@@ -1,9 +1,17 @@
 import { listProjects } from "@/lib/server/projects";
 import { StartSessionButton } from "@/components/start-session-button";
 
+const MODE_NOTE: Record<string, string> = {
+  api: "요청은 Claude API로 처리합니다. 서버에 ANTHROPIC_API_KEY가 있어야 합니다.",
+  "claude-code":
+    "요청은 이 PC의 claude CLI에 로그인한 계정으로 처리합니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 여러 사람이 쓰는 서버에는 api 모드를 씁니다.",
+  demo: "데모 모드로 실행 중입니다. 준비된 요청을 스크립트로 실행하므로 API 키가 필요 없습니다.",
+};
+
 export default async function HomePage() {
   const projects = await listProjects();
-  const demo = process.env.B_STUDIO_MODE === "demo";
+  const mode = process.env.B_STUDIO_MODE?.trim() || "api";
+  const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, demo 중 하나로 실행하세요.`;
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
@@ -14,11 +22,7 @@ export default async function HomePage() {
         통과한 결과만 완료로 보여줍니다.
       </p>
 
-      <p className="mt-6 border-l-2 border-line pl-3 text-sm text-muted">
-        {demo
-          ? "데모 모드로 실행 중입니다. 준비된 요청을 스크립트로 실행하므로 API 키가 필요 없습니다."
-          : "요청은 Claude API로 처리합니다. 서버에 ANTHROPIC_API_KEY가 있어야 합니다."}
-      </p>
+      <p className="mt-6 border-l-2 border-line pl-3 text-sm text-muted">{note}</p>
 
       <ul className="mt-10 divide-y divide-line border-y border-line">
         {projects.length === 0 && (

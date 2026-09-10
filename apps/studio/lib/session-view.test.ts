@@ -53,6 +53,20 @@ describe('reduceSession', () => {
     });
   });
 
+  it('실행 환경을 알리는 이벤트는 대화에 한 줄로 남긴다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '주문 수 API 추가' },
+      { type: 'agent', runId: 'r1', event: { type: 'session', backend: '로컬 Claude Agent (CLI 2.1.267)', model: 'claude-opus-5', auth: 'Claude Max 구독' } },
+    ]);
+    expect(view.chat.at(-1)).toEqual({
+      kind: 'backend',
+      runId: 'r1',
+      backend: '로컬 Claude Agent (CLI 2.1.267)',
+      model: 'claude-opus-5',
+      auth: 'Claude Max 구독',
+    });
+  });
+
   it('검증 게이트는 확인 중으로 나타났다가 결과로 채워진다', () => {
     const pending = fold([{ type: 'agent', runId: 'r1', event: { type: 'verify_start', files: ['api/Order.java'] } }]);
     expect(pending.chat).toEqual([{ kind: 'gate', runId: 'r1', files: ['api/Order.java'] }]);

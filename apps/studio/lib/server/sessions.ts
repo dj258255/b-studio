@@ -6,15 +6,19 @@ import {
   AnthropicModelClient,
   CheckpointStore,
   ORDERS_DEMO_SCENARIOS,
+  preflightClaudeCode,
   restartServicesFor,
   runAgent,
+  runClaudeCodeAgent,
   ScriptedModelClient,
+  type AgentEvent,
+  type AgentResult,
   type DemoScenario,
   type ModelClient,
 } from '@b-studio/agent';
 import { LocalDockerProvider, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
-import type { SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
+import type { SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
 import { findProject } from './projects';
 
@@ -35,6 +39,12 @@ interface Session {
   logFollower?: AbortController;
   demoIndex: number;
   checkpoints: CheckpointStore;
+  /** 로컬 Claude Code 모드의 대화. 기록은 Claude Code가 들고 있고 여기에는 이어받을 세션만 둔다 */
+  claudeCode: {
+    sessionId?: string;
+    /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
+    notes: string[];
+  };
 }
 
 const HISTORY_LIMIT = 5_000;
@@ -52,6 +62,7 @@ export function getSnapshot(id: string): SessionSnapshot | undefined {
 }
 
 export async function createSession(projectId: string): Promise<SessionSnapshot> {
+  const mode = sessionMode();
   const source = await findProject(projectId);
   if (!source) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
 
@@ -66,7 +77,6 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
   const checkpoints = new CheckpointStore(workDir);
   const firstCheckpoint = await checkpoints.init('세션 시작');
   const sandbox = await new LocalDockerProvider().create(project);
-  const mode = process.env.B_STUDIO_MODE === 'demo' ? 'demo' : 'claude';
 
   const session: Session = {
     snapshot: {
@@ -96,6 +106,7 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
     conversation: [],
     stop: new AbortController(),
     demoIndex: 0,
+    claudeCode: { notes: [] },
   };
 
   store.sessions.set(id, session);
@@ -167,14 +178,13 @@ async function boot(session: Session): Promise<void> {
   }
 }
 
-interface RunPlan {
-  client: ModelClient;
-  allowBreaking: boolean;
-  maxVerifyAttempts?: number;
-}
+type RunPlan =
+  | { kind: 'model'; client: ModelClient; allowBreaking: boolean; maxVerifyAttempts?: number }
+  | { kind: 'claude-code'; allowBreaking: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean): RunPlan {
-  if (session.snapshot.mode === 'claude') return { client: new AnthropicModelClient(), allowBreaking };
+  if (session.snapshot.mode === 'api') return { kind: 'model', client: new AnthropicModelClient(), allowBreaking };
+  if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking };
 
   // 데모 모드는 스크립트이므로 준비된 요청을 순서대로만 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
@@ -182,32 +192,22 @@ function planRun(session: Session, request: string, allowBreaking: boolean): Run
   if (scenario.request !== request) {
     throw new StudioError(409, `데모 모드는 준비된 요청을 순서대로 실행합니다. 다음 요청: "${scenario.request}"`);
   }
-  return { client: new ScriptedModelClient(scenario.turns), allowBreaking: scenario.allowBreaking ?? false, maxVerifyAttempts: scenario.maxVerifyAttempts };
+  return {
+    kind: 'model',
+    client: new ScriptedModelClient(scenario.turns),
+    allowBreaking: scenario.allowBreaking ?? false,
+    maxVerifyAttempts: scenario.maxVerifyAttempts,
+  };
 }
 
 async function execute(session: Session, runId: string, request: string, plan: RunPlan): Promise<void> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   try {
-    if (plan.client instanceof AnthropicModelClient) {
-      const preflight = await plan.client.preflight();
-      if (!preflight.ok) {
-        finished = { type: 'run_finished', runId, status: 'error', summary: preflight.reason };
-        return;
-      }
+    const result = await runPlan(session, runId, request, plan);
+    if ('preflightError' in result) {
+      finished = { type: 'run_finished', runId, status: 'error', summary: result.preflightError };
+      return;
     }
-
-    const result = await runAgent({
-      request,
-      project: session.project,
-      sandbox: session.sandbox,
-      client: plan.client,
-      conversation: session.conversation,
-      allowBreaking: plan.allowBreaking,
-      maxVerifyAttempts: plan.maxVerifyAttempts,
-      signal: session.stop.signal,
-      onEvent: (event) => emit(session, { type: 'agent', runId, event }),
-      onServiceStatus: (event) => onServiceStatus(session, event),
-    });
 
     // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
     if (result.status === 'done') await saveCheckpoint(session, runId, request);
@@ -228,6 +228,47 @@ async function execute(session: Session, runId: string, request: string, plan: R
       emit(session, { ...finished, nextDemoRequest: session.snapshot.nextDemoRequest });
     }
   }
+}
+
+/** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
+async function runPlan(session: Session, runId: string, request: string, plan: RunPlan): Promise<AgentResult | { preflightError: string }> {
+  const shared = {
+    project: session.project,
+    sandbox: session.sandbox,
+    allowBreaking: plan.allowBreaking,
+    signal: session.stop.signal,
+    onEvent: (event: AgentEvent) => emit(session, { type: 'agent', runId, event }),
+    onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
+  };
+
+  if (plan.kind === 'claude-code') {
+    const preflight = await preflightClaudeCode({ cwd: session.project.root });
+    if (!preflight.ok) return { preflightError: preflight.reason };
+
+    const { claudeCode } = session;
+    const result = await runClaudeCodeAgent({
+      ...shared,
+      request: [...claudeCode.notes, request].join('\n\n'),
+      resume: claudeCode.sessionId,
+      account: preflight.account,
+    });
+    // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
+    claudeCode.notes = [];
+    if (result.sessionId) claudeCode.sessionId = result.sessionId;
+    return result;
+  }
+
+  if (plan.client instanceof AnthropicModelClient) {
+    const preflight = await plan.client.preflight();
+    if (!preflight.ok) return { preflightError: preflight.reason };
+  }
+  return runAgent({
+    ...shared,
+    request,
+    client: plan.client,
+    conversation: session.conversation,
+    maxVerifyAttempts: plan.maxVerifyAttempts,
+  });
 }
 
 async function saveCheckpoint(session: Session, runId: string, request: string): Promise<void> {
@@ -269,10 +310,9 @@ export function restoreCheckpoint(id: string, sha: string): void {
       });
       session.snapshot.checkpoints = await session.checkpoints.list();
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
-      session.conversation.push({
-        role: 'user',
-        content: `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`,
-      });
+      const note = `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`;
+      if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(note);
+      else session.conversation.push({ role: 'user', content: note });
       if (session.snapshot.mode === 'demo') {
         // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 체크포인트 수에 맞춰 다음 요청을 다시 정한다
         session.demoIndex = session.snapshot.checkpoints.length - 1;
@@ -370,6 +410,14 @@ function requireSession(id: string): Session {
 
 function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
   return project.spec.name === 'orders' ? ORDERS_DEMO_SCENARIOS : [];
+}
+
+/** 오타가 조용히 다른 모드(특히 비용이 드는 모드)로 떨어지지 않도록 모르는 값은 거부한다 */
+function sessionMode(): SessionMode {
+  const value = process.env.B_STUDIO_MODE?.trim();
+  if (!value || value === 'api') return 'api';
+  if (value === 'claude-code' || value === 'demo') return value;
+  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, demo 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
 function sessionsRoot(): string {
