@@ -1,0 +1,13 @@
+{
+  "name": "@b-studio/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@b-studio/sandbox": "workspace:*",
+    "@b-studio/spec": "workspace:*"
+  }
+}

@@ -1,0 +1,52 @@
+# 표준 compose 파일이라 스튜디오 없이 `docker compose up`으로도 똑같이 실행된다
+services:
+  web:
+    build: { context: ./web, dockerfile: Dockerfile.dev }
+    environment:
+      API_BASE_URL: http://api:8080
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+      - web-next:/app/.next
+      - pnpm-store:/cache/pnpm
+
+  api:
+    build: { context: ./api, dockerfile: Dockerfile.dev }
+    environment:
+      DATABASE_URL: jdbc:postgresql://db:5432/app
+      DATABASE_USERNAME: app
+      DATABASE_PASSWORD: app
+    volumes:
+      - ./api:/app
+      - api-gradle-project:/app/.gradle
+      - api-build:/app/build
+      - gradle-cache:/cache/gradle
+    depends_on:
+      db: { condition: service_healthy }
+
+  # studio.yaml에 없는 부가 서비스: 샌드박스와 함께 뜨고 함께 사라진다
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  # 샌드박스 전용 (destroy 시 삭제)
+  web-node-modules:
+  web-next:
+  api-gradle-project:
+  api-build:
+  # 샌드박스끼리 공유하는 의존성 캐시 (destroy 후에도 유지)
+  pnpm-store:
+    external: true
+    name: b-studio-cache-pnpm
+  gradle-cache:
+    external: true
+    name: b-studio-cache-gradle

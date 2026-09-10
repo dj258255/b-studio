@@ -1,0 +1,8 @@
+# 개발용 이미지: 소스는 compose에서 마운트하고 Gradle 캐시는 샌드박스끼리 공유한다
+FROM eclipse-temurin:25-jdk
+
+WORKDIR /app
+ENV GRADLE_USER_HOME=/cache/gradle
+
+EXPOSE 8080
+CMD ["./gradlew", "bootRun", "--no-daemon", "--console=plain"]

@@ -1,0 +1,21 @@
+version: 1
+name: orders
+
+services:
+  web:
+    source: managed
+    template: nextjs
+    path: web
+    port: 3000
+    preview: browser
+    ready: { path: /, timeoutSeconds: 300 }
+
+  api:
+    source: managed
+    template: spring-boot
+    path: api
+    port: 8080
+    preview: openapi
+    # 첫 기동은 Gradle 배포판과 의존성을 내려받느라 오래 걸린다
+    ready: { path: /actuator/health/readiness, timeoutSeconds: 900 }
+    contract: { extract: /v3/api-docs }
