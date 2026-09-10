@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: api
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/app}
+    username: ${DATABASE_USERNAME:app}
+    password: ${DATABASE_PASSWORD:app}
+  jpa:
+    open-in-view: false
+    hibernate:
+      # 스키마는 Flyway 마이그레이션으로만 바꾼다
+      ddl-auto: validate
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
