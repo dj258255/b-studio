@@ -1,64 +1,15 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import type { ContainerState, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { runAgent, type AgentEvent } from './loop';
 import { ScriptedModelClient } from './scripted-client';
+import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;
 
-const contract: OpenApiDocument = {
-  paths: { '/api/orders': { get: {} } },
-  components: { schemas: { OrderResponse: { properties: { id: { type: 'integer' }, memo: { type: 'string' } } } } },
-};
-
 beforeEach(async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'loop-test-'));
-  await mkdir(path.join(root, 'api/src'), { recursive: true });
-  await writeFile(path.join(root, 'api/src/Order.java'), 'class Order { String customerNam; }\n');
-  project = {
-    root,
-    spec: { name: 'orders' },
-    managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }]],
-  } as unknown as LoadedProject;
+  project = await createOrdersProject('loop-test-');
 });
-
-/** restart 결과를 순서대로 돌려주는 가짜 샌드박스 */
-function fakeSandbox(restartOutcomes: boolean[]): Sandbox & { restarts: string[] } {
-  const restarts: string[] = [];
-  return {
-    id: 'fake',
-    project,
-    restarts,
-    async start() {
-      return [];
-    },
-    async sync() {
-      return { elapsedMs: 0, checks: 1 };
-    },
-    async restart(service: string): Promise<ServiceEndpoint> {
-      restarts.push(service);
-      if (restartOutcomes.shift() === false) throw new Error('컨테이너가 종료됐습니다');
-      return { service, containerPort: 8080, url: 'http://127.0.0.1:1' };
-    },
-    async endpoint(service: string) {
-      return { service, containerPort: 8080, url: 'http://127.0.0.1:1' };
-    },
-    async state(): Promise<ContainerState> {
-      return 'running';
-    },
-    async *logs(): AsyncIterable<LogLine> {
-      yield { service: 'api', text: 'Order.java:1: error: cannot find symbol', at: new Date() };
-    },
-    async exec() {
-      return { exitCode: 0, stdout: '', stderr: '' };
-    },
-    async destroy() {},
-  };
-}
 
 function collect(events: AgentEvent[]) {
   return (event: AgentEvent) => events.push(event);
@@ -72,7 +23,7 @@ describe('runAgent', () => {
       { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
       { text: '컴파일 에러를 고쳤습니다.' },
     ]);
-    const sandbox = fakeSandbox([false, true]);
+    const sandbox = fakeSandbox(project, [false, true]);
     const events: AgentEvent[] = [];
 
     const result = await runAgent({
@@ -108,7 +59,7 @@ describe('runAgent', () => {
     const result = await runAgent({
       request: '정리해줘',
       project,
-      sandbox: fakeSandbox([true]),
+      sandbox: fakeSandbox(project, [true]),
       client,
       maxVerifyAttempts: 1,
       fetcher: async () => (calls++ === 0 ? contract : withoutMemo),
@@ -124,7 +75,7 @@ describe('runAgent', () => {
       { text: '읽을 수 없는 경로입니다.' },
     ]);
 
-    const result = await runAgent({ request: '읽어줘', project, sandbox: fakeSandbox([]), client, fetcher: async () => contract });
+    const result = await runAgent({ request: '읽어줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
 
     expect(result).toMatchObject({ status: 'done', verifyAttempts: 0 });
     const toolResult = client.requests[1]!.messages.at(-1)!.content;
@@ -132,7 +83,7 @@ describe('runAgent', () => {
   });
 
   it('파일을 바꾸지 않았으면 검증 없이 끝난다', async () => {
-    const sandbox = fakeSandbox([]);
+    const sandbox = fakeSandbox(project, []);
     const result = await runAgent({
       request: '설명해줘',
       project,
@@ -147,7 +98,7 @@ describe('runAgent', () => {
   it('대화 기록을 넘기면 다음 요청이 이전 맥락을 이어받는다', async () => {
     const conversation: Parameters<typeof runAgent>[0]['conversation'] = [];
     const client = new ScriptedModelClient([{ text: '주문 API입니다.' }, { text: '앞에서 말한 주문 API에 필드를 더할 수 있습니다.' }]);
-    const base = { project, sandbox: fakeSandbox([]), client, conversation, fetcher: async () => contract };
+    const base = { project, sandbox: fakeSandbox(project, []), client, conversation, fetcher: async () => contract };
 
     await runAgent({ ...base, request: '이 프로젝트는 뭐야?' });
     await runAgent({ ...base, request: '거기에 뭘 더할 수 있어?' });
@@ -164,7 +115,7 @@ describe('runAgent', () => {
     const client = new ScriptedModelClient([{ toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] }]);
 
     await expect(
-      runAgent({ request: '읽고 설명해줘', project, sandbox: fakeSandbox([]), client, conversation, fetcher: async () => contract }),
+      runAgent({ request: '읽고 설명해줘', project, sandbox: fakeSandbox(project, []), client, conversation, fetcher: async () => contract }),
     ).rejects.toThrow('스크립트에 남은 턴이 없습니다');
     expect(conversation).toHaveLength(2);
   });
@@ -173,7 +124,7 @@ describe('runAgent', () => {
     const result = await runAgent({
       request: '...',
       project,
-      sandbox: fakeSandbox([]),
+      sandbox: fakeSandbox(project, []),
       client: new ScriptedModelClient([{ stopReason: 'refusal' }]),
       fetcher: async () => contract,
     });

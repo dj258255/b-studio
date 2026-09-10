@@ -3,6 +3,8 @@ import type { AgentEvent, Checkpoint, ServiceCheck } from '@b-studio/agent';
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
 export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
+/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, demo: 준비된 스크립트 */
+export type SessionMode = 'api' | 'claude-code' | 'demo';
 export type ServiceState = 'starting' | 'probing' | 'ready' | 'failed';
 
 export interface ServiceView {
@@ -24,7 +26,7 @@ export interface SessionSnapshot {
   workDir: string;
   status: SessionStatus;
   error?: string;
-  mode: 'claude' | 'demo';
+  mode: SessionMode;
   running: boolean;
   services: ServiceView[];
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */

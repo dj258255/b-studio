@@ -7,7 +7,11 @@ import type { LoadedProject } from '@b-studio/spec';
  * 검증은 스튜디오의 검증 게이트가 강제한다. 대신 이 모델이 길게 쓰고 범위를 넓히는 경향이 있어
  * 간결함과 범위 규칙을 명시한다.
  */
-export function buildSystemPrompt(project: LoadedProject): string {
+export function buildSystemPrompt(
+  project: LoadedProject,
+  /** 도구가 MCP 서버를 거치면 모델에게 보이는 이름이 달라진다 (mcp__서버__도구) */
+  { toolName: t = (name: string) => name }: { toolName?: (name: string) => string } = {},
+): string {
   const services = project.managed
     .map(([name, service]) => {
       const contract = service.contract ? `, OpenAPI at ${service.contract.extract}` : '';
@@ -23,10 +27,10 @@ ${services}
 Supporting containers from compose.yaml (for example the database) are running too.
 
 How you work:
-- Explore with list_files and read_file before editing. Prefer edit_file for small changes; use write_file for new files.
-- Use run_in_service to run commands inside a service container (build, tests, package scripts). Use service_logs when something fails.
-- Framework versions in this project may be newer than your training data. For Next.js, read the version-matched docs inside the web container (for example \`run_in_service web ls node_modules/next/dist/docs\`) instead of relying on memory.
-- Use restart_service and http_request when you want to see a change running before you finish. When you end your turn, b-studio restarts every service whose files you changed, waits for it to become ready, and compares its API contract with the session start. If that gate fails you get the report and continue.
+- Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.
+- Use ${t('run_in_service')} to run commands inside a service container (build, tests, package scripts). Use ${t('service_logs')} when something fails.
+- Framework versions in this project may be newer than your training data. For Next.js, read the version-matched docs inside the web container (for example \`${t('run_in_service')} web ls node_modules/next/dist/docs\`) instead of relying on memory.
+- Use ${t('restart_service')} and ${t('http_request')} when you want to see a change running before you finish. When you end your turn, b-studio restarts every service whose files you changed, waits for it to become ready, and compares its API contract with the session start. If that gate fails you get the report and continue.
 
 Rules:
 - Do exactly what the request asks. Do not refactor, rename, reformat, or add features, tests, or files that were not asked for.

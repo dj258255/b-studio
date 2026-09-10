@@ -1,5 +1,14 @@
 export { runAgent, type AgentEvent, type AgentRequest, type AgentResult, type AgentUsage, type ModelClient, type RunAgentOptions } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
+export {
+  describeAccount,
+  preflightClaudeCode,
+  runClaudeCodeAgent,
+  type ClaudeCodeAccount,
+  type ClaudeCodeResult,
+  type ClaudeCodeRunOptions,
+} from './claude-code-runner';
+export { VerificationGate, type GateOutcome } from './gate';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
 export { diffContracts, formatContractChanges, summarizeContract, type ContractChange, type OpenApiDocument } from './contract-diff';

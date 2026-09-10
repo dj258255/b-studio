@@ -115,6 +115,14 @@ function ChatEntry({ item }: { item: ChatItem }) {
     case "request":
       return <p className="border-l-[3px] border-ink pl-3 font-medium leading-7 whitespace-pre-wrap">{item.text}</p>;
 
+    case "backend":
+      return (
+        <p className="text-sm text-muted">
+          {item.backend}에서 <span className="font-mono text-ink">{item.model}</span> 모델로 실행합니다
+          {item.auth && ` (${item.auth})`}
+        </p>
+      );
+
     case "reply":
       return <p className="leading-7 whitespace-pre-wrap">{item.text}</p>;
 
@@ -200,7 +208,9 @@ function hintFor({ snapshot, chat }: SessionView): string {
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다.";
   if (chat.length > 0) return "요청마다 검증 게이트를 통과해야 완료로 표시됩니다.";
-  return snapshot.mode === "demo"
-    ? "데모 모드는 준비된 요청을 순서대로 스크립트로 실행합니다."
-    : "에이전트가 작업을 끝내면 스튜디오가 서비스를 재시작하고 API 계약을 확인합니다.";
+  if (snapshot.mode === "demo") return "데모 모드는 준비된 요청을 순서대로 스크립트로 실행합니다.";
+  if (snapshot.mode === "claude-code") {
+    return "이 PC에서 로그인한 Claude 계정으로 실행합니다. 작업을 끝내면 스튜디오가 서비스를 재시작하고 API 계약을 확인합니다.";
+  }
+  return "에이전트가 작업을 끝내면 스튜디오가 서비스를 재시작하고 API 계약을 확인합니다.";
 }

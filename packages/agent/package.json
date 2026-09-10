@@ -10,8 +10,11 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.267",
     "@anthropic-ai/sdk": "^0.124.0",
     "@b-studio/sandbox": "workspace:*",
-    "@b-studio/spec": "workspace:*"
+    "@b-studio/spec": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.6.1"
   }
 }

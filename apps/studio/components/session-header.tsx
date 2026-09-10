@@ -2,8 +2,14 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import type { SessionSnapshot } from "@/lib/studio-events";
+import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
 import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
+
+const MODE_LABEL: Record<SessionMode, string> = {
+  api: "Claude API",
+  "claude-code": "로컬 Claude Agent",
+  demo: "데모 모드",
+};
 
 export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const [stopping, setStopping] = useState(false);
@@ -38,9 +44,14 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
-        {snapshot.mode === "demo" && (
-          <span className="rounded-full border border-wait/50 px-2.5 py-0.5 text-xs font-medium text-wait">데모 모드</span>
-        )}
+        <span
+          className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${
+            snapshot.mode === "demo" ? "border-wait/50 text-wait" : "border-line text-muted"
+          }`}
+          title="에이전트 실행 방식"
+        >
+          {MODE_LABEL[snapshot.mode]}
+        </span>
         {snapshot.status === "stopped" ? (
           <Link href="/" className="text-sm font-medium hover:underline">
             프로젝트 목록

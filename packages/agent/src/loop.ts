@@ -1,17 +1,10 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
+import { VerificationGate } from './gate';
 import { buildSystemPrompt } from './prompts';
-import { servicesForFiles } from './services';
 import { buildTools, executeTool } from './tools';
-import {
-  captureBaselines,
-  fetchContract,
-  formatVerificationReport,
-  verifyChanges,
-  type ContractFetcher,
-  type VerificationReport,
-} from './verify';
+import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
 
 type BetaMessage = Anthropic.Beta.BetaMessage;
@@ -50,6 +43,8 @@ export interface AgentResult {
 }
 
 export type AgentEvent =
+  /** 실제로 요청을 처리하는 실행 환경. 로컬 Claude Code처럼 모델과 인증을 밖에서 정할 때 알린다 */
+  | { type: 'session'; backend: string; model: string; auth?: string }
   | { type: 'turn'; turn: number }
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
@@ -79,6 +74,10 @@ export interface RunAgentOptions {
   /** 검증 게이트나 도구가 서비스를 재시작할 때의 상태. 재시작하면 호스트 포트가 바뀌므로 미리보기가 따라가야 한다 */
   onServiceStatus?: StartOptions['onStatus'];
   fetcher?: ContractFetcher;
+}
+
+export function emptyUsage(): AgentUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
 
 /**
@@ -114,19 +113,32 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   } = options;
 
   const workspace = new Workspace(project.root);
-  const baselines = await captureBaselines(sandbox, project, fetcher);
+  const gate = await VerificationGate.create({
+    project,
+    sandbox,
+    workspace,
+    allowBreaking,
+    maxVerifyAttempts,
+    fetcher,
+    signal,
+    onServiceStatus,
+    onEvent,
+  });
   const system = buildSystemPrompt(project);
   const tools = buildTools(project);
   messages.push({ role: 'user', content: request });
-  const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-
-  let verifyAttempts = 0;
-  let verifiedVersion = 0;
-  let failedServices = new Set<string>();
-  let report: VerificationReport | undefined;
+  const usage = emptyUsage();
 
   const finish = (status: AgentResult['status'], summary: string, turns: number): AgentResult => {
-    const result: AgentResult = { status, summary, changedFiles: workspace.changedFiles(), report, verifyAttempts, turns, usage };
+    const result: AgentResult = {
+      status,
+      summary,
+      changedFiles: workspace.changedFiles(),
+      report: gate.report,
+      verifyAttempts: gate.attempts,
+      turns,
+      usage,
+    };
     onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
     return result;
   };
@@ -174,50 +186,13 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     }
 
     // 모델이 턴을 끝냈다 → 검증 게이트
-    const allChanged = workspace.changedFiles();
-    if (allChanged.length === 0) return finish('done', text, turn);
-
-    const files = filesToVerify(project, workspace, verifiedVersion, failedServices);
-    onEvent({ type: 'verify_start', files });
-    verifiedVersion = workspace.version;
-    report = await verifyChanges({
-      sandbox,
-      project,
-      changedFiles: files,
-      baselines,
-      allowBreaking,
-      fetcher,
-      start: { signal, onStatus: onServiceStatus },
-    });
-    failedServices = new Set(report.restarted.filter((check) => !check.ready).map((check) => check.service));
-
-    const reportText = formatVerificationReport(report, { allowBreaking });
-    onEvent({ type: 'verify_result', report, text: reportText });
-    if (report.ok) return finish('done', text, turn);
-
-    verifyAttempts += 1;
-    if (verifyAttempts >= maxVerifyAttempts) {
-      return finish('failed', `검증 게이트를 ${verifyAttempts}번 통과하지 못했습니다`, turn);
-    }
-    messages.push({
-      role: 'user',
-      content: `[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n${reportText}`,
-    });
+    const outcome = await gate.check();
+    if (outcome.kind === 'pass') return finish('done', text, turn);
+    if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    messages.push({ role: 'user', content: outcome.feedback });
   }
 
   return finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`, maxTurns);
-}
-
-/** 지난 검증 이후 바뀐 파일 + 지난번에 준비에 실패한 서비스의 파일 (고치지 않았더라도 다시 확인해야 한다) */
-function filesToVerify(project: LoadedProject, workspace: Workspace, since: number, failedServices: ReadonlySet<string>): string[] {
-  const files = new Set(workspace.changedSince(since));
-  if (failedServices.size > 0) {
-    for (const file of workspace.changedFiles()) {
-      const [owner] = servicesForFiles(project, [file]).services;
-      if (owner && failedServices.has(owner)) files.add(file);
-    }
-  }
-  return [...files].sort();
 }
 
 function addUsage(total: AgentUsage, usage: BetaMessage['usage']): void {

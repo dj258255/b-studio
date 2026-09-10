@@ -16,6 +16,7 @@ export interface ToolCallView {
 
 export type ChatItem =
   | { kind: 'request'; runId: string; text: string }
+  | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport }
@@ -132,6 +133,9 @@ function patchSnapshot(view: SessionView, patch: Partial<SessionSnapshot>): Sess
 
 function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): ChatItem[] {
   switch (event.type) {
+    case 'session':
+      return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
+
     case 'text':
       return [...chat, { kind: 'reply', runId, text: event.text }];
 
