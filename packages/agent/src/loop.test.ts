@@ -144,6 +144,31 @@ describe('runAgent', () => {
     expect(sandbox.restarts).toEqual([]);
   });
 
+  it('대화 기록을 넘기면 다음 요청이 이전 맥락을 이어받는다', async () => {
+    const conversation: Parameters<typeof runAgent>[0]['conversation'] = [];
+    const client = new ScriptedModelClient([{ text: '주문 API입니다.' }, { text: '앞에서 말한 주문 API에 필드를 더할 수 있습니다.' }]);
+    const base = { project, sandbox: fakeSandbox([]), client, conversation, fetcher: async () => contract };
+
+    await runAgent({ ...base, request: '이 프로젝트는 뭐야?' });
+    await runAgent({ ...base, request: '거기에 뭘 더할 수 있어?' });
+
+    expect(client.requests[1]!.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(conversation).toHaveLength(4);
+  });
+
+  it('실행 중 예외가 나면 이번 실행분을 대화 기록에서 되돌린다', async () => {
+    const conversation: Parameters<typeof runAgent>[0]['conversation'] = [
+      { role: 'user', content: '이전 요청' },
+      { role: 'assistant', content: '이전 답변' },
+    ];
+    const client = new ScriptedModelClient([{ toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] }]);
+
+    await expect(
+      runAgent({ request: '읽고 설명해줘', project, sandbox: fakeSandbox([]), client, conversation, fetcher: async () => contract }),
+    ).rejects.toThrow('스크립트에 남은 턴이 없습니다');
+    expect(conversation).toHaveLength(2);
+  });
+
   it('거절되면 바로 실패한다', async () => {
     const result = await runAgent({
       request: '...',

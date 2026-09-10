@@ -66,4 +66,19 @@ describe('parseLogLine', () => {
   it('형식이 다른 줄은 원문을 그대로 남긴다', () => {
     expect(parseLogLine('some raw output')).toMatchObject({ service: 'unknown', text: 'some raw output' });
   });
+
+  it('제어 코드가 붙은 컨테이너 상태 줄을 서비스별로 나눈다', () => {
+    expect(parseLogLine('\u001b[Kapi-1 exited with code 143')).toMatchObject({ service: 'api', text: 'exited with code 143' });
+    expect(parseLogLine('\u001b[Korder-web-1 has been recreated')).toMatchObject({ service: 'order-web', text: 'has been recreated' });
+  });
+
+  it('로그 본문의 대괄호는 제어 코드로 보고 지우지 않는다', () => {
+    const raw = 'api-1  | 2026-09-10T13:21:18.241Z  WARN 109 --- [api] [           main] o.s.core.events.SpringDocAppInitializer';
+    expect(parseLogLine(raw)?.text).toBe(' WARN 109 --- [api] [           main] o.s.core.events.SpringDocAppInitializer');
+  });
+
+  it('내용이 없는 줄은 건너뛴다', () => {
+    expect(parseLogLine('')).toBeUndefined();
+    expect(parseLogLine('\u001b[K')).toBeUndefined();
+  });
 });

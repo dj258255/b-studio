@@ -6,3 +6,8 @@ packages:
 
 onlyBuiltDependencies:
   - esbuild
+
+# create-next-app 기본값을 워크스페이스 루트로 옮겼다
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver

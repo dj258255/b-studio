@@ -1,0 +1,40 @@
+import { readdir } from 'node:fs/promises';
+import path from 'node:path';
+import { loadProject, SpecError, type LoadedProject } from '@b-studio/spec';
+import type { ProjectSummary } from '@/lib/studio-events';
+
+const PROJECT_ID = /^[a-z0-9][a-z0-9-]*$/;
+
+/** 스튜디오가 여는 프로젝트들이 있는 폴더. 브라우저에서 임의의 경로를 받지 않고 이 폴더의 하위 폴더만 연다 */
+export function projectsRoot(): string {
+  return path.resolve(process.env.B_STUDIO_PROJECTS_DIR ?? path.join(process.cwd(), '../../examples'));
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  const root = projectsRoot();
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const projects: ProjectSummary[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !PROJECT_ID.test(entry.name)) continue;
+    try {
+      const project = await loadProject(path.join(root, entry.name));
+      projects.push({
+        id: entry.name,
+        name: project.spec.name,
+        services: project.managed.map(([name, service]) => ({ name, template: service.template, preview: service.preview })),
+      });
+    } catch (error) {
+      // studio.yaml이 없는 폴더는 프로젝트가 아니다
+      if (error instanceof SpecError && error.message.startsWith('파일이 없습니다')) continue;
+      projects.push({ id: entry.name, name: entry.name, services: [], error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return projects.sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+
+export async function findProject(id: string): Promise<LoadedProject | undefined> {
+  if (!PROJECT_ID.test(id)) return undefined;
+  const project = (await listProjects()).find((candidate) => candidate.id === id && !candidate.error);
+  return project ? loadProject(path.join(projectsRoot(), id)) : undefined;
+}

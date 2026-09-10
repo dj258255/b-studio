@@ -166,7 +166,8 @@ class LocalDockerSandbox implements Sandbox {
 
     try {
       for await (const raw of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
-        yield parseLogLine(raw);
+        const line = parseLogLine(raw);
+        if (line) yield line;
       }
     } finally {
       child.kill();

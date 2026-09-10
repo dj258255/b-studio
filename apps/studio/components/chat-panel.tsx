@@ -1,0 +1,161 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import type { ChatItem, SessionView } from "@/lib/session-view";
+import { GateTrack } from "./gate-track";
+
+export function ChatPanel({ view }: { view: SessionView }) {
+  const { snapshot, chat } = view;
+  const [text, setText] = useState("");
+  const [allowBreaking, setAllowBreaking] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string>();
+  const listRef = useRef<HTMLOListElement>(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [chat]);
+
+  const canSend = snapshot.status === "ready" && !snapshot.running && !sending;
+
+  async function send(request: string) {
+    setSending(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: request, allowBreaking }),
+    });
+    if (response.ok) setText("");
+    else setError((await response.json()).error ?? "요청을 보내지 못했습니다");
+    setSending(false);
+  }
+
+  return (
+    <section className="flex min-h-0 flex-col border-t border-line bg-panel lg:border-t-0" aria-label="대화">
+      <div className="border-b border-line px-5 py-3">
+        <h2 className="font-semibold">대화</h2>
+        <p className="mt-0.5 text-sm text-muted">{hintFor(view)}</p>
+      </div>
+
+      <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
+        {chat.map((item, index) => (
+          <li key={index}>
+            <ChatEntry item={item} />
+          </li>
+        ))}
+        {snapshot.running && <li className="text-sm text-wait motion-safe:animate-pulse">에이전트가 작업하는 중</li>}
+      </ol>
+
+      <form
+        className="border-t border-line px-5 py-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSend && text.trim()) void send(text);
+        }}
+      >
+        {snapshot.mode === "demo" ? (
+          snapshot.nextDemoRequest ? (
+            <button
+              type="button"
+              disabled={!canSend}
+              onClick={() => void send(snapshot.nextDemoRequest!)}
+              className="w-full rounded-md bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+            >
+              다음 요청 보내기: {snapshot.nextDemoRequest}
+            </button>
+          ) : (
+            <p className="text-sm text-muted">준비된 데모 요청을 모두 실행했습니다.</p>
+          )
+        ) : (
+          <>
+            <label htmlFor="request" className="sr-only">
+              요청
+            </label>
+            <textarea
+              id="request"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && canSend && text.trim()) {
+                  event.preventDefault();
+                  void send(text);
+                }
+              }}
+              rows={3}
+              placeholder="만들거나 바꾸고 싶은 내용을 적어 주세요"
+              className="w-full resize-none rounded-md border border-line bg-ground px-3 py-2 text-sm leading-6 placeholder:text-muted"
+            />
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <label className="flex items-center gap-2 text-sm text-muted">
+                <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
+                필드 삭제나 타입 변경 허용
+              </label>
+              <button
+                type="submit"
+                disabled={!canSend || !text.trim()}
+                className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+              >
+                요청 보내기
+              </button>
+            </div>
+          </>
+        )}
+        {error && <p className="mt-2 text-sm text-fail">{error}</p>}
+      </form>
+    </section>
+  );
+}
+
+function ChatEntry({ item }: { item: ChatItem }) {
+  switch (item.kind) {
+    case "request":
+      return <p className="border-l-[3px] border-ink pl-3 font-medium leading-7 whitespace-pre-wrap">{item.text}</p>;
+
+    case "reply":
+      return <p className="leading-7 whitespace-pre-wrap">{item.text}</p>;
+
+    case "tools": {
+      const failed = item.calls.filter((call) => call.ok === false).length;
+      return (
+        <details className="rounded-md border border-line">
+          <summary className="cursor-pointer px-3 py-2 text-sm text-muted hover:text-ink">
+            도구 {item.calls.length}회 사용{failed > 0 && <span className="text-fail">, 실패 {failed}회</span>}
+          </summary>
+          <ul className="space-y-1 border-t border-line px-3 py-2">
+            {item.calls.map((call, index) => (
+              <li key={index} className="font-mono text-xs leading-5">
+                <span className={call.ok === false ? "text-fail" : call.ok ? "text-pass" : "text-wait"}>
+                  {call.ok === false ? "실패" : call.ok ? "완료" : "실행 중"}
+                </span>{" "}
+                <span className="break-all">{call.summary}</span>
+                {call.ok === false && call.output && <p className="mt-0.5 break-words text-fail">{call.output.split("\n")[0]}</p>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      );
+    }
+
+    case "gate":
+      return <GateTrack files={item.files} report={item.report} />;
+
+    case "outcome":
+      return (
+        <p className={`text-sm ${item.status === "done" ? "text-pass" : "text-fail"}`}>
+          {item.status === "done" ? `완료, ${item.turns ?? 0}턴` : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`}
+        </p>
+      );
+  }
+}
+
+function hintFor({ snapshot, chat }: SessionView): string {
+  if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
+  if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
+  if (snapshot.status === "stopped") return "샌드박스를 중지했습니다.";
+  if (chat.length > 0) return "요청마다 검증 게이트를 통과해야 완료로 표시됩니다.";
+  return snapshot.mode === "demo"
+    ? "데모 모드는 준비된 요청을 순서대로 스크립트로 실행합니다."
+    : "에이전트가 작업을 끝내면 스튜디오가 서비스를 재시작하고 API 계약을 확인합니다.";
+}

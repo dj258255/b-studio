@@ -8,6 +8,8 @@
   },
   "scripts": {
     "studio": "tsx apps/cli/src/main.ts",
+    "studio:web": "pnpm --filter @b-studio/studio dev",
+    "studio:demo": "B_STUDIO_MODE=demo pnpm --filter @b-studio/studio dev",
     "e2e:agent": "tsx packages/agent/e2e/scripted-orders.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"
