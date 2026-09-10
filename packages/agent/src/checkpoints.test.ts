@@ -1,8 +1,12 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CheckpointError, CheckpointStore } from './checkpoints';
+import { CheckpointError, CheckpointStore, redactCredentials } from './checkpoints';
+
+const execFileAsync = promisify(execFile);
 
 let root: string;
 const savedEnv = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
@@ -102,5 +106,148 @@ describe('CheckpointStore', () => {
     await store.init();
     await expect(store.restore('HEAD~1; rm -rf /')).rejects.toThrow(CheckpointError);
     await expect(store.restore('deadbeef')).rejects.toThrow('찾을 수 없습니다');
+  });
+
+  it('원본 Git 저장소가 없는 세션은 원격 정보가 없고 올릴 수 없다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    expect(await store.repository()).toBeUndefined();
+    await expect(store.push()).rejects.toThrow('원격 저장소와 연결되지 않은 세션');
+  });
+});
+
+/** 커밋 작성자를 명령마다 넘긴다. 테스트는 빈 전역 설정으로 돌기 때문이다 */
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', cwd, '-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args]);
+  return stdout.trim();
+}
+
+/** origin(bare 저장소)으로 main을 올려 둔 원본 저장소를 만든다 */
+async function createSourceRepository() {
+  const base = path.join(root, 'remote-test');
+  const remote = path.join(base, 'orders.git');
+  const source = path.join(base, 'orders');
+  await mkdir(path.join(source, 'api/src'), { recursive: true });
+  await execFileAsync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  await execFileAsync('git', ['init', '-q', '-b', 'main', source]);
+  await writeFile(path.join(source, 'api/src/Order.java'), 'class Order {}\n');
+  await git(source, 'add', '-A');
+  await git(source, 'commit', '-q', '-m', 'init');
+  await writeFile(path.join(source, 'README.md'), '# orders\n');
+  await git(source, 'add', '-A');
+  await git(source, 'commit', '-q', '-m', 'docs');
+  await git(source, 'remote', 'add', 'origin', remote);
+  await git(source, 'push', '-q', 'origin', 'main');
+  return { base, remote, source, workDir: path.join(base, 'sessions', 'orders-s1') };
+}
+
+const BRANCH = 'b-studio/orders-s1';
+
+describe('CheckpointStore 원격 저장소 연동', () => {
+  it('원본을 복제해 세션 브랜치를 만들고, 기록에는 세션 시작 이후만 보인다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store, start, source: info } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    expect(info).toEqual({ base: 'main', originUrl: remote, dirtyFiles: 0 });
+    expect(start).toMatchObject({ sha: await git(source, 'rev-parse', 'HEAD'), message: '세션 시작 (main 브랜치)', files: ['README.md', 'api/src/Order.java'] });
+    expect(await git(workDir, 'branch', '--show-current')).toBe(BRANCH);
+    expect(await store.patch(start.sha)).toContain('세션을 시작한 시점');
+
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가', '검증 통과\n- api: 재시작 후 준비 완료\n\n# 에이전트 요약 제목');
+
+    expect((await store.list()).map((checkpoint) => checkpoint.message)).toEqual(['요청: 메모 추가', '세션 시작 (main 브랜치)']);
+    expect(await store.repository()).toEqual({ remoteUrl: remote, base: 'main', branch: BRANCH, pushedSha: undefined, pullRequestUrl: undefined });
+    // 마크다운 제목(#)이 커밋 정리 규칙에 지워지지 않아야 한다
+    expect(await store.sessionCommits()).toMatchObject([
+      { subject: '요청: 메모 추가', body: '검증 통과\n- api: 재시작 후 준비 완료\n\n# 에이전트 요약 제목', files: ['api/src/Order.java'] },
+    ]);
+  });
+
+  it('올리면 원격에 세션 브랜치가 생기고, 기준 브랜치에서 갈라져 있다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await expect(store.push()).rejects.toThrow('올릴 체크포인트가 없습니다');
+
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+    const checkpoint = (await store.commit('요청: 메모 추가'))!;
+
+    expect(await store.push()).toEqual({ sha: checkpoint.sha, commits: 1, forced: false });
+    expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(checkpoint.sha);
+    expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}^`)).toBe(await git(remote, 'rev-parse', 'refs/heads/main'));
+    expect((await store.repository())?.pushedSha).toBe(checkpoint.sha);
+  });
+
+  it('되돌린 뒤 다시 올리면 원격 브랜치를 맞추고, 다른 사람이 올린 커밋은 덮어쓰지 않는다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+
+    await writeFile(order, 'class Order { String a; }\n');
+    const a = (await store.commit('요청: A'))!;
+    await writeFile(order, 'class Order { String b; }\n');
+    await store.commit('요청: B');
+    await store.push();
+
+    await store.restore(a.sha);
+    expect(await store.push()).toEqual({ sha: a.sha, commits: 1, forced: true });
+    expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(a.sha);
+
+    // 리뷰어가 같은 브랜치에 커밋을 올린다
+    const reviewer = path.join(base, 'reviewer');
+    await execFileAsync('git', ['clone', '-q', '--branch', BRANCH, remote, reviewer]);
+    await writeFile(path.join(reviewer, 'NOTE.md'), 'review\n');
+    await git(reviewer, 'add', '-A');
+    await git(reviewer, 'commit', '-q', '-m', 'review note');
+    await git(reviewer, 'push', '-q', 'origin', 'HEAD');
+    const theirs = await git(reviewer, 'rev-parse', 'HEAD');
+
+    await writeFile(order, 'class Order { String c; }\n');
+    await store.commit('요청: C');
+    await expect(store.push()).rejects.toThrow('덮어쓰지 않았습니다');
+    expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(theirs);
+  });
+
+  it('원본의 커밋하지 않은 변경은 세션에 들어가지 않고 개수만 알려 준다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    await writeFile(path.join(source, 'DRAFT.md'), 'wip\n');
+    await writeFile(path.join(source, 'README.md'), '# changed\n');
+
+    const { source: info } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    expect(info.dirtyFiles).toBe(2);
+    await expect(readFile(path.join(workDir, 'DRAFT.md'), 'utf8')).rejects.toThrow();
+    expect(await readFile(path.join(workDir, 'README.md'), 'utf8')).toBe('# orders\n');
+  });
+
+  it('origin이 없는 원본은 원본 저장소에 세션 브랜치를 올린다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    await git(source, 'remote', 'remove', 'origin');
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+    const checkpoint = (await store.commit('요청: 메모 추가'))!;
+    await store.push();
+
+    expect((await store.repository())?.remoteUrl).toBe(await realpath(source));
+    expect(await git(source, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(checkpoint.sha);
+    // 원본의 체크아웃 브랜치와 작업 트리는 그대로다
+    expect(await git(source, 'branch', '--show-current')).toBe('main');
+  });
+
+  it('Git 저장소 루트가 아닌 폴더는 복제하지 않고, 세션 이전 기록으로는 되돌리지 않는다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    expect(await CheckpointStore.inspectSource(path.join(source, 'api'))).toBeUndefined();
+    await expect(CheckpointStore.clone(path.join(source, 'api'), workDir, { branch: BRANCH })).rejects.toThrow(CheckpointError);
+
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const firstCommit = await git(source, 'rev-list', '--max-parents=0', 'HEAD');
+    await expect(store.restore(firstCommit)).rejects.toThrow('세션 기록에 없는');
+  });
+
+  it('git 오류 메시지에서 주소의 자격 증명을 지운다', () => {
+    expect(redactCredentials("fatal: unable to access 'https://bot:ghp_secret@github.com/acme/orders.git/': 403")).toBe(
+      "fatal: unable to access 'https://***@github.com/acme/orders.git/': 403",
+    );
   });
 });

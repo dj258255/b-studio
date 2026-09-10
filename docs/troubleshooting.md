@@ -421,3 +421,7 @@ WebSocket connection to 'ws://127.0.0.1:32821/_next/hmr?id=...' failed: Error du
 | Spring Initializr 기본 테스트(`contextLoads`)는 DB가 있어야 통과 | 템플릿에서 제거. DB 없이 도는 슬라이스 테스트는 에이전트 검증 단계에서 추가 예정 |
 | 사용자의 compose 파일에 스튜디오 설정을 넣으면 표준 파일이 오염됨 | 임시 디렉터리의 override 파일로 덧씌우고 `destroy()` 때 삭제 |
 | 실행 경로에서 셸을 거치면 명령 주입 위험 | `child_process.execFile`/`spawn`에 인자를 배열로 전달해 셸을 거치지 않음 |
+| 로컬 폴더에서 복제한 저장소의 `origin/*`는 실제 원격이 아니라 원본 폴더의 브랜치를 가리킴 | `--force-with-lease`의 기대값을 원격 추적 브랜치에 맡기지 않고, 마지막으로 올린 커밋을 저장소 설정에 기록해 직접 넘김 |
+| git 기본 커밋 정리 규칙은 `#`으로 시작하는 줄을 지워, 커밋 본문에 넣은 에이전트 요약의 마크다운 제목이 사라짐 | `--cleanup=whitespace`로 커밋하고 단위 테스트로 고정 |
+| git 오류 메시지에 `https://user:token@host` 형태의 주소가 그대로 나올 수 있음 | 오류를 화면과 로그로 보내기 전에 주소의 자격 증명을 지우고, 화면에는 자격 증명을 뺀 주소만 보냄 |
+| 서버에서 원격 작업이 비밀번호 입력이나 SSH 호스트 키 확인을 기다리며 멈출 수 있음 | `GIT_TERMINAL_PROMPT=0`, `ssh -o BatchMode=yes`로 실행하고 push는 2분, clone은 5분 제한 |

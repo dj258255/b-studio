@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -11,8 +11,55 @@ export interface Checkpoint {
   message: string;
   /** ISO 8601 */
   createdAt: string;
-  /** 직전 체크포인트 대비 바뀐 파일 (첫 체크포인트는 전체 파일) */
+  /** 직전 체크포인트 대비 바뀐 파일 (세션 시작 체크포인트는 전체 파일) */
   files: string[];
+}
+
+export interface GitAuthor {
+  name: string;
+  email: string;
+}
+
+/** 세션을 시작할 원본 Git 저장소의 상태 */
+export interface SourceRepository {
+  /** 원본이 체크아웃한 브랜치. 세션 브랜치가 여기서 갈라지고 PR의 대상이 된다 */
+  base: string;
+  /** 원본의 origin 주소. 없으면 원본 저장소 자체로 올린다 */
+  originUrl?: string;
+  /** 원본에서 커밋하지 않은 변경 수. 세션은 커밋된 상태로 시작하므로 이 변경은 들어가지 않는다 */
+  dirtyFiles: number;
+}
+
+export interface RepositoryInfo {
+  /** 올릴 곳. 자격 증명이 들어 있을 수 있어 화면에는 parseRemote로 가공해 보여 준다 */
+  remoteUrl: string;
+  base: string;
+  branch: string;
+  /** 스튜디오가 마지막으로 올린 커밋. 다음에 올릴 때 원격이 이 상태 그대로인지 확인한다 */
+  pushedSha?: string;
+  pullRequestUrl?: string;
+}
+
+export interface SessionCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  body: string;
+  files: string[];
+}
+
+export interface PushResult {
+  sha: string;
+  /** 세션 시작 이후 커밋 수 */
+  commits: number;
+  /** 되돌리기 때문에 원격 브랜치를 이어 붙이지 않고 다른 기록으로 맞췄는지 */
+  forced: boolean;
+}
+
+export interface CheckpointStoreOptions {
+  gitBin?: string;
+  /** 체크포인트 커밋 작성자. 사내 저장소가 작성자 이메일을 검사하면 바꿔야 한다 */
+  author?: GitAuthor;
 }
 
 export class CheckpointError extends Error {
@@ -24,42 +71,90 @@ export class CheckpointError extends Error {
 
 const SHA = /^[0-9a-f]{7,40}$/;
 const MAX_PATCH_CHARS = 200_000;
+const MAX_BODY_CHARS = 8_000;
+const CLONE_TIMEOUT_MS = 300_000;
+const PUSH_TIMEOUT_MS = 120_000;
+const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-studio.local' };
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
 const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts'];
 
 /**
  * 세션 작업 복사본의 Git 기록으로 체크포인트를 관리한다.
  * 게이트를 통과한 변경만 남기고, 통과하지 못한 변경은 되돌릴 수 있게 하는 것이 목적이다.
+ * 원본이 Git 저장소면 세션 브랜치에서 작업하고, 체크포인트를 그대로 원격 브랜치로 올린다.
  */
 export class CheckpointStore {
   readonly root: string;
   readonly #gitBin: string;
+  readonly #author: GitAuthor;
+  #start: string | undefined;
 
-  constructor(root: string, { gitBin = 'git' }: { gitBin?: string } = {}) {
+  constructor(root: string, { gitBin = 'git', author = DEFAULT_AUTHOR }: CheckpointStoreOptions = {}) {
     this.root = path.resolve(root);
     this.#gitBin = gitBin;
+    this.#author = author;
+  }
+
+  /** 폴더가 커밋이 있는 Git 저장소의 루트인지 확인한다. 하위 폴더나 저장소가 아닌 폴더는 undefined */
+  static async inspectSource(source: string, { gitBin = 'git' }: { gitBin?: string } = {}): Promise<SourceRepository | undefined> {
+    const root = await resolveReal(source);
+    const inRepo = (args: string[]) => runGit(gitBin, ['-C', root, ...args]);
+
+    const toplevel = await inRepo(['rev-parse', '--show-toplevel']).then((out) => resolveReal(out.trim()), () => undefined);
+    if (toplevel !== root) return undefined;
+    const hasCommit = await inRepo(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).then(() => true, () => false);
+    if (!hasCommit) return undefined;
+
+    const base = await inRepo(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim(), () => '');
+    if (!base) throw new CheckpointError('원본 저장소가 브랜치가 아닌 커밋(detached HEAD)을 가리키고 있어 세션 브랜치를 만들 수 없습니다');
+    const originUrl = await inRepo(['remote', 'get-url', 'origin']).then((out) => out.trim() || undefined, () => undefined);
+    const status = await inRepo(['status', '--porcelain=v1', '--untracked-files=normal']);
+    return { base, originUrl, dirtyFiles: status.split('\n').filter(Boolean).length };
+  }
+
+  /**
+   * 원본 저장소의 커밋된 상태를 복제하고 세션 브랜치를 만든다.
+   * 원본에 origin이 있으면 그 주소로, 없으면 원본 저장소로 올리도록 설정한다.
+   */
+  static async clone(
+    source: string,
+    root: string,
+    { branch, ...options }: CheckpointStoreOptions & { branch: string },
+  ): Promise<{ store: CheckpointStore; start: Checkpoint; source: SourceRepository }> {
+    const gitBin = options.gitBin ?? 'git';
+    const info = await CheckpointStore.inspectSource(source, { gitBin });
+    if (!info) throw new CheckpointError('커밋이 있는 Git 저장소의 루트 폴더만 세션 브랜치로 시작할 수 있습니다');
+    await runGit(gitBin, ['check-ref-format', '--branch', branch]).catch(() => {
+      throw new CheckpointError(`브랜치 이름이 올바르지 않습니다: ${branch}`);
+    });
+
+    await mkdir(path.dirname(path.resolve(root)), { recursive: true });
+    await runGit(gitBin, ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(source), path.resolve(root)], {
+      timeout: CLONE_TIMEOUT_MS,
+    });
+
+    const store = new CheckpointStore(root, options);
+    if (info.originUrl) await store.#git(['remote', 'set-url', 'origin', info.originUrl]);
+    await store.#git(['checkout', '-q', '-b', branch]);
+    await store.#configure();
+    const start = (await store.#git(['rev-parse', 'HEAD'])).trim();
+    await store.#setMeta('start', start);
+    await store.#setMeta('base', info.base);
+    await store.#setMeta('branch', branch);
+    return { store, start: await store.#checkpoint(start), source: info };
   }
 
   /** 저장소가 없으면 만들고, 지금 상태를 첫 체크포인트로 남긴다 */
   async init(message = '세션 시작'): Promise<Checkpoint> {
-    const toplevel = await this.#git(['rev-parse', '--show-toplevel']).then(
-      (out) => path.resolve(out.trim()),
-      () => undefined,
-    );
-    if (toplevel !== this.root) await this.#git(['init', '-q', '-b', 'main']);
+    const toplevel = await this.#git(['rev-parse', '--show-toplevel']).then((out) => resolveReal(out.trim()), () => undefined);
+    if (toplevel !== (await resolveReal(this.root))) await this.#git(['init', '-q', '-b', 'main']);
 
-    // 사용자 전역 설정(커밋 훅, 서명)이 체크포인트 커밋을 막거나 입력을 기다리며 멈추지 않도록 이 저장소에만 설정한다
-    const hooks = path.join(this.root, '.git', 'b-studio-hooks');
-    await mkdir(hooks, { recursive: true });
-    await this.#git(['config', 'core.hooksPath', hooks]);
-    await this.#git(['config', 'commit.gpgsign', 'false']);
-    await this.#git(['config', 'user.name', 'b-studio']);
-    await this.#git(['config', 'user.email', 'checkpoints@b-studio.local']);
-    await this.#excludeGenerated();
-
+    await this.#configure();
     await this.#git(['add', '-A']);
     await this.#git(['commit', '-q', '--allow-empty', '-m', oneLine(message)]);
-    return this.#checkpoint('HEAD');
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    if (!(await this.#getMeta('start'))) await this.#setMeta('start', head);
+    return this.#checkpoint(head);
   }
 
   /** 마지막 체크포인트 이후 바뀐 파일 (새 파일과 삭제 포함) */
@@ -78,11 +173,13 @@ export class CheckpointStore {
     return [...new Set(files)].sort();
   }
 
-  /** 바뀐 파일이 있으면 체크포인트로 남긴다 */
-  async commit(message: string): Promise<Checkpoint | undefined> {
+  /** 바뀐 파일이 있으면 체크포인트로 남긴다. 본문에는 검증 결과처럼 PR에서 다시 쓸 기록을 넣는다 */
+  async commit(message: string, body?: string): Promise<Checkpoint | undefined> {
     if ((await this.pendingFiles()).length === 0) return undefined;
     await this.#git(['add', '-A']);
-    await this.#git(['commit', '-q', '-m', oneLine(message)]);
+    const text = body?.trim();
+    // 기본 정리 모드는 #으로 시작하는 줄(마크다운 제목)을 지우므로 공백만 정리한다
+    await this.#git(['commit', '-q', '--cleanup=whitespace', '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : [])]);
     return this.#checkpoint('HEAD');
   }
 
@@ -95,18 +192,23 @@ export class CheckpointStore {
     const patch = await this.#git(['diff', '--cached', '--no-color', 'HEAD']);
     await this.#git(['reset', '-q', '--hard', 'HEAD']);
     await this.#git(['clean', '-q', '-fd']);
-    return { files, patch: capPatch(patch) };
+    return { files, patch: capText(patch, MAX_PATCH_CHARS) };
   }
 
-  /** 최신 체크포인트부터 */
+  /** 최신 체크포인트부터. 복제한 저장소의 이전 기록은 포함하지 않고 세션 시작에서 끝난다 */
   async list(limit = 50): Promise<Checkpoint[]> {
-    const shas = (await this.#git(['log', `-n${limit}`, '--format=%H'])).split('\n').filter(Boolean);
-    return Promise.all(shas.map((sha) => this.#checkpoint(sha)));
+    const start = await this.#startSha();
+    const shas = (await this.#git(['log', `-n${Math.max(limit - 1, 0)}`, '--format=%H', `${start}..HEAD`])).split('\n').filter(Boolean);
+    return Promise.all([...shas, start].map((sha) => this.#checkpoint(sha)));
   }
 
   async patch(sha: string): Promise<string> {
     const commit = await this.#resolve(sha);
-    return capPatch(await this.#git(['show', '--format=', '--patch', '--no-color', commit]));
+    // 복제한 저장소의 시작 커밋은 원본 기록의 커밋이라 그 diff는 이 세션의 변경이 아니다
+    if (commit === (await this.#startSha()) && (await this.#getMeta('base'))) {
+      return `# 세션을 시작한 시점입니다. ${await this.#getMeta('base')} 브랜치의 커밋이며 이 세션에서 바꾼 내용은 없습니다.\n`;
+    }
+    return capText(await this.#git(['show', '--format=', '--patch', '--no-color', commit]), MAX_PATCH_CHARS);
   }
 
   /**
@@ -115,9 +217,8 @@ export class CheckpointStore {
    */
   async restore(sha: string): Promise<{ checkpoint: Checkpoint; files: string[] }> {
     const commit = await this.#resolve(sha);
-    await this.#git(['merge-base', '--is-ancestor', commit, 'HEAD']).catch(() => {
-      throw new CheckpointError('현재 기록에 없는 체크포인트입니다');
-    });
+    const inSession = (await this.#isAncestor(await this.#startSha(), commit)) && (await this.#isAncestor(commit, 'HEAD'));
+    if (!inSession) throw new CheckpointError('현재 세션 기록에 없는 체크포인트입니다');
 
     const pending = await this.pendingFiles();
     const committed = (await this.#git(['diff', '--name-only', '-z', commit, 'HEAD'])).split('\0').filter(Boolean);
@@ -125,6 +226,71 @@ export class CheckpointStore {
     await this.#git(['clean', '-q', '-fd']);
 
     return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort() };
+  }
+
+  /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
+  async repository(): Promise<RepositoryInfo | undefined> {
+    const [base, branch] = await Promise.all([this.#getMeta('base'), this.#getMeta('branch')]);
+    if (!base || !branch) return undefined;
+    return {
+      remoteUrl: (await this.#git(['remote', 'get-url', 'origin'])).trim(),
+      base,
+      branch,
+      pushedSha: await this.#getMeta('pushed'),
+      pullRequestUrl: await this.#getMeta('pullrequest'),
+    };
+  }
+
+  async recordPullRequest(url: string): Promise<void> {
+    await this.#setMeta('pullrequest', url);
+  }
+
+  /** 세션 시작 이후 커밋. 오래된 것부터 */
+  async sessionCommits(): Promise<SessionCommit[]> {
+    const start = await this.#startSha();
+    const records = (await this.#git(['log', '--reverse', '--format=%H%x00%h%x00%s%x00%b%x1e', `${start}..HEAD`]))
+      .split('\x1e')
+      .map((record) => record.replace(/^\n/, ''))
+      .filter(Boolean);
+    return Promise.all(
+      records.map(async (record) => {
+        const [sha = '', shortSha = '', subject = '', body = ''] = record.split('\0');
+        return { sha, shortSha, subject, body: body.trim(), files: await this.#changedFiles(sha) };
+      }),
+    );
+  }
+
+  /**
+   * 체크포인트를 세션 브랜치로 올린다.
+   * 되돌리기 뒤에는 원격 브랜치를 다른 기록으로 맞춰야 하므로 강제로 올리되,
+   * 원격이 스튜디오가 마지막으로 올린 상태와 다르면(다른 사람이 커밋했으면) 거부한다.
+   */
+  async push(): Promise<PushResult> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원격 저장소와 연결되지 않은 세션입니다');
+    if ((await this.pendingFiles()).length > 0) throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 올릴 수 없습니다');
+
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    const commits = Number((await this.#git(['rev-list', '--count', `${await this.#startSha()}..HEAD`])).trim());
+    if (commits === 0) throw new CheckpointError('올릴 체크포인트가 없습니다. 요청이 검증 게이트를 통과하면 체크포인트가 생깁니다');
+
+    const ref = `refs/heads/${info.branch}`;
+    // 한 번도 올리지 않았으면 빈 값: 원격에 같은 이름의 브랜치가 없어야 한다
+    const expected = info.pushedSha ?? '';
+    try {
+      await this.#git(['push', `--force-with-lease=${ref}:${expected}`, 'origin', `HEAD:${ref}`], { timeout: PUSH_TIMEOUT_MS });
+    } catch (error) {
+      if (error instanceof CheckpointError && error.message.includes('stale info')) {
+        throw new CheckpointError(
+          `원격의 ${info.branch} 브랜치가 스튜디오가 마지막으로 올린 상태와 달라 덮어쓰지 않았습니다. 다른 사람이 같은 브랜치에 올렸는지 확인하세요.`,
+        );
+      }
+      throw error;
+    }
+
+    const forced = expected !== '' && !(await this.#isAncestor(expected, head));
+    await this.#setMeta('pushed', head);
+    return { sha: head, commits, forced };
   }
 
   async #resolve(sha: string): Promise<string> {
@@ -137,13 +303,55 @@ export class CheckpointStore {
   }
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
-    const [sha = '', shortSha = '', message = '', createdAt = ''] = (
-      await this.#git(['show', '-s', '--format=%H%x00%h%x00%s%x00%cI', ref])
-    )
+    const [sha = '', shortSha = '', subject = '', createdAt = ''] = (await this.#git(['show', '-s', '--format=%H%x00%h%x00%s%x00%cI', ref]))
       .trim()
       .split('\0');
-    const files = (await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha])).split('\0').filter(Boolean);
-    return { sha, shortSha, message, createdAt, files };
+
+    if (sha === (await this.#startSha())) {
+      const base = await this.#getMeta('base');
+      const files = (await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean);
+      return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
+    }
+    return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha) };
+  }
+
+  async #changedFiles(sha: string): Promise<string[]> {
+    return (await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha])).split('\0').filter(Boolean);
+  }
+
+  async #startSha(): Promise<string> {
+    this.#start ??= (await this.#getMeta('start')) ?? (await this.#git(['rev-list', '--max-parents=0', 'HEAD'])).trim().split('\n')[0]!;
+    return this.#start;
+  }
+
+  async #isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    return this.#git(['merge-base', '--is-ancestor', ancestor, descendant]).then(
+      () => true,
+      () => false,
+    );
+  }
+
+  /** 세션 정보는 저장소 설정에 둔다. 스튜디오 서버를 재시작해도 작업 복사본만으로 복원할 수 있다 */
+  async #getMeta(key: string): Promise<string | undefined> {
+    return this.#git(['config', '--get', `b-studio.${key}`]).then(
+      (out) => out.trim() || undefined,
+      () => undefined,
+    );
+  }
+
+  async #setMeta(key: string, value: string): Promise<void> {
+    await this.#git(['config', `b-studio.${key}`, value]);
+  }
+
+  /** 사용자 전역 설정(커밋 훅, 서명)이 체크포인트 커밋을 막거나 입력을 기다리며 멈추지 않도록 이 저장소에만 설정한다 */
+  async #configure(): Promise<void> {
+    const hooks = path.join(this.root, '.git', 'b-studio-hooks');
+    await mkdir(hooks, { recursive: true });
+    await this.#git(['config', 'core.hooksPath', hooks]);
+    await this.#git(['config', 'commit.gpgsign', 'false']);
+    await this.#git(['config', 'user.name', this.#author.name]);
+    await this.#git(['config', 'user.email', this.#author.email]);
+    await this.#excludeGenerated();
   }
 
   async #excludeGenerated(): Promise<void> {
@@ -157,26 +365,46 @@ export class CheckpointStore {
     await appendFile(file, `${separator}# b-studio 샌드박스 생성물\n${missing.join('\n')}\n`);
   }
 
-  /** 셸을 거치지 않고 인자 배열로 실행한다 */
-  async #git(args: string[]): Promise<string> {
-    try {
-      const { stdout } = await execFileAsync(this.#gitBin, ['-C', this.root, ...args], {
-        maxBuffer: 64 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      });
-      return stdout;
-    } catch (error) {
-      const stderr = (error as { stderr?: string }).stderr?.trim();
-      throw new CheckpointError(`git ${args[0]} 실패${stderr ? `: ${stderr}` : ''}`);
-    }
+  async #git(args: string[], options?: { timeout?: number }): Promise<string> {
+    return runGit(this.#gitBin, ['-C', this.root, ...args], options);
   }
+}
+
+/** 셸을 거치지 않고 인자 배열로 실행한다. 원격 작업이 사람의 입력(비밀번호, 호스트 키 확인)을 기다리며 멈추지 않게 한다 */
+async function runGit(gitBin: string, args: string[], { timeout }: { timeout?: number } = {}): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(gitBin, args, {
+      maxBuffer: 64 * 1024 * 1024,
+      timeout,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes',
+      },
+    });
+    return stdout;
+  } catch (error) {
+    const failure = error as { stderr?: string; killed?: boolean };
+    const command = args[0] === '-C' ? args[2] : args[0];
+    const stderr = redactCredentials(failure.stderr?.trim() ?? '');
+    throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${stderr ? `: ${stderr}` : ''}`);
+  }
+}
+
+/** 오류 메시지가 화면과 로그로 나가므로 주소에 들어 있는 토큰을 지운다 */
+export function redactCredentials(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1***@');
+}
+
+async function resolveReal(target: string): Promise<string> {
+  return realpath(target).catch(() => path.resolve(target));
 }
 
 function oneLine(message: string): string {
   return message.replace(/\s+/g, ' ').trim().slice(0, 120) || '체크포인트';
 }
 
-function capPatch(patch: string): string {
-  if (patch.length <= MAX_PATCH_CHARS) return patch;
-  return `${patch.slice(0, MAX_PATCH_CHARS)}\n[... 변경 내용이 길어 ${patch.length - MAX_PATCH_CHARS}자를 생략했습니다 ...]\n`;
+function capText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n[... 길어서 ${text.length - max}자를 생략했습니다 ...]\n`;
 }

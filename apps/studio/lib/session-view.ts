@@ -1,4 +1,4 @@
-import type { AgentEvent, Checkpoint, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, Checkpoint, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -27,6 +27,15 @@ export type ChatItem =
       kind: 'restore';
       checkpoint: Checkpoint;
       result?: { ok: true; files: string[]; restarted: ServiceCheck[] } | { ok: false; error: string };
+    }
+  | {
+      kind: 'exported';
+      branch: string;
+      hostKind: GitHostKind;
+      commits: number;
+      forced: boolean;
+      pullRequest?: { url: string; created: boolean };
+      pullRequestError?: string;
     };
 
 type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
@@ -117,6 +126,24 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return {
         ...patchSnapshot(view, { running: false }),
         chat: settleRestore(view.chat, event.checkpoint.sha, { ok: false, error: event.error }),
+      };
+
+    case 'exported':
+      // 원격 상태는 통째로 바꾸므로 기록을 다시 재생해도 결과가 같다
+      return {
+        ...patchSnapshot(view, { repository: event.repository }),
+        chat: [
+          ...view.chat,
+          {
+            kind: 'exported',
+            branch: event.repository.branch,
+            hostKind: event.repository.kind,
+            commits: event.commits,
+            forced: event.forced,
+            pullRequest: event.pullRequest,
+            pullRequestError: event.pullRequestError,
+          },
+        ],
       };
   }
 }

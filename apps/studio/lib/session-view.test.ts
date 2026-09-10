@@ -132,6 +132,43 @@ describe('reduceSession', () => {
     expect(done.completedRuns).toBe(1);
   });
 
+  it('올린 결과로 원격 상태를 바꾸고 대화에 남긴다', () => {
+    const repository = {
+      remote: 'github.com/acme/orders',
+      kind: 'github',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      sourceDirtyFiles: 0,
+      canCreatePullRequest: true,
+    } as const;
+    const pushed = { ...repository, pushedSha: 'c'.repeat(40), pullRequestUrl: 'https://github.com/acme/orders/pull/1' };
+    const exported: StudioEvent = {
+      type: 'exported',
+      repository: pushed,
+      sha: 'c'.repeat(40),
+      commits: 2,
+      forced: false,
+      pullRequest: { url: 'https://github.com/acme/orders/pull/1', created: true },
+    };
+
+    const view = fold([{ type: 'snapshot', snapshot: { ...snapshot, repository } }, exported]);
+    // 다시 연결하면 이미 반영된 스냅샷 위에 같은 이벤트가 재생된다
+    const replayed = fold([{ type: 'snapshot', snapshot: { ...snapshot, repository: pushed } }, exported]);
+
+    expect(view.snapshot.repository).toEqual(pushed);
+    expect(replayed.snapshot.repository).toEqual(pushed);
+    expect(view.chat).toEqual([
+      {
+        kind: 'exported',
+        branch: 'b-studio/orders-s1',
+        hostKind: 'github',
+        commits: 2,
+        forced: false,
+        pullRequest: { url: 'https://github.com/acme/orders/pull/1', created: true },
+      },
+    ]);
+  });
+
   it('로그는 최근 항목만 남긴다', () => {
     const events: StudioEvent[] = Array.from({ length: LOG_LIMIT + 5 }, (_, i) => ({ type: 'log', service: 'api', text: `line ${i}`, at: '' }));
     const view = fold(events);
