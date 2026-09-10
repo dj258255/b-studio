@@ -4,8 +4,15 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import {
   AnthropicModelClient,
+  buildPullRequest,
+  canCreatePullRequest,
+  CheckpointError,
   CheckpointStore,
+  compareUrl,
+  createPullRequest,
+  formatVerificationReport,
   ORDERS_DEMO_SCENARIOS,
+  parseRemote,
   preflightClaudeCode,
   restartServicesFor,
   runAgent,
@@ -13,12 +20,14 @@ import {
   ScriptedModelClient,
   type AgentEvent,
   type AgentResult,
+  type Checkpoint,
   type DemoScenario,
+  type GitAuthor,
   type ModelClient,
 } from '@b-studio/agent';
 import { LocalDockerProvider, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
-import type { SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
+import type { ExportResult, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
 import { findProject } from './projects';
 
@@ -45,6 +54,10 @@ interface Session {
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
   };
+  /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
+  sourceDirtyFiles: number;
+  /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
+  exporting: boolean;
 }
 
 const HISTORY_LIMIT = 5_000;
@@ -70,12 +83,26 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
   // 에이전트가 원본을 바꾸지 않도록 세션마다 작업 복사본을 만든다. Docker가 마운트할 수 있는 홈 아래에 둔다
   const workDir = path.join(sessionsRoot(), `${projectId}-${id}`);
   await mkdir(path.dirname(workDir), { recursive: true });
-  await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
+
+  // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 복사본의 시작 상태를 체크포인트로 둔다
+  const author = gitAuthor();
+  let checkpoints: CheckpointStore;
+  let firstCheckpoint: Checkpoint;
+  let sourceDirtyFiles = 0;
+  if (await CheckpointStore.inspectSource(source.root)) {
+    // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
+    const cloned = await CheckpointStore.clone(source.root, workDir, { branch: `b-studio/${projectId}-${id}`, author });
+    checkpoints = cloned.store;
+    firstCheckpoint = cloned.start;
+    sourceDirtyFiles = cloned.source.dirtyFiles;
+  } else {
+    await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
+    checkpoints = new CheckpointStore(workDir, { author });
+    firstCheckpoint = await checkpoints.init('세션 시작');
+  }
 
   const project = await loadProject(workDir);
-  // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 복사본의 시작 상태를 체크포인트로 둔다
-  const checkpoints = new CheckpointStore(workDir);
-  const firstCheckpoint = await checkpoints.init('세션 시작');
+  const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   const sandbox = await new LocalDockerProvider().create(project);
 
   const session: Session = {
@@ -96,6 +123,7 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
       })),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       checkpoints: [firstCheckpoint],
+      repository,
     },
     project,
     sandbox,
@@ -107,6 +135,8 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
     stop: new AbortController(),
     demoIndex: 0,
     claudeCode: { notes: [] },
+    sourceDirtyFiles,
+    exporting: false,
   };
 
   store.sessions.set(id, session);
@@ -129,6 +159,7 @@ export function sendMessage(id: string, text: string, { allowBreaking }: { allow
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
   if (session.snapshot.running) throw new StudioError(409, '이전 요청을 처리하는 중입니다');
+  if (session.exporting) throw new StudioError(409, '원격 저장소에 올리는 중입니다');
 
   const request = text.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
@@ -210,7 +241,7 @@ async function execute(session: Session, runId: string, request: string, plan: R
     }
 
     // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-    if (result.status === 'done') await saveCheckpoint(session, runId, request);
+    if (result.status === 'done') await saveCheckpoint(session, runId, request, checkpointBody(result, plan.allowBreaking));
     else await revertRun(session, runId);
     finished = { type: 'run_finished', runId, status: result.status, summary: result.summary, turns: result.turns };
   } catch (error) {
@@ -271,8 +302,18 @@ async function runPlan(session: Session, runId: string, request: string, plan: R
   });
 }
 
-async function saveCheckpoint(session: Session, runId: string, request: string): Promise<void> {
-  const checkpoint = await session.checkpoints.commit(`요청: ${request}`);
+/** PR 리뷰어가 요청마다 무엇을 확인했는지 볼 수 있도록 검증 결과와 에이전트 요약을 커밋 본문에 남긴다 */
+function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
+  const sections: string[] = [];
+  if (result.report) sections.push(formatVerificationReport(result.report, { allowBreaking }));
+  if (result.verifyAttempts > 0) sections.push(`검증 게이트 재시도: ${result.verifyAttempts}회`);
+  const summary = result.summary.trim();
+  if (summary) sections.push(`에이전트 요약:\n${summary.split('\n').slice(0, 30).join('\n')}`);
+  return sections.join('\n\n');
+}
+
+async function saveCheckpoint(session: Session, runId: string, request: string, body: string): Promise<void> {
+  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body);
   if (!checkpoint) return;
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
   emit(session, { type: 'checkpoint', runId, checkpoint });
@@ -292,7 +333,7 @@ async function revertRun(session: Session, runId: string): Promise<void> {
 export function restoreCheckpoint(id: string, sha: string): void {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되돌릴 수 있습니다');
-  if (session.snapshot.running) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
   const target = session.snapshot.checkpoints.find((checkpoint) => checkpoint.sha === sha);
   if (!target) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
   if (target.sha === session.snapshot.checkpoints[0]?.sha) throw new StudioError(409, '이미 최신 체크포인트입니다');
@@ -333,6 +374,82 @@ export function restoreCheckpoint(id: string, sha: string): void {
     session.snapshot.running = false;
     if (!session.stop.signal.aborted) emit(session, event);
   })();
+}
+
+/** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
+export async function exportSession(id: string, { pullRequest }: { pullRequest: boolean }): Promise<ExportResult> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
+  if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
+  if (session.exporting) throw new StudioError(409, '이미 올리는 중입니다');
+
+  session.exporting = true;
+  try {
+    const pushed = await session.checkpoints.push().catch((error: unknown) => {
+      // git 명령 자체가 실패하면(인증, 네트워크) 원격 문제이고, 나머지는 지금 상태로는 올릴 수 없다는 뜻이다
+      const gitFailure = error instanceof CheckpointError && error.message.startsWith('git ');
+      throw new StudioError(gitFailure ? 502 : 409, describe(error));
+    });
+
+    const info = (await session.checkpoints.repository())!;
+    let created: ExportResult['pullRequest'];
+    let pullRequestError: string | undefined;
+    if (pullRequest && !info.pullRequestUrl) {
+      try {
+        const { title, body } = buildPullRequest({
+          projectName: session.project.spec.name,
+          base: info.base,
+          branch: info.branch,
+          commits: await session.checkpoints.sessionCommits(),
+        });
+        const result = await createPullRequest(parseRemote(info.remoteUrl), { title, body, base: info.base, branch: info.branch });
+        await session.checkpoints.recordPullRequest(result.url);
+        created = { url: result.url, created: result.created };
+      } catch (error) {
+        // 브랜치는 이미 올라갔으므로 실패 이유를 알리고, 작성 페이지 링크로 직접 만들 수 있게 한다
+        pullRequestError = describe(error);
+      }
+    }
+
+    const repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
+    session.snapshot.repository = repository;
+    const result: ExportResult = {
+      repository,
+      sha: pushed.sha,
+      commits: pushed.commits,
+      forced: pushed.forced,
+      pullRequest: created,
+      pullRequestError,
+    };
+    emit(session, { type: 'exported', ...result });
+    return result;
+  } finally {
+    session.exporting = false;
+  }
+}
+
+async function describeRepository(store: CheckpointStore, sourceDirtyFiles: number): Promise<RepositoryView | undefined> {
+  const info = await store.repository();
+  if (!info) return undefined;
+  const remote = parseRemote(info.remoteUrl);
+  return {
+    remote: remote.display,
+    kind: remote.kind,
+    base: info.base,
+    branch: info.branch,
+    sourceDirtyFiles,
+    pushedSha: info.pushedSha,
+    pullRequestUrl: info.pullRequestUrl,
+    compareUrl: compareUrl(remote, info.base, info.branch),
+    canCreatePullRequest: canCreatePullRequest(remote),
+  };
+}
+
+/** 사내 저장소가 커밋 작성자를 검사하면 체크포인트 작성자를 실제 계정으로 바꿔야 한다 */
+function gitAuthor(): GitAuthor | undefined {
+  const name = process.env.B_STUDIO_GIT_AUTHOR_NAME?.trim();
+  const email = process.env.B_STUDIO_GIT_AUTHOR_EMAIL?.trim();
+  return name && email ? { name, email } : undefined;
 }
 
 export async function checkpointPatch(id: string, sha: string): Promise<string> {

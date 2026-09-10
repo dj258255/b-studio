@@ -22,6 +22,27 @@ export {
   type ServiceCheck,
   type VerificationReport,
 } from './verify';
-export { CheckpointError, CheckpointStore, type Checkpoint } from './checkpoints';
+export {
+  CheckpointError,
+  CheckpointStore,
+  redactCredentials,
+  type Checkpoint,
+  type GitAuthor,
+  type PushResult,
+  type RepositoryInfo,
+  type SessionCommit,
+  type SourceRepository,
+} from './checkpoints';
+export {
+  buildPullRequest,
+  canCreatePullRequest,
+  compareUrl,
+  createPullRequest,
+  parseRemote,
+  PullRequestError,
+  type GitHostKind,
+  type PullRequestResult,
+  type RemoteLocation,
+} from './repository';
 export { buildTools, executeTool } from './tools';
 export { Workspace, WorkspaceError } from './workspace';

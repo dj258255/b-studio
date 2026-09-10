@@ -189,6 +189,30 @@ function ChatEntry({ item }: { item: ChatItem }) {
         <p className="text-sm text-fail">되돌리지 못했습니다: {item.result.error}</p>
       );
 
+    case "exported": {
+      const label = item.hostKind === "gitlab" ? "MR" : "PR";
+      return (
+        <div className="space-y-0.5 text-sm">
+          <p className="text-pass">
+            <span className="font-mono">{item.branch}</span> 브랜치에 체크포인트 {item.commits}개를 올렸습니다
+            {item.forced && ". 되돌린 기록에 맞춰 원격 브랜치를 바꿨습니다"}
+          </p>
+          {item.pullRequest && (
+            <p>
+              <a href={item.pullRequest.url} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-2">
+                {item.pullRequest.created ? `${label}을 만들었습니다` : `이미 열려 있는 ${label}을 찾았습니다`}
+              </a>
+            </p>
+          )}
+          {item.pullRequestError && (
+            <p className="text-fail">
+              {label}을 만들지 못했습니다: {item.pullRequestError}
+            </p>
+          )}
+        </div>
+      );
+    }
+
     case "outcome":
       return (
         <p className={`text-sm ${item.status === "done" ? "text-pass" : "text-fail"}`}>
