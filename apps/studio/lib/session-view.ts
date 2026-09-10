@@ -1,4 +1,4 @@
-import type { AgentEvent, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, Checkpoint, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -19,10 +19,18 @@ export type ChatItem =
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport }
-  | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error'; summary: string; turns?: number };
+  | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error'; summary: string; turns?: number }
+  | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
+  | { kind: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[] }
+  | {
+      kind: 'restore';
+      checkpoint: Checkpoint;
+      result?: { ok: true; files: string[]; restarted: ServiceCheck[] } | { ok: false; error: string };
+    };
 
 type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
 type GateItem = Extract<ChatItem, { kind: 'gate' }>;
+type RestoreItem = Extract<ChatItem, { kind: 'restore' }>;
 
 export interface SessionView {
   snapshot: SessionSnapshot;
@@ -77,7 +85,45 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ],
         completedRuns: view.completedRuns + 1,
       };
+
+    case 'checkpoint': {
+      // 다시 연결하면 서버가 이미 체크포인트가 반영된 스냅샷을 보낸 뒤 기록을 재생하므로, 같은 체크포인트는 한 번만 쌓는다
+      const known = view.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === event.checkpoint.sha);
+      return {
+        ...(known ? view : patchSnapshot(view, { checkpoints: [event.checkpoint, ...view.snapshot.checkpoints] })),
+        chat: [...view.chat, { kind: 'checkpoint', runId: event.runId, checkpoint: event.checkpoint }],
+      };
+    }
+
+    case 'reverted':
+      return {
+        ...view,
+        chat: [...view.chat, { kind: 'reverted', runId: event.runId, files: event.files, patch: event.patch, restarted: event.restarted }],
+      };
+
+    case 'restore_started':
+      return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'restore', checkpoint: event.checkpoint }] };
+
+    case 'restored':
+      return {
+        ...patchSnapshot(view, { running: false, checkpoints: event.checkpoints, nextDemoRequest: event.nextDemoRequest }),
+        chat: settleRestore(view.chat, event.checkpoint.sha, { ok: true, files: event.files, restarted: event.restarted }),
+        // 파일이 바뀌었으므로 미리보기와 계약을 다시 불러오게 한다
+        completedRuns: view.completedRuns + 1,
+      };
+
+    case 'restore_failed':
+      return {
+        ...patchSnapshot(view, { running: false }),
+        chat: settleRestore(view.chat, event.checkpoint.sha, { ok: false, error: event.error }),
+      };
   }
+}
+
+function settleRestore(chat: ChatItem[], sha: string, result: NonNullable<RestoreItem['result']>): ChatItem[] {
+  const index = chat.findLastIndex((item) => item.kind === 'restore' && item.checkpoint.sha === sha && !item.result);
+  if (index === -1) return chat;
+  return chat.map((item, i) => (i === index ? { ...(item as RestoreItem), result } : item));
 }
 
 function patchSnapshot(view: SessionView, patch: Partial<SessionSnapshot>): SessionView {

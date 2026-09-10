@@ -11,6 +11,7 @@ const snapshot: SessionSnapshot = {
   status: 'starting',
   mode: 'demo',
   running: false,
+  checkpoints: [],
   services: [
     { name: 'web', template: 'nextjs', preview: 'browser', state: 'starting', hasContract: false },
     { name: 'api', template: 'spring-boot', preview: 'openapi', state: 'starting', hasContract: true },
@@ -74,6 +75,47 @@ describe('reduceSession', () => {
     const once = fold([{ type: 'snapshot', snapshot }, ...history]);
     const twice = fold([{ type: 'snapshot', snapshot }, ...history], once);
     expect(twice.chat).toHaveLength(1);
+  });
+
+  it('체크포인트를 최신순으로 쌓고 대화에 남긴다', () => {
+    const first = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '세션 시작', createdAt: '', files: [] };
+    const second = { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', message: '요청: 메모', createdAt: '', files: ['api/Order.java'] };
+    const view = fold([
+      { type: 'snapshot', snapshot: { ...snapshot, checkpoints: [first] } },
+      { type: 'checkpoint', runId: 'r1', checkpoint: second },
+    ]);
+    expect(view.snapshot.checkpoints.map((c) => c.shortSha)).toEqual(['bbbbbbb', 'aaaaaaa']);
+    expect(view.chat).toEqual([{ kind: 'checkpoint', runId: 'r1', checkpoint: second }]);
+  });
+
+  it('다시 연결해 기록을 재생해도 스냅샷에 이미 있는 체크포인트를 중복으로 쌓지 않는다', () => {
+    const first = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '세션 시작', createdAt: '', files: [] };
+    const second = { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', message: '요청: 메모', createdAt: '', files: ['api/Order.java'] };
+    // 서버 스냅샷에는 이미 second가 반영돼 있고, 재생되는 기록에도 second의 checkpoint 이벤트가 있다
+    const view = fold([
+      { type: 'snapshot', snapshot: { ...snapshot, checkpoints: [second, first] } },
+      { type: 'checkpoint', runId: 'r1', checkpoint: second },
+    ]);
+    expect(view.snapshot.checkpoints.map((c) => c.shortSha)).toEqual(['bbbbbbb', 'aaaaaaa']);
+    expect(view.chat).toHaveLength(1);
+  });
+
+  it('복원은 진행 중으로 표시했다가 결과와 새 기록으로 채운다', () => {
+    const first = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '세션 시작', createdAt: '', files: [] };
+    const second = { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', message: '요청: 메모', createdAt: '', files: ['api/Order.java'] };
+    const pending = fold([
+      { type: 'snapshot', snapshot: { ...snapshot, checkpoints: [second, first] } },
+      { type: 'restore_started', checkpoint: first },
+    ]);
+    expect(pending.snapshot.running).toBe(true);
+
+    const done = fold(
+      [{ type: 'restored', checkpoint: first, files: ['api/Order.java'], restarted: [{ service: 'api', ready: true }], checkpoints: [first] }],
+      pending,
+    );
+    expect(done.snapshot).toMatchObject({ running: false, checkpoints: [first] });
+    expect(done.chat.at(-1)).toMatchObject({ kind: 'restore', result: { ok: true, files: ['api/Order.java'] } });
+    expect(done.completedRuns).toBe(1);
   });
 
   it('로그는 최근 항목만 남긴다', () => {

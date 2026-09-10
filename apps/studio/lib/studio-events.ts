@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@b-studio/agent';
+import type { AgentEvent, Checkpoint, ServiceCheck } from '@b-studio/agent';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
@@ -29,6 +29,8 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
   nextDemoRequest?: string;
+  /** 게이트를 통과해 남긴 체크포인트. 최신이 먼저 온다 */
+  checkpoints: Checkpoint[];
 }
 
 export interface ProjectSummary {
@@ -52,7 +54,19 @@ export type StudioEvent =
       summary: string;
       turns?: number;
       nextDemoRequest?: string;
-    };
+    }
+  | { type: 'checkpoint'; runId: string; checkpoint: Checkpoint }
+  | { type: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[] }
+  | { type: 'restore_started'; checkpoint: Checkpoint }
+  | {
+      type: 'restored';
+      checkpoint: Checkpoint;
+      files: string[];
+      restarted: ServiceCheck[];
+      checkpoints: Checkpoint[];
+      nextDemoRequest?: string;
+    }
+  | { type: 'restore_failed'; checkpoint: Checkpoint; error: string };
 
 export interface ProxyResponse {
   status: number;

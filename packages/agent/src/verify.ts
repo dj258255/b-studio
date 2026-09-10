@@ -55,26 +55,8 @@ export interface VerifyOptions {
  */
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
   const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
-  const { services, unmatched } = servicesForFiles(project, changedFiles);
-
-  // 파일 공유 캐시 때문에 옛 코드로 재시작하면 게이트가 틀린 결과를 통과시킨다. 반영을 먼저 확인한다
-  let sync: VerificationReport['sync'];
-  try {
-    sync = { elapsedMs: (await sandbox.sync([...changedFiles], { signal: start?.signal })).elapsedMs };
-  } catch (error) {
-    return { ok: false, sync: { error: describe(error) }, restarted: [], contracts: [], unverifiedFiles: unmatched };
-  }
-
-  const restarted = await Promise.all(
-    services.map(async (service): Promise<ServiceCheck> => {
-      try {
-        await sandbox.restart(service, start);
-        return { service, ready: true };
-      } catch (error) {
-        return { service, ready: false, error: describe(error), logTail: await recentLogs(sandbox, service) };
-      }
-    }),
-  );
+  const { sync, restarted, unverifiedFiles } = await restartServicesFor(sandbox, project, changedFiles, start);
+  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles };
 
   // 재시작에 실패한 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
   const failed = new Set(restarted.filter((check) => !check.ready).map((check) => check.service));
@@ -98,7 +80,48 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     contracts.every((check) => !check.error) &&
     (allowBreaking || !breaking);
 
-  return { ok, sync, restarted, contracts, unverifiedFiles: unmatched };
+  return { ok, sync, restarted, contracts, unverifiedFiles };
+}
+
+export interface RestartReport {
+  sync: VerificationReport['sync'];
+  restarted: ServiceCheck[];
+  /** 서비스에 속하지 않아 재시작으로 확인할 수 없는 파일 */
+  unverifiedFiles: string[];
+}
+
+/**
+ * 바뀐 파일이 샌드박스에 반영됐는지 확인한 뒤, 그 파일이 속한 서비스를 다시 띄운다.
+ * 검증 게이트, 실패한 변경 되돌리기, 체크포인트 복원이 같은 절차를 쓴다.
+ */
+export async function restartServicesFor(
+  sandbox: Sandbox,
+  project: LoadedProject,
+  files: readonly string[],
+  start?: StartOptions,
+): Promise<RestartReport> {
+  const { services, unmatched } = servicesForFiles(project, files);
+
+  // 파일 공유 캐시 때문에 옛 코드로 재시작하면 틀린 결과를 얻는다. 반영을 먼저 확인한다
+  let sync: RestartReport['sync'];
+  try {
+    sync = { elapsedMs: (await sandbox.sync([...files], { signal: start?.signal })).elapsedMs };
+  } catch (error) {
+    return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched };
+  }
+
+  const restarted = await Promise.all(
+    services.map(async (service): Promise<ServiceCheck> => {
+      try {
+        await sandbox.restart(service, start);
+        return { service, ready: true };
+      } catch (error) {
+        return { service, ready: false, error: describe(error), logTail: await recentLogs(sandbox, service) };
+      }
+    }),
+  );
+
+  return { sync, restarted, unverifiedFiles: unmatched };
 }
 
 /** 세션 시작 시점의 계약을 저장해 둔다. 실패한 서비스는 비교 기준 없이 진행한다 */

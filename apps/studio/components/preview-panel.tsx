@@ -4,18 +4,21 @@ import { useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import type { ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
+import { HistoryPanel } from "./history-panel";
 import { LogPanel } from "./log-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 
 type Tab = { id: string; label: string; service?: ServiceView };
 
 const LOGS_TAB = "logs";
+const HISTORY_TAB = "history";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
     ...view.snapshot.services
       .filter((service) => service.preview !== "logs")
       .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
+    { id: HISTORY_TAB, label: "기록" },
     { id: LOGS_TAB, label: "로그" },
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
@@ -41,7 +44,9 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       </div>
 
       <div role="tabpanel" className="min-h-0 flex-1">
-        {active.id === LOGS_TAB || !active.service ? (
+        {active.id === HISTORY_TAB ? (
+          <HistoryPanel view={view} />
+        ) : active.id === LOGS_TAB || !active.service ? (
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
         ) : !active.service.url ? (
           <ServicePending service={active.service} />
