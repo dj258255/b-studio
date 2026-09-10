@@ -25,7 +25,7 @@ import {
   type GitAuthor,
   type ModelClient,
 } from '@b-studio/agent';
-import { LocalDockerProvider, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
+import { describeSnapshotEvent, LocalDockerProvider, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import type { ExportResult, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
@@ -202,7 +202,13 @@ export async function endpointFor(id: string, service: string): Promise<string> 
 
 async function boot(session: Session): Promise<void> {
   try {
-    await session.sandbox.start({ signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) });
+    await session.sandbox.start({
+      signal: session.stop.signal,
+      onStatus: (event) => onServiceStatus(session, event),
+      // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
+      onSnapshot: (event) =>
+        emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
+    });
     setStatus(session, 'ready');
   } catch (error) {
     if (!session.stop.signal.aborted) setStatus(session, 'failed', describe(error));

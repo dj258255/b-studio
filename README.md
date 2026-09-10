@@ -114,6 +114,7 @@ sequenceDiagram
 | **Next.js 단일 앱 + Server-Sent Events** | 오래 걸리는 샌드박스·에이전트 작업의 진행 상황을 한 프로세스에서 실시간으로 보내기 위해 | [ADR-015](docs/decisions.md#adr-015-스튜디오-서버-nextjs-단일-앱과-server-sent-events) |
 | **작업 복사본을 Git 체크포인트로 관리** | "완료로 인정하지 않음"을 넘어 실패한 변경이 실제로 남지 않게 하기 위해 | [ADR-018](docs/decisions.md#adr-018-세션-체크포인트-검증을-통과한-변경만-남긴다) |
 | **로컬 로그인 계정 모드는 명시적으로 켜고, 기본 도구를 모두 끔** | 로그인 흐름 없이 본인 PC에서만 쓰고, 모델이 샌드박스와 작업 공간 규칙을 우회하지 못하게 하기 위해 | [ADR-019](docs/decisions.md#adr-019-로컬-로그인-계정으로-실행-api-키-없이-개인-pc에서만) |
+| **입력 파일 해시로 찾는 스냅샷 볼륨, 측정으로 켤 볼륨 결정** | 도구의 설치 단계는 그대로 두어 결과를 틀리게 만들지 않으면서, 실제 병목에만 기동 비용을 줄이기 위해 | [ADR-021](docs/decisions.md#adr-021-기동-최적화-입력-파일-해시로-찾는-스냅샷-볼륨) |
 | **원본 저장소를 복제한 세션 브랜치 + 마지막으로 올린 커밋 기준 lease 푸시** | 체크포인트를 그대로 PR로 넘기고, 되돌린 기록은 반영하되 리뷰어 커밋은 덮어쓰지 않기 위해 | [ADR-020](docs/decisions.md#adr-020-원격-저장소-연동-세션-브랜치와-덮어쓰지-않는-푸시) |
 
 ## 프로젝트 구조
@@ -148,6 +149,7 @@ pnpm test                          # 단위 테스트
 pnpm typecheck                     # 패키지 전체 타입 체크
 pnpm studio up examples/orders     # 샌드박스 기동 (Ctrl+C로 종료하면 정리)
 pnpm e2e:agent                     # 스크립트 모델로 에이전트 루프 전체를 실제 Docker에서 검증 (API 키 불필요)
+pnpm bench:boot examples/orders 3  # 샌드박스를 세 번 띄워 기동 단계별 시간 측정
 pnpm studio:demo                   # 웹 스튜디오를 데모 모드로 실행 (http://127.0.0.1:3000, API 키 불필요)
 
 # Claude API 인증 정보가 있을 때
@@ -239,6 +241,10 @@ services:
     preview: openapi       # API 탐색기
     ready: { path: /actuator/health/readiness, timeoutSeconds: 900 }
     contract: { extract: /v3/api-docs }   # 실행 중인 서버에서 OpenAPI 추출
+    # 키 파일 내용이 같으면 이전 세션의 볼륨을 복사해 시작 (Gradle 설정 캐시 재사용)
+    snapshots:
+      - volume: api-gradle-project
+        key: [build.gradle, settings.gradle, gradle.properties, gradle/wrapper/gradle-wrapper.properties, Dockerfile.dev]
 
   # 이미 운영 중인 API는 등록만 한다 (TOI 방식)
   # legacy-users:
@@ -261,8 +267,8 @@ services:
 | 포트 공개 범위 | `127.0.0.1`의 빈 포트에만 공개 (같은 네트워크에서 접근 불가) |
 | Ctrl+C 신호가 여러 번 들어올 때 | 정리가 끝까지 완료됨 (tsx와 node에 SIGINT를 동시에 보내 재현) |
 | 종료 후 정리 | 컨테이너 0개, 샌드박스 볼륨 0개. 공유 캐시 볼륨(Gradle, pnpm)은 유지 |
-| 두 번째 기동 | 늦어도 43초 안에 두 서비스 모두 준비 완료 |
-| 단위 테스트 / 타입 체크 | 97개 통과 / 패키지 5개 통과 |
+| 두 번째 기동 | 처음에는 늦어도 43초 안에 준비. 단계별로 측정해 병목(api의 Gradle 기동·설정)을 찾은 뒤 **13.4초 → 10.9초** (`pnpm bench:boot`, 3회 10.8~10.9초) |
+| 단위 테스트 / 타입 체크 | 104개 통과 / 패키지 5개 통과 |
 
 ### 에이전트 루프 (`pnpm e2e:agent`, 실제 Docker 샌드박스)
 
@@ -353,7 +359,7 @@ services:
 - **미리보기 HMR 연결이 계속 실패한 문제**: Next.js 16의 개발용 요청 출처 제한을 문서로 확인하고 `allowedDevOrigins`로 해결
 - **Ctrl+C 한 번에 신호가 여러 번 들어와 정리가 중간에 끊길 수 있는 문제**: `process.once` 대신 멱등한 정리 함수로 해결
 - **Next dev 첫 요청 컴파일 때문에 준비 확인이 시간 초과되는 현상**: 기동 중 에러와 진짜 실패를 구분하는 판정 규칙으로 해결
-- **캐시를 공유해도 두 번째 기동이 크게 빨라지지 않는 이유**: 샌드박스 전용 `node_modules` 볼륨이 원인이며, lockfile 해시 기반 스냅샷을 다음 과제로 정함
+- **캐시를 공유해도 두 번째 기동이 빨라지지 않은 문제**: "`node_modules` 재설치가 원인"이라는 가설을 측정으로 뒤집음. 실제 병목은 api의 Gradle 기동·설정이었고, 이득이 측정된 볼륨에만 스냅샷을 켜 13.4초 → 10.9초
 - **재시작할 때마다 콘솔에 HMR 연결 실패가 쌓이는 현상**: 에러의 origin을 확인해 스튜디오가 아니라 이전 포트에 남은 미리보기 앱의 재연결임을 확인
 
 ## 로드맵
@@ -367,7 +373,7 @@ services:
 - [ ] **데이터**: 세션별 DB 브랜치, 운영 DB 접근 차단, 시크릿 주입
 - [ ] **정책 프록시**: 사내 API 등록, 마스킹, 감사 로그, 서비스 단위 권한
 - [ ] **격리 강화**: Kubernetes agent-sandbox + gVisor/Kata 제공자
-- [ ] **기동 최적화**: lockfile 해시별로 의존성 설치가 끝난 스냅샷 재사용
+- [x] **기동 최적화**: 단계별 측정으로 병목을 찾고, 입력 파일 해시별 스냅샷 볼륨과 Gradle 캐시로 준비 시간 13.4초 → 10.9초
 
 ## 기술 스택
 

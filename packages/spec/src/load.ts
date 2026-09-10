@@ -56,11 +56,24 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
   const managed: LoadedProject['managed'] = [];
   const issues: string[] = [];
 
+  const composeVolumes = compose.data.volumes ?? {};
+
   for (const [name, service] of Object.entries(spec.services)) {
     const inCompose = composeServices.has(name);
     if (service.source === 'managed') {
       if (!inCompose) issues.push(`services.${name}: managed 서비스는 ${spec.compose}에 같은 이름으로 정의돼야 합니다`);
       managed.push([name, service]);
+
+      service.snapshots?.forEach((snapshot, index) => {
+        const field = `services.${name}.snapshots.${index}.volume`;
+        if (!(snapshot.volume in composeVolumes)) {
+          issues.push(`${field}: ${spec.compose}의 volumes에 '${snapshot.volume}'이 없습니다`);
+        } else if (composeVolumes[snapshot.volume]?.external) {
+          issues.push(`${field}: 샌드박스끼리 공유하는 external 볼륨은 스냅샷으로 만들 수 없습니다`);
+        } else if (inCompose && !mountsVolume(compose.data.services[name], snapshot.volume)) {
+          issues.push(`${field}: ${spec.compose}의 ${name} 서비스가 '${snapshot.volume}' 볼륨을 마운트하지 않습니다`);
+        }
+      });
     } else if (inCompose) {
       issues.push(`services.${name}: external 서비스는 샌드박스에서 실행하지 않으므로 ${spec.compose}에 넣지 않습니다`);
     }
@@ -73,6 +86,15 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     .map(([key, volume]) => volume?.name ?? key);
 
   return { root, spec, composePath, managed, sharedVolumes };
+}
+
+/** compose 서비스의 volumes 항목(짧은 문법 "이름:경로", 긴 문법 { source })에 볼륨이 있는지 */
+function mountsVolume(service: unknown, volume: string): boolean {
+  const mounts = (service as { volumes?: unknown } | null)?.volumes;
+  if (!Array.isArray(mounts)) return false;
+  return mounts.some((mount) =>
+    typeof mount === 'string' ? mount.split(':')[0] === volume : (mount as { source?: unknown } | null)?.source === volume,
+  );
 }
 
 async function readText(file: string): Promise<string> {

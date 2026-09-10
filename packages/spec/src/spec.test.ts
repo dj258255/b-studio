@@ -103,6 +103,64 @@ describe('loadProject', () => {
     const project = await loadProject(dir);
     expect(project.sharedVolumes).toEqual(['b-studio-cache-uv', 'shared']);
   });
+
+  it('스냅샷 볼륨은 서비스가 마운트하는 샌드박스 전용 볼륨이어야 한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  web:
+    source: managed
+    template: nextjs
+    path: web
+    port: 3000
+    preview: browser
+    snapshots:
+      - { volume: web-node-modules, key: [pnpm-lock.yaml] }
+      - { volume: pnpm-store, key: [pnpm-lock.yaml] }
+      - { volume: missing, key: [pnpm-lock.yaml] }
+      - { volume: web-next, key: [package.json] }
+`,
+    );
+    await writeFile(
+      path.join(dir, 'compose.yaml'),
+      `services:
+  web:
+    build: ./web
+    volumes:
+      - ./web:/app
+      - web-node-modules:/app/node_modules
+      - { type: volume, source: pnpm-store, target: /cache/pnpm }
+volumes:
+  web-node-modules:
+  web-next:
+  pnpm-store: { external: true, name: b-studio-cache-pnpm }
+`,
+    );
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual([
+      "services.web.snapshots.1.volume: 샌드박스끼리 공유하는 external 볼륨은 스냅샷으로 만들 수 없습니다",
+      "services.web.snapshots.2.volume: compose.yaml의 volumes에 'missing'이 없습니다",
+      "services.web.snapshots.3.volume: compose.yaml의 web 서비스가 'web-next' 볼륨을 마운트하지 않습니다",
+    ]);
+  });
+
+  it('스냅샷 키는 서비스 폴더 밖을 가리킬 수 없다', () => {
+    const source = `
+version: 1
+name: x
+services:
+  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser, snapshots: [{ volume: nm, key: [../secrets.env, /etc/passwd] }] }
+`;
+    const error = captureError(() => parseSpec(source));
+    expect(error.issues.filter((issue) => issue.startsWith('services.web.snapshots.0.key'))).toHaveLength(2);
+  });
 });
 
 function captureError(fn: () => unknown): SpecError {

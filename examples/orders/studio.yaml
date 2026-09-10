@@ -9,6 +9,8 @@ services:
     port: 3000
     preview: browser
     ready: { path: /, timeoutSeconds: 300 }
+    # node_modules 스냅샷은 켜지 않았다. 공유 pnpm 저장소에서 연결하는 시간(약 3초)과 459MB 볼륨을 복사하는 시간이
+    # 비슷해 이득이 없었다 (docs/troubleshooting.md 3번)
 
   api:
     source: managed
@@ -19,3 +21,7 @@ services:
     # 첫 기동은 Gradle 배포판과 의존성을 내려받느라 오래 걸린다
     ready: { path: /actuator/health/readiness, timeoutSeconds: 900 }
     contract: { extract: /v3/api-docs }
+    # 빌드 스크립트가 같으면 Gradle 설정 캐시가 들어 있는 프로젝트 .gradle 폴더를 재사용한다
+    snapshots:
+      - volume: api-gradle-project
+        key: [build.gradle, settings.gradle, gradle.properties, gradle/wrapper/gradle-wrapper.properties, Dockerfile.dev]
