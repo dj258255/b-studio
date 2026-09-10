@@ -1,6 +1,6 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { buildOverride, parseContainerState, parseHostPort, parseLogLine } from './format';
+import { buildOverride, parseContainerState, parseHostPort, parseLogLine, parseSyncOutput } from './format';
 
 describe('buildOverride', () => {
   it('managed 서비스 포트를 루프백의 빈 포트에 공개한다', () => {
@@ -41,6 +41,16 @@ describe('parseContainerState', () => {
 
   it('컨테이너가 없으면 unknown', () => {
     expect(parseContainerState('')).toBe('unknown');
+  });
+});
+
+describe('parseSyncOutput', () => {
+  it('해시와 경로를 나누고 공백이 들어간 경로를 보존한다', () => {
+    const seen = parseSyncOutput('abc123 api/src/Order.java\nMISSING web/app/my page.tsx\n');
+    expect([...seen]).toEqual([
+      ['api/src/Order.java', 'abc123'],
+      ['web/app/my page.tsx', 'MISSING'],
+    ]);
   });
 });
 

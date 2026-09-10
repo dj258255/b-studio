@@ -1,9 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
@@ -18,10 +19,32 @@ import type {
   SandboxProvider,
   ServiceEndpoint,
   StartOptions,
+  SyncOptions,
+  SyncResult,
 } from '../types';
-import { buildOverride, parseContainerState, parseHostPort, parseLogLine } from './format';
+import { buildOverride, parseContainerState, parseHostPort, parseLogLine, parseSyncOutput } from './format';
 
 const execFileAsync = promisify(execFile);
+
+/** 파일 반영 확인에 쓰는 작은 이미지. 서비스 컨테이너가 죽어 있어도 확인할 수 있도록 별도 컨테이너로 돌린다 */
+const SYNC_HELPER_IMAGE = 'busybox:1.37';
+
+/**
+ * 파일 경로는 셸 문자열에 끼워 넣지 않고 위치 인자로 넘긴다.
+ * 디렉터리 목록(readdir)에 이름이 보이는지와 내용 해시를 함께 확인한다.
+ * 빌드 도구는 목록과 속성으로 변경을 감지하므로 경로로 직접 여는 것만으로는 부족하다.
+ */
+const SYNC_SCRIPT = [
+  'cd /project || exit 2',
+  'for f in "$@"; do',
+  '  if ls -1a "$(dirname "$f")" 2>/dev/null | grep -Fxq -- "$(basename "$f")"; then',
+  '    h=$(sha256sum "$f" 2>/dev/null | cut -d " " -f 1)',
+  '    echo "${h:-UNREADABLE} $f"',
+  '  else',
+  '    echo "MISSING $f"',
+  '  fi',
+  'done',
+].join('\n');
 
 export interface LocalDockerProviderOptions {
   /** docker 실행 파일 경로 (기본: PATH의 docker) */
@@ -90,6 +113,32 @@ class LocalDockerSandbox implements Sandbox {
     return this.#awaitReady(name, options);
   }
 
+  async sync(files: string[], { signal, timeoutMs = 60_000 }: SyncOptions = {}): Promise<SyncResult> {
+    if (files.length === 0) return { elapsedMs: 0, checks: 0 };
+
+    const expected = new Map(
+      await Promise.all(files.map(async (file) => [file, await hashOrMissing(path.join(this.project.root, file))] as const)),
+    );
+    const started = Date.now();
+
+    for (let checks = 1; ; checks++) {
+      const result = await this.#docker(
+        ['run', '--rm', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...files],
+        signal,
+      );
+      if (result.exitCode !== 0) throw new SandboxError('샌드박스 파일 반영 확인에 실패했습니다', result.stderr);
+
+      const seen = parseSyncOutput(result.stdout);
+      const pending = files.filter((file) => seen.get(file) !== expected.get(file));
+      if (pending.length === 0) return { elapsedMs: Date.now() - started, checks };
+
+      if (Date.now() - started >= timeoutMs) {
+        throw new SandboxError(`${Math.round(timeoutMs / 1_000)}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: ${pending.join(', ')}`);
+      }
+      await sleep(250, undefined, { signal });
+    }
+  }
+
   async endpoint(name: string): Promise<ServiceEndpoint> {
     const service = this.#managed(name);
     const { stdout } = await this.#composeOrThrow(['port', name, String(service.port)]);
@@ -101,8 +150,16 @@ class LocalDockerSandbox implements Sandbox {
     return parseContainerState(stdout);
   }
 
-  async *logs({ services = [], tail = 200, signal }: LogOptions = {}): AsyncIterable<LogLine> {
-    const args = this.#composeArgs(['logs', '--follow', '--no-color', '--timestamps', '--tail', String(tail), ...services]);
+  async *logs({ services = [], tail = 200, follow = true, signal }: LogOptions = {}): AsyncIterable<LogLine> {
+    const args = this.#composeArgs([
+      'logs',
+      ...(follow ? ['--follow'] : []),
+      '--no-color',
+      '--timestamps',
+      '--tail',
+      String(tail),
+      ...services,
+    ]);
     const child = spawn(this.#dockerBin, args, { signal, stdio: ['ignore', 'pipe', 'ignore'] });
     // signal로 중단하면 AbortError가 발생하는데, 로그 구독 종료는 정상 흐름이다
     child.on('error', () => {});
@@ -116,8 +173,8 @@ class LocalDockerSandbox implements Sandbox {
     }
   }
 
-  exec(name: string, command: string[]): Promise<ExecResult> {
-    return this.#compose(['exec', '-T', name, ...command]);
+  exec(name: string, command: string[], { signal }: { signal?: AbortSignal } = {}): Promise<ExecResult> {
+    return this.#compose(['exec', '-T', name, ...command], signal);
   }
 
   async destroy(): Promise<void> {
@@ -187,9 +244,13 @@ class LocalDockerSandbox implements Sandbox {
     ];
   }
 
-  async #compose(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+  #compose(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+    return this.#docker(this.#composeArgs(args), signal);
+  }
+
+  async #docker(args: string[], signal?: AbortSignal): Promise<ExecResult> {
     try {
-      const { stdout, stderr } = await execFileAsync(this.#dockerBin, this.#composeArgs(args), {
+      const { stdout, stderr } = await execFileAsync(this.#dockerBin, args, {
         signal,
         maxBuffer: 32 * 1024 * 1024,
       });
@@ -208,6 +269,15 @@ class LocalDockerSandbox implements Sandbox {
     const result = await this.#compose(args, signal);
     if (result.exitCode !== 0) throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, result.stderr);
     return result;
+  }
+}
+
+async function hashOrMissing(file: string): Promise<string> {
+  try {
+    return createHash('sha256').update(await readFile(file)).digest('hex');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'MISSING';
+    throw error;
   }
 }
 

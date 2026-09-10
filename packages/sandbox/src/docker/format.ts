@@ -47,7 +47,20 @@ export function parseContainerState(stdout: string): ContainerState {
   return typeof state === 'string' && CONTAINER_STATES.has(state) ? (state as ContainerState) : 'unknown';
 }
 
-const LOG_LINE = /^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
+/**
+ * 동기화 확인 스크립트 출력: 파일마다 `<sha256|MISSING|UNREADABLE> <경로>` 한 줄.
+ * 경로에 공백이 있을 수 있으므로 첫 공백에서만 나눈다
+ */
+export function parseSyncOutput(stdout: string): Map<string, string> {
+  const seen = new Map<string, string>();
+  for (const line of stdout.split('\n')) {
+    const space = line.indexOf(' ');
+    if (space > 0) seen.set(line.slice(space + 1), line.slice(0, space));
+  }
+  return seen;
+}
+
+const LOG_LINE =/^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
 
 /** `docker compose logs --timestamps` 한 줄: `api-1  | 2026-09-10T11:48:35.123456789Z 메시지` */
 export function parseLogLine(raw: string): LogLine {

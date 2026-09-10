@@ -45,7 +45,22 @@ export interface LogOptions {
   services?: string[];
   /** 과거 로그를 몇 줄부터 보여줄지 */
   tail?: number;
+  /** false면 지금까지의 로그만 돌려주고 끝난다 (기본: true, 계속 따라감) */
+  follow?: boolean;
   signal?: AbortSignal;
+}
+
+export interface SyncOptions {
+  signal?: AbortSignal;
+  /** 이 시간 안에 반영되지 않으면 실패 (기본 60초) */
+  timeoutMs?: number;
+}
+
+export interface SyncResult {
+  /** 샌드박스에서 보일 때까지 걸린 시간 */
+  elapsedMs: number;
+  /** 확인 횟수 */
+  checks: number;
 }
 
 export interface ExecResult {
@@ -62,10 +77,16 @@ export interface Sandbox {
   start(options?: StartOptions): Promise<ServiceEndpoint[]>;
   /** 코드가 바뀐 서비스 하나만 다시 빌드해서 띄운다 */
   restart(service: string, options?: StartOptions): Promise<ServiceEndpoint>;
+  /**
+   * 호스트에서 바꾼 프로젝트 파일(루트 기준 경로)이 샌드박스 안에서 현재 내용 그대로 보일 때까지 기다린다.
+   * 파일 공유 계층(sshfs 등)의 캐시 때문에 재시작한 서비스가 옛 코드를 빌드하는 것을 막는 동기화 지점이다.
+   * 원격 제공자에서는 업로드 완료를 보장하는 방식으로 구현한다.
+   */
+  sync(files: string[], options?: SyncOptions): Promise<SyncResult>;
   endpoint(service: string): Promise<ServiceEndpoint>;
   state(service: string): Promise<ContainerState>;
   logs(options?: LogOptions): AsyncIterable<LogLine>;
-  exec(service: string, command: string[]): Promise<ExecResult>;
+  exec(service: string, command: string[], options?: { signal?: AbortSignal }): Promise<ExecResult>;
   destroy(): Promise<void>;
 }
 
