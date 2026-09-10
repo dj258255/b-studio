@@ -1,0 +1,17 @@
+{
+  "name": "@b-studio/spec",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "yaml": "^2.9.0",
+    "zod": "^4.6.1"
+  }
+}
