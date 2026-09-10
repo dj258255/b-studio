@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+  - apps/*
+
+# templates/ 는 사용자 프로젝트로 복사되는 원본이라 워크스페이스에 포함하지 않는다
+
+onlyBuiltDependencies:
+  - esbuild
