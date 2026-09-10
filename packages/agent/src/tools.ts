@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Sandbox } from '@b-studio/sandbox';
+import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
 import { servicesForFiles } from './services';
@@ -18,6 +18,8 @@ export interface ToolContext {
   sandbox: Sandbox;
   fetcher: ContractFetcher;
   signal?: AbortSignal;
+  /** 재시작 중 서비스 상태(바뀐 포트 포함)를 밖으로 알린다 */
+  onServiceStatus?: StartOptions['onStatus'];
 }
 
 export interface ToolOutcome {
@@ -124,7 +126,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
           // 방금 쓴 파일을 샌드박스가 보기 전에 재시작하면 옛 코드가 빌드된다
           const owned = workspace.changedFiles().filter((file) => servicesForFiles(context.project, [file]).services[0] === target);
           await sandbox.sync(owned, { signal });
-          const endpoint = await sandbox.restart(target, { signal });
+          const endpoint = await sandbox.restart(target, { signal, onStatus: context.onServiceStatus });
           return success(`${target} is ready at ${endpoint.url}`);
         } catch (error) {
           return failure(`${describe(error)}\n--- recent logs\n${await tailLogs(sandbox, target, 60)}`);
@@ -159,7 +161,10 @@ async function httpRequest(context: ToolContext, args: Record<string, unknown>):
   const body = string(args, 'body');
 
   const endpoint = await context.sandbox.endpoint(target);
-  const response = await fetch(new URL(requestPath, endpoint.url), {
+  const url = new URL(requestPath, endpoint.url);
+  // "//other-host/..." 같은 경로는 URL 해석에서 호스트가 바뀐다. 서비스 밖으로 요청하지 못하게 막는다
+  if (url.origin !== new URL(endpoint.url).origin) return failure('path must stay on the service host');
+  const response = await fetch(url, {
     method,
     headers: body ? { 'content-type': 'application/json' } : undefined,
     body: body || undefined,

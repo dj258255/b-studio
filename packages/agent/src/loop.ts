@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Sandbox } from '@b-studio/sandbox';
+import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { buildSystemPrompt } from './prompts';
 import { servicesForFiles } from './services';
@@ -61,6 +61,11 @@ export type AgentEvent =
 
 export interface RunAgentOptions {
   request: string;
+  /**
+   * 이전 요청부터 이어지는 대화 기록. 넘기면 이번 실행의 메시지가 여기에 이어 붙는다.
+   * 실행 중 예외가 나면 이번 실행분은 되돌려 다음 요청이 깨진 대화로 시작하지 않게 한다.
+   */
+  conversation?: BetaMessageParam[];
   project: LoadedProject;
   sandbox: Sandbox;
   client: ModelClient;
@@ -71,6 +76,8 @@ export interface RunAgentOptions {
   maxVerifyAttempts?: number;
   signal?: AbortSignal;
   onEvent?: (event: AgentEvent) => void;
+  /** 검증 게이트나 도구가 서비스를 재시작할 때의 상태. 재시작하면 호스트 포트가 바뀌므로 미리보기가 따라가야 한다 */
+  onServiceStatus?: StartOptions['onStatus'];
   fetcher?: ContractFetcher;
 }
 
@@ -80,6 +87,18 @@ export interface RunAgentOptions {
  * 게이트가 실패하면 결과를 돌려주고 루프를 이어 가며, 통과해야만 완료로 본다.
  */
 export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
+  const messages = options.conversation ?? [];
+  const startLength = messages.length;
+  try {
+    return await run(options, messages);
+  } catch (error) {
+    // 도구 호출 뒤 결과를 붙이기 전에 끊기면 대화가 API 규칙을 어기므로 이번 실행분을 버린다
+    messages.splice(startLength);
+    throw error;
+  }
+}
+
+async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Promise<AgentResult> {
   const {
     request,
     project,
@@ -90,6 +109,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     maxVerifyAttempts = 3,
     signal,
     onEvent = () => {},
+    onServiceStatus,
     fetcher = fetchContract,
   } = options;
 
@@ -97,7 +117,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   const baselines = await captureBaselines(sandbox, project, fetcher);
   const system = buildSystemPrompt(project);
   const tools = buildTools(project);
-  const messages: BetaMessageParam[] = [{ role: 'user', content: request }];
+  messages.push({ role: 'user', content: request });
   const usage: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
   let verifyAttempts = 0;
@@ -139,7 +159,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       const results: BetaToolResultBlockParam[] = [];
       for (const call of toolUses) {
         onEvent({ type: 'tool_call', name: call.name, input: call.input });
-        const outcome = await executeTool(call.name, call.input, { project, workspace, sandbox, fetcher, signal });
+        const outcome = await executeTool(call.name, call.input, { project, workspace, sandbox, fetcher, signal, onServiceStatus });
         onEvent({ type: 'tool_result', name: call.name, ok: outcome.ok, content: outcome.content });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: !outcome.ok });
       }
@@ -160,7 +180,15 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     const files = filesToVerify(project, workspace, verifiedVersion, failedServices);
     onEvent({ type: 'verify_start', files });
     verifiedVersion = workspace.version;
-    report = await verifyChanges({ sandbox, project, changedFiles: files, baselines, allowBreaking, fetcher, start: { signal } });
+    report = await verifyChanges({
+      sandbox,
+      project,
+      changedFiles: files,
+      baselines,
+      allowBreaking,
+      fetcher,
+      start: { signal, onStatus: onServiceStatus },
+    });
     failedServices = new Set(report.restarted.filter((check) => !check.ready).map((check) => check.service));
 
     const reportText = formatVerificationReport(report, { allowBreaking });

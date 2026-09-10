@@ -2,9 +2,14 @@ import { z } from 'zod';
 
 const NAME = /^[a-z][a-z0-9-]*$/;
 
+/**
+ * 서비스 안의 경로. `//host/...`는 `new URL(path, base)`에서 다른 호스트를 가리키게 되므로 거부한다
+ */
+const SERVICE_PATH = z.string().regex(/^\/(?!\/)/, '"/"로 시작하고 "//"로 시작하지 않는 경로여야 합니다');
+
 /** 서비스가 요청을 받을 준비가 됐는지 HTTP로 확인하는 방법 */
 export const HttpProbeSchema = z.object({
-  path: z.string().startsWith('/'),
+  path: SERVICE_PATH,
   expectStatus: z.number().int().min(100).max(599).default(200),
   /** 첫 기동은 의존성 다운로드 때문에 오래 걸릴 수 있다 (Gradle 등) */
   timeoutSeconds: z.number().int().positive().optional(),
@@ -23,7 +28,7 @@ export const ManagedServiceSchema = z.object({
   preview: PreviewKindSchema,
   ready: HttpProbeSchema.optional(),
   /** 실행 중인 서버에서 OpenAPI 문서를 뽑아낼 경로 (코드 우선 방식) */
-  contract: z.object({ extract: z.string().startsWith('/') }).optional(),
+  contract: z.object({ extract: SERVICE_PATH }).optional(),
 });
 
 /** 이미 운영 중인 API를 등록만 하는 서비스 (TOI 방식) */

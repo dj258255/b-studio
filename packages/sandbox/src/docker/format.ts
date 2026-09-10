@@ -60,17 +60,32 @@ export function parseSyncOutput(stdout: string): Map<string, string> {
   return seen;
 }
 
-const LOG_LINE =/^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
+const LOG_LINE = /^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
+/** compose가 컨테이너 수명 주기를 알리는 줄: `api-1 exited with code 143`, `web-1 has been recreated` */
+const STATUS_LINE = /^(?<container>[a-z0-9][a-z0-9_.-]*)-\d+\s+(?<text>[^|\s].*)$/;
+/** --no-color를 줘도 상태 줄 앞에는 줄 지우기(ESC [K) 같은 제어 코드가 붙는다 */
+const ANSI_ESCAPE = /\u001b\[[0-9;?]*[A-Za-z]/g;
 
-/** `docker compose logs --timestamps` 한 줄: `api-1  | 2026-09-10T11:48:35.123456789Z 메시지` */
-export function parseLogLine(raw: string): LogLine {
-  const groups = LOG_LINE.exec(raw)?.groups;
-  if (!groups?.container || !groups.timestamp) return { service: 'unknown', text: raw, at: new Date() };
+/**
+ * `docker compose logs --timestamps` 한 줄: `api-1  | 2026-09-10T11:48:35.123456789Z 메시지`.
+ * 내용이 없는 줄은 undefined를 돌려 건너뛰게 한다.
+ */
+export function parseLogLine(raw: string): LogLine | undefined {
+  const line = raw.replace(ANSI_ESCAPE, '');
+  if (line.trim() === '') return undefined;
 
-  return {
-    service: groups.container,
-    text: groups.text ?? '',
-    // 나노초 정밀도는 Date가 다루지 못하므로 밀리초까지만 남긴다
-    at: new Date(groups.timestamp.replace(/(\.\d{3})\d+/, '$1')),
-  };
+  const groups = LOG_LINE.exec(line)?.groups;
+  if (groups?.container && groups.timestamp) {
+    return {
+      service: groups.container,
+      text: groups.text ?? '',
+      // 나노초 정밀도는 Date가 다루지 못하므로 밀리초까지만 남긴다
+      at: new Date(groups.timestamp.replace(/(\.\d{3})\d+/, '$1')),
+    };
+  }
+
+  const status = STATUS_LINE.exec(line)?.groups;
+  if (status?.container && status.text) return { service: status.container, text: status.text, at: new Date() };
+
+  return { service: 'unknown', text: line, at: new Date() };
 }

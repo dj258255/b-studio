@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+/*
+ * 실험실 작업대: 민트빛 회색 바탕에 짙은 청록 글자.
+ * 색은 상태(통과, 실패, 확인 중)를 전할 때만 쓴다.
+ */
+@theme {
+  --color-ground: #edf2ef;
+  --color-panel: #ffffff;
+  --color-ink: #102a2b;
+  --color-muted: #5e7470;
+  --color-line: #cad6d1;
+  --color-pass: #1e7f55;
+  --color-fail: #b4233a;
+  --color-wait: #a86b12;
+}
+
+@theme inline {
+  --font-sans: var(--font-plex-sans), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    background: var(--color-ground);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "tnum" 1;
+    /* 한국어는 어절 단위로 줄바꿈하고, 긴 경로나 URL만 필요할 때 끊는다 */
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+}

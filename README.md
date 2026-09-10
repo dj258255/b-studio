@@ -6,11 +6,14 @@
 
 `pnpm studio agent`는 요청을 Claude에게 맡깁니다. 에이전트가 "끝났다"고 해도 **스튜디오가 직접 바뀐 서비스를 재시작하고, 준비 상태와 API 계약을 확인해 통과해야만** 완료로 봅니다.
 
+![에이전트가 넣은 컴파일 에러를 검증 게이트가 로그와 함께 되돌려 보내고, 수정 후 통과해 미리보기에 주문 화면이 뜬 모습](docs/images/studio-gate-retry.png)
+
 | 단계 | 상태 |
 |---|---|
 | 1. 런타임 코어 (프로젝트 명세 · 샌드박스 · 템플릿 · CLI) | ✅ 완료 |
 | 2. 에이전트 루프 (Plan → Code → Run → Verify) | ✅ 구현 · 스크립트 모델로 실제 Docker에서 검증 (Claude API 실행 확인은 인증 정보 필요) |
-| 3. 스튜디오 UI · DB 브랜치 · 정책 프록시 | 📋 계획 |
+| 3. 웹 스튜디오 (대화 · 미리보기 · API 탐색기 · 로그) | ✅ 구현 · 데모 모드로 실제 브라우저에서 검증 |
+| 4. DB 브랜치 · 정책 프록시 · 격리 강화 | 📋 계획 |
 
 ---
 
@@ -36,7 +39,9 @@
 ```mermaid
 flowchart LR
   subgraph Studio["b-studio"]
-    CLI["apps/cli<br/>studio up"]
+    UI["apps/studio<br/>웹 스튜디오 (Next.js 16)"]
+    CLI["apps/cli<br/>studio up · agent"]
+    AG["@b-studio/agent<br/>에이전트 루프 · 검증 게이트"]
     SPEC["@b-studio/spec<br/>studio.yaml 검증"]
     SB["@b-studio/sandbox<br/>Sandbox 인터페이스"]
   end
@@ -52,8 +57,11 @@ flowchart LR
     DB[("db<br/>PostgreSQL 17")]
   end
 
+  UI --> AG
+  CLI --> AG
+  UI --> SPEC
   CLI --> SPEC
-  CLI --> SB
+  AG --> SB
   SB --> LD
   SB -.-> K8S
   LD --> Box
@@ -99,6 +107,8 @@ sequenceDiagram
 | **직접 작성한 루프 + 스튜디오 검증 게이트** | 모델이 "끝났다"고 해도 재시작·준비 판정·계약 비교를 통과해야 완료로 보기 위해 | [ADR-010](docs/decisions.md#adr-010-에이전트-루프-직접-작성한-루프와-스튜디오-검증-게이트) |
 | **bash 대신 행동별 도구** | 경로 제한, 덮어쓰기 충돌 방지, 바뀐 파일 기록을 강제하기 위해 | [ADR-011](docs/decisions.md#adr-011-도구-설계-bash-하나-대신-행동별-도구) |
 | **계약 호환 깨짐은 기본 차단** | 요청하지 않은 필드 삭제·타입 변경이 운영 중인 화면을 깨뜨리지 않게 하기 위해 | [ADR-013](docs/decisions.md#adr-013-계약-호환-정책-기본은-차단-요청이-명시할-때만-허용) |
+| **재시작 전 파일 반영 확인** | 파일 공유 캐시 때문에 게이트가 옛 코드를 검증하는 일을 막기 위해 | [ADR-014](docs/decisions.md#adr-014-재시작-전에-샌드박스가-바뀐-파일을-보는지-확인한다) |
+| **Next.js 단일 앱 + Server-Sent Events** | 오래 걸리는 샌드박스·에이전트 작업의 진행 상황을 한 프로세스에서 실시간으로 보내기 위해 | [ADR-015](docs/decisions.md#adr-015-스튜디오-서버-nextjs-단일-앱과-server-sent-events) |
 
 ## 프로젝트 구조
 
@@ -109,7 +119,8 @@ b-studio/
 │  ├─ sandbox/        Sandbox/SandboxProvider 인터페이스, 준비 판정, 파일 반영 확인, LocalDockerProvider
 │  └─ agent/          에이전트 루프, 도구, 작업 공간 안전장치, 검증 게이트, 계약 비교, Claude·스크립트 클라이언트
 ├─ apps/
-│  └─ cli/            studio up · studio agent — 샌드박스 수명 주기, 에이전트 실행, 로그 스트리밍
+│  ├─ cli/            studio up · studio agent — 샌드박스 수명 주기, 에이전트 실행, 로그 스트리밍
+│  └─ studio/         웹 스튜디오 (Next.js 16) — 세션 관리자, SSE, 대화 · 미리보기 · API 탐색기 · 로그
 ├─ templates/         새 서비스의 원본 (각각 개발용 Dockerfile과 lockfile 포함)
 │  ├─ nextjs-web/     Next.js 16.3 · React 19 · Tailwind 4
 │  ├─ spring-boot-api/ Spring Boot 4.1 · Java 25 · JPA · Flyway · springdoc 3.1
@@ -131,6 +142,7 @@ pnpm test                          # 단위 테스트
 pnpm typecheck                     # 패키지 전체 타입 체크
 pnpm studio up examples/orders     # 샌드박스 기동 (Ctrl+C로 종료하면 정리)
 pnpm e2e:agent                     # 스크립트 모델로 에이전트 루프 전체를 실제 Docker에서 검증 (API 키 불필요)
+pnpm studio:demo                   # 웹 스튜디오를 데모 모드로 실행 (http://127.0.0.1:3000, API 키 불필요)
 
 # Claude API 인증 정보가 있을 때
 export ANTHROPIC_API_KEY=...
@@ -156,6 +168,25 @@ api    │ 준비 완료 → http://127.0.0.1:32769
 
 studio │ Ctrl+C로 종료합니다
 ```
+
+## 스튜디오 화면
+
+`pnpm studio:demo`로 웹 스튜디오를 열면 프로젝트마다 샌드박스 세션을 시작할 수 있습니다. 왼쪽에는 샌드박스에서 실제로 돌고 있는 서비스가, 오른쪽에는 에이전트와의 대화가 보입니다.
+
+| 영역 | 하는 일 |
+|---|---|
+| 화면 (web) | 샌드박스의 Next.js 앱을 iframe으로 보여 줍니다. 서비스가 재시작돼 포트가 바뀌어도 입력한 경로를 유지한 채 새 주소를 따라갑니다 |
+| API (api) | 실행 중인 서버에서 추출한 OpenAPI로 엔드포인트와 스키마를 보여 주고, 스튜디오 서버를 거쳐 요청을 보냅니다 |
+| 로그 | web, api, db 로그를 서비스별로 걸러 봅니다 |
+| 대화 | 요청, 에이전트 답변, 도구 사용 기록, **검증 게이트** 결과가 순서대로 쌓입니다 |
+
+![배송 메모 필드를 추가한 뒤 미리보기에 새 열이 보이고, 검증 게이트가 계약에 memo 필드가 추가됐다고 알려 주는 화면](docs/images/studio-memo-field.png)
+
+![요청하지 않은 필드 삭제를 검증 게이트가 호환 깨짐으로 막은 화면](docs/images/studio-breaking-blocked.png)
+
+위 화면에서 미리보기의 배송 메모가 모두 `-`로 보이는 데는 이유가 있습니다. 게이트는 호환을 깨는 변경을 **완료로 인정하지 않을 뿐, 이미 적용된 변경을 되돌리지는 않습니다.** 게이트에 실패한 변경을 되돌리는 기능은 Git 연동과 함께 다음 단계로 남겨 두었습니다.
+
+> 데모 모드는 Claude API 대신 미리 적어 둔 스크립트로 실행합니다. 준비된 요청만 순서대로 실행하고, 다른 요청은 거절합니다.
 
 ## `studio.yaml`
 
@@ -205,7 +236,7 @@ services:
 | Ctrl+C 신호가 여러 번 들어올 때 | 정리가 끝까지 완료됨 (tsx와 node에 SIGINT를 동시에 보내 재현) |
 | 종료 후 정리 | 컨테이너 0개, 샌드박스 볼륨 0개. 공유 캐시 볼륨(Gradle, pnpm)은 유지 |
 | 두 번째 기동 | 늦어도 43초 안에 두 서비스 모두 준비 완료 |
-| 단위 테스트 / 타입 체크 | 42개 통과 / 패키지 4개 통과 |
+| 단위 테스트 / 타입 체크 | 56개 통과 / 패키지 5개 통과 |
 
 ### 에이전트 루프 (`pnpm e2e:agent`, 실제 Docker 샌드박스)
 
@@ -217,11 +248,34 @@ services:
 | B. 배송 메모 필드 추가 (Flyway V2 + 엔티티 + 응답 + 화면) | 한 번에 통과. 계약 변경은 `OrderResponse.memo` 추가 하나. 화면에 메모 렌더링 (2턴, 14.0초) |
 | C. 요청하지 않은 필드 삭제 | api는 정상 기동했지만 `OrderResponse.memo` 삭제를 **호환 깨짐으로 차단** (2턴, 10.0초) |
 
+### 웹 스튜디오 (데모 모드, Playwright로 실제 브라우저 조작)
+
+| 확인 항목 | 결과 |
+|---|---|
+| 세션 시작 → 준비 | 두 서비스 모두 10초 안에 준비 (의존성 캐시가 채워진 상태) |
+| A. 주문 목록 | 게이트 실패(api 컴파일 에러 로그 포함) → 수정 → 통과, 미리보기 `/orders`에 주문 표 렌더링 |
+| B. 배송 메모 | 게이트 통과, 계약에 `OrderResponse.memo` 추가, 미리보기에 배송 메모 열 렌더링 |
+| C. 필드 삭제 | 게이트가 호환 깨짐으로 차단, "완료하지 못함" 표시 |
+| API 탐색기 | `GET /api/orders` HTTP 200, 재시작 후 계약을 다시 불러와 스키마에 `memo` 반영 |
+| 재시작 중 미리보기 | 포트가 32796에서 32799로 바뀐 뒤에도 입력한 경로 `/orders` 유지 |
+| 미리보기 HMR | WebSocket 핸드셰이크 `101 Switching Protocols`, 준비 후 브라우저 콘솔 에러 0개 |
+| 프록시 입력 검증 | `//` 경로 400, 허용하지 않은 메서드 400, 없는 서비스 404, 데모 순서 위반 409 |
+| 세션 중지 | 컨테이너 0개, 볼륨 0개. 공유 캐시와 작업 복사본은 유지 |
+
+### 아직 검증하지 못한 것과 알려진 한계
+
+- **실제 모델 실행**: 인증 정보가 없어서 에이전트가 실제 모델로 코드를 작성하는 흐름은 아직 실행하지 못했습니다. 인증 정보가 없을 때 샌드박스를 띄우기 전에 안내 메시지를 내고 멈추는 것까지만 확인했습니다.
+- **게이트 실패 시 되돌리기 없음**: 차단된 변경도 작업 복사본과 샌드박스에는 그대로 남습니다.
+- **세션은 서버 메모리에만 있음**: 스튜디오 서버를 재시작하면 세션 목록이 사라집니다. 띄워 둔 샌드박스는 종료 신호를 받을 때 정리합니다.
+- **원격 미리보기**: 서비스 포트가 루프백에만 열려 있어, 다른 PC의 브라우저에서는 미리보기를 열 수 없습니다.
+
 ## 트러블슈팅
 
 실행하면서 발견한 문제와 해결 과정은 [docs/troubleshooting.md](docs/troubleshooting.md)에 정리했습니다.
 
 - **검증 게이트가 컴파일 에러가 있는 코드를 통과시킨 문제**: colima sshfs에서 디렉터리 목록과 파일 속성이 약 20초 늦게 반영되는 것을 실측으로 확인하고, 재시작 전 동기화 지점으로 해결
+- **"//"로 시작하는 경로가 다른 호스트를 가리키는 문제**: 에이전트 도구, API 탐색기 프록시, `studio.yaml` 경로에서 origin 비교로 차단
+- **미리보기 HMR 연결이 계속 실패한 문제**: Next.js 16의 개발용 요청 출처 제한을 문서로 확인하고 `allowedDevOrigins`로 해결
 - **Ctrl+C 한 번에 신호가 여러 번 들어와 정리가 중간에 끊길 수 있는 문제**: `process.once` 대신 멱등한 정리 함수로 해결
 - **Next dev 첫 요청 컴파일 때문에 준비 확인이 시간 초과되는 현상**: 기동 중 에러와 진짜 실패를 구분하는 판정 규칙으로 해결
 - **캐시를 공유해도 두 번째 기동이 크게 빨라지지 않는 이유**: 샌드박스 전용 `node_modules` 볼륨이 원인이며, lockfile 해시 기반 스냅샷을 다음 과제로 정함
@@ -230,7 +284,8 @@ services:
 
 - [x] **런타임 코어**: 프로젝트 명세, 샌드박스 추상화, 로컬 Docker 제공자, 템플릿 3종, CLI
 - [x] **에이전트 루프**: "필드 하나 추가해줘" → Flyway 마이그레이션, 엔티티, API, 화면을 한 번에 수정 → 재시작 → OpenAPI 대조 검증 (스크립트 모델로 Docker 검증 완료, Claude API 실행 확인은 인증 정보 필요)
-- [ ] **스튜디오 UI**: 채팅, 미리보기 iframe, API 탐색기, 로그 타임라인
+- [x] **웹 스튜디오**: 대화, 미리보기 iframe, API 탐색기, 로그 (데모 모드로 브라우저 검증 완료)
+- [ ] **Git 연동과 되돌리기**: 세션마다 브랜치를 만들고, 게이트를 통과한 변경만 커밋하고, 실패한 변경은 되돌리기
 - [ ] **데이터**: 세션별 DB 브랜치, 운영 DB 접근 차단, 시크릿 주입
 - [ ] **정책 프록시**: 사내 API 등록, 마스킹, 감사 로그, 서비스 단위 권한
 - [ ] **격리 강화**: Kubernetes agent-sandbox + gVisor/Kata 제공자
@@ -242,6 +297,7 @@ services:
 |---|---|
 | 스튜디오 코어 | TypeScript, Node.js 22, pnpm workspace, zod 4, yaml, Vitest 5, tsx |
 | AI | Claude Opus 5 (`claude-opus-5`), Anthropic TypeScript SDK 0.124 — adaptive thinking, 스트리밍, 프롬프트 캐시, strict 도구, server-side fallback |
+| 웹 스튜디오 | Next.js 16 App Router, React 19, Tailwind CSS 4, Server-Sent Events, IBM Plex Sans KR |
 | 샌드박스 | Docker Compose v2 (override 파일, external 볼륨, 루프백 포트 공개) |
 | 템플릿 | Next.js 16.3, React 19, Tailwind 4 / Spring Boot 4.1, Java 25, Gradle 9, Flyway, springdoc-openapi 3.1 / FastAPI, Python 3.14, uv |
 | 데이터 | PostgreSQL 17 |

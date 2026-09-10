@@ -48,6 +48,17 @@ services:
     expect(() => parseSpec(source)).toThrow(SpecError);
   });
 
+  it('다른 호스트를 가리킬 수 있는 "//" 경로를 거부한다', () => {
+    const source = `
+version: 1
+name: x
+services:
+  api: { source: managed, template: fastapi, path: api, port: 8000, preview: openapi, contract: { extract: //evil.example/openapi.json } }
+`;
+    const error = captureError(() => parseSpec(source));
+    expect(error.issues.some((issue) => issue.startsWith('services.api.contract.extract'))).toBe(true);
+  });
+
   it('문제가 있는 필드 경로를 알려준다', () => {
     const source = `
 version: 1
