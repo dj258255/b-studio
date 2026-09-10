@@ -8,6 +8,7 @@
   },
   "scripts": {
     "studio": "tsx apps/cli/src/main.ts",
+    "e2e:agent": "tsx packages/agent/e2e/scripted-orders.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"
   },

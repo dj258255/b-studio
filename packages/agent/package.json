@@ -1,13 +1,16 @@
 {
-  "name": "@b-studio/cli",
+  "name": "@b-studio/agent",
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "typecheck": "tsc -p ."
   },
   "dependencies": {
-    "@b-studio/agent": "workspace:*",
+    "@anthropic-ai/sdk": "^0.124.0",
     "@b-studio/sandbox": "workspace:*",
     "@b-studio/spec": "workspace:*"
   }
