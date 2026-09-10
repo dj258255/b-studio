@@ -1,0 +1,17 @@
+{
+  "name": "@b-studio/sandbox",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@b-studio/spec": "workspace:*",
+    "yaml": "^2.9.0"
+  }
+}
