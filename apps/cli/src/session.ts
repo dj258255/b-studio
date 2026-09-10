@@ -1,5 +1,5 @@
 import { styleText } from 'node:util';
-import { LocalDockerProvider, type Sandbox, type ServiceEndpoint } from '@b-studio/sandbox';
+import { describeSnapshotEvent, LocalDockerProvider, type Sandbox, type ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { createLabeler, describe, once, pipeLogs, print, printEndpoints, reportStatus, type Label } from './ui';
 
@@ -55,7 +55,11 @@ export async function runSandboxSession(
   print(label('studio'), `${project.spec.name} 샌드박스를 시작합니다 (${sandbox.id})`);
   let code: number;
   try {
-    const endpoints = await sandbox.start({ signal: stop.signal, onStatus: reportStatus(label, () => void startLogs()) });
+    const endpoints = await sandbox.start({
+      signal: stop.signal,
+      onStatus: reportStatus(label, () => void startLogs()),
+      onSnapshot: (event) => print(label(event.service), styleText('dim', describeSnapshotEvent(event))),
+    });
     printEndpoints(project, endpoints);
     code = await body({ sandbox, endpoints, signal: stop.signal, label });
   } catch (error) {

@@ -12,6 +12,7 @@
     "studio:demo": "B_STUDIO_MODE=demo pnpm --filter @b-studio/studio dev",
     "studio:local": "B_STUDIO_MODE=claude-code pnpm --filter @b-studio/studio dev",
     "e2e:agent": "tsx packages/agent/e2e/scripted-orders.ts",
+    "bench:boot": "tsx packages/sandbox/bench/boot.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"
   },

@@ -23,6 +23,15 @@ import type {
   SyncResult,
 } from '../types';
 import { buildOverride, parseContainerState, parseHostPort, parseLogLine, parseSyncOutput } from './format';
+import {
+  composeVolumeName,
+  SNAPSHOT_LABEL,
+  SNAPSHOT_MARKER,
+  snapshotName,
+  SNAPSHOTS_TO_KEEP,
+  snapshotSlot,
+  snapshotsToPrune,
+} from './snapshots';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,6 +54,23 @@ const SYNC_SCRIPT = [
   '  fi',
   'done',
 ].join('\n');
+
+/** 끝까지 복사된 스냅샷만 쓴다. 표시 파일이 없으면 3으로 끝내 깨진 스냅샷을 지우게 한다 */
+const SEED_SCRIPT = `[ -f /from/${SNAPSHOT_MARKER} ] || exit 3\ncp -a /from/. /to/ && rm -f /to/${SNAPSHOT_MARKER}`;
+/** 표시 파일은 복사가 끝난 뒤에만 남긴다 */
+const CAPTURE_SCRIPT = `cp -a /from/. /to/ && touch /to/${SNAPSHOT_MARKER}`;
+
+/** 같은 스튜디오 서버에서 두 세션이 같은 스냅샷을 동시에 만들지 않게 한다 */
+const capturing = new Set<string>();
+
+interface SnapshotPlan {
+  service: string;
+  volume: string;
+  snapshot: string;
+  slot: string;
+  /** compose가 이 샌드박스에 만들 볼륨 이름 */
+  sandboxVolume: string;
+}
 
 export interface LocalDockerProviderOptions {
   /** docker 실행 파일 경로 (기본: PATH의 docker) */
@@ -101,8 +127,20 @@ class LocalDockerSandbox implements Sandbox {
   async start(options: StartOptions = {}): Promise<ServiceEndpoint[]> {
     for (const [name] of this.project.managed) options.onStatus?.({ service: name, phase: 'starting' });
     await this.#ensureSharedVolumes();
-    await this.#composeOrThrow(['up', '--detach', '--build', '--remove-orphans'], options.signal);
-    return Promise.all(this.project.managed.map(([name]) => this.#awaitReady(name, options)));
+
+    // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다
+    const plans = await this.#planSnapshots();
+    const [seeded] = await Promise.all([
+      Promise.all(plans.map((plan) => this.#seedSnapshot(plan, options))),
+      this.#composeOrThrow(['build'], options.signal),
+    ]);
+
+    await this.#composeOrThrow(['up', '--detach', '--remove-orphans'], options.signal);
+    const endpoints = await Promise.all(this.project.managed.map(([name]) => this.#awaitReady(name, options)));
+
+    // 설치 단계만 끝나고 에이전트가 아직 도구를 쓰지 않은 시점의 볼륨을 다음 기동용으로 남긴다
+    await Promise.all(plans.filter((_, index) => !seeded[index]).map((plan) => this.#captureSnapshot(plan, options)));
+    return endpoints;
   }
 
   async restart(name: string, options: StartOptions = {}): Promise<ServiceEndpoint> {
@@ -208,6 +246,112 @@ class LocalDockerSandbox implements Sandbox {
 
     onStatus?.({ service: name, phase: 'ready', endpoint });
     return endpoint;
+  }
+
+  async #planSnapshots(): Promise<SnapshotPlan[]> {
+    const plans: SnapshotPlan[] = [];
+    for (const [service, spec] of this.project.managed) {
+      for (const { volume, key } of spec.snapshots ?? []) {
+        const files = await Promise.all(
+          key.map(async (file) => ({
+            path: file,
+            content: await readFile(path.join(this.project.root, spec.path, file)).catch(() => undefined),
+          })),
+        );
+        plans.push({
+          service,
+          volume,
+          snapshot: snapshotName({ project: this.project.spec.name, service, volume, files }),
+          slot: snapshotSlot(this.project.spec.name, service, volume),
+          sandboxVolume: composeVolumeName(this.id, volume),
+        });
+      }
+    }
+    return plans;
+  }
+
+  /** 스냅샷이 있으면 이 샌드박스의 볼륨을 미리 만들어 채운다. 실패하면 빈 볼륨으로 평소처럼 설치한다 */
+  async #seedSnapshot(plan: SnapshotPlan, { signal, onSnapshot }: StartOptions): Promise<boolean> {
+    const event = { service: plan.service, volume: plan.volume, snapshot: plan.snapshot };
+    if ((await this.#docker(['volume', 'inspect', plan.snapshot], signal)).exitCode !== 0) {
+      onSnapshot?.({ ...event, action: 'missing' });
+      return false;
+    }
+
+    const started = Date.now();
+    // compose가 자기 볼륨으로 알아보도록 compose 라벨을 붙인다. 그래야 경고 없이 쓰고 destroy() 때 함께 지운다
+    const created = await this.#docker(
+      [
+        'volume', 'create',
+        '--label', `com.docker.compose.project=${this.id}`,
+        '--label', `com.docker.compose.volume=${plan.volume}`,
+        plan.sandboxVolume,
+      ],
+      signal,
+    );
+    const copied =
+      created.exitCode === 0
+        ? await this.#docker(
+            ['run', '--rm', '--volume', `${plan.snapshot}:/from:ro`, '--volume', `${plan.sandboxVolume}:/to`, SYNC_HELPER_IMAGE, 'sh', '-c', SEED_SCRIPT],
+            signal,
+          )
+        : created;
+
+    if (copied.exitCode === 0) {
+      onSnapshot?.({ ...event, action: 'seeded', elapsedMs: Date.now() - started });
+      return true;
+    }
+
+    await this.#docker(['volume', 'rm', '--force', plan.sandboxVolume]);
+    // 끝까지 복사되지 않은 스냅샷은 지워서 이번 기동이 새로 만들게 한다 (다른 샌드박스가 쓰는 중이면 지워지지 않는다)
+    if (copied.exitCode === 3) await this.#docker(['volume', 'rm', plan.snapshot]);
+    onSnapshot?.({
+      ...event,
+      action: 'failed',
+      stage: 'seed',
+      reason: copied.exitCode === 3 ? '스냅샷이 끝까지 저장되지 않았습니다' : copied.stderr.trim() || `exit ${copied.exitCode}`,
+    });
+    return false;
+  }
+
+  async #captureSnapshot(plan: SnapshotPlan, { onSnapshot }: StartOptions): Promise<void> {
+    if (capturing.has(plan.snapshot)) return;
+    capturing.add(plan.snapshot);
+    const event = { service: plan.service, volume: plan.volume, snapshot: plan.snapshot };
+    const started = Date.now();
+    try {
+      // 그사이 다른 세션이 만들었으면 그것을 쓴다
+      if ((await this.#docker(['volume', 'inspect', plan.snapshot])).exitCode === 0) return;
+
+      const created = await this.#docker(['volume', 'create', '--label', `${SNAPSHOT_LABEL}=true`, '--label', `${SNAPSHOT_LABEL}.slot=${plan.slot}`, plan.snapshot]);
+      if (created.exitCode !== 0) throw new SandboxError('스냅샷 볼륨을 만들지 못했습니다', created.stderr);
+
+      const copied = await this.#docker([
+        'run', '--rm', '--volume', `${plan.sandboxVolume}:/from:ro`, '--volume', `${plan.snapshot}:/to`, SYNC_HELPER_IMAGE, 'sh', '-c', CAPTURE_SCRIPT,
+      ]);
+      if (copied.exitCode !== 0) {
+        await this.#docker(['volume', 'rm', '--force', plan.snapshot]);
+        throw new SandboxError('스냅샷을 복사하지 못했습니다', copied.stderr);
+      }
+
+      onSnapshot?.({ ...event, action: 'captured', elapsedMs: Date.now() - started });
+      await this.#pruneSnapshots(plan.slot);
+    } catch (error) {
+      const reason = error instanceof SandboxError && error.detail ? `${error.message}: ${error.detail.trim()}` : String(error);
+      onSnapshot?.({ ...event, action: 'failed', stage: 'capture', reason });
+    } finally {
+      capturing.delete(plan.snapshot);
+    }
+  }
+
+  /** lockfile이 바뀔 때마다 스냅샷이 쌓이므로 같은 자리에서는 최근 것만 남긴다 */
+  async #pruneSnapshots(slot: string): Promise<void> {
+    const listed = await this.#docker(['volume', 'ls', '--quiet', '--filter', `label=${SNAPSHOT_LABEL}.slot=${slot}`]);
+    const names = listed.stdout.split('\n').filter(Boolean);
+    if (names.length <= SNAPSHOTS_TO_KEEP) return;
+    const inspected = await this.#docker(['volume', 'inspect', '--format', '{{.Name}} {{.CreatedAt}}', ...names]);
+    // 다른 샌드박스가 복사 중인 스냅샷은 지워지지 않고 남는다
+    for (const name of snapshotsToPrune(inspected.stdout)) await this.#docker(['volume', 'rm', name]);
   }
 
   /** compose는 external 볼륨을 만들어 주지 않으므로 먼저 만든다. 이미 있으면 그대로 둔다 */

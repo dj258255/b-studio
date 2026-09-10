@@ -29,9 +29,17 @@ export type ServiceStatusEvent =
   | { service: string; phase: 'ready'; endpoint: ServiceEndpoint }
   | { service: string; phase: 'failed'; reason: string };
 
+/** 기동 가속용 스냅샷을 쓰거나 만든 결과. 실패해도 기동은 스냅샷 없이 계속된다 */
+export type SnapshotEvent =
+  | { service: string; volume: string; snapshot: string; action: 'seeded'; elapsedMs: number }
+  | { service: string; volume: string; snapshot: string; action: 'missing' }
+  | { service: string; volume: string; snapshot: string; action: 'captured'; elapsedMs: number }
+  | { service: string; volume: string; snapshot: string; action: 'failed'; stage: 'seed' | 'capture'; reason: string };
+
 export interface StartOptions {
   signal?: AbortSignal;
   onStatus?: (event: ServiceStatusEvent) => void;
+  onSnapshot?: (event: SnapshotEvent) => void;
 }
 
 export interface LogLine {
