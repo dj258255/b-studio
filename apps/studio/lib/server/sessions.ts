@@ -4,7 +4,9 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import {
   AnthropicModelClient,
+  CheckpointStore,
   ORDERS_DEMO_SCENARIOS,
+  restartServicesFor,
   runAgent,
   ScriptedModelClient,
   type DemoScenario,
@@ -32,6 +34,7 @@ interface Session {
   stop: AbortController;
   logFollower?: AbortController;
   demoIndex: number;
+  checkpoints: CheckpointStore;
 }
 
 const HISTORY_LIMIT = 5_000;
@@ -59,6 +62,9 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
   await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
 
   const project = await loadProject(workDir);
+  // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 복사본의 시작 상태를 체크포인트로 둔다
+  const checkpoints = new CheckpointStore(workDir);
+  const firstCheckpoint = await checkpoints.init('세션 시작');
   const sandbox = await new LocalDockerProvider().create(project);
   const mode = process.env.B_STUDIO_MODE === 'demo' ? 'demo' : 'claude';
 
@@ -79,9 +85,11 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
         hasContract: Boolean(service.contract),
       })),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
+      checkpoints: [firstCheckpoint],
     },
     project,
     sandbox,
+    checkpoints,
     history: [],
     logs: [],
     listeners: new Set(),
@@ -200,8 +208,15 @@ async function execute(session: Session, runId: string, request: string, plan: R
       onEvent: (event) => emit(session, { type: 'agent', runId, event }),
       onServiceStatus: (event) => onServiceStatus(session, event),
     });
+
+    // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
+    if (result.status === 'done') await saveCheckpoint(session, runId, request);
+    else await revertRun(session, runId);
     finished = { type: 'run_finished', runId, status: result.status, summary: result.summary, turns: result.turns };
   } catch (error) {
+    if (!session.stop.signal.aborted) {
+      await revertRun(session, runId).catch((revertError: unknown) => console.error('[b-studio] 되돌리기 실패', revertError));
+    }
     finished = { type: 'run_finished', runId, status: 'error', summary: describe(error) };
   } finally {
     if (session.snapshot.mode === 'demo') {
@@ -213,6 +228,79 @@ async function execute(session: Session, runId: string, request: string, plan: R
       emit(session, { ...finished, nextDemoRequest: session.snapshot.nextDemoRequest });
     }
   }
+}
+
+async function saveCheckpoint(session: Session, runId: string, request: string): Promise<void> {
+  const checkpoint = await session.checkpoints.commit(`요청: ${request}`);
+  if (!checkpoint) return;
+  session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  emit(session, { type: 'checkpoint', runId, checkpoint });
+}
+
+async function revertRun(session: Session, runId: string): Promise<void> {
+  const { files, patch } = await session.checkpoints.discard();
+  if (files.length === 0) return;
+  const report = await restartServicesFor(session.sandbox, session.project, files, {
+    signal: session.stop.signal,
+    onStatus: (event) => onServiceStatus(session, event),
+  });
+  emit(session, { type: 'reverted', runId, files, patch, restarted: report.restarted });
+}
+
+/** 이 세션의 이전 체크포인트로 되돌린다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다 */
+export function restoreCheckpoint(id: string, sha: string): void {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되돌릴 수 있습니다');
+  if (session.snapshot.running) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+  const target = session.snapshot.checkpoints.find((checkpoint) => checkpoint.sha === sha);
+  if (!target) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
+  if (target.sha === session.snapshot.checkpoints[0]?.sha) throw new StudioError(409, '이미 최신 체크포인트입니다');
+
+  session.snapshot.running = true;
+  emit(session, { type: 'restore_started', checkpoint: target });
+
+  void (async () => {
+    let event: StudioEvent;
+    try {
+      const { files } = await session.checkpoints.restore(sha);
+      const report = await restartServicesFor(session.sandbox, session.project, files, {
+        signal: session.stop.signal,
+        onStatus: (status) => onServiceStatus(session, status),
+      });
+      session.snapshot.checkpoints = await session.checkpoints.list();
+      // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
+      session.conversation.push({
+        role: 'user',
+        content: `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`,
+      });
+      if (session.snapshot.mode === 'demo') {
+        // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 체크포인트 수에 맞춰 다음 요청을 다시 정한다
+        session.demoIndex = session.snapshot.checkpoints.length - 1;
+        session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
+      }
+      event = {
+        type: 'restored',
+        checkpoint: target,
+        files,
+        restarted: report.restarted,
+        checkpoints: session.snapshot.checkpoints,
+        nextDemoRequest: session.snapshot.nextDemoRequest,
+      };
+    } catch (error) {
+      event = { type: 'restore_failed', checkpoint: target, error: describe(error) };
+    }
+    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
+    session.snapshot.running = false;
+    if (!session.stop.signal.aborted) emit(session, event);
+  })();
+}
+
+export async function checkpointPatch(id: string, sha: string): Promise<string> {
+  const session = requireSession(id);
+  if (!session.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === sha)) {
+    throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
+  }
+  return session.checkpoints.patch(sha);
 }
 
 function onServiceStatus(session: Session, event: ServiceStatusEvent): void {

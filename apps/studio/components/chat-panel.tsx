@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ServiceCheck } from "@b-studio/agent";
 import type { ChatItem, SessionView } from "@/lib/session-view";
+import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 
 export function ChatPanel({ view }: { view: SessionView }) {
@@ -141,6 +143,44 @@ function ChatEntry({ item }: { item: ChatItem }) {
     case "gate":
       return <GateTrack files={item.files} report={item.report} />;
 
+    case "checkpoint":
+      return (
+        <p className="text-sm text-muted">
+          체크포인트 <span className="font-mono text-ink">{item.checkpoint.shortSha}</span>에 저장했습니다. 바뀐 파일 {item.checkpoint.files.length}개
+        </p>
+      );
+
+    case "reverted":
+      return (
+        <div className="rounded-md border border-wait/40 bg-wait/10 px-3 py-2 text-sm">
+          <p className="font-medium text-wait">검증을 통과하지 못한 변경 {item.files.length}개를 되돌렸습니다</p>
+          <p className="mt-0.5 text-muted">{restartSummary(item.restarted)}</p>
+          <details className="mt-1.5">
+            <summary className="cursor-pointer text-muted hover:text-ink">되돌린 변경 보기</summary>
+            <div className="mt-1.5 max-h-72 overflow-auto">
+              <DiffView patch={item.patch} />
+            </div>
+          </details>
+        </div>
+      );
+
+    case "restore":
+      if (!item.result) {
+        return (
+          <p className="text-sm text-wait motion-safe:animate-pulse">
+            체크포인트 <span className="font-mono">{item.checkpoint.shortSha}</span>로 되돌리는 중
+          </p>
+        );
+      }
+      return item.result.ok ? (
+        <p className="text-sm text-pass">
+          체크포인트 <span className="font-mono">{item.checkpoint.shortSha}</span>로 되돌렸습니다. 파일 {item.result.files.length}개 복원,{" "}
+          {restartSummary(item.result.restarted)}
+        </p>
+      ) : (
+        <p className="text-sm text-fail">되돌리지 못했습니다: {item.result.error}</p>
+      );
+
     case "outcome":
       return (
         <p className={`text-sm ${item.status === "done" ? "text-pass" : "text-fail"}`}>
@@ -148,6 +188,11 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </p>
       );
   }
+}
+
+function restartSummary(restarted: ServiceCheck[]): string {
+  if (restarted.length === 0) return "재시작한 서비스 없음";
+  return restarted.map((check) => `${check.service} ${check.ready ? "준비됨" : "재시작 실패"}`).join(", ");
 }
 
 function hintFor({ snapshot, chat }: SessionView): string {
