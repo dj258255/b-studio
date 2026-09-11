@@ -12,6 +12,8 @@ export interface ToolCallView {
   summary: string;
   ok?: boolean;
   output?: string;
+  /** 파일을 쓰거나 고친 도구의 대상 경로. 코드 화면이 에이전트가 방금 고친 파일을 따라갈 때 쓴다 */
+  path?: string;
   /** 결과가 오기 전에 요청이 끝났다 */
   interrupted?: boolean;
 }
@@ -274,7 +276,7 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
       return [...chat, { kind: 'reply', runId, text: event.text }];
 
     case 'tool_call': {
-      const call: ToolCallView = { name: event.name, summary: describeToolCall(event.name, event.input) };
+      const call: ToolCallView = { name: event.name, summary: describeToolCall(event.name, event.input), path: writtenPath(event.name, event.input) };
       const last = chat.at(-1);
       // 연속된 도구 호출은 한 묶음으로 보여준다
       if (last?.kind === 'tools' && last.runId === runId) {
@@ -305,6 +307,28 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
     default:
       return chat;
   }
+}
+
+function writtenPath(name: string, input: unknown): string | undefined {
+  if (name !== 'write_file' && name !== 'edit_file') return undefined;
+  const value = (typeof input === 'object' && input !== null ? (input as Record<string, unknown>).path : undefined);
+  return typeof value === 'string' ? value.replace(/^\.\//, '') : undefined;
+}
+
+/** 에이전트가 성공적으로 쓰거나 고친 파일 중 가장 최근 것과, 지금까지 성공한 쓰기 수. 코드 화면을 다시 불러오는 기준이다 */
+export function latestWrite(chat: readonly ChatItem[]): { path?: string; count: number } {
+  let count = 0;
+  let latest: string | undefined;
+  for (const item of chat) {
+    if (item.kind !== 'tools') continue;
+    for (const call of item.calls) {
+      if (call.path && call.ok === true) {
+        count += 1;
+        latest = call.path;
+      }
+    }
+  }
+  return { path: latest, count };
 }
 
 export function describeToolCall(name: string, input: unknown): string {

@@ -77,6 +77,26 @@ export interface RepositoryView {
   canCreatePullRequest: boolean;
 }
 
+/** 코드 화면의 파일 목록. 생성물과 .env는 에이전트 작업 공간과 같은 규칙으로 뺀다 */
+export interface CodeTree {
+  files: string[];
+  /** 마지막 체크포인트 이후 바뀐 파일. 삭제한 파일은 files에 없다 */
+  changes: Array<{ file: string; change: 'added' | 'modified' | 'deleted' }>;
+  /** 파일이 많아 목록을 자른 경우 */
+  truncated: boolean;
+}
+
+/** 코드 화면에서 연 파일. 내용과 diff의 시크릿 값은 가려서 보낸다 */
+export interface CodeFile {
+  path: string;
+  /** 삭제한 파일이거나 바이너리면 없다 */
+  content?: string;
+  binary?: boolean;
+  change?: 'added' | 'modified' | 'deleted';
+  /** 마지막 체크포인트 대비 변경 내용 (수정·삭제한 파일) */
+  patch?: string;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;

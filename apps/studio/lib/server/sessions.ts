@@ -25,6 +25,7 @@ import {
   runClaudeCodeAgent,
   ScriptedModelClient,
   verifyChanges,
+  Workspace,
   type AgentEvent,
   type AgentResult,
   type Checkpoint,
@@ -40,6 +41,8 @@ import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, t
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import type {
+  CodeFile,
+  CodeTree,
   ExportResult,
   ProxyResponse,
   RepositoryView,
@@ -937,6 +940,44 @@ function gitAuthor(): GitAuthor | undefined {
   const name = process.env.B_STUDIO_GIT_AUTHOR_NAME?.trim();
   const email = process.env.B_STUDIO_GIT_AUTHOR_EMAIL?.trim();
   return name && email ? { name, email } : undefined;
+}
+
+const CODE_TREE_DEPTH = 16;
+const CODE_TREE_LIMIT = 500;
+
+/** 코드 화면의 파일 목록과 마지막 체크포인트 이후 바뀐 파일. 에이전트 작업 공간과 같은 규칙으로 생성물과 .env를 뺀다 */
+export async function listCodeFiles(id: string): Promise<CodeTree> {
+  const session = requireSession(id);
+  const entries = await new Workspace(session.project.root).list('.', CODE_TREE_DEPTH);
+  return {
+    files: entries.filter((entry) => !entry.endsWith('/')),
+    changes: (await session.checkpoints.pendingChanges()).filter((change) => !isDeniedPath(change.file)),
+    truncated: entries.length >= CODE_TREE_LIMIT,
+  };
+}
+
+/** 코드 화면에서 연 파일. 에이전트 도구 결과처럼 시크릿 값을 가려서 돌려준다 */
+export async function readCodeFile(id: string, file: string): Promise<CodeFile> {
+  const session = requireSession(id);
+  const change = (await session.checkpoints.pendingChanges()).find((candidate) => candidate.file === file)?.change;
+  if (change === 'deleted') {
+    if (isDeniedPath(file)) throw new StudioError(400, `${file}: 생성물이나 비밀 파일 경로는 볼 수 없습니다`);
+    return { path: file, change, patch: session.sandbox.redact(await session.checkpoints.pendingPatch(file)) };
+  }
+  const content = await new Workspace(session.project.root).read(file);
+  const binary = content.includes('\u0000');
+  return {
+    path: file,
+    content: binary ? undefined : session.sandbox.redact(content),
+    binary: binary || undefined,
+    change,
+    patch: change === 'modified' ? session.sandbox.redact(await session.checkpoints.pendingPatch(file)) : undefined,
+  };
+}
+
+/** 삭제된 파일은 작업 공간 검사를 거치지 않으므로 같은 규칙을 따로 적용한다 */
+function isDeniedPath(file: string): boolean {
+  return file.split('/').some((segment) => ['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__'].includes(segment) || /^\.env(\..*)?$/.test(segment));
 }
 
 export async function checkpointPatch(id: string, sha: string): Promise<string> {

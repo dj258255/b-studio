@@ -96,6 +96,27 @@ describe('CheckpointStore', () => {
     expect(await store.pendingFiles()).toEqual([]);
   });
 
+  it('마지막 체크포인트 이후 추가·수정·삭제한 파일과 파일 하나의 변경 내용을 돌려준다', async () => {
+    const store = new CheckpointStore(root);
+    await write('api/src/Gone.java', 'class Gone {}\n');
+    await store.init();
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await write('api/src/Memo.java', 'class Memo {}\n');
+    await rm(path.join(root, 'api/src/Gone.java'));
+
+    expect(await store.pendingChanges()).toEqual([
+      { file: 'api/src/Gone.java', change: 'deleted' },
+      { file: 'api/src/Memo.java', change: 'added' },
+      { file: 'api/src/Order.java', change: 'modified' },
+    ]);
+    const patch = await store.pendingPatch('api/src/Order.java');
+    expect(patch).toContain('-class Order {}');
+    expect(patch).toContain('+class Order { String memo; }');
+    // 아직 기록에 없는 새 파일은 diff가 없다
+    expect(await store.pendingPatch('api/src/Memo.java')).toBe('');
+  });
+
   it('이전 체크포인트로 복원하면 그 사이에 바뀐 파일 목록을 돌려준다', async () => {
     const store = new CheckpointStore(root);
     const first = await store.init();
@@ -400,6 +421,11 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await writeFile(path.join(projectRoot, 'src/Order.java'), 'class Order { String memo; }\n');
     await writeFile(path.join(projectRoot, 'src/Memo.java'), 'class Memo {}\n');
     expect(await store.pendingFiles()).toEqual(['src/Memo.java', 'src/Order.java']);
+    expect(await store.pendingChanges()).toEqual([
+      { file: 'src/Memo.java', change: 'added' },
+      { file: 'src/Order.java', change: 'modified' },
+    ]);
+    expect(await store.pendingPatch('src/Order.java')).toContain('+++ b/src/Order.java');
     const checkpoint = (await store.commit('요청: 메모'))!;
     expect(checkpoint.files).toEqual(['src/Memo.java', 'src/Order.java']);
     expect(await store.patch(checkpoint.sha)).toContain('+++ b/src/Order.java');
