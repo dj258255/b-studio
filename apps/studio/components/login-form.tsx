@@ -5,6 +5,7 @@ import { useState } from "react";
 
 export function LoginForm({ next }: { next: string }) {
   const router = useRouter();
+  const [name, setName] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -15,7 +16,7 @@ export function LoginForm({ next }: { next: string }) {
     const response = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ name: name.trim(), token }),
     });
     if (response.ok) {
       // 새 쿠키로 서버 컴포넌트를 다시 그리게 한다
@@ -35,6 +36,18 @@ export function LoginForm({ next }: { next: string }) {
         void submit();
       }}
     >
+      <label htmlFor="name" className="block text-sm font-medium">
+        이름
+      </label>
+      <input
+        id="name"
+        autoComplete="username"
+        autoCapitalize="none"
+        spellCheck={false}
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        className="w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm"
+      />
       <label htmlFor="token" className="block text-sm font-medium">
         접근 토큰
       </label>
@@ -48,7 +61,7 @@ export function LoginForm({ next }: { next: string }) {
       />
       <button
         type="submit"
-        disabled={busy || !token}
+        disabled={busy || !name.trim() || !token}
         className="w-full rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
       >
         {busy ? "확인하는 중" : "로그인"}

@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import type { Effort } from '@b-studio/agent';
 import { loadProject, SpecError } from '@b-studio/spec';
 import { agent, type Backend } from './commands/agent';
+import { authToken } from './commands/auth';
 import { deploy } from './commands/deploy';
 import { up } from './commands/up';
 
@@ -12,6 +13,10 @@ const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
+  studio auth token <이름>
+
+auth token:
+  웹 스튜디오 token 모드에 쓸 접근 토큰과, 서버의 B_STUDIO_AUTH_TOKENS에 넣을 해시 값을 만든다
 
 deploy:
   운영 Dockerfile로 이미지를 만들어 로컬 Docker에 배포하고, 준비되면 고정 주소를 새 릴리스로 무중단 전환한다
@@ -59,6 +64,10 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
     return deploy(await loadProject(dir), { status: values.status, rollback: values.rollback, remove: values.remove, volumes: values.volumes });
+  }
+
+  if (command === 'auth' && dir === 'token' && request) {
+    return authToken(request);
   }
 
   if (command === 'agent' && dir && request) {
