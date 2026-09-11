@@ -125,6 +125,8 @@ describe('runClaudeCodeAgent', () => {
     expect(sandbox.restarts).toEqual(['api', 'api']);
     // modelUsage는 누적값이라 마지막 결과로 바꾼다
     expect(result.usage.inputTokens).toBe(40);
+    // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
+    expect(events.flatMap((e) => (e.type === 'tokens' ? [e.usage.inputTokens] : []))).toEqual([20, 40]);
 
     expect(state.prompts).toHaveLength(2);
     expect(state.prompts[1]).toContain('[b-studio 검증 게이트]');
@@ -160,6 +162,33 @@ describe('runClaudeCodeAgent', () => {
 
     expect(result).toMatchObject({ status: 'failed', summary: '모델 호출이 실패했습니다: rate limit reached' });
     expect(sandbox.restarts).toEqual([]);
+  });
+
+  it('취소하면 Claude Code에 중단을 넘기고 결과 대신 취소 이유를 던진다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [[{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }, { tool: 'read_file', input: { path: 'api/src/New.java' } }, { text: '추가했습니다.' }]],
+    });
+    const controller = new AbortController();
+    const events: AgentEvent[] = [];
+
+    await expect(
+      runClaudeCodeAgent({
+        request: '추가해줘',
+        project,
+        sandbox: fakeSandbox(project, [true]),
+        sdk,
+        signal: controller.signal,
+        fetcher: async () => contract,
+        onEvent: (event) => {
+          events.push(event);
+          if (event.type === 'tool_result') controller.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+        },
+      }),
+    ).rejects.toThrow('요청을 취소했습니다');
+
+    expect(state.options?.abortController?.signal.aborted).toBe(true);
+    // 취소 뒤에 온 도구 호출은 실행하지 않는다
+    expect(events.filter((e) => e.type === 'tool_call').map((e) => e.type === 'tool_call' && e.name)).toEqual(['write_file']);
   });
 
   it('Claude Code가 예외를 던지면 프로세스를 닫고 그대로 던진다', async () => {

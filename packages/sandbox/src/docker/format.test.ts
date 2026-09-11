@@ -177,7 +177,7 @@ describe('SYNC_SCRIPT', () => {
   /** 파일 공유 캐시가 옛 목록을 돌려주는 상황을 흉내 내는 ls와, 내용 길이로 해시를 대신하는 sha256sum */
   async function runSync(
     files: string[] | ((project: string) => string[]),
-    { stale, root: syncRoot }: { stale?: { dir: string; name: string }; root?: string } = {},
+    { stale, ghost, root: syncRoot }: { stale?: { dir: string; name: string }; ghost?: { dir: string; name: string }; root?: string } = {},
   ): Promise<Map<string, string>> {
     const root = await mkdtemp(path.join(tmpdir(), 'sync-script-'));
     const bin = path.join(root, 'bin');
@@ -189,7 +189,7 @@ describe('SYNC_SCRIPT', () => {
     const realLs = execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim();
     await writeFile(
       path.join(bin, 'ls'),
-      `#!/bin/sh\nfor last in "$@"; do :; done\nif [ -n "$HIDE_IN" ] && [ "$last" = "$HIDE_IN" ]; then ${realLs} "$@" | grep -vx "$HIDE_NAME"; else ${realLs} "$@"; fi\n`,
+      `#!/bin/sh\nfor last in "$@"; do :; done\nif [ -n "$HIDE_IN" ] && [ "$last" = "$HIDE_IN" ]; then ${realLs} "$@" | grep -vx "$HIDE_NAME"; elif [ -n "$GHOST_IN" ] && [ "$last" = "$GHOST_IN" ]; then ${realLs} "$@"; echo "$GHOST_NAME"; else ${realLs} "$@"; fi\n`,
     );
     await writeFile(path.join(bin, 'sha256sum'), '#!/bin/sh\necho "len$(wc -c < "$1" | tr -d " ")  $1"\n');
     await chmod(path.join(bin, 'ls'), 0o755);
@@ -197,7 +197,7 @@ describe('SYNC_SCRIPT', () => {
     const args = typeof files === 'function' ? files(project) : files;
     const stdout = execFileSync('sh', ['-c', SYNC_SCRIPT, 'sh', ...args], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYNC_ROOT: syncRoot ?? project, HIDE_IN: stale?.dir ?? '', HIDE_NAME: stale?.name ?? '' },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYNC_ROOT: syncRoot ?? project, HIDE_IN: stale?.dir ?? '', HIDE_NAME: stale?.name ?? '', GHOST_IN: ghost?.dir ?? '', GHOST_NAME: ghost?.name ?? '' },
     });
     return parseSyncOutput(stdout);
   }
@@ -218,6 +218,16 @@ describe('SYNC_SCRIPT', () => {
       ['api/src/orders/Order.java', 'MISSING'],
       ['api/src/Old.java', 'len4'],
     ]);
+  });
+
+  it('지운 폴더가 상위 폴더 목록에 아직 남아 있으면 그 폴더는 MISSING으로 보지 않는다', async () => {
+    // 폴더 안의 파일은 바로 MISSING이 되지만, 빌드 도구는 api/src 목록에 남은 removed를 읽다가 실패한다
+    const stale = await runSync(['api/src/removed/Gone.java', 'api/src/removed'], { ghost: { dir: 'api/src', name: 'removed' } });
+    expect(stale.get('api/src/removed/Gone.java')).toBe('MISSING');
+    expect(stale.get('api/src/removed')).not.toBe('MISSING');
+
+    const settled = await runSync(['api/src/removed/Gone.java', 'api/src/removed']);
+    expect(settled.get('api/src/removed')).toBe('MISSING');
   });
 
   it('Kubernetes 파드처럼 절대 경로를 넘기면 루트까지 올라가며 확인한다', async () => {

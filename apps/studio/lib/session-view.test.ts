@@ -1,6 +1,6 @@
 import type { VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
-import { createView, latestWrite, LOG_LIMIT, reduceSession, type SessionView } from './session-view';
+import { activeRun, createView, latestWrite, LOG_LIMIT, reduceSession, type SessionView } from './session-view';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 
 const snapshot: SessionSnapshot = {
@@ -122,6 +122,64 @@ describe('reduceSession', () => {
     ]);
     expect(view.snapshot).toMatchObject({ running: false, nextDemoRequest: '주문에 배송 메모 필드 추가해줘' });
     expect(view.completedRuns).toBe(1);
+  });
+
+  it('요청 취소는 취소 중으로 표시했다가 되돌린 결과와 그때까지 쓴 토큰으로 끝낸다', () => {
+    const usage = { inputTokens: 1_200, outputTokens: 80, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const running = fold([
+      { type: 'snapshot', snapshot: { ...snapshot, status: 'ready' } },
+      { type: 'run_started', runId: 'r1', request: '메모 필드 추가' },
+      { type: 'agent', runId: 'r1', event: { type: 'verify_start', files: ['api/V2.sql'] } },
+      { type: 'tokens', runId: 'r1', usage, sessionTokens: usage },
+      { type: 'run_cancelling', runId: 'r1' },
+    ]);
+    expect(activeRun(running)).toBe('r1');
+    expect(running.snapshot).toMatchObject({ running: true, cancelling: true, tokens: usage });
+    expect(running.runTokens).toEqual({ runId: 'r1', usage });
+
+    const done = fold(
+      [
+        { type: 'reverted', runId: 'r1', cancelled: true, files: ['api/V2.sql'], patch: '', restarted: [{ service: 'api', ready: true }], databases: [] },
+        { type: 'run_finished', runId: 'r1', status: 'cancelled', summary: '요청을 취소하고 바뀐 파일 1개를 되돌렸습니다', usage, sessionTokens: usage },
+      ],
+      running,
+    );
+    expect(activeRun(done)).toBeUndefined();
+    expect(done.snapshot.cancelling).toBeUndefined();
+    expect(done.snapshot.tokens).toEqual(usage);
+    expect(done.runTokens).toBeUndefined();
+    expect(done.chat).toMatchObject([
+      { kind: 'request' },
+      { kind: 'gate', interrupted: true },
+      { kind: 'reverted', cancelled: true },
+      { kind: 'outcome', status: 'cancelled', usage },
+    ]);
+  });
+
+  it('체크포인트 복원 중에는 취소할 요청이 없다', () => {
+    const first = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '세션 시작', createdAt: '', files: [] };
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '메모' },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '완료' },
+      { type: 'restore_started', checkpoint: first },
+    ]);
+    expect(view.snapshot.running).toBe(true);
+    expect(activeRun(view)).toBeUndefined();
+  });
+
+  it('다시 연결해 기록을 재생해도 세션 토큰 합계를 두 번 더하지 않는다', () => {
+    const tokens = (input: number) => ({ inputTokens: input, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const history: StudioEvent[] = [
+      { type: 'run_started', runId: 'r1', request: '첫 요청' },
+      { type: 'tokens', runId: 'r1', usage: tokens(100), sessionTokens: tokens(100) },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '완료', usage: tokens(100), sessionTokens: tokens(100) },
+      { type: 'run_started', runId: 'r2', request: '두 번째 요청' },
+      { type: 'tokens', runId: 'r2', usage: tokens(200), sessionTokens: tokens(300) },
+      { type: 'run_finished', runId: 'r2', status: 'failed', summary: '실패', usage: tokens(200), sessionTokens: tokens(300) },
+    ];
+    const view = fold([{ type: 'snapshot', snapshot: { ...snapshot, tokens: tokens(300) } }, ...history]);
+    expect(view.snapshot.tokens).toEqual(tokens(300));
+    expect(view.chat.filter((item) => item.kind === 'outcome').map((item) => item.kind === 'outcome' && item.usage?.inputTokens)).toEqual([100, 200]);
   });
 
   it('다시 연결되면 snapshot에서 초기화해 기록이 중복되지 않는다', () => {

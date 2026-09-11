@@ -1,4 +1,4 @@
-import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -25,9 +25,18 @@ export type ChatItem =
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */
   | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport; interrupted?: boolean }
-  | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error'; summary: string; turns?: number }
+  | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error' | 'cancelled'; summary: string; turns?: number; usage?: AgentUsage }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
-  | { kind: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[]; databases: DatabaseState[] }
+  | {
+      kind: 'reverted';
+      runId: string;
+      /** 게이트 실패가 아니라 사용자가 취소해서 되돌렸다 */
+      cancelled?: boolean;
+      files: string[];
+      patch: string;
+      restarted: ServiceCheck[];
+      databases: DatabaseState[];
+    }
   | {
       kind: 'restore';
       checkpoint: Checkpoint;
@@ -76,6 +85,8 @@ export interface SessionView {
   logs: LogEntry[];
   /** 끝난 요청 수. 미리보기와 계약을 새로 불러오는 기준으로 쓴다 */
   completedRuns: number;
+  /** 처리 중인 요청이 지금까지 쓴 토큰 */
+  runTokens?: { runId: string; usage: AgentUsage };
 }
 
 export const LOG_LIMIT = 1000;
@@ -121,14 +132,25 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };
+    case 'tokens':
+      // 합계를 더하지 않고 서버가 보낸 값으로 바꿔서, 다시 연결해 기록을 재생해도 두 번 세지 않는다
+      return { ...patchSnapshot(view, { tokens: event.sessionTokens }), runTokens: { runId: event.runId, usage: event.usage } };
+    case 'run_cancelling':
+      return patchSnapshot(view, { cancelling: true });
     case 'run_finished':
       return {
-        ...patchSnapshot(view, { running: false, nextDemoRequest: event.nextDemoRequest }),
+        ...patchSnapshot(view, {
+          running: false,
+          cancelling: undefined,
+          nextDemoRequest: event.nextDemoRequest,
+          tokens: event.sessionTokens ?? view.snapshot.tokens,
+        }),
         chat: [
           ...markInterrupted(view.chat, event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage },
         ],
         completedRuns: view.completedRuns + 1,
+        runTokens: undefined,
       };
 
     case 'checkpoint': {
@@ -145,7 +167,15 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ...view,
         chat: [
           ...view.chat,
-          { kind: 'reverted', runId: event.runId, files: event.files, patch: event.patch, restarted: event.restarted, databases: event.databases },
+          {
+            kind: 'reverted',
+            runId: event.runId,
+            cancelled: event.cancelled,
+            files: event.files,
+            patch: event.patch,
+            restarted: event.restarted,
+            databases: event.databases,
+          },
         ],
       };
 
@@ -329,6 +359,14 @@ export function latestWrite(chat: readonly ChatItem[]): { path?: string; count: 
     }
   }
   return { path: latest, count };
+}
+
+/** 처리 중인 에이전트 요청. 체크포인트 복원이나 원격 가져오기처럼 요청이 아닌 작업 중이면 없다 */
+export function activeRun({ snapshot, chat }: Pick<SessionView, 'snapshot' | 'chat'>): string | undefined {
+  if (!snapshot.running) return undefined;
+  const request = chat.findLast((item): item is Extract<ChatItem, { kind: 'request' }> => item.kind === 'request');
+  if (!request) return undefined;
+  return chat.some((item) => item.kind === 'outcome' && item.runId === request.runId) ? undefined : request.runId;
 }
 
 export function describeToolCall(name: string, input: unknown): string {

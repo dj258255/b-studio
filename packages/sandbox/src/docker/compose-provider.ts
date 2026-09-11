@@ -12,6 +12,7 @@ import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
+import { withRemovedDirectories } from '../sync-paths';
 import type {
   CleanupCommand,
   ContainerState,
@@ -222,20 +223,21 @@ class LocalDockerSandbox implements Sandbox {
   async sync(files: string[], { signal, timeoutMs = 60_000 }: SyncOptions = {}): Promise<SyncResult> {
     if (files.length === 0) return { elapsedMs: 0, checks: 0 };
 
+    const targets = await withRemovedDirectories(this.project.root, files);
     const expected = new Map(
-      await Promise.all(files.map(async (file) => [file, await hashOrMissing(path.join(this.project.root, file))] as const)),
+      await Promise.all(targets.map(async (file) => [file, await hashOrMissing(path.join(this.project.root, file))] as const)),
     );
     const started = Date.now();
 
     for (let checks = 1; ; checks++) {
       const result = await this.#docker(
-        ['run', '--rm', '--network', 'none', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...files],
+        ['run', '--rm', '--network', 'none', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...targets],
         signal,
       );
       if (result.exitCode !== 0) throw new SandboxError('샌드박스 파일 반영 확인에 실패했습니다', result.stderr);
 
       const seen = parseSyncOutput(result.stdout);
-      const pending = files.filter((file) => seen.get(file) !== expected.get(file));
+      const pending = targets.filter((file) => seen.get(file) !== expected.get(file));
       if (pending.length === 0) return { elapsedMs: Date.now() - started, checks };
 
       if (Date.now() - started >= timeoutMs) {

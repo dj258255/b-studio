@@ -13,6 +13,7 @@ import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
+import { withRemovedDirectories } from '../sync-paths';
 import type {
   CleanupCommand,
   ContainerState,
@@ -443,7 +444,7 @@ class KubernetesSandbox implements Sandbox {
   /** 바뀐 파일마다 그 파일을 마운트한 서비스 컨테이너 안의 경로와 기대하는 해시 */
   async #syncTargets(files: string[]): Promise<Map<string, Array<{ file: string; containerPath: string; expected: string }>>> {
     const targets = new Map<string, Array<{ file: string; containerPath: string; expected: string }>>();
-    for (const file of files) {
+    for (const file of await withRemovedDirectories(this.project.root, files)) {
       const absolute = path.join(this.project.root, file);
       for (const [service, definition] of Object.entries(this.#compose.services)) {
         const bind = definition.volumes?.find((volume) => volume.type === 'bind' && volume.source && (absolute === volume.source || absolute.startsWith(`${volume.source}/`)));

@@ -193,6 +193,29 @@ describe('restartServicesFor', () => {
     expect(formatVerificationReport({ ok: true, contracts: [], secretLeaks: [], ...report }, { allowBreaking: false })).toContain('한 번 더 재시작');
   });
 
+  it('취소로 끊긴 재시작은 실패로 보고하지 않고 로그도 모으지 않은 채 그대로 던진다', async () => {
+    const controller = new AbortController();
+    const base = fakeSandbox();
+    let logsRead = false;
+    const sandbox: Sandbox = {
+      ...base,
+      async restart(service, options) {
+        base.restarts.push(service);
+        controller.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+        options?.signal?.throwIfAborted();
+        return base.endpoint(service);
+      },
+      async *logs(): AsyncIterable<LogLine> {
+        logsRead = true;
+        yield { service: 'api', text: 'unused', at: new Date() };
+      },
+    };
+
+    await expect(restartServicesFor(sandbox, project, ['api/src/Order.java'], { signal: controller.signal })).rejects.toThrow('요청을 취소했습니다');
+    expect(base.restarts).toEqual(['api']);
+    expect(logsRead).toBe(false);
+  });
+
   it('지운 파일과 무관한 실패는 다시 시도하지 않는다', async () => {
     const { sandbox, restarts } = flakySandbox([false, true], 'error: cannot find symbol memo');
 

@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
-import type { ChatItem, SessionView } from "@/lib/session-view";
+import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
+import { describeTokens, hasTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 
@@ -12,7 +13,10 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const [allowBreaking, setAllowBreaking] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
+  /** 되돌리는 동작이라 한 번 더 누르게 한다. 요청이 바뀌면 확인 상태도 사라지도록 요청 id로 둔다 */
+  const [confirmingCancel, setConfirmingCancel] = useState<string>();
   const listRef = useRef<HTMLOListElement>(null);
+  const runId = activeRun(view);
 
   useEffect(() => {
     const list = listRef.current;
@@ -34,10 +38,25 @@ export function ChatPanel({ view }: { view: SessionView }) {
     setSending(false);
   }
 
+  /** 취소 중 표시와 결과는 이벤트 스트림으로 온다 */
+  async function cancel(target: string) {
+    setError(undefined);
+    setConfirmingCancel(undefined);
+    const response = await fetch(`/api/sessions/${snapshot.id}/runs/${target}/cancel`, { method: "POST" });
+    if (!response.ok) setError((await response.json()).error ?? "요청을 취소하지 못했습니다");
+  }
+
   return (
     <section className="glass flex min-h-0 flex-col overflow-hidden rounded-2xl" aria-label="대화">
       <div className="border-b border-line px-5 py-3">
-        <h2 className="font-semibold">대화</h2>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+          <h2 className="font-semibold">대화</h2>
+          {hasTokens(snapshot.tokens) && (
+            <span className="text-xs text-muted" title="이 세션의 요청들이 쓴 모델 토큰입니다. 취소하거나 실패한 요청도 그때까지 쓴 양을 더합니다">
+              세션 합계 {describeTokens(snapshot.tokens)}
+            </span>
+          )}
+        </div>
         <p className="mt-0.5 text-sm text-muted">{hintFor(view)}</p>
       </div>
 
@@ -47,7 +66,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
             <ChatEntry item={item} />
           </li>
         ))}
-        {snapshot.running && <li className="text-sm text-wait motion-safe:animate-pulse">에이전트가 작업하는 중</li>}
+        {snapshot.running && !runId && <li className="text-sm text-wait motion-safe:animate-pulse">작업하는 중</li>}
       </ol>
 
       <form
@@ -57,6 +76,45 @@ export function ChatPanel({ view }: { view: SessionView }) {
           if (canSend && text.trim()) void send(text);
         }}
       >
+        {runId && (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="min-w-0 text-sm" role="status">
+              <span className="text-wait motion-safe:animate-pulse">
+                {snapshot.cancelling ? "요청을 취소하는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다" : "에이전트가 작업하는 중"}
+              </span>
+              {view.runTokens?.runId === runId && hasTokens(view.runTokens.usage) && (
+                <span className="ml-2 text-xs text-muted">{describeTokens(view.runTokens.usage)}</span>
+              )}
+            </p>
+            {!snapshot.cancelling &&
+              (confirmingCancel === runId ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingCancel(undefined)}
+                    className="rounded-full px-3 py-1.5 text-sm text-muted hover:text-ink"
+                  >
+                    계속 진행
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void cancel(runId)}
+                    className="rounded-full bg-fail px-3.5 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-fail/85"
+                  >
+                    변경 되돌리고 취소
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingCancel(runId)}
+                  className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-medium hover:text-fail"
+                >
+                  요청 취소
+                </button>
+              ))}
+          </div>
+        )}
         {snapshot.mode === "demo" ? (
           snapshot.nextDemoRequest ? (
             <button
@@ -160,16 +218,20 @@ function ChatEntry({ item }: { item: ChatItem }) {
 
     case "reverted":
       return (
-        <div className="rounded-md border border-wait/40 bg-wait/10 px-3 py-2 text-sm">
-          <p className="font-medium text-wait">검증을 통과하지 못한 변경을 되돌렸습니다: 파일 {item.files.length}개</p>
+        <div className={`rounded-md border px-3 py-2 text-sm ${item.cancelled ? "border-line" : "border-wait/40 bg-wait/10"}`}>
+          <p className={`font-medium ${item.cancelled ? "" : "text-wait"}`}>
+            {item.cancelled ? "취소한 요청의 변경을 되돌렸습니다" : "검증을 통과하지 못한 변경을 되돌렸습니다"}: 파일 {item.files.length}개
+          </p>
           {databaseSummary(item.databases) && <p className="mt-0.5 text-muted">{databaseSummary(item.databases)}</p>}
           <p className="mt-0.5 text-muted">{restartSummary(item.restarted)}</p>
-          <details className="mt-1.5">
-            <summary className="cursor-pointer text-muted hover:text-ink">되돌린 변경 보기</summary>
-            <div className="mt-1.5 max-h-72 overflow-auto">
-              <DiffView patch={item.patch} />
-            </div>
-          </details>
+          {item.files.length > 0 && (
+            <details className="mt-1.5">
+              <summary className="cursor-pointer text-muted hover:text-ink">되돌린 변경 보기</summary>
+              <div className="mt-1.5 max-h-72 overflow-auto">
+                <DiffView patch={item.patch} />
+              </div>
+            </details>
+          )}
         </div>
       );
 
@@ -272,12 +334,21 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </div>
       );
 
-    case "outcome":
+    case "outcome": {
+      const tone = item.status === "done" ? "text-pass" : item.status === "cancelled" ? "text-muted" : "text-fail";
+      const text =
+        item.status === "done"
+          ? `완료, ${item.turns ?? 0}턴`
+          : item.status === "cancelled"
+            ? item.summary
+            : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`;
       return (
-        <p className={`text-sm ${item.status === "done" ? "text-pass" : "text-fail"}`}>
-          {item.status === "done" ? `완료, ${item.turns ?? 0}턴` : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`}
-        </p>
+        <div className="text-sm">
+          <p className={tone}>{text}</p>
+          {hasTokens(item.usage) && <p className="mt-0.5 text-xs text-muted">{describeTokens(item.usage)}</p>}
+        </div>
       );
+    }
   }
 }
 

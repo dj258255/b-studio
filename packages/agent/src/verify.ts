@@ -176,6 +176,8 @@ async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptio
     await sandbox.restart(service, start);
     return { service, ready: true };
   } catch (error) {
+    // 요청 취소나 세션 중지로 끊긴 재시작은 서비스 실패가 아니다. 로그를 모으지 않고 그대로 던진다
+    if (start?.signal?.aborted) throw start.signal.reason;
     // 메모리 부족으로 죽었는지 먼저 알려야 에이전트가 코드를 고치려 들지 않는다
     const usage = (await sandbox.stats().catch(() => [])).find((candidate) => candidate.service === service);
     const logTail = await recentLogs(sandbox, service);

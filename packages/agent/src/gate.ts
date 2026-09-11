@@ -63,6 +63,8 @@ export class VerificationGate {
       fetcher,
       start: { signal, onStatus: onServiceStatus },
     });
+    // 도중에 취소되면 계약 조회처럼 결과로 바뀐 중단까지 게이트 실패로 알리지 않는다
+    signal?.throwIfAborted();
     this.report = report;
     this.#failedServices = new Set(report.restarted.filter((check) => !check.ready).map((check) => check.service));
 

@@ -1,5 +1,30 @@
+import type { AgentUsage } from '@b-studio/agent';
 import type { ServiceUsage } from '@b-studio/sandbox';
 import type { LogEntry } from './session-view';
+
+const TOKEN_FORMAT = new Intl.NumberFormat('ko-KR', { notation: 'compact', maximumFractionDigits: 1 });
+
+export function addTokens(base: AgentUsage | undefined, usage: AgentUsage): AgentUsage {
+  return {
+    inputTokens: (base?.inputTokens ?? 0) + usage.inputTokens,
+    outputTokens: (base?.outputTokens ?? 0) + usage.outputTokens,
+    cacheReadTokens: (base?.cacheReadTokens ?? 0) + usage.cacheReadTokens,
+    cacheWriteTokens: (base?.cacheWriteTokens ?? 0) + usage.cacheWriteTokens,
+  };
+}
+
+/** 스크립트 모델(데모 모드)은 토큰을 쓰지 않는다 */
+export function hasTokens(usage: AgentUsage | undefined): usage is AgentUsage {
+  return Boolean(usage && usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens > 0);
+}
+
+/** 캐시는 쓴 경우에만 붙인다 */
+export function describeTokens(usage: AgentUsage): string {
+  const parts = [`입력 ${TOKEN_FORMAT.format(usage.inputTokens)}`, `출력 ${TOKEN_FORMAT.format(usage.outputTokens)}`];
+  if (usage.cacheReadTokens > 0) parts.push(`캐시 읽기 ${TOKEN_FORMAT.format(usage.cacheReadTokens)}`);
+  if (usage.cacheWriteTokens > 0) parts.push(`캐시 쓰기 ${TOKEN_FORMAT.format(usage.cacheWriteTokens)}`);
+  return `${parts.join(', ')} 토큰`;
+}
 
 /** 샌드박스 패키지는 서버 전용 모듈을 불러오므로 화면용 표기를 따로 둔다 */
 export function formatBytes(bytes: number | undefined): string {
