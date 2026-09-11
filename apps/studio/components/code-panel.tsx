@@ -23,9 +23,10 @@ export function CodePanel({ view }: { view: SessionView }) {
   const [showDiff, setShowDiff] = useState(false);
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string>();
+  const [query, setQuery] = useState("");
 
-  // 쓰기, 요청 완료, 체크포인트·되돌리기·가져오기가 일어날 때마다 목록을 새로 받는다
-  const revision = `${write.count}|${view.completedRuns}|${snapshot.checkpoints[0]?.sha ?? ""}|${snapshot.status}`;
+  // 쓰기, 요청 완료, 체크포인트·되돌리기·가져오기, 서비스 안에서 명령이 바꾼 파일이 있을 때마다 목록을 새로 받는다
+  const revision = `${write.count}|${view.completedRuns}|${snapshot.checkpoints[0]?.sha ?? ""}|${snapshot.status}|${snapshot.fileRevision ?? 0}`;
   const active = follow && write.path ? write.path : selected;
 
   useEffect(() => {
@@ -61,6 +62,8 @@ export function CodePanel({ view }: { view: SessionView }) {
 
   const changes = tree?.changes ?? [];
   const changeOf = (path: string) => changes.find((change) => change.file === path)?.change;
+  const needle = query.trim().toLowerCase();
+  const shown = needle ? (tree?.files ?? []).filter((path) => path.toLowerCase().includes(needle)) : (tree?.files ?? []);
   const open = (path: string) => {
     setFollow(false);
     setSelected(path);
@@ -92,9 +95,23 @@ export function CodePanel({ view }: { view: SessionView }) {
           ))}
         </ul>
 
-        <h3 className="border-t border-line px-4 pt-3 text-sm font-semibold">모든 파일 {tree ? `${tree.files.length}개` : ""}</h3>
+        <h3 className="border-t border-line px-4 pt-3 text-sm font-semibold">
+          모든 파일 {tree ? `${tree.files.length}개` : ""}
+          {needle && <span className="ml-1 font-normal text-muted">중 {shown.length}개</span>}
+        </h3>
+        <div className="px-4 pt-2">
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="파일 이름이나 경로로 찾기"
+            aria-label="파일 찾기"
+            className="w-full rounded-lg border border-line bg-panel px-2.5 py-1.5 font-mono text-xs placeholder:font-sans placeholder:text-muted"
+          />
+        </div>
         <ul className="px-2 py-1 pb-3">
-          {tree?.files.map((path) => (
+          {needle && shown.length === 0 && <li className="px-2 py-1 text-xs text-muted">&apos;{query.trim()}&apos;와 맞는 파일이 없습니다.</li>}
+          {shown.map((path) => (
             <li key={path}>
               <FileButton path={path} active={active === path} onOpen={open} badge={changeOf(path)} fresh={false} />
             </li>

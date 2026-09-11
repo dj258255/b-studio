@@ -62,6 +62,8 @@ export interface SessionSnapshot {
   repository?: RepositoryView;
   /** 가장 최근에 잰 컨테이너별 자원 사용량 */
   usage?: { at: string; services: ServiceUsage[] };
+  /** 프로젝트 폴더의 파일이 바뀔 때마다 늘어난다. 서비스 안에서 명령이 만든 파일도 코드 화면이 다시 불러오는 기준이다 */
+  fileRevision?: number;
 }
 
 /** 원본이 Git 저장소인 세션의 원격 연동 상태 */
@@ -135,6 +137,8 @@ export type StudioEvent =
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
+  /** 파일 변경을 모아 알린다. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
+  | { type: 'files_changed'; revision: number }
   | { type: 'run_started'; runId: string; request: string }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */

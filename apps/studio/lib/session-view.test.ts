@@ -345,6 +345,15 @@ describe('reduceSession', () => {
     ]);
   });
 
+  it('파일 변경 알림은 대화에 남기지 않고 코드 화면이 다시 불러올 기준 번호만 바꾼다', () => {
+    const view = fold([
+      { type: 'files_changed', revision: 1 },
+      { type: 'files_changed', revision: 2 },
+    ]);
+    expect(view.snapshot.fileRevision).toBe(2);
+    expect(view.chat).toEqual([]);
+  });
+
   it('로그는 최근 항목만 남긴다', () => {
     const events: StudioEvent[] = Array.from({ length: LOG_LIMIT + 5 }, (_, i) => ({ type: 'log', service: 'api', text: `line ${i}`, at: '' }));
     const view = fold(events);
