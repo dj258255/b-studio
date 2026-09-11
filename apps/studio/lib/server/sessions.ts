@@ -181,9 +181,11 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
   let checkpoints: CheckpointStore;
   let firstCheckpoint: Checkpoint;
   let sourceDirtyFiles = 0;
-  if (await CheckpointStore.inspectSource(source.root)) {
+  // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
+  const allowSubfolder = source.spec.repository?.monorepo === true;
+  if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
     // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
-    const cloned = await CheckpointStore.clone(source.root, workDir, { branch: `b-studio/${projectId}-${id}`, author });
+    const cloned = await CheckpointStore.clone(source.root, workDir, { branch: `b-studio/${projectId}-${id}`, author, allowSubfolder });
     checkpoints = cloned.store;
     firstCheckpoint = cloned.start;
     sourceDirtyFiles = cloned.source.dirtyFiles;
@@ -193,7 +195,7 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
     firstCheckpoint = await checkpoints.init('세션 시작');
   }
 
-  const project = await loadProject(workDir);
+  const project = await loadProject(await checkpoints.projectRoot());
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
@@ -362,8 +364,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       throw new StudioError(409, `작업 복사본이 없어 이어서 작업할 수 없습니다: ${workDir}`);
     }
 
-    const project = await loadProject(workDir);
     const checkpoints = new CheckpointStore(workDir, { author: gitAuthor() });
+    const project = await loadProject(await checkpoints.projectRoot());
     // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리고 마지막 체크포인트에서 시작한다
     const { files: discarded } = await checkpoints.discard();
     const list = await checkpoints.list();
@@ -898,6 +900,7 @@ async function describeRepository(store: CheckpointStore, sourceDirtyFiles: numb
     kind: remote.kind,
     base: info.base,
     branch: info.branch,
+    subdir: info.subdir,
     sourceDirtyFiles,
     pushedSha: info.pushedSha,
     pullRequestUrl: info.pullRequestUrl,

@@ -77,7 +77,15 @@ export function RepositoryBar({ view }: { view: SessionView }) {
         <div className="min-w-0">
           <p className="text-sm">
             <span className="font-mono font-medium">{repository.branch}</span>
-            <span className="text-muted"> 브랜치, 기준 {repository.base}</span>
+            <span className="text-muted">
+              {" "}
+              브랜치, 기준 {repository.base}
+              {repository.subdir && (
+                <>
+                  , 폴더 <span className="font-mono">{repository.subdir}</span>
+                </>
+              )}
+            </span>
           </p>
           <p className="mt-0.5 truncate text-xs text-muted" title={repository.remote}>
             {repository.remote}
