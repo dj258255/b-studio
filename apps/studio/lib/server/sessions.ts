@@ -184,13 +184,14 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     projectName: snapshot.projectName,
     status: snapshot.status,
     mode: snapshot.mode,
+    owner: snapshot.owner,
     checkpoints: snapshot.checkpoints.length,
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
     updatedAt,
   };
 }
 
-export async function createSession(projectId: string): Promise<SessionSnapshot> {
+export async function createSession(projectId: string, owner: string): Promise<SessionSnapshot> {
   const mode = sessionMode();
   const tokenLimit = sessionTokenLimit();
   const preview = previewConfig();
@@ -239,6 +240,7 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
       mode,
       running: false,
       tokenLimit,
+      owner,
       ...projectViews(project),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       runtime: provider.isolation,
@@ -334,7 +336,7 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
-export function sendMessage(id: string, text: string, { allowBreaking }: { allowBreaking: boolean }): { runId: string } {
+export function sendMessage(id: string, text: string, { allowBreaking, by }: { allowBreaking: boolean; by?: string }): { runId: string } {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
   if (session.snapshot.running) throw new StudioError(409, '이전 요청을 처리하는 중입니다');
@@ -356,7 +358,7 @@ export function sendMessage(id: string, text: string, { allowBreaking }: { allow
   };
   session.run = run;
   session.snapshot.running = true;
-  emit(session, { type: 'run_started', runId: run.id, request });
+  emit(session, { type: 'run_started', runId: run.id, request, by });
   void execute(session, run, request, plan);
   return { runId: run.id };
 }

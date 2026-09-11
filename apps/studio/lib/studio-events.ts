@@ -42,6 +42,8 @@ export interface SessionSnapshot {
   status: SessionStatus;
   error?: string;
   mode: SessionMode;
+  /** 세션을 만든 사람. 인증을 켜면 만든 사람과 관리자만 세션을 바꿀 수 있다 */
+  owner?: string;
   running: boolean;
   /** 처리 중인 요청을 멈추고 변경을 되돌리는 중이다. user: 사용자가 취소함, budget: 세션 토큰 한도에 도달함 */
   cancelling?: 'user' | 'budget';
@@ -125,6 +127,7 @@ export interface SessionSummary {
   projectName: string;
   status: SessionStatus;
   mode: SessionMode;
+  owner?: string;
   checkpoints: number;
   lastRequest?: string;
   updatedAt: string;
@@ -139,7 +142,8 @@ export type StudioEvent =
   | { type: 'usage'; at: string; services: ServiceUsage[] }
   /** 파일 변경을 모아 알린다. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'files_changed'; revision: number }
-  | { type: 'run_started'; runId: string; request: string }
+  /** by: 요청을 보낸 사람 */
+  | { type: 'run_started'; runId: string; request: string; by?: string }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
   | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }

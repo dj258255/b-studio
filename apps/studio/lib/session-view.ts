@@ -19,7 +19,7 @@ export interface ToolCallView {
 }
 
 export type ChatItem =
-  | { kind: 'request'; runId: string; text: string }
+  | { kind: 'request'; runId: string; text: string; by?: string }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
@@ -128,7 +128,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'run_started':
       return {
         ...patchSnapshot(view, { running: true }),
-        chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request }],
+        chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by }],
       };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };

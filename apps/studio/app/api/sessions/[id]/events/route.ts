@@ -1,14 +1,16 @@
+import { requireUser } from '@/lib/server/access';
 import { errorResponse } from '@/lib/server/errors';
 import { recoverSessions, subscribe } from '@/lib/server/sessions';
 import type { StudioEvent } from '@/lib/studio-events';
 
 /** 세션 이벤트를 Server-Sent Events로 흘려보낸다. 연결하면 지금 상태와 지금까지의 기록부터 보낸다 */
 export async function GET(request: Request, context: RouteContext<'/api/sessions/[id]/events'>) {
-  const { id } = await context.params;
   const encoder = new TextEncoder();
   let cleanup = () => {};
 
   try {
+    requireUser(request.headers);
+    const { id } = await context.params;
     // 스튜디오 서버가 다시 시작된 뒤 열려 있던 화면이 다시 연결하면 이전 세션 기록을 보낸다
     await recoverSessions();
     const stream = new ReadableStream<Uint8Array>({

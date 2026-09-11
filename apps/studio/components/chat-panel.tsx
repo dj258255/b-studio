@@ -7,6 +7,7 @@ import { describeTokens, formatTokenCount, hasTokens, totalTokens } from "@/lib/
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
+import { useSessionAccess, type SessionAccess } from "./session-access";
 
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
@@ -18,6 +19,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const [confirmingCancel, setConfirmingCancel] = useState<string>();
   const listRef = useRef<HTMLOListElement>(null);
   const runId = activeRun(view);
+  const access = useSessionAccess();
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
   const budgetReached = limit !== undefined && used >= limit;
@@ -27,7 +29,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     if (list) list.scrollTop = list.scrollHeight;
   }, [chat]);
 
-  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached;
+  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && access.canManage;
 
   async function send(request: string) {
     setSending(true);
@@ -66,7 +68,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
             </span>
           )}
         </div>
-        <p className="mt-0.5 text-sm text-muted">{hintFor(view)}</p>
+        <p className="mt-0.5 text-sm text-muted">{hintFor(view, access)}</p>
       </div>
 
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
@@ -100,6 +102,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               )}
             </p>
             {!snapshot.cancelling &&
+              access.canManage &&
               (confirmingCancel === runId ? (
                 <div className="flex items-center gap-1">
                   <button
@@ -184,7 +187,12 @@ export function ChatPanel({ view }: { view: SessionView }) {
 function ChatEntry({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "request":
-      return <p className="border-l-[3px] border-ink pl-3 font-medium leading-7 whitespace-pre-wrap">{item.text}</p>;
+      return (
+        <div className="border-l-[3px] border-ink pl-3">
+          <p className="font-medium leading-7 whitespace-pre-wrap">{item.text}</p>
+          {item.by && <p className="text-xs text-muted">{item.by}</p>}
+        </div>
+      );
 
     case "backend":
       return (
@@ -387,7 +395,10 @@ function restartSummary(restarted: ServiceCheck[]): string {
     .join(", ");
 }
 
-function hintFor({ snapshot, chat }: SessionView): string {
+function hintFor({ snapshot, chat }: SessionView, access: SessionAccess): string {
+  if (!access.canManage) {
+    return `읽기 전용입니다. 세션을 만든 사람(${access.owner ?? "기록 없음"})이나 관리자만 요청하고 바꿀 수 있습니다.`;
+  }
   if (snapshot.status === "ready" && !snapshot.running && snapshot.tokenLimit !== undefined && totalTokens(snapshot.tokens) >= snapshot.tokenLimit) {
     return "이 세션은 토큰 한도에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요.";
   }

@@ -1,3 +1,4 @@
+import { authorizeSession, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { endpointFor } from '@/lib/server/sessions';
 import type { ProxyResponse } from '@/lib/studio-events';
@@ -8,10 +9,13 @@ const MAX_BODY = 200_000;
 /**
  * API 탐색기 요청을 샌드박스 서비스로 전달한다.
  * 서비스 포트는 루프백에만 열려 있으므로 브라우저가 직접 부르지 않고 스튜디오 서버를 거친다.
+ * 서비스 데이터를 바꿀 수 있으므로 세션을 바꿀 수 있는 사람만 보낼 수 있다
  */
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/services/[service]/request'>) {
   try {
+    const user = requireUser(request.headers);
     const { id, service } = await context.params;
+    await authorizeSession(id, user);
     const input = (await request.json().catch(() => ({}))) as { method?: unknown; path?: unknown; body?: unknown };
 
     const method = typeof input.method === 'string' ? input.method.toUpperCase() : '';
