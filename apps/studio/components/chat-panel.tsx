@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ServiceCheck } from "@b-studio/agent";
+import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
 import type { ChatItem, SessionView } from "@/lib/session-view";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
@@ -161,7 +161,8 @@ function ChatEntry({ item }: { item: ChatItem }) {
     case "reverted":
       return (
         <div className="rounded-md border border-wait/40 bg-wait/10 px-3 py-2 text-sm">
-          <p className="font-medium text-wait">검증을 통과하지 못한 변경 {item.files.length}개를 되돌렸습니다</p>
+          <p className="font-medium text-wait">검증을 통과하지 못한 변경을 되돌렸습니다: 파일 {item.files.length}개</p>
+          {databaseSummary(item.databases) && <p className="mt-0.5 text-muted">{databaseSummary(item.databases)}</p>}
           <p className="mt-0.5 text-muted">{restartSummary(item.restarted)}</p>
           <details className="mt-1.5">
             <summary className="cursor-pointer text-muted hover:text-ink">되돌린 변경 보기</summary>
@@ -183,6 +184,7 @@ function ChatEntry({ item }: { item: ChatItem }) {
       return item.result.ok ? (
         <p className="text-sm text-pass">
           체크포인트 <span className="font-mono">{item.checkpoint.shortSha}</span>로 되돌렸습니다. 파일 {item.result.files.length}개 복원,{" "}
+          {databaseSummary(item.result.databases) && `${databaseSummary(item.result.databases)}, `}
           {restartSummary(item.result.restarted)}
         </p>
       ) : (
@@ -222,9 +224,26 @@ function ChatEntry({ item }: { item: ChatItem }) {
   }
 }
 
+/** 에이전트 패키지는 서버 전용 모듈을 불러오므로 화면에서는 문구를 따로 만든다 */
+function databaseSummary(databases: DatabaseState[] = []): string | undefined {
+  const touched = databases.filter((state) => state.action !== "unchanged");
+  if (touched.length === 0) return undefined;
+  return touched
+    .map((state) =>
+      state.action === "restored"
+        ? `${state.service} 스키마와 데이터 복원`
+        : state.action === "missing"
+          ? `${state.service} 저장된 상태 없음`
+          : `${state.service} 복원 실패 (${state.detail ?? "원인 모름"})`,
+    )
+    .join(", ");
+}
+
 function restartSummary(restarted: ServiceCheck[]): string {
   if (restarted.length === 0) return "재시작한 서비스 없음";
-  return restarted.map((check) => `${check.service} ${check.ready ? "준비됨" : "재시작 실패"}`).join(", ");
+  return restarted
+    .map((check) => `${check.service} ${check.ready ? "준비됨" : "재시작 실패"}${check.retried ? " (한 번 더 재시작)" : ""}`)
+    .join(", ");
 }
 
 function hintFor({ snapshot, chat }: SessionView): string {

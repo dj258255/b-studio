@@ -25,3 +25,7 @@ services:
     snapshots:
       - volume: api-gradle-project
         key: [build.gradle, settings.gradle, gradle.properties, gradle/wrapper/gradle-wrapper.properties, Dockerfile.dev]
+
+# 체크포인트마다 상태를 저장해, 파일을 되돌릴 때 스키마와 데이터도 같은 시점으로 되돌린다
+databases:
+  db: { engine: postgres, database: app, user: app }

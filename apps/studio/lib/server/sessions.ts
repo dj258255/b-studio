@@ -10,6 +10,8 @@ import {
   CheckpointStore,
   compareUrl,
   createPullRequest,
+  DatabaseBranches,
+  describeDatabaseState,
   formatVerificationReport,
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
@@ -48,6 +50,8 @@ interface Session {
   logFollower?: AbortController;
   demoIndex: number;
   checkpoints: CheckpointStore;
+  /** 체크포인트마다 저장한 개발용 데이터베이스 상태 */
+  databases: DatabaseBranches;
   /** 로컬 Claude Code 모드의 대화. 기록은 Claude Code가 들고 있고 여기에는 이어받을 세션만 둔다 */
   claudeCode: {
     sessionId?: string;
@@ -128,6 +132,8 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
     project,
     sandbox,
     checkpoints,
+    // 덤프는 에이전트 도구가 접근할 수 없고 커밋에도 들어가지 않는 .git 아래에 둔다
+    databases: new DatabaseBranches(sandbox, project, path.join(workDir, '.git', 'b-studio', 'databases')),
     history: [],
     logs: [],
     listeners: new Set(),
@@ -209,6 +215,8 @@ async function boot(session: Session): Promise<void> {
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
     });
+    // 서비스가 마이그레이션까지 마친 상태를 세션 시작 체크포인트의 데이터베이스 상태로 남긴다
+    await saveDatabases(session, session.snapshot.checkpoints[0]!.sha);
     setStatus(session, 'ready');
   } catch (error) {
     if (!session.stop.signal.aborted) setStatus(session, 'failed', describe(error));
@@ -319,20 +327,47 @@ function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
 }
 
 async function saveCheckpoint(session: Session, runId: string, request: string, body: string): Promise<void> {
-  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body);
+  const head = session.snapshot.checkpoints[0]!.sha;
+  // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
+  const dataOnly =
+    session.databases.enabled &&
+    (await session.checkpoints.pendingFiles()).length === 0 &&
+    (await session.databases.changedSince(head, session.stop.signal));
+  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body, { allowEmpty: dataOnly });
   if (!checkpoint) return;
+  await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
   emit(session, { type: 'checkpoint', runId, checkpoint });
 }
 
 async function revertRun(session: Session, runId: string): Promise<void> {
   const { files, patch } = await session.checkpoints.discard();
-  if (files.length === 0) return;
-  const report = await restartServicesFor(session.sandbox, session.project, files, {
-    signal: session.stop.signal,
-    onStatus: (event) => onServiceStatus(session, event),
-  });
-  emit(session, { type: 'reverted', runId, files, patch, restarted: report.restarted });
+  // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다
+  const database = await session.databases.restore(session.snapshot.checkpoints[0]!.sha, session.stop.signal);
+  const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
+  if (files.length === 0 && !databaseTouched) return;
+
+  const report = await restartServicesFor(
+    session.sandbox,
+    session.project,
+    files,
+    { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) },
+    { alsoRestart: database.dependents },
+  );
+  emit(session, { type: 'reverted', runId, files, patch, restarted: report.restarted, databases: database.states, sync: report.sync });
+}
+
+/** 체크포인트 시점의 데이터베이스 상태를 남긴다. 실패해도 작업은 계속하고 로그로 알린다 */
+async function saveDatabases(session: Session, sha: string): Promise<void> {
+  if (!session.databases.enabled) return;
+  for (const state of await session.databases.save(sha, session.stop.signal)) {
+    emit(session, {
+      type: 'log',
+      service: state.service,
+      text: `[b-studio] ${describeDatabaseState(state)} (체크포인트 ${sha.slice(0, 7)})`,
+      at: new Date().toISOString(),
+    });
+  }
 }
 
 /** 이 세션의 이전 체크포인트로 되돌린다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다 */
@@ -351,10 +386,15 @@ export function restoreCheckpoint(id: string, sha: string): void {
     let event: StudioEvent;
     try {
       const { files } = await session.checkpoints.restore(sha);
-      const report = await restartServicesFor(session.sandbox, session.project, files, {
-        signal: session.stop.signal,
-        onStatus: (status) => onServiceStatus(session, status),
-      });
+      // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다
+      const database = await session.databases.restore(sha, session.stop.signal);
+      const report = await restartServicesFor(
+        session.sandbox,
+        session.project,
+        files,
+        { signal: session.stop.signal, onStatus: (status) => onServiceStatus(session, status) },
+        { alsoRestart: database.dependents },
+      );
       session.snapshot.checkpoints = await session.checkpoints.list();
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
       const note = `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`;
@@ -370,6 +410,8 @@ export function restoreCheckpoint(id: string, sha: string): void {
         checkpoint: target,
         files,
         restarted: report.restarted,
+        databases: database.states,
+        sync: report.sync,
         checkpoints: session.snapshot.checkpoints,
         nextDemoRequest: session.snapshot.nextDemoRequest,
       };

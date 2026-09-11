@@ -1,4 +1,4 @@
-import type { AgentEvent, Checkpoint, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -22,11 +22,11 @@ export type ChatItem =
   | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport }
   | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error'; summary: string; turns?: number }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
-  | { kind: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[] }
+  | { kind: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[]; databases: DatabaseState[] }
   | {
       kind: 'restore';
       checkpoint: Checkpoint;
-      result?: { ok: true; files: string[]; restarted: ServiceCheck[] } | { ok: false; error: string };
+      result?: { ok: true; files: string[]; restarted: ServiceCheck[]; databases: DatabaseState[] } | { ok: false; error: string };
     }
   | {
       kind: 'exported';
@@ -108,7 +108,10 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'reverted':
       return {
         ...view,
-        chat: [...view.chat, { kind: 'reverted', runId: event.runId, files: event.files, patch: event.patch, restarted: event.restarted }],
+        chat: [
+          ...view.chat,
+          { kind: 'reverted', runId: event.runId, files: event.files, patch: event.patch, restarted: event.restarted, databases: event.databases },
+        ],
       };
 
     case 'restore_started':
@@ -117,7 +120,12 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'restored':
       return {
         ...patchSnapshot(view, { running: false, checkpoints: event.checkpoints, nextDemoRequest: event.nextDemoRequest }),
-        chat: settleRestore(view.chat, event.checkpoint.sha, { ok: true, files: event.files, restarted: event.restarted }),
+        chat: settleRestore(view.chat, event.checkpoint.sha, {
+          ok: true,
+          files: event.files,
+          restarted: event.restarted,
+          databases: event.databases,
+        }),
         // 파일이 바뀌었으므로 미리보기와 계약을 다시 불러오게 한다
         completedRuns: view.completedRuns + 1,
       };

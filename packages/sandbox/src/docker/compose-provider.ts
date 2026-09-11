@@ -212,8 +212,8 @@ class LocalDockerSandbox implements Sandbox {
     }
   }
 
-  exec(name: string, command: string[], { signal }: { signal?: AbortSignal } = {}): Promise<ExecResult> {
-    return this.#compose(['exec', '-T', name, ...command], signal);
+  exec(name: string, command: string[], { signal, input }: { signal?: AbortSignal; input?: string } = {}): Promise<ExecResult> {
+    return this.#docker(this.#composeArgs(['exec', '-T', name, ...command]), signal, input);
   }
 
   async destroy(): Promise<void> {
@@ -393,12 +393,12 @@ class LocalDockerSandbox implements Sandbox {
     return this.#docker(this.#composeArgs(args), signal);
   }
 
-  async #docker(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+  async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
     try {
-      const { stdout, stderr } = await execFileAsync(this.#dockerBin, args, {
-        signal,
-        maxBuffer: 32 * 1024 * 1024,
-      });
+      // 개발용 데이터베이스 덤프를 문자열로 주고받으므로 넉넉하게 둔다
+      const running = execFileAsync(this.#dockerBin, args, { signal, maxBuffer: 256 * 1024 * 1024 });
+      running.child.stdin?.end(input);
+      const { stdout, stderr } = await running;
       return { exitCode: 0, stdout, stderr };
     } catch (error) {
       if (!isExecFailure(error)) throw error;

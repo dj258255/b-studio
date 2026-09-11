@@ -124,11 +124,23 @@ describe('reduceSession', () => {
     expect(pending.snapshot.running).toBe(true);
 
     const done = fold(
-      [{ type: 'restored', checkpoint: first, files: ['api/Order.java'], restarted: [{ service: 'api', ready: true }], checkpoints: [first] }],
+      [
+        {
+          type: 'restored',
+          checkpoint: first,
+          files: ['api/Order.java'],
+          restarted: [{ service: 'api', ready: true }],
+          databases: [{ service: 'db', action: 'restored' }],
+          checkpoints: [first],
+        },
+      ],
       pending,
     );
     expect(done.snapshot).toMatchObject({ running: false, checkpoints: [first] });
-    expect(done.chat.at(-1)).toMatchObject({ kind: 'restore', result: { ok: true, files: ['api/Order.java'] } });
+    expect(done.chat.at(-1)).toMatchObject({
+      kind: 'restore',
+      result: { ok: true, files: ['api/Order.java'], databases: [{ service: 'db', action: 'restored' }] },
+    });
     expect(done.completedRuns).toBe(1);
   });
 

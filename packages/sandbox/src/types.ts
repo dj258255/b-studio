@@ -94,7 +94,8 @@ export interface Sandbox {
   endpoint(service: string): Promise<ServiceEndpoint>;
   state(service: string): Promise<ContainerState>;
   logs(options?: LogOptions): AsyncIterable<LogLine>;
-  exec(service: string, command: string[], options?: { signal?: AbortSignal }): Promise<ExecResult>;
+  /** input은 명령의 표준 입력으로 넘긴다 (예: 데이터베이스 덤프 복원) */
+  exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string }): Promise<ExecResult>;
   destroy(): Promise<void>;
 }
 

@@ -173,13 +173,19 @@ export class CheckpointStore {
     return [...new Set(files)].sort();
   }
 
-  /** 바뀐 파일이 있으면 체크포인트로 남긴다. 본문에는 검증 결과처럼 PR에서 다시 쓸 기록을 넣는다 */
-  async commit(message: string, body?: string): Promise<Checkpoint | undefined> {
-    if ((await this.pendingFiles()).length === 0) return undefined;
+  /**
+   * 바뀐 파일이 있으면 체크포인트로 남긴다. 본문에는 검증 결과처럼 PR에서 다시 쓸 기록을 넣는다.
+   * allowEmpty는 파일은 그대로지만 데이터베이스만 바뀐 요청을 체크포인트로 남길 때 쓴다.
+   */
+  async commit(message: string, body?: string, { allowEmpty = false }: { allowEmpty?: boolean } = {}): Promise<Checkpoint | undefined> {
+    if (!allowEmpty && (await this.pendingFiles()).length === 0) return undefined;
     await this.#git(['add', '-A']);
     const text = body?.trim();
     // 기본 정리 모드는 #으로 시작하는 줄(마크다운 제목)을 지우므로 공백만 정리한다
-    await this.#git(['commit', '-q', '--cleanup=whitespace', '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : [])]);
+    await this.#git([
+      'commit', '-q', '--cleanup=whitespace', ...(allowEmpty ? ['--allow-empty'] : []),
+      '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
+    ]);
     return this.#checkpoint('HEAD');
   }
 
