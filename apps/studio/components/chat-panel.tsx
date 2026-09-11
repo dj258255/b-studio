@@ -30,13 +30,31 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
   const budgetReached = limit !== undefined && used >= limit;
+  /** 내 사용량은 세션을 보는 모든 사람에게 방송되지 않으므로 따로 받아 온다 */
+  const [personal, setPersonal] = useState<{ used: number; limit?: number; window: "day" | "month" }>();
 
   useEffect(() => {
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [chat]);
 
-  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && access.canManage;
+  // 요청이 끝나 세션 합계가 바뀔 때마다 내 합계도 다시 받는다
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/usage")
+      .then(async (response) => {
+        const data = await response.json();
+        if (!cancelled && response.ok) setPersonal({ used: data.used ?? 0, limit: data.limit, window: data.window ?? "day" });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [used, snapshot.running]);
+
+  const personalLimit = personal?.limit;
+  const personalReached = personalLimit !== undefined && personal !== undefined && personal.used >= personalLimit;
+  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
 
   const planRequest = snapshot.mode === "demo" ? snapshot.nextDemoRequest : BUILD_FROM_PLAN;
 
@@ -73,7 +91,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
       <div className="border-b border-line px-5 py-3">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3">
           <h2 className="font-semibold">대화</h2>
-          {(hasTokens(snapshot.tokens) || limit !== undefined) && (
+          {/* 세션 한도를 쓰지 않고 사람 한도만 정한 서버에서도 내 사용량이 보이게 한다 */}
+          {(hasTokens(snapshot.tokens) || limit !== undefined || personalLimit !== undefined) && (
             <span className="text-xs text-muted" title="이 세션의 요청들이 쓴 모델 토큰입니다. 취소하거나 실패한 요청도 그때까지 쓴 양을 더합니다">
               {hasTokens(snapshot.tokens) && <>세션 합계 {describeTokens(snapshot.tokens)}</>}
               {limit !== undefined && (
@@ -81,10 +100,18 @@ export function ChatPanel({ view }: { view: SessionView }) {
                   한도 {formatTokenCount(limit)} 중 {formatTokenCount(used)} 사용
                 </span>
               )}
+              {personalLimit !== undefined && personal !== undefined && (
+                <span
+                  className={`ml-2 whitespace-nowrap ${personalReached ? "font-medium text-fail" : personal.used >= personalLimit * 0.8 ? "text-wait" : ""}`}
+                  title="이 기간에 내가 쓴 모델 토큰입니다. 세션을 새로 만들어도 이어서 셉니다"
+                >
+                  내 한도 {personal.window === "month" ? "(이번 달)" : "(오늘)"} {formatTokenCount(personalLimit)} 중 {formatTokenCount(personal.used)} 사용
+                </span>
+              )}
             </span>
           )}
         </div>
-        <p className="mt-0.5 text-sm text-muted">{hintFor(view, access)}</p>
+        <p className="mt-0.5 text-sm text-muted">{hintFor(view, access, personal && { reached: personalReached, window: personal.window })}</p>
       </div>
 
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
@@ -518,9 +545,13 @@ function isAsking(view: Pick<SessionView, "snapshot" | "chat">): boolean {
   return runId !== undefined && view.chat.some((item) => item.kind === "request" && item.runId === runId && item.intent === "ask");
 }
 
-function hintFor({ snapshot, chat }: SessionView, access: SessionAccess): string {
+function hintFor({ snapshot, chat }: SessionView, access: SessionAccess, personalLimit?: { reached: boolean; window: "day" | "month" }): string {
   if (!access.canManage) {
     return `읽기 전용입니다. 세션을 만든 사람(${access.owner ?? "기록 없음"})이나 관리자만 요청하고 바꿀 수 있습니다.`;
+  }
+  // 사람 한도는 새 세션을 만들어도 풀리지 않으므로 세션 한도보다 먼저 알린다
+  if (personalLimit?.reached) {
+    return `${personalLimit.window === "month" ? "이번 달" : "오늘"} 쓸 수 있는 토큰 한도에 도달해 새 요청을 받지 않습니다. 기간이 바뀐 뒤에 다시 요청하세요.`;
   }
   if (snapshot.status === "ready" && !snapshot.running && snapshot.tokenLimit !== undefined && totalTokens(snapshot.tokens) >= snapshot.tokenLimit) {
     return "이 세션은 토큰 한도에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요.";
