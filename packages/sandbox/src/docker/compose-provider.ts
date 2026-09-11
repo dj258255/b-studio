@@ -16,6 +16,8 @@ import type {
   CreateSandboxOptions,
   EgressDenial,
   ExecResult,
+  ExternalCallRequest,
+  ExternalCallResult,
   LogLine,
   LogOptions,
   Sandbox,
@@ -36,6 +38,7 @@ import {
   parseLogLine,
   parseSyncOutput,
 } from './format';
+import { externalCallScript } from './external-call';
 import { mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
@@ -115,7 +118,7 @@ export class LocalDockerProvider implements SandboxProvider {
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript })));
-    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets);
+    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript);
   }
 }
 
@@ -129,6 +132,7 @@ class LocalDockerSandbox implements Sandbox {
   /** docker 명령의 프로세스 환경으로만 넘긴다. override 파일에는 이름만 있다 */
   readonly #secrets: Record<string, string>;
   readonly #redactor: Redactor;
+  readonly #edgeScript: string;
 
   constructor(
     id: string,
@@ -137,7 +141,9 @@ class LocalDockerSandbox implements Sandbox {
     overridePath: string,
     options: LocalDockerProviderOptions,
     secrets: Record<string, string>,
+    edgeScript: string,
   ) {
+    this.#edgeScript = edgeScript;
     this.id = id;
     this.project = project;
     this.#workDir = workDir;
@@ -297,6 +303,20 @@ class LocalDockerSandbox implements Sandbox {
 
   findSecrets(text: string): string[] {
     return this.#redactor.find(text);
+  }
+
+  async callExternal(name: string, request: ExternalCallRequest, { via, signal }: { via: string; signal?: AbortSignal }): Promise<ExternalCallResult> {
+    if (!(this.project.external ?? []).some(([external]) => external === name)) throw new SandboxError(`'${name}'은(는) 등록한 사내 API가 아닙니다`);
+    if (!request.path.startsWith('/')) throw new SandboxError('경로는 "/"로 시작해야 합니다');
+
+    // edge 컨테이너 안에서 실행해 샌드박스 서비스와 같은 네트워크 위치, 정책, 인증 시크릿으로 부른다.
+    // 스튜디오용 포트를 따로 열면 샌드박스 서비스가 그 포트로 studio를 사칭할 수 있어 docker exec를 쓴다
+    const script = externalCallScript(this.#edgeScript, { name, via, ...request });
+    const result = await this.#docker(this.#composeArgs(['exec', '-T', EDGE_SERVICE, 'node', '--input-type=module', '-']), signal, script);
+    const last = result.stdout.trim().split('\n').at(-1);
+    if (result.exitCode !== 0 || !last) throw new SandboxError('사내 API 호출을 실행하지 못했습니다', this.redact(result.stderr));
+    const parsed = JSON.parse(last) as ExternalCallResult;
+    return { ...parsed, body: this.redact(parsed.body) };
   }
 
   async destroy(): Promise<void> {

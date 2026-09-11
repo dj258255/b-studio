@@ -2,7 +2,16 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { StudioSpecSchema, type DatabaseSpec, type ManagedServiceSpec, type ResourceLimit, type SecretSpec, type StudioSpec } from './schema';
+import {
+  STUDIO_CALLER,
+  StudioSpecSchema,
+  type DatabaseSpec,
+  type ExternalServiceSpec,
+  type ManagedServiceSpec,
+  type ResourceLimit,
+  type SecretSpec,
+  type StudioSpec,
+} from './schema';
 
 export const SPEC_FILE = 'studio.yaml';
 
@@ -33,6 +42,8 @@ export interface LoadedProject {
   egress: string[];
   /** 시크릿 이름(컨테이너 환경 변수 이름) → 받을 서비스. 값은 들어 있지 않다 */
   secrets: Array<[name: string, secret: SecretSpec]>;
+  /** 등록한 사내 API. 샌드박스에서는 이 이름의 호스트로 부르고 edge가 정책을 적용한다 */
+  external: Array<[name: string, service: ExternalServiceSpec]>;
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -64,6 +75,7 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
 
   const composeServices = new Set(Object.keys(compose.data.services));
   const managed: LoadedProject['managed'] = [];
+  const external: LoadedProject['external'] = [];
   const issues: string[] = [];
 
   const composeVolumes = compose.data.volumes ?? {};
@@ -84,8 +96,19 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
           issues.push(`${field}: ${spec.compose}의 ${name} 서비스가 '${snapshot.volume}' 볼륨을 마운트하지 않습니다`);
         }
       });
-    } else if (inCompose) {
-      issues.push(`services.${name}: external 서비스는 샌드박스에서 실행하지 않으므로 ${spec.compose}에 넣지 않습니다`);
+    } else {
+      if (inCompose) issues.push(`services.${name}: external 서비스는 샌드박스에서 실행하지 않으므로 ${spec.compose}에 넣지 않습니다`);
+      external.push([name, service]);
+
+      service.policy.allow?.forEach((rule, index) => {
+        for (const caller of rule.callers) {
+          if (caller !== STUDIO_CALLER && !composeServices.has(caller)) {
+            issues.push(`services.${name}.policy.allow.${index}.callers: '${caller}'은(는) ${spec.compose}의 서비스도 ${STUDIO_CALLER}도 아닙니다`);
+          }
+        }
+      });
+      const secret = service.policy.auth?.secret;
+      if (secret && !spec.secrets?.[secret]) issues.push(`services.${name}.policy.auth.secret: secrets에 '${secret}'이 없습니다`);
     }
   }
 
@@ -111,6 +134,10 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     for (const service of secret.services) {
       if (!composeServices.has(service)) issues.push(`secrets.${name}.services: ${spec.compose}에 '${service}' 서비스가 없습니다`);
     }
+    const usedByPolicy = external.some(([, service]) => service.policy.auth?.secret === name);
+    if (secret.services.length === 0 && !usedByPolicy) {
+      issues.push(`secrets.${name}: 받을 서비스(services)나 외부 API 인증(policy.auth)에 쓰이지 않습니다`);
+    }
   }
 
   if (issues.length > 0) throw new SpecError(`${SPEC_FILE}과 ${spec.compose}가 맞지 않습니다`, issues);
@@ -130,6 +157,7 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     composeServices: [...composeServices],
     egress: spec.network?.egress ?? [],
     secrets: Object.entries(spec.secrets ?? {}),
+    external,
   };
 }
 

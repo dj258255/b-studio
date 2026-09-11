@@ -19,6 +19,17 @@ export interface ServiceView {
   hasContract: boolean;
 }
 
+/** 등록한 사내 API. 샌드박스 안에서는 http://<name>/으로 부르고 edge가 정책을 적용한다 */
+export interface ExternalApiView {
+  name: string;
+  baseUrl: string;
+  /** 사람이 읽을 허용 규칙 요약 */
+  access: string[];
+  mask: string[];
+  /** 인증 헤더를 b-studio가 붙이는지 */
+  authenticated: boolean;
+}
+
 export interface SessionSnapshot {
   id: string;
   projectId: string;
@@ -30,6 +41,8 @@ export interface SessionSnapshot {
   mode: SessionMode;
   running: boolean;
   services: ServiceView[];
+  /** 등록한 사내 API */
+  externals?: ExternalApiView[];
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
   nextDemoRequest?: string;
   /** 게이트를 통과해 남긴 체크포인트. 최신이 먼저 온다 */
@@ -125,4 +138,6 @@ export interface ProxyResponse {
   body: string;
   truncated: boolean;
   durationMs: number;
+  /** 등록한 사내 API를 부른 경우의 정책 결과 */
+  policy?: { decision: 'allow' | 'deny'; masked: number; reason?: string };
 }

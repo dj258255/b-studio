@@ -61,6 +61,9 @@ export function fakeSandbox(project: LoadedProject, restartOutcomes: boolean[]):
     findSecrets() {
       return [];
     },
+    async callExternal() {
+      return { decision: 'deny' as const, status: 404, body: '', masked: 0 };
+    },
     async destroy() {},
   };
 }

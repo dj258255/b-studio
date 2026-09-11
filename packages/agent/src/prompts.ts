@@ -1,4 +1,12 @@
-import type { LoadedProject } from '@b-studio/spec';
+import type { ExternalPolicy, LoadedProject } from '@b-studio/spec';
+
+/** 정책을 모델이 읽을 한 줄로: 누가 어떤 메서드·경로를 부를 수 있는지와 가리는 필드 */
+function describeAccess(policy: ExternalPolicy): string {
+  const access = policy.allow
+    ? policy.allow.map((rule) => `${rule.methods.join('/')} ${rule.paths.join(', ')} for ${rule.callers.join(', ')}`).join('; ')
+    : 'read-only (GET, HEAD) for every caller';
+  return policy.mask.length > 0 ? `${access}; masked fields: ${policy.mask.join(', ')}` : access;
+}
 
 /**
  * 프로젝트마다 고정된 시스템 프롬프트. 시각이나 요청별 값을 넣지 않아야 프롬프트 캐시가 유지된다.
@@ -24,6 +32,10 @@ export function buildSystemPrompt(
   const secretsSection = secrets
     ? `Secrets are injected into these services as environment variables with the same name. Their values are hidden from every tool output. Read them from the environment in code, and never write a value into a file:\n${secrets}\n`
     : '';
+  const apis = (project.external ?? []).map(([name, service]) => `- ${name}: ${describeAccess(service.policy)}`).join('\n');
+  const apisSection = apis
+    ? `Registered internal APIs. From service code, call them at http://<name>/<path> with no base URL, credentials, or proxy settings; b-studio adds authentication. Access is checked per calling service and masked response fields read "[가림]". Use ${t('call_external_api')} to see real responses before writing code:\n${apis}\n`
+    : '';
 
   return `You are the coding agent inside b-studio, an internal tool that builds company admin apps and backends.
 You change a real project that is already running in an isolated sandbox. Every managed service runs its dev server with the project files mounted, so your edits are what gets built.
@@ -32,7 +44,7 @@ Project "${project.spec.name}" services:
 ${services}
 Supporting containers from compose.yaml (for example the database) are running too.
 The sandbox network is isolated: services reach each other by service name, but outbound HTTP(S) only reaches the package registries and hosts listed in studio.yaml \`network.egress\`. If a feature needs another external host, say so in your summary instead of working around the block.
-${secretsSection}
+${secretsSection}${apisSection}
 
 How you work:
 - Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.

@@ -1,8 +1,23 @@
 import http from 'node:http';
 import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-// @ts-expect-error 컨테이너에서 그대로 실행하는 의존성 없는 스크립트라 타입 선언이 없다
-import { isAllowedHost, isPrivateAddress, parseAllow, parseForwards, splitHostPort, startEdge } from './edge.mjs';
+import {
+  callerResolver,
+  isAllowedCall,
+  isAllowedHost,
+  isPrivateAddress,
+  maskJson,
+  matchPath,
+  normalizeExternal,
+  parseAllow,
+  parseExternals,
+  parseForwards,
+  splitHostPort,
+  startApiProxy,
+  startEdge,
+  upstreamUrl,
+  type ApiAuditEntry,
+} from './edge.mjs';
 
 describe('설정 해석', () => {
   it('포워딩과 허용 목록을 읽는다', () => {
@@ -50,6 +65,140 @@ describe('isPrivateAddress', () => {
     ['2606:4700::6810:722', false],
   ])('%s → %s', (address, expected) => {
     expect(isPrivateAddress(address)).toBe(expected);
+  });
+});
+
+describe('사내 API 정책', () => {
+  it('*는 한 구간, **는 여러 구간과 맞는다', () => {
+    expect(matchPath('/api/users/*', '/api/users/1')).toBe(true);
+    expect(matchPath('/api/users/*', '/api/users/1/orders')).toBe(false);
+    expect(matchPath('/api/users/*', '/api/users')).toBe(false);
+    expect(matchPath('/api/**', '/api')).toBe(true);
+    expect(matchPath('/api/**/orders', '/api/users/1/orders')).toBe(true);
+    expect(matchPath('/**', '/anything/at/all')).toBe(true);
+  });
+
+  it('규칙이 없으면 GET·HEAD만, 규칙이 있으면 호출자·메서드·경로가 모두 맞는 것만 허용한다', () => {
+    const readOnly = { mask: [] };
+    expect(isAllowedCall(readOnly, 'api', 'GET', '/x')).toBe(true);
+    expect(isAllowedCall(readOnly, 'api', 'POST', '/x')).toBe(false);
+
+    const policy = { mask: [], allow: [{ callers: ['api', 'studio'], methods: ['GET'], paths: ['/api/users/*'] }, { callers: ['worker'], methods: ['POST'] }] };
+    expect(isAllowedCall(policy, 'api', 'GET', '/api/users/7')).toBe(true);
+    expect(isAllowedCall(policy, 'web', 'GET', '/api/users/7')).toBe(false);
+    expect(isAllowedCall(policy, 'api', 'DELETE', '/api/users/7')).toBe(false);
+    expect(isAllowedCall(policy, 'api', 'GET', '/api/admin')).toBe(false);
+    expect(isAllowedCall(policy, 'worker', 'POST', '/any/path')).toBe(true);
+  });
+
+  it('필드 이름으로 어느 깊이든 값을 가리고 개수를 센다', () => {
+    const { value, masked } = maskJson(
+      { id: 1, Phone: '010-1234-5678', owner: { email: 'kim@example.com', address: { street: 'x' } }, users: [{ phone: '010' }, { phone: null }] },
+      ['phone', 'email', 'address'],
+    );
+    expect(value).toEqual({ id: 1, Phone: '[가림]', owner: { email: '[가림]', address: '[가림]' }, users: [{ phone: '[가림]' }, { phone: null }] });
+    expect(masked).toBe(4);
+  });
+
+  it('등록한 주소의 경로 뒤에 요청 경로와 쿼리를 붙인다', () => {
+    expect(upstreamUrl(new URL('https://users.internal.example.com/users-api/'), '/api/users/1', '?expand=orders').toString()).toBe(
+      'https://users.internal.example.com/users-api/api/users/1?expand=orders',
+    );
+  });
+
+  it('설정을 읽고 요청 IP로 호출한 서비스를 찾는다', async () => {
+    expect(parseExternals('[{"name":"legacy-users","baseUrl":"https://u.example.com","policy":{"mask":["Phone"]}}]')[0]).toMatchObject({
+      name: 'legacy-users',
+      policy: { mask: ['phone'] },
+    });
+    const addresses: Record<string, string[]> = { api: ['172.30.0.5'], web: ['172.30.0.6'] };
+    const resolve = callerResolver(['api', 'web'], async (name) => (addresses[name] ?? []).map((address) => ({ address })));
+    expect(await resolve('::ffff:172.30.0.6')).toBe('web');
+    expect(await resolve('172.30.0.99')).toBeUndefined();
+  });
+});
+
+describe('startApiProxy', () => {
+  const servers: net.Server[] = [];
+  afterEach(() => {
+    for (const server of servers.splice(0)) server.close();
+  });
+
+  function listen(server: net.Server): Promise<number> {
+    return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port)));
+  }
+
+  /** fetch는 Host 헤더를 바꿀 수 없으므로 http.request로 등록한 이름을 Host에 넣는다 */
+  function call(port: number, host: string, method: string, path: string): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port, method, path, headers: { host, authorization: 'Bearer from-sandbox' } }, (response) => {
+        let body = '';
+        response.on('data', (chunk) => (body += chunk));
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, body }));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+  }
+
+  async function setup(caller: string | undefined) {
+    const received: Array<{ path: string; authorization?: string }> = [];
+    const upstream = http.createServer((request, response) => {
+      received.push({ path: request.url ?? '', authorization: request.headers.authorization });
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ id: 1, name: 'kim', phone: '010-1234-5678', echoedAuth: request.headers.authorization }));
+    });
+    servers.push(upstream);
+    const upstreamPort = await listen(upstream);
+
+    const audits: ApiAuditEntry[] = [];
+    const external = normalizeExternal({
+      name: 'legacy-users',
+      baseUrl: `http://127.0.0.1:${upstreamPort}/users-api`,
+      policy: {
+        allow: [{ callers: ['api'], methods: ['GET'], paths: ['/api/users/*'] }],
+        mask: ['phone'],
+        auth: { header: 'Authorization', secret: 'LEGACY_USERS_TOKEN', prefix: 'Bearer ' },
+      },
+    });
+    const proxy = startApiProxy({
+      externals: [external],
+      secrets: { LEGACY_USERS_TOKEN: 'tok_live_1234567890' },
+      resolveCaller: async () => caller,
+      port: 0,
+      host: '127.0.0.1',
+      log: (entry) => audits.push(entry),
+    });
+    servers.push(proxy);
+    await new Promise((resolve) => proxy.once('listening', resolve));
+    return { port: (proxy.address() as net.AddressInfo).port, received, audits };
+  }
+
+  it('허용한 호출에 인증 헤더를 붙이고, 응답의 개인정보와 되돌아온 인증 값을 가린다', async () => {
+    const { port, received, audits } = await setup('api');
+
+    const response = await call(port, 'legacy-users', 'GET', '/api/users/1');
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ id: 1, name: 'kim', phone: '[가림]', echoedAuth: 'Bearer [LEGACY_USERS_TOKEN 가림]' });
+    expect(received).toEqual([{ path: '/users-api/api/users/1', authorization: 'Bearer tok_live_1234567890' }]);
+    expect(audits).toEqual([expect.objectContaining({ caller: 'api', target: 'legacy-users', method: 'GET', path: '/api/users/1', decision: 'allow', status: 200, masked: 1 })]);
+  });
+
+  it('허용하지 않은 메서드·경로, 모르는 호출자, 등록하지 않은 이름은 사내 API로 보내지 않는다', async () => {
+    const denied = await setup('api');
+    expect((await call(denied.port, 'legacy-users', 'DELETE', '/api/users/1')).status).toBe(403);
+    expect((await call(denied.port, 'legacy-users', 'GET', '/api/admin/users')).status).toBe(403);
+    expect((await call(denied.port, 'legacy-users', 'GET', '/api/users/../admin/users')).status).toBe(403);
+    expect((await call(denied.port, 'billing', 'GET', '/api/users/1')).status).toBe(404);
+    expect(denied.received).toEqual([]);
+    expect(denied.audits.map((entry) => entry.decision)).toEqual(['deny', 'deny', 'deny', 'deny']);
+
+    const unknown = await setup(undefined);
+    const response = await call(unknown.port, 'legacy-users', 'GET', '/api/users/1');
+    expect(response.status).toBe(403);
+    expect(response.body).toContain('요청한 서비스를 알 수 없습니다');
+    expect(unknown.received).toEqual([]);
   });
 });
 

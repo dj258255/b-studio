@@ -78,6 +78,22 @@ export function buildTools(project: LoadedProject): BetaTool[] {
     }),
   ];
 
+  const apis = (project.external ?? []).map(([name]) => name);
+  if (apis.length > 0) {
+    tools.push(
+      tool(
+        'call_external_api',
+        'Call a registered internal API through the b-studio policy proxy. The same access rules, authentication, and response masking apply as when service code calls http://<api>/.',
+        {
+          api: { type: 'string', enum: apis, description: 'Registered API name' },
+          method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+          path: { type: 'string', description: 'Path starting with "/", including any query string.' },
+          body: { type: 'string', description: 'JSON request body, or an empty string for none.' },
+        },
+      ),
+    );
+  }
+
   if (contractServices.length > 0) {
     tools.push(
       tool('get_contract', "Summarize the service's current OpenAPI contract (operations and schemas), extracted from the running server.", {
@@ -147,6 +163,26 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       }
       case 'http_request':
         return await httpRequest(context, args);
+      case 'call_external_api': {
+        const api = string(args, 'api');
+        if (!(context.project.external ?? []).some(([name]) => name === api)) throw new ToolInputError(`Unknown API: ${api}`);
+        const body = string(args, 'body');
+        const result = await sandbox.callExternal(
+          api,
+          { method: string(args, 'method'), path: string(args, 'path'), body: body || undefined },
+          { via: 'agent', signal: withTimeout(signal, HTTP_TIMEOUT_MS) },
+        );
+        const policy =
+          result.decision === 'deny'
+            ? `blocked by b-studio policy: ${result.reason}`
+            : result.masked > 0
+              ? `${result.masked} field value(s) masked by b-studio policy`
+              : 'allowed, nothing masked';
+        return {
+          ok: result.decision === 'allow',
+          content: `HTTP ${result.status}\ncontent-type: ${result.contentType ?? 'unknown'}\npolicy: ${policy}\n\n${truncate(result.body)}`,
+        };
+      }
       case 'get_contract': {
         const target = serviceName(context, args);
         const contract = context.project.managed.find(([serviceKey]) => serviceKey === target)?.[1].contract;

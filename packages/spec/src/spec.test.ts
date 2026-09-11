@@ -228,10 +228,57 @@ secrets:
     expect(error.issues).toEqual(["secrets.WEBHOOK_TOKEN.services: compose.yaml에 'worker' 서비스가 없습니다"]);
 
     const bad = captureError(() =>
-      parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nsecrets:\n  payment-key: { services: [api] }\n  EMPTY: { services: [] }\n'),
+      parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nsecrets:\n  payment-key: { services: [api] }\n'),
     );
     expect(bad.issues.some((issue) => issue.startsWith('secrets.payment-key'))).toBe(true);
-    expect(bad.issues.some((issue) => issue.startsWith('secrets.EMPTY.services'))).toBe(true);
+  });
+
+  it('외부 API 정책의 호출자는 compose 서비스나 studio이고, 인증은 선언한 시크릿을 쓴다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+  legacy-users:
+    source: external
+    baseUrl: https://users.internal.example.com
+    policy:
+      allow:
+        - { callers: [api, studio], methods: [GET], paths: ["/api/users/*"] }
+        - { callers: [worker], methods: [POST] }
+      mask: [phone, email]
+      auth: { header: Authorization, secret: LEGACY_USERS_TOKEN, prefix: "Bearer " }
+  billing:
+    source: external
+    baseUrl: https://billing.internal.example.com
+    policy:
+      auth: { header: X-Api-Key, secret: MISSING_TOKEN }
+secrets:
+  LEGACY_USERS_TOKEN: {}
+  UNUSED_TOKEN: {}
+`,
+    );
+    await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual([
+      "services.legacy-users.policy.allow.1.callers: 'worker'은(는) compose.yaml의 서비스도 studio도 아닙니다",
+      "services.billing.policy.auth.secret: secrets에 'MISSING_TOKEN'이 없습니다",
+      'secrets.UNUSED_TOKEN: 받을 서비스(services)나 외부 API 인증(policy.auth)에 쓰이지 않습니다',
+    ]);
+
+    expect(parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "https://users.example.com" }\n').services.users).toMatchObject({
+      policy: { mask: [] },
+    });
+    const ftp = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "ftp://users.example.com" }\n'));
+    expect(ftp.issues[0]).toMatch(/^services\.users\.baseUrl/);
+    const credentials = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "https://svc:pw@users.example.com" }\n'));
+    expect(credentials.issues).toEqual(['services.users.baseUrl: 주소에 자격 증명을 넣지 말고 policy.auth와 secrets를 쓰세요']);
   });
 
   it('외부 접속 허용 목록은 호스트 이름만 받는다', () => {

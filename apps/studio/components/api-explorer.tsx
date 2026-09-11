@@ -2,7 +2,7 @@
 
 import type { OpenApiDocument } from "@b-studio/agent";
 import { useEffect, useState } from "react";
-import type { ProxyResponse, ServiceView } from "@/lib/studio-events";
+import type { ProxyResponse } from "@/lib/studio-events";
 
 const METHODS = ["get", "post", "put", "patch", "delete"] as const;
 
@@ -14,7 +14,18 @@ interface Operation {
 
 type SchemaMap = NonNullable<NonNullable<OpenApiDocument["components"]>["schemas"]>;
 
-export function ApiExplorer({ sessionId, service, revision }: { sessionId: string; service: ServiceView; revision: number }) {
+/** API 탐색기가 다루는 대상: 샌드박스 서비스나 등록한 사내 API */
+export interface ExplorerTarget {
+  name: string;
+  requestUrl: string;
+  contractUrl?: string;
+  ready: boolean;
+  /** 재시작으로 주소가 바뀌면 계약을 다시 불러오기 위한 값 */
+  address?: string;
+  notice?: string;
+}
+
+export function ApiExplorer({ target, revision }: { target: ExplorerTarget; revision: number }) {
   const [contract, setContract] = useState<{ document?: OpenApiDocument; error?: string }>({});
   const [method, setMethod] = useState("GET");
   const [path, setPath] = useState("/");
@@ -23,9 +34,9 @@ export function ApiExplorer({ sessionId, service, revision }: { sessionId: strin
   const [sending, setSending] = useState(false);
 
   useEffect(() => {
-    if (!service.hasContract) return;
+    if (!target.contractUrl) return;
     let cancelled = false;
-    fetch(`/api/sessions/${sessionId}/services/${service.name}/contract`)
+    fetch(target.contractUrl)
       .then(async (res) => {
         const data = await res.json();
         if (!cancelled) setContract(res.ok ? { document: data as OpenApiDocument } : { error: data.error });
@@ -37,14 +48,14 @@ export function ApiExplorer({ sessionId, service, revision }: { sessionId: strin
       cancelled = true;
     };
     // 재시작(주소 변경)이나 요청 완료 뒤에 계약을 다시 불러온다
-  }, [sessionId, service.name, service.hasContract, service.url, revision]);
+  }, [target.contractUrl, target.address, revision]);
 
   const operations = listOperations(contract.document);
   const schemas = contract.document?.components?.schemas ?? {};
 
   async function send() {
     setSending(true);
-    const res = await fetch(`/api/sessions/${sessionId}/services/${service.name}/request`, {
+    const res = await fetch(target.requestUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ method, path, body }),
@@ -59,7 +70,7 @@ export function ApiExplorer({ sessionId, service, revision }: { sessionId: strin
       <aside className="min-h-0 overflow-y-auto border-b border-line bg-panel md:border-r md:border-b-0">
         <h3 className="px-4 pt-4 text-sm font-semibold">엔드포인트</h3>
         {contract.error && <p className="px-4 pt-2 text-sm text-fail">{contract.error}</p>}
-        {!service.hasContract && <p className="px-4 pt-2 text-sm text-muted">이 서비스는 API 계약을 제공하지 않습니다.</p>}
+        {target.notice && <p className="px-4 pt-2 text-sm text-muted">{target.notice}</p>}
         <ul className="px-2 py-2">
           {operations.map((operation) => {
             const selected = operation.method === method && operation.path === path;
@@ -109,7 +120,7 @@ export function ApiExplorer({ sessionId, service, revision }: { sessionId: strin
             onChange={(event) => setPath(event.target.value)}
             className="min-w-0 flex-1 rounded border border-line bg-panel px-2 py-1.5 font-mono text-sm"
           />
-          <button type="submit" disabled={sending || service.state !== "ready"} className="rounded-md bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50">
+          <button type="submit" disabled={sending || !target.ready} className="rounded-md bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50">
             {sending ? "보내는 중" : "보내기"}
           </button>
         </form>
@@ -146,6 +157,15 @@ function ResponseView({ response }: { response: ProxyResponse | { error: string 
         <span className="text-muted">, {response.durationMs}ms</span>
         {response.truncated && <span className="text-wait">, 응답이 길어 앞부분만 표시</span>}
       </p>
+      {response.policy && (
+        <p className={`mt-1 text-sm ${response.policy.decision === "deny" ? "text-fail" : "text-muted"}`}>
+          {response.policy.decision === "deny"
+            ? `정책으로 막힘: ${response.policy.reason ?? "허용하지 않은 호출"}`
+            : response.policy.masked > 0
+              ? `정책 통과. 필드 ${response.policy.masked}개를 가렸습니다`
+              : "정책 통과. 가린 필드는 없습니다"}
+        </p>
+      )}
       <pre className="mt-2 overflow-auto rounded-md border border-line bg-panel p-3 font-mono text-xs leading-5 whitespace-pre-wrap">
         {prettyBody(response)}
       </pre>

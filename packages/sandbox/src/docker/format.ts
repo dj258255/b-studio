@@ -42,7 +42,9 @@ export function edgePortFor(project: LoadedProject, service: string): number {
 export function buildOverride(project: LoadedProject, sandboxId: string, { edgeScript = '' }: { edgeScript?: string } = {}) {
   const composeServices = project.composeServices ?? project.managed.map(([name]) => name);
   const proxy = `http://${EDGE_SERVICE}:${EDGE_PROXY_PORT}`;
-  const direct = ['localhost', '127.0.0.1', ...composeServices];
+  const externals = project.external ?? [];
+  // 등록한 사내 API 이름은 edge의 별칭이므로 HTTP 프록시(3128)를 거치지 않고 바로 부른다
+  const direct = ['localhost', '127.0.0.1', ...composeServices, ...externals.map(([name]) => name)];
   const proxyEnvironment = {
     HTTP_PROXY: proxy,
     HTTPS_PROXY: proxy,
@@ -86,8 +88,16 @@ export function buildOverride(project: LoadedProject, sandboxId: string, { edgeS
       EDGE_MAIN: '1',
       EDGE_FORWARDS: forwards.join(','),
       EDGE_ALLOW: [...DEFAULT_EGRESS_ALLOW, ...(project.egress ?? [])].join(','),
+      EDGE_CALLERS: composeServices.join(','),
+      // compose는 environment 값의 $도 치환하므로 $$로 적는다
+      EDGE_EXTERNALS: JSON.stringify(externals.map(([name, service]) => ({ name, baseUrl: service.baseUrl, policy: service.policy }))).replaceAll('$', '$$$$'),
+      // 사내 API 인증 시크릿은 edge에만 넣는다. 값 자리를 비워 compose 프로세스 환경에서 채운다
+      ...Object.fromEntries(externals.flatMap(([, service]) => (service.policy.auth ? [[service.policy.auth.secret, null]] : []))),
     },
-    networks: [SANDBOX_NETWORK, EGRESS_NETWORK],
+    // 등록한 사내 API 이름을 internal 네트워크의 별칭으로 가져, 서비스가 http://<이름>/으로 부르면 edge로 온다
+    networks: { [SANDBOX_NETWORK]: { aliases: externals.map(([name]) => name) }, [EGRESS_NETWORK]: {} },
+    // 사내 API가 Docker 호스트에서 돌 때도 edge가 찾아갈 수 있게 한다
+    ...(externals.length > 0 ? { extra_hosts: ['host.docker.internal:host-gateway'] } : {}),
     healthcheck: {
       test: ['CMD', 'node', '-e', `require('node:net').connect(${EDGE_PROXY_PORT}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))`],
       interval: '1s',

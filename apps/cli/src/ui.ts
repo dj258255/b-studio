@@ -80,5 +80,8 @@ export function printEndpoints(project: LoadedProject, endpoints: ServiceEndpoin
     const contract = service?.contract ? `  계약: ${new URL(service.contract.extract, endpoint.url)}` : '';
     console.log(`  ${endpoint.service.padEnd(12)} ${(service?.preview ?? '').padEnd(8)} ${endpoint.url}${contract}`);
   }
+  for (const [name, service] of project.external ?? []) {
+    console.log(`  ${name.padEnd(12)} ${'사내 API'.padEnd(8)} 샌드박스 안에서 http://${name}/ → ${service.baseUrl} (정책 적용)`);
+  }
   console.log();
 }
