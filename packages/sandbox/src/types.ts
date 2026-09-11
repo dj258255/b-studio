@@ -165,6 +165,21 @@ export interface SandboxProvider {
   /** 컨테이너 격리 런타임 (예: runsc, gvisor). 화면에 격리 수준을 표시할 때 쓴다 */
   readonly isolation?: string;
   create(project: LoadedProject, options?: CreateSandboxOptions): Promise<Sandbox>;
+  /**
+   * 이전 스튜디오 프로세스가 정리하지 못한 샌드박스를 id로 지운다 (서버가 비정상 종료된 뒤 복구할 때).
+   * b-studio가 만든 id 형식이 아니면 아무것도 지우지 않고 거부한다
+   */
+  cleanup?(sandboxId: string): Promise<void>;
+  /**
+   * cleanup()과 같은 정리를 하는 명령. 스튜디오 프로세스가 곧 강제 종료될 때(종료 신호) 따로 띄워 두는 용도다.
+   * 형식이 아닌 id는 거부한다
+   */
+  cleanupCommand?(sandboxId: string): CleanupCommand;
+}
+
+export interface CleanupCommand {
+  command: string;
+  args: string[];
 }
 
 export interface CreateSandboxOptions {

@@ -12,15 +12,15 @@ interface Stage {
  * 스튜디오 검증 게이트. 에이전트가 끝났다고 한 결과를 믿어도 되는지 보여주는 화면의 중심이다.
  * 파일 반영 → 서비스 재시작과 준비 판정 → 계약 비교는 실제로 순서대로 일어나므로 순서 있는 목록으로 그린다.
  */
-export function GateTrack({ files, report }: { files: string[]; report?: VerificationReport }) {
-  const verdict: Tone = !report ? "wait" : report.ok ? "pass" : "fail";
-  const stages = buildStages(files, report);
+export function GateTrack({ files, report, interrupted = false }: { files: string[]; report?: VerificationReport; interrupted?: boolean }) {
+  const verdict: Tone = !report ? (interrupted ? "idle" : "wait") : report.ok ? "pass" : "fail";
+  const stages = buildStages(files, report, interrupted);
 
   return (
     <figure className={`rounded-lg border bg-panel ${verdict === "fail" ? "border-fail/50" : verdict === "pass" ? "border-pass/40" : "border-line"}`}>
       <figcaption className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <span className="text-sm font-semibold">검증 게이트</span>
-        <span className={`text-sm font-medium ${TONE_TEXT[verdict]}`}>{verdict === "wait" ? "확인 중" : verdict === "pass" ? "통과" : "실패"}</span>
+        <span className={`text-sm font-medium ${TONE_TEXT[verdict]}`}>{verdict === "wait" ? "확인 중" : verdict === "idle" ? "중단됨" : verdict === "pass" ? "통과" : "실패"}</span>
       </figcaption>
 
       <ol className="px-4 py-3">
@@ -53,10 +53,14 @@ export function GateTrack({ files, report }: { files: string[]; report?: Verific
   );
 }
 
-function buildStages(files: string[], report?: VerificationReport): Stage[] {
+function buildStages(files: string[], report: VerificationReport | undefined, interrupted: boolean): Stage[] {
   if (!report) {
     return [
-      { title: "파일 반영 확인", tone: "wait", lines: [{ text: `바뀐 파일 ${files.length}개` }] },
+      {
+        title: "파일 반영 확인",
+        tone: interrupted ? "idle" : "wait",
+        lines: [{ text: `바뀐 파일 ${files.length}개` }, ...(interrupted ? [{ text: "확인을 마치기 전에 요청이 끝났습니다" }] : [])],
+      },
       { title: "서비스 재시작과 준비 판정", tone: "idle", lines: [] },
       { title: "API 계약 비교", tone: "idle", lines: [] },
     ];

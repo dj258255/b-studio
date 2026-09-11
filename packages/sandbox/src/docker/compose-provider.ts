@@ -10,8 +10,10 @@ import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
+import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import type {
+  CleanupCommand,
   ContainerState,
   CreateSandboxOptions,
   EgressDenial,
@@ -116,6 +118,22 @@ export class LocalDockerProvider implements SandboxProvider {
   constructor(options: LocalDockerProviderOptions = {}) {
     this.#options = options;
     this.isolation = options.runtime;
+  }
+
+  /** compose 파일 없이도 프로젝트 이름(라벨)으로 컨테이너, 볼륨, 네트워크를 지운다. external 공유 캐시는 지우지 않는다 */
+  cleanupCommand(sandboxId: string): CleanupCommand {
+    assertSandboxId(sandboxId);
+    return { command: this.#options.dockerBin ?? 'docker', args: ['compose', '--project-name', sandboxId, 'down', '--volumes', '--remove-orphans'] };
+  }
+
+  async cleanup(sandboxId: string): Promise<void> {
+    const { command, args } = this.cleanupCommand(sandboxId);
+    // 작업 디렉터리의 compose 파일을 읽지 않도록 임시 디렉터리에서 실행한다
+    try {
+      await execFileAsync(command, args, { cwd: tmpdir() });
+    } catch (error) {
+      throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, error instanceof Error ? error.message : String(error));
+    }
   }
 
   async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {

@@ -34,6 +34,14 @@ describe('reduceSession', () => {
     expect(view.snapshot.services[1]).toMatchObject({ state: 'ready', url: 'http://127.0.0.1:32801' });
   });
 
+  it('중지된 서비스는 이전 주소를 지워 사라진 미리보기를 띄우지 않는다', () => {
+    const view = fold([
+      { type: 'service', service: 'web', state: 'ready', url: 'http://127.0.0.1:32769' },
+      { type: 'service', service: 'web', state: 'stopped' },
+    ]);
+    expect(view.snapshot.services[0]).toMatchObject({ state: 'stopped', url: undefined });
+  });
+
   it('연속된 도구 호출을 한 묶음으로 모으고 결과를 순서대로 붙인다', () => {
     const view = fold([
       { type: 'run_started', runId: 'r1', request: '메모 필드 추가' },
@@ -73,6 +81,25 @@ describe('reduceSession', () => {
 
     const done = fold([{ type: 'agent', runId: 'r1', event: { type: 'verify_result', report, text: '검증 통과' } }], pending);
     expect(done.chat).toEqual([{ kind: 'gate', runId: 'r1', files: ['api/Order.java'], report }]);
+  });
+
+  it('요청이 끝났는데 결과가 오지 않은 게이트와 도구 호출은 중단으로 표시한다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '메모 필드 추가' },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_call', name: 'write_file', input: { path: 'api/V2.sql' } } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_result', name: 'write_file', ok: true, content: 'wrote' } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_call', name: 'restart_service', input: { service: 'api' } } },
+      { type: 'agent', runId: 'r1', event: { type: 'verify_start', files: ['api/V2.sql'] } },
+      { type: 'run_finished', runId: 'r1', status: 'error', summary: '스튜디오 서버가 멈춰 끝내지 못했습니다' },
+    ]);
+
+    expect(view.chat).toMatchObject([
+      { kind: 'request' },
+      { kind: 'tools', calls: [{ ok: true }, { interrupted: true }] },
+      { kind: 'gate', interrupted: true },
+      { kind: 'outcome', status: 'error' },
+    ]);
+    expect((view.chat[1] as { calls: Array<{ interrupted?: boolean }> }).calls[0]?.interrupted).toBeUndefined();
   });
 
   it('요청이 끝나면 실행 중 표시를 끄고 다음 데모 요청을 갱신한다', () => {
@@ -142,6 +169,27 @@ describe('reduceSession', () => {
       result: { ok: true, files: ['api/Order.java'], databases: [{ service: 'db', action: 'restored' }] },
     });
     expect(done.completedRuns).toBe(1);
+  });
+
+  it('이어서 작업하면 대화에 남기고 새 샌드박스 주소로 미리보기를 다시 불러오게 한다', () => {
+    const head = { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', message: '요청: 메모', createdAt: '', files: ['api/Order.java'] };
+    const resumed = {
+      checkpoint: head,
+      discarded: ['web/app/page.tsx'],
+      databases: [{ service: 'db', action: 'restored' }],
+      restarted: [{ service: 'api', ready: true }],
+    } as const;
+    const view = fold([
+      { type: 'snapshot', snapshot: { ...snapshot, status: 'stopped', checkpoints: [head] } },
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      { type: 'run_finished', runId: 'r1', status: 'error', summary: '스튜디오 서버가 멈춰 끝내지 못했습니다' },
+      { type: 'resumed', ...resumed, discarded: [...resumed.discarded], databases: [...resumed.databases], restarted: [...resumed.restarted] },
+    ]);
+
+    expect(view.snapshot.running).toBe(false);
+    expect(view.chat.map((item) => item.kind)).toEqual(['request', 'outcome', 'resumed']);
+    expect(view.chat.at(-1)).toEqual({ kind: 'resumed', ...resumed });
+    expect(view.completedRuns).toBe(2);
   });
 
   it('올린 결과로 원격 상태를 바꾸고 대화에 남긴다', () => {

@@ -136,8 +136,8 @@ function ChatEntry({ item }: { item: ChatItem }) {
           <ul className="space-y-1 border-t border-line px-3 py-2">
             {item.calls.map((call, index) => (
               <li key={index} className="font-mono text-xs leading-5">
-                <span className={call.ok === false ? "text-fail" : call.ok ? "text-pass" : "text-wait"}>
-                  {call.ok === false ? "실패" : call.ok ? "완료" : "실행 중"}
+                <span className={call.ok === false ? "text-fail" : call.ok ? "text-pass" : call.interrupted ? "text-muted" : "text-wait"}>
+                  {call.ok === false ? "실패" : call.ok ? "완료" : call.interrupted ? "중단" : "실행 중"}
                 </span>{" "}
                 <span className="break-all">{call.summary}</span>
                 {call.ok === false && call.output && <p className="mt-0.5 break-words text-fail">{call.output.split("\n")[0]}</p>}
@@ -149,7 +149,7 @@ function ChatEntry({ item }: { item: ChatItem }) {
     }
 
     case "gate":
-      return <GateTrack files={item.files} report={item.report} />;
+      return <GateTrack files={item.files} report={item.report} interrupted={item.interrupted} />;
 
     case "checkpoint":
       return (
@@ -215,6 +215,26 @@ function ChatEntry({ item }: { item: ChatItem }) {
       );
     }
 
+    case "resumed":
+      return (
+        <div className="rounded-md border border-line px-3 py-2 text-sm">
+          <p className="font-medium">
+            새 샌드박스에서 체크포인트 <span className="font-mono">{item.checkpoint.shortSha}</span>부터 이어서 작업합니다
+          </p>
+          {item.discarded.length > 0 && (
+            <p className="mt-0.5 text-muted">
+              체크포인트에 없던 변경 {item.discarded.length}개를 버렸습니다:{" "}
+              <span className="break-all font-mono text-xs">
+                {item.discarded.slice(0, 5).join(", ")}
+                {item.discarded.length > 5 && " 외"}
+              </span>
+            </p>
+          )}
+          {databaseSummary(item.databases) && <p className="mt-0.5 text-muted">{databaseSummary(item.databases)}</p>}
+          {item.restarted.length > 0 && <p className="mt-0.5 text-muted">{restartSummary(item.restarted)}</p>}
+        </div>
+      );
+
     case "outcome":
       return (
         <p className={`text-sm ${item.status === "done" ? "text-pass" : "text-fail"}`}>
@@ -249,7 +269,7 @@ function restartSummary(restarted: ServiceCheck[]): string {
 function hintFor({ snapshot, chat }: SessionView): string {
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
-  if (snapshot.status === "stopped") return "샌드박스를 중지했습니다.";
+  if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";
   if (chat.length > 0) return "요청마다 검증 게이트를 통과해야 완료로 표시됩니다.";
   if (snapshot.mode === "demo") return "데모 모드는 준비된 요청을 순서대로 스크립트로 실행합니다.";
   if (snapshot.mode === "claude-code") {

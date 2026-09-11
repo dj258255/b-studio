@@ -11,8 +11,10 @@ import { parseEgressDenial, parseSyncOutput } from '../docker/format';
 import { EDGE_SERVICE, edgePortFor } from '../edge-config';
 import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
+import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import type {
+  CleanupCommand,
   ContainerState,
   CreateSandboxOptions,
   EgressDenial,
@@ -66,6 +68,19 @@ export class KubernetesProvider implements SandboxProvider {
   constructor(options: KubernetesProviderOptions) {
     this.#options = options;
     this.isolation = options.runtimeClassName;
+  }
+
+  /** 세션의 모든 리소스(Sandbox, Secret, NetworkPolicy)가 네임스페이스 안에 있다 */
+  cleanupCommand(sandboxId: string): CleanupCommand {
+    assertSandboxId(sandboxId);
+    const kubectl = new Kubectl(this.#options);
+    return { command: kubectl.bin, args: kubectl.args(['delete', 'namespace', sandboxId, '--ignore-not-found', '--wait=false']) };
+  }
+
+  async cleanup(sandboxId: string): Promise<void> {
+    const { command, args } = this.cleanupCommand(sandboxId);
+    const result = await execCommand(command, args, {});
+    if (result.exitCode !== 0) throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, result.stderr);
   }
 
   async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {

@@ -6,7 +6,8 @@ import type { ServiceUsage } from '@b-studio/sandbox';
 export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
 /** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, demo: 준비된 스크립트 */
 export type SessionMode = 'api' | 'claude-code' | 'demo';
-export type ServiceState = 'starting' | 'probing' | 'ready' | 'failed';
+/** stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다 */
+export type ServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped';
 
 export interface ServiceView {
   name: string;
@@ -79,6 +80,17 @@ export interface ProjectSummary {
   error?: string;
 }
 
+/** 홈 화면의 세션 목록. 중지된 세션도 작업 복사본이 남아 있어 이어서 작업할 수 있다 */
+export interface SessionSummary {
+  id: string;
+  projectName: string;
+  status: SessionStatus;
+  mode: SessionMode;
+  checkpoints: number;
+  lastRequest?: string;
+  updatedAt: string;
+}
+
 export type StudioEvent =
   | { type: 'snapshot'; snapshot: SessionSnapshot }
   | { type: 'status'; status: SessionStatus; error?: string }
@@ -120,6 +132,15 @@ export type StudioEvent =
       nextDemoRequest?: string;
     }
   | { type: 'restore_failed'; checkpoint: Checkpoint; error: string }
+  /** 중지된 세션을 새 샌드박스에서 마지막 체크포인트부터 다시 띄웠다 */
+  | {
+      type: 'resumed';
+      checkpoint: Checkpoint;
+      /** 끝내지 못한 요청이 남겨 버린, 체크포인트에 없던 변경 */
+      discarded: string[];
+      databases: DatabaseState[];
+      restarted: ServiceCheck[];
+    }
   | {
       type: 'exported';
       repository: RepositoryView;

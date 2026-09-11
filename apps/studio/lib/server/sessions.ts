@@ -1,6 +1,7 @@
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cp, mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { cp, mkdir, stat } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   AnthropicModelClient,
@@ -26,13 +27,33 @@ import {
   type DemoScenario,
   type GitAuthor,
   type ModelClient,
+  type ServiceCheck,
 } from '@b-studio/agent';
 import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import type { ExportResult, ProxyResponse, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
+import type {
+  ExportResult,
+  ProxyResponse,
+  RepositoryView,
+  SessionMode,
+  SessionSnapshot,
+  SessionStatus,
+  SessionSummary,
+  StudioEvent,
+} from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
 import { findProject } from './projects';
+import {
+  archivedSnapshot,
+  closeUnfinished,
+  isProcessAlive,
+  readSessions,
+  trimHistory,
+  writeSession,
+  writeSessionSync,
+  type PersistedSession,
+} from './session-store';
 
 type Conversation = NonNullable<Parameters<typeof runAgent>[0]['conversation']>;
 type Listener = (event: StudioEvent) => void;
@@ -41,12 +62,19 @@ interface Session {
   snapshot: SessionSnapshot;
   project: LoadedProject;
   sandbox: Sandbox;
+  /** 샌드박스를 만든 제공자 이름. 서버가 비정상 종료된 뒤 남은 샌드박스를 정리할 때 쓴다 */
+  provider: string;
   /** 채팅·상태 이벤트. 새로 연결한 브라우저에 다시 보낸다 */
   history: StudioEvent[];
   /** 로그는 양이 많아 따로 최근 것만 둔다 */
   logs: StudioEvent[];
   listeners: Set<Listener>;
   conversation: Conversation;
+  /**
+   * 요청이 끝난 시점의 대화 길이. 요청 도중의 대화에는 결과가 없는 도구 호출이 있어,
+   * 그 상태로 저장했다가 이어서 작업하면 다음 요청이 API 오류로 실패한다
+   */
+  settledConversation: number;
   stop: AbortController;
   logFollower?: AbortController;
   demoIndex: number;
@@ -64,28 +92,78 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   usageTimer?: NodeJS.Timeout;
+  /** 마지막으로 대화나 상태가 바뀐 시각. 세션 목록 정렬에 쓴다 */
+  updatedAt: string;
+  persist: { timer?: NodeJS.Timeout; chain: Promise<void> };
+}
+
+/** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
+interface ArchivedSession {
+  data: PersistedSession;
+  snapshot: SessionSnapshot;
+  history: StudioEvent[];
+  listeners: Set<Listener>;
+  /** 남은 샌드박스 정리. 끝난 뒤에 이어서 작업한다 */
+  cleanup: Promise<void>;
 }
 
 const HISTORY_LIMIT = 5_000;
 /** docker stats 한 번이 1초 남짓 걸리므로 넉넉히 둔다 */
 const USAGE_INTERVAL_MS = 5_000;
 const LOG_LIMIT = 1_000;
+/** 도구 호출마다 이벤트가 오므로 모아서 쓴다 */
+const PERSIST_DELAY_MS = 500;
 const GENERATED = /[/\\](node_modules|\.next|build|\.gradle|\.venv)([/\\]|$)/;
+const INTERRUPTED_BY_RESTART = '스튜디오 서버가 멈춰 끝내지 못했습니다';
+const INTERRUPTED_BY_STOP = '샌드박스를 중지해 끝내지 못했습니다';
 
 // 개발 서버의 HMR로 모듈이 다시 로드돼도 실행 중인 샌드박스를 잃지 않도록 전역에 둔다
-const globalStore = globalThis as typeof globalThis & {
-  __bStudio?: { sessions: Map<string, Session>; cleanupRegistered: boolean };
-};
-const store = (globalStore.__bStudio ??= { sessions: new Map(), cleanupRegistered: false });
+interface Store {
+  sessions: Map<string, Session>;
+  /** 이전 버전 모듈이 만든 전역 객체에는 없을 수 있다 */
+  archived?: Map<string, ArchivedSession>;
+  resuming?: Set<string>;
+  recovery?: Promise<void>;
+  cleanupRegistered: boolean;
+}
+const globalStore = globalThis as typeof globalThis & { __bStudio?: Store };
+const store: Store = (globalStore.__bStudio ??= { sessions: new Map(), cleanupRegistered: false });
+const archived = (store.archived ??= new Map());
+const resuming = (store.resuming ??= new Set());
 
 export function getSnapshot(id: string): SessionSnapshot | undefined {
-  return store.sessions.get(id)?.snapshot;
+  return (store.sessions.get(id) ?? archived.get(id))?.snapshot;
+}
+
+/** 실행 중이거나 중지된 세션. 최근에 바뀐 것부터 */
+export async function listSessions(): Promise<SessionSummary[]> {
+  await recoverSessions();
+  const summaries = [
+    ...[...store.sessions.values()].map((session) => summarize(session.snapshot, session.history, session.updatedAt)),
+    ...[...archived.values()].map((entry) => summarize(entry.snapshot, entry.history, entry.data.savedAt)),
+  ];
+  return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], updatedAt: string): SessionSummary {
+  const lastRequest = history.findLast((event) => event.type === 'run_started');
+  return {
+    id: snapshot.id,
+    projectName: snapshot.projectName,
+    status: snapshot.status,
+    mode: snapshot.mode,
+    checkpoints: snapshot.checkpoints.length,
+    lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
+    updatedAt,
+  };
 }
 
 export async function createSession(projectId: string): Promise<SessionSnapshot> {
   const mode = sessionMode();
   const source = await findProject(projectId);
   if (!source) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
+  // 이전 프로세스가 남긴 샌드박스를 먼저 정리해 새 세션과 자원을 다투지 않게 한다
+  await recoverSessions();
 
   const id = randomUUID().slice(0, 8);
   // 에이전트가 원본을 바꾸지 않도록 세션마다 작업 복사본을 만든다. Docker가 마운트할 수 있는 홈 아래에 둔다
@@ -113,10 +191,9 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
-  const runtime = provider.isolation;
   const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
 
-  const session: Session = {
+  const session = newSession({
     snapshot: {
       id,
       projectId,
@@ -125,57 +202,86 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
       status: 'starting',
       mode,
       running: false,
-      services: project.managed.map(([name, service]) => ({
-        name,
-        template: service.template,
-        preview: service.preview,
-        state: 'starting',
-        hasContract: Boolean(service.contract),
-      })),
-      externals: (project.external ?? []).map(([name, service]) => ({
-        name,
-        baseUrl: service.baseUrl,
-        access: service.policy.allow
-          ? service.policy.allow.map((rule) => `${rule.callers.join(', ')}: ${rule.methods.join('/')} ${rule.paths.join(', ')}`)
-          : ['모든 호출자: GET/HEAD'],
-        mask: service.policy.mask,
-        authenticated: Boolean(service.policy.auth),
-      })),
+      ...projectViews(project),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
-      runtime,
+      runtime: provider.isolation,
       checkpoints: [firstCheckpoint],
       repository,
     },
     project,
     sandbox,
+    provider: provider.name,
     checkpoints,
-    // 덤프는 에이전트 도구가 접근할 수 없고 커밋에도 들어가지 않는 .git 아래에 둔다
-    databases: new DatabaseBranches(sandbox, project, path.join(workDir, '.git', 'b-studio', 'databases')),
     history: [],
-    logs: [],
     listeners: new Set(),
     conversation: [],
-    stop: new AbortController(),
     demoIndex: 0,
     claudeCode: { notes: [] },
     sourceDirtyFiles,
-    exporting: false,
-  };
+  });
 
   store.sessions.set(id, session);
   registerCleanup();
+  // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
+  void flushPersist(session);
   void boot(session);
   return session.snapshot;
 }
 
+type NewSession = Pick<
+  Session,
+  'snapshot' | 'project' | 'sandbox' | 'provider' | 'checkpoints' | 'history' | 'listeners' | 'conversation' | 'demoIndex' | 'claudeCode' | 'sourceDirtyFiles'
+>;
+
+function newSession(fields: NewSession): Session {
+  return {
+    ...fields,
+    // 덤프는 에이전트 도구가 접근할 수 없고 커밋에도 들어가지 않는 .git 아래에 둔다
+    databases: new DatabaseBranches(fields.sandbox, fields.project, path.join(fields.snapshot.workDir, '.git', 'b-studio', 'databases')),
+    logs: [],
+    settledConversation: fields.conversation.length,
+    stop: new AbortController(),
+    exporting: false,
+    updatedAt: new Date().toISOString(),
+    persist: { chain: Promise.resolve() },
+  };
+}
+
+function projectViews(project: LoadedProject): Pick<SessionSnapshot, 'services' | 'externals'> {
+  return {
+    services: project.managed.map(([name, service]) => ({
+      name,
+      template: service.template,
+      preview: service.preview,
+      state: 'starting',
+      hasContract: Boolean(service.contract),
+    })),
+    externals: (project.external ?? []).map(([name, service]) => ({
+      name,
+      baseUrl: service.baseUrl,
+      access: service.policy.allow
+        ? service.policy.allow.map((rule) => `${rule.callers.join(', ')}: ${rule.methods.join('/')} ${rule.paths.join(', ')}`)
+        : ['모든 호출자: GET/HEAD'],
+      mask: service.policy.mask,
+      authenticated: Boolean(service.policy.auth),
+    })),
+  };
+}
+
 /** 새 구독자에게 지금 상태와 지금까지의 기록을 보낸 뒤 실시간 이벤트를 전달한다 */
 export function subscribe(id: string, listener: Listener): () => void {
-  const session = requireSession(id);
-  listener({ type: 'snapshot', snapshot: session.snapshot });
-  for (const event of session.history) listener(event);
-  for (const event of session.logs) listener(event);
-  session.listeners.add(listener);
-  return () => session.listeners.delete(listener);
+  const target = store.sessions.get(id) ?? archived.get(id);
+  if (!target) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  replay(target, listener);
+  target.listeners.add(listener);
+  // 이어서 작업하면 같은 Set을 새 세션이 넘겨받으므로 구독 해제도 그대로 동작한다
+  return () => target.listeners.delete(listener);
+}
+
+function replay(target: Session | ArchivedSession, listener: Listener): void {
+  listener({ type: 'snapshot', snapshot: target.snapshot });
+  for (const event of target.history) listener(event);
+  if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
 export function sendMessage(id: string, text: string, { allowBreaking }: { allowBreaking: boolean }): { runId: string } {
@@ -203,8 +309,161 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   clearInterval(session.usageTimer);
   await session.sandbox.destroy().catch(() => {});
   session.snapshot.running = false;
+  // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
+  for (const service of session.snapshot.services) {
+    Object.assign(service, { state: 'stopped', url: undefined, detail: undefined });
+    emit(session, { type: 'service', service: service.name, state: 'stopped' });
+  }
   setStatus(session, 'stopped');
+  await flushPersist(session);
   return session.snapshot;
+}
+
+/**
+ * 중지된 세션을 같은 작업 복사본과 체크포인트로 새 샌드박스에서 다시 띄운다.
+ * 이 프로세스에서 중지한 세션과 이전 스튜디오 프로세스가 남긴 세션 모두 같은 id로 이어진다
+ */
+export async function resumeSession(id: string): Promise<SessionSnapshot> {
+  await recoverSessions();
+  const live = store.sessions.get(id);
+  const entry = archived.get(id);
+  if (!live && !entry) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  if (live && live.snapshot.status !== 'stopped') throw new StudioError(409, '샌드박스를 중지한 세션만 이어서 작업할 수 있습니다');
+  if (resuming.has(id)) throw new StudioError(409, '이미 이어서 작업할 준비를 하는 중입니다');
+
+  resuming.add(id);
+  try {
+    let data: PersistedSession;
+    let history: StudioEvent[];
+    if (live) {
+      // 중지한 세션의 늦은 저장이 새 세션의 파일을 덮어쓰지 않게 기다린다
+      clearTimeout(live.persist.timer);
+      await live.persist.chain;
+      data = toPersisted(live);
+      history = closeUnfinished(data.history, INTERRUPTED_BY_STOP);
+    } else {
+      await entry!.cleanup;
+      data = entry!.data;
+      history = entry!.history;
+    }
+
+    const mode = sessionMode();
+    if (data.snapshot.mode !== mode) {
+      throw new StudioError(409, `이 세션은 ${data.snapshot.mode} 모드로 만들었습니다. B_STUDIO_MODE=${data.snapshot.mode}로 스튜디오를 실행한 뒤 이어서 작업하세요`);
+    }
+    const { workDir } = data.snapshot;
+    if (!(await stat(workDir).then((info) => info.isDirectory(), () => false))) {
+      throw new StudioError(409, `작업 복사본이 없어 이어서 작업할 수 없습니다: ${workDir}`);
+    }
+
+    const project = await loadProject(workDir);
+    const checkpoints = new CheckpointStore(workDir, { author: gitAuthor() });
+    // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리고 마지막 체크포인트에서 시작한다
+    const { files: discarded } = await checkpoints.discard();
+    const list = await checkpoints.list();
+    const head = list[0]!;
+    const provider = providerFromEnv();
+    const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
+
+    const session = newSession({
+      snapshot: {
+        ...data.snapshot,
+        ...projectViews(project),
+        status: 'starting',
+        error: undefined,
+        running: false,
+        usage: undefined,
+        runtime: provider.isolation,
+        checkpoints: list,
+        repository: await describeRepository(checkpoints, data.sourceDirtyFiles),
+        nextDemoRequest: mode === 'demo' ? demoScenarios(project)[data.demoIndex]?.request : undefined,
+      },
+      project,
+      sandbox,
+      provider: provider.name,
+      checkpoints,
+      history,
+      // 열려 있는 화면의 구독을 그대로 넘겨받는다
+      listeners: live?.listeners ?? entry!.listeners,
+      conversation: data.conversation as Conversation,
+      demoIndex: data.demoIndex,
+      claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
+      sourceDirtyFiles: data.sourceDirtyFiles,
+    });
+
+    // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
+    const note = [
+      `[b-studio] 세션을 새 샌드박스에서 이어서 시작했습니다. 작업 복사본과 데이터베이스는 체크포인트 ${head.shortSha}("${head.message}") 상태입니다.`,
+      ...(discarded.length > 0 ? [`체크포인트에 없던 변경 ${discarded.length}개는 버렸습니다: ${discarded.slice(0, 20).join(', ')}`] : []),
+    ].join(' ');
+    if (mode === 'claude-code') session.claudeCode.notes.push(note);
+    else session.conversation.push({ role: 'user', content: note });
+    session.settledConversation = session.conversation.length;
+
+    archived.delete(id);
+    store.sessions.set(id, session);
+    registerCleanup();
+    for (const listener of session.listeners) replay(session, listener);
+    void flushPersist(session);
+    void boot(session, { discarded });
+    return session.snapshot;
+  } finally {
+    resuming.delete(id);
+  }
+}
+
+/**
+ * 프로세스마다 한 번, 세션 폴더에 남은 세션을 읽는다.
+ * 비정상 종료로 샌드박스가 남은 세션은 샌드박스를 정리하고, 모든 세션을 중지 상태로 보여 준다
+ */
+export function recoverSessions(): Promise<void> {
+  store.recovery ??= recover().catch((error: unknown) => console.error('[b-studio] 이전 세션을 읽지 못했습니다', error));
+  return store.recovery;
+}
+
+async function recover(): Promise<void> {
+  for (const data of await readSessions(sessionsRoot())) {
+    const { id } = data.snapshot;
+    if (store.sessions.has(id) || archived.has(id)) continue;
+    // 같은 세션 폴더를 쓰는 다른 스튜디오 프로세스가 실행 중이면 그 세션은 건드리지 않는다
+    if (data.owner.pid !== process.pid && isProcessAlive(data.owner.pid)) continue;
+
+    const interrupted = data.snapshot.status !== 'stopped';
+    const entry: ArchivedSession = {
+      data,
+      snapshot: archivedSnapshot(data, interrupted ? '스튜디오 서버가 다시 시작돼 이전 샌드박스를 정리하는 중입니다.' : undefined),
+      history: closeUnfinished(data.history, interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP),
+      listeners: new Set(),
+      cleanup: Promise.resolve(),
+    };
+    archived.set(id, entry);
+    if (interrupted) entry.cleanup = cleanupSandbox(entry);
+  }
+}
+
+async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
+  const { id: sandboxId, provider: providerName } = entry.data.sandbox;
+  let error: string;
+  let cleaned = false;
+  try {
+    const provider = providerFromEnv();
+    if (provider.name !== providerName || !provider.cleanup) {
+      throw new Error(`지금 설정한 샌드박스 제공자(${provider.name})가 이 세션을 만든 제공자(${providerName})와 다릅니다`);
+    }
+    await provider.cleanup(sandboxId);
+    cleaned = true;
+    error = '스튜디오 서버가 다시 시작돼 이전 샌드박스를 정리했습니다. 작업 복사본과 체크포인트는 남아 있어 이어서 작업할 수 있습니다.';
+  } catch (cause) {
+    error = `이전 샌드박스 ${sandboxId}를 정리하지 못했습니다: ${describe(cause)}`;
+  }
+
+  entry.snapshot = { ...entry.snapshot, error };
+  for (const listener of entry.listeners) listener({ type: 'status', status: 'stopped', error });
+  // 정리하지 못했으면 파일을 그대로 두어 다음 실행에서 다시 정리한다
+  if (cleaned) {
+    entry.data = { ...entry.data, savedAt: new Date().toISOString(), owner: { pid: process.pid }, snapshot: entry.snapshot, history: entry.history };
+    await writeSession(entry.data).catch((cause: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', cause));
+  }
 }
 
 export async function contractFor(id: string, service: string): Promise<unknown> {
@@ -248,20 +507,36 @@ export async function externalRequest(id: string, name: string, input: { method:
   };
 }
 
-async function boot(session: Session): Promise<void> {
+/** resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다 */
+async function boot(session: Session, resumed?: { discarded: string[] }): Promise<void> {
+  const signal = session.stop.signal;
+  const onStatus = (event: ServiceStatusEvent) => onServiceStatus(session, event);
   try {
     await session.sandbox.start({
-      signal: session.stop.signal,
-      onStatus: (event) => onServiceStatus(session, event),
+      signal,
+      onStatus,
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
     });
-    // 서비스가 마이그레이션까지 마친 상태를 세션 시작 체크포인트의 데이터베이스 상태로 남긴다
-    await saveDatabases(session, session.snapshot.checkpoints[0]!.sha);
+    const head = session.snapshot.checkpoints[0]!;
+    if (!resumed) {
+      // 서비스가 마이그레이션까지 마친 상태를 세션 시작 체크포인트의 데이터베이스 상태로 남긴다
+      await saveDatabases(session, head.sha);
+    } else {
+      const database = await session.databases.restore(head.sha, signal);
+      // 기동 전에 서버가 멈춰 저장한 상태가 없으면 지금 상태를 그 체크포인트의 상태로 남긴다
+      if (database.states.some((state) => state.action === 'missing')) await saveDatabases(session, head.sha);
+      let restarted: ServiceCheck[] = [];
+      if (database.dependents.length > 0) {
+        // 복원한 데이터베이스에 붙어 있던 연결과 캐시를 버리도록 의존 서비스를 다시 띄운다
+        restarted = (await restartServicesFor(session.sandbox, session.project, [], { signal, onStatus }, { alsoRestart: database.dependents })).restarted;
+      }
+      emit(session, { type: 'resumed', checkpoint: head, discarded: resumed.discarded, databases: database.states, restarted });
+    }
     setStatus(session, 'ready');
   } catch (error) {
-    if (!session.stop.signal.aborted) setStatus(session, 'failed', describe(error));
+    if (!signal.aborted) setStatus(session, 'failed', describe(error));
   }
 }
 
@@ -312,6 +587,7 @@ async function execute(session: Session, runId: string, request: string, plan: R
     }
     session.snapshot.running = false;
     if (!session.stop.signal.aborted && finished) {
+      session.settledConversation = session.conversation.length;
       emit(session, { ...finished, nextDemoRequest: session.snapshot.nextDemoRequest });
     }
   }
@@ -445,6 +721,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
       const note = `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`;
       if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(note);
       else session.conversation.push({ role: 'user', content: note });
+      session.settledConversation = session.conversation.length;
       if (session.snapshot.mode === 'demo') {
         // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 체크포인트 수에 맞춰 다음 요청을 다시 정한다
         session.demoIndex = session.snapshot.checkpoints.length - 1;
@@ -640,13 +917,49 @@ function emit(session: Session, event: StudioEvent): void {
     const limit = event.type === 'log' ? LOG_LIMIT : HISTORY_LIMIT;
     if (buffer.length > limit) buffer.splice(0, buffer.length - limit);
   }
+  if (event.type !== 'usage' && event.type !== 'log') {
+    session.updatedAt = new Date().toISOString();
+    schedulePersist(session);
+  }
   for (const listener of session.listeners) listener(event);
+}
+
+function toPersisted(session: Session): PersistedSession {
+  return {
+    version: 1,
+    savedAt: session.updatedAt,
+    owner: { pid: process.pid },
+    snapshot: session.snapshot,
+    history: trimHistory(session.history),
+    conversation: session.conversation.slice(0, session.settledConversation),
+    demoIndex: session.demoIndex,
+    claudeCode: session.claudeCode,
+    sourceDirtyFiles: session.sourceDirtyFiles,
+    sandbox: { id: session.sandbox.id, provider: session.provider },
+  };
+}
+
+function schedulePersist(session: Session): void {
+  if (session.persist.timer) return;
+  session.persist.timer = setTimeout(() => void flushPersist(session), PERSIST_DELAY_MS);
+  session.persist.timer.unref();
+}
+
+/** 쓰기를 차례로 이어 붙여 같은 임시 파일을 동시에 쓰지 않는다. 저장에 실패해도 세션은 계속한다 */
+function flushPersist(session: Session): Promise<void> {
+  clearTimeout(session.persist.timer);
+  session.persist.timer = undefined;
+  session.persist.chain = session.persist.chain
+    .then(() => writeSession(toPersisted(session)))
+    .catch((error: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', error));
+  return session.persist.chain;
 }
 
 function requireSession(id: string): Session {
   const session = store.sessions.get(id);
-  if (!session) throw new StudioError(404, '세션을 찾을 수 없습니다');
-  return session;
+  if (session) return session;
+  if (archived.has(id)) throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
+  throw new StudioError(404, '세션을 찾을 수 없습니다');
 }
 
 function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
@@ -665,22 +978,40 @@ function sessionsRoot(): string {
   return path.resolve(process.env.B_STUDIO_SESSIONS_DIR ?? path.join(homedir(), '.cache/b-studio/sessions'));
 }
 
-/** 스튜디오 서버가 종료될 때 띄워 둔 샌드박스를 정리한다 */
+/**
+ * 스튜디오 서버가 종료 신호를 받으면 샌드박스 정리 명령을 따로 띄워 두고 마지막 상태를 남긴다.
+ * next dev는 신호를 넘긴 자식 프로세스를 100ms 뒤 강제 종료하므로(NEXT_EXIT_TIMEOUT_MS) 정리를 기다릴 수 없다.
+ * 상태를 중지로 바꾸지 않으므로, 따로 띄운 정리가 실패해도 다음 실행의 복구가 다시 정리한다
+ */
 function registerCleanup(): void {
   if (store.cleanupRegistered) return;
   store.cleanupRegistered = true;
 
   let cleaning = false;
-  const cleanup = async () => {
+  const cleanup = (signal: NodeJS.Signals) => {
+    // 터미널의 Ctrl+C와 next dev가 넘긴 신호가 함께 온다
     if (cleaning) return;
     cleaning = true;
-    const running = [...store.sessions.values()].filter((session) => session.snapshot.status !== 'stopped');
-    await Promise.race([
-      Promise.allSettled(running.map((session) => stopSession(session.snapshot.id))),
-      new Promise((resolve) => setTimeout(resolve, 20_000)),
-    ]);
-    process.exit(0);
+    for (const session of store.sessions.values()) {
+      if (session.snapshot.status === 'stopped') continue;
+      session.stop.abort();
+      clearTimeout(session.persist.timer);
+      try {
+        const command = providerFromEnv().cleanupCommand?.(session.sandbox.id);
+        if (command) {
+          // 새 프로세스 그룹으로 띄워 터미널의 신호와 스튜디오의 강제 종료가 닿지 않게 한다
+          const child = spawn(command.command, command.args, { cwd: tmpdir(), detached: true, stdio: 'ignore' });
+          child.on('error', (error) => console.error('[b-studio] 샌드박스 정리 명령을 실행하지 못했습니다', error));
+          child.unref();
+        }
+        writeSessionSync(toPersisted(session));
+      } catch (error) {
+        console.error('[b-studio] 종료할 때 세션을 정리하지 못했습니다', session.snapshot.id, error);
+      }
+    }
+    // Next의 신호 처리를 끈 실행(NEXT_MANUAL_SIG_HANDLE)에서는 직접 끝낸다
+    if (process.env.NEXT_MANUAL_SIG_HANDLE) process.exit(signal === 'SIGINT' ? 130 : 143);
   };
-  process.on('SIGINT', () => void cleanup());
-  process.on('SIGTERM', () => void cleanup());
+  process.on('SIGINT', () => cleanup('SIGINT'));
+  process.on('SIGTERM', () => cleanup('SIGTERM'));
 }

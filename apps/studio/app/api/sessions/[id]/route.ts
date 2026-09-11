@@ -1,8 +1,9 @@
 import { errorResponse, StudioError } from '@/lib/server/errors';
-import { getSnapshot, stopSession } from '@/lib/server/sessions';
+import { getSnapshot, recoverSessions, stopSession } from '@/lib/server/sessions';
 
 export async function GET(_request: Request, context: RouteContext<'/api/sessions/[id]'>) {
   const { id } = await context.params;
+  await recoverSessions();
   const snapshot = getSnapshot(id);
   return snapshot ? Response.json(snapshot) : errorResponse(new StudioError(404, '세션을 찾을 수 없습니다'));
 }

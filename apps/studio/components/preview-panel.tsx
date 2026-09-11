@@ -182,7 +182,9 @@ function ServicePending({ service }: { service: ServiceView }) {
       </p>
       {service.detail && <p className="mt-2 max-w-[70ch] font-mono text-sm break-words text-muted">{service.detail}</p>}
       <p className="mt-4 max-w-[60ch] text-sm leading-6 text-muted">
-        처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다.
+        {service.state === "stopped"
+          ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
+          : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다."}
       </p>
     </div>
   );

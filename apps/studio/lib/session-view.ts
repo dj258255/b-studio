@@ -12,6 +12,8 @@ export interface ToolCallView {
   summary: string;
   ok?: boolean;
   output?: string;
+  /** 결과가 오기 전에 요청이 끝났다 */
+  interrupted?: boolean;
 }
 
 export type ChatItem =
@@ -19,7 +21,8 @@ export type ChatItem =
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
-  | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport }
+  /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */
+  | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport; interrupted?: boolean }
   | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error'; summary: string; turns?: number }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   | { kind: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[]; databases: DatabaseState[] }
@@ -28,6 +31,7 @@ export type ChatItem =
       checkpoint: Checkpoint;
       result?: { ok: true; files: string[]; restarted: ServiceCheck[]; databases: DatabaseState[] } | { ok: false; error: string };
     }
+  | { kind: 'resumed'; checkpoint: Checkpoint; discarded: string[]; databases: DatabaseState[]; restarted: ServiceCheck[] }
   | {
       kind: 'exported';
       branch: string;
@@ -70,7 +74,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return patchSnapshot(view, {
         services: view.snapshot.services.map((service) =>
           service.name === event.service
-            ? { ...service, state: event.state, url: event.url ?? service.url, detail: event.detail }
+            ? // 재시작 중에는 이전 주소로 미리보기를 유지하고, 중지하면 주소를 지운다
+              { ...service, state: event.state, url: event.state === 'stopped' ? undefined : (event.url ?? service.url), detail: event.detail }
             : service,
         ),
       });
@@ -90,7 +95,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return {
         ...patchSnapshot(view, { running: false, nextDemoRequest: event.nextDemoRequest }),
         chat: [
-          ...view.chat,
+          ...markInterrupted(view.chat, event.runId),
           { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns },
         ],
         completedRuns: view.completedRuns + 1,
@@ -136,6 +141,17 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         chat: settleRestore(view.chat, event.checkpoint.sha, { ok: false, error: event.error }),
       };
 
+    case 'resumed':
+      return {
+        ...view,
+        chat: [
+          ...view.chat,
+          { kind: 'resumed', checkpoint: event.checkpoint, discarded: event.discarded, databases: event.databases, restarted: event.restarted },
+        ],
+        // 새 샌드박스의 주소로 미리보기와 계약을 다시 불러오게 한다
+        completedRuns: view.completedRuns + 1,
+      };
+
     case 'usage':
       return patchSnapshot(view, { usage: { at: event.at, services: event.services } });
 
@@ -157,6 +173,17 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ],
       };
   }
+}
+
+/** 요청이 끝났는데 결과가 오지 않은 게이트와 도구 호출을 중단으로 확정한다. 그대로 두면 "확인 중"에 멈춰 보인다 */
+function markInterrupted(chat: ChatItem[], runId: string): ChatItem[] {
+  return chat.map((item) => {
+    if (item.kind === 'gate' && item.runId === runId && !item.report) return { ...item, interrupted: true };
+    if (item.kind === 'tools' && item.runId === runId && item.calls.some((call) => call.ok === undefined)) {
+      return { ...item, calls: item.calls.map((call) => (call.ok === undefined ? { ...call, interrupted: true } : call)) };
+    }
+    return item;
+  });
 }
 
 function settleRestore(chat: ChatItem[], sha: string, result: NonNullable<RestoreItem['result']>): ChatItem[] {
