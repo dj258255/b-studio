@@ -31,7 +31,7 @@ export function StartSessionButton({ projectId }: { projectId: string }) {
         type="button"
         onClick={start}
         disabled={starting}
-        className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+        className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-60"
       >
         {starting ? "복사본 만드는 중" : "샌드박스 시작"}
       </button>

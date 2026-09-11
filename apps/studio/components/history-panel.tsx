@@ -102,7 +102,7 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                   type="button"
                   onClick={() => setConfirming(true)}
                   disabled={!canRestore}
-                  className="rounded-md border border-line px-3 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+                  className="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
                 >
                   이 시점으로 되돌리기
                 </button>
