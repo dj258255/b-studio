@@ -1,4 +1,5 @@
 import { CheckpointError } from '@b-studio/agent';
+import { SecretError } from '@b-studio/sandbox';
 import { SpecError } from '@b-studio/spec';
 
 /** 라우트 핸들러가 HTTP 상태로 바꿔 돌려줄 수 있는 오류 */
@@ -14,7 +15,8 @@ export class StudioError extends Error {
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof StudioError) return Response.json({ error: error.message }, { status: error.status });
-  if (error instanceof SpecError || error instanceof CheckpointError) {
+  // 시크릿 오류 메시지에는 이름과 이유만 있고 값은 없다
+  if (error instanceof SpecError || error instanceof CheckpointError || error instanceof SecretError) {
     return Response.json({ error: error.message }, { status: 400 });
   }
   console.error('[b-studio]', error);

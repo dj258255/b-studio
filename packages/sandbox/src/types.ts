@@ -123,13 +123,25 @@ export interface Sandbox {
   logs(options?: LogOptions): AsyncIterable<LogLine>;
   /** since 이후 외부 접속이 막힌 기록. 네트워크를 제한하지 않는 제공자는 구현하지 않는다 */
   egressDenials?(options?: { since?: Date }): Promise<EgressDenial[]>;
-  /** input은 명령의 표준 입력으로 넘긴다 (예: 데이터베이스 덤프 복원) */
-  exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string }): Promise<ExecResult>;
+  /**
+   * input은 명령의 표준 입력으로 넘긴다 (예: 데이터베이스 덤프 복원).
+   * 출력의 시크릿 값은 가려서 돌려준다. raw는 덤프처럼 내용을 그대로 옮겨야 하고 사람이나 모델에게 보이지 않을 때만 쓴다
+   */
+  exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string; raw?: boolean }): Promise<ExecResult>;
+  /** 텍스트의 시크릿 값을 가린다. logs()와 exec() 출력은 이미 가려져 있다 */
+  redact(text: string): string;
+  /** 텍스트에 값이 들어 있는 시크릿 이름 (체크포인트에 시크릿이 커밋되지 않게 확인할 때) */
+  findSecrets(text: string): string[];
   destroy(): Promise<void>;
 }
 
 /** 샌드박스를 만드는 구현체. 로컬 Docker → 사내 Kubernetes 등으로 교체할 수 있다 */
 export interface SandboxProvider {
   readonly name: string;
-  create(project: LoadedProject): Promise<Sandbox>;
+  create(project: LoadedProject, options?: CreateSandboxOptions): Promise<Sandbox>;
+}
+
+export interface CreateSandboxOptions {
+  /** studio.yaml에 선언한 시크릿의 값 (이름 → 값). resolveSecrets()로 준비한다 */
+  secrets?: Record<string, string>;
 }

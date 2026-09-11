@@ -18,7 +18,7 @@ const snapshot: SessionSnapshot = {
   ],
 };
 
-const report = { ok: true, sync: { elapsedMs: 700 }, restarted: [], contracts: [], unverifiedFiles: [] } satisfies VerificationReport;
+const report = { ok: true, sync: { elapsedMs: 700 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [] } satisfies VerificationReport;
 
 function fold(events: StudioEvent[], start: SessionView = createView(snapshot)): SessionView {
   return events.reduce(reduceSession, start);

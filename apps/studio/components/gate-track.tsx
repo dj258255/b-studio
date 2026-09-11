@@ -77,8 +77,14 @@ function buildStages(files: string[], report?: VerificationReport): Stage[] {
   return [
     {
       title: "파일 반영 확인",
-      tone: "pass",
-      lines: [{ text: `바뀐 파일 ${files.length}개, ${(report.sync.elapsedMs / 1000).toFixed(1)}초 만에 샌드박스에서 확인` }],
+      tone: report.secretLeaks.length > 0 ? "fail" : "pass",
+      lines: [
+        { text: `바뀐 파일 ${files.length}개, ${(report.sync.elapsedMs / 1000).toFixed(1)}초 만에 샌드박스에서 확인` },
+        ...report.secretLeaks.map((leak) => ({
+          text: `시크릿 값이 들어간 파일: ${leak.file} (${leak.secrets.join(", ")}). 체크포인트로 남기지 않습니다`,
+          tone: "fail" as const,
+        })),
+      ],
     },
     {
       title: "서비스 재시작과 준비 판정",

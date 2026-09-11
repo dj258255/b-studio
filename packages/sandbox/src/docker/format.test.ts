@@ -71,6 +71,16 @@ describe('buildOverride 네트워크 격리', () => {
   });
 });
 
+describe('buildOverride 시크릿', () => {
+  it('받을 서비스에만 이름을 적고 값 자리는 비워 둔다', () => {
+    const project = { ...ORDERS, secrets: [['PAYMENT_API_KEY', { services: ['api'] }]] } as unknown as LoadedProject;
+    const { services } = buildOverride(project, 's1');
+
+    expect(services.api!.environment).toMatchObject({ PAYMENT_API_KEY: null, HTTPS_PROXY: 'http://b-studio-edge:3128' });
+    expect(services.web!.environment).not.toHaveProperty('PAYMENT_API_KEY');
+  });
+});
+
 describe('parseEgressDenial', () => {
   it('edge 감사 로그에서 거부 기록만 읽는다', () => {
     expect(

@@ -27,7 +27,7 @@ import {
   type GitAuthor,
   type ModelClient,
 } from '@b-studio/agent';
-import { describeSnapshotEvent, LocalDockerProvider, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
+import { describeSnapshotEvent, LocalDockerProvider, resolveSecrets, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import type { ExportResult, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
@@ -111,7 +111,8 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
 
   const project = await loadProject(workDir);
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
-  const sandbox = await new LocalDockerProvider().create(project);
+  // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
+  const sandbox = await new LocalDockerProvider().create(project, { secrets: await resolveSecrets(project) });
 
   const session: Session = {
     snapshot: {
@@ -338,7 +339,10 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     session.databases.enabled &&
     (await session.checkpoints.pendingFiles()).length === 0 &&
     (await session.databases.changedSince(head, session.stop.signal));
-  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body, { allowEmpty: dataOnly });
+  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body, {
+    allowEmpty: dataOnly,
+    findSecrets: (text) => session.sandbox.findSecrets(text),
+  });
   if (!checkpoint) return;
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];

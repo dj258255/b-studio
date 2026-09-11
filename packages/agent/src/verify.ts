@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
@@ -42,6 +42,14 @@ export interface VerificationReport {
   contracts: ContractCheck[];
   /** 서비스에 속하지 않아 재시작으로 확인할 수 없는 파일 */
   unverifiedFiles: string[];
+  /** 시크릿 값이 들어간 바뀐 파일. 체크포인트로 커밋되지 않게 게이트를 실패시킨다 */
+  secretLeaks: SecretLeak[];
+}
+
+export interface SecretLeak {
+  file: string;
+  /** 값이 들어 있는 시크릿 이름 */
+  secrets: string[];
 }
 
 export interface VerifyOptions {
@@ -64,8 +72,9 @@ export interface VerifyOptions {
  */
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
   const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
+  const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
   const { sync, restarted, unverifiedFiles } = await restartServicesFor(sandbox, project, changedFiles, start);
-  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles };
+  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks };
 
   // 재시작에 실패한 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
   const failed = new Set(restarted.filter((check) => !check.ready).map((check) => check.service));
@@ -87,9 +96,25 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
   const ok =
     restarted.every((check) => check.ready) &&
     contracts.every((check) => !check.error) &&
-    (allowBreaking || !breaking);
+    (allowBreaking || !breaking) &&
+    secretLeaks.length === 0;
 
-  return { ok, sync, restarted, contracts, unverifiedFiles };
+  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks };
+}
+
+/**
+ * 바뀐 파일에 시크릿 값이 들어갔는지. 에이전트는 값을 볼 수 없지만,
+ * 명령으로 환경 변수를 파일에 쓰는 것처럼 출력 가림을 거치지 않는 경로가 있다
+ */
+export async function findSecretLeaks(sandbox: Sandbox, root: string, files: readonly string[]): Promise<SecretLeak[]> {
+  const found = await Promise.all(
+    files.map(async (file) => {
+      const content = await readFile(path.join(root, file), 'utf8').catch(() => undefined);
+      const secrets = content === undefined ? [] : sandbox.findSecrets(content);
+      return secrets.length > 0 ? { file, secrets } : undefined;
+    }),
+  );
+  return found.filter((leak): leak is SecretLeak => leak !== undefined);
 }
 
 export interface RestartReport {
@@ -244,6 +269,9 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
 
   if (report.unverifiedFiles.length > 0) {
     lines.push(`- 재시작으로 확인하지 못한 파일: ${report.unverifiedFiles.join(', ')}`);
+  }
+  for (const leak of report.secretLeaks) {
+    lines.push(`- 시크릿 값이 파일에 들어갔습니다: ${leak.file} (${leak.secrets.join(', ')}). 값은 코드에서 환경 변수로 읽고 파일에 쓰지 마세요`);
   }
   return lines.join('\n');
 }

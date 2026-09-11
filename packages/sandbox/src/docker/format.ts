@@ -69,6 +69,14 @@ export function buildOverride(project: LoadedProject, sandboxId: string, { edgeS
     services[name] = { ...services[name], labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name } };
   }
 
+  // 시크릿 값은 override 파일에 쓰지 않는다. 값 자리를 비워 두면 compose가 자기 프로세스 환경에서 채운다
+  for (const [name, secret] of project.secrets ?? []) {
+    for (const service of secret.services) {
+      const current = services[service] ?? {};
+      services[service] = { ...current, environment: { ...(current.environment as Record<string, unknown> | undefined), [name]: null } };
+    }
+  }
+
   const forwards = project.managed.map(([name, service]) => `${edgePortFor(project, name)}=${name}:${service.port}`);
   services[EDGE_SERVICE] = {
     image: EDGE_IMAGE,

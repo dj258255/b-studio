@@ -10,8 +10,10 @@ import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
+import { Redactor } from '../secrets';
 import type {
   ContainerState,
+  CreateSandboxOptions,
   EgressDenial,
   ExecResult,
   LogLine,
@@ -107,13 +109,13 @@ export class LocalDockerProvider implements SandboxProvider {
     this.#options = options;
   }
 
-  async create(project: LoadedProject): Promise<Sandbox> {
+  async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
     const workDir = await mkdtemp(path.join(tmpdir(), 'b-studio-'));
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript })));
-    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options);
+    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets);
   }
 }
 
@@ -124,6 +126,9 @@ class LocalDockerSandbox implements Sandbox {
   readonly #overridePath: string;
   readonly #dockerBin: string;
   readonly #readiness: Partial<ReadinessPolicy>;
+  /** docker 명령의 프로세스 환경으로만 넘긴다. override 파일에는 이름만 있다 */
+  readonly #secrets: Record<string, string>;
+  readonly #redactor: Redactor;
 
   constructor(
     id: string,
@@ -131,6 +136,7 @@ class LocalDockerSandbox implements Sandbox {
     workDir: string,
     overridePath: string,
     options: LocalDockerProviderOptions,
+    secrets: Record<string, string>,
   ) {
     this.id = id;
     this.project = project;
@@ -138,6 +144,8 @@ class LocalDockerSandbox implements Sandbox {
     this.#overridePath = overridePath;
     this.#dockerBin = options.dockerBin ?? 'docker';
     this.#readiness = options.readiness ?? {};
+    this.#secrets = secrets;
+    this.#redactor = new Redactor(secrets);
   }
 
   async start(options: StartOptions = {}): Promise<ServiceEndpoint[]> {
@@ -251,14 +259,14 @@ class LocalDockerSandbox implements Sandbox {
       String(tail),
       ...services,
     ]);
-    const child = spawn(this.#dockerBin, args, { signal, stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(this.#dockerBin, args, { signal, stdio: ['ignore', 'pipe', 'ignore'], env: this.#environment() });
     // signal로 중단하면 AbortError가 발생하는데, 로그 구독 종료는 정상 흐름이다
     child.on('error', () => {});
 
     try {
       for await (const raw of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
         const line = parseLogLine(raw);
-        if (line) yield line;
+        if (line) yield { ...line, text: this.#redactor.redact(line.text) };
       }
     } finally {
       child.kill();
@@ -274,8 +282,21 @@ class LocalDockerSandbox implements Sandbox {
     return denials;
   }
 
-  exec(name: string, command: string[], { signal, input }: { signal?: AbortSignal; input?: string } = {}): Promise<ExecResult> {
-    return this.#docker(this.#composeArgs(['exec', '-T', name, ...command]), signal, input);
+  async exec(
+    name: string,
+    command: string[],
+    { signal, input, raw = false }: { signal?: AbortSignal; input?: string; raw?: boolean } = {},
+  ): Promise<ExecResult> {
+    const result = await this.#docker(this.#composeArgs(['exec', '-T', name, ...command]), signal, input);
+    return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
+  }
+
+  redact(text: string): string {
+    return this.#redactor.redact(text);
+  }
+
+  findSecrets(text: string): string[] {
+    return this.#redactor.find(text);
   }
 
   async destroy(): Promise<void> {
@@ -458,7 +479,7 @@ class LocalDockerSandbox implements Sandbox {
   async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
     try {
       // 개발용 데이터베이스 덤프를 문자열로 주고받으므로 넉넉하게 둔다
-      const running = execFileAsync(this.#dockerBin, args, { signal, maxBuffer: 256 * 1024 * 1024 });
+      const running = execFileAsync(this.#dockerBin, args, { signal, maxBuffer: 256 * 1024 * 1024, env: this.#environment() });
       running.child.stdin?.end(input);
       const { stdout, stderr } = await running;
       return { exitCode: 0, stdout, stderr };
@@ -474,8 +495,13 @@ class LocalDockerSandbox implements Sandbox {
 
   async #composeOrThrow(args: string[], signal?: AbortSignal): Promise<ExecResult> {
     const result = await this.#compose(args, signal);
-    if (result.exitCode !== 0) throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, result.stderr);
+    if (result.exitCode !== 0) throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, this.redact(result.stderr));
     return result;
+  }
+
+  /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다 */
+  #environment(): NodeJS.ProcessEnv {
+    return { ...process.env, ...this.#secrets };
   }
 }
 

@@ -206,6 +206,34 @@ resources:
     expect(bad.issues.some((issue) => issue.startsWith('resources.db'))).toBe(true);
   });
 
+  it('시크릿은 환경 변수 이름으로 적고, 받을 서비스는 compose에 있어야 한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+secrets:
+  PAYMENT_API_KEY: { services: [api], description: 결제 대행사 테스트 키 }
+  WEBHOOK_TOKEN: { services: [api, worker] }
+`,
+    );
+    await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual(["secrets.WEBHOOK_TOKEN.services: compose.yaml에 'worker' 서비스가 없습니다"]);
+
+    const bad = captureError(() =>
+      parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nsecrets:\n  payment-key: { services: [api] }\n  EMPTY: { services: [] }\n'),
+    );
+    expect(bad.issues.some((issue) => issue.startsWith('secrets.payment-key'))).toBe(true);
+    expect(bad.issues.some((issue) => issue.startsWith('secrets.EMPTY.services'))).toBe(true);
+  });
+
   it('외부 접속 허용 목록은 호스트 이름만 받는다', () => {
     const spec = parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nnetwork:\n  egress: [api.slack.com, "*.internal-mirror.example.com"]\n');
     expect(spec.network?.egress).toEqual(['api.slack.com', '*.internal-mirror.example.com']);
