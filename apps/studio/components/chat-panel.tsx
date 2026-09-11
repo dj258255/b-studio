@@ -355,6 +355,42 @@ function ChatEntry({ item }: { item: ChatItem }) {
         <p className="text-sm text-fail">되돌리지 못했습니다: {item.result.error}</p>
       );
 
+    case "deploy": {
+      const { result } = item;
+      if (!result) {
+        return (
+          <p className="text-sm text-wait motion-safe:animate-pulse">
+            {item.action === "deploy" ? `체크포인트 ${item.target}를 운영 배포하는 중` : `운영 배포를 릴리스 ${item.target}로 되돌리는 중`}
+          </p>
+        );
+      }
+      if (!result.ok) {
+        return (
+          <div className="rounded-md border border-fail/40 bg-fail/10 px-3 py-2 text-sm">
+            <p className="font-medium text-fail">
+              {item.action === "deploy" ? "운영 배포" : "되돌리기"}에 실패했습니다: {result.error}
+            </p>
+            <p className="mt-0.5 text-muted">운영 주소는 바꾸지 않았습니다. 배포 탭에서 원인을 볼 수 있습니다.</p>
+          </div>
+        );
+      }
+      return (
+        <div className="space-y-0.5 text-sm">
+          <p className="text-pass">
+            {item.action === "deploy" ? "운영 배포" : "되돌리기"}를 마쳤습니다. 릴리스 <span className="font-mono">{result.release}</span>
+            {item.by && <span className="text-muted">, {item.by}</span>}
+          </p>
+          <p className="flex flex-wrap gap-x-3">
+            {Object.entries(result.urls).map(([service, url]) => (
+              <a key={service} href={url} target="_blank" rel="noreferrer" className="font-mono underline underline-offset-2">
+                {service} {url}
+              </a>
+            ))}
+          </p>
+        </div>
+      );
+    }
+
     case "exported": {
       const label = item.hostKind === "gitlab" ? "MR" : "PR";
       return (

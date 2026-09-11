@@ -69,6 +69,9 @@ describe('세션 저장', () => {
       { type: 'remote_sync_started' },
       { type: 'remote_sync_failed', error: '서버가 멈췄습니다' },
     ]);
+    const deploy: StudioEvent = { type: 'deploy_started', action: 'deploy', target: 'abc1234', at: '2026-09-12T00:00:00Z' };
+    expect(closeUnfinished([deploy], '서버가 멈췄습니다').at(-1)).toEqual({ type: 'deploy_failed', action: 'deploy', target: 'abc1234', error: '서버가 멈췄습니다' });
+    expect(trimHistory([deploy, { type: 'deploy_log', line: 'building' }])).toEqual([deploy]);
   });
 
   it('작업 복사본의 .git 아래에 쓰고 세션 폴더들에서 다시 읽으며, 깨진 파일은 건너뛴다', async () => {

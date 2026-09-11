@@ -305,7 +305,10 @@ export class DockerDeployer {
     const started = Date.now();
     const result = await this.#docker(['build', '--progress=plain', '--file', dockerfile, '--tag', tag, '--label', `b-studio.deploy=${this.project.spec.name}`, ...args, context], {
       signal,
-      onLine: (line) => log('build', line, name),
+      // Docker Desktop CLI가 붙이는 대시보드 링크는 colima에서는 열 수 없어 진행 줄에서 뺀다
+      onLine: (line) => {
+        if (!line.startsWith('View build details:')) log('build', line, name);
+      },
     });
     if (result.exitCode !== 0) {
       signal?.throwIfAborted();

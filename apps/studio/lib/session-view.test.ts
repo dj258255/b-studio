@@ -44,6 +44,30 @@ describe('reduceSession', () => {
     expect(fold([event], createView({ ...snapshot, checkpoints: [saved] })).snapshot.checkpoints).toEqual([saved]);
   });
 
+  it('배포 진행 줄은 스냅샷에 모으고, 끝나면 대화에 결과를 남기며 배포 탭이 다시 불러오게 한다', () => {
+    const started: StudioEvent = { type: 'deploy_started', action: 'deploy', target: 'abc1234', at: '2026-09-12T00:00:00Z', by: 'alice' };
+    const running = fold([started, { type: 'deploy_log', line: '[api] api 빌드 완료 (8.9초)' }]);
+    expect(running.snapshot.deploying).toEqual({ action: 'deploy', target: 'abc1234', startedAt: '2026-09-12T00:00:00Z', by: 'alice', lines: ['[api] api 빌드 완료 (8.9초)'] });
+
+    const done = fold([{ type: 'deploy_finished', action: 'deploy', release: 'r1', label: '체크포인트 abc1234', urls: { web: 'http://127.0.0.1:8300' } }], running);
+    expect(done.snapshot.deploying).toBeUndefined();
+    expect(done.deployRevision).toBe(1);
+    expect(done.chat).toEqual([
+      {
+        kind: 'deploy',
+        action: 'deploy',
+        target: 'abc1234',
+        by: 'alice',
+        result: { ok: true, release: 'r1', label: '체크포인트 abc1234', urls: { web: 'http://127.0.0.1:8300' } },
+      },
+    ]);
+
+    // 시작 이벤트 없이 줄만 오면 무시한다
+    expect(fold([{ type: 'deploy_log', line: 'x' }]).snapshot.deploying).toBeUndefined();
+    const failed = fold([started, { type: 'deploy_failed', action: 'deploy', target: 'abc1234', error: 'api 운영 이미지를 빌드하지 못했습니다' }]);
+    expect(failed.chat[0]).toMatchObject({ kind: 'deploy', result: { ok: false, error: 'api 운영 이미지를 빌드하지 못했습니다' } });
+  });
+
   it('질문 요청의 결과에 질문 표시를 남기고 데모 질문을 갱신한다', () => {
     const view = fold([
       { type: 'run_started', runId: 'q1', request: '어떻게 바꿔?', intent: 'ask' },

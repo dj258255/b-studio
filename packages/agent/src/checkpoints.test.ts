@@ -94,6 +94,22 @@ describe('CheckpointStore', () => {
     expect(await new CheckpointStore(root, { gitDir }).list()).toHaveLength(1);
   });
 
+  it('체크포인트의 기록한 파일만 폴더로 꺼내고, 남기지 않은 변경은 넣지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    const start = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const memo = (await store.commit('요청: 메모'))!;
+    await write('api/src/Draft.java', 'class Draft {}\n');
+    const out = await mkdtemp(path.join(tmpdir(), 'checkpoint-export-'));
+
+    expect(await store.exportTree(start.sha, path.join(out, 'start'))).toBe(path.join(out, 'start'));
+    expect(await readFile(path.join(out, 'start/api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
+    await store.exportTree(memo.shortSha, path.join(out, 'memo'));
+    expect(await readFile(path.join(out, 'memo/api/src/Order.java'), 'utf8')).toBe('class Order { String memo; }\n');
+    await expect(readFile(path.join(out, 'memo/api/src/Draft.java'), 'utf8')).rejects.toThrow();
+    await expect(store.exportTree('not-a-sha', path.join(out, 'bad'))).rejects.toThrow(CheckpointError);
+  });
+
   it('지금 상태를 첫 체크포인트로 남기고 샌드박스 생성물은 제외한다', async () => {
     await mkdir(path.join(root, 'web/node_modules/next'), { recursive: true });
     await write('web/node_modules/next/index.js', '');

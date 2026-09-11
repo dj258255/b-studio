@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
-import type { RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
+import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
   service: string;
@@ -76,6 +76,15 @@ export type ChatItem =
           };
     }
   | {
+      kind: 'deploy';
+      action: DeployAction;
+      target: string;
+      by?: string;
+      result?:
+        | { ok: true; release: string; label: string; urls: Record<string, string>; previous?: string }
+        | { ok: false; error: string; detail?: string };
+    }
+  | {
       kind: 'exported';
       branch: string;
       hostKind: GitHostKind;
@@ -89,6 +98,7 @@ type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
 type GateItem = Extract<ChatItem, { kind: 'gate' }>;
 type RestoreItem = Extract<ChatItem, { kind: 'restore' }>;
 type RemoteSyncItem = Extract<ChatItem, { kind: 'remoteSync' }>;
+type DeployItem = Extract<ChatItem, { kind: 'deploy' }>;
 
 export interface SessionView {
   snapshot: SessionSnapshot;
@@ -98,12 +108,16 @@ export interface SessionView {
   completedRuns: number;
   /** 처리 중인 요청이 지금까지 쓴 토큰 */
   runTokens?: { runId: string; usage: AgentUsage };
+  /** 배포가 끝날 때마다 늘어난다. 배포 탭이 운영 상태를 다시 불러오는 기준이다 */
+  deployRevision: number;
 }
 
 export const LOG_LIMIT = 1000;
+/** 스냅샷에 두는 배포 진행 줄 수. 서버의 DEPLOY_LOG_LIMIT와 같다 */
+export const DEPLOY_LINE_LIMIT = 200;
 
 export function createView(snapshot: SessionSnapshot): SessionView {
-  return { snapshot, chat: [], logs: [], completedRuns: 0 };
+  return { snapshot, chat: [], logs: [], completedRuns: 0, deployRevision: 0 };
 }
 
 /**
@@ -274,6 +288,31 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
       };
 
+    case 'deploy_started':
+      return {
+        ...patchSnapshot(view, { deploying: { action: event.action, target: event.target, startedAt: event.at, by: event.by, lines: [] } }),
+        chat: [...view.chat, { kind: 'deploy', action: event.action, target: event.target, by: event.by }],
+      };
+
+    case 'deploy_log': {
+      const deploying = view.snapshot.deploying;
+      if (!deploying) return view;
+      return patchSnapshot(view, { deploying: { ...deploying, lines: [...deploying.lines.slice(-(DEPLOY_LINE_LIMIT - 1)), event.line] } });
+    }
+
+    case 'deploy_finished':
+    case 'deploy_failed': {
+      const result: NonNullable<DeployItem['result']> =
+        event.type === 'deploy_finished'
+          ? { ok: true, release: event.release, label: event.label, urls: event.urls, previous: event.previous }
+          : { ok: false, error: event.error, detail: event.detail };
+      return {
+        ...patchSnapshot(view, { deploying: undefined }),
+        chat: settleDeploy(view.chat, event.action, result),
+        deployRevision: view.deployRevision + 1,
+      };
+    }
+
     case 'usage':
       return patchSnapshot(view, { usage: { at: event.at, services: event.services } });
 
@@ -316,6 +355,13 @@ function settleRemoteSync(chat: ChatItem[], result: NonNullable<RemoteSyncItem['
   // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
   if (index === -1) return [...chat, { kind: 'remoteSync', result }];
   return chat.map((item, i) => (i === index ? { kind: 'remoteSync', result } : item));
+}
+
+function settleDeploy(chat: ChatItem[], action: DeployAction, result: NonNullable<DeployItem['result']>): ChatItem[] {
+  const index = chat.findLastIndex((item) => item.kind === 'deploy' && !item.result);
+  // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
+  if (index === -1) return [...chat, { kind: 'deploy', action, target: result.ok ? result.release : '', result }];
+  return chat.map((item, i) => (i === index ? { ...(item as DeployItem), result } : item));
 }
 
 function settleRestore(chat: ChatItem[], sha: string, result: NonNullable<RestoreItem['result']>): ChatItem[] {

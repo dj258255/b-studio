@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -394,6 +394,41 @@ export class CheckpointStore {
     await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
 
     return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort() };
+  }
+
+  /**
+   * 체크포인트의 파일을 폴더로 꺼낸다. 운영 배포는 작업 폴더가 아니라 게이트를 통과한 체크포인트를 빌드한다.
+   * 기록한 파일만 나오므로 생성물과 무시한 파일은 들어가지 않는다. 모노레포 하위 폴더 세션은 저장소 전체를 꺼내고 프로젝트 폴더를 돌려준다
+   */
+  async exportTree(sha: string, dest: string): Promise<string> {
+    const commit = await this.#resolve(sha);
+    await mkdir(dest, { recursive: true });
+    const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
+    await new Promise<void>((resolve, reject) => {
+      const git = spawn(this.#gitBin, ['-C', this.root, ...location, 'archive', '--format=tar', commit], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const tar = spawn('tar', ['-x', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
+      git.stdout.pipe(tar.stdin);
+      let errors = '';
+      let pending = 2;
+      let failed = false;
+      const collect = (chunk: Buffer) => (errors += chunk.toString('utf8'));
+      git.stderr.on('data', collect);
+      tar.stderr.on('data', collect);
+      const finish = (name: string) => (code: number | null) => {
+        if (code !== 0) {
+          failed = true;
+          errors += `\n${name}이(가) ${code}로 끝났습니다`;
+        }
+        if (--pending > 0) return;
+        if (failed) reject(new CheckpointError(`체크포인트를 꺼내지 못했습니다: ${redactCredentials(errors.trim())}`));
+        else resolve();
+      };
+      git.on('error', reject);
+      tar.on('error', reject);
+      git.on('close', finish('git archive'));
+      tar.on('close', finish('tar'));
+    });
+    return path.join(dest, await this.#subdir());
   }
 
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
