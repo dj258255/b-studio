@@ -6,6 +6,8 @@ import type { ServiceUsage } from '@b-studio/sandbox';
 export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
 /** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, demo: 준비된 스크립트 */
 export type SessionMode = 'api' | 'claude-code' | 'demo';
+/** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
+export type WorkspaceKind = 'copy' | 'local';
 /** stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다 */
 export type ServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped';
 
@@ -37,8 +39,12 @@ export interface SessionSnapshot {
   id: string;
   projectId: string;
   projectName: string;
-  /** 세션용 작업 복사본 위치 */
+  /** 에이전트와 샌드박스가 쓰는 폴더. 작업 복사본이거나, 로컬 폴더 세션이면 사용자의 프로젝트 폴더다 */
   workDir: string;
+  /** 없으면 copy (이 필드가 생기기 전에 만든 세션) */
+  workspace?: WorkspaceKind;
+  /** 로컬 폴더 세션의 체크포인트 저장소와 세션 상태를 두는 폴더. 사용자 폴더의 .git과 섞이지 않게 작업 폴더 밖에 둔다 */
+  stateDir?: string;
   status: SessionStatus;
   error?: string;
   mode: SessionMode;
@@ -128,6 +134,7 @@ export interface SessionSummary {
   status: SessionStatus;
   mode: SessionMode;
   owner?: string;
+  workspace: WorkspaceKind;
   checkpoints: number;
   lastRequest?: string;
   updatedAt: string;
@@ -162,6 +169,11 @@ export type StudioEvent =
       nextDemoRequest?: string;
     }
   | { type: 'checkpoint'; runId: string; checkpoint: Checkpoint }
+  /**
+   * 로컬 폴더 세션에서 스튜디오 밖(IDE 등)에서 바꾼 파일을 체크포인트로 남겼다. 검증 게이트는 거치지 않았다.
+   * request: 요청을 시작하기 전에, resume: 중지한 세션을 이어서 작업하기 전에 남겼다
+   */
+  | { type: 'local_edits_saved'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
   | {
       type: 'reverted';
       runId: string;

@@ -237,6 +237,14 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </p>
       );
 
+    case "localEdits":
+      return (
+        <p className="text-sm text-muted">
+          {item.reason === "resume" ? "중지한 동안 폴더에서 바뀐" : "스튜디오 밖에서 바꾼"} 파일 {item.checkpoint.files.length}개를 체크포인트{" "}
+          <span className="font-mono text-ink">{item.checkpoint.shortSha}</span>에 남겼습니다. 검증 게이트는 거치지 않았습니다.
+        </p>
+      );
+
     case "reverted":
       return (
         <div className={`rounded-md border px-3 py-2 text-sm ${item.cancelled ? "border-line" : "border-wait/40 bg-wait/10"}`}>
@@ -405,7 +413,13 @@ function hintFor({ snapshot, chat }: SessionView, access: SessionAccess): string
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";
+  if (snapshot.workspace === "local" && snapshot.running) {
+    return "처리하는 동안 폴더에서 고친 파일은 요청이 실패하거나 취소되면 함께 되돌아갑니다.";
+  }
   if (chat.length > 0) return "요청마다 검증 게이트를 통과해야 완료로 표시됩니다.";
+  if (snapshot.workspace === "local") {
+    return "내 폴더에서 바로 작업합니다. IDE에서 고친 파일은 미리보기에 바로 반영되고, 요청을 보낼 때 체크포인트로 남습니다.";
+  }
   if (snapshot.mode === "demo") return "데모 모드는 준비된 요청을 순서대로 스크립트로 실행합니다.";
   if (snapshot.mode === "claude-code") {
     return "이 PC에서 로그인한 Claude 계정으로 실행합니다. 작업을 끝내면 스튜디오가 서비스를 재시작하고 API 계약을 확인합니다.";

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { cp, mkdir, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -38,7 +39,16 @@ import {
   type ServiceCheck,
   type VerificationReport,
 } from '@b-studio/agent';
-import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent, type StartOptions } from '@b-studio/sandbox';
+import {
+  describeSnapshotEvent,
+  providerFromEnv,
+  Redactor,
+  resolveSecrets,
+  type FileChange,
+  type Sandbox,
+  type ServiceStatusEvent,
+  type StartOptions,
+} from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import { addTokens, formatTokenCount, hasTokens, parseTokenLimit, totalTokens } from '@/lib/usage';
@@ -53,7 +63,9 @@ import type {
   SessionStatus,
   SessionSummary,
   StudioEvent,
+  WorkspaceKind,
 } from '@/lib/studio-events';
+import { authConfig } from './auth';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { createPreviewGateway, previewHost, type PreviewTarget } from './preview-gateway';
@@ -63,6 +75,7 @@ import {
   closeUnfinished,
   isProcessAlive,
   readSessions,
+  stateDirOf,
   trimHistory,
   writeSession,
   writeSessionSync,
@@ -123,6 +136,10 @@ interface Session {
   usageTimer?: NodeJS.Timeout;
   /** 에이전트 도구를 거치지 않은 파일 변경(서비스 안에서 명령이 만든 파일 등)을 코드 화면에 알린다 */
   fileWatcher?: FileWatcher;
+  /** 내 폴더에서 새로 만든 폴더를 서비스 컨테이너 안에서 옮겼다 되돌린 시각. 그 이동이 다시 변경 알림으로 오는 것을 거른다 */
+  relayed: Map<string, number>;
+  /** 진행 중인 변경 알림 전달. 잠깐 쓰는 이름이 체크포인트에 들어가지 않도록 체크포인트를 남기기 전에 기다린다 */
+  relaying: Promise<void>;
   /** 마지막으로 대화나 상태가 바뀐 시각. 세션 목록 정렬에 쓴다 */
   updatedAt: string;
   persist: { timer?: NodeJS.Timeout; chain: Promise<void> };
@@ -154,6 +171,8 @@ interface Store {
   /** 이전 버전 모듈이 만든 전역 객체에는 없을 수 있다 */
   archived?: Map<string, ArchivedSession>;
   resuming?: Set<string>;
+  /** 로컬 폴더 세션을 만들거나 이어서 작업하려고 잡아 둔 폴더 */
+  claimedFolders?: Set<string>;
   recovery?: Promise<void>;
   previewGateway?: Server;
   cleanupRegistered: boolean;
@@ -162,6 +181,7 @@ const globalStore = globalThis as typeof globalThis & { __bStudio?: Store };
 const store: Store = (globalStore.__bStudio ??= { sessions: new Map(), cleanupRegistered: false });
 const archived = (store.archived ??= new Map());
 const resuming = (store.resuming ??= new Set());
+const claimedFolders = (store.claimedFolders ??= new Set());
 
 export function getSnapshot(id: string): SessionSnapshot | undefined {
   return (store.sessions.get(id) ?? archived.get(id))?.snapshot;
@@ -185,43 +205,81 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     status: snapshot.status,
     mode: snapshot.mode,
     owner: snapshot.owner,
+    workspace: snapshot.workspace ?? 'copy',
     checkpoints: snapshot.checkpoints.length,
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
     updatedAt,
   };
 }
 
-export async function createSession(projectId: string, owner: string): Promise<SessionSnapshot> {
+export async function createSession(projectId: string, owner: string, workspace: WorkspaceKind = 'copy'): Promise<SessionSnapshot> {
   const mode = sessionMode();
   const tokenLimit = sessionTokenLimit();
   const preview = previewConfig();
+  if (workspace === 'local') assertLocalFolderAllowed();
   const source = await findProject(projectId);
   if (!source) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
   // 이전 프로세스가 남긴 샌드박스를 먼저 정리해 새 세션과 자원을 다투지 않게 한다
   await recoverSessions();
+  const release = workspace === 'local' ? claimFolder(source.root) : undefined;
+  try {
+    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview });
+  } finally {
+    // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
+    release?.();
+  }
+}
 
+async function startSession({
+  projectId,
+  owner,
+  workspace,
+  source,
+  mode,
+  tokenLimit,
+  preview,
+}: {
+  projectId: string;
+  owner: string;
+  workspace: WorkspaceKind;
+  source: LoadedProject;
+  mode: SessionMode;
+  tokenLimit: number | undefined;
+  preview: PreviewConfig | undefined;
+}): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
-  // 에이전트가 원본을 바꾸지 않도록 세션마다 작업 복사본을 만든다. Docker가 마운트할 수 있는 홈 아래에 둔다
-  const workDir = path.join(sessionsRoot(), `${projectId}-${id}`);
-  await mkdir(path.dirname(workDir), { recursive: true });
+  const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
 
-  // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 복사본의 시작 상태를 체크포인트로 둔다
+  // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 폴더의 시작 상태를 체크포인트로 둔다
   const author = gitAuthor();
+  let workDir = sessionDir;
+  let stateDir: string | undefined;
   let checkpoints: CheckpointStore;
   let firstCheckpoint: Checkpoint;
   let sourceDirtyFiles = 0;
-  // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
-  const allowSubfolder = source.spec.repository?.monorepo === true;
-  if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
-    // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
-    const cloned = await CheckpointStore.clone(source.root, workDir, { branch: `b-studio/${projectId}-${id}`, author, allowSubfolder });
-    checkpoints = cloned.store;
-    firstCheckpoint = cloned.start;
-    sourceDirtyFiles = cloned.source.dirtyFiles;
+  if (workspace === 'local') {
+    // 사용자의 폴더에서 바로 작업해 IDE의 수정과 에이전트의 수정이 같은 파일에 반영되게 한다.
+    // 체크포인트 저장소와 세션 상태는 사용자 폴더의 .git과 섞이지 않게 세션 폴더에 둔다
+    workDir = source.root;
+    stateDir = sessionDir;
+    checkpoints = new CheckpointStore(workDir, { author, gitDir: path.join(stateDir, '.git') });
+    firstCheckpoint = await checkpoints.init('세션 시작 (내 폴더)');
   } else {
-    await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
-    checkpoints = new CheckpointStore(workDir, { author });
-    firstCheckpoint = await checkpoints.init('세션 시작');
+    // 에이전트가 원본을 바꾸지 않도록 세션마다 작업 복사본을 만든다. Docker가 마운트할 수 있는 홈 아래에 둔다
+    await mkdir(path.dirname(workDir), { recursive: true });
+    // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
+    const allowSubfolder = source.spec.repository?.monorepo === true;
+    if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
+      // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
+      const cloned = await CheckpointStore.clone(source.root, workDir, { branch: `b-studio/${projectId}-${id}`, author, allowSubfolder });
+      checkpoints = cloned.store;
+      firstCheckpoint = cloned.start;
+      sourceDirtyFiles = cloned.source.dirtyFiles;
+    } else {
+      await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
+      checkpoints = new CheckpointStore(workDir, { author });
+      firstCheckpoint = await checkpoints.init('세션 시작');
+    }
   }
 
   const project = await loadProject(await checkpoints.projectRoot());
@@ -236,6 +294,8 @@ export async function createSession(projectId: string, owner: string): Promise<S
       projectId,
       projectName: project.spec.name,
       workDir,
+      workspace,
+      stateDir,
       status: 'starting',
       mode,
       running: false,
@@ -289,11 +349,13 @@ function newSession(fields: NewSession): Session {
   return {
     ...fields,
     // 덤프는 에이전트 도구가 접근할 수 없고 커밋에도 들어가지 않는 .git 아래에 둔다
-    databases: new DatabaseBranches(fields.sandbox, fields.project, path.join(fields.snapshot.workDir, '.git', 'b-studio', 'databases')),
+    databases: new DatabaseBranches(fields.sandbox, fields.project, path.join(fields.checkpoints.gitDir, 'b-studio', 'databases')),
     logs: [],
     settledConversation: fields.conversation.length,
     stop: new AbortController(),
     exporting: false,
+    relayed: new Map(),
+    relaying: Promise.resolve(),
     updatedAt: new Date().toISOString(),
     persist: { chain: Promise.resolve() },
   };
@@ -410,6 +472,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
   if (resuming.has(id)) throw new StudioError(409, '이미 이어서 작업할 준비를 하는 중입니다');
 
   resuming.add(id);
+  let release: (() => void) | undefined;
   try {
     let data: PersistedSession;
     let history: StudioEvent[];
@@ -432,18 +495,34 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       throw new StudioError(409, `이 세션은 ${data.snapshot.mode} 모드로 만들었습니다. B_STUDIO_MODE=${data.snapshot.mode}로 스튜디오를 실행한 뒤 이어서 작업하세요`);
     }
     const { workDir } = data.snapshot;
+    const local = data.snapshot.workspace === 'local';
+    if (local) assertLocalFolderAllowed();
     if (!(await stat(workDir).then((info) => info.isDirectory(), () => false))) {
-      throw new StudioError(409, `작업 복사본이 없어 이어서 작업할 수 없습니다: ${workDir}`);
+      throw new StudioError(409, `${local ? '내 폴더가' : '작업 복사본이'} 없어 이어서 작업할 수 없습니다: ${workDir}`);
     }
+    if (local) release = claimFolder(workDir, id);
 
-    const checkpoints = new CheckpointStore(workDir, { author: gitAuthor() });
+    const checkpoints = new CheckpointStore(workDir, { author: gitAuthor(), ...(local ? { gitDir: path.join(stateDirOf(data.snapshot), '.git') } : {}) });
     const project = await loadProject(await checkpoints.projectRoot());
-    // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리고 마지막 체크포인트에서 시작한다
-    const { files: discarded } = await checkpoints.discard();
+    const secrets = await resolveSecrets(project);
+    const previous = (await checkpoints.list())[0]!;
+    let discarded: string[] = [];
+    let localEdits: Checkpoint | undefined;
+    if (local) {
+      // 샌드박스를 멈춘 동안 IDE에서 고친 파일일 수 있어 버리지 않고 체크포인트로 남긴다
+      const redactor = new Redactor(secrets);
+      localEdits = await commitLocalEdits(checkpoints, (text) => redactor.find(text)).catch((error: unknown) => {
+        throw new StudioError(409, `폴더에서 바뀐 파일을 체크포인트로 남기지 못해 이어서 작업하지 않았습니다: ${describe(error)}`);
+      });
+      if (localEdits) history = [...history, { type: 'local_edits_saved', checkpoint: localEdits, reason: 'resume' }];
+    } else {
+      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리고 마지막 체크포인트에서 시작한다
+      ({ files: discarded } = await checkpoints.discard());
+    }
     const list = await checkpoints.list();
     const head = list[0]!;
     const provider = providerFromEnv();
-    const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
+    const sandbox = await provider.create(project, { secrets });
 
     const session = newSession({
       snapshot: {
@@ -477,8 +556,11 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
-      `[b-studio] 세션을 새 샌드박스에서 이어서 시작했습니다. 작업 복사본과 데이터베이스는 체크포인트 ${head.shortSha}("${head.message}") 상태입니다.`,
+      `[b-studio] 세션을 새 샌드박스에서 이어서 시작했습니다. ${local ? '작업 폴더와' : '작업 복사본과'} 데이터베이스는 체크포인트 ${head.shortSha}("${head.message}") 상태입니다.`,
       ...(discarded.length > 0 ? [`체크포인트에 없던 변경 ${discarded.length}개는 버렸습니다: ${discarded.slice(0, 20).join(', ')}`] : []),
+      ...(localEdits
+        ? [`중지한 동안 폴더에서 바뀐 파일 ${localEdits.files.length}개를 이 체크포인트로 남겼습니다: ${localEdits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`]
+        : []),
     ].join(' ');
     noteForModel(session, note);
 
@@ -489,10 +571,11 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     if (preview) ensurePreviewGateway(preview);
     for (const listener of session.listeners) replay(session, listener);
     void flushPersist(session);
-    void boot(session, { discarded });
+    void boot(session, { discarded, databaseFrom: localEdits ? previous.sha : undefined });
     return session.snapshot;
   } finally {
     resuming.delete(id);
+    release?.();
   }
 }
 
@@ -591,8 +674,11 @@ export async function externalRequest(id: string, name: string, input: { method:
   };
 }
 
-/** resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다 */
-async function boot(session: Session, resumed?: { discarded: string[] }): Promise<void> {
+/**
+ * resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다.
+ * databaseFrom은 이어서 작업하기 전에 폴더의 수정을 새 체크포인트로 남겼을 때, 데이터베이스 상태를 가져올 그 앞 체크포인트다
+ */
+async function boot(session: Session, resumed?: { discarded: string[]; databaseFrom?: string }): Promise<void> {
   const signal = session.stop.signal;
   const onStatus = (event: ServiceStatusEvent) => onServiceStatus(session, event);
   try {
@@ -608,9 +694,10 @@ async function boot(session: Session, resumed?: { discarded: string[] }): Promis
       // 서비스가 마이그레이션까지 마친 상태를 세션 시작 체크포인트의 데이터베이스 상태로 남긴다
       await saveDatabases(session, head.sha);
     } else {
-      const database = await session.databases.restore(head.sha, signal);
-      // 기동 전에 서버가 멈춰 저장한 상태가 없으면 지금 상태를 그 체크포인트의 상태로 남긴다
-      if (database.states.some((state) => state.action === 'missing')) await saveDatabases(session, head.sha);
+      const from = resumed.databaseFrom ?? head.sha;
+      const database = await session.databases.restore(from, signal);
+      // 기동 전에 서버가 멈춰 저장한 상태가 없거나 폴더의 수정을 새 체크포인트로 남겼으면, 지금 상태를 그 체크포인트의 상태로 남긴다
+      if (from !== head.sha || database.states.some((state) => state.action === 'missing')) await saveDatabases(session, head.sha);
       let restarted: ServiceCheck[] = [];
       if (database.dependents.length > 0) {
         // 복원한 데이터베이스에 붙어 있던 연결과 캐시를 버리도록 의존 서비스를 다시 띄운다
@@ -650,7 +737,24 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
   let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns'> | undefined;
   let cancelled = false;
+  /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
+  let notStarted = false;
   try {
+    let edits: Checkpoint | undefined;
+    try {
+      await session.relaying;
+      // 요청이 실패하거나 취소돼 마지막 체크포인트로 되돌릴 때 사람이 고친 파일까지 지우지 않도록 먼저 남긴다
+      edits = await saveLocalEdits(session);
+    } catch (error) {
+      throw new LocalEditsError(`스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}`);
+    }
+    if (edits) {
+      emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
+      noteForModel(
+        session,
+        `[b-studio] 사용자가 스튜디오 밖에서 파일 ${edits.files.length}개를 바꿔 체크포인트 ${edits.shortSha}로 남겼습니다: ${edits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`,
+      );
+    }
     const result = await runPlan(session, run, request, plan, signal);
     // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
     if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
@@ -665,6 +769,13 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     else await revertRun(session, run.id);
     finished = { status: result.status, summary: result.summary, turns: result.turns };
   } catch (error) {
+    if (error instanceof LocalEditsError) {
+      // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
+      notStarted = true;
+      session.run = undefined;
+      finished = { status: 'error', summary: error.message };
+      return;
+    }
     cancelled = run.cancel.signal.aborted && !session.stop.signal.aborted;
     // 취소해 되돌리는 동안 다시 누른 취소는 받아들인다. 오류로 되돌리는 중에는 취소를 받지 않는다
     if (!cancelled) session.run = undefined;
@@ -684,7 +795,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   } finally {
     session.run = undefined;
     // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
-    if (session.snapshot.mode === 'demo' && !cancelled) {
+    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted) {
       session.demoIndex += 1;
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
     }
@@ -831,6 +942,59 @@ async function revertRun(
   return files;
 }
 
+/** 요청 전에 로컬 폴더의 수정을 체크포인트로 남기지 못했다 */
+class LocalEditsError extends Error {}
+
+/**
+ * 로컬 폴더 세션에서 스튜디오 밖(IDE 등)에서 바꾼 파일을 체크포인트로 남긴다.
+ * 요청이 실패하거나 취소되면 마지막 체크포인트로 되돌리므로, 그 전에 사람이 고친 파일을 기록에 넣어 지우지 않게 한다
+ */
+async function saveLocalEdits(session: Session): Promise<Checkpoint | undefined> {
+  if (session.snapshot.workspace !== 'local') return undefined;
+  const checkpoint = await commitLocalEdits(session.checkpoints, (text) => session.sandbox.findSecrets(text));
+  if (!checkpoint) return undefined;
+  await saveDatabases(session, checkpoint.sha);
+  session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  return checkpoint;
+}
+
+/** 검증 게이트 없이 체크포인트로 남긴다. 시크릿 값이 든 파일이 있으면 남기지 않고 오류를 낸다 */
+async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text: string) => string[]): Promise<Checkpoint | undefined> {
+  const files = await checkpoints.pendingFiles();
+  if (files.length === 0) return undefined;
+  return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', { findSecrets });
+}
+
+/** 로컬 폴더 세션은 에이전트가 서버의 프로젝트 폴더를 바로 바꾸므로, 인증을 끈 개인 PC에서만 허용한다 */
+export function localFolderAllowed(): boolean {
+  try {
+    return authConfig().mode === 'none';
+  } catch {
+    return false;
+  }
+}
+
+function assertLocalFolderAllowed(): void {
+  if (!localFolderAllowed()) {
+    throw new StudioError(403, '내 폴더에서 바로 작업하기는 인증을 끈 개인 PC(B_STUDIO_AUTH=none)에서만 쓸 수 있습니다. 여러 사람이 쓰는 서버에서는 복사본으로 시작하세요');
+  }
+}
+
+/**
+ * 로컬 폴더 세션이 쓸 폴더를 잡는다. 두 세션이 같은 폴더를 바꾸면 한쪽의 되돌리기가 다른 쪽의 변경을 지우므로 거부한다.
+ * sessionId는 이어서 작업하는 세션 자신이다. 돌려준 함수로 푼다
+ */
+function claimFolder(root: string, sessionId?: string): () => void {
+  const busy = [...store.sessions.values()].find(
+    (session) =>
+      session.snapshot.workspace === 'local' && session.snapshot.workDir === root && session.snapshot.status !== 'stopped' && session.snapshot.id !== sessionId,
+  );
+  if (busy) throw new StudioError(409, `이 폴더는 세션 ${busy.snapshot.id}에서 작업하고 있습니다. 그 세션의 샌드박스를 중지한 뒤 시작하세요`);
+  if (claimedFolders.has(root)) throw new StudioError(409, '이 폴더로 다른 세션을 시작하는 중입니다. 끝난 뒤 다시 시도하세요');
+  claimedFolders.add(root);
+  return () => claimedFolders.delete(root);
+}
+
 /** 체크포인트 시점의 데이터베이스 상태를 남긴다. 실패해도 작업은 계속하고 로그로 알린다 */
 async function saveDatabases(session: Session, sha: string): Promise<DatabaseState[]> {
   if (!session.databases.enabled) return [];
@@ -868,6 +1032,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
   void (async () => {
     let event: StudioEvent;
     try {
+      await session.relaying;
       const { files } = await session.checkpoints.restore(sha);
       // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다
       const database = await session.databases.restore(sha, session.stop.signal);
@@ -1146,15 +1311,49 @@ function setStatus(session: Session, status: SessionStatus, error?: string): voi
 function watchFiles(session: Session): void {
   if (session.fileWatcher) return;
   try {
-    session.fileWatcher = watchProjectFiles(session.project.root, () => {
+    session.fileWatcher = watchProjectFiles(session.project.root, (_files, renamed) => {
       if (session.stop.signal.aborted) return;
       session.snapshot.fileRevision = (session.snapshot.fileRevision ?? 0) + 1;
       emit(session, { type: 'files_changed', revision: session.snapshot.fileRevision });
+      if (session.snapshot.workspace === 'local') relayChanges(session, renamed);
     });
   } catch (error) {
     // 감시하지 못해도 에이전트 쓰기와 요청 완료 때는 코드 화면이 계속 다시 불러온다
     console.error('[b-studio] 파일 변경을 감시하지 못했습니다', error);
   }
+}
+
+/** 옮겼다 되돌린 폴더의 변경 알림이 돌아오는 동안 같은 폴더를 다시 옮기지 않는다 */
+const RELAY_ECHO_MS = 5_000;
+
+/**
+ * 내 폴더에서 IDE로 만들거나 지운 파일과 폴더를 서비스의 개발 서버가 알아채게 한다(트러블슈팅 29).
+ * 요청·되돌리기·가져오기를 처리하는 중에는 검증 게이트의 반영 확인과 재시작에 끼어들지 않도록 건너뛴다. 그때는 게이트가 서비스를 다시 띄워 반영한다
+ */
+function relayChanges(session: Session, renamed: string[]): void {
+  const { sandbox, snapshot } = session;
+  if (!sandbox.relayChanges || snapshot.running || snapshot.status !== 'ready' || renamed.length === 0) return;
+  const now = Date.now();
+  for (const [file, at] of session.relayed) if (now - at > RELAY_ECHO_MS) session.relayed.delete(file);
+  const changes = renamed.flatMap((file): FileChange[] => {
+    if (session.relayed.has(file)) return [];
+    const info = statSync(path.join(session.project.root, file), { throwIfNoEntry: false });
+    return [{ file, kind: info === undefined ? 'deleted' : info.isDirectory() ? 'directory' : 'file' }];
+  });
+  if (changes.length === 0) return;
+  for (const change of changes) if (change.kind === 'directory') session.relayed.set(change.file, now);
+
+  session.relaying = session.relaying
+    .then(async () => {
+      const relayed = await sandbox.relayChanges!(changes, { signal: session.stop.signal });
+      const at = new Date().toISOString();
+      for (const [service, paths] of Map.groupBy(relayed, (entry) => entry.service)) {
+        emit(session, { type: 'log', service, text: `[b-studio] 폴더에서 만들거나 지운 경로를 개발 서버에 알렸습니다: ${paths.map((entry) => entry.file).join(', ')}`, at });
+      }
+    })
+    .catch((error: unknown) => {
+      if (!session.stop.signal.aborted) console.error('[b-studio] 폴더의 변경을 서비스에 알리지 못했습니다', error);
+    });
 }
 
 /** 샌드박스가 준비되면 컨테이너별 자원 사용량을 주기적으로 잰다. 실패하면 다음 주기에 다시 잰다 */

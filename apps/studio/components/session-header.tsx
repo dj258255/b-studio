@@ -81,6 +81,11 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           </span>
         )}
         {access.canLogout && <LogoutButton />}
+        {snapshot.workspace === "local" && (
+          <span className="glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted" title={`${snapshot.workDir}에서 바로 작업합니다`}>
+            내 폴더
+          </span>
+        )}
         {snapshot.runtime && (
           <span
             className="glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted"

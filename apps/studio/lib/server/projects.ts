@@ -33,6 +33,11 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return projects.sort((a, b) => (a.id < b.id ? -1 : 1));
 }
 
+/** 프로젝트 폴더의 절대 경로. 로컬 폴더 세션을 고르는 화면에 보여 준다 */
+export function projectPath(id: string): string {
+  return path.join(projectsRoot(), id);
+}
+
 export async function findProject(id: string): Promise<LoadedProject | undefined> {
   if (!PROJECT_ID.test(id)) return undefined;
   const project = (await listProjects()).find((candidate) => candidate.id === id && !candidate.error);

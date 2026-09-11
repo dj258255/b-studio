@@ -34,6 +34,16 @@ describe('reduceSession', () => {
     expect(view.snapshot.services[1]).toMatchObject({ state: 'ready', url: 'http://127.0.0.1:32801' });
   });
 
+  it('로컬 폴더에서 바꾼 파일을 남긴 체크포인트는 기록을 다시 재생해도 한 번만 쌓는다', () => {
+    const saved = { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', message: '직접 수정: 파일 1개', createdAt: '2026-09-11T00:00:00Z', files: ['NOTE.md'] };
+    const event: StudioEvent = { type: 'local_edits_saved', checkpoint: saved, reason: 'request' };
+
+    const view = fold([event]);
+    expect(view.snapshot.checkpoints).toEqual([saved]);
+    expect(view.chat).toEqual([{ kind: 'localEdits', checkpoint: saved, reason: 'request' }]);
+    expect(fold([event], createView({ ...snapshot, checkpoints: [saved] })).snapshot.checkpoints).toEqual([saved]);
+  });
+
   it('중지된 서비스는 이전 주소를 지워 사라진 미리보기를 띄우지 않는다', () => {
     const view = fold([
       { type: 'service', service: 'web', state: 'ready', url: 'http://127.0.0.1:32769' },

@@ -21,8 +21,10 @@ import type {
   ExecResult,
   ExternalCallRequest,
   ExternalCallResult,
+  FileChange,
   LogLine,
   LogOptions,
+  RelayedPath,
   Sandbox,
   SandboxProvider,
   ServiceEndpoint,
@@ -44,6 +46,7 @@ import {
   parseSyncOutput,
 } from './format';
 import { externalCallScript } from './external-call';
+import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
@@ -149,6 +152,7 @@ class LocalDockerSandbox implements Sandbox {
   readonly #secrets: Record<string, string>;
   readonly #redactor: Redactor;
   readonly #edgeScript: string;
+  #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
 
   constructor(
     id: string,
@@ -312,6 +316,30 @@ class LocalDockerSandbox implements Sandbox {
   ): Promise<ExecResult> {
     const result = await this.#docker(this.#composeArgs(['exec', '-T', name, ...command]), signal, input);
     return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
+  }
+
+  async relayChanges(changes: FileChange[], { signal }: { signal?: AbortSignal } = {}): Promise<RelayedPath[]> {
+    if (changes.length === 0) return [];
+    // 바인드 마운트는 세션 동안 바뀌지 않으므로 compose 해석은 한 번만 한다
+    this.#composeConfig ??= this.#compose(['config', '--format', 'json']).then((result) => {
+      if (result.exitCode !== 0) throw new SandboxError(`compose 설정을 읽지 못했습니다 (${this.id})`, this.redact(result.stderr));
+      return JSON.parse(result.stdout) as { services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> };
+    });
+    const config = await this.#composeConfig.catch((error: unknown) => {
+      this.#composeConfig = undefined;
+      throw error;
+    });
+
+    const managed = new Set(this.project.managed.map(([name]) => name));
+    const relayed: RelayedPath[] = [];
+    for (const [service, targets] of planRelay(this.project.root, changes, bindMounts(config.services, managed))) {
+      const args = targets.map((target) => `${target.action === 'move' ? 'm' : 'n'}:${target.containerPath}`);
+      const result = await this.#compose(['exec', '-T', service, 'sh', '-c', RELAY_SCRIPT, 'sh', ...args], signal);
+      // 컨테이너가 재시작 중이면 알리지 못한 경로가 생긴다. 다시 뜬 서비스는 파일을 처음부터 읽으므로 알린 경로만 돌려준다
+      const done = new Set(result.stdout.split('\n').filter(Boolean));
+      relayed.push(...targets.filter((_, index) => done.has(args[index]!)).flatMap((target) => target.files.map((file) => ({ service, file }))));
+    }
+    return relayed;
   }
 
   redact(text: string): string {
