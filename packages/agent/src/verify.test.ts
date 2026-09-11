@@ -64,6 +64,9 @@ function fakeSandbox(failing: string[] = [], { syncFails = false } = {}): Sandbo
     findSecrets() {
       return [];
     },
+    async callExternal() {
+      return { decision: 'deny' as const, status: 404, body: '', masked: 0 };
+    },
     async destroy() {},
   };
 }

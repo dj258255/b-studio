@@ -2,14 +2,14 @@
 
 import { useState } from "react";
 import type { SessionView } from "@/lib/session-view";
-import type { ServiceView } from "@/lib/studio-events";
+import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
 import { HistoryPanel } from "./history-panel";
 import { LogPanel } from "./log-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 
-type Tab = { id: string; label: string; service?: ServiceView };
+type Tab = { id: string; label: string; service?: ServiceView; external?: ExternalApiView };
 
 const LOGS_TAB = "logs";
 const HISTORY_TAB = "history";
@@ -20,6 +20,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     ...view.snapshot.services
       .filter((service) => service.preview !== "logs")
       .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
+    ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
     { id: HISTORY_TAB, label: "기록" },
     { id: LOGS_TAB, label: "로그" },
     { id: RESOURCES_TAB, label: "리소스" },
@@ -51,6 +52,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <HistoryPanel view={view} />
         ) : active.id === RESOURCES_TAB ? (
           <ResourcePanel view={view} />
+        ) : active.external ? (
+          <ExternalApiPanel sessionId={view.snapshot.id} external={active.external} ready={view.snapshot.status === "ready"} revision={view.completedRuns} />
         ) : active.id === LOGS_TAB || !active.service ? (
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
         ) : !active.service.url ? (
@@ -63,7 +66,18 @@ export function PreviewPanel({ view }: { view: SessionView }) {
               {active.service.preview === "browser" ? (
                 <BrowserPreview key={active.service.name} service={active.service} revision={view.completedRuns} />
               ) : (
-                <ApiExplorer key={active.service.name} sessionId={view.snapshot.id} service={active.service} revision={view.completedRuns} />
+                <ApiExplorer
+                  key={active.service.name}
+                  target={{
+                    name: active.service.name,
+                    requestUrl: `/api/sessions/${view.snapshot.id}/services/${active.service.name}/request`,
+                    contractUrl: active.service.hasContract ? `/api/sessions/${view.snapshot.id}/services/${active.service.name}/contract` : undefined,
+                    ready: active.service.state === "ready",
+                    address: active.service.url,
+                    notice: active.service.hasContract ? undefined : "이 서비스는 API 계약을 제공하지 않습니다.",
+                  }}
+                  revision={view.completedRuns}
+                />
               )}
             </div>
           </div>
@@ -105,6 +119,45 @@ function BrowserPreview({ service, revision }: { service: ServiceView; revision:
       </form>
       {/* 요청이 끝날 때마다, 그리고 재시작으로 주소가 바뀌면 새로 불러온다 */}
       <iframe key={`${src}|${reloads}|${revision}`} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
+    </div>
+  );
+}
+
+function ExternalApiPanel({ sessionId, external, ready, revision }: { sessionId: string; external: ExternalApiView; ready: boolean; revision: number }) {
+  return (
+    <div className="flex h-full flex-col">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 border-b border-line bg-panel px-4 py-3 text-sm">
+        <dt className="text-muted">샌드박스 안의 주소</dt>
+        <dd className="font-mono break-all">
+          http://{external.name}/ → {external.baseUrl}
+        </dd>
+        <dt className="text-muted">허용</dt>
+        <dd>{external.access.join(" / ")}</dd>
+        {external.mask.length > 0 && (
+          <>
+            <dt className="text-muted">가리는 필드</dt>
+            <dd className="font-mono">{external.mask.join(", ")}</dd>
+          </>
+        )}
+        {external.authenticated && (
+          <>
+            <dt className="text-muted">인증</dt>
+            <dd>b-studio가 인증 헤더를 붙입니다. 샌드박스 서비스는 값을 받지 않습니다</dd>
+          </>
+        )}
+      </dl>
+      <div className="min-h-0 flex-1">
+        <ApiExplorer
+          key={external.name}
+          target={{
+            name: external.name,
+            requestUrl: `/api/sessions/${sessionId}/externals/${external.name}/request`,
+            ready,
+            notice: "여기서 보낸 요청은 studio 호출자로 정책을 거치고 감사 기록에 남습니다.",
+          }}
+          revision={revision}
+        />
+      </div>
     </div>
   );
 }

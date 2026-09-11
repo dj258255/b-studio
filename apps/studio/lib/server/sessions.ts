@@ -30,7 +30,7 @@ import {
 import { describeSnapshotEvent, LocalDockerProvider, resolveSecrets, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import type { ExportResult, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
+import type { ExportResult, ProxyResponse, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
 import { findProject } from './projects';
 
@@ -130,6 +130,15 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
         state: 'starting',
         hasContract: Boolean(service.contract),
       })),
+      externals: (project.external ?? []).map(([name, service]) => ({
+        name,
+        baseUrl: service.baseUrl,
+        access: service.policy.allow
+          ? service.policy.allow.map((rule) => `${rule.callers.join(', ')}: ${rule.methods.join('/')} ${rule.paths.join(', ')}`)
+          : ['모든 호출자: GET/HEAD'],
+        mask: service.policy.mask,
+        authenticated: Boolean(service.policy.auth),
+      })),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       checkpoints: [firstCheckpoint],
       repository,
@@ -210,6 +219,30 @@ export async function endpointFor(id: string, service: string): Promise<string> 
   if (!session.project.managed.some(([name]) => name === service)) throw new StudioError(404, `${service} 서비스가 없습니다`);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
   return (await session.sandbox.endpoint(service)).url;
+}
+
+const MAX_PROXY_BODY = 200_000;
+
+/** API 탐색기에서 등록한 사내 API를 부른다. 샌드박스 서비스와 같은 정책·인증·가림을 거치고 감사 기록은 edge 로그에 남는다 */
+export async function externalRequest(id: string, name: string, input: { method: string; path: string; body: string }): Promise<ProxyResponse> {
+  const session = requireSession(id);
+  if (!(session.project.external ?? []).some(([external]) => external === name)) throw new StudioError(404, `${name} 사내 API가 없습니다`);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
+
+  const started = performance.now();
+  const result = await session.sandbox.callExternal(
+    name,
+    { method: input.method, path: input.path, body: input.body || undefined },
+    { via: 'explorer', signal: AbortSignal.any([session.stop.signal, AbortSignal.timeout(40_000)]) },
+  );
+  return {
+    status: result.status,
+    contentType: result.contentType ?? null,
+    body: result.body.slice(0, MAX_PROXY_BODY),
+    truncated: result.body.length > MAX_PROXY_BODY,
+    durationMs: Math.round(performance.now() - started),
+    policy: { decision: result.decision, masked: result.masked, ...(result.reason ? { reason: result.reason } : {}) },
+  };
 }
 
 async function boot(session: Session): Promise<void> {

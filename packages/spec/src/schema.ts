@@ -1,6 +1,10 @@
 import { z } from 'zod';
 
 const NAME = /^[a-z][a-z0-9-]*$/;
+/** 컨테이너 안에서 값을 받을 환경 변수 이름 */
+const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
+/** 정책에서 샌드박스 서비스가 아닌 호출자: 에이전트 도구와 API 탐색기 (스튜디오 서버가 대신 부른다) */
+export const STUDIO_CALLER = 'studio';
 
 /**
  * 서비스 안의 경로. `//host/...`는 `new URL(path, base)`에서 다른 호스트를 가리키게 되므로 거부한다
@@ -49,12 +53,43 @@ export const ManagedServiceSchema = z.object({
   snapshots: z.array(SnapshotSchema).optional(),
 });
 
-/** 이미 운영 중인 API를 등록만 하는 서비스 (TOI 방식) */
+/** `/api/users/*`: `*`는 한 경로 구간, `**`는 여러 구간 */
+const PATH_PATTERN = z.string().regex(/^\/\S*$/, '"/"로 시작하고 공백이 없는 경로 패턴이어야 합니다');
+
+export const PolicyRuleSchema = z.object({
+  /** 부를 수 있는 쪽: compose 서비스 이름이나 studio(에이전트 도구·API 탐색기) */
+  callers: z.array(z.string().regex(NAME)).min(1),
+  methods: z.array(z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'])).min(1),
+  paths: z.array(PATH_PATTERN).min(1).default(['/**']),
+});
+
+/** 등록한 API를 샌드박스에서 부를 때 edge가 적용하는 정책 */
+export const ExternalPolicySchema = z.object({
+  /** 적지 않으면 모든 호출자에게 GET·HEAD만 허용한다. 적으면 적은 규칙만 허용한다 */
+  allow: z.array(PolicyRuleSchema).optional(),
+  /** 응답 JSON에서 값을 가릴 필드 이름 (대소문자 무시, 어느 깊이든) */
+  mask: z.array(z.string().min(1)).default([]),
+  /** edge가 요청에 붙이는 인증 헤더. 값은 secrets에 선언한 시크릿이며 샌드박스 서비스에는 들어가지 않는다 */
+  auth: z
+    .object({
+      header: z.string().regex(/^[A-Za-z0-9-]+$/, 'HTTP 헤더 이름이어야 합니다'),
+      secret: z.string().regex(ENV_NAME),
+      prefix: z.string().default(''),
+    })
+    .optional(),
+});
+
+/** 이미 운영 중인 API를 등록만 하는 서비스 (TOI 방식). 샌드박스에서는 edge의 정책 프록시로만 부른다 */
 export const ExternalServiceSchema = z.object({
   source: z.literal('external'),
-  baseUrl: z.url(),
+  baseUrl: z
+    .url()
+    .refine((value) => /^https?:\/\//.test(value), 'http나 https 주소여야 합니다')
+    // studio.yaml은 저장소에 커밋되므로 자격 증명은 policy.auth와 secrets로만 받는다
+    .refine((value) => URL.canParse(value) && !new URL(value).username && !new URL(value).password, '주소에 자격 증명을 넣지 말고 policy.auth와 secrets를 쓰세요'),
   preview: PreviewKindSchema.exclude(['browser']).default('openapi'),
   contract: z.object({ url: z.url() }).optional(),
+  policy: ExternalPolicySchema.default({ mask: [] }),
 });
 
 export const ServiceSchema = z.discriminatedUnion('source', [ManagedServiceSchema, ExternalServiceSchema]);
@@ -89,16 +124,13 @@ export const DatabaseSchema = z.object({
   user: SQL_IDENTIFIER,
 });
 
-/** 컨테이너 안에서 값을 받을 환경 변수 이름 */
-const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
-
 /**
  * 샌드박스 서비스에 넣을 시크릿. 값은 프로젝트가 아니라 스튜디오 서버의 환경 변수나 시크릿 파일에서 읽고,
  * 샌드박스에서 나오는 로그·명령 출력·응답에서는 가린다.
  */
 export const SecretSchema = z.object({
-  /** 이 값을 같은 이름의 환경 변수로 받을 compose 서비스 */
-  services: z.array(z.string().regex(NAME)).min(1),
+  /** 이 값을 같은 이름의 환경 변수로 받을 compose 서비스. 외부 API 인증에만 쓰는 시크릿은 비워 둔다 */
+  services: z.array(z.string().regex(NAME)).default([]),
   description: z.string().optional(),
 });
 
@@ -129,6 +161,8 @@ export type SnapshotSpec = z.infer<typeof SnapshotSchema>;
 export type DatabaseSpec = z.infer<typeof DatabaseSchema>;
 export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type SecretSpec = z.infer<typeof SecretSchema>;
+export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
+export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;
 export type PreviewKind = z.infer<typeof PreviewKindSchema>;
 export type ManagedServiceSpec = z.infer<typeof ManagedServiceSchema>;
 export type ExternalServiceSpec = z.infer<typeof ExternalServiceSchema>;

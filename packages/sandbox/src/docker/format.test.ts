@@ -35,7 +35,7 @@ describe('buildOverride 네트워크 격리', () => {
       expect(override.services[name]).not.toHaveProperty('ports');
     }
     expect(override.services[EDGE_SERVICE]).toMatchObject({
-      networks: ['b-studio-sandbox', 'b-studio-egress'],
+      networks: { 'b-studio-sandbox': { aliases: [] }, 'b-studio-egress': {} },
       ports: ['127.0.0.1::20000', '127.0.0.1::20001'],
       environment: { EDGE_FORWARDS: '20000=web:3000,20001=api:8080' },
     });
@@ -68,6 +68,31 @@ describe('buildOverride 네트워크 격리', () => {
     });
     expect(services.db).toMatchObject({ deploy: { resources: { limits: { memory: '256m' } } } });
     expect(services.db).not.toHaveProperty('labels');
+  });
+});
+
+describe('buildOverride 사내 API', () => {
+  it('등록한 이름을 edge 별칭으로 두고, 서비스는 프록시 없이 부르며, 인증 시크릿은 edge에만 넣는다', () => {
+    const policy = { mask: ['phone'], auth: { header: 'Authorization', secret: 'LEGACY_USERS_TOKEN', prefix: 'Bearer $' } };
+    const project = {
+      ...ORDERS,
+      secrets: [['LEGACY_USERS_TOKEN', { services: [] }]],
+      external: [['legacy-users', { source: 'external', baseUrl: 'https://users.internal.example.com/v1', preview: 'openapi', policy }]],
+    } as unknown as LoadedProject;
+
+    const { services } = buildOverride(project, 's1');
+    const edge = services[EDGE_SERVICE]!;
+    const environment = edge.environment as Record<string, unknown>;
+
+    expect(edge.networks).toEqual({ 'b-studio-sandbox': { aliases: ['legacy-users'] }, 'b-studio-egress': {} });
+    expect(edge.extra_hosts).toEqual(['host.docker.internal:host-gateway']);
+    expect(environment.LEGACY_USERS_TOKEN).toBeNull();
+    expect(environment.EDGE_CALLERS).toBe('web,api,db');
+    expect(JSON.parse(String(environment.EDGE_EXTERNALS).replaceAll('$$', '$'))).toEqual([
+      { name: 'legacy-users', baseUrl: 'https://users.internal.example.com/v1', policy },
+    ]);
+    expect((services.api!.environment as Record<string, string>).NO_PROXY).toBe('localhost,127.0.0.1,web,api,db,legacy-users');
+    expect(services.api!.environment).not.toHaveProperty('LEGACY_USERS_TOKEN');
   });
 });
 

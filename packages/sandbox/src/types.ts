@@ -96,6 +96,25 @@ export interface EgressDenial {
   at: Date;
 }
 
+export interface ExternalCallRequest {
+  method: string;
+  /** "/"로 시작하는 경로와 쿼리 */
+  path: string;
+  /** JSON 본문 */
+  body?: string;
+}
+
+export interface ExternalCallResult {
+  decision: 'allow' | 'deny';
+  status: number;
+  contentType?: string;
+  /** 시크릿 값을 가린 응답 본문. 거부했으면 이유 */
+  body: string;
+  /** 정책으로 가린 필드 수 */
+  masked: number;
+  reason?: string;
+}
+
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -132,6 +151,11 @@ export interface Sandbox {
   redact(text: string): string;
   /** 텍스트에 값이 들어 있는 시크릿 이름 (체크포인트에 시크릿이 커밋되지 않게 확인할 때) */
   findSecrets(text: string): string[];
+  /**
+   * 등록한 사내 API를 studio 호출자(에이전트 도구, API 탐색기)로 부른다.
+   * 샌드박스 서비스의 호출과 같은 정책·인증·응답 가림·감사 기록을 거친다. via는 감사 기록에 남길 경로다
+   */
+  callExternal(name: string, request: ExternalCallRequest, options: { via: string; signal?: AbortSignal }): Promise<ExternalCallResult>;
   destroy(): Promise<void>;
 }
 
