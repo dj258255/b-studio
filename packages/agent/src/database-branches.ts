@@ -108,7 +108,8 @@ export class DatabaseBranches {
     const result = await this.#sandbox.exec(
       service,
       ['pg_dump', '-U', database.user, '-d', database.database, '--no-owner', '--no-privileges'],
-      { signal },
+      // 덤프는 파일로만 옮기고 보여 주지 않는다. 가리면 복원할 데이터가 바뀐다
+      { signal, raw: true },
     );
     return result.exitCode === 0 ? { sql: result.stdout } : { error: firstLines(result.stderr) || `pg_dump exit ${result.exitCode}` };
   }

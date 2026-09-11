@@ -34,6 +34,28 @@ const write = (file: string, content: string) => writeFile(path.join(root, file)
 const read = (file: string) => readFile(path.join(root, file), 'utf8');
 
 describe('CheckpointStore', () => {
+  it('시크릿 값이 들어간 파일이나 메시지는 커밋하지 않고, 값을 에러에 넣지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/PaymentClient.java', 'class PaymentClient { String key = "sk_live_1234567890"; }\n');
+    const findSecrets = (text: string) => (text.includes('sk_live_1234567890') ? ['PAYMENT_API_KEY'] : []);
+
+    const error = await store.commit('요청: 결제 연동', undefined, { findSecrets }).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as CheckpointError,
+    );
+
+    expect(error).toBeInstanceOf(CheckpointError);
+    expect(error.message).toContain('api/src/PaymentClient.java (PAYMENT_API_KEY)');
+    expect(error.message).not.toContain('sk_live_1234567890');
+    expect(await store.list()).toHaveLength(1);
+    expect(await store.pendingFiles()).toEqual(['api/src/PaymentClient.java']);
+
+    await write('api/src/PaymentClient.java', 'class PaymentClient { String key = System.getenv("PAYMENT_API_KEY"); }\n');
+    await expect(store.commit('요청: 결제 연동', '키는 sk_live_1234567890', { findSecrets })).rejects.toThrow('커밋 메시지 (PAYMENT_API_KEY)');
+    expect(await store.commit('요청: 결제 연동', undefined, { findSecrets })).toMatchObject({ files: ['api/src/PaymentClient.java'] });
+  });
+
   it('지금 상태를 첫 체크포인트로 남기고 샌드박스 생성물은 제외한다', async () => {
     await mkdir(path.join(root, 'web/node_modules/next'), { recursive: true });
     await write('web/node_modules/next/index.js', '');

@@ -1,5 +1,5 @@
 import { styleText } from 'node:util';
-import { describeSnapshotEvent, LocalDockerProvider, type Sandbox, type ServiceEndpoint } from '@b-studio/sandbox';
+import { describeSnapshotEvent, LocalDockerProvider, resolveSecrets, type Sandbox, type ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { createLabeler, describe, once, pipeLogs, print, printEndpoints, reportStatus, type Label } from './ui';
 
@@ -27,7 +27,7 @@ export async function runSandboxSession(
   { keep, followLogs }: SessionOptions,
   body: (context: SessionContext) => Promise<number>,
 ): Promise<number> {
-  const sandbox = await new LocalDockerProvider().create(project);
+  const sandbox = await new LocalDockerProvider().create(project, { secrets: await resolveSecrets(project) });
   const label = createLabeler(project);
   const stop = new AbortController();
 
@@ -53,6 +53,10 @@ export async function runSandboxSession(
   });
 
   print(label('studio'), `${project.spec.name} 샌드박스를 시작합니다 (${sandbox.id})`);
+  if (project.secrets.length > 0) {
+    const injected = project.secrets.map(([name, secret]) => `${name} → ${secret.services.join(', ')}`).join(', ');
+    print(label('studio'), `시크릿을 넣고 출력에서 가립니다: ${injected}`);
+  }
   let code: number;
   try {
     const endpoints = await sandbox.start({

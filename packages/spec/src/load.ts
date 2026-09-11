@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { StudioSpecSchema, type DatabaseSpec, type ManagedServiceSpec, type ResourceLimit, type StudioSpec } from './schema';
+import { StudioSpecSchema, type DatabaseSpec, type ManagedServiceSpec, type ResourceLimit, type SecretSpec, type StudioSpec } from './schema';
 
 export const SPEC_FILE = 'studio.yaml';
 
@@ -31,6 +31,8 @@ export interface LoadedProject {
   composeServices: string[];
   /** 기본 패키지 저장소 외에 외부 접속을 허용할 호스트 */
   egress: string[];
+  /** 시크릿 이름(컨테이너 환경 변수 이름) → 받을 서비스. 값은 들어 있지 않다 */
+  secrets: Array<[name: string, secret: SecretSpec]>;
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -105,6 +107,12 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     if (!composeServices.has(name)) issues.push(`resources.${name}: ${spec.compose}에 같은 이름의 서비스가 없습니다`);
   }
 
+  for (const [name, secret] of Object.entries(spec.secrets ?? {})) {
+    for (const service of secret.services) {
+      if (!composeServices.has(service)) issues.push(`secrets.${name}.services: ${spec.compose}에 '${service}' 서비스가 없습니다`);
+    }
+  }
+
   if (issues.length > 0) throw new SpecError(`${SPEC_FILE}과 ${spec.compose}가 맞지 않습니다`, issues);
 
   const sharedVolumes = Object.entries(compose.data.volumes ?? {})
@@ -121,6 +129,7 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     resources: spec.resources ?? {},
     composeServices: [...composeServices],
     egress: spec.network?.egress ?? [],
+    secrets: Object.entries(spec.secrets ?? {}),
   };
 }
 

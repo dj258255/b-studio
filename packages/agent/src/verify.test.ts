@@ -6,7 +6,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
-import { formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
+import { findSecretLeaks, formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
 
 const project = {
   root: '/tmp/orders',
@@ -57,6 +57,12 @@ function fakeSandbox(failing: string[] = [], { syncFails = false } = {}): Sandbo
     },
     async exec() {
       return { exitCode: 0, stdout: '', stderr: '' };
+    },
+    redact(text: string) {
+      return text;
+    },
+    findSecrets() {
+      return [];
     },
     async destroy() {},
   };
@@ -181,7 +187,7 @@ describe('restartServicesFor', () => {
 
     expect(restarts).toEqual(['api', 'api']);
     expect(report.restarted).toEqual([{ service: 'api', ready: true, retried: true }]);
-    expect(formatVerificationReport({ ok: true, contracts: [], ...report }, { allowBreaking: false })).toContain('한 번 더 재시작');
+    expect(formatVerificationReport({ ok: true, contracts: [], secretLeaks: [], ...report }, { allowBreaking: false })).toContain('한 번 더 재시작');
   });
 
   it('지운 파일과 무관한 실패는 다시 시도하지 않는다', async () => {
@@ -221,9 +227,24 @@ describe('restartServicesFor', () => {
     expect(report.restarted[0]?.blockedEgress).toEqual(['registry.example.com:443 (허용 목록에 없는 호스트나 포트)']);
     // 시계 차이를 감안해 재시작 직전보다 조금 이른 시점부터 묻는다
     expect(asked!.getTime()).toBeLessThan(recent.getTime());
-    expect(formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: report.restarted, contracts: [], unverifiedFiles: [] }, { allowBreaking: false })).toContain(
+    expect(formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: report.restarted, contracts: [], unverifiedFiles: [], secretLeaks: [] }, { allowBreaking: false })).toContain(
       '막힌 외부 접속 (studio.yaml network.egress에 없는 호스트): registry.example.com:443',
     );
+  });
+
+  it('바뀐 파일에 들어간 시크릿 값을 이름으로 찾고, 게이트 보고에 값은 넣지 않는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'secret-leak-'));
+    await mkdir(path.join(root, 'api/src'), { recursive: true });
+    await writeFile(path.join(root, 'api/src/PaymentClient.java'), 'class PaymentClient { String key = "sk_live_1234567890"; }\n');
+    await writeFile(path.join(root, 'api/src/Order.java'), 'class Order { String key = System.getenv("PAYMENT_API_KEY"); }\n');
+    const sandbox = { findSecrets: (text: string) => (text.includes('sk_live_1234567890') ? ['PAYMENT_API_KEY'] : []) } as unknown as Sandbox;
+
+    const leaks = await findSecretLeaks(sandbox, root, ['api/src/PaymentClient.java', 'api/src/Order.java', 'api/src/Deleted.java']);
+
+    expect(leaks).toEqual([{ file: 'api/src/PaymentClient.java', secrets: ['PAYMENT_API_KEY'] }]);
+    const text = formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: leaks }, { allowBreaking: false });
+    expect(text).toContain('시크릿 값이 파일에 들어갔습니다: api/src/PaymentClient.java (PAYMENT_API_KEY)');
+    expect(text).not.toContain('sk_live_1234567890');
   });
 
   it('로그에 지운 파일 이름과 "없음" 오류가 함께 나올 때만 해당한다', () => {

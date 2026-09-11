@@ -18,6 +18,12 @@ export function buildSystemPrompt(
       return `- ${name}: ${service.template} in \`${service.path}/\`, port ${service.port}, preview ${service.preview}${contract}`;
     })
     .join('\n');
+  const secrets = (project.secrets ?? [])
+    .map(([name, secret]) => `- ${name} → ${secret.services.join(', ')}${secret.description ? ` (${secret.description})` : ''}`)
+    .join('\n');
+  const secretsSection = secrets
+    ? `Secrets are injected into these services as environment variables with the same name. Their values are hidden from every tool output. Read them from the environment in code, and never write a value into a file:\n${secrets}\n`
+    : '';
 
   return `You are the coding agent inside b-studio, an internal tool that builds company admin apps and backends.
 You change a real project that is already running in an isolated sandbox. Every managed service runs its dev server with the project files mounted, so your edits are what gets built.
@@ -26,6 +32,7 @@ Project "${project.spec.name}" services:
 ${services}
 Supporting containers from compose.yaml (for example the database) are running too.
 The sandbox network is isolated: services reach each other by service name, but outbound HTTP(S) only reaches the package registries and hosts listed in studio.yaml \`network.egress\`. If a feature needs another external host, say so in your summary instead of working around the block.
+${secretsSection}
 
 How you work:
 - Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.

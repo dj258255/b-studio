@@ -107,7 +107,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
         return success(entries.length > 0 ? entries.join('\n') : '(empty)');
       }
       case 'read_file':
-        return success(truncate(await workspace.read(string(args, 'path'))));
+        return success(truncate(sandbox.redact(await workspace.read(string(args, 'path')))));
       case 'write_file': {
         const file = string(args, 'path');
         await workspace.write(file, string(args, 'content'));
@@ -152,7 +152,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
         const contract = context.project.managed.find(([serviceKey]) => serviceKey === target)?.[1].contract;
         if (!contract) return failure(`${target} does not expose a contract`);
         const endpoint = await sandbox.endpoint(target);
-        return success(summarizeContract(await context.fetcher(new URL(contract.extract, endpoint.url).toString())));
+        return success(sandbox.redact(summarizeContract(await context.fetcher(new URL(contract.extract, endpoint.url).toString()))));
       }
       default:
         return failure(`Unknown tool: ${name}`);
@@ -183,7 +183,8 @@ async function httpRequest(context: ToolContext, args: Record<string, unknown>):
   const text = await response.text();
   const contentType = response.headers.get('content-type') ?? 'unknown';
   // 4xx/5xx도 요청 자체는 수행됐으므로 정상 결과로 돌려주고 판단은 모델에게 맡긴다
-  return success(`HTTP ${response.status}\ncontent-type: ${contentType}\n\n${truncate(text)}`);
+  // 서비스가 응답에 환경 변수 값을 그대로 담아 보낼 수 있다
+  return success(`HTTP ${response.status}\ncontent-type: ${contentType}\n\n${truncate(context.sandbox.redact(text))}`);
 }
 
 async function tailLogs(sandbox: Sandbox, service: string, lines: number): Promise<string> {

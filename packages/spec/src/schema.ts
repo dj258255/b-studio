@@ -89,6 +89,19 @@ export const DatabaseSchema = z.object({
   user: SQL_IDENTIFIER,
 });
 
+/** 컨테이너 안에서 값을 받을 환경 변수 이름 */
+const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
+
+/**
+ * 샌드박스 서비스에 넣을 시크릿. 값은 프로젝트가 아니라 스튜디오 서버의 환경 변수나 시크릿 파일에서 읽고,
+ * 샌드박스에서 나오는 로그·명령 출력·응답에서는 가린다.
+ */
+export const SecretSchema = z.object({
+  /** 이 값을 같은 이름의 환경 변수로 받을 compose 서비스 */
+  services: z.array(z.string().regex(NAME)).min(1),
+  description: z.string().optional(),
+});
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -107,12 +120,15 @@ export const StudioSpecSchema = z.object({
       egress: z.array(EGRESS_HOST).default([]),
     })
     .optional(),
+  /** 환경 변수 이름 → 받을 서비스 */
+  secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
 export type SnapshotSpec = z.infer<typeof SnapshotSchema>;
 export type DatabaseSpec = z.infer<typeof DatabaseSchema>;
 export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
+export type SecretSpec = z.infer<typeof SecretSchema>;
 export type PreviewKind = z.infer<typeof PreviewKindSchema>;
 export type ManagedServiceSpec = z.infer<typeof ManagedServiceSchema>;
 export type ExternalServiceSpec = z.infer<typeof ExternalServiceSchema>;

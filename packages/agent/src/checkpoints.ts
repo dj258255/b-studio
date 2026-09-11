@@ -177,8 +177,18 @@ export class CheckpointStore {
    * 바뀐 파일이 있으면 체크포인트로 남긴다. 본문에는 검증 결과처럼 PR에서 다시 쓸 기록을 넣는다.
    * allowEmpty는 파일은 그대로지만 데이터베이스만 바뀐 요청을 체크포인트로 남길 때 쓴다.
    */
-  async commit(message: string, body?: string, { allowEmpty = false }: { allowEmpty?: boolean } = {}): Promise<Checkpoint | undefined> {
-    if (!allowEmpty && (await this.pendingFiles()).length === 0) return undefined;
+  async commit(
+    message: string,
+    body?: string,
+    { allowEmpty = false, findSecrets }: { allowEmpty?: boolean; findSecrets?: (text: string) => string[] } = {},
+  ): Promise<Checkpoint | undefined> {
+    const pending = await this.pendingFiles();
+    if (!allowEmpty && pending.length === 0) return undefined;
+    // 검증 게이트는 에이전트 도구로 쓴 파일만 보지만, 커밋은 명령이 만든 파일까지 담는다. 올리기 전 마지막으로 막는다
+    if (findSecrets) {
+      const leaks = await this.#secretLeaks(pending, `${message}\n${body ?? ''}`, findSecrets);
+      if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
+    }
     await this.#git(['add', '-A']);
     const text = body?.trim();
     // 기본 정리 모드는 #으로 시작하는 줄(마크다운 제목)을 지우므로 공백만 정리한다
@@ -187,6 +197,19 @@ export class CheckpointStore {
       '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
     ]);
     return this.#checkpoint('HEAD');
+  }
+
+  /** "파일 (시크릿 이름)" 목록. 값은 담지 않는다 */
+  async #secretLeaks(files: readonly string[], text: string, findSecrets: (text: string) => string[]): Promise<string[]> {
+    const leaks: string[] = [];
+    const inText = findSecrets(text);
+    if (inText.length > 0) leaks.push(`커밋 메시지 (${inText.join(', ')})`);
+    for (const file of files) {
+      const content = await readFile(path.join(this.root, file), 'utf8').catch(() => undefined);
+      const found = content === undefined ? [] : findSecrets(content);
+      if (found.length > 0) leaks.push(`${file} (${found.join(', ')})`);
+    }
+    return leaks;
   }
 
   /** 마지막 체크포인트 이후의 변경을 버린다. 무엇을 버렸는지 볼 수 있게 patch를 함께 돌려준다 */
