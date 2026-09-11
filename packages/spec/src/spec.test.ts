@@ -39,6 +39,12 @@ describe('parseSpec', () => {
     expect(spec.repository).toBeUndefined();
   });
 
+  it('배포 설정은 Dockerfile 기본값을 채우고, 포트는 1024 이상만 받는다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}deploy:\n  services:\n    web: { port: 8300 }\n`).deploy).toEqual({ services: { web: { dockerfile: 'Dockerfile', port: 8300 } } });
+    expect(() => parseSpec(`${ORDERS_SPEC}deploy:\n  services:\n    web: { port: 80 }\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}deploy:\n  services:\n    web: { dockerfile: ../Dockerfile }\n`)).toThrow(SpecError);
+  });
+
   it('모노레포 하위 폴더 연동은 명시해야 켜진다', () => {
     expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false });
     expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true });
