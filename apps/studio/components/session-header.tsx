@@ -56,6 +56,18 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
+        {snapshot.runtime && (
+          <span
+            className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-muted"
+            title={
+              snapshot.runtime === "runsc"
+                ? "gVisor로 격리했습니다. 파일 변경 알림이 오지 않아 미리보기는 요청이 끝나고 서비스를 다시 띄울 때 바뀝니다"
+                : `컨테이너 런타임: ${snapshot.runtime}`
+            }
+          >
+            {snapshot.runtime === "runsc" ? "gVisor 격리" : `런타임 ${snapshot.runtime}`}
+          </span>
+        )}
         <span
           className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${
             snapshot.mode === "demo" ? "border-wait/50 text-wait" : "border-line text-muted"

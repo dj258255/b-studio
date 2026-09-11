@@ -43,6 +43,8 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
+  /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
+  runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
   nextDemoRequest?: string;
   /** 게이트를 통과해 남긴 체크포인트. 최신이 먼저 온다 */

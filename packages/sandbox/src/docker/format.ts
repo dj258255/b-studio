@@ -39,7 +39,11 @@ export function edgePortFor(project: LoadedProject, service: string): number {
  *  - internal 네트워크의 컨테이너는 포트를 공개할 수 없으므로 edge가 루프백의 빈 포트로 대신 공개해 넘긴다
  *  - HTTP(S) 도구는 edge 프록시를 거쳐 허용한 호스트로만 나간다
  */
-export function buildOverride(project: LoadedProject, sandboxId: string, { edgeScript = '' }: { edgeScript?: string } = {}) {
+export function buildOverride(
+  project: LoadedProject,
+  sandboxId: string,
+  { edgeScript = '', runtime }: { edgeScript?: string; runtime?: string } = {},
+) {
   const composeServices = project.composeServices ?? project.managed.map(([name]) => name);
   const proxy = `http://${EDGE_SERVICE}:${EDGE_PROXY_PORT}`;
   const externals = project.external ?? [];
@@ -64,8 +68,10 @@ export function buildOverride(project: LoadedProject, sandboxId: string, { edgeS
 
   // 프록시가 듣기 전에 서비스가 뜨면 첫 다운로드(corepack의 pnpm 등)가 연결 거부로 실패하고 컨테이너가 끝난다
   const waitForEdge = { [EDGE_SERVICE]: { condition: 'service_healthy' } };
+  // gVisor(runsc) 같은 런타임은 에이전트 코드가 도는 서비스와 샌드박스 네트워크에 노출된 edge에 모두 건다
+  const isolation = runtime ? { runtime } : {};
   const services: Record<string, Record<string, unknown>> = Object.fromEntries(
-    composeServices.map((name) => [name, { networks: [SANDBOX_NETWORK], environment: proxyEnvironment, depends_on: waitForEdge }]),
+    composeServices.map((name) => [name, { networks: [SANDBOX_NETWORK], environment: proxyEnvironment, depends_on: waitForEdge, ...isolation }]),
   );
   for (const [name] of project.managed) {
     services[name] = { ...services[name], labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name } };
@@ -82,6 +88,7 @@ export function buildOverride(project: LoadedProject, sandboxId: string, { edgeS
   const forwards = project.managed.map(([name, service]) => `${edgePortFor(project, name)}=${name}:${service.port}`);
   services[EDGE_SERVICE] = {
     image: EDGE_IMAGE,
+    ...isolation,
     // compose는 command 안의 $도 변수로 치환하므로 스크립트의 $를 $$로 적는다
     command: ['node', '--input-type=module', '-e', edgeScript.replaceAll('$', '$$$$')],
     environment: {
@@ -140,6 +147,16 @@ export function parseEgressDenial(text: string): EgressDenial | undefined {
     };
   } catch {
     return undefined;
+  }
+}
+
+/** `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다 */
+export function parseRuntimes(stdout: string): string[] {
+  try {
+    const runtimes = JSON.parse(stdout.trim() || '{}') as unknown;
+    return runtimes && typeof runtimes === 'object' ? Object.keys(runtimes).sort() : [];
+  } catch {
+    return [];
   }
 }
 
