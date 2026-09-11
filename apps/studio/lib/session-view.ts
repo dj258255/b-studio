@@ -97,7 +97,13 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         services: view.snapshot.services.map((service) =>
           service.name === event.service
             ? // 재시작 중에는 이전 주소로 미리보기를 유지하고, 중지하면 주소를 지운다
-              { ...service, state: event.state, url: event.state === 'stopped' ? undefined : (event.url ?? service.url), detail: event.detail }
+              {
+                ...service,
+                state: event.state,
+                url: event.state === 'stopped' ? undefined : (event.url ?? service.url),
+                previewUrl: event.state === 'stopped' ? undefined : (event.previewUrl ?? service.previewUrl),
+                detail: event.detail,
+              }
             : service,
         ),
       });

@@ -23,6 +23,8 @@ export interface PersistedSession {
   sourceDirtyFiles: number;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };
+  /** 원격 미리보기 주소에 넣는 토큰. 이어서 작업해도 같은 주소를 쓰도록 남긴다 */
+  previewToken?: string;
 }
 
 export function sessionFile(workDir: string): string {
@@ -113,6 +115,6 @@ export function archivedSnapshot(data: PersistedSession, error?: string): Sessio
     running: false,
     error,
     usage: undefined,
-    services: data.snapshot.services.map((service) => ({ ...service, state: 'stopped' as const, url: undefined, detail: undefined })),
+    services: data.snapshot.services.map((service) => ({ ...service, state: 'stopped' as const, url: undefined, previewUrl: undefined, detail: undefined })),
   };
 }

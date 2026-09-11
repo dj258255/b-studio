@@ -16,6 +16,8 @@ export interface ServiceView {
   state: ServiceState;
   /** 준비된 서비스의 주소. 재시작하면 포트가 바뀐다 */
   url?: string;
+  /** 원격 미리보기 게이트웨이를 켰을 때 다른 PC의 브라우저에서도 열리는 주소. 재시작해도 바뀌지 않는다 */
+  previewUrl?: string;
   detail?: string;
   hasContract: boolean;
 }
@@ -103,7 +105,7 @@ export interface SessionSummary {
 export type StudioEvent =
   | { type: 'snapshot'; snapshot: SessionSnapshot }
   | { type: 'status'; status: SessionStatus; error?: string }
-  | { type: 'service'; service: string; state: ServiceState; url?: string; detail?: string }
+  | { type: 'service'; service: string; state: ServiceState; url?: string; previewUrl?: string; detail?: string }
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }

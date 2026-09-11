@@ -91,7 +91,9 @@ function BrowserPreview({ service, revision }: { service: ServiceView; revision:
   const [path, setPath] = useState("/");
   const [draft, setDraft] = useState("/");
   const [reloads, setReloads] = useState(0);
-  const src = new URL(path, service.url).toString();
+  // 원격 미리보기 게이트웨이를 켰으면 다른 PC에서도 열리는 주소를 쓴다
+  const base = service.previewUrl ?? service.url;
+  const src = new URL(path, base).toString();
 
   return (
     <div className="flex h-full flex-col">
@@ -103,7 +105,9 @@ function BrowserPreview({ service, revision }: { service: ServiceView; revision:
           setReloads((count) => count + 1);
         }}
       >
-        <span className="font-mono text-xs text-muted">{service.url}</span>
+        <span className="max-w-[40%] truncate font-mono text-xs text-muted" title={base}>
+          {base}
+        </span>
         <label htmlFor="preview-path" className="sr-only">
           경로
         </label>
