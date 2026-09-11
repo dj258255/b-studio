@@ -1,7 +1,7 @@
 import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { Sandbox, StartOptions } from '@b-studio/sandbox';
+import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
@@ -22,6 +22,8 @@ export interface ServiceCheck {
   logTail?: string[];
   /** 지운 파일을 빌드 도구가 읽다 실패해 한 번 더 재시작했는지 */
   retried?: boolean;
+  /** 메모리 한도를 넘어 커널이 종료시켰는지. 코드 문제가 아니라는 신호다 */
+  oomKilled?: boolean;
 }
 
 export interface ContractCheck {
@@ -146,7 +148,14 @@ async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptio
     await sandbox.restart(service, start);
     return { service, ready: true };
   } catch (error) {
-    return { service, ready: false, error: describe(error), logTail: await recentLogs(sandbox, service) };
+    // 메모리 부족으로 죽었는지 먼저 알려야 에이전트가 코드를 고치려 들지 않는다
+    const usage = (await sandbox.stats().catch(() => [])).find((candidate) => candidate.service === service);
+    const logTail = await recentLogs(sandbox, service);
+    if (usage?.oomKilled) {
+      const limit = usage.memoryLimitBytes ? ` (${formatBytes(usage.memoryLimitBytes)})` : '';
+      return { service, ready: false, error: `메모리 한도${limit}를 넘어 종료됐습니다. ${describe(error)}`, logTail, oomKilled: true };
+    }
+    return { service, ready: false, error: describe(error), logTail };
   }
 }
 

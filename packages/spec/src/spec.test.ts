@@ -179,6 +179,33 @@ databases:
     expect(project.databases).toEqual([['db', { engine: 'postgres', database: 'app', user: 'app', dependents: ['api', 'worker'] }]]);
   });
 
+  it('자원 한도는 compose 서비스에만 걸 수 있고 docker 메모리 표기를 쓴다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+resources:
+  api: { memory: 1536m, cpus: 2 }
+  db: { memory: 256m }
+  missing: { memory: 1g }
+`,
+    );
+    await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual(['resources.missing: compose.yaml에 같은 이름의 서비스가 없습니다']);
+
+    const bad = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nresources:\n  api: { memory: 2GB }\n  db: {}\n'));
+    expect(bad.issues.some((issue) => issue.startsWith('resources.api.memory'))).toBe(true);
+    expect(bad.issues.some((issue) => issue.startsWith('resources.db'))).toBe(true);
+  });
+
   it('SQL에 들어가는 데이터베이스 이름과 사용자는 식별자만 허용한다', () => {
     const source = `
 version: 1

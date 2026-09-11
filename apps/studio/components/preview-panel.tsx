@@ -6,12 +6,14 @@ import type { ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
 import { HistoryPanel } from "./history-panel";
 import { LogPanel } from "./log-panel";
+import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 
 type Tab = { id: string; label: string; service?: ServiceView };
 
 const LOGS_TAB = "logs";
 const HISTORY_TAB = "history";
+const RESOURCES_TAB = "resources";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
@@ -20,6 +22,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
     { id: HISTORY_TAB, label: "기록" },
     { id: LOGS_TAB, label: "로그" },
+    { id: RESOURCES_TAB, label: "리소스" },
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0]!;
@@ -46,6 +49,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       <div role="tabpanel" className="min-h-0 flex-1">
         {active.id === HISTORY_TAB ? (
           <HistoryPanel view={view} />
+        ) : active.id === RESOURCES_TAB ? (
+          <ResourcePanel view={view} />
         ) : active.id === LOGS_TAB || !active.service ? (
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
         ) : !active.service.url ? (

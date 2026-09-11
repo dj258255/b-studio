@@ -46,6 +46,9 @@ export function fakeSandbox(project: LoadedProject, restartOutcomes: boolean[]):
     async state(): Promise<ContainerState> {
       return 'running';
     },
+    async stats() {
+      return [];
+    },
     async *logs(): AsyncIterable<LogLine> {
       yield { service: 'api', text: 'Order.java:1: error: cannot find symbol', at: new Date() };
     },

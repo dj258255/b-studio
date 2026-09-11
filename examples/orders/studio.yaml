@@ -29,3 +29,10 @@ services:
 # 체크포인트마다 상태를 저장해, 파일을 되돌릴 때 스키마와 데이터도 같은 시점으로 되돌린다
 databases:
   db: { engine: postgres, database: app, user: app }
+
+# 컨테이너 한도. 한 샌드박스가 Docker VM 자원을 다 써서 다른 세션까지 멈추지 않게 한다.
+# 한도 없이 잰 최대 사용량: api 726MiB(JVM 3개: Gradle 래퍼, Gradle 데몬, 앱), web 548MiB, db 48MiB
+resources:
+  api: { memory: 1536m, cpus: 2 }
+  web: { memory: 1g, cpus: 2 }
+  db: { memory: 256m }

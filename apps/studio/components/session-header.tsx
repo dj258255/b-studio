@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
+import { endedReason, formatBytes } from "@/lib/usage";
 import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
 
 const MODE_LABEL: Record<SessionMode, string> = {
@@ -34,13 +35,24 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </div>
 
       <ul className="flex flex-wrap items-center gap-4 text-sm" aria-label="서비스 상태">
-        {snapshot.services.map((service) => (
-          <li key={service.name} className="flex items-center gap-1.5">
-            <Dot tone={toneOfService(service.state)} />
-            <span className="font-medium">{service.name}</span>
-            <span className="text-muted">{SERVICE_STATE_LABEL[service.state]}</span>
-          </li>
-        ))}
+        {snapshot.services.map((service) => {
+          const usage = snapshot.usage?.services.find((candidate) => candidate.service === service.name);
+          const ended = usage && endedReason(usage);
+          return (
+            <li key={service.name} className="flex items-center gap-1.5">
+              <Dot tone={toneOfService(service.state)} />
+              <span className="font-medium">{service.name}</span>
+              <span className="text-muted">{SERVICE_STATE_LABEL[service.state]}</span>
+              {usage?.memoryBytes !== undefined && (
+                <span className="font-mono text-xs text-muted" title="메모리 사용량 / 한도">
+                  {formatBytes(usage.memoryBytes)}
+                  {usage.memoryLimitBytes ? ` / ${formatBytes(usage.memoryLimitBytes)}` : ""}
+                </span>
+              )}
+              {ended && usage?.oomKilled && <span className="text-xs text-fail">메모리 부족으로 종료</span>}
+            </li>
+          );
+        })}
       </ul>
 
       <div className="ml-auto flex items-center gap-3">

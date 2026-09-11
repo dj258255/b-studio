@@ -19,6 +19,24 @@ describe('buildOverride', () => {
   });
 });
 
+describe('buildOverride 자원 한도', () => {
+  it('managed와 부가 서비스 모두에 deploy 형식으로 한도를 건다', () => {
+    const project = {
+      managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi' }]],
+      resources: { api: { memory: '1536m', cpus: 2 }, db: { memory: '256m' } },
+    } as unknown as LoadedProject;
+
+    expect(buildOverride(project, 's1').services).toEqual({
+      api: {
+        ports: ['127.0.0.1::8080'],
+        labels: { 'b-studio.sandbox': 's1', 'b-studio.service': 'api' },
+        deploy: { resources: { limits: { memory: '1536m', cpus: '2' } } },
+      },
+      db: { deploy: { resources: { limits: { memory: '256m' } } } },
+    });
+  });
+});
+
 describe('parseHostPort', () => {
   it('compose port 출력에서 호스트 포트를 읽는다', () => {
     expect(parseHostPort('127.0.0.1:55012\n')).toBe(55012);

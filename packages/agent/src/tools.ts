@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Sandbox, StartOptions } from '@b-studio/sandbox';
+import { describeUsage, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
 import { servicesForFiles } from './services';
@@ -65,6 +65,11 @@ export function buildTools(project: LoadedProject): BetaTool[] {
       service,
       lines: { type: 'integer', description: 'Number of recent lines (1-400).' },
     }),
+    tool(
+      'service_stats',
+      'Show CPU and memory usage, limits, and exit status of every container in the sandbox, including supporting services such as the database. Exit code 137 or "memory limit exceeded" means the container ran out of memory.',
+      {},
+    ),
     tool('http_request', 'Send an HTTP request to a running service.', {
       service,
       method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
@@ -135,6 +140,10 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       case 'service_logs': {
         const target = serviceName(context, args);
         return success(await tailLogs(sandbox, target, clamp(integer(args, 'lines'), 1, 400)));
+      }
+      case 'service_stats': {
+        const usage = await sandbox.stats();
+        return success(usage.length > 0 ? usage.map(describeUsage).join('\n') : '(no containers)');
       }
       case 'http_request':
         return await httpRequest(context, args);

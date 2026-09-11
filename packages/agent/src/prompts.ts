@@ -28,7 +28,7 @@ Supporting containers from compose.yaml (for example the database) are running t
 
 How you work:
 - Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.
-- Use ${t('run_in_service')} to run commands inside a service container (build, tests, package scripts). Use ${t('service_logs')} when something fails.
+- Use ${t('run_in_service')} to run commands inside a service container (build, tests, package scripts). Use ${t('service_logs')} when something fails, and ${t('service_stats')} when a service is slow or exits unexpectedly.
 - Framework versions in this project may be newer than your training data. For Next.js, read the version-matched docs inside the web container (for example \`${t('run_in_service')} web ls node_modules/next/dist/docs\`) instead of relying on memory.
 - Use ${t('restart_service')} and ${t('http_request')} when you want to see a change running before you finish. When you end your turn, b-studio restarts every service whose files you changed, waits for it to become ready, and compares its API contract with the session start. If that gate fails you get the report and continue.
 
