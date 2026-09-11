@@ -303,6 +303,7 @@ async function startSession({
       owner,
       ...projectViews(project),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
+      nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[0]?.question?.request : undefined,
       runtime: provider.isolation,
       checkpoints: [firstCheckpoint],
       repository,
@@ -398,7 +399,11 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
-export function sendMessage(id: string, text: string, { allowBreaking, by }: { allowBreaking: boolean; by?: string }): { runId: string } {
+export function sendMessage(
+  id: string,
+  text: string,
+  { allowBreaking, by, intent = 'build' }: { allowBreaking: boolean; by?: string; intent?: Intent },
+): { runId: string } {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
   if (session.snapshot.running) throw new StudioError(409, '이전 요청을 처리하는 중입니다');
@@ -411,7 +416,7 @@ export function sendMessage(id: string, text: string, { allowBreaking, by }: { a
     throw new StudioError(409, `이 세션은 토큰 한도(${formatTokenCount(limit)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`);
   }
 
-  const plan = planRun(session, request, allowBreaking);
+  const plan = planRun(session, request, allowBreaking, intent);
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
     cancel: new AbortController(),
@@ -420,7 +425,7 @@ export function sendMessage(id: string, text: string, { allowBreaking, by }: { a
   };
   session.run = run;
   session.snapshot.running = true;
-  emit(session, { type: 'run_started', runId: run.id, request, by });
+  emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined });
   void execute(session, run, request, plan);
   return { runId: run.id };
 }
@@ -538,6 +543,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
         checkpoints: list,
         repository: await describeRepository(checkpoints, data.sourceDirtyFiles),
         nextDemoRequest: mode === 'demo' ? demoScenarios(project)[data.demoIndex]?.request : undefined,
+        nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[data.demoIndex]?.question?.request : undefined,
       },
       project,
       sandbox,
@@ -711,16 +717,25 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
   }
 }
 
+/** build: 파일을 바꾸고 검증 게이트를 거치는 요청, ask: 파일을 바꾸지 않고 답과 계획만 받는 질문 */
+type Intent = 'build' | 'ask';
+
 type RunPlan =
-  | { kind: 'model'; client: ModelClient; allowBreaking: boolean; maxVerifyAttempts?: number }
-  | { kind: 'claude-code'; allowBreaking: boolean };
+  | { kind: 'model'; client: ModelClient; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
+  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent };
 
-function planRun(session: Session, request: string, allowBreaking: boolean): RunPlan {
-  if (session.snapshot.mode === 'api') return { kind: 'model', client: new AnthropicModelClient(), allowBreaking };
-  if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking };
+function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
+  if (session.snapshot.mode === 'api') return { kind: 'model', client: new AnthropicModelClient(), allowBreaking, intent };
+  if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
 
-  // 데모 모드는 스크립트이므로 준비된 요청을 순서대로만 실행한다. 다른 요청을 받은 척하지 않는다
+  // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
+  if (intent === 'ask') {
+    const question = scenario?.question;
+    if (!question) throw new StudioError(409, '데모 모드에서 지금 물어볼 수 있는 준비된 질문이 없습니다');
+    if (question.request !== request) throw new StudioError(409, `데모 모드는 준비된 질문에만 답합니다. 지금 질문: "${question.request}"`);
+    return { kind: 'model', client: new ScriptedModelClient(question.turns), allowBreaking: false, intent };
+  }
   if (!scenario) throw new StudioError(409, '데모 모드에서 실행할 수 있는 요청을 모두 실행했습니다');
   if (scenario.request !== request) {
     throw new StudioError(409, `데모 모드는 준비된 요청을 순서대로 실행합니다. 다음 요청: "${scenario.request}"`);
@@ -730,6 +745,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean): Run
     client: new ScriptedModelClient(scenario.turns),
     allowBreaking: scenario.allowBreaking ?? false,
     maxVerifyAttempts: scenario.maxVerifyAttempts,
+    intent,
   };
 }
 
@@ -739,12 +755,14 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   let cancelled = false;
   /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
   let notStarted = false;
+  // 질문은 파일을 바꾸지 않으므로 직접 수정을 남기거나, 체크포인트를 만들거나, 되돌리지 않는다
+  const ask = plan.intent === 'ask';
   try {
     let edits: Checkpoint | undefined;
     try {
       await session.relaying;
       // 요청이 실패하거나 취소돼 마지막 체크포인트로 되돌릴 때 사람이 고친 파일까지 지우지 않도록 먼저 남긴다
-      edits = await saveLocalEdits(session);
+      if (!ask) edits = await saveLocalEdits(session);
     } catch (error) {
       throw new LocalEditsError(`스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}`);
     }
@@ -764,9 +782,11 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       return;
     }
 
-    // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-    if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking));
-    else await revertRun(session, run.id);
+    if (!ask) {
+      // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
+      if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking));
+      else await revertRun(session, run.id);
+    }
     finished = { status: result.status, summary: result.summary, turns: result.turns };
   } catch (error) {
     if (error instanceof LocalEditsError) {
@@ -781,7 +801,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     if (!cancelled) session.run = undefined;
     let reverted: string[] | undefined;
     let revertError: unknown;
-    if (!session.stop.signal.aborted) {
+    if (!session.stop.signal.aborted && !ask) {
       // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
       const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
       reverted = await revertRun(session, run.id, { cancelled, alsoRestart: unsettled }).catch((cause: unknown) => {
@@ -791,13 +811,17 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       });
     }
     if (!cancelled) finished = { status: 'error', summary: describe(error) };
-    else finished = { status: 'cancelled', summary: stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError) };
+    else {
+      const summary = ask ? stoppedQuestionSummary(run, session.snapshot.tokenLimit) : stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError);
+      finished = { status: 'cancelled', summary };
+    }
   } finally {
     session.run = undefined;
     // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
-    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted) {
+    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask) {
       session.demoIndex += 1;
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
+      session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
     }
     session.snapshot.running = false;
     session.snapshot.cancelling = undefined;
@@ -810,6 +834,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         usage: hasTokens(run.tokens) ? run.tokens : undefined,
         sessionTokens: session.snapshot.tokens,
         nextDemoRequest: session.snapshot.nextDemoRequest,
+        nextDemoQuestion: session.snapshot.nextDemoQuestion,
       });
     }
   }
@@ -826,12 +851,18 @@ function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: str
   return reverted.length > 0 ? `요청을 취소하고 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : '요청을 취소했습니다. 바뀐 파일은 없었습니다';
 }
 
+/** 질문은 되돌릴 변경이 없으므로 멈춘 이유만 알린다 */
+function stoppedQuestionSummary(run: ActiveRun, limit: number | undefined): string {
+  return run.stopReason === 'budget' ? `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해 질문을 멈췄습니다` : '질문을 취소했습니다';
+}
+
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
 async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
   const shared = {
     project: session.project,
     sandbox: session.sandbox,
     allowBreaking: plan.allowBreaking,
+    intent: plan.intent,
     signal,
     onEvent: (event: AgentEvent) => {
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
@@ -1047,9 +1078,11 @@ export function restoreCheckpoint(id: string, sha: string): void {
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
       noteForModel(session, `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`);
       if (session.snapshot.mode === 'demo') {
-        // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 체크포인트 수에 맞춰 다음 요청을 다시 정한다
-        session.demoIndex = session.snapshot.checkpoints.length - 1;
+        // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 요청 체크포인트 수에 맞춰 다음 요청을 다시 정한다.
+        // 내 폴더 세션의 직접 수정 체크포인트는 요청이 아니므로 세지 않는다
+        session.demoIndex = session.snapshot.checkpoints.filter((checkpoint) => checkpoint.message.startsWith('요청: ')).length;
         session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
+        session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
       }
       event = {
         type: 'restored',
@@ -1060,6 +1093,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
         sync: report.sync,
         checkpoints: session.snapshot.checkpoints,
         nextDemoRequest: session.snapshot.nextDemoRequest,
+        nextDemoQuestion: session.snapshot.nextDemoQuestion,
       };
     } catch (error) {
       event = { type: 'restore_failed', checkpoint: target, error: describe(error) };

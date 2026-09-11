@@ -94,6 +94,31 @@ function fakeClaudeCode({ turns = [], result = {}, account = {} }: FakeOptions =
 }
 
 describe('runClaudeCodeAgent', () => {
+  it('질문 모드는 요청 앞에 읽기 전용 안내를 붙이고, 쓰기 도구를 거부하며, 게이트 없이 끝난다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [[{ tool: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order {}' } }, { text: '계획입니다.' }]],
+    });
+    const sandbox = fakeSandbox(project, []);
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '어떻게 바꿔?',
+      intent: 'ask',
+      project,
+      sandbox,
+      sdk,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', summary: '계획입니다.', changedFiles: [], verifyAttempts: 0 });
+    expect(state.prompts[0]).toContain('[b-studio question mode]');
+    expect(state.prompts[0]).toContain('mcp__b-studio__write_file');
+    expect(events.find((event) => event.type === 'tool_result')).toMatchObject({ ok: false });
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    expect(sandbox.restarts).toEqual([]);
+  });
+
   it('기본 도구와 사용자 설정을 끄고 b-studio 도구만 허용한다. 게이트가 실패하면 같은 대화에 결과를 넣는다', async () => {
     const { sdk, state } = fakeClaudeCode({
       turns: [

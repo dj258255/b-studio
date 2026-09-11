@@ -64,6 +64,8 @@ export interface SessionSnapshot {
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
   nextDemoRequest?: string;
+  /** 데모 모드에서 다음 요청을 보내기 전에 질문 모드로 물어볼 수 있는 준비된 질문 */
+  nextDemoQuestion?: string;
   /** 게이트를 통과해 남긴 체크포인트. 최신이 먼저 온다 */
   checkpoints: Checkpoint[];
   /** 원본 프로젝트가 Git 저장소일 때만 있다 */
@@ -149,8 +151,8 @@ export type StudioEvent =
   | { type: 'usage'; at: string; services: ServiceUsage[] }
   /** 파일 변경을 모아 알린다. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'files_changed'; revision: number }
-  /** by: 요청을 보낸 사람 */
-  | { type: 'run_started'; runId: string; request: string; by?: string }
+  /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
+  | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask' }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
   | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }
@@ -167,6 +169,7 @@ export type StudioEvent =
       usage?: AgentUsage;
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
+      nextDemoQuestion?: string;
     }
   | { type: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   /**
@@ -197,6 +200,7 @@ export type StudioEvent =
       sync?: { elapsedMs: number } | { error: string };
       checkpoints: Checkpoint[];
       nextDemoRequest?: string;
+      nextDemoQuestion?: string;
     }
   | { type: 'restore_failed'; checkpoint: Checkpoint; error: string }
   /** 중지된 세션을 새 샌드박스에서 마지막 체크포인트부터 다시 띄웠다 */

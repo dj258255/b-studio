@@ -43,6 +43,7 @@
 - [ADR-039 코드 탭 찾기와 변경 감시: 서버가 작업 복사본을 감시하고, 알림은 기록에 쌓지 않는다](#adr-039-코드-탭-찾기와-변경-감시-서버가-작업-복사본을-감시하고-알림은-기록에-쌓지-않는다)
 - [ADR-040 스튜디오 인증: proxy.ts와 라우트에서 두 번 확인하고, 세션을 바꾸는 일은 만든 사람과 관리자만 한다](#adr-040-스튜디오-인증-proxyts와-라우트에서-두-번-확인하고-세션을-바꾸는-일은-만든-사람과-관리자만-한다)
 - [ADR-041 내 폴더에서 바로 작업: 체크포인트 저장소는 폴더 밖에 두고, 사람의 수정은 먼저 남긴다](#adr-041-내-폴더에서-바로-작업-체크포인트-저장소는-폴더-밖에-두고-사람의-수정은-먼저-남긴다)
+- [ADR-042 질문 모드: 같은 대화와 도구 목록을 쓰고, 바꾸는 도구는 실행기에서 막는다](#adr-042-질문-모드-같은-대화와-도구-목록을-쓰고-바꾸는-도구는-실행기에서-막는다)
 
 ---
 
@@ -1470,6 +1471,63 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 
 ---
 
+## ADR-042 질문 모드: 같은 대화와 도구 목록을 쓰고, 바꾸는 도구는 실행기에서 막는다
+
+### 맥락
+- 지금까지 모든 요청은 "만들기"였습니다. 코드를 묻거나 계획만 세우려 해도 에이전트가 파일을 바꿀 수 있었습니다. 요청이 끝나면 검증 게이트와 체크포인트도 돌았습니다.
+- 비슷한 제품은 바꾸지 않고 묻는 모드를 따로 둡니다. 2026년 9월 공개 문서 기준입니다.
+  - Lovable의 Plan 모드(이전 이름 Chat 모드)는 코드를 바꾸지 않고 계획을 세운 뒤, "Implement the plan"을 누르면 실행 모드로 넘어갑니다.
+  - Cursor의 Ask 모드는 코드베이스를 읽기만 합니다.
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| 질문용 시스템 프롬프트와 읽기 도구만 넘김 | 모드마다 프롬프트 캐시가 갈림. 만들기 대화에 남은 쓰기 도구 호출이 이번 요청의 도구 목록에 없게 됨 |
+| 질문을 별도 대화로 처리 | 세운 계획이 만들기 요청으로 이어지지 않아 다시 설명해야 함 |
+| **같은 대화·시스템 프롬프트·도구 목록을 쓰고, 요청 앞에 안내를 붙이고, 실행기에서 막음** | 모델이 막힌 도구를 부르면 한 번의 도구 호출을 낭비함 |
+
+### 결정
+- **요청마다 만들기(`build`)와 질문(`ask`)을 고릅니다.** 기본은 만들기입니다.
+- **시스템 프롬프트와 도구 목록은 두 모드가 같습니다.**
+  - 질문은 요청 앞에 `[b-studio question mode]` 안내를 붙여, 파일을 바꾸지 말고 답과 계획만 내라고 알립니다.
+  - 실제로 막는 곳은 도구 실행기입니다. 파일 쓰기·수정, 서비스 안 명령 실행, 서비스 재시작, GET·HEAD가 아닌 서비스·사내 API 호출을 거부합니다.
+- **질문은 되돌릴 변경이 없으므로 무거운 단계를 뺍니다.**
+  - 계약 기준 수집, 검증 게이트, 체크포인트, 되돌리기, 내 폴더의 직접 수정 저장을 하지 않습니다.
+  - 취소도 한 번 더 묻지 않습니다.
+- **질문도 같은 대화에 남깁니다.**
+  - API 키 모드는 같은 대화 배열을, 로컬 로그인 계정 모드는 같은 세션을 이어받습니다.
+  - 답 아래의 "이대로 만들기"는 "앞에서 정리한 계획대로 만들어줘"라는 만들기 요청을 보내고, 모델이 앞의 계획을 이어받습니다. 데모 모드에서는 다음 준비된 요청을 보냅니다.
+- **데모 시나리오에 준비된 질문을 둡니다.** 데모 모드는 준비된 질문에만 답하고, 질문은 데모 순서를 넘기지 않습니다.
+- **세션 토큰 한도는 질문에도 똑같이 적용합니다.**
+
+### 검증 결과
+- **단위 테스트:**
+  - 읽기 전용 실행기가 쓰기·수정·명령·재시작 도구와 POST 요청을 거부함
+  - 직접 만든 루프와 로컬 실행기 모두 질문에서 계약 조회·게이트 없이 끝나고 파일이 그대로임
+  - 질문도 대화에 남음
+  - 화면 상태의 질문 표시
+- **데모 모드 · 실제 Docker:** 확인 9개가 모두 통과했습니다.
+  - 질문 두 개(코드 읽기, 코드·계약 읽기)가 각각 1.33초에 답했습니다. 게이트·체크포인트·되돌리기 이벤트가 없었고, 작업 복사본 변경은 0개였으며, 데모 요청 순서는 그대로였습니다.
+  - 질문 뒤 만들기 요청은 체크포인트를 남겼습니다.
+  - 모르는 `intent`는 400, 준비되지 않은 데모 질문은 409였습니다.
+- **로컬 로그인 계정 모드 · 실제 모델 · 실제 Docker:** 확인 4개가 모두 통과했습니다.
+  - "서버 현재 시각 GET 엔드포인트를 추가하려면 어디를 바꿔야 해? 계획만"이라는 질문에 22.0초, 4턴 만에 답했습니다. 도구는 파일 목록·계약·코드 읽기뿐이었고, 작업 복사본은 그대로였습니다.
+  - 이어서 보낸 "앞에서 정리한 계획대로 만들어줘"는 43.5초, 3턴 만에 끝났습니다.
+    - 모델이 질문의 계획에 적은 `TimeController.java`를 만들었습니다.
+    - 게이트가 통과했고, 계약에는 `GET /api/time` 추가(호환 유지)가 기록됐습니다.
+    - 모델은 답을 받지 못한 결정(경로, 시간대)을 계획에 적은 기본안으로 만들었다고 요약했습니다.
+- **브라우저 (Playwright):**
+  - 질문 표시, 질문 탭의 안내와 준비된 질문 버튼, "이대로 만들기" 뒤 만들기 요청 완료(12.0초)를 확인했습니다.
+  - 확인하다가 답의 표가 대화 폭을 넘는 문제를 찾아 고쳤습니다([트러블슈팅 30](troubleshooting.md#30-답변의-표에서-긴-경로가-다른-열을-대화-밖으로-밀어냄)).
+
+### 감수한 트레이드오프
+- GET 요청도 서버 상태를 바꾸도록 잘못 만든 API라면 막지 못합니다.
+- 모델이 안내를 무시하고 막힌 도구를 부르면, 거부 결과를 받는 데 도구 호출 한 번을 씁니다.
+- 질문은 체크포인트를 남기지 않으므로 기록 탭에는 보이지 않고 대화에만 남습니다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -1486,5 +1544,6 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
 - Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
 - remarkjs, [react-markdown: Security](https://github.com/remarkjs/react-markdown#security)
+- Lovable, [Brainstorm in Plan mode](https://docs.lovable.dev/features/plan-mode) · [Chat mode & Follow-up questions](https://lovable.dev/blog/chat-mode-and-questions) · Cursor, [Ask mode](https://cursor.com/help/ai-features/ask-mode)
 - Next.js, [Authentication](https://nextjs.org/docs/app/guides/authentication) (Proxy의 낙관적 확인과 데이터 접근 계층) · [proxy.js](https://nextjs.org/docs/app/api-reference/file-conventions/proxy)
 - MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)

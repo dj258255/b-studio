@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { VerificationGate } from './gate';
-import { buildSystemPrompt } from './prompts';
+import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
@@ -68,6 +68,8 @@ export interface RunAgentOptions {
   client: ModelClient;
   /** 요청이 필드·엔드포인트 삭제나 타입 변경을 명시할 때만 true */
   allowBreaking?: boolean;
+  /** ask: 질문 모드. 파일을 바꾸는 도구를 거부하고, 바뀐 파일이 없으므로 검증 게이트를 돌리지 않는다 */
+  intent?: 'build' | 'ask';
   maxTurns?: number;
   /** 검증 게이트 실패를 몇 번까지 모델에게 돌려줄지 */
   maxVerifyAttempts?: number;
@@ -112,23 +114,28 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     onEvent = () => {},
     onServiceStatus,
     fetcher = fetchContract,
+    intent = 'build',
   } = options;
+  const ask = intent === 'ask';
 
   const workspace = new Workspace(project.root);
-  const gate = await VerificationGate.create({
-    project,
-    sandbox,
-    workspace,
-    allowBreaking,
-    maxVerifyAttempts,
-    fetcher,
-    signal,
-    onServiceStatus,
-    onEvent,
-  });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
+  const gate = ask
+    ? undefined
+    : await VerificationGate.create({
+        project,
+        sandbox,
+        workspace,
+        allowBreaking,
+        maxVerifyAttempts,
+        fetcher,
+        signal,
+        onServiceStatus,
+        onEvent,
+      });
   const system = buildSystemPrompt(project);
   const tools = buildTools(project);
-  messages.push({ role: 'user', content: request });
+  messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
   const usage = emptyUsage();
 
   const finish = (status: AgentResult['status'], summary: string, turns: number): AgentResult => {
@@ -136,8 +143,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       status,
       summary,
       changedFiles: workspace.changedFiles(),
-      report: gate.report,
-      verifyAttempts: gate.attempts,
+      report: gate?.report,
+      verifyAttempts: gate?.attempts ?? 0,
       turns,
       usage,
     };
@@ -175,7 +182,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       const results: BetaToolResultBlockParam[] = [];
       for (const call of toolUses) {
         onEvent({ type: 'tool_call', name: call.name, input: call.input });
-        const outcome = await executeTool(call.name, call.input, { project, workspace, sandbox, fetcher, signal, onServiceStatus });
+        const outcome = await executeTool(call.name, call.input, { project, workspace, sandbox, fetcher, signal, onServiceStatus, readOnly: ask });
         onEvent({ type: 'tool_result', name: call.name, ok: outcome.ok, content: outcome.content });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: !outcome.ok });
       }
@@ -189,7 +196,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       continue;
     }
 
-    // 모델이 턴을 끝냈다 → 검증 게이트
+    // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
+    if (!gate) return finish('done', text, turn);
     const outcome = await gate.check();
     if (outcome.kind === 'pass') return finish('done', text, turn);
     if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);

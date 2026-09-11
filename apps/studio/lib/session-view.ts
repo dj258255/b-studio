@@ -19,13 +19,22 @@ export interface ToolCallView {
 }
 
 export type ChatItem =
-  | { kind: 'request'; runId: string; text: string; by?: string }
+  | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */
   | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport; interrupted?: boolean }
-  | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error' | 'cancelled'; summary: string; turns?: number; usage?: AgentUsage }
+  | {
+      kind: 'outcome';
+      runId: string;
+      status: 'done' | 'failed' | 'error' | 'cancelled';
+      summary: string;
+      turns?: number;
+      usage?: AgentUsage;
+      /** 질문 모드 요청의 결과 */
+      intent?: 'ask';
+    }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   /** 로컬 폴더 세션에서 스튜디오 밖에서 바꾼 파일을 남긴 체크포인트 */
   | { kind: 'localEdits'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
@@ -130,7 +139,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'run_started':
       return {
         ...patchSnapshot(view, { running: true }),
-        chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by }],
+        chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
       };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };
@@ -139,21 +148,25 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return { ...patchSnapshot(view, { tokens: event.sessionTokens }), runTokens: { runId: event.runId, usage: event.usage } };
     case 'run_cancelling':
       return patchSnapshot(view, { cancelling: event.reason ?? 'user' });
-    case 'run_finished':
+    case 'run_finished': {
+      const request = view.chat.find((item) => item.kind === 'request' && item.runId === event.runId);
+      const intent = request?.kind === 'request' ? request.intent : undefined;
       return {
         ...patchSnapshot(view, {
           running: false,
           cancelling: undefined,
           nextDemoRequest: event.nextDemoRequest,
+          nextDemoQuestion: event.nextDemoQuestion,
           tokens: event.sessionTokens ?? view.snapshot.tokens,
         }),
         chat: [
           ...markInterrupted(view.chat, event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,
       };
+    }
 
     case 'checkpoint': {
       // 다시 연결하면 서버가 이미 체크포인트가 반영된 스냅샷을 보낸 뒤 기록을 재생하므로, 같은 체크포인트는 한 번만 쌓는다
@@ -194,7 +207,12 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
 
     case 'restored':
       return {
-        ...patchSnapshot(view, { running: false, checkpoints: event.checkpoints, nextDemoRequest: event.nextDemoRequest }),
+        ...patchSnapshot(view, {
+          running: false,
+          checkpoints: event.checkpoints,
+          nextDemoRequest: event.nextDemoRequest,
+          nextDemoQuestion: event.nextDemoQuestion,
+        }),
         chat: settleRestore(view.chat, event.checkpoint.sha, {
           ok: true,
           files: event.files,

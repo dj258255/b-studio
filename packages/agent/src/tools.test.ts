@@ -27,3 +27,24 @@ describe('http_request', () => {
     expect(outcome).toEqual({ ok: false, content: 'Unknown service: db' });
   });
 });
+
+describe('질문 모드', () => {
+  const readOnly: ToolContext = { ...context, readOnly: true };
+
+  it('파일을 바꾸거나 명령을 실행하는 도구와 조회가 아닌 요청을 거부한다', async () => {
+    const changing = [
+      ['write_file', { path: 'a.txt', content: 'x' }],
+      ['edit_file', { path: 'a.txt', old_text: 'a', new_text: 'b' }],
+      ['run_in_service', { service: 'api', command: ['ls'] }],
+      ['restart_service', { service: 'api' }],
+    ] as const;
+    for (const [name, input] of changing) {
+      const outcome = await executeTool(name, input, readOnly);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.content).toContain('Question mode is read-only');
+    }
+
+    const post = await executeTool('http_request', { service: 'api', method: 'POST', path: '/api/orders', body: '{}' }, readOnly);
+    expect(post).toEqual({ ok: false, content: 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.' });
+  });
+});

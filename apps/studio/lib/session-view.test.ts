@@ -44,6 +44,27 @@ describe('reduceSession', () => {
     expect(fold([event], createView({ ...snapshot, checkpoints: [saved] })).snapshot.checkpoints).toEqual([saved]);
   });
 
+  it('질문 요청의 결과에 질문 표시를 남기고 데모 질문을 갱신한다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'q1', request: '어떻게 바꿔?', intent: 'ask' },
+      {
+        type: 'run_finished',
+        runId: 'q1',
+        status: 'done',
+        summary: '계획',
+        turns: 2,
+        nextDemoRequest: '주문 목록 API와 화면을 만들어줘',
+        nextDemoQuestion: '주문 목록 화면을 만들려면 무엇을 바꿔야 해?',
+      },
+    ]);
+
+    expect(view.chat).toEqual([
+      { kind: 'request', runId: 'q1', text: '어떻게 바꿔?', intent: 'ask' },
+      { kind: 'outcome', runId: 'q1', status: 'done', summary: '계획', turns: 2, intent: 'ask' },
+    ]);
+    expect(view.snapshot.nextDemoQuestion).toBe('주문 목록 화면을 만들려면 무엇을 바꿔야 해?');
+  });
+
   it('중지된 서비스는 이전 주소를 지워 사라진 미리보기를 띄우지 않는다', () => {
     const view = fold([
       { type: 'service', service: 'web', state: 'ready', url: 'http://127.0.0.1:32769' },

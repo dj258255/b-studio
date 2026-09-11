@@ -50,4 +50,5 @@ export {
   type RemoteLocation,
 } from './repository';
 export { buildTools, executeTool } from './tools';
+export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
