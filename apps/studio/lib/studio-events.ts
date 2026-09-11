@@ -110,10 +110,31 @@ export interface RepositoryView {
 
 /** 코드 화면의 파일 목록. 생성물과 .env는 에이전트 작업 공간과 같은 규칙으로 뺀다 */
 export interface CodeTree {
+  /** 이번 쪽의 파일. 찾는 말을 넘기면 경로가 맞는 파일만 담는다 */
   files: string[];
+  /** files가 시작하는 위치 */
+  offset: number;
+  /** 조건에 맞는 전체 파일 수 */
+  total: number;
   /** 마지막 체크포인트 이후 바뀐 파일. 삭제한 파일은 files에 없다 */
   changes: Array<{ file: string; change: 'added' | 'modified' | 'deleted' }>;
-  /** 파일이 많아 목록을 자른 경우 */
+  /** 파일이 아주 많아 전체를 세지 못한 경우 */
+  truncated: boolean;
+}
+
+/** 내용 찾기에서 맞은 한 줄 */
+export interface CodeSearchMatch {
+  line: number;
+  text: string;
+  /** text 안에서 맞은 자리 (가린 값 때문에 자리를 찾지 못하면 0) */
+  start: number;
+  length: number;
+}
+
+export interface CodeSearch {
+  query: string;
+  results: Array<{ file: string; matches: CodeSearchMatch[] }>;
+  /** 결과나 파일 수 상한에 걸려 멈춘 경우 */
   truncated: boolean;
 }
 

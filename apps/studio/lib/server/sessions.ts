@@ -58,6 +58,7 @@ import { skipAlreadySeen } from '@/lib/logs';
 import { addTokens, formatTokenCount, hasTokens, parseTokenLimit, totalTokens } from '@/lib/usage';
 import type {
   CodeFile,
+  CodeSearch,
   CodeTree,
   ExportResult,
   ProxyResponse,
@@ -71,6 +72,7 @@ import type {
 } from '@/lib/studio-events';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
+import { searchFiles, walkFiles } from './code-files';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -1339,17 +1341,46 @@ function gitAuthor(): GitAuthor | undefined {
   return name && email ? { name, email } : undefined;
 }
 
-const CODE_TREE_DEPTH = 16;
-const CODE_TREE_LIMIT = 500;
+/** 한 번에 보내는 파일 수. 더 보기로 이어서 받는다 */
+const CODE_PAGE_SIZE = 500;
 
-/** 코드 화면의 파일 목록과 마지막 체크포인트 이후 바뀐 파일. 에이전트 작업 공간과 같은 규칙으로 생성물과 .env를 뺀다 */
-export async function listCodeFiles(id: string): Promise<CodeTree> {
+/**
+ * 코드 화면의 파일 목록과 마지막 체크포인트 이후 바뀐 파일. 생성물과 .env는 빼고, 경로로 좁힌 뒤 쪽 단위로 보낸다.
+ * 에이전트 도구의 목록 한도(500개)와 달리 화면은 큰 저장소의 파일도 모두 센다
+ */
+export async function listCodeFiles(id: string, { query = '', offset = 0, limit = CODE_PAGE_SIZE }: { query?: string; offset?: number; limit?: number } = {}): Promise<CodeTree> {
   const session = requireSession(id);
-  const entries = await new Workspace(session.project.root).list('.', CODE_TREE_DEPTH);
+  const walk = await walkFiles(session.project.root);
+  const needle = query.trim().toLowerCase();
+  const matched = needle ? walk.files.filter((file) => file.toLowerCase().includes(needle)) : walk.files;
   return {
-    files: entries.filter((entry) => !entry.endsWith('/')),
+    files: matched.slice(offset, offset + limit),
+    offset,
+    total: matched.length,
     changes: (await session.checkpoints.pendingChanges()).filter((change) => !isDeniedPath(change.file)),
-    truncated: entries.length >= CODE_TREE_LIMIT,
+    truncated: walk.truncated,
+  };
+}
+
+/** 코드 화면의 내용 찾기. 도구 결과와 같게 시크릿 값을 가려서 보내고, 가리면서 자리가 바뀌면 다시 찾는다 */
+export async function searchCodeFiles(id: string, query: string): Promise<CodeSearch> {
+  const session = requireSession(id);
+  const needle = query.trim();
+  if (needle.length < 2) throw new StudioError(400, '내용 찾기는 두 글자 이상으로 합니다');
+  const walk = await walkFiles(session.project.root);
+  const found = await searchFiles(session.project.root, needle, walk.files);
+  return {
+    query: needle,
+    results: found.results.map(({ file, matches }) => ({
+      file,
+      matches: matches.map((match) => {
+        const text = session.sandbox.redact(match.text);
+        if (text === match.text) return match;
+        const start = text.toLowerCase().indexOf(needle.toLowerCase());
+        return start < 0 ? { ...match, text, start: 0, length: 0 } : { ...match, text, start };
+      }),
+    })),
+    truncated: found.truncated || walk.truncated,
   };
 }
 
