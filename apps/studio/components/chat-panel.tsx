@@ -6,6 +6,7 @@ import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, hasTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
+import { Markdown } from "./markdown";
 
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
@@ -182,7 +183,7 @@ function ChatEntry({ item }: { item: ChatItem }) {
       );
 
     case "reply":
-      return <p className="leading-7 whitespace-pre-wrap">{item.text}</p>;
+      return <Markdown text={item.text} />;
 
     case "tools": {
       const failed = item.calls.filter((call) => call.ok === false).length;
