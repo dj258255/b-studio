@@ -154,6 +154,15 @@ export const StudioSpecSchema = z.object({
     .optional(),
   /** 환경 변수 이름 → 받을 서비스 */
   secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
+  repository: z
+    .object({
+      /**
+       * 이 폴더가 모노레포의 하위 폴더일 때 켠다. 상위 Git 저장소 전체를 복제해 세션 브랜치로 작업하고 PR을 만든다.
+       * 끄면(기본) 저장소 루트가 아닌 폴더는 복사본으로 시작하고 원격 연동이 없다
+       */
+      monorepo: z.boolean().default(false),
+    })
+    .optional(),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;

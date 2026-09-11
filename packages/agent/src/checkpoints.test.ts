@@ -287,7 +287,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     const { source, remote, workDir } = await createSourceRepository();
     const { store, start, source: info } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
 
-    expect(info).toEqual({ base: 'main', originUrl: remote, dirtyFiles: 0 });
+    expect(info).toEqual({ base: 'main', originUrl: remote, dirtyFiles: 0, subdir: '' });
     expect(start).toMatchObject({ sha: await git(source, 'rev-parse', 'HEAD'), message: '세션 시작 (main 브랜치)', files: ['README.md', 'api/src/Order.java'] });
     expect(await git(workDir, 'branch', '--show-current')).toBe(BRANCH);
     expect(await store.patch(start.sha)).toContain('세션을 시작한 시점');
@@ -300,6 +300,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
       remoteUrl: remote,
       base: 'main',
       branch: BRANCH,
+      subdir: undefined,
       pushedSha: undefined,
       remoteSha: undefined,
       pullRequestUrl: undefined,
@@ -379,6 +380,41 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(await git(source, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(checkpoint.sha);
     // 원본의 체크아웃 브랜치와 작업 트리는 그대로다
     expect(await git(source, 'branch', '--show-current')).toBe('main');
+  });
+
+  it('모노레포 하위 폴더는 명시하면 저장소 전체를 복제하고, 경로는 프로젝트 폴더 기준으로 주고받는다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const project = path.join(source, 'api');
+    // 프로젝트 안의 변경만 센다
+    await writeFile(path.join(project, 'DRAFT.md'), 'wip\n');
+    await writeFile(path.join(source, 'OTHER.md'), 'other team\n');
+    expect(await CheckpointStore.inspectSource(project)).toBeUndefined();
+    expect(await CheckpointStore.inspectSource(project, { allowSubfolder: true })).toEqual({ base: 'main', originUrl: remote, dirtyFiles: 1, subdir: 'api' });
+
+    const { store, start, projectRoot } = await CheckpointStore.clone(project, workDir, { branch: BRANCH, allowSubfolder: true });
+    expect(projectRoot).toBe(path.join(workDir, 'api'));
+    expect(start.files).toEqual(['src/Order.java']);
+    expect(await readFile(path.join(workDir, 'README.md'), 'utf8')).toBe('# orders\n');
+    expect((await store.repository())?.subdir).toBe('api');
+
+    await writeFile(path.join(projectRoot, 'src/Order.java'), 'class Order { String memo; }\n');
+    await writeFile(path.join(projectRoot, 'src/Memo.java'), 'class Memo {}\n');
+    expect(await store.pendingFiles()).toEqual(['src/Memo.java', 'src/Order.java']);
+    const checkpoint = (await store.commit('요청: 메모'))!;
+    expect(checkpoint.files).toEqual(['src/Memo.java', 'src/Order.java']);
+    expect(await store.patch(checkpoint.sha)).toContain('+++ b/src/Order.java');
+
+    await writeFile(path.join(projectRoot, 'src/Order.java'), 'broken\n');
+    expect(await store.discard()).toMatchObject({ files: ['src/Order.java'] });
+    expect(await store.restore(start.sha)).toMatchObject({ files: ['src/Memo.java', 'src/Order.java'] });
+
+    await writeFile(path.join(projectRoot, 'src/Memo.java'), 'class Memo {}\n');
+    await store.commit('요청: 메모 다시');
+    await store.push();
+    // 원격에는 저장소 루트 기준 경로로 올라간다
+    expect(await git(remote, 'show', `refs/heads/${BRANCH}:api/src/Memo.java`)).toBe('class Memo {}');
+    // 서버를 다시 시작해도 작업 복사본만으로 프로젝트 폴더를 찾는다
+    expect(await new CheckpointStore(workDir).projectRoot()).toBe(path.join(workDir, 'api'));
   });
 
   it('Git 저장소 루트가 아닌 폴더는 복제하지 않고, 세션 이전 기록으로는 되돌리지 않는다', async () => {

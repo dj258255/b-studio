@@ -28,6 +28,8 @@ export interface SourceRepository {
   originUrl?: string;
   /** 원본에서 커밋하지 않은 변경 수. 세션은 커밋된 상태로 시작하므로 이 변경은 들어가지 않는다 */
   dirtyFiles: number;
+  /** 저장소 루트 기준 프로젝트 폴더 경로. 저장소 루트면 빈 문자열이고, 모노레포 하위 폴더면 "apps/orders" 같은 값이다 */
+  subdir: string;
 }
 
 export interface RepositoryInfo {
@@ -35,6 +37,8 @@ export interface RepositoryInfo {
   remoteUrl: string;
   base: string;
   branch: string;
+  /** 모노레포 하위 폴더 프로젝트면 저장소 루트 기준 폴더 경로 */
+  subdir?: string;
   /** 스튜디오가 마지막으로 올린 커밋 */
   pushedSha?: string;
   /** 스튜디오가 마지막으로 확인한 원격 브랜치의 끝 커밋(올렸거나 가져왔을 때). 다음에 올릴 때 원격이 이 상태 그대로인지 확인한다 */
@@ -130,6 +134,7 @@ export class CheckpointStore {
   readonly #gitBin: string;
   readonly #author: GitAuthor;
   #start: string | undefined;
+  #subdirCache: string | undefined;
 
   constructor(root: string, { gitBin = 'git', author = DEFAULT_AUTHOR }: CheckpointStoreOptions = {}) {
     this.root = path.resolve(root);
@@ -137,21 +142,30 @@ export class CheckpointStore {
     this.#author = author;
   }
 
-  /** 폴더가 커밋이 있는 Git 저장소의 루트인지 확인한다. 하위 폴더나 저장소가 아닌 폴더는 undefined */
-  static async inspectSource(source: string, { gitBin = 'git' }: { gitBin?: string } = {}): Promise<SourceRepository | undefined> {
+  /**
+   * 폴더가 커밋이 있는 Git 저장소에 있는지 확인한다. 저장소가 아니면 undefined.
+   * 저장소 루트가 아닌 하위 폴더는 allowSubfolder(모노레포 하위 폴더 프로젝트)일 때만 인정한다
+   */
+  static async inspectSource(
+    source: string,
+    { gitBin = 'git', allowSubfolder = false }: { gitBin?: string; allowSubfolder?: boolean } = {},
+  ): Promise<SourceRepository | undefined> {
     const root = await resolveReal(source);
     const inRepo = (args: string[]) => runGit(gitBin, ['-C', root, ...args]);
 
     const toplevel = await inRepo(['rev-parse', '--show-toplevel']).then((out) => resolveReal(out.trim()), () => undefined);
-    if (toplevel !== root) return undefined;
+    if (!toplevel) return undefined;
+    const subdir = path.relative(toplevel, root).split(path.sep).join('/');
+    if (subdir.startsWith('..') || (subdir !== '' && !allowSubfolder)) return undefined;
     const hasCommit = await inRepo(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).then(() => true, () => false);
     if (!hasCommit) return undefined;
 
     const base = await inRepo(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim(), () => '');
     if (!base) throw new CheckpointError('원본 저장소가 브랜치가 아닌 커밋(detached HEAD)을 가리키고 있어 세션 브랜치를 만들 수 없습니다');
     const originUrl = await inRepo(['remote', 'get-url', 'origin']).then((out) => out.trim() || undefined, () => undefined);
-    const status = await inRepo(['status', '--porcelain=v1', '--untracked-files=normal']);
-    return { base, originUrl, dirtyFiles: status.split('\n').filter(Boolean).length };
+    // 모노레포에서 다른 폴더의 변경은 이 프로젝트와 관계없으므로 프로젝트 폴더의 변경만 센다
+    const status = await inRepo(['status', '--porcelain=v1', '--untracked-files=normal', ...(subdir ? ['--', '.'] : [])]);
+    return { base, originUrl, dirtyFiles: status.split('\n').filter(Boolean).length, subdir };
   }
 
   /**
@@ -161,17 +175,23 @@ export class CheckpointStore {
   static async clone(
     source: string,
     root: string,
-    { branch, ...options }: CheckpointStoreOptions & { branch: string },
-  ): Promise<{ store: CheckpointStore; start: Checkpoint; source: SourceRepository }> {
+    { branch, allowSubfolder = false, ...options }: CheckpointStoreOptions & { branch: string; allowSubfolder?: boolean },
+  ): Promise<{ store: CheckpointStore; start: Checkpoint; source: SourceRepository; projectRoot: string }> {
     const gitBin = options.gitBin ?? 'git';
-    const info = await CheckpointStore.inspectSource(source, { gitBin });
-    if (!info) throw new CheckpointError('커밋이 있는 Git 저장소의 루트 폴더만 세션 브랜치로 시작할 수 있습니다');
+    const info = await CheckpointStore.inspectSource(source, { gitBin, allowSubfolder });
+    if (!info) {
+      throw new CheckpointError(
+        allowSubfolder ? '커밋이 있는 Git 저장소 안의 폴더만 세션 브랜치로 시작할 수 있습니다' : '커밋이 있는 Git 저장소의 루트 폴더만 세션 브랜치로 시작할 수 있습니다',
+      );
+    }
     await runGit(gitBin, ['check-ref-format', '--branch', branch]).catch(() => {
       throw new CheckpointError(`브랜치 이름이 올바르지 않습니다: ${branch}`);
     });
 
+    // 모노레포 하위 폴더도 저장소 전체를 복제한다. compose 빌드가 공용 패키지처럼 프로젝트 밖 폴더를 쓸 수 있기 때문이다
+    const toplevel = (await runGit(gitBin, ['-C', await resolveReal(source), 'rev-parse', '--show-toplevel'])).trim();
     await mkdir(path.dirname(path.resolve(root)), { recursive: true });
-    await runGit(gitBin, ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(source), path.resolve(root)], {
+    await runGit(gitBin, ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(toplevel), path.resolve(root)], {
       timeout: CLONE_TIMEOUT_MS,
     });
 
@@ -183,7 +203,14 @@ export class CheckpointStore {
     await store.#setMeta('start', start);
     await store.#setMeta('base', info.base);
     await store.#setMeta('branch', branch);
-    return { store, start: await store.#checkpoint(start), source: info };
+    // 서버를 다시 시작해도 작업 복사본만으로 프로젝트 폴더를 찾을 수 있게 저장소 설정에 남긴다
+    if (info.subdir) await store.#setMeta('subdir', info.subdir);
+    return { store, start: await store.#checkpoint(start), source: info, projectRoot: path.join(path.resolve(root), info.subdir) };
+  }
+
+  /** 프로젝트 폴더. 모노레포 하위 폴더 세션이면 저장소 루트 아래의 그 폴더다 */
+  async projectRoot(): Promise<string> {
+    return path.join(this.root, await this.#subdir());
   }
 
   /** 저장소가 없으면 만들고, 지금 상태를 첫 체크포인트로 남긴다 */
@@ -201,7 +228,7 @@ export class CheckpointStore {
 
   /** 마지막 체크포인트 이후 바뀐 파일 (새 파일과 삭제 포함) */
   async pendingFiles(): Promise<string[]> {
-    const entries = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'])).split('\0').filter(Boolean);
+    const entries = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(await this.#scope())])).split('\0').filter(Boolean);
     const files: string[] = [];
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!;
@@ -212,7 +239,7 @@ export class CheckpointStore {
         if (original) files.push(original);
       }
     }
-    return [...new Set(files)].sort();
+    return (await this.#fromRoot([...new Set(files)])).sort();
   }
 
   /**
@@ -231,7 +258,7 @@ export class CheckpointStore {
       const leaks = await this.#secretLeaks(pending, `${message}\n${body ?? ''}`, findSecrets);
       if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
     }
-    await this.#git(['add', '-A']);
+    await this.#git(['add', '-A', ...(await this.#scope())]);
     const text = body?.trim();
     // 기본 정리 모드는 #으로 시작하는 줄(마크다운 제목)을 지우므로 공백만 정리한다
     await this.#git([
@@ -246,8 +273,9 @@ export class CheckpointStore {
     const leaks: string[] = [];
     const inText = findSecrets(text);
     if (inText.length > 0) leaks.push(`커밋 메시지 (${inText.join(', ')})`);
+    const projectRoot = await this.projectRoot();
     for (const file of files) {
-      const content = await readFile(path.join(this.root, file), 'utf8').catch(() => undefined);
+      const content = await readFile(path.join(projectRoot, file), 'utf8').catch(() => undefined);
       const found = content === undefined ? [] : findSecrets(content);
       if (found.length > 0) leaks.push(`${file} (${found.join(', ')})`);
     }
@@ -259,10 +287,11 @@ export class CheckpointStore {
     const files = await this.pendingFiles();
     if (files.length === 0) return { files, patch: '' };
 
-    await this.#git(['add', '-A']);
-    const patch = await this.#git(['diff', '--cached', '--no-color', 'HEAD']);
+    const scope = await this.#scope();
+    await this.#git(['add', '-A', ...scope]);
+    const patch = await this.#git(['diff', '--cached', '--no-color', ...(await this.#relative()), 'HEAD']);
     await this.#git(['reset', '-q', '--hard', 'HEAD']);
-    await this.#git(['clean', '-q', '-fd']);
+    await this.#git(['clean', '-q', '-fd', ...scope]);
     return { files, patch: capText(patch, MAX_PATCH_CHARS) };
   }
 
@@ -284,9 +313,10 @@ export class CheckpointStore {
     }
     // 병합 커밋도 체크포인트 사이의 변경으로 보이도록 첫 번째 부모와 비교한다
     const parent = await this.#firstParent(commit);
+    const relative = await this.#relative();
     const patch = parent
-      ? await this.#git(['diff', '--no-color', parent, commit])
-      : await this.#git(['show', '--format=', '--patch', '--no-color', commit]);
+      ? await this.#git(['diff', '--no-color', ...relative, parent, commit])
+      : await this.#git(['show', '--format=', '--patch', '--no-color', ...relative, commit]);
     return capText(patch, MAX_PATCH_CHARS);
   }
 
@@ -300,9 +330,9 @@ export class CheckpointStore {
     if (!inSession) throw new CheckpointError('현재 세션 기록에 없는 체크포인트입니다');
 
     const pending = await this.pendingFiles();
-    const committed = (await this.#git(['diff', '--name-only', '-z', commit, 'HEAD'])).split('\0').filter(Boolean);
+    const committed = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), commit, 'HEAD'])).split('\0').filter(Boolean);
     await this.#git(['reset', '-q', '--hard', commit]);
-    await this.#git(['clean', '-q', '-fd']);
+    await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
 
     return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort() };
   }
@@ -315,6 +345,7 @@ export class CheckpointStore {
       remoteUrl: (await this.#git(['remote', 'get-url', 'origin'])).trim(),
       base,
       branch,
+      subdir: (await this.#subdir()) || undefined,
       pushedSha: await this.#getMeta('pushed'),
       remoteSha: await this.#getMeta('remote'),
       pullRequestUrl: await this.#getMeta('pullrequest'),
@@ -414,10 +445,10 @@ export class CheckpointStore {
     try {
       await this.#git(picked ? ['cherry-pick', '--no-commit', `${from}..${remote}`] : ['merge', '--no-ff', '--no-commit', remote]);
     } catch (error) {
-      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U'])).split('\0').filter(Boolean).sort();
+      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U', ...(await this.#relative())])).split('\0').filter(Boolean).sort();
       await this.#git([picked ? 'cherry-pick' : 'merge', '--abort']).catch(() => {});
       await this.#git(['reset', '-q', '--hard', head]);
-      await this.#git(['clean', '-q', '-fd']);
+      await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
       if (conflicts.length > 0) throw new RemoteConflictError(conflicts);
       throw error;
     }
@@ -427,7 +458,8 @@ export class CheckpointStore {
       'commit', '-q', '--allow-empty', '--cleanup=whitespace',
       '-m', `원격 커밋 ${commits.length}개 가져오기`, ...(body ? ['-m', capText(body, MAX_BODY_CHARS)] : []),
     ]);
-    const files = (await this.#git(['diff', '--name-only', '-z', head, 'HEAD'])).split('\0').filter(Boolean).sort();
+    // 모노레포에서는 프로젝트 밖 변경도 함께 들어오지만, 게이트가 확인할 파일은 프로젝트 폴더 안의 것뿐이다
+    const files = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), head, 'HEAD'])).split('\0').filter(Boolean).sort();
     return { status: picked ? 'picked' : 'merged', remoteSha: remote, commits, files, checkpoint: await this.#checkpoint('HEAD'), previous: head };
   }
 
@@ -474,7 +506,7 @@ export class CheckpointStore {
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');
-      const files = (await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean);
+      const files = await this.#fromRoot((await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean));
       return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
     }
     return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha) };
@@ -483,10 +515,35 @@ export class CheckpointStore {
   /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */
   async #changedFiles(sha: string): Promise<string[]> {
     const parent = await this.#firstParent(sha);
+    const relative = await this.#relative();
     const output = parent
-      ? await this.#git(['diff', '--name-only', '-z', parent, sha])
-      : await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha]);
+      ? await this.#git(['diff', '--name-only', '-z', ...relative, parent, sha])
+      : await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', ...relative, sha]);
     return output.split('\0').filter(Boolean);
+  }
+
+  async #subdir(): Promise<string> {
+    this.#subdirCache ??= (await this.#getMeta('subdir')) ?? '';
+    return this.#subdirCache;
+  }
+
+  /** git 명령의 대상을 프로젝트 폴더로 한정한다 */
+  async #scope(): Promise<string[]> {
+    const subdir = await this.#subdir();
+    return subdir ? ['--', subdir] : [];
+  }
+
+  /** diff 계열 출력의 경로를 프로젝트 폴더 기준으로 바꾸고 폴더 밖 변경은 뺀다 */
+  async #relative(): Promise<string[]> {
+    const subdir = await this.#subdir();
+    return subdir ? [`--relative=${subdir}`] : [];
+  }
+
+  /** 저장소 루트 기준 경로를 프로젝트 기준으로 바꾸고, 프로젝트 밖 경로는 뺀다 */
+  async #fromRoot(files: string[]): Promise<string[]> {
+    const subdir = await this.#subdir();
+    if (!subdir) return files;
+    return files.filter((file) => file.startsWith(`${subdir}/`)).map((file) => file.slice(subdir.length + 1));
   }
 
   async #startSha(): Promise<string> {

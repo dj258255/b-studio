@@ -63,6 +63,8 @@ export interface RepositoryView {
   kind: GitHostKind;
   base: string;
   branch: string;
+  /** 모노레포 하위 폴더 프로젝트면 저장소 루트 기준 폴더 경로 */
+  subdir?: string;
   /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
   sourceDirtyFiles: number;
   /** 스튜디오가 마지막으로 올린 커밋 */

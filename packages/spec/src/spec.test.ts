@@ -36,6 +36,13 @@ describe('parseSpec', () => {
     expect(spec.services.web).toMatchObject({ source: 'managed', port: 3000 });
     expect(spec.services.api).toMatchObject({ ready: { expectStatus: 200, timeoutSeconds: 600 } });
     expect(spec.services['legacy-users']).toMatchObject({ source: 'external', preview: 'openapi' });
+    expect(spec.repository).toBeUndefined();
+  });
+
+  it('모노레포 하위 폴더 연동은 명시해야 켜진다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true });
+    expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
   it('external 서비스에는 browser 미리보기를 쓸 수 없다', () => {
