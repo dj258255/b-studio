@@ -1,7 +1,9 @@
 "use client";
 
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { languageFor, SUPPORTED_LANGUAGES } from "@/lib/highlight";
 import { CodeTokens, useHighlightedCode } from "./code-tokens";
 
@@ -20,7 +22,7 @@ export function languageForFence(name: string | undefined): string | undefined {
   return FENCE_ALIASES[lower] ?? languageFor(`file.${lower}`);
 }
 
-type MarkdownNode = { type: string; value?: string; tagName?: string; properties?: Record<string, unknown>; children?: MarkdownNode[] };
+type MarkdownNode = { type: string; value?: string; tagName?: string; properties?: Record<string, unknown>; data?: unknown; children?: MarkdownNode[] };
 
 /**
  * 답변 속 HTML을 글자로 남긴다. HTML로 그리지 않을 뿐 아니라, 버리지도 않아서
@@ -34,12 +36,36 @@ function remarkHtmlAsText() {
   return walk;
 }
 
+/**
+ * 금액처럼 쓴 달러는 수식으로 보지 않는다. 실제 모델 답변은 인라인 수식을 `$n$`, `$p_i$`처럼 달러 하나로 적으므로
+ * 인라인 수식을 켜야 하는데, 그러면 "가격은 $100 이고 배송비는 $5"가 수식이 된다.
+ * 글자를 미리 바꾸면 코드 블록 안의 `$1`까지 망가지므로, 파싱한 뒤 숫자로 시작하는 수식만 원문 글자로 되돌린다
+ */
+function remarkMoneyAsText() {
+  const walk = (node: MarkdownNode) => {
+    for (const child of node.children ?? []) {
+      if (child.type === "inlineMath" && /^\d/.test(child.value ?? "")) {
+        child.type = "text";
+        child.value = `$${child.value ?? ""}$`;
+        // 수식 노드는 hast로 바꿀 때 쓸 정보(span.math-inline)를 data에 들고 온다. 타입만 바꾸면 그 정보로 수식이 다시 만들어진다
+        delete child.data;
+      }
+      walk(child);
+    }
+  };
+  return walk;
+}
+
 function textOf(node: MarkdownNode): string {
   if (node.type === "text") return node.value ?? "";
   return (node.children ?? []).map(textOf).join("");
 }
 
-const heading: Components["h1"] = ({ children }) => <p className="font-semibold leading-7">{children}</p>;
+/**
+ * 제목은 대화 흐름에서 문단 크기로 둔다. 다만 원래 붙어 있던 클래스는 지우지 않는다.
+ * 각주 묶음의 제목은 화면에서 숨기는 클래스(sr-only)를 달고 오는데, 지우면 "각주"라는 글자가 그대로 보인다
+ */
+const heading: Components["h1"] = ({ children, className }) => <p className={`font-semibold leading-7${className ? ` ${className}` : ""}`}>{children}</p>;
 
 const COMPONENTS: Components = {
   p: ({ children }) => <p className="leading-7">{children}</p>,
@@ -56,11 +82,17 @@ const COMPONENTS: Components = {
     </ol>
   ),
   blockquote: ({ children }) => <blockquote className="space-y-2 border-l-2 border-line pl-3 text-muted">{children}</blockquote>,
-  a: ({ href, children }) => (
-    <a href={href} target="_blank" rel="noreferrer noopener" className="underline underline-offset-2">
-      {children}
-    </a>
-  ),
+  // 각주처럼 같은 답변 안을 가리키는 링크는 새 탭으로 열지 않는다
+  a: ({ href, children }) =>
+    href?.startsWith("#") ? (
+      <a href={href} className="underline underline-offset-2">
+        {children}
+      </a>
+    ) : (
+      <a href={href} target="_blank" rel="noreferrer noopener" className="underline underline-offset-2">
+        {children}
+      </a>
+    ),
   // 에이전트가 적은 외부 이미지를 불러오면 사용자 몰래 밖으로 요청이 나가므로 대체 글만 보여 준다
   img: ({ alt }) => <span className="text-muted">[이미지{alt ? `: ${alt}` : ""}]</span>,
   hr: () => <hr className="border-line" />,
@@ -101,11 +133,21 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   );
 }
 
-/** 에이전트 답변. HTML은 글자로 보여 주고, 링크는 새 탭으로 열며, 외부 이미지는 불러오지 않는다 */
+/**
+ * 에이전트 답변. HTML은 글자로 보여 주고, 외부 링크는 새 탭으로 열며, 외부 이미지는 불러오지 않는다.
+ * 수식은 `$…$`(인라인)와 `$$…$$`(블록)를 그리고, 숫자로 시작하는 것은 금액으로 보아 글자로 남긴다.
+ * KaTeX 기본 출력을 그대로 써서 보이는 수식과 함께 MathML을 남긴다. 화면 낭독기가 읽을 내용이 사라지지 않게 하기 위해서다.
+ * 문법이 틀린 수식은 예외로 답변 전체를 깨뜨리지 않고, 그 자리를 원문으로 남긴다
+ */
 export function Markdown({ text }: { text: string }) {
   return (
     <div className="space-y-3 break-words">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkHtmlAsText]} components={COMPONENTS}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath, remarkMoneyAsText, remarkHtmlAsText]}
+        rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
+        remarkRehypeOptions={{ footnoteLabel: "각주", footnoteBackLabel: "본문으로 돌아가기" }}
+        components={COMPONENTS}
+      >
         {text}
       </ReactMarkdown>
     </div>

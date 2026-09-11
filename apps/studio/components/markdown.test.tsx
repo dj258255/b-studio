@@ -35,6 +35,50 @@ describe("Markdown", () => {
     expect(html).toContain("[이미지: 화면 캡처]");
   });
 
+  it("각주는 같은 답변 안을 가리키므로 새 탭으로 열지 않고, 각주 묶음 제목은 화면에서 숨긴다", () => {
+    const html = render(["본문에 각주[^1]가 있다.", "", "[^1]: 각주 내용"].join("\n"));
+
+    expect(html).toMatch(/<sup><a href="#user-content-fn-1"[^>]*>1<\/a><\/sup>/);
+    expect(html).not.toMatch(/<a href="#user-content-fn-1"[^>]*target="_blank"/);
+    expect(html).toMatch(/<section[^>]*class="footnotes"/);
+    // 묶음 제목은 sr-only로 남아 화면에 글자로 보이지 않는다
+    expect(html).toMatch(/class="font-semibold leading-7 sr-only"[^>]*>각주</);
+    expect(html).toContain("각주 내용");
+  });
+
+  it("블록 수식과 인라인 수식을 요소로 그리고, 화면 낭독기용 MathML을 함께 남긴다", () => {
+    const math = render(["$$", "a^2 + b^2 = c^2", "$$"].join("\n"));
+    expect(math).toContain("katex-display");
+    expect(math).toMatch(/<annotation encoding="application\/x-tex">a\^2 \+ b\^2 = c\^2/);
+
+    // 실제 모델은 인라인 수식을 달러 하나로 적는다
+    const inline = render("품목이 $n$개이고 단가는 $p_i$ 입니다.");
+    expect(inline).not.toContain("katex-display");
+    expect(inline).toMatch(/<annotation encoding="application\/x-tex">n<\/annotation>/);
+    expect(inline).toMatch(/<annotation encoding="application\/x-tex">p_i<\/annotation>/);
+  });
+
+  it("금액처럼 숫자로 시작하는 달러 표기는 수식으로 보지 않고, 코드 블록의 $1도 그대로 둔다", () => {
+    const money = render("가격은 $100 이고 배송비는 $5 입니다.");
+    expect(money).not.toContain("katex");
+    expect(money).toContain("$100");
+    expect(money).toContain("$5");
+
+    const code = render(["```bash", 'echo "$1 $2"', "```"].join("\n"));
+    expect(code).not.toContain("katex");
+    expect(code).toContain("$1 $2");
+
+    // 금액과 구분할 방법이 없어, 숫자로 시작하는 인라인 수식은 수식으로 그리지 않는다 (감수한 한계)
+    const digitFirst = render("계수는 $2x$ 입니다.");
+    expect(digitFirst).not.toContain("katex");
+    expect(digitFirst).toContain("$2x$");
+  });
+
+  it("문법이 틀린 수식은 답변을 깨뜨리지 않고 원문을 남긴다", () => {
+    const broken = render(["$$", "\\frac{1}{", "$$"].join("\n"));
+    expect(broken).toContain("frac{1}{");
+  });
+
   it("코드 블록은 강조가 끝나기 전에도 원문을 줄 단위로 보여 준다", () => {
     const html = render(["```java", "@GetMapping", 'List<OrderResponse> list() { return List.of(); }', "```"].join("\n"));
 
