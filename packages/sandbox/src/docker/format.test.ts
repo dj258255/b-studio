@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import {
@@ -11,6 +15,7 @@ import {
   parseLogLine,
   parseRuntimes,
   parseSyncOutput,
+  SYNC_SCRIPT,
 } from './format';
 
 const ORDERS = {
@@ -165,6 +170,66 @@ describe('parseSyncOutput', () => {
       ['api/src/Order.java', 'abc123'],
       ['web/app/my page.tsx', 'MISSING'],
     ]);
+  });
+});
+
+describe('SYNC_SCRIPT', () => {
+  /** 파일 공유 캐시가 옛 목록을 돌려주는 상황을 흉내 내는 ls와, 내용 길이로 해시를 대신하는 sha256sum */
+  async function runSync(
+    files: string[] | ((project: string) => string[]),
+    { stale, root: syncRoot }: { stale?: { dir: string; name: string }; root?: string } = {},
+  ): Promise<Map<string, string>> {
+    const root = await mkdtemp(path.join(tmpdir(), 'sync-script-'));
+    const bin = path.join(root, 'bin');
+    const project = path.join(root, 'project');
+    await mkdir(path.join(project, 'api/src/orders'), { recursive: true });
+    await writeFile(path.join(project, 'api/src/Old.java'), 'old\n');
+    await writeFile(path.join(project, 'api/src/orders/Order.java'), 'order\n');
+    await mkdir(bin);
+    const realLs = execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim();
+    await writeFile(
+      path.join(bin, 'ls'),
+      `#!/bin/sh\nfor last in "$@"; do :; done\nif [ -n "$HIDE_IN" ] && [ "$last" = "$HIDE_IN" ]; then ${realLs} "$@" | grep -vx "$HIDE_NAME"; else ${realLs} "$@"; fi\n`,
+    );
+    await writeFile(path.join(bin, 'sha256sum'), '#!/bin/sh\necho "len$(wc -c < "$1" | tr -d " ")  $1"\n');
+    await chmod(path.join(bin, 'ls'), 0o755);
+    await chmod(path.join(bin, 'sha256sum'), 0o755);
+    const args = typeof files === 'function' ? files(project) : files;
+    const stdout = execFileSync('sh', ['-c', SYNC_SCRIPT, 'sh', ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYNC_ROOT: syncRoot ?? project, HIDE_IN: stale?.dir ?? '', HIDE_NAME: stale?.name ?? '' },
+    });
+    return parseSyncOutput(stdout);
+  }
+
+  it('모든 상위 폴더의 목록에 경로가 보이면 내용 해시를, 파일이 없으면 MISSING을 출력한다', async () => {
+    const seen = await runSync(['api/src/Old.java', 'api/src/orders/Order.java', 'api/src/Gone.java']);
+    expect([...seen]).toEqual([
+      ['api/src/Old.java', 'len4'],
+      ['api/src/orders/Order.java', 'len6'],
+      ['api/src/Gone.java', 'MISSING'],
+    ]);
+  });
+
+  it('새 폴더의 목록에는 파일이 보여도 상위 폴더 목록에 새 폴더가 아직 없으면 반영되지 않은 것으로 본다', async () => {
+    // 빌드 도구는 api/src 목록에서 orders를 찾지 못해 새 파일을 컴파일하지 않는다
+    const seen = await runSync(['api/src/orders/Order.java', 'api/src/Old.java'], { stale: { dir: 'api/src', name: 'orders' } });
+    expect([...seen]).toEqual([
+      ['api/src/orders/Order.java', 'MISSING'],
+      ['api/src/Old.java', 'len4'],
+    ]);
+  });
+
+  it('Kubernetes 파드처럼 절대 경로를 넘기면 루트까지 올라가며 확인한다', async () => {
+    let file = '';
+    const seen = await runSync(
+      (project) => {
+        file = path.join(project, 'api/src/orders/Order.java');
+        return [file];
+      },
+      { root: '/' },
+    );
+    expect([...seen]).toEqual([[file, 'len6']]);
   });
 });
 

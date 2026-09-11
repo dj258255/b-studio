@@ -8,7 +8,7 @@ import type { ExportResult } from "@/lib/studio-events";
 export function RepositoryBar({ view }: { view: SessionView }) {
   const { snapshot } = view;
   const repository = snapshot.repository;
-  const [busy, setBusy] = useState<"push" | "pull-request">();
+  const [busy, setBusy] = useState<"push" | "pull-request" | "sync">();
   const [error, setError] = useState<string>();
 
   if (!repository) {
@@ -57,6 +57,20 @@ export function RepositoryBar({ view }: { view: SessionView }) {
     }
   }
 
+  /** 요청만 보내고, 가져오기와 검증 결과는 대화에 이벤트로 온다 */
+  async function pullRemote() {
+    setBusy("sync");
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${snapshot.id}/sync`, { method: "POST" });
+      if (!response.ok) setError((await response.json()).error ?? "원격 변경을 가져오지 못했습니다");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
   return (
     <div className="border-b border-line bg-panel px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -91,6 +105,15 @@ export function RepositoryBar({ view }: { view: SessionView }) {
               {label} 작성 페이지
             </a>
           )}
+          <button
+            type="button"
+            onClick={() => void pullRemote()}
+            disabled={!idle || snapshot.status !== "ready"}
+            title="같은 브랜치에 다른 사람이 올린 커밋을 가져와 검증 게이트로 확인합니다"
+            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+          >
+            {busy === "sync" ? "요청하는 중" : "원격 변경 가져오기"}
+          </button>
           <button
             type="button"
             onClick={() => void upload(false)}

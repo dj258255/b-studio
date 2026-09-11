@@ -39,6 +39,7 @@ import {
   parseHostPort,
   parseLogLine,
   parseRuntimes,
+  SYNC_SCRIPT,
   parseSyncOutput,
 } from './format';
 import { externalCallScript } from './external-call';
@@ -66,18 +67,6 @@ const SYNC_HELPER_IMAGE = 'busybox:1.37';
  * 디렉터리 목록(readdir)에 이름이 보이는지와 내용 해시를 함께 확인한다.
  * 빌드 도구는 목록과 속성으로 변경을 감지하므로 경로로 직접 여는 것만으로는 부족하다.
  */
-const SYNC_SCRIPT = [
-  'cd /project || exit 2',
-  'for f in "$@"; do',
-  '  if ls -1a "$(dirname "$f")" 2>/dev/null | grep -Fxq -- "$(basename "$f")"; then',
-  '    h=$(sha256sum "$f" 2>/dev/null | cut -d " " -f 1)',
-  '    echo "${h:-UNREADABLE} $f"',
-  '  else',
-  '    echo "MISSING $f"',
-  '  fi',
-  'done',
-].join('\n');
-
 /** 끝까지 복사된 스냅샷만 쓴다. 표시 파일이 없으면 3으로 끝내 깨진 스냅샷을 지우게 한다 */
 const SEED_SCRIPT = `[ -f /from/${SNAPSHOT_MARKER} ] || exit 3\ncp -a /from/. /to/ && rm -f /to/${SNAPSHOT_MARKER}`;
 /** 표시 파일은 복사가 끝난 뒤에만 남긴다 */

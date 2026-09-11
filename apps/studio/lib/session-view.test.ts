@@ -192,6 +192,39 @@ describe('reduceSession', () => {
     expect(view.completedRuns).toBe(2);
   });
 
+  it('원격 변경 가져오기는 진행 중으로 표시했다가 결과와 새 기록으로 채운다', () => {
+    const merged = { sha: 'c'.repeat(40), shortSha: 'ccccccc', message: '원격 커밋 1개 가져오기', createdAt: '', files: ['NOTE.md'] };
+    const repository = {
+      remote: 'github.com/acme/orders',
+      kind: 'github',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      sourceDirtyFiles: 0,
+      canCreatePullRequest: true,
+    } as const;
+    const commits = [{ shortSha: 'ddddddd', subject: 'review note', author: 'reviewer' }];
+
+    const pending = fold([{ type: 'remote_sync_started' }]);
+    expect(pending.snapshot.running).toBe(true);
+    expect(pending.chat).toEqual([{ kind: 'remoteSync' }]);
+
+    const done = fold(
+      [{ type: 'remote_synced', status: 'merged', commits, files: ['NOTE.md'], checkpoint: merged, report, checkpoints: [merged], repository }],
+      pending,
+    );
+    expect(done.snapshot).toMatchObject({ running: false, checkpoints: [merged], repository });
+    expect(done.chat).toEqual([{ kind: 'remoteSync', result: { ok: true, status: 'merged', commits, files: ['NOTE.md'], checkpoint: merged, report } }]);
+    expect(done.completedRuns).toBe(1);
+
+    const conflict = fold([
+      { type: 'remote_sync_started' },
+      { type: 'remote_sync_failed', error: '충돌했습니다', conflicts: ['api/src/Order.java'] },
+    ]);
+    expect(conflict.snapshot.running).toBe(false);
+    expect(conflict.chat).toEqual([{ kind: 'remoteSync', result: { ok: false, error: '충돌했습니다', conflicts: ['api/src/Order.java'] } }]);
+    expect(conflict.completedRuns).toBe(0);
+  });
+
   it('올린 결과로 원격 상태를 바꾸고 대화에 남긴다', () => {
     const repository = {
       remote: 'github.com/acme/orders',
