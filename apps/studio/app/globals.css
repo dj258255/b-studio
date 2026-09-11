@@ -107,6 +107,24 @@
     inset 0 1px 0 var(--glass-highlight);
 }
 
+/*
+ * 문법 강조: Shiki가 토큰마다 밝은·어두운 테마 색을 변수로 넣고, 여기서 운영체제 테마에 맞는 쪽을 고른다.
+ * 강제 색상 모드에서는 브라우저가 글자색을 덮어쓴다
+ */
+@layer components {
+  .code-token {
+    color: var(--shiki-light);
+    font-style: var(--shiki-light-font-style, inherit);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .code-token {
+      color: var(--shiki-dark);
+      font-style: var(--shiki-dark-font-style, inherit);
+    }
+  }
+}
+
 @layer base {
   html {
     background: var(--ground);

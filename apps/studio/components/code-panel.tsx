@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { languageFor, type HighlightedLine } from "@/lib/highlight";
 import { latestWrite, type SessionView } from "@/lib/session-view";
 import type { CodeFile, CodeTree } from "@/lib/studio-events";
+import { CodeTokens, useHighlightedCode } from "./code-tokens";
 import { DiffView } from "./diff-view";
 
 const CHANGE_LABEL = { added: "추가", modified: "수정", deleted: "삭제" } as const;
@@ -148,7 +150,7 @@ export function CodePanel({ view }: { view: SessionView }) {
                   {file.patch && <DiffView patch={file.patch} />}
                 </div>
               ) : (
-                <CodeLines content={file.content} />
+                <CodeLines path={file.path} content={file.content} />
               )}
             </div>
           </>
@@ -191,20 +193,31 @@ function FileButton({
   );
 }
 
-/** 줄 번호와 함께 보여 준다. 긴 줄은 가로로 스크롤한다 */
-function CodeLines({ content }: { content: string }) {
-  const lines = content.split("\n");
-  if (lines.at(-1) === "") lines.pop();
+/** 줄 번호와 함께 보여 준다. 아직 강조하지 않은 줄과 강조하지 않는 파일은 평문으로 두고, 긴 줄은 가로로 스크롤한다 */
+function CodeLines({ path, content }: { path: string; content: string }) {
+  const highlighted = useHighlightedCode(content, languageFor(path));
+  const lines = useMemo(() => {
+    const split = content.split("\n");
+    if (split.at(-1) === "") split.pop();
+    return split;
+  }, [content]);
   return (
     <pre className="min-w-max py-2 font-mono text-xs leading-5">
       {lines.map((line, index) => (
-        <div key={index} className="flex">
-          <span aria-hidden className="w-12 shrink-0 pr-3 text-right text-muted select-none">
-            {index + 1}
-          </span>
-          <span className="pr-4 whitespace-pre">{line || " "}</span>
-        </div>
+        <CodeLine key={index} number={index + 1} text={line} tokens={highlighted?.[index]} />
       ))}
     </pre>
   );
 }
+
+/** 조각을 강조할 때마다 목록 전체가 다시 그려지므로, 이미 그린 줄은 건너뛴다 */
+const CodeLine = memo(function CodeLine({ number, text, tokens }: { number: number; text: string; tokens?: HighlightedLine }) {
+  return (
+    <div className="flex">
+      <span aria-hidden className="w-12 shrink-0 pr-3 text-right text-muted select-none">
+        {number}
+      </span>
+      <span className="pr-4 whitespace-pre">{tokens ? <CodeTokens line={tokens} /> : text || " "}</span>
+    </div>
+  );
+});
