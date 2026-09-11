@@ -6,17 +6,25 @@ import type { ContainerState, LogLine } from '../types';
  * 포트는 호스트 루프백의 빈 포트에만 공개해서 같은 네트워크의 다른 PC에서 접근하지 못하게 한다.
  */
 export function buildOverride(project: LoadedProject, sandboxId: string) {
-  return {
-    services: Object.fromEntries(
-      project.managed.map(([name, service]) => [
-        name,
-        {
-          ports: [`127.0.0.1::${service.port}`],
-          labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name },
-        },
-      ]),
-    ),
-  };
+  const services: Record<string, Record<string, unknown>> = Object.fromEntries(
+    project.managed.map(([name, service]) => [
+      name,
+      {
+        ports: [`127.0.0.1::${service.port}`],
+        labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name },
+      },
+    ]),
+  );
+
+  // 서비스 단위 cpus는 compose가 deploy.resources.limits와 섞어 쓰지 못하게 하므로 deploy 형식으로만 건다
+  for (const [name, limit] of Object.entries(project.resources ?? {})) {
+    const limits = {
+      ...(limit.memory ? { memory: limit.memory } : {}),
+      ...(limit.cpus ? { cpus: String(limit.cpus) } : {}),
+    };
+    services[name] = { ...services[name], deploy: { resources: { limits } } };
+  }
+  return { services };
 }
 
 /** `docker compose port <service> <port>` 출력에서 호스트 포트를 읽는다 */

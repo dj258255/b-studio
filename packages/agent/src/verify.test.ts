@@ -49,6 +49,9 @@ function fakeSandbox(failing: string[] = [], { syncFails = false } = {}): Sandbo
     async state(): Promise<ContainerState> {
       return 'running';
     },
+    async stats() {
+      return [];
+    },
     async *logs(): AsyncIterable<LogLine> {
       yield { service: 'api', text: 'error: cannot find symbol memo', at: new Date() };
     },
@@ -189,6 +192,16 @@ describe('restartServicesFor', () => {
     expect(restarts).toEqual(['api']);
     expect(report.restarted[0]).toMatchObject({ service: 'api', ready: false });
     expect(report.restarted[0]?.retried).toBeUndefined();
+  });
+
+  it('메모리 한도를 넘어 종료된 서비스는 원인을 먼저 알린다', async () => {
+    const { sandbox } = flakySandbox([false], 'Killed');
+    sandbox.stats = async () => [{ service: 'api', state: 'exited', exitCode: 137, oomKilled: true, memoryLimitBytes: 1536 * 1024 ** 2 }];
+
+    const report = await restartServicesFor(sandbox, await projectWithDeletedMigration(), ['api/src/main/java/Order.java']);
+
+    expect(report.restarted[0]).toMatchObject({ service: 'api', ready: false, oomKilled: true });
+    expect(report.restarted[0]?.error).toMatch(/^메모리 한도 \(1\.50GiB\)를 넘어 종료됐습니다/);
   });
 
   it('로그에 지운 파일 이름과 "없음" 오류가 함께 나올 때만 해당한다', () => {

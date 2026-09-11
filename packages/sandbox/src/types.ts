@@ -71,6 +71,23 @@ export interface SyncResult {
   checks: number;
 }
 
+/** 샌드박스 컨테이너 하나의 자원 사용량과 상태. 부가 서비스(DB 등)도 포함한다 */
+export interface ServiceUsage {
+  /** compose 서비스 이름 */
+  service: string;
+  state: ContainerState;
+  /** 실행 중일 때만. 100이 CPU 1개를 다 쓴 것이다 */
+  cpuPercent?: number;
+  memoryBytes?: number;
+  /** 한도를 걸었을 때만 */
+  memoryLimitBytes?: number;
+  cpuLimit?: number;
+  /** 종료된 컨테이너의 종료 코드 */
+  exitCode?: number;
+  /** 메모리 한도를 넘어 커널이 종료시켰는지 */
+  oomKilled: boolean;
+}
+
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -93,6 +110,8 @@ export interface Sandbox {
   sync(files: string[], options?: SyncOptions): Promise<SyncResult>;
   endpoint(service: string): Promise<ServiceEndpoint>;
   state(service: string): Promise<ContainerState>;
+  /** 모든 컨테이너의 자원 사용량. 실행 중이 아닌 컨테이너는 종료 코드와 메모리 부족 종료 여부만 담는다 */
+  stats(): Promise<ServiceUsage[]>;
   logs(options?: LogOptions): AsyncIterable<LogLine>;
   /** input은 명령의 표준 입력으로 넘긴다 (예: 데이터베이스 덤프 복원) */
   exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string }): Promise<ExecResult>;

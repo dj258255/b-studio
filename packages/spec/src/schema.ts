@@ -59,6 +59,17 @@ export const ExternalServiceSchema = z.object({
 
 export const ServiceSchema = z.discriminatedUnion('source', [ManagedServiceSchema, ExternalServiceSchema]);
 
+/** 컨테이너 한도. memory는 docker 표기(512m, 1.5g), cpus는 CPU 개수 */
+export const ResourceLimitSchema = z
+  .object({
+    memory: z
+      .string()
+      .regex(/^\d+(\.\d+)?[kmg]$/i, '512m, 1.5g 같은 docker 메모리 표기여야 합니다')
+      .optional(),
+    cpus: z.number().positive().max(64).optional(),
+  })
+  .refine((limit) => limit.memory !== undefined || limit.cpus !== undefined, 'memory나 cpus 중 하나는 적어야 합니다');
+
 /** SQL 식별자. 셸을 거치지 않더라도 SQL 문에 들어가므로 좁게 허용한다 */
 const SQL_IDENTIFIER = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/, 'SQL 식별자(영문, 숫자, 밑줄)여야 합니다');
 
@@ -83,11 +94,14 @@ export const StudioSpecSchema = z.object({
     .refine((services) => Object.keys(services).length > 0, '서비스가 최소 1개 필요합니다'),
   /** compose 서비스 이름 → 데이터베이스 */
   databases: z.record(z.string().regex(NAME), DatabaseSchema).optional(),
+  /** compose 서비스 이름 → 컨테이너 한도. 한 샌드박스가 Docker VM 자원을 다 써서 다른 세션까지 멈추지 않게 한다 */
+  resources: z.record(z.string().regex(NAME), ResourceLimitSchema).optional(),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
 export type SnapshotSpec = z.infer<typeof SnapshotSchema>;
 export type DatabaseSpec = z.infer<typeof DatabaseSchema>;
+export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type PreviewKind = z.infer<typeof PreviewKindSchema>;
 export type ManagedServiceSpec = z.infer<typeof ManagedServiceSchema>;
 export type ExternalServiceSpec = z.infer<typeof ExternalServiceSchema>;

@@ -62,9 +62,12 @@ interface Session {
   sourceDirtyFiles: number;
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
+  usageTimer?: NodeJS.Timeout;
 }
 
 const HISTORY_LIMIT = 5_000;
+/** docker stats 한 번이 1초 남짓 걸리므로 넉넉히 둔다 */
+const USAGE_INTERVAL_MS = 5_000;
 const LOG_LIMIT = 1_000;
 const GENERATED = /[/\\](node_modules|\.next|build|\.gradle|\.venv)([/\\]|$)/;
 
@@ -183,6 +186,7 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   if (session.snapshot.status === 'stopped') return session.snapshot;
   session.stop.abort();
   session.logFollower?.abort();
+  clearInterval(session.usageTimer);
   await session.sandbox.destroy().catch(() => {});
   session.snapshot.running = false;
   setStatus(session, 'stopped');
@@ -539,7 +543,32 @@ function setStatus(session: Session, status: SessionStatus, error?: string): voi
   session.snapshot.status = status;
   session.snapshot.error = error;
   emit(session, { type: 'status', status, error });
-  if (status === 'ready') followLogs(session, 100);
+  if (status === 'ready') {
+    followLogs(session, 100);
+    watchUsage(session);
+  }
+}
+
+/** 샌드박스가 준비되면 컨테이너별 자원 사용량을 주기적으로 잰다. 실패하면 다음 주기에 다시 잰다 */
+function watchUsage(session: Session): void {
+  if (session.usageTimer) return;
+  let measuring = false;
+  const measure = async () => {
+    if (measuring || session.stop.signal.aborted) return;
+    measuring = true;
+    try {
+      const usage = { at: new Date().toISOString(), services: await session.sandbox.stats() };
+      session.snapshot.usage = usage;
+      emit(session, { type: 'usage', ...usage });
+    } catch {
+      // 재시작 중이면 컨테이너가 잠깐 없을 수 있다
+    } finally {
+      measuring = false;
+    }
+  };
+  void measure();
+  session.usageTimer = setInterval(() => void measure(), USAGE_INTERVAL_MS);
+  session.usageTimer.unref();
 }
 
 function followLogs(session: Session, tail: number): void {
@@ -560,10 +589,13 @@ function followLogs(session: Session, tail: number): void {
 }
 
 function emit(session: Session, event: StudioEvent): void {
-  const buffer = event.type === 'log' ? session.logs : session.history;
-  buffer.push(event);
-  const limit = event.type === 'log' ? LOG_LIMIT : HISTORY_LIMIT;
-  if (buffer.length > limit) buffer.splice(0, buffer.length - limit);
+  // 사용량은 몇 초마다 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
+  if (event.type !== 'usage') {
+    const buffer = event.type === 'log' ? session.logs : session.history;
+    buffer.push(event);
+    const limit = event.type === 'log' ? LOG_LIMIT : HISTORY_LIMIT;
+    if (buffer.length > limit) buffer.splice(0, buffer.length - limit);
+  }
   for (const listener of session.listeners) listener(event);
 }
 

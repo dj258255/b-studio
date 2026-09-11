@@ -1,4 +1,5 @@
 import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck } from '@b-studio/agent';
+import type { ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
@@ -35,6 +36,8 @@ export interface SessionSnapshot {
   checkpoints: Checkpoint[];
   /** 원본 프로젝트가 Git 저장소일 때만 있다 */
   repository?: RepositoryView;
+  /** 가장 최근에 잰 컨테이너별 자원 사용량 */
+  usage?: { at: string; services: ServiceUsage[] };
 }
 
 /** 원본이 Git 저장소인 세션의 원격 연동 상태 */
@@ -66,6 +69,8 @@ export type StudioEvent =
   | { type: 'status'; status: SessionStatus; error?: string }
   | { type: 'service'; service: string; state: ServiceState; url?: string; detail?: string }
   | { type: 'log'; service: string; text: string; at: string }
+  /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
+  | { type: 'usage'; at: string; services: ServiceUsage[] }
   | { type: 'run_started'; runId: string; request: string }
   | { type: 'agent'; runId: string; event: AgentEvent }
   | {

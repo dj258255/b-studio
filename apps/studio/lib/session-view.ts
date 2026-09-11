@@ -136,6 +136,9 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         chat: settleRestore(view.chat, event.checkpoint.sha, { ok: false, error: event.error }),
       };
 
+    case 'usage':
+      return patchSnapshot(view, { usage: { at: event.at, services: event.services } });
+
     case 'exported':
       // 원격 상태는 통째로 바꾸므로 기록을 다시 재생해도 결과가 같다
       return {
@@ -227,6 +230,8 @@ export function describeToolCall(name: string, input: unknown): string {
       return `재시작 ${text(args.service)}`;
     case 'service_logs':
       return `로그 확인 ${text(args.service)}`;
+    case 'service_stats':
+      return '리소스 확인';
     case 'http_request':
       return `요청 ${text(args.service)} ${text(args.method)} ${text(args.path)}`;
     case 'get_contract':

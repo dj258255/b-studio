@@ -18,11 +18,13 @@ import type {
   Sandbox,
   SandboxProvider,
   ServiceEndpoint,
+  ServiceUsage,
   StartOptions,
   SyncOptions,
   SyncResult,
 } from '../types';
 import { buildOverride, parseContainerState, parseHostPort, parseLogLine, parseSyncOutput } from './format';
+import { mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
   SNAPSHOT_LABEL,
@@ -136,7 +138,30 @@ class LocalDockerSandbox implements Sandbox {
     ]);
 
     await this.#composeOrThrow(['up', '--detach', '--remove-orphans'], options.signal);
-    const endpoints = await Promise.all(this.project.managed.map(([name]) => this.#awaitReady(name, options)));
+
+    // 한 서비스가 준비에 실패하면 나머지 서비스의 준비 확인도 멈춘다. 그러지 않으면 실패를 돌려준 뒤에도
+    // 다른 서비스가 제한 시간(수 분)까지 확인을 계속하며 프로세스와 샌드박스 정리를 붙잡는다
+    const giveUp = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal, giveUp.signal]) : giveUp.signal;
+    let failedFirst: string | undefined;
+    // 멈춘 서비스는 자기 문제로 실패한 것이 아니므로 원인 서비스를 알려 준다
+    const onStatus: StartOptions['onStatus'] = options.onStatus
+      ? (event) =>
+          options.onStatus!(
+            event.phase === 'failed' && failedFirst && event.service !== failedFirst && !options.signal?.aborted
+              ? { ...event, reason: `${failedFirst} 서비스가 준비에 실패해 확인을 멈췄습니다` }
+              : event,
+          )
+      : undefined;
+    const endpoints = await Promise.all(
+      this.project.managed.map(([name]) =>
+        this.#awaitReady(name, { ...options, signal, onStatus }).catch((error: unknown) => {
+          failedFirst ??= name;
+          giveUp.abort(error);
+          throw error;
+        }),
+      ),
+    );
 
     // 설치 단계만 끝나고 에이전트가 아직 도구를 쓰지 않은 시점의 볼륨을 다음 기동용으로 남긴다
     await Promise.all(plans.filter((_, index) => !seeded[index]).map((plan) => this.#captureSnapshot(plan, options)));
@@ -186,6 +211,19 @@ class LocalDockerSandbox implements Sandbox {
   async state(name: string): Promise<ContainerState> {
     const { stdout } = await this.#compose(['ps', '--all', '--format', 'json', name]);
     return parseContainerState(stdout);
+  }
+
+  async stats(): Promise<ServiceUsage[]> {
+    const ids = (await this.#compose(['ps', '--all', '--quiet'])).stdout.split('\n').filter(Boolean);
+    if (ids.length === 0) return [];
+    const inspected = await this.#docker(['inspect', ...ids]);
+    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 상태를 읽지 못했습니다 (${this.id})`, inspected.stderr);
+    const rows = parseInspectOutput(inspected.stdout);
+
+    // docker stats는 CPU 사용률을 재느라 1초 남짓 걸리므로 실행 중인 컨테이너만 묻는다
+    const running = rows.filter((row) => row.state === 'running').map((row) => row.name);
+    const stats = running.length > 0 ? await this.#docker(['stats', '--no-stream', '--format', '{{json .}}', ...running]) : undefined;
+    return mergeUsage(rows, stats?.exitCode === 0 ? parseStatsOutput(stats.stdout) : []);
   }
 
   async *logs({ services = [], tail = 200, follow = true, signal }: LogOptions = {}): AsyncIterable<LogLine> {

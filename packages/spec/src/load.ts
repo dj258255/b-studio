@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { StudioSpecSchema, type DatabaseSpec, type ManagedServiceSpec, type StudioSpec } from './schema';
+import { StudioSpecSchema, type DatabaseSpec, type ManagedServiceSpec, type ResourceLimit, type StudioSpec } from './schema';
 
 export const SPEC_FILE = 'studio.yaml';
 
@@ -25,6 +25,8 @@ export interface LoadedProject {
   sharedVolumes: string[];
   /** compose 서비스 이름과 데이터베이스. dependents는 compose depends_on으로 이 DB에 기대는 managed 서비스 */
   databases: Array<[name: string, database: DatabaseSpec & { dependents: string[] }]>;
+  /** compose 서비스 이름 → 컨테이너 한도 */
+  resources: Record<string, ResourceLimit>;
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -95,13 +97,17 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     databases.push([name, { ...database, dependents }]);
   }
 
+  for (const name of Object.keys(spec.resources ?? {})) {
+    if (!composeServices.has(name)) issues.push(`resources.${name}: ${spec.compose}에 같은 이름의 서비스가 없습니다`);
+  }
+
   if (issues.length > 0) throw new SpecError(`${SPEC_FILE}과 ${spec.compose}가 맞지 않습니다`, issues);
 
   const sharedVolumes = Object.entries(compose.data.volumes ?? {})
     .filter(([, volume]) => volume?.external === true)
     .map(([key, volume]) => volume?.name ?? key);
 
-  return { root, spec, composePath, managed, sharedVolumes, databases };
+  return { root, spec, composePath, managed, sharedVolumes, databases, resources: spec.resources ?? {} };
 }
 
 /** compose depends_on은 목록(["db"])이나 맵({ db: { condition } })으로 쓴다 */
