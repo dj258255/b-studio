@@ -1629,7 +1629,7 @@ function sessionTokenLimit(): number | undefined {
 }
 
 function sessionsRoot(): string {
-  return path.resolve(process.env.B_STUDIO_SESSIONS_DIR ?? path.join(homedir(), '.cache/b-studio/sessions'));
+  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_SESSIONS_DIR ?? path.join(homedir(), '.cache/b-studio/sessions'));
 }
 
 /**

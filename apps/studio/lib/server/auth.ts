@@ -28,7 +28,8 @@ export const LOCAL_USER = 'local';
 
 const USER_NAME = /^[A-Za-z0-9._@-]{1,64}$/;
 const HEADER_USER = /^[\x21-\x7E]{1,256}$/;
-const PUBLIC_PATHS = new Set(['/login', '/api/auth/login', '/api/auth/logout']);
+/** 로그인 없이 여는 경로. /api/health는 컨테이너 헬스체크가 부른다 */
+const PUBLIC_PATHS = new Set(['/login', '/api/auth/login', '/api/auth/logout', '/api/health']);
 
 /** 환경 변수. 테스트가 process.env 대신 필요한 값만 넘길 수 있게 좁힌 형태 */
 export type Env = Record<string, string | undefined>;

@@ -128,6 +128,7 @@ describe('decideRequest', () => {
     expect(decideRequest(request('/api/projects'), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
     expect(decideRequest(request('/api/projects', { headers: { [USER_HEADER]: 'alice' } }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
     expect(decideRequest(request('/login'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
+    expect(decideRequest(request('/api/health'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
     expect(decideRequest(request('/api/projects', { cookie: signSession('alice', SECRET, NOW, 1) }), TOKEN_ENV, NOW)).toEqual({ kind: 'allow', user: 'alice' });
   });
 

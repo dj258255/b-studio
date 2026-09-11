@@ -81,7 +81,7 @@ const KEEP_PREVIOUS = 2;
 const OUTPUT_LIMIT = 200_000;
 
 export function defaultDeployRoot(): string {
-  return path.resolve(process.env.B_STUDIO_DEPLOYS_DIR ?? path.join(homedir(), '.cache/b-studio/deploys'));
+  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_DEPLOYS_DIR ?? path.join(homedir(), '.cache/b-studio/deploys'));
 }
 
 /**
@@ -295,8 +295,8 @@ export class DockerDeployer {
     const source = config.services[name];
     const context = source?.build?.context;
     if (!context) throw new DeployError(`${name}: compose에 build.context가 없어 운영 이미지를 만들 수 없습니다`);
-    const dockerfile = path.join(context, this.project.deploy[name]?.dockerfile ?? 'Dockerfile');
-    const text = await readFile(dockerfile, 'utf8').catch(() => {
+    const dockerfile = path.join(/*turbopackIgnore: true*/ context, this.project.deploy[name]?.dockerfile ?? 'Dockerfile');
+    const text = await readFile(/*turbopackIgnore: true*/ dockerfile, 'utf8').catch(() => {
       throw new DeployError(`${name}: 운영용 ${path.relative(this.project.root, dockerfile)}이(가) 없습니다. 템플릿의 Dockerfile을 참고해 만드세요`);
     });
     const tag = this.#names.image(name, releaseId);
