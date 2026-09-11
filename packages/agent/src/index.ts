@@ -30,6 +30,7 @@ export {
   RemoteConflictError,
   type Checkpoint,
   type GitAuthor,
+  type PendingChange,
   type PushResult,
   type RemoteCommit,
   type RemoteSyncResult,

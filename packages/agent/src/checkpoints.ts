@@ -62,6 +62,12 @@ export interface PushResult {
   forced: boolean;
 }
 
+/** 마지막 체크포인트 이후 바뀐 파일 (프로젝트 기준 경로) */
+export interface PendingChange {
+  file: string;
+  change: 'added' | 'modified' | 'deleted';
+}
+
 /** 원격 세션 브랜치에만 있던 커밋 (리뷰어가 올린 커밋 등) */
 export interface RemoteCommit {
   sha: string;
@@ -240,6 +246,38 @@ export class CheckpointStore {
       }
     }
     return (await this.#fromRoot([...new Set(files)])).sort();
+  }
+
+  /** 마지막 체크포인트 이후 바뀐 파일과 바뀐 종류. 코드 화면이 추가·수정·삭제를 구분해 보여 줄 때 쓴다 */
+  async pendingChanges(): Promise<PendingChange[]> {
+    const subdir = await this.#subdir();
+    const entries = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(await this.#scope())])).split('\0').filter(Boolean);
+    const changes = new Map<string, PendingChange['change']>();
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      const code = entry.slice(0, 2);
+      const file = entry.slice(3);
+      if (code[0] === 'R' || code[0] === 'C') {
+        // 이름 변경은 새 경로가 추가, 원래 경로가 삭제다
+        const original = entries[++i];
+        if (original) changes.set(original, 'deleted');
+        changes.set(file, 'added');
+        continue;
+      }
+      changes.set(file, code === '??' || code.includes('A') ? 'added' : code.includes('D') ? 'deleted' : 'modified');
+    }
+    // 저장소 루트 기준 경로를 프로젝트 기준으로 바꾸고, 프로젝트 밖 경로는 뺀다
+    return [...changes.entries()]
+      .filter(([file]) => !subdir || file.startsWith(`${subdir}/`))
+      .map(([file, change]) => ({ file: subdir ? file.slice(subdir.length + 1) : file, change }))
+      .sort((a, b) => a.file.localeCompare(b.file));
+  }
+
+  /** 파일 하나가 마지막 체크포인트 이후 어떻게 바뀌었는지. 아직 기록에 없는 새 파일은 빈 문자열이다 */
+  async pendingPatch(file: string): Promise<string> {
+    const subdir = await this.#subdir();
+    const target = subdir ? `${subdir}/${file}` : file;
+    return capText(await this.#git(['diff', '--no-color', ...(await this.#relative()), 'HEAD', '--', target]), MAX_PATCH_CHARS);
   }
 
   /**

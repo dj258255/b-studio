@@ -1,6 +1,6 @@
 import type { VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
-import { createView, LOG_LIMIT, reduceSession, type SessionView } from './session-view';
+import { createView, latestWrite, LOG_LIMIT, reduceSession, type SessionView } from './session-view';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 
 const snapshot: SessionSnapshot = {
@@ -59,6 +59,19 @@ describe('reduceSession', () => {
         { summary: '수정 api/Order.java', ok: false, output: '찾지 못했습니다' },
       ],
     });
+  });
+
+  it('코드 화면이 따라갈 수 있게 성공한 쓰기 도구의 경로와 횟수를 모은다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '메모' },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_call', name: 'read_file', input: { path: 'api/Order.java' } } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_result', name: 'read_file', ok: true, content: '...' } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_call', name: 'write_file', input: { path: './api/V2.sql' } } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_result', name: 'write_file', ok: true, content: 'wrote' } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_call', name: 'edit_file', input: { path: 'web/page.tsx' } } },
+      { type: 'agent', runId: 'r1', event: { type: 'tool_result', name: 'edit_file', ok: false, content: '찾지 못했습니다' } },
+    ]);
+    expect(latestWrite(view.chat)).toEqual({ path: 'api/V2.sql', count: 1 });
   });
 
   it('실행 환경을 알리는 이벤트는 대화에 한 줄로 남긴다', () => {

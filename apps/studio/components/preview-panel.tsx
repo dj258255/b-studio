@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
+import { CodePanel } from "./code-panel";
 import { HistoryPanel } from "./history-panel";
 import { LogPanel } from "./log-panel";
 import { ResourcePanel } from "./resource-panel";
@@ -13,6 +14,7 @@ type Tab = { id: string; label: string; service?: ServiceView; external?: Extern
 
 const LOGS_TAB = "logs";
 const HISTORY_TAB = "history";
+const CODE_TAB = "code";
 const RESOURCES_TAB = "resources";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
@@ -21,6 +23,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       .filter((service) => service.preview !== "logs")
       .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
     ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
+    { id: CODE_TAB, label: "코드" },
     { id: HISTORY_TAB, label: "기록" },
     { id: LOGS_TAB, label: "로그" },
     { id: RESOURCES_TAB, label: "리소스" },
@@ -48,7 +51,9 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       </div>
 
       <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden rounded-2xl border border-line bg-panel shadow-sm">
-        {active.id === HISTORY_TAB ? (
+        {active.id === CODE_TAB ? (
+          <CodePanel view={view} />
+        ) : active.id === HISTORY_TAB ? (
           <HistoryPanel view={view} />
         ) : active.id === RESOURCES_TAB ? (
           <ResourcePanel view={view} />
