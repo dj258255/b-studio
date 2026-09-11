@@ -55,6 +55,7 @@ import type {
   StudioEvent,
 } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
+import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { createPreviewGateway, previewHost, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import {
@@ -120,6 +121,8 @@ interface Session {
   exporting: boolean;
   run?: ActiveRun;
   usageTimer?: NodeJS.Timeout;
+  /** 에이전트 도구를 거치지 않은 파일 변경(서비스 안에서 명령이 만든 파일 등)을 코드 화면에 알린다 */
+  fileWatcher?: FileWatcher;
   /** 마지막으로 대화나 상태가 바뀐 시각. 세션 목록 정렬에 쓴다 */
   updatedAt: string;
   persist: { timer?: NodeJS.Timeout; chain: Promise<void> };
@@ -379,6 +382,7 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   session.stop.abort();
   session.logFollower?.abort();
   clearInterval(session.usageTimer);
+  session.fileWatcher?.close();
   await session.sandbox.destroy().catch(() => {});
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
@@ -1090,11 +1094,6 @@ export async function readCodeFile(id: string, file: string): Promise<CodeFile> 
   };
 }
 
-/** 삭제된 파일은 작업 공간 검사를 거치지 않으므로 같은 규칙을 따로 적용한다 */
-function isDeniedPath(file: string): boolean {
-  return file.split('/').some((segment) => ['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__'].includes(segment) || /^\.env(\..*)?$/.test(segment));
-}
-
 export async function checkpointPatch(id: string, sha: string): Promise<string> {
   const session = requireSession(id);
   if (!session.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === sha)) {
@@ -1137,6 +1136,22 @@ function setStatus(session: Session, status: SessionStatus, error?: string): voi
   if (status === 'ready') {
     followLogs(session, 100);
     watchUsage(session);
+    watchFiles(session);
+  }
+}
+
+/** 서비스 안에서 명령이 만든 파일처럼 에이전트 도구를 거치지 않은 변경도 코드 화면이 다시 불러오게 한다 */
+function watchFiles(session: Session): void {
+  if (session.fileWatcher) return;
+  try {
+    session.fileWatcher = watchProjectFiles(session.project.root, () => {
+      if (session.stop.signal.aborted) return;
+      session.snapshot.fileRevision = (session.snapshot.fileRevision ?? 0) + 1;
+      emit(session, { type: 'files_changed', revision: session.snapshot.fileRevision });
+    });
+  } catch (error) {
+    // 감시하지 못해도 에이전트 쓰기와 요청 완료 때는 코드 화면이 계속 다시 불러온다
+    console.error('[b-studio] 파일 변경을 감시하지 못했습니다', error);
   }
 }
 
@@ -1183,14 +1198,15 @@ function followLogs(session: Session, tail: number): void {
 }
 
 function emit(session: Session, event: StudioEvent): void {
-  // 사용량은 몇 초마다 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  if (event.type !== 'usage') {
+  // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
+  const transient = event.type === 'usage' || event.type === 'files_changed';
+  if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);
     const limit = event.type === 'log' ? LOG_LIMIT : HISTORY_LIMIT;
     if (buffer.length > limit) buffer.splice(0, buffer.length - limit);
   }
-  if (event.type !== 'usage' && event.type !== 'log') {
+  if (!transient && event.type !== 'log') {
     session.updatedAt = new Date().toISOString();
     schedulePersist(session);
   }
