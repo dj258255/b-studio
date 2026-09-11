@@ -7,9 +7,11 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await authorizeSession(id, user);
-    const body = (await request.json().catch(() => ({}))) as { text?: unknown; allowBreaking?: unknown };
+    const body = (await request.json().catch(() => ({}))) as { text?: unknown; allowBreaking?: unknown; intent?: unknown };
     if (typeof body.text !== 'string') throw new StudioError(400, 'text가 필요합니다');
-    return Response.json(sendMessage(id, body.text, { allowBreaking: body.allowBreaking === true, by: user }), { status: 202 });
+    const intent = body.intent ?? 'build';
+    if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
+    return Response.json(sendMessage(id, body.text, { allowBreaking: body.allowBreaking === true, by: user, intent }), { status: 202 });
   } catch (error) {
     return errorResponse(error);
   }

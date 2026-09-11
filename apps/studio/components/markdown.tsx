@@ -66,11 +66,12 @@ const COMPONENTS: Components = {
   hr: () => <hr className="border-line" />,
   table: ({ children }) => (
     <div className="overflow-x-auto">
-      <table className="border-collapse text-sm">{children}</table>
+      <table className="w-full border-collapse text-sm">{children}</table>
     </div>
   ),
-  th: ({ children }) => <th className="border border-line bg-ground px-2 py-1 text-left font-semibold">{children}</th>,
-  td: ({ children }) => <td className="border border-line px-2 py-1 align-top">{children}</td>,
+  // break-word는 표의 최소 너비를 줄이지 못해 긴 경로 한 칸이 다른 열을 밀어낸다. anywhere는 최소 너비 계산에서도 줄을 바꾼다
+  th: ({ children }) => <th className="border border-line bg-ground px-2 py-1 text-left font-semibold [overflow-wrap:anywhere]">{children}</th>,
+  td: ({ children }) => <td className="border border-line px-2 py-1 align-top [overflow-wrap:anywhere]">{children}</td>,
   code: ({ children }) => <code className="rounded bg-ground px-1 py-0.5 font-mono text-[0.85em]">{children}</code>,
   pre: ({ node }) => {
     const code = (node as unknown as MarkdownNode | undefined)?.children?.[0];

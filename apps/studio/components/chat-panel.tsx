@@ -9,16 +9,23 @@ import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
 import { useSessionAccess, type SessionAccess } from "./session-access";
 
+type Intent = "build" | "ask";
+
+/** 질문의 답을 받아 만들기로 넘어갈 때 보내는 요청. 대화를 이어받으므로 앞의 계획을 가리키기만 한다 */
+const BUILD_FROM_PLAN = "앞에서 정리한 계획대로 만들어줘";
+
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
   const [text, setText] = useState("");
   const [allowBreaking, setAllowBreaking] = useState(false);
+  const [intent, setIntent] = useState<Intent>("build");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   /** 되돌리는 동작이라 한 번 더 누르게 한다. 요청이 바뀌면 확인 상태도 사라지도록 요청 id로 둔다 */
   const [confirmingCancel, setConfirmingCancel] = useState<string>();
   const listRef = useRef<HTMLOListElement>(null);
   const runId = activeRun(view);
+  const asking = isAsking(view);
   const access = useSessionAccess();
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
@@ -31,17 +38,26 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && access.canManage;
 
-  async function send(request: string) {
+  const planRequest = snapshot.mode === "demo" ? snapshot.nextDemoRequest : BUILD_FROM_PLAN;
+
+  async function send(request: string, sendIntent: Intent = intent) {
     setSending(true);
     setError(undefined);
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: request, allowBreaking }),
+      body: JSON.stringify({ text: request, allowBreaking: sendIntent === "build" && allowBreaking, intent: sendIntent }),
     });
     if (response.ok) setText("");
     else setError((await response.json()).error ?? "요청을 보내지 못했습니다");
     setSending(false);
+  }
+
+  /** 질문의 답을 계획으로 삼아 만들기 요청을 보낸다 */
+  function buildFromPlan() {
+    if (!planRequest) return;
+    setIntent("build");
+    void send(planRequest, "build");
   }
 
   /** 취소 중 표시와 결과는 이벤트 스트림으로 온다 */
@@ -75,6 +91,16 @@ export function ChatPanel({ view }: { view: SessionView }) {
         {chat.map((item, index) => (
           <li key={index}>
             <ChatEntry item={item} />
+            {index === chat.length - 1 && item.kind === "outcome" && item.intent === "ask" && item.status === "done" && access.canManage && (
+              <button
+                type="button"
+                onClick={buildFromPlan}
+                disabled={!canSend || !planRequest}
+                className="mt-2 rounded-full bg-ink px-3.5 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+              >
+                이대로 만들기
+              </button>
+            )}
           </li>
         ))}
         {snapshot.running && !runId && <li className="text-sm text-wait motion-safe:animate-pulse">작업하는 중</li>}
@@ -92,10 +118,16 @@ export function ChatPanel({ view }: { view: SessionView }) {
             <p className="min-w-0 text-sm" role="status">
               <span className="text-wait motion-safe:animate-pulse">
                 {snapshot.cancelling === "budget"
-                  ? "세션 토큰 한도에 도달해 요청을 멈추는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다"
+                  ? asking
+                    ? "세션 토큰 한도에 도달해 질문을 멈추는 중"
+                    : "세션 토큰 한도에 도달해 요청을 멈추는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다"
                   : snapshot.cancelling
-                    ? "요청을 취소하는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다"
-                    : "에이전트가 작업하는 중"}
+                    ? asking
+                      ? "질문을 취소하는 중"
+                      : "요청을 취소하는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다"
+                    : asking
+                      ? "에이전트가 답을 준비하는 중"
+                      : "에이전트가 작업하는 중"}
               </span>
               {view.runTokens?.runId === runId && hasTokens(view.runTokens.usage) && (
                 <span className="ml-2 text-xs text-muted">{describeTokens(view.runTokens.usage)}</span>
@@ -123,20 +155,52 @@ export function ChatPanel({ view }: { view: SessionView }) {
               ) : (
                 <button
                   type="button"
-                  onClick={() => setConfirmingCancel(runId)}
+                  // 질문은 되돌릴 변경이 없으므로 한 번 더 묻지 않는다
+                  onClick={() => (asking ? void cancel(runId) : setConfirmingCancel(runId))}
                   className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-medium hover:text-fail"
                 >
-                  요청 취소
+                  {asking ? "질문 취소" : "요청 취소"}
                 </button>
               ))}
           </div>
         )}
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="glass-soft inline-flex rounded-full p-0.5 text-sm" role="group" aria-label="요청 종류">
+            {(["build", "ask"] as const).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                aria-pressed={intent === kind}
+                onClick={() => setIntent(kind)}
+                className={`rounded-full px-3 py-1 font-medium transition-colors ${
+                  intent === kind ? "bg-panel text-ink shadow-sm ring-1 ring-line" : "text-muted hover:text-ink"
+                }`}
+              >
+                {kind === "build" ? "만들기" : "질문"}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted">{intent === "ask" ? "파일은 바꾸지 않고 답과 계획만 받습니다" : "검증 게이트를 통과한 변경만 남습니다"}</p>
+        </div>
         {snapshot.mode === "demo" ? (
-          snapshot.nextDemoRequest ? (
+          intent === "ask" ? (
+            snapshot.nextDemoQuestion ? (
+              <button
+                type="button"
+                disabled={!canSend}
+                onClick={() => void send(snapshot.nextDemoQuestion!, "ask")}
+                className="w-full rounded-xl border border-line bg-panel px-4 py-2.5 text-left text-sm font-medium shadow-sm hover:border-ink disabled:opacity-50"
+              >
+                질문하기: {snapshot.nextDemoQuestion}
+              </button>
+            ) : (
+              <p className="text-sm text-muted">지금 단계에는 준비된 데모 질문이 없습니다.</p>
+            )
+          ) : snapshot.nextDemoRequest ? (
             <button
               type="button"
               disabled={!canSend}
-              onClick={() => void send(snapshot.nextDemoRequest!)}
+              onClick={() => void send(snapshot.nextDemoRequest!, "build")}
               className="w-full rounded-xl bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
             >
               다음 요청 보내기: {snapshot.nextDemoRequest}
@@ -147,7 +211,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
         ) : (
           <>
             <label htmlFor="request" className="sr-only">
-              요청
+              {intent === "ask" ? "질문" : "요청"}
             </label>
             <textarea
               id="request"
@@ -160,20 +224,24 @@ export function ChatPanel({ view }: { view: SessionView }) {
                 }
               }}
               rows={3}
-              placeholder="만들거나 바꾸고 싶은 내용을 적어 주세요"
+              placeholder={intent === "ask" ? "코드나 동작을 묻거나, 만들기 전에 계획을 세워 보세요" : "만들거나 바꾸고 싶은 내용을 적어 주세요"}
               className="w-full resize-none rounded-xl border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
             <div className="mt-2 flex items-center justify-between gap-3">
-              <label className="flex items-center gap-2 text-sm text-muted">
-                <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
-                필드 삭제나 타입 변경 허용
-              </label>
+              {intent === "build" ? (
+                <label className="flex items-center gap-2 text-sm text-muted">
+                  <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
+                  필드 삭제나 타입 변경 허용
+                </label>
+              ) : (
+                <span />
+              )}
               <button
                 type="submit"
                 disabled={!canSend || !text.trim()}
                 className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
               >
-                요청 보내기
+                {intent === "ask" ? "질문하기" : "요청 보내기"}
               </button>
             </div>
           </>
@@ -188,9 +256,14 @@ function ChatEntry({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "request":
       return (
-        <div className="border-l-[3px] border-ink pl-3">
+        <div className={`border-l-[3px] pl-3 ${item.intent === "ask" ? "border-line" : "border-ink"}`}>
           <p className="font-medium leading-7 whitespace-pre-wrap">{item.text}</p>
-          {item.by && <p className="text-xs text-muted">{item.by}</p>}
+          {(item.intent === "ask" || item.by) && (
+            <p className="text-xs text-muted">
+              {item.intent === "ask" && <span className="mr-1.5 rounded-full border border-line px-1.5 py-px">질문</span>}
+              {item.by}
+            </p>
+          )}
         </div>
       );
 
@@ -367,7 +440,7 @@ function ChatEntry({ item }: { item: ChatItem }) {
       const tone = item.status === "done" ? "text-pass" : item.status === "cancelled" ? "text-muted" : "text-fail";
       const text =
         item.status === "done"
-          ? `완료, ${item.turns ?? 0}턴`
+          ? `${item.intent === "ask" ? "답변 완료" : "완료"}, ${item.turns ?? 0}턴`
           : item.status === "cancelled"
             ? item.summary
             : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`;
@@ -403,6 +476,12 @@ function restartSummary(restarted: ServiceCheck[]): string {
     .join(", ");
 }
 
+/** 처리 중인 요청이 질문인지 */
+function isAsking(view: Pick<SessionView, "snapshot" | "chat">): boolean {
+  const runId = activeRun(view);
+  return runId !== undefined && view.chat.some((item) => item.kind === "request" && item.runId === runId && item.intent === "ask");
+}
+
 function hintFor({ snapshot, chat }: SessionView, access: SessionAccess): string {
   if (!access.canManage) {
     return `읽기 전용입니다. 세션을 만든 사람(${access.owner ?? "기록 없음"})이나 관리자만 요청하고 바꿀 수 있습니다.`;
@@ -413,7 +492,7 @@ function hintFor({ snapshot, chat }: SessionView, access: SessionAccess): string
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";
-  if (snapshot.workspace === "local" && snapshot.running) {
+  if (snapshot.workspace === "local" && snapshot.running && !isAsking({ snapshot, chat })) {
     return "처리하는 동안 폴더에서 고친 파일은 요청이 실패하거나 취소되면 함께 되돌아갑니다.";
   }
   if (chat.length > 0) return "요청마다 검증 게이트를 통과해야 완료로 표시됩니다.";

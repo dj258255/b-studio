@@ -1,8 +1,10 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
-import { runAgent, type AgentEvent, type ModelClient } from './loop';
+import { runAgent, type AgentEvent, type ModelClient, type RunAgentOptions } from './loop';
 import { ScriptedModelClient } from './scripted-client';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
@@ -56,6 +58,47 @@ describe('runAgent', () => {
     expect(feedback.role).toBe('user');
     expect(String(feedback.content)).toContain('[b-studio 검증 게이트]');
     expect(String(feedback.content)).toContain('cannot find symbol');
+  });
+
+  it('질문 모드는 요청 앞에 읽기 전용 안내를 붙이고, 쓰기 도구를 거부하며, 검증 게이트 없이 답으로 끝난다', async () => {
+    const client = new ScriptedModelClient([
+      {
+        toolCalls: [
+          { name: 'read_file', input: { path: 'api/src/Order.java' } },
+          { name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order {}' } },
+        ],
+      },
+      { text: '메모 필드는 Order.java에 추가하면 됩니다.' },
+    ]);
+    const sandbox = fakeSandbox(project, []);
+    const events: AgentEvent[] = [];
+    const conversation: NonNullable<RunAgentOptions['conversation']> = [];
+    let fetched = 0;
+
+    const result = await runAgent({
+      request: '메모 필드를 넣으려면?',
+      intent: 'ask',
+      project,
+      sandbox,
+      client,
+      conversation,
+      fetcher: async () => {
+        fetched += 1;
+        return contract;
+      },
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'done', summary: '메모 필드는 Order.java에 추가하면 됩니다.', changedFiles: [], verifyAttempts: 0, turns: 2 });
+    expect(fetched).toBe(0);
+    expect(sandbox.restarts).toEqual([]);
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    expect(events.flatMap((event) => (event.type === 'tool_result' ? [event.ok] : []))).toEqual([true, false]);
+    expect(await readFile(path.join(project.root, 'api/src/Order.java'), 'utf8')).toBe('class Order { String customerNam; }\n');
+    // 질문도 같은 대화에 남아 다음 만들기 요청이 계획을 이어받는다
+    expect(String(conversation[0]!.content)).toContain('[b-studio question mode]');
+    expect(String(conversation[0]!.content)).toContain('메모 필드를 넣으려면?');
+    expect(conversation).toHaveLength(4);
   });
 
   it('허용하지 않은 호환 깨짐은 재시도 한도 안에서 실패로 끝난다', async () => {

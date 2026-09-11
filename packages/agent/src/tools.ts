@@ -20,7 +20,15 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** 재시작 중 서비스 상태(바뀐 포트 포함)를 밖으로 알린다 */
   onServiceStatus?: StartOptions['onStatus'];
+  /** 질문 모드. 파일을 바꾸거나 명령을 실행하는 도구와 조회가 아닌 HTTP 호출을 거부한다 */
+  readOnly?: boolean;
 }
+
+/** 질문 모드에서 거부하는 도구 */
+const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'run_in_service', 'restart_service']);
+const READ_METHODS = new Set(['GET', 'HEAD']);
+const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
+const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.';
 
 export interface ToolOutcome {
   ok: boolean;
@@ -116,6 +124,8 @@ function tool(name: string, description: string, properties: Record<string, unkn
 export async function executeTool(name: string, input: unknown, context: ToolContext): Promise<ToolOutcome> {
   const { workspace, sandbox, signal } = context;
   try {
+    // 모델에게 보이는 도구 목록은 만들기 모드와 같으므로 여기서 막는다
+    if (context.readOnly && CHANGING_TOOLS.has(name)) return failure(READ_ONLY_TOOL);
     const args = asRecord(input);
     switch (name) {
       case 'list_files': {
@@ -166,6 +176,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       case 'call_external_api': {
         const api = string(args, 'api');
         if (!(context.project.external ?? []).some(([name]) => name === api)) throw new ToolInputError(`Unknown API: ${api}`);
+        if (context.readOnly && !READ_METHODS.has(string(args, 'method'))) return failure(READ_ONLY_METHOD);
         const body = string(args, 'body');
         const result = await sandbox.callExternal(
           api,
@@ -201,6 +212,7 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
 async function httpRequest(context: ToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
   const target = serviceName(context, args);
   const method = string(args, 'method');
+  if (context.readOnly && !READ_METHODS.has(method)) return failure(READ_ONLY_METHOD);
   const requestPath = string(args, 'path');
   if (!requestPath.startsWith('/')) return failure('path must start with "/"');
   const body = string(args, 'body');

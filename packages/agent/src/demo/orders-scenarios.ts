@@ -12,6 +12,8 @@ export interface DemoScenario {
   allowBreaking?: boolean;
   maxVerifyAttempts?: number;
   turns: ScriptedTurn[];
+  /** 이 요청을 보내기 전에 질문 모드로 물어볼 수 있는 준비된 질문 */
+  question?: { request: string; turns: ScriptedTurn[] };
 }
 
 const MIGRATIONS = 'api/src/main/resources/db/migration';
@@ -121,12 +123,46 @@ export default async function OrdersPage() {
 
 const edit = (file: string, oldText: string, newText: string) => ({ name: 'edit_file', input: { path: file, old_text: oldText, new_text: newText } });
 const write = (file: string, content: string) => ({ name: 'write_file', input: { path: file, content } });
+const read = (file: string) => ({ name: 'read_file', input: { path: file } });
+const list = (dir: string, depth: number) => ({ name: 'list_files', input: { path: dir, depth } });
+
+const ORDERS_LIST_PLAN = `아직 주문 기능이 없습니다. api는 Spring Boot에 JPA·Flyway·PostgreSQL이 들어 있고, web은 Next.js 첫 화면(\`web/app/page.tsx\`)만 있습니다.
+
+만들 때 바꿀 곳은 다음과 같습니다.
+
+| 위치 | 변경 |
+|---|---|
+| \`${MIGRATIONS}/V1__create_orders.sql\` | 주문 테이블과 예시 데이터 |
+| \`${ORDERS_PKG}/CustomerOrder.java\` | 주문 엔티티 |
+| \`${ORDERS_PKG}/OrderRepository.java\` | 조회 저장소 |
+| \`${ORDERS_PKG}/OrderController.java\` | \`GET /api/orders\` |
+| \`web/app/orders/page.tsx\` | 서버에서 API를 불러 표로 보여 주는 주문 목록 화면 |
+
+기존 API는 바꾸지 않으므로 계약 호환은 그대로입니다. 진행하려면 **이대로 만들기**를 누르세요.`;
+
+const ORDER_MEMO_PLAN = `주문은 고객 이름만 가지고 있고, \`GET /api/orders\` 응답은 \`id\`와 \`customerName\`입니다.
+
+| 위치 | 변경 |
+|---|---|
+| \`${MIGRATIONS}/V2__add_order_memo.sql\` | \`memo\` 열 추가 (이미 적용된 V1은 고치지 않음) |
+| \`CustomerOrder.java\` | \`memo\` 필드와 getter |
+| \`OrderController.java\` | 응답에 \`memo\` 추가 |
+| \`web/app/orders/page.tsx\` | 배송 메모 열 |
+
+응답에 필드를 더하기만 하므로 기존 화면과 호환됩니다. 진행하려면 **이대로 만들기**를 누르세요.`;
 
 export const ORDERS_DEMO_SCENARIOS: readonly DemoScenario[] = [
   {
     id: 'orders-list',
     title: '주문 목록 API와 화면 (일부러 넣은 컴파일 에러를 게이트가 잡음)',
     request: '주문 목록 API와 화면을 만들어줘',
+    question: {
+      request: '주문 목록 화면을 만들려면 무엇을 바꿔야 해?',
+      turns: [
+        { text: '지금 구조부터 확인하겠습니다.', toolCalls: [list('.', 2), read('api/build.gradle'), read('web/app/page.tsx')] },
+        { text: ORDERS_LIST_PLAN },
+      ],
+    },
     turns: [
       {
         text: '주문 테이블, 엔티티, 조회 API, 화면을 추가합니다.',
@@ -150,6 +186,16 @@ export const ORDERS_DEMO_SCENARIOS: readonly DemoScenario[] = [
     id: 'order-memo',
     title: '배송 메모 필드 추가 (DB·API·화면 동시 변경, 호환 유지)',
     request: '주문에 배송 메모 필드 추가해줘',
+    question: {
+      request: '배송 메모를 넣으면 어디가 바뀌어?',
+      turns: [
+        {
+          text: '지금 주문 코드와 API 계약을 확인하겠습니다.',
+          toolCalls: [read(`${ORDERS_PKG}/CustomerOrder.java`), read(`${ORDERS_PKG}/OrderController.java`), { name: 'get_contract', input: { service: 'api' } }],
+        },
+        { text: ORDER_MEMO_PLAN },
+      ],
+    },
     turns: [
       {
         text: '마이그레이션, 엔티티, 응답, 화면에 배송 메모를 추가합니다.',

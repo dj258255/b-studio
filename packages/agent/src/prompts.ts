@@ -9,6 +9,16 @@ function describeAccess(policy: ExternalPolicy): string {
 }
 
 /**
+ * 질문 모드 요청. 시스템 프롬프트와 도구 목록은 만들기 요청과 같게 두어 프롬프트 캐시와 대화 기록을 함께 쓰고,
+ * 이번 요청만 읽기 전용이라는 것을 요청 앞에 붙여 알린다. 실제로 막는 것은 도구 실행기다
+ */
+export function buildAskRequest(request: string, { toolName: t = (name: string) => name }: { toolName?: (name: string) => string } = {}): string {
+  return `[b-studio question mode] Answer or plan only. In this turn you cannot change files, run commands, restart services, or send requests other than GET and HEAD: ${t('write_file')}, ${t('edit_file')}, ${t('run_in_service')} and ${t('restart_service')} are rejected. Read files, logs, contracts, and GET responses as needed. Reply in the user's language. If the question leads to a change, end with a short concrete plan (files, migrations, API and screen changes) that the user can approve with "이대로 만들기".
+
+${request}`;
+}
+
+/**
  * 프로젝트마다 고정된 시스템 프롬프트. 시각이나 요청별 값을 넣지 않아야 프롬프트 캐시가 유지된다.
  *
  * Claude Opus 5는 시키지 않아도 스스로 검증하므로 "검증하라"는 지시는 넣지 않는다.

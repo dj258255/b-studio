@@ -14,7 +14,7 @@ import { z } from 'zod';
 import type { Effort } from './anthropic-client';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions } from './loop';
-import { buildSystemPrompt } from './prompts';
+import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { Workspace } from './workspace';
@@ -84,12 +84,17 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     effort = 'high',
     account,
     sdk = DEFAULT_SDK,
+    intent = 'build',
   } = options;
   signal?.throwIfAborted();
+  const ask = intent === 'ask';
 
   const workspace = new Workspace(project.root);
-  const gate = await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, signal, onServiceStatus, onEvent });
-  const context: ToolContext = { project, workspace, sandbox, fetcher, signal, onServiceStatus };
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
+  const gate = ask
+    ? undefined
+    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, signal, onServiceStatus, onEvent });
+  const context: ToolContext = { project, workspace, sandbox, fetcher, signal, onServiceStatus, readOnly: ask };
   const specs = buildTools(project);
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
@@ -135,7 +140,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
     },
   });
-  input.push(request);
+  input.push(ask ? buildAskRequest(request, { toolName }) : request);
 
   const usage = emptyUsage();
   const messageIds = new Set<string>();
@@ -149,8 +154,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       status,
       summary,
       changedFiles: workspace.changedFiles(),
-      report: gate.report,
-      verifyAttempts: gate.attempts,
+      report: gate?.report,
+      verifyAttempts: gate?.attempts ?? 0,
       turns: messageIds.size,
       usage,
       sessionId,
@@ -213,7 +218,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             finish('failed', failure);
             break;
           }
-          // 모델이 턴을 끝냈다 → 검증 게이트
+          // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
+          if (!gate) {
+            finish('done', lastText);
+            break;
+          }
           const outcome = await gate.check();
           if (outcome.kind === 'pass') finish('done', lastText);
           else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
