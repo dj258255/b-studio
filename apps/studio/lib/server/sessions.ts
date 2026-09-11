@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Server } from 'node:http';
 import { cp, mkdir, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -49,6 +50,7 @@ import type {
   StudioEvent,
 } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
+import { createPreviewGateway, previewHost, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import {
   archivedSnapshot,
@@ -70,6 +72,8 @@ interface Session {
   sandbox: Sandbox;
   /** 샌드박스를 만든 제공자 이름. 서버가 비정상 종료된 뒤 남은 샌드박스를 정리할 때 쓴다 */
   provider: string;
+  /** 원격 미리보기 주소에 넣는 128비트 토큰. 스튜디오에 사용자 인증이 없어 주소를 추측할 수 없게 한다 */
+  previewToken: string;
   /** 채팅·상태 이벤트. 새로 연결한 브라우저에 다시 보낸다 */
   history: StudioEvent[];
   /** 로그는 양이 많아 따로 최근 것만 둔다 */
@@ -130,6 +134,7 @@ interface Store {
   archived?: Map<string, ArchivedSession>;
   resuming?: Set<string>;
   recovery?: Promise<void>;
+  previewGateway?: Server;
   cleanupRegistered: boolean;
 }
 const globalStore = globalThis as typeof globalThis & { __bStudio?: Store };
@@ -166,6 +171,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
 
 export async function createSession(projectId: string): Promise<SessionSnapshot> {
   const mode = sessionMode();
+  const preview = previewConfig();
   const source = await findProject(projectId);
   if (!source) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
   // 이전 프로세스가 남긴 샌드박스를 먼저 정리해 새 세션과 자원을 다투지 않게 한다
@@ -226,10 +232,12 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
     demoIndex: 0,
     claudeCode: { notes: [] },
     sourceDirtyFiles,
+    previewToken: randomBytes(16).toString('hex'),
   });
 
   store.sessions.set(id, session);
   registerCleanup();
+  if (preview) ensurePreviewGateway(preview);
   // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
   void flushPersist(session);
   void boot(session);
@@ -238,7 +246,18 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
 
 type NewSession = Pick<
   Session,
-  'snapshot' | 'project' | 'sandbox' | 'provider' | 'checkpoints' | 'history' | 'listeners' | 'conversation' | 'demoIndex' | 'claudeCode' | 'sourceDirtyFiles'
+  | 'snapshot'
+  | 'project'
+  | 'sandbox'
+  | 'provider'
+  | 'previewToken'
+  | 'checkpoints'
+  | 'history'
+  | 'listeners'
+  | 'conversation'
+  | 'demoIndex'
+  | 'claudeCode'
+  | 'sourceDirtyFiles'
 >;
 
 function newSession(fields: NewSession): Session {
@@ -319,7 +338,7 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
   for (const service of session.snapshot.services) {
-    Object.assign(service, { state: 'stopped', url: undefined, detail: undefined });
+    Object.assign(service, { state: 'stopped', url: undefined, previewUrl: undefined, detail: undefined });
     emit(session, { type: 'service', service: service.name, state: 'stopped' });
   }
   setStatus(session, 'stopped');
@@ -397,6 +416,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       demoIndex: data.demoIndex,
       claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
       sourceDirtyFiles: data.sourceDirtyFiles,
+      // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
+      previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
@@ -409,6 +430,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     archived.delete(id);
     store.sessions.set(id, session);
     registerCleanup();
+    const preview = previewConfig();
+    if (preview) ensurePreviewGateway(preview);
     for (const listener of session.listeners) replay(session, listener);
     void flushPersist(session);
     void boot(session, { discarded });
@@ -940,7 +963,7 @@ function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
       break;
     }
     case 'ready':
-      Object.assign(service, { state: 'ready', url: event.endpoint.url, detail: undefined });
+      Object.assign(service, { state: 'ready', url: event.endpoint.url, previewUrl: previewUrlFor(session, service.name), detail: undefined });
       // 재시작한 컨테이너는 기존 로그 구독에 잡히지 않으므로 다시 붙는다
       if (session.snapshot.status === 'ready') followLogs(session, 20);
       break;
@@ -948,7 +971,7 @@ function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
       Object.assign(service, { state: 'failed', detail: event.reason });
       break;
   }
-  emit(session, { type: 'service', service: service.name, state: service.state, url: service.url, detail: service.detail });
+  emit(session, { type: 'service', service: service.name, state: service.state, url: service.url, previewUrl: service.previewUrl, detail: service.detail });
 }
 
 function setStatus(session: Session, status: SessionStatus, error?: string): void {
@@ -1030,6 +1053,7 @@ function toPersisted(session: Session): PersistedSession {
     claudeCode: session.claudeCode,
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
+    previewToken: session.previewToken,
   };
 }
 
@@ -1047,6 +1071,52 @@ function flushPersist(session: Session): Promise<void> {
     .then(() => writeSession(toPersisted(session)))
     .catch((error: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', error));
   return session.persist.chain;
+}
+
+interface PreviewConfig {
+  domain: string;
+  port: number;
+  bind: string;
+}
+
+/**
+ * B_STUDIO_PREVIEW_DOMAIN을 정하면 원격 미리보기 게이트웨이를 켠다.
+ * 기본 바인드 주소는 루프백이라, 다른 PC에 공개하려면 운영자가 B_STUDIO_PREVIEW_BIND를 명시해야 한다
+ */
+function previewConfig(): PreviewConfig | undefined {
+  const domain = process.env.B_STUDIO_PREVIEW_DOMAIN?.trim().toLowerCase();
+  if (!domain) return undefined;
+  const port = Number(process.env.B_STUDIO_PREVIEW_PORT ?? 4100);
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new StudioError(500, `B_STUDIO_PREVIEW_DOMAIN은 점이 들어간 호스트 이름, B_STUDIO_PREVIEW_PORT는 포트 번호여야 합니다 (지금 값: ${domain}, ${process.env.B_STUDIO_PREVIEW_PORT ?? 4100})`);
+  }
+  return { domain, port, bind: process.env.B_STUDIO_PREVIEW_BIND?.trim() || '127.0.0.1' };
+}
+
+/** HMR로 모듈이 다시 불러와져도 같은 포트를 두 번 열지 않도록 전역에 둔다 */
+function ensurePreviewGateway(config: PreviewConfig): void {
+  if (store.previewGateway) return;
+  const server = createPreviewGateway({ domain: config.domain, resolve: resolvePreview });
+  server.on('error', (error) => console.error('[b-studio] 미리보기 게이트웨이를 열지 못했습니다', error));
+  server.listen(config.port, config.bind);
+  store.previewGateway = server;
+}
+
+/** 준비된 세션의 managed 서비스로만 넘긴다. 토큰은 시간 차로 추측하지 못하게 비교한다 */
+async function resolvePreview(target: PreviewTarget): Promise<string | undefined> {
+  const session = store.sessions.get(target.sessionId);
+  if (!session || session.snapshot.status !== 'ready') return undefined;
+  const expected = Buffer.from(session.previewToken);
+  const given = Buffer.from(target.token);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return undefined;
+  if (!session.project.managed.some(([name]) => name === target.service)) return undefined;
+  return (await session.sandbox.endpoint(target.service)).url;
+}
+
+function previewUrlFor(session: Session, service: string): string | undefined {
+  const config = previewConfig();
+  if (!config) return undefined;
+  return `http://${previewHost({ service, sessionId: session.snapshot.id, token: session.previewToken }, config.domain)}:${config.port}`;
 }
 
 function requireSession(id: string): Session {
