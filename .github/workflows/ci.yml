@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 타입 검사·단위 테스트·lint·스튜디오 빌드
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # package.json의 packageManager에 적은 pnpm 버전을 쓴다
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm --filter @b-studio/studio lint
+      - run: pnpm --filter @b-studio/studio build
+
+  images:
+    name: 운영 이미지 빌드 (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: studio, context: ., file: apps/studio/Dockerfile }
+          - { name: nextjs-web, context: templates/nextjs-web, file: templates/nextjs-web/Dockerfile }
+          - { name: spring-boot-api, context: templates/spring-boot-api, file: templates/spring-boot-api/Dockerfile }
+          - { name: fastapi-api, context: templates/fastapi-api, file: templates/fastapi-api/Dockerfile }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # 이미지를 올리지 않고 빌드만 확인한다. 층 캐시는 GitHub Actions 캐시에 서비스별로 남긴다
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

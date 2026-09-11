@@ -1,0 +1,19 @@
+# 스튜디오 이미지(apps/studio/Dockerfile)의 빌드 컨텍스트. 소스와 잠금 파일만 보낸다
+**/node_modules
+**/.next
+**/build
+**/.gradle
+**/.venv
+**/__pycache__
+**/*.tsbuildinfo
+.git
+.github
+.playwright-mcp
+coverage
+docs
+examples
+templates
+# CLI는 워크스페이스 목록이 잠금 파일과 맞도록 package.json만 보낸다
+apps/cli/*
+!apps/cli/package.json
+**/*.test.ts

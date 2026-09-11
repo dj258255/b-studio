@@ -33,6 +33,9 @@
 - [29. 내 폴더에서 IDE로 만든 새 화면이 미리보기에 뜨지 않음](#29-내-폴더에서-ide로-만든-새-화면이-미리보기에-뜨지-않음)
 - [30. 답변의 표에서 긴 경로가 다른 열을 대화 밖으로 밀어냄](#30-답변의-표에서-긴-경로가-다른-열을-대화-밖으로-밀어냄)
 - [31. 운영 이미지의 web에서 /api 요청이 404가 됨](#31-운영-이미지의-web에서-api-요청이-404가-됨)
+- [32. 스튜디오 standalone 결과물에 예제 프로젝트와 소스·테스트 파일이 들어감](#32-스튜디오-standalone-결과물에-예제-프로젝트와-소스테스트-파일이-들어감)
+- [33. 컨테이너로 띄운 스튜디오가 세션을 만들지 못함 ("not in a git directory")](#33-컨테이너로-띄운-스튜디오가-세션을-만들지-못함-not-in-a-git-directory)
+- [34. 컨테이너로 띄운 스튜디오에서 체크포인트 배포가 바로 실패함](#34-컨테이너로-띄운-스튜디오에서-체크포인트-배포가-바로-실패함)
 
 ---
 
@@ -1209,3 +1212,89 @@ Chrome 성능 트레이스로 1,500줄 파일을 열 때의 작업을 나눴습�
   - 개발용 compose에 같은 값을 두 번 적지 않아도 됩니다.
   - 선언하지 않은 환경 변수(DB 비밀번호 등)는 이미지 빌드 기록에 들어가지 않습니다.
 - 실제 배포 검증에서 운영 주소의 web `/api/orders`가 200으로 api의 주문 목록을 돌려주는 것을 확인했습니다.
+
+## 32. 스튜디오 standalone 결과물에 예제 프로젝트와 소스·테스트 파일이 들어감
+
+**구분:** 스튜디오 컨테이너 이미지(ADR-044)를 만들면서 빌드 경고와 결과물을 확인하다가 발견
+
+### 현상
+- `output: "standalone"`을 켜고 `next build`를 하자 Turbopack 경고 "Dynamic filesystem access causes tracing of the whole project"가 10건 나왔습니다.
+  - 위치: `projects.ts` 5곳, `sessions.ts` 1곳, `packages/agent/src/workspace.ts` 1곳, `packages/sandbox/src/docker/deploy.ts` 3곳
+- 빌드는 성공했지만 `.next/standalone`(65MB)에 서버 실행에 필요 없는 파일이 들어 있었습니다.
+  - `examples/orders` 폴더
+  - `apps/studio`의 `app`, `components`, `lib` 원본, `Dockerfile`, `tsconfig.json`
+- 결과물을 둔 채 `pnpm test`를 돌리자 결과물 안의 테스트 복사본까지 실행돼 39개 파일(325개)로 셌습니다. 원래는 35개 파일(287개)입니다.
+
+### 원인 확인
+- 경고가 가리킨 곳은 모두 실행할 때 정해지는 경로로 파일에 접근합니다.
+  - 프로젝트 폴더(`B_STUDIO_PROJECTS_DIR`, 기본값 `process.cwd()/../../examples`)
+  - 세션·배포 상태 폴더, 샌드박스 작업 폴더의 `realpath`, 운영 Dockerfile 읽기
+- 정적 분석으로는 경로를 알 수 없어, Turbopack이 추적 기준 폴더 전체를 서버 파일로 넣었습니다. 경고 안내에 "경로를 하위 폴더로 고정하거나, 호출에 `/*turbopackIgnore: true*/`를 붙이라"고 나옵니다.
+
+### 해결
+1. 경고가 가리킨 호출의 경로 인자에 `/*turbopackIgnore: true*/`를 붙였습니다.
+   - 경고가 0건이 됐고 `examples/`가 결과물에서 빠졌습니다.
+   - 하지만 `components`와 `lib` 원본(테스트 파일 포함)은 남았습니다. 페이지의 추적 파일(`page.js.nft.json`)에 `node_modules` 밖의 파일이 49개 있었습니다.
+2. 서버 코드는 번들 조각에 들어가 원본이 필요 없으므로, `outputFileTracingExcludes`로 모든 경로(`/*`)에서 `./components/**/*`, `./lib/**/*`를 뺐습니다.
+   - `apps/studio`에는 `server.js`, `package.json`, `.next`, `node_modules`만 남았습니다. `node_modules` 밖의 `.ts`·`.tsx`는 0개입니다.
+   - 크기는 63MB로 크게 줄지 않았습니다. 결과물 대부분이 `node_modules`(57MB)이기 때문입니다.
+3. 결과물의 `server.js`를 직접 띄워 `/api/health`, `/api/projects`, `/`가 모두 정상으로 응답하는 것을 확인했습니다.
+
+## 33. 컨테이너로 띄운 스튜디오가 세션을 만들지 못함 ("not in a git directory")
+
+**구분:** 스튜디오 이미지를 실제 Docker(colima)에서 띄워 세션을 만드는 검증에서 발견 → 재현 후 수정
+
+### 현상
+- 이미지는 healthy가 됐고 `/api/projects`도 orders를 돌려줬습니다.
+- 그런데 세션을 만드는 요청은 400으로 실패했습니다. 오류는 `git config 실패: fatal: not in a git directory`였습니다.
+- 세션 폴더에는 복사된 파일과 `.git`이 이미 만들어져 있었습니다. 저장소가 없어서 난 실패가 아니었습니다.
+
+### 원인 확인
+같은 이미지를 새 컨테이너로 띄우고, 세션 폴더와 같은 마운트 경로에서 명령을 하나씩 실행했습니다.
+
+| 위치 | 결과 |
+|---|---|
+| 마운트한 폴더에서 `git init` 후 `git config` | exit 128, `fatal: not in a git directory` |
+| 같은 폴더에서 `git status` | `fatal: detected dubious ownership in repository` |
+| 컨테이너 안의 `/tmp`에서 같은 순서 | exit 0 |
+| 마운트한 폴더에서 `git -c safe.directory=<그 폴더> config` | exit 0 |
+
+- 마운트한 폴더의 소유자는 uid 501(macOS 사용자)로 보였고, 스튜디오는 uid 0(root)으로 돌았습니다.
+- Git은 현재 사용자가 소유하지 않은 저장소에서 동작을 거부합니다(`safe.directory`). `git config`는 이 거부를 저장소가 없다는 메시지로 보여 줘서 원인이 가려졌습니다.
+
+### 해결
+- `safe.directory`는 시스템·전역·명령 줄 설정에서만 읽습니다. 저장소 안의 설정으로는 우회할 수 없습니다.
+- 세션 폴더는 실행 중에 새로 생기므로 경로를 미리 하나씩 등록할 수 없습니다.
+- 폴더 아래를 한꺼번에 허용하는 `경로/*` 형식은 Git 2.46.0 릴리스 노트에 추가된 기능입니다. 이미지의 Git 2.39.5에서 재 보니 무시돼 exit 128이 났고, `*`는 exit 0이었습니다.
+- 그래서 이미지의 시스템 설정에 `safe.directory = *`를 넣었습니다.
+  - 이 컨테이너가 여는 저장소는 운영자가 마운트한 세션·프로젝트 폴더뿐입니다.
+  - 에이전트 도구는 `.git` 경로를 쓰지 못합니다.
+- 다시 빌드한 이미지에서는 세션이 17.5초에 준비됐습니다. 데모 요청 1은 게이트를 통과해 체크포인트를 남겼습니다.
+
+## 34. 컨테이너로 띄운 스튜디오에서 체크포인트 배포가 바로 실패함
+
+**구분:** 33을 고친 뒤 같은 검증의 배포 단계에서 발견 → 재현 후 수정
+
+### 현상
+- 세션을 중지하고 체크포인트 배포를 요청하자 0.5초 만에 실패 이벤트가 왔습니다.
+- 오류는 `체크포인트를 꺼내지 못했습니다: tar: api/.dockerignore: Cannot change ownership to uid 0, gid 0: Permission denied`였습니다.
+- macOS에서 스튜디오를 직접 띄운 배포 검증(ADR-043)에서는 같은 코드가 통과했습니다.
+
+### 원인 확인
+- 체크포인트는 `git archive`의 tar 스트림을 `tar -x`로 배포 폴더에 풉니다.
+- 같은 이미지에서 커밋 하나짜리 저장소를 만들어 풀어 봤습니다.
+
+| 조건 | 결과 |
+|---|---|
+| root, 마운트한 폴더, 옵션 없음 | exit 2, `Cannot change ownership to uid 0, gid 0: Permission denied` |
+| root, 마운트한 폴더, `--no-same-owner` | exit 0 |
+| root, 컨테이너 안의 `/tmp`, 옵션 없음 | exit 0 |
+
+- `git archive`는 항목의 소유자를 uid 0으로 기록합니다.
+- GNU tar(1.34)는 root로 풀면 기록된 소유자로 chown합니다. 마운트한 폴더는 이 chown을 거부했습니다.
+- macOS에서는 스튜디오가 일반 사용자로 돌기 때문에 tar가 소유자를 바꾸지 않아 드러나지 않았습니다.
+
+### 해결
+- `exportTree`가 `tar -x --no-same-owner`로 풀게 했습니다. 꺼낸 파일은 빌드 입력으로만 쓰므로 원래 소유자가 필요 없습니다.
+- macOS의 bsdtar도 같은 옵션을 받아, 체크포인트 단위 테스트 23개가 그대로 통과했습니다.
+- 다시 빌드한 이미지에서 같은 배포가 파일을 꺼내고 운영 이미지 빌드와 전환까지 끝났습니다(78.2초, 진행 줄 194줄).

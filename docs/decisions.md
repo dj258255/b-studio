@@ -45,6 +45,7 @@
 - [ADR-041 내 폴더에서 바로 작업: 체크포인트 저장소는 폴더 밖에 두고, 사람의 수정은 먼저 남긴다](#adr-041-내-폴더에서-바로-작업-체크포인트-저장소는-폴더-밖에-두고-사람의-수정은-먼저-남긴다)
 - [ADR-042 질문 모드: 같은 대화와 도구 목록을 쓰고, 바꾸는 도구는 실행기에서 막는다](#adr-042-질문-모드-같은-대화와-도구-목록을-쓰고-바꾸는-도구는-실행기에서-막는다)
 - [ADR-043 운영 배포: 릴리스마다 compose 프로젝트를 띄우고, 고정 주소의 프록시로 무중단 전환한다](#adr-043-운영-배포-릴리스마다-compose-프로젝트를-띄우고-고정-주소의-프록시로-무중단-전환한다)
+- [ADR-044 CI와 스튜디오 이미지: 호스트 Docker 소켓을 쓰고, 세션·배포 폴더는 같은 경로로 마운트한다](#adr-044-ci와-스튜디오-이미지-호스트-docker-소켓을-쓰고-세션배포-폴더는-같은-경로로-마운트한다)
 
 ---
 
@@ -1602,6 +1603,53 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - 운영 설정(DB 비밀번호 등)은 개발용 compose의 값을 그대로 씁니다.
 - 배포 기록은 스튜디오 서버의 로컬 파일에 둡니다.
 
+## ADR-044 CI와 스튜디오 이미지: 호스트 Docker 소켓을 쓰고, 세션·배포 폴더는 같은 경로로 마운트한다
+
+### 맥락
+- 스튜디오를 서버에 띄우려면 저장소를 받아 `pnpm install`과 개발 서버를 돌려야 했습니다. 운영용 빌드와 실행 방법이 정해져 있지 않았습니다.
+- 단위 테스트, 타입 검사, 스튜디오 빌드는 로컬에서만 돌렸습니다. PR에서 이를 자동으로 확인하는 장치가 없었습니다.
+- 템플릿의 운영 Dockerfile 3종은 배포 실검증 때만 빌드했습니다. 템플릿을 고치다 이미지가 깨져도 알 수 없었습니다.
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| 이미지 안에 Docker 데몬(Docker-in-Docker) | privileged 컨테이너가 필요함. 샌드박스, 운영 배포, 이미지 캐시가 호스트가 아니라 스튜디오 컨테이너 안의 데몬에 묶여, 스튜디오를 바꾸거나 다시 만들 때 운영 앱도 함께 다뤄야 함 |
+| 호스트 소켓 마운트 + 기본(bridge) 네트워크 | 샌드박스 edge와 운영 프록시가 호스트의 `127.0.0.1`에만 포트를 공개함. 컨테이너의 `127.0.0.1`은 호스트와 달라 준비 확인과 API 탐색기가 닿지 않음 |
+| **호스트 소켓 마운트 + host 네트워크 + 같은 경로 마운트** | 소켓 접근은 호스트 root 권한과 같음. 세션·배포 폴더의 경로를 호스트와 맞춰야 함 |
+
+### 결정
+- **스튜디오 이미지는 Next standalone 서버만 담습니다.**
+  - 빌드 단계에서는 스튜디오와 워크스페이스 패키지 의존성만 설치합니다(`--filter "@b-studio/studio..."`).
+  - 실행 단계에는 `server.js`, 정적 파일, git, tar, openssh-client를 넣습니다. docker CLI와 compose·buildx 플러그인은 `docker:28-cli` 이미지에서 복사합니다.
+  - 추적 기준을 저장소 루트로 두고, 실행할 때 정해지는 경로의 파일 접근은 추적에서 뺐습니다([트러블슈팅 32](troubleshooting.md#32-스튜디오-standalone-결과물에-예제-프로젝트와-소스테스트-파일이-들어감)).
+- **샌드박스와 운영 배포는 호스트의 Docker 데몬이 만듭니다.**
+  - Docker 소켓을 마운트하고 `--network host`로 띄웁니다.
+  - compose의 소스 마운트 경로는 호스트 데몬이 풀기 때문에, 세션·배포 폴더는 호스트와 같은 경로로 마운트합니다. edge 스크립트는 override에 내용으로 들어가고, 운영 프록시 설정은 `docker exec`의 표준 입력으로 넣으므로 컨테이너 안에만 있는 파일을 마운트하지 않습니다.
+  - host 네트워크라서 기본 바인드 주소는 `127.0.0.1`입니다. 다른 PC에 공개할 때는 인증을 켜고 바꿉니다.
+- **root로 실행합니다.** 소켓의 그룹 ID는 호스트마다 다릅니다. 이 때문에 생기는 두 가지 문제는 이미지와 코드에서 막았습니다.
+  - Git이 호스트 사용자 소유의 저장소를 거부하는 문제: 이미지에 `safe.directory = *`를 넣었습니다([트러블슈팅 33](troubleshooting.md#33-컨테이너로-띄운-스튜디오가-세션을-만들지-못함-not-in-a-git-directory)).
+  - tar가 체크포인트를 꺼낼 때 소유자를 바꾸려다 실패하는 문제: `--no-same-owner`로 꺼냅니다([트러블슈팅 34](troubleshooting.md#34-컨테이너로-띄운-스튜디오에서-체크포인트-배포가-바로-실패함)).
+- **`/api/health`는 로그인 없이 엽니다.** 서버 프로세스가 요청을 받는지만 알리고 Docker 연결은 확인하지 않습니다. 이미지에 curl이 없어 `HEALTHCHECK`는 node의 `fetch`로 부릅니다.
+- **CI는 PR과 main 푸시마다 두 작업을 돌립니다.**
+  - 확인 작업: 잠금 파일 그대로 설치, 타입 검사, 단위 테스트, 스튜디오 lint, 스튜디오 운영 빌드
+  - 이미지 작업: 스튜디오와 템플릿 3종의 Dockerfile을 빌드만 합니다(레지스트리에 올리지 않음). 층 캐시는 이미지마다 GitHub Actions 캐시에 따로 둡니다.
+
+### 검증 결과
+- **standalone 결과물:** 빌드 경고 10건이 0건이 됐고, `node_modules` 밖의 소스·테스트 파일과 `examples/`가 빠졌습니다. 결과물의 `server.js`로 `/api/health`, `/api/projects`, `/`가 정상 응답했습니다.
+- **이미지 (colima · 데모 모드):** 7개 확인이 모두 통과했습니다. 측정값은 README에 있습니다.
+  - token 모드에서 `/api/health`만 로그인 없이 200, 나머지 API는 401
+  - 컨테이너 안의 docker CLI로 호스트 데몬에 샌드박스를 만들어 17.5초에 준비, 데모 요청 1이 게이트를 통과해 체크포인트를 남김
+  - 세션을 중지한 뒤 체크포인트를 운영 배포(빌드 캐시를 지운 뒤 78.2초, 다음 배포 12.5초). 운영 주소의 화면과 rewrites가 200
+- **처음 실행에서 드러난 문제:** Git 소유권 거부와 tar 소유자 변경 실패를 재현으로 확인하고 고쳤습니다(트러블슈팅 33, 34).
+- **CI:** 로컬에서 actionlint를 통과했습니다. PR에서 실제로 돈 결과가 병합 조건입니다.
+
+### 감수한 트레이드오프
+- Docker 소켓을 넘긴 컨테이너는 호스트 root 권한과 같으므로, 스튜디오 컨테이너 자체의 격리는 기대하지 않습니다. 샌드박스 격리(internal 네트워크, gVisor)는 그대로입니다.
+- 컨테이너 안의 Git은 모든 폴더를 안전하다고 봅니다.
+- 이미지를 레지스트리에 게시하지 않으므로 운영자가 직접 빌드합니다.
+- 로컬 로그인 계정 모드(개인 PC 전용)와 내 폴더 세션은 이미지에서 쓰는 경로로 보지 않습니다.
+
 ---
 
 ## 출처
@@ -1621,5 +1669,6 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
 - remarkjs, [react-markdown: Security](https://github.com/remarkjs/react-markdown#security)
 - Lovable, [Brainstorm in Plan mode](https://docs.lovable.dev/features/plan-mode) · [Chat mode & Follow-up questions](https://lovable.dev/blog/chat-mode-and-questions) · Cursor, [Ask mode](https://cursor.com/help/ai-features/ask-mode)
+- Next.js, [output (standalone, outputFileTracingRoot, outputFileTracingExcludes)](https://nextjs.org/docs/app/api-reference/config/next-config-js/output) · Git, [git-config: safe.directory](https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory) · [Git 2.46.0 릴리스 노트](https://github.com/git/git/blob/master/Documentation/RelNotes/2.46.0.adoc)
 - Next.js, [Authentication](https://nextjs.org/docs/app/guides/authentication) (Proxy의 낙관적 확인과 데이터 접근 계층) · [proxy.js](https://nextjs.org/docs/app/api-reference/file-conventions/proxy)
 - MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)

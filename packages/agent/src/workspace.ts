@@ -146,7 +146,7 @@ export class Workspace {
     // 존재하는 가장 가까운 상위 경로의 실제 위치로 심볼릭 링크 탈출을 막는다
     const existing = await nearestExisting(absolute);
     if (mustExist && existing !== absolute) throw new WorkspaceError(`${file}: 파일이 없습니다`);
-    const [realRoot, realExisting] = await Promise.all([realpath(this.root), realpath(existing)]);
+    const [realRoot, realExisting] = await Promise.all([realpath(/*turbopackIgnore: true*/ this.root), realpath(/*turbopackIgnore: true*/ existing)]);
     if (!isInside(realRoot, realExisting)) throw new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
 
     return absolute;

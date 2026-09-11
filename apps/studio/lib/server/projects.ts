@@ -5,20 +5,23 @@ import type { ProjectSummary } from '@/lib/studio-events';
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]*$/;
 
-/** 스튜디오가 여는 프로젝트들이 있는 폴더. 브라우저에서 임의의 경로를 받지 않고 이 폴더의 하위 폴더만 연다 */
+/**
+ * 스튜디오가 여는 프로젝트들이 있는 폴더. 브라우저에서 임의의 경로를 받지 않고 이 폴더의 하위 폴더만 연다.
+ * 실행할 때 정해지는 경로라 turbopackIgnore로 빌드 추적에서 뺀다. 빼지 않으면 standalone 결과물에 저장소 전체가 들어간다
+ */
 export function projectsRoot(): string {
-  return path.resolve(process.env.B_STUDIO_PROJECTS_DIR ?? path.join(process.cwd(), '../../examples'));
+  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_PROJECTS_DIR ?? path.join(/*turbopackIgnore: true*/ process.cwd(), '../../examples'));
 }
 
 export async function listProjects(): Promise<ProjectSummary[]> {
   const root = projectsRoot();
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(/*turbopackIgnore: true*/ root, { withFileTypes: true }).catch(() => []);
   const projects: ProjectSummary[] = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory() || !PROJECT_ID.test(entry.name)) continue;
     try {
-      const project = await loadProject(path.join(root, entry.name));
+      const project = await loadProject(path.join(/*turbopackIgnore: true*/ root, entry.name));
       projects.push({
         id: entry.name,
         name: project.spec.name,
@@ -35,11 +38,11 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
 /** 프로젝트 폴더의 절대 경로. 로컬 폴더 세션을 고르는 화면에 보여 준다 */
 export function projectPath(id: string): string {
-  return path.join(projectsRoot(), id);
+  return path.join(/*turbopackIgnore: true*/ projectsRoot(), id);
 }
 
 export async function findProject(id: string): Promise<LoadedProject | undefined> {
   if (!PROJECT_ID.test(id)) return undefined;
   const project = (await listProjects()).find((candidate) => candidate.id === id && !candidate.error);
-  return project ? loadProject(path.join(projectsRoot(), id)) : undefined;
+  return project ? loadProject(path.join(/*turbopackIgnore: true*/ projectsRoot(), id)) : undefined;
 }
