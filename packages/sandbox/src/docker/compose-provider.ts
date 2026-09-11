@@ -36,6 +36,7 @@ import {
   parseEgressDenial,
   parseHostPort,
   parseLogLine,
+  parseRuntimes,
   parseSyncOutput,
 } from './format';
 import { externalCallScript } from './external-call';
@@ -97,6 +98,8 @@ export interface LocalDockerProviderOptions {
   dockerBin?: string;
   /** 모든 서비스에 적용할 준비 정책. studio.yaml의 ready.timeoutSeconds가 우선한다 */
   readiness?: Partial<ReadinessPolicy>;
+  /** 샌드박스 컨테이너에 쓸 Docker 런타임 (예: gVisor의 runsc). 비우면 데몬 기본값(runc) */
+  runtime?: string;
 }
 
 /**
@@ -113,11 +116,13 @@ export class LocalDockerProvider implements SandboxProvider {
   }
 
   async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {
+    // 런타임이 없으면 compose up 도중이 아니라 샌드박스를 만들기 전에 알린다
+    if (this.#options.runtime) await assertRuntime(this.#options.dockerBin ?? 'docker', this.#options.runtime);
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
     const workDir = await mkdtemp(path.join(tmpdir(), 'b-studio-'));
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
-    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript })));
+    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime })));
     return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript);
   }
 }
@@ -522,6 +527,24 @@ class LocalDockerSandbox implements Sandbox {
   /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다 */
   #environment(): NodeJS.ProcessEnv {
     return { ...process.env, ...this.#secrets };
+  }
+}
+
+/** 스튜디오 서버·CLI 환경 변수 B_STUDIO_CONTAINER_RUNTIME. 격리 수준은 프로젝트가 아니라 운영자가 정한다 */
+export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.B_STUDIO_CONTAINER_RUNTIME?.trim() || undefined;
+}
+
+async function assertRuntime(dockerBin: string, runtime: string): Promise<void> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(dockerBin, ['info', '--format', '{{json .Runtimes}}']));
+  } catch (error) {
+    throw new SandboxError('Docker 데몬 정보를 읽지 못해 컨테이너 런타임을 확인하지 못했습니다', error instanceof Error ? error.message : String(error));
+  }
+  const available = parseRuntimes(stdout);
+  if (!available.includes(runtime)) {
+    throw new SandboxError(`컨테이너 런타임 '${runtime}'이 Docker 데몬에 등록되지 않았습니다 (등록된 런타임: ${available.join(', ') || '없음'})`);
   }
 }
 

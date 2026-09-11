@@ -9,6 +9,7 @@ import {
   parseEgressDenial,
   parseHostPort,
   parseLogLine,
+  parseRuntimes,
   parseSyncOutput,
 } from './format';
 
@@ -68,6 +69,21 @@ describe('buildOverride 네트워크 격리', () => {
     });
     expect(services.db).toMatchObject({ deploy: { resources: { limits: { memory: '256m' } } } });
     expect(services.db).not.toHaveProperty('labels');
+  });
+});
+
+describe('buildOverride 컨테이너 런타임', () => {
+  it('런타임을 지정하면 edge를 포함한 모든 컨테이너에 걸고, 지정하지 않으면 데몬 기본값을 쓴다', () => {
+    const isolated = buildOverride(ORDERS, 's1', { runtime: 'runsc' }).services;
+    for (const name of ['web', 'api', 'db', EDGE_SERVICE]) expect(isolated[name]).toMatchObject({ runtime: 'runsc' });
+
+    const plain = buildOverride(ORDERS, 's1').services;
+    for (const name of ['web', 'api', 'db', EDGE_SERVICE]) expect(plain[name]).not.toHaveProperty('runtime');
+  });
+
+  it('docker info의 런타임 목록을 읽는다', () => {
+    expect(parseRuntimes('{"io.containerd.runc.v2":{},"runc":{},"runsc":{"path":"/usr/local/bin/runsc"}}\n')).toEqual(['io.containerd.runc.v2', 'runc', 'runsc']);
+    expect(parseRuntimes('not json')).toEqual([]);
   });
 });
 
