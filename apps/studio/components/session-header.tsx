@@ -17,11 +17,22 @@ const GVISOR_RUNTIMES = new Set(["runsc", "gvisor"]);
 
 export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const [stopping, setStopping] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string>();
 
   async function stop() {
     setStopping(true);
     await fetch(`/api/sessions/${snapshot.id}`, { method: "DELETE" });
     setStopping(false);
+  }
+
+  /** 새 상태는 이벤트 스트림으로 온다 */
+  async function resume() {
+    setResuming(true);
+    setResumeError(undefined);
+    const response = await fetch(`/api/sessions/${snapshot.id}/resume`, { method: "POST" });
+    if (!response.ok) setResumeError((await response.json()).error ?? "이어서 작업하지 못했습니다");
+    setResuming(false);
   }
 
   const statusTone = snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
@@ -46,7 +57,8 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
               <Dot tone={toneOfService(service.state)} />
               <span className="font-medium">{service.name}</span>
               <span className="text-muted">{SERVICE_STATE_LABEL[service.state]}</span>
-              {usage?.memoryBytes !== undefined && (
+              {/* 중지된 서비스에 마지막으로 잰 사용량을 남기면 아직 자원을 쓰는 것처럼 보인다 */}
+              {service.state !== "stopped" && usage?.memoryBytes !== undefined && (
                 <span className="font-mono text-xs text-muted" title="메모리 사용량 / 한도">
                   {formatBytes(usage.memoryBytes)}
                   {usage.memoryLimitBytes ? ` / ${formatBytes(usage.memoryLimitBytes)}` : ""}
@@ -80,9 +92,19 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           {MODE_LABEL[snapshot.mode]}
         </span>
         {snapshot.status === "stopped" ? (
-          <Link href="/" className="text-sm font-medium hover:underline">
-            프로젝트 목록
-          </Link>
+          <>
+            <Link href="/" className="text-sm font-medium hover:underline">
+              프로젝트 목록
+            </Link>
+            <button
+              type="button"
+              onClick={resume}
+              disabled={resuming}
+              className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+            >
+              {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
+            </button>
+          </>
         ) : (
           <button
             type="button"
@@ -95,7 +117,10 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         )}
       </div>
 
-      {snapshot.error && <p className="basis-full text-sm text-fail">{snapshot.error}</p>}
+      {snapshot.error && (
+        <p className={`basis-full text-sm ${snapshot.status === "stopped" ? "text-muted" : "text-fail"}`}>{snapshot.error}</p>
+      )}
+      {resumeError && <p className="basis-full text-sm text-fail">{resumeError}</p>}
     </header>
   );
 }
