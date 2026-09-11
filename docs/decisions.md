@@ -38,6 +38,7 @@
 - [ADR-034 실시간 코드 보기: 에이전트 이벤트로 다시 불러오고, 읽기는 작업 공간 규칙을 따른다](#adr-034-실시간-코드-보기-에이전트-이벤트로-다시-불러오고-읽기는-작업-공간-규칙을-따른다)
 - [ADR-035 요청 취소와 토큰 사용량: 샌드박스는 그대로 두고 요청만 되돌리며, 합계는 서버가 센다](#adr-035-요청-취소와-토큰-사용량-샌드박스는-그대로-두고-요청만-되돌리며-합계는-서버가-센다)
 - [ADR-036 코드 문법 강조: Shiki를 처음 볼 때 불러오고, 색은 CSS 변수로 테마를 따른다](#adr-036-코드-문법-강조-shiki를-처음-볼-때-불러오고-색은-css-변수로-테마를-따른다)
+- [ADR-037 답변 마크다운: 요소로 그리되 HTML과 외부 요청은 막는다](#adr-037-답변-마크다운-요소로-그리되-html과-외부-요청은-막는다)
 
 ---
 
@@ -1252,6 +1253,39 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 
 ---
 
+## ADR-037 답변 마크다운: 요소로 그리되 HTML과 외부 요청은 막는다
+
+### 맥락
+- 에이전트 답변은 마크다운(굵게, 목록, 인용, 표, 코드 블록)으로 오는데 화면은 평문으로 보여 줬습니다. 로컬 로그인 계정 모드 실측 화면에서도 인용 기호 `>`가 그대로 보였습니다.
+- 답변은 모델이 만든 글이라 믿을 수 없는 입력입니다. 모델이 읽은 프로젝트 파일이나 사내 API 응답의 글이 답변에 섞일 수 있습니다.
+
+### 결정
+- **react-markdown과 remark-gfm으로 그립니다.** HTML 문자열을 만들어 넣지 않고 React 요소로 그리므로 글자는 React가 이스케이프합니다. 표와 취소선은 GFM으로 지원합니다.
+- **답변 속 HTML은 글자로 남깁니다.** 마크다운의 HTML 노드를 글자 노드로 바꿔 요소로 만들지도, 버리지도 않습니다. 버리면 백틱 없이 쓴 `List<OrderResponse>` 같은 제네릭 타입이 답변에서 사라집니다.
+- **링크는 새 탭으로 열고, `javascript:` 같은 주소는 react-markdown의 기본 주소 변환으로 지웁니다.**
+- **외부 이미지는 불러오지 않고 대체 글만 보여 줍니다.** 답변에 이미지 주소를 넣는 것만으로 사용자 브라우저가 밖으로 요청을 보내지 않게 하기 위해서입니다.
+- **코드 블록은 코드 탭과 같은 강조를 씁니다.** 언어 이름(`ts`, `bash`, `shell` 등)을 문법으로 바꾸고, 강조가 끝나기 전에는 원문을 보여 줍니다.
+- 사용자가 보낸 요청은 지금처럼 입력한 그대로 보여 줍니다.
+- 컴포넌트 테스트가 Next.js 경로 별칭(`@/`)을 풀도록 루트에 Vitest 설정을 두었습니다. `@b-studio/*` 패키지와 겹치지 않게 `@/`로 시작할 때만 바꿉니다.
+
+### 검증 결과
+- **단위 테스트**: 굵게·목록·인용·인라인 코드·표가 요소로 그려짐, `<script>`와 `<img>`가 요소가 되지 않고 `List<OrderResponse>`가 글자로 남음, `javascript:` 링크의 주소가 지워짐, 외부 이미지는 대체 글만 남음, 코드 블록이 강조 전에도 원문을 줄 단위로 보여 줌, 코드 블록 언어 이름과 별칭.
+- **로컬 로그인 계정 모드 · 실제 모델 · Playwright(Chromium)**: 파일은 바꾸지 말고 표·목록·코드 블록으로 프로젝트를 설명해 달라고 요청했습니다(4턴, 바꾼 파일 없음).
+
+| 확인 | 결과 |
+|---|---|
+| 모델이 보낸 답 | 표(머리글과 3행), 굵게 3개, 목록 3개, `bash`·`java` 코드 블록 2개. 코드 블록 안에 `Map<String, String>` |
+| 화면 | 표 1개(머리글 이름·기술·역할, 본문 3행), 목록 항목 3개, 굵게 3개, 인라인 코드 12개, 코드 블록 2개(강조된 줄 9개). `**`, 표 구분선, 코드 블록 울타리가 글자로 남지 않음 |
+| 안전 | 답변 영역에 `script`·`img`·`iframe` 요소 0개 |
+| 콘솔 | 오류·경고 0개 |
+
+### 감수한 트레이드오프
+- 답변 속 이미지는 보이지 않습니다. 필요하면 링크로 열어야 합니다.
+- 수식, 각주처럼 GFM 밖의 문법은 지원하지 않습니다.
+- 답변 항목마다 마크다운을 파싱합니다. 아주 긴 대화에서의 렌더링 비용은 재지 않았습니다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -1267,4 +1301,5 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - Apple Newsroom, [Apple introduces a delightful and elegant new software design](https://www.apple.com/newsroom/2025/06/apple-introduces-a-delightful-and-elegant-new-software-design/) · Apple Developer, [Meet Liquid Glass (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/219/)
 - Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
 - Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
+- remarkjs, [react-markdown: Security](https://github.com/remarkjs/react-markdown#security)
 - MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
