@@ -18,6 +18,23 @@ export function hasTokens(usage: AgentUsage | undefined): usage is AgentUsage {
   return Boolean(usage && usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens > 0);
 }
 
+/** 화면에 보이는 네 값의 합. 세션 토큰 한도는 이 값으로 잰다 */
+export function totalTokens(usage: AgentUsage | undefined): number {
+  return usage ? usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens : 0;
+}
+
+/** B_STUDIO_SESSION_TOKEN_LIMIT 값. 비우면 한도가 없고, 오타가 조용히 "한도 없음"이 되지 않도록 양의 정수가 아니면 던진다 */
+export function parseTokenLimit(value: string | undefined): number | undefined {
+  const text = value?.trim().replaceAll('_', '');
+  if (!text) return undefined;
+  if (!/^\d+$/.test(text) || Number(text) <= 0) throw new Error(`B_STUDIO_SESSION_TOKEN_LIMIT는 양의 정수여야 합니다 (지금 값: ${value})`);
+  return Number(text);
+}
+
+export function formatTokenCount(count: number): string {
+  return TOKEN_FORMAT.format(count);
+}
+
 /** 캐시는 쓴 경우에만 붙인다 */
 export function describeTokens(usage: AgentUsage): string {
   const parts = [`입력 ${TOKEN_FORMAT.format(usage.inputTokens)}`, `출력 ${TOKEN_FORMAT.format(usage.outputTokens)}`];

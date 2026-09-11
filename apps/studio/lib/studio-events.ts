@@ -43,10 +43,12 @@ export interface SessionSnapshot {
   error?: string;
   mode: SessionMode;
   running: boolean;
-  /** 처리 중인 요청을 취소해 변경을 되돌리는 중이다 */
-  cancelling?: boolean;
+  /** 처리 중인 요청을 멈추고 변경을 되돌리는 중이다. user: 사용자가 취소함, budget: 세션 토큰 한도에 도달함 */
+  cancelling?: 'user' | 'budget';
   /** 이 세션의 요청들이 쓴 모델 토큰 합계. 취소하거나 실패한 요청도 그때까지 쓴 양을 더한다 */
   tokens?: AgentUsage;
+  /** 운영자가 정한 세션 토큰 한도(B_STUDIO_SESSION_TOKEN_LIMIT). 없으면 한도가 없다 */
+  tokenLimit?: number;
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
@@ -137,11 +139,12 @@ export type StudioEvent =
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
   | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }
-  | { type: 'run_cancelling'; runId: string }
+  /** reason이 없으면 사용자가 취소했다 */
+  | { type: 'run_cancelling'; runId: string; reason?: 'budget' }
   | {
       type: 'run_finished';
       runId: string;
-      /** cancelled: 사용자가 취소해 이번 요청의 변경을 되돌렸다 */
+      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다 */
       status: 'done' | 'failed' | 'error' | 'cancelled';
       summary: string;
       turns?: number;

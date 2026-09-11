@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addTokens, currentPhase, describeTokens, endedReason, formatBytes, hasTokens, memoryRatio } from './usage';
+import { addTokens, currentPhase, describeTokens, endedReason, formatBytes, formatTokenCount, hasTokens, memoryRatio, parseTokenLimit, totalTokens } from './usage';
 
 const log = (service: string, text: string) => ({ service, text, at: '' });
 
@@ -40,5 +40,17 @@ describe('사용량 표기', () => {
     expect(hasTokens(usage)).toBe(true);
     expect(hasTokens({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(false);
     expect(hasTokens(undefined)).toBe(false);
+  });
+
+  it('세션 토큰 한도는 화면에 보이는 네 값의 합으로 재고, 잘못 적은 한도는 거부한다', () => {
+    expect(totalTokens({ inputTokens: 984, outputTokens: 633, cacheReadTokens: 13_287, cacheWriteTokens: 14_690 })).toBe(29_594);
+    expect(totalTokens(undefined)).toBe(0);
+    expect(parseTokenLimit(undefined)).toBeUndefined();
+    expect(parseTokenLimit('  ')).toBeUndefined();
+    expect(parseTokenLimit('200_000')).toBe(200_000);
+    expect(() => parseTokenLimit('20만')).toThrow('양의 정수');
+    expect(() => parseTokenLimit('0')).toThrow('양의 정수');
+    expect(() => parseTokenLimit('-5')).toThrow('양의 정수');
+    expect(formatTokenCount(200_000)).toBe('20만');
   });
 });

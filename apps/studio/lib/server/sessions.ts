@@ -41,7 +41,7 @@ import {
 import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import { addTokens, hasTokens } from '@/lib/usage';
+import { addTokens, formatTokenCount, hasTokens, parseTokenLimit, totalTokens } from '@/lib/usage';
 import type {
   CodeFile,
   CodeTree,
@@ -79,6 +79,8 @@ interface ActiveRun {
   /** 요청을 시작할 때의 세션 토큰 합계 */
   baseTokens?: AgentUsage;
   tokens: AgentUsage;
+  /** 요청을 멈춘 이유. 사용자가 취소했거나 세션 토큰 한도에 도달했다 */
+  stopReason?: 'user' | 'budget';
 }
 
 interface Session {
@@ -187,6 +189,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
 
 export async function createSession(projectId: string): Promise<SessionSnapshot> {
   const mode = sessionMode();
+  const tokenLimit = sessionTokenLimit();
   const preview = previewConfig();
   const source = await findProject(projectId);
   if (!source) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
@@ -232,6 +235,7 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
       status: 'starting',
       mode,
       running: false,
+      tokenLimit,
       ...projectViews(project),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       runtime: provider.isolation,
@@ -335,6 +339,10 @@ export function sendMessage(id: string, text: string, { allowBreaking }: { allow
 
   const request = text.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
+  const limit = session.snapshot.tokenLimit;
+  if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit) {
+    throw new StudioError(409, `이 세션은 토큰 한도(${formatTokenCount(limit)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`);
+  }
 
   const plan = planRun(session, request, allowBreaking);
   const run: ActiveRun = {
@@ -359,7 +367,8 @@ export function cancelRun(id: string, runId: string): void {
   const run = session.run;
   if (!run || run.id !== runId) throw new StudioError(409, '취소할 수 있는 요청이 없습니다. 이미 끝났거나 결과를 저장하는 중입니다');
   if (run.cancel.signal.aborted) return;
-  session.snapshot.cancelling = true;
+  run.stopReason = 'user';
+  session.snapshot.cancelling = 'user';
   emit(session, { type: 'run_cancelling', runId });
   run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
 }
@@ -411,6 +420,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     }
 
     const mode = sessionMode();
+    // 이어서 작업하는 세션도 지금 스튜디오 서버에 설정한 한도를 따른다
+    const tokenLimit = sessionTokenLimit();
     if (data.snapshot.mode !== mode) {
       throw new StudioError(409, `이 세션은 ${data.snapshot.mode} 모드로 만들었습니다. B_STUDIO_MODE=${data.snapshot.mode}로 스튜디오를 실행한 뒤 이어서 작업하세요`);
     }
@@ -436,6 +447,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
         error: undefined,
         running: false,
         cancelling: undefined,
+        tokenLimit,
         usage: undefined,
         runtime: provider.isolation,
         checkpoints: list,
@@ -662,8 +674,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       });
     }
     if (!cancelled) finished = { status: 'error', summary: describe(error) };
-    else if (!reverted) finished = { status: 'cancelled', summary: `요청을 취소했지만 변경을 되돌리지 못했습니다: ${describe(revertError)}` };
-    else finished = { status: 'cancelled', summary: reverted.length > 0 ? `요청을 취소하고 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : '요청을 취소했습니다. 바뀐 파일은 없었습니다' };
+    else finished = { status: 'cancelled', summary: stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError) };
   } finally {
     session.run = undefined;
     // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
@@ -687,6 +698,17 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   }
 }
 
+/** 멈춘 이유와 되돌린 결과. revertError가 있으면 되돌리지 못했다 */
+function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: string[] | undefined, revertError: unknown): string {
+  if (run.stopReason === 'budget') {
+    const reason = `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해 요청을 멈췄습니다`;
+    if (!reverted) return `${reason}. 변경을 되돌리지 못했습니다: ${describe(revertError)}`;
+    return reverted.length > 0 ? `${reason}. 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : `${reason}. 바뀐 파일은 없었습니다`;
+  }
+  if (!reverted) return `요청을 취소했지만 변경을 되돌리지 못했습니다: ${describe(revertError)}`;
+  return reverted.length > 0 ? `요청을 취소하고 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : '요청을 취소했습니다. 바뀐 파일은 없었습니다';
+}
+
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
 async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
   const shared = {
@@ -702,6 +724,14 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       // 서버가 요청 도중에 멈춰도 그때까지 쓴 양이 세션 파일에 남도록 합계를 바로 바꾼다
       session.snapshot.tokens = addTokens(run.baseTokens, event.usage);
       emit(session, { type: 'tokens', runId: run.id, usage: event.usage, sessionTokens: session.snapshot.tokens });
+      const limit = session.snapshot.tokenLimit;
+      // 게이트 실패를 되풀이하는 요청이 한도를 넘어 계속 토큰을 쓰지 않도록, 넘는 순간 멈추고 되돌린다
+      if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit && !run.cancel.signal.aborted) {
+        run.stopReason = 'budget';
+        session.snapshot.cancelling = 'budget';
+        emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
+        run.cancel.abort(new DOMException('세션 토큰 한도에 도달했습니다', 'AbortError'));
+      }
     },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
   };
@@ -1262,6 +1292,15 @@ function sessionMode(): SessionMode {
   if (!value || value === 'api') return 'api';
   if (value === 'claude-code' || value === 'demo') return value;
   throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, demo 중 하나여야 합니다 (지금 값: ${value})`);
+}
+
+/** 운영자가 정한 세션 토큰 한도. 잘못 적은 값이 "한도 없음"으로 넘어가지 않도록 샌드박스를 만들기 전에 거부한다 */
+function sessionTokenLimit(): number | undefined {
+  try {
+    return parseTokenLimit(process.env.B_STUDIO_SESSION_TOKEN_LIMIT);
+  } catch (error) {
+    throw new StudioError(500, describe(error));
+  }
 }
 
 function sessionsRoot(): string {

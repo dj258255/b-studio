@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
 import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
-import { describeTokens, hasTokens } from "@/lib/usage";
+import { describeTokens, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
@@ -18,13 +18,16 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const [confirmingCancel, setConfirmingCancel] = useState<string>();
   const listRef = useRef<HTMLOListElement>(null);
   const runId = activeRun(view);
+  const limit = snapshot.tokenLimit;
+  const used = totalTokens(snapshot.tokens);
+  const budgetReached = limit !== undefined && used >= limit;
 
   useEffect(() => {
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [chat]);
 
-  const canSend = snapshot.status === "ready" && !snapshot.running && !sending;
+  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached;
 
   async function send(request: string) {
     setSending(true);
@@ -52,9 +55,14 @@ export function ChatPanel({ view }: { view: SessionView }) {
       <div className="border-b border-line px-5 py-3">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3">
           <h2 className="font-semibold">대화</h2>
-          {hasTokens(snapshot.tokens) && (
+          {(hasTokens(snapshot.tokens) || limit !== undefined) && (
             <span className="text-xs text-muted" title="이 세션의 요청들이 쓴 모델 토큰입니다. 취소하거나 실패한 요청도 그때까지 쓴 양을 더합니다">
-              세션 합계 {describeTokens(snapshot.tokens)}
+              {hasTokens(snapshot.tokens) && <>세션 합계 {describeTokens(snapshot.tokens)}</>}
+              {limit !== undefined && (
+                <span className={`ml-2 whitespace-nowrap ${budgetReached ? "font-medium text-fail" : used >= limit * 0.8 ? "text-wait" : ""}`}>
+                  한도 {formatTokenCount(limit)} 중 {formatTokenCount(used)} 사용
+                </span>
+              )}
             </span>
           )}
         </div>
@@ -81,7 +89,11 @@ export function ChatPanel({ view }: { view: SessionView }) {
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <p className="min-w-0 text-sm" role="status">
               <span className="text-wait motion-safe:animate-pulse">
-                {snapshot.cancelling ? "요청을 취소하는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다" : "에이전트가 작업하는 중"}
+                {snapshot.cancelling === "budget"
+                  ? "세션 토큰 한도에 도달해 요청을 멈추는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다"
+                  : snapshot.cancelling
+                    ? "요청을 취소하는 중. 바뀐 파일을 되돌리고 서비스를 확인합니다"
+                    : "에이전트가 작업하는 중"}
               </span>
               {view.runTokens?.runId === runId && hasTokens(view.runTokens.usage) && (
                 <span className="ml-2 text-xs text-muted">{describeTokens(view.runTokens.usage)}</span>
@@ -376,6 +388,9 @@ function restartSummary(restarted: ServiceCheck[]): string {
 }
 
 function hintFor({ snapshot, chat }: SessionView): string {
+  if (snapshot.status === "ready" && !snapshot.running && snapshot.tokenLimit !== undefined && totalTokens(snapshot.tokens) >= snapshot.tokenLimit) {
+    return "이 세션은 토큰 한도에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요.";
+  }
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";
