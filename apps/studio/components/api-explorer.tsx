@@ -3,6 +3,7 @@
 import type { OpenApiDocument } from "@b-studio/agent";
 import { useEffect, useState } from "react";
 import type { ProxyResponse } from "@/lib/studio-events";
+import { useSessionAccess } from "./session-access";
 
 const METHODS = ["get", "post", "put", "patch", "delete"] as const;
 
@@ -32,6 +33,7 @@ export function ApiExplorer({ target, revision }: { target: ExplorerTarget; revi
   const [body, setBody] = useState("");
   const [response, setResponse] = useState<ProxyResponse | { error: string }>();
   const [sending, setSending] = useState(false);
+  const access = useSessionAccess();
 
   useEffect(() => {
     if (!target.contractUrl) return;
@@ -120,7 +122,7 @@ export function ApiExplorer({ target, revision }: { target: ExplorerTarget; revi
             onChange={(event) => setPath(event.target.value)}
             className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 font-mono text-sm"
           />
-          <button type="submit" disabled={sending || !target.ready} className="rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50">
+          <button type="submit" disabled={sending || !target.ready || !access.canManage} className="rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50">
             {sending ? "보내는 중" : "보내기"}
           </button>
         </form>

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import { DiffView } from "./diff-view";
 import { RepositoryBar } from "./repository-bar";
+import { useSessionAccess } from "./session-access";
 
 /** 체크포인트 기록. 게이트를 통과한 요청마다 하나씩 쌓이고, 이전 시점으로 되돌릴 수 있다 */
 export function HistoryPanel({ view }: { view: SessionView }) {
@@ -12,6 +13,7 @@ export function HistoryPanel({ view }: { view: SessionView }) {
   const [patch, setPatch] = useState<{ sha: string; text?: string; error?: string }>();
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string>();
+  const access = useSessionAccess();
 
   const checkpoints = snapshot.checkpoints;
   const active = checkpoints.find((checkpoint) => checkpoint.sha === selectedSha) ?? checkpoints[0];
@@ -44,7 +46,7 @@ export function HistoryPanel({ view }: { view: SessionView }) {
 
   if (!active) return <p className="p-6 text-sm text-muted">아직 체크포인트가 없습니다.</p>;
 
-  const canRestore = newerCount > 0 && snapshot.status === "ready" && !snapshot.running;
+  const canRestore = newerCount > 0 && snapshot.status === "ready" && !snapshot.running && access.canManage;
 
   return (
     <div className="flex h-full min-h-0 flex-col">

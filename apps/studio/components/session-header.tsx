@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useState } from "react";
 import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
 import { endedReason, formatBytes } from "@/lib/usage";
+import { LogoutButton } from "./logout-button";
+import { useSessionAccess } from "./session-access";
 import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
 
 const MODE_LABEL: Record<SessionMode, string> = {
@@ -19,6 +21,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const [stopping, setStopping] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string>();
+  const access = useSessionAccess();
 
   async function stop() {
     setStopping(true);
@@ -71,6 +74,13 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
+        {access.viewer && (
+          <span className="text-xs text-muted">
+            {access.viewer}
+            {!access.canManage && <span className="ml-1.5 text-wait">읽기 전용, 만든 사람 {access.owner ?? "기록 없음"}</span>}
+          </span>
+        )}
+        {access.canLogout && <LogoutButton />}
         {snapshot.runtime && (
           <span
             className="glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted"
@@ -97,7 +107,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             <button
               type="button"
               onClick={resume}
-              disabled={resuming}
+              disabled={resuming || !access.canManage}
               className="rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-60"
             >
               {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
@@ -107,7 +117,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           <button
             type="button"
             onClick={stop}
-            disabled={stopping}
+            disabled={stopping || !access.canManage}
             className="glass-soft rounded-full px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
           >
             {stopping ? "중지하는 중" : "샌드박스 중지"}

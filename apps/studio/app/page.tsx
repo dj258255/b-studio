@@ -1,4 +1,7 @@
 import Link from "next/link";
+import { LogoutButton } from "@/components/logout-button";
+import { pageUser } from "@/lib/server/access";
+import { authConfig } from "@/lib/server/auth";
 import { listProjects } from "@/lib/server/projects";
 import { listSessions } from "@/lib/server/sessions";
 import { StartSessionButton } from "@/components/start-session-button";
@@ -17,13 +20,23 @@ const RECENT_SESSIONS = 20;
 const TIME = new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" });
 
 export default async function HomePage() {
+  const viewer = await pageUser();
+  const auth = authConfig().mode;
   const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
   const mode = process.env.B_STUDIO_MODE?.trim() || "api";
   const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, demo 중 하나로 실행하세요.`;
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
-      <p className="text-sm font-semibold text-muted">b-studio</p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-muted">b-studio</p>
+        {auth !== "none" && (
+          <div className="flex items-center gap-3 text-sm text-muted">
+            <span>{viewer}</span>
+            {auth === "token" && <LogoutButton />}
+          </div>
+        )}
+      </div>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">프로젝트를 열어 샌드박스를 시작하세요</h1>
       <p className="mt-3 max-w-[60ch] leading-7 text-muted">
         세션마다 프로젝트 복사본으로 서비스를 띄웁니다. 에이전트가 작업을 끝내면 스튜디오가 바뀐 서비스를 재시작하고 API 계약을 비교해,
@@ -72,6 +85,7 @@ export default async function HomePage() {
                   </p>
                   <p className="mt-0.5 text-xs text-muted">
                     체크포인트 {session.checkpoints}개, {TIME.format(new Date(session.updatedAt))}
+                    {auth !== "none" && session.owner && `, 만든 사람 ${session.owner}`}
                   </p>
                 </div>
                 <Link href={`/sessions/${session.id}`} className="glass-soft rounded-full px-4 py-1.5 text-sm font-medium hover:bg-panel">

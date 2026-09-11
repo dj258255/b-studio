@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import type { ExportResult } from "@/lib/studio-events";
+import { useSessionAccess } from "./session-access";
 
 /** 세션 브랜치를 원격에 올리고 PR을 만드는 영역. 원본 프로젝트가 Git 저장소인 세션에서만 쓸 수 있다 */
 export function RepositoryBar({ view }: { view: SessionView }) {
@@ -10,6 +11,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
   const repository = snapshot.repository;
   const [busy, setBusy] = useState<"push" | "pull-request" | "sync">();
   const [error, setError] = useState<string>();
+  const access = useSessionAccess();
 
   if (!repository) {
     return (
@@ -33,7 +35,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
         ? `올리지 않은 체크포인트 ${pushedIndex}개`
         : "되돌리기 뒤 원격 브랜치와 기록이 다릅니다. 다시 올리면 원격 브랜치를 지금 기록으로 맞춥니다.";
 
-  const idle = !snapshot.running && !busy;
+  const idle = !snapshot.running && !busy && access.canManage;
   const canPush = idle && sessionCheckpoints > 0 && !upToDate;
   const showCreate = repository.canCreatePullRequest && !repository.pullRequestUrl;
   const showCompare = !repository.canCreatePullRequest && !repository.pullRequestUrl && repository.compareUrl && repository.pushedSha;
