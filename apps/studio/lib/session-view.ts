@@ -136,7 +136,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       // 합계를 더하지 않고 서버가 보낸 값으로 바꿔서, 다시 연결해 기록을 재생해도 두 번 세지 않는다
       return { ...patchSnapshot(view, { tokens: event.sessionTokens }), runTokens: { runId: event.runId, usage: event.usage } };
     case 'run_cancelling':
-      return patchSnapshot(view, { cancelling: true });
+      return patchSnapshot(view, { cancelling: event.reason ?? 'user' });
     case 'run_finished':
       return {
         ...patchSnapshot(view, {

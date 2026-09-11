@@ -134,7 +134,7 @@ describe('reduceSession', () => {
       { type: 'run_cancelling', runId: 'r1' },
     ]);
     expect(activeRun(running)).toBe('r1');
-    expect(running.snapshot).toMatchObject({ running: true, cancelling: true, tokens: usage });
+    expect(running.snapshot).toMatchObject({ running: true, cancelling: 'user', tokens: usage });
     expect(running.runTokens).toEqual({ runId: 'r1', usage });
 
     const done = fold(
@@ -154,6 +154,18 @@ describe('reduceSession', () => {
       { kind: 'reverted', cancelled: true },
       { kind: 'outcome', status: 'cancelled', usage },
     ]);
+  });
+
+  it('세션 토큰 한도에 도달해 멈추는 요청은 멈춘 이유를 함께 표시한다', () => {
+    const stopping = fold([
+      { type: 'run_started', runId: 'r1', request: '메모 필드 추가' },
+      { type: 'run_cancelling', runId: 'r1', reason: 'budget' },
+    ]);
+    expect(stopping.snapshot.cancelling).toBe('budget');
+
+    const done = fold([{ type: 'run_finished', runId: 'r1', status: 'cancelled', summary: '세션 토큰 한도(2만)에 도달해 요청을 멈췄습니다. 바뀐 파일은 없었습니다' }], stopping);
+    expect(done.snapshot.cancelling).toBeUndefined();
+    expect(done.chat.at(-1)).toMatchObject({ kind: 'outcome', status: 'cancelled' });
   });
 
   it('체크포인트 복원 중에는 취소할 요청이 없다', () => {
