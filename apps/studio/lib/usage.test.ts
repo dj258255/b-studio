@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { currentPhase, endedReason, formatBytes, memoryRatio } from './usage';
+import { addTokens, currentPhase, describeTokens, endedReason, formatBytes, hasTokens, memoryRatio } from './usage';
 
 const log = (service: string, text: string) => ({ service, text, at: '' });
 
@@ -30,5 +30,15 @@ describe('사용량 표기', () => {
     expect(endedReason({ service: 'api', state: 'exited', exitCode: 137, oomKilled: true })).toBe('메모리 한도를 넘어 종료 (종료 코드 137)');
     expect(endedReason({ service: 'api', state: 'running', oomKilled: false })).toBeUndefined();
     expect(formatBytes(726 * 1024 ** 2)).toBe('726MiB');
+  });
+
+  it('토큰은 한국어 단위로 줄이고 쓴 캐시만 붙인다', () => {
+    const usage = { inputTokens: 12_345, outputTokens: 850, cacheReadTokens: 1_234_567, cacheWriteTokens: 0 };
+    expect(describeTokens(usage)).toBe('입력 1.2만, 출력 850, 캐시 읽기 123.5만 토큰');
+    expect(addTokens(usage, usage)).toEqual({ inputTokens: 24_690, outputTokens: 1_700, cacheReadTokens: 2_469_134, cacheWriteTokens: 0 });
+    expect(addTokens(undefined, usage)).toEqual(usage);
+    expect(hasTokens(usage)).toBe(true);
+    expect(hasTokens({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })).toBe(false);
+    expect(hasTokens(undefined)).toBe(false);
   });
 });

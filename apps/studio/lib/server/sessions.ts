@@ -28,6 +28,7 @@ import {
   Workspace,
   type AgentEvent,
   type AgentResult,
+  type AgentUsage,
   type Checkpoint,
   type DatabaseState,
   type DemoScenario,
@@ -40,6 +41,7 @@ import {
 import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
+import { addTokens, hasTokens } from '@/lib/usage';
 import type {
   CodeFile,
   CodeTree,
@@ -68,6 +70,16 @@ import {
 
 type Conversation = NonNullable<Parameters<typeof runAgent>[0]['conversation']>;
 type Listener = (event: StudioEvent) => void;
+
+/** 처리 중인 에이전트 요청 */
+interface ActiveRun {
+  id: string;
+  /** 사용자가 요청을 취소하면 abort한다. 에이전트가 끝나 체크포인트를 남기기 시작하면 세션에서 떼어 더는 취소를 받지 않는다 */
+  cancel: AbortController;
+  /** 요청을 시작할 때의 세션 토큰 합계 */
+  baseTokens?: AgentUsage;
+  tokens: AgentUsage;
+}
 
 interface Session {
   snapshot: SessionSnapshot;
@@ -104,6 +116,7 @@ interface Session {
   sourceDirtyFiles: number;
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
+  run?: ActiveRun;
   usageTimer?: NodeJS.Timeout;
   /** 마지막으로 대화나 상태가 바뀐 시각. 세션 목록 정렬에 쓴다 */
   updatedAt: string;
@@ -324,11 +337,31 @@ export function sendMessage(id: string, text: string, { allowBreaking }: { allow
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
 
   const plan = planRun(session, request, allowBreaking);
-  const runId = randomUUID().slice(0, 8);
+  const run: ActiveRun = {
+    id: randomUUID().slice(0, 8),
+    cancel: new AbortController(),
+    baseTokens: session.snapshot.tokens,
+    tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  };
+  session.run = run;
   session.snapshot.running = true;
-  emit(session, { type: 'run_started', runId, request });
-  void execute(session, runId, request, plan);
-  return { runId };
+  emit(session, { type: 'run_started', runId: run.id, request });
+  void execute(session, run, request, plan);
+  return { runId: run.id };
+}
+
+/**
+ * 처리 중인 요청을 취소한다. 샌드박스는 그대로 두고, 에이전트를 멈춘 뒤 이번 요청의 변경을 마지막 체크포인트로 되돌린다.
+ * 되돌리기는 실행 쪽에서 이어서 하므로 바로 돌아가고 결과는 run_finished로 알린다
+ */
+export function cancelRun(id: string, runId: string): void {
+  const session = requireSession(id);
+  const run = session.run;
+  if (!run || run.id !== runId) throw new StudioError(409, '취소할 수 있는 요청이 없습니다. 이미 끝났거나 결과를 저장하는 중입니다');
+  if (run.cancel.signal.aborted) return;
+  session.snapshot.cancelling = true;
+  emit(session, { type: 'run_cancelling', runId });
+  run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
 }
 
 export async function stopSession(id: string): Promise<SessionSnapshot> {
@@ -402,6 +435,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
         status: 'starting',
         error: undefined,
         running: false,
+        cancelling: undefined,
         usage: undefined,
         runtime: provider.isolation,
         checkpoints: list,
@@ -594,45 +628,81 @@ function planRun(session: Session, request: string, allowBreaking: boolean): Run
   };
 }
 
-async function execute(session: Session, runId: string, request: string, plan: RunPlan): Promise<void> {
-  let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
+async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
+  const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns'> | undefined;
+  let cancelled = false;
   try {
-    const result = await runPlan(session, runId, request, plan);
+    const result = await runPlan(session, run, request, plan, signal);
+    // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
+    if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
+    session.run = undefined;
     if ('preflightError' in result) {
-      finished = { type: 'run_finished', runId, status: 'error', summary: result.preflightError };
+      finished = { status: 'error', summary: result.preflightError };
       return;
     }
 
     // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-    if (result.status === 'done') await saveCheckpoint(session, runId, request, checkpointBody(result, plan.allowBreaking));
-    else await revertRun(session, runId);
-    finished = { type: 'run_finished', runId, status: result.status, summary: result.summary, turns: result.turns };
+    if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking));
+    else await revertRun(session, run.id);
+    finished = { status: result.status, summary: result.summary, turns: result.turns };
   } catch (error) {
+    cancelled = run.cancel.signal.aborted && !session.stop.signal.aborted;
+    // 취소해 되돌리는 동안 다시 누른 취소는 받아들인다. 오류로 되돌리는 중에는 취소를 받지 않는다
+    if (!cancelled) session.run = undefined;
+    let reverted: string[] | undefined;
+    let revertError: unknown;
     if (!session.stop.signal.aborted) {
-      await revertRun(session, runId).catch((revertError: unknown) => console.error('[b-studio] 되돌리기 실패', revertError));
+      // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
+      const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
+      reverted = await revertRun(session, run.id, { cancelled, alsoRestart: unsettled }).catch((cause: unknown) => {
+        revertError = cause;
+        console.error('[b-studio] 되돌리기 실패', cause);
+        return undefined;
+      });
     }
-    finished = { type: 'run_finished', runId, status: 'error', summary: describe(error) };
+    if (!cancelled) finished = { status: 'error', summary: describe(error) };
+    else if (!reverted) finished = { status: 'cancelled', summary: `요청을 취소했지만 변경을 되돌리지 못했습니다: ${describe(revertError)}` };
+    else finished = { status: 'cancelled', summary: reverted.length > 0 ? `요청을 취소하고 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : '요청을 취소했습니다. 바뀐 파일은 없었습니다' };
   } finally {
-    if (session.snapshot.mode === 'demo') {
+    session.run = undefined;
+    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
+    if (session.snapshot.mode === 'demo' && !cancelled) {
       session.demoIndex += 1;
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
     }
     session.snapshot.running = false;
+    session.snapshot.cancelling = undefined;
     if (!session.stop.signal.aborted && finished) {
       session.settledConversation = session.conversation.length;
-      emit(session, { ...finished, nextDemoRequest: session.snapshot.nextDemoRequest });
+      emit(session, {
+        type: 'run_finished',
+        runId: run.id,
+        ...finished,
+        usage: hasTokens(run.tokens) ? run.tokens : undefined,
+        sessionTokens: session.snapshot.tokens,
+        nextDemoRequest: session.snapshot.nextDemoRequest,
+      });
     }
   }
 }
 
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
-async function runPlan(session: Session, runId: string, request: string, plan: RunPlan): Promise<AgentResult | { preflightError: string }> {
+async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
   const shared = {
     project: session.project,
     sandbox: session.sandbox,
     allowBreaking: plan.allowBreaking,
-    signal: session.stop.signal,
-    onEvent: (event: AgentEvent) => emit(session, { type: 'agent', runId, event }),
+    signal,
+    onEvent: (event: AgentEvent) => {
+      if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
+      run.tokens = event.usage;
+      // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다
+      if (!hasTokens(event.usage)) return;
+      // 서버가 요청 도중에 멈춰도 그때까지 쓴 양이 세션 파일에 남도록 합계를 바로 바꾼다
+      session.snapshot.tokens = addTokens(run.baseTokens, event.usage);
+      emit(session, { type: 'tokens', runId: run.id, usage: event.usage, sessionTokens: session.snapshot.tokens });
+    },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
   };
 
@@ -693,21 +763,36 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
   emit(session, { type: 'checkpoint', runId, checkpoint });
 }
 
-async function revertRun(session: Session, runId: string): Promise<void> {
+/** 되돌린 파일을 돌려준다. alsoRestart는 파일과 상관없이 다시 띄울 서비스다 */
+async function revertRun(
+  session: Session,
+  runId: string,
+  { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
+): Promise<string[]> {
   const { files, patch } = await session.checkpoints.discard();
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다
   const database = await session.databases.restore(session.snapshot.checkpoints[0]!.sha, session.stop.signal);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
-  if (files.length === 0 && !databaseTouched) return;
+  if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return files;
 
   const report = await restartServicesFor(
     session.sandbox,
     session.project,
     files,
     { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) },
-    { alsoRestart: database.dependents },
+    { alsoRestart: [...new Set([...database.dependents, ...alsoRestart])] },
   );
-  emit(session, { type: 'reverted', runId, files, patch, restarted: report.restarted, databases: database.states, sync: report.sync });
+  emit(session, {
+    type: 'reverted',
+    runId,
+    cancelled: cancelled || undefined,
+    files,
+    patch,
+    restarted: report.restarted,
+    databases: database.states,
+    sync: report.sync,
+  });
+  return files;
 }
 
 /** 체크포인트 시점의 데이터베이스 상태를 남긴다. 실패해도 작업은 계속하고 로그로 알린다 */

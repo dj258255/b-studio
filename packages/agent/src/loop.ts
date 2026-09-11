@@ -46,6 +46,8 @@ export type AgentEvent =
   /** 실제로 요청을 처리하는 실행 환경. 로컬 Claude Code처럼 모델과 인증을 밖에서 정할 때 알린다 */
   | { type: 'session'; backend: string; model: string; auth?: string }
   | { type: 'turn'; turn: number }
+  /** 이번 실행에서 지금까지 쓴 토큰 누적값. 직접 만든 루프는 모델 응답마다, 로컬 Claude Code는 턴을 끝낼 때마다 온다 */
+  | { type: 'tokens'; usage: AgentUsage }
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   | { type: 'tool_result'; name: string; ok: boolean; content: string }
@@ -149,6 +151,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
 
     const message = await client.createMessage({ system, tools, messages }, signal);
     addUsage(usage, message.usage);
+    // 요청이 취소되거나 오류로 끝나도 그때까지 쓴 양을 알 수 있게 응답마다 알린다
+    onEvent({ type: 'tokens', usage: { ...usage } });
     // thinking·fallback 블록까지 응답 전체를 그대로 이어 붙여야 다음 요청이 올바르게 이어진다
     messages.push({ role: 'assistant', content: message.content });
 

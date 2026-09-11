@@ -98,6 +98,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const definitions = specs.map((spec) =>
     tool(spec.name, spec.description ?? '', zodShape(spec.input_schema), (args) =>
       serial(async () => {
+        // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
+        signal?.throwIfAborted();
         onEvent({ type: 'tool_call', name: spec.name, input: args });
         const outcome = await executeTool(spec.name, args, context);
         onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content });
@@ -205,6 +207,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
         case 'result': {
           setUsage(usage, message);
+          onEvent({ type: 'tokens', usage: { ...usage } });
           const failure = describeResultFailure(message);
           if (failure) {
             finish('failed', failure);
@@ -228,6 +231,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   } finally {
     input.close();
     signal?.removeEventListener('abort', onAbort);
+    // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
+    await serial.idle();
   }
 
   signal?.throwIfAborted();
@@ -331,11 +336,12 @@ export function zodShape(schema: { properties?: unknown }): Record<string, z.Zod
 
 function serialQueue() {
   let tail: Promise<unknown> = Promise.resolve();
-  return <T>(task: () => Promise<T>): Promise<T> => {
+  const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
     const next = tail.then(task, task);
     tail = next.catch(() => {});
     return next;
   };
+  return Object.assign(enqueue, { idle: () => tail });
 }
 
 /** 스트리밍 입력. 게이트 결과를 같은 대화에 이어 넣고, 끝나면 닫는다 */

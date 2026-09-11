@@ -113,6 +113,7 @@ export function archivedSnapshot(data: PersistedSession, error?: string): Sessio
     ...data.snapshot,
     status: 'stopped',
     running: false,
+    cancelling: undefined,
     error,
     usage: undefined,
     services: data.snapshot.services.map((service) => ({ ...service, state: 'stopped' as const, url: undefined, previewUrl: undefined, detail: undefined })),

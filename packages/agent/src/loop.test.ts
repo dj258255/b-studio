@@ -1,7 +1,8 @@
+import type { StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
-import { runAgent, type AgentEvent } from './loop';
+import { runAgent, type AgentEvent, type ModelClient } from './loop';
 import { ScriptedModelClient } from './scripted-client';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
@@ -13,6 +14,16 @@ beforeEach(async () => {
 
 function collect(events: AgentEvent[]) {
   return (event: AgentEvent) => events.push(event);
+}
+
+/** 스크립트 모델은 토큰을 쓰지 않으므로 응답마다 정해진 사용량을 붙인다 */
+function withUsage(scripted: ScriptedModelClient): ModelClient {
+  return {
+    async createMessage(request) {
+      const message = await scripted.createMessage(request);
+      return { ...message, usage: { ...message.usage, input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 1_000 } };
+    },
+  };
 }
 
 describe('runAgent', () => {
@@ -118,6 +129,84 @@ describe('runAgent', () => {
       runAgent({ request: '읽고 설명해줘', project, sandbox: fakeSandbox(project, []), client, conversation, fetcher: async () => contract }),
     ).rejects.toThrow('스크립트에 남은 턴이 없습니다');
     expect(conversation).toHaveLength(2);
+  });
+
+  it('모델 응답마다 이번 실행의 누적 토큰을 알린다', async () => {
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client: withUsage(new ScriptedModelClient([{ toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] }, { text: '주문 API입니다.' }])),
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(events.flatMap((e) => (e.type === 'tokens' ? [e.usage] : []))).toEqual([
+      { inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 0 },
+      { inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 },
+    ]);
+    expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 });
+  });
+
+  it('취소하면 다음 턴 전에 멈추고 이번 실행분을 대화 기록에서 되돌린다', async () => {
+    const conversation: Parameters<typeof runAgent>[0]['conversation'] = [];
+    const controller = new AbortController();
+    const events: AgentEvent[] = [];
+
+    await expect(
+      runAgent({
+        request: '새 클래스를 추가해줘',
+        project,
+        sandbox: fakeSandbox(project, [true]),
+        client: withUsage(new ScriptedModelClient([{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }] }, { text: '추가했습니다.' }])),
+        conversation,
+        signal: controller.signal,
+        fetcher: async () => contract,
+        onEvent: (event) => {
+          events.push(event);
+          if (event.type === 'tool_result') controller.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+        },
+      }),
+    ).rejects.toThrow('요청을 취소했습니다');
+
+    expect(conversation).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'turn')).toHaveLength(1);
+    // 취소 전에 쓴 토큰은 이벤트로 이미 알렸다
+    expect(events.find((e) => e.type === 'tokens')).toMatchObject({ usage: { inputTokens: 100 } });
+  });
+
+  it('게이트가 서비스를 다시 띄우는 중에 취소하면 끊긴 결과를 게이트 실패로 알리지 않는다', async () => {
+    const controller = new AbortController();
+    const base = fakeSandbox(project, []);
+    const sandbox = {
+      ...base,
+      async restart(service: string, options?: StartOptions) {
+        base.restarts.push(service);
+        controller.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+        options?.signal?.throwIfAborted();
+        return base.endpoint(service);
+      },
+    };
+    const events: AgentEvent[] = [];
+
+    await expect(
+      runAgent({
+        request: '주문에 메모 필드 추가',
+        project,
+        sandbox,
+        client: new ScriptedModelClient([
+          { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+          { text: '고쳤습니다.' },
+        ]),
+        signal: controller.signal,
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      }),
+    ).rejects.toThrow('요청을 취소했습니다');
+
+    expect(events.some((e) => e.type === 'verify_start')).toBe(true);
+    expect(events.some((e) => e.type === 'verify_result')).toBe(false);
   });
 
   it('거절되면 바로 실패한다', async () => {

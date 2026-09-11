@@ -1,4 +1,4 @@
-import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
@@ -43,6 +43,10 @@ export interface SessionSnapshot {
   error?: string;
   mode: SessionMode;
   running: boolean;
+  /** 처리 중인 요청을 취소해 변경을 되돌리는 중이다 */
+  cancelling?: boolean;
+  /** 이 세션의 요청들이 쓴 모델 토큰 합계. 취소하거나 실패한 요청도 그때까지 쓴 양을 더한다 */
+  tokens?: AgentUsage;
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
@@ -130,19 +134,28 @@ export type StudioEvent =
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
   | { type: 'run_started'; runId: string; request: string }
-  | { type: 'agent'; runId: string; event: AgentEvent }
+  | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
+  /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
+  | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }
+  | { type: 'run_cancelling'; runId: string }
   | {
       type: 'run_finished';
       runId: string;
-      status: 'done' | 'failed' | 'error';
+      /** cancelled: 사용자가 취소해 이번 요청의 변경을 되돌렸다 */
+      status: 'done' | 'failed' | 'error' | 'cancelled';
       summary: string;
       turns?: number;
+      /** 이번 요청이 쓴 토큰. 모델을 부르지 않았으면 없다 */
+      usage?: AgentUsage;
+      sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
     }
   | { type: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   | {
       type: 'reverted';
       runId: string;
+      /** 게이트 실패가 아니라 사용자가 취소해서 되돌렸다 */
+      cancelled?: boolean;
       files: string[];
       patch: string;
       restarted: ServiceCheck[];
