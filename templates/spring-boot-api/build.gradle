@@ -37,3 +37,15 @@ dependencies {
 tasks.named('test') {
 	useJUnitPlatform()
 }
+
+// 개발용 이미지(Dockerfile.dev)가 의존성 캐시를 구울 때 쓴다. 소스 없이 실행되도록 classpath만 해결한다.
+// dependencies 리포트 태스크는 메타데이터만 받아, 실행할 때 jar을 다시 내려받으려 한다.
+// 구성 캐시와 맞도록 설정 단계에서 파일 목록을 잡아 두고, 실행 단계에서는 그것만 읽는다
+tasks.register('downloadDependencies') {
+	description = '런타임·컴파일 classpath의 의존성을 모두 내려받는다'
+	def classpathFiles = files(configurations.runtimeClasspath, configurations.compileClasspath)
+	inputs.files(classpathFiles)
+	doLast {
+		println "내려받은 의존성 파일 ${classpathFiles.files.size()}개"
+	}
+}
