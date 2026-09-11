@@ -116,6 +116,7 @@ sequenceDiagram
 | **Next.js 단일 앱 + Server-Sent Events** | 오래 걸리는 샌드박스·에이전트 작업의 진행 상황을 한 프로세스에서 실시간으로 보내기 위해 | [ADR-015](docs/decisions.md#adr-015-스튜디오-서버-nextjs-단일-앱과-server-sent-events) |
 | **작업 복사본을 Git 체크포인트로 관리** | "완료로 인정하지 않음"을 넘어 실패한 변경이 실제로 남지 않게 하기 위해 | [ADR-018](docs/decisions.md#adr-018-세션-체크포인트-검증을-통과한-변경만-남긴다) |
 | **로컬 로그인 계정 모드는 명시적으로 켜고, 기본 도구를 모두 끔** | 로그인 흐름 없이 본인 PC에서만 쓰고, 모델이 샌드박스와 작업 공간 규칙을 우회하지 못하게 하기 위해 | [ADR-019](docs/decisions.md#adr-019-로컬-로그인-계정으로-실행-api-키-없이-개인-pc에서만) |
+| **Kubernetes에서는 세션마다 네임스페이스, compose 서비스마다 agent-sandbox `Sandbox`, edge는 기본 런타임** | compose와 같은 서비스 이름 연결과 요청 IP 기반 정책을 유지하면서 클러스터의 RuntimeClass·NetworkPolicy로 격리하고, gVisor Pod로는 열리지 않는 port-forward를 edge로 받기 위해 | [ADR-028](docs/decisions.md#adr-028-kubernetes-제공자-서비스마다-agent-sandbox-sandbox를-둔다) |
 | **컨테이너 런타임은 운영자가 환경 변수로 고르고, gVisor는 `--network=host`로 모든 서비스와 edge에 적용** | 에이전트 코드가 호스트 커널을 직접 쓰지 않게 하되, 프로젝트가 격리 수준을 낮출 수 없게 하고 서비스 이름으로 하는 연결을 유지하기 위해 | [ADR-027](docs/decisions.md#adr-027-격리-강화-운영자가-고르는-컨테이너-런타임과-gvisor) |
 | **사내 API는 edge의 별칭으로만 부르고, 요청 IP로 호출한 서비스를 확인하고, 스튜디오 쪽 호출은 edge 안에서 실행** | 인증 값과 운영 개인정보를 샌드박스 코드·모델 대화에서 떼어 놓고, 스튜디오용 포트로 서비스가 권한을 사칭하지 못하게 하기 위해 | [ADR-026](docs/decisions.md#adr-026-정책-프록시-사내-api는-edge를-거쳐서만-부른다) |
 | **시크릿 값은 compose 프로세스 환경으로만 넘기고, 나오는 모든 출력에서 가리고, 파일에 들어가면 커밋 거부** | 에이전트는 명령 출력·로그·응답을 모델에게 그대로 보내고 체크포인트는 PR로 올라가므로, 한 번의 `printenv`나 파일 쓰기로 값이 대화 기록과 저장소에 영구히 남지 않게 하기 위해 | [ADR-025](docs/decisions.md#adr-025-시크릿-주입과-가림-값은-보이지-않게-넣고-새는-경로를-막는다) |
@@ -194,6 +195,17 @@ export B_STUDIO_SECRETS_FILE=~/.config/b-studio/orders.env   # 또는 KEY=VALUE 
 
 ```bash
 export B_STUDIO_CONTAINER_RUNTIME=runsc   # 데몬에 없는 런타임이면 샌드박스를 만들기 전에 등록된 런타임 목록과 함께 거부
+```
+
+샌드박스를 Kubernetes 클러스터에 띄우려면 클러스터에 [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)를 설치하고 제공자를 바꿉니다. 소스를 hostPath로 마운트하므로 kind 같은 단일 노드 개발 클러스터용입니다.
+
+```bash
+export B_STUDIO_SANDBOX_PROVIDER=kubernetes
+export B_STUDIO_KUBECONFIG=~/.kube/b-studio.yaml          # 비우면 kubectl 기본값
+export B_STUDIO_KUBECTL=/usr/local/bin/kubectl             # 선택. 비우면 PATH의 kubectl
+export B_STUDIO_K8S_RUNTIME_CLASS=gvisor                   # 서비스 Pod에 걸 RuntimeClass (선택)
+export B_STUDIO_K8S_HOST_PATHS=~/.cache/b-studio=/b-studio  # 호스트 경로=노드 경로 (kind extraMounts와 같게)
+export B_STUDIO_K8S_KIND_CLUSTER=b-studio                   # build 서비스 이미지를 kind load로 올림 (또는 B_STUDIO_K8S_REGISTRY)
 ```
 
 푸시는 스튜디오 서버의 git 인증(SSH 에이전트, credential helper)을 그대로 씁니다. 토큰이 없으면 PR 작성 페이지 링크만 보여 줍니다. 설계 근거는 [ADR-020](docs/decisions.md#adr-020-원격-저장소-연동-세션-브랜치와-덮어쓰지-않는-푸시)에 있습니다.
@@ -318,7 +330,7 @@ resources:
 | Ctrl+C 신호가 여러 번 들어올 때 | 정리가 끝까지 완료됨 (tsx와 node에 SIGINT를 동시에 보내 재현) |
 | 종료 후 정리 | 컨테이너 0개, 샌드박스 볼륨 0개. 공유 캐시 볼륨(Gradle, pnpm)은 유지 |
 | 두 번째 기동 | 처음에는 늦어도 43초 안에 준비. 단계별로 측정해 병목(api의 Gradle 기동·설정)을 찾은 뒤 **13.4초 → 10.9초** (`pnpm bench:boot`, 3회 10.8~10.9초) |
-| 단위 테스트 / 타입 체크 | 174개 통과 / 패키지 5개 통과 |
+| 단위 테스트 / 타입 체크 | 197개 통과 / 패키지 5개 통과 |
 
 ### 에이전트 루프 (`pnpm e2e:agent`, 실제 Docker 샌드박스)
 
@@ -491,6 +503,23 @@ Docker 호스트에 가짜 사내 API를 띄웠습니다. 이 API는 받은 인�
 
 설계 근거는 [ADR-027](docs/decisions.md#adr-027-격리-강화-운영자가-고르는-컨테이너-런타임과-gvisor)에 있습니다.
 
+### Kubernetes 제공자 (kind · agent-sandbox · gVisor)
+
+kind v0.32.0(Kubernetes v1.36.1)에 gVisor RuntimeClass와 agent-sandbox v1.0.2를 설치했습니다. 그 위에서 web 서비스 하나와 시크릿 하나를 선언한 프로젝트를 `B_STUDIO_SANDBOX_PROVIDER=kubernetes`로 띄웠습니다.
+
+| 확인 항목 | 결과 |
+|---|---|
+| 설계 전 실험 | runsc 등록, gVisor Pod의 클러스터 DNS, `Sandbox`의 `service: true`로 이름 연결, kindnet의 NetworkPolicy 적용, Pod 삭제 뒤 2초 만에 재생성. port-forward는 runc Pod만 동작하고 gVisor Pod는 "connection refused inside namespace"로 실패해 edge를 runc로 둠 |
+| 기동 | 35.8초 (이미지 빌드·`kind load`, Secret·Sandbox 적용, edge 대기, pnpm 설치 포함) |
+| 격리·시크릿 | web Pod 커널 `4.19.0-gvisor`, `exec` 출력은 `[PAYMENT_API_KEY 가림]` |
+| 네트워크 | web Pod에서 `1.1.1.1:443`에 직접 연결하면 시간 초과, edge 프록시로 `example.com`에 연결하면 403, pnpm 설치는 프록시를 거침 (허용 370건) |
+| 미리보기 | 기동 직후와 web 재시작 뒤 모두 같은 주소로 요청 12번 12/12 |
+| 파일 수정과 재시작 | 반영 확인 94ms, 재시작 17.2초 뒤 바뀐 화면 |
+| 실측 중 발견 | edge보다 먼저 뜬 web이 이름을 풀지 못해 종료 ([트러블슈팅 20](docs/troubleshooting.md#20-kubernetes에서-web이-edge-이름을-풀지-못해-기동-14초-만에-종료됨)). 준비 확인을 받은 port-forward가 3번에 2번꼴로 멈춤. 가설 다섯 개를 실측으로 배제한 뒤 원인을 찾음 ([트러블슈팅 21](docs/troubleshooting.md#21-kubernetes-미리보기-요청이-3번에-2번꼴로-멈춤)) |
+| 정리 | 네임스페이스 삭제 10.4초, 실험 클러스터와 빌드 이미지 삭제 |
+
+설계 근거는 [ADR-028](docs/decisions.md#adr-028-kubernetes-제공자-서비스마다-agent-sandbox-sandbox를-둔다)에 있습니다.
+
 ### 아직 검증하지 못한 것과 알려진 한계
 
 - **API 키 경로의 실제 실행**: 실제 모델 실행은 로컬 로그인 계정 모드로만 확인했습니다. `AnthropicModelClient`로 API를 직접 호출하는 경로는 API 키가 없어서, 샌드박스를 띄우기 전에 안내 메시지를 내고 멈추는 것까지만 확인했습니다.
@@ -501,6 +530,7 @@ Docker 호스트에 가짜 사내 API를 띄웠습니다. 이 API는 받은 인�
 - **모노레포 하위 폴더 프로젝트는 원격 연동이 꺼짐**: Git 저장소 루트에 있는 프로젝트만 세션 브랜치로 시작합니다.
 - **DB 브랜치의 한계**: Postgres만 지원하고, 덤프를 한 번에 256MB까지 다룹니다. 되돌림 결과 문구는 이벤트 스트림으로 확인했고 브라우저 화면으로는 확인하지 않았습니다.
 - **세션은 서버 메모리에만 있음**: 스튜디오 서버를 재시작하면 세션 목록이 사라집니다. 띄워 둔 샌드박스는 종료 신호를 받을 때 정리합니다.
+- **Kubernetes 제공자의 범위**: 소스를 hostPath로 마운트하므로 kind 같은 단일 노드 개발 클러스터에서만 동작합니다. 기동 가속용 스냅샷 볼륨이 없고, 전용 볼륨은 emptyDir라 Pod를 다시 만들면 의존성 설치가 다시 돕니다. CPU·메모리 사용량은 metrics-server가 없어 표시하지 않습니다. edge Pod는 port-forward를 받기 위해 gVisor 없이 돌고, compose의 `depends_on` 중 edge를 기다리는 것 말고는 순서를 보장하지 않습니다.
 - **gVisor 격리의 범위**: 개발 PC의 Docker 데몬에는 등록하지 않고, 격리된 Docker-in-Docker 데몬에서 edge와 Next web만 띄워 확인했습니다. api(JVM)와 db(Postgres)는 아직 gVisor에서 띄워 보지 않았습니다. runsc는 서비스 이름 풀이 때문에 `--network=host`로 등록해야 하고, 이 모드는 네트워크 경로의 격리를 줄입니다. gVisor 안에서는 파일 변경 알림이 오지 않아, 미리보기는 요청이 끝나고 서비스를 다시 띄울 때 바뀝니다.
 - **정책 프록시의 범위**: 가림은 필드 이름 기준이라 다른 이름의 필드나 자유 텍스트 안의 개인정보는 가리지 못합니다. 가릴 필드가 있는 API의 JSON이 아닌 응답은 넘기지 않고, 본문은 5MB까지, HTTP(S) API만 다룹니다. 실제 사내망 API가 아니라 Docker 호스트의 가짜 API로 확인했습니다.
 - **시크릿 가림의 범위**: 문자열 일치(원래 값, URL 인코딩, base64)로 찾으므로 값을 쪼개거나 다른 방식으로 바꾸면 가려지지 않습니다. Docker 호스트에서는 `docker inspect`·`docker logs`로 값이 보입니다. 게이트의 시크릿 실패 문구와 세션 시작 거부 문구는 스튜디오 화면이 아니라 코드 경로와 API 매핑으로만 확인했습니다.
@@ -517,9 +547,12 @@ Docker 호스트에 가짜 사내 API를 띄웠습니다. 이 API는 받은 인�
 - **Ctrl+C 한 번에 신호가 여러 번 들어와 정리가 중간에 끊길 수 있는 문제**: `process.once` 대신 멱등한 정리 함수로 해결
 - **Next dev 첫 요청 컴파일 때문에 준비 확인이 시간 초과되는 현상**: 기동 중 에러와 진짜 실패를 구분하는 판정 규칙으로 해결
 - **캐시를 공유해도 두 번째 기동이 빨라지지 않은 문제**: "`node_modules` 재설치가 원인"이라는 가설을 측정으로 뒤집음. 실제 병목은 api의 Gradle 기동·설정이었고, 이득이 측정된 볼륨에만 스냅샷을 켜 13.4초 → 10.9초
-- **재시작할 때마다 콘솔에 HMR 연결 실패가 쌓이는 현상**: 에러의 origin을 확인해 스튜디오가 아니라 이전 포트에 남은 미리보기 앱의 재연결임을 확인
+- **재시작할 때마다 콘솔에 HMR 연결 실패가 쌓이는 현상**: 에러의 origin을 확인해 스튜디오가 아니라 이전 포트에 남은 미리보기 앱의 재연결임을 확인. 네트워크 격리 이후 edge가 포트를 유지해 재시작 중 2건만 남음
 - **체크포인트로 되돌린 뒤 DB 스키마가 코드와 달라지는 문제**: 데모 시나리오로 재현하고, 체크포인트마다 DB 덤프를 남겨 해결
 - **되돌린 뒤 api가 지운 파일을 찾다가 기동하지 못한 문제**: 설정 캐시·스냅샷·파일 공유 지연을 차례로 의심했다가 틀렸고, 스택 트레이스로 새 컨테이너의 디렉터리 목록 문제임을 확정해 조건부 재시도로 해결
+- **Kubernetes 미리보기 요청이 3번에 2번꼴로 멈춘 문제**: keep-alive, 옛 Pod IP, kubectl 버전 차이, RST 종료를 차례로 실측해 배제하고, 중간에 끊긴 요청을 받은 port-forward만 망가진다는 것을 비교 실측으로 확인해 준비 확인 뒤 같은 포트로 다시 열어 해결
+- **Kubernetes에서 web이 edge 이름을 풀지 못해 종료된 문제**: Pod가 동시에 떠 헤드리스 Service 이름이 아직 없던 것을 로그로 확인하고, edge 대기 init 컨테이너로 해결
+- **gVisor에서 서비스 이름을 풀지 못하고 파일 변경 알림이 오지 않은 문제**: 격리된 Docker-in-Docker에서 네트워크 모드와 inotify를 비교해 `--network=host`로 등록하고, 폴링 대신 게이트의 재시작으로 반영
 - **base64로 인코딩한 시크릿 값이 가려지지 않은 문제**: 실제 샌드박스에서 `| base64` 한 번으로 가림이 우회되는 것을 확인하고, 앞에 붙는 바이트 수마다 값만으로 정해지는 base64 구간을 함께 가려 해결
 - **재시작하면 로그 탭에 같은 줄이 두 번 쌓인 문제**: 격리 검증 화면에서 재시작하지 않은 edge의 줄이 반복되는 것을 보고, 로그 재구독의 `--tail`이 원인임을 찾아 이미 받은 줄을 건너뛰게 해결
 - **네트워크를 격리하자 web이 3초 만에 종료된 문제**: 인터넷 없이 띄우는 사전 실험으로 web만 corepack 다운로드가 필요함을 확인했고, 연결 거부 대상이 edge 프록시였다는 로그로 기동 순서 문제임을 찾아 healthcheck와 `depends_on`으로 해결
@@ -538,7 +571,7 @@ Docker 호스트에 가짜 사내 API를 띄웠습니다. 이 API는 받은 인�
 - [x] **정책 프록시**: 등록한 사내 API를 edge로만 부르고, 서비스·studio 단위 허용 규칙, 응답 JSON 필드 가림, 인증 헤더 주입, 호출마다 감사 기록
 - [x] **자원 한도와 사용량 표시**: 측정으로 정한 서비스별 메모리·CPU 한도, 리소스 탭(CPU·메모리·종료 이유·최근 단계), 메모리 부족 종료 판정, 에이전트용 `service_stats` 도구
 - [x] **gVisor 런타임**: 운영자가 고른 Docker 런타임(runsc)을 모든 서비스와 edge에 적용하고, 샌드박스를 만들기 전에 등록 여부 확인, 세션 헤더에 격리 표시
-- [ ] **Kubernetes 제공자**: agent-sandbox `Sandbox` 리소스와 RuntimeClass(gVisor/Kata)로 샌드박스를 띄우는 제공자
+- [x] **Kubernetes 제공자**: 세션마다 네임스페이스, compose 서비스마다 agent-sandbox `Sandbox`, RuntimeClass(gVisor)와 NetworkPolicy로 격리, edge로 port-forward (kind로 검증, 단일 노드 클러스터용)
 - [x] **기동 최적화**: 단계별 측정으로 병목을 찾고, 입력 파일 해시별 스냅샷 볼륨과 Gradle 캐시로 준비 시간 13.4초 → 10.9초
 
 ## 기술 스택

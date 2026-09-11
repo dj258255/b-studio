@@ -1,37 +1,13 @@
 import type { LoadedProject } from '@b-studio/spec';
+import { directHosts, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, edgeEnvironment, edgePortFor, proxyEnvironment } from '../edge-config';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
 
-/** 샌드박스 네트워크의 유일한 출입구 컨테이너 (packages/sandbox/edge/edge.mjs) */
-export const EDGE_SERVICE = 'b-studio-edge';
-export const EDGE_PROXY_PORT = 3128;
-const EDGE_FIRST_PORT = 20_000;
-const EDGE_IMAGE = 'node:22-bookworm-slim';
+export { DEFAULT_EGRESS_ALLOW, EDGE_PROXY_PORT, EDGE_SERVICE, edgePortFor } from '../edge-config';
+
 /** 외부로 나갈 수 없는 네트워크. 모든 서비스가 여기에만 붙는다 */
 const SANDBOX_NETWORK = 'b-studio-sandbox';
 /** edge만 붙는 네트워크. 허용한 외부 호스트로 나갈 때 쓴다 */
 const EGRESS_NETWORK = 'b-studio-egress';
-
-/** 기본으로 허용하는 외부 호스트: 템플릿이 의존성을 받는 패키지 저장소와 Next 템플릿의 next/font/google */
-export const DEFAULT_EGRESS_ALLOW = [
-  'registry.npmjs.org',
-  'fonts.googleapis.com',
-  'fonts.gstatic.com',
-  'repo.maven.apache.org',
-  'repo1.maven.org',
-  'plugins.gradle.org',
-  'plugins-artifacts.gradle.org',
-  'services.gradle.org',
-  'downloads.gradle.org',
-  'pypi.org',
-  'files.pythonhosted.org',
-];
-
-/** managed 서비스가 edge에서 공개되는 포트. 서비스 순서로 정해 여러 서비스가 같은 컨테이너 포트를 써도 겹치지 않는다 */
-export function edgePortFor(project: LoadedProject, service: string): number {
-  const index = project.managed.findIndex(([name]) => name === service);
-  if (index === -1) throw new Error(`'${service}'은(는) managed 서비스가 아닙니다`);
-  return EDGE_FIRST_PORT + index;
-}
 
 /**
  * 사용자의 compose 파일은 건드리지 않고 덧씌울 설정.
@@ -45,33 +21,16 @@ export function buildOverride(
   { edgeScript = '', runtime }: { edgeScript?: string; runtime?: string } = {},
 ) {
   const composeServices = project.composeServices ?? project.managed.map(([name]) => name);
-  const proxy = `http://${EDGE_SERVICE}:${EDGE_PROXY_PORT}`;
   const externals = project.external ?? [];
   // 등록한 사내 API 이름은 edge의 별칭이므로 HTTP 프록시(3128)를 거치지 않고 바로 부른다
-  const direct = ['localhost', '127.0.0.1', ...composeServices, ...externals.map(([name]) => name)];
-  const proxyEnvironment = {
-    HTTP_PROXY: proxy,
-    HTTPS_PROXY: proxy,
-    http_proxy: proxy,
-    https_proxy: proxy,
-    NO_PROXY: direct.join(','),
-    no_proxy: direct.join(','),
-    // JVM(Gradle, 앱)은 프록시 환경 변수를 읽지 않으므로 시스템 속성으로 넘긴다
-    JAVA_TOOL_OPTIONS: [
-      `-Dhttp.proxyHost=${EDGE_SERVICE}`,
-      `-Dhttp.proxyPort=${EDGE_PROXY_PORT}`,
-      `-Dhttps.proxyHost=${EDGE_SERVICE}`,
-      `-Dhttps.proxyPort=${EDGE_PROXY_PORT}`,
-      `-Dhttp.nonProxyHosts=${direct.join('|')}`,
-    ].join(' '),
-  };
+  const environment = proxyEnvironment(directHosts(project, composeServices));
 
   // 프록시가 듣기 전에 서비스가 뜨면 첫 다운로드(corepack의 pnpm 등)가 연결 거부로 실패하고 컨테이너가 끝난다
   const waitForEdge = { [EDGE_SERVICE]: { condition: 'service_healthy' } };
   // gVisor(runsc) 같은 런타임은 에이전트 코드가 도는 서비스와 샌드박스 네트워크에 노출된 edge에 모두 건다
   const isolation = runtime ? { runtime } : {};
   const services: Record<string, Record<string, unknown>> = Object.fromEntries(
-    composeServices.map((name) => [name, { networks: [SANDBOX_NETWORK], environment: proxyEnvironment, depends_on: waitForEdge, ...isolation }]),
+    composeServices.map((name) => [name, { networks: [SANDBOX_NETWORK], environment, depends_on: waitForEdge, ...isolation }]),
   );
   for (const [name] of project.managed) {
     services[name] = { ...services[name], labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name } };
@@ -85,19 +44,14 @@ export function buildOverride(
     }
   }
 
-  const forwards = project.managed.map(([name, service]) => `${edgePortFor(project, name)}=${name}:${service.port}`);
   services[EDGE_SERVICE] = {
     image: EDGE_IMAGE,
     ...isolation,
     // compose는 command 안의 $도 변수로 치환하므로 스크립트의 $를 $$로 적는다
     command: ['node', '--input-type=module', '-e', edgeScript.replaceAll('$', '$$$$')],
     environment: {
-      EDGE_MAIN: '1',
-      EDGE_FORWARDS: forwards.join(','),
-      EDGE_ALLOW: [...DEFAULT_EGRESS_ALLOW, ...(project.egress ?? [])].join(','),
-      EDGE_CALLERS: composeServices.join(','),
       // compose는 environment 값의 $도 치환하므로 $$로 적는다
-      EDGE_EXTERNALS: JSON.stringify(externals.map(([name, service]) => ({ name, baseUrl: service.baseUrl, policy: service.policy }))).replaceAll('$', '$$$$'),
+      ...Object.fromEntries(Object.entries(edgeEnvironment(project, composeServices)).map(([key, value]) => [key, value.replaceAll('$', '$$$$')])),
       // 사내 API 인증 시크릿은 edge에만 넣는다. 값 자리를 비워 compose 프로세스 환경에서 채운다
       ...Object.fromEntries(externals.flatMap(([, service]) => (service.policy.auth ? [[service.policy.auth.secret, null]] : []))),
     },

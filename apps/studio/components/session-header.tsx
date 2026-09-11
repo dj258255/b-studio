@@ -12,6 +12,9 @@ const MODE_LABEL: Record<SessionMode, string> = {
   demo: "데모 모드",
 };
 
+/** Docker 런타임 이름(runsc)과 Kubernetes RuntimeClass 이름(gvisor) */
+const GVISOR_RUNTIMES = new Set(["runsc", "gvisor"]);
+
 export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const [stopping, setStopping] = useState(false);
 
@@ -60,12 +63,12 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           <span
             className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-muted"
             title={
-              snapshot.runtime === "runsc"
+              GVISOR_RUNTIMES.has(snapshot.runtime)
                 ? "gVisor로 격리했습니다. 파일 변경 알림이 오지 않아 미리보기는 요청이 끝나고 서비스를 다시 띄울 때 바뀝니다"
                 : `컨테이너 런타임: ${snapshot.runtime}`
             }
           >
-            {snapshot.runtime === "runsc" ? "gVisor 격리" : `런타임 ${snapshot.runtime}`}
+            {GVISOR_RUNTIMES.has(snapshot.runtime) ? "gVisor 격리" : `런타임 ${snapshot.runtime}`}
           </span>
         )}
         <span
