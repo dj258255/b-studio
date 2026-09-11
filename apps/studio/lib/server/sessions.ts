@@ -27,7 +27,7 @@ import {
   type GitAuthor,
   type ModelClient,
 } from '@b-studio/agent';
-import { describeSnapshotEvent, LocalDockerProvider, resolveSecrets, runtimeFromEnv, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
+import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import type { ExportResult, ProxyResponse, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
@@ -112,8 +112,9 @@ export async function createSession(projectId: string): Promise<SessionSnapshot>
   const project = await loadProject(workDir);
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
-  const runtime = runtimeFromEnv();
-  const sandbox = await new LocalDockerProvider({ runtime }).create(project, { secrets: await resolveSecrets(project) });
+  const provider = providerFromEnv();
+  const runtime = provider.isolation;
+  const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
 
   const session: Session = {
     snapshot: {

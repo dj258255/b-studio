@@ -111,8 +111,11 @@ export class LocalDockerProvider implements SandboxProvider {
   readonly name = 'local-docker';
   readonly #options: LocalDockerProviderOptions;
 
+  readonly isolation: string | undefined;
+
   constructor(options: LocalDockerProviderOptions = {}) {
     this.#options = options;
+    this.isolation = options.runtime;
   }
 
   async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {

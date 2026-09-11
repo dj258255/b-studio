@@ -29,6 +29,7 @@
 - [ADR-025 시크릿 주입과 가림: 값은 보이지 않게 넣고, 새는 경로를 막는다](#adr-025-시크릿-주입과-가림-값은-보이지-않게-넣고-새는-경로를-막는다)
 - [ADR-026 정책 프록시: 사내 API는 edge를 거쳐서만 부른다](#adr-026-정책-프록시-사내-api는-edge를-거쳐서만-부른다)
 - [ADR-027 격리 강화: 운영자가 고르는 컨테이너 런타임과 gVisor](#adr-027-격리-강화-운영자가-고르는-컨테이너-런타임과-gvisor)
+- [ADR-028 Kubernetes 제공자: 서비스마다 agent-sandbox Sandbox를 둔다](#adr-028-kubernetes-제공자-서비스마다-agent-sandbox-sandbox를-둔다)
 
 ---
 
@@ -778,6 +779,69 @@ Docker 호스트의 가짜 사내 API를 예제 복사본에 등록했습니다.
 - 파일을 고친 즉시 미리보기가 바뀌지 않습니다. 요청이 끝나고 서비스를 다시 띄울 때 바뀝니다.
 - runsc 설치와 Docker 데몬 등록은 운영자가 합니다. 중첩 가상화 제약 등으로 gVisor를 돌릴 수 없는 호스트에서는 쓸 수 없습니다.
 - JVM과 Postgres를 gVisor에서 띄운 결과는 아직 없습니다.
+
+---
+
+## ADR-028 Kubernetes 제공자: 서비스마다 agent-sandbox Sandbox를 둔다
+
+### 맥락
+- 로컬 Docker 제공자는 개발 PC나 서버 한 대를 위한 구현입니다([ADR-006](#adr-006-샌드박스-제공자를-추상화하고-로컬-docker부터-구현)). 여러 사람이 쓰는 사내 운영에서는 클러스터에 샌드박스를 나눠 띄우고, 격리 런타임을 노드에서 관리하는 편이 낫습니다.
+- kubernetes-sigs/agent-sandbox(v1.0.2)는 격리된 싱글턴 워크로드를 `Sandbox` 리소스로 다룹니다. `podTemplate`, 안정적인 이름을 주는 `service`, `runtimeClassName`을 지원합니다.
+- 실행 정의는 계속 표준 `compose.yaml`이어야 합니다([ADR-004](#adr-004-새-dsl을-만들지-않는다-compose--openapi-위의-얇은-층)).
+
+### 설계 전 실험
+kind v0.32.0(Kubernetes v1.36.1, containerd v2.3.1)에 agent-sandbox v1.0.2를 설치하고 확인했습니다. 실험 클러스터는 확인 뒤 지웠습니다.
+
+| 확인 | 결과 |
+|---|---|
+| gVisor 등록 | containerd는 v2.3.1이지만 kind가 만든 설정은 `version = 2`였습니다. `io.containerd.grpc.v1.cri` 경로에 runsc를 등록하고 RuntimeClass `gvisor`를 만들었습니다 |
+| gVisor Pod | 커널 `4.19.0-gvisor`, 클러스터 DNS 동작. Docker와 달리 기본 네트워크 모드로도 이름을 풀었습니다 |
+| `Sandbox`의 `service: true` | 헤드리스 Service가 생기고, 다른 Pod에서 `http://web:8080`으로 응답했습니다 |
+| NetworkPolicy (kindnet) | 네임스페이스 안과 DNS만 허용하자 `1.1.1.1:443`이 차단되고, 네임스페이스 안 연결은 유지됐습니다 |
+| `kubectl port-forward` | runc Pod는 2초 만에 응답했습니다. gVisor Pod는 "failed to connect to localhost:8080 inside namespace ...: connection refused"로 실패했습니다 |
+| Pod 삭제 | 컨트롤러가 Pod를 다시 만들어 2초 뒤 준비됐습니다 |
+| Secret 환경 변수, `exec -i` 표준 입력 | gVisor Pod 안에서 동작했습니다 |
+| hostPath (kind `extraMounts`) | 호스트에서 고친 파일이 Pod 안에서 곧바로 보였습니다 |
+
+### 결정
+- **세션은 네임스페이스 하나, compose 서비스마다 같은 이름의 `Sandbox`(`service: true`)를 둡니다.** edge도 `b-studio-edge` Sandbox로 둡니다. compose에서처럼 서비스 이름으로 연결하고, 정책 프록시([ADR-026](#adr-026-정책-프록시-사내-api는-edge를-거쳐서만-부른다))도 요청 IP로 호출한 서비스를 그대로 알아봅니다. 등록한 사내 API 이름은 edge를 가리키는 Service로 만듭니다.
+- **compose 해석은 `docker compose config --format json`에 맡깁니다.** 변수 치환, 상대 경로, 짧은 문법을 정규화한 결과만 번역합니다.
+- **격리:** 서비스 Pod에는 운영자가 고른 RuntimeClass를 겁니다. **edge는 기본 런타임으로 둡니다.** port-forward가 gVisor Pod의 포트를 보지 못해 미리보기를 공개할 수 없기 때문입니다. edge에서는 b-studio 코드만 돕니다.
+- **네트워크:** NetworkPolicy `sandbox-isolation`은 네임스페이스 안과 DNS만 허용합니다. `edge-egress`는 edge만 밖으로 나가게 합니다. 어느 호스트를 허용할지는 edge가 판단합니다([ADR-024](#adr-024-네트워크-격리-샌드박스의-출입구를-하나로-만든다)).
+- **미리보기와 준비 확인:** edge Pod로 `kubectl port-forward`를 루프백에 열고, 끊기면 다시 엽니다. 서비스를 재시작해도 edge는 그대로라 포트가 유지됩니다.
+- **재시작:** Pod를 지우면 컨트롤러가 다시 만듭니다. 소스는 hostPath로 마운트돼 새 Pod가 바뀐 코드로 뜹니다.
+- **시크릿:** `b-studio-secrets` Secret은 kubectl 표준 입력으로만 만들고 `secretKeyRef`로 넣습니다. 사내 API 인증 시크릿은 edge에만 넣습니다.
+- **이미지:** build 서비스는 호스트 Docker로 빌드한 뒤 kind 클러스터에 올리거나(`kind load`) 레지스트리에 푸시합니다.
+- **볼륨:** 바인드 마운트는 설정한 호스트 경로=노드 경로 매핑으로 hostPath가 됩니다. external(공유 캐시)은 노드의 `/var/lib/b-studio/cache/<이름>`, 나머지는 emptyDir입니다. 매핑에 없는 바인드 경로는 적용 전에 거부합니다.
+- **상태:** Pod 상태, 재시작 여부, 직전 종료의 `OOMKilled`를 읽습니다. CPU·메모리 사용량은 metrics-server가 필요해 비워 둡니다.
+- **기동 순서:** 서비스 Pod마다 busybox init 컨테이너가 edge 프록시에 연결될 때까지 기다립니다. compose `depends_on`에 해당하며, 없으면 edge보다 먼저 뜬 서비스가 edge 이름을 풀지 못하고 종료했습니다([트러블슈팅 20](troubleshooting.md#20-kubernetes에서-web이-edge-이름을-풀지-못해-기동-14초-만에-종료됨)).
+- **port-forward 다시 열기:** 요청이 중간에 끊긴 kubectl port-forward는 살아 있어도 이후 일부 요청이 멈춥니다. 그래서 기동과 재시작의 준비 확인이 끝나면 같은 로컬 포트로 다시 엽니다. kubectl이 스트림 생성 에러를 내면 그때도 다시 엽니다([트러블슈팅 21](troubleshooting.md#21-kubernetes-미리보기-요청이-3번에-2번꼴로-멈춤)).
+- **선택:** `B_STUDIO_SANDBOX_PROVIDER=kubernetes`와 설정 환경 변수로 고르며, 스튜디오와 CLI가 같은 함수를 씁니다. 샌드박스를 만들기 전에 agent-sandbox CRD와 RuntimeClass가 있는지 확인합니다.
+
+### 검증 결과
+kind 클러스터에 gVisor RuntimeClass와 agent-sandbox v1.0.2를 설치했습니다. web 서비스 하나와 시크릿 하나를 선언한 프로젝트를 `providerFromEnv()`로 만든 제공자로 띄웠습니다.
+
+| 확인 | 결과 |
+|---|---|
+| 기동 | 35.8초 만에 준비. 이미지 빌드와 `kind load`, Secret·Sandbox 적용, edge 대기, pnpm 설치를 포함합니다(클러스터 준비 37초는 별도) |
+| 서비스 격리 | web Pod 안 커널 `4.19.0-gvisor` |
+| 시크릿 | `exec` 출력은 `[PAYMENT_API_KEY 가림]`, 컨테이너 안 값은 24자 |
+| 네트워크 | web Pod에서 `1.1.1.1:443`에 직접 연결하면 시간 초과(NetworkPolicy). edge 프록시로 `example.com`에 연결하면 403 |
+| 외부 접속 기록 | pnpm 설치는 프록시로 10.4초(허용 370건). `egressDenials()`가 example.com 거부를 찾음 |
+| 미리보기 | 기동 직후 요청 12번 12/12. web 재시작 뒤에도 같은 주소로 12/12 |
+| 파일 수정과 재시작 | 반영 확인 94ms, 재시작 17.2초 뒤 바뀐 화면 |
+| 로그와 상태 | 로그 430줄(edge, web). Pod 상태와 edge 한도(128MiB, CPU 0.5) |
+| 정리 | 네임스페이스 삭제 10.4초 |
+
+실측 중에 두 문제를 발견해 고쳤습니다. 서비스가 edge보다 먼저 떠 종료한 문제(트러블슈팅 20)와, 준비 확인을 받은 port-forward가 멈춘 문제(트러블슈팅 21)입니다.
+
+### 감수한 트레이드오프
+- port-forward를 다시 여는 1초 남짓 동안에는 미리보기 요청이 실패할 수 있습니다.
+- 소스를 hostPath로 마운트하므로 단일 노드 개발 클러스터(kind 등)에서만 동작합니다. 다중 노드 클러스터에서는 소스를 동기화할 방식이 따로 필요합니다.
+- 기동 가속용 스냅샷 볼륨([ADR-021](#adr-021-기동-최적화-입력-파일-해시로-찾는-스냅샷-볼륨))이 없습니다. 전용 볼륨은 emptyDir라 Pod를 다시 만들면 설치 단계가 다시 돕니다(공유 캐시로 내려받기는 줄어듭니다).
+- edge는 gVisor 격리를 받지 않습니다.
+- 리소스 탭에 CPU·메모리 사용량이 나오지 않습니다.
+- compose `depends_on` 순서를 보장하지 않고, 먼저 뜬 서비스가 실패하면 컨테이너 재시작에 맡깁니다.
 
 ---
 

@@ -1,5 +1,5 @@
 import { styleText } from 'node:util';
-import { describeSnapshotEvent, LocalDockerProvider, resolveSecrets, runtimeFromEnv, type Sandbox, type ServiceEndpoint } from '@b-studio/sandbox';
+import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { createLabeler, describe, once, pipeLogs, print, printEndpoints, reportStatus, type Label } from './ui';
 
@@ -27,7 +27,7 @@ export async function runSandboxSession(
   { keep, followLogs }: SessionOptions,
   body: (context: SessionContext) => Promise<number>,
 ): Promise<number> {
-  const sandbox = await new LocalDockerProvider({ runtime: runtimeFromEnv() }).create(project, { secrets: await resolveSecrets(project) });
+  const sandbox = await providerFromEnv().create(project, { secrets: await resolveSecrets(project) });
   const label = createLabeler(project);
   const stop = new AbortController();
 
