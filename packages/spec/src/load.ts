@@ -27,6 +27,10 @@ export interface LoadedProject {
   databases: Array<[name: string, database: DatabaseSpec & { dependents: string[] }]>;
   /** compose 서비스 이름 → 컨테이너 한도 */
   resources: Record<string, ResourceLimit>;
+  /** compose 파일의 모든 서비스 이름 (부가 서비스 포함) */
+  composeServices: string[];
+  /** 기본 패키지 저장소 외에 외부 접속을 허용할 호스트 */
+  egress: string[];
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -107,7 +111,17 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     .filter(([, volume]) => volume?.external === true)
     .map(([key, volume]) => volume?.name ?? key);
 
-  return { root, spec, composePath, managed, sharedVolumes, databases, resources: spec.resources ?? {} };
+  return {
+    root,
+    spec,
+    composePath,
+    managed,
+    sharedVolumes,
+    databases,
+    resources: spec.resources ?? {},
+    composeServices: [...composeServices],
+    egress: spec.network?.egress ?? [],
+  };
 }
 
 /** compose depends_on은 목록(["db"])이나 맵({ db: { condition } })으로 쓴다 */

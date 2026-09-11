@@ -1,39 +1,84 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { buildOverride, parseContainerState, parseHostPort, parseLogLine, parseSyncOutput } from './format';
+import {
+  buildOverride,
+  DEFAULT_EGRESS_ALLOW,
+  EDGE_SERVICE,
+  edgePortFor,
+  parseContainerState,
+  parseEgressDenial,
+  parseHostPort,
+  parseLogLine,
+  parseSyncOutput,
+} from './format';
 
-describe('buildOverride', () => {
-  it('managed 서비스 포트를 루프백의 빈 포트에 공개한다', () => {
-    const project = {
-      managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi' }]],
-    } as unknown as LoadedProject;
+const ORDERS = {
+  managed: [
+    ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' }],
+    ['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi' }],
+  ],
+  composeServices: ['web', 'api', 'db'],
+  egress: ['api.slack.com'],
+  resources: { api: { memory: '1536m', cpus: 2 }, db: { memory: '256m' } },
+} as unknown as LoadedProject;
 
-    expect(buildOverride(project, 'studio-orders-abc123')).toEqual({
-      services: {
-        api: {
-          ports: ['127.0.0.1::8080'],
-          labels: { 'b-studio.sandbox': 'studio-orders-abc123', 'b-studio.service': 'api' },
-        },
-      },
+describe('buildOverride 네트워크 격리', () => {
+  it('모든 서비스를 internal 네트워크에만 붙이고 포트는 edge만 루프백에 공개한다', () => {
+    const override = buildOverride(ORDERS, 's1');
+
+    expect(override.networks).toEqual({ 'b-studio-sandbox': { internal: true }, 'b-studio-egress': {} });
+    for (const name of ['web', 'api', 'db']) {
+      expect(override.services[name]).toMatchObject({
+        networks: ['b-studio-sandbox'],
+        depends_on: { [EDGE_SERVICE]: { condition: 'service_healthy' } },
+      });
+      expect(override.services[name]).not.toHaveProperty('ports');
+    }
+    expect(override.services[EDGE_SERVICE]).toMatchObject({
+      networks: ['b-studio-sandbox', 'b-studio-egress'],
+      ports: ['127.0.0.1::20000', '127.0.0.1::20001'],
+      environment: { EDGE_FORWARDS: '20000=web:3000,20001=api:8080' },
     });
+    expect(edgePortFor(ORDERS, 'api')).toBe(20001);
+  });
+
+  it('기본 패키지 저장소와 studio.yaml의 허용 호스트를 edge에 넘긴다', () => {
+    const allow = (buildOverride(ORDERS, 's1').services[EDGE_SERVICE]!.environment as Record<string, string>).EDGE_ALLOW;
+    expect(allow?.split(',')).toEqual([...DEFAULT_EGRESS_ALLOW, 'api.slack.com']);
+  });
+
+  it('서비스끼리는 프록시를 거치지 않고, 밖으로 나가는 HTTP는 JVM까지 edge 프록시를 쓴다', () => {
+    const environment = buildOverride(ORDERS, 's1').services.api!.environment as Record<string, string>;
+    expect(environment.HTTPS_PROXY).toBe('http://b-studio-edge:3128');
+    expect(environment.NO_PROXY).toBe('localhost,127.0.0.1,web,api,db');
+    expect(environment.JAVA_TOOL_OPTIONS).toContain('-Dhttps.proxyHost=b-studio-edge');
+    expect(environment.JAVA_TOOL_OPTIONS).toContain('-Dhttp.nonProxyHosts=localhost|127.0.0.1|web|api|db');
+  });
+
+  it('compose가 스크립트의 $를 변수로 치환하지 않게 적는다', () => {
+    const command = buildOverride(ORDERS, 's1', { edgeScript: 'console.log(`${a}` + $b)' }).services[EDGE_SERVICE]!.command as string[];
+    expect(command.at(-1)).toBe('console.log(`$${a}` + $$b)');
+  });
+
+  it('managed 서비스에는 라벨을, 부가 서비스까지 deploy 형식 자원 한도를 건다', () => {
+    const { services } = buildOverride(ORDERS, 's1');
+    expect(services.api).toMatchObject({
+      labels: { 'b-studio.sandbox': 's1', 'b-studio.service': 'api' },
+      deploy: { resources: { limits: { memory: '1536m', cpus: '2' } } },
+    });
+    expect(services.db).toMatchObject({ deploy: { resources: { limits: { memory: '256m' } } } });
+    expect(services.db).not.toHaveProperty('labels');
   });
 });
 
-describe('buildOverride 자원 한도', () => {
-  it('managed와 부가 서비스 모두에 deploy 형식으로 한도를 건다', () => {
-    const project = {
-      managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi' }]],
-      resources: { api: { memory: '1536m', cpus: 2 }, db: { memory: '256m' } },
-    } as unknown as LoadedProject;
-
-    expect(buildOverride(project, 's1').services).toEqual({
-      api: {
-        ports: ['127.0.0.1::8080'],
-        labels: { 'b-studio.sandbox': 's1', 'b-studio.service': 'api' },
-        deploy: { resources: { limits: { memory: '1536m', cpus: '2' } } },
-      },
-      db: { deploy: { resources: { limits: { memory: '256m' } } } },
-    });
+describe('parseEgressDenial', () => {
+  it('edge 감사 로그에서 거부 기록만 읽는다', () => {
+    expect(
+      parseEgressDenial('{"edge":"egress","decision":"deny","host":"example.com","port":443,"reason":"허용 목록에 없는 호스트나 포트","at":"2026-09-11T01:00:00.000Z"}'),
+    ).toEqual({ host: 'example.com', port: 443, reason: '허용 목록에 없는 호스트나 포트', at: new Date('2026-09-11T01:00:00.000Z') });
+    expect(parseEgressDenial('{"edge":"egress","decision":"allow","host":"registry.npmjs.org","port":443,"at":"2026-09-11T01:00:00.000Z"}')).toBeUndefined();
+    expect(parseEgressDenial('{"edge":"started","forwards":[]}')).toBeUndefined();
+    expect(parseEgressDenial('{"edge":"egress", 잘린 줄')).toBeUndefined();
   });
 });
 

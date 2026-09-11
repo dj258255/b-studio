@@ -88,6 +88,14 @@ export interface ServiceUsage {
   oomKilled: boolean;
 }
 
+/** 샌드박스 밖으로 나가려다 막힌 요청 (허용 목록에 없는 호스트, 사설 주소로 풀리는 이름 등) */
+export interface EgressDenial {
+  host: string;
+  port?: number;
+  reason: string;
+  at: Date;
+}
+
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -113,6 +121,8 @@ export interface Sandbox {
   /** 모든 컨테이너의 자원 사용량. 실행 중이 아닌 컨테이너는 종료 코드와 메모리 부족 종료 여부만 담는다 */
   stats(): Promise<ServiceUsage[]>;
   logs(options?: LogOptions): AsyncIterable<LogLine>;
+  /** since 이후 외부 접속이 막힌 기록. 네트워크를 제한하지 않는 제공자는 구현하지 않는다 */
+  egressDenials?(options?: { since?: Date }): Promise<EgressDenial[]>;
   /** input은 명령의 표준 입력으로 넘긴다 (예: 데이터베이스 덤프 복원) */
   exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string }): Promise<ExecResult>;
   destroy(): Promise<void>;

@@ -25,6 +25,7 @@ You change a real project that is already running in an isolated sandbox. Every 
 Project "${project.spec.name}" services:
 ${services}
 Supporting containers from compose.yaml (for example the database) are running too.
+The sandbox network is isolated: services reach each other by service name, but outbound HTTP(S) only reaches the package registries and hosts listed in studio.yaml \`network.egress\`. If a feature needs another external host, say so in your summary instead of working around the block.
 
 How you work:
 - Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.

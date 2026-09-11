@@ -86,8 +86,16 @@ function buildStages(files: string[], report?: VerificationReport): Stage[] {
       lines:
         report.restarted.length === 0
           ? [{ text: "재시작할 서비스가 없습니다" }]
-          : report.restarted.map((check) =>
-              check.ready ? { text: `${check.service} 준비됨`, tone: "pass" as const } : { text: `${check.service} ${check.error ?? "실패"}`, tone: "fail" as const },
+          : report.restarted.flatMap((check): { text: string; tone: "pass" | "fail" }[] =>
+              check.ready
+                ? [{ text: `${check.service} 준비됨`, tone: "pass" as const }]
+                : [
+                    { text: `${check.service} ${check.error ?? "실패"}`, tone: "fail" as const },
+                    // 의존성 다운로드가 허용 목록에 막혀 실패했다면 코드가 아니라 studio.yaml을 고쳐야 한다
+                    ...(check.blockedEgress?.length
+                      ? [{ text: `막힌 외부 접속: ${check.blockedEgress.join(", ")} (studio.yaml network.egress에 추가해야 접속할 수 있습니다)`, tone: "fail" as const }]
+                      : []),
+                  ],
             ),
       logs: report.restarted.filter((check) => check.logTail?.length).map((check) => ({ service: check.service, lines: check.logTail ?? [] })),
     },

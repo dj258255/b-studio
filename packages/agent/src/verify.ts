@@ -24,6 +24,8 @@ export interface ServiceCheck {
   retried?: boolean;
   /** 메모리 한도를 넘어 커널이 종료시켰는지. 코드 문제가 아니라는 신호다 */
   oomKilled?: boolean;
+  /** 재시작하는 동안 샌드박스 밖으로 나가려다 막힌 요청. 의존성 다운로드가 막혔다면 코드 문제가 아니다 */
+  blockedEgress?: string[];
 }
 
 export interface ContractCheck {
@@ -144,6 +146,7 @@ export async function restartServicesFor(
 }
 
 async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptions): Promise<ServiceCheck> {
+  const startedAt = new Date();
   try {
     await sandbox.restart(service, start);
     return { service, ready: true };
@@ -151,12 +154,22 @@ async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptio
     // 메모리 부족으로 죽었는지 먼저 알려야 에이전트가 코드를 고치려 들지 않는다
     const usage = (await sandbox.stats().catch(() => [])).find((candidate) => candidate.service === service);
     const logTail = await recentLogs(sandbox, service);
+    const blocked = await blockedEgressSince(sandbox, startedAt);
+    const extra = blocked.length > 0 ? { blockedEgress: blocked } : {};
     if (usage?.oomKilled) {
       const limit = usage.memoryLimitBytes ? ` (${formatBytes(usage.memoryLimitBytes)})` : '';
-      return { service, ready: false, error: `메모리 한도${limit}를 넘어 종료됐습니다. ${describe(error)}`, logTail, oomKilled: true };
+      return { service, ready: false, error: `메모리 한도${limit}를 넘어 종료됐습니다. ${describe(error)}`, logTail, oomKilled: true, ...extra };
     }
-    return { service, ready: false, error: describe(error), logTail };
+    return { service, ready: false, error: describe(error), logTail, ...extra };
   }
+}
+
+/** 막힌 외부 접속을 "호스트:포트 (이유)"로 중복 없이 모은다 */
+async function blockedEgressSince(sandbox: Sandbox, startedAt: Date): Promise<string[]> {
+  // 스튜디오 서버와 Docker VM의 시계가 조금 어긋날 수 있어 여유를 둔다
+  const since = new Date(startedAt.getTime() - 5_000);
+  const denials = (await sandbox.egressDenials?.({ since }).catch(() => [])) ?? [];
+  return [...new Set(denials.map((denial) => `${denial.host}${denial.port ? `:${denial.port}` : ''} (${denial.reason})`))];
 }
 
 /** 호스트에서 이미 사라진 파일. 되돌리기나 에이전트의 삭제로 생긴다 */
@@ -212,6 +225,9 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
   for (const check of report.restarted) {
     const retried = check.retried ? ' (지운 파일 반영을 기다려 한 번 더 재시작)' : '';
     lines.push(check.ready ? `- ${check.service}: 재시작 후 준비 완료${retried}` : `- ${check.service}: 준비 실패${retried} — ${check.error}`);
+    if (check.blockedEgress?.length) {
+      lines.push(`  막힌 외부 접속 (studio.yaml network.egress에 없는 호스트): ${check.blockedEgress.join(', ')}`);
+    }
     if (check.logTail?.length) lines.push('  마지막 로그:', ...check.logTail.map((line) => `    ${line}`));
   }
 

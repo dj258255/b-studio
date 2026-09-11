@@ -12,6 +12,7 @@ import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
 import type {
   ContainerState,
+  EgressDenial,
   ExecResult,
   LogLine,
   LogOptions,
@@ -23,7 +24,16 @@ import type {
   SyncOptions,
   SyncResult,
 } from '../types';
-import { buildOverride, parseContainerState, parseHostPort, parseLogLine, parseSyncOutput } from './format';
+import {
+  buildOverride,
+  EDGE_SERVICE,
+  edgePortFor,
+  parseContainerState,
+  parseEgressDenial,
+  parseHostPort,
+  parseLogLine,
+  parseSyncOutput,
+} from './format';
 import { mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
@@ -36,6 +46,9 @@ import {
 } from './snapshots';
 
 const execFileAsync = promisify(execFile);
+
+/** 샌드박스 출입구 스크립트. 원격 Docker 호스트에서도 돌도록 파일을 마운트하지 않고 내용을 compose 설정에 넣는다 */
+const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 
 /** 파일 반영 확인에 쓰는 작은 이미지. 서비스 컨테이너가 죽어 있어도 확인할 수 있도록 별도 컨테이너로 돌린다 */
 const SYNC_HELPER_IMAGE = 'busybox:1.37';
@@ -98,7 +111,8 @@ export class LocalDockerProvider implements SandboxProvider {
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
     const workDir = await mkdtemp(path.join(tmpdir(), 'b-studio-'));
     const overridePath = path.join(workDir, 'compose.override.yaml');
-    await writeFile(overridePath, stringify(buildOverride(project, id)));
+    const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
+    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript })));
     return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options);
   }
 }
@@ -186,7 +200,7 @@ class LocalDockerSandbox implements Sandbox {
 
     for (let checks = 1; ; checks++) {
       const result = await this.#docker(
-        ['run', '--rm', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...files],
+        ['run', '--rm', '--network', 'none', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...files],
         signal,
       );
       if (result.exitCode !== 0) throw new SandboxError('샌드박스 파일 반영 확인에 실패했습니다', result.stderr);
@@ -204,7 +218,8 @@ class LocalDockerSandbox implements Sandbox {
 
   async endpoint(name: string): Promise<ServiceEndpoint> {
     const service = this.#managed(name);
-    const { stdout } = await this.#composeOrThrow(['port', name, String(service.port)]);
+    // 서비스는 internal 네트워크에 있어 포트를 공개할 수 없으므로 edge가 대신 공개한 포트를 쓴다
+    const { stdout } = await this.#composeOrThrow(['port', EDGE_SERVICE, String(edgePortFor(this.project, name))]);
     return { service: name, containerPort: service.port, url: `http://127.0.0.1:${parseHostPort(stdout)}` };
   }
 
@@ -248,6 +263,15 @@ class LocalDockerSandbox implements Sandbox {
     } finally {
       child.kill();
     }
+  }
+
+  async egressDenials({ since }: { since?: Date } = {}): Promise<EgressDenial[]> {
+    const denials: EgressDenial[] = [];
+    for await (const line of this.logs({ services: [EDGE_SERVICE], tail: 500, follow: false })) {
+      const denial = parseEgressDenial(line.text);
+      if (denial && (!since || denial.at >= since)) denials.push(denial);
+    }
+    return denials;
   }
 
   exec(name: string, command: string[], { signal, input }: { signal?: AbortSignal; input?: string } = {}): Promise<ExecResult> {
@@ -330,7 +354,7 @@ class LocalDockerSandbox implements Sandbox {
     const copied =
       created.exitCode === 0
         ? await this.#docker(
-            ['run', '--rm', '--volume', `${plan.snapshot}:/from:ro`, '--volume', `${plan.sandboxVolume}:/to`, SYNC_HELPER_IMAGE, 'sh', '-c', SEED_SCRIPT],
+            ['run', '--rm', '--network', 'none', '--volume', `${plan.snapshot}:/from:ro`, '--volume', `${plan.sandboxVolume}:/to`, SYNC_HELPER_IMAGE, 'sh', '-c', SEED_SCRIPT],
             signal,
           )
         : created;
@@ -365,7 +389,7 @@ class LocalDockerSandbox implements Sandbox {
       if (created.exitCode !== 0) throw new SandboxError('스냅샷 볼륨을 만들지 못했습니다', created.stderr);
 
       const copied = await this.#docker([
-        'run', '--rm', '--volume', `${plan.sandboxVolume}:/from:ro`, '--volume', `${plan.snapshot}:/to`, SYNC_HELPER_IMAGE, 'sh', '-c', CAPTURE_SCRIPT,
+        'run', '--rm', '--network', 'none', '--volume', `${plan.sandboxVolume}:/from:ro`, '--volume', `${plan.snapshot}:/to`, SYNC_HELPER_IMAGE, 'sh', '-c', CAPTURE_SCRIPT,
       ]);
       if (copied.exitCode !== 0) {
         await this.#docker(['volume', 'rm', '--force', plan.snapshot]);
