@@ -55,7 +55,18 @@ import {
 } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import { addTokens, formatTokenCount, hasTokens, parseTokenLimit, totalTokens } from '@/lib/usage';
+import {
+  addTokens,
+  describeWindow,
+  formatTokenCount,
+  hasTokens,
+  parseTokenLimit,
+  parseUsageWindow,
+  parseUserTokenLimit,
+  subtractTokens,
+  totalTokens,
+  type UsageWindow,
+} from '@/lib/usage';
 import type {
   CodeFile,
   CodeSearch,
@@ -73,6 +84,7 @@ import type {
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
 import { searchFiles, walkFiles } from './code-files';
+import { addUserUsage, userTokens } from './usage-state';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -100,8 +112,14 @@ interface ActiveRun {
   /** 요청을 시작할 때의 세션 토큰 합계 */
   baseTokens?: AgentUsage;
   tokens: AgentUsage;
-  /** 요청을 멈춘 이유. 사용자가 취소했거나 세션 토큰 한도에 도달했다 */
+  /** 요청을 보낸 사람. 사용량을 세션을 만든 사람이 아니라 이 사람에게 붙인다 */
+  by?: string;
+  /** 이미 이 사람 몫으로 더한 양. 토큰 이벤트는 실행 누적값을 주므로 늘어난 만큼만 더한다 */
+  charged?: AgentUsage;
+  /** 요청을 멈춘 이유. 사용자가 취소했거나 토큰 한도에 도달했다 */
   stopReason?: 'user' | 'budget';
+  /** 한도로 멈췄을 때 어느 한도인지 */
+  limitKind?: 'session' | 'user';
 }
 
 interface Session {
@@ -424,6 +442,14 @@ export function sendMessage(
   if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit) {
     throw new StudioError(409, `이 세션은 토큰 한도(${formatTokenCount(limit)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`);
   }
+  // 사람 한도는 세션과 따로 센다. 새 세션을 만들어도 같은 사람이면 그 기간 안에서는 더 쓸 수 없다
+  const personal = userTokenBudget(by);
+  if (personal && personal.used >= personal.limit) {
+    throw new StudioError(
+      409,
+      `${describeWindow(personal.window)} 쓸 수 있는 토큰 한도(${formatTokenCount(personal.limit)})에 도달해 새 요청을 받지 않습니다. 기간이 바뀐 뒤에 다시 요청하세요`,
+    );
+  }
 
   const plan = planRun(session, request, allowBreaking, intent);
   const run: ActiveRun = {
@@ -431,6 +457,7 @@ export function sendMessage(
     cancel: new AbortController(),
     baseTokens: session.snapshot.tokens,
     tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    by,
   };
   session.run = run;
   session.snapshot.running = true;
@@ -849,10 +876,41 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   }
 }
 
+/** 사람 한도 설정과 지금까지 쓴 양. 한도를 정하지 않았거나 누가 보냈는지 모르면 undefined */
+function userTokenBudget(by: string | undefined): { used: number; limit: number; window: UsageWindow } | undefined {
+  if (!by) return undefined;
+  const limit = parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT);
+  if (limit === undefined) return undefined;
+  const window = parseUsageWindow(process.env.B_STUDIO_USER_TOKEN_WINDOW);
+  return { used: userTokens(by, window), limit, window };
+}
+
+/** 사람 몫에 늘어난 만큼만 더한다. 기록을 쓰지 못해도 요청은 계속한다 */
+async function chargeUser(run: ActiveRun, usage: AgentUsage): Promise<void> {
+  if (!run.by || parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT) === undefined) return;
+  const delta = subtractTokens(usage, run.charged);
+  run.charged = usage;
+  if (!hasTokens(delta)) return;
+  try {
+    await addUserUsage(run.by, delta, parseUsageWindow(process.env.B_STUDIO_USER_TOKEN_WINDOW));
+  } catch (error) {
+    console.error('[b-studio] 사람별 토큰 사용량을 기록하지 못했습니다', error);
+  }
+}
+
+/** 한도로 멈췄을 때 어느 한도인지 알린다. 사람 한도는 새 세션을 만들어도 풀리지 않으므로 구분해서 말한다 */
+function limitReason(run: ActiveRun, limit: number | undefined): string {
+  if (run.limitKind === 'user') {
+    const personal = userTokenBudget(run.by);
+    return `${describeWindow(personal?.window ?? 'day')} 쓸 수 있는 토큰 한도(${formatTokenCount(personal?.limit ?? 0)})에 도달해`;
+  }
+  return `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해`;
+}
+
 /** 멈춘 이유와 되돌린 결과. revertError가 있으면 되돌리지 못했다 */
 function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: string[] | undefined, revertError: unknown): string {
   if (run.stopReason === 'budget') {
-    const reason = `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해 요청을 멈췄습니다`;
+    const reason = `${limitReason(run, limit)} 요청을 멈췄습니다`;
     if (!reverted) return `${reason}. 변경을 되돌리지 못했습니다: ${describe(revertError)}`;
     return reverted.length > 0 ? `${reason}. 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : `${reason}. 바뀐 파일은 없었습니다`;
   }
@@ -862,7 +920,7 @@ function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: str
 
 /** 질문은 되돌릴 변경이 없으므로 멈춘 이유만 알린다 */
 function stoppedQuestionSummary(run: ActiveRun, limit: number | undefined): string {
-  return run.stopReason === 'budget' ? `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해 질문을 멈췄습니다` : '질문을 취소했습니다';
+  return run.stopReason === 'budget' ? `${limitReason(run, limit)} 질문을 멈췄습니다` : '질문을 취소했습니다';
 }
 
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
@@ -881,13 +939,19 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       // 서버가 요청 도중에 멈춰도 그때까지 쓴 양이 세션 파일에 남도록 합계를 바로 바꾼다
       session.snapshot.tokens = addTokens(run.baseTokens, event.usage);
       emit(session, { type: 'tokens', runId: run.id, usage: event.usage, sessionTokens: session.snapshot.tokens });
+      // 사람 몫에는 늘어난 만큼만 더한다. 세션이 여러 개여도 한 사람의 합계는 한 곳에 쌓인다
+      void chargeUser(run, event.usage);
       const limit = session.snapshot.tokenLimit;
+      const personal = userTokenBudget(run.by);
+      const overSession = limit !== undefined && totalTokens(session.snapshot.tokens) >= limit;
+      const overUser = personal !== undefined && personal.used + totalTokens(event.usage) >= personal.limit;
       // 게이트 실패를 되풀이하는 요청이 한도를 넘어 계속 토큰을 쓰지 않도록, 넘는 순간 멈추고 되돌린다
-      if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit && !run.cancel.signal.aborted) {
+      if ((overSession || overUser) && !run.cancel.signal.aborted) {
         run.stopReason = 'budget';
+        run.limitKind = overSession ? 'session' : 'user';
         session.snapshot.cancelling = 'budget';
         emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
-        run.cancel.abort(new DOMException('세션 토큰 한도에 도달했습니다', 'AbortError'));
+        run.cancel.abort(new DOMException(overSession ? '세션 토큰 한도에 도달했습니다' : '사람별 토큰 한도에 도달했습니다', 'AbortError'));
       }
     },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
