@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
@@ -74,7 +74,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
             {active.service.state !== "ready" && <RestartBanner service={active.service} />}
             <div className="min-h-0 flex-1">
               {active.service.preview === "browser" ? (
-                <BrowserPreview key={active.service.name} service={active.service} revision={view.completedRuns} />
+                <BrowserPreview key={active.service.name} sessionId={view.snapshot.id} service={active.service} revision={view.completedRuns} />
               ) : (
                 <ApiExplorer
                   key={active.service.name}
@@ -97,13 +97,36 @@ export function PreviewPanel({ view }: { view: SessionView }) {
   );
 }
 
-function BrowserPreview({ service, revision }: { service: ServiceView; revision: number }) {
+function BrowserPreview({ sessionId, service, revision }: { sessionId: string; service: ServiceView; revision: number }) {
   const [path, setPath] = useState("/");
   const [draft, setDraft] = useState("/");
   const [reloads, setReloads] = useState(0);
   // 원격 미리보기 게이트웨이를 켰으면 다른 PC에서도 열리는 주소를 쓴다
   const base = service.previewUrl ?? service.url;
-  const src = new URL(path, base).toString();
+  const load = `${base}|${path}|${reloads}|${revision}`;
+  // 게이트웨이 주소는 스튜디오 인증을 켜면 1회용 티켓을 붙여야 열리므로, 불러올 때마다 스튜디오에서 주소를 받는다
+  const [access, setAccess] = useState<{ load: string; src?: string; error?: string }>();
+  useEffect(() => {
+    if (!service.previewUrl) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/preview-access`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ service: service.name, path }),
+    })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as { url?: string; error?: string };
+        if (!cancelled) setAccess(response.ok && body.url ? { load, src: body.url } : { load, error: body.error ?? "미리보기 주소를 받지 못했습니다" });
+      })
+      .catch(() => {
+        if (!cancelled) setAccess({ load, error: "미리보기 주소를 받지 못했습니다" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [load, path, service.name, service.previewUrl, sessionId]);
+  const current = access?.load === load ? access : undefined;
+  const src = service.previewUrl ? current?.src : new URL(path, base).toString();
 
   return (
     <div className="flex h-full flex-col">
@@ -132,7 +155,13 @@ function BrowserPreview({ service, revision }: { service: ServiceView; revision:
         </button>
       </form>
       {/* 요청이 끝날 때마다, 그리고 재시작으로 주소가 바뀌면 새로 불러온다 */}
-      <iframe key={`${src}|${reloads}|${revision}`} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
+      {src ? (
+        <iframe key={load} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
+      ) : (
+        <p role={current?.error ? "alert" : "status"} className={`px-4 py-3 text-sm ${current?.error ? "text-fail" : "text-muted"}`}>
+          {current?.error ?? "미리보기를 여는 중"}
+        </p>
+      )}
     </div>
   );
 }

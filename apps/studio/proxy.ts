@@ -1,19 +1,26 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { decideRequest, PROXY_SECRET_HEADER, SESSION_COOKIE, USER_HEADER } from './lib/server/auth';
+import { readRevocations } from './lib/server/auth-state';
 
 /**
  * 모든 화면과 API 앞에서 사용자를 확인한다. 라우트는 여기서 넣은 사용자 헤더로 한 번 더 확인하고 권한을 따진다.
- * 브라우저가 보낸 내부 헤더는 지우고, 확인한 사용자만 넣어 넘긴다
+ * 브라우저가 보낸 내부 헤더는 지우고, 확인한 사용자만 넣어 넘긴다.
+ * Proxy는 Node.js 런타임에서 돌므로 로그아웃한 세션 기록을 파일에서 읽는다
  */
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
-  const decision = decideRequest({
-    method: request.method,
-    pathname,
-    search,
-    headers: request.headers,
-    cookie: request.cookies.get(SESSION_COOKIE)?.value,
-  });
+  const decision = decideRequest(
+    {
+      method: request.method,
+      pathname,
+      search,
+      headers: request.headers,
+      cookie: request.cookies.get(SESSION_COOKIE)?.value,
+    },
+    process.env,
+    Date.now(),
+    () => readRevocations(),
+  );
 
   if (decision.kind === 'redirect') return NextResponse.redirect(new URL(decision.location, request.url));
   if (decision.kind === 'reject') {

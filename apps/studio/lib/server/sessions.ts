@@ -69,10 +69,11 @@ import type {
   StudioEvent,
   WorkspaceKind,
 } from '@/lib/studio-events';
-import { authConfig } from './auth';
+import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
+import { readRevocations } from './auth-state';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
-import { createPreviewGateway, previewHost, type PreviewTarget } from './preview-gateway';
+import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import {
   archivedSnapshot,
@@ -179,6 +180,8 @@ interface Store {
   claimedFolders?: Set<string>;
   recovery?: Promise<void>;
   previewGateway?: Server;
+  /** 이미 쓴 미리보기 티켓의 임의 값과 만료 시각 */
+  previewTickets?: Map<string, number>;
   cleanupRegistered: boolean;
 }
 const globalStore = globalThis as typeof globalThis & { __bStudio?: Store };
@@ -1577,7 +1580,7 @@ function previewConfig(): PreviewConfig | undefined {
 /** HMR로 모듈이 다시 불러와져도 같은 포트를 두 번 열지 않도록 전역에 둔다 */
 function ensurePreviewGateway(config: PreviewConfig): void {
   if (store.previewGateway) return;
-  const server = createPreviewGateway({ domain: config.domain, resolve: resolvePreview });
+  const server = createPreviewGateway({ domain: config.domain, resolve: resolvePreview, access: previewAccess() });
   server.on('error', (error) => console.error('[b-studio] 미리보기 게이트웨이를 열지 못했습니다', error));
   server.listen(config.port, config.bind);
   store.previewGateway = server;
@@ -1598,6 +1601,66 @@ function previewUrlFor(session: Session, service: string): string | undefined {
   const config = previewConfig();
   if (!config) return undefined;
   return `http://${previewHost({ service, sessionId: session.snapshot.id, token: session.previewToken }, config.domain)}:${config.port}`;
+}
+
+/** 티켓은 iframe이 곧바로 여는 데만 쓰므로 짧게 둔다 */
+const PREVIEW_TICKET_MS = 60_000;
+
+/**
+ * 스튜디오 인증을 켰을 때 게이트웨이의 접근 확인. 인증을 끈 개인 PC에서는 호스트 이름의 토큰만으로 연다.
+ * 티켓은 한 번만 쓰도록 사용한 값을 만료 때까지 기억하고, 확인 중 오류가 나면 열지 않는 쪽으로 실패한다
+ */
+function previewAccess(): PreviewAccess | undefined {
+  if (authConfig().mode === 'none') return undefined;
+  const used = (store.previewTickets ??= new Map());
+  return {
+    cookieName: PREVIEW_COOKIE,
+    redeem(host, ticket) {
+      const now = Date.now();
+      for (const [nonce, expiresAt] of used) if (expiresAt <= now) used.delete(nonce);
+      try {
+        const config = authConfig();
+        const grant = verifyPreviewGrant(ticket, 'ticket', host, config, now, readRevocations());
+        if (!grant?.nonce || used.has(grant.nonce)) return undefined;
+        used.set(grant.nonce, grant.expiresAt);
+        // 미리보기 쿠키가 스튜디오 로그인보다 오래가지 않게 한다
+        const expiresAt = Math.min(now + config.sessionHours * 3_600_000, grant.sessionExpiresAt ?? Number.POSITIVE_INFINITY);
+        const cookie = signPreviewGrant('cookie', { host: grant.host, user: grant.user, sid: grant.sid, issuedAt: now, expiresAt }, config);
+        return { cookie, maxAgeSeconds: Math.max(1, Math.floor((expiresAt - now) / 1_000)) };
+      } catch (error) {
+        console.error('[b-studio] 미리보기 티켓을 확인하지 못했습니다', error);
+        return undefined;
+      }
+    },
+    allows(host, cookie) {
+      try {
+        return verifyPreviewGrant(cookie, 'cookie', host, authConfig(), Date.now(), readRevocations()) !== undefined;
+      } catch (error) {
+        console.error('[b-studio] 미리보기 쿠키를 확인하지 못했습니다', error);
+        return false;
+      }
+    },
+  };
+}
+
+/** 미리보기 iframe이 열 주소. 인증을 켰으면 게이트웨이가 그 호스트 전용 쿠키로 바꿔 줄 1회용 티켓을 붙인다 */
+export function previewAccessUrl(id: string, service: string, requestedPath: string, viewer: { user: string; sid?: string; sessionExpiresAt?: number }): string {
+  const session = requireSession(id);
+  const base = session.snapshot.services.find((candidate) => candidate.name === service)?.previewUrl;
+  if (!base) throw new StudioError(409, `${service} 서비스의 미리보기 주소가 없습니다. 원격 미리보기를 켜고 서비스가 준비된 뒤 다시 여세요`);
+  const target = safePreviewPath(requestedPath);
+  const config = authConfig();
+  if (config.mode === 'none') return new URL(target, base).toString();
+  const url = new URL(ACCESS_PATH, base);
+  const now = Date.now();
+  const ticket = signPreviewGrant(
+    'ticket',
+    { host: url.hostname, user: viewer.user, sid: viewer.sid, issuedAt: now, expiresAt: now + PREVIEW_TICKET_MS, nonce: randomBytes(16).toString('hex'), sessionExpiresAt: viewer.sessionExpiresAt },
+    config,
+  );
+  url.searchParams.set('ticket', ticket);
+  url.searchParams.set('next', target);
+  return url.toString();
 }
 
 function requireSession(id: string): Session {

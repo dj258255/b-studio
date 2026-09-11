@@ -1,4 +1,4 @@
-import http, { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type Server } from 'node:http';
+import http, { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type Server, type ServerResponse } from 'node:http';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
 
@@ -17,6 +17,21 @@ export interface PreviewTarget {
 /** 서비스 주소(예: http://127.0.0.1:33048)를 돌려준다. 세션·토큰이 맞지 않으면 undefined */
 export type PreviewResolver = (target: PreviewTarget) => Promise<string | undefined>;
 
+/**
+ * 스튜디오 인증을 켰을 때의 미리보기 접근 확인.
+ * 스튜디오가 로그인한 사람에게 1회용 티켓을 주고, 게이트웨이는 티켓을 그 호스트 전용 쿠키로 바꾼다.
+ * 호스트 이름의 토큰만 알아서는 미리보기를 볼 수 없다
+ */
+export interface PreviewAccess {
+  cookieName: string;
+  /** 티켓이 맞으면 미리보기 호스트에 줄 쿠키 값과 유지 시간 */
+  redeem(host: string, ticket: string): { cookie: string; maxAgeSeconds: number } | undefined;
+  allows(host: string, cookie: string | undefined): boolean;
+}
+
+/** 게이트웨이가 서비스 대신 답하는 경로. 서비스의 경로와 겹치지 않게 접두사를 둔다 */
+export const ACCESS_PATH = '/__b-studio/preview-access';
+
 const LABEL = /^([a-z][a-z0-9-]*?)--([0-9a-f]{8})--([0-9a-f]{32})$/;
 
 export function previewHost(target: PreviewTarget, domain: string): string {
@@ -34,11 +49,36 @@ export function parsePreviewHost(host: string | undefined, domain: string): Prev
   return { service: match[1]!, sessionId: match[2]!, token: match[3]! };
 }
 
+export function readCookie(header: string | undefined, name: string): string | undefined {
+  for (const part of (header ?? '').split(';')) {
+    const equals = part.indexOf('=');
+    if (equals > 0 && part.slice(0, equals).trim() === name) return part.slice(equals + 1).trim();
+  }
+  return undefined;
+}
+
+export function withoutCookie(header: string, name: string): string {
+  return header
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => {
+      const equals = part.indexOf('=');
+      return part && (equals < 0 ? part : part.slice(0, equals).trim()) !== name;
+    })
+    .join('; ');
+}
+
+/** 티켓을 바꾼 뒤 돌아갈 경로. 같은 호스트의 경로만 받는다 */
+export function safePreviewPath(value: string | null | undefined): string {
+  return value && value.startsWith('/') && !value.startsWith('//') && !value.startsWith('/\\') ? value : '/';
+}
+
 /**
  * 샌드박스 앱이 보기에 루프백 주소에서 온 같은 출처 요청이 되도록 Host, Origin, Referer를 바꾼다.
- * Next dev 서버는 허용하지 않은 출처의 개발용 요청(HMR)을 막는데, 템플릿은 127.0.0.1만 허용한다
+ * Next dev 서버는 허용하지 않은 출처의 개발용 요청(HMR)을 막는데, 템플릿은 127.0.0.1만 허용한다.
+ * 게이트웨이의 접근 쿠키는 샌드박스 앱이 볼 필요가 없으므로 넘기지 않는다
  */
-export function upstreamHeaders(headers: IncomingHttpHeaders, upstream: URL, publicHost: string | undefined): OutgoingHttpHeaders {
+export function upstreamHeaders(headers: IncomingHttpHeaders, upstream: URL, publicHost: string | undefined, stripCookie?: string): OutgoingHttpHeaders {
   const result: OutgoingHttpHeaders = { ...headers, host: upstream.host };
   if (headers.origin) result.origin = upstream.origin;
   if (typeof headers.referer === 'string') {
@@ -48,6 +88,11 @@ export function upstreamHeaders(headers: IncomingHttpHeaders, upstream: URL, pub
     } catch {
       delete result.referer;
     }
+  }
+  if (stripCookie && typeof headers.cookie === 'string') {
+    const rest = withoutCookie(headers.cookie, stripCookie);
+    if (rest) result.cookie = rest;
+    else delete result.cookie;
   }
   if (publicHost) result['x-forwarded-host'] = publicHost;
   return result;
@@ -63,7 +108,32 @@ export function rewriteLocation(location: string, upstream: URL, publicOrigin: s
   }
 }
 
-export function createPreviewGateway({ domain, resolve }: { domain: string; resolve: PreviewResolver }): Server {
+/** 접근 확인을 통과하면 true. 티켓 교환과 거부는 여기서 응답을 끝낸다 */
+function admit(request: IncomingMessage, response: ServerResponse, host: string, access: PreviewAccess): boolean {
+  const url = new URL(request.url ?? '/', 'http://preview.invalid');
+  if (url.pathname === ACCESS_PATH) {
+    const granted = access.redeem(host, url.searchParams.get('ticket') ?? '');
+    if (!granted) {
+      response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      response.end('미리보기 티켓이 맞지 않거나 이미 썼거나 만료됐습니다. 스튜디오에서 미리보기를 다시 여세요.');
+      return false;
+    }
+    const secure = request.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+    response.writeHead(302, {
+      location: safePreviewPath(url.searchParams.get('next')),
+      'set-cookie': `${access.cookieName}=${granted.cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${granted.maxAgeSeconds}${secure}`,
+      'cache-control': 'no-store',
+    });
+    response.end();
+    return false;
+  }
+  if (access.allows(host, readCookie(request.headers.cookie, access.cookieName))) return true;
+  response.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' });
+  response.end('미리보기를 볼 권한을 확인하지 못했습니다. 스튜디오에서 미리보기를 다시 여세요.');
+  return false;
+}
+
+export function createPreviewGateway({ domain, resolve, access }: { domain: string; resolve: PreviewResolver; access?: PreviewAccess }): Server {
   const locate = async (request: IncomingMessage): Promise<URL | undefined> => {
     const target = parsePreviewHost(request.headers.host, domain);
     const base = target ? await resolve(target).catch(() => undefined) : undefined;
@@ -78,14 +148,16 @@ export function createPreviewGateway({ domain, resolve }: { domain: string; reso
         response.end('미리보기를 찾을 수 없습니다. 세션이 중지됐거나 주소가 올바르지 않습니다.');
         return;
       }
-      const publicOrigin = `http://${request.headers.host}`;
+      const host = request.headers.host ?? '';
+      if (access && !admit(request, response, host, access)) return;
+      const publicOrigin = `http://${host}`;
       const proxied = http.request(
         {
           hostname: upstream.hostname,
           port: upstream.port,
           method: request.method,
           path: request.url,
-          headers: upstreamHeaders(request.headers, upstream, request.headers.host),
+          headers: upstreamHeaders(request.headers, upstream, host, access?.cookieName),
         },
         (upstreamResponse) => {
           const headers = { ...upstreamResponse.headers };
@@ -110,8 +182,12 @@ export function createPreviewGateway({ domain, resolve }: { domain: string; reso
         socket.end('HTTP/1.1 404 Not Found\r\nconnection: close\r\ncontent-length: 0\r\n\r\n');
         return;
       }
+      if (access && !access.allows(request.headers.host ?? '', readCookie(request.headers.cookie, access.cookieName))) {
+        socket.end('HTTP/1.1 401 Unauthorized\r\nconnection: close\r\ncontent-length: 0\r\n\r\n');
+        return;
+      }
       const connection = net.connect(Number(upstream.port), upstream.hostname, () => {
-        const headers = upstreamHeaders(request.headers, upstream, request.headers.host);
+        const headers = upstreamHeaders(request.headers, upstream, request.headers.host, access?.cookieName);
         const lines = Object.entries(headers).flatMap(([name, value]) =>
           value === undefined ? [] : Array.isArray(value) ? value.map((item) => `${name}: ${item}`) : [`${name}: ${value}`],
         );
