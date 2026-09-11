@@ -6,6 +6,7 @@ import {
   STUDIO_CALLER,
   StudioSpecSchema,
   type DatabaseSpec,
+  type DeployServiceSpec,
   type ExternalServiceSpec,
   type ManagedServiceSpec,
   type ResourceLimit,
@@ -44,6 +45,8 @@ export interface LoadedProject {
   secrets: Array<[name: string, secret: SecretSpec]>;
   /** 등록한 사내 API. 샌드박스에서는 이 이름의 호스트로 부르고 edge가 정책을 적용한다 */
   external: Array<[name: string, service: ExternalServiceSpec]>;
+  /** managed 서비스 이름 → 운영 배포 설정. 적지 않은 서비스도 기본값(Dockerfile)으로 채운다 */
+  deploy: Record<string, DeployServiceSpec>;
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -140,6 +143,15 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     }
   }
 
+  const deployPorts = new Map<number, string>();
+  for (const [name, service] of Object.entries(spec.deploy?.services ?? {})) {
+    if (!managed.some(([managedName]) => managedName === name)) issues.push(`deploy.services.${name}: managed 서비스만 배포 설정을 가질 수 있습니다`);
+    if (service.port === undefined) continue;
+    const taken = deployPorts.get(service.port);
+    if (taken) issues.push(`deploy.services.${name}.port: ${taken} 서비스와 같은 포트(${service.port})입니다`);
+    deployPorts.set(service.port, name);
+  }
+
   if (issues.length > 0) throw new SpecError(`${SPEC_FILE}과 ${spec.compose}가 맞지 않습니다`, issues);
 
   const sharedVolumes = Object.entries(compose.data.volumes ?? {})
@@ -158,6 +170,7 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     egress: spec.network?.egress ?? [],
     secrets: Object.entries(spec.secrets ?? {}),
     external,
+    deploy: Object.fromEntries(managed.map(([name]) => [name, spec.deploy?.services[name] ?? { dockerfile: 'Dockerfile' }])),
   };
 }
 

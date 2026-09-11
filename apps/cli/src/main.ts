@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import type { Effort } from '@b-studio/agent';
 import { loadProject, SpecError } from '@b-studio/spec';
 import { agent, type Backend } from './commands/agent';
+import { deploy } from './commands/deploy';
 import { up } from './commands/up';
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -10,6 +11,13 @@ const BACKENDS: readonly Backend[] = ['api', 'claude-code'];
 const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
   studio agent <프로젝트 경로> "<요청>" [옵션]
+  studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
+
+deploy:
+  운영 Dockerfile로 이미지를 만들어 로컬 Docker에 배포하고, 준비되면 고정 주소를 새 릴리스로 무중단 전환한다
+  --status           운영 주소, 컨테이너 상태, 릴리스 기록
+  --rollback <id>    이미지를 남긴 이전 릴리스로 빌드 없이 되돌린다 (데이터베이스 마이그레이션은 되돌리지 않는다)
+  --remove           운영 프록시, 릴리스, 기반 스택을 지운다. --volumes를 더하면 데이터베이스 볼륨도 지운다
 
 공통 옵션:
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
@@ -33,12 +41,24 @@ async function main(argv: string[]): Promise<number> {
       backend: { type: 'string', default: 'api' },
       effort: { type: 'string' },
       model: { type: 'string' },
+      status: { type: 'boolean', default: false },
+      rollback: { type: 'string' },
+      remove: { type: 'boolean', default: false },
+      volumes: { type: 'boolean', default: false },
     },
   });
   const [command, dir, request] = positionals;
 
   if (command === 'up' && dir) {
     return up(await loadProject(dir), { keep: values.keep });
+  }
+
+  if (command === 'deploy' && dir) {
+    if ([values.status, values.remove, values.rollback !== undefined].filter(Boolean).length > 1) {
+      console.error('--status, --rollback, --remove는 하나만 쓸 수 있습니다');
+      return 2;
+    }
+    return deploy(await loadProject(dir), { status: values.status, rollback: values.rollback, remove: values.remove, volumes: values.volumes });
   }
 
   if (command === 'agent' && dir && request) {

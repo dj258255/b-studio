@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const apiBaseUrl = process.env.API_BASE_URL;
 
 const nextConfig: NextConfig = {
+  // 운영 이미지는 standalone 서버만 복사해 node_modules 없이 실행한다 (Dockerfile)
+  output: "standalone",
   // 스튜디오 미리보기는 dev 서버가 시작된 호스트(0.0.0.0)가 아니라 127.0.0.1의 다른 포트로 접속한다.
   // 개발용 요청(HMR 연결 등)이 교차 출처로 막히지 않게 허용한다
   allowedDevOrigins: ["127.0.0.1"],
