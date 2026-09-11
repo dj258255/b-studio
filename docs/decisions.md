@@ -32,6 +32,7 @@
 - [ADR-028 Kubernetes 제공자: 서비스마다 agent-sandbox Sandbox를 둔다](#adr-028-kubernetes-제공자-서비스마다-agent-sandbox-sandbox를-둔다)
 - [ADR-029 세션 복구: 세션 상태를 작업 복사본에 남기고 새 샌드박스로 이어서 작업한다](#adr-029-세션-복구-세션-상태를-작업-복사본에-남기고-새-샌드박스로-이어서-작업한다)
 - [ADR-030 원격 변경 가져오기: 리뷰어 커밋을 병합 커밋으로 가져와 게이트로 확인한다](#adr-030-원격-변경-가져오기-리뷰어-커밋을-병합-커밋으로-가져와-게이트로-확인한다)
+- [ADR-031 화면 디자인: 조작 계층만 유리로 띄우고 읽는 영역은 불투명하게 둔다](#adr-031-화면-디자인-조작-계층만-유리로-띄우고-읽는-영역은-불투명하게-둔다)
 
 ---
 
@@ -955,6 +956,55 @@ orders 예제를 독립 Git 저장소로 만들고, 로컬 bare 저장소를 원
 
 ---
 
+## ADR-031 화면 디자인: 조작 계층만 유리로 띄우고 읽는 영역은 불투명하게 둔다
+
+### 맥락
+- 스튜디오 화면은 헤어라인 테두리로 나눈 평평한 패널이었습니다. Liquid Glass 느낌의 화면을 요청받았습니다.
+- Apple은 Liquid Glass를 "주변을 반사하고 굴절하는 반투명 소재"로 소개하고, 콘텐츠 위에 떠 있는 조작 계층(탭 막대, 사이드바, 툴바, 버튼)에 씁니다.
+- 출시 뒤 글자가 배경과 겹치는 곳의 가독성 비판이 이어졌습니다. Apple은 불투명도를 높이는 Tinted 옵션을 추가했습니다(iOS 26.1).
+- 스튜디오에는 로그, diff, 게이트 결과처럼 오래 읽는 텍스트가 많습니다.
+- 웹에서 흐림(`backdrop-filter`)은 주요 브라우저가 지원합니다. 굴절 효과를 내는 SVG 필터(`backdrop-filter: url()`)는 Chromium에서만 동작합니다.
+
+### 검토한 선택지
+
+| 방식 | 판단 |
+|---|---|
+| 모든 패널을 유리로 | 로그·diff·게이트 결과가 배경과 겹쳐 읽기 어려워짐. 흐림 표면이 많아 합성 비용도 커짐 |
+| SVG 필터로 굴절까지 재현 | Chromium에서만 보이고 Safari·Firefox에서는 무시됨 |
+| **조작 계층만 흐림 유리, 읽는 영역은 불투명** | 깊이감은 주면서 가독성을 지키고, 브라우저마다 같은 모습 |
+
+### 결정
+- **조작 계층만 유리로 둡니다.** 세션 헤더, 탭 막대, 대화 시트, 홈의 목록 시트가 해당합니다. 미리보기 iframe, 로그, diff, API 응답, 게이트 카드, 입력창은 불투명 패널로 둡니다.
+- **흐림은 최상위 표면에만 겁니다.** 흐림을 겹치면 두 번 흐려지고 합성 비용이 늘기 때문입니다. 안쪽 칩과 보조 버튼은 흐림 없이 반투명 채움과 윗면 하이라이트만 줍니다(`glass-soft`).
+- **테두리는 box-shadow로 그립니다.** 그래서 기존 `border` 유틸리티와 부딪치지 않습니다.
+- **굴절 효과는 넣지 않습니다.**
+- **배경**: 고정 레이어에 빛 번짐(radial-gradient) 세 개를 둡니다. 유리가 유리로 보이게 하려는 것입니다. 스크롤할 때 다시 그리지 않고 움직이지도 않습니다.
+- **대체 스타일**
+  - `prefers-reduced-transparency: reduce`와 `prefers-contrast: more`에서는 흐림 없는 불투명 패널로 바꿉니다.
+  - 흐림을 지원하지 않는 브라우저에서도 불투명하게 둡니다.
+  - `forced-colors: active`는 box-shadow를 지우므로 실제 테두리를 그립니다.
+- **다크 모드**: 색 토큰을 CSS 변수로 옮기고 `prefers-color-scheme: dark`에서 바꿉니다. 어두운 유리는 밝은 유리보다 불투명도를 높였습니다.
+- **그대로 둔 것**: 글꼴(IBM Plex Sans KR, IBM Plex Mono)과 상태 색의 역할(통과, 실패, 확인 중)은 그대로입니다.
+
+### 검증 결과
+Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바꿔 세션 헤더의 계산된 스타일과 스크린샷을 확인했습니다.
+
+| 설정 | 결과 |
+|---|---|
+| 기본 | 배경 `rgba(255, 255, 255, 0.55)`, `blur(24px) saturate(1.7)`, 테두리 없음 |
+| `prefers-color-scheme: dark` | 바탕 변수 `#0a1413`, 어두운 유리와 게이트 카드 |
+| `prefers-contrast: more` | 배경 `rgb(251, 253, 252)`, `blur(0px)` |
+| `forced-colors: active` | 실제 테두리 1px, 시스템 색 |
+
+`prefers-reduced-transparency`는 Playwright에서 흉내 내지 못해 확인하지 않았습니다. 같은 규칙으로 묶은 `prefers-contrast: more`만 확인했습니다. Safari·Firefox와 렌더링 비용도 확인하지 않았습니다.
+
+### 감수한 트레이드오프
+- 흐림은 GPU 합성 비용이 들어 저사양 기기에서 느려질 수 있습니다. 흐림 표면을 헤더, 탭 막대, 대화, 목록으로 제한했습니다.
+- 가독성을 우선해 유리 효과를 약하게 두었습니다. 굴절이나 움직임이 있는 Apple의 효과와는 거리가 있습니다.
+- 미리보기 앱은 자기 스타일을 쓰므로, 운영체제 다크 모드를 따르는 앱이면 미리보기도 함께 어두워집니다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -967,3 +1017,6 @@ orders 예제를 독립 Git 저장소로 만들고, 로컬 bare 저장소를 원
 - Replit, [Development and production databases](https://docs.replit.com/features/data-and-storage/development-and-production)
 - Upstash, [Best Sandbox Providers for AI Agents](https://upstash.com/blog/best-sandbox-providers-for-ai-agents)
 - Anthropic, [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) (인증 정책, 브랜딩 가이드)
+- Apple Newsroom, [Apple introduces a delightful and elegant new software design](https://www.apple.com/newsroom/2025/06/apple-introduces-a-delightful-and-elegant-new-software-design/) · Apple Developer, [Meet Liquid Glass (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/219/)
+- Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
+- MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)

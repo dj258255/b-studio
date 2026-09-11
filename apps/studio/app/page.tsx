@@ -30,14 +30,14 @@ export default async function HomePage() {
         통과한 결과만 완료로 보여줍니다.
       </p>
 
-      <p className="mt-6 border-l-2 border-line pl-3 text-sm text-muted">{note}</p>
+      <p className="glass-soft mt-6 rounded-xl px-4 py-3 text-sm leading-6 text-muted">{note}</p>
 
-      <ul className="mt-10 divide-y divide-line border-y border-line">
+      <ul className="glass mt-10 divide-y divide-line overflow-hidden rounded-2xl">
         {projects.length === 0 && (
-          <li className="py-6 text-muted">열 수 있는 프로젝트가 없습니다. studio.yaml이 있는 폴더를 B_STUDIO_PROJECTS_DIR에 두세요.</li>
+          <li className="px-5 py-6 text-muted">열 수 있는 프로젝트가 없습니다. studio.yaml이 있는 폴더를 B_STUDIO_PROJECTS_DIR에 두세요.</li>
         )}
         {projects.map((project) => (
-          <li key={project.id} className="flex flex-wrap items-center gap-4 py-5">
+          <li key={project.id} className="flex flex-wrap items-center gap-4 px-5 py-5">
             <div className="min-w-0 flex-1">
               <h2 className="text-lg font-semibold">{project.name}</h2>
               {project.error ? (
@@ -59,9 +59,9 @@ export default async function HomePage() {
             최근 세션
           </h2>
           <p className="mt-1 text-sm text-muted">중지된 세션도 작업 복사본과 체크포인트가 남아 있어 열어서 이어서 작업할 수 있습니다.</p>
-          <ul className="mt-4 divide-y divide-line border-y border-line">
+          <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-2xl">
             {sessions.slice(0, RECENT_SESSIONS).map((session) => (
-              <li key={session.id} className="flex flex-wrap items-center gap-4 py-4">
+              <li key={session.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
                 <div className="min-w-0 flex-1">
                   <p className="flex items-baseline gap-2">
                     <span className="font-semibold">{session.projectName}</span>
@@ -74,7 +74,7 @@ export default async function HomePage() {
                     체크포인트 {session.checkpoints}개, {TIME.format(new Date(session.updatedAt))}
                   </p>
                 </div>
-                <Link href={`/sessions/${session.id}`} className="rounded-md border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">
+                <Link href={`/sessions/${session.id}`} className="glass-soft rounded-full px-4 py-1.5 text-sm font-medium hover:bg-panel">
                   열기
                 </Link>
               </li>

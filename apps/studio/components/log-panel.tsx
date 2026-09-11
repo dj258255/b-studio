@@ -26,7 +26,7 @@ export function LogPanel({ logs, services }: { logs: LogEntry[]; services: strin
             type="button"
             aria-pressed={filter === name}
             onClick={() => setFilter(name)}
-            className={`rounded px-2.5 py-1 text-sm ${filter === name ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
+            className={`rounded-full px-3 py-1 text-sm ${filter === name ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
           >
             {name === ALL ? "전체" : name}
           </button>

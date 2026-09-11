@@ -38,7 +38,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const statusTone = snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
 
   return (
-    <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-panel px-5 py-3">
+    <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl px-5 py-3">
       <Link href="/" className="font-semibold tracking-tight hover:underline">
         b-studio
       </Link>
@@ -73,7 +73,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       <div className="ml-auto flex items-center gap-3">
         {snapshot.runtime && (
           <span
-            className="rounded-full border border-line px-2.5 py-0.5 text-xs font-medium text-muted"
+            className="glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted"
             title={
               GVISOR_RUNTIMES.has(snapshot.runtime)
                 ? "gVisor로 격리했습니다. 파일 변경 알림이 오지 않아 미리보기는 요청이 끝나고 서비스를 다시 띄울 때 바뀝니다"
@@ -84,9 +84,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           </span>
         )}
         <span
-          className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${
-            snapshot.mode === "demo" ? "border-wait/50 text-wait" : "border-line text-muted"
-          }`}
+          className={`glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium ${snapshot.mode === "demo" ? "text-wait" : "text-muted"}`}
           title="에이전트 실행 방식"
         >
           {MODE_LABEL[snapshot.mode]}
@@ -100,7 +98,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
               type="button"
               onClick={resume}
               disabled={resuming}
-              className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+              className="rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-60"
             >
               {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
             </button>
@@ -110,7 +108,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             type="button"
             onClick={stop}
             disabled={stopping}
-            className="rounded-md border border-line px-3 py-1.5 text-sm font-medium hover:border-fail hover:text-fail disabled:opacity-60"
+            className="glass-soft rounded-full px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
           >
             {stopping ? "중지하는 중" : "샌드박스 중지"}
           </button>

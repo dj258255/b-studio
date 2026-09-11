@@ -35,7 +35,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   }
 
   return (
-    <section className="flex min-h-0 flex-col border-t border-line bg-panel lg:border-t-0" aria-label="대화">
+    <section className="glass flex min-h-0 flex-col overflow-hidden rounded-2xl" aria-label="대화">
       <div className="border-b border-line px-5 py-3">
         <h2 className="font-semibold">대화</h2>
         <p className="mt-0.5 text-sm text-muted">{hintFor(view)}</p>
@@ -63,7 +63,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               type="button"
               disabled={!canSend}
               onClick={() => void send(snapshot.nextDemoRequest!)}
-              className="w-full rounded-md bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+              className="w-full rounded-xl bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
             >
               다음 요청 보내기: {snapshot.nextDemoRequest}
             </button>
@@ -87,7 +87,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               }}
               rows={3}
               placeholder="만들거나 바꾸고 싶은 내용을 적어 주세요"
-              className="w-full resize-none rounded-md border border-line bg-ground px-3 py-2 text-sm leading-6 placeholder:text-muted"
+              className="w-full resize-none rounded-xl border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
             <div className="mt-2 flex items-center justify-between gap-3">
               <label className="flex items-center gap-2 text-sm text-muted">
@@ -97,7 +97,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               <button
                 type="submit"
                 disabled={!canSend || !text.trim()}
-                className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+                className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
               >
                 요청 보내기
               </button>

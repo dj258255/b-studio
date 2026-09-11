@@ -1,33 +1,119 @@
 @import "tailwindcss";
 
 /*
- * 실험실 작업대: 민트빛 회색 바탕에 짙은 청록 글자.
+ * 유리 작업대: 청록과 호박색 빛이 은은하게 번진 바탕 위에 조작 계층(헤더, 탭, 대화)을 반투명 유리로 띄운다.
+ * 오래 읽는 영역(미리보기, 로그, diff, 게이트 결과)은 불투명 패널로 두어 가독성을 지킨다.
  * 색은 상태(통과, 실패, 확인 중)를 전할 때만 쓴다.
  */
-@theme {
-  --color-ground: #edf2ef;
-  --color-panel: #ffffff;
-  --color-ink: #102a2b;
-  --color-muted: #5e7470;
-  --color-line: #cad6d1;
-  --color-pass: #1e7f55;
-  --color-fail: #b4233a;
-  --color-wait: #a86b12;
+:root {
+  color-scheme: light dark;
+  --ground: #e5edea;
+  --panel: #fbfdfc;
+  --ink: #102a2b;
+  --muted: #55706b;
+  --line: rgb(16 42 43 / 0.13);
+  --pass: #1a7a51;
+  --fail: #b4233a;
+  --wait: #9a6310;
+
+  --bloom-teal: rgb(64 168 146 / 0.26);
+  --bloom-amber: rgb(236 176 98 / 0.2);
+  --bloom-sky: rgb(118 176 222 / 0.2);
+
+  --glass-fill: rgb(255 255 255 / 0.55);
+  --glass-soft: rgb(255 255 255 / 0.5);
+  --glass-edge: rgb(255 255 255 / 0.75);
+  --glass-highlight: rgb(255 255 255 / 0.95);
+  --glass-shadow: 0 1px 2px rgb(16 42 43 / 0.05), 0 18px 40px -20px rgb(16 42 43 / 0.28);
+  --glass-blur: 24px;
+  --glass-saturate: 170%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #0a1413;
+    --panel: #101c1b;
+    --ink: #e3eeeb;
+    --muted: #93aaa5;
+    --line: rgb(227 238 235 / 0.12);
+    --pass: #4cc38a;
+    --fail: #f26b7f;
+    --wait: #e3ab4d;
+
+    --bloom-teal: rgb(46 150 130 / 0.26);
+    --bloom-amber: rgb(210 146 66 / 0.12);
+    --bloom-sky: rgb(84 132 196 / 0.16);
+
+    --glass-fill: rgb(22 38 37 / 0.6);
+    --glass-soft: rgb(255 255 255 / 0.06);
+    --glass-edge: rgb(255 255 255 / 0.1);
+    --glass-highlight: rgb(255 255 255 / 0.1);
+    --glass-shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 20px 44px -20px rgb(0 0 0 / 0.7);
+  }
+}
+
+/* 투명도 줄이기나 고대비를 요청하면 유리를 불투명 패널로 바꾼다 */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :root {
+    --glass-fill: var(--panel);
+    --glass-soft: var(--panel);
+    --glass-edge: var(--line);
+    --glass-blur: 0px;
+    --glass-saturate: 100%;
+  }
+}
+
+/* 뒤를 흐리지 못하는 브라우저에서는 반투명 채움만 남으면 글자가 배경에 묻히므로 불투명하게 둔다 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-fill: var(--panel);
+    --glass-soft: var(--panel);
+  }
 }
 
 @theme inline {
+  --color-ground: var(--ground);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-pass: var(--pass);
+  --color-fail: var(--fail);
+  --color-wait: var(--wait);
   --font-sans: var(--font-plex-sans), system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, monospace;
 }
 
+/*
+ * 떠 있는 조작 계층: 헤더, 탭 막대, 대화, 목록 시트.
+ * 흐림은 최상위 표면에만 쓴다. 겹치면 두 번 흐려지고, 표면마다 합성 비용이 든다.
+ * 테두리는 box-shadow로 그려 border 유틸리티와 부딪치지 않게 한다
+ */
+@utility glass {
+  background-color: var(--glass-fill);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow:
+    inset 0 0 0 1px var(--glass-edge),
+    inset 0 1px 0 var(--glass-highlight),
+    var(--glass-shadow);
+}
+
+/* 유리 안의 칩과 보조 버튼: 흐림 없이 반투명 채움과 윗면 하이라이트만 둔다 */
+@utility glass-soft {
+  background-color: var(--glass-soft);
+  box-shadow:
+    inset 0 0 0 1px var(--glass-edge),
+    inset 0 1px 0 var(--glass-highlight);
+}
+
 @layer base {
   html {
-    color-scheme: light;
+    background: var(--ground);
   }
 
   body {
-    background: var(--color-ground);
-    color: var(--color-ink);
+    color: var(--ink);
     font-family: var(--font-sans);
     font-feature-settings: "tnum" 1;
     /* 한국어는 어절 단위로 줄바꿈하고, 긴 경로나 URL만 필요할 때 끊는다 */
@@ -35,9 +121,35 @@
     overflow-wrap: break-word;
   }
 
+  /* 유리가 유리로 보이도록 뒤에 빛이 번진 바탕을 둔다. 고정 레이어라 스크롤할 때 다시 그리지 않는다 */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(56rem 40rem at 6% -8%, var(--bloom-teal), transparent 70%),
+      radial-gradient(44rem 34rem at 96% -4%, var(--bloom-sky), transparent 70%),
+      radial-gradient(52rem 38rem at 88% 108%, var(--bloom-amber), transparent 70%),
+      var(--ground);
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--pass) 28%, transparent);
+  }
+
   :focus-visible {
-    outline: 2px solid var(--color-ink);
+    outline: 2px solid var(--ink);
     outline-offset: 2px;
+  }
+
+  /* 강제 색상 모드는 box-shadow를 지우므로 유리 표면의 경계를 실제 테두리로 그린다 */
+  @media (forced-colors: active) {
+    .glass,
+    .glass-soft {
+      border: 1px solid CanvasText;
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
