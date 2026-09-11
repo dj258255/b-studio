@@ -59,6 +59,20 @@ export const ExternalServiceSchema = z.object({
 
 export const ServiceSchema = z.discriminatedUnion('source', [ManagedServiceSchema, ExternalServiceSchema]);
 
+/** SQL 식별자. 셸을 거치지 않더라도 SQL 문에 들어가므로 좁게 허용한다 */
+const SQL_IDENTIFIER = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/, 'SQL 식별자(영문, 숫자, 밑줄)여야 합니다');
+
+/**
+ * 샌드박스와 함께 뜨는 개발용 데이터베이스. 체크포인트마다 상태를 저장해,
+ * 파일을 되돌릴 때 스키마와 데이터도 같은 시점으로 되돌린다.
+ */
+export const DatabaseSchema = z.object({
+  engine: z.literal('postgres'),
+  database: SQL_IDENTIFIER,
+  /** 데이터베이스를 지우고 다시 만들 권한이 있어야 한다 */
+  user: SQL_IDENTIFIER,
+});
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -67,10 +81,13 @@ export const StudioSpecSchema = z.object({
   services: z
     .record(z.string().regex(NAME), ServiceSchema)
     .refine((services) => Object.keys(services).length > 0, '서비스가 최소 1개 필요합니다'),
+  /** compose 서비스 이름 → 데이터베이스 */
+  databases: z.record(z.string().regex(NAME), DatabaseSchema).optional(),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
 export type SnapshotSpec = z.infer<typeof SnapshotSchema>;
+export type DatabaseSpec = z.infer<typeof DatabaseSchema>;
 export type PreviewKind = z.infer<typeof PreviewKindSchema>;
 export type ManagedServiceSpec = z.infer<typeof ManagedServiceSchema>;
 export type ExternalServiceSpec = z.infer<typeof ExternalServiceSchema>;

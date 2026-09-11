@@ -1,4 +1,4 @@
-import type { AgentEvent, Checkpoint, GitHostKind, ServiceCheck } from '@b-studio/agent';
+import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck } from '@b-studio/agent';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
@@ -77,13 +77,25 @@ export type StudioEvent =
       nextDemoRequest?: string;
     }
   | { type: 'checkpoint'; runId: string; checkpoint: Checkpoint }
-  | { type: 'reverted'; runId: string; files: string[]; patch: string; restarted: ServiceCheck[] }
+  | {
+      type: 'reverted';
+      runId: string;
+      files: string[];
+      patch: string;
+      restarted: ServiceCheck[];
+      databases: DatabaseState[];
+      /** 재시작 전에 샌드박스가 바뀐 파일을 보게 될 때까지 기다린 결과 */
+      sync?: { elapsedMs: number } | { error: string };
+    }
   | { type: 'restore_started'; checkpoint: Checkpoint }
   | {
       type: 'restored';
       checkpoint: Checkpoint;
       files: string[];
       restarted: ServiceCheck[];
+      /** 데이터베이스를 체크포인트 시점으로 맞춘 결과 */
+      databases: DatabaseState[];
+      sync?: { elapsedMs: number } | { error: string };
       checkpoints: Checkpoint[];
       nextDemoRequest?: string;
     }

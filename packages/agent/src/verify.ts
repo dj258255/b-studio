@@ -1,3 +1,6 @@
+import { access } from 'node:fs/promises';
+import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
@@ -17,6 +20,8 @@ export interface ServiceCheck {
   error?: string;
   /** 실패했을 때만 채운다. 에이전트가 원인을 읽을 수 있게 마지막 로그를 담는다 */
   logTail?: string[];
+  /** 지운 파일을 빌드 도구가 읽다 실패해 한 번 더 재시작했는지 */
+  retried?: boolean;
 }
 
 export interface ContractCheck {
@@ -94,13 +99,24 @@ export interface RestartReport {
  * 바뀐 파일이 샌드박스에 반영됐는지 확인한 뒤, 그 파일이 속한 서비스를 다시 띄운다.
  * 검증 게이트, 실패한 변경 되돌리기, 체크포인트 복원이 같은 절차를 쓴다.
  */
+export interface RestartOptions {
+  /** 파일과 무관하게 함께 재시작할 서비스 (예: 되돌린 데이터베이스에 기대는 서비스) */
+  alsoRestart?: readonly string[];
+  /** 지운 파일 때문에 실패했을 때 다시 시도하기 전 기다리는 시간 */
+  deletedFileRetryDelayMs?: number;
+}
+
 export async function restartServicesFor(
   sandbox: Sandbox,
   project: LoadedProject,
   files: readonly string[],
   start?: StartOptions,
+  { alsoRestart = [], deletedFileRetryDelayMs = 3_000 }: RestartOptions = {},
 ): Promise<RestartReport> {
-  const { services, unmatched } = servicesForFiles(project, files);
+  const owned = servicesForFiles(project, files);
+  const services = [...new Set([...owned.services, ...alsoRestart])];
+  const unmatched = owned.unmatched;
+  const deleted = await deletedFiles(project.root, files);
 
   // 파일 공유 캐시 때문에 옛 코드로 재시작하면 틀린 결과를 얻는다. 반영을 먼저 확인한다
   let sync: RestartReport['sync'];
@@ -112,16 +128,47 @@ export async function restartServicesFor(
 
   const restarted = await Promise.all(
     services.map(async (service): Promise<ServiceCheck> => {
-      try {
-        await sandbox.restart(service, start);
-        return { service, ready: true };
-      } catch (error) {
-        return { service, ready: false, error: describe(error), logTail: await recentLogs(sandbox, service) };
-      }
+      const first = await restartOnce(sandbox, service, start);
+      if (first.ready || !mentionsDeletedFile(first.logTail ?? [], deleted)) return first;
+
+      // 반영 확인이 끝났어도 새로 뜬 서비스 컨테이너 안의 디렉터리 목록에 지운 파일이 잠깐 남을 수 있다.
+      // 이때 빌드 도구는 "목록에는 있지만 읽을 수 없는 파일"로 실패하므로 잠시 뒤 한 번만 다시 띄운다 (트러블슈팅 13)
+      await sleep(deletedFileRetryDelayMs, undefined, { signal: start?.signal });
+      return { ...(await restartOnce(sandbox, service, start)), retried: true };
     }),
   );
 
   return { sync, restarted, unverifiedFiles: unmatched };
+}
+
+async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptions): Promise<ServiceCheck> {
+  try {
+    await sandbox.restart(service, start);
+    return { service, ready: true };
+  } catch (error) {
+    return { service, ready: false, error: describe(error), logTail: await recentLogs(sandbox, service) };
+  }
+}
+
+/** 호스트에서 이미 사라진 파일. 되돌리기나 에이전트의 삭제로 생긴다 */
+async function deletedFiles(root: string, files: readonly string[]): Promise<string[]> {
+  const checks = await Promise.all(
+    files.map(async (file) =>
+      access(path.join(root, file)).then(
+        () => undefined,
+        () => file,
+      ),
+    ),
+  );
+  return checks.filter((file): file is string => file !== undefined);
+}
+
+/** 로그에 지운 파일이 "없다"는 오류로 나오는지 */
+export function mentionsDeletedFile(logTail: readonly string[], deleted: readonly string[]): boolean {
+  return deleted.some((file) => {
+    const name = path.posix.basename(file);
+    return logTail.some((line) => line.includes(name) && /NoSuchFile|No such file/i.test(line));
+  });
 }
 
 /** 세션 시작 시점의 계약을 저장해 둔다. 실패한 서비스는 비교 기준 없이 진행한다 */
@@ -154,7 +201,8 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
 
   if (report.restarted.length === 0) lines.push('- 재시작한 서비스 없음');
   for (const check of report.restarted) {
-    lines.push(check.ready ? `- ${check.service}: 재시작 후 준비 완료` : `- ${check.service}: 준비 실패 — ${check.error}`);
+    const retried = check.retried ? ' (지운 파일 반영을 기다려 한 번 더 재시작)' : '';
+    lines.push(check.ready ? `- ${check.service}: 재시작 후 준비 완료${retried}` : `- ${check.service}: 준비 실패${retried} — ${check.error}`);
     if (check.logTail?.length) lines.push('  마지막 로그:', ...check.logTail.map((line) => `    ${line}`));
   }
 

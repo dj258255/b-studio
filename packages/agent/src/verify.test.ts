@@ -1,9 +1,12 @@
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { ContainerState, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
-import { formatVerificationReport, verifyChanges } from './verify';
+import { formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
 
 const project = {
   root: '/tmp/orders',
@@ -134,5 +137,65 @@ describe('verifyChanges', () => {
     const text = formatVerificationReport(report, { allowBreaking: false });
     expect(text).toContain('api: 준비 실패');
     expect(text).toContain('cannot find symbol memo');
+  });
+});
+
+describe('restartServicesFor', () => {
+  const deletedV2 = 'api/src/main/resources/db/migration/V2__memo.sql';
+
+  /** V1만 남고 V2는 지워진 작업 복사본 */
+  async function projectWithDeletedMigration(): Promise<LoadedProject> {
+    const root = await mkdtemp(path.join(tmpdir(), 'restart-test-'));
+    await mkdir(path.join(root, 'api/src/main/resources/db/migration'), { recursive: true });
+    await writeFile(path.join(root, 'api/src/main/resources/db/migration/V1__orders.sql'), 'create table orders (id bigint);\n');
+    return { ...project, root } as LoadedProject;
+  }
+
+  /** 재시작 결과를 순서대로 돌려주고, 실패하면 주어진 로그를 남기는 가짜 샌드박스 */
+  function flakySandbox(outcomes: boolean[], logLine: string) {
+    const base = fakeSandbox();
+    const sandbox: Sandbox = {
+      ...base,
+      async restart(service: string) {
+        base.restarts.push(service);
+        if (outcomes.shift() === false) throw new Error('컨테이너가 종료됐습니다 (마지막 확인: ECONNRESET, 컨테이너 exited)');
+        return base.endpoint(service);
+      },
+      async *logs(): AsyncIterable<LogLine> {
+        yield { service: 'api', text: logLine, at: new Date() };
+      },
+    };
+    return { sandbox, restarts: base.restarts };
+  }
+
+  it('지운 파일을 읽다 실패한 서비스는 잠시 뒤 한 번만 다시 재시작한다', async () => {
+    const { sandbox, restarts } = flakySandbox(
+      [false, true],
+      '   > java.nio.file.NoSuchFileException: /app/src/main/resources/db/migration/V2__memo.sql',
+    );
+
+    const report = await restartServicesFor(sandbox, await projectWithDeletedMigration(), [deletedV2], undefined, { deletedFileRetryDelayMs: 1 });
+
+    expect(restarts).toEqual(['api', 'api']);
+    expect(report.restarted).toEqual([{ service: 'api', ready: true, retried: true }]);
+    expect(formatVerificationReport({ ok: true, contracts: [], ...report }, { allowBreaking: false })).toContain('한 번 더 재시작');
+  });
+
+  it('지운 파일과 무관한 실패는 다시 시도하지 않는다', async () => {
+    const { sandbox, restarts } = flakySandbox([false, true], 'error: cannot find symbol memo');
+
+    const report = await restartServicesFor(sandbox, await projectWithDeletedMigration(), [deletedV2], undefined, { deletedFileRetryDelayMs: 1 });
+
+    expect(restarts).toEqual(['api']);
+    expect(report.restarted[0]).toMatchObject({ service: 'api', ready: false });
+    expect(report.restarted[0]?.retried).toBeUndefined();
+  });
+
+  it('로그에 지운 파일 이름과 "없음" 오류가 함께 나올 때만 해당한다', () => {
+    const deleted = ['api/src/main/resources/db/migration/V2__memo.sql'];
+    expect(mentionsDeletedFile(['java.nio.file.NoSuchFileException: /app/src/main/resources/db/migration/V2__memo.sql'], deleted)).toBe(true);
+    expect(mentionsDeletedFile(["stat: can't stat 'V2__memo.sql': No such file or directory"], deleted)).toBe(true);
+    expect(mentionsDeletedFile(['Flyway migrated V2__memo.sql'], deleted)).toBe(false);
+    expect(mentionsDeletedFile(['java.nio.file.NoSuchFileException: /app/other.sql'], deleted)).toBe(false);
   });
 });

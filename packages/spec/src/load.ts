@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { StudioSpecSchema, type ManagedServiceSpec, type StudioSpec } from './schema';
+import { StudioSpecSchema, type DatabaseSpec, type ManagedServiceSpec, type StudioSpec } from './schema';
 
 export const SPEC_FILE = 'studio.yaml';
 
@@ -23,6 +23,8 @@ export interface LoadedProject {
   managed: Array<[name: string, service: ManagedServiceSpec]>;
   /** compose의 external 볼륨. 샌드박스끼리 공유하는 의존성 캐시(Gradle, pnpm, uv) 용도 */
   sharedVolumes: string[];
+  /** compose 서비스 이름과 데이터베이스. dependents는 compose depends_on으로 이 DB에 기대는 managed 서비스 */
+  databases: Array<[name: string, database: DatabaseSpec & { dependents: string[] }]>;
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -79,13 +81,34 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     }
   }
 
+  const databases: LoadedProject['databases'] = [];
+  for (const [name, database] of Object.entries(spec.databases ?? {})) {
+    if (!composeServices.has(name)) {
+      issues.push(`databases.${name}: ${spec.compose}에 같은 이름의 서비스가 없습니다`);
+      continue;
+    }
+    if (spec.services[name]) {
+      issues.push(`databases.${name}: services에 등록한 서비스는 데이터베이스로 등록할 수 없습니다`);
+      continue;
+    }
+    const dependents = managed.map(([service]) => service).filter((service) => dependsOn(compose.data.services[service], name));
+    databases.push([name, { ...database, dependents }]);
+  }
+
   if (issues.length > 0) throw new SpecError(`${SPEC_FILE}과 ${spec.compose}가 맞지 않습니다`, issues);
 
   const sharedVolumes = Object.entries(compose.data.volumes ?? {})
     .filter(([, volume]) => volume?.external === true)
     .map(([key, volume]) => volume?.name ?? key);
 
-  return { root, spec, composePath, managed, sharedVolumes };
+  return { root, spec, composePath, managed, sharedVolumes, databases };
+}
+
+/** compose depends_on은 목록(["db"])이나 맵({ db: { condition } })으로 쓴다 */
+function dependsOn(service: unknown, target: string): boolean {
+  const dependencies = (service as { depends_on?: unknown } | null)?.depends_on;
+  if (Array.isArray(dependencies)) return dependencies.includes(target);
+  return typeof dependencies === 'object' && dependencies !== null && target in dependencies;
 }
 
 /** compose 서비스의 volumes 항목(짧은 문법 "이름:경로", 긴 문법 { source })에 볼륨이 있는지 */

@@ -151,6 +151,47 @@ volumes:
     ]);
   });
 
+  it('데이터베이스는 compose의 부가 서비스여야 하고, depends_on으로 기대는 서비스를 찾는다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+  worker: { source: managed, template: fastapi, path: worker, port: 8000, preview: logs }
+databases:
+  db: { engine: postgres, database: app, user: app }
+`,
+    );
+    await writeFile(
+      path.join(dir, 'compose.yaml'),
+      `services:
+  web: { build: ./web, depends_on: [api] }
+  api: { build: ./api, depends_on: { db: { condition: service_healthy } } }
+  worker: { build: ./worker, depends_on: [db] }
+  db: { image: postgres:17-alpine }
+`,
+    );
+
+    const project = await loadProject(dir);
+    expect(project.databases).toEqual([['db', { engine: 'postgres', database: 'app', user: 'app', dependents: ['api', 'worker'] }]]);
+  });
+
+  it('SQL에 들어가는 데이터베이스 이름과 사용자는 식별자만 허용한다', () => {
+    const source = `
+version: 1
+name: x
+services:
+  api: { source: managed, template: fastapi, path: api, port: 8000, preview: openapi }
+databases:
+  db: { engine: postgres, database: 'app"; DROP DATABASE x; --', user: app }
+`;
+    const error = captureError(() => parseSpec(source));
+    expect(error.issues.some((issue) => issue.startsWith('databases.db.database'))).toBe(true);
+  });
+
   it('스냅샷 키는 서비스 폴더 밖을 가리킬 수 없다', () => {
     const source = `
 version: 1
