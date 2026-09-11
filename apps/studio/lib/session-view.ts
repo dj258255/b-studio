@@ -27,6 +27,8 @@ export type ChatItem =
   | { kind: 'gate'; runId: string; files: string[]; report?: VerificationReport; interrupted?: boolean }
   | { kind: 'outcome'; runId: string; status: 'done' | 'failed' | 'error' | 'cancelled'; summary: string; turns?: number; usage?: AgentUsage }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
+  /** 로컬 폴더 세션에서 스튜디오 밖에서 바꾼 파일을 남긴 체크포인트 */
+  | { kind: 'localEdits'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
   | {
       kind: 'reverted';
       runId: string;
@@ -159,6 +161,14 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return {
         ...(known ? view : patchSnapshot(view, { checkpoints: [event.checkpoint, ...view.snapshot.checkpoints] })),
         chat: [...view.chat, { kind: 'checkpoint', runId: event.runId, checkpoint: event.checkpoint }],
+      };
+    }
+
+    case 'local_edits_saved': {
+      const known = view.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === event.checkpoint.sha);
+      return {
+        ...(known ? view : patchSnapshot(view, { checkpoints: [event.checkpoint, ...view.snapshot.checkpoints] })),
+        chat: [...view.chat, { kind: 'localEdits', checkpoint: event.checkpoint, reason: event.reason }],
       };
     }
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Checkpoint } from '@b-studio/agent';
 import type { SessionSnapshot, StudioEvent } from '../studio-events';
 
-/** 세션 작업 복사본 안의 저장 위치. .git 아래라 에이전트 도구가 접근하지 못하고 커밋에도 들어가지 않는다 */
+/** 세션 상태 폴더 안의 저장 위치. .git 아래라 에이전트 도구가 접근하지 못하고 커밋에도 들어가지 않는다 */
 const FILE = path.join('.git', 'b-studio', 'session.json');
 export const PERSISTED_HISTORY_LIMIT = 2_000;
 
@@ -27,8 +27,13 @@ export interface PersistedSession {
   previewToken?: string;
 }
 
-export function sessionFile(workDir: string): string {
-  return path.join(workDir, FILE);
+export function sessionFile(stateDir: string): string {
+  return path.join(stateDir, FILE);
+}
+
+/** 세션 상태를 두는 폴더. 작업 복사본 세션은 작업 복사본 자체이고, 로컬 폴더 세션은 사용자 폴더 밖의 세션 폴더다 */
+export function stateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>): string {
+  return snapshot.stateDir ?? snapshot.workDir;
 }
 
 /**
@@ -62,7 +67,7 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
 
 /** 쓰는 도중 서버가 멈춰도 이전 파일이 남도록 임시 파일에 쓴 뒤 이름을 바꾼다 */
 export async function writeSession(data: PersistedSession): Promise<void> {
-  const file = sessionFile(data.snapshot.workDir);
+  const file = sessionFile(stateDirOf(data.snapshot));
   await mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
   await writeFile(temp, JSON.stringify(data));
@@ -74,7 +79,7 @@ export async function writeSession(data: PersistedSession): Promise<void> {
  * 진행 중일 수 있는 비동기 쓰기와 같은 임시 파일을 동시에 쓰지 않도록 이름을 달리한다
  */
 export function writeSessionSync(data: PersistedSession): void {
-  const file = sessionFile(data.snapshot.workDir);
+  const file = sessionFile(stateDirOf(data.snapshot));
   mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.exit.tmp`;
   writeFileSync(temp, JSON.stringify(data));

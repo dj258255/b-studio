@@ -2,8 +2,8 @@ import Link from "next/link";
 import { LogoutButton } from "@/components/logout-button";
 import { pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
-import { listProjects } from "@/lib/server/projects";
-import { listSessions } from "@/lib/server/sessions";
+import { listProjects, projectPath } from "@/lib/server/projects";
+import { listSessions, localFolderAllowed } from "@/lib/server/sessions";
 import { StartSessionButton } from "@/components/start-session-button";
 import { SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "@/components/status";
 import type { SessionStatus } from "@/lib/studio-events";
@@ -25,6 +25,7 @@ export default async function HomePage() {
   const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
   const mode = process.env.B_STUDIO_MODE?.trim() || "api";
   const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, demo 중 하나로 실행하세요.`;
+  const localAllowed = localFolderAllowed();
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
@@ -39,8 +40,10 @@ export default async function HomePage() {
       </div>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">프로젝트를 열어 샌드박스를 시작하세요</h1>
       <p className="mt-3 max-w-[60ch] leading-7 text-muted">
-        세션마다 프로젝트 복사본으로 서비스를 띄웁니다. 에이전트가 작업을 끝내면 스튜디오가 바뀐 서비스를 재시작하고 API 계약을 비교해,
-        통과한 결과만 완료로 보여줍니다.
+        {localAllowed
+          ? "프로젝트 복사본이나 내 폴더에서 서비스를 띄웁니다. "
+          : "세션마다 프로젝트 복사본으로 서비스를 띄웁니다. "}
+        에이전트가 작업을 끝내면 스튜디오가 바뀐 서비스를 재시작하고 API 계약을 비교해, 통과한 결과만 완료로 보여줍니다.
       </p>
 
       <p className="glass-soft mt-6 rounded-xl px-4 py-3 text-sm leading-6 text-muted">{note}</p>
@@ -61,7 +64,7 @@ export default async function HomePage() {
                 </p>
               )}
             </div>
-            {!project.error && <StartSessionButton projectId={project.id} />}
+            {!project.error && <StartSessionButton projectId={project.id} folder={localAllowed ? projectPath(project.id) : undefined} />}
           </li>
         ))}
       </ul>
@@ -84,6 +87,7 @@ export default async function HomePage() {
                     {session.lastRequest ? `마지막 요청: ${session.lastRequest}` : "아직 보낸 요청이 없습니다"}
                   </p>
                   <p className="mt-0.5 text-xs text-muted">
+                    {session.workspace === "local" && "내 폴더, "}
                     체크포인트 {session.checkpoints}개, {TIME.format(new Date(session.updatedAt))}
                     {auth !== "none" && session.owner && `, 만든 사람 ${session.owner}`}
                   </p>

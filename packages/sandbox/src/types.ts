@@ -115,6 +115,19 @@ export interface ExternalCallResult {
   reason?: string;
 }
 
+/** 호스트에서 바뀐 경로(프로젝트 루트 기준). directory·file은 새로 만든 경로, deleted는 지운 경로다 */
+export interface FileChange {
+  file: string;
+  kind: 'directory' | 'file' | 'deleted';
+}
+
+/** 서비스 컨테이너에 변경 알림을 전달한 경로 */
+export interface RelayedPath {
+  service: string;
+  /** 프로젝트 루트 기준 경로 */
+  file: string;
+}
+
 export interface ExecResult {
   exitCode: number;
   stdout: string;
@@ -147,6 +160,12 @@ export interface Sandbox {
    * 출력의 시크릿 값은 가려서 돌려준다. raw는 덤프처럼 내용을 그대로 옮겨야 하고 사람이나 모델에게 보이지 않을 때만 쓴다
    */
   exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string; raw?: boolean }): Promise<ExecResult>;
+  /**
+   * 호스트에서 만들거나 지운 파일과 폴더를, 그 경로를 마운트한 서비스 컨테이너의 파일 감시기가 알아채게 한다.
+   * 파일 공유 계층(colima sshfs)이 수정 알림은 전달하지만 생성·삭제 알림은 전달하지 않아 개발 서버가 새 화면을 모르거나 지운 화면을 계속 보여 주기 때문이다(트러블슈팅 29).
+   * 알린 경로를 돌려준다. 어느 서비스도 마운트하지 않은 경로는 건너뛴다
+   */
+  relayChanges?(changes: FileChange[], options?: { signal?: AbortSignal }): Promise<RelayedPath[]>;
   /** 텍스트의 시크릿 값을 가린다. logs()와 exec() 출력은 이미 가려져 있다 */
   redact(text: string): string;
   /** 텍스트에 값이 들어 있는 시크릿 이름 (체크포인트에 시크릿이 커밋되지 않게 확인할 때) */

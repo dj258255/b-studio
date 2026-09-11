@@ -54,7 +54,11 @@ export function HistoryPanel({ view }: { view: SessionView }) {
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[20rem_minmax(0,1fr)]">
         <aside className="min-h-0 overflow-y-auto border-b border-line bg-panel md:border-r md:border-b-0">
           <h3 className="px-4 pt-4 text-sm font-semibold">체크포인트</h3>
-          <p className="px-4 pt-1 text-xs leading-5 text-muted">검증 게이트를 통과한 요청만 남습니다.</p>
+          <p className="px-4 pt-1 text-xs leading-5 text-muted">
+            {snapshot.workspace === "local"
+              ? "검증 게이트를 통과한 요청과, 요청 전에 남긴 폴더의 직접 수정이 쌓입니다."
+              : "검증 게이트를 통과한 요청만 남습니다."}
+          </p>
           <ol className="px-2 py-2">
             {checkpoints.map((checkpoint, index) => (
               <li key={checkpoint.sha}>
@@ -91,7 +95,11 @@ export function HistoryPanel({ view }: { view: SessionView }) {
             {newerCount > 0 &&
               (confirming ? (
                 <div className="flex flex-wrap items-center gap-2 rounded-md border border-fail/40 bg-fail/10 px-3 py-2">
-                  <p className="text-sm text-fail">이후 체크포인트 {newerCount}개와 그 변경이 사라집니다.</p>
+                  <p className="text-sm text-fail">
+                    {snapshot.workspace === "local"
+                      ? `이후 체크포인트 ${newerCount}개와 그 변경, 체크포인트에 없는 폴더의 수정이 내 폴더에서 사라집니다.`
+                      : `이후 체크포인트 ${newerCount}개와 그 변경이 사라집니다.`}
+                  </p>
                   <button type="button" onClick={() => void restore()} disabled={!canRestore} className="rounded bg-fail px-3 py-1 text-sm font-medium text-panel disabled:opacity-50">
                     되돌리기
                   </button>

@@ -28,6 +28,7 @@ describe('isDeniedPath', () => {
     expect(isDeniedPath('.git/index')).toBe(true);
     expect(isDeniedPath('web/.env.local')).toBe(true);
     expect(isDeniedPath('web\\.next\\cache')).toBe(true);
+    expect(isDeniedPath('web/app/.b-studio-relay-42-new-route/page.tsx')).toBe(true);
     expect(isDeniedPath('web/app/page.tsx')).toBe(false);
     expect(isDeniedPath('api/src/main/resources/application.yaml')).toBe(false);
   });
@@ -52,6 +53,18 @@ describe('watchProjectFiles', () => {
     expect(seen().some((file) => file.includes('node_modules') || file.includes('.env'))).toBe(false);
     // 한꺼번에 생긴 변경은 몇 번으로 모인다
     expect(calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it('새로 만든 경로는 renamed로도 알린다', async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'file-watch-'));
+    const renamed: string[] = [];
+    watcher = watchProjectFiles(root, (_files, created) => renamed.push(...created), { debounceMs: 100 });
+    await sleep(200);
+
+    await mkdir(path.join(root, 'new-route'));
+    await writeFile(path.join(root, 'new-route', 'page.tsx'), 'export default 1;\n');
+
+    await waitUntil(() => renamed.includes('new-route') && renamed.includes('new-route/page.tsx'), 5_000);
   });
 
   it('닫은 뒤에 생긴 변경은 알리지 않는다', async () => {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, readFile, realpath } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -99,6 +99,11 @@ export interface CheckpointStoreOptions {
   gitBin?: string;
   /** 체크포인트 커밋 작성자. 사내 저장소가 작성자 이메일을 검사하면 바꿔야 한다 */
   author?: GitAuthor;
+  /**
+   * 작업 폴더 밖에 둘 Git 저장소 경로. 사용자의 프로젝트 폴더에서 바로 작업할 때 쓴다.
+   * 사용자 폴더의 .git(커밋, 브랜치, 설정, 훅)을 건드리지 않고 체크포인트를 따로 남긴다
+   */
+  gitDir?: string;
 }
 
 export class CheckpointError extends Error {
@@ -128,7 +133,7 @@ const CLONE_TIMEOUT_MS = 300_000;
 const PUSH_TIMEOUT_MS = 120_000;
 const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-studio.local' };
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
-const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts'];
+const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts', '*.b-studio-relay-*'];
 
 /**
  * 세션 작업 복사본의 Git 기록으로 체크포인트를 관리한다.
@@ -139,13 +144,20 @@ export class CheckpointStore {
   readonly root: string;
   readonly #gitBin: string;
   readonly #author: GitAuthor;
+  readonly #separateGitDir: string | undefined;
   #start: string | undefined;
   #subdirCache: string | undefined;
 
-  constructor(root: string, { gitBin = 'git', author = DEFAULT_AUTHOR }: CheckpointStoreOptions = {}) {
+  constructor(root: string, { gitBin = 'git', author = DEFAULT_AUTHOR, gitDir }: CheckpointStoreOptions = {}) {
     this.root = path.resolve(root);
     this.#gitBin = gitBin;
     this.#author = author;
+    this.#separateGitDir = gitDir === undefined ? undefined : path.resolve(gitDir);
+  }
+
+  /** 체크포인트 저장소 위치. 따로 정하지 않으면 작업 폴더의 .git이다 */
+  get gitDir(): string {
+    return this.#separateGitDir ?? path.join(this.root, '.git');
   }
 
   /**
@@ -221,8 +233,17 @@ export class CheckpointStore {
 
   /** 저장소가 없으면 만들고, 지금 상태를 첫 체크포인트로 남긴다 */
   async init(message = '세션 시작'): Promise<Checkpoint> {
-    const toplevel = await this.#git(['rev-parse', '--show-toplevel']).then((out) => resolveReal(out.trim()), () => undefined);
-    if (toplevel !== (await resolveReal(this.root))) await this.#git(['init', '-q', '-b', 'main']);
+    if (this.#separateGitDir) {
+      // 작업 폴더가 다른 저장소(사용자의 저장소) 안에 있어도 그 저장소를 쓰지 않고 따로 만든다
+      const exists = await stat(path.join(this.#separateGitDir, 'HEAD')).then(() => true, () => false);
+      if (!exists) {
+        await mkdir(path.dirname(this.#separateGitDir), { recursive: true });
+        await this.#git(['init', '-q', '-b', 'main']);
+      }
+    } else {
+      const toplevel = await this.#git(['rev-parse', '--show-toplevel']).then((out) => resolveReal(out.trim()), () => undefined);
+      if (toplevel !== (await resolveReal(this.root))) await this.#git(['init', '-q', '-b', 'main']);
+    }
 
     await this.#configure();
     await this.#git(['add', '-A']);
@@ -610,7 +631,7 @@ export class CheckpointStore {
 
   /** 사용자 전역 설정(커밋 훅, 서명)이 체크포인트 커밋을 막거나 입력을 기다리며 멈추지 않도록 이 저장소에만 설정한다 */
   async #configure(): Promise<void> {
-    const hooks = path.join(this.root, '.git', 'b-studio-hooks');
+    const hooks = path.join(this.gitDir, 'b-studio-hooks');
     await mkdir(hooks, { recursive: true });
     await this.#git(['config', 'core.hooksPath', hooks]);
     await this.#git(['config', 'commit.gpgsign', 'false']);
@@ -620,7 +641,7 @@ export class CheckpointStore {
   }
 
   async #excludeGenerated(): Promise<void> {
-    const file = path.join(this.root, '.git', 'info', 'exclude');
+    const file = path.join(this.gitDir, 'info', 'exclude');
     await mkdir(path.dirname(file), { recursive: true });
     const current = await readFile(file, 'utf8').catch(() => '');
     const lines = new Set(current.split('\n'));
@@ -631,7 +652,8 @@ export class CheckpointStore {
   }
 
   async #git(args: string[], options?: { timeout?: number }): Promise<string> {
-    return runGit(this.#gitBin, ['-C', this.root, ...args], options);
+    const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
+    return runGit(this.#gitBin, ['-C', this.root, ...location, ...args], options);
   }
 }
 
@@ -650,10 +672,19 @@ async function runGit(gitBin: string, args: string[], { timeout }: { timeout?: n
     return stdout;
   } catch (error) {
     const failure = error as { stderr?: string; killed?: boolean };
-    const command = args[0] === '-C' ? args[2] : args[0];
+    const command = subcommand(args);
     const stderr = redactCredentials(failure.stderr?.trim() ?? '');
     throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${stderr ? `: ${stderr}` : ''}`);
   }
+}
+
+/** 오류 메시지에 넣을 git 하위 명령. 앞에 붙인 위치 옵션(-C, --git-dir, --work-tree)과 그 값은 건너뛴다 */
+function subcommand(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-C' || args[i] === '--git-dir' || args[i] === '--work-tree') i++;
+    else return args[i];
+  }
+  return undefined;
 }
 
 /** 오류 메시지가 화면과 로그로 나가므로 주소에 들어 있는 토큰을 지운다 */

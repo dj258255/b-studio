@@ -56,6 +56,44 @@ describe('CheckpointStore', () => {
     expect(await store.commit('요청: 결제 연동', undefined, { findSecrets })).toMatchObject({ files: ['api/src/PaymentClient.java'] });
   });
 
+  it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {
+    // 사용자가 쓰던 저장소: 커밋 하나, 무시하는 로그 파일, 아직 커밋하지 않은 초안
+    await write('.gitignore', '*.log\n');
+    await git(root, 'init', '-q', '-b', 'main');
+    await git(root, 'add', '-A');
+    await git(root, 'commit', '-q', '-m', '내 커밋');
+    await write('debug.log', 'local log\n');
+    await write('api/src/Draft.java', 'class Draft {}\n');
+    const userConfig = await readFile(path.join(root, '.git', 'config'), 'utf8');
+
+    const gitDir = path.join(await mkdtemp(path.join(tmpdir(), 'checkpoints-state-')), 'orders-s1', '.git');
+    const store = new CheckpointStore(root, { gitDir });
+    const start = await store.init('세션 시작');
+    expect(store.gitDir).toBe(gitDir);
+    expect(start.files).toEqual(['.gitignore', 'api/src/Draft.java', 'api/src/Order.java']);
+
+    // 실패한 요청의 변경은 되돌리고, 무시한 파일은 남긴다
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await write('api/src/Temp.java', 'class Temp {}\n');
+    expect(await store.pendingFiles()).toEqual(['api/src/Order.java', 'api/src/Temp.java']);
+    await store.discard();
+    expect(await read('api/src/Order.java')).toBe('class Order {}\n');
+    await expect(read('api/src/Temp.java')).rejects.toThrow();
+    expect(await read('debug.log')).toBe('local log\n');
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    expect(await store.commit('요청: 메모')).toMatchObject({ files: ['api/src/Order.java'] });
+    await store.restore(start.sha);
+    expect(await read('api/src/Order.java')).toBe('class Order {}\n');
+    expect(await read('api/src/Draft.java')).toBe('class Draft {}\n');
+
+    // 사용자 저장소의 기록, 설정, 작업 상태는 그대로다
+    expect(await git(root, 'log', '--format=%s')).toBe('내 커밋');
+    expect(await git(root, 'status', '--porcelain', '--untracked-files=all')).toBe('?? api/src/Draft.java');
+    expect(await readFile(path.join(root, '.git', 'config'), 'utf8')).toBe(userConfig);
+    expect(await new CheckpointStore(root, { gitDir }).list()).toHaveLength(1);
+  });
+
   it('지금 상태를 첫 체크포인트로 남기고 샌드박스 생성물은 제외한다', async () => {
     await mkdir(path.join(root, 'web/node_modules/next'), { recursive: true });
     await write('web/node_modules/next/index.js', '');

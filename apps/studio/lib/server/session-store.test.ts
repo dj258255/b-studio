@@ -1,11 +1,23 @@
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Checkpoint } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
 import type { SessionSnapshot, StudioEvent } from '../studio-events';
-import { archivedSnapshot, closeUnfinished, isProcessAlive, PERSISTED_HISTORY_LIMIT, readSessions, sessionFile, trimHistory, writeSession, writeSessionSync, type PersistedSession } from './session-store';
+import {
+  archivedSnapshot,
+  closeUnfinished,
+  isProcessAlive,
+  PERSISTED_HISTORY_LIMIT,
+  readSessions,
+  sessionFile,
+  stateDirOf,
+  trimHistory,
+  writeSession,
+  writeSessionSync,
+  type PersistedSession,
+} from './session-store';
 
 const checkpoint = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '세션 시작', at: '2026-09-11T00:00:00Z', files: [] } as unknown as Checkpoint;
 
@@ -88,6 +100,30 @@ describe('세션 저장', () => {
     // 종료 신호 처리에서 쓰는 동기 쓰기도 같은 파일을 바꾼다
     writeSessionSync({ ...data, demoIndex: 2 });
     expect(await readSessions(root)).toEqual([{ ...data, demoIndex: 2 }]);
+  });
+
+  it('로컬 폴더 세션은 사용자 폴더가 아니라 세션 폴더의 .git 아래에 쓰고 다시 읽는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'session-store-'));
+    const folder = await mkdtemp(path.join(tmpdir(), 'my-orders-'));
+    const stateDir = path.join(root, 'orders-ef56ab78');
+    const data: PersistedSession = {
+      version: 1,
+      savedAt: '2026-09-11T00:00:00Z',
+      owner: { pid: 4242 },
+      snapshot: { ...snapshot(folder), id: 'ef56ab78', workspace: 'local', stateDir },
+      history: [],
+      conversation: [],
+      demoIndex: 0,
+      claudeCode: { notes: [] },
+      sourceDirtyFiles: 0,
+      sandbox: { id: 'studio-orders-9f8e7d', provider: 'local-docker' },
+    };
+    await writeSession(data);
+
+    expect(stateDirOf(data.snapshot)).toBe(stateDir);
+    expect(stateDirOf(snapshot(folder))).toBe(folder);
+    expect(await readSessions(root)).toEqual([data]);
+    expect(await readdir(folder)).toEqual([]);
   });
 
   it('끝난 프로세스와 살아 있는 프로세스를 구분한다', () => {
