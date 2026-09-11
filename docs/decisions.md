@@ -37,6 +37,7 @@
 - [ADR-033 원격 미리보기: 호스트 이름으로 나누는 게이트웨이가 경로를 그대로 넘긴다](#adr-033-원격-미리보기-호스트-이름으로-나누는-게이트웨이가-경로를-그대로-넘긴다)
 - [ADR-034 실시간 코드 보기: 에이전트 이벤트로 다시 불러오고, 읽기는 작업 공간 규칙을 따른다](#adr-034-실시간-코드-보기-에이전트-이벤트로-다시-불러오고-읽기는-작업-공간-규칙을-따른다)
 - [ADR-035 요청 취소와 토큰 사용량: 샌드박스는 그대로 두고 요청만 되돌리며, 합계는 서버가 센다](#adr-035-요청-취소와-토큰-사용량-샌드박스는-그대로-두고-요청만-되돌리며-합계는-서버가-센다)
+- [ADR-036 코드 문법 강조: Shiki를 처음 볼 때 불러오고, 색은 CSS 변수로 테마를 따른다](#adr-036-코드-문법-강조-shiki를-처음-볼-때-불러오고-색은-css-변수로-테마를-따른다)
 
 ---
 
@@ -1208,6 +1209,49 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 
 ---
 
+## ADR-036 코드 문법 강조: Shiki를 처음 볼 때 불러오고, 색은 CSS 변수로 테마를 따른다
+
+### 맥락
+- 코드 탭과 diff(대화의 되돌림, 기록 탭)는 색 없는 평문이라 코드 구조를 읽기 어려웠습니다.
+- 템플릿이 다루는 언어가 여럿입니다. Next.js의 TSX, Spring Boot의 Java·Gradle, FastAPI의 Python, SQL 마이그레이션, YAML 설정이 한 세션에 섞입니다.
+- 화면은 운영체제의 다크 모드를 따르고 강제 색상 설정도 지원합니다([ADR-031](#adr-031-화면-디자인-조작-계층만-유리로-띄우고-읽는-영역은-불투명하게-둔다)).
+- 코드 탭은 에이전트가 파일을 쓸 때마다 내용을 다시 받습니다([ADR-034](#adr-034-실시간-코드-보기-에이전트-이벤트로-다시-불러오고-읽기는-작업-공간-규칙을-따른다)).
+
+### 결정
+- **Shiki를 씁니다.** VS Code와 같은 TextMate 문법이라 언어별 강조가 정확하고, 문법과 테마를 따로 불러올 수 있습니다.
+- **WASM이 필요 없는 JavaScript 정규식 엔진을 씁니다.** 브라우저 정규식으로 옮기지 못하는 드문 패턴은 건너뜁니다(`forgiving`). 확장자 표에 넣은 32개 문법이 모두 이 엔진으로 불러와지는 것을 테스트로 고정했습니다.
+- **처음 강조할 때 불러옵니다.** Shiki 코어·엔진·테마를 동적 `import`로 불러와 첫 화면 번들에 넣지 않고, 문법은 파일 확장자로 고른 것만 받습니다.
+- **밝은·어두운 테마 색을 토큰에 함께 받고 CSS가 고릅니다.** `defaultColor: false`로 토큰마다 `--shiki-light`, `--shiki-dark` 변수를 받고, `.code-token`이 `prefers-color-scheme`에 맞는 쪽을 씁니다. 테마가 바뀌어도 다시 강조하지 않습니다.
+- **HTML 문자열을 넣지 않고 토큰을 React 요소로 그립니다.** 에이전트가 쓴 코드를 `dangerouslySetInnerHTML`로 넣지 않습니다.
+- **diff는 바꾸기 전과 바꾼 뒤를 따로 강조합니다.**
+  - 파일마다 문맥 줄과 삭제 줄, 문맥 줄과 추가 줄을 각각 이어 붙여 강조해 여러 줄 주석 같은 문맥을 지킵니다. 줄 배경과 +/- 표시는 추가·삭제 색을 그대로 둡니다.
+  - 훙크 안에서는 첫 글자로만 줄 종류를 정합니다. 전에는 줄 앞부분만 보고 색을 정해서, 지운 SQL 주석(`--- …`)을 파일 머리말 색으로 칠했습니다.
+- **100줄씩 나눠 강조하고, 조각 사이에 브라우저에 차례를 넘깁니다.** 한 번에 강조하면 1,500줄 파일에서 화면이 1.16초 멈췄습니다([트러블슈팅 28](troubleshooting.md#28-큰-파일을-열면-코드-강조가-화면을-1초-넘게-멈춤)).
+  - 조각마다 Shiki가 돌려주는 문법 상태(`grammarState`)를 다음 조각에 넘깁니다. 조각 경계를 넘는 여러 줄 주석과 문자열도 한 번에 강조한 결과와 같습니다.
+  - 조각을 끝낼 때마다 그 줄까지 화면에 반영하고, 이미 그린 줄은 다시 그리지 않도록 줄 컴포넌트를 `memo`로 둡니다.
+  - 파일이 바뀌면 남은 조각을 멈춥니다. 압축한 코드처럼 2,000자가 넘는 줄은 토큰화하지 않습니다.
+- **아직 강조하지 않은 줄과 모르는 언어는 평문으로 보여 줍니다.** 줄 수로 강조를 끄는 제한은 두지 않습니다. 파일 크기는 작업 공간 규칙(256KB)이 이미 막습니다.
+- **색이 같은 이웃 토큰과 공백은 합치고, 색 조합마다 CSS 클래스를 한 번만 만듭니다.** 그리는 요소 수와 요소마다의 인라인 스타일을 줄입니다. 다만 이 두 가지만으로는 화면이 멈추는 시간이 줄지 않았습니다(트러블슈팅 28).
+
+### 검증 결과
+데모 세션을 띄워 Playwright(Chromium)로 코드 탭을 열었습니다. 스튜디오는 사용자가 실행하는 방식과 같은 `next dev`로 띄웠습니다.
+
+| 확인 | 결과 |
+|---|---|
+| 번들 | 첫 화면에서 받은 스크립트 44개 중 Shiki 코어가 든 것은 0개. 코드 탭에서 파일을 열자 스크립트 9개를 더 받았고, 그중 1개에 Shiki 코어가 들어 있음. 첫 Java 파일은 누른 뒤 0.14초 만에 강조됨 |
+| 테마 | 같은 `export` 토큰의 글자색이 밝은 테마 `rgb(215, 58, 73)`, 다크 모드 `rgb(249, 117, 131)`. 테마를 바꿔도 다시 강조하지 않음 |
+| 조밀한 코드(줄마다 80자, 토큰 15개)의 가장 긴 작업 | 500줄 109ms, 1,000줄 90ms, 1,500줄 103ms, 2,500줄 115ms. 나누기 전에는 500줄 462ms, 1,000줄 849ms, 1,500줄 1,161ms |
+| 끝까지 강조하는 시간 | 500줄 0.60초, 1,000줄 0.98초, 1,500줄 1.57초, 2,500줄 2.89초. 첫 조각은 0.42~0.55초에 보임 |
+| 조각으로 나눈 결과 | 경계를 넘는 여러 줄 주석과 템플릿 문자열이 든 1,505줄에서 한 번에 강조한 결과와 토큰·색이 모두 같음(Node). 단위 테스트로도 고정 |
+
+### 감수한 트레이드오프
+- 강조는 여전히 화면 스레드에서 돕니다. 조각 하나가 약 0.1초 걸려, 큰 파일을 여는 동안 입력이 조금씩 늦을 수 있습니다. Web Worker로 옮기지 않았습니다.
+- 큰 파일은 아래쪽 줄이 늦게 강조됩니다(2,500줄에서 약 2.9초).
+- 테마는 GitHub Light·Dark로 고정했습니다. 앱 색과 맞춘 전용 테마는 만들지 않았습니다.
+- 언어는 확장자와 알려진 파일 이름(`Dockerfile`, `Makefile`, `gradlew` 등)으로만 고릅니다. 첫 줄의 `#!`로 언어를 알아내지 않습니다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -1222,4 +1266,5 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - Anthropic, [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) (인증 정책, 브랜딩 가이드)
 - Apple Newsroom, [Apple introduces a delightful and elegant new software design](https://www.apple.com/newsroom/2025/06/apple-introduces-a-delightful-and-elegant-new-software-design/) · Apple Developer, [Meet Liquid Glass (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/219/)
 - Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
+- Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
 - MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
