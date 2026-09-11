@@ -74,6 +74,19 @@ export interface SessionSnapshot {
   usage?: { at: string; services: ServiceUsage[] };
   /** 프로젝트 폴더의 파일이 바뀔 때마다 늘어난다. 서비스 안에서 명령이 만든 파일도 코드 화면이 다시 불러오는 기준이다 */
   fileRevision?: number;
+  /** 이 세션에서 시작한 운영 배포나 되돌리기가 진행 중이다. lines는 최근 진행 줄 */
+  deploying?: DeployingView;
+}
+
+export type DeployAction = 'deploy' | 'rollback';
+
+export interface DeployingView {
+  action: DeployAction;
+  /** 배포할 체크포인트나 되돌릴 릴리스 */
+  target: string;
+  startedAt: string;
+  by?: string;
+  lines: string[];
 }
 
 /** 원본이 Git 저장소인 세션의 원격 연동 상태 */
@@ -246,7 +259,21 @@ export type StudioEvent =
       pullRequest?: { url: string; created: boolean };
       /** 브랜치는 올렸지만 PR을 만들지 못한 이유 */
       pullRequestError?: string;
-    };
+    }
+  | { type: 'deploy_started'; action: DeployAction; target: string; at: string; by?: string }
+  /** 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷의 deploying.lines에서 최근 줄을 받는다 */
+  | { type: 'deploy_log'; line: string }
+  | {
+      type: 'deploy_finished';
+      action: DeployAction;
+      release: string;
+      /** 배포한 체크포인트 설명 */
+      label: string;
+      /** 서비스 이름 → 운영 주소 */
+      urls: Record<string, string>;
+      previous?: string;
+    }
+  | { type: 'deploy_failed'; action: DeployAction; target: string; error: string; detail?: string };
 
 export type ExportResult = Omit<Extract<StudioEvent, { type: 'exported' }>, 'type'>;
 

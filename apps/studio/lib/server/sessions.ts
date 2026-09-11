@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, stat } from 'node:fs/promises';
+import { cp, mkdir, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -40,10 +40,14 @@ import {
   type VerificationReport,
 } from '@b-studio/agent';
 import {
+  defaultDeployRoot,
   describeSnapshotEvent,
+  DockerDeployer,
   providerFromEnv,
   Redactor,
   resolveSecrets,
+  type DeployLog,
+  type DeployResult,
   type FileChange,
   type Sandbox,
   type ServiceStatusEvent,
@@ -1156,6 +1160,76 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
   }
 }
 
+/** 배포 진행 줄은 최근 것만 스냅샷에 둔다. 빌드 출력이 수백 줄이라 전부 두면 새로 연결할 때 무겁다 */
+const DEPLOY_LOG_LIMIT = 200;
+
+/**
+ * 세션의 체크포인트를 운영 배포한다. 작업 폴더가 아니라 체크포인트를 꺼내 빌드하므로 게이트를 통과한 상태만 배포된다.
+ * 샌드박스와 따로 돌고 오래 걸리므로 바로 돌아가며, 진행과 결과는 이벤트로 알린다
+ */
+export function deploySession(id: string, { by, sha }: { by?: string; sha?: string }): void {
+  const session = requireSession(id);
+  if (session.snapshot.deploying) throw new StudioError(409, '이 세션에서 이미 배포하는 중입니다');
+  const checkpoint = sha ? session.snapshot.checkpoints.find((candidate) => candidate.sha === sha) : session.snapshot.checkpoints[0];
+  if (!checkpoint) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
+
+  runDeployJob(session, { action: 'deploy', target: checkpoint.shortSha, by }, async (onLog) => {
+    // 같은 체크포인트를 동시에 배포해도 폴더가 겹치지 않게 한다
+    const sourceRoot = path.join(defaultDeployRoot(), session.project.spec.name, 'sources', `${checkpoint.shortSha}-${randomBytes(3).toString('hex')}`);
+    try {
+      onLog({ stage: 'prepare', text: `체크포인트 ${checkpoint.shortSha}의 파일을 꺼냅니다` });
+      const project = await loadProject(await session.checkpoints.exportTree(checkpoint.sha, sourceRoot));
+      const deployer = new DockerDeployer(project, { secrets: await resolveSecrets(project) });
+      return await deployer.deploy({ label: `체크포인트 ${checkpoint.shortSha} ${checkpoint.message}`, sha: checkpoint.sha }, { onLog, by });
+    } finally {
+      // 이미지를 만든 뒤에는 꺼낸 파일이 필요 없다. 릴리스 compose 파일은 배포 상태 폴더에 따로 있다
+      await rm(sourceRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+/** 이미지를 남긴 이전 릴리스로 빌드 없이 되돌린다 */
+export function rollbackSessionDeploy(id: string, releaseId: string, { by }: { by?: string }): void {
+  const session = requireSession(id);
+  if (session.snapshot.deploying) throw new StudioError(409, '이 세션에서 이미 배포하는 중입니다');
+  runDeployJob(session, { action: 'rollback', target: releaseId, by }, async (onLog) => {
+    const deployer = new DockerDeployer(session.project, { secrets: await resolveSecrets(session.project) });
+    return deployer.rollback(releaseId, { onLog, by });
+  });
+}
+
+function runDeployJob(
+  session: Session,
+  { action, target, by }: { action: 'deploy' | 'rollback'; target: string; by?: string },
+  job: (onLog: (log: DeployLog) => void) => Promise<DeployResult>,
+): void {
+  const at = new Date().toISOString();
+  session.snapshot.deploying = { action, target, startedAt: at, by, lines: [] };
+  emit(session, { type: 'deploy_started', action, target, at, by });
+  const onLog = (log: DeployLog) => {
+    const deploying = session.snapshot.deploying;
+    if (!deploying) return;
+    const line = `${log.service ? `[${log.service}] ` : ''}${log.text}`;
+    deploying.lines.push(line);
+    if (deploying.lines.length > DEPLOY_LOG_LIMIT) deploying.lines.splice(0, deploying.lines.length - DEPLOY_LOG_LIMIT);
+    emit(session, { type: 'deploy_log', line });
+  };
+
+  void (async () => {
+    let event: StudioEvent;
+    try {
+      const result = await job(onLog);
+      event = { type: 'deploy_finished', action, release: result.release.id, label: result.release.source.label, urls: result.urls, previous: result.previous };
+    } catch (error) {
+      const detail = (error as { detail?: unknown }).detail;
+      event = { type: 'deploy_failed', action, target, error: describe(error).split('\n')[0]!, ...(typeof detail === 'string' && detail.trim() ? { detail: detail.trim().slice(-4_000) } : {}) };
+    }
+    // 새로 연결한 브라우저가 배포 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
+    session.snapshot.deploying = undefined;
+    emit(session, event);
+  })();
+}
+
 /**
  * 원격 세션 브랜치에 다른 사람(리뷰어)이 올린 커밋을 가져온다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다.
  * 가져온 변경도 에이전트의 변경처럼 게이트를 거치고, 통과하지 못하면 파일과 데이터베이스를 가져오기 전으로 되돌린다
@@ -1434,7 +1508,7 @@ function followLogs(session: Session, tail: number): void {
 
 function emit(session: Session, event: StudioEvent): void {
   // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient = event.type === 'usage' || event.type === 'files_changed';
+  const transient = event.type === 'usage' || event.type === 'files_changed' || event.type === 'deploy_log';
   if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);

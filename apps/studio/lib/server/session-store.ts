@@ -41,7 +41,7 @@ export function stateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir
  * 로그·사용량·서비스 상태는 샌드박스와 함께 사라지고, 세션 상태는 스냅샷이 들고 있으므로 뺀다
  */
 export function trimHistory(history: readonly StudioEvent[]): StudioEvent[] {
-  return history.filter((event) => !['log', 'usage', 'service', 'status', 'snapshot'].includes(event.type)).slice(-PERSISTED_HISTORY_LIMIT);
+  return history.filter((event) => !['log', 'usage', 'service', 'status', 'snapshot', 'deploy_log'].includes(event.type)).slice(-PERSISTED_HISTORY_LIMIT);
 }
 
 /** 서버가 멈춰 끝나지 못한 요청과 되돌리기를 닫는다. 그대로 두면 다시 그린 화면이 "처리 중"에 멈춘다 */
@@ -49,7 +49,10 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
   const openRuns = new Set<string>();
   let openRestore: Checkpoint | undefined;
   let openRemoteSync = false;
+  let openDeploy: Extract<StudioEvent, { type: 'deploy_started' }> | undefined;
   for (const event of history) {
+    if (event.type === 'deploy_started') openDeploy = event;
+    else if (event.type === 'deploy_finished' || event.type === 'deploy_failed') openDeploy = undefined;
     if (event.type === 'run_started') openRuns.add(event.runId);
     else if (event.type === 'run_finished') openRuns.delete(event.runId);
     else if (event.type === 'restore_started') openRestore = event.checkpoint;
@@ -62,6 +65,7 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
     ...[...openRuns].map((runId): StudioEvent => ({ type: 'run_finished', runId, status: 'error', summary: reason })),
     ...(openRestore ? [{ type: 'restore_failed', checkpoint: openRestore, error: reason } satisfies StudioEvent] : []),
     ...(openRemoteSync ? [{ type: 'remote_sync_failed', error: reason } satisfies StudioEvent] : []),
+    ...(openDeploy ? [{ type: 'deploy_failed', action: openDeploy.action, target: openDeploy.target, error: reason } satisfies StudioEvent] : []),
   ];
 }
 
@@ -119,6 +123,7 @@ export function archivedSnapshot(data: PersistedSession, error?: string): Sessio
     status: 'stopped',
     running: false,
     cancelling: undefined,
+    deploying: undefined,
     error,
     usage: undefined,
     services: data.snapshot.services.map((service) => ({ ...service, state: 'stopped' as const, url: undefined, previewUrl: undefined, detail: undefined })),

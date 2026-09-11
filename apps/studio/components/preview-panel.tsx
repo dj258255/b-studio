@@ -5,6 +5,7 @@ import type { SessionView } from "@/lib/session-view";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
 import { CodePanel } from "./code-panel";
+import { DeployPanel } from "./deploy-panel";
 import { HistoryPanel } from "./history-panel";
 import { LogPanel } from "./log-panel";
 import { ResourcePanel } from "./resource-panel";
@@ -16,6 +17,7 @@ const LOGS_TAB = "logs";
 const HISTORY_TAB = "history";
 const CODE_TAB = "code";
 const RESOURCES_TAB = "resources";
+const DEPLOY_TAB = "deploy";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
@@ -25,6 +27,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
     { id: CODE_TAB, label: "코드" },
     { id: HISTORY_TAB, label: "기록" },
+    { id: DEPLOY_TAB, label: "배포" },
     { id: LOGS_TAB, label: "로그" },
     { id: RESOURCES_TAB, label: "리소스" },
   ];
@@ -55,6 +58,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <CodePanel view={view} />
         ) : active.id === HISTORY_TAB ? (
           <HistoryPanel view={view} />
+        ) : active.id === DEPLOY_TAB ? (
+          <DeployPanel view={view} />
         ) : active.id === RESOURCES_TAB ? (
           <ResourcePanel view={view} />
         ) : active.external ? (
