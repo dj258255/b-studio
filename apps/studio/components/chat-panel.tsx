@@ -215,6 +215,43 @@ function ChatEntry({ item }: { item: ChatItem }) {
       );
     }
 
+    case "remoteSync": {
+      const { result } = item;
+      if (!result) return <p className="text-sm text-wait motion-safe:animate-pulse">원격 브랜치에서 다른 사람이 올린 커밋을 가져오는 중</p>;
+      if (result.ok && result.status === "up-to-date") return <p className="text-sm text-muted">원격 브랜치에 가져올 커밋이 없습니다.</p>;
+      const commitList = result.commits && result.commits.length > 0 && (
+        <ul className="mt-1 space-y-0.5 font-mono text-xs text-muted">
+          {result.commits.map((commit) => (
+            <li key={commit.shortSha} className="break-words">
+              {commit.shortSha} {commit.subject} ({commit.author})
+            </li>
+          ))}
+        </ul>
+      );
+      return (
+        <div className="space-y-2">
+          {result.ok ? (
+            <div className="text-sm">
+              <p className="text-pass">
+                원격 커밋 {result.commits.length}개를 가져와 체크포인트 <span className="font-mono">{result.checkpoint?.shortSha}</span>에 저장했습니다. 바뀐 파일{" "}
+                {result.files.length}개
+              </p>
+              {result.status === "picked" && <p className="mt-0.5 text-muted">되돌린 체크포인트는 다시 넣지 않고 원격에만 있던 변경을 옮겼습니다.</p>}
+              {commitList}
+            </div>
+          ) : (
+            <div className="rounded-md border border-fail/40 bg-fail/10 px-3 py-2 text-sm">
+              <p className="font-medium text-fail">원격 변경을 가져오지 못했습니다: {result.error}</p>
+              {result.conflicts && <p className="mt-0.5 text-muted">PR이나 원격 브랜치에서 충돌을 해결한 뒤 다시 가져오세요.</p>}
+              {result.restarted && <p className="mt-0.5 text-muted">{restartSummary(result.restarted)}</p>}
+              {commitList}
+            </div>
+          )}
+          {result.report && <GateTrack files={result.files ?? []} report={result.report} />}
+        </div>
+      );
+    }
+
     case "resumed":
       return (
         <div className="rounded-md border border-line px-3 py-2 text-sm">

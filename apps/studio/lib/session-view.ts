@@ -1,5 +1,5 @@
 import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
-import type { SessionSnapshot, StudioEvent } from './studio-events';
+import type { RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
   service: string;
@@ -33,6 +33,27 @@ export type ChatItem =
     }
   | { kind: 'resumed'; checkpoint: Checkpoint; discarded: string[]; databases: DatabaseState[]; restarted: ServiceCheck[] }
   | {
+      kind: 'remoteSync';
+      result?:
+        | {
+            ok: true;
+            status: 'up-to-date' | 'merged' | 'picked';
+            commits: RemoteCommitView[];
+            files: string[];
+            checkpoint?: Checkpoint;
+            report?: VerificationReport;
+          }
+        | {
+            ok: false;
+            error: string;
+            conflicts?: string[];
+            commits?: RemoteCommitView[];
+            files?: string[];
+            report?: VerificationReport;
+            restarted?: ServiceCheck[];
+          };
+    }
+  | {
       kind: 'exported';
       branch: string;
       hostKind: GitHostKind;
@@ -45,6 +66,7 @@ export type ChatItem =
 type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
 type GateItem = Extract<ChatItem, { kind: 'gate' }>;
 type RestoreItem = Extract<ChatItem, { kind: 'restore' }>;
+type RemoteSyncItem = Extract<ChatItem, { kind: 'remoteSync' }>;
 
 export interface SessionView {
   snapshot: SessionSnapshot;
@@ -152,6 +174,40 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         completedRuns: view.completedRuns + 1,
       };
 
+    case 'remote_sync_started':
+      return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'remoteSync' }] };
+
+    case 'remote_synced':
+      return {
+        ...patchSnapshot(view, { running: false, checkpoints: event.checkpoints, repository: event.repository }),
+        chat: settleRemoteSync(view.chat, {
+          ok: true,
+          status: event.status,
+          commits: event.commits,
+          files: event.files,
+          checkpoint: event.checkpoint,
+          report: event.report,
+        }),
+        // 파일이 바뀌었으면 미리보기와 계약을 다시 불러오게 한다
+        completedRuns: event.status === 'up-to-date' ? view.completedRuns : view.completedRuns + 1,
+      };
+
+    case 'remote_sync_failed':
+      return {
+        ...patchSnapshot(view, { running: false, ...(event.checkpoints ? { checkpoints: event.checkpoints } : {}) }),
+        chat: settleRemoteSync(view.chat, {
+          ok: false,
+          error: event.error,
+          conflicts: event.conflicts,
+          commits: event.commits,
+          files: event.files,
+          report: event.report,
+          restarted: event.restarted,
+        }),
+        // 가져온 변경을 반영했다가 되돌렸으면 서비스가 다시 떴다
+        completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
+      };
+
     case 'usage':
       return patchSnapshot(view, { usage: { at: event.at, services: event.services } });
 
@@ -184,6 +240,13 @@ function markInterrupted(chat: ChatItem[], runId: string): ChatItem[] {
     }
     return item;
   });
+}
+
+function settleRemoteSync(chat: ChatItem[], result: NonNullable<RemoteSyncItem['result']>): ChatItem[] {
+  const index = chat.findLastIndex((item) => item.kind === 'remoteSync' && !item.result);
+  // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
+  if (index === -1) return [...chat, { kind: 'remoteSync', result }];
+  return chat.map((item, i) => (i === index ? { kind: 'remoteSync', result } : item));
 }
 
 function settleRestore(chat: ChatItem[], sha: string, result: NonNullable<RestoreItem['result']>): ChatItem[] {

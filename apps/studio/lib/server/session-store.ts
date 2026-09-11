@@ -41,16 +41,20 @@ export function trimHistory(history: readonly StudioEvent[]): StudioEvent[] {
 export function closeUnfinished(history: readonly StudioEvent[], reason: string): StudioEvent[] {
   const openRuns = new Set<string>();
   let openRestore: Checkpoint | undefined;
+  let openRemoteSync = false;
   for (const event of history) {
     if (event.type === 'run_started') openRuns.add(event.runId);
     else if (event.type === 'run_finished') openRuns.delete(event.runId);
     else if (event.type === 'restore_started') openRestore = event.checkpoint;
     else if (event.type === 'restored' || event.type === 'restore_failed') openRestore = undefined;
+    else if (event.type === 'remote_sync_started') openRemoteSync = true;
+    else if (event.type === 'remote_synced' || event.type === 'remote_sync_failed') openRemoteSync = false;
   }
   return [
     ...history,
     ...[...openRuns].map((runId): StudioEvent => ({ type: 'run_finished', runId, status: 'error', summary: reason })),
     ...(openRestore ? [{ type: 'restore_failed', checkpoint: openRestore, error: reason } satisfies StudioEvent] : []),
+    ...(openRemoteSync ? [{ type: 'remote_sync_failed', error: reason } satisfies StudioEvent] : []),
   ];
 }
 

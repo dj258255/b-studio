@@ -7,6 +7,7 @@ import {
   AnthropicModelClient,
   buildPullRequest,
   canCreatePullRequest,
+  captureBaselines,
   CheckpointError,
   CheckpointStore,
   compareUrl,
@@ -17,19 +18,24 @@ import {
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
   preflightClaudeCode,
+  RemoteConflictError,
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
   ScriptedModelClient,
+  verifyChanges,
   type AgentEvent,
   type AgentResult,
   type Checkpoint,
+  type DatabaseState,
   type DemoScenario,
   type GitAuthor,
   type ModelClient,
+  type RemoteSyncResult,
   type ServiceCheck,
+  type VerificationReport,
 } from '@b-studio/agent';
-import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
+import { describeSnapshotEvent, providerFromEnv, resolveSecrets, type Sandbox, type ServiceStatusEvent, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import type {
@@ -396,9 +402,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       `[b-studio] 세션을 새 샌드박스에서 이어서 시작했습니다. 작업 복사본과 데이터베이스는 체크포인트 ${head.shortSha}("${head.message}") 상태입니다.`,
       ...(discarded.length > 0 ? [`체크포인트에 없던 변경 ${discarded.length}개는 버렸습니다: ${discarded.slice(0, 20).join(', ')}`] : []),
     ].join(' ');
-    if (mode === 'claude-code') session.claudeCode.notes.push(note);
-    else session.conversation.push({ role: 'user', content: note });
-    session.settledConversation = session.conversation.length;
+    noteForModel(session, note);
 
     archived.delete(id);
     store.sessions.set(id, session);
@@ -679,9 +683,10 @@ async function revertRun(session: Session, runId: string): Promise<void> {
 }
 
 /** 체크포인트 시점의 데이터베이스 상태를 남긴다. 실패해도 작업은 계속하고 로그로 알린다 */
-async function saveDatabases(session: Session, sha: string): Promise<void> {
-  if (!session.databases.enabled) return;
-  for (const state of await session.databases.save(sha, session.stop.signal)) {
+async function saveDatabases(session: Session, sha: string): Promise<DatabaseState[]> {
+  if (!session.databases.enabled) return [];
+  const states = await session.databases.save(sha, session.stop.signal);
+  for (const state of states) {
     emit(session, {
       type: 'log',
       service: state.service,
@@ -689,6 +694,14 @@ async function saveDatabases(session: Session, sha: string): Promise<void> {
       at: new Date().toISOString(),
     });
   }
+  return states;
+}
+
+/** 대화 밖에서 바뀐 사실(되돌리기, 새 샌드박스, 가져온 원격 커밋)을 다음 요청에서 모델이 알게 한다 */
+function noteForModel(session: Session, text: string): void {
+  if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(text);
+  else session.conversation.push({ role: 'user', content: text });
+  session.settledConversation = session.conversation.length;
 }
 
 /** 이 세션의 이전 체크포인트로 되돌린다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다 */
@@ -718,10 +731,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
       );
       session.snapshot.checkpoints = await session.checkpoints.list();
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
-      const note = `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`;
-      if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(note);
-      else session.conversation.push({ role: 'user', content: note });
-      session.settledConversation = session.conversation.length;
+      noteForModel(session, `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`);
       if (session.snapshot.mode === 'demo') {
         // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 체크포인트 수에 맞춰 다음 요청을 다시 정한다
         session.demoIndex = session.snapshot.checkpoints.length - 1;
@@ -795,6 +805,87 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
     return result;
   } finally {
     session.exporting = false;
+  }
+}
+
+/**
+ * 원격 세션 브랜치에 다른 사람(리뷰어)이 올린 커밋을 가져온다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다.
+ * 가져온 변경도 에이전트의 변경처럼 게이트를 거치고, 통과하지 못하면 파일과 데이터베이스를 가져오기 전으로 되돌린다
+ */
+export function syncRemote(id: string): void {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 가져올 원격 브랜치가 없습니다');
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 가져올 수 있습니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+
+  session.snapshot.running = true;
+  emit(session, { type: 'remote_sync_started' });
+  void (async () => {
+    const event = await runRemoteSync(session);
+    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
+    session.snapshot.running = false;
+    if (!session.stop.signal.aborted) emit(session, event);
+  })();
+}
+
+async function runRemoteSync(session: Session): Promise<StudioEvent> {
+  const start: StartOptions = { signal: session.stop.signal, onStatus: (status) => onServiceStatus(session, status) };
+  let baselines: Awaited<ReturnType<typeof captureBaselines>>;
+  let result: RemoteSyncResult;
+  try {
+    // 계약 비교 기준은 가져온 파일이 반영되기 전에 잡는다
+    baselines = await captureBaselines(session.sandbox, session.project);
+    result = await session.checkpoints.integrateRemote();
+  } catch (error) {
+    return { type: 'remote_sync_failed', error: describe(error), conflicts: error instanceof RemoteConflictError ? error.conflicts : undefined };
+  }
+
+  const commits = result.commits.map(({ shortSha, subject, author }) => ({ shortSha, subject, author }));
+  if (result.status === 'up-to-date') {
+    const repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
+    session.snapshot.repository = repository;
+    return { type: 'remote_synced', status: 'up-to-date', commits, files: [], checkpoints: session.snapshot.checkpoints, repository };
+  }
+
+  let report: VerificationReport | undefined;
+  try {
+    // 리뷰어가 의도한 API 변경은 막지 않고 결과로 보여 준다. 기동 실패와 시크릿 값은 막는다
+    report = await verifyChanges({ sandbox: session.sandbox, project: session.project, changedFiles: result.files, baselines, allowBreaking: true, start });
+    if (!report.ok) return await undoRemoteSync(session, result, commits, report, '가져온 변경이 검증 게이트를 통과하지 못해 가져오기 전 체크포인트로 되돌렸습니다', start);
+
+    await session.checkpoints.acceptRemote(result);
+    const checkpoint = result.checkpoint!;
+    await saveDatabases(session, checkpoint.sha);
+    session.snapshot.checkpoints = await session.checkpoints.list();
+    const repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
+    session.snapshot.repository = repository;
+    noteForModel(
+      session,
+      `[b-studio] 원격 브랜치에서 다른 사람이 올린 커밋 ${commits.length}개(${commits.map((commit) => commit.subject).join(', ')})를 가져와 체크포인트 ${checkpoint.shortSha}로 남겼습니다. 바뀐 파일: ${result.files.slice(0, 20).join(', ')}. 다음 작업은 이 변경을 전제로 하세요.`,
+    );
+    return { type: 'remote_synced', status: result.status, commits, files: result.files, checkpoint, report, checkpoints: session.snapshot.checkpoints, repository };
+  } catch (error) {
+    return undoRemoteSync(session, result, commits, report, `가져온 변경을 확인하지 못해 가져오기 전 체크포인트로 되돌렸습니다: ${describe(error)}`, start);
+  }
+}
+
+/** 검증된 체크포인트만 남긴다. 파일과 데이터베이스를 가져오기 전으로 되돌리고 바뀐 서비스를 다시 띄운다 */
+async function undoRemoteSync(
+  session: Session,
+  result: RemoteSyncResult,
+  commits: Array<{ shortSha: string; subject: string; author: string }>,
+  report: VerificationReport | undefined,
+  error: string,
+  start: StartOptions,
+): Promise<StudioEvent> {
+  try {
+    const { files } = await session.checkpoints.restore(result.previous);
+    const database = await session.databases.restore(result.previous, session.stop.signal);
+    const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
+    session.snapshot.checkpoints = await session.checkpoints.list();
+    return { type: 'remote_sync_failed', error, commits, files: result.files, report, restarted: restart.restarted, checkpoints: session.snapshot.checkpoints };
+  } catch (undoError) {
+    return { type: 'remote_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, commits, files: result.files, report };
   }
 }
 

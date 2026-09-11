@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { externalCallScript } from '../docker/external-call';
-import { parseEgressDenial, parseSyncOutput } from '../docker/format';
+import { parseEgressDenial, parseSyncOutput, SYNC_SCRIPT } from '../docker/format';
 import { EDGE_SERVICE, edgePortFor } from '../edge-config';
 import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
@@ -232,7 +232,8 @@ class KubernetesSandbox implements Sandbox {
     for (let checks = 1; ; checks++) {
       const pending: string[] = [];
       for (const [service, entries] of targets) {
-        const script = 'for f in "$@"; do if [ -e "$f" ]; then h=$(sha256sum "$f" 2>/dev/null | cut -d " " -f 1); echo "${h:-UNREADABLE} $f"; else echo "MISSING $f"; fi; done';
+        // 파드 안의 절대 경로를 루트부터 목록으로 확인한다. hostPath도 파일 공유 캐시를 거치므로 Docker 제공자와 같은 규칙을 쓴다
+        const script = `SYNC_ROOT=/\n${SYNC_SCRIPT}`;
         const result = await this.#kubectl.run(['-n', this.#namespace, 'exec', service, '-c', service, '--', 'sh', '-c', script, 'sh', ...entries.map((entry) => entry.containerPath)], { signal });
         const seen = result.exitCode === 0 ? parseSyncOutput(result.stdout) : new Map<string, string>();
         for (const entry of entries) if (seen.get(entry.containerPath) !== entry.expected) pending.push(entry.file);

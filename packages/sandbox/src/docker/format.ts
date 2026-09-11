@@ -146,6 +146,29 @@ export function parseContainerState(stdout: string): ContainerState {
  * 동기화 확인 스크립트 출력: 파일마다 `<sha256|MISSING|UNREADABLE> <경로>` 한 줄.
  * 경로에 공백이 있을 수 있으므로 첫 공백에서만 나눈다
  */
+/**
+ * 샌드박스 쪽에서 바뀐 파일이 보이는지 확인하는 스크립트. 인자는 프로젝트 루트 기준 경로이고, 줄마다 "해시 경로"를 출력한다.
+ * 빌드 도구는 루트부터 디렉터리 목록을 따라 내려가므로, 파일이 든 폴더뿐 아니라 모든 상위 폴더의 목록에 다음 경로 이름이 보여야
+ * 반영된 것으로 본다. 새 폴더를 만들면 그 폴더의 목록은 바로 보이지만 상위 폴더의 목록은 파일 공유 캐시 때문에 약 19초 늦게 바뀐다
+ */
+export const SYNC_SCRIPT = [
+  'cd "${SYNC_ROOT:-/project}" || exit 2',
+  'for f in "$@"; do',
+  '  p="$f"',
+  '  listed=1',
+  '  while [ "$p" != "." ] && [ "$p" != "/" ]; do',
+  '    if ! ls -1a "$(dirname "$p")" 2>/dev/null | grep -Fxq -- "$(basename "$p")"; then listed=0; break; fi',
+  '    p=$(dirname "$p")',
+  '  done',
+  '  if [ "$listed" = 1 ]; then',
+  '    h=$(sha256sum "$f" 2>/dev/null | cut -d " " -f 1)',
+  '    echo "${h:-UNREADABLE} $f"',
+  '  else',
+  '    echo "MISSING $f"',
+  '  fi',
+  'done',
+].join('\n');
+
 export function parseSyncOutput(stdout: string): Map<string, string> {
   const seen = new Map<string, string>();
   for (const line of stdout.split('\n')) {

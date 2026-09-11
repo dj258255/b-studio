@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CheckpointError, CheckpointStore, redactCredentials } from './checkpoints';
+import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError } from './checkpoints';
 
 const execFileAsync = promisify(execFile);
 
@@ -165,6 +165,123 @@ async function createSourceRepository() {
 
 const BRANCH = 'b-studio/orders-s1';
 
+/** 리뷰어가 세션 브랜치를 받아 커밋 하나를 올린다 */
+async function pushReviewerCommit(base: string, remote: string, file: string, content: string, message: string): Promise<string> {
+  const reviewer = await mkdtemp(path.join(base, 'reviewer-'));
+  await execFileAsync('git', ['clone', '-q', '--branch', BRANCH, remote, reviewer]);
+  await mkdir(path.dirname(path.join(reviewer, file)), { recursive: true });
+  await writeFile(path.join(reviewer, file), content);
+  await git(reviewer, 'add', '-A');
+  await git(reviewer, 'commit', '-q', '-m', message);
+  await git(reviewer, 'push', '-q', 'origin', 'HEAD');
+  return git(reviewer, 'rev-parse', 'HEAD');
+}
+
+describe('CheckpointStore 원격 변경 가져오기', () => {
+  it('리뷰어 커밋을 병합 커밋 하나로 가져오고, 받아들인 뒤 올리면 원격을 덮어쓰지 않고 이어 붙인다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+
+    await writeFile(order, 'class Order { String a; }\n');
+    await store.commit('요청: A');
+    await store.push();
+    const theirs = await pushReviewerCommit(base, remote, 'NOTE.md', 'review\n', 'review note');
+    await writeFile(order, 'class Order { String b; }\n');
+    const b = (await store.commit('요청: B'))!;
+    await expect(store.push()).rejects.toThrow('원격 변경을 가져온 뒤 다시 올리세요');
+
+    const result = await store.integrateRemote();
+    expect(result).toMatchObject({
+      status: 'merged',
+      remoteSha: theirs,
+      files: ['NOTE.md'],
+      previous: b.sha,
+      commits: [{ sha: theirs, subject: 'review note', author: 'test' }],
+      checkpoint: { message: '원격 커밋 1개 가져오기', files: ['NOTE.md'] },
+    });
+    expect(await readFile(path.join(workDir, 'NOTE.md'), 'utf8')).toBe('review\n');
+    expect(await readFile(order, 'utf8')).toBe('class Order { String b; }\n');
+
+    // 리뷰어 커밋은 체크포인트로 보이지 않고, 가져온 결과가 체크포인트 하나로 남는다
+    expect((await store.list()).map((checkpoint) => checkpoint.message)).toEqual(['원격 커밋 1개 가져오기', '요청: B', '요청: A', '세션 시작 (main 브랜치)']);
+    expect((await store.sessionCommits()).map((commit) => commit.subject)).toEqual(['요청: A', '요청: B', '원격 커밋 1개 가져오기']);
+    expect(await store.patch(result.checkpoint!.sha)).toContain('+review');
+
+    await store.acceptRemote(result);
+    expect(await store.push()).toEqual({ sha: result.checkpoint!.sha, commits: 3, forced: false });
+    await expect(git(remote, 'merge-base', '--is-ancestor', theirs, `refs/heads/${BRANCH}`)).resolves.toBe('');
+  });
+
+  it('원격 커밋과 같은 곳을 고쳤으면 아무것도 바꾸지 않고 충돌한 파일을 알린다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+
+    await writeFile(order, 'class Order { String a; }\n');
+    await store.commit('요청: A');
+    await store.push();
+    await pushReviewerCommit(base, remote, 'api/src/Order.java', 'class Order { String reviewer; }\n', 'reviewer edit');
+    await writeFile(order, 'class Order { String mine; }\n');
+    const mine = (await store.commit('요청: 내 변경'))!;
+
+    const error = await store.integrateRemote().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(RemoteConflictError);
+    expect((error as RemoteConflictError).conflicts).toEqual(['api/src/Order.java']);
+    expect(await git(workDir, 'rev-parse', 'HEAD')).toBe(mine.sha);
+    expect(await store.pendingFiles()).toEqual([]);
+    expect(await readFile(order, 'utf8')).toBe('class Order { String mine; }\n');
+    await expect(git(workDir, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD')).rejects.toThrow();
+  });
+
+  it('원격에 브랜치가 없거나 지금 기록에 이미 들어 있으면 가져올 것이 없다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const head = await git(workDir, 'rev-parse', 'HEAD');
+    expect(await store.integrateRemote()).toEqual({ status: 'up-to-date', commits: [], files: [], previous: head });
+
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String a; }\n');
+    const a = (await store.commit('요청: A'))!;
+    await store.push();
+    expect(await store.integrateRemote()).toEqual({ status: 'up-to-date', remoteSha: a.sha, commits: [], files: [], previous: a.sha });
+  });
+
+  it('올린 뒤 되돌린 기록에는 버린 체크포인트 없이 원격에만 있는 변경을 옮겨 오고, 받아들이기 전에는 원격 상태로 기록하지 않는다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+
+    await writeFile(order, 'class Order { String a; }\n');
+    const a = (await store.commit('요청: A'))!;
+    await writeFile(order, 'class Order { String b; }\n');
+    await store.commit('요청: B');
+    await store.push();
+    await store.restore(a.sha);
+    const theirs = await pushReviewerCommit(base, remote, 'NOTE.md', 'review\n', 'review note');
+
+    const result = await store.integrateRemote();
+    expect(result).toMatchObject({ status: 'picked', remoteSha: theirs, files: ['NOTE.md'], previous: a.sha, commits: [{ subject: 'review note' }] });
+    // 버린 B의 변경은 다시 들어오지 않는다
+    expect(await readFile(order, 'utf8')).toBe('class Order { String a; }\n');
+    expect(await readFile(path.join(workDir, 'NOTE.md'), 'utf8')).toBe('review\n');
+
+    // 검증에 실패해 가져오기를 되돌렸다면, 원격 상태로 기록하지 않았으므로 올려도 리뷰어 커밋을 덮어쓰지 않는다
+    await store.restore(a.sha);
+    await expect(store.acceptRemote(result)).rejects.toThrow('원격 상태로 기록하지 않았습니다');
+    await expect(store.push()).rejects.toThrow('덮어쓰지 않았습니다');
+    expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(theirs);
+
+    // 다시 가져와 받아들이면 원격 브랜치를 지금 기록으로 맞춘다. 리뷰어 변경은 내용으로 남는다
+    const again = await store.integrateRemote();
+    await store.acceptRemote(again);
+    expect(await store.push()).toMatchObject({ sha: again.checkpoint!.sha, forced: true });
+    expect(await git(remote, 'show', `refs/heads/${BRANCH}:NOTE.md`)).toBe('review');
+  });
+});
+
 describe('CheckpointStore 원격 저장소 연동', () => {
   it('원본을 복제해 세션 브랜치를 만들고, 기록에는 세션 시작 이후만 보인다', async () => {
     const { source, remote, workDir } = await createSourceRepository();
@@ -179,7 +296,14 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await store.commit('요청: 메모 추가', '검증 통과\n- api: 재시작 후 준비 완료\n\n# 에이전트 요약 제목');
 
     expect((await store.list()).map((checkpoint) => checkpoint.message)).toEqual(['요청: 메모 추가', '세션 시작 (main 브랜치)']);
-    expect(await store.repository()).toEqual({ remoteUrl: remote, base: 'main', branch: BRANCH, pushedSha: undefined, pullRequestUrl: undefined });
+    expect(await store.repository()).toEqual({
+      remoteUrl: remote,
+      base: 'main',
+      branch: BRANCH,
+      pushedSha: undefined,
+      remoteSha: undefined,
+      pullRequestUrl: undefined,
+    });
     // 마크다운 제목(#)이 커밋 정리 규칙에 지워지지 않아야 한다
     expect(await store.sessionCommits()).toMatchObject([
       { subject: '요청: 메모 추가', body: '검증 통과\n- api: 재시작 후 준비 완료\n\n# 에이전트 요약 제목', files: ['api/src/Order.java'] },

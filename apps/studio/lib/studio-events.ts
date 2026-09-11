@@ -1,4 +1,4 @@
-import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck } from '@b-studio/agent';
+import type { AgentEvent, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
@@ -80,6 +80,13 @@ export interface ProjectSummary {
   error?: string;
 }
 
+/** 원격 세션 브랜치에서 가져온 커밋 (리뷰어가 올린 커밋 등) */
+export interface RemoteCommitView {
+  shortSha: string;
+  subject: string;
+  author: string;
+}
+
 /** 홈 화면의 세션 목록. 중지된 세션도 작업 복사본이 남아 있어 이어서 작업할 수 있다 */
 export interface SessionSummary {
   id: string;
@@ -140,6 +147,30 @@ export type StudioEvent =
       discarded: string[];
       databases: DatabaseState[];
       restarted: ServiceCheck[];
+    }
+  | { type: 'remote_sync_started' }
+  | {
+      type: 'remote_synced';
+      /** up-to-date면 가져온 커밋이 없다. picked는 되돌린 기록이라 원격에만 있던 변경만 옮겨 왔다는 뜻이다 */
+      status: 'up-to-date' | 'merged' | 'picked';
+      commits: RemoteCommitView[];
+      files: string[];
+      checkpoint?: Checkpoint;
+      report?: VerificationReport;
+      checkpoints: Checkpoint[];
+      repository: RepositoryView;
+    }
+  | {
+      type: 'remote_sync_failed';
+      error: string;
+      /** 충돌한 파일. 작업 복사본은 가져오기 전 그대로다 */
+      conflicts?: string[];
+      commits?: RemoteCommitView[];
+      files?: string[];
+      /** 가져온 변경이 검증을 통과하지 못해 되돌렸을 때의 게이트 결과 */
+      report?: VerificationReport;
+      restarted?: ServiceCheck[];
+      checkpoints?: Checkpoint[];
     }
   | {
       type: 'exported';

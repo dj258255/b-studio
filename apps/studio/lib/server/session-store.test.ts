@@ -53,6 +53,10 @@ describe('세션 저장', () => {
       { type: 'restore_failed', checkpoint, error: '서버가 멈췄습니다' },
     ]);
     expect(closeUnfinished(history.slice(0, 2), 'x')).toHaveLength(2);
+    expect(closeUnfinished([{ type: 'remote_sync_started' }], '서버가 멈췄습니다')).toEqual([
+      { type: 'remote_sync_started' },
+      { type: 'remote_sync_failed', error: '서버가 멈췄습니다' },
+    ]);
   });
 
   it('작업 복사본의 .git 아래에 쓰고 세션 폴더들에서 다시 읽으며, 깨진 파일은 건너뛴다', async () => {

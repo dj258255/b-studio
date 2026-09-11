@@ -35,8 +35,10 @@ export interface RepositoryInfo {
   remoteUrl: string;
   base: string;
   branch: string;
-  /** 스튜디오가 마지막으로 올린 커밋. 다음에 올릴 때 원격이 이 상태 그대로인지 확인한다 */
+  /** 스튜디오가 마지막으로 올린 커밋 */
   pushedSha?: string;
+  /** 스튜디오가 마지막으로 확인한 원격 브랜치의 끝 커밋(올렸거나 가져왔을 때). 다음에 올릴 때 원격이 이 상태 그대로인지 확인한다 */
+  remoteSha?: string;
   pullRequestUrl?: string;
 }
 
@@ -56,6 +58,33 @@ export interface PushResult {
   forced: boolean;
 }
 
+/** 원격 세션 브랜치에만 있던 커밋 (리뷰어가 올린 커밋 등) */
+export interface RemoteCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  author: string;
+}
+
+export interface RemoteSyncResult {
+  /**
+   * up-to-date: 가져올 커밋이 없다 (원격에 브랜치가 없거나 이미 기록에 들어 있다)
+   * merged: 원격 브랜치를 병합 커밋으로 가져왔다
+   * picked: 올린 뒤 되돌린 기록이라, 버린 체크포인트는 빼고 원격에만 있는 커밋의 변경을 옮겨 왔다
+   */
+  status: 'up-to-date' | 'merged' | 'picked';
+  /** 원격 브랜치의 끝 커밋. 원격에 브랜치가 없으면 비어 있다 */
+  remoteSha?: string;
+  /** 가져온 원격 커밋. 오래된 것부터 */
+  commits: RemoteCommit[];
+  /** 가져오기로 바뀐 파일 */
+  files: string[];
+  /** 가져온 변경을 담은 체크포인트 */
+  checkpoint?: Checkpoint;
+  /** 가져오기 전의 최신 체크포인트. 가져온 변경이 검증을 통과하지 못하면 여기로 되돌린다 */
+  previous: string;
+}
+
 export interface CheckpointStoreOptions {
   gitBin?: string;
   /** 체크포인트 커밋 작성자. 사내 저장소가 작성자 이메일을 검사하면 바꿔야 한다 */
@@ -69,7 +98,20 @@ export class CheckpointError extends Error {
   }
 }
 
+/** 원격 커밋과 같은 곳을 고쳐 가져오지 못했다. 작업 복사본은 가져오기 전 그대로다 */
+export class RemoteConflictError extends CheckpointError {
+  readonly conflicts: string[];
+
+  constructor(conflicts: string[]) {
+    super(`원격 커밋과 같은 곳을 고쳐 충돌했습니다. 가져오지 않고 그대로 두었습니다: ${conflicts.join(', ')}`);
+    this.name = 'RemoteConflictError';
+    this.conflicts = conflicts;
+  }
+}
+
 const SHA = /^[0-9a-f]{7,40}$/;
+/** 가져오기 전에 원격 세션 브랜치를 받아 두는 곳. origin/*는 원본 폴더의 브랜치를 가리킬 수 있어 쓰지 않는다 */
+const REMOTE_REF = 'refs/b-studio/remote';
 const MAX_PATCH_CHARS = 200_000;
 const MAX_BODY_CHARS = 8_000;
 const CLONE_TIMEOUT_MS = 300_000;
@@ -224,10 +266,13 @@ export class CheckpointStore {
     return { files, patch: capText(patch, MAX_PATCH_CHARS) };
   }
 
-  /** 최신 체크포인트부터. 복제한 저장소의 이전 기록은 포함하지 않고 세션 시작에서 끝난다 */
+  /**
+   * 최신 체크포인트부터. 복제한 저장소의 이전 기록은 포함하지 않고 세션 시작에서 끝난다.
+   * 원격에서 가져온 커밋은 병합 커밋 하나로만 보이도록 첫 번째 부모만 따라간다
+   */
   async list(limit = 50): Promise<Checkpoint[]> {
     const start = await this.#startSha();
-    const shas = (await this.#git(['log', `-n${Math.max(limit - 1, 0)}`, '--format=%H', `${start}..HEAD`])).split('\n').filter(Boolean);
+    const shas = (await this.#git(['log', '--first-parent', `-n${Math.max(limit - 1, 0)}`, '--format=%H', `${start}..HEAD`])).split('\n').filter(Boolean);
     return Promise.all([...shas, start].map((sha) => this.#checkpoint(sha)));
   }
 
@@ -237,7 +282,12 @@ export class CheckpointStore {
     if (commit === (await this.#startSha()) && (await this.#getMeta('base'))) {
       return `# 세션을 시작한 시점입니다. ${await this.#getMeta('base')} 브랜치의 커밋이며 이 세션에서 바꾼 내용은 없습니다.\n`;
     }
-    return capText(await this.#git(['show', '--format=', '--patch', '--no-color', commit]), MAX_PATCH_CHARS);
+    // 병합 커밋도 체크포인트 사이의 변경으로 보이도록 첫 번째 부모와 비교한다
+    const parent = await this.#firstParent(commit);
+    const patch = parent
+      ? await this.#git(['diff', '--no-color', parent, commit])
+      : await this.#git(['show', '--format=', '--patch', '--no-color', commit]);
+    return capText(patch, MAX_PATCH_CHARS);
   }
 
   /**
@@ -266,6 +316,7 @@ export class CheckpointStore {
       base,
       branch,
       pushedSha: await this.#getMeta('pushed'),
+      remoteSha: await this.#getMeta('remote'),
       pullRequestUrl: await this.#getMeta('pullrequest'),
     };
   }
@@ -274,10 +325,10 @@ export class CheckpointStore {
     await this.#setMeta('pullrequest', url);
   }
 
-  /** 세션 시작 이후 커밋. 오래된 것부터 */
+  /** 세션 시작 이후 체크포인트 커밋. 오래된 것부터. 원격에서 가져온 커밋은 병합 커밋으로만 들어간다 */
   async sessionCommits(): Promise<SessionCommit[]> {
     const start = await this.#startSha();
-    const records = (await this.#git(['log', '--reverse', '--format=%H%x00%h%x00%s%x00%b%x1e', `${start}..HEAD`]))
+    const records = (await this.#git(['log', '--first-parent', '--reverse', '--format=%H%x00%h%x00%s%x00%b%x1e', `${start}..HEAD`]))
       .split('\x1e')
       .map((record) => record.replace(/^\n/, ''))
       .filter(Boolean);
@@ -300,18 +351,18 @@ export class CheckpointStore {
     if ((await this.pendingFiles()).length > 0) throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 올릴 수 없습니다');
 
     const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
-    const commits = Number((await this.#git(['rev-list', '--count', `${await this.#startSha()}..HEAD`])).trim());
+    const commits = Number((await this.#git(['rev-list', '--count', '--first-parent', `${await this.#startSha()}..HEAD`])).trim());
     if (commits === 0) throw new CheckpointError('올릴 체크포인트가 없습니다. 요청이 검증 게이트를 통과하면 체크포인트가 생깁니다');
 
     const ref = `refs/heads/${info.branch}`;
-    // 한 번도 올리지 않았으면 빈 값: 원격에 같은 이름의 브랜치가 없어야 한다
-    const expected = info.pushedSha ?? '';
+    // 한 번도 올리거나 가져오지 않았으면 빈 값: 원격에 같은 이름의 브랜치가 없어야 한다
+    const expected = info.remoteSha ?? info.pushedSha ?? '';
     try {
       await this.#git(['push', `--force-with-lease=${ref}:${expected}`, 'origin', `HEAD:${ref}`], { timeout: PUSH_TIMEOUT_MS });
     } catch (error) {
       if (error instanceof CheckpointError && error.message.includes('stale info')) {
         throw new CheckpointError(
-          `원격의 ${info.branch} 브랜치가 스튜디오가 마지막으로 올린 상태와 달라 덮어쓰지 않았습니다. 다른 사람이 같은 브랜치에 올렸는지 확인하세요.`,
+          `원격의 ${info.branch} 브랜치가 스튜디오가 마지막으로 확인한 상태와 달라 덮어쓰지 않았습니다. 다른 사람이 올린 커밋이면 원격 변경을 가져온 뒤 다시 올리세요.`,
         );
       }
       throw error;
@@ -319,7 +370,92 @@ export class CheckpointStore {
 
     const forced = expected !== '' && !(await this.#isAncestor(expected, head));
     await this.#setMeta('pushed', head);
+    await this.#setMeta('remote', head);
     return { sha: head, commits, forced };
+  }
+
+  /**
+   * 원격 세션 브랜치에 다른 사람이 올린 커밋을 가져온다.
+   * 체크포인트마다 DB 덤프를 커밋 ID로 저장하므로, 기존 체크포인트의 ID를 바꾸는 리베이스 대신 병합 커밋 하나로 가져온다.
+   * 올린 뒤 이전 체크포인트로 되돌렸다면, 버린 체크포인트가 다시 들어오지 않게 원격에만 있는 커밋의 변경만 옮겨 온다.
+   * 충돌하면 작업 복사본을 가져오기 전 그대로 두고 충돌한 파일을 알린다.
+   * 가져온 결과는 검증을 통과한 뒤 acceptRemote()로 받아들여야 다음에 올릴 때 원격 상태로 인정된다
+   */
+  async integrateRemote(): Promise<RemoteSyncResult> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원격 저장소와 연결되지 않은 세션입니다');
+    if ((await this.pendingFiles()).length > 0) throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 원격 변경을 가져올 수 없습니다');
+
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    const ref = `refs/heads/${info.branch}`;
+    const listed = (await this.#git(['ls-remote', '--heads', 'origin', ref], { timeout: PUSH_TIMEOUT_MS })).trim();
+    if (!listed) return { status: 'up-to-date', commits: [], files: [], previous: head };
+
+    await this.#git(['fetch', '--quiet', '--no-tags', 'origin', `+${ref}:${REMOTE_REF}`], { timeout: PUSH_TIMEOUT_MS });
+    const remote = (await this.#git(['rev-parse', REMOTE_REF])).trim();
+    if (!(await this.#isAncestor(await this.#startSha(), remote))) {
+      throw new CheckpointError(`원격의 ${info.branch} 브랜치가 이 세션의 시작 커밋을 포함하지 않아 가져오지 않았습니다`);
+    }
+    if (await this.#isAncestor(remote, head)) {
+      // 지금 기록이 원격을 모두 담고 있으므로 원격 상태로 기록해도 덮어쓸 커밋이 없다
+      await this.#setMeta('remote', remote);
+      return { status: 'up-to-date', remoteSha: remote, commits: [], files: [], previous: head };
+    }
+
+    // 원격에만 있는 커밋의 시작점: 마지막으로 확인한 원격 상태가 원격 기록에 남아 있으면 그곳, 아니면 두 기록이 갈라진 곳
+    const known = info.remoteSha ?? info.pushedSha;
+    const from = known && (await this.#isAncestor(known, remote)) ? known : (await this.#git(['merge-base', head, remote])).trim();
+    const commits = await this.#remoteCommits(from, remote);
+    const picked = !(await this.#isAncestor(from, head));
+    if (picked && (await this.#git(['rev-list', '--merges', `${from}..${remote}`])).trim()) {
+      throw new CheckpointError('원격에만 있는 커밋에 병합 커밋이 있어 옮겨 오지 못했습니다. PR에서 기록을 정리한 뒤 다시 가져오세요');
+    }
+
+    try {
+      await this.#git(picked ? ['cherry-pick', '--no-commit', `${from}..${remote}`] : ['merge', '--no-ff', '--no-commit', remote]);
+    } catch (error) {
+      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U'])).split('\0').filter(Boolean).sort();
+      await this.#git([picked ? 'cherry-pick' : 'merge', '--abort']).catch(() => {});
+      await this.#git(['reset', '-q', '--hard', head]);
+      await this.#git(['clean', '-q', '-fd']);
+      if (conflicts.length > 0) throw new RemoteConflictError(conflicts);
+      throw error;
+    }
+
+    const body = commits.map((commit) => `- ${commit.shortSha} ${commit.subject} (${commit.author})`).join('\n');
+    await this.#git([
+      'commit', '-q', '--allow-empty', '--cleanup=whitespace',
+      '-m', `원격 커밋 ${commits.length}개 가져오기`, ...(body ? ['-m', capText(body, MAX_BODY_CHARS)] : []),
+    ]);
+    const files = (await this.#git(['diff', '--name-only', '-z', head, 'HEAD'])).split('\0').filter(Boolean).sort();
+    return { status: picked ? 'picked' : 'merged', remoteSha: remote, commits, files, checkpoint: await this.#checkpoint('HEAD'), previous: head };
+  }
+
+  /**
+   * 가져온 변경이 검증을 통과했을 때 원격 상태로 기록한다. 다음에 올릴 때 이 상태를 기준으로 덮어쓰는지 확인한다.
+   * 가져온 체크포인트가 지금 기록에 없으면(검증에 실패해 되돌렸으면) 기록하지 않는다. 기록하면 리뷰어 커밋을 덮어쓸 수 있다
+   */
+  async acceptRemote(result: RemoteSyncResult): Promise<void> {
+    if (!result.remoteSha || !result.checkpoint) return;
+    if (!(await this.#isAncestor(result.checkpoint.sha, 'HEAD'))) {
+      throw new CheckpointError('가져온 체크포인트가 지금 기록에 없어 원격 상태로 기록하지 않았습니다');
+    }
+    await this.#setMeta('remote', result.remoteSha);
+  }
+
+  async #remoteCommits(from: string, remote: string): Promise<RemoteCommit[]> {
+    return (await this.#git(['log', '--reverse', '--format=%H%x00%h%x00%s%x00%an%x1e', `${from}..${remote}`]))
+      .split('\x1e')
+      .map((record) => record.replace(/^\n/, ''))
+      .filter(Boolean)
+      .map((record) => {
+        const [sha = '', shortSha = '', subject = '', author = ''] = record.split('\0');
+        return { sha, shortSha, subject, author };
+      });
+  }
+
+  async #firstParent(sha: string): Promise<string | undefined> {
+    return (await this.#git(['rev-list', '--parents', '-n', '1', sha])).trim().split(' ')[1];
   }
 
   async #resolve(sha: string): Promise<string> {
@@ -344,8 +480,13 @@ export class CheckpointStore {
     return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha) };
   }
 
+  /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */
   async #changedFiles(sha: string): Promise<string[]> {
-    return (await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha])).split('\0').filter(Boolean);
+    const parent = await this.#firstParent(sha);
+    const output = parent
+      ? await this.#git(['diff', '--name-only', '-z', parent, sha])
+      : await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha]);
+    return output.split('\0').filter(Boolean);
   }
 
   async #startSha(): Promise<string> {
