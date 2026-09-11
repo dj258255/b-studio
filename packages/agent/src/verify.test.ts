@@ -204,6 +204,28 @@ describe('restartServicesFor', () => {
     expect(report.restarted[0]?.error).toMatch(/^메모리 한도 \(1\.50GiB\)를 넘어 종료됐습니다/);
   });
 
+  it('재시작하는 동안 막힌 외부 접속을 중복 없이 보고한다', async () => {
+    const { sandbox } = flakySandbox([false], 'Error when performing the request to https://registry.example.com/pnpm.tgz');
+    const recent = new Date();
+    let asked: Date | undefined;
+    sandbox.egressDenials = async ({ since } = {}) => {
+      asked = since;
+      return [
+        { host: 'registry.example.com', port: 443, reason: '허용 목록에 없는 호스트나 포트', at: recent },
+        { host: 'registry.example.com', port: 443, reason: '허용 목록에 없는 호스트나 포트', at: recent },
+      ];
+    };
+
+    const report = await restartServicesFor(sandbox, await projectWithDeletedMigration(), ['api/src/main/java/Order.java']);
+
+    expect(report.restarted[0]?.blockedEgress).toEqual(['registry.example.com:443 (허용 목록에 없는 호스트나 포트)']);
+    // 시계 차이를 감안해 재시작 직전보다 조금 이른 시점부터 묻는다
+    expect(asked!.getTime()).toBeLessThan(recent.getTime());
+    expect(formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: report.restarted, contracts: [], unverifiedFiles: [] }, { allowBreaking: false })).toContain(
+      '막힌 외부 접속 (studio.yaml network.egress에 없는 호스트): registry.example.com:443',
+    );
+  });
+
   it('로그에 지운 파일 이름과 "없음" 오류가 함께 나올 때만 해당한다', () => {
     const deleted = ['api/src/main/resources/db/migration/V2__memo.sql'];
     expect(mentionsDeletedFile(['java.nio.file.NoSuchFileException: /app/src/main/resources/db/migration/V2__memo.sql'], deleted)).toBe(true);

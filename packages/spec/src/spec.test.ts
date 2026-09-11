@@ -206,6 +206,16 @@ resources:
     expect(bad.issues.some((issue) => issue.startsWith('resources.db'))).toBe(true);
   });
 
+  it('외부 접속 허용 목록은 호스트 이름만 받는다', () => {
+    const spec = parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nnetwork:\n  egress: [api.slack.com, "*.internal-mirror.example.com"]\n');
+    expect(spec.network?.egress).toEqual(['api.slack.com', '*.internal-mirror.example.com']);
+
+    const error = captureError(() =>
+      parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nnetwork:\n  egress: [10.0.0.5, "db.prod:5432"]\n'),
+    );
+    expect(error.issues.filter((issue) => issue.startsWith('network.egress'))).toHaveLength(2);
+  });
+
   it('SQL에 들어가는 데이터베이스 이름과 사용자는 식별자만 허용한다', () => {
     const source = `
 version: 1

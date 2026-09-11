@@ -29,6 +29,7 @@ import {
 } from '@b-studio/agent';
 import { describeSnapshotEvent, LocalDockerProvider, type Sandbox, type ServiceStatusEvent } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
+import { skipAlreadySeen } from '@/lib/logs';
 import type { ExportResult, RepositoryView, SessionMode, SessionSnapshot, SessionStatus, StudioEvent } from '@/lib/studio-events';
 import { describe, StudioError } from './errors';
 import { findProject } from './projects';
@@ -576,11 +577,14 @@ function followLogs(session: Session, tail: number): void {
   const follower = new AbortController();
   session.logFollower = follower;
   const signal = AbortSignal.any([follower.signal, session.stop.signal]);
+  // 다시 붙을 때 --tail이 재시작하지 않은 컨테이너(DB, edge)의 줄까지 다시 보내므로 이미 받은 줄은 건너뛴다
+  const isNew = skipAlreadySeen(session.logs.flatMap((event) => (event.type === 'log' ? [event] : [])));
 
   void (async () => {
     try {
       for await (const line of session.sandbox.logs({ signal, tail })) {
-        emit(session, { type: 'log', service: line.service, text: line.text, at: line.at.toISOString() });
+        const event = { type: 'log', service: line.service, text: line.text, at: line.at.toISOString() } as const;
+        if (isNew(event)) emit(session, event);
       }
     } catch {
       // 구독을 다시 붙이거나 세션을 멈추면 끊기는 것이 정상이다

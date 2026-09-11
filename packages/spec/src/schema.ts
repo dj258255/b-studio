@@ -70,6 +70,11 @@ export const ResourceLimitSchema = z
   })
   .refine((limit) => limit.memory !== undefined || limit.cpus !== undefined, 'memory나 cpus 중 하나는 적어야 합니다');
 
+/** 외부 접속 허용 호스트. IP는 이름으로 판단할 수 없으므로 받지 않는다 */
+const EGRESS_HOST = z
+  .string()
+  .regex(/^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i, 'example.com이나 *.example.com 같은 호스트 이름이어야 합니다');
+
 /** SQL 식별자. 셸을 거치지 않더라도 SQL 문에 들어가므로 좁게 허용한다 */
 const SQL_IDENTIFIER = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/, 'SQL 식별자(영문, 숫자, 밑줄)여야 합니다');
 
@@ -96,6 +101,12 @@ export const StudioSpecSchema = z.object({
   databases: z.record(z.string().regex(NAME), DatabaseSchema).optional(),
   /** compose 서비스 이름 → 컨테이너 한도. 한 샌드박스가 Docker VM 자원을 다 써서 다른 세션까지 멈추지 않게 한다 */
   resources: z.record(z.string().regex(NAME), ResourceLimitSchema).optional(),
+  network: z
+    .object({
+      /** 기본 패키지 저장소 외에 샌드박스에서 HTTP(S)로 접속을 허용할 호스트. `*.example.com`은 하위 도메인 */
+      egress: z.array(EGRESS_HOST).default([]),
+    })
+    .optional(),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
