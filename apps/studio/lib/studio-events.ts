@@ -31,6 +31,8 @@ export interface ExternalApiView {
   /** 사람이 읽을 허용 규칙 요약 */
   access: string[];
   mask: string[];
+  /** 값의 형태로 가리는 패턴 이름 */
+  maskPatterns: string[];
   /** 인증 헤더를 b-studio가 붙이는지 */
   authenticated: boolean;
 }

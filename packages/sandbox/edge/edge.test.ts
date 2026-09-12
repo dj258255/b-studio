@@ -7,6 +7,7 @@ import {
   isAllowedHost,
   isPrivateAddress,
   maskJson,
+  maskValues,
   matchPath,
   normalizeExternal,
   parseAllow,
@@ -100,6 +101,39 @@ describe('사내 API 정책', () => {
     expect(masked).toBe(4);
   });
 
+  it('자유 텍스트 안의 값을 형태로 가리고, 고른 패턴만 적용한다', () => {
+    const memo = '연락처 010-1234-5678, 주민 900101-1234567, 카드 1234-5678-9012-3456, 메일 kim@example.com';
+    const all = maskValues(memo, ['phone', 'email', 'residentNumber', 'card']);
+    expect(all.text).toBe('연락처 [phone 가림], 주민 [residentNumber 가림], 카드 [card 가림], 메일 [email 가림]');
+    expect(all.masked).toBe(4);
+
+    // 고르지 않은 패턴은 그대로 둔다
+    const onlyEmail = maskValues(memo, ['email']);
+    expect(onlyEmail.masked).toBe(1);
+    expect(onlyEmail.text).toContain('010-1234-5678');
+  });
+
+  it('주문 번호나 금액 같은 값은 가리지 않는다', () => {
+    const plain = '주문 20260912-0001 수량 12 금액 1250원 재고 4321';
+    expect(maskValues(plain, ['phone', 'email', 'residentNumber', 'card'])).toEqual({ text: plain, masked: 0 });
+    expect(maskValues('버전 1.2.3 빌드 4567', ['phone', 'card'])).toEqual({ text: '버전 1.2.3 빌드 4567', masked: 0 });
+  });
+
+  it('필드 이름 가림과 값 패턴 가림을 함께 세고, 가린 필드는 다시 훑지 않는다', () => {
+    const { value, masked } = maskJson(
+      { phone: '010-1234-5678', memo: '급할 때 010-9876-5432로 연락', notes: ['메일 kim@example.com', null], count: 3 },
+      ['phone'],
+      ['phone', 'email'],
+    );
+    expect(value).toEqual({
+      phone: '[가림]',
+      memo: '급할 때 [phone 가림]로 연락',
+      notes: ['메일 [email 가림]', null],
+      count: 3,
+    });
+    expect(masked).toBe(3);
+  });
+
   it('등록한 주소의 경로 뒤에 요청 경로와 쿼리를 붙인다', () => {
     expect(upstreamUrl(new URL('https://users.internal.example.com/users-api/'), '/api/users/1', '?expand=orders').toString()).toBe(
       'https://users.internal.example.com/users-api/api/users/1?expand=orders',
@@ -107,10 +141,12 @@ describe('사내 API 정책', () => {
   });
 
   it('설정을 읽고 요청 IP로 호출한 서비스를 찾는다', async () => {
-    expect(parseExternals('[{"name":"legacy-users","baseUrl":"https://u.example.com","policy":{"mask":["Phone"]}}]')[0]).toMatchObject({
+    expect(parseExternals('[{"name":"legacy-users","baseUrl":"https://u.example.com","policy":{"mask":["Phone"],"maskPatterns":["email"]}}]')[0]).toMatchObject({
       name: 'legacy-users',
-      policy: { mask: ['phone'] },
+      policy: { mask: ['phone'], maskPatterns: ['email'] },
     });
+    // 패턴을 적지 않은 정책도 그대로 읽는다
+    expect(normalizeExternal({ name: 'x', baseUrl: 'https://x.example.com', policy: { mask: [] } }).policy.maskPatterns).toEqual([]);
     const addresses: Record<string, string[]> = { api: ['172.30.0.5'], web: ['172.30.0.6'] };
     const resolve = callerResolver(['api', 'web'], async (name) => (addresses[name] ?? []).map((address) => ({ address })));
     expect(await resolve('::ffff:172.30.0.6')).toBe('web');

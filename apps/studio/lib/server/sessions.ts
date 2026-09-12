@@ -405,6 +405,7 @@ function projectViews(project: LoadedProject): Pick<SessionSnapshot, 'services' 
         ? service.policy.allow.map((rule) => `${rule.callers.join(', ')}: ${rule.methods.join('/')} ${rule.paths.join(', ')}`)
         : ['모든 호출자: GET/HEAD'],
       mask: service.policy.mask,
+      maskPatterns: service.policy.maskPatterns,
       authenticated: Boolean(service.policy.auth),
     })),
   };

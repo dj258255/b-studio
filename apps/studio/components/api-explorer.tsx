@@ -164,8 +164,8 @@ function ResponseView({ response }: { response: ProxyResponse | { error: string 
           {response.policy.decision === "deny"
             ? `정책으로 막힘: ${response.policy.reason ?? "허용하지 않은 호출"}`
             : response.policy.masked > 0
-              ? `정책 통과. 필드 ${response.policy.masked}개를 가렸습니다`
-              : "정책 통과. 가린 필드는 없습니다"}
+              ? `정책 통과. ${response.policy.masked}곳을 가렸습니다`
+              : "정책 통과. 가린 곳은 없습니다"}
         </p>
       )}
       <pre className="mt-2 overflow-auto rounded-md border border-line bg-panel p-3 font-mono text-xs leading-5 whitespace-pre-wrap">

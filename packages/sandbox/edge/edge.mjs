@@ -105,7 +105,12 @@ export function normalizeExternal({ name, baseUrl, policy = {} }) {
   return {
     name,
     baseUrl: new URL(baseUrl),
-    policy: { allow: policy.allow, mask: (policy.mask ?? []).map((field) => field.toLowerCase()), auth: policy.auth },
+    policy: {
+      allow: policy.allow,
+      mask: (policy.mask ?? []).map((field) => field.toLowerCase()),
+      maskPatterns: policy.maskPatterns ?? [],
+      auth: policy.auth,
+    },
   };
 }
 
@@ -129,10 +134,47 @@ export function isAllowedCall(policy, caller, method, pathname) {
   );
 }
 
-/** 응답 JSON에서 이름이 fields에 있는 필드(대소문자 무시, 어느 깊이든)의 값을 가린다. null은 그대로 둔다 */
-export function maskJson(value, fields) {
+/**
+ * 값의 형태로 가릴 패턴. studio.yaml은 에이전트가 고칠 수 있는 파일이라 임의 정규식은 받지 않고 정해 둔 이름만 받는다.
+ * 한국에서 쓰는 표기를 기준으로 하고, 주문 번호 같은 값을 잘못 가리지 않도록 좁게 잡는다
+ */
+export const MASK_PATTERNS = {
+  residentNumber: /\b\d{6}[- ]?[1-4]\d{6}\b/g,
+  card: /\b\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/g,
+  phone: /\b0\d{1,2}[- ]?\d{3,4}[- ]?\d{4}\b/g,
+  email: /[\w.+-]+@[\w-]+\.[\w.-]{2,}/g,
+};
+/** 자릿수가 겹치는 패턴이 서로 잘라 먹지 않도록 긴 것부터 적용한다 */
+const MASK_ORDER = ['residentNumber', 'card', 'phone', 'email'];
+
+/** 자유 텍스트 안에서 패턴에 맞는 값을 가리고 가린 횟수를 돌려준다 */
+export function maskValues(text, patterns = []) {
+  let masked = 0;
+  let result = text;
+  for (const name of MASK_ORDER) {
+    if (!patterns.includes(name)) continue;
+    result = result.replace(MASK_PATTERNS[name], () => {
+      masked += 1;
+      return `[${name} 가림]`;
+    });
+  }
+  return { text: result, masked };
+}
+
+/**
+ * 응답 JSON을 가린다. null은 그대로 둔다.
+ *  - fields: 이름이 맞는 필드(대소문자 무시, 어느 깊이든)의 값을 통째로 가린다
+ *  - patterns: 남은 문자열 값 안에서 형태가 맞는 부분만 가린다(메모 같은 자유 텍스트용)
+ * 가린 횟수는 한 카운터로 합산해 감사 기록과 화면 문구가 같은 수를 쓰게 한다
+ */
+export function maskJson(value, fields, patterns = []) {
   let masked = 0;
   const walk = (node) => {
+    if (typeof node === 'string') {
+      const result = maskValues(node, patterns);
+      masked += result.masked;
+      return result.text;
+    }
     if (Array.isArray(node)) return node.map(walk);
     if (node === null || typeof node !== 'object') return node;
     return Object.fromEntries(
@@ -176,7 +218,7 @@ export function callerResolver(names, lookup = (name) => dns.lookup(name, { all:
 export async function callUpstream(external, secrets, { method, pathname, search = '', headers = {}, body }) {
   const url = upstreamUrl(external.baseUrl, pathname, search);
   const outgoing = Object.fromEntries(Object.entries(headers).filter(([key]) => !HOP_BY_HOP.has(key.toLowerCase()) && !key.toLowerCase().startsWith('x-b-studio-')));
-  const { auth, mask } = external.policy;
+  const { auth, mask, maskPatterns = [] } = external.policy;
   let secretValue;
   if (auth) {
     secretValue = secrets[auth.secret];
@@ -184,7 +226,7 @@ export async function callUpstream(external, secrets, { method, pathname, search
     for (const key of Object.keys(outgoing)) if (key.toLowerCase() === auth.header.toLowerCase()) delete outgoing[key];
     outgoing[auth.header] = `${auth.prefix ?? ''}${secretValue}`;
   }
-  const masking = mask.length > 0;
+  const masking = mask.length > 0 || maskPatterns.length > 0;
   if (masking) outgoing['accept-encoding'] = 'identity';
   if (body && body.length > 0) outgoing['content-length'] = String(Buffer.byteLength(body));
 
@@ -212,9 +254,9 @@ export async function callUpstream(external, secrets, { method, pathname, search
   let masked = 0;
 
   if (masking && payload.length > 0) {
-    if (!/json/i.test(contentType)) throw new ApiPolicyError(502, `가릴 필드가 있어 JSON이 아닌 응답(${contentType || '형식 없음'})은 넘기지 않습니다`);
+    if (!/json/i.test(contentType)) throw new ApiPolicyError(502, `가릴 규칙이 있어 JSON이 아닌 응답(${contentType || '형식 없음'})은 넘기지 않습니다`);
     try {
-      const result = maskJson(JSON.parse(payload.toString('utf8')), mask);
+      const result = maskJson(JSON.parse(payload.toString('utf8')), mask, maskPatterns);
       payload = Buffer.from(JSON.stringify(result.value));
       masked = result.masked;
     } catch {

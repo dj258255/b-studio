@@ -69,6 +69,11 @@ export const ExternalPolicySchema = z.object({
   allow: z.array(PolicyRuleSchema).optional(),
   /** 응답 JSON에서 값을 가릴 필드 이름 (대소문자 무시, 어느 깊이든) */
   mask: z.array(z.string().min(1)).default([]),
+  /**
+   * 필드 이름이 아니라 값의 형태로 가린다. 자유 텍스트(메모, 설명) 안에 든 개인정보를 위해서다.
+   * studio.yaml은 에이전트가 고칠 수 있는 파일이므로 임의 정규식은 받지 않고 정해 둔 이름만 받는다
+   */
+  maskPatterns: z.array(z.enum(['phone', 'email', 'residentNumber', 'card'])).default([]),
   /** edge가 요청에 붙이는 인증 헤더. 값은 secrets에 선언한 시크릿이며 샌드박스 서비스에는 들어가지 않는다 */
   auth: z
     .object({
@@ -89,7 +94,8 @@ export const ExternalServiceSchema = z.object({
     .refine((value) => URL.canParse(value) && !new URL(value).username && !new URL(value).password, '주소에 자격 증명을 넣지 말고 policy.auth와 secrets를 쓰세요'),
   preview: PreviewKindSchema.exclude(['browser']).default('openapi'),
   contract: z.object({ url: z.url() }).optional(),
-  policy: ExternalPolicySchema.default({ mask: [] }),
+  // 기본값은 다시 파싱되지 않으므로 모든 필드를 적는다
+  policy: ExternalPolicySchema.default({ mask: [], maskPatterns: [] }),
 });
 
 export const ServiceSchema = z.discriminatedUnion('source', [ManagedServiceSchema, ExternalServiceSchema]);
