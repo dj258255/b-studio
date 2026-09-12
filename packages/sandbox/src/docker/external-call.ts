@@ -34,6 +34,8 @@ const refuse = (status, reason) => {
 
 if (!studioExternal) {
   refuse(404, '등록하지 않은 API입니다');
+} else if (hasEncodedSeparator(studioTarget.pathname)) {
+  refuse(403, '경로에 인코딩된 구분자가 있어 규칙을 검사할 수 없습니다');
 } else if (!isAllowedCall(studioExternal.policy, STUDIO_CALLER, studioMethod, studioTarget.pathname)) {
   refuse(403, 'studio(에이전트 도구·API 탐색기)에 허용하지 않은 호출입니다');
 } else {

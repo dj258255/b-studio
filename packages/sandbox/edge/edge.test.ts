@@ -3,9 +3,9 @@ import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   callerResolver,
+  hasEgressRuleFor,
   isAllowedEgress,
   isAllowedCall,
-  isAllowedHost,
   isPrivateAddress,
   maskJson,
   maskValues,
@@ -39,31 +39,54 @@ describe('설정 해석', () => {
   });
 });
 
-describe('isAllowedHost', () => {
+describe('hasEgressRuleFor', () => {
   const rules = ['registry.npmjs.org', '*.gradle.org'];
 
   it('목록의 호스트와 하위 도메인만, 80·443 포트로만 허용한다', () => {
-    expect(isAllowedHost('registry.npmjs.org', 443, rules)).toBe(true);
-    expect(isAllowedHost('plugins.gradle.org', 443, rules)).toBe(true);
-    expect(isAllowedHost('gradle.org', 443, rules)).toBe(false);
-    expect(isAllowedHost('evilgradle.org', 443, rules)).toBe(false);
-    expect(isAllowedHost('registry.npmjs.org.evil.com', 443, rules)).toBe(false);
-    expect(isAllowedHost('registry.npmjs.org', 5432, rules)).toBe(false);
+    expect(hasEgressRuleFor('registry.npmjs.org', 443, rules)).toBe(true);
+    expect(hasEgressRuleFor('plugins.gradle.org', 443, rules)).toBe(true);
+    expect(hasEgressRuleFor('gradle.org', 443, rules)).toBe(false);
+    expect(hasEgressRuleFor('evilgradle.org', 443, rules)).toBe(false);
+    expect(hasEgressRuleFor('registry.npmjs.org.evil.com', 443, rules)).toBe(false);
+    expect(hasEgressRuleFor('registry.npmjs.org', 5432, rules)).toBe(false);
   });
 
   it('IP로 직접 접속하는 요청은 막는다', () => {
-    expect(isAllowedHost('104.16.7.34', 443, ['104.16.7.34'])).toBe(false);
-    expect(isAllowedHost('[2606:4700::6810:722]', 443, rules)).toBe(false);
+    expect(hasEgressRuleFor('104.16.7.34', 443, ['104.16.7.34'])).toBe(false);
+    expect(hasEgressRuleFor('[2606:4700::6810:722]', 443, rules)).toBe(false);
   });
 
   it('객체 규칙은 호스트가 맞아도 메서드와 경로가 맞아야 허용한다', () => {
     const precise = [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/users/*'] }];
 
-    expect(isAllowedHost('api.example.com', 80, precise)).toBe(true);
+    expect(hasEgressRuleFor('api.example.com', 80, precise)).toBe(true);
     expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/users/7', precise)).toBe(true);
     expect(isAllowedEgress('api.example.com', 80, 'POST', '/v1/users/7', precise)).toBe(false);
     expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/admin/7', precise)).toBe(false);
     expect(isAllowedEgress('api.example.com', 443, 'GET', '/v1/users/7', ['api.example.com'])).toBe(true);
+  });
+
+  it('인코딩된 구분자가 든 경로는 견줄 수 없어 막는다', () => {
+    const precise = [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/*'] }];
+
+    // `/v1/..%2Fadmin`은 한 구간이라 `/v1/*`에 맞지만, %2F를 푸는 서버에서는 /admin이 된다
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/..%2Fadmin', precise)).toBe(false);
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/..%252Fadmin', precise)).toBe(false);
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/users%5Cadmin', precise)).toBe(false);
+    // 호스트 전체를 연 규칙은 경로를 보지 않으므로 영향이 없다
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/..%2Fadmin', ['api.example.com'])).toBe(true);
+  });
+});
+
+describe('isAllowedCall', () => {
+  it('인코딩된 구분자가 든 경로는 규칙을 검사할 수 없어 막는다', () => {
+    const policy = { mask: [], maskPatterns: [], allow: [{ callers: ['web'], methods: ['GET'], paths: ['/api/users/*'] }] };
+
+    expect(isAllowedCall(policy, 'web', 'GET', '/api/users/7')).toBe(true);
+    expect(isAllowedCall(policy, 'web', 'GET', '/api/users/..%2Fadmin')).toBe(false);
+    expect(isAllowedCall(policy, 'web', 'GET', '/api/users/..%252Fadmin')).toBe(false);
+    // 규칙을 적지 않아 경로를 보지 않는 정책에서도 막는다. 감사 기록의 경로와 실제로 불리는 경로가 달라진다
+    expect(isAllowedCall({ mask: [], maskPatterns: [] }, 'web', 'GET', '/api/users%2Fadmin')).toBe(false);
   });
 });
 

@@ -58,11 +58,23 @@ export function parseEgressRules(text = '') {
 }
 
 /**
- * 허용 목록 판단. `*.example.com`은 하위 도메인만 뜻한다(example.com 자체는 따로 적는다).
+ * 이 호스트·포트에 맞는 규칙이 있는지. `*.example.com`은 하위 도메인만 뜻한다(example.com 자체는 따로 적는다).
  * IP로 직접 접속하는 요청은 이름으로 판단할 수 없으므로 막는다.
+ * 규칙이 있다는 뜻일 뿐 이 요청이 허용된다는 뜻은 아니다. 허용 판단은 isAllowedEgress를 쓴다
  */
-export function isAllowedHost(host, port, rules) {
+export function hasEgressRuleFor(host, port, rules) {
   return matchingEgressRules(host, port, rules).length > 0;
+}
+
+/**
+ * 퍼센트 인코딩된 경로 구분자(`%2f`, `%5c`)와 이중 인코딩(`%25`).
+ * edge가 본 경로와 상위 서버가 풀어서 해석할 경로가 달라지므로 경로 규칙 검사가 성립하지 않는다.
+ * 상위가 몇 번 푸는지 알 수 없어 세지 않고, CONNECT 터널과 같은 원칙으로 검사할 수 없으면 막는다
+ */
+const ENCODED_SEPARATOR = /%(?:2f|5c|25)/i;
+
+export function hasEncodedSeparator(pathname) {
+  return ENCODED_SEPARATOR.test(String(pathname));
 }
 
 export function isAllowedEgress(host, port, method, pathname, rules) {
@@ -86,6 +98,8 @@ function checkHttpEgress(host, port, method, pathname, rules) {
   const candidates = matchingEgressRules(host, port, rules);
   if (candidates.length === 0) return { denied: '허용 목록에 없는 호스트나 포트' };
   if (candidates.some(isHostLevelRule)) return {};
+  // 여기서부터는 경로를 견줘야 한다. 인코딩된 구분자가 있으면 견줄 수 없다
+  if (hasEncodedSeparator(pathname)) return { denied: '경로에 인코딩된 구분자가 있어 검사할 수 없음' };
   const normalizedMethod = String(method).toUpperCase();
   if (candidates.some((rule) => rule.methods.includes(normalizedMethod) && rule.paths.some((pattern) => matchPath(pattern, pathname)))) return {};
   return { denied: '허용하지 않은 메서드나 경로' };
@@ -180,6 +194,8 @@ export function matchPath(pattern, pathname) {
 
 /** 규칙을 적지 않은 API는 모든 호출자에게 GET·HEAD만 허용한다. 규칙을 적으면 적은 것만 허용한다 */
 export function isAllowedCall(policy, caller, method, pathname) {
+  // 규칙을 적지 않아 경로를 보지 않는 정책에서도 막는다. 감사 기록의 경로와 상위 서버가 부를 경로가 달라지기 때문이다
+  if (hasEncodedSeparator(pathname)) return false;
   if (!policy.allow) return READ_ONLY_METHODS.has(method);
   return policy.allow.some(
     (rule) => rule.callers.includes(caller) && rule.methods.includes(method) && (rule.paths ?? ['/**']).some((pattern) => matchPath(pattern, pathname)),
@@ -438,6 +454,7 @@ export function startApiProxy({ externals, secrets = {}, resolveCaller, port = A
 
     if (!external) return deny(404, '등록하지 않은 API입니다');
     if (!caller) return deny(403, '요청한 서비스를 알 수 없습니다');
+    if (hasEncodedSeparator(target.pathname)) return deny(403, '경로에 인코딩된 구분자가 있어 규칙을 검사할 수 없습니다');
     if (!isAllowedCall(external.policy, caller, method, target.pathname)) return deny(403, `${caller} 서비스에 허용하지 않은 호출입니다`);
 
     try {

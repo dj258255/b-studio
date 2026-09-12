@@ -85,8 +85,9 @@ export declare function parseForwards(text?: string): Forward[];
 export declare function parseAllow(text?: string): string[];
 export declare function normalizeEgressRule(rule: EdgeEgressRule): NormalizedEgressRule;
 export declare function parseEgressRules(text?: string): NormalizedEgressRule[];
-export declare function isAllowedHost(host: string, port: number, rules: EdgeEgressRule[]): boolean;
+export declare function hasEgressRuleFor(host: string, port: number, rules: EdgeEgressRule[]): boolean;
 export declare function isAllowedEgress(host: string, port: number, method: string, pathname: string, rules: EdgeEgressRule[]): boolean;
+export declare function hasEncodedSeparator(pathname: string): boolean;
 export declare function isPrivateAddress(address: string): boolean;
 export declare function splitHostPort(target: string): { host: string; port: number } | undefined;
 export declare function parseExternals(text?: string): EdgeExternal[];
@@ -96,7 +97,6 @@ export declare function maskValues(text: string, patterns?: MaskPatternName[]): 
 export declare function maskJson(value: unknown, fields: string[], patterns?: MaskPatternName[]): { value: unknown; masked: number };
 export declare function matchPath(pattern: string, pathname: string): boolean;
 export declare function isAllowedCall(policy: EdgePolicy, caller: string, method: string, pathname: string): boolean;
-export declare function maskJson(value: unknown, fields: string[]): { value: unknown; masked: number };
 export declare function upstreamUrl(baseUrl: URL | string, pathname: string, search?: string): URL;
 export declare function callerResolver(
   names: string[],
