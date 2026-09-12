@@ -51,6 +51,25 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
+  it('network.egress는 호스트 문자열과 평문 HTTP 경로·메서드 규칙을 함께 받는다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}network:
+  egress:
+    - api.slack.com
+    - host: audit.example.com
+      methods: [POST]
+      paths: ["/events/*"]
+    - host: readonly.example.com
+`);
+    expect(spec.network?.egress).toEqual([
+      'api.slack.com',
+      { host: 'audit.example.com', methods: ['POST'], paths: ['/events/*'] },
+      { host: 'readonly.example.com', methods: ['GET', 'HEAD'], paths: ['/**'] },
+    ]);
+
+    expect(() => parseSpec(`${ORDERS_SPEC}network:\n  egress: [127.0.0.1]\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}network:\n  egress:\n    - { host: api.example.com, paths: [users] }\n`)).toThrow(SpecError);
+  });
+
   it('external 서비스에는 browser 미리보기를 쓸 수 없다', () => {
     const source = `
 version: 1

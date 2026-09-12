@@ -91,11 +91,13 @@ export function buildOverride(
 export function parseEgressDenial(text: string): EgressDenial | undefined {
   if (!text.startsWith('{"edge":"egress"')) return undefined;
   try {
-    const entry = JSON.parse(text) as { decision?: unknown; host?: unknown; port?: unknown; reason?: unknown; at?: unknown };
+    const entry = JSON.parse(text) as { decision?: unknown; host?: unknown; port?: unknown; method?: unknown; path?: unknown; reason?: unknown; at?: unknown };
     if (entry.decision !== 'deny' || typeof entry.host !== 'string' || typeof entry.at !== 'string') return undefined;
     return {
       host: entry.host,
       ...(typeof entry.port === 'number' ? { port: entry.port } : {}),
+      ...(typeof entry.method === 'string' ? { method: entry.method } : {}),
+      ...(typeof entry.path === 'string' ? { path: entry.path } : {}),
       reason: typeof entry.reason === 'string' ? entry.reason : '',
       at: new Date(entry.at),
     };

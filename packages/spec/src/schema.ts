@@ -20,6 +20,8 @@ export const HttpProbeSchema = z.object({
 });
 
 export const PreviewKindSchema = z.enum(['browser', 'openapi', 'logs']);
+const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
+export const HttpMethodSchema = z.enum(HTTP_METHODS);
 
 /** 서비스 폴더 안의 상대 경로 */
 const RELATIVE_PATH = z
@@ -56,12 +58,26 @@ export const ManagedServiceSchema = z.object({
 /** `/api/users/*`: `*`는 한 경로 구간, `**`는 여러 구간 */
 const PATH_PATTERN = z.string().regex(/^\/\S*$/, '"/"로 시작하고 공백이 없는 경로 패턴이어야 합니다');
 
+/** 외부 접속 허용 호스트. IP는 이름으로 판단할 수 없으므로 받지 않는다 */
+const EGRESS_HOST = z
+  .string()
+  .regex(/^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i, 'example.com이나 *.example.com 같은 호스트 이름이어야 합니다');
+
 export const PolicyRuleSchema = z.object({
   /** 부를 수 있는 쪽: compose 서비스 이름이나 studio(에이전트 도구·API 탐색기) */
   callers: z.array(z.string().regex(NAME)).min(1),
-  methods: z.array(z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'])).min(1),
+  methods: z.array(HttpMethodSchema).min(1),
   paths: z.array(PATH_PATTERN).min(1).default(['/**']),
 });
+
+export const EgressRuleSchema = z.union([
+  EGRESS_HOST,
+  z.object({
+    host: EGRESS_HOST,
+    methods: z.array(HttpMethodSchema).min(1).default(['GET', 'HEAD']),
+    paths: z.array(PATH_PATTERN).min(1).default(['/**']),
+  }),
+]);
 
 /** 등록한 API를 샌드박스에서 부를 때 edge가 적용하는 정책 */
 export const ExternalPolicySchema = z.object({
@@ -110,11 +126,6 @@ export const ResourceLimitSchema = z
     cpus: z.number().positive().max(64).optional(),
   })
   .refine((limit) => limit.memory !== undefined || limit.cpus !== undefined, 'memory나 cpus 중 하나는 적어야 합니다');
-
-/** 외부 접속 허용 호스트. IP는 이름으로 판단할 수 없으므로 받지 않는다 */
-const EGRESS_HOST = z
-  .string()
-  .regex(/^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i, 'example.com이나 *.example.com 같은 호스트 이름이어야 합니다');
 
 /** SQL 식별자. 셸을 거치지 않더라도 SQL 문에 들어가므로 좁게 허용한다 */
 const SQL_IDENTIFIER = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/, 'SQL 식별자(영문, 숫자, 밑줄)여야 합니다');
@@ -169,8 +180,8 @@ export const StudioSpecSchema = z.object({
   resources: z.record(z.string().regex(NAME), ResourceLimitSchema).optional(),
   network: z
     .object({
-      /** 기본 패키지 저장소 외에 샌드박스에서 HTTP(S)로 접속을 허용할 호스트. `*.example.com`은 하위 도메인 */
-      egress: z.array(EGRESS_HOST).default([]),
+      /** 기본 패키지 저장소 외에 샌드박스에서 HTTP(S)로 접속을 허용할 호스트나 평문 HTTP 경로·메서드 규칙. `*.example.com`은 하위 도메인 */
+      egress: z.array(EgressRuleSchema).default([]),
     })
     .optional(),
   /** 환경 변수 이름 → 받을 서비스 */
@@ -196,6 +207,7 @@ export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;
+export type EgressRule = z.infer<typeof EgressRuleSchema>;
 export type PreviewKind = z.infer<typeof PreviewKindSchema>;
 export type ManagedServiceSpec = z.infer<typeof ManagedServiceSchema>;
 export type ExternalServiceSpec = z.infer<typeof ExternalServiceSchema>;

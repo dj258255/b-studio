@@ -92,6 +92,8 @@ export interface ServiceUsage {
 export interface EgressDenial {
   host: string;
   port?: number;
+  method?: string;
+  path?: string;
   reason: string;
   at: Date;
 }

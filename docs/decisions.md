@@ -650,12 +650,12 @@ compose의 `internal: true` 네트워크는 외부로 나가는 경로가 없습
 - **모든 compose 서비스를 internal 네트워크에만 붙입니다.** override의 `networks`가 사용자 compose의 기본 네트워크를 대체하므로 DB 같은 부가 서비스도 포함됩니다. 서비스끼리는 이전처럼 서비스 이름으로 연결합니다.
 - **edge 컨테이너 하나만 internal 네트워크와 외부용 네트워크에 함께 붙입니다.** Node 표준 모듈만 쓴 스크립트(`packages/sandbox/edge/edge.mjs`)를 `node:22-bookworm-slim`에서 돌리며, 하는 일은 두 가지입니다.
   1. **들어오는 연결:** managed 서비스마다 edge 포트를 하나씩 루프백의 빈 포트로 공개하고, 들어온 TCP 연결을 서비스로 넘깁니다. `Sandbox.endpoint()`는 이 포트를 돌려줍니다.
-  2. **나가는 연결:** 3128 포트의 HTTP 프록시(CONNECT와 평문 HTTP)가 허용 목록에 있는 호스트의 80·443 포트만 통과시킵니다. IP로 직접 접속하면 이름으로 판단할 수 없어 거부합니다. 허용한 이름이 사설·루프백·링크 로컬 주소로 풀려도 거부합니다(DNS 재바인딩). IPv6 경로가 없는 Docker 네트워크가 많아 IPv4 주소를 먼저 씁니다.
+  2. **나가는 연결:** 3128 포트의 HTTP 프록시(CONNECT와 평문 HTTP)가 허용 목록에 있는 호스트의 80·443 포트만 통과시킵니다. 문자열 규칙은 호스트 전체를 열고, 객체 규칙은 평문 HTTP의 메서드와 경로까지 맞아야 통과시킵니다. IP로 직접 접속하면 이름으로 판단할 수 없어 거부합니다. 허용한 이름이 사설·루프백·링크 로컬 주소로 풀려도 거부합니다(DNS 재바인딩). IPv6 경로가 없는 Docker 네트워크가 많아 IPv4 주소를 먼저 씁니다.
 - **스크립트는 파일로 마운트하지 않고 compose 설정에 넣습니다.** 원격 Docker 호스트에서도 그대로 돌게 하기 위해서입니다. compose는 `command` 안의 `$`도 변수로 치환하므로 `$$`로 바꿔 적습니다.
-- **허용 목록:** 기본값은 템플릿이 의존성을 받는 저장소(npm, Maven Central, Gradle 플러그인·배포, PyPI)와 Next 템플릿의 `next/font/google`이 쓰는 Google Fonts입니다. 프로젝트는 `studio.yaml`의 `network.egress`에 호스트 이름만 더합니다. IP와 포트는 스키마에서 거부합니다.
-- **도구가 프록시를 쓰게 합니다.** `HTTP(S)_PROXY`와 소문자 변수, 서비스 이름을 담은 `NO_PROXY`를 넣습니다. JVM(Gradle, Spring 앱)은 이 환경 변수를 읽지 않으므로 `JAVA_TOOL_OPTIONS`로 `http(s).proxyHost`와 `http.nonProxyHosts`를 넘깁니다.
+- **허용 목록:** 기본값은 템플릿이 의존성을 받는 저장소(npm, Maven Central, Gradle 플러그인·배포, PyPI)와 Next 템플릿의 `next/font/google`이 쓰는 Google Fonts입니다. 프로젝트는 `studio.yaml`의 `network.egress`에 호스트 문자열이나 `{ host, methods, paths }` 객체를 더합니다. IP와 포트는 스키마에서 거부합니다.
+- **도구가 프록시를 쓰게 합니다.** `HTTP(S)_PROXY`, `ALL_PROXY`와 소문자 변수, 서비스 이름을 담은 `NO_PROXY`를 넣습니다. JVM(Gradle, Spring 앱)은 이 환경 변수를 읽지 않으므로 `JAVA_TOOL_OPTIONS`로 `http(s).proxyHost`와 `http.nonProxyHosts`를 넘깁니다.
 - **기동 순서:** edge에 3128 포트 확인 `healthcheck`를 두고, 모든 서비스가 `depends_on: service_healthy`로 기다립니다.
-- **감사와 피드백:** edge는 허용·거부를 JSON 한 줄로 남기고, 이 로그는 로그 탭에 `b-studio-edge` 서비스로 보입니다. 검증 게이트는 재시작이 실패하면 그사이 막힌 접속을 모아 "studio.yaml network.egress에 없는 호스트"로 알립니다. 의존성 다운로드가 막혀 실패했을 때 에이전트가 코드를 고치려 들지 않게 하기 위해서입니다. 시스템 프롬프트에도 격리 사실을 적었습니다.
+- **감사와 피드백:** edge는 허용·거부를 JSON 한 줄로 남기고, 평문 HTTP에서는 메서드와 경로도 함께 남깁니다. 이 로그는 로그 탭에 `b-studio-edge` 서비스로 보입니다. 검증 게이트는 재시작이 실패하면 그사이 막힌 접속을 모아 "studio.yaml network.egress에 없는 호스트"로 알립니다. 의존성 다운로드가 막혀 실패했을 때 에이전트가 코드를 고치려 들지 않게 하기 위해서입니다. 시스템 프롬프트에도 격리 사실을 적었습니다.
 - 스튜디오의 보조 컨테이너(파일 반영 확인, 스냅샷 복사)는 `--network none`으로 돌립니다. edge에는 메모리 128MiB, CPU 0.5개 한도를 겁니다.
 
 ### 검증 결과
@@ -674,10 +674,14 @@ compose의 `internal: true` 네트워크는 외부로 나가는 경로가 없습
 | 기동 | 12.8초, web `/` 200, api health·OpenAPI 200 |
 | edge 감사 로그 | 결정 14건. 확인용 요청 외에 web이 `fonts.googleapis.com`에 4번 나가려다 거부된 기록이 있어 기본 허용 목록에 Google Fonts를 넣음 |
 | edge 메모리 | 18MiB (한도 128MiB) |
+| FastAPI 템플릿(uv) | 임시 FastAPI 샌드박스 준비 6.3초, `/health` 200. uv 설치 중 `files.pythonhosted.org:443` `CONNECT` 허용 로그 50건 |
+| 경로·메서드 egress 규칙 | `GET http://detectportal.firefox.com/success.txt`는 200과 `success`, 같은 경로 `POST`와 `/blocked` GET은 403. 같은 호스트 HTTPS는 `CONNECT`라 403 |
+| 세밀 규칙 감사 로그 | 같은 실행에서 egress 로그 54줄(허용 51, 거부 3). 거부 3건은 `method`와 `path` 또는 `CONNECT` 이유를 포함 |
 
 ### 감수한 트레이드오프
 - HTTP(S)가 아닌 외부 연결(외부 DB, SMTP 등)은 허용 목록에 넣어도 쓸 수 없습니다. 필요하면 정책 프록시 단계에서 등록형으로 다룹니다.
-- 허용은 호스트 단위라서, 허용한 호스트로는 경로와 메서드에 상관없이 보낼 수 있습니다(예: 패키지 저장소에 올리기).
+- HTTPS는 암호화된 `CONNECT` 터널이라 edge가 경로와 메서드를 볼 수 없습니다. 그래서 `{ host, methods, paths }` 객체 규칙은 평문 HTTP에만 적용하고, HTTPS가 필요하면 호스트 문자열로 전체 호스트를 열거나 등록형 정책 프록시를 씁니다.
+- `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` 계열을 모두 무시하는 도구는 edge 감사 로그에 남기 전에 Docker internal 네트워크에서 이름 풀이·연결이 실패합니다.
 - 프록시 설정을 따르지 않는 도구는 이름 풀이부터 실패합니다. 이 경우 edge를 거치지 않으므로 감사 로그에도 남지 않습니다.
 - 사용자 compose에 `JAVA_TOOL_OPTIONS`나 프록시 변수가 이미 있으면 override 값이 덮어씁니다. JVM은 시작할 때마다 "Picked up JAVA_TOOL_OPTIONS" 한 줄을 로그에 남깁니다.
 - 샌드박스마다 컨테이너가 하나 늘고, 기동이 edge 준비를 기다립니다.

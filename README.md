@@ -408,9 +408,13 @@ resources:
   web: { memory: 1g, cpus: 2 }
   db: { memory: 256m }
 
-# 샌드박스는 외부로 나갈 수 없고, HTTP(S)는 패키지 저장소만 허용한다. 더 필요한 호스트만 적는다
+# 샌드박스는 외부로 나갈 수 없고, HTTP(S)는 패키지 저장소만 허용한다.
+# 문자열은 호스트 전체를, 객체는 평문 HTTP의 메서드·경로까지 제한한다.
 # network:
-#   egress: [api.slack.com, "*.internal-mirror.example.com"]
+#   egress:
+#     - api.slack.com
+#     - "*.internal-mirror.example.com"
+#     - { host: detectportal.firefox.com, methods: [GET], paths: ["/success.txt"] }
 
 # 시크릿은 이름과 받을 서비스만 적는다. 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서 읽고, 출력에서 가린다
 # secrets:
@@ -563,6 +567,17 @@ Docker VM은 메모리 6GiB, CPU 4개입니다.
 | 세션 중지 | 세션 컨테이너 0개, 볼륨 0개. 같은 VM의 다른 프로젝트 컨테이너는 그대로 |
 
 첫 실행에서는 web이 edge보다 먼저 떠 3초 만에 종료됐고([트러블슈팅 15](docs/troubleshooting.md#15-네트워크를-격리하자-web이-기동-3초-만에-종료됨)), 화면을 찍다가 로그 중복도 발견했습니다([트러블슈팅 16](docs/troubleshooting.md#16-서비스를-재시작하면-로그-탭에-같은-줄이-두-번-쌓임)). 설계 근거는 [ADR-024](docs/decisions.md#adr-024-네트워크-격리-샌드박스의-출입구를-하나로-만든다)에 있습니다.
+
+`network.egress`에 `host/methods/paths` 객체 규칙을 넣은 FastAPI 임시 프로젝트도 실제 Docker로 확인했습니다. 시작 전 메모리는 `free -m` 기준 available 2205MiB, 종료 뒤 2133MiB였고, `dbtower-*` 5개는 전후 모두 살아 있었습니다.
+
+| 확인 항목 | 결과 |
+|---|---|
+| FastAPI 템플릿(uv) 설치 | 샌드박스 준비 6.3초, `/health` 200. uv가 `files.pythonhosted.org:443`으로 50번 `CONNECT`했고 모두 edge 감사 로그에 허용으로 남음 |
+| 경로·메서드 허용 | `GET http://detectportal.firefox.com/success.txt` → 200, 본문 `success\n`. 감사 로그 `allow`, `method: GET`, `path: /success.txt` |
+| 메서드 거부 | 같은 경로 `POST` → 403, 이유 `허용하지 않은 메서드나 경로` |
+| 경로 거부 | `GET /blocked` → 403, 이유 `허용하지 않은 메서드나 경로` |
+| HTTPS 터널 | 같은 호스트의 HTTPS는 `CONNECT`라 경로를 볼 수 없어 403, 이유 `CONNECT 터널은 경로·메서드 규칙을 검사할 수 없음` |
+| 감사·자원 | edge egress 로그 54줄(허용 51, 거부 3). 실행 중 api 194MiB / 1GiB, edge 26MiB / 128MiB |
 
 ### 시크릿 주입과 가림 (실제 Docker · 에이전트 도구 · Git)
 
@@ -1056,7 +1071,7 @@ CI 워크플로는 로컬에서 actionlint로 확인했고, PR에서 실제로 �
 - **내 폴더 세션의 범위**: 인증을 끈 개인 PC에서만 쓰고, 세션 브랜치와 PR 연동이 없습니다. 요청을 처리하는 동안 폴더에서 고친 파일은 요청이 실패하거나 취소되면 함께 되돌아갑니다. IDE의 새 파일·삭제를 개발 서버에 전달하는 동작은 macOS의 colima(sshfs)와 Docker 제공자로만 실측했고, Linux의 Docker, Kubernetes 제공자, gVisor 런타임에서는 재지 않았습니다. 브라우저에서 실제 IDE(VS Code 등)를 열어 확인하지 않고, 스크립트가 파일을 쓰고 지우는 방식으로 확인했습니다.
 - **스튜디오 컨테이너 이미지의 범위**: macOS의 colima(Docker 데몬이 VM 안에 있고 폴더는 sshfs로 공유)에서만 띄워 봤고, Linux 호스트의 Docker에서는 확인하지 않았습니다. Docker 소켓을 넘기므로 컨테이너는 호스트 root 권한과 같고, 컨테이너 안의 Git은 모든 폴더를 안전하다고 봅니다. 이미지를 레지스트리에 올리지 않습니다. 원격 저장소로 푸시할 SSH 키나 credential helper는 운영자가 넣어야 하는데, 컨테이너에서 푸시하는 경로는 실행해 보지 않았습니다. 데모 모드로만 띄웠고, API 키 모드의 모델 호출은 이미지에서도 확인하지 않았습니다.
 - **원격 미리보기의 범위**: 게이트웨이는 루프백 바인드와 `preview.localhost`로 같은 PC에서만 실측했고, 다른 PC·실제 와일드카드 DNS·TLS 리버스 프록시·Kubernetes 제공자로는 확인하지 않았습니다. 인증을 켜면 로그인한 사람만 열 수 있지만, 접근 쿠키가 `SameSite=Lax`라서 미리보기 도메인이 스튜디오 주소와 다른 사이트면 브라우저가 쿠키를 보내지 않아 iframe에서 열리지 않습니다(Chromium으로 실측, Safari·Firefox는 확인하지 않음). 인증을 끈 개인 PC에서는 예전처럼 주소의 토큰만으로 열립니다.
-- **네트워크 격리의 범위**: 외부로는 허용한 호스트의 HTTP(S)만 나갈 수 있고, 허용은 호스트 단위라 경로·메서드를 가리지 않습니다. 프록시 설정을 따르지 않는 도구는 이름 풀이부터 실패하며 감사 로그에도 남지 않습니다. 사용자 compose의 `JAVA_TOOL_OPTIONS`와 프록시 변수는 override 값으로 덮어씁니다. FastAPI 템플릿(uv)의 프록시 경유 설치는 실행해 보지 않았습니다.
+- **네트워크 격리의 범위**: 외부로는 허용한 호스트의 HTTP(S)만 나갈 수 있습니다. `network.egress`의 문자열 규칙은 호스트 전체를 열고, 객체 규칙은 평문 HTTP의 메서드·경로까지 제한합니다. HTTPS는 `CONNECT` 터널이라 경로·메서드를 볼 수 없어 객체 규칙만으로는 열지 않고, 호스트 전체 허용이 필요합니다. 프록시 변수(`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`와 소문자)는 넣지만 이를 모두 무시하는 도구는 이름 풀이부터 실패하며 감사 로그에도 남지 않습니다. 사용자 compose의 `JAVA_TOOL_OPTIONS`와 프록시 변수는 override 값으로 덮어씁니다.
 
 ## 트러블슈팅
 

@@ -13,6 +13,8 @@ import { pathToFileURL } from 'node:url';
 
 export const PROXY_PORT = 3128;
 const EGRESS_PORTS = new Set([80, 443]);
+const DEFAULT_EGRESS_METHODS = ['GET', 'HEAD'];
+const DEFAULT_EGRESS_PATHS = ['/**'];
 
 /** "20000=web:3000,20001=api:8080" */
 export function parseForwards(text = '') {
@@ -35,15 +37,65 @@ export function parseAllow(text = '') {
     .filter(Boolean);
 }
 
+export function normalizeEgressRule(rule) {
+  if (typeof rule === 'string') return { host: rule.trim().toLowerCase(), hostOnly: true };
+  if (rule.hostOnly) return { host: String(rule.host ?? '').trim().toLowerCase(), hostOnly: true };
+  return {
+    host: String(rule.host ?? '').trim().toLowerCase(),
+    methods: (rule.methods ?? DEFAULT_EGRESS_METHODS).map((method) => String(method).toUpperCase()),
+    paths: rule.paths ?? DEFAULT_EGRESS_PATHS,
+  };
+}
+
+/** EDGE_EGRESS: `["registry.npmjs.org", { "host": "api.example.com", "methods": ["POST"], "paths": ["/v1/*"] }]` */
+export function parseEgressRules(text = '') {
+  const value = text.trim();
+  if (!value) return [];
+  if (!value.startsWith('[')) return parseAllow(value).map(normalizeEgressRule);
+  const rules = JSON.parse(value);
+  if (!Array.isArray(rules)) throw new Error('EDGE_EGRESS는 배열이어야 합니다');
+  return rules.map(normalizeEgressRule);
+}
+
 /**
  * 허용 목록 판단. `*.example.com`은 하위 도메인만 뜻한다(example.com 자체는 따로 적는다).
  * IP로 직접 접속하는 요청은 이름으로 판단할 수 없으므로 막는다.
  */
 export function isAllowedHost(host, port, rules) {
-  if (!EGRESS_PORTS.has(port)) return false;
+  return matchingEgressRules(host, port, rules).length > 0;
+}
+
+export function isAllowedEgress(host, port, method, pathname, rules) {
+  return !checkHttpEgress(host, port, method, pathname, rules).denied;
+}
+
+function matchingEgressRules(host, port, rules) {
+  if (!EGRESS_PORTS.has(port)) return [];
   const name = String(host).toLowerCase().replace(/\.$/, '');
-  if (!name || net.isIP(name.replace(/^\[|\]$/g, ''))) return false;
-  return rules.some((rule) => (rule.startsWith('*.') ? name.endsWith(rule.slice(1)) && name.length > rule.length - 1 : name === rule));
+  if (!name || net.isIP(name.replace(/^\[|\]$/g, ''))) return [];
+  return rules
+    .map(normalizeEgressRule)
+    .filter((rule) => (rule.host.startsWith('*.') ? name.endsWith(rule.host.slice(1)) && name.length > rule.host.length - 1 : name === rule.host));
+}
+
+function isHostLevelRule(rule) {
+  return rule.hostOnly === true;
+}
+
+function checkHttpEgress(host, port, method, pathname, rules) {
+  const candidates = matchingEgressRules(host, port, rules);
+  if (candidates.length === 0) return { denied: '허용 목록에 없는 호스트나 포트' };
+  if (candidates.some(isHostLevelRule)) return {};
+  const normalizedMethod = String(method).toUpperCase();
+  if (candidates.some((rule) => rule.methods.includes(normalizedMethod) && rule.paths.some((pattern) => matchPath(pattern, pathname)))) return {};
+  return { denied: '허용하지 않은 메서드나 경로' };
+}
+
+function checkConnectEgress(host, port, rules) {
+  const candidates = matchingEgressRules(host, port, rules);
+  if (candidates.length === 0) return { denied: '허용 목록에 없는 호스트나 포트' };
+  if (candidates.some(isHostLevelRule)) return {};
+  return { denied: 'CONNECT 터널은 경로·메서드 규칙을 검사할 수 없음' };
 }
 
 /** 사설·루프백·링크 로컬 주소. 허용한 이름이 사내 주소로 풀리면(DNS 재바인딩 포함) 막는다 */
@@ -278,14 +330,15 @@ export function auditApi(entry) {
   console.log(JSON.stringify({ edge: 'api', ...entry, at: new Date().toISOString() }));
 }
 
-function audit(decision, host, port, reason) {
+function audit(decision, host, port, reason, details = {}) {
   // 한 줄 JSON이라 스튜디오 로그와 감사 기록에서 그대로 걸러 쓸 수 있다
-  console.log(JSON.stringify({ edge: 'egress', decision, host, port, ...(reason ? { reason } : {}), at: new Date().toISOString() }));
+  console.log(JSON.stringify({ edge: 'egress', decision, host, port, ...details, ...(reason ? { reason } : {}), at: new Date().toISOString() }));
 }
 
 /** 허용 목록과 주소 검사를 모두 통과한 IP를 돌려준다 */
-async function resolveAllowed(host, port, rules) {
-  if (!isAllowedHost(host, port, rules)) return { denied: '허용 목록에 없는 호스트나 포트' };
+async function resolveAllowed(host, port, rules, request = {}) {
+  const decision = request.tunnel ? checkConnectEgress(host, port, rules) : checkHttpEgress(host, port, request.method, request.pathname, rules);
+  if ('denied' in decision) return decision;
   const addresses = await dns.lookup(host, { all: true }).catch(() => []);
   // Docker 기본 네트워크에는 IPv6 경로가 없는 경우가 많으므로 IPv4를 먼저 쓴다
   const usable = addresses
@@ -320,13 +373,15 @@ export function startEdge({ forwards, rules, proxyPort = PROXY_PORT }) {
       return;
     }
     const port = Number(url.port || 80);
-    const resolved = url.protocol === 'http:' ? await resolveAllowed(url.hostname, port, rules) : { denied: 'http 이외의 프로토콜' };
+    const path = url.pathname;
+    const details = { method: String(request.method ?? 'GET').toUpperCase(), path };
+    const resolved = url.protocol === 'http:' ? await resolveAllowed(url.hostname, port, rules, { ...details, pathname: path }) : { denied: 'http 이외의 프로토콜' };
     if ('denied' in resolved) {
-      audit('deny', url.hostname, port, resolved.denied);
+      audit('deny', url.hostname, port, resolved.denied, details);
       response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end(`b-studio: ${url.hostname}:${port} 접속이 허용되지 않았습니다 (${resolved.denied})\n`);
       return;
     }
-    audit('allow', url.hostname, port);
+    audit('allow', url.hostname, port, undefined, details);
     const upstream = http.request(
       { host: resolved.address, servername: url.hostname, port, method: request.method, path: `${url.pathname}${url.search}`, headers: { ...request.headers, host: url.host } },
       (reply) => {
@@ -341,13 +396,14 @@ export function startEdge({ forwards, rules, proxyPort = PROXY_PORT }) {
   proxy.on('connect', async (request, socket, head) => {
     socket.on('error', () => {});
     const target = splitHostPort(request.url ?? '');
-    const resolved = target ? await resolveAllowed(target.host, target.port, rules) : { denied: '잘못된 CONNECT 대상' };
+    const details = { method: 'CONNECT' };
+    const resolved = target ? await resolveAllowed(target.host, target.port, rules, { tunnel: true }) : { denied: '잘못된 CONNECT 대상' };
     if ('denied' in resolved) {
-      audit('deny', target?.host ?? request.url, target?.port, resolved.denied);
+      audit('deny', target?.host ?? request.url, target?.port, resolved.denied, details);
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-    audit('allow', target.host, target.port);
+    audit('allow', target.host, target.port, undefined, details);
     const upstream = net.connect(target.port, resolved.address, () => {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length > 0) upstream.write(head);
@@ -408,7 +464,7 @@ export function startApiProxy({ externals, secrets = {}, resolveCaller, port = A
 const invokedDirectly = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (process.env.EDGE_MAIN === '1' || invokedDirectly) {
   const forwards = parseForwards(process.env.EDGE_FORWARDS);
-  const rules = parseAllow(process.env.EDGE_ALLOW);
+  const rules = parseEgressRules(process.env.EDGE_EGRESS ?? process.env.EDGE_ALLOW);
   startEdge({ forwards, rules });
   const externals = parseExternals(process.env.EDGE_EXTERNALS);
   if (externals.length > 0) {

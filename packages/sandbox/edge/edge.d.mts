@@ -30,6 +30,21 @@ export interface EdgeExternal {
   policy: EdgePolicy;
 }
 
+export type EdgeEgressRule =
+  | string
+  | {
+      host: string;
+      methods?: string[];
+      paths?: string[];
+    };
+
+export interface NormalizedEgressRule {
+  host: string;
+  hostOnly?: boolean;
+  methods?: string[];
+  paths?: string[];
+}
+
 export interface UpstreamRequest {
   method: string;
   pathname: string;
@@ -68,7 +83,10 @@ export declare class ApiPolicyError extends Error {
 
 export declare function parseForwards(text?: string): Forward[];
 export declare function parseAllow(text?: string): string[];
-export declare function isAllowedHost(host: string, port: number, rules: string[]): boolean;
+export declare function normalizeEgressRule(rule: EdgeEgressRule): NormalizedEgressRule;
+export declare function parseEgressRules(text?: string): NormalizedEgressRule[];
+export declare function isAllowedHost(host: string, port: number, rules: EdgeEgressRule[]): boolean;
+export declare function isAllowedEgress(host: string, port: number, method: string, pathname: string, rules: EdgeEgressRule[]): boolean;
 export declare function isPrivateAddress(address: string): boolean;
 export declare function splitHostPort(target: string): { host: string; port: number } | undefined;
 export declare function parseExternals(text?: string): EdgeExternal[];
@@ -86,7 +104,7 @@ export declare function callerResolver(
 ): (address: string | undefined) => Promise<string | undefined>;
 export declare function callUpstream(external: EdgeExternal, secrets: Record<string, string | undefined>, request: UpstreamRequest): Promise<UpstreamResult>;
 export declare function auditApi(entry: ApiAuditEntry): void;
-export declare function startEdge(options: { forwards: Forward[]; rules: string[]; proxyPort?: number }): net.Server[];
+export declare function startEdge(options: { forwards: Forward[]; rules: EdgeEgressRule[]; proxyPort?: number }): net.Server[];
 export declare function startApiProxy(options: {
   externals: EdgeExternal[];
   secrets?: Record<string, string | undefined>;

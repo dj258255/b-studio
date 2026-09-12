@@ -24,7 +24,7 @@ const ORDERS = {
     ['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi' }],
   ],
   composeServices: ['web', 'api', 'db'],
-  egress: ['api.slack.com'],
+  egress: ['api.slack.com', { host: 'audit.example.com', methods: ['POST'], paths: ['/events/*'] }],
   resources: { api: { memory: '1536m', cpus: 2 }, db: { memory: '256m' } },
 } as unknown as LoadedProject;
 
@@ -48,14 +48,15 @@ describe('buildOverride 네트워크 격리', () => {
     expect(edgePortFor(ORDERS, 'api')).toBe(20001);
   });
 
-  it('기본 패키지 저장소와 studio.yaml의 허용 호스트를 edge에 넘긴다', () => {
-    const allow = (buildOverride(ORDERS, 's1').services[EDGE_SERVICE]!.environment as Record<string, string>).EDGE_ALLOW;
-    expect(allow?.split(',')).toEqual([...DEFAULT_EGRESS_ALLOW, 'api.slack.com']);
+  it('기본 패키지 저장소와 studio.yaml의 허용 규칙을 edge에 넘긴다', () => {
+    const egress = (buildOverride(ORDERS, 's1').services[EDGE_SERVICE]!.environment as Record<string, string>).EDGE_EGRESS;
+    expect(JSON.parse(String(egress))).toEqual([...DEFAULT_EGRESS_ALLOW, 'api.slack.com', { host: 'audit.example.com', methods: ['POST'], paths: ['/events/*'] }]);
   });
 
   it('서비스끼리는 프록시를 거치지 않고, 밖으로 나가는 HTTP는 JVM까지 edge 프록시를 쓴다', () => {
     const environment = buildOverride(ORDERS, 's1').services.api!.environment as Record<string, string>;
     expect(environment.HTTPS_PROXY).toBe('http://b-studio-edge:3128');
+    expect(environment.ALL_PROXY).toBe('http://b-studio-edge:3128');
     expect(environment.NO_PROXY).toBe('localhost,127.0.0.1,web,api,db');
     expect(environment.JAVA_TOOL_OPTIONS).toContain('-Dhttps.proxyHost=b-studio-edge');
     expect(environment.JAVA_TOOL_OPTIONS).toContain('-Dhttp.nonProxyHosts=localhost|127.0.0.1|web|api|db');
@@ -130,8 +131,17 @@ describe('buildOverride 시크릿', () => {
 describe('parseEgressDenial', () => {
   it('edge 감사 로그에서 거부 기록만 읽는다', () => {
     expect(
-      parseEgressDenial('{"edge":"egress","decision":"deny","host":"example.com","port":443,"reason":"허용 목록에 없는 호스트나 포트","at":"2026-09-11T01:00:00.000Z"}'),
-    ).toEqual({ host: 'example.com', port: 443, reason: '허용 목록에 없는 호스트나 포트', at: new Date('2026-09-11T01:00:00.000Z') });
+      parseEgressDenial(
+        '{"edge":"egress","decision":"deny","host":"example.com","port":80,"method":"POST","path":"/api/users","reason":"허용하지 않은 메서드나 경로","at":"2026-09-11T01:00:00.000Z"}',
+      ),
+    ).toEqual({
+      host: 'example.com',
+      port: 80,
+      method: 'POST',
+      path: '/api/users',
+      reason: '허용하지 않은 메서드나 경로',
+      at: new Date('2026-09-11T01:00:00.000Z'),
+    });
     expect(parseEgressDenial('{"edge":"egress","decision":"allow","host":"registry.npmjs.org","port":443,"at":"2026-09-11T01:00:00.000Z"}')).toBeUndefined();
     expect(parseEgressDenial('{"edge":"started","forwards":[]}')).toBeUndefined();
     expect(parseEgressDenial('{"edge":"egress", 잘린 줄')).toBeUndefined();

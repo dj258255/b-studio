@@ -3,6 +3,7 @@ import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   callerResolver,
+  isAllowedEgress,
   isAllowedCall,
   isAllowedHost,
   isPrivateAddress,
@@ -11,6 +12,7 @@ import {
   matchPath,
   normalizeExternal,
   parseAllow,
+  parseEgressRules,
   parseExternals,
   parseForwards,
   splitHostPort,
@@ -28,6 +30,10 @@ describe('설정 해석', () => {
     ]);
     expect(() => parseForwards('20000=web')).toThrow('잘못된 포워딩 설정');
     expect(parseAllow('Registry.npmjs.org, *.gradle.org,')).toEqual(['registry.npmjs.org', '*.gradle.org']);
+    expect(parseEgressRules('["registry.npmjs.org",{"host":"API.Example.com","methods":["post"],"paths":["/v1/*"]}]')).toEqual([
+      { host: 'registry.npmjs.org', hostOnly: true },
+      { host: 'api.example.com', methods: ['POST'], paths: ['/v1/*'] },
+    ]);
     expect(splitHostPort('registry.npmjs.org:443')).toEqual({ host: 'registry.npmjs.org', port: 443 });
     expect(splitHostPort('[::1]:443')).toEqual({ host: '::1', port: 443 });
   });
@@ -48,6 +54,16 @@ describe('isAllowedHost', () => {
   it('IP로 직접 접속하는 요청은 막는다', () => {
     expect(isAllowedHost('104.16.7.34', 443, ['104.16.7.34'])).toBe(false);
     expect(isAllowedHost('[2606:4700::6810:722]', 443, rules)).toBe(false);
+  });
+
+  it('객체 규칙은 호스트가 맞아도 메서드와 경로가 맞아야 허용한다', () => {
+    const precise = [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/users/*'] }];
+
+    expect(isAllowedHost('api.example.com', 80, precise)).toBe(true);
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/users/7', precise)).toBe(true);
+    expect(isAllowedEgress('api.example.com', 80, 'POST', '/v1/users/7', precise)).toBe(false);
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/admin/7', precise)).toBe(false);
+    expect(isAllowedEgress('api.example.com', 443, 'GET', '/v1/users/7', ['api.example.com'])).toBe(true);
   });
 });
 
@@ -277,5 +293,21 @@ describe('startEdge', () => {
     expect(await connect('db.internal.example:5432')).toBe('HTTP/1.1 403 Forbidden');
     // localhost는 목록에 있어도 루프백 주소로 풀리므로 막는다
     expect(await connect('localhost:443')).toBe('HTTP/1.1 403 Forbidden');
+  });
+
+  it('경로·메서드 규칙만 있는 호스트는 CONNECT 터널로 열지 않는다', async () => {
+    const proxyPort = 30_000 + Math.floor(Math.random() * 20_000);
+    servers.push(...startEdge({ forwards: [], rules: [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/*'] }], proxyPort }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const status = await new Promise<string>((resolve) => {
+      const socket = net.connect(proxyPort, '127.0.0.1', () => socket.write('CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n'));
+      socket.once('data', (data) => {
+        resolve(data.toString().split('\r\n')[0]!);
+        socket.destroy();
+      });
+    });
+
+    expect(status).toBe('HTTP/1.1 403 Forbidden');
   });
 });
