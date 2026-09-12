@@ -213,7 +213,17 @@ UND_ERR_SOCKET (포트는 열렸지만 서버 준비 전)
 | 샌드박스 전용 | 일반 named volume | `destroy()` 때 삭제 | `node_modules`, `.next`, Gradle `build`, DB 데이터 |
 | 공유 캐시 | `external: true` + 고정 이름 | 샌드박스를 지워도 유지 | `b-studio-cache-gradle`, `b-studio-cache-pnpm` |
 
-compose는 external 볼륨을 만들어 주지 않으므로, 로더가 external 볼륨을 모아 두고 제공자가 기동 전에 `docker volume create`로 만듭니다(이미 있으면 그대로 둠). Gradle과 pnpm 캐시는 여러 프로세스가 동시에 써도 안전해서 샌드박스끼리 공유할 수 있습니다.
+compose는 external 볼륨을 만들어 주지 않으므로, 로더가 external 볼륨을 모아 두고 제공자가 기동 전에 `docker volume create`로 만듭니다(이미 있으면 그대로 둠).
+
+### 나중에 고친 것: Gradle 캐시는 공유하면 안 됐다 (2026-09)
+처음에는 "Gradle과 pnpm 캐시는 여러 프로세스가 동시에 써도 안전하다"고 적어 두고 Gradle 홈 전체를 공유했습니다. **Gradle 쪽은 사실이 아니었습니다.** 같은 프로젝트로 두 샌드박스를 띄우면 뒤에 뜨는 쪽이 캐시 잠금을 얻지 못해 빌드가 실패하는 것을 실측으로 확인했습니다([트러블슈팅 36](troubleshooting.md#36-같은-프로젝트로-두-세션을-동시에-띄우면-api-빌드가-실패함)).
+
+- **Gradle 홈은 샌드박스 전용 볼륨으로 옮겼습니다.** 잠금이 샌드박스마다 따로 걸립니다.
+- **공유는 이미지에 구운 읽기 전용 의존성 캐시로 대체했습니다**(`GRADLE_RO_DEP_CACHE`). Gradle은 이 캐시를 잠금 없이 읽습니다. 쓰기 공유 볼륨이 없어져 씨 뿌리기 경쟁도 사라졌습니다.
+- **Gradle 배포판도 이미지에 넣습니다.** 샌드박스는 네트워크가 격리돼 있어 실행 중에 배포판을 받을 수 없습니다. compose가 붙이는 빈 볼륨은 첫 마운트 때 이미지의 그 경로 내용으로 채워지는 것을 따로 실측해 확인했습니다.
+- **캐시를 굽는 태스크는 `downloadDependencies`입니다.** `dependencies` 리포트 태스크는 메타데이터만 받아, 실행할 때 jar을 다시 내려받으려 합니다.
+- **감수한 비용**: 기동이 느려졌습니다(api 준비 13.9초 → 21.1초). 샌드박스마다 Gradle 홈을 새로 채우기 때문입니다. 같은 프로젝트로 두 세션을 띄울 수 있게 된 대가로 받아들였습니다. pnpm 캐시는 그대로 공유합니다.
+- 이미 쓰던 설치에는 `b-studio-cache-gradle` 볼륨이 쓰이지 않는 상태로 남습니다. `docker volume rm b-studio-cache-gradle`로 지울 수 있습니다.
 
 ### 결과와 한계
 Gradle 다운로드는 사라졌지만 두 번째 기동도 "늦어도 43초 안에 준비" 수준으로, 극적으로 빨라지지는 않았습니다. `node_modules`가 샌드박스마다 새로 설치되기 때문입니다. 자세한 분석은 [troubleshooting.md](troubleshooting.md#3-공유-캐시를-써도-두-번째-기동이-크게-빨라지지-않음)에 있습니다.

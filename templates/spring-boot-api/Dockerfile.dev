@@ -1,8 +1,27 @@
-# 개발용 이미지: 소스는 compose에서 마운트하고 Gradle 캐시는 샌드박스끼리 공유한다
+# 개발용 이미지: 소스는 compose에서 마운트한다.
+# Gradle 홈은 샌드박스마다 따로 둔다. 홈을 공유하면 같은 프로젝트로 두 샌드박스를 띄울 때 캐시 잠금이 충돌해
+# 뒤에 뜨는 쪽의 빌드가 실패한다(docs/troubleshooting.md 36).
+# 그래서 두 가지를 이미지에 미리 넣는다.
+#  - Gradle 배포판(wrapper/dists): 샌드박스는 네트워크가 격리돼 실행 중에 받을 수 없다.
+#    compose가 붙이는 빈 볼륨은 첫 마운트 때 이미지의 이 경로 내용으로 채워지므로 그대로 물려받는다.
+#  - 의존성 캐시(modules-2): Gradle이 잠금 없이 읽는 읽기 전용 캐시로 넘긴다.
 FROM eclipse-temurin:25-jdk
 
 WORKDIR /app
-ENV GRADLE_USER_HOME=/cache/gradle
+ENV GRADLE_USER_HOME=/gradle-home \
+    GRADLE_RO_DEP_CACHE=/cache/gradle-ro
+
+COPY gradlew settings.gradle build.gradle gradle.properties ./
+COPY gradle ./gradle
+# 소스를 이미지에 넣지 않는다. 에이전트가 소스를 고칠 때마다 이 층이 깨지면 기동이 느려진다.
+# 그래서 소스가 필요 없는 downloadDependencies로 런타임 의존성을 받는다
+# (dependencies 태스크는 메타데이터만 받아 실행할 때 jar을 다시 내려받으려 한다).
+# 읽기 전용 원본에는 잠금 파일을 남기지 않는다(Gradle 문서 요건)
+RUN ./gradlew downloadDependencies --no-daemon --console=plain > /dev/null \
+    && mkdir -p /cache/gradle-ro \
+    && cp -r /gradle-home/caches/modules-2 /cache/gradle-ro/modules-2 \
+    && rm -rf /gradle-home/caches/modules-2 /gradle-home/daemon .gradle \
+    && find /gradle-home /cache/gradle-ro -name '*.lock' -delete
 
 EXPOSE 8080
 CMD ["./gradlew", "bootRun", "--no-daemon", "--console=plain"]
