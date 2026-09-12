@@ -136,6 +136,15 @@ export interface ExecResult {
   stderr: string;
 }
 
+export interface ExecFileOptions {
+  signal?: AbortSignal;
+  /**
+   * 파일은 raw 여부와 상관없이 그대로 읽고 쓴다. 가리면 복원할 데이터가 바뀌기 때문이다.
+   * raw는 함께 돌려주는 stdout·stderr만 가리지 않게 한다. 파일을 사람이나 모델에게 보여 주지 않을 때만 쓴다
+   */
+  raw?: boolean;
+}
+
 /** 프로젝트 하나를 실행하는 격리된 환경 */
 export interface Sandbox {
   readonly id: string;
@@ -157,11 +166,12 @@ export interface Sandbox {
   logs(options?: LogOptions): AsyncIterable<LogLine>;
   /** since 이후 외부 접속이 막힌 기록. 네트워크를 제한하지 않는 제공자는 구현하지 않는다 */
   egressDenials?(options?: { since?: Date }): Promise<EgressDenial[]>;
-  /**
-   * input은 명령의 표준 입력으로 넘긴다 (예: 데이터베이스 덤프 복원).
-   * 출력의 시크릿 값은 가려서 돌려준다. raw는 덤프처럼 내용을 그대로 옮겨야 하고 사람이나 모델에게 보이지 않을 때만 쓴다
-   */
+  /** 출력의 시크릿 값은 가려서 돌려준다. input/raw는 작은 표준 입력을 넘기거나 가리지 않은 출력을 내부에서만 다룰 때 쓴다 */
   exec(service: string, command: string[], options?: { signal?: AbortSignal; input?: string; raw?: boolean }): Promise<ExecResult>;
+  /** 명령의 stdout을 파일로 직접 흘린다. 큰 DB 덤프처럼 문자열로 올리면 안 되는 출력에 쓴다. 파일 내용은 가리지 않는다 */
+  execToFile(service: string, command: string[], outputFile: string, options?: ExecFileOptions): Promise<ExecResult>;
+  /** 파일 내용을 명령의 stdin으로 직접 흘린다. 큰 DB 덤프 복원에 쓴다. 파일 내용은 가리지 않고 넘긴다 */
+  execFromFile(service: string, command: string[], inputFile: string, options?: ExecFileOptions): Promise<ExecResult>;
   /**
    * 호스트에서 만들거나 지운 파일과 폴더를, 그 경로를 마운트한 서비스 컨테이너의 파일 감시기가 알아채게 한다.
    * 파일 공유 계층(colima sshfs)이 수정 알림은 전달하지만 생성·삭제 알림은 전달하지 않아 개발 서버가 새 화면을 모르거나 지운 화면을 계속 보여 주기 때문이다(트러블슈팅 29).

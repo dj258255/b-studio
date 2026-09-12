@@ -55,6 +55,12 @@ export function fakeSandbox(project: LoadedProject, restartOutcomes: boolean[]):
     async exec() {
       return { exitCode: 0, stdout: '', stderr: '' };
     },
+    async execToFile() {
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
+    async execFromFile() {
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
     redact(text: string) {
       return text;
     },

@@ -13,6 +13,7 @@ import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
+import { runCommandFromFile, runCommandToFile } from '../stream-exec';
 import { withRemovedDirectories } from '../sync-paths';
 import type {
   CleanupCommand,
@@ -286,6 +287,16 @@ class KubernetesSandbox implements Sandbox {
 
   async exec(name: string, command: string[], { signal, input, raw = false }: { signal?: AbortSignal; input?: string; raw?: boolean } = {}): Promise<ExecResult> {
     const result = await this.#kubectl.run(['-n', this.#namespace, 'exec', ...(input !== undefined ? ['-i'] : []), name, '-c', name, '--', ...command], { signal, input });
+    return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
+  }
+
+  async execToFile(name: string, command: string[], outputFile: string, { signal, raw = false }: { signal?: AbortSignal; raw?: boolean } = {}): Promise<ExecResult> {
+    const result = await runCommandToFile(this.#kubectl.bin, this.#kubectl.args(['-n', this.#namespace, 'exec', name, '-c', name, '--', ...command]), outputFile, { signal });
+    return raw ? result : { ...result, stderr: this.redact(result.stderr) };
+  }
+
+  async execFromFile(name: string, command: string[], inputFile: string, { signal, raw = false }: { signal?: AbortSignal; raw?: boolean } = {}): Promise<ExecResult> {
+    const result = await runCommandFromFile(this.#kubectl.bin, this.#kubectl.args(['-n', this.#namespace, 'exec', '-i', name, '-c', name, '--', ...command]), inputFile, { signal });
     return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
   }
 

@@ -33,6 +33,7 @@ import type {
   SyncOptions,
   SyncResult,
 } from '../types';
+import { runCommandFromFile, runCommandToFile } from '../stream-exec';
 import {
   buildOverride,
   EDGE_SERVICE,
@@ -318,6 +319,16 @@ class LocalDockerSandbox implements Sandbox {
     return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
   }
 
+  async execToFile(name: string, command: string[], outputFile: string, { signal, raw = false }: { signal?: AbortSignal; raw?: boolean } = {}): Promise<ExecResult> {
+    const result = await runCommandToFile(this.#dockerBin, this.#composeArgs(['exec', '-T', name, ...command]), outputFile, { signal, env: this.#environment() });
+    return raw ? result : { ...result, stderr: this.redact(result.stderr) };
+  }
+
+  async execFromFile(name: string, command: string[], inputFile: string, { signal, raw = false }: { signal?: AbortSignal; raw?: boolean } = {}): Promise<ExecResult> {
+    const result = await runCommandFromFile(this.#dockerBin, this.#composeArgs(['exec', '-T', name, ...command]), inputFile, { signal, env: this.#environment() });
+    return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
+  }
+
   async relayChanges(changes: FileChange[], { signal }: { signal?: AbortSignal } = {}): Promise<RelayedPath[]> {
     if (changes.length === 0) return [];
     // 바인드 마운트는 세션 동안 바뀌지 않으므로 compose 해석은 한 번만 한다
@@ -543,7 +554,6 @@ class LocalDockerSandbox implements Sandbox {
 
   async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
     try {
-      // 개발용 데이터베이스 덤프를 문자열로 주고받으므로 넉넉하게 둔다
       const running = execFileAsync(this.#dockerBin, args, { signal, maxBuffer: 256 * 1024 * 1024, env: this.#environment() });
       running.child.stdin?.end(input);
       const { stdout, stderr } = await running;

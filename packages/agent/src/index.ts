@@ -9,7 +9,7 @@ export {
   type ClaudeCodeRunOptions,
 } from './claude-code-runner';
 export { VerificationGate, type GateOutcome } from './gate';
-export { DatabaseBranches, describeDatabaseState, normalizeDump, type DatabaseAction, type DatabaseState } from './database-branches';
+export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
 export { diffContracts, formatContractChanges, summarizeContract, type ContractChange, type OpenApiDocument } from './contract-diff';
