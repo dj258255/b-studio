@@ -196,7 +196,14 @@ async function blockedEgressSince(sandbox: Sandbox, startedAt: Date): Promise<st
   // 스튜디오 서버와 Docker VM의 시계가 조금 어긋날 수 있어 여유를 둔다
   const since = new Date(startedAt.getTime() - 5_000);
   const denials = (await sandbox.egressDenials?.({ since }).catch(() => [])) ?? [];
-  return [...new Set(denials.map((denial) => `${denial.host}${denial.port ? `:${denial.port}` : ''} (${denial.reason})`))];
+  return [
+    ...new Set(
+      denials.map((denial) => {
+        const target = `${denial.host}${denial.port ? `:${denial.port}` : ''}${denial.path ?? ''}`;
+        return `${denial.method ? `${denial.method} ` : ''}${target} (${denial.reason})`;
+      }),
+    ),
+  ];
 }
 
 /** 호스트에서 이미 사라진 파일. 되돌리기나 에이전트의 삭제로 생긴다 */

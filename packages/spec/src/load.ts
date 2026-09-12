@@ -7,6 +7,7 @@ import {
   StudioSpecSchema,
   type DatabaseSpec,
   type DeployServiceSpec,
+  type EgressRule,
   type ExternalServiceSpec,
   type ManagedServiceSpec,
   type ResourceLimit,
@@ -39,8 +40,8 @@ export interface LoadedProject {
   resources: Record<string, ResourceLimit>;
   /** compose 파일의 모든 서비스 이름 (부가 서비스 포함) */
   composeServices: string[];
-  /** 기본 패키지 저장소 외에 외부 접속을 허용할 호스트 */
-  egress: string[];
+  /** 기본 패키지 저장소 외에 외부 접속을 허용할 호스트나 평문 HTTP 경로·메서드 규칙 */
+  egress: EgressRule[];
   /** 시크릿 이름(컨테이너 환경 변수 이름) → 받을 서비스. 값은 들어 있지 않다 */
   secrets: Array<[name: string, secret: SecretSpec]>;
   /** 등록한 사내 API. 샌드박스에서는 이 이름의 호스트로 부르고 edge가 정책을 적용한다 */

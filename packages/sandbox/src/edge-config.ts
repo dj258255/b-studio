@@ -1,4 +1,4 @@
-import type { LoadedProject } from '@b-studio/spec';
+import type { EgressRule, LoadedProject } from '@b-studio/spec';
 
 /** 샌드박스 네트워크의 유일한 출입구 (packages/sandbox/edge/edge.mjs). Docker와 Kubernetes 제공자가 같은 설정을 쓴다 */
 export const EDGE_SERVICE = 'b-studio-edge';
@@ -39,8 +39,10 @@ export function proxyEnvironment(direct: readonly string[]): Record<string, stri
   return {
     HTTP_PROXY: proxy,
     HTTPS_PROXY: proxy,
+    ALL_PROXY: proxy,
     http_proxy: proxy,
     https_proxy: proxy,
+    all_proxy: proxy,
     NO_PROXY: direct.join(','),
     no_proxy: direct.join(','),
     // JVM(Gradle, 앱)은 프록시 환경 변수를 읽지 않으므로 시스템 속성으로 넘긴다
@@ -56,10 +58,11 @@ export function proxyEnvironment(direct: readonly string[]): Record<string, stri
 
 /** edge 프로세스 설정. 값을 그대로 담는다 (compose override는 $를 따로 적는다) */
 export function edgeEnvironment(project: LoadedProject, services: readonly string[]): Record<string, string> {
+  const egress: EgressRule[] = [...DEFAULT_EGRESS_ALLOW, ...(project.egress ?? [])];
   return {
     EDGE_MAIN: '1',
     EDGE_FORWARDS: project.managed.map(([name, service]) => `${edgePortFor(project, name)}=${name}:${service.port}`).join(','),
-    EDGE_ALLOW: [...DEFAULT_EGRESS_ALLOW, ...(project.egress ?? [])].join(','),
+    EDGE_EGRESS: JSON.stringify(egress),
     EDGE_CALLERS: services.join(','),
     EDGE_EXTERNALS: JSON.stringify((project.external ?? []).map(([name, service]) => ({ name, baseUrl: service.baseUrl, policy: service.policy }))),
   };
