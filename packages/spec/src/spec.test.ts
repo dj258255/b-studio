@@ -286,7 +286,7 @@ secrets:
     ]);
 
     expect(parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "https://users.example.com" }\n').services.users).toMatchObject({
-      policy: { mask: [] },
+      policy: { mask: [], maskPatterns: [] },
     });
     const ftp = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "ftp://users.example.com" }\n'));
     expect(ftp.issues[0]).toMatch(/^services\.users\.baseUrl/);

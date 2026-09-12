@@ -394,7 +394,8 @@ services:
   #   policy:
   #     allow:                                  # 적지 않으면 모든 호출자에게 GET·HEAD만
   #       - { callers: [api, studio], methods: [GET], paths: ["/api/users/*"] }
-  #     mask: [phone, residentNumber]           # 응답 JSON에서 가릴 필드
+  #     mask: [phone, residentNumber]           # 응답 JSON에서 가릴 필드 이름
+  #     maskPatterns: [phone, residentNumber]   # 자유 텍스트 안에서 가릴 값 형태 (phone, email, residentNumber, card)
   #     auth: { header: Authorization, secret: LEGACY_USERS_TOKEN, prefix: "Bearer " }
 
 # 체크포인트마다 DB 상태를 저장해, 파일을 되돌릴 때 스키마와 데이터도 같은 시점으로 되돌린다
@@ -598,6 +599,19 @@ Docker 호스트에 가짜 사내 API를 띄웠습니다. 이 API는 받은 인�
 | 에이전트 도구 `call_external_api` | 결과에 `policy: 2 field value(s) masked by b-studio policy` |
 | 감사 기록 | edge 로그에 7줄: web 허용 1·거부 2, api 거부 1, studio(explorer) 허용 1·거부 1, studio(agent) 허용 1. 스튜디오 로그 스트림에서 토큰 0건 |
 | 기동 | 14.1초 |
+
+자유 텍스트 안의 개인정보를 가리는 `maskPatterns`는 따로 쟀습니다. 같은 예제 복사본에 `mask: [phone]`과 `maskPatterns: [phone, residentNumber, card, email]`을 함께 적고, 가짜 API가 자유 텍스트 `memo`에 전화·주민번호·카드번호·메일 주소를 담아 돌려주게 했습니다.
+
+| 확인 항목 | 결과 |
+|---|---|
+| 사내 API 탭 | 가리는 필드 `phone`과 가리는 값 형태 `phone, residentNumber, card, email`이 함께 표시됨 |
+| 가림 적용 (studio 호출자) | HTTP 200, "정책 통과. 5곳을 가렸습니다" (필드 1곳 + 자유 텍스트 4곳) |
+| 필드 가림 | `"phone": "[가림]"` |
+| 자유 텍스트 가림 | `"memo": "급할 때 [phone 가림]로 연락. 주민 [residentNumber 가림], 카드 [card 가림], 메일 [email 가림]"` |
+| 인증 값 | API가 되돌려 보낸 토큰은 `[FAKE_API_TOKEN 가림]` (시크릿 가림과 함께 적용됨) |
+| 새지 않음 | `010-9876-5432`, `900101-1234567`, `1234-5678-9012-3456`, `kim@example.com`, `010-1111-2222`, 토큰 모두 0건 |
+| 과하게 가리지 않음 | 주문번호 `20260912-0001`, 금액 `12500`, 수량 `4321` 보존 |
+| 기동 | 32.5초. 호출 0.2초 |
 
 설계 근거는 [ADR-026](docs/decisions.md#adr-026-정책-프록시-사내-api는-edge를-거쳐서만-부른다)에 있습니다.
 
@@ -1029,7 +1043,7 @@ CI 워크플로는 로컬에서 actionlint로 확인했고, PR에서 실제로 �
 - **세션 복구의 범위**: 서버가 멈추면 진행 중이던 요청은 이어지지 않고 마지막 체크포인트부터 다시 시작합니다. 세션 파일은 스튜디오 서버의 로컬 디스크에 있어 여러 서버가 세션을 나눠 갖지 못합니다. 강제 종료와 이어서 작업은 Docker 제공자로만 실측했고, Kubernetes 제공자의 정리 명령은 단위 테스트로만 확인했습니다. API 키 모드와 로컬 로그인 계정 모드에서 대화를 이어받는 것은 실제 모델로 확인하지 않았습니다.
 - **Kubernetes 제공자의 범위**: 소스를 hostPath로 마운트하므로 kind 같은 단일 노드 개발 클러스터에서만 동작합니다. 기동 가속용 스냅샷 볼륨이 없고, 전용 볼륨은 emptyDir라 Pod를 다시 만들면 의존성 설치가 다시 돕니다. CPU·메모리 사용량은 metrics-server가 없어 표시하지 않습니다. edge Pod는 port-forward를 받기 위해 gVisor 없이 돌고, compose의 `depends_on` 중 edge를 기다리는 것 말고는 순서를 보장하지 않습니다.
 - **gVisor 격리의 범위**: 개발 PC의 Docker 데몬에는 등록하지 않고, 격리된 Docker-in-Docker 데몬에서 edge와 Next web만 띄워 확인했습니다. api(JVM)와 db(Postgres)는 아직 gVisor에서 띄워 보지 않았습니다. runsc는 서비스 이름 풀이 때문에 `--network=host`로 등록해야 하고, 이 모드는 네트워크 경로의 격리를 줄입니다. gVisor 안에서는 파일 변경 알림이 오지 않아, 미리보기는 요청이 끝나고 서비스를 다시 띄울 때 바뀝니다.
-- **정책 프록시의 범위**: 가림은 필드 이름 기준이라 다른 이름의 필드나 자유 텍스트 안의 개인정보는 가리지 못합니다. 가릴 필드가 있는 API의 JSON이 아닌 응답은 넘기지 않고, 본문은 5MB까지, HTTP(S) API만 다룹니다. 실제 사내망 API가 아니라 Docker 호스트의 가짜 API로 확인했습니다.
+- **정책 프록시의 범위**: 필드 이름(`mask`)과 값 형태(`maskPatterns`)로 가립니다. 값 형태는 전화·메일·주민번호·카드 4가지만 알아서, 사번·계좌번호처럼 조직마다 형태가 다른 값은 필드 이름으로 적어야 합니다. `studio.yaml`은 에이전트가 고칠 수 있는 파일이라 임의 정규식은 받지 않습니다. 가릴 규칙이 있는 API의 JSON이 아닌 응답은 넘기지 않고, 본문은 5MB까지, HTTP(S) API만 다룹니다. 값 형태 가림은 studio 호출자 경로로만 다시 쟀고(가림은 서비스 호출자와 같은 함수를 지납니다), 실제 사내망 API가 아니라 Docker 호스트의 가짜 API로 확인했습니다.
 - **시크릿 가림의 범위**: 문자열 일치(원래 값, URL 인코딩, base64)로 찾으므로 값을 쪼개거나 다른 방식으로 바꾸면 가려지지 않습니다. Docker 호스트에서는 `docker inspect`·`docker logs`로 값이 보입니다. 게이트의 시크릿 실패 문구와 세션 시작 거부 문구는 스튜디오 화면이 아니라 코드 경로와 API 매핑으로만 확인했습니다.
 - **화면 디자인의 범위**: Chromium(Playwright)으로만 확인했고 Safari·Firefox에서는 열어 보지 않았습니다. `prefers-reduced-transparency`는 흉내 내지 못해 확인하지 않았고, 흐림 효과의 렌더링 비용도 측정하지 않았습니다.
 - **코드 보기의 범위**: 읽기 전용입니다. 목록은 파일 20,000개까지 세어 500개씩 나눠 보내고, 내용 찾기는 파일 하나를 256KB까지만 읽어 50개 파일·파일마다 5줄까지 보여 줍니다. 목록을 새로 받을 때마다 폴더를 다시 훑습니다(캐시 없음). 강조는 여전히 화면 스레드에서 100줄씩 돌아갑니다. 워커로 옮기려 했지만 번들러가 워커를 컴파일하지 않아 되돌렸습니다([트러블슈팅 35](docs/troubleshooting.md#35-문법-강조를-워커로-옮기려다-워커가-컴파일되지-않는-것을-확인함)). 파일 변경 감시는 macOS에서만 실측했고, Linux에서는 폴더가 아주 많으면 inotify 감시 한도에 걸릴 수 있습니다. 로컬 로그인 계정 모드에서는 실제 모델로 확인하지 않았습니다.
@@ -1084,7 +1098,7 @@ CI 워크플로는 로컬에서 actionlint로 확인했고, PR에서 실제로 �
 - [x] **DB 브랜치**: 체크포인트마다 DB 상태를 남겨, 파일을 되돌릴 때 스키마와 데이터도 같은 시점으로 복원
 - [x] **네트워크 격리**: 모든 서비스를 internal 네트워크에 두고, edge 컨테이너 하나로 포트를 공개하고 허용한 호스트의 HTTP(S)만 통과시켜 운영 DB·사내망 접근 차단 (감사 로그, 막힌 접속을 게이트가 보고)
 - [x] **시크릿 주입과 가림**: 서버 쪽에서 읽은 값을 파일에 남기지 않고 주입, 로그·명령 출력·도구 결과에서 원래 값·URL 인코딩·base64 형태를 가리고, 값이 들어간 파일은 게이트 실패와 커밋 거부
-- [x] **정책 프록시**: 등록한 사내 API를 edge로만 부르고, 서비스·studio 단위 허용 규칙, 응답 JSON 필드 가림, 인증 헤더 주입, 호출마다 감사 기록
+- [x] **정책 프록시**: 등록한 사내 API를 edge로만 부르고, 서비스·studio 단위 허용 규칙, 응답 JSON의 필드 이름·값 형태 가림(자유 텍스트 속 전화·메일·주민번호·카드), 인증 헤더 주입, 호출마다 감사 기록
 - [x] **자원 한도와 사용량 표시**: 측정으로 정한 서비스별 메모리·CPU 한도, 리소스 탭(CPU·메모리·종료 이유·최근 단계), 메모리 부족 종료 판정, 에이전트용 `service_stats` 도구
 - [x] **gVisor 런타임**: 운영자가 고른 Docker 런타임(runsc)을 모든 서비스와 edge에 적용하고, 샌드박스를 만들기 전에 등록 여부 확인, 세션 헤더에 격리 표시
 - [x] **Kubernetes 제공자**: 세션마다 네임스페이스, compose 서비스마다 agent-sandbox `Sandbox`, RuntimeClass(gVisor)와 NetworkPolicy로 격리, edge로 port-forward (kind로 검증, 단일 노드 클러스터용)

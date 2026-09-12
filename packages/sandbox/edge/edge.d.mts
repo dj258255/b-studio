@@ -13,10 +13,14 @@ export interface EdgePolicyRule {
   paths?: string[];
 }
 
+export type MaskPatternName = 'phone' | 'email' | 'residentNumber' | 'card';
+
 export interface EdgePolicy {
   allow?: EdgePolicyRule[];
   /** 소문자로 맞춘 필드 이름 */
   mask: string[];
+  /** 값의 형태로 가릴 패턴 이름 */
+  maskPatterns: MaskPatternName[];
   auth?: { header: string; secret: string; prefix?: string };
 }
 
@@ -69,6 +73,9 @@ export declare function isPrivateAddress(address: string): boolean;
 export declare function splitHostPort(target: string): { host: string; port: number } | undefined;
 export declare function parseExternals(text?: string): EdgeExternal[];
 export declare function normalizeExternal(external: { name: string; baseUrl: string; policy?: Partial<EdgePolicy> }): EdgeExternal;
+export declare const MASK_PATTERNS: Record<MaskPatternName, RegExp>;
+export declare function maskValues(text: string, patterns?: MaskPatternName[]): { text: string; masked: number };
+export declare function maskJson(value: unknown, fields: string[], patterns?: MaskPatternName[]): { value: unknown; masked: number };
 export declare function matchPath(pattern: string, pathname: string): boolean;
 export declare function isAllowedCall(policy: EdgePolicy, caller: string, method: string, pathname: string): boolean;
 export declare function maskJson(value: unknown, fields: string[]): { value: unknown; masked: number };

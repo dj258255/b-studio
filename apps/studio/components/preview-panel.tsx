@@ -182,6 +182,12 @@ function ExternalApiPanel({ sessionId, external, ready, revision }: { sessionId:
             <dd className="font-mono">{external.mask.join(", ")}</dd>
           </>
         )}
+        {external.maskPatterns.length > 0 && (
+          <>
+            <dt className="text-muted">가리는 값 형태</dt>
+            <dd className="font-mono">{external.maskPatterns.join(", ")}</dd>
+          </>
+        )}
         {external.authenticated && (
           <>
             <dt className="text-muted">인증</dt>
