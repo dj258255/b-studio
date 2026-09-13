@@ -8,6 +8,8 @@
 
 `pnpm studio agent`는 요청을 Claude에게 맡깁니다. 에이전트가 "끝났다"고 해도 **스튜디오가 직접 바뀐 서비스를 재시작하고, 준비 상태와 API 계약을 확인해 통과해야만** 완료로 봅니다. API 키가 없어도 **본인 PC의 `claude` CLI에 로그인한 계정으로** 같은 흐름을 실행할 수 있습니다(개인 PC 전용).
 
+웹 스튜디오의 API 모드는 Anthropic·OpenAI 호환 API·Google Gemini를 같은 도구 계약으로 실행합니다. 요청의 복잡도와 위험도, 검증 이력, 지연 시간, 추정 비용을 함께 비교해 모델을 고르고 그 이유를 대화에 남깁니다. **Agent Fleet**에서는 같은 요청을 2~4개의 독립 세션에 보내 서로 다른 브랜치와 샌드박스에서 병렬로 실행한 뒤, 검증 게이트를 통과한 결과만 나란히 비교해 사람이 선택할 수 있습니다.
+
 ![에이전트가 넣은 컴파일 에러를 검증 게이트가 로그와 함께 되돌려 보내고, 수정 후 통과해 미리보기에 주문 화면이 뜬 모습](docs/images/studio-gate-retry.png)
 
 | 단계 | 상태 |
@@ -20,7 +22,9 @@
 | 6. 원격 저장소 연동 (세션 브랜치 · 덮어쓰지 않는 푸시 · PR) | ✅ 구현 · 실제 git 원격과 Gitea PR API로 브라우저에서 검증 (GitHub·GitLab API는 가짜 서버 테스트) |
 | 7. DB 브랜치 (체크포인트마다 DB 상태를 함께 저장·복원) | ✅ 구현 · 데모 시나리오로 실제 Docker에서 검증 |
 | 8. 자원 한도와 사용량 표시 | ✅ 구현 · 실제 Docker와 브라우저에서 검증 |
-| 9. 데이터 보호 · 정책 프록시 · 격리 강화 | 📋 계획 |
+| 9. 데이터 보호 · 정책 프록시 · 격리 강화 | ✅ 구현 · 시크릿 가림, 경로·도구 제한, 정책 프록시, 네트워크 격리, gVisor·Kubernetes 제공자 테스트 |
+| 10. 멀티 모델 라우터 | ✅ 구현 · 공통 도구 계약, 설명 가능한 선택, 검증 결과·사용량 관측 저장 (로컬 호환 제공자와 실제 Docker 실행으로 검증) |
+| 11. Agent Fleet | ✅ 구현 · 2~4개 독립 브랜치·샌드박스 병렬 실행, 결과 비교, 통과 결과 선택 (2개 후보 E2E 검증) |
 
 ---
 
@@ -47,6 +51,8 @@
 flowchart LR
   subgraph Studio["b-studio"]
     UI["apps/studio<br/>웹 스튜디오 (Next.js 16)"]
+    FLEET["Agent Fleet<br/>독립 세션 비교 워크벤치"]
+    ROUTER["Model Router<br/>품질 · 비용 · 지연 · 위험"]
     CLI["apps/cli<br/>studio up · agent"]
     AG["@b-studio/agent<br/>에이전트 루프 · 검증 게이트"]
     SPEC["@b-studio/spec<br/>studio.yaml 검증"]
@@ -55,7 +61,7 @@ flowchart LR
 
   subgraph Providers["SandboxProvider 구현"]
     LD["LocalDockerProvider<br/>(구현 완료)"]
-    K8S["K8s agent-sandbox + gVisor/Kata<br/>(예정)"]
+    K8S["K8s agent-sandbox + gVisor/Kata<br/>(구현 · kind 검증)"]
   end
 
   subgraph Box["샌드박스 = compose 프로젝트 1개"]
@@ -64,13 +70,16 @@ flowchart LR
     DB[("db<br/>PostgreSQL 17")]
   end
 
-  UI --> AG
+  UI --> FLEET
+  UI --> ROUTER
+  FLEET --> ROUTER
+  ROUTER --> AG
   CLI --> AG
   UI --> SPEC
   CLI --> SPEC
   AG --> SB
   SB --> LD
-  SB -.-> K8S
+  SB --> K8S
   LD --> Box
   WEB -- "/api/* rewrite" --> API
   API --> DB
@@ -134,6 +143,8 @@ sequenceDiagram
 | **체크포인트마다 DB 덤프, 되돌릴 때 같은 시점으로 복원** | 파일만 되돌리면 이미 적용된 마이그레이션이 남아 코드와 스키마가 달라지기 때문에 | [ADR-022](docs/decisions.md#adr-022-데이터베이스-브랜치-체크포인트마다-db-상태를-함께-남긴다) |
 | **입력 파일 해시로 찾는 스냅샷 볼륨, 측정으로 켤 볼륨 결정** | 도구의 설치 단계는 그대로 두어 결과를 틀리게 만들지 않으면서, 실제 병목에만 기동 비용을 줄이기 위해 | [ADR-021](docs/decisions.md#adr-021-기동-최적화-입력-파일-해시로-찾는-스냅샷-볼륨) |
 | **원본 저장소를 복제한 세션 브랜치 + 마지막으로 올린 커밋 기준 lease 푸시** | 체크포인트를 그대로 PR로 넘기고, 되돌린 기록은 반영하되 리뷰어 커밋은 덮어쓰지 않기 위해 | [ADR-020](docs/decisions.md#adr-020-원격-저장소-연동-세션-브랜치와-덮어쓰지-않는-푸시) |
+| **공통 도구 계약 위의 설명 가능한 멀티 모델 라우터** | 요청의 위험·복잡도와 실제 게이트 결과를 함께 보고, 모델별 구현을 에이전트 루프에서 분리하기 위해 | [ADR-047](docs/decisions.md#adr-047-멀티-모델-라우터-공통-도구-계약-위에서-검증된-작업당-비용을-고른다) |
+| **Agent Fleet는 독립 세션에서 병렬 실행하고 사람이 결과를 선택** | 같은 작업 공간의 충돌을 막고, 자동 병합 전에 실제 실행·검증 결과를 비교하기 위해 | [ADR-048](docs/decisions.md#adr-048-agent-fleet-같은-요청을-독립-세션에서-병렬로-실행하고-사람이-고른다) |
 
 ## 프로젝트 구조
 
@@ -142,10 +153,11 @@ b-studio/
 ├─ packages/
 │  ├─ spec/           studio.yaml 스키마(zod 4)와 로더. compose 파일과 서로 맞는지 검증
 │  ├─ sandbox/        Sandbox/SandboxProvider 인터페이스, 준비 판정, 파일 반영 확인, LocalDockerProvider
-│  └─ agent/          에이전트 루프, 도구, 작업 공간 안전장치, 검증 게이트, 계약 비교, Claude·스크립트 클라이언트, 로컬 CLI 실행기, 체크포인트·원격 저장소 연동
+│  └─ agent/          에이전트 루프, 도구, 검증 게이트, 모델 라우터, Anthropic·OpenAI 호환·Gemini 클라이언트, 로컬 CLI 실행기
 ├─ apps/
 │  ├─ cli/            studio up · studio agent — 샌드박스 수명 주기, 에이전트 실행, 로그 스트리밍
-│  └─ studio/         웹 스튜디오 (Next.js 16) — 세션 관리자, SSE, 대화 · 미리보기 · API 탐색기 · 로그
+│  └─ studio/         웹 스튜디오 (Next.js 16) — 세션·체크포인트·원격 저장소 관리자, SSE, Agent Fleet, 대화 · 미리보기 · API 탐색기 · 로그
+├─ config/            비밀값 없이 모델·가격·기능을 선언하는 레지스트리 예시
 ├─ templates/         새 서비스의 원본 (각각 개발용 Dockerfile과 lockfile 포함)
 │  ├─ nextjs-web/     Next.js 16.3 · React 19 · Tailwind 4
 │  ├─ spring-boot-api/ Spring Boot 4.1 · Java 25 · JPA · Flyway · springdoc 3.1
@@ -167,6 +179,7 @@ pnpm test                          # 단위 테스트
 pnpm typecheck                     # 패키지 전체 타입 체크
 pnpm studio up examples/orders     # 샌드박스 기동 (Ctrl+C로 종료하면 정리)
 pnpm e2e:agent                     # 스크립트 모델로 에이전트 루프 전체를 실제 Docker에서 검증 (API 키 불필요)
+pnpm e2e:fleet                     # 로컬 OpenAI 호환 제공자 2개로 Agent Fleet 전체를 실제 Docker에서 검증
 pnpm bench:boot examples/orders 3  # 샌드박스를 세 번 띄워 기동 단계별 시간 측정
 pnpm studio:demo                   # 웹 스튜디오를 데모 모드로 실행 (http://127.0.0.1:3000, API 키 불필요)
 
@@ -179,6 +192,23 @@ pnpm studio agent examples/orders "메모 필드를 응답에서 제거해줘" -
 pnpm studio agent examples/orders "현재 서버 시각을 돌려주는 GET /api/time 엔드포인트를 추가해줘" --backend claude-code
 pnpm studio:local                  # 웹 스튜디오를 로컬 로그인 계정 모드로 실행
 ```
+
+### 멀티 모델 라우터와 Agent Fleet
+
+API 모드에서 여러 모델을 쓰려면 예시를 복사해 모델 레지스트리를 지정합니다. JSON에는 모델 식별자, 기능, 컨텍스트 크기와 단가만 두고 API 키는 넣지 않습니다. `pricing`을 0으로 두면 비용을 모르는 모델로 취급합니다.
+
+```bash
+cp config/model-registry.example.json ~/.config/b-studio/models.json
+export B_STUDIO_MODEL_REGISTRY=~/.config/b-studio/models.json
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+export GOOGLE_API_KEY=...
+pnpm studio:web
+```
+
+일반 세션은 요청마다 라우터가 모델을 고르고 후보별 품질·비용·지연 점수와 선택 이유를 대화에 표시합니다. `만들기` 요청이 검증 게이트까지 통과하거나 실패한 경우에만 관측값으로 남겨, 질문 답변을 코드 품질 증거로 섞지 않습니다. 관측값은 기본적으로 `~/.cache/b-studio/model-observations.json`에 저장하며 `B_STUDIO_MODEL_OBSERVATIONS_FILE`로 바꿀 수 있습니다.
+
+홈의 **Agent Fleet**는 같은 요청을 2~4개 모델에 동시에 보냅니다. 각 후보는 별도 세션 브랜치·작업 복사본·샌드박스를 사용하고, 화면에서 상태·턴·토큰·추정 비용·체크포인트와 diff를 비교합니다. 검증 게이트를 통과한 후보만 승자로 표시할 수 있으며, 선택이 자동 병합·푸시·PR을 뜻하지는 않습니다. Fleet 기록은 기본적으로 `~/.cache/b-studio/fleets`에 남고 `B_STUDIO_FLEETS_DIR`로 바꿀 수 있습니다.
 
 **원본 프로젝트가 Git 저장소면** 세션이 커밋된 상태를 복제해 `b-studio/<프로젝트>-<세션>` 브랜치에서 시작합니다. 기록 탭에서 체크포인트를 원격 브랜치로 올리고 PR을 만들 수 있습니다.
 
@@ -449,7 +479,7 @@ resources:
 | Ctrl+C 신호가 여러 번 들어올 때 | 정리가 끝까지 완료됨 (tsx와 node에 SIGINT를 동시에 보내 재현) |
 | 종료 후 정리 | 컨테이너 0개, 샌드박스 볼륨 0개. 공유 캐시 볼륨(Gradle, pnpm)은 유지 |
 | 두 번째 기동 | 처음에는 늦어도 43초 안에 준비. 단계별로 측정해 병목(api의 Gradle 기동·설정)을 찾은 뒤 **13.4초 → 10.9초** (`pnpm bench:boot`, 3회 10.8~10.9초) |
-| 단위 테스트 / 타입 체크 | 225개 통과 / 패키지 5개 통과 |
+| 단위 테스트 / 타입 체크 | 344개 통과 / 패키지 5개 통과 |
 
 ### 에이전트 루프 (`pnpm e2e:agent`, 실제 Docker 샌드박스)
 
@@ -1068,9 +1098,26 @@ CI 워크플로는 로컬에서 actionlint로 확인했고, PR에서 실제로 �
 
 설계 근거는 [ADR-031](docs/decisions.md#adr-031-화면-디자인-조작-계층만-유리로-띄우고-읽는-영역은-불투명하게-둔다)에 있습니다.
 
+### 멀티 모델 라우터와 Agent Fleet (단위 테스트 · 프로덕션 빌드 · headless Chrome)
+
+| 확인 항목 | 결과 |
+|---|---|
+| 모델 레지스트리 | 중복 ID, 잘못된 기능·숫자·환경 변수 이름, 원격 평문 HTTP를 거부하고 localhost 호환 API만 HTTP 허용 |
+| 라우팅 | 요청 복잡도·위험도, 필수 기능, 컨텍스트 한도, 비용 한도, 초기 품질과 실제 게이트 통과율·지연·비용을 함께 점수화하는 테스트 통과 |
+| 제공자 어댑터 | OpenAI 호환 API와 Gemini의 메시지·도구 호출·사용량을 공통 계약으로 왕복하는 가짜 HTTP 테스트 통과. API 키가 URL과 도구 입력으로 들어가지 않음을 확인 |
+| 관측 저장 | 손상되거나 음수인 기록을 제외하고 가격을 모르는 실행도 품질·지연 근거로 보존하는 테스트 통과 |
+| Fleet 화면 | 1,440×1,000 headless Chrome에서 프로젝트·요청·모델 선택과 빈 비교 영역을 렌더링. `/api/models`에 결제·권한 요청을 보내 고위험으로 판정하고 후보별 점수와 이유를 반환 |
+| Fleet 실제 실행 | 로컬 OpenAI 호환 제공자 2개 → 서로 다른 세션·Git 브랜치·작업 복사본 → Docker 샌드박스 2개 → 파일 변경 → 재기동·계약 검증 → 체크포인트 → 비용 기록 → 사람의 승자 선택까지 105.1초에 통과. 후보별 변경 파일과 커밋이 서로 달랐음 |
+| 운영 빌드 | Next.js 정적 페이지 생성 15/15, `/fleets`, 모델·Fleet API 4개를 포함해 경고 없이 완료 |
+
+`pnpm e2e:fleet`는 외부 과금 없이도 제공자 어댑터부터 모델 라우터, Agent Fleet, 실제 Docker와 검증 게이트까지 한 번에 회귀 검증합니다. 외부 제공자의 실제 모델 품질과 응답 변형은 아래 한계에 따로 적었습니다.
+
 ### 아직 검증하지 못한 것과 알려진 한계
 
 - **API 키 경로의 실제 실행**: 실제 모델 실행은 로컬 로그인 계정 모드로만 확인했습니다. `AnthropicModelClient`로 API를 직접 호출하는 경로는 API 키가 없어서, 샌드박스를 띄우기 전에 안내 메시지를 내고 멈추는 것까지만 확인했습니다.
+- **멀티 모델 제공자 호출의 범위**: 로컬 OpenAI 호환 제공자 2개로 전체 Fleet 경로와 실제 Docker 병렬 실행은 확인했습니다. OpenAI·Gemini의 실제 제공자 키를 사용한 end-to-end 실행과 각 제공자의 스트리밍·응답 변형은 인증 정보가 없어 아직 확인하지 않았습니다.
+- **라우팅과 비용의 범위**: 복잡도·위험도는 키워드와 입력 길이로 나누고 단가는 운영자가 레지스트리에 적습니다. 실시간 장애·rate limit·데이터 지역은 판단하지 않으며, 화면의 비용은 토큰 사용량과 등록 단가로 계산한 추정치라 청구서 대사가 아닙니다.
+- **Agent Fleet의 범위**: Orca처럼 임의의 터미널·SSH·모바일을 묶는 범용 워크벤치는 아니며 b-studio API 모델과 프로젝트 세션만 다룹니다. 2~4개의 작업 복사본·샌드박스를 동시에 띄워 자원과 모델 비용도 후보 수만큼 늘고, 서버 재시작 뒤 진행 중이던 Fleet는 자동 재개하지 않습니다. 선택 결과도 자동 병합·푸시하지 않습니다.
 - **로컬 로그인 계정 모드는 개인 PC 전용**: 공유 서버 배포용이 아니며, 대화 기록이 로컬 CLI의 세션 파일(`~/.claude/projects/` 아래)에 남습니다. 로그인하지 않은 상태의 안내 문구는 가짜 SDK로만 확인했습니다.
 - **CLI는 자동 되돌리기를 하지 않음**: 체크포인트는 스튜디오 세션의 작업 복사본에만 적용합니다. `studio agent`는 사용자 프로젝트 폴더를 직접 다루므로 `reset`을 실행하지 않습니다.
 - **실제 GitHub·GitLab에서 PR 생성은 검증하지 않음**: 실제 서버로는 Gitea만 확인했습니다. GitHub·GitLab API는 요청 형태와 응답 처리를 가짜 서버 테스트로 확인했습니다.
@@ -1161,13 +1208,15 @@ CI 워크플로는 로컬에서 actionlint로 확인했고, PR에서 실제로 �
 - [x] **원격 미리보기**: 서비스·세션·토큰을 호스트 이름에 담은 게이트웨이가 HTTP와 HMR 웹소켓을 경로 그대로 넘겨, 다른 PC의 브라우저에서도 미리보기를 엶
 - [x] **화면 디자인**: 조작 계층만 유리로 띄우는 Liquid Glass 스타일, 다크 모드, 고대비·강제 색상·투명도 줄이기 대체 스타일
 - [x] **기동 최적화**: 단계별 측정으로 병목을 찾고, 입력 파일 해시별 스냅샷 볼륨과 Gradle 캐시로 준비 시간 13.4초 → 10.9초
+- [x] **멀티 모델 라우터**: Anthropic·OpenAI 호환·Gemini를 공통 도구 계약으로 연결하고, 복잡도·위험도·게이트 이력·지연·비용을 점수화해 선택 이유와 후보를 표시
+- [x] **Agent Fleet**: 같은 요청을 2~4개의 독립 세션·브랜치·샌드박스에서 병렬 실행하고, 게이트를 통과한 결과의 diff·사용량·비용을 비교해 사람이 선택
 
 ## 기술 스택
 
 | 영역 | 사용 기술 |
 |---|---|
 | 스튜디오 코어 | TypeScript, Node.js 22, pnpm workspace, zod 4, yaml, Vitest 5, tsx |
-| AI | Claude Opus 5 (`claude-opus-5`), Anthropic TypeScript SDK 0.124 — adaptive thinking, 스트리밍, 프롬프트 캐시, strict 도구, server-side fallback |
+| AI | Anthropic TypeScript SDK 0.124, OpenAI 호환 Chat Completions, Google Gemini `generateContent`, 설명 가능한 모델 라우팅, Agent Fleet — 공통 도구 계약, 검증 결과·토큰·지연·추정 비용 관측 |
 | 로컬 실행 | Claude Agent SDK 0.3.267 — 프로세스 안 MCP 서버로 b-studio 도구 제공, 기본 도구·사용자 설정 비활성화, 스트리밍 입력, 세션 fork |
 | 저장소 연동 | Git (clone, `--force-with-lease`), GitHub REST API, GitLab REST API, Gitea API |
 | 웹 스튜디오 | Next.js 16 App Router, React 19, Tailwind CSS 4, Server-Sent Events, IBM Plex Sans KR |
@@ -1183,3 +1232,5 @@ CI 워크플로는 로컬에서 actionlint로 확인했고, PR에서 실제로 �
 - [Replit 개발/운영 DB 분리](https://docs.replit.com/features/data-and-storage/development-and-production)
 - [Kubernetes agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
 - [Vercel Sandbox](https://vercel.com/docs/sandbox)
+- [StablyAI Orca — 여러 코딩 에이전트를 독립 작업 공간에서 비교](https://github.com/stablyai/orca)
+- [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · [Google Gemini `generateContent`](https://ai.google.dev/api/generate-content)

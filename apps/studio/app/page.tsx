@@ -31,12 +31,17 @@ export default async function HomePage() {
     <main className="mx-auto max-w-3xl px-6 py-16">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
-        {auth !== "none" && (
-          <div className="flex items-center gap-3 text-sm text-muted">
+        <div className="flex items-center gap-3 text-sm text-muted">
+          <Link href="/fleets" className="glass-soft rounded-full px-3 py-1.5 font-medium text-ink hover:bg-panel">
+            Agent Fleet
+          </Link>
+          {auth !== "none" && (
+            <>
             <span>{viewer}</span>
             {auth === "token" && <LogoutButton />}
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </div>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">프로젝트를 열어 샌드박스를 시작하세요</h1>
       <p className="mt-3 max-w-[60ch] leading-7 text-muted">

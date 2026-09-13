@@ -1,4 +1,14 @@
-export { runAgent, type AgentEvent, type AgentRequest, type AgentResult, type AgentUsage, type ModelClient, type RunAgentOptions } from './loop';
+export {
+  runAgent,
+  type AgentEvent,
+  type AgentRequest,
+  type AgentResult,
+  type AgentUsage,
+  type ModelClient,
+  type ModelClientInfo,
+  type ModelPreflight,
+  type RunAgentOptions,
+} from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export {
   describeAccount,
@@ -52,3 +62,20 @@ export {
 export { buildTools, executeTool } from './tools';
 export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
+export {
+  aggregateModelStats,
+  estimateCost,
+  routeModel,
+  validateModelProfiles,
+  type ModelCapability,
+  type ModelObservation,
+  type ModelPricing,
+  type ModelProfile,
+  type ModelProvider,
+  type ModelStats,
+  type RouteCandidate,
+  type RouteIntent,
+  type RouteRequest,
+  type RoutingDecision,
+} from './model-router';
+export { createProviderClient, GoogleModelClient, OpenAICompatibleModelClient } from './provider-clients';

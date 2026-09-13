@@ -20,6 +20,15 @@ export interface ToolCallView {
 
 export type ChatItem =
   | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
+  | {
+      kind: 'route';
+      runId: string;
+      selectedId: string;
+      reason: string;
+      complexity: 'simple' | 'normal' | 'complex';
+      risk: 'normal' | 'high';
+      candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+    }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
@@ -376,6 +385,20 @@ function patchSnapshot(view: SessionView, patch: Partial<SessionSnapshot>): Sess
 
 function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): ChatItem[] {
   switch (event.type) {
+    case 'route':
+      return [
+        ...chat,
+        {
+          kind: 'route',
+          runId,
+          selectedId: event.selectedId,
+          reason: event.reason,
+          complexity: event.complexity,
+          risk: event.risk,
+          candidates: event.candidates,
+        },
+      ];
+
     case 'session':
       return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
 

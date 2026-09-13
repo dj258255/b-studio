@@ -19,8 +19,19 @@ export interface AgentRequest {
   messages: BetaMessageParam[];
 }
 
+export interface ModelClientInfo {
+  provider: 'anthropic' | 'openai' | 'google' | 'scripted';
+  backend: string;
+  model: string;
+  auth?: string;
+}
+
+export type ModelPreflight = { ok: true } | { ok: false; reason: string };
+
 /** 모델 호출을 추상화한다. 실제 Claude 클라이언트와 오프라인 검증용 스크립트 모델이 같은 루프를 쓴다 */
 export interface ModelClient {
+  readonly info?: ModelClientInfo;
+  preflight?(): Promise<ModelPreflight>;
   createMessage(request: AgentRequest, signal?: AbortSignal): Promise<BetaMessage>;
 }
 
@@ -45,6 +56,14 @@ export interface AgentResult {
 export type AgentEvent =
   /** 실제로 요청을 처리하는 실행 환경. 로컬 Claude Code처럼 모델과 인증을 밖에서 정할 때 알린다 */
   | { type: 'session'; backend: string; model: string; auth?: string }
+  | {
+      type: 'route';
+      selectedId: string;
+      reason: string;
+      complexity: 'simple' | 'normal' | 'complex';
+      risk: 'normal' | 'high';
+      candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+    }
   | { type: 'turn'; turn: number }
   /** 이번 실행에서 지금까지 쓴 토큰 누적값. 직접 만든 루프는 모델 응답마다, 로컬 Claude Code는 턴을 끝낼 때마다 온다 */
   | { type: 'tokens'; usage: AgentUsage }
@@ -117,6 +136,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     intent = 'build',
   } = options;
   const ask = intent === 'ask';
+
+  if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth });
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다

@@ -25,6 +25,27 @@ function fold(events: StudioEvent[], start: SessionView = createView(snapshot)):
 }
 
 describe('reduceSession', () => {
+  it('모델 라우팅 결정과 후보 점수를 대화 기록에 남긴다', () => {
+    const initial = createView(snapshot);
+    const view = reduceSession(initial, {
+      type: 'agent',
+      runId: 'r1',
+      event: {
+        type: 'route',
+        selectedId: 'fast',
+        reason: '단순 요청은 비용 가중치를 높임',
+        complexity: 'simple',
+        risk: 'normal',
+        candidates: [
+          { id: 'fast', label: '빠른 모델', eligible: true, score: 0.8, estimatedCostUsd: 0.01 },
+          { id: 'strong', label: '강한 모델', eligible: true, score: 0.7, estimatedCostUsd: 0.08 },
+        ],
+      },
+    });
+
+    expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
+  });
+
   it('재시작으로 바뀐 서비스 주소를 반영한다', () => {
     const view = fold([
       { type: 'service', service: 'api', state: 'ready', url: 'http://127.0.0.1:32769' },

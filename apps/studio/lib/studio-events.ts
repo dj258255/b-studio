@@ -50,6 +50,8 @@ export interface SessionSnapshot {
   status: SessionStatus;
   error?: string;
   mode: SessionMode;
+  /** API 모드에서 이 세션에 고정한 모델. 없으면 요청마다 라우터가 선택한다 */
+  modelId?: string;
   /** 세션을 만든 사람. 인증을 켜면 만든 사람과 관리자만 세션을 바꿀 수 있다 */
   owner?: string;
   running: boolean;

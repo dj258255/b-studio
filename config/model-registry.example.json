@@ -1,0 +1,38 @@
+[
+  {
+    "id": "claude-strong",
+    "provider": "anthropic",
+    "model": "모델 ID를 입력하세요",
+    "label": "Claude 강한 모델",
+    "capabilities": ["tools", "reasoning", "long-context", "json"],
+    "contextWindow": 200000,
+    "pricing": { "inputPerMillion": 0, "outputPerMillion": 0, "cacheReadPerMillion": 0, "cacheWritePerMillion": 0 },
+    "baselineQuality": 0.92,
+    "baselineLatencyMs": 5000,
+    "apiKeyEnv": "ANTHROPIC_API_KEY"
+  },
+  {
+    "id": "openai-fast",
+    "provider": "openai",
+    "model": "모델 ID를 입력하세요",
+    "label": "OpenAI 빠른 모델",
+    "capabilities": ["tools", "reasoning", "json"],
+    "contextWindow": 128000,
+    "pricing": { "inputPerMillion": 0, "outputPerMillion": 0 },
+    "baselineQuality": 0.82,
+    "baselineLatencyMs": 2500,
+    "apiKeyEnv": "OPENAI_API_KEY"
+  },
+  {
+    "id": "gemini-fast",
+    "provider": "google",
+    "model": "모델 ID를 입력하세요",
+    "label": "Gemini 빠른 모델",
+    "capabilities": ["tools", "reasoning", "long-context", "json"],
+    "contextWindow": 1000000,
+    "pricing": { "inputPerMillion": 0, "outputPerMillion": 0 },
+    "baselineQuality": 0.84,
+    "baselineLatencyMs": 2200,
+    "apiKeyEnv": "GOOGLE_API_KEY"
+  }
+]

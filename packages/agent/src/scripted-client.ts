@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { AgentRequest, ModelClient } from './loop';
+import type { AgentRequest, ModelClient, ModelClientInfo } from './loop';
 
 export interface ScriptedTurn {
   text?: string;
@@ -14,6 +14,7 @@ export interface ScriptedTurn {
  * 모델의 코드 작성 능력을 검증하는 도구가 아니다.
  */
 export class ScriptedModelClient implements ModelClient {
+  readonly info: ModelClientInfo = { provider: 'scripted', backend: '데모 스크립트', model: 'scripted' };
   readonly requests: AgentRequest[] = [];
   readonly #turns: ScriptedTurn[];
   #ids = 0;

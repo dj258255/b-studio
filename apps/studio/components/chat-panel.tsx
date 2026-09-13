@@ -294,6 +294,27 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </div>
       );
 
+    case "route": {
+      const selected = item.candidates.find((candidate) => candidate.id === item.selectedId);
+      return (
+        <details className="rounded-md border border-line bg-panel/60 px-3 py-2 text-sm">
+          <summary className="cursor-pointer text-muted hover:text-ink">
+            라우터가 <span className="font-medium text-ink">{selected?.label ?? item.selectedId}</span>을 선택했습니다
+            <span className="ml-1.5 text-xs">({item.complexity === "complex" ? "복잡" : item.complexity === "normal" ? "보통" : "단순"}{item.risk === "high" ? " · 고위험" : ""})</span>
+          </summary>
+          <p className="mt-2 leading-6 text-muted">{item.reason}</p>
+          <ol className="mt-2 space-y-1 border-t border-line pt-2 font-mono text-xs">
+            {item.candidates.map((candidate, index) => (
+              <li key={candidate.id} className={`flex justify-between gap-3 ${candidate.eligible ? "" : "text-muted line-through"}`}>
+                <span>{index + 1}. {candidate.label}</span>
+                <span>{candidate.eligible ? candidate.score.toFixed(3) : "제외"}{candidate.estimatedCostUsd === undefined ? "" : ` · $${candidate.estimatedCostUsd.toFixed(4)}`}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
+      );
+    }
+
     case "backend":
       return (
         <p className="text-sm text-muted">

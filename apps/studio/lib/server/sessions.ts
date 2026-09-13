@@ -6,7 +6,6 @@ import { cp, mkdir, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  AnthropicModelClient,
   buildPullRequest,
   canCreatePullRequest,
   captureBaselines,
@@ -16,6 +15,7 @@ import {
   createPullRequest,
   DatabaseBranches,
   describeDatabaseState,
+  estimateCost,
   formatVerificationReport,
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
@@ -35,6 +35,7 @@ import {
   type DemoScenario,
   type GitAuthor,
   type ModelClient,
+  type RoutingDecision,
   type RemoteSyncResult,
   type ServiceCheck,
   type VerificationReport,
@@ -85,6 +86,8 @@ import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from
 import { readRevocations } from './auth-state';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
+import { clientForModel, routingDecision } from './model-registry';
+import { recordObservation } from './model-observations';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -239,7 +242,12 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
   };
 }
 
-export async function createSession(projectId: string, owner: string, workspace: WorkspaceKind = 'copy'): Promise<SessionSnapshot> {
+export async function createSession(
+  projectId: string,
+  owner: string,
+  workspace: WorkspaceKind = 'copy',
+  options: { modelId?: string } = {},
+): Promise<SessionSnapshot> {
   const mode = sessionMode();
   const tokenLimit = sessionTokenLimit();
   const preview = previewConfig();
@@ -250,7 +258,7 @@ export async function createSession(projectId: string, owner: string, workspace:
   await recoverSessions();
   const release = workspace === 'local' ? claimFolder(source.root) : undefined;
   try {
-    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview });
+    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview, modelId: options.modelId });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
@@ -265,6 +273,7 @@ async function startSession({
   mode,
   tokenLimit,
   preview,
+  modelId,
 }: {
   projectId: string;
   owner: string;
@@ -273,6 +282,7 @@ async function startSession({
   mode: SessionMode;
   tokenLimit: number | undefined;
   preview: PreviewConfig | undefined;
+  modelId?: string;
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
@@ -325,6 +335,7 @@ async function startSession({
       stateDir,
       status: 'starting',
       mode,
+      modelId,
       running: false,
       tokenLimit,
       owner,
@@ -758,11 +769,14 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
 type Intent = 'build' | 'ask';
 
 type RunPlan =
-  | { kind: 'model'; client: ModelClient; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
+  | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
-  if (session.snapshot.mode === 'api') return { kind: 'model', client: new AnthropicModelClient(), allowBreaking, intent };
+  if (session.snapshot.mode === 'api') {
+    const route = routingDecision(request, intent, session.snapshot.modelId);
+    return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent };
+  }
   if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
@@ -810,6 +824,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         `[b-studio] 사용자가 스튜디오 밖에서 파일 ${edits.files.length}개를 바꿔 체크포인트 ${edits.shortSha}로 남겼습니다: ${edits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`,
       );
     }
+    const agentStarted = performance.now();
     const result = await runPlan(session, run, request, plan, signal);
     // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
     if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
@@ -817,6 +832,21 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     if ('preflightError' in result) {
       finished = { status: 'error', summary: result.preflightError };
       return;
+    }
+
+    // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다
+    if (!ask && plan.kind === 'model' && plan.route) {
+      try {
+        recordObservation({
+          modelId: plan.route.selected.id,
+          passed: result.status === 'done',
+          latencyMs: Math.round(performance.now() - agentStarted),
+          costUsd: estimateCost(plan.route.selected, result.usage),
+        });
+      } catch (error) {
+        // 관측 파일 오류 때문에 검증을 통과한 사용자 변경을 실패·되돌리면 안 된다
+        console.error('[b-studio] 모델 실측 기록을 남기지 못했습니다', error);
+      }
     }
 
     if (!ask) {
@@ -975,7 +1005,23 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     return result;
   }
 
-  if (plan.client instanceof AnthropicModelClient) {
+  if (plan.route) {
+    shared.onEvent({
+      type: 'route',
+      selectedId: plan.route.selected.id,
+      reason: plan.route.reason,
+      complexity: plan.route.complexity,
+      risk: plan.route.risk,
+      candidates: plan.route.candidates.map((candidate) => ({
+        id: candidate.model.id,
+        label: candidate.model.label,
+        eligible: candidate.eligible,
+        score: candidate.score,
+        estimatedCostUsd: candidate.estimatedCostUsd,
+      })),
+    });
+  }
+  if (plan.client.preflight) {
     const preflight = await plan.client.preflight();
     if (!preflight.ok) return { preflightError: preflight.reason };
   }

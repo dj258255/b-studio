@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { AgentRequest, ModelClient } from './loop';
+import type { AgentRequest, ModelClient, ModelClientInfo } from './loop';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -7,6 +7,10 @@ export interface AnthropicModelClientOptions {
   model?: string;
   effort?: Effort;
   maxTokens?: number;
+  apiKey?: string;
+  authToken?: string;
+  baseURL?: string;
+  authLabel?: string;
 }
 
 export const DEFAULT_MODEL = 'claude-opus-5';
@@ -19,15 +23,19 @@ export const DEFAULT_MODEL = 'claude-opus-5';
  * - 긴 출력이 HTTP 타임아웃에 걸리지 않도록 스트리밍으로 받는다
  */
 export class AnthropicModelClient implements ModelClient {
+  readonly info: ModelClientInfo;
   readonly model: string;
   readonly effort: Effort;
   readonly #maxTokens: number;
+  readonly #credentials: Pick<AnthropicModelClientOptions, 'apiKey' | 'authToken' | 'baseURL'>;
   #client: Anthropic | undefined;
 
-  constructor({ model = DEFAULT_MODEL, effort = 'high', maxTokens = 64_000 }: AnthropicModelClientOptions = {}) {
+  constructor({ model = DEFAULT_MODEL, effort = 'high', maxTokens = 64_000, apiKey, authToken, baseURL, authLabel = '서버 인증' }: AnthropicModelClientOptions = {}) {
     this.model = model;
     this.effort = effort;
     this.#maxTokens = maxTokens;
+    this.#credentials = { apiKey, authToken, baseURL };
+    this.info = { provider: 'anthropic', backend: 'Anthropic API', model, auth: authLabel };
   }
 
   /** 샌드박스를 띄우기 전에 인증과 모델 접근 권한을 토큰 소비 없이 확인한다 */
@@ -79,6 +87,6 @@ export class AnthropicModelClient implements ModelClient {
   }
 
   #anthropic(): Anthropic {
-    return (this.#client ??= new Anthropic());
+    return (this.#client ??= new Anthropic(this.#credentials));
   }
 }
