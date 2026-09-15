@@ -23,10 +23,12 @@ import {
   preflightClaudeCode,
   releaseBlockers,
   RemoteConflictError,
+  scopedExecutionPolicy,
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
   ScriptedModelClient,
+  type ScriptedTurn,
   verifyChanges,
   Workspace,
   type AgentEvent,
@@ -443,7 +445,21 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
 export function sendMessage(
   id: string,
   text: string,
-  { allowBreaking, by, intent = 'build' }: { allowBreaking: boolean; by?: string; intent?: Intent },
+  {
+    allowBreaking,
+    by,
+    intent = 'build',
+    writableScope,
+    scriptedTurns,
+  }: {
+    allowBreaking: boolean;
+    by?: string;
+    intent?: Intent;
+    /** 서버 안에서만 쓴다(작업 분해). 이 경로 밖의 파일 쓰기를 실행기가 막는다. HTTP로는 받지 않는다 */
+    writableScope?: readonly string[];
+    /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
+    scriptedTurns?: ScriptedTurn[];
+  },
 ): { runId: string } {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
@@ -465,7 +481,7 @@ export function sendMessage(
     );
   }
 
-  const plan = planRun(session, request, allowBreaking, intent);
+  const plan = { ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)), writableScope };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
     cancel: new AbortController(),
@@ -770,9 +786,10 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
 /** build: 파일을 바꾸고 검증 게이트를 거치는 요청, ask: 파일을 바꾸지 않고 답과 계획만 받는 질문 */
 type Intent = 'build' | 'ask';
 
-type RunPlan =
+type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
-  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent };
+  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
+) & { writableScope?: readonly string[] };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
@@ -963,6 +980,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     sandbox: session.sandbox,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
+    // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
+    policy: scopedExecutionPolicy(session.project, plan.writableScope),
     signal,
     onEvent: (event: AgentEvent) => {
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });

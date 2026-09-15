@@ -35,6 +35,9 @@ export default async function HomePage() {
           <Link href="/fleets" className="glass-soft rounded-full px-3 py-1.5 font-medium text-ink hover:bg-panel">
             Agent Fleet
           </Link>
+          <Link href="/task-plans" className="glass-soft rounded-full px-3 py-1.5 font-medium text-ink hover:bg-panel">
+            작업 분해
+          </Link>
           {auth !== "none" && (
             <>
             <span>{viewer}</span>

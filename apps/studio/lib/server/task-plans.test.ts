@@ -1,0 +1,200 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { StudioEvent } from '../studio-events';
+
+type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
+type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
+type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content: string } }> }> };
+
+const fake = vi.hoisted(() => ({
+  root: '',
+  counter: 0,
+  plan: {} as unknown,
+  sessions: new Map<string, Session>(),
+  listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
+  /** 작업 id → 그 작업이 쓸 파일. 없으면 실패로 끝낸다 */
+  writes: {} as Record<string, Record<string, string> | 'fail'>,
+  sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
+  stopped: [] as string[],
+  stopOrder: { integrationCreatedAfterStops: false },
+}));
+
+vi.mock('./model-registry', () => ({
+  listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
+  modelById: (id: string) => ({ id }),
+  clientForModel: () => ({
+    createMessage: async () => ({ content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }),
+  }),
+}));
+
+vi.mock('./projects', () => ({
+  findProject: async () => ({ spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] }),
+}));
+
+vi.mock('./sessions', () => ({
+  createSession: async () => {
+    const id = `session-${++fake.counter}`;
+    // 두 레인 세션이 모두 멈춘 뒤에 만들어진 세션이면 통합 세션이다
+    if (fake.counter === 3) fake.stopOrder.integrationCreatedAfterStops = new Set(fake.stopped).size === 2;
+    const workDir = path.join(fake.root, id);
+    mkdirSync(workDir, { recursive: true });
+    fake.sessions.set(id, { id, status: 'ready', workDir, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
+    return { id };
+  },
+  getSnapshot: (id: string) => fake.sessions.get(id),
+  stopSession: async (id: string) => {
+    fake.stopped.push(id);
+  },
+  subscribe: (id: string, listener: (event: StudioEvent) => void) => {
+    const set = fake.listeners.get(id) ?? new Set();
+    set.add(listener);
+    fake.listeners.set(id, set);
+    return () => set.delete(listener);
+  },
+  sendMessage: (sessionId: string, request: string, options: SendOptions) => {
+    fake.sends.push({ sessionId, request, options });
+    const session = fake.sessions.get(sessionId)!;
+    const runId = `run-${fake.sends.length}`;
+    const taskId = /\[id:([a-z0-9-]+)\]/.exec(request)?.[1];
+    const files = options.scriptedTurns
+      ? Object.fromEntries((options.scriptedTurns[0]?.toolCalls ?? []).map((call) => [call.input.path, call.input.content]))
+      : taskId
+        ? fake.writes[taskId]
+        : undefined;
+    const finish = (status: 'done' | 'failed', summary: string) => {
+      for (const listener of fake.listeners.get(sessionId) ?? []) listener({ type: 'run_finished', runId, status, summary } as StudioEvent);
+    };
+    if (files === 'fail' || files === undefined) {
+      finish('failed', '검증 게이트를 통과하지 못했습니다');
+    } else {
+      for (const [file, content] of Object.entries(files)) {
+        mkdirSync(path.dirname(path.join(session.workDir, file)), { recursive: true });
+        writeFileSync(path.join(session.workDir, file), content);
+      }
+      session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: Object.keys(files) });
+      finish('done', '완료');
+    }
+    return { runId };
+  },
+}));
+
+import { createTaskPlan, getTaskPlan } from './task-plans';
+
+const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
+const saved = { mode: process.env.B_STUDIO_MODE, dir: process.env.B_STUDIO_TASK_PLANS_DIR };
+
+const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `[id:${id}] ${id} 작업`, paths, dependsOn });
+
+beforeEach(() => {
+  fake.root = mkdtempSync(path.join(directory, 'work-'));
+  fake.counter = 0;
+  fake.sessions.clear();
+  fake.listeners.clear();
+  fake.sends = [];
+  fake.stopped = [];
+  fake.stopOrder.integrationCreatedAfterStops = false;
+  process.env.B_STUDIO_MODE = 'api';
+  process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
+});
+
+afterAll(() => {
+  for (const [key, value] of [['B_STUDIO_MODE', saved.mode], ['B_STUDIO_TASK_PLANS_DIR', saved.dir]] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  rmSync(directory, { recursive: true, force: true });
+});
+
+async function finished(id: string) {
+  for (let i = 0; i < 500; i++) {
+    const plan = getTaskPlan(id, 'kim');
+    if (plan.status === 'done' || plan.status === 'failed') return plan;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('작업 계획이 끝나지 않았습니다');
+}
+
+describe('작업 분해 실행', () => {
+  it('이어진 작업은 한 세션에서 쓰기 범위를 걸어 차례로, 독립 레인은 다른 세션에서 돌리고 결과를 새 세션에 다시 적용한다', async () => {
+    fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
+    fake.writes = { a1: { 'web/a/one.md': 'one' }, a2: { 'web/a/two.md': 'two' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' })).id);
+
+    expect(plan.status).toBe('done');
+    const laneA = plan.lanes.find((lane) => lane.tasks.length === 2)!;
+    const laneB = plan.lanes.find((lane) => lane.tasks.length === 1)!;
+    const sendsA = fake.sends.filter((send) => send.sessionId === laneA.sessionId);
+    expect(sendsA.map((send) => send.options.writableScope)).toEqual([['web/a'], ['web/a']]);
+    expect(sendsA[1]!.request).toContain('같은 작업 공간에서 먼저 끝난 작업:\n- a1');
+    expect(laneB.sessionId).not.toBe(laneA.sessionId);
+
+    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
+    expect(integration.sessionId).toBe(plan.integration?.sessionId);
+    expect(integration.options.scriptedTurns![0]!.toolCalls!.map((call) => [call.input.path, call.input.content]).sort()).toEqual([
+      ['web/a/one.md', 'one'],
+      ['web/a/two.md', 'two'],
+      ['web/b/one.md', 'b'],
+    ]);
+    expect(integration.options.writableScope).toEqual(['web/a', 'web/b']);
+    expect(plan.integration).toMatchObject({ status: 'done', files: ['web/a/one.md', 'web/a/two.md', 'web/b/one.md'] });
+    // 레인 세션은 통합 샌드박스를 띄우기 전에 내려 동시에 뜨는 샌드박스를 레인 수로 제한하고, 통합 세션은 검토용으로 남긴다
+    expect([...new Set(fake.stopped)].sort()).toEqual([laneA.sessionId, laneB.sessionId].sort());
+    expect(fake.stopOrder.integrationCreatedAfterStops).toBe(true);
+  });
+
+  it('병렬 레인의 쓰기 범위가 겹치는 계획은 세션을 만들기 전에 실패시킨다', async () => {
+    fake.plan = { tasks: [task('a', ['web/app']), task('b', ['web/app/orders'])] };
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '겹치는 계획', modelId: 'model-a', owner: 'kim' })).id);
+    expect(plan).toMatchObject({ status: 'failed', lanes: [] });
+    expect(plan.error).toContain('쓰기 범위가 겹칩니다');
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  it('레인 하나가 실패하면 뒤 작업은 건너뛰고 통합하지 않는다', async () => {
+    fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
+    fake.writes = { a1: 'fail', b: { 'web/b/one.md': 'b' } };
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '실패 레인', modelId: 'model-a', owner: 'kim' })).id);
+    const laneA = plan.lanes.find((lane) => lane.tasks.length === 2)!;
+    expect(plan.status).toBe('failed');
+    expect(laneA.tasks.map((item) => item.status)).toEqual(['failed', 'skipped']);
+    expect(plan.lanes.find((lane) => lane.tasks.length === 1)!.status).toBe('done');
+    expect(plan.integration).toBeUndefined();
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+
+  it('레인이 도구를 거치지 않고 범위 밖 파일을 바꿨으면 통합하지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    // 실행기 정책을 우회한 변경(명령으로 만든 파일 등)이 체크포인트에 들어온 상황
+    fake.writes = { a: { 'web/a/one.md': 'one', 'web/b/sneaky.md': 'x' }, b: { 'web/b/one.md': 'b' } };
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '범위 밖 변경', modelId: 'model-a', owner: 'kim' })).id);
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('쓰기 범위 밖 파일을 바꿨습니다: web/b/sneaky.md');
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+
+  it('레인이 지운 파일이 있으면 통합이 생성·수정만 지원한다고 알리고 멈춘다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '삭제 포함', modelId: 'model-a', owner: 'kim' });
+    // 체크포인트에는 있지만 작업 폴더에 없는 파일 = 레인이 지운 파일
+    const original = fake.sessions.get.bind(fake.sessions);
+    const spy = vi.spyOn(fake.sessions, 'get').mockImplementation((id) => {
+      const session = original(id);
+      if (session && session.checkpoints.length > 1) session.checkpoints[0]!.files = ['web/a/one.md', 'web/a/removed.md'];
+      return session;
+    });
+    const plan = await finished(created.id);
+    spy.mockRestore();
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('web/a/removed.md이 지워졌습니다');
+  });
+
+  it('api 모드가 아니거나 모델이 등록되지 않았으면 시작하지 않는다', async () => {
+    await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'unknown', owner: 'kim' })).rejects.toThrow('등록되지 않은 모델');
+    process.env.B_STUDIO_MODE = 'demo';
+    await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+  });
+});

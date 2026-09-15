@@ -13,6 +13,8 @@
     "studio:local": "B_STUDIO_MODE=claude-code pnpm --filter @b-studio/studio dev",
     "e2e:agent": "tsx packages/agent/e2e/scripted-orders.ts",
     "e2e:fleet": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/fleet-local.ts",
+    "e2e:deploy-gate": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/deploy-gate-local.ts",
+    "e2e:task-plan": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/task-plan-local.ts",
     "bench:boot": "tsx packages/sandbox/bench/boot.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"

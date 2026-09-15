@@ -17,7 +17,10 @@ export function workflow(project: LoadedProject, options: { piEnv: boolean }): n
   console.log(`플랫폼이 판정하는 단계: ${stages.filter((stage) => VERIFICATION_STAGES.includes(stage)).join(', ')}`);
   for (const test of spec?.tests ?? []) console.log(`  test  ${test.name} · ${test.service}: ${test.command.join(' ')} (최대 ${test.maxAttempts}회)`);
   for (const page of spec?.pageChecks ?? []) {
-    console.log(`  page  ${page.service} ${page.path} → HTTP ${page.expectStatus}${page.expectText ? ` · '${page.expectText}' 포함` : ''}`);
+    const browser = page.mode === 'browser'
+      ? ` · 브라우저${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''}${page.noHorizontalScroll ? ' · 가로 넘침 금지' : ''}${page.allowConsoleErrors ? ' · console.error 허용' : ''}`
+      : ' · HTTP';
+    console.log(`  page  ${page.service} ${page.path}${browser} → ${page.expectStatus}${page.expectText ? ` · '${page.expectText}' 포함` : ''}`);
   }
   console.log(`보호 경로: ${spec?.protectedPaths?.join(', ') || '없음'}`);
   if (spec?.maxChangedFiles !== undefined) console.log(`요청당 변경 파일 상한: ${spec.maxChangedFiles}`);
