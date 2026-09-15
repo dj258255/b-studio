@@ -17,9 +17,11 @@ import {
   describeDatabaseState,
   estimateCost,
   formatVerificationReport,
+  formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
   preflightClaudeCode,
+  releaseBlockers,
   RemoteConflictError,
   restartServicesFor,
   runAgent,
@@ -1041,6 +1043,8 @@ function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
   if (result.verifyAttempts > 0) sections.push(`검증 게이트 재시도: ${result.verifyAttempts}회`);
   const summary = result.summary.trim();
   if (summary) sections.push(`에이전트 요약:\n${summary.split('\n').slice(0, 30).join('\n')}`);
+  // 트레일러는 본문 마지막 문단이어야 git이 트레일러로 읽는다. 배포할 때 releaseRequires와 대조한다
+  if (result.passedStages) sections.push(formatWorkflowTrailer(result.passedStages));
   return sections.join('\n\n');
 }
 
@@ -1288,6 +1292,14 @@ export function deploySession(id: string, { by, sha }: { by?: string; sha?: stri
   if (session.snapshot.deploying) throw new StudioError(409, '이 세션에서 이미 배포하는 중입니다');
   const checkpoint = sha ? session.snapshot.checkpoints.find((candidate) => candidate.sha === sha) : session.snapshot.checkpoints[0];
   if (!checkpoint) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
+  // 규칙은 체크포인트 안의 studio.yaml이 아니라 실행 중인 세션의 것을 쓴다. 같은 변경에서 규칙을 느슨하게 고쳐 배포하지 못하게 한다
+  const blockers = releaseBlockers(session.project, checkpoint.passedStages);
+  if (blockers.length > 0) {
+    throw new StudioError(
+      409,
+      `체크포인트 ${checkpoint.shortSha}는 배포 조건을 채우지 못했습니다. 통과 기록이 없는 단계: ${blockers.join(', ')}${checkpoint.passedStages ? '' : ' (검증 게이트를 거치지 않은 체크포인트입니다)'}`,
+    );
+  }
 
   runDeployJob(session, { action: 'deploy', target: checkpoint.shortSha, by }, async (onLog) => {
     // 같은 체크포인트를 동시에 배포해도 폴더가 겹치지 않게 한다

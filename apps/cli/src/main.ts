@@ -5,6 +5,7 @@ import { agent, type Backend } from './commands/agent';
 import { authToken } from './commands/auth';
 import { deploy } from './commands/deploy';
 import { up } from './commands/up';
+import { workflow } from './commands/workflow';
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const BACKENDS: readonly Backend[] = ['api', 'claude-code'];
@@ -13,7 +14,12 @@ const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
+  studio workflow <프로젝트 경로> [--pi-env]
   studio auth token <이름>
+
+workflow:
+  studio.yaml에서 강제할 단계, 테스트, 화면 확인, 보호 경로, 배포 조건을 보여 준다
+  --pi-env           Pi 확장(packages/agent/pi/bstudio-policy.ts)이 읽는 환경 변수를 export 문으로 출력한다
 
 auth token:
   웹 스튜디오 token 모드에 쓸 접근 토큰과, 서버의 B_STUDIO_AUTH_TOKENS에 넣을 해시 값을 만든다
@@ -50,6 +56,7 @@ async function main(argv: string[]): Promise<number> {
       rollback: { type: 'string' },
       remove: { type: 'boolean', default: false },
       volumes: { type: 'boolean', default: false },
+      'pi-env': { type: 'boolean', default: false },
     },
   });
   const [command, dir, request] = positionals;
@@ -64,6 +71,10 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
     return deploy(await loadProject(dir), { status: values.status, rollback: values.rollback, remove: values.remove, volumes: values.volumes });
+  }
+
+  if (command === 'workflow' && dir) {
+    return workflow(await loadProject(dir), { piEnv: values['pi-env'] });
   }
 
   if (command === 'auth' && dir === 'token' && request) {

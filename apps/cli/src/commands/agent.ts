@@ -98,6 +98,16 @@ function printAgentEvent(label: Label) {
       case 'policy':
         print(label('policy'), styleText(event.decision === 'allow' ? 'dim' : 'yellow', `${event.decision === 'allow' ? '허용' : '차단'} · ${event.tool}${event.reason ? ` · ${event.reason}` : ''}`));
         break;
+      case 'stage':
+        print(label('studio'), styleText('dim', `작업 단계 · ${stageLabel(event.stage)}`));
+        break;
+      case 'workflow_check':
+        print(
+          label('studio'),
+          styleText(event.check.ok ? 'green' : 'red', `${stageLabel(event.check.stage)} · ${event.check.name} · ${event.check.ok ? '통과' : '실패'}${event.check.attempts > 1 ? ` (시도 ${event.check.attempts}회)` : ''}`),
+        );
+        if (!event.check.ok && event.check.detail) print(label('studio'), styleText('dim', event.check.detail.split('\n').slice(0, 8).join('\n')));
+        break;
       case 'verify_start':
         print(label('studio'), `검증 게이트: 파일 ${event.files.length}개 → 서비스 재시작, 준비 판정, 계약 비교`);
         break;
@@ -112,6 +122,21 @@ function printAgentEvent(label: Label) {
         break;
     }
   };
+}
+
+function stageLabel(stage: string): string {
+  return (
+    {
+      plan: '계획',
+      implement: '구현',
+      run: '실행',
+      browser_check: '브라우저 확인',
+      contract_check: 'API 계약 확인',
+      test: '테스트',
+      review: '리뷰',
+      checkpoint: '체크포인트',
+    } as Record<string, string>
+  )[stage] ?? stage;
 }
 
 function summarizeInput(input: unknown): string {

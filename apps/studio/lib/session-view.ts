@@ -30,6 +30,9 @@ export type ChatItem =
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
     }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
+  | { kind: 'stage'; runId: string; stage: string }
+  /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과 */
+  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */
@@ -401,6 +404,12 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
 
     case 'session':
       return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
+
+    case 'stage':
+      return [...chat, { kind: 'stage', runId, stage: event.stage }];
+
+    case 'workflow_check':
+      return [...chat, { kind: 'check', runId, ...event.check }];
 
     case 'text':
       return [...chat, { kind: 'reply', runId, text: event.text }];

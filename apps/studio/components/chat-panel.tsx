@@ -323,6 +323,20 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </p>
       );
 
+    case "stage":
+      return <p className="text-xs font-medium tracking-wide text-muted">작업 단계 · {stageLabel(item.stage)}</p>;
+
+    case "check":
+      return (
+        <div className="text-xs">
+          <p className={item.ok ? "text-pass" : "text-fail"}>
+            {stageLabel(item.stage)} · {item.name} · {item.ok ? "통과" : "실패"}
+            {item.attempts > 1 ? ` (시도 ${item.attempts}회)` : ""}
+          </p>
+          {!item.ok && item.detail && <pre className="mt-1 whitespace-pre-wrap text-muted">{item.detail}</pre>}
+        </div>
+      );
+
     case "reply":
       return <Markdown text={item.text} />;
 
@@ -536,6 +550,21 @@ function ChatEntry({ item }: { item: ChatItem }) {
       );
     }
   }
+}
+
+function stageLabel(stage: string): string {
+  return (
+    {
+      plan: "계획",
+      implement: "구현",
+      run: "실행",
+      browser_check: "브라우저 확인",
+      contract_check: "API 계약 확인",
+      test: "테스트",
+      review: "리뷰",
+      checkpoint: "체크포인트",
+    } as Record<string, string>
+  )[stage] ?? stage;
 }
 
 /** 에이전트 패키지는 서버 전용 모듈을 불러오므로 화면에서는 문구를 따로 만든다 */
