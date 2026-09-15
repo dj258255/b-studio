@@ -14,6 +14,14 @@ describe('Pi 정책 브리지', () => {
     expect(evaluatePiToolCall({ toolName: 'edit', input: { path: 'web/app/page.tsx', edits: [] } }, config)).toBeUndefined();
   });
 
+  it('b-studio 작업 공간과 같이 .env 파일은 읽기·검색도 막고, 다른 파일 읽기는 막지 않는다', () => {
+    expect(evaluatePiToolCall({ toolName: 'read', input: { path: '.env' } }, config)?.reason).toContain('비밀 파일');
+    expect(evaluatePiToolCall({ toolName: 'read', input: { path: 'api/.env.production' } }, config)?.block).toBe(true);
+    expect(evaluatePiToolCall({ toolName: 'grep', input: { pattern: 'KEY', paths: ['src', '.env.local'] } }, config)?.block).toBe(true);
+    expect(evaluatePiToolCall({ toolName: 'read', input: { path: 'infra/main.tf' } }, config)).toBeUndefined();
+    expect(evaluatePiToolCall({ toolName: 'read', input: { path: 'docs/env.md' } }, config)).toBeUndefined();
+  });
+
   it('프로젝트 밖 파일 수정을 막는다', () => {
     expect(evaluatePiToolCall({ toolName: 'write', input: { path: '../other/app.ts', content: '' } }, config)?.reason).toContain('프로젝트 밖');
   });

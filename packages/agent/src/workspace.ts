@@ -157,6 +157,14 @@ export class Workspace {
   }
 }
 
+/** 경로의 어느 구간이든 .env·.env.* 이면 비밀 파일로 본다. Pi 확장도 같은 규칙으로 읽기를 막는다 */
+export function isSecretFile(file: string): boolean {
+  return file
+    .replaceAll('\\', '/')
+    .split('/')
+    .some((segment) => DENIED_FILES.some((pattern) => pattern.test(segment)));
+}
+
 function isDenied(segment: string): boolean {
   return DENIED_SEGMENTS.has(segment) || DENIED_FILES.some((pattern) => pattern.test(segment));
 }

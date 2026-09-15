@@ -9,6 +9,7 @@
  */
 import path from 'node:path';
 import { checkToolPolicy, DEFAULT_DENIED_COMMANDS, type ExecutionPolicy } from '../src/policy';
+import { isSecretFile } from '../src/workspace';
 
 /** Pi 확장 API 중 이 확장이 쓰는 부분만 적었다. API가 늘어나도 이 확장은 영향받지 않는다 */
 export interface PiExtensionApi {
@@ -47,10 +48,17 @@ export function configFromEnvironment(env: NodeJS.ProcessEnv = process.env, cwd 
 
 /**
  * Pi 내장 도구 호출을 b-studio 도구 정책의 같은 규칙으로 판정한다.
- * write·edit → write_file, bash → 셸 래퍼로 감싼 run_in_service (명령 문자열 전체에서 차단 규칙을 찾는다)
+ * write·edit → write_file, bash → 셸 래퍼로 감싼 run_in_service (명령 문자열 전체에서 차단 규칙을 찾는다).
+ * read·grep·find·ls·write·edit의 경로가 .env 파일이면 b-studio 작업 공간과 같이 막는다. 비밀 값이 모델 컨텍스트에 들어가지 않게 하기 위해서다
  */
 export function evaluatePiToolCall(call: PiToolCall, config: PiPolicyConfig): { block: true; reason: string } | undefined {
   const policy: ExecutionPolicy = { protectedPaths: config.protectedPaths, deniedCommands: config.deniedCommands };
+
+  const paths = [call.input.path, ...(Array.isArray(call.input.paths) ? call.input.paths : [])].filter((value): value is string => typeof value === 'string');
+  const secret = paths.find((file) => isSecretFile(file));
+  if (secret && ['read', 'write', 'edit', 'grep', 'find', 'ls'].includes(call.toolName)) {
+    return block(`비밀 파일 '${secret}'은 읽거나 바꿀 수 없습니다`);
+  }
 
   if (call.toolName === 'write' || call.toolName === 'edit') {
     const raw = typeof call.input.path === 'string' ? call.input.path : '';
