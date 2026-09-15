@@ -14,7 +14,7 @@ flowchart TB
   end
   subgraph Core[코어 패키지]
     SPEC[@b-studio/spec]
-    AGENT[@b-studio/agent]
+    AGENT[@b-studio/agent + Pi bridge]
     SANDBOX[@b-studio/sandbox]
     ROUTER[Model Router]
   end
@@ -41,7 +41,7 @@ flowchart TB
 | `apps/studio` | 세션·대화·미리보기·API·로그 UI, 복구, Fleet 비교 |
 | `packages/spec` | `studio.yaml` 스키마와 compose 교차 검증 |
 | `packages/sandbox` | Docker/Kubernetes 제공자, 준비 판정, 네트워크·시크릿·DB·배포 |
-| `packages/agent` | 모델 클라이언트, 제한된 도구, 검증 게이트, Git 체크포인트와 원격 연동 |
+| `packages/agent` | 모델 클라이언트, 제한된 도구, 워크플로 정책, 검증 게이트, Git 체크포인트와 원격 연동 |
 
 ## 요청 수명 주기
 
@@ -69,6 +69,20 @@ sequenceDiagram
   end
 ```
 
+직접 만든 루프와 로컬 Claude Code 러너는 같은 `VerificationGate`로 완료를 판정합니다. 게이트는 모델이 턴을 끝낼 때마다 다음 순서로 돕니다.
+
+```text
+run (바뀐 서비스 재시작·준비 판정)
+ → contract_check (OpenAPI 호환성)
+ → browser_check · test (studio.yaml에 선언한 것만, 작업 그래프로 동시에)
+ → review (보호 경로·변경 파일 수를 전체 diff에서 다시 확인)
+ → 필수 단계 대조 → checkpoint
+```
+
+앞 단계가 실패하면 뒤 단계는 돌리지 않고 실패 결과를 모델에게 돌려줍니다. 통과한 단계는 `AgentResult.passedStages`로 남고 체크포인트 커밋 본문 끝에 `Workflow-Passed:` 트레일러로 기록됩니다. 배포는 이 트레일러를 실행 중인 세션의 `releaseRequires`와 대조합니다.
+
+Pi 확장은 이 게이트 밖에서 동작하는 안내·조기 차단 계층입니다. 같은 정책 코드(`checkToolPolicy`)로 Pi 내장 도구 호출을 판정하지만 체크포인트를 만들지 않습니다.
+
 ## 샌드박스 경계
 
 - managed 서비스는 프로젝트마다 분리된 실행 환경에서 동작합니다.
@@ -83,6 +97,26 @@ sequenceDiagram
 세션마다 별도 작업 복사본과 체크포인트 기록을 둡니다. 검증을 통과하면 파일 변경과 PostgreSQL 덤프를 같은 시점으로 저장합니다. 프로세스가 비정상 종료되면 남은 샌드박스를 정리하고 마지막 체크포인트에서 새 샌드박스를 만들어 이어서 작업합니다.
 
 로컬 폴더를 직접 다루는 세션은 사용자 저장소의 `.git`을 수정하지 않도록 별도 Git 디렉터리를 사용합니다. 원격 저장소 세션은 브랜치를 분리하고, 마지막으로 올린 커밋을 기준으로 lease를 확인해 리뷰어의 변경을 덮어쓰지 않습니다.
+
+## 병렬 작업과 작업 그래프
+
+병렬 실행은 두 방식으로 나눕니다.
+
+| 방식 | 용도 | 격리와 완료 조건 |
+|---|---|---|
+| Agent Fleet | 같은 요청을 여러 모델로 비교 | 후보마다 별도 Git 작업 복제본·브랜치·샌드박스. 검증 통과 후보만 사람이 선택 |
+| Task Graph | 서로 기다릴 필요가 없는 작업을 동시 실행 수 안에서 처리 | 의존 작업이 통과해야 다음 노드를 실행하고, 실패한 노드의 후속 작업은 `skipped`로 기록. 노드별 재시도 횟수를 결과에 남긴다 |
+
+현재 `runTaskGraph`를 쓰는 곳은 검증 게이트입니다. `studio.yaml`의 `tests`와 `pageChecks`는 서로 독립이라 동시 실행 수 2로 함께 돌리고, 테스트마다 선언한 `maxAttempts`만큼 다시 시도합니다. 실행 함수를 주입받는 구조라 특정 큐나 메신저에 묶이지 않습니다.
+
+```text
+재시작·계약 통과
+ ├─ page: web /      ─┐
+ ├─ test: web-lint   ─┼─ review ─ 필수 단계 대조 ─ checkpoint
+ └─ test: api-unit   ─┘
+```
+
+요청을 하위 작업으로 자동 분해해 여러 세션에 나눠 맡기는 기능은 아직 없습니다. Fleet은 같은 요청의 후보 비교에만 씁니다.
 
 ## 확장 지점
 

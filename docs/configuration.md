@@ -14,6 +14,7 @@ resources: {}
 network: {}
 secrets: {}
 deploy: {}
+workflow: {}
 repository: {}
 ```
 
@@ -28,6 +29,7 @@ repository: {}
 | `network` | 아니요 | 기본 저장소 외 외부 HTTP(S) 허용 목록 |
 | `secrets` | 아니요 | 서버에서 읽어 서비스에 주입할 시크릿 선언 |
 | `deploy` | 아니요 | 운영 Dockerfile과 공개 포트 |
+| `workflow` | 아니요 | 에이전트 작업 단계·도구·보호 경로·승인·릴리스 조건 |
 | `repository` | 아니요 | 모노레포 하위 프로젝트 처리 |
 
 ## managed 서비스
@@ -166,6 +168,44 @@ deploy:
 ```
 
 Dockerfile은 compose `build.context` 기준 경로입니다. 포트를 생략하면 첫 배포 때 루프백의 빈 포트를 선택하고 이후 릴리스에서도 유지합니다.
+
+## 팀 워크플로
+
+모델 하네스가 Pi·Claude·API 중 무엇이든 같은 실행 기준을 적용합니다. 프롬프트 파일은 에이전트를 안내하지만, 아래 정책은 Tool Gateway가 다시 검사합니다.
+
+```yaml
+workflow:
+  required: [plan, implement, run, browser_check, contract_check, test, review, checkpoint]
+  tests:
+    - { name: web-lint, service: web, command: [pnpm, lint] }
+    - { name: api-unit, service: api, command: [./gradlew, test], maxAttempts: 2 }
+  pageChecks:
+    - { service: web, path: /orders, expectStatus: 200, expectText: 주문 목록 }
+  allowedTools: [list_files, read_file, write_file, edit_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
+  deniedCommands: [npm publish, git push, terraform apply]
+  requireApprovalFor: [restart_service]
+  protectedPaths: [.env, .github/workflows, infra, migrations]
+  maxChangedFiles: 20
+  releaseRequires: [contract_check, test, review, checkpoint]
+```
+
+| 키 | 적용 방식 |
+|---|---|
+| `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests` 단계를 더합니다 |
+| `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
+| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 경로를 HTTP로 불러 상태 코드와 문구를 확인합니다. 헤드리스 브라우저 렌더링이나 클라이언트 스크립트 실행은 하지 않습니다 |
+| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다 |
+| `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
+| `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
+| `releaseRequires` | 배포할 체크포인트의 `Workflow-Passed` 트레일러에 있어야 하는 단계. 스튜디오 밖에서 바꾼 체크포인트처럼 기록이 없으면 `checkpoint` 외 조건을 채우지 못해 배포가 거부됩니다. 생략하면 `[checkpoint]`로 모든 체크포인트를 배포할 수 있습니다 |
+
+불러올 때 검사하는 규칙:
+
+- `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
+- `tests`·`pageChecks`의 `service`는 `source: managed` 서비스여야 합니다.
+- 테스트 이름은 중복될 수 없습니다.
+
+`studio workflow <프로젝트>`로 실제로 강제할 단계와 검사를 확인할 수 있습니다.
 
 ## 모노레포
 
