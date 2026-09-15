@@ -1400,3 +1400,23 @@ FastAPI 임시 프로젝트를 `/private/tmp` 아래 만들고 샌드박스를 �
 Docker가 실제로 볼 수 있는 `/Users/...` 아래, 이번에는 저장소의 gitignore된 `.playwright-mcp/egress-*`에 임시 프로젝트를 만들었습니다.
 
 그 뒤 같은 FastAPI 템플릿이 `/health` 200으로 준비됐고, uv 설치가 `files.pythonhosted.org:443`을 edge 프록시로 50번 통과한 감사 로그를 남겼습니다.
+
+## 38. 세션을 끝낼 때마다 샌드박스 이미지가 남아 Docker 디스크가 가득 참
+
+**구분:** 배포 조건 E2E의 운영 이미지 빌드가 `ENOSPC`로 실패해 원인을 추적하다 발견. 제품 코드 결함
+
+### 현상
+| 확인 | 결과 |
+|---|---|
+| 배포 로그 | web 빌드 `ENOSPC: no space left on device`, 다음 실행은 api `bootJar` 실패 |
+| Docker VM | 28GB 중 남은 공간 64.9MB |
+| 이미지 목록 | `studio-orders-<id>-api`(748MB)·`-web`처럼 세션 id가 든 이미지 40개, 연결된 컨테이너 0개 |
+
+### 원인
+샌드박스 종료(`destroy`)와 남은 샌드박스 정리(`cleanup`)가 `compose down --volumes --remove-orphans`만 실행했습니다. 컨테이너·볼륨·네트워크는 지웠지만 compose가 그 세션을 위해 빌드한 이미지는 남겼습니다. 이름에 세션 id가 들어가 다른 세션이 다시 쓰지도 않았습니다. 컨테이너가 이미 사라진 뒤라 `--rmi local`만 붙여서는 라벨로 이미지를 찾지 못했습니다.
+
+### 해결
+- `down`에 `--rmi local`을 붙이고, 이어서 `image ls --filter reference=<샌드박스 id>-*`로 찾은 이미지 중 그 id로 시작하는 것만 지웁니다. `postgres` 같은 공용 이미지와 다른 샌드박스 이미지는 건드리지 않습니다.
+- 빌드 캐시는 지우지 않아 다음 세션의 빌드 속도는 그대로입니다.
+- 남아 있던 샌드박스 이미지 40개를 지운 뒤 배포 조건 E2E가 운영 릴리스까지 통과했고, 종료 뒤 남은 샌드박스 이미지는 0개였습니다.
+- 작업 분해도 같은 이유로 통합 샌드박스가 Gradle 배포판을 볼륨에 복사하다 `no space left on device`로 실패했습니다. 레인 결과를 메모리로 옮긴 뒤 레인 샌드박스를 먼저 내리도록 바꿔, 동시에 뜨는 샌드박스를 레인 수 이하로 줄였습니다.

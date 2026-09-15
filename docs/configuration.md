@@ -181,6 +181,7 @@ workflow:
     - { name: api-unit, service: api, command: [./gradlew, test], maxAttempts: 2 }
   pageChecks:
     - { service: web, path: /orders, expectStatus: 200, expectText: 주문 목록 }
+    - { service: web, path: /, mode: browser, expectText: 주문, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
   allowedTools: [list_files, read_file, write_file, edit_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply]
   requireApprovalFor: [restart_service]
@@ -193,7 +194,7 @@ workflow:
 |---|---|
 | `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests` 단계를 더합니다 |
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
-| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 경로를 HTTP로 불러 상태 코드와 문구를 확인합니다. 헤드리스 브라우저 렌더링이나 클라이언트 스크립트 실행은 하지 않습니다 |
+| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다 |
 | `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
@@ -206,6 +207,8 @@ workflow:
 - 테스트 이름은 중복될 수 없습니다.
 
 `studio workflow <프로젝트>`로 실제로 강제할 단계와 검사를 확인할 수 있습니다.
+
+`mode: browser`는 스튜디오 서버가 도는 호스트에서 Chromium을 띄웁니다. Playwright가 내려받은 Chromium을 먼저 쓰고, 없으면 설치된 Chrome을 쓰며, `B_STUDIO_BROWSER_EXECUTABLE`로 실행 파일을 지정할 수 있습니다. 어느 것도 없으면 검사는 통과가 아니라 실패로 끝납니다. 스튜디오를 브라우저가 없는 컨테이너 이미지로 운영한다면 `http` 모드를 쓰거나 이미지에 Chromium을 넣어야 합니다.
 
 ## 모노레포
 
