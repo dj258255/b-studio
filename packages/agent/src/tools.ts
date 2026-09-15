@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { describeUsage, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
+import { checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 import { servicesForFiles } from './services';
 import type { ContractFetcher } from './verify';
 import type { Workspace } from './workspace';
@@ -22,6 +23,14 @@ export interface ToolContext {
   onServiceStatus?: StartOptions['onStatus'];
   /** 질문 모드. 파일을 바꾸거나 명령을 실행하는 도구와 조회가 아닌 HTTP 호출을 거부한다 */
   readOnly?: boolean;
+  /** 모델이 호출한 도구를 실행기에서 먼저 검사한다 */
+  policy?: ExecutionPolicy;
+  /** 승인 흐름에서 발급한 일회성 토큰. 토큰 값은 로그에 기록하지 않는다 */
+  approvalToken?: string;
+  /** UI나 CLI가 사람의 승인을 연결할 수 있는 선택적 훅 */
+  requestApproval?: (request: ApprovalRequest) => Promise<boolean>;
+  /** 허용·차단 결정을 구조화해 감사 로그에 남긴다 */
+  onPolicyDecision?: (decision: PolicyDecision) => void;
 }
 
 /** 질문 모드에서 거부하는 도구 */
@@ -124,8 +133,27 @@ function tool(name: string, description: string, properties: Record<string, unkn
 export async function executeTool(name: string, input: unknown, context: ToolContext): Promise<ToolOutcome> {
   const { workspace, sandbox, signal } = context;
   try {
-    // 모델에게 보이는 도구 목록은 만들기 모드와 같으므로 여기서 막는다
-    if (context.readOnly && CHANGING_TOOLS.has(name)) return failure(READ_ONLY_TOOL);
+    // 질문 모드의 제한도 실행기에서 강제하고 감사 로그에 한 번만 남긴다
+    if (context.readOnly && CHANGING_TOOLS.has(name)) {
+      const denied = { tool: name, decision: 'deny' as const, reason: 'question mode is read-only' };
+      context.onPolicyDecision?.(denied);
+      return failure(READ_ONLY_TOOL);
+    }
+    const decision = checkToolPolicy(name, input, context.policy, context.approvalToken);
+    if (decision.decision === 'deny' && decision.reason?.includes('requires an explicit approval') && context.requestApproval) {
+      const approved = await context.requestApproval({ tool: name, summary: summarizeApproval(name, input) });
+      if (!approved) {
+        const denied = { tool: name, decision: 'deny' as const, reason: 'approval was not granted' };
+        context.onPolicyDecision?.(denied);
+        return failure(`blocked by execution policy: ${denied.reason}`);
+      }
+      context.onPolicyDecision?.({ tool: name, decision: 'allow', reason: 'approval was granted' });
+    } else if (decision.decision === 'deny') {
+      context.onPolicyDecision?.(decision);
+      return failure(`blocked by execution policy: ${decision.reason}`);
+    } else {
+      context.onPolicyDecision?.(decision);
+    }
     const args = asRecord(input);
     switch (name) {
       case 'list_files': {
@@ -207,6 +235,20 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
   } catch (error) {
     return failure(describe(error));
   }
+}
+
+function summarizeApproval(name: string, input: unknown): string {
+  if (name === 'run_in_service' && typeof input === 'object' && input !== null) {
+    const args = input as Record<string, unknown>;
+    const service = typeof args.service === 'string' ? args.service : 'unknown service';
+    const command = Array.isArray(args.command) ? args.command.filter((value): value is string => typeof value === 'string').join(' ') : '';
+    return `run ${command} in ${service}`;
+  }
+  if ((name === 'write_file' || name === 'edit_file') && typeof input === 'object' && input !== null) {
+    const file = (input as Record<string, unknown>).path;
+    return `${name} ${typeof file === 'string' ? file : 'a file'}`;
+  }
+  return name;
 }
 
 async function httpRequest(context: ToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {

@@ -183,6 +183,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 - [`studio.yaml` 설정](docs/configuration.md)
 - [아키텍처](docs/architecture.md)
 - [운영과 배포](docs/operations.md)
+- [실행 정책과 도구 호출 통제](docs/execution-policy.md)
 - [검증 기록과 한계](docs/verification.md)
 - [설계 결정 기록](docs/decisions.md)
 - [트러블슈팅](docs/troubleshooting.md)

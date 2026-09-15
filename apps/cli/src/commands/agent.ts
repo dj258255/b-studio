@@ -95,6 +95,9 @@ function printAgentEvent(label: Label) {
       case 'tool_result':
         if (!event.ok) print(label('agent'), styleText('yellow', `✗ ${event.name}: ${event.content.split('\n')[0]}`));
         break;
+      case 'policy':
+        print(label('policy'), styleText(event.decision === 'allow' ? 'dim' : 'yellow', `${event.decision === 'allow' ? '허용' : '차단'} · ${event.tool}${event.reason ? ` · ${event.reason}` : ''}`));
+        break;
       case 'verify_start':
         print(label('studio'), `검증 게이트: 파일 ${event.files.length}개 → 서비스 재시작, 준비 판정, 계약 비교`);
         break;

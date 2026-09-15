@@ -48,3 +48,34 @@ describe('질문 모드', () => {
     expect(post).toEqual({ ok: false, content: 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.' });
   });
 });
+
+describe('실행 정책', () => {
+  it('샌드박스 실행 전에 위험 명령을 차단하고 실행하지 않는다', async () => {
+    let called = false;
+    const outcome = await executeTool(
+      'run_in_service',
+      { service: 'api', command: ['git', 'push', 'origin', 'main'] },
+      { ...context, policy: {}, sandbox: { ...context.sandbox, exec: async () => { called = true; throw new Error('must not run'); } } as unknown as Sandbox },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('blocked by execution policy');
+    expect(called).toBe(false);
+  });
+
+  it('승인 훅이 거부하면 변경 도구를 실행하지 않는다', async () => {
+    let called = false;
+    const outcome = await executeTool(
+      'write_file',
+      { path: 'a.txt', content: 'x' },
+      {
+        ...context,
+        policy: { requireApprovalFor: ['write_file'] },
+        requestApproval: async () => false,
+        workspace: { ...context.workspace, write: async () => { called = true; throw new Error('must not write'); } } as unknown as Workspace,
+      },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('approval was not granted');
+    expect(called).toBe(false);
+  });
+});

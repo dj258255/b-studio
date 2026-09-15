@@ -3,9 +3,10 @@ import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { VerificationGate } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool } from './tools';
+import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
+import type { ExecutionPolicy } from './policy';
 
 type BetaMessage = Anthropic.Beta.BetaMessage;
 type BetaMessageParam = Anthropic.Beta.BetaMessageParam;
@@ -70,6 +71,7 @@ export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   | { type: 'tool_result'; name: string; ok: boolean; content: string }
+  | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   | { type: 'verify_start'; files: string[] }
   | { type: 'verify_result'; report: VerificationReport; text: string }
   | { type: 'done'; result: AgentResult }
@@ -97,6 +99,10 @@ export interface RunAgentOptions {
   /** 검증 게이트나 도구가 서비스를 재시작할 때의 상태. 재시작하면 호스트 포트가 바뀌므로 미리보기가 따라가야 한다 */
   onServiceStatus?: StartOptions['onStatus'];
   fetcher?: ContractFetcher;
+  /** 도구 호출을 실행기에서 통제하는 정책 */
+  policy?: ExecutionPolicy;
+  approvalToken?: string;
+  requestApproval?: ToolContext['requestApproval'];
 }
 
 export function emptyUsage(): AgentUsage {
@@ -203,7 +209,19 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       const results: BetaToolResultBlockParam[] = [];
       for (const call of toolUses) {
         onEvent({ type: 'tool_call', name: call.name, input: call.input });
-        const outcome = await executeTool(call.name, call.input, { project, workspace, sandbox, fetcher, signal, onServiceStatus, readOnly: ask });
+        const outcome = await executeTool(call.name, call.input, {
+          project,
+          workspace,
+          sandbox,
+          fetcher,
+          signal,
+          onServiceStatus,
+          readOnly: ask,
+          policy: options.policy,
+          approvalToken: options.approvalToken,
+          requestApproval: options.requestApproval,
+          onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+        });
         onEvent({ type: 'tool_result', name: call.name, ok: outcome.ok, content: outcome.content });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: !outcome.ok });
       }

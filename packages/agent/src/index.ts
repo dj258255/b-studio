@@ -60,6 +60,7 @@ export {
   type RemoteLocation,
 } from './repository';
 export { buildTools, executeTool } from './tools';
+export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
 export {

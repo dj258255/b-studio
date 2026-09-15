@@ -94,7 +94,19 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const gate = ask
     ? undefined
     : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, signal, onServiceStatus, onEvent });
-  const context: ToolContext = { project, workspace, sandbox, fetcher, signal, onServiceStatus, readOnly: ask };
+  const context: ToolContext = {
+    project,
+    workspace,
+    sandbox,
+    fetcher,
+    signal,
+    onServiceStatus,
+    readOnly: ask,
+    policy: options.policy,
+    approvalToken: options.approvalToken,
+    requestApproval: options.requestApproval,
+    onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+  };
   const specs = buildTools(project);
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
