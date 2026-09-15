@@ -61,6 +61,18 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * compose가 샌드박스용으로 빌드한 이미지(<샌드박스 id>-<서비스>)를 지운다.
+ * 이름에 세션 id가 들어가 다른 세션이 다시 쓰지 않으므로 남기면 세션마다 수백 MB씩 쌓여 Docker 디스크를 채운다.
+ * 빌드 캐시는 지우지 않으므로 다음 세션의 빌드 속도는 그대로다
+ */
+async function removeSandboxImages(dockerBin: string, sandboxId: string): Promise<void> {
+  assertSandboxId(sandboxId);
+  const { stdout } = await execFileAsync(dockerBin, ['image', 'ls', '--filter', `reference=${sandboxId}-*`, '--format', '{{.Repository}}:{{.Tag}}'], { cwd: tmpdir() });
+  const images = stdout.split('\n').map((line) => line.trim()).filter((line) => line.startsWith(`${sandboxId}-`));
+  if (images.length > 0) await execFileAsync(dockerBin, ['image', 'rm', ...images], { cwd: tmpdir() });
+}
+
 /** 샌드박스 출입구 스크립트. 원격 Docker 호스트에서도 돌도록 파일을 마운트하지 않고 내용을 compose 설정에 넣는다 */
 const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 
@@ -114,10 +126,16 @@ export class LocalDockerProvider implements SandboxProvider {
     this.isolation = options.runtime;
   }
 
-  /** compose 파일 없이도 프로젝트 이름(라벨)으로 컨테이너, 볼륨, 네트워크를 지운다. external 공유 캐시는 지우지 않는다 */
+  /**
+   * compose 파일 없이도 프로젝트 이름(라벨)으로 컨테이너, 볼륨, 네트워크, 이 샌드박스가 빌드한 이미지를 지운다. external 공유 캐시는 지우지 않는다.
+   * 스튜디오가 강제 종료되기 전에 따로 띄우는 명령이라 한 번에 끝나야 한다. 컨테이너가 남아 있을 때는 --rmi local이 라벨로 이미지를 찾는다
+   */
   cleanupCommand(sandboxId: string): CleanupCommand {
     assertSandboxId(sandboxId);
-    return { command: this.#options.dockerBin ?? 'docker', args: ['compose', '--project-name', sandboxId, 'down', '--volumes', '--remove-orphans'] };
+    return {
+      command: this.#options.dockerBin ?? 'docker',
+      args: ['compose', '--project-name', sandboxId, 'down', '--volumes', '--remove-orphans', '--rmi', 'local'],
+    };
   }
 
   async cleanup(sandboxId: string): Promise<void> {
@@ -125,6 +143,8 @@ export class LocalDockerProvider implements SandboxProvider {
     // 작업 디렉터리의 compose 파일을 읽지 않도록 임시 디렉터리에서 실행한다
     try {
       await execFileAsync(command, args, { cwd: tmpdir() });
+      // 컨테이너가 이미 없으면 --rmi local이 이미지를 찾지 못한다. 이름으로 한 번 더 지운다
+      await removeSandboxImages(command, sandboxId);
     } catch (error) {
       throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, error instanceof Error ? error.message : String(error));
     }
@@ -377,7 +397,8 @@ class LocalDockerSandbox implements Sandbox {
 
   async destroy(): Promise<void> {
     try {
-      await this.#composeOrThrow(['down', '--volumes', '--remove-orphans']);
+      await this.#composeOrThrow(['down', '--volumes', '--remove-orphans', '--rmi', 'local']);
+      await removeSandboxImages(this.#dockerBin, this.id);
     } finally {
       await rm(this.#workDir, { recursive: true, force: true });
     }
