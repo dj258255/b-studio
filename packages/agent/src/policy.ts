@@ -10,6 +10,8 @@ export interface ExecutionPolicy {
   requireApprovalFor?: readonly string[];
   /** 에이전트가 수정할 수 없는 프로젝트 상대 경로 접두사 */
   protectedPaths?: readonly string[];
+  /** 지정하면 이 경로(와 하위 경로) 안에서만 파일을 쓸 수 있다. 작업 분해에서 레인끼리 변경이 겹치지 않게 한다 */
+  writablePaths?: readonly string[];
 }
 
 export interface ApprovalRequest {
@@ -48,6 +50,13 @@ export function checkToolPolicy(
 ): PolicyDecision {
   if (policy?.allowedTools && !policy.allowedTools.includes(tool)) {
     return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
+  }
+
+  if ((tool === 'write_file' || tool === 'edit_file') && policy?.writablePaths) {
+    const file = fileInput(input);
+    if (!policy.writablePaths.some((candidate) => isProtectedPath(file, candidate))) {
+      return { tool, decision: 'deny', reason: `path is outside this task's writable scope: ${policy.writablePaths.join(', ')}` };
+    }
   }
 
   if ((tool === 'write_file' || tool === 'edit_file') && policy?.protectedPaths?.length) {

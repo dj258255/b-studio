@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
+import type { BrowserRunner } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
@@ -107,6 +108,7 @@ export interface RunAgentOptions {
   onServiceStatus?: StartOptions['onStatus'];
   fetcher?: ContractFetcher;
   pageFetcher?: PageFetcher;
+  browserRunner?: BrowserRunner;
   /** 도구 호출을 실행기에서 통제하는 정책 */
   policy?: ExecutionPolicy;
   approvalToken?: string;
@@ -148,6 +150,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     onServiceStatus,
     fetcher = fetchContract,
     pageFetcher,
+    browserRunner,
     intent = 'build',
   } = options;
   const ask = intent === 'ask';
@@ -166,6 +169,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         maxVerifyAttempts,
         fetcher,
         pageFetcher,
+        browserRunner,
         signal,
         onServiceStatus,
         onEvent,

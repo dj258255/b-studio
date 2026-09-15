@@ -62,7 +62,7 @@ function workflowPassed(result: AgentResult): string[] {
   return [
     check(['run', 'browser_check', 'contract_check', 'test', 'review'].every((stage) => passed.has(stage as never)), `검증 단계 전부 통과 (실제: ${[...passed].join(', ')})`),
     check(checks.some((c) => c.stage === 'test' && c.name === 'web-lint' && c.ok), `web 컨테이너에서 pnpm lint 통과 (${checks.map((c) => `${c.name}:${c.ok}`).join(', ')})`),
-    check(checks.some((c) => c.stage === 'browser_check' && c.ok), 'web / 화면 확인 통과'),
+    check(checks.some((c) => c.stage === 'browser_check' && c.name.includes('browser 390x844') && c.ok), `web / 모바일 브라우저 렌더링 확인 통과 (${checks.filter((c) => c.stage === 'browser_check').map((c) => c.detail ?? 'ok').join(', ')})`),
   ];
 }
 

@@ -19,8 +19,10 @@ export {
   type ClaudeCodeRunOptions,
 } from './claude-code-runner';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
+export { BrowserUnavailableError, runInBrowser, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
+export { isInScope, MAX_PLAN_LANES, MAX_PLAN_TASKS, planLanes, requestTaskPlan, TaskPlanError, type PlannedTask, type TaskLane } from './task-plan';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
 export { diffContracts, formatContractChanges, summarizeContract, type ContractChange, type OpenApiDocument } from './contract-diff';
 export {
@@ -71,6 +73,7 @@ export {
   piPolicyEnvironment,
   releaseBlockers,
   reviewChanges,
+  scopedExecutionPolicy,
   VERIFICATION_STAGES,
   WORKFLOW_TRAILER,
   workflowContext,

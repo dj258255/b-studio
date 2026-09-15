@@ -82,10 +82,21 @@ describe('parseSpec', () => {
       parseSpec(`${ORDERS_SPEC}workflow:\n  tests:\n    - { name: unit, service: api, command: [a] }\n    - { name: unit, service: web, command: [b] }\n`),
     );
     expect(duplicate.issues).toEqual(["workflow.tests.1.name: 테스트 이름 'unit'이 중복됩니다"]);
+    const httpOnly = captureError(() =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }\n`),
+    );
+    expect(httpOnly.issues).toEqual([
+      'workflow.pageChecks.0.viewport: viewport는 mode: browser에서만 쓸 수 있습니다',
+      'workflow.pageChecks.0.noHorizontalScroll: noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다',
+    ]);
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }\n`).workflow
+        ?.pageChecks?.[0],
+    ).toMatchObject({ mode: 'browser', viewport: { width: 390, height: 844 }, noHorizontalScroll: true, allowConsoleErrors: false });
     // //host 경로는 URL 해석에서 다른 호스트를 가리키므로 ready.path와 같은 규칙으로 막는다
     expect(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: //evil.example.com }\n`)).toThrow(SpecError);
     expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /orders }\n`).workflow?.pageChecks).toEqual([
-      { service: 'web', path: '/orders', expectStatus: 200 },
+      { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false },
     ]);
   });
 

@@ -31,6 +31,15 @@ export function executionPolicyFor(project: LoadedProject): ExecutionPolicy | un
 }
 
 /**
+ * studio.yaml 정책 위에 쓰기 범위를 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠지므로 항상 합친다
+ */
+export function scopedExecutionPolicy(project: LoadedProject, writablePaths: readonly string[] | undefined): ExecutionPolicy | undefined {
+  const base = executionPolicyFor(project);
+  if (!writablePaths) return base;
+  return { ...base, writablePaths };
+}
+
+/**
  * 이 프로젝트에서 순서대로 확인할 단계.
  * required를 생략해도 tests·pageChecks를 선언했다면 해당 단계를 필수로 넣는다. 선언한 검사를 건너뛸 방법은 두지 않는다
  */

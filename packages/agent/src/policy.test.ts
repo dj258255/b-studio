@@ -24,6 +24,16 @@ describe('execution policy', () => {
     expect(checkToolPolicy('write_file', {}, { requireApprovalFor: ['write_file'] }, 'approval-1').decision).toBe('allow');
   });
 
+  it('쓰기 범위를 지정하면 그 밖의 파일 쓰기를 막고, 보호 경로 규칙은 그대로 적용한다', () => {
+    const policy = { writablePaths: ['web/app/plan-a'], protectedPaths: ['web/app/plan-a/secret'] };
+    expect(checkToolPolicy('write_file', { path: 'web/app/plan-a/page.tsx' }, policy, undefined).decision).toBe('allow');
+    expect(checkToolPolicy('edit_file', { path: './web/app/plan-a/one.md' }, policy, undefined).decision).toBe('allow');
+    expect(checkToolPolicy('write_file', { path: 'web/app/plan-b/page.tsx' }, policy, undefined)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('writable scope') });
+    expect(checkToolPolicy('write_file', { path: 'web/app/plan-abc/page.tsx' }, policy, undefined).decision).toBe('deny');
+    expect(checkToolPolicy('write_file', { path: 'web/app/plan-a/secret/key.txt' }, policy, undefined).decision).toBe('deny');
+    expect(checkToolPolicy('read_file', { path: 'api/src/Order.java' }, policy, undefined).decision).toBe('allow');
+  });
+
   it('blocks protected project paths even when the tool itself is allowed', () => {
     const policy = { allowedTools: ['write_file'], protectedPaths: ['.env', 'infra', 'migrations'] };
     expect(checkToolPolicy('write_file', { path: '.env.local' }, policy, undefined)).toMatchObject({ decision: 'deny' });

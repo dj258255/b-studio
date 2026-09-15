@@ -58,8 +58,13 @@ export class OpenAICompatibleModelClient implements ModelClient {
       body: JSON.stringify({
         model: this.#profile.model,
         messages: openAiMessages(request.system, request.messages),
-        tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.input_schema } })),
-        tool_choice: request.tools.length ? 'auto' : undefined,
+        // OpenAI는 빈 tools 배열을 "[] is too short"로 거부한다. 도구 없는 요청(작업 계획 등)은 필드를 뺀다
+        ...(request.tools.length
+          ? {
+              tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.input_schema } })),
+              tool_choice: 'auto',
+            }
+          : {}),
         max_completion_tokens: this.#maxTokens,
       }),
       signal,

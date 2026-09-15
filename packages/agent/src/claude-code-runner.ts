@@ -81,6 +81,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onServiceStatus,
     fetcher = fetchContract,
     pageFetcher,
+    browserRunner,
     resume,
     model,
     effort = 'high',
@@ -95,7 +96,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
   const gate = ask
     ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, signal, onServiceStatus, onEvent });
+    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent });
   const context: ToolContext = {
     project,
     workspace,

@@ -40,7 +40,7 @@ describe('project workflow', () => {
   it('기본 단계에는 플랫폼이 항상 실행하는 단계만 두고, 선언한 테스트·화면 확인은 자동으로 필수 단계가 된다', () => {
     expect(workflowStages(projectWith())).toEqual(DEFAULT_WORKFLOW);
     expect(
-      workflowStages(projectWith({ tests: [unit], pageChecks: [{ service: 'web', path: '/', expectStatus: 200 }] })),
+      workflowStages(projectWith({ tests: [unit], pageChecks: [{ service: 'web', path: '/', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false }] })),
     ).toEqual(['plan', 'implement', 'run', 'browser_check', 'contract_check', 'test', 'review', 'checkpoint']);
   });
 

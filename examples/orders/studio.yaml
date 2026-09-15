@@ -9,9 +9,9 @@ workflow:
   # api에는 아직 테스트 소스가 없고, 실행 중인 bootRun 옆에서 Gradle을 한 번 더 돌리면 .gradle 잠금이 부딪혀 넣지 않았다
   tests:
     - { name: web-lint, service: web, command: [pnpm, lint] }
-  # browser_check 단계: 재시작한 화면을 HTTP로 불러 상태 코드와 문구를 확인한다 (헤드리스 브라우저 렌더링은 아니다)
+  # browser_check 단계: 헤드리스 Chromium으로 모바일 크기 화면을 렌더링해 문구·스크립트 예외·console.error·실패한 요청·가로 넘침을 확인한다
   pageChecks:
-    - { service: web, path: /, expectStatus: 200, expectText: <html }
+    - { service: web, path: /, mode: browser, expectText: To get started, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
   allowedTools: [list_files, read_file, write_file, edit_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply, terraform destroy]
   requireApprovalFor: [restart_service]

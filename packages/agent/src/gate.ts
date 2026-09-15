@@ -1,5 +1,6 @@
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowPageCheck, WorkflowStage, WorkflowTest } from '@b-studio/spec';
+import { runInBrowser, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { servicesForFiles } from './services';
 import { runTaskGraph, type TaskNode } from './task-graph';
@@ -36,6 +37,7 @@ export interface GateOptions {
   maxVerifyAttempts: number;
   fetcher: ContractFetcher;
   pageFetcher?: PageFetcher;
+  browserRunner?: BrowserRunner;
   signal?: AbortSignal;
   onServiceStatus?: StartOptions['onStatus'];
   onEvent: (event: AgentEvent) => void;
@@ -148,7 +150,7 @@ export class VerificationGate {
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     const nodes: TaskNode<void>[] = [];
     for (const page of pages) {
-      const name = `${page.service} ${page.path}`;
+      const name = `${page.service} ${page.path}${page.mode === 'browser' ? ` (browser${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''})` : ''}`;
       meta.push({ stage: 'browser_check', name });
       nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, signal) });
     }
@@ -169,10 +171,23 @@ export class VerificationGate {
   }
 
   async #checkPage(page: WorkflowPageCheck, signal: AbortSignal): Promise<void> {
-    const { sandbox, pageFetcher = fetchPage } = this.#options;
+    const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser } = this.#options;
     const endpoint = await sandbox.endpoint(page.service);
     const url = new URL(page.path, endpoint.url);
     if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
+    if (page.mode === 'browser') {
+      const result = await browserRunner(url.href, { viewport: page.viewport, signal });
+      const problems: string[] = [];
+      if (result.status !== page.expectStatus) problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
+      if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
+      if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
+      if (!page.allowConsoleErrors && result.consoleErrors.length > 0) problems.push(`console.error: ${result.consoleErrors.slice(0, 3).join(' | ')}`);
+      if (!page.allowConsoleErrors && result.failedRequests.length > 0) problems.push(`실패한 요청: ${result.failedRequests.slice(0, 3).join(' | ')}`);
+      if (page.noHorizontalScroll && result.horizontalOverflowPx > 1) problems.push(`가로로 ${result.horizontalOverflowPx}px 넘칩니다`);
+      // 화면 출력에 시크릿 값이 섞여 있을 수 있어 가린 뒤 모델에게 돌려준다
+      if (problems.length > 0) throw new Error(sandbox.redact(problems.join('\n')));
+      return;
+    }
     const { status, text } = await pageFetcher(url.href, signal);
     if (status !== page.expectStatus) throw new Error(`HTTP ${status} (기대 ${page.expectStatus})`);
     if (page.expectText && !text.includes(page.expectText)) throw new Error(`응답 본문에 '${page.expectText}'가 없습니다`);

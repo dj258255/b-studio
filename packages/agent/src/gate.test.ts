@@ -47,7 +47,7 @@ describe('VerificationGate 워크플로 단계', () => {
   it('선언한 화면 확인·테스트·리뷰를 모두 실행하고 통과한 단계를 기록한다', async () => {
     const target = withWorkflow({
       tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }],
-      pageChecks: [{ service: 'api', path: '/orders', expectStatus: 200, expectText: '주문 목록' }],
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'http', expectStatus: 200, expectText: '주문 목록', allowConsoleErrors: false, noHorizontalScroll: false }],
     });
     const { gate, workspace, events, commands } = await setup(target);
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
@@ -81,12 +81,75 @@ describe('VerificationGate 워크플로 단계', () => {
   });
 
   it('화면 응답에 기대 문구가 없으면 통과시키지 않는다', async () => {
-    const target = withWorkflow({ pageChecks: [{ service: 'api', path: '/orders', expectStatus: 200, expectText: '주문 목록' }] });
+    const target = withWorkflow({ pageChecks: [{ service: 'api', path: '/orders', mode: 'http', expectStatus: 200, expectText: '주문 목록', allowConsoleErrors: false, noHorizontalScroll: false }] });
     const { gate, workspace } = await setup(target, { page: async () => ({ status: 200, text: '<h1>Error</h1>' }) });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
 
     const outcome = await gate.check();
     expect(outcome.kind === 'retry' && outcome.feedback).toContain("응답 본문에 '주문 목록'가 없습니다");
+  });
+
+  it('browser 모드는 렌더링 결과의 문구·스크립트 예외·console.error·가로 넘침을 모두 실패 사유로 돌려준다', async () => {
+    const target = withWorkflow({
+      pageChecks: [
+        { service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, expectText: '주문 목록', viewport: { width: 390, height: 844 }, allowConsoleErrors: false, noHorizontalScroll: true },
+      ],
+    });
+    const sandbox = fakeSandbox(target, [true]);
+    const workspace = new Workspace(target.root);
+    const seen: Array<{ url: string; viewport?: { width: number; height: number } }> = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: async () => {
+        throw new Error('browser 모드에서 HTTP 확인을 쓰면 안 된다');
+      },
+      browserRunner: async (url, options) => {
+        seen.push({ url, viewport: options.viewport });
+        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], horizontalOverflowPx: 510 };
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(seen).toEqual([{ url: 'http://127.0.0.1:1/orders', viewport: { width: 390, height: 844 } }]);
+    expect(outcome.kind).toBe('retry');
+    const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+    expect(feedback).toContain('[browser_check] api /orders (browser 390x844)');
+    for (const reason of ["렌더링된 화면에 '주문 목록'가 없습니다", '스크립트 예외: window.missing is undefined', 'console.error: hydration failed', '실패한 요청: 404 http://127.0.0.1:1/_next/static/chunk.js', '가로로 510px 넘칩니다']) {
+      expect(feedback).toContain(reason);
+    }
+    expect(gate.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('브라우저를 띄울 수 없으면 화면 확인을 통과시키지 않는다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const { gate, workspace } = await setup(target);
+    // setup은 기본 러너를 쓰지 않도록 browserRunner를 넘기지 않으므로, 여기서만 실패하는 러너로 바꾼다
+    Object.assign(gate, {});
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    const failing = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => {
+        throw new Error('헤드리스 브라우저를 실행할 수 없습니다: executable not found');
+      },
+      onEvent: () => {},
+    });
+    const outcome = await failing.check();
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('헤드리스 브라우저를 실행할 수 없습니다');
+    expect(failing.passedStages.has('browser_check')).toBe(false);
   });
 
   it('도구 게이트를 거치지 않고 바뀐 보호 경로도 리뷰 단계에서 막는다', async () => {

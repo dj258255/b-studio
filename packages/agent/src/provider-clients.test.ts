@@ -46,6 +46,19 @@ describe('OpenAICompatibleModelClient', () => {
   });
 });
 
+describe('OpenAICompatibleModelClient 도구 없는 요청', () => {
+  it('빈 tools 배열을 보내지 않는다', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ id: 'msg-2', model: 'openai-model', choices: [{ finish_reason: 'stop', message: { content: '{"tasks":[]}' } }] }), { status: 200 }),
+    );
+    const client = new OpenAICompatibleModelClient({ profile: profile('openai'), fetcher, env: { TEST_KEY: 'secret' } });
+    await client.createMessage({ ...request, tools: [] });
+    const sent = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
+    expect(sent).not.toHaveProperty('tools');
+    expect(sent).not.toHaveProperty('tool_choice');
+  });
+});
+
 describe('GoogleModelClient', () => {
   it('공통 도구 계약을 Gemini function call로 왕복한다', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(

@@ -15,6 +15,7 @@
     "@b-studio/sandbox": "workspace:*",
     "@b-studio/spec": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "playwright-core": "1.63.0",
     "zod": "^4.6.1"
   }
 }

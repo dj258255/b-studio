@@ -187,14 +187,32 @@ export const WorkflowTestSchema = z.object({
   maxAttempts: z.number().int().min(1).max(3).default(1),
 });
 
-/** browser_check 단계에서 재시작한 서비스의 화면 경로를 HTTP로 불러 렌더링 결과를 확인한다 (헤드리스 브라우저는 아니다) */
-export const WorkflowPageCheckSchema = z.object({
-  service: z.string().regex(NAME),
-  path: SERVICE_PATH,
-  expectStatus: z.number().int().min(100).max(599).default(200),
-  /** 응답 본문에 반드시 들어 있어야 하는 문구 */
-  expectText: z.string().min(1).optional(),
-});
+/**
+ * browser_check 단계에서 재시작한 서비스의 화면을 확인한다.
+ * http는 응답 상태와 본문 문구만 보고, browser는 헤드리스 Chromium으로 렌더링해 스크립트 예외·console.error·가로 넘침까지 본다
+ */
+export const WorkflowPageCheckSchema = z
+  .object({
+    service: z.string().regex(NAME),
+    path: SERVICE_PATH,
+    mode: z.enum(['http', 'browser']).default('http'),
+    expectStatus: z.number().int().min(100).max(599).default(200),
+    /** http는 응답 본문, browser는 렌더링된 화면 텍스트에 들어 있어야 하는 문구 */
+    expectText: z.string().min(1).optional(),
+    /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다 */
+    viewport: z.object({ width: z.number().int().min(240).max(3840), height: z.number().int().min(240).max(3840) }).optional(),
+    /** browser 전용. 기본은 console.error나 실패한 요청(4xx·5xx·연결 실패, 자동 favicon 제외)이 하나라도 있으면 실패 */
+    allowConsoleErrors: z.boolean().default(false),
+    /** browser 전용. 문서가 창보다 넓어 가로 스크롤이 생기면 실패 */
+    noHorizontalScroll: z.boolean().default(false),
+  })
+  .superRefine((check, ctx) => {
+    if (check.mode === 'browser') return;
+    // http 모드에서 무시되는 옵션을 받으면 검사한 것처럼 보이기만 한다
+    if (check.viewport) ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
+    if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
+  });
 
 /** 모델 프롬프트가 아니라 실행기에서 적용하는 프로젝트별 워크플로 정책 */
 export const WorkflowSchema = z
