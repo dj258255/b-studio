@@ -51,6 +51,44 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
+  it('워크플로 정책의 단계와 보호 경로를 읽고 잘못된 단계를 거부한다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:
+  required: [plan, implement, run, test, checkpoint]
+  tests:
+    - { name: unit, service: api, command: [./gradlew, test] }
+  allowedTools: [read_file, edit_file]
+  protectedPaths: [.env, infra]
+  releaseRequires: [checkpoint]
+`);
+    expect(spec.workflow).toMatchObject({
+      required: ['plan', 'implement', 'run', 'test', 'checkpoint'],
+      tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }],
+      allowedTools: ['read_file', 'edit_file'],
+      protectedPaths: ['.env', 'infra'],
+      // zod는 모르는 키를 조용히 버린다. 선언한 필드가 실제로 남는지 확인한다
+      releaseRequires: ['checkpoint'],
+    });
+    expect(() => parseSpec(`${ORDERS_SPEC}workflow:
+  required: [plan, deploy]
+`)).toThrow(SpecError);
+  });
+
+  it('실행할 수단이 없는 test·browser_check를 필수 단계로 두면 거부한다', () => {
+    const noTests = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [plan, test, checkpoint]\n`));
+    expect(noTests.issues).toEqual(['workflow.tests: required에 test가 있으면 실행할 tests가 최소 1개 필요합니다']);
+    const noPages = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [browser_check]\n`));
+    expect(noPages.issues).toEqual(['workflow.pageChecks: required에 browser_check가 있으면 확인할 pageChecks가 최소 1개 필요합니다']);
+    const duplicate = captureError(() =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  tests:\n    - { name: unit, service: api, command: [a] }\n    - { name: unit, service: web, command: [b] }\n`),
+    );
+    expect(duplicate.issues).toEqual(["workflow.tests.1.name: 테스트 이름 'unit'이 중복됩니다"]);
+    // //host 경로는 URL 해석에서 다른 호스트를 가리키므로 ready.path와 같은 규칙으로 막는다
+    expect(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: //evil.example.com }\n`)).toThrow(SpecError);
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /orders }\n`).workflow?.pageChecks).toEqual([
+      { service: 'web', path: '/orders', expectStatus: 200 },
+    ]);
+  });
+
   it('network.egress는 호스트 문자열과 평문 HTTP 경로·메서드 규칙을 함께 받는다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}network:
   egress:
@@ -236,6 +274,34 @@ resources:
     const bad = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  api: { source: managed, template: t, path: api, port: 1, preview: logs }\nresources:\n  api: { memory: 2GB }\n  db: {}\n'));
     expect(bad.issues.some((issue) => issue.startsWith('resources.api.memory'))).toBe(true);
     expect(bad.issues.some((issue) => issue.startsWith('resources.db'))).toBe(true);
+  });
+
+  it('워크플로 테스트와 화면 확인은 관리형 서비스에서만 돌린다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-workflow-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+workflow:
+  tests:
+    - { name: unit, service: api, command: [./gradlew, test] }
+    - { name: db, service: db, command: [pg_isready] }
+  pageChecks:
+    - { service: web, path: / }
+`,
+    );
+    await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual([
+      "workflow.tests.1.service: 'db'은(는) source: managed 서비스가 아닙니다",
+      "workflow.pageChecks.0.service: 'web'은(는) source: managed 서비스가 아닙니다",
+    ]);
   });
 
   it('시크릿은 환경 변수 이름으로 적고, 받을 서비스는 compose에 있어야 한다', async () => {

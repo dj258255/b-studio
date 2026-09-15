@@ -1,12 +1,13 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
-import { VerificationGate } from './gate';
+import { VerificationGate, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
+import { executionPolicyFor, workflowContext, type WorkflowCheck } from './workflow';
 
 type BetaMessage = Anthropic.Beta.BetaMessage;
 type BetaMessageParam = Anthropic.Beta.BetaMessageParam;
@@ -49,6 +50,10 @@ export interface AgentResult {
   changedFiles: string[];
   /** 마지막 검증 게이트 결과 */
   report?: VerificationReport;
+  /** 마지막 검증에서 플랫폼이 실행한 화면 확인·테스트·리뷰 */
+  checks?: WorkflowCheck[];
+  /** 마지막 검증에서 통과한 워크플로 검증 단계 */
+  passedStages?: import('@b-studio/spec').WorkflowStage[];
   verifyAttempts: number;
   turns: number;
   usage: AgentUsage;
@@ -72,6 +77,8 @@ export type AgentEvent =
   | { type: 'tool_call'; name: string; input: unknown }
   | { type: 'tool_result'; name: string; ok: boolean; content: string }
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
+  | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
+  | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }
   | { type: 'verify_result'; report: VerificationReport; text: string }
   | { type: 'done'; result: AgentResult }
@@ -99,6 +106,7 @@ export interface RunAgentOptions {
   /** 검증 게이트나 도구가 서비스를 재시작할 때의 상태. 재시작하면 호스트 포트가 바뀌므로 미리보기가 따라가야 한다 */
   onServiceStatus?: StartOptions['onStatus'];
   fetcher?: ContractFetcher;
+  pageFetcher?: PageFetcher;
   /** 도구 호출을 실행기에서 통제하는 정책 */
   policy?: ExecutionPolicy;
   approvalToken?: string;
@@ -139,6 +147,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     onEvent = () => {},
     onServiceStatus,
     fetcher = fetchContract,
+    pageFetcher,
     intent = 'build',
   } = options;
   const ask = intent === 'ask';
@@ -156,12 +165,16 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         allowBreaking,
         maxVerifyAttempts,
         fetcher,
+        pageFetcher,
         signal,
         onServiceStatus,
         onEvent,
       });
-  const system = buildSystemPrompt(project);
+  const system = buildSystemPrompt(project) + workflowContext(project);
   const tools = buildTools(project);
+  const policy = options.policy ?? executionPolicyFor(project);
+  let stage: import('@b-studio/spec').WorkflowStage = 'plan';
+  onEvent({ type: 'stage', stage, source: 'platform' });
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
   const usage = emptyUsage();
 
@@ -171,6 +184,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       summary,
       changedFiles: workspace.changedFiles(),
       report: gate?.report,
+      checks: gate?.checks,
+      passedStages: gate ? [...gate.passedStages] : undefined,
       verifyAttempts: gate?.attempts ?? 0,
       turns,
       usage,
@@ -217,11 +232,18 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           signal,
           onServiceStatus,
           readOnly: ask,
-          policy: options.policy,
+          policy,
           approvalToken: options.approvalToken,
           requestApproval: options.requestApproval,
           onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
         });
+        if (outcome.ok && (call.name === 'write_file' || call.name === 'edit_file') && stage === 'plan') {
+          stage = 'implement';
+          onEvent({ type: 'stage', stage, source: 'platform' });
+        } else if (outcome.ok && (call.name === 'run_in_service' || call.name === 'restart_service') && stage !== 'run') {
+          stage = 'run';
+          onEvent({ type: 'stage', stage, source: 'platform' });
+        }
         onEvent({ type: 'tool_result', name: call.name, ok: outcome.ok, content: outcome.content });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: !outcome.ok });
       }
@@ -237,8 +259,13 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
 
     // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
     if (!gate) return finish('done', text, turn);
+    // 단계 이벤트(실행·계약·화면·테스트·리뷰)는 게이트가 직접 알린다. 로컬 Claude Code 러너도 같은 게이트를 쓴다
     const outcome = await gate.check();
-    if (outcome.kind === 'pass') return finish('done', text, turn);
+    if (outcome.kind === 'pass') {
+      // 바뀐 파일이 없어 검증 없이 끝났다면 체크포인트할 것도 없다
+      if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+      return finish('done', text, turn);
+    }
     if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
     messages.push({ role: 'user', content: outcome.feedback });
   }

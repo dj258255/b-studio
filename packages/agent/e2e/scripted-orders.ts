@@ -28,6 +28,7 @@ const expectations: Record<DemoScenario['id'], Expectation> = {
       check(gates[1]?.contracts[0]?.changes.some((c) => c.target === 'GET /api/orders' && !c.breaking) ?? false, '계약에 GET /api/orders 추가'),
       check(api.includes('김토스'), `API 응답에 시드 데이터 (${api.slice(0, 80)})`),
       check(web.includes('김토스'), '/orders 화면에 시드 데이터가 렌더링됨'),
+      ...workflowPassed(result),
     ];
   },
   async 'order-memo'(result, events, sandbox) {
@@ -39,6 +40,7 @@ const expectations: Record<DemoScenario['id'], Expectation> = {
       check(gates.length === 1 && gates[0]!.ok, '게이트 한 번에 통과'),
       check(changes.length === 1 && changes[0]!.target === 'OrderResponse.memo' && !changes[0]!.breaking, `계약 변경은 OrderResponse.memo 추가 하나 (실제: ${changes.map((c) => c.target).join(', ')})`),
       check(web.includes('문 앞에 놓아주세요'), '/orders 화면에 배송 메모가 렌더링됨'),
+      ...workflowPassed(result),
     ];
   },
   async 'drop-memo'(result) {
@@ -47,9 +49,22 @@ const expectations: Record<DemoScenario['id'], Expectation> = {
       check(result.status === 'failed', `상태 failed (실제: ${result.status})`),
       check(result.report?.restarted.every((r) => r.ready) ?? false, 'api 재시작 자체는 성공'),
       check(breaking.some((c) => c.kind === 'property-removed' && c.target === 'OrderResponse.memo'), '호환 깨짐으로 OrderResponse.memo 삭제를 감지'),
+      // 계약이 깨진 상태 위에서는 테스트·화면 확인을 돌리지 않는다
+      check(!(result.passedStages ?? []).includes('test') && !(result.checks ?? []).some((c) => c.stage === 'test'), '계약 실패 뒤에는 test 단계를 실행하지 않음'),
     ];
   },
 };
+
+/** 게이트가 studio.yaml의 test·browser_check·review를 실제 컨테이너에서 실행해 통과시켰는지 */
+function workflowPassed(result: AgentResult): string[] {
+  const passed = new Set(result.passedStages ?? []);
+  const checks = result.checks ?? [];
+  return [
+    check(['run', 'browser_check', 'contract_check', 'test', 'review'].every((stage) => passed.has(stage as never)), `검증 단계 전부 통과 (실제: ${[...passed].join(', ')})`),
+    check(checks.some((c) => c.stage === 'test' && c.name === 'web-lint' && c.ok), `web 컨테이너에서 pnpm lint 통과 (${checks.map((c) => `${c.name}:${c.ok}`).join(', ')})`),
+    check(checks.some((c) => c.stage === 'browser_check' && c.ok), 'web / 화면 확인 통과'),
+  ];
+}
 
 async function main(): Promise<number> {
   const workDir = path.join(homedir(), '.cache/b-studio/e2e', `orders-${Date.now()}`);

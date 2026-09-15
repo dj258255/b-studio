@@ -166,6 +166,74 @@ export const DeploySchema = z.object({
     .default({}),
 });
 
+/** 에이전트가 작업을 끝냈다고 주장해도 스튜디오가 순서대로 확인할 개발 단계 */
+export const WorkflowStageSchema = z.enum([
+  'plan',
+  'implement',
+  'run',
+  'browser_check',
+  'contract_check',
+  'test',
+  'review',
+  'checkpoint',
+]);
+
+/** test 단계에서 플랫폼이 서비스 컨테이너 안에서 직접 실행하는 명령. 종료 코드 0이어야 통과 */
+export const WorkflowTestSchema = z.object({
+  name: z.string().regex(NAME),
+  service: z.string().regex(NAME),
+  command: z.array(z.string().min(1)).min(1),
+  /** 불안정한 테스트를 몇 번까지 다시 돌릴지. 재시도 횟수는 결과에 남는다 */
+  maxAttempts: z.number().int().min(1).max(3).default(1),
+});
+
+/** browser_check 단계에서 재시작한 서비스의 화면 경로를 HTTP로 불러 렌더링 결과를 확인한다 (헤드리스 브라우저는 아니다) */
+export const WorkflowPageCheckSchema = z.object({
+  service: z.string().regex(NAME),
+  path: SERVICE_PATH,
+  expectStatus: z.number().int().min(100).max(599).default(200),
+  /** 응답 본문에 반드시 들어 있어야 하는 문구 */
+  expectText: z.string().min(1).optional(),
+});
+
+/** 모델 프롬프트가 아니라 실행기에서 적용하는 프로젝트별 워크플로 정책 */
+export const WorkflowSchema = z
+  .object({
+    /** 생략하면 현재 b-studio 기본 검증 흐름을 사용한다 */
+    required: z.array(WorkflowStageSchema).min(1).optional(),
+    /** required에 test를 넣으면 최소 하나가 필요하다 */
+    tests: z.array(WorkflowTestSchema).optional(),
+    /** required에 browser_check를 넣으면 최소 하나가 필요하다 */
+    pageChecks: z.array(WorkflowPageCheckSchema).optional(),
+    /** review 단계에서 한 번의 요청이 바꿀 수 있는 파일 수 상한. 넘으면 나눠서 요청하게 한다 */
+    maxChangedFiles: z.number().int().min(1).optional(),
+    /** 이 목록 밖의 도구는 모델이 요청해도 실행하지 않는다 */
+    allowedTools: z.array(z.string().min(1)).min(1).optional(),
+    /** 명령의 첫 토큰부터 비교하는 추가 차단 목록 */
+    deniedCommands: z.array(z.string().min(1)).optional(),
+    /** 파일 변경·서비스 실행 전에 사람 승인을 요구할 도구 */
+    requireApprovalFor: z.array(z.string().min(1)).optional(),
+    /** 에이전트가 변경할 수 없는 프로젝트 상대 경로 접두사 */
+    protectedPaths: z.array(RELATIVE_PATH).optional(),
+    /** 배포할 체크포인트가 통과했어야 하는 단계. checkpoint만 두면(기본) 모든 체크포인트를 배포할 수 있다 */
+    releaseRequires: z.array(WorkflowStageSchema).min(1).optional(),
+  })
+  // 실행할 수단이 없는 단계를 필수로 두면 "선언은 됐지만 한 번도 돌지 않은" 단계가 통과처럼 보인다. 불러올 때 막는다
+  .superRefine((workflow, ctx) => {
+    const required = new Set(workflow.required ?? []);
+    if (required.has('test') && !workflow.tests?.length) {
+      ctx.addIssue({ code: 'custom', path: ['tests'], message: 'required에 test가 있으면 실행할 tests가 최소 1개 필요합니다' });
+    }
+    if (required.has('browser_check') && !workflow.pageChecks?.length) {
+      ctx.addIssue({ code: 'custom', path: ['pageChecks'], message: 'required에 browser_check가 있으면 확인할 pageChecks가 최소 1개 필요합니다' });
+    }
+    const names = new Set<string>();
+    workflow.tests?.forEach((test, index) => {
+      if (names.has(test.name)) ctx.addIssue({ code: 'custom', path: ['tests', index, 'name'], message: `테스트 이름 '${test.name}'이 중복됩니다` });
+      names.add(test.name);
+    });
+  });
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -187,6 +255,8 @@ export const StudioSpecSchema = z.object({
   /** 환경 변수 이름 → 받을 서비스 */
   secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
   deploy: DeploySchema.optional(),
+  /** Pi·Claude·API 에이전트에 공통으로 적용하는 실행 정책 */
+  workflow: WorkflowSchema.optional(),
   repository: z
     .object({
       /**
@@ -205,6 +275,10 @@ export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type SecretSpec = z.infer<typeof SecretSchema>;
 export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
+export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
+export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
+export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
+export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;
 export type EgressRule = z.infer<typeof EgressRuleSchema>;

@@ -23,4 +23,12 @@ describe('execution policy', () => {
     expect(checkToolPolicy('write_file', {}, { requireApprovalFor: ['write_file'] }, undefined).decision).toBe('deny');
     expect(checkToolPolicy('write_file', {}, { requireApprovalFor: ['write_file'] }, 'approval-1').decision).toBe('allow');
   });
+
+  it('blocks protected project paths even when the tool itself is allowed', () => {
+    const policy = { allowedTools: ['write_file'], protectedPaths: ['.env', 'infra', 'migrations'] };
+    expect(checkToolPolicy('write_file', { path: '.env.local' }, policy, undefined)).toMatchObject({ decision: 'deny' });
+    expect(checkToolPolicy('write_file', { path: '.env' }, policy, undefined)).toMatchObject({ decision: 'deny' });
+    expect(checkToolPolicy('edit_file', { path: 'infra/docker-compose.yml' }, policy, undefined)).toMatchObject({ decision: 'deny' });
+    expect(checkToolPolicy('write_file', { path: 'src/migrations.ts' }, policy, undefined).decision).toBe('allow');
+  });
 });

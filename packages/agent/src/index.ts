@@ -18,7 +18,7 @@ export {
   type ClaudeCodeResult,
   type ClaudeCodeRunOptions,
 } from './claude-code-runner';
-export { VerificationGate, type GateOutcome } from './gate';
+export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
@@ -60,7 +60,25 @@ export {
   type RemoteLocation,
 } from './repository';
 export { buildTools, executeTool } from './tools';
-export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
+export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
+export {
+  DEFAULT_WORKFLOW,
+  describeWorkflow,
+  executionPolicyFor,
+  formatWorkflowTrailer,
+  missingVerificationStages,
+  parseWorkflowTrailer,
+  piPolicyEnvironment,
+  releaseBlockers,
+  reviewChanges,
+  VERIFICATION_STAGES,
+  WORKFLOW_TRAILER,
+  workflowContext,
+  workflowReleaseRequirements,
+  workflowStages,
+  type WorkflowCheck,
+} from './workflow';
+export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
 export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
 export {

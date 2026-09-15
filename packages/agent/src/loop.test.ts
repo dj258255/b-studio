@@ -149,6 +149,34 @@ describe('runAgent', () => {
     expect(sandbox.restarts).toEqual([]);
   });
 
+  it('게이트를 통과한 변경만 체크포인트 단계로 넘어가고, 통과한 검증 단계를 결과에 남긴다', async () => {
+    const events: AgentEvent[] = [];
+    const changed = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      client: new ScriptedModelClient([
+        { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+        { text: '고쳤습니다.' },
+      ]),
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+    expect(events.flatMap((e) => (e.type === 'stage' ? [e.stage] : []))).toEqual(['plan', 'implement', 'run', 'contract_check', 'review', 'checkpoint']);
+    expect(changed.passedStages?.sort()).toEqual(['contract_check', 'review', 'run']);
+
+    const quiet: AgentEvent[] = [];
+    await runAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client: new ScriptedModelClient([{ text: '주문 API입니다.' }]),
+      fetcher: async () => contract,
+      onEvent: collect(quiet),
+    });
+    expect(quiet.some((e) => e.type === 'stage' && e.stage === 'checkpoint')).toBe(false);
+  });
+
   it('대화 기록을 넘기면 다음 요청이 이전 맥락을 이어받는다', async () => {
     const conversation: Parameters<typeof runAgent>[0]['conversation'] = [];
     const client = new ScriptedModelClient([{ text: '주문 API입니다.' }, { text: '앞에서 말한 주문 API에 필드를 더할 수 있습니다.' }]);

@@ -17,6 +17,7 @@ import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type Ru
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract } from './verify';
+import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
 
 const SERVER = 'b-studio';
@@ -79,6 +80,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onEvent = () => {},
     onServiceStatus,
     fetcher = fetchContract,
+    pageFetcher,
     resume,
     model,
     effort = 'high',
@@ -93,7 +95,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
   const gate = ask
     ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, signal, onServiceStatus, onEvent });
+    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, signal, onServiceStatus, onEvent });
   const context: ToolContext = {
     project,
     workspace,
@@ -102,7 +104,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     signal,
     onServiceStatus,
     readOnly: ask,
-    policy: options.policy,
+    // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
+    policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
@@ -134,7 +137,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     prompt: input,
     options: {
       cwd: project.root,
-      systemPrompt: buildSystemPrompt(project, { toolName }),
+      systemPrompt: buildSystemPrompt(project, { toolName }) + workflowContext(project),
       // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
       tools: [],
       mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
@@ -167,6 +170,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       summary,
       changedFiles: workspace.changedFiles(),
       report: gate?.report,
+      checks: gate?.checks,
+      passedStages: gate ? [...gate.passedStages] : undefined,
       verifyAttempts: gate?.attempts ?? 0,
       turns: messageIds.size,
       usage,
@@ -236,7 +241,10 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             break;
           }
           const outcome = await gate.check();
-          if (outcome.kind === 'pass') finish('done', lastText);
+          if (outcome.kind === 'pass') {
+            if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+            finish('done', lastText);
+          }
           else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
           else {
             lastText = '';

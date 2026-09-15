@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError } from './checkpoints';
+import { formatWorkflowTrailer } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -54,6 +55,23 @@ describe('CheckpointStore', () => {
     await write('api/src/PaymentClient.java', 'class PaymentClient { String key = System.getenv("PAYMENT_API_KEY"); }\n');
     await expect(store.commit('요청: 결제 연동', '키는 sk_live_1234567890', { findSecrets })).rejects.toThrow('커밋 메시지 (PAYMENT_API_KEY)');
     expect(await store.commit('요청: 결제 연동', undefined, { findSecrets })).toMatchObject({ files: ['api/src/PaymentClient.java'] });
+  });
+
+  it('커밋 본문의 Workflow-Passed 트레일러를 체크포인트의 통과 단계로 다시 읽고, 없으면 비워 둔다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const verified = await store.commit('요청: 메모 추가', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check', 'test', 'review'])}`);
+    expect(verified?.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
+
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    const local = await store.commit('직접 수정: 파일 1개', '스튜디오 밖에서 바꾼 파일입니다.');
+    expect(local?.passedStages).toBeUndefined();
+
+    // 스튜디오를 다시 켜서 목록을 새로 읽어도 같은 기록이 나온다
+    const [latest, previous] = await store.list();
+    expect(latest!.passedStages).toBeUndefined();
+    expect(previous!.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
   });
 
   it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {

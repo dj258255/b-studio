@@ -2,6 +2,8 @@ import { execFile, spawn } from 'node:child_process';
 import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { WorkflowStage } from '@b-studio/spec';
+import { parseWorkflowTrailer } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -13,6 +15,8 @@ export interface Checkpoint {
   createdAt: string;
   /** 직전 체크포인트 대비 바뀐 파일 (세션 시작 체크포인트는 전체 파일) */
   files: string[];
+  /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 체크포인트다 */
+  passedStages?: WorkflowStage[];
 }
 
 export interface GitAuthor {
@@ -595,16 +599,19 @@ export class CheckpointStore {
   }
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
-    const [sha = '', shortSha = '', subject = '', createdAt = ''] = (await this.#git(['show', '-s', '--format=%H%x00%h%x00%s%x00%cI', ref]))
+    const [sha = '', shortSha = '', subject = '', createdAt = '', body = ''] = (
+      await this.#git(['show', '-s', '--format=%H%x00%h%x00%s%x00%cI%x00%b', ref])
+    )
       .trim()
       .split('\0');
+    const passedStages = parseWorkflowTrailer(body);
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');
       const files = await this.#fromRoot((await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean));
       return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
     }
-    return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha) };
+    return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha), ...(passedStages ? { passedStages } : {}) };
   }
 
   /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */

@@ -134,6 +134,15 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     if (!composeServices.has(name)) issues.push(`resources.${name}: ${spec.compose}에 같은 이름의 서비스가 없습니다`);
   }
 
+  // 검증 명령과 화면 확인은 스튜디오가 재시작하는 관리형 서비스에서만 의미가 있다
+  const managedNames = new Set(managed.map(([name]) => name));
+  spec.workflow?.tests?.forEach((test, index) => {
+    if (!managedNames.has(test.service)) issues.push(`workflow.tests.${index}.service: '${test.service}'은(는) source: managed 서비스가 아닙니다`);
+  });
+  spec.workflow?.pageChecks?.forEach((check, index) => {
+    if (!managedNames.has(check.service)) issues.push(`workflow.pageChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
+  });
+
   for (const [name, secret] of Object.entries(spec.secrets ?? {})) {
     for (const service of secret.services) {
       if (!composeServices.has(service)) issues.push(`secrets.${name}.services: ${spec.compose}에 '${service}' 서비스가 없습니다`);

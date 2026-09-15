@@ -8,6 +8,8 @@ export interface ExecutionPolicy {
   deniedCommands?: readonly string[];
   /** 지정한 도구는 실행 전에 호출자의 승인을 받아야 한다. */
   requireApprovalFor?: readonly string[];
+  /** 에이전트가 수정할 수 없는 프로젝트 상대 경로 접두사 */
+  protectedPaths?: readonly string[];
 }
 
 export interface ApprovalRequest {
@@ -48,6 +50,14 @@ export function checkToolPolicy(
     return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
   }
 
+  if ((tool === 'write_file' || tool === 'edit_file') && policy?.protectedPaths?.length) {
+    const file = fileInput(input);
+    const protectedPath = policy.protectedPaths.find((candidate) => isProtectedPath(file, candidate));
+    if (protectedPath) {
+      return { tool, decision: 'deny', reason: `path is protected by execution policy: ${protectedPath}` };
+    }
+  }
+
   if (tool === 'run_in_service') {
     const command = commandInput(input);
     const denied = [...DEFAULT_DENIED_COMMANDS, ...(policy?.deniedCommands ?? [])].find((rule) => {
@@ -73,6 +83,19 @@ function commandInput(input: unknown): string[] {
   if (typeof input !== 'object' || input === null) return [];
   const command = (input as Record<string, unknown>).command;
   return Array.isArray(command) && command.every((value) => typeof value === 'string') ? command : [];
+}
+
+function fileInput(input: unknown): string {
+  if (typeof input !== 'object' || input === null) return '';
+  const file = (input as Record<string, unknown>).path;
+  return typeof file === 'string' ? file.replaceAll('\\', '/') : '';
+}
+
+/** 도구 호출 전 차단, 리뷰 단계의 사후 확인, Pi 확장이 같은 규칙으로 보호 경로를 판정하도록 공유한다 */
+export function isProtectedPath(file: string, candidate: string): boolean {
+  file = file.replaceAll('\\', '/').replace(/^\.\//, '');
+  const normalized = candidate.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
+  return file === normalized || file.startsWith(`${normalized}/`) || (normalized.startsWith('.') && file.startsWith(`${normalized}.`));
 }
 
 function splitRule(rule: string): string[] {
