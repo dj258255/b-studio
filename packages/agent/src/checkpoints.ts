@@ -3,7 +3,7 @@ import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
-import { parseWorkflowTrailer } from './workflow';
+import { parseWorkflowTrailerValues, WORKFLOW_TRAILER } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -308,11 +308,16 @@ export class CheckpointStore {
   /**
    * 바뀐 파일이 있으면 체크포인트로 남긴다. 본문에는 검증 결과처럼 PR에서 다시 쓸 기록을 넣는다.
    * allowEmpty는 파일은 그대로지만 데이터베이스만 바뀐 요청을 체크포인트로 남길 때 쓴다.
+   * trailers는 본문 길이 상한과 상관없이 마지막 문단으로 붙인다. 본문에 넣으면 긴 검증 보고서와 함께 잘려 나간다
    */
   async commit(
     message: string,
     body?: string,
-    { allowEmpty = false, findSecrets }: { allowEmpty?: boolean; findSecrets?: (text: string) => string[] } = {},
+    {
+      allowEmpty = false,
+      findSecrets,
+      trailers = [],
+    }: { allowEmpty?: boolean; findSecrets?: (text: string) => string[]; trailers?: readonly string[] } = {},
   ): Promise<Checkpoint | undefined> {
     const pending = await this.pendingFiles();
     if (!allowEmpty && pending.length === 0) return undefined;
@@ -327,6 +332,7 @@ export class CheckpointStore {
     await this.#git([
       'commit', '-q', '--cleanup=whitespace', ...(allowEmpty ? ['--allow-empty'] : []),
       '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
+      ...(trailers.length > 0 ? ['-m', trailers.map(oneLine).join('\n')] : []),
     ]);
     return this.#checkpoint('HEAD');
   }
@@ -599,12 +605,13 @@ export class CheckpointStore {
   }
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
-    const [sha = '', shortSha = '', subject = '', createdAt = '', body = ''] = (
-      await this.#git(['show', '-s', '--format=%H%x00%h%x00%s%x00%cI%x00%b', ref])
+    // 트레일러는 git이 마지막 문단에서만 읽는다. 본문(에이전트 요약)에 같은 모양의 줄이 있어도 통과 기록이 되지 않는다
+    const [sha = '', shortSha = '', subject = '', createdAt = '', trailers = ''] = (
+      await this.#git(['show', '-s', `--format=%H%x00%h%x00%s%x00%cI%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)`, ref])
     )
       .trim()
       .split('\0');
-    const passedStages = parseWorkflowTrailer(body);
+    const passedStages = parseWorkflowTrailerValues(trailers.split('\x1f'));
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');

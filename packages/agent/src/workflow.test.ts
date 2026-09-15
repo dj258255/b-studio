@@ -4,7 +4,7 @@ import {
   DEFAULT_WORKFLOW,
   executionPolicyFor,
   missingVerificationStages,
-  parseWorkflowTrailer,
+  parseWorkflowTrailerValues,
   piPolicyEnvironment,
   releaseBlockers,
   formatWorkflowTrailer,
@@ -69,9 +69,12 @@ describe('project workflow', () => {
     // 선언하지 않으면 기존처럼 모든 체크포인트를 배포할 수 있다
     expect(releaseBlockers(projectWith(), undefined)).toEqual([]);
 
-    expect(parseWorkflowTrailer(`요약\n\n${formatWorkflowTrailer(['run', 'review'])}`)).toEqual(['run', 'review']);
-    expect(parseWorkflowTrailer(formatWorkflowTrailer([]))).toEqual([]);
-    expect(parseWorkflowTrailer('트레일러 없음')).toBeUndefined();
+    const value = (stages: Parameters<typeof formatWorkflowTrailer>[0]) => formatWorkflowTrailer(stages).split(': ')[1]!;
+    expect(parseWorkflowTrailerValues([value(['run', 'review'])])).toEqual(['run', 'review']);
+    expect(parseWorkflowTrailerValues([value([])])).toEqual([]);
+    expect(parseWorkflowTrailerValues([''])).toBeUndefined();
+    // 알 수 없는 단계 이름은 버리고, 여러 값이면 마지막 것을 쓴다
+    expect(parseWorkflowTrailerValues(['test, review', 'run, deploy'])).toEqual(['run']);
   });
 
   it('Pi 확장이 읽을 환경 변수를 같은 studio.yaml에서 만든다', () => {

@@ -55,12 +55,17 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
   return `${WORKFLOW_TRAILER}: ${stages.length > 0 ? stages.join(', ') : 'none'}`;
 }
 
-/** 트레일러가 없으면 undefined. 스튜디오 밖에서 바꾼 파일이나 이전 버전의 체크포인트다 */
-export function parseWorkflowTrailer(body: string): WorkflowStage[] | undefined {
-  const match = new RegExp(`^${WORKFLOW_TRAILER}: (.*)$`, 'm').exec(body);
-  if (!match) return undefined;
-  const value = match[1]!.trim();
-  return value === 'none' ? [] : (value.split(/\s*,\s*/).filter(Boolean) as WorkflowStage[]);
+/**
+ * git이 트레일러 블록(본문 마지막 문단)에서 읽은 Workflow-Passed 값. 없으면 undefined로, 스튜디오 밖에서 바꾼 파일이나 이전 버전의 체크포인트다.
+ * 본문 전체에서 찾으면 에이전트 요약에 쓴 같은 모양의 줄로 통과 기록을 위조할 수 있어 트레일러 블록 값만 받는다.
+ * 여러 개면 마지막 것을 쓴다
+ */
+export function parseWorkflowTrailerValues(values: readonly string[]): WorkflowStage[] | undefined {
+  const value = values.map((entry) => entry.trim()).filter(Boolean).at(-1);
+  if (value === undefined) return undefined;
+  if (value === 'none') return [];
+  const known = new Set<string>([...VERIFICATION_STAGES, 'plan', 'implement', 'checkpoint']);
+  return value.split(/\s*,\s*/).filter((stage): stage is WorkflowStage => known.has(stage));
 }
 
 /**

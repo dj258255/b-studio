@@ -853,7 +853,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
 
     if (!ask) {
       // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-      if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking));
+      if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
       else await revertRun(session, run.id);
     }
     finished = { status: result.status, summary: result.summary, turns: result.turns };
@@ -1043,12 +1043,15 @@ function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
   if (result.verifyAttempts > 0) sections.push(`검증 게이트 재시도: ${result.verifyAttempts}회`);
   const summary = result.summary.trim();
   if (summary) sections.push(`에이전트 요약:\n${summary.split('\n').slice(0, 30).join('\n')}`);
-  // 트레일러는 본문 마지막 문단이어야 git이 트레일러로 읽는다. 배포할 때 releaseRequires와 대조한다
-  if (result.passedStages) sections.push(formatWorkflowTrailer(result.passedStages));
   return sections.join('\n\n');
 }
 
-async function saveCheckpoint(session: Session, runId: string, request: string, body: string): Promise<void> {
+/** 배포할 때 releaseRequires와 대조하는 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
+function checkpointTrailers(result: AgentResult): string[] {
+  return result.passedStages ? [formatWorkflowTrailer(result.passedStages)] : [];
+}
+
+async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = []): Promise<void> {
   const head = session.snapshot.checkpoints[0]!.sha;
   // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
   const dataOnly =
@@ -1058,6 +1061,7 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
   const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body, {
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
+    trailers,
   });
   if (!checkpoint) return;
   await saveDatabases(session, checkpoint.sha);

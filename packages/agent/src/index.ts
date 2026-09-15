@@ -67,7 +67,7 @@ export {
   executionPolicyFor,
   formatWorkflowTrailer,
   missingVerificationStages,
-  parseWorkflowTrailer,
+  parseWorkflowTrailerValues,
   piPolicyEnvironment,
   releaseBlockers,
   reviewChanges,
