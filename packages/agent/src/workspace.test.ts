@@ -87,4 +87,34 @@ describe('Workspace', () => {
     expect(await readFile(path.join(root, 'api/src/App.java'), 'utf8')).toContain('사람이 수정');
     expect(workspace.deletedFiles()).toEqual([]);
   });
+
+  it('바깥에서 바뀐 파일을 알리고 경로를 정규화하며 여러 번 불러도 중복되지 않는다', () => {
+    workspace.trackExternalChanges(['./api/src/App.java', 'web\\src\\page.tsx']);
+    workspace.trackExternalChanges(['api/src/App.java']);
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java', 'web/src/page.tsx']);
+  });
+
+  it('바깥 변경으로 루트 밖 경로를 알리면 거부한다', () => {
+    expect(() => workspace.trackExternalChanges(['../secret.txt'])).toThrow(WorkspaceError);
+    expect(workspace.changedFiles()).toEqual([]);
+  });
+
+  it('지운 것으로 기록된 파일을 다시 알리면 지운 파일 목록에서 빠진다', async () => {
+    await workspace.remove('api/src/App.java');
+    workspace.trackExternalChanges(['api/src/App.java']);
+    expect(workspace.deletedFiles()).toEqual([]);
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java']);
+  });
+
+  it('바깥 변경을 알릴 때 파일 내용을 읽지 않는다', () => {
+    expect(() => workspace.trackExternalChanges(['api/src/Ghost.java'])).not.toThrow();
+    expect(workspace.changedFiles()).toEqual(['api/src/Ghost.java']);
+  });
+
+  it('바깥 변경 입구에서도 비밀 파일·생성물·루트 경로를 거부한다', () => {
+    expect(() => workspace.trackExternalChanges(['.env'])).toThrow(WorkspaceError);
+    expect(() => workspace.trackExternalChanges(['node_modules/x.js'])).toThrow(WorkspaceError);
+    expect(() => workspace.trackExternalChanges([''])).toThrow(WorkspaceError);
+    expect(workspace.changedFiles()).toEqual([]);
+  });
 });

@@ -49,6 +49,18 @@ export class Workspace {
     return [...this.#deleted].sort();
   }
 
+  /**
+   * 에이전트 도구를 거치지 않은 편집기·명령의 변경도 같은 게이트로 검증할 수 있게 알린다.
+   * 파일 내용은 읽지 않고 바뀐 목록에만 기록한다 (실제 판정은 게이트가 맡는다).
+   */
+  trackExternalChanges(files: readonly string[]): void {
+    for (const file of files) {
+      const relative = this.#normalizeExternal(file);
+      this.#deleted.delete(relative);
+      this.#changed.set(relative, ++this.#version);
+    }
+  }
+
   /** 주어진 버전 이후에 바뀐 파일 */
   changedSince(version: number): string[] {
     return [...this.#changed.entries()]
@@ -169,6 +181,22 @@ export class Workspace {
     if (!isInside(realRoot, realExisting)) throw new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
 
     return absolute;
+  }
+
+  /** 바깥에서 온 경로를 루트 기준 상대 경로로 정규화한다. 루트 밖 경로는 거부한다 */
+  #normalizeExternal(file: string): string {
+    if (path.isAbsolute(file)) throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
+
+    const normalized = file.replaceAll('\\', '/').replace(/^\.\//, '');
+    const absolute = path.resolve(this.root, normalized);
+    if (!isInside(this.root, absolute)) throw new WorkspaceError(`${file}: 프로젝트 밖 경로입니다`);
+
+    const relative = path.relative(this.root, absolute);
+    if (relative === '') throw new WorkspaceError(`${file}: 프로젝트 루트 자체는 다룰 수 없습니다`);
+    if (relative.split(path.sep).some(isDenied)) {
+      throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
+    }
+    return this.#relative(absolute);
   }
 
   #relative(absolute: string): string {

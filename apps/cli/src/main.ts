@@ -6,6 +6,7 @@ import { authToken } from './commands/auth';
 import { deploy } from './commands/deploy';
 import { sandboxPrune } from './commands/sandbox';
 import { up } from './commands/up';
+import { verify } from './commands/verify';
 import { workflow } from './commands/workflow';
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -16,8 +17,16 @@ const USAGE = `사용법:
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
   studio workflow <프로젝트 경로> [--pi-env]
+  studio verify <프로젝트 경로> [--allow-breaking] [--keep] [--logs]
   studio auth token <이름>
   studio sandbox prune [--dry-run]
+
+verify:
+  편집기·명령으로 바꾼 현재 변경을 에이전트와 같은 검증 게이트로 확인한다. 체크포인트는 만들지 않는다
+  종료 코드          0 통과 · 1 검증 실패 · 2 사용법·git 오류 · 3 검증할 변경 없음
+  --allow-breaking   계약을 깨는 변경(필드·엔드포인트 삭제, 타입 변경)을 허용한다
+  --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
+  --logs             서비스 로그를 함께 출력한다
 
 workflow:
   studio.yaml에서 강제할 단계, 테스트, 화면 확인, 보호 경로, 배포 조건을 보여 준다
@@ -82,6 +91,14 @@ async function main(argv: string[]): Promise<number> {
 
   if (command === 'workflow' && dir) {
     return workflow(await loadProject(dir), { piEnv: values['pi-env'] });
+  }
+
+  if (command === 'verify' && dir) {
+    if (request !== undefined) {
+      console.error(USAGE);
+      return 2;
+    }
+    return verify(await loadProject(dir), { keep: values.keep, logs: values.logs, allowBreaking: values['allow-breaking'] });
   }
 
   if (command === 'auth' && dir === 'token' && request) {
