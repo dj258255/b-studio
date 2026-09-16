@@ -87,7 +87,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   }
 
   return (
-    <section className="glass flex min-h-0 flex-col overflow-hidden rounded-2xl" aria-label="대화">
+    <section className="glass flex min-h-0 flex-col overflow-hidden rounded-panel" aria-label="대화">
       <div className="border-b border-line px-5 py-3">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3">
           <h2 className="font-semibold">대화</h2>
@@ -123,7 +123,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
                 type="button"
                 onClick={buildFromPlan}
                 disabled={!canSend || !planRequest}
-                className="mt-2 rounded-full bg-ink px-3.5 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+                className="mt-2 rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
               >
                 이대로 만들기
               </button>
@@ -167,14 +167,14 @@ export function ChatPanel({ view }: { view: SessionView }) {
                   <button
                     type="button"
                     onClick={() => setConfirmingCancel(undefined)}
-                    className="rounded-full px-3 py-1.5 text-sm text-muted hover:text-ink"
+                    className="rounded-control px-3 py-1.5 text-sm text-muted hover:text-ink"
                   >
                     계속 진행
                   </button>
                   <button
                     type="button"
                     onClick={() => void cancel(runId)}
-                    className="rounded-full bg-fail px-3.5 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-fail/85"
+                    className="rounded-control bg-fail px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-fail/85"
                   >
                     변경 되돌리고 취소
                   </button>
@@ -184,7 +184,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
                   type="button"
                   // 질문은 되돌릴 변경이 없으므로 한 번 더 묻지 않는다
                   onClick={() => (asking ? void cancel(runId) : setConfirmingCancel(runId))}
-                  className="glass-soft rounded-full px-3.5 py-1.5 text-sm font-medium hover:text-fail"
+                  className="glass-soft rounded-control px-3.5 py-1.5 text-sm font-medium hover:text-fail"
                 >
                   {asking ? "질문 취소" : "요청 취소"}
                 </button>
@@ -192,15 +192,15 @@ export function ChatPanel({ view }: { view: SessionView }) {
           </div>
         )}
         <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-          <div className="glass-soft inline-flex rounded-full p-0.5 text-sm" role="group" aria-label="요청 종류">
+          <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="요청 종류">
             {(["build", "ask"] as const).map((kind) => (
               <button
                 key={kind}
                 type="button"
                 aria-pressed={intent === kind}
                 onClick={() => setIntent(kind)}
-                className={`rounded-full px-3 py-1 font-medium transition-colors ${
-                  intent === kind ? "bg-panel text-ink shadow-sm ring-1 ring-line" : "text-muted hover:text-ink"
+                className={`rounded-md px-3 py-1 font-medium transition-colors ${
+                  intent === kind ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
                 }`}
               >
                 {kind === "build" ? "만들기" : "질문"}
@@ -216,7 +216,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
                 type="button"
                 disabled={!canSend}
                 onClick={() => void send(snapshot.nextDemoQuestion!, "ask")}
-                className="w-full rounded-xl border border-line bg-panel px-4 py-2.5 text-left text-sm font-medium shadow-sm hover:border-ink disabled:opacity-50"
+                className="w-full rounded-control border border-line bg-panel px-4 py-2.5 text-left text-sm font-medium hover:border-ink disabled:opacity-50"
               >
                 질문하기: {snapshot.nextDemoQuestion}
               </button>
@@ -228,7 +228,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               type="button"
               disabled={!canSend}
               onClick={() => void send(snapshot.nextDemoRequest!, "build")}
-              className="w-full rounded-xl bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+              className="w-full rounded-control bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
             >
               다음 요청 보내기: {snapshot.nextDemoRequest}
             </button>
@@ -252,7 +252,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               }}
               rows={3}
               placeholder={intent === "ask" ? "코드나 동작을 묻거나, 만들기 전에 계획을 세워 보세요" : "만들거나 바꾸고 싶은 내용을 적어 주세요"}
-              className="w-full resize-none rounded-xl border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
+              className="w-full resize-none rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
             <div className="mt-2 flex items-center justify-between gap-3">
               {intent === "build" ? (
@@ -266,7 +266,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               <button
                 type="submit"
                 disabled={!canSend || !text.trim()}
-                className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+                className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
               >
                 {intent === "ask" ? "질문하기" : "요청 보내기"}
               </button>

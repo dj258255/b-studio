@@ -41,7 +41,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const statusTone = snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
 
   return (
-    <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl px-5 py-3">
+    <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-panel px-5 py-3">
       <Link href="/" className="font-semibold tracking-tight hover:underline">
         b-studio
       </Link>
@@ -113,7 +113,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
               type="button"
               onClick={resume}
               disabled={resuming || !access.canManage}
-              className="rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-60"
+              className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
             >
               {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
             </button>
@@ -123,7 +123,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             type="button"
             onClick={stop}
             disabled={stopping || !access.canManage}
-            className="glass-soft rounded-full px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
+            className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
           >
             {stopping ? "중지하는 중" : "샌드박스 중지"}
           </button>

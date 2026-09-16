@@ -166,7 +166,7 @@ export function CodePanel({ view }: { view: SessionView }) {
               type="button"
               aria-pressed={mode === value}
               onClick={() => setMode(value)}
-              className={`rounded-full px-3 py-1 text-xs ${mode === value ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
+              className={`rounded-control px-3 py-1 text-xs ${mode === value ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
             >
               {label}
             </button>
@@ -179,7 +179,7 @@ export function CodePanel({ view }: { view: SessionView }) {
             onChange={(event) => setQuery(event.target.value)}
             placeholder={mode === "path" ? "파일 이름이나 경로로 찾기" : "파일 내용에서 찾기 (두 글자 이상)"}
             aria-label={mode === "path" ? "파일 찾기" : "내용 찾기"}
-            className="w-full rounded-lg border border-line bg-panel px-2.5 py-1.5 font-mono text-xs placeholder:font-sans placeholder:text-muted"
+            className="w-full rounded-control border border-line bg-panel px-2.5 py-1.5 font-mono text-xs placeholder:font-sans placeholder:text-muted"
           />
         </div>
 
@@ -226,7 +226,7 @@ export function CodePanel({ view }: { view: SessionView }) {
             ))}
             {tree && files.length < tree.total && (
               <li className="px-2 py-1">
-                <button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="w-full rounded border border-line px-2 py-1 text-xs hover:border-ink disabled:opacity-60">
+                <button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="w-full rounded-control border border-line px-2 py-1 text-xs hover:border-ink disabled:opacity-60">
                   {loadingMore ? "불러오는 중" : `더 보기 (${(tree.total - files.length).toLocaleString()}개 남음)`}
                 </button>
               </li>
@@ -255,7 +255,7 @@ export function CodePanel({ view }: { view: SessionView }) {
                     type="button"
                     aria-pressed={!showDiff}
                     onClick={() => setShowDiff(false)}
-                    className={`rounded-full px-3 py-1 text-xs ${!showDiff ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
+                    className={`rounded-control px-3 py-1 text-xs ${!showDiff ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
                   >
                     내용
                   </button>
@@ -263,7 +263,7 @@ export function CodePanel({ view }: { view: SessionView }) {
                     type="button"
                     aria-pressed={showDiff}
                     onClick={() => setShowDiff(true)}
-                    className={`rounded-full px-3 py-1 text-xs ${showDiff ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
+                    className={`rounded-control px-3 py-1 text-xs ${showDiff ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
                   >
                     체크포인트 이후 변경
                   </button>

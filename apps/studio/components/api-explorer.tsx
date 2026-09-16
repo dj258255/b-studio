@@ -108,7 +108,7 @@ export function ApiExplorer({ target, revision }: { target: ExplorerTarget; revi
           <label htmlFor="api-method" className="sr-only">
             메서드
           </label>
-          <select id="api-method" value={method} onChange={(event) => setMethod(event.target.value)} className="rounded-lg border border-line bg-panel px-2 py-1.5 font-mono text-sm">
+          <select id="api-method" value={method} onChange={(event) => setMethod(event.target.value)} className="rounded-control border border-line bg-panel px-2 py-1.5 font-mono text-sm">
             {METHODS.map((value) => (
               <option key={value}>{value.toUpperCase()}</option>
             ))}
@@ -120,9 +120,9 @@ export function ApiExplorer({ target, revision }: { target: ExplorerTarget; revi
             id="api-path"
             value={path}
             onChange={(event) => setPath(event.target.value)}
-            className="min-w-0 flex-1 rounded-lg border border-line bg-panel px-2 py-1.5 font-mono text-sm"
+            className="min-w-0 flex-1 rounded-control border border-line bg-panel px-2 py-1.5 font-mono text-sm"
           />
-          <button type="submit" disabled={sending || !target.ready || !access.canManage} className="rounded-full bg-ink px-4 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50">
+          <button type="submit" disabled={sending || !target.ready || !access.canManage} className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50">
             {sending ? "보내는 중" : "보내기"}
           </button>
         </form>
@@ -137,7 +137,7 @@ export function ApiExplorer({ target, revision }: { target: ExplorerTarget; revi
               value={body}
               onChange={(event) => setBody(event.target.value)}
               rows={5}
-              className="mt-1 rounded-lg border border-line bg-panel px-2 py-1.5 font-mono text-sm"
+              className="mt-1 rounded-control border border-line bg-panel px-2 py-1.5 font-mono text-sm"
             />
           </>
         )}

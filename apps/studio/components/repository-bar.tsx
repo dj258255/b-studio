@@ -100,7 +100,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
               href={repository.pullRequestUrl}
               target="_blank"
               rel="noreferrer"
-              className="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink"
+              className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink"
             >
               {label} 열기
             </a>
@@ -110,7 +110,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
               href={repository.compareUrl}
               target="_blank"
               rel="noreferrer"
-              className="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink"
+              className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink"
             >
               {label} 작성 페이지
             </a>
@@ -120,7 +120,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
             onClick={() => void pullRemote()}
             disabled={!idle || snapshot.status !== "ready"}
             title="같은 브랜치에 다른 사람이 올린 커밋을 가져와 검증 게이트로 확인합니다"
-            className="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+            className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
           >
             {busy === "sync" ? "요청하는 중" : "원격 변경 가져오기"}
           </button>
@@ -128,7 +128,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
             type="button"
             onClick={() => void upload(false)}
             disabled={!canPush}
-            className="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+            className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
           >
             {busy === "push" ? "올리는 중" : "브랜치 올리기"}
           </button>
@@ -137,7 +137,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
               type="button"
               onClick={() => void upload(true)}
               disabled={!idle || sessionCheckpoints === 0}
-              className="rounded-full bg-ink px-3.5 py-1.5 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+              className="rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
             >
               {busy === "pull-request" ? "올리는 중" : `올리고 ${label} 만들기`}
             </button>
