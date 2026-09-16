@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
@@ -27,6 +27,7 @@ export class Workspace {
   readonly #seen = new Map<string, string>();
   /** 파일 → 마지막으로 바뀐 시점의 버전 */
   readonly #changed = new Map<string, number>();
+  readonly #deleted = new Set<string>();
   #version = 0;
 
   constructor(root: string) {
@@ -41,6 +42,11 @@ export class Workspace {
   /** 에이전트가 이번 실행에서 만들거나 수정한 파일 (루트 기준 경로) */
   changedFiles(): string[] {
     return [...this.#changed.keys()].sort();
+  }
+
+  /** 에이전트가 이번 실행에서 지운 파일 (루트 기준 경로) */
+  deletedFiles(): string[] {
+    return [...this.#deleted].sort();
   }
 
   /** 주어진 버전 이후에 바뀐 파일 */
@@ -115,6 +121,18 @@ export class Workspace {
     this.#record(absolute, next);
   }
 
+  /** 파일 하나를 지운다. 디렉터리는 지우지 않는다 */
+  async remove(file: string): Promise<void> {
+    const absolute = await this.#resolve(file, { mustExist: true });
+    await this.#assertNotStale(absolute);
+    await rm(absolute);
+
+    const relative = this.#relative(absolute);
+    this.#seen.delete(relative);
+    this.#deleted.add(relative);
+    this.#changed.set(relative, ++this.#version);
+  }
+
   async #assertNotStale(absolute: string): Promise<void> {
     const relative = this.#relative(absolute);
     const seen = this.#seen.get(relative);
@@ -128,6 +146,7 @@ export class Workspace {
 
   #record(absolute: string, content: string): void {
     const relative = this.#relative(absolute);
+    this.#deleted.delete(relative);
     this.#seen.set(relative, digest(content));
     this.#changed.set(relative, ++this.#version);
   }

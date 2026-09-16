@@ -34,6 +34,23 @@ describe('execution policy', () => {
     expect(checkToolPolicy('read_file', { path: 'api/src/Order.java' }, policy, undefined).decision).toBe('allow');
   });
 
+  it('삭제도 허용 도구·쓰기 범위·보호 경로를 그대로 따른다', () => {
+    const policy = { allowedTools: ['read_file', 'delete_file'], writablePaths: ['web/app/plan-a'] };
+    expect(checkToolPolicy('delete_file', { path: 'web/app/plan-a/old.md' }, policy, undefined).decision).toBe('allow');
+    expect(checkToolPolicy('delete_file', { path: 'web/app/plan-b/old.md' }, policy, undefined)).toMatchObject({
+      decision: 'deny',
+      reason: expect.stringContaining('writable scope'),
+    });
+    expect(checkToolPolicy('delete_file', { path: 'infra/docker-compose.yml' }, { writablePaths: ['infra'], protectedPaths: ['infra'] }, undefined)).toMatchObject({
+      decision: 'deny',
+      reason: expect.stringContaining('protected'),
+    });
+    expect(checkToolPolicy('delete_file', { path: 'web/app/plan-a/old.md' }, { allowedTools: ['read_file'] }, undefined)).toMatchObject({
+      decision: 'deny',
+      reason: expect.stringContaining('allowed tool list'),
+    });
+  });
+
   it('blocks protected project paths even when the tool itself is allowed', () => {
     const policy = { allowedTools: ['write_file'], protectedPaths: ['.env', 'infra', 'migrations'] };
     expect(checkToolPolicy('write_file', { path: '.env.local' }, policy, undefined)).toMatchObject({ decision: 'deny' });

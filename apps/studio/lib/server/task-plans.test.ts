@@ -6,7 +6,7 @@ import type { StudioEvent } from '../studio-events';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
 type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
-type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content: string } }> }> };
+type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
 
 const fake = vi.hoisted(() => ({
   root: '',
@@ -16,6 +16,10 @@ const fake = vi.hoisted(() => ({
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
   /** 작업 id → 그 작업이 쓸 파일. 없으면 실패로 끝낸다 */
   writes: {} as Record<string, Record<string, string> | 'fail'>,
+  /** 작업 id → 그 작업이 지울 파일 */
+  deletes: {} as Record<string, string[]>,
+  /** 세션을 만들 때 작업 폴더에 넣는 프로젝트 원본 파일 */
+  sourceFiles: {} as Record<string, string>,
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   stopped: [] as string[],
   stopOrder: { integrationCreatedAfterStops: false },
@@ -40,6 +44,11 @@ vi.mock('./sessions', () => ({
     if (fake.counter === 3) fake.stopOrder.integrationCreatedAfterStops = new Set(fake.stopped).size === 2;
     const workDir = path.join(fake.root, id);
     mkdirSync(workDir, { recursive: true });
+    // 실제 세션은 프로젝트 원본을 복사해 시작한다. 지운 파일이 여기 있으면 통합 세션도 그 파일을 갖고 시작한다
+    for (const [file, content] of Object.entries(fake.sourceFiles)) {
+      mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
+      writeFileSync(path.join(workDir, file), content);
+    }
     fake.sessions.set(id, { id, status: 'ready', workDir, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
     return { id };
   },
@@ -58,8 +67,10 @@ vi.mock('./sessions', () => ({
     const session = fake.sessions.get(sessionId)!;
     const runId = `run-${fake.sends.length}`;
     const taskId = /\[id:([a-z0-9-]+)\]/.exec(request)?.[1];
+    const deleted = taskId ? (fake.deletes[taskId] ?? []) : [];
+    const scripted = (options.scriptedTurns?.[0]?.toolCalls ?? []).filter((call) => call.name === 'write_file');
     const files = options.scriptedTurns
-      ? Object.fromEntries((options.scriptedTurns[0]?.toolCalls ?? []).map((call) => [call.input.path, call.input.content]))
+      ? Object.fromEntries(scripted.map((call) => [call.input.path, call.input.content ?? '']))
       : taskId
         ? fake.writes[taskId]
         : undefined;
@@ -73,7 +84,9 @@ vi.mock('./sessions', () => ({
         mkdirSync(path.dirname(path.join(session.workDir, file)), { recursive: true });
         writeFileSync(path.join(session.workDir, file), content);
       }
-      session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: Object.keys(files) });
+      // 레인이 지운 파일은 작업 폴더에서 사라지고 체크포인트에만 남는다 (실제 체크포인트의 변경 목록과 같다)
+      for (const file of deleted) rmSync(path.join(session.workDir, file), { force: true });
+      session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set([...Object.keys(files), ...deleted])] });
       finish('done', '완료');
     }
     return { runId };
@@ -92,6 +105,8 @@ beforeEach(() => {
   fake.counter = 0;
   fake.sessions.clear();
   fake.listeners.clear();
+  fake.deletes = {};
+  fake.sourceFiles = {};
   fake.sends = [];
   fake.stopped = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
@@ -175,21 +190,55 @@ describe('작업 분해 실행', () => {
     expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
   });
 
-  it('레인이 지운 파일이 있으면 통합이 생성·수정만 지원한다고 알리고 멈춘다', async () => {
+  it('레인이 지운 파일을 통합이 delete_file로 함께 적용한다', async () => {
     fake.plan = { tasks: [task('a', ['web/a'])] };
     fake.writes = { a: { 'web/a/one.md': 'one' } };
-    const created = await createTaskPlan({ projectId: 'orders', request: '삭제 포함', modelId: 'model-a', owner: 'kim' });
-    // 체크포인트에는 있지만 작업 폴더에 없는 파일 = 레인이 지운 파일
-    const original = fake.sessions.get.bind(fake.sessions);
-    const spy = vi.spyOn(fake.sessions, 'get').mockImplementation((id) => {
-      const session = original(id);
-      if (session && session.checkpoints.length > 1) session.checkpoints[0]!.files = ['web/a/one.md', 'web/a/removed.md'];
-      return session;
+    // 프로젝트 원본에는 있지만 레인이 지운 파일. 통합 세션은 그 파일을 가진 원본에서 시작한다
+    fake.sourceFiles = { 'web/a/removed.md': 'old' };
+    fake.deletes = { a: ['web/a/removed.md'] };
+
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '삭제 포함', modelId: 'model-a', owner: 'kim' })).id);
+
+    expect(plan.status).toBe('done');
+    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
+    // 쓰기 먼저, 삭제 나중
+    expect(integration.options.scriptedTurns![0]!.toolCalls!.map((call) => [call.name, call.input.path])).toEqual([
+      ['write_file', 'web/a/one.md'],
+      ['delete_file', 'web/a/removed.md'],
+    ]);
+    expect(plan.integration).toMatchObject({
+      status: 'done',
+      files: ['web/a/one.md', 'web/a/removed.md'],
+      deleted: ['web/a/removed.md'],
     });
-    const plan = await finished(created.id);
-    spy.mockRestore();
+  });
+
+  it('통합 세션의 원본에도 없는 파일은 지울 목록에서 뺀다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    // 레인이 만들었다가 지운 파일: 어느 작업 폴더에도 남아 있지 않다
+    fake.deletes = { a: ['web/a/never-existed.md'] };
+
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '없는 파일 삭제', modelId: 'model-a', owner: 'kim' })).id);
+
+    expect(plan.status).toBe('done');
+    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
+    expect(integration.options.scriptedTurns![0]!.toolCalls!.map((call) => call.name)).toEqual(['write_file']);
+    expect(plan.integration).toMatchObject({ status: 'done', files: ['web/a/one.md'], deleted: [] });
+  });
+
+  it('레인이 만들었다가 지운 파일만 있으면 빈 턴을 돌리지 않고 실패시킨다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    // 파일을 만들었다가 지운 레인: 작업 폴더에도 통합 세션 원본에도 파일이 없다
+    fake.writes = { a: {} };
+    fake.deletes = { a: ['web/a/never-existed.md'] };
+
+    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '만들었다 지운 파일', modelId: 'model-a', owner: 'kim' })).id);
+
     expect(plan.status).toBe('failed');
-    expect(plan.integration?.error).toContain('web/a/removed.md이 지워졌습니다');
+    expect(plan.integration?.error).toContain('적용할 변경이 없습니다');
+    // 아무것도 검증하지 않았는데 통과로 기록되면 안 된다. 스크립트 턴을 아예 보내지 않는다
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
   });
 
   it('api 모드가 아니거나 모델이 등록되지 않았으면 시작하지 않는다', async () => {

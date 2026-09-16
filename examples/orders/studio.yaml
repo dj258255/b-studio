@@ -12,7 +12,7 @@ workflow:
   # browser_check 단계: 헤드리스 Chromium으로 모바일 크기 화면을 렌더링해 문구·스크립트 예외·console.error·실패한 요청·가로 넘침을 확인한다
   pageChecks:
     - { service: web, path: /, mode: browser, expectText: To get started, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
-  allowedTools: [list_files, read_file, write_file, edit_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
+  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply, terraform destroy]
   requireApprovalFor: [restart_service]
   protectedPaths: [.env, .github/workflows, infra, migrations]

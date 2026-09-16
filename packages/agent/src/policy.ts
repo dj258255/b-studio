@@ -42,6 +42,9 @@ export const DEFAULT_DENIED_COMMANDS = [
   'mongosh',
 ] as const;
 
+/** 경로 정책(쓰기 범위·보호 경로)이 걸리는 도구. 파일을 만드는 것과 지우는 것을 같게 본다 */
+const PATH_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
+
 export function checkToolPolicy(
   tool: string,
   input: unknown,
@@ -52,14 +55,14 @@ export function checkToolPolicy(
     return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
   }
 
-  if ((tool === 'write_file' || tool === 'edit_file') && policy?.writablePaths) {
+  if (PATH_WRITE_TOOLS.has(tool) && policy?.writablePaths) {
     const file = fileInput(input);
     if (!policy.writablePaths.some((candidate) => isProtectedPath(file, candidate))) {
       return { tool, decision: 'deny', reason: `path is outside this task's writable scope: ${policy.writablePaths.join(', ')}` };
     }
   }
 
-  if ((tool === 'write_file' || tool === 'edit_file') && policy?.protectedPaths?.length) {
+  if (PATH_WRITE_TOOLS.has(tool) && policy?.protectedPaths?.length) {
     const file = fileInput(input);
     const protectedPath = policy.protectedPaths.find((candidate) => isProtectedPath(file, candidate));
     if (protectedPath) {

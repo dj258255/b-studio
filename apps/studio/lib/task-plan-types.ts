@@ -33,6 +33,8 @@ export interface TaskPlanIntegrationView {
   status: TaskPlanStepStatus;
   /** 레인들에서 모아 다시 적용한 파일 */
   files: string[];
+  /** 레인들이 지워 통합에서 함께 지운 파일 */
+  deleted: string[];
   checkpoint?: TaskPlanCheckpointView;
   error?: string;
 }

@@ -182,7 +182,7 @@ workflow:
   pageChecks:
     - { service: web, path: /orders, expectStatus: 200, expectText: 주문 목록 }
     - { service: web, path: /, mode: browser, expectText: 주문, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
-  allowedTools: [list_files, read_file, write_file, edit_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
+  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply]
   requireApprovalFor: [restart_service]
   protectedPaths: [.env, .github/workflows, infra, migrations]

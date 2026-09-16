@@ -57,4 +57,34 @@ describe('Workspace', () => {
     await workspace.write('api/src/main/resources/db/migration/V1__init.sql', 'create table t (id bigint);');
     expect(workspace.changedFiles()).toEqual(['api/src/main/resources/db/migration/V1__init.sql']);
   });
+
+  it('파일을 지우면 바뀐 파일과 지운 파일에 함께 기록한다', async () => {
+    await workspace.remove('api/src/App.java');
+    await expect(readFile(path.join(root, 'api/src/App.java'), 'utf8')).rejects.toThrow();
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java']);
+    expect(workspace.deletedFiles()).toEqual(['api/src/App.java']);
+  });
+
+  it('없는 파일과 비밀 파일은 지우지 못한다', async () => {
+    await expect(workspace.remove('api/src/Missing.java')).rejects.toThrow('파일이 없습니다');
+    await expect(workspace.remove('.env')).rejects.toThrow(WorkspaceError);
+    expect(await readFile(path.join(root, '.env'), 'utf8')).toBe('SECRET=1');
+    expect(workspace.deletedFiles()).toEqual([]);
+  });
+
+  it('지운 뒤 같은 경로에 다시 쓰면 지운 파일 목록에서 빠진다', async () => {
+    await workspace.remove('api/src/App.java');
+    await workspace.write('api/src/App.java', 'class App {}\n');
+    expect(workspace.deletedFiles()).toEqual([]);
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java']);
+    expect(await readFile(path.join(root, 'api/src/App.java'), 'utf8')).toBe('class App {}\n');
+  });
+
+  it('마지막으로 읽은 뒤 사람이 바꾼 파일은 지우지 않는다', async () => {
+    await workspace.read('api/src/App.java');
+    await writeFile(path.join(root, 'api/src/App.java'), 'class App { /* 사람이 수정 */ }\n');
+    await expect(workspace.remove('api/src/App.java')).rejects.toThrow('다른 곳에서');
+    expect(await readFile(path.join(root, 'api/src/App.java'), 'utf8')).toContain('사람이 수정');
+    expect(workspace.deletedFiles()).toEqual([]);
+  });
 });

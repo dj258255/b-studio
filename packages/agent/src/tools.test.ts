@@ -1,7 +1,10 @@
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { executeTool, type ToolContext } from './tools';
+import { buildTools, executeTool, type ToolContext } from './tools';
 import { Workspace } from './workspace';
 
 const project = {
@@ -28,6 +31,28 @@ describe('http_request', () => {
   });
 });
 
+describe('delete_file', () => {
+  it('도구 목록에 있고 실제로 파일을 지운다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-delete-'));
+    await writeFile(path.join(root, 'a.md'), 'a');
+    const workspace = new Workspace(root);
+
+    expect(buildTools(project).map((candidate) => candidate.name)).toContain('delete_file');
+
+    const outcome = await executeTool('delete_file', { path: 'a.md' }, { ...context, workspace });
+    expect(outcome).toEqual({ ok: true, content: 'deleted a.md' });
+    expect(workspace.deletedFiles()).toEqual(['a.md']);
+    await expect(readFile(path.join(root, 'a.md'), 'utf8')).rejects.toThrow();
+  });
+
+  it('없는 파일이면 실패로 돌려준다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-delete-'));
+    const outcome = await executeTool('delete_file', { path: 'missing.md' }, { ...context, workspace: new Workspace(root) });
+    expect(outcome).toMatchObject({ ok: false });
+    expect(outcome.content).toContain('파일이 없습니다');
+  });
+});
+
 describe('질문 모드', () => {
   const readOnly: ToolContext = { ...context, readOnly: true };
 
@@ -35,6 +60,7 @@ describe('질문 모드', () => {
     const changing = [
       ['write_file', { path: 'a.txt', content: 'x' }],
       ['edit_file', { path: 'a.txt', old_text: 'a', new_text: 'b' }],
+      ['delete_file', { path: 'a.txt' }],
       ['run_in_service', { service: 'api', command: ['ls'] }],
       ['restart_service', { service: 'api' }],
     ] as const;

@@ -210,6 +210,9 @@ function PlanResult({ plan }: { plan: TaskPlanView }) {
             <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[plan.integration.status]}`}>{STEP_STATUS[plan.integration.status]}</span>
           </div>
           {plan.integration.files.length > 0 && <p className="mt-3 break-all font-mono text-xs text-muted">{plan.integration.files.join(', ')}</p>}
+          {(plan.integration.deleted ?? []).length > 0 && (
+            <p className="mt-1 break-all font-mono text-xs text-fail">삭제 {plan.integration.deleted.length}개: {plan.integration.deleted.join(', ')}</p>
+          )}
           {plan.integration.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.integration.error}</p>}
           {plan.integration.checkpoint && <p className="mt-3 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{plan.integration.checkpoint.shortSha}</span></p>}
           {plan.integration.sessionId && <Link href={`/sessions/${plan.integration.sessionId}`} className="mt-4 inline-block rounded-full bg-ink px-3 py-1.5 text-sm font-medium text-panel">통합 세션·diff 보기</Link>}

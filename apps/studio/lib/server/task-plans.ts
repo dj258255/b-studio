@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -143,10 +143,11 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
 /** 레인 세션들의 최종 파일을 새 세션에 같은 루프·게이트로 다시 적용한다. git 병합 없이 합친 결과를 한 번 더 검증하기 위해서다 */
 async function integrate(plan: TaskPlanView): Promise<void> {
   plan.status = 'integrating';
-  const integration = (plan.integration = { status: 'booting' as TaskPlanStepStatus, files: [] as string[] });
+  const integration = (plan.integration = { status: 'booting' as TaskPlanStepStatus, files: [] as string[], deleted: [] as string[] });
   persist(plan);
 
   const writes: Array<{ path: string; content: string }> = [];
+  const deletes: string[] = [];
   try {
     for (const lane of plan.lanes) {
       const snapshot = lane.sessionId ? getSnapshot(lane.sessionId) : undefined;
@@ -158,27 +159,42 @@ async function integrate(plan: TaskPlanView): Promise<void> {
       if (outside.length > 0) throw new Error(`${lane.id}가 쓰기 범위 밖 파일을 바꿨습니다: ${outside.join(', ')}`);
       for (const file of changed) {
         const content = await readFile(path.join(snapshot.workDir, file)).catch(() => undefined);
-        if (!content) throw new Error(`${lane.id}에서 ${file}이 지워졌습니다. 통합은 파일 생성·수정만 지원합니다`);
+        // 작업 폴더에 없는 파일은 레인이 지운 것이다. 지운 것도 통합이 함께 지운다
+        if (!content) {
+          deletes.push(file);
+          continue;
+        }
         if (content.byteLength > MAX_INTEGRATION_FILE_BYTES || content.includes(0)) throw new Error(`${lane.id}의 ${file}은 텍스트 파일로 다시 적용할 수 없습니다`);
         writes.push({ path: file, content: content.toString('utf8') });
       }
     }
-    if (writes.length === 0) throw new Error('레인들이 바꾼 파일이 없어 통합할 내용이 없습니다');
-    integration.files = writes.map((write) => write.path);
-    persist(plan);
+    if (writes.length === 0 && deletes.length === 0) throw new Error('바꾼 파일이 없어 통합할 내용이 없습니다');
     // 레인 결과는 이미 메모리로 옮겼다. 통합 샌드박스를 띄우기 전에 레인 샌드박스를 내려, 동시에 뜨는 샌드박스를 레인 수 이하로 둔다
     await stopLaneSessions(plan);
 
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId });
     Object.assign(integration, { sessionId: snapshot.id });
+    // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
+    const integrationRoot = getSnapshot(snapshot.id)?.workDir;
+    if (!integrationRoot) throw new Error('통합 세션의 작업 폴더를 찾지 못했습니다');
+    const removable = deletes.filter((file) => existsSync(path.join(integrationRoot, file)));
+    // 레인이 만들었다가 지운 파일만 있으면 적용할 변경이 없다. 빈 턴은 게이트를 그냥 통과하므로 여기서 멈춘다
+    if (writes.length === 0 && removable.length === 0) throw new Error('통합 세션에 적용할 변경이 없습니다 (레인이 만들었다가 지운 파일만 있었습니다)');
+    integration.files = [...writes.map((write) => write.path), ...removable].sort();
+    integration.deleted = removable;
     persist(plan);
     await waitForReady(snapshot.id);
     integration.status = 'running';
     persist(plan);
 
     const turns: ScriptedTurn[] = [
-      { toolCalls: writes.map((write) => ({ name: 'write_file', input: write })) },
-      { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개)를 합쳤습니다.` },
+      {
+        toolCalls: [
+          ...writes.map((write) => ({ name: 'write_file', input: { path: write.path, content: write.content } })),
+          ...removable.map((file) => ({ name: 'delete_file', input: { path: file } })),
+        ],
+      },
+      { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
     ];
     const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, {
       by: plan.owner,

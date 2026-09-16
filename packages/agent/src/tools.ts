@@ -34,7 +34,7 @@ export interface ToolContext {
 }
 
 /** 질문 모드에서 거부하는 도구 */
-const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'run_in_service', 'restart_service']);
+const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_in_service', 'restart_service']);
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
 const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.';
@@ -72,6 +72,9 @@ export function buildTools(project: LoadedProject): BetaTool[] {
       path: { type: 'string', description: 'File path relative to the project root.' },
       old_text: { type: 'string', description: 'Exact text to replace. Must appear exactly once; include surrounding lines if needed.' },
       new_text: { type: 'string', description: 'Replacement text.' },
+    }),
+    tool('delete_file', 'Delete a file from the project. Use it only when the request asks for the file to be removed.', {
+      path: { type: 'string', description: 'Project-relative file path' },
     }),
     tool('run_in_service', 'Run a command inside a service container (working directory is the service root). Times out after 3 minutes; do not start long-running servers.', {
       service,
@@ -172,6 +175,11 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
         await workspace.edit(file, string(args, 'old_text'), string(args, 'new_text'));
         return success(`edited ${file}`);
       }
+      case 'delete_file': {
+        const file = string(args, 'path');
+        await workspace.remove(file);
+        return success(`deleted ${file}`);
+      }
       case 'run_in_service': {
         const result = await sandbox.exec(serviceName(context, args), stringArray(args, 'command'), {
           signal: withTimeout(signal, COMMAND_TIMEOUT_MS),
@@ -244,7 +252,7 @@ function summarizeApproval(name: string, input: unknown): string {
     const command = Array.isArray(args.command) ? args.command.filter((value): value is string => typeof value === 'string').join(' ') : '';
     return `run ${command} in ${service}`;
   }
-  if ((name === 'write_file' || name === 'edit_file') && typeof input === 'object' && input !== null) {
+  if ((name === 'write_file' || name === 'edit_file' || name === 'delete_file') && typeof input === 'object' && input !== null) {
     const file = (input as Record<string, unknown>).path;
     return `${name} ${typeof file === 'string' ? file : 'a file'}`;
   }
