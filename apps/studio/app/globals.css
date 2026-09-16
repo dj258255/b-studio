@@ -3,7 +3,7 @@
 @import "katex/dist/katex.min.css";
 
 /*
- * 유리 작업대: 청록과 호박색 빛이 은은하게 번진 바탕 위에 조작 계층(헤더, 탭, 대화)을 반투명 유리로 띄운다.
+ * 유리 작업대: 청록 빛이 은은하게 번진 바탕 위에 조작 계층(헤더, 탭, 대화)을 반투명 유리로 띄운다.
  * 오래 읽는 영역(미리보기, 로그, diff, 게이트 결과)은 불투명 패널로 두어 가독성을 지킨다.
  * 색은 상태(통과, 실패, 확인 중)를 전할 때만 쓴다.
  */
@@ -18,9 +18,7 @@
   --fail: #b4233a;
   --wait: #9a6310;
 
-  --bloom-teal: rgb(64 168 146 / 0.26);
-  --bloom-amber: rgb(236 176 98 / 0.2);
-  --bloom-sky: rgb(118 176 222 / 0.2);
+  --bloom-teal: rgb(64 168 146 / 0.18);
 
   --glass-fill: rgb(255 255 255 / 0.55);
   --glass-soft: rgb(255 255 255 / 0.5);
@@ -42,9 +40,7 @@
     --fail: #f26b7f;
     --wait: #e3ab4d;
 
-    --bloom-teal: rgb(46 150 130 / 0.26);
-    --bloom-amber: rgb(210 146 66 / 0.12);
-    --bloom-sky: rgb(84 132 196 / 0.16);
+    --bloom-teal: rgb(46 150 130 / 0.16);
 
     --glass-fill: rgb(22 38 37 / 0.6);
     --glass-soft: rgb(255 255 255 / 0.06);
@@ -84,6 +80,12 @@
   --color-wait: var(--wait);
   --font-sans: var(--font-plex-sans), system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+/* 모서리 3단계: 패널 · 버튼과 입력 · 상태 칩(rounded-full). 역할이 모양으로 드러나게 한다 */
+@theme {
+  --radius-panel: 12px;
+  --radius-control: 8px;
 }
 
 /*
@@ -141,18 +143,14 @@
     overflow-wrap: break-word;
   }
 
-  /* 유리가 유리로 보이도록 뒤에 빛이 번진 바탕을 둔다. 고정 레이어라 스크롤할 때 다시 그리지 않는다 */
+  /* 유리가 유리로 보이도록 뒤에 청록 빛 한 줄기가 번진 바탕을 둔다. 고정 레이어라 스크롤할 때 다시 그리지 않는다 */
   body::before {
     content: "";
     position: fixed;
     inset: 0;
     z-index: -1;
     pointer-events: none;
-    background:
-      radial-gradient(56rem 40rem at 6% -8%, var(--bloom-teal), transparent 70%),
-      radial-gradient(44rem 34rem at 96% -4%, var(--bloom-sky), transparent 70%),
-      radial-gradient(52rem 38rem at 88% 108%, var(--bloom-amber), transparent 70%),
-      var(--ground);
+    background: radial-gradient(56rem 40rem at 6% -8%, var(--bloom-teal), transparent 70%), var(--ground);
   }
 
   ::selection {
