@@ -51,6 +51,25 @@ pnpm studio deploy examples/orders --remove --volumes
 
 `--rollback`은 컨테이너 이미지만 이전 릴리스로 되돌립니다. 데이터베이스 마이그레이션은 자동으로 되돌리지 않으므로, 하위 호환 마이그레이션과 별도 복구 절차를 준비해야 합니다. `--remove`는 DB 볼륨을 기본적으로 보존하며 `--volumes`를 붙일 때만 함께 제거합니다.
 
+## 남은 샌드박스 자원 정리
+
+비정상 종료나 실패로 남은 샌드박스 자원(컨테이너·이미지·볼륨·네트워크)을 확인하고 지웁니다. Docker VM 디스크가 가득 차 샌드박스가 뜨지 않을 때도 같은 명령을 씁니다.
+
+```bash
+pnpm studio sandbox prune --dry-run
+pnpm studio sandbox prune
+```
+
+`--dry-run`은 지울 목록만 보여 주고 아무것도 지우지 않습니다. 기본 동작은 지울 목록을 먼저 보여 준 뒤 지웁니다.
+
+이름이 `studio-<프로젝트>-<6자리 16진수>` 형태인 compose 자원만 대상으로 하며, 다음은 지우지 않고 건너뜁니다.
+
+- `b-studio.cache=true` 라벨이 붙은 공유 캐시 볼륨 — 다음 세션의 기동 속도가 여기에 달려 있습니다.
+- compose 라벨이 없는 익명 볼륨 — 어느 프로젝트가 만들었는지 알 수 없습니다.
+- 실행 중인 샌드박스의 자원 — 다른 세션이 쓰는 중일 수 있습니다.
+
+강제 삭제(`-f`)를 쓰지 않으므로 사용 중인 자원은 건너뜁니다. 지우지 못한 자원은 이유와 함께 출력합니다.
+
 ## Kubernetes 제공자
 
 `B_STUDIO_SANDBOX_PROVIDER=kubernetes`로 선택하며 환경에 따라 `B_STUDIO_KUBECONFIG`, `B_STUDIO_KUBECTL`, `B_STUDIO_K8S_CONTEXT`, `B_STUDIO_K8S_RUNTIME_CLASS`, `B_STUDIO_K8S_REGISTRY`를 설정합니다. 로컬 kind 검증에는 `B_STUDIO_K8S_KIND_CLUSTER`, `B_STUDIO_K8S_HOST_PATHS`도 사용합니다.

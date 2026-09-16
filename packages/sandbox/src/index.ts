@@ -1,7 +1,14 @@
 export * from './types';
 export * from './errors';
 export * from './readiness';
-export { LocalDockerProvider, runtimeFromEnv, type LocalDockerProviderOptions } from './docker/compose-provider';
+export { describeDockerFailure, DOCKER_OUT_OF_SPACE, LocalDockerProvider, runtimeFromEnv, type LocalDockerProviderOptions } from './docker/compose-provider';
+export {
+  findSandboxLeftovers,
+  pruneSandboxLeftovers,
+  type PruneOptions,
+  type PruneResult,
+  type SandboxLeftovers,
+} from './docker/prune';
 export { KubernetesProvider, type ImageLoader, type KubernetesProviderOptions } from './kubernetes/kubernetes-provider';
 export { providerFromEnv } from './provider';
 export { describeSnapshotEvent, SNAPSHOT_LABEL } from './docker/snapshots';

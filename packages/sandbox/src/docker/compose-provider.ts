@@ -73,6 +73,18 @@ async function removeSandboxImages(dockerBin: string, sandboxId: string): Promis
   if (images.length > 0) await execFileAsync(dockerBin, ['image', 'rm', ...images], { cwd: tmpdir() });
 }
 
+/** Docker VM 디스크가 가득 찼을 때 원인과 다음 행동을 알려 주는 문구 */
+export const DOCKER_OUT_OF_SPACE = "Docker 디스크가 가득 찼습니다. 'studio sandbox prune --dry-run' 으로 남은 샌드박스 자원을 확인하고 정리하거나 Docker VM 디스크를 늘리세요.";
+
+/**
+ * docker 명령이 디스크 부족으로 실패했는지 보고, 그렇다면 안내 문구를 덧붙인다.
+ * 그 밖의 오류는 원문을 그대로 돌려준다. 오류를 삼키지 않도록 항상 원래 메시지를 포함한다
+ */
+export function describeDockerFailure(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.includes('no space left on device') ? `${text}\n${DOCKER_OUT_OF_SPACE}` : text;
+}
+
 /** 샌드박스 출입구 스크립트. 원격 Docker 호스트에서도 돌도록 파일을 마운트하지 않고 내용을 compose 설정에 넣는다 */
 const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 
@@ -591,7 +603,10 @@ class LocalDockerSandbox implements Sandbox {
 
   async #composeOrThrow(args: string[], signal?: AbortSignal): Promise<ExecResult> {
     const result = await this.#compose(args, signal);
-    if (result.exitCode !== 0) throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, this.redact(result.stderr));
+    if (result.exitCode !== 0) {
+      // 디스크 부족이면 원본 stderr는 그대로 두고 다음에 할 일만 덧붙인다
+      throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)));
+    }
     return result;
   }
 
