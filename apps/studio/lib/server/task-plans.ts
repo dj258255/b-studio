@@ -103,6 +103,18 @@ export function rejectTaskPlan(id: string, owner: string, reason?: string): Task
   return clone(plan);
 }
 
+/**
+ * 재시작으로 멈춘 계획의 통합만 다시 시작한다.
+ * 레인 세션은 이미 없어졌지만 남겨 둔 결과 기록이 있으므로 레인을 다시 돌리지 않고 합치는 단계만 반복한다
+ */
+export function resumeTaskPlan(id: string, owner: string): TaskPlanView {
+  const plan = findPlan(id, owner);
+  if (plan.status !== 'interrupted') throw new StudioError(409, '이어서 할 수 있는 계획이 아닙니다');
+  plan.error = undefined;
+  void integrate(plan).catch((error: unknown) => fail(plan, describe(error)));
+  return clone(plan);
+}
+
 async function execute(plan: TaskPlanView): Promise<void> {
   const project = await findProject(plan.projectId);
   if (!project) return fail(plan, '프로젝트를 찾을 수 없습니다');
@@ -165,6 +177,13 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       persist(plan);
     }
     lane.status = 'done';
+    // 세션이 보관 처리된 뒤에도 통합이 결과를 다시 읽을 수 있게 작업 폴더와 바꾼 파일을 계획에 남긴다.
+    // 체크포인트는 최신부터 정렬돼 있고 마지막은 세션 시작 체크포인트라 변경 목록에서 뺀다
+    const finished = getSnapshot(snapshot.id);
+    if (finished) {
+      lane.workDir = finished.workDir;
+      lane.changedFiles = [...new Set(finished.checkpoints.slice(0, -1).flatMap((checkpoint) => checkpoint.files))].sort();
+    }
     persist(plan);
   } catch (error) {
     lane.status = 'failed';
@@ -184,15 +203,15 @@ async function integrate(plan: TaskPlanView): Promise<void> {
   const deletes: string[] = [];
   try {
     for (const lane of plan.lanes) {
-      const snapshot = lane.sessionId ? getSnapshot(lane.sessionId) : undefined;
-      if (!snapshot) throw new Error(`${lane.id} 세션을 찾을 수 없습니다`);
-      // 최신부터 정렬돼 있고 마지막은 세션 시작 체크포인트다
-      const changed = [...new Set(snapshot.checkpoints.slice(0, -1).flatMap((checkpoint) => checkpoint.files))].sort();
+      // 재시작 뒤에는 레인 세션이 없어도 남겨 둔 기록으로 통합한다. 기록이 없으면 합칠 근거가 없으므로 멈춘다
+      if (!lane.workDir || !lane.changedFiles) throw new Error(`${lane.id} 의 결과 기록이 없어 통합할 수 없습니다`);
+      const workDir = lane.workDir;
+      const changed = lane.changedFiles;
       const outside = changed.filter((file) => !isInScope(file, lane.paths));
       // 명령으로 만든 파일처럼 도구 게이트를 거치지 않은 변경도 체크포인트에는 들어온다. 범위 밖이면 합치지 않는다
       if (outside.length > 0) throw new Error(`${lane.id}가 쓰기 범위 밖 파일을 바꿨습니다: ${outside.join(', ')}`);
       for (const file of changed) {
-        const content = await readFile(path.join(snapshot.workDir, file)).catch(() => undefined);
+        const content = await readFile(path.join(workDir, file)).catch(() => undefined);
         // 작업 폴더에 없는 파일은 레인이 지운 것이다. 지운 것도 통합이 함께 지운다
         if (!content) {
           deletes.push(file);
@@ -323,6 +342,11 @@ function fail(plan: TaskPlanView, error: string): void {
   persist(plan);
 }
 
+/** 통합이 레인 세션 없이 결과를 다시 읽으려면 작업 폴더와 바꾼 파일 기록이 있어야 한다 */
+function hasResultRecord(lane: TaskPlanLaneView): boolean {
+  return Boolean(lane.workDir && lane.changedFiles);
+}
+
 function ensureLoaded(): void {
   if (loaded) return;
   loaded = true;
@@ -335,8 +359,21 @@ function ensureLoaded(): void {
         // 서버가 재시작되면 진행 중이던 계획은 이어서 돌릴 수 없다. 끝나지 않은 채 멈춘 것으로 남긴다.
         // 승인 대기(awaiting_approval)는 진행 중이 아니므로 그대로 두고, 서버가 다시 떠도 승인을 기다린다
         if (parsed.status === 'planning' || parsed.status === 'running' || parsed.status === 'integrating') {
-          parsed.status = 'failed';
-          parsed.error = '스튜디오가 다시 시작돼 진행 중이던 작업 계획을 멈췄습니다';
+          // 레인이 모두 끝나 통합만 남았으면 샌드박스가 사라져도 통합만 다시 시도할 수 있게 남긴다.
+          // 다만 그 결과를 다시 읽을 기록(작업 폴더·바꾼 파일)이 레인마다 있어야 한다. 기록이 없으면 이어서 할 수 없는데 안내만 하면 누를 때마다 실패한다
+          const allLanesDone = parsed.lanes.length > 0 && parsed.lanes.every((lane) => lane.status === 'done');
+          if (allLanesDone && parsed.integration?.status !== 'done') {
+            if (parsed.lanes.every(hasResultRecord)) {
+              parsed.status = 'interrupted';
+              parsed.error = '스튜디오가 다시 시작됐습니다. 레인 결과는 남아 있으니 통합을 다시 시도할 수 있습니다.';
+            } else {
+              parsed.status = 'failed';
+              parsed.error = '스튜디오가 다시 시작됐고 레인 결과 기록이 없어 이어서 할 수 없습니다';
+            }
+          } else {
+            parsed.status = 'failed';
+            parsed.error = '스튜디오가 다시 시작돼 진행 중이던 작업 계획을 멈췄습니다';
+          }
         }
         plans.set(parsed.id, parsed);
       } catch {

@@ -346,3 +346,161 @@ describe('작업 계획 승인', () => {
     expect(statusOf(() => rejectTaskPlan(created.id, 'kim'))).toBe(409);
   });
 });
+
+describe('서버 재시작 뒤 이어서 하기', () => {
+  it('레인이 끝나면 작업 폴더와 바꾼 파일을 계획에 남긴다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b', 'web/b/two.md': 'two' } };
+
+    const plan = await run({ projectId: 'orders', request: '결과 기록', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    const laneA = plan.lanes.find((lane) => lane.tasks[0]!.id === 'a')!;
+    const laneB = plan.lanes.find((lane) => lane.tasks[0]!.id === 'b')!;
+    expect(laneA.workDir).toBe(fake.sessions.get(laneA.sessionId!)!.workDir);
+    expect(laneA.changedFiles).toEqual(['web/a/one.md']);
+    expect(laneB.changedFiles).toEqual(['web/b/one.md', 'web/b/two.md']);
+  });
+
+  it('레인이 모두 끝나 통합만 남은 계획은 재시작 뒤 interrupted로 남는다', async () => {
+    writePlan({
+      id: 'plan-done-lanes',
+      owner: 'kim',
+      lanes: [
+        laneView('lane-1', 'done', { workDir: path.join(fake.root, 'lane-1'), changedFiles: ['web/a/one.md'] }),
+        laneView('lane-2', 'done', { paths: ['web/b'], workDir: path.join(fake.root, 'lane-2'), changedFiles: ['web/b/one.md'] }),
+      ],
+    });
+
+    const { getTaskPlan: reloaded } = await restart();
+    const plan = reloaded('plan-done-lanes', 'kim');
+
+    expect(plan.status).toBe('interrupted');
+    expect(plan.error).toContain('통합을 다시 시도할 수 있습니다');
+  });
+
+  it('레인이 끝났어도 결과 기록이 없는 계획은 재시작 뒤 이어서 하라고 안내하지 않는다', async () => {
+    writePlan({
+      id: 'plan-no-record',
+      owner: 'kim',
+      lanes: [
+        laneView('lane-1', 'done', { workDir: path.join(fake.root, 'lane-1'), changedFiles: ['web/a/one.md'] }),
+        // 기록이 생기기 전에 만들어진 레인: 통합이 결과를 다시 읽을 근거가 없다
+        laneView('lane-2', 'done', { paths: ['web/b'] }),
+      ],
+    });
+
+    const { getTaskPlan: reloaded } = await restart();
+    const plan = reloaded('plan-no-record', 'kim');
+
+    expect(plan.status).toBe('failed');
+    expect(plan.error).toContain('기록');
+  });
+
+  it('레인이 끝나지 않은 계획은 재시작 뒤 failed로 남는다', async () => {
+    writePlan({ id: 'plan-half', owner: 'kim', lanes: [laneView('lane-1', 'done'), laneView('lane-2', 'running', { paths: ['web/b'] })] });
+
+    const { getTaskPlan: reloaded } = await restart();
+    const plan = reloaded('plan-half', 'kim');
+
+    expect(plan.status).toBe('failed');
+    expect(plan.error).toContain('스튜디오가 다시 시작돼');
+  });
+
+  it('resumeTaskPlan은 레인을 다시 돌리지 않고 통합만 다시 한다', async () => {
+    const laneA = path.join(fake.root, 'lane-a');
+    const laneB = path.join(fake.root, 'lane-b');
+    mkdirSync(path.join(laneA, 'web/a'), { recursive: true });
+    mkdirSync(path.join(laneB, 'web/b'), { recursive: true });
+    writeFileSync(path.join(laneA, 'web/a/one.md'), 'one');
+    writeFileSync(path.join(laneB, 'web/b/one.md'), 'b');
+    writePlan({
+      id: 'plan-resume',
+      owner: 'kim',
+      lanes: [
+        laneView('lane-1', 'done', { sessionId: 'session-lane-1', workDir: laneA, changedFiles: ['web/a/one.md'], paths: ['web/a'] }),
+        laneView('lane-2', 'done', { sessionId: 'session-lane-2', workDir: laneB, changedFiles: ['web/b/one.md'], paths: ['web/b'] }),
+      ],
+    });
+
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    const resumed = resumeTaskPlan('plan-resume', 'kim');
+
+    expect(resumed.status).toBe('integrating');
+    expect(resumed.error).toBeUndefined();
+
+    const done = await settled(() => reloaded('plan-resume', 'kim'));
+    expect(done.status).toBe('done');
+    expect(done.integration?.status).toBe('done');
+    // 통합 세션 하나만 새로 만들어지고(레인 세션 2개는 다시 안 만든다), 레인에 대한 sendMessage도 새로 불리지 않는다
+    expect(fake.counter).toBe(1);
+    expect(fake.sends).toHaveLength(1);
+    expect(fake.sends[0]!.options.scriptedTurns![0]!.toolCalls!.map((call) => call.input.path).sort()).toEqual(['web/a/one.md', 'web/b/one.md']);
+  });
+
+  it('interrupted가 아닌 계획은 이어서 할 수 없고 남의 계획도 이어서 할 수 없다', async () => {
+    writePlan({ id: 'plan-done', owner: 'kim', status: 'done', lanes: [laneView('lane-1', 'done')] });
+
+    const { resumeTaskPlan } = await restart();
+
+    expect(resumeStatus(() => resumeTaskPlan('plan-done', 'lee'))).toBe(403);
+    expect(resumeStatus(() => resumeTaskPlan('plan-done', 'kim'))).toBe(409);
+    expect(resumeStatus(() => resumeTaskPlan('missing', 'kim'))).toBe(404);
+  });
+
+  it('레인 결과 기록이 없으면 통합을 시작하지 않고 실패한다', async () => {
+    // 이어서 하기로 남은 계획이지만 결과 기록이 없는 예전 기록: 통합이 다시 읽을 근거가 없다
+    writePlan({ id: 'plan-no-record-resume', owner: 'kim', status: 'interrupted', lanes: [laneView('lane-1', 'done', { sessionId: 'session-lane-1' })] });
+
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    resumeTaskPlan('plan-no-record-resume', 'kim');
+
+    const plan = await settled(() => reloaded('plan-no-record-resume', 'kim'));
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.status).toBe('failed');
+    expect(plan.integration?.error).toContain('결과 기록이 없어');
+    // 통합 샌드박스를 띄우기 전에 멈춰야 한다. 스크립트 턴이 돌면 아무것도 합치지 않았는데 통과한 것처럼 남는다
+    expect(fake.counter).toBe(0);
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+});
+
+/** 계획 JSON을 기록 폴더에 직접 써, 서버가 다시 뜨며 기록을 읽는 상황을 만든다 */
+function writePlan(plan: Pick<TaskPlanView, 'id' | 'owner' | 'lanes'> & Partial<TaskPlanView>): void {
+  const file = path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ projectId: 'orders', request: '재시작', modelId: 'model-a', status: 'running', createdAt: new Date().toISOString(), ...plan }));
+}
+
+function laneView(
+  id: string,
+  status: TaskPlanView['lanes'][number]['status'],
+  overrides: Partial<TaskPlanView['lanes'][number]> = {},
+): TaskPlanView['lanes'][number] {
+  return { id, paths: ['web/a'], status, tasks: [], ...overrides };
+}
+
+/** 모듈 내부 캐시를 비우고 다시 읽어, 서버가 다시 시작된 것과 같은 상태를 만든다 */
+async function restart(): Promise<typeof import('./task-plans')> {
+  vi.resetModules();
+  return import('./task-plans');
+}
+
+/** 다시 읽은 모듈은 StudioError 클래스도 새로 만들어 instanceof가 깨지므로 상태 코드만 읽는다 */
+function resumeStatus(action: () => unknown): number {
+  try {
+    action();
+  } catch (error) {
+    return (error as { status?: number }).status ?? 0;
+  }
+  throw new Error('오류가 나지 않았습니다');
+}
+
+async function settled(read: () => TaskPlanView): Promise<TaskPlanView> {
+  for (let i = 0; i < 500; i++) {
+    const plan = read();
+    if (plan.status === 'done' || plan.status === 'failed') return plan;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('작업 계획이 끝나지 않았습니다');
+}

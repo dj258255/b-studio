@@ -13,6 +13,7 @@ const PLAN_STATUS: Record<TaskPlanStatus, string> = {
   awaiting_approval: '승인 대기',
   running: '레인 실행 중',
   integrating: '결과 통합 중',
+  interrupted: '중단됨 (이어서 가능)',
   done: '통합 검증 통과',
   failed: '중단됨',
   rejected: '거부됨',
@@ -47,8 +48,8 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
   const [deciding, setDeciding] = useState(false);
   const [error, setError] = useState<string>();
   const selected = plans.find((plan) => plan.id === selectedId);
-  // 승인 대기와 거부됨은 사람이 움직이기 전까지 바뀌지 않으므로 폴링하지 않는다
-  const active = selected !== undefined && !['done', 'failed', 'rejected', 'awaiting_approval'].includes(selected.status);
+  // 승인 대기·중단됨·거부됨은 사람이 움직이기 전까지 바뀌지 않으므로 폴링하지 않는다
+  const active = selected !== undefined && !['done', 'failed', 'rejected', 'awaiting_approval', 'interrupted'].includes(selected.status);
 
   useEffect(() => {
     if (!selectedId || !active) return;
@@ -96,6 +97,23 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(approve ? { approve: true } : { approve: false, reason }),
       });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
+      const plan = result as TaskPlanView;
+      setPlans((current) => [plan, ...current.filter((entry) => entry.id !== plan.id)]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDeciding(false);
+    }
+  }
+
+  async function resume() {
+    if (!selectedId) return;
+    setDeciding(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/task-plans/${encodeURIComponent(selectedId)}/resume`, { method: 'POST' });
       const result = await response.json();
       if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
       const plan = result as TaskPlanView;
@@ -174,17 +192,32 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             <div><p className="font-medium text-ink">실행한 작업 분해가 아직 없습니다</p><p className="mt-2 text-sm">여러 영역에 걸친 요청을 나눠 동시에 실행해 보세요.</p></div>
           </div>
         ) : (
-          <PlanResult plan={selected} deciding={deciding} onDecide={(approve, reason) => void decide(approve, reason)} />
+          <PlanResult plan={selected} deciding={deciding} onDecide={(approve, reason) => void decide(approve, reason)} onResume={() => void resume()} />
         )}
       </section>
     </div>
   );
 }
 
-function PlanResult({ plan, deciding, onDecide }: { plan: TaskPlanView; deciding: boolean; onDecide: (approve: boolean, reason?: string) => void }) {
+function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView; deciding: boolean; onDecide: (approve: boolean, reason?: string) => void; onResume: () => void }) {
   const [reason, setReason] = useState('');
   return (
     <div className="space-y-4">
+      {plan.status === 'interrupted' && (
+        <section className="glass rounded-2xl p-5 ring-2 ring-wait">
+          <h2 className="text-lg font-semibold">레인 결과가 남아 있습니다. 통합만 다시 시도할까요?</h2>
+          <p className="mt-1 text-sm leading-6 text-muted">레인은 다시 돌리지 않고, 남겨 둔 레인 파일을 새 세션에서 같은 게이트로 다시 검증합니다.</p>
+          <button
+            type="button"
+            disabled={deciding}
+            onClick={onResume}
+            className="mt-3 rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+          >
+            통합 다시 시도
+          </button>
+        </section>
+      )}
+
       {plan.status === 'awaiting_approval' && (
         <section className="glass rounded-2xl p-5 ring-2 ring-wait">
           <h2 className="text-lg font-semibold">이 계획대로 레인을 실행할까요?</h2>
