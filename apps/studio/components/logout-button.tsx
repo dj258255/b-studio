@@ -20,7 +20,7 @@ export function LogoutButton() {
       type="button"
       onClick={() => void logout()}
       disabled={busy}
-      className="glass-soft rounded-full px-3 py-1 text-xs font-medium text-muted hover:text-ink disabled:opacity-60"
+      className="glass-soft rounded-control px-3 py-1 text-xs font-medium text-muted hover:text-ink disabled:opacity-60"
     >
       {busy ? "로그아웃하는 중" : "로그아웃"}
     </button>
