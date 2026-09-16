@@ -34,7 +34,7 @@ export function StartSessionButton({ projectId, folder }: { projectId: string; f
     <>
       <div className="flex flex-col items-end gap-2">
         {folder && (
-          <div className="glass-soft inline-flex rounded-full p-0.5 text-sm" role="group" aria-label="작업할 위치">
+          <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="작업할 위치">
             {(["copy", "local"] as const).map((kind) => (
               <button
                 key={kind}
@@ -42,8 +42,8 @@ export function StartSessionButton({ projectId, folder }: { projectId: string; f
                 aria-pressed={workspace === kind}
                 disabled={starting}
                 onClick={() => setWorkspace(kind)}
-                className={`rounded-full px-3 py-1 font-medium transition-colors ${
-                  workspace === kind ? "bg-panel text-ink shadow-sm ring-1 ring-line" : "text-muted hover:text-ink"
+                className={`rounded-md px-3 py-1 font-medium transition-colors ${
+                  workspace === kind ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
                 }`}
               >
                 {kind === "copy" ? "복사본" : "내 폴더"}
@@ -55,7 +55,7 @@ export function StartSessionButton({ projectId, folder }: { projectId: string; f
           type="button"
           onClick={start}
           disabled={starting}
-          className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-60"
+          className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
         >
           {starting ? (local ? "내 폴더로 준비하는 중" : "복사본 만드는 중") : local ? "내 폴더에서 시작" : "샌드박스 시작"}
         </button>

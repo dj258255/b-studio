@@ -17,7 +17,7 @@ export default async function FleetsPage() {
           <p className="text-sm font-semibold text-muted">b-studio / Agent Fleet</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">같은 요청을 격리된 여러 에이전트에서 비교합니다</h1>
         </div>
-        <Link href="/" className="glass-soft rounded-full px-4 py-2 text-sm font-medium hover:bg-panel">
+        <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
           프로젝트로 돌아가기
         </Link>
       </header>

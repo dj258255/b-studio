@@ -32,10 +32,10 @@ export default async function HomePage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
         <div className="flex items-center gap-3 text-sm text-muted">
-          <Link href="/fleets" className="glass-soft rounded-full px-3 py-1.5 font-medium text-ink hover:bg-panel">
+          <Link href="/fleets" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
             Agent Fleet
           </Link>
-          <Link href="/task-plans" className="glass-soft rounded-full px-3 py-1.5 font-medium text-ink hover:bg-panel">
+          <Link href="/task-plans" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
             작업 분해
           </Link>
           {auth !== "none" && (
@@ -54,9 +54,9 @@ export default async function HomePage() {
         에이전트가 작업을 끝내면 스튜디오가 바뀐 서비스를 재시작하고 API 계약을 비교해, 통과한 결과만 완료로 보여줍니다.
       </p>
 
-      <p className="glass-soft mt-6 rounded-xl px-4 py-3 text-sm leading-6 text-muted">{note}</p>
+      <p className="mt-6 rounded-panel border border-line bg-panel px-4 py-3 text-sm leading-6 text-muted">{note}</p>
 
-      <ul className="glass mt-10 divide-y divide-line overflow-hidden rounded-2xl">
+      <ul className="glass mt-10 divide-y divide-line overflow-hidden rounded-panel">
         {projects.length === 0 && (
           <li className="px-5 py-6 text-muted">열 수 있는 프로젝트가 없습니다. studio.yaml이 있는 폴더를 B_STUDIO_PROJECTS_DIR에 두세요.</li>
         )}
@@ -83,7 +83,7 @@ export default async function HomePage() {
             최근 세션
           </h2>
           <p className="mt-1 text-sm text-muted">중지된 세션도 작업 복사본과 체크포인트가 남아 있어 열어서 이어서 작업할 수 있습니다.</p>
-          <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-2xl">
+          <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-panel">
             {sessions.slice(0, RECENT_SESSIONS).map((session) => (
               <li key={session.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
                 <div className="min-w-0 flex-1">
@@ -100,7 +100,7 @@ export default async function HomePage() {
                     {auth !== "none" && session.owner && `, 만든 사람 ${session.owner}`}
                   </p>
                 </div>
-                <Link href={`/sessions/${session.id}`} className="glass-soft rounded-full px-4 py-1.5 text-sm font-medium hover:bg-panel">
+                <Link href={`/sessions/${session.id}`} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
                   열기
                 </Link>
               </li>

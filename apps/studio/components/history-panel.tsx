@@ -100,10 +100,10 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                       ? `이후 체크포인트 ${newerCount}개와 그 변경, 체크포인트에 없는 폴더의 수정이 내 폴더에서 사라집니다.`
                       : `이후 체크포인트 ${newerCount}개와 그 변경이 사라집니다.`}
                   </p>
-                  <button type="button" onClick={() => void restore()} disabled={!canRestore} className="rounded bg-fail px-3 py-1 text-sm font-medium text-panel disabled:opacity-50">
+                  <button type="button" onClick={() => void restore()} disabled={!canRestore} className="rounded-control bg-fail px-3 py-1 text-sm font-medium text-panel disabled:opacity-50">
                     되돌리기
                   </button>
-                  <button type="button" onClick={() => setConfirming(false)} className="rounded px-2 py-1 text-sm text-muted hover:text-ink">
+                  <button type="button" onClick={() => setConfirming(false)} className="rounded-control px-2 py-1 text-sm text-muted hover:text-ink">
                     취소
                   </button>
                 </div>
@@ -112,7 +112,7 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                   type="button"
                   onClick={() => setConfirming(true)}
                   disabled={!canRestore}
-                  className="rounded-full border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+                  className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
                 >
                   이 시점으로 되돌리기
                 </button>
