@@ -6,9 +6,11 @@ name: orders
 workflow:
   required: [plan, implement, run, browser_check, contract_check, test, review, checkpoint]
   # test 단계: 게이트가 서비스 컨테이너 안에서 실행한다. 종료 코드 0이어야 통과
-  # api에는 아직 테스트 소스가 없고, 실행 중인 bootRun 옆에서 Gradle을 한 번 더 돌리면 .gradle 잠금이 부딪혀 넣지 않았다
+  # api는 bootRun이 계속 돌고 있어 프로젝트 캐시(/app/.gradle)를 같이 쓰면 잠금이 부딪힌다.
+  # --project-cache-dir로 테스트 전용 캐시를 따로 쓴다. 첫 실행은 의존성을 받느라 느리거나 잠금 대기로 실패할 수 있어 재시도한다
   tests:
     - { name: web-lint, service: web, command: [pnpm, lint] }
+    - { name: api-unit, service: api, command: [./gradlew, test, --no-daemon, --console=plain, --project-cache-dir, /tmp/gradle-test-cache], maxAttempts: 2 }
   # browser_check 단계: 헤드리스 Chromium으로 모바일 크기 화면을 렌더링해 문구·스크립트 예외·console.error·실패한 요청·가로 넘침을 확인한다
   pageChecks:
     - { service: web, path: /, mode: browser, expectText: To get started, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
