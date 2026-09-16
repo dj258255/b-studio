@@ -9,6 +9,10 @@ const PAGES: Record<string, string> = {
   '/broken': `<html><body><p>로딩</p><script>console.error('hydration failed'); window.missing.call()</script></body></html>`,
   '/missing-chunk': `<html><body><p>표</p><script src="/chunk.js"></script></body></html>`,
   '/wide': `<html><head><meta name="viewport" content="width=device-width"></head><body style="margin:0"><div style="width:900px">표</div></body></html>`,
+  // 입력값을 버튼으로 옮겨 그리는 페이지. 처음 화면에는 결과 문구가 없다
+  '/interactive': `<html><body><input id="q"><button id="go" onclick="document.getElementById('out').textContent = document.getElementById('q').value">검색</button><p id="out"></p></body></html>`,
+  // 입력칸에서 Enter를 누르면 폼이 제출되는 페이지
+  '/form': `<html><body><form onsubmit="event.preventDefault(); document.getElementById('done').textContent = '제출됨'"><input id="name"></form><p id="done"></p></body></html>`,
 };
 
 let server: Server;
@@ -52,5 +56,34 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
     expect(mobile.horizontalOverflowPx).toBe(900 - 390);
     const desktop = await runInBrowser(`${base}/wide`, { viewport: { width: 1280, height: 800 } });
     expect(desktop.horizontalOverflowPx).toBe(0);
+  });
+
+  it('선언한 단계를 순서대로 실행해 처음에는 없던 문구가 나타난다', async () => {
+    // 단계 없이 열면 결과 문구가 없어야 단계가 실제로 화면을 바꿨다는 증거가 된다
+    expect((await runInBrowser(`${base}/interactive`, {})).text).not.toContain('김토스');
+    const result = await runInBrowser(`${base}/interactive`, {
+      steps: [{ fill: { selector: '#q', text: '김토스' } }, { click: '#go' }, { waitFor: 'text=김토스' }],
+    });
+    expect(result.text).toContain('김토스');
+  });
+
+  it('단계가 실패하면 몇 번째 단계였는지와 선택자를 담아 그 자리에서 멈춘다', async () => {
+    await expect(runInBrowser(`${base}/interactive`, { steps: [{ click: '#go' }, { click: '[data-testid=missing]' }] })).rejects.toThrow(
+      '2번째 단계 실패 (click [data-testid=missing])',
+    );
+  });
+
+  it('press로 폼을 제출한 뒤의 화면을 읽는다', async () => {
+    expect((await runInBrowser(`${base}/form`, {})).text).not.toContain('제출됨');
+    const result = await runInBrowser(`${base}/form`, {
+      steps: [{ fill: { selector: '#name', text: '김토스' } }, { press: 'Enter' }, { waitFor: 'text=제출됨' }],
+    });
+    expect(result.text).toContain('제출됨');
+  });
+
+  it('실행할 동작이 없는 단계는 조용히 넘기지 않고 몇 번째 단계인지 알린다', async () => {
+    await expect(runInBrowser(`${base}/interactive`, { steps: [{ click: '#go' }, {} as never] })).rejects.toThrow(
+      '2번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)',
+    );
   });
 });

@@ -1,6 +1,7 @@
 import type { ExecResult } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { BrowserPageOptions } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
@@ -125,6 +126,44 @@ describe('VerificationGate 워크플로 단계', () => {
       expect(feedback).toContain(reason);
     }
     expect(gate.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('browser 모드는 steps를 러너에 그대로 넘기고 검사 이름에 단계 수를 넣는다', async () => {
+    const target = withWorkflow({
+      pageChecks: [
+        {
+          service: 'api',
+          path: '/orders',
+          mode: 'browser',
+          expectStatus: 200,
+          viewport: { width: 390, height: 844 },
+          steps: [{ click: '#go' }, { fill: { selector: '#q', text: '김토스' } }],
+          allowConsoleErrors: false,
+          noHorizontalScroll: false,
+        },
+      ],
+    });
+    const sandbox = fakeSandbox(target, [true]);
+    const workspace = new Workspace(target.root);
+    const seen: Array<BrowserPageOptions['steps']> = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async (_url, options) => {
+        seen.push(options.steps);
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], horizontalOverflowPx: 0 };
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(seen).toEqual([[{ click: '#go' }, { fill: { selector: '#q', text: '김토스' } }]]);
+    expect(gate.checks.filter((check) => check.stage === 'browser_check').map((check) => check.name)).toEqual(['api /orders (browser 390x844, 단계 2개)']);
   });
 
   it('브라우저를 띄울 수 없으면 화면 확인을 통과시키지 않는다', async () => {

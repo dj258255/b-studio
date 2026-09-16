@@ -17,8 +17,9 @@ export function workflow(project: LoadedProject, options: { piEnv: boolean }): n
   console.log(`플랫폼이 판정하는 단계: ${stages.filter((stage) => VERIFICATION_STAGES.includes(stage)).join(', ')}`);
   for (const test of spec?.tests ?? []) console.log(`  test  ${test.name} · ${test.service}: ${test.command.join(' ')} (최대 ${test.maxAttempts}회)`);
   for (const page of spec?.pageChecks ?? []) {
+    const steps = page.steps?.length ? ` · 단계 ${page.steps.length}개` : '';
     const browser = page.mode === 'browser'
-      ? ` · 브라우저${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''}${page.noHorizontalScroll ? ' · 가로 넘침 금지' : ''}${page.allowConsoleErrors ? ' · console.error 허용' : ''}`
+      ? ` · 브라우저${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''}${page.noHorizontalScroll ? ' · 가로 넘침 금지' : ''}${page.allowConsoleErrors ? ' · console.error 허용' : ''}${steps}`
       : ' · HTTP';
     console.log(`  page  ${page.service} ${page.path}${browser} → ${page.expectStatus}${page.expectText ? ` · '${page.expectText}' 포함` : ''}`);
   }

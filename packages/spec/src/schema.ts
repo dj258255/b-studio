@@ -188,6 +188,30 @@ export const WorkflowTestSchema = z.object({
 });
 
 /**
+ * browser_check의 browser 모드에서 페이지를 연 뒤 순서대로 실행할 동작 하나.
+ * 화면 확인이 코드 실행 경로가 되지 않도록 정해 둔 네 동작만 받고, 각 단계는 정확히 하나의 동작을 가져야 한다.
+ */
+export const WorkflowPageStepSchema = z
+  .object({
+    /** Playwright 선택자. 클릭한다 */
+    click: z.string().min(1).optional(),
+    /** Playwright 선택자를 입력칸에 채운다 */
+    fill: z.object({ selector: z.string().min(1), text: z.string() }).optional(),
+    /** 키보드를 누른다 (예: Enter) */
+    press: z.string().min(1).optional(),
+    /** Playwright 선택자가 나타날 때까지 기다린다 */
+    waitFor: z.string().min(1).optional(),
+  })
+  .superRefine((step, ctx) => {
+    const actions = [step.click, step.fill, step.press, step.waitFor].filter((value) => value !== undefined);
+    if (actions.length !== 1) {
+      ctx.addIssue({ code: 'custom', message: '단계에는 click, fill, press, waitFor 중 정확히 하나를 적어야 합니다' });
+    }
+  });
+
+const PAGE_STEPS_MAX = 10;
+
+/**
  * browser_check 단계에서 재시작한 서비스의 화면을 확인한다.
  * http는 응답 상태와 본문 문구만 보고, browser는 헤드리스 Chromium으로 렌더링해 스크립트 예외·console.error·가로 넘침까지 본다
  */
@@ -197,8 +221,10 @@ export const WorkflowPageCheckSchema = z
     path: SERVICE_PATH,
     mode: z.enum(['http', 'browser']).default('http'),
     expectStatus: z.number().int().min(100).max(599).default(200),
-    /** http는 응답 본문, browser는 렌더링된 화면 텍스트에 들어 있어야 하는 문구 */
+    /** http는 응답 본문, browser는 렌더링된 화면 텍스트에 들어 있어야 하는 문구. browser에서는 단계를 모두 마친 뒤의 화면을 본다 */
     expectText: z.string().min(1).optional(),
+    /** browser 전용. 페이지를 연 뒤 순서대로 실행할 상호작용. 정해 둔 네 동작만 받는다 */
+    steps: z.array(WorkflowPageStepSchema).max(PAGE_STEPS_MAX, `단계는 최대 ${PAGE_STEPS_MAX}개까지 쓸 수 있습니다`).optional(),
     /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다 */
     viewport: z.object({ width: z.number().int().min(240).max(3840), height: z.number().int().min(240).max(3840) }).optional(),
     /** browser 전용. 기본은 console.error나 실패한 요청(4xx·5xx·연결 실패, 자동 favicon 제외)이 하나라도 있으면 실패 */
@@ -209,6 +235,7 @@ export const WorkflowPageCheckSchema = z
   .superRefine((check, ctx) => {
     if (check.mode === 'browser') return;
     // http 모드에서 무시되는 옵션을 받으면 검사한 것처럼 보이기만 한다
+    if (check.steps) ctx.addIssue({ code: 'custom', path: ['steps'], message: 'steps는 mode: browser에서만 쓸 수 있습니다' });
     if (check.viewport) ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
     if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
@@ -296,6 +323,7 @@ export type DeployServiceSpec = DeploySpec['services'][string];
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
+export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;

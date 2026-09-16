@@ -150,7 +150,9 @@ export class VerificationGate {
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     const nodes: TaskNode<void>[] = [];
     for (const page of pages) {
-      const name = `${page.service} ${page.path}${page.mode === 'browser' ? ` (browser${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''})` : ''}`;
+      const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
+      const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
+      const name = `${page.service} ${page.path}${page.mode === 'browser' ? ` (${browser}${steps})` : ''}`;
       meta.push({ stage: 'browser_check', name });
       nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, signal) });
     }
@@ -176,7 +178,7 @@ export class VerificationGate {
     const url = new URL(page.path, endpoint.url);
     if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
     if (page.mode === 'browser') {
-      const result = await browserRunner(url.href, { viewport: page.viewport, signal });
+      const result = await browserRunner(url.href, { viewport: page.viewport, steps: page.steps, signal });
       const problems: string[] = [];
       if (result.status !== page.expectStatus) problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
       if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);

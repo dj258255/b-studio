@@ -100,6 +100,42 @@ describe('parseSpec', () => {
     ]);
   });
 
+  it('browser 모드의 상호작용 단계를 읽고, http 모드나 잘못된 단계를 거부한다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:
+  pageChecks:
+    - service: web
+      path: /orders
+      mode: browser
+      steps:
+        - { click: "[data-testid=refresh]" }
+        - { fill: { selector: "#q", text: "김토스" } }
+        - { press: Enter }
+        - { waitFor: "text=김토스" }
+      expectText: 김토스
+`);
+    const page = spec.workflow?.pageChecks?.[0];
+    expect(page).toMatchObject({ mode: 'browser', expectText: '김토스' });
+    expect(page?.steps).toEqual([
+      { click: '[data-testid=refresh]' },
+      { fill: { selector: '#q', text: '김토스' } },
+      { press: 'Enter' },
+      { waitFor: 'text=김토스' },
+    ]);
+
+    const httpSteps = captureError(() =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, steps: [{ click: "#a" }] }\n`),
+    );
+    expect(httpSteps.issues).toEqual(['workflow.pageChecks.0.steps: steps는 mode: browser에서만 쓸 수 있습니다']);
+
+    const both = captureError(() =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, steps: [{ click: "#a", fill: { selector: "#q", text: x } }] }\n`),
+    );
+    expect(both.issues).toEqual(['workflow.pageChecks.0.steps.0: 단계에는 click, fill, press, waitFor 중 정확히 하나를 적어야 합니다']);
+
+    const empty = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, steps: [{}] }\n`));
+    expect(empty.issues).toEqual(['workflow.pageChecks.0.steps.0: 단계에는 click, fill, press, waitFor 중 정확히 하나를 적어야 합니다']);
+  });
+
   it('network.egress는 호스트 문자열과 평문 HTTP 경로·메서드 규칙을 함께 받는다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}network:
   egress:
