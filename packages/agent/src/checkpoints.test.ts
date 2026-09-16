@@ -92,6 +92,40 @@ describe('CheckpointStore', () => {
     expect(previous!.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
   });
 
+  it('다른 사람이 만든 커밋의 트레일러는 무시하고, 스튜디오가 만든 체크포인트의 통과 기록은 그대로 읽는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const mine = await store.commit('요청: 메모 추가', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check', 'test', 'review'])}`);
+    expect(mine?.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
+
+    // 원격에 쓸 수 있는 사람이 통과 기록을 적어 올린 커밋. 본문 마지막 문단이 트레일러 블록이다
+    await write('api/src/Order.java', 'class Order { String memo; String theirs; }\n');
+    await execFileAsync('git', ['-C', root, 'add', '-A']);
+    await execFileAsync('git', [
+      '-C', root, '-c', 'user.name=other', '-c', 'user.email=other@example.com',
+      'commit', '-q', '-m', '외부 커밋', '-m', formatWorkflowTrailer(['run', 'contract_check', 'test', 'review']),
+    ]);
+
+    const [theirs, latest, start] = await store.list();
+    expect(theirs!.message).toBe('외부 커밋');
+    expect(theirs!.passedStages).toBeUndefined();
+    // 신뢰 범위를 좁히면서 스튜디오가 만든 체크포인트까지 막지 않았는지 확인한다
+    expect(latest!.message).toBe('요청: 메모 추가');
+    expect(latest!.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
+    expect(start!.passedStages).toBeUndefined();
+  });
+
+  it('저장소가 사용자 지정 작성자를 쓰면 그 작성자가 만든 체크포인트의 통과 기록을 읽는다', async () => {
+    const store = new CheckpointStore(root, { author: { name: 'ops', email: 'ops@example.com' } });
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const checkpoint = await store.commit('요청: 메모 추가', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check', 'review'])}`);
+
+    expect(checkpoint?.passedStages).toEqual(['run', 'contract_check', 'review']);
+    expect((await store.list())[0]!.passedStages).toEqual(['run', 'contract_check', 'review']);
+  });
+
   it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {
     // 사용자가 쓰던 저장소: 커밋 하나, 무시하는 로그 파일, 아직 커밋하지 않은 초안
     await write('.gitignore', '*.log\n');

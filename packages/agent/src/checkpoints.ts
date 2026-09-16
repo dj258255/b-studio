@@ -606,12 +606,14 @@ export class CheckpointStore {
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
     // 트레일러는 git이 마지막 문단에서만 읽는다. 본문(에이전트 요약)에 같은 모양의 줄이 있어도 통과 기록이 되지 않는다
-    const [sha = '', shortSha = '', subject = '', createdAt = '', trailers = ''] = (
-      await this.#git(['show', '-s', `--format=%H%x00%h%x00%s%x00%cI%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)`, ref])
+    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = ''] = (
+      await this.#git(['show', '-s', `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)`, ref])
     )
       .trim()
       .split('\0');
-    const passedStages = parseWorkflowTrailerValues(trailers.split('\x1f'));
+    // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다. 원격에 쓸 수 있는 사람이 커밋 메시지에 트레일러를 적어 가져온 체크포인트를 배포 조건 통과처럼 보이게 하지 못하게 한다
+    const passedStages =
+      authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');
