@@ -15,9 +15,10 @@ import { createSession, getSnapshot, sendMessage, stopSession, subscribe } from 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
  *  1. 모델이 작업·쓰기 범위·의존 관계를 JSON으로 제안하고 planLanes가 검증한다 (틀리면 실행하지 않는다)
- *  2. 의존 관계로 이어진 작업은 한 세션(레인)에서 차례로, 독립 레인은 서로 다른 세션에서 동시에 돌린다
+ *  2. 검증을 통과한 계획은 사람이 승인할 때까지 멈춘다. 승인 없이는 어떤 레인 세션도 만들지 않는다
+ *  3. 의존 관계로 이어진 작업은 한 세션(레인)에서 차례로, 독립 레인은 서로 다른 세션에서 동시에 돌린다
  *     작업마다 쓰기 범위를 실행기 정책으로 걸어 레인끼리 변경이 겹치지 않게 한다
- *  3. 모든 레인이 게이트를 통과하면 새 세션에서 레인들의 최종 파일을 같은 루프·게이트로 다시 적용해 합친 결과를 검증한다
+ *  4. 모든 레인이 게이트를 통과하면 새 세션에서 레인들의 최종 파일을 같은 루프·게이트로 다시 적용해 합친 결과를 검증한다
  * 자동 병합·푸시·배포는 하지 않는다. 통합 세션의 체크포인트를 사람이 검토하고 기존 흐름(PR·배포 조건)으로 넘긴다
  */
 const MAX_REQUEST = 20_000;
@@ -68,10 +69,37 @@ export function listTaskPlans(owner: string): TaskPlanView[] {
 }
 
 export function getTaskPlan(id: string, owner: string): TaskPlanView {
+  return clone(findPlan(id, owner));
+}
+
+/** 계획을 찾아 소유자를 확인한다. 승인·거부도 같은 규칙을 쓴다 */
+function findPlan(id: string, owner: string): TaskPlanView {
   ensureLoaded();
   const plan = plans.get(id);
   if (!plan) throw new StudioError(404, '작업 계획을 찾을 수 없습니다');
   if (plan.owner !== owner) throw new StudioError(403, '이 작업 계획을 볼 수 없습니다');
+  return plan;
+}
+
+/** 사람이 계획을 승인하면 그때 레인 실행을 시작한다. 승인 전에는 세션을 만들지 않는다 */
+export function approveTaskPlan(id: string, owner: string): TaskPlanView {
+  const plan = findPlan(id, owner);
+  if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인을 기다리는 계획이 아닙니다');
+  plan.approvedBy = owner;
+  plan.approvedAt = new Date().toISOString();
+  persist(plan);
+  void runApprovedPlan(plan).catch((error: unknown) => fail(plan, describe(error)));
+  return clone(plan);
+}
+
+/** 사람이 계획을 거부하면 세션을 만들지 않고 멈춘다 */
+export function rejectTaskPlan(id: string, owner: string, reason?: string): TaskPlanView {
+  const plan = findPlan(id, owner);
+  if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인을 기다리는 계획이 아닙니다');
+  plan.status = 'rejected';
+  plan.rejectedReason = reason?.trim() || undefined;
+  plan.finishedAt = new Date().toISOString();
+  persist(plan);
   return clone(plan);
 }
 
@@ -91,6 +119,12 @@ async function execute(plan: TaskPlanView): Promise<void> {
     status: 'queued',
     tasks: lane.tasks.map((task) => ({ ...task, status: 'queued' })),
   }));
+  // 사람이 승인할 때까지 여기서 멈춘다. 승인 없이 레인을 돌리지 않는다
+  plan.status = 'awaiting_approval';
+  persist(plan);
+}
+
+async function runApprovedPlan(plan: TaskPlanView): Promise<void> {
   plan.status = 'running';
   persist(plan);
 
@@ -298,7 +332,8 @@ function ensureLoaded(): void {
       try {
         const parsed = JSON.parse(readFileSync(path.join(root(), name), 'utf8')) as TaskPlanView;
         if (!parsed?.id || !Array.isArray(parsed.lanes)) continue;
-        // 서버가 재시작되면 진행 중이던 계획은 이어서 돌릴 수 없다. 끝나지 않은 채 멈춘 것으로 남긴다
+        // 서버가 재시작되면 진행 중이던 계획은 이어서 돌릴 수 없다. 끝나지 않은 채 멈춘 것으로 남긴다.
+        // 승인 대기(awaiting_approval)는 진행 중이 아니므로 그대로 두고, 서버가 다시 떠도 승인을 기다린다
         if (parsed.status === 'planning' || parsed.status === 'running' || parsed.status === 'integrating') {
           parsed.status = 'failed';
           parsed.error = '스튜디오가 다시 시작돼 진행 중이던 작업 계획을 멈췄습니다';

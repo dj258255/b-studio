@@ -2,6 +2,7 @@
  * 작업 분해의 실제 실행 경로를 외부 과금 없이 검증한다.
  *
  *  - 모델이 낸 계획을 검증해 레인 2개로 나눈다 (lane A: a1 → a2, lane B: b)
+ *  - 계획은 승인을 기다리며 멈추고, approveTaskPlan을 부른 뒤에야 레인 세션이 생긴다
  *  - a2는 a1이 만든 파일을 읽어야 끝낼 수 있다 → 같은 레인은 한 세션에서 차례로 돈다
  *  - b는 먼저 lane A의 범위에 쓰려다 실행기에 막히고, 자기 범위에만 쓴다 → 작업별 쓰기 범위가 실제로 걸린다
  *  - 두 레인의 결과를 새 세션에서 같은 게이트로 다시 적용해 한 체크포인트로 합친다
@@ -66,7 +67,7 @@ async function main(): Promise<void> {
       B_STUDIO_MODEL_OBSERVATIONS_FILE: path.join(root, 'model-observations.json'),
     });
 
-    const { createTaskPlan, getTaskPlan } = await import('../lib/server/task-plans');
+    const { approveTaskPlan, createTaskPlan, getTaskPlan } = await import('../lib/server/task-plans');
     const { getSnapshot, stopSession } = await import('../lib/server/sessions');
     const { LOCAL_USER } = await import('../lib/server/auth');
 
@@ -74,15 +75,34 @@ async function main(): Promise<void> {
     const created = await createTaskPlan({ projectId: PROJECT, request: 'plan-a 메모 두 개와 plan-b 메모를 추가해줘', modelId: 'local-planner', owner: LOCAL_USER });
     let plan = created;
     let previous = '';
-    while (plan.status !== 'done' && plan.status !== 'failed') {
-      if (Date.now() - started > 40 * 60_000) throw new Error('작업 분해가 40분 안에 끝나지 않았습니다');
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-      plan = getTaskPlan(created.id, LOCAL_USER);
+    const trace = () => {
       const current = `${plan.status} | ${plan.lanes.map((lane) => `${lane.id}=${lane.status}[${lane.tasks.map((task) => `${task.id}:${task.status}`).join(' ')}]`).join(' ')} | 통합=${plan.integration?.status ?? '-'}`;
       if (current !== previous) {
         log(`${((Date.now() - started) / 1_000).toFixed(0)}s ${current}`);
         previous = current;
       }
+    };
+
+    // 승인 게이트: 계획이 검증을 통과하면 사람이 승인할 때까지 여기서 멈춘다
+    while (plan.status !== 'awaiting_approval' && plan.status !== 'failed') {
+      if (Date.now() - started > 40 * 60_000) throw new Error('작업 분해가 40분 안에 승인 대기에 이르지 않았습니다');
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      plan = getTaskPlan(created.id, LOCAL_USER);
+      trace();
+    }
+    log('\n▶ 승인 게이트');
+    check(plan.status === 'awaiting_approval', `계획이 사람 승인을 기다림 (실제: ${plan.status}${plan.error ? ` · ${plan.error}` : ''})`);
+    check(plan.lanes.length > 0 && plan.lanes.every((lane) => lane.sessionId === undefined), `승인 전에는 레인 세션이 하나도 없음 (${plan.lanes.map((lane) => lane.id).join(', ') || '레인 없음'})`);
+
+    // 승인하고 나서야 레인이 돈다
+    approveTaskPlan(created.id, LOCAL_USER);
+    plan = getTaskPlan(created.id, LOCAL_USER);
+
+    while (plan.status !== 'done' && plan.status !== 'failed') {
+      if (Date.now() - started > 40 * 60_000) throw new Error('작업 분해가 40분 안에 끝나지 않았습니다');
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      plan = getTaskPlan(created.id, LOCAL_USER);
+      trace();
     }
     sessionIds = [...plan.lanes.flatMap((lane) => (lane.sessionId ? [lane.sessionId] : [])), ...(plan.integration?.sessionId ? [plan.integration.sessionId] : [])];
 

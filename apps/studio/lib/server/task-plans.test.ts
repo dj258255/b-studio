@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StudioEvent } from '../studio-events';
+import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
 type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
@@ -93,7 +94,8 @@ vi.mock('./sessions', () => ({
   },
 }));
 
-import { createTaskPlan, getTaskPlan } from './task-plans';
+import { StudioError } from './errors';
+import { approveTaskPlan, createTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
 const saved = { mode: process.env.B_STUDIO_MODE, dir: process.env.B_STUDIO_TASK_PLANS_DIR };
@@ -131,12 +133,41 @@ async function finished(id: string) {
   throw new Error('작업 계획이 끝나지 않았습니다');
 }
 
+/** 계획 검증이 끝나 승인을 기다리거나(awaiting_approval), 계획 단계에서 실패할 때까지 기다린다 */
+async function awaiting(id: string): Promise<TaskPlanView> {
+  for (let i = 0; i < 500; i++) {
+    const plan = getTaskPlan(id, 'kim');
+    if (plan.status === 'awaiting_approval' || plan.status === 'failed') return plan;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('작업 계획이 승인 대기에 이르지 않았습니다');
+}
+
+/** 계획을 만들고, 사람이 승인한 뒤 완료·실패까지 기다린다 */
+async function run(input: Parameters<typeof createTaskPlan>[0]): Promise<TaskPlanView> {
+  const created = await createTaskPlan(input);
+  const waiting = await awaiting(created.id);
+  if (waiting.status !== 'awaiting_approval') return waiting;
+  approveTaskPlan(created.id, 'kim');
+  return finished(created.id);
+}
+
+function statusOf(action: () => unknown): number {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof StudioError) return error.status;
+    throw error;
+  }
+  throw new Error('오류가 나지 않았습니다');
+}
+
 describe('작업 분해 실행', () => {
   it('이어진 작업은 한 세션에서 쓰기 범위를 걸어 차례로, 독립 레인은 다른 세션에서 돌리고 결과를 새 세션에 다시 적용한다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
     fake.writes = { a1: { 'web/a/one.md': 'one' }, a2: { 'web/a/two.md': 'two' }, b: { 'web/b/one.md': 'b' } };
 
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('done');
     const laneA = plan.lanes.find((lane) => lane.tasks.length === 2)!;
@@ -162,7 +193,7 @@ describe('작업 분해 실행', () => {
 
   it('병렬 레인의 쓰기 범위가 겹치는 계획은 세션을 만들기 전에 실패시킨다', async () => {
     fake.plan = { tasks: [task('a', ['web/app']), task('b', ['web/app/orders'])] };
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '겹치는 계획', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '겹치는 계획', modelId: 'model-a', owner: 'kim' });
     expect(plan).toMatchObject({ status: 'failed', lanes: [] });
     expect(plan.error).toContain('쓰기 범위가 겹칩니다');
     expect(fake.sessions.size).toBe(0);
@@ -171,7 +202,7 @@ describe('작업 분해 실행', () => {
   it('레인 하나가 실패하면 뒤 작업은 건너뛰고 통합하지 않는다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
     fake.writes = { a1: 'fail', b: { 'web/b/one.md': 'b' } };
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '실패 레인', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '실패 레인', modelId: 'model-a', owner: 'kim' });
     const laneA = plan.lanes.find((lane) => lane.tasks.length === 2)!;
     expect(plan.status).toBe('failed');
     expect(laneA.tasks.map((item) => item.status)).toEqual(['failed', 'skipped']);
@@ -184,7 +215,7 @@ describe('작업 분해 실행', () => {
     fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
     // 실행기 정책을 우회한 변경(명령으로 만든 파일 등)이 체크포인트에 들어온 상황
     fake.writes = { a: { 'web/a/one.md': 'one', 'web/b/sneaky.md': 'x' }, b: { 'web/b/one.md': 'b' } };
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '범위 밖 변경', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '범위 밖 변경', modelId: 'model-a', owner: 'kim' });
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('쓰기 범위 밖 파일을 바꿨습니다: web/b/sneaky.md');
     expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
@@ -197,7 +228,7 @@ describe('작업 분해 실행', () => {
     fake.sourceFiles = { 'web/a/removed.md': 'old' };
     fake.deletes = { a: ['web/a/removed.md'] };
 
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '삭제 포함', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '삭제 포함', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('done');
     const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
@@ -219,7 +250,7 @@ describe('작업 분해 실행', () => {
     // 레인이 만들었다가 지운 파일: 어느 작업 폴더에도 남아 있지 않다
     fake.deletes = { a: ['web/a/never-existed.md'] };
 
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '없는 파일 삭제', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '없는 파일 삭제', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('done');
     const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
@@ -233,7 +264,7 @@ describe('작업 분해 실행', () => {
     fake.writes = { a: {} };
     fake.deletes = { a: ['web/a/never-existed.md'] };
 
-    const plan = await finished((await createTaskPlan({ projectId: 'orders', request: '만들었다 지운 파일', modelId: 'model-a', owner: 'kim' })).id);
+    const plan = await run({ projectId: 'orders', request: '만들었다 지운 파일', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('적용할 변경이 없습니다');
@@ -245,5 +276,73 @@ describe('작업 분해 실행', () => {
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'unknown', owner: 'kim' })).rejects.toThrow('등록되지 않은 모델');
     process.env.B_STUDIO_MODE = 'demo';
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+  });
+});
+
+describe('작업 계획 승인', () => {
+  it('계획을 만들면 승인을 기다리며 세션을 하나도 만들지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '승인 대기', modelId: 'model-a', owner: 'kim' });
+    const waiting = await awaiting(created.id);
+
+    expect(waiting.status).toBe('awaiting_approval');
+    expect(waiting.lanes).toHaveLength(2);
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.sends).toEqual([]);
+  });
+
+  it('승인해야 레인이 돌고 통합까지 끝난다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '승인 후 실행', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    expect(fake.sessions.size).toBe(0);
+
+    const approved = approveTaskPlan(created.id, 'kim');
+    expect(approved).toMatchObject({ status: 'running', approvedBy: 'kim' });
+    expect(approved.approvedAt).toBeDefined();
+
+    const plan = await finished(created.id);
+    expect(plan.status).toBe('done');
+    expect(plan.lanes.every((lane) => lane.sessionId)).toBe(true);
+    expect(plan.integration?.status).toBe('done');
+  });
+
+  it('다른 사용자는 승인·거부할 수 없고 승인 대기가 아니면 409로 거부한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '승인 권한', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => approveTaskPlan(created.id, 'lee'))).toBe(403);
+    expect(statusOf(() => rejectTaskPlan(created.id, 'lee'))).toBe(403);
+    expect(statusOf(() => approveTaskPlan('nope', 'kim'))).toBe(404);
+
+    approveTaskPlan(created.id, 'kim');
+    expect(statusOf(() => approveTaskPlan(created.id, 'kim'))).toBe(409);
+    // 승인으로 시작한 실행을 이 테스트 안에서 끝내, 다음 테스트로 세션 생성이 새지 않게 한다
+    await finished(created.id);
+  });
+
+  it('거부하면 세션을 만들지 않고 상태를 rejected로 남긴다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '거부', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    const rejected = rejectTaskPlan(created.id, 'kim', '  쓰기 범위가 이상합니다  ');
+    expect(rejected).toMatchObject({ status: 'rejected', rejectedReason: '쓰기 범위가 이상합니다' });
+    expect(rejected.finishedAt).toBeDefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.sends).toEqual([]);
+    expect(getTaskPlan(created.id, 'kim').status).toBe('rejected');
+    expect(statusOf(() => rejectTaskPlan(created.id, 'kim'))).toBe(409);
   });
 });

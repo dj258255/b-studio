@@ -10,10 +10,12 @@ type ModelOption = ModelProfile & { configured: boolean };
 
 const PLAN_STATUS: Record<TaskPlanStatus, string> = {
   planning: '작업 계획 중',
+  awaiting_approval: '승인 대기',
   running: '레인 실행 중',
   integrating: '결과 통합 중',
   done: '통합 검증 통과',
   failed: '중단됨',
+  rejected: '거부됨',
 };
 
 const STEP_STATUS: Record<TaskPlanStepStatus, string> = {
@@ -42,9 +44,11 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
   const [plans, setPlans] = useState(initialPlans);
   const [selectedId, setSelectedId] = useState(initialPlans[0]?.id);
   const [creating, setCreating] = useState(false);
+  const [deciding, setDeciding] = useState(false);
   const [error, setError] = useState<string>();
   const selected = plans.find((plan) => plan.id === selectedId);
-  const active = selected !== undefined && !['done', 'failed'].includes(selected.status);
+  // 승인 대기와 거부됨은 사람이 움직이기 전까지 바뀌지 않으므로 폴링하지 않는다
+  const active = selected !== undefined && !['done', 'failed', 'rejected', 'awaiting_approval'].includes(selected.status);
 
   useEffect(() => {
     if (!selectedId || !active) return;
@@ -79,6 +83,27 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function decide(approve: boolean, reason?: string) {
+    if (!selectedId) return;
+    setDeciding(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/task-plans/${encodeURIComponent(selectedId)}/approval`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(approve ? { approve: true } : { approve: false, reason }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
+      const plan = result as TaskPlanView;
+      setPlans((current) => [plan, ...current.filter((entry) => entry.id !== plan.id)]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDeciding(false);
     }
   }
 
@@ -117,7 +142,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             onClick={() => void create()}
             className="mt-4 w-full rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
           >
-            {creating ? '계획을 요청하는 중' : '작업 계획 받고 실행'}
+            {creating ? '계획을 요청하는 중' : '작업 계획 받기'}
           </button>
           {error && <p className="mt-3 text-sm text-fail">{error}</p>}
         </section>
@@ -149,25 +174,57 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             <div><p className="font-medium text-ink">실행한 작업 분해가 아직 없습니다</p><p className="mt-2 text-sm">여러 영역에 걸친 요청을 나눠 동시에 실행해 보세요.</p></div>
           </div>
         ) : (
-          <PlanResult plan={selected} />
+          <PlanResult plan={selected} deciding={deciding} onDecide={(approve, reason) => void decide(approve, reason)} />
         )}
       </section>
     </div>
   );
 }
 
-function PlanResult({ plan }: { plan: TaskPlanView }) {
+function PlanResult({ plan, deciding, onDecide }: { plan: TaskPlanView; deciding: boolean; onDecide: (approve: boolean, reason?: string) => void }) {
+  const [reason, setReason] = useState('');
   return (
     <div className="space-y-4">
+      {plan.status === 'awaiting_approval' && (
+        <section className="glass rounded-2xl p-5 ring-2 ring-wait">
+          <h2 className="text-lg font-semibold">이 계획대로 레인을 실행할까요?</h2>
+          <input
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="거부 사유 (선택)"
+            className="mt-4 w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm placeholder:text-muted"
+          />
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={deciding}
+              onClick={() => onDecide(true)}
+              className="rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+            >
+              승인하고 실행
+            </button>
+            <button
+              type="button"
+              disabled={deciding}
+              onClick={() => onDecide(false, reason)}
+              className="rounded-xl border border-line px-4 py-2.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+            >
+              거부
+            </button>
+          </div>
+        </section>
+      )}
+
       <header className="glass rounded-2xl p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-sm font-medium text-muted">{plan.projectId} · 작업 분해 {plan.id} · {plan.modelId}</p>
             <h2 className="mt-1 text-xl font-semibold leading-8 whitespace-pre-wrap">{plan.request}</h2>
           </div>
-          <span className={`glass-soft rounded-full px-3 py-1.5 text-sm font-medium ${plan.status === 'done' ? 'text-pass' : plan.status === 'failed' ? 'text-fail' : 'text-wait'}`}>{PLAN_STATUS[plan.status]}</span>
+          <span className={`glass-soft rounded-full px-3 py-1.5 text-sm font-medium ${plan.status === 'done' ? 'text-pass' : plan.status === 'failed' || plan.status === 'rejected' ? 'text-fail' : 'text-wait'}`}>{PLAN_STATUS[plan.status]}</span>
         </div>
         {plan.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.error}</p>}
+        {plan.rejectedReason && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">거부 사유: {plan.rejectedReason}</p>}
         <p className="mt-3 text-sm text-muted">통합 결과는 자동으로 병합·푸시·배포하지 않습니다. 통합 세션에서 diff와 검증 근거를 확인한 뒤 내보내세요.</p>
       </header>
 

@@ -1,4 +1,4 @@
-export type TaskPlanStatus = 'planning' | 'running' | 'integrating' | 'done' | 'failed';
+export type TaskPlanStatus = 'planning' | 'awaiting_approval' | 'running' | 'integrating' | 'done' | 'failed' | 'rejected';
 export type TaskPlanStepStatus = 'queued' | 'booting' | 'running' | 'done' | 'failed' | 'skipped';
 
 export interface TaskPlanCheckpointView {
@@ -48,6 +48,11 @@ export interface TaskPlanView {
   status: TaskPlanStatus;
   createdAt: string;
   finishedAt?: string;
+  /** 계획을 승인한 사용자와 시각 */
+  approvedBy?: string;
+  approvedAt?: string;
+  /** 거부한 사유 (있으면) */
+  rejectedReason?: string;
   lanes: TaskPlanLaneView[];
   integration?: TaskPlanIntegrationView;
   error?: string;
