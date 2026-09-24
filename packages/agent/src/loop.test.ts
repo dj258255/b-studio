@@ -28,6 +28,22 @@ function withUsage(scripted: ScriptedModelClient): ModelClient {
   };
 }
 
+/** 호출마다 다른 usage를 붙인다. 입력 크기(캐시 포함)와 토큰 합계를 따로 확인하는 데 쓴다 */
+function withUsageSequence(
+  scripted: ScriptedModelClient,
+  usages: Array<{ input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }>,
+): ModelClient {
+  let index = 0;
+  return {
+    async createMessage(request) {
+      const message = await scripted.createMessage(request);
+      const usage = usages[Math.min(index, usages.length - 1)]!;
+      index += 1;
+      return { ...message, usage: { ...message.usage, ...usage } };
+    },
+  };
+}
+
 describe('runAgent', () => {
   it('검증 게이트가 실패하면 결과를 돌려주고, 고친 뒤 통과해야 완료한다', async () => {
     const client = new ScriptedModelClient([
@@ -218,6 +234,31 @@ describe('runAgent', () => {
       { inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 },
     ]);
     expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 });
+  });
+
+  it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남긴다', async () => {
+    const client = withUsageSequence(
+      new ScriptedModelClient([
+        { toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] },
+        { text: '주문 API입니다.' },
+      ]),
+      [
+        { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 5 },
+        { input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 2_000, cache_creation_input_tokens: 7 },
+      ],
+    );
+
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+
+    // 두 번 호출했고, 한 호출의 입력 크기는 input+cacheRead+cacheWrite: 1105, 2207이다
+    expect(result.metrics?.modelCalls).toBe(2);
+    expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // usage 합계는 캐시를 입력에 섞지 않은 기존 값 그대로다
+    expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 30, cacheReadTokens: 3_000, cacheWriteTokens: 12 });
+    for (const ms of [result.metrics!.modelMs, result.metrics!.toolMs, result.metrics!.gateMs]) {
+      expect(Number.isInteger(ms)).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('취소하면 다음 턴 전에 멈추고 이번 실행분을 대화 기록에서 되돌린다', async () => {

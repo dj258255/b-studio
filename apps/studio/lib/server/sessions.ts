@@ -821,7 +821,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
-  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns'> | undefined;
+  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs'> | undefined;
   let cancelled = false;
   /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
   let notStarted = false;
@@ -873,7 +873,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
       else await revertRun(session, run.id);
     }
-    finished = { status: result.status, summary: result.summary, turns: result.turns };
+    finished = { status: result.status, summary: result.summary, turns: result.turns, metrics: result.metrics, durationMs: Math.round(performance.now() - agentStarted) };
   } catch (error) {
     if (error instanceof LocalEditsError) {
       // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다

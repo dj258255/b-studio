@@ -8,6 +8,7 @@ export {
   type ModelClientInfo,
   type ModelPreflight,
   type RunAgentOptions,
+  type RunMetrics,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export {

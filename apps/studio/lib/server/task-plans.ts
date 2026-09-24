@@ -3,10 +3,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { isInScope, MAX_PLAN_LANES, requestTaskPlan, runTaskGraph, type ScriptedTurn, type TaskLane } from '@b-studio/agent';
+import { isInScope, MAX_PLAN_LANES, requestTaskPlan, runTaskGraph, TaskPlanError, type AgentUsage, type RunMetrics, type ScriptedTurn, type TaskLane } from '@b-studio/agent';
 import type { Checkpoint } from '@b-studio/agent';
 import type { StudioEvent } from '@/lib/studio-events';
-import type { TaskPlanCheckpointView, TaskPlanLaneView, TaskPlanStepStatus, TaskPlanView } from '@/lib/task-plan-types';
+import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
+import type { TaskPlanCheckpointView, TaskPlanIntegrationView, TaskPlanLaneView, TaskPlanStepStatus, TaskPlanView } from '@/lib/task-plan-types';
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
@@ -121,8 +122,14 @@ async function execute(plan: TaskPlanView): Promise<void> {
 
   let lanes: TaskLane[];
   try {
-    ({ lanes } = await requestTaskPlan(clientForModel(modelById(plan.modelId)), project, plan.request));
+    const planned = await requestTaskPlan(clientForModel(modelById(plan.modelId)), project, plan.request);
+    plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
+    lanes = planned.lanes;
   } catch (error) {
+    // 계획 검증이 실패해도 모델 호출에 쓴 토큰과 시간은 남긴다. 아래 fail()이 지표를 계산한다
+    if (error instanceof TaskPlanError && error.usage) {
+      plan.planning = { usage: error.usage, durationMs: error.durationMs ?? 0 };
+    }
     return fail(plan, `작업 계획을 만들지 못했습니다: ${describe(error)}`);
   }
   plan.lanes = lanes.map((lane) => ({
@@ -153,12 +160,15 @@ async function runApprovedPlan(plan: TaskPlanView): Promise<void> {
 
 async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void> {
   lane.status = 'booting';
+  lane.startedAt = new Date().toISOString();
   persist(plan);
+  const bootStarted = performance.now();
   try {
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId });
     lane.sessionId = snapshot.id;
     persist(plan);
     await waitForReady(snapshot.id);
+    lane.bootMs = Math.round(performance.now() - bootStarted);
     lane.status = 'running';
     persist(plan);
 
@@ -166,6 +176,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       task.status = 'running';
       persist(plan);
       const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), { by: plan.owner, writableScope: task.paths });
+      task.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
       task.summary = outcome.summary;
       if (outcome.status !== 'done') {
         task.status = 'failed';
@@ -190,13 +201,16 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     lane.error = describe(error);
     persist(plan);
     throw error;
+  } finally {
+    lane.finishedAt = new Date().toISOString();
+    persist(plan);
   }
 }
 
 /** 레인 세션들의 최종 파일을 새 세션에 같은 루프·게이트로 다시 적용한다. git 병합 없이 합친 결과를 한 번 더 검증하기 위해서다 */
 async function integrate(plan: TaskPlanView): Promise<void> {
   plan.status = 'integrating';
-  const integration = (plan.integration = { status: 'booting' as TaskPlanStepStatus, files: [] as string[], deleted: [] as string[] });
+  const integration: TaskPlanIntegrationView = (plan.integration = { status: 'booting' as TaskPlanStepStatus, files: [] as string[], deleted: [] as string[] });
   persist(plan);
 
   const writes: Array<{ path: string; content: string }> = [];
@@ -225,6 +239,8 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     // 레인 결과는 이미 메모리로 옮겼다. 통합 샌드박스를 띄우기 전에 레인 샌드박스를 내려, 동시에 뜨는 샌드박스를 레인 수 이하로 둔다
     await stopLaneSessions(plan);
 
+    integration.startedAt = new Date().toISOString();
+    const bootStarted = performance.now();
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId });
     Object.assign(integration, { sessionId: snapshot.id });
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
@@ -237,6 +253,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     integration.deleted = removable;
     persist(plan);
     await waitForReady(snapshot.id);
+    integration.bootMs = Math.round(performance.now() - bootStarted);
     integration.status = 'running';
     persist(plan);
 
@@ -254,17 +271,22 @@ async function integrate(plan: TaskPlanView): Promise<void> {
       scriptedTurns: turns,
       writableScope: [...new Set(plan.lanes.flatMap((lane) => lane.paths))],
     });
+    integration.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
     if (outcome.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${outcome.status} ${outcome.summary}`);
     Object.assign(integration, { status: 'done', checkpoint: checkpointView(getSnapshot(snapshot.id)?.checkpoints[0]) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
+    recordMetrics(plan);
     persist(plan);
   } catch (error) {
     Object.assign(integration, { status: 'failed', error: describe(error) });
     fail(plan, `통합하지 못했습니다: ${describe(error)}`);
   } finally {
+    integration.finishedAt = new Date().toISOString();
     // 통합 전에 실패했어도 레인 세션의 자원은 돌려준다. 기록과 체크포인트는 남아 다시 열 수 있다
     await stopLaneSessions(plan);
+    // finally에서 넣은 finishedAt이 파일에 남도록 마지막으로 저장한다
+    persist(plan);
   }
 }
 
@@ -301,7 +323,7 @@ async function runAndWait(
   sessionId: string,
   request: string,
   options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[] },
-): Promise<{ status: string; summary: string }> {
+): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number }> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;
   const unsubscribe = subscribe(sessionId, (event) => {
@@ -310,7 +332,7 @@ async function runAndWait(
   try {
     ({ runId } = sendMessage(sessionId, request, { allowBreaking: false, ...options }));
     await waitForEvent(sessionId, () => ({ done: finished?.runId === runId }), RUN_TIMEOUT_MS);
-    return { status: finished!.status, summary: finished!.summary };
+    return { status: finished!.status, summary: finished!.summary, usage: finished!.usage, metrics: finished!.metrics, durationMs: finished!.durationMs };
   } finally {
     unsubscribe();
   }
@@ -339,7 +361,17 @@ function fail(plan: TaskPlanView, error: string): void {
     if (lane.status === 'queued') lane.status = 'skipped';
     for (const task of lane.tasks) if (task.status === 'queued') task.status = 'skipped';
   }
+  recordMetrics(plan);
   persist(plan);
+}
+
+/** 계획 전체 지표를 기록한다. 이 계산이 예외를 던져도 계획의 상태 전이를 바꾸면 안 된다 */
+function recordMetrics(plan: TaskPlanView): void {
+  try {
+    plan.metrics = summarizeTaskPlan(plan);
+  } catch (error) {
+    console.error('[b-studio] 작업 계획 지표를 계산하지 못했습니다', error);
+  }
 }
 
 /** 통합이 레인 세션 없이 결과를 다시 읽으려면 작업 폴더와 바꾼 파일 기록이 있어야 한다 */

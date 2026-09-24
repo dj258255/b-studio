@@ -1,3 +1,6 @@
+import type { AgentUsage, RunMetrics } from '@b-studio/agent';
+import type { TaskPlanMetrics } from './task-plan-metrics';
+
 export type TaskPlanStatus = 'planning' | 'awaiting_approval' | 'running' | 'integrating' | 'interrupted' | 'done' | 'failed' | 'rejected';
 export type TaskPlanStepStatus = 'queued' | 'booting' | 'running' | 'done' | 'failed' | 'skipped';
 
@@ -5,6 +8,15 @@ export interface TaskPlanCheckpointView {
   sha: string;
   shortSha: string;
   files: string[];
+}
+
+/** 한 실행(작업·통합)이 남긴 지표. 로컬 Claude Code 러너처럼 지표가 없으면 usage만 있다 */
+export interface TaskPlanRunMetricsView {
+  /** run_finished status */
+  status: string;
+  durationMs?: number;
+  usage?: AgentUsage;
+  metrics?: RunMetrics;
 }
 
 export interface TaskPlanTaskView {
@@ -16,6 +28,8 @@ export interface TaskPlanTaskView {
   status: TaskPlanStepStatus;
   summary?: string;
   checkpoint?: TaskPlanCheckpointView;
+  /** 이 작업 실행의 지표 (실패한 작업도 기록한다) */
+  run?: TaskPlanRunMetricsView;
 }
 
 export interface TaskPlanLaneView {
@@ -30,6 +44,12 @@ export interface TaskPlanLaneView {
   status: TaskPlanStepStatus;
   tasks: TaskPlanTaskView[];
   error?: string;
+  /** 세션 생성부터 준비까지 걸린 시간 */
+  bootMs?: number;
+  /** 세션을 만들기 직전 시각 */
+  startedAt?: string;
+  /** 레인이 성공·실패로 끝난 시각 */
+  finishedAt?: string;
 }
 
 export interface TaskPlanIntegrationView {
@@ -41,6 +61,14 @@ export interface TaskPlanIntegrationView {
   deleted: string[];
   checkpoint?: TaskPlanCheckpointView;
   error?: string;
+  /** 통합 세션 생성부터 준비까지 걸린 시간 */
+  bootMs?: number;
+  /** 통합 실행의 지표 */
+  run?: TaskPlanRunMetricsView;
+  /** 통합 세션을 만들기 직전 시각 */
+  startedAt?: string;
+  /** 통합이 끝난 시각 */
+  finishedAt?: string;
 }
 
 export interface TaskPlanView {
@@ -57,6 +85,10 @@ export interface TaskPlanView {
   approvedAt?: string;
   /** 거부한 사유 (있으면) */
   rejectedReason?: string;
+  /** 계획 호출의 usage와 걸린 시간 */
+  planning?: { usage: AgentUsage; durationMs: number };
+  /** 계획 전체 합계 지표 */
+  metrics?: TaskPlanMetrics;
   lanes: TaskPlanLaneView[];
   integration?: TaskPlanIntegrationView;
   error?: string;
