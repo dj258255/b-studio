@@ -36,7 +36,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
 
   return (
     <section className="flex min-h-0 flex-col gap-2" aria-label="미리보기">
-      <div role="tablist" aria-label="미리보기 대상" className="glass flex max-w-full gap-1 self-start overflow-x-auto rounded-full p-1">
+      <div role="tablist" aria-label="미리보기 대상" className="glass flex max-w-full gap-1 self-start overflow-x-auto rounded-panel p-1">
         {tabs.map((tab) => (
           <button
             key={tab.id}
@@ -44,8 +44,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
             type="button"
             aria-selected={tab.id === active.id}
             onClick={() => setActiveId(tab.id)}
-            className={`shrink-0 rounded-full px-3.5 py-1.5 text-sm font-medium whitespace-nowrap ${
-              tab.id === active.id ? "bg-panel text-ink shadow-sm" : "text-muted hover:text-ink"
+            className={`shrink-0 rounded-control px-3.5 py-1.5 text-sm font-medium whitespace-nowrap ${
+              tab.id === active.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
             }`}
           >
             {tab.label}
@@ -53,7 +53,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
         ))}
       </div>
 
-      <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden rounded-2xl border border-line bg-panel shadow-sm">
+      <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden rounded-panel border border-line bg-panel">
         {active.id === CODE_TAB ? (
           <CodePanel view={view} />
         ) : active.id === HISTORY_TAB ? (
@@ -148,9 +148,9 @@ function BrowserPreview({ sessionId, service, revision }: { sessionId: string; s
           id="preview-path"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          className="min-w-0 flex-1 rounded border border-line bg-ground px-2 py-1 font-mono text-sm"
+          className="min-w-0 flex-1 rounded-control border border-line bg-ground px-2 py-1 font-mono text-sm"
         />
-        <button type="submit" className="rounded border border-line px-3 py-1 text-sm font-medium hover:border-ink">
+        <button type="submit" className="rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink">
           열기
         </button>
       </form>

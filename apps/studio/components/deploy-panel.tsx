@@ -77,7 +77,7 @@ export function DeployPanel({ view }: { view: SessionView }) {
             type="button"
             onClick={() => head && void post(`/api/sessions/${snapshot.id}/deploys`, { sha: head.sha })}
             disabled={!canDeploy}
-            className="shrink-0 rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+            className="shrink-0 rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
           >
             {deploying?.action === "deploy" ? "배포하는 중" : `최신 체크포인트 배포${head ? ` (${head.shortSha})` : ""}`}
           </button>
@@ -149,7 +149,7 @@ export function DeployPanel({ view }: { view: SessionView }) {
                         type="button"
                         onClick={() => void post(`/api/sessions/${snapshot.id}/deploys/rollback`, { releaseId: release.id })}
                         disabled={Boolean(deploying)}
-                        className="rounded-full bg-ink px-3 py-1 font-medium text-panel disabled:opacity-50"
+                        className="rounded-control bg-ink px-3 py-1 font-medium text-panel disabled:opacity-50"
                       >
                         되돌리기
                       </button>
@@ -162,7 +162,7 @@ export function DeployPanel({ view }: { view: SessionView }) {
                       type="button"
                       onClick={() => setConfirming(release.id)}
                       disabled={Boolean(deploying)}
-                      className="rounded-full border border-line px-3 py-1 text-sm font-medium hover:border-ink disabled:opacity-50"
+                      className="rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink disabled:opacity-50"
                     >
                       이 릴리스로 되돌리기
                     </button>

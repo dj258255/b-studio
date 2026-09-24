@@ -138,7 +138,7 @@ export function FleetWorkbench({
   return (
     <div className="grid items-start gap-5 xl:grid-cols-[24rem_minmax(0,1fr)]">
       <aside className="space-y-4 xl:sticky xl:top-5">
-        <section className="glass rounded-2xl p-5">
+        <section className="glass rounded-panel p-5">
           <h2 className="text-lg font-semibold">새 병렬 작업</h2>
           <p className="mt-1 text-sm leading-6 text-muted">모델마다 독립된 세션 브랜치와 샌드박스를 만듭니다. 실행 버튼을 누르면 선택한 모델 수만큼 비용이 발생합니다.</p>
 
@@ -147,7 +147,7 @@ export function FleetWorkbench({
             id="fleet-project"
             value={projectId}
             onChange={(event) => setProjectId(event.target.value)}
-            className="mt-1 w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm"
+            className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm"
           >
             {projects.filter((project) => !project.error).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
@@ -159,7 +159,7 @@ export function FleetWorkbench({
             onChange={(event) => { setRequest(event.target.value); setDecision(undefined); }}
             rows={7}
             placeholder="구현할 기능과 완료 조건을 함께 적어 주세요"
-            className="mt-1 w-full resize-y rounded-xl border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
+            className="mt-1 w-full resize-y rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
           />
 
           <div className="mt-4 flex items-center justify-between gap-3">
@@ -168,7 +168,7 @@ export function FleetWorkbench({
               type="button"
               disabled={!request.trim() || loading !== undefined}
               onClick={() => void previewRoute()}
-              className="rounded-full border border-line px-3 py-1.5 text-xs font-medium hover:border-ink disabled:opacity-50"
+              className="rounded-control border border-line px-3 py-1.5 text-xs font-medium hover:border-ink disabled:opacity-50"
             >
               {loading === 'route' ? '분석 중' : '라우터 추천'}
             </button>
@@ -177,7 +177,7 @@ export function FleetWorkbench({
             {models.map((model) => {
               const unavailable = !model.configured || model.enabled === false || !model.capabilities.includes('tools');
               return (
-                <label key={model.id} className={`glass-soft flex items-start gap-3 rounded-xl px-3 py-2.5 text-sm ${unavailable ? 'opacity-50' : 'cursor-pointer'}`}>
+                <label key={model.id} className={`glass-soft flex items-start gap-3 rounded-control px-3 py-2.5 text-sm ${unavailable ? 'opacity-50' : 'cursor-pointer'}`}>
                   <input
                     type="checkbox"
                     checked={selectedModels.includes(model.id)}
@@ -196,7 +196,7 @@ export function FleetWorkbench({
           </div>
 
           {decision && (
-            <div className="mt-4 rounded-xl border border-line bg-panel p-3 text-xs leading-5">
+            <div className="mt-4 rounded-md border border-line bg-panel p-3 text-xs leading-5">
               <p className="font-medium">추천: {decision.selected.label}</p>
               <p className="text-muted">{complexityLabel(decision.complexity)} · {decision.risk === 'high' ? '고위험 요청' : '일반 위험'} · 입력 약 {formatTokenCount(decision.inputTokens)}</p>
               <ol className="mt-2 space-y-1">
@@ -218,7 +218,7 @@ export function FleetWorkbench({
             type="button"
             disabled={!projectId || !request.trim() || selectedModels.length < 2 || loading !== undefined}
             onClick={() => void create()}
-            className="mt-4 w-full rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+            className="mt-4 w-full rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >
             {loading === 'fleet' ? '세션을 만드는 중' : `${selectedModels.length}개 에이전트 병렬 실행`}
           </button>
@@ -226,7 +226,7 @@ export function FleetWorkbench({
         </section>
 
         {fleets.length > 0 && (
-          <section className="glass rounded-2xl p-4">
+          <section className="glass rounded-panel p-4">
             <h2 className="px-1 text-sm font-semibold">최근 Fleet</h2>
             <ul className="mt-2 max-h-72 space-y-1 overflow-auto">
               {fleets.map((fleet) => (
@@ -234,7 +234,7 @@ export function FleetWorkbench({
                   <button
                     type="button"
                     onClick={() => setSelectedFleetId(fleet.id)}
-                    className={`w-full rounded-xl px-3 py-2 text-left text-sm ${selectedFleetId === fleet.id ? 'bg-panel shadow-sm ring-1 ring-line' : 'hover:bg-panel/60'}`}
+                    className={`w-full rounded-control px-3 py-2 text-left text-sm ${selectedFleetId === fleet.id ? 'bg-panel ring-1 ring-line' : 'hover:bg-panel/60'}`}
                   >
                     <span className="block truncate font-medium">{fleet.request}</span>
                     <span className="mt-0.5 block text-xs text-muted">{fleet.projectName} · {fleet.members.length}개 · {time(fleet.createdAt)}</span>
@@ -248,7 +248,7 @@ export function FleetWorkbench({
 
       <section className="min-w-0">
         {!selectedFleet ? (
-          <div className="glass flex min-h-[30rem] items-center justify-center rounded-2xl p-8 text-center text-muted">
+          <div className="flex min-h-[30rem] items-center justify-center rounded-panel border border-line bg-panel p-8 text-center text-muted">
             <div><p className="font-medium text-ink">비교할 작업이 아직 없습니다</p><p className="mt-2 text-sm">동일한 요청을 두 모델 이상에 보내 결과를 나란히 확인하세요.</p></div>
           </div>
         ) : (
@@ -263,7 +263,7 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
   const finished = fleet.members.filter((member) => !['booting', 'running'].includes(member.status)).length;
   return (
     <div className="space-y-4">
-      <header className="glass rounded-2xl p-5">
+      <header className="glass rounded-panel p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-sm font-medium text-muted">{fleet.projectName} · Fleet {fleet.id}</p>
@@ -277,7 +277,7 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
         {fleet.members.map((member) => {
           const winner = fleet.winnerSessionId === member.sessionId;
           return (
-            <article key={member.sessionId} className={`glass min-w-0 rounded-2xl p-5 ${winner ? 'ring-2 ring-pass' : ''}`}>
+            <article key={member.sessionId} className={`min-w-0 rounded-panel border border-line bg-panel p-5 ${winner ? 'ring-2 ring-pass' : ''}`}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="truncate text-lg font-semibold">{member.label}</p>
@@ -292,7 +292,7 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
                 <Metric label="비용" value={member.costUsd === undefined ? '—' : `$${member.costUsd.toFixed(4)}`} />
               </dl>
 
-              <div className="mt-4 min-h-36 rounded-xl border border-line bg-panel p-3">
+              <div className="mt-4 min-h-36 rounded-md border border-line bg-panel p-3">
                 {member.summary ? <p className="text-sm leading-6 whitespace-pre-wrap">{member.summary}</p> : <p className="text-sm text-muted motion-safe:animate-pulse">{member.status === 'booting' ? '독립 샌드박스를 준비하고 있습니다.' : '에이전트가 도구를 사용하고 검증 게이트를 통과하는 중입니다.'}</p>}
               </div>
 
@@ -301,10 +301,10 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 {!member.sessionId.startsWith('failed-') && (
-                  <Link href={`/sessions/${member.sessionId}`} className="rounded-full border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">세션·diff 보기</Link>
+                  <Link href={`/sessions/${member.sessionId}`} className="rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">세션·diff 보기</Link>
                 )}
                 {member.status === 'done' && !winner && (
-                  <button type="button" disabled={choosing} onClick={() => void onChoose(member.sessionId)} className="rounded-full bg-ink px-3 py-1.5 text-sm font-medium text-panel disabled:opacity-50">이 결과 선택</button>
+                  <button type="button" disabled={choosing} onClick={() => void onChoose(member.sessionId)} className="rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel disabled:opacity-50">이 결과 선택</button>
                 )}
               </div>
             </article>
@@ -316,7 +316,7 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-xl border border-line bg-panel px-2 py-2"><dt className="text-muted">{label}</dt><dd className="mt-0.5 font-mono font-medium text-ink">{value}</dd></div>;
+  return <div className="rounded-md border border-line bg-panel px-2 py-2"><dt className="text-muted">{label}</dt><dd className="mt-0.5 font-mono font-medium text-ink">{value}</dd></div>;
 }
 
 function complexityLabel(value: RoutingDecision['complexity']): string {

@@ -128,19 +128,19 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
   return (
     <div className="grid items-start gap-5 xl:grid-cols-[24rem_minmax(0,1fr)]">
       <aside className="space-y-4 xl:sticky xl:top-5">
-        <section className="glass rounded-2xl p-5">
+        <section className="glass rounded-panel p-5">
           <h2 className="text-lg font-semibold">새 작업 분해</h2>
           <p className="mt-1 text-sm leading-6 text-muted">
             모델이 작업·쓰기 범위·의존 관계를 제안하고 스튜디오가 검증합니다. 이어진 작업은 한 세션에서 차례로, 독립 작업은 다른 세션에서 동시에 돌린 뒤 결과를 새 세션에서 합쳐 다시 검증합니다.
           </p>
 
           <label className="mt-5 block text-sm font-medium" htmlFor="plan-project">프로젝트</label>
-          <select id="plan-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} className="mt-1 w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm">
+          <select id="plan-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
             {projects.filter((project) => !project.error).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
 
           <label className="mt-4 block text-sm font-medium" htmlFor="plan-model">모델</label>
-          <select id="plan-model" value={modelId} onChange={(event) => setModelId(event.target.value)} className="mt-1 w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm">
+          <select id="plan-model" value={modelId} onChange={(event) => setModelId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
             {readyModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
           </select>
           {readyModels.length === 0 && <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>}
@@ -152,13 +152,13 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             onChange={(event) => setRequest(event.target.value)}
             rows={7}
             placeholder="여러 화면·API에 걸친 기능과 완료 조건을 적어 주세요"
-            className="mt-1 w-full resize-y rounded-xl border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
+            className="mt-1 w-full resize-y rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
           />
           <button
             type="button"
             disabled={!projectId || !modelId || !request.trim() || creating}
             onClick={() => void create()}
-            className="mt-4 w-full rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+            className="mt-4 w-full rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >
             {creating ? '계획을 요청하는 중' : '작업 계획 받기'}
           </button>
@@ -166,7 +166,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
         </section>
 
         {plans.length > 0 && (
-          <section className="glass rounded-2xl p-4">
+          <section className="glass rounded-panel p-4">
             <h2 className="px-1 text-sm font-semibold">최근 작업 분해</h2>
             <ul className="mt-2 max-h-72 space-y-1 overflow-auto">
               {plans.map((plan) => (
@@ -174,7 +174,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
                   <button
                     type="button"
                     onClick={() => setSelectedId(plan.id)}
-                    className={`w-full rounded-xl px-3 py-2 text-left text-sm ${selectedId === plan.id ? 'bg-panel shadow-sm ring-1 ring-line' : 'hover:bg-panel/60'}`}
+                    className={`w-full rounded-control px-3 py-2 text-left text-sm ${selectedId === plan.id ? 'bg-panel ring-1 ring-line' : 'hover:bg-panel/60'}`}
                   >
                     <span className="block truncate font-medium">{plan.request}</span>
                     <span className="mt-0.5 block text-xs text-muted">{plan.projectId} · {PLAN_STATUS[plan.status]} · 레인 {plan.lanes.length}개</span>
@@ -188,7 +188,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
 
       <section className="min-w-0">
         {!selected ? (
-          <div className="glass flex min-h-[30rem] items-center justify-center rounded-2xl p-8 text-center text-muted">
+          <div className="flex min-h-[30rem] items-center justify-center rounded-panel border border-line bg-panel p-8 text-center text-muted">
             <div><p className="font-medium text-ink">실행한 작업 분해가 아직 없습니다</p><p className="mt-2 text-sm">여러 영역에 걸친 요청을 나눠 동시에 실행해 보세요.</p></div>
           </div>
         ) : (
@@ -204,14 +204,14 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
   return (
     <div className="space-y-4">
       {plan.status === 'interrupted' && (
-        <section className="glass rounded-2xl p-5 ring-2 ring-wait">
+        <section className="rounded-panel border border-line bg-panel p-5 ring-2 ring-wait">
           <h2 className="text-lg font-semibold">레인 결과가 남아 있습니다. 통합만 다시 시도할까요?</h2>
           <p className="mt-1 text-sm leading-6 text-muted">레인은 다시 돌리지 않고, 남겨 둔 레인 파일을 새 세션에서 같은 게이트로 다시 검증합니다.</p>
           <button
             type="button"
             disabled={deciding}
             onClick={onResume}
-            className="mt-3 rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+            className="mt-3 rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >
             통합 다시 시도
           </button>
@@ -219,20 +219,20 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
       )}
 
       {plan.status === 'awaiting_approval' && (
-        <section className="glass rounded-2xl p-5 ring-2 ring-wait">
+        <section className="rounded-panel border border-line bg-panel p-5 ring-2 ring-wait">
           <h2 className="text-lg font-semibold">이 계획대로 레인을 실행할까요?</h2>
           <input
             value={reason}
             onChange={(event) => setReason(event.target.value)}
             placeholder="거부 사유 (선택)"
-            className="mt-4 w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm placeholder:text-muted"
+            className="mt-4 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm placeholder:text-muted"
           />
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
               disabled={deciding}
               onClick={() => onDecide(true)}
-              className="rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+              className="rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
             >
               승인하고 실행
             </button>
@@ -240,7 +240,7 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
               type="button"
               disabled={deciding}
               onClick={() => onDecide(false, reason)}
-              className="rounded-xl border border-line px-4 py-2.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+              className="rounded-control border border-line px-4 py-2.5 text-sm font-medium hover:border-ink disabled:opacity-50"
             >
               거부
             </button>
@@ -248,7 +248,7 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
         </section>
       )}
 
-      <header className="glass rounded-2xl p-5">
+      <header className="glass rounded-panel p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-sm font-medium text-muted">{plan.projectId} · 작업 분해 {plan.id} · {plan.modelId}</p>
@@ -263,7 +263,7 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
 
       <div className={`grid gap-4 ${plan.lanes.length >= 3 ? '2xl:grid-cols-3' : 'lg:grid-cols-2'}`}>
         {plan.lanes.map((lane) => (
-          <article key={lane.id} className="glass min-w-0 rounded-2xl p-5">
+          <article key={lane.id} className="min-w-0 rounded-panel border border-line bg-panel p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-lg font-semibold">{lane.id}</p>
@@ -273,7 +273,7 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
             </div>
             <ol className="mt-4 space-y-2">
               {lane.tasks.map((task, index) => (
-                <li key={task.id} className="rounded-xl border border-line bg-panel p-3 text-sm">
+                <li key={task.id} className="rounded-md border border-line bg-panel p-3 text-sm">
                   <div className="flex items-start justify-between gap-2">
                     <span className="font-medium">{index + 1}. {task.title}</span>
                     <span className={`shrink-0 text-xs font-medium ${STEP_COLOR[task.status]}`}>{STEP_STATUS[task.status]}</span>
@@ -285,13 +285,13 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
               ))}
             </ol>
             {lane.error && <p className="mt-3 text-xs text-fail whitespace-pre-wrap">{lane.error}</p>}
-            {lane.sessionId && <Link href={`/sessions/${lane.sessionId}`} className="mt-4 inline-block rounded-full border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">레인 세션 보기</Link>}
+            {lane.sessionId && <Link href={`/sessions/${lane.sessionId}`} className="mt-4 inline-block rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">레인 세션 보기</Link>}
           </article>
         ))}
       </div>
 
       {plan.integration && (
-        <article className={`glass rounded-2xl p-5 ${plan.integration.status === 'done' ? 'ring-2 ring-pass' : ''}`}>
+        <article className={`rounded-panel border border-line bg-panel p-5 ${plan.integration.status === 'done' ? 'ring-2 ring-pass' : ''}`}>
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-lg font-semibold">통합</p>
@@ -305,7 +305,7 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
           )}
           {plan.integration.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.integration.error}</p>}
           {plan.integration.checkpoint && <p className="mt-3 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{plan.integration.checkpoint.shortSha}</span></p>}
-          {plan.integration.sessionId && <Link href={`/sessions/${plan.integration.sessionId}`} className="mt-4 inline-block rounded-full bg-ink px-3 py-1.5 text-sm font-medium text-panel">통합 세션·diff 보기</Link>}
+          {plan.integration.sessionId && <Link href={`/sessions/${plan.integration.sessionId}`} className="mt-4 inline-block rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel">통합 세션·diff 보기</Link>}
         </article>
       )}
     </div>

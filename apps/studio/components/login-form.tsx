@@ -30,7 +30,7 @@ export function LoginForm({ next }: { next: string }) {
 
   return (
     <form
-      className="glass mt-6 space-y-3 rounded-2xl p-5"
+      className="glass mt-6 space-y-3 rounded-panel p-5"
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -46,7 +46,7 @@ export function LoginForm({ next }: { next: string }) {
         spellCheck={false}
         value={name}
         onChange={(event) => setName(event.target.value)}
-        className="w-full rounded-xl border border-line bg-panel px-3 py-2 text-sm"
+        className="w-full rounded-control border border-line bg-panel px-3 py-2 text-sm"
       />
       <label htmlFor="token" className="block text-sm font-medium">
         접근 토큰
@@ -57,12 +57,12 @@ export function LoginForm({ next }: { next: string }) {
         autoComplete="current-password"
         value={token}
         onChange={(event) => setToken(event.target.value)}
-        className="w-full rounded-xl border border-line bg-panel px-3 py-2 font-mono text-sm"
+        className="w-full rounded-control border border-line bg-panel px-3 py-2 font-mono text-sm"
       />
       <button
         type="submit"
         disabled={busy || !name.trim() || !token}
-        className="w-full rounded-full bg-ink px-4 py-2 text-sm font-medium text-panel shadow-sm hover:bg-ink/85 disabled:opacity-50"
+        className="w-full rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
       >
         {busy ? "확인하는 중" : "로그인"}
       </button>
