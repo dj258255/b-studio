@@ -1,4 +1,4 @@
-name: 버그
+name: 버그 제보
 description: 관측한 동작과 기대한 동작이 다를 때
 title: "[버그] "
 labels: [bug]
