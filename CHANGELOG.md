@@ -6,17 +6,17 @@
 
 ### 추가
 
-- 착수 명세·버그·실험 이슈 양식 3종과 PR 템플릿을 추가했습니다 (#43).
-- 프로젝트 로드맵(`ROADMAP.md`)과 변경 기록(`CHANGELOG.md`)을 추가했습니다 (#43).
-- ADR 양식(`docs/templates/adr.md`)과 실험 보고서 양식(`docs/templates/experiment-report.md`)을 추가했습니다 (#43).
+- 착수 명세·버그·실험 이슈 양식 3종과 PR 템플릿을 추가했습니다 (#46).
+- 프로젝트 로드맵(`ROADMAP.md`)과 변경 기록(`CHANGELOG.md`)을 추가했습니다 (#46).
+- ADR 양식(`docs/templates/adr.md`)과 실험 보고서 양식(`docs/templates/experiment-report.md`)을 추가했습니다 (#46).
 
 ### 변경
 
-- `CONTRIBUTING.md`에 작업 흐름·예상 갱신·실험·측정 용어 절을 더하고, PR 체크리스트를 PR 템플릿으로 옮겼습니다 (#43).
+- `CONTRIBUTING.md`에 작업 흐름·예상 갱신·실험·측정 용어 절을 더하고, PR 체크리스트를 PR 템플릿으로 옮겼습니다 (#46).
 
 ### 문서
 
-- `README.md`, `docs/README.md`, Wiki 개발 페이지의 문서 안내를 로드맵·변경 기록·문서 양식에 연결했습니다 (#43).
+- `README.md`, `docs/README.md`, Wiki 개발 페이지의 문서 안내를 로드맵·변경 기록·문서 양식에 연결했습니다 (#46).
 
 ## 2026-09-24
 
