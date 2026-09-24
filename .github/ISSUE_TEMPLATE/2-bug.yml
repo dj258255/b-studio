@@ -1,0 +1,78 @@
+name: 버그
+description: 관측한 동작과 기대한 동작이 다를 때
+title: "[버그] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        보안 취약점은 여기에 올리지 말고 [SECURITY.md](https://github.com/dj258255/b-studio/blob/main/SECURITY.md)의 비공개 절차를 따릅니다.
+        로그에서 토큰·개인정보·내부 주소를 지우고 붙입니다.
+  - type: textarea
+    id: observed
+    attributes:
+      label: 관측한 동작
+      description: 수치와 메시지를 그대로 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 기대한 동작
+      description: 대신 어떻게 동작해야 한다고 봤나.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 절차
+      placeholder: |-
+        1. pnpm studio up examples/orders
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 실행 경로
+      options:
+        - 웹 스튜디오 · demo
+        - 웹 스튜디오 · api
+        - 웹 스튜디오 · claude-code
+        - CLI (studio up·agent·verify·deploy)
+        - 모름
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 환경
+      placeholder: |-
+        OS: macOS 26
+        Node: 22.x
+        pnpm: 10.29.3
+        Docker: Colima 0.x (메모리 6GiB)
+        커밋: 351872d
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 로그
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: ruled-out
+    attributes:
+      label: 확인한 것과 배제한 원인
+      description: 무엇을 확인했고 무엇은 원인이 아니라고 봤는지 적습니다. 재현하지 못했다면 어떤 조건에서 시도했는지 적습니다.
+    validations:
+      required: false
+  - type: textarea
+    id: impact
+    attributes:
+      label: 영향 범위
+      description: 누가, 얼마나 자주 겪고, 데이터 손실이 있는지 적습니다.
+    validations:
+      required: false

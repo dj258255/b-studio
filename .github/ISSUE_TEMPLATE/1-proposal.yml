@@ -1,0 +1,108 @@
+name: 착수 명세
+description: 만들기 전에 문제·선택지·완료 조건·예상을 적습니다
+title: "[착수] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        구현 방법보다 **왜 이 문제를 풀고, 어떤 선택지를 버렸고, 언제 끝났다고 볼지**를 먼저 적습니다. 예상은 틀려도 됩니다. 틀리면 이 이슈에 갱신 댓글을 남깁니다.
+  - type: textarea
+    id: problem
+    attributes:
+      label: 문제
+      description: 지금 무엇이 안 되거나 비싼가, 어떻게 알게 됐나.
+      placeholder: 작업 분해의 병렬 레인은 서로의 변경을 보지 못해, api 필드를 추가하는 레인과 web에서 그 필드를 쓰는 레인이 이름을 다르게 쓰면 통합 게이트에서야 실패가 드러난다.
+    validations:
+      required: true
+  - type: textarea
+    id: why-now
+    attributes:
+      label: 왜 지금
+      description: 다른 작업보다 먼저 하는 이유.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: 선택지와 트레이드오프
+      description: 최소 2개. 각 선택지가 얻는 것과 잃는 것을 적습니다.
+      placeholder: |-
+        | 선택지 | 얻는 것 | 잃는 것 |
+        |---|---|---|
+        | A | | |
+        | B | | |
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: 결정 기준
+      description: 선택지가 충돌할 때 무엇을 우선하나.
+      placeholder: 통합 성공 건수를 먼저 보고, 같으면 종단 시간이 짧은 쪽
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: 하지 않는 것
+      description: 이번에 의도적으로 다루지 않는 범위.
+    validations:
+      required: false
+  - type: textarea
+    id: tasks
+    attributes:
+      label: 작업 단위
+      description: 한 PR 안에서 검증 가능한 단위로 나눕니다. 체크박스 목록으로 적습니다.
+      placeholder: |-
+        - [ ] 실행 지표 기록 (2~3시간)
+        - [ ] 벤치마크 실행기 (4~6시간)
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 완료 조건
+      description: 실행할 명령과 확인할 동작을 적습니다. "잘 동작한다"는 쓰지 않습니다.
+      placeholder: |-
+        pnpm exec vitest run packages/agent 통과
+        남은 studio-* 컨테이너 0개
+    validations:
+      required: true
+  - type: textarea
+    id: deliverables
+    attributes:
+      label: 산출물
+      description: 무엇이 남는가(코드·문서·ADR·실험 보고서).
+    validations:
+      required: true
+  - type: input
+    id: estimate
+    attributes:
+      label: 예상 시간
+      placeholder: 4~6시간 (범위로)
+    validations:
+      required: true
+  - type: textarea
+    id: uncertainty
+    attributes:
+      label: 주요 불확실성
+      description: 무엇을 모르고, 언제 더 정확히 알 수 있나.
+      placeholder: Spring Boot 기동 시간에 따라 실험 시간이 2배까지 달라질 수 있다. 첫 1회 실행 뒤 갱신한다.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 영역
+      multiple: true
+      options:
+        - spec
+        - sandbox
+        - agent
+        - studio
+        - cli
+        - templates·examples
+        - docs·process
+    validations:
+      required: true

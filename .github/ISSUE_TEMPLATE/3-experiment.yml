@@ -1,0 +1,70 @@
+name: 실험
+description: 결정하기 전에 가설을 측정으로 확인합니다
+title: "[실험] "
+labels: [experiment]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        실험은 결정을 위해 합니다. 가설이 맞을 때와 틀릴 때 각각 무엇을 할지 먼저 적습니다. 틀린 결과도 결과로 남깁니다.
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: 가설
+      placeholder: "H1: 격리 병렬(S1)에서 인터페이스로 엮인 과제는 통합 게이트에서 실패한다."
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: 이 실험이 정할 것
+      description: 가설이 맞으면 무엇을, 틀리면 무엇을 하나.
+      placeholder: 맞으면 레인 간 조율 전략을 만든다. 틀리면 "중앙 조율로 충분"을 ADR로 남기고 조율 기능을 만들지 않는다.
+    validations:
+      required: true
+  - type: textarea
+    id: conditions
+    attributes:
+      label: 조건
+      description: 과제·모델·반복 횟수·환경과 고정한 변수를 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: 지표와 정의
+      description: 지표마다 무엇을 어떻게 재는지 적습니다. "성능" 같은 말 대신 축을 적습니다(종단 시간·입력 토큰·통합 성공 건수…). 반복이 적으면 비율 대신 건수로 적습니다.
+    validations:
+      required: true
+  - type: input
+    id: estimate
+    attributes:
+      label: 예상 시간·비용
+      placeholder: 기계 시간 2~5시간, 모델 비용 첫 1회 뒤 갱신
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: 관측 결과
+      description: 끝난 뒤 채웁니다. 무엇을 관측했는지 수치 그대로, 원자료 경로를 포함합니다.
+    validations:
+      required: false
+  - type: textarea
+    id: surprises
+    attributes:
+      label: 예상과 다른 점
+    validations:
+      required: false
+  - type: textarea
+    id: ruled-out
+    attributes:
+      label: 배제한 원인
+    validations:
+      required: false
+  - type: textarea
+    id: next
+    attributes:
+      label: 다음에 확인할 것
+    validations:
+      required: false
