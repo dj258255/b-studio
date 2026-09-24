@@ -18,6 +18,10 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 ## 개발하고 검토하는 사람
 
 - [기여 가이드](../CONTRIBUTING.md) — 개발 명령, 변경 원칙, PR 체크리스트
+- [로드맵](../ROADMAP.md) — 현재 단계, 완료 조건, 예상과 실제
+- [변경 기록](../CHANGELOG.md) — 날짜별로 정리한 사용자 변경
+- [실험 기록](experiments/README.md) — 결정 전에 측정한 결과
+- [문서 양식](templates/adr.md) — ADR과 [실험 보고서](templates/experiment-report.md) 작성 틀
 - [설계 결정 기록](decisions.md) — ADR-001부터 이어지는 선택과 트레이드오프
 - [검증 기록과 한계](verification.md) — 자동 검사, 실제 환경 검증, 확인하지 못한 범위
 
@@ -28,3 +32,4 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 - 새로운 설계 선택은 기존 ADR을 고쳐 쓰지 않고 다음 번호의 ADR로 추가합니다.
 - 재현 가능한 장애 해결 과정은 [트러블슈팅](troubleshooting.md)에 추가합니다.
 - README, `docs/`, Wiki에서 같은 설명을 길게 복제하지 않고 이 문서를 기준으로 연결합니다.
+- 계획과 예상은 [로드맵](../ROADMAP.md)과 이슈에, 들어간 변경은 [변경 기록](../CHANGELOG.md)에 적습니다.

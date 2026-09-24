@@ -23,6 +23,14 @@ Docker 관련 변경은 `pnpm studio up examples/orders`, 에이전트 게이트
 - `templates`: 새 서비스 원본
 - `examples/orders`: 전체 통합 예제
 
+## 작업 흐름
+
+1. 새 기능·개선은 "착수 명세" 이슈로 열어 문제·선택지·완료 조건·예상 시간을 먼저 적습니다.
+2. `main`에서 `feature/...`, `fix/...`, `docs/...` 브랜치를 딴 뒤 PR 템플릿의 모든 절을 채웁니다.
+3. PR은 squash 병합하고, 병합 뒤 `CHANGELOG.md`와 `ROADMAP.md`를 갱신합니다.
+
+자세한 내용은 [CONTRIBUTING.md](https://github.com/dj258255/b-studio/blob/main/CONTRIBUTING.md)를 참고하세요.
+
 ## 변경할 때 지킬 것
 
 - 성공 경로만큼 실패·취소·복구 경로를 테스트합니다.
