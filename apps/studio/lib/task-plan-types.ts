@@ -87,6 +87,8 @@ export interface TaskPlanView {
   rejectedReason?: string;
   /** 계획 호출의 usage와 걸린 시간 */
   planning?: { usage: AgentUsage; durationMs: number };
+  /** 모델에게 계획을 받지 않고 서버 안에서 고정했다(벤치마크·테스트). 이때는 planning이 없다 */
+  preset?: true;
   /** 계획 전체 합계 지표 */
   metrics?: TaskPlanMetrics;
   lanes: TaskPlanLaneView[];

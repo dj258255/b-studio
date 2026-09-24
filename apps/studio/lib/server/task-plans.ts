@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { isInScope, MAX_PLAN_LANES, requestTaskPlan, runTaskGraph, TaskPlanError, type AgentUsage, type RunMetrics, type ScriptedTurn, type TaskLane } from '@b-studio/agent';
+import { isInScope, MAX_PLAN_LANES, planLanes, requestTaskPlan, runTaskGraph, TaskPlanError, type AgentUsage, type RunMetrics, type ScriptedTurn, type TaskLane } from '@b-studio/agent';
 import type { Checkpoint } from '@b-studio/agent';
 import type { StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
@@ -31,15 +31,43 @@ const MAX_INTEGRATION_FILE_BYTES = 256 * 1024;
 const plans = new Map<string, TaskPlanView>();
 let loaded = false;
 
-export async function createTaskPlan(input: { projectId: string; request: string; modelId: string; owner: string }): Promise<TaskPlanView> {
-  if ((process.env.B_STUDIO_MODE?.trim() || 'api') !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
+export async function createTaskPlan(input: {
+  projectId: string;
+  request: string;
+  modelId: string;
+  owner: string;
+  /**
+   * 서버 안에서만 넘긴다(벤치마크·테스트). HTTP 라우트는 이 필드를 넘기지 않는다.
+   * ADR-051에서 쓰기 범위를 서버 안에서만 넘긴 것과 같은 규칙이다.
+   * 있으면 모델 레지스트리 확인을 건너뛰고 이 계획을 planLanes로 검증해 쓴다.
+   */
+  presetPlan?: unknown;
+}): Promise<TaskPlanView> {
+  const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
+  const preset = input.presetPlan;
+  if (preset === undefined) {
+    if (mode !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
+  } else if (mode !== 'api' && mode !== 'claude-code') {
+    // 고정 계획은 모델을 부르지 않으므로 claude-code 모드에서도 쓴다. demo는 지금처럼 거부한다
+    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api 또는 claude-code에서만 사용할 수 있습니다');
+  }
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
-  const model = listModelOptions().find((candidate) => candidate.id === input.modelId && candidate.enabled !== false);
-  if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${input.modelId}`);
-  if (!model.configured) throw new StudioError(400, `${model.label}의 API 키 환경 변수가 설정되지 않았습니다`);
-  if (!model.capabilities.includes('tools')) throw new StudioError(400, `${model.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
+
+  let modelId = input.modelId;
+  if (preset === undefined) {
+    const model = listModelOptions().find((candidate) => candidate.id === input.modelId && candidate.enabled !== false);
+    if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${input.modelId}`);
+    if (!model.configured) throw new StudioError(400, `${model.label}의 API 키 환경 변수가 설정되지 않았습니다`);
+    if (!model.capabilities.includes('tools')) throw new StudioError(400, `${model.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
+    modelId = model.id;
+  } else {
+    // 고정 계획에는 모델 호출이 없다. modelId는 기록용이라 비어 있으면 안 된다
+    if (!modelId.trim()) throw new StudioError(400, 'modelId가 필요합니다');
+    modelId = modelId.trim();
+  }
+
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
 
@@ -49,14 +77,15 @@ export async function createTaskPlan(input: { projectId: string; request: string
     owner: input.owner,
     projectId: input.projectId,
     request,
-    modelId: model.id,
+    modelId,
     status: 'planning',
     createdAt: new Date().toISOString(),
     lanes: [],
+    ...(preset === undefined ? {} : { preset: true as const }),
   };
   plans.set(plan.id, plan);
   persist(plan);
-  void execute(plan).catch((error: unknown) => fail(plan, describe(error)));
+  void execute(plan, preset).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
 }
 
@@ -116,15 +145,20 @@ export function resumeTaskPlan(id: string, owner: string): TaskPlanView {
   return clone(plan);
 }
 
-async function execute(plan: TaskPlanView): Promise<void> {
+async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
   const project = await findProject(plan.projectId);
   if (!project) return fail(plan, '프로젝트를 찾을 수 없습니다');
 
   let lanes: TaskLane[];
   try {
-    const planned = await requestTaskPlan(clientForModel(modelById(plan.modelId)), project, plan.request);
-    plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
-    lanes = planned.lanes;
+    if (preset === undefined) {
+      const planned = await requestTaskPlan(clientForModel(modelById(plan.modelId)), project, plan.request);
+      plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
+      lanes = planned.lanes;
+    } else {
+      // 고정 계획은 모델을 부르지 않는다. plan.planning은 남기지 않는다(모델 호출이 없었다)
+      lanes = planLanes(preset);
+    }
   } catch (error) {
     // 계획 검증이 실패해도 모델 호출에 쓴 토큰과 시간은 남긴다. 아래 fail()이 지표를 계산한다
     if (error instanceof TaskPlanError && error.usage) {

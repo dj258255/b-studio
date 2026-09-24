@@ -1018,6 +1018,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...shared,
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
+      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
+      model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다

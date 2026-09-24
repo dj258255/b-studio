@@ -12,6 +12,8 @@
 
 프로젝트, 세션, Fleet, 배포 데이터는 각각 `B_STUDIO_PROJECTS_DIR`, `B_STUDIO_SESSIONS_DIR`, `B_STUDIO_FLEETS_DIR`, `B_STUDIO_DEPLOYS_DIR`로 위치를 분리할 수 있습니다. 운영에서는 영속 볼륨에 두고 접근 권한을 제한하세요.
 
+`claude-code` 모드에서 쓸 모델은 `B_STUDIO_CLAUDE_CODE_MODEL`로 고정할 수 있습니다(예: `sonnet`). 비우면 로그인 계정의 기본 모델을 씁니다. 실제로 쓴 모델 이름은 세션 이벤트로 기록됩니다.
+
 ## 웹 인증
 
 ### token 모드
