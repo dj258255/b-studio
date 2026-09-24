@@ -11,6 +11,7 @@ export type FailureCategory =
   | 'lane_gate'
   | 'integration_gate'
   | 'acceptance'
+  | 'rate_limited'
   | 'environment'
   | 'timeout'
   | 'unknown';
@@ -20,16 +21,34 @@ export interface Classification {
   detail: string;
 }
 
-const ENVIRONMENT_NEEDLES = ['준비하지 못했습니다', 'no space left', 'ENOSPC', 'OOM', 'ECONNREFUSED', '502', '429'];
+/**
+ * 사용 한도 신호. environment보다 먼저 본다.
+ * 부분 문자열이 아니라 경계가 있는 정규식으로 찾는다 — '1429ms'·'4290 bytes'·'unlimited' 같은 값을 한도로 오인하지 않게.
+ */
+const RATE_LIMIT_PATTERNS: RegExp[] = [
+  /\b429\b/,
+  /\busage limit\b/i,
+  /\brate[ _]limit/i,
+  /\bhit your (usage )?limit\b/i,
+  /\blimit reached\b/i,
+  /\boverloaded\b/i,
+];
+const ENVIRONMENT_NEEDLES = ['준비하지 못했습니다', 'no space left', 'ENOSPC', 'OOM', 'ECONNREFUSED', '502'];
 const DETAIL_LIMIT = 300;
 
 export function classify(plan: TaskPlanView, acceptance: AcceptanceResult[] | undefined, harnessError?: string): Classification {
-  // 하네스(벤치 실행기) 자체 오류를 먼저 본다
+  const errors = [plan.error, ...plan.lanes.map((lane) => lane.error), plan.integration?.error].filter((value): value is string => Boolean(value));
+  const combined = [harnessError, ...errors].filter((value): value is string => Boolean(value)).join('\n');
+
+  // 사용 한도는 환경 문제보다 먼저 본다. 한도에 걸린 실행을 환경 오류로 묶으면 원인을 잃는다
+  const rateLimit = RATE_LIMIT_PATTERNS.find((pattern) => pattern.test(combined));
+  if (rateLimit) return { category: 'rate_limited', detail: clip(`${rateLimit.source}: ${combined}`) };
+
+  // 하네스(벤치 실행기) 자체 오류
   if (harnessError) {
     return { category: /시간\s*초과|timeout|timed out/i.test(harnessError) ? 'timeout' : 'environment', detail: clip(harnessError) };
   }
 
-  const errors = [plan.error, ...plan.lanes.map((lane) => lane.error), plan.integration?.error].filter((value): value is string => Boolean(value));
   const environment = ENVIRONMENT_NEEDLES.find((needle) => errors.some((error) => error.includes(needle)));
   if (environment) return { category: 'environment', detail: clip(`${environment}: ${errors.join(' | ')}`) };
 

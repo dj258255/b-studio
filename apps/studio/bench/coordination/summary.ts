@@ -34,11 +34,15 @@ export interface BenchProxyStats {
 
 export interface BenchRow {
   order: number;
+  /** 사용 한도로 다시 시도한 실행이면 원래 실행의 order */
+  retryOf?: number;
   repeat: number;
   taskId: string;
   coupled: boolean;
   strategy: Strategy;
   model: string;
+  /** 세션 이벤트에서 읽은 실제 모델 이름 (중복 제거) */
+  observedModels: string[];
   startedAt: string;
   finishedAt: string;
   planId?: string;
@@ -51,14 +55,21 @@ export interface BenchRow {
   success: boolean;
   category: FailureCategory;
   detail: string;
-  proxy: BenchProxyStats;
+  /** 프록시를 쓰지 않는 백엔드(claude-code)에서는 없다 */
+  proxy?: BenchProxyStats;
   leftoverContainers: string[];
   estimatedCostUsd: number;
 }
 
-const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'environment', 'timeout', 'unknown'];
+export interface SummaryMeta {
+  backend: string;
+  requestedModel: string;
+}
 
-export function summarize(rows: BenchRow[]): string {
+const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'environment', 'timeout', 'unknown'];
+
+export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
+  const observed = [...new Set(rows.flatMap((row) => row.observedModels))];
   const groups = new Map<string, BenchRow[]>();
   for (const row of rows) {
     const key = `${row.taskId}|${row.strategy}`;
@@ -111,6 +122,8 @@ export function summarize(rows: BenchRow[]): string {
   return [
     '# 협업 벤치마크 요약',
     '',
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회`,
+    '',
     '## 과제 × 전략',
     '',
     ...taskTable,
@@ -119,6 +132,9 @@ export function summarize(rows: BenchRow[]): string {
     '',
     ...failureTable,
     '',
+    ...(meta.backend === 'claude-code'
+      ? ['로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다. 비용은 청구가 없고, 단가를 주면 API 단가 환산 추정치만 계산합니다.', '']
+      : []),
     '반복 수가 적어 비율 대신 건수로 적습니다. 이 결과는 이 저장소·이 모델·이 과제에 한정됩니다.',
     '',
   ].join('\n');

@@ -5,14 +5,20 @@
  * 운영 코드(apps/studio/lib, packages)는 고치지 않고, e2e처럼 환경 변수를 세운 뒤 서버 내부 함수를 dynamic import로 부른다.
  * 사람 승인 게이트는 그대로 지난다(approveTaskPlan을 직접 부른다). 새 HTTP 라우트나 우회 경로를 만들지 않는다.
  *
- *   pnpm bench:coordination --dry          # 가짜 상류로, 실제 모델 호출 없이
- *   BENCH_UPSTREAM_BASE_URL=... BENCH_UPSTREAM_API_KEY=... BENCH_UPSTREAM_MODEL=... pnpm bench:coordination
+ * 백엔드(--backend, --dry가 아니면 필수):
+ *   openai      유료 API. BENCH_UPSTREAM_* 환경 변수와 로컬 프록시를 쓴다. --dry는 이 백엔드의 가짜 상류다
+ *   claude-code 본인 PC에 로그인된 구독 CLI. 프록시·상류를 띄우지 않고, 계획도 모델에게 받지 않는다(presetPlan)
+ *
+ *   pnpm bench:coordination --dry
+ *   BENCH_UPSTREAM_BASE_URL=... BENCH_UPSTREAM_API_KEY=... BENCH_UPSTREAM_MODEL=... pnpm bench:coordination --backend openai
+ *   pnpm bench:coordination --backend claude-code --model sonnet
  */
 import { spawnSync } from 'node:child_process';
 import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
+import { planModelId, resolveBackend, resolveRateLimitPolicy, type Backend } from './backends';
 import { classify } from './classify';
 import { startDryProvider } from './dry-provider';
 import { startProxy, type ProxyHandle } from './proxy';
@@ -25,6 +31,7 @@ type TaskPlansModule = typeof import('../../lib/server/task-plans');
 type SessionsModule = typeof import('../../lib/server/sessions');
 
 const PROJECT_ID = 'bench-orders';
+/** openai 백엔드가 모델 레지스트리에 등록하는 id */
 const MODEL_ID = 'bench-coordination';
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
 const RUN_TIMEOUT_MS = 40 * 60_000;
@@ -37,6 +44,10 @@ interface Args {
   strategies?: Strategy[];
   repeats?: number;
   out?: string;
+  backend?: string;
+  model?: string;
+  onRateLimit?: string;
+  rateLimitWaitMinutes?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -49,10 +60,18 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--strategies') args.strategies = split(next(argv, index++, '--strategies')) as Strategy[];
     else if (arg === '--repeats') args.repeats = Number(next(argv, index++, '--repeats'));
     else if (arg === '--out') args.out = next(argv, index++, '--out');
+    else if (arg === '--backend') args.backend = next(argv, index++, '--backend');
+    else if (arg === '--model') args.model = next(argv, index++, '--model');
+    else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
+    else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
     else if (arg.startsWith('--out=')) args.out = arg.slice('--out='.length);
+    else if (arg.startsWith('--backend=')) args.backend = arg.slice('--backend='.length);
+    else if (arg.startsWith('--model=')) args.model = arg.slice('--model='.length);
+    else if (arg.startsWith('--on-rate-limit=')) args.onRateLimit = arg.slice('--on-rate-limit='.length);
+    else if (arg.startsWith('--rate-limit-wait-minutes=')) args.rateLimitWaitMinutes = Number(arg.slice('--rate-limit-wait-minutes='.length));
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;
@@ -128,7 +147,7 @@ function price(name: string): number {
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
-  if (!value) throw new Error(`실제 실행에는 ${name} 환경 변수가 필요합니다`);
+  if (!value) throw new Error(`openai 백엔드에는 ${name} 환경 변수가 필요합니다`);
   return value;
 }
 
@@ -144,23 +163,34 @@ interface RunContext {
   taskPlans: TaskPlansModule;
   sessions: SessionsModule;
   localUser: string;
-  proxy: ProxyHandle;
+  backend: Backend;
+  /** openai 백엔드에서만 있다 */
+  proxy?: ProxyHandle;
   priceInput: number;
   priceOutput: number;
-  model: string;
+  requestedModel: string;
+  planModelId: string;
 }
 
 async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
   const startedAt = new Date().toISOString();
-  const { taskPlans, sessions, localUser, proxy } = context;
-  let plan: TaskPlanView = { id: '', owner: localUser, projectId: PROJECT_ID, request: '', modelId: MODEL_ID, status: 'failed', createdAt: startedAt, lanes: [] };
+  const { taskPlans, sessions, localUser } = context;
+  const planJson = planFor(task, strategy);
+  let plan: TaskPlanView = { id: '', owner: localUser, projectId: PROJECT_ID, request: '', modelId: context.planModelId, status: 'failed', createdAt: startedAt, lanes: [] };
   let planId: string | undefined;
   let acceptance: AcceptanceResult[] | undefined;
   let harnessError: string | undefined;
 
   try {
-    proxy.setPlan(planFor(task, strategy));
-    const created = await taskPlans.createTaskPlan({ projectId: PROJECT_ID, request: task.request, modelId: MODEL_ID, owner: localUser });
+    // openai 백엔드는 프록시가 계획 요청에 이 JSON을 돌려준다. claude-code는 계획을 서버 안에서 넘긴다
+    if (context.backend === 'openai' && context.proxy) context.proxy.setPlan(planJson);
+    const created = await taskPlans.createTaskPlan({
+      projectId: PROJECT_ID,
+      request: task.request,
+      modelId: context.planModelId,
+      owner: localUser,
+      ...(context.backend === 'claude-code' ? { presetPlan: planJson } : {}),
+    });
     planId = created.id;
     plan = await waitForPlan(taskPlans, created.id, localUser, ['awaiting_approval', 'failed'], APPROVAL_TIMEOUT_MS, '계획이 승인 대기에 이르지 않았습니다', activeSessions);
     if (plan.status === 'awaiting_approval') {
@@ -185,9 +215,12 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     }
   }
 
+  const sessionIds = [...plan.lanes.flatMap((lane) => (lane.sessionId ? [lane.sessionId] : [])), ...(plan.integration?.sessionId ? [plan.integration.sessionId] : [])];
+  // 세션을 내리기 전에 기록에서 실제로 쓴 모델 이름을 읽는다. 읽기 실패는 실행 결과를 바꾸지 않는다
+  const observedModels = readObservedModels(sessions, sessionIds);
+
   // 세션을 모두 내린다. 실패·시간 초과로 끝났어도 남기지 않는다.
   // stopSession이 실패하면 activeSessions에 남겨, 남은 컨테이너가 있을 때 다시 시도한다
-  const sessionIds = [...plan.lanes.flatMap((lane) => (lane.sessionId ? [lane.sessionId] : [])), ...(plan.integration?.sessionId ? [plan.integration.sessionId] : [])];
   for (const id of sessionIds) {
     try {
       await sessions.stopSession(id);
@@ -212,7 +245,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   }
   const success = !harnessError && plan.status === 'done' && Boolean(acceptance) && acceptance!.every((result) => result.ok);
   const classification = classify(plan, acceptance, harnessError);
-  const proxyStats = proxy.takeStats();
+  const proxyStats = context.proxy?.takeStats();
   const metrics = plan.metrics;
   const estimatedCostUsd =
     (context.priceInput * ((metrics?.usage.inputTokens ?? 0) + (metrics?.usage.cacheReadTokens ?? 0) + (metrics?.usage.cacheWriteTokens ?? 0)) +
@@ -225,7 +258,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     taskId: task.id,
     coupled: task.coupled,
     strategy,
-    model: context.model,
+    model: context.requestedModel,
+    observedModels,
     startedAt,
     finishedAt: new Date().toISOString(),
     planId,
@@ -250,6 +284,25 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     leftoverContainers,
     estimatedCostUsd,
   };
+}
+
+/**
+ * 세션 기록을 다시 보내 주는 subscribe를 등록→즉시 해제해 실제로 쓴 모델 이름을 읽는다.
+ * 모델은 `{ type: 'agent', event: { type: 'session', model } }` 이벤트에 있다. 실패는 빈 배열로 둔다.
+ */
+function readObservedModels(sessions: SessionsModule, sessionIds: string[]): string[] {
+  const models = new Set<string>();
+  for (const id of sessionIds) {
+    try {
+      const unsubscribe = sessions.subscribe(id, (event) => {
+        if (event.type === 'agent' && event.event.type === 'session') models.add(event.event.model);
+      });
+      unsubscribe();
+    } catch {
+      // 없는 세션이거나 기록을 읽지 못하면 넘어간다
+    }
+  }
+  return [...models];
 }
 
 async function waitForPlan(
@@ -285,6 +338,10 @@ function timestamp(): string {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  // 백엔드와 사용 한도 정책은 Docker를 건드리기 전에 확정한다(모델 경로를 조용히 고르지 않는다)
+  const choice = resolveBackend({ dry: args.dry, backend: args.backend, model: args.model });
+  const backend = choice.backend;
+  const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
   const dry = args.dry;
   const repeats = args.repeats ?? (dry ? 1 : 3);
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error(`--repeats는 1 이상의 정수여야 합니다 (지금 값: ${args.repeats})`);
@@ -294,14 +351,21 @@ async function main(): Promise<void> {
   // 1. 사전 확인 — 다른 프로젝트 컨테이너가 있으면 여기서 멈춘다
   const dockerMemTotal = preflight(args.force);
 
-  const upstreamModel = dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
-  const upstream = dry ? await startDryProvider() : { baseUrl: requiredEnv('BENCH_UPSTREAM_BASE_URL'), close: async () => {} };
-  const upstreamApiKey = dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_API_KEY');
+  // 2. 백엔드별 준비
+  const requestedModel = backend === 'claude-code' ? choice.model! : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
   const priceInput = price('BENCH_PRICE_INPUT_PER_M');
   const priceOutput = price('BENCH_PRICE_OUTPUT_PER_M');
-  const secrets = dry ? [] : [upstreamApiKey].filter((value) => value.length >= 8);
 
-  const proxy = await startProxy({ upstreamBaseUrl: upstream.baseUrl, upstreamApiKey });
+  let proxy: ProxyHandle | undefined;
+  let upstream: { baseUrl: string; close(): Promise<void> } | undefined;
+  let secrets: string[] = [];
+  if (backend === 'openai') {
+    const upstreamApiKey = dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_API_KEY');
+    upstream = dry ? await startDryProvider() : { baseUrl: requiredEnv('BENCH_UPSTREAM_BASE_URL'), close: async () => {} };
+    proxy = await startProxy({ upstreamBaseUrl: upstream.baseUrl, upstreamApiKey });
+    secrets = dry ? [] : [upstreamApiKey].filter((value) => value.length >= 8);
+  }
+
   const outRoot = args.out ? path.resolve(args.out) : path.join(homedir(), '.cache/b-studio/bench/coordination', timestamp());
   await mkdir(outRoot, { recursive: true });
   const workRoot = await mkdtemp(path.join(homedir(), '.cache/b-studio/bench-work-'));
@@ -315,8 +379,8 @@ async function main(): Promise<void> {
     const { stopSession } = await import('../../lib/server/sessions');
     for (const id of activeSessions) await stopSession(id).catch(() => {});
     activeSessions.clear();
-    await proxy.close().catch(() => {});
-    await upstream.close().catch(() => {});
+    await proxy?.close().catch(() => {});
+    await upstream?.close().catch(() => {});
     await rm(workRoot, { recursive: true, force: true }).catch(() => {});
   };
   process.on('SIGINT', () => {
@@ -327,7 +391,7 @@ async function main(): Promise<void> {
   let abortReason: string | undefined;
 
   try {
-    // 2. 임시 루트에 프로젝트 복사와 모델 레지스트리·환경 변수 준비 (e2e와 같은 방식)
+    // 3. 임시 루트에 프로젝트 복사와 환경 변수 준비 (e2e와 같은 방식)
     const projectsDir = path.join(workRoot, 'projects');
     const projectDir = path.join(projectsDir, PROJECT_ID);
     await cp(path.resolve(import.meta.dirname, '../../../../examples/orders'), projectDir, {
@@ -337,58 +401,104 @@ async function main(): Promise<void> {
     const specFile = path.join(projectDir, 'studio.yaml');
     await writeFile(specFile, (await readFile(specFile, 'utf8')).replace(/^name: orders$/m, `name: ${PROJECT_ID}`));
 
-    const registryFile = path.join(workRoot, 'models.json');
-    await writeFile(
-      registryFile,
-      JSON.stringify([
-        {
-          id: MODEL_ID,
-          provider: 'openai',
-          model: upstreamModel,
-          label: 'Bench upstream',
-          capabilities: ['tools', 'json'],
-          contextWindow: 200_000,
-          pricing: { inputPerMillion: priceInput, outputPerMillion: priceOutput },
-          baselineQuality: 0.8,
-          baselineLatencyMs: 100,
-          baseUrl: proxy.baseUrl,
-          apiKeyEnv: 'B_STUDIO_BENCH_PROXY_KEY',
-        },
-      ]),
-      { mode: 0o600 },
-    );
     await mkdir(path.join(workRoot, 'sessions'), { recursive: true });
-    Object.assign(process.env, {
-      B_STUDIO_MODE: 'api',
+    const benchEnv: Record<string, string> = {
       B_STUDIO_AUTH: 'none',
-      B_STUDIO_MODEL_REGISTRY: registryFile,
       B_STUDIO_PROJECTS_DIR: projectsDir,
       B_STUDIO_SESSIONS_DIR: path.join(workRoot, 'sessions'),
       B_STUDIO_TASK_PLANS_DIR: path.join(workRoot, 'task-plans'),
       B_STUDIO_MODEL_OBSERVATIONS_FILE: path.join(workRoot, 'model-observations.json'),
-      B_STUDIO_BENCH_PROXY_KEY: 'local',
-    });
+    };
+    if (backend === 'openai') {
+      const registryFile = path.join(workRoot, 'models.json');
+      await writeFile(
+        registryFile,
+        JSON.stringify([
+          {
+            id: MODEL_ID,
+            provider: 'openai',
+            model: requestedModel,
+            label: 'Bench upstream',
+            capabilities: ['tools', 'json'],
+            contextWindow: 200_000,
+            pricing: { inputPerMillion: priceInput, outputPerMillion: priceOutput },
+            baselineQuality: 0.8,
+            baselineLatencyMs: 100,
+            baseUrl: proxy!.baseUrl,
+            apiKeyEnv: 'B_STUDIO_BENCH_PROXY_KEY',
+          },
+        ]),
+        { mode: 0o600 },
+      );
+      Object.assign(benchEnv, { B_STUDIO_MODE: 'api', B_STUDIO_MODEL_REGISTRY: registryFile, B_STUDIO_BENCH_PROXY_KEY: 'local' });
+    } else {
+      // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
+      Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
+    }
+    Object.assign(process.env, benchEnv);
+
+    if (backend === 'claude-code') {
+      // 4. 로컬 CLI 로그인 확인. 프롬프트를 보내지 않으므로 모델 사용량을 쓰지 않는다
+      const { preflightClaudeCode } = await import('@b-studio/agent');
+      const preflight = await preflightClaudeCode({ cwd: projectDir });
+      if (!preflight.ok) {
+        console.error(`로컬 Claude Code를 쓸 수 없습니다: ${preflight.reason}`);
+        process.exitCode = 3;
+        return;
+      }
+      console.log(`로컬 Claude Code 로그인 확인: ${preflight.account.subscriptionType ?? preflight.account.apiKeySource ?? '로그인 계정'} · 모델 ${requestedModel}`);
+    }
 
     const taskPlans = await import('../../lib/server/task-plans');
     const sessions = await import('../../lib/server/sessions');
     const auth = await import('../../lib/server/auth');
 
-    const context: RunContext = { taskPlans, sessions, localUser: auth.LOCAL_USER, proxy, priceInput, priceOutput, model: upstreamModel };
+    const context: RunContext = {
+      taskPlans,
+      sessions,
+      localUser: auth.LOCAL_USER,
+      backend,
+      proxy,
+      priceInput,
+      priceOutput,
+      requestedModel,
+      planModelId: planModelId(backend, requestedModel, MODEL_ID),
+    };
 
-    // 3. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
+    // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
     let order = 0;
+    const record = async (task: BenchTask, strategy: Strategy, repeat: number, retryOf?: number): Promise<BenchRow> => {
+      order += 1;
+      console.log(`[${order}] 반복 ${repeat}/${repeats} · ${task.id} · ${strategy}${retryOf === undefined ? '' : ` (재시도 of ${retryOf})`}`);
+      const row = await runOnce(context, task, strategy, order, repeat, activeSessions);
+      const stored: BenchRow = retryOf === undefined ? row : { ...row, retryOf };
+      rows.push(stored);
+      await appendFile(path.join(outRoot, 'results.jsonl'), `${redact(JSON.stringify(stored), secrets)}\n`);
+      console.log(`    → ${stored.success ? '성공' : stored.category} (계획 ${stored.planStatus}${stored.detail ? ` · ${stored.detail.slice(0, 120)}` : ''})`);
+      return stored;
+    };
+
     for (let repeat = 1; repeat <= repeats && !abortReason; repeat += 1) {
       const ordered = repeat % 2 === 1 ? strategies : [...strategies].reverse();
       for (const task of tasks) {
         for (const strategy of ordered) {
-          order += 1;
-          console.log(`[${order}] 반복 ${repeat}/${repeats} · ${task.id} · ${strategy}`);
-          const row = await runOnce(context, task, strategy, order, repeat, activeSessions);
-          rows.push(row);
-          await appendFile(path.join(outRoot, 'results.jsonl'), `${redact(JSON.stringify(row), secrets)}\n`);
-          console.log(`    → ${row.success ? '성공' : row.category} (계획 ${row.planStatus}${row.detail ? ` · ${row.detail.slice(0, 120)}` : ''})`);
+          let row = await record(task, strategy, repeat);
+          // 남은 컨테이너가 있으면 재시도하지 않고 아래 '남은 컨테이너' 중단 경로로 멈춘다
+          if (row.leftoverContainers.length === 0 && row.category === 'rate_limited' && rateLimit.policy === 'wait') {
+            console.warn(`사용 한도에 걸렸습니다. ${rateLimit.waitMinutes}분 기다린 뒤 같은 실행을 한 번만 다시 시도합니다.`);
+            await delay(rateLimit.waitMinutes * 60_000);
+            row = await record(task, strategy, repeat, row.order);
+          }
           if (row.leftoverContainers.length > 0) {
             abortReason = `남은 컨테이너가 있어 멈춥니다: ${row.leftoverContainers.join(', ')}`;
+            console.error(abortReason);
+            break;
+          }
+          if (row.category === 'rate_limited') {
+            abortReason =
+              rateLimit.policy === 'wait'
+                ? '다시 시도한 실행도 사용 한도에 걸려 멈춥니다.'
+                : `사용 한도에 걸려 멈춥니다 (--on-rate-limit wait로 기다렸다 다시 시도할 수 있습니다).`;
             console.error(abortReason);
             break;
           }
@@ -401,7 +511,8 @@ async function main(): Promise<void> {
   }
 
   const finishedAt = new Date().toISOString();
-  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows), secrets));
+  const observedModels = [...new Set(rows.flatMap((row) => row.observedModels))];
+  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel }), secrets));
   await writeFile(
     path.join(outRoot, 'meta.json'),
     redact(
@@ -410,13 +521,17 @@ async function main(): Promise<void> {
           startedAt,
           finishedAt,
           dry,
-          model: upstreamModel,
+          backend,
+          requestedModel,
+          observedModels,
           dockerMemTotal,
           gitCommit: gitCommit(),
           tasks: tasks.map((task) => task.id),
           strategies,
           repeats,
           runs: rows.length,
+          onRateLimit: rateLimit.policy,
+          rateLimitWaitMinutes: rateLimit.waitMinutes,
           abortReason,
         },
         null,

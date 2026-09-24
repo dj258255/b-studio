@@ -52,6 +52,34 @@ describe('실패 원인 분류', () => {
     expect(classify(plan({ status: 'done' }), acceptanceOk).category).toBe('none');
   });
 
+  it('사용 한도 신호는 environment보다 먼저 rate_limited로 본다', () => {
+    const laneFailed = plan({
+      status: 'failed',
+      approvedAt: 'x',
+      lanes: [lane({ status: 'failed', error: 'Claude AI usage limit reached|1758620000' })],
+    });
+    const result = classify(laneFailed, undefined);
+    expect(result.category).toBe('rate_limited');
+    expect(result.detail).toContain('usage limit');
+
+    // 하네스 오류가 한도면 rate_limited다
+    expect(classify(plan(), undefined, '429 Too Many Requests').category).toBe('rate_limited');
+    // 429는 environment 목록에서 빠져 한도로만 분류된다
+    expect(classify(plan({ status: 'failed', error: 'HTTP 429' }), undefined).category).toBe('rate_limited');
+    // 대소문자를 가리지 않는다
+    expect(classify(plan(), undefined, 'The model is OVERLOADED right now').category).toBe('rate_limited');
+  });
+
+  it('경계 없는 숫자·단어는 한도로 보지 않는다', () => {
+    // 하네스 오류지만 한도 신호가 아니다 → environment
+    for (const text of ['1429ms 걸렸습니다', '4290 bytes', 'unlimited']) {
+      expect(classify(plan(), undefined, text).category, text).toBe('environment');
+    }
+    // 계획 오류도 한도 신호가 아니면 한도가 아니다 → 승인 전 실패라 plan_rejected
+    expect(classify(plan({ status: 'failed', error: '응답이 4290 bytes였습니다' }), undefined).category).toBe('plan_rejected');
+    expect(classify(plan({ status: 'failed', error: '1429ms 만에 끝났습니다' }), undefined).category).toBe('plan_rejected');
+  });
+
   it('그 밖의 상태는 unknown', () => {
     expect(classify(plan({ status: 'interrupted' }), undefined).category).toBe('unknown');
     expect(classify(plan({ status: 'rejected', rejectedReason: '쓰기 범위가 이상함' }), undefined).category).toBe('unknown');

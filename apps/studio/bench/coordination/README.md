@@ -10,24 +10,43 @@
 
 ## 실행
 
+`--dry`가 아니면 `--backend`가 필수입니다. 모델 경로(유료 API / 로컬 구독 CLI)를 조용한 기본값으로 고르지 않습니다.
+
 ```bash
-# 실제 모델 호출 없이(과금 없음) 실행 경로만 확인. 과제 orders-list, 전략 S0·S1, 반복 1로 고정
+# 실제 모델 호출 없이(과금 없음) 실행 경로만 확인. --dry는 항상 openai 가짜 상류를 쓴다
 pnpm bench:coordination --dry
 
-# 실제 실행
+# openai: 유료 API
 BENCH_UPSTREAM_BASE_URL=https://api.example.com/v1 \
 BENCH_UPSTREAM_API_KEY=... \
 BENCH_UPSTREAM_MODEL=... \
 BENCH_PRICE_INPUT_PER_M=3 BENCH_PRICE_OUTPUT_PER_M=15 \
-pnpm bench:coordination
+pnpm bench:coordination --backend openai
 
-# 일부만
-pnpm bench:coordination --tasks orders-list,independent --strategies S0,S1 --repeats 2 --out /tmp/bench-run
+# claude-code: 이 PC에 로그인된 구독 CLI (유료 API 없이 E1을 돌린다)
+pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list --strategies S0,S1 --repeats 1
+
+# 일부만 (openai)
+pnpm bench:coordination --backend openai --tasks orders-list,independent --strategies S0,S1 --repeats 2 --out /tmp/bench-run
 ```
 
-인자: `--dry`, `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`.
+인자:
 
-`BENCH_PRICE_INPUT_PER_M`·`BENCH_PRICE_OUTPUT_PER_M`는 선택입니다. 없으면 0으로 두고 경고합니다.
+- `--backend claude-code|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
+- `--model <이름>` — `claude-code`에서만. 기본 `sonnet`. `B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다
+- `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
+- `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
+
+**claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
+
+**openai**는 `BENCH_UPSTREAM_BASE_URL`, `BENCH_UPSTREAM_API_KEY`, `BENCH_UPSTREAM_MODEL`이 필요합니다. `--dry`는 이 백엔드의 가짜 상류라 이 값들이 필요 없습니다. `BENCH_PRICE_INPUT_PER_M`·`BENCH_PRICE_OUTPUT_PER_M`는 선택이고, 없으면 0으로 두고 경고합니다.
+
+## 사용 한도
+
+실행 뒤 분류가 `rate_limited`면(모델 응답에 `usage limit`, `rate limit`, `429`, `hit your limit`, `limit reached`, `overloaded`) 정책에 따라 처리합니다.
+
+- `--on-rate-limit stop`(기본): 다음 실행을 시작하지 않고 멈춥니다.
+- `--on-rate-limit wait`: `--rate-limit-wait-minutes`만큼 기다린 뒤 **같은 실행을 한 번만** 다시 시도합니다. 다시 시도한 실행은 행의 `retryOf`로 표시하고, 원래 행도 지우지 않고 남깁니다.
 
 ## 사전 확인이 멈추는 이유
 
@@ -37,14 +56,16 @@ pnpm bench:coordination --tasks orders-list,independent --strategies S0,S1 --rep
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
 
-- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 수용 확인, 분류, 프록시 통계, 추정 비용).
-- `summary.md`: 과제 × 전략 표와 전략별 실패 원인 표.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 모델 이름, 과제·전략·반복, git 커밋.
+- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 수용 확인, 분류, 프록시 통계, 관측한 모델, 추정 비용).
+- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, git 커밋.
 
-상류 API 키는 환경 변수에서만 읽고 JSONL·요약·로그에 쓰지 않습니다. 결과를 쓰기 직전에 키가 들어 있으면 `***`로 바꿉니다.
+실제로 쓴 모델 이름은 실행마다 레인·통합 세션의 이벤트 기록에서 읽어 `observedModels`에 넣습니다. 상류 API 키는 환경 변수에서만 읽고 JSONL·요약·로그에 쓰지 않습니다. 결과를 쓰기 직전에 키가 들어 있으면 `***`로 바꿉니다.
 
 ## 한계
 
-- **고정 계획이라 계획 모델의 품질은 재지 않습니다.** 전략 차이만 재기 위해 계획은 과제마다 미리 정해 두고, 로컬 프록시가 계획 요청에 그대로 돌려줍니다.
+- **본인 PC에서 본인이 로그인한 CLI만 씁니다.** `claude-code` 백엔드는 개인 구독 계정용이고, 공유 서버에서는 쓰지 않습니다(ADR의 로컬 CLI 원칙).
+- **고정 계획이라 계획 모델의 품질은 재지 않습니다.** 전략 차이만 재기 위해 계획은 과제마다 미리 정해 둡니다(openai는 로컬 프록시가, claude-code는 `presetPlan`이 그대로 넘깁니다).
+- **로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다.** 0은 "재지 않음"이고, 추측값을 넣지 않습니다. 비용은 청구가 없고, 단가를 주면 API 단가 환산 추정치만 계산합니다.
 - 추정 비용은 단순화했습니다. 입력 토큰은 `inputTokens + cacheReadTokens + cacheWriteTokens`를 입력 단가로 곱하고, 캐시 할인은 반영하지 않습니다. 청구서 금액이 아닙니다.
 - 반복이 적어 비율 대신 건수로 적습니다. 결과는 이 저장소·이 모델·이 과제에 한정됩니다.
