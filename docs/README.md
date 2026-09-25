@@ -22,6 +22,7 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 - [변경 기록](../CHANGELOG.md) — 날짜별로 정리한 사용자 변경
 - [실험 기록](experiments/README.md) — 결정 전에 측정한 결과
 - [문서 양식](templates/adr.md) — ADR과 [실험 보고서](templates/experiment-report.md) 작성 틀
+- [검토 문서](research/2026-09-25-knowledge-sharing-and-model-handoff.md) — 결정 전 아이디어 검토(에이전트 간 지식 공유, 작업 중 모델 교체)
 - [설계 결정 기록](decisions.md) — ADR-001부터 이어지는 선택과 트레이드오프
 - [검증 기록과 한계](verification.md) — 자동 검사, 실제 환경 검증, 확인하지 못한 범위
 
