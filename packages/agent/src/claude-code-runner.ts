@@ -382,7 +382,11 @@ export function zodShape(schema: { properties?: unknown }): Record<string, z.Zod
   return shape;
 }
 
-function serialQueue() {
+/**
+ * 도구 호출을 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Code 러너와 Codex 러너가 같이 쓴다.
+ * 끝난 뒤 실행 중이던 호출까지 기다릴 수 있게 idle()을 함께 돌려준다.
+ */
+export function serialQueue() {
   let tail: Promise<unknown> = Promise.resolve();
   const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
     const next = tail.then(task, task);
