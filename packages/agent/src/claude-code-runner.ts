@@ -13,7 +13,7 @@ import {
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
 import { VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions } from './loop';
+import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract } from './verify';
@@ -116,13 +116,18 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다
   const serial = serialQueue();
+  // 실행 지표. modelMs는 모델 응답 대기가 SDK 안에서 일어나 이 러너가 관찰하지 못하므로 0으로 둔다.
+  // 0은 "재지 않음"이고, 전체 시간에서 도구·게이트 시간을 뺀 추측값을 넣지 않는다
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
   const definitions = specs.map((spec) =>
     tool(spec.name, spec.description ?? '', zodShape(spec.input_schema), (args) =>
       serial(async () => {
         // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
         signal?.throwIfAborted();
         onEvent({ type: 'tool_call', name: spec.name, input: args });
+        const toolStarted = performance.now();
         const outcome = await executeTool(spec.name, args, context);
+        metrics.toolMs += Math.round(performance.now() - toolStarted);
         onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content });
         return { content: [{ type: 'text' as const, text: outcome.content }], isError: !outcome.ok };
       }),
@@ -166,6 +171,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let result: ClaudeCodeResult | undefined;
 
   const finish = (status: AgentResult['status'], summary: string): void => {
+    // 본 대화의 서로 다른 assistant 메시지 수. 이미 있는 messageIds Set의 크기와 같다
+    metrics.modelCalls = messageIds.size;
     result = {
       status,
       summary,
@@ -176,6 +183,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       verifyAttempts: gate?.attempts ?? 0,
       turns: messageIds.size,
       usage,
+      metrics: { ...metrics },
       sessionId,
     };
     onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
@@ -208,6 +216,14 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         case 'assistant': {
           // 하위 에이전트 메시지는 없어야 하지만, 섞여 와도 본 대화로 세지 않는다
           if (message.parent_tool_use_id) break;
+          // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
+          const messageUsage = message.message.usage;
+          if (messageUsage) {
+            metrics.maxContextTokens = Math.max(
+              metrics.maxContextTokens,
+              (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0),
+            );
+          }
           if (!messageIds.has(message.message.id)) {
             messageIds.add(message.message.id);
             onEvent({ type: 'turn', turn: messageIds.size });
@@ -241,7 +257,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             finish('done', lastText);
             break;
           }
+          const gateStarted = performance.now();
           const outcome = await gate.check();
+          metrics.gateMs += Math.round(performance.now() - gateStarted);
           if (outcome.kind === 'pass') {
             if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
             finish('done', lastText);

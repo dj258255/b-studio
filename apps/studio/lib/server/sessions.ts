@@ -821,7 +821,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
-  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns'> | undefined;
+  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs'> | undefined;
   let cancelled = false;
   /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
   let notStarted = false;
@@ -873,7 +873,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
       else await revertRun(session, run.id);
     }
-    finished = { status: result.status, summary: result.summary, turns: result.turns };
+    finished = { status: result.status, summary: result.summary, turns: result.turns, metrics: result.metrics, durationMs: Math.round(performance.now() - agentStarted) };
   } catch (error) {
     if (error instanceof LocalEditsError) {
       // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
@@ -1018,6 +1018,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...shared,
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
+      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
+      model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
