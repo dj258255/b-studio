@@ -8,9 +8,12 @@ import type { TaskPlanRunMetricsView } from '../../lib/task-plan-types';
 import type { AcceptanceResult } from './acceptance';
 import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
+import type { LaneTrace } from './trace';
 
 export interface BenchLaneRow {
   id: string;
+  /** 레인 세션 id. 세션을 만들기 전에 실패하면 없다 */
+  sessionId?: string;
   status: string;
   bootMs?: number;
   error?: string;
@@ -50,6 +53,14 @@ export interface BenchRow {
   planError?: string;
   lanes: BenchLaneRow[];
   integration?: BenchIntegrationRow;
+  /** 레인 세션 순서대로 모은 탐색·실패 흔적 */
+  traces: LaneTrace[];
+  /** 통합 세션의 흔적. 탐색 합계에서는 뺀다 */
+  integrationTrace?: LaneTrace;
+  /** 레인 합계만 센 탐색량 */
+  explore: { filesReadTotal: number; filesReadUnionAcrossLanes: number; readCallsTotal: number };
+  /** 검증기가 낸 실패 서명 합계 */
+  failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
   metrics?: TaskPlanMetrics;
   acceptance?: AcceptanceResult[];
   success: boolean;
@@ -78,10 +89,22 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     else groups.set(key, [row]);
   }
 
-  const taskTable = [
-    '| 과제 | 엮임 | 전략 | 성공 | 종단 시간 중앙값(s) | 입력 토큰 중앙값 | 출력 토큰 중앙값 | 모델 호출 중앙값 | 최대 컨텍스트 중앙값 | 기동 시간 합 중앙값(s) |',
-    '|---|---|---|---|---|---|---|---|---|---|',
+  const taskHeaders = [
+    '과제',
+    '엮임',
+    '전략',
+    '성공',
+    '종단 시간 중앙값(s)',
+    '입력 토큰 중앙값',
+    '출력 토큰 중앙값',
+    '모델 호출 중앙값',
+    '최대 컨텍스트 중앙값',
+    '기동 시간 합 중앙값(s)',
+    '읽은 파일 수 중앙값',
+    '실패 서명 중앙값',
+    '반복 실패 중앙값',
   ];
+  const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
     const head = group[0]!;
     const ok = group.filter((row) => row.success).length;
@@ -107,6 +130,12 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         count(medianValue(group, (row) => row.metrics?.maxContextTokens)),
         '|',
         seconds(medianValue(group, (row) => row.metrics?.bootMsTotal)),
+        '|',
+        count(medianValue(group, (row) => withLaneSessions(row, row.explore.filesReadTotal))),
+        '|',
+        count(medianValue(group, (row) => withLaneSessions(row, row.failures.signaturesTotal))),
+        '|',
+        count(medianValue(group, (row) => withLaneSessions(row, row.failures.repeatedFailures))),
         '|',
       ].join(' '),
     );
@@ -138,6 +167,14 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '반복 수가 적어 비율 대신 건수로 적습니다. 이 결과는 이 저장소·이 모델·이 과제에 한정됩니다.',
     '',
   ].join('\n');
+}
+
+/**
+ * 탐색·실패 열은 레인 세션을 하나라도 만든 실행만 센다. 세션을 만들기 전에 실패한 실행은
+ * 탐색도 실패 서명도 없어서 0으로 섞이면 중앙값을 낮춘다.
+ */
+function withLaneSessions(row: BenchRow, value: number): number | undefined {
+  return row.lanes.some((lane) => lane.sessionId) ? value : undefined;
 }
 
 function medianValue(rows: BenchRow[], pick: (row: BenchRow) => number | undefined): number | undefined {
