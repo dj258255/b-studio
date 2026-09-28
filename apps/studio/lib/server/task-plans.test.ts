@@ -2,19 +2,48 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BoardAccess } from '@b-studio/agent';
 import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
 type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
-type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
+type SendOptions = {
+  allowBreaking: boolean;
+  by?: string;
+  writableScope?: readonly string[];
+  scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }>;
+  board?: BoardAccess;
+};
+
+/** 검증기가 낸 실패 서명 하나를 담은 이벤트(레인 실패 때 기록에 남긴다). S5가 이걸 읽어 게시한다 */
+function failureEvent(runId: string): StudioEvent {
+  return {
+    type: 'agent',
+    runId,
+    event: {
+      type: 'verify_result',
+      text: '',
+      report: { ok: false, sync: { elapsedMs: 1 }, restarted: [{ service: 'web', ready: false, error: 'cannot find symbol at line 42' }], contracts: [], unverifiedFiles: [], secretLeaks: [] },
+    },
+  } as StudioEvent;
+}
+
+/** S4 수리 요청인지: 원래 요청 + 통합 게이트 실패 문구 */
+function isRepair(request: string): boolean {
+  return request.includes('[조율] 레인') && request.includes('검증이 실패했습니다');
+}
 
 const fake = vi.hoisted(() => ({
   root: '',
   counter: 0,
   plan: {} as unknown,
+  /** findProject가 돌려주는 프로젝트. 시크릿 가림 테스트는 여기에 secrets를 넣고 환경 변수를 세운다 */
+  project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
+  /** 세션별 이벤트 기록. subscribe가 다시 보내 주므로 S5가 실패 서명을 읽는다 */
+  history: new Map<string, StudioEvent[]>(),
   /** 작업 id → 그 작업이 쓸 파일. 없으면 실패로 끝낸다 */
   writes: {} as Record<string, Record<string, string> | 'fail'>,
   /** 작업 id → 그 작업이 지울 파일 */
@@ -26,6 +55,10 @@ const fake = vi.hoisted(() => ({
   stopOrder: { integrationCreatedAfterStops: false },
   /** 계획 모델을 부른 횟수. 고정 계획(presetPlan)은 0이어야 한다 */
   modelCalls: 0,
+  /** 통합 스크립트 턴의 게이트 결과. S4 수리를 부르려면 'failed'로 둔다 */
+  integration: 'done' as 'done' | 'failed',
+  /** S4 수리 요청의 게이트 결과 */
+  repair: 'done' as 'done' | 'failed',
   /** 모든 run_finished에 붙이는 실행 지표. 계획 기록에 그대로 옮겨지는지 확인한다 */
   run: {
     usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
@@ -46,7 +79,7 @@ vi.mock('./model-registry', () => ({
 }));
 
 vi.mock('./projects', () => ({
-  findProject: async () => ({ spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] }),
+  findProject: async () => fake.project,
 }));
 
 vi.mock('./sessions', () => ({
@@ -69,6 +102,8 @@ vi.mock('./sessions', () => ({
     fake.stopped.push(id);
   },
   subscribe: (id: string, listener: (event: StudioEvent) => void) => {
+    // 실제 세션과 같이 지금까지의 기록을 먼저 보낸다(레인 조율이 실패 서명을 읽는 경로)
+    for (const event of fake.history.get(id) ?? []) listener(event);
     const set = fake.listeners.get(id) ?? new Set();
     set.add(listener);
     fake.listeners.set(id, set);
@@ -78,17 +113,42 @@ vi.mock('./sessions', () => ({
     fake.sends.push({ sessionId, request, options });
     const session = fake.sessions.get(sessionId)!;
     const runId = `run-${fake.sends.length}`;
+    const record = (event: StudioEvent) => {
+      const list = fake.history.get(sessionId) ?? [];
+      list.push(event);
+      fake.history.set(sessionId, list);
+      for (const listener of fake.listeners.get(sessionId) ?? []) listener(event);
+    };
+    const finish = (status: 'done' | 'failed', summary: string) => {
+      // 실패한 실행은 검증기가 낸 실패 서명을 하나 남긴다(S5가 읽어 게시한다)
+      if (status === 'failed') record(failureEvent(runId));
+      record({ type: 'run_finished', runId, status, summary, ...fake.run } as StudioEvent);
+    };
+
+    // 통합: 스크립트 턴이 만든 파일을 적용하고 게이트 결과는 fake.integration이 정한다
+    if (options.scriptedTurns) {
+      const writes = (options.scriptedTurns[0]?.toolCalls ?? []).filter((call) => call.name === 'write_file');
+      for (const call of writes) {
+        mkdirSync(path.dirname(path.join(session.workDir, call.input.path)), { recursive: true });
+        writeFileSync(path.join(session.workDir, call.input.path), call.input.content ?? '');
+      }
+      if (fake.integration === 'done') {
+        session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set(writes.map((call) => call.input.path))] });
+        finish('done', '완료');
+      } else {
+        finish('failed', '검증 게이트를 통과하지 못했습니다');
+      }
+      return { runId };
+    }
+    // S4 수리: 모델 경로로 보낸 요청. 게이트 결과는 fake.repair가 정한다
+    if (isRepair(request)) {
+      finish(fake.repair, fake.repair === 'done' ? '수리 완료' : '검증 게이트를 통과하지 못했습니다');
+      return { runId };
+    }
+    // 레인 작업
     const taskId = /\[id:([a-z0-9-]+)\]/.exec(request)?.[1];
     const deleted = taskId ? (fake.deletes[taskId] ?? []) : [];
-    const scripted = (options.scriptedTurns?.[0]?.toolCalls ?? []).filter((call) => call.name === 'write_file');
-    const files = options.scriptedTurns
-      ? Object.fromEntries(scripted.map((call) => [call.input.path, call.input.content ?? '']))
-      : taskId
-        ? fake.writes[taskId]
-        : undefined;
-    const finish = (status: 'done' | 'failed', summary: string) => {
-      for (const listener of fake.listeners.get(sessionId) ?? []) listener({ type: 'run_finished', runId, status, summary, ...fake.run } as StudioEvent);
-    };
+    const files = taskId ? fake.writes[taskId] : undefined;
     if (files === 'fail' || files === undefined) {
       finish('failed', '검증 게이트를 통과하지 못했습니다');
     } else {
@@ -116,14 +176,18 @@ const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, t
 beforeEach(() => {
   fake.root = mkdtempSync(path.join(directory, 'work-'));
   fake.counter = 0;
+  fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };
   fake.sessions.clear();
   fake.listeners.clear();
+  fake.history.clear();
   fake.deletes = {};
   fake.sourceFiles = {};
   fake.sends = [];
   fake.stopped = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
   fake.modelCalls = 0;
+  fake.integration = 'done';
+  fake.repair = 'done';
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
 });
@@ -569,6 +633,162 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     // 통합 샌드박스를 띄우기 전에 멈춰야 한다. 스크립트 턴이 돌면 아무것도 합치지 않았는데 통과한 것처럼 남는다
     expect(fake.counter).toBe(0);
     expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+});
+
+describe('레인 조율 전략', () => {
+  const contract = { body: 'GET /api/orders → JSON 배열', refs: ['api'] };
+
+  it('조율을 켜지 않으면 게시판도 도구도 없고 요청 문구도 그대로다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '조율 없음', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.coordination).toBeUndefined();
+    expect(plan.board).toBeUndefined();
+    expect(plan.metrics?.coordination).toBeUndefined();
+    expect(fake.sends.every((send) => send.options.board === undefined)).toBe(true);
+    expect(fake.sends.some((send) => send.request.includes('[조율]'))).toBe(false);
+  });
+
+  it('S2는 계약을 레인 시작 전에 플랫폼이 게시하고, 레인은 읽기만 한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: 'S2 계약',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S2', contracts: [contract] },
+    });
+    const waiting = await awaiting(created.id);
+
+    // 승인 전에도 계약은 이미 게시돼 있다
+    expect(waiting.coordination).toEqual({ strategy: 'S2', topology: 'mesh' });
+    expect(waiting.board?.notes).toHaveLength(1);
+    expect(waiting.board?.notes[0]).toMatchObject({ kind: 'contract', lane: 'plan', by: 'platform', refs: ['api'] });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    expect(laneSends).toHaveLength(2);
+    // S2는 레인 읽기 전용이라 모델 쓰기가 꺼져 있다
+    expect(laneSends.every((send) => send.options.board!.modelWrites === false)).toBe(true);
+    expect(laneSends.every((send) => send.request.includes('[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요'))).toBe(true);
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S2', topology: 'mesh', posts: 1 });
+  });
+
+  it('S3는 레인이 게시판에 쓸 수 있고 topology를 따른다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S3 게시판',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'star' },
+    });
+
+    expect(plan.status).toBe('done');
+    expect(plan.coordination).toEqual({ strategy: 'S3', topology: 'star' });
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    expect(laneSends).toHaveLength(2);
+    expect(laneSends.every((send) => send.options.board!.modelWrites === true)).toBe(true);
+    expect(laneSends[0]!.request).toContain('post_note(contract)');
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S3', topology: 'star' });
+  });
+
+  it('S5는 작업이 끝날 때마다 검증 실패 서명을 플랫폼이 게시하고 모델 쓰기를 끈다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: 'fail' };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S5 실패 서명',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S5' },
+    });
+
+    expect(plan.status).toBe('failed');
+    const failures = plan.board?.notes.filter((note) => note.kind === 'failure') ?? [];
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ by: 'platform', refs: [] });
+    expect(failures[0]!.body).toContain('[run web]');
+    expect(failures[0]!.body).toContain('cannot find symbol at line N');
+
+    const laneSend = fake.sends.find((send) => send.options.board)!;
+    expect(laneSend.options.board!.modelWrites).toBe(false);
+    expect(laneSend.request).toContain('[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요');
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S5', byKind: { failure: 1 } });
+  });
+
+  it('S4는 통합 게이트가 실패하면 한 번만 모델 수리를 요청하고, 레인에는 게시판을 넘기지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.integration = 'failed';
+
+    const plan = await run({ projectId: 'orders', request: 'S4 수리', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+
+    expect(plan.status).toBe('done');
+    const repairs = fake.sends.filter((send) => isRepair(send.request));
+    expect(repairs).toHaveLength(1);
+    // 수리 요청은 스크립트 턴이 아니라 세션의 기본 모델 경로로 보낸다
+    expect(repairs[0]!.options.scriptedTurns).toBeUndefined();
+    expect(repairs[0]!.options.writableScope).toEqual(['web/a', 'web/b']);
+    expect(repairs[0]!.request).toContain('검증이 실패했습니다');
+    expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'done' });
+    expect(fake.sends.filter((send) => send.options.board)).toHaveLength(0);
+  });
+
+  it('S4의 수리도 실패하면 통합이 실패한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    fake.integration = 'failed';
+    fake.repair = 'failed';
+
+    const plan = await run({ projectId: 'orders', request: 'S4 수리 실패', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'failed' });
+    expect(fake.sends.filter((send) => isRepair(send.request))).toHaveLength(1);
+  });
+
+  it('S3에서 모델이 시크릿 값을 담아 게시하면 기록·화면에 남기 전에 가린다', async () => {
+    const secret = 'sk_test_payment_secret';
+    process.env.B_STUDIO_SECRET_PAYMENT_API_KEY = secret;
+    fake.project = {
+      spec: { name: 'orders' },
+      managed: [['web', { template: 'nextjs', path: 'web' }]],
+      secrets: [['PAYMENT_API_KEY', { services: ['web'] }]],
+    };
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    try {
+      const plan = await run({ projectId: 'orders', request: 'S3 가림', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+      expect(plan.status).toBe('done');
+
+      // 레인에 실제로 넘긴 게시판 래퍼로 모델의 post_note를 흉내 낸다
+      const board = fake.sends.find((send) => send.options.board)!.options.board!;
+      const posted = board.post({ kind: 'fact', body: `배포 키는 ${secret} 입니다`, refs: [`config/${secret}.env`] });
+      expect(posted.ok).toBe(true);
+
+      // 계획 기록(plan.board)과 모델에게 돌려준 메모 어디에도 원래 값이 없고 가림 문구가 있다
+      const stored = getTaskPlan(plan.id, 'kim').board!.notes.find((note) => note.body.includes('배포 키는'))!;
+      expect(stored.body).not.toContain(secret);
+      expect(stored.body).toContain('[PAYMENT_API_KEY 가림]');
+      expect(stored.refs.join(' ')).not.toContain(secret);
+      expect(stored.refs.join(' ')).toContain('[PAYMENT_API_KEY 가림]');
+      expect(posted.ok && posted.note.body).not.toContain(secret);
+    } finally {
+      delete process.env.B_STUDIO_SECRET_PAYMENT_API_KEY;
+    }
   });
 });
 

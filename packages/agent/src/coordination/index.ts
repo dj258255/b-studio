@@ -11,11 +11,13 @@ export {
   type ReadResult,
 } from './board';
 export {
+  failureNotesFromEvents,
   failureNotesFromReport,
   normalizeMessage,
   signatureFromCheck,
   signatureKey,
   signaturesFromReport,
+  type FailureEvent,
   type FailureNoteInput,
   type FailureSignature,
 } from './signature';

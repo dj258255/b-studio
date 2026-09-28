@@ -1,8 +1,35 @@
-import type { AgentUsage, RunMetrics } from '@b-studio/agent';
+import type { AgentUsage, BoardStats, NoteKind, RunMetrics, Topology } from '@b-studio/agent';
 import type { TaskPlanMetrics } from './task-plan-metrics';
 
 export type TaskPlanStatus = 'planning' | 'awaiting_approval' | 'running' | 'integrating' | 'interrupted' | 'done' | 'failed' | 'rejected';
 export type TaskPlanStepStatus = 'queued' | 'booting' | 'running' | 'done' | 'failed' | 'skipped';
+
+/** 레인 간 조율 전략. S0·S1은 공유 없음(기존)이라 여기 없다 */
+export type TaskPlanStrategy = 'S2' | 'S3' | 'S4' | 'S5';
+
+/** 게시판 메모 하나(화면·기록용). Board의 Note에서 작성자와 id를 평평하게 폈다 */
+export interface TaskPlanNoteView {
+  kind: NoteKind;
+  body: string;
+  refs: string[];
+  lane: string;
+  task?: string;
+  by: 'model' | 'platform';
+  priority: number;
+  at: string;
+}
+
+export interface TaskPlanBoardView {
+  notes: TaskPlanNoteView[];
+  stats: BoardStats;
+}
+
+/** S4에서 통합 게이트가 실패한 뒤 한 번 시도한 모델 수리 */
+export interface TaskPlanRepairView {
+  attempted: boolean;
+  status: string;
+  run?: TaskPlanRunMetricsView;
+}
 
 export interface TaskPlanCheckpointView {
   sha: string;
@@ -65,6 +92,8 @@ export interface TaskPlanIntegrationView {
   bootMs?: number;
   /** 통합 실행의 지표 */
   run?: TaskPlanRunMetricsView;
+  /** S4: 통합 게이트가 실패해 모델에 수리를 한 번 요청한 기록 */
+  repair?: TaskPlanRepairView;
   /** 통합 세션을 만들기 직전 시각 */
   startedAt?: string;
   /** 통합이 끝난 시각 */
@@ -91,6 +120,10 @@ export interface TaskPlanView {
   preset?: true;
   /** 계획 전체 합계 지표 */
   metrics?: TaskPlanMetrics;
+  /** 조율 전략과 topology. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다) */
+  coordination?: { strategy: TaskPlanStrategy; topology: Topology };
+  /** 조율 게시판 상태(메모 목록과 통계). 조율을 켠 계획에만 있다 */
+  board?: TaskPlanBoardView;
   lanes: TaskPlanLaneView[];
   integration?: TaskPlanIntegrationView;
   error?: string;

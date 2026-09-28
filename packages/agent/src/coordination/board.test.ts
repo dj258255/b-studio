@@ -181,6 +181,19 @@ describe('Board 중복·우선순위·읽기', () => {
   });
 });
 
+describe('Board modelWrites', () => {
+  it('false면 모델의 post를 거부하고 플랫폼은 허용한다', () => {
+    const b = new Board({ topology: 'mesh', modelWrites: false });
+    expect(b.modelWrites).toBe(false);
+    expect(b.post({ kind: 'fact', body: 'x' }, asModel('web'))).toEqual({ ok: false, reason: '이 전략에서는 게시판에 쓸 수 없습니다' });
+    expect(b.post({ kind: 'failure', body: 'x' }, { lane: 'verifier', by: 'platform' }).ok).toBe(true);
+  });
+
+  it('기본값은 true다', () => {
+    expect(new Board({ topology: 'mesh' }).modelWrites).toBe(true);
+  });
+});
+
 describe('Board stats·onChange·snapshot', () => {
   it('쓴·거부한·읽은 수와 종류별 개수를 센다', () => {
     const b = board();

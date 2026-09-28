@@ -143,6 +143,13 @@ describe('조율 도구', () => {
     expect(only).not.toContain('read_notes');
   });
 
+  it('modelWrites가 false면 post_note를 넣지 않고 read_notes만 남긴다', () => {
+    const board = { ...boardContext().board!, modelWrites: false };
+    const names = buildTools(project, { board }).map((candidate) => candidate.name);
+    expect(names).not.toContain('post_note');
+    expect(names).toContain('read_notes');
+  });
+
   it('post_note 스키마는 failure를 넣지 않는다', () => {
     const postNote = buildTools(project, { board: boardContext().board }).find((candidate) => candidate.name === 'post_note');
     const properties = (postNote?.input_schema as { properties?: Record<string, { enum?: string[] }> }).properties;

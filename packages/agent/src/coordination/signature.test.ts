@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { VerificationReport } from '../verify';
 import type { WorkflowCheck } from '../workflow';
-import { failureNotesFromReport, signatureFromCheck, signatureKey, signaturesFromReport } from './signature';
+import { failureNotesFromEvents, failureNotesFromReport, signatureFromCheck, signatureKey, signaturesFromReport } from './signature';
 
 function report(over: Partial<VerificationReport>): VerificationReport {
   return { ok: false, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], ...over };
@@ -73,5 +73,25 @@ describe('failureNotesFromReport', () => {
 
   it('실패가 없으면 빈 목록이다', () => {
     expect(failureNotesFromReport(report({}))).toEqual([]);
+  });
+});
+
+describe('failureNotesFromEvents', () => {
+  it('세션 기록의 검증 결과와 실패한 워크플로 확인만 서명으로 만든다', () => {
+    const notes = failureNotesFromEvents([
+      { type: 'log' },
+      { type: 'agent', event: { type: 'verify_result', report: report({ restarted: [{ service: 'api', ready: false, error: 'boom 42' }] }) } },
+      { type: 'agent', event: { type: 'workflow_check', check: { stage: 'test', name: 'web-lint', ok: false, attempts: 1, detail: 'eslint found 3 problems' } } },
+      // 통과한 확인도, 검증 결과가 아닌 이벤트도 서명이 되지 않는다
+      { type: 'agent', event: { type: 'workflow_check', check: { stage: 'review', name: 'review', ok: true, attempts: 1 } } },
+      { type: 'agent', event: { type: 'text' } },
+      // event가 없는 이벤트도 무시한다
+      { type: 'snapshot' },
+    ]);
+
+    expect(notes).toEqual([
+      { kind: 'failure', body: '[run api] boom N', refs: [] },
+      { kind: 'failure', body: '[test] eslint found N problems', refs: [] },
+    ]);
   });
 });

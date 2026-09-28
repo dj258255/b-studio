@@ -52,12 +52,19 @@ export interface BoardOptions {
   limits?: Partial<BoardLimits>;
   /** star·hierarchical에서 허브로 볼 레인 이름. 기본 'hub' */
   hub?: string;
+  /**
+   * 모델이 쓸 수 있는가. 기본 true. S2·S5처럼 레인이 읽기만 하는 전략에서는 false로 두어
+   * 모델의 post를 거부하고(도구 목록에도 post_note를 넣지 않는다) 실패 서명만 흐르게 한다.
+   */
+  modelWrites?: boolean;
   now?: () => Date;
   /** 메모가 추가될 때마다 호출자가 저장하도록 넘긴다 */
   onChange?: (snapshot: Note[]) => void;
 }
 
 export class Board {
+  /** 모델이 쓸 수 있는가. 실행기가 도구 목록을 정할 때도 본다 */
+  readonly modelWrites: boolean;
   private readonly topology: Topology;
   private readonly limits: BoardLimits;
   private readonly hub: string;
@@ -72,6 +79,7 @@ export class Board {
     this.topology = options.topology;
     this.limits = { ...DEFAULT_BOARD_LIMITS, ...options.limits };
     this.hub = options.hub ?? 'hub';
+    this.modelWrites = options.modelWrites ?? true;
     this.now = options.now ?? (() => new Date());
     this.onChange = options.onChange;
   }
@@ -151,6 +159,7 @@ export class Board {
   }
 
   private validate(input: PostInput, as: Author): string | undefined {
+    if (!this.modelWrites && as.by === 'model') return '이 전략에서는 게시판에 쓸 수 없습니다';
     if (input.kind === 'failure' && as.by === 'model') return '실패 메모는 검증기만 씁니다';
     if (input.body.trim().length === 0) return '빈 메모는 쓸 수 없습니다';
     if (noteBytes(input.body) > this.limits.noteBytes) return `메모가 너무 큽니다(최대 ${this.limits.noteBytes}바이트)`;

@@ -26,6 +26,7 @@ import { redact } from './redact';
 import { summarize, type BenchLaneRow, type BenchRow } from './summary';
 import { BENCH_TASKS, planFor, type BenchTask, type Strategy } from './tasks';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
+import type { Topology } from '@b-studio/agent';
 import type { StudioEvent } from '../../lib/studio-events';
 import type { TaskPlanView } from '../../lib/task-plan-types';
 
@@ -50,6 +51,14 @@ interface Args {
   model?: string;
   onRateLimit?: string;
   rateLimitWaitMinutes?: number;
+  topology?: string;
+}
+
+/** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
+function parseTopology(value: string | undefined): Topology {
+  if (value === undefined) return 'mesh';
+  if (value === 'star' || value === 'hierarchical' || value === 'mesh') return value;
+  throw new Error(`전략 topology는 star, hierarchical, mesh 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
 function parseArgs(argv: string[]): Args {
@@ -66,6 +75,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--model') args.model = next(argv, index++, '--model');
     else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
     else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
+    else if (arg === '--topology') args.topology = next(argv, index++, '--topology');
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -74,6 +84,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--model=')) args.model = arg.slice('--model='.length);
     else if (arg.startsWith('--on-rate-limit=')) args.onRateLimit = arg.slice('--on-rate-limit='.length);
     else if (arg.startsWith('--rate-limit-wait-minutes=')) args.rateLimitWaitMinutes = Number(arg.slice('--rate-limit-wait-minutes='.length));
+    else if (arg.startsWith('--topology=')) args.topology = arg.slice('--topology='.length);
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;
@@ -100,9 +111,11 @@ function selectTasks(taskIds: string[] | undefined, dry: boolean): BenchTask[] {
 }
 
 function selectStrategies(strategies: Strategy[] | undefined, dry: boolean): Strategy[] {
+  // --dry의 가짜 제공자는 S2~S5의 조율을 모른다. 기준선 S0·S1만 돈다
   const values: Strategy[] | undefined = dry ? ['S0', 'S1'] : strategies;
   if (!values || values.length === 0) return ['S0', 'S1'];
-  for (const value of values) if (value !== 'S0' && value !== 'S1') throw new Error(`전략은 S0 또는 S1이어야 합니다: ${value}`);
+  const all: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
+  for (const value of values) if (!all.includes(value)) throw new Error(`전략은 ${all.join(', ')} 중 하나여야 합니다: ${value}`);
   return [...new Set(values)];
 }
 
@@ -172,12 +185,14 @@ interface RunContext {
   priceOutput: number;
   requestedModel: string;
   planModelId: string;
+  /** S3의 읽기 범위. 다른 전략에는 영향이 없다 */
+  topology: Topology;
 }
 
 async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
   const startedAt = new Date().toISOString();
   const { taskPlans, sessions, localUser } = context;
-  const planJson = planFor(task, strategy);
+  const planJson = planFor(task, strategy, context.topology);
   let plan: TaskPlanView = { id: '', owner: localUser, projectId: PROJECT_ID, request: '', modelId: context.planModelId, status: 'failed', createdAt: startedAt, lanes: [] };
   let planId: string | undefined;
   let acceptance: AcceptanceResult[] | undefined;
@@ -192,6 +207,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       modelId: context.planModelId,
       owner: localUser,
       ...(context.backend === 'claude-code' ? { presetPlan: planJson } : {}),
+      // S2~S5의 조율 설정은 서버 안에서만 넘긴다. S0·S1은 없다
+      ...(planJson.coordination ? { coordination: planJson.coordination } : {}),
     });
     planId = created.id;
     plan = await waitForPlan(taskPlans, created.id, localUser, ['awaiting_approval', 'failed'], APPROVAL_TIMEOUT_MS, '계획이 승인 대기에 이르지 않았습니다', activeSessions);
@@ -321,6 +338,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     explore,
     failures,
     metrics,
+    coordination: plan.metrics?.coordination,
     acceptance,
     success,
     category: classification.category,
@@ -408,6 +426,7 @@ async function main(): Promise<void> {
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error(`--repeats는 1 이상의 정수여야 합니다 (지금 값: ${args.repeats})`);
   const tasks = selectTasks(args.taskIds, dry);
   const strategies = selectStrategies(args.strategies, dry);
+  const topology = parseTopology(args.topology);
 
   // 1. 사전 확인 — 다른 프로젝트 컨테이너가 있으면 여기서 멈춘다
   const dockerMemTotal = preflight(args.force);
@@ -524,6 +543,7 @@ async function main(): Promise<void> {
       priceOutput,
       requestedModel,
       planModelId: planModelId(backend, requestedModel, MODEL_ID),
+      topology,
     };
 
     // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
@@ -589,6 +609,7 @@ async function main(): Promise<void> {
           gitCommit: gitCommit(),
           tasks: tasks.map((task) => task.id),
           strategies,
+          topology,
           repeats,
           runs: rows.length,
           onRateLimit: rateLimit.policy,

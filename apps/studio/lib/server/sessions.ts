@@ -34,6 +34,7 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
+  type BoardAccess,
   type Checkpoint,
   type DatabaseState,
   type DemoScenario,
@@ -451,6 +452,7 @@ export function sendMessage(
     intent = 'build',
     writableScope,
     scriptedTurns,
+    board,
   }: {
     allowBreaking: boolean;
     by?: string;
@@ -459,6 +461,8 @@ export function sendMessage(
     writableScope?: readonly string[];
     /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
     scriptedTurns?: ScriptedTurn[];
+    /** 서버 안에서만 쓴다(레인 조율). 레인 신원으로 감싼 게시판. HTTP로는 받지 않는다 */
+    board?: BoardAccess;
   },
 ): { runId: string } {
   const session = requireSession(id);
@@ -481,7 +485,11 @@ export function sendMessage(
     );
   }
 
-  const plan = { ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)), writableScope };
+  const plan = {
+    ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)),
+    writableScope,
+    board,
+  };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
     cancel: new AbortController(),
@@ -789,7 +797,7 @@ type Intent = 'build' | 'ask';
 type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[] };
+) & { writableScope?: readonly string[]; board?: BoardAccess };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
@@ -982,6 +990,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     intent: plan.intent,
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
+    // 레인 조율 게시판. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음)
+    board: plan.board,
     signal,
     onEvent: (event: AgentEvent) => {
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });

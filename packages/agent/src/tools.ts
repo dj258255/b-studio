@@ -23,6 +23,8 @@ export interface BoardAccess {
   read(options: { kinds?: readonly NoteKind[] }): { notes: Note[]; truncated: boolean; reason?: string };
   lane: string;
   task?: string;
+  /** false면 모델은 읽기만 한다(기본 true). buildTools가 post_note를 목록에서 뺀다 */
+  modelWrites?: boolean;
 }
 
 export interface ToolBuildOptions {
@@ -150,7 +152,8 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
   // 허용 도구 목록이 있는 프로젝트에서 그 목록에 없으면 넣지 않아, 모델이 막힐 도구를 보지 않게 한다.
   if (options.board) {
     const isAllowed = (name: string) => !options.allowedTools || options.allowedTools.includes(name);
-    if (isAllowed('post_note')) {
+    // S2·S5처럼 읽기만 하는 전략(board.modelWrites === false)에서는 post_note를 넣지 않는다
+    if (isAllowed('post_note') && options.board.modelWrites !== false) {
       tools.push(
         tool(
           'post_note',

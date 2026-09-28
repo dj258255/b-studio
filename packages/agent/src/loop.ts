@@ -4,7 +4,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool, type ToolContext } from './tools';
+import { buildTools, executeTool, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
@@ -129,6 +129,8 @@ export interface RunAgentOptions {
   policy?: ExecutionPolicy;
   approvalToken?: string;
   requestApproval?: ToolContext['requestApproval'];
+  /** 레인 조율 게시판. 주면 read_notes·(모델이 쓰는 전략이면) post_note 도구가 목록에 오른다 */
+  board?: BoardAccess;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -191,8 +193,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         onEvent,
       });
   const system = buildSystemPrompt(project) + workflowContext(project);
-  const tools = buildTools(project);
   const policy = options.policy ?? executionPolicyFor(project);
+  const tools = buildTools(project, options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {});
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
@@ -262,6 +264,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           policy,
           approvalToken: options.approvalToken,
           requestApproval: options.requestApproval,
+          board: options.board,
           onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
         });
         metrics.toolMs += Math.round(performance.now() - toolStarted);

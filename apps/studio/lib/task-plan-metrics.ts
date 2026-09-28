@@ -1,5 +1,5 @@
-import type { AgentUsage } from '@b-studio/agent';
-import type { TaskPlanView } from './task-plan-types';
+import type { AgentUsage, BoardStats, Topology } from '@b-studio/agent';
+import type { TaskPlanStrategy, TaskPlanView } from './task-plan-types';
 
 /**
  * 작업 계획 전체의 실행 지표. 전략을 비교하려면 실행마다 "모델을 몇 번 불렀고,
@@ -29,10 +29,19 @@ export interface TaskPlanMetrics {
   integrationMs?: number;
   /** 만든 세션 수 (sessionId가 있는 레인 + 통합) */
   sessions: number;
+  /** 조율(S2~S5)을 켠 계획의 게시판 지표. 켜지 않았으면 없다 */
+  coordination?: TaskPlanCoordinationMetrics;
 }
+
+/** 게시판 통계와 전략·topology. 게시·읽기의 양을 벤치에서 전략별로 비교한다 */
+export type TaskPlanCoordinationMetrics = { strategy: TaskPlanStrategy; topology: Topology } & BoardStats;
 
 function emptyUsage(): AgentUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+}
+
+function emptyBoardStats(): BoardStats {
+  return { posts: 0, rejected: 0, reads: 0, bytesRead: 0, byKind: { contract: 0, failure: 0, fact: 0 } };
 }
 
 /** 계획 호출 한 번이 모델에 보낸 입력 크기. input_tokens는 캐시 분을 빼고 세므로 캐시를 더한다 */
@@ -81,6 +90,8 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   for (const lane of plan.lanes) for (const task of lane.tasks) addRun(task.run);
   // 통합은 모델 없이 레인 결과를 다시 적용하는 스크립트 턴이라 모델 호출로 세지 않는다
   addRun(plan.integration?.run, false);
+  // S4의 수리 요청은 스크립트 턴과 달리 실제 모델 호출이므로 호출 수·토큰 합계에 넣는다
+  addRun(plan.integration?.repair?.run, true);
 
   const boots = [...plan.lanes.map((lane) => lane.bootMs ?? 0), plan.integration?.bootMs ?? 0];
   const bootMsTotal = boots.reduce((sum, value) => sum + value, 0);
@@ -103,5 +114,6 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     gateMs,
     integrationMs: plan.integration?.run?.durationMs,
     sessions,
+    ...(plan.coordination ? { coordination: { ...plan.coordination, ...(plan.board?.stats ?? emptyBoardStats()) } } : {}),
   };
 }

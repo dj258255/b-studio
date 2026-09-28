@@ -15,7 +15,7 @@ import type { Effort } from './anthropic-client';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool, type ToolContext } from './tools';
+import { buildTools, executeTool, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -109,9 +109,10 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
+    board: options.board,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
   };
-  const specs = buildTools(project);
+  const specs = buildTools(project, options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {});
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다

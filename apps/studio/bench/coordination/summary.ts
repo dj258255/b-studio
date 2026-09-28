@@ -3,7 +3,7 @@
  *
  * 반복이 적어 비율을 쓰지 않고 건수로 적는다. 중앙값은 값이 있는 실행만으로 계산하고, 값이 하나도 없으면 '—'로 둔다.
  */
-import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
+import type { TaskPlanCoordinationMetrics, TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanRunMetricsView } from '../../lib/task-plan-types';
 import type { AcceptanceResult } from './acceptance';
 import type { FailureCategory } from './classify';
@@ -62,6 +62,8 @@ export interface BenchRow {
   /** 검증기가 낸 실패 서명 합계 */
   failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
   metrics?: TaskPlanMetrics;
+  /** S2~S5의 게시판 지표. 공유 없음(S0·S1)이면 없다 */
+  coordination?: TaskPlanCoordinationMetrics;
   acceptance?: AcceptanceResult[];
   success: boolean;
   category: FailureCategory;
@@ -103,6 +105,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '읽은 파일 수 중앙값',
     '실패 서명 중앙값',
     '반복 실패 중앙값',
+    '게시·읽기 바이트 중앙값',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -136,6 +139,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         count(medianValue(group, (row) => withLaneSessions(row, row.failures.signaturesTotal))),
         '|',
         count(medianValue(group, (row) => withLaneSessions(row, row.failures.repeatedFailures))),
+        '|',
+        count(medianValue(group, (row) => row.coordination?.bytesRead)),
         '|',
       ].join(' '),
     );

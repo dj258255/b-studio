@@ -78,7 +78,31 @@ export interface FailureNoteInput {
 /** 검증 보고서와 워크플로 확인에서 failure 메모 입력을 만든다. 실패 서명만 넘긴다 */
 export function failureNotesFromReport(report: VerificationReport, checks: readonly WorkflowCheck[] = []): FailureNoteInput[] {
   const signatures = [...signaturesFromReport(report), ...checks.filter((check) => !check.ok).map(signatureFromCheck)];
-  return signatures.map((signature) => ({ kind: 'failure', body: formatSignature(signature), refs: signature.files ? [...signature.files] : [] }));
+  return signatures.map(toNoteInput);
+}
+
+/**
+ * 세션 기록에서 failure 메모 입력을 만든다(S5). StudioEvent 전체에 의존하지 않도록
+ * 필요한 부분만 구조적으로 받는다 — 검증 결과와 실패한 워크플로 확인만 본다.
+ */
+export interface FailureEvent {
+  type: string;
+  event?: { type: string; report?: VerificationReport; check?: WorkflowCheck };
+}
+
+export function failureNotesFromEvents(events: readonly FailureEvent[]): FailureNoteInput[] {
+  const signatures: FailureSignature[] = [];
+  for (const event of events) {
+    const agent = event.event;
+    if (!agent) continue;
+    if (agent.type === 'verify_result' && agent.report) signatures.push(...signaturesFromReport(agent.report));
+    else if (agent.type === 'workflow_check' && agent.check && !agent.check.ok) signatures.push(signatureFromCheck(agent.check));
+  }
+  return signatures.map(toNoteInput);
+}
+
+function toNoteInput(signature: FailureSignature): FailureNoteInput {
+  return { kind: 'failure', body: formatSignature(signature), refs: signature.files ? [...signature.files] : [] };
 }
 
 function formatSignature(signature: FailureSignature): string {
