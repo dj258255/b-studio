@@ -331,4 +331,61 @@ describe('runAgent', () => {
     });
     expect(result).toMatchObject({ status: 'failed', summary: '모델이 요청을 거절했습니다 (scripted)' });
   });
+
+  it('ask_user가 질문을 남기면 도구 결과를 넣고 실행을 끝내 답을 기다린다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    const conversation: NonNullable<RunAgentOptions['conversation']> = [];
+
+    const result = await runAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client,
+      conversation,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', changedFiles: [], verifyAttempts: 0, turns: 1 });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(events.find((event) => event.type === 'question')).toMatchObject({ options: ['표', '카드'], allowOther: true });
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    // 도구 결과가 대화에 남아 다음 요청이 맥락을 그대로 잇는다
+    expect(conversation).toHaveLength(3);
+  });
+
+  it('질문 전에 파일을 바꿨으면 게이트를 돌리고, interactive가 아니면 ask_user가 도구 목록에 없다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }] },
+      { toolCalls: [{ name: 'ask_user', input: { question: '계속할까요?', options: ['예', '아니오'], allowOther: false } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      request: '새 클래스 추가',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      client,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '계속할까요?', changedFiles: ['api/src/New.java'] });
+    expect(result.report?.ok).toBe(true);
+    expect(events.some((event) => event.type === 'verify_start')).toBe(true);
+
+    // interactive를 넘기지 않으면(레인·벤치·CLI) 도구 목록이 지금과 같다
+    const plain = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: plain, fetcher: async () => contract });
+    expect(plain.requests[0]!.tools.map((tool) => tool.name)).not.toContain('ask_user');
+
+    const withAsk = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: withAsk, interactive: true, fetcher: async () => contract });
+    expect(withAsk.requests[0]!.tools.map((tool) => tool.name)).toContain('ask_user');
+  });
 });

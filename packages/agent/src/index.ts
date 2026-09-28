@@ -92,7 +92,7 @@ export {
   type PullRequestResult,
   type RemoteLocation,
 } from './repository';
-export { buildTools, executeTool } from './tools';
+export { buildTools, executeTool, type AskUserQuestion, type ToolBuildOptions } from './tools';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   DEFAULT_WORKFLOW,

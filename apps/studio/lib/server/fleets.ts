@@ -244,7 +244,8 @@ function root(): string {
 }
 
 function terminal(status: FleetMemberView['status']): boolean {
-  return status === 'done' || status === 'failed' || status === 'error' || status === 'cancelled';
+  // awaiting_input은 플릿 실행에서 오지 않는다(되묻기를 켜지 않는다). 와도 사람이 답할 수 없으니 끝난 것으로 본다
+  return status === 'done' || status === 'failed' || status === 'error' || status === 'cancelled' || status === 'awaiting_input';
 }
 
 function clone(fleet: FleetView): FleetView {

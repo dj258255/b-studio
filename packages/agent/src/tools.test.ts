@@ -108,6 +108,45 @@ describe('디자인 도구', () => {
   });
 });
 
+describe('되묻기 도구(ask_user)', () => {
+  it('interactive를 넘길 때만 도구 목록에 넣고, 없으면 목록이 그대로다', () => {
+    expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('ask_user');
+    expect(buildTools(project, { interactive: true }).map((candidate) => candidate.name)).toContain('ask_user');
+  });
+
+  it('질문과 선택지를 좁게 검증하고, 통과하면 onQuestion으로 넘긴다', async () => {
+    const asked: Array<{ question: string; options: string[]; allowOther: boolean }> = [];
+    const askContext: ToolContext = { ...context, onQuestion: (question) => asked.push(question) };
+
+    const outcome = await executeTool('ask_user', { question: '어떤 형태로 만들까요?', options: ['표', '카드 목록'], allowOther: true }, askContext);
+    expect(outcome.ok).toBe(true);
+    expect(outcome.content).toContain('End this run');
+    expect(asked).toEqual([{ question: '어떤 형태로 만들까요?', options: ['표', '카드 목록'], allowOther: true }]);
+  });
+
+  it('질문 길이·선택지 개수·길이·중복을 거부한다', async () => {
+    let asked = 0;
+    const askContext: ToolContext = { ...context, onQuestion: () => (asked += 1) };
+    const invalid = [
+      { question: '', options: ['a', 'b'], allowOther: false },
+      { question: 'q', options: ['a'], allowOther: false },
+      { question: 'q', options: ['a', 'b', 'c', 'd', 'e'], allowOther: false },
+      { question: 'q', options: ['a', 'a'], allowOther: false },
+      { question: 'q'.repeat(301), options: ['a', 'b'], allowOther: false },
+      { question: 'q', options: ['a'.repeat(81), 'b'], allowOther: false },
+      { question: 'q', options: ['a', 'b'], allowOther: 'yes' },
+    ];
+    for (const input of invalid) expect((await executeTool('ask_user', input, askContext)).ok).toBe(false);
+    expect(asked).toBe(0);
+  });
+
+  it('onQuestion이 없는 실행에서는 거부한다', async () => {
+    const outcome = await executeTool('ask_user', { question: 'q', options: ['a', 'b'], allowOther: false }, context);
+    expect(outcome).toMatchObject({ ok: false });
+    expect(outcome.content).toContain('cannot ask the user');
+  });
+});
+
 describe('실행 정책', () => {
   it('샌드박스 실행 전에 위험 명령을 차단하고 실행하지 않는다', async () => {
     let called = false;

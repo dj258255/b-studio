@@ -322,4 +322,29 @@ describe('runCodexAgent', () => {
     expect(entries).toEqual([]);
     await expect(stat(tempHome)).rejects.toThrow();
   });
+
+  it('ask_user가 질문을 남기면 그 턴이 끝날 때 멈추고 awaiting_input으로 끝낸다', async () => {
+    const { sdk } = fakeCodex([
+      { steps: [{ tool: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: false } }], usage: usage(50) },
+    ]);
+    const sandbox = fakeSandbox(project, []);
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox,
+      sdk,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', turns: 1 });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: false });
+    expect(events.find((event) => event.type === 'question')).toBeTruthy();
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    expect(sandbox.restarts).toEqual([]);
+  });
 });

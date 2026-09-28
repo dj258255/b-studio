@@ -13,6 +13,27 @@ type BetaTool = Anthropic.Beta.BetaTool;
 const MAX_OUTPUT_CHARS = 30_000;
 const COMMAND_TIMEOUT_MS = 180_000;
 const HTTP_TIMEOUT_MS = 30_000;
+/** ask_user: 질문 문장 길이와 선택지 개수·길이 상한. 좁게 잡아 화면 카드가 깨지지 않게 한다 */
+const ASK_QUESTION_MAX = 300;
+const ASK_OPTION_MAX = 80;
+const ASK_OPTIONS_MIN = 2;
+const ASK_OPTIONS_MAX = 4;
+
+/** ask_user 도구가 남기는 질문. 러너는 이걸 보고 실행을 끝내 사용자 답을 다음 요청으로 받는다 */
+export interface AskUserQuestion {
+  question: string;
+  options: string[];
+  /** 직접 입력도 허용하는지 */
+  allowOther: boolean;
+}
+
+/** buildTools 옵션. interactive가 아니면(레인·벤치·CLI) 도구 목록이 지금과 같다 */
+export interface ToolBuildOptions {
+  /** 세션이 Figma 디자인을 설정했을 때 디자인 도구를 더한다 */
+  design?: boolean;
+  /** 단일 세션의 사용자 요청일 때만 ask_user를 더한다 */
+  interactive?: boolean;
+}
 
 export interface ToolContext {
   project: LoadedProject;
@@ -26,6 +47,8 @@ export interface ToolContext {
   readOnly?: boolean;
   /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘어온다. 없으면 디자인 도구가 목록에 없다 */
   design?: DesignSource;
+  /** ask_user가 남긴 질문. 러너가 이걸 받으면 실행을 끝내고 사용자 답을 기다린다. 없으면 ask_user가 목록에 없다 */
+  onQuestion?: (question: AskUserQuestion) => void;
   /** 모델이 호출한 도구를 실행기에서 먼저 검사한다 */
   policy?: ExecutionPolicy;
   /** 승인 흐름에서 발급한 일회성 토큰. 토큰 값은 로그에 기록하지 않는다 */
@@ -53,9 +76,10 @@ export interface ToolOutcome {
  *  - 파일 쓰기는 작업 공간 규칙(경로 제한, 덮어쓰기 충돌)을 강제해야 한다
  *  - 바뀐 파일을 기록해야 검증 게이트가 재시작할 서비스를 고를 수 있다
  * strict 모드는 선택 필드가 없는 스키마에서 가장 안전하므로 모든 필드를 필수로 둔다.
- * design을 넘기면(세션이 Figma 디자인을 설정했을 때) 디자인 도구를 더하고, 아니면 목록이 지금과 같다
+ * design을 넘기면(세션이 Figma 디자인을 설정했을 때) 디자인 도구를 더하고, 아니면 목록이 지금과 같다.
+ * interactive를 넘기면(단일 세션의 사용자 요청일 때) ask_user를 더한다. 레인·벤치·CLI는 넘기지 않아 목록이 그대로다
  */
-export function buildTools(project: LoadedProject, options: { design?: boolean } = {}): BetaTool[] {
+export function buildTools(project: LoadedProject, options: ToolBuildOptions = {}): BetaTool[] {
   const services = project.managed.map(([name]) => name);
   const contractServices = project.managed.filter(([, service]) => service.contract).map(([name]) => name);
   const service = { type: 'string', enum: services, description: 'Managed service name' };
@@ -133,6 +157,20 @@ export function buildTools(project: LoadedProject, options: { design?: boolean }
         'design_frame',
         'Summarize a Figma frame: structure, auto layout, colors, corner radius, and text styles. Saves the frame PNG as an artifact and returns only its reference path; the image itself is not sent to the model.',
         { id: { type: 'string', description: 'Frame id from design_frames.' } },
+      ),
+    );
+  }
+
+  if (options.interactive) {
+    tools.push(
+      tool(
+        'ask_user',
+        'Ask the user to choose before building, only when the request is ambiguous and the result would change a lot. Ask once, before making changes. Do not ask when a reasonable guess is enough. Calling this ends the run; the user answers with a follow-up request that continues this conversation.',
+        {
+          question: { type: 'string', description: `One short question (max ${ASK_QUESTION_MAX} characters).` },
+          options: { type: 'array', items: { type: 'string' }, description: `Two to four short choices (each max ${ASK_OPTION_MAX} characters).` },
+          allowOther: { type: 'boolean', description: 'true to also let the user type a free-form answer.' },
+        },
       ),
     );
   }
@@ -264,6 +302,18 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
         const artifact = await context.design.saveArtifact(`design ${id}`, frame.png);
         return success(`${frame.summary}\n\nframe PNG saved as artifact: ${artifact} (the image is not sent to the model)`);
       }
+      case 'ask_user': {
+        if (!context.onQuestion) return failure('This run cannot ask the user a question.');
+        const question = string(args, 'question').trim();
+        if (question.length === 0 || question.length > ASK_QUESTION_MAX) return failure(`"question" must be 1-${ASK_QUESTION_MAX} characters`);
+        const options = stringArray(args, 'options').map((option) => option.trim());
+        if (options.length < ASK_OPTIONS_MIN || options.length > ASK_OPTIONS_MAX) return failure(`"options" must have ${ASK_OPTIONS_MIN}-${ASK_OPTIONS_MAX} choices`);
+        if (options.some((option) => option.length === 0 || option.length > ASK_OPTION_MAX)) return failure(`each option must be 1-${ASK_OPTION_MAX} characters`);
+        if (new Set(options).size !== options.length) return failure('"options" must not repeat a choice');
+        context.onQuestion({ question, options, allowOther: boolean(args, 'allowOther') });
+        // 이 결과를 받은 모델이 곧바로 멈추도록, 도구가 끝났다는 사실과 멈추라는 지시를 함께 돌려준다
+        return success('Question sent to the user. End this run now and wait for their answer; do not call any more tools.');
+      }
       default:
         return failure(`Unknown tool: ${name}`);
     }
@@ -340,6 +390,12 @@ function string(args: Record<string, unknown>, key: string): string {
 function integer(args: Record<string, unknown>, key: string): number {
   const value = args[key];
   if (typeof value !== 'number' || !Number.isInteger(value)) throw new ToolInputError(`"${key}" must be an integer`);
+  return value;
+}
+
+function boolean(args: Record<string, unknown>, key: string): boolean {
+  const value = args[key];
+  if (typeof value !== 'boolean') throw new ToolInputError(`"${key}" must be a boolean`);
   return value;
 }
 

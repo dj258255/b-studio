@@ -256,6 +256,39 @@ describe('runClaudeCodeAgent', () => {
     ).rejects.toThrow('스크립트에 남은 턴이 없습니다');
     expect(state.closed).toBe(true);
   });
+
+  it('ask_user가 질문을 남기면 쿼리를 중단하고 awaiting_input으로 끝내 세션 id를 남긴다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [[{ tool: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true } }]],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', sessionId: 'new-session' });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(events.find((event) => event.type === 'question')).toMatchObject({ allowOther: true });
+    // 되묻기 도구는 interactive일 때만 허용 목록에 들어간다
+    expect(state.options?.allowedTools).toContain('mcp__b-studio__ask_user');
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+  });
+
+  it('interactive가 아니면 허용 목록에 ask_user가 없다(레인·벤치·CLI)', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '주문 API입니다.' }]] });
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('done');
+    expect(state.options?.allowedTools).not.toContain('mcp__b-studio__ask_user');
+  });
 });
 
 describe('preflightClaudeCode', () => {
@@ -287,5 +320,10 @@ describe('zodShape', () => {
     expect(tools.run_in_service!.safeParse({ service: 'db', command: ['psql'] }).success).toBe(false);
     expect(tools.service_logs!.safeParse({ service: 'api', lines: 1.5 }).success).toBe(false);
     expect(tools.http_request!.safeParse({ service: 'api', method: 'TRACE', path: '/', body: '' }).success).toBe(false);
+
+    // ask_user의 boolean 필드도 zod 형태로 옮긴다
+    const interactive = Object.fromEntries(buildTools(project, { interactive: true }).map((tool) => [tool.name, z.object(zodShape(tool.input_schema))]));
+    expect(interactive.ask_user!.safeParse({ question: 'q', options: ['a', 'b'], allowOther: true }).success).toBe(true);
+    expect(interactive.ask_user!.safeParse({ question: 'q', options: ['a', 'b'], allowOther: 'yes' }).success).toBe(false);
   });
 });
