@@ -47,9 +47,9 @@ export async function createTaskPlan(input: {
   const preset = input.presetPlan;
   if (preset === undefined) {
     if (mode !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
-  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'commandcode') {
-    // 고정 계획은 모델을 부르지 않으므로 claude-code·commandcode 모드에서도 쓴다. demo는 지금처럼 거부한다
-    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code 또는 commandcode에서만 사용할 수 있습니다');
+  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode') {
+    // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode 모드에서도 쓴다. demo는 지금처럼 거부한다
+    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex 또는 commandcode에서만 사용할 수 있습니다');
   }
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');

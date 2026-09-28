@@ -82,6 +82,24 @@ describe('실패 원인 분류', () => {
     expect(creditResult.detail).toContain('크레딧이 부족');
   });
 
+  it('Codex의 사용 한도 문구도 rate_limited로 본다', () => {
+    // 0단계에서 확인한 Codex CLI의 실제 문구
+    const laneFailed = plan({
+      status: 'failed',
+      approvedAt: 'x',
+      lanes: [
+        lane({
+          status: 'failed',
+          error:
+            "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits",
+        }),
+      ],
+    });
+    const result = classify(laneFailed, undefined);
+    expect(result.category).toBe('rate_limited');
+    expect(result.detail).toContain('hit your usage limit');
+  });
+
   it('경계 없는 숫자·단어는 한도로 보지 않는다', () => {
     // 하네스 오류지만 한도 신호가 아니다 → environment
     for (const text of ['1429ms 걸렸습니다', '4290 bytes', 'unlimited']) {

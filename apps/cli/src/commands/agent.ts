@@ -4,9 +4,11 @@ import {
   describeAccount,
   listCommandCodeModels,
   preflightClaudeCode,
+  preflightCodex,
   preflightCommandCode,
   runAgent,
   runClaudeCodeAgent,
+  runCodexAgent,
   runCommandCodeAgent,
   type AgentEvent,
   type AgentUsage,
@@ -17,10 +19,10 @@ import type { LoadedProject } from '@b-studio/spec';
 import { runSandboxSession } from '../session';
 import { print, type Label } from '../ui';
 
-export type Backend = 'api' | 'claude-code' | 'commandcode';
+export type Backend = 'api' | 'claude-code' | 'codex' | 'commandcode';
 
 /** `--backend`로 고를 수 있는 실행 방식 */
-export const BACKENDS: readonly Backend[] = ['api', 'claude-code', 'commandcode'];
+export const BACKENDS: readonly Backend[] = ['api', 'claude-code', 'codex', 'commandcode'];
 
 export interface AgentCommandOptions {
   keep: boolean;
@@ -36,6 +38,7 @@ export interface AgentCommandOptions {
 /** 샌드박스를 띄우고 요청을 에이전트에게 맡긴다. 검증 게이트를 통과해야 종료 코드 0 */
 export async function agent(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
   if (options.backend === 'claude-code') return withClaudeCode(project, request, options);
+  if (options.backend === 'codex') return withCodex(project, request, options);
   if (options.backend === 'commandcode') return withCommandCode(project, request, options);
   return withApi(project, request, options);
 }
@@ -87,6 +90,33 @@ async function withClaudeCode(project: LoadedProject, request: string, options: 
       model: options.model,
       effort: options.effort,
       account: preflight.account,
+      allowBreaking: options.allowBreaking,
+      signal,
+      onEvent: printAgentEvent(label),
+    });
+    return result.status === 'done' ? 0 : 1;
+  });
+}
+
+/**
+ * 이 PC의 Codex CLI에 ChatGPT로 로그인한 계정으로 실행한다.
+ * 한 번 실행이라 이어받을 대화가 없다. 스튜디오 모드와 달리 이전 요청 맥락도 넘기지 않는다.
+ */
+async function withCodex(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
+  const preflight = await preflightCodex();
+  if (!preflight.ok) {
+    console.error(preflight.reason);
+    return 2;
+  }
+
+  return runSandboxSession(project, { keep: options.keep, followLogs: options.logs }, async ({ sandbox, signal, label }) => {
+    print(label('studio'), `에이전트 시작: 로컬 ChatGPT Agent${options.model ? ` (${options.model})` : ' (계정 기본 모델)'}`);
+    const result = await runCodexAgent({
+      request,
+      project,
+      sandbox,
+      model: options.model,
+      effort: options.effort,
       allowBreaking: options.allowBreaking,
       signal,
       onEvent: printAgentEvent(label),

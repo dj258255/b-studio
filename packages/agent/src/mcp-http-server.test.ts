@@ -66,14 +66,23 @@ describe('startToolServer', () => {
 
     await expect(connect(server, null)).rejects.toThrow();
     await expect(connect(server, 'Bearer 다른토큰')).rejects.toThrow();
+    // 길이가 같고 값만 다른 토큰도 거부한다(값 비교는 시간이 달라지지 않게 한다)
+    await expect(connect(server, `Bearer ${'a'.repeat(server.token.length)}`)).rejects.toThrow();
     // 맞는 토큰이면 붙는다
     await expect(connect(server)).resolves.toBeDefined();
   });
 
-  it('루프백이 아닌 Host 헤더는 거부한다', async () => {
+  it('루프백이 아닌 Host 헤더는 거부하고, IPv6 루프백 표기는 허용한다', async () => {
     const server = await start(async () => ({ ok: true, content: 'ok' }));
-    const status = await rawPost(server, { host: 'evil.example', authorization: `Bearer ${server.token}` });
-    expect(status).toBe(403);
+    const authorization = `Bearer ${server.token}`;
+    const port = new URL(server.url).port;
+
+    expect(await rawPost(server, { host: 'evil.com', authorization })).toBe(403);
+    expect(await rawPost(server, { host: 'evil.com:80', authorization })).toBe(403);
+    // 같은 요청이 대괄호로 감싼 IPv6 루프백 주소로는 통과한다
+    expect(await rawPost(server, { host: `[::1]:${port}`, authorization })).toBe(200);
+    expect(await rawPost(server, { host: `127.0.0.1:${port}`, authorization })).toBe(200);
+    expect(await rawPost(server, { host: `localhost:${port}`, authorization })).toBe(200);
   });
 
   it('close() 뒤에는 연결할 수 없다', async () => {
@@ -90,7 +99,13 @@ function rawPost(server: ToolServer, headers: Record<string, string>): Promise<n
   return new Promise((resolve, reject) => {
     const url = new URL(server.url);
     const req = httpRequest(
-      { hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'content-type': 'application/json', ...headers } },
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+      },
       (res) => {
         res.resume();
         resolve(res.statusCode ?? 0);

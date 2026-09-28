@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -95,10 +95,36 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Requir
 
 /** 통과하면 undefined, 막으면 응답할 상태와 이유 */
 function authorize(host: string | undefined, authorization: string | undefined, token: string): { status: number; message: string } | undefined {
-  const hostname = (host ?? '').split(':')[0]!.replace(/^\[|\]$/g, '');
-  if (!LOOPBACK_HOSTS.has(hostname)) return { status: 403, message: 'MCP 서버는 루프백에서만 접근할 수 있습니다' };
-  if (authorization !== `Bearer ${token}`) return { status: 401, message: 'unauthorized' };
+  if (!LOOPBACK_HOSTS.has(hostnameOf(host))) return { status: 403, message: 'MCP 서버는 루프백에서만 접근할 수 있습니다' };
+  if (!tokenMatches(authorization, token)) return { status: 401, message: 'unauthorized' };
   return undefined;
+}
+
+/**
+ * Host 헤더에서 호스트 이름만 꺼낸다. `[::1]:1234` → `::1`, `127.0.0.1:1234` → `127.0.0.1`, `localhost` → `localhost`.
+ * IPv6는 대괄호로 감싸므로 대괄호가 있으면 그 안을 쓰고, 없으면 마지막 콜론 뒤만 포트로 본다.
+ */
+function hostnameOf(host: string | undefined): string {
+  const value = (host ?? '').trim();
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    return end === -1 ? '' : value.slice(1, end);
+  }
+  const colon = value.indexOf(':');
+  // 콜론이 둘 이상이면 포트 없는 IPv6 주소다
+  return colon === -1 || value.includes(':', colon + 1) ? value : value.slice(0, colon);
+}
+
+/**
+ * bearer 토큰을 값의 위치에 따라 시간이 달라지지 않게 비교한다.
+ * 길이가 다르면 timingSafeEqual이 예외를 던지므로 먼저 거부한다(토큰 길이는 비밀이 아니다).
+ */
+function tokenMatches(authorization: string | undefined, token: string): boolean {
+  const prefix = 'Bearer ';
+  if (!authorization?.startsWith(prefix)) return false;
+  const provided = Buffer.from(authorization.slice(prefix.length), 'utf8');
+  const expected = Buffer.from(token, 'utf8');
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 function listen(server: Server): Promise<void> {

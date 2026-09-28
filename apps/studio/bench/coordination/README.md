@@ -26,6 +26,9 @@ pnpm bench:coordination --backend openai
 # claude-code: 이 PC에 로그인된 구독 CLI (유료 API 없이 E1을 돌린다)
 pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list --strategies S0,S1 --repeats 1
 
+# codex: 이 PC에 ChatGPT로 로그인된 Codex CLI. --model을 생략하면 로그인 계정의 기본 모델을 쓴다
+pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 --repeats 1
+
 # commandcode: 이 PC에 로그인된 Command Code CLI. 무료 모델로 비용 없이 돌린다 (모델을 생략하면 계정 기본 모델)
 pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only --tasks orders-list --strategies S0,S1 --repeats 1
 
@@ -35,8 +38,8 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 인자:
 
-- `--backend claude-code|commandcode|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
-- `--model <이름>` — `claude-code`·`commandcode`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `commandcode`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CMD_MODEL`)
+- `--backend claude-code|codex|commandcode|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
+- `--model <이름>` — `claude-code`·`codex`·`commandcode`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `codex`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CODEX_MODEL`), `commandcode`도 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CMD_MODEL`)
 - `--free-only` — `commandcode`에서만. 무료가 아닌 `--model`이면 오류
 - `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)

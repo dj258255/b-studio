@@ -20,6 +20,8 @@ export interface PersistedSession {
   conversation: unknown[];
   demoIndex: number;
   claudeCode: { sessionId?: string; notes: string[] };
+  /** codex 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해 요약만 넘긴다. 이 필드가 생기기 전 기록에는 없다 */
+  codex?: { notes: string[]; recent: Array<{ request: string; summary: string; status: string }> };
   /** commandcode 모드의 이어받을 세션과 알림. 이 필드가 생기기 전 기록에는 없다 */
   commandCode?: { sessionId?: string; notes: string[] };
   sourceDirtyFiles: number;

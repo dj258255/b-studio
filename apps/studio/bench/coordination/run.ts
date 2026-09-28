@@ -7,12 +7,14 @@
  *
  * 백엔드(--backend, --dry가 아니면 필수):
  *   openai      유료 API. BENCH_UPSTREAM_* 환경 변수와 로컬 프록시를 쓴다. --dry는 이 백엔드의 가짜 상류다
- *   claude-code 본인 PC에 로그인된 구독 CLI. 프록시·상류를 띄우지 않고, 계획도 모델에게 받지 않는다(presetPlan)
+ *   claude-code 본인 PC에 로그인된 Claude 구독 CLI. 프록시·상류를 띄우지 않고, 계획도 모델에게 받지 않는다(presetPlan)
+ *   codex       본인 PC에 ChatGPT로 로그인된 Codex CLI. claude-code와 같지만 모델은 계정 기본값을 쓸 수 있다
  *   commandcode 본인 PC에 로그인된 Command Code CLI. claude-code와 같지만 모델을 고를 수 있고 무료 모델로 비용 없이 돌릴 수 있다
  *
  *   pnpm bench:coordination --dry
  *   BENCH_UPSTREAM_BASE_URL=... BENCH_UPSTREAM_API_KEY=... BENCH_UPSTREAM_MODEL=... pnpm bench:coordination --backend openai
  *   pnpm bench:coordination --backend claude-code --model sonnet
+ *   pnpm bench:coordination --backend codex
  *   pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only
  */
 import { spawnSync } from 'node:child_process';
@@ -198,14 +200,14 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   let harnessError: string | undefined;
 
   try {
-    // openai 백엔드는 프록시가 계획 요청에 이 JSON을 돌려준다. claude-code는 계획을 서버 안에서 넘긴다
+    // openai 백엔드는 프록시가 계획 요청에 이 JSON을 돌려준다. 로컬 CLI 백엔드는 계획을 서버 안에서 넘긴다
     if (context.backend === 'openai' && context.proxy) context.proxy.setPlan(planJson);
     const created = await taskPlans.createTaskPlan({
       projectId: PROJECT_ID,
       request: task.request,
       modelId: context.planModelId,
       owner: localUser,
-      ...(context.backend === 'claude-code' ? { presetPlan: planJson } : {}),
+      ...(context.backend === 'openai' ? {} : { presetPlan: planJson }),
     });
     planId = created.id;
     plan = await waitForPlan(taskPlans, created.id, localUser, ['awaiting_approval', 'failed'], APPROVAL_TIMEOUT_MS, '계획이 승인 대기에 이르지 않았습니다', activeSessions);
@@ -428,7 +430,7 @@ async function main(): Promise<void> {
   const dockerMemTotal = preflight(args.force);
 
   // 2. 백엔드별 준비
-  const requestedModel = backend === 'claude-code' ? choice.model! : backend === 'commandcode' ? choice.model ?? 'default' : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
+  const requestedModel = backend === 'claude-code' ? choice.model! : backend === 'codex' || backend === 'commandcode' ? choice.model ?? 'default' : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
   const priceInput = price('BENCH_PRICE_INPUT_PER_M');
   const priceOutput = price('BENCH_PRICE_OUTPUT_PER_M');
 
@@ -510,6 +512,10 @@ async function main(): Promise<void> {
     } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
+    } else if (backend === 'codex') {
+      // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
+      Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
+      if (choice.model) benchEnv.B_STUDIO_CODEX_MODEL = choice.model;
     } else {
       // commandcode도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'commandcode' });
@@ -528,6 +534,15 @@ async function main(): Promise<void> {
           return;
         }
         console.log(`로컬 Claude Code 로그인 확인: ${preflight.account.subscriptionType ?? preflight.account.apiKeySource ?? '로그인 계정'} · 모델 ${requestedModel}`);
+      } else if (backend === 'codex') {
+        const { preflightCodex } = await import('@b-studio/agent');
+        const preflight = await preflightCodex();
+        if (!preflight.ok) {
+          console.error(`로컬 Codex를 쓸 수 없습니다: ${preflight.reason}`);
+          process.exitCode = 3;
+          return;
+        }
+        console.log(`로컬 Codex 로그인 확인 · 모델 ${choice.model ?? '계정 기본값'}`);
       } else {
         const { preflightCommandCode } = await import('@b-studio/agent');
         const preflight = await preflightCommandCode();
