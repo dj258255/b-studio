@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openRemoteBrowser, type RemoteBrowser } from './remote-browser';
+import type { BrowserFrame } from './browser-check';
 
 // 실제 헤드리스 Chromium을 띄운다. 브라우저가 없으면 기존 browser-check 테스트와 같이 건너뛰지 않고 실패한다
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -165,6 +166,22 @@ describe('openRemoteBrowser', { timeout: 60_000 }, () => {
     }
   });
 
+  it('pick 뒤에도 미리보기가 잘린 스크린샷에 멈추지 않고 전체 화면 프레임을 받는다', async () => {
+    const frames: BrowserFrame[] = [];
+    const browser = await openRemoteBrowser({ url: `${base}/pick`, viewport: { width: 400, height: 400 }, allowedOrigins: [base], onFrame: (frame) => frames.push(frame) });
+    try {
+      await waitFor(() => frames.length > 0);
+      const before = frames.length;
+      await browser.pick(10, 10);
+      await waitFor(() => frames.length > before);
+      // 마지막 프레임이 들어오기를 잠깐 기다린 뒤, 그 실제 이미지 크기가 뷰포트 전체인지 본다
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(jpegSize(frames.at(-1)!.data)).toEqual({ width: 400, height: 400 });
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('navigate·reload·resize로 화면을 바꾸고 이동을 알린다', async () => {
     const navigated: string[] = [];
     const browser = await openRemoteBrowser({
@@ -277,3 +294,22 @@ describe('서비스 워커를 막는다', { timeout: 60_000 }, () => {
     }
   });
 });
+
+async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('조건을 기다리다 시간이 지났습니다');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/** JPEG의 SOF 표지에서 실제 이미지 크기를 읽는다(프레임 메타데이터가 아니라 그려진 이미지 기준) */
+function jpegSize(data: Buffer): { width: number; height: number } {
+  for (let offset = 2; offset + 9 < data.length; ) {
+    if (data[offset] !== 0xff) throw new Error('JPEG 표지를 찾지 못했습니다');
+    const marker = data[offset + 1]!;
+    if (marker >= 0xc0 && marker <= 0xc3) return { height: data.readUInt16BE(offset + 5), width: data.readUInt16BE(offset + 7) };
+    offset += 2 + data.readUInt16BE(offset + 2);
+  }
+  throw new Error('JPEG 크기를 찾지 못했습니다');
+}

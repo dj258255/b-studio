@@ -159,22 +159,45 @@ export async function restrictPageToOrigins(page: Page, allowedOrigins: readonly
  * ack를 빠뜨리면 브라우저가 전송을 멈추므로, 상한에 걸러 콜백을 건너뛸 때도 항상 ack한다.
  */
 export function createScreencast(client: CDPSession, viewport: { width: number; height: number }, onFrame: (frame: BrowserFrame) => void) {
+  // 초당 상한을 넘는 프레임은 버리지 않고 가장 최근 것 하나를 들고 있다가 간격이 지나면 보낸다(뒤쪽 스로틀).
+  // 앞쪽에서 버리기만 하면 변화의 마지막 프레임이 사라져, 페이지가 멈춘 뒤에도 미리보기가 그 전 화면에 머문다
   let last = 0;
+  let pending: BrowserFrame | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deliver = (frame: BrowserFrame) => {
+    last = Date.now();
+    onFrame({ ...frame, at: last });
+  };
   client.on('Page.screencastFrame', (params) => {
     void client.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
-    const now = Date.now();
-    if (now - last < SCREENCAST_INTERVAL_MS) return;
-    last = now;
-    onFrame({
+    const frame: BrowserFrame = {
       data: Buffer.from(params.data, 'base64'),
       width: params.metadata.deviceWidth || viewport.width,
       height: params.metadata.deviceHeight || viewport.height,
-      at: now,
-    });
+      at: Date.now(),
+    };
+    const wait = last + SCREENCAST_INTERVAL_MS - frame.at;
+    if (wait <= 0 && !timer) {
+      deliver(frame);
+      return;
+    }
+    pending = frame;
+    timer ??= setTimeout(() => {
+      timer = undefined;
+      const next = pending;
+      pending = undefined;
+      if (next) deliver(next);
+    }, Math.max(0, wait));
   });
   return {
     start: (maxWidth: number) => client.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth, everyNthFrame: 1 }).then(() => {}),
-    stop: () => client.send('Page.stopScreencast').then(() => {}).catch(() => {}),
+    stop: () => {
+      // 멈춘 뒤에는 들고 있던 프레임도 보내지 않는다(잘린 화면이나 닫힌 브라우저의 프레임이 늦게 도착하지 않게)
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      pending = undefined;
+      return client.send('Page.stopScreencast').then(() => {}).catch(() => {});
+    },
   };
 }
 

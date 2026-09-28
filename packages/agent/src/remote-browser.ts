@@ -147,11 +147,18 @@ export async function openRemoteBrowser(options: RemoteBrowserOptions): Promise<
       async pick(x, y) {
         const info = await page.evaluate<Omit<RemoteBrowserPick, 'screenshot'> | null>(pickExpression(x, y));
         if (!info) throw new Error(`좌표 (${x}, ${y})에서 요소를 찾지 못했습니다`);
-        const screenshot = await page.screenshot({
-          type: 'png',
-          clip: { x: info.rect.x, y: info.rect.y, width: Math.max(1, info.rect.width), height: Math.max(1, info.rect.height) },
-        });
-        return { ...info, screenshot };
+        // 영역을 자른 스크린샷은 잠깐 화면 크기를 바꿔 screencast가 잘린 프레임을 내보낸다. 페이지가 그 뒤 바뀌지 않으면
+        // 새 프레임이 오지 않아 미리보기가 잘린 화면에 멈춘다. 찍는 동안 screencast를 멈췄다가 다시 켜 전체 화면 프레임을 받는다
+        await screencast.stop();
+        try {
+          const screenshot = await page.screenshot({
+            type: 'png',
+            clip: { x: info.rect.x, y: info.rect.y, width: Math.max(1, info.rect.width), height: Math.max(1, info.rect.height) },
+          });
+          return { ...info, screenshot };
+        } finally {
+          await screencast.start(viewport.width);
+        }
       },
       async close() {
         // 여러 번 불러도 안전하다
