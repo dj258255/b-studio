@@ -1,12 +1,15 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
-import type { LoadedProject, WorkflowPageCheck, WorkflowStage, WorkflowTest } from '@b-studio/spec';
+import type { LoadedProject, WorkflowPageCheck, WorkflowPageCompare, WorkflowStage, WorkflowTest } from '@b-studio/spec';
 import { runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { servicesForFiles } from './services';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
-import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowStepCheck } from './workflow';
+import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
+import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 import type { Workspace } from './workspace';
 
 export type GateOutcome =
@@ -71,6 +74,8 @@ export class VerificationGate {
   #failedServices = new Set<string>();
   /** 화면 확인 이름 → 단계 결과. 실패해 예외로 끝나도 실패 단계의 스크린샷을 남기려고 따로 모은다 */
   #pageSteps = new Map<string, WorkflowStepCheck[]>();
+  /** 화면 확인 이름 → 디자인 비교 결과. 실패해 예외로 끝나도 결과를 남기려고 따로 모은다 */
+  #pageCompares = new Map<string, WorkflowCompare>();
 
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
@@ -159,6 +164,7 @@ export class VerificationGate {
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     const nodes: TaskNode<void>[] = [];
     this.#pageSteps.clear();
+    this.#pageCompares.clear();
     for (const page of pages) {
       const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
       const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
@@ -177,12 +183,14 @@ export class VerificationGate {
     return results.map((result, index) => {
       const entry = meta[index]!;
       const steps = this.#pageSteps.get(entry.name);
+      const compare = this.#pageCompares.get(entry.name);
       return {
         ...entry,
         ok: result.status === 'succeeded',
         attempts: result.attempts,
         detail: result.error,
         ...(steps ? { steps } : {}),
+        ...(compare ? { compare } : {}),
       };
     });
   }
@@ -199,8 +207,8 @@ export class VerificationGate {
           viewport: page.viewport,
           steps: page.steps,
           signal,
-          // 스크린샷을 저장할 곳이 있을 때만 찍는다
-          capture: saveArtifact !== undefined,
+          // 스크린샷을 저장할 곳이 있거나 디자인 비교를 할 때만 찍는다
+          capture: saveArtifact !== undefined || page.compare !== undefined,
           ...(onBrowserFrame ? { onFrame: (frame: BrowserFrame) => onBrowserFrame({ check: name, frame }) } : {}),
         });
       } catch (error) {
@@ -218,6 +226,7 @@ export class VerificationGate {
       if (page.noHorizontalScroll && result.horizontalOverflowPx > 1) problems.push(`가로로 ${result.horizontalOverflowPx}px 넘칩니다`);
       // 화면 출력에 시크릿 값이 섞여 있을 수 있어 가린 뒤 모델에게 돌려준다
       if (problems.length > 0) throw new Error(sandbox.redact(problems.join('\n')));
+      if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
       return;
     }
     const { status, text } = await pageFetcher(url.href, signal);
@@ -242,6 +251,49 @@ export class VerificationGate {
         }
       }
       saved.push({ label: step.label, ok: step.ok, ...(step.detail !== undefined ? { detail: step.detail } : {}), ...(artifact ? { artifact } : {}) });
+    }
+    return saved;
+  }
+
+  /**
+   * 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 비교한다.
+   * 기준 이미지는 project.root 기준으로 읽고, 없거나 읽지 못하면 건너뛰지 않고 확인 실패로 알린다.
+   * 비율이 허용치를 넘으면 실패시키되, 비교 이미지는 산출물로 남겨 화면에서 볼 수 있게 한다
+   */
+  async #compareDesign(compare: WorkflowPageCompare, name: string, result: BrowserPageResult, sandbox: Sandbox): Promise<void> {
+    const actual = result.steps.at(-1)?.screenshot;
+    if (!actual) throw new Error('디자인 비교에 쓸 뷰포트 스크린샷을 찍지 못했습니다');
+    const reference = await readFile(path.join(this.#options.project.root, compare.reference)).catch(() => undefined);
+    if (!reference) throw new Error(`디자인 기준 이미지를 읽지 못했습니다: ${compare.reference}`);
+
+    let comparison: CompareResult;
+    try {
+      comparison = compareScreenshot({ actual, reference, masks: compare.masks, threshold: compare.threshold });
+    } catch (error) {
+      // 비교 자체가 성립하지 않는 경우(너비 불일치)는 원인을 그대로 알린다
+      if (error instanceof VisualCompareError) throw new Error(sandbox.redact(error.message));
+      throw error;
+    }
+    this.#pageCompares.set(name, { ratio: comparison.ratio, max: compare.maxDiffRatio, ...(await this.#saveCompareImages(name, reference, actual, comparison.diff)) });
+    if (comparison.ratio > compare.maxDiffRatio) throw new Error(compareDetail(comparison, compare.maxDiffRatio));
+  }
+
+  /** 기준·실제·차이 이미지를 저장한다. 저장은 관측용이라 실패해도 비교 결과를 바꾸지 않고 경고만 남긴다 */
+  async #saveCompareImages(name: string, reference: Buffer, actual: Buffer, diff: Buffer): Promise<Pick<WorkflowCompare, 'reference' | 'actual' | 'diff'>> {
+    const save = this.#options.saveArtifact;
+    const saved: Pick<WorkflowCompare, 'reference' | 'actual' | 'diff'> = {};
+    if (!save) return saved;
+    const images: Array<[keyof typeof saved, string, Buffer]> = [
+      ['reference', '디자인', reference],
+      ['actual', '실제', actual],
+      ['diff', '차이', diff],
+    ];
+    for (const [key, label, data] of images) {
+      try {
+        saved[key] = await save({ name: `${name} ${label} 이미지`, data, contentType: 'image/png' });
+      } catch (error) {
+        console.warn(`디자인 비교 이미지를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     return saved;
   }
@@ -274,4 +326,9 @@ function formatFailedChecks(checks: readonly WorkflowCheck[]): string {
   if (checks.length === 0) return '';
   const lines = checks.map((check) => `- [${check.stage}] ${check.name} (시도 ${check.attempts}회)${check.detail ? `\n${check.detail}` : ''}`);
   return `\n\n워크플로 검사 실패:\n${lines.join('\n')}`;
+}
+
+/** 디자인 비교 실패 문구. 비율과 허용치, 비교한 크기를 함께 적는다 */
+function compareDetail(comparison: CompareResult, max: number): string {
+  return `디자인 차이 ${(comparison.ratio * 100).toFixed(1)}% (허용 ${(max * 100).toFixed(1)}%, 비교 ${comparison.width}×${comparison.height})`;
 }

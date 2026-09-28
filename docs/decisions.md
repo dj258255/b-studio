@@ -9,7 +9,7 @@
 | 주제 | ADR |
 |---|---|
 | 프로젝트 모델과 런타임 | 001–009, 021, 028, 032, 044 |
-| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048 |
+| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053 |
 | 웹 스튜디오와 세션 | 015–020, 029–031, 033, 040–041, 045–046, 052 |
 | 데이터·자원·보안 | 022–027, 038, 040, 045 |
 | 운영 배포 | 020, 030, 032–033, 043–045 |
@@ -68,6 +68,7 @@
 - [ADR-050 화면 확인: HTTP 확인을 기본으로 두고 헤드리스 브라우저 모드를 더한다](#adr-050-화면-확인-http-확인을-기본으로-두고-헤드리스-브라우저-모드를-더한다)
 - [ADR-051 작업 분해: 이어진 작업은 한 세션에서, 독립 레인은 병렬로 돌리고 통합 결과를 다시 검증한다](#adr-051-작업-분해-이어진-작업은-한-세션에서-독립-레인은-병렬로-돌리고-통합-결과를-다시-검증한다)
 - [ADR-052 미리보기 QA: 서버 소유 브라우저 화면을 중계하고 입력을 되돌려 보낸다](#adr-052-미리보기-qa-서버-소유-브라우저-화면을-중계하고-입력을-되돌려-보낸다)
+- [ADR-053 시각 비교: 디자인 이미지를 저장소에 두고 결정론적으로 비교한다](#adr-053-시각-비교-디자인-이미지를-저장소에-두고-결정론적으로-비교한다)
 
 ---
 
@@ -2053,6 +2054,43 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 
 ---
 
+## ADR-053 시각 비교: 디자인 이미지를 저장소에 두고 결정론적으로 비교한다
+
+### 맥락
+- "피그마를 최대한 반영했는지"를 지금은 사람이 눈으로만 봅니다. 검증 게이트는 렌더링 문구·스크립트 예외·가로 넘침까지만 숫자로 판정하고([ADR-050](#adr-050-화면-확인-http-확인을-기본으로-두고-헤드리스-브라우저-모드를-더한다)), 디자인과의 어긋남은 판정하지 못합니다.
+- 완료 판정은 모델의 말이 아니라 플랫폼이 실행한 결과여야 합니다([ADR-010](#adr-010-에이전트-루프-직접-작성한-루프와-스튜디오-검증-게이트)).
+
+### 검토한 선택지
+
+| 선택지 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| **디자인 이미지를 프로젝트 파일로 두고 pixelmatch 비교** | 게이트가 외부 인증 없이 결정론적으로 판정 | 폰트 렌더링·동적 데이터 차이로 잡음. 임계치와 가림 영역 필요 |
+| 게이트가 Figma API를 직접 호출 | 항상 최신 | 토큰·네트워크 의존, 결정론이 깨짐 |
+| 모델에게 두 이미지를 보여 주고 판단 | 유연 | 판정이 모델 말에 기댐(ADR-010과 충돌) |
+
+디자인 이미지는 운영자가 Figma MCP 등으로 뽑아 저장소에 둡니다(추출은 제품 밖).
+
+### 결정
+- **선언**: `pageChecks[].compare`에 `reference`(프로젝트 루트 기준 `.png` 상대 경로)·`maxDiffRatio`(0~1)·`masks`(최대 20개)·`threshold`(0~1, 기본 0.1)를 적습니다. `mode: browser`에서만 쓸 수 있고, `..`·절대 경로는 거부합니다.
+- **비교 시점**: 마지막 단계 뒤의 **뷰포트 스크린샷**을 기준 이미지와 `pixelmatch`(packages/agent에 버전 고정)로 비교합니다. PNG 디코딩은 `pngjs`로 합니다.
+- **판정**: 실제 화면과 디자인의 다른 픽셀 비율이 `maxDiffRatio`를 넘으면 확인 실패로 알립니다. detail은 `디자인 차이 12.4% (허용 10.0%, 비교 375×812)` 형식입니다.
+- **가림**: `masks` 영역은 두 이미지 모두 같은 색으로 칠해 비교에서 뺍니다(동적 데이터·항상 달라지는 시각 요소).
+- **산출물**: 기준·실제·차이 이미지를 저장해 `WorkflowCheck.compare`(산출물 식별자)로 남기고, QA 보기에서 나란히 봅니다.
+- **기준 이미지가 없거나 읽지 못하면 건너뛰지 않고 실패**로 처리합니다("검사 안 함"이 통과로 보이지 않게).
+
+### 감수한 트레이드오프
+- **너비가 다르면 자동으로 맞추지 않고 실패시킵니다.** 자동 축소·확대는 비교 대상 자체를 바꿔 판정을 흐리므로, 뷰포트를 디자인 프레임 너비에 맞추라는 오류로 알립니다. 높이가 다르면 겹치는 위쪽만 비교합니다.
+- **폰트 렌더링·안티앨리어싱·동적 데이터가 잡음**이 됩니다. `threshold`와 `masks`, 그리고 임계치로 흡수합니다.
+- **임계치(`maxDiffRatio`)의 기본값은 아직 잡지 않았습니다(미측정).** 실제 과제 화면에서 잡음과 실제 어긋남을 측정한 뒤 정해야 하며, 지금은 프로젝트가 값을 선언합니다.
+- 디자인 이미지는 저장소에 커밋되므로 이미지 용량이 늘어납니다.
+- 추출 파이프라인(피그마 → 저장소)은 제품 밖에 두어 게이트가 네트워크·토큰에 의존하지 않게 했습니다.
+
+### 검증 결과
+- 단위 테스트로 같은 이미지 0, 알려진 차이(100×100에서 10×10 → 1%), mask로 0, 너비 불일치 실패, 높이 겹침 비교, 게이트 연결(가짜 러너·saveArtifact로 산출물·판정)을 확인했습니다.
+- 임계치는 실제 과제 화면에서 아직 재지 못했습니다(미측정).
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -2074,4 +2112,5 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - Next.js, [Authentication](https://nextjs.org/docs/app/guides/authentication) (Proxy의 낙관적 확인과 데이터 접근 계층) · [proxy.js](https://nextjs.org/docs/app/api-reference/file-conventions/proxy)
 - MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
 - StablyAI, [Orca](https://github.com/stablyai/orca)
+- mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
 - OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)

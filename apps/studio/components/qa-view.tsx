@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { WorkflowStepCheck } from "@b-studio/agent";
+import type { WorkflowCompare, WorkflowStepCheck } from "@b-studio/agent";
 import { artifactUrl } from "@/lib/artifact-url";
 import type { LiveFrame } from "./live-frames";
 
@@ -11,12 +11,13 @@ export interface QaCheck {
   attempts: number;
   detail?: string;
   steps?: WorkflowStepCheck[];
+  compare?: WorkflowCompare;
 }
 
 /**
  * 플랫폼의 화면 확인(browser_check)을 실시간으로 보여 준다.
  * 확인이 도는 동안에는 프레임 채널의 화면을 그대로 그리고, 옆에 확인 이름과 단계 결과(✓/✗)를 둔다.
- * 끝나면 단계별 스크린샷(산출물)을 넘겨 볼 수 있고, 실패한 단계를 강조한다.
+ * 끝나면 단계별 스크린샷(산출물)을 넘겨 볼 수 있고, 디자인 비교(compare)가 있으면 디자인·실제·차이를 함께 보여 준다.
  * 부모가 확인이 바뀔 때마다 key를 바꿔 다시 마운트하므로, 새 확인은 마지막(실패 지점) 스크린샷부터 보인다
  */
 export function QaView({ sessionId, frame, check }: { sessionId: string; frame?: LiveFrame; check?: QaCheck }) {
@@ -42,9 +43,11 @@ export function QaView({ sessionId, frame, check }: { sessionId: string; frame?:
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_18rem] lg:grid-rows-1">
-        <div className="flex min-h-0 items-center justify-center overflow-hidden bg-ground">
+        <div className="flex min-h-0 w-full items-center justify-center overflow-hidden bg-ground">
           {live && frame ? (
             <img src={`data:${frame.mime};base64,${frame.data}`} alt="" className="max-h-full max-w-full" />
+          ) : check?.compare ? (
+            <DesignCompare sessionId={sessionId} compare={check.compare} />
           ) : current ? (
             <img src={artifactUrl(sessionId, current.artifact)} alt={`${current.label} 화면`} className="max-h-full max-w-full" />
           ) : (
@@ -98,6 +101,66 @@ export function QaView({ sessionId, frame, check }: { sessionId: string; frame?:
             <p className="text-sm text-muted">{name ? "확인 중입니다. 단계 결과는 끝나면 표시됩니다." : "화면 확인 기록이 아직 없습니다."}</p>
           )}
         </aside>
+      </div>
+    </div>
+  );
+}
+
+const COMPARE_VIEWS = [
+  { id: "reference", label: "디자인" },
+  { id: "actual", label: "실제" },
+  { id: "diff", label: "차이" },
+] as const;
+
+type CompareView = (typeof COMPARE_VIEWS)[number]["id"];
+
+/**
+ * 디자인 기준 이미지와 실제 화면, 차이 이미지를 보여 준다.
+ * 넓은 화면(lg)에서는 세 장을 나란히, 좁은 화면에서는 탭으로 한 장씩 본다
+ */
+function DesignCompare({ sessionId, compare }: { sessionId: string; compare: WorkflowCompare }) {
+  const [active, setActive] = useState<CompareView>("diff");
+  const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
+  const ok = compare.ratio <= compare.max;
+  const artifacts: Array<{ id: CompareView; label: string; artifact?: string }> = [
+    { id: "reference", label: "디자인", artifact: compare.reference },
+    { id: "actual", label: "실제", artifact: compare.actual },
+    { id: "diff", label: "차이", artifact: compare.diff },
+  ];
+
+  return (
+    <div className="flex h-full w-full flex-col gap-2 p-3">
+      <p className={`text-base font-semibold sm:text-lg ${ok ? "text-pass" : "text-fail"}`}>
+        디자인 차이 {percent(compare.ratio)} <span className="text-sm font-normal text-muted">· 허용 {percent(compare.max)}</span>
+      </p>
+      <div className="flex gap-1 lg:hidden" role="tablist" aria-label="디자인 비교 이미지">
+        {COMPARE_VIEWS.map((view) => (
+          <button
+            key={view.id}
+            type="button"
+            role="tab"
+            aria-selected={active === view.id}
+            onClick={() => setActive(view.id)}
+            className={`rounded-control px-3 py-1 text-sm font-medium ${active === view.id ? "bg-ink text-panel" : "border border-line hover:border-ink"}`}
+          >
+            {view.label}
+          </button>
+        ))}
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-3">
+        {artifacts.map((view) => (
+          <figure
+            key={view.id}
+            className={`min-h-0 flex-col overflow-hidden rounded-control border border-line bg-ground ${active === view.id ? "flex" : "hidden lg:flex"}`}
+          >
+            <figcaption className="border-b border-line bg-panel px-2 py-1 text-xs font-medium text-muted">{view.label}</figcaption>
+            {view.artifact ? (
+              <img src={artifactUrl(sessionId, view.artifact)} alt={`${view.label} 이미지`} className="min-h-0 w-full flex-1 object-contain" />
+            ) : (
+              <p className="p-2 text-xs text-muted">이미지 없음</p>
+            )}
+          </figure>
+        ))}
       </div>
     </div>
   );

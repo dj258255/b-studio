@@ -191,6 +191,15 @@ workflow:
         - { press: Enter }
         - { waitFor: "text=김토스" }
       expectText: 김토스
+    - service: web
+      path: /orders
+      mode: browser
+      viewport: mobile
+      compare:
+        reference: design/list.png
+        maxDiffRatio: 0.15
+        masks:
+          - { x: 0, y: 240, width: 375, height: 120 }
   allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply]
   requireApprovalFor: [restart_service]
@@ -203,7 +212,7 @@ workflow:
 |---|---|
 | `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests` 단계를 더합니다 |
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
-| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다 |
+| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다 |
 | `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
@@ -214,6 +223,35 @@ workflow:
 - `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
 - `tests`·`pageChecks`의 `service`는 `source: managed` 서비스여야 합니다.
 - 테스트 이름은 중복될 수 없습니다.
+
+### 디자인 비교 (`compare`)
+
+`mode: browser` 화면 확인에 `compare`를 적으면, 마지막 단계 뒤의 **뷰포트 화면**을 디자인 기준 이미지와 픽셀 단위로 비교합니다. 운영자가 Figma 등에서 뽑은 기준 이미지를 프로젝트 안에 `.png`로 두고, `reference`에 프로젝트 루트 기준 상대 경로로 적습니다(추출은 제품 밖의 일입니다).
+
+```yaml
+pageChecks:
+  - service: web
+    path: /orders
+    mode: browser
+    viewport: mobile
+    compare:
+      reference: design/list.png
+      maxDiffRatio: 0.15
+      masks:
+        - { x: 0, y: 240, width: 375, height: 120 }   # 항상 달라지는 동적 영역
+      threshold: 0.1
+```
+
+| 키 | 설명 |
+|---|---|
+| `reference` | 프로젝트 안의 `.png` 상대 경로. `..`이나 절대 경로는 거부합니다 |
+| `maxDiffRatio` | 허용하는 최대 차이 비율(0~1). 넘으면 확인 실패입니다 |
+| `masks` | 비교에서 빼는 사각형(픽셀, 최대 20개). 두 이미지 모두 같은 색으로 칠해 동적 데이터·시각 요소를 가립니다 |
+| `threshold` | pixelmatch의 색 차이 민감도(0~1, 기본 0.1). 클수록 관대합니다 |
+
+- 기준 이미지와 실제 화면의 **너비가 다르면 자동으로 맞추지 않고 실패**합니다(뷰포트를 디자인 프레임 너비에 맞추라는 안내). 높이가 다르면 겹치는 위쪽만 비교합니다.
+- 기준 이미지가 없거나 읽지 못하면 건너뛰지 않고 확인 실패로 처리합니다("검사 안 함"이 통과로 보이지 않게).
+- 실패하면 `디자인 차이 12.4% (허용 10.0%, 비교 375×812)` 형태로 알리고, 디자인·실제·차이 이미지를 세션 산출물로 남겨 QA 보기에서 나란히 볼 수 있습니다.
 
 `studio workflow <프로젝트>`로 실제로 강제할 단계와 검사를 확인할 수 있습니다.
 

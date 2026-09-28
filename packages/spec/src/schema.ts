@@ -226,6 +226,28 @@ const ViewportSchema = z
   ])
   .transform((value): { width: number; height: number } => (typeof value === 'string' ? VIEWPORT_PRESETS[value] : value));
 
+const MAX_COMPARE_MASKS = 20;
+
+/** 기준 이미지에서 비교에서 빼는 사각형. 동적 데이터나 항상 달라지는 시각 요소를 가린다 */
+export const CompareMaskSchema = z.object({
+  x: z.number().int().min(0),
+  y: z.number().int().min(0),
+  width: z.number().int().min(1),
+  height: z.number().int().min(1),
+});
+
+/** 디자인 기준 이미지와 실제 화면을 픽셀 차이 비율로 비교하는 설정 */
+export const WorkflowPageCompareSchema = z.object({
+  /** 프로젝트 안의 .png 파일 상대 경로 (운영자가 Figma 등에서 뽑아 저장소에 둔다) */
+  reference: RELATIVE_PATH.refine((value) => value.toLowerCase().endsWith('.png'), 'reference는 .png 파일이어야 합니다'),
+  /** 허용하는 최대 차이 비율 (0~1) */
+  maxDiffRatio: z.number().min(0).max(1),
+  /** 두 이미지 모두 같은 색으로 칠해 비교에서 빼는 영역 */
+  masks: z.array(CompareMaskSchema).max(MAX_COMPARE_MASKS, `masks는 최대 ${MAX_COMPARE_MASKS}개까지 쓸 수 있습니다`).optional(),
+  /** pixelmatch의 색 차이 민감도 (0~1). 클수록 관대하다 */
+  threshold: z.number().min(0).max(1).default(0.1),
+});
+
 /**
  * browser_check 단계에서 재시작한 서비스의 화면을 확인한다.
  * http는 응답 상태와 본문 문구만 보고, browser는 헤드리스 Chromium으로 렌더링해 스크립트 예외·console.error·가로 넘침까지 본다
@@ -246,6 +268,8 @@ export const WorkflowPageCheckSchema = z
     allowConsoleErrors: z.boolean().default(false),
     /** browser 전용. 문서가 창보다 넓어 가로 스크롤이 생기면 실패 */
     noHorizontalScroll: z.boolean().default(false),
+    /** browser 전용. 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교한다 */
+    compare: WorkflowPageCompareSchema.optional(),
   })
   .superRefine((check, ctx) => {
     if (check.mode === 'browser') return;
@@ -254,6 +278,7 @@ export const WorkflowPageCheckSchema = z
     if (check.viewport) ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
     if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
   });
 
 /** 모델 프롬프트가 아니라 실행기에서 적용하는 프로젝트별 워크플로 정책 */
@@ -340,6 +365,8 @@ export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
 export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
+export type WorkflowPageCompare = z.infer<typeof WorkflowPageCompareSchema>;
+export type CompareMask = z.infer<typeof CompareMaskSchema>;
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;
 export type EgressRule = z.infer<typeof EgressRuleSchema>;

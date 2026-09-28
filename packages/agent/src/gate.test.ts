@@ -1,11 +1,30 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { PNG } from 'pngjs';
 import type { ExecResult } from '@b-studio/sandbox';
-import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
+import type { LoadedProject, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { StepFailedError, type BrowserPageOptions } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { Workspace } from './workspace';
+
+/** 단색 배경에 원하는 색을 칠한 PNG 버퍼를 만든다 */
+function image(width: number, height: number, paint: (x: number, y: number) => [number, number, number] = () => [255, 255, 255]): Buffer {
+  const png = new PNG({ width, height });
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const index = (width * y + x) << 2;
+      const [r, g, b] = paint(x, y);
+      png.data[index] = r;
+      png.data[index + 1] = g;
+      png.data[index + 2] = b;
+      png.data[index + 3] = 255;
+    }
+  }
+  return PNG.sync.write(png);
+}
 
 let project: LoadedProject;
 
@@ -350,5 +369,107 @@ describe('VerificationGate 워크플로 단계', () => {
       { label: 'open /orders', ok: true, artifact: 'artifact-1' },
       { label: 'click #missing', ok: false, detail: 'timeout', artifact: 'artifact-2' },
     ]);
+  });
+});
+
+describe('VerificationGate 디자인 비교', () => {
+  const compare = (overrides: Partial<NonNullable<WorkflowPageCheck['compare']>> = {}): NonNullable<WorkflowPageCheck['compare']> => ({
+    reference: 'design.png',
+    maxDiffRatio: 0.02,
+    threshold: 0.1,
+    ...overrides,
+  });
+  const comparePage = (value: NonNullable<WorkflowPageCheck['compare']>): WorkflowPageCheck => ({
+    service: 'api',
+    path: '/orders',
+    mode: 'browser',
+    expectStatus: 200,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    compare: value,
+  });
+  const browserResult = (actual: Buffer) => ({
+    status: 200,
+    text: '주문 목록',
+    pageErrors: [],
+    consoleErrors: [],
+    failedRequests: [],
+    horizontalOverflowPx: 0,
+    steps: [{ label: 'open /orders', ok: true, screenshot: actual }],
+  });
+
+  async function compareGate(target: LoadedProject, actual: Buffer, saved: string[] = []) {
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => browserResult(actual),
+      saveArtifact: async ({ name }) => `a${saved.push(name)}`,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  it('기준 이미지와 같으면 통과하고 비교 이미지 세 장을 저장한다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare({ reference: 'design/list.png' }))] });
+    const shot = image(60, 40);
+    await mkdir(path.join(target.root, 'design'), { recursive: true });
+    await writeFile(path.join(target.root, 'design/list.png'), shot);
+    const saved: string[] = [];
+    const gate = await compareGate(target, shot, saved);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(true);
+    // 단계 스크린샷(a1)에 이어 기준·실제·차이 이미지를 저장한다
+    expect(check?.compare).toEqual({ ratio: 0, max: 0.02, reference: 'a2', actual: 'a3', diff: 'a4' });
+    expect(saved).toEqual([
+      'api /orders (browser) 1. open /orders',
+      'api /orders (browser) 디자인 이미지',
+      'api /orders (browser) 실제 이미지',
+      'api /orders (browser) 차이 이미지',
+    ]);
+  });
+
+  it('허용 비율을 넘으면 실패로 알리고 비교 결과를 남긴다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare())] });
+    await writeFile(path.join(target.root, 'design.png'), image(100, 100));
+    // 20×20만 다른 색이라 4%가 다르다
+    const gate = await compareGate(target, image(100, 100, (x, y) => (x < 20 && y < 20 ? [0, 0, 0] : [255, 255, 255])));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('디자인 차이 4.0% (허용 2.0%, 비교 100×100)');
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(false);
+    expect(check?.compare?.ratio).toBeCloseTo(0.04, 4);
+    expect(check?.compare?.max).toBe(0.02);
+    expect(gate.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('기준 이미지가 없으면 건너뛰지 않고 실패로 알린다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare({ reference: 'missing.png' }))] });
+    const gate = await compareGate(target, image(100, 100));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('디자인 기준 이미지를 읽지 못했습니다: missing.png');
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.compare).toBeUndefined();
+  });
+
+  it('기준 이미지와 너비가 다르면 자동 조정 없이 실패로 알린다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare())] });
+    await writeFile(path.join(target.root, 'design.png'), image(100, 100));
+    const gate = await compareGate(target, image(120, 100));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('이미지 너비가 다릅니다 (실제 120px, 디자인 100px)');
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.compare).toBeUndefined();
   });
 });
