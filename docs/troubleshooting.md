@@ -1545,3 +1545,28 @@ it('지원하는 언어는 모두 …', async () => {
   …
 }, 30_000);
 ```
+
+## 43. ChatGPT 구독 러너를 넣은 뒤 협업 벤치가 시작하자마자 끝남
+
+**구분:** 실제 실행에서 발견(E2 시작) → `--dry`로 재현 → 원인 확인 → 수정([#85](https://github.com/dj258255/b-studio/issues/85))
+
+### 현상
+`pnpm bench:coordination`이 `--dry`로도 첫 실행 전에 끝납니다.
+
+```
+Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No "exports" main defined in packages/agent/node_modules/@openai/codex-sdk/package.json
+```
+
+### 원인
+- `apps/studio/package.json`에는 `"type": "module"`이 없습니다. 그래서 tsx는 벤치 파일을 CommonJS로 옮기고, 그 파일이 부르는 `@b-studio/agent`의 소스도 `require`로 불러옵니다.
+- [#51](https://github.com/dj258255/b-studio/pull/51)의 codex 러너는 `@openai/codex-sdk`를 정적으로 import합니다. 이 패키지의 `exports`에는 `import` 조건만 있어 `require`로는 해석되지 않습니다.
+- 단위 테스트는 vitest(ESM)로 돌아 이 경로를 밟지 않았습니다. 스튜디오(Next 번들)와 CLI(`"type": "module"`)도 영향이 없었습니다. E1은 #51 병합 전에 시작한 프로세스라 문제를 드러내지 않았습니다.
+
+### 확인
+- 같은 SDK를 CommonJS 파일에서 `await import()`로 불러오면 `loaded function`이 나옵니다. 동적 import는 두 방식 모두에서 동작합니다.
+
+### 해결
+러너가 SDK를 첫 `runStreamed`에서 `await import('@openai/codex-sdk')`로 불러옵니다. 타입은 `import type`으로만 씁니다. codex 모드를 쓰지 않는 실행은 SDK를 아예 불러오지 않습니다.
+
+### 재발 방지
+`apps/studio/bench/coordination/load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
