@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Thread, ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sdk';
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
+import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
@@ -71,7 +72,7 @@ const DEFAULT_SDK: CodexSdk = {
   },
 };
 
-export interface CodexRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation'> {
+export interface CodexRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation' | 'escalation'> {
   /**
    * 이전 요청의 Codex 스레드 id.
    * 설치된 TS SDK에는 `codex exec fork`를 부르는 경로가 없어 이어받기를 지원하지 않는다. 값을 주면 오류를 낸다.
@@ -79,6 +80,8 @@ export interface CodexRunOptions extends Omit<RunAgentOptions, 'client' | 'conve
   resume?: string;
   /** 넘기지 않으면 로그인한 계정의 기본 모델을 쓴다 */
   model?: string;
+  /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다 */
+  escalation?: EscalationPolicy;
   effort?: Effort;
   sdk?: CodexSdk;
 }
@@ -126,6 +129,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     throw new Error('Codex는 이어받기를 지원하지 않습니다: 설치된 SDK에 대화를 갈라 이어받는(fork) 경로가 없습니다');
   }
   const ask = intent === 'ask';
+  // codex 러너는 이번에 승격을 구현하지 않는다. 옵션을 조용히 무시하지 않고 한 번 알린다
+  if (options.escalation) onEvent({ type: 'warning', message: '로컬 ChatGPT Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다

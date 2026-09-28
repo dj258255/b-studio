@@ -302,6 +302,27 @@ describe('runCodexAgent', () => {
     ).rejects.toThrow('이어받기를 지원하지 않습니다');
   });
 
+  it('승격 옵션을 받으면 지원하지 않는다고 경고를 한 번 낸다', async () => {
+    const { sdk } = fakeCodex([{ steps: [{ text: 'ok' }] }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '안녕',
+      intent: 'ask',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      escalation: { to: 'sonnet' },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done' });
+    const warnings = events.filter((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.message).toContain('승격을 지원하지 않습니다');
+  });
+
   it('사용자 ~/.codex 대신 임시 CODEX_HOME을 넘기고, 로그인 파일만 링크한다', async () => {
     let tempHome = '';
     let entries: string[] = [];

@@ -20,12 +20,12 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
-import { planModelId, resolveBackend, resolveRateLimitPolicy, type Backend } from './backends';
+import { planModelId, resolveBackend, resolveEscalation, resolveRateLimitPolicy, type Backend } from './backends';
 import { classify } from './classify';
 import { startDryProvider } from './dry-provider';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
-import { summarize, type BenchLaneRow, type BenchRow } from './summary';
+import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
 import { BENCH_TASKS, missingCoordinationTools, planFor, type BenchTask, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
@@ -55,6 +55,8 @@ interface Args {
   onRateLimit?: string;
   rateLimitWaitMinutes?: number;
   topology?: string;
+  escalateTo?: string;
+  escalateAfter?: number;
 }
 
 /** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
@@ -79,6 +81,8 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
     else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
     else if (arg === '--topology') args.topology = next(argv, index++, '--topology');
+    else if (arg === '--escalate-to') args.escalateTo = next(argv, index++, '--escalate-to');
+    else if (arg === '--escalate-after') args.escalateAfter = Number(next(argv, index++, '--escalate-after'));
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -88,6 +92,8 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--on-rate-limit=')) args.onRateLimit = arg.slice('--on-rate-limit='.length);
     else if (arg.startsWith('--rate-limit-wait-minutes=')) args.rateLimitWaitMinutes = Number(arg.slice('--rate-limit-wait-minutes='.length));
     else if (arg.startsWith('--topology=')) args.topology = arg.slice('--topology='.length);
+    else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
+    else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;
@@ -190,6 +196,10 @@ interface RunContext {
   planModelId: string;
   /** S3의 읽기 범위. 다른 전략에는 영향이 없다 */
   topology: Topology;
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  escalateTo?: string;
+  /** --escalate-after */
+  escalateAfter: number;
 }
 
 async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
@@ -243,6 +253,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   // 세션을 내리기 전에 기록에서 실제로 쓴 모델 이름과 탐색·실패 흔적을 읽는다. 읽기 실패는 실행 결과를 바꾸지 않는다
   const observedModels = readObservedModels(sessions, sessionIds);
   const sessionEvents = readSessionEvents(sessions, sessionIds);
+  // 승격은 세션 기록의 model_escalated 이벤트로 확인한다. 설정하지 않았으면 escalated=false
+  const escalation = readEscalation(sessionEvents, context.escalateTo, context.escalateAfter);
   // trace 계산이 실패해도 실행 결과(성공·분류)는 바뀌지 않게, 그 세션의 trace만 생략하고 경고를 남긴다
   const traces: LaneTrace[] = [];
   for (const id of laneSessionIds) {
@@ -340,6 +352,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     integrationTrace,
     explore,
     failures,
+    escalation,
     metrics,
     coordination: plan.metrics?.coordination,
     acceptance,
@@ -369,6 +382,18 @@ function readObservedModels(sessions: SessionsModule, sessionIds: string[]): str
     }
   }
   return [...models];
+}
+
+/** 세션 기록에서 승격 이벤트를 찾는다. 승격은 한 실행에 한 번이므로 첫 이벤트만 본다 */
+function readEscalation(eventsBySession: Map<string, StudioEvent[]>, to: string | undefined, after: number): BenchEscalation {
+  const result: BenchEscalation = { ...(to ? { to } : {}), after, escalated: false };
+  if (!to) return result;
+  for (const events of eventsBySession.values()) {
+    for (const event of events) {
+      if (event.type === 'agent' && event.event.type === 'model_escalated') return { ...result, escalated: true, attempt: event.event.attempt };
+    }
+  }
+  return result;
 }
 
 /** 세션 기록을 통째로 다시 받아 온다. 읽기 실패는 빈 결과로 두고 실행을 막지 않는다 */
@@ -424,6 +449,8 @@ async function main(): Promise<void> {
   const choice = resolveBackend({ dry: args.dry, backend: args.backend, model: args.model });
   const backend = choice.backend;
   const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
+  // 승격 설정도 시작 전에 확정한다. claude-code가 아니면 --escalate-to는 여기서 오류를 낸다
+  const escalation = resolveEscalation({ backend, escalateTo: args.escalateTo, escalateAfter: args.escalateAfter });
   const dry = args.dry;
   const repeats = args.repeats ?? (dry ? 1 : 3);
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error(`--repeats는 1 이상의 정수여야 합니다 (지금 값: ${args.repeats})`);
@@ -525,6 +552,8 @@ async function main(): Promise<void> {
     } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
+      // 시작 모델은 --model, 승격 대상은 --escalate-to. 세션·레인·통합이 모두 이 설정을 쓴다
+      if (escalation.to) Object.assign(benchEnv, { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: escalation.to, B_STUDIO_ESCALATE_AFTER: String(escalation.after) });
     } else {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
@@ -570,6 +599,8 @@ async function main(): Promise<void> {
       requestedModel,
       planModelId: planModelId(backend, requestedModel, MODEL_ID),
       topology,
+      ...(escalation.to ? { escalateTo: escalation.to } : {}),
+      escalateAfter: escalation.after,
     };
 
     // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
@@ -638,6 +669,8 @@ async function main(): Promise<void> {
           tasks: tasks.map((task) => task.id),
           strategies,
           topology,
+          escalateTo: escalation.to,
+          escalateAfter: escalation.after,
           repeats,
           runs: rows.length,
           onRateLimit: rateLimit.policy,

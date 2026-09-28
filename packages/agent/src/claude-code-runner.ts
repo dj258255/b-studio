@@ -12,6 +12,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
+import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
@@ -44,11 +45,16 @@ export interface ClaudeCodeAccount {
   apiProvider?: string;
 }
 
-export interface ClaudeCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation'> {
+export interface ClaudeCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation' | 'escalation'> {
   /** 이전 요청을 처리한 Claude Code 세션. 넘기면 그 대화를 이어받는다 */
   resume?: string;
   /** 넘기지 않으면 로그인한 계정의 기본 모델을 쓴다 */
   model?: string;
+  /**
+   * 게이트 실패 서명이 `sameSignatureTimes`번 반복되면 다음 게이트 재시도부터 `to` 모델로 돈다.
+   * 모델은 query를 열 때 정해지므로, 같은 세션을 이어받는 새 query를 모델만 바꿔 연다.
+   */
+  escalation?: EscalationPolicy;
   effort?: Effort;
   /** preflight에서 확인한 인증 정보. 화면에 어떤 계정으로 실행하는지 표시한다 */
   account?: ClaudeCodeAccount;
@@ -141,34 +147,23 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     ),
   );
 
-  const input = new InputQueue();
   const abort = new AbortController();
   const onAbort = () => abort.abort(signal?.reason);
   signal?.addEventListener('abort', onAbort, { once: true });
 
-  const conversation = sdk.query({
-    prompt: input,
-    options: {
-      cwd: project.root,
-      systemPrompt: buildSystemPrompt(project, { toolName }) + workflowContext(project),
-      // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
-      tools: [],
-      mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
-      allowedTools: specs.map((spec) => toolName(spec.name)),
-      permissionMode: 'dontAsk',
-      strictMcpConfig: true,
-      // 사용자 전역·프로젝트 설정(훅, 플러그인, CLAUDE.md)이 에이전트 동작을 바꾸지 않게 한다
-      settingSources: [],
-      model,
-      effort,
-      maxTurns,
-      abortController: abort,
-      // 실패한 실행이 다음 요청의 대화를 오염시키지 않도록 매번 갈라서 이어받는다
-      ...(resume ? { resume, forkSession: true } : {}),
-      env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
-    },
-  });
-  input.push(ask ? buildAskRequest(request, { toolName }) : request);
+  // 승격은 게이트의 실패 서명이 정한다. 같은 집합이 N번 반복되면 다음 게이트 재시도 query를 같은 세션에서
+  // 이어받되 모델만 바꾼다. SDK는 query를 열 때 모델이 정해지므로 대화를 이어받는 새 query가 필요하다
+  const escalation = options.escalation;
+  const escalationHistory: string[] = [];
+  let escalated = false;
+  let modelForQuery = model;
+  let resumeForQuery = resume;
+
+  let input = new InputQueue();
+  let conversation: ClaudeCodeQuery | undefined;
+  let pendingPrompt = ask ? buildAskRequest(request, { toolName }) : request;
+  // 승격으로 다음 query를 열어야 하면 true. 게이트 재시도는 같은 대화에 이어 넣는다
+  let reopen = false;
 
   const usage = emptyUsage();
   const messageIds = new Set<string>();
@@ -199,89 +194,136 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   };
 
   try {
-    for await (const message of conversation) {
-      if ('session_id' in message && message.session_id) sessionId = message.session_id;
-      if (result) {
-        result.sessionId = sessionId;
-        continue;
-      }
+    // 승격이 일어나면 같은 세션을 이어받은 새 query를 모델만 바꿔 연다. 그 밖에는 한 query로 끝까지 돈다
+    for (;;) {
+      reopen = false;
+      input = new InputQueue();
+      conversation = sdk.query({
+        prompt: input,
+        options: {
+          cwd: project.root,
+          systemPrompt: buildSystemPrompt(project, { toolName }) + workflowContext(project),
+          // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
+          tools: [],
+          mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
+          allowedTools: specs.map((spec) => toolName(spec.name)),
+          permissionMode: 'dontAsk',
+          strictMcpConfig: true,
+          // 사용자 전역·프로젝트 설정(훅, 플러그인, CLAUDE.md)이 에이전트 동작을 바꾸지 않게 한다
+          settingSources: [],
+          model: modelForQuery,
+          effort,
+          maxTurns,
+          abortController: abort,
+          // 실패한 실행이 다음 요청의 대화를 오염시키지 않도록 매번 갈라서 이어받는다
+          ...(resumeForQuery ? { resume: resumeForQuery, forkSession: true } : {}),
+          env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
+        },
+      });
+      input.push(pendingPrompt);
 
-      switch (message.type) {
-        case 'system':
-          // init은 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
-          if (message.subtype === 'init' && !announced) {
-            announced = true;
-            onEvent({
-              type: 'session',
-              backend: `${BACKEND} (CLI ${message.claude_code_version})`,
-              model: message.model,
-              auth: account ? describeAccount(account) : undefined,
-            });
+      messages: for await (const message of conversation) {
+        if ('session_id' in message && message.session_id) sessionId = message.session_id;
+        if (result) {
+          result.sessionId = sessionId;
+          continue;
+        }
+  
+        switch (message.type) {
+          case 'system':
+            // init은 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
+            if (message.subtype === 'init' && !announced) {
+              announced = true;
+              onEvent({
+                type: 'session',
+                backend: `${BACKEND} (CLI ${message.claude_code_version})`,
+                model: message.model,
+                auth: account ? describeAccount(account) : undefined,
+              });
+            }
+            break;
+  
+          case 'assistant': {
+            // 하위 에이전트 메시지는 없어야 하지만, 섞여 와도 본 대화로 세지 않는다
+            if (message.parent_tool_use_id) break;
+            // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
+            const messageUsage = message.message.usage;
+            if (messageUsage) {
+              metrics.maxContextTokens = Math.max(
+                metrics.maxContextTokens,
+                (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0),
+              );
+            }
+            if (!messageIds.has(message.message.id)) {
+              messageIds.add(message.message.id);
+              onEvent({ type: 'turn', turn: messageIds.size });
+              if (messageIds.size > maxTurns) {
+                await conversation.interrupt().catch(() => {});
+                finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+                break;
+              }
+            }
+            const text = message.message.content
+              .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+              .join('\n')
+              .trim();
+            if (text) {
+              onEvent({ type: 'text', text });
+              lastText = text;
+            }
+            break;
           }
-          break;
-
-        case 'assistant': {
-          // 하위 에이전트 메시지는 없어야 하지만, 섞여 와도 본 대화로 세지 않는다
-          if (message.parent_tool_use_id) break;
-          // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
-          const messageUsage = message.message.usage;
-          if (messageUsage) {
-            metrics.maxContextTokens = Math.max(
-              metrics.maxContextTokens,
-              (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0),
-            );
-          }
-          if (!messageIds.has(message.message.id)) {
-            messageIds.add(message.message.id);
-            onEvent({ type: 'turn', turn: messageIds.size });
-            if (messageIds.size > maxTurns) {
-              await conversation.interrupt().catch(() => {});
-              finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+  
+          case 'result': {
+            setUsage(usage, message);
+            onEvent({ type: 'tokens', usage: { ...usage } });
+            const failure = describeResultFailure(message);
+            if (failure) {
+              finish('failed', failure);
               break;
             }
-          }
-          const text = message.message.content
-            .flatMap((block) => (block.type === 'text' ? [block.text] : []))
-            .join('\n')
-            .trim();
-          if (text) {
-            onEvent({ type: 'text', text });
-            lastText = text;
-          }
-          break;
-        }
-
-        case 'result': {
-          setUsage(usage, message);
-          onEvent({ type: 'tokens', usage: { ...usage } });
-          const failure = describeResultFailure(message);
-          if (failure) {
-            finish('failed', failure);
+            // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
+            if (!gate) {
+              finish('done', lastText);
+              break;
+            }
+            const gateStarted = performance.now();
+            const outcome = await gate.check();
+            metrics.gateMs += Math.round(performance.now() - gateStarted);
+            if (outcome.kind === 'pass') {
+              if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+              finish('done', lastText);
+            }
+            else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
+            else {
+              lastText = '';
+              const key = signatureSetKey(gate.report, gate.checks);
+              escalationHistory.push(key);
+              const times = escalation?.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
+              if (escalation && !escalated && shouldEscalate(escalationHistory, times)) {
+                escalated = true;
+                metrics.escalatedAt = gate.attempts;
+                onEvent({ type: 'model_escalated', from: modelForQuery ?? '기본 모델', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
+                modelForQuery = escalation.to;
+                resumeForQuery = sessionId;
+                pendingPrompt = outcome.feedback;
+                conversation?.close();
+                reopen = true;
+                // 같은 대화를 이어받아 모델만 바꾸려면 새 query를 열어야 한다. 이 query는 여기서 닫는다
+                break messages;
+              }
+              input.push(outcome.feedback);
+            }
             break;
           }
-          // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
-          if (!gate) {
-            finish('done', lastText);
-            break;
-          }
-          const gateStarted = performance.now();
-          const outcome = await gate.check();
-          metrics.gateMs += Math.round(performance.now() - gateStarted);
-          if (outcome.kind === 'pass') {
-            if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
-            finish('done', lastText);
-          }
-          else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
-          else {
-            lastText = '';
-            input.push(outcome.feedback);
-          }
-          break;
         }
       }
+      // 승격이 아니면 query가 스스로 끝난 것이다. 결과를 받지 못했으면 지금처럼 실패로 끝낸다
+      if (result) break;
+      if (!reopen) throw new Error('Claude Code가 결과를 보내지 않고 종료됐습니다');
     }
   } catch (error) {
-    conversation.close();
+    conversation?.close();
     throw error;
   } finally {
     input.close();

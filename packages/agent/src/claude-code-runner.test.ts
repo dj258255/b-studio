@@ -256,6 +256,61 @@ describe('runClaudeCodeAgent', () => {
     ).rejects.toThrow('스크립트에 남은 턴이 없습니다');
     expect(state.closed).toBe(true);
   });
+
+  it('게이트가 같은 실패를 반복하면 같은 세션을 이어받아 모델만 바꾼 다음 query를 연다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+        [{ text: '3' }],
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, true]),
+      sdk,
+      model: 'haiku',
+      escalation: { to: 'sonnet', sameSignatureTimes: 2 },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', sessionId: 'forked-session', verifyAttempts: 2 });
+    // 두 번째 query는 첫 query가 만든 세션을 이어받고 모델만 바뀐다
+    expect(state.options).toMatchObject({ model: 'sonnet', resume: 'new-session', forkSession: true });
+    const escalated = events.filter((event): event is Extract<AgentEvent, { type: 'model_escalated' }> => event.type === 'model_escalated');
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0]).toMatchObject({ from: 'haiku', to: 'sonnet', attempt: 2, sameSignatureTimes: 2 });
+    expect(result.metrics?.escalatedAt).toBe(2);
+  });
+
+  it('escalation을 주지 않으면 게이트가 반복 실패해도 query를 다시 열지 않는다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, true]),
+      sdk,
+      model: 'haiku',
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', sessionId: 'new-session' });
+    expect(state.options).toMatchObject({ model: 'haiku' });
+    expect(state.options?.resume).toBeUndefined();
+    expect(events.some((event) => event.type === 'model_escalated')).toBe(false);
+  });
 });
 
 describe('preflightClaudeCode', () => {

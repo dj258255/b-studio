@@ -48,6 +48,28 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
   return upstreamModelId;
 }
 
+/** 벤치가 넘길 승격 설정. claude-code 백엔드에서만 쓴다 */
+export interface EscalationChoice {
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  to?: string;
+  /** --escalate-after. 기본 2 */
+  after: number;
+}
+
+/**
+ * 승격 인자를 확정한다. --escalate-to는 승격을 지원하는 claude-code 백엔드에서만 쓸 수 있다.
+ * 모델 경로를 조용히 고르지 않는 원칙과 같게, 다른 백엔드에 주면 시작 전에 오류를 낸다.
+ */
+export function resolveEscalation(input: { backend: Backend; escalateTo?: string; escalateAfter?: number }): EscalationChoice {
+  const after = input.escalateAfter ?? 2;
+  if (!Number.isInteger(after) || after < 1) throw new Error(`--escalate-after는 1 이상의 정수여야 합니다 (지금 값: ${input.escalateAfter})`);
+  // --escalate-after만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
+  const to = input.escalateTo?.trim();
+  if (!to) return { after };
+  if (input.backend !== 'claude-code') throw new Error(`--escalate-to는 --backend claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${input.backend})`);
+  return { to, after };
+}
+
 export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinutes: number | undefined): { policy: RateLimitPolicy; waitMinutes: number } {
   const value = onRateLimit?.trim() || 'stop';
   if (value !== 'stop' && value !== 'wait') throw new Error(`--on-rate-limit은 stop 또는 wait여야 합니다 (지금 값: ${onRateLimit})`);

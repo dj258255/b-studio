@@ -4,6 +4,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
+import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
@@ -58,6 +59,8 @@ export interface RunMetrics {
   toolMs: number;
   /** gate.check() 실행 시간 합 */
   gateMs: number;
+  /** 승격이 일어났다면 몇 번째 게이트 시도(실패) 뒤였는지. 승격이 없으면 없다 */
+  escalatedAt?: number;
 }
 
 export interface AgentResult {
@@ -96,6 +99,10 @@ export type AgentEvent =
   | { type: 'tool_result'; name: string; ok: boolean; content: string }
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
+  /** 게이트의 실패 서명이 같은 값으로 반복돼 더 비싼 모델로 올렸다 */
+  | { type: 'model_escalated'; from: string; to: string; attempt: number; signature: string; sameSignatureTimes: number }
+  /** 이 러너가 승격을 지원하지 않아 옵션을 무시했다 */
+  | { type: 'warning'; message: string }
   | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }
   | { type: 'verify_result'; report: VerificationReport; text: string }
@@ -112,6 +119,11 @@ export interface RunAgentOptions {
   project: LoadedProject;
   sandbox: Sandbox;
   client: ModelClient;
+  /**
+   * 게이트 실패 서명이 `sameSignatureTimes`번 반복되면 이후 호출을 `client`로 바꾼다.
+   * 주지 않으면 지금처럼 한 모델로 끝까지 돈다(승격 없음). 한 번 올리면 다시 올리지 않는다.
+   */
+  escalation?: EscalationPolicy & { client: ModelClient };
   /** 요청이 필드·엔드포인트 삭제나 타입 변경을 명시할 때만 true */
   allowBreaking?: boolean;
   /** ask: 질문 모드. 파일을 바꾸는 도구를 거부하고, 바뀐 파일이 없으므로 검증 게이트를 돌리지 않는다 */
@@ -215,6 +227,11 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
   const usage = emptyUsage();
   const metrics = emptyMetrics();
+  // 승격은 게이트의 실패 서명이 정한다. 게이트 실패마다 서명 집합을 쌓고, 같은 집합이 연속되면 모델을 바꾼다
+  const escalation = options.escalation;
+  const escalationHistory: string[] = [];
+  let escalated = false;
+  let activeClient = client;
 
   const finish = (status: AgentResult['status'], summary: string, turns: number): AgentResult => {
     const result: AgentResult = {
@@ -238,7 +255,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     onEvent({ type: 'turn', turn });
 
     const modelStarted = performance.now();
-    const message = await client.createMessage({ system, tools, messages }, signal);
+    const message = await activeClient.createMessage({ system, tools, messages }, signal);
     metrics.modelMs += Math.round(performance.now() - modelStarted);
     metrics.modelCalls += 1;
     metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(message.usage));
@@ -316,6 +333,17 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       return finish('done', text, turn);
     }
     if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    if (escalation && !escalated) {
+      const key = signatureSetKey(gate.report, gate.checks);
+      escalationHistory.push(key);
+      const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
+      if (shouldEscalate(escalationHistory, times)) {
+        escalated = true;
+        metrics.escalatedAt = gate.attempts;
+        onEvent({ type: 'model_escalated', from: client.info?.model ?? '알 수 없음', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
+        activeClient = escalation.client;
+      }
+    }
     messages.push({ role: 'user', content: outcome.feedback });
   }
 

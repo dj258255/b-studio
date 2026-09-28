@@ -26,6 +26,9 @@ pnpm bench:coordination --backend openai
 # claude-code: 이 PC에 로그인된 구독 CLI (유료 API 없이 E1을 돌린다)
 pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list --strategies S0,S1 --repeats 1
 
+# claude-code 승격(H5): haiku로 시작해 게이트가 같은 실패 서명을 2번 내면 sonnet으로 올린다
+pnpm bench:coordination --backend claude-code --model haiku --escalate-to sonnet --tasks orders-list --strategies S0 --repeats 1
+
 # codex: 이 PC에 ChatGPT로 로그인된 Codex CLI. --model을 생략하면 로그인 계정의 기본 모델을 쓴다
 pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 --repeats 1
 
@@ -39,6 +42,8 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--model <이름>` — `claude-code`·`codex`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `codex`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CODEX_MODEL`)
 - `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
+- `--escalate-to <모델>` — `claude-code`에서만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). 다른 백엔드에 주면 시작 전에 오류를 낸다
+- `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
 
 **claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
 
@@ -59,9 +64,11 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
 
-- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 수용 확인, 분류, 프록시 통계, 관측한 모델, 추정 비용).
-- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, git 커밋.
+- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용).
+- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표("승격 건수" 열 포함), 전략별 실패 원인 표.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, 승격 설정(`escalateTo`·`escalateAfter`), git 커밋.
+
+행의 `escalation`은 `{ to, after, escalated, attempt? }`입니다. `to`·`after`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).
 
 원자료에는 레인·통합 세션마다의 탐색·실패 흔적도 남깁니다.
 

@@ -27,6 +27,18 @@ export interface BenchIntegrationRow {
   error?: string;
 }
 
+/** 한 실행의 승격 결과. 승격을 설정하지 않은 실행은 to가 없다 */
+export interface BenchEscalation {
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  to?: string;
+  /** --escalate-after */
+  after: number;
+  /** 이 실행에서 한 번이라도 승격이 일어났는지 */
+  escalated: boolean;
+  /** 승격이 일어난 뒤의 게이트 시도(실패) 횟수 */
+  attempt?: number;
+}
+
 export interface BenchProxyStats {
   forwardedCalls: number;
   requestBytes: number;
@@ -61,6 +73,8 @@ export interface BenchRow {
   explore: { filesReadTotal: number; filesReadUnionAcrossLanes: number; readCallsTotal: number };
   /** 검증기가 낸 실패 서명 합계 */
   failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
+  /** 모델 승격 설정과 이 실행의 승격 결과 */
+  escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;
   /** S2~S5의 게시판 지표. 공유 없음(S0·S1)이면 없다 */
   coordination?: TaskPlanCoordinationMetrics;
@@ -106,6 +120,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '실패 서명 중앙값',
     '반복 실패 중앙값',
     '게시·읽기 바이트 중앙값',
+    '승격 건수',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -141,6 +156,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         count(medianValue(group, (row) => withLaneSessions(row, row.failures.repeatedFailures))),
         '|',
         count(medianValue(group, (row) => row.coordination?.bytesRead)),
+        '|',
+        String(group.filter((row) => row.escalation.escalated).length),
         '|',
       ].join(' '),
     );

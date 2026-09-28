@@ -36,6 +36,7 @@ function row(over: Partial<BenchRow>): BenchRow {
     traces: [],
     explore: { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 },
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
+    escalation: { after: 2, escalated: false },
     success: true,
     category: 'none',
     detail: '',
@@ -88,15 +89,28 @@ describe('summarize', () => {
     const markdown = summarize(rows, meta);
 
     // orders-list S0: 2회 중 1회 성공, 값이 있는 실행만으로 중앙값을 낸다
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 3 | 2 | 1 | — |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 3 | 2 | 1 | — | 0 |');
     // 나머지 행은 레인 세션이 없어 탐색·실패 열이 —다
-    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | — | — | — | — |');
-    expect(markdown).toContain('| independent | X | S0 | 1/1 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | — | — | — | — |');
+    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | — | — | — | — | 0 |');
+    expect(markdown).toContain('| independent | X | S0 | 1/1 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | — | — | — | — | 0 |');
   });
 
   it('탐색·실패·조율 열을 표 1에 더한다', () => {
     const markdown = summarize(rows, meta);
-    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 |');
+    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 | 승격 건수 |');
+  });
+
+  it('승격 건수 열에 escalated 실행 수를 센다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: true, attempt: 2 } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: false } }),
+        row({ taskId: 'orders-list', strategy: 'S0' }),
+      ],
+      meta,
+    );
+    expect(markdown).toMatch(/\| \S+ 건수 \|/);
+    expect(markdown).toContain('| orders-list | O | S0 | 3/3 | — | — | — | — | — | — | — | — | — | — | 1 |');
   });
 
   it('조율 게시판의 읽은 바이트 중앙값을 낸다', () => {
@@ -136,13 +150,13 @@ describe('summarize', () => {
       ],
       meta,
     );
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | 10 | 4 | 0 | — |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | 10 | 4 | 0 | — | 0 |');
   });
 
   it('값이 하나도 없으면 —로 둔다', () => {
     const markdown = summarize(rows, meta);
     // independent S1의 두 실행 모두 metrics가 없다. 레인 세션도 없어 탐색·실패 열까지 —다
-    expect(markdown).toContain('| independent | X | S1 | 2/2 | — | — | — | — | — | — | — | — | — | — |');
+    expect(markdown).toContain('| independent | X | S1 | 2/2 | — | — | — | — | — | — | — | — | — | — | 0 |');
   });
 
   it('전략별 실패 원인에 rate_limited 열을 포함해 건수로 센다', () => {
