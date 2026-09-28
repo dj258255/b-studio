@@ -80,6 +80,19 @@ pnpm studio sandbox prune
 
 다른 PC에서 미리보기를 열려면 `B_STUDIO_PREVIEW_DOMAIN`, `B_STUDIO_PREVIEW_BIND`, `B_STUDIO_PREVIEW_PORT`로 호스트 기반 게이트웨이를 구성합니다. TLS 종료 프록시가 원래 `Host` 정보를 보존해야 합니다.
 
+## 세션 브랜치와 PR
+
+원본 프로젝트가 Git 저장소면 스튜디오는 세션 브랜치를 원격에 올리고 PR을 만들 수 있습니다. 호스트마다 토큰을 설정합니다: `B_STUDIO_GITHUB_TOKEN`, `B_STUDIO_GITLAB_TOKEN`, `B_STUDIO_GITEA_TOKEN`. 주소만으로 종류를 알 수 없는 사내 호스트는 `B_STUDIO_GIT_PROVIDER`(github·gitlab·gitea)로 정하고, 필요하면 `B_STUDIO_GITHUB_API_URL`, `B_STUDIO_GITLAB_API_URL`, `B_STUDIO_GITEA_API_URL`로 API 주소를 바꿉니다. 토큰이 없으면 PR을 만들지 않고 작성 페이지 링크만 보여 줍니다.
+
+올리고 PR을 만들기 전에 미리보기 패널이 열립니다. 이슈 번호를 넣으면 PR 본문 첫 줄에 `Closes #N`이 들어가 병합할 때 이슈를 함께 닫고, 확인 목록에 다음이 보입니다.
+
+- 이슈 연결 여부와 원격 이슈의 존재·열림 여부. 이슈 조회는 GitHub·Gitea `GET /repos/{owner}/{repo}/issues/{n}`, GitLab `GET /projects/{id}/issues/{iid}`를 씁니다. 조회 실패(네트워크·권한·토큰 없음)는 `?`와 이유로 두고 막지 않습니다.
+- 필수 워크플로 단계 기록(`Workflow-Passed` 트레일러)이 없는 커밋 수.
+- 체크포인트로 남기지 않은 변경 수.
+- 진행 중인 작업 여부.
+
+누락이 ✗로 보여도 PR 만들기는 막지 않습니다. 사람이 판단해 올리고, 배포 조건은 `releaseRequires`가 따로 막습니다.
+
 ## 백업과 복구
 
 세션·체크포인트, DB 덤프, 사용량 기록, 배포 상태, 인증 설정, 모델 레지스트리를 백업하세요. 소스 코드와 데이터베이스 내용이 포함될 수 있으므로 암호화와 보존 기간을 조직 정책에 맞추고 실제 복구 훈련을 수행해야 합니다.

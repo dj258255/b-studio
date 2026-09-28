@@ -2,14 +2,15 @@
 
 import { useState } from "react";
 import type { SessionView } from "@/lib/session-view";
-import type { ExportResult } from "@/lib/studio-events";
+import { ExportPreview } from "./export-preview";
 import { useSessionAccess } from "./session-access";
 
 /** 세션 브랜치를 원격에 올리고 PR을 만드는 영역. 원본 프로젝트가 Git 저장소인 세션에서만 쓸 수 있다 */
 export function RepositoryBar({ view }: { view: SessionView }) {
   const { snapshot } = view;
   const repository = snapshot.repository;
-  const [busy, setBusy] = useState<"push" | "pull-request" | "sync">();
+  const [busy, setBusy] = useState<"push" | "sync">();
+  const [previewing, setPreviewing] = useState(false);
   const [error, setError] = useState<string>();
   const access = useSessionAccess();
 
@@ -40,18 +41,16 @@ export function RepositoryBar({ view }: { view: SessionView }) {
   const showCreate = repository.canCreatePullRequest && !repository.pullRequestUrl;
   const showCompare = !repository.canCreatePullRequest && !repository.pullRequestUrl && repository.compareUrl && repository.pushedSha;
 
-  async function upload(pullRequest: boolean) {
-    setBusy(pullRequest ? "pull-request" : "push");
+  async function upload() {
+    setBusy("push");
     setError(undefined);
     try {
       const response = await fetch(`/api/sessions/${snapshot.id}/export`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pullRequest }),
+        body: JSON.stringify({ pullRequest: false }),
       });
-      const data = await response.json();
-      if (!response.ok) setError(data.error ?? "올리지 못했습니다");
-      else if ((data as ExportResult).pullRequestError) setError(`브랜치는 올렸지만 ${label}을 만들지 못했습니다: ${data.pullRequestError}`);
+      if (!response.ok) setError((await response.json()).error ?? "올리지 못했습니다");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -126,7 +125,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
           </button>
           <button
             type="button"
-            onClick={() => void upload(false)}
+            onClick={() => void upload()}
             disabled={!canPush}
             className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
           >
@@ -135,11 +134,11 @@ export function RepositoryBar({ view }: { view: SessionView }) {
           {showCreate && (
             <button
               type="button"
-              onClick={() => void upload(true)}
+              onClick={() => setPreviewing(true)}
               disabled={!idle || sessionCheckpoints === 0}
               className="rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
             >
-              {busy === "pull-request" ? "올리는 중" : `올리고 ${label} 만들기`}
+              {`올리고 ${label} 만들기`}
             </button>
           )}
         </div>
@@ -150,6 +149,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
         <p className="mt-1 text-sm text-wait">원본 폴더에서 커밋하지 않은 변경 {repository.sourceDirtyFiles}개는 이 세션에 들어 있지 않습니다.</p>
       )}
       {error && <p className="mt-1 text-sm text-fail">{error}</p>}
+      {previewing && showCreate && <ExportPreview sessionId={snapshot.id} label={label} onClose={() => setPreviewing(false)} />}
     </div>
   );
 }

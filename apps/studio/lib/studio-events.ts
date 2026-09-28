@@ -284,6 +284,8 @@ export type StudioEvent =
       pullRequest?: { url: string; created: boolean };
       /** 브랜치는 올렸지만 PR을 만들지 못한 이유 */
       pullRequestError?: string;
+      /** PR에 연결한 이슈 번호. 연결하지 않았거나 PR을 만들지 않았으면 없다 */
+      issue?: number;
     }
   | { type: 'deploy_started'; action: DeployAction; target: string; at: string; by?: string }
   /** 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷의 deploying.lines에서 최근 줄을 받는다 */
@@ -301,6 +303,22 @@ export type StudioEvent =
   | { type: 'deploy_failed'; action: DeployAction; target: string; error: string; detail?: string };
 
 export type ExportResult = Omit<Extract<StudioEvent, { type: 'exported' }>, 'type'>;
+
+/** 올리기 전 미리보기. PR 생성은 사람이 확인한 뒤 결정하고, 누락은 확인 목록에 보이게만 한다 */
+export interface ExportPreview {
+  title: string;
+  body: string;
+  /** 토큰이 있고 호스트가 지원해 실제로 PR을 만들 수 있는가 */
+  canCreate: boolean;
+  /** 이미 같은 브랜치로 열려 있는 PR 주소 */
+  existingPullRequest?: string;
+  checks: Array<{
+    id: 'issue_linked' | 'issue_open' | 'stages_passed' | 'uncheckpointed_changes' | 'running';
+    /** unknown: 확인하지 못했지만 올리기를 막지는 않는 항목 (예: 원격 이슈 조회 실패) */
+    ok: boolean | 'unknown';
+    detail: string;
+  }>;
+}
 
 export interface ProxyResponse {
   status: number;
