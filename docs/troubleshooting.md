@@ -1599,4 +1599,4 @@ Configuration cache entry discarded due to serialization error.
 ### 재발 방지와 확인
 - 요청 한도가 풀린 뒤 이미지를 다시 빌드하고, 테스트 실행 중 api 컨테이너가 받은 바이트([#94](https://github.com/dj258255/b-studio/issues/94)의 기록)가 줄었는지 확인합니다.
 - 실험 결과에서는 이 두 실행을 조율 전략의 실패가 아니라 환경 실패로 따로 분류하고 다시 돌립니다.
-- 교훈: 모델이 "고치려고" 빌드 파일을 건드리면 원인이 더 가려집니다. 게이트 실패 메시지에 원인이 된 외부 응답(429)이 드러나지 않았던 것이 진단을 늦췄습니다.
+- 교훈: 모델이 "고치려고" 빌드 파일을 건드리면 원인이 더 가려집니다. 게이트 실패 출력의 **앞부분**은 설정 캐시 오류였고, 진짜 원인(`Received status code 429 from server: Too Many Requests`)은 긴 출력의 **뒤쪽**에 있었습니다. 명령 출력을 뒤쪽 위주로 남기는 도구 결과 예산([#96](https://github.com/dj258255/b-studio/pull/96))이 이런 경우를 돕습니다.
