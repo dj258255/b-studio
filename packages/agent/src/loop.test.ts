@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { runAgent, type AgentEvent, type ModelClient, type RunAgentOptions } from './loop';
 import { ScriptedModelClient } from './scripted-client';
-import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
+import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;
 
@@ -330,5 +330,102 @@ describe('runAgent', () => {
       fetcher: async () => contract,
     });
     expect(result).toMatchObject({ status: 'failed', summary: '모델이 요청을 거절했습니다 (scripted)' });
+  });
+
+  it('실행 중 지시는 다음 모델 호출 직전에 도구 결과 뒤에 붙는다(도구 호출 도중에 끼어들지 않는다)', async () => {
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] },
+      { text: '주문 API입니다.' },
+    ]);
+    // 첫 모델 응답 뒤(도구를 쓰는 동안) 사용자가 지시를 보낸다
+    const wrapped: ModelClient = {
+      async createMessage(request) {
+        const message = await client.createMessage(request);
+        if (client.requests.length === 1) {
+          queue.push('메모 필드도 추가해줘');
+          queue.push('테스트도 추가해줘');
+        }
+        return message;
+      },
+    };
+
+    const result = await runAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client: wrapped,
+      steering: queue.steering,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result.status).toBe('done');
+    // 첫 모델 호출에는 지시가 없다
+    expect(client.requests[0]!.messages.some((m) => typeof m.content === 'string' && m.content.includes('[진행 중 지시]'))).toBe(false);
+
+    // 두 번째 호출에는 도구 결과(user 배열) 뒤에 지시가 텍스트 블록으로 붙는다. 연속 user 메시지를 만들지 않는다
+    const second = client.requests[1]!.messages;
+    const last = second.at(-1)!;
+    expect(Array.isArray(last.content)).toBe(true);
+    const directive = (last.content as Array<{ type: string; text?: string }>).find((block) => block.type === 'text' && block.text?.includes('[진행 중 지시]'));
+    expect(directive?.text).toBe('[진행 중 지시] 메모 필드도 추가해줘\n테스트도 추가해줘');
+    expect(second.filter((m) => m.role === 'user')).toHaveLength(2); // 요청 + (도구 결과 + 지시)
+
+    expect(events.filter((event): event is Extract<AgentEvent, { type: 'steer_applied' }> => event.type === 'steer_applied')).toMatchObject([{ count: 2 }]);
+  });
+
+  it('게이트 피드백과 지시가 함께 있으면 둘 다 넣고 지시를 뒤에 둔다', async () => {
+    const queue = fakeSteering();
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
+      { text: '메모를 추가했습니다.' },
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '고쳤습니다.' },
+    ]);
+    const base = fakeSandbox(project, [false, true]);
+    // 게이트가 서비스를 다시 띄우는 동안 사용자가 지시를 보낸다
+    const sandbox = {
+      ...base,
+      async restart(service: string, options?: StartOptions) {
+        queue.push('테스트도 추가해줘');
+        return base.restart(service, options);
+      },
+    };
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox,
+      client,
+      steering: queue.steering,
+      fetcher: async () => contract,
+    });
+
+    expect(result.status).toBe('done');
+    // 게이트 피드백이 먼저 들어가고, 다음 모델 호출 직전에 지시가 그 뒤에 붙는다
+    const retry = client.requests[2]!.messages.at(-1)!;
+    const content = String(retry.content);
+    expect(content).toContain('[b-studio 검증 게이트]');
+    expect(content).toContain('[진행 중 지시] 테스트도 추가해줘');
+    expect(content.indexOf('[b-studio 검증 게이트]')).toBeLessThan(content.indexOf('[진행 중 지시]'));
+  });
+
+  it('steering을 주지 않으면 지시가 있어도 대화에 넣지 않는다(기본값)', async () => {
+    const queue = fakeSteering();
+    queue.push('무시되어야 한다');
+    const client = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+
+    const result = await runAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client,
+      fetcher: async () => contract,
+    });
+
+    expect(result.status).toBe('done');
+    expect(client.requests[0]!.messages.some((m) => typeof m.content === 'string' && m.content.includes('[진행 중 지시]'))).toBe(false);
   });
 });

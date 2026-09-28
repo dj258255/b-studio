@@ -20,6 +20,8 @@ export interface ToolCallView {
 
 export type ChatItem =
   | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
+  /** 실행 중 보낸 지시. queued: 아직 반영 전, applied: 대화에 들어감, dropped: 끝날 때까지 반영되지 못함 */
+  | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
   | {
       kind: 'route';
       runId: string;
@@ -171,6 +173,10 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };
+    case 'steer_queued':
+      return { ...view, chat: [...view.chat, { kind: 'steer', runId: event.runId, text: event.text, status: 'queued' }] };
+    case 'steer_dropped':
+      return { ...view, chat: settleSteering(view.chat, event.runId) };
     case 'tokens':
       // 합계를 더하지 않고 서버가 보낸 값으로 바꿔서, 다시 연결해 기록을 재생해도 두 번 세지 않는다
       return { ...patchSnapshot(view, { tokens: event.sessionTokens }), runTokens: { runId: event.runId, usage: event.usage } };
@@ -364,6 +370,23 @@ function markInterrupted(chat: ChatItem[], runId: string): ChatItem[] {
   });
 }
 
+/** 지시가 대화에 들어간 만큼 앞에서부터 반영됨으로 표시한다 */
+function applySteerApplied(chat: ChatItem[], runId: string, count: number): ChatItem[] {
+  let remaining = count;
+  return chat.map((item) => {
+    if (remaining > 0 && item.kind === 'steer' && item.runId === runId && item.status === 'queued') {
+      remaining -= 1;
+      return { ...item, status: 'applied' as const };
+    }
+    return item;
+  });
+}
+
+/** 실행이 끝날 때까지 반영되지 못한 지시를 적용 실패로 표시한다 */
+function settleSteering(chat: ChatItem[], runId: string): ChatItem[] {
+  return chat.map((item) => (item.kind === 'steer' && item.runId === runId && item.status === 'queued' ? { ...item, status: 'dropped' as const } : item));
+}
+
 function settleRemoteSync(chat: ChatItem[], result: NonNullable<RemoteSyncItem['result']>): ChatItem[] {
   const index = chat.findLastIndex((item) => item.kind === 'remoteSync' && !item.result);
   // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
@@ -406,6 +429,9 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
 
     case 'session':
       return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
+
+    case 'steer_applied':
+      return applySteerApplied(chat, runId, event.count);
 
     case 'stage':
       return [...chat, { kind: 'stage', runId, stage: event.stage }];

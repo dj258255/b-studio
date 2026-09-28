@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ContainerState, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { OpenApiDocument } from './contract-diff';
+import type { Steering } from './loop';
 
 /** 단위 테스트 전용. 서비스 하나(api)짜리 주문 프로젝트를 임시 폴더에 만든다 */
 export async function createOrdersProject(prefix: string): Promise<LoadedProject> {
@@ -15,6 +16,25 @@ export async function createOrdersProject(prefix: string): Promise<LoadedProject
     spec: { name: 'orders' },
     managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }]],
   } as unknown as LoadedProject;
+}
+
+/** 진행 중 지시 큐를 흉내 낸다. push하면 알림(onPush)이 기다리는 러너에게 전달된다 */
+export function fakeSteering(): { steering: Steering; push: (text: string) => void } {
+  const items: string[] = [];
+  const listeners = new Set<() => void>();
+  return {
+    steering: {
+      take: () => items.splice(0),
+      onPush: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
+    push: (text) => {
+      items.push(text);
+      for (const listener of listeners) listener();
+    },
+  };
 }
 
 export const ORDERS_CONTRACT: OpenApiDocument = {

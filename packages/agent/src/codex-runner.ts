@@ -6,7 +6,7 @@ import type { Thread, ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sd
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import { VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
@@ -120,6 +120,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     effort,
     sdk = DEFAULT_SDK,
     intent = 'build',
+    steering,
   } = options;
   signal?.throwIfAborted();
   if (resume) {
@@ -231,6 +232,12 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();
       onEvent({ type: 'turn', turn });
+      // Codex는 턴 사이에만 지시를 넣을 수 있다. 다음 턴 입력 뒤에 붙여 게이트 피드백보다 뒤에 오게 한다
+      const steeringTexts = takeSteering(steering);
+      if (steeringTexts.length > 0) {
+        pending = `${pending}\n\n${formatSteering(steeringTexts)}`;
+        onEvent({ type: 'steer_applied', count: steeringTexts.length });
+      }
       const { events } = await thread.runStreamed(pending, { signal });
 
       let failure: string | undefined;

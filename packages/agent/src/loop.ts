@@ -39,6 +39,59 @@ export interface ModelClient {
   createMessage(request: AgentRequest, signal?: AbortSignal): Promise<BetaMessage>;
 }
 
+/**
+ * 실행 중 지시 큐. 스튜디오가 채우고 러너가 꺼내 간다. 꺼내는 시점은 러너마다 다르다
+ * (API 루프·Codex는 다음 모델 호출 직전, 로컬 Claude는 입력 큐에 들어올 때).
+ * 어떤 러너든 도구 호출 도중에 끼어들지 않고, 지금 하던 도구 호출이 끝난 뒤에만 반영한다.
+ */
+export interface Steering {
+  /** 쌓인 지시를 꺼내 비운다 */
+  take(): string[];
+  /**
+   * 지시가 들어올 때 알린다(선택). 모델 호출 지점을 직접 잡을 수 없는 로컬 Claude 러너가
+   * 입력 큐에 대기 없이 넣는 데 쓴다. 없으면 러너가 짧은 주기로 take()를 부른다.
+   * 돌려준 함수로 구독을 해제한다.
+   */
+  onPush?(listener: () => void): () => void;
+}
+
+/** 진행 중 지시를 대화에 넣을 때 붙이는 표시 */
+export const STEERING_MARKER = '[진행 중 지시]';
+
+/** 지시 여러 개를 한 사용자 메시지로 만든다. 여러 개면 줄바꿈으로 잇는다 */
+export function formatSteering(texts: readonly string[]): string {
+  return `${STEERING_MARKER} ${texts.join('\n')}`;
+}
+
+/** 지시 큐에서 꺼낸다. 큐 구현이 던져도 실행을 멈추지 않는다 */
+export function takeSteering(steering: Steering | undefined): string[] {
+  try {
+    return steering?.take() ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 사용자 메시지를 대화에 넣는다. API는 user/assistant가 번갈아야 하므로,
+ * 마지막 메시지가 이미 사용자면 거기에 이어 붙이고(도구 결과 배열이면 텍스트 블록을 더한다),
+ * 아니면 새 사용자 메시지를 넣는다.
+ */
+export function appendUserText(messages: BetaMessageParam[], text: string): void {
+  const last = messages.at(-1);
+  if (last?.role === 'user') {
+    if (typeof last.content === 'string') {
+      last.content = `${last.content}\n\n${text}`;
+      return;
+    }
+    if (Array.isArray(last.content)) {
+      last.content.push({ type: 'text', text });
+      return;
+    }
+  }
+  messages.push({ role: 'user', content: text });
+}
+
 export interface AgentUsage {
   inputTokens: number;
   outputTokens: number;
@@ -96,6 +149,8 @@ export type AgentEvent =
   | { type: 'tool_result'; name: string; ok: boolean; content: string }
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
+  /** 진행 중 지시를 다음 모델 호출 전에 대화에 넣었다 */
+  | { type: 'steer_applied'; count: number }
   | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }
   | { type: 'verify_result'; report: VerificationReport; text: string }
@@ -109,6 +164,11 @@ export interface RunAgentOptions {
    * 실행 중 예외가 나면 이번 실행분은 되돌려 다음 요청이 깨진 대화로 시작하지 않게 한다.
    */
   conversation?: BetaMessageParam[];
+  /**
+   * 실행 도중 들어온 지시를 꺼내는 큐. 주면 다음 모델 호출 직전에 take()해 대화에 넣는다.
+   * 도구 호출 도중에는 끼어들지 않고, 도구 결과가 대화에 들어간 뒤 다음 호출 전에만 반영한다.
+   */
+  steering?: Steering;
   project: LoadedProject;
   sandbox: Sandbox;
   client: ModelClient;
@@ -231,6 +291,13 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   for (let turn = 1; turn <= maxTurns; turn++) {
     signal?.throwIfAborted();
     onEvent({ type: 'turn', turn });
+
+    // 진행 중 지시는 다음 모델 호출 직전에만 넣는다. 도구 결과가 들어간 뒤라 도구 호출 도중에 끼어들지 않는다
+    const steering = takeSteering(options.steering);
+    if (steering.length > 0) {
+      appendUserText(messages, formatSteering(steering));
+      onEvent({ type: 'steer_applied', count: steering.length });
+    }
 
     const modelStarted = performance.now();
     const message = await client.createMessage({ system, tools, messages }, signal);

@@ -11,7 +11,8 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     if (typeof body.text !== 'string') throw new StudioError(400, 'text가 필요합니다');
     const intent = body.intent ?? 'build';
     if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
-    return Response.json(sendMessage(id, body.text, { allowBreaking: body.allowBreaking === true, by: user, intent }), { status: 202 });
+    // 사람이 보는 단일 세션에서 시작한 실행이라 실행 중 지시를 받는다(레인·플릿은 이 라우트를 쓰지 않는다)
+    return Response.json(sendMessage(id, body.text, { allowBreaking: body.allowBreaking === true, by: user, intent, steering: true }), { status: 202 });
   } catch (error) {
     return errorResponse(error);
   }
