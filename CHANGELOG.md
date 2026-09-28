@@ -14,6 +14,11 @@
 
 - `CONTRIBUTING.md`에 작업 흐름·예상 갱신·실험·측정 용어 절을 더하고, PR 체크리스트를 PR 템플릿으로 옮겼습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 
+### 수정
+
+- 격리 샌드박스의 Node 서비스가 edge 프록시를 쓰도록 `NODE_USE_ENV_PROXY=1`을 넘깁니다 ([#69](https://github.com/dj258255/b-studio/issues/69)).
+- 예제 api 컨테이너의 메모리 한도를 1536m에서 2048m으로 올려, 개발 서버 옆에서 테스트를 돌릴 때 OOM으로 실패하지 않게 합니다 ([#70](https://github.com/dj258255/b-studio/issues/70)).
+
 ### 문서
 
 - `README.md`, `docs/README.md`, Wiki 개발 페이지의 문서 안내를 로드맵·변경 기록·문서 양식에 연결했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).

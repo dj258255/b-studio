@@ -102,6 +102,7 @@ describe('buildKubernetesManifests', () => {
 
     expect(api).toContainEqual({ name: 'HTTPS_PROXY', value: 'http://b-studio-edge:3128' });
     expect(api).toContainEqual({ name: 'NO_PROXY', value: 'localhost,127.0.0.1,web,api,db,legacy-users' });
+    expect(api).toContainEqual({ name: 'NODE_USE_ENV_PROXY', value: '1' });
     expect(api).toContainEqual({ name: 'DATABASE_URL', value: 'jdbc:postgresql://db:5432/app' });
     expect(api).toContainEqual({ name: 'PAYMENT_API_KEY', valueFrom: { secretKeyRef: { name: 'b-studio-secrets', key: 'PAYMENT_API_KEY' } } });
     expect(api.some((entry) => entry.name === 'PASSTHROUGH')).toBe(false);
