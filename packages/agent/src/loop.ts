@@ -2,7 +2,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
-import { VerificationGate, type PageFetcher } from './gate';
+import type { DesignSource } from './design';
+import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
@@ -125,6 +126,12 @@ export interface RunAgentOptions {
   fetcher?: ContractFetcher;
   pageFetcher?: PageFetcher;
   browserRunner?: BrowserRunner;
+  /** 화면 확인 스크린샷을 저장하고 식별자를 돌려준다. 저장은 호출자가 한다 (agent는 파일 위치를 모른다) */
+  saveArtifact?: GateOptions['saveArtifact'];
+  /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
+  onBrowserFrame?: GateOptions['onBrowserFrame'];
+  /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘긴다(없으면 디자인 도구가 목록에 없다) */
+  design?: DesignSource;
   /** 도구 호출을 실행기에서 통제하는 정책 */
   policy?: ExecutionPolicy;
   approvalToken?: string;
@@ -169,6 +176,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     fetcher = fetchContract,
     pageFetcher,
     browserRunner,
+    saveArtifact,
+    onBrowserFrame,
+    design,
     intent = 'build',
   } = options;
   const ask = intent === 'ask';
@@ -188,13 +198,18 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         fetcher,
         pageFetcher,
         browserRunner,
+        saveArtifact,
+        onBrowserFrame,
         signal,
         onServiceStatus,
         onEvent,
       });
   const system = buildSystemPrompt(project) + workflowContext(project);
   const policy = options.policy ?? executionPolicyFor(project);
-  const tools = buildTools(project, options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {});
+  const tools = buildTools(project, {
+    ...(options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {}),
+    design: design !== undefined,
+  });
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
@@ -261,6 +276,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           signal,
           onServiceStatus,
           readOnly: ask,
+          design,
           policy,
           approvalToken: options.approvalToken,
           requestApproval: options.requestApproval,

@@ -453,6 +453,8 @@ async function main(): Promise<void> {
   const workRoot = await mkdtemp(path.join(homedir(), '.cache/b-studio/bench-work-'));
   const activeSessions = new Set<string>();
   const startedAt = new Date().toISOString();
+  // 실행 중에 작업 트리가 바뀌어도(병합·pull) 이미 올라간 코드는 시작 시점의 것이다. 그래서 커밋은 시작할 때 읽는다
+  const commitAtStart = gitCommit();
 
   let cleaned = false;
   const cleanup = async (): Promise<void> => {
@@ -623,7 +625,9 @@ async function main(): Promise<void> {
           requestedModel,
           observedModels,
           dockerMemTotal,
-          gitCommit: gitCommit(),
+          gitCommit: commitAtStart,
+          // 끝날 때 다르면 기록한다. 결과를 해석할 때 어느 코드로 돌았는지 헷갈리지 않게
+          ...(gitCommit() === commitAtStart ? {} : { gitCommitAtEnd: gitCommit() }),
           tasks: tasks.map((task) => task.id),
           strategies,
           topology,

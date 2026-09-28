@@ -30,8 +30,28 @@ export {
 } from './codex-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
-export { BrowserUnavailableError, runInBrowser, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
+export {
+  BrowserUnavailableError,
+  launchBrowser,
+  runInBrowser,
+  StepFailedError,
+  type BrowserFrame,
+  type BrowserPageOptions,
+  type BrowserPageResult,
+  type BrowserPageStep,
+  type BrowserRunner,
+} from './browser-check';
+export {
+  openRemoteBrowser,
+  type RemoteBrowser,
+  type RemoteBrowserKeyEvent,
+  type RemoteBrowserMouseEvent,
+  type RemoteBrowserOptions,
+  type RemoteBrowserPick,
+  type RemoteBrowserViewport,
+} from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
+export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { isInScope, MAX_PLAN_LANES, MAX_PLAN_TASKS, planLanes, requestTaskPlan, TaskPlanError, type PlannedTask, type TaskLane } from './task-plan';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
@@ -119,7 +139,10 @@ export {
   workflowReleaseRequirements,
   workflowStages,
   type WorkflowCheck,
+  type WorkflowCompare,
+  type WorkflowStepCheck,
 } from './workflow';
+export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
 export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';

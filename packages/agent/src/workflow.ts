@@ -10,12 +10,35 @@ export const VERIFICATION_STAGES: readonly WorkflowStage[] = ['run', 'browser_ch
 /** workflow를 선언하지 않았을 때도 플랫폼이 항상 실행하는 단계만 둔다. 실행 수단이 없는 단계를 기본값에 넣으면 통과처럼 보이기만 한다 */
 export const DEFAULT_WORKFLOW: readonly WorkflowStage[] = ['plan', 'implement', 'run', 'contract_check', 'review', 'checkpoint'];
 
+/** 화면 확인의 단계별 결과. 스크린샷을 저장했으면 artifact에 저장 식별자가 들어간다 */
+export interface WorkflowStepCheck {
+  label: string;
+  ok: boolean;
+  detail?: string;
+  artifact?: string;
+}
+
+/** browser 화면 확인이 디자인 기준 이미지와 비교한 결과. 세 이미지는 산출물 식별자다 */
+export interface WorkflowCompare {
+  /** 실제 화면이 디자인과 다른 픽셀 비율 (0~1) */
+  ratio: number;
+  /** 허용한 최대 비율 (0~1) */
+  max: number;
+  reference?: string;
+  actual?: string;
+  diff?: string;
+}
+
 export interface WorkflowCheck {
   stage: 'browser_check' | 'test' | 'review';
   name: string;
   ok: boolean;
   attempts: number;
   detail?: string;
+  /** browser 모드 화면 확인의 단계별 결과. 스크린샷을 저장하지 않았으면 없다 */
+  steps?: WorkflowStepCheck[];
+  /** 디자인 기준 이미지와 비교했으면 그 결과. compare를 선언하지 않았으면 없다 */
+  compare?: WorkflowCompare;
 }
 
 /** studio.yaml의 선언을 실행기 정책으로 변환한다. 프롬프트와 별개로 항상 적용된다. */

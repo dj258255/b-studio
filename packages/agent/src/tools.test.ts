@@ -76,6 +76,39 @@ describe('질문 모드', () => {
   });
 });
 
+describe('디자인 도구', () => {
+  const design = {
+    frames: async () => [{ id: '1:2', name: 'Orders', page: 'Page 1', width: 375, height: 812 }],
+    frame: async (id: string) => ({ summary: `frame ${id} summary`, png: Buffer.from([1, 2, 3]) }),
+    saveArtifact: async (name: string, data: Buffer) => `artifact/${name}/${data.length}`,
+  };
+
+  it('design을 넘기면 도구 목록에 더하고, 넘기지 않으면 목록이 그대로다', () => {
+    expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('design_frames');
+    expect(buildTools(project, { design: true }).map((candidate) => candidate.name)).toEqual(expect.arrayContaining(['design_frames', 'design_frame']));
+  });
+
+  it('design_frames는 페이지·id·이름·크기를 돌려준다', async () => {
+    expect(await executeTool('design_frames', {}, { ...context, design })).toEqual({ ok: true, content: '1:2\tPage 1\tOrders\t375x812' });
+  });
+
+  it('design_frame은 요약과 저장한 산출물 경로를 돌려주고 이미지는 넘기지 않는다', async () => {
+    const outcome = await executeTool('design_frame', { id: '1:2' }, { ...context, design });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.content).toContain('frame 1:2 summary');
+    expect(outcome.content).toContain('artifact/design 1:2/3');
+    expect(outcome.content).toContain('not sent to the model');
+  });
+
+  it('질문 모드에서도 디자인 조회를 허용한다', async () => {
+    expect((await executeTool('design_frames', {}, { ...context, design, readOnly: true })).ok).toBe(true);
+  });
+
+  it('design이 없으면 실행을 거부한다', async () => {
+    expect(await executeTool('design_frames', {}, context)).toEqual({ ok: false, content: 'Design is not configured for this session' });
+  });
+});
+
 describe('실행 정책', () => {
   it('샌드박스 실행 전에 위험 명령을 차단하고 실행하지 않는다', async () => {
     let called = false;
@@ -124,6 +157,11 @@ describe('조율 도구', () => {
     const names = buildTools(project).map((candidate) => candidate.name);
     expect(names).not.toContain('post_note');
     expect(names).not.toContain('read_notes');
+  });
+
+  it('board와 디자인을 함께 켜면 두 묶음이 모두 들어간다', () => {
+    const names = buildTools(project, { board: boardContext().board, design: true }).map((candidate) => candidate.name);
+    expect(names).toEqual(expect.arrayContaining(['post_note', 'read_notes', 'design_frames', 'design_frame']));
   });
 
   it('board가 있으면 두 도구를 더한다', () => {

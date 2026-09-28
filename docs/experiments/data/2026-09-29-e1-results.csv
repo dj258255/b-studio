@@ -1,0 +1,25 @@
+order,repeat,task,coupled,strategy,success,category,plan_status,end_to_end_ms,boot_ms_total,gate_ms,model_calls,max_context_tokens,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,web_acceptance
+1,1,orders-list,True,S0,True,none,done,261180,47591,145588,19,29720,1143,242884,26138,5796,ok
+2,1,orders-list,True,S1,True,none,done,236747,85216,162172,20,17191,2234,162661,17636,7434,ok
+3,1,order-detail,True,S0,True,none,done,356042,44507,97328,41,95806,1235,1906354,92224,13789,ok
+4,1,order-detail,True,S1,True,none,done,238534,84820,131591,25,30295,2314,304915,44474,9582,ok
+5,1,order-summary,True,S0,True,none,done,283156,75693,130884,20,24314,1134,191655,20732,5960,ok
+6,1,order-summary,True,S1,True,none,done,266472,75852,152246,19,26298,2235,158301,42498,10746,ok
+7,1,independent,False,S0,True,none,done,208007,47527,127637,9,7371,1049,45597,3789,1218,ok
+8,1,independent,False,S1,True,none,done,194551,82995,172321,10,6243,2108,46138,4227,1624,ok
+9,2,orders-list,True,S1,False,acceptance,done,257788,82876,158487,29,67232,2252,667405,67926,10239,status 500
+10,2,orders-list,True,S0,True,none,done,247976,46513,125683,18,24275,1141,177665,20693,4478,ok
+11,2,order-detail,True,S1,True,none,done,282836,86049,134523,23,38025,2310,305671,55652,10316,ok
+12,2,order-detail,True,S0,True,none,done,356206,46553,95179,29,67094,1211,1071397,63512,9551,ok
+13,2,order-summary,True,S1,False,acceptance,done,435166,81851,132877,26,38189,2249,330224,54405,8930,status 500
+14,2,order-summary,True,S0,True,none,done,250088,45525,95433,23,42160,1140,495957,38578,5395,ok
+15,2,independent,False,S1,True,none,done,184605,76903,171212,10,6187,2108,46058,4164,1423,ok
+16,2,independent,False,S0,True,none,done,205032,48570,128699,11,7818,1053,59702,4236,1515,ok
+17,3,orders-list,True,S0,True,none,done,275944,57502,120132,22,44090,1149,345915,40508,6681,ok
+18,3,orders-list,True,S1,False,acceptance,done,245720,79916,133525,20,32815,2234,250958,49081,9210,status 500
+19,3,order-detail,True,S0,True,none,done,349193,45506,95429,28,86559,1209,974085,82977,11920,ok
+20,3,order-detail,True,S1,False,acceptance,done,225775,83918,139144,22,25124,2308,206833,40963,7430,"status 200, missing text"
+21,3,order-summary,True,S0,True,none,done,231197,48552,125438,16,16842,1126,128943,13260,4096,ok
+22,3,order-summary,True,S1,False,acceptance,done,296983,82041,134704,27,63571,2251,534376,79920,11322,status 500
+23,3,independent,False,S0,True,none,done,207033,45542,129021,9,7341,1049,45478,3759,1187,ok
+24,3,independent,False,S1,True,none,done,184476,88854,162761,10,6174,2108,46046,4153,1417,ok
