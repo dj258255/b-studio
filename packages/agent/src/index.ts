@@ -8,6 +8,7 @@ export {
   type ModelClientInfo,
   type ModelPreflight,
   type RunAgentOptions,
+  type RunMetrics,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export {
@@ -18,6 +19,16 @@ export {
   type ClaudeCodeResult,
   type ClaudeCodeRunOptions,
 } from './claude-code-runner';
+export {
+  preflightCodex,
+  runCodexAgent,
+  type CodexConfig,
+  type CodexRunOptions,
+  type CodexRunResult,
+  type CodexSdk,
+  type CodexThread,
+} from './codex-runner';
+export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
 export {
   BrowserUnavailableError,

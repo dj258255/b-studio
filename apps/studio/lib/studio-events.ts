@@ -1,11 +1,11 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
 export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
-/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, demo: 준비된 스크립트 */
-export type SessionMode = 'api' | 'claude-code' | 'demo';
+/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, demo: 준비된 스크립트 */
+export type SessionMode = 'api' | 'claude-code' | 'codex' | 'demo';
 /** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
 export type WorkspaceKind = 'copy' | 'local';
 /** stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다 */
@@ -220,6 +220,10 @@ export type StudioEvent =
       turns?: number;
       /** 이번 요청이 쓴 토큰. 모델을 부르지 않았으면 없다 */
       usage?: AgentUsage;
+      /** 실행 지표. 모델을 부르지 않았거나 로컬 Claude Code 러너가 모델 호출을 직접 보지 못해 없을 수 있다 */
+      metrics?: RunMetrics;
+      /** 요청을 시작한 뒤 끝난 시각까지의 벽시계 시간 */
+      durationMs?: number;
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
       nextDemoQuestion?: string;

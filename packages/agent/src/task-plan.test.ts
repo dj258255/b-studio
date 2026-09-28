@@ -61,4 +61,47 @@ describe('작업 계획', () => {
     expect(seen[0]!.tools).toBe(0);
     expect(seen[0]!.system).toContain('paths must not overlap');
   });
+
+  it('계획 호출의 usage와 걸린 시간을 함께 돌려준다', async () => {
+    const client: ModelClient = {
+      async createMessage() {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ tasks: [task('a', ['web/a'])] }), citations: null }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 12, output_tokens: 3, cache_read_input_tokens: 4, cache_creation_input_tokens: 5 },
+        } as never;
+      },
+    };
+    const project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown as LoadedProject;
+
+    const result = await requestTaskPlan(client, project, '한 화면 추가');
+
+    expect(result.lanes).toHaveLength(1);
+    // addUsage와 같은 모양으로 바꾼다 (캐시 분을 따로 센다)
+    expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 3, cacheReadTokens: 4, cacheWriteTokens: 5 });
+    expect(Number.isInteger(result.durationMs)).toBe(true);
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('계획 검증이 실패해도 그때까지 쓴 usage와 시간을 오류에 남긴다', async () => {
+    const client: ModelClient = {
+      async createMessage() {
+        return {
+          content: [{ type: 'text', text: '{"tasks":[]}', citations: null }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 7, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 1 },
+        } as never;
+      },
+    };
+    const project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown as LoadedProject;
+
+    const error = await requestTaskPlan(client, project, '빈 계획').then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toBeInstanceOf(TaskPlanError);
+    expect((error as TaskPlanError).usage).toEqual({ inputTokens: 7, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 1 });
+    expect((error as TaskPlanError).durationMs).toBeGreaterThanOrEqual(0);
+  });
 });

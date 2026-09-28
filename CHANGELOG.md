@@ -9,13 +9,26 @@
 - 착수 명세·버그·실험 이슈 양식 3종과 PR 템플릿을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - 프로젝트 로드맵(`ROADMAP.md`)과 변경 기록(`CHANGELOG.md`)을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - ADR 양식(`docs/templates/adr.md`)과 실험 보고서 양식(`docs/templates/experiment-report.md`)을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
+- 실행마다 모델 호출 수, 호출당 최대 컨텍스트, 모델·도구·게이트 시간을 남기고, 작업 계획에 계획 호출·레인·통합의 기동 시간과 전체 합계를 기록합니다 ([#49](https://github.com/dj258255/b-studio/pull/49)).
+- 작업 분해에 서버 내부에서만 넘기는 고정 계획 입력을 추가했습니다. HTTP로는 받지 않고 사람 승인은 그대로입니다. 고정 계획이면 로컬 CLI 모드에서도 작업 분해를 돌립니다 ([#49](https://github.com/dj258255/b-studio/pull/49)).
+- 작업 분해의 직렬화와 격리 병렬을 같은 과제로 반복 실행해 비교하는 `pnpm bench:coordination`을 추가했습니다 ([#49](https://github.com/dj258255/b-studio/pull/49)).
+- 본인 PC에 로그인된 ChatGPT 구독 CLI로 에이전트를 돌리는 백엔드를 추가했습니다. 모델은 루프백 MCP 서버의 b-studio 도구만 쓰고, 셸 도구는 끄며, 실행마다 빈 작업 폴더와 격리된 설정 폴더를 씁니다. 스튜디오·CLI·벤치에서 고를 수 있습니다 ([#51](https://github.com/dj258255/b-studio/pull/51)).
 
 ### 변경
 
 - `CONTRIBUTING.md`에 작업 흐름·예상 갱신·실험·측정 용어 절을 더하고, PR 체크리스트를 PR 템플릿으로 옮겼습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
+- 로컬 CLI 모드에서 쓸 모델을 환경 변수로 고정할 수 있습니다(`docs/operations.md`) ([#49](https://github.com/dj258255/b-studio/pull/49)).
+
+### 수정
+
+- 격리 샌드박스의 Node 서비스가 edge 프록시를 쓰도록 `NODE_USE_ENV_PROXY=1`을 넘깁니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#69](https://github.com/dj258255/b-studio/issues/69)).
+- 예제 api 컨테이너의 메모리 한도를 1536m에서 2048m으로 올려, 개발 서버 옆에서 테스트를 돌릴 때 OOM으로 실패하지 않게 합니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#70](https://github.com/dj258255/b-studio/issues/70)).
+- 부하가 걸리면 가끔 시간 초과로 실패하던 문법 강조 전체 로딩 테스트에만 30초 제한을 따로 줬습니다 ([#78](https://github.com/dj258255/b-studio/pull/78)).
 
 ### 문서
 
+- PR 본문에 이슈를 닫는 키워드와 필수 절이 있는지 검사하는 `pr-body` 워크플로를 추가하고, 추적 이슈·하위 이슈 규칙을 CONTRIBUTING에 적었습니다. 문서의 이슈·PR·커밋 번호를 링크로 바꿨습니다 ([#59](https://github.com/dj258255/b-studio/pull/59)).
+- 에이전트 간 지식 공유와 작업 중 모델 교체를 결정 전에 검토한 문서를 추가했습니다 ([#50](https://github.com/dj258255/b-studio/pull/50)).
 - `README.md`, `docs/README.md`, Wiki 개발 페이지의 문서 안내를 로드맵·변경 기록·문서 양식에 연결했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 
 ## 2026-09-24

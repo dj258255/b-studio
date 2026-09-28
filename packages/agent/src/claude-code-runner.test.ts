@@ -20,7 +20,12 @@ beforeEach(async () => {
   project = await createOrdersProject('claude-code-test-');
 });
 
-type Step = { tool: string; input: Record<string, unknown> } | { text: string };
+type Step = ({ tool: string; input: Record<string, unknown> } | { text: string }) & {
+  /** 이 assistant 메시지의 usage. 주면 실행 지표(maxContextTokens) 계산에 쓰인다 */
+  usage?: Record<string, number>;
+  /** 같은 id를 여러 메시지에 쓰면 지표상 한 번의 호출로 센다 */
+  id?: string;
+};
 
 interface FakeOptions {
   /** 사용자 메시지마다 모델이 할 일 */
@@ -55,15 +60,16 @@ function fakeClaudeCode({ turns = [], result = {}, account = {} }: FakeOptions =
           if (!steps) throw new Error('스크립트에 남은 턴이 없습니다');
           let lastText = '';
           for (const step of steps) {
-            const id = `msg_${++ids}`;
+            const id = step.id ?? `msg_${++ids}`;
+            const usage = step.usage ? { usage: step.usage } : {};
             if ('tool' in step) {
               const content = [{ type: 'tool_use', id: `toolu_${ids}`, name: `mcp__b-studio__${step.tool}`, input: step.input }];
-              yield { type: 'assistant', message: { id, content }, parent_tool_use_id: null, session_id: sessionId } as unknown as SDKMessage;
+              yield { type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId } as unknown as SDKMessage;
               await tools.find((definition) => definition.name === step.tool)!.handler(step.input, {});
             } else {
               lastText = step.text;
               const content = [{ type: 'text', text: step.text }];
-              yield { type: 'assistant', message: { id, content }, parent_tool_use_id: null, session_id: sessionId } as unknown as SDKMessage;
+              yield { type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId } as unknown as SDKMessage;
             }
           }
           yield {
@@ -158,6 +164,32 @@ describe('runClaudeCodeAgent', () => {
     expect(state.prompts[1]).toContain('cannot find symbol');
     expect(events[0]).toEqual({ type: 'session', backend: '로컬 Claude Agent (CLI 9.9.9)', model: 'test-model', auth: 'Claude Max 구독' });
     expect(events.filter((e) => e.type === 'tool_result').map((e) => e.type === 'tool_result' && e.ok)).toEqual([true, true]);
+  });
+
+  it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남기고 modelMs는 0으로 둔다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [
+        [
+          { tool: 'read_file', input: { path: 'api/src/Order.java' }, id: 'm1', usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 1_000, cache_creation_input_tokens: 5 } },
+          { text: '읽었습니다.', id: 'm1', usage: { input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 2_000, cache_creation_input_tokens: 7 } },
+          { text: '주문 API입니다.', id: 'm2', usage: { input_tokens: 50, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 } },
+        ],
+      ],
+    });
+
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('done');
+    // 서로 다른 assistant 메시지 id가 2개다 (id 2개, 메시지 3개)
+    expect(result.metrics?.modelCalls).toBe(2);
+    // 호출 한 번의 입력 크기 최댓값: 200 + 2,000 + 7 = 2,207
+    expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
+    expect(result.metrics?.modelMs).toBe(0);
+    for (const ms of [result.metrics!.toolMs, result.metrics!.gateMs]) {
+      expect(Number.isInteger(ms)).toBe(true);
+      expect(ms).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('이전 세션을 넘기면 갈라서 이어받고, 새 세션 ID를 돌려준다', async () => {
