@@ -1,4 +1,4 @@
-import type { ContainerState, ServiceUsage } from '../types';
+import type { BootNetwork, ContainerState, ServiceUsage } from '../types';
 
 const BYTE_UNITS: Record<string, number> = {
   b: 1,
@@ -24,6 +24,8 @@ interface StatsRow {
   name: string;
   cpuPercent: number;
   memoryBytes?: number;
+  networkRxBytes?: number;
+  networkTxBytes?: number;
 }
 
 /** `docker stats --no-stream --format '{{json .}}'` 출력 (컨테이너마다 JSON 한 줄) */
@@ -32,12 +34,16 @@ export function parseStatsOutput(stdout: string): StatsRow[] {
     .split('\n')
     .filter((line) => line.trim().startsWith('{'))
     .map((line) => {
-      const row = JSON.parse(line) as { Name?: string; CPUPerc?: string; MemUsage?: string };
+      const row = JSON.parse(line) as { Name?: string; CPUPerc?: string; MemUsage?: string; NetIO?: string };
+      // NetIO는 "수신 / 송신"이다(예: "28.8kB / 23.4kB"). docker가 값을 못 주면 "--"라 둘 다 undefined가 된다
+      const [rx, tx] = (row.NetIO ?? '').split('/');
       return {
         name: row.Name ?? '',
         cpuPercent: Number.parseFloat(row.CPUPerc ?? '') || 0,
         // "사용량 / 한도"에서 한도는 한도를 걸지 않으면 VM 전체 메모리이므로 inspect 값을 쓴다
         memoryBytes: parseDockerBytes((row.MemUsage ?? '').split('/')[0] ?? ''),
+        networkRxBytes: parseDockerBytes(rx ?? ''),
+        networkTxBytes: parseDockerBytes(tx ?? ''),
       };
     });
 }
@@ -84,11 +90,25 @@ export function mergeUsage(inspected: InspectRow[], stats: StatsRow[]): ServiceU
         memoryBytes: live?.memoryBytes,
         memoryLimitBytes: row.memoryLimitBytes,
         cpuLimit: row.cpuLimit,
+        networkRxBytes: live?.networkRxBytes,
+        networkTxBytes: live?.networkTxBytes,
         exitCode: row.state === 'exited' || row.state === 'dead' ? row.exitCode : undefined,
         oomKilled: row.oomKilled,
       };
     })
     .sort((a, b) => (a.service < b.service ? -1 : a.service > b.service ? 1 : 0));
+}
+
+/**
+ * 기동 직후 stats에서 기동 네트워크 지표를 만든다. 값은 컨테이너 수명 누계라 기동 직후에는 "기동 중 받은 양"이다.
+ * edge 프록시는 서비스 트래픽이 지나가므로 더하면 이중 계산이라 뺀다. 값이 없는 컨테이너도 뺀다.
+ */
+export function bootNetworkFromUsage(usage: ServiceUsage[], exclude: string): BootNetwork {
+  return usage.flatMap((entry) =>
+    entry.service === exclude || entry.networkRxBytes === undefined || entry.networkTxBytes === undefined
+      ? []
+      : [{ service: entry.service, rxBytes: entry.networkRxBytes, txBytes: entry.networkTxBytes }],
+  );
 }
 
 /** 사람이 읽는 크기. 화면과 에이전트 도구가 같은 표기를 쓴다 */
