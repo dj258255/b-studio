@@ -28,9 +28,14 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'commandcode', model: ' poolside/laguna-s-2.1-free ' })).toEqual({ backend: 'commandcode', model: 'poolside/laguna-s-2.1-free' });
   });
 
-  it('--model은 claude-code, codex 또는 commandcode에서만 쓸 수 있다', () => {
+  it('opencode는 --model이 필수다(기본 모델을 추측하지 않는다)', () => {
+    expect(() => resolveBackend({ dry: false, backend: 'opencode' })).toThrow(/--model이 필요합니다/);
+    expect(resolveBackend({ dry: false, backend: 'opencode', model: ' opencode/space-bunny-free ' })).toEqual({ backend: 'opencode', model: 'opencode/space-bunny-free' });
+  });
+
+  it('--model은 claude-code, codex, commandcode 또는 opencode에서만 쓸 수 있다', () => {
     expect(resolveBackend({ dry: false, backend: 'openai' })).toEqual({ backend: 'openai' });
-    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code, codex 또는 commandcode에서만/);
+    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code, codex, commandcode 또는 opencode에서만/);
   });
 });
 
@@ -39,12 +44,14 @@ describe('planModelId', () => {
     expect(planModelId('claude-code', 'sonnet', 'bench-coordination')).toBe('local-cli:sonnet');
     expect(planModelId('codex', 'gpt-5-codex', 'bench-coordination')).toBe('local-cli-chatgpt:gpt-5-codex');
     expect(planModelId('commandcode', 'poolside/laguna-s-2.1-free', 'bench-coordination')).toBe('local-cli-commandcode:poolside/laguna-s-2.1-free');
+    expect(planModelId('opencode', 'opencode/mimo-v2.6-flash-free', 'bench-coordination')).toBe('local-cli-opencode:opencode/mimo-v2.6-flash-free');
     expect(planModelId('openai', 'dry', 'bench-coordination')).toBe('bench-coordination');
   });
 
-  it('codex·commandcode에 모델이 없으면 default로 적는다', () => {
+  it('codex·commandcode·opencode에 모델이 없으면 default로 적는다', () => {
     expect(planModelId('codex', '', 'bench-coordination')).toBe('local-cli-chatgpt:default');
     expect(planModelId('commandcode', '', 'bench-coordination')).toBe('local-cli-commandcode:default');
+    expect(planModelId('opencode', '', 'bench-coordination')).toBe('local-cli-opencode:default');
   });
 });
 

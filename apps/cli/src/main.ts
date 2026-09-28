@@ -48,15 +48,16 @@ deploy:
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
 
 agent 옵션:
-  --backend <name>   api | claude-code | codex | commandcode (기본: api)
+  --backend <name>   api | claude-code | codex | commandcode | opencode (기본: api)
                      claude-code는 이 PC의 claude CLI에 로그인한 계정으로 실행한다 (API 키 불필요, 개인 PC 전용)
                      codex는 이 PC의 Codex CLI에 ChatGPT로 로그인한 계정으로 실행한다 (API 키 불필요, 개인 PC 전용)
                      codex는 대화를 이어받지 않는다. 요청 하나를 한 번에 처리하고 끝낸다
                      commandcode는 이 PC에 로그인한 Command Code로 실행한다. 모델을 고를 수 있고 기본은 계정 기본 모델이다
+                     opencode는 이 PC에 설치된 OpenCode CLI로 실행한다. --model이 필수다(무료 Zen 모델은 내장 도구를 끈 b-studio 구성에서 거절된다)
   --allow-breaking   요청이 필드·엔드포인트 삭제나 타입 변경을 원할 때 호환 깨짐을 허용한다
   --effort <level>   low | medium | high | xhigh | max (기본: high)
-  --model <id>       api 기본: claude-opus-5, claude-code·codex·commandcode 기본: 로그인한 계정의 기본 모델
-  --free-only        commandcode에서 무료 모델만 쓴다. 무료가 아닌 --model이면 오류
+  --model <id>       api 기본: claude-opus-5, claude-code·codex·commandcode 기본: 로그인한 계정의 기본 모델, opencode 필수: 로그인한 제공자의 모델('opencode models'로 확인)
+  --free-only        commandcode·opencode에서 무료 모델만 쓴다. 무료가 아니거나 쓸 수 없는 --model이면 오류
   --logs             서비스 로그를 함께 출력한다`;
 
 async function main(argv: string[]): Promise<number> {

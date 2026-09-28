@@ -39,6 +39,20 @@ export {
   type CommandCodeRunOptions,
   type CommandCodeRunResult,
 } from './commandcode-runner';
+export {
+  listOpenCodeModels,
+  OPENCODE_FREE_UNUSABLE_REASON,
+  OPENCODE_MODEL_REQUIRED,
+  OPENCODE_PROVIDER_GATE_MESSAGE,
+  parseOpenCodeModels,
+  preflightOpenCode,
+  runOpenCodeAgent,
+  type OpenCodeModel,
+  type OpenCodeProcess,
+  type OpenCodeProcessResult,
+  type OpenCodeRunOptions,
+  type OpenCodeRunResult,
+} from './opencode-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
 export { BrowserUnavailableError, runInBrowser, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';

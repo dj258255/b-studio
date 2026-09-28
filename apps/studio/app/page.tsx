@@ -16,6 +16,8 @@ const MODE_NOTE: Record<string, string> = {
     "이 PC에 ChatGPT로 로그인한 Codex CLI로 실행합니다. 대화는 이어받지 않고 최근 요청 요약만 넘깁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 아직 실제 계정으로 확인하지 못한 모드입니다(#54).",
   commandcode:
     "이 PC에 로그인한 Command Code로 실행합니다. 모델을 고를 수 있고 기본은 계정 기본 모델입니다. 무료 모델만 쓰도록 설정할 수도 있습니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요.",
+  opencode:
+    "이 PC에 설치된 OpenCode CLI로 실행합니다. 모델을 고를 수 있고 기본은 무료 모델만 씁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요.",
   demo: "데모 모드로 실행 중입니다. 준비된 요청을 스크립트로 실행하므로 API 키가 필요 없습니다.",
 };
 
@@ -28,7 +30,7 @@ export default async function HomePage() {
   const auth = authConfig().mode;
   const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
   const mode = process.env.B_STUDIO_MODE?.trim() || "api";
-  const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, codex, commandcode, demo 중 하나로 실행하세요.`;
+  const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, codex, commandcode, opencode, demo 중 하나로 실행하세요.`;
   const localAllowed = localFolderAllowed();
 
   return (
@@ -76,7 +78,13 @@ export default async function HomePage() {
                 </p>
               )}
             </div>
-            {!project.error && <StartSessionButton projectId={project.id} folder={localAllowed ? projectPath(project.id) : undefined} commandCode={mode === "commandcode"} />}
+            {!project.error && (
+              <StartSessionButton
+                projectId={project.id}
+                folder={localAllowed ? projectPath(project.id) : undefined}
+                modelsBackend={mode === "commandcode" || mode === "opencode" ? mode : undefined}
+              />
+            )}
           </li>
         ))}
       </ul>

@@ -77,7 +77,7 @@ export interface SummaryMeta {
   requestedModel: string;
 }
 
-const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'environment', 'timeout', 'unknown'];
+const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'provider_gate', 'environment', 'timeout', 'unknown'];
 
 export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   const observed = [...new Set(rows.flatMap((row) => row.observedModels))];

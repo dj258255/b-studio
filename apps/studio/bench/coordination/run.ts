@@ -10,12 +10,14 @@
  *   claude-code 본인 PC에 로그인된 Claude 구독 CLI. 프록시·상류를 띄우지 않고, 계획도 모델에게 받지 않는다(presetPlan)
  *   codex       본인 PC에 ChatGPT로 로그인된 Codex CLI. claude-code와 같지만 모델은 계정 기본값을 쓸 수 있다
  *   commandcode 본인 PC에 로그인된 Command Code CLI. claude-code와 같지만 모델을 고를 수 있고 무료 모델로 비용 없이 돌릴 수 있다
+ *   opencode    본인 PC에 설치된 OpenCode CLI. --model이 필수다(무료 Zen 모델은 b-studio 구성에서 거절된다)
  *
  *   pnpm bench:coordination --dry
  *   BENCH_UPSTREAM_BASE_URL=... BENCH_UPSTREAM_API_KEY=... BENCH_UPSTREAM_MODEL=... pnpm bench:coordination --backend openai
  *   pnpm bench:coordination --backend claude-code --model sonnet
  *   pnpm bench:coordination --backend codex
  *   pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only
+ *   pnpm bench:coordination --backend opencode --model <로그인한 제공자의 모델>
  */
 import { spawnSync } from 'node:child_process';
 import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -167,10 +169,25 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** --free-only는 commandcode에서만, 무료가 아닌 --model이면 오류다. 모델 목록을 못 불러오면 확인할 수 없어 통과시킨다 */
+/**
+ * `--free-only`는 commandcode·opencode에서만 쓴다.
+ * commandcode는 무료가 아닌 `--model`이면 오류다. opencode는 `usable`까지 본다 — 무료 Zen 모델은 b-studio 구성에서 거절되고,
+ * 쓸 수 있는 무료 모델이 하나도 없으면 시작 전에 이유와 함께 멈춘다.
+ * 모델 목록을 못 불러오면(commandcode) 확인할 수 없어 통과시킨다.
+ */
 async function assertFreeOnlyModel(backend: Backend, model: string | undefined): Promise<void> {
-  if (backend !== 'commandcode') throw new Error('--free-only는 --backend commandcode에서만 쓸 수 있습니다');
+  if (backend !== 'commandcode' && backend !== 'opencode') throw new Error('--free-only는 --backend commandcode 또는 opencode에서만 쓸 수 있습니다');
   if (!model) return;
+  if (backend === 'opencode') {
+    const { listOpenCodeModels } = await import('@b-studio/agent');
+    const models = await listOpenCodeModels().catch(() => []);
+    const found = models.find((candidate) => candidate.id === model);
+    if (found && (!found.free || !found.usable)) throw new Error(`--free-only: ${model}은(는) 쓸 수 있는 무료 모델이 아닙니다${found.reason ? `: ${found.reason}` : ''}`);
+    if (!models.some((candidate) => candidate.free && candidate.usable)) {
+      throw new Error('--free-only: 쓸 수 있는 무료 모델이 없습니다. `opencode auth login`으로 제공자에 로그인한 뒤 그 제공자의 무료 모델을 고르세요');
+    }
+    return;
+  }
   const { listCommandCodeModels } = await import('@b-studio/agent');
   const models = await listCommandCodeModels().catch(() => []);
   const found = models.find((candidate) => candidate.id === model);
@@ -430,7 +447,7 @@ async function main(): Promise<void> {
   const dockerMemTotal = preflight(args.force);
 
   // 2. 백엔드별 준비
-  const requestedModel = backend === 'claude-code' ? choice.model! : backend === 'codex' || backend === 'commandcode' ? choice.model ?? 'default' : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
+  const requestedModel = backend === 'claude-code' ? choice.model! : backend === 'codex' || backend === 'commandcode' || backend === 'opencode' ? choice.model ?? 'default' : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
   const priceInput = price('BENCH_PRICE_INPUT_PER_M');
   const priceOutput = price('BENCH_PRICE_OUTPUT_PER_M');
 
@@ -516,6 +533,10 @@ async function main(): Promise<void> {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
       if (choice.model) benchEnv.B_STUDIO_CODEX_MODEL = choice.model;
+    } else if (backend === 'opencode') {
+      // opencode도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 러너의 무료 기본 모델을 쓴다
+      Object.assign(benchEnv, { B_STUDIO_MODE: 'opencode' });
+      if (choice.model) benchEnv.B_STUDIO_OPENCODE_MODEL = choice.model;
     } else {
       // commandcode도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'commandcode' });
@@ -543,6 +564,15 @@ async function main(): Promise<void> {
           return;
         }
         console.log(`로컬 Codex 로그인 확인 · 모델 ${choice.model ?? '계정 기본값'}`);
+      } else if (backend === 'opencode') {
+        const { preflightOpenCode } = await import('@b-studio/agent');
+        const preflight = await preflightOpenCode();
+        if (!preflight.ok) {
+          console.error(`로컬 OpenCode를 쓸 수 없습니다: ${preflight.reason}`);
+          process.exitCode = 3;
+          return;
+        }
+        console.log(`로컬 OpenCode 확인 · 모델 ${choice.model}`);
       } else {
         const { preflightCommandCode } = await import('@b-studio/agent');
         const preflight = await preflightCommandCode();

@@ -1509,3 +1509,32 @@ api 단위 테스트는 2026-09-16 예제에 추가됐고(2eed4ea), 작업 분�
 
 ### 수정 후 검증
 api 한도를 2048m로 올린 뒤 `pnpm e2e:task-plan`이 통과했습니다(168.1초, 레인 2개 동시 실행, 통합 체크포인트가 5단계 재통과). 실행 동안 VM 커널 기록에 새 OOM 종료가 없었습니다. 2026-09-16 기록 98.1초보다 긴 것은 그 뒤 추가된 api 테스트 단계(2eed4ea) 때문입니다.
+
+## 43. OpenCode 무료(Zen) 모델로 세션을 시작하면 403으로 끝나고 진행이 멈춤
+
+**구분:** 실제 실행에서 발견(무료 모델로 세션 시작) → 조건을 나눠 측정 → 러너·모델 목록·문서 수정
+
+### 현상
+`B_STUDIO_MODE=opencode`에서 무료 Zen 모델(예: `opencode/mimo-v2.6-flash-free`)로 요청하면 러너가 실패합니다.
+
+```
+Error from provider (Console): OpenCode's free tier can only be used from within OpenCode
+```
+
+(403) `opencode run --format json`은 이 오류를 낸 뒤 **종료하지 않고 멈출 수 있습니다**(출력 없이 2분 넘게 대기).
+
+### 원인
+조건을 나눠 무료 모델(`opencode/mimo-v2.6-flash-free`, 요청 "reply with the single word ok")로 재봤습니다.
+
+| 조건 | 결과 |
+|---|---|
+| 격리 HOME·XDG, 설정 없음, 기본 에이전트 | 성공 |
+| 전용 에이전트 `b-studio`(`*: deny`, `read: allow`), MCP 없음 | 403 |
+| 내장 `build` 에이전트의 권한만 덮어씀(`*: deny`, `read: allow`), MCP 없음 | 403 |
+
+즉 격리 HOME이나 MCP가 아니라 **내장 도구 구성을 좁히면** 무료 Zen 티어가 거절합니다. b-studio는 "모델은 b-studio 도구만 쓴다"는 경계를 지키려고 내장 도구를 모두 끄므로, 이 검사를 통과하려면 경계를 풀어야 합니다 — 보안 후퇴이고 제공자 정책 우회이므로 그렇게 하지 않습니다.
+
+### 해결
+경계를 유지하고 사실을 그대로 알립니다. `opencode auth login`으로 제공자에 로그인한 뒤 **그 제공자의 모델**을 고르세요. 무료 Zen 모델은 모델 목록에서 `usable: false`로 내려가 비활성으로 표시되고, 러너는 이 오류를 `provider_gate`로 분류해 한 번만 알리고 재시도하지 않습니다(게이트 재시도·fork 포함). 오류 이벤트를 받으면 러너가 자식을 죽이고 제한 시간 안에 실패로 끝내, 멈춘 채 매달리지 않습니다.
+
+`--model`은 이제 필수입니다(CLI·벤치·스튜디오 모두). 기본 모델을 추측하지 않습니다.

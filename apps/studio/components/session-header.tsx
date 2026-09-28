@@ -13,6 +13,7 @@ const MODE_LABEL: Record<SessionMode, string> = {
   "claude-code": "로컬 Claude Agent",
   codex: "로컬 ChatGPT Agent",
   commandcode: "로컬 Command Code Agent",
+  opencode: "로컬 OpenCode Agent",
   demo: "데모 모드",
 };
 

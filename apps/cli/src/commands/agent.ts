@@ -3,26 +3,29 @@ import {
   AnthropicModelClient,
   describeAccount,
   listCommandCodeModels,
+  listOpenCodeModels,
   preflightClaudeCode,
   preflightCodex,
   preflightCommandCode,
+  preflightOpenCode,
   runAgent,
   runClaudeCodeAgent,
   runCodexAgent,
   runCommandCodeAgent,
+  runOpenCodeAgent,
+  OPENCODE_MODEL_REQUIRED,
   type AgentEvent,
   type AgentUsage,
-  type CommandCodeModel,
   type Effort,
 } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { runSandboxSession } from '../session';
 import { print, type Label } from '../ui';
 
-export type Backend = 'api' | 'claude-code' | 'codex' | 'commandcode';
+export type Backend = 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode';
 
 /** `--backend`로 고를 수 있는 실행 방식 */
-export const BACKENDS: readonly Backend[] = ['api', 'claude-code', 'codex', 'commandcode'];
+export const BACKENDS: readonly Backend[] = ['api', 'claude-code', 'codex', 'commandcode', 'opencode'];
 
 export interface AgentCommandOptions {
   keep: boolean;
@@ -31,7 +34,7 @@ export interface AgentCommandOptions {
   backend: Backend;
   model?: string;
   effort?: Effort;
-  /** commandcode 모드에서 무료 모델만 쓰도록 강제한다. 무료가 아닌 --model이면 거부한다 */
+  /** commandcode·opencode 모드에서 무료 모델만 쓰도록 강제한다. 무료가 아닌 --model이면 거부한다 */
   freeOnly?: boolean;
 }
 
@@ -40,13 +43,20 @@ export async function agent(project: LoadedProject, request: string, options: Ag
   if (options.backend === 'claude-code') return withClaudeCode(project, request, options);
   if (options.backend === 'codex') return withCodex(project, request, options);
   if (options.backend === 'commandcode') return withCommandCode(project, request, options);
+  if (options.backend === 'opencode') return withOpenCode(project, request, options);
   return withApi(project, request, options);
 }
 
-/** `--free-only`에서 고른 모델이 무료가 아니면 오류 문구를 돌려준다(목록에 없어 확인할 수 없으면 통과시킨다) */
-export function freeOnlyViolation(model: string, models: readonly CommandCodeModel[]): string | undefined {
+/**
+ * `--free-only`에서 고른 모델이 무료가 아니거나 지금 쓸 수 없으면 오류 문구를 돌려준다.
+ * 목록에 없어 확인할 수 없으면 통과시킨다. commandcode·opencode 모델이 같은 모양이라 함께 받는다(`usable`은 opencode만 있다).
+ */
+export function freeOnlyViolation(model: string, models: readonly { id: string; free: boolean; usable?: boolean; reason?: string }[]): string | undefined {
   const found = models.find((candidate) => candidate.id === model);
-  return found && !found.free ? `--free-only: ${model}은(는) 무료 모델이 아닙니다` : undefined;
+  if (!found) return undefined;
+  if (!found.free) return `--free-only: ${model}은(는) 무료 모델이 아닙니다`;
+  if (found.usable === false) return `--free-only: ${model}은(는) 지금 쓸 수 없습니다${found.reason ? `: ${found.reason}` : ''}`;
+  return undefined;
 }
 
 async function withApi(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
@@ -151,6 +161,46 @@ async function withCommandCode(project: LoadedProject, request: string, options:
       project,
       sandbox,
       model: options.model,
+      allowBreaking: options.allowBreaking,
+      signal,
+      onEvent: printAgentEvent(label),
+    });
+    return result.status === 'done' ? 0 : 1;
+  });
+}
+
+/**
+ * 이 PC에 설치된 OpenCode CLI로 실행한다. `--model`이 필수다(기본 모델을 추측하지 않는다 — 무료 Zen 모델은 b-studio 구성에서 거절된다).
+ * `--free-only`면 무료이면서 쓸 수 있는 모델만 쓴다. 한 번 실행이라 이어받을 대화가 없어 맥락도 넘기지 않는다.
+ */
+async function withOpenCode(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
+  const preflight = await preflightOpenCode();
+  if (!preflight.ok) {
+    console.error(preflight.reason);
+    return 2;
+  }
+
+  const model = options.model?.trim();
+  if (!model) {
+    console.error(OPENCODE_MODEL_REQUIRED);
+    return 2;
+  }
+
+  if (options.freeOnly) {
+    const violation = freeOnlyViolation(model, await listOpenCodeModels().catch(() => []));
+    if (violation) {
+      console.error(violation);
+      return 2;
+    }
+  }
+
+  return runSandboxSession(project, { keep: options.keep, followLogs: options.logs }, async ({ sandbox, signal, label }) => {
+    print(label('studio'), `에이전트 시작: 로컬 OpenCode Agent (${model})`);
+    const result = await runOpenCodeAgent({
+      request,
+      project,
+      sandbox,
+      model,
       allowBreaking: options.allowBreaking,
       signal,
       onEvent: printAgentEvent(label),

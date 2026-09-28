@@ -32,21 +32,26 @@ pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 -
 # commandcode: 이 PC에 로그인된 Command Code CLI. 무료 모델로 비용 없이 돌린다 (모델을 생략하면 계정 기본 모델)
 pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only --tasks orders-list --strategies S0,S1 --repeats 1
 
+# opencode: 이 PC에 설치된 OpenCode CLI. --model이 필수다(무료 Zen 모델은 내장 도구를 끈 b-studio 구성에서 거절된다)
+pnpm bench:coordination --backend opencode --model <로그인한 제공자의 모델> --tasks orders-list --strategies S0,S1 --repeats 1
+
 # 일부만 (openai)
 pnpm bench:coordination --backend openai --tasks orders-list,independent --strategies S0,S1 --repeats 2 --out /tmp/bench-run
 ```
 
 인자:
 
-- `--backend claude-code|codex|commandcode|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
-- `--model <이름>` — `claude-code`·`codex`·`commandcode`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `codex`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CODEX_MODEL`), `commandcode`도 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CMD_MODEL`)
-- `--free-only` — `commandcode`에서만. 무료가 아닌 `--model`이면 오류
+- `--backend claude-code|codex|commandcode|opencode|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
+- `--model <이름>` — `claude-code`·`codex`·`commandcode`·`opencode`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `codex`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CODEX_MODEL`), `commandcode`도 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CMD_MODEL`), `opencode`는 **필수**다(기본 모델을 추측하지 않는다. `B_STUDIO_OPENCODE_MODEL`)
+- `--free-only` — `commandcode`·`opencode`에서만. commandcode는 무료가 아닌 `--model`이면 오류, opencode는 `usable`한 무료 모델만 고르고 쓸 수 있는 무료 모델이 하나도 없으면 시작 전에 멈춘다
 - `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 
 **claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
 
 **commandcode**는 `claude-code`와 같지만 모델을 고를 수 있고, 무료 모델(예: `poolside/laguna-s-2.1-free`)로 비용 없이 실험할 수 있습니다. `B_STUDIO_CMD_MODEL`로 모델을 고정하고, 실행 전에 `preflightCommandCode`로 로그인을 확인해 실패하면 종료 코드 3으로 멈춥니다. 사용 한도(종료 코드 5)와 크레딧 부족(종료 코드 10)은 둘 다 `rate_limited`로 묶되 detail로 구분합니다.
+
+**opencode**는 `claude-code`와 같지만 `--model`이 필수입니다(기본 모델을 추측하지 않습니다). 무료 Zen 모델은 내장 도구를 좁힌 b-studio 구성을 제공자가 거절하므로 쓸 수 없고, 로그인한 제공자의 모델을 고르세요. 실행 전에 `preflightOpenCode`로 CLI가 있는지 확인해 실패하면 종료 코드 3으로 멈춥니다. OpenCode는 종료 코드가 0/1/130뿐이라 한도는 "…사용 한도…" 문구로 `rate_limited`, 무료 Zen 거절은 `provider_gate`로 묶습니다.
 
 **openai**는 `BENCH_UPSTREAM_BASE_URL`, `BENCH_UPSTREAM_API_KEY`, `BENCH_UPSTREAM_MODEL`이 필요합니다. `--dry`는 이 백엔드의 가짜 상류라 이 값들이 필요 없습니다. `BENCH_PRICE_INPUT_PER_M`·`BENCH_PRICE_OUTPUT_PER_M`는 선택이고, 없으면 0으로 두고 경고합니다.
 
