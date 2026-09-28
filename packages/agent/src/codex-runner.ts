@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { access, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { Codex, type ThreadEvent, type ThreadOptions, type Usage } from '@openai/codex-sdk';
+import type { Thread, ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sdk';
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import { VerificationGate } from './gate';
@@ -48,8 +48,27 @@ export interface CodexThread {
   runStreamed(input: string, options?: { signal?: AbortSignal }): Promise<{ events: AsyncIterable<ThreadEvent> }>;
 }
 
+/**
+ * 실제 SDK는 처음 실행할 때 불러온다. `@openai/codex-sdk`는 ESM 전용(`exports`에 `import`만)이라,
+ * CommonJS로 옮겨지는 경로(예: tsx로 도는 벤치가 `@b-studio/agent`를 require)에서 정적 import가 모듈 해석 오류를 낸다.
+ * 동적 import는 두 방식 모두에서 동작하고, codex 모드를 쓰지 않는 실행은 이 패키지를 아예 불러오지 않는다
+ */
 const DEFAULT_SDK: CodexSdk = {
-  startThread: ({ config, env, options }) => new Codex({ config, env }).startThread(options),
+  startThread: ({ config, env, options }) => {
+    let thread: Thread | undefined;
+    return {
+      get id() {
+        return thread?.id ?? null;
+      },
+      async runStreamed(input, runOptions) {
+        if (!thread) {
+          const { Codex } = await import('@openai/codex-sdk');
+          thread = new Codex({ config, env }).startThread(options);
+        }
+        return thread.runStreamed(input, runOptions);
+      },
+    };
+  },
 };
 
 export interface CodexRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation'> {
