@@ -5,6 +5,8 @@ import { runInBrowser, StepFailedError, type BrowserFrame } from './browser-chec
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8]);
+/** 1×1 투명 PNG */
+const PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 
 // 실제 헤드리스 Chromium을 띄운다. 브라우저가 없으면 건너뛰지 않고 실패한다. 건너뛰면 검사 안 함이 통과처럼 보인다
 const PAGES: Record<string, string> = {
@@ -21,19 +23,61 @@ const PAGES: Record<string, string> = {
 };
 
 let server: Server;
-let base: string;
+let other: Server;
+let base = '';
+let otherBase = '';
+/** 허용하지 않은 서버로 실제 요청이 닿았는지. 라우트가 막으면 0이어야 한다 */
+let otherHits = 0;
+
+/** 기준 서버에 없는, 허용하지 않은 출처를 참조하는 페이지들. 그때그때 만든다 */
+function dynamicPages(): Record<string, string> {
+  return {
+    '/mixed': `<html><body><img src="${otherBase}/pixel.png"><script>fetch('${otherBase}/data.json').catch(() => {});</script></body></html>`,
+    '/fetch-ok': `<html><body><div id="out">pending</div><script>fetch('/data.json').then((response) => response.json()).then((data) => { document.getElementById('out').textContent = 'ok:' + data.value; }).catch(() => { document.getElementById('out').textContent = 'fail'; });</script></body></html>`,
+    '/sw': `<html><body><div id="out">pending</div><script>navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.getRegistrations()).then((registrations) => { document.getElementById('out').textContent = 'registered:' + registrations.length; }).catch(() => { document.getElementById('out').textContent = 'failed'; });</script></body></html>`,
+  };
+}
 
 beforeAll(async () => {
   server = createServer((request, response) => {
-    const body = PAGES[request.url ?? ''];
+    const path = request.url ?? '';
+    if (path === '/data.json') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"value":"allowed"}');
+      return;
+    }
+    if (path === '/pixel.png') {
+      response.writeHead(200, { 'content-type': 'image/png' });
+      response.end(PIXEL);
+      return;
+    }
+    if (path === '/sw.js') {
+      response.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+      response.end('self.addEventListener("install", () => {});');
+      return;
+    }
+    const body = PAGES[path] ?? dynamicPages()[path];
     response.writeHead(body ? 200 : 404, { 'content-type': 'text/html; charset=utf-8' });
     response.end(body ?? 'not found');
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  other = createServer((_request, response) => {
+    otherHits += 1;
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('other');
+  });
+  await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+  otherBase = `http://127.0.0.1:${(other.address() as AddressInfo).port}`;
 });
 
-afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+afterAll(
+  () =>
+    new Promise<void>((resolve) => {
+      other.close(() => server.close(() => resolve()));
+    }),
+);
 
 describe('runInBrowser', { timeout: 60_000 }, () => {
   it('클라이언트 스크립트가 만든 텍스트를 렌더링 뒤에 읽는다 (HTTP 본문에는 없는 문구)', async () => {
@@ -138,5 +182,32 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
     expect(frames[0]?.width).toBe(400);
     // 콜백은 시간 기준으로 걸러지므로 연속한 프레임 간격이 200ms보다 좁을 수 없다
     for (const [index, frame] of frames.slice(1).entries()) expect(frame.at - frames[index]!.at).toBeGreaterThanOrEqual(190);
+  });
+
+  it('allowedOrigins가 있으면 허용한 출처 밖 요청을 막고, 실패가 아니라 기록으로 남긴다', async () => {
+    otherHits = 0;
+    const result = await runInBrowser(`${base}/mixed`, { allowedOrigins: [base] });
+    expect(result.failedRequests).toEqual([]);
+    expect([...result.blockedRequests].sort()).toEqual([`${otherBase}/data.json`, `${otherBase}/pixel.png`]);
+    // 실제로 그 서버에 요청이 닿지 않았다
+    expect(otherHits).toBe(0);
+  });
+
+  it('허용한 출처의 요청은 막지 않는다', async () => {
+    const result = await runInBrowser(`${base}/fetch-ok`, { allowedOrigins: [base] });
+    expect(result.blockedRequests).toEqual([]);
+    expect(result.failedRequests).toEqual([]);
+    expect(result.text).toContain('ok:allowed');
+  });
+
+  it('allowedOrigins가 있으면 서비스 워커 등록을 막는다', async () => {
+    const result = await runInBrowser(`${base}/sw`, { allowedOrigins: [base] });
+    expect(result.text).toMatch(/failed|registered:0/);
+  });
+
+  it('allowedOrigins를 넘기지 않으면 막지 않고 blockedRequests는 비어 있다', async () => {
+    const result = await runInBrowser(`${base}/missing-chunk`, {});
+    expect(result.blockedRequests).toEqual([]);
+    expect(result.failedRequests).toEqual([`404 ${base}/chunk.js`]);
   });
 });

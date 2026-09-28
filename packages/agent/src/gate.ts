@@ -76,6 +76,8 @@ export class VerificationGate {
   #pageSteps = new Map<string, WorkflowStepCheck[]>();
   /** 화면 확인 이름 → 디자인 비교 결과. 실패해 예외로 끝나도 결과를 남기려고 따로 모은다 */
   #pageCompares = new Map<string, WorkflowCompare>();
+  /** 화면 확인 이름 → 허용 출처 밖이라 막은 요청. 앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않고 기록만 한다 */
+  #pageBlocked = new Map<string, string[]>();
 
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
@@ -165,6 +167,7 @@ export class VerificationGate {
     const nodes: TaskNode<void>[] = [];
     this.#pageSteps.clear();
     this.#pageCompares.clear();
+    this.#pageBlocked.clear();
     for (const page of pages) {
       const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
       const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
@@ -184,11 +187,14 @@ export class VerificationGate {
       const entry = meta[index]!;
       const steps = this.#pageSteps.get(entry.name);
       const compare = this.#pageCompares.get(entry.name);
+      // 실패 사유에 막은 요청 수를 한 줄 덧붙인다. 통과해도 남겨 QA 보기에서 볼 수 있게 한다
+      const blocked = this.#pageBlocked.get(entry.name) ?? [];
+      const detail = [result.error, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined].filter((line) => line !== undefined).join('\n');
       return {
         ...entry,
         ok: result.status === 'succeeded',
         attempts: result.attempts,
-        detail: result.error,
+        detail: detail || undefined,
         ...(steps ? { steps } : {}),
         ...(compare ? { compare } : {}),
       };
@@ -209,6 +215,8 @@ export class VerificationGate {
           signal,
           // 스크린샷을 저장할 곳이 있거나 디자인 비교를 할 때만 찍는다
           capture: saveArtifact !== undefined || page.compare !== undefined,
+          // 세션 서비스의 출처 밖으로는 요청이 나가지 못하게 한다(모델이 만든 페이지를 통한 요청 위조 차단)
+          allowedOrigins: await this.#serviceOrigins(),
           ...(onBrowserFrame ? { onFrame: (frame: BrowserFrame) => onBrowserFrame({ check: name, frame }) } : {}),
         });
       } catch (error) {
@@ -217,6 +225,7 @@ export class VerificationGate {
         throw error;
       }
       if (saveArtifact) this.#pageSteps.set(name, await this.#saveSteps(name, result.steps));
+      if (result.blockedRequests.length > 0) this.#pageBlocked.set(name, result.blockedRequests);
       const problems: string[] = [];
       if (result.status !== page.expectStatus) problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
       if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
@@ -306,6 +315,23 @@ export class VerificationGate {
       const output = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-OUTPUT_TAIL_LINES).join('\n');
       throw new Error(`종료 코드 ${result.exitCode}\n${output}`);
     }
+  }
+
+  /**
+   * 화면 확인이 요청해도 되는 출처. 세션의 모든 managed 서비스가 게이트에서 쓰는 주소(endpoint)의 출처를 모은다.
+   * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 화면이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
+   */
+  async #serviceOrigins(): Promise<string[]> {
+    const { sandbox, project } = this.#options;
+    const origins = new Set<string>();
+    for (const [name] of project.managed) {
+      try {
+        origins.add(new URL((await sandbox.endpoint(name)).url).origin);
+      } catch {
+        // 아직 준비되지 않았거나 없는 서비스의 주소는 건너뛴다
+      }
+    }
+    return [...origins];
   }
 
   /** 지난 검증 이후 바뀐 파일 + 지난번에 준비에 실패한 서비스의 파일 (고치지 않았더라도 다시 확인해야 한다) */

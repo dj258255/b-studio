@@ -1,4 +1,4 @@
-import { createScreencast, launchBrowser, type BrowserFrame } from './browser-check';
+import { createScreencast, launchBrowser, restrictPageToOrigins, type BrowserFrame, type OriginBlockEvent } from './browser-check';
 
 /**
  * 스튜디오 서버가 미리보기 패널용으로 소유하는 Chromium. 화면 확인(browser_check)과는 별개 인스턴스다.
@@ -64,7 +64,7 @@ export interface RemoteBrowserOptions {
   onFrame: (frame: BrowserFrame) => void;
   onNavigate?: (url: string) => void;
   /** 허용하지 않은 출처로 나가려던 요청을 막을 때마다 불린다 */
-  onBlocked?: (input: { url: string; kind: 'navigation' | 'resource' }) => void;
+  onBlocked?: (event: OriginBlockEvent) => void;
 }
 
 export interface RemoteBrowser {
@@ -76,20 +76,6 @@ export interface RemoteBrowser {
   type(text: string): Promise<void>;
   pick(x: number, y: number): Promise<RemoteBrowserPick>;
   close(): Promise<void>;
-}
-
-/** 네트워크로 나가지 않는 내부 스킴. 이 셋은 허용 목록과 무관하게 통과시킨다 */
-const INTERNAL_SCHEMES = new Set(['data:', 'blob:', 'about:']);
-
-/** 출처가 허용 목록에 있으면 true. 내부 스킴이거나 파싱할 수 없으면 각각 허용·거부한다 */
-function isAllowedRequest(url: string, allowed: ReadonlySet<string>): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  return INTERNAL_SCHEMES.has(parsed.protocol) || allowed.has(parsed.origin);
 }
 
 /**
@@ -104,14 +90,8 @@ export async function openRemoteBrowser(options: RemoteBrowserOptions): Promise<
     // serviceWorkers: 'block'로 서비스 워커 등록을 막는다. 서비스 워커가 만든 요청은 page.route를 우회하므로,
     // 허용 출처 검사를 유일한 통로로 남기려면 꺼야 한다(대신 오프라인 캐시 같은 기능은 원격 미리보기에서 동작하지 않는다)
     const page = await browser.newPage({ viewport: options.viewport, serviceWorkers: 'block' });
-    // goto 전에 걸어 첫 문서 요청부터 검사한다
-    const allowed = new Set(options.allowedOrigins);
-    await page.route('**/*', (route) => {
-      const request = route.request();
-      if (isAllowedRequest(request.url(), allowed)) return route.continue();
-      options.onBlocked?.({ url: request.url(), kind: request.isNavigationRequest() ? 'navigation' : 'resource' });
-      return route.abort('blockedbyclient');
-    });
+    // 허용한 출처 밖으로 나가는 요청을 막는다(공통 규칙은 browser-check.ts). goto 전에 걸어 첫 문서 요청부터 검사한다
+    await restrictPageToOrigins(page, options.allowedOrigins, options.onBlocked);
     const client = await page.context().newCDPSession(page);
     // createScreencast는 이 객체를 참조로 읽으므로 resize가 값을 바꾸면 프레임 크기 fallback도 따라간다
     const viewport = { width: options.viewport.width, height: options.viewport.height };

@@ -1,4 +1,4 @@
-import type { Browser, CDPSession } from 'playwright-core';
+import type { Browser, CDPSession, Page } from 'playwright-core';
 import type { WorkflowPageStep } from '@b-studio/spec';
 
 /** CDP screencast로 받은 화면 한 장. `at`은 프레임을 받은 시각(ms) */
@@ -32,6 +32,11 @@ export interface BrowserPageResult {
   consoleErrors: string[];
   /** 4xx·5xx로 끝났거나 연결되지 않은 요청. 브라우저가 스스로 여는 /favicon.ico는 제외한다 */
   failedRequests: string[];
+  /**
+   * 허용한 출처 밖이라 막은 요청. 앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않고 기록만 한다.
+   * allowedOrigins를 넘기지 않았으면 항상 빈 배열이다
+   */
+  blockedRequests: string[];
   /** 문서 너비가 화면 너비를 넘는 픽셀 수. 0이면 가로 스크롤이 없다 */
   horizontalOverflowPx: number;
   /** 페이지를 연 직후와 각 단계의 결과. 첫 항목은 `open <경로>` */
@@ -44,6 +49,11 @@ export interface BrowserPageOptions {
   steps?: readonly WorkflowPageStep[];
   /** true면 페이지를 연 직후와 각 단계 뒤에 뷰포트 스크린샷(PNG)을 찍는다 */
   capture?: boolean;
+  /**
+   * 이 페이지가 요청해도 되는 출처(origin) 목록. 넘기면 여기 없는 출처로 나가는 요청을 막고 서비스 워커도 막는다.
+   * 서버(스튜디오 호스트)에서 도는 검사라, 모델이 만든 페이지가 호스트 내부나 외부로 나가면 요청 위조 통로가 된다
+   */
+  allowedOrigins?: string[];
   /** CDP screencast 프레임. 초당 5장 상한으로 거른 뒤 넘긴다 */
   onFrame?: (frame: BrowserFrame) => void;
   signal?: AbortSignal;
@@ -107,6 +117,43 @@ export async function launchBrowser(): Promise<Browser> {
   throw new BrowserUnavailableError(`헤드리스 브라우저를 실행할 수 없습니다: ${failures.join(' / ')}`);
 }
 
+/** 네트워크로 나가지 않는 내부 스킴. 이 셋은 허용 목록과 무관하게 통과시킨다 */
+const INTERNAL_SCHEMES = new Set(['data:', 'blob:', 'about:']);
+
+/** 출처가 허용 목록에 있으면 true. 내부 스킴은 허용하고, 파싱할 수 없으면 거부한다 */
+export function isAllowedRequest(url: string, allowed: ReadonlySet<string>): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return INTERNAL_SCHEMES.has(parsed.protocol) || allowed.has(parsed.origin);
+}
+
+/** 허용하지 않은 출처로 나가려던 요청을 막을 때의 정보 */
+export interface OriginBlockEvent {
+  url: string;
+  kind: 'navigation' | 'resource';
+}
+
+/**
+ * 페이지의 모든 요청을 허용한 출처로 제한한다. 메인·하위 프레임 이동과 하위 리소스(fetch·img·script 등)를 모두 검사해,
+ * 허용 목록에 없는 출처면 막고 onBlocked으로 알린다. 그래서 모델이 만든 페이지가 (스튜디오) 호스트 내부나 외부로 새 나가지 않는다.
+ * 서비스 워커는 이 검사를 우회하므로, 부르는 쪽이 페이지를 만들 때 serviceWorkers: 'block'을 함께 줘야 한다.
+ * 원격 브라우저(remote-browser.ts)와 게이트의 화면 확인(runInBrowser)이 같은 규칙을 쓰도록 여기 모아 둔다
+ */
+export async function restrictPageToOrigins(page: Page, allowedOrigins: readonly string[], onBlocked?: (event: OriginBlockEvent) => void): Promise<void> {
+  const allowed = new Set(allowedOrigins);
+  // goto 전에 걸어 첫 문서 요청부터 검사한다
+  await page.route('**/*', (route) => {
+    const request = route.request();
+    if (isAllowedRequest(request.url(), allowed)) return route.continue();
+    onBlocked?.({ url: request.url(), kind: request.isNavigationRequest() ? 'navigation' : 'resource' });
+    return route.abort('blockedbyclient');
+  });
+}
+
 /**
  * CDP screencast를 켜고 끄는 도구. 리스너는 한 번만 붙이고 start·stop으로 전환한다.
  * ack를 빠뜨리면 브라우저가 전송을 멈추므로, 상한에 걸러 콜백을 건너뛸 때도 항상 ack한다.
@@ -131,13 +178,17 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   };
 }
 
-export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, steps = [], capture = false, onFrame, signal }) => {
+export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, steps = [], capture = false, allowedOrigins, onFrame, signal }) => {
   signal?.throwIfAborted();
   const browser = await launchBrowser();
   const abort = () => void browser.close();
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    const page = await browser.newPage({ viewport });
+    // 허용 출처를 넘기면 서비스 워커를 막는다. 서비스 워커가 만든 요청은 page.route를 우회하기 때문이다
+    const page = await browser.newPage({ viewport, ...(allowedOrigins ? { serviceWorkers: 'block' as const } : {}) });
+    // 허용 출처 밖으로 나가려는 요청을 막고, 막은 URL을 모아 둔다(앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않는다)
+    const blockedUrls = new Set<string>();
+    if (allowedOrigins) await restrictPageToOrigins(page, allowedOrigins, ({ url: blocked }) => void blockedUrls.add(blocked));
     const pageErrors: string[] = [];
     const consoleErrors: string[] = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -149,7 +200,8 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
     // 4xx 스크립트는 응답 뒤 브라우저가 한 번 더 ERR_ABORTED로 끊는다. 같은 URL은 상태 코드가 있는 첫 기록만 남긴다
     const failedUrls = new Set<string>();
     const recordFailure = (url: string, reason: string) => {
-      if (isAutomaticFavicon(url) || failedUrls.has(url)) return;
+      // 허용 출처 밖이라 막은 요청은 앱의 오류가 아니므로 실패로 세지 않는다(이중 기록 방지)
+      if (isAutomaticFavicon(url) || failedUrls.has(url) || blockedUrls.has(url)) return;
       failedUrls.add(url);
       failedRequests.push(`${reason} ${url}`);
     };
@@ -192,7 +244,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       const { text, overflow } = await page.evaluate<{ text: string; overflow: number }>(
         `({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })`,
       );
-      return { status: response?.status() ?? null, text, pageErrors, consoleErrors, failedRequests, horizontalOverflowPx: overflow, steps: recorded };
+      return { status: response?.status() ?? null, text, pageErrors, consoleErrors, failedRequests, blockedRequests: [...blockedUrls], horizontalOverflowPx: overflow, steps: recorded };
     } finally {
       await screencast?.stop();
     }

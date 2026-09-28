@@ -4,7 +4,7 @@ import { PNG } from 'pngjs';
 import type { ExecResult } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { StepFailedError, type BrowserPageOptions } from './browser-check';
+import { StepFailedError, type BrowserPageOptions, type BrowserPageResult } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
@@ -130,7 +130,7 @@ describe('VerificationGate 워크플로 단계', () => {
       },
       browserRunner: async (url, options) => {
         seen.push({ url, viewport: options.viewport });
-        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], horizontalOverflowPx: 510, steps: [] };
+        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], blockedRequests: [], horizontalOverflowPx: 510, steps: [] };
       },
       onEvent: () => {},
     });
@@ -174,7 +174,7 @@ describe('VerificationGate 워크플로 단계', () => {
       fetcher: async () => ORDERS_CONTRACT,
       browserRunner: async (_url, options) => {
         seen.push(options.steps);
-        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], horizontalOverflowPx: 0, steps: [] };
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
       },
       onEvent: () => {},
     });
@@ -273,6 +273,7 @@ describe('VerificationGate 워크플로 단계', () => {
           pageErrors: [],
           consoleErrors: [],
           failedRequests: [],
+          blockedRequests: [],
           horizontalOverflowPx: 0,
           steps: [
             { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
@@ -316,6 +317,7 @@ describe('VerificationGate 워크플로 단계', () => {
         pageErrors: [],
         consoleErrors: [],
         failedRequests: [],
+        blockedRequests: [],
         horizontalOverflowPx: 0,
         steps: [
           { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
@@ -394,6 +396,7 @@ describe('VerificationGate 디자인 비교', () => {
     pageErrors: [],
     consoleErrors: [],
     failedRequests: [],
+    blockedRequests: [],
     horizontalOverflowPx: 0,
     steps: [{ label: 'open /orders', ok: true, screenshot: actual }],
   });
@@ -471,5 +474,82 @@ describe('VerificationGate 디자인 비교', () => {
     expect(outcome.kind).toBe('retry');
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('이미지 너비가 다릅니다 (실제 120px, 디자인 100px)');
     expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.compare).toBeUndefined();
+  });
+});
+
+describe('VerificationGate 출처 제한', () => {
+  const browserPage = (extra: Partial<WorkflowPageCheck> = {}): WorkflowPageCheck => ({
+    service: 'api',
+    path: '/orders',
+    mode: 'browser',
+    expectStatus: 200,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    ...extra,
+  });
+
+  async function originGate(target: LoadedProject, result: BrowserPageResult) {
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 2,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => result,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  it('화면 확인에 세션 서비스 출처를 넘기고, 막은 요청을 detail에 남긴다', async () => {
+    const target = withWorkflow({ pageChecks: [browserPage()] });
+    const workspace = new Workspace(target.root);
+    let origins: string[] | undefined;
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 2,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async (_url, options) => {
+        origins = options.allowedOrigins;
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: ['http://evil.example/x'], horizontalOverflowPx: 0, steps: [] };
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // fakeSandbox는 서비스마다 http://127.0.0.1:1을 돌려준다
+    expect(origins).toEqual(['http://127.0.0.1:1']);
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(true);
+    expect(check?.detail).toBe('다른 출처 요청 1건을 막았습니다');
+  });
+
+  it('실패 사유에 막은 요청 수를 덧붙인다', async () => {
+    const target = withWorkflow({ pageChecks: [browserPage({ expectText: '없는 문구' })] });
+    const gate = await originGate(target, {
+      status: 200,
+      text: '주문 목록',
+      pageErrors: [],
+      consoleErrors: [],
+      failedRequests: [],
+      blockedRequests: ['http://evil.example/a', 'http://evil.example/b'],
+      horizontalOverflowPx: 0,
+      steps: [],
+    });
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain("렌더링된 화면에 '없는 문구'가 없습니다");
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('다른 출처 요청 2건을 막았습니다');
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.detail).toContain("렌더링된 화면에 '없는 문구'가 없습니다");
+    expect(check?.detail).toContain('다른 출처 요청 2건을 막았습니다');
   });
 });

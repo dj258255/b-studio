@@ -42,6 +42,9 @@ export function QaView({ sessionId, frame, check }: { sessionId: string; frame?:
         {check && <span className={`ml-auto font-medium ${check.ok ? "text-pass" : "text-fail"}`}>{check.ok ? "통과" : "실패"}</span>}
       </div>
 
+      {/* 실패 사유나 막은 요청 수("다른 출처 요청 N건을 막았습니다")를 한 줄로 보여 준다 */}
+      {check?.detail && <p className="whitespace-pre-wrap border-b border-line bg-panel px-3 py-1.5 text-xs text-muted">{check.detail}</p>}
+
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_18rem] lg:grid-rows-1">
         <div className="flex min-h-0 w-full items-center justify-center overflow-hidden bg-ground">
           {live && frame ? (
