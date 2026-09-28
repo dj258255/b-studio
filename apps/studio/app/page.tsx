@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AgentsBadge } from "@/components/agents-badge";
 import { LogoutButton } from "@/components/logout-button";
 import { pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
@@ -34,6 +35,7 @@ export default async function HomePage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
         <div className="flex items-center gap-3 text-sm text-muted">
+          <AgentsBadge />
           <Link href="/fleets" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
             Agent Fleet
           </Link>
