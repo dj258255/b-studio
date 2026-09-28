@@ -32,6 +32,22 @@ export interface TaskPlanLaneView {
   error?: string;
 }
 
+/** 원격 저장소에 올린 이슈 하나 */
+export interface TaskPlanIssueRef {
+  number: number;
+  url: string;
+}
+
+/** 승인 뒤 원격 저장소에 올린 추적 이슈와 작업별 하위 이슈 */
+export interface TaskPlanIssuesView {
+  /** 계획 전체를 나타내는 추적 이슈 */
+  tracking?: TaskPlanIssueRef;
+  /** 작업 id → 하위 이슈 */
+  tasks: Record<string, TaskPlanIssueRef>;
+  /** 이슈를 올리다 실패한 이유. 실패해도 계획 실행·상태 전이는 바뀌지 않는다 */
+  error?: string;
+}
+
 export interface TaskPlanIntegrationView {
   sessionId?: string;
   status: TaskPlanStepStatus;
@@ -59,5 +75,7 @@ export interface TaskPlanView {
   rejectedReason?: string;
   lanes: TaskPlanLaneView[];
   integration?: TaskPlanIntegrationView;
+  /** 승인 때 "이슈로 올리기"를 골랐을 때 만든 추적 이슈·하위 이슈 */
+  issues?: TaskPlanIssuesView;
   error?: string;
 }

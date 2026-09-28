@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ExportPreview as ExportPreviewData } from "@/lib/studio-events";
 import { Markdown } from "./markdown";
 
@@ -12,8 +12,9 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string>();
   const [showBody, setShowBody] = useState(false);
-  const parsed = parseIssue(issue);
-  const issueValue = parsed.ok ? parsed.value : undefined;
+  // 첫 미리보기만 이슈 입력을 비워 보내, 서버가 채운 기본 이슈(통합 세션의 하위 이슈)를 받는다. 그 뒤로는 입력값을 그대로 보낸다
+  const requestedDefaults = useRef(false);
+  const parsed = useMemo(() => parseIssues(issue), [issue]);
 
   // 이슈 번호 입력이 멈춘 뒤 한 번만 미리보기를 다시 부른다
   useEffect(() => {
@@ -27,12 +28,20 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
           const response = await fetch(`/api/sessions/${sessionId}/export/preview`, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify(issueValue === undefined ? {} : { issue: issueValue }),
+            body: JSON.stringify(requestedDefaults.current ? { issues: parsed.issues } : {}),
           });
           const data = await response.json();
           if (cancelled) return;
-          if (response.ok) setPreview(data as ExportPreviewData);
-          else setError(data.error ?? "미리보기를 불러오지 못했습니다");
+          if (!response.ok) {
+            setError(data.error ?? "미리보기를 불러오지 못했습니다");
+            return;
+          }
+          setPreview(data as ExportPreviewData);
+          if (!requestedDefaults.current) {
+            requestedDefaults.current = true;
+            const defaults: number[] = Array.isArray(data.issues) ? data.issues : [];
+            if (defaults.length > 0) setIssue(defaults.join(", "));
+          }
         } catch (reason) {
           if (!cancelled) setError(String(reason));
         } finally {
@@ -44,7 +53,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [issue, sessionId, parsed.ok, issueValue]);
+  }, [parsed, sessionId]);
 
   /** 브랜치 올리기와 PR 만들기를 한 번에 한다. 누락이 있어도 막지 않는다 */
   async function create() {
@@ -54,7 +63,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
       const response = await fetch(`/api/sessions/${sessionId}/export`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pullRequest: true, ...(issueValue === undefined ? {} : { issue: issueValue }) }),
+        body: JSON.stringify({ pullRequest: true, issues: parsed.ok ? parsed.issues : [] }),
       });
       const data = await response.json();
       if (!response.ok) setError(data.error ?? `${label}을 만들지 못했습니다`);
@@ -75,23 +84,21 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
 
       <div className="mt-3">
         <label htmlFor="export-issue" className="block text-sm font-medium">
-          연결할 이슈 번호 (선택)
+          연결할 이슈 번호 (선택, 쉼표로 여러 개)
         </label>
         <input
           id="export-issue"
-          type="number"
+          type="text"
           inputMode="numeric"
-          min={1}
-          max={10_000_000}
           value={issue}
           onChange={(event) => setIssue(event.target.value)}
-          placeholder="예: 57"
-          className="mt-1 w-40 rounded-control border border-line bg-panel px-3 py-1.5 text-sm"
+          placeholder="예: 57, 58"
+          className="mt-1 w-56 rounded-control border border-line bg-panel px-3 py-1.5 text-sm"
         />
-        <p className="mt-1 text-xs text-muted">넣으면 PR 본문 첫 줄에 Closes #N을 넣어 이슈를 함께 닫습니다.</p>
+        <p className="mt-1 text-xs text-muted">넣으면 PR 본문 첫 줄들에 Closes #N을 넣어 이슈를 함께 닫습니다.</p>
       </div>
 
-      {!parsed.ok && <p className="mt-3 text-sm text-fail">이슈 번호는 1 이상 10,000,000 이하의 정수여야 합니다</p>}
+      {!parsed.ok && <p className="mt-3 text-sm text-fail">이슈 번호는 쉼표로 구분한 1 이상 10,000,000 이하의 정수여야 합니다</p>}
 
       {parsed.ok && loading && (
         <p className="mt-3 text-sm text-wait" role="status">
@@ -156,12 +163,17 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
   );
 }
 
-/** 입력한 이슈 번호. 빈 값은 연결하지 않음, 범위 밖이거나 정수가 아니면 잘못된 값이다 */
-function parseIssue(input: string): { ok: true; value?: number } | { ok: false } {
+/** 입력한 이슈 번호들. 빈 값은 연결하지 않음, 쉼표로 여러 개, 범위 밖이거나 정수가 아니면 잘못된 값이다 */
+function parseIssues(input: string): { ok: true; issues: number[] } | { ok: false } {
   const trimmed = input.trim();
-  if (trimmed === "") return { ok: true, value: undefined };
-  if (!/^[0-9]{1,8}$/.test(trimmed)) return { ok: false };
-  const value = Number(trimmed);
-  if (value < 1 || value > 10_000_000) return { ok: false };
-  return { ok: true, value };
+  if (trimmed === "") return { ok: true, issues: [] };
+  const issues: number[] = [];
+  for (const part of trimmed.split(",")) {
+    const value = part.trim();
+    if (!/^[0-9]{1,8}$/.test(value)) return { ok: false };
+    const number = Number(value);
+    if (number < 1 || number > 10_000_000) return { ok: false };
+    issues.push(number);
+  }
+  return { ok: true, issues: [...new Set(issues)] };
 }

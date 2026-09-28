@@ -51,18 +51,23 @@ export {
   type SourceRepository,
 } from './checkpoints';
 export {
+  addSubIssue,
   buildPullRequest,
   canCreatePullRequest,
   compareUrl,
+  createIssue,
   createPullRequest,
   fetchIssue,
   parseRemote,
   PullRequestError,
   type GitHostKind,
+  type IssueInput,
   type IssueLookup,
+  type IssueResult,
   type PullRequestDraft,
   type PullRequestResult,
   type RemoteLocation,
+  type SubIssueResult,
 } from './repository';
 export { buildTools, executeTool } from './tools';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';

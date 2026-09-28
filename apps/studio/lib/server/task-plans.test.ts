@@ -24,7 +24,36 @@ const fake = vi.hoisted(() => ({
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   stopped: [] as string[],
   stopOrder: { integrationCreatedAfterStops: false },
+  /** 원본 저장소의 상태. originUrl이 없으면 원격 저장소가 아니다 */
+  source: { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' } as { base: string; originUrl?: string; dirtyFiles: number; subdir: string } | undefined,
+  /** 만든 이슈 제목 (만든 순서) */
+  issues: [] as string[],
+  /** 만든 이슈의 제목·본문 (만든 순서). 추적 이슈 본문을 확인할 때 쓴다 */
+  issueInputs: [] as Array<{ title: string; body: string }>,
+  /** 연결한 하위 이슈 수 */
+  subIssues: [] as boolean[],
+  /** true면 이슈 만들기가 실패한다 */
+  failIssue: false,
 }));
+
+// 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다
+vi.mock('@b-studio/agent', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@b-studio/agent')>();
+  return {
+    ...actual,
+    CheckpointStore: { inspectSource: async () => fake.source },
+    createIssue: async (_remote: unknown, input: { title: string; body: string }) => {
+      if (fake.failIssue) throw new Error('이슈를 만들지 못했습니다');
+      fake.issues.push(input.title);
+      fake.issueInputs.push({ title: input.title, body: input.body });
+      return { number: fake.issues.length, url: `https://github.com/acme/orders/issues/${fake.issues.length}` };
+    },
+    addSubIssue: async () => {
+      fake.subIssues.push(true);
+      return { supported: true };
+    },
+  };
+});
 
 vi.mock('./model-registry', () => ({
   listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
@@ -35,7 +64,7 @@ vi.mock('./model-registry', () => ({
 }));
 
 vi.mock('./projects', () => ({
-  findProject: async () => ({ spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] }),
+  findProject: async () => ({ root: fake.root, spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] }),
 }));
 
 vi.mock('./sessions', () => ({
@@ -98,7 +127,13 @@ import { StudioError } from './errors';
 import { approveTaskPlan, createTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
-const saved = { mode: process.env.B_STUDIO_MODE, dir: process.env.B_STUDIO_TASK_PLANS_DIR };
+const saved = {
+  mode: process.env.B_STUDIO_MODE,
+  dir: process.env.B_STUDIO_TASK_PLANS_DIR,
+  token: process.env.B_STUDIO_GITHUB_TOKEN,
+  giteaToken: process.env.B_STUDIO_GITEA_TOKEN,
+  provider: process.env.B_STUDIO_GIT_PROVIDER,
+};
 
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `[id:${id}] ${id} 작업`, paths, dependsOn });
 
@@ -112,12 +147,26 @@ beforeEach(() => {
   fake.sends = [];
   fake.stopped = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
+  fake.source = { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' };
+  fake.issues = [];
+  fake.issueInputs = [];
+  fake.subIssues = [];
+  fake.failIssue = false;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
+  delete process.env.B_STUDIO_GITHUB_TOKEN;
+  delete process.env.B_STUDIO_GITEA_TOKEN;
+  delete process.env.B_STUDIO_GIT_PROVIDER;
 });
 
 afterAll(() => {
-  for (const [key, value] of [['B_STUDIO_MODE', saved.mode], ['B_STUDIO_TASK_PLANS_DIR', saved.dir]] as const) {
+  for (const [key, value] of [
+    ['B_STUDIO_MODE', saved.mode],
+    ['B_STUDIO_TASK_PLANS_DIR', saved.dir],
+    ['B_STUDIO_GITHUB_TOKEN', saved.token],
+    ['B_STUDIO_GITEA_TOKEN', saved.giteaToken],
+    ['B_STUDIO_GIT_PROVIDER', saved.provider],
+  ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -141,6 +190,16 @@ async function awaiting(id: string): Promise<TaskPlanView> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('작업 계획이 승인 대기에 이르지 않았습니다');
+}
+
+/** 이슈 올리기가 끝나 추적 이슈나 실패 이유가 남을 때까지 기다린다 */
+async function untilIssues(id: string): Promise<TaskPlanView> {
+  for (let i = 0; i < 500; i++) {
+    const plan = getTaskPlan(id, 'kim');
+    if (plan.issues?.tracking || plan.issues?.error) return plan;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('이슈를 올리지 않았습니다');
 }
 
 /** 계획을 만들고, 사람이 승인한 뒤 완료·실패까지 기다린다 */
@@ -462,6 +521,119 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     // 통합 샌드박스를 띄우기 전에 멈춰야 한다. 스크립트 턴이 돌면 아무것도 합치지 않았는데 통과한 것처럼 남는다
     expect(fake.counter).toBe(0);
     expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+});
+
+describe('승인 뒤 이슈로 올리기', () => {
+  it('publishIssues를 고르면 작업별 하위 이슈를 먼저 만들고 추적 이슈를 만든 뒤 GitHub 하위 이슈로 연결한다', async () => {
+    process.env.B_STUDIO_GITHUB_TOKEN = 't';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    approveTaskPlan(created.id, 'kim', { publishIssues: true });
+    await finished(created.id);
+
+    const plan = await untilIssues(created.id);
+    // 하위 이슈 2개를 먼저 만들고 추적 이슈를 마지막에 만든다
+    expect(fake.issues).toHaveLength(3);
+    expect(fake.issues.slice(0, 2).sort()).toEqual(['a', 'b']);
+    expect(fake.issues[2]).toBe('[작업 분해] 메모 추가');
+    expect(plan.issues?.tracking).toEqual({ number: 3, url: 'https://github.com/acme/orders/issues/3' });
+    expect(Object.values(plan.issues!.tasks).map((ref) => ref.number).sort()).toEqual([1, 2]);
+    // GitHub이면 하위 이슈 API로 연결한다
+    expect(fake.subIssues).toHaveLength(2);
+    expect(plan.issues?.error).toBeUndefined();
+  });
+
+  it('GitHub가 아니면 하위 이슈 API 대신 추적 이슈 본문에 체크리스트를 넣는다', async () => {
+    process.env.B_STUDIO_GITEA_TOKEN = 't';
+    process.env.B_STUDIO_GIT_PROVIDER = 'gitea';
+    fake.source = { base: 'main', originUrl: 'https://git.corp.local/dev/orders.git', dirtyFiles: 0, subdir: '' };
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    approveTaskPlan(created.id, 'kim', { publishIssues: true });
+    await finished(created.id);
+
+    const plan = await untilIssues(created.id);
+    expect(fake.subIssues).toEqual([]);
+    const tracking = fake.issueInputs.find((input) => input.title === '[작업 분해] 메모 추가')!;
+    expect(tracking.body).toContain('- [ ] #1 a');
+    expect(tracking.body).toContain('- [ ] #2 b');
+    expect(plan.issues?.tracking?.number).toBe(3);
+  });
+
+  it('이슈 올리기가 실패해도 계획은 끝까지 돌고 이유만 남긴다', async () => {
+    process.env.B_STUDIO_GITHUB_TOKEN = 't';
+    fake.failIssue = true;
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '실패', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    approveTaskPlan(created.id, 'kim', { publishIssues: true });
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    const withError = await untilIssues(created.id);
+    expect(withError.issues?.error).toContain('이슈를 만들지 못했습니다');
+    expect(withError.issues?.tracking).toBeUndefined();
+  });
+
+  it('원격 저장소가 아니거나 토큰이 없거나 고르지 않으면 이슈를 만들지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    // 저장소가 원격이 아니다 (토큰은 있어도)
+    process.env.B_STUDIO_GITHUB_TOKEN = 't';
+    fake.source = undefined;
+    const noRemote = await createTaskPlan({ projectId: 'orders', request: '원격 아님', modelId: 'model-a', owner: 'kim' });
+    await awaiting(noRemote.id);
+    approveTaskPlan(noRemote.id, 'kim', { publishIssues: true });
+    await finished(noRemote.id);
+
+    // 원격이지만 토큰이 없다
+    fake.source = { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' };
+    delete process.env.B_STUDIO_GITHUB_TOKEN;
+    const noToken = await createTaskPlan({ projectId: 'orders', request: '토큰 없음', modelId: 'model-a', owner: 'kim' });
+    await awaiting(noToken.id);
+    approveTaskPlan(noToken.id, 'kim', { publishIssues: true });
+    await finished(noToken.id);
+
+    // publishIssues를 고르지 않았다
+    process.env.B_STUDIO_GITHUB_TOKEN = 't';
+    const notAsked = await createTaskPlan({ projectId: 'orders', request: '고르지 않음', modelId: 'model-a', owner: 'kim' });
+    await awaiting(notAsked.id);
+    approveTaskPlan(notAsked.id, 'kim');
+    await finished(notAsked.id);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    for (const id of [noRemote.id, noToken.id, notAsked.id]) expect(getTaskPlan(id, 'kim').issues).toBeUndefined();
+    expect(fake.issues).toEqual([]);
+  });
+
+  it('이미 이슈를 만든 계획은 다시 만들지 않는다', async () => {
+    process.env.B_STUDIO_GITHUB_TOKEN = 't';
+    writePlan({
+      id: 'plan-issues-done',
+      owner: 'kim',
+      status: 'awaiting_approval',
+      lanes: [],
+      issues: { tracking: { number: 9, url: 'https://github.com/acme/orders/issues/9' }, tasks: { a: { number: 8, url: 'https://github.com/acme/orders/issues/8' } } },
+    });
+
+    const { approveTaskPlan: approve, getTaskPlan: read } = await restart();
+    approve('plan-issues-done', 'kim', { publishIssues: true });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(fake.issues).toEqual([]);
+    const plan = read('plan-issues-done', 'kim');
+    expect(plan.issues?.tracking?.number).toBe(9);
+    expect(plan.issues?.tasks.a?.number).toBe(8);
   });
 });
 

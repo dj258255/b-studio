@@ -2048,6 +2048,13 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - 이슈 연결은 PR 본문의 `Closes #N` 문구에 기댑니다. 호스트가 문구를 다르게 해석하면 연결되지 않을 수 있습니다.
 - 미리보기는 부른 시점의 커밋을 기준으로 합니다. 미리보기 뒤 커밋이 바뀌면 미리보기와 실제 PR 본문이 달라질 수 있습니다(생성이 같은 함수로 다시 만듭니다).
 
+### 보강: 승인한 작업 분해 계획을 이슈로 올린다 (#66)
+- 계획이 스튜디오 기록에만 있으면 저장소의 이슈·PR 흐름과 이어지지 않습니다. 승인 뒤 추적 이슈와 작업별 하위 이슈를 만들고, 통합 PR이 그 이슈들을 `Closes`로 닫도록 같은 ADR을 넓혔습니다(새 ADR을 만들지 않았습니다).
+- 이슈 올리기는 승인 시점에 레인 실행과 **별개로** 비동기로 돕니다. 프로젝트가 원격 저장소이고 그 호스트의 토큰이 있을 때만(PR 생성과 같은 `canCreatePullRequest` 판정) 시도하고, 실패해도 계획 실행·상태 전이는 바꾸지 않으며 `plan.issues.error`에 이유만 남깁니다. 거부된 계획의 이슈가 남지 않도록 계획 전에는 만들지 않습니다.
+- `createIssue`는 GitHub·Gitea `POST /repos/{owner}/{repo}/issues`, GitLab `POST /projects/{id}/issues`를 씁니다. 하위 이슈 API는 GitHub에만 있어(`POST /repos/{owner}/{repo}/issues/{n}/sub_issues`, `sub_issue_id`는 번호가 아니라 id라 `GET /issues/{child}`로 먼저 얻습니다) Gitea·GitLab은 추적 이슈 본문에 `- [ ] #N 제목` 체크리스트를 넣고 `addSubIssue`가 `{ supported: false }`를 돌려줍니다. 토큰은 오류 메시지에 넣지 않습니다.
+- `buildPullRequest`·`previewExport`·`exportSession`은 이슈 번호 여러 개(`issues`)를 받습니다. 기존 `issue`(단수)는 남겨 두고 둘 다 오면 합칩니다. 통합 세션 미리보기는 그 세션이 `plan.integration.sessionId`인 계획을 찾아 하위 이슈 번호를 기본값으로 채우고, 확인 목록 `issue_linked`가 여러 이슈를 이어 붙여 보여 줍니다.
+- 검증 결과: 가짜 fetch로 세 호스트 이슈 생성, GitHub 하위 이슈 id 조회·연결, 실패 시 토큰 미노출을 단위 테스트로 확인했고, 승인 라우트가 `publishIssues`만 넘기는지 라우트 테스트로 고정했습니다. 계획 승인 뒤 이슈 생성·실패 시 상태 유지·원격/토큰 없음 건너뛰기·재생성 방지를 task-plans 테스트로 확인했습니다. 로컬 Gitea 확인은 Docker가 필요해 하지 않았습니다.
+
 ---
 
 ## 출처

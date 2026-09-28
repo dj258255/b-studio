@@ -3,10 +3,23 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { isInScope, MAX_PLAN_LANES, requestTaskPlan, runTaskGraph, type ScriptedTurn, type TaskLane } from '@b-studio/agent';
-import type { Checkpoint } from '@b-studio/agent';
+import {
+  addSubIssue,
+  canCreatePullRequest,
+  CheckpointStore,
+  createIssue,
+  isInScope,
+  MAX_PLAN_LANES,
+  parseRemote,
+  requestTaskPlan,
+  runTaskGraph,
+  type Checkpoint,
+  type RemoteLocation,
+  type ScriptedTurn,
+  type TaskLane,
+} from '@b-studio/agent';
 import type { StudioEvent } from '@/lib/studio-events';
-import type { TaskPlanCheckpointView, TaskPlanLaneView, TaskPlanStepStatus, TaskPlanView } from '@/lib/task-plan-types';
+import type { TaskPlanCheckpointView, TaskPlanIssueRef, TaskPlanIssuesView, TaskPlanLaneView, TaskPlanStepStatus, TaskPlanTaskView, TaskPlanView } from '@/lib/task-plan-types';
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
@@ -81,15 +94,121 @@ function findPlan(id: string, owner: string): TaskPlanView {
   return plan;
 }
 
-/** 사람이 계획을 승인하면 그때 레인 실행을 시작한다. 승인 전에는 세션을 만들지 않는다 */
-export function approveTaskPlan(id: string, owner: string): TaskPlanView {
+/**
+ * 사람이 계획을 승인하면 그때 레인 실행을 시작한다. 승인 전에는 세션을 만들지 않는다.
+ * publishIssues를 고르면 레인 실행과 별개로 추적 이슈·하위 이슈를 원격에 올린다. 이슈 올리기가 실패해도 계획 실행·상태 전이는 바뀌지 않는다
+ */
+export function approveTaskPlan(id: string, owner: string, { publishIssues = false }: { publishIssues?: boolean } = {}): TaskPlanView {
   const plan = findPlan(id, owner);
   if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인을 기다리는 계획이 아닙니다');
   plan.approvedBy = owner;
   plan.approvedAt = new Date().toISOString();
   persist(plan);
+  if (publishIssues) void publishPlanIssues(plan).catch(() => {});
   void runApprovedPlan(plan).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
+}
+
+/** 통합 세션 id로 그 계획의 하위 이슈 번호를 찾는다. 통합 PR 미리보기의 기본 이슈 번호로 쓴다 */
+export function integrationIssues(sessionId: string): number[] {
+  ensureLoaded();
+  const plan = [...plans.values()].find((candidate) => candidate.integration?.sessionId === sessionId);
+  if (!plan?.issues) return [];
+  const issuesByTask = plan.issues.tasks;
+  const numbers = plan.lanes.flatMap((lane) => lane.tasks.map((task) => issuesByTask[task.id]?.number));
+  return [...new Set(numbers.filter((number): number is number => number !== undefined))];
+}
+
+const TRACKING_TITLE_LIMIT = 60;
+const TRACKING_REQUEST_LIMIT = 4_000;
+
+/**
+ * 계획을 원격 저장소의 추적 이슈와 작업별 하위 이슈로 올린다.
+ * 프로젝트가 원격 저장소이고 그 호스트의 토큰이 있을 때만(createPullRequest와 같은 판정) 시도하며, 아니면 조용히 건너뛴다.
+ * GitHub이면 하위 이슈 API로 연결하고, Gitea·GitLab은 추적 이슈 본문에 체크리스트를 넣는다.
+ * 이미 이슈를 만든 계획(재시작 뒤 재개 등)은 다시 만들지 않는다.
+ */
+async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
+  if (plan.issues?.tracking || Object.keys(plan.issues?.tasks ?? {}).length > 0) return;
+
+  let remote: RemoteLocation;
+  try {
+    const project = await findProject(plan.projectId);
+    const source = project && (await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true }));
+    const candidate = source?.originUrl ? parseRemote(source.originUrl) : undefined;
+    // 원격을 확인하지 못하거나 올릴 수 없는 호스트·토큰이면 계획만 실행하고 이슈는 만들지 않는다
+    if (!candidate || !canCreatePullRequest(candidate)) return;
+    remote = candidate;
+  } catch {
+    return;
+  }
+
+  const issues: TaskPlanIssuesView = (plan.issues = { tasks: {} });
+  persist(plan);
+  try {
+    // 하위 이슈를 먼저 만들어, GitHub가 아니어도 추적 이슈 본문에 체크리스트를 넣을 수 있게 한다
+    for (const lane of plan.lanes) {
+      for (const task of lane.tasks) {
+        const created = await createIssue(remote, { title: task.title, body: taskIssueBody(plan, lane, task) });
+        issues.tasks[task.id] = { number: created.number, url: created.url };
+        persist(plan);
+      }
+    }
+    const tracking = await createIssue(remote, { title: trackingTitle(plan), body: trackingIssueBody(plan, remote) });
+    issues.tracking = { number: tracking.number, url: tracking.url };
+    persist(plan);
+
+    if (remote.kind === 'github') {
+      for (const ref of Object.values(issues.tasks)) await addSubIssue(remote, tracking.number, ref.number);
+    }
+  } catch (error) {
+    // 실패해도 계획 실행·상태 전이는 그대로 두고 이유만 남긴다
+    issues.error = describe(error);
+  }
+  persist(plan);
+}
+
+function trackingTitle(plan: TaskPlanView): string {
+  return `[작업 분해] ${plan.request.slice(0, TRACKING_TITLE_LIMIT)}`;
+}
+
+function trackingIssueBody(plan: TaskPlanView, remote: RemoteLocation): string {
+  const request = plan.request.length > TRACKING_REQUEST_LIMIT ? `${plan.request.slice(0, TRACKING_REQUEST_LIMIT)}\n\n(요청이 길어 뒷부분을 생략했습니다)` : plan.request;
+  const rows = plan.lanes.flatMap((lane) =>
+    lane.tasks.map((task) => `| ${lane.id} | ${task.title} | ${task.paths.join(', ') || '-'} | ${task.dependsOn.join(', ') || '-'} |`),
+  );
+  // GitHub는 하위 이슈로 연결하므로 체크리스트를 넣지 않는다. 나머지 호스트는 본문 목록으로 남긴다
+  const checklist =
+    remote.kind === 'github'
+      ? []
+      : plan.lanes.flatMap((lane) =>
+          lane.tasks.flatMap((task) => {
+            const ref: TaskPlanIssueRef | undefined = plan.issues?.tasks[task.id];
+            return ref ? [`- [ ] #${ref.number} ${task.title}`] : [];
+          }),
+        );
+  return [
+    request,
+    '',
+    '| 레인 | 작업 | 쓰기 범위 | 의존 |',
+    '| --- | --- | --- | --- |',
+    ...rows,
+    ...(checklist.length > 0 ? ['', ...checklist] : []),
+    '',
+    `b-studio 작업 분해 계획 ${plan.id}에서 만들었습니다.`,
+  ].join('\n');
+}
+
+function taskIssueBody(plan: TaskPlanView, lane: TaskPlanLaneView, task: TaskPlanTaskView): string {
+  return [
+    task.request,
+    '',
+    `- 레인: ${lane.id}`,
+    `- 쓰기 범위: ${task.paths.join(', ') || '-'}`,
+    `- 의존: ${task.dependsOn.join(', ') || '없음'}`,
+    '',
+    `b-studio 작업 분해 계획 ${plan.id}에서 만들었습니다.`,
+  ].join('\n');
 }
 
 /** 사람이 계획을 거부하면 세션을 만들지 않고 멈춘다 */
