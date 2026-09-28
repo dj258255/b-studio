@@ -6,6 +6,7 @@
 
 ### 추가
 
+- 미리보기에 원격 브라우저·QA 보기를 추가했습니다. 게이트의 화면 확인을 실시간 프레임과 단계 스크린샷으로 보고, 서버 소유 브라우저를 조작하며, 고른 요소를 요청에 첨부합니다. Figma 프레임을 세션으로 가져와 실제 화면과 픽셀 차이 비율로 비교합니다 ([#81](https://github.com/dj258255/b-studio/pull/81)).
 - 착수 명세·버그·실험 이슈 양식 3종과 PR 템플릿을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - 프로젝트 로드맵(`ROADMAP.md`)과 변경 기록(`CHANGELOG.md`)을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - ADR 양식(`docs/templates/adr.md`)과 실험 보고서 양식(`docs/templates/experiment-report.md`)을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
@@ -21,6 +22,8 @@
 
 ### 수정
 
+- ChatGPT 구독 러너가 ESM 전용 SDK를 정적으로 불러와, tsx로 도는 협업 벤치가 시작하지 못하던 문제를 고쳤습니다. SDK는 첫 실행 때 불러옵니다 ([#86](https://github.com/dj258255/b-studio/pull/86)).
+- 게이트의 화면 확인도 세션 서비스 출처 밖 요청을 막고 service worker를 차단합니다 ([#81](https://github.com/dj258255/b-studio/pull/81)).
 - 협업 벤치의 `meta.json`이 커밋을 끝날 때 읽어, 실행 중 main이 바뀌면 다른 커밋을 적던 문제를 고쳤습니다. 시작할 때 읽고, 끝날 때 다르면 `gitCommitAtEnd`를 함께 적습니다.
 - 격리 샌드박스의 Node 서비스가 edge 프록시를 쓰도록 `NODE_USE_ENV_PROXY=1`을 넘깁니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#69](https://github.com/dj258255/b-studio/issues/69)).
 - 예제 api 컨테이너의 메모리 한도를 1536m에서 2048m으로 올려, 개발 서버 옆에서 테스트를 돌릴 때 OOM으로 실패하지 않게 합니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#70](https://github.com/dj258255/b-studio/issues/70)).
