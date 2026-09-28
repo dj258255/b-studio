@@ -16,6 +16,7 @@
     "e2e:deploy-gate": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/deploy-gate-local.ts",
     "e2e:task-plan": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/task-plan-local.ts",
     "bench:boot": "tsx packages/sandbox/bench/boot.ts",
+    "bench:coordination": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/run.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"
   },

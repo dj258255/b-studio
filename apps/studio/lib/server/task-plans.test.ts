@@ -24,13 +24,24 @@ const fake = vi.hoisted(() => ({
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   stopped: [] as string[],
   stopOrder: { integrationCreatedAfterStops: false },
+  /** 계획 모델을 부른 횟수. 고정 계획(presetPlan)은 0이어야 한다 */
+  modelCalls: 0,
+  /** 모든 run_finished에 붙이는 실행 지표. 계획 기록에 그대로 옮겨지는지 확인한다 */
+  run: {
+    usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+    metrics: { modelCalls: 2, maxContextTokens: 9, modelMs: 5, toolMs: 6, gateMs: 7 },
+    durationMs: 11,
+  },
 }));
 
 vi.mock('./model-registry', () => ({
   listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
   modelById: (id: string) => ({ id }),
   clientForModel: () => ({
-    createMessage: async () => ({ content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }),
+    createMessage: async () => {
+      fake.modelCalls += 1;
+      return { content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } };
+    },
   }),
 }));
 
@@ -76,7 +87,7 @@ vi.mock('./sessions', () => ({
         ? fake.writes[taskId]
         : undefined;
     const finish = (status: 'done' | 'failed', summary: string) => {
-      for (const listener of fake.listeners.get(sessionId) ?? []) listener({ type: 'run_finished', runId, status, summary } as StudioEvent);
+      for (const listener of fake.listeners.get(sessionId) ?? []) listener({ type: 'run_finished', runId, status, summary, ...fake.run } as StudioEvent);
     };
     if (files === 'fail' || files === undefined) {
       finish('failed', '검증 게이트를 통과하지 못했습니다');
@@ -112,6 +123,7 @@ beforeEach(() => {
   fake.sends = [];
   fake.stopped = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
+  fake.modelCalls = 0;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
 });
@@ -276,6 +288,101 @@ describe('작업 분해 실행', () => {
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'unknown', owner: 'kim' })).rejects.toThrow('등록되지 않은 모델');
     process.env.B_STUDIO_MODE = 'demo';
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+  });
+
+  it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {
+    fake.plan = { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a1: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '지표 기록', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    // 계획 호출의 usage와 걸린 시간
+    expect(plan.planning).toEqual({ usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: expect.any(Number) });
+
+    const lane = plan.lanes.find((candidate) => candidate.tasks[0]!.id === 'a1')!;
+    expect(lane.bootMs).toBeGreaterThanOrEqual(0);
+    expect(typeof lane.startedAt).toBe('string');
+    expect(typeof lane.finishedAt).toBe('string');
+    // run_finished의 지표가 작업 실행 기록으로 그대로 옮겨진다
+    expect(lane.tasks[0]!.run).toEqual({ status: 'done', durationMs: 11, usage: fake.run.usage, metrics: fake.run.metrics });
+    expect(plan.integration?.run).toEqual({ status: 'done', durationMs: 11, usage: fake.run.usage, metrics: fake.run.metrics });
+    expect(plan.integration?.bootMs).toBeGreaterThanOrEqual(0);
+
+    // 계획 호출 1회 + 레인 작업 실행 2회 × 2회 = 5 (통합은 스크립트 턴이라 세지 않는다), 최대 입력 크기는 9, 세션은 레인 2 + 통합 1
+    expect(plan.metrics).toMatchObject({ modelCalls: 5, maxContextTokens: 9, sessions: 3 });
+    expect(plan.metrics!.bootMsTotal).toBeGreaterThanOrEqual(0);
+    expect(typeof plan.metrics!.endToEndMs).toBe('number');
+  });
+});
+
+describe('고정 계획(presetPlan)', () => {
+  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code 모드 포함)', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    const presetPlan = { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: 'claude-code', owner: 'kim', presetPlan });
+    const waiting = await awaiting(created.id);
+
+    expect(waiting.status).toBe('awaiting_approval');
+    expect(waiting.preset).toBe(true);
+    // 모델 호출이 없었으므로 planning이 없다
+    expect(waiting.planning).toBeUndefined();
+    expect(fake.modelCalls).toBe(0);
+    expect(
+      waiting.lanes
+        .map((lane) => lane.tasks.map((item) => item.id))
+        .flat()
+        .sort(),
+    ).toEqual(['a1', 'b']);
+    // 승인 게이트는 그대로다. 승인 전에는 세션을 만들지 않는다
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  it('presetPlan도 승인 뒤 레인·통합이 그대로 돈다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    fake.writes = { a1: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: '고정 계획 실행',
+      modelId: 'claude-code',
+      owner: 'kim',
+      presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] },
+    });
+
+    expect(plan.status).toBe('done');
+    expect(plan.preset).toBe(true);
+    expect(plan.planning).toBeUndefined();
+    expect(fake.modelCalls).toBe(0);
+  });
+
+  it('presetPlan이 없으면 claude-code 모드에서 거부한다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+    expect(fake.modelCalls).toBe(0);
+  });
+
+  it('presetPlan이 있어도 demo 모드에서는 거부한다', async () => {
+    process.env.B_STUDIO_MODE = 'demo';
+    await expect(
+      createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'claude-code', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
+    ).rejects.toThrow('api 또는 claude-code');
+  });
+
+  it('presetPlan이 규칙을 어기면 세션을 만들지 않고 실패한다', async () => {
+    const created = await createTaskPlan({ projectId: 'orders', request: '나쁜 계획', modelId: 'model-a', owner: 'kim', presetPlan: { tasks: [] } });
+    const plan = await awaiting(created.id);
+
+    expect(plan.status).toBe('failed');
+    expect(plan.error).toContain('작업 계획을 만들지 못했습니다');
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  it('presetPlan이면 modelId가 비어 있을 수 없다', async () => {
+    await expect(
+      createTaskPlan({ projectId: 'orders', request: '요청', modelId: '  ', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
+    ).rejects.toThrow('modelId가 필요합니다');
   });
 });
 

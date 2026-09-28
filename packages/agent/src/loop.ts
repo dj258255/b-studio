@@ -45,6 +45,20 @@ export interface AgentUsage {
   cacheWriteTokens: number;
 }
 
+/** 요청 하나를 처리하며 관찰한 실행 지표. 토큰 합계(usage)와 달리 호출 횟수·입력 크기·단계별 시간을 남긴다 */
+export interface RunMetrics {
+  /** client.createMessage 호출 횟수 */
+  modelCalls: number;
+  /** 호출 한 번의 입력 크기(input+cache_read+cache_creation) 중 최댓값 */
+  maxContextTokens: number;
+  /** createMessage 호출에 걸린 시간 합 */
+  modelMs: number;
+  /** executeTool 실행 시간 합 */
+  toolMs: number;
+  /** gate.check() 실행 시간 합 */
+  gateMs: number;
+}
+
 export interface AgentResult {
   status: 'done' | 'failed';
   summary: string;
@@ -58,6 +72,8 @@ export interface AgentResult {
   verifyAttempts: number;
   turns: number;
   usage: AgentUsage;
+  /** 실행 지표. 로컬 Claude Code 러너는 모델 호출을 직접 보지 못해 채우지 않는다 */
+  metrics?: RunMetrics;
 }
 
 export type AgentEvent =
@@ -181,6 +197,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   onEvent({ type: 'stage', stage, source: 'platform' });
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
   const usage = emptyUsage();
+  const metrics = emptyMetrics();
 
   const finish = (status: AgentResult['status'], summary: string, turns: number): AgentResult => {
     const result: AgentResult = {
@@ -193,6 +210,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       verifyAttempts: gate?.attempts ?? 0,
       turns,
       usage,
+      metrics: { ...metrics },
     };
     onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
     return result;
@@ -202,7 +220,11 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     signal?.throwIfAborted();
     onEvent({ type: 'turn', turn });
 
+    const modelStarted = performance.now();
     const message = await client.createMessage({ system, tools, messages }, signal);
+    metrics.modelMs += Math.round(performance.now() - modelStarted);
+    metrics.modelCalls += 1;
+    metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(message.usage));
     addUsage(usage, message.usage);
     // 요청이 취소되거나 오류로 끝나도 그때까지 쓴 양을 알 수 있게 응답마다 알린다
     onEvent({ type: 'tokens', usage: { ...usage } });
@@ -228,6 +250,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       const results: BetaToolResultBlockParam[] = [];
       for (const call of toolUses) {
         onEvent({ type: 'tool_call', name: call.name, input: call.input });
+        const toolStarted = performance.now();
         const outcome = await executeTool(call.name, call.input, {
           project,
           workspace,
@@ -241,6 +264,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           requestApproval: options.requestApproval,
           onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
         });
+        metrics.toolMs += Math.round(performance.now() - toolStarted);
         if (outcome.ok && (call.name === 'write_file' || call.name === 'edit_file') && stage === 'plan') {
           stage = 'implement';
           onEvent({ type: 'stage', stage, source: 'platform' });
@@ -264,7 +288,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
     if (!gate) return finish('done', text, turn);
     // 단계 이벤트(실행·계약·화면·테스트·리뷰)는 게이트가 직접 알린다. 로컬 Claude Code 러너도 같은 게이트를 쓴다
+    const gateStarted = performance.now();
     const outcome = await gate.check();
+    metrics.gateMs += Math.round(performance.now() - gateStarted);
     if (outcome.kind === 'pass') {
       // 바뀐 파일이 없어 검증 없이 끝났다면 체크포인트할 것도 없다
       if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
@@ -282,4 +308,16 @@ function addUsage(total: AgentUsage, usage: BetaMessage['usage']): void {
   total.outputTokens += usage.output_tokens ?? 0;
   total.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
   total.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+}
+
+function emptyMetrics(): RunMetrics {
+  return { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+}
+
+/**
+ * 모델이 실제로 받은 입력 크기. Anthropic 응답의 input_tokens는 캐시 분을 빼고 세므로
+ * cache_read·cache_creation을 더해야 한 호출의 입력 크기가 된다.
+ */
+function contextTokens(usage: BetaMessage['usage']): number {
+  return (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
 }

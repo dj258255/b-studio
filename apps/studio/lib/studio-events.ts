@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
@@ -205,6 +205,10 @@ export type StudioEvent =
       turns?: number;
       /** 이번 요청이 쓴 토큰. 모델을 부르지 않았으면 없다 */
       usage?: AgentUsage;
+      /** 실행 지표. 모델을 부르지 않았거나 로컬 Claude Code 러너가 모델 호출을 직접 보지 못해 없을 수 있다 */
+      metrics?: RunMetrics;
+      /** 요청을 시작한 뒤 끝난 시각까지의 벽시계 시간 */
+      durationMs?: number;
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
       nextDemoQuestion?: string;
