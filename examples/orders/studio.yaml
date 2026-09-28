@@ -53,8 +53,8 @@ databases:
   db: { engine: postgres, database: app, user: app }
 
 # 컨테이너 한도. 한 샌드박스가 Docker VM 자원을 다 써서 다른 세션까지 멈추지 않게 한다.
-# 한도 없이 잰 최대 사용량: api 726MiB(JVM 3개: Gradle 래퍼, Gradle 데몬, 앱), web 548MiB, db 48MiB
+# 한도 없이 잰 최대 사용량: 개발 서버만 api 779MiB, 같은 컨테이너에서 ./gradlew test를 함께 돌리면 1,736MiB(1초 간격 표본, #70). 1536m이면 테스트 중 OOM으로 종료돼 2048m로 둔다(여유 약 15%). web 548MiB, db 48MiB
 resources:
-  api: { memory: 1536m, cpus: 2 }
+  api: { memory: 2048m, cpus: 2 }
   web: { memory: 1g, cpus: 2 }
   db: { memory: 256m }

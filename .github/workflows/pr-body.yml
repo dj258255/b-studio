@@ -1,0 +1,20 @@
+name: PR 본문 검사
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-body:
+    name: "PR 본문: 이슈 연결과 필수 절"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: node .github/scripts/check-pr-body.mjs

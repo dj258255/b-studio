@@ -2,7 +2,7 @@
 
 이 문서는 현재 어디까지 왔고, 각 단계의 완료 조건과 예상·실제가 무엇인지 한 곳에 모읍니다. 무엇을 왜 만들기로 했는지는 이슈에서, 무엇이 들어갔는지는 [변경 기록](CHANGELOG.md)에서 봅니다. 이슈 상태가 바뀌거나 PR이 병합되면 이 문서를 갱신합니다.
 
-마지막 갱신: 2026-09-24
+마지막 갱신: 2026-09-28
 
 ## 상태 표기
 
@@ -20,10 +20,11 @@
 
 | 마일스톤 | 목표 | 이슈 | 상태 | 예상 | 실제 | 완료 조건 |
 |---|---|---|---|---|---|---|
-| M1 저장소 가시성 | 계획·예상·변경·검증·배포를 저장소에서 따라가게 합니다 | #43 | 완료 | 반나절 (09-25까지) | 약 22분 (#46, #47) | issue form 3종 표시, 문서 링크 검사 통과 |
-| M2 협업 비용 기준 측정 | 작업 분해의 격리 병렬과 직렬화를 같은 과제로 잽니다 | #44, #45, #49 | 검증 중 | 도구 1일 + 실험 기계 시간 2~5시간 (09-29까지) | 도구 약 2시간 (#49). Docker 실행 대기 | 24회 실행 결과와 실패 원인 분류를 `docs/experiments/`에 기록 |
-| M3 레인 간 조율 전략 | 계약 먼저·게시판·통합 후 수리를 비교합니다 | #42에서 결정 | 보류 | 2~3일 | — | M2의 가설 H1이 확인될 때만 진행 |
-| M4 구독 백엔드 확장 | ChatGPT 구독(Codex CLI) 백엔드와 같은 과제의 재현 실험(E1-b) | #48 | 보류 | 3~5일 | — | E1이 끝난 뒤 진행 |
+| M1 저장소 가시성 | 계획·예상·변경·검증·배포를 저장소에서 따라가게 합니다 | [#43](https://github.com/dj258255/b-studio/issues/43) | 완료 | 반나절 (09-25까지) | 약 22분 ([#46](https://github.com/dj258255/b-studio/pull/46), [#47](https://github.com/dj258255/b-studio/pull/47)) | issue form 3종 표시, 문서 링크 검사 통과 |
+| M2 협업 비용 기준 측정 | 작업 분해의 격리 병렬과 직렬화를 같은 과제로 잽니다 | [#44](https://github.com/dj258255/b-studio/issues/44), [#45](https://github.com/dj258255/b-studio/issues/45), [#49](https://github.com/dj258255/b-studio/pull/49) | 검증 중 | 도구 1일 + 실험 기계 시간 2~5시간 (09-29까지) | 도구 약 2시간 ([#49](https://github.com/dj258255/b-studio/pull/49)). Docker 실행 대기 | 24회 실행 결과와 실패 원인 분류를 `docs/experiments/`에 기록 |
+| M3 레인 간 조율 전략 | 계약 먼저·게시판·통합 후 수리를 비교합니다 | [#42](https://github.com/dj258255/b-studio/issues/42)에서 결정 | 보류 | 2~3일 | — | M2의 가설 H1이 확인될 때만 진행 |
+| M4 구독 백엔드 확장 | 유료 API 없이 본인 PC에 로그인된 구독 CLI(Codex·Command Code)로 에이전트를 돌립니다 | [#48](https://github.com/dj258255/b-studio/issues/48), [#52](https://github.com/dj258255/b-studio/issues/52)~[#55](https://github.com/dj258255/b-studio/issues/55), [#58](https://github.com/dj258255/b-studio/issues/58) | 구현 중 | 3~5일 + 1.5~2.5일 (10-25 이후 확인) | — | 실제 계정 실행이 게이트를 통과하고 b-studio 도구 밖 파일 변경 0건 |
+| M5 이슈·PR 추적성 | 이 저장소와 b-studio 제품 모두에서 PR이 끝내는 이슈와 검증을 올리기 전에 확인한다 | [#56](https://github.com/dj258255/b-studio/issues/56), [#57](https://github.com/dj258255/b-studio/issues/57) | 구현 중 | 반나절 + 1~1.5일 (10-02까지) | — | pr-body 검사 동작, b-studio PR 미리보기 |
 
 ## 왜 이 순서인가
 
@@ -33,14 +34,14 @@
 
 | 단계 | 기간 | 대표 PR |
 |---|---|---|
-| 런타임 코어·샌드박스 | 09-10 | PR 없음 (c733cc8 ~ 4499334) |
-| 에이전트 루프·검증 게이트 | 09-10 ~ 09-11 | #3, #4 |
-| 체크포인트 | 09-10 ~ 09-11 | #2, #6 |
-| 정책·격리 | 09-11 ~ 09-12 | #7~#12, #35, #36, #38 |
-| 배포 | 09-11 ~ 09-12 | #27, #28, #29 |
+| 런타임 코어·샌드박스 | 09-10 | PR 없음 ([c733cc8](https://github.com/dj258255/b-studio/commit/c733cc8) ~ [4499334](https://github.com/dj258255/b-studio/commit/4499334)) |
+| 에이전트 루프·검증 게이트 | 09-10 ~ 09-11 | [#3](https://github.com/dj258255/b-studio/pull/3), [#4](https://github.com/dj258255/b-studio/pull/4) |
+| 체크포인트 | 09-10 ~ 09-11 | [#2](https://github.com/dj258255/b-studio/pull/2), [#6](https://github.com/dj258255/b-studio/pull/6) |
+| 정책·격리 | 09-11 ~ 09-12 | [#7](https://github.com/dj258255/b-studio/pull/7)~[#12](https://github.com/dj258255/b-studio/pull/12), [#35](https://github.com/dj258255/b-studio/pull/35), [#36](https://github.com/dj258255/b-studio/pull/36), [#38](https://github.com/dj258255/b-studio/pull/38) |
+| 배포 | 09-11 ~ 09-12 | [#27](https://github.com/dj258255/b-studio/pull/27), [#28](https://github.com/dj258255/b-studio/pull/28), [#29](https://github.com/dj258255/b-studio/pull/29) |
 | 멀티 모델·Fleet | 09-13 | PR 없음 |
 | 작업 분해·워크플로 강제 | 09-15 ~ 09-16 | PR 없음 |
-| 화면 문법 정리 | 09-16 ~ 09-24 | #40 (이슈 #39) |
+| 화면 문법 정리 | 09-16 ~ 09-24 | [#40](https://github.com/dj258255/b-studio/pull/40) (이슈 [#39](https://github.com/dj258255/b-studio/issues/39)) |
 
 이 표는 커밋 기록으로 나중에 다시 구성했습니다. 당시에는 예상 시간을 적지 않아 실제와 비교할 기록이 없습니다.
 
