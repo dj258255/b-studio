@@ -70,6 +70,18 @@ describe('실패 원인 분류', () => {
     expect(classify(plan(), undefined, 'The model is OVERLOADED right now').category).toBe('rate_limited');
   });
 
+  it('Command Code의 사용 한도·크레딧 부족도 rate_limited로 보고 detail로 구분한다', () => {
+    const usage = plan({ status: 'failed', error: "Command Code 사용 한도에 걸렸습니다: You've reached your weekly usage limit. Resets in 15h 47m (Sat 2:39 PM)." });
+    const usageResult = classify(usage, undefined);
+    expect(usageResult.category).toBe('rate_limited');
+    expect(usageResult.detail).toContain('usage limit');
+
+    const credit = plan({ status: 'failed', error: 'Command Code 크레딧이 부족합니다: Insufficient credits for Command Code.' });
+    const creditResult = classify(credit, undefined);
+    expect(creditResult.category).toBe('rate_limited');
+    expect(creditResult.detail).toContain('크레딧이 부족');
+  });
+
   it('경계 없는 숫자·단어는 한도로 보지 않는다', () => {
     // 하네스 오류지만 한도 신호가 아니다 → environment
     for (const text of ['1429ms 걸렸습니다', '4290 bytes', 'unlimited']) {

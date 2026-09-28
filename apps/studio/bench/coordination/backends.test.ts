@@ -18,16 +18,26 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'claude-code', model: ' opus ' })).toEqual({ backend: 'claude-code', model: 'opus' });
   });
 
-  it('--model은 claude-code에서만 쓸 수 있다', () => {
+  it('commandcode는 모델을 고정할 수도, 계정 기본 모델을 쓰게 둘 수도 있다', () => {
+    expect(resolveBackend({ dry: false, backend: 'commandcode' })).toEqual({ backend: 'commandcode' });
+    expect(resolveBackend({ dry: false, backend: 'commandcode', model: ' poolside/laguna-s-2.1-free ' })).toEqual({ backend: 'commandcode', model: 'poolside/laguna-s-2.1-free' });
+  });
+
+  it('--model은 claude-code 또는 commandcode에서만 쓸 수 있다', () => {
     expect(resolveBackend({ dry: false, backend: 'openai' })).toEqual({ backend: 'openai' });
-    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code에서만/);
+    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code 또는 commandcode에서만/);
   });
 });
 
 describe('planModelId', () => {
-  it('claude-code는 로컬 CLI 모델로 표시하고, openai는 상류 모델 id를 쓴다', () => {
+  it('로컬 CLI 백엔드는 따로 표시하고, openai는 상류 모델 id를 쓴다', () => {
     expect(planModelId('claude-code', 'sonnet', 'bench-coordination')).toBe('local-cli:sonnet');
+    expect(planModelId('commandcode', 'poolside/laguna-s-2.1-free', 'bench-coordination')).toBe('local-cli-commandcode:poolside/laguna-s-2.1-free');
     expect(planModelId('openai', 'dry', 'bench-coordination')).toBe('bench-coordination');
+  });
+
+  it('commandcode에 모델이 없으면 default로 적는다', () => {
+    expect(planModelId('commandcode', '', 'bench-coordination')).toBe('local-cli-commandcode:default');
   });
 });
 

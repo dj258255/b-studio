@@ -26,18 +26,24 @@ pnpm bench:coordination --backend openai
 # claude-code: 이 PC에 로그인된 구독 CLI (유료 API 없이 E1을 돌린다)
 pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list --strategies S0,S1 --repeats 1
 
+# commandcode: 이 PC에 로그인된 Command Code CLI. 무료 모델로 비용 없이 돌린다 (모델을 생략하면 계정 기본 모델)
+pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only --tasks orders-list --strategies S0,S1 --repeats 1
+
 # 일부만 (openai)
 pnpm bench:coordination --backend openai --tasks orders-list,independent --strategies S0,S1 --repeats 2 --out /tmp/bench-run
 ```
 
 인자:
 
-- `--backend claude-code|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
-- `--model <이름>` — `claude-code`에서만. 기본 `sonnet`. `B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다
+- `--backend claude-code|commandcode|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
+- `--model <이름>` — `claude-code`·`commandcode`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `commandcode`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CMD_MODEL`)
+- `--free-only` — `commandcode`에서만. 무료가 아닌 `--model`이면 오류
 - `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 
 **claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
+
+**commandcode**는 `claude-code`와 같지만 모델을 고를 수 있고, 무료 모델(예: `poolside/laguna-s-2.1-free`)로 비용 없이 실험할 수 있습니다. `B_STUDIO_CMD_MODEL`로 모델을 고정하고, 실행 전에 `preflightCommandCode`로 로그인을 확인해 실패하면 종료 코드 3으로 멈춥니다. 사용 한도(종료 코드 5)와 크레딧 부족(종료 코드 10)은 둘 다 `rate_limited`로 묶되 detail로 구분합니다.
 
 **openai**는 `BENCH_UPSTREAM_BASE_URL`, `BENCH_UPSTREAM_API_KEY`, `BENCH_UPSTREAM_MODEL`이 필요합니다. `--dry`는 이 백엔드의 가짜 상류라 이 값들이 필요 없습니다. `BENCH_PRICE_INPUT_PER_M`·`BENCH_PRICE_OUTPUT_PER_M`는 선택이고, 없으면 0으로 두고 경고합니다.
 

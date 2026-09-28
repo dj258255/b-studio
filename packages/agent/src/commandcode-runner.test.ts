@@ -314,5 +314,9 @@ describe('parseCommandCodeModels', () => {
     // 같은 id가 여러 그룹에 나와도 한 번만 남긴다
     expect(models.filter((model) => model.id === 'deepseek/deepseek-v4-flash')).toHaveLength(1);
     expect(new Set(models.map((model) => model.id)).size).toBe(models.length);
+    // Decision models 그룹(예: typesafe/jev)은 채팅 모델이 아니라 목록에서 뺀다
+    expect(models.some((model) => model.group.startsWith('Decision models'))).toBe(false);
+    expect(byId.has('typesafe/jev')).toBe(false);
+    expect(text).toContain('typesafe/jev'); // fixture에는 있지만 파서가 거른다
   });
 });

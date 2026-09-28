@@ -20,6 +20,8 @@ export interface PersistedSession {
   conversation: unknown[];
   demoIndex: number;
   claudeCode: { sessionId?: string; notes: string[] };
+  /** commandcode 모드의 이어받을 세션과 알림. 이 필드가 생기기 전 기록에는 없다 */
+  commandCode?: { sessionId?: string; notes: string[] };
   sourceDirtyFiles: number;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };

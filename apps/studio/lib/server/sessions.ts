@@ -21,12 +21,14 @@ import {
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
   preflightClaudeCode,
+  preflightCommandCode,
   releaseBlockers,
   RemoteConflictError,
   scopedExecutionPolicy,
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
+  runCommandCodeAgent,
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
@@ -88,6 +90,7 @@ import type {
 } from '@/lib/studio-events';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
+import { resolveCommandCodeModel } from './commandcode-models';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, routingDecision } from './model-registry';
@@ -156,6 +159,15 @@ interface Session {
   databases: DatabaseBranches;
   /** 로컬 Claude Code 모드의 대화. 기록은 Claude Code가 들고 있고 여기에는 이어받을 세션만 둔다 */
   claudeCode: {
+    sessionId?: string;
+    /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
+    notes: string[];
+  };
+  /**
+   * 로컬 Command Code Agent 모드의 대화. Command Code가 대화를 들고 있고,
+   * 이어받기는 세션을 갈라(fork) 하므로 여기에는 이어받을 세션 id와 알림만 둔다
+   */
+  commandCode: {
     sessionId?: string;
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
@@ -359,6 +371,7 @@ async function startSession({
     conversation: [],
     demoIndex: 0,
     claudeCode: { notes: [] },
+    commandCode: { notes: [] },
     sourceDirtyFiles,
     previewToken: randomBytes(16).toString('hex'),
   });
@@ -385,6 +398,7 @@ type NewSession = Pick<
   | 'conversation'
   | 'demoIndex'
   | 'claudeCode'
+  | 'commandCode'
   | 'sourceDirtyFiles'
 >;
 
@@ -621,6 +635,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       conversation: data.conversation as Conversation,
       demoIndex: data.demoIndex,
       claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
+      // 이 필드가 생기기 전에 저장한 기록에는 없다
+      commandCode: { sessionId: data.commandCode?.sessionId, notes: [...(data.commandCode?.notes ?? [])] },
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
@@ -789,6 +805,7 @@ type Intent = 'build' | 'ask';
 type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
+  | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
 ) & { writableScope?: readonly string[] };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
@@ -797,6 +814,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent };
   }
   if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
+  if (session.snapshot.mode === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
@@ -1028,6 +1046,25 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     return result;
   }
 
+  if (plan.kind === 'commandcode') {
+    const preflight = await preflightCommandCode();
+    if (!preflight.ok) return { preflightError: preflight.reason };
+
+    // Command Code는 세션을 갈라(fork) 이어받으므로 Codex처럼 요약 블록을 붙이지 않는다
+    const { commandCode } = session;
+    const result = await runCommandCodeAgent({
+      ...shared,
+      request: [...commandCode.notes, request].join('\n\n'),
+      resume: commandCode.sessionId,
+      // 세션에서 고른 모델 → B_STUDIO_CMD_MODEL → 없음(계정 기본)
+      model: resolveCommandCodeModel(session.snapshot.modelId, process.env.B_STUDIO_CMD_MODEL),
+    });
+    // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
+    commandCode.notes = [];
+    if (result.sessionId) commandCode.sessionId = result.sessionId;
+    return result;
+  }
+
   if (plan.route) {
     shared.onEvent({
       type: 'route',
@@ -1193,6 +1230,7 @@ async function saveDatabases(session: Session, sha: string): Promise<DatabaseSta
 /** 대화 밖에서 바뀐 사실(되돌리기, 새 샌드박스, 가져온 원격 커밋)을 다음 요청에서 모델이 알게 한다 */
 function noteForModel(session: Session, text: string): void {
   if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(text);
+  else if (session.snapshot.mode === 'commandcode') session.commandCode.notes.push(text);
   else session.conversation.push({ role: 'user', content: text });
   session.settledConversation = session.conversation.length;
 }
@@ -1714,6 +1752,7 @@ function toPersisted(session: Session): PersistedSession {
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
+    commandCode: session.commandCode,
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
@@ -1857,8 +1896,8 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
 function sessionMode(): SessionMode {
   const value = process.env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
-  if (value === 'claude-code' || value === 'demo') return value;
-  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, demo 중 하나여야 합니다 (지금 값: ${value})`);
+  if (value === 'claude-code' || value === 'commandcode' || value === 'demo') return value;
+  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, commandcode, demo 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
 /** 운영자가 정한 세션 토큰 한도. 잘못 적은 값이 "한도 없음"으로 넘어가지 않도록 샌드박스를 만들기 전에 거부한다 */

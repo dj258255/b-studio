@@ -8,10 +8,12 @@
  * 백엔드(--backend, --dry가 아니면 필수):
  *   openai      유료 API. BENCH_UPSTREAM_* 환경 변수와 로컬 프록시를 쓴다. --dry는 이 백엔드의 가짜 상류다
  *   claude-code 본인 PC에 로그인된 구독 CLI. 프록시·상류를 띄우지 않고, 계획도 모델에게 받지 않는다(presetPlan)
+ *   commandcode 본인 PC에 로그인된 Command Code CLI. claude-code와 같지만 모델을 고를 수 있고 무료 모델로 비용 없이 돌릴 수 있다
  *
  *   pnpm bench:coordination --dry
  *   BENCH_UPSTREAM_BASE_URL=... BENCH_UPSTREAM_API_KEY=... BENCH_UPSTREAM_MODEL=... pnpm bench:coordination --backend openai
  *   pnpm bench:coordination --backend claude-code --model sonnet
+ *   pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only
  */
 import { spawnSync } from 'node:child_process';
 import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -48,6 +50,7 @@ interface Args {
   out?: string;
   backend?: string;
   model?: string;
+  freeOnly?: boolean;
   onRateLimit?: string;
   rateLimitWaitMinutes?: number;
 }
@@ -64,6 +67,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--out') args.out = next(argv, index++, '--out');
     else if (arg === '--backend') args.backend = next(argv, index++, '--backend');
     else if (arg === '--model') args.model = next(argv, index++, '--model');
+    else if (arg === '--free-only') args.freeOnly = true;
     else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
     else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
@@ -159,6 +163,16 @@ function delay(ms: number): Promise<void> {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** --free-only는 commandcode에서만, 무료가 아닌 --model이면 오류다. 모델 목록을 못 불러오면 확인할 수 없어 통과시킨다 */
+async function assertFreeOnlyModel(backend: Backend, model: string | undefined): Promise<void> {
+  if (backend !== 'commandcode') throw new Error('--free-only는 --backend commandcode에서만 쓸 수 있습니다');
+  if (!model) return;
+  const { listCommandCodeModels } = await import('@b-studio/agent');
+  const models = await listCommandCodeModels().catch(() => []);
+  const found = models.find((candidate) => candidate.id === model);
+  if (found && !found.free) throw new Error(`--free-only: ${model}은(는) 무료 모델이 아닙니다`);
 }
 
 interface RunContext {
@@ -402,6 +416,7 @@ async function main(): Promise<void> {
   // 백엔드와 사용 한도 정책은 Docker를 건드리기 전에 확정한다(모델 경로를 조용히 고르지 않는다)
   const choice = resolveBackend({ dry: args.dry, backend: args.backend, model: args.model });
   const backend = choice.backend;
+  if (args.freeOnly) await assertFreeOnlyModel(backend, choice.model);
   const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
   const dry = args.dry;
   const repeats = args.repeats ?? (dry ? 1 : 3);
@@ -413,7 +428,7 @@ async function main(): Promise<void> {
   const dockerMemTotal = preflight(args.force);
 
   // 2. 백엔드별 준비
-  const requestedModel = backend === 'claude-code' ? choice.model! : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
+  const requestedModel = backend === 'claude-code' ? choice.model! : backend === 'commandcode' ? choice.model ?? 'default' : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
   const priceInput = price('BENCH_PRICE_INPUT_PER_M');
   const priceOutput = price('BENCH_PRICE_OUTPUT_PER_M');
 
@@ -492,22 +507,37 @@ async function main(): Promise<void> {
         { mode: 0o600 },
       );
       Object.assign(benchEnv, { B_STUDIO_MODE: 'api', B_STUDIO_MODEL_REGISTRY: registryFile, B_STUDIO_BENCH_PROXY_KEY: 'local' });
-    } else {
+    } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
+    } else {
+      // commandcode도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
+      Object.assign(benchEnv, { B_STUDIO_MODE: 'commandcode' });
+      if (choice.model) benchEnv.B_STUDIO_CMD_MODEL = choice.model;
     }
     Object.assign(process.env, benchEnv);
 
-    if (backend === 'claude-code') {
+    if (backend !== 'openai') {
       // 4. 로컬 CLI 로그인 확인. 프롬프트를 보내지 않으므로 모델 사용량을 쓰지 않는다
-      const { preflightClaudeCode } = await import('@b-studio/agent');
-      const preflight = await preflightClaudeCode({ cwd: projectDir });
-      if (!preflight.ok) {
-        console.error(`로컬 Claude Code를 쓸 수 없습니다: ${preflight.reason}`);
-        process.exitCode = 3;
-        return;
+      if (backend === 'claude-code') {
+        const { preflightClaudeCode } = await import('@b-studio/agent');
+        const preflight = await preflightClaudeCode({ cwd: projectDir });
+        if (!preflight.ok) {
+          console.error(`로컬 Claude Code를 쓸 수 없습니다: ${preflight.reason}`);
+          process.exitCode = 3;
+          return;
+        }
+        console.log(`로컬 Claude Code 로그인 확인: ${preflight.account.subscriptionType ?? preflight.account.apiKeySource ?? '로그인 계정'} · 모델 ${requestedModel}`);
+      } else {
+        const { preflightCommandCode } = await import('@b-studio/agent');
+        const preflight = await preflightCommandCode();
+        if (!preflight.ok) {
+          console.error(`로컬 Command Code를 쓸 수 없습니다: ${preflight.reason}`);
+          process.exitCode = 3;
+          return;
+        }
+        console.log(`로컬 Command Code 로그인 확인 · 모델 ${choice.model ?? '계정 기본값'}`);
       }
-      console.log(`로컬 Claude Code 로그인 확인: ${preflight.account.subscriptionType ?? preflight.account.apiKeySource ?? '로그인 계정'} · 모델 ${requestedModel}`);
     }
 
     const taskPlans = await import('../../lib/server/task-plans');

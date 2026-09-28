@@ -8,11 +8,14 @@
 |---|---|---|
 | `demo` | 모델 없이 제품 흐름 시연 | 실제 코드 작업용이 아님 |
 | `claude-code` | 개인 PC의 Claude Code 로그인 사용 | 공유 서버에서 사용하지 않음 |
+| `commandcode` | 개인 PC의 Command Code 로그인 사용(모델 선택, 무료 모델) | 공유 서버에서 사용하지 않음 |
 | API 모드 | 모델 레지스트리와 API 자격 증명 사용 | 공유 환경 권장 |
 
 프로젝트, 세션, Fleet, 배포 데이터는 각각 `B_STUDIO_PROJECTS_DIR`, `B_STUDIO_SESSIONS_DIR`, `B_STUDIO_FLEETS_DIR`, `B_STUDIO_DEPLOYS_DIR`로 위치를 분리할 수 있습니다. 운영에서는 영속 볼륨에 두고 접근 권한을 제한하세요.
 
 `claude-code` 모드에서 쓸 모델은 `B_STUDIO_CLAUDE_CODE_MODEL`로 고정할 수 있습니다(예: `sonnet`). 비우면 로그인 계정의 기본 모델을 씁니다. 실제로 쓴 모델 이름은 세션 이벤트로 기록됩니다.
+
+`commandcode` 모드는 `pnpm studio:commandcode`(`B_STUDIO_MODE=commandcode`)로 켭니다. 모델은 세션을 만들 때 화면에서 고르거나 `B_STUDIO_CMD_MODEL`로 고정하고, 비우면 로그인 계정의 기본 모델(보통 DeepSeek)을 씁니다. `B_STUDIO_CMD_FREE_ONLY=1`이면 무료 모델만 쓰도록 강제합니다(고른 모델이 무료가 아니면 세션을 만들지 않습니다). 무료 모델 목록은 화면의 "무료 모델만" 체크박스로도 걸러 볼 수 있습니다. 실제로 쓴 모델 이름은 세션 이벤트로 기록됩니다. 격리는 실행마다 만드는 빈 작업 폴더 + 프로젝트 `.commandcode/settings.json`의 `permissions.allow: ["mcp__b_studio__*"]`(그 밖의 내장 도구는 헤드리스 기본에서 거부) + 빈 임시 HOME(로그인 파일 `~/.commandcode/auth.json`만 심볼릭 링크로 빌려오고 사용자 설정·스킬·mods·MCP 서버는 읽지 않음) 세 겹입니다. Command Code는 대화를 갈라(fork) 이어받으므로 이전 대화를 이어서 작업할 수 있습니다. 다른 사람이 쓰는 서버가 아니라 **본인 PC 전용**입니다.
 
 ## 웹 인증
 

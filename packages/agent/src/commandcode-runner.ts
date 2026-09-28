@@ -475,7 +475,7 @@ export interface CommandCodeModel {
   isDefault: boolean;
 }
 
-/** `cmd --list-models` 텍스트를 파싱한다. 그룹 헤더와 `id  설명` 줄만 골라낸다(순수 함수). 같은 id가 여러 그룹에 나오면 첫 줄을 남긴다 */
+/** `cmd --list-models` 텍스트를 파싱한다. 그룹 헤더와 `id  설명` 줄만 골라낸다(순수 함수). 같은 id가 여러 그룹에 나오면 첫 줄을 남기고, Decision models 그룹은 뺀다 */
 export function parseCommandCodeModels(text: string): CommandCodeModel[] {
   const models = new Map<string, CommandCodeModel>();
   let group = '';
@@ -494,6 +494,8 @@ export function parseCommandCodeModels(text: string): CommandCodeModel[] {
     }
     const id = match[1]!;
     const description = match[2]!.trim();
+    // Decision models(예: typesafe/jev)은 채팅·도구 호출 모델이 아니라 헤드리스 전용이라 목록에서 뺀다
+    if (group.startsWith('Decision models')) continue;
     if (!models.has(id)) {
       models.set(id, { id, description, group, free: description.startsWith('FREE') || id.includes(':free') || group === 'Stealth', isDefault: /\(default\)$/.test(description) });
     }
