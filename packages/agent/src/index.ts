@@ -19,7 +19,26 @@ export {
   type ClaudeCodeRunOptions,
 } from './claude-code-runner';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
-export { BrowserUnavailableError, runInBrowser, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
+export {
+  BrowserUnavailableError,
+  launchBrowser,
+  runInBrowser,
+  StepFailedError,
+  type BrowserFrame,
+  type BrowserPageOptions,
+  type BrowserPageResult,
+  type BrowserPageStep,
+  type BrowserRunner,
+} from './browser-check';
+export {
+  openRemoteBrowser,
+  type RemoteBrowser,
+  type RemoteBrowserKeyEvent,
+  type RemoteBrowserMouseEvent,
+  type RemoteBrowserOptions,
+  type RemoteBrowserPick,
+  type RemoteBrowserViewport,
+} from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { isInScope, MAX_PLAN_LANES, MAX_PLAN_TASKS, planLanes, requestTaskPlan, TaskPlanError, type PlannedTask, type TaskLane } from './task-plan';
@@ -80,6 +99,7 @@ export {
   workflowReleaseRequirements,
   workflowStages,
   type WorkflowCheck,
+  type WorkflowStepCheck,
 } from './workflow';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
 export { buildAskRequest, buildSystemPrompt } from './prompts';

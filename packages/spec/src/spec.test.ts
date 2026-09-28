@@ -136,6 +136,21 @@ describe('parseSpec', () => {
     expect(empty.issues).toEqual(['workflow.pageChecks.0.steps.0: 단계에는 click, fill, press, waitFor 중 정확히 하나를 적어야 합니다']);
   });
 
+  it('뷰포트는 크기 객체나 mobile·tablet·desktop 이름으로 적고 파싱 뒤에는 항상 크기 객체로 맞춘다', () => {
+    const viewport = (value: string) =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, viewport: ${value} }\n`).workflow?.pageChecks?.[0]
+        ?.viewport;
+    expect(viewport('mobile')).toEqual({ width: 375, height: 812 });
+    expect(viewport('tablet')).toEqual({ width: 768, height: 1024 });
+    expect(viewport('desktop')).toEqual({ width: 1280, height: 800 });
+    // 크기 객체는 그대로 남는다
+    expect(viewport('{ width: 390, height: 844 }')).toEqual({ width: 390, height: 844 });
+    expect(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, viewport: phone }\n`)).toThrow(SpecError);
+    // http 모드에서는 이름이든 객체든 쓸 수 없다
+    const http = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, viewport: mobile }\n`));
+    expect(http.issues).toEqual(['workflow.pageChecks.0.viewport: viewport는 mode: browser에서만 쓸 수 있습니다']);
+  });
+
   it('network.egress는 호스트 문자열과 평문 HTTP 경로·메서드 규칙을 함께 받는다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}network:
   egress:

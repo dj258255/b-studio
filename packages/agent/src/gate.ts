@@ -1,11 +1,11 @@
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowPageCheck, WorkflowStage, WorkflowTest } from '@b-studio/spec';
-import { runInBrowser, type BrowserRunner } from './browser-check';
+import { runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { servicesForFiles } from './services';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
-import { missingVerificationStages, reviewChanges, type WorkflowCheck } from './workflow';
+import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
 import type { Workspace } from './workspace';
 
@@ -41,6 +41,13 @@ export interface GateOptions {
   signal?: AbortSignal;
   onServiceStatus?: StartOptions['onStatus'];
   onEvent: (event: AgentEvent) => void;
+  /**
+   * 화면 확인 중 찍은 스크린샷(PNG/JPEG)을 저장하고 식별자를 돌려준다. 저장 위치는 호출자가 정한다(agent는 모른다).
+   * 넘기면 browser 모드 화면 확인이 capture를 켜고 단계 스크린샷을 WorkflowCheck.steps에 남긴다
+   */
+  saveArtifact?: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => Promise<string>;
+  /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
+  onBrowserFrame?: (input: { check: string; frame: BrowserFrame }) => void;
 }
 
 /**
@@ -62,6 +69,8 @@ export class VerificationGate {
   readonly #baselines: ReadonlyMap<string, OpenApiDocument>;
   #verifiedVersion = 0;
   #failedServices = new Set<string>();
+  /** 화면 확인 이름 → 단계 결과. 실패해 예외로 끝나도 실패 단계의 스크린샷을 남기려고 따로 모은다 */
+  #pageSteps = new Map<string, WorkflowStepCheck[]>();
 
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
@@ -149,12 +158,13 @@ export class VerificationGate {
 
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     const nodes: TaskNode<void>[] = [];
+    this.#pageSteps.clear();
     for (const page of pages) {
       const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
       const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
       const name = `${page.service} ${page.path}${page.mode === 'browser' ? ` (${browser}${steps})` : ''}`;
       meta.push({ stage: 'browser_check', name });
-      nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, signal) });
+      nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, name, signal) });
     }
     for (const test of tests) {
       meta.push({ stage: 'test', name: test.name });
@@ -164,21 +174,41 @@ export class VerificationGate {
     if (tests.length > 0) this.#stage('test');
 
     const results = await runTaskGraph(nodes, { concurrency: CHECK_CONCURRENCY, signal: this.#options.signal });
-    return results.map((result, index) => ({
-      ...meta[index]!,
-      ok: result.status === 'succeeded',
-      attempts: result.attempts,
-      detail: result.error,
-    }));
+    return results.map((result, index) => {
+      const entry = meta[index]!;
+      const steps = this.#pageSteps.get(entry.name);
+      return {
+        ...entry,
+        ok: result.status === 'succeeded',
+        attempts: result.attempts,
+        detail: result.error,
+        ...(steps ? { steps } : {}),
+      };
+    });
   }
 
-  async #checkPage(page: WorkflowPageCheck, signal: AbortSignal): Promise<void> {
-    const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser } = this.#options;
+  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal): Promise<void> {
+    const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
     const endpoint = await sandbox.endpoint(page.service);
     const url = new URL(page.path, endpoint.url);
     if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
     if (page.mode === 'browser') {
-      const result = await browserRunner(url.href, { viewport: page.viewport, steps: page.steps, signal });
+      let result: BrowserPageResult;
+      try {
+        result = await browserRunner(url.href, {
+          viewport: page.viewport,
+          steps: page.steps,
+          signal,
+          // 스크린샷을 저장할 곳이 있을 때만 찍는다
+          capture: saveArtifact !== undefined,
+          ...(onBrowserFrame ? { onFrame: (frame: BrowserFrame) => onBrowserFrame({ check: name, frame }) } : {}),
+        });
+      } catch (error) {
+        // 실패한 단계의 스크린샷도 결과에 남긴다
+        if (error instanceof StepFailedError) this.#pageSteps.set(name, await this.#saveSteps(name, error.steps));
+        throw error;
+      }
+      if (saveArtifact) this.#pageSteps.set(name, await this.#saveSteps(name, result.steps));
       const problems: string[] = [];
       if (result.status !== page.expectStatus) problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
       if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
@@ -193,6 +223,27 @@ export class VerificationGate {
     const { status, text } = await pageFetcher(url.href, signal);
     if (status !== page.expectStatus) throw new Error(`HTTP ${status} (기대 ${page.expectStatus})`);
     if (page.expectText && !text.includes(page.expectText)) throw new Error(`응답 본문에 '${page.expectText}'가 없습니다`);
+  }
+
+  /**
+   * 단계 스크린샷을 저장하고 식별자를 붙인다. 저장은 관측용이라 실패해도 확인 결과를 바꾸지 않고 경고만 남긴다.
+   * browser_check의 browser 모드가 아니면 스크린샷이 없어 저장하지 않는다
+   */
+  async #saveSteps(name: string, steps: readonly BrowserPageStep[]): Promise<WorkflowStepCheck[]> {
+    const save = this.#options.saveArtifact;
+    const saved: WorkflowStepCheck[] = [];
+    for (const [index, step] of steps.entries()) {
+      let artifact: string | undefined;
+      if (save && step.screenshot) {
+        try {
+          artifact = await save({ name: `${name} ${index + 1}. ${step.label}`, data: step.screenshot, contentType: 'image/png' });
+        } catch (error) {
+          console.warn(`화면 확인 스크린샷을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      saved.push({ label: step.label, ok: step.ok, ...(step.detail !== undefined ? { detail: step.detail } : {}), ...(artifact ? { artifact } : {}) });
+    }
+    return saved;
   }
 
   async #runTest(test: WorkflowTest, signal: AbortSignal): Promise<void> {

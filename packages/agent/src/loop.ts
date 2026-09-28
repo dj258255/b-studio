@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
-import { VerificationGate, type PageFetcher } from './gate';
+import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
@@ -109,6 +109,10 @@ export interface RunAgentOptions {
   fetcher?: ContractFetcher;
   pageFetcher?: PageFetcher;
   browserRunner?: BrowserRunner;
+  /** 화면 확인 스크린샷을 저장하고 식별자를 돌려준다. 저장은 호출자가 한다 (agent는 파일 위치를 모른다) */
+  saveArtifact?: GateOptions['saveArtifact'];
+  /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
+  onBrowserFrame?: GateOptions['onBrowserFrame'];
   /** 도구 호출을 실행기에서 통제하는 정책 */
   policy?: ExecutionPolicy;
   approvalToken?: string;
@@ -151,6 +155,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     fetcher = fetchContract,
     pageFetcher,
     browserRunner,
+    saveArtifact,
+    onBrowserFrame,
     intent = 'build',
   } = options;
   const ask = intent === 'ask';
@@ -170,6 +176,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         fetcher,
         pageFetcher,
         browserRunner,
+        saveArtifact,
+        onBrowserFrame,
         signal,
         onServiceStatus,
         onEvent,

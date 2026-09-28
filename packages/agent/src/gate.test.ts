@@ -1,7 +1,7 @@
 import type { ExecResult } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { BrowserPageOptions } from './browser-check';
+import { StepFailedError, type BrowserPageOptions } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
@@ -111,7 +111,7 @@ describe('VerificationGate 워크플로 단계', () => {
       },
       browserRunner: async (url, options) => {
         seen.push({ url, viewport: options.viewport });
-        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], horizontalOverflowPx: 510 };
+        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], horizontalOverflowPx: 510, steps: [] };
       },
       onEvent: () => {},
     });
@@ -155,7 +155,7 @@ describe('VerificationGate 워크플로 단계', () => {
       fetcher: async () => ORDERS_CONTRACT,
       browserRunner: async (_url, options) => {
         seen.push(options.steps);
-        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], horizontalOverflowPx: 0 };
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], horizontalOverflowPx: 0, steps: [] };
       },
       onEvent: () => {},
     });
@@ -228,5 +228,127 @@ describe('VerificationGate 워크플로 단계', () => {
     const outcome = await gate.check();
     expect(outcome).toEqual({ kind: 'exhausted', summary: '워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: test' });
     expect(gate.verified).toBe(false);
+  });
+
+  it('화면 확인 단계 스크린샷을 저장해 steps[].artifact로 남기고 프레임을 전달한다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, expectText: '주문 목록', viewport: { width: 390, height: 844 }, allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const saved: Array<{ name: string; contentType: string }> = [];
+    const frames: Array<{ check: string; frame: unknown }> = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async (_url, options) => {
+        // 저장할 곳이 있으면 게이트가 capture를 켠다
+        expect(options.capture).toBe(true);
+        options.onFrame?.({ data: Buffer.from([9]), width: 390, height: 844, at: 7 });
+        return {
+          status: 200,
+          text: '주문 목록',
+          pageErrors: [],
+          consoleErrors: [],
+          failedRequests: [],
+          horizontalOverflowPx: 0,
+          steps: [
+            { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
+            { label: 'click #go', ok: true, screenshot: Buffer.from([2]) },
+          ],
+        };
+      },
+      saveArtifact: async ({ name, contentType }) => {
+        saved.push({ name, contentType });
+        return `artifact-${saved.length}`;
+      },
+      onBrowserFrame: ({ check, frame }) => frames.push({ check, frame }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.steps).toEqual([
+      { label: 'open /orders', ok: true, artifact: 'artifact-1' },
+      { label: 'click #go', ok: true, artifact: 'artifact-2' },
+    ]);
+    expect(saved.map((entry) => entry.contentType)).toEqual(['image/png', 'image/png']);
+    expect(frames).toEqual([{ check: 'api /orders (browser 390x844)', frame: { data: Buffer.from([9]), width: 390, height: 844, at: 7 } }]);
+  });
+
+  it('스크린샷 저장이 실패해도 화면 확인 결과는 바뀌지 않는다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, expectText: '주문 목록', allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => ({
+        status: 200,
+        text: '주문 목록',
+        pageErrors: [],
+        consoleErrors: [],
+        failedRequests: [],
+        horizontalOverflowPx: 0,
+        steps: [
+          { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
+          { label: 'click #go', ok: true, screenshot: Buffer.from([2]) },
+        ],
+      }),
+      saveArtifact: async () => {
+        throw new Error('디스크가 꽉 찼습니다');
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(true);
+    expect(check?.steps?.map((step) => step.label)).toEqual(['open /orders', 'click #go']);
+    expect(check?.steps?.every((step) => step.artifact === undefined)).toBe(true);
+  });
+
+  it('실패한 단계의 스크린샷도 저장해 실패 결과에 남긴다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const saved: string[] = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => {
+        throw new StepFailedError('2번째 단계 실패 (click #missing): timeout', [
+          { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
+          { label: 'click #missing', ok: false, detail: 'timeout', screenshot: Buffer.from([2]) },
+        ]);
+      },
+      saveArtifact: async () => `artifact-${saved.push('saved')}`,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain('2번째 단계 실패');
+    expect(check?.steps).toEqual([
+      { label: 'open /orders', ok: true, artifact: 'artifact-1' },
+      { label: 'click #missing', ok: false, detail: 'timeout', artifact: 'artifact-2' },
+    ]);
   });
 });

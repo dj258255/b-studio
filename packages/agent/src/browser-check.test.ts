@@ -1,7 +1,10 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runInBrowser } from './browser-check';
+import { runInBrowser, StepFailedError, type BrowserFrame } from './browser-check';
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8]);
 
 // 실제 헤드리스 Chromium을 띄운다. 브라우저가 없으면 건너뛰지 않고 실패한다. 건너뛰면 검사 안 함이 통과처럼 보인다
 const PAGES: Record<string, string> = {
@@ -13,6 +16,8 @@ const PAGES: Record<string, string> = {
   '/interactive': `<html><body><input id="q"><button id="go" onclick="document.getElementById('out').textContent = document.getElementById('q').value">검색</button><p id="out"></p></body></html>`,
   // 입력칸에서 Enter를 누르면 폼이 제출되는 페이지
   '/form': `<html><body><form onsubmit="event.preventDefault(); document.getElementById('done').textContent = '제출됨'"><input id="name"></form><p id="done"></p></body></html>`,
+  // screencast가 볼 화면 변화를 계속 만드는 페이지
+  '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => clearInterval(timer), 1500);</script></body></html>`,
 };
 
 let server: Server;
@@ -85,5 +90,53 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
     await expect(runInBrowser(`${base}/interactive`, { steps: [{ click: '#go' }, {} as never] })).rejects.toThrow(
       '2번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)',
     );
+  });
+
+  it('capture를 켜면 열기와 단계마다 결과를 남기고 PNG 스크린샷을 찍는다', async () => {
+    const result = await runInBrowser(`${base}/interactive`, {
+      capture: true,
+      steps: [{ fill: { selector: '#q', text: '김토스' } }, { click: '#go' }],
+    });
+    expect(result.steps.map((step) => [step.label, step.ok])).toEqual([
+      ['open /interactive', true],
+      ['fill #q', true],
+      ['click #go', true],
+    ]);
+    for (const step of result.steps) expect(step.screenshot?.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+  });
+
+  it('capture를 끄면 스크린샷 없이 단계 결과만 남긴다', async () => {
+    const result = await runInBrowser(`${base}/interactive`, { steps: [{ click: '#go' }] });
+    expect(result.steps.map((step) => step.label)).toEqual(['open /interactive', 'click #go']);
+    expect(result.steps.every((step) => step.screenshot === undefined)).toBe(true);
+  });
+
+  it('단계가 실패하면 던지기 전에 실패 단계의 스크린샷을 예외에 담는다', async () => {
+    const error = await runInBrowser(`${base}/interactive`, {
+      capture: true,
+      steps: [{ click: '#go' }, { click: '[data-testid=missing]' }],
+    }).then(
+      () => expect.unreachable('단계 실패로 끝나야 합니다'),
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(StepFailedError);
+    const steps = (error as StepFailedError).steps;
+    expect(steps.map((step) => [step.label, step.ok])).toEqual([
+      ['open /interactive', true],
+      ['click #go', true],
+      ['click [data-testid=missing]', false],
+    ]);
+    expect(steps.at(-1)?.detail).toBeTruthy();
+    expect(steps.at(-1)?.screenshot?.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+  });
+
+  it('onFrame으로 JPEG 프레임을 받되 초당 5장 상한을 넘지 않는다', async () => {
+    const frames: BrowserFrame[] = [];
+    await runInBrowser(`${base}/animation`, { viewport: { width: 400, height: 300 }, onFrame: (frame) => frames.push(frame) });
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames[0]?.data.subarray(0, 2)).toEqual(JPEG_SIGNATURE);
+    expect(frames[0]?.width).toBe(400);
+    // 콜백은 시간 기준으로 걸러지므로 연속한 프레임 간격이 200ms보다 좁을 수 없다
+    for (const [index, frame] of frames.slice(1).entries()) expect(frame.at - frames[index]!.at).toBeGreaterThanOrEqual(190);
   });
 });

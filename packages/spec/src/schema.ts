@@ -211,6 +211,21 @@ export const WorkflowPageStepSchema = z
 
 const PAGE_STEPS_MAX = 10;
 
+/** browser 모드에서 자주 쓰는 창 크기. 이름으로 적으면 이 값으로 편다 */
+const VIEWPORT_PRESETS: Record<'mobile' | 'tablet' | 'desktop', { width: number; height: number }> = {
+  mobile: { width: 375, height: 812 },
+  tablet: { width: 768, height: 1024 },
+  desktop: { width: 1280, height: 800 },
+};
+
+/** 크기 객체나 mobile·tablet·desktop 이름을 받아 파싱 뒤에는 항상 { width, height }로 맞춘다 */
+const ViewportSchema = z
+  .union([
+    z.enum(['mobile', 'tablet', 'desktop']),
+    z.object({ width: z.number().int().min(240).max(3840), height: z.number().int().min(240).max(3840) }),
+  ])
+  .transform((value): { width: number; height: number } => (typeof value === 'string' ? VIEWPORT_PRESETS[value] : value));
+
 /**
  * browser_check 단계에서 재시작한 서비스의 화면을 확인한다.
  * http는 응답 상태와 본문 문구만 보고, browser는 헤드리스 Chromium으로 렌더링해 스크립트 예외·console.error·가로 넘침까지 본다
@@ -225,8 +240,8 @@ export const WorkflowPageCheckSchema = z
     expectText: z.string().min(1).optional(),
     /** browser 전용. 페이지를 연 뒤 순서대로 실행할 상호작용. 정해 둔 네 동작만 받는다 */
     steps: z.array(WorkflowPageStepSchema).max(PAGE_STEPS_MAX, `단계는 최대 ${PAGE_STEPS_MAX}개까지 쓸 수 있습니다`).optional(),
-    /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다 */
-    viewport: z.object({ width: z.number().int().min(240).max(3840), height: z.number().int().min(240).max(3840) }).optional(),
+    /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다. mobile·tablet·desktop 이름이나 { width, height }를 받는다 */
+    viewport: ViewportSchema.optional(),
     /** browser 전용. 기본은 console.error나 실패한 요청(4xx·5xx·연결 실패, 자동 favicon 제외)이 하나라도 있으면 실패 */
     allowConsoleErrors: z.boolean().default(false),
     /** browser 전용. 문서가 창보다 넓어 가로 스크롤이 생기면 실패 */
