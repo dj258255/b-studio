@@ -46,6 +46,8 @@ export interface TaskPlanLaneView {
   error?: string;
   /** 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
+  /** 기동 중 이 레인 세션이 받은 바이트(서비스 합). 못 읽었으면 없다 */
+  bootRxBytes?: number;
   /** 세션을 만들기 직전 시각 */
   startedAt?: string;
   /** 레인이 성공·실패로 끝난 시각 */
@@ -63,6 +65,8 @@ export interface TaskPlanIntegrationView {
   error?: string;
   /** 통합 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
+  /** 기동 중 통합 세션이 받은 바이트(서비스 합). 못 읽었으면 없다 */
+  bootRxBytes?: number;
   /** 통합 실행의 지표 */
   run?: TaskPlanRunMetricsView;
   /** 통합 세션을 만들기 직전 시각 */

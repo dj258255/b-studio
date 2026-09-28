@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
 import { artifactUrl } from "@/lib/artifact-url";
 import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
-import { describeTokens, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
+import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
@@ -338,6 +338,15 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
 function ChatEntry({ item }: { item: ChatItem }) {
   switch (item.kind) {
+    case "boot": {
+      const rx = item.network.reduce((sum, entry) => sum + entry.rxBytes, 0);
+      return (
+        <p className="text-sm text-muted">
+          샌드박스를 띄웠습니다{item.network.length > 0 ? ` · 받음 ${formatBytes(rx)}` : ""}
+        </p>
+      );
+    }
+
     case "request":
       return (
         <div className={`border-l-[3px] pl-3 ${item.intent === "ask" ? "border-line" : "border-ink"}`}>

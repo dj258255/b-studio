@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
-import type { ServiceUsage } from '@b-studio/sandbox';
+import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
@@ -89,6 +89,8 @@ export interface SessionSnapshot {
   repository?: RepositoryView;
   /** 가장 최근에 잰 컨테이너별 자원 사용량 */
   usage?: { at: string; services: ServiceUsage[] };
+  /** 서비스가 준비된 직후 한 번 읽은 컨테이너별 수신/송신 바이트(수명 누계). 못 읽으면 없다 */
+  bootNetwork?: BootNetwork;
   /** 프로젝트 폴더의 파일이 바뀔 때마다 늘어난다. 서비스 안에서 명령이 만든 파일도 코드 화면이 다시 불러오는 기준이다 */
   fileRevision?: number;
   /** 이 세션에서 시작한 운영 배포나 되돌리기가 진행 중이다. lines는 최근 진행 줄 */
@@ -197,6 +199,8 @@ export type StudioEvent =
   | { type: 'snapshot'; snapshot: SessionSnapshot }
   | { type: 'status'; status: SessionStatus; error?: string }
   | { type: 'service'; service: string; state: ServiceState; url?: string; previewUrl?: string; detail?: string }
+  /** 서비스가 준비된 직후 기동 중 받은/보낸 바이트를 남긴다. 컨테이너 수명 누계이고, edge 프록시는 뺀다 */
+  | { type: 'boot_network'; at: string; network: BootNetwork }
   /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
   | { type: 'design'; design?: DesignView }
   | { type: 'log'; service: string; text: string; at: string }
