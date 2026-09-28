@@ -20,6 +20,8 @@
 
 ### 문서
 
+- PR 본문에 이슈를 닫는 키워드와 필수 절이 있는지 검사하는 `pr-body` 워크플로를 추가하고, 추적 이슈·하위 이슈 규칙을 CONTRIBUTING에 적었습니다. 문서의 이슈·PR·커밋 번호를 링크로 바꿨습니다 ([#59](https://github.com/dj258255/b-studio/pull/59)).
+- 에이전트 간 지식 공유와 작업 중 모델 교체를 결정 전에 검토한 문서를 추가했습니다 ([#50](https://github.com/dj258255/b-studio/pull/50)).
 - `README.md`, `docs/README.md`, Wiki 개발 페이지의 문서 안내를 로드맵·변경 기록·문서 양식에 연결했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 
 ## 2026-09-24
