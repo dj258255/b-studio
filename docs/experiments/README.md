@@ -4,4 +4,4 @@
 
 | 날짜 | 실험 | 가설 결과 | 이슈 |
 |---|---|---|---|
-| — | E1 격리 병렬과 직렬화 비용 비교 (진행 전) | — | [#45](https://github.com/dj258255/b-studio/issues/45) |
+| 2026-09-29 | [E1 격리 병렬과 직렬화 비용 비교](2026-09-29-e1-isolated-parallel-baseline.md) | H1 확인(엮인 과제 S0 9/9, S1 4/9), H2 일부 확인(입력 토큰 증가, 시간 차이는 7%) | [#45](https://github.com/dj258255/b-studio/issues/45) |

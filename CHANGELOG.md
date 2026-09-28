@@ -21,12 +21,14 @@
 
 ### 수정
 
+- 협업 벤치의 `meta.json`이 커밋을 끝날 때 읽어, 실행 중 main이 바뀌면 다른 커밋을 적던 문제를 고쳤습니다. 시작할 때 읽고, 끝날 때 다르면 `gitCommitAtEnd`를 함께 적습니다.
 - 격리 샌드박스의 Node 서비스가 edge 프록시를 쓰도록 `NODE_USE_ENV_PROXY=1`을 넘깁니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#69](https://github.com/dj258255/b-studio/issues/69)).
 - 예제 api 컨테이너의 메모리 한도를 1536m에서 2048m으로 올려, 개발 서버 옆에서 테스트를 돌릴 때 OOM으로 실패하지 않게 합니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#70](https://github.com/dj258255/b-studio/issues/70)).
 - 부하가 걸리면 가끔 시간 초과로 실패하던 문법 강조 전체 로딩 테스트에만 30초 제한을 따로 줬습니다 ([#78](https://github.com/dj258255/b-studio/pull/78)).
 
 ### 문서
 
+- 실험 E1 보고서를 추가했습니다. 인터페이스로 엮인 과제에서 격리 병렬은 9회 중 4회, 직렬화는 9회 모두 성공했고, 실패 5건은 모두 통합 게이트를 통과했습니다. ADR-051에 보강 절을 더했습니다.
 - PR 본문에 이슈를 닫는 키워드와 필수 절이 있는지 검사하는 `pr-body` 워크플로를 추가하고, 추적 이슈·하위 이슈 규칙을 CONTRIBUTING에 적었습니다. 문서의 이슈·PR·커밋 번호를 링크로 바꿨습니다 ([#59](https://github.com/dj258255/b-studio/pull/59)).
 - 에이전트 간 지식 공유와 작업 중 모델 교체를 결정 전에 검토한 문서를 추가했습니다 ([#50](https://github.com/dj258255/b-studio/pull/50)).
 - `README.md`, `docs/README.md`, Wiki 개발 페이지의 문서 안내를 로드맵·변경 기록·문서 양식에 연결했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
