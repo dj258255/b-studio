@@ -14,7 +14,7 @@ ENV GRADLE_USER_HOME=/gradle-home \
 COPY gradlew settings.gradle build.gradle gradle.properties ./
 COPY gradle ./gradle
 # 소스를 이미지에 넣지 않는다. 에이전트가 소스를 고칠 때마다 이 층이 깨지면 기동이 느려진다.
-# 그래서 소스가 필요 없는 downloadDependencies로 런타임 의존성을 받는다
+# 그래서 소스가 필요 없는 downloadDependencies로 런타임·테스트 의존성을 받는다
 # (dependencies 태스크는 메타데이터만 받아 실행할 때 jar을 다시 내려받으려 한다).
 # 읽기 전용 원본에는 잠금 파일을 남기지 않는다(Gradle 문서 요건)
 RUN ./gradlew downloadDependencies --no-daemon --console=plain > /dev/null \

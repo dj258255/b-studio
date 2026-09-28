@@ -1570,3 +1570,33 @@ Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No "exports" main defined in packages/age
 
 ### 재발 방지
 `apps/studio/bench/coordination/load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+## 44. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐
+
+**구분:** 실험 중 발견(E2 27·28회) → 기록에서 원인 추적 → 네트워크로 재현 → 수정([#116](https://github.com/dj258255/b-studio/issues/116))
+
+### 현상
+- E2의 두 실행에서 api 레인이 게이트를 3번 모두 통과하지 못했습니다. 앞의 26회는 같은 과제로 모두 통과했습니다.
+- 게이트의 `api-unit`(`./gradlew test`)이 다음처럼 끝났습니다.
+
+```
+- Task `:compileTestJava` of type `org.gradle.api.tasks.compile.JavaCompile`: error writing value of type 'org.gradle.api.internal.file.collections.DefaultConfigurableFileCollection'
+Configuration cache entry discarded due to serialization error.
+```
+
+- 에이전트는 테스트 의존성(`spring-boot-starter-test`)을 캐시에서 찾고, Maven Central에 `curl`로 확인하고, `build.gradle`의 `downloadDependencies`를 고쳤습니다. 그러자 이미지를 다시 빌드하는 단계까지 실패했습니다.
+
+### 원인
+- 호스트와 Docker 안에서 모두 Maven Central이 `429 Too Many Requests`를 돌려줬습니다(2026-09-29 08:50 KST).
+- 예제 이미지는 `downloadDependencies`로 **런타임·컴파일 classpath만** 미리 받아 굽고 있었습니다. 테스트 classpath는 샌드박스가 테스트를 돌릴 때마다 edge 프록시를 거쳐 새로 받습니다.
+- E1·E2로 수십 번 실행하면서 이 내려받기가 쌓여 요청 한도에 걸렸습니다. 의존성 해석이 실패하면 Gradle은 설정 캐시를 쓰는 단계에서 위의 직렬화 오류를 냅니다. 그래서 원인이 "네트워크"가 아니라 "설정 캐시"처럼 보였습니다.
+- 디스크(Docker VM 95%)도 처음에 의심했습니다. 하지만 기록 어디에도 `No space left`가 없었고, 429는 직접 재현됐습니다.
+
+### 해결
+- `downloadDependencies`에 `testRuntimeClasspath`·`testCompileClasspath`를 넣어, 테스트 의존성도 이미지의 읽기 전용 캐시에 굽습니다.
+- 이제 샌드박스는 테스트 때문에 Maven Central에 가지 않습니다.
+
+### 재발 방지와 확인
+- 요청 한도가 풀린 뒤 이미지를 다시 빌드하고, 테스트 실행 중 api 컨테이너가 받은 바이트([#94](https://github.com/dj258255/b-studio/issues/94)의 기록)가 줄었는지 확인합니다.
+- 실험 결과에서는 이 두 실행을 조율 전략의 실패가 아니라 환경 실패로 따로 분류하고 다시 돌립니다.
+- 교훈: 모델이 "고치려고" 빌드 파일을 건드리면 원인이 더 가려집니다. 게이트 실패 메시지에 원인이 된 외부 응답(429)이 드러나지 않았던 것이 진단을 늦췄습니다.
