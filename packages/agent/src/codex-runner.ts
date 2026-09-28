@@ -9,6 +9,7 @@ import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
@@ -145,6 +146,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+    // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
+    toolResults: createToolResultCache(),
   };
   const specs = buildTools(project);
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
@@ -199,7 +202,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
           const toolStarted = performance.now();
           const outcome = await executeTool(name, args, context);
           metrics.toolMs += Math.round(performance.now() - toolStarted);
-          onEvent({ type: 'tool_result', name, ok: outcome.ok, content: outcome.content });
+          onEvent({ type: 'tool_result', name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
           return outcome;
         }),
     });
@@ -247,14 +250,26 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
             }
             break;
 
-          case 'turn.completed':
+          case 'turn.completed': {
             // Codex 이벤트는 모델 호출 단위가 아니라 턴 단위라 턴 수로 센다
             completedTurns += 1;
             metrics.modelCalls = completedTurns;
             addUsage(usage, event.usage);
-            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(event.usage));
+            const turnContext = contextTokens(event.usage);
+            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
             onEvent({ type: 'tokens', usage: { ...usage } });
+            // 턴 하나의 사용량. 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
+            onEvent({
+              type: 'turn_usage',
+              turn: completedTurns,
+              inputTokens: event.usage.input_tokens,
+              outputTokens: event.usage.output_tokens,
+              cacheReadTokens: event.usage.cached_input_tokens ?? 0,
+              cacheWriteTokens: event.usage.cache_write_input_tokens ?? 0,
+              contextTokens: turnContext,
+            });
             break;
+          }
 
           case 'turn.failed':
             failure = classifyFailure(event.error.message);

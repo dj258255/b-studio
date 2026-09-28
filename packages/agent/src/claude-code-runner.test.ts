@@ -158,6 +158,8 @@ describe('runClaudeCodeAgent', () => {
     expect(result.usage.inputTokens).toBe(40);
     // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
     expect(events.flatMap((e) => (e.type === 'tokens' ? [e.usage.inputTokens] : []))).toEqual([20, 40]);
+    // 이 스크립트는 assistant usage를 주지 않으므로 턴 사용량 이벤트가 없다(기록된 값만 남긴다)
+    expect(events.filter((e) => e.type === 'turn_usage')).toEqual([]);
 
     expect(state.prompts).toHaveLength(2);
     expect(state.prompts[1]).toContain('[b-studio 검증 게이트]');
@@ -177,13 +179,19 @@ describe('runClaudeCodeAgent', () => {
       ],
     });
 
-    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+    const events: AgentEvent[] = [];
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract, onEvent: (event) => events.push(event) });
 
     expect(result.status).toBe('done');
     // 서로 다른 assistant 메시지 id가 2개다 (id 2개, 메시지 3개)
     expect(result.metrics?.modelCalls).toBe(2);
     // 호출 한 번의 입력 크기 최댓값: 200 + 2,000 + 7 = 2,207
     expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // 같은 메시지 id가 여러 번 와도 그 턴의 사용량은 처음 값으로 한 번만 남긴다(컨텍스트 = input + cacheRead + cacheWrite)
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 5, contextTokens: 1_105 },
+      { type: 'turn_usage', turn: 2, inputTokens: 50, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 0, contextTokens: 150 },
+    ]);
     // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
     expect(result.metrics?.modelMs).toBe(0);
     for (const ms of [result.metrics!.toolMs, result.metrics!.gateMs]) {

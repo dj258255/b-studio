@@ -256,6 +256,11 @@ describe('runCodexAgent', () => {
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 12, cacheReadTokens: 30, cacheWriteTokens: 3 });
     // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
     expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
+    // turn.completed마다 그 턴 하나의 사용량을 남긴다(컨텍스트 = input + cacheRead + cacheWrite)
+    expect(events.flatMap((event) => (event.type === 'turn_usage' ? [event] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 1, contextTokens: 111 },
+      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 7, cacheReadTokens: 20, cacheWriteTokens: 2, contextTokens: 222 },
+    ]);
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(222);
     // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
