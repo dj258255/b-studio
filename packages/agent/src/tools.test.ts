@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { Workspace } from './workspace';
 
@@ -15,9 +15,17 @@ const project = {
 const context: ToolContext = {
   project,
   workspace: new Workspace('/tmp/none'),
-  sandbox: { endpoint: async (service: string) => ({ service, containerPort: 8080, url: 'http://127.0.0.1:1' }) } as unknown as Sandbox,
+  sandbox: {
+    endpoint: async (service: string) => ({ service, containerPort: 8080, url: 'http://127.0.0.1:1' }),
+    redact: (text: string) => text,
+  } as unknown as Sandbox,
   fetcher: async () => ({}),
 };
+
+// 컨텍스트를 여러 테스트가 함께 쓰므로 도구 결과 캐시는 테스트마다 새로 시작한다(실제로는 러너가 실행마다 새로 만든다)
+beforeEach(() => {
+  context.toolResults = undefined;
+});
 
 describe('http_request', () => {
   it('"//" 경로로 서비스 밖 호스트에 요청하지 못한다', async () => {
@@ -136,5 +144,60 @@ describe('실행 정책', () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.content).toContain('approval was not granted');
     expect(called).toBe(false);
+  });
+});
+
+describe('도구 결과 예산', () => {
+  it('read_file 결과를 앞쪽 위주로 자르고 원래 글자 수를 남긴다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-budget-'));
+    await writeFile(path.join(root, 'big.txt'), 'a'.repeat(20_000));
+    const outcome = await executeTool('read_file', { path: 'big.txt' }, { ...context, workspace: new Workspace(root) });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.rawChars).toBe(20_000);
+    expect(outcome.content.length).toBeLessThan(20_000);
+    expect(outcome.content).toContain('전체 20000자 중 8000자 생략');
+  });
+
+  it('명령 출력은 뒤쪽 위주로 잘라 실패 요약을 남긴다', async () => {
+    const sandbox = {
+      ...context.sandbox,
+      exec: async () => ({ exitCode: 1, stdout: `${'a'.repeat(10_000)}\nFAILURE: cannot compile`, stderr: '' }),
+    } as unknown as Sandbox;
+    const outcome = await executeTool('run_in_service', { service: 'api', command: ['./gradlew', 'test'] }, { ...context, sandbox });
+    expect(outcome.ok).toBe(false);
+    // 긴 로그를 잘라도 뒤쪽의 실패 요약은 남는다
+    expect(outcome.content).toContain('FAILURE: cannot compile');
+    expect(outcome.content.length).toBeLessThan(6_100);
+    expect(outcome.rawChars).toBeGreaterThan(6_000);
+    expect(outcome.content).toContain('grep·tail로 좁혀 다시 실행');
+  });
+
+  it('HTML 응답은 태그를 벗긴 보이는 글자만 남긴다', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('<html><head><script>var a = 1 < 2;</script></head><body><h1>주문</h1></body></html>', { status: 200, headers: { 'content-type': 'text/html' } })) as typeof fetch;
+    try {
+      const outcome = await executeTool('http_request', { service: 'api', method: 'GET', path: '/', body: '' }, context);
+      expect(outcome.ok).toBe(true);
+      expect(outcome.content).toContain('주문');
+      expect(outcome.content).not.toContain('var a');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe('같은 결과 반복 대체', () => {
+  it('같은 도구·같은 입력의 결과가 같으면 참조로 바꾸고, 쓰기 뒤에는 다시 읽는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-dedupe-'));
+    await writeFile(path.join(root, 'a.txt'), 'same');
+    const runContext: ToolContext = { ...context, workspace: new Workspace(root) };
+
+    expect((await executeTool('read_file', { path: 'a.txt' }, runContext)).content).toBe('same');
+    expect((await executeTool('read_file', { path: 'a.txt' }, runContext)).content).toBe('(앞의 1번째 호출 결과와 같습니다)');
+
+    // 쓰기가 성공하면 읽기 캐시를 비워, 같은 파일을 다시 읽으면 본문을 그대로 돌려준다
+    expect((await executeTool('write_file', { path: 'a.txt', content: 'same' }, runContext)).ok).toBe(true);
+    expect((await executeTool('read_file', { path: 'a.txt' }, runContext)).content).toBe('same');
   });
 });

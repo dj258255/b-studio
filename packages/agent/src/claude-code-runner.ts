@@ -15,6 +15,7 @@ import type { Effort } from './anthropic-client';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
@@ -113,6 +114,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+    // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
+    toolResults: createToolResultCache(),
   };
   const specs = buildTools(project, { design: options.design !== undefined });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
@@ -131,7 +134,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         const toolStarted = performance.now();
         const outcome = await executeTool(spec.name, args, context);
         metrics.toolMs += Math.round(performance.now() - toolStarted);
-        onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content });
+        onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
         return { content: [{ type: 'text' as const, text: outcome.content }], isError: !outcome.ok };
       }),
     ),
@@ -221,16 +224,29 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           if (message.parent_tool_use_id) break;
           // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
           const messageUsage = message.message.usage;
+          const turnContext = messageUsage
+            ? (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0)
+            : 0;
           if (messageUsage) {
-            metrics.maxContextTokens = Math.max(
-              metrics.maxContextTokens,
-              (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0),
-            );
+            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
           }
           if (!messageIds.has(message.message.id)) {
             messageIds.add(message.message.id);
-            onEvent({ type: 'turn', turn: messageIds.size });
-            if (messageIds.size > maxTurns) {
+            const turn = messageIds.size;
+            onEvent({ type: 'turn', turn });
+            // 턴 하나의 사용량. 같은 메시지 id가 여러 번 와도 한 번만 남긴다(누적값 tokens와 다르다)
+            if (messageUsage) {
+              onEvent({
+                type: 'turn_usage',
+                turn,
+                inputTokens: messageUsage.input_tokens ?? 0,
+                outputTokens: messageUsage.output_tokens ?? 0,
+                cacheReadTokens: messageUsage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: messageUsage.cache_creation_input_tokens ?? 0,
+                contextTokens: turnContext,
+              });
+            }
+            if (turn > maxTurns) {
               await conversation.interrupt().catch(() => {});
               finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
               break;
