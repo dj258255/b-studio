@@ -18,6 +18,11 @@
 - `CONTRIBUTING.md`에 작업 흐름·예상 갱신·실험·측정 용어 절을 더하고, PR 체크리스트를 PR 템플릿으로 옮겼습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - 로컬 CLI 모드에서 쓸 모델을 환경 변수로 고정할 수 있습니다(`docs/operations.md`) ([#49](https://github.com/dj258255/b-studio/pull/49)).
 
+### 수정
+
+- 격리 샌드박스의 Node 서비스가 edge 프록시를 쓰도록 `NODE_USE_ENV_PROXY=1`을 넘깁니다 ([#69](https://github.com/dj258255/b-studio/issues/69)).
+- 예제 api 컨테이너의 메모리 한도를 1536m에서 2048m으로 올려, 개발 서버 옆에서 테스트를 돌릴 때 OOM으로 실패하지 않게 합니다 ([#70](https://github.com/dj258255/b-studio/issues/70)).
+
 ### 문서
 
 - PR 본문에 이슈를 닫는 키워드와 필수 절이 있는지 검사하는 `pr-body` 워크플로를 추가하고, 추적 이슈·하위 이슈 규칙을 CONTRIBUTING에 적었습니다. 문서의 이슈·PR·커밋 번호를 링크로 바꿨습니다 ([#59](https://github.com/dj258255/b-studio/pull/59)).
