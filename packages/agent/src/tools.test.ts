@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
+import { Board } from './coordination';
 import { buildTools, executeTool, type ToolContext } from './tools';
 import { Workspace } from './workspace';
 
@@ -103,5 +104,84 @@ describe('실행 정책', () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.content).toContain('approval was not granted');
     expect(called).toBe(false);
+  });
+});
+
+describe('조율 도구', () => {
+  function boardContext(): ToolContext {
+    const board = new Board({ topology: 'mesh' });
+    return {
+      ...context,
+      board: {
+        lane: 'web',
+        post: (input) => board.post(input, { lane: 'web', by: 'model' }),
+        read: (options) => board.read({ lane: 'web' }, options),
+      },
+    };
+  }
+
+  it('board가 없으면 도구 목록이 지금과 같다', () => {
+    const names = buildTools(project).map((candidate) => candidate.name);
+    expect(names).not.toContain('post_note');
+    expect(names).not.toContain('read_notes');
+  });
+
+  it('board가 있으면 두 도구를 더한다', () => {
+    const names = buildTools(project, { board: boardContext().board }).map((candidate) => candidate.name);
+    expect(names).toContain('post_note');
+    expect(names).toContain('read_notes');
+  });
+
+  it('허용 목록에 없으면 그 도구를 목록에 넣지 않는다', () => {
+    const board = boardContext().board;
+    const none = buildTools(project, { board, allowedTools: [] }).map((candidate) => candidate.name);
+    expect(none).not.toContain('post_note');
+    expect(none).not.toContain('read_notes');
+
+    const only = buildTools(project, { board, allowedTools: ['post_note'] }).map((candidate) => candidate.name);
+    expect(only).toContain('post_note');
+    expect(only).not.toContain('read_notes');
+  });
+
+  it('post_note 스키마는 failure를 넣지 않는다', () => {
+    const postNote = buildTools(project, { board: boardContext().board }).find((candidate) => candidate.name === 'post_note');
+    const properties = (postNote?.input_schema as { properties?: Record<string, { enum?: string[] }> }).properties;
+    expect(properties?.kind?.enum).toEqual(['contract', 'fact']);
+  });
+
+  it('post_note로 쓰고 read_notes로 읽는다', async () => {
+    const ctx = boardContext();
+    const posted = await executeTool('post_note', { kind: 'contract', body: 'OrderResponse.memo', refs: ['api/src/Order.java'] }, ctx);
+    expect(posted).toEqual({ ok: true, content: 'posted note-1 (contract)' });
+
+    await executeTool('post_note', { kind: 'fact', body: 'api listens on 8080', refs: [] }, ctx);
+    const read = await executeTool('read_notes', { kinds: [] }, ctx);
+    expect(read.ok).toBe(true);
+    expect(read.content).toContain('[contract·2] web: OrderResponse.memo (api/src/Order.java)');
+
+    const facts = await executeTool('read_notes', { kinds: ['fact'] }, ctx);
+    expect(facts.content).toContain('[fact·1] web: api listens on 8080');
+    expect(facts.content).not.toContain('OrderResponse.memo');
+  });
+
+  it('계약 메모에 refs가 없으면 게시판이 거부한 이유를 그대로 돌려준다', async () => {
+    const outcome = await executeTool('post_note', { kind: 'contract', body: 'x', refs: [] }, boardContext());
+    expect(outcome).toEqual({ ok: false, content: '계약 메모는 refs가 하나 이상 필요합니다' });
+  });
+
+  it('게시판이 없는 실행에서 조율 도구를 직접 부르면 실패한다', async () => {
+    const outcome = await executeTool('post_note', { kind: 'fact', body: 'x', refs: [] }, context);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('조율 게시판이 없습니다');
+  });
+
+  it('질문 모드에서 read_notes는 허용하고 post_note는 거부한다', async () => {
+    const readOnly: ToolContext = { ...boardContext(), readOnly: true };
+    const denied = await executeTool('post_note', { kind: 'fact', body: 'x', refs: [] }, readOnly);
+    expect(denied.ok).toBe(false);
+    expect(denied.content).toContain('Question mode is read-only');
+
+    const read = await executeTool('read_notes', { kinds: [] }, readOnly);
+    expect(read.ok).toBe(true);
   });
 });

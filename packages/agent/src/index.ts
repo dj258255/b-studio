@@ -62,7 +62,33 @@ export {
   type PullRequestResult,
   type RemoteLocation,
 } from './repository';
-export { buildTools, executeTool } from './tools';
+export { buildTools, executeTool, type BoardAccess, type ToolBuildOptions } from './tools';
+export {
+  Board,
+  canRead,
+  DEFAULT_BOARD_LIMITS,
+  failureNotesFromReport,
+  NOTE_PRIORITY,
+  normalizeMessage,
+  noteBytes,
+  signatureFromCheck,
+  signatureKey,
+  signaturesFromReport,
+  type Author,
+  type BoardLimits,
+  type BoardOptions,
+  type BoardStats,
+  type FailureNoteInput,
+  type FailureSignature,
+  type Note,
+  type NoteKind,
+  type PostInput,
+  type PostResult,
+  type ReadOptions,
+  type ReadResult,
+  type Reader,
+  type Topology,
+} from './coordination';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   DEFAULT_WORKFLOW,
