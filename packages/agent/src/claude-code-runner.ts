@@ -107,13 +107,14 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     signal,
     onServiceStatus,
     readOnly: ask,
+    design: options.design,
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
   };
-  const specs = buildTools(project);
+  const specs = buildTools(project, { design: options.design !== undefined });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다

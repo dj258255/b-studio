@@ -37,6 +37,17 @@ export interface ExternalApiView {
   authenticated: boolean;
 }
 
+/** 디자인(Figma) 연동 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
+export interface DesignView {
+  /** 지금 쓰는 Figma 파일 URL. 세션 설정이 studio.yaml보다 우선한다 */
+  fileUrl: string;
+  fileKey: string;
+  /** URL이 어디서 왔는지 */
+  from: 'session' | 'studio.yaml';
+  /** 서버에 FIGMA_TOKEN이 설정돼 있는지 */
+  hasToken: boolean;
+}
+
 export interface SessionSnapshot {
   id: string;
   projectId: string;
@@ -64,6 +75,8 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
+  /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
+  design?: DesignView;
   /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
@@ -184,6 +197,8 @@ export type StudioEvent =
   | { type: 'snapshot'; snapshot: SessionSnapshot }
   | { type: 'status'; status: SessionStatus; error?: string }
   | { type: 'service'; service: string; state: ServiceState; url?: string; previewUrl?: string; detail?: string }
+  /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
+  | { type: 'design'; design?: DesignView }
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }

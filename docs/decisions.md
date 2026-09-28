@@ -9,7 +9,7 @@
 | 주제 | ADR |
 |---|---|
 | 프로젝트 모델과 런타임 | 001–009, 021, 028, 032, 044 |
-| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053 |
+| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053–054 |
 | 웹 스튜디오와 세션 | 015–020, 029–031, 033, 040–041, 045–046, 052 |
 | 데이터·자원·보안 | 022–027, 038, 040, 045 |
 | 운영 배포 | 020, 030, 032–033, 043–045 |
@@ -69,6 +69,7 @@
 - [ADR-051 작업 분해: 이어진 작업은 한 세션에서, 독립 레인은 병렬로 돌리고 통합 결과를 다시 검증한다](#adr-051-작업-분해-이어진-작업은-한-세션에서-독립-레인은-병렬로-돌리고-통합-결과를-다시-검증한다)
 - [ADR-052 미리보기 QA: 서버 소유 브라우저 화면을 중계하고 입력을 되돌려 보낸다](#adr-052-미리보기-qa-서버-소유-브라우저-화면을-중계하고-입력을-되돌려-보낸다)
 - [ADR-053 시각 비교: 디자인 이미지를 저장소에 두고 결정론적으로 비교한다](#adr-053-시각-비교-디자인-이미지를-저장소에-두고-결정론적으로-비교한다)
+- [ADR-054 디자인(Figma) 연동: REST API와 서버 토큰을 쓰고 이미지는 모델에 넘기지 않는다](#adr-054-디자인figma-연동-rest-api와-서버-토큰을-쓰고-이미지는-모델에-넘기지-않는다)
 
 ---
 
@@ -2098,6 +2099,40 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 
 ---
 
+## ADR-054 디자인(Figma) 연동: REST API와 서버 토큰을 쓰고 이미지는 모델에 넘기지 않는다
+
+### 맥락
+- 디자인이 Figma에 있는 과제(#67)에서는 에이전트가 디자인을 볼 방법이 없어 사람이 화면을 보고 말로 옮겨야 했고, 시각 비교([ADR-053](#adr-053-시각-비교-디자인-이미지를-저장소에-두고-결정론적으로-비교한다))의 기준 이미지도 사람이 직접 만들어 넣어야 했습니다.
+- 사용자 요청(2026-09-29): b-studio에서 Figma URL을 넣으면 디자인을 쓸 수 있게.
+
+### 검토한 선택지
+
+| 선택지 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| Figma 원격 MCP 서버를 러너에 붙이기 | 공식 MCP | 사람마다 OAuth 로그인 필요. 스튜디오 서버가 대신 쓸 수 없고, 러너 격리(빈 HOME·빈 CODEX_HOME)와 충돌 |
+| **Figma REST API + 개인 액세스 토큰(서버 시크릿), b-studio 도구로 에이전트에 노출** | 서버가 결정론적으로 가져온다. 로컬 CLI 러너는 b-studio 도구를 MCP로 받으므로 에이전트 입장에서는 MCP로 Figma를 본다 | 토큰 관리, Figma API 요청 한도 |
+| `.fig` 파일 직접 파싱 | Figma 계정 불필요 | 비공개 형식이라 정확도·유지보수 위험이 크다 |
+
+### 결정
+- **REST + 개인 액세스 토큰**: 서버가 `X-Figma-Token` 헤더로 Figma REST API를 부릅니다. 토큰은 서버 환경 변수 `FIGMA_TOKEN`에서만 읽고, 값은 오류 문구·로그·화면·모델 어디에도 넣지 않습니다. URL은 `studio.yaml`의 `design.figma.fileUrl`에 두거나 세션 단위로 저장하며, 파일 키는 URL에서 뽑아 검증합니다.
+- **도구로 노출**: `design_frames`(페이지별 프레임 목록)와 `design_frame`(프레임 구조·스타일 요약). 세션이 디자인을 설정했을 때만 도구 목록에 더하고, 없으면 목록이 지금과 같습니다.
+- **이미지는 모델에 넘기지 않습니다**: 프레임 PNG는 산출물로 저장하고 참조 경로만 돌려줍니다(원격 브라우저의 요소 선택과 같은 이유 — 모델마다 이미지 입력 지원이 달라 한쪽에 맞춘 형식이 다른 쪽에서 무시되거나 오류가 됩니다).
+- **가져오기는 세션 변경으로 남깁니다**: 고른 프레임을 세션 작업 복사본의 `design/<이름>.png`로 저장합니다. 서버가 몰래 어딘가에 쓰지 않고, 파일 도구와 같은 Workspace 경로 규칙과 보호 경로(`workflow.protectedPaths`) 검사를 거쳐 체크포인트·게이트·PR을 탑니다.
+
+### 감수한 트레이드오프
+- **Figma API 요청 한도**(429)를 만나면 `Retry-After`를 존중해 한 번만 다시 시도하고, 그래도 막히면 실패로 알립니다. 파일 목록·노드는 파일 `version` 기준으로 메모리에 캐시합니다.
+- **노드 요약을 텍스트로 줄입니다**(깊이 3·노드 200·8KB). 픽셀 단위 정밀도는 담기지 않아, 정확한 판정은 시각 비교(이미지)로 합니다.
+- **기준 이미지와 화면 스크린샷의 픽셀 너비가 같아야** 시각 비교가 성립하므로, 비교용으로는 `scale: 1`로 가져온 이미지를 씁니다(`scale`은 1·2). 이름이 같은 프레임을 다시 가져오면 같은 파일을 덮어씁니다.
+- 디자인 도구는 읽기 전용이라 질문 모드에서도 허용됩니다.
+- `.fig`는 Figma에 한 번 Import해야 파일 키가 생깁니다.
+
+### 검증 결과
+- 가짜 Figma 서버로 키 추출·검증, 파일 목록, 노드 요약 상한, 이미지 내보내기·다운로드 호스트 제한, 429 재시도, 오류 문구에 토큰 없음을 확인했습니다.
+- 도구 노출 조건(설정이 없으면 목록이 그대로), 가져오기가 보호 경로·프로젝트 밖 경로를 거부하고 세션 변경으로 남는 것을 단위 테스트로 확인했습니다.
+- 실제 Figma 파일로는 아직 확인하지 못했습니다(토큰 없음). 확인 방법은 결과 문서에 적었습니다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -2120,4 +2155,5 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
 - StablyAI, [Orca](https://github.com/stablyai/orca)
 - mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
+- Figma, [REST API](https://www.figma.com/developers/api) (개인 액세스 토큰, `file_content:read`)
 - OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)

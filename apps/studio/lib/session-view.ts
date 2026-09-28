@@ -157,6 +157,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             : service,
         ),
       });
+    case 'design':
+      return patchSnapshot(view, { design: event.design });
     case 'log': {
       const logs = view.logs.length >= LOG_LIMIT ? view.logs.slice(view.logs.length - LOG_LIMIT + 1) : [...view.logs];
       logs.push({ service: event.service, text: event.text, at: event.at });

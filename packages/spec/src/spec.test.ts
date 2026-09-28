@@ -51,6 +51,19 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
+  it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
+      fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',
+      fileKey: 'abc123XYZ',
+    });
+    // 옛 /file/ 경로와 www 없는 호스트도 받는다
+    expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://figma.com/file/KEY9/legacy"\n`).design?.figma?.fileKey).toBe('KEY9');
+    expect(parseSpec(`${ORDERS_SPEC}`).design).toBeUndefined();
+
+    const bad = captureError(() => parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://example.com/design/x"\n`));
+    expect(bad.issues.some((issue) => issue.startsWith('design.figma.fileUrl'))).toBe(true);
+  });
+
   it('워크플로 정책의 단계와 보호 경로를 읽고 잘못된 단계를 거부한다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}workflow:
   required: [plan, implement, run, test, checkpoint]

@@ -6,6 +6,7 @@ import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
 import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
+import { DesignPanel } from "./design-panel";
 import { HistoryPanel } from "./history-panel";
 import { useLiveFrames } from "./live-frames";
 import { LogPanel } from "./log-panel";
@@ -21,6 +22,7 @@ const HISTORY_TAB = "history";
 const CODE_TAB = "code";
 const RESOURCES_TAB = "resources";
 const DEPLOY_TAB = "deploy";
+const DESIGN_TAB = "design";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
@@ -28,6 +30,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       .filter((service) => service.preview !== "logs")
       .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
     ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
+    { id: DESIGN_TAB, label: "디자인" },
     { id: CODE_TAB, label: "코드" },
     { id: HISTORY_TAB, label: "기록" },
     { id: DEPLOY_TAB, label: "배포" },
@@ -57,7 +60,10 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       </div>
 
       <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden rounded-panel border border-line bg-panel">
-        {active.id === CODE_TAB ? (
+        {active.id === DESIGN_TAB ? (
+          // URL이 바뀌면 다시 마운트해 입력값·프레임 목록을 새 URL에 맞춘다
+          <DesignPanel key={view.snapshot.design?.fileUrl ?? ""} sessionId={view.snapshot.id} design={view.snapshot.design} ready={view.snapshot.status === "ready"} />
+        ) : active.id === CODE_TAB ? (
           <CodePanel view={view} />
         ) : active.id === HISTORY_TAB ? (
           <HistoryPanel view={view} />

@@ -319,6 +319,29 @@ export const WorkflowSchema = z
     });
   });
 
+/** Figma 디자인/파일 URL. `https://www.figma.com/design/<key>/...`과 `/file/<key>/...` 둘 다 받는다 */
+const FIGMA_FILE_URL = /^https?:\/\/(?:www\.)?figma\.com\/(?:design|file)\/([A-Za-z0-9]+)(?:[/?#]|$)/;
+
+/** Figma URL에서 파일 키를 뽑는다. 형식이 아니면 undefined */
+export function figmaFileKey(url: string): string | undefined {
+  return FIGMA_FILE_URL.exec(url.trim())?.[1];
+}
+
+/**
+ * 디자인(Figma) 연동. 토큰은 studio.yaml이 아니라 서버 환경 변수 FIGMA_TOKEN에서만 읽는다.
+ * fileKey는 URL에서 미리 뽑아 두어 다운스트림이 URL을 다시 파싱하지 않게 한다
+ */
+export const DesignSchema = z
+  .object({
+    figma: z
+      .object({
+        /** `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...` */
+        fileUrl: z.string().refine((value) => figmaFileKey(value) !== undefined, 'Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다'),
+      })
+      .transform((value) => ({ fileUrl: value.fileUrl, fileKey: figmaFileKey(value.fileUrl)! })),
+  })
+  .optional();
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -340,6 +363,8 @@ export const StudioSpecSchema = z.object({
   /** 환경 변수 이름 → 받을 서비스 */
   secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
   deploy: DeploySchema.optional(),
+  /** Figma 디자인 연동. fileUrl에서 뽑은 키로 서버가 Figma REST API를 부른다 */
+  design: DesignSchema,
   /** Pi·Claude·API 에이전트에 공통으로 적용하는 실행 정책 */
   workflow: WorkflowSchema.optional(),
   repository: z
@@ -360,6 +385,7 @@ export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type SecretSpec = z.infer<typeof SecretSchema>;
 export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
+export type DesignSpec = z.infer<typeof DesignSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;

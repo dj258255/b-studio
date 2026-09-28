@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
+import type { DesignSource } from './design';
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { buildTools, executeTool, type ToolContext } from './tools';
@@ -113,6 +114,8 @@ export interface RunAgentOptions {
   saveArtifact?: GateOptions['saveArtifact'];
   /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
   onBrowserFrame?: GateOptions['onBrowserFrame'];
+  /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘긴다(없으면 디자인 도구가 목록에 없다) */
+  design?: DesignSource;
   /** 도구 호출을 실행기에서 통제하는 정책 */
   policy?: ExecutionPolicy;
   approvalToken?: string;
@@ -157,6 +160,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     browserRunner,
     saveArtifact,
     onBrowserFrame,
+    design,
     intent = 'build',
   } = options;
   const ask = intent === 'ask';
@@ -183,7 +187,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         onEvent,
       });
   const system = buildSystemPrompt(project) + workflowContext(project);
-  const tools = buildTools(project);
+  const tools = buildTools(project, { design: design !== undefined });
   const policy = options.policy ?? executionPolicyFor(project);
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
@@ -244,6 +248,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           signal,
           onServiceStatus,
           readOnly: ask,
+          design,
           policy,
           approvalToken: options.approvalToken,
           requestApproval: options.requestApproval,

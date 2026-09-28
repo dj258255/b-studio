@@ -16,6 +16,7 @@ secrets: {}
 deploy: {}
 workflow: {}
 repository: {}
+design: {}
 ```
 
 | 필드 | 필수 | 설명 |
@@ -31,6 +32,7 @@ repository: {}
 | `deploy` | 아니요 | 운영 Dockerfile과 공개 포트 |
 | `workflow` | 아니요 | 에이전트 작업 단계·도구·보호 경로·승인·릴리스 조건 |
 | `repository` | 아니요 | 모노레포 하위 프로젝트 처리 |
+| `design` | 아니요 | Figma 디자인 파일 URL(에이전트 도구·시각 비교 기준) |
 
 ## managed 서비스
 
@@ -256,6 +258,25 @@ pageChecks:
 `studio workflow <프로젝트>`로 실제로 강제할 단계와 검사를 확인할 수 있습니다.
 
 `mode: browser`는 스튜디오 서버가 도는 호스트에서 Chromium을 띄웁니다. Playwright가 내려받은 Chromium을 먼저 쓰고, 없으면 설치된 Chrome을 쓰며, `B_STUDIO_BROWSER_EXECUTABLE`로 실행 파일을 지정할 수 있습니다. 어느 것도 없으면 검사는 통과가 아니라 실패로 끝납니다. 스튜디오를 브라우저가 없는 컨테이너 이미지로 운영한다면 `http` 모드를 쓰거나 이미지에 Chromium을 넣어야 합니다.
+
+## 디자인 (Figma)
+
+Figma 파일 URL을 두면 에이전트가 `design_frames`·`design_frame` 도구로 프레임 목록과 구조·스타일 요약을 볼 수 있고, 화면의 "디자인" 패널에서 고른 프레임을 PNG로 가져와 시각 비교(`pageChecks.compare`)의 기준 이미지로 쓸 수 있습니다.
+
+```yaml
+design:
+  figma:
+    fileUrl: https://www.figma.com/design/<파일 키>/<이름>
+```
+
+| 필드 | 설명 |
+|---|---|
+| `figma.fileUrl` | `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...`. 파일 키는 여기서 뽑아 검증하고, 형식이 아니면 불러올 때 거부합니다 |
+
+- 토큰은 `studio.yaml`이 아니라 **서버 환경 변수 `FIGMA_TOKEN`**에서만 읽습니다. 값은 로그·오류·화면·모델 어디에도 넣지 않습니다.
+- 스튜디오는 `studio.yaml`을 고치지 않습니다. 화면의 "디자인" 패널에서 **세션 단위로** URL을 저장할 수 있고(세션 설정이 `studio.yaml`보다 우선), 팀과 공유하려면 패널이 보여 주는 줄을 사람이 커밋합니다.
+- `.fig` 파일은 Figma에 한 번 Import해야 파일 키가 생깁니다.
+- 토큰 발급 방법과 운영 주의는 [운영 문서](operations.md)의 "Figma 연동"을 보세요.
 
 ## 모노레포
 

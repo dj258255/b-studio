@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { describeUsage, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
+import type { DesignSource } from './design';
 import { checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 import { servicesForFiles } from './services';
 import type { ContractFetcher } from './verify';
@@ -23,6 +24,8 @@ export interface ToolContext {
   onServiceStatus?: StartOptions['onStatus'];
   /** 질문 모드. 파일을 바꾸거나 명령을 실행하는 도구와 조회가 아닌 HTTP 호출을 거부한다 */
   readOnly?: boolean;
+  /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘어온다. 없으면 디자인 도구가 목록에 없다 */
+  design?: DesignSource;
   /** 모델이 호출한 도구를 실행기에서 먼저 검사한다 */
   policy?: ExecutionPolicy;
   /** 승인 흐름에서 발급한 일회성 토큰. 토큰 값은 로그에 기록하지 않는다 */
@@ -50,8 +53,9 @@ export interface ToolOutcome {
  *  - 파일 쓰기는 작업 공간 규칙(경로 제한, 덮어쓰기 충돌)을 강제해야 한다
  *  - 바뀐 파일을 기록해야 검증 게이트가 재시작할 서비스를 고를 수 있다
  * strict 모드는 선택 필드가 없는 스키마에서 가장 안전하므로 모든 필드를 필수로 둔다.
+ * design을 넘기면(세션이 Figma 디자인을 설정했을 때) 디자인 도구를 더하고, 아니면 목록이 지금과 같다
  */
-export function buildTools(project: LoadedProject): BetaTool[] {
+export function buildTools(project: LoadedProject, options: { design?: boolean } = {}): BetaTool[] {
   const services = project.managed.map(([name]) => name);
   const contractServices = project.managed.filter(([, service]) => service.contract).map(([name]) => name);
   const service = { type: 'string', enum: services, description: 'Managed service name' };
@@ -119,6 +123,17 @@ export function buildTools(project: LoadedProject): BetaTool[] {
       tool('get_contract', "Summarize the service's current OpenAPI contract (operations and schemas), extracted from the running server.", {
         service: { type: 'string', enum: contractServices, description: 'Service that exposes an OpenAPI contract' },
       }),
+    );
+  }
+
+  if (options.design) {
+    tools.push(
+      tool('design_frames', 'List the Figma design frames (page, id, name, size). Use an id with design_frame.', {}),
+      tool(
+        'design_frame',
+        'Summarize a Figma frame: structure, auto layout, colors, corner radius, and text styles. Saves the frame PNG as an artifact and returns only its reference path; the image itself is not sent to the model.',
+        { id: { type: 'string', description: 'Frame id from design_frames.' } },
+      ),
     );
   }
   return tools;
@@ -236,6 +251,18 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
         if (!contract) return failure(`${target} does not expose a contract`);
         const endpoint = await sandbox.endpoint(target);
         return success(sandbox.redact(summarizeContract(await context.fetcher(new URL(contract.extract, endpoint.url).toString()))));
+      }
+      case 'design_frames': {
+        if (!context.design) return failure('Design is not configured for this session');
+        const frames = await context.design.frames();
+        return success(frames.length > 0 ? frames.map((frame) => `${frame.id}\t${frame.page}\t${frame.name}\t${frame.width}x${frame.height}`).join('\n') : '(no frames)');
+      }
+      case 'design_frame': {
+        if (!context.design) return failure('Design is not configured for this session');
+        const id = string(args, 'id');
+        const frame = await context.design.frame(id);
+        const artifact = await context.design.saveArtifact(`design ${id}`, frame.png);
+        return success(`${frame.summary}\n\nframe PNG saved as artifact: ${artifact} (the image is not sent to the model)`);
       }
       default:
         return failure(`Unknown tool: ${name}`);

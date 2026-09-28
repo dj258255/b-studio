@@ -136,6 +136,7 @@ function DesignCompare({ sessionId, compare }: { sessionId: string; compare: Wor
       <p className={`text-base font-semibold sm:text-lg ${ok ? "text-pass" : "text-fail"}`}>
         디자인 차이 {percent(compare.ratio)} <span className="text-sm font-normal text-muted">· 허용 {percent(compare.max)}</span>
       </p>
+      <p className="text-xs text-muted">기준 이미지는 디자인 패널에서 design/으로 가져온 파일입니다.</p>
       <div className="flex gap-1 lg:hidden" role="tablist" aria-label="디자인 비교 이미지">
         {COMPARE_VIEWS.map((view) => (
           <button

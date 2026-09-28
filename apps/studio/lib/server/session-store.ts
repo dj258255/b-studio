@@ -20,6 +20,8 @@ export interface PersistedSession {
   conversation: unknown[];
   demoIndex: number;
   claudeCode: { sessionId?: string; notes: string[] };
+  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml을 스튜디오가 고치지 않고 여기에 둔다 */
+  design?: { fileUrl: string; fileKey: string };
   sourceDirtyFiles: number;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };

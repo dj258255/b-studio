@@ -40,6 +40,7 @@ export {
   type RemoteBrowserViewport,
 } from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
+export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { isInScope, MAX_PLAN_LANES, MAX_PLAN_TASKS, planLanes, requestTaskPlan, TaskPlanError, type PlannedTask, type TaskLane } from './task-plan';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
