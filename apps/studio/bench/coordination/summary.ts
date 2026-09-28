@@ -96,6 +96,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '엮임',
     '전략',
     '성공',
+    '성공 1건당 토큰',
     '종단 시간 중앙값(s)',
     '입력 토큰 중앙값',
     '출력 토큰 중앙값',
@@ -121,6 +122,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         head.strategy,
         '|',
         `${ok}/${group.length}`,
+        '|',
+        tokensPerSuccess(group),
         '|',
         seconds(medianValue(group, (row) => row.metrics?.endToEndMs)),
         '|',
@@ -188,6 +191,25 @@ function medianValue(rows: BenchRow[], pick: (row: BenchRow) => number | undefin
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+/**
+ * 성공 1건당 토큰 = (입력 + 캐시읽기 + 캐시쓰기 + 출력) 합 ÷ 성공 수. 성공이 없으면 '—'.
+ * 실패한 실행이 쓴 토큰도 분자에 넣는다 — 같은 성과를 내는 데 실제로 쓴 총량을 본다.
+ */
+function tokensPerSuccess(group: BenchRow[]): string {
+  const ok = group.filter((row) => row.success).length;
+  if (ok === 0) return '—';
+  // 지표가 있는 실행만 더한다. 하나도 없으면 다른 열처럼 '—'다
+  const withMetrics = group.filter((row) => row.metrics);
+  if (withMetrics.length === 0) return '—';
+  const total = withMetrics.reduce((sum, row) => sum + usageTokens(row.metrics!.usage), 0);
+  return count(total / ok);
+}
+
+function usageTokens(usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number } | undefined): number {
+  if (!usage) return 0;
+  return usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens + usage.outputTokens;
 }
 
 function count(value: number | undefined): string {

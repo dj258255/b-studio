@@ -171,15 +171,15 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   input.push(ask ? buildAskRequest(request, { toolName }) : request);
 
   const usage = emptyUsage();
-  const messageIds = new Set<string>();
+  const tracker = new ClaudeCodeUsageTracker();
   let sessionId: string | undefined;
   let lastText = '';
   let announced = false;
   let result: ClaudeCodeResult | undefined;
 
   const finish = (status: AgentResult['status'], summary: string): void => {
-    // 본 대화의 서로 다른 assistant 메시지 수. 이미 있는 messageIds Set의 크기와 같다
-    metrics.modelCalls = messageIds.size;
+    // 본 대화의 서로 다른 assistant 메시지 수
+    metrics.modelCalls = tracker.modelCalls;
     result = {
       status,
       summary,
@@ -188,7 +188,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
       verifyAttempts: gate?.attempts ?? 0,
-      turns: messageIds.size,
+      turns: tracker.modelCalls,
       usage,
       metrics: { ...metrics },
       sessionId,
@@ -224,17 +224,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           // 하위 에이전트 메시지는 없어야 하지만, 섞여 와도 본 대화로 세지 않는다
           if (message.parent_tool_use_id) break;
           // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
-          const messageUsage = message.message.usage;
-          if (messageUsage) {
-            metrics.maxContextTokens = Math.max(
-              metrics.maxContextTokens,
-              (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0),
-            );
-          }
-          if (!messageIds.has(message.message.id)) {
-            messageIds.add(message.message.id);
-            onEvent({ type: 'turn', turn: messageIds.size });
-            if (messageIds.size > maxTurns) {
+          const firstSeen = tracker.observeAssistant(message.message);
+          metrics.maxContextTokens = tracker.maxContextTokens;
+          if (firstSeen) {
+            onEvent({ type: 'turn', turn: tracker.modelCalls });
+            if (tracker.modelCalls > maxTurns) {
               await conversation.interrupt().catch(() => {});
               finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
               break;
@@ -252,7 +246,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         }
 
         case 'result': {
-          setUsage(usage, message);
+          tracker.observeResult(message);
+          Object.assign(usage, tracker.usage);
           onEvent({ type: 'tokens', usage: { ...usage } });
           const failure = describeResultFailure(message);
           if (failure) {
@@ -345,7 +340,7 @@ export function describeAccount(account: ClaudeCodeAccount): string {
   return '로그인 계정';
 }
 
-function describeResultFailure(message: SDKResultMessage): string | undefined {
+export function describeResultFailure(message: SDKResultMessage): string | undefined {
   switch (message.subtype) {
     case 'success':
       if (message.is_error) return `모델 호출이 실패했습니다: ${message.result}`;
@@ -360,13 +355,60 @@ function describeResultFailure(message: SDKResultMessage): string | undefined {
   }
 }
 
-/** modelUsage는 query 전체의 누적값이므로 더하지 않고 최신 값으로 바꾼다 */
-function setUsage(usage: AgentUsage, message: SDKResultMessage): void {
-  const models = Object.values(message.modelUsage ?? {});
-  usage.inputTokens = models.reduce((sum, model) => sum + model.inputTokens, 0);
-  usage.outputTokens = models.reduce((sum, model) => sum + model.outputTokens, 0);
-  usage.cacheReadTokens = models.reduce((sum, model) => sum + model.cacheReadInputTokens, 0);
-  usage.cacheWriteTokens = models.reduce((sum, model) => sum + model.cacheCreationInputTokens, 0);
+type AssistantTokenUsage = {
+  input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+};
+
+/**
+ * Claude Code 메시지 스트림에서 실행 지표를 모으는 규칙. 로컬 러너와 기준선(P0, plain-baseline)이 같은 계산을 쓴다.
+ * - 서로 다른 assistant 메시지 id가 곧 모델 호출 수다(같은 id가 여러 번 와도 한 번으로 센다)
+ * - 한 호출의 입력 크기(input+cache_read+cache_creation)의 최댓값을 남긴다
+ * - result의 modelUsage는 query 전체 누적값이라 더하지 않고 최신 값으로 바꾼다
+ */
+export class ClaudeCodeUsageTracker {
+  readonly #messageIds = new Set<string>();
+  readonly #usage: AgentUsage = emptyUsage();
+  #maxContextTokens = 0;
+
+  /** assistant 메시지 하나를 반영한다. 처음 보는 메시지 id면 true(모델 호출 1회) */
+  observeAssistant(message: { id: string; usage?: AssistantTokenUsage | null }): boolean {
+    const usage = message.usage;
+    if (usage) {
+      this.#maxContextTokens = Math.max(
+        this.#maxContextTokens,
+        (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+      );
+    }
+    if (this.#messageIds.has(message.id)) return false;
+    this.#messageIds.add(message.id);
+    return true;
+  }
+
+  /** result의 modelUsage를 반영한다(누적값이므로 최신 값으로 바꾼다) */
+  observeResult(message: SDKResultMessage): void {
+    const models = Object.values(message.modelUsage ?? {});
+    this.#usage.inputTokens = models.reduce((sum, model) => sum + model.inputTokens, 0);
+    this.#usage.outputTokens = models.reduce((sum, model) => sum + model.outputTokens, 0);
+    this.#usage.cacheReadTokens = models.reduce((sum, model) => sum + model.cacheReadInputTokens, 0);
+    this.#usage.cacheWriteTokens = models.reduce((sum, model) => sum + model.cacheCreationInputTokens, 0);
+  }
+
+  /** 서로 다른 assistant 메시지 수 = 모델 호출 수 */
+  get modelCalls(): number {
+    return this.#messageIds.size;
+  }
+
+  /** 호출 한 번의 최대 입력 크기 */
+  get maxContextTokens(): number {
+    return this.#maxContextTokens;
+  }
+
+  /** 지금까지 합산한 토큰. 바꾸지 말고 복사해서 쓴다 */
+  get usage(): AgentUsage {
+    return this.#usage;
+  }
 }
 
 type JsonProperty = { type?: string; enum?: unknown[]; items?: { type?: string }; description?: string };

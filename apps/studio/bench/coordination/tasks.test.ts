@@ -2,14 +2,14 @@ import { planLanes } from '@b-studio/agent';
 import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { BENCH_TASKS, missingCoordinationTools, planFor, type Strategy } from './tasks';
+import { BENCH_TASKS, missingCoordinationTools, planFor, STRATEGIES as ALL_STRATEGIES, STRATEGY_LABELS, type Strategy } from './tasks';
 
-const STRATEGIES: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
+const LANE_STRATEGIES: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
 
 describe('협업 벤치 과제와 고정 계획', () => {
   it('모든 과제·전략의 계획이 planLanes 검증을 통과한다', () => {
     for (const task of BENCH_TASKS) {
-      for (const strategy of STRATEGIES) {
+      for (const strategy of LANE_STRATEGIES) {
         expect(() => planLanes(planFor(task, strategy)), `${task.id} ${strategy}`).not.toThrow();
       }
     }
@@ -91,5 +91,20 @@ describe('missingCoordinationTools', () => {
     const project = await loadProject(path.resolve(import.meta.dirname, '../../../../examples/orders'));
     const strategies: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
     expect(strategies.flatMap((strategy) => missingCoordinationTools(strategy, project.spec.workflow?.allowedTools))).toEqual([]);
+  });
+});
+
+describe('P0 기준선 전략', () => {
+  it('전략 목록에 P0가 있고 표시 이름이 "그냥 Claude Code"다', () => {
+    expect(ALL_STRATEGIES).toContain('P0');
+    expect(STRATEGY_LABELS.P0).toBe('그냥 Claude Code');
+  });
+
+  it('planFor는 P0에 작업 분해 계획을 만들지 않는다', () => {
+    expect(() => planFor(BENCH_TASKS[0]!, 'P0')).toThrow(/P0/);
+  });
+
+  it('P0는 조율 도구가 필요 없다', () => {
+    expect(missingCoordinationTools('P0', ['read_file', 'write_file'])).toEqual([]);
   });
 });

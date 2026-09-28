@@ -5,6 +5,8 @@
  * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex=본인 PC 구독 CLI, openai=유료 API).
  */
 
+import type { Strategy } from './tasks';
+
 export type Backend = 'claude-code' | 'codex' | 'openai';
 export type RateLimitPolicy = 'stop' | 'wait';
 
@@ -46,6 +48,16 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
   if (backend === 'claude-code') return `local-cli:${requestedModel}`;
   if (backend === 'codex') return `local-cli-chatgpt:${requestedModel || 'default'}`;
   return upstreamModelId;
+}
+
+/**
+ * P0(그냥 Claude Code) 기준선은 로컬 Claude Code로만 돌 수 있다. 다른 백엔드는 Claude Code가 아니라 비교 기준이 아니다.
+ * Docker·모델을 건드리기 전에 막는다.
+ */
+export function assertPlainBaselineBackend(backend: Backend, strategies: readonly Strategy[]): void {
+  if (strategies.includes('P0') && backend !== 'claude-code') {
+    throw new Error(`P0(그냥 Claude Code)는 --backend claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${backend})`);
+  }
 }
 
 export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinutes: number | undefined): { policy: RateLimitPolicy; waitMinutes: number } {
