@@ -6,7 +6,7 @@ import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
-type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
+type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
 type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
 
 const fake = vi.hoisted(() => ({
@@ -14,6 +14,8 @@ const fake = vi.hoisted(() => ({
   counter: 0,
   plan: {} as unknown,
   sessions: new Map<string, Session>(),
+  /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
+  bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
   /** 작업 id → 그 작업이 쓸 파일. 없으면 실패로 끝낸다 */
   writes: {} as Record<string, Record<string, string> | 'fail'>,
@@ -61,7 +63,7 @@ vi.mock('./sessions', () => ({
       mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
       writeFileSync(path.join(workDir, file), content);
     }
-    fake.sessions.set(id, { id, status: 'ready', workDir, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
+    fake.sessions.set(id, { id, status: 'ready', workDir, bootNetwork: fake.bootNetwork, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
     return { id };
   },
   getSnapshot: (id: string) => fake.sessions.get(id),
@@ -117,6 +119,7 @@ beforeEach(() => {
   fake.root = mkdtempSync(path.join(directory, 'work-'));
   fake.counter = 0;
   fake.sessions.clear();
+  fake.bootNetwork = [];
   fake.listeners.clear();
   fake.deletes = {};
   fake.sourceFiles = {};
@@ -293,6 +296,8 @@ describe('작업 분해 실행', () => {
   it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] };
     fake.writes = { a1: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    // 모든 세션이 기동 중 1,000바이트를 받은 것으로 둔다 (레인 2 + 통합 1)
+    fake.bootNetwork = [{ service: 'web', rxBytes: 1_000, txBytes: 100 }];
 
     const plan = await run({ projectId: 'orders', request: '지표 기록', modelId: 'model-a', owner: 'kim' });
 
@@ -302,6 +307,7 @@ describe('작업 분해 실행', () => {
 
     const lane = plan.lanes.find((candidate) => candidate.tasks[0]!.id === 'a1')!;
     expect(lane.bootMs).toBeGreaterThanOrEqual(0);
+    expect(lane.bootRxBytes).toBe(1_000);
     expect(typeof lane.startedAt).toBe('string');
     expect(typeof lane.finishedAt).toBe('string');
     // run_finished의 지표가 작업 실행 기록으로 그대로 옮겨진다
@@ -312,6 +318,8 @@ describe('작업 분해 실행', () => {
     // 계획 호출 1회 + 레인 작업 실행 2회 × 2회 = 5 (통합은 스크립트 턴이라 세지 않는다), 최대 입력 크기는 9, 세션은 레인 2 + 통합 1
     expect(plan.metrics).toMatchObject({ modelCalls: 5, maxContextTokens: 9, sessions: 3 });
     expect(plan.metrics!.bootMsTotal).toBeGreaterThanOrEqual(0);
+    // 레인 2 + 통합 1의 기동 수신 합
+    expect(plan.metrics!.bootRxBytesTotal).toBe(3_000);
     expect(typeof plan.metrics!.endToEndMs).toBe('number');
   });
 });

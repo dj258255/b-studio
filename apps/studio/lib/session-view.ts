@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
+import type { BootNetwork } from '@b-studio/sandbox';
 import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -19,6 +20,7 @@ export interface ToolCallView {
 }
 
 export type ChatItem =
+  | { kind: 'boot'; network: BootNetwork }
   | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
   | {
       kind: 'route';
@@ -159,6 +161,11 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       });
     case 'design':
       return patchSnapshot(view, { design: event.design });
+    case 'boot_network':
+      return {
+        ...patchSnapshot(view, { bootNetwork: event.network }),
+        chat: [...view.chat, { kind: 'boot', network: event.network }],
+      };
     case 'log': {
       const logs = view.logs.length >= LOG_LIMIT ? view.logs.slice(view.logs.length - LOG_LIMIT + 1) : [...view.logs];
       logs.push({ service: event.service, text: event.text, at: event.at });
