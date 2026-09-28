@@ -28,6 +28,17 @@ export {
   type CodexSdk,
   type CodexThread,
 } from './codex-runner';
+export {
+  listCommandCodeModels,
+  parseCommandCodeModels,
+  preflightCommandCode,
+  runCommandCodeAgent,
+  type CommandCodeModel,
+  type CommandCodeProcess,
+  type CommandCodeProcessResult,
+  type CommandCodeRunOptions,
+  type CommandCodeRunResult,
+} from './commandcode-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
 export { BrowserUnavailableError, runInBrowser, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
