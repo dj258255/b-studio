@@ -9,9 +9,9 @@
 | 영역 | 관련 항목 |
 |---|---|
 | 기동·종료·준비 판정 | 1–4, 14, 23, 36–37 |
-| 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29 |
+| 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29, 41 |
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
-| 네트워크·시크릿·격리 | 15, 17–21 |
+| 네트워크·시크릿·격리 | 15, 17–21, 40 |
 | 운영 이미지·컨테이너 배포 | 31–34 |
 | 설계 단계에서 대비한 문제 | 22 |
 
@@ -56,6 +56,8 @@
 - [37. Docker 실검증 프로젝트를 /private/tmp에 만들면 컨테이너 안 코드가 비어 보일 수 있음](#37-docker-실검증-프로젝트를-privatetmp에-만들면-컨테이너-안-코드가-비어-보일-수-있음)
 - [38. 세션을 끝낼 때마다 샌드박스 이미지가 남아 Docker 디스크가 가득 참](#38-세션을-끝낼-때마다-샌드박스-이미지가-남아-docker-디스크가-가득-참)
 - [39. 개발 서버를 강제로 끄면 다음 next build 가 .next/dev/types 의 잘린 파일 때문에 실패함](#39-개발-서버를-강제로-끄면-다음-next-build-가-nextdevtypes-의-잘린-파일-때문에-실패함)
+- [40. 베이스 이미지 갱신 뒤 격리 샌드박스의 web이 pnpm을 받지 못해 기동에 실패함](#40-베이스-이미지-갱신-뒤-격리-샌드박스의-web이-pnpm을-받지-못해-기동에-실패함)
+- [41. 개발 서버 옆에서 api 테스트를 돌리면 컨테이너 한도 1536MiB를 넘어 OOM으로 실패함](#41-개발-서버-옆에서-api-테스트를-돌리면-컨테이너-한도-1536mib를-넘어-oom으로-실패함)
 
 ---
 
@@ -1441,3 +1443,69 @@ Docker가 실제로 볼 수 있는 `/Users/...` 아래, 이번에는 저장소�
 
 ### 확인하지 못한 것
 - 한 번은 SIGINT로 끝낸 뒤에도 `.next/dev/types/routes.d.ts`가 손상돼 빌드가 실패했습니다. 손상된 내용에 b-studio에 없는 `/blog/[slug]` 경로가 들어 있었습니다. 폴더를 지워 복구하면서 파일이 사라져 원인은 확인하지 못했습니다.
+
+## 40. 베이스 이미지 갱신 뒤 격리 샌드박스의 web이 pnpm을 받지 못해 기동에 실패함
+
+**구분:** 실제 실행에서 발견(e2e `pnpm e2e:task-plan`의 레인 두 개가 같은 원인으로 실패) → 원인을 실측으로 확인 → 수정
+
+### 현상
+`pnpm studio up examples/orders`에서 web 컨테이너가 기동 몇 초 만에 종료됩니다. 준비 확인은 `컨테이너가 종료됐습니다 (마지막 확인: UND_ERR_SOCKET, 컨테이너 exited)`를 돌려주고, `docker ps -a`에는 `studio-orders-*-web-1`이 `Exited (1)`로 남습니다. web 로그:
+
+```
+Error: getaddrinfo EAI_AGAIN registry.npmjs.org  (corepack … installVersion → fetch failed)
+```
+
+[15번](#15-네트워크를-격리하자-web이-기동-3초-만에-종료됨) 이후 web은 edge 프록시(`HTTPS_PROXY=http://b-studio-edge:3128`)로 pnpm을 받아 기동했는데, 이번에는 이름 풀이 단계에서 끝났습니다.
+
+### 원인
+베이스 이미지(`node:22-bookworm-slim`)가 갱신되면서 Node가 v22.23.3, corepack이 0.36.0이 됐습니다. 아래를 실측으로 확인하거나 배제했습니다.
+
+| 확인 | 결과 |
+|---|---|
+| 메모리 | VM 커널 기록에 OOM 없음 → **배제** |
+| VM DNS | 일반 네트워크의 busybox가 `registry.npmjs.org`를 조회함 → **배제** |
+| 프록시 환경 변수 | 샌드박스가 `HTTP(S)_PROXY`를 넘기고 있음(`edge-config.ts`의 `proxyEnvironment`) |
+| corepack 0.36.0 소스 | `HTTP_PROXY`를 읽는 코드가 0건 → 프록시 처리를 Node 기본 `fetch`에 맡김 |
+| 실험: `HTTPS_PROXY=http://127.0.0.1:9`로 `fetch('https://registry.npmjs.org/')` | `NODE_USE_ENV_PROXY=0` → `direct status 200` (프록시를 무시하고 직접 나감), `NODE_USE_ENV_PROXY=1` → `ECONNREFUSED` (프록시를 씀) |
+
+즉 Node 기본 `fetch`는 `NODE_USE_ENV_PROXY`가 있어야 `HTTP(S)_PROXY`를 따릅니다. 이 값이 없으면 격리 네트워크에서 직접 이름 풀이가 막혀 `EAI_AGAIN`으로 끝납니다. corepack이 자체 프록시 처리를 없애면서 베이스 이미지 갱신만으로 동작이 깨졌습니다.
+
+### 해결
+`proxyEnvironment`가 돌려주는 환경 변수에 `NODE_USE_ENV_PROXY: '1'`을 더했습니다. 이 값을 모르는 옛 Node는 무시하므로 해가 없습니다.
+
+### 수정 후 검증
+`NODE_USE_ENV_PROXY=1`을 넣은 뒤 `pnpm studio up examples/orders`에서 web이 pnpm을 받아 기동했고, `pnpm e2e:agent` 3개 시나리오가 모두 기대대로 끝났습니다(통과 2, 계약 깨짐 실패 1). 통과 시나리오는 `run`·`contract_check`·`browser_check`·`test`·`review` 5단계를 모두 통과했습니다.
+
+## 41. 개발 서버 옆에서 api 테스트를 돌리면 컨테이너 한도 1536MiB를 넘어 OOM으로 실패함
+
+**구분:** 실제 실행에서 발견(`pnpm e2e:task-plan`에서 레인 두 개가 같은 원인으로 실패) → 측정으로 확인 → 수정
+
+### 현상
+`pnpm e2e:task-plan`의 두 레인이 모두 `검증 게이트를 3번 통과하지 못했습니다`로 끝났습니다. VM 커널 기록에는 api 컨테이너 cgroup 안에서 `java`가 OOM으로 종료된 흔적(`CONSTRAINT_MEMCG`)이 있었습니다. 샌드박스 하나로도 재현됩니다. `pnpm studio up examples/orders` 뒤 api 컨테이너에서 테스트를 돌리면 테스트가 실패하고 `docker inspect`의 `OOMKilled`가 `true`입니다.
+
+```
+./gradlew test --no-daemon --console=plain --project-cache-dir /tmp/gradle-test-cache
+```
+
+기대한 동작은 예제 `test` 단계(`api-unit`)가 개발 서버와 같은 컨테이너에서 통과하는 것입니다.
+
+### 원인
+개발 서버(`bootRun`)가 도는 같은 컨테이너에서 테스트가 함께 돌면 메모리 사용이 한도를 넘습니다. `docker stats`를 1초 간격으로 재서 최대값을 비교했습니다.
+
+| 조건 | 최대 메모리 | 결과 |
+|---|---|---|
+| 개발 서버만 | 778.8MiB | — |
+| + 테스트, 한도 1536MiB | 1,364MiB(표본) | OOM, 테스트 실패 |
+| + 테스트, Gradle 데몬 384MB·테스트 워커 256MB 상한 | 1,444MiB(표본) | OOM, 테스트 실패 → JVM 힙 상한으로는 부족(컴파일러·메타스페이스·네이티브 메모리) |
+| + 테스트, 한도 3GiB(`docker update`, 측정용) | **1,736MiB** | 38초 통과 |
+
+api 단위 테스트는 2026-09-16 예제에 추가됐고(2eed4ea), 작업 분해 e2e가 마지막으로 통과한 것은 그 전입니다. 그 뒤로 작업 분해 e2e를 다시 돌리지 않아 드러나지 않았습니다.
+
+### 해결
+예제 `examples/orders/studio.yaml`의 `resources.api.memory`를 1536m에서 **2048m**로 올렸습니다. 측정된 최대치 1,736MiB에 약 15% 여유를 둔 값입니다.
+
+### 감수
+샌드박스 하나의 컨테이너 한도 합이 약 3.3GB입니다. VM 6GiB에서 레인 두 개를 동시에 띄우면 한도 합이 VM을 넘습니다. 다만 실제 사용은 평소 약 0.8GB라, 두 레인이 동시에 테스트 최대치에 닿을 때만 위험합니다.
+
+### 수정 후 검증
+api 한도를 2048m로 올린 뒤 `pnpm e2e:task-plan`이 통과했습니다(168.1초, 레인 2개 동시 실행, 통합 체크포인트가 5단계 재통과). 실행 동안 VM 커널 기록에 새 OOM 종료가 없었습니다. 2026-09-16 기록 98.1초보다 긴 것은 그 뒤 추가된 api 테스트 단계(2eed4ea) 때문입니다.

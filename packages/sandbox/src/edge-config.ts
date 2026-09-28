@@ -45,6 +45,9 @@ export function proxyEnvironment(direct: readonly string[]): Record<string, stri
     all_proxy: proxy,
     NO_PROXY: direct.join(','),
     no_proxy: direct.join(','),
+    // Node 22.21+ 의 기본 fetch는 이 값이 있어야 HTTP(S)_PROXY를 따른다. corepack 0.36(2026-09 베이스 이미지)이
+    // 자체 프록시 처리를 없애 이 값이 없으면 격리 네트워크에서 pnpm을 받지 못한다(#69). 이 값을 모르는 옛 Node는 무시하므로 해가 없다
+    NODE_USE_ENV_PROXY: '1',
     // JVM(Gradle, 앱)은 프록시 환경 변수를 읽지 않으므로 시스템 속성으로 넘긴다
     JAVA_TOOL_OPTIONS: [
       `-Dhttp.proxyHost=${EDGE_SERVICE}`,
