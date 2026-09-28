@@ -21,12 +21,14 @@ import {
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
   preflightClaudeCode,
+  preflightCodex,
   releaseBlockers,
   RemoteConflictError,
   scopedExecutionPolicy,
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
+  runCodexAgent,
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
@@ -89,6 +91,7 @@ import type {
 } from '@/lib/studio-events';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
+import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, routingDecision } from './model-registry';
@@ -160,6 +163,16 @@ interface Session {
     sessionId?: string;
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
+  };
+  /**
+   * 로컬 ChatGPT Agent(Codex) 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해(설치된 SDK에 fork가 없다)
+   * 전체 기록 대신 최근 요청의 요약만 넘긴다
+   */
+  codex: {
+    /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
+    notes: string[];
+    /** 지난 요청의 요약. 최근 3개만 둔다 */
+    recent: CodexRunSummary[];
   };
   /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
   sourceDirtyFiles: number;
@@ -360,6 +373,7 @@ async function startSession({
     conversation: [],
     demoIndex: 0,
     claudeCode: { notes: [] },
+    codex: { notes: [], recent: [] },
     sourceDirtyFiles,
     previewToken: randomBytes(16).toString('hex'),
   });
@@ -386,6 +400,7 @@ type NewSession = Pick<
   | 'conversation'
   | 'demoIndex'
   | 'claudeCode'
+  | 'codex'
   | 'sourceDirtyFiles'
 >;
 
@@ -629,6 +644,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       conversation: data.conversation as Conversation,
       demoIndex: data.demoIndex,
       claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
+      // 이 필드가 생기기 전에 저장한 기록에는 없다
+      codex: { notes: [...(data.codex?.notes ?? [])], recent: [...(data.codex?.recent ?? [])] },
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
@@ -797,6 +814,7 @@ type Intent = 'build' | 'ask';
 type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
+  | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
 ) & { writableScope?: readonly string[]; board?: BoardAccess };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
@@ -805,6 +823,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent };
   }
   if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
+  if (session.snapshot.mode === 'codex') return { kind: 'codex', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
@@ -1038,6 +1057,24 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     return result;
   }
 
+  if (plan.kind === 'codex') {
+    const preflight = await preflightCodex();
+    if (!preflight.ok) return { preflightError: preflight.reason };
+
+    // 러너가 대화를 이어받지 못하므로 전체 기록 대신 지난 요청의 요약을 짧게 붙인다
+    const { codex } = session;
+    const result = await runCodexAgent({
+      ...shared,
+      request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
+      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
+      model: process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined,
+    });
+    // 예외로 끝나면 여기까지 오지 않으므로 알림과 이전 맥락이 그대로 남는다
+    codex.notes = [];
+    codex.recent = rememberCodexRun(codex.recent, { request, summary: result.summary, status: result.status });
+    return result;
+  }
+
   if (plan.route) {
     shared.onEvent({
       type: 'route',
@@ -1203,6 +1240,7 @@ async function saveDatabases(session: Session, sha: string): Promise<DatabaseSta
 /** 대화 밖에서 바뀐 사실(되돌리기, 새 샌드박스, 가져온 원격 커밋)을 다음 요청에서 모델이 알게 한다 */
 function noteForModel(session: Session, text: string): void {
   if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(text);
+  else if (session.snapshot.mode === 'codex') session.codex.notes.push(text);
   else session.conversation.push({ role: 'user', content: text });
   session.settledConversation = session.conversation.length;
 }
@@ -1724,6 +1762,7 @@ function toPersisted(session: Session): PersistedSession {
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
+    codex: session.codex,
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
@@ -1867,8 +1906,8 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
 function sessionMode(): SessionMode {
   const value = process.env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
-  if (value === 'claude-code' || value === 'demo') return value;
-  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, demo 중 하나여야 합니다 (지금 값: ${value})`);
+  if (value === 'claude-code' || value === 'codex' || value === 'demo') return value;
+  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, codex, demo 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
 /** 운영자가 정한 세션 토큰 한도. 잘못 적은 값이 "한도 없음"으로 넘어가지 않도록 샌드박스를 만들기 전에 거부한다 */

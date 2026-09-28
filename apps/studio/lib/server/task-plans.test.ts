@@ -381,26 +381,26 @@ describe('작업 분해 실행', () => {
 });
 
 describe('고정 계획(presetPlan)', () => {
-  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code 모드 포함)', async () => {
-    process.env.B_STUDIO_MODE = 'claude-code';
-    const presetPlan = { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] };
-
-    const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: 'claude-code', owner: 'kim', presetPlan });
-    const waiting = await awaiting(created.id);
-
-    expect(waiting.status).toBe('awaiting_approval');
-    expect(waiting.preset).toBe(true);
-    // 모델 호출이 없었으므로 planning이 없다
-    expect(waiting.planning).toBeUndefined();
+  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex 모드 포함)', async () => {
+    for (const mode of ['claude-code', 'codex']) {
+      process.env.B_STUDIO_MODE = mode;
+      const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: mode, owner: 'kim', presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] } });
+      const waiting = await awaiting(created.id);
+      expect(waiting.status, mode).toBe('awaiting_approval');
+      expect(waiting.preset, mode).toBe(true);
+      // 모델 호출이 없었으므로 planning이 없다
+      expect(waiting.planning, mode).toBeUndefined();
+      expect(
+        waiting.lanes
+          .map((lane) => lane.tasks.map((item) => item.id))
+          .flat()
+          .sort(),
+        mode,
+      ).toEqual(['a1', 'b']);
+      // 승인 게이트는 그대로다. 승인 전에는 세션을 만들지 않는다
+      expect(fake.sessions.size, mode).toBe(0);
+    }
     expect(fake.modelCalls).toBe(0);
-    expect(
-      waiting.lanes
-        .map((lane) => lane.tasks.map((item) => item.id))
-        .flat()
-        .sort(),
-    ).toEqual(['a1', 'b']);
-    // 승인 게이트는 그대로다. 승인 전에는 세션을 만들지 않는다
-    expect(fake.sessions.size).toBe(0);
   });
 
   it('presetPlan도 승인 뒤 레인·통합이 그대로 돈다', async () => {
@@ -431,7 +431,7 @@ describe('고정 계획(presetPlan)', () => {
     process.env.B_STUDIO_MODE = 'demo';
     await expect(
       createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'claude-code', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
-    ).rejects.toThrow('api 또는 claude-code');
+    ).rejects.toThrow('api, claude-code 또는 codex');
   });
 
   it('presetPlan이 규칙을 어기면 세션을 만들지 않고 실패한다', async () => {
