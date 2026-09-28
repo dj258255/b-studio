@@ -36,10 +36,27 @@ export type SnapshotEvent =
   | { service: string; volume: string; snapshot: string; action: 'captured'; elapsedMs: number }
   | { service: string; volume: string; snapshot: string; action: 'failed'; stage: 'seed' | 'capture'; reason: string };
 
+/**
+ * 서비스 컨테이너가 받은/보낸 바이트. 컨테이너 수명 누계라 기동 직후에 읽으면 "기동 중 받은 양"과 같다고 본다.
+ * 한계: 이미지 빌드 단계에서 받은 것(docker build가 받는 의존성)은 컨테이너 NetIO에 잡히지 않는다.
+ */
+export interface ServiceNetwork {
+  service: string;
+  rxBytes: number;
+  txBytes: number;
+}
+
+export type BootNetwork = ServiceNetwork[];
+
 export interface StartOptions {
   signal?: AbortSignal;
   onStatus?: (event: ServiceStatusEvent) => void;
   onSnapshot?: (event: SnapshotEvent) => void;
+  /**
+   * 서비스가 준비된 직후 한 번 읽은 컨테이너별 수신/송신 바이트(수명 누계). 못 읽으면 부르지 않는다.
+   * edge 프록시 컨테이너는 서비스 트래픽이 지나가므로 뺀다(더하면 이중 계산).
+   */
+  onBootNetwork?: (network: BootNetwork) => void;
 }
 
 export interface LogLine {
@@ -82,6 +99,10 @@ export interface ServiceUsage {
   /** 한도를 걸었을 때만 */
   memoryLimitBytes?: number;
   cpuLimit?: number;
+  /** 컨테이너가 받은 바이트(수명 누계). docker stats의 NetIO 수신 */
+  networkRxBytes?: number;
+  /** 컨테이너가 보낸 바이트(수명 누계). docker stats의 NetIO 송신 */
+  networkTxBytes?: number;
   /** 종료된 컨테이너의 종료 코드 */
   exitCode?: number;
   /** 메모리 한도를 넘어 커널이 종료시켰는지 */

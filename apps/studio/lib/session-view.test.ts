@@ -351,6 +351,17 @@ describe('reduceSession', () => {
     expect(view.completedRuns).toBe(2);
   });
 
+  it('기동 중 받은 네트워크 바이트를 스냅샷과 기동 줄에 남긴다', () => {
+    const network = [
+      { service: 'api', rxBytes: 1_200_000, txBytes: 3_400 },
+      { service: 'web', rxBytes: 500_000, txBytes: 2_000 },
+    ];
+    const view = fold([{ type: 'boot_network', at: '2026-09-12T00:00:00Z', network }]);
+
+    expect(view.snapshot.bootNetwork).toEqual(network);
+    expect(view.chat).toEqual([{ kind: 'boot', network }]);
+  });
+
   it('원격 변경 가져오기는 진행 중으로 표시했다가 결과와 새 기록으로 채운다', () => {
     const merged = { sha: 'c'.repeat(40), shortSha: 'ccccccc', message: '원격 커밋 1개 가져오기', createdAt: '', files: ['NOTE.md'] };
     const repository = {
