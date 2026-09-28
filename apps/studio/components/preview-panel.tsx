@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { SessionView } from "@/lib/session-view";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import type { SessionView, ChatItem } from "@/lib/session-view";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
 import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
 import { HistoryPanel } from "./history-panel";
+import { useLiveFrames } from "./live-frames";
 import { LogPanel } from "./log-panel";
+import { QaView } from "./qa-view";
+import { RemoteBrowserView } from "./remote-browser";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 
@@ -74,7 +77,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
             {active.service.state !== "ready" && <RestartBanner service={active.service} />}
             <div className="min-h-0 flex-1">
               {active.service.preview === "browser" ? (
-                <BrowserPreview key={active.service.name} sessionId={view.snapshot.id} service={active.service} revision={view.completedRuns} />
+                <BrowserServicePanel key={active.service.name} view={view} service={active.service} />
               ) : (
                 <ApiExplorer
                   key={active.service.name}
@@ -97,7 +100,85 @@ export function PreviewPanel({ view }: { view: SessionView }) {
   );
 }
 
-function BrowserPreview({ sessionId, service, revision }: { sessionId: string; service: ServiceView; revision: number }) {
+/** 미리보기 보기 전환. 앱은 기존 iframe, 원격 브라우저와 QA는 서버가 중계하는 프레임을 그린다 */
+const VIEW_MODES = [
+  { id: "app", label: "앱" },
+  { id: "remote", label: "원격 브라우저" },
+  { id: "qa", label: "QA" },
+] as const;
+
+type ViewMode = (typeof VIEW_MODES)[number]["id"];
+
+/**
+ * 화면 확인 중 QA 보기로 자동 전환하는 설정. 새로 고쳐도 남도록 localStorage에 둔다.
+ * useSyncExternalStore로 읽어, 효과 안에서 setState하지 않고도 저장값을 반영한다(서버 렌더는 기본 켬)
+ */
+const AUTO_QA_KEY = "b-studio:auto-qa";
+let autoQaCache: boolean | undefined;
+const autoQaListeners = new Set<() => void>();
+function readAutoQa(): boolean {
+  autoQaCache ??= typeof window === "undefined" ? true : window.localStorage.getItem(AUTO_QA_KEY) !== "off";
+  return autoQaCache;
+}
+function writeAutoQa(next: boolean): void {
+  autoQaCache = next;
+  window.localStorage.setItem(AUTO_QA_KEY, next ? "on" : "off");
+  for (const listener of autoQaListeners) listener();
+}
+function subscribeAutoQa(listener: () => void): () => void {
+  autoQaListeners.add(listener);
+  return () => autoQaListeners.delete(listener);
+}
+
+/**
+ * 브라우저 서비스의 미리보기. 보기를 여는 동안에만 원격 브라우저를 띄우고, 화면 확인(QA)이 시작되면 자동으로 QA 보기로 넘어간다.
+ * 자동 전환은 설정(기본 켬)으로 끌 수 있고, 끄면 사람이 고른 보기를 유지한다
+ */
+function BrowserServicePanel({ view, service }: { view: SessionView; service: ServiceView }) {
+  const [mode, setMode] = useState<ViewMode>("app");
+  const autoQa = useSyncExternalStore(subscribeAutoQa, readAutoQa, () => true);
+  // 화면 확인 프레임이 오면 QA 보기로 넘어간다. 설정을 읽어 그때그때 판단한다
+  const { qa, remote, blocked } = useLiveFrames(view.snapshot.id, (frame) => {
+    if (frame.source === "qa" && readAutoQa()) setMode("qa");
+  });
+
+  const browserCheck = view.chat.findLast((item): item is Extract<ChatItem, { kind: "check" }> => item.kind === "check" && item.stage === "browser_check");
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
+        <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="미리보기 보기">
+          {VIEW_MODES.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              aria-pressed={mode === option.id}
+              onClick={() => setMode(option.id)}
+              className={`rounded-md px-2.5 py-1 font-medium transition-colors ${mode === option.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
+          <input type="checkbox" checked={autoQa} onChange={(event) => writeAutoQa(event.target.checked)} className="accent-ink" />
+          화면 확인 중 QA 보기로 자동 전환
+        </label>
+      </div>
+      <div className="min-h-0 flex-1">
+        {mode === "app" ? (
+          <AppPreview sessionId={view.snapshot.id} service={service} revision={view.completedRuns} />
+        ) : mode === "remote" ? (
+          <RemoteBrowserView sessionId={view.snapshot.id} service={service.name} frame={remote} blocked={blocked} />
+        ) : (
+          <QaView key={`${browserCheck?.name ?? ""}:${browserCheck?.steps?.length ?? 0}`} sessionId={view.snapshot.id} frame={qa} check={browserCheck} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AppPreview({ sessionId, service, revision }: { sessionId: string; service: ServiceView; revision: number }) {
   const [path, setPath] = useState("/");
   const [draft, setDraft] = useState("/");
   const [reloads, setReloads] = useState(0);

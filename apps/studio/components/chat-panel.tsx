@@ -2,11 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
+import { artifactUrl } from "@/lib/artifact-url";
 import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
+import { formatElementSelections, useElementSelections } from "./selection-context";
 import { useSessionAccess, type SessionAccess } from "./session-access";
 
 type Intent = "build" | "ask";
@@ -27,6 +29,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const runId = activeRun(view);
   const asking = isAsking(view);
   const access = useSessionAccess();
+  const { selections, remove: removeSelection, clear: clearSelections } = useElementSelections();
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
   const budgetReached = limit !== undefined && used >= limit;
@@ -61,13 +64,21 @@ export function ChatPanel({ view }: { view: SessionView }) {
   async function send(request: string, sendIntent: Intent = intent) {
     setSending(true);
     setError(undefined);
+    // 미리보기에서 고른 요소는 요청 앞에 `[선택한 요소]` 블록으로 붙인다. 스크린샷은 이미지가 아니라 참조 경로로만 넣는다
+    const attachments = formatElementSelections(snapshot.id, selections);
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: request, allowBreaking: sendIntent === "build" && allowBreaking, intent: sendIntent }),
+      body: JSON.stringify({
+        text: attachments ? `${attachments}\n\n${request}` : request,
+        allowBreaking: sendIntent === "build" && allowBreaking,
+        intent: sendIntent,
+      }),
     });
-    if (response.ok) setText("");
-    else setError((await response.json()).error ?? "요청을 보내지 못했습니다");
+    if (response.ok) {
+      setText("");
+      clearSelections();
+    } else setError((await response.json()).error ?? "요청을 보내지 못했습니다");
     setSending(false);
   }
 
@@ -140,6 +151,21 @@ export function ChatPanel({ view }: { view: SessionView }) {
           if (canSend && text.trim()) void send(text);
         }}
       >
+        {selections.length > 0 && (
+          <ul className="mb-3 flex flex-wrap gap-2" aria-label="첨부한 요소">
+            {selections.map((selection, index) => (
+              <li key={index} className="glass-soft flex items-center gap-2 rounded-control px-2 py-1 text-xs">
+                <img src={artifactUrl(snapshot.id, selection.screenshotArtifact)} alt="" className="size-8 rounded object-cover" />
+                <span className="max-w-[12rem] truncate font-mono" title={selection.selector}>
+                  {selection.selector}
+                </span>
+                <button type="button" onClick={() => removeSelection(index)} aria-label={`${selection.selector} 첨부 제거`} className="text-muted hover:text-fail">
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {runId && (
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <p className="min-w-0 text-sm" role="status">

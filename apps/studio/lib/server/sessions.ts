@@ -34,6 +34,7 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
+  type BrowserFrame,
   type Checkpoint,
   type DatabaseState,
   type DemoScenario,
@@ -88,6 +89,9 @@ import type {
 } from '@/lib/studio-events';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
+import { resolveArtifact, saveArtifact } from './artifacts';
+import { clearFrames, publish } from './live-frames';
+import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, routingDecision } from './model-registry';
@@ -519,6 +523,9 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   clearInterval(session.usageTimer);
   session.fileWatcher?.close();
   await session.sandbox.destroy().catch(() => {});
+  // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
+  await closeRemoteBrowser(id).catch(() => {});
+  clearFrames(id);
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
   for (const service of session.snapshot.services) {
@@ -720,6 +727,58 @@ export async function endpointFor(id: string, service: string): Promise<string> 
   if (!session.project.managed.some(([name]) => name === service)) throw new StudioError(404, `${service} 서비스가 없습니다`);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
   return (await session.sandbox.endpoint(service)).url;
+}
+
+/** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
+function saveSessionArtifact(session: Session, runId: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  return saveArtifact(stateDirOf(session.snapshot), runId, input);
+}
+
+/** 라우트가 산출물을 내려줄 때 쓴다. 중지된 세션의 산출물도 볼 수 있게 스냅샷으로 세션 폴더를 찾는다 */
+export async function readSessionArtifact(id: string, segments: readonly string[]): Promise<{ file: string; contentType: 'image/png' | 'image/jpeg' }> {
+  const snapshot = getSnapshot(id);
+  if (!snapshot) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  return resolveArtifact(stateDirOf(snapshot), segments);
+}
+
+/** 요소 선택 스크린샷을 산출물로 저장하고 식별자를 돌려준다 */
+export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  const session = requireSession(id);
+  return saveArtifact(stateDirOf(session.snapshot), 'pick', input);
+}
+
+/**
+ * 원격 브라우저가 열 미리보기 주소. iframe 미리보기와 같은 규칙(게이트웨이 주소가 있으면 그것, 없으면 서비스 주소)을 쓴다.
+ * 서버가 직접 여는 주소이므로 다른 출처로 나가지 않도록 이 값만 넘긴다
+ */
+export function remoteBrowserUrl(id: string, service: string): string {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 원격 브라우저를 열 수 있습니다');
+  const view = session.snapshot.services.find((candidate) => candidate.name === service);
+  if (!view) throw new StudioError(404, `${service} 서비스가 없습니다`);
+  const url = view.previewUrl ?? view.url;
+  if (!url) throw new StudioError(409, `${service} 서비스의 미리보기 주소가 없습니다. 서비스가 준비된 뒤 다시 시도하세요`);
+  return url;
+}
+
+/**
+ * 원격 브라우저가 요청해도 되는 출처 목록. 세션의 모든 서비스 주소(루프백·미리보기 게이트웨이)의 출처를 모은다.
+ * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 앱이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
+ */
+export function remoteBrowserAllowedOrigins(id: string): string[] {
+  const session = requireSession(id);
+  const origins = new Set<string>();
+  for (const service of session.snapshot.services) {
+    for (const url of [service.url, service.previewUrl]) {
+      if (!url) continue;
+      try {
+        origins.add(new URL(url).origin);
+      } catch {
+        // 준비 중 잠깐 이상한 값이 있어도 다른 서비스 주소는 살린다
+      }
+    }
+  }
+  return [...origins];
 }
 
 const MAX_PROXY_BODY = 200_000;
@@ -982,6 +1041,18 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     intent: plan.intent,
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
+    // 화면 확인이 찍은 스크린샷은 세션 폴더에 남기고, 실시간 프레임은 채널로만 보낸다(기록에 쌓지 않는다)
+    saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
+    onBrowserFrame: ({ check, frame }: { check: string; frame: BrowserFrame }) =>
+      publish(session.snapshot.id, {
+        source: 'qa',
+        check,
+        mime: 'image/jpeg',
+        data: frame.data.toString('base64'),
+        width: frame.width,
+        height: frame.height,
+        at: frame.at,
+      }),
     signal,
     onEvent: (event: AgentEvent) => {
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
@@ -1886,6 +1957,8 @@ function registerCleanup(): void {
     // 터미널의 Ctrl+C와 next dev가 넘긴 신호가 함께 온다
     if (cleaning) return;
     cleaning = true;
+    // 남은 원격 브라우저 프로세스를 함께 내린다. 기다릴 수 없으므로 최선 노력으로 끝낸다
+    void closeAllRemoteBrowsers();
     for (const session of store.sessions.values()) {
       if (session.snapshot.status === 'stopped') continue;
       session.stop.abort();

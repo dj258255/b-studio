@@ -56,8 +56,15 @@ export interface RemoteBrowserPick {
 export interface RemoteBrowserOptions {
   url: string;
   viewport: RemoteBrowserViewport;
+  /**
+   * 이 브라우저가 요청해도 되는 출처(origin) 목록. 여기 없는 출처로 나가는 요청은 모두 막는다.
+   * 서버 소유 브라우저라, 모델이 만든 페이지가 호스트 내부 주소나 외부로 나가면 서버 측 요청 위조 통로가 된다
+   */
+  allowedOrigins: string[];
   onFrame: (frame: BrowserFrame) => void;
   onNavigate?: (url: string) => void;
+  /** 허용하지 않은 출처로 나가려던 요청을 막을 때마다 불린다 */
+  onBlocked?: (input: { url: string; kind: 'navigation' | 'resource' }) => void;
 }
 
 export interface RemoteBrowser {
@@ -71,14 +78,40 @@ export interface RemoteBrowser {
   close(): Promise<void>;
 }
 
+/** 네트워크로 나가지 않는 내부 스킴. 이 셋은 허용 목록과 무관하게 통과시킨다 */
+const INTERNAL_SCHEMES = new Set(['data:', 'blob:', 'about:']);
+
+/** 출처가 허용 목록에 있으면 true. 내부 스킴이거나 파싱할 수 없으면 각각 허용·거부한다 */
+function isAllowedRequest(url: string, allowed: ReadonlySet<string>): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return INTERNAL_SCHEMES.has(parsed.protocol) || allowed.has(parsed.origin);
+}
+
 /**
- * 서버 소유 Chromium을 열고 첫 화면을 띄운다. URL은 호출자가 준 것만 열며, 검증은 호출자 책임이다.
+ * 서버 소유 Chromium을 열고 첫 화면을 띄운다.
+ * 허용한 출처로만 요청을 내보낸다: 메인 프레임·하위 프레임 이동과 하위 리소스(fetch·img·script 등)를 모두 검사해,
+ * 허용 목록에 없는 출처면 막고 onBlocked으로 알린다. 그래서 모델이 만든 페이지가 막히더라도 호스트 내부나 외부로 새 나가지 않는다.
  * 세션마다 프로세스 하나를 쓰므로 다 쓰면 close()로 내려야 한다
  */
 export async function openRemoteBrowser(options: RemoteBrowserOptions): Promise<RemoteBrowser> {
   const browser = await launchBrowser();
   try {
-    const page = await browser.newPage({ viewport: options.viewport });
+    // serviceWorkers: 'block'로 서비스 워커 등록을 막는다. 서비스 워커가 만든 요청은 page.route를 우회하므로,
+    // 허용 출처 검사를 유일한 통로로 남기려면 꺼야 한다(대신 오프라인 캐시 같은 기능은 원격 미리보기에서 동작하지 않는다)
+    const page = await browser.newPage({ viewport: options.viewport, serviceWorkers: 'block' });
+    // goto 전에 걸어 첫 문서 요청부터 검사한다
+    const allowed = new Set(options.allowedOrigins);
+    await page.route('**/*', (route) => {
+      const request = route.request();
+      if (isAllowedRequest(request.url(), allowed)) return route.continue();
+      options.onBlocked?.({ url: request.url(), kind: request.isNavigationRequest() ? 'navigation' : 'resource' });
+      return route.abort('blockedbyclient');
+    });
     const client = await page.context().newCDPSession(page);
     // createScreencast는 이 객체를 참조로 읽으므로 resize가 값을 바꾸면 프레임 크기 fallback도 따라간다
     const viewport = { width: options.viewport.width, height: options.viewport.height };
