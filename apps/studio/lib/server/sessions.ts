@@ -965,6 +965,11 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
+      // 서비스가 준비된 직후 읽은 기동 중 수신/송신 바이트를 세션 기록에 남긴다(작업 분해 지표도 이 스냅샷에서 읽는다)
+      onBootNetwork: (network) => {
+        session.snapshot.bootNetwork = network;
+        emit(session, { type: 'boot_network', at: new Date().toISOString(), network });
+      },
     });
     const head = session.snapshot.checkpoints[0]!;
     if (!resumed) {

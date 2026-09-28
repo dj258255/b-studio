@@ -14,6 +14,7 @@ import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { withRemovedDirectories } from '../sync-paths';
 import type {
+  BootNetwork,
   CleanupCommand,
   ContainerState,
   CreateSandboxOptions,
@@ -48,7 +49,7 @@ import {
 } from './format';
 import { externalCallScript } from './external-call';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
-import { mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
+import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
   SNAPSHOT_LABEL,
@@ -244,9 +245,29 @@ class LocalDockerSandbox implements Sandbox {
       ),
     );
 
+    // 서비스가 모두 준비된 직후 한 번 stats를 읽어 기동 중 받은 바이트를 알린다
+    await this.#reportBootNetwork(options);
+
     // 설치 단계만 끝나고 에이전트가 아직 도구를 쓰지 않은 시점의 볼륨을 다음 기동용으로 남긴다
     await Promise.all(plans.filter((_, index) => !seeded[index]).map((plan) => this.#captureSnapshot(plan, options)));
     return endpoints;
+  }
+
+  /**
+   * 서비스가 준비된 직후 한 번 stats를 읽어 컨테이너별 수신/송신 바이트를 알린다.
+   * 값은 컨테이너 수명 누계라 기동 직후에 읽으면 "기동 중 받은 양"으로 본다.
+   *
+   * 한계: 이미지 빌드 단계에서 받은 것(docker build가 받는 의존성)은 컨테이너 NetIO에 잡히지 않는다.
+   * edge 프록시 컨테이너는 서비스 트래픽이 지나가므로 더하면 이중 계산이라 뺀다.
+   */
+  async #reportBootNetwork({ onBootNetwork }: StartOptions): Promise<void> {
+    if (!onBootNetwork) return;
+    try {
+      const network: BootNetwork = bootNetworkFromUsage(await this.stats(), EDGE_SERVICE);
+      onBootNetwork(network);
+    } catch {
+      // 수신 바이트를 못 읽어도 기동은 계속한다. 기동 지표는 부가 정보다
+    }
   }
 
   async restart(name: string, options: StartOptions = {}): Promise<ServiceEndpoint> {
