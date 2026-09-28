@@ -13,7 +13,7 @@ const MODE_NOTE: Record<string, string> = {
   "claude-code":
     "요청은 이 PC의 claude CLI에 로그인한 계정으로 처리합니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 여러 사람이 쓰는 서버에는 api 모드를 씁니다.",
   codex:
-    "이 PC에 ChatGPT로 로그인한 Codex CLI로 실행합니다. 대화는 이어받지 않고 최근 요청 요약만 넘깁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요.",
+    "이 PC에 ChatGPT로 로그인한 Codex CLI로 실행합니다. 대화는 이어받지 않고 최근 요청 요약만 넘깁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 아직 실제 계정으로 확인하지 못한 모드입니다(#54).",
   commandcode:
     "이 PC에 로그인한 Command Code로 실행합니다. 모델을 고를 수 있고 기본은 계정 기본 모델입니다. 무료 모델만 쓰도록 설정할 수도 있습니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요.",
   demo: "데모 모드로 실행 중입니다. 준비된 요청을 스크립트로 실행하므로 API 키가 필요 없습니다.",
