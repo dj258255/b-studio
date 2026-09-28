@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
 import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -31,8 +31,8 @@ export type ChatItem =
     }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'stage'; runId: string; stage: string }
-  /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과 */
-  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string }
+  /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과. browser_check면 단계별 스크린샷 식별자(steps)와 디자인 비교(compare)가 함께 온다 */
+  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */
@@ -157,6 +157,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             : service,
         ),
       });
+    case 'design':
+      return patchSnapshot(view, { design: event.design });
     case 'log': {
       const logs = view.logs.length >= LOG_LIMIT ? view.logs.slice(view.logs.length - LOG_LIMIT + 1) : [...view.logs];
       logs.push({ service: event.service, text: event.text, at: event.at });

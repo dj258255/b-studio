@@ -82,6 +82,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     fetcher = fetchContract,
     pageFetcher,
     browserRunner,
+    saveArtifact,
+    onBrowserFrame,
     resume,
     model,
     effort = 'high',
@@ -96,7 +98,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
   const gate = ask
     ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent });
+    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent });
   const context: ToolContext = {
     project,
     workspace,
@@ -105,13 +107,14 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     signal,
     onServiceStatus,
     readOnly: ask,
+    design: options.design,
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
   };
-  const specs = buildTools(project);
+  const specs = buildTools(project, { design: options.design !== undefined });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다

@@ -20,6 +20,8 @@ export interface PersistedSession {
   conversation: unknown[];
   demoIndex: number;
   claudeCode: { sessionId?: string; notes: string[] };
+  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml을 스튜디오가 고치지 않고 여기에 둔다 */
+  design?: { fileUrl: string; fileKey: string };
   /** codex 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해 요약만 넘긴다. 이 필드가 생기기 전 기록에는 없다 */
   codex?: { notes: string[]; recent: Array<{ request: string; summary: string; status: string }> };
   sourceDirtyFiles: number;

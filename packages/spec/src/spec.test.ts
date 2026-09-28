@@ -51,6 +51,19 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
+  it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
+      fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',
+      fileKey: 'abc123XYZ',
+    });
+    // 옛 /file/ 경로와 www 없는 호스트도 받는다
+    expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://figma.com/file/KEY9/legacy"\n`).design?.figma?.fileKey).toBe('KEY9');
+    expect(parseSpec(`${ORDERS_SPEC}`).design).toBeUndefined();
+
+    const bad = captureError(() => parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://example.com/design/x"\n`));
+    expect(bad.issues.some((issue) => issue.startsWith('design.figma.fileUrl'))).toBe(true);
+  });
+
   it('워크플로 정책의 단계와 보호 경로를 읽고 잘못된 단계를 거부한다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}workflow:
   required: [plan, implement, run, test, checkpoint]
@@ -134,6 +147,50 @@ describe('parseSpec', () => {
 
     const empty = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, steps: [{}] }\n`));
     expect(empty.issues).toEqual(['workflow.pageChecks.0.steps.0: 단계에는 click, fill, press, waitFor 중 정확히 하나를 적어야 합니다']);
+  });
+
+  it('디자인 비교는 프로젝트 안 .png와 허용 비율을 받고, http 모드나 프로젝트 밖 경로는 거부한다', () => {
+    const compareOf = (line: string) =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - ${line}\n`).workflow?.pageChecks?.[0]?.compare;
+
+    expect(
+      compareOf(`{ service: web, path: /, mode: browser, viewport: mobile, compare: { reference: design/list.png, maxDiffRatio: 0.15, masks: [{ x: 0, y: 0, width: 10, height: 10 }] } }`),
+    ).toEqual({ reference: 'design/list.png', maxDiffRatio: 0.15, masks: [{ x: 0, y: 0, width: 10, height: 10 }], threshold: 0.1 });
+    // threshold를 적으면 그 값을, 생략하면 0.1을 쓴다
+    expect(compareOf(`{ service: web, path: /, mode: browser, compare: { reference: a.png, maxDiffRatio: 0, threshold: 0.4 } }`)).toEqual({
+      reference: 'a.png',
+      maxDiffRatio: 0,
+      threshold: 0.4,
+    });
+
+    // .png가 아니면 거부
+    const notPng = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: design/list.jpg, maxDiffRatio: 0.1 } }\n`));
+    expect(notPng.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.compare.reference'))).toBe(true);
+    // 프로젝트 밖 경로는 거부
+    const outside = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: ../secret.png, maxDiffRatio: 0.1 } }\n`));
+    expect(outside.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.compare.reference'))).toBe(true);
+    // masks는 최대 20개
+    const masks = Array.from({ length: 21 }, () => '{ x: 0, y: 0, width: 1, height: 1 }').join(', ');
+    const tooMany = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: a.png, maxDiffRatio: 0.1, masks: [${masks}] } }\n`));
+    expect(tooMany.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.compare.masks'))).toBe(true);
+    // http 모드에서는 쓸 수 없다
+    const http = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, compare: { reference: a.png, maxDiffRatio: 0.1 } }\n`));
+    expect(http.issues).toEqual(['workflow.pageChecks.0.compare: compare는 mode: browser에서만 쓸 수 있습니다']);
+  });
+
+  it('뷰포트는 크기 객체나 mobile·tablet·desktop 이름으로 적고 파싱 뒤에는 항상 크기 객체로 맞춘다', () => {
+    const viewport = (value: string) =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, viewport: ${value} }\n`).workflow?.pageChecks?.[0]
+        ?.viewport;
+    expect(viewport('mobile')).toEqual({ width: 375, height: 812 });
+    expect(viewport('tablet')).toEqual({ width: 768, height: 1024 });
+    expect(viewport('desktop')).toEqual({ width: 1280, height: 800 });
+    // 크기 객체는 그대로 남는다
+    expect(viewport('{ width: 390, height: 844 }')).toEqual({ width: 390, height: 844 });
+    expect(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, viewport: phone }\n`)).toThrow(SpecError);
+    // http 모드에서는 이름이든 객체든 쓸 수 없다
+    const http = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, viewport: mobile }\n`));
+    expect(http.issues).toEqual(['workflow.pageChecks.0.viewport: viewport는 mode: browser에서만 쓸 수 있습니다']);
   });
 
   it('network.egress는 호스트 문자열과 평문 HTTP 경로·메서드 규칙을 함께 받는다', () => {

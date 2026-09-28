@@ -114,6 +114,20 @@ export class Workspace {
     this.#record(absolute, content);
   }
 
+  /**
+   * 이진 파일(PNG 등)을 쓴다. 경로 규칙·프로젝트 밖 탈출 금지는 write와 같다.
+   * 텍스트가 아니라 내용 해시 비교(덮어쓰기 보호)는 하지 않지만, 바뀐 파일로는 똑같이 기록한다
+   */
+  async writeBinary(file: string, data: Buffer): Promise<void> {
+    const absolute = await this.#resolve(file, { mustExist: false });
+    await mkdir(path.dirname(absolute), { recursive: true });
+    await writeFile(absolute, data);
+    const relative = this.#relative(absolute);
+    this.#seen.delete(relative);
+    this.#deleted.delete(relative);
+    this.#changed.set(relative, ++this.#version);
+  }
+
   /** oldText가 파일에 정확히 한 번 있어야 바꾼다. 모호한 수정은 거부한다 */
   async edit(file: string, oldText: string, newText: string): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: true });

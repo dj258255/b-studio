@@ -211,6 +211,43 @@ export const WorkflowPageStepSchema = z
 
 const PAGE_STEPS_MAX = 10;
 
+/** browser 모드에서 자주 쓰는 창 크기. 이름으로 적으면 이 값으로 편다 */
+const VIEWPORT_PRESETS: Record<'mobile' | 'tablet' | 'desktop', { width: number; height: number }> = {
+  mobile: { width: 375, height: 812 },
+  tablet: { width: 768, height: 1024 },
+  desktop: { width: 1280, height: 800 },
+};
+
+/** 크기 객체나 mobile·tablet·desktop 이름을 받아 파싱 뒤에는 항상 { width, height }로 맞춘다 */
+const ViewportSchema = z
+  .union([
+    z.enum(['mobile', 'tablet', 'desktop']),
+    z.object({ width: z.number().int().min(240).max(3840), height: z.number().int().min(240).max(3840) }),
+  ])
+  .transform((value): { width: number; height: number } => (typeof value === 'string' ? VIEWPORT_PRESETS[value] : value));
+
+const MAX_COMPARE_MASKS = 20;
+
+/** 기준 이미지에서 비교에서 빼는 사각형. 동적 데이터나 항상 달라지는 시각 요소를 가린다 */
+export const CompareMaskSchema = z.object({
+  x: z.number().int().min(0),
+  y: z.number().int().min(0),
+  width: z.number().int().min(1),
+  height: z.number().int().min(1),
+});
+
+/** 디자인 기준 이미지와 실제 화면을 픽셀 차이 비율로 비교하는 설정 */
+export const WorkflowPageCompareSchema = z.object({
+  /** 프로젝트 안의 .png 파일 상대 경로 (운영자가 Figma 등에서 뽑아 저장소에 둔다) */
+  reference: RELATIVE_PATH.refine((value) => value.toLowerCase().endsWith('.png'), 'reference는 .png 파일이어야 합니다'),
+  /** 허용하는 최대 차이 비율 (0~1) */
+  maxDiffRatio: z.number().min(0).max(1),
+  /** 두 이미지 모두 같은 색으로 칠해 비교에서 빼는 영역 */
+  masks: z.array(CompareMaskSchema).max(MAX_COMPARE_MASKS, `masks는 최대 ${MAX_COMPARE_MASKS}개까지 쓸 수 있습니다`).optional(),
+  /** pixelmatch의 색 차이 민감도 (0~1). 클수록 관대하다 */
+  threshold: z.number().min(0).max(1).default(0.1),
+});
+
 /**
  * browser_check 단계에서 재시작한 서비스의 화면을 확인한다.
  * http는 응답 상태와 본문 문구만 보고, browser는 헤드리스 Chromium으로 렌더링해 스크립트 예외·console.error·가로 넘침까지 본다
@@ -225,12 +262,14 @@ export const WorkflowPageCheckSchema = z
     expectText: z.string().min(1).optional(),
     /** browser 전용. 페이지를 연 뒤 순서대로 실행할 상호작용. 정해 둔 네 동작만 받는다 */
     steps: z.array(WorkflowPageStepSchema).max(PAGE_STEPS_MAX, `단계는 최대 ${PAGE_STEPS_MAX}개까지 쓸 수 있습니다`).optional(),
-    /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다 */
-    viewport: z.object({ width: z.number().int().min(240).max(3840), height: z.number().int().min(240).max(3840) }).optional(),
+    /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다. mobile·tablet·desktop 이름이나 { width, height }를 받는다 */
+    viewport: ViewportSchema.optional(),
     /** browser 전용. 기본은 console.error나 실패한 요청(4xx·5xx·연결 실패, 자동 favicon 제외)이 하나라도 있으면 실패 */
     allowConsoleErrors: z.boolean().default(false),
     /** browser 전용. 문서가 창보다 넓어 가로 스크롤이 생기면 실패 */
     noHorizontalScroll: z.boolean().default(false),
+    /** browser 전용. 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교한다 */
+    compare: WorkflowPageCompareSchema.optional(),
   })
   .superRefine((check, ctx) => {
     if (check.mode === 'browser') return;
@@ -239,6 +278,7 @@ export const WorkflowPageCheckSchema = z
     if (check.viewport) ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
     if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
   });
 
 /** 모델 프롬프트가 아니라 실행기에서 적용하는 프로젝트별 워크플로 정책 */
@@ -279,6 +319,29 @@ export const WorkflowSchema = z
     });
   });
 
+/** Figma 디자인/파일 URL. `https://www.figma.com/design/<key>/...`과 `/file/<key>/...` 둘 다 받는다 */
+const FIGMA_FILE_URL = /^https?:\/\/(?:www\.)?figma\.com\/(?:design|file)\/([A-Za-z0-9]+)(?:[/?#]|$)/;
+
+/** Figma URL에서 파일 키를 뽑는다. 형식이 아니면 undefined */
+export function figmaFileKey(url: string): string | undefined {
+  return FIGMA_FILE_URL.exec(url.trim())?.[1];
+}
+
+/**
+ * 디자인(Figma) 연동. 토큰은 studio.yaml이 아니라 서버 환경 변수 FIGMA_TOKEN에서만 읽는다.
+ * fileKey는 URL에서 미리 뽑아 두어 다운스트림이 URL을 다시 파싱하지 않게 한다
+ */
+export const DesignSchema = z
+  .object({
+    figma: z
+      .object({
+        /** `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...` */
+        fileUrl: z.string().refine((value) => figmaFileKey(value) !== undefined, 'Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다'),
+      })
+      .transform((value) => ({ fileUrl: value.fileUrl, fileKey: figmaFileKey(value.fileUrl)! })),
+  })
+  .optional();
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -300,6 +363,8 @@ export const StudioSpecSchema = z.object({
   /** 환경 변수 이름 → 받을 서비스 */
   secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
   deploy: DeploySchema.optional(),
+  /** Figma 디자인 연동. fileUrl에서 뽑은 키로 서버가 Figma REST API를 부른다 */
+  design: DesignSchema,
   /** Pi·Claude·API 에이전트에 공통으로 적용하는 실행 정책 */
   workflow: WorkflowSchema.optional(),
   repository: z
@@ -320,11 +385,14 @@ export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type SecretSpec = z.infer<typeof SecretSchema>;
 export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
+export type DesignSpec = z.infer<typeof DesignSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
 export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
+export type WorkflowPageCompare = z.infer<typeof WorkflowPageCompareSchema>;
+export type CompareMask = z.infer<typeof CompareMaskSchema>;
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;
 export type EgressRule = z.infer<typeof EgressRuleSchema>;

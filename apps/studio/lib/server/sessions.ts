@@ -36,9 +36,12 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
+  type BrowserFrame,
   type Checkpoint,
   type DatabaseState,
   type DemoScenario,
+  type DesignFrameInfo,
+  type DesignSource,
   type GitAuthor,
   type ModelClient,
   type RoutingDecision,
@@ -60,7 +63,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { loadProject, type LoadedProject } from '@b-studio/spec';
+import { loadProject, figmaFileKey, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import {
   addTokens,
@@ -78,6 +81,7 @@ import type {
   CodeFile,
   CodeSearch,
   CodeTree,
+  DesignView,
   ExportResult,
   ProxyResponse,
   RepositoryView,
@@ -90,6 +94,11 @@ import type {
 } from '@/lib/studio-events';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
+import { resolveArtifact, saveArtifact } from './artifacts';
+import { compareExample, designPathFor, writeDesignPng } from './design-files';
+import { FigmaClient } from './figma';
+import { clearFrames, publish } from './live-frames';
+import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
@@ -175,6 +184,8 @@ interface Session {
   };
   /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
   sourceDirtyFiles: number;
+  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml의 설정보다 우선한다 */
+  design?: { fileUrl: string; fileKey: string };
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
@@ -220,6 +231,8 @@ interface Store {
   claimedFolders?: Set<string>;
   recovery?: Promise<void>;
   previewGateway?: Server;
+  /** Figma 클라이언트. 파일·노드 캐시를 요청 사이에도 유지한다 */
+  figma?: FigmaClient;
   /** 이미 쓴 미리보기 티켓의 임의 값과 만료 시각 */
   previewTickets?: Map<string, number>;
   cleanupRegistered: boolean;
@@ -376,6 +389,8 @@ async function startSession({
     sourceDirtyFiles,
     previewToken: randomBytes(16).toString('hex'),
   });
+  // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
+  session.snapshot.design = sessionDesignView(session);
 
   store.sessions.set(id, session);
   registerCleanup();
@@ -534,6 +549,9 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   clearInterval(session.usageTimer);
   session.fileWatcher?.close();
   await session.sandbox.destroy().catch(() => {});
+  // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
+  await closeRemoteBrowser(id).catch(() => {});
+  clearFrames(id);
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
   for (const service of session.snapshot.services) {
@@ -642,6 +660,9 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
+    // 세션 단위 디자인 설정을 되살리고, 화면 상태를 다시 계산한다(studio.yaml 설정이 바뀌었을 수 있다)
+    session.design = data.design;
+    session.snapshot.design = sessionDesignView(session);
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
@@ -737,6 +758,163 @@ export async function endpointFor(id: string, service: string): Promise<string> 
   if (!session.project.managed.some(([name]) => name === service)) throw new StudioError(404, `${service} 서비스가 없습니다`);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
   return (await session.sandbox.endpoint(service)).url;
+}
+
+/** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
+function saveSessionArtifact(session: Session, runId: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  return saveArtifact(stateDirOf(session.snapshot), runId, input);
+}
+
+/** 라우트가 산출물을 내려줄 때 쓴다. 중지된 세션의 산출물도 볼 수 있게 스냅샷으로 세션 폴더를 찾는다 */
+export async function readSessionArtifact(id: string, segments: readonly string[]): Promise<{ file: string; contentType: 'image/png' | 'image/jpeg' }> {
+  const snapshot = getSnapshot(id);
+  if (!snapshot) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  return resolveArtifact(stateDirOf(snapshot), segments);
+}
+
+/** 요소 선택 스크린샷을 산출물로 저장하고 식별자를 돌려준다 */
+export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  const session = requireSession(id);
+  return saveArtifact(stateDirOf(session.snapshot), 'pick', input);
+}
+
+/**
+ * 원격 브라우저가 열 미리보기 주소. iframe 미리보기와 같은 규칙(게이트웨이 주소가 있으면 그것, 없으면 서비스 주소)을 쓴다.
+ * 서버가 직접 여는 주소이므로 다른 출처로 나가지 않도록 이 값만 넘긴다
+ */
+export function remoteBrowserUrl(id: string, service: string): string {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 원격 브라우저를 열 수 있습니다');
+  const view = session.snapshot.services.find((candidate) => candidate.name === service);
+  if (!view) throw new StudioError(404, `${service} 서비스가 없습니다`);
+  const url = view.previewUrl ?? view.url;
+  if (!url) throw new StudioError(409, `${service} 서비스의 미리보기 주소가 없습니다. 서비스가 준비된 뒤 다시 시도하세요`);
+  return url;
+}
+
+/**
+ * 원격 브라우저가 요청해도 되는 출처 목록. 세션의 모든 서비스 주소(루프백·미리보기 게이트웨이)의 출처를 모은다.
+ * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 앱이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
+ */
+export function remoteBrowserAllowedOrigins(id: string): string[] {
+  const session = requireSession(id);
+  const origins = new Set<string>();
+  for (const service of session.snapshot.services) {
+    for (const url of [service.url, service.previewUrl]) {
+      if (!url) continue;
+      try {
+        origins.add(new URL(url).origin);
+      } catch {
+        // 준비 중 잠깐 이상한 값이 있어도 다른 서비스 주소는 살린다
+      }
+    }
+  }
+  return [...origins];
+}
+
+/** 세션 단위 Figma 파일 키가 있으면 그걸, 없으면 studio.yaml의 design.figma를 쓴다 */
+function effectiveDesign(session: Pick<Session, 'design' | 'project'>): { fileUrl: string; fileKey: string } | undefined {
+  if (session.design) return session.design;
+  const figma = session.project.spec.design?.figma;
+  return figma ? { fileUrl: figma.fileUrl, fileKey: figma.fileKey } : undefined;
+}
+
+/** 화면에 보여 줄 디자인 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
+function sessionDesignView(session: Pick<Session, 'design' | 'project'>): DesignView | undefined {
+  const design = effectiveDesign(session);
+  if (!design) return undefined;
+  return { fileUrl: design.fileUrl, fileKey: design.fileKey, from: session.design ? 'session' : 'studio.yaml', hasToken: Boolean(process.env.FIGMA_TOKEN) };
+}
+
+/** HMR로 모듈이 다시 로드돼도 같은 캐시를 쓰도록 전역에 둔다. 토큰은 만들 때 읽으므로 바꾸려면 서버를 다시 시작한다 */
+function figmaClient(): FigmaClient {
+  return (store.figma ??= new FigmaClient({ token: process.env.FIGMA_TOKEN, baseUrl: process.env.B_STUDIO_FIGMA_API }));
+}
+
+/** 세션 단위로 Figma URL을 저장한다(studio.yaml은 스튜디오가 고치지 않는다). 빈 값이면 세션 설정을 지운다 */
+export function setSessionDesign(id: string, fileUrl: string): DesignView | undefined {
+  const session = requireSession(id);
+  const trimmed = fileUrl.trim();
+  if (trimmed === '') {
+    session.design = undefined;
+  } else {
+    const fileKey = figmaFileKey(trimmed);
+    if (!fileKey) throw new StudioError(400, 'Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다');
+    session.design = { fileUrl: trimmed, fileKey };
+  }
+  const design = sessionDesignView(session);
+  session.snapshot.design = design;
+  emit(session, { type: 'design', design });
+  return design;
+}
+
+/** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
+export async function sessionDesignFrames(id: string): Promise<{ design?: DesignView; frames: DesignFrameInfo[] }> {
+  const session = requireSession(id);
+  const design = effectiveDesign(session);
+  if (!design || !process.env.FIGMA_TOKEN) return { design: sessionDesignView(session), frames: [] };
+  const frames = await figmaClient().listFrames(design.fileKey, session.stop.signal);
+  return { design: sessionDesignView(session), frames: frames.map((frame) => ({ id: frame.id, name: frame.name, page: frame.page, width: frame.width, height: frame.height })) };
+}
+
+/** 디자인 패널의 프레임 썸네일. 비교용이 아니라 목록용이라 작은 배율로 받는다 */
+export async function sessionDesignThumbnail(id: string, frameId: string): Promise<Buffer> {
+  const session = requireSession(id);
+  const design = effectiveDesign(session);
+  if (!design) throw new StudioError(409, '디자인(Figma)이 설정되지 않았습니다');
+  const images = await figmaClient().exportImages(design.fileKey, [frameId], { scale: 0.5 }, session.stop.signal);
+  const png = images.get(frameId);
+  if (!png) throw new StudioError(404, '프레임 이미지를 찾지 못했습니다');
+  return png;
+}
+
+export interface DesignImportResult {
+  files: Array<{ frameId: string; name: string; path: string; width: number; height: number }>;
+  /** pageChecks.compare에 붙여 넣을 예시. scale이 1일 때만 만든다 */
+  examples: string[];
+  note?: string;
+}
+
+/**
+ * 고른 프레임을 PNG로 받아 세션 작업 복사본의 `design/`에 저장한다(=세션 변경으로 남아 체크포인트·게이트를 탄다).
+ * 시각 비교 기준으로 쓰려면 화면 스크린샷과 픽셀 너비가 같아야 하므로 scale 1을 기본으로 한다
+ */
+export async function importDesign(id: string, frameIds: readonly string[], scale: 1 | 2 = 1): Promise<DesignImportResult> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 디자인을 가져올 수 있습니다');
+  if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 디자인을 가져올 수 있습니다');
+  const design = effectiveDesign(session);
+  if (!design) throw new StudioError(409, '디자인(Figma)이 설정되지 않았습니다');
+
+  const client = figmaClient();
+  const frames = (await client.listFrames(design.fileKey, session.stop.signal)).filter((frame) => frameIds.includes(frame.id));
+  if (frames.length === 0) throw new StudioError(400, '가져올 프레임을 찾지 못했습니다');
+  const images = await client.exportImages(design.fileKey, frames.map((frame) => frame.id), { scale }, session.stop.signal);
+
+  const files: DesignImportResult['files'] = [];
+  const examples: string[] = [];
+  for (const frame of frames) {
+    const png = images.get(frame.id);
+    if (!png) throw new StudioError(502, `프레임 ${frame.id} 이미지를 내보내지 못했습니다`);
+    const relative = designPathFor(frame);
+    await writeDesignPng(session.project, relative, png);
+    files.push({ frameId: frame.id, name: frame.name, path: relative, width: frame.width, height: frame.height });
+    if (scale === 1) examples.push(compareExample(relative, frame));
+  }
+  return { files, examples, ...(scale !== 1 ? { note: 'scale 2로 저장한 이미지는 시각 비교 기준(compare)에 쓰려면 scale 1로 다시 가져오세요' } : {}) };
+}
+
+/** 디자인 도구가 쓸 자료원. 세션에 디자인이 설정됐을 때만 runPlan이 넘긴다 */
+function designSourceFor(session: Session, runId: string): DesignSource | undefined {
+  const design = effectiveDesign(session);
+  if (!design) return undefined;
+  const client = figmaClient();
+  return {
+    frames: () => client.listFrames(design.fileKey, session.stop.signal),
+    frame: (id) => client.summarizeFrame(design.fileKey, id, session.stop.signal),
+    // 이미지는 세션 산출물로 저장하고 참조 경로만 모델에 돌려준다(모델에 이미지를 넘기지 않는다)
+    saveArtifact: (name, data) => saveArtifact(stateDirOf(session.snapshot), runId, { name, data, contentType: 'image/png' }),
+  };
 }
 
 const MAX_PROXY_BODY = 200_000;
@@ -1001,6 +1179,20 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     intent: plan.intent,
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
+    // 화면 확인이 찍은 스크린샷은 세션 폴더에 남기고, 실시간 프레임은 채널로만 보낸다(기록에 쌓지 않는다)
+    saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
+    onBrowserFrame: ({ check, frame }: { check: string; frame: BrowserFrame }) =>
+      publish(session.snapshot.id, {
+        source: 'qa',
+        check,
+        mime: 'image/jpeg',
+        data: frame.data.toString('base64'),
+        width: frame.width,
+        height: frame.height,
+        at: frame.at,
+      }),
+    // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
+    design: designSourceFor(session, run.id),
     signal,
     onEvent: (event: AgentEvent) => {
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
@@ -1752,6 +1944,7 @@ function toPersisted(session: Session): PersistedSession {
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
+    design: session.design,
     codex: session.codex,
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
@@ -1927,6 +2120,8 @@ function registerCleanup(): void {
     // 터미널의 Ctrl+C와 next dev가 넘긴 신호가 함께 온다
     if (cleaning) return;
     cleaning = true;
+    // 남은 원격 브라우저 프로세스를 함께 내린다. 기다릴 수 없으므로 최선 노력으로 끝낸다
+    void closeAllRemoteBrowsers();
     for (const session of store.sessions.values()) {
       if (session.snapshot.status === 'stopped') continue;
       session.stop.abort();
