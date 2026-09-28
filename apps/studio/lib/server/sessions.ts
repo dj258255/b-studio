@@ -472,6 +472,17 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
+/**
+ * 세션 기록을 통째로 읽는다. 구독을 등록해 replay(스냅샷 + 기록 + 로그)를 받은 뒤 바로 푼다.
+ * 토큰 탭이 이 기록에서 실행별 보고서를 만든다(token-report). 없는 세션은 subscribe가 404로 알린다.
+ */
+export function sessionHistory(id: string): StudioEvent[] {
+  const events: StudioEvent[] = [];
+  const unsubscribe = subscribe(id, (event) => events.push(event));
+  unsubscribe();
+  return events;
+}
+
 export function sendMessage(
   id: string,
   text: string,

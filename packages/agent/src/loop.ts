@@ -5,6 +5,7 @@ import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, type AskUserQuestion, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
@@ -94,9 +95,15 @@ export type AgentEvent =
   | { type: 'turn'; turn: number }
   /** 이번 실행에서 지금까지 쓴 토큰 누적값. 직접 만든 루프는 모델 응답마다, 로컬 Claude Code는 턴을 끝낼 때마다 온다 */
   | { type: 'tokens'; usage: AgentUsage }
+  /**
+   * 턴 하나의 모델 요청 사용량. 실행 누적값(tokens)과 달리 그 턴 한 번의 값이라 "어느 턴에서 컨텍스트가 커졌는지" 볼 수 있다.
+   * contextTokens = input + cacheRead + cacheWrite (한 요청이 모델에 보낸 입력 크기).
+   */
+  | { type: 'turn_usage'; turn: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; contextTokens: number }
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
-  | { type: 'tool_result'; name: string; ok: boolean; content: string }
+  /** chars: 모델에 간 글자 수(자르기·반복 대체 뒤). rawChars: 자르기 전 원래 글자 수. 토큰 탭이 이 둘로 낭비를 찾는다 */
+  | { type: 'tool_result'; name: string; ok: boolean; content: string; chars?: number; rawChars?: number }
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   /** ask_user가 남긴 질문. 실행은 이 턴 뒤에 끝난다 */
   | { type: 'question'; question: string; options: string[]; allowOther: boolean }
@@ -220,6 +227,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   const metrics = emptyMetrics();
   // 이번 턴에 ask_user가 남긴 질문. 있으면 도구 결과를 넣은 뒤 실행을 끝내고 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
+  // 실행 단위 도구 결과 캐시. 한 실행 안에서 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
+  const toolCache = createToolResultCache();
 
   const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion): AgentResult => {
     const result: AgentResult = {
@@ -247,10 +256,21 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     const message = await client.createMessage({ system, tools, messages }, signal);
     metrics.modelMs += Math.round(performance.now() - modelStarted);
     metrics.modelCalls += 1;
-    metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(message.usage));
+    const turnContext = contextTokens(message.usage);
+    metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
     addUsage(usage, message.usage);
     // 요청이 취소되거나 오류로 끝나도 그때까지 쓴 양을 알 수 있게 응답마다 알린다
     onEvent({ type: 'tokens', usage: { ...usage } });
+    // 그 턴 한 번의 사용량. 실행 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
+    onEvent({
+      type: 'turn_usage',
+      turn,
+      inputTokens: message.usage.input_tokens ?? 0,
+      outputTokens: message.usage.output_tokens ?? 0,
+      cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
+      contextTokens: turnContext,
+    });
     // thinking·fallback 블록까지 응답 전체를 그대로 이어 붙여야 다음 요청이 올바르게 이어진다
     messages.push({ role: 'assistant', content: message.content });
 
@@ -291,6 +311,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           approvalToken: options.approvalToken,
           requestApproval: options.requestApproval,
           onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+          toolResults: toolCache,
         });
         metrics.toolMs += Math.round(performance.now() - toolStarted);
         if (outcome.ok && (call.name === 'write_file' || call.name === 'edit_file') && stage === 'plan') {
@@ -300,7 +321,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           stage = 'run';
           onEvent({ type: 'stage', stage, source: 'platform' });
         }
-        onEvent({ type: 'tool_result', name: call.name, ok: outcome.ok, content: outcome.content });
+        onEvent({ type: 'tool_result', name: call.name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
         results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: !outcome.ok });
       }
       messages.push({ role: 'user', content: results });

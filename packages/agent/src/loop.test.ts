@@ -234,6 +234,8 @@ describe('runAgent', () => {
       { inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 },
     ]);
     expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 });
+    // 실행 누적값(tokens)과 별개로, 턴 하나의 사용량을 남긴다. 이 스크립트는 응답마다 같은 값을 주므로 두 턴이 같다
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e.contextTokens] : []))).toEqual([1_100, 1_100]);
   });
 
   it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남긴다', async () => {
@@ -248,11 +250,17 @@ describe('runAgent', () => {
       ],
     );
 
-    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+    const events: AgentEvent[] = [];
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract, onEvent: collect(events) });
 
     // 두 번 호출했고, 한 호출의 입력 크기는 input+cacheRead+cacheWrite: 1105, 2207이다
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // 턴 하나의 사용량을 그대로 남긴다(실행 누적값 tokens와 다르다)
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 5, contextTokens: 1_105 },
+      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 7, contextTokens: 2_207 },
+    ]);
     // usage 합계는 캐시를 입력에 섞지 않은 기존 값 그대로다
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 30, cacheReadTokens: 3_000, cacheWriteTokens: 12 });
     for (const ms of [result.metrics!.modelMs, result.metrics!.toolMs, result.metrics!.gateMs]) {

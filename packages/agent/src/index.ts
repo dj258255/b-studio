@@ -92,7 +92,24 @@ export {
   type PullRequestResult,
   type RemoteLocation,
 } from './repository';
-export { buildTools, executeTool, type AskUserQuestion, type ToolBuildOptions } from './tools';
+export { buildTools, executeTool, type AskUserQuestion, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
+export {
+  clipCommandOutput,
+  clipText,
+  COMMAND_OUTPUT_BUDGET,
+  createToolResultCache,
+  dedupeResult,
+  HTTP_BODY_BUDGET,
+  invalidateReadCache,
+  isHtmlContent,
+  isRepeatNote,
+  LOGS_OUTPUT_LIMIT,
+  READ_FILE_BUDGET,
+  REPEAT_NOTE_PREFIX,
+  repeatNote,
+  visibleHtml,
+  type ToolResultCache,
+} from './tool-output';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   DEFAULT_WORKFLOW,
