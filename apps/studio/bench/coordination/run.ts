@@ -25,6 +25,8 @@ import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchLaneRow, type BenchRow } from './summary';
 import { BENCH_TASKS, planFor, type BenchTask, type Strategy } from './tasks';
+import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
+import type { StudioEvent } from '../../lib/studio-events';
 import type { TaskPlanView } from '../../lib/task-plan-types';
 
 type TaskPlansModule = typeof import('../../lib/server/task-plans');
@@ -215,9 +217,47 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     }
   }
 
-  const sessionIds = [...plan.lanes.flatMap((lane) => (lane.sessionId ? [lane.sessionId] : [])), ...(plan.integration?.sessionId ? [plan.integration.sessionId] : [])];
-  // 세션을 내리기 전에 기록에서 실제로 쓴 모델 이름을 읽는다. 읽기 실패는 실행 결과를 바꾸지 않는다
+  const laneSessionIds = plan.lanes.flatMap((lane) => (lane.sessionId ? [lane.sessionId] : []));
+  const integrationSessionId = plan.integration?.sessionId;
+  const sessionIds = [...laneSessionIds, ...(integrationSessionId ? [integrationSessionId] : [])];
+  // 세션을 내리기 전에 기록에서 실제로 쓴 모델 이름과 탐색·실패 흔적을 읽는다. 읽기 실패는 실행 결과를 바꾸지 않는다
   const observedModels = readObservedModels(sessions, sessionIds);
+  const sessionEvents = readSessionEvents(sessions, sessionIds);
+  // trace 계산이 실패해도 실행 결과(성공·분류)는 바뀌지 않게, 그 세션의 trace만 생략하고 경고를 남긴다
+  const traces: LaneTrace[] = [];
+  for (const id of laneSessionIds) {
+    const events = sessionEvents.get(id);
+    if (!events) continue;
+    try {
+      traces.push(traceFromEvents(id, events));
+    } catch (error) {
+      console.warn(`세션 ${id}의 탐색·실패 기록을 계산하지 못했습니다: ${describe(error)}`);
+    }
+  }
+  const integrationEvents = integrationSessionId ? sessionEvents.get(integrationSessionId) : undefined;
+  let integrationTrace: LaneTrace | undefined;
+  if (integrationSessionId && integrationEvents) {
+    try {
+      integrationTrace = traceFromEvents(integrationSessionId, integrationEvents);
+    } catch (error) {
+      console.warn(`세션 ${integrationSessionId}의 탐색·실패 기록을 계산하지 못했습니다: ${describe(error)}`);
+    }
+  }
+
+  const explore = { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 };
+  const failures = { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 };
+  try {
+    // 탐색 합계는 레인만 센다. 통합 세션은 모델 없이 스크립트 턴으로 돌아 탐색이 아니다
+    const failureSignatures = [...traces.flatMap((trace) => trace.failureSignatures), ...(integrationTrace?.failureSignatures ?? [])];
+    explore.filesReadTotal = traces.reduce((sum, trace) => sum + trace.filesRead.length, 0);
+    explore.filesReadUnionAcrossLanes = new Set(traces.flatMap((trace) => trace.filesRead)).size;
+    explore.readCallsTotal = traces.reduce((sum, trace) => sum + (trace.toolCalls.read_file ?? 0), 0);
+    failures.signaturesTotal = failureSignatures.length;
+    failures.distinctSignatures = new Set(failureSignatures.map(signatureKey)).size;
+    failures.repeatedFailures = traces.reduce((sum, trace) => sum + trace.repeatedFailures, 0) + (integrationTrace?.repeatedFailures ?? 0);
+  } catch (error) {
+    console.warn(`탐색·실패 합계를 계산하지 못했습니다: ${describe(error)}`);
+  }
 
   // 세션을 모두 내린다. 실패·시간 초과로 끝났어도 남기지 않는다.
   // stopSession이 실패하면 activeSessions에 남겨, 남은 컨테이너가 있을 때 다시 시도한다
@@ -268,6 +308,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     lanes: plan.lanes.map(
       (lane): BenchLaneRow => ({
         id: lane.id,
+        sessionId: lane.sessionId,
         status: lane.status,
         bootMs: lane.bootMs,
         error: lane.error,
@@ -275,6 +316,10 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       }),
     ),
     integration: plan.integration ? { status: plan.integration.status, bootMs: plan.integration.bootMs, run: plan.integration.run, error: plan.integration.error } : undefined,
+    traces,
+    integrationTrace,
+    explore,
+    failures,
     metrics,
     acceptance,
     success,
@@ -303,6 +348,22 @@ function readObservedModels(sessions: SessionsModule, sessionIds: string[]): str
     }
   }
   return [...models];
+}
+
+/** 세션 기록을 통째로 다시 받아 온다. 읽기 실패는 빈 결과로 두고 실행을 막지 않는다 */
+function readSessionEvents(sessions: SessionsModule, sessionIds: string[]): Map<string, StudioEvent[]> {
+  const collected = new Map<string, StudioEvent[]>();
+  for (const id of sessionIds) {
+    try {
+      const events: StudioEvent[] = [];
+      const unsubscribe = sessions.subscribe(id, (event) => events.push(event));
+      unsubscribe();
+      collected.set(id, events);
+    } catch {
+      // 없는 세션이거나 기록을 읽지 못하면 그 세션의 trace를 생략한다
+    }
+  }
+  return collected;
 }
 
 async function waitForPlan(
