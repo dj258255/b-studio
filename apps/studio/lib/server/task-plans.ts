@@ -203,6 +203,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     persist(plan);
     await waitForReady(snapshot.id);
     lane.bootMs = Math.round(performance.now() - bootStarted);
+    lane.bootRxBytes = bootRxBytes(snapshot.id);
     lane.status = 'running';
     persist(plan);
 
@@ -288,6 +289,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     persist(plan);
     await waitForReady(snapshot.id);
     integration.bootMs = Math.round(performance.now() - bootStarted);
+    integration.bootRxBytes = bootRxBytes(snapshot.id);
     integration.status = 'running';
     persist(plan);
 
@@ -335,6 +337,12 @@ function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number):
 
 [작업 분해] 전체 요청: ${plan.request}
 이 작업이 파일을 쓸 수 있는 경로: ${task.paths.join(', ')} (그 밖의 쓰기는 실행기가 막습니다)${previous ? `\n같은 작업 공간에서 먼저 끝난 작업:\n${previous}` : ''}`;
+}
+
+/** 기동 직후 세션 스냅샷이 읽은 수신 바이트 합. 못 읽었으면 undefined */
+function bootRxBytes(sessionId: string): number | undefined {
+  const network = getSnapshot(sessionId)?.bootNetwork;
+  return network ? network.reduce((sum, entry) => sum + entry.rxBytes, 0) : undefined;
 }
 
 function waitForReady(sessionId: string): Promise<void> {

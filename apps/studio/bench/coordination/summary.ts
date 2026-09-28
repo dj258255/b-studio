@@ -100,6 +100,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '모델 호출 중앙값',
     '최대 컨텍스트 중앙값',
     '기동 시간 합 중앙값(s)',
+    '기동 수신(중앙값)',
     '읽은 파일 수 중앙값',
     '실패 서명 중앙값',
     '반복 실패 중앙값',
@@ -130,6 +131,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         count(medianValue(group, (row) => row.metrics?.maxContextTokens)),
         '|',
         seconds(medianValue(group, (row) => row.metrics?.bootMsTotal)),
+        '|',
+        bytes(medianValue(group, (row) => row.metrics?.bootRxBytesTotal)),
         '|',
         count(medianValue(group, (row) => withLaneSessions(row, row.explore.filesReadTotal))),
         '|',
@@ -191,4 +194,11 @@ function count(value: number | undefined): string {
 
 function seconds(milliseconds: number | undefined): string {
   return milliseconds === undefined ? '—' : (milliseconds / 1_000).toFixed(1);
+}
+
+/** 기동 수신 바이트를 사람이 읽는 크기로. 중앙값이라 소수 한 자리까지 둔다 */
+function bytes(value: number | undefined): string {
+  if (value === undefined) return '—';
+  if (value >= 1_024 ** 2) return `${(value / 1_024 ** 2).toFixed(1)}MiB`;
+  return `${Math.round(value / 1_024)}KiB`;
 }

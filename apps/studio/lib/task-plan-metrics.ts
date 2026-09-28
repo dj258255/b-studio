@@ -19,6 +19,8 @@ export interface TaskPlanMetrics {
   bootMsTotal: number;
   /** 레인 + 통합 기동 시간 중 최댓값 */
   bootMsMax: number;
+  /** 레인 + 통합 기동 중 받은 바이트 합. 읽지 못한 세션은 0으로 둔다 */
+  bootRxBytesTotal: number;
   /** 모든 실행의 모델 호출 시간 합 */
   modelMs: number;
   /** 모든 실행의 도구 실행 시간 합 */
@@ -85,6 +87,7 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   const boots = [...plan.lanes.map((lane) => lane.bootMs ?? 0), plan.integration?.bootMs ?? 0];
   const bootMsTotal = boots.reduce((sum, value) => sum + value, 0);
   const bootMsMax = boots.reduce((max, value) => Math.max(max, value), 0);
+  const bootRxBytesTotal = [...plan.lanes.map((lane) => lane.bootRxBytes ?? 0), plan.integration?.bootRxBytes ?? 0].reduce((sum, value) => sum + value, 0);
 
   const sessions = plan.lanes.filter((lane) => Boolean(lane.sessionId)).length + (plan.integration?.sessionId ? 1 : 0);
 
@@ -98,6 +101,7 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     maxContextTokens,
     bootMsTotal,
     bootMsMax,
+    bootRxBytesTotal,
     modelMs,
     toolMs,
     gateMs,
