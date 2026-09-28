@@ -26,7 +26,8 @@ import { startDryProvider } from './dry-provider';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, planFor, type BenchTask, type Strategy } from './tasks';
+import { BENCH_TASKS, missingCoordinationTools, planFor, type BenchTask, type Strategy } from './tasks';
+import { loadProject } from '@b-studio/spec';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
 import type { Topology } from '@b-studio/agent';
 import type { StudioEvent } from '../../lib/studio-events';
@@ -484,6 +485,12 @@ async function main(): Promise<void> {
     });
     const specFile = path.join(projectDir, 'studio.yaml');
     await writeFile(specFile, (await readFile(specFile, 'utf8')).replace(/^name: orders$/m, `name: ${PROJECT_ID}`));
+    // 조율 도구가 허용 목록에 없으면 S2·S3·S5가 S1과 같아진다. 결과를 모으기 전에 멈춘다
+    const allowedTools = (await loadProject(projectDir)).spec.workflow?.allowedTools;
+    const missing = strategies.flatMap((strategy) => missingCoordinationTools(strategy, allowedTools).map((name) => `${strategy}: ${name}`));
+    if (missing.length > 0) {
+      throw new Error(`조율 도구가 프로젝트 허용 목록(workflow.allowedTools)에 없어 전략이 동작하지 않습니다: ${missing.join(', ')}`);
+    }
 
     await mkdir(path.join(workRoot, 'sessions'), { recursive: true });
     const benchEnv: Record<string, string> = {

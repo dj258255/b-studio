@@ -179,3 +179,13 @@ export function planFor(task: BenchTask, strategy: Strategy, topology: Topology 
     ...(coordination ? { coordination } : {}),
   };
 }
+
+/**
+ * 전략이 레인에게 보여 줘야 하는 조율 도구. 프로젝트의 허용 도구 목록에 없으면 도구가 모델에게 보이지 않아
+ * 전략이 실제로는 "공유 없음"(S1)과 같아진다. 그런 실행은 측정이 무의미하므로 시작 전에 막는다(E2 첫 시작에서 실제로 그랬다)
+ */
+export function missingCoordinationTools(strategy: Strategy, allowedTools: readonly string[] | undefined): string[] {
+  const needed: Record<Strategy, string[]> = { S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'] };
+  if (!allowedTools) return [];
+  return needed[strategy].filter((name) => !allowedTools.includes(name));
+}

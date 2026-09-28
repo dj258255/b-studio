@@ -1,6 +1,8 @@
 import { planLanes } from '@b-studio/agent';
+import path from 'node:path';
+import { loadProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { BENCH_TASKS, planFor, type Strategy } from './tasks';
+import { BENCH_TASKS, missingCoordinationTools, planFor, type Strategy } from './tasks';
 
 const STRATEGIES: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
 
@@ -67,5 +69,27 @@ describe('협업 벤치 과제와 고정 계획', () => {
     expect(planFor(task, 'S3').coordination).toEqual({ strategy: 'S3', topology: 'mesh' });
     expect(planFor(task, 'S4').coordination).toEqual({ strategy: 'S4' });
     expect(planFor(task, 'S5').coordination).toEqual({ strategy: 'S5' });
+  });
+});
+
+describe('missingCoordinationTools', () => {
+  it('전략이 레인에게 보여 줘야 하는 도구가 허용 목록에 없으면 알려 준다', () => {
+    const base = ['list_files', 'read_file'];
+    expect(missingCoordinationTools('S1', base)).toEqual([]);
+    expect(missingCoordinationTools('S4', base)).toEqual([]);
+    expect(missingCoordinationTools('S2', base)).toEqual(['read_notes']);
+    expect(missingCoordinationTools('S5', base)).toEqual(['read_notes']);
+    expect(missingCoordinationTools('S3', base)).toEqual(['post_note', 'read_notes']);
+    expect(missingCoordinationTools('S3', [...base, 'post_note', 'read_notes'])).toEqual([]);
+  });
+
+  it('허용 목록이 없는 프로젝트는 모든 도구를 쓸 수 있다', () => {
+    expect(missingCoordinationTools('S3', undefined)).toEqual([]);
+  });
+
+  it('벤치가 쓰는 예제 프로젝트는 모든 전략의 조율 도구를 허용한다', async () => {
+    const project = await loadProject(path.resolve(import.meta.dirname, '../../../../examples/orders'));
+    const strategies: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
+    expect(strategies.flatMap((strategy) => missingCoordinationTools(strategy, project.spec.workflow?.allowedTools))).toEqual([]);
   });
 });
