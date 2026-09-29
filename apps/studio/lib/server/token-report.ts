@@ -9,7 +9,7 @@
  */
 import { isRepeatNote, type AgentEvent, type AgentUsage } from '@b-studio/agent';
 import type { StudioEvent } from '../studio-events';
-import { estimateCostUsd, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
+import { costForUsageByModel, estimateCostUsd, matchTokenPrices, parsePriceTable, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
 
 export { estimateCostUsd } from '../token-types';
 export type { TokenBigResult, TokenPrices, TokenReport, TokenToolTotal, TokenTurn, TokenWarning, TokenWarningKind } from '../token-types';
@@ -45,6 +45,20 @@ interface DraftRun {
   pending: PendingCall[];
   results: RecordedResult[];
   usage: AgentUsage;
+  /** run_finished.metrics.usageByModel. 한 실행에 모델이 섞였을 때만 있다 */
+  usageByModel?: Record<string, AgentUsage>;
+  /** model_escalated 이벤트. 한 실행에 한 번만 온다 */
+  escalation?: { from: string; to: string; attempt: number };
+}
+
+/** 보고서에 적용할 단가. 모델별 표가 있으면 단일 단가보다 우선한다 */
+export interface TokenPricing {
+  /** 모든 모델에 같은 단가(기존 환경 변수 네 개) */
+  single?: TokenPrices;
+  /** 모델 이름 일부 → 단가(B_STUDIO_TOKEN_PRICES_JSON) */
+  byModel?: Record<string, TokenPrices>;
+  /** 단가 표를 읽지 못한 이유. 있으면 보고서에 경고로 남기고 단가 없음으로 취급한다 */
+  error?: string;
 }
 
 function emptyUsage(): AgentUsage {
@@ -52,7 +66,7 @@ function emptyUsage(): AgentUsage {
 }
 
 /** 세션 기록에서 실행별 보고서를 만든다. 최신 실행이 먼저 온다 */
-export function buildTokenReports(events: readonly StudioEvent[], prices?: TokenPrices): TokenReport[] {
+export function buildTokenReports(events: readonly StudioEvent[], pricing: TokenPricing = {}): TokenReport[] {
   const runs: DraftRun[] = [];
   let current: DraftRun | undefined;
 
@@ -74,11 +88,13 @@ export function buildTokenReports(events: readonly StudioEvent[], prices?: Token
     }
     if (event.type === 'run_finished' && event.runId === current.runId) {
       if (event.usage) current.usage = event.usage;
+      // 모델별 사용량은 run_finished.metrics에 실려 온다(#98)
+      if (event.metrics?.usageByModel) current.usageByModel = event.metrics.usageByModel;
       current = undefined;
     }
   }
 
-  return runs.map((run) => finalize(run, prices)).reverse();
+  return runs.map((run) => finalize(run, pricing)).reverse();
 }
 
 function applyAgentEvent(run: DraftRun, event: Exclude<AgentEvent, { type: 'tokens' }>): void {
@@ -95,6 +111,9 @@ function applyAgentEvent(run: DraftRun, event: Exclude<AgentEvent, { type: 'toke
       run.clearedByTurn.set(event.turn, { count: previous.count + event.clearedCount, chars: previous.chars + event.clearedChars });
       break;
     }
+    case 'model_escalated':
+      run.escalation = { from: event.from, to: event.to, attempt: event.attempt };
+      break;
     case 'tool_call':
       run.pending.push({ name: event.name, input: event.input, turn: run.currentTurn });
       break;
@@ -111,7 +130,7 @@ function applyAgentEvent(run: DraftRun, event: Exclude<AgentEvent, { type: 'toke
   }
 }
 
-function finalize(run: DraftRun, prices: TokenPrices | undefined): TokenReport {
+function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
   const turns: TokenTurn[] = [];
   let previous = 0;
   for (const turn of run.turns) {
@@ -147,19 +166,55 @@ function finalize(run: DraftRun, prices: TokenPrices | undefined): TokenReport {
     .slice(0, BIGGEST_LIMIT)
     .map((result) => ({ name: result.name, input: summarizeInput(result.name, result.input), chars: result.chars, rawChars: result.rawChars, turn: result.turn }));
 
-  const report: TokenReport = {
+  const warnings = warningsFor(run, turns);
+  // 단가 표를 읽지 못했으면 경고를 남기고 단가 없음으로 취급한다
+  if (pricing.error) warnings.unshift({ kind: 'price_table', message: pricing.error });
+  const cost = resolveCost(run, pricing);
+
+  return {
     runId: run.runId,
     request: run.request,
     turns,
     toolTotals,
     biggest,
-    warnings: warningsFor(run, turns),
+    warnings,
     totals: run.usage,
+    ...(run.usageByModel ? { usageByModel: run.usageByModel } : {}),
+    ...(cost.modelCosts ? { modelCosts: cost.modelCosts } : {}),
     cacheHitRatio: cacheHitRatio(run.usage),
     cleared: clearedTotals(run.clearedByTurn),
+    priceSource: cost.priceSource,
+    ...(cost.estimatedCostUsd !== undefined ? { estimatedCostUsd: cost.estimatedCostUsd } : {}),
+    ...(cost.priceNote ? { priceNote: cost.priceNote } : {}),
+    ...(run.escalation ? { escalation: run.escalation } : {}),
   };
-  // 단가가 없으면 비용 칸을 비우고 문구만 남긴다
-  return prices ? { ...report, estimatedCostUsd: estimateCostUsd(run.usage, prices) } : { ...report, priceNote: '단가 미설정' };
+}
+
+/**
+ * 비용을 계산한다. 모델별 단가 표가 있고 그 실행이 모델별 사용량을 남겼으면 모델별로 곱하고(단일 단가보다 우선),
+ * 아니면 단일 단가로 계산한다. 둘 다 없으면 비용 칸을 비우고 문구만 남긴다.
+ */
+function resolveCost(
+  run: DraftRun,
+  pricing: TokenPricing,
+): { priceSource: 'by-model' | 'single' | 'none'; estimatedCostUsd?: number; priceNote?: string; modelCosts?: Record<string, number> } {
+  const usageByModel = run.usageByModel;
+  if (pricing.byModel && usageByModel && Object.keys(usageByModel).length > 0) {
+    const { costUsd, costNote } = costForUsageByModel(usageByModel, pricing.byModel);
+    const modelCosts: Record<string, number> = {};
+    for (const [model, usage] of Object.entries(usageByModel)) {
+      const prices = matchTokenPrices(pricing.byModel, model);
+      if (prices) modelCosts[model] = estimateCostUsd(usage, prices);
+    }
+    return { priceSource: 'by-model', ...(costUsd !== undefined ? { estimatedCostUsd: costUsd } : {}), ...(costNote ? { priceNote: costNote } : {}), modelCosts };
+  }
+  if (pricing.single) {
+    const modelCosts = usageByModel
+      ? Object.fromEntries(Object.entries(usageByModel).map(([model, usage]) => [model, estimateCostUsd(usage, pricing.single!)]))
+      : undefined;
+    return { priceSource: 'single', estimatedCostUsd: estimateCostUsd(run.usage, pricing.single), ...(modelCosts ? { modelCosts } : {}) };
+  }
+  return { priceSource: 'none', priceNote: '단가 미설정' };
 }
 
 function warningsFor(run: DraftRun, turns: TokenTurn[]): TokenWarning[] {
@@ -268,5 +323,21 @@ export function pricesFromEnv(env: Record<string, string | undefined>): TokenPri
   const cacheWritePerM = read('B_STUDIO_PRICE_CACHE_WRITE_PER_M');
   if (inputPerM === undefined || outputPerM === undefined || cacheReadPerM === undefined || cacheWritePerM === undefined) return undefined;
   return { inputPerM, outputPerM, cacheReadPerM, cacheWritePerM };
+}
+
+/**
+ * 환경 변수에서 보고서용 단가를 모은다. 모델별 표(`B_STUDIO_TOKEN_PRICES_JSON`)가 잘못된 JSON이면
+ * 서버를 죽이지 않고 error에 이유를 담아 보고서 경고로 넘긴다(단가 없음으로 취급).
+ */
+export function tokenPricing(env: Record<string, string | undefined>): TokenPricing {
+  const single = pricesFromEnv(env);
+  const base: TokenPricing = single ? { single } : {};
+  const raw = env.B_STUDIO_TOKEN_PRICES_JSON?.trim();
+  if (!raw) return base;
+  try {
+    return { ...base, byModel: parsePriceTable(JSON.parse(raw)) };
+  } catch (error) {
+    return { ...base, error: `단가 표를 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 

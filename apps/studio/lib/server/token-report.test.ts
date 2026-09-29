@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '@b-studio/agent';
 import type { StudioEvent } from '../studio-events';
-import { buildTokenReports, estimateCostUsd, pricesFromEnv, summarizeInput, type TokenPrices } from './token-report';
+import { buildTokenReports, estimateCostUsd, pricesFromEnv, summarizeInput, tokenPricing, type TokenPrices } from './token-report';
 
 const agent = (runId: string, event: Exclude<AgentEvent, { type: 'tokens' }>): StudioEvent => ({ type: 'agent', runId, event });
 
@@ -20,6 +20,37 @@ function sampleEvents(): StudioEvent[] {
     { type: 'run_finished', runId: 'r1', status: 'done', summary: 'ok', turns: 2, usage: { inputTokens: 3000, outputTokens: 110, cacheReadTokens: 30_000, cacheWriteTokens: 100 } },
   ];
 }
+
+/** 승격으로 모델이 바뀐 실행 하나: haiku 100/10 뒤 sonnet 200/20 */
+function modelEvents(): StudioEvent[] {
+  return [
+    { type: 'run_started', runId: 'r1', request: '주문 필터 추가' },
+    agent('r1', { type: 'turn', turn: 1 }),
+    agent('r1', { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 100 }),
+    agent('r1', { type: 'model_escalated', from: 'haiku', to: 'sonnet', attempt: 2, signature: 'run|api|x', sameSignatureTimes: 2 }),
+    {
+      type: 'run_finished',
+      runId: 'r1',
+      status: 'done',
+      summary: 'ok',
+      turns: 1,
+      usage: { inputTokens: 300, outputTokens: 30, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      metrics: {
+        modelCalls: 2,
+        maxContextTokens: 100,
+        modelMs: 0,
+        toolMs: 0,
+        gateMs: 0,
+        usageByModel: {
+          haiku: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          sonnet: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      },
+    },
+  ];
+}
+
+const prices = (inputPerM: number, outputPerM: number, cacheReadPerM = 0, cacheWritePerM = 0): TokenPrices => ({ inputPerM, outputPerM, cacheReadPerM, cacheWritePerM });
 
 describe('buildTokenReports', () => {
   it('턴별 컨텍스트·증가량과 그 턴의 가장 큰 도구 결과를 낸다', () => {
@@ -62,13 +93,15 @@ describe('buildTokenReports', () => {
 
   it('단가가 있으면 추정 비용을, 없으면 "단가 미설정"을 남긴다', () => {
     const prices: TokenPrices = { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 };
-    const [priced] = buildTokenReports(sampleEvents(), prices);
+    const [priced] = buildTokenReports(sampleEvents(), { single: prices });
     expect(priced!.estimatedCostUsd).toBeCloseTo(estimateCostUsd({ inputTokens: 3000, outputTokens: 110, cacheReadTokens: 30_000, cacheWriteTokens: 100 }, prices), 8);
     expect(priced!.priceNote).toBeUndefined();
+    expect(priced!.priceSource).toBe('single');
 
     const [unpriced] = buildTokenReports(sampleEvents());
     expect(unpriced!.estimatedCostUsd).toBeUndefined();
     expect(unpriced!.priceNote).toBe('단가 미설정');
+    expect(unpriced!.priceSource).toBe('none');
   });
 
   it('여러 실행은 최신이 먼저 오고, 도구 결과가 없는 실행도 남는다', () => {
@@ -122,6 +155,79 @@ describe('buildTokenReports', () => {
     const [report] = buildTokenReports(sampleEvents());
     expect(report!.cleared).toEqual({ count: 0, chars: 0 });
     expect(report!.turns.every((turn) => turn.cleared === undefined)).toBe(true);
+  });
+
+  it('실행이 남긴 모델별 사용량과 승격 정보를 보고서에 싣는다', () => {
+    const [report] = buildTokenReports(modelEvents());
+    expect(report!.usageByModel).toEqual({
+      haiku: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      sonnet: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    });
+    expect(report!.escalation).toEqual({ from: 'haiku', to: 'sonnet', attempt: 2 });
+  });
+
+  it('모델별 단가 표가 있으면 모델별로 계산하고(단일 단가보다 우선) 모델별 비용도 남긴다', () => {
+    const byModel = { haiku: prices(1, 5), sonnet: prices(3, 15) };
+    const [report] = buildTokenReports(modelEvents(), { byModel, single: prices(100, 100) });
+
+    expect(report!.priceSource).toBe('by-model');
+    const haiku = estimateCostUsd({ inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }, byModel.haiku);
+    const sonnet = estimateCostUsd({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }, byModel.sonnet);
+    expect(report!.estimatedCostUsd).toBeCloseTo(haiku + sonnet, 8);
+    expect(report!.modelCosts).toEqual({ haiku, sonnet });
+    expect(report!.priceNote).toBeUndefined();
+  });
+
+  it('모델별 단가가 없는 모델이 하나라도 있으면 합계 비용 대신 사유를 남긴다', () => {
+    const [report] = buildTokenReports(modelEvents(), { byModel: { haiku: prices(1, 5) } });
+
+    expect(report!.priceSource).toBe('by-model');
+    expect(report!.estimatedCostUsd).toBeUndefined();
+    expect(report!.priceNote).toBe('단가 없음: sonnet');
+    // 값을 찾은 모델의 비용은 표에 남는다
+    expect(report!.modelCosts).toEqual({ haiku: estimateCostUsd({ inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }, prices(1, 5)) });
+  });
+
+  it('모델별 사용량이 없으면 모델별 표가 있어도 단일 단가로 계산한다', () => {
+    const single = prices(3, 15);
+    const [report] = buildTokenReports(sampleEvents(), { byModel: { haiku: prices(1, 5) }, single });
+
+    expect(report!.priceSource).toBe('single');
+    expect(report!.estimatedCostUsd).toBeCloseTo(estimateCostUsd({ inputTokens: 3000, outputTokens: 110, cacheReadTokens: 30_000, cacheWriteTokens: 100 }, single), 8);
+  });
+
+  it('단가 표 JSON을 읽지 못하면 경고를 남기고 단가 없음으로 취급한다', () => {
+    const [report] = buildTokenReports(modelEvents(), tokenPricing({ B_STUDIO_TOKEN_PRICES_JSON: '{' }));
+
+    expect(report!.priceSource).toBe('none');
+    expect(report!.warnings.find((warning) => warning.kind === 'price_table')?.message).toContain('단가 표를 읽지 못했습니다');
+  });
+});
+
+describe('tokenPricing', () => {
+  it('모델별 표 JSON과 단일 단가를 함께 싣는다', () => {
+    const json = JSON.stringify({ haiku: { inputPerM: 1, outputPerM: 5, cacheReadPerM: 0, cacheWritePerM: 0 } });
+    const pricing = tokenPricing({
+      B_STUDIO_TOKEN_PRICES_JSON: json,
+      B_STUDIO_PRICE_INPUT_PER_M: '3',
+      B_STUDIO_PRICE_OUTPUT_PER_M: '15',
+      B_STUDIO_PRICE_CACHE_READ_PER_M: '0.3',
+      B_STUDIO_PRICE_CACHE_WRITE_PER_M: '3.75',
+    });
+
+    expect(pricing.byModel).toEqual({ haiku: { inputPerM: 1, outputPerM: 5, cacheReadPerM: 0, cacheWritePerM: 0 } });
+    expect(pricing.single).toEqual({ inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 });
+    expect(pricing.error).toBeUndefined();
+  });
+
+  it('잘못된 JSON이면 서버를 죽이지 않고 error에 이유를 담는다', () => {
+    const pricing = tokenPricing({ B_STUDIO_TOKEN_PRICES_JSON: '{ not json' });
+    expect(pricing.error).toContain('단가 표를 읽지 못했습니다');
+    expect(pricing.byModel).toBeUndefined();
+  });
+
+  it('환경 변수가 없으면 빈 설정이다', () => {
+    expect(tokenPricing({})).toEqual({});
   });
 });
 

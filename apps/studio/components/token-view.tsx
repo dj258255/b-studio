@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { AgentUsage } from "@b-studio/agent";
 import type { SessionView } from "@/lib/session-view";
 import type { TokenReport, TokenWarningKind } from "@/lib/token-types";
+import { formatTokenCount } from "@/lib/usage";
 
 const number = (value: number) => value.toLocaleString("ko-KR");
 const percent = (ratio: number) => `${(ratio * 100).toFixed(0)}%`;
@@ -13,6 +15,14 @@ const WARNING_TONE: Record<TokenWarningKind, string> = {
   repeated_result: "text-wait",
   node_modules: "text-wait",
   context_jump: "text-fail",
+  price_table: "text-wait",
+};
+
+/** 비용을 어느 방식으로 계산했는지 화면에 붙일 이름 */
+const PRICE_SOURCE_LABEL: Record<TokenReport["priceSource"], string> = {
+  "by-model": "모델별 단가",
+  single: "단일 단가",
+  none: "단가 미설정",
 };
 
 /**
@@ -84,7 +94,8 @@ export function TokenView({ view }: { view: SessionView }) {
   );
 }
 
-function RunDetail({ report }: { report: TokenReport }) {
+export function RunDetail({ report }: { report: TokenReport }) {
+  const models = Object.entries(report.usageByModel ?? {});
   return (
     <div className="flex flex-col gap-6">
       <section aria-labelledby="token-totals">
@@ -95,11 +106,24 @@ function RunDetail({ report }: { report: TokenReport }) {
           <Stat label="캐시 읽기" value={number(report.totals.cacheReadTokens)} />
           <Stat label="캐시 쓰기" value={number(report.totals.cacheWriteTokens)} />
           <Stat label="캐시 적중률" value={percent(report.cacheHitRatio)} />
-          <Stat label="추정 비용" value={report.estimatedCostUsd === undefined ? (report.priceNote ?? "단가 미설정") : `$${report.estimatedCostUsd.toFixed(4)}`} />
+          <Stat label="추정 비용" value={costText(report)} />
           <Stat label="비운 도구 결과" value={report.cleared.count === 0 ? "없음" : `${number(report.cleared.count)}개 · ${number(report.cleared.chars)}자`} />
         </dl>
         <p className="mt-1 text-xs text-muted">캐시 적중률은 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기)입니다. 추정 비용은 단가 환경 변수를 넣었을 때만 계산합니다.</p>
+        {report.escalation && (
+          <p className="mt-1 text-sm text-muted">
+            {report.escalation.attempt}번째 게이트 실패 뒤 <span className="font-mono text-ink">{report.escalation.from}</span> →{" "}
+            <span className="font-mono text-ink">{report.escalation.to}</span> 모델로 올렸습니다
+          </p>
+        )}
       </section>
+
+      {models.length > 0 && (
+        <section aria-labelledby="token-models">
+          <h3 id="token-models" className="text-sm font-semibold">모델별</h3>
+          <ModelBreakdown report={report} models={models} />
+        </section>
+      )}
 
       <section aria-labelledby="token-turns">
         <h3 id="token-turns" className="text-sm font-semibold">턴별 컨텍스트</h3>
@@ -264,6 +288,62 @@ function ContextChart({ turns }: { turns: TokenReport["turns"] }) {
         })}
       </svg>
     </div>
+  );
+}
+
+/** 합계의 추정 비용 한 칸. 계산 방식을 함께 붙이고, 계산하지 못했으면 사유를 보여 준다 */
+function costText(report: TokenReport): string {
+  const amount = report.estimatedCostUsd === undefined ? (report.priceNote ?? "단가 미설정") : `$${report.estimatedCostUsd.toFixed(4)}`;
+  return report.priceSource === "none" ? amount : `${amount} · ${PRICE_SOURCE_LABEL[report.priceSource]}`;
+}
+
+/** 모델 한 줄의 비용 칸. 단가를 찾은 모델만 값을, 아니면 사유를 보여 준다 */
+function modelCostText(report: TokenReport, model: string): string {
+  const cost = report.modelCosts?.[model];
+  if (cost !== undefined) return `$${cost.toFixed(4)}`;
+  return report.priceSource === "none" ? "단가 미설정" : "단가 없음";
+}
+
+/**
+ * 실행이 쓴 모델별 토큰과 비용. 모델이 하나면 표 대신 한 줄로 적고, 여럿이면 좁은 화면에서도
+ * 가로로 넘치지 않게 압축 표기(compact)로 표를 그린다.
+ */
+function ModelBreakdown({ report, models }: { report: TokenReport; models: Array<[string, AgentUsage]> }) {
+  if (models.length === 1) {
+    const [model, usage] = models[0]!;
+    return (
+      <p className="mt-2 text-sm text-muted">
+        <span className="font-mono text-ink">{model}</span> · 입력 {formatTokenCount(usage.inputTokens)} · 캐시 읽기{" "}
+        {formatTokenCount(usage.cacheReadTokens)} · 캐시 쓰기 {formatTokenCount(usage.cacheWriteTokens)} · 출력{" "}
+        {formatTokenCount(usage.outputTokens)} · {modelCostText(report, model)}
+      </p>
+    );
+  }
+  return (
+    <table className="mt-2 w-full text-left text-xs">
+      <thead className="border-b border-line text-muted">
+        <tr>
+          <th scope="col" className="py-1.5 pr-2 font-medium">모델</th>
+          <th scope="col" className="py-1.5 pr-2 text-right font-medium">입력</th>
+          <th scope="col" className="py-1.5 pr-2 text-right font-medium">캐시 읽기</th>
+          <th scope="col" className="py-1.5 pr-2 text-right font-medium">캐시 쓰기</th>
+          <th scope="col" className="py-1.5 pr-2 text-right font-medium">출력</th>
+          <th scope="col" className="py-1.5 text-right font-medium">비용</th>
+        </tr>
+      </thead>
+      <tbody>
+        {models.map(([model, usage]) => (
+          <tr key={model} className="border-b border-line/60">
+            <th scope="row" className="py-1.5 pr-2 font-mono font-medium break-all">{model}</th>
+            <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.inputTokens)}</td>
+            <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.cacheReadTokens)}</td>
+            <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.cacheWriteTokens)}</td>
+            <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.outputTokens)}</td>
+            <td className="py-1.5 text-right font-mono">{modelCostText(report, model)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
