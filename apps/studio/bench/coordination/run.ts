@@ -36,9 +36,12 @@ import {
   resolveContractsSource,
   resolveEscalation,
   resolveRateLimitPolicy,
+  resolveVerify,
   sessionBackendOf,
+  verifyNotice,
   type Backend,
   type BenchLaneGroup,
+  type BenchVerify,
   type ContractsSource,
 } from './backends';
 import { classify } from './classify';
@@ -89,6 +92,8 @@ interface Args {
   topology?: string;
   /** 통합 게이트에 api 값 확인을 덧붙일지. 기본 꺼짐 */
   integrationChecks?: boolean;
+  /** 검증 범위(full|light). 기본 full. light면 레인·통합 실행이 가볍게 확인한다 */
+  verify?: string;
   /** 레인 사이 계약의 출처(human|model). 기본 human. model은 S2에서만 */
   contracts?: string;
   escalateTo?: string;
@@ -117,6 +122,7 @@ function parseArgs(argv: string[]): Args {
     if (arg === '--dry') args.dry = true;
     else if (arg === '--force') args.force = true;
     else if (arg === '--integration-checks') args.integrationChecks = true;
+    else if (arg === '--verify') args.verify = next(argv, index++, '--verify');
     else if (arg === '--tasks') args.taskIds = split(next(argv, index++, '--tasks'));
     else if (arg === '--strategies') args.strategies = split(next(argv, index++, '--strategies')) as Strategy[];
     else if (arg === '--repeats') args.repeats = Number(next(argv, index++, '--repeats'));
@@ -146,6 +152,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--topology=')) args.topology = arg.slice('--topology='.length);
     else if (arg.startsWith('--contracts=')) args.contracts = arg.slice('--contracts='.length);
     else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
+    else if (arg.startsWith('--verify=')) args.verify = arg.slice('--verify='.length);
     else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
     else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
     else if (arg.startsWith('--escalate-after-failures=')) args.escalateAfterFailures = Number(arg.slice('--escalate-after-failures='.length));
@@ -310,6 +317,8 @@ interface RunContext {
   laneBackends: LaneBackends;
   /** 통합 게이트에 api 값 확인을 덧붙이는지. 행마다 기록한다 */
   integrationChecks: boolean;
+  /** 검증 범위(--verify). 'light'면 레인·통합 실행에 가볍게 확인을 넘긴다. 기본 full */
+  verify: BenchVerify;
   /** 레인 사이 계약의 출처(--contracts). S2에서만 뜻이 있다 */
   contractsSource: ContractsSource;
   /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
@@ -369,6 +378,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       ...(coordination ? { coordination } : {}),
       // 통합 게이트 전용 확인도 서버 안에서만 넘긴다(--integration-checks)
       ...(integrationChecks ? { integrationChecks } : {}),
+      // 가볍게 확인(--verify light)도 서버 안에서만 넘긴다. 레인·통합 실행이 이 값을 쓴다
+      ...(context.verify === 'light' ? { verify: context.verify } : {}),
     });
     planId = created.id;
     plan = await waitForPlan(taskPlans, created.id, localUser, ['awaiting_approval', 'failed'], APPROVAL_TIMEOUT_MS, '계획이 승인 대기에 이르지 않았습니다', activeSessions);
@@ -495,6 +506,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     coupled: task.coupled,
     strategy,
     integrationChecks: context.integrationChecks,
+    verify: context.verify,
     model: context.requestedModel,
     observedModels,
     startedAt,
@@ -667,6 +679,7 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     coupled: task.coupled,
     strategy: 'P0',
     integrationChecks: context.integrationChecks,
+    verify: context.verify,
     model: context.requestedModel,
     observedModels: baseline ? Object.keys(baseline.usageByModel).sort() : [],
     startedAt,
@@ -874,6 +887,8 @@ async function main(): Promise<void> {
   const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
   // 오래된 도구 결과 비우기. 기본은 끔이고, API 루프(openai)에서만 뜻이 있다 — 로컬 CLI는 각자 자체 압축을 한다
   const contextClearing = resolveContextClearing(args.contextClearing);
+  // 검증 범위(--verify). 기본 full(지금과 같다). light면 레인·통합 실행이 가볍게 확인한다
+  const verify = resolveVerify(args.verify);
   if (contextClearing && backend !== 'openai') throw new Error('--context-clearing은 --backend openai(API 루프)에서만 쓸 수 있습니다. 로컬 CLI 러너는 대화를 직접 다루지 않습니다');
   // 레인 백엔드(--lane-backend)도 시작 전에 확정한다. 모르는 레인 그룹·백엔드는 여기서 오류를 낸다
   const laneBackendChoices = parseLaneBackends(args.laneBackends);
@@ -899,6 +914,9 @@ async function main(): Promise<void> {
   const topology = parseTopology(args.topology);
   // P0는 로컬 Claude Code 전용이다. Docker·모델을 건드리기 전에 백엔드를 확인한다
   assertPlainBaselineBackend(backend, strategies);
+  // P0는 b-studio 게이트를 쓰지 않아 verify가 적용되지 않는다. light와 함께 주면 무시하고 한 줄 알린다
+  const verifyWarning = verifyNotice(verify, strategies);
+  if (verifyWarning) console.warn(verifyWarning);
   // 계약 출처도 시작 전에 확정한다. model 계약을 계약을 쓰지 않는 전략과 함께 돌리면 무엇을 잰 것인지 알 수 없다
   const contractsSource = resolveContractsSource(args.contracts);
   assertContractsStrategy(contractsSource, strategies);
@@ -1071,6 +1089,7 @@ async function main(): Promise<void> {
       topology,
       laneBackends,
       integrationChecks: args.integrationChecks ?? false,
+      verify,
       contractsSource,
       ...(escalation.to ? { escalateTo: escalation.to } : {}),
       escalateAfter: escalation.after,
@@ -1130,7 +1149,7 @@ async function main(): Promise<void> {
 
   const finishedAt = new Date().toISOString();
   const observedModels = [...new Set(rows.flatMap((row) => row.observedModels))];
-  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource }), secrets));
+  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource, verify }), secrets));
   await writeFile(
     path.join(outRoot, 'meta.json'),
     redact(
@@ -1163,6 +1182,7 @@ async function main(): Promise<void> {
           rateLimitWaitMinutes: rateLimit.waitMinutes,
           contextClearing,
           integrationChecks: args.integrationChecks ?? false,
+          verify,
           abortReason,
         },
         null,

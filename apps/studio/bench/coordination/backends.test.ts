@@ -12,7 +12,9 @@ import {
   resolveContractsSource,
   resolveEscalation,
   resolveRateLimitPolicy,
+  resolveVerify,
   sessionBackendOf,
+  verifyNotice,
 } from './backends';
 
 describe('resolveBackend', () => {
@@ -79,6 +81,28 @@ describe('resolveContextClearing', () => {
 
   it('모르는 값은 거부한다', () => {
     expect(() => resolveContextClearing('yes')).toThrow(/on 또는 off/);
+  });
+});
+
+describe('검증 범위(--verify)', () => {
+  it('기본은 full이고, light만 가볍게 확인으로 받는다', () => {
+    expect(resolveVerify(undefined)).toBe('full');
+    expect(resolveVerify('full')).toBe('full');
+    expect(resolveVerify('light')).toBe('light');
+    expect(resolveVerify(' LIGHT ')).toBe('light');
+  });
+
+  it('모르는 값은 조용히 full로 떨어뜨리지 않고 거부한다', () => {
+    expect(() => resolveVerify('none')).toThrow(/full 또는 light/);
+    expect(() => resolveVerify('true')).toThrow(/full 또는 light/);
+  });
+
+  it('P0는 게이트가 없어 light가 적용되지 않는다. light와 함께 주면 무시하고 경고를 돌려준다', () => {
+    expect(verifyNotice('light', ['P0'])).toMatch(/P0.*적용되지 않습니다/);
+    expect(verifyNotice('light', ['S0', 'P0'])).toBeDefined();
+    // full이거나 P0가 없으면 경고가 없다
+    expect(verifyNotice('full', ['P0'])).toBeUndefined();
+    expect(verifyNotice('light', ['S0', 'S1'])).toBeUndefined();
   });
 });
 

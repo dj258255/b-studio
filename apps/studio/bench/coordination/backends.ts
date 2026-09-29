@@ -9,6 +9,8 @@ import type { Strategy } from './tasks';
 
 export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'openai';
 export type RateLimitPolicy = 'stop' | 'wait';
+/** 검증 범위(--verify). 기본 full은 지금과 같고, light는 레인·통합 게이트가 재시작·준비·계약만 확인한다 */
+export type BenchVerify = 'full' | 'light';
 
 export interface BackendChoice {
   backend: Backend;
@@ -67,6 +69,28 @@ export function resolveContextClearing(value: string | undefined): boolean {
   const trimmed = value?.trim().toLowerCase() || 'off';
   if (trimmed !== 'on' && trimmed !== 'off') throw new Error(`--context-clearing은 on 또는 off여야 합니다 (지금 값: ${value})`);
   return trimmed === 'on';
+}
+
+/**
+ * 검증 범위(`--verify`). 기본은 full(지금과 같다). light는 E5(전체 검증 대 가볍게 확인)를 재려고 둔다.
+ * 모르는 값은 조용히 full로 떨어뜨리지 않고 여기서 멈춘다.
+ */
+export function resolveVerify(value: string | undefined): BenchVerify {
+  const trimmed = value?.trim().toLowerCase();
+  if (trimmed === undefined || trimmed === '' || trimmed === 'full') return 'full';
+  if (trimmed === 'light') return 'light';
+  throw new Error(`--verify는 full 또는 light여야 합니다 (지금 값: ${value})`);
+}
+
+/**
+ * P0(그냥 Claude Code)는 b-studio 검증 게이트를 쓰지 않으므로 verify가 적용되지 않는다.
+ * light를 P0와 함께 주면 무시한다는 경고 한 줄을 돌려준다(에러가 아니다).
+ */
+export function verifyNotice(verify: BenchVerify, strategies: readonly Strategy[]): string | undefined {
+  if (verify === 'light' && strategies.includes('P0')) {
+    return '경고: P0는 b-studio 검증 게이트를 쓰지 않아 --verify light가 적용되지 않습니다(P0 행은 전체 검증과 같습니다).';
+  }
+  return undefined;
 }
 
 /** 벤치가 넘길 승격 설정. claude-code 백엔드에서만 쓴다 */

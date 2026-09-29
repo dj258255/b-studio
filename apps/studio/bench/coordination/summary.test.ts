@@ -40,6 +40,7 @@ function row(over: Partial<BenchRow>): BenchRow {
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     contextCleared: { count: 0, chars: 0 },
     integrationChecks: false,
+    verify: 'full',
     success: true,
     category: 'none',
     detail: '',
@@ -204,6 +205,11 @@ describe('summarize', () => {
     );
     // 관측한 모델이 없으면 '없음'
     expect(summarize([row({})], meta)).toContain('관측한 모델 없음 · 실행 1회');
+  });
+
+  it('맨 위에 검증 범위(--verify)를 적는다. 기본은 full', () => {
+    expect(summarize([row({})], meta)).toContain('검증 full');
+    expect(summarize([row({ verify: 'light' })], { ...meta, verify: 'light' })).toContain('검증 light(가볍게)');
   });
 
   it('claude-code 백엔드면 modelMs 한계 줄을 더한다', () => {
