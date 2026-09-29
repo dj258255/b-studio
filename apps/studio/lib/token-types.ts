@@ -105,7 +105,7 @@ export interface TokenBigResult {
   turn?: number;
 }
 
-export type TokenWarningKind = 'big_result' | 'repeated_result' | 'node_modules' | 'context_jump';
+export type TokenWarningKind = 'big_result' | 'repeated_result' | 'node_modules' | 'context_jump' | 'price_table';
 
 export interface TokenWarning {
   kind: TokenWarningKind;
@@ -122,11 +122,19 @@ export interface TokenReport {
   biggest: TokenBigResult[];
   warnings: TokenWarning[];
   totals: AgentUsage;
+  /** 모델 이름별 토큰. 한 실행에 모델이 섞일 때(승격 등) 채워진다 */
+  usageByModel?: Record<string, AgentUsage>;
+  /** 모델별 비용(달러). 단가를 찾은 모델만 값이 있다 */
+  modelCosts?: Record<string, number>;
   /** 캐시 읽기 / (입력 + 캐시 읽기 + 캐시 쓰기). 분모가 0이면 0 */
   cacheHitRatio: number;
   /** 실행 중 오래된 도구 결과를 비운 합계(횟수·글자). 비운 적이 없으면 0 */
   cleared: { count: number; chars: number };
   estimatedCostUsd?: number;
-  /** 단가가 없을 때 화면이 보여줄 문구 */
+  /** 비용을 어느 방식으로 계산했는지: 모델별 단가 / 단일 단가 / 단가 없음 */
+  priceSource: 'by-model' | 'single' | 'none';
+  /** 비용을 계산하지 못한 이유 또는 모델별 단가가 없는 모델 문구 */
   priceNote?: string;
+  /** 승격이 있었으면 어느 게이트 실패 뒤에 무엇으로 올렸는지 */
+  escalation?: { from: string; to: string; attempt: number };
 }
