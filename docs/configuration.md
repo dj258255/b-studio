@@ -232,6 +232,7 @@ workflow:
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
 | `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `expectAnyText`는 그중 **하나라도 있으면 통과**하는 문구 목록(1~5개)입니다(같은 값의 표기가 갈릴 때, 예: `45000`/`45,000`). `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다. `expectFromApi`를 적으면 api를 먼저 불러 그 값이 화면 글자에 있는지 확인합니다(아래 'api 값 확인') |
 | `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
+| `autoPageChecks` | **이번 실행에서 바뀐 Next.js 페이지를 게이트가 스스로 찾아 열어 봅니다**(선택, 기본 없음). `service`는 `source: managed`이면서 템플릿이 `nextjs`여야 합니다. 아래 '바뀐 페이지 자동 확인' |
 | `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
@@ -241,8 +242,59 @@ workflow:
 
 - `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가, `concurrency_check`가 있으면 `concurrencyChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
 - `tests`·`pageChecks`·`concurrencyChecks`의 `service`는 `source: managed` 서비스여야 합니다. `pageChecks.expectFromApi.service`(값을 꺼낼 api)도 마찬가지입니다.
+- `autoPageChecks.service`는 `source: managed`이면서 템플릿이 `nextjs`인 서비스여야 합니다(열어 볼 경로를 app 라우터 구조에서 찾습니다).
 - 테스트·동시 요청 확인 이름은 중복될 수 없습니다.
 - `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
+
+### 바뀐 페이지 자동 확인 (`autoPageChecks`)
+
+E1~E4 내내 반복된 원인 하나: 게이트의 화면 확인은 `pageChecks`에 적어 둔 페이지만 열어서, **이번 실행이 새로 만든 페이지가 500을 내도 게이트는 통과**했습니다(E2의 order-summary). `autoPageChecks`를 켜면 게이트가 이번 실행에서 바뀐 파일에서 Next.js 페이지를 찾아 스스로 열어 봅니다.
+
+```yaml
+workflow:
+  autoPageChecks:
+    service: web            # 필수. source: managed이고 템플릿이 nextjs인 서비스
+    mode: http              # http(기본) | browser
+    expectStatus: 200       # 기본 200
+    maxPages: 5             # 1~10, 기본 5
+    # 동적 세그먼트 [id]에 넣을 값. 값이 없는 세그먼트가 있는 라우트는 건너뜁니다
+    sampleParams: { id: "1" }
+    # browser 모드에서만
+    viewport: { width: 390, height: 844 }
+```
+
+**찾는 규칙** (서비스 폴더 기준, `page` 파일만)
+
+- `app/**/page.tsx|jsx|ts|js|mdx`와 `src/app/**/page.*`를 찾습니다.
+- 라우트 그룹 `(marketing)`은 주소에서 빼고, 동적 세그먼트 `[id]`는 `sampleParams` 값으로 채워 엽니다(`encodeURIComponent`).
+- 같은 경로를 만드는 파일이 여럿이면 하나만 열고, 경로 순으로 정렬해 `maxPages`까지만 엽니다.
+- `pageChecks`에 **이미 선언한 `service`+`path`는 두 번 열지 않습니다**(건너뜀 check로 남습니다).
+
+**건너뛰는 경우** (조용히 사라지지 않고 `ok`인 check로 이유가 남습니다)
+
+| 대상 | 이유 |
+|---|---|
+| `[...slug]`·`[[...slug]]` | catch-all은 열어 볼 값을 정할 수 없습니다 |
+| `@modal`(병렬 라우트) | 같은 주소를 여러 파일이 나눠 그려 경로를 하나로 정할 수 없습니다 |
+| `(.)`·`(..)`(인터셉트 라우트) | 화면 주소가 아닙니다 |
+| `sampleParams`에 값이 없는 `[id]` | `동적 세그먼트 'id'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요` |
+| `maxPages`를 넘은 페이지 | 상한(N개)을 넘었습니다 |
+
+**무엇을 확인하나**
+
+- `expectStatus`(기본 200)와, `mode: browser`면 렌더링 뒤 문구·스크립트 예외·`console.error`·실패한 요청까지 `pageChecks`와 같은 규칙으로 봅니다.
+- 자동으로 연 페이지에만 **Next.js 오류 화면 표지**를 추가로 봅니다. 상태 코드가 200이어도 본문에 아래 문구가 있으면 실패입니다.
+  - `Application error: a server-side exception has occurred` (서버 컴포넌트 예외)
+  - `Unhandled Runtime Error` (클라이언트 예외, 개발 오버레이)
+  - `This page could not be found` (Next.js 404 화면. `expectStatus: 404`일 때는 실패로 보지 않습니다)
+- 실패하면 `자동 페이지 /orders: HTTP 500 (기대 200)`처럼 경로를 앞에 붙입니다. 그래서 실패 서명이 선언한 `pageChecks`의 실패와 갈리고, 조율(S5) 게시판에서도 어느 페이지였는지 보입니다.
+
+**한계**
+
+- **작업 분해의 레인 게이트에서 켜면 통과하기 어렵습니다.** 레인은 자기 샌드박스만 보므로, web 레인이 자기 샌드박스에 없는 api를 부르는 페이지를 열면 실패합니다(전체 스택은 통합 게이트에만 있습니다). 전체 스택이 있는 **일반 세션과 통합 게이트용**입니다.
+- `page` 파일만 봅니다. 같은 폴더의 `layout`·`loading`·`error`만 바뀐 경우는 열지 않습니다(그 폴더에 페이지가 있는지 작업 공간에서 싸게 알 방법이 없고, 그런 변경은 대개 `page`도 함께 바뀝니다).
+- `app` 라우터만 봅니다. `pages` 라우터는 다루지 않습니다.
+- **예제 `examples/orders`에는 켜지 않았습니다.** E1~E4와 같은 조건에서 비교할 수 없게 되기 때문입니다.
 
 ### api 값 확인 (`expectFromApi`)
 

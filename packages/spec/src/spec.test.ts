@@ -113,6 +113,36 @@ describe('parseSpec', () => {
     ]);
   });
 
+  it('autoPageChecks는 서비스·모드·상한·동적 값 규칙을 검사하고 기본값을 채운다', () => {
+    // 기본값: http, 200, 5개
+    const parsed = parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web }\n`).workflow?.autoPageChecks;
+    expect(parsed).toEqual({ service: 'web', mode: 'http', expectStatus: 200, maxPages: 5 });
+
+    const full = parseSpec(
+      `${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, mode: browser, expectStatus: 201, maxPages: 10, sampleParams: { id: "1", slug: "a-b_c" }, viewport: { width: 390, height: 844 } }\n`,
+    ).workflow?.autoPageChecks;
+    expect(full).toMatchObject({ mode: 'browser', expectStatus: 201, maxPages: 10, sampleParams: { id: '1', slug: 'a-b_c' }, viewport: { width: 390, height: 844 } });
+
+    // 상한 범위(1~10)를 벗어나면 거부한다
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, maxPages: 0 }\n`)).issues).toEqual([
+      'workflow.autoPageChecks.maxPages: Too small: expected number to be >=1',
+    ]);
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, maxPages: 11 }\n`)).issues).toEqual([
+      'workflow.autoPageChecks.maxPages: maxPages는 최대 10개까지 쓸 수 있습니다',
+    ]);
+    // 값은 경로 조각으로 안전한 문자만 받는다(여기에 이상한 값이 들어가면 URL이 깨진다)
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, sampleParams: { id: "../etc/passwd" } }\n`)).issues).toEqual([
+      'workflow.autoPageChecks.sampleParams.id: 경로 조각으로 안전한 문자(영문·숫자·_·-)만 쓸 수 있습니다',
+    ]);
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, sampleParams: { "a/b": "1" } }\n`)).issues).toEqual([
+      'workflow.autoPageChecks.sampleParams.a/b: 세그먼트 이름은 영문·숫자·_·-만 쓸 수 있습니다',
+    ]);
+    // http 모드에서 viewport를 받으면 검사한 것처럼 보이기만 한다
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, viewport: { width: 390, height: 844 } }\n`)).issues).toEqual([
+      'workflow.autoPageChecks.viewport: viewport는 mode: browser에서만 쓸 수 있습니다',
+    ]);
+  });
+
   it('browser 모드의 상호작용 단계를 읽고, http 모드나 잘못된 단계를 거부한다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}workflow:
   pageChecks:
@@ -518,6 +548,40 @@ workflow:
       "workflow.pageChecks.0.service: 'web'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.expectFromApi.service: 'db'은(는) source: managed 서비스가 아닙니다",
     ]);
+  });
+
+  it('자동 페이지 확인은 관리형이면서 nextjs인 서비스에서만 켤 수 있다', async () => {
+    const write = async (spec: string): Promise<string> => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'spec-autopage-'));
+      await writeFile(path.join(dir, 'studio.yaml'), spec);
+      await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  web: { build: ./web }\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
+      return dir;
+    };
+    const spec = (service: string) => `version: 1
+name: x
+services:
+  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+workflow:
+  autoPageChecks: { service: ${service} }
+`;
+
+    // nextjs 서비스면 통과한다
+    await expect(loadProject(await write(spec('web')))).resolves.toBeDefined();
+
+    const notNextjs = await loadProject(await write(spec('api'))).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(notNextjs.issues).toEqual([
+      "workflow.autoPageChecks.service: 'api'의 템플릿이 spring-boot입니다. app 라우터를 쓰는 Next.js(nextjs) 서비스에서만 자동 페이지 확인을 켤 수 있습니다",
+    ]);
+
+    const notManaged = await loadProject(await write(spec('db'))).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(notManaged.issues).toEqual(["workflow.autoPageChecks.service: 'db'은(는) source: managed 서비스가 아닙니다"]);
   });
 
   it('시크릿은 환경 변수 이름으로 적고, 받을 서비스는 compose에 있어야 한다', async () => {

@@ -1,9 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
-import type { ConcurrencyExpect, LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowPageCompare, WorkflowStage, WorkflowTest } from '@b-studio/spec';
+import type { AutoPageChecks, ConcurrencyExpect, LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowPageCompare, WorkflowStage, WorkflowTest } from '@b-studio/spec';
 import { runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
+import { routesFromChangedFiles } from './next-routes';
 import { servicesForFiles } from './services';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
@@ -27,6 +28,40 @@ const TEST_TIMEOUT_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const CHECK_CONCURRENCY = 2;
 const OUTPUT_TAIL_LINES = 30;
+
+/**
+ * Next.js가 오류 화면을 대신 그릴 때 나오는 문구. 상태 코드가 200이어도 본문이 오류 화면이면 실패로 본다.
+ * 자동으로 연 페이지에만 적용한다(선언한 pageChecks는 사람이 기대 문구를 적어 두므로 그대로 둔다).
+ *  - "Application error: a server-side exception has occurred" — App Router가 서버 컴포넌트 예외를 만나면(프로덕션) 대신 그리는 화면
+ *  - "Unhandled Runtime Error" — 클라이언트 예외를 Next.js 개발 오버레이가 보여 줄 때의 제목
+ */
+export const NEXT_ERROR_MARKERS = ['Application error: a server-side exception has occurred', 'Unhandled Runtime Error'] as const;
+/** Next.js 기본 404 화면. 약속한 응답이 404가 아니면 실패로 본다(없는 라우트를 열어 본 셈이다) */
+export const NEXT_NOT_FOUND_MARKER = 'This page could not be found';
+
+/** 자동으로 연 페이지의 본문에서 찾은 오류 표지. 없으면 undefined */
+export function nextErrorMarker(text: string, expectStatus: number): string | undefined {
+  const found = NEXT_ERROR_MARKERS.find((marker) => text.includes(marker));
+  if (found) return found;
+  if (expectStatus !== 404 && text.includes(NEXT_NOT_FOUND_MARKER)) return NEXT_NOT_FOUND_MARKER;
+  return undefined;
+}
+
+/**
+ * `workflow.autoPageChecks` 설정을 선언형 pageChecks와 같은 모양으로 바꾼다.
+ * 같은 `#checkPage` 경로로 돌리기 위한 것이라, 설정에 없는 값은 pageChecks의 기본값과 같게 둔다.
+ */
+export function autoPageCheck(config: AutoPageChecks, routePath: string): WorkflowPageCheck {
+  return {
+    service: config.service,
+    path: routePath,
+    mode: config.mode,
+    expectStatus: config.expectStatus,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    ...(config.viewport ? { viewport: config.viewport } : {}),
+  };
+}
 
 export const fetchPage: PageFetcher = async (url, signal) => {
   const timeout = AbortSignal.timeout(PAGE_TIMEOUT_MS);
@@ -189,7 +224,9 @@ export class VerificationGate {
     const pages = workflow?.pageChecks ?? [];
     const tests = workflow?.tests ?? [];
     const concurrency = workflow?.concurrencyChecks ?? [];
-    if (pages.length === 0 && tests.length === 0 && concurrency.length === 0) return [];
+    // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
+    const auto = this.#autoPages(pages);
+    if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
 
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     const nodes: TaskNode<void>[] = [];
@@ -205,6 +242,11 @@ export class VerificationGate {
       meta.push({ stage: 'browser_check', name });
       nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, name, signal) });
     }
+    for (const entry of auto.pages) {
+      meta.push({ stage: 'browser_check', name: entry.name });
+      // 자동 페이지는 같은 #checkPage로 돌리되 오류 화면 표지까지 본다
+      nodes.push({ id: `page:${entry.name}`, run: ({ signal }) => this.#checkPage(entry.page, entry.name, signal, { auto: true }) });
+    }
     for (const test of tests) {
       meta.push({ stage: 'test', name: test.name });
       nodes.push({ id: `test:${test.name}`, maxAttempts: test.maxAttempts, run: ({ signal }) => this.#runTest(test, signal) });
@@ -213,12 +255,13 @@ export class VerificationGate {
       meta.push({ stage: 'concurrency_check', name: check.name });
       nodes.push({ id: `concurrency:${check.name}`, run: ({ signal }) => this.#runConcurrencyCheck(check, check.name, signal) });
     }
-    if (pages.length > 0) this.#stage('browser_check');
+    // 건너뛴 자동 페이지만 있는 경우(상한 초과 등)에는 browser_check를 돌았다고 세지 않는다
+    if (pages.length > 0 || auto.pages.length > 0) this.#stage('browser_check');
     if (tests.length > 0) this.#stage('test');
     if (concurrency.length > 0) this.#stage('concurrency_check');
 
     const results = await runTaskGraph(nodes, { concurrency: CHECK_CONCURRENCY, signal: this.#options.signal });
-    return results.map((result, index) => {
+    const checks = results.map((result, index) => {
       const entry = meta[index]!;
       const steps = this.#pageSteps.get(entry.name);
       const compare = this.#pageCompares.get(entry.name);
@@ -240,10 +283,50 @@ export class VerificationGate {
         ...(loadMs !== undefined ? { metrics: { loadMs } } : {}),
       };
     });
+    // 건너뛴 라우트도 check로 남긴다(ok). 조용히 사라지면 "확인했다"처럼 보인다
+    return [...checks, ...auto.skipped];
   }
 
-  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal): Promise<void> {
+  /**
+   * 이번 실행에서 바뀐 Next.js 페이지 중 자동으로 열어 볼 것을 고른다(`workflow.autoPageChecks`).
+   * page 파일만 본다 — 같은 폴더의 layout·loading·error만 바뀐 경우는 열지 않는다(next-routes.ts의 범위 주석 참고).
+   * 선언한 pageChecks와 같은 service+path는 두 번 열지 않고 건너뜀 check로 남긴다.
+   */
+  #autoPages(declared: readonly WorkflowPageCheck[]): { pages: Array<{ page: WorkflowPageCheck; name: string }>; skipped: WorkflowCheck[] } {
+    const config = this.#options.project.spec.workflow?.autoPageChecks;
+    if (!config) return { pages: [], skipped: [] };
+    const service = this.#options.project.managed.find(([name]) => name === config.service);
+    // 불러올 때 막지만(load.ts), 여기서도 조용히 넘어가지 않고 이유를 남긴다
+    if (!service) {
+      return {
+        pages: [],
+        skipped: [this.#autoSkipCheck(config.service, config.service, `autoPageChecks.service '${config.service}'를 이 프로젝트의 관리형 서비스에서 찾지 못했습니다`)],
+      };
+    }
+
+    const found = routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages);
+    const declaredKeys = new Set(declared.map((page) => `${page.service} ${page.path}`));
+    const pages: Array<{ page: WorkflowPageCheck; name: string }> = [];
+    const skipped = found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason));
+    for (const route of found.routes) {
+      if (declaredKeys.has(`${config.service} ${route.path}`)) {
+        skipped.push(this.#autoSkipCheck(config.service, route.file, `${route.path}은(는) 이미 선언한 pageChecks에 있어 두 번 열지 않았습니다`));
+        continue;
+      }
+      pages.push({ page: autoPageCheck(config, route.path), name: `${config.service} ${route.path} (자동)` });
+    }
+    return { pages, skipped };
+  }
+
+  /** 건너뛴 자동 페이지를 남기는 check. ok로 두어 게이트를 막지 않되, 이유는 detail에 남긴다 */
+  #autoSkipCheck(service: string, file: string, reason: string): WorkflowCheck {
+    return { stage: 'browser_check', name: `${service} ${file} (자동, 건너뜀)`, ok: true, attempts: 1, detail: reason };
+  }
+
+  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean } = {}): Promise<void> {
     const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
+    // 자동으로 연 페이지의 실패는 경로를 앞에 붙여, 실패 서명에서 선언한 pageChecks의 실패와 구분되게 한다
+    const fail = (message: string) => new Error(sandbox.redact(options.auto ? `자동 페이지 ${page.path}: ${message}` : message));
     // ① api를 불러 값을 꺼내 둔다. 여기서 실패하면 화면을 열지 않고 멈춘다(렌더링을 낭비하지 않는다)
     const api = await this.#apiValue(page, pageFetcher, signal);
     const endpoint = await sandbox.endpoint(page.service);
@@ -292,17 +375,26 @@ export class VerificationGate {
         }
       }
       // 화면 출력에 시크릿 값이 섞여 있을 수 있어 가린 뒤 모델에게 돌려준다
-      if (problems.length > 0) throw new Error(sandbox.redact(problems.join('\n')));
+      if (options.auto) {
+        // 상태 코드가 200이어도 본문이 Next.js 오류 화면이면 실패다(새로 만든 페이지가 500을 내는 것을 잡는 자리)
+        const marker = nextErrorMarker(result.text, page.expectStatus);
+        if (marker) problems.push(`Next.js 오류 화면: '${marker}'`);
+      }
+      if (problems.length > 0) throw fail(problems.join('\n'));
       if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
       return;
     }
     const { status, text } = await pageFetcher(url.href, signal);
-    if (status !== page.expectStatus) throw new Error(`HTTP ${status} (기대 ${page.expectStatus})`);
-    if (page.expectText && !text.includes(page.expectText)) throw new Error(`응답 본문에 '${page.expectText}'가 없습니다`);
+    if (status !== page.expectStatus) throw fail(`HTTP ${status} (기대 ${page.expectStatus})`);
+    if (options.auto) {
+      const marker = nextErrorMarker(text, page.expectStatus);
+      if (marker) throw fail(`Next.js 오류 화면: '${marker}'`);
+    }
+    if (page.expectText && !text.includes(page.expectText)) throw fail(`응답 본문에 '${page.expectText}'가 없습니다`);
     // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
-    if (page.expectAnyText && !page.expectAnyText.some((candidate) => text.includes(candidate))) throw new Error(missingAnyText(page.expectAnyText));
+    if (page.expectAnyText && !page.expectAnyText.some((candidate) => text.includes(candidate))) throw fail(missingAnyText(page.expectAnyText));
     // ④ api에서 꺼낸 값이 응답 본문(http) 글자에 있는지
-    if (api && !containsApiValue(text, api.value)) throw new Error(sandbox.redact(missingApiValue(api, page.path)));
+    if (api && !containsApiValue(text, api.value)) throw fail(missingApiValue(api, page.path));
   }
 
   /**
