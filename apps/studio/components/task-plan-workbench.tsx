@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
-import type { ProjectSummary } from '@/lib/studio-events';
+import type { ProjectSummary, SessionMode } from '@/lib/studio-events';
 import type { TaskPlanMetrics } from '@/lib/task-plan-metrics';
 import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
 import { describeTokens, hasTokens } from '@/lib/usage';
@@ -47,7 +47,26 @@ const STEP_COLOR: Record<TaskPlanStepStatus, string> = {
   skipped: 'text-muted',
 };
 
-export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects: ProjectSummary[]; models: ModelOption[]; initialPlans: TaskPlanView[] }) {
+/** 이 서버에서 계획을 어떻게 받는지(서버 capabilities에서 온다). enabled=false면 이 화면은 고정 계획만 보여 준다 */
+export interface PlannerCapability {
+  mode: SessionMode;
+  enabled: boolean;
+  reason?: string;
+}
+
+export function TaskPlanWorkbench({
+  projects,
+  models,
+  initialPlans,
+  planner,
+}: {
+  projects: ProjectSummary[];
+  models: ModelOption[];
+  initialPlans: TaskPlanView[];
+  planner: PlannerCapability;
+}) {
+  // 로컬 Claude Code 구독 모드는 모델 레지스트리가 아니라 그 CLI가 모델을 정한다(모델 선택 칸을 쓰지 않는다)
+  const localCli = planner.enabled && planner.mode === 'claude-code';
   const readyModels = models.filter((model) => model.configured && model.enabled !== false && model.capabilities.includes('tools'));
   const [projectId, setProjectId] = useState(projects.find((project) => !project.error)?.id ?? '');
   const [modelId, setModelId] = useState(readyModels[0]?.id ?? '');
@@ -83,7 +102,8 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
       const response = await fetch('/api/task-plans', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId, request, modelId }),
+        // 로컬 CLI 모드는 모델을 보내지 않는다(그 CLI가 정한다)
+        body: JSON.stringify({ projectId, request, ...(localCli ? {} : { modelId }) }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
@@ -149,11 +169,23 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             {projects.filter((project) => !project.error).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
 
-          <label className="mt-4 block text-sm font-medium" htmlFor="plan-model">모델</label>
-          <select id="plan-model" value={modelId} onChange={(event) => setModelId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
-            {readyModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-          </select>
-          {readyModels.length === 0 && <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>}
+          {localCli ? (
+            <>
+              <p className="mt-4 text-sm font-medium">모델</p>
+              <p className="mt-1 rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 text-muted">
+                이 PC에 로그인한 Claude Code 구독으로 계획을 받습니다. 모델은 <span className="font-mono">B_STUDIO_CLAUDE_CODE_MODEL</span> 또는 계정 기본값입니다.
+              </p>
+            </>
+          ) : (
+            <>
+              <label className="mt-4 block text-sm font-medium" htmlFor="plan-model">모델</label>
+              <select id="plan-model" value={modelId} onChange={(event) => setModelId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
+                {readyModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+              </select>
+              {readyModels.length === 0 && <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>}
+            </>
+          )}
+          {!planner.enabled && <p className="mt-1 text-xs text-wait">{planner.reason ?? '이 모드에서는 모델에게 계획을 받을 수 없습니다'}</p>}
 
           <label className="mt-4 block text-sm font-medium" htmlFor="plan-request">요청</label>
           <textarea
@@ -166,7 +198,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
           />
           <button
             type="button"
-            disabled={!projectId || !modelId || !request.trim() || creating}
+            disabled={!planner.enabled || !projectId || (!localCli && !modelId) || !request.trim() || creating}
             onClick={() => void create()}
             className="mt-4 w-full rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >

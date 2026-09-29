@@ -6,7 +6,6 @@ import path from 'node:path';
 import {
   addSubIssue,
   Board,
-  contractAskFromClient,
   canCreatePullRequest,
   CheckpointStore,
   createIssue,
@@ -14,6 +13,7 @@ import {
   isInScope,
   MAX_PLAN_LANES,
   parseRemote,
+  planAskFromClient,
   planLanes,
   requestLaneContracts,
   requestTaskPlan,
@@ -22,12 +22,14 @@ import {
   type AgentUsage,
   type BoardAccess,
   type Note,
+  type PlanAsk,
   type RemoteLocation,
   type RunMetrics,
   type ScriptedTurn,
   type TaskLane,
   type Topology,
 } from '@b-studio/agent';
+import { claudeCodeAsk } from './claude-code-ask';
 import type { Checkpoint } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
@@ -99,10 +101,42 @@ export interface CoordinationInput {
   contracts?: Array<{ body: string; refs: string[] }>;
 }
 
+/**
+ * 모델에게 계획을 받을 수 있는 모드. 유료 API(api)와 이 PC에 로그인한 Claude Code 구독(claude-code)뿐이다.
+ * codex·commandcode·opencode·demo는 아직 계획 호출 경로가 없다(고정 계획만 쓴다) — 나중 작업이다.
+ */
+export const PLANNER_MODES = ['api', 'claude-code'] as const;
+
+/** 로컬 Claude Code 계획 호출에 쓸 모델. 없으면 로그인 계정의 기본 모델을 쓴다 */
+function claudeCodePlanModel(): string | undefined {
+  return process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined;
+}
+
+/** 로컬 CLI로 만든 계획의 기록용 모델 id 접두어. 벤치의 `local-cli:` 규칙과 같다 */
+const LOCAL_CLI_MODEL_PREFIX = 'local-cli:';
+
+/** 이 계획을 만든 모델의 기록용 id. 모델 레지스트리 id가 아니라 이 PC의 CLI 모델 이름이다 */
+function claudeCodePlanModelId(): string {
+  return `${LOCAL_CLI_MODEL_PREFIX}${claudeCodePlanModel() ?? 'default'}`;
+}
+
+/**
+ * 계획·계약을 부르는 방법. 기록된 모델 id가 `local-cli:`면 그 CLI로 **도구 없이 한 번** 부르고,
+ * 아니면 모델 레지스트리 클라이언트로 부른다. 다시 시작한 계획(resume)도 같은 규칙을 탄다.
+ */
+function plannerAskFor(plan: TaskPlanView, project: LoadedProject): PlanAsk {
+  if (plan.modelId.startsWith(LOCAL_CLI_MODEL_PREFIX)) {
+    const model = plan.modelId.slice(LOCAL_CLI_MODEL_PREFIX.length);
+    return claudeCodeAsk({ cwd: project.root, ...(model && model !== 'default' ? { model } : {}) });
+  }
+  return planAskFromClient(clientForModel(modelById(plan.modelId)));
+}
+
 export async function createTaskPlan(input: {
   projectId: string;
   request: string;
-  modelId: string;
+  /** API 모드의 모델 레지스트리 id. 로컬 Claude Code 모드에서는 쓰지 않는다(모델은 그 CLI가 정한다) */
+  modelId?: string;
   owner: string;
   /**
    * 서버 안에서만 넘긴다(벤치마크·테스트). HTTP 라우트는 이 필드를 넘기지 않는다.
@@ -121,7 +155,13 @@ export async function createTaskPlan(input: {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
   if (preset === undefined) {
-    if (mode !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
+    // 모델이 만드는 계획은 모델을 부를 수 있는 모드에서만 만든다(유료 API 또는 이 PC에 로그인한 Claude Code 구독)
+    if (!(PLANNER_MODES as readonly string[]).includes(mode)) {
+      throw new StudioError(
+        409,
+        `모델이 만드는 작업 계획은 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}에서만 만들 수 있습니다 (지금 모드: ${mode}). 이 모드에서는 고정 계획만 쓸 수 있습니다`,
+      );
+    }
   } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode' && mode !== 'opencode') {
     // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode·opencode 모드에서도 쓴다. demo는 지금처럼 거부한다
     throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex, commandcode 또는 opencode에서만 사용할 수 있습니다');
@@ -130,17 +170,22 @@ export async function createTaskPlan(input: {
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
 
-  let modelId = input.modelId;
+  let modelId = input.modelId?.trim() ?? '';
   if (preset === undefined) {
-    const model = listModelOptions().find((candidate) => candidate.id === input.modelId && candidate.enabled !== false);
-    if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${input.modelId}`);
-    if (!model.configured) throw new StudioError(400, `${model.label}의 API 키 환경 변수가 설정되지 않았습니다`);
-    if (!model.capabilities.includes('tools')) throw new StudioError(400, `${model.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
-    modelId = model.id;
-  } else {
+    if (mode === 'claude-code') {
+      // API 키가 아니라 이 PC의 Claude Code 로그인으로 부른다. 모델은 B_STUDIO_CLAUDE_CODE_MODEL 또는 계정 기본이라
+      // 모델 레지스트리를 확인하지 않고, 기록에는 그 CLI 모델 이름(local-cli:…)을 남긴다
+      modelId = claudeCodePlanModelId();
+    } else {
+      const model = listModelOptions().find((candidate) => candidate.id === modelId && candidate.enabled !== false);
+      if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${modelId}`);
+      if (!model.configured) throw new StudioError(400, `${model.label}의 API 키 환경 변수가 설정되지 않았습니다`);
+      if (!model.capabilities.includes('tools')) throw new StudioError(400, `${model.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
+      modelId = model.id;
+    }
+  } else if (!modelId) {
     // 고정 계획에는 모델 호출이 없다. modelId는 기록용이라 비어 있으면 안 된다
-    if (!modelId.trim()) throw new StudioError(400, 'modelId가 필요합니다');
-    modelId = modelId.trim();
+    throw new StudioError(400, 'modelId가 필요합니다');
   }
 
   const project = await findProject(input.projectId);
@@ -387,7 +432,7 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
   let lanes: TaskLane[];
   try {
     if (preset === undefined) {
-      const planned = await requestTaskPlan(clientForModel(modelById(plan.modelId)), project, plan.request);
+      const planned = await requestTaskPlan(plannerAskFor(plan, project), project, plan.request);
       plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
       lanes = planned.lanes;
     } else {
@@ -438,7 +483,8 @@ function contractsSetting(): boolean {
  */
 async function askLaneContracts(plan: TaskPlanView, project: LoadedProject, lanes: readonly TaskLane[]): Promise<void> {
   try {
-    const asked = await requestLaneContracts(contractAskFromClient(clientForModel(modelById(plan.modelId))), project, plan.request, lanes);
+    // 계약도 계획과 **같은 호출**로 받는다(API나 이 PC의 Claude Code). 모드를 섞지 않는다
+    const asked = await requestLaneContracts(plannerAskFor(plan, project), project, plan.request, lanes);
     const redactor = new Redactor(await resolveSecrets(project));
     const contracts = asked.contracts.map((contract) => ({ body: redactor.redact(contract.body), refs: contract.refs.map((ref) => redactor.redact(ref)) }));
     attachCoordination(plan, { strategy: 'S2', contracts }, redactor);

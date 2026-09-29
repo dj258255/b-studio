@@ -2540,8 +2540,11 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
   return project.spec.name === 'orders' ? ORDERS_DEMO_SCENARIOS : [];
 }
 
-/** 오타가 조용히 다른 모드(특히 비용이 드는 모드)로 떨어지지 않도록 모르는 값은 거부한다 */
-function sessionMode(env: Record<string, string | undefined> = process.env): SessionMode {
+/**
+ * 지금 서버 모드. 오타가 조용히 다른 모드(특히 비용이 드는 모드)로 떨어지지 않도록 모르는 값은 거부한다.
+ * capabilities가 같은 값을 읽어 "지금 쓸 수 있는 방식"을 알린다 — 두 곳이 갈라지지 않게 한 곳에서 읽는다
+ */
+export function sessionMode(env: Record<string, string | undefined> = process.env): SessionMode {
   const value = env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
   if (value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'demo') return value;
