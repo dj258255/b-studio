@@ -562,6 +562,13 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     for (const id of [...activeSessions]) await closeSession(sessions, id, activeSessions);
     leftoverContainers = runningContainers(`studio-${PROJECT_ID}-`);
   }
+  // ⑤ 복사본을 다시 처음 상태로 되돌린다. P0는 복사본을 직접 고치므로, 되돌리지 않으면 뒤따르는 다른 전략의 세션이
+  // 이미 구현된 프로젝트에서 시작한다(E3 첫 묶음에서 S0가 "바꾼 파일 없음"으로 실패한 원인). 실패하면 이 행을 오류로 남긴다
+  try {
+    await context.resetProject();
+  } catch (error) {
+    harnessError ??= `프로젝트 복사본을 되돌리지 못했습니다: ${describe(error)}`;
+  }
 
   const plan = plainPlan(context, task, startedAt, baseline);
   const classification = classify(plan, acceptance, harnessError);
