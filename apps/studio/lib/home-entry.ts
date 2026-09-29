@@ -175,18 +175,21 @@ export async function submitEntry(fetcher: FetchLike, input: EntryInput): Promis
   if (input.method === 'fleet') {
     if (apiMode && input.fleetModelIds.length < 2) return { ok: false, error: '여러 명 비교에는 모델이 2개 이상 필요합니다' };
     const created = await post(fetcher, '/api/fleets', { projectId: input.projectId, request: input.text, ...(apiMode ? { modelIds: input.fleetModelIds } : {}) });
-    return created.ok ? { ok: true, href: '/fleets' } : created;
+    return created.ok ? { ok: true, href: detailHref('/fleets', created.body) } : created;
   }
 
   if (apiMode && !input.planModelId) return { ok: false, error: '계획에 쓸 모델을 고를 수 없습니다' };
   const created = await post(fetcher, '/api/task-plans', { projectId: input.projectId, request: input.text, ...(apiMode ? { modelId: input.planModelId } : {}) });
-  return created.ok ? { ok: true, href: '/task-plans' } : created;
+  return created.ok ? { ok: true, href: detailHref('/task-plans', created.body) } : created;
 }
 
-/** 진행 중 목록에 쓸 최소 항목. /api/agents의 AgentItem과 모양이 같다 */
+/** 만든 비교·계획을 바로 연다. 응답에 id가 없으면 목록 화면(가장 최근 것이 먼저 열린다)으로 간다 */
+function detailHref(base: '/fleets' | '/task-plans', body: Record<string, unknown>): string {
+  return typeof body.id === 'string' && body.id ? `${base}?id=${encodeURIComponent(body.id)}` : base;
+}
+
+/** 진행 중 목록에 쓸 최소 항목. /api/agents의 AgentItem과, 그것을 요청 단위로 묶은 작업 항목(work-list) 모두 이 모양이다 */
 export interface InboxSource {
-  kind: string;
-  id: string;
   title: string;
   projectName: string;
   href: string;
@@ -195,7 +198,7 @@ export interface InboxSource {
   lastActivityAt: string;
 }
 
-/** 개입 필요 먼저, 그다음 작업 중, 그다음 최근 활동 순(관제 화면과 같은 규칙) */
+/** 개입 필요 먼저, 그다음 작업 중, 그다음 최근 활동 순(작업 화면과 같은 규칙) */
 export function sortInbox<T extends InboxSource>(items: readonly T[]): T[] {
   const rank = (item: InboxSource) => (item.attention ? 0 : item.state === 'working' ? 1 : 2);
   return [...items].sort((a, b) => rank(a) - rank(b) || b.lastActivityAt.localeCompare(a.lastActivityAt));

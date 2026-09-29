@@ -72,7 +72,7 @@ describe('attentionNotices', () => {
     expect(attentionNotices(three)).toHaveLength(3);
 
     const four = ['a', 'b', 'c', 'd'].map((id) => item({ id, attention: 'error' }));
-    expect(attentionNotices(four)).toEqual([{ title: '개입 필요 4건', href: '/agents' }]);
+    expect(attentionNotices(four)).toEqual([{ title: '개입 필요 4건', href: '/work' }]);
   });
 
   it('빈 목록이면 알리지 않는다', () => {

@@ -6,7 +6,9 @@ import { listModelOptions } from '@/lib/server/model-registry';
 import { canPublishIssues, listProjects } from '@/lib/server/projects';
 import { listTaskPlans, PLAN_LIMITS } from '@/lib/server/task-plans';
 
-export default async function TaskPlansPage() {
+export default async function TaskPlansPage(props: { searchParams: Promise<{ id?: string | string[] }> }) {
+  const requested = (await props.searchParams).id;
+  const selectedId = Array.isArray(requested) ? requested[0] : requested;
   const user = await pageUser();
   const projects = await listProjects();
   // "이슈로 올리기"를 보일지 정하려면 프로젝트마다 원격 저장소·토큰을 확인해야 한다. 작업 분해 화면에서만 계산한다
@@ -27,14 +29,14 @@ export default async function TaskPlansPage() {
     <main className="mx-auto max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm font-semibold text-muted">b-studio / 작업 분해</p>
+          <p className="text-sm font-semibold text-muted">b-studio / 나눠서 병렬</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">한 요청을 나눠 동시에 실행하고 합친 결과를 다시 검증합니다</h1>
         </div>
-        <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          프로젝트로 돌아가기
+        <Link href="/work" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+          작업 목록
         </Link>
       </header>
-      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} planner={planner} limits={PLAN_LIMITS} />
+      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} initialSelectedId={selectedId} planner={planner} limits={PLAN_LIMITS} />
     </main>
   );
 }

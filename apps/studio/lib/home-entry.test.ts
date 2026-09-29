@@ -160,12 +160,12 @@ describe('submitEntry', () => {
     expect(result).toEqual({ ok: false, error: '샌드박스가 준비된 뒤에 요청할 수 있습니다', sessionId: 's1' });
   });
 
-  it('여러 명 비교는 Fleet을 만들고 Fleet 화면으로 간다', async () => {
+  it('여러 명 비교는 Fleet을 만들고 그 비교 화면으로 간다', async () => {
     const { fetchImpl, calls } = fakeFetch([{ status: 201, body: { id: 'f1' } }]);
 
     const result = await submitEntry(fetchImpl, { ...base, method: 'fleet' });
 
-    expect(result).toEqual({ ok: true, href: '/fleets' });
+    expect(result).toEqual({ ok: true, href: '/fleets?id=f1' });
     expect(calls[0]!.url).toBe('/api/fleets');
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ projectId: 'orders', request: base.text, modelIds: ['a', 'b'] });
   });
@@ -177,14 +177,20 @@ describe('submitEntry', () => {
     expect(calls).toEqual([]);
   });
 
-  it('나눠서 병렬은 작업 분해를 만들고 계획 화면으로 간다', async () => {
+  it('나눠서 병렬은 작업 분해를 만들고 그 계획 화면으로 간다', async () => {
     const { fetchImpl, calls } = fakeFetch([{ status: 201, body: { id: 'p1' } }]);
 
     const result = await submitEntry(fetchImpl, { ...base, method: 'split' });
 
-    expect(result).toEqual({ ok: true, href: '/task-plans' });
+    expect(result).toEqual({ ok: true, href: '/task-plans?id=p1' });
     expect(calls[0]!.url).toBe('/api/task-plans');
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ projectId: 'orders', request: base.text, modelId: 'plan-model' });
+  });
+
+  it('응답에 id가 없으면 목록 화면으로 간다', async () => {
+    const { fetchImpl } = fakeFetch([{ status: 201, body: {} }]);
+
+    expect(await submitEntry(fetchImpl, { ...base, method: 'split' })).toEqual({ ok: true, href: '/task-plans' });
   });
 
   it('프로젝트나 요청이 없으면 서버를 부르지 않는다', async () => {
@@ -206,8 +212,8 @@ describe('submitEntry', () => {
 });
 
 describe('진행 중 목록', () => {
-  const item = (over: Partial<InboxSource> & { id: string }): InboxSource => ({
-    kind: 'session',
+  // 목록 항목은 InboxSource 모양에 식별용 id를 더한 것이다(작업 화면의 key, 관제 항목의 id)
+  const item = (over: Partial<InboxSource> & { id: string }): InboxSource & { id: string } => ({
     title: `요청 ${over.id}`,
     projectName: 'orders',
     href: `/sessions/${over.id}`,
@@ -244,8 +250,8 @@ describe('구독 CLI 모드에서는 모델을 고르지 않고 서버 기본을
       return ok({ id: 'x' });
     };
     const base = { projectId: 'orders', text: '주문 목록', workspace: 'copy' as const, fleetModelIds: [], planModelId: '', mode: 'claude-code' };
-    expect(await submitEntry(fetcher, { ...base, method: 'fleet' })).toEqual({ ok: true, href: '/fleets' });
-    expect(await submitEntry(fetcher, { ...base, method: 'split' })).toEqual({ ok: true, href: '/task-plans' });
+    expect(await submitEntry(fetcher, { ...base, method: 'fleet' })).toEqual({ ok: true, href: '/fleets?id=x' });
+    expect(await submitEntry(fetcher, { ...base, method: 'split' })).toEqual({ ok: true, href: '/task-plans?id=x' });
     expect(bodies[0]!.body).not.toHaveProperty('modelIds');
     expect(bodies[1]!.body).not.toHaveProperty('modelId');
   });
