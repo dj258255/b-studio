@@ -154,15 +154,17 @@ describe('summarize', () => {
 
   it('전략별 실패 원인에 rate_limited 열을 포함해 건수로 센다', () => {
     const markdown = summarize(rows, meta);
-    // 열 순서: none | plan_rejected | scope_violation | lane_gate | integration_gate | acceptance | rate_limited | environment | timeout | unknown
-    expect(markdown).toContain('| 전략 | none | plan_rejected | scope_violation | lane_gate | integration_gate | acceptance | rate_limited | environment | timeout | unknown |');
+    // 열 순서: none | plan_rejected | scope_violation | lane_gate | integration_gate | acceptance | rate_limited | provider_gate | environment | timeout | unknown
+    expect(markdown).toContain('| 전략 | none | plan_rejected | scope_violation | lane_gate | integration_gate | acceptance | rate_limited | provider_gate | environment | timeout | unknown |');
     // S0: none 2 (orders-list, independent), lane_gate 1
-    expect(markdown).toContain('| S0 | 2 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |');
+    expect(markdown).toContain('| S0 | 2 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |');
     // S1: none 3
-    expect(markdown).toContain('| S1 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |');
+    expect(markdown).toContain('| S1 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |');
 
     const limited = summarize([row({ category: 'rate_limited', success: false })], meta);
-    expect(limited).toContain('| S0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |');
+    expect(limited).toContain('| S0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 |');
+    const gated = summarize([row({ category: 'provider_gate', success: false })], meta);
+    expect(gated).toContain('| S0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |');
   });
 
   it('계약 호출 토큰을 성공 1건당 토큰에 포함하고, 계약 출처를 맨 위에 적는다', () => {

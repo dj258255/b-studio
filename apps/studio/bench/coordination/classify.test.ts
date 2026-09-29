@@ -100,6 +100,24 @@ describe('실패 원인 분류', () => {
     expect(result.detail).toContain('hit your usage limit');
   });
 
+  it('OpenCode 무료 Zen 거절은 provider_gate로, 한도와 구분한다', () => {
+    // 러너가 한국어 요약으로 알린다
+    const summary = plan({ status: 'failed', error: 'OpenCode 무료(Zen) 모델은 내장 도구를 끈 b-studio 구성에서 거절됩니다. `opencode auth login`으로 제공자에 로그인하고 그 제공자의 모델을 고르세요' });
+    const result = classify(summary, undefined);
+    expect(result.category).toBe('provider_gate');
+    expect(result.detail).toContain('무료(Zen)');
+
+    // 원문 문구가 하네스 오류로 와도 provider_gate다
+    expect(classify(plan(), undefined, "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode").category).toBe('provider_gate');
+  });
+
+  it('OpenCode의 사용 한도 문구도 rate_limited로 본다', () => {
+    // 러너는 종료 코드가 0/1/130뿐이라 "OpenCode 사용 한도에 걸렸습니다: …" 문구로 알린다
+    const result = classify(plan({ status: 'failed', error: 'OpenCode 사용 한도에 걸렸습니다: 종료 코드 1' }), undefined);
+    expect(result.category).toBe('rate_limited');
+    expect(result.detail).toContain('사용 한도');
+  });
+
   it('경계 없는 숫자·단어는 한도로 보지 않는다', () => {
     // 하네스 오류지만 한도 신호가 아니다 → environment
     for (const text of ['1429ms 걸렸습니다', '4290 bytes', 'unlimited']) {

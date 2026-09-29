@@ -12,6 +12,7 @@ export type FailureCategory =
   | 'integration_gate'
   | 'acceptance'
   | 'rate_limited'
+  | 'provider_gate'
   | 'environment'
   | 'timeout'
   | 'unknown';
@@ -25,6 +26,7 @@ export interface Classification {
  * 사용 한도 신호. environment보다 먼저 본다.
  * 부분 문자열이 아니라 경계가 있는 정규식으로 찾는다 — '1429ms'·'4290 bytes'·'unlimited' 같은 값을 한도로 오인하지 않게.
  * Command Code 러너는 종료 코드 5(한도)와 10(크레딧 부족)을 "…사용 한도…"/"…크레딧이 부족…" 문구로 알린다. 둘 다 rate_limited로 묶고 detail로 구분한다.
+ * OpenCode 러너는 종료 코드가 0/1/130뿐이라 "OpenCode 사용 한도에 걸렸습니다: …" 문구로 알린다. 그래서 한국어 "사용 한도"도 한도 신호로 본다.
  */
 const RATE_LIMIT_PATTERNS: RegExp[] = [
   /\b429\b/,
@@ -35,7 +37,13 @@ const RATE_LIMIT_PATTERNS: RegExp[] = [
   /\boverloaded\b/i,
   /크레딧이 부족/,
   /\binsufficient credits?\b/i,
+  /사용 한도/,
 ];
+/**
+ * 제공자 게이트 신호. 한도보다 먼저 본다.
+ * OpenCode 무료 Zen 티어는 내장 도구를 끈 b-studio 구성을 403으로 거절한다(3단계 실측). 러너는 그 사실을 한국어 요약으로 알린다.
+ */
+const PROVIDER_GATE_PATTERNS: RegExp[] = [/free tier can only be used from within opencode/i, /OpenCode 무료\(Zen\)/];
 const ENVIRONMENT_NEEDLES = ['준비하지 못했습니다', 'no space left', 'ENOSPC', 'OOM', 'ECONNREFUSED', '502'];
 const DETAIL_LIMIT = 300;
 
@@ -50,6 +58,10 @@ export function isRateLimited(text: string): boolean {
 export function classify(plan: TaskPlanView, acceptance: AcceptanceResult[] | undefined, harnessError?: string): Classification {
   const errors = [plan.error, ...plan.lanes.map((lane) => lane.error), plan.integration?.error].filter((value): value is string => Boolean(value));
   const combined = [harnessError, ...errors].filter((value): value is string => Boolean(value)).join('\n');
+
+  // 제공자 게이트(정책 거절)를 가장 먼저 본다. 재시도해도 같은 결과라 한도·환경과 구분한다
+  const providerGate = PROVIDER_GATE_PATTERNS.find((pattern) => pattern.test(combined));
+  if (providerGate) return { category: 'provider_gate', detail: clip(`${providerGate.source}: ${combined}`) };
 
   // 사용 한도는 환경 문제보다 먼저 본다. 한도에 걸린 실행을 환경 오류로 묶으면 원인을 잃는다
   const rateLimit = RATE_LIMIT_PATTERNS.find((pattern) => pattern.test(combined));

@@ -54,8 +54,11 @@ describe('작업 계획', () => {
     ]);
 
     // 독립 레인은 서로 다른 backend를 쓸 수 있다
-    const mixed = planLanes({ tasks: [withBackend('a', ['a'], [], 'claude-code'), withBackend('b', ['b'], [], 'commandcode')] });
-    expect(mixed.map((lane) => lane.tasks[0]!.backend)).toEqual(['claude-code', 'commandcode']);
+    const mixed = planLanes({
+      tasks: [withBackend('a', ['a'], [], 'claude-code'), withBackend('b', ['b'], [], 'commandcode'), withBackend('c', ['c'], [], 'opencode', 'opencode/mimo-v2.6-flash-free')],
+    });
+    expect(mixed.map((lane) => lane.tasks[0]!.backend)).toEqual(['claude-code', 'commandcode', 'opencode']);
+    expect(mixed[2]!.tasks[0]!.model).toBe('opencode/mimo-v2.6-flash-free');
 
     // 같은 레인 안에서 backend나 model이 다르면 실행 전에 거부한다
     expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'claude-code'), withBackend('b', ['api/sub'], ['a'], 'codex')] })).toThrow(/backend가 같아야/);
@@ -63,7 +66,7 @@ describe('작업 계획', () => {
       planLanes({ tasks: [withBackend('a', ['api'], [], 'claude-code', 'sonnet'), withBackend('b', ['api/sub'], ['a'], 'claude-code', 'opus')] }),
     ).toThrow(/model이 같아야/);
     // 모르는 backend는 스키마가 거부한다
-    expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'opencode')] })).toThrow(/형식이 올바르지 않습니다/);
+    expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'gemini')] })).toThrow(/형식이 올바르지 않습니다/);
   });
 
   it('모델 응답의 코드 펜스·설명을 걷어내고 JSON을 읽는다', () => {

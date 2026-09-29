@@ -25,6 +25,18 @@ function fold(events: StudioEvent[], start: SessionView = createView(snapshot)):
 }
 
 describe('reduceSession', () => {
+  it('러너 경고(warning)를 대화에 안내 한 줄로 남긴다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '이어서 해줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'warning', message: '이 실행은 이전 대화를 이어받지 못합니다: 상태 폴더 없음' } },
+    ]);
+
+    expect(view.chat.map((item) => item.kind)).toEqual(['request', 'warning']);
+    expect(view.chat[1]).toMatchObject({ runId: 'r1', text: '이 실행은 이전 대화를 이어받지 못합니다: 상태 폴더 없음' });
+    // 경고는 실행을 멈추지 않는다(안내만 남긴다)
+    expect(view.snapshot.running).toBe(true);
+  });
+
   it('모델 라우팅 결정과 후보 점수를 대화 기록에 남긴다', () => {
     const initial = createView(snapshot);
     const view = reduceSession(initial, {

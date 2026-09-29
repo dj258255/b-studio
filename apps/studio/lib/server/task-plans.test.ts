@@ -483,26 +483,30 @@ describe('작업 분해 실행', () => {
 
   it('고정 계획의 레인 backend·model로 레인 세션을 만들고, 레인 뷰에 남긴다', async () => {
     const lane = (id: string, paths: string[], backend: string, model?: string) => ({ ...task(id, paths), backend, ...(model ? { model } : {}) });
-    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' }, c: { 'web/c/one.md': 'c' } };
 
     const plan = await run({
       projectId: 'orders',
       request: '레인 백엔드',
       modelId: 'model-a',
       owner: 'kim',
-      presetPlan: { tasks: [lane('a', ['web/a'], 'claude-code', 'sonnet'), lane('b', ['web/b'], 'commandcode')] },
+      presetPlan: {
+        tasks: [lane('a', ['web/a'], 'claude-code', 'sonnet'), lane('b', ['web/b'], 'commandcode'), lane('c', ['web/c'], 'opencode', 'opencode/mimo-v2.6-flash-free')],
+      },
     });
 
     expect(plan.status).toBe('done');
-    // 레인 세션은 그 레인의 backend로 만들고, claude-code 레인은 고른 모델을 세션에 싣는다(modelId)
+    // 레인 세션은 그 레인의 backend로 만들고, 모델을 고른 CLI 레인은 그 모델을 세션에 싣는다(modelId)
     expect(fake.sessionOptions.find((options) => options.backend === 'claude-code')?.modelId).toBe('sonnet');
     expect(fake.sessionOptions.find((options) => options.backend === 'commandcode')?.modelId).toBeUndefined();
+    expect(fake.sessionOptions.find((options) => options.backend === 'opencode')?.modelId).toBe('opencode/mimo-v2.6-flash-free');
     // 통합 세션은 계획 기본(서버 모드)이라 backend가 없다
-    expect(fake.sessionOptions[2]!.backend).toBeUndefined();
+    expect(fake.sessionOptions[3]!.backend).toBeUndefined();
     // 레인 뷰에 backend·model이 남아 화면·서버 기록에서 볼 수 있다
     expect(plan.lanes.map((item) => [item.backend, item.model])).toEqual([
       ['claude-code', 'sonnet'],
       ['commandcode', undefined],
+      ['opencode', 'opencode/mimo-v2.6-flash-free'],
     ]);
   });
 
@@ -538,8 +542,8 @@ describe('작업 분해 실행', () => {
 });
 
 describe('고정 계획(presetPlan)', () => {
-  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex·commandcode 모드 포함)', async () => {
-    for (const mode of ['claude-code', 'codex', 'commandcode']) {
+  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex·commandcode·opencode 모드 포함)', async () => {
+    for (const mode of ['claude-code', 'codex', 'commandcode', 'opencode']) {
       process.env.B_STUDIO_MODE = mode;
       const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: mode, owner: 'kim', presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] } });
       const waiting = await awaiting(created.id);
@@ -588,7 +592,7 @@ describe('고정 계획(presetPlan)', () => {
     process.env.B_STUDIO_MODE = 'demo';
     await expect(
       createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'claude-code', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
-    ).rejects.toThrow('api, claude-code, codex 또는 commandcode');
+    ).rejects.toThrow('api, claude-code, codex, commandcode 또는 opencode');
   });
 
   it('presetPlan이 규칙을 어기면 세션을 만들지 않고 실패한다', async () => {
