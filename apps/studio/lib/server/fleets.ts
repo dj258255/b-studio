@@ -29,9 +29,16 @@ export function defaultFleetCandidates(backends: readonly SessionMode[]): FleetC
   if (unique.length === 1) return [{ backend: unique[0]! }, { backend: unique[0]! }];
   return unique.map((backend) => ({ backend }));
 }
-const fleets = new Map<string, FleetView>();
-const subscribed = new Set<string>();
-let loaded = false;
+/** 비교 상태. 페이지와 API 라우트가 모듈을 따로 불러와도 같은 상태를 보도록 전역에 둔다(task-plans.ts와 같은 이유) */
+interface FleetStore {
+  fleets: Map<string, FleetView>;
+  subscribed: Set<string>;
+  loaded: boolean;
+}
+const globalFleets = globalThis as typeof globalThis & { __bStudioFleets?: FleetStore };
+const fleetStore: FleetStore = (globalFleets.__bStudioFleets ??= { fleets: new Map(), subscribed: new Set(), loaded: false });
+const fleets = fleetStore.fleets;
+const subscribed = fleetStore.subscribed;
 
 /** 후보 하나를 검증해 멤버를 만들 때 쓸 값으로 바꾼다. backend마다 model의 뜻과 확인할 것이 다르다 */
 interface ValidatedCandidate {
@@ -276,8 +283,8 @@ function failMember(fleet: FleetView, member: FleetMemberView, summary: string):
 }
 
 function ensureLoaded(): void {
-  if (loaded) return;
-  loaded = true;
+  if (fleetStore.loaded) return;
+  fleetStore.loaded = true;
   try {
     for (const name of readdirSync(/* turbopackIgnore: true */ root())) {
       if (!name.endsWith('.json')) continue;

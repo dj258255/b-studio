@@ -1186,6 +1186,8 @@ function laneView(
 /** 모듈 내부 캐시를 비우고 다시 읽어, 서버가 다시 시작된 것과 같은 상태를 만든다 */
 async function restart(): Promise<typeof import('./task-plans')> {
   vi.resetModules();
+  // 계획 상태는 전역에 있다(개발 서버의 페이지·API가 같은 상태를 보게). 재시작을 흉내 내려면 전역 상태도 비운다
+  delete (globalThis as { __bStudioTaskPlans?: unknown }).__bStudioTaskPlans;
   return import('./task-plans');
 }
 

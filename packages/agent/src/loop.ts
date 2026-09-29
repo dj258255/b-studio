@@ -177,7 +177,7 @@ export type AgentEvent =
   | { type: 'tool_result'; name: string; ok: boolean; content: string; chars?: number; rawChars?: number }
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   /** ask_user가 남긴 질문. 실행은 이 턴 뒤에 끝난다 */
-  | { type: 'question'; question: string; options: string[]; allowOther: boolean }
+  | { type: 'question'; question: string; options: string[]; allowOther: boolean; proposal?: import('./tools').ModeProposal }
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
   /** 진행 중 지시를 다음 모델 호출 전에 대화에 넣었다 */
   | { type: 'steer_applied'; count: number }

@@ -24,14 +24,10 @@ type Intent = "build" | "ask";
 /** 질문의 답을 받아 만들기로 넘어갈 때 보내는 요청. 대화를 이어받으므로 앞의 계획을 가리키기만 한다 */
 const BUILD_FROM_PLAN = "앞에서 정리한 계획대로 만들어줘";
 
-const METHOD_LABEL: Record<ChatMethod, string> = { single: "한 명", fleet: "여러 명 비교", split: "나눠서 병렬" };
-
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
   const router = useRouter();
   const [text, setText] = useState("");
-  /** 방식. 한 명은 이 세션에 보내고, 비교·병렬은 같은 프로젝트로 새 비교·계획을 만든다(ADR-066) */
-  const [method, setMethod] = useState<ChatMethod>("single");
   const [capabilities, setCapabilities] = useState<ChatCapabilities>();
   const [allowBreaking, setAllowBreaking] = useState(false);
   const [sending, setSending] = useState(false);
@@ -81,7 +77,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     };
   }, [used, snapshot.running]);
 
-  // 비교·병렬을 이 서버에서 쓸 수 있는지는 서버가 정한다(데모는 못 쓰고, API 모드는 모델을 골라야 한다)
+  // 에이전트가 제안한 비교·병렬을 이 서버에서 바로 넘길 수 있는지는 서버가 정한다(데모는 못 쓰고, API 모드는 모델을 골라야 한다)
   useEffect(() => {
     let cancelled = false;
     fetch("/api/capabilities")
@@ -131,39 +127,43 @@ export function ChatPanel({ view }: { view: SessionView }) {
     setSending(false);
   }
 
-  /** 여러 명 비교·나눠서 병렬: 이 프로젝트로 새 비교·계획을 만들고 그 화면으로 간다. 모델은 서버 기본(구독 CLI 모드)을 쓴다 */
-  async function startOther(request: string, other: Exclude<ChatMethod, "single">) {
+  /**
+   * 에이전트의 제안(ADR-068)을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘긴다. 홈과 같은 경로(submitEntry)로 만들고,
+   * 넘긴 사실을 세션에 남긴 뒤(질문 카드가 사라지고 대화에 한 줄 남는다) 그 화면으로 간다. 모델은 서버 기본(구독 CLI 모드)을 쓴다
+   */
+  async function handOff(proposal: { mode: Exclude<ChatMethod, "single">; request: string }, questionRunId: string) {
     setSending(true);
     setError(undefined);
     const result = await submitEntry(fetch, {
-      method: other,
+      method: proposal.mode,
       projectId: snapshot.projectId,
-      text: request,
+      text: proposal.request,
       workspace: "copy",
       fleetModelIds: [],
       planModelId: "",
       ...(capabilities ? { mode: capabilities.mode } : {}),
     });
-    setSending(false);
     if (!result.ok) {
+      setSending(false);
       setError(result.error);
       return;
     }
-    setText("");
+    await fetch(`/api/sessions/${snapshot.id}/handoff`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: questionRunId, to: proposal.mode, href: result.href }),
+    }).catch(() => undefined);
+    setSending(false);
     router.push(result.href);
   }
 
-  /** 지금 방식으로 보낸다. 실행 중이면 진행 중 지시가 된다 */
+  /** 실행 중이면 진행 중 지시로, 아니면 이 세션에 요청으로 보낸다 */
   function submit(request: string) {
     if (runId) {
       if (canSteer) void steer(request);
       return;
     }
-    if (method === "single") {
-      if (canSend) void send(request);
-      return;
-    }
-    if (methods[method].enabled && !sending && access.canManage) void startOther(request, method);
+    if (canSend) void send(request);
   }
 
   /** 실행 중 지시를 보낸다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다 */
@@ -241,7 +241,20 @@ export function ChatPanel({ view }: { view: SessionView }) {
         {snapshot.running && !runId && <li className="text-sm text-wait motion-safe:animate-pulse">작업하는 중</li>}
         {pending && (
           <li>
-            <QuestionCard question={pending.question} options={pending.options} allowOther={pending.allowOther} disabled={!canSend} onAnswer={answerQuestion} />
+            {pending.proposal ? (
+              <ProposalCard
+                reason={pending.question}
+                options={pending.options}
+                mode={pending.proposal.mode}
+                available={methods[pending.proposal.mode]}
+                disabled={!access.canManage || sending}
+                onAccept={() => void handOff(pending.proposal!, pending.runId)}
+                onDecline={(value) => answerQuestion(value)}
+                declineDisabled={!canSend}
+              />
+            ) : (
+              <QuestionCard question={pending.question} options={pending.options} allowOther={pending.allowOther} disabled={!canSend} onAnswer={answerQuestion} />
+            )}
           </li>
         )}
       </ol>
@@ -347,36 +360,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
           </div>
         ) : (
           <>
-            {/* 방식: 한 명은 이 세션, 비교·병렬은 같은 프로젝트로 새로 만든다. 실행 중에는 진행 중 지시만 보내므로 숨긴다 */}
-            {!runId && access.canManage && (
-              <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="radiogroup" aria-label="방식">
-                  {(["single", "fleet", "split"] as const).map((candidate) => (
-                    <button
-                      key={candidate}
-                      type="button"
-                      role="radio"
-                      aria-checked={method === candidate}
-                      disabled={!methods[candidate].enabled}
-                      title={methods[candidate].reason}
-                      onClick={() => setMethod(candidate)}
-                      className={`rounded-md px-3 py-1 font-medium transition-colors disabled:opacity-40 ${
-                        method === candidate ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
-                      }`}
-                    >
-                      {METHOD_LABEL[candidate]}
-                    </button>
-                  ))}
-                </div>
-                {methods.fleet.reason === API_MODE_REASON && (
-                  <Link href="/start" className="text-xs text-muted underline underline-offset-2 hover:text-ink">
-                    비교·병렬은 새로 시작 화면에서
-                  </Link>
-                )}
-              </div>
-            )}
             {/* 입력은 하나다. "읽기만"을 켜면 파일을 바꾸지 않고 답과 계획만 받는다(세션마다 기억한다) */}
-            {method === "single" ? (
               <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
                 <button
                   type="button"
@@ -413,13 +397,6 @@ export function ChatPanel({ view }: { view: SessionView }) {
                       : "질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다"}
                 </p>
               </div>
-            ) : (
-              <p className="mb-2.5 text-xs text-muted">
-                {method === "fleet"
-                  ? "같은 요청을 여러 에이전트가 각자 복사본에서 만들고, 결과를 비교해 하나를 고릅니다. 보내면 비교 화면으로 갑니다"
-                  : "요청을 레인으로 나눠 동시에 만들고 합쳐서 다시 검증합니다. 보내면 계획 화면으로 갑니다"}
-              </p>
-            )}
             <label htmlFor="request" className="sr-only">
               {intent === "ask" ? "질문" : "요청"}
             </label>
@@ -437,16 +414,14 @@ export function ChatPanel({ view }: { view: SessionView }) {
               placeholder={
                 runId
                   ? "실행 중 지시를 적어 주세요. 다음 모델 호출(또는 다음 턴)에 반영됩니다"
-                  : method !== "single"
-                    ? "여러 에이전트에게 맡길 요청을 적어 주세요"
-                    : intent === "ask"
+                  : intent === "ask"
                     ? "코드나 동작을 묻거나, 만들기 전에 계획을 세워 보세요"
                     : "만들거나 바꾸고 싶은 내용을 적어 주세요"
               }
               className="w-full resize-none rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
             <div className="mt-2 flex items-center justify-between gap-3">
-              {intent === "build" && method === "single" ? (
+              {intent === "build" ? (
                 <label className="flex items-center gap-2 text-sm text-muted">
                   <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
                   필드 삭제나 타입 변경 허용
@@ -456,13 +431,10 @@ export function ChatPanel({ view }: { view: SessionView }) {
               )}
               <button
                 type="submit"
-                disabled={
-                  !text.trim() ||
-                  (runId ? !canSteer : method === "single" ? !canSend : !methods[method].enabled || sending || !access.canManage)
-                }
+                disabled={!text.trim() || (runId ? !canSteer : !canSend)}
                 className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
               >
-                {runId ? "진행 중 지시" : method === "fleet" ? "비교 시작" : method === "split" ? "나눠서 시작" : intent === "ask" ? "질문하기" : "요청 보내기"}
+                {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
               </button>
             </div>
           </>
@@ -614,6 +586,15 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
         </p>
       );
 
+    case "handoff":
+      return (
+        <p className="text-sm text-muted">
+          제안을 받아 이 요청을 {item.to === "split" ? "나눠서 병렬로" : "여러 명 비교로"} 넘겼습니다 ·{" "}
+          <Link href={item.href} className="underline underline-offset-2 hover:text-ink">
+            {item.to === "split" ? "계획 화면" : "비교 화면"} 열기
+          </Link>
+        </p>
+      );
     case "reverted":
       return (
         <div className={`rounded-md border px-3 py-2 text-sm ${item.cancelled ? "border-line" : "border-wait/40 bg-wait/10"}`}>
@@ -789,6 +770,67 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
  * 에이전트가 되물은 질문 카드. 선택지를 누르면 `[질문] …\n[답] …` 요청으로 보내 이 대화를 이어서 만든다.
  * 실행을 붙잡고 기다리지 않고 질문을 남기고 끝난 뒤, 답을 다음 요청으로 받는 흐름의 화면이다
  */
+/**
+ * 에이전트의 제안 카드(ADR-068). 첫 선택지는 이 요청을 나눠서 병렬·여러 명 비교로 넘기고, 둘째는 한 명으로 계속한다(보통 답처럼 대화를 이어 감).
+ * 이 서버에서 바로 넘길 수 없으면(API 모드는 모델을 골라야 함) 이유와 새로 시작 화면 링크를 보여 준다
+ */
+function ProposalCard({
+  reason,
+  options,
+  mode,
+  available,
+  disabled,
+  declineDisabled,
+  onAccept,
+  onDecline,
+}: {
+  reason: string;
+  options: string[];
+  mode: "split" | "fleet";
+  available: { enabled: boolean; reason?: string };
+  disabled: boolean;
+  declineDisabled: boolean;
+  onAccept: () => void;
+  onDecline: (value: string) => void;
+}) {
+  const [accept, decline] = [options[0] ?? (mode === "split" ? "나눠서 병렬로 하기" : "여러 안 비교하기"), options[1] ?? "한 명으로 계속"];
+  return (
+    <div className="rounded-md border border-ink/40 bg-panel px-3.5 py-3">
+      <p className="text-xs font-medium text-muted">에이전트의 제안 · {mode === "split" ? "나눠서 병렬" : "여러 명 비교"}</p>
+      <p className="mt-1 text-sm font-medium">{reason}</p>
+      <p className="mt-1 text-xs leading-5 text-muted">
+        {mode === "split"
+          ? "요청을 레인으로 나눠 여러 에이전트가 동시에 만들고, 합쳐서 다시 검증합니다. 계획 화면으로 갑니다."
+          : "같은 요청을 여러 에이전트가 각자 만들고 결과를 비교해 하나를 고릅니다. 토큰을 2~4배 씁니다. 비교 화면으로 갑니다."}
+      </p>
+      <div className="mt-2 flex flex-col gap-1.5">
+        <button
+          type="button"
+          disabled={disabled || !available.enabled}
+          title={available.reason}
+          onClick={onAccept}
+          className="rounded-control bg-ink px-3 py-1.5 text-left text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+        >
+          {accept}
+        </button>
+        <button
+          type="button"
+          disabled={declineDisabled}
+          onClick={() => onDecline(decline)}
+          className="rounded-control border border-line bg-panel px-3 py-1.5 text-left text-sm font-medium hover:border-ink disabled:opacity-50"
+        >
+          {decline}
+        </button>
+      </div>
+      {!available.enabled && available.reason === API_MODE_REASON && (
+        <Link href="/start" className="mt-2 inline-block text-xs text-muted underline underline-offset-2 hover:text-ink">
+          새로 시작 화면에서 모델을 골라 보내기
+        </Link>
+      )}
+    </div>
+  );
+}
+
 function QuestionCard({
   question,
   options,

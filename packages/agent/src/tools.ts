@@ -41,7 +41,27 @@ export interface AskUserQuestion {
   options: string[];
   /** 직접 입력도 허용하는지 */
   allowOther: boolean;
+  /**
+   * propose_mode가 남긴 제안(ADR-068). 있으면 첫 선택지가 "이 방식으로 넘기기"이고, 화면은 그 요청으로 비교·계획을 만든다.
+   * 두 번째 선택지("한 명으로 계속")는 보통 답처럼 대화를 이어 간다
+   */
+  proposal?: ModeProposal;
 }
+
+/** 에이전트가 제안하는 다른 방식. split=나눠서 병렬, fleet=여러 명 비교 */
+export interface ModeProposal {
+  mode: 'split' | 'fleet';
+  /** 비교·계획에 넘길 요청(사용자 요청을 그대로 또는 다듬어서) */
+  request: string;
+}
+
+/** propose_mode 선택지. 화면이 첫 선택지를 "넘기기" 버튼으로 그린다 */
+export const PROPOSAL_OPTIONS: Record<ModeProposal['mode'], readonly [string, string]> = {
+  split: ['나눠서 병렬로 하기', '한 명으로 계속'],
+  fleet: ['여러 안 비교하기', '한 명으로 계속'],
+};
+/** 넘길 요청 길이 상한 */
+const PROPOSAL_REQUEST_MAX = 2_000;
 
 /** buildTools 옵션. interactive가 아니면(레인·벤치·CLI) 도구 목록이 지금과 같다 */
 export interface ToolBuildOptions {
@@ -154,6 +174,7 @@ export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   'design_frames',
   'design_frame',
   'ask_user',
+  'propose_mode',
 ]);
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
@@ -292,6 +313,15 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
           question: { type: 'string', description: `One short question (max ${ASK_QUESTION_MAX} characters).` },
           options: { type: 'array', items: { type: 'string' }, description: `Two to four short choices (each max ${ASK_OPTION_MAX} characters).` },
           allowOther: { type: 'boolean', description: 'true to also let the user type a free-form answer.' },
+        },
+      ),
+      tool(
+        'propose_mode',
+        'Offer to hand this request to several agents instead of doing it alone. Use rarely, before making changes: "split" when the work clearly divides into independent parts in different services that can be built at the same time (for example an API and a page that only share a contract); "fleet" when the user asks for alternatives or the right design is genuinely open and comparing two or three independent attempts is worth the extra cost. Most requests should simply be done yourself. Calling this ends the run; the user either accepts (the studio starts the split or comparison) or answers "continue alone" in a follow-up request.',
+        {
+          mode: { type: 'string', enum: ['split', 'fleet'], description: 'split = divide into parallel lanes; fleet = compare independent attempts.' },
+          reason: { type: 'string', description: `One short sentence in the user's language explaining why (max ${ASK_QUESTION_MAX} characters).` },
+          request: { type: 'string', description: `The request to hand over, in the user's language (max ${PROPOSAL_REQUEST_MAX} characters). Usually the user's request as is.` },
         },
       ),
     );
@@ -461,6 +491,17 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       context.onQuestion({ question, options, allowOther: boolean(args, 'allowOther') });
       // 이 결과를 받은 모델이 곧바로 멈추도록, 도구가 끝났다는 사실과 멈추라는 지시를 함께 돌려준다
       return success('Question sent to the user. End this run now and wait for their answer; do not call any more tools.');
+    }
+    case 'propose_mode': {
+      if (!context.onQuestion) return failure('This run cannot propose another mode.');
+      const mode = string(args, 'mode');
+      if (mode !== 'split' && mode !== 'fleet') return failure('"mode" must be "split" or "fleet"');
+      const reason = string(args, 'reason').trim();
+      if (reason.length === 0 || reason.length > ASK_QUESTION_MAX) return failure(`"reason" must be 1-${ASK_QUESTION_MAX} characters`);
+      const request = string(args, 'request').trim();
+      if (request.length === 0 || request.length > PROPOSAL_REQUEST_MAX) return failure(`"request" must be 1-${PROPOSAL_REQUEST_MAX} characters`);
+      context.onQuestion({ question: reason, options: [...PROPOSAL_OPTIONS[mode]], allowOther: false, proposal: { mode, request } });
+      return success('Proposal sent to the user. End this run now and wait for their choice; do not call any more tools.');
     }
     case 'post_note': {
       const board = context.board;

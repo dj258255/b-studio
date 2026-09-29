@@ -60,6 +60,8 @@ export type ChatItem =
       verify?: 'light';
     }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
+  /** 에이전트의 제안을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘겼다(ADR-068) */
+  | { kind: 'handoff'; runId: string; to: 'split' | 'fleet'; href: string }
   /** 로컬 폴더 세션에서 스튜디오 밖에서 바꾼 파일을 남긴 체크포인트 */
   | { kind: 'localEdits'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
   | {
@@ -178,7 +180,15 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'question':
       // 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답을 보내면(run_started) 지운다.
       // 대화 항목으로는 넣지 않는다 — 답을 보내면 요청 줄에 질문과 답이 함께 남는다
-      return patchSnapshot(view, { pendingQuestion: { runId: event.runId, question: event.question, options: event.options, allowOther: event.allowOther } });
+      return patchSnapshot(view, {
+        pendingQuestion: { runId: event.runId, question: event.question, options: event.options, allowOther: event.allowOther, ...(event.proposal ? { proposal: event.proposal } : {}) },
+      });
+    case 'question_dismissed':
+      // 제안을 받아 다른 방식으로 넘겼다. 같은 질문이면 카드를 치운다(넘긴 곳은 대화 줄로 남긴다)
+      return {
+        ...(view.snapshot.pendingQuestion?.runId === event.runId ? patchSnapshot(view, { pendingQuestion: undefined }) : view),
+        chat: [...view.chat, { kind: 'handoff', runId: event.runId, to: event.to, href: event.href }],
+      };
     case 'boot_network':
       return {
         ...patchSnapshot(view, { bootNetwork: event.network }),

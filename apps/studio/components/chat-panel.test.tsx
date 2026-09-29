@@ -51,21 +51,27 @@ describe("ChatPanel 입력", () => {
     expect(html).toContain("필드 삭제나 타입 변경 허용");
   });
 
-  it("방식(한 명·여러 명 비교·나눠서 병렬)을 고를 수 있고, 기본은 한 명이다", () => {
+  it("입력창에는 방식 버튼이 없다. 한 명이 처리하고, 필요하면 에이전트가 제안한다(ADR-068)", () => {
     const html = render(view());
 
-    expect(html).toContain('role="radiogroup" aria-label="방식"');
-    expect(html).toMatch(/role="radio" aria-checked="true"[^>]*>한 명</);
-    // 서버가 쓸 수 있다고 알려 주기 전(첫 그리기)에는 비교·병렬을 막아 둔다
-    expect(html).toMatch(/role="radio" aria-checked="false" disabled=""[^>]*>여러 명 비교</);
-    expect(html).toMatch(/role="radio" aria-checked="false" disabled=""[^>]*>나눠서 병렬</);
+    expect(html).not.toContain('aria-label="방식"');
+    expect(html).not.toContain(">여러 명 비교</button>");
     expect(html).toContain("요청 보내기");
   });
 
-  it("실행 중에는 방식을 고르지 않는다(진행 중 지시만 보낸다)", () => {
-    const html = render(view([{ type: "run_started", runId: "r9", request: "주문 목록" }]));
+  it("에이전트가 제안하면 제안 카드를 그리고, 서버 답을 받기 전에는 넘기기 버튼을 막아 둔다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "주문 API와 화면을 만들어줘" },
+        { type: "question", runId: "r1", question: "API와 화면을 나눠 동시에 만들 수 있습니다", options: ["나눠서 병렬로 하기", "한 명으로 계속"], allowOther: false, proposal: { mode: "split", request: "주문 API와 화면을 만들어줘" } },
+        { type: "run_finished", runId: "r1", status: "awaiting_input", summary: "제안" },
+      ]),
+    );
 
-    expect(html).not.toContain('aria-label="방식"');
+    expect(html).toContain("에이전트의 제안 · 나눠서 병렬");
+    expect(html).toContain("API와 화면을 나눠 동시에 만들 수 있습니다");
+    expect(html).toMatch(/disabled=""[^>]*>나눠서 병렬로 하기</);
+    expect(html).toContain(">한 명으로 계속</button>");
   });
 
   it("읽기만 스위치는 세션마다 저장된 값을 쓰고, 켜지면 파일을 바꾸지 않는다고 알린다", () => {
