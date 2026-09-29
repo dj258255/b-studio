@@ -5,7 +5,7 @@ import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
-import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
+import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
@@ -349,6 +349,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   const escalationHistory: string[] = [];
   let escalated = false;
   let activeClient = client;
+  /** 마지막으로 모델에게 보낸 게이트 실패 안내. 상한이 소진된 뒤 승격하면 같은 안내를 다시 보낸다 */
+  let lastFeedback: string | undefined;
 
   const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion): AgentResult => {
     const result: AgentResult = {
@@ -503,18 +505,35 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
       return finish('done', text, turn);
     }
-    if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    // 승격: 게이트 실패가 계기가 된다(같은 서명이 반복되거나, 설정이 있으면 실패 N번). 한 실행에 한 번만 올린다
     if (escalation && !escalated) {
       const key = signatureSetKey(gate.report, gate.checks);
       escalationHistory.push(key);
-      const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
-      if (shouldEscalate(escalationHistory, times)) {
+      if (shouldPromote(escalation, escalationHistory)) {
+        // 올라간 모델에게는 게이트 재시도를 새로 준다(기존 남은 횟수 대신)
+        const extended = gate.grantRetryBudget(retryBudgetFor(escalation));
+        // 상한이 이미 소진됐는데 예산도 못 받았으면 올려도 시도할 기회가 없다 — 지금처럼 실패로 끝낸다
+        if (outcome.kind === 'exhausted' && !extended) return finish('failed', outcome.summary, turn);
         escalated = true;
         metrics.escalatedAt = gate.attempts;
-        onEvent({ type: 'model_escalated', from: client.info?.model ?? '알 수 없음', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
+        onEvent({
+          type: 'model_escalated',
+          from: client.info?.model ?? '알 수 없음',
+          to: escalation.to,
+          attempt: gate.attempts,
+          signature: key,
+          sameSignatureTimes: escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES,
+        });
         activeClient = escalation.client;
+        if (outcome.kind === 'exhausted') {
+          // 상한을 새로 받았으면 마지막 실패 안내를 다시 보내고 이어 간다
+          messages.push({ role: 'user', content: escalationPrompt(outcome.summary, lastFeedback) });
+          continue;
+        }
       }
     }
+    if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    lastFeedback = outcome.feedback;
     messages.push({ role: 'user', content: outcome.feedback });
   }
 

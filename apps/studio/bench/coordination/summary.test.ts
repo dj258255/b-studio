@@ -23,7 +23,7 @@ function metrics(over: Partial<TaskPlanMetrics> = {}): TaskPlanMetrics {
 
 function row(over: Partial<BenchRow>): BenchRow {
   return {
-    escalation: { after: 2, escalated: false },
+    escalation: { after: 2, retryBudget: 2, escalated: false },
     order: 0,
     repeat: 1,
     taskId: 'orders-list',
@@ -244,8 +244,8 @@ describe('summarize', () => {
   it('승격 건수 열에 escalated 실행 수를 센다', () => {
     const markdown = summarize(
       [
-        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: true, attempt: 2 } }),
-        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: false } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, retryBudget: 2, escalated: true, attempt: 2 } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, retryBudget: 2, escalated: false } }),
         row({ taskId: 'orders-list', strategy: 'S0' }),
       ],
       meta,

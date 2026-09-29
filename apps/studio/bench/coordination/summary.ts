@@ -40,6 +40,10 @@ export interface BenchEscalation {
   to?: string;
   /** --escalate-after */
   after: number;
+  /** --escalate-after-failures. 서명과 무관하게 실패 N번이면 올리는 규칙(설정하지 않으면 없다) */
+  afterFailures?: number;
+  /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수(기본 2) */
+  retryBudget: number;
   /** 이 실행에서 한 번이라도 승격이 일어났는지 */
   escalated: boolean;
   /** 승격이 일어난 뒤의 게이트 시도(실패) 횟수 */

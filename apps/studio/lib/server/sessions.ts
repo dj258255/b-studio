@@ -1271,12 +1271,29 @@ function isDemoAnswer(request: string, question: string): boolean {
   return request.startsWith('[질문]') && request.includes('[답]') && request.includes(question);
 }
 
+/**
+ * 승격한 뒤 게이트 재시도를 새로 주는 횟수(기본 2). 승격을 켠 실행에서만 뜻이 있다.
+ * 0이면 새 예산을 주지 않는다(승격해도 남은 횟수만 쓴다 — 승격 규칙을 넣기 전과 같은 동작)
+ */
+function escalateRetryBudget(): number {
+  return integerEnv('B_STUDIO_ESCALATE_RETRY_BUDGET', 0) ?? 2;
+}
+
+/** 서명과 무관하게 게이트 실패가 이만큼이면 올린다. 설정하지 않으면 그 규칙을 쓰지 않는다 */
+function escalateAfterFailures(): number | undefined {
+  return integerEnv('B_STUDIO_ESCALATE_AFTER_FAILURES', 1);
+}
+
 /** 승격 임계치. 같은 실패 서명 집합이 이만큼 연속으로 나오면 올린다(기본 2) */
 function escalateAfter(): number {
-  const raw = process.env.B_STUDIO_ESCALATE_AFTER?.trim();
-  if (!raw) return 2;
+  return integerEnv('B_STUDIO_ESCALATE_AFTER', 1) ?? 2;
+}
+
+function integerEnv(name: string, min: number): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) throw new StudioError(500, `B_STUDIO_ESCALATE_AFTER는 1 이상의 정수여야 합니다 (지금 값: ${raw})`);
+  if (!Number.isInteger(value) || value < min) throw new StudioError(500, `${name}은 ${min} 이상의 정수여야 합니다 (지금 값: ${raw})`);
   return value;
 }
 
@@ -1295,14 +1312,24 @@ function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefin
     }
   })();
   // 로컬 Claude 모드와 같은 임계치를 쓴다. 사람이 읽는 이름은 모델 라벨을 쓴다
-  return { to: model.label || model.id, sameSignatureTimes: escalateAfter(), client: clientForModel(model) };
+  return { ...escalationRules(), to: model.label || model.id, client: clientForModel(model) };
 }
 
 /** 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet) */
 function claudeCodeEscalation(): EscalationPolicy | undefined {
   const to = process.env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim();
   if (!to) return undefined;
-  return { to, sameSignatureTimes: escalateAfter() };
+  return { ...escalationRules(), to };
+}
+
+/** 두 러너가 함께 쓰는 승격 규칙(임계치·실패 횟수·재시도 예산) */
+function escalationRules(): Pick<EscalationPolicy, 'sameSignatureTimes' | 'afterFailures' | 'retryBudget'> {
+  const afterFailures = escalateAfterFailures();
+  return {
+    sameSignatureTimes: escalateAfter(),
+    ...(afterFailures === undefined ? {} : { afterFailures }),
+    retryBudget: escalateRetryBudget(),
+  };
 }
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {

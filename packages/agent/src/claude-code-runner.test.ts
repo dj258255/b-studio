@@ -400,6 +400,39 @@ describe('zodShape', () => {
     expect(result.metrics?.escalatedAt).toBe(2);
   });
 
+  it('서명이 반복되지 않아도 afterFailures번 실패하면 승격하고, 승격 예산만큼 더 시도한다', async () => {
+    // 파일 내용을 매번 다르게 써서 편집 충돌 없이 턴을 끝낸다
+    const write = (n: number) => [
+      { tool: 'write_file', input: { path: 'api/src/Order.java', content: `class Order { String customerName; /* ${n} */ }\n` } },
+      { text: `${n}` },
+    ];
+    const { sdk, state } = fakeClaudeCode({ turns: [write(1), write(2), write(3), [{ text: '승격 뒤 고쳤습니다.' }]] });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      // 기본 상한(3)을 넘긴 지점에서 승격하므로, 예산이 없으면 이어 가지 못한다
+      sandbox: fakeSandbox(project, [false, false, false, true]),
+      sdk,
+      model: 'haiku',
+      // 서명 규칙은 사실상 끄고 실패 횟수 규칙만 본다
+      escalation: { to: 'sonnet', sameSignatureTimes: 99, afterFailures: 3, retryBudget: 2 },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 3 });
+    expect(result.metrics?.escalatedAt).toBe(3);
+    // 승격 뒤 query는 같은 세션을 이어받고 모델만 바뀐다(네 번째 시도가 승격 모델로 돌았다)
+    expect(state.options).toMatchObject({ model: 'sonnet', resume: 'new-session', forkSession: true });
+    const escalated = events.filter((event): event is Extract<AgentEvent, { type: 'model_escalated' }> => event.type === 'model_escalated');
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0]).toMatchObject({ from: 'haiku', to: 'sonnet', attempt: 3 });
+    // 상한이 소진된 뒤의 승격이라 마지막 실패 안내를 다시 보낸다
+    expect(state.prompts.at(-1)).toContain('직전 검증 결과를 다시 보냅니다');
+  });
+
   it('escalation을 주지 않으면 게이트가 반복 실패해도 query를 다시 열지 않는다', async () => {
     const { sdk, state } = fakeClaudeCode({
       turns: [

@@ -12,7 +12,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
-import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
+import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
@@ -180,6 +180,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const escalation = options.escalation;
   const escalationHistory: string[] = [];
   let escalated = false;
+  /** 마지막으로 모델에게 보낸 게이트 실패 안내. 상한이 소진된 뒤 승격하면 같은 안내를 다시 보낸다 */
+  let lastFeedback: string | undefined;
   let modelForQuery = model;
   let resumeForQuery = resume;
   let pendingPrompt = ask ? buildAskRequest(request, { toolName }) : request;
@@ -383,30 +385,46 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
               if (activeGate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
               finish('done', lastText);
             }
-            else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
             else {
-              lastText = '';
+              if (outcome.kind === 'retry') lastText = '';
+              // 승격: 같은 서명이 반복되거나, 설정이 있으면 실패 N번이 계기가 된다. 한 실행에 한 번만 올린다
               if (escalation && !escalated) {
                 const key = signatureSetKey(activeGate.report, activeGate.checks);
                 escalationHistory.push(key);
-                const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
-                if (shouldEscalate(escalationHistory, times)) {
-                  escalated = true;
-                  metrics.escalatedAt = activeGate.attempts;
-                  // 닫히는 입력 큐로 지시가 들어가 사라지지 않게, close보다 먼저 이 query의 지시 연결을 끊는다.
-                  // 그 뒤 들어온 지시는 큐에 남아 새 query가 연결할 때 flush로 가져간다
-                  detachSteeringOnce();
-                  onEvent({ type: 'model_escalated', from: modelForQuery ?? '기본 모델', to: escalation.to, attempt: activeGate.attempts, signature: key, sameSignatureTimes: times });
-                  modelForQuery = escalation.to;
-                  resumeForQuery = sessionId;
-                  pendingPrompt = outcome.feedback;
-                  conversation.close();
-                  reopen = true;
-                  // 같은 대화를 이어받아 모델만 바꾸려면 새 query를 열어야 한다. 이 query는 여기서 닫는다
-                  break messages;
+                if (shouldPromote(escalation, escalationHistory)) {
+                  // 올라간 모델에게 게이트 재시도를 새로 준다(기존 남은 횟수 대신)
+                  const extended = activeGate.grantRetryBudget(retryBudgetFor(escalation));
+                  // 상한이 이미 소진됐는데 예산도 못 받았으면 올려도 시도할 기회가 없다 — 아래에서 실패로 끝난다
+                  if (outcome.kind === 'retry' || extended) {
+                    escalated = true;
+                    metrics.escalatedAt = activeGate.attempts;
+                    // 닫히는 입력 큐로 지시가 들어가 사라지지 않게, close보다 먼저 이 query의 지시 연결을 끊는다.
+                    // 그 뒤 들어온 지시는 큐에 남아 새 query가 연결할 때 flush로 가져간다
+                    detachSteeringOnce();
+                    onEvent({
+                      type: 'model_escalated',
+                      from: modelForQuery ?? '기본 모델',
+                      to: escalation.to,
+                      attempt: activeGate.attempts,
+                      signature: key,
+                      sameSignatureTimes: escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES,
+                    });
+                    modelForQuery = escalation.to;
+                    resumeForQuery = sessionId;
+                    // 상한을 새로 받은 경우에는 마지막 실패 안내를 다시 보낸다(올라간 모델이 무엇을 고칠지 알게)
+                    pendingPrompt = outcome.kind === 'exhausted' ? escalationPrompt(outcome.summary, lastFeedback) : outcome.feedback;
+                    conversation.close();
+                    reopen = true;
+                    // 같은 대화를 이어받아 모델만 바꾸려면 새 query를 열어야 한다. 이 query는 여기서 닫는다
+                    break messages;
+                  }
                 }
               }
-              input.push(outcome.feedback);
+              if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
+              else {
+                lastFeedback = outcome.feedback;
+                input.push(outcome.feedback);
+              }
             }
             break;
           }
