@@ -752,6 +752,64 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
 }
 
 /**
+ * 작업 목록에서 세션 기록 자체를 지운다(중지와 다르다 — 중지는 샌드박스만 내리고 기록은 남긴다).
+ * 실행 중(샌드박스가 떠 있거나 준비 중)이면 지우지 않고 먼저 멈추라고 알린다. 세션 하나만 지우는 화면 동작은
+ * 사용자가 실행 중인 세션을 실수로 잃지 않도록 명시적으로 멈춘 뒤에만 허용한다(플릿·작업 계획을 통째로 지울 때는
+ * stopAndDeleteSession으로 먼저 멈추고 지운다 — 그 경우는 상위 묶음을 지우겠다는 의사가 이미 분명하다).
+ * 지운 뒤에는 작업 복사본(또는 내 폴더 세션의 상태 폴더)도 디스크에서 지운다. 내 폴더 세션은 사용자의 폴더 자체를
+ * 지우면 안 되므로 항상 상태 폴더(stateDir)만 지운다.
+ */
+export async function deleteSession(id: string): Promise<void> {
+  await recoverSessions();
+  const live = store.sessions.get(id);
+  const entry = archived.get(id);
+  if (!live && !entry) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  const snapshot = (live ?? entry)!.snapshot;
+  // idle(지연 기동, 아직 켜지 않음)은 지울 샌드박스가 없어 그대로 지울 수 있다. 그 밖의 실행 중 상태는 먼저 멈춰야 한다
+  if (snapshot.status !== 'stopped' && snapshot.status !== 'idle') {
+    throw new StudioError(409, '실행 중인 세션은 지울 수 없습니다. 먼저 샌드박스를 중지한 뒤 지우세요');
+  }
+
+  const workspace = snapshot.workspace ?? 'copy';
+  const dir = stateDirOf(snapshot);
+  // 내 폴더 세션은 사용자 폴더를 지우면 안 된다. stateDir이 없어 workDir과 같아지면(있어야 하는데 없으면) 안전하게 멈춘다
+  if (workspace === 'local' && dir === snapshot.workDir) {
+    throw new StudioError(500, '내 폴더 세션의 상태 폴더를 확인하지 못해 지우지 않았습니다');
+  }
+  assertWithinSessionsRoot(dir);
+
+  if (live) {
+    clearTimeout(live.persist.timer);
+    store.sessions.delete(id);
+  }
+  if (entry) archived.delete(id);
+  // 두 세션이 같은 폴더를 잡지 못하게 막는 표시. 남아 있으면 그 폴더로 새 세션을 영영 시작하지 못한다
+  claimedFolders.delete(snapshot.workDir);
+
+  await rm(dir, { recursive: true, force: true });
+}
+
+/** 지울 폴더가 세션 저장소 루트 밖이거나 루트 그 자체면 거부한다(경로 조작·설정 오류 방어) */
+function assertWithinSessionsRoot(dir: string): void {
+  const root = path.resolve(sessionsRoot());
+  const target = path.resolve(dir);
+  const relative = path.relative(root, target);
+  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new StudioError(500, `삭제할 폴더가 세션 저장소 밖에 있습니다: ${dir}`);
+  }
+}
+
+/**
+ * 세션을 멈추고 b-studio 기록까지 지운다(최선 노력, 실패해도 던지지 않는다).
+ * 플릿·작업 계획을 통째로 지울 때 구성원 세션을 함께 정리하는 데 쓴다 — 상위 묶음을 지우겠다는 의사가
+ * 이미 분명하므로, 화면에서 낱개 세션을 지울 때와 달리 실행 중이어도 먼저 멈추고 지운다.
+ */
+export async function stopAndDeleteSession(id: string): Promise<void> {
+  await stopSession(id).catch(() => {});
+  await deleteSession(id).catch(() => {});
+}
+
+/**
  * 중지된 세션을 같은 작업 복사본과 체크포인트로 새 샌드박스에서 다시 띄운다.
  * 이 프로세스에서 중지한 세션과 이전 스튜디오 프로세스가 남긴 세션 모두 같은 id로 이어진다
  */

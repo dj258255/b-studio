@@ -129,6 +129,29 @@ export function splitSelection(works: readonly WorkItem[], selectedKeys: readonl
   return { ids: ids.slice(0, MAX_SPLIT), dropped: Math.max(0, ids.length - MAX_SPLIT) };
 }
 
+/** 지우기 API 주소. key(`session:<id>`·`fleet:<id>`·`plan:<id>`)의 종류마다 다른 라우트를 부른다 */
+export function deleteHref(key: string): string {
+  const index = key.indexOf(':');
+  const kind = index === -1 ? 'session' : key.slice(0, index);
+  const id = index === -1 ? key : key.slice(index + 1);
+  if (kind === 'fleet') return `/api/fleets/${encodeURIComponent(id)}/delete`;
+  if (kind === 'plan') return `/api/task-plans/${encodeURIComponent(id)}/delete`;
+  return `/api/sessions/${encodeURIComponent(id)}/delete`;
+}
+
+/**
+ * 지금 지울 수 없으면 그 이유(버튼 title·안내 문구에 쓴다), 지울 수 있으면 undefined.
+ * 한 명이면 세션 자체가 중지·대기(샌드박스 꺼짐) 상태여야 한다(서버가 실행 중이면 409로 거부한다).
+ * 비교·병렬은 구성원 하나라도 작업 중·준비 중이면 막는다(그 밖의 상태는 지울 때 서버가 먼저 멈추고 지운다)
+ */
+export function deleteBlockReason(work: WorkItem): string | undefined {
+  if (work.mode === 'single') {
+    return work.state === 'stopped' || work.state === 'dormant' ? undefined : '세션이 아직 실행 중입니다. 먼저 멈춘 뒤 지울 수 있습니다';
+  }
+  const active = work.members.some((member) => member.state === 'working' || member.state === 'booting');
+  return active ? '진행 중인 참가자가 있습니다. 끝나거나 멈춘 뒤 지울 수 있습니다' : undefined;
+}
+
 /** 묶음 줄의 구성원 요약. 예: "참가자 3명 · 작업 중 2" / "레인 2개 · 대기 2" */
 export function membersSummary(work: WorkItem): string | undefined {
   if (work.mode === 'single') return undefined;

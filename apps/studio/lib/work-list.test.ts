@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ATTENTION_PRIORITY, type AgentItem } from './server/agents-overview';
 import { MAX_SPLIT } from './split';
-import { filterWork, groupWork, initialWorkTab, membersSummary, splitSelection, WORK_ATTENTION_PRIORITY, workCounts } from './work-list';
+import { deleteBlockReason, deleteHref, filterWork, groupWork, initialWorkTab, membersSummary, splitSelection, WORK_ATTENTION_PRIORITY, workCounts } from './work-list';
 
 function item(overrides: Partial<AgentItem> & Pick<AgentItem, 'id'>): AgentItem {
   return {
@@ -127,5 +127,39 @@ describe('membersSummary', () => {
     expect(membersSummary(byKey.get('fleet:f1')!)).toBe('참가자 2명 · 작업 중 1');
     expect(membersSummary(byKey.get('plan:p1')!)).toBe('레인 1개');
     expect(membersSummary(byKey.get('session:s1')!)).toBeUndefined();
+  });
+});
+
+describe('deleteHref', () => {
+  it('key의 종류(session·fleet·plan)마다 다른 지우기 라우트를 돌려준다', () => {
+    expect(deleteHref('session:ab12')).toBe('/api/sessions/ab12/delete');
+    expect(deleteHref('fleet:f1')).toBe('/api/fleets/f1/delete');
+    expect(deleteHref('plan:p1')).toBe('/api/task-plans/p1/delete');
+    // id에 라우트에 쓸 수 없는 글자가 있어도 인코딩해서 넣는다
+    expect(deleteHref('session:a/b')).toBe('/api/sessions/a%2Fb/delete');
+  });
+});
+
+describe('deleteBlockReason', () => {
+  it('한 명은 중지·대기(샌드박스 꺼짐)일 때만 지울 수 있다', () => {
+    const works = groupWork([item({ id: 's1', state: 'stopped' })]);
+    expect(deleteBlockReason(works[0]!)).toBeUndefined();
+
+    const dormant = groupWork([item({ id: 's2', state: 'dormant' })]);
+    expect(deleteBlockReason(dormant[0]!)).toBeUndefined();
+
+    for (const state of ['working', 'booting', 'idle', 'error'] as const) {
+      const blocked = groupWork([item({ id: 's3', state })]);
+      expect(deleteBlockReason(blocked[0]!)).toBeDefined();
+    }
+  });
+
+  it('비교·병렬은 작업 중·준비 중인 구성원이 있을 때만 막고, 그 밖의 상태는 지울 수 있다(지울 때 서버가 먼저 멈춘다)', () => {
+    const fleet = { kind: 'fleet' as const, id: 'f1', href: '/fleets?id=f1' };
+    const running = groupWork([item({ id: 'm1', kind: 'fleet', group: fleet, state: 'working' }), item({ id: 'm2', kind: 'fleet', group: fleet, state: 'stopped' })]);
+    expect(deleteBlockReason(running[0]!)).toBeDefined();
+
+    const idleMembers = groupWork([item({ id: 'm3', kind: 'fleet', group: fleet, state: 'stopped' }), item({ id: 'm4', kind: 'fleet', group: fleet, state: 'error' })]);
+    expect(deleteBlockReason(idleMembers[0]!)).toBeUndefined();
   });
 });
