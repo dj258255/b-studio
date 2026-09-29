@@ -118,6 +118,21 @@ export interface TokenWarning {
   tool?: string;
 }
 
+/**
+ * 도구 결과 예산이 잘라낸 양(측정)과 그 결과가 남은 호출마다 다시 읽혔을 양(추정).
+ *
+ * 추정은 **글자 수를 4로 나눠 토큰으로 본 근사**다(`estimatedTokens`). 언어·토크나이저마다 달라 정확하지 않으므로
+ * 화면과 마크다운에서 측정값과 분리해 표시한다.
+ */
+export interface TokenTrimmed {
+  /** 잘라낸 글자 합: Σ (rawChars - chars) */
+  chars: number;
+  /** 앞과 같은 결과를 참조로 대체한 횟수 */
+  repeated: number;
+  /** 잘린 결과가 그 실행의 남은 모델 호출마다 다시 읽혔을 토큰 추정 = Σ ((rawChars - chars) / 4) × (그 뒤 모델 호출 수 + 1) */
+  estimatedTokens: number;
+}
+
 export interface TokenReport {
   runId: string;
   request: string;
@@ -134,6 +149,8 @@ export interface TokenReport {
   cacheHitRatio: number;
   /** 실행 중 오래된 도구 결과를 비운 합계(횟수·글자). 비운 적이 없으면 0 */
   cleared: { count: number; chars: number };
+  /** 도구 결과 예산이 잘라낸 양과 그 결과가 남은 호출마다 다시 읽혔을 양(추정). 프로젝트 보고서가 합산한다 */
+  trimmed: TokenTrimmed;
   estimatedCostUsd?: number;
   /** 비용을 어느 방식으로 계산했는지: 모델별 단가 / 단일 단가 / 단가 없음 */
   priceSource: 'by-model' | 'single' | 'none';

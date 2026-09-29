@@ -89,6 +89,15 @@ export default async function HomePage() {
                 <Link href={`/sessions/${session.id}`} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
                   열기
                 </Link>
+                {/* 프로젝트 토큰 보고서로 가는 한 곳. 세션마다 같은 프로젝트 보고서를 가리킨다 */}
+                <Link
+                  href={`/projects/${session.projectId}/tokens`}
+                  aria-label={`${session.projectName} 프로젝트 토큰 보고서`}
+                  title="이 프로젝트가 쓴 토큰과 b-studio가 줄인 양"
+                  className="glass-soft rounded-control px-3 py-1.5 text-sm text-muted hover:bg-panel hover:text-ink"
+                >
+                  토큰
+                </Link>
               </li>
             ))}
           </ul>

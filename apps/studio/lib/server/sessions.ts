@@ -313,6 +313,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
   const lastRequest = history.findLast((event) => event.type === 'run_started');
   return {
     id: snapshot.id,
+    projectId: snapshot.projectId,
     projectName: snapshot.projectName,
     status: snapshot.status,
     mode: snapshot.mode,
@@ -671,7 +672,7 @@ export function sendMessage(
   session.snapshot.running = true;
   // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
   session.snapshot.pendingQuestion = undefined;
-  emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined });
+  emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined, at: new Date().toISOString() });
   void execute(session, run, request, plan);
   return { runId: run.id };
 }
@@ -1416,6 +1417,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       metrics: result.metrics,
       durationMs: Math.round(performance.now() - agentStarted),
       ...(result.verify === 'light' ? { verify: 'light' as const } : {}),
+      // 가볍게 확인이 건너뛴 단계를 함께 남긴다(프로젝트 토큰 보고서가 이 수를 센다)
+      ...(result.skippedStages && result.skippedStages.length > 0 ? { skippedStages: [...result.skippedStages] } : {}),
     };
   } catch (error) {
     if (error instanceof LocalEditsError) {

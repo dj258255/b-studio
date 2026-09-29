@@ -206,6 +206,7 @@ export interface RemoteCommitView {
 /** 홈 화면의 세션 목록. 중지된 세션도 작업 복사본이 남아 있어 이어서 작업할 수 있다 */
 export interface SessionSummary {
   id: string;
+  projectId: string;
   projectName: string;
   status: SessionStatus;
   /** 세션을 만들 때의 서버 모드 */
@@ -237,7 +238,7 @@ export type StudioEvent =
   /** 파일 변경을 모아 알린다. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'files_changed'; revision: number }
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
-  | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask' }
+  | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask'; /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */ at?: string }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** 실행 중 보낸 지시를 큐에 넣었다. 러너가 이어서 쓰면 agent 이벤트 steer_applied로 온다 */
   | { type: 'steer_queued'; runId: string; text: string }
@@ -262,6 +263,8 @@ export type StudioEvent =
       durationMs?: number;
       /** 가볍게 확인(light) 실행이면 'light'. 테스트·화면 확인·동시 요청·리뷰를 건너뛰었다 */
       verify?: 'light';
+      /** 가볍게 확인이 건너뛴 검증 단계(프로젝트 토큰 보고서가 이 수를 센다). light가 아니면 없다 */
+      skippedStages?: string[];
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
       nextDemoQuestion?: string;

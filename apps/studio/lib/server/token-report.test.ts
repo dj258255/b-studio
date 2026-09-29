@@ -76,6 +76,16 @@ describe('buildTokenReports', () => {
     expect(report!.cacheHitRatio).toBeCloseTo(30_000 / 33_100, 5);
   });
 
+  it('도구 결과가 잘라낸 글자와 남은 호출마다 다시 읽혔을 양(추정)을 낸다', () => {
+    const [report] = buildTokenReports(sampleEvents());
+
+    // (30,452-6,000) + (12,000-28) = 36,424자, 그중 반복 대체 1회
+    expect(report!.trimmed.chars).toBe(36_424);
+    expect(report!.trimmed.repeated).toBe(1);
+    // (24452/4)×(뒤 1턴+1) + (11972/4)×(뒤 0턴+1) = 12,226 + 2,993
+    expect(report!.trimmed.estimatedTokens).toBe(15_219);
+  });
+
   it('글자 수로 낭비 신호를 찾는다: 큰 결과·같은 결과 반복·node_modules·컨텍스트 급증', () => {
     const [report] = buildTokenReports(sampleEvents());
     const kinds = report!.warnings.map((warning) => warning.kind);
