@@ -1,3 +1,4 @@
+import { classifyRole } from '../service-role';
 import type { ContainerState, LogLine, ServiceUsage } from '../types';
 
 /** `kubectl logs --prefix --timestamps` 한 줄: `[pod/web/web] 2026-09-11T04:35:45.419151529Z 메시지` */
@@ -48,7 +49,7 @@ export function parsePortForwardLine(line: string): { local: number; remote: num
   return match ? { local: Number(match[1]), remote: Number(match[2]) } : undefined;
 }
 
-type ContainerStateJson = Partial<Record<'running' | 'waiting' | 'terminated', { exitCode?: number; reason?: string }>>;
+type ContainerStateJson = Partial<Record<'running' | 'waiting' | 'terminated', { exitCode?: number; reason?: string; startedAt?: string }>>;
 
 export interface PodJson {
   metadata?: { name?: string; uid?: string; labels?: Record<string, string>; deletionTimestamp?: string };
@@ -77,17 +78,24 @@ export function podReady(pod: PodJson | undefined): boolean {
 
 /**
  * Pod 하나의 상태와 한도. 사용량(CPU, 메모리)은 metrics-server가 있어야 알 수 있어 넣지 않는다.
- * 컨테이너가 다시 시작됐으면 직전 종료(lastState)로 메모리 부족 종료를 알아본다
+ * 컨테이너가 다시 시작됐으면 직전 종료(lastState)로 메모리 부족 종료를 알아본다.
+ * managedNames를 비워 두면(옛 호출자 호환) 모두 supporting으로 분류한다
  */
-export function podUsage(pod: PodJson): ServiceUsage {
+export function podUsage(pod: PodJson, managedNames: ReadonlySet<string> = new Set()): ServiceUsage {
   const status = pod.status?.containerStatuses?.[0];
   const terminated = status?.state?.terminated ?? status?.lastState?.terminated;
   const limits = pod.spec?.containers?.[0]?.resources?.limits ?? {};
+  const service = pod.metadata?.labels?.['b-studio.service'] ?? pod.metadata?.name ?? 'unknown';
+  const state = podState(pod);
   return {
-    service: pod.metadata?.labels?.['b-studio.service'] ?? pod.metadata?.name ?? 'unknown',
-    state: podState(pod),
+    service,
+    ...(pod.metadata?.name ? { containerName: pod.metadata.name } : {}),
+    role: classifyRole(service, managedNames),
+    state,
     ...(limits.memory ? { memoryLimitBytes: quantityBytes(limits.memory) } : {}),
     ...(limits.cpu ? { cpuLimit: quantityCpu(limits.cpu) } : {}),
+    ...(status?.restartCount !== undefined ? { restartCount: status.restartCount } : {}),
+    ...(state === 'running' && status?.state?.running?.startedAt ? { startedAt: status.state.running.startedAt } : {}),
     ...(terminated?.exitCode !== undefined ? { exitCode: terminated.exitCode } : {}),
     oomKilled: terminated?.reason === 'OOMKilled',
   };

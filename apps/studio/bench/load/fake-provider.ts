@@ -98,7 +98,7 @@ class FakeSandbox implements Sandbox {
 
   async stats(): Promise<ServiceUsage[]> {
     const memoryLimitBytes = 1_024 * 1_024 * 1_024;
-    return this.project.managed.map(([service]) => ({ service, state: 'running', cpuPercent: 1, memoryBytes: 32 * 1_024 * 1_024, memoryLimitBytes, oomKilled: false }));
+    return this.project.managed.map(([service]) => ({ service, role: 'managed', state: 'running', cpuPercent: 1, memoryBytes: 32 * 1_024 * 1_024, memoryLimitBytes, oomKilled: false }));
   }
 
   async *logs(options?: LogOptions): AsyncIterable<LogLine> {
