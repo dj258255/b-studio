@@ -89,3 +89,10 @@ describe('highlightLogLine', () => {
     expect(performance.now() - start).toBeLessThan(200);
   });
 });
+
+describe('상태 코드 강조 범위', () => {
+  it('HTTP 줄의 상태 코드만 칠하고, 크기·포트 같은 숫자는 칠하지 않는다', () => {
+    expect(highlightLogLine('GET / 200 in 43ms')).toContainEqual({ content: '200', tone: 'pass' });
+    expect(highlightLogLine('distance=494 kB, estimate=494 kB').some((token) => token.tone === 'fail')).toBe(false);
+  });
+});

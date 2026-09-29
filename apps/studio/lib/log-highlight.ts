@@ -22,6 +22,8 @@ const PLATFORM_PREFIX = '[b-studio]';
 const TIMESTAMP = /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/g;
 /** HTTP 상태 코드. 2xx/4xx/5xx만 다루고(3xx는 강조 대상이 아님) 앞뒤가 글자·숫자가 아니어야 한다 */
 const STATUS_CODE = /\b(?:2\d{2}|4\d{2}|5\d{2})\b/g;
+/** 상태 코드는 HTTP 줄에서만 찾는다. 없으면 "494 kB"처럼 크기·포트 숫자가 오류 색으로 칠해졌다(실제 db 로그에서 발견) */
+const HTTP_CONTEXT = /\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b|\bHTTP\/|\bstatus\b/i;
 
 /** ANSI SGR(색·굵기) 이스케이프. `\x1b[` 뒤에 숫자와 세미콜론이 오고 `m`으로 끝난다 */
 const ANSI_SGR = /\x1b\[([0-9;]*)m/g;
@@ -105,7 +107,8 @@ function findPatternSpans(text: string): Span[] {
   const spans: Span[] = [];
   for (const match of text.matchAll(TIMESTAMP)) spans.push({ start: match.index, end: match.index + match[0].length, tone: 'muted' });
   for (const match of text.matchAll(QUIET_LEVEL)) spans.push({ start: match.index, end: match.index + match[0].length, tone: 'muted' });
-  for (const match of text.matchAll(STATUS_CODE)) {
+  const statusCodes = HTTP_CONTEXT.test(text) ? text.matchAll(STATUS_CODE) : [];
+  for (const match of statusCodes) {
     const code = Number(match[0]);
     spans.push({ start: match.index, end: match.index + match[0].length, tone: code < 300 ? 'pass' : 'fail' });
   }
