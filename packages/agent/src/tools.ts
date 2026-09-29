@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { describeUsage, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
+import type { Note, NoteKind } from './coordination';
 import type { DesignSource } from './design';
 import { checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 import { servicesForFiles } from './services';
@@ -41,10 +42,42 @@ export interface AskUserQuestion {
 
 /** buildTools 옵션. interactive가 아니면(레인·벤치·CLI) 도구 목록이 지금과 같다 */
 export interface ToolBuildOptions {
+  /** 주면 조율 도구 두 개(post_note·read_notes)를 더한다. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음) */
+  board?: BoardAccess;
+  /**
+   * 프로젝트가 허용 도구 목록을 정했으면 조율 도구도 그 목록에 있어야 한다(기존 규칙 그대로).
+   * 목록에 없으면 도구를 아예 넣지 않는다 — 모델이 막히는 도구를 보지 않게.
+   */
+  allowedTools?: readonly string[];
   /** 세션이 Figma 디자인을 설정했을 때 디자인 도구를 더한다 */
   design?: boolean;
   /** 단일 세션의 사용자 요청일 때만 ask_user를 더한다 */
   interactive?: boolean;
+}
+
+/**
+ * 조율 게시판을 레인 신원으로 감싼 것. Board를 직접 넘기지 않고 도구가 쓸 수 있는 두 동작만 노출한다.
+ * 어떤 레인으로 쓰고 읽는지는 실행기가 정하고 모델은 바꿀 수 없다.
+ */
+export interface BoardAccess {
+  post(input: { kind: NoteKind; body: string; refs?: string[] }): { ok: true; note: Note } | { ok: false; reason: string };
+  read(options: { kinds?: readonly NoteKind[] }): { notes: Note[]; truncated: boolean; reason?: string };
+  lane: string;
+  task?: string;
+  /** false면 모델은 읽기만 한다(기본 true). buildTools가 post_note를 목록에서 뺀다 */
+  modelWrites?: boolean;
+}
+
+export interface ToolBuildOptions {
+  /** 주면 조율 도구 두 개(post_note·read_notes)를 더한다. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음) */
+  board?: BoardAccess;
+  /**
+   * 프로젝트가 허용 도구 목록을 정했으면 조율 도구도 그 목록에 있어야 한다(기존 규칙 그대로).
+   * 목록에 없으면 도구를 아예 넣지 않는다 — 모델이 막히는 도구를 보지 않게.
+   */
+  allowedTools?: readonly string[];
+  /** 세션이 디자인(Figma)을 설정했을 때만 디자인 도구 두 개(design_frames·design_frame)를 더한다 */
+  design?: boolean;
 }
 
 export interface ToolContext {
@@ -53,6 +86,8 @@ export interface ToolContext {
   sandbox: Sandbox;
   fetcher: ContractFetcher;
   signal?: AbortSignal;
+  /** 조율 게시판. 있을 때만 조율 도구가 목록에 오른다 */
+  board?: BoardAccess;
   /** 재시작 중 서비스 상태(바뀐 포트 포함)를 밖으로 알린다 */
   onServiceStatus?: StartOptions['onStatus'];
   /** 질문 모드. 파일을 바꾸거나 명령을 실행하는 도구와 조회가 아닌 HTTP 호출을 거부한다 */
@@ -77,8 +112,8 @@ export interface ToolContext {
   toolResults?: ToolResultCache;
 }
 
-/** 질문 모드에서 거부하는 도구 */
-const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_in_service', 'restart_service']);
+/** 질문 모드에서 거부하는 도구. 게시판에 쓰는 post_note도 상태를 바꾸므로 포함한다(읽기 read_notes는 허용) */
+const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_in_service', 'restart_service', 'post_note']);
 /** 성공하면 읽기 캐시를 비우는 쓰기 도구. 같은 경로를 다시 읽으면 내용이 달라졌을 수 있다 */
 const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
 const READ_METHODS = new Set(['GET', 'HEAD']);
@@ -172,6 +207,32 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
     );
   }
 
+  // 조율 도구는 조율을 켠 실행(board가 있는 실행)에만 넣는다. 기본값은 공유 없음이라 목록이 지금과 같다.
+  // 허용 도구 목록이 있는 프로젝트에서 그 목록에 없으면 넣지 않아, 모델이 막힐 도구를 보지 않게 한다.
+  if (options.board) {
+    const isAllowed = (name: string) => !options.allowedTools || options.allowedTools.includes(name);
+    // S2·S5처럼 읽기만 하는 전략(board.modelWrites === false)에서는 post_note를 넣지 않는다
+    if (isAllowed('post_note') && options.board.modelWrites !== false) {
+      tools.push(
+        tool(
+          'post_note',
+          'Post a short note to the coordination board shared by parallel lanes: interface contracts (refs required) and environment facts. Verification failures are written by the platform, not by the model, so failure is not offered here.',
+          {
+            kind: { type: 'string', enum: ['contract', 'fact'], description: 'Note kind. Send "contract" for interface agreements, "fact" for environment facts.' },
+            body: { type: 'string', description: 'Short note body (up to 2048 bytes). Do not paste diffs or reasoning.' },
+            refs: { type: 'array', items: { type: 'string' }, description: 'File paths or checkpoint references. contract notes need at least one; send [] when there is nothing to point at.' },
+          },
+        ),
+      );
+    }
+    if (isAllowed('read_notes')) {
+      tools.push(
+        tool('read_notes', 'Read notes posted by other lanes on the coordination board. Notes come back newest first, ordered by priority (failure > contract > fact).', {
+          kinds: { type: 'array', items: { type: 'string', enum: ['contract', 'failure', 'fact'] }, description: 'Kinds to read. Send [] to read every kind.' },
+        }),
+      );
+    }
+  }
   if (options.design) {
     tools.push(
       tool('design_frames', 'List the Figma design frames (page, id, name, size). Use an id with design_frame.', {}),
@@ -358,6 +419,21 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       // 이 결과를 받은 모델이 곧바로 멈추도록, 도구가 끝났다는 사실과 멈추라는 지시를 함께 돌려준다
       return success('Question sent to the user. End this run now and wait for their answer; do not call any more tools.');
     }
+    case 'post_note': {
+      const board = context.board;
+      if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
+      const result = board.post({ kind: asNoteKind(string(args, 'kind')), body: string(args, 'body'), refs: optionalStringArray(args, 'refs') });
+      return result.ok ? success(`posted ${result.note.id} (${result.note.kind})`) : failure(result.reason);
+    }
+    case 'read_notes': {
+      const board = context.board;
+      if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
+      const kinds = asNoteKinds(optionalStringArray(args, 'kinds'));
+      const { notes, truncated, reason } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
+      const lines = notes.map(formatNote);
+      if (truncated) lines.push(`[... ${reason ?? '읽기 상한으로 일부만 돌려줬습니다'} ...]`);
+      return success(lines.length > 0 ? lines.join('\n') : '(no notes)');
+    }
     default:
       return failure(`Unknown tool: ${name}`);
   }
@@ -453,6 +529,31 @@ function stringArray(args: Record<string, unknown>, key: string): string[] {
     throw new ToolInputError(`"${key}" must be a non-empty array of strings`);
   }
   return value;
+}
+
+/** 없으면 빈 배열. 조율 도구의 refs·kinds처럼 비어 있을 수 있는 배열에 쓴다 */
+function optionalStringArray(args: Record<string, unknown>, key: string): string[] {
+  const value = args[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new ToolInputError(`"${key}" must be an array of strings`);
+  return value;
+}
+
+const NOTE_KINDS: readonly NoteKind[] = ['contract', 'failure', 'fact'];
+
+function asNoteKind(value: string): NoteKind {
+  if (!(NOTE_KINDS as readonly string[]).includes(value)) throw new ToolInputError(`Unknown note kind: ${value}`);
+  return value as NoteKind;
+}
+
+function asNoteKinds(values: string[]): NoteKind[] {
+  return values.map(asNoteKind);
+}
+
+/** 읽은 메모를 짧은 텍스트로: `[kind·priority] 작성 레인: 본문 (refs)` */
+function formatNote(note: Note): string {
+  const refs = note.refs.length > 0 ? ` (${note.refs.join(', ')})` : '';
+  return `[${note.kind}·${note.priority}] ${note.author.lane}: ${note.body}${refs}`;
 }
 
 function clamp(value: number, min: number, max: number): number {

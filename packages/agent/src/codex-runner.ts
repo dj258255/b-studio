@@ -151,11 +151,16 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
+    board: options.board,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
     // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
     toolResults: createToolResultCache(),
   };
-  const specs = buildTools(project, { interactive });
+  // 조율 게시판은 Claude Code 러너와 같게, 켠 실행에만 도구를 더한다
+  const specs = buildTools(project, {
+    ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}),
+    interactive,
+  });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent 러너와 같은 큐를 쓴다

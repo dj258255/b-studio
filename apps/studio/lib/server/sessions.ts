@@ -36,6 +36,7 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
+  type BoardAccess,
   type BrowserFrame,
   type Checkpoint,
   type DatabaseState,
@@ -527,6 +528,7 @@ export function sendMessage(
     intent = 'build',
     writableScope,
     scriptedTurns,
+    board,
     steering,
     interactive = false,
   }: {
@@ -537,6 +539,8 @@ export function sendMessage(
     writableScope?: readonly string[];
     /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
     scriptedTurns?: ScriptedTurn[];
+    /** 서버 안에서만 쓴다(레인 조율). 레인 신원으로 감싼 게시판. HTTP로는 받지 않는다 */
+    board?: BoardAccess;
     /** 실행 중 지시를 받을 실행인지. 사람이 보는 단일 세션(메시지 라우트)만 켠다. 레인·플릿·벤치는 켜지 않는다 */
     steering?: boolean;
     /** 서버 안에서만 쓴다. true면 되묻기(ask_user) 도구를 넣는다. 사람이 보낸 단일 세션 요청(messages 라우트)만 켠다 */
@@ -567,6 +571,7 @@ export function sendMessage(
   const plan = {
     ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)),
     writableScope,
+    board,
     interactive,
   };
   const run: ActiveRun = {
@@ -1069,7 +1074,7 @@ type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[]; interactive?: boolean };
+) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
@@ -1298,6 +1303,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     intent: plan.intent,
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
+    // 레인 조율 게시판. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음)
+    board: plan.board,
     // 화면 확인이 찍은 스크린샷은 세션 폴더에 남기고, 실시간 프레임은 채널로만 보낸다(기록에 쌓지 않는다)
     saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
     onBrowserFrame: ({ check, frame }: { check: string; frame: BrowserFrame }) =>

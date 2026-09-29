@@ -93,7 +93,35 @@ export {
   type PullRequestResult,
   type RemoteLocation,
 } from './repository';
-export { buildTools, executeTool, type AskUserQuestion, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
+export { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
+export {
+  Board,
+  canRead,
+  DEFAULT_BOARD_LIMITS,
+  failureNotesFromEvents,
+  failureNotesFromReport,
+  NOTE_PRIORITY,
+  normalizeMessage,
+  noteBytes,
+  signatureFromCheck,
+  signatureKey,
+  signaturesFromReport,
+  type Author,
+  type BoardLimits,
+  type BoardOptions,
+  type BoardStats,
+  type FailureEvent,
+  type FailureNoteInput,
+  type FailureSignature,
+  type Note,
+  type NoteKind,
+  type PostInput,
+  type PostResult,
+  type ReadOptions,
+  type ReadResult,
+  type Reader,
+  type Topology,
+} from './coordination';
 export {
   clipCommandOutput,
   clipText,

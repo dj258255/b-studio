@@ -92,15 +92,15 @@ describe('summarize', () => {
 
     // orders-list S0: 2회 중 1회 성공, 값이 있는 실행만으로 중앙값을 낸다. 기동 수신은 0KiB
     // 비운 도구 결과는 [2, 0]의 중앙값 1이다
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 0KiB | 3 | 2 | 1 | 1 |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 0KiB | 3 | 2 | 1 | — | 1 |');
     // 나머지 행은 레인 세션이 없어 탐색·실패 열이 —다
-    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | 0KiB | — | — | — | — |');
-    expect(markdown).toContain('| independent | X | S0 | 1/1 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | 0KiB | — | — | — | — |');
+    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | 0KiB | — | — | — | — | — |');
+    expect(markdown).toContain('| independent | X | S0 | 1/1 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | 0KiB | — | — | — | — | — |');
   });
 
   it('탐색·실패 열을 표 1에 더한다', () => {
     const markdown = summarize(rows, meta);
-    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 기동 수신(중앙값) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 비운 도구 결과 중앙값 |');
+    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 기동 수신(중앙값) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 | 비운 도구 결과 중앙값 |');
   });
 
   it('기동 수신(중앙값) 열에 bootRxBytesTotal 중앙값을 사람이 읽는 크기로 낸다', () => {
@@ -141,7 +141,7 @@ describe('summarize', () => {
       ],
       meta,
     );
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | — | 10 | 4 | 0 | 0 |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | — | 10 | 4 | 0 | — | 0 |');
   });
 
   it('값이 하나도 없으면 —로 둔다', () => {
@@ -189,5 +189,24 @@ describe('summarize', () => {
     const markdown = summarize([], meta);
     expect(markdown).toContain('| 과제 | 엮임 | 전략 | 성공 |');
     expect(markdown).not.toContain('orders-list');
+  });
+
+  it('탐색·실패·조율 열을 표 1에 더한다', () => {
+    const markdown = summarize(rows, meta);
+    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 기동 수신(중앙값) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 | 비운 도구 결과 중앙값 |');
+  });
+
+  it('조율 게시판의 읽은 바이트 중앙값을 낸다', () => {
+    const markdown = summarize(
+      [
+        row({
+          strategy: 'S3',
+          coordination: { strategy: 'S3', topology: 'mesh', posts: 2, rejected: 0, reads: 3, bytesRead: 4_096, byKind: { contract: 1, failure: 0, fact: 1 } },
+        }),
+      ],
+      meta,
+    );
+    expect(markdown).toContain('| S3 | 1/1 |');
+    expect(markdown).toContain('| 4,096 |');
   });
 });

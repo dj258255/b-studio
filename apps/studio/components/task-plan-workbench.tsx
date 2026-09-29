@@ -4,7 +4,14 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
 import type { ProjectSummary } from '@/lib/studio-events';
-import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanView } from '@/lib/task-plan-types';
+import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
+
+const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
+  S2: 'S2 계약 먼저',
+  S3: 'S3 게시판',
+  S4: 'S4 통합 후 수리',
+  S5: 'S5 실패 서명만',
+};
 
 type ModelOption = ModelProfile & { configured: boolean };
 
@@ -261,6 +268,38 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
         <p className="mt-3 text-sm text-muted">통합 결과는 자동으로 병합·푸시·배포하지 않습니다. 통합 세션에서 diff와 검증 근거를 확인한 뒤 내보내세요.</p>
       </header>
 
+      {plan.coordination && (
+        <section className="glass rounded-panel p-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">조율 게시판</h2>
+            <span className="glass-soft rounded-full px-3 py-1 text-sm font-medium text-wait">{STRATEGY_LABEL[plan.coordination.strategy]}</span>
+            <span className="text-sm text-muted">topology {plan.coordination.topology}</span>
+          </div>
+          {plan.board && (
+            <p className="mt-2 text-xs text-muted">
+              메모 {plan.board.stats.posts}개 · 거부 {plan.board.stats.rejected} · 읽기 {plan.board.stats.reads}회 · 읽은 바이트 {plan.board.stats.bytesRead.toLocaleString('ko-KR')}
+            </p>
+          )}
+          {plan.board && plan.board.notes.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {plan.board.notes.map((note, index) => (
+                <li key={`${note.at}-${index}`} className="rounded-md border border-line bg-panel p-3">
+                  <p className="text-xs font-medium">
+                    [{note.kind}·{note.priority}] {note.lane}
+                    {note.task ? ` / ${note.task}` : ''} · {note.by === 'platform' ? '검증기' : '모델'}
+                  </p>
+                  <p className="mt-1 text-sm leading-5 whitespace-pre-wrap">{note.body.slice(0, 200)}</p>
+                  {note.refs.length > 0 && <p className="mt-1 break-all font-mono text-xs text-muted">{note.refs.join(', ')}</p>}
+                  <p className="mt-1 text-xs text-muted">{note.at}</p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-sm text-muted">아직 게시된 메모가 없습니다.</p>
+          )}
+        </section>
+      )}
+
       <div className={`grid gap-4 ${plan.lanes.length >= 3 ? '2xl:grid-cols-3' : 'lg:grid-cols-2'}`}>
         {plan.lanes.map((lane) => {
           // 레인 합계는 그 레인 작업들의 실행 기록에서 더한다. 계획 전체 합계(plan.metrics)만으로는 레인별 비중을 알 수 없다
@@ -313,6 +352,11 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
           {plan.integration.files.length > 0 && <p className="mt-3 break-all font-mono text-xs text-muted">{plan.integration.files.join(', ')}</p>}
           {(plan.integration.deleted ?? []).length > 0 && (
             <p className="mt-1 break-all font-mono text-xs text-fail">삭제 {plan.integration.deleted.length}개: {plan.integration.deleted.join(', ')}</p>
+          )}
+          {plan.integration.repair && (
+            <p className={`mt-3 text-sm ${plan.integration.repair.status === 'done' ? 'text-pass' : 'text-fail'}`}>
+              S4 수리 요청 {plan.integration.repair.status === 'done' ? '성공' : '실패'} · {plan.integration.repair.status}
+            </p>
           )}
           {plan.integration.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.integration.error}</p>}
           {plan.integration.checkpoint && <p className="mt-3 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{plan.integration.checkpoint.shortSha}</span></p>}

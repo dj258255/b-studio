@@ -23,20 +23,22 @@ beforeEach(() => {
 });
 
 describe('POST /api/task-plans', () => {
-  it('본문에 presetPlan이 있어도 createTaskPlan에 넘기지 않는다', async () => {
+  it('본문에 presetPlan·coordination이 있어도 createTaskPlan에 넘기지 않는다', async () => {
     const response = await post({
       projectId: 'orders',
       request: '요청',
       modelId: 'model-a',
       presetPlan: { tasks: [{ id: 'a', paths: ['web/a'] }] },
+      coordination: { strategy: 'S3', topology: 'star' },
     });
 
     expect(response.status).toBe(201);
     expect(mocks.createTaskPlan).toHaveBeenCalledTimes(1);
     const input = mocks.createTaskPlan.mock.calls[0]![0];
-    // presetPlan은 서버 안에서만 넘긴다. HTTP 라우트는 이 필드를 넘기지 않는다
+    // presetPlan·coordination은 서버 안에서만 넘긴다. HTTP 라우트는 이 필드를 넘기지 않는다
     expect(input).toEqual({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
     expect(Object.keys(input)).not.toContain('presetPlan');
+    expect(Object.keys(input)).not.toContain('coordination');
   });
 
   it('필수 필드가 없으면 400을 돌려주고 계획을 만들지 않는다', async () => {

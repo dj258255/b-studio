@@ -1,11 +1,20 @@
 /**
  * 협업 벤치마크 과제 정의와 전략별 고정 계획.
  *
- * 계획은 과제마다 고정한다. 모델이 레인을 어떻게 나누느냐가 섞이면 전략(S0/S1) 차이를 잴 수 없기 때문이다.
+ * 계획은 과제마다 고정한다. 모델이 레인을 어떻게 나누느냐가 섞이면 전략 차이를 잴 수 없기 때문이다.
  * 여기서 만든 계획은 프록시가 계획 요청에 그대로 돌려준다.
+ *
+ * 전략(검토 문서 1.6):
+ *  - S0 직렬화    같은 레인·같은 세션 (기존)
+ *  - S1 격리 병렬 공유 없음 (기존)
+ *  - S2 계약 먼저 계획의 인터페이스 계약을 레인 시작 전에 플랫폼이 contract 메모로 게시. 레인은 읽기만
+ *  - S3 게시판    레인이 contract·fact를 쓰고 읽음. topology로 읽기 범위 제한
+ *  - S4 통합 후 수리 공유 없음. 통합 게이트 실패 시 통합 세션에 모델 수리 요청 한 번
+ *  - S5 실패 서명만 작업마다 플랫폼이 검증 실패 서명을 failure 메모로 게시. 레인은 읽기만
  */
+import type { Topology } from '@b-studio/agent';
 
-export type Strategy = 'S0' | 'S1';
+export type Strategy = 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5';
 
 export interface AcceptanceCheck {
   service: 'api' | 'web';
@@ -25,6 +34,8 @@ export interface BenchTask {
   api: { title: string; request: string };
   web: { title: string; request: string };
   acceptance: AcceptanceCheck[];
+  /** S2에서 레인 시작 전에 플랫폼이 게시하는 인터페이스 계약. web 담당이 스스로 맞춰야 할 경계를 명시한다 */
+  contract: { body: string; refs: string[] };
 }
 
 export interface PlannedTask {
@@ -58,6 +69,10 @@ export const BENCH_TASKS: BenchTask[] = [
       { service: 'api', path: '/api/orders', expectAll: ['김민수'] },
       { service: 'web', path: '/orders', expectAll: ['김민수', '이영희', '박철수'] },
     ],
+    contract: {
+      body: 'GET /api/orders → JSON 배열. 항목: id(number), customerName(string), amount(number), status(string). 샘플 고객 이름 김민수·이영희·박철수',
+      refs: ['api'],
+    },
   },
   {
     id: 'order-detail',
@@ -77,6 +92,10 @@ export const BENCH_TASKS: BenchTask[] = [
       { service: 'api', path: '/api/orders/1', expectAll: ['문 앞에 놓아 주세요'] },
       { service: 'web', path: '/orders/1', expectAll: ['김민수', '문 앞에 놓아 주세요'] },
     ],
+    contract: {
+      body: 'GET /api/orders/{id} → JSON. 항목: customerName(string), items(배열: name(string)·quantity(number)), shippingMemo(string). 1번 주문: customerName 김민수, items 사과 2·배 1, shippingMemo "문 앞에 놓아 주세요". 없는 id는 404',
+      refs: ['api'],
+    },
   },
   {
     id: 'order-summary',
@@ -96,6 +115,10 @@ export const BENCH_TASKS: BenchTask[] = [
       { service: 'api', path: '/api/orders/summary', expectAny: ['45000'] },
       { service: 'web', path: '/dashboard', expectAny: ['45000', '45,000'] },
     ],
+    contract: {
+      body: 'GET /api/orders/summary → JSON. 항목: statusCount(상태별 건수: PAID 결제 완료 2, SHIPPED 배송 중 1), totalRevenue(총매출 45000)',
+      refs: ['api'],
+    },
   },
   {
     id: 'independent',
@@ -113,23 +136,56 @@ export const BENCH_TASKS: BenchTask[] = [
       { service: 'api', path: '/api/time', expectAny: ['T'] },
       { service: 'web', path: '/about', expectAll: ['b-studio 주문 예제'] },
     ],
+    contract: {
+      body: 'GET /api/time → JSON. 항목: time(string, ISO 8601 현재 시각)',
+      refs: ['api'],
+    },
   },
 ];
+
+export interface PlannedPlan {
+  tasks: PlannedTask[];
+  coordination?: {
+    strategy: 'S2' | 'S3' | 'S4' | 'S5';
+    topology?: Topology;
+    contracts?: Array<{ body: string; refs: string[] }>;
+  };
+}
 
 /**
  * 전략별 고정 계획. 작업 id는 `${task.id}-api`·`${task.id}-web`(소문자·숫자·하이픈, 40자 이하)이고,
  * 요청 앞에 작업 표지 `[task:<id>]`를 붙여 작업 담당 모델(또는 dry 제공자)이 자기 작업을 알아본다.
  *
  * - S0 직렬화: web이 api에 의존 → 한 레인에서 api 다음 web이 차례로 돈다
- * - S1 격리 병렬: 둘 다 의존 없음 → 다른 레인에서 동시에 돈다
+ * - S1 격리 병렬: 둘 다 의존 없음 → 다른 레인에서 동시에 돈다(공유 없음)
+ * - S2~S5: 레인 둘(격리 병렬)에 조율 설정을 얹는다. topology는 S3에서만 쓴다
  */
-export function planFor(task: BenchTask, strategy: Strategy): { tasks: PlannedTask[] } {
+export function planFor(task: BenchTask, strategy: Strategy, topology: Topology = 'mesh'): PlannedPlan {
   const apiId = `${task.id}-api`;
   const webId = `${task.id}-web`;
+  const coordination: PlannedPlan['coordination'] =
+    strategy === 'S2'
+      ? { strategy, contracts: [{ body: task.contract.body, refs: [...task.contract.refs] }] }
+      : strategy === 'S3'
+        ? { strategy, topology }
+        : strategy === 'S4' || strategy === 'S5'
+          ? { strategy }
+          : undefined;
   return {
     tasks: [
       { id: apiId, title: task.api.title, request: `[task:${apiId}] ${task.api.request}`, paths: ['api'], dependsOn: [] },
       { id: webId, title: task.web.title, request: `[task:${webId}] ${task.web.request}`, paths: ['web'], dependsOn: strategy === 'S0' ? [apiId] : [] },
     ],
+    ...(coordination ? { coordination } : {}),
   };
+}
+
+/**
+ * 전략이 레인에게 보여 줘야 하는 조율 도구. 프로젝트의 허용 도구 목록에 없으면 도구가 모델에게 보이지 않아
+ * 전략이 실제로는 "공유 없음"(S1)과 같아진다. 그런 실행은 측정이 무의미하므로 시작 전에 막는다(E2 첫 시작에서 실제로 그랬다)
+ */
+export function missingCoordinationTools(strategy: Strategy, allowedTools: readonly string[] | undefined): string[] {
+  const needed: Record<Strategy, string[]> = { S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'] };
+  if (!allowedTools) return [];
+  return needed[strategy].filter((name) => !allowedTools.includes(name));
 }

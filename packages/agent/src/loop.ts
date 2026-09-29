@@ -7,7 +7,7 @@ import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type AskUserQuestion, type ToolContext } from './tools';
+import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
@@ -222,6 +222,8 @@ export interface RunAgentOptions {
   contextClearing?: ContextClearingPolicy | false;
   approvalToken?: string;
   requestApproval?: ToolContext['requestApproval'];
+  /** 레인 조율 게시판. 주면 read_notes·(모델이 쓰는 전략이면) post_note 도구가 목록에 오른다 */
+  board?: BoardAccess;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -290,8 +292,12 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
         onEvent,
       });
   const system = buildSystemPrompt(project) + workflowContext(project);
-  const tools = buildTools(project, { design: design !== undefined, interactive });
   const policy = options.policy ?? executionPolicyFor(project);
+  const tools = buildTools(project, {
+    ...(options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {}),
+    design: design !== undefined,
+    interactive,
+  });
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
@@ -405,6 +411,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           policy,
           approvalToken: options.approvalToken,
           requestApproval: options.requestApproval,
+          board: options.board,
           onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
           toolResults: toolCache,
         });

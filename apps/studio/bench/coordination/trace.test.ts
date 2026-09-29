@@ -1,7 +1,7 @@
-import type { VerificationReport } from '@b-studio/agent';
+import { normalizeMessage, signatureKey, type VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
 import type { StudioEvent } from '../../lib/studio-events';
-import { normalizeMessage, signatureKey, traceFromEvents } from './trace';
+import { traceFromEvents } from './trace';
 
 const agent = (event: unknown): StudioEvent => ({ type: 'agent', runId: 'run-1', event }) as StudioEvent;
 const toolCall = (name: string, input: unknown): StudioEvent => agent({ type: 'tool_call', name, input });

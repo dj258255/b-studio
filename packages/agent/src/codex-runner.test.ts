@@ -6,6 +6,7 @@ import type { ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sdk';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Board } from './coordination';
 import { runCodexAgent, type CodexConfig, type CodexSdk, type CodexThread } from './codex-runner';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
@@ -176,6 +177,33 @@ describe('runCodexAgent', () => {
     expect(events.find((event) => event.type === 'session')).toMatchObject({ backend: '로컬 ChatGPT Agent' });
     expect(events.flatMap((event) => (event.type === 'tool_call' ? [event.name] : []))).toEqual(['edit_file']);
     expect(events.flatMap((event) => (event.type === 'tool_result' ? [event.ok] : []))).toEqual([true]);
+  });
+
+  it('조율 게시판을 켜면 post_note가 MCP 서버를 거쳐 레인 신원으로 게시된다', async () => {
+    const board = new Board({ topology: 'mesh' });
+    const { sdk } = fakeCodex([
+      {
+        steps: [
+          { tool: 'post_note', input: { kind: 'contract', body: 'GET /api/orders → [{ id, amount }]', refs: ['api'] } },
+          { text: '계약을 남겼습니다.' },
+        ],
+      },
+    ]);
+    const result = await runCodexAgent({
+      request: '계약 남기기',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      sdk,
+      fetcher: async () => contract,
+      onEvent: () => {},
+      board: {
+        lane: 'api',
+        post: (input) => board.post(input, { lane: 'api', by: 'model' }),
+        read: (options) => board.read({ lane: 'api' }, options),
+      },
+    });
+    expect(result.status).toBe('done');
+    expect(board.snapshot()).toMatchObject([{ kind: 'contract', author: { lane: 'api', by: 'model' } }]);
   });
 
   it('게이트가 실패하면 같은 스레드에 결과를 넣어 다시 돌리고, 통과하면 끝난다', async () => {
