@@ -2,12 +2,16 @@ import Link from 'next/link';
 import { TaskPlanWorkbench } from '@/components/task-plan-workbench';
 import { pageUser } from '@/lib/server/access';
 import { listModelOptions } from '@/lib/server/model-registry';
-import { listProjects } from '@/lib/server/projects';
+import { canPublishIssues, listProjects } from '@/lib/server/projects';
 import { listTaskPlans } from '@/lib/server/task-plans';
 
 export default async function TaskPlansPage() {
   const user = await pageUser();
   const projects = await listProjects();
+  // "이슈로 올리기"를 보일지 정하려면 프로젝트마다 원격 저장소·토큰을 확인해야 한다. 작업 분해 화면에서만 계산한다
+  const publishable = await Promise.all(
+    projects.map(async (project) => ({ ...project, canPublishIssues: project.error ? false : await canPublishIssues(project.id) })),
+  );
   const models = listModelOptions();
   const initial = listTaskPlans(user);
 
@@ -22,7 +26,7 @@ export default async function TaskPlansPage() {
           프로젝트로 돌아가기
         </Link>
       </header>
-      <TaskPlanWorkbench projects={projects} models={models} initialPlans={initial} />
+      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} />
     </main>
   );
 }

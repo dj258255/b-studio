@@ -11,6 +11,8 @@ export interface TaskPlanMetrics {
   endToEndMs?: number;
   /** 계획 호출 + 모든 작업 실행 + 통합 실행의 합 */
   usage: AgentUsage;
+  /** 모델 이름별 사용량 합계. 승격 등으로 실행 중 모델이 바뀐 경우 모델별 비용을 계산할 수 있게 한다. 없으면 모델을 구분할 수 없다 */
+  usageByModel?: Record<string, AgentUsage>;
   /** 계획 호출 1회를 포함한 모델 호출 수 */
   modelCalls: number;
   /** 모든 실행 중 한 호출의 최대 입력 크기 (계획 호출은 input+cacheRead+cacheWrite로 계산해 포함) */
@@ -31,15 +33,31 @@ export interface TaskPlanMetrics {
   integrationMs?: number;
   /** 만든 세션 수 (sessionId가 있는 레인 + 통합) */
   sessions: number;
+  /**
+   * 계획 모델이 레인 사이 계약을 받은 호출(B_STUDIO_PLAN_CONTRACTS). 계획 호출 지표 옆에 따로 남긴다.
+   * 이 호출의 usage·호출 수는 위 합계에도 들어간다 — 계약이 공짜처럼 보이면 안 된다
+   */
+  contracts?: TaskPlanContractsMetrics;
   /** 조율(S2~S5)을 켠 계획의 게시판 지표. 켜지 않았으면 없다 */
   coordination?: TaskPlanCoordinationMetrics;
 }
+
+/** 계약 호출 한 번의 지표. count는 그 호출로 받은 계약(게시한 계약 메모) 수 */
+export type TaskPlanContractsMetrics = { count: number; usage: AgentUsage; durationMs: number };
 
 /** 게시판 통계와 전략·topology. 게시·읽기의 양을 벤치에서 전략별로 비교한다 */
 export type TaskPlanCoordinationMetrics = { strategy: TaskPlanStrategy; topology: Topology } & BoardStats;
 
 function emptyUsage(): AgentUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+}
+
+/** 사용량을 다른 곳에 더한다 */
+function addUsageTo(target: AgentUsage, source: AgentUsage): void {
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.cacheWriteTokens += source.cacheWriteTokens;
 }
 
 function emptyBoardStats(): BoardStats {
@@ -54,6 +72,8 @@ function contextOf(usage: AgentUsage): number {
 /** 계획 하나의 지표를 합계로 낸다. 입력을 바꾸지 않는다 */
 export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   const usage = emptyUsage();
+  const usageByModel: Record<string, AgentUsage> = {};
+  let hasUsageByModel = false;
   let modelCalls = 0;
   let maxContextTokens = 0;
   let modelMs = 0;
@@ -67,13 +87,19 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     usage.cacheReadTokens += value.cacheReadTokens;
     usage.cacheWriteTokens += value.cacheWriteTokens;
   };
+  const addModelUsage = (value: Record<string, AgentUsage> | undefined): void => {
+    if (!value) return;
+    hasUsageByModel = true;
+    for (const [model, entry] of Object.entries(value)) addUsageTo((usageByModel[model] ??= emptyUsage()), entry);
+  };
   const addRun = (
-    run: { usage?: AgentUsage; metrics?: { modelCalls: number; maxContextTokens: number; modelMs: number; toolMs: number; gateMs: number } } | undefined,
+    run: { usage?: AgentUsage; metrics?: { modelCalls: number; maxContextTokens: number; modelMs: number; toolMs: number; gateMs: number; usageByModel?: Record<string, AgentUsage> } } | undefined,
     countModel = true,
   ): void => {
     if (!run) return;
     addUsage(run.usage);
     if (!run.metrics) return;
+    addModelUsage(run.metrics.usageByModel);
     toolMs += run.metrics.toolMs;
     gateMs += run.metrics.gateMs;
     if (!countModel) return;
@@ -87,6 +113,13 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     addUsage(plan.planning.usage);
     modelCalls += 1;
     maxContextTokens = Math.max(maxContextTokens, contextOf(plan.planning.usage));
+  }
+
+  // 레인 사이 계약 호출도 계획 단계의 실제 모델 호출이다. 합계에 넣어야 계약이 공짜처럼 보이지 않는다
+  if (plan.contracts?.usage) {
+    addUsage(plan.contracts.usage);
+    modelCalls += 1;
+    maxContextTokens = Math.max(maxContextTokens, contextOf(plan.contracts.usage));
   }
 
   for (const lane of plan.lanes) for (const task of lane.tasks) addRun(task.run);
@@ -108,6 +141,7 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   return {
     endToEndMs,
     usage,
+    ...(hasUsageByModel ? { usageByModel } : {}),
     modelCalls,
     maxContextTokens,
     bootMsTotal,
@@ -118,6 +152,9 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     gateMs,
     integrationMs: plan.integration?.run?.durationMs,
     sessions,
+    ...(plan.contracts?.usage
+      ? { contracts: { count: plan.contracts.count, usage: plan.contracts.usage, durationMs: plan.contracts.durationMs ?? 0 } }
+      : {}),
     ...(plan.coordination ? { coordination: { ...plan.coordination, ...(plan.board?.stats ?? emptyBoardStats()) } } : {}),
   };
 }

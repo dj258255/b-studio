@@ -63,6 +63,28 @@ export function resolveContextClearing(value: string | undefined): boolean {
   return trimmed === 'on';
 }
 
+/** 벤치가 넘길 승격 설정. claude-code 백엔드에서만 쓴다 */
+export interface EscalationChoice {
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  to?: string;
+  /** --escalate-after. 기본 2 */
+  after: number;
+}
+
+/**
+ * 승격 인자를 확정한다. --escalate-to는 승격을 지원하는 claude-code 백엔드에서만 쓸 수 있다.
+ * 모델 경로를 조용히 고르지 않는 원칙과 같게, 다른 백엔드에 주면 시작 전에 오류를 낸다.
+ */
+export function resolveEscalation(input: { backend: Backend; escalateTo?: string; escalateAfter?: number }): EscalationChoice {
+  const after = input.escalateAfter ?? 2;
+  if (!Number.isInteger(after) || after < 1) throw new Error(`--escalate-after는 1 이상의 정수여야 합니다 (지금 값: ${input.escalateAfter})`);
+  // --escalate-after만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
+  const to = input.escalateTo?.trim();
+  if (!to) return { after };
+  if (input.backend !== 'claude-code') throw new Error(`--escalate-to는 --backend claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${input.backend})`);
+  return { to, after };
+}
+
 /**
  * P0(그냥 Claude Code) 기준선은 로컬 Claude Code로만 돌 수 있다. 다른 백엔드는 Claude Code가 아니라 비교 기준이 아니다.
  * Docker·모델을 건드리기 전에 막는다.
@@ -71,6 +93,35 @@ export function assertPlainBaselineBackend(backend: Backend, strategies: readonl
   if (strategies.includes('P0') && backend !== 'claude-code') {
     throw new Error(`P0(그냥 Claude Code)는 --backend claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${backend})`);
   }
+}
+
+/**
+ * 레인 사이 계약(S2)의 출처. 기본 human(과제 정의에 사람이 써 둔 것, E2와 같다).
+ * model이면 고정 계획은 그대로 두고 계약만 계획 모델에게 받는다(계획 품질은 재지 않는다).
+ */
+export type ContractsSource = 'human' | 'model';
+
+export function resolveContractsSource(value: string | undefined): ContractsSource {
+  const trimmed = value?.trim().toLowerCase() || 'human';
+  if (trimmed !== 'human' && trimmed !== 'model') throw new Error(`--contracts는 human 또는 model이어야 합니다 (지금 값: ${value})`);
+  return trimmed;
+}
+
+/**
+ * 모델 계약은 S2에서만 뜻이 있다. 계약을 쓰지 않는 전략과 함께 주면 무엇을 잰 것인지 알 수 없다.
+ * 조용히 human으로 돌리면 "model 계약"이라고 적힌 행이 실제로는 사람 계약이 되어 결과가 거짓말이 된다.
+ */
+export function assertContractsStrategy(source: ContractsSource, strategies: readonly Strategy[]): void {
+  if (source !== 'model') return;
+  const wrong = strategies.filter((strategy) => strategy !== 'S2');
+  if (wrong.length > 0) throw new Error(`--contracts model은 S2에서만 쓸 수 있습니다 (지금 전략: ${wrong.join(', ')})`);
+}
+
+/** 모델 계약을 부를 수 있는 백엔드. codex는 한 번 호출 경로를 만들지 않았다(계획도 presetPlan으로 넘긴다) */
+export function assertContractsBackend(source: ContractsSource, backend: Backend): void {
+  if (source !== 'model') return;
+  if (backend === 'openai' || backend === 'claude-code') return;
+  throw new Error(`--contracts model은 --backend openai 또는 claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${backend})`);
 }
 
 export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinutes: number | undefined): { policy: RateLimitPolicy; waitMinutes: number } {

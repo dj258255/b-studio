@@ -4,34 +4,48 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
+  addSubIssue,
   Board,
+  contractAskFromClient,
+  canCreatePullRequest,
+  CheckpointStore,
+  createIssue,
   failureNotesFromEvents,
   isInScope,
   MAX_PLAN_LANES,
+  parseRemote,
   planLanes,
+  requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
   TaskPlanError,
   type AgentUsage,
   type BoardAccess,
   type Note,
+  type RemoteLocation,
   type RunMetrics,
   type ScriptedTurn,
   type TaskLane,
   type Topology,
 } from '@b-studio/agent';
 import type { Checkpoint } from '@b-studio/agent';
+import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
+import type { WorkflowPageCheck } from '@b-studio/spec';
 import type { StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
 import type {
   TaskPlanBoardView,
   TaskPlanCheckpointView,
+  TaskPlanContractsView,
   TaskPlanIntegrationView,
+  TaskPlanIssueRef,
+  TaskPlanIssuesView,
   TaskPlanLaneView,
   TaskPlanNoteView,
   TaskPlanStepStatus,
   TaskPlanStrategy,
+  TaskPlanTaskView,
   TaskPlanView,
 } from '@/lib/task-plan-types';
 import { StudioError } from './errors';
@@ -62,6 +76,11 @@ const boards = new Map<string, Board>();
  * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
  */
 const redactors = new Map<string, Redactor>();
+/**
+ * 계획별 통합 게이트 전용 pageChecks(S 서버 안에서만 넘긴다). 레인 게이트는 그대로 두고 통합 세션에만 덧붙인다.
+ * 게시판처럼 서버 메모리에만 있고 재시작하면 사라진다(그때는 통합을 다시 시도해도 확인 없이 돈다)
+ */
+const integrationPageChecks = new Map<string, readonly WorkflowPageCheck[]>();
 let loaded = false;
 
 /**
@@ -93,6 +112,11 @@ export async function createTaskPlan(input: {
   presetPlan?: unknown;
   /** 서버 안에서만 넘긴다(벤치마크·테스트). 조율 전략 S2~S5와 topology·계약. HTTP 라우트는 이 필드를 넘기지 않는다 */
   coordination?: CoordinationInput;
+  /**
+   * 서버 안에서만 넘긴다(벤치마크·테스트). 통합 게이트에만 덧붙일 pageChecks. HTTP 라우트는 이 필드를 넘기지 않는다.
+   * presetPlan·coordination과 같은 규칙이다. 레인 게이트는 그대로 두고 통합 세션에만 더한다
+   */
+  integrationChecks?: { pageChecks?: WorkflowPageCheck[] };
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
@@ -139,6 +163,7 @@ export async function createTaskPlan(input: {
   };
   plans.set(plan.id, plan);
   attachCoordination(plan, input.coordination, redactor);
+  if (input.integrationChecks?.pageChecks?.length) integrationPageChecks.set(plan.id, input.integrationChecks.pageChecks);
   persist(plan);
   void execute(plan, preset).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
@@ -215,15 +240,121 @@ function findPlan(id: string, owner: string): TaskPlanView {
   return plan;
 }
 
-/** 사람이 계획을 승인하면 그때 레인 실행을 시작한다. 승인 전에는 세션을 만들지 않는다 */
-export function approveTaskPlan(id: string, owner: string): TaskPlanView {
+/**
+ * 사람이 계획을 승인하면 그때 레인 실행을 시작한다. 승인 전에는 세션을 만들지 않는다.
+ * publishIssues를 고르면 레인 실행과 별개로 추적 이슈·하위 이슈를 원격에 올린다. 이슈 올리기가 실패해도 계획 실행·상태 전이는 바뀌지 않는다
+ */
+export function approveTaskPlan(id: string, owner: string, { publishIssues = false }: { publishIssues?: boolean } = {}): TaskPlanView {
   const plan = findPlan(id, owner);
   if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인을 기다리는 계획이 아닙니다');
   plan.approvedBy = owner;
   plan.approvedAt = new Date().toISOString();
   persist(plan);
+  if (publishIssues) void publishPlanIssues(plan).catch(() => {});
   void runApprovedPlan(plan).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
+}
+
+/** 통합 세션 id로 그 계획의 하위 이슈 번호를 찾는다. 통합 PR 미리보기의 기본 이슈 번호로 쓴다 */
+export function integrationIssues(sessionId: string): number[] {
+  ensureLoaded();
+  const plan = [...plans.values()].find((candidate) => candidate.integration?.sessionId === sessionId);
+  if (!plan?.issues) return [];
+  const issuesByTask = plan.issues.tasks;
+  const numbers = plan.lanes.flatMap((lane) => lane.tasks.map((task) => issuesByTask[task.id]?.number));
+  return [...new Set(numbers.filter((number): number is number => number !== undefined))];
+}
+
+const TRACKING_TITLE_LIMIT = 60;
+const TRACKING_REQUEST_LIMIT = 4_000;
+
+/**
+ * 계획을 원격 저장소의 추적 이슈와 작업별 하위 이슈로 올린다.
+ * 프로젝트가 원격 저장소이고 그 호스트의 토큰이 있을 때만(createPullRequest와 같은 판정) 시도하며, 아니면 조용히 건너뛴다.
+ * GitHub이면 하위 이슈 API로 연결하고, Gitea·GitLab은 추적 이슈 본문에 체크리스트를 넣는다.
+ * 이미 이슈를 만든 계획(재시작 뒤 재개 등)은 다시 만들지 않는다.
+ */
+async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
+  if (plan.issues?.tracking || Object.keys(plan.issues?.tasks ?? {}).length > 0) return;
+
+  let remote: RemoteLocation;
+  try {
+    const project = await findProject(plan.projectId);
+    const source = project && (await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true }));
+    const candidate = source?.originUrl ? parseRemote(source.originUrl) : undefined;
+    // 원격을 확인하지 못하거나 올릴 수 없는 호스트·토큰이면 계획만 실행하고 이슈는 만들지 않는다
+    if (!candidate || !canCreatePullRequest(candidate)) return;
+    remote = candidate;
+  } catch {
+    return;
+  }
+
+  const issues: TaskPlanIssuesView = (plan.issues = { tasks: {} });
+  persist(plan);
+  try {
+    // 하위 이슈를 먼저 만들어, GitHub가 아니어도 추적 이슈 본문에 체크리스트를 넣을 수 있게 한다
+    for (const lane of plan.lanes) {
+      for (const task of lane.tasks) {
+        const created = await createIssue(remote, { title: task.title, body: taskIssueBody(plan, lane, task) });
+        issues.tasks[task.id] = { number: created.number, url: created.url };
+        persist(plan);
+      }
+    }
+    const tracking = await createIssue(remote, { title: trackingTitle(plan), body: trackingIssueBody(plan, remote) });
+    issues.tracking = { number: tracking.number, url: tracking.url };
+    persist(plan);
+
+    if (remote.kind === 'github') {
+      for (const ref of Object.values(issues.tasks)) await addSubIssue(remote, tracking.number, ref.number);
+    }
+  } catch (error) {
+    // 실패해도 계획 실행·상태 전이는 그대로 두고 이유만 남긴다
+    issues.error = describe(error);
+  }
+  persist(plan);
+}
+
+function trackingTitle(plan: TaskPlanView): string {
+  return `[작업 분해] ${plan.request.slice(0, TRACKING_TITLE_LIMIT)}`;
+}
+
+function trackingIssueBody(plan: TaskPlanView, remote: RemoteLocation): string {
+  const request = plan.request.length > TRACKING_REQUEST_LIMIT ? `${plan.request.slice(0, TRACKING_REQUEST_LIMIT)}\n\n(요청이 길어 뒷부분을 생략했습니다)` : plan.request;
+  const rows = plan.lanes.flatMap((lane) =>
+    lane.tasks.map((task) => `| ${lane.id} | ${task.title} | ${task.paths.join(', ') || '-'} | ${task.dependsOn.join(', ') || '-'} |`),
+  );
+  // GitHub는 하위 이슈로 연결하므로 체크리스트를 넣지 않는다. 나머지 호스트는 본문 목록으로 남긴다
+  const checklist =
+    remote.kind === 'github'
+      ? []
+      : plan.lanes.flatMap((lane) =>
+          lane.tasks.flatMap((task) => {
+            const ref: TaskPlanIssueRef | undefined = plan.issues?.tasks[task.id];
+            return ref ? [`- [ ] #${ref.number} ${task.title}`] : [];
+          }),
+        );
+  return [
+    request,
+    '',
+    '| 레인 | 작업 | 쓰기 범위 | 의존 |',
+    '| --- | --- | --- | --- |',
+    ...rows,
+    ...(checklist.length > 0 ? ['', ...checklist] : []),
+    '',
+    `b-studio 작업 분해 계획 ${plan.id}에서 만들었습니다.`,
+  ].join('\n');
+}
+
+function taskIssueBody(plan: TaskPlanView, lane: TaskPlanLaneView, task: TaskPlanTaskView): string {
+  return [
+    task.request,
+    '',
+    `- 레인: ${lane.id}`,
+    `- 쓰기 범위: ${task.paths.join(', ') || '-'}`,
+    `- 의존: ${task.dependsOn.join(', ') || '없음'}`,
+    '',
+    `b-studio 작업 분해 계획 ${plan.id}에서 만들었습니다.`,
+  ].join('\n');
 }
 
 /** 사람이 계획을 거부하면 세션을 만들지 않고 멈춘다 */
@@ -276,9 +407,50 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
     status: 'queued',
     tasks: lane.tasks.map((task) => ({ ...task, status: 'queued' })),
   }));
+  // 레인을 만든 직후, 레인을 돌리기 전에 레인 사이 계약을 받아 S2로 게시한다.
+  // 실패해도 계획은 계속 간다(계약 없이) — 경고 한 줄만 남긴다
+  if (preset === undefined && lanes.length >= 2 && !plan.coordination && contractsSetting()) {
+    await askLaneContracts(plan, project, lanes);
+  }
   // 사람이 승인할 때까지 여기서 멈춘다. 승인 없이 레인을 돌리지 않는다
   plan.status = 'awaiting_approval';
   persist(plan);
+}
+
+/**
+ * 레인 사이 계약을 계획 모델에게 받을지. 기본은 꺼짐이다 — 효과를 재기 전에는 켜지 않는다(ADR-059 보강 예정).
+ * 켜더라도 API 모드의 모델 계획(presetPlan 아님)에서, 레인이 둘 이상이고, 조율 입력이 없을 때만 받는다.
+ * 벤치가 coordination을 넘기면(고정 계약) 그쪽이 우선이라 여기서는 모델을 부르지 않는다.
+ */
+function contractsSetting(): boolean {
+  return process.env.B_STUDIO_PLAN_CONTRACTS?.trim().toLowerCase() === 'on';
+}
+
+/**
+ * 계약을 한 번 받아 S2 게시판을 붙이고 게시한다. 레인 실행 전에 끝나야 레인이 계약을 읽을 수 있다.
+ * 모델이 쓴 본문·refs는 계획 기록과 화면에 남으므로 S3의 모델 게시와 같은 규칙으로 시크릿 값을 가린다.
+ */
+async function askLaneContracts(plan: TaskPlanView, project: LoadedProject, lanes: readonly TaskLane[]): Promise<void> {
+  try {
+    const asked = await requestLaneContracts(contractAskFromClient(clientForModel(modelById(plan.modelId))), project, plan.request, lanes);
+    const redactor = new Redactor(await resolveSecrets(project));
+    const contracts = asked.contracts.map((contract) => ({ body: redactor.redact(contract.body), refs: contract.refs.map((ref) => redactor.redact(ref)) }));
+    attachCoordination(plan, { strategy: 'S2', contracts }, redactor);
+    plan.contracts = { source: 'model', count: contracts.length, usage: asked.usage, durationMs: asked.durationMs };
+    persist(plan);
+  } catch (error) {
+    // 형식 오류면 그때까지 쓴 토큰과 시간이 오류에 붙어 있다. 버리지 않고 기록에 남긴다
+    const spent = error instanceof TaskPlanError ? error.usage : undefined;
+    const contracts: TaskPlanContractsView = {
+      source: 'model',
+      count: 0,
+      ...(spent ? { usage: spent, durationMs: error instanceof TaskPlanError ? (error.durationMs ?? 0) : 0 } : {}),
+      warning: `레인 사이 계약을 받지 못해 계약 없이 진행합니다: ${describe(error)}`,
+    };
+    plan.contracts = contracts;
+    console.warn(`[b-studio] 작업 분해 ${plan.id}: ${contracts.warning}`);
+    persist(plan);
+  }
 }
 
 async function runApprovedPlan(plan: TaskPlanView): Promise<void> {
@@ -383,7 +555,13 @@ async function integrate(plan: TaskPlanView): Promise<void> {
 
     integration.startedAt = new Date().toISOString();
     const bootStarted = performance.now();
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', sessionModelOption(plan.modelId));
+    // 통합 게이트에만 확인을 덧붙인다(레인·통합 모두 이 세션에서 파일을 적용한 뒤 같은 루프·게이트를 돈다)
+    const extraPageChecks = integrationPageChecks.get(plan.id);
+    // Command Code 모드는 모델을 세션에 고정하지 않으므로 sessionModelOption이 빈 객체를 돌려준다(빈 모델 id를 넘기지 않는다)
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', {
+      ...sessionModelOption(plan.modelId),
+      ...(extraPageChecks ? { extraPageChecks } : {}),
+    });
     Object.assign(integration, { sessionId: snapshot.id });
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
     const integrationRoot = getSnapshot(snapshot.id)?.workDir;

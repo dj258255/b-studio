@@ -5,6 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
 import { serialQueue } from './claude-code-runner';
+import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
@@ -100,11 +101,13 @@ const DEFAULT_PROCESS: CommandCodeProcess = {
   },
 };
 
-export interface CommandCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation'> {
+export interface CommandCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation' | 'escalation'> {
   /** 이전 실행의 Command Code 세션 id. 주면 `--resume <id> --fork-session`으로 갈라 이어받는다(Codex와 달리 지원) */
   resume?: string;
   /** 넘기지 않으면 로그인한 계정의 기본 모델(DeepSeek)을 쓴다 */
   model?: string;
+  /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex 러너와 같다) */
+  escalation?: EscalationPolicy;
   /** 모델별 추론 강도. 넘기면 `--effort <level>`로 전달한다 */
   effort?: string;
   /**
@@ -152,6 +155,7 @@ export interface CommandCodeRunResult extends AgentResult {
  *
  * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
  * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
+ * 모델 승격(`escalation`)은 타입으로는 받지만 지원하지 않는다 — 무시하지 않고 warning 이벤트로 알린다(codex 러너와 같다).
  */
 export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promise<CommandCodeRunResult> {
   const {
@@ -183,6 +187,9 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   if (resume !== undefined && stateDir === undefined) {
     onEvent({ type: 'warning', message: '이 실행은 이전 대화를 이어받지 못합니다: 상태 폴더 없음' });
   }
+  // 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex 러너와 같은 규칙).
+  // 벤치는 --escalate-to를 claude-code에서만 받으므로 여기까지 오지 않지만, 옵션을 직접 넘기는 경로도 조용히 넘기지 않는다
+  if (options.escalation) onEvent({ type: 'warning', message: '로컬 Command Code Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
