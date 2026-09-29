@@ -23,6 +23,7 @@ function metrics(over: Partial<TaskPlanMetrics> = {}): TaskPlanMetrics {
 
 function row(over: Partial<BenchRow>): BenchRow {
   return {
+    escalation: { after: 2, escalated: false },
     order: 0,
     repeat: 1,
     taskId: 'orders-list',
@@ -164,6 +165,33 @@ describe('summarize', () => {
     expect(limited).toContain('| S0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |');
   });
 
+  it('계약 호출 토큰을 성공 1건당 토큰에 포함하고, 계약 출처를 맨 위에 적는다', () => {
+    const markdown = summarize(
+      [
+        row({
+          taskId: 'orders-list',
+          strategy: 'S2',
+          success: true,
+          metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
+          contracts: { source: 'model', count: 1, usage: { inputTokens: 40, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        }),
+      ],
+      { ...meta, contracts: 'model' },
+    );
+
+    // (100+10) + 계약(40+4) = 154 / 성공 1건. 빼면 모델 계약이 공짜처럼 보인다
+    expect(markdown).toContain('| orders-list | O | S2 | 1/1 | 154 |');
+    expect(markdown).toContain('계약 model');
+
+    // 사람 계약은 호출이 없어 usage가 없다 → 계약 토큰을 더하지 않는다
+    const human = summarize(
+      [row({ taskId: 'orders-list', strategy: 'S2', success: true, metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 } }), contracts: { source: 'human', count: 1 } })],
+      meta,
+    );
+    expect(human).toContain('| orders-list | O | S2 | 1/1 | 110 |');
+    expect(human).toContain('계약 human');
+  });
+
   it('맨 위에 백엔드·요청한 모델·관측한 모델·실행 수를 적는다', () => {
     const withObserved = [
       row({ observedModels: ['claude-sonnet-4-5', 'claude-haiku-4-5'] }),
@@ -209,6 +237,34 @@ describe('summarize', () => {
     );
     expect(markdown).toContain('| S3 | 1/1 |');
     expect(markdown).toContain('| 4,096 |');
+  });
+
+  it('승격 건수 열에 escalated 실행 수를 센다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: true, attempt: 2 } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: false } }),
+        row({ taskId: 'orders-list', strategy: 'S0' }),
+      ],
+      meta,
+    );
+    expect(markdown).toMatch(/\| \S+ 건수 \|/);
+    expect(markdown).toContain('| orders-list | O | S0 | 3/3 | — | — | — | — | — | — | — | — | — | — | — | — | — | 1 |');
+  });
+
+  it('API 환산 비용 열에 costUsd가 있는 실행만으로 합계/중앙값을 낸다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', costUsd: 0.01 }),
+        row({ taskId: 'orders-list', strategy: 'S0', costUsd: 0.03 }),
+        row({ taskId: 'orders-list', strategy: 'S0' }),
+      ],
+      meta,
+    );
+    expect(markdown).toContain('| API 환산 비용($) |');
+    expect(markdown).toContain('| orders-list | O | S0 | 3/3 | — | — | — | — | — | — | — | — | — | — | — | — | — | 0 | 0.0400 / 0.0200 |');
+    // costUsd가 하나도 없으면 —로 둔다
+    expect(summarize([row({})], meta)).toContain('| orders-list | O | S0 | 1/1 | — | — | — | — | — | — | — | — | — | — | — | — | — | 0 | — |');
   });
 
   it('성공 1건당 토큰은 (입력+캐시+출력) 합을 성공 수로 나누고, 성공이 없으면 —다', () => {

@@ -37,6 +37,8 @@ export interface PlainBaselineOptions {
 export interface PlainBaselineResult {
   status: 'done' | 'failed' | 'rate_limited';
   usage: AgentUsage;
+  /** 모델 이름별 토큰. 환산 비용을 모델별 단가로 계산할 때 쓴다 */
+  usageByModel: Record<string, AgentUsage>;
   modelCalls: number;
   maxContextTokens: number;
   durationMs: number;
@@ -134,6 +136,7 @@ export async function runPlainBaseline({
   return {
     status,
     usage: { ...tracker.usage },
+    usageByModel: tracker.usageByModel,
     modelCalls: tracker.modelCalls,
     maxContextTokens: tracker.maxContextTokens,
     durationMs: Math.round(performance.now() - started),

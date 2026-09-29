@@ -20,17 +20,32 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
-import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy, type Backend } from './backends';
+import {
+  assertContractsBackend,
+  assertContractsStrategy,
+  assertPlainBaselineBackend,
+  planModelId,
+  resolveBackend,
+  resolveContextClearing,
+  resolveContractsSource,
+  resolveEscalation,
+  resolveRateLimitPolicy,
+  type Backend,
+  type ContractsSource,
+} from './backends';
 import { classify } from './classify';
+import { claudeCodeContractAsk } from './contracts';
 import { startDryProvider } from './dry-provider';
 import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
-import { summarize, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type Strategy } from './tasks';
+import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
+import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
+import { contractAskFromClient, planLanes, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
-import type { Topology } from '@b-studio/agent';
+import type { AgentUsage, Topology } from '@b-studio/agent';
+import { costForUsageByModel, parsePriceTable, type TokenPrices } from '../../lib/token-types';
 import type { SessionSnapshot, StudioEvent } from '../../lib/studio-events';
 import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanView } from '../../lib/task-plan-types';
@@ -65,6 +80,12 @@ interface Args {
   topology?: string;
   /** 통합 게이트에 api 값 확인을 덧붙일지. 기본 꺼짐 */
   integrationChecks?: boolean;
+  /** 레인 사이 계약의 출처(human|model). 기본 human. model은 S2에서만 */
+  contracts?: string;
+  escalateTo?: string;
+  escalateAfter?: number;
+  /** 모델 이름 일부 → 단가 표 JSON 파일. 모델별 API 환산 비용을 계산한다 */
+  prices?: string;
 }
 
 /** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
@@ -90,7 +111,11 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
     else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
     else if (arg === '--topology') args.topology = next(argv, index++, '--topology');
+    else if (arg === '--contracts') args.contracts = next(argv, index++, '--contracts');
     else if (arg === '--context-clearing') args.contextClearing = next(argv, index++, '--context-clearing');
+    else if (arg === '--escalate-to') args.escalateTo = next(argv, index++, '--escalate-to');
+    else if (arg === '--escalate-after') args.escalateAfter = Number(next(argv, index++, '--escalate-after'));
+    else if (arg === '--prices') args.prices = next(argv, index++, '--prices');
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -100,7 +125,11 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--on-rate-limit=')) args.onRateLimit = arg.slice('--on-rate-limit='.length);
     else if (arg.startsWith('--rate-limit-wait-minutes=')) args.rateLimitWaitMinutes = Number(arg.slice('--rate-limit-wait-minutes='.length));
     else if (arg.startsWith('--topology=')) args.topology = arg.slice('--topology='.length);
+    else if (arg.startsWith('--contracts=')) args.contracts = arg.slice('--contracts='.length);
     else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
+    else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
+    else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
+    else if (arg.startsWith('--prices=')) args.prices = arg.slice('--prices='.length);
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;
@@ -175,6 +204,22 @@ function price(name: string): number {
   return value;
 }
 
+/** 단가 파일(모델 이름 일부 → 단가 JSON)을 읽어 검증한다. 값을 코드에 적지 않는다 */
+async function loadPriceTable(file: string): Promise<Record<string, TokenPrices>> {
+  const resolved = path.resolve(file);
+  let text: string;
+  try {
+    text = await readFile(resolved, 'utf8');
+  } catch (error) {
+    throw new Error(`단가 파일을 읽지 못했습니다(${resolved}): ${describe(error)}`);
+  }
+  try {
+    return parsePriceTable(JSON.parse(text));
+  } catch (error) {
+    throw new Error(`단가 파일이 올바르지 않습니다(${resolved}): ${describe(error)}`);
+  }
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`openai 백엔드에는 ${name} 환경 변수가 필요합니다`);
@@ -187,6 +232,18 @@ function delay(ms: number): Promise<void> {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function emptyUsage(): AgentUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+}
+
+/** 사용량을 다른 곳에 더한다 */
+function addUsage(target: AgentUsage, source: AgentUsage): void {
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.cacheWriteTokens += source.cacheWriteTokens;
 }
 
 interface RunContext {
@@ -204,10 +261,21 @@ interface RunContext {
   topology: Topology;
   /** 통합 게이트에 api 값 확인을 덧붙이는지. 행마다 기록한다 */
   integrationChecks: boolean;
+  /** 레인 사이 계약의 출처(--contracts). S2에서만 뜻이 있다 */
+  contractsSource: ContractsSource;
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  escalateTo?: string;
+  /** --escalate-after */
+  escalateAfter: number;
+  /** --prices 단가 표(모델 이름 일부 → 단가). 없으면 모델별 API 환산 비용을 계산하지 않는다 */
+  prices?: Record<string, TokenPrices>;
+
   /** 벤치가 만든 프로젝트 복사본. P0는 이 폴더에서 Claude Code를 돌린다 */
   projectDir: string;
   /** P0 실행마다 복사본을 처음 상태로 되돌린다(반복이 서로 영향을 주지 않게) */
   resetProject: () => Promise<void>;
+  /** 모델이 쓴 계약 원문을 결과 폴더에 남긴다(나중에 불일치 원인을 보기 위해). 이름은 실행마다 다르다 */
+  saveContracts: (name: string, payload: unknown) => Promise<void>;
 }
 
 async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
@@ -219,6 +287,10 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   const planJson = planFor(task, strategy, context.topology);
   // --integration-checks일 때만 엮인 과제의 통합 게이트에 확인을 더한다(독립 과제는 없다)
   const integrationChecks = context.integrationChecks ? integrationChecksFor(task) : undefined;
+  // 계약의 출처. S2에서만 뜻이 있다(다른 전략은 계약을 쓰지 않는다)
+  let contracts: BenchRow['contracts'] =
+    strategy === 'S2' ? { source: context.contractsSource, count: planJson.coordination?.contracts?.length ?? 0 } : undefined;
+  let coordination = planJson.coordination;
   let plan: TaskPlanView = { id: '', owner: localUser, projectId: PROJECT_ID, request: '', modelId: context.planModelId, status: 'failed', createdAt: startedAt, lanes: [] };
   let planId: string | undefined;
   let acceptance: AcceptanceResult[] | undefined;
@@ -227,6 +299,13 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   try {
     // openai 백엔드는 프록시가 계획 요청에 이 JSON을 돌려준다. 로컬 CLI 백엔드는 계획을 서버 안에서 넘긴다
     if (context.backend === 'openai' && context.proxy) context.proxy.setPlan(planJson);
+    // 모델 계약: 고정 계획은 그대로 두고 계약만 계획 모델에게 받아 coordination.contracts로 넘긴다.
+    // 실패하면 계약 없이 돌리지 않고 이 실행을 실패로 남긴다(계약 없이 돌면 S1을 S2라고 적는 셈이다)
+    if (strategy === 'S2' && context.contractsSource === 'model') {
+      const asked = await askModelContracts(context, task, planJson, `${task.id}-r${repeat}-${order}`);
+      contracts = { source: 'model', count: asked.contracts.length, usage: asked.usage, durationMs: asked.durationMs };
+      coordination = { ...planJson.coordination!, contracts: asked.contracts };
+    }
     const created = await taskPlans.createTaskPlan({
       projectId: PROJECT_ID,
       request: task.request,
@@ -234,7 +313,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       owner: localUser,
       ...(context.backend === 'openai' ? {} : { presetPlan: planJson }),
       // S2~S5의 조율 설정은 서버 안에서만 넘긴다. S0·S1은 없다
-      ...(planJson.coordination ? { coordination: planJson.coordination } : {}),
+      ...(coordination ? { coordination } : {}),
       // 통합 게이트 전용 확인도 서버 안에서만 넘긴다(--integration-checks)
       ...(integrationChecks ? { integrationChecks } : {}),
     });
@@ -268,6 +347,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   // 세션을 내리기 전에 기록에서 실제로 쓴 모델 이름과 탐색·실패 흔적을 읽는다. 읽기 실패는 실행 결과를 바꾸지 않는다
   const observedModels = readObservedModels(sessions, sessionIds);
   const sessionEvents = readSessionEvents(sessions, sessionIds);
+  // 승격은 세션 기록의 model_escalated 이벤트로 확인한다. 설정하지 않았으면 escalated=false
+  const escalation = readEscalation(sessionEvents, context.escalateTo, context.escalateAfter);
   // trace 계산이 실패해도 실행 결과(성공·분류)는 바뀌지 않게, 그 세션의 trace만 생략하고 경고를 남긴다
   const traces: LaneTrace[] = [];
   for (const id of laneSessionIds) {
@@ -348,6 +429,12 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       context.priceOutput * (metrics?.usage.outputTokens ?? 0)) /
     1_000_000;
 
+  // 모델별 API 환산 비용. 계획 호출(P0)도 같은 방식으로 그 모델(openai는 상류 모델)의 사용량에 더한다
+  const usageByModel: Record<string, AgentUsage> = {};
+  for (const [model, usage] of Object.entries(metrics?.usageByModel ?? {})) usageByModel[model] = { ...usage };
+  if (plan.planning && context.backend === 'openai') addUsage((usageByModel[context.requestedModel] ??= emptyUsage()), plan.planning.usage);
+  const cost = context.prices ? costForUsageByModel(usageByModel, context.prices) : {};
+
   return {
     order,
     repeat,
@@ -378,8 +465,10 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     explore,
     failures,
     contextCleared,
+    escalation,
     metrics,
     coordination: plan.metrics?.coordination,
+    contracts,
     acceptance,
     success,
     category: classification.category,
@@ -387,7 +476,42 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     proxy: proxyStats,
     leftoverContainers,
     estimatedCostUsd,
+    ...(cost.costUsd !== undefined ? { costUsd: cost.costUsd } : {}),
+    ...(cost.costNote ? { costNote: cost.costNote } : {}),
   };
+}
+
+/**
+ * 고정 계획의 레인으로 계약을 받아 온다(--contracts model). 제품(studio)과 같은 함수·프롬프트를 쓴다.
+ * 원문은 결과 폴더에 남긴다(요약·JSONL에는 수치만 넣는다 — 나중에 불일치 원인을 보려고).
+ * 실패(형식 오류·사용 한도·연결 실패)는 삼키지 않는다: 계약 없이 돌리면 그 행은 S1을 S2라고 적는 것이 된다.
+ */
+async function askModelContracts(context: RunContext, task: BenchTask, planJson: PlannedPlan, name: string): Promise<LaneContractsResult> {
+  const lanes = planLanes(planJson);
+  const project = await loadProject(context.projectDir);
+  const asked = await requestLaneContracts(await contractAskFor(context), project, task.request, lanes);
+  await context.saveContracts(name, {
+    taskId: task.id,
+    strategy: 'S2',
+    source: 'model',
+    model: context.requestedModel,
+    lanes: lanes.map((lane) => lane.id),
+    contracts: asked.contracts,
+    usage: asked.usage,
+    durationMs: asked.durationMs,
+  });
+  return asked;
+}
+
+/** 백엔드별 계약 호출. openai는 실행기와 같은 ModelClient 경로(프록시 경유), claude-code는 SDK 한 번 호출 */
+async function contractAskFor(context: RunContext): Promise<ContractAsk> {
+  if (context.backend === 'openai') {
+    const { clientForModel, modelById } = await import('../../lib/server/model-registry');
+    return contractAskFromClient(clientForModel(modelById(MODEL_ID)));
+  }
+  if (context.backend === 'claude-code') return claudeCodeContractAsk({ cwd: context.projectDir, model: context.requestedModel });
+  // 시작 전에 막히지만(assertContractsBackend), 여기서도 조용히 다른 경로로 가지 않는다
+  throw new Error(`--contracts model은 --backend openai 또는 claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${context.backend})`);
 }
 
 /**
@@ -454,7 +578,10 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     toolMs: 0,
     gateMs: 0,
     sessions: sessionId ? 1 : 0,
+    ...(baseline && Object.keys(baseline.usageByModel).length > 0 ? { usageByModel: baseline.usageByModel } : {}),
   };
+  // P0도 S0와 같은 규칙으로 모델별 단가를 곱한다(비교할 두 행의 비용 계산이 달라지면 안 된다)
+  const cost = context.prices ? costForUsageByModel(metrics.usageByModel ?? {}, context.prices) : {};
   const success = !harnessError && baseline?.status === 'done' && Boolean(acceptance) && acceptance!.every((result) => result.ok);
   const estimatedCostUsd =
     (context.priceInput * (usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens) + context.priceOutput * usage.outputTokens) / 1_000_000;
@@ -467,7 +594,7 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     strategy: 'P0',
     integrationChecks: context.integrationChecks,
     model: context.requestedModel,
-    observedModels: [],
+    observedModels: baseline ? Object.keys(baseline.usageByModel).sort() : [],
     startedAt,
     finishedAt: new Date().toISOString(),
     planStatus: plan.status,
@@ -477,6 +604,8 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     // P0는 b-studio 러너를 쓰지 않으므로 오래된 도구 결과 비우기와 무관하다
     contextCleared: { count: 0, chars: 0 },
+    // P0는 b-studio 게이트가 없어 승격 판정이 일어나지 않는다. 설정값만 남기고 승격은 없음으로 적는다
+    escalation: { after: context.escalateAfter, escalated: false },
     metrics,
     acceptance,
     success,
@@ -484,6 +613,8 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     detail: classification.detail,
     leftoverContainers,
     estimatedCostUsd,
+    ...(cost.costUsd !== undefined ? { costUsd: cost.costUsd } : {}),
+    ...(cost.costNote ? { costNote: cost.costNote } : {}),
   };
 }
 
@@ -545,6 +676,18 @@ function readObservedModels(sessions: SessionsModule, sessionIds: string[]): str
   return [...models];
 }
 
+/** 세션 기록에서 승격 이벤트를 찾는다. 승격은 한 실행에 한 번이므로 첫 이벤트만 본다 */
+function readEscalation(eventsBySession: Map<string, StudioEvent[]>, to: string | undefined, after: number): BenchEscalation {
+  const result: BenchEscalation = { ...(to ? { to } : {}), after, escalated: false };
+  if (!to) return result;
+  for (const events of eventsBySession.values()) {
+    for (const event of events) {
+      if (event.type === 'agent' && event.event.type === 'model_escalated') return { ...result, escalated: true, attempt: event.event.attempt };
+    }
+  }
+  return result;
+}
+
 /** 세션 기록을 통째로 다시 받아 온다. 읽기 실패는 빈 결과로 두고 실행을 막지 않는다 */
 function readSessionEvents(sessions: SessionsModule, sessionIds: string[]): Map<string, StudioEvent[]> {
   const collected = new Map<string, StudioEvent[]>();
@@ -601,6 +744,10 @@ async function main(): Promise<void> {
   // 오래된 도구 결과 비우기. 기본은 끔이고, API 루프(openai)에서만 뜻이 있다 — 로컬 CLI는 각자 자체 압축을 한다
   const contextClearing = resolveContextClearing(args.contextClearing);
   if (contextClearing && backend !== 'openai') throw new Error('--context-clearing은 --backend openai(API 루프)에서만 쓸 수 있습니다. 로컬 CLI 러너는 대화를 직접 다루지 않습니다');
+  // 승격 설정도 시작 전에 확정한다. claude-code가 아니면 --escalate-to는 여기서 오류를 낸다
+  const escalation = resolveEscalation({ backend, escalateTo: args.escalateTo, escalateAfter: args.escalateAfter });
+  // 단가 표도 시작 전에 읽는다. 값은 파일로만 받고 코드에 적지 않는다(잘못된 파일이면 Docker를 건드리기 전에 멈춘다)
+  const prices = args.prices ? await loadPriceTable(args.prices) : undefined;
   const dry = args.dry;
   const repeats = args.repeats ?? (dry ? 1 : 3);
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error(`--repeats는 1 이상의 정수여야 합니다 (지금 값: ${args.repeats})`);
@@ -609,6 +756,10 @@ async function main(): Promise<void> {
   const topology = parseTopology(args.topology);
   // P0는 로컬 Claude Code 전용이다. Docker·모델을 건드리기 전에 백엔드를 확인한다
   assertPlainBaselineBackend(backend, strategies);
+  // 계약 출처도 시작 전에 확정한다. model 계약을 계약을 쓰지 않는 전략과 함께 돌리면 무엇을 잰 것인지 알 수 없다
+  const contractsSource = resolveContractsSource(args.contracts);
+  assertContractsStrategy(contractsSource, strategies);
+  assertContractsBackend(contractsSource, backend);
 
   // 1. 사전 확인 — 다른 프로젝트 컨테이너가 있으면 여기서 멈춘다
   const dockerMemTotal = preflight(args.force);
@@ -709,6 +860,8 @@ async function main(): Promise<void> {
     } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
+      // 시작 모델은 --model, 승격 대상은 --escalate-to. 세션·레인·통합이 모두 이 설정을 쓴다
+      if (escalation.to) Object.assign(benchEnv, { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: escalation.to, B_STUDIO_ESCALATE_AFTER: String(escalation.after) });
     } else {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
@@ -743,6 +896,13 @@ async function main(): Promise<void> {
     const sessions = await import('../../lib/server/sessions');
     const auth = await import('../../lib/server/auth');
 
+    /** 모델 계약 원문은 결과 폴더에 따로 남긴다(요약·JSONL에는 수치만 넣는다) */
+    const saveContracts = async (name: string, payload: unknown): Promise<void> => {
+      const directory = path.join(outRoot, 'contracts');
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, `${name}.json`), redact(JSON.stringify(payload, null, 2), secrets), { mode: 0o600 });
+    };
+
     const context: RunContext = {
       taskPlans,
       sessions,
@@ -755,8 +915,14 @@ async function main(): Promise<void> {
       planModelId: planModelId(backend, requestedModel, MODEL_ID),
       topology,
       integrationChecks: args.integrationChecks ?? false,
+      contractsSource,
+      ...(escalation.to ? { escalateTo: escalation.to } : {}),
+      escalateAfter: escalation.after,
+      ...(prices ? { prices } : {}),
+
       projectDir,
       resetProject,
+      saveContracts,
     };
 
     // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
@@ -806,7 +972,7 @@ async function main(): Promise<void> {
 
   const finishedAt = new Date().toISOString();
   const observedModels = [...new Set(rows.flatMap((row) => row.observedModels))];
-  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing }), secrets));
+  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource }), secrets));
   await writeFile(
     path.join(outRoot, 'meta.json'),
     redact(
@@ -825,6 +991,10 @@ async function main(): Promise<void> {
           tasks: tasks.map((task) => task.id),
           strategies,
           topology,
+          contracts: contractsSource,
+          escalateTo: escalation.to,
+          escalateAfter: escalation.after,
+          pricesPath: args.prices,
           repeats,
           runs: rows.length,
           onRateLimit: rateLimit.policy,

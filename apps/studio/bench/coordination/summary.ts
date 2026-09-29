@@ -27,12 +27,33 @@ export interface BenchIntegrationRow {
   error?: string;
 }
 
+/** 한 실행의 승격 결과. 승격을 설정하지 않은 실행은 to가 없다 */
+export interface BenchEscalation {
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  to?: string;
+  /** --escalate-after */
+  after: number;
+  /** 이 실행에서 한 번이라도 승격이 일어났는지 */
+  escalated: boolean;
+  /** 승격이 일어난 뒤의 게이트 시도(실패) 횟수 */
+  attempt?: number;
+}
+
 export interface BenchProxyStats {
   forwardedCalls: number;
   requestBytes: number;
   responseBytes: number;
   plannerCalls: number;
   upstreamErrors: number;
+}
+
+/** S2에서 쓴 계약. human=과제 정의에 사람이 써 둔 것, model=계획 모델이 쓴 것 */
+export interface BenchContractsRow {
+  source: 'human' | 'model';
+  count: number;
+  /** 계약 호출의 usage(모델 계약만). 사람 계약은 호출이 없어 없다 */
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
+  durationMs?: number;
 }
 
 export interface BenchRow {
@@ -65,7 +86,11 @@ export interface BenchRow {
   contextCleared: { count: number; chars: number };
   /** 통합 게이트에 api 값 확인을 덧붙였는지(--integration-checks). 기본 꺼짐이면 false */
   integrationChecks: boolean;
+  /** 모델 승격 설정과 이 실행의 승격 결과 */
+  escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;
+  /** S2에서 쓴 계약의 출처와 수(모델 계약이면 호출 usage). 계약을 쓰지 않는 전략이면 없다 */
+  contracts?: BenchContractsRow;
   /** S2~S5의 게시판 지표. 공유 없음(S0·S1)이면 없다 */
   coordination?: TaskPlanCoordinationMetrics;
   acceptance?: AcceptanceResult[];
@@ -76,6 +101,10 @@ export interface BenchRow {
   proxy?: BenchProxyStats;
   leftoverContainers: string[];
   estimatedCostUsd: number;
+  /** --prices가 있으면 모델별 사용량으로 계산한 API 환산 비용(달러). 단가가 없는 모델이 하나라도 있으면 없다 */
+  costUsd?: number;
+  /** costUsd를 쓰지 못한 사유(단가 없는 모델 등) */
+  costNote?: string;
 }
 
 export interface SummaryMeta {
@@ -83,6 +112,8 @@ export interface SummaryMeta {
   requestedModel: string;
   /** 오래된 도구 결과 비우기를 켰는지. 기본 off(ADR-055 보강) */
   contextClearing?: boolean;
+  /** 레인 사이 계약(S2)의 출처. 기본 human */
+  contracts?: 'human' | 'model';
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'environment', 'timeout', 'unknown'];
@@ -115,6 +146,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '반복 실패 중앙값',
     '게시·읽기 바이트 중앙값',
     '비운 도구 결과 중앙값',
+    '승격 건수',
+    'API 환산 비용($)',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -157,6 +190,10 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         '|',
         count(medianValue(group, (row) => withLaneSessions(row, row.contextCleared.count))),
         '|',
+        String(group.filter((row) => row.escalation.escalated).length),
+        '|',
+        costCell(group),
+        '|',
       ].join(' '),
     );
   }
@@ -171,7 +208,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'}`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}`,
     '',
     '## 과제 × 전략',
     '',
@@ -197,6 +234,20 @@ function withLaneSessions(row: BenchRow, value: number): number | undefined {
   return row.lanes.some((lane) => lane.sessionId) ? value : undefined;
 }
 
+/** 그룹의 API 환산 비용을 "합계 / 중앙값"(달러)으로 적는다. costUsd가 있는 실행이 없으면 — */
+function costCell(rows: BenchRow[]): string {
+  const values = rows.map((row) => row.costUsd).filter((value): value is number => typeof value === 'number');
+  if (values.length === 0) return '—';
+  const sum = values.reduce((total, value) => total + value, 0);
+  return `${sum.toFixed(4)} / ${medianOf(values).toFixed(4)}`;
+}
+
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
 function medianValue(rows: BenchRow[], pick: (row: BenchRow) => number | undefined): number | undefined {
   const values = rows.map(pick).filter((value): value is number => typeof value === 'number');
   if (values.length === 0) return undefined;
@@ -208,6 +259,9 @@ function medianValue(rows: BenchRow[], pick: (row: BenchRow) => number | undefin
 /**
  * 성공 1건당 토큰 = (입력 + 캐시읽기 + 캐시쓰기 + 출력) 합 ÷ 성공 수. 성공이 없으면 '—'.
  * 실패한 실행이 쓴 토큰도 분자에 넣는다 — 같은 성과를 내는 데 실제로 쓴 총량을 본다.
+ * **계약 호출 토큰도 넣는다**(빼면 모델 계약이 공짜처럼 보인다). 벤치가 직접 부른 계약(--contracts model)은
+ * 스튜디오 지표에 없어 `row.contracts.usage`로 더하고, 제품 경로에서 계획 모델이 쓴 계약은 이미
+ * `metrics.usage`에 들어 있어 겹치지 않는다.
  */
 function tokensPerSuccess(group: BenchRow[]): string {
   const ok = group.filter((row) => row.success).length;
@@ -215,7 +269,7 @@ function tokensPerSuccess(group: BenchRow[]): string {
   // 지표가 있는 실행만 더한다. 하나도 없으면 다른 열처럼 '—'다
   const withMetrics = group.filter((row) => row.metrics);
   if (withMetrics.length === 0) return '—';
-  const total = withMetrics.reduce((sum, row) => sum + usageTokens(row.metrics!.usage), 0);
+  const total = group.reduce((sum, row) => sum + usageTokens(row.metrics?.usage) + usageTokens(row.contracts?.usage), 0);
   return count(total / ok);
 }
 

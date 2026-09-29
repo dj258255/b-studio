@@ -45,6 +45,7 @@ import {
   type DemoScenario,
   type DesignFrameInfo,
   type DesignSource,
+  type EscalationPolicy,
   type GitAuthor,
   type ModelClient,
   type PullRequestDraft,
@@ -109,7 +110,7 @@ import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './cod
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
-import { clientForModel, routingDecision } from './model-registry';
+import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
@@ -360,6 +361,8 @@ async function startSession({
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
+  // 승격 대상 모델 id가 레지스트리에 없으면 샌드박스를 띄우기 전에 거부한다(조용히 승격 없이 돌지 않게)
+  if (mode === 'api') apiEscalation();
 
   // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 폴더의 시작 상태를 체크포인트로 둔다
   const author = gitAuthor();
@@ -1083,17 +1086,30 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
 type Intent = 'build' | 'ask';
 
 type RunPlan = (
-  | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
-  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
+  | {
+      kind: 'model';
+      client: ModelClient;
+      route?: RoutingDecision;
+      allowBreaking: boolean;
+      maxVerifyAttempts?: number;
+      intent: Intent;
+      /** 게이트 실패 서명이 반복되면 쓸 승격 클라이언트. 설정하지 않으면 승격 없음 */
+      escalation?: EscalationPolicy & { client: ModelClient };
+    }
+  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent; escalation?: EscalationPolicy }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
 ) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
     const route = routingDecision(request, intent, session.snapshot.modelId);
-    return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent };
+    const escalation = apiEscalation();
+    return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
-  if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
+  if (session.snapshot.mode === 'claude-code') {
+    const escalation = claudeCodeEscalation();
+    return { kind: 'claude-code', allowBreaking, intent, ...(escalation ? { escalation } : {}) };
+  }
   if (session.snapshot.mode === 'codex') return { kind: 'codex', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
@@ -1133,6 +1149,40 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
 /** 데모 모드에서 질문 카드의 답으로 보낸 요청인지. 화면은 `[질문] …\n[답] …` 형식으로 보낸다 */
 function isDemoAnswer(request: string, question: string): boolean {
   return request.startsWith('[질문]') && request.includes('[답]') && request.includes(question);
+}
+
+/** 승격 임계치. 같은 실패 서명 집합이 이만큼 연속으로 나오면 올린다(기본 2) */
+function escalateAfter(): number {
+  const raw = process.env.B_STUDIO_ESCALATE_AFTER?.trim();
+  if (!raw) return 2;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) throw new StudioError(500, `B_STUDIO_ESCALATE_AFTER는 1 이상의 정수여야 합니다 (지금 값: ${raw})`);
+  return value;
+}
+
+/**
+ * API 모드 승격 대상. 모델 레지스트리 id(B_STUDIO_ESCALATE_MODEL_ID)로 지정한다.
+ * 없는 id면 기동 시 오류를 내고, 설정하지 않으면 승격하지 않는다(지금 동작과 같다).
+ */
+function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefined {
+  const id = process.env.B_STUDIO_ESCALATE_MODEL_ID?.trim();
+  if (!id) return undefined;
+  const model = (() => {
+    try {
+      return modelById(id);
+    } catch (error) {
+      throw new StudioError(500, `B_STUDIO_ESCALATE_MODEL_ID=${id}: ${describe(error)}`);
+    }
+  })();
+  // 로컬 Claude 모드와 같은 임계치를 쓴다. 사람이 읽는 이름은 모델 라벨을 쓴다
+  return { to: model.label || model.id, sameSignatureTimes: escalateAfter(), client: clientForModel(model) };
+}
+
+/** 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet) */
+function claudeCodeEscalation(): EscalationPolicy | undefined {
+  const to = process.env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim();
+  if (!to) return undefined;
+  return { to, sameSignatureTimes: escalateAfter() };
 }
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
@@ -1375,6 +1425,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
       steering: run.steering,
+      // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
+      escalation: plan.escalation,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
@@ -1431,6 +1483,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     maxVerifyAttempts: plan.maxVerifyAttempts,
     // 실행 중 지시 큐. 없으면(레인·플릿·데모) 지시를 받지 않는다
     steering: run.steering,
+    // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
+    escalation: plan.escalation,
   });
 }
 

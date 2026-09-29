@@ -32,13 +32,15 @@ interface FakeOptions {
   turns?: Step[][];
   result?: Record<string, unknown>;
   account?: AccountInfo;
+  /** 사용자 메시지(게이트 재시도 포함)마다 돌려줄 modelUsage. 없으면 기본 계산을 쓴다 */
+  modelUsages?: Array<Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }>>;
 }
 
 /**
  * Claude Code 프로세스를 흉내 내는 가짜 SDK.
  * 사용자 메시지를 받을 때마다 준비된 단계를 실행하고, 도구 단계는 러너가 등록한 MCP 도구 핸들러를 실제로 부른다.
  */
-function fakeClaudeCode({ turns = [], result = {}, account = {} }: FakeOptions = {}) {
+function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [] }: FakeOptions = {}) {
   const state = { prompts: [] as string[], options: undefined as Options | undefined, closed: false };
   let tools: Array<SdkMcpToolDefinition<any>> = [];
 
@@ -72,6 +74,7 @@ function fakeClaudeCode({ turns = [], result = {}, account = {} }: FakeOptions =
               yield { type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId } as unknown as SDKMessage;
             }
           }
+          const modelUsage = modelUsages.shift() ?? { 'test-model': { inputTokens: 10 * ids, outputTokens: 5, cacheReadInputTokens: 1, cacheCreationInputTokens: 2 } };
           yield {
             type: 'result',
             subtype: 'success',
@@ -79,7 +82,7 @@ function fakeClaudeCode({ turns = [], result = {}, account = {} }: FakeOptions =
             result: lastText,
             stop_reason: 'end_turn',
             errors: [],
-            modelUsage: { 'test-model': { inputTokens: 10 * ids, outputTokens: 5, cacheReadInputTokens: 1, cacheCreationInputTokens: 2 } },
+            modelUsage,
             session_id: sessionId,
             ...result,
           } as unknown as SDKMessage;
@@ -365,5 +368,194 @@ describe('zodShape', () => {
     // 지시가 입력 큐에 들어가 다음 사용자 메시지로 처리된다
     expect(state.prompts[1]).toBe('[진행 중 지시] 테스트도 추가해줘');
     expect(events.filter((event): event is Extract<AgentEvent, { type: 'steer_applied' }> => event.type === 'steer_applied')).toMatchObject([{ count: 1 }]);
+  });
+
+  it('게이트가 같은 실패를 반복하면 같은 세션을 이어받아 모델만 바꾼 다음 query를 연다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+        [{ text: '3' }],
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, true]),
+      sdk,
+      model: 'haiku',
+      escalation: { to: 'sonnet', sameSignatureTimes: 2 },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', sessionId: 'forked-session', verifyAttempts: 2 });
+    // 두 번째 query는 첫 query가 만든 세션을 이어받고 모델만 바뀐다
+    expect(state.options).toMatchObject({ model: 'sonnet', resume: 'new-session', forkSession: true });
+    const escalated = events.filter((event): event is Extract<AgentEvent, { type: 'model_escalated' }> => event.type === 'model_escalated');
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0]).toMatchObject({ from: 'haiku', to: 'sonnet', attempt: 2, sameSignatureTimes: 2 });
+    expect(result.metrics?.escalatedAt).toBe(2);
+  });
+
+  it('escalation을 주지 않으면 게이트가 반복 실패해도 query를 다시 열지 않는다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, true]),
+      sdk,
+      model: 'haiku',
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', sessionId: 'new-session' });
+    expect(state.options).toMatchObject({ model: 'haiku' });
+    expect(state.options?.resume).toBeUndefined();
+    expect(events.some((event) => event.type === 'model_escalated')).toBe(false);
+  });
+
+  it('승격 뒤에 보낸 지시는 새 query의 입력 큐로 들어간다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+        // 승격 뒤 새 query의 첫 턴. 지시를 넣을 도구 결과 하나가 필요하다
+        [{ tool: 'read_file', input: { path: 'api/src/Order.java' } }, { text: '3' }],
+        [{ text: '지시를 반영했습니다.' }],
+        // 지시가 먼저 처리되고 게이트 피드백이 큐에 남아, 끝난 뒤 큐를 비우며 한 번 더 든다
+        [{ text: '게이트 피드백을 처리했습니다.' }],
+      ],
+    });
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+    // 승격이 일어난 뒤에만 지시를 보낸다(승격 직후 도구가 끝날 때). 그 지시가 새 query의 입력 큐로 가야 한다
+    let escalated = false;
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, false, true]),
+      sdk,
+      model: 'haiku',
+      escalation: { to: 'sonnet' },
+      steering: queue.steering,
+      // 승격 뒤 실패 한 번, 지시 반영 한 번까지 돌도록 재시도 여유를 둔다
+      maxVerifyAttempts: 4,
+      fetcher: async () => contract,
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === 'model_escalated') escalated = true;
+        if (escalated && event.type === 'tool_result') queue.push('승격 뒤 지시');
+      },
+    });
+
+    expect(result.status).toBe('done');
+    // 새 query의 첫 입력은 게이트 피드백이고, 그 뒤에 지시가 들어간다
+    expect(state.prompts[2]).toContain('[b-studio 검증 게이트]');
+    expect(state.prompts[3]).toBe('[진행 중 지시] 승격 뒤 지시');
+    expect(events.some((event) => event.type === 'steer_applied')).toBe(true);
+  });
+
+  it('승격해도 승격 전 사용량을 잃지 않고 모델별로 남긴다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+        [{ text: '3' }],
+      ],
+      // query 하나의 modelUsage는 누적값이라 시도마다 커진다. 승격 뒤에는 다른 모델(sonnet)의 값이 온다
+      modelUsages: [
+        { haiku: { inputTokens: 100, outputTokens: 10, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+        { haiku: { inputTokens: 150, outputTokens: 15, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+        { sonnet: { inputTokens: 200, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, true]),
+      sdk,
+      model: 'haiku',
+      escalation: { to: 'sonnet' },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('done');
+    // 승격 전(haiku 150) + 승격 뒤(sonnet 200). 합계가 이벤트에도 반영된다
+    expect(result.usage).toEqual({ inputTokens: 350, outputTokens: 35, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 150, 350]);
+    expect(result.metrics?.usageByModel).toEqual({
+      haiku: { inputTokens: 150, outputTokens: 15, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      sonnet: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    });
+  });
+
+  it('승격 순간에 보낸 지시는 닫히는 query가 아니라 새 query 입력으로 들어간다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+        [{ tool: 'read_file', input: { path: 'api/src/Order.java' } }, { text: '3' }],
+        [{ text: '지시 반영' }],
+        [{ text: '게이트 피드백 처리' }],
+      ],
+    });
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, false, true]),
+      sdk,
+      model: 'haiku',
+      escalation: { to: 'sonnet' },
+      steering: queue.steering,
+      maxVerifyAttempts: 4,
+      fetcher: async () => contract,
+      onEvent: (event) => {
+        events.push(event);
+        // 승격이 일어나 지시 연결을 끊은 직후(model_escalated 시점)에 들어온 지시
+        if (event.type === 'model_escalated') queue.push('승격 순간 지시');
+      },
+    });
+
+    expect(result.status).toBe('done');
+    expect(state.prompts[2]).toContain('[b-studio 검증 게이트]');
+    expect(state.prompts[3]).toBe('[진행 중 지시] 승격 순간 지시');
+    expect(events.some((event) => event.type === 'steer_applied')).toBe(true);
+  });
+
+  it('연결 시 flush는 쌓인 지시가 없으면 아무 이벤트도 내지 않는다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ text: '주문 API입니다.' }]] });
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      steering: queue.steering,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe('done');
+    expect(events.some((event) => event.type === 'steer_applied')).toBe(false);
   });
 });

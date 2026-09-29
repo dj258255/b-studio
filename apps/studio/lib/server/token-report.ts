@@ -9,8 +9,9 @@
  */
 import { isRepeatNote, type AgentEvent, type AgentUsage } from '@b-studio/agent';
 import type { StudioEvent } from '../studio-events';
-import type { TokenBigResult, TokenPrices, TokenReport, TokenTurn, TokenToolTotal, TokenWarning } from '../token-types';
+import { estimateCostUsd, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
 
+export { estimateCostUsd } from '../token-types';
 export type { TokenBigResult, TokenPrices, TokenReport, TokenToolTotal, TokenTurn, TokenWarning, TokenWarningKind } from '../token-types';
 
 /** 한 결과가 이 글자를 넘으면 경고한다. 명령 출력 예산(6,000)보다 큰 결과를 낭비로 본다 */
@@ -269,10 +270,3 @@ export function pricesFromEnv(env: Record<string, string | undefined>): TokenPri
   return { inputPerM, outputPerM, cacheReadPerM, cacheWritePerM };
 }
 
-/** 추정 비용(달러). 청구 금액이 아니라 단가를 넣었을 때의 환산값이다 */
-export function estimateCostUsd(usage: AgentUsage, prices: TokenPrices): number {
-  return (
-    (usage.inputTokens * prices.inputPerM + usage.outputTokens * prices.outputPerM + usage.cacheReadTokens * prices.cacheReadPerM + usage.cacheWriteTokens * prices.cacheWritePerM) /
-    1_000_000
-  );
-}
