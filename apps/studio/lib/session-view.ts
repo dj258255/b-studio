@@ -34,6 +34,8 @@ export type ChatItem =
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
     }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
+  /** 게이트의 같은 실패 서명이 반복돼 더 비싼 모델로 올렸다 */
+  | { kind: 'escalation'; runId: string; from: string; to: string; times: number; attempt: number }
   | { kind: 'stage'; runId: string; stage: string }
   /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과. browser_check면 단계별 스크린샷 식별자(steps)와 디자인 비교(compare)가 함께 온다 */
   | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare }
@@ -448,6 +450,8 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
 
     case 'steer_applied':
       return applySteerApplied(chat, runId, event.count);
+    case 'model_escalated':
+      return [...chat, { kind: 'escalation', runId, from: event.from, to: event.to, times: event.sameSignatureTimes, attempt: event.attempt }];
 
     case 'stage':
       return [...chat, { kind: 'stage', runId, stage: event.stage }];

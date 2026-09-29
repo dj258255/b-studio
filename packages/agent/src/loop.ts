@@ -5,6 +5,7 @@ import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
+import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
@@ -113,6 +114,13 @@ export interface RunMetrics {
   toolMs: number;
   /** gate.check() 실행 시간 합 */
   gateMs: number;
+  /** 승격이 일어났다면 몇 번째 게이트 시도(실패) 뒤였는지. 승격이 없으면 없다 */
+  escalatedAt?: number;
+  /**
+   * 모델 이름(또는 id)별 사용량. 승격 등으로 실행 중 모델이 바뀌면 모델별 비용을 나누어 계산할 수 있게 한다.
+   * 모델을 구분할 수 없는 러너는 채우지 않는다
+   */
+  usageByModel?: Record<string, AgentUsage>;
 }
 
 export interface AgentResult {
@@ -169,6 +177,10 @@ export type AgentEvent =
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
   /** 진행 중 지시를 다음 모델 호출 전에 대화에 넣었다 */
   | { type: 'steer_applied'; count: number }
+  /** 게이트의 실패 서명이 같은 값으로 반복돼 더 비싼 모델로 올렸다 */
+  | { type: 'model_escalated'; from: string; to: string; attempt: number; signature: string; sameSignatureTimes: number }
+  /** 이 러너가 승격을 지원하지 않아 옵션을 무시했다 */
+  | { type: 'warning'; message: string }
   | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }
   | { type: 'verify_result'; report: VerificationReport; text: string }
@@ -190,6 +202,11 @@ export interface RunAgentOptions {
   project: LoadedProject;
   sandbox: Sandbox;
   client: ModelClient;
+  /**
+   * 게이트 실패 서명이 `sameSignatureTimes`번 반복되면 이후 호출을 `client`로 바꾼다.
+   * 주지 않으면 지금처럼 한 모델로 끝까지 돈다(승격 없음). 한 번 올리면 다시 올리지 않는다.
+   */
+  escalation?: EscalationPolicy & { client: ModelClient };
   /** 요청이 필드·엔드포인트 삭제나 타입 변경을 명시할 때만 true */
   allowBreaking?: boolean;
   /** ask: 질문 모드. 파일을 바꾸는 도구를 거부하고, 바뀐 파일이 없으므로 검증 게이트를 돌리지 않는다 */
@@ -303,6 +320,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
   const usage = emptyUsage();
   const metrics = emptyMetrics();
+  // 모델 id별 사용량. 승격으로 클라이언트가 바뀌면 승격 전후가 다른 키로 쌓인다
+  const usageByModel: Record<string, AgentUsage> = {};
+  metrics.usageByModel = usageByModel;
   // 이번 턴에 ask_user가 남긴 질문. 있으면 도구 결과를 넣은 뒤 실행을 끝내고 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
   // 실행 단위 도구 결과 캐시. 한 실행 안에서 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
@@ -311,6 +331,11 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   const contextClearing = resolveContextClearing(options.contextClearing, process.env);
   // 직전 턴이 모델에 보낸 입력 크기. 이 값이 임계치를 넘으면 다음 호출 전에 오래된 도구 결과를 묶어서 비운다
   let previousContextTokens = 0;
+  // 승격은 게이트의 실패 서명이 정한다. 게이트 실패마다 서명 집합을 쌓고, 같은 집합이 연속되면 모델을 바꾼다
+  const escalation = options.escalation;
+  const escalationHistory: string[] = [];
+  let escalated = false;
+  let activeClient = client;
 
   const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion): AgentResult => {
     const result: AgentResult = {
@@ -352,12 +377,14 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     }
 
     const modelStarted = performance.now();
-    const message = await client.createMessage({ system, tools, messages }, signal);
+    const message = await activeClient.createMessage({ system, tools, messages }, signal);
     metrics.modelMs += Math.round(performance.now() - modelStarted);
     metrics.modelCalls += 1;
     const turnContext = contextTokens(message.usage);
     metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
     addUsage(usage, message.usage);
+    // 모델별 사용량. 클라이언트가 모델 id를 알려 주면 그 이름으로, 아니면 '알 수 없음'으로 묶는다
+    addUsage((usageByModel[activeClient.info?.model ?? '알 수 없음'] ??= emptyUsage()), message.usage);
     // 요청이 취소되거나 오류로 끝나도 그때까지 쓴 양을 알 수 있게 응답마다 알린다
     onEvent({ type: 'tokens', usage: { ...usage } });
     // 그 턴 한 번의 사용량. 실행 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
@@ -459,6 +486,17 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       return finish('done', text, turn);
     }
     if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    if (escalation && !escalated) {
+      const key = signatureSetKey(gate.report, gate.checks);
+      escalationHistory.push(key);
+      const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
+      if (shouldEscalate(escalationHistory, times)) {
+        escalated = true;
+        metrics.escalatedAt = gate.attempts;
+        onEvent({ type: 'model_escalated', from: client.info?.model ?? '알 수 없음', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
+        activeClient = escalation.client;
+      }
+    }
     messages.push({ role: 'user', content: outcome.feedback });
   }
 

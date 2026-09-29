@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy } from './backends';
+import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveEscalation, resolveRateLimitPolicy } from './backends';
 
 describe('resolveBackend', () => {
   it('--dry는 --backend·--model과 함께 쓸 수 없고 항상 openai다', () => {
@@ -66,6 +66,28 @@ describe('resolveRateLimitPolicy', () => {
   it('모르는 값과 0 이하의 분은 거부한다', () => {
     expect(() => resolveRateLimitPolicy('continue', undefined)).toThrow(/stop 또는 wait/);
     expect(() => resolveRateLimitPolicy('wait', 0)).toThrow(/0보다 큰/);
+  });
+});
+
+describe('resolveEscalation', () => {
+  it('--escalate-to를 주지 않으면 기본 임계치만 두고 승격하지 않는다', () => {
+    expect(resolveEscalation({ backend: 'claude-code' })).toEqual({ after: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateAfter: 3 })).toEqual({ after: 3 });
+  });
+
+  it('claude-code 백엔드에서만 --escalate-to를 받는다', () => {
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: ' sonnet ', escalateAfter: 4 })).toEqual({ to: 'sonnet', after: 4 });
+  });
+
+  it('승격을 지원하지 않는 백엔드에 --escalate-to를 주면 시작 전에 오류를 낸다', () => {
+    expect(() => resolveEscalation({ backend: 'openai', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+    expect(() => resolveEscalation({ backend: 'codex', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+  });
+
+  it('--escalate-after는 1 이상의 정수여야 한다', () => {
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateAfter: 0 })).toThrow(/--escalate-after는 1 이상의 정수/);
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfter: 1.5 })).toThrow(/--escalate-after는 1 이상의 정수/);
   });
 });
 

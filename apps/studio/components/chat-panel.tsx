@@ -417,6 +417,13 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </p>
       );
 
+    case "escalation":
+      return (
+        <p className="text-sm text-muted">
+          같은 실패가 {item.times}번 반복되어 <span className="font-mono text-ink">{item.to}</span>으로 올렸습니다
+        </p>
+      );
+
     case "stage":
       return <p className="text-xs font-medium tracking-wide text-muted">작업 단계 · {stageLabel(item.stage)}</p>;
 

@@ -12,6 +12,7 @@ export {
   type Steering,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
+export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
   ClaudeCodeUsageTracker,
   describeAccount,
