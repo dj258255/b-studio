@@ -126,6 +126,20 @@ describe('CheckpointStore', () => {
     expect((await store.list())[0]!.passedStages).toEqual(['run', 'contract_check', 'review']);
   });
 
+  it('sessionCommits는 커밋 본문의 트레일러에서 통과 단계를 함께 읽고, 없으면 비워 둔다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run', 'contract_check', 'review'])] });
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    await store.commit('직접 수정: 파일 1개', '스튜디오 밖에서 바꾼 파일입니다.');
+
+    const commits = await store.sessionCommits();
+    expect(commits[0]).toMatchObject({ subject: '요청: 메모 추가', passedStages: ['run', 'contract_check', 'review'] });
+    expect(commits[1]).toMatchObject({ subject: '직접 수정: 파일 1개' });
+    expect(commits[1]!.passedStages).toBeUndefined();
+  });
+
   it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {
     // 사용자가 쓰던 저장소: 커밋 하나, 무시하는 로그 파일, 아직 커밋하지 않은 초안
     await write('.gitignore', '*.log\n');

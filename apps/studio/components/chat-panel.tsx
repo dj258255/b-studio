@@ -560,6 +560,7 @@ function ChatEntry({ item }: { item: ChatItem }) {
               <a href={item.pullRequest.url} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-2">
                 {item.pullRequest.created ? `${label}을 만들었습니다` : `이미 열려 있는 ${label}을 찾았습니다`}
               </a>
+              {item.issue !== undefined && <span className="ml-2 text-muted">#{item.issue} 이슈를 함께 닫습니다</span>}
             </p>
           )}
           {item.pullRequestError && (
