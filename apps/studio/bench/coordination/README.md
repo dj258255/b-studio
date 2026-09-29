@@ -67,6 +67,9 @@ pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list
 # claude-code 승격(H5): haiku로 시작해 게이트가 같은 실패 서명을 2번 내면 sonnet으로 올린다
 pnpm bench:coordination --backend claude-code --model haiku --escalate-to sonnet --tasks orders-list --strategies S0 --repeats 1
 
+# 가볍게 확인(E5): 레인·통합 게이트가 서비스 재시작·준비·계약만 확인한다(테스트·화면·리뷰는 건너뜀)
+pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --verify light --tasks orders-list,order-detail,order-summary --repeats 3
+
 # codex: 이 PC에 ChatGPT로 로그인된 Codex CLI. --model을 생략하면 로그인 계정의 기본 모델을 쓴다
 pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 --repeats 1
 
@@ -95,6 +98,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 - `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
 - `--integration-checks`(기본 꺼짐) — 엮인 과제 3개의 **통합 게이트**에만, 과제 요청에 적힌 샘플 값이 web 화면에 보이는지 확인(`pageChecks.expectAllText`·`expectAnyText`)을 덧붙입니다(orders-list `김민수`·`이영희`·`박철수` 모두, order-detail `김민수`·`문 앞에 놓아 주세요` 모두, order-summary `45000`/`45,000` 중 하나). 인수 검사와 **같은 값을 같은 규칙(모두/하나라도)으로** 봅니다 — E4 첫 묶음에서 첫 값 하나만 보던 확인은 '김민수'만 보이는 화면을 통과시켰습니다. 필드 이름은 쓰지 않습니다. 이 값들은 인수 검사(`runAcceptance`)와 **같은 값**이라, 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면 S4 수리가 시작되는가"를 재는 것입니다([#124](https://github.com/dj258255/b-studio/issues/124), E2 H10). 각 실행 행에 `integrationChecks: true/false`를 남기고 `meta.json`에도 기록합니다. 레인 게이트는 그대로이고 통합 게이트만 바뀝니다(서버 안에서만 넘기는 `createTaskPlan.integrationChecks`)
+- `--verify full|light`(기본 `full`) — `light`(가볍게 확인)면 작업 분해의 **레인 실행과 통합 실행**(S4 수리 포함)에 `verify=light`를 넘겨, 게이트가 서비스 재시작·준비 판정·계약 비교만 하고 테스트·화면 확인·리뷰를 건너뜁니다. 전체 검증(E0~E4)과 가볍게 확인을 같은 과제·모델로 비교하는 E5용입니다. 각 실행 행에 `verify`, `meta.json`에 `verify`, 요약 맨 위 줄에 `검증 full` 또는 `검증 light(가볍게)`가 남습니다. 사람이 보낸 세션 메시지가 아니라 **서버 안에서만** 넘깁니다(HTTP 라우트는 받지 않음, `createTaskPlan.verify`). `P0`(그냥 Claude Code)는 b-studio 게이트를 쓰지 않으므로 light와 함께 주면 무시하고 경고 한 줄만 남깁니다
 - `--contracts human|model`(기본 `human`) — S2에서 레인 사이 계약을 누가 쓰는지 정합니다. `model`은 계획 모델에게 한 번 받아 씁니다(S2에서만, `--backend openai|claude-code`에서만). 위의 "레인 사이 계약" 절을 보세요
 - `--escalate-to <모델>` — claude-code 백엔드(계획 기본 또는 레인 중 하나)가 있을 때만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). claude-code가 하나도 없는데 주면 시작 전에 오류를 낸다
 - `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
