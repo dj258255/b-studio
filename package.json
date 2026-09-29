@@ -25,6 +25,7 @@
     "desktop:dev": "pnpm --filter @b-studio/desktop dev",
     "desktop:build": "pnpm --filter @b-studio/desktop build:app",
     "desktop:install": "tsx apps/desktop/scripts/install.ts",
+    "desktop:icon": "tsx apps/desktop/scripts/make-icon.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"
   },
