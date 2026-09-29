@@ -74,6 +74,9 @@ importers:
       shiki:
         specifier: 4.4.3
         version: 4.4.3
+      zod:
+        specifier: ^4.6.1
+        version: 4.6.1
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4
@@ -117,12 +120,25 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.30.0(zod@4.6.1)
+      '@openai/codex-sdk':
+        specifier: 0.157.0
+        version: 0.157.0
+      pixelmatch:
+        specifier: 7.2.0
+        version: 7.2.0
       playwright-core:
         specifier: 1.63.0
         version: 1.63.0
+      pngjs:
+        specifier: 7.0.0
+        version: 7.0.0
       zod:
         specifier: ^4.6.1
         version: 4.6.1
+    devDependencies:
+      '@types/pngjs':
+        specifier: 6.0.5
+        version: 6.0.5
 
   packages/sandbox:
     dependencies:
@@ -787,6 +803,51 @@ packages:
     resolution: {integrity: sha512-nn5ozdjYQpUCZlWGuxcJY/KpxkWQs4DcbMCmKojjyrYDEAGy4Ce19NN4v5MduafTwJlbKc99UA8YhSVqq9yPZA==}
     engines: {node: '>=12.4.0'}
 
+  '@openai/codex-sdk@0.157.0':
+    resolution: {integrity: sha512-ANbcdgbVodJ/kbLThBKJqrlVSZ+AZaNNP2i1KYv0428OG9oMp5eJuUQwi4z+XNGtpzF4n5fAihXzieGDy6T44w==}
+    engines: {node: '>=18'}
+
+  '@openai/codex@0.157.0':
+    resolution: {integrity: sha512-st1R2MhP3ndngOqj2SVh1qk6ED1lpgtlDxipDUyxlKfbsna0imwU2FdTnCjohFQpVh4bR5D5m1hA05AuW2v8Xg==}
+    engines: {node: '>=16'}
+    hasBin: true
+
+  '@openai/codex@0.157.0-darwin-arm64':
+    resolution: {integrity: sha512-mcaLbR+tTizMr7nzxBscNfPpGrdxmsyyDqXnpPPd2419YXorDiLGpF5QmtA29gUUFg9ppjhZjM854R4tXNHzVQ==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@openai/codex@0.157.0-darwin-x64':
+    resolution: {integrity: sha512-ZLwB/P3LcvTrNfUAKKxdEDN2qzvDf9g+x4Ahv7BKCya5uNhG000GR64SXh4aP0h23hJIJQLwWNmiTMgDhPC7QQ==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@openai/codex@0.157.0-linux-arm64':
+    resolution: {integrity: sha512-67Y2HL4s+DEKtWr1oFz86iN+wLDRsdm6fuq8rhaxlt8QeIK79aO7Eg82Wfucou4QSisq/SSWYkwa9q7hWi8fLA==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@openai/codex@0.157.0-linux-x64':
+    resolution: {integrity: sha512-3TEPslRaNmlgJST5xMJJ9ZWXW1hr4RlVEpF0tO4NULNGj4b5naWlHa6PlSRiDpnMz322aJkz0uvyyKqc37rLJQ==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [linux]
+
+  '@openai/codex@0.157.0-win32-arm64':
+    resolution: {integrity: sha512-a5IkHahC9dO8OcWPvxEy/+1oC/7X4VCeMAZOvzhcYKPOwhPbHkyzzEJGGAVEuForpfR26N4khuGOLY2Q55BrRA==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@openai/codex@0.157.0-win32-x64':
+    resolution: {integrity: sha512-vZm6DtJ6rBWzdaelStuU+1PH3aCxtgQCENmzgs6EPa0mW6Ouk70a6vv8KzlysG4vx+kcnglBrIcwEn0yNgS2hw==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [win32]
+
   '@oxc-project/types@0.149.0':
     resolution: {integrity: sha512-Efcc+iF0j3Bf67YjEqIqWXbX5XddXoK/Mw4K1/JuXwRCZ8N16VR7iT23nlCc9XrveFVh/E5Rqs2StT0V8v9LdA==}
 
@@ -1062,6 +1123,9 @@ packages:
 
   '@types/node@22.20.2':
     resolution: {integrity: sha512-xlvWf4Vs9n1PEVYwP1n4vvG07M6y8WgvJ2t0vbrWTmijsIHp1cS+uJ2kMIRdY3nHZK0nCYKrPeD171+SzF4/zw==}
+
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
 
   '@types/react-dom@19.3.0':
     resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
@@ -2889,6 +2953,10 @@ packages:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
 
+  pixelmatch@7.2.0:
+    resolution: {integrity: sha512-xhcb4yHu9sM/G7foGzoLtXYcC0zHEaOXXjRKhGup0fw78Nf2Tkiapv4EQyMzrbcmQPsllAI7DbFY2UT7PlI9Pg==}
+    hasBin: true
+
   pkce-challenge@5.0.1:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
@@ -2897,6 +2965,10 @@ packages:
     resolution: {integrity: sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg==}
     engines: {node: '>=20'}
     hasBin: true
+
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
 
   possible-typed-array-names@1.1.0:
     resolution: {integrity: sha512-/+5VFTchJDoVj3bhoqi6UeymcD00DAwb1nJwamzPvHEszJ4FpF6SNNbUbOS8yI56qHzdV8eK0qEfOSiodkTdxg==}
@@ -4033,6 +4105,37 @@ snapshots:
 
   '@nolyfill/is-core-module@1.0.39': {}
 
+  '@openai/codex-sdk@0.157.0':
+    dependencies:
+      '@openai/codex': 0.157.0
+
+  '@openai/codex@0.157.0':
+    optionalDependencies:
+      '@openai/codex-darwin-arm64': '@openai/codex@0.157.0-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.157.0-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.157.0-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.157.0-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.157.0-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.157.0-win32-x64'
+
+  '@openai/codex@0.157.0-darwin-arm64':
+    optional: true
+
+  '@openai/codex@0.157.0-darwin-x64':
+    optional: true
+
+  '@openai/codex@0.157.0-linux-arm64':
+    optional: true
+
+  '@openai/codex@0.157.0-linux-x64':
+    optional: true
+
+  '@openai/codex@0.157.0-win32-arm64':
+    optional: true
+
+  '@openai/codex@0.157.0-win32-x64':
+    optional: true
+
   '@oxc-project/types@0.149.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.8':
@@ -4244,6 +4347,10 @@ snapshots:
   '@types/node@22.20.2':
     dependencies:
       undici-types: 6.21.0
+
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 22.20.2
 
   '@types/react-dom@19.3.0(@types/react@19.3.0)':
     dependencies:
@@ -6420,9 +6527,15 @@ snapshots:
 
   picomatch@4.0.7: {}
 
+  pixelmatch@7.2.0:
+    dependencies:
+      pngjs: 7.0.0
+
   pkce-challenge@5.0.1: {}
 
   playwright-core@1.63.0: {}
+
+  pngjs@7.0.0: {}
 
   possible-typed-array-names@1.1.0: {}
 

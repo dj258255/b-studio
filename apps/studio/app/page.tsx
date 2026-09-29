@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AgentsBadge } from "@/components/agents-badge";
 import { LogoutButton } from "@/components/logout-button";
 import { pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
@@ -12,6 +13,8 @@ const MODE_NOTE: Record<string, string> = {
   api: "요청은 Claude API로 처리합니다. 서버에 ANTHROPIC_API_KEY가 있어야 합니다.",
   "claude-code":
     "요청은 이 PC의 claude CLI에 로그인한 계정으로 처리합니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 여러 사람이 쓰는 서버에는 api 모드를 씁니다.",
+  codex:
+    "이 PC에 ChatGPT로 로그인한 Codex CLI로 실행합니다. 대화는 이어받지 않고 최근 요청 요약만 넘깁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 아직 실제 계정으로 확인하지 못한 모드입니다(#54).",
   demo: "데모 모드로 실행 중입니다. 준비된 요청을 스크립트로 실행하므로 API 키가 필요 없습니다.",
 };
 
@@ -24,7 +27,7 @@ export default async function HomePage() {
   const auth = authConfig().mode;
   const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
   const mode = process.env.B_STUDIO_MODE?.trim() || "api";
-  const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, demo 중 하나로 실행하세요.`;
+  const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, codex, demo 중 하나로 실행하세요.`;
   const localAllowed = localFolderAllowed();
 
   return (
@@ -32,6 +35,7 @@ export default async function HomePage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
         <div className="flex items-center gap-3 text-sm text-muted">
+          <AgentsBadge />
           <Link href="/fleets" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
             Agent Fleet
           </Link>
@@ -79,9 +83,14 @@ export default async function HomePage() {
 
       {sessions.length > 0 && (
         <section className="mt-14" aria-labelledby="sessions-heading">
-          <h2 id="sessions-heading" className="text-lg font-semibold">
-            최근 세션
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 id="sessions-heading" className="text-lg font-semibold">
+              최근 세션
+            </h2>
+            <Link href="/split" className="glass-soft rounded-control px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-panel">
+              나란히 보기
+            </Link>
+          </div>
           <p className="mt-1 text-sm text-muted">중지된 세션도 작업 복사본과 체크포인트가 남아 있어 열어서 이어서 작업할 수 있습니다.</p>
           <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-panel">
             {sessions.slice(0, RECENT_SESSIONS).map((session) => (

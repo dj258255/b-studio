@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -20,6 +21,10 @@ export interface PersistedSession {
   conversation: unknown[];
   demoIndex: number;
   claudeCode: { sessionId?: string; notes: string[] };
+  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml을 스튜디오가 고치지 않고 여기에 둔다 */
+  design?: { fileUrl: string; fileKey: string };
+  /** codex 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해 요약만 넘긴다. 이 필드가 생기기 전 기록에는 없다 */
+  codex?: { notes: string[]; recent: Array<{ request: string; summary: string; status: string }> };
   sourceDirtyFiles: number;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };
@@ -73,7 +78,8 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
 export async function writeSession(data: PersistedSession): Promise<void> {
   const file = sessionFile(stateDirOf(data.snapshot));
   await mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
+  // 임시 파일 이름은 호출마다 달라야 한다. 같으면 같은 세션 파일에 동시에 쓰는 두 저장이 서로의 임시 파일을 지우고 rename이 ENOENT로 깨진다
+  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   await writeFile(temp, JSON.stringify(data));
   await rename(temp, file);
 }

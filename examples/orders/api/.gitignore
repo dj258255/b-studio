@@ -35,3 +35,6 @@ out/
 
 ### VS Code ###
 .vscode/
+
+# JVM attach 흔적(컨테이너에서 jcmd·진단 명령을 쓸 때 생긴다)
+.attach_pid*

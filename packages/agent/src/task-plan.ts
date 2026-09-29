@@ -1,6 +1,6 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { z } from 'zod';
-import type { ModelClient } from './loop';
+import type { AgentUsage, ModelClient } from './loop';
 import { isProtectedPath } from './policy';
 
 /**
@@ -46,7 +46,11 @@ export interface TaskLane {
   paths: string[];
 }
 
-export class TaskPlanError extends Error {}
+export class TaskPlanError extends Error {
+  /** 계획 검증이 실패해도 그때까지 쓴 계획 호출의 토큰과 시간을 남긴다 */
+  usage?: AgentUsage;
+  durationMs?: number;
+}
 
 /** 계획을 검증하고 레인으로 묶는다. 모델이 만든 계획이라도 이 검사를 통과하지 못하면 실행하지 않는다 */
 export function planLanes(input: unknown): TaskLane[] {
@@ -152,9 +156,32 @@ export function parsePlannerReply(text: string): unknown {
 }
 
 /** 모델에게 계획을 받아 검증까지 마친 레인을 돌려준다. 계획이 틀리면 한 작업으로 몰래 바꾸지 않고 실패시킨다 */
-export async function requestTaskPlan(client: ModelClient, project: LoadedProject, request: string, signal?: AbortSignal): Promise<{ lanes: TaskLane[]; raw: unknown }> {
+export async function requestTaskPlan(
+  client: ModelClient,
+  project: LoadedProject,
+  request: string,
+  signal?: AbortSignal,
+): Promise<{ lanes: TaskLane[]; raw: unknown; usage: AgentUsage; durationMs: number }> {
+  const started = performance.now();
   const message = await client.createMessage({ system: buildPlannerSystem(project), tools: [], messages: [{ role: 'user', content: request }] }, signal);
+  const durationMs = Math.round(performance.now() - started);
   const text = message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
-  const raw = parsePlannerReply(text);
-  return { lanes: planLanes(raw), raw };
+  // loop.ts의 addUsage와 같은 매핑. 그 함수는 세션 토큰 한도가 쓰므로 그대로 두고 여기서 같은 모양으로 바꾼다
+  const usage: AgentUsage = {
+    inputTokens: message.usage.input_tokens ?? 0,
+    outputTokens: message.usage.output_tokens ?? 0,
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
+  };
+  try {
+    const raw = parsePlannerReply(text);
+    return { lanes: planLanes(raw), raw, usage, durationMs };
+  } catch (error) {
+    // 계획 검증이 실패해도 호출에 쓴 토큰과 시간은 잃지 않도록 오류에 남겨 다시 던진다
+    if (error instanceof TaskPlanError) {
+      error.usage = usage;
+      error.durationMs = durationMs;
+    }
+    throw error;
+  }
 }

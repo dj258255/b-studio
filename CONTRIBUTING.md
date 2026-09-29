@@ -27,6 +27,16 @@ pnpm typecheck
 6. **병합**: squash 병합합니다. PR 제목이 `main`의 커밋 제목이 되므로 무엇이 바뀌는지 알 수 있게 씁니다.
 7. **병합 뒤**: [CHANGELOG.md](CHANGELOG.md)의 "아직 릴리스하지 않음"에 한 줄을 더하고, [ROADMAP.md](ROADMAP.md)의 상태와 실제 시간을 갱신합니다.
 
+## 이슈와 PR 연결
+
+큰 일은 `tracking` 라벨 추적 이슈를 만들고 작업 단위는 GitHub 하위 이슈(Sub-issues)로 묶습니다. 예를 들어 추적 이슈 [#42](https://github.com/dj258255/b-studio/issues/42) 아래에 [#43](https://github.com/dj258255/b-studio/issues/43)·[#44](https://github.com/dj258255/b-studio/issues/44)·[#45](https://github.com/dj258255/b-studio/issues/45)·[#48](https://github.com/dj258255/b-studio/issues/48)·[#56](https://github.com/dj258255/b-studio/issues/56)·[#57](https://github.com/dj258255/b-studio/issues/57)·[#58](https://github.com/dj258255/b-studio/issues/58)가 있고, [#48](https://github.com/dj258255/b-studio/issues/48) 아래에 [#52](https://github.com/dj258255/b-studio/issues/52)~[#55](https://github.com/dj258255/b-studio/issues/55)가 있습니다.
+
+- PR 하나는 하위 이슈를 하나 이상 `Closes`로 닫습니다. 이슈 일부만 끝내면 하위 이슈를 쪼갭니다. `Refs`만 적으면 GitHub가 Development 패널에 연결하지 않습니다.
+- 쌓인 PR(base가 기본 브랜치가 아닌 PR)은 `Closes`가 이슈와 연결되지 않습니다. 앞 PR이 병합된 뒤 base를 기본 브랜치로 바꿉니다.
+- 막힌 일은 `blocked` 라벨을 달고 이유와 재개 조건을 댓글로 남깁니다. 예: [#54](https://github.com/dj258255/b-studio/issues/54) "ChatGPT 계정 한도, 10-25 재설정".
+- PR 본문 검사(`pr-body` 워크플로)가 닫는 키워드와 템플릿 필수 절(무엇을·검증·돌리지 않은 검증과 이유·예상과 실제)이 채워졌는지 확인합니다.
+- 저장소 md 파일에서는 `#43`이 링크가 되지 않으므로 위처럼 전체 URL 링크로 씁니다.
+
 ## 예상을 적고 갱신하기
 
 - 예상은 한 값이 아니라 범위로 씁니다(`2~3시간`). 범위를 가르는 불확실성을 같이 적습니다.

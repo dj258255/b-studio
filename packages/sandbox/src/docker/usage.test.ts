@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { describeUsage, formatBytes, mergeUsage, parseDockerBytes, parseInspectOutput, parseStatsOutput } from './usage';
+import type { ServiceUsage } from '../types';
+import { bootNetworkFromUsage, describeUsage, formatBytes, mergeUsage, parseDockerBytes, parseInspectOutput, parseStatsOutput } from './usage';
 
 describe('parseDockerBytes', () => {
   it.each([
@@ -21,6 +22,23 @@ const STATS = [
   '{"CPUPerc":"187.35%","MemUsage":"1.203GiB / 1.5GiB","Name":"studio-orders-bb3675-api-1"}',
   '',
 ].join('\n');
+
+describe('parseStatsOutput NetIO', () => {
+  it('수신/송신 바이트를 여러 단위로 읽는다', () => {
+    const [row] = parseStatsOutput('{"Name":"api","CPUPerc":"0%","MemUsage":"10MiB / 1GiB","NetIO":"1.2MB / 43.12MiB"}');
+    expect(row).toMatchObject({ networkRxBytes: 1_200_000, networkTxBytes: Math.round(43.12 * 1024 ** 2) });
+  });
+
+  it('NetIO가 없거나 "--"면 둘 다 undefined다', () => {
+    const [missing, dash] = parseStatsOutput(
+      ['{"Name":"api","CPUPerc":"0%","MemUsage":"10MiB / 1GiB"}', '{"Name":"web","CPUPerc":"0%","MemUsage":"10MiB / 1GiB","NetIO":"-- / --"}'].join('\n'),
+    );
+    expect(missing!.networkRxBytes).toBeUndefined();
+    expect(missing!.networkTxBytes).toBeUndefined();
+    expect(dash!.networkRxBytes).toBeUndefined();
+    expect(dash!.networkTxBytes).toBeUndefined();
+  });
+});
 
 const INSPECT = JSON.stringify([
   {
@@ -49,9 +67,19 @@ describe('docker 출력 해석', () => {
 
     expect(usage).toEqual([
       { service: 'api', state: 'running', cpuPercent: 187.35, memoryBytes: Math.round(1.203 * 1024 ** 3), memoryLimitBytes: 1610612736, cpuLimit: 2, exitCode: undefined, oomKilled: false },
-      { service: 'db', state: 'running', cpuPercent: 0.02, memoryBytes: Math.round(43.12 * 1024 ** 2), memoryLimitBytes: undefined, cpuLimit: undefined, exitCode: undefined, oomKilled: false },
+      { service: 'db', state: 'running', cpuPercent: 0.02, memoryBytes: Math.round(43.12 * 1024 ** 2), memoryLimitBytes: undefined, cpuLimit: undefined, networkRxBytes: 28_800, networkTxBytes: 23_400, exitCode: undefined, oomKilled: false },
       { service: 'web', state: 'exited', cpuPercent: undefined, memoryBytes: undefined, memoryLimitBytes: 536870912, cpuLimit: undefined, exitCode: 137, oomKilled: true },
     ]);
+  });
+
+  it('기동 네트워크 지표는 edge와 값이 없는 컨테이너를 뺀다', () => {
+    const usage: ServiceUsage[] = [
+      { service: 'api', state: 'running', oomKilled: false, networkRxBytes: 1_200_000, networkTxBytes: 3_400 },
+      { service: 'b-studio-edge', state: 'running', oomKilled: false, networkRxBytes: 9_000_000, networkTxBytes: 8_000_000 },
+      // 실행 중이 아니면 NetIO가 없어 빠진다
+      { service: 'db', state: 'exited', oomKilled: false },
+    ];
+    expect(bootNetworkFromUsage(usage, 'b-studio-edge')).toEqual([{ service: 'api', rxBytes: 1_200_000, txBytes: 3_400 }]);
   });
 
   it('사람이 읽는 표기로 요약한다', () => {
