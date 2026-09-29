@@ -56,6 +56,12 @@ describe('costForUsageByModel', () => {
     expect(cost.costNote).toBe('단가 없음: gpt-5-codex');
   });
 
+  it('토큰을 쓰지 않은 모델은 단가가 없어도 비용 계산을 막지 않는다 (벤치의 scripted 클라이언트)', () => {
+    const cost = costForUsageByModel({ 'claude-haiku-4-5': usage(1_000_000, 0), scripted: usage(0, 0) }, table);
+    expect(cost.costUsd).toBeCloseTo(1, 8);
+    expect(cost.costNote).toBeUndefined();
+  });
+
   it('모델이 없으면 아무것도 돌려주지 않는다', () => {
     expect(costForUsageByModel({}, table)).toEqual({});
   });

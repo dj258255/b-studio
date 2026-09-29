@@ -64,12 +64,16 @@ export function costForUsageByModel(usageByModel: Record<string, AgentUsage>, ta
   let total = 0;
   const missing: string[] = [];
   for (const model of models) {
+    const usage = usageByModel[model]!;
+    // 토큰을 하나도 쓰지 않은 모델(벤치의 고정 계획용 가짜 클라이언트 'scripted' 등)은 단가가 없어도 비용이 0이다.
+    // 이것 때문에 전체 비용을 "단가 없음"으로 버리면 실제 모델의 비용까지 보이지 않는다(E3에서 S0 비용이 전부 빠졌다)
+    if (usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens === 0) continue;
     const prices = matchTokenPrices(table, model);
     if (!prices) {
       missing.push(model);
       continue;
     }
-    total += estimateCostUsd(usageByModel[model]!, prices);
+    total += estimateCostUsd(usage, prices);
   }
   if (missing.length > 0) return { costNote: `단가 없음: ${missing.join(', ')}` };
   return { costUsd: total };
