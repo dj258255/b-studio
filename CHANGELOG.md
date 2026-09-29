@@ -6,6 +6,14 @@
 
 ### 추가
 
+- 홈을 입력창 하나와 방식 선택(한 명 / 여러 명 비교 / 나눠서 병렬), 진행 중 목록으로 합쳤습니다. 백엔드·모델 고르기는 '자세히'에 있습니다 ([#168](https://github.com/dj258255/b-studio/pull/168)).
+- 샌드박스를 실제로 필요할 때(샌드박스 도구를 처음 부르거나 파일을 처음 바꿀 때, '지금 켜기') 켭니다. 질문만 하는 요청은 샌드박스 없이 끝납니다. 작업 분해 레인·Fleet·벤치는 지금처럼 바로 켭니다 ([#167](https://github.com/dj258255/b-studio/pull/167)).
+- 채팅의 만들기/질문 입력을 하나로 합치고 '읽기만' 스위치를 두었습니다. 파일을 바꾸지 않은 실행은 "답만 했습니다"로 보입니다 ([#165](https://github.com/dj258255/b-studio/pull/165)).
+- 구독 CLI 모드에서도 여러 명 비교(Fleet)를 씁니다. 후보를 백엔드·모델 짝으로 받고, 기본 후보는 백엔드마다 하나 또는 같은 백엔드로 독립 시도 두 개입니다 ([#166](https://github.com/dj258255/b-studio/pull/166)).
+- 유료 API 없이 로컬 Claude Code 구독으로 작업 분해 계획을 받고, 화면이 쓸 수 있는 방식을 `GET /api/capabilities`로 알립니다 ([#163](https://github.com/dj258255/b-studio/pull/163)).
+- 웹 스튜디오를 감싸는 얇은 Electron 데스크톱 앱(`pnpm desktop:install`)을 추가했습니다. 주소창·뒤로·앞으로가 있고, 이 PC 주소만 앱 안에서 열며, 앱이 켠 서버만 닫을 때 끕니다 ([#157](https://github.com/dj258255/b-studio/pull/157), ADR-062).
+- `pnpm studio launch`·`stop`으로 스튜디오를 한 번에 켜고 끕니다(`--json`은 데스크톱 앱이 씀) ([#156](https://github.com/dj258255/b-studio/pull/156)).
+- OpenCode 백엔드를 추가했습니다. 실제 계정 확인은 로그인 뒤로 남겼습니다 ([#83](https://github.com/dj258255/b-studio/pull/83), [#154](https://github.com/dj258255/b-studio/issues/154)).
 - 세션마다 백엔드(api·Claude Code·Codex·Command Code)를 고르고, 작업 분해의 고정 계획에서 레인마다 다른 백엔드로 한 계획을 돌립니다(`B_STUDIO_BACKENDS`, 기본은 서버 모드 하나). 세션을 이어서 할 때도 지금 서버의 허용 목록을 확인합니다 ([#145](https://github.com/dj258255/b-studio/pull/145)).
 - 게이트가 이번 실행에서 바뀐 Next.js 페이지를 찾아 열어 보는 `workflow.autoPageChecks`를 추가했습니다(기본 끔). 상태가 200이어도 Next.js 오류 화면 문구가 보이면 실패로 봅니다 ([#142](https://github.com/dj258255/b-studio/pull/142)).
 - 화면 확인에 모두 있어야 통과하는 `expectAllText`를 추가했습니다 ([#144](https://github.com/dj258255/b-studio/pull/144)).
