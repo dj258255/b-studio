@@ -1,6 +1,8 @@
 node_modules/
 .pnpm-store/
 dist/
+# 데스크톱 앱 패키징 결과(.app)와 로컬 설치본
+dist-app/
 coverage/
 *.tsbuildinfo
 

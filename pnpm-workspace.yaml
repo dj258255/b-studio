@@ -6,6 +6,12 @@ packages:
 
 onlyBuiltDependencies:
   - esbuild
+  # Electron은 postinstall에서 자기 바이너리(약 100MB)를 받는다. apps/desktop의 dev·build에 필요해서 허용한다.
+  # CI 검사와 스튜디오 운영 이미지에는 필요 없으므로 그쪽은 ELECTRON_SKIP_BINARY_DOWNLOAD=1로 건너뛴다
+  - electron
+  # electron-builder가 딸려 오는 Windows 설치기 도구. 설치 스크립트가 7z 아키텍처를 고르는 일만 한다(내려받지 않음).
+  # mac .app만 만들어서 쓰지는 않지만, 막아 두면 pnpm이 매번 "무시한 설치 스크립트" 경고를 띄운다
+  - electron-winstaller
 
 # create-next-app 기본값을 워크스페이스 루트로 옮겼다
 ignoredBuiltDependencies:

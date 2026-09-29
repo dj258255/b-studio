@@ -25,7 +25,10 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      # 데스크톱 셸(apps/desktop)의 Electron 바이너리는 검사에 필요 없다. 받지 않아 CI 시간·용량을 아낀다
       - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm --filter @b-studio/studio lint

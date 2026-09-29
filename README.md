@@ -76,6 +76,21 @@ pnpm studio launch --json   # {"url":"http://127.0.0.1:3000","port":3000,"mode":
 pnpm studio stop --json     # {"stopped":true}
 ```
 
+### 데스크톱 앱 (macOS)
+
+터미널 대신 더블클릭으로 켜고 싶으면 얇은 Electron 껍데기를 설치합니다. **화면은 서버가 주는 웹 그대로**라, 스튜디오를 고쳐도(`git pull`) 앱을 다시 만들 필요가 없습니다([ADR-062](docs/decisions.md#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)).
+
+```bash
+pnpm desktop:install   # 빌드 + ~/Applications/b-studio.app 설치 + 설정 파일 쓰기
+```
+
+- 앱을 열면 저장소에서 스튜디오 서버를 스스로 켜고(이미 떠 있으면 그대로 씁니다) 창을 띄웁니다. 서버가 뜨는 동안에는 진행 안내를 보여 줍니다.
+- 창 위 도구 막대: 뒤로·앞으로·새로고침·주소 입력창·"브라우저에서 열기". 주소창에는 `127.0.0.1:3000`, `3100`(미리보기 포트), `/sessions/…` 같은 상대 경로를 넣을 수 있습니다.
+- 이 PC 주소만 앱 안에서 열리고, 외부 주소(예: PR 링크)는 기본 브라우저로 넘어갑니다.
+- 앱을 닫으면 **앱이 켠 서버만** 끕니다. 사람이 따로 켠 서버는 그대로 둡니다.
+- 서명을 하지 않으므로 처음 한 번은 Finder에서 우클릭 → 열기로 열어야 합니다.
+- 개발 중에는 서버를 끄고 `pnpm desktop:dev`로 앱만 띄워 볼 수 있습니다.
+
 ### CLI로 에이전트 실행
 
 ```bash
@@ -127,6 +142,7 @@ flowchart LR
 b-studio/
 ├── apps/
 │   ├── cli/                  # studio up · agent · deploy · auth
+│   ├── desktop/              # 웹 스튜디오를 감싸는 얇은 Electron 껍데기 (macOS)
 │   └── studio/               # Next.js 웹 스튜디오
 ├── packages/
 │   ├── spec/                 # studio.yaml 스키마와 로더
@@ -148,6 +164,8 @@ b-studio/
 | `pnpm studio deploy <path> --status` | 현재 배포와 릴리스 상태 확인 |
 | `pnpm studio deploy <path> --rollback <id>` | 이전 릴리스로 롤백 |
 | `pnpm studio auth token <name>` | 웹 스튜디오 token 모드용 토큰 생성 |
+| `pnpm desktop:install` | 데스크톱 앱을 빌드해 `~/Applications/b-studio.app`에 설치 (macOS) |
+| `pnpm desktop:dev` | 데스크톱 앱을 개발 모드로 실행(서버는 따로 켜 둠) |
 | `pnpm test` | 단위 테스트 실행 |
 | `pnpm typecheck` | 전체 워크스페이스 타입 검사 |
 

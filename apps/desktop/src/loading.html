@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'unsafe-inline'; img-src data:" />
+    <title>b-studio</title>
+    <style>
+      :root {
+        --ground: #fbfdfc;
+        --panel: #ffffff;
+        --ink: #102a2b;
+        --muted: #55706b;
+        --line: rgb(16 42 43 / 0.13);
+        --wait: #9a6310;
+        --fail: #b4233a;
+        --pass: #1a7a51;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ground: #101c1b;
+          --panel: #16262a;
+          --ink: #e3eeeb;
+          --muted: #93aaa5;
+          --line: rgb(227 238 235 / 0.12);
+          --wait: #e3ab4d;
+          --fail: #f26b7f;
+          --pass: #4cc38a;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--ground);
+        color: var(--ink);
+        font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      main { width: min(46rem, 88vw); }
+      h1 { margin: 0 0 4px; font-size: 20px; }
+      .note { margin: 0 0 18px; color: var(--muted); }
+      .state { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--wait); }
+      .state[data-tone="fail"] { color: var(--fail); }
+      .state[data-tone="ready"] { color: var(--pass); }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      .state[data-tone="wait"] .dot { animation: pulse 1.2s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: 0.25; } }
+      pre {
+        margin: 14px 0 0;
+        padding: 12px 14px;
+        max-height: 16rem;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        color: var(--muted);
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .actions { margin-top: 16px; display: flex; gap: 8px; }
+      button {
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover { border-color: var(--muted); }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>b-studio</h1>
+      <p class="note">스튜디오 서버를 켜면 이 창에 화면이 뜹니다. 처음이거나 업데이트 뒤라면 Docker(또는 Colima)를 켜는 데 몇 분 걸릴 수 있습니다.</p>
+      <p class="state" id="state" data-tone="wait"><span class="dot"></span><span id="state-text">서버를 켜는 중…</span></p>
+      <pre id="log" hidden></pre>
+      <div class="actions">
+        <button id="logs" type="button">로그 폴더 열기</button>
+      </div>
+    </main>
+    <script src="./loading.js"></script>
+  </body>
+</html>
