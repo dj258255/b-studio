@@ -9,3 +9,4 @@
 | 2026-09-29 | [E3 그냥 Claude Code·도구 결과 예산·승격](2026-09-29-e3-baseline-budget-escalation.md) | H7·H11 확인, H8 반증(P0도 9/9), H5 판정 불가(승격 0회) | [#90](https://github.com/dj258255/b-studio/issues/90) |
 | 2026-09-29 | [E4 수리·승격·모델이 쓴 계약](2026-09-29-e4-repair-escalation-model-contracts.md) | H9 확인, H10 수리 시작 확인(성공 증가는 p = 0.294), H5' 승격 발생하나 1/9 | [#138](https://github.com/dj258255/b-studio/issues/138) |
 | 2026-09-29 | [E5 가볍게 확인은 토큰을 줄이는가](2026-09-29-e5-light-verify.md) | H13 기각(토큰 +19%, p = 0.203), H14 확인(9/9 대 9/9), 시간 −15% | [#181](https://github.com/dj258255/b-studio/issues/181) |
+| 2026-09-30 | [E6 토큰은 어디서 나오는가(P0·S0 호출별 분해)](2026-09-30-e6-token-breakdown.md) | 측정. S0 고정 문맥은 P0의 1/6, 추가 문맥의 78%가 도구 결과 재읽기(`run_in_service` 32.7%) | [#187](https://github.com/dj258255/b-studio/issues/187) |

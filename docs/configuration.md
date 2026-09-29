@@ -261,9 +261,9 @@ workflow:
 
 - **프롬프트**: `run_in_service`는 필요한 명령만 돌리고 전체 빌드·테스트를 확인용으로 돌리지 말라고, `restart_service`·`http_request`는 무엇을 쓸지 정하려고 동작을 볼 때만 쓰고 끝난 변경을 확인하는 데 쓰지 말라고 안내합니다. 턴을 끝내면 게이트가 재시작·준비·계약과 워크플로의 확인을 돌려 실패를 돌려준다는 설명은 같습니다.
 - **명령 출력**: 성공한(종료 코드 0) `run_in_service` 출력은 800자(`LEAN_SUCCESS_OUTPUT_BUDGET`)만 돌려줍니다. 실패한 명령은 원인을 봐야 하므로 기본 예산(6,000자) 그대로입니다.
-- **왜**: E6(`docs/experiments/`)에서 b-studio의 모델 호출은 그냥 Claude Code의 3.4배였고, 문맥 합의 61%가 도구 결과를 다시 읽은 양, 그중 `run_in_service`가 32.7%였습니다. 고정 문맥(시스템 프롬프트·도구 설명)은 오히려 b-studio가 작았습니다.
+- **왜**: E6([보고서](experiments/2026-09-30-e6-token-breakdown.md))에서 b-studio의 모델 호출은 그냥 Claude Code의 3.4배였고, 문맥 합의 61%가 도구 결과를 다시 읽은 양, 그중 `run_in_service`가 32.7%였습니다. 고정 문맥(시스템 프롬프트·도구 설명)은 오히려 b-studio가 작았습니다.
 - **쓰이는 곳**: 모든 러너(API 루프, Claude Code, Codex, Command Code, OpenCode)와 모든 세션(일반·레인·통합·Fleet). 벤치는 `--self-check lean`으로 켭니다.
-- **한계**: 효과는 E7로 잽니다. 에이전트가 스스로 확인하지 않으면 게이트 실패와 재시도가 늘 수 있습니다.
+- **한계**: 효과는 E7([#193](https://github.com/dj258255/b-studio/issues/193))로 잽니다. 에이전트가 스스로 확인하지 않으면 게이트 실패와 재시도가 늘 수 있습니다.
 
 ### 바뀐 페이지 자동 확인 (`autoPageChecks`)
 
