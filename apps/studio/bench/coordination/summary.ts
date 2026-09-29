@@ -25,6 +25,8 @@ export interface BenchIntegrationRow {
   bootMs?: number;
   run?: TaskPlanRunMetricsView;
   error?: string;
+  /** S4: 통합 게이트가 실패해 모델 수리를 요청했는지와 그 결과. 요청하지 않았으면 없다 */
+  repair?: { attempted: boolean; status: string };
 }
 
 /** 한 실행의 승격 결과. 승격을 설정하지 않은 실행은 to가 없다 */
@@ -147,6 +149,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '게시·읽기 바이트 중앙값',
     '비운 도구 결과 중앙값',
     '승격 건수',
+    '수리(시도/성공)',
     'API 환산 비용($)',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
@@ -191,6 +194,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         count(medianValue(group, (row) => withLaneSessions(row, row.contextCleared.count))),
         '|',
         String(group.filter((row) => row.escalation.escalated).length),
+        '|',
+        repairCell(group),
         '|',
         costCell(group),
         '|',
@@ -291,4 +296,11 @@ function bytes(value: number | undefined): string {
   if (value === undefined) return '—';
   if (value >= 1_024 ** 2) return `${(value / 1_024 ** 2).toFixed(1)}MiB`;
   return `${Math.round(value / 1_024)}KiB`;
+}
+
+/** S4 수리 칸: 수리를 요청한 실행 수 / 그중 수리 실행이 done으로 끝난 수. 수리가 없는 전략은 0/0 */
+function repairCell(group: readonly BenchRow[]): string {
+  const attempted = group.filter((row) => row.integration?.repair?.attempted);
+  const repaired = attempted.filter((row) => row.integration?.repair?.status === 'done');
+  return `${attempted.length}/${repaired.length}`;
 }

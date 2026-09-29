@@ -112,6 +112,22 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(outcome.kind === 'retry' && outcome.feedback).toContain("응답 본문에 '주문 목록'가 없습니다");
   });
 
+  it('expectAllText는 모두 있어야 통과하고, 빠진 문구만 알린다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'http', expectStatus: 200, expectAllText: ['김민수', '이영희', '박철수'], allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+
+    const passing = await setup(target, { page: async () => ({ status: 200, text: '<td>김민수</td><td>이영희</td><td>박철수</td>' }) });
+    await passing.workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    expect(await passing.gate.check()).toEqual({ kind: 'pass' });
+
+    // E4 첫 묶음의 실패: 한 사람만 보이고 나머지가 없다. 값 하나만 보는 확인은 이것을 통과시켰다
+    const failing = await setup(target, { page: async () => ({ status: 200, text: '<td>김민수</td><td>박도윤</td>' }) });
+    await failing.workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    const outcome = await failing.gate.check();
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain("화면에 '이영희', '박철수'가 없습니다");
+  });
+
   it('expectAnyText는 하나라도 있으면 통과하고, 어느 것도 없으면 문구를 알린다', async () => {
     const target = withWorkflow({
       pageChecks: [{ service: 'api', path: '/dashboard', mode: 'http', expectStatus: 200, expectAnyText: ['45000', '45,000'], allowConsoleErrors: false, noHorizontalScroll: false }],

@@ -219,14 +219,17 @@ export function missingCoordinationTools(strategy: Strategy, allowedTools: reado
  * **인수 검사(`runAcceptance`)의 기대값과 같다.** 그래서 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면
  * (게이트가 실패하면) S4 수리가 시작되는가"를 재는 것이다 — H10을 그렇게 판정한다.
  *
+ * 인수 검사가 여러 값을 모두 요구하면 확인도 모두 요구한다(expectAllText). E4 첫 묶음에서 첫 값 하나만 보는 확인이
+ * '김민수'는 있고 '이영희'·'박철수'가 없는 화면을 통과시켰다 — 확인이 인수 검사보다 약하면 수리할 계기를 놓친다.
+ *
  * mode는 http로 둔다(web 요청이 "서버에서 요청할 때마다 새로" 받으라고 한다). 독립 과제는 api↔web을 엮지 않으므로 확인을 두지 않는다.
  */
 export function integrationChecksFor(task: BenchTask): { pageChecks: WorkflowPageCheck[] } | undefined {
   switch (task.id) {
     case 'orders-list':
-      return { pageChecks: [sampleValuePageCheck('/orders', { expectText: '김민수' })] };
+      return { pageChecks: [sampleValuePageCheck('/orders', { expectAllText: ['김민수', '이영희', '박철수'] })] };
     case 'order-detail':
-      return { pageChecks: [sampleValuePageCheck('/orders/1', { expectText: '문 앞에 놓아 주세요' })] };
+      return { pageChecks: [sampleValuePageCheck('/orders/1', { expectAllText: ['김민수', '문 앞에 놓아 주세요'] })] };
     case 'order-summary':
       return { pageChecks: [sampleValuePageCheck('/dashboard', { expectAnyText: ['45000', '45,000'] })] };
     default:
@@ -235,6 +238,6 @@ export function integrationChecksFor(task: BenchTask): { pageChecks: WorkflowPag
 }
 
 /** web 페이지(service: web)에 과제의 샘플 값이 그려지는지 보는 http 확인 하나 */
-function sampleValuePageCheck(path: string, expect: Pick<WorkflowPageCheck, 'expectText' | 'expectAnyText'>): WorkflowPageCheck {
+function sampleValuePageCheck(path: string, expect: Pick<WorkflowPageCheck, 'expectAllText' | 'expectAnyText'>): WorkflowPageCheck {
   return { service: 'web', path, mode: 'http', expectStatus: 200, ...expect, allowConsoleErrors: false, noHorizontalScroll: false };
 }
