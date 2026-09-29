@@ -57,6 +57,40 @@ pnpm studio:local
 
 브라우저에서 `http://127.0.0.1:3000`을 열고 `examples/orders` 프로젝트로 세션을 만듭니다. `claude-code` 모드는 로그인된 개인 PC에서만 사용하세요. 여러 사용자가 접속하는 서버에서는 API 모드와 웹 인증을 구성해야 합니다.
 
+### 한 번에 켜기 (`launch`)
+
+위 두 명령 대신 한 명령으로 켜고 끌 수 있습니다. Docker가 꺼져 있으면 colima를 켜고, 준비되면 브라우저를 엽니다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 엽니다.
+
+```bash
+pnpm studio launch              # 이 PC의 Claude Code로 (기본)
+pnpm studio launch --mode demo  # 모델 없이 화면·흐름만
+pnpm studio launch --mode codex --port 3100
+pnpm studio stop
+```
+
+- `--mode`: `local`(기본, `B_STUDIO_MODE=claude-code`) · `demo` · `commandcode` · `codex`
+- `--port`: 기본 3000 · `--no-open`: 브라우저를 열지 않고 주소만 출력
+- `--json`: 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 출력(진행 안내는 stderr). 데스크톱 앱이 이 출력으로 창을 엽니다
+- 로그: `~/.cache/b-studio/launch/studio.log`, PID: `~/.cache/b-studio/launch/studio.pid`
+
+준비 로그는 위 파일에 남고, 준비되지 않으면 끝 20줄을 보여 주고 종료 코드 1로 끝납니다. `stop`은 PID 파일의 프로세스 그룹에 SIGTERM을 보내고 파일을 지웁니다(로그는 남습니다).
+
+프로그램이 열 주소와 PID를 알아야 하면 `--json`을 씁니다.
+
+```bash
+pnpm studio launch --json
+# {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
+pnpm studio stop --json
+# {"stopped":true}
+```
+
+`started`는 `launch`가 이번에 새로 띄웠으면 `true`, 이미 떠 있어 브라우저만 열었으면 `false`입니다. 준비에 실패하면 JSON을 쓰지 않고 종료 코드 1로 끝납니다.
+
+문제가 생기면:
+
+- **포트를 이미 쓰는 중**: `launch`가 "다른 프로그램이 응답합니다"라고 하면 `--port 3100`처럼 다른 포트를 씁니다.
+- **Docker가 꺼져 있음**: colima가 설치돼 있으면 `launch`가 자동으로 켭니다. 없으면 Docker Desktop을 켜세요.
+
 ### 진행 중 지시
 
 에이전트가 작업하는 동안에도 대화 입력창은 열려 있고, 보내기 버튼이 "진행 중 지시"로 바뀝니다. 실행 중에 보낸 말은 **다음 모델 호출 직전**에 대화에 들어가고, 지금 하던 도구 호출(테스트 실행처럼 몇 분 걸리는 것)을 중간에 끊지는 않습니다. 그래서 긴 도구 호출이 끝난 뒤에 반영될 수 있습니다. 대화에는 "지시(대기)" → "지시(반영됨)" 상태로 남고, 실행이 끝날 때까지 반영되지 못한 지시는 "지시(적용되지 못함)"으로 표시됩니다.
