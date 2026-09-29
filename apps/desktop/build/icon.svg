@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  데스크톱 앱·스튜디오 favicon의 아이콘 원본(1024×1024). 외부 이미지·폰트 없이 도형만 쓴다.
+
+  배경은 스튜디오 ink 색(apps/studio/app/globals.css의 :root ink), 도형은 panel 색을 쓴다.
+  macOS 아이콘처럼 가장자리를 남기고(96px) 둥글게 깎아, 창 제목 표시줄이 아니라 Dock에서 자연스럽게 보이게 한다.
+  가운데 도형은 글자꼴 없이 선으로 그린 "b"(세로 기둥 + 고리) — 16px에서도 형태가 남는다.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>b-studio</title>
+  <rect x="96" y="96" width="832" height="832" rx="188" fill="#102a2b" />
+  <g fill="none" stroke="#fbfdfc" stroke-width="120" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M326 772V252" />
+    <circle cx="546" cy="548" r="158" />
+  </g>
+</svg>

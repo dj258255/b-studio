@@ -90,6 +90,7 @@ pnpm desktop:install   # 빌드 + ~/Applications/b-studio.app 설치 + 설정 �
 - 앱을 닫으면 **앱이 켠 서버만** 끕니다. 사람이 따로 켠 서버는 그대로 둡니다.
 - 서명을 하지 않으므로 처음 한 번은 Finder에서 우클릭 → 열기로 열어야 합니다.
 - 개발 중에는 서버를 끄고 `pnpm desktop:dev`로 앱만 띄워 볼 수 있습니다.
+- Dock·Finder 아이콘은 `apps/desktop/build/icon.svg` 하나에서 나옵니다. 모양을 고쳤으면 `pnpm desktop:icon`으로 macOS 아이콘(`.icns`)과 창 아이콘, 스튜디오 favicon을 함께 다시 굽습니다(macOS 도구만 씁니다).
 
 ### CLI로 에이전트 실행
 
@@ -166,6 +167,7 @@ b-studio/
 | `pnpm studio auth token <name>` | 웹 스튜디오 token 모드용 토큰 생성 |
 | `pnpm desktop:install` | 데스크톱 앱을 빌드해 `~/Applications/b-studio.app`에 설치 (macOS) |
 | `pnpm desktop:dev` | 데스크톱 앱을 개발 모드로 실행(서버는 따로 켜 둠) |
+| `pnpm desktop:icon` | 원본 SVG에서 데스크톱 아이콘(`.icns`·창 아이콘)과 스튜디오 favicon을 다시 굽기 (macOS) |
 | `pnpm test` | 단위 테스트 실행 |
 | `pnpm typecheck` | 전체 워크스페이스 타입 검사 |
 
