@@ -30,7 +30,7 @@ export {
   type CodexThread,
 } from './codex-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
-export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
+export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
 export {
   BrowserUnavailableError,
   launchBrowser,
