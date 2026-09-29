@@ -75,6 +75,10 @@ export interface EscalationChoice {
   to?: string;
   /** --escalate-after. 기본 2 */
   after: number;
+  /** --escalate-after-failures. 없으면 서명 규칙만 쓴다(실패 N번 규칙 없음) */
+  afterFailures?: number;
+  /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수(기본 2) */
+  retryBudget: number;
 }
 
 /**
@@ -82,15 +86,30 @@ export interface EscalationChoice {
  * 레인마다 백엔드를 고를 수 있으므로(레인 백엔드) 레인 중 하나라도 claude-code면 허용한다.
  * 모델 경로를 조용히 고르지 않는 원칙과 같게, claude-code가 하나도 없는데 주면 시작 전에 오류를 낸다.
  */
-export function resolveEscalation(input: { backend: Backend; laneBackends?: Iterable<Backend>; escalateTo?: string; escalateAfter?: number }): EscalationChoice {
-  const after = input.escalateAfter ?? 2;
-  if (!Number.isInteger(after) || after < 1) throw new Error(`--escalate-after는 1 이상의 정수여야 합니다 (지금 값: ${input.escalateAfter})`);
-  // --escalate-after만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
+export function resolveEscalation(input: {
+  backend: Backend;
+  laneBackends?: Iterable<Backend>;
+  escalateTo?: string;
+  escalateAfter?: number;
+  escalateAfterFailures?: number;
+  escalateRetryBudget?: number;
+}): EscalationChoice {
+  const after = integer(input.escalateAfter, '--escalate-after', 1) ?? 2;
+  const afterFailures = integer(input.escalateAfterFailures, '--escalate-after-failures', 1);
+  // 0이면 새 예산을 주지 않는다(승격해도 남은 횟수만 쓴다 — 승격 규칙을 넣기 전과 같은 동작)
+  const retryBudget = integer(input.escalateRetryBudget, '--escalate-retry-budget', 0) ?? 2;
+  // --escalate-*만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
   const to = input.escalateTo?.trim();
-  if (!to) return { after };
+  if (!to) return { after, retryBudget, ...(afterFailures === undefined ? {} : { afterFailures }) };
   const backends = new Set<Backend>([input.backend, ...(input.laneBackends ?? [])]);
   if (!backends.has('claude-code')) throw new Error(`--escalate-to는 claude-code 백엔드에서만 쓸 수 있습니다 (지금 백엔드: ${[...backends].join(', ')})`);
-  return { to, after };
+  return { to, after, retryBudget, ...(afterFailures === undefined ? {} : { afterFailures }) };
+}
+
+function integer(value: number | undefined, flag: string, min: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || value < min) throw new Error(`${flag}는 ${min} 이상의 정수여야 합니다 (지금 값: ${value})`);
+  return value;
 }
 
 /** 벤치 레인 그룹(레인의 첫 쓰기 경로). planFor가 만드는 레인은 api·web 둘이다 */

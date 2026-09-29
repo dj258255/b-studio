@@ -99,13 +99,30 @@ describe('resolveRateLimitPolicy', () => {
 
 describe('resolveEscalation', () => {
   it('--escalate-to를 주지 않으면 기본 임계치만 두고 승격하지 않는다', () => {
-    expect(resolveEscalation({ backend: 'claude-code' })).toEqual({ after: 2 });
-    expect(resolveEscalation({ backend: 'claude-code', escalateAfter: 3 })).toEqual({ after: 3 });
+    expect(resolveEscalation({ backend: 'claude-code' })).toEqual({ after: 2, retryBudget: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateAfter: 3 })).toEqual({ after: 3, retryBudget: 2 });
+    // 대상 없이 규칙만 주면 기억만 한다(승격 없음)
+    expect(resolveEscalation({ backend: 'claude-code', escalateAfterFailures: 3, escalateRetryBudget: 4 })).toEqual({
+      after: 2,
+      afterFailures: 3,
+      retryBudget: 4,
+    });
   });
 
   it('claude-code 백엔드에서만 --escalate-to를 받는다', () => {
-    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
-    expect(resolveEscalation({ backend: 'claude-code', escalateTo: ' sonnet ', escalateAfter: 4 })).toEqual({ to: 'sonnet', after: 4 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2, retryBudget: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: ' sonnet ', escalateAfter: 4 })).toEqual({ to: 'sonnet', after: 4, retryBudget: 2 });
+  });
+
+  it('실패 N번 규칙과 승격 뒤 재시도 예산을 함께 넘긴다', () => {
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfterFailures: 3, escalateRetryBudget: 4 })).toEqual({
+      to: 'sonnet',
+      after: 2,
+      afterFailures: 3,
+      retryBudget: 4,
+    });
+    // 예산 0은 "새 예산 없음"이다(승격해도 남은 횟수만 쓴다)
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateRetryBudget: 0 })).toEqual({ to: 'sonnet', after: 2, retryBudget: 0 });
   });
 
   it('승격을 지원하지 않는 백엔드에 --escalate-to를 주면 시작 전에 오류를 낸다', () => {
@@ -116,9 +133,11 @@ describe('resolveEscalation', () => {
     expect(() => resolveEscalation({ backend: 'opencode', escalateTo: 'opencode/mimo-v2.6-flash-free' })).toThrow(/--escalate-to는 claude-code/);
   });
 
-  it('--escalate-after는 1 이상의 정수여야 한다', () => {
+  it('승격 인자는 1 이상의 정수여야 한다(재시도 예산은 0도 받는다)', () => {
     expect(() => resolveEscalation({ backend: 'claude-code', escalateAfter: 0 })).toThrow(/--escalate-after는 1 이상의 정수/);
     expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfter: 1.5 })).toThrow(/--escalate-after는 1 이상의 정수/);
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfterFailures: 0 })).toThrow(/--escalate-after-failures는 1 이상의 정수/);
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateRetryBudget: -1 })).toThrow(/--escalate-retry-budget는 0 이상의 정수/);
   });
 });
 
@@ -193,7 +212,7 @@ describe('레인 백엔드(--lane-backend)', () => {
   });
 
   it('claude-code 레인이 하나라도 있으면 --escalate-to를 허용한다', () => {
-    expect(resolveEscalation({ backend: 'openai', laneBackends: ['claude-code'], escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
+    expect(resolveEscalation({ backend: 'openai', laneBackends: ['claude-code'], escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2, retryBudget: 2 });
     expect(() => resolveEscalation({ backend: 'openai', laneBackends: ['codex'], escalateTo: 'sonnet' })).toThrow(/claude-code/);
   });
 });

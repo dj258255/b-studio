@@ -138,6 +138,8 @@ export class VerificationGate {
   verified = false;
   readonly #options: GateOptions;
   readonly #baselines: ReadonlyMap<string, OpenApiDocument>;
+  /** 게이트 재시도 상한. 기본은 생성 시 받은 값이고, 승격이 새 예산을 주면 커진다 */
+  #maxAttempts: number;
   #verifiedVersion = 0;
   #failedServices = new Set<string>();
   /** 화면 확인 이름 → 단계 결과. 실패해 예외로 끝나도 실패 단계의 스크린샷을 남기려고 따로 모은다 */
@@ -154,6 +156,7 @@ export class VerificationGate {
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
     this.#baselines = baselines;
+    this.#maxAttempts = options.maxVerifyAttempts;
   }
 
   /** 계약 비교 기준은 모델이 파일을 바꾸기 전에 잡아야 한다 */
@@ -161,8 +164,19 @@ export class VerificationGate {
     return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
   }
 
+  /**
+   * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
+   * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
+   * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
+   */
+  grantRetryBudget(budget: number): boolean {
+    const next = this.attempts + (Number.isFinite(budget) && budget > 0 ? Math.floor(budget) : 0);
+    if (next > this.#maxAttempts) this.#maxAttempts = next;
+    return this.attempts < this.#maxAttempts;
+  }
+
   async check(): Promise<GateOutcome> {
-    const { project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, signal, onServiceStatus, onEvent } = this.#options;
+    const { project, sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
     if (workspace.changedFiles().length === 0) return { kind: 'pass' };
 
     const files = this.#filesToVerify();
@@ -225,7 +239,7 @@ export class VerificationGate {
     }
 
     this.attempts += 1;
-    if (this.attempts >= maxVerifyAttempts) {
+    if (this.attempts >= this.#maxAttempts) {
       return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다` };
     }
     return {

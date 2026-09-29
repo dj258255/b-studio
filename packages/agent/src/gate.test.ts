@@ -313,6 +313,39 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(gate.verified).toBe(false);
   });
 
+  it('승격이 준 재시도 예산만큼 게이트를 더 돌리고, 다 쓰면 exhausted가 된다', async () => {
+    const target = withWorkflow({});
+    // 재시작이 계속 실패해 게이트가 매번 실패한다(기본 상한 3)
+    const { gate, workspace } = await setup(target, { restarts: Array.from({ length: 10 }, () => false) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toMatchObject({ kind: 'retry' });
+    expect(await gate.check()).toMatchObject({ kind: 'retry' });
+    expect(await gate.check()).toMatchObject({ kind: 'exhausted' });
+    expect(gate.attempts).toBe(3);
+
+    // 승격이 예산 2를 주면 "지금까지 3 + 2"까지 다시 시도할 수 있다(남은 횟수에 더하는 게 아니다)
+    expect(gate.grantRetryBudget(2)).toBe(true);
+    expect(await gate.check()).toMatchObject({ kind: 'retry' });
+    expect(await gate.check()).toMatchObject({ kind: 'exhausted' });
+    expect(gate.attempts).toBe(5);
+  });
+
+  it('예산이 0이거나 이미 남아 있으면 상한을 늘리지 않는다', async () => {
+    const target = withWorkflow({});
+    const { gate, workspace } = await setup(target, { restarts: Array.from({ length: 10 }, () => false) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toMatchObject({ kind: 'retry' });
+    // 예산 0은 상한을 늘리지 않는다. 다만 아직 남은 횟수가 있으면 다음 시도는 가능하다고 알린다
+    expect(gate.grantRetryBudget(0)).toBe(true);
+    expect(await gate.check()).toMatchObject({ kind: 'retry' });
+    expect(await gate.check()).toMatchObject({ kind: 'exhausted' });
+    // 상한을 다 쓴 뒤 예산 0이면 다음 시도가 불가능하다
+    expect(gate.grantRetryBudget(0)).toBe(false);
+    expect(await gate.check()).toMatchObject({ kind: 'exhausted' });
+  });
+
   it('화면 확인 단계 스크린샷을 저장해 steps[].artifact로 남기고 프레임을 전달한다', async () => {
     const target = withWorkflow({
       pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, expectText: '주문 목록', viewport: { width: 390, height: 844 }, allowConsoleErrors: false, noHorizontalScroll: false }],
