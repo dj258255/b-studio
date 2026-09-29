@@ -410,7 +410,7 @@ export function describeAccount(account: ClaudeCodeAccount): string {
   return '로그인 계정';
 }
 
-function describeResultFailure(message: SDKResultMessage): string | undefined {
+export function describeResultFailure(message: SDKResultMessage): string | undefined {
   switch (message.subtype) {
     case 'success':
       if (message.is_error) return `모델 호출이 실패했습니다: ${message.result}`;
@@ -425,6 +425,12 @@ function describeResultFailure(message: SDKResultMessage): string | undefined {
   }
 }
 
+type AssistantTokenUsage = {
+  input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+};
+
 /** modelUsage는 query 전체의 누적값이므로 더하지 않고 최신 값으로 바꾼다 */
 function setUsage(usage: AgentUsage, message: SDKResultMessage): void {
   const models = Object.values(message.modelUsage ?? {});
@@ -432,6 +438,56 @@ function setUsage(usage: AgentUsage, message: SDKResultMessage): void {
   usage.outputTokens = models.reduce((sum, model) => sum + model.outputTokens, 0);
   usage.cacheReadTokens = models.reduce((sum, model) => sum + model.cacheReadInputTokens, 0);
   usage.cacheWriteTokens = models.reduce((sum, model) => sum + model.cacheCreationInputTokens, 0);
+}
+
+/**
+ * Claude Code 메시지 스트림에서 실행 지표를 모으는 규칙. 로컬 러너와 기준선(P0, plain-baseline)이 같은 계산을 쓴다.
+ * - 서로 다른 assistant 메시지 id가 곧 모델 호출 수다(같은 id가 여러 번 와도 한 번으로 센다)
+ * - 한 호출의 입력 크기(input+cache_read+cache_creation)의 최댓값을 남긴다
+ * - result의 modelUsage는 query 전체 누적값이라 더하지 않고 최신 값으로 바꾼다
+ */
+export class ClaudeCodeUsageTracker {
+  readonly #messageIds = new Set<string>();
+  readonly #usage: AgentUsage = emptyUsage();
+  #maxContextTokens = 0;
+
+  /** assistant 메시지 하나를 반영한다. 처음 보는 메시지 id면 true(모델 호출 1회) */
+  observeAssistant(message: { id: string; usage?: AssistantTokenUsage | null }): boolean {
+    const usage = message.usage;
+    if (usage) {
+      this.#maxContextTokens = Math.max(
+        this.#maxContextTokens,
+        (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0),
+      );
+    }
+    if (this.#messageIds.has(message.id)) return false;
+    this.#messageIds.add(message.id);
+    return true;
+  }
+
+  /** result의 modelUsage를 반영한다(누적값이므로 최신 값으로 바꾼다) */
+  observeResult(message: SDKResultMessage): void {
+    const models = Object.values(message.modelUsage ?? {});
+    this.#usage.inputTokens = models.reduce((sum, model) => sum + model.inputTokens, 0);
+    this.#usage.outputTokens = models.reduce((sum, model) => sum + model.outputTokens, 0);
+    this.#usage.cacheReadTokens = models.reduce((sum, model) => sum + model.cacheReadInputTokens, 0);
+    this.#usage.cacheWriteTokens = models.reduce((sum, model) => sum + model.cacheCreationInputTokens, 0);
+  }
+
+  /** 서로 다른 assistant 메시지 수 = 모델 호출 수 */
+  get modelCalls(): number {
+    return this.#messageIds.size;
+  }
+
+  /** 호출 한 번의 최대 입력 크기 */
+  get maxContextTokens(): number {
+    return this.#maxContextTokens;
+  }
+
+  /** 지금까지 합산한 토큰. 바꾸지 말고 복사해서 쓴다 */
+  get usage(): AgentUsage {
+    return this.#usage;
+  }
 }
 
 type JsonProperty = { type?: string; enum?: unknown[]; items?: { type?: string }; description?: string };

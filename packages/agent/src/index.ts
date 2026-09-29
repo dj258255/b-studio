@@ -13,7 +13,9 @@ export {
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export {
+  ClaudeCodeUsageTracker,
   describeAccount,
+  describeResultFailure,
   preflightClaudeCode,
   runClaudeCodeAgent,
   type ClaudeCodeAccount,

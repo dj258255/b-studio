@@ -92,10 +92,10 @@ describe('summarize', () => {
 
     // orders-list S0: 2회 중 1회 성공, 값이 있는 실행만으로 중앙값을 낸다. 기동 수신은 0KiB
     // 비운 도구 결과는 [2, 0]의 중앙값 1이다
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 0KiB | 3 | 2 | 1 | — | 1 |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 110 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 0KiB | 3 | 2 | 1 | — | 1 |');
     // 나머지 행은 레인 세션이 없어 탐색·실패 열이 —다
-    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | 0KiB | — | — | — | — | — |');
-    expect(markdown).toContain('| independent | X | S0 | 1/1 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | 0KiB | — | — | — | — | — |');
+    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 220 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | 0KiB | — | — | — | — | — |');
+    expect(markdown).toContain('| independent | X | S0 | 1/1 | 55 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | 0KiB | — | — | — | — | — |');
   });
 
   it('탐색·실패 열을 표 1에 더한다', () => {
@@ -141,7 +141,7 @@ describe('summarize', () => {
       ],
       meta,
     );
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | — | 10 | 4 | 0 | — | 0 |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | — | — | 10 | 4 | 0 | — | 0 |');
   });
 
   it('값이 하나도 없으면 —로 둔다', () => {
@@ -208,5 +208,29 @@ describe('summarize', () => {
     );
     expect(markdown).toContain('| S3 | 1/1 |');
     expect(markdown).toContain('| 4,096 |');
+  });
+
+  it('성공 1건당 토큰은 (입력+캐시+출력) 합을 성공 수로 나누고, 성공이 없으면 —다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'P0', success: true, metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 5 } }) }),
+        row({
+          taskId: 'orders-list',
+          strategy: 'P0',
+          success: false,
+          category: 'acceptance',
+          metrics: metrics({ usage: { inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
+        }),
+      ],
+      meta,
+    );
+    // (100+20+5+10) + (50+0+0+5) = 190 / 성공 1건 = 190
+    expect(markdown).toContain('| orders-list | O | P0 | 1/2 | 190 |');
+
+    const none = summarize(
+      [row({ taskId: 'order-detail', strategy: 'P0', success: false, category: 'acceptance', metrics: metrics({ usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }) })],
+      meta,
+    );
+    expect(none).toContain('| order-detail | O | P0 | 0/1 | — |');
   });
 });

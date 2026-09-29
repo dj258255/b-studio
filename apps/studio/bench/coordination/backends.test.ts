@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy } from './backends';
+import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy } from './backends';
 
 describe('resolveBackend', () => {
   it('--dry는 --backend·--model과 함께 쓸 수 없고 항상 openai다', () => {
@@ -66,5 +66,15 @@ describe('resolveRateLimitPolicy', () => {
   it('모르는 값과 0 이하의 분은 거부한다', () => {
     expect(() => resolveRateLimitPolicy('continue', undefined)).toThrow(/stop 또는 wait/);
     expect(() => resolveRateLimitPolicy('wait', 0)).toThrow(/0보다 큰/);
+  });
+});
+
+describe('assertPlainBaselineBackend', () => {
+  it('P0는 claude-code에서만 쓸 수 있고, 다른 백엔드는 시작 전에 거부한다', () => {
+    expect(() => assertPlainBaselineBackend('claude-code', ['P0', 'S0'])).not.toThrow();
+    expect(() => assertPlainBaselineBackend('openai', ['P0'])).toThrow(/claude-code에서만/);
+    expect(() => assertPlainBaselineBackend('codex', ['S0', 'P0'])).toThrow(/claude-code에서만/);
+    // P0가 없으면 백엔드를 가리지 않는다
+    expect(() => assertPlainBaselineBackend('codex', ['S0', 'S1'])).not.toThrow();
   });
 });

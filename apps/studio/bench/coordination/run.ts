@@ -20,17 +20,19 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
-import { planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy, type Backend } from './backends';
+import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy, type Backend } from './backends';
 import { classify } from './classify';
 import { startDryProvider } from './dry-provider';
+import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, missingCoordinationTools, planFor, type BenchTask, type Strategy } from './tasks';
+import { BENCH_TASKS, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
 import type { Topology } from '@b-studio/agent';
-import type { StudioEvent } from '../../lib/studio-events';
+import type { SessionSnapshot, StudioEvent } from '../../lib/studio-events';
+import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanView } from '../../lib/task-plan-types';
 
 type TaskPlansModule = typeof import('../../lib/server/task-plans');
@@ -41,7 +43,11 @@ const PROJECT_ID = 'bench-orders';
 const MODEL_ID = 'bench-coordination';
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
 const RUN_TIMEOUT_MS = 40 * 60_000;
+/** P0에서 세션(샌드박스)이 준비될 때까지 기다리는 시간 */
+const BOOT_TIMEOUT_MS = 20 * 60_000;
 const POLL_MS = 2_000;
+/** 생성물 폴더. 프로젝트 복사본을 만들 때 뺀다 */
+const GENERATED_FILES = /[/\\](node_modules|\.next|build|\.gradle)([/\\]|$)/;
 
 interface Args {
   dry: boolean;
@@ -118,11 +124,10 @@ function selectTasks(taskIds: string[] | undefined, dry: boolean): BenchTask[] {
 }
 
 function selectStrategies(strategies: Strategy[] | undefined, dry: boolean): Strategy[] {
-  // --dry의 가짜 제공자는 S2~S5의 조율을 모른다. 기준선 S0·S1만 돈다
+  // --dry의 가짜 제공자는 S2~S5의 조율과 P0(로컬 Claude Code)을 모른다. 기준선 S0·S1만 돈다
   const values: Strategy[] | undefined = dry ? ['S0', 'S1'] : strategies;
   if (!values || values.length === 0) return ['S0', 'S1'];
-  const all: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
-  for (const value of values) if (!all.includes(value)) throw new Error(`전략은 ${all.join(', ')} 중 하나여야 합니다: ${value}`);
+  for (const value of values) if (!STRATEGIES.includes(value)) throw new Error(`전략은 ${STRATEGIES.join(', ')} 중 하나여야 합니다: ${value}`);
   return [...new Set(values)];
 }
 
@@ -194,9 +199,16 @@ interface RunContext {
   planModelId: string;
   /** S3의 읽기 범위. 다른 전략에는 영향이 없다 */
   topology: Topology;
+  /** 벤치가 만든 프로젝트 복사본. P0는 이 폴더에서 Claude Code를 돌린다 */
+  projectDir: string;
+  /** P0 실행마다 복사본을 처음 상태로 되돌린다(반복이 서로 영향을 주지 않게) */
+  resetProject: () => Promise<void>;
 }
 
 async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
+  // P0는 작업 분해를 쓰지 않는다. 복사본에서 Claude Code를 돌린 뒤 세션만 띄워 인수 검사한다
+  if (strategy === 'P0') return runPlainOnce(context, task, order, repeat, activeSessions);
+
   const startedAt = new Date().toISOString();
   const { taskPlans, sessions, localUser } = context;
   const planJson = planFor(task, strategy, context.topology);
@@ -369,6 +381,141 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
 }
 
 /**
+ * P0 기준선 실행. 다른 전략과 달리 작업 계획을 만들지 않는다.
+ * ① 새 프로젝트 복사본 → ② `runPlainBaseline`(Claude Code가 과제 전체를 직접 고침) →
+ * ③ 그 복사본으로 세션만 만들어 샌드박스를 띄우고(에이전트 요청 없음) 서비스가 준비되면 `runAcceptance`로 인수 검사 →
+ * ④ 세션·샌드박스를 다른 전략과 같은 경로로 정리(남은 컨테이너 검사 포함).
+ * 세션을 띄우는 방법은 작업 분해를 만들기 전 경로(스튜디오 서버의 createSession)를 그대로 따른다.
+ */
+async function runPlainOnce(context: RunContext, task: BenchTask, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
+  const startedAt = new Date().toISOString();
+  const startedMs = performance.now();
+  const { sessions, localUser } = context;
+  let baseline: PlainBaselineResult | undefined;
+  let acceptance: AcceptanceResult[] | undefined;
+  let harnessError: string | undefined;
+  let bootMs: number | undefined;
+  let bootRxBytes: number | undefined;
+  let sessionId: string | undefined;
+
+  try {
+    // ① 복사본을 처음 상태로 되돌린다(반복이 서로 영향을 주지 않게). 스튜디오가 프로젝트로 알아보는 폴더다
+    await context.resetProject();
+    // ② Claude Code가 복사본을 직접 고친다. Bash가 없어 스스로 실행해 확인하지는 못한다
+    baseline = await runPlainBaseline({ projectDir: context.projectDir, task, model: context.requestedModel });
+    // ③ 작업 분해 없이 세션만 만들어 샌드박스를 띄운다(에이전트 요청은 보내지 않는다)
+    const bootStarted = performance.now();
+    const created = await sessions.createSession(PROJECT_ID, localUser);
+    sessionId = created.id;
+    activeSessions.add(sessionId);
+    const snapshot = await waitForSession(sessions, sessionId, ['ready', 'failed', 'stopped'], BOOT_TIMEOUT_MS, '샌드박스가 준비되지 않았습니다');
+    bootMs = Math.round(performance.now() - bootStarted);
+    // 기동 중 받은 바이트(#94). 다른 전략의 기동 수신 열과 같은 기준으로 비교한다
+    bootRxBytes = (snapshot.bootNetwork ?? []).reduce((sum, entry) => sum + entry.rxBytes, 0);
+    if (snapshot.status === 'ready') {
+      acceptance = await runAcceptance(task.acceptance, { api: serviceUrl(snapshot, 'api'), web: serviceUrl(snapshot, 'web') });
+    } else {
+      harnessError = snapshot.error ?? `샌드박스 상태 ${snapshot.status}`;
+    }
+  } catch (error) {
+    harnessError = describe(error);
+  }
+
+  // ④ 세션을 내리고, 못 내리면 남은 컨테이너를 다시 확인한다(다른 전략과 같은 정리 경로)
+  if (sessionId) await closeSession(sessions, sessionId, activeSessions);
+  let leftoverContainers = runningContainers(`studio-${PROJECT_ID}-`);
+  if (leftoverContainers.length > 0) {
+    for (const id of [...activeSessions]) await closeSession(sessions, id, activeSessions);
+    leftoverContainers = runningContainers(`studio-${PROJECT_ID}-`);
+  }
+
+  const plan = plainPlan(context, task, startedAt, baseline);
+  const classification = classify(plan, acceptance, harnessError);
+  const usage = baseline?.usage ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const metrics: TaskPlanMetrics = {
+    endToEndMs: Math.round(performance.now() - startedMs),
+    usage,
+    modelCalls: baseline?.modelCalls ?? 0,
+    maxContextTokens: baseline?.maxContextTokens ?? 0,
+    bootMsTotal: bootMs ?? 0,
+    bootMsMax: bootMs ?? 0,
+    bootRxBytesTotal: bootRxBytes ?? 0,
+    modelMs: 0,
+    toolMs: 0,
+    gateMs: 0,
+    sessions: sessionId ? 1 : 0,
+  };
+  const success = !harnessError && baseline?.status === 'done' && Boolean(acceptance) && acceptance!.every((result) => result.ok);
+  const estimatedCostUsd =
+    (context.priceInput * (usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens) + context.priceOutput * usage.outputTokens) / 1_000_000;
+
+  return {
+    order,
+    repeat,
+    taskId: task.id,
+    coupled: task.coupled,
+    strategy: 'P0',
+    model: context.requestedModel,
+    observedModels: [],
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    planStatus: plan.status,
+    lanes: [],
+    traces: [],
+    explore: { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 },
+    failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
+    // P0는 b-studio 러너를 쓰지 않으므로 오래된 도구 결과 비우기와 무관하다
+    contextCleared: { count: 0, chars: 0 },
+    metrics,
+    acceptance,
+    success,
+    category: classification.category,
+    detail: classification.detail,
+    leftoverContainers,
+    estimatedCostUsd,
+  };
+}
+
+/** P0의 분류용 최소 계획. TaskPlanView가 없어 classify에 넘길 모양만 만든다 */
+function plainPlan(context: RunContext, task: BenchTask, startedAt: string, baseline: PlainBaselineResult | undefined): TaskPlanView {
+  const done = baseline?.status === 'done';
+  return {
+    id: '',
+    owner: context.localUser,
+    projectId: PROJECT_ID,
+    request: task.request,
+    modelId: context.planModelId,
+    status: done ? 'done' : 'failed',
+    createdAt: startedAt,
+    // 승인 개념이 없다. 실패를 plan_rejected로 잘못 분류하지 않도록 승인 시각을 채운다
+    ...(done ? {} : { approvedAt: startedAt }),
+    ...(baseline && baseline.status !== 'done' ? { error: baseline.summary || '기준선 실행이 실패했습니다' } : {}),
+    lanes: [],
+  };
+}
+
+async function waitForSession(sessions: SessionsModule, id: string, statuses: string[], timeoutMs: number, message: string): Promise<SessionSnapshot> {
+  const started = Date.now();
+  for (;;) {
+    const snapshot = sessions.getSnapshot(id);
+    if (!snapshot) throw new Error(`세션 ${id}을(를) 찾을 수 없습니다`);
+    if (statuses.includes(snapshot.status)) return snapshot;
+    if (Date.now() - started > timeoutMs) throw new Error(`시간 초과: ${message}`);
+    await delay(POLL_MS);
+  }
+}
+
+/** 세션 하나를 내린다. 실패해도 멈추지 않고 activeSessions에 남겨 남은 컨테이너 검사에서 다시 시도한다 */
+async function closeSession(sessions: SessionsModule, id: string, activeSessions: Set<string>): Promise<void> {
+  try {
+    await sessions.stopSession(id);
+    activeSessions.delete(id);
+  } catch (error) {
+    console.warn(`세션 ${id}을 내리지 못했습니다: ${describe(error)}`);
+  }
+}
+
+/**
  * 세션 기록을 다시 보내 주는 subscribe를 등록→즉시 해제해 실제로 쓴 모델 이름을 읽는다.
  * 모델은 `{ type: 'agent', event: { type: 'session', model } }` 이벤트에 있다. 실패는 빈 배열로 둔다.
  */
@@ -449,6 +596,8 @@ async function main(): Promise<void> {
   const tasks = selectTasks(args.taskIds, dry);
   const strategies = selectStrategies(args.strategies, dry);
   const topology = parseTopology(args.topology);
+  // P0는 로컬 Claude Code 전용이다. Docker·모델을 건드리기 전에 백엔드를 확인한다
+  assertPlainBaselineBackend(backend, strategies);
 
   // 1. 사전 확인 — 다른 프로젝트 컨테이너가 있으면 여기서 멈춘다
   const dockerMemTotal = preflight(args.force);
@@ -498,12 +647,15 @@ async function main(): Promise<void> {
     // 3. 임시 루트에 프로젝트 복사와 환경 변수 준비 (e2e와 같은 방식)
     const projectsDir = path.join(workRoot, 'projects');
     const projectDir = path.join(projectsDir, PROJECT_ID);
-    await cp(path.resolve(import.meta.dirname, '../../../../examples/orders'), projectDir, {
-      recursive: true,
-      filter: (source) => !/[/\\](node_modules|\.next|build|\.gradle)([/\\]|$)/.test(source),
-    });
-    const specFile = path.join(projectDir, 'studio.yaml');
-    await writeFile(specFile, (await readFile(specFile, 'utf8')).replace(/^name: orders$/m, `name: ${PROJECT_ID}`));
+    const examplesDir = path.resolve(import.meta.dirname, '../../../../examples/orders');
+    // P0는 실행마다 이 복사본을 처음 상태로 되돌려 Claude Code가 과제를 직접 고치게 한다
+    const resetProject = async (): Promise<void> => {
+      await rm(projectDir, { recursive: true, force: true });
+      await cp(examplesDir, projectDir, { recursive: true, filter: (source) => !GENERATED_FILES.test(source) });
+      const specFile = path.join(projectDir, 'studio.yaml');
+      await writeFile(specFile, (await readFile(specFile, 'utf8')).replace(/^name: orders$/m, `name: ${PROJECT_ID}`));
+    };
+    await resetProject();
     // 조율 도구가 허용 목록에 없으면 S2·S3·S5가 S1과 같아진다. 결과를 모으기 전에 멈춘다
     const allowedTools = (await loadProject(projectDir)).spec.workflow?.allowedTools;
     const missing = strategies.flatMap((strategy) => missingCoordinationTools(strategy, allowedTools).map((name) => `${strategy}: ${name}`));
@@ -591,13 +743,15 @@ async function main(): Promise<void> {
       requestedModel,
       planModelId: planModelId(backend, requestedModel, MODEL_ID),
       topology,
+      projectDir,
+      resetProject,
     };
 
     // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
     let order = 0;
     const record = async (task: BenchTask, strategy: Strategy, repeat: number, retryOf?: number): Promise<BenchRow> => {
       order += 1;
-      console.log(`[${order}] 반복 ${repeat}/${repeats} · ${task.id} · ${strategy}${retryOf === undefined ? '' : ` (재시도 of ${retryOf})`}`);
+      console.log(`[${order}] 반복 ${repeat}/${repeats} · ${task.id} · ${strategy} (${STRATEGY_LABELS[strategy]})${retryOf === undefined ? '' : ` (재시도 of ${retryOf})`}`);
       const row = await runOnce(context, task, strategy, order, repeat, activeSessions);
       const stored: BenchRow = retryOf === undefined ? row : { ...row, retryOf };
       rows.push(stored);
