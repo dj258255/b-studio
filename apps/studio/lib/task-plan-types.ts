@@ -164,6 +164,8 @@ export interface TaskPlanView {
   metrics?: TaskPlanMetrics;
   /** 조율 전략과 topology. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다) */
   coordination?: { strategy: TaskPlanStrategy; topology: Topology };
+  /** 검증 범위. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다). light면 레인·통합 실행이 가볍게 확인한다. 없으면 full */
+  verify?: 'light';
   /** 조율 게시판 상태(메모 목록과 통계). 조율을 켠 계획에만 있다 */
   board?: TaskPlanBoardView;
   lanes: TaskPlanLaneView[];

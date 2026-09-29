@@ -29,6 +29,7 @@ import {
   type ScriptedTurn,
   type TaskLane,
   type Topology,
+  type VerifyMode,
 } from '@b-studio/agent';
 import { claudeCodeAsk } from './claude-code-ask';
 import type { Checkpoint } from '@b-studio/agent';
@@ -158,6 +159,11 @@ export async function createTaskPlan(input: {
    * presetPlan·coordination과 같은 규칙이다. 레인 게이트는 그대로 두고 통합 세션에만 더한다
    */
   integrationChecks?: { pageChecks?: WorkflowPageCheck[] };
+  /**
+   * 서버 안에서만 넘긴다(벤치마크·테스트). 'light'면 레인 실행과 통합 실행(S4 수리 포함)에 가볍게 확인을 넘긴다.
+   * HTTP 라우트는 이 필드를 넘기지 않는다(presetPlan·coordination과 같은 규칙). 없으면 full
+   */
+  verify?: VerifyMode;
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
@@ -212,6 +218,8 @@ export async function createTaskPlan(input: {
     createdAt: new Date().toISOString(),
     lanes: [],
     ...(preset === undefined ? {} : { preset: true as const }),
+    // 가볍게 확인은 레인·통합 실행에 그대로 넘긴다. 없으면(full) 지금과 한 글자도 다르지 않다
+    ...(input.verify === 'light' ? { verify: 'light' as const } : {}),
   };
   plans.set(plan.id, plan);
   attachCoordination(plan, input.coordination, redactor);
@@ -546,7 +554,12 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       task.status = 'running';
       persist(plan);
       const board = laneBoard(plan, lane, task.id);
-      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), { by: plan.owner, writableScope: task.paths, ...(board ? { board } : {}) });
+      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
+        by: plan.owner,
+        writableScope: task.paths,
+        ...(board ? { board } : {}),
+        ...(plan.verify ? { verify: plan.verify } : {}),
+      });
       // S5: 성공·실패와 무관하게 그 실행의 검증 실패 서명을 플랫폼이 게시해 다른 레인이 읽게 한다
       if (plan.coordination?.strategy === 'S5') postFailures(plan, lane, snapshot.id);
       task.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
@@ -647,13 +660,18 @@ async function integrate(plan: TaskPlanView): Promise<void> {
       { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
     ];
     const writableScope = [...new Set(plan.lanes.flatMap((lane) => lane.paths))];
-    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, { by: plan.owner, scriptedTurns: turns, writableScope });
+    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, {
+      by: plan.owner,
+      scriptedTurns: turns,
+      writableScope,
+      ...(plan.verify ? { verify: plan.verify } : {}),
+    });
     integration.run = runView(outcome);
     let settled = outcome;
     // S4: 통합 게이트가 실패하면 한 번만 통합 세션에 모델 수리를 요청한다(공유 없이 실패 뒤에만 비용을 내는 대조군).
     // scriptedTurns 없이 보내므로 세션의 기본 모델 경로(API 모드는 계획의 모델, 로컬 CLI는 그 러너)로 실제 호출된다
     if (outcome.status !== 'done' && plan.coordination?.strategy === 'S4') {
-      const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope });
+      const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope, ...(plan.verify ? { verify: plan.verify } : {}) });
       integration.repair = { attempted: true, status: repair.status, run: runView(repair) };
       settled = repair;
     }
@@ -812,7 +830,7 @@ function waitForReady(sessionId: string): Promise<void> {
 async function runAndWait(
   sessionId: string,
   request: string,
-  options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[]; board?: BoardAccess },
+  options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[]; board?: BoardAccess; verify?: VerifyMode },
 ): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number }> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;

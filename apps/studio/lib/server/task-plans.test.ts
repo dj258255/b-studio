@@ -16,6 +16,7 @@ type SendOptions = {
   steering?: boolean;
   scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }>;
   board?: BoardAccess;
+  verify?: 'light';
 };
 
 /** 검증기가 낸 실패 서명 하나를 담은 이벤트(레인 실패 때 기록에 남긴다). S5가 이걸 읽어 게시한다 */
@@ -503,6 +504,42 @@ describe('작업 분해 실행', () => {
     expect(fake.sessionOptions).toHaveLength(3);
     expect(fake.sessionOptions.slice(0, 2).every((options) => options.extraPageChecks === undefined)).toBe(true);
     expect(fake.sessionOptions[2]!.extraPageChecks).toEqual(pageChecks);
+  });
+
+  // verify light는 레인·통합 실행에 그대로 넘긴다. S4 수리도 같은 verify로 돈다
+  it('verify light면 레인·통합·S4 수리 실행에 가볍게 확인을 넘긴다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.integration = 'failed';
+
+    const plan = await run({
+      projectId: 'orders',
+      request: '가볍게 확인',
+      modelId: 'model-a',
+      owner: 'kim',
+      verify: 'light',
+      coordination: { strategy: 'S4' },
+    });
+
+    expect(plan.status).toBe('done');
+    // 계획이 기억해 레인·통합 실행이 같은 값을 쓴다
+    expect(plan.verify).toBe('light');
+    const laneSends = fake.sends.filter((send) => !send.options.scriptedTurns && !isRepair(send.request));
+    expect(laneSends.length).toBeGreaterThan(0);
+    expect(laneSends.every((send) => send.options.verify === 'light')).toBe(true);
+    // 통합 실행과 S4 수리도 같은 값을 받는다
+    expect(fake.sends.find((send) => send.options.scriptedTurns)!.options.verify).toBe('light');
+    expect(fake.sends.find((send) => isRepair(send.request))!.options.verify).toBe('light');
+  });
+
+  it('기본(full)은 verify를 넘기지 않는다(지금과 같다)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '전체 검증', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.verify).toBeUndefined();
+    expect(fake.sends.every((send) => send.options.verify === undefined)).toBe(true);
   });
 
   it('고정 계획의 레인 backend·model로 레인 세션을 만들고, 레인 뷰에 남긴다', async () => {

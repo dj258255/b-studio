@@ -6,6 +6,7 @@
 import type { TaskPlanCoordinationMetrics, TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanRunMetricsView } from '../../lib/task-plan-types';
 import type { AcceptanceResult } from './acceptance';
+import type { BenchVerify } from './backends';
 import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
 import type { LaneTrace } from './trace';
@@ -97,6 +98,8 @@ export interface BenchRow {
   contextCleared: { count: number; chars: number };
   /** 통합 게이트에 api 값 확인을 덧붙였는지(--integration-checks). 기본 꺼짐이면 false */
   integrationChecks: boolean;
+  /** 검증 범위(--verify). full은 지금과 같고, light는 레인·통합 게이트가 재시작·준비·계약만 확인한다 */
+  verify: BenchVerify;
   /** 모델 승격 설정과 이 실행의 승격 결과 */
   escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;
@@ -125,6 +128,8 @@ export interface SummaryMeta {
   contextClearing?: boolean;
   /** 레인 사이 계약(S2)의 출처. 기본 human */
   contracts?: 'human' | 'model';
+  /** 검증 범위(--verify). 기본 full */
+  verify?: BenchVerify;
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'provider_gate', 'environment', 'timeout', 'unknown'];
@@ -225,7 +230,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 검증 ${meta.verify === 'light' ? 'light(가볍게)' : 'full'} · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}`,
     '',
     '## 과제 × 전략',
     '',
