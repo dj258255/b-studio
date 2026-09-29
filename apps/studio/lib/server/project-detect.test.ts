@@ -137,11 +137,12 @@ describe('detectProject: 부가 서비스(ADR-073)', () => {
         '    image: postgres:17-alpine',
         '    ports: ["5432:5432"]',
         '    environment:',
-        '      POSTGRES_DB: app',
-        '      POSTGRES_USER: app',
-        '      POSTGRES_PASSWORD: app',
+        // 일부러 'app'과 다른 이름·비밀번호를 써서, 지어낸 고정값이 아니라 실제 compose 값을 읽었는지 확인한다
+        '      POSTGRES_DB: shop',
+        '      POSTGRES_USER: shopuser',
+        '      POSTGRES_PASSWORD: shopsecret',
         '    healthcheck:',
-        '      test: ["CMD-SHELL", "pg_isready -U app -d app"]',
+        '      test: ["CMD-SHELL", "pg_isready -U shopuser -d shop"]',
         '  cache:',
         '    image: redis:7-alpine',
         '  app:',
@@ -159,22 +160,29 @@ describe('detectProject: 부가 서비스(ADR-073)', () => {
     expect('sourceFile' in db && db.sourceFile).toBe('compose.yaml');
 
     const service = detection.services[0]!;
-    expect(service.environment).toMatchObject({ SPRING_DATASOURCE_URL: 'jdbc:postgresql://db:5432/app', SPRING_DATA_REDIS_HOST: 'cache' });
+    // compose의 실제 POSTGRES_DB/USER/PASSWORD(shop/shopuser/shopsecret)로 채워야 한다 — 'app'/'app' 같은 지어낸 값이면 안 된다
+    expect(service.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:postgresql://db:5432/shop',
+      SPRING_DATASOURCE_USERNAME: 'shopuser',
+      SPRING_DATASOURCE_PASSWORD: 'shopsecret',
+      SPRING_DATA_REDIS_HOST: 'cache',
+    });
     expect(service.dependsOn.sort()).toEqual(['cache', 'db']);
-    expect(service.notes.some((note) => note.includes('POSTGRES_'))).toBe(true);
+    expect(service.notes.some((note) => note.includes('환경 변수에서 그대로 가져왔습니다'))).toBe(true);
 
     const files = generateFiles(detection);
     const compose = files.find((file) => file.path === GENERATED_COMPOSE)!.content;
     expect(compose).toContain('# compose.yaml에서 가져왔습니다');
     // 콜론·슬래시가 있는 값은 따옴표로 감싼다(yamlString)
-    expect(compose).toContain('SPRING_DATASOURCE_URL: "jdbc:postgresql://db:5432/app"');
+    expect(compose).toContain('SPRING_DATASOURCE_URL: "jdbc:postgresql://db:5432/shop"');
+    expect(compose).toContain('SPRING_DATASOURCE_USERNAME: shopuser');
     // db는 healthcheck가 있어 service_healthy, cache는 없어 service_started — 목록·맵 문법이 섞이면 잘못된 YAML이라 모두 맵 문법으로 통일한다
     expect(compose).toContain('db: { condition: service_healthy }');
     expect(compose).toContain('cache: { condition: service_started }');
 
     const spec = files.find((file) => file.path === 'studio.yaml')!.content;
     expect(spec).toContain('databases:');
-    expect(spec).toContain('db: { engine: postgres, database: app, user: app }');
+    expect(spec).toContain('db: { engine: postgres, database: shop, user: shopuser }');
 
     // 실제로 b-studio가 파싱할 수 있어야 한다(depends_on의 목록·맵 문법이 섞이면 여기서 걸린다)
     for (const file of files) {
@@ -227,6 +235,45 @@ describe('detectProject: 부가 서비스(ADR-073)', () => {
     const { infra } = await detectProject(root);
 
     expect(infra.map((service) => service.name)).toEqual(['db']);
+  });
+
+  it('pay를 본뜬 mysql·kafka 픽스처: 지어낸 app/app이 아니라 실제 MYSQL_*·Kafka 광고 리스너 값으로 채운다(읽기 전용으로 확인한 실제 저장소 값)', async () => {
+    const root = await repo({
+      'build.gradle': `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'com.mysql:mysql-connector-j'\n}`,
+      'src/main/resources/application.properties': ['spring.datasource.url=jdbc:mysql://localhost:3306/becommerce', 'spring.kafka.bootstrap-servers=localhost:9092', ''].join('\n'),
+      'compose.yaml': [
+        'services:',
+        '  mysql:',
+        '    image: mysql:8.4',
+        '    ports: ["3306:3306"]',
+        '    environment:',
+        '      MYSQL_DATABASE: becommerce',
+        '      MYSQL_USER: becommerce',
+        '      MYSQL_PASSWORD: becommerce',
+        '      MYSQL_ROOT_PASSWORD: root',
+        '  kafka:',
+        '    image: apache/kafka:3.8.0',
+        '    ports: ["9092:9092"]',
+        '    environment:',
+        '      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:29092"',
+        '  app:',
+        '    profiles: ["app"]',
+        '    build: { context: . }',
+        '    depends_on: [mysql, kafka]',
+        '',
+      ].join('\n'),
+    });
+
+    const detection = await detectProject(root);
+    const service = detection.services[0]!;
+
+    expect(service.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:mysql://mysql:3306/becommerce',
+      SPRING_DATASOURCE_USERNAME: 'becommerce',
+      SPRING_DATASOURCE_PASSWORD: 'becommerce',
+      // kafka:29092(INTERNAL)가 컨테이너 사이 주소다. kafka:9092로 추측하면 광고된 listener(localhost:9092, PLAINTEXT)로 리다이렉트돼 접속에 실패한다
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: 'kafka:29092',
+    });
   });
 });
 

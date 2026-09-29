@@ -28,6 +28,7 @@ import {
   COMPOSE_FILE_CANDIDATES,
   isProdComposeFile,
   type InfraService,
+  type WirableInfraService,
 } from '@b-studio/spec';
 
 export type { InfraService } from '@b-studio/spec';
@@ -157,12 +158,14 @@ async function appDependencyText(dir: string, template: 'spring-boot' | 'fastapi
 /** 각 관리형 서비스의 설정에서 postgres·mysql·redis·kafka 참조를 찾아, 가져오거나 제안한 부가 서비스로 접속 환경 변수를 채운다(있으면 서비스에 바로 붙인다) */
 async function wireServiceEnvironments(root: string, services: DetectedService[], infra: readonly InfraService[]): Promise<void> {
   if (infra.length === 0) return;
-  const byEngine = infra.map((service) => ({ name: service.name, engine: service.engine }));
+  // environment·command도 함께 넘긴다 — wireAppEnvironment가 실제 POSTGRES_*/MYSQL_* 값과 Kafka 광고 리스너를 읽어야 한다(지어내지 않는다)
+  const byEngine: WirableInfraService[] = infra.map((service) => ({ name: service.name, engine: service.engine, environment: service.environment, command: service.command }));
   for (const service of services) {
     const configText = await appConfigText(root, service);
     const refs = detectEnvReferences(configText);
     const wiring = wireAppEnvironment(service.template, refs, byEngine);
-    if (Object.keys(wiring.environment).length === 0) continue;
+    // 접속 정보를 못 채워도(계정을 못 찾음) depends_on과 "확인:" 메모는 남긴다 — 컨테이너 기동 순서는 여전히 의미가 있다
+    if (wiring.dependsOn.length === 0 && Object.keys(wiring.environment).length === 0) continue;
     service.environment = wiring.environment;
     service.dependsOn = wiring.dependsOn;
     // specYaml이 notes를 "# 확인: ..." 형태로 찍으므로 여기서는 접두사 없이 그대로 쌓는다

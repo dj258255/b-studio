@@ -65,11 +65,15 @@ const BASENAME_ENGINE: Record<string, InfraEngine> = {
   localstack: 'localstack',
 };
 
-/** `quay.io/minio/minio:RELEASE...` → `minio`, `apache/kafka:3.8.0` → `kafka` 식으로 이미지 이름에서 엔진을 알아낸다 */
+/**
+ * `quay.io/minio/minio:RELEASE...` → `minio`, `apache/kafka:3.8.0` → `kafka` 식으로 이미지 이름에서 엔진을 알아낸다.
+ * 경로 조각(`/`)부터 나눈 뒤 마지막 조각에서 태그를 떼어낸다 — 태그부터 떼면 `localhost:5000/postgres:16`처럼
+ * 포트가 있는 레지스트리 주소에서 "localhost"를 basename으로 잘못 읽는다(레지스트리:포트의 콜론과 태그의 콜론을 구분하지 못해서다)
+ */
 export function engineOfImage(image: string): InfraEngine | undefined {
   const withoutDigest = image.split('@')[0] ?? image;
-  const withoutTag = withoutDigest.split(':')[0] ?? withoutDigest;
-  const basename = withoutTag.split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
+  const lastSegment = withoutDigest.split('/').filter(Boolean).pop() ?? '';
+  const basename = (lastSegment.split(':')[0] ?? lastSegment).toLowerCase();
   return BASENAME_ENGINE[basename];
 }
 
@@ -295,42 +299,139 @@ export interface EnvWiringResult {
   dependsOn: string[];
 }
 
+/** wireAppEnvironment가 필요로 하는 인프라 정보. ImportedInfraService·ProposedInfraService 둘 다 이 모양을 만족한다 */
+export interface WirableInfraService {
+  name: string;
+  engine: InfraEngine;
+  environment: Record<string, string>;
+  command?: string[] | string;
+}
+
+/**
+ * compose의 `${VAR:-default}` 치환에서 기본값만 뽑는다. `${VAR}`처럼 기본값이 없으면(값이 호스트 셸 환경에 달려 있어
+ * 여기서는 알 수 없다) undefined를 돌려준다 — 없는 값을 지어내지 않는다
+ */
+function resolveComposeVar(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const withDefault = /^\$\{[A-Za-z_][A-Za-z0-9_]*:-(.*)\}$/.exec(raw);
+  if (withDefault) return withDefault[1];
+  if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(raw)) return undefined;
+  return raw;
+}
+
+/** 후보 키를 순서대로 보아 처음 값이 있는(치환 후에도 빈 문자열이 아닌) 것을 돌려준다 */
+function firstDefined(environment: Record<string, string>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const resolved = resolveComposeVar(environment[key]);
+    if (resolved) return resolved;
+  }
+  return undefined;
+}
+
+export interface DbCredentials {
+  database: string;
+  user: string;
+  /** compose에 비밀번호가 없으면(신뢰 인증 등) 없다 — 이때는 지어내지 않고 그대로 알린다 */
+  password?: string;
+}
+
+/** MySQL_USER/PASSWORD가 없으면(전용 계정을 안 만들고 root만 쓰는 compose) root + MYSQL_ROOT_PASSWORD로 내려간다. MariaDB의 MARIADB_* 변형도 같이 본다 */
+function mysqlLikeCredentials(environment: Record<string, string>): DbCredentials | undefined {
+  const database = firstDefined(environment, ['MYSQL_DATABASE', 'MARIADB_DATABASE']);
+  if (!database) return undefined;
+  const user = firstDefined(environment, ['MYSQL_USER', 'MARIADB_USER']);
+  const password = firstDefined(environment, ['MYSQL_PASSWORD', 'MARIADB_PASSWORD']);
+  if (user) return { database, user, password };
+  const rootPassword = firstDefined(environment, ['MYSQL_ROOT_PASSWORD', 'MARIADB_ROOT_PASSWORD']);
+  return rootPassword ? { database, user: 'root', password: rootPassword } : undefined;
+}
+
+/** 공식 postgres 이미지 기본값: POSTGRES_USER가 없으면 postgres, POSTGRES_DB가 없으면 POSTGRES_USER 값을 쓴다 */
+function postgresCredentials(environment: Record<string, string>): DbCredentials {
+  const user = firstDefined(environment, ['POSTGRES_USER']) ?? 'postgres';
+  const database = firstDefined(environment, ['POSTGRES_DB']) ?? user;
+  const password = firstDefined(environment, ['POSTGRES_PASSWORD']);
+  return { database, user, password };
+}
+
+/** 가져오거나 제안한 부가 서비스의 실제(또는 우리가 채운) 환경 변수에서 접속 정보를 읽는다. 값을 지어내지 않는다 — mysql/mariadb는 계정을 못 찾으면 undefined다 */
+export function databaseCredentialsFor(engine: InfraEngine, environment: Record<string, string>): DbCredentials | undefined {
+  if (engine === 'postgres') return postgresCredentials(environment);
+  if (engine === 'mysql' || engine === 'mariadb') return mysqlLikeCredentials(environment);
+  return undefined;
+}
+
+/** `redis-server --port 6380`·`postgres -p 5433`처럼 command에서 포트를 바꿨으면 그 값을 쓴다. 간단한 형태만 본다(그 밖은 건너뛴다) */
+function customPortFrom(command: string[] | string | undefined): number | undefined {
+  if (command === undefined) return undefined;
+  const tokens = Array.isArray(command) ? command : command.split(/\s+/);
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === undefined) continue;
+    const inline = /^(?:--port|-p)=(\d+)$/.exec(token);
+    if (inline) return Number(inline[1]);
+    if ((token === '--port' || token === '-p') && /^\d+$/.test(tokens[index + 1] ?? '')) return Number(tokens[index + 1]);
+  }
+  return undefined;
+}
+
+/**
+ * Kafka는 `KAFKA_ADVERTISED_LISTENERS`(bitnami는 `KAFKA_CFG_ADVERTISED_LISTENERS`)에 리스너별 광고 주소를 적는다.
+ * 컨테이너 안에서는 서비스 이름으로 광고하는 리스너를 써야 한다 — pay처럼 `PLAINTEXT://localhost:9092,INTERNAL://kafka:29092`면
+ * localhost:9092는 호스트 전용이고 kafka:29092가 컨테이너 사이에서 쓸 주소다. 못 찾으면 기본 포트로 추측한다
+ */
+function kafkaBootstrapFor(serviceName: string, environment: Record<string, string>): { bootstrap: string; guessed: boolean } {
+  const raw = environment.KAFKA_ADVERTISED_LISTENERS ?? environment.KAFKA_CFG_ADVERTISED_LISTENERS;
+  for (const listener of raw?.split(',') ?? []) {
+    const match = /^[A-Za-z0-9_]+:\/\/([^:,]+):(\d+)$/.exec(listener.trim());
+    if (match && match[1] === serviceName) return { bootstrap: `${match[1]}:${match[2]}`, guessed: false };
+  }
+  return { bootstrap: `${serviceName}:${ENGINE_DEFAULT_PORT.kafka}`, guessed: true };
+}
+
 /**
  * 알아낸 참조(refs)와 가져오거나 제안한 인프라 목록을 보고, 관리형 서비스에 넣을 환경 변수를 만든다.
  * Spring은 SPRING_DATASOURCE_*·SPRING_DATA_REDIS_HOST·SPRING_KAFKA_BOOTSTRAP_SERVERS, 그 밖은 DATABASE_URL·REDIS_HOST/REDIS_URL·KAFKA_BOOTSTRAP_SERVERS를 쓴다.
- * 모두 추측이라 "확인:" 메모를 함께 돌려준다
+ * 데이터베이스 이름·계정·비밀번호는 인프라 서비스의 실제 환경 변수에서 읽는다(지어내지 않는다 — 제안한 postgres는 우리가 그 환경 변수를 채워 뒀으므로 결과가 같다).
+ * 그 밖(포트·Kafka 리스너)은 추측일 수 있어 "확인:" 메모를 함께 돌려준다
  */
-export function wireAppEnvironment(
-  template: 'nextjs' | 'vite' | 'spring-boot' | 'fastapi',
-  refs: EnvReferences,
-  infra: ReadonlyArray<{ name: string; engine: InfraEngine }>,
-): EnvWiringResult {
+export function wireAppEnvironment(template: 'nextjs' | 'vite' | 'spring-boot' | 'fastapi', refs: EnvReferences, infra: ReadonlyArray<WirableInfraService>): EnvWiringResult {
   const environment: Record<string, string> = {};
   const notes: string[] = [];
   const dependsOn: string[] = [];
   const byEngine = (engine: InfraEngine) => infra.find((service) => service.engine === engine);
 
   if (refs.postgres || refs.mysql) {
-    const db = refs.postgres ? byEngine('postgres') : byEngine('mysql');
+    const db = refs.postgres ? byEngine('postgres') : (byEngine('mysql') ?? byEngine('mariadb'));
     if (db) {
       dependsOn.push(db.name);
       const scheme = db.engine === 'postgres' ? 'postgresql' : 'mysql';
-      const port = ENGINE_DEFAULT_PORT[db.engine];
-      if (template === 'spring-boot') {
-        environment.SPRING_DATASOURCE_URL = `jdbc:${scheme}://${db.name}:${port}/app`;
-        environment.SPRING_DATASOURCE_USERNAME = 'app';
-        environment.SPRING_DATASOURCE_PASSWORD = 'app';
+      const port = customPortFrom(db.command) ?? ENGINE_DEFAULT_PORT[db.engine];
+      const credentials = databaseCredentialsFor(db.engine, db.environment);
+      if (credentials) {
+        const auth = credentials.password !== undefined ? `${credentials.user}:${credentials.password}` : credentials.user;
+        if (template === 'spring-boot') {
+          environment.SPRING_DATASOURCE_URL = `jdbc:${scheme}://${db.name}:${port}/${credentials.database}`;
+          environment.SPRING_DATASOURCE_USERNAME = credentials.user;
+          if (credentials.password !== undefined) environment.SPRING_DATASOURCE_PASSWORD = credentials.password;
+        } else {
+          environment.DATABASE_URL = `${scheme}://${auth}@${db.name}:${port}/${credentials.database}`;
+        }
+        notes.push(
+          credentials.password !== undefined
+            ? `데이터베이스 접속 정보는 ${db.name}의 환경 변수에서 그대로 가져왔습니다. 값이 바뀌면 함께 고치세요`
+            : `${db.name}에서 비밀번호를 찾지 못했습니다(신뢰 인증이거나 compose 밖에서 설정). 필요하면 직접 채우세요`,
+        );
       } else {
-        environment.DATABASE_URL = `${scheme}://app:app@${db.name}:${port}/app`;
+        notes.push(`${db.name}의 데이터베이스·계정 정보를 compose 환경 변수에서 찾지 못해 접속 정보를 채우지 못했습니다. 직접 확인하세요`);
       }
-      notes.push(`데이터베이스 접속 정보는 추측입니다. ${db.name}의 실제 POSTGRES_*/MYSQL_* 값과 맞는지 확인하세요`);
     }
   }
   if (refs.redis) {
     const redis = byEngine('redis') ?? byEngine('valkey');
     if (redis) {
       dependsOn.push(redis.name);
-      const port = ENGINE_DEFAULT_PORT[redis.engine];
+      const port = customPortFrom(redis.command) ?? ENGINE_DEFAULT_PORT[redis.engine];
       if (template === 'spring-boot') {
         environment.SPRING_DATA_REDIS_HOST = redis.name;
       } else {
@@ -344,10 +445,14 @@ export function wireAppEnvironment(
     const kafka = byEngine('kafka');
     if (kafka) {
       dependsOn.push(kafka.name);
-      const bootstrap = `${kafka.name}:${ENGINE_DEFAULT_PORT.kafka}`;
+      const { bootstrap, guessed } = kafkaBootstrapFor(kafka.name, kafka.environment);
       if (template === 'spring-boot') environment.SPRING_KAFKA_BOOTSTRAP_SERVERS = bootstrap;
       else environment.KAFKA_BOOTSTRAP_SERVERS = bootstrap;
-      notes.push('Kafka 부트스트랩 주소는 기본 포트(9092)로 추측했습니다. compose의 리스너 설정이 다르면 고치세요');
+      notes.push(
+        guessed
+          ? 'Kafka 부트스트랩 주소는 기본 포트(9092)로 추측했습니다. compose의 리스너 설정이 다르면 고치세요'
+          : `Kafka 부트스트랩 주소는 ${kafka.name}의 KAFKA_ADVERTISED_LISTENERS에서 컨테이너 사이 리스너(${bootstrap})를 찾아 채웠습니다`,
+      );
     }
   }
   return { environment, notes, dependsOn: [...new Set(dependsOn)] };

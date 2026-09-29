@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  databaseCredentialsFor,
   databaseSpecFor,
   detectEnvReferences,
   engineOfImage,
@@ -8,6 +9,7 @@ import {
   proposePostgresService,
   suggestsPostgresNeed,
   wireAppEnvironment,
+  type WirableInfraService,
 } from './compose-import';
 
 // 실제 저장소(~/Desktop/pay, edumeet, dbtower — 읽기 전용으로 확인한 것)를 본떠 만든 조각. 통째로 복사하지 않았다
@@ -38,6 +40,10 @@ services:
     ports: ["9092:9092"]
     environment:
       KAFKA_NODE_ID: 1
+      # 리스너가 둘인 이유(실제 pay/compose.yaml 주석): 클라이언트는 <접속한 주소>가 아니라 <브로커가 광고한 주소>로 다시 붙는다.
+      # 컨테이너 안에서는 INTERNAL(kafka:29092)을 써야 하고, PLAINTEXT(localhost:9092)는 호스트 전용이다
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:29092"
     healthcheck:
       test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
 
@@ -162,6 +168,13 @@ describe('engineOfImage', () => {
     expect(engineOfImage('pgvector/pgvector:pg16')).toBe('postgres');
   });
 
+  it('포트가 있는 사설 레지스트리 주소에서도 마지막 경로 조각으로 엔진을 찾는다(레지스트리:포트의 콜론을 태그 구분자로 잘못 보지 않는다)', () => {
+    expect(engineOfImage('localhost:5000/postgres:16')).toBe('postgres');
+    expect(engineOfImage('registry.internal:5000/team/redis:7-alpine')).toBe('redis');
+    // 태그가 없어도(레지스트리:포트만 있는 경우) 마지막 조각(postgres)으로 찾는다
+    expect(engineOfImage('localhost:5000/postgres')).toBe('postgres');
+  });
+
   it('알려지지 않은 이미지는 undefined다(mssql·oracle·관측성 도구 등)', () => {
     expect(engineOfImage('mcr.microsoft.com/mssql/server:2022-latest')).toBeUndefined();
     expect(engineOfImage('gvenzl/oracle-free:23-slim-faststart')).toBeUndefined();
@@ -277,18 +290,22 @@ describe('detectEnvReferences', () => {
 });
 
 describe('wireAppEnvironment', () => {
-  const infra = [
-    { name: 'db', engine: 'postgres' as const },
-    { name: 'cache', engine: 'redis' as const },
-    { name: 'broker', engine: 'kafka' as const },
+  // 접속 정보는 인프라 서비스의 "실제" 환경 변수에서 읽는다(지어내지 않는다) — 제안한 postgres는 우리가 이 환경 변수를 채워 뒀으므로 같은 경로를 탄다
+  const infra: WirableInfraService[] = [
+    { name: 'db', engine: 'postgres', environment: { POSTGRES_DB: 'orders', POSTGRES_USER: 'orders', POSTGRES_PASSWORD: 'orders-secret' } },
+    { name: 'cache', engine: 'redis', environment: {} },
+    { name: 'broker', engine: 'kafka', environment: { KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092,INTERNAL://broker:29092' } },
   ];
 
-  it('Spring은 SPRING_DATASOURCE_*·SPRING_DATA_REDIS_HOST·SPRING_KAFKA_BOOTSTRAP_SERVERS를 채운다', () => {
+  it('Spring은 실제 POSTGRES_*와 Kafka 광고 리스너 값으로 채운다(고정값 app/app을 지어내지 않는다)', () => {
     const result = wireAppEnvironment('spring-boot', { postgres: true, mysql: false, redis: true, kafka: true }, infra);
-    expect(result.environment).toMatchObject({
-      SPRING_DATASOURCE_URL: 'jdbc:postgresql://db:5432/app',
+    expect(result.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:postgresql://db:5432/orders',
+      SPRING_DATASOURCE_USERNAME: 'orders',
+      SPRING_DATASOURCE_PASSWORD: 'orders-secret',
       SPRING_DATA_REDIS_HOST: 'cache',
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: 'broker:9092',
+      // INTERNAL 리스너(broker:29092)가 컨테이너 사이 주소다. PLAINTEXT(localhost:9092)는 호스트 전용이라 쓰면 컨테이너 안에서 접속이 안 된다
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: 'broker:29092',
     });
     expect(result.dependsOn.sort()).toEqual(['broker', 'cache', 'db']);
     expect(result.notes.length).toBeGreaterThan(0);
@@ -297,7 +314,7 @@ describe('wireAppEnvironment', () => {
   it('FastAPI는 DATABASE_URL·REDIS_HOST/REDIS_URL·KAFKA_BOOTSTRAP_SERVERS를 쓴다', () => {
     const result = wireAppEnvironment('fastapi', { postgres: true, mysql: false, redis: true, kafka: false }, infra);
     expect(result.environment).toEqual({
-      DATABASE_URL: 'postgresql://app:app@db:5432/app',
+      DATABASE_URL: 'postgresql://orders:orders-secret@db:5432/orders',
       REDIS_HOST: 'cache',
       REDIS_URL: 'redis://cache:6379',
     });
@@ -307,6 +324,76 @@ describe('wireAppEnvironment', () => {
     const result = wireAppEnvironment('spring-boot', { postgres: true, mysql: false, redis: false, kafka: false }, []);
     expect(result.environment).toEqual({});
     expect(result.dependsOn).toEqual([]);
+  });
+
+  it('mysql은 MYSQL_USER/PASSWORD가 없으면(전용 계정 없이 root만 쓰는 compose) root + MYSQL_ROOT_PASSWORD로 내려간다', () => {
+    const result = wireAppEnvironment('spring-boot', { postgres: false, mysql: true, redis: false, kafka: false }, [
+      { name: 'db', engine: 'mysql', environment: { MYSQL_DATABASE: 'app', MYSQL_ROOT_PASSWORD: 'root-secret' } },
+    ]);
+    expect(result.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:mysql://db:3306/app',
+      SPRING_DATASOURCE_USERNAME: 'root',
+      SPRING_DATASOURCE_PASSWORD: 'root-secret',
+    });
+  });
+
+  it('mariadb 변형 환경 변수(MARIADB_*)도 같은 방식으로 읽는다', () => {
+    const result = wireAppEnvironment('fastapi', { postgres: false, mysql: true, redis: false, kafka: false }, [
+      { name: 'db', engine: 'mariadb', environment: { MARIADB_DATABASE: 'app', MARIADB_USER: 'app', MARIADB_PASSWORD: 'secret' } },
+    ]);
+    expect(result.environment.DATABASE_URL).toBe('mysql://app:secret@db:3306/app');
+  });
+
+  it('${VAR:-기본값} 치환은 기본값을 쓴다(호스트 셸 환경에 실제로 있는 값은 알 수 없다)', () => {
+    const result = wireAppEnvironment('fastapi', { postgres: true, mysql: false, redis: false, kafka: false }, [
+      { name: 'db', engine: 'postgres', environment: { POSTGRES_DB: 'app', POSTGRES_USER: 'app', POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:-devsecret}' } },
+    ]);
+    expect(result.environment.DATABASE_URL).toBe('postgresql://app:devsecret@db:5432/app');
+  });
+
+  it('계정을 못 찾으면(MYSQL_USER도 MYSQL_ROOT_PASSWORD도 없음) 값을 지어내지 않고 depends_on·메모만 남긴다', () => {
+    const result = wireAppEnvironment('spring-boot', { postgres: false, mysql: true, redis: false, kafka: false }, [
+      { name: 'db', engine: 'mysql', environment: { MYSQL_DATABASE: 'app' } },
+    ]);
+    expect(result.environment).toEqual({});
+    expect(result.dependsOn).toEqual(['db']);
+    expect(result.notes.some((note) => note.includes('찾지 못해'))).toBe(true);
+  });
+
+  it('command의 --port/-p로 바꾼 포트를 따른다(redis·postgres)', () => {
+    const redisResult = wireAppEnvironment('fastapi', { postgres: false, mysql: false, redis: true, kafka: false }, [
+      { name: 'cache', engine: 'redis', environment: {}, command: ['redis-server', '--port', '6380'] },
+    ]);
+    expect(redisResult.environment.REDIS_URL).toBe('redis://cache:6380');
+
+    const postgresResult = wireAppEnvironment('fastapi', { postgres: true, mysql: false, redis: false, kafka: false }, [
+      { name: 'db', engine: 'postgres', environment: { POSTGRES_DB: 'app', POSTGRES_USER: 'app', POSTGRES_PASSWORD: 'app' }, command: 'postgres -p 5433' },
+    ]);
+    expect(postgresResult.environment.DATABASE_URL).toBe('postgresql://app:app@db:5433/app');
+  });
+
+  it('pay 픽스처(mysql·kafka)를 끝까지 통과시키면 실제 compose 값과 같은 환경 변수가 나온다', () => {
+    const imported = importSupportingServices(PAY_COMPOSE, 'compose.yaml').services;
+    const result = wireAppEnvironment('spring-boot', { postgres: false, mysql: true, redis: true, kafka: true }, imported);
+    expect(result.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:mysql://mysql:3306/becommerce',
+      SPRING_DATASOURCE_USERNAME: 'becommerce',
+      SPRING_DATASOURCE_PASSWORD: 'becommerce',
+      SPRING_DATA_REDIS_HOST: 'redis',
+      // kafka:29092(INTERNAL)가 컨테이너 사이 주소다. 9092(PLAINTEXT)로 광고된 것은 localhost용이라 골라지지 않는다
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: 'kafka:29092',
+    });
+  });
+});
+
+describe('databaseCredentialsFor', () => {
+  it('postgres는 POSTGRES_USER·POSTGRES_DB가 없으면 공식 이미지 기본값(postgres/postgres)으로 내려간다', () => {
+    expect(databaseCredentialsFor('postgres', {})).toEqual({ database: 'postgres', user: 'postgres', password: undefined });
+    expect(databaseCredentialsFor('postgres', { POSTGRES_USER: 'app' })).toEqual({ database: 'app', user: 'app', password: undefined });
+  });
+
+  it('mysql/mariadb가 아니면 undefined다(redis·kafka 등은 이 함수로 자격을 만들지 않는다)', () => {
+    expect(databaseCredentialsFor('redis', { MYSQL_DATABASE: 'app' })).toBeUndefined();
   });
 });
 
