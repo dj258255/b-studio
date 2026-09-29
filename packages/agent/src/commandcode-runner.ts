@@ -107,6 +107,20 @@ export interface CommandCodeRunOptions extends Omit<RunAgentOptions, 'client' | 
   model?: string;
   /** 모델별 추론 강도. 넘기면 `--effort <level>`로 전달한다 */
   effort?: string;
+  /**
+   * 세션마다 고정된 상태 폴더. 주면 HOME을 `<stateDir>/home`, 작업 폴더(cwd)를 `<stateDir>/work`로 고정한다.
+   *
+   * **왜 필요한가.** cmd는 대화 세션을 `$HOME/.commandcode/projects/<cwd를 바꾼 이름>/` 아래에 저장한다.
+   * 실행마다 HOME과 cwd가 바뀌면 다음 실행이 `--resume`으로 세션을 찾지 못한다(실측: `No session "…" found to resume.`).
+   * 같은 실행 안의 게이트 재시도는 HOME·cwd가 같아 그대로 되지만, **다음 실행**(같은 레인의 다음 작업, 사용자의 후속 요청)은 안 된다.
+   * 그래서 이어받으려면 두 값이 실행 사이에도 같아야 하고, 그 자리를 정하는 것이 이 옵션이다.
+   *
+   * 임시 HOME을 쓰는 목적(사용자 설정·스킬·훅·등록한 MCP 서버가 모델에 실리지 않게 격리)은 그대로 지켜진다.
+   * 여전히 사용자의 `~/.commandcode/auth.json`만 심볼릭 링크로 빌려오고, 작업 폴더는 실행마다 비운다.
+   *
+   * 주지 않으면 예전처럼 실행마다 임시 폴더를 만들고 끝나면 지운다(그때는 `resume`을 넘겨도 이어받지 못한다).
+   */
+  stateDir?: string;
   /** 하위 프로세스 실행을 바꿔 끼우는 지점(테스트용 가짜) */
   process?: CommandCodeProcess;
 }
@@ -120,16 +134,21 @@ export interface CommandCodeRunResult extends AgentResult {
  * 이 PC에 로그인한 Command Code CLI(`cmd`)로 요청을 처리한다. API 키 없이 개인 계정(DeepSeek·무료 모델)으로 돌릴 수 있다.
  *
  * 도구 경계를 세 겹으로 막는다.
- *  1. 실행마다 빈 임시 HOME을 만들고 사용자 `~/.commandcode/auth.json`만 심볼릭 링크로 빌려온다.
+ *  1. 빈 HOME(`stateDir`을 주면 세션마다 고정된 `<stateDir>/home`, 아니면 실행마다 만드는 임시 폴더)을 쓰고
+ *     사용자 `~/.commandcode/auth.json`만 심볼릭 링크로 빌려온다.
  *     그대로 두면 사용자 설정·스킬·mods·taste·등록한 MCP 서버(파일 편집 도구를 가진 것 포함)가 모델에 실려
  *     b-studio 도구를 거치지 않고 작업 공간을 바꿀 수 있다. Codex 러너의 임시 `CODEX_HOME`과 같은 목적이다.
- *  2. 작업 폴더(cwd)를 실행마다 만드는 빈 임시 폴더로 두고, 그 폴더의 `.commandcode/settings.json`에
+ *  2. 작업 폴더(cwd)를 빈 폴더(`stateDir`을 주면 `<stateDir>/work`를 비워서, 아니면 실행마다 만드는 임시 폴더)로 두고, 그 폴더의 `.commandcode/settings.json`에
  *     `permissions.allow: ["mcp__b_studio__*"]`만 둔다. 헤드리스 기본은 승인이 필요한 모든 호출(파일 쓰기·셸·
  *     allow 규칙 없는 MCP)을 거부하므로, b-studio 도구만 통과한다. `--yolo`·`--tools-all`은 절대 붙이지 않는다.
  *  3. 실제 변경은 b-studio 도구(MCP 서버)만 호스트의 작업 공간에 쓴다.
  *
  * 완료 판정은 직접 만든 루프·Codex 러너와 같은 검증 게이트가 한다. `cmd -p` 한 번이 모델 턴 하나이고,
  * 턴이 끝날 때마다 게이트를 돌리고 실패하면 같은 세션을 `--resume <id> --fork-session`으로 이어 피드백을 넣는다.
+ *
+ * **이어받기에는 `stateDir`이 필요하다.** `resume`은 같은 실행 안의 재시도에는 그대로 쓰이고, 실행 사이(다음 작업,
+ * 후속 요청)를 이으려면 HOME과 cwd가 같아야 한다. 상태 폴더 없이 `resume`만 받으면 이어받을 수 없으므로
+ * `--resume`을 넘기지 않고 새 대화로 시작하며 warning 이벤트 한 번으로 알린다(조용히 실패시키지 않는다).
  *
  * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
  * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
@@ -151,11 +170,19 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     resume,
     model,
     effort,
+    stateDir,
     process: proc = DEFAULT_PROCESS,
     intent = 'build',
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
+
+  // 이어받기를 요청했는데 상태 폴더가 없으면 이어받을 수 없다(HOME·cwd가 실행마다 달라져 cmd가 세션을 찾지 못한다).
+  // 조용히 실패시키지 않고 한 번 알린 뒤 새 대화로 시작한다
+  const canResume = resume !== undefined && stateDir !== undefined;
+  if (resume !== undefined && stateDir === undefined) {
+    onEvent({ type: 'warning', message: '이 실행은 이전 대화를 이어받지 못합니다: 상태 폴더 없음' });
+  }
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
@@ -185,16 +212,17 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   // 실행 지표. modelMs는 그 이벤트에 시간이 있을 때만 더한다(없으면 0 = "재지 않음")
   const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
 
-  // 작업 폴더는 실행마다 만드는 빈 임시 폴더다. project.root를 cwd로 주면 모델이 내장 도구로 작업 공간을 직접 바꿀 수 있다
-  const workdir = await mkdtemp(path.join(tmpdir(), WORKDIR_PREFIX));
+  // 작업 폴더(cwd). project.root를 cwd로 주면 모델이 내장 도구로 작업 공간을 직접 바꿀 수 있다.
+  // 상태 폴더를 주면 그 아래 고정 경로를 쓴다 — cmd가 세션을 cwd로 찾으므로 다음 실행에서도 같아야 이어받는다
+  const workdir = stateDir ? path.join(stateDir, 'work') : await mkdtemp(path.join(tmpdir(), WORKDIR_PREFIX));
   let toolServer: Awaited<ReturnType<typeof startToolServer>> | undefined;
   let home: string | undefined;
   let result: CommandCodeRunResult | undefined;
   const usage = emptyUsage();
   let completedTurns = 0;
   let lastText = '';
-  /** 이어받기·재시도에 쓰는 현재 세션 id. 첫 턴은 options.resume에서 시작한다 */
-  let sessionId: string | undefined = resume;
+  /** 이어받기·재시도에 쓰는 현재 세션 id. 첫 턴은 이어받을 수 있을 때만 options.resume에서 시작한다 */
+  let sessionId: string | undefined = canResume ? resume : undefined;
   let announced = false;
   // b-studio 도구가 아닌 호출을 한 번만 기록한다
   const foreignTools = new Set<string>();
@@ -261,13 +289,17 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
         }),
     });
 
+    // 고정 작업 폴더는 실행 시작 때 안을 비운다. "빈 작업 폴더" 성질(모델이 여기서 만든 파일이 프로젝트에 반영되지 않는다)을 그대로 유지한다
+    if (stateDir) await emptyDirectory(workdir);
     // 작업 폴더(cwd)에 실행별 MCP 설정과 허용 규칙을 둔다. 사용자 설정은 건드리지 않는다
     await writeFile(path.join(workdir, '.mcp.json'), mcpJson(toolServer.url));
     await mkdir(path.join(workdir, '.commandcode'), { recursive: true });
     await writeFile(path.join(workdir, '.commandcode', 'settings.json'), settingsJson());
 
-    // 임시 HOME. 작업 폴더와 다른 폴더다(cmd가 세션·로그를 여기에 쓰므로 작업 폴더와 섞지 않는다)
-    home = await mkdtemp(path.join(tmpdir(), HOME_PREFIX));
+    // HOME. 상태 폴더를 주면 고정한다(cmd가 세션·프로젝트 기록을 여기 아래에 쓴다).
+    // 작업 폴더와 다른 폴더다(cmd가 세션·로그를 여기에 쓰므로 작업 폴더와 섞지 않는다)
+    home = stateDir ? path.join(stateDir, 'home') : await mkdtemp(path.join(tmpdir(), HOME_PREFIX));
+    await mkdir(home, { recursive: true });
     await linkAuthFile(home);
 
     // cmd에는 systemPrompt 자리가 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다
@@ -379,10 +411,14 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
     await serial.idle();
     await toolServer?.close();
-    // 심볼릭 링크만 지운다. 링크가 가리키는 원본 auth.json은 그대로 남는다
-    if (home) await rm(home, { recursive: true, force: true }).catch(() => {});
-    // cmd가 작업 폴더에 남긴 것(세션 파일·로그)이 있어도 작업 공간과 무관하므로 통째로 지운다
-    await rm(workdir, { recursive: true, force: true }).catch(() => {});
+    // 상태 폴더를 쓰면 HOME·작업 폴더를 지우지 않는다. cmd가 세션을 HOME 아래(`$HOME/.commandcode/projects/<cwd 이름>`)에
+    // 두므로 지우면 다음 실행이 이어받지 못한다. 주지 않았을 때만 예전처럼 임시 폴더를 지운다
+    if (!stateDir) {
+      // 심볼릭 링크만 지운다. 링크가 가리키는 원본 auth.json은 그대로 남는다
+      if (home) await rm(home, { recursive: true, force: true }).catch(() => {});
+      // cmd가 작업 폴더에 남긴 것(세션 파일·로그)이 있어도 작업 공간과 무관하므로 통째로 지운다
+      await rm(workdir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   signal?.throwIfAborted();
@@ -522,16 +558,26 @@ function userHome(): string {
   return process.env.HOME ?? process.env.USERPROFILE ?? homedir();
 }
 
+/** 고정 작업 폴더를 빈 상태로 만든다. 지난 실행이 남긴 모델 산출물과 cmd 설정을 지우고 새로 만든다 */
+async function emptyDirectory(directory: string): Promise<void> {
+  await rm(directory, { recursive: true, force: true });
+  await mkdir(directory, { recursive: true });
+}
+
 /**
- * 로그인 파일만 임시 HOME으로 빌려온다. 파일 내용을 읽거나 복사하지 않고 심볼릭 링크 하나만 만든다.
+ * 로그인 파일만 HOME으로 빌려온다. 파일 내용을 읽거나 복사하지 않고 심볼릭 링크 하나만 만든다.
  * cmd가 토큰을 갱신하면 이 링크를 통해 원본 `~/.commandcode/auth.json`이 그대로 갱신되므로, 링크가 끊어지지 않는 한 로그인은 유지된다.
  * 파일이 원래 없으면 링크를 만들지 않고 진행한다. 그 실행은 로그인 오류로 끝나고 기존 실패 경로를 탄다.
+ *
+ * 상태 폴더를 쓰면 같은 HOME을 다시 쓰므로 링크가 남아 있다. 매번 확인해 **없을 때만** 만든다(있으면 그대로 둔다).
  */
 async function linkAuthFile(home: string): Promise<void> {
+  const target = path.join(home, '.commandcode', 'auth.json');
+  if (await exists(target)) return;
   const source = path.join(userHome(), '.commandcode', 'auth.json');
   if (!(await exists(source))) return;
   await mkdir(path.join(home, '.commandcode'), { recursive: true });
-  await symlink(source, path.join(home, '.commandcode', 'auth.json'));
+  await symlink(source, target);
 }
 
 async function exists(target: string): Promise<boolean> {
