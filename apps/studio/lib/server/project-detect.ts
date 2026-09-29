@@ -22,11 +22,15 @@ import {
   databaseSpecFor,
   detectEnvReferences,
   importSupportingServices,
+  needsDevDefaultCredentials,
   proposePostgresService,
   suggestsPostgresNeed,
   wireAppEnvironment,
+  withDefaultHealthcheck,
+  withDevDefaultCredentials,
   COMPOSE_FILE_CANDIDATES,
   isProdComposeFile,
+  type ImportedInfraService,
   type InfraService,
   type WirableInfraService,
 } from '@b-studio/spec';
@@ -115,7 +119,7 @@ async function detectInfra(root: string, services: readonly DetectedService[], c
   const composeFile = await findComposeFile(root, childDirNames);
   if (composeFile) {
     const text = await readText(composeFile.absolute);
-    if (text) return importSupportingServices(text, composeFile.relative).services;
+    if (text) return finalizeImportedInfra(root, composeFile.relative, importSupportingServices(text, composeFile.relative).services);
   }
   for (const service of services) {
     if (service.template !== 'spring-boot' && service.template !== 'fastapi') continue;
@@ -125,6 +129,43 @@ async function detectInfra(root: string, services: readonly DetectedService[], c
     }
   }
   return [];
+}
+
+/**
+ * 가져온 부가 서비스를 실제로 쓸 수 있게 다듬는다.
+ *  - env_file(예: edumeet의 mysql처럼 .env로만 자격 증명을 받고 environment가 없는 경우)로는 값을 알 수 없어,
+ *    공식 이미지가 비밀번호 없이는 기동을 거부하는 postgres/mysql/mariadb에 개발용 기본값을 채운다. .env 내용은 절대 읽지 않는다 —
+ *    저장소에 있든 없든 세션 폴더 복사본에는 담기지 않으므로 같은 값을 채우되, 메모 문구만 다르게 한다
+ *  - healthcheck가 없으면 기본 healthcheck를 붙인다(있어야 depends_on이 service_healthy를 써서, 앱이 DB가 뜨기 전에 시작해 죽는 경합을 막는다)
+ */
+async function finalizeImportedInfra(root: string, composeRelative: string, services: readonly ImportedInfraService[]): Promise<ImportedInfraService[]> {
+  const composeDir = path.dirname(composeRelative);
+  const result: ImportedInfraService[] = [];
+  for (const service of services) {
+    let next = service;
+    if (needsDevDefaultCredentials(next)) {
+      const envFileExists = next.envFiles.length > 0 && (await anyExists(root, composeDir, next.envFiles));
+      next = withDevDefaultCredentials(next, devDefaultCredentialNote(next.envFiles, envFileExists));
+    }
+    result.push(withDefaultHealthcheck(next));
+  }
+  return result;
+}
+
+function devDefaultCredentialNote(envFiles: readonly string[], envFileExists: boolean): string {
+  if (envFiles.length === 0) return '접속 정보(비밀번호 등)를 compose에서 찾지 못해 개발용 값을 넣었습니다';
+  const files = envFiles.join(', ');
+  // .env가 저장소에 있어도 세션 폴더 복사본에는 담기지 않는다(비밀값이라 절대 읽지 않는다) — 있고 없고에 따라 문구만 다르다
+  return envFileExists
+    ? `원래 compose는 env_file(${files})로 받는데, 샌드박스 복사본에는 .env가 들어가지 않아 개발용 값을 넣었습니다`
+    : `원래 compose는 env_file(${files})로 받는데 저장소에 없어 개발용 값을 넣었습니다`;
+}
+
+async function anyExists(root: string, dir: string, fileNames: readonly string[]): Promise<boolean> {
+  for (const fileName of fileNames) {
+    if (await exists(path.join(root, dir, fileName))) return true;
+  }
+  return false;
 }
 
 /** compose.yaml → docker-compose.yml → ... 우선순위로 root와 한 단계 아래를 본다. 운영용(prod·production)은 개발용이 있으면 건너뛴다 */
@@ -159,7 +200,7 @@ async function appDependencyText(dir: string, template: 'spring-boot' | 'fastapi
 async function wireServiceEnvironments(root: string, services: DetectedService[], infra: readonly InfraService[]): Promise<void> {
   if (infra.length === 0) return;
   // environment·command도 함께 넘긴다 — wireAppEnvironment가 실제 POSTGRES_*/MYSQL_* 값과 Kafka 광고 리스너를 읽어야 한다(지어내지 않는다)
-  const byEngine: WirableInfraService[] = infra.map((service) => ({ name: service.name, engine: service.engine, environment: service.environment, command: service.command }));
+  const byEngine: WirableInfraService[] = infra.map((service) => ({ name: service.name, engine: service.engine, environment: service.environment, command: service.command, notes: service.notes }));
   for (const service of services) {
     const configText = await appConfigText(root, service);
     const refs = detectEnvReferences(configText);
@@ -457,7 +498,9 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
   if (infra.length > 0) {
     lines.push('', '  # studio.yaml에 없는 부가 서비스: 샌드박스와 함께 뜨고 함께 사라진다 (기존 compose에서 가져오거나 새로 제안했습니다, ADR-073)');
     for (const service of infra) {
-      lines.push(`  ${service.name}:`, service.proposed ? `    # 확인: ${service.reason}` : `    # ${service.sourceFile}에서 가져왔습니다`, `    image: ${service.image}`);
+      lines.push(`  ${service.name}:`, service.proposed ? `    # 확인: ${service.reason}` : `    # ${service.sourceFile}에서 가져왔습니다`);
+      for (const note of service.notes) lines.push(`    # 확인: ${note}`);
+      lines.push(`    image: ${service.image}`);
       if (Object.keys(service.environment).length > 0) {
         lines.push('    environment:');
         for (const [key, value] of Object.entries(service.environment)) lines.push(`      ${key}: ${yamlString(value)}`);

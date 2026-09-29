@@ -99,6 +99,10 @@ export interface ImportedInfraService {
   dependsOn: string[];
   /** 새 볼륨 이름(서비스 접두사를 붙였다) → 컨테이너 경로. 이름 있는 볼륨만, 호스트 바인드 마운트는 뺀다 */
   volumes: Record<string, string>;
+  /** compose의 env_file 이름만 기록한다(경로 문자열). 비밀값이 든 내용은 절대 읽지 않는다 — 세션 폴더 복사본에도 .env는 없다 */
+  envFiles: string[];
+  /** 확인이 필요한 추가 메모(예: 접속 정보를 개발용 기본값으로 채웠다는 안내). compose.b-studio.yaml에 "# 확인:" 주석으로 남긴다 */
+  notes: string[];
   /** 가져온 compose 파일의 프로젝트 폴더 기준 상대 경로 */
   sourceFile: string;
   proposed?: false;
@@ -168,10 +172,24 @@ export function importSupportingServices(composeText: string, sourceFile: string
     ...(def.healthcheck !== undefined ? { healthcheck: def.healthcheck as Record<string, unknown> } : {}),
     dependsOn: dependsOnNames(def.depends_on).filter((dep) => matched.has(dep)),
     volumes: namedVolumesFor(name, def.volumes),
+    envFiles: envFileNames(def.env_file),
+    notes: [],
     sourceFile,
   }));
 
   return { services, skipped };
+}
+
+/** env_file은 문자열 하나·문자열 목록·`{ path, required? }` 목록으로 쓸 수 있다. 이름만 뽑는다(파일을 읽지 않는다) */
+function envFileNames(value: unknown): string[] {
+  const nameOf = (entry: unknown): string | undefined => {
+    if (typeof entry === 'string') return entry;
+    if (entry && typeof entry === 'object' && typeof (entry as { path?: unknown }).path === 'string') return (entry as { path: string }).path;
+    return undefined;
+  };
+  if (Array.isArray(value)) return value.flatMap((entry) => { const name = nameOf(entry); return name ? [name] : []; });
+  const single = nameOf(value);
+  return single ? [single] : [];
 }
 
 function normalizeEnvironment(value: unknown): Record<string, string> {
@@ -263,6 +281,8 @@ export function proposePostgresService(database: string, reason: string, service
     healthcheck: { test: ['CMD-SHELL', `pg_isready -U ${db} -d ${db}`], interval: '2s', timeout: '3s', retries: 30 },
     dependsOn: [],
     volumes: { [`${sanitizeServiceName(serviceName)}-data`]: '/var/lib/postgresql/data' },
+    envFiles: [],
+    notes: [],
     proposed: true,
     reason,
   };
@@ -305,6 +325,8 @@ export interface WirableInfraService {
   engine: InfraEngine;
   environment: Record<string, string>;
   command?: string[] | string;
+  /** 있으면(예: 개발용 기본값으로 채웠다는 메모) 접속 정보가 실제 compose 값이 아닐 수 있다는 뜻이라, 앱 쪽 메모 문구를 다르게 쓴다 */
+  notes?: readonly string[];
 }
 
 /**
@@ -358,6 +380,68 @@ function postgresCredentials(environment: Record<string, string>): DbCredentials
 export function databaseCredentialsFor(engine: InfraEngine, environment: Record<string, string>): DbCredentials | undefined {
   if (engine === 'postgres') return postgresCredentials(environment);
   if (engine === 'mysql' || engine === 'mariadb') return mysqlLikeCredentials(environment);
+  return undefined;
+}
+
+type CredentialedEngine = 'postgres' | 'mysql' | 'mariadb';
+
+function isCredentialedEngine(engine: InfraEngine): engine is CredentialedEngine {
+  return engine === 'postgres' || engine === 'mysql' || engine === 'mariadb';
+}
+
+/**
+ * 가져온 postgres/mysql/mariadb가 실제로 쓸 수 있는 비밀번호를 못 구했는지 본다.
+ * edumeet의 mysql처럼 `env_file: .env`로만 값을 받고 `environment:`가 아예 없는 경우, 공식 이미지는 비밀번호 없이는 뜨지 않는다
+ * (mysql은 MYSQL_ROOT_PASSWORD 등, postgres는 POSTGRES_PASSWORD가 없으면 기동을 거부한다).
+ */
+export function needsDevDefaultCredentials(service: { engine: InfraEngine; environment: Record<string, string> }): boolean {
+  if (!isCredentialedEngine(service.engine)) return false;
+  const credentials = databaseCredentialsFor(service.engine, service.environment);
+  return credentials === undefined || credentials.password === undefined;
+}
+
+const DEV_DEFAULT_CREDENTIAL_ENV: Record<CredentialedEngine, Record<string, string>> = {
+  postgres: { POSTGRES_DB: 'app', POSTGRES_USER: 'app', POSTGRES_PASSWORD: 'app' },
+  mysql: { MYSQL_DATABASE: 'app', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app', MYSQL_ROOT_PASSWORD: 'root' },
+  mariadb: { MYSQL_DATABASE: 'app', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app', MYSQL_ROOT_PASSWORD: 'root' },
+};
+
+/**
+ * `needsDevDefaultCredentials`가 참일 때만 부른다. 실제로 값을 알 수 있는 키(치환 가능한 값)는 그대로 두고,
+ * 비어 있거나 `${VAR}`처럼 알 수 없는 키만 개발용 기본값으로 채운다 — 부분적으로만 적힌 값(예: MYSQL_DATABASE만 있음)까지 지우지 않는다.
+ * note는 왜 채웠는지(호출자가 env_file 존재 여부로 문구를 고른다) — "확인:" 주석으로 남는다
+ */
+export function withDevDefaultCredentials(service: ImportedInfraService, note: string): ImportedInfraService {
+  if (!isCredentialedEngine(service.engine)) return service;
+  const defaults = DEV_DEFAULT_CREDENTIAL_ENV[service.engine];
+  const environment = { ...service.environment };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (resolveComposeVar(environment[key]) === undefined) environment[key] = value;
+  }
+  return { ...service, environment, notes: [...service.notes, note] };
+}
+
+/** postgres·mysql/mariadb·redis/valkey인데 healthcheck가 없으면 기본값을 붙인다. depends_on이 service_healthy를 쓸 수 있어야 앱이 DB보다 먼저 뜨는 경합을 피한다 */
+export function withDefaultHealthcheck(service: ImportedInfraService): ImportedInfraService {
+  if (service.healthcheck) return service;
+  const healthcheck = defaultHealthcheckFor(service);
+  return healthcheck ? { ...service, healthcheck } : service;
+}
+
+function defaultHealthcheckFor(service: { engine: InfraEngine; environment: Record<string, string> }): Record<string, unknown> | undefined {
+  if (service.engine === 'postgres') {
+    const credentials = postgresCredentials(service.environment);
+    return { test: ['CMD-SHELL', `pg_isready -U ${credentials.user} -d ${credentials.database}`], interval: '2s', timeout: '3s', retries: 30 };
+  }
+  if (service.engine === 'mysql' || service.engine === 'mariadb') {
+    // withDevDefaultCredentials를 먼저 거치지 않아 계정을 못 구했으면(비밀번호가 없으면) mysqladmin ping도 인증에 실패하니 붙이지 않는다
+    const credentials = mysqlLikeCredentials(service.environment);
+    if (!credentials?.password) return undefined;
+    return { test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', `-u${credentials.user}`, `-p${credentials.password}`], interval: '5s', timeout: '3s', retries: 10 };
+  }
+  if (service.engine === 'redis' || service.engine === 'valkey') {
+    return { test: ['CMD', 'redis-cli', 'ping'], interval: '2s', timeout: '3s', retries: 10 };
+  }
   return undefined;
 }
 
@@ -418,9 +502,11 @@ export function wireAppEnvironment(template: 'nextjs' | 'vite' | 'spring-boot' |
           environment.DATABASE_URL = `${scheme}://${auth}@${db.name}:${port}/${credentials.database}`;
         }
         notes.push(
-          credentials.password !== undefined
-            ? `데이터베이스 접속 정보는 ${db.name}의 환경 변수에서 그대로 가져왔습니다. 값이 바뀌면 함께 고치세요`
-            : `${db.name}에서 비밀번호를 찾지 못했습니다(신뢰 인증이거나 compose 밖에서 설정). 필요하면 직접 채우세요`,
+          credentials.password === undefined
+            ? `${db.name}에서 비밀번호를 찾지 못했습니다(신뢰 인증이거나 compose 밖에서 설정). 필요하면 직접 채우세요`
+            : (db.notes?.length ?? 0) > 0
+              ? `${db.name}은(는) 개발용 기본값을 쓰고 있습니다(부가 서비스 목록의 메모를 보세요). 운영 배포 전에 반드시 바꾸세요`
+              : `데이터베이스 접속 정보는 ${db.name}의 환경 변수에서 그대로 가져왔습니다. 값이 바뀌면 함께 고치세요`,
         );
       } else {
         notes.push(`${db.name}의 데이터베이스·계정 정보를 compose 환경 변수에서 찾지 못해 접속 정보를 채우지 못했습니다. 직접 확인하세요`);

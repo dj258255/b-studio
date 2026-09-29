@@ -10,6 +10,8 @@ interface InfraProposal {
   /** 기존 compose에서 가져왔으면 그 파일, 새로 제안했으면 없다(reason을 대신 보여준다) */
   sourceFile?: string;
   reason?: string;
+  /** 확인이 필요한 메모(예: env_file(.env)에 자격 증명이 있었는데 저장소에 없어 개발용 값을 넣었다는 경고) */
+  notes?: string[];
 }
 
 interface Proposal {
@@ -165,6 +167,11 @@ export function OpenFolder() {
                         ) : (
                           <p className="text-xs text-wait">새로 제안: {service.reason}</p>
                         )}
+                        {service.notes?.map((note) => (
+                          <p key={note} className="text-xs text-wait">
+                            확인: {note}
+                          </p>
+                        ))}
                       </li>
                     ))}
                   </ul>

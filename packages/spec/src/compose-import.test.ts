@@ -6,11 +6,20 @@ import {
   engineOfImage,
   importSupportingServices,
   isProdComposeFile,
+  needsDevDefaultCredentials,
   proposePostgresService,
   suggestsPostgresNeed,
   wireAppEnvironment,
+  withDefaultHealthcheck,
+  withDevDefaultCredentials,
+  type ImportedInfraService,
   type WirableInfraService,
 } from './compose-import';
+
+/** 테스트용 최소 ImportedInfraService. import 결과를 흉내 낸다(진짜 파싱 없이 함수 하나만 검증할 때 쓴다) */
+function infraFixture(partial: Partial<ImportedInfraService> & Pick<ImportedInfraService, 'name' | 'engine'>): ImportedInfraService {
+  return { image: `${partial.engine}:latest`, environment: {}, dependsOn: [], volumes: {}, envFiles: [], notes: [], sourceFile: 'compose.yaml', ...partial };
+}
 
 // 실제 저장소(~/Desktop/pay, edumeet, dbtower — 읽기 전용으로 확인한 것)를 본떠 만든 조각. 통째로 복사하지 않았다
 const PAY_COMPOSE = `
@@ -74,6 +83,8 @@ services:
   mysql:
     image: mysql:8.0
     container_name: edumeet-mysql
+    # 실제 edumeet은 자격 증명을 environment가 아니라 env_file(.env, 저장소에는 없음)로만 받는다 — 이 조각의 핵심이다
+    env_file: .env
     volumes:
       - ./mysql_data:/var/lib/mysql
     ports: ["3306:3306"]
@@ -216,6 +227,12 @@ describe('importSupportingServices', () => {
     expect(redis.command).toBe('redis-server --appendonly yes');
     // ./redis_data 바인드 마운트는 이름 있는 볼륨이 아니라서 빠진다
     expect(redis.volumes).toEqual({});
+
+    // mysql은 env_file(.env)로만 자격 증명을 받는다 — 이름만 기록하고 내용은 절대 읽지 않는다(environment는 비어 있다)
+    const mysql = result.services.find((service) => service.name === 'mysql')!;
+    expect(mysql.envFiles).toEqual(['.env']);
+    expect(mysql.environment).toEqual({});
+    expect(redis.envFiles).toEqual([]);
   });
 
   it('dbtower: build가 있는 postgres는 빼고, verify-postgres(build 없음)·mongo·minio는 가져온다. mssql·profiles 있는 aiops-redis는 뺀다', () => {
@@ -394,6 +411,71 @@ describe('databaseCredentialsFor', () => {
 
   it('mysql/mariadb가 아니면 undefined다(redis·kafka 등은 이 함수로 자격을 만들지 않는다)', () => {
     expect(databaseCredentialsFor('redis', { MYSQL_DATABASE: 'app' })).toBeUndefined();
+  });
+});
+
+describe('needsDevDefaultCredentials·withDevDefaultCredentials (edumeet: env_file(.env)만 있고 environment가 없는 경우)', () => {
+  it('mysql이 environment 없이 env_file만 있으면 개발용 기본값이 필요하다고 본다', () => {
+    expect(needsDevDefaultCredentials({ engine: 'mysql', environment: {} })).toBe(true);
+    expect(needsDevDefaultCredentials({ engine: 'postgres', environment: {} })).toBe(true);
+    // redis는 이 판단 대상이 아니다(자격 증명 없이도 뜬다)
+    expect(needsDevDefaultCredentials({ engine: 'redis', environment: {} })).toBe(false);
+  });
+
+  it('비밀번호를 구할 수 있으면 필요 없다고 본다', () => {
+    expect(needsDevDefaultCredentials({ engine: 'mysql', environment: { MYSQL_DATABASE: 'app', MYSQL_ROOT_PASSWORD: 'root' } })).toBe(false);
+    expect(needsDevDefaultCredentials({ engine: 'postgres', environment: { POSTGRES_PASSWORD: 'secret' } })).toBe(false);
+  });
+
+  it('mysql에 개발용 기본값(app/app/app, root)을 채우고 메모를 남긴다 — 없는 키만 채운다', () => {
+    const service = infraFixture({ name: 'mysql', engine: 'mysql', environment: {}, envFiles: ['.env'] });
+    const filled = withDevDefaultCredentials(service, '원래 compose는 env_file(.env)로 받는데 저장소에 없어 개발용 값을 넣었습니다');
+    expect(filled.environment).toEqual({ MYSQL_DATABASE: 'app', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app', MYSQL_ROOT_PASSWORD: 'root' });
+    expect(filled.notes).toEqual(['원래 compose는 env_file(.env)로 받는데 저장소에 없어 개발용 값을 넣었습니다']);
+  });
+
+  it('postgres에 개발용 기본값(app/app/app)을 채운다', () => {
+    const service = infraFixture({ name: 'db', engine: 'postgres', environment: {}, envFiles: ['.env'] });
+    const filled = withDevDefaultCredentials(service, '메모');
+    expect(filled.environment).toEqual({ POSTGRES_DB: 'app', POSTGRES_USER: 'app', POSTGRES_PASSWORD: 'app' });
+  });
+
+  it('일부만 있으면(MYSQL_DATABASE는 실제 값) 그 키는 그대로 두고 나머지만 채운다', () => {
+    const service = infraFixture({ name: 'mysql', engine: 'mysql', environment: { MYSQL_DATABASE: 'becommerce' } });
+    const filled = withDevDefaultCredentials(service, '메모');
+    expect(filled.environment).toEqual({ MYSQL_DATABASE: 'becommerce', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app', MYSQL_ROOT_PASSWORD: 'root' });
+  });
+
+  it('채운 뒤에는 databaseCredentialsFor가 usable한 자격 증명을 돌려준다(개발용 기본값도 정상적으로 배선에 쓰인다)', () => {
+    const filled = withDevDefaultCredentials(infraFixture({ name: 'mysql', engine: 'mysql', environment: {}, envFiles: ['.env'] }), '메모');
+    expect(databaseCredentialsFor('mysql', filled.environment)).toEqual({ database: 'app', user: 'app', password: 'app' });
+  });
+});
+
+describe('withDefaultHealthcheck', () => {
+  it('healthcheck가 없는 postgres/mysql/redis에 기본 healthcheck를 붙인다(자격 증명은 이미 채워져 있어야 한다)', () => {
+    const postgres = withDefaultHealthcheck(infraFixture({ name: 'db', engine: 'postgres', environment: { POSTGRES_DB: 'app', POSTGRES_USER: 'app', POSTGRES_PASSWORD: 'app' } }));
+    expect(postgres.healthcheck).toEqual({ test: ['CMD-SHELL', 'pg_isready -U app -d app'], interval: '2s', timeout: '3s', retries: 30 });
+
+    const mysql = withDefaultHealthcheck(infraFixture({ name: 'mysql', engine: 'mysql', environment: { MYSQL_DATABASE: 'app', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app' } }));
+    expect(mysql.healthcheck).toEqual({ test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uapp', '-papp'], interval: '5s', timeout: '3s', retries: 10 });
+
+    const redis = withDefaultHealthcheck(infraFixture({ name: 'cache', engine: 'redis' }));
+    expect(redis.healthcheck).toEqual({ test: ['CMD', 'redis-cli', 'ping'], interval: '2s', timeout: '3s', retries: 10 });
+  });
+
+  it('이미 healthcheck가 있으면 그대로 둔다', () => {
+    const service = infraFixture({ name: 'cache', engine: 'redis', healthcheck: { test: ['CMD', 'custom'] } });
+    expect(withDefaultHealthcheck(service).healthcheck).toEqual({ test: ['CMD', 'custom'] });
+  });
+
+  it('mysql/mariadb가 아직 비밀번호를 못 구했으면(개발용 기본값을 채우기 전) healthcheck를 붙이지 않는다', () => {
+    const service = infraFixture({ name: 'mysql', engine: 'mysql', environment: {} });
+    expect(withDefaultHealthcheck(service).healthcheck).toBeUndefined();
+  });
+
+  it('알려진 엔진이 아니면(kafka 등) 붙이지 않는다', () => {
+    expect(withDefaultHealthcheck(infraFixture({ name: 'broker', engine: 'kafka' })).healthcheck).toBeUndefined();
   });
 });
 
