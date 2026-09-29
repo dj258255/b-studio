@@ -45,6 +45,15 @@ export interface AgentItem {
   tokens?: AgentUsage;
   /** 실행 중일 때 마지막 에이전트 이벤트 한 줄 */
   activity?: string;
+  /** 여러 명 비교(fleet)·나눠서 병렬(plan)에 속한 항목이면 그 작업. 작업 화면이 이 값으로 한 줄로 묶는다 */
+  group?: AgentGroup;
+}
+
+/** 항목이 속한 작업. href는 그 작업의 화면(비교·병렬 화면에서 그 작업을 연다) */
+export interface AgentGroup {
+  kind: 'fleet' | 'plan';
+  id: string;
+  href: string;
 }
 
 export interface AgentTotals {
@@ -96,6 +105,7 @@ interface AgentRow {
   backend?: SessionMode;
   /** 스냅샷이 없을 때의 토큰 */
   tokens?: AgentUsage;
+  group?: AgentGroup;
 }
 
 function emptyUsage(): AgentUsage {
@@ -118,7 +128,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
       rows.push({
         kind: 'lane',
         id: `plan:${plan.id}`,
-        href: '/task-plans',
+        href: `/task-plans?id=${encodeURIComponent(plan.id)}`,
         title: plan.request,
         projectName: plan.projectId,
         owner: plan.owner,
@@ -126,6 +136,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         approval: true,
         fallbackState: 'idle',
         tokens: plan.planning?.usage,
+        group: planGroup(plan.id),
       });
       continue;
     }
@@ -145,6 +156,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
           : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane) }),
         // 레인은 그 레인이 고른 백엔드(세션이 있으면 스냅샷)를 보여 준다
         backend: source ? sessionBackend(source.snapshot) : lane.backend,
+        group: planGroup(plan.id),
       });
     }
   }
@@ -166,6 +178,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
           : { updatedAt: member.finishedAt ?? member.startedAt ?? fleet.createdAt, fallbackState: fleetMemberState(member.status), fallbackAttention: fleetMemberAttention(member.status) }),
         backend: source ? sessionBackend(source.snapshot) : undefined,
         tokens: source?.snapshot.tokens ?? member.usage,
+        group: { kind: 'fleet', id: fleet.id, href: `/fleets?id=${encodeURIComponent(fleet.id)}` },
       });
     }
   }
@@ -190,6 +203,10 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
 
   const items = rows.map((row) => evaluate(row, now)).sort(compareItems);
   return { items, totals: totalsOf(items) };
+}
+
+function planGroup(id: string): AgentGroup {
+  return { kind: 'plan', id, href: `/task-plans?id=${encodeURIComponent(id)}` };
 }
 
 /** 라우트가 쓰는 수집기. 기존 목록 함수가 돌려주는 것만 모은다(권한 규칙을 새로 만들지 않는다) */
@@ -218,6 +235,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(runningForMs !== undefined ? { runningForMs } : {}),
     ...(tokens ? { tokens } : {}),
     ...(state === 'working' ? { activity: activityOf(row.recent ?? []) } : {}),
+    ...(row.group ? { group: row.group } : {}),
   };
 }
 

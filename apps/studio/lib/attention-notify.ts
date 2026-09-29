@@ -6,7 +6,7 @@
  */
 import type { AgentAttention, AgentItem } from './server/agents-overview';
 
-/** 개입 사유 한국어. 관제 화면과 알림이 같은 문구를 쓰도록 여기 한 곳에서 정의한다 */
+/** 개입 사유 한국어. 작업 화면과 알림이 같은 문구를 쓰도록 여기 한 곳에서 정의한다 */
 export const ATTENTION_LABEL: Record<AgentAttention, string> = {
   question: '답을 기다립니다',
   approval: '계획 승인을 기다립니다',
@@ -53,7 +53,7 @@ export interface AttentionNotice {
 /** 새 항목의 알림. BATCH_OVER개 이하면 하나씩("{제목} — {사유}"), 넘으면 하나로 묶는다("개입 필요 N건") */
 export function attentionNotices(items: readonly AgentItem[]): AttentionNotice[] {
   if (items.length === 0) return [];
-  if (items.length > BATCH_OVER) return [{ title: `개입 필요 ${items.length}건`, href: '/agents' }];
+  if (items.length > BATCH_OVER) return [{ title: `개입 필요 ${items.length}건`, href: '/work' }];
   return items.map((item) => ({ title: `${item.title} — ${item.attention ? attentionLabel(item.attention) : '개입 필요'}`.trim(), href: item.href }));
 }
 

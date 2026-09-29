@@ -40,11 +40,14 @@ export function FleetWorkbench({
   projects,
   models,
   initialFleets,
+  initialSelectedId,
   fleet: capability,
 }: {
   projects: ProjectSummary[];
   models: ModelOption[];
   initialFleets: FleetView[];
+  /** 먼저 열 비교(`?id=`). 목록에 없으면 가장 최근 것 */
+  initialSelectedId?: string;
   fleet: FleetCapability;
 }) {
   const readyModels = models.filter((model) => model.configured && model.enabled !== false && model.capabilities.includes('tools'));
@@ -54,7 +57,7 @@ export function FleetWorkbench({
   const [allowBreaking, setAllowBreaking] = useState(false);
   const [decision, setDecision] = useState<RoutingDecision>();
   const [fleets, setFleets] = useState(initialFleets);
-  const [selectedFleetId, setSelectedFleetId] = useState(initialFleets[0]?.id);
+  const [selectedFleetId, setSelectedFleetId] = useState(initialFleets.some((fleet) => fleet.id === initialSelectedId) ? initialSelectedId : initialFleets[0]?.id);
   const [loading, setLoading] = useState<'route' | 'fleet' | 'winner'>();
   const [error, setError] = useState<string>();
   const selectedFleet = fleets.find((fleet) => fleet.id === selectedFleetId);

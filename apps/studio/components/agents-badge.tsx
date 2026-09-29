@@ -5,11 +5,11 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentItem, AgentTotals } from "@/lib/server/agents-overview";
 import { attentionNotices, diffAttention, readNotifyEnabled, shouldNotify, titleWithCount } from "@/lib/attention-notify";
 
-/** 배지를 다시 읽는 간격. 관제 화면(3초)보다 느리게 둬서 헤더가 서버를 자주 두드리지 않게 한다 */
+/** 배지를 다시 읽는 간격. 작업 화면(3초)보다 느리게 둬서 헤더가 서버를 자주 두드리지 않게 한다 */
 const REFRESH_MS = 15_000;
 
 /**
- * 관제 화면으로 가는 버튼. 개입 필요 수를 배지로 보여 준다(0이면 숨김).
+ * 작업 화면(/work)으로 가는 버튼. 개입 필요 수를 배지로 보여 준다(0이면 숨김).
  * 홈 상단 버튼 줄과 세션 헤더가 같이 쓴다.
  *
  * 실행 중 지시(#103)와 달리 이 알림은 다른 탭에서 일하다가도 놓치지 않게 하는 것이 목적이라,
@@ -76,8 +76,8 @@ export function AgentsBadge() {
   }, []);
 
   return (
-    <Link href="/agents" className="glass-soft inline-flex items-center rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
-      관제
+    <Link href="/work" className="glass-soft inline-flex items-center rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
+      작업
       {attention > 0 && (
         <span
           className="ml-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-fail px-1.5 text-xs font-semibold text-panel"

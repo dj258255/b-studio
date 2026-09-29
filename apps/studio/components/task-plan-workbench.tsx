@@ -64,12 +64,15 @@ export function TaskPlanWorkbench({
   projects,
   models,
   initialPlans,
+  initialSelectedId,
   planner,
   limits,
 }: {
   projects: ProjectSummary[];
   models: ModelOption[];
   initialPlans: TaskPlanView[];
+  /** 먼저 열 계획(`?id=`). 목록에 없으면 가장 최근 것 */
+  initialSelectedId?: string;
   planner: PlannerCapability;
   limits: PlanLimitView;
 }) {
@@ -80,7 +83,7 @@ export function TaskPlanWorkbench({
   const [modelId, setModelId] = useState(readyModels[0]?.id ?? '');
   const [request, setRequest] = useState('');
   const [plans, setPlans] = useState(initialPlans);
-  const [selectedId, setSelectedId] = useState(initialPlans[0]?.id);
+  const [selectedId, setSelectedId] = useState(initialPlans.some((plan) => plan.id === initialSelectedId) ? initialSelectedId : initialPlans[0]?.id);
   const [creating, setCreating] = useState(false);
   const [deciding, setDeciding] = useState(false);
   const [error, setError] = useState<string>();
