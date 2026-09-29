@@ -374,6 +374,13 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </div>
       );
 
+    case "warning":
+      return (
+        <p className="border-l-[3px] border-wait pl-3 text-sm text-wait">
+          {item.text}
+        </p>
+      );
+
     case "steer": {
       const label = item.status === "applied" ? "지시(반영됨)" : item.status === "dropped" ? "지시(적용되지 못함)" : "지시(대기)";
       return (

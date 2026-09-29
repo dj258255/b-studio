@@ -1,6 +1,7 @@
 import { requireUser } from '@/lib/server/access';
 import { validateCommandCodeModelSelection } from '@/lib/server/commandcode-models';
 import { errorResponse, StudioError } from '@/lib/server/errors';
+import { validateOpenCodeModelSelection } from '@/lib/server/opencode-models';
 import { createSession, resolveSessionBackend } from '@/lib/server/sessions';
 
 export async function POST(request: Request) {
@@ -16,9 +17,14 @@ export async function POST(request: Request) {
     if (body.backend !== undefined && typeof body.backend !== 'string') throw new StudioError(400, 'backend는 문자열이어야 합니다');
     // 고른 백엔드는 서버가 정한 허용 목록에서만 받는다(B_STUDIO_BACKENDS). 없으면 서버 모드라 지금과 같다
     const backend = resolveSessionBackend(body.backend);
-    // commandcode 백엔드에서는 고른 값이 Command Code 모델 id다. 목록에 있는 id만 받는다(목록을 못 불러오면 형식만 본다).
+    // commandcode·opencode 백엔드에서는 고른 값이 그 CLI의 모델 id다. 목록에 있는 id만 받는다(목록을 못 불러오면 형식만 본다).
     // 서버 모드가 아니라 이 세션의 백엔드를 본다(레인이 서버 모드와 다른 백엔드를 고를 수 있다)
-    const modelId = backend === 'commandcode' ? await validateCommandCodeModelSelection(requestedModel) : requestedModel;
+    const modelId =
+      backend === 'commandcode'
+        ? await validateCommandCodeModelSelection(requestedModel)
+        : backend === 'opencode'
+          ? await validateOpenCodeModelSelection(requestedModel)
+          : requestedModel;
     return Response.json(await createSession(body.projectId, user, workspace, { modelId, backend }), { status: 201 });
   } catch (error) {
     return errorResponse(error);

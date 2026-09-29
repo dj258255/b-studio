@@ -23,7 +23,7 @@ const SCOPE_PATH = z
  * 고정 계획(presetPlan)이 작업마다 지정할 수 있는 세션 백엔드. 실행기(studio)가 아는 값만 받는다.
  * 모델이 만든 계획(API 모드 계획 호출)에는 이 필드를 쓰지 않는다 — 계획 프롬프트는 바꾸지 않는다.
  */
-export const PlanBackendSchema = z.enum(['api', 'claude-code', 'codex', 'commandcode']);
+export const PlanBackendSchema = z.enum(['api', 'claude-code', 'codex', 'commandcode', 'opencode']);
 export type PlanBackend = z.infer<typeof PlanBackendSchema>;
 
 export const TaskPlanSchema = z.object({

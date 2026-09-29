@@ -64,6 +64,8 @@
 - [45. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐](#45-실험을-여러-번-돌리자-api-테스트가-설정-캐시-오류로-실패하고-에이전트가-빌드-파일을-고치다-이미지까지-깨짐)
 - [46. 벤치에서 P0 뒤에 돈 S0가 "바꾼 파일이 없어 통합할 내용이 없습니다"로 실패함](#46-벤치에서-p0-뒤에-돈-s0가-바꾼-파일이-없어-통합할-내용이-없습니다로-실패함)
 - [47. Command Code 세션을 다음 실행에서 이어받지 못함 ("No session … found to resume.")](#47-command-code-세션을-다음-실행에서-이어받지-못함-no-session--found-to-resume)
+- [48. OpenCode 무료(Zen) 모델로 세션을 시작하면 403으로 끝나고 진행이 멈춤](#48-opencode-무료zen-모델로-세션을-시작하면-403으로-끝나고-진행이-멈춤)
+- [49. OpenCode 러너가 다음 실행에서 세션을 이어받지 못함 (상태 폴더 문제)](#49-opencode-러너가-다음-실행에서-세션을-이어받지-못함-상태-폴더-문제)
 
 ---
 
@@ -1691,3 +1693,57 @@ Error: No session "1ed02710-…" found to resume.
 ### 확인
 - 가짜 프로세스로 확인했습니다: `stateDir`을 주면 두 실행이 같은 HOME·같은 cwd로 cmd를 부르고 두 번째 실행 인자에 `--resume <첫 세션> --fork-session`이 붙습니다. HOME은 실행 뒤에도 남고 work는 다음 실행 시작 때 비워집니다. `stateDir` 없이 `resume`을 주면 `--resume`이 없고 `warning` 이벤트가 한 번 옵니다. `stateDir` 없이 돌린 실행은 예전처럼 임시 폴더를 지웁니다.
 - 실제 `cmd`로 도는 확인은 별도입니다(이 작업에서는 실행하지 않았습니다).
+
+## 48. OpenCode 무료(Zen) 모델로 세션을 시작하면 403으로 끝나고 진행이 멈춤
+
+**구분:** 실제 실행에서 발견(무료 모델로 세션 시작) → 조건을 나눠 측정 → 러너·모델 목록·문서 수정
+
+### 현상
+`B_STUDIO_MODE=opencode`에서 무료 Zen 모델(예: `opencode/mimo-v2.6-flash-free`)로 요청하면 러너가 실패합니다.
+
+```
+Error from provider (Console): OpenCode's free tier can only be used from within OpenCode
+```
+
+(403) `opencode run --format json`은 이 오류를 낸 뒤 **종료하지 않고 멈출 수 있습니다**(출력 없이 2분 넘게 대기).
+
+### 원인
+조건을 나눠 무료 모델(`opencode/mimo-v2.6-flash-free`, 요청 "reply with the single word ok")로 재봤습니다.
+
+| 조건 | 결과 |
+|---|---|
+| 격리 HOME·XDG, 설정 없음, 기본 에이전트 | 성공 |
+| 전용 에이전트 `b-studio`(`*: deny`, `read: allow`), MCP 없음 | 403 |
+| 내장 `build` 에이전트의 권한만 덮어씀(`*: deny`, `read: allow`), MCP 없음 | 403 |
+
+즉 격리 HOME이나 MCP가 아니라 **내장 도구 구성을 좁히면** 무료 Zen 티어가 거절합니다. b-studio는 "모델은 b-studio 도구만 쓴다"는 경계를 지키려고 내장 도구를 모두 끄므로, 이 검사를 통과하려면 경계를 풀어야 합니다 — 보안 후퇴이고 제공자 정책 우회이므로 그렇게 하지 않습니다.
+
+### 해결
+경계를 유지하고 사실을 그대로 알립니다. `opencode auth login`으로 제공자에 로그인한 뒤 **그 제공자의 모델**을 고르세요. 무료 Zen 모델은 모델 목록에서 `usable: false`로 내려가 비활성으로 표시되고, 러너는 이 오류를 `provider_gate`로 분류해 한 번만 알리고 재시도하지 않습니다(게이트 재시도·fork 포함). 오류 이벤트를 받으면 러너가 자식을 죽이고 제한 시간 안에 실패로 끝내, 멈춘 채 매달리지 않습니다.
+
+`--model`은 이제 필수입니다(CLI·벤치·스튜디오 모두). 기본 모델을 추측하지 않습니다.
+
+## 49. OpenCode 러너가 다음 실행에서 세션을 이어받지 못함 (상태 폴더 문제)
+
+**구분:** Command Code에서 같은 문제를 실측(트러블슈팅 47) → 코드로 같은 구조 확인 → 이 러너도 수정
+
+### 현상
+같은 레인의 두 번째 작업이나 사용자의 후속 요청이 첫 실행의 대화를 이어받지 못합니다. `opencode run --session <id> --fork`가 그 세션을 찾지 못해 실패합니다(Command Code에서 실제로 난 `No session "…" found to resume.`와 같은 원인).
+
+### 원인
+`runOpenCodeAgent`는 실행마다 새 임시 HOME(`mkdtemp(HOME_PREFIX)`)을 만들고 XDG 경로도 그 아래로 돌린 뒤 끝나면 지웁니다. OpenCode는 세션과 런타임 DB를 `$XDG_DATA_HOME/opencode/opencode.db`에 두므로(0단계 조사: `opencode export <id>`·`opencode stats`·`opencode db`가 그 DB를 읽습니다), 홈이 지워지는 순간 그 실행의 세션도 함께 사라집니다.
+
+- 같은 실행 안의 게이트 재시도(`--session <id> --fork`)는 같은 HOME·cwd라 됩니다.
+- **다음 실행**(같은 레인의 다음 작업, 사용자의 후속 요청)은 HOME·XDG가 달라져 세션을 찾지 못합니다.
+- 단위 테스트는 가짜 프로세스라 이 조건을 재현하지 않았습니다.
+
+### 해결
+- 러너에 `stateDir?: string` 옵션을 넣었습니다(Command Code 러너와 같은 모양). 주면 HOME과 그 아래 XDG 경로들(`XDG_CONFIG_HOME`·`XDG_DATA_HOME`·`XDG_STATE_HOME`·`XDG_CACHE_HOME`)을 `<stateDir>/home` 아래로, 작업 폴더(cwd)를 `<stateDir>/work`로 **고정**하고 실행 끝에 지우지 않습니다. 작업 폴더는 실행 시작 때 비워 "빈 작업 폴더" 성질을 유지합니다. 로그인 파일 심볼릭 링크는 매 실행 확인해 없을 때만 만듭니다.
+- 주지 않으면 예전처럼 실행마다 임시 폴더를 만들고 지웁니다. 이때는 이어받을 수 없다는 것을 알고 있으므로 `resume`을 받아도 `--session`을 넘기지 않고 새 대화로 시작하며 `warning` 이벤트 한 번으로 알립니다(조용히 실패시키지 않습니다).
+- 스튜디오는 세션마다 `<세션 상태 폴더>/.git/b-studio/opencode`를 넘깁니다(`openCodeStateDirOf`). `session.json`·아티팩트·Command Code 상태와 같은 `.git/b-studio/` 아래라 에이전트 도구가 닿지 않고 `git add -A`·`git clean -fd`에도 걸리지 않습니다.
+- 임시 HOME을 쓰는 목적(사용자 설정·플러그인·외부 스킬이 모델에 실리지 않게 격리)은 그대로입니다.
+
+### 확인
+- 가짜 프로세스로 확인했습니다: 상태 폴더를 주면 두 실행이 같은 HOME·같은 cwd·같은 `XDG_DATA_HOME`으로 `opencode`를 부르고 두 번째 실행 인자에 `--session <첫 세션> --fork`가 붙습니다. HOME은 실행 뒤에도 남고 work는 다음 실행 시작 때 비워집니다. 상태 폴더 없이 `resume`을 주면 `--session`이 없고 `warning` 이벤트가 한 번 옵니다.
+- 세션 조회가 **cwd에도** 묶이는지는 확인하지 못했습니다(실제 실행 금지). 다만 DB 위치가 HOME·XDG에 묶인 것은 0단계 조사로 확인했고, cwd도 두 러너를 같은 규칙으로 두려고 함께 고정했습니다.
+- 실제 `opencode`로 도는 확인은 별도입니다(이 작업에서는 실행하지 않았습니다).
