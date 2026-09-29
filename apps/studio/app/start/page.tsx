@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { HomeEntry } from "@/components/home-entry";
 import { HomeInbox } from "@/components/home-inbox";
+import { OpenFolder } from "@/components/open-folder";
 import { LogoutButton } from "@/components/logout-button";
 import { pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
@@ -40,7 +41,9 @@ export default async function StartPage() {
   const localAllowed = localFolderAllowed();
   const models = listModelOptions();
   // 내 폴더를 고를 수 있으면 "자세히"에서 실제 경로를 보여 준다
-  const projectItems = projects.map((project) => ({ ...project, folder: localAllowed && !project.error ? projectPath(project.id) : undefined }));
+  const projectItems = await Promise.all(
+    projects.map(async (project) => ({ ...project, folder: localAllowed && !project.error ? await projectPath(project.id) : undefined })),
+  );
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
@@ -73,6 +76,13 @@ export default async function StartPage() {
         <HomeEntry projects={projectItems} models={models} localAllowed={localAllowed} />
         <HomeInbox />
       </div>
+
+      {/* 아무 폴더나 프로젝트로 연다(ADR-067). 서버가 이 PC의 경로를 읽고 쓰므로 개인 PC 모드에서만 보인다 */}
+      {localAllowed && (
+        <div className="mt-5">
+          <OpenFolder />
+        </div>
+      )}
 
       {sessions.length > 0 && (
         <section className="mt-14" aria-labelledby="sessions-heading">
