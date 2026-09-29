@@ -15,8 +15,9 @@ export function AgentsBadge() {
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => {
-      if (document.visibilityState !== "visible") return;
+    // 처음 한 번은 탭이 보이지 않아도 읽는다(뒤 탭으로 연 페이지도 배지가 비어 있지 않게). 그 뒤 주기 갱신은 보이는 탭에서만
+    const load = (force = false) => {
+      if (!force && document.visibilityState !== "visible") return;
       fetch("/api/agents", { cache: "no-store" })
         .then((response) => (response.ok ? (response.json() as Promise<{ totals?: { attention?: number } }>) : undefined))
         .then((data) => {
@@ -26,11 +27,15 @@ export function AgentsBadge() {
           // 배지를 못 읽어도 화면은 그대로 둔다
         });
     };
-    load();
-    const timer = setInterval(load, REFRESH_MS);
+    load(true);
+    const timer = setInterval(() => load(), REFRESH_MS);
+    // 탭이 다시 보이면 주기를 기다리지 않고 바로 읽는다
+    const onVisible = () => load();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 
