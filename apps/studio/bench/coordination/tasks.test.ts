@@ -114,9 +114,9 @@ describe('integrationChecksFor (통합 게이트 샘플 값 확인)', () => {
 
   it('엮인 과제마다 과제 요청의 샘플 값을 web 화면에서 확인한다(필드 이름을 쓰지 않는다)', () => {
     expect(integrationChecksFor(task('orders-list'))?.pageChecks).toEqual([
-      { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, expectText: '김민수', allowConsoleErrors: false, noHorizontalScroll: false },
+      { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, expectAllText: ['김민수', '이영희', '박철수'], allowConsoleErrors: false, noHorizontalScroll: false },
     ]);
-    expect(integrationChecksFor(task('order-detail'))?.pageChecks[0]).toMatchObject({ path: '/orders/1', mode: 'http', expectText: '문 앞에 놓아 주세요' });
+    expect(integrationChecksFor(task('order-detail'))?.pageChecks[0]).toMatchObject({ path: '/orders/1', mode: 'http', expectAllText: ['김민수', '문 앞에 놓아 주세요'] });
     expect(integrationChecksFor(task('order-summary'))?.pageChecks[0]).toMatchObject({ path: '/dashboard', mode: 'http', expectAnyText: ['45000', '45,000'] });
     // 필드 이름 대신 샘플 값만 본다
     for (const coupled of BENCH_TASKS.filter((candidate) => candidate.coupled)) {
@@ -128,15 +128,14 @@ describe('integrationChecksFor (통합 게이트 샘플 값 확인)', () => {
     expect(integrationChecksFor(task('independent'))).toBeUndefined();
   });
 
-  it('확인 값은 그 과제의 web 인수 검사 기대값과 같다(H10 판정 기준)', () => {
+  it('확인은 그 과제의 web 인수 검사와 같은 값을 같은 규칙(모두/하나라도)으로 본다(H10 판정 기준)', () => {
+    // 확인이 인수 검사보다 약하면(값 하나만 보면) 인수 검사가 잡는 실패를 게이트가 통과시켜 수리할 계기를 놓친다
     for (const coupled of BENCH_TASKS.filter((candidate) => candidate.coupled)) {
       const check = integrationChecksFor(coupled)!.pageChecks[0]!;
       const acceptance = coupled.acceptance.find((item) => item.service === 'web')!;
       expect(acceptance.path, coupled.id).toBe(check.path);
-      const values = check.expectAnyText ?? [check.expectText!];
-      const expected = acceptance.expectAny ?? acceptance.expectAll ?? [];
-      expect(values.length, coupled.id).toBeGreaterThan(0);
-      expect(values.every((value) => expected.includes(value)), coupled.id).toBe(true);
+      if (acceptance.expectAll) expect(check.expectAllText, coupled.id).toEqual(acceptance.expectAll);
+      if (acceptance.expectAny) expect(check.expectAnyText, coupled.id).toEqual(acceptance.expectAny);
     }
   });
 });

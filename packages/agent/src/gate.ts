@@ -360,6 +360,9 @@ export class VerificationGate {
       if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
       // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
       if (page.expectAnyText && !page.expectAnyText.some((candidate) => result.text.includes(candidate))) problems.push(missingAnyText(page.expectAnyText));
+      // expectAllText는 적은 문구가 모두 있어야 통과한다. 빠진 것만 알린다
+      const missingAllRendered = page.expectAllText?.filter((candidate) => !result.text.includes(candidate)) ?? [];
+      if (missingAllRendered.length > 0) problems.push(missingAllText(missingAllRendered));
       // ④ api에서 꺼낸 값이 렌더링된 글자에 있는지. expectText와 같은 위치에서 본다
       if (api && !containsApiValue(result.text, api.value)) problems.push(missingApiValue(api, page.path));
       if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
@@ -393,6 +396,9 @@ export class VerificationGate {
     if (page.expectText && !text.includes(page.expectText)) throw fail(`응답 본문에 '${page.expectText}'가 없습니다`);
     // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
     if (page.expectAnyText && !page.expectAnyText.some((candidate) => text.includes(candidate))) throw fail(missingAnyText(page.expectAnyText));
+    // expectAllText는 적은 문구가 모두 있어야 통과한다. 빠진 것만 알린다
+    const missingAll = page.expectAllText?.filter((candidate) => !text.includes(candidate)) ?? [];
+    if (missingAll.length > 0) throw fail(missingAllText(missingAll));
     // ④ api에서 꺼낸 값이 응답 본문(http) 글자에 있는지
     if (api && !containsApiValue(text, api.value)) throw fail(missingApiValue(api, page.path));
   }
@@ -619,6 +625,11 @@ function containsApiValue(text: string, value: string | number): boolean {
 /** api 값이 화면에 없을 때의 문구. 화면이 다른 필드 이름을 읽고 있을 수 있음을 알린다 */
 function missingApiValue(api: ApiValue, pagePath: string): string {
   return `${api.service}의 ${api.jsonPath} 값 '${String(api.value)}'이 ${pagePath} 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다`;
+}
+
+/** expectAllText 실패 문구. 빠진 문구만 적는다 */
+function missingAllText(values: readonly string[]): string {
+  return `화면에 ${values.map((value) => `'${value}'`).join(', ')}가 없습니다`;
 }
 
 /** expectAnyText 실패 문구. 적은 문구 중 어느 것도 없을 때 */

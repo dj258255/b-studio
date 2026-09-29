@@ -349,6 +349,11 @@ export const WorkflowPageCheckSchema = z
      */
     expectAnyText: z.array(z.string().min(1)).min(1).max(PAGE_EXPECT_ANY_MAX, `expectAnyText는 최대 ${PAGE_EXPECT_ANY_MAX}개까지 쓸 수 있습니다`).optional(),
     /**
+     * 모두 들어 있어야 통과하는 문구 목록(1~5개). 한 화면에 여러 값이 함께 보여야 할 때 쓴다(예: 샘플 주문 세 건의 고객 이름).
+     * expectText와 같은 자리에서 확인한다
+     */
+    expectAllText: z.array(z.string().min(1)).min(1).max(PAGE_EXPECT_ANY_MAX, `expectAllText는 최대 ${PAGE_EXPECT_ANY_MAX}개까지 쓸 수 있습니다`).optional(),
+    /**
      * api를 불러 jsonPath 값(문자열·숫자)을 꺼내, 그 값이 화면 글자에 있는지 확인한다. http·browser 모드 모두에서 쓴다.
      * 화면이 다른 필드 이름·모양을 읽고 있는 불일치를 사람이 값을 미리 몰라도 잡는다
      */

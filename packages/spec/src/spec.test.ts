@@ -290,6 +290,15 @@ describe('parseSpec', () => {
     expect(tooMany.issues).toEqual(['workflow.pageChecks.0.expectAnyText: expectAnyText는 최대 5개까지 쓸 수 있습니다']);
   });
 
+  it('expectAllText는 1~5개의 문구를 받는다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /orders, expectAllText: [김민수, 이영희] }\n`);
+    expect(spec.workflow?.pageChecks?.[0]).toMatchObject({ path: '/orders', expectAllText: ['김민수', '이영희'] });
+    const empty = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectAllText: [] }\n`));
+    expect(empty.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.expectAllText'))).toBe(true);
+    const tooMany = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectAllText: [a, b, c, d, e, f] }\n`));
+    expect(tooMany.issues).toEqual(['workflow.pageChecks.0.expectAllText: expectAllText는 최대 5개까지 쓸 수 있습니다']);
+  });
+
   it('디자인 비교는 프로젝트 안 .png와 허용 비율을 받고, http 모드나 프로젝트 밖 경로는 거부한다', () => {
     const compareOf = (line: string) =>
       parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - ${line}\n`).workflow?.pageChecks?.[0]?.compare;
