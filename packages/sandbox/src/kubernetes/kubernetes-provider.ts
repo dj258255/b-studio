@@ -264,7 +264,8 @@ class KubernetesSandbox implements Sandbox {
 
   async stats(): Promise<ServiceUsage[]> {
     const result = await this.#kubectlOrThrow(['-n', this.#namespace, 'get', 'pods', '-l', `${SANDBOX_LABEL}=${this.id}`, '-o', 'json']);
-    return (JSON.parse(result.stdout) as { items: PodJson[] }).items.map(podUsage);
+    const managedNames = new Set(this.project.managed.map(([name]) => name));
+    return (JSON.parse(result.stdout) as { items: PodJson[] }).items.map((pod) => podUsage(pod, managedNames));
   }
 
   async *logs({ services = [], tail = 200, follow = true, signal }: LogOptions = {}): AsyncIterable<LogLine> {

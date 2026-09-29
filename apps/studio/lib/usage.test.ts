@@ -7,7 +7,9 @@ import {
   endedReason,
   formatBytes,
   formatTokenCount,
+  formatUptime,
   hasTokens,
+  healthLabel,
   memoryRatio,
   parseTokenLimit,
   parseUsageWindow,
@@ -86,6 +88,21 @@ describe('사용량 표기', () => {
     expect(endedReason({ service: 'api', state: 'exited', exitCode: 137, oomKilled: true })).toBe('메모리 한도를 넘어 종료 (종료 코드 137)');
     expect(endedReason({ service: 'api', state: 'running', oomKilled: false })).toBeUndefined();
     expect(formatBytes(726 * 1024 ** 2)).toBe('726MiB');
+  });
+
+  it('헬스체크 상태는 한국어로, 가동 시간은 분·시간·일 단위로 줄인다', () => {
+    expect(healthLabel('healthy')).toBe('정상');
+    expect(healthLabel('unhealthy')).toBe('불량');
+    expect(healthLabel('starting')).toBe('점검 중');
+    expect(healthLabel(undefined)).toBeUndefined();
+
+    const now = Date.parse('2026-09-12T12:00:00Z');
+    expect(formatUptime(undefined, now)).toBeUndefined();
+    expect(formatUptime('말이 안 되는 시각', now)).toBeUndefined();
+    expect(formatUptime('2026-09-12T11:59:50Z', now)).toBe('방금 시작');
+    expect(formatUptime('2026-09-12T11:42:00Z', now)).toBe('18분');
+    expect(formatUptime('2026-09-12T09:55:00Z', now)).toBe('2시간 5분');
+    expect(formatUptime('2026-09-10T08:00:00Z', now)).toBe('2일 4시간');
   });
 
   it('토큰은 한국어 단위로 줄이고 쓴 캐시만 붙인다', () => {

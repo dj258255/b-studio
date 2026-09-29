@@ -1,9 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { highlightLogLine, type LogTone } from "@/lib/log-highlight";
 import type { LogEntry } from "@/lib/session-view";
 
 const ALL = "all";
+
+/** 톤마다 쓸 Tailwind 색. platform은 색뿐 아니라 굵기로도 눈에 띄게 한다 */
+const TONE_CLASS: Record<LogTone, string> = {
+  fail: "text-fail",
+  wait: "text-wait",
+  muted: "text-muted",
+  pass: "text-pass",
+  platform: "text-ink font-semibold",
+};
 
 export function LogPanel({ logs, services }: { logs: LogEntry[]; services: string[] }) {
   const [filter, setFilter] = useState(ALL);
@@ -40,14 +50,24 @@ export function LogPanel({ logs, services }: { logs: LogEntry[]; services: strin
         {visible.length === 0 ? (
           <span className="text-muted">아직 로그가 없습니다.</span>
         ) : (
-          visible.map((log, index) => (
-            <div key={index} className="whitespace-pre-wrap break-all">
-              <span className="text-muted">{log.service.padEnd(8)}</span>
-              {log.text}
-            </div>
-          ))
+          visible.map((log, index) => <LogLine key={index} service={log.service} text={log.text} />)
         )}
       </pre>
+    </div>
+  );
+}
+
+/** 강조는 줄마다 한 번만 계산해 두고, 이미 그린 줄은 다시 나누지 않는다 */
+function LogLine({ service, text }: { service: string; text: string }) {
+  const tokens = useMemo(() => highlightLogLine(text), [text]);
+  return (
+    <div className="whitespace-pre-wrap break-all">
+      <span className="text-muted">{service.padEnd(8)}</span>
+      {tokens.map((token, index) => (
+        <span key={index} className={token.tone ? TONE_CLASS[token.tone] : undefined}>
+          {token.content}
+        </span>
+      ))}
     </div>
   );
 }

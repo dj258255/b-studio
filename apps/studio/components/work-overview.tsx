@@ -2,11 +2,23 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { AgentAttention, AgentItem, AgentState, AgentTotals } from "@/lib/server/agents-overview";
 import { ATTENTION_LABEL, readNotifyEnabled, writeNotifyEnabled } from "@/lib/attention-notify";
 import { MAX_SPLIT, splitHref } from "@/lib/split";
-import { filterWork, groupWork, initialWorkTab, membersSummary, splitSelection, WORK_MODE_LABEL, workCounts, type WorkItem, type WorkTab } from "@/lib/work-list";
+import {
+  deleteBlockReason,
+  deleteHref,
+  filterWork,
+  groupWork,
+  initialWorkTab,
+  membersSummary,
+  splitSelection,
+  WORK_MODE_LABEL,
+  workCounts,
+  type WorkItem,
+  type WorkTab,
+} from "@/lib/work-list";
 import { Dot, TONE_TEXT, type Tone } from "./status";
 
 /** 작업 화면이 다시 읽는 간격. 보이는 탭일 때만 읽는다 */
@@ -56,44 +68,69 @@ export function WorkOverview({
   const works = useMemo(() => groupWork(data.items), [data.items]);
   const [tab, setTab] = useState<WorkTab>(() => initialWorkTab(groupWork(initial.items)));
   const [selected, setSelected] = useState<string[]>([]);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkError, setBulkError] = useState<string>();
+
+  const load = useCallback((force = false) => {
+    // 숨은 탭에서는 서버를 두드리지 않는다. 다시 보이면 다음 주기에 읽는다(강제로 다시 읽을 때는 예외)
+    if (!force && document.visibilityState !== "visible") return;
+    return fetch("/api/agents", { cache: "no-store" })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as { items?: AgentItem[]; totals?: AgentTotals; error?: string };
+        if (!response.ok || !body.items || !body.totals) {
+          setError(body.error ?? "작업 목록을 불러오지 못했습니다");
+          return;
+        }
+        setData({ items: body.items, totals: body.totals });
+        setUpdatedAt(new Date().toISOString());
+        setError(undefined);
+      })
+      .catch(() => {
+        setError("작업 목록을 불러오지 못했습니다");
+      });
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      // 숨은 탭에서는 서버를 두드리지 않는다. 다시 보이면 다음 주기에 읽는다
-      if (document.visibilityState !== "visible") return;
-      fetch("/api/agents", { cache: "no-store" })
-        .then(async (response) => {
-          const body = (await response.json().catch(() => ({}))) as { items?: AgentItem[]; totals?: AgentTotals; error?: string };
-          if (cancelled) return;
-          if (!response.ok || !body.items || !body.totals) {
-            setError(body.error ?? "작업 목록을 불러오지 못했습니다");
-            return;
-          }
-          setData({ items: body.items, totals: body.totals });
-          setUpdatedAt(new Date().toISOString());
-          setError(undefined);
-        })
-        .catch(() => {
-          if (!cancelled) setError("작업 목록을 불러오지 못했습니다");
-        });
-    };
-    load();
-    const timer = setInterval(load, REFRESH_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
+    void load();
+    const timer = setInterval(() => void load(), REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [load]);
 
   const counts = workCounts(works);
   const shown = filterWork(works, tab);
   // 목록이 바뀌어 사라진 작업은 고른 것에서 뺀다
   const liveSelected = selected.filter((key) => works.some((work) => work.key === key));
   const selection = splitSelection(works, liveSelected);
+  const deletableSelected = liveSelected.filter((key) => {
+    const work = works.find((candidate) => candidate.key === key);
+    return work && !deleteBlockReason(work);
+  });
 
   function toggle(key: string) {
     setSelected((current) => (current.includes(key) ? current.filter((candidate) => candidate !== key) : [...current, key]));
+  }
+
+  /** 지운 뒤 목록을 다시 받고 고른 것에서도 뺀다(사라진 줄은 고를 수 없다) */
+  function onDeleted(key: string) {
+    setSelected((current) => current.filter((candidate) => candidate !== key));
+    void load(true);
+  }
+
+  async function deleteSelected() {
+    setBulkDeleting(true);
+    setBulkError(undefined);
+    const results = await Promise.all(
+      deletableSelected.map((key) =>
+        fetch(deleteHref(key), { method: "POST" })
+          .then(async (response) => ({ key, ok: response.ok, error: response.ok ? undefined : ((await response.json().catch(() => ({}))) as { error?: string }).error }))
+          .catch(() => ({ key, ok: false, error: undefined })),
+      ),
+    );
+    const failed = results.filter((result) => !result.ok);
+    setSelected((current) => current.filter((key) => !results.some((result) => result.key === key && result.ok)));
+    setBulkDeleting(false);
+    if (failed.length > 0) setBulkError(`${failed.length}개를 지우지 못했습니다${failed[0]?.error ? `: ${failed[0].error}` : ""}`);
+    void load(true);
   }
 
   return (
@@ -138,7 +175,7 @@ export function WorkOverview({
       ) : (
         <ul className="flex flex-col gap-2">
           {shown.map((work) => (
-            <WorkRow key={work.key} work={work} checked={liveSelected.includes(work.key)} onToggle={() => toggle(work.key)} />
+            <WorkRow key={work.key} work={work} checked={liveSelected.includes(work.key)} onToggle={() => toggle(work.key)} onDeleted={() => onDeleted(work.key)} />
           ))}
         </ul>
       )}
@@ -156,6 +193,16 @@ export function WorkOverview({
           <button type="button" onClick={() => setSelected([])} className="text-muted underline underline-offset-2 hover:text-ink">
             선택 해제
           </button>
+          {bulkError && <span className="text-fail text-xs">{bulkError}</span>}
+          <button
+            type="button"
+            disabled={bulkDeleting || deletableSelected.length === 0}
+            onClick={() => void deleteSelected()}
+            title={deletableSelected.length === 0 ? "고른 것 중 지금 지울 수 있는 것이 없습니다" : undefined}
+            className="rounded-control px-3 py-2 font-medium text-fail hover:bg-fail/10 disabled:opacity-40"
+          >
+            {bulkDeleting ? "지우는 중…" : `선택한 것 지우기${deletableSelected.length > 0 ? ` (${deletableSelected.length})` : ""}`}
+          </button>
           <button
             type="button"
             disabled={selection.ids.length === 0}
@@ -170,10 +217,35 @@ export function WorkOverview({
   );
 }
 
-function WorkRow({ work, checked, onToggle }: { work: WorkItem; checked: boolean; onToggle: () => void }) {
+function WorkRow({ work, checked, onToggle, onDeleted }: { work: WorkItem; checked: boolean; onToggle: () => void; onDeleted: () => void }) {
   const state = STATE[work.state];
   const summary = membersSummary(work);
   const selectable = work.sessionIds.length > 0;
+  const blockReason = deleteBlockReason(work);
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
+
+  async function confirmDelete() {
+    setDeleting(true);
+    setDeleteError(undefined);
+    try {
+      const response = await fetch(deleteHref(work.key), { method: "POST" });
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        setDeleteError(body.error ?? "지우지 못했습니다");
+        setDeleting(false);
+        setConfirming(false);
+        return;
+      }
+      onDeleted();
+    } catch {
+      setDeleteError("지우지 못했습니다");
+      setDeleting(false);
+      setConfirming(false);
+    }
+  }
+
   return (
     <li className="glass flex gap-3 rounded-panel px-4 py-3">
       <input
@@ -198,15 +270,41 @@ function WorkRow({ work, checked, onToggle }: { work: WorkItem; checked: boolean
           </div>
           <p className="mt-1.5 font-medium break-words">{work.title}</p>
         </Link>
-        <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
-          <span>{work.projectName}</span>
-          {summary && <span>{summary}</span>}
-          {work.mode === "single" && work.members[0]?.backend && <span>백엔드 {work.members[0].backend}</span>}
-          {work.mode === "single" && work.members[0]?.runningForMs !== undefined && <span>진행 {formatDuration(work.members[0].runningForMs)}</span>}
-          {work.tokens && <span>토큰 {formatCount(totalTokens(work.tokens))}</span>}
-          {work.mode === "single" && work.members[0]?.activity && <span>{work.members[0].activity}</span>}
-          {work.owner && <span>만든 사람 {work.owner}</span>}
-        </p>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <p className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+            <span>{work.projectName}</span>
+            {summary && <span>{summary}</span>}
+            {work.mode === "single" && work.members[0]?.backend && <span>백엔드 {work.members[0].backend}</span>}
+            {work.mode === "single" && work.members[0]?.runningForMs !== undefined && <span>진행 {formatDuration(work.members[0].runningForMs)}</span>}
+            {work.tokens && <span>토큰 {formatCount(totalTokens(work.tokens))}</span>}
+            {work.mode === "single" && work.members[0]?.activity && <span>{work.members[0].activity}</span>}
+            {work.owner && <span>만든 사람 {work.owner}</span>}
+          </p>
+          <span className="ml-auto flex items-center gap-2 text-xs">
+            {deleteError && <span className="text-fail">{deleteError}</span>}
+            {confirming ? (
+              <span className="flex items-center gap-1.5">
+                <span className="text-muted">삭제할까요?</span>
+                <button type="button" disabled={deleting} onClick={() => void confirmDelete()} className="font-medium text-fail hover:underline disabled:opacity-50">
+                  삭제
+                </button>
+                <button type="button" disabled={deleting} onClick={() => setConfirming(false)} className="text-muted hover:underline disabled:opacity-50">
+                  취소
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                disabled={Boolean(blockReason)}
+                onClick={() => setConfirming(true)}
+                title={blockReason ?? "이 기록을 지웁니다"}
+                className="glass-soft rounded-control px-2 py-1 font-medium text-muted hover:text-fail disabled:opacity-40"
+              >
+                지우기
+              </button>
+            )}
+          </span>
+        </div>
         {work.mode !== "single" && work.sessionIds.length > 0 && (
           <ul className="mt-2 flex flex-wrap gap-1.5" aria-label={work.mode === "fleet" ? "참가자" : "레인"}>
             {work.members
