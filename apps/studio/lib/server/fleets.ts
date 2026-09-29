@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { estimateCost } from '@b-studio/agent';
@@ -8,7 +8,7 @@ import type { SessionMode, StudioEvent } from '@/lib/studio-events';
 import { StudioError } from './errors';
 import { listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
-import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, subscribe, type BackendPreflights } from './sessions';
+import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
 
 const MAX_MEMBERS = 4;
 const MAX_REQUEST = 20_000;
@@ -189,6 +189,32 @@ export function chooseFleetWinner(id: string, sessionId: string, owner: string):
   fleet.winnerSessionId = sessionId;
   persist(fleet);
   return clone(fleet);
+}
+
+/**
+ * Agent Fleet 기록을 지운다. 참가자가 하나라도 아직 진행 중(booting·running)이면 지우지 않는다.
+ * 지울 때는 이 Fleet을 통째로 지우겠다는 의사가 이미 분명하므로, 끝난 참가자든 실패한 참가자든 그 세션 기록도
+ * 함께 지운다(세션이 아직 켜져 있으면 먼저 멈춘 뒤 지운다). 실패해 세션을 만들지 못한 참가자(`failed-` id)는 건너뛴다.
+ */
+export async function deleteFleet(id: string, owner: string): Promise<void> {
+  ensureLoaded();
+  const fleet = fleets.get(id);
+  if (!fleet) throw new StudioError(404, 'Agent Fleet을 찾을 수 없습니다');
+  if (fleet.owner !== owner) throw new StudioError(403, '이 Agent Fleet을 지울 수 없습니다');
+  if (fleet.members.some((member) => !terminal(member.status))) {
+    throw new StudioError(409, '진행 중인 참가자가 있어 지울 수 없습니다. 끝나거나 멈춘 뒤 지우세요');
+  }
+  fleets.delete(id);
+  removeFleetFile(id);
+  await Promise.all(fleet.members.filter((member) => !member.sessionId.startsWith('failed-')).map((member) => stopAndDeleteSession(member.sessionId)));
+}
+
+function removeFleetFile(id: string): void {
+  try {
+    unlinkSync(path.join(root(), `${id}.json`));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`[b-studio] Agent Fleet ${id} 파일을 지우지 못했습니다`, error);
+  }
 }
 
 function watchMember(fleet: FleetView, member: FleetMemberView): void {
