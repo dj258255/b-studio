@@ -60,6 +60,14 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
 
   const planRequest = snapshot.mode === "demo" ? snapshot.nextDemoRequest : BUILD_FROM_PLAN;
+  /** 에이전트가 되물은 질문. 답을 보내면 지워진다 */
+  const pending = snapshot.pendingQuestion;
+
+  /** 질문 카드의 답을 한 요청으로 보낸다. 기존 전송 경로를 그대로 쓴다(첨부 칩도 함께 실린다) */
+  function answerQuestion(value: string) {
+    if (!pending) return;
+    void send(`[질문] ${pending.question}\n[답] ${value}`, "build");
+  }
 
   async function send(request: string, sendIntent: Intent = intent) {
     setSending(true);
@@ -142,6 +150,11 @@ export function ChatPanel({ view }: { view: SessionView }) {
           </li>
         ))}
         {snapshot.running && !runId && <li className="text-sm text-wait motion-safe:animate-pulse">작업하는 중</li>}
+        {pending && (
+          <li>
+            <QuestionCard question={pending.question} options={pending.options} allowOther={pending.allowOther} disabled={!canSend} onAnswer={answerQuestion} />
+          </li>
+        )}
       </ol>
 
       <form
@@ -570,13 +583,15 @@ function ChatEntry({ item }: { item: ChatItem }) {
       );
 
     case "outcome": {
-      const tone = item.status === "done" ? "text-pass" : item.status === "cancelled" ? "text-muted" : "text-fail";
+      const tone = item.status === "done" ? "text-pass" : item.status === "awaiting_input" ? "text-wait" : item.status === "cancelled" ? "text-muted" : "text-fail";
       const text =
         item.status === "done"
           ? `${item.intent === "ask" ? "답변 완료" : "완료"}, ${item.turns ?? 0}턴`
-          : item.status === "cancelled"
-            ? item.summary
-            : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`;
+          : item.status === "awaiting_input"
+            ? "답을 기다립니다"
+            : item.status === "cancelled"
+              ? item.summary
+              : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`;
       return (
         <div className="text-sm">
           <p className={tone}>{text}</p>
@@ -585,6 +600,69 @@ function ChatEntry({ item }: { item: ChatItem }) {
       );
     }
   }
+}
+
+/**
+ * 에이전트가 되물은 질문 카드. 선택지를 누르면 `[질문] …\n[답] …` 요청으로 보내 이 대화를 이어서 만든다.
+ * 실행을 붙잡고 기다리지 않고 질문을 남기고 끝난 뒤, 답을 다음 요청으로 받는 흐름의 화면이다
+ */
+function QuestionCard({
+  question,
+  options,
+  allowOther,
+  disabled,
+  onAnswer,
+}: {
+  question: string;
+  options: string[];
+  allowOther: boolean;
+  disabled: boolean;
+  onAnswer: (value: string) => void;
+}) {
+  const [other, setOther] = useState("");
+
+  return (
+    <div className="rounded-md border border-ink/40 bg-panel px-3.5 py-3">
+      <p className="text-sm font-medium">{question}</p>
+      <div className="mt-2 flex flex-col gap-1.5">
+        {options.map((option) => (
+          <button
+            key={option}
+            type="button"
+            disabled={disabled}
+            onClick={() => onAnswer(option)}
+            className="rounded-control border border-line bg-panel px-3 py-1.5 text-left text-sm font-medium hover:border-ink disabled:opacity-50"
+          >
+            {option}
+          </button>
+        ))}
+      </div>
+      {allowOther && (
+        <form
+          className="mt-2 flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (other.trim()) onAnswer(other.trim());
+          }}
+        >
+          <label htmlFor="answer-other" className="sr-only">
+            직접 입력
+          </label>
+          <input
+            id="answer-other"
+            value={other}
+            onChange={(event) => setOther(event.target.value)}
+            placeholder="직접 입력"
+            className="min-w-0 flex-1 rounded-control border border-line bg-panel px-2 py-1.5 text-sm"
+          />
+          <button type="submit" disabled={disabled || !other.trim()} className="rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50">
+            답하기
+          </button>
+        </form>
+      )}
+      <p className="mt-2 text-xs text-muted">답을 보내면 이 대화를 이어서 만듭니다.</p>
+    </div>
+  );
 }
 
 function stageLabel(stage: string): string {

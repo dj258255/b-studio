@@ -16,7 +16,7 @@ import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type ToolContext } from './tools';
+import { buildTools, executeTool, type AskUserQuestion, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -90,6 +90,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     effort = 'high',
     account,
     sdk = DEFAULT_SDK,
+    interactive = false,
     intent = 'build',
   } = options;
   signal?.throwIfAborted();
@@ -109,6 +110,10 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onServiceStatus,
     readOnly: ask,
     design: options.design,
+    onQuestion: (question) => {
+      asked = question;
+      onEvent({ type: 'question', ...question });
+    },
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
@@ -117,7 +122,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
     toolResults: createToolResultCache(),
   };
-  const specs = buildTools(project, { design: options.design !== undefined });
+  const specs = buildTools(project, { design: options.design !== undefined, interactive });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다
@@ -175,14 +180,17 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let lastText = '';
   let announced = false;
   let result: ClaudeCodeResult | undefined;
+  // ask_user가 남긴 질문. 있으면 쿼리를 중단하고 awaiting_input으로 끝내 사용자 답을 기다린다
+  let asked: AskUserQuestion | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion): void => {
     // 본 대화의 서로 다른 assistant 메시지 수. 이미 있는 messageIds Set의 크기와 같다
     metrics.modelCalls = messageIds.size;
     result = {
       status,
       summary,
       changedFiles: workspace.changedFiles(),
+      ...(question ? { question } : {}),
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
@@ -192,7 +200,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       metrics: { ...metrics },
       sessionId,
     };
-    onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
+    onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다
     input.close();
   };
@@ -269,6 +277,19 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           const failure = describeResultFailure(message);
           if (failure) {
             finish('failed', failure);
+            break;
+          }
+          // 되묻고 멈추기: ask_user가 질문을 남겼으면 쿼리를 중단하고 실행을 끝낸다.
+          // 세션 id는 그대로 저장되어 다음 요청이 이 대화를 이어받는다.
+          // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
+          if (asked) {
+            await conversation.interrupt().catch(() => {});
+            if (gate && workspace.changedFiles().length > 0) {
+              const gateStarted = performance.now();
+              await gate.check();
+              metrics.gateMs += Math.round(performance.now() - gateStarted);
+            }
+            finish('awaiting_input', asked.question, asked);
             break;
           }
           // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
@@ -394,6 +415,7 @@ export function zodShape(schema: { properties?: unknown }): Record<string, z.Zod
     if (value.type === 'string' && value.enum?.length) type = z.enum(value.enum.map(String) as [string, ...string[]]);
     else if (value.type === 'string') type = z.string();
     else if (value.type === 'integer') type = z.number().int();
+    else if (value.type === 'boolean') type = z.boolean();
     else if (value.type === 'array' && value.items?.type === 'string') type = z.array(z.string());
     else throw new Error(`지원하지 않는 도구 입력 형식입니다: ${key} ${JSON.stringify(value)}`);
     shape[key] = value.description ? type.describe(value.description) : type;

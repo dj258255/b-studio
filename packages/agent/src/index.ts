@@ -92,7 +92,7 @@ export {
   type PullRequestResult,
   type RemoteLocation,
 } from './repository';
-export { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
+export { buildTools, executeTool, type AskUserQuestion, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {
   clipCommandOutput,
   clipText,

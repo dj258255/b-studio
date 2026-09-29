@@ -10,7 +10,7 @@ import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type Ru
 import { startToolServer } from './mcp-http-server';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
+import { buildTools, executeTool, type AskUserQuestion, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -120,6 +120,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     model,
     effort,
     sdk = DEFAULT_SDK,
+    interactive = false,
     intent = 'build',
   } = options;
   signal?.throwIfAborted();
@@ -141,6 +142,10 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     signal,
     onServiceStatus,
     readOnly: ask,
+    onQuestion: (question) => {
+      asked = question;
+      onEvent({ type: 'question', ...question });
+    },
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
@@ -149,7 +154,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
     toolResults: createToolResultCache(),
   };
-  const specs = buildTools(project);
+  const specs = buildTools(project, { interactive });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent 러너와 같은 큐를 쓴다
@@ -167,12 +172,15 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   let completedTurns = 0;
   let lastText = '';
   let threadId: string | undefined;
+  // ask_user가 남긴 질문. 있으면 이 턴이 끝날 때 실행을 끝내고 사용자 답을 기다린다
+  let asked: AskUserQuestion | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion): void => {
     result = {
       status,
       summary,
       changedFiles: workspace.changedFiles(),
+      ...(question ? { question } : {}),
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
@@ -182,7 +190,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
       metrics: { ...metrics },
       threadId,
     };
-    onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
+    onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
   };
 
   try {
@@ -293,6 +301,19 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
         break;
       }
       if (text) lastText = text;
+
+      // 되묻고 멈추기: 질문이 나오면 이 턴이 끝날 때 멈춘다.
+      // Codex는 대화를 이어받지 못하므로 다음 요청은 codex.recent 요약 맥락으로 이어진다(studio가 붙인다).
+      // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
+      if (asked) {
+        if (gate && workspace.changedFiles().length > 0) {
+          const gateStarted = performance.now();
+          await gate.check();
+          metrics.gateMs += Math.round(performance.now() - gateStarted);
+        }
+        finish('awaiting_input', asked.question, asked);
+        break;
+      }
 
       // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
       if (!gate) {

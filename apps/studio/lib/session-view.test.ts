@@ -46,6 +46,26 @@ describe('reduceSession', () => {
     expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
   });
 
+  it('되묻기 질문을 스냅샷에 남기고, 다음 요청을 보내면 지운다', () => {
+    const asked = fold([
+      { type: 'question', runId: 'r1', question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true },
+      { type: 'run_finished', runId: 'r1', status: 'awaiting_input', summary: '어떤 형태로 만들까요?' },
+    ]);
+    expect(asked.snapshot.pendingQuestion).toEqual({ runId: 'r1', question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(asked.chat.at(-1)).toMatchObject({ kind: 'outcome', status: 'awaiting_input' });
+
+    const answered = reduceSession(asked, { type: 'run_started', runId: 'r2', request: '[질문] 어떤 형태로 만들까요?\n[답] 표' });
+    expect(answered.snapshot.pendingQuestion).toBeUndefined();
+  });
+
+  it('끝나거나 실패한 실행이 남긴 질문은 남기지 않는다', () => {
+    const failed = fold([
+      { type: 'question', runId: 'r1', question: 'q', options: ['a', 'b'], allowOther: false },
+      { type: 'run_finished', runId: 'r1', status: 'failed', summary: '실패' },
+    ]);
+    expect(failed.snapshot.pendingQuestion).toBeUndefined();
+  });
+
   it('재시작으로 바뀐 서비스 주소를 반영한다', () => {
     const view = fold([
       { type: 'service', service: 'api', state: 'ready', url: 'http://127.0.0.1:32769' },
