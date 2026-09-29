@@ -1,4 +1,7 @@
 import type { AgentUsage } from '@b-studio/agent';
+import type { ContextGrowthReport } from './context-growth';
+
+export type { ContextGrowthReport, ContextGrowthSource, ContextGrowthSourceKind, ContextGrowthTurn, ContextJump } from './context-growth';
 
 /** 토큰 탭이 주고받는 형태. 서버(token-report)와 화면(token-view)이 함께 쓴다(서버 전용 코드는 담지 않는다) */
 
@@ -158,4 +161,6 @@ export interface TokenReport {
   priceNote?: string;
   /** 승격이 있었으면 어느 게이트 실패 뒤에 무엇으로 올렸는지 */
   escalation?: { from: string; to: string; attempt: number };
+  /** 턴별 컨텍스트 증가와 급증(jump) 분석. 기존 보고서와 호환하도록 선택 필드로 둔다 */
+  contextGrowth?: ContextGrowthReport;
 }

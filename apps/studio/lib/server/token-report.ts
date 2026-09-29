@@ -8,6 +8,7 @@
  * 토큰을 글자 수에서 추정하지 않는다. 언어·토크나이저마다 달라 틀린 숫자를 만들기 때문이다. 그래서 경고 규칙도 글자 수로만 판단한다.
  */
 import { isRepeatNote, type AgentEvent, type AgentUsage } from '@b-studio/agent';
+import { analyzeContextGrowth } from '../context-growth';
 import type { StudioEvent } from '../studio-events';
 import { costForUsageByModel, estimateCostUsd, matchTokenPrices, parsePriceTable, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTrimmed, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
 
@@ -42,6 +43,8 @@ interface DraftRun {
   turns: Array<{ turn: number; contextTokens: number; output: number; cacheRead: number }>;
   /** 턴별로 비운 도구 결과(횟수·글자). 비우기는 그 턴의 모델 호출 전에 일어나 turn_usage보다 먼저 온다 */
   clearedByTurn: Map<number, { count: number; chars: number }>;
+  /** 이 실행의 agent 이벤트를 그대로 모아 둔다(context-growth.ts가 턴별 증가 원인을 다시 계산할 때 쓴다) */
+  rawEvents: StudioEvent[];
   pending: PendingCall[];
   results: RecordedResult[];
   usage: AgentUsage;
@@ -72,12 +75,13 @@ export function buildTokenReports(events: readonly StudioEvent[], pricing: Token
 
   for (const event of events) {
     if (event.type === 'run_started') {
-      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), pending: [], results: [], usage: emptyUsage() };
+      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), rawEvents: [], pending: [], results: [], usage: emptyUsage() };
       runs.push(current);
       continue;
     }
     if (!current) continue;
     if (event.type === 'agent') {
+      current.rawEvents.push(event);
       applyAgentEvent(current, event.event);
       continue;
     }
@@ -192,6 +196,7 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
     ...(cost.estimatedCostUsd !== undefined ? { estimatedCostUsd: cost.estimatedCostUsd } : {}),
     ...(cost.priceNote ? { priceNote: cost.priceNote } : {}),
     ...(run.escalation ? { escalation: run.escalation } : {}),
+    contextGrowth: analyzeContextGrowth(run.rawEvents),
   };
 }
 
