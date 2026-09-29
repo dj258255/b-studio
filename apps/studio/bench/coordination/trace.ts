@@ -11,6 +11,7 @@
 import { normalizeMessage, signatureKey, signaturesFromReport } from '@b-studio/agent';
 import type { FailureSignature } from '@b-studio/agent';
 import type { StudioEvent } from '../../lib/studio-events';
+import { turnsFromEvents, type TurnRecord } from './turns';
 
 export { normalizeMessage, signatureKey };
 export type { FailureSignature };
@@ -27,6 +28,8 @@ export interface LaneTrace {
   failureSignatures: FailureSignature[];
   /** 같은 서명이 두 번째 이상 나온 횟수 합 */
   repeatedFailures: number;
+  /** 모델 호출마다 문맥 크기·출력·부른 도구. 토큰이 어디서 나왔는지 나눌 때 쓴다(turns.ts) */
+  turns: TurnRecord[];
 }
 
 export function traceFromEvents(sessionId: string, events: StudioEvent[]): LaneTrace {
@@ -70,6 +73,7 @@ export function traceFromEvents(sessionId: string, events: StudioEvent[]): LaneT
     dirsListed: [...dirsListed].sort(),
     failureSignatures,
     repeatedFailures,
+    turns: turnsFromEvents(events),
   };
 }
 

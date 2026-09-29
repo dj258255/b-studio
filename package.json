@@ -21,6 +21,7 @@
     "e2e:two-sessions": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/two-sessions-local.ts",
     "bench:boot": "tsx packages/sandbox/bench/boot.ts",
     "bench:coordination": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/run.ts",
+    "bench:coordination:tokens": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/breakdown-cli.ts",
     "bench:studio-load": "tsx --tsconfig apps/studio/bench/load/tsconfig.json apps/studio/bench/load/studio-load.ts",
     "desktop:dev": "pnpm --filter @b-studio/desktop dev",
     "desktop:build": "pnpm --filter @b-studio/desktop build:app",

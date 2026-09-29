@@ -10,6 +10,7 @@ import type { BenchVerify } from './backends';
 import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
 import type { LaneTrace } from './trace';
+import type { TurnRecord } from './turns';
 
 export interface BenchLaneRow {
   id: string;
@@ -90,6 +91,8 @@ export interface BenchRow {
   traces: LaneTrace[];
   /** 통합 세션의 흔적. 탐색 합계에서는 뺀다 */
   integrationTrace?: LaneTrace;
+  /** P0(그냥 Claude Code)의 모델 호출별 기록. b-studio 전략은 traces[].turns에 있다 */
+  plainTurns?: TurnRecord[];
   /** 레인 합계만 센 탐색량 */
   explore: { filesReadTotal: number; filesReadUnionAcrossLanes: number; readCallsTotal: number };
   /** 검증기가 낸 실패 서명 합계 */

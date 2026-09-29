@@ -13,6 +13,7 @@ import { query, type Options, type SDKMessage } from '@anthropic-ai/claude-agent
 import { ClaudeCodeUsageTracker, describeResultFailure, type AgentUsage } from '@b-studio/agent';
 import { isRateLimited } from './classify';
 import type { BenchTask } from './tasks';
+import { TurnRecorder, type TurnRecord } from './turns';
 
 /** P0가 모델에게 주는 도구. 파일 도구만 — Bash·WebFetch·WebSearch·Task는 주지 않는다 */
 export const PLAIN_BASELINE_TOOLS = ['Read', 'Edit', 'Write', 'Glob', 'Grep'] as const;
@@ -43,6 +44,8 @@ export interface PlainBaselineResult {
   maxContextTokens: number;
   durationMs: number;
   turns: number;
+  /** 모델 호출마다 문맥 크기·출력·부른 도구(b-studio 레인의 trace.turns와 같은 모양) */
+  turnLog: TurnRecord[];
   /** 실행 전후 복사본에서 더하거나 고치거나 지운 파일(정렬) */
   changedFiles: string[];
   summary: string;
@@ -77,6 +80,7 @@ export async function runPlainBaseline({
   const started = performance.now();
   const before = await snapshotFiles(projectDir);
   const tracker = new ClaudeCodeUsageTracker();
+  const recorder = new TurnRecorder();
   const abort = new AbortController();
   const onAbort = () => abort.abort(signal?.reason);
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -114,8 +118,11 @@ export async function runPlainBaseline({
         // 하위 에이전트 메시지는 본 대화로 세지 않는다
         if (message.parent_tool_use_id) continue;
         tracker.observeAssistant(message.message);
+        recorder.observeAssistant(message.message);
         const text = message.message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n').trim();
         if (text) summary = text;
+      } else if (message.type === 'user') {
+        if (!message.parent_tool_use_id) recorder.observeUser(message.message.content);
       } else if (message.type === 'result') {
         tracker.observeResult(message);
         const failure = describeResultFailure(message);
@@ -141,6 +148,7 @@ export async function runPlainBaseline({
     maxContextTokens: tracker.maxContextTokens,
     durationMs: Math.round(performance.now() - started),
     turns: tracker.modelCalls,
+    turnLog: recorder.turns,
     changedFiles: diffFiles(before, after),
     summary,
   };
