@@ -7,7 +7,7 @@ import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
 type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
-type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
+type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; steering?: boolean; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
 
 const fake = vi.hoisted(() => ({
   root: '',
@@ -190,6 +190,8 @@ describe('작업 분해 실행', () => {
     const sendsA = fake.sends.filter((send) => send.sessionId === laneA.sessionId);
     expect(sendsA.map((send) => send.options.writableScope)).toEqual([['web/a'], ['web/a']]);
     expect(sendsA[1]!.request).toContain('같은 작업 공간에서 먼저 끝난 작업:\n- a1');
+    // 레인·통합 실행에는 실행 중 지시(steering)를 켜지 않는다(사람이 보는 단일 세션만)
+    expect(fake.sends.every((send) => send.options.steering === undefined)).toBe(true);
     expect(laneB.sessionId).not.toBe(laneA.sessionId);
 
     const integration = fake.sends.find((send) => send.options.scriptedTurns)!;

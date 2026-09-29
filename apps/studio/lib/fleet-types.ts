@@ -1,6 +1,6 @@
 import type { AgentUsage } from '@b-studio/agent';
 
-export type FleetMemberStatus = 'booting' | 'running' | 'done' | 'failed' | 'error' | 'cancelled';
+export type FleetMemberStatus = 'booting' | 'running' | 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
 
 export interface FleetMemberView {
   sessionId: string;
