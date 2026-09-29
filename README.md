@@ -57,6 +57,25 @@ pnpm studio:local
 
 기본 주소는 `http://127.0.0.1:3000`입니다.
 
+### 한 번에 켜기
+
+웹 스튜디오를 한 명령으로 켜고 끌 수 있습니다. Docker가 꺼져 있으면 colima를 켜고, 준비되면 브라우저를 엽니다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 엽니다.
+
+```bash
+pnpm studio launch              # 이 PC의 Claude Code로 (기본)
+pnpm studio launch --mode demo  # 모델 없이 화면·흐름만
+pnpm studio stop                # launch가 띄운 스튜디오를 멈춘다
+```
+
+`launch`는 백그라운드로 띄웁니다(로그 `~/.cache/b-studio/launch/studio.log`, PID `studio.pid`). `--port`로 포트를 바꾸고 `--no-open`으로 브라우저를 열지 않을 수 있습니다.
+
+프로그램이 이 출력을 읽어야 하면 `--json`을 붙입니다. 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 씁니다(진행 안내는 stderr).
+
+```bash
+pnpm studio launch --json   # {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
+pnpm studio stop --json     # {"stopped":true}
+```
+
 ### CLI로 에이전트 실행
 
 ```bash
