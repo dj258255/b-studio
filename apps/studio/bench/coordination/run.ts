@@ -687,6 +687,7 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     planStatus: plan.status,
     lanes: [],
     traces: [],
+    ...(baseline ? { plainTurns: baseline.turnLog } : {}),
     explore: { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 },
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     // P0는 b-studio 러너를 쓰지 않으므로 오래된 도구 결과 비우기와 무관하다
