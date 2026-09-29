@@ -14,6 +14,7 @@ function report(over: Partial<TokenReport> = {}): TokenReport {
     totals: { inputTokens: 300, outputTokens: 30, cacheReadTokens: 0, cacheWriteTokens: 0 },
     cacheHitRatio: 0,
     cleared: { count: 0, chars: 0 },
+    trimmed: { chars: 0, repeated: 0, estimatedTokens: 0 },
     priceSource: "none",
     ...over,
   };
