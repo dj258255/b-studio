@@ -6,10 +6,11 @@ import type { Thread, ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sd
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import { VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
+import { createToolResultCache } from './tool-output';
+import { buildTools, executeTool, type AskUserQuestion, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -119,7 +120,9 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     model,
     effort,
     sdk = DEFAULT_SDK,
+    interactive = false,
     intent = 'build',
+    steering,
   } = options;
   signal?.throwIfAborted();
   if (resume) {
@@ -140,13 +143,19 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     signal,
     onServiceStatus,
     readOnly: ask,
+    onQuestion: (question) => {
+      asked = question;
+      onEvent({ type: 'question', ...question });
+    },
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+    // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
+    toolResults: createToolResultCache(),
   };
-  const specs = buildTools(project);
+  const specs = buildTools(project, { interactive });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent 러너와 같은 큐를 쓴다
@@ -164,12 +173,15 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   let completedTurns = 0;
   let lastText = '';
   let threadId: string | undefined;
+  // ask_user가 남긴 질문. 있으면 이 턴이 끝날 때 실행을 끝내고 사용자 답을 기다린다
+  let asked: AskUserQuestion | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion): void => {
     result = {
       status,
       summary,
       changedFiles: workspace.changedFiles(),
+      ...(question ? { question } : {}),
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
@@ -179,7 +191,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
       metrics: { ...metrics },
       threadId,
     };
-    onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
+    onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
   };
 
   try {
@@ -199,7 +211,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
           const toolStarted = performance.now();
           const outcome = await executeTool(name, args, context);
           metrics.toolMs += Math.round(performance.now() - toolStarted);
-          onEvent({ type: 'tool_result', name, ok: outcome.ok, content: outcome.content });
+          onEvent({ type: 'tool_result', name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
           return outcome;
         }),
     });
@@ -231,6 +243,12 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();
       onEvent({ type: 'turn', turn });
+      // Codex는 턴 사이에만 지시를 넣을 수 있다. 다음 턴 입력 뒤에 붙여 게이트 피드백보다 뒤에 오게 한다
+      const steeringTexts = takeSteering(steering);
+      if (steeringTexts.length > 0) {
+        pending = `${pending}\n\n${formatSteering(steeringTexts)}`;
+        onEvent({ type: 'steer_applied', count: steeringTexts.length });
+      }
       const { events } = await thread.runStreamed(pending, { signal });
 
       let failure: string | undefined;
@@ -247,14 +265,26 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
             }
             break;
 
-          case 'turn.completed':
+          case 'turn.completed': {
             // Codex 이벤트는 모델 호출 단위가 아니라 턴 단위라 턴 수로 센다
             completedTurns += 1;
             metrics.modelCalls = completedTurns;
             addUsage(usage, event.usage);
-            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(event.usage));
+            const turnContext = contextTokens(event.usage);
+            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
             onEvent({ type: 'tokens', usage: { ...usage } });
+            // 턴 하나의 사용량. 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
+            onEvent({
+              type: 'turn_usage',
+              turn: completedTurns,
+              inputTokens: event.usage.input_tokens,
+              outputTokens: event.usage.output_tokens,
+              cacheReadTokens: event.usage.cached_input_tokens ?? 0,
+              cacheWriteTokens: event.usage.cache_write_input_tokens ?? 0,
+              contextTokens: turnContext,
+            });
             break;
+          }
 
           case 'turn.failed':
             failure = classifyFailure(event.error.message);
@@ -278,6 +308,19 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
         break;
       }
       if (text) lastText = text;
+
+      // 되묻고 멈추기: 질문이 나오면 이 턴이 끝날 때 멈춘다.
+      // Codex는 대화를 이어받지 못하므로 다음 요청은 codex.recent 요약 맥락으로 이어진다(studio가 붙인다).
+      // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
+      if (asked) {
+        if (gate && workspace.changedFiles().length > 0) {
+          const gateStarted = performance.now();
+          await gate.check();
+          metrics.gateMs += Math.round(performance.now() - gateStarted);
+        }
+        finish('awaiting_input', asked.question, asked);
+        break;
+      }
 
       // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
       if (!gate) {
