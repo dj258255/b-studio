@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
 import type { ProjectSummary } from '@/lib/studio-events';
+import type { TaskPlanMetrics } from '@/lib/task-plan-metrics';
 import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
 import { describeTokens, hasTokens } from '@/lib/usage';
 import { PlanGraphView } from './plan-graph';
@@ -214,6 +215,26 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
   );
 }
 
+/** 계획 카드의 토큰 합계. 모델별 합(usageByModel)이 있으면 모델마다 한 줄 더 적는다 */
+export function PlanTokenTotals({ metrics }: { metrics?: TaskPlanMetrics }) {
+  if (!metrics || !hasTokens(metrics.usage)) return null;
+  const models = Object.entries(metrics.usageByModel ?? {});
+  return (
+    <div className="mt-3 text-sm text-muted">
+      <p>토큰 합계 {describeTokens(metrics.usage)}</p>
+      {models.length > 0 && (
+        <ul className="mt-1 space-y-0.5 text-xs">
+          {models.map(([model, usage]) => (
+            <li key={model}>
+              <span className="font-mono text-ink">{model}</span> {describeTokens(usage)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function PlanResult({
   plan,
   canPublish,
@@ -318,6 +339,7 @@ function PlanResult({
         </div>
         {plan.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.error}</p>}
         {plan.rejectedReason && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">거부 사유: {plan.rejectedReason}</p>}
+        <PlanTokenTotals metrics={plan.metrics} />
         <p className="mt-3 text-sm text-muted">통합 결과는 자동으로 병합·푸시·배포하지 않습니다. 통합 세션에서 diff와 검증 근거를 확인한 뒤 내보내세요.</p>
       </header>
 
