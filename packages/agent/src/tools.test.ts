@@ -156,6 +156,46 @@ describe('되묻기 도구(ask_user)', () => {
   });
 });
 
+describe('방식 제안 도구(propose_mode)', () => {
+  it('interactive일 때만 목록에 넣는다(ask_user와 같다)', () => {
+    expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('propose_mode');
+    expect(buildTools(project, { interactive: true }).map((candidate) => candidate.name)).toContain('propose_mode');
+  });
+
+  it('제안을 질문으로 넘긴다. 첫 선택지는 넘기기, 둘째는 한 명으로 계속이다', async () => {
+    const asked: unknown[] = [];
+    const askContext: ToolContext = { ...context, onQuestion: (question) => asked.push(question) };
+
+    const outcome = await executeTool('propose_mode', { mode: 'split', reason: 'API와 화면이 계약만 공유해 동시에 만들 수 있습니다', request: '주문 API와 화면을 만들어줘' }, askContext);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.content).toContain('End this run');
+    expect(asked).toEqual([
+      {
+        question: 'API와 화면이 계약만 공유해 동시에 만들 수 있습니다',
+        options: ['나눠서 병렬로 하기', '한 명으로 계속'],
+        allowOther: false,
+        proposal: { mode: 'split', request: '주문 API와 화면을 만들어줘' },
+      },
+    ]);
+  });
+
+  it('방식·이유·요청을 검증하고, onQuestion이 없는 실행은 거부한다', async () => {
+    let asked = 0;
+    const askContext: ToolContext = { ...context, onQuestion: () => (asked += 1) };
+    const invalid = [
+      { mode: 'solo', reason: 'r', request: 'q' },
+      { mode: 'fleet', reason: '', request: 'q' },
+      { mode: 'fleet', reason: 'r'.repeat(301), request: 'q' },
+      { mode: 'fleet', reason: 'r', request: '' },
+      { mode: 'fleet', reason: 'r', request: 'q'.repeat(2_001) },
+    ];
+    for (const input of invalid) expect((await executeTool('propose_mode', input, askContext)).ok).toBe(false);
+    expect(asked).toBe(0);
+    expect((await executeTool('propose_mode', { mode: 'fleet', reason: 'r', request: 'q' }, context)).ok).toBe(false);
+  });
+});
+
 describe('실행 정책', () => {
   it('샌드박스 실행 전에 위험 명령을 차단하고 실행하지 않는다', async () => {
     let called = false;

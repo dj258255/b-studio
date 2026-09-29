@@ -162,7 +162,7 @@ export {
   type RemoteLocation,
   type SubIssueResult,
 } from './repository';
-export { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
+export { buildTools, executeTool, PROPOSAL_OPTIONS, type AskUserQuestion, type BoardAccess, type ModeProposal, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {
   Board,
   canRead,

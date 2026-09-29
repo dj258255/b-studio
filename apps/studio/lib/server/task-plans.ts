@@ -72,20 +72,33 @@ const RUN_TIMEOUT_MS = 30 * 60_000;
 /** 통합 세션에 다시 쓸 파일 하나의 상한. 생성물이나 바이너리가 레인 결과에 섞였을 때 통합을 멈춘다 */
 const MAX_INTEGRATION_FILE_BYTES = 256 * 1024;
 
-const plans = new Map<string, TaskPlanView>();
+/**
+ * 계획·게시판·가림기 상태. 개발 서버에서 페이지와 API 라우트가 이 모듈을 따로 불러오거나 HMR로 다시 읽어도 같은 상태를 보도록
+ * 전역에 둔다(sessions.ts와 같은 이유). 따로 두면 페이지 쪽이 디스크에서 다시 읽어 진행 중인 계획을 "재시작으로 멈춤"(중단됨)으로 잘못 보였다
+ */
+interface TaskPlanStore {
+  plans: Map<string, TaskPlanView>;
+  boards: Map<string, Board>;
+  redactors: Map<string, Redactor>;
+  integrationPageChecks: Map<string, readonly WorkflowPageCheck[]>;
+  loaded: boolean;
+}
+const globalPlans = globalThis as typeof globalThis & { __bStudioTaskPlans?: TaskPlanStore };
+const planStore: TaskPlanStore = (globalPlans.__bStudioTaskPlans ??= { plans: new Map(), boards: new Map(), redactors: new Map(), integrationPageChecks: new Map(), loaded: false });
+
+const plans = planStore.plans;
 /** 계획별 조율 게시판. 서버 메모리에만 있고, 재시작하면 사라진다(그때는 조율 없이 이어서 한다) */
-const boards = new Map<string, Board>();
+const boards = planStore.boards;
 /**
  * S3에서 모델이 게시판에 쓴 본문·refs를 게시 전에 가리는 가림기. 조율 모듈(coordination/)이 아니라
  * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
  */
-const redactors = new Map<string, Redactor>();
+const redactors = planStore.redactors;
 /**
  * 계획별 통합 게이트 전용 pageChecks(S 서버 안에서만 넘긴다). 레인 게이트는 그대로 두고 통합 세션에만 덧붙인다.
  * 게시판처럼 서버 메모리에만 있고 재시작하면 사라진다(그때는 통합을 다시 시도해도 확인 없이 돈다)
  */
-const integrationPageChecks = new Map<string, readonly WorkflowPageCheck[]>();
-let loaded = false;
+const integrationPageChecks = planStore.integrationPageChecks;
 
 /**
  * 조율 전략 S2~S5. presetPlan과 같은 규칙으로 서버 안에서만 넘긴다(HTTP 라우트는 받지 않는다).
@@ -900,8 +913,8 @@ function hasResultRecord(lane: TaskPlanLaneView): boolean {
 }
 
 function ensureLoaded(): void {
-  if (loaded) return;
-  loaded = true;
+  if (planStore.loaded) return;
+  planStore.loaded = true;
   try {
     for (const name of readdirSync(/* turbopackIgnore: true */ root())) {
       if (!name.endsWith('.json')) continue;

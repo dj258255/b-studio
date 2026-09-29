@@ -700,6 +700,22 @@ export function cancelRun(id: string, runId: string): void {
  * 실행 중인 요청에 진행 중 지시를 넣는다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다.
  * 지금 하던 도구 호출을 끊지 않는다. 사람이 보는 단일 세션(steering 큐가 있는 실행)만 받는다.
  */
+/**
+ * 에이전트의 제안(propose_mode)을 받아 요청을 나눠서 병렬·여러 명 비교로 넘겼다고 남긴다(ADR-068).
+ * 넘기기 자체(비교·계획 만들기)는 화면이 기존 API로 하고, 여기서는 질문 카드를 치우고 대화에 넘긴 곳을 남긴다.
+ * 제안이 없는 질문이거나 다른 질문이면 거부한다(늦게 온 요청이 새 질문을 치우지 않게)
+ */
+export function recordHandoff(id: string, input: { runId: string; to: 'split' | 'fleet'; href: string }): SessionSnapshot {
+  const session = requireSession(id);
+  const pending = session.snapshot.pendingQuestion;
+  if (!pending?.proposal || pending.runId !== input.runId) throw new StudioError(409, '넘길 제안이 없습니다');
+  if (pending.proposal.mode !== input.to) throw new StudioError(409, '제안한 방식과 다릅니다');
+  if (!/^\/(fleets|task-plans)\?id=[\w%-]+$/.test(input.href)) throw new StudioError(400, '넘긴 곳 주소가 올바르지 않습니다');
+  session.snapshot.pendingQuestion = undefined;
+  emit(session, { type: 'question_dismissed', runId: input.runId, to: input.to, href: input.href });
+  return session.snapshot;
+}
+
 export function steerRun(id: string, text: string): { runId: string } {
   const session = requireSession(id);
   if (session.snapshot.mode === 'demo') throw new StudioError(409, '이 모드는 실행 중 지시를 지원하지 않습니다');
@@ -1427,6 +1443,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         question: result.question.question,
         options: result.question.options,
         allowOther: result.question.allowOther,
+        ...(result.question.proposal ? { proposal: result.question.proposal } : {}),
       };
     }
     if (!ask) {
@@ -1588,7 +1605,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     signal,
     onEvent: (event: AgentEvent) => {
       // 질문은 세션 기록에 따로 남겨 화면이 카드로 그린다(대화 흐름에 남는다)
-      if (event.type === 'question') return emit(session, { type: 'question', runId: run.id, question: event.question, options: event.options, allowOther: event.allowOther });
+      if (event.type === 'question')
+        return emit(session, { type: 'question', runId: run.id, question: event.question, options: event.options, allowOther: event.allowOther, ...(event.proposal ? { proposal: event.proposal } : {}) });
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
       run.tokens = event.usage;
       // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다

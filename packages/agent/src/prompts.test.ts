@@ -55,3 +55,12 @@ describe('buildSystemPrompt 자가 확인 범위', () => {
     expect(prompt).toContain('compares its API contract with the session start');
   });
 });
+
+describe('buildSystemPrompt 방식 제안', () => {
+  it('드물게, 뚜렷이 나뉘거나 비교를 원할 때만 propose_mode를 쓰고 보통은 직접 하라고 이른다', () => {
+    const prompt = buildSystemPrompt(project);
+
+    expect(prompt).toContain('call propose_mode (when it is in your tools) once before making changes');
+    expect(prompt).toContain('otherwise just do the work');
+  });
+});

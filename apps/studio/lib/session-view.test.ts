@@ -70,6 +70,23 @@ describe('reduceSession', () => {
     expect(answered.snapshot.pendingQuestion).toBeUndefined();
   });
 
+  it('제안이 붙은 질문을 남기고, 넘기면 카드를 치우고 넘긴 곳을 대화에 남긴다', () => {
+    const proposal = { mode: 'split' as const, request: '주문 API와 화면' };
+    const asked = fold([
+      { type: 'question', runId: 'r1', question: '나눠서 할까요?', options: ['나눠서 병렬로 하기', '한 명으로 계속'], allowOther: false, proposal },
+      { type: 'run_finished', runId: 'r1', status: 'awaiting_input', summary: '나눠서 할까요?' },
+    ]);
+    expect(asked.snapshot.pendingQuestion).toMatchObject({ runId: 'r1', proposal });
+
+    const handed = reduceSession(asked, { type: 'question_dismissed', runId: 'r1', to: 'split', href: '/task-plans?id=p1' });
+    expect(handed.snapshot.pendingQuestion).toBeUndefined();
+    expect(handed.chat.at(-1)).toEqual({ kind: 'handoff', runId: 'r1', to: 'split', href: '/task-plans?id=p1' });
+
+    // 다른 질문의 늦은 치우기는 지금 질문을 지우지 않는다
+    const stale = reduceSession(asked, { type: 'question_dismissed', runId: 'old', to: 'split', href: '/task-plans?id=p0' });
+    expect(stale.snapshot.pendingQuestion).toMatchObject({ runId: 'r1' });
+  });
+
   it('끝나거나 실패한 실행이 남긴 질문은 남기지 않는다', () => {
     const failed = fold([
       { type: 'question', runId: 'r1', question: 'q', options: ['a', 'b'], allowOther: false },

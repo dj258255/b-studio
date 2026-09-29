@@ -58,6 +58,8 @@ export interface PendingQuestion {
   question: string;
   options: string[];
   allowOther: boolean;
+  /** 에이전트가 다른 방식(나눠서 병렬·여러 명 비교)을 제안했으면 그 방식과 넘길 요청(ADR-068) */
+  proposal?: { mode: 'split' | 'fleet'; request: string };
 }
 
 export interface SessionSnapshot {
@@ -233,7 +235,9 @@ export type StudioEvent =
   /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
   | { type: 'design'; design?: DesignView }
   /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
-  | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean }
+  | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean; proposal?: { mode: 'split' | 'fleet'; request: string } }
+  /** 사람이 제안을 받아 다른 방식으로 넘겼다. 대화를 이어 가지 않고 질문 카드만 치운다(ADR-068) */
+  | { type: 'question_dismissed'; runId: string; to: 'split' | 'fleet'; href: string }
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
