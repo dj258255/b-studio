@@ -2,7 +2,9 @@ import { authorizeSession, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import {
   closeRemoteBrowser,
+  hoverRemoteBrowser,
   inputRemoteBrowser,
+  pickRectRemoteBrowser,
   pickRemoteBrowser,
   RemoteBrowserError,
   remoteBrowserRequestSchema,
@@ -44,9 +46,18 @@ export async function POST(request: Request, context: RouteContext<'/api/session
         return Response.json({ ok: true });
       case 'pick': {
         const pick = await pickRemoteBrowser(id, body.x, body.y);
-        // 잘라 낸 스크린샷은 세션 산출물로 남기고 식별자만 돌려준다
+        // 잘라 낸 스크린샷은 세션 산출물로 남기고 식별자만 돌려준다. rect는 뷰포트 기준(오버레이 표시용)이다
         const screenshotArtifact = await saveElementArtifact(id, { name: pick.selector, data: pick.screenshot, contentType: 'image/png' });
-        return Response.json({ selector: pick.selector, html: pick.html, css: pick.css, screenshotArtifact });
+        return Response.json({ selector: pick.selector, html: pick.html, css: pick.css, screenshotArtifact, rect: pick.viewportRect, viewport: pick.viewport });
+      }
+      case 'pickRect': {
+        const pick = await pickRectRemoteBrowser(id, body.rect);
+        const screenshotArtifact = await saveElementArtifact(id, { name: pick.selector, data: pick.screenshot, contentType: 'image/png' });
+        return Response.json({ selector: pick.selector, html: pick.html, css: pick.css, screenshotArtifact, rect: pick.viewportRect, viewport: pick.viewport });
+      }
+      case 'hover': {
+        const hovered = await hoverRemoteBrowser(id, body.x, body.y);
+        return Response.json({ rect: hovered?.rect ?? null });
       }
     }
   } catch (error) {

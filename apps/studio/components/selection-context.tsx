@@ -3,12 +3,24 @@
 import { createContext, useContext } from "react";
 import { artifactUrl } from "@/lib/artifact-url";
 
+/** 뷰포트 기준 사각형(스크롤 미포함). 미리보기 위 오버레이 표시에만 쓰고 모델에는 보내지 않는다 */
+export interface SelectionRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** 원격 브라우저에서 고른 요소 하나 */
 export interface ElementSelection {
   selector: string;
   html: string;
   css: Record<string, string>;
   screenshotArtifact: string;
+  /** 고를 때의 뷰포트 기준 영역. 클릭·드래그 모두 채운다. 구버전 선택엔 없을 수 있어 선택형이다 */
+  rect?: SelectionRect;
+  /** rect를 잰 순간의 뷰포트 크기. 지금 뷰포트와 다르면(프리셋을 바꿨으면) 오버레이가 안 맞으니 숨기는 데 쓴다 */
+  viewport?: { width: number; height: number };
 }
 
 export interface ElementSelections {
