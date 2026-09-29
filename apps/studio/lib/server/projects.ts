@@ -1,5 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { canCreatePullRequest, CheckpointStore, parseRemote } from '@b-studio/agent';
 import { loadProject, SpecError, type LoadedProject } from '@b-studio/spec';
 import type { ProjectSummary } from '@/lib/studio-events';
 
@@ -44,5 +45,21 @@ export function projectPath(id: string): string {
 export async function findProject(id: string): Promise<LoadedProject | undefined> {
   if (!PROJECT_ID.test(id)) return undefined;
   const project = (await listProjects()).find((candidate) => candidate.id === id && !candidate.error);
-  return project ? loadProject(path.join(/*turbopackIgnore: true*/ projectsRoot(), id)) : undefined;
+  return project ? loadProject(path.join(/* turbopackIgnore: true */ projectsRoot(), id)) : undefined;
+}
+
+/**
+ * 프로젝트가 원격 저장소이고 그 호스트의 토큰이 있어 이슈를 올릴 수 있는가.
+ * 작업대의 "이슈로 올리기"를 보일지 정하는 기준이라, 매번 부르지 않고 작업 분해 화면에서만 계산한다
+ */
+export async function canPublishIssues(projectId: string): Promise<boolean> {
+  const project = await findProject(projectId);
+  if (!project) return false;
+  try {
+    const source = await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true });
+    return Boolean(source?.originUrl && canCreatePullRequest(parseRemote(source.originUrl)));
+  } catch {
+    // Git 저장소가 아니거나 detached HEAD라면 이슈를 올릴 곳을 정할 수 없다
+    return false;
+  }
 }

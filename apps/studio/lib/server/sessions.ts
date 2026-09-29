@@ -16,6 +16,7 @@ import {
   DatabaseBranches,
   describeDatabaseState,
   estimateCost,
+  fetchIssue,
   formatVerificationReport,
   formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
@@ -32,6 +33,7 @@ import {
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
+  workflowStages,
   Workspace,
   type AgentEvent,
   type AgentResult,
@@ -45,6 +47,8 @@ import {
   type DesignSource,
   type GitAuthor,
   type ModelClient,
+  type PullRequestDraft,
+  type RepositoryInfo,
   type RoutingDecision,
   type RemoteSyncResult,
   type ServiceCheck,
@@ -83,6 +87,7 @@ import type {
   CodeSearch,
   CodeTree,
   DesignView,
+  ExportPreview,
   ExportResult,
   ProxyResponse,
   RepositoryView,
@@ -1626,8 +1631,146 @@ export function restoreCheckpoint(id: string, sha: string): void {
   })();
 }
 
+/** PR에 연결할 이슈 번호. 생략은 undefined, 잘못된 값은 400이다 */
+export function parseIssueInput(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 10_000_000) {
+    throw new StudioError(400, 'issue는 1 이상 10,000,000 이하의 정수여야 합니다');
+  }
+  return value;
+}
+
+/**
+ * 요청 본문에서 연결할 이슈 번호 목록을 만든다. 이전 형식 issue(단수)와 issues(배열)를 합치고 중복을 없앤다.
+ * 이슈 입력이 아예 없으면 undefined를 돌려줘, 부르는 쪽이 기본값(통합 세션의 하위 이슈)을 쓸지 정하게 한다
+ */
+export function parseIssueList({ issue, issues }: { issue?: unknown; issues?: unknown }): number[] | undefined {
+  if (issue === undefined && issues === undefined) return undefined;
+  const list: number[] = [];
+  const single = parseIssueInput(issue);
+  if (single !== undefined) list.push(single);
+  if (issues !== undefined && issues !== null) {
+    if (!Array.isArray(issues)) throw new StudioError(400, 'issues는 이슈 번호 배열이어야 합니다');
+    for (const value of issues) {
+      const parsed = parseIssueInput(value);
+      if (parsed === undefined) throw new StudioError(400, 'issues의 각 항목은 1 이상 10,000,000 이하의 정수여야 합니다');
+      list.push(parsed);
+    }
+  }
+  return [...new Set(list)];
+}
+
+type IssueLookupResult = { ok: true; state: 'open' | 'closed'; title: string } | { ok: false; error: string };
+
+/**
+ * 미리보기의 확인 목록을 만든다. 세션 없이 계산할 수 있도록 순수 함수로 둔다.
+ * 어떤 항목이 false여도 올리기를 막지는 않는다. 사람이 보고 판단한다
+ */
+export function buildExportChecks({
+  issues,
+  issueLookups,
+  missing,
+  uncheckpointed,
+  running,
+}: {
+  issues: readonly number[];
+  /** 이슈 번호별 원격 조회 결과. 없는 번호는 확인하지 못한 것으로 둔다 */
+  issueLookups?: ReadonlyArray<{ issue: number; lookup: IssueLookupResult }>;
+  missing: ReadonlyArray<{ shortSha: string; subject: string; stages: readonly string[] }>;
+  uncheckpointed: number;
+  running: boolean;
+}): ExportPreview['checks'] {
+  const checks: ExportPreview['checks'] = [
+    {
+      id: 'issue_linked',
+      ok: issues.length > 0,
+      detail: issues.length === 0 ? '이슈 번호를 넣지 않았습니다. 선택 사항입니다' : `${issues.map((number) => `#${number}`).join(', ')} 이슈를 PR에 연결합니다`,
+    },
+  ];
+
+  if (issues.length === 0) {
+    checks.push({ id: 'issue_open', ok: 'unknown', detail: '이슈 번호를 넣으면 원격 이슈 상태를 확인합니다' });
+  } else {
+    const parts = issues.map((issue) => {
+      const lookup = issueLookups?.find((entry) => entry.issue === issue)?.lookup;
+      if (lookup?.ok) return { ok: lookup.state === 'open', detail: `#${issue} ${lookup.title} (${lookup.state === 'open' ? '열림' : '닫힘'})` };
+      const reason = lookup?.error ?? '알 수 없는 오류';
+      return { ok: 'unknown' as const, detail: `#${issue} 이슈를 확인하지 못했습니다: ${reason}` };
+    });
+    const ok: boolean | 'unknown' = parts.some((part) => part.ok === 'unknown') ? 'unknown' : parts.every((part) => part.ok === true);
+    checks.push({ id: 'issue_open', ok, detail: parts.map((part) => part.detail).join(', ') });
+  }
+
+  checks.push({
+    id: 'stages_passed',
+    ok: missing.length === 0,
+    detail: missing.length === 0 ? '모든 커밋이 필수 단계를 통과했습니다' : `필수 단계 기록이 없는 커밋 ${missing.length}개가 있습니다`,
+  });
+  checks.push({
+    id: 'uncheckpointed_changes',
+    ok: uncheckpointed === 0,
+    detail: uncheckpointed === 0 ? '체크포인트 밖 변경이 없습니다' : `체크포인트로 남기지 않은 변경 ${uncheckpointed}개가 있습니다. 올리기 전에 체크포인트로 남겨야 합니다`,
+  });
+  checks.push({
+    id: 'running',
+    ok: !running,
+    detail: running ? '작업이 진행 중입니다. 끝난 뒤에 올릴 수 있습니다' : '진행 중인 작업이 없습니다',
+  });
+  return checks;
+}
+
+/** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
+async function pullRequestDraft(session: Session, issues: readonly number[]): Promise<PullRequestDraft & { info: RepositoryInfo }> {
+  const info = (await session.checkpoints.repository())!;
+  const draft = buildPullRequest({
+    projectName: session.project.spec.name,
+    base: info.base,
+    branch: info.branch,
+    commits: await session.checkpoints.sessionCommits(),
+    issues,
+    requiredStages: workflowStages(session.project),
+  });
+  return { info, ...draft };
+}
+
+/**
+ * 올리기 전 미리보기. 제목·본문과 확인 목록(이슈 연결·원격 이슈 상태·누락 단계·체크포인트 밖 변경)을 돌려준다.
+ * 누락을 보여 주기만 하고 막지는 않는다. 실제 생성은 exportSession이 같은 함수로 본문을 다시 만들어 한다
+ */
+export async function previewExport(id: string, { issues = [] }: { issues?: readonly number[] } = {}): Promise<ExportPreview> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
+
+  const { info, title, body, missing } = await pullRequestDraft(session, issues);
+  const remote = parseRemote(info.remoteUrl);
+  const issueLookups = await Promise.all(
+    issues.map(async (issue) => ({
+      issue,
+      lookup: await fetchIssue(remote, issue).then(
+        (lookup): IssueLookupResult => ({ ok: true, state: lookup.state, title: lookup.title }),
+        (error: unknown): IssueLookupResult => ({ ok: false, error: describe(error) }),
+      ),
+    })),
+  );
+
+  return {
+    title,
+    body,
+    canCreate: canCreatePullRequest(remote),
+    existingPullRequest: info.pullRequestUrl,
+    issues: [...issues],
+    checks: buildExportChecks({
+      issues,
+      issueLookups,
+      missing,
+      uncheckpointed: (await session.checkpoints.pendingFiles()).length,
+      running: session.snapshot.running,
+    }),
+  };
+}
+
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
-export async function exportSession(id: string, { pullRequest }: { pullRequest: boolean }): Promise<ExportResult> {
+export async function exportSession(id: string, { pullRequest, issues = [] }: { pullRequest: boolean; issues?: readonly number[] }): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
   if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
@@ -1646,12 +1789,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
     let pullRequestError: string | undefined;
     if (pullRequest && !info.pullRequestUrl) {
       try {
-        const { title, body } = buildPullRequest({
-          projectName: session.project.spec.name,
-          base: info.base,
-          branch: info.branch,
-          commits: await session.checkpoints.sessionCommits(),
-        });
+        const { title, body } = await pullRequestDraft(session, issues);
         const result = await createPullRequest(parseRemote(info.remoteUrl), { title, body, base: info.base, branch: info.branch });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
@@ -1670,6 +1808,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
       forced: pushed.forced,
       pullRequest: created,
       pullRequestError,
+      issues: created && issues.length > 0 ? [...issues] : undefined,
     };
     emit(session, { type: 'exported', ...result });
     return result;

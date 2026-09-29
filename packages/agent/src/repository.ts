@@ -1,4 +1,6 @@
+import type { WorkflowStage } from '@b-studio/spec';
 import type { SessionCommit } from './checkpoints';
+import { VERIFICATION_STAGES } from './workflow';
 
 export type GitHostKind = 'github' | 'gitlab' | 'gitea' | 'other' | 'local';
 
@@ -26,6 +28,30 @@ export interface PullRequestResult {
   number: number;
   /** false면 같은 브랜치로 이미 열려 있던 PR을 찾은 것이다 */
   created: boolean;
+}
+
+export interface IssueInput {
+  title: string;
+  body: string;
+  labels?: string[];
+}
+
+export interface IssueResult {
+  number: number;
+  url: string;
+}
+
+/** 하위 이슈 연결 지원 여부. GitHub만 하위 이슈 API가 있고 Gitea·GitLab은 지원하지 않는다 */
+export interface SubIssueResult {
+  supported: boolean;
+}
+
+/** 원격 이슈 조회 결과. 미리보기의 "이슈가 열려 있는가" 확인에 쓴다 */
+export interface IssueLookup {
+  /** GitHub·Gitea는 open/closed를, GitLab은 opened를 open으로 바꿔 준다 */
+  state: 'open' | 'closed';
+  title: string;
+  url: string;
 }
 
 export class PullRequestError extends Error {
@@ -202,6 +228,135 @@ async function createMergeRequest(
 }
 
 /**
+ * 원격 이슈를 조회한다. 미리보기에서 이슈가 존재하고 열려 있는지 확인할 때 쓴다.
+ * GitHub·Gitea는 `GET /repos/{owner}/{repo}/issues/{n}`, GitLab은 `GET /projects/{id}/issues/{iid}`를 쓴다.
+ * GitLab은 MR 설명의 `Closes #N`으로 이슈를 닫으므로 같은 문구를 쓴다
+ * (https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically).
+ */
+export async function fetchIssue(
+  remote: RemoteLocation,
+  issue: number,
+  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+): Promise<IssueLookup> {
+  if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
+    throw new PullRequestError('이슈를 조회할 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
+  }
+  const token = env[TOKEN_ENV[remote.kind]];
+  if (!token) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈를 확인할 수 없습니다`);
+
+  if (remote.kind === 'gitlab') {
+    const api = env.B_STUDIO_GITLAB_API_URL ?? `${originOf(remote)}/api/v4`;
+    const response = await fetchFn(`${api}/projects/${encodeURIComponent(remote.path)}/issues/${issue}`, {
+      headers: { 'private-token': token },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new PullRequestError(`GitLab 이슈 조회가 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+    const data = (await response.json()) as { state: string; title: string; web_url: string };
+    return { state: data.state === 'opened' ? 'open' : 'closed', title: data.title, url: data.web_url };
+  }
+
+  const [owner, repo, ...rest] = remote.path.split('/');
+  if (!owner || !repo || rest.length > 0) throw new PullRequestError(`저장소 경로가 owner/repo 형식이 아닙니다: ${remote.path}`);
+  const github = remote.kind === 'github';
+  const origin = originOf(remote);
+  const api = github
+    ? (env.B_STUDIO_GITHUB_API_URL ?? (remote.host === 'github.com' ? 'https://api.github.com' : `${origin}/api/v3`))
+    : (env.B_STUDIO_GITEA_API_URL ?? `${origin}/api/v1`);
+  const label = github ? 'GitHub' : 'Gitea';
+  const response = await fetchFn(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issue}`, {
+    headers: {
+      accept: github ? 'application/vnd.github+json' : 'application/json',
+      authorization: github ? `Bearer ${token}` : `token ${token}`,
+      ...(github ? { 'x-github-api-version': '2022-11-28' } : {}),
+    },
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new PullRequestError(`${label} 이슈 조회가 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  const data = (await response.json()) as { state: string; title: string; html_url: string };
+  return { state: data.state === 'open' ? 'open' : 'closed', title: data.title, url: data.html_url };
+}
+
+/**
+ * 원격 저장소에 이슈를 만든다. GitHub·Gitea는 `POST /repos/{owner}/{repo}/issues`, GitLab은 `POST /projects/{id}/issues`를 쓴다.
+ * 토큰·API 주소 규칙은 createPullRequest와 같다.
+ */
+export async function createIssue(
+  remote: RemoteLocation,
+  input: IssueInput,
+  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+): Promise<IssueResult> {
+  if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
+    throw new PullRequestError('이슈를 만들 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
+  }
+  const token = env[TOKEN_ENV[remote.kind]];
+  if (!token) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈를 만들 수 없습니다`);
+
+  if (remote.kind === 'gitlab') {
+    const api = env.B_STUDIO_GITLAB_API_URL ?? `${originOf(remote)}/api/v4`;
+    const response = await fetchFn(`${api}/projects/${encodeURIComponent(remote.path)}/issues`, {
+      method: 'POST',
+      headers: { 'private-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: input.title, description: input.body, ...(input.labels?.length ? { labels: input.labels } : {}) }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+    if (response.status !== 201) throw new PullRequestError(`GitLab API가 이슈 생성을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+    const data = (await response.json()) as { iid: number; web_url: string };
+    return { number: data.iid, url: data.web_url };
+  }
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, token, env);
+  const response = await fetchFn(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ title: input.title, body: input.body, ...(input.labels?.length ? { labels: input.labels } : {}) }),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  if (response.status !== 201) throw new PullRequestError(`${label} API가 이슈 생성을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  const data = (await response.json()) as { number: number; html_url: string };
+  return { number: data.number, url: data.html_url };
+}
+
+/**
+ * GitHub에서 child 이슈를 parent의 하위 이슈로 연결한다.
+ * `sub_issue_id`는 이슈 번호가 아니라 이슈 id라서, 먼저 child 이슈를 조회해 id를 얻는다.
+ * Gitea·GitLab은 하위 이슈 API가 없어 `{ supported: false }`를 돌려준다(추적 이슈 본문의 체크리스트로 대신한다).
+ */
+export async function addSubIssue(
+  remote: RemoteLocation,
+  parent: number,
+  child: number,
+  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+): Promise<SubIssueResult> {
+  if (remote.kind !== 'github') return { supported: false };
+  if (!remote.host || !remote.path) throw new PullRequestError('하위 이슈를 연결할 수 있는 저장소 호스트가 아닙니다');
+  const token = env[TOKEN_ENV.github];
+  if (!token) throw new PullRequestError(`${TOKEN_ENV.github} 토큰이 없어 하위 이슈를 연결할 수 없습니다`);
+  const { api, headers } = gitHubStyleApi(remote, token, env);
+  const issues = `${api}/repos/${encodeURIComponent(remote.path.split('/')[0]!)}/${encodeURIComponent(remote.path.split('/')[1]!)}/issues`;
+
+  const childResponse = await fetchFn(`${issues}/${child}`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  if (!childResponse.ok) throw new PullRequestError(`GitHub 이슈 조회가 실패했습니다 (HTTP ${childResponse.status}): ${await errorMessage(childResponse)}`);
+  const { id } = (await childResponse.json()) as { id: number };
+
+  const response = await fetchFn(`${issues}/${parent}/sub_issues`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sub_issue_id: id }),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  if (response.status !== 201) throw new PullRequestError(`GitHub 하위 이슈 연결이 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  return { supported: true };
+}
+
+/** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
+export interface PullRequestDraft {
+  title: string;
+  body: string;
+  /** requiredStages 중 통과 기록이 없는 단계가 있는 커밋만. 오래된 것부터 */
+  missing: Array<{ shortSha: string; subject: string; stages: WorkflowStage[] }>;
+}
+
+/**
  * 세션 커밋만으로 PR 제목과 본문을 만든다. 체크포인트 커밋 본문에 검증 결과가 들어 있어
  * 스튜디오 서버의 메모리 상태 없이도 같은 PR을 다시 만들 수 있다.
  */
@@ -210,15 +365,33 @@ export function buildPullRequest({
   base,
   branch,
   commits,
+  issue,
+  issues,
+  requiredStages = [],
 }: {
   projectName: string;
   base: string;
   branch: string;
   commits: SessionCommit[];
-}): { title: string; body: string } {
-  const requests = commits.map((commit) => commit.subject.replace(/^요청:\s*/, ''));
+  /** 연결할 이슈 번호 하나. issues와 함께 주면 둘을 합친다 */
+  issue?: number;
+  /** 연결할 이슈 번호들. 있으면 본문 첫 줄들에 `Closes #N`을 하나씩 넣는다 */
+  issues?: readonly number[];
+  /** 이 프로젝트의 필수 워크플로 단계. 통과 기록이 없는 검증 단계를 "돌리지 않은 검증"에 모은다 */
+  requiredStages?: readonly WorkflowStage[];
+}): PullRequestDraft {
+  const requests = commits.map(requestName);
   const first = requests[0] ?? `${projectName} 세션 변경`;
   const title = `[b-studio] ${first}${requests.length > 1 ? ` 외 ${requests.length - 1}건` : ''}`.slice(0, 120);
+
+  // 통과 기록은 검증 단계만 남으므로, plan·implement·checkpoint는 없는 것이 정상이다
+  const stages = requiredStages.filter((stage) => VERIFICATION_STAGES.includes(stage));
+  const missing = commits
+    .map((commit, index) => {
+      const passed = new Set(commit.passedStages ?? []);
+      return { shortSha: commit.shortSha, subject: requests[index]!, stages: stages.filter((stage) => !passed.has(stage)) };
+    })
+    .filter((entry) => entry.stages.length > 0);
 
   const sections = commits.map((commit, index) => {
     const shown = commit.files.slice(0, 10).map((file) => `\`${file}\``);
@@ -230,7 +403,15 @@ export function buildPullRequest({
     return lines.join('\n');
   });
 
+  const verification = commits.map((commit, index) => {
+    const passed = commit.passedStages ?? [];
+    return `- \`${commit.shortSha}\` ${requests[index]} — 통과: ${passed.length > 0 ? passed.join(', ') : '기록 없음'}`;
+  });
+  const unverified = missing.length > 0 ? missing.map((entry) => `- \`${entry.shortSha}\` ${entry.subject} — 기록 없음: ${entry.stages.join(', ')}`) : ['모든 커밋이 필수 단계를 통과했습니다'];
+
+  const linked = [...new Set([...(issue === undefined ? [] : [issue]), ...(issues ?? [])])];
   const body = [
+    ...(linked.length === 0 ? [] : [...linked.map((number) => `Closes #${number}`), '']),
     `\`${projectName}\` 프로젝트의 b-studio 세션에서 처리한 요청 ${commits.length}건입니다.`,
     '요청마다 스튜디오가 바뀐 서비스를 재시작하고 준비 상태와 API 계약을 확인했고, **검증 게이트를 통과한 변경만** 커밋했습니다.',
     '',
@@ -240,12 +421,52 @@ export function buildPullRequest({
     '## 요청',
     '',
     sections.join('\n\n'),
+    '',
+    '## 검증',
+    '',
+    verification.join('\n'),
+    '',
+    '## 돌리지 않은 검증',
+    '',
+    unverified.join('\n'),
   ].join('\n');
-  return { title, body: capBody(body) };
+  return { title, body: capBody(body), missing };
+}
+
+/** 체크포인트 커밋 제목에서 "요청: " 접두사를 뺀 사람이 읽는 이름 */
+function requestName(commit: SessionCommit): string {
+  return commit.subject.replace(/^요청:\s*/, '');
 }
 
 function originOf(remote: RemoteLocation): string {
   return new URL(remote.webUrl!).origin;
+}
+
+/** GitHub와 Gitea는 API 주소·헤더 모양이 같다. 이슈 API에서 함께 쓴다 */
+function gitHubStyleApi(
+  remote: RemoteLocation,
+  token: string,
+  env: Env,
+): { api: string; headers: Record<string, string>; label: string; owner: string; repo: string } {
+  const [owner, repo, ...rest] = remote.path!.split('/');
+  if (!owner || !repo || rest.length > 0) throw new PullRequestError(`저장소 경로가 owner/repo 형식이 아닙니다: ${remote.path}`);
+  const github = remote.kind === 'github';
+  const origin = originOf(remote);
+  const api = github
+    ? (env.B_STUDIO_GITHUB_API_URL ?? (remote.host === 'github.com' ? 'https://api.github.com' : `${origin}/api/v3`))
+    : (env.B_STUDIO_GITEA_API_URL ?? `${origin}/api/v1`);
+  return {
+    api,
+    headers: {
+      accept: github ? 'application/vnd.github+json' : 'application/json',
+      authorization: github ? `Bearer ${token}` : `token ${token}`,
+      'content-type': 'application/json',
+      ...(github ? { 'x-github-api-version': '2022-11-28' } : {}),
+    },
+    label: github ? 'GitHub' : 'Gitea',
+    owner,
+    repo,
+  };
 }
 
 function encodeRef(ref: string): string {

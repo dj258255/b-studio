@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPullRequest, canCreatePullRequest, compareUrl, createPullRequest, parseRemote, PullRequestError } from './repository';
+import { addSubIssue, buildPullRequest, canCreatePullRequest, compareUrl, createIssue, createPullRequest, fetchIssue, parseRemote, PullRequestError } from './repository';
 
 describe('parseRemote', () => {
   it.each([
@@ -142,5 +142,218 @@ describe('buildPullRequest', () => {
     expect(body).toContain('### 1. 주문 목록 API와 화면을 만들어줘');
     expect(body).toContain('~~~text\n검증 통과\n- api: 재시작 후 준비 완료\n~~~');
     expect(body).toContain('### 2. 주문에 배송 메모 필드 추가해줘\n\n커밋 `bbbbbbb`, 파일 2개: `api/V2.sql`, `web/app/orders/page.tsx`');
+  });
+
+  it('이슈 번호가 있으면 본문 첫 줄에 Closes #N을 넣는다', () => {
+    const { body } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      issue: 57,
+      commits: [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 메모 추가', body: '', files: ['api/Order.java'] }],
+    });
+
+    expect(body.startsWith('Closes #57\n')).toBe(true);
+  });
+
+  it('여러 이슈를 받으면(단수 issue와 합쳐) 본문 첫 줄들에 Closes #N을 하나씩 넣는다', () => {
+    const { body } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      issue: 57,
+      issues: [58, 57],
+      commits: [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 메모 추가', body: '', files: ['api/Order.java'] }],
+    });
+
+    // 단수와 배열을 합치고 중복은 한 번만 남긴다
+    expect(body.startsWith('Closes #57\nCloses #58\n')).toBe(true);
+  });
+
+  it('필수 단계를 통과한 커밋과 기록 없는 단계를 구분해 검증·돌리지 않은 검증 절에 남긴다', () => {
+    const requiredStages = ['plan', 'implement', 'run', 'contract_check', 'test', 'review', 'checkpoint'] as const;
+    const { body, missing } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requiredStages,
+      commits: [
+        {
+          sha: 'a'.repeat(40),
+          shortSha: 'aaaaaaa',
+          subject: '요청: 주문 목록 API',
+          body: '',
+          files: ['api/Order.java'],
+          passedStages: ['run', 'contract_check', 'test', 'review'],
+        },
+        { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', subject: '요청: 배송 메모 추가', body: '', files: ['api/V2.sql'], passedStages: ['run', 'contract_check'] },
+        { sha: 'c'.repeat(40), shortSha: 'ccccccc', subject: '요청: 화면 정리', body: '', files: ['web/page.tsx'] },
+      ],
+    });
+
+    expect(body).toContain('## 검증');
+    expect(body).toContain('- `aaaaaaa` 주문 목록 API — 통과: run, contract_check, test, review');
+    expect(body).toContain('- `ccccccc` 화면 정리 — 통과: 기록 없음');
+    // plan·implement·checkpoint는 통과 기록에 없는 것이 정상이라 돌리지 않은 검증으로 세지 않는다
+    expect(body).toContain('## 돌리지 않은 검증');
+    expect(body).toContain('- `bbbbbbb` 배송 메모 추가 — 기록 없음: test, review');
+    expect(body).toContain('- `ccccccc` 화면 정리 — 기록 없음: run, contract_check, test, review');
+    expect(missing).toEqual([
+      { shortSha: 'bbbbbbb', subject: '배송 메모 추가', stages: ['test', 'review'] },
+      { shortSha: 'ccccccc', subject: '화면 정리', stages: ['run', 'contract_check', 'test', 'review'] },
+    ]);
+  });
+
+  it('모든 커밋이 필수 단계를 통과하면 그렇게 알린다', () => {
+    const { body, missing } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requiredStages: ['run', 'contract_check'],
+      commits: [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 메모 추가', body: '', files: [], passedStages: ['run', 'contract_check'] }],
+    });
+
+    expect(missing).toEqual([]);
+    expect(body).toContain('## 돌리지 않은 검증\n\n모든 커밋이 필수 단계를 통과했습니다');
+  });
+});
+
+describe('fetchIssue', () => {
+  it('GitHub·Gitea는 issues API로, GitLab은 projects API로 조회하고 제목과 상태를 돌려준다', async () => {
+    const github = await fetchIssue(parseRemote('git@github.com:acme/orders.git', {}), 57, {
+      env: { B_STUDIO_GITHUB_TOKEN: 't' },
+      fetch: fakeFetch([{ status: 200, body: { state: 'open', title: 'PR 미리보기', html_url: 'https://github.com/acme/orders/issues/57' } }]).fn,
+    });
+    expect(github).toEqual({ state: 'open', title: 'PR 미리보기', url: 'https://github.com/acme/orders/issues/57' });
+
+    const giteaCall = fakeFetch([{ status: 200, body: { state: 'closed', title: '닫힌 이슈', html_url: 'https://git.corp.local/dev/orders/issues/3' } }]);
+    const gitea = await fetchIssue(parseRemote('https://git.corp.local/dev/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitea' }), 3, {
+      env: { B_STUDIO_GITEA_TOKEN: 't' },
+      fetch: giteaCall.fn,
+    });
+    expect(gitea).toEqual({ state: 'closed', title: '닫힌 이슈', url: 'https://git.corp.local/dev/orders/issues/3' });
+    expect(giteaCall.calls[0]).toMatchObject({ url: 'https://git.corp.local/api/v1/repos/dev/orders/issues/3', headers: { authorization: 'token t' } });
+
+    const gitlabCall = fakeFetch([{ status: 200, body: { state: 'opened', title: 'MR 미리보기', web_url: 'https://gitlab.corp.local/platform/orders/-/issues/3' } }]);
+    const gitlab = await fetchIssue(parseRemote('git@gitlab.corp.local:platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' }), 3, {
+      env: { B_STUDIO_GITLAB_TOKEN: 't' },
+      fetch: gitlabCall.fn,
+    });
+    // GitLab은 opened를 open으로 바꾼다
+    expect(gitlab).toEqual({ state: 'open', title: 'MR 미리보기', url: 'https://gitlab.corp.local/platform/orders/-/issues/3' });
+    expect(gitlabCall.calls[0]?.url).toBe('https://gitlab.corp.local/api/v4/projects/platform%2Forders/issues/3');
+  });
+
+  it('조회가 실패하면 이유를 담아 던지고, 토큰이 없으면 요청하지 않는다', async () => {
+    const failure = fakeFetch([{ status: 404, body: { message: 'Not Found' } }]);
+    const error = await fetchIssue(parseRemote('git@github.com:acme/orders.git', {}), 999, {
+      env: { B_STUDIO_GITHUB_TOKEN: 't' },
+      fetch: failure.fn,
+    }).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(PullRequestError);
+    expect((error as Error).message).toContain('HTTP 404');
+
+    const none = fakeFetch([]);
+    await expect(fetchIssue(parseRemote('git@github.com:acme/orders.git', {}), 57, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    await expect(fetchIssue(parseRemote('/Users/dev/orders', {}), 57, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
+    expect(none.calls).toHaveLength(0);
+  });
+});
+
+describe('createIssue', () => {
+  const issue = { title: '[작업 분해] 메모 추가', body: '본문', labels: ['enhancement'] };
+
+  it('GitHub·Gitea는 issues API로, GitLab은 projects API로 이슈를 만들고 번호와 주소를 돌려준다', async () => {
+    const github = fakeFetch([{ status: 201, body: { number: 66, html_url: 'https://github.com/acme/orders/issues/66' } }]);
+    const created = await createIssue(parseRemote('git@github.com:acme/orders.git', {}), issue, { env: { B_STUDIO_GITHUB_TOKEN: 'ghp' }, fetch: github.fn });
+    expect(created).toEqual({ number: 66, url: 'https://github.com/acme/orders/issues/66' });
+    expect(github.calls[0]).toMatchObject({
+      url: 'https://api.github.com/repos/acme/orders/issues',
+      method: 'POST',
+      headers: { authorization: 'Bearer ghp' },
+      body: { title: issue.title, body: issue.body, labels: ['enhancement'] },
+    });
+
+    const gitea = fakeFetch([{ status: 201, body: { number: 3, html_url: 'https://git.corp.local/dev/orders/issues/3' } }]);
+    const giteaIssue = await createIssue(parseRemote('https://git.corp.local/dev/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitea' }), { title: 't', body: 'b' }, {
+      env: { B_STUDIO_GITEA_TOKEN: 't' },
+      fetch: gitea.fn,
+    });
+    expect(giteaIssue).toEqual({ number: 3, url: 'https://git.corp.local/dev/orders/issues/3' });
+    expect(gitea.calls[0]).toMatchObject({ url: 'https://git.corp.local/api/v1/repos/dev/orders/issues', headers: { authorization: 'token t' } });
+    // 라벨을 주지 않으면 필드를 넣지 않는다
+    expect(gitea.calls[0]!.body).toEqual({ title: 't', body: 'b' });
+
+    const gitlab = fakeFetch([{ status: 201, body: { iid: 7, web_url: 'https://gitlab.corp.local/platform/orders/-/issues/7' } }]);
+    const mr = await createIssue(parseRemote('git@gitlab.corp.local:platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' }), issue, {
+      env: { B_STUDIO_GITLAB_TOKEN: 'glpat' },
+      fetch: gitlab.fn,
+    });
+    expect(mr).toEqual({ number: 7, url: 'https://gitlab.corp.local/platform/orders/-/issues/7' });
+    expect(gitlab.calls[0]).toMatchObject({
+      url: 'https://gitlab.corp.local/api/v4/projects/platform%2Forders/issues',
+      headers: { 'private-token': 'glpat' },
+      body: { title: issue.title, description: issue.body, labels: ['enhancement'] },
+    });
+  });
+
+  it('거절 사유를 알려 주되 토큰은 메시지에 넣지 않고, 토큰이 없으면 요청하지 않는다', async () => {
+    const failure = fakeFetch([{ status: 401, body: { message: 'Bad credentials' } }]);
+    const error = await createIssue(parseRemote('git@github.com:acme/orders.git', {}), issue, { env: { B_STUDIO_GITHUB_TOKEN: 'ghp_secret' }, fetch: failure.fn }).catch(
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(PullRequestError);
+    expect((error as Error).message).toContain('HTTP 401');
+    expect((error as Error).message).not.toContain('ghp_secret');
+
+    const none = fakeFetch([]);
+    await expect(createIssue(parseRemote('git@github.com:acme/orders.git', {}), issue, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    await expect(createIssue(parseRemote('/Users/dev/orders', {}), issue, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
+    expect(none.calls).toHaveLength(0);
+  });
+});
+
+describe('addSubIssue', () => {
+  it('GitHub에서 child 이슈 id를 조회해 parent의 하위 이슈로 연결한다', async () => {
+    // sub_issue_id는 이슈 번호가 아니라 id라서 GET으로 id를 먼저 얻는다
+    const { fn, calls } = fakeFetch([
+      { status: 200, body: { id: 90_005, number: 5 } },
+      { status: 201, body: { number: 5 } },
+    ]);
+    const result = await addSubIssue(parseRemote('git@github.com:acme/orders.git', {}), 7, 5, { env: { B_STUDIO_GITHUB_TOKEN: 'ghp' }, fetch: fn });
+
+    expect(result).toEqual({ supported: true });
+    expect(calls[0]).toMatchObject({ url: 'https://api.github.com/repos/acme/orders/issues/5', method: 'GET' });
+    expect(calls[1]).toMatchObject({
+      url: 'https://api.github.com/repos/acme/orders/issues/7/sub_issues',
+      method: 'POST',
+      body: { sub_issue_id: 90_005 },
+    });
+  });
+
+  it('Gitea·GitLab은 지원하지 않는다고 돌려주고 요청하지 않는다', async () => {
+    const { fn, calls } = fakeFetch([]);
+    const gitea = await addSubIssue(parseRemote('https://git.corp.local/dev/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitea' }), 7, 5, { env: {}, fetch: fn });
+    const gitlab = await addSubIssue(parseRemote('git@gitlab.corp.local:platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' }), 7, 5, { env: {}, fetch: fn });
+
+    expect(gitea).toEqual({ supported: false });
+    expect(gitlab).toEqual({ supported: false });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('GitHub에서 토큰이 없으면 요청하지 않고, 연결 실패는 토큰을 넣지 않고 알린다', async () => {
+    const none = fakeFetch([]);
+    await expect(addSubIssue(parseRemote('git@github.com:acme/orders.git', {}), 7, 5, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    expect(none.calls).toHaveLength(0);
+
+    const failure = fakeFetch([
+      { status: 200, body: { id: 90_005 } },
+      { status: 410, body: { message: 'Gone' } },
+    ]);
+    const error = await addSubIssue(parseRemote('git@github.com:acme/orders.git', {}), 7, 5, { env: { B_STUDIO_GITHUB_TOKEN: 'ghp_secret' }, fetch: failure.fn }).catch(
+      (reason: unknown) => reason,
+    );
+    expect((error as Error).message).toContain('HTTP 410');
+    expect((error as Error).message).not.toContain('ghp_secret');
   });
 });
