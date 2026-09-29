@@ -55,7 +55,8 @@ export function rowSessions(row: BenchRow): TurnRecord[][] {
 }
 
 export function conditionLabel(row: BenchRow): string {
-  return row.verify === 'light' ? `${row.strategy} (light)` : row.strategy;
+  const marks = [row.verify === 'light' ? 'light' : undefined, row.selfCheck === 'lean' ? 'lean' : undefined].filter(Boolean);
+  return marks.length > 0 ? `${row.strategy} (${marks.join(', ')})` : row.strategy;
 }
 
 export function breakdownByCondition(rows: readonly BenchRow[]): { conditions: ConditionBreakdown[]; skipped: number } {

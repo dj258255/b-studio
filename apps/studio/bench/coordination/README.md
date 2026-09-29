@@ -70,6 +70,9 @@ pnpm bench:coordination --backend claude-code --model haiku --escalate-to sonnet
 # 가볍게 확인(E5): 레인·통합 게이트가 서비스 재시작·준비·계약만 확인한다(테스트·화면·리뷰는 건너뜀)
 pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --verify light --tasks orders-list,order-detail,order-summary --repeats 3
 
+# 자가 확인 lean(E7): 게이트와 겹치는 전체 빌드·테스트·확인을 줄이게 안내하고, 성공한 명령 출력을 800자로 줄인다(B_STUDIO_SELF_CHECK=lean). P0에는 적용되지 않는다
+pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --self-check lean --tasks orders-list,order-detail,order-summary --repeats 3
+
 # codex: 이 PC에 ChatGPT로 로그인된 Codex CLI. --model을 생략하면 로그인 계정의 기본 모델을 쓴다
 pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 --repeats 1
 

@@ -1,4 +1,5 @@
 import type { ExternalPolicy, LoadedProject } from '@b-studio/spec';
+import type { SelfCheckMode } from './tool-output';
 
 /** 정책을 모델이 읽을 한 줄로: 누가 어떤 메서드·경로를 부를 수 있는지와 가리는 필드 */
 function describeAccess(policy: ExternalPolicy): string {
@@ -28,7 +29,14 @@ ${request}`;
 export function buildSystemPrompt(
   project: LoadedProject,
   /** 도구가 MCP 서버를 거치면 모델에게 보이는 이름이 달라진다 (mcp__서버__도구) */
-  { toolName: t = (name: string) => name }: { toolName?: (name: string) => string } = {},
+  {
+    toolName: t = (name: string) => name,
+    selfCheck = 'full',
+  }: {
+    toolName?: (name: string) => string;
+    /** lean이면 게이트가 하는 확인을 되풀이하지 않게 안내한다(tool-output.ts의 SelfCheckMode) */
+    selfCheck?: SelfCheckMode;
+  } = {},
 ): string {
   const services = project.managed
     .map(([name, service]) => {
@@ -58,9 +66,17 @@ ${secretsSection}${apisSection}
 
 How you work:
 - Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.
-- Use ${t('run_in_service')} to run commands inside a service container (build, tests, package scripts). Use ${t('service_logs')} when something fails, and ${t('service_stats')} when a service is slow or exits unexpectedly.
+${
+    selfCheck === 'lean'
+      ? `- Use ${t('run_in_service')} for targeted commands inside a service container (a package script, one test, a quick check you need to decide what to write). Do not run the full build or test suite just to confirm a change: b-studio runs the checks in the workflow section below when you end your turn and sends you any failure. Output of successful commands is shortened. Use ${t('service_logs')} when something fails, and ${t('service_stats')} when a service is slow or exits unexpectedly.`
+      : `- Use ${t('run_in_service')} to run commands inside a service container (build, tests, package scripts). Use ${t('service_logs')} when something fails, and ${t('service_stats')} when a service is slow or exits unexpectedly.`
+  }
 - Framework versions in this project may be newer than your training data. For Next.js, read the version-matched docs inside the web container (for example \`${t('run_in_service')} web ls node_modules/next/dist/docs\`) instead of relying on memory.
-- Use ${t('restart_service')} and ${t('http_request')} when you want to see a change running before you finish. When you end your turn, b-studio restarts every service whose files you changed, waits for it to become ready, and compares its API contract with the session start. If that gate fails you get the report and continue.
+${
+    selfCheck === 'lean'
+      ? `- Use ${t('restart_service')} and ${t('http_request')} only when you need to see real behavior to decide what to write, not to confirm a finished change. When you end your turn, b-studio restarts every service whose files you changed, waits for it to become ready, and compares its API contract with the session start. If that gate fails you get the report and continue, so ending your turn is the cheapest way to verify.`
+      : `- Use ${t('restart_service')} and ${t('http_request')} when you want to see a change running before you finish. When you end your turn, b-studio restarts every service whose files you changed, waits for it to become ready, and compares its API contract with the session start. If that gate fails you get the report and continue.`
+  }
 
 Rules:
 - A request can be a question, a change, or both. If it asks about the code (why, how, what happens if), answer from the code and leave the files alone; change files only when a change is asked for. If that is ambiguous, or a decision only the user can make blocks a correct change, call ${t('ask_user')} when it is in your tools (a person is watching this run); otherwise pick the safest reading and say what you assumed. Answering without changing files is a normal outcome: the platform records the reply and creates no checkpoint.

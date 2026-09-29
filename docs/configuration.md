@@ -255,6 +255,16 @@ workflow:
 - **쓰이는 곳**: 사람이 보낸 단일 세션 요청과 벤치(`--verify light`, [#182](https://github.com/dj258255/b-studio/pull/182))에서 쓰입니다. 작업 분해 레인·Fleet·CLI 경로는 `full` 그대로입니다.
 - **효과는 시간이지 토큰이 아닙니다**: E5([보고서](experiments/2026-09-29-e5-light-verify.md))에서 종단 시간은 15%, 게이트 시간은 53% 줄었지만 토큰은 줄지 않았습니다. 건너뛰는 단계는 b-studio 코드가 실행하고 모델을 부르지 않기 때문입니다. 작은 과제 3개 × 3회에서 잰 결과이며, 큰 변경이나 계약이 얽힌 작업에서는 `full`로 확인하세요.
 
+### 자가 확인 범위 (`B_STUDIO_SELF_CHECK`)
+
+`B_STUDIO_SELF_CHECK=lean`이면 에이전트가 게이트가 어차피 하는 확인을 되풀이하지 않게 합니다. 설정하지 않거나 `full`이면 지금과 한 글자도 다르지 않습니다. 모르는 값은 조용히 `full`로 떨어뜨리지 않고 설정 오류로 알립니다.
+
+- **프롬프트**: `run_in_service`는 필요한 명령만 돌리고 전체 빌드·테스트를 확인용으로 돌리지 말라고, `restart_service`·`http_request`는 무엇을 쓸지 정하려고 동작을 볼 때만 쓰고 끝난 변경을 확인하는 데 쓰지 말라고 안내합니다. 턴을 끝내면 게이트가 재시작·준비·계약과 워크플로의 확인을 돌려 실패를 돌려준다는 설명은 같습니다.
+- **명령 출력**: 성공한(종료 코드 0) `run_in_service` 출력은 800자(`LEAN_SUCCESS_OUTPUT_BUDGET`)만 돌려줍니다. 실패한 명령은 원인을 봐야 하므로 기본 예산(6,000자) 그대로입니다.
+- **왜**: E6([보고서](experiments/2026-09-30-e6-token-breakdown.md))에서 b-studio의 모델 호출은 그냥 Claude Code의 3.4배였고, 문맥 합의 61%가 도구 결과를 다시 읽은 양, 그중 `run_in_service`가 32.7%였습니다. 고정 문맥(시스템 프롬프트·도구 설명)은 오히려 b-studio가 작았습니다.
+- **쓰이는 곳**: 모든 러너(API 루프, Claude Code, Codex, Command Code, OpenCode)와 모든 세션(일반·레인·통합·Fleet). 벤치는 `--self-check lean`으로 켭니다.
+- **한계**: 효과는 E7([#193](https://github.com/dj258255/b-studio/issues/193))로 잽니다. 에이전트가 스스로 확인하지 않으면 게이트 실패와 재시도가 늘 수 있습니다.
+
 ### 바뀐 페이지 자동 확인 (`autoPageChecks`)
 
 E1~E4 내내 반복된 원인 하나: 게이트의 화면 확인은 `pageChecks`에 적어 둔 페이지만 열어서, **이번 실행이 새로 만든 페이지가 500을 내도 게이트는 통과**했습니다(E2의 order-summary). `autoPageChecks`를 켜면 게이트가 이번 실행에서 바뀐 파일에서 Next.js 페이지를 찾아 스스로 열어 봅니다.

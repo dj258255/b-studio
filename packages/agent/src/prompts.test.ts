@@ -32,3 +32,26 @@ describe('buildSystemPrompt 테스트 작성 기준', () => {
     expect(buildSystemPrompt(project, { toolName: (name) => `mcp__b__${name}` })).toContain('call mcp__b__ask_user when it is in your tools');
   });
 });
+
+describe('buildSystemPrompt 자가 확인 범위', () => {
+  it('기본(full)은 빌드·테스트를 직접 돌리고 끝내기 전에 확인하라는 지금 문구 그대로다', () => {
+    const prompt = buildSystemPrompt(project);
+
+    expect(prompt).toBe(buildSystemPrompt(project, { selfCheck: 'full' }));
+    expect(prompt).toContain('(build, tests, package scripts)');
+    expect(prompt).toContain('when you want to see a change running before you finish');
+    expect(prompt).not.toContain('Do not run the full build or test suite');
+  });
+
+  it('lean은 게이트가 하는 전체 빌드·테스트와 끝난 변경의 확인을 되풀이하지 말라고 이른다', () => {
+    const prompt = buildSystemPrompt(project, { selfCheck: 'lean' });
+
+    expect(prompt).toContain('Do not run the full build or test suite just to confirm a change');
+    expect(prompt).toContain('Output of successful commands is shortened');
+    expect(prompt).toContain('not to confirm a finished change');
+    expect(prompt).toContain('ending your turn is the cheapest way to verify');
+    expect(prompt).not.toContain('(build, tests, package scripts)');
+    // 게이트 설명(재시작·준비·계약)은 두 범위가 같다
+    expect(prompt).toContain('compares its API contract with the session start');
+  });
+});

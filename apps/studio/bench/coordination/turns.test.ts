@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StudioEvent } from '../../lib/studio-events';
-import { breakdownByCondition, breakdownMarkdown } from './breakdown';
+import { breakdownByCondition, breakdownMarkdown, conditionLabel } from './breakdown';
 import type { BenchRow } from './summary';
 import { tokenBreakdown, turnsFromEvents, TurnRecorder, type TurnRecord } from './turns';
 
@@ -133,5 +133,16 @@ describe('breakdownByCondition', () => {
     const markdown = breakdownMarkdown(conditions, skipped);
     expect(markdown).toContain('| S0 | 1 (1) | 2 | 3 | 2,900 | 2,800 (96.6%)');
     expect(markdown).toContain('호출별 기록이 없는 옛 결과 1행은 건너뛰었습니다.');
+  });
+});
+
+describe('conditionLabel', () => {
+  it('가볍게 확인과 자가 확인 lean을 조건 이름에 붙인다', () => {
+    const label = (row: Partial<BenchRow>) => conditionLabel({ strategy: 'S0', verify: 'full', ...row } as BenchRow);
+
+    expect(label({})).toBe('S0');
+    expect(label({ selfCheck: 'full' })).toBe('S0');
+    expect(label({ selfCheck: 'lean' })).toBe('S0 (lean)');
+    expect(label({ verify: 'light', selfCheck: 'lean' })).toBe('S0 (light, lean)');
   });
 });
