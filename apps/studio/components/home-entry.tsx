@@ -3,19 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { ProjectSummary } from "@/lib/studio-events";
-import {
-  backendLabel,
-  backendOptions,
-  defaultFleetModels,
-  defaultPlanModel,
-  initialProjectId,
-  methodOptions,
-  modelsBackendFor,
-  submitEntry,
-  type Capabilities,
-  type EntryMethod,
-  type ModelOptionLike,
-} from "@/lib/home-entry";
+import { backendLabel, backendOptions, initialProjectId, modelsBackendFor, submitEntry, type Capabilities, type ModelOptionLike } from "@/lib/home-entry";
 
 /** 모델 목록에서 화면이 쓰는 부분 */
 export type HomeModelOption = ModelOptionLike & { label: string };
@@ -54,15 +42,13 @@ function groupBy(models: CliModel[]): Array<[string, CliModel[]]> {
 }
 
 /**
- * 홈의 입구. 프로젝트 고르기 + 입력창 + 방식 선택(한 명/여러 명 비교/나눠서 병렬)을 한 곳에 모은다.
- * 방식별로 기존 API(세션·Fleet·작업 분해)를 그대로 부르고 해당 화면으로 이동한다.
- * 쓸 수 있는 방식은 `GET /api/capabilities`로 확인하고, 없으면 한 명만 켠다.
+ * 새로 시작 화면의 입구. 프로젝트 고르기 + 입력창 하나. 방식(한 명/여러 명 비교/나눠서 병렬)은 고르지 않는다 —
+ * 대화로 시작하고, 나눌 만하면 에이전트가 대화에서 제안한다(ADR-068·069). 백엔드·모델·작업 위치는 "자세히"에서 고른다.
  */
-export function HomeEntry({ projects, models, localAllowed }: { projects: HomeProject[]; models: HomeModelOption[]; localAllowed: boolean }) {
+export function HomeEntry({ projects, localAllowed }: { projects: HomeProject[]; models?: HomeModelOption[]; localAllowed: boolean }) {
   const router = useRouter();
   const usable = useMemo(() => projects.filter((project) => !project.error), [projects]);
   const [capabilities, setCapabilities] = useState<Capabilities>();
-  const [method, setMethod] = useState<EntryMethod>("single");
   const [projectId, setProjectId] = useState(() => initialProjectId(projects));
   const [text, setText] = useState("");
   const [workspace, setWorkspace] = useState<"copy" | "local">("copy");
@@ -136,13 +122,9 @@ export function HomeEntry({ projects, models, localAllowed }: { projects: HomePr
     };
   }, [modelsBackend]);
 
-  const options = useMemo(() => methodOptions(capabilities), [capabilities]);
-  const selected = options.find((option) => option.id === method) ?? options[0]!;
-  const fleetModelIds = useMemo(() => defaultFleetModels(models), [models]);
-  const planModelId = useMemo(() => defaultPlanModel(models), [models]);
   const shownModels = useMemo(() => (freeFilter ? cliModels.filter((model) => model.free) : cliModels), [cliModels, freeFilter]);
   const hasUsableModel = useMemo(() => shownModels.some((model) => model.usable !== false), [shownModels]);
-  const canSend = Boolean(projectId) && text.trim().length > 0 && selected.enabled && !sending;
+  const canSend = Boolean(projectId) && text.trim().length > 0 && !sending;
   const singleProject = usable.length === 1 ? usable[0] : undefined;
   const selectedProject = usable.find((project) => project.id === projectId);
   // 백엔드를 고를 수 없으면 보내지 않는다(서버 기본). 모델은 CLI 백엔드에서만 싣는다
@@ -163,7 +145,7 @@ export function HomeEntry({ projects, models, localAllowed }: { projects: HomePr
     setSending(true);
     setError(undefined);
     setCreatedSessionId(undefined);
-    const result = await submitEntry(fetch, { method, projectId, text, workspace, backend: sendBackend, model: sendModel, fleetModelIds, planModelId, mode: capabilities?.mode });
+    const result = await submitEntry(fetch, { method: "single", projectId, text, workspace, backend: sendBackend, model: sendModel, fleetModelIds: [], planModelId: "", mode: capabilities?.mode });
     if (result.ok) {
       router.push(result.href);
       return;
@@ -211,45 +193,13 @@ export function HomeEntry({ projects, models, localAllowed }: { projects: HomePr
           }
         }}
         rows={4}
-        placeholder="만들거나 바꾸고 싶은 내용을 적어 주세요 (Cmd/Ctrl+Enter로 보내기)"
+        placeholder="만들거나 바꾸고 싶은 내용을 적어 주세요. 나눠서 하거나 여러 안을 비교할 만하면 에이전트가 먼저 제안합니다 (Cmd/Ctrl+Enter로 보내기)"
         className="mt-1 w-full resize-y rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
       />
 
-      <fieldset className="mt-4">
-        <legend className="text-sm font-medium">어떻게 시킬까요?</legend>
-        <div className="mt-2 grid gap-2 sm:grid-cols-3">
-          {options.map((option) => {
-            const active = option.id === method;
-            return (
-              <label
-                key={option.id}
-                className={`glass-soft flex items-start gap-2 rounded-control px-3 py-2.5 text-sm ${
-                  option.enabled ? "cursor-pointer" : "opacity-60"
-                } ${active ? "ring-1 ring-line" : ""}`}
-              >
-                <input
-                  type="radio"
-                  name="home-method"
-                  value={option.id}
-                  checked={active}
-                  disabled={!option.enabled || sending}
-                  onChange={() => setMethod(option.id)}
-                  className="mt-0.5 accent-ink"
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block font-medium text-ink">{option.label}</span>
-                  <span className="block text-xs leading-5 text-muted">{option.enabled ? option.description : option.reason}</span>
-                </span>
-              </label>
-            );
-          })}
-        </div>
-      </fieldset>
-
       <details className="mt-3">
         <summary className="cursor-pointer text-sm text-muted">자세히</summary>
-        {method === "single" ? (
-          <div className="mt-2 space-y-3">
+        <div className="mt-2 space-y-3">
             {backends.length >= 2 && (
               <div>
                 <label htmlFor="home-backend" className="block text-sm font-medium">백엔드</label>
@@ -348,9 +298,6 @@ export function HomeEntry({ projects, models, localAllowed }: { projects: HomePr
               <p className="text-xs leading-5 text-muted">세션마다 프로젝트 복사본에서 작업합니다. 원본 폴더는 바뀌지 않습니다.</p>
             )}
           </div>
-        ) : (
-          <p className="mt-2 text-xs leading-5 text-muted">여러 명 비교·나눠서 병렬은 서버 기본 백엔드로 돕니다.</p>
-        )}
       </details>
 
       <button

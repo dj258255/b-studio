@@ -2,11 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   backendLabel,
   backendOptions,
-  defaultFleetModels,
-  defaultPlanModel,
   inboxPreview,
   initialProjectId,
-  methodOptions,
   modelsBackendFor,
   sortInbox,
   submitEntry,
@@ -26,39 +23,6 @@ function fakeFetch(routes: Array<{ status?: number; body: unknown }>) {
 }
 
 const base = { projectId: 'orders', text: '주문 목록에 필터 추가', workspace: 'copy' as const, fleetModelIds: ['a', 'b'], planModelId: 'plan-model' };
-
-describe('methodOptions', () => {
-  it('capabilities가 없으면(API 없음·실패) 한 명만 켜고 나머지는 확인하지 못했다고 알린다', () => {
-    const options = methodOptions(undefined);
-    expect(options.map((option) => [option.id, option.enabled])).toEqual([
-      ['single', true],
-      ['fleet', false],
-      ['split', false],
-    ]);
-    expect(options[1]!.reason).toBe('이 서버에서 확인하지 못했습니다');
-    expect(options[2]!.reason).toBe('이 서버에서 확인하지 못했습니다');
-    // 각 방식에 한 줄 설명이 있다
-    expect(options[0]!.description).toContain('에이전트 하나');
-    expect(options[1]!.description).toContain('따로 만들어');
-    expect(options[2]!.description).toContain('나눠');
-  });
-
-  it('capabilities가 있으면 방식별 enabled와 이유를 그대로 따른다', () => {
-    const options = methodOptions({
-      mode: 'api',
-      single: { enabled: true },
-      fleet: { enabled: true },
-      split: { enabled: false, reason: '이 모드에서는 계획을 받을 수 없습니다' },
-    });
-    expect(options.find((option) => option.id === 'fleet')).toMatchObject({ enabled: true });
-    expect(options.find((option) => option.id === 'split')).toMatchObject({ enabled: false, reason: '이 모드에서는 계획을 받을 수 없습니다' });
-  });
-
-  it('한 명도 꺼져 있으면 비활성으로 둔다', () => {
-    const options = methodOptions({ single: { enabled: false } });
-    expect(options[0]).toMatchObject({ id: 'single', enabled: false });
-  });
-});
 
 describe('initialProjectId', () => {
   it('쓸 수 있는 프로젝트가 하나면 자동으로 고른다', () => {
@@ -96,24 +60,6 @@ describe('백엔드 선택', () => {
     expect(modelsBackendFor('opencode')).toBe('opencode');
     expect(modelsBackendFor('claude-code')).toBeUndefined();
     expect(modelsBackendFor(undefined)).toBeUndefined();
-  });
-});
-
-describe('기본 모델', () => {
-  const models = [
-    { id: 'a', configured: true, capabilities: ['tools'] },
-    { id: 'b', configured: true, enabled: false, capabilities: ['tools'] },
-    { id: 'c', configured: false, capabilities: ['tools'] },
-    { id: 'd', configured: true, capabilities: [] },
-    { id: 'e', configured: true, capabilities: ['tools'] },
-    { id: 'f', configured: true, capabilities: ['tools'] },
-  ];
-
-  it('설정됨·활성·도구 지원 모델만 앞에서 고른다', () => {
-    expect(defaultFleetModels(models)).toEqual(['a', 'e']);
-    expect(defaultFleetModels(models, 3)).toEqual(['a', 'e', 'f']);
-    expect(defaultPlanModel(models)).toBe('a');
-    expect(defaultPlanModel([{ id: 'x', configured: false, capabilities: ['tools'] }])).toBe('');
   });
 });
 

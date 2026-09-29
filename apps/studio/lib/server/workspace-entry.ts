@@ -76,6 +76,27 @@ export function excludedSessions(viewer: string): Set<string> {
   return ids;
 }
 
+/**
+ * 이미 켜져 있거나 켜는 중인 개발 세션이 있으면 그 id(읽기만 한다). 첫 화면(`/`)이 "여는 중" 화면 없이 바로 보내는 데 쓴다.
+ * 켜야 하거나(지연 기동·중지) 새로 만들어야 하면 undefined — 그때는 화면이 POST /api/workspace로 연다(GET이 세션을 만들지 않게)
+ */
+export async function findOpenWorkspace(viewer: string, options: { projectId?: string } = {}): Promise<string | undefined> {
+  const projects = (await listProjects()).filter((project) => !project.error);
+  const projectIds = projects.map((project) => project.id);
+  if (options.projectId && !projectIds.includes(options.projectId)) return undefined;
+  const pick = pickWorkspace({
+    sessions: await listSessions(),
+    excluded: excludedSessions(viewer),
+    viewer,
+    canManage: canManageSession,
+    projectIds,
+    ...(options.projectId ? { projectId: options.projectId } : {}),
+    localAllowed: localFolderAllowed(),
+  });
+  const status = pick.session?.status;
+  return status === 'ready' || status === 'starting' ? pick.session!.id : undefined;
+}
+
 // 첫 화면이 두 번 불려도(React 개발 모드의 이중 실행, 탭 두 개) 세션을 두 개 만들지 않도록 사람마다 한 번에 하나만 연다
 const globalOpening = globalThis as typeof globalThis & { __bStudioOpening?: Map<string, Promise<OpenWorkspaceResult>> };
 const opening = (globalOpening.__bStudioOpening ??= new Map());

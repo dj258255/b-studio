@@ -31,19 +31,24 @@ const ATTENTION_TONE: Record<AgentAttention, string> = {
 };
 
 const TABS: Array<{ id: WorkTab; label: string }> = [
-  { id: "all", label: "전체" },
   { id: "attention", label: "개입 필요" },
-  { id: "single", label: WORK_MODE_LABEL.single },
-  { id: "fleet", label: WORK_MODE_LABEL.fleet },
-  { id: "split", label: WORK_MODE_LABEL.split },
+  { id: "working", label: "작업 중" },
+  { id: "all", label: "전체" },
 ];
 
 /**
- * 작업 화면: 한 명·여러 명 비교·나눠서 병렬로 보낸 요청을 요청 단위로 한 목록에 보여 준다.
+ * 작업 화면: 보낸 요청을 요청 단위로 한 목록에 보여 준다(방식으로 나누지 않고, 비교·병렬은 줄 안의 표시로만 보인다).
  * 비교 참가자·병렬 레인은 한 줄로 묶고, 개입이 필요한 것을 먼저 세운다. 줄을 골라 그 세션들을 나란히 볼 수 있다.
  * 서버가 준 첫 목록으로 바로 그린 뒤, 3초마다(보이는 탭일 때만) 다시 읽는다.
  */
-export function WorkOverview({ initial }: { initial: { items: AgentItem[]; totals: AgentTotals } }) {
+export function WorkOverview({
+  initial,
+  variant = "page",
+}: {
+  initial: { items: AgentItem[]; totals: AgentTotals };
+  /** drawer면 개발 화면 옆 패널 안에 그린다(선택 막대가 패널 바닥에 붙는다, ADR-069) */
+  variant?: "page" | "drawer";
+}) {
   const router = useRouter();
   const [data, setData] = useState(initial);
   const [updatedAt, setUpdatedAt] = useState<string>();
@@ -92,7 +97,7 @@ export function WorkOverview({ initial }: { initial: { items: AgentItem[]; total
   }
 
   return (
-    <div className="flex flex-col gap-4 pb-20">
+    <div className={`flex flex-col gap-4 ${variant === "page" ? "pb-20" : ""}`}>
       <div className="glass flex flex-wrap items-center gap-x-4 gap-y-1 rounded-panel px-4 py-3 text-sm">
         <span className="font-medium">작업 중 {data.totals.working}</span>
         <span className={data.totals.attention > 0 ? "font-medium text-fail" : "text-muted"}>개입 필요 {data.totals.attention}</span>
@@ -128,7 +133,7 @@ export function WorkOverview({ initial }: { initial: { items: AgentItem[]; total
 
       {shown.length === 0 ? (
         <p className="rounded-panel border border-line bg-panel px-4 py-6 text-sm text-muted">
-          {tab === "attention" ? "지금 볼 것이 없습니다." : tab === "all" ? "아직 보낸 요청이 없습니다. 홈에서 요청을 보내면 여기에 나옵니다." : `${WORK_MODE_LABEL[tab]}로 보낸 요청이 없습니다.`}
+          {tab === "attention" ? "지금 볼 것이 없습니다." : tab === "working" ? "지금 작업 중인 요청이 없습니다." : "아직 보낸 요청이 없습니다. 대화에서 요청을 보내면 여기에 나옵니다."}
         </p>
       ) : (
         <ul className="flex flex-col gap-2">
@@ -139,7 +144,11 @@ export function WorkOverview({ initial }: { initial: { items: AgentItem[]; total
       )}
 
       {liveSelected.length > 0 && (
-        <div className="glass fixed inset-x-4 bottom-4 z-10 mx-auto flex max-w-[72rem] flex-wrap items-center gap-3 rounded-panel px-4 py-3 text-sm shadow-lg">
+        <div
+          className={`glass flex flex-wrap items-center gap-3 rounded-panel px-4 py-3 text-sm shadow-lg ${
+            variant === "page" ? "fixed inset-x-4 bottom-4 z-10 mx-auto max-w-[72rem]" : "sticky bottom-0 z-10"
+          }`}
+        >
           <span>
             작업 {liveSelected.length}개 · 세션 {selection.ids.length + selection.dropped}개
             {selection.dropped > 0 && <span className="text-muted"> (한 화면에 {MAX_SPLIT}개까지라 {selection.dropped}개는 빼고 엽니다)</span>}

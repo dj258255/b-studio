@@ -1,7 +1,7 @@
 /**
- * 홈 입구(입력창 하나 + 방식 선택)의 순수 로직.
+ * 새로 시작 화면 입구(입력창 하나)와 대화의 넘기기(ADR-068)가 함께 쓰는 순수 로직.
  *
- * 방식 목록·프로젝트 자동 선택·모델 기본값·보내기 흐름을 화면에서 떼어 두어 테스트한다.
+ * 프로젝트 자동 선택·백엔드 목록·보내기 흐름을 화면에서 떼어 두어 테스트한다. 방식(한 명/비교/병렬)을 사람이 고르는 목록은 없앴다(ADR-069).
  * 실제 네트워크는 `submitEntry`에 넘기는 fetch 구현으로만 만진다(테스트는 가짜 fetch를 넘긴다).
  */
 
@@ -15,42 +15,6 @@ export interface Capabilities {
   split?: { enabled?: boolean; reason?: string };
   /** 세션 백엔드로 고를 수 있는 값(서버 모드 + B_STUDIO_BACKENDS). 하나면 고를 게 없다 */
   backends?: string[];
-}
-
-export interface MethodOption {
-  id: EntryMethod;
-  label: string;
-  /** 방식 옆 한 줄 설명 */
-  description: string;
-  enabled: boolean;
-  /** 쓸 수 없을 때 보여줄 이유. 활성이면 없다 */
-  reason?: string;
-}
-
-const METHOD_META: Record<EntryMethod, { label: string; description: string }> = {
-  single: { label: '한 명', description: '에이전트 하나가 만들고 검증합니다' },
-  fleet: { label: '여러 명 비교', description: '같은 요청을 여러 에이전트가 따로 만들어 고릅니다' },
-  split: { label: '나눠서 병렬', description: '요청을 나눠 동시에 만들고 합칩니다' },
-};
-
-const UNCHECKED_REASON = '이 서버에서 확인하지 못했습니다';
-
-/**
- * 방식 목록을 만든다. capabilities가 없으면(API가 없거나 실패) 한 명만 켜고 나머지는 확인하지 못했다고 알린다.
- * capabilities가 있으면 각 방식의 enabled를 그대로 따르고, 꺼진 이유가 있으면 그대로 보여 준다.
- */
-export function methodOptions(capabilities: Capabilities | undefined): MethodOption[] {
-  return (['single', 'fleet', 'split'] as const).map((id) => {
-    const meta = METHOD_META[id];
-    if (id === 'single') {
-      const enabled = capabilities ? capabilities.single?.enabled !== false : true;
-      return { id, ...meta, enabled, ...(enabled ? {} : { reason: '지금 쓸 수 없습니다' }) };
-    }
-    const entry = id === 'fleet' ? capabilities?.fleet : capabilities?.split;
-    if (!capabilities) return { id, ...meta, enabled: false, reason: UNCHECKED_REASON };
-    const enabled = entry?.enabled === true;
-    return { id, ...meta, enabled, ...(enabled ? {} : { reason: entry?.reason ?? UNCHECKED_REASON }) };
-  });
 }
 
 /**
@@ -95,20 +59,6 @@ export interface ModelOptionLike {
   configured: boolean;
   enabled?: boolean;
   capabilities: string[];
-}
-
-function usableModels(models: readonly ModelOptionLike[]): ModelOptionLike[] {
-  return models.filter((model) => model.configured && model.enabled !== false && model.capabilities.includes('tools'));
-}
-
-/** 여러 명 비교의 기본 모델(2~4개 중 앞의 count개). 화면에서 고르지 않고 기본값만 쓴다 */
-export function defaultFleetModels(models: readonly ModelOptionLike[], count = 2): string[] {
-  return usableModels(models).slice(0, Math.max(1, count)).map((model) => model.id);
-}
-
-/** 나눠서 병렬의 기본 계획 모델. 없으면 빈 문자열 */
-export function defaultPlanModel(models: readonly ModelOptionLike[]): string {
-  return usableModels(models)[0]?.id ?? '';
 }
 
 export interface EntryInput {

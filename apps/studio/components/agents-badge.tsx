@@ -1,15 +1,15 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentItem, AgentTotals } from "@/lib/server/agents-overview";
 import { attentionNotices, diffAttention, readNotifyEnabled, shouldNotify, titleWithCount } from "@/lib/attention-notify";
+import { WorkDrawer } from "./work-drawer";
 
 /** 배지를 다시 읽는 간격. 작업 화면(3초)보다 느리게 둬서 헤더가 서버를 자주 두드리지 않게 한다 */
 const REFRESH_MS = 15_000;
 
 /**
- * 작업 화면(/work)으로 가는 버튼. 개입 필요 수를 배지로 보여 준다(0이면 숨김).
+ * 작업 목록을 여는 버튼. 누르면 개발 화면 옆에 패널로 연다(ADR-069). 개입 필요 수를 배지로 보여 준다(0이면 숨김).
  * 홈 상단 버튼 줄과 세션 헤더가 같이 쓴다.
  *
  * 실행 중 지시(#103)와 달리 이 알림은 다른 탭에서 일하다가도 놓치지 않게 하는 것이 목적이라,
@@ -18,6 +18,9 @@ const REFRESH_MS = 15_000;
  */
 export function AgentsBadge() {
   const [attention, setAttention] = useState(0);
+  /** 작업 목록 패널(ADR-069). 페이지를 옮기지 않고 개발 화면 옆에 연다 */
+  const [open, setOpen] = useState(false);
+  const closeDrawer = useCallback(() => setOpen(false), []);
   /** 처음 불러온 목록. 여기서 새로 늘어난 항목만 알린다(첫 로드는 알리지 않음) */
   const prevItems = useRef<AgentItem[] | undefined>(undefined);
   /** 배지가 붙기 전의 원래 제목. 페이지를 떠나면 되돌린다 */
@@ -76,16 +79,25 @@ export function AgentsBadge() {
   }, []);
 
   return (
-    <Link href="/work" className="glass-soft inline-flex items-center rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
-      작업
-      {attention > 0 && (
-        <span
-          className="ml-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-fail px-1.5 text-xs font-semibold text-panel"
-          aria-label={`개입 필요 ${attention}개`}
-        >
-          {attention > 99 ? "99+" : attention}
-        </span>
-      )}
-    </Link>
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        className="glass-soft inline-flex items-center rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel"
+      >
+        작업
+        {attention > 0 && (
+          <span
+            className="ml-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-fail px-1.5 text-xs font-semibold text-panel"
+            aria-label={`개입 필요 ${attention}개`}
+          >
+            {attention > 99 ? "99+" : attention}
+          </span>
+        )}
+      </button>
+      {open && <WorkDrawer onClose={closeDrawer} />}
+    </>
   );
 }
