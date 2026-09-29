@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
-import { allowedBackends, assertBackendReady, assertResumableBackend, buildExportChecks, parseIssueInput, parseIssueList, resolveSessionBackend, sessionBackend } from './sessions';
+import {
+  allowedBackends,
+  assertBackendReady,
+  assertResumableBackend,
+  buildExportChecks,
+  parseIssueInput,
+  parseIssueList,
+  planKindForBackend,
+  resolveSessionBackend,
+  sessionBackend,
+} from './sessions';
 
 describe('parseIssueInput', () => {
   it('생략은 undefined, 1~10,000,000 정수만 받고 나머지는 400으로 거부한다', () => {
@@ -106,14 +116,15 @@ describe('세션 백엔드', () => {
     expect(resolveSessionBackend(undefined, env)).toBe('api');
     expect(() => resolveSessionBackend('claude-code', env)).toThrow(StudioError);
 
-    const withList = { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'claude-code,commandcode' };
-    expect([...allowedBackends('api', withList)].sort()).toEqual(['api', 'claude-code', 'commandcode']);
+    const withList = { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'claude-code,commandcode,opencode' };
+    expect([...allowedBackends('api', withList)].sort()).toEqual(['api', 'claude-code', 'commandcode', 'opencode']);
     expect(resolveSessionBackend('commandcode', withList)).toBe('commandcode');
+    expect(resolveSessionBackend('opencode', withList)).toBe('opencode');
     // 요청이 없으면 여전히 서버 모드(계획 기본·통합 세션)
     expect(resolveSessionBackend(undefined, withList)).toBe('api');
     expect(() => resolveSessionBackend('codex', withList)).toThrow(/쓸 수 없는 백엔드/);
     // 목록에 모르는 값이 있으면 서버 설정 오류로 거부한다
-    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'opencode' })).toThrow(/B_STUDIO_BACKENDS/);
+    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'gemini' })).toThrow(/B_STUDIO_BACKENDS/);
   });
 
   it('demo 서버에서는 백엔드를 고를 수 없다', () => {
@@ -126,20 +137,36 @@ describe('세션 백엔드', () => {
     expect(sessionBackend({ mode: 'api', backend: 'codex' })).toBe('codex');
   });
 
+  it('백엔드마다 자기 실행 방식으로 가고, 데모만 실행 방식이 없다(대본 경로)', () => {
+    expect(planKindForBackend('api')).toBe('model');
+    expect(planKindForBackend('claude-code')).toBe('claude-code');
+    expect(planKindForBackend('codex')).toBe('codex');
+    expect(planKindForBackend('commandcode')).toBe('commandcode');
+    expect(planKindForBackend('opencode')).toBe('opencode');
+    // demo는 준비된 대본이라 표에 없다 → planRun이 데모 시나리오 경로로 처리한다
+    expect(planKindForBackend('demo')).toBeUndefined();
+  });
+
   it('CLI 백엔드는 세션을 만들기 전에 로그인을 확인하고, 실패하면 이유와 함께 거부한다', async () => {
     const ready = {
       claudeCode: async () => ({ ok: true as const }),
       codex: async () => ({ ok: true as const }),
       commandCode: async () => ({ ok: true as const }),
+      openCode: async () => ({ ok: true as const }),
     };
     await expect(assertBackendReady('claude-code', '/x', ready)).resolves.toBeUndefined();
     await expect(assertBackendReady('codex', '/x', ready)).resolves.toBeUndefined();
     await expect(assertBackendReady('commandcode', '/x', ready)).resolves.toBeUndefined();
+    await expect(assertBackendReady('opencode', '/x', ready)).resolves.toBeUndefined();
     // api는 CLI가 아니라 확인하지 않는다(preflight를 주지 않아도 통과)
     await expect(assertBackendReady('api', '/x', {})).resolves.toBeUndefined();
 
     const fail = { codex: async () => ({ ok: false as const, reason: '로그인이 필요합니다' }) };
     await expect(assertBackendReady('codex', '/x', fail)).rejects.toThrow('로그인이 필요합니다');
+    // OpenCode도 로그인 확인에 실패하면 세션을 만들지 않고 이유와 함께 거부한다
+    await expect(assertBackendReady('opencode', '/x', { openCode: async () => ({ ok: false as const, reason: 'opencode CLI가 없습니다' }) })).rejects.toThrow(
+      /로컬 OpenCode를 쓸 수 없습니다: opencode CLI가 없습니다/,
+    );
   });
 });
 
@@ -169,7 +196,7 @@ describe('세션 백엔드 확정은 두 번 불러도 같다', () => {
   });
 
   it('다른 서버 모드에서도 확정한 값을 다시 확정하면 같은 값이다', () => {
-    for (const mode of ['api', 'claude-code', 'codex', 'commandcode']) {
+    for (const mode of ['api', 'claude-code', 'codex', 'commandcode', 'opencode']) {
       const env = { B_STUDIO_MODE: mode };
       expect(resolveSessionBackend(resolveSessionBackend(undefined, env), env)).toBe(mode);
     }

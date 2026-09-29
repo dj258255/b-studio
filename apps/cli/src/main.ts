@@ -5,7 +5,9 @@ import { agent, BACKENDS, type Backend } from './commands/agent';
 import { authToken } from './commands/auth';
 import { bootProbe } from './commands/boot-probe';
 import { deploy } from './commands/deploy';
+import { launch, LAUNCH_MODES, type LaunchMode } from './commands/launch';
 import { sandboxPrune } from './commands/sandbox';
+import { stop } from './commands/stop';
 import { up } from './commands/up';
 import { verify } from './commands/verify';
 import { workflow } from './commands/workflow';
@@ -14,6 +16,8 @@ const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
+  studio launch [--mode local|demo|commandcode|codex] [--port <n>] [--no-open] [--json]
+  studio stop [--json]
   studio boot-probe <프로젝트 경로> [--json]
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
@@ -28,6 +32,19 @@ verify:
   --allow-breaking   계약을 깨는 변경(필드·엔드포인트 삭제, 타입 변경)을 허용한다
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
   --logs             서비스 로그를 함께 출력한다
+
+launch:
+  스튜디오를 백그라운드로 띄우고 준비되면 브라우저를 연다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 연다
+  준비 로그는 ~/.cache/b-studio/launch/studio.log, PID는 studio.pid에 남는다
+  --mode      local(기본, 이 PC의 Claude Code) | demo | commandcode | codex
+  --port      기본 3000
+  --no-open   브라우저를 열지 않고 주소만 출력한다
+  --json      브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr).
+              {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
+
+stop:
+  launch가 띄운 스튜디오를 멈춘다. PID 파일의 프로세스 그룹에 SIGTERM을 보낸다(로그는 남는다)
+  --json      stdout에 {"stopped":true|false} 한 줄만 쓴다
 
 boot-probe:
   샌드박스를 띄워 기동 시간(ms)과 서비스별 받은·보낸 바이트를 재고 곧바로 내린다(keep 없음). 캐시 없음/있음 기동 비교에 쓴다
@@ -55,15 +72,16 @@ deploy:
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
 
 agent 옵션:
-  --backend <name>   api | claude-code | codex | commandcode (기본: api)
+  --backend <name>   api | claude-code | codex | commandcode | opencode (기본: api)
                      claude-code는 이 PC의 claude CLI에 로그인한 계정으로 실행한다 (API 키 불필요, 개인 PC 전용)
                      codex는 이 PC의 Codex CLI에 ChatGPT로 로그인한 계정으로 실행한다 (API 키 불필요, 개인 PC 전용)
                      codex는 대화를 이어받지 않는다. 요청 하나를 한 번에 처리하고 끝낸다
                      commandcode는 이 PC에 로그인한 Command Code로 실행한다. 모델을 고를 수 있고 기본은 계정 기본 모델이다
+                     opencode는 이 PC에 설치된 OpenCode CLI로 실행한다. --model이 필수다(무료 Zen 모델은 내장 도구를 끈 b-studio 구성에서 거절된다)
   --allow-breaking   요청이 필드·엔드포인트 삭제나 타입 변경을 원할 때 호환 깨짐을 허용한다
   --effort <level>   low | medium | high | xhigh | max (기본: high)
-  --model <id>       api 기본: claude-opus-5, claude-code·codex·commandcode 기본: 로그인한 계정의 기본 모델
-  --free-only        commandcode에서 무료 모델만 쓴다. 무료가 아닌 --model이면 오류
+  --model <id>       api 기본: claude-opus-5, claude-code·codex·commandcode 기본: 로그인한 계정의 기본 모델, opencode 필수: 로그인한 제공자의 모델('opencode models'로 확인)
+  --free-only        commandcode·opencode에서 무료 모델만 쓴다. 무료가 아니거나 쓸 수 없는 --model이면 오류
   --logs             서비스 로그를 함께 출력한다`;
 
 async function main(argv: string[]): Promise<number> {
@@ -85,12 +103,41 @@ async function main(argv: string[]): Promise<number> {
       'pi-env': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
+      mode: { type: 'string' },
+      port: { type: 'string' },
+      'no-open': { type: 'boolean', default: false },
     },
   });
   const [command, dir, request] = positionals;
 
   if (command === 'up' && dir) {
     return up(await loadProject(dir), { keep: values.keep });
+  }
+
+  if (command === 'launch') {
+    if (dir !== undefined) {
+      console.error(USAGE);
+      return 2;
+    }
+    const mode = values.mode ?? 'local';
+    if (!LAUNCH_MODES.includes(mode as LaunchMode)) {
+      console.error(`--mode는 ${LAUNCH_MODES.join(', ')} 중 하나여야 합니다 (지금 값: ${values.mode})`);
+      return 2;
+    }
+    const port = values.port === undefined ? 3000 : Number(values.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      console.error(`--port는 1~65535 사이의 정수여야 합니다 (지금 값: ${values.port})`);
+      return 2;
+    }
+    return launch({ mode: mode as LaunchMode, port, open: !values['no-open'], json: values.json });
+  }
+
+  if (command === 'stop') {
+    if (dir !== undefined) {
+      console.error(USAGE);
+      return 2;
+    }
+    return stop({ json: values.json });
   }
 
   if (command === 'boot-probe' && dir) {

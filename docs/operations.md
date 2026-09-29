@@ -10,6 +10,7 @@
 | `claude-code` | 개인 PC의 Claude Code 로그인 사용 | 공유 서버에서 사용하지 않음 |
 | `codex` | 개인 PC의 Codex CLI(ChatGPT 로그인) 사용 | 공유 서버에서 사용하지 않음 |
 | `commandcode` | 개인 PC의 Command Code 로그인 사용(모델 선택, 무료 모델) | 공유 서버에서 사용하지 않음 |
+| `opencode` | 개인 PC에 설치된 OpenCode CLI 사용(모델 선택, 기본 무료 모델) | 공유 서버에서 사용하지 않음 |
 | API 모드 | 모델 레지스트리와 API 자격 증명 사용 | 공유 환경 권장 |
 
 프로젝트, 세션, Fleet, 배포 데이터는 각각 `B_STUDIO_PROJECTS_DIR`, `B_STUDIO_SESSIONS_DIR`, `B_STUDIO_FLEETS_DIR`, `B_STUDIO_DEPLOYS_DIR`로 위치를 분리할 수 있습니다. 운영에서는 영속 볼륨에 두고 접근 권한을 제한하세요.
@@ -18,10 +19,10 @@
 
 ### 세션별 백엔드 (`B_STUDIO_BACKENDS`)
 
-`B_STUDIO_MODE`는 **기본값**입니다. 아무것도 설정하지 않으면 지금과 한 글자도 다르지 않습니다. `B_STUDIO_BACKENDS`에 쉼표로 백엔드를 적으면 세션을 만들 때 그중 하나를 고를 수 있습니다(예 `claude-code,codex,commandcode`). 비우면 서버 모드 하나뿐이고, **목록 밖 백엔드를 요청하면 거부**합니다(HTTP 400). `demo` 서버에서는 백엔드 선택을 끕니다.
+`B_STUDIO_MODE`는 **기본값**입니다. 아무것도 설정하지 않으면 지금과 한 글자도 다르지 않습니다. `B_STUDIO_BACKENDS`에 쉼표로 백엔드를 적으면 세션을 만들 때 그중 하나를 고를 수 있습니다(예 `claude-code,codex,commandcode,opencode`). 비우면 서버 모드 하나뿐이고, **목록 밖 백엔드를 요청하면 거부**합니다(HTTP 400). `demo` 서버에서는 백엔드 선택을 끕니다.
 
 - 서버 모드(`B_STUDIO_MODE`)는 언제나 쓸 수 있습니다(계획 기본·통합 세션의 백엔드).
-- 세션을 만들 때 `POST /api/sessions`의 `backend`로 고릅니다. `commandcode` 백엔드일 때만 `modelId`가 Command Code 모델 id입니다(서버 모드가 아니라 이 세션의 백엔드를 봅니다).
+- 세션을 만들 때 `POST /api/sessions`의 `backend`로 고릅니다. `commandcode`·`opencode` 백엔드일 때는 `modelId`가 그 CLI의 모델 id입니다(서버 모드가 아니라 이 세션의 백엔드를 봅니다).
 - **CLI 백엔드는 세션을 만들기 전에 기존 로그인 사전 확인을 합니다.** 실패하면 샌드박스를 띄우지 않고 이유를 돌려줍니다(요청마다 러너도 한 번 더 확인합니다).
 - 작업 분해(고정 계획, 서버 안에서만)의 레인마다 backend·model을 실을 수 있습니다. 한 레인의 작업은 같은 backend·model이어야 합니다(레인은 한 세션). 모델이 만든 계획(API 모드)은 backend를 쓰지 않습니다.
 - **한계:** 백엔드마다 토큰·캐시를 세는 방식이 다릅니다(로컬 CLI 구독은 청구가 없고, API는 단가가 다릅니다). 백엔드를 섞은 실행을 비교할 때는 합계가 아니라 **모델별 사용량**(세션 이벤트·토큰 탭)으로 보세요.
@@ -43,6 +44,20 @@
 `codex` 모드는 `pnpm studio:codex`(`B_STUDIO_MODE=codex`)로 켭니다. 쓸 모델은 `B_STUDIO_CODEX_MODEL`로 고정하고, 비우면 로그인 계정의 기본 모델을 씁니다. Codex SDK에는 대화를 갈라 이어받는 경로가 없어 **이전 대화를 이어받지 않습니다**. 대신 세션에 최근 3개 요청의 요약(요청 앞 200자·결과 앞 300자, 블록 전체 2,000자 상한)만 남겨 다음 요청 앞에 붙입니다. 격리는 세 겹입니다: 실행마다 만드는 빈 작업 폴더 + 읽기 전용 샌드박스 + 빈 `CODEX_HOME`(로그인 파일 `auth.json`만 심볼릭 링크로 빌려오고 사용자 `~/.codex`의 설정·스킬·MCP 서버는 읽지 않음). 다른 사람이 쓰는 서버가 아니라 **본인 PC 전용**입니다.
 
 `commandcode` 모드는 `pnpm studio:commandcode`(`B_STUDIO_MODE=commandcode`)로 켭니다. 모델은 세션을 만들 때 화면에서 고르거나 `B_STUDIO_CMD_MODEL`로 고정하고, 비우면 로그인 계정의 기본 모델(보통 DeepSeek)을 씁니다. `B_STUDIO_CMD_FREE_ONLY=1`이면 무료 모델만 쓰도록 강제합니다(고른 모델이 무료가 아니면 세션을 만들지 않습니다). 무료 모델 목록은 화면의 "무료 모델만" 체크박스로도 걸러 볼 수 있습니다. 실제로 쓴 모델 이름은 세션 이벤트로 기록됩니다. 격리는 실행마다 만드는 빈 작업 폴더 + 프로젝트 `.commandcode/settings.json`의 `permissions.allow: ["mcp__b_studio__*"]`(그 밖의 내장 도구는 헤드리스 기본에서 거부) + 빈 임시 HOME(로그인 파일 `~/.commandcode/auth.json`만 심볼릭 링크로 빌려오고 사용자 설정·스킬·mods·MCP 서버는 읽지 않음) 세 겹입니다. Command Code는 대화를 갈라(fork) 이어받으므로 이전 대화를 이어서 작업할 수 있습니다. 다른 사람이 쓰는 서버가 아니라 **본인 PC 전용**입니다.
+
+`opencode` 모드는 `pnpm studio:opencode`(`B_STUDIO_MODE=opencode`)로 켭니다. **모델을 반드시 골라야 합니다**(CLI·벤치·스튜디오 모두 기본 모델을 추측하지 않습니다). 로그인한 제공자의 모델을 고르고, 로그인 파일(`~/.local/share/opencode/auth.json`)이 있으면 실행마다 임시 HOME에 심볼릭 링크로만 빌려옵니다(내용을 읽거나 복사하지 않습니다). `B_STUDIO_OPENCODE_FREE_ONLY=1`이면 무료 모델만 보여줍니다(기본은 꺼짐). 실제로 쓴 모델 이름은 세션 이벤트로 기록됩니다.
+
+**무료 Zen 거절(중요).** 무료 Zen 티어(`opencode` 제공자의 free 모델)는 b-studio처럼 내장 도구를 좁힌 구성을 거절합니다. 조건을 나눠 잰 결과입니다(무료 모델, 요청 "reply with the single word ok").
+
+| 조건 | 결과 |
+|---|---|
+| 격리 HOME·XDG, 설정 없음, 기본 에이전트 | 성공 |
+| 전용 에이전트 `b-studio`(`*: deny`, `read: allow`), MCP 없음 | 403 `OpenCode's free tier can only be used from within OpenCode` |
+| 내장 `build` 에이전트 권한만 덮어씀(`*: deny`, `read: allow`), MCP 없음 | 같은 403 |
+
+원인은 격리 HOME도 MCP도 아니라 **내장 도구 구성을 좁힌 것**입니다. b-studio 경계("모델은 b-studio 도구만")를 풀어 이 검사를 통과시키지 않습니다 — 보안 후퇴이고 제공자 정책 우회입니다. 대신 무료 Zen 모델을 `usable: false`로 표시해 고를 수 없게 하고, 러너는 이 오류를 `provider_gate`로 분류해 재시도하지 않고 한 번만 알립니다(게이트 재시도·fork 포함). 그 오류 뒤 `opencode run`이 멈출 수 있어, 러너는 오류 이벤트를 받으면 자식을 죽이고 제한 시간 안에 실패로 끝냅니다. 쓸 수 있는 모델이 하나도 없으면 화면이 `opencode auth login` 안내를 보여줍니다.
+
+격리는 세 겹입니다: 실행마다 만드는 빈 작업 폴더 + 그 폴더의 `opencode.json`에 정의한 전용 에이전트 `b-studio`(`permission`에서 넓은 `*: deny`를 먼저, 좁은 `b_studio_*: allow`를 나중에 둡니다 — opencode는 마지막으로 맞는 규칙이 이기고, 허용 키는 MCP 도구 이름 글롭입니다) + 빈 임시 HOME(XDG 경로까지 임시 HOME 아래로 돌리고, `OPENCODE_CONFIG`로 실행별 설정만 싣고 `OPENCODE_DISABLE_PROJECT_CONFIG`로 상위 폴더 설정을 막습니다). OpenCode는 대화를 갈라(fork) 이어받으므로 이전 대화를 이어서 작업할 수 있습니다. 다른 사람이 쓰는 서버가 아니라 **본인 PC 전용**입니다.
 
 ## 웹 인증
 

@@ -122,9 +122,9 @@ export async function createTaskPlan(input: {
   const preset = input.presetPlan;
   if (preset === undefined) {
     if (mode !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
-  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode') {
-    // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode 모드에서도 쓴다. demo는 지금처럼 거부한다
-    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex 또는 commandcode에서만 사용할 수 있습니다');
+  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode' && mode !== 'opencode') {
+    // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode·opencode 모드에서도 쓴다. demo는 지금처럼 거부한다
+    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex, commandcode 또는 opencode에서만 사용할 수 있습니다');
   }
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
@@ -627,11 +627,12 @@ async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
 }
 
 /**
- * commandcode 모드는 세션 모델을 고른 모델(`B_STUDIO_CMD_MODEL`)이나 세션 선택에서 정한다.
- * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 `cmd -m`으로 나가므로 넘기지 않는다
+ * commandcode·opencode 모드는 세션 모델을 고른 모델(`B_STUDIO_CMD_MODEL`·`B_STUDIO_OPENCODE_MODEL`)이나 세션 선택에서 정한다.
+ * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 CLI `-m`으로 나가므로 넘기지 않는다
  */
 function sessionModelOption(modelId: string): { modelId?: string } {
-  return process.env.B_STUDIO_MODE?.trim() === 'commandcode' ? {} : { modelId };
+  const mode = process.env.B_STUDIO_MODE?.trim();
+  return mode === 'commandcode' || mode === 'opencode' ? {} : { modelId };
 }
 
 /**
@@ -642,9 +643,9 @@ function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelI
   const head = lane.tasks[0];
   const backend = head?.backend;
   if (!backend) return sessionModelOption(plan.modelId);
-  // api는 모델 레지스트리 id를, commandcode는 cmd 모델 id를 세션에 넘긴다. claude-code·codex는 고른 모델을 세션에 실어
+  // api는 모델 레지스트리 id를, commandcode·opencode는 그 CLI의 모델 id를 세션에 넘긴다. claude-code·codex도 고른 모델을 세션에 실어
   // 러너가 그 값을 쓰게 한다(없으면 환경 변수 = 계획 기본)
-  if (backend === 'commandcode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
+  if (backend === 'commandcode' || backend === 'opencode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
   if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId };
   return { backend, ...(head.model ? { modelId: head.model } : {}) };
 }

@@ -27,6 +27,8 @@ export interface PersistedSession {
   codex?: { notes: string[]; recent: Array<{ request: string; summary: string; status: string }> };
   /** commandcode 모드의 이어받을 세션과 알림. 이 필드가 생기기 전 기록에는 없다 */
   commandCode?: { sessionId?: string; notes: string[] };
+  /** opencode 모드의 이어받을 세션과 알림. 이 필드가 생기기 전 기록에는 없다 */
+  openCode?: { sessionId?: string; notes: string[] };
   sourceDirtyFiles: number;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };
@@ -44,14 +46,25 @@ export function stateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir
 }
 
 /**
- * Command Code 러너가 쓰는 세션별 고정 상태 폴더(HOME·작업 폴더를 이 아래에 둔다).
+ * 로컬 구독 CLI 러너(Command Code·OpenCode)가 쓰는 세션별 고정 상태 폴더. 러너의 HOME과 작업 폴더가 이 아래에 들어간다.
  *
- * cmd는 대화 세션을 `$HOME/.commandcode/projects/<cwd 이름>/`에 저장하므로 이어받으려면 HOME과 cwd가 실행 사이에도 같아야 한다.
+ * 두 CLI 모두 대화 세션을 HOME 아래에 저장하므로(cmd: `$HOME/.commandcode/projects/<cwd 이름>/`,
+ * opencode: `$XDG_DATA_HOME/opencode/opencode.db`) 실행 사이에 이어받으려면 HOME·cwd가 같아야 한다.
  * `session.json`·아티팩트와 같은 `.git/b-studio/` 아래에 두면 에이전트 도구가 닿지 않고 커밋에도 들어가지 않는다
  * (작업 폴더에 두면 `git add -A`가 체크포인트에 넣고 되돌리기의 `git clean -fd`가 지운다).
  */
+function runnerStateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>, runner: 'commandcode' | 'opencode'): string {
+  return path.join(stateDirOf(snapshot), '.git', 'b-studio', runner);
+}
+
+/** Command Code 러너(`runCommandCodeAgent`의 `stateDir`)용 */
 export function commandCodeStateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>): string {
-  return path.join(stateDirOf(snapshot), '.git', 'b-studio', 'commandcode');
+  return runnerStateDirOf(snapshot, 'commandcode');
+}
+
+/** OpenCode 러너(`runOpenCodeAgent`의 `stateDir`)용 */
+export function openCodeStateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>): string {
+  return runnerStateDirOf(snapshot, 'opencode');
 }
 
 /**

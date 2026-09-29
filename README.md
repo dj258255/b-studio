@@ -22,7 +22,7 @@ b-studio는 한 에이전트를 IDE에 붙이는 도구가 아니라, 여러 에
 - **안전한 체크포인트**: 검증을 통과한 변경과 데이터베이스 상태만 남기고, 실패하거나 취소한 변경은 되돌립니다.
 - **정책과 격리**: 자원 한도, 네트워크 허용 목록, 시크릿 가림, 사내 API 정책 프록시를 프로젝트 설정으로 적용합니다.
 - **팀 워크플로 강제**: `studio.yaml`에 단계·테스트 명령·화면 확인·보호 경로·승인·배포 조건을 선언합니다. 검증 게이트가 재시작·계약·화면·테스트·리뷰를 직접 실행하고, 필수 단계를 모두 통과한 변경만 체크포인트로 남깁니다. 통과한 단계는 커밋 트레일러로 기록돼 배포 조건과 대조합니다. Pi 확장은 같은 정책 코드로 Pi 내장 도구 호출을 먼저 막고 다음 행동을 안내합니다.
-- **로컬 또는 API 실행**: API 키뿐 아니라 개인 PC에 로그인된 `claude` CLI나 Command Code(`cmd`, 모델 선택·무료 모델) 계정으로도 실행할 수 있습니다.
+- **로컬 또는 API 실행**: API 키뿐 아니라 개인 PC에 로그인된 `claude` CLI, ChatGPT로 로그인한 Codex CLI, Command Code(`cmd`, 모델 선택·무료 모델), OpenCode(`opencode`, 모델 선택) 계정으로도 실행할 수 있습니다.
 
 ## 빠른 시작
 
@@ -56,6 +56,25 @@ pnpm studio:local
 ```
 
 기본 주소는 `http://127.0.0.1:3000`입니다.
+
+### 한 번에 켜기
+
+웹 스튜디오를 한 명령으로 켜고 끌 수 있습니다. Docker가 꺼져 있으면 colima를 켜고, 준비되면 브라우저를 엽니다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 엽니다.
+
+```bash
+pnpm studio launch              # 이 PC의 Claude Code로 (기본)
+pnpm studio launch --mode demo  # 모델 없이 화면·흐름만
+pnpm studio stop                # launch가 띄운 스튜디오를 멈춘다
+```
+
+`launch`는 백그라운드로 띄웁니다(로그 `~/.cache/b-studio/launch/studio.log`, PID `studio.pid`). `--port`로 포트를 바꾸고 `--no-open`으로 브라우저를 열지 않을 수 있습니다.
+
+프로그램이 이 출력을 읽어야 하면 `--json`을 붙입니다. 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 씁니다(진행 안내는 stderr).
+
+```bash
+pnpm studio launch --json   # {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
+pnpm studio stop --json     # {"stopped":true}
+```
 
 ### 데스크톱 앱 (macOS)
 
