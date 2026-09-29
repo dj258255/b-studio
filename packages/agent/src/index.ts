@@ -89,9 +89,12 @@ export {
   canCreatePullRequest,
   compareUrl,
   createPullRequest,
+  fetchIssue,
   parseRemote,
   PullRequestError,
   type GitHostKind,
+  type IssueLookup,
+  type PullRequestDraft,
   type PullRequestResult,
   type RemoteLocation,
 } from './repository';

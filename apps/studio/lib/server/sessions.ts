@@ -16,6 +16,7 @@ import {
   DatabaseBranches,
   describeDatabaseState,
   estimateCost,
+  fetchIssue,
   formatVerificationReport,
   formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
@@ -32,6 +33,7 @@ import {
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
+  workflowStages,
   Workspace,
   type AgentEvent,
   type AgentResult,
@@ -45,6 +47,8 @@ import {
   type DesignSource,
   type GitAuthor,
   type ModelClient,
+  type PullRequestDraft,
+  type RepositoryInfo,
   type RoutingDecision,
   type RemoteSyncResult,
   type ServiceCheck,
@@ -83,6 +87,7 @@ import type {
   CodeSearch,
   CodeTree,
   DesignView,
+  ExportPreview,
   ExportResult,
   ProxyResponse,
   RepositoryView,
@@ -1619,8 +1624,121 @@ export function restoreCheckpoint(id: string, sha: string): void {
   })();
 }
 
+/** PR에 연결할 이슈 번호. 생략은 undefined, 잘못된 값은 400이다 */
+export function parseIssueInput(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 10_000_000) {
+    throw new StudioError(400, 'issue는 1 이상 10,000,000 이하의 정수여야 합니다');
+  }
+  return value;
+}
+
+type IssueLookupResult = { ok: true; state: 'open' | 'closed'; title: string } | { ok: false; error: string };
+
+/**
+ * 미리보기의 확인 목록을 만든다. 세션 없이 계산할 수 있도록 순수 함수로 둔다.
+ * 어떤 항목이 false여도 올리기를 막지는 않는다. 사람이 보고 판단한다
+ */
+export function buildExportChecks({
+  issue,
+  issueLookup,
+  missing,
+  uncheckpointed,
+  running,
+}: {
+  issue?: number;
+  issueLookup?: IssueLookupResult;
+  missing: ReadonlyArray<{ shortSha: string; subject: string; stages: readonly string[] }>;
+  uncheckpointed: number;
+  running: boolean;
+}): ExportPreview['checks'] {
+  const checks: ExportPreview['checks'] = [
+    {
+      id: 'issue_linked',
+      ok: issue !== undefined,
+      detail: issue === undefined ? '이슈 번호를 넣지 않았습니다. 선택 사항입니다' : `#${issue} 이슈를 PR에 연결합니다`,
+    },
+  ];
+
+  if (issue === undefined) {
+    checks.push({ id: 'issue_open', ok: 'unknown', detail: '이슈 번호를 넣으면 원격 이슈 상태를 확인합니다' });
+  } else if (issueLookup?.ok) {
+    checks.push({
+      id: 'issue_open',
+      ok: issueLookup.state === 'open',
+      detail: `#${issue} ${issueLookup.title} (${issueLookup.state === 'open' ? '열림' : '닫힘'})`,
+    });
+  } else {
+    checks.push({ id: 'issue_open', ok: 'unknown', detail: `#${issue} 이슈를 확인하지 못했습니다: ${issueLookup?.error ?? '알 수 없는 오류'}` });
+  }
+
+  checks.push({
+    id: 'stages_passed',
+    ok: missing.length === 0,
+    detail: missing.length === 0 ? '모든 커밋이 필수 단계를 통과했습니다' : `필수 단계 기록이 없는 커밋 ${missing.length}개가 있습니다`,
+  });
+  checks.push({
+    id: 'uncheckpointed_changes',
+    ok: uncheckpointed === 0,
+    detail: uncheckpointed === 0 ? '체크포인트 밖 변경이 없습니다' : `체크포인트로 남기지 않은 변경 ${uncheckpointed}개가 있습니다. 올리기 전에 체크포인트로 남겨야 합니다`,
+  });
+  checks.push({
+    id: 'running',
+    ok: !running,
+    detail: running ? '작업이 진행 중입니다. 끝난 뒤에 올릴 수 있습니다' : '진행 중인 작업이 없습니다',
+  });
+  return checks;
+}
+
+/** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
+async function pullRequestDraft(session: Session, issue?: number): Promise<PullRequestDraft & { info: RepositoryInfo }> {
+  const info = (await session.checkpoints.repository())!;
+  const draft = buildPullRequest({
+    projectName: session.project.spec.name,
+    base: info.base,
+    branch: info.branch,
+    commits: await session.checkpoints.sessionCommits(),
+    issue,
+    requiredStages: workflowStages(session.project),
+  });
+  return { info, ...draft };
+}
+
+/**
+ * 올리기 전 미리보기. 제목·본문과 확인 목록(이슈 연결·원격 이슈 상태·누락 단계·체크포인트 밖 변경)을 돌려준다.
+ * 누락을 보여 주기만 하고 막지는 않는다. 실제 생성은 exportSession이 같은 함수로 본문을 다시 만들어 한다
+ */
+export async function previewExport(id: string, { issue }: { issue?: number } = {}): Promise<ExportPreview> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
+
+  const { info, title, body, missing } = await pullRequestDraft(session, issue);
+  const remote = parseRemote(info.remoteUrl);
+  const issueLookup =
+    issue === undefined
+      ? undefined
+      : await fetchIssue(remote, issue).then(
+          (lookup): IssueLookupResult => ({ ok: true, state: lookup.state, title: lookup.title }),
+          (error: unknown): IssueLookupResult => ({ ok: false, error: describe(error) }),
+        );
+
+  return {
+    title,
+    body,
+    canCreate: canCreatePullRequest(remote),
+    existingPullRequest: info.pullRequestUrl,
+    checks: buildExportChecks({
+      issue,
+      issueLookup,
+      missing,
+      uncheckpointed: (await session.checkpoints.pendingFiles()).length,
+      running: session.snapshot.running,
+    }),
+  };
+}
+
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
-export async function exportSession(id: string, { pullRequest }: { pullRequest: boolean }): Promise<ExportResult> {
+export async function exportSession(id: string, { pullRequest, issue }: { pullRequest: boolean; issue?: number }): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
   if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
@@ -1639,12 +1757,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
     let pullRequestError: string | undefined;
     if (pullRequest && !info.pullRequestUrl) {
       try {
-        const { title, body } = buildPullRequest({
-          projectName: session.project.spec.name,
-          base: info.base,
-          branch: info.branch,
-          commits: await session.checkpoints.sessionCommits(),
-        });
+        const { title, body } = await pullRequestDraft(session, issue);
         const result = await createPullRequest(parseRemote(info.remoteUrl), { title, body, base: info.base, branch: info.branch });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
@@ -1663,6 +1776,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
       forced: pushed.forced,
       pullRequest: created,
       pullRequestError,
+      issue: created ? issue : undefined,
     };
     emit(session, { type: 'exported', ...result });
     return result;
