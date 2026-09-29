@@ -16,10 +16,17 @@ describe('classifyLine', () => {
     expect(classifyLine('build FAILED')).toBe('fail');
   });
 
-  it('경고는 wait, 안내는 muted', () => {
+  it('경고는 줄 전체가 wait. INFO·DEBUG 줄은 줄 전체를 흐리게 하지 않고 그 단어만 흐리게 한다', () => {
     expect(classifyLine('WARN deprecated option used')).toBe('wait');
-    expect(classifyLine('INFO server started')).toBe('muted');
-    expect(classifyLine('DEBUG cache miss')).toBe('muted');
+    expect(classifyLine('INFO server started')).toBeUndefined();
+    expect(classifyLine('DEBUG cache miss')).toBeUndefined();
+    expect(highlightLogLine('INFO server started')).toEqual([{ content: 'INFO', tone: 'muted' }, { content: ' server started' }]);
+  });
+
+  it('들여쓴 스택 트레이스와 Caused by 줄도 fail로 본다(Java·Node)', () => {
+    expect(classifyLine('    at com.example.api.OrderController.get(OrderController.java:42)')).toBe('fail');
+    expect(classifyLine('Caused by: java.lang.IllegalStateException: boom')).toBe('fail');
+    expect(classifyLine('\t... 12 more')).toBe('fail');
   });
 
   it('아무 것도 아니면 undefined', () => {

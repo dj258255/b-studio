@@ -40,7 +40,8 @@ const ANSI_FOREGROUND_TONE: Partial<Record<string, LogTone>> = {
 };
 
 /**
- * 줄 전체의 성격을 정한다. 우선순위: b-studio 플랫폼 줄 > 스택 트레이스/에러 > 경고 > 안내(info/debug).
+ * 줄 전체의 성격을 정한다. 우선순위: b-studio 플랫폼 줄 > 스택 트레이스/에러 > 경고.
+ * INFO·DEBUG는 줄 전체가 아니라 그 단어만 흐리게 한다(Spring처럼 거의 모든 줄에 INFO가 있으면 로그가 통째로 흐려진다).
  * 아무 것도 아니면 undefined(기본 색)를 돌려준다
  */
 export function classifyLine(text: string): LogTone | undefined {
@@ -48,14 +49,17 @@ export function classifyLine(text: string): LogTone | undefined {
   if (isStackTraceLine(text)) return 'fail';
   if (/\b(error|exception|fail(?:ed|ure)?)\b/i.test(text)) return 'fail';
   if (/\bwarn(?:ing)?\b/i.test(text)) return 'wait';
-  if (/\b(info|debug)\b/i.test(text)) return 'muted';
   return undefined;
 }
 
-/** 스택 트레이스 줄: "at "나 탭 뒤 "at "으로 시작 */
+/** 스택 트레이스 줄: 들여쓴 "at …"(Java·Node), "Caused by:", "... N more" */
+const STACK_TRACE = /^\s*(?:at\s|Caused by:|\.\.\. \d+ more)/;
 function isStackTraceLine(text: string): boolean {
-  return text.startsWith('at ') || text.startsWith('\tat ');
+  return STACK_TRACE.test(text);
 }
+
+/** 로그 수준 단어 INFO·DEBUG·TRACE. 그 단어만 흐리게 한다 */
+const QUIET_LEVEL = /\b(?:INFO|DEBUG|TRACE)\b/g;
 
 /** ANSI 이스케이프 코드를 지운 순수 문자열만 필요할 때 */
 export function stripAnsi(text: string): string {
@@ -100,6 +104,7 @@ function splitAnsi(rawText: string): { text: string; colorSpans: Span[] } {
 function findPatternSpans(text: string): Span[] {
   const spans: Span[] = [];
   for (const match of text.matchAll(TIMESTAMP)) spans.push({ start: match.index, end: match.index + match[0].length, tone: 'muted' });
+  for (const match of text.matchAll(QUIET_LEVEL)) spans.push({ start: match.index, end: match.index + match[0].length, tone: 'muted' });
   for (const match of text.matchAll(STATUS_CODE)) {
     const code = Number(match[0]);
     spans.push({ start: match.index, end: match.index + match[0].length, tone: code < 300 ? 'pass' : 'fail' });
