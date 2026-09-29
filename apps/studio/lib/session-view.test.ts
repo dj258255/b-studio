@@ -1,6 +1,6 @@
 import type { VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
-import { activeRun, createView, latestWrite, LOG_LIMIT, reduceSession, type SessionView } from './session-view';
+import { activeRun, createView, latestWrite, LOG_LIMIT, outcomeText, reduceSession, runHasChanges, runsWithChanges, type ChatItem, type SessionView } from './session-view';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 
 const snapshot: SessionSnapshot = {
@@ -498,5 +498,44 @@ describe('reduceSession', () => {
       { kind: 'steer', runId: 'r1', text: '지시1', status: 'applied' },
       { kind: 'steer', runId: 'r1', text: '지시2', status: 'dropped' },
     ]);
+  });
+});
+
+describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
+  const outcome = (over: Partial<Extract<ChatItem, { kind: 'outcome' }>> = {}): Extract<ChatItem, { kind: 'outcome' }> => ({
+    kind: 'outcome',
+    runId: 'r1',
+    status: 'done',
+    summary: '이 함수는 …',
+    turns: 1,
+    ...over,
+  });
+
+  it('게이트를 돌았거나 체크포인트가 남은 실행만 파일을 바꾼 실행으로 본다', () => {
+    const changed = fold([
+      { type: 'run_started', runId: 'r1', request: '고쳐줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'verify_start', files: ['web/app/page.tsx'] } },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '고쳤습니다', turns: 2 },
+    ]);
+    expect(runHasChanges(changed.chat, 'r1')).toBe(true);
+    expect([...runsWithChanges(changed.chat)]).toEqual(['r1']);
+
+    // 바뀐 파일이 없으면 게이트가 검증 없이 통과하므로 게이트 줄도 체크포인트도 없다
+    const answered = fold([
+      { type: 'run_started', runId: 'r2', request: '이 함수는 어떻게 동작해?' },
+      { type: 'run_finished', runId: 'r2', status: 'done', summary: '이렇게 동작합니다', turns: 1 },
+    ]);
+    expect(runHasChanges(answered.chat, 'r2')).toBe(false);
+    expect(runsWithChanges(answered.chat).size).toBe(0);
+  });
+
+  it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {
+    expect(outcomeText(outcome(), true)).toBe('완료, 1턴');
+    expect(outcomeText(outcome({ turns: 3 }), false)).toBe('답만 했습니다(바꾼 파일 없음), 3턴');
+    // 답을 기다리거나 취소·실패한 실행의 문구는 그대로다
+    expect(outcomeText(outcome({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?' }), false)).toBe('답을 기다립니다');
+    expect(outcomeText(outcome({ status: 'cancelled', summary: '요청을 취소했습니다' }), true)).toBe('요청을 취소했습니다');
+    expect(outcomeText(outcome({ status: 'failed', summary: '게이트 실패' }), true)).toBe('완료하지 못함: 게이트 실패');
+    expect(outcomeText(outcome({ status: 'error', summary: '연결 끊김' }), true)).toBe('오류: 연결 끊김');
   });
 });
