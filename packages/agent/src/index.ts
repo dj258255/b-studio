@@ -8,19 +8,53 @@ export {
   type ModelClientInfo,
   type ModelPreflight,
   type RunAgentOptions,
+  type RunMetrics,
+  type Steering,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export {
+  ClaudeCodeUsageTracker,
   describeAccount,
+  describeResultFailure,
   preflightClaudeCode,
   runClaudeCodeAgent,
   type ClaudeCodeAccount,
   type ClaudeCodeResult,
   type ClaudeCodeRunOptions,
 } from './claude-code-runner';
-export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
-export { BrowserUnavailableError, runInBrowser, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
+export {
+  preflightCodex,
+  runCodexAgent,
+  type CodexConfig,
+  type CodexRunOptions,
+  type CodexRunResult,
+  type CodexSdk,
+  type CodexThread,
+} from './codex-runner';
+export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
+export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
+export {
+  BrowserUnavailableError,
+  launchBrowser,
+  runInBrowser,
+  StepFailedError,
+  type BrowserFrame,
+  type BrowserPageOptions,
+  type BrowserPageResult,
+  type BrowserPageStep,
+  type BrowserRunner,
+} from './browser-check';
+export {
+  openRemoteBrowser,
+  type RemoteBrowser,
+  type RemoteBrowserKeyEvent,
+  type RemoteBrowserMouseEvent,
+  type RemoteBrowserOptions,
+  type RemoteBrowserPick,
+  type RemoteBrowserViewport,
+} from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
+export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export { isInScope, MAX_PLAN_LANES, MAX_PLAN_TASKS, planLanes, requestTaskPlan, TaskPlanError, type PlannedTask, type TaskLane } from './task-plan';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
@@ -69,7 +103,63 @@ export {
   type RemoteLocation,
   type SubIssueResult,
 } from './repository';
-export { buildTools, executeTool } from './tools';
+export { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
+export {
+  Board,
+  canRead,
+  DEFAULT_BOARD_LIMITS,
+  failureNotesFromEvents,
+  failureNotesFromReport,
+  NOTE_PRIORITY,
+  normalizeMessage,
+  noteBytes,
+  signatureFromCheck,
+  signatureKey,
+  signaturesFromReport,
+  type Author,
+  type BoardLimits,
+  type BoardOptions,
+  type BoardStats,
+  type FailureEvent,
+  type FailureNoteInput,
+  type FailureSignature,
+  type Note,
+  type NoteKind,
+  type PostInput,
+  type PostResult,
+  type ReadOptions,
+  type ReadResult,
+  type Reader,
+  type Topology,
+} from './coordination';
+export {
+  clipCommandOutput,
+  clipText,
+  COMMAND_OUTPUT_BUDGET,
+  createToolResultCache,
+  dedupeResult,
+  HTTP_BODY_BUDGET,
+  invalidateReadCache,
+  isHtmlContent,
+  isRepeatNote,
+  LOGS_OUTPUT_LIMIT,
+  READ_FILE_BUDGET,
+  REPEAT_NOTE_PREFIX,
+  repeatNote,
+  visibleHtml,
+  type ToolResultCache,
+} from './tool-output';
+export {
+  clearedToolResultNote,
+  clearOldToolResults,
+  CLEARED_TOOL_RESULT_PREFIX,
+  contextClearingFromEnv,
+  DEFAULT_CONTEXT_CLEARING,
+  isClearedToolResult,
+  resolveContextClearing,
+  type ClearToolResults,
+  type ContextClearingPolicy,
+} from './context-clearing';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   DEFAULT_WORKFLOW,
@@ -88,7 +178,10 @@ export {
   workflowReleaseRequirements,
   workflowStages,
   type WorkflowCheck,
+  type WorkflowCompare,
+  type WorkflowStepCheck,
 } from './workflow';
+export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
 export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';

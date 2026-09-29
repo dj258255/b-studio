@@ -14,7 +14,8 @@ workflow:
   # browser_check 단계: 헤드리스 Chromium으로 모바일 크기 화면을 렌더링해 문구·스크립트 예외·console.error·실패한 요청·가로 넘침을 확인한다
   pageChecks:
     - { service: web, path: /, mode: browser, expectText: To get started, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
-  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
+  # post_note·read_notes는 작업 분해에서 조율 전략을 켠 실행에만, ask_user는 사람이 보낸 요청에서만 보인다
+  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract, post_note, read_notes, ask_user]
   deniedCommands: [npm publish, git push, terraform apply, terraform destroy]
   requireApprovalFor: [restart_service]
   protectedPaths: [.env, .github/workflows, infra, migrations]
@@ -53,8 +54,8 @@ databases:
   db: { engine: postgres, database: app, user: app }
 
 # 컨테이너 한도. 한 샌드박스가 Docker VM 자원을 다 써서 다른 세션까지 멈추지 않게 한다.
-# 한도 없이 잰 최대 사용량: api 726MiB(JVM 3개: Gradle 래퍼, Gradle 데몬, 앱), web 548MiB, db 48MiB
+# 한도 없이 잰 최대 사용량: 개발 서버만 api 779MiB, 같은 컨테이너에서 ./gradlew test를 함께 돌리면 1,736MiB(1초 간격 표본, #70). 1536m이면 테스트 중 OOM으로 종료돼 2048m로 둔다(여유 약 15%). web 548MiB, db 48MiB
 resources:
-  api: { memory: 1536m, cpus: 2 }
+  api: { memory: 2048m, cpus: 2 }
   web: { memory: 1g, cpus: 2 }
   db: { memory: 256m }

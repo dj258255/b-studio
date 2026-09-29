@@ -1,11 +1,30 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { PNG } from 'pngjs';
 import type { ExecResult } from '@b-studio/sandbox';
-import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
+import type { LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { BrowserPageOptions } from './browser-check';
-import { VerificationGate, type PageFetcher } from './gate';
+import { StepFailedError, type BrowserPageOptions, type BrowserPageResult } from './browser-check';
+import { VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { Workspace } from './workspace';
+
+/** 단색 배경에 원하는 색을 칠한 PNG 버퍼를 만든다 */
+function image(width: number, height: number, paint: (x: number, y: number) => [number, number, number] = () => [255, 255, 255]): Buffer {
+  const png = new PNG({ width, height });
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const index = (width * y + x) << 2;
+      const [r, g, b] = paint(x, y);
+      png.data[index] = r;
+      png.data[index + 1] = g;
+      png.data[index + 2] = b;
+      png.data[index + 3] = 255;
+    }
+  }
+  return PNG.sync.write(png);
+}
 
 let project: LoadedProject;
 
@@ -111,7 +130,7 @@ describe('VerificationGate 워크플로 단계', () => {
       },
       browserRunner: async (url, options) => {
         seen.push({ url, viewport: options.viewport });
-        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], horizontalOverflowPx: 510 };
+        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], blockedRequests: [], horizontalOverflowPx: 510, steps: [] };
       },
       onEvent: () => {},
     });
@@ -155,7 +174,7 @@ describe('VerificationGate 워크플로 단계', () => {
       fetcher: async () => ORDERS_CONTRACT,
       browserRunner: async (_url, options) => {
         seen.push(options.steps);
-        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], horizontalOverflowPx: 0 };
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
       },
       onEvent: () => {},
     });
@@ -228,5 +247,469 @@ describe('VerificationGate 워크플로 단계', () => {
     const outcome = await gate.check();
     expect(outcome).toEqual({ kind: 'exhausted', summary: '워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: test' });
     expect(gate.verified).toBe(false);
+  });
+
+  it('화면 확인 단계 스크린샷을 저장해 steps[].artifact로 남기고 프레임을 전달한다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, expectText: '주문 목록', viewport: { width: 390, height: 844 }, allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const saved: Array<{ name: string; contentType: string }> = [];
+    const frames: Array<{ check: string; frame: unknown }> = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async (_url, options) => {
+        // 저장할 곳이 있으면 게이트가 capture를 켠다
+        expect(options.capture).toBe(true);
+        options.onFrame?.({ data: Buffer.from([9]), width: 390, height: 844, at: 7 });
+        return {
+          status: 200,
+          text: '주문 목록',
+          pageErrors: [],
+          consoleErrors: [],
+          failedRequests: [],
+          blockedRequests: [],
+          horizontalOverflowPx: 0,
+          steps: [
+            { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
+            { label: 'click #go', ok: true, screenshot: Buffer.from([2]) },
+          ],
+        };
+      },
+      saveArtifact: async ({ name, contentType }) => {
+        saved.push({ name, contentType });
+        return `artifact-${saved.length}`;
+      },
+      onBrowserFrame: ({ check, frame }) => frames.push({ check, frame }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.steps).toEqual([
+      { label: 'open /orders', ok: true, artifact: 'artifact-1' },
+      { label: 'click #go', ok: true, artifact: 'artifact-2' },
+    ]);
+    expect(saved.map((entry) => entry.contentType)).toEqual(['image/png', 'image/png']);
+    expect(frames).toEqual([{ check: 'api /orders (browser 390x844)', frame: { data: Buffer.from([9]), width: 390, height: 844, at: 7 } }]);
+  });
+
+  it('스크린샷 저장이 실패해도 화면 확인 결과는 바뀌지 않는다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, expectText: '주문 목록', allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => ({
+        status: 200,
+        text: '주문 목록',
+        pageErrors: [],
+        consoleErrors: [],
+        failedRequests: [],
+        blockedRequests: [],
+        horizontalOverflowPx: 0,
+        steps: [
+          { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
+          { label: 'click #go', ok: true, screenshot: Buffer.from([2]) },
+        ],
+      }),
+      saveArtifact: async () => {
+        throw new Error('디스크가 꽉 찼습니다');
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(true);
+    expect(check?.steps?.map((step) => step.label)).toEqual(['open /orders', 'click #go']);
+    expect(check?.steps?.every((step) => step.artifact === undefined)).toBe(true);
+  });
+
+  it('실패한 단계의 스크린샷도 저장해 실패 결과에 남긴다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const saved: string[] = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => {
+        throw new StepFailedError('2번째 단계 실패 (click #missing): timeout', [
+          { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
+          { label: 'click #missing', ok: false, detail: 'timeout', screenshot: Buffer.from([2]) },
+        ]);
+      },
+      saveArtifact: async () => `artifact-${saved.push('saved')}`,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain('2번째 단계 실패');
+    expect(check?.steps).toEqual([
+      { label: 'open /orders', ok: true, artifact: 'artifact-1' },
+      { label: 'click #missing', ok: false, detail: 'timeout', artifact: 'artifact-2' },
+    ]);
+  });
+});
+
+describe('VerificationGate 디자인 비교', () => {
+  const compare = (overrides: Partial<NonNullable<WorkflowPageCheck['compare']>> = {}): NonNullable<WorkflowPageCheck['compare']> => ({
+    reference: 'design.png',
+    maxDiffRatio: 0.02,
+    threshold: 0.1,
+    ...overrides,
+  });
+  const comparePage = (value: NonNullable<WorkflowPageCheck['compare']>): WorkflowPageCheck => ({
+    service: 'api',
+    path: '/orders',
+    mode: 'browser',
+    expectStatus: 200,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    compare: value,
+  });
+  const browserResult = (actual: Buffer) => ({
+    status: 200,
+    text: '주문 목록',
+    pageErrors: [],
+    consoleErrors: [],
+    failedRequests: [],
+    blockedRequests: [],
+    horizontalOverflowPx: 0,
+    steps: [{ label: 'open /orders', ok: true, screenshot: actual }],
+  });
+
+  async function compareGate(target: LoadedProject, actual: Buffer, saved: string[] = []) {
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => browserResult(actual),
+      saveArtifact: async ({ name }) => `a${saved.push(name)}`,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  it('기준 이미지와 같으면 통과하고 비교 이미지 세 장을 저장한다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare({ reference: 'design/list.png' }))] });
+    const shot = image(60, 40);
+    await mkdir(path.join(target.root, 'design'), { recursive: true });
+    await writeFile(path.join(target.root, 'design/list.png'), shot);
+    const saved: string[] = [];
+    const gate = await compareGate(target, shot, saved);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(true);
+    // 단계 스크린샷(a1)에 이어 기준·실제·차이 이미지를 저장한다
+    expect(check?.compare).toEqual({ ratio: 0, max: 0.02, reference: 'a2', actual: 'a3', diff: 'a4' });
+    expect(saved).toEqual([
+      'api /orders (browser) 1. open /orders',
+      'api /orders (browser) 디자인 이미지',
+      'api /orders (browser) 실제 이미지',
+      'api /orders (browser) 차이 이미지',
+    ]);
+  });
+
+  it('허용 비율을 넘으면 실패로 알리고 비교 결과를 남긴다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare())] });
+    await writeFile(path.join(target.root, 'design.png'), image(100, 100));
+    // 20×20만 다른 색이라 4%가 다르다
+    const gate = await compareGate(target, image(100, 100, (x, y) => (x < 20 && y < 20 ? [0, 0, 0] : [255, 255, 255])));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('디자인 차이 4.0% (허용 2.0%, 비교 100×100)');
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(false);
+    expect(check?.compare?.ratio).toBeCloseTo(0.04, 4);
+    expect(check?.compare?.max).toBe(0.02);
+    expect(gate.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('기준 이미지가 없으면 건너뛰지 않고 실패로 알린다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare({ reference: 'missing.png' }))] });
+    const gate = await compareGate(target, image(100, 100));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('디자인 기준 이미지를 읽지 못했습니다: missing.png');
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.compare).toBeUndefined();
+  });
+
+  it('기준 이미지와 너비가 다르면 자동 조정 없이 실패로 알린다', async () => {
+    const target = withWorkflow({ pageChecks: [comparePage(compare())] });
+    await writeFile(path.join(target.root, 'design.png'), image(100, 100));
+    const gate = await compareGate(target, image(120, 100));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('이미지 너비가 다릅니다 (실제 120px, 디자인 100px)');
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.compare).toBeUndefined();
+  });
+});
+
+describe('VerificationGate 출처 제한', () => {
+  const browserPage = (extra: Partial<WorkflowPageCheck> = {}): WorkflowPageCheck => ({
+    service: 'api',
+    path: '/orders',
+    mode: 'browser',
+    expectStatus: 200,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    ...extra,
+  });
+
+  async function originGate(target: LoadedProject, result: BrowserPageResult) {
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 2,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => result,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  it('화면 확인에 세션 서비스 출처를 넘기고, 막은 요청을 detail에 남긴다', async () => {
+    const target = withWorkflow({ pageChecks: [browserPage()] });
+    const workspace = new Workspace(target.root);
+    let origins: string[] | undefined;
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 2,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async (_url, options) => {
+        origins = options.allowedOrigins;
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: ['http://evil.example/x'], horizontalOverflowPx: 0, steps: [] };
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // fakeSandbox는 서비스마다 http://127.0.0.1:1을 돌려준다
+    expect(origins).toEqual(['http://127.0.0.1:1']);
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.ok).toBe(true);
+    expect(check?.detail).toBe('다른 출처 요청 1건을 막았습니다');
+  });
+
+  it('실패 사유에 막은 요청 수를 덧붙인다', async () => {
+    const target = withWorkflow({ pageChecks: [browserPage({ expectText: '없는 문구' })] });
+    const gate = await originGate(target, {
+      status: 200,
+      text: '주문 목록',
+      pageErrors: [],
+      consoleErrors: [],
+      failedRequests: [],
+      blockedRequests: ['http://evil.example/a', 'http://evil.example/b'],
+      horizontalOverflowPx: 0,
+      steps: [],
+    });
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain("렌더링된 화면에 '없는 문구'가 없습니다");
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('다른 출처 요청 2건을 막았습니다');
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check');
+    expect(check?.detail).toContain("렌더링된 화면에 '없는 문구'가 없습니다");
+    expect(check?.detail).toContain('다른 출처 요청 2건을 막았습니다');
+  });
+});
+
+describe('VerificationGate 동시 요청 확인', () => {
+  const check = (over: Partial<WorkflowConcurrencyCheck> = {}): WorkflowConcurrencyCheck => ({
+    name: 'stock',
+    service: 'api',
+    method: 'POST',
+    path: '/api/products/1/orders',
+    concurrent: 10,
+    expect: { successCount: { exactly: 1 }, then: { method: 'GET', path: '/api/products/1', jsonPath: '$.stock', equals: 0 } },
+    ...over,
+  });
+
+  async function concurrencyGate(target: LoadedProject, requestService: ServiceRequest) {
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      requestService,
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  it('선언한 동시 요청을 한 번에 보내고, 성공 건수·상태 분포·then 값을 남긴다', async () => {
+    const target = withWorkflow({ concurrencyChecks: [check()] });
+    const calls: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let posts = 0;
+    const gate = await concurrencyGate(target, async (url, init) => {
+      calls.push(`${init.method} ${new URL(url).pathname}`);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      if (init.method === 'POST') {
+        posts += 1;
+        return { status: posts === 1 ? 201 : 409, text: '' };
+      }
+      return { status: 200, text: JSON.stringify({ stock: 0 }) };
+    });
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // 10개를 실제로 동시에 보냈다
+    expect(maxInFlight).toBe(10);
+    expect(calls.filter((call) => call === 'POST /api/products/1/orders')).toHaveLength(10);
+    expect(calls).toContain('GET /api/products/1');
+    const result = gate.checks.find((entry) => entry.stage === 'concurrency_check');
+    expect(result?.ok).toBe(true);
+    expect(result?.detail).toContain('성공 1/10 (기대: 정확히 1)');
+    expect(result?.detail).toContain('상태 201:1, 409:9');
+    expect(result?.detail).toContain('$.stock = 0');
+    expect(gate.passedStages.has('concurrency_check')).toBe(true);
+  });
+
+  it('성공 건수나 then 값이 기대와 다르면 실패로 알린다', async () => {
+    const target = withWorkflow({ concurrencyChecks: [check()] });
+    let posts = 0;
+    const gate = await concurrencyGate(target, async (_url, init) => {
+      if (init.method === 'POST') {
+        posts += 1;
+        return { status: posts <= 3 ? 201 : 409, text: '' };
+      }
+      return { status: 200, text: JSON.stringify({ stock: 1 }) };
+    });
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('성공 3/10 (기대: 정확히 1)');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('$.stock 값이 1 (기대: 0)');
+    expect(gate.passedStages.has('concurrency_check')).toBe(false);
+  });
+
+  it('세션 서비스 출처 밖 경로는 요청하지 않고 거부한다', async () => {
+    const target = withWorkflow({ concurrencyChecks: [check({ path: '//evil.example/x' })] });
+    let called = 0;
+    const gate = await concurrencyGate(target, async () => {
+      called += 1;
+      return { status: 200, text: '{}' };
+    });
+
+    const outcome = await gate.check();
+    expect(called).toBe(0);
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('path must stay on the service host');
+  });
+
+  it('요청이 타임아웃으로 실패하면 그대로 게이트 실패로 알린다', async () => {
+    const target = withWorkflow({ concurrencyChecks: [check({ expect: { allStatusIn: [200, 201, 409] } })] });
+    const gate = await concurrencyGate(target, async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    });
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toMatch(/timeout/i);
+    expect(gate.passedStages.has('concurrency_check')).toBe(false);
+  });
+});
+
+describe('VerificationGate 로드 시간 예산', () => {
+  const browserPage = (extra: Partial<WorkflowPageCheck> = {}): WorkflowPageCheck => ({
+    service: 'api',
+    path: '/orders',
+    mode: 'browser',
+    expectStatus: 200,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    ...extra,
+  });
+
+  async function loadGate(target: LoadedProject, result: Partial<BrowserPageResult>) {
+    const workspace = new Workspace(target.root);
+    let measure: boolean | undefined;
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async (_url, options) => {
+        measure = options.measureLoad;
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [], ...result };
+      },
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return { gate, measure: () => measure };
+  }
+
+  it('예산을 넘으면 실패로 알리고, 잰 값을 metrics에 남긴다', async () => {
+    const over = await loadGate(withWorkflow({ pageChecks: [browserPage({ maxLoadMs: 2000 })] }), { loadMs: 2340 });
+    const outcome = await over.gate.check();
+    // 게이트는 로드 시간을 재도록 러너에 요청한다
+    expect(over.measure()).toBe(true);
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('로드 2,340ms (예산 2,000ms)');
+    expect(over.gate.passedStages.has('browser_check')).toBe(false);
+
+    const noBudget = await loadGate(withWorkflow({ pageChecks: [browserPage()] }), { loadMs: 1500 });
+    expect(await noBudget.gate.check()).toEqual({ kind: 'pass' });
+    expect(noBudget.gate.checks.find((entry) => entry.stage === 'browser_check')?.metrics).toEqual({ loadMs: 1500 });
+  });
+
+  it('예산 안이면 통과하고 metrics.loadMs를 남긴다', async () => {
+    const { gate } = await loadGate(withWorkflow({ pageChecks: [browserPage({ maxLoadMs: 3000 })] }), { loadMs: 2340 });
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.metrics).toEqual({ loadMs: 2340 });
+  });
+
+  it('예산을 적었는데 재지 못하면 통과로 보지 않는다', async () => {
+    const { gate } = await loadGate(withWorkflow({ pageChecks: [browserPage({ maxLoadMs: 2000 })] }), {});
+    const outcome = await gate.check();
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('로드 시간을 재지 못했습니다 (예산 2,000ms)');
   });
 });

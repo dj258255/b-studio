@@ -1,4 +1,5 @@
 import type { ScriptedTurn } from '../scripted-client';
+import type { AskUserQuestion } from '../tools';
 
 /**
  * examples/orders 프로젝트용 스크립트 시나리오.
@@ -12,6 +13,8 @@ export interface DemoScenario {
   allowBreaking?: boolean;
   maxVerifyAttempts?: number;
   turns: ScriptedTurn[];
+  /** 이 요청을 보내면 먼저 선택지로 되묻는다. 답을 보내면 turns를 이어서 실행한다(모델 없이 질문 카드를 보여 주는 용도) */
+  ask?: AskUserQuestion;
   /** 이 요청을 보내기 전에 질문 모드로 물어볼 수 있는 준비된 질문 */
   question?: { request: string; turns: ScriptedTurn[] };
 }
@@ -156,6 +159,7 @@ export const ORDERS_DEMO_SCENARIOS: readonly DemoScenario[] = [
     id: 'orders-list',
     title: '주문 목록 API와 화면 (일부러 넣은 컴파일 에러를 게이트가 잡음)',
     request: '주문 목록 API와 화면을 만들어줘',
+    ask: { question: '주문 목록 화면을 어떤 형태로 만들까요?', options: ['표', '카드 목록', '간단한 목록'], allowOther: true },
     question: {
       request: '주문 목록 화면을 만들려면 무엇을 바꿔야 해?',
       turns: [

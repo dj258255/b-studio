@@ -16,6 +16,7 @@ secrets: {}
 deploy: {}
 workflow: {}
 repository: {}
+design: {}
 ```
 
 | 필드 | 필수 | 설명 |
@@ -31,6 +32,7 @@ repository: {}
 | `deploy` | 아니요 | 운영 Dockerfile과 공개 포트 |
 | `workflow` | 아니요 | 에이전트 작업 단계·도구·보호 경로·승인·릴리스 조건 |
 | `repository` | 아니요 | 모노레포 하위 프로젝트 처리 |
+| `design` | 아니요 | Figma 디자인 파일 URL(에이전트 도구·시각 비교 기준) |
 
 ## managed 서비스
 
@@ -191,6 +193,27 @@ workflow:
         - { press: Enter }
         - { waitFor: "text=김토스" }
       expectText: 김토스
+    - service: web
+      path: /orders
+      mode: browser
+      viewport: mobile
+      maxLoadMs: 2500
+      compare:
+        reference: design/list.png
+        maxDiffRatio: 0.15
+        masks:
+          - { x: 0, y: 240, width: 375, height: 120 }
+  concurrencyChecks:
+    - name: stock-race
+      service: api
+      method: POST
+      path: /api/products/1/orders
+      body: '{"qty":1}'
+      headers: { content-type: application/json }
+      concurrent: 10
+      expect:
+        successCount: { exactly: 1 }
+        then: { method: GET, path: /api/products/1, jsonPath: "$.stock", equals: 0 }
   allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply]
   requireApprovalFor: [restart_service]
@@ -201,23 +224,73 @@ workflow:
 
 | 키 | 적용 방식 |
 |---|---|
-| `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests` 단계를 더합니다 |
+| `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`concurrency_check`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests`·`concurrencyChecks` 단계를 더합니다 |
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
-| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다 |
-| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다 |
+| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다 |
+| `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
+| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
 | `releaseRequires` | 배포할 체크포인트의 `Workflow-Passed` 트레일러에 있어야 하는 단계. 스튜디오 밖에서 바꾼 체크포인트처럼 기록이 없으면 `checkpoint` 외 조건을 채우지 못해 배포가 거부됩니다. 생략하면 `[checkpoint]`로 모든 체크포인트를 배포할 수 있습니다 |
 
 불러올 때 검사하는 규칙:
 
-- `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
-- `tests`·`pageChecks`의 `service`는 `source: managed` 서비스여야 합니다.
-- 테스트 이름은 중복될 수 없습니다.
+- `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가, `concurrency_check`가 있으면 `concurrencyChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
+- `tests`·`pageChecks`·`concurrencyChecks`의 `service`는 `source: managed` 서비스여야 합니다.
+- 테스트·동시 요청 확인 이름은 중복될 수 없습니다.
+- `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
+
+### 디자인 비교 (`compare`)
+
+`mode: browser` 화면 확인에 `compare`를 적으면, 마지막 단계 뒤의 **뷰포트 화면**을 디자인 기준 이미지와 픽셀 단위로 비교합니다. 운영자가 Figma 등에서 뽑은 기준 이미지를 프로젝트 안에 `.png`로 두고, `reference`에 프로젝트 루트 기준 상대 경로로 적습니다(추출은 제품 밖의 일입니다).
+
+```yaml
+pageChecks:
+  - service: web
+    path: /orders
+    mode: browser
+    viewport: mobile
+    compare:
+      reference: design/list.png
+      maxDiffRatio: 0.15
+      masks:
+        - { x: 0, y: 240, width: 375, height: 120 }   # 항상 달라지는 동적 영역
+      threshold: 0.1
+```
+
+| 키 | 설명 |
+|---|---|
+| `reference` | 프로젝트 안의 `.png` 상대 경로. `..`이나 절대 경로는 거부합니다 |
+| `maxDiffRatio` | 허용하는 최대 차이 비율(0~1). 넘으면 확인 실패입니다 |
+| `masks` | 비교에서 빼는 사각형(픽셀, 최대 20개). 두 이미지 모두 같은 색으로 칠해 동적 데이터·시각 요소를 가립니다 |
+| `threshold` | pixelmatch의 색 차이 민감도(0~1, 기본 0.1). 클수록 관대합니다 |
+
+- 기준 이미지와 실제 화면의 **너비가 다르면 자동으로 맞추지 않고 실패**합니다(뷰포트를 디자인 프레임 너비에 맞추라는 안내). 높이가 다르면 겹치는 위쪽만 비교합니다.
+- 기준 이미지가 없거나 읽지 못하면 건너뛰지 않고 확인 실패로 처리합니다("검사 안 함"이 통과로 보이지 않게).
+- 실패하면 `디자인 차이 12.4% (허용 10.0%, 비교 375×812)` 형태로 알리고, 디자인·실제·차이 이미지를 세션 산출물로 남겨 QA 보기에서 나란히 볼 수 있습니다.
 
 `studio workflow <프로젝트>`로 실제로 강제할 단계와 검사를 확인할 수 있습니다.
 
 `mode: browser`는 스튜디오 서버가 도는 호스트에서 Chromium을 띄웁니다. Playwright가 내려받은 Chromium을 먼저 쓰고, 없으면 설치된 Chrome을 쓰며, `B_STUDIO_BROWSER_EXECUTABLE`로 실행 파일을 지정할 수 있습니다. 어느 것도 없으면 검사는 통과가 아니라 실패로 끝납니다. 스튜디오를 브라우저가 없는 컨테이너 이미지로 운영한다면 `http` 모드를 쓰거나 이미지에 Chromium을 넣어야 합니다.
+
+## 디자인 (Figma)
+
+Figma 파일 URL을 두면 에이전트가 `design_frames`·`design_frame` 도구로 프레임 목록과 구조·스타일 요약을 볼 수 있고, 화면의 "디자인" 패널에서 고른 프레임을 PNG로 가져와 시각 비교(`pageChecks.compare`)의 기준 이미지로 쓸 수 있습니다.
+
+```yaml
+design:
+  figma:
+    fileUrl: https://www.figma.com/design/<파일 키>/<이름>
+```
+
+| 필드 | 설명 |
+|---|---|
+| `figma.fileUrl` | `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...`. 파일 키는 여기서 뽑아 검증하고, 형식이 아니면 불러올 때 거부합니다 |
+
+- 토큰은 `studio.yaml`이 아니라 **서버 환경 변수 `FIGMA_TOKEN`**에서만 읽습니다. 값은 로그·오류·화면·모델 어디에도 넣지 않습니다.
+- 스튜디오는 `studio.yaml`을 고치지 않습니다. 화면의 "디자인" 패널에서 **세션 단위로** URL을 저장할 수 있고(세션 설정이 `studio.yaml`보다 우선), 팀과 공유하려면 패널이 보여 주는 줄을 사람이 커밋합니다.
+- `.fig` 파일은 Figma에 한 번 Import해야 파일 키가 생깁니다.
+- 토큰 발급 방법과 운영 주의는 [운영 문서](operations.md)의 "Figma 연동"을 보세요.
 
 ## 모노레포
 

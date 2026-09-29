@@ -44,6 +44,15 @@ describe('project workflow', () => {
     ).toEqual(['plan', 'implement', 'run', 'browser_check', 'contract_check', 'test', 'review', 'checkpoint']);
   });
 
+  it('선언한 동시 요청 확인은 자동으로 필수 단계가 되고 모델 컨텍스트에 나온다', () => {
+    const project = projectWith({
+      concurrencyChecks: [{ name: 'stock', service: 'api', method: 'POST', path: '/api/products/1/orders', concurrent: 5, expect: { successCount: { exactly: 1 } } }],
+    });
+    expect(workflowStages(project)).toContain('concurrency_check');
+    expect(missingVerificationStages(project, new Set(['run', 'contract_check', 'review']))).toEqual(['concurrency_check']);
+    expect(workflowContext(project)).toContain('플랫폼이 동시에 보낼 요청: stock(api POST /api/products/1/orders ×5)');
+  });
+
   it('통과 기록이 없는 검증 단계만 빠진 단계로 본다 (plan·implement·checkpoint는 게이트가 판정하지 않는다)', () => {
     const project = projectWith({ tests: [unit] });
     expect(missingVerificationStages(project, new Set(['run', 'contract_check', 'review']))).toEqual(['test']);

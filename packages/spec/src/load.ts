@@ -142,6 +142,9 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
   spec.workflow?.pageChecks?.forEach((check, index) => {
     if (!managedNames.has(check.service)) issues.push(`workflow.pageChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
   });
+  spec.workflow?.concurrencyChecks?.forEach((check, index) => {
+    if (!managedNames.has(check.service)) issues.push(`workflow.concurrencyChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
+  });
 
   for (const [name, secret] of Object.entries(spec.secrets ?? {})) {
     for (const service of secret.services) {

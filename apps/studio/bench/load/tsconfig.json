@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../../*"],
+      "@b-studio/sandbox": ["./sandbox-shim.ts"]
+    }
+  }
+}

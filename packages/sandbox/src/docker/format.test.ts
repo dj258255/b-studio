@@ -58,6 +58,7 @@ describe('buildOverride 네트워크 격리', () => {
     expect(environment.HTTPS_PROXY).toBe('http://b-studio-edge:3128');
     expect(environment.ALL_PROXY).toBe('http://b-studio-edge:3128');
     expect(environment.NO_PROXY).toBe('localhost,127.0.0.1,web,api,db');
+    expect(environment.NODE_USE_ENV_PROXY).toBe('1');
     expect(environment.JAVA_TOOL_OPTIONS).toContain('-Dhttps.proxyHost=b-studio-edge');
     expect(environment.JAVA_TOOL_OPTIONS).toContain('-Dhttp.nonProxyHosts=localhost|127.0.0.1|web|api|db');
   });

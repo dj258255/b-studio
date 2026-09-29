@@ -22,12 +22,14 @@ import {
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
   preflightClaudeCode,
+  preflightCodex,
   releaseBlockers,
   RemoteConflictError,
   scopedExecutionPolicy,
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
+  runCodexAgent,
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
@@ -36,9 +38,13 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
+  type BoardAccess,
+  type BrowserFrame,
   type Checkpoint,
   type DatabaseState,
   type DemoScenario,
+  type DesignFrameInfo,
+  type DesignSource,
   type GitAuthor,
   type ModelClient,
   type PullRequestDraft,
@@ -62,7 +68,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { loadProject, type LoadedProject } from '@b-studio/spec';
+import { loadProject, figmaFileKey, type LoadedProject } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import {
   addTokens,
@@ -80,6 +86,7 @@ import type {
   CodeFile,
   CodeSearch,
   CodeTree,
+  DesignView,
   ExportPreview,
   ExportResult,
   ProxyResponse,
@@ -93,6 +100,13 @@ import type {
 } from '@/lib/studio-events';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
+import { resolveArtifact, saveArtifact } from './artifacts';
+import { compareExample, designPathFor, writeDesignPng } from './design-files';
+import { FigmaClient } from './figma';
+import { clearFrames, publish } from './live-frames';
+import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
+import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
+import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, routingDecision } from './model-registry';
@@ -119,6 +133,8 @@ type Listener = (event: StudioEvent) => void;
 /** 처리 중인 에이전트 요청 */
 interface ActiveRun {
   id: string;
+  /** 요청을 시작한 시각(ISO). 관제 화면이 진행 시간을 잰다 */
+  startedAt: string;
   /** 사용자가 요청을 취소하면 abort한다. 에이전트가 끝나 체크포인트를 남기기 시작하면 세션에서 떼어 더는 취소를 받지 않는다 */
   cancel: AbortController;
   /** 요청을 시작할 때의 세션 토큰 합계 */
@@ -132,6 +148,11 @@ interface ActiveRun {
   stopReason?: 'user' | 'budget';
   /** 한도로 멈췄을 때 어느 한도인지 */
   limitKind?: 'session' | 'user';
+  /**
+   * 실행 중 지시 큐. 사람이 보는 단일 세션이 이 실행을 시작했을 때만 있다(작업 분해 레인·플릿은 없다).
+   * 러너가 다음 모델 호출 직전에 꺼내 가고, 남은 지시는 실행이 끝날 때 버림으로 기록한다
+   */
+  steering?: SteeringQueue;
 }
 
 interface Session {
@@ -165,8 +186,20 @@ interface Session {
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
   };
+  /**
+   * 로컬 ChatGPT Agent(Codex) 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해(설치된 SDK에 fork가 없다)
+   * 전체 기록 대신 최근 요청의 요약만 넘긴다
+   */
+  codex: {
+    /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
+    notes: string[];
+    /** 지난 요청의 요약. 최근 3개만 둔다 */
+    recent: CodexRunSummary[];
+  };
   /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
   sourceDirtyFiles: number;
+  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml의 설정보다 우선한다 */
+  design?: { fileUrl: string; fileKey: string };
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
@@ -212,6 +245,8 @@ interface Store {
   claimedFolders?: Set<string>;
   recovery?: Promise<void>;
   previewGateway?: Server;
+  /** Figma 클라이언트. 파일·노드 캐시를 요청 사이에도 유지한다 */
+  figma?: FigmaClient;
   /** 이미 쓴 미리보기 티켓의 임의 값과 만료 시각 */
   previewTickets?: Map<string, number>;
   cleanupRegistered: boolean;
@@ -249,6 +284,33 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
     updatedAt,
   };
+}
+
+/** 관제 화면이 세션마다 받는 최근 이벤트 수. 전체 기록을 복사하지 않고 마지막 것만 준다 */
+const OVERVIEW_TAIL = 40;
+
+/**
+ * 관제 화면용: 세션마다 스냅샷과 최근 이벤트 몇 개만 준다(전체 기록을 복사하지 않는다).
+ * 실행 중이면 runningSince(요청 시작 시각)를 함께 준다. 진행 시간과 마지막 활동을 여기서 계산한다.
+ */
+export async function overviewSessions(): Promise<Array<{ snapshot: SessionSnapshot; recent: StudioEvent[]; updatedAt: string; runningSince?: string; lastRequest?: string }>> {
+  await recoverSessions();
+  const tail = (events: readonly StudioEvent[]): StudioEvent[] => events.slice(-OVERVIEW_TAIL);
+  // 마지막 요청은 최근 이벤트에 없을 수 있어(도구 호출이 많으면 잘린다) 전체 기록에서 찾는다
+  const lastRequestOf = (events: readonly StudioEvent[]): string | undefined => {
+    const started = events.findLast((event) => event.type === 'run_started');
+    return started?.type === 'run_started' ? started.request : undefined;
+  };
+  return [
+    ...[...store.sessions.values()].map((session) => ({
+      snapshot: session.snapshot,
+      recent: tail(session.history),
+      lastRequest: lastRequestOf(session.history),
+      updatedAt: session.updatedAt,
+      ...(session.run ? { runningSince: session.run.startedAt } : {}),
+    })),
+    ...[...archived.values()].map((entry) => ({ snapshot: entry.snapshot, recent: tail(entry.history), lastRequest: lastRequestOf(entry.history), updatedAt: entry.data.savedAt })),
+  ];
 }
 
 export async function createSession(
@@ -364,9 +426,12 @@ async function startSession({
     conversation: [],
     demoIndex: 0,
     claudeCode: { notes: [] },
+    codex: { notes: [], recent: [] },
     sourceDirtyFiles,
     previewToken: randomBytes(16).toString('hex'),
   });
+  // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
+  session.snapshot.design = sessionDesignView(session);
 
   store.sessions.set(id, session);
   registerCleanup();
@@ -390,6 +455,7 @@ type NewSession = Pick<
   | 'conversation'
   | 'demoIndex'
   | 'claudeCode'
+  | 'codex'
   | 'sourceDirtyFiles'
 >;
 
@@ -447,6 +513,17 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
+/**
+ * 세션 기록을 통째로 읽는다. 구독을 등록해 replay(스냅샷 + 기록 + 로그)를 받은 뒤 바로 푼다.
+ * 토큰 탭이 이 기록에서 실행별 보고서를 만든다(token-report). 없는 세션은 subscribe가 404로 알린다.
+ */
+export function sessionHistory(id: string): StudioEvent[] {
+  const events: StudioEvent[] = [];
+  const unsubscribe = subscribe(id, (event) => events.push(event));
+  unsubscribe();
+  return events;
+}
+
 export function sendMessage(
   id: string,
   text: string,
@@ -456,6 +533,9 @@ export function sendMessage(
     intent = 'build',
     writableScope,
     scriptedTurns,
+    board,
+    steering,
+    interactive = false,
   }: {
     allowBreaking: boolean;
     by?: string;
@@ -464,6 +544,12 @@ export function sendMessage(
     writableScope?: readonly string[];
     /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
     scriptedTurns?: ScriptedTurn[];
+    /** 서버 안에서만 쓴다(레인 조율). 레인 신원으로 감싼 게시판. HTTP로는 받지 않는다 */
+    board?: BoardAccess;
+    /** 실행 중 지시를 받을 실행인지. 사람이 보는 단일 세션(메시지 라우트)만 켠다. 레인·플릿·벤치는 켜지 않는다 */
+    steering?: boolean;
+    /** 서버 안에서만 쓴다. true면 되묻기(ask_user) 도구를 넣는다. 사람이 보낸 단일 세션 요청(messages 라우트)만 켠다 */
+    interactive?: boolean;
   },
 ): { runId: string } {
   const session = requireSession(id);
@@ -486,16 +572,27 @@ export function sendMessage(
     );
   }
 
-  const plan = { ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)), writableScope };
+  // 되묻기(ask_user)는 사람이 보낸 단일 세션 요청에만 켠다. 레인·플릿·벤치·CLI는 도구 목록이 그대로다
+  const plan = {
+    ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)),
+    writableScope,
+    board,
+    interactive,
+  };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
+    startedAt: new Date().toISOString(),
     cancel: new AbortController(),
     baseTokens: session.snapshot.tokens,
     tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
     by,
+    // 데모(스크립트)는 실행 중 지시를 반영할 모델 호출이 없어 큐를 만들지 않는다
+    ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
   };
   session.run = run;
   session.snapshot.running = true;
+  // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
+  session.snapshot.pendingQuestion = undefined;
   emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined });
   void execute(session, run, request, plan);
   return { runId: run.id };
@@ -516,6 +613,23 @@ export function cancelRun(id: string, runId: string): void {
   run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
 }
 
+/**
+ * 실행 중인 요청에 진행 중 지시를 넣는다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다.
+ * 지금 하던 도구 호출을 끊지 않는다. 사람이 보는 단일 세션(steering 큐가 있는 실행)만 받는다.
+ */
+export function steerRun(id: string, text: string): { runId: string } {
+  const session = requireSession(id);
+  if (session.snapshot.mode === 'demo') throw new StudioError(409, '이 모드는 실행 중 지시를 지원하지 않습니다');
+  const run = session.run;
+  if (!run) throw new StudioError(409, '실행 중이 아닙니다. 새 요청으로 보내세요');
+  if (!run.steering) throw new StudioError(409, '이 실행은 진행 중 지시를 받지 않습니다');
+  const directive = text.trim();
+  if (!directive) throw new StudioError(400, '지시 내용을 입력하세요');
+  run.steering.push(directive);
+  emit(session, { type: 'steer_queued', runId: run.id, text: directive });
+  return { runId: run.id };
+}
+
 export async function stopSession(id: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status === 'stopped') return session.snapshot;
@@ -524,6 +638,9 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   clearInterval(session.usageTimer);
   session.fileWatcher?.close();
   await session.sandbox.destroy().catch(() => {});
+  // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
+  await closeRemoteBrowser(id).catch(() => {});
+  clearFrames(id);
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
   for (const service of session.snapshot.services) {
@@ -626,10 +743,15 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       conversation: data.conversation as Conversation,
       demoIndex: data.demoIndex,
       claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
+      // 이 필드가 생기기 전에 저장한 기록에는 없다
+      codex: { notes: [...(data.codex?.notes ?? [])], recent: [...(data.codex?.recent ?? [])] },
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
+    // 세션 단위 디자인 설정을 되살리고, 화면 상태를 다시 계산한다(studio.yaml 설정이 바뀌었을 수 있다)
+    session.design = data.design;
+    session.snapshot.design = sessionDesignView(session);
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
@@ -727,6 +849,163 @@ export async function endpointFor(id: string, service: string): Promise<string> 
   return (await session.sandbox.endpoint(service)).url;
 }
 
+/** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
+function saveSessionArtifact(session: Session, runId: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  return saveArtifact(stateDirOf(session.snapshot), runId, input);
+}
+
+/** 라우트가 산출물을 내려줄 때 쓴다. 중지된 세션의 산출물도 볼 수 있게 스냅샷으로 세션 폴더를 찾는다 */
+export async function readSessionArtifact(id: string, segments: readonly string[]): Promise<{ file: string; contentType: 'image/png' | 'image/jpeg' }> {
+  const snapshot = getSnapshot(id);
+  if (!snapshot) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  return resolveArtifact(stateDirOf(snapshot), segments);
+}
+
+/** 요소 선택 스크린샷을 산출물로 저장하고 식별자를 돌려준다 */
+export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  const session = requireSession(id);
+  return saveArtifact(stateDirOf(session.snapshot), 'pick', input);
+}
+
+/**
+ * 원격 브라우저가 열 미리보기 주소. iframe 미리보기와 같은 규칙(게이트웨이 주소가 있으면 그것, 없으면 서비스 주소)을 쓴다.
+ * 서버가 직접 여는 주소이므로 다른 출처로 나가지 않도록 이 값만 넘긴다
+ */
+export function remoteBrowserUrl(id: string, service: string): string {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 원격 브라우저를 열 수 있습니다');
+  const view = session.snapshot.services.find((candidate) => candidate.name === service);
+  if (!view) throw new StudioError(404, `${service} 서비스가 없습니다`);
+  const url = view.previewUrl ?? view.url;
+  if (!url) throw new StudioError(409, `${service} 서비스의 미리보기 주소가 없습니다. 서비스가 준비된 뒤 다시 시도하세요`);
+  return url;
+}
+
+/**
+ * 원격 브라우저가 요청해도 되는 출처 목록. 세션의 모든 서비스 주소(루프백·미리보기 게이트웨이)의 출처를 모은다.
+ * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 앱이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
+ */
+export function remoteBrowserAllowedOrigins(id: string): string[] {
+  const session = requireSession(id);
+  const origins = new Set<string>();
+  for (const service of session.snapshot.services) {
+    for (const url of [service.url, service.previewUrl]) {
+      if (!url) continue;
+      try {
+        origins.add(new URL(url).origin);
+      } catch {
+        // 준비 중 잠깐 이상한 값이 있어도 다른 서비스 주소는 살린다
+      }
+    }
+  }
+  return [...origins];
+}
+
+/** 세션 단위 Figma 파일 키가 있으면 그걸, 없으면 studio.yaml의 design.figma를 쓴다 */
+function effectiveDesign(session: Pick<Session, 'design' | 'project'>): { fileUrl: string; fileKey: string } | undefined {
+  if (session.design) return session.design;
+  const figma = session.project.spec.design?.figma;
+  return figma ? { fileUrl: figma.fileUrl, fileKey: figma.fileKey } : undefined;
+}
+
+/** 화면에 보여 줄 디자인 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
+function sessionDesignView(session: Pick<Session, 'design' | 'project'>): DesignView | undefined {
+  const design = effectiveDesign(session);
+  if (!design) return undefined;
+  return { fileUrl: design.fileUrl, fileKey: design.fileKey, from: session.design ? 'session' : 'studio.yaml', hasToken: Boolean(process.env.FIGMA_TOKEN) };
+}
+
+/** HMR로 모듈이 다시 로드돼도 같은 캐시를 쓰도록 전역에 둔다. 토큰은 만들 때 읽으므로 바꾸려면 서버를 다시 시작한다 */
+function figmaClient(): FigmaClient {
+  return (store.figma ??= new FigmaClient({ token: process.env.FIGMA_TOKEN, baseUrl: process.env.B_STUDIO_FIGMA_API }));
+}
+
+/** 세션 단위로 Figma URL을 저장한다(studio.yaml은 스튜디오가 고치지 않는다). 빈 값이면 세션 설정을 지운다 */
+export function setSessionDesign(id: string, fileUrl: string): DesignView | undefined {
+  const session = requireSession(id);
+  const trimmed = fileUrl.trim();
+  if (trimmed === '') {
+    session.design = undefined;
+  } else {
+    const fileKey = figmaFileKey(trimmed);
+    if (!fileKey) throw new StudioError(400, 'Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다');
+    session.design = { fileUrl: trimmed, fileKey };
+  }
+  const design = sessionDesignView(session);
+  session.snapshot.design = design;
+  emit(session, { type: 'design', design });
+  return design;
+}
+
+/** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
+export async function sessionDesignFrames(id: string): Promise<{ design?: DesignView; frames: DesignFrameInfo[] }> {
+  const session = requireSession(id);
+  const design = effectiveDesign(session);
+  if (!design || !process.env.FIGMA_TOKEN) return { design: sessionDesignView(session), frames: [] };
+  const frames = await figmaClient().listFrames(design.fileKey, session.stop.signal);
+  return { design: sessionDesignView(session), frames: frames.map((frame) => ({ id: frame.id, name: frame.name, page: frame.page, width: frame.width, height: frame.height })) };
+}
+
+/** 디자인 패널의 프레임 썸네일. 비교용이 아니라 목록용이라 작은 배율로 받는다 */
+export async function sessionDesignThumbnail(id: string, frameId: string): Promise<Buffer> {
+  const session = requireSession(id);
+  const design = effectiveDesign(session);
+  if (!design) throw new StudioError(409, '디자인(Figma)이 설정되지 않았습니다');
+  const images = await figmaClient().exportImages(design.fileKey, [frameId], { scale: 0.5 }, session.stop.signal);
+  const png = images.get(frameId);
+  if (!png) throw new StudioError(404, '프레임 이미지를 찾지 못했습니다');
+  return png;
+}
+
+export interface DesignImportResult {
+  files: Array<{ frameId: string; name: string; path: string; width: number; height: number }>;
+  /** pageChecks.compare에 붙여 넣을 예시. scale이 1일 때만 만든다 */
+  examples: string[];
+  note?: string;
+}
+
+/**
+ * 고른 프레임을 PNG로 받아 세션 작업 복사본의 `design/`에 저장한다(=세션 변경으로 남아 체크포인트·게이트를 탄다).
+ * 시각 비교 기준으로 쓰려면 화면 스크린샷과 픽셀 너비가 같아야 하므로 scale 1을 기본으로 한다
+ */
+export async function importDesign(id: string, frameIds: readonly string[], scale: 1 | 2 = 1): Promise<DesignImportResult> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 디자인을 가져올 수 있습니다');
+  if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 디자인을 가져올 수 있습니다');
+  const design = effectiveDesign(session);
+  if (!design) throw new StudioError(409, '디자인(Figma)이 설정되지 않았습니다');
+
+  const client = figmaClient();
+  const frames = (await client.listFrames(design.fileKey, session.stop.signal)).filter((frame) => frameIds.includes(frame.id));
+  if (frames.length === 0) throw new StudioError(400, '가져올 프레임을 찾지 못했습니다');
+  const images = await client.exportImages(design.fileKey, frames.map((frame) => frame.id), { scale }, session.stop.signal);
+
+  const files: DesignImportResult['files'] = [];
+  const examples: string[] = [];
+  for (const frame of frames) {
+    const png = images.get(frame.id);
+    if (!png) throw new StudioError(502, `프레임 ${frame.id} 이미지를 내보내지 못했습니다`);
+    const relative = designPathFor(frame);
+    await writeDesignPng(session.project, relative, png);
+    files.push({ frameId: frame.id, name: frame.name, path: relative, width: frame.width, height: frame.height });
+    if (scale === 1) examples.push(compareExample(relative, frame));
+  }
+  return { files, examples, ...(scale !== 1 ? { note: 'scale 2로 저장한 이미지는 시각 비교 기준(compare)에 쓰려면 scale 1로 다시 가져오세요' } : {}) };
+}
+
+/** 디자인 도구가 쓸 자료원. 세션에 디자인이 설정됐을 때만 runPlan이 넘긴다 */
+function designSourceFor(session: Session, runId: string): DesignSource | undefined {
+  const design = effectiveDesign(session);
+  if (!design) return undefined;
+  const client = figmaClient();
+  return {
+    frames: () => client.listFrames(design.fileKey, session.stop.signal),
+    frame: (id) => client.summarizeFrame(design.fileKey, id, session.stop.signal),
+    // 이미지는 세션 산출물로 저장하고 참조 경로만 모델에 돌려준다(모델에 이미지를 넘기지 않는다)
+    saveArtifact: (name, data) => saveArtifact(stateDirOf(session.snapshot), runId, { name, data, contentType: 'image/png' }),
+  };
+}
+
 const MAX_PROXY_BODY = 200_000;
 
 /** API 탐색기에서 등록한 사내 API를 부른다. 샌드박스 서비스와 같은 정책·인증·가림을 거치고 감사 기록은 edge 로그에 남는다 */
@@ -765,6 +1044,11 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
+      // 서비스가 준비된 직후 읽은 기동 중 수신/송신 바이트를 세션 기록에 남긴다(작업 분해 지표도 이 스냅샷에서 읽는다)
+      onBootNetwork: (network) => {
+        session.snapshot.bootNetwork = network;
+        emit(session, { type: 'boot_network', at: new Date().toISOString(), network });
+      },
     });
     const head = session.snapshot.checkpoints[0]!;
     if (!resumed) {
@@ -794,7 +1078,8 @@ type Intent = 'build' | 'ask';
 type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[] };
+  | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
+) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
@@ -802,6 +1087,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent };
   }
   if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
+  if (session.snapshot.mode === 'codex') return { kind: 'codex', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
@@ -812,8 +1098,21 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     return { kind: 'model', client: new ScriptedModelClient(question.turns), allowBreaking: false, intent };
   }
   if (!scenario) throw new StudioError(409, '데모 모드에서 실행할 수 있는 요청을 모두 실행했습니다');
+  // 되묻기 답: 대본의 질문에 대한 답이면 이어서 대본을 실행한다(모델 없이 화면 흐름을 확인하는 용도)
+  if (scenario.ask && isDemoAnswer(request, scenario.ask.question)) {
+    return { kind: 'model', client: new ScriptedModelClient(scenario.turns), allowBreaking: scenario.allowBreaking ?? false, maxVerifyAttempts: scenario.maxVerifyAttempts, intent };
+  }
   if (scenario.request !== request) {
     throw new StudioError(409, `데모 모드는 준비된 요청을 순서대로 실행합니다. 다음 요청: "${scenario.request}"`);
+  }
+  // 되묻기 단계가 있으면 먼저 ask_user를 부르는 대본을 돌려, 모델 없이 질문 카드를 보여 준다
+  if (scenario.ask) {
+    return {
+      kind: 'model',
+      client: new ScriptedModelClient([{ text: scenario.ask.question, toolCalls: [{ name: 'ask_user', input: { ...scenario.ask } }] }]),
+      allowBreaking: false,
+      intent,
+    };
   }
   return {
     kind: 'model',
@@ -824,9 +1123,14 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   };
 }
 
+/** 데모 모드에서 질문 카드의 답으로 보낸 요청인지. 화면은 `[질문] …\n[답] …` 형식으로 보낸다 */
+function isDemoAnswer(request: string, question: string): boolean {
+  return request.startsWith('[질문]') && request.includes('[답]') && request.includes(question);
+}
+
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
-  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns'> | undefined;
+  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs'> | undefined;
   let cancelled = false;
   /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
   let notStarted = false;
@@ -873,12 +1177,25 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       }
     }
 
-    if (!ask) {
-      // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-      if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
-      else await revertRun(session, run.id);
+    // 되묻고 멈췄으면 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답은 다음 요청으로 온다
+    if (result.status === 'awaiting_input' && result.question) {
+      session.snapshot.pendingQuestion = {
+        runId: run.id,
+        question: result.question.question,
+        options: result.question.options,
+        allowOther: result.question.allowOther,
+      };
     }
-    finished = { status: result.status, summary: result.summary, turns: result.turns };
+    if (!ask) {
+      // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
+      // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
+      if (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok)) {
+        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
+      } else if (result.status !== 'awaiting_input') {
+        await revertRun(session, run.id);
+      }
+    }
+    finished = { status: result.status, summary: result.summary, turns: result.turns, metrics: result.metrics, durationMs: Math.round(performance.now() - agentStarted) };
   } catch (error) {
     if (error instanceof LocalEditsError) {
       // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
@@ -908,14 +1225,18 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     }
   } finally {
     session.run = undefined;
-    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
-    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask) {
+    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다.
+    // 되묻고 멈춘 경우는 아직 시나리오가 끝나지 않았으므로 다음 단계로 넘기지 않는다(답을 받아 이어서 실행한다)
+    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask && finished?.status !== 'awaiting_input') {
       session.demoIndex += 1;
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
       session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
     }
     session.snapshot.running = false;
     session.snapshot.cancelling = undefined;
+    // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
+    const dropped = run.steering?.take() ?? [];
+    if (!session.stop.signal.aborted && dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
     if (!session.stop.signal.aborted && finished) {
       session.settledConversation = session.conversation.length;
       emit(session, {
@@ -987,8 +1308,28 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     intent: plan.intent,
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
+    // 레인 조율 게시판. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음)
+    board: plan.board,
+    // 화면 확인이 찍은 스크린샷은 세션 폴더에 남기고, 실시간 프레임은 채널로만 보낸다(기록에 쌓지 않는다)
+    saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
+    onBrowserFrame: ({ check, frame }: { check: string; frame: BrowserFrame }) =>
+      publish(session.snapshot.id, {
+        source: 'qa',
+        check,
+        mime: 'image/jpeg',
+        data: frame.data.toString('base64'),
+        width: frame.width,
+        height: frame.height,
+        at: frame.at,
+      }),
+    // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
+    design: designSourceFor(session, run.id),
+    // 되묻기(ask_user) 도구는 사람이 있는 단일 세션 요청에만 넣는다
+    interactive: plan.interactive === true,
     signal,
     onEvent: (event: AgentEvent) => {
+      // 질문은 세션 기록에 따로 남겨 화면이 카드로 그린다(대화 흐름에 남는다)
+      if (event.type === 'question') return emit(session, { type: 'question', runId: run.id, question: event.question, options: event.options, allowOther: event.allowOther });
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
       run.tokens = event.usage;
       // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다
@@ -1023,11 +1364,35 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...shared,
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
+      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
+      model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
+      steering: run.steering,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
     claudeCode.notes = [];
     if (result.sessionId) claudeCode.sessionId = result.sessionId;
+    return result;
+  }
+
+  if (plan.kind === 'codex') {
+    const preflight = await preflightCodex();
+    if (!preflight.ok) return { preflightError: preflight.reason };
+
+    // 러너가 대화를 이어받지 못하므로 전체 기록 대신 지난 요청의 요약을 짧게 붙인다
+    const { codex } = session;
+    const result = await runCodexAgent({
+      ...shared,
+      request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
+      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
+      model: process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. Codex는 턴 사이에만 넣는다
+      steering: run.steering,
+    });
+    // 예외로 끝나면 여기까지 오지 않으므로 알림과 이전 맥락이 그대로 남는다
+    codex.notes = [];
+    codex.recent = rememberCodexRun(codex.recent, { request, summary: result.summary, status: result.status });
     return result;
   }
 
@@ -1057,6 +1422,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     client: plan.client,
     conversation: session.conversation,
     maxVerifyAttempts: plan.maxVerifyAttempts,
+    // 실행 중 지시 큐. 없으면(레인·플릿·데모) 지시를 받지 않는다
+    steering: run.steering,
   });
 }
 
@@ -1196,6 +1563,7 @@ async function saveDatabases(session: Session, sha: string): Promise<DatabaseSta
 /** 대화 밖에서 바뀐 사실(되돌리기, 새 샌드박스, 가져온 원격 커밋)을 다음 요청에서 모델이 알게 한다 */
 function noteForModel(session: Session, text: string): void {
   if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(text);
+  else if (session.snapshot.mode === 'codex') session.codex.notes.push(text);
   else session.conversation.push({ role: 'user', content: text });
   session.settledConversation = session.conversation.length;
 }
@@ -1851,6 +2219,8 @@ function toPersisted(session: Session): PersistedSession {
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
+    design: session.design,
+    codex: session.codex,
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
@@ -1994,8 +2364,8 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
 function sessionMode(): SessionMode {
   const value = process.env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
-  if (value === 'claude-code' || value === 'demo') return value;
-  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, demo 중 하나여야 합니다 (지금 값: ${value})`);
+  if (value === 'claude-code' || value === 'codex' || value === 'demo') return value;
+  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, codex, demo 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
 /** 운영자가 정한 세션 토큰 한도. 잘못 적은 값이 "한도 없음"으로 넘어가지 않도록 샌드박스를 만들기 전에 거부한다 */
@@ -2025,6 +2395,8 @@ function registerCleanup(): void {
     // 터미널의 Ctrl+C와 next dev가 넘긴 신호가 함께 온다
     if (cleaning) return;
     cleaning = true;
+    // 남은 원격 브라우저 프로세스를 함께 내린다. 기다릴 수 없으므로 최선 노력으로 끝낸다
+    void closeAllRemoteBrowsers();
     for (const session of store.sessions.values()) {
       if (session.snapshot.status === 'stopped') continue;
       session.stop.abort();

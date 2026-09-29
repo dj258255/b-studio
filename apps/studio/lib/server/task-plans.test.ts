@@ -1,20 +1,52 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BoardAccess } from '@b-studio/agent';
 import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
-type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
-type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
+type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
+type SendOptions = {
+  allowBreaking: boolean;
+  by?: string;
+  writableScope?: readonly string[];
+  steering?: boolean;
+  scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }>;
+  board?: BoardAccess;
+};
+
+/** 검증기가 낸 실패 서명 하나를 담은 이벤트(레인 실패 때 기록에 남긴다). S5가 이걸 읽어 게시한다 */
+function failureEvent(runId: string): StudioEvent {
+  return {
+    type: 'agent',
+    runId,
+    event: {
+      type: 'verify_result',
+      text: '',
+      report: { ok: false, sync: { elapsedMs: 1 }, restarted: [{ service: 'web', ready: false, error: 'cannot find symbol at line 42' }], contracts: [], unverifiedFiles: [], secretLeaks: [] },
+    },
+  } as StudioEvent;
+}
+
+/** S4 수리 요청인지: 원래 요청 + 통합 게이트 실패 문구 */
+function isRepair(request: string): boolean {
+  return request.includes('[조율] 레인') && request.includes('검증이 실패했습니다');
+}
 
 const fake = vi.hoisted(() => ({
   root: '',
   counter: 0,
   plan: {} as unknown,
+  /** findProject가 돌려주는 프로젝트. 시크릿 가림 테스트는 여기에 secrets를 넣고 환경 변수를 세운다 */
+  project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
+  /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
+  bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
+  /** 세션별 이벤트 기록. subscribe가 다시 보내 주므로 S5가 실패 서명을 읽는다 */
+  history: new Map<string, StudioEvent[]>(),
   /** 작업 id → 그 작업이 쓸 파일. 없으면 실패로 끝낸다 */
   writes: {} as Record<string, Record<string, string> | 'fail'>,
   /** 작업 id → 그 작업이 지울 파일 */
@@ -34,6 +66,18 @@ const fake = vi.hoisted(() => ({
   subIssues: [] as boolean[],
   /** true면 이슈 만들기가 실패한다 */
   failIssue: false,
+  /** 계획 모델을 부른 횟수. 고정 계획(presetPlan)은 0이어야 한다 */
+  modelCalls: 0,
+  /** 통합 스크립트 턴의 게이트 결과. S4 수리를 부르려면 'failed'로 둔다 */
+  integration: 'done' as 'done' | 'failed',
+  /** S4 수리 요청의 게이트 결과 */
+  repair: 'done' as 'done' | 'failed',
+  /** 모든 run_finished에 붙이는 실행 지표. 계획 기록에 그대로 옮겨지는지 확인한다 */
+  run: {
+    usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+    metrics: { modelCalls: 2, maxContextTokens: 9, modelMs: 5, toolMs: 6, gateMs: 7 },
+    durationMs: 11,
+  },
 }));
 
 // 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다
@@ -59,12 +103,15 @@ vi.mock('./model-registry', () => ({
   listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
   modelById: (id: string) => ({ id }),
   clientForModel: () => ({
-    createMessage: async () => ({ content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } }),
+    createMessage: async () => {
+      fake.modelCalls += 1;
+      return { content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } };
+    },
   }),
 }));
 
 vi.mock('./projects', () => ({
-  findProject: async () => ({ root: fake.root, spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] }),
+  findProject: async () => fake.project,
 }));
 
 vi.mock('./sessions', () => ({
@@ -79,7 +126,7 @@ vi.mock('./sessions', () => ({
       mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
       writeFileSync(path.join(workDir, file), content);
     }
-    fake.sessions.set(id, { id, status: 'ready', workDir, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
+    fake.sessions.set(id, { id, status: 'ready', workDir, bootNetwork: fake.bootNetwork, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
     return { id };
   },
   getSnapshot: (id: string) => fake.sessions.get(id),
@@ -87,6 +134,8 @@ vi.mock('./sessions', () => ({
     fake.stopped.push(id);
   },
   subscribe: (id: string, listener: (event: StudioEvent) => void) => {
+    // 실제 세션과 같이 지금까지의 기록을 먼저 보낸다(레인 조율이 실패 서명을 읽는 경로)
+    for (const event of fake.history.get(id) ?? []) listener(event);
     const set = fake.listeners.get(id) ?? new Set();
     set.add(listener);
     fake.listeners.set(id, set);
@@ -96,17 +145,42 @@ vi.mock('./sessions', () => ({
     fake.sends.push({ sessionId, request, options });
     const session = fake.sessions.get(sessionId)!;
     const runId = `run-${fake.sends.length}`;
+    const record = (event: StudioEvent) => {
+      const list = fake.history.get(sessionId) ?? [];
+      list.push(event);
+      fake.history.set(sessionId, list);
+      for (const listener of fake.listeners.get(sessionId) ?? []) listener(event);
+    };
+    const finish = (status: 'done' | 'failed', summary: string) => {
+      // 실패한 실행은 검증기가 낸 실패 서명을 하나 남긴다(S5가 읽어 게시한다)
+      if (status === 'failed') record(failureEvent(runId));
+      record({ type: 'run_finished', runId, status, summary, ...fake.run } as StudioEvent);
+    };
+
+    // 통합: 스크립트 턴이 만든 파일을 적용하고 게이트 결과는 fake.integration이 정한다
+    if (options.scriptedTurns) {
+      const writes = (options.scriptedTurns[0]?.toolCalls ?? []).filter((call) => call.name === 'write_file');
+      for (const call of writes) {
+        mkdirSync(path.dirname(path.join(session.workDir, call.input.path)), { recursive: true });
+        writeFileSync(path.join(session.workDir, call.input.path), call.input.content ?? '');
+      }
+      if (fake.integration === 'done') {
+        session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set(writes.map((call) => call.input.path))] });
+        finish('done', '완료');
+      } else {
+        finish('failed', '검증 게이트를 통과하지 못했습니다');
+      }
+      return { runId };
+    }
+    // S4 수리: 모델 경로로 보낸 요청. 게이트 결과는 fake.repair가 정한다
+    if (isRepair(request)) {
+      finish(fake.repair, fake.repair === 'done' ? '수리 완료' : '검증 게이트를 통과하지 못했습니다');
+      return { runId };
+    }
+    // 레인 작업
     const taskId = /\[id:([a-z0-9-]+)\]/.exec(request)?.[1];
     const deleted = taskId ? (fake.deletes[taskId] ?? []) : [];
-    const scripted = (options.scriptedTurns?.[0]?.toolCalls ?? []).filter((call) => call.name === 'write_file');
-    const files = options.scriptedTurns
-      ? Object.fromEntries(scripted.map((call) => [call.input.path, call.input.content ?? '']))
-      : taskId
-        ? fake.writes[taskId]
-        : undefined;
-    const finish = (status: 'done' | 'failed', summary: string) => {
-      for (const listener of fake.listeners.get(sessionId) ?? []) listener({ type: 'run_finished', runId, status, summary } as StudioEvent);
-    };
+    const files = taskId ? fake.writes[taskId] : undefined;
     if (files === 'fail' || files === undefined) {
       finish('failed', '검증 게이트를 통과하지 못했습니다');
     } else {
@@ -140,13 +214,19 @@ const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, t
 beforeEach(() => {
   fake.root = mkdtempSync(path.join(directory, 'work-'));
   fake.counter = 0;
+  fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };
   fake.sessions.clear();
+  fake.bootNetwork = [];
   fake.listeners.clear();
+  fake.history.clear();
   fake.deletes = {};
   fake.sourceFiles = {};
   fake.sends = [];
   fake.stopped = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
+  fake.modelCalls = 0;
+  fake.integration = 'done';
+  fake.repair = 'done';
   fake.source = { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' };
   fake.issues = [];
   fake.issueInputs = [];
@@ -234,6 +314,8 @@ describe('작업 분해 실행', () => {
     const sendsA = fake.sends.filter((send) => send.sessionId === laneA.sessionId);
     expect(sendsA.map((send) => send.options.writableScope)).toEqual([['web/a'], ['web/a']]);
     expect(sendsA[1]!.request).toContain('같은 작업 공간에서 먼저 끝난 작업:\n- a1');
+    // 레인·통합 실행에는 실행 중 지시(steering)를 켜지 않는다(사람이 보는 단일 세션만)
+    expect(fake.sends.every((send) => send.options.steering === undefined)).toBe(true);
     expect(laneB.sessionId).not.toBe(laneA.sessionId);
 
     const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
@@ -335,6 +417,120 @@ describe('작업 분해 실행', () => {
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'unknown', owner: 'kim' })).rejects.toThrow('등록되지 않은 모델');
     process.env.B_STUDIO_MODE = 'demo';
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+  });
+
+  // 계획은 메모리의 객체가 원본이고 persist는 그 객체 전체를 쓴다. 레인들이 동시에 끝나도 먼저 끝난 레인 결과가 저장에서 빠지면 안 된다
+  it('여러 레인이 동시에 끝나도 계획 파일에 모든 레인 결과가 남는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '동시 저장', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    const saved = JSON.parse(readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`), 'utf8')) as TaskPlanView;
+    expect(saved.lanes.map((lane) => lane.status)).toEqual(['done', 'done']);
+    expect(saved.lanes.every((lane) => (lane.changedFiles?.length ?? 0) > 0)).toBe(true);
+    expect(saved.integration?.status).toBe('done');
+  });
+
+  it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {
+    fake.plan = { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a1: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    // 모든 세션이 기동 중 1,000바이트를 받은 것으로 둔다 (레인 2 + 통합 1)
+    fake.bootNetwork = [{ service: 'web', rxBytes: 1_000, txBytes: 100 }];
+
+    const plan = await run({ projectId: 'orders', request: '지표 기록', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    // 계획 호출의 usage와 걸린 시간
+    expect(plan.planning).toEqual({ usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: expect.any(Number) });
+
+    const lane = plan.lanes.find((candidate) => candidate.tasks[0]!.id === 'a1')!;
+    expect(lane.bootMs).toBeGreaterThanOrEqual(0);
+    expect(lane.bootRxBytes).toBe(1_000);
+    expect(typeof lane.startedAt).toBe('string');
+    expect(typeof lane.finishedAt).toBe('string');
+    // run_finished의 지표가 작업 실행 기록으로 그대로 옮겨진다
+    expect(lane.tasks[0]!.run).toEqual({ status: 'done', durationMs: 11, usage: fake.run.usage, metrics: fake.run.metrics });
+    expect(plan.integration?.run).toEqual({ status: 'done', durationMs: 11, usage: fake.run.usage, metrics: fake.run.metrics });
+    expect(plan.integration?.bootMs).toBeGreaterThanOrEqual(0);
+
+    // 계획 호출 1회 + 레인 작업 실행 2회 × 2회 = 5 (통합은 스크립트 턴이라 세지 않는다), 최대 입력 크기는 9, 세션은 레인 2 + 통합 1
+    expect(plan.metrics).toMatchObject({ modelCalls: 5, maxContextTokens: 9, sessions: 3 });
+    expect(plan.metrics!.bootMsTotal).toBeGreaterThanOrEqual(0);
+    // 레인 2 + 통합 1의 기동 수신 합
+    expect(plan.metrics!.bootRxBytesTotal).toBe(3_000);
+    expect(typeof plan.metrics!.endToEndMs).toBe('number');
+  });
+});
+
+describe('고정 계획(presetPlan)', () => {
+  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex 모드 포함)', async () => {
+    for (const mode of ['claude-code', 'codex']) {
+      process.env.B_STUDIO_MODE = mode;
+      const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: mode, owner: 'kim', presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] } });
+      const waiting = await awaiting(created.id);
+      expect(waiting.status, mode).toBe('awaiting_approval');
+      expect(waiting.preset, mode).toBe(true);
+      // 모델 호출이 없었으므로 planning이 없다
+      expect(waiting.planning, mode).toBeUndefined();
+      expect(
+        waiting.lanes
+          .map((lane) => lane.tasks.map((item) => item.id))
+          .flat()
+          .sort(),
+        mode,
+      ).toEqual(['a1', 'b']);
+      // 승인 게이트는 그대로다. 승인 전에는 세션을 만들지 않는다
+      expect(fake.sessions.size, mode).toBe(0);
+    }
+    expect(fake.modelCalls).toBe(0);
+  });
+
+  it('presetPlan도 승인 뒤 레인·통합이 그대로 돈다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    fake.writes = { a1: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: '고정 계획 실행',
+      modelId: 'claude-code',
+      owner: 'kim',
+      presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] },
+    });
+
+    expect(plan.status).toBe('done');
+    expect(plan.preset).toBe(true);
+    expect(plan.planning).toBeUndefined();
+    expect(fake.modelCalls).toBe(0);
+  });
+
+  it('presetPlan이 없으면 claude-code 모드에서 거부한다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+    expect(fake.modelCalls).toBe(0);
+  });
+
+  it('presetPlan이 있어도 demo 모드에서는 거부한다', async () => {
+    process.env.B_STUDIO_MODE = 'demo';
+    await expect(
+      createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'claude-code', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
+    ).rejects.toThrow('api, claude-code 또는 codex');
+  });
+
+  it('presetPlan이 규칙을 어기면 세션을 만들지 않고 실패한다', async () => {
+    const created = await createTaskPlan({ projectId: 'orders', request: '나쁜 계획', modelId: 'model-a', owner: 'kim', presetPlan: { tasks: [] } });
+    const plan = await awaiting(created.id);
+
+    expect(plan.status).toBe('failed');
+    expect(plan.error).toContain('작업 계획을 만들지 못했습니다');
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  it('presetPlan이면 modelId가 비어 있을 수 없다', async () => {
+    await expect(
+      createTaskPlan({ projectId: 'orders', request: '요청', modelId: '  ', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
+    ).rejects.toThrow('modelId가 필요합니다');
   });
 });
 
@@ -524,6 +720,204 @@ describe('서버 재시작 뒤 이어서 하기', () => {
   });
 });
 
+describe('레인 조율 전략', () => {
+  const contract = { body: 'GET /api/orders → JSON 배열', refs: ['api'] };
+
+  it('조율을 켜지 않으면 게시판도 도구도 없고 요청 문구도 그대로다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '조율 없음', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.coordination).toBeUndefined();
+    expect(plan.board).toBeUndefined();
+    expect(plan.metrics?.coordination).toBeUndefined();
+    expect(fake.sends.every((send) => send.options.board === undefined)).toBe(true);
+    expect(fake.sends.some((send) => send.request.includes('[조율]'))).toBe(false);
+  });
+
+  it('S2는 계약을 레인 시작 전에 플랫폼이 게시하고, 레인은 읽기만 한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: 'S2 계약',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S2', contracts: [contract] },
+    });
+    const waiting = await awaiting(created.id);
+
+    // 승인 전에도 계약은 이미 게시돼 있다
+    expect(waiting.coordination).toEqual({ strategy: 'S2', topology: 'mesh' });
+    expect(waiting.board?.notes).toHaveLength(1);
+    expect(waiting.board?.notes[0]).toMatchObject({ kind: 'contract', lane: 'plan', by: 'platform', refs: ['api'] });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    expect(laneSends).toHaveLength(2);
+    // S2는 레인 읽기 전용이라 모델 쓰기가 꺼져 있다
+    expect(laneSends.every((send) => send.options.board!.modelWrites === false)).toBe(true);
+    expect(laneSends.every((send) => send.request.includes('[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요'))).toBe(true);
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S2', topology: 'mesh', posts: 1 });
+  });
+
+  it('S3는 레인이 게시판에 쓸 수 있고 topology를 따른다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S3 게시판',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'star' },
+    });
+
+    expect(plan.status).toBe('done');
+    expect(plan.coordination).toEqual({ strategy: 'S3', topology: 'star' });
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    expect(laneSends).toHaveLength(2);
+    expect(laneSends.every((send) => send.options.board!.modelWrites === true)).toBe(true);
+    expect(laneSends[0]!.request).toContain('post_note(contract)');
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S3', topology: 'star' });
+  });
+
+  it('S5는 작업이 끝날 때마다 검증 실패 서명을 플랫폼이 게시하고 모델 쓰기를 끈다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: 'fail' };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S5 실패 서명',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S5' },
+    });
+
+    expect(plan.status).toBe('failed');
+    const failures = plan.board?.notes.filter((note) => note.kind === 'failure') ?? [];
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ by: 'platform', refs: [] });
+    expect(failures[0]!.body).toContain('[run web]');
+    expect(failures[0]!.body).toContain('cannot find symbol at line N');
+
+    const laneSend = fake.sends.find((send) => send.options.board)!;
+    expect(laneSend.options.board!.modelWrites).toBe(false);
+    expect(laneSend.request).toContain('[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요');
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S5', byKind: { failure: 1 } });
+  });
+
+  it('S4는 통합 게이트가 실패하면 한 번만 모델 수리를 요청하고, 레인에는 게시판을 넘기지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.integration = 'failed';
+
+    const plan = await run({ projectId: 'orders', request: 'S4 수리', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+
+    expect(plan.status).toBe('done');
+    const repairs = fake.sends.filter((send) => isRepair(send.request));
+    expect(repairs).toHaveLength(1);
+    // 수리 요청은 스크립트 턴이 아니라 세션의 기본 모델 경로로 보낸다
+    expect(repairs[0]!.options.scriptedTurns).toBeUndefined();
+    expect(repairs[0]!.options.writableScope).toEqual(['web/a', 'web/b']);
+    expect(repairs[0]!.request).toContain('검증이 실패했습니다');
+    expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'done' });
+    expect(fake.sends.filter((send) => send.options.board)).toHaveLength(0);
+  });
+
+  it('S4의 수리도 실패하면 통합이 실패한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    fake.integration = 'failed';
+    fake.repair = 'failed';
+
+    const plan = await run({ projectId: 'orders', request: 'S4 수리 실패', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'failed' });
+    expect(fake.sends.filter((send) => isRepair(send.request))).toHaveLength(1);
+  });
+
+  it('S3에서 모델이 시크릿 값을 담아 게시하면 기록·화면에 남기 전에 가린다', async () => {
+    const secret = 'sk_test_payment_secret';
+    process.env.B_STUDIO_SECRET_PAYMENT_API_KEY = secret;
+    fake.project = {
+      spec: { name: 'orders' },
+      managed: [['web', { template: 'nextjs', path: 'web' }]],
+      secrets: [['PAYMENT_API_KEY', { services: ['web'] }]],
+    };
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    try {
+      const plan = await run({ projectId: 'orders', request: 'S3 가림', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+      expect(plan.status).toBe('done');
+
+      // 레인에 실제로 넘긴 게시판 래퍼로 모델의 post_note를 흉내 낸다
+      const board = fake.sends.find((send) => send.options.board)!.options.board!;
+      const posted = board.post({ kind: 'fact', body: `배포 키는 ${secret} 입니다`, refs: [`config/${secret}.env`] });
+      expect(posted.ok).toBe(true);
+
+      // 계획 기록(plan.board)과 모델에게 돌려준 메모 어디에도 원래 값이 없고 가림 문구가 있다
+      const stored = getTaskPlan(plan.id, 'kim').board!.notes.find((note) => note.body.includes('배포 키는'))!;
+      expect(stored.body).not.toContain(secret);
+      expect(stored.body).toContain('[PAYMENT_API_KEY 가림]');
+      expect(stored.refs.join(' ')).not.toContain(secret);
+      expect(stored.refs.join(' ')).toContain('[PAYMENT_API_KEY 가림]');
+      expect(posted.ok && posted.note.body).not.toContain(secret);
+      // 계층 구조의 그룹 비교가 성립하도록 레인의 첫 쓰기 범위가 그룹으로 남는다
+      expect(stored.group).toBe('web/a');
+    } finally {
+      delete process.env.B_STUDIO_SECRET_PAYMENT_API_KEY;
+    }
+  });
+});
+
+/** 계획 JSON을 기록 폴더에 직접 써, 서버가 다시 뜨며 기록을 읽는 상황을 만든다 */
+function writePlan(plan: Pick<TaskPlanView, 'id' | 'owner' | 'lanes'> & Partial<TaskPlanView>): void {
+  const file = path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ projectId: 'orders', request: '재시작', modelId: 'model-a', status: 'running', createdAt: new Date().toISOString(), ...plan }));
+}
+
+function laneView(
+  id: string,
+  status: TaskPlanView['lanes'][number]['status'],
+  overrides: Partial<TaskPlanView['lanes'][number]> = {},
+): TaskPlanView['lanes'][number] {
+  return { id, paths: ['web/a'], status, tasks: [], ...overrides };
+}
+
+/** 모듈 내부 캐시를 비우고 다시 읽어, 서버가 다시 시작된 것과 같은 상태를 만든다 */
+async function restart(): Promise<typeof import('./task-plans')> {
+  vi.resetModules();
+  return import('./task-plans');
+}
+
+/** 다시 읽은 모듈은 StudioError 클래스도 새로 만들어 instanceof가 깨지므로 상태 코드만 읽는다 */
+function resumeStatus(action: () => unknown): number {
+  try {
+    action();
+  } catch (error) {
+    return (error as { status?: number }).status ?? 0;
+  }
+  throw new Error('오류가 나지 않았습니다');
+}
+
+async function settled(read: () => TaskPlanView): Promise<TaskPlanView> {
+  for (let i = 0; i < 500; i++) {
+    const plan = read();
+    if (plan.status === 'done' || plan.status === 'failed') return plan;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('작업 계획이 끝나지 않았습니다');
+}
+
 describe('승인 뒤 이슈로 올리기', () => {
   it('publishIssues를 고르면 작업별 하위 이슈를 먼저 만들고 추적 이슈를 만든 뒤 GitHub 하위 이슈로 연결한다', async () => {
     process.env.B_STUDIO_GITHUB_TOKEN = 't';
@@ -636,43 +1030,3 @@ describe('승인 뒤 이슈로 올리기', () => {
     expect(plan.issues?.tasks.a?.number).toBe(8);
   });
 });
-
-/** 계획 JSON을 기록 폴더에 직접 써, 서버가 다시 뜨며 기록을 읽는 상황을 만든다 */
-function writePlan(plan: Pick<TaskPlanView, 'id' | 'owner' | 'lanes'> & Partial<TaskPlanView>): void {
-  const file = path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`);
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ projectId: 'orders', request: '재시작', modelId: 'model-a', status: 'running', createdAt: new Date().toISOString(), ...plan }));
-}
-
-function laneView(
-  id: string,
-  status: TaskPlanView['lanes'][number]['status'],
-  overrides: Partial<TaskPlanView['lanes'][number]> = {},
-): TaskPlanView['lanes'][number] {
-  return { id, paths: ['web/a'], status, tasks: [], ...overrides };
-}
-
-/** 모듈 내부 캐시를 비우고 다시 읽어, 서버가 다시 시작된 것과 같은 상태를 만든다 */
-async function restart(): Promise<typeof import('./task-plans')> {
-  vi.resetModules();
-  return import('./task-plans');
-}
-
-/** 다시 읽은 모듈은 StudioError 클래스도 새로 만들어 instanceof가 깨지므로 상태 코드만 읽는다 */
-function resumeStatus(action: () => unknown): number {
-  try {
-    action();
-  } catch (error) {
-    return (error as { status?: number }).status ?? 0;
-  }
-  throw new Error('오류가 나지 않았습니다');
-}
-
-async function settled(read: () => TaskPlanView): Promise<TaskPlanView> {
-  for (let i = 0; i < 500; i++) {
-    const plan = read();
-    if (plan.status === 'done' || plan.status === 'failed') return plan;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('작업 계획이 끝나지 않았습니다');
-}

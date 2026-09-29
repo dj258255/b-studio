@@ -1,11 +1,11 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
-import type { ServiceUsage } from '@b-studio/sandbox';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
 export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
-/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, demo: 준비된 스크립트 */
-export type SessionMode = 'api' | 'claude-code' | 'demo';
+/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, demo: 준비된 스크립트 */
+export type SessionMode = 'api' | 'claude-code' | 'codex' | 'demo';
 /** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
 export type WorkspaceKind = 'copy' | 'local';
 /** stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다 */
@@ -37,6 +37,25 @@ export interface ExternalApiView {
   authenticated: boolean;
 }
 
+/** 디자인(Figma) 연동 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
+export interface DesignView {
+  /** 지금 쓰는 Figma 파일 URL. 세션 설정이 studio.yaml보다 우선한다 */
+  fileUrl: string;
+  fileKey: string;
+  /** URL이 어디서 왔는지 */
+  from: 'session' | 'studio.yaml';
+  /** 서버에 FIGMA_TOKEN이 설정돼 있는지 */
+  hasToken: boolean;
+}
+
+/** 에이전트가 되물은 질문. 사용자가 답을 보내면 지운다 */
+export interface PendingQuestion {
+  runId: string;
+  question: string;
+  options: string[];
+  allowOther: boolean;
+}
+
 export interface SessionSnapshot {
   id: string;
   projectId: string;
@@ -64,6 +83,10 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
+  /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
+  design?: DesignView;
+  /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */
+  pendingQuestion?: PendingQuestion;
   /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
@@ -76,6 +99,8 @@ export interface SessionSnapshot {
   repository?: RepositoryView;
   /** 가장 최근에 잰 컨테이너별 자원 사용량 */
   usage?: { at: string; services: ServiceUsage[] };
+  /** 서비스가 준비된 직후 한 번 읽은 컨테이너별 수신/송신 바이트(수명 누계). 못 읽으면 없다 */
+  bootNetwork?: BootNetwork;
   /** 프로젝트 폴더의 파일이 바뀔 때마다 늘어난다. 서비스 안에서 명령이 만든 파일도 코드 화면이 다시 불러오는 기준이다 */
   fileRevision?: number;
   /** 이 세션에서 시작한 운영 배포나 되돌리기가 진행 중이다. lines는 최근 진행 줄 */
@@ -186,6 +211,12 @@ export type StudioEvent =
   | { type: 'snapshot'; snapshot: SessionSnapshot }
   | { type: 'status'; status: SessionStatus; error?: string }
   | { type: 'service'; service: string; state: ServiceState; url?: string; previewUrl?: string; detail?: string }
+  /** 서비스가 준비된 직후 기동 중 받은/보낸 바이트를 남긴다. 컨테이너 수명 누계이고, edge 프록시는 뺀다 */
+  | { type: 'boot_network'; at: string; network: BootNetwork }
+  /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
+  | { type: 'design'; design?: DesignView }
+  /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
+  | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean }
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
@@ -194,6 +225,10 @@ export type StudioEvent =
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
   | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask' }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
+  /** 실행 중 보낸 지시를 큐에 넣었다. 러너가 이어서 쓰면 agent 이벤트 steer_applied로 온다 */
+  | { type: 'steer_queued'; runId: string; text: string }
+  /** 실행이 끝났는데 적용되지 못한 지시. 화면에서 다시 보내라고 알린다 */
+  | { type: 'steer_dropped'; runId: string; texts: string[] }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
   | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }
   /** reason이 없으면 사용자가 취소했다 */
@@ -201,12 +236,16 @@ export type StudioEvent =
   | {
       type: 'run_finished';
       runId: string;
-      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다 */
-      status: 'done' | 'failed' | 'error' | 'cancelled';
+      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다. awaiting_input: 답을 기다린다 */
+      status: 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
       summary: string;
       turns?: number;
       /** 이번 요청이 쓴 토큰. 모델을 부르지 않았으면 없다 */
       usage?: AgentUsage;
+      /** 실행 지표. 모델을 부르지 않았거나 로컬 Claude Code 러너가 모델 호출을 직접 보지 못해 없을 수 있다 */
+      metrics?: RunMetrics;
+      /** 요청을 시작한 뒤 끝난 시각까지의 벽시계 시간 */
+      durationMs?: number;
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
       nextDemoQuestion?: string;

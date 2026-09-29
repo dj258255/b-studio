@@ -27,7 +27,9 @@ describe('highlightLines', () => {
     const className = line![0]!.className!;
     expect(className).toMatch(/^shiki-\d+$/);
     expect(highlightStyleRules()).toContainEqual(expect.stringMatching(new RegExp(`^\\.${className}\\{--shiki-light:#[0-9A-Fa-f]{6};--shiki-dark:#[0-9A-Fa-f]{6}\\}$`)));
-  });
+    // 이 테스트는 지원 언어 문법 40여 개를 처음부터 불러와 무겁다. 한가할 때 1.1초, CPU가 밀릴 때 5.4초까지 늘어
+    // 기본 시간 제한 5초를 넘겼다(트러블슈팅 42). 전역 제한은 그대로 두고 이 테스트에만 넉넉히 준다
+  }, 30_000);
 
   it('색이 같은 이웃 토큰과 공백 토큰을 합쳐 그릴 요소 수를 줄이고, 내용은 그대로 둔다', async () => {
     const code = 'export const row0 = { id: 0, label: "item 0", enabled: true }; // row 0';
