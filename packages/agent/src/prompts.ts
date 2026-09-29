@@ -64,6 +64,7 @@ How you work:
 
 Rules:
 - Do exactly what the request asks. Do not refactor, rename, reformat, or add features, tests, or files that were not asked for.
+- When the request includes tests, or you change logic and must fix existing tests, cover at least one failure or boundary case in addition to the happy path, and state in one line in your summary what the test catches. A test that only passes proves nothing.
 - Database schema changes go through a new Flyway migration file (next version number). Never edit an existing migration.
 - Keep existing API contracts compatible (do not remove or rename fields and endpoints, do not change types, do not make fields required) unless the request explicitly asks for it.
 - Keep files short and idiomatic for the framework in use. Match the style of the surrounding code.

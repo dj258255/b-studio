@@ -6,14 +6,54 @@ import type { Note, NoteKind } from './coordination';
 import type { DesignSource } from './design';
 import { checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 import { servicesForFiles } from './services';
+import {
+  clipCommandOutput,
+  clipText,
+  createToolResultCache,
+  dedupeResult,
+  HTTP_BODY_BUDGET,
+  invalidateReadCache,
+  isHtmlContent,
+  LOGS_OUTPUT_LIMIT,
+  READ_FILE_BUDGET,
+  visibleHtml,
+  type ToolResultCache,
+} from './tool-output';
 import type { ContractFetcher } from './verify';
 import type { Workspace } from './workspace';
 
 type BetaTool = Anthropic.Beta.BetaTool;
 
-const MAX_OUTPUT_CHARS = 30_000;
 const COMMAND_TIMEOUT_MS = 180_000;
 const HTTP_TIMEOUT_MS = 30_000;
+/** ask_user: 질문 문장 길이와 선택지 개수·길이 상한. 좁게 잡아 화면 카드가 깨지지 않게 한다 */
+const ASK_QUESTION_MAX = 300;
+const ASK_OPTION_MAX = 80;
+const ASK_OPTIONS_MIN = 2;
+const ASK_OPTIONS_MAX = 4;
+
+/** ask_user 도구가 남기는 질문. 러너는 이걸 보고 실행을 끝내 사용자 답을 다음 요청으로 받는다 */
+export interface AskUserQuestion {
+  question: string;
+  options: string[];
+  /** 직접 입력도 허용하는지 */
+  allowOther: boolean;
+}
+
+/** buildTools 옵션. interactive가 아니면(레인·벤치·CLI) 도구 목록이 지금과 같다 */
+export interface ToolBuildOptions {
+  /** 주면 조율 도구 두 개(post_note·read_notes)를 더한다. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음) */
+  board?: BoardAccess;
+  /**
+   * 프로젝트가 허용 도구 목록을 정했으면 조율 도구도 그 목록에 있어야 한다(기존 규칙 그대로).
+   * 목록에 없으면 도구를 아예 넣지 않는다 — 모델이 막히는 도구를 보지 않게.
+   */
+  allowedTools?: readonly string[];
+  /** 세션이 Figma 디자인을 설정했을 때 디자인 도구를 더한다 */
+  design?: boolean;
+  /** 단일 세션의 사용자 요청일 때만 ask_user를 더한다 */
+  interactive?: boolean;
+}
 
 /**
  * 조율 게시판을 레인 신원으로 감싼 것. Board를 직접 넘기지 않고 도구가 쓸 수 있는 두 동작만 노출한다.
@@ -54,6 +94,8 @@ export interface ToolContext {
   readOnly?: boolean;
   /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘어온다. 없으면 디자인 도구가 목록에 없다 */
   design?: DesignSource;
+  /** ask_user가 남긴 질문. 러너가 이걸 받으면 실행을 끝내고 사용자 답을 기다린다. 없으면 ask_user가 목록에 없다 */
+  onQuestion?: (question: AskUserQuestion) => void;
   /** 모델이 호출한 도구를 실행기에서 먼저 검사한다 */
   policy?: ExecutionPolicy;
   /** 승인 흐름에서 발급한 일회성 토큰. 토큰 값은 로그에 기록하지 않는다 */
@@ -62,10 +104,18 @@ export interface ToolContext {
   requestApproval?: (request: ApprovalRequest) => Promise<boolean>;
   /** 허용·차단 결정을 구조화해 감사 로그에 남긴다 */
   onPolicyDecision?: (decision: PolicyDecision) => void;
+  /**
+   * 실행 단위 도구 결과 캐시. 러너가 실행(runAgent 한 번)마다 새로 만들어 넘긴다.
+   * 같은 도구·같은 입력의 결과가 앞과 완전히 같으면 본문 대신 참조를 돌려 결과 글자를 줄인다.
+   * 넘기지 않으면 executeTool이 이 컨텍스트에 하나 만들어 쓴다(러너가 컨텍스트를 실행 내내 재사용할 때).
+   */
+  toolResults?: ToolResultCache;
 }
 
 /** 질문 모드에서 거부하는 도구. 게시판에 쓰는 post_note도 상태를 바꾸므로 포함한다(읽기 read_notes는 허용) */
 const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_in_service', 'restart_service', 'post_note']);
+/** 성공하면 읽기 캐시를 비우는 쓰기 도구. 같은 경로를 다시 읽으면 내용이 달라졌을 수 있다 */
+const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
 const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.';
@@ -73,6 +123,8 @@ const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Descr
 export interface ToolOutcome {
   ok: boolean;
   content: string;
+  /** 자르기 전 결과 글자 수. 잘랐을 때만 넣는다(안 넣으면 content 길이와 같다). 토큰 탭의 "원래 글자"에 쓴다 */
+  rawChars?: number;
 }
 
 /**
@@ -81,7 +133,8 @@ export interface ToolOutcome {
  *  - 파일 쓰기는 작업 공간 규칙(경로 제한, 덮어쓰기 충돌)을 강제해야 한다
  *  - 바뀐 파일을 기록해야 검증 게이트가 재시작할 서비스를 고를 수 있다
  * strict 모드는 선택 필드가 없는 스키마에서 가장 안전하므로 모든 필드를 필수로 둔다.
- * design을 넘기면(세션이 Figma 디자인을 설정했을 때) 디자인 도구를 더하고, 아니면 목록이 지금과 같다
+ * design을 넘기면(세션이 Figma 디자인을 설정했을 때) 디자인 도구를 더하고, 아니면 목록이 지금과 같다.
+ * interactive를 넘기면(단일 세션의 사용자 요청일 때) ask_user를 더한다. 레인·벤치·CLI는 넘기지 않아 목록이 그대로다
  */
 export function buildTools(project: LoadedProject, options: ToolBuildOptions = {}): BetaTool[] {
   const services = project.managed.map(([name]) => name);
@@ -190,6 +243,20 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
       ),
     );
   }
+
+  if (options.interactive) {
+    tools.push(
+      tool(
+        'ask_user',
+        'Ask the user to choose before building, only when the request is ambiguous and the result would change a lot. Ask once, before making changes. Do not ask when a reasonable guess is enough. Calling this ends the run; the user answers with a follow-up request that continues this conversation.',
+        {
+          question: { type: 'string', description: `One short question (max ${ASK_QUESTION_MAX} characters).` },
+          options: { type: 'array', items: { type: 'string' }, description: `Two to four short choices (each max ${ASK_OPTION_MAX} characters).` },
+          allowOther: { type: 'boolean', description: 'true to also let the user type a free-form answer.' },
+        },
+      ),
+    );
+  }
   return tools;
 }
 
@@ -203,7 +270,6 @@ function tool(name: string, description: string, properties: Record<string, unkn
 }
 
 export async function executeTool(name: string, input: unknown, context: ToolContext): Promise<ToolOutcome> {
-  const { workspace, sandbox, signal } = context;
   try {
     // 질문 모드의 제한도 실행기에서 강제하고 감사 로그에 한 번만 남긴다
     if (context.readOnly && CHANGING_TOOLS.has(name)) {
@@ -227,117 +293,149 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       context.onPolicyDecision?.(decision);
     }
     const args = asRecord(input);
-    switch (name) {
-      case 'list_files': {
-        const entries = await workspace.list(string(args, 'path'), clamp(integer(args, 'depth'), 1, 6));
-        return success(entries.length > 0 ? entries.join('\n') : '(empty)');
-      }
-      case 'read_file':
-        return success(truncate(sandbox.redact(await workspace.read(string(args, 'path')))));
-      case 'write_file': {
-        const file = string(args, 'path');
-        await workspace.write(file, string(args, 'content'));
-        return success(`wrote ${file}`);
-      }
-      case 'edit_file': {
-        const file = string(args, 'path');
-        await workspace.edit(file, string(args, 'old_text'), string(args, 'new_text'));
-        return success(`edited ${file}`);
-      }
-      case 'delete_file': {
-        const file = string(args, 'path');
-        await workspace.remove(file);
-        return success(`deleted ${file}`);
-      }
-      case 'run_in_service': {
-        const result = await sandbox.exec(serviceName(context, args), stringArray(args, 'command'), {
-          signal: withTimeout(signal, COMMAND_TIMEOUT_MS),
-        });
-        const output = `exit code ${result.exitCode}\n--- stdout\n${truncate(result.stdout)}\n--- stderr\n${truncate(result.stderr)}`;
-        return { ok: result.exitCode === 0, content: output };
-      }
-      case 'restart_service': {
-        const target = serviceName(context, args);
-        try {
-          // 방금 쓴 파일을 샌드박스가 보기 전에 재시작하면 옛 코드가 빌드된다
-          const owned = workspace.changedFiles().filter((file) => servicesForFiles(context.project, [file]).services[0] === target);
-          await sandbox.sync(owned, { signal });
-          const endpoint = await sandbox.restart(target, { signal, onStatus: context.onServiceStatus });
-          return success(`${target} is ready at ${endpoint.url}`);
-        } catch (error) {
-          return failure(`${describe(error)}\n--- recent logs\n${await tailLogs(sandbox, target, 60)}`);
-        }
-      }
-      case 'service_logs': {
-        const target = serviceName(context, args);
-        return success(await tailLogs(sandbox, target, clamp(integer(args, 'lines'), 1, 400)));
-      }
-      case 'service_stats': {
-        const usage = await sandbox.stats();
-        return success(usage.length > 0 ? usage.map(describeUsage).join('\n') : '(no containers)');
-      }
-      case 'http_request':
-        return await httpRequest(context, args);
-      case 'call_external_api': {
-        const api = string(args, 'api');
-        if (!(context.project.external ?? []).some(([name]) => name === api)) throw new ToolInputError(`Unknown API: ${api}`);
-        if (context.readOnly && !READ_METHODS.has(string(args, 'method'))) return failure(READ_ONLY_METHOD);
-        const body = string(args, 'body');
-        const result = await sandbox.callExternal(
-          api,
-          { method: string(args, 'method'), path: string(args, 'path'), body: body || undefined },
-          { via: 'agent', signal: withTimeout(signal, HTTP_TIMEOUT_MS) },
-        );
-        const policy =
-          result.decision === 'deny'
-            ? `blocked by b-studio policy: ${result.reason}`
-            : result.masked > 0
-              ? `${result.masked} field value(s) masked by b-studio policy`
-              : 'allowed, nothing masked';
-        return {
-          ok: result.decision === 'allow',
-          content: `HTTP ${result.status}\ncontent-type: ${result.contentType ?? 'unknown'}\npolicy: ${policy}\n\n${truncate(result.body)}`,
-        };
-      }
-      case 'get_contract': {
-        const target = serviceName(context, args);
-        const contract = context.project.managed.find(([serviceKey]) => serviceKey === target)?.[1].contract;
-        if (!contract) return failure(`${target} does not expose a contract`);
-        const endpoint = await sandbox.endpoint(target);
-        return success(sandbox.redact(summarizeContract(await context.fetcher(new URL(contract.extract, endpoint.url).toString()))));
-      }
-      case 'post_note': {
-        const board = context.board;
-        if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
-        const result = board.post({ kind: asNoteKind(string(args, 'kind')), body: string(args, 'body'), refs: optionalStringArray(args, 'refs') });
-        return result.ok ? success(`posted ${result.note.id} (${result.note.kind})`) : failure(result.reason);
-      }
-      case 'read_notes': {
-        const board = context.board;
-        if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
-        const kinds = asNoteKinds(optionalStringArray(args, 'kinds'));
-        const { notes, truncated, reason } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
-        const lines = notes.map(formatNote);
-        if (truncated) lines.push(`[... ${reason ?? '읽기 상한으로 일부만 돌려줬습니다'} ...]`);
-        return success(lines.length > 0 ? lines.join('\n') : '(no notes)');
-      }
-      case 'design_frames': {
-        if (!context.design) return failure('Design is not configured for this session');
-        const frames = await context.design.frames();
-        return success(frames.length > 0 ? frames.map((frame) => `${frame.id}\t${frame.page}\t${frame.name}\t${frame.width}x${frame.height}`).join('\n') : '(no frames)');
-      }
-      case 'design_frame': {
-        if (!context.design) return failure('Design is not configured for this session');
-        const id = string(args, 'id');
-        const frame = await context.design.frame(id);
-        const artifact = await context.design.saveArtifact(`design ${id}`, frame.png);
-        return success(`${frame.summary}\n\nframe PNG saved as artifact: ${artifact} (the image is not sent to the model)`);
-      }
-      default:
-        return failure(`Unknown tool: ${name}`);
-    }
+    const outcome = await runTool(name, args, context);
+    // 같은 도구·같은 입력의 결과가 앞과 완전히 같으면 본문을 참조로 바꾼다(실행 단위). 모든 러너가 이 한 곳을 지나간다
+    const cache = (context.toolResults ??= createToolResultCache());
+    if (outcome.ok && WRITE_TOOLS.has(name)) invalidateReadCache(cache);
+    // rawChars는 도구가 잘랐을 때만 넣는다. 러너가 이벤트로 보낼 때 content 길이로 채운다
+    const content = dedupeResult(cache, name, input, outcome.content);
+    return content === outcome.content ? outcome : { ...outcome, content };
   } catch (error) {
     return failure(describe(error));
+  }
+}
+
+/** 도구별 실행. 예산 자르기와 반복 대체 같은 공통 처리는 executeTool이 맡는다 */
+async function runTool(name: string, args: Record<string, unknown>, context: ToolContext): Promise<ToolOutcome> {
+  const { workspace, sandbox, signal } = context;
+  switch (name) {
+    case 'list_files': {
+      const entries = await workspace.list(string(args, 'path'), clamp(integer(args, 'depth'), 1, 6));
+      return success(entries.length > 0 ? entries.join('\n') : '(empty)');
+    }
+    case 'read_file': {
+      // 파일은 앞에서부터 읽는 경우가 많아 앞쪽 위주로 자른다
+      const raw = sandbox.redact(await workspace.read(string(args, 'path')));
+      return { ok: true, content: clipText(raw, READ_FILE_BUDGET), rawChars: raw.length };
+    }
+    case 'write_file': {
+      const file = string(args, 'path');
+      await workspace.write(file, string(args, 'content'));
+      return success(`wrote ${file}`);
+    }
+    case 'edit_file': {
+      const file = string(args, 'path');
+      await workspace.edit(file, string(args, 'old_text'), string(args, 'new_text'));
+      return success(`edited ${file}`);
+    }
+    case 'delete_file': {
+      const file = string(args, 'path');
+      await workspace.remove(file);
+      return success(`deleted ${file}`);
+    }
+    case 'run_in_service': {
+      const result = await sandbox.exec(serviceName(context, args), stringArray(args, 'command'), {
+        signal: withTimeout(signal, COMMAND_TIMEOUT_MS),
+      });
+      // stdout과 stderr를 합쳐 한 예산으로 자른다. 테스트·빌드 로그의 실패 요약이 뒤에 있어 뒤쪽을 더 남긴다
+      const raw = `exit code ${result.exitCode}\n--- stdout\n${result.stdout}\n--- stderr\n${result.stderr}`;
+      return { ok: result.exitCode === 0, content: clipCommandOutput(raw), rawChars: raw.length };
+    }
+    case 'restart_service': {
+      const target = serviceName(context, args);
+      try {
+        // 방금 쓴 파일을 샌드박스가 보기 전에 재시작하면 옛 코드가 빌드된다
+        const owned = workspace.changedFiles().filter((file) => servicesForFiles(context.project, [file]).services[0] === target);
+        await sandbox.sync(owned, { signal });
+        const endpoint = await sandbox.restart(target, { signal, onStatus: context.onServiceStatus });
+        return success(`${target} is ready at ${endpoint.url}`);
+      } catch (error) {
+        return failure(`${describe(error)}\n--- recent logs\n${clipText(await tailLogs(sandbox, target, 60), LOGS_OUTPUT_LIMIT)}`);
+      }
+    }
+    case 'service_logs': {
+      const target = serviceName(context, args);
+      // 줄 수 상한(1-400)은 그대로 두고 글자 상한만 지금 값을 유지한다
+      const raw = await tailLogs(sandbox, target, clamp(integer(args, 'lines'), 1, 400));
+      return { ok: true, content: clipText(raw, LOGS_OUTPUT_LIMIT), rawChars: raw.length };
+    }
+    case 'service_stats': {
+      const usage = await sandbox.stats();
+      return success(usage.length > 0 ? usage.map(describeUsage).join('\n') : '(no containers)');
+    }
+    case 'http_request':
+      return await httpRequest(context, args);
+    case 'call_external_api': {
+      const api = string(args, 'api');
+      if (!(context.project.external ?? []).some(([name]) => name === api)) throw new ToolInputError(`Unknown API: ${api}`);
+      if (context.readOnly && !READ_METHODS.has(string(args, 'method'))) return failure(READ_ONLY_METHOD);
+      const body = string(args, 'body');
+      const result = await sandbox.callExternal(
+        api,
+        { method: string(args, 'method'), path: string(args, 'path'), body: body || undefined },
+        { via: 'agent', signal: withTimeout(signal, HTTP_TIMEOUT_MS) },
+      );
+      const policy =
+        result.decision === 'deny'
+          ? `blocked by b-studio policy: ${result.reason}`
+          : result.masked > 0
+            ? `${result.masked} field value(s) masked by b-studio policy`
+            : 'allowed, nothing masked';
+      const raw = context.sandbox.redact(result.body);
+      return {
+        ok: result.decision === 'allow',
+        content: `HTTP ${result.status}\ncontent-type: ${result.contentType ?? 'unknown'}\npolicy: ${policy}\n\n${clipBody(raw, result.contentType ?? undefined)}`,
+        rawChars: raw.length,
+      };
+    }
+    case 'get_contract': {
+      const target = serviceName(context, args);
+      const contract = context.project.managed.find(([serviceKey]) => serviceKey === target)?.[1].contract;
+      if (!contract) return failure(`${target} does not expose a contract`);
+      const endpoint = await sandbox.endpoint(target);
+      return success(sandbox.redact(summarizeContract(await context.fetcher(new URL(contract.extract, endpoint.url).toString()))));
+    }
+    case 'design_frames': {
+      if (!context.design) return failure('Design is not configured for this session');
+      const frames = await context.design.frames();
+      return success(frames.length > 0 ? frames.map((frame) => `${frame.id}\t${frame.page}\t${frame.name}\t${frame.width}x${frame.height}`).join('\n') : '(no frames)');
+    }
+    case 'design_frame': {
+      if (!context.design) return failure('Design is not configured for this session');
+      const id = string(args, 'id');
+      const frame = await context.design.frame(id);
+      const artifact = await context.design.saveArtifact(`design ${id}`, frame.png);
+      return success(`${frame.summary}\n\nframe PNG saved as artifact: ${artifact} (the image is not sent to the model)`);
+    }
+    case 'ask_user': {
+      if (!context.onQuestion) return failure('This run cannot ask the user a question.');
+      const question = string(args, 'question').trim();
+      if (question.length === 0 || question.length > ASK_QUESTION_MAX) return failure(`"question" must be 1-${ASK_QUESTION_MAX} characters`);
+      const options = stringArray(args, 'options').map((option) => option.trim());
+      if (options.length < ASK_OPTIONS_MIN || options.length > ASK_OPTIONS_MAX) return failure(`"options" must have ${ASK_OPTIONS_MIN}-${ASK_OPTIONS_MAX} choices`);
+      if (options.some((option) => option.length === 0 || option.length > ASK_OPTION_MAX)) return failure(`each option must be 1-${ASK_OPTION_MAX} characters`);
+      if (new Set(options).size !== options.length) return failure('"options" must not repeat a choice');
+      context.onQuestion({ question, options, allowOther: boolean(args, 'allowOther') });
+      // 이 결과를 받은 모델이 곧바로 멈추도록, 도구가 끝났다는 사실과 멈추라는 지시를 함께 돌려준다
+      return success('Question sent to the user. End this run now and wait for their answer; do not call any more tools.');
+    }
+    case 'post_note': {
+      const board = context.board;
+      if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
+      const result = board.post({ kind: asNoteKind(string(args, 'kind')), body: string(args, 'body'), refs: optionalStringArray(args, 'refs') });
+      return result.ok ? success(`posted ${result.note.id} (${result.note.kind})`) : failure(result.reason);
+    }
+    case 'read_notes': {
+      const board = context.board;
+      if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
+      const kinds = asNoteKinds(optionalStringArray(args, 'kinds'));
+      const { notes, truncated, reason } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
+      const lines = notes.map(formatNote);
+      if (truncated) lines.push(`[... ${reason ?? '읽기 상한으로 일부만 돌려줬습니다'} ...]`);
+      return success(lines.length > 0 ? lines.join('\n') : '(no notes)');
+    }
+    default:
+      return failure(`Unknown tool: ${name}`);
   }
 }
 
@@ -376,15 +474,22 @@ async function httpRequest(context: ToolContext, args: Record<string, unknown>):
   });
   const text = await response.text();
   const contentType = response.headers.get('content-type') ?? 'unknown';
-  // 4xx/5xx도 요청 자체는 수행됐으므로 정상 결과로 돌려주고 판단은 모델에게 맡긴다
   // 서비스가 응답에 환경 변수 값을 그대로 담아 보낼 수 있다
-  return success(`HTTP ${response.status}\ncontent-type: ${contentType}\n\n${truncate(context.sandbox.redact(text))}`);
+  const raw = context.sandbox.redact(text);
+  // 4xx/5xx도 요청 자체는 수행됐으므로 정상 결과로 돌려주고 판단은 모델에게 맡긴다
+  return { ok: true, content: `HTTP ${response.status}\ncontent-type: ${contentType}\n\n${clipBody(raw, contentType)}`, rawChars: raw.length };
+}
+
+/** HTTP 응답 본문을 예산에 맞춘다. HTML이면 태그를 벗긴 "보이는 글자"를 기준으로 한다(개발 서버 HTML이 13,430자였다) */
+function clipBody(body: string, contentType: string | undefined): string {
+  return clipText(isHtmlContent(contentType, body) ? visibleHtml(body) : body, HTTP_BODY_BUDGET);
 }
 
 async function tailLogs(sandbox: Sandbox, service: string, lines: number): Promise<string> {
   const collected: string[] = [];
   for await (const line of sandbox.logs({ services: [service], tail: lines, follow: false })) collected.push(line.text);
-  return collected.length > 0 ? truncate(collected.join('\n')) : '(no logs)';
+  // 자르기는 부르는 쪽에서 예산에 맞춰 한다(service_logs·restart_service가 같은 값을 다른 상한으로 쓴다)
+  return collected.length > 0 ? collected.join('\n') : '(no logs)';
 }
 
 function serviceName({ project }: ToolContext, args: Record<string, unknown>): string {
@@ -409,6 +514,12 @@ function string(args: Record<string, unknown>, key: string): string {
 function integer(args: Record<string, unknown>, key: string): number {
   const value = args[key];
   if (typeof value !== 'number' || !Number.isInteger(value)) throw new ToolInputError(`"${key}" must be an integer`);
+  return value;
+}
+
+function boolean(args: Record<string, unknown>, key: string): boolean {
+  const value = args[key];
+  if (typeof value !== 'boolean') throw new ToolInputError(`"${key}" must be a boolean`);
   return value;
 }
 
@@ -452,14 +563,6 @@ function clamp(value: number, min: number, max: number): number {
 function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
   const timeout = AbortSignal.timeout(ms);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-/** 잘라낸 사실을 숨기지 않고 표시한다 */
-function truncate(text: string, max = MAX_OUTPUT_CHARS): string {
-  if (text.length <= max) return text;
-  const head = Math.floor(max * 0.8);
-  const tail = max - head;
-  return `${text.slice(0, head)}\n[... ${text.length - max} characters truncated ...]\n${text.slice(-tail)}`;
 }
 
 function success(content: string): ToolOutcome {

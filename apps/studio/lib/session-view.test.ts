@@ -46,6 +46,26 @@ describe('reduceSession', () => {
     expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
   });
 
+  it('되묻기 질문을 스냅샷에 남기고, 다음 요청을 보내면 지운다', () => {
+    const asked = fold([
+      { type: 'question', runId: 'r1', question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true },
+      { type: 'run_finished', runId: 'r1', status: 'awaiting_input', summary: '어떤 형태로 만들까요?' },
+    ]);
+    expect(asked.snapshot.pendingQuestion).toEqual({ runId: 'r1', question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(asked.chat.at(-1)).toMatchObject({ kind: 'outcome', status: 'awaiting_input' });
+
+    const answered = reduceSession(asked, { type: 'run_started', runId: 'r2', request: '[질문] 어떤 형태로 만들까요?\n[답] 표' });
+    expect(answered.snapshot.pendingQuestion).toBeUndefined();
+  });
+
+  it('끝나거나 실패한 실행이 남긴 질문은 남기지 않는다', () => {
+    const failed = fold([
+      { type: 'question', runId: 'r1', question: 'q', options: ['a', 'b'], allowOther: false },
+      { type: 'run_finished', runId: 'r1', status: 'failed', summary: '실패' },
+    ]);
+    expect(failed.snapshot.pendingQuestion).toBeUndefined();
+  });
+
   it('재시작으로 바뀐 서비스 주소를 반영한다', () => {
     const view = fold([
       { type: 'service', service: 'api', state: 'ready', url: 'http://127.0.0.1:32769' },
@@ -351,6 +371,17 @@ describe('reduceSession', () => {
     expect(view.completedRuns).toBe(2);
   });
 
+  it('기동 중 받은 네트워크 바이트를 스냅샷과 기동 줄에 남긴다', () => {
+    const network = [
+      { service: 'api', rxBytes: 1_200_000, txBytes: 3_400 },
+      { service: 'web', rxBytes: 500_000, txBytes: 2_000 },
+    ];
+    const view = fold([{ type: 'boot_network', at: '2026-09-12T00:00:00Z', network }]);
+
+    expect(view.snapshot.bootNetwork).toEqual(network);
+    expect(view.chat).toEqual([{ kind: 'boot', network }]);
+  });
+
   it('원격 변경 가져오기는 진행 중으로 표시했다가 결과와 새 기록으로 채운다', () => {
     const merged = { sha: 'c'.repeat(40), shortSha: 'ccccccc', message: '원격 커밋 1개 가져오기', createdAt: '', files: ['NOTE.md'] };
     const repository = {
@@ -435,5 +466,25 @@ describe('reduceSession', () => {
     const view = fold(events);
     expect(view.logs).toHaveLength(LOG_LIMIT);
     expect(view.logs.at(-1)?.text).toBe(`line ${LOG_LIMIT + 4}`);
+  });
+
+  it('진행 중 지시를 대기로 넣고, 반영되면 반영됨, 끝까지 남으면 적용 실패로 표시한다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      { type: 'steer_queued', runId: 'r1', text: '지시1' },
+      { type: 'steer_queued', runId: 'r1', text: '지시2' },
+      { type: 'agent', runId: 'r1', event: { type: 'steer_applied', count: 1 } },
+    ]);
+
+    expect(view.chat.filter((item) => item.kind === 'steer')).toEqual([
+      { kind: 'steer', runId: 'r1', text: '지시1', status: 'applied' },
+      { kind: 'steer', runId: 'r1', text: '지시2', status: 'queued' },
+    ]);
+
+    const dropped = fold([{ type: 'steer_dropped', runId: 'r1', texts: ['지시2'] }], view);
+    expect(dropped.chat.filter((item) => item.kind === 'steer')).toEqual([
+      { kind: 'steer', runId: 'r1', text: '지시1', status: 'applied' },
+      { kind: 'steer', runId: 'r1', text: '지시2', status: 'dropped' },
+    ]);
   });
 });
