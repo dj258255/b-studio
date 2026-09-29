@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
 import type { ProjectSummary } from '@/lib/studio-events';
 import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
+import { describeTokens, hasTokens } from '@/lib/usage';
 import { PlanGraphView } from './plan-graph';
 
 const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
@@ -211,6 +212,14 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
   const [reason, setReason] = useState('');
   /** 레인·통합 카드로 보는 기존 목록 보기와, 관계를 한 그림으로 보는 그래프 보기를 겹쳐 둔다 */
   const [view, setView] = useState<'list' | 'graph'>('list');
+  /**
+   * 레인 사이 계약(S2)은 아래 "레인 사이 계약" 절에서 본문·refs·출처를 보여 준다.
+   * 같은 메모가 게시판 목록에도 나오면 두 번 보이므로, 게시판 목록에서는 플랫폼이 게시한 계약 메모를 뺀다
+   * (S3에서 레인이 쓴 계약 메모는 게시판에 그대로 남는다 — 누가 언제 썼는지가 거기 있다).
+   */
+  const platformContracts = (plan.board?.notes ?? []).filter((note) => note.kind === 'contract' && note.by === 'platform');
+  const showContracts = plan.contracts !== undefined || platformContracts.length > 0;
+  const boardNotes = (plan.board?.notes ?? []).filter((note) => !showContracts || !(note.kind === 'contract' && note.by === 'platform'));
   return (
     <div className="space-y-4">
       {plan.status === 'interrupted' && (
@@ -298,9 +307,9 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
               메모 {plan.board.stats.posts}개 · 거부 {plan.board.stats.rejected} · 읽기 {plan.board.stats.reads}회 · 읽은 바이트 {plan.board.stats.bytesRead.toLocaleString('ko-KR')}
             </p>
           )}
-          {plan.board && plan.board.notes.length > 0 ? (
+          {boardNotes.length > 0 ? (
             <ul className="mt-3 space-y-2">
-              {plan.board.notes.map((note, index) => (
+              {boardNotes.map((note, index) => (
                 <li key={`${note.at}-${index}`} className="rounded-md border border-line bg-panel p-3">
                   <p className="text-xs font-medium">
                     [{note.kind}·{note.priority}] {note.lane}
@@ -313,8 +322,45 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
               ))}
             </ul>
           ) : (
-            <p className="mt-2 text-sm text-muted">아직 게시된 메모가 없습니다.</p>
+            <p className="mt-2 text-sm text-muted">{showContracts ? '레인 사이 계약 말고는 아직 게시된 메모가 없습니다.' : '아직 게시된 메모가 없습니다.'}</p>
           )}
+        </section>
+      )}
+
+      {showContracts && (
+        <section className="glass rounded-panel p-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">레인 사이 계약</h2>
+            <span className="glass-soft rounded-full px-3 py-1 text-sm font-medium text-wait">
+              계약 {plan.contracts?.count ?? platformContracts.length}개
+            </span>
+            <span className="text-sm text-muted">출처: {plan.contracts?.source === 'model' ? '계획 모델' : '사람'}</span>
+            {plan.contracts?.usage && hasTokens(plan.contracts.usage) && (
+              <span className="text-xs text-muted">
+                {describeTokens(plan.contracts.usage)}
+                {plan.contracts.durationMs !== undefined && ` · ${(plan.contracts.durationMs / 1_000).toFixed(1)}초`}
+              </span>
+            )}
+          </div>
+          {plan.contracts?.warning && <p className="mt-2 text-sm text-fail">{plan.contracts.warning}</p>}
+          {platformContracts.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {platformContracts.map((note, index) => (
+                <li key={`${note.at}-${index}`} className="rounded-md border border-line bg-panel p-3">
+                  <p className="text-sm leading-5 whitespace-pre-wrap">{note.body}</p>
+                  {note.refs.length > 0 && <p className="mt-1 break-all font-mono text-xs text-muted">{note.refs.join(', ')}</p>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-sm text-muted">게시된 계약이 없습니다. 레인끼리 맞물리는 인터페이스가 없다고 판단했습니다.</p>
+          )}
+          {plan.contracts !== undefined && plan.contracts.count > platformContracts.length && (
+            <p className="mt-2 text-sm text-fail">
+              계약 {plan.contracts.count - platformContracts.length}개가 게시되지 않았습니다. refs가 없는 계약은 게시판이 거부합니다.
+            </p>
+          )}
+          <p className="mt-2 text-xs text-muted">레인은 시작 전에 read_notes로 이 계약을 읽습니다.</p>
         </section>
       )}
 

@@ -1,5 +1,6 @@
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { buildContractSystem, buildPlannerSystem } from '@b-studio/agent';
 import { afterEach, describe, expect, it } from 'vitest';
 import { isPlannerRequest, startProxy, type ProxyHandle } from './proxy';
 
@@ -139,5 +140,24 @@ describe('startProxy', () => {
     expect(response.status).toBe(502);
     expect(text).not.toContain('sk-secret-value');
     expect(proxy.takeStats().upstreamErrors).toBe(1);
+  });
+
+  it('레인 사이 계약 요청은 계획 요청으로 보지 않고 상류로 넘긴다', async () => {
+    // 계약 프롬프트가 계획 프롬프트 접두사로 시작하면 프록시가 고정 계획을 돌려주어 계약이 계획 JSON이 된다
+    const project = { spec: { name: 'orders' }, managed: [['api', { template: 'spring-boot', path: 'api' }]] } as never;
+    const contractSystem = buildContractSystem(project);
+
+    expect(isPlannerRequest({ messages: [{ role: 'system', content: contractSystem }] })).toBe(false);
+    // 계획 프롬프트는 여전히 계획 요청으로 본다
+    expect(isPlannerRequest({ messages: [{ role: 'system', content: buildPlannerSystem(project) }] })).toBe(true);
+
+    const upstream = await fakeUpstream((_call, response) => response.end('{"choices":[]}'));
+    const proxy = await startProxy({ upstreamBaseUrl: upstream.baseUrl, upstreamApiKey: 'k' });
+    cleanups.push(() => proxy.close(), () => upstream.close());
+
+    const body = JSON.stringify({ model: 'm', messages: [{ role: 'system', content: contractSystem }, { role: 'user', content: '레인 계약을 써 주세요' }] });
+    await fetch(`${proxy.baseUrl}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+
+    expect(proxy.takeStats()).toMatchObject({ plannerCalls: 0, forwardedCalls: 1 });
   });
 });

@@ -5,10 +5,12 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import {
   Board,
+  contractAskFromClient,
   failureNotesFromEvents,
   isInScope,
   MAX_PLAN_LANES,
   planLanes,
+  requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
   TaskPlanError,
@@ -21,12 +23,14 @@ import {
   type Topology,
 } from '@b-studio/agent';
 import type { Checkpoint } from '@b-studio/agent';
+import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
 import type { StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
 import type {
   TaskPlanBoardView,
   TaskPlanCheckpointView,
+  TaskPlanContractsView,
   TaskPlanIntegrationView,
   TaskPlanLaneView,
   TaskPlanNoteView,
@@ -276,9 +280,50 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
     status: 'queued',
     tasks: lane.tasks.map((task) => ({ ...task, status: 'queued' })),
   }));
+  // 레인을 만든 직후, 레인을 돌리기 전에 레인 사이 계약을 받아 S2로 게시한다.
+  // 실패해도 계획은 계속 간다(계약 없이) — 경고 한 줄만 남긴다
+  if (preset === undefined && lanes.length >= 2 && !plan.coordination && contractsSetting()) {
+    await askLaneContracts(plan, project, lanes);
+  }
   // 사람이 승인할 때까지 여기서 멈춘다. 승인 없이 레인을 돌리지 않는다
   plan.status = 'awaiting_approval';
   persist(plan);
+}
+
+/**
+ * 레인 사이 계약을 계획 모델에게 받을지. 기본은 꺼짐이다 — 효과를 재기 전에는 켜지 않는다(ADR-059 보강 예정).
+ * 켜더라도 API 모드의 모델 계획(presetPlan 아님)에서, 레인이 둘 이상이고, 조율 입력이 없을 때만 받는다.
+ * 벤치가 coordination을 넘기면(고정 계약) 그쪽이 우선이라 여기서는 모델을 부르지 않는다.
+ */
+function contractsSetting(): boolean {
+  return process.env.B_STUDIO_PLAN_CONTRACTS?.trim().toLowerCase() === 'on';
+}
+
+/**
+ * 계약을 한 번 받아 S2 게시판을 붙이고 게시한다. 레인 실행 전에 끝나야 레인이 계약을 읽을 수 있다.
+ * 모델이 쓴 본문·refs는 계획 기록과 화면에 남으므로 S3의 모델 게시와 같은 규칙으로 시크릿 값을 가린다.
+ */
+async function askLaneContracts(plan: TaskPlanView, project: LoadedProject, lanes: readonly TaskLane[]): Promise<void> {
+  try {
+    const asked = await requestLaneContracts(contractAskFromClient(clientForModel(modelById(plan.modelId))), project, plan.request, lanes);
+    const redactor = new Redactor(await resolveSecrets(project));
+    const contracts = asked.contracts.map((contract) => ({ body: redactor.redact(contract.body), refs: contract.refs.map((ref) => redactor.redact(ref)) }));
+    attachCoordination(plan, { strategy: 'S2', contracts }, redactor);
+    plan.contracts = { source: 'model', count: contracts.length, usage: asked.usage, durationMs: asked.durationMs };
+    persist(plan);
+  } catch (error) {
+    // 형식 오류면 그때까지 쓴 토큰과 시간이 오류에 붙어 있다. 버리지 않고 기록에 남긴다
+    const spent = error instanceof TaskPlanError ? error.usage : undefined;
+    const contracts: TaskPlanContractsView = {
+      source: 'model',
+      count: 0,
+      ...(spent ? { usage: spent, durationMs: error instanceof TaskPlanError ? (error.durationMs ?? 0) : 0 } : {}),
+      warning: `레인 사이 계약을 받지 못해 계약 없이 진행합니다: ${describe(error)}`,
+    };
+    plan.contracts = contracts;
+    console.warn(`[b-studio] 작업 분해 ${plan.id}: ${contracts.warning}`);
+    persist(plan);
+  }
 }
 
 async function runApprovedPlan(plan: TaskPlanView): Promise<void> {

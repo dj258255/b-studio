@@ -106,6 +106,17 @@ export interface TaskPlanIntegrationView {
   finishedAt?: string;
 }
 
+/** 계획 모델이 받은 레인 사이 계약(B_STUDIO_PLAN_CONTRACTS). 받지 못했으면 warning이 있다(계약 없이 진행) */
+export interface TaskPlanContractsView {
+  source: 'model' | 'human';
+  count: number;
+  /** 계약 호출의 usage와 걸린 시간. 사람이 쓴 계약(벤치 고정 계약)은 호출이 없어 없다 */
+  usage?: AgentUsage;
+  durationMs?: number;
+  /** 계약을 받지 못했을 때의 한 줄 경고(이유 포함) */
+  warning?: string;
+}
+
 export interface TaskPlanView {
   id: string;
   owner: string;
@@ -122,6 +133,8 @@ export interface TaskPlanView {
   rejectedReason?: string;
   /** 계획 호출의 usage와 걸린 시간 */
   planning?: { usage: AgentUsage; durationMs: number };
+  /** 계획 모델이 레인 사이 계약을 썼는가(S2로 게시). 설정이 꺼져 있거나 레인이 하나면 없다 */
+  contracts?: TaskPlanContractsView;
   /** 모델에게 계획을 받지 않고 서버 안에서 고정했다(벤치마크·테스트). 이때는 planning이 없다 */
   preset?: true;
   /** 계획 전체 합계 지표 */
