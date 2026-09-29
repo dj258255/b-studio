@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ServiceUsage } from '../types';
 import { bootNetworkFromUsage, describeUsage, formatBytes, mergeUsage, parseDockerBytes, parseInspectOutput, parseStatsOutput } from './usage';
 
+const MANAGED = new Set(['api', 'web']);
+
 describe('parseDockerBytes', () => {
   it.each([
     ['43.12MiB', Math.round(43.12 * 1024 ** 2)],
@@ -43,19 +45,22 @@ describe('parseStatsOutput NetIO', () => {
 const INSPECT = JSON.stringify([
   {
     Name: '/studio-orders-bb3675-db-1',
-    State: { Status: 'running', ExitCode: 0, OOMKilled: false },
+    RestartCount: 0,
+    State: { Status: 'running', ExitCode: 0, OOMKilled: false, StartedAt: '2026-09-12T09:00:00Z' },
     HostConfig: { Memory: 0, NanoCpus: 0 },
     Config: { Labels: { 'com.docker.compose.service': 'db' } },
   },
   {
     Name: '/studio-orders-bb3675-api-1',
-    State: { Status: 'running', ExitCode: 0, OOMKilled: false },
+    RestartCount: 2,
+    State: { Status: 'running', ExitCode: 0, OOMKilled: false, StartedAt: '2026-09-12T09:00:05Z', Health: { Status: 'healthy' } },
     HostConfig: { Memory: 1610612736, NanoCpus: 2000000000 },
     Config: { Labels: { 'com.docker.compose.service': 'api' } },
   },
   {
     Name: '/studio-orders-bb3675-web-1',
-    State: { Status: 'exited', ExitCode: 137, OOMKilled: true },
+    RestartCount: 1,
+    State: { Status: 'exited', ExitCode: 137, OOMKilled: true, StartedAt: '0001-01-01T00:00:00Z' },
     HostConfig: { Memory: 536870912 },
     Config: { Labels: { 'com.docker.compose.service': 'web' } },
   },
@@ -63,13 +68,70 @@ const INSPECT = JSON.stringify([
 
 describe('docker 출력 해석', () => {
   it('실행 중인 컨테이너는 사용량을, 종료된 컨테이너는 종료 코드와 메모리 부족 종료 여부를 담는다', () => {
-    const usage = mergeUsage(parseInspectOutput(INSPECT), parseStatsOutput(STATS));
+    const usage = mergeUsage(parseInspectOutput(INSPECT), parseStatsOutput(STATS), MANAGED);
 
     expect(usage).toEqual([
-      { service: 'api', state: 'running', cpuPercent: 187.35, memoryBytes: Math.round(1.203 * 1024 ** 3), memoryLimitBytes: 1610612736, cpuLimit: 2, exitCode: undefined, oomKilled: false },
-      { service: 'db', state: 'running', cpuPercent: 0.02, memoryBytes: Math.round(43.12 * 1024 ** 2), memoryLimitBytes: undefined, cpuLimit: undefined, networkRxBytes: 28_800, networkTxBytes: 23_400, exitCode: undefined, oomKilled: false },
-      { service: 'web', state: 'exited', cpuPercent: undefined, memoryBytes: undefined, memoryLimitBytes: 536870912, cpuLimit: undefined, exitCode: 137, oomKilled: true },
+      {
+        service: 'api',
+        containerName: 'studio-orders-bb3675-api-1',
+        role: 'managed',
+        state: 'running',
+        health: 'healthy',
+        cpuPercent: 187.35,
+        memoryBytes: Math.round(1.203 * 1024 ** 3),
+        memoryLimitBytes: 1610612736,
+        cpuLimit: 2,
+        restartCount: 2,
+        startedAt: '2026-09-12T09:00:05Z',
+        exitCode: undefined,
+        oomKilled: false,
+      },
+      {
+        service: 'db',
+        containerName: 'studio-orders-bb3675-db-1',
+        role: 'supporting',
+        state: 'running',
+        cpuPercent: 0.02,
+        memoryBytes: Math.round(43.12 * 1024 ** 2),
+        memoryLimitBytes: undefined,
+        cpuLimit: undefined,
+        networkRxBytes: 28_800,
+        networkTxBytes: 23_400,
+        restartCount: 0,
+        startedAt: '2026-09-12T09:00:00Z',
+        exitCode: undefined,
+        oomKilled: false,
+      },
+      {
+        service: 'web',
+        containerName: 'studio-orders-bb3675-web-1',
+        role: 'managed',
+        state: 'exited',
+        cpuPercent: undefined,
+        memoryBytes: undefined,
+        memoryLimitBytes: 536870912,
+        cpuLimit: undefined,
+        restartCount: 1,
+        exitCode: 137,
+        oomKilled: true,
+      },
     ]);
+  });
+
+  it('시작한 적 없는 컨테이너(StartedAt 0001-01-01)와 헬스체크 없는 컨테이너는 값을 비운다', () => {
+    // INSPECT 순서 그대로: db, api, web
+    const [db, api, web] = parseInspectOutput(INSPECT);
+    expect(db?.health).toBeUndefined();
+    expect(api?.health).toBe('healthy');
+    expect(web?.startedAt).toBeUndefined();
+  });
+
+  it('edge 프록시는 managedNames와 상관없이 platform으로 분류한다', () => {
+    const edgeInspect = JSON.stringify([
+      { Name: '/studio-orders-bb3675-b-studio-edge-1', State: { Status: 'running', ExitCode: 0, OOMKilled: false }, Config: { Labels: { 'com.docker.compose.service': 'b-studio-edge' } } },
+    ]);
+    const [edge] = mergeUsage(parseInspectOutput(edgeInspect), [], MANAGED);
+    expect(edge?.role).toBe('platform');
   });
 
   it('기동 네트워크 지표는 edge와 값이 없는 컨테이너를 뺀다', () => {

@@ -1,4 +1,5 @@
-import type { BootNetwork, ContainerState, ServiceUsage } from '../types';
+import { classifyRole } from '../service-role';
+import type { BootNetwork, ContainerHealth, ContainerState, ServiceUsage } from '../types';
 
 const BYTE_UNITS: Record<string, number> = {
   b: 1,
@@ -48,6 +49,10 @@ export function parseStatsOutput(stdout: string): StatsRow[] {
     });
 }
 
+/** 컨테이너를 시작한 적이 없으면 Docker가 이 값을 StartedAt에 넣는다("0001-01-01T00:00:00Z") */
+const NEVER_STARTED = '0001-01-01T00:00:00Z';
+const HEALTH_STATUSES: ReadonlySet<string> = new Set(['starting', 'healthy', 'unhealthy']);
+
 interface InspectRow {
   name: string;
   service: string;
@@ -56,6 +61,9 @@ interface InspectRow {
   oomKilled: boolean;
   memoryLimitBytes?: number;
   cpuLimit?: number;
+  restartCount?: number;
+  startedAt?: string;
+  health?: ContainerHealth;
 }
 
 const STATES: ReadonlySet<string> = new Set(['created', 'running', 'paused', 'restarting', 'removing', 'exited', 'dead']);
@@ -64,7 +72,8 @@ const STATES: ReadonlySet<string> = new Set(['created', 'running', 'paused', 're
 export function parseInspectOutput(stdout: string): InspectRow[] {
   const rows = JSON.parse(stdout.trim() || '[]') as Array<{
     Name?: string;
-    State?: { Status?: string; ExitCode?: number; OOMKilled?: boolean };
+    RestartCount?: number;
+    State?: { Status?: string; ExitCode?: number; OOMKilled?: boolean; StartedAt?: string; Health?: { Status?: string } };
     HostConfig?: { Memory?: number; NanoCpus?: number };
     Config?: { Labels?: Record<string, string> };
   }>;
@@ -76,22 +85,34 @@ export function parseInspectOutput(stdout: string): InspectRow[] {
     oomKilled: row.State?.OOMKilled ?? false,
     memoryLimitBytes: row.HostConfig?.Memory ? row.HostConfig.Memory : undefined,
     cpuLimit: row.HostConfig?.NanoCpus ? row.HostConfig.NanoCpus / 1e9 : undefined,
+    restartCount: row.RestartCount,
+    startedAt: row.State?.StartedAt && row.State.StartedAt !== NEVER_STARTED ? row.State.StartedAt : undefined,
+    health: HEALTH_STATUSES.has(row.State?.Health?.Status ?? '') ? (row.State!.Health!.Status as ContainerHealth) : undefined,
   }));
 }
 
-export function mergeUsage(inspected: InspectRow[], stats: StatsRow[]): ServiceUsage[] {
+/**
+ * 이 프로젝트의 compose 서비스를 세 갈래(서비스/부가 서비스/플랫폼)로 나눠 사용량과 합친다.
+ * managedNames를 비워 두면(옛 호출자 호환) 모두 supporting으로 분류한다
+ */
+export function mergeUsage(inspected: InspectRow[], stats: StatsRow[], managedNames: ReadonlySet<string> = new Set()): ServiceUsage[] {
   return inspected
     .map((row): ServiceUsage => {
       const live = row.state === 'running' ? stats.find((candidate) => candidate.name === row.name) : undefined;
       return {
         service: row.service,
+        containerName: row.name,
+        role: classifyRole(row.service, managedNames),
         state: row.state,
+        health: row.health,
         cpuPercent: live?.cpuPercent,
         memoryBytes: live?.memoryBytes,
         memoryLimitBytes: row.memoryLimitBytes,
         cpuLimit: row.cpuLimit,
         networkRxBytes: live?.networkRxBytes,
         networkTxBytes: live?.networkTxBytes,
+        restartCount: row.restartCount,
+        startedAt: row.state === 'running' ? row.startedAt : undefined,
         exitCode: row.state === 'exited' || row.state === 'dead' ? row.exitCode : undefined,
         oomKilled: row.oomKilled,
       };

@@ -4,7 +4,7 @@ import { buildCapabilities } from './capabilities';
 
 describe('buildCapabilities', () => {
   it('API 모드는 한 명·비교·나눠서 병렬을 모두 쓸 수 있다', () => {
-    const caps = buildCapabilities({ mode: 'api', backends: ['api', 'claude-code'] });
+    const caps = buildCapabilities({ mode: 'api', backends: ['api', 'claude-code'], openFolder: false });
 
     expect(caps).toEqual({
       mode: 'api',
@@ -12,6 +12,7 @@ describe('buildCapabilities', () => {
       fleet: { enabled: true },
       split: { enabled: true },
       backends: ['api', 'claude-code'],
+      openFolder: false,
     });
     // enabled면 이유를 붙이지 않는다(화면이 빈 문구를 그리지 않게)
     expect(caps.fleet.reason).toBeUndefined();
@@ -19,17 +20,19 @@ describe('buildCapabilities', () => {
   });
 
   it('로컬 Claude Code 모드는 계획(나눠서 병렬)도 여러 후보 비교도 된다', () => {
-    const caps = buildCapabilities({ mode: 'claude-code', backends: ['claude-code'] });
+    const caps = buildCapabilities({ mode: 'claude-code', backends: ['claude-code'], openFolder: true });
 
     expect(caps.single).toEqual({ enabled: true });
     expect(caps.split).toEqual({ enabled: true });
     // 후보마다 backend를 고를 수 있어 구독 CLI 모드에서도 비교한다
     expect(caps.fleet).toEqual({ enabled: true });
+    // 폴더 열기는 서버가 계산해 그대로 넘긴다(여기서는 정하지 않는다)
+    expect(caps.openFolder).toBe(true);
   });
 
   it('데모만 여러 후보 비교를 못 하고, 계획 경로가 없는 모드는 나눠서 병렬을 못 한다', () => {
     for (const mode of ['codex', 'commandcode', 'opencode', 'demo'] as const) {
-      const caps = buildCapabilities({ mode, backends: [mode] });
+      const caps = buildCapabilities({ mode, backends: [mode], openFolder: false });
 
       // 한 명에게 시키는 것은 어떤 모드에서도 된다(데모는 준비된 대본)
       expect(caps.single, mode).toEqual({ enabled: true });
@@ -44,9 +47,9 @@ describe('buildCapabilities', () => {
   });
 
   it('홈 화면이 기대는 키 이름을 고정한다', () => {
-    const caps = buildCapabilities({ mode: 'api', backends: ['api', 'codex'] as SessionMode[] });
+    const caps = buildCapabilities({ mode: 'api', backends: ['api', 'codex'] as SessionMode[], openFolder: false });
 
-    expect(Object.keys(caps).sort()).toEqual(['backends', 'fleet', 'mode', 'single', 'split']);
+    expect(Object.keys(caps).sort()).toEqual(['backends', 'fleet', 'mode', 'openFolder', 'single', 'split']);
     expect(Object.keys(caps.single).sort()).toEqual(['enabled']);
     expect(caps.backends).toEqual(['api', 'codex']);
   });

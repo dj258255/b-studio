@@ -1,65 +1,12 @@
 /**
- * 새로 시작 화면 입구(입력창 하나)와 대화의 넘기기(ADR-068)가 함께 쓰는 순수 로직.
+ * 대화의 넘기기(ADR-068)가 쓰는 순수 로직: 방식에 맞는 API를 불러 비교·계획을 만들고 이동할 주소를 돌려준다.
  *
- * 프로젝트 자동 선택·백엔드 목록·보내기 흐름을 화면에서 떼어 두어 테스트한다. 방식(한 명/비교/병렬)을 사람이 고르는 목록은 없앴다(ADR-069).
+ * 예전 새로 시작 화면(`/start`)의 입구도 이 함수를 썼지만, 그 화면은 없앴다(ADR-070) — 다른 프로젝트로 시작하는 일은
+ * 개발 화면 머리의 프로젝트 메뉴(`lib/project-menu.ts`)로 옮겼다. 방식(한 명/비교/병렬)을 사람이 고르는 목록도 없다(ADR-069).
  * 실제 네트워크는 `submitEntry`에 넘기는 fetch 구현으로만 만진다(테스트는 가짜 fetch를 넘긴다).
  */
 
 export type EntryMethod = 'single' | 'fleet' | 'split';
-
-/** `GET /api/capabilities` 응답. 다른 브랜치가 만든다 — 없으면 한 명만 켠다 */
-export interface Capabilities {
-  mode?: string;
-  single?: { enabled?: boolean };
-  fleet?: { enabled?: boolean; reason?: string };
-  split?: { enabled?: boolean; reason?: string };
-  /** 세션 백엔드로 고를 수 있는 값(서버 모드 + B_STUDIO_BACKENDS). 하나면 고를 게 없다 */
-  backends?: string[];
-}
-
-/**
- * 세션 백엔드로 고를 값. capabilities의 backends가 **둘 이상일 때만** 돌려주고, 없거나 하나뿐이면 빈 목록이다(고를 게 없다).
- * 백엔드 고르기는 "자세히" 안에서만 보인다.
- */
-export function backendOptions(capabilities: Capabilities | undefined): string[] {
-  const list = capabilities?.backends;
-  if (!Array.isArray(list)) return [];
-  const values = list.filter((value): value is string => typeof value === "string" && value.length > 0);
-  return values.length >= 2 ? values : [];
-}
-
-const BACKEND_LABEL: Record<string, string> = {
-  api: "Claude API",
-  "claude-code": "Claude Code",
-  codex: "Codex",
-  commandcode: "Command Code",
-  opencode: "OpenCode",
-  demo: "데모",
-};
-
-/** 백엔드 id를 화면에 보여 줄 이름으로 */
-export function backendLabel(id: string): string {
-  return BACKEND_LABEL[id] ?? id;
-}
-
-/** 고른 백엔드가 자기 모델 목록을 내려주는 CLI인지(Command Code·OpenCode). 아니면 모델을 고르지 않는다 */
-export function modelsBackendFor(backend: string | undefined): "commandcode" | "opencode" | undefined {
-  return backend === "commandcode" || backend === "opencode" ? backend : undefined;
-}
-
-/** 프로젝트가 하나뿐이면 그 id를 자동으로 고른다. 여럿이거나 없으면 빈 문자열(사용자가 고른다) */
-export function initialProjectId(projects: ReadonlyArray<{ id: string; error?: string }>): string {
-  const usable = projects.filter((project) => !project.error);
-  return usable.length === 1 ? usable[0]!.id : '';
-}
-
-/** 모델 목록에서 "쓸 수 있는" 모델(설정됨·활성·도구 지원)만 순서대로 */
-export interface ModelOptionLike {
-  id: string;
-  configured: boolean;
-  enabled?: boolean;
-  capabilities: string[];
-}
 
 export interface EntryInput {
   method: EntryMethod;
@@ -136,25 +83,4 @@ export async function submitEntry(fetcher: FetchLike, input: EntryInput): Promis
 /** 만든 비교·계획을 바로 연다. 응답에 id가 없으면 목록 화면(가장 최근 것이 먼저 열린다)으로 간다 */
 function detailHref(base: '/fleets' | '/task-plans', body: Record<string, unknown>): string {
   return typeof body.id === 'string' && body.id ? `${base}?id=${encodeURIComponent(body.id)}` : base;
-}
-
-/** 진행 중 목록에 쓸 최소 항목. /api/agents의 AgentItem과, 그것을 요청 단위로 묶은 작업 항목(work-list) 모두 이 모양이다 */
-export interface InboxSource {
-  title: string;
-  projectName: string;
-  href: string;
-  state: string;
-  attention?: string;
-  lastActivityAt: string;
-}
-
-/** 개입 필요 먼저, 그다음 작업 중, 그다음 최근 활동 순(작업 화면과 같은 규칙) */
-export function sortInbox<T extends InboxSource>(items: readonly T[]): T[] {
-  const rank = (item: InboxSource) => (item.attention ? 0 : item.state === 'working' ? 1 : 2);
-  return [...items].sort((a, b) => rank(a) - rank(b) || b.lastActivityAt.localeCompare(a.lastActivityAt));
-}
-
-/** 진행 중 목록에 보여 줄 앞의 몇 개 */
-export function inboxPreview<T extends InboxSource>(items: readonly T[], limit = 5): T[] {
-  return sortInbox(items).slice(0, limit);
 }

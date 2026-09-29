@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -55,7 +55,7 @@ import type {
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
-import { createSession, getSnapshot, sendMessage, stopSession, subscribe } from './sessions';
+import { createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
@@ -439,6 +439,34 @@ export function rejectTaskPlan(id: string, owner: string, reason?: string): Task
   plan.finishedAt = new Date().toISOString();
   persist(plan);
   return clone(plan);
+}
+
+/**
+ * 작업 계획 기록을 지운다. 레인을 실행 중이거나(running) 통합 중(integrating)이거나 계획을 짜는 중(planning)이면
+ * 지우지 않는다 — 아직 세션·게시판이 살아 움직이는 중이라 지울 수 없다(승인 대기·끝남·실패·거부·재시작으로 멈춤은 지울 수 있다).
+ * 지울 때는 이 계획을 통째로 지우겠다는 의사가 이미 분명하므로, 레인 세션과 통합 세션의 기록도 함께 지운다
+ * (세션이 아직 켜져 있으면 먼저 멈춘 뒤 지운다).
+ */
+export async function deleteTaskPlan(id: string, owner: string): Promise<void> {
+  const plan = findPlan(id, owner);
+  if (plan.status === 'running' || plan.status === 'integrating' || plan.status === 'planning') {
+    throw new StudioError(409, '진행 중인 작업 계획은 지울 수 없습니다. 끝나거나 멈춘 뒤 지우세요');
+  }
+  plans.delete(id);
+  boards.delete(id);
+  redactors.delete(id);
+  integrationPageChecks.delete(id);
+  removePlanFile(id);
+  const sessionIds = [...plan.lanes.map((lane) => lane.sessionId), plan.integration?.sessionId].filter((value): value is string => Boolean(value));
+  await Promise.all(sessionIds.map((sessionId) => stopAndDeleteSession(sessionId)));
+}
+
+function removePlanFile(id: string): void {
+  try {
+    unlinkSync(path.join(root(), `${id}.json`));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`[b-studio] 작업 계획 ${id} 파일을 지우지 못했습니다`, error);
+  }
 }
 
 /**

@@ -4,7 +4,9 @@ import { clearFrames, subscribe, type LiveFrame, type LiveMessage } from './live
 import {
   closeAllRemoteBrowsers,
   closeRemoteBrowser,
+  hoverRemoteBrowser,
   inputRemoteBrowser,
+  pickRectRemoteBrowser,
   pickRemoteBrowser,
   REMOTE_BROWSER_IDLE_MS,
   RemoteBrowserError,
@@ -22,7 +24,23 @@ function stubBrowser() {
     mouse: vi.fn(async () => {}),
     key: vi.fn(async () => {}),
     type: vi.fn(async () => {}),
-    pick: vi.fn(async () => ({ selector: '#buy', html: '<button id="buy">', css: { display: 'block' }, screenshot: Buffer.from([1, 2]), rect: { x: 0, y: 0, width: 10, height: 10 } })),
+    pick: vi.fn(async () => ({
+      selector: '#buy',
+      html: '<button id="buy">',
+      css: { display: 'block' },
+      screenshot: Buffer.from([1, 2]),
+      rect: { x: 0, y: 0, width: 10, height: 10 },
+      viewportRect: { x: 0, y: 0, width: 10, height: 10 },
+    })),
+    pickRect: vi.fn(async () => ({
+      selector: '#card',
+      html: '<div id="card">',
+      css: { display: 'block' },
+      screenshot: Buffer.from([3, 4]),
+      rect: { x: 0, y: 0, width: 100, height: 60 },
+      viewportRect: { x: 0, y: 0, width: 100, height: 60 },
+    })),
+    hover: vi.fn(async () => ({ rect: { x: 0, y: 0, width: 10, height: 10 } })),
     close: vi.fn(async () => {}),
   };
   return browser;
@@ -69,6 +87,8 @@ describe('startRemoteBrowser', () => {
   it('열려 있지 않으면 조작을 거부한다', async () => {
     await expect(inputRemoteBrowser(SESSION, { type: 'reload' })).rejects.toMatchObject({ status: 409 });
     await expect(pickRemoteBrowser(SESSION, 1, 1)).rejects.toMatchObject({ status: 409 });
+    await expect(pickRectRemoteBrowser(SESSION, { x: 0, y: 0, width: 10, height: 10 })).rejects.toMatchObject({ status: 409 });
+    await expect(hoverRemoteBrowser(SESSION, 1, 1)).rejects.toMatchObject({ status: 409 });
   });
 });
 
@@ -118,14 +138,53 @@ describe('허용 출처와 차단 집계', () => {
 });
 
 describe('pick', () => {
-  it('고른 요소의 선택자·HTML·CSS·스크린샷을 돌려준다', async () => {
+  it('고른 요소의 선택자·HTML·CSS·스크린샷과 지금 뷰포트 크기를 돌려준다', async () => {
     const browser = stubBrowser();
     await startRemoteBrowser(SESSION, { service: 'web', url: 'http://127.0.0.1:3000/', viewport: VIEWPORT, allowedOrigins: ['http://127.0.0.1:3000'] }, async () => browser);
 
     const pick = await pickRemoteBrowser(SESSION, 5, 6);
     expect(pick.selector).toBe('#buy');
     expect(pick.screenshot).toBeInstanceOf(Buffer);
+    expect(pick.viewport).toEqual(VIEWPORT);
     expect(browser.pick).toHaveBeenCalledWith(5, 6);
+  });
+});
+
+describe('pickRect', () => {
+  it('드래그한 사각형을 뷰포트 범위 안으로 잘라 브라우저에 넘긴다', async () => {
+    const browser = stubBrowser();
+    await startRemoteBrowser(SESSION, { service: 'web', url: 'http://127.0.0.1:3000/', viewport: VIEWPORT, allowedOrigins: ['http://127.0.0.1:3000'] }, async () => browser);
+
+    const pick = await pickRectRemoteBrowser(SESSION, { x: 10, y: 10, width: 100, height: 60 });
+    expect(pick.selector).toBe('#card');
+    expect(pick.viewport).toEqual(VIEWPORT);
+    expect(browser.pickRect).toHaveBeenCalledWith({ x: 10, y: 10, width: 100, height: 60 });
+  });
+
+  it('뷰포트 밖으로 나가는 크기는 경계에서 잘라낸다', async () => {
+    const browser = stubBrowser();
+    await startRemoteBrowser(SESSION, { service: 'web', url: 'http://127.0.0.1:3000/', viewport: VIEWPORT, allowedOrigins: ['http://127.0.0.1:3000'] }, async () => browser);
+
+    await pickRectRemoteBrowser(SESSION, { x: 1270, y: 790, width: 100, height: 100 });
+    expect(browser.pickRect).toHaveBeenCalledWith({ x: 1270, y: 790, width: 10, height: 10 });
+  });
+
+  it('드래그 영역이 비면 거부한다', async () => {
+    const browser = stubBrowser();
+    await startRemoteBrowser(SESSION, { service: 'web', url: 'http://127.0.0.1:3000/', viewport: VIEWPORT, allowedOrigins: ['http://127.0.0.1:3000'] }, async () => browser);
+
+    await expect(pickRectRemoteBrowser(SESSION, { x: 1280, y: 10, width: 10, height: 10 })).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('hover', () => {
+  it('좌표 아래 요소의 영역만 돌려준다', async () => {
+    const browser = stubBrowser();
+    await startRemoteBrowser(SESSION, { service: 'web', url: 'http://127.0.0.1:3000/', viewport: VIEWPORT, allowedOrigins: ['http://127.0.0.1:3000'] }, async () => browser);
+
+    const hovered = await hoverRemoteBrowser(SESSION, 5, 6);
+    expect(hovered).toEqual({ rect: { x: 0, y: 0, width: 10, height: 10 } });
+    expect(browser.hover).toHaveBeenCalledWith(5, 6);
   });
 });
 
@@ -155,6 +214,11 @@ describe('remoteBrowserRequestSchema', () => {
     expect(remoteBrowserRequestSchema.safeParse({ action: 'pick', x: 0, y: 10 }).success).toBe(true);
     expect(remoteBrowserRequestSchema.safeParse({ action: 'pick', x: -1, y: 0 }).success).toBe(false);
     expect(remoteBrowserRequestSchema.safeParse({ action: 'pick', x: 99999, y: 0 }).success).toBe(false);
+    expect(remoteBrowserRequestSchema.safeParse({ action: 'pickRect', rect: { x: 0, y: 0, width: 10, height: 10 } }).success).toBe(true);
+    expect(remoteBrowserRequestSchema.safeParse({ action: 'pickRect', rect: { x: 0, y: 0, width: 0, height: 10 } }).success).toBe(false);
+    expect(remoteBrowserRequestSchema.safeParse({ action: 'pickRect', rect: { x: -1, y: 0, width: 10, height: 10 } }).success).toBe(false);
+    expect(remoteBrowserRequestSchema.safeParse({ action: 'hover', x: 0, y: 10 }).success).toBe(true);
+    expect(remoteBrowserRequestSchema.safeParse({ action: 'hover', x: -1, y: 0 }).success).toBe(false);
     expect(remoteBrowserRequestSchema.safeParse({ action: 'input', input: { type: 'key', key: 'Enter' } }).success).toBe(true);
     expect(remoteBrowserRequestSchema.safeParse({ action: 'input', input: { type: 'key', key: 'a'.repeat(33) } }).success).toBe(false);
     expect(remoteBrowserRequestSchema.safeParse({ action: 'input', input: { type: 'navigate' } }).success).toBe(false);

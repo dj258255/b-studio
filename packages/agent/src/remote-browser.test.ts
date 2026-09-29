@@ -63,6 +63,12 @@ function pages(): Record<string, string> {
     '/pick': `<html><body style="margin:0">
 <div id="card" data-testid="card" class="panel box" style="margin:8px;padding:4px;display:flex;gap:6px;color:rgb(10,20,30);background-color:rgb(240,240,240)"><span style="font-size:13px">안녕</span></div>
 </body></html>`,
+    // 드래그 선택(pickRect)용 페이지. 작은 버튼 하나가 큰 카드 안에 있다
+    '/pick-rect': `<html><body style="margin:0">
+<div id="card" style="position:fixed;top:0;left:0;width:300px;height:200px;background:#eee">
+<button id="buy" style="position:fixed;top:20px;left:20px;width:60px;height:24px">사기</button>
+</div>
+</body></html>`,
     // 허용하지 않은 출처로 나가는 링크
     '/link': `${head}<a id="out" href="${otherBase}/landing" style="${box}">stay</a></body></html>`,
     // 허용하지 않은 출처로 fetch
@@ -160,7 +166,56 @@ describe('openRemoteBrowser', { timeout: 60_000 }, () => {
       expect(picked.rect.x).toBeCloseTo(8, 0);
       expect(picked.rect.y).toBeCloseTo(8, 0);
       expect(picked.rect.width).toBeGreaterThan(0);
+      expect(picked.viewportRect.x).toBeCloseTo(8, 0);
+      expect(picked.viewportRect.y).toBeCloseTo(8, 0);
       expect(picked.screenshot.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('pickRect는 드래그 사각형 안에 완전히 들어오는 가장 작은 요소를 고른다', async () => {
+    const browser = await openRemoteBrowser({ url: `${base}/pick-rect`, viewport: { width: 400, height: 400 }, allowedOrigins: [base], onFrame: () => {} });
+    try {
+      // 버튼(20,20,60x24)을 여유 있게 감싸는 사각형을 드래그한다. 카드는 드래그보다 커서 안 들어오니 버튼이 뽑혀야 한다
+      const picked = await browser.pickRect({ x: 10, y: 10, width: 100, height: 60 });
+      expect(picked.selector).toBe('#buy');
+      expect(picked.screenshot.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('pickRect는 완전히 감싸는 요소가 없으면 가장 많이 겹치는 요소를 고른다', async () => {
+    const browser = await openRemoteBrowser({ url: `${base}/pick-rect`, viewport: { width: 400, height: 400 }, allowedOrigins: [base], onFrame: () => {} });
+    try {
+      // 버튼 오른쪽 절반만 걸치는 좁은 사각형. 버튼을 완전히 감싸지 못하지만(오른쪽으로 삐져나감), 카드보다는 버튼과 훨씬 많이 겹친다
+      const picked = await browser.pickRect({ x: 50, y: 20, width: 30, height: 24 });
+      expect(picked.selector).toBe('#buy');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('pickRect는 더 구체적인 후보가 없으면 그 자리를 감싸는 문서 뿌리 요소로 물러난다', async () => {
+    const browser = await openRemoteBrowser({ url: `${base}/pick-rect`, viewport: { width: 400, height: 400 }, allowedOrigins: [base], onFrame: () => {} });
+    try {
+      // 카드(0,0,300x200) 밖 빈 자리를 드래그하면 카드나 버튼과 안 겹치므로, 클릭 선택처럼 그 자리를 덮는 html/body로 물러난다
+      const picked = await browser.pickRect({ x: 350, y: 350, width: 10, height: 10 });
+      expect(['html', 'body']).toContain(picked.selector);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('hover는 스크린샷 없이 좌표 아래 요소의 뷰포트 영역만 돌려준다', async () => {
+    const browser = await openRemoteBrowser({ url: `${base}/pick`, viewport: { width: 400, height: 400 }, allowedOrigins: [base], onFrame: () => {} });
+    try {
+      const hovered = await browser.hover(10, 10);
+      expect(hovered?.rect.x).toBeCloseTo(8, 0);
+      expect(hovered?.rect.width).toBeGreaterThan(0);
+      // 뷰포트 밖 좌표는 elementFromPoint 규격상 null이다
+      expect(await browser.hover(-10, -10)).toBeNull();
     } finally {
       await browser.close();
     }

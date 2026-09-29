@@ -8,6 +8,7 @@ import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/li
 import { endedReason, formatBytes } from "@/lib/usage";
 import { AgentsBadge } from "./agents-badge";
 import { LogoutButton } from "./logout-button";
+import { ProjectMenu } from "./project-menu";
 import { useSessionAccess } from "./session-access";
 import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
 
@@ -48,13 +49,16 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
 
   return (
     <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-panel px-5 py-3">
-      {/* 이 화면이 곧 첫 화면(개발 화면)이라, 로고는 다른 프로젝트·방식으로 시작하는 곳으로 간다 */}
-      <Link href="/start" className="font-semibold tracking-tight hover:underline" title="다른 프로젝트로 시작하거나 여러 명 비교·나눠서 병렬로 보냅니다">
+      {/* 이 화면이 곧 첫 화면(개발 화면)이다(ADR-066). 로고는 그 첫 화면(마지막 프로젝트)으로 간다 */}
+      <Link href="/" className="font-semibold tracking-tight hover:underline" title="첫 화면(마지막 프로젝트의 개발 화면)">
         b-studio
       </Link>
 
       <div className="flex items-baseline gap-2">
-        <h1 className="text-lg font-semibold">{snapshot.projectName}</h1>
+        {/* 프로젝트 이름을 누르면 다른 프로젝트로 바꾸거나 폴더를 열거나 새 대화를 시작하는 메뉴가 열린다(ADR-070) */}
+        <h1 className="text-lg font-semibold">
+          <ProjectMenu projectId={snapshot.projectId} projectName={snapshot.projectName} />
+        </h1>
         <span className={`text-sm ${TONE_TEXT[statusTone]}`}>{SESSION_STATUS_LABEL[snapshot.status]}</span>
       </div>
 
@@ -116,19 +120,14 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           나란히 보기에 추가
         </button>
         {snapshot.status === "stopped" ? (
-          <>
-            <Link href="/start" className="text-sm font-medium hover:underline">
-              프로젝트 목록
-            </Link>
-            <button
-              type="button"
-              onClick={resume}
-              disabled={resuming || !access.canManage}
-              className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
-            >
-              {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={resume}
+            disabled={resuming || !access.canManage}
+            className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+          >
+            {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
+          </button>
         ) : (
           <button
             type="button"
