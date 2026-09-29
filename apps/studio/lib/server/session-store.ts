@@ -44,6 +44,17 @@ export function stateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir
 }
 
 /**
+ * Command Code 러너가 쓰는 세션별 고정 상태 폴더(HOME·작업 폴더를 이 아래에 둔다).
+ *
+ * cmd는 대화 세션을 `$HOME/.commandcode/projects/<cwd 이름>/`에 저장하므로 이어받으려면 HOME과 cwd가 실행 사이에도 같아야 한다.
+ * `session.json`·아티팩트와 같은 `.git/b-studio/` 아래에 두면 에이전트 도구가 닿지 않고 커밋에도 들어가지 않는다
+ * (작업 폴더에 두면 `git add -A`가 체크포인트에 넣고 되돌리기의 `git clean -fd`가 지운다).
+ */
+export function commandCodeStateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>): string {
+  return path.join(stateDirOf(snapshot), '.git', 'b-studio', 'commandcode');
+}
+
+/**
  * 화면의 대화와 체크포인트를 다시 그리는 이벤트만 남긴다.
  * 로그·사용량·서비스 상태는 샌드박스와 함께 사라지고, 세션 상태는 스냅샷이 들고 있으므로 뺀다
  */

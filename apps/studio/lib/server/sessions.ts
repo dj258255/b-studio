@@ -116,6 +116,7 @@ import { findProject } from './projects';
 import {
   archivedSnapshot,
   closeUnfinished,
+  commandCodeStateDirOf,
   isProcessAlive,
   readSessions,
   stateDirOf,
@@ -1421,6 +1422,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...shared,
       request: [...commandCode.notes, request].join('\n\n'),
       resume: commandCode.sessionId,
+      // cmd는 세션을 HOME과 cwd로 찾는다. 둘을 세션마다 고정해 다음 요청이 이어받게 한다(세션 기록·아티팩트와 같은 폴더 아래)
+      stateDir: commandCodeStateDirOf(session.snapshot),
       // 세션에서 고른 모델 → B_STUDIO_CMD_MODEL → 없음(계정 기본)
       model: resolveCommandCodeModel(session.snapshot.modelId, process.env.B_STUDIO_CMD_MODEL),
     });

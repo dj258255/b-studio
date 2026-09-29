@@ -1637,3 +1637,31 @@ Configuration cache entry discarded due to serialization error.
 - 요청 한도가 풀린 뒤 이미지를 다시 빌드하고, 테스트 실행 중 api 컨테이너가 받은 바이트([#94](https://github.com/dj258255/b-studio/issues/94)의 기록)가 줄었는지 확인합니다.
 - 실험 결과에서는 이 두 실행을 조율 전략의 실패가 아니라 환경 실패로 따로 분류하고 다시 돌립니다.
 - 교훈: 모델이 "고치려고" 빌드 파일을 건드리면 원인이 더 가려집니다. 게이트 실패 출력의 **앞부분**은 설정 캐시 오류였고, 진짜 원인(`Received status code 429 from server: Too Many Requests`)은 긴 출력의 **뒤쪽**에 있었습니다. 명령 출력을 뒤쪽 위주로 남기는 도구 결과 예산([#96](https://github.com/dj258255/b-studio/pull/96))이 이런 경우를 돕습니다.
+
+## 46. Command Code 세션을 다음 실행에서 이어받지 못함 ("No session … found to resume.")
+
+**구분:** 실제 실행에서 발견(같은 레인의 두 번째 작업이 1.5초 만에 실패) → 원인 분석 → 러너·스튜디오 수정
+
+### 현상
+`pnpm bench:coordination --backend commandcode --tasks independent --strategies S0 --repeats 1`에서 같은 레인의 첫 작업(`independent-api`)은 done(127초)이었는데, 두 번째 작업(`independent-web`)이 1.5초 만에 실패했습니다.
+
+```
+Error: No session "1ed02710-…" found to resume.
+```
+
+### 원인
+`runCommandCodeAgent`는 실행마다 새 임시 HOME(`mkdtemp(HOME_PREFIX)`)과 새 작업 폴더(`mkdtemp(WORKDIR_PREFIX)`)를 만들고 끝나면 지웁니다. cmd는 대화 세션을 `$HOME/.commandcode/projects/<cwd를 소문자·하이픈으로 바꾼 이름>/` 아래에 저장하므로, HOME과 cwd가 실행마다 바뀌면 다음 실행이 그 세션을 찾지 못합니다.
+
+- 같은 실행 안의 게이트 재시도(`--resume <id> --fork-session`)는 같은 HOME·cwd라 됩니다.
+- **다음 실행**(같은 레인의 다음 작업, 사용자의 후속 요청)은 둘 다 달라져 실패합니다.
+- 단위 테스트는 가짜 프로세스라 이 조건을 재현하지 않았습니다.
+
+### 해결
+- 러너에 `stateDir?: string` 옵션을 넣었습니다. 주면 HOME = `<stateDir>/home`, 작업 폴더 = `<stateDir>/work`로 **고정**하고 실행 끝에 지우지 않습니다. 작업 폴더는 실행 시작 때 안을 비워 "빈 작업 폴더" 성질(모델이 여기서 만든 파일이 프로젝트에 반영되지 않는다)을 유지합니다. `auth.json` 심볼릭 링크는 매 실행 확인해 없을 때만 만듭니다.
+- 주지 않으면 예전처럼 실행마다 임시 폴더를 만들고 지웁니다. 이때는 이어받을 수 없다는 것을 알고 있으므로 `resume`을 받아도 `--resume`을 넘기지 않고 새 대화로 시작하며 `warning` 이벤트 한 번으로 알립니다(조용히 실패시키지 않습니다).
+- 스튜디오는 세션마다 `<세션 상태 폴더>/.git/b-studio/commandcode`를 넘깁니다(`commandCodeStateDirOf`). `session.json`·아티팩트와 같은 `.git/b-studio/` 아래라 에이전트 도구가 닿지 않고 `git add -A`·`git clean -fd`에도 걸리지 않습니다. 세션 폴더를 지우면 함께 사라집니다.
+- 임시 HOME을 쓰는 목적(사용자 설정·스킬·mods·훅·등록한 MCP 서버가 모델에 실리지 않게 격리)은 그대로입니다. 여전히 사용자의 `~/.commandcode/auth.json`만 심볼릭 링크로 빌려옵니다.
+
+### 확인
+- 가짜 프로세스로 확인했습니다: `stateDir`을 주면 두 실행이 같은 HOME·같은 cwd로 cmd를 부르고 두 번째 실행 인자에 `--resume <첫 세션> --fork-session`이 붙습니다. HOME은 실행 뒤에도 남고 work는 다음 실행 시작 때 비워집니다. `stateDir` 없이 `resume`을 주면 `--resume`이 없고 `warning` 이벤트가 한 번 옵니다. `stateDir` 없이 돌린 실행은 예전처럼 임시 폴더를 지웁니다.
+- 실제 `cmd`로 도는 확인은 별도입니다(이 작업에서는 실행하지 않았습니다).

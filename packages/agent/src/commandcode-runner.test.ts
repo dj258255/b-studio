@@ -251,13 +251,89 @@ describe('runCommandCodeAgent', () => {
     expect(result.metrics?.modelMs).toBe(0);
   });
 
-  it('resume을 주면 첫 실행부터 --fork-session으로 이어받고 새 sessionId를 남긴다', async () => {
+  it('stateDir과 함께 resume을 주면 첫 실행부터 --fork-session으로 이어받고 새 sessionId를 남긴다', async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), 'commandcode-state-'));
     const { process, state } = fakeCommandCode([success('forked-1', 'ok')]);
 
-    const result = await runCommandCodeAgent({ request: '이어서 해줘', intent: 'ask', project, sandbox: fakeSandbox(project, []), process, resume: 'previous-session', fetcher: async () => contract });
+    try {
+      const result = await runCommandCodeAgent({ request: '이어서 해줘', intent: 'ask', project, sandbox: fakeSandbox(project, []), process, stateDir, resume: 'previous-session', fetcher: async () => contract });
 
-    expect(result).toMatchObject({ status: 'done', sessionId: 'forked-1' });
-    expect(state.calls[0]!.args).toEqual(expect.arrayContaining(['--resume', 'previous-session', '--fork-session']));
+      expect(result).toMatchObject({ status: 'done', sessionId: 'forked-1' });
+      expect(state.calls[0]!.args).toEqual(expect.arrayContaining(['--resume', 'previous-session', '--fork-session']));
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stateDir 없이 resume을 주면 이어받지 않고 새 대화로 시작하며 한 번 알린다', async () => {
+    const { process, state } = fakeCommandCode([success('session-9', 'ok')]);
+    const events: AgentEvent[] = [];
+
+    const result = await runCommandCodeAgent({
+      request: '이어서 해줘',
+      intent: 'ask',
+      project,
+      sandbox: fakeSandbox(project, []),
+      process,
+      resume: 'previous-session',
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    // 이어받을 수 없다는 것을 알면서 --resume을 넘기지 않는다(HOME·cwd가 달라지므로 찾지 못한다)
+    expect(result).toMatchObject({ status: 'done', sessionId: 'session-9' });
+    expect(state.calls[0]!.args).not.toContain('--resume');
+    expect(events.filter((event) => event.type === 'warning')).toEqual([{ type: 'warning', message: '이 실행은 이전 대화를 이어받지 못합니다: 상태 폴더 없음' }]);
+  });
+
+  it('stateDir을 주면 실행 사이에 같은 HOME·같은 cwd를 쓰고, 두 번째 실행이 그 세션을 이어받는다', async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), 'commandcode-state-'));
+    const { process, state } = fakeCommandCode([success('session-1', '첫 작업을 끝냈습니다.'), success('session-2', '이어서 끝냈습니다.')]);
+
+    try {
+      const first = await runCommandCodeAgent({ request: '첫 작업', intent: 'ask', project, sandbox: fakeSandbox(project, []), process, stateDir, fetcher: async () => contract });
+      const second = await runCommandCodeAgent({ request: '이어서', intent: 'ask', project, sandbox: fakeSandbox(project, []), process, stateDir, resume: first.sessionId, fetcher: async () => contract });
+
+      expect(first).toMatchObject({ status: 'done', sessionId: 'session-1' });
+      expect(second).toMatchObject({ status: 'done', sessionId: 'session-2' });
+      expect(state.calls).toHaveLength(2);
+      // cmd가 세션을 HOME과 cwd로 찾으므로 두 값이 실행 사이에도 같아야 한다
+      expect(state.calls[0]!.cwd).toBe(path.join(stateDir, 'work'));
+      expect(state.calls[1]!.cwd).toBe(state.calls[0]!.cwd);
+      expect(state.calls[0]!.env.HOME).toBe(path.join(stateDir, 'home'));
+      expect(state.calls[1]!.env.HOME).toBe(state.calls[0]!.env.HOME);
+      // 첫 실행은 새 세션, 두 번째 실행은 그 세션을 갈라 이어받는다(이어받지 못해 실패하지 않는다)
+      expect(state.calls[0]!.args).not.toContain('--resume');
+      expect(state.calls[1]!.args).toEqual(expect.arrayContaining(['--resume', 'session-1', '--fork-session']));
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stateDir의 home은 실행 뒤에도 남고, work는 다음 실행이 시작할 때 비워진다', async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), 'commandcode-state-'));
+    const home = path.join(stateDir, 'home');
+    const workdir = path.join(stateDir, 'work');
+
+    try {
+      const first = fakeCommandCode([success('session-1', 'ok')]);
+      await runCommandCodeAgent({ request: '질문', intent: 'ask', project, sandbox: fakeSandbox(project, []), process: first.process, stateDir, fetcher: async () => contract });
+
+      // HOME은 지우지 않는다. auth.json 링크도 그대로 남아 다음 실행이 다시 쓰지 않는다
+      expect((await lstat(path.join(home, '.commandcode', 'auth.json'))).isSymbolicLink()).toBe(true);
+      // 지난 실행이 남긴 파일을 심어 두고 다음 실행이 비우는지 본다
+      await writeFile(path.join(workdir, 'model-output.txt'), '남은 파일\n');
+
+      const second = fakeCommandCode([success('session-2', 'ok')]);
+      await runCommandCodeAgent({ request: '질문', intent: 'ask', project, sandbox: fakeSandbox(project, []), process: second.process, stateDir, fetcher: async () => contract });
+
+      // 실행 시작 때 비우므로 이번 실행의 설정만 남는다("빈 작업 폴더" 성질 유지)
+      expect((await readdir(workdir)).sort()).toEqual(['.commandcode', '.mcp.json']);
+      // HOME은 실행이 끝나도 남는다(세션 저장 위치)
+      expect((await readdir(home)).sort()).toEqual(['.commandcode']);
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
   });
 
   it('b-studio 도구가 아닌 호출을 실제 이벤트대로 기록한다: 거부는 deny, 실행된 것은 allow, b-studio 도구는 기록하지 않는다', async () => {

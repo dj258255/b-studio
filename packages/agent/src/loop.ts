@@ -169,6 +169,8 @@ export type AgentEvent =
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
   /** 진행 중 지시를 다음 모델 호출 전에 대화에 넣었다 */
   | { type: 'steer_applied'; count: number }
+  /** 실행은 이어가지만 사람이 알면 좋은 사실. 예: 이어받기를 요청했는데 상태 폴더가 없어 새 대화로 시작한다 */
+  | { type: 'warning'; message: string }
   | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }
   | { type: 'verify_result'; report: VerificationReport; text: string }
