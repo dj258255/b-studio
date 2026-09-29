@@ -1,0 +1,28 @@
+batch,order,repeat,task,condition,model_start,success,category,end_to_end_ms,boot_ms_total,gate_ms,model_calls,max_context_tokens,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,escalated,cost_usd_recomputed,detail
+A,1,1,orders-list,P0,sonnet,True,none,116249,24250,0,10,28005,1153,199900,20793,5668,False,0.14972,통과
+A,2,1,orders-list,S0-sonnet,sonnet,True,none,274035,47505,108287,20,27944,1145,296597,24276,6289,False,0.18398,통과
+A,3,1,order-detail,P0,sonnet,True,none,138080,24231,0,9,26662,1221,170196,14309,8903,False,0.15999,통과
+A,4,1,order-detail,S0-sonnet,sonnet,True,none,335174,50559,81965,31,38449,1215,617645,34781,11942,False,0.33107,통과
+A,5,1,order-summary,P0,sonnet,True,none,98378,24237,0,11,28606,1156,245325,16253,6550,False,0.15627,통과
+A,6,1,order-summary,S0-sonnet,sonnet,True,none,268087,47487,112860,24,22982,1142,293828,19314,6300,False,0.17111,통과
+A,7,2,orders-list,S0-sonnet,sonnet,True,none,232002,45510,84262,20,21888,1145,245067,18220,5143,False,0.1471,통과
+A,8,2,orders-list,P0,sonnet,True,none,103514,24236,0,8,28495,1149,155164,15012,7812,False,0.14775,통과
+A,9,2,order-detail,S0-sonnet,sonnet,True,none,365131,45470,81699,37,44710,1227,928877,41042,11752,False,0.4071,통과
+A,10,2,order-detail,P0,sonnet,True,none,99998,24227,0,9,26139,1221,174133,12587,6877,False,0.13621,통과
+A,11,2,order-summary,S0-sonnet,sonnet,True,none,238980,46503,80947,20,23949,1134,255139,20281,5392,False,0.15669,통과
+A,12,2,order-summary,P0,sonnet,True,none,82976,24220,0,7,28137,1148,138891,14647,5781,False,0.12326,통과
+A,13,3,orders-list,P0,sonnet,True,none,91211,24227,0,10,26283,1153,199919,12800,5428,False,0.12734,통과
+A,14,3,orders-list,S0-sonnet,sonnet,True,none,233994,44485,83002,21,23920,1147,279726,20252,5395,False,0.16161,통과
+A,15,3,order-detail,P0,sonnet,True,none,142878,22218,0,12,30281,1227,256836,16729,9477,False,0.18912,통과
+A,16,3,order-detail,S0-sonnet,sonnet,True,none,269997,46502,80956,24,28764,1201,346187,25096,8083,False,0.21394,통과
+A,17,3,order-summary,P0,sonnet,True,none,88321,24218,0,10,28354,1154,208463,14864,5505,False,0.13496,통과
+A,18,3,order-summary,S0-sonnet,sonnet,True,none,298102,45495,106054,25,29483,1144,366438,25815,7472,False,0.21362,통과
+B,1,1,orders-list,S0-esc,haiku,False,acceptance,461365,46521,151724,51,46207,5470,1258891,46197,22084,False,0.29953,"web /orders: 문구 누락: 김민수, 이영희, 박철수 · 본문: Create Next App 주문 목록 홈으로 로딩 중... self.__next_r=""G5-FcayAzHfOTsiZsPsnH"";if(docum"
+B,2,1,order-detail,S0-esc,haiku,True,none,496410,44482,108789,58,62061,5637,1691268,62051,26015,False,0.3824,통과
+B,3,1,order-summary,S0-esc,haiku,True,none,432299,46484,79758,47,41873,5410,1094349,41863,17453,False,0.25444,통과
+B,4,2,orders-list,S0-esc,haiku,False,acceptance,409232,46508,143471,37,40486,5337,749657,40476,16117,False,0.21148,"web /orders: 문구 누락: 김민수, 이영희, 박철수 · 본문: Create Next App 주문 목록 로딩 중... self.__next_r=""RBpzVDi2nVefjqBr7EE4R"";if(document."
+B,5,2,order-detail,S0-esc,haiku,True,none,452252,45486,81849,38,44190,5439,852416,44180,20171,False,0.24676,통과
+B,6,2,order-summary,S0-esc,haiku,True,none,503388,47495,81088,53,44999,5469,1254955,44991,18227,False,0.27834,통과
+B,7,3,orders-list,S0-esc,haiku,True,none,230974,44518,119610,13,15432,5104,101379,15422,6247,False,0.06575,통과
+B,8,3,order-detail,S0-esc,haiku,True,none,561363,47489,79477,46,40768,5519,1007719,40758,19166,False,0.25307,통과
+B,9,3,order-summary,S0-esc,haiku,False,acceptance,413288,46476,98684,48,38168,5419,965063,38158,18527,False,0.24226,"web /dashboard: 기대 문구 없음: 45000 또는 45,000 · 본문: Create Next App Order Summary Dashboard Loading order summary... self.__"
