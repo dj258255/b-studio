@@ -2,7 +2,7 @@ import { planLanes } from '@b-studio/agent';
 import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { BENCH_TASKS, missingCoordinationTools, planFor, STRATEGIES as ALL_STRATEGIES, STRATEGY_LABELS, type Strategy } from './tasks';
+import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES as ALL_STRATEGIES, STRATEGY_LABELS, type Strategy } from './tasks';
 
 const LANE_STRATEGIES: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
 
@@ -106,5 +106,37 @@ describe('P0 기준선 전략', () => {
 
   it('P0는 조율 도구가 필요 없다', () => {
     expect(missingCoordinationTools('P0', ['read_file', 'write_file'])).toEqual([]);
+  });
+});
+
+describe('integrationChecksFor (통합 게이트 샘플 값 확인)', () => {
+  const task = (id: string) => BENCH_TASKS.find((candidate) => candidate.id === id)!;
+
+  it('엮인 과제마다 과제 요청의 샘플 값을 web 화면에서 확인한다(필드 이름을 쓰지 않는다)', () => {
+    expect(integrationChecksFor(task('orders-list'))?.pageChecks).toEqual([
+      { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, expectText: '김민수', allowConsoleErrors: false, noHorizontalScroll: false },
+    ]);
+    expect(integrationChecksFor(task('order-detail'))?.pageChecks[0]).toMatchObject({ path: '/orders/1', mode: 'http', expectText: '문 앞에 놓아 주세요' });
+    expect(integrationChecksFor(task('order-summary'))?.pageChecks[0]).toMatchObject({ path: '/dashboard', mode: 'http', expectAnyText: ['45000', '45,000'] });
+    // 필드 이름 대신 샘플 값만 본다
+    for (const coupled of BENCH_TASKS.filter((candidate) => candidate.coupled)) {
+      expect(integrationChecksFor(coupled)!.pageChecks[0]!.expectFromApi, coupled.id).toBeUndefined();
+    }
+  });
+
+  it('독립 과제는 확인을 두지 않는다', () => {
+    expect(integrationChecksFor(task('independent'))).toBeUndefined();
+  });
+
+  it('확인 값은 그 과제의 web 인수 검사 기대값과 같다(H10 판정 기준)', () => {
+    for (const coupled of BENCH_TASKS.filter((candidate) => candidate.coupled)) {
+      const check = integrationChecksFor(coupled)!.pageChecks[0]!;
+      const acceptance = coupled.acceptance.find((item) => item.service === 'web')!;
+      expect(acceptance.path, coupled.id).toBe(check.path);
+      const values = check.expectAnyText ?? [check.expectText!];
+      const expected = acceptance.expectAny ?? acceptance.expectAll ?? [];
+      expect(values.length, coupled.id).toBeGreaterThan(0);
+      expect(values.every((value) => expected.includes(value)), coupled.id).toBe(true);
+    }
   });
 });

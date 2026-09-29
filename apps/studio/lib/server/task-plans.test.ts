@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BoardAccess } from '@b-studio/agent';
+import type { WorkflowPageCheck } from '@b-studio/spec';
 import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
@@ -42,6 +43,8 @@ const fake = vi.hoisted(() => ({
   /** findProject가 돌려주는 프로젝트. 시크릿 가림 테스트는 여기에 secrets를 넣고 환경 변수를 세운다 */
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
+  /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지 확인한다 */
+  sessionOptions: [] as Array<{ modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
   /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
   bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
@@ -86,7 +89,8 @@ vi.mock('./projects', () => ({
 }));
 
 vi.mock('./sessions', () => ({
-  createSession: async () => {
+  createSession: async (_projectId: string, _owner: string, _workspace: string, options: { modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {}) => {
+    fake.sessionOptions.push(options);
     const id = `session-${++fake.counter}`;
     // 두 레인 세션이 모두 멈춘 뒤에 만들어진 세션이면 통합 세션이다
     if (fake.counter === 3) fake.stopOrder.integrationCreatedAfterStops = new Set(fake.stopped).size === 2;
@@ -181,6 +185,7 @@ beforeEach(() => {
   fake.counter = 0;
   fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };
   fake.sessions.clear();
+  fake.sessionOptions = [];
   fake.bootNetwork = [];
   fake.listeners.clear();
   fake.history.clear();
@@ -372,6 +377,31 @@ describe('작업 분해 실행', () => {
     expect(saved.lanes.map((lane) => lane.status)).toEqual(['done', 'done']);
     expect(saved.lanes.every((lane) => (lane.changedFiles?.length ?? 0) > 0)).toBe(true);
     expect(saved.integration?.status).toBe('done');
+  });
+
+  // integrationChecks는 통합 게이트에만 덧붙인다. 레인 세션에는 넘기지 않아 레인 게이트는 그대로다
+  it('integrationChecks는 통합 게이트에만 덧붙인다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    const pageChecks: WorkflowPageCheck[] = [
+      {
+        service: 'web',
+        path: '/orders',
+        mode: 'http',
+        expectStatus: 200,
+        expectFromApi: { service: 'api', path: '/api/orders', jsonPath: '$[0].customerName' },
+        allowConsoleErrors: false,
+        noHorizontalScroll: false,
+      },
+    ];
+
+    const plan = await run({ projectId: 'orders', request: '통합 확인', modelId: 'model-a', owner: 'kim', integrationChecks: { pageChecks } });
+
+    expect(plan.status).toBe('done');
+    // 세션은 레인 2개 + 통합 1개 순서로 만들어지고, 통합 세션에만 덧붙인다
+    expect(fake.sessionOptions).toHaveLength(3);
+    expect(fake.sessionOptions.slice(0, 2).every((options) => options.extraPageChecks === undefined)).toBe(true);
+    expect(fake.sessionOptions[2]!.extraPageChecks).toEqual(pageChecks);
   });
 
   it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {

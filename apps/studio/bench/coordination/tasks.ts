@@ -15,6 +15,7 @@
  *  - P0 기준선   작업 분해 없이 Claude Code 하나가 과제 전체를 한 번에 한다(비교 기준, `--backend claude-code` 전용)
  */
 import type { Topology } from '@b-studio/agent';
+import type { WorkflowPageCheck } from '@b-studio/spec';
 
 export type Strategy = 'P0' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5';
 
@@ -207,4 +208,33 @@ export function missingCoordinationTools(strategy: Strategy, allowedTools: reado
   const needed: Record<Strategy, string[]> = { P0: [], S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'] };
   if (!allowedTools) return [];
   return needed[strategy].filter((name) => !allowedTools.includes(name));
+}
+
+/**
+ * 통합 게이트에만 덧붙일 확인(벤치 `--integration-checks`, 기본 꺼짐). 과제 요청에 적힌 **샘플 값**이 web 화면에
+ * 보이는지 본다. E2에서 레인 경계의 필드 이름·모양 불일치가 통합 게이트를 그대로 통과한 것을 잡기 위한 것이다(#124).
+ *
+ * 값은 **과제를 쓴 계획자가 아는 것**만 쓴다 — 과제 요청에 적힌 고객 이름·배송 메모·총매출이다. 필드 이름은 쓰지 않는다
+ * (요청이 필드 이름을 정하지 않으므로, api와 화면이 일관되게 다른 이름을 써도 앱은 정상이다). 이 값들은
+ * **인수 검사(`runAcceptance`)의 기대값과 같다.** 그래서 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면
+ * (게이트가 실패하면) S4 수리가 시작되는가"를 재는 것이다 — H10을 그렇게 판정한다.
+ *
+ * mode는 http로 둔다(web 요청이 "서버에서 요청할 때마다 새로" 받으라고 한다). 독립 과제는 api↔web을 엮지 않으므로 확인을 두지 않는다.
+ */
+export function integrationChecksFor(task: BenchTask): { pageChecks: WorkflowPageCheck[] } | undefined {
+  switch (task.id) {
+    case 'orders-list':
+      return { pageChecks: [sampleValuePageCheck('/orders', { expectText: '김민수' })] };
+    case 'order-detail':
+      return { pageChecks: [sampleValuePageCheck('/orders/1', { expectText: '문 앞에 놓아 주세요' })] };
+    case 'order-summary':
+      return { pageChecks: [sampleValuePageCheck('/dashboard', { expectAnyText: ['45000', '45,000'] })] };
+    default:
+      return undefined;
+  }
+}
+
+/** web 페이지(service: web)에 과제의 샘플 값이 그려지는지 보는 http 확인 하나 */
+function sampleValuePageCheck(path: string, expect: Pick<WorkflowPageCheck, 'expectText' | 'expectAnyText'>): WorkflowPageCheck {
+  return { service: 'web', path, mode: 'http', expectStatus: 200, ...expect, allowConsoleErrors: false, noHorizontalScroll: false };
 }

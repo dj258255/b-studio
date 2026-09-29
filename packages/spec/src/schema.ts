@@ -275,6 +275,8 @@ export const WorkflowPageStepSchema = z
   });
 
 const PAGE_STEPS_MAX = 10;
+/** 기대 문구 묶음은 최대 5개까지. 많아지면 무엇을 확인하는지 읽기 어려워진다 */
+const PAGE_EXPECT_ANY_MAX = 5;
 
 /** browser 모드에서 자주 쓰는 창 크기. 이름으로 적으면 이 값으로 편다 */
 const VIEWPORT_PRESETS: Record<'mobile' | 'tablet' | 'desktop', { width: number; height: number }> = {
@@ -314,6 +316,22 @@ export const WorkflowPageCompareSchema = z.object({
 });
 
 /**
+ * api 응답에서 값을 꺼내 그 값이 화면 글자에 있는지 확인하는 설정.
+ * 사람이 값을 미리 알 필요 없이(expectText와 달리) api가 실제로 돌려준 값을 화면에서 찾는다
+ */
+export const WorkflowPageExpectFromApiSchema = z.object({
+  /** 값을 꺼낼 api 서비스. 모호함을 없애려고 생략을 허용하지 않고 반드시 적는다 */
+  service: z.string().regex(NAME),
+  /** 값을 꺼낼 api의 경로. 페이지 경로가 아니라 확인할 api 경로다 */
+  path: SERVICE_PATH,
+  /**
+   * 응답 JSON에서 꺼낼 값. 게이트의 `readJsonPath`와 같은 문법으로 `$.a.b`, `$[0].a`, `$.items[0].qty` 정도만 지원한다.
+   * 문자열·숫자만 화면 글자와 비교할 수 있고, 객체·배열이나 빈 문자열을 가리키면 확인 설정 오류로 실패한다
+   */
+  jsonPath: z.string().min(1),
+});
+
+/**
  * browser_check 단계에서 재시작한 서비스의 화면을 확인한다.
  * http는 응답 상태와 본문 문구만 보고, browser는 헤드리스 Chromium으로 렌더링해 스크립트 예외·console.error·가로 넘침까지 본다
  */
@@ -325,6 +343,16 @@ export const WorkflowPageCheckSchema = z
     expectStatus: z.number().int().min(100).max(599).default(200),
     /** http는 응답 본문, browser는 렌더링된 화면 텍스트에 들어 있어야 하는 문구. browser에서는 단계를 모두 마친 뒤의 화면을 본다 */
     expectText: z.string().min(1).optional(),
+    /**
+     * 하나라도 들어 있으면 통과하는 문구 목록(1~5개). 같은 값의 표기가 갈릴 때(예: 45000과 45,000) 쓴다.
+     * expectText와 같은 자리에서 확인한다
+     */
+    expectAnyText: z.array(z.string().min(1)).min(1).max(PAGE_EXPECT_ANY_MAX, `expectAnyText는 최대 ${PAGE_EXPECT_ANY_MAX}개까지 쓸 수 있습니다`).optional(),
+    /**
+     * api를 불러 jsonPath 값(문자열·숫자)을 꺼내, 그 값이 화면 글자에 있는지 확인한다. http·browser 모드 모두에서 쓴다.
+     * 화면이 다른 필드 이름·모양을 읽고 있는 불일치를 사람이 값을 미리 몰라도 잡는다
+     */
+    expectFromApi: WorkflowPageExpectFromApiSchema.optional(),
     /** browser 전용. 페이지를 연 뒤 순서대로 실행할 상호작용. 정해 둔 네 동작만 받는다 */
     steps: z.array(WorkflowPageStepSchema).max(PAGE_STEPS_MAX, `단계는 최대 ${PAGE_STEPS_MAX}개까지 쓸 수 있습니다`).optional(),
     /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다. mobile·tablet·desktop 이름이나 { width, height }를 받는다 */
@@ -469,6 +497,7 @@ export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
 export type WorkflowConcurrencyCheck = z.infer<typeof WorkflowConcurrencyCheckSchema>;
 export type ConcurrencyExpect = z.infer<typeof ConcurrencyExpectSchema>;
 export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
+export type WorkflowPageExpectFromApi = z.infer<typeof WorkflowPageExpectFromApiSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
 export type WorkflowPageCompare = z.infer<typeof WorkflowPageCompareSchema>;
 export type CompareMask = z.infer<typeof CompareMaskSchema>;

@@ -61,6 +61,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
   - `--strategies`의 기본값은 `S0,S1`이고 P0는 넣어야 돕니다. `P0`는 `--backend claude-code`에서만 쓸 수 있습니다. `--dry`는 P0를 모릅니다(항상 `S0,S1`만 돕니다)
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 - `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
+- `--integration-checks`(기본 꺼짐) — 엮인 과제 3개의 **통합 게이트**에만, 과제 요청에 적힌 샘플 값이 web 화면에 보이는지 확인(`pageChecks.expectText`·`expectAnyText`)을 덧붙입니다(orders-list `김민수`, order-detail `문 앞에 놓아 주세요`, order-summary `45000`/`45,000`). 필드 이름은 쓰지 않습니다. 이 값들은 인수 검사(`runAcceptance`)와 **같은 값**이라, 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면 S4 수리가 시작되는가"를 재는 것입니다([#124](https://github.com/dj258255/b-studio/issues/124), E2 H10). 각 실행 행에 `integrationChecks: true/false`를 남기고 `meta.json`에도 기록합니다. 레인 게이트는 그대로이고 통합 게이트만 바뀝니다(서버 안에서만 넘기는 `createTaskPlan.integrationChecks`)
 
 **claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
 
@@ -103,3 +104,4 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - 세션 기록은 5,000개 이벤트를 넘으면 오래된 것부터 잘립니다. 아주 긴 세션은 탐색량(`filesRead`, 도구 호출)이 실제보다 적게 잡힐 수 있습니다.
 - 추정 비용은 단순화했습니다. 입력 토큰은 `inputTokens + cacheReadTokens + cacheWriteTokens`를 입력 단가로 곱하고, 캐시 할인은 반영하지 않습니다. 청구서 금액이 아닙니다.
 - 반복이 적어 비율 대신 건수로 적습니다. 결과는 이 저장소·이 모델·이 과제에 한정됩니다.
+- `--integration-checks`의 확인은 과제 요청에 적힌 **샘플 값**이 web 화면에 보이는지만 봅니다(필드 이름·값의 모양은 보지 않음). api와 화면이 일관되게 다른 필드 이름을 쓰거나 값의 모양(맵 vs 배열)이 달라도, 그 값이 화면에 보이면 이 확인은 통과합니다 — 그런 불일치는 인수 검사가 잡습니다. 그래서 이 확인이 재는 것은 "통합 게이트가 인수 검사와 같은 신호로 실패하면 S4 수리가 시작되는가"입니다. 값은 하나만 보므로(예: 목록 첫 고객 이름) 목록의 다른 항목이 빠지는 것은 잡지 못합니다.

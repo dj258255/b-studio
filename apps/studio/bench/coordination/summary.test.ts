@@ -38,6 +38,7 @@ function row(over: Partial<BenchRow>): BenchRow {
     explore: { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 },
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     contextCleared: { count: 0, chars: 0 },
+    integrationChecks: false,
     success: true,
     category: 'none',
     detail: '',

@@ -63,6 +63,8 @@ export interface BenchRow {
   failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
   /** 오래된 도구 결과를 묶어서 비운 합계(레인·통합). 비우기를 끄면 0 */
   contextCleared: { count: number; chars: number };
+  /** 통합 게이트에 api 값 확인을 덧붙였는지(--integration-checks). 기본 꺼짐이면 false */
+  integrationChecks: boolean;
   metrics?: TaskPlanMetrics;
   /** S2~S5의 게시판 지표. 공유 없음(S0·S1)이면 없다 */
   coordination?: TaskPlanCoordinationMetrics;

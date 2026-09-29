@@ -183,6 +183,10 @@ workflow:
     - { name: api-unit, service: api, command: [./gradlew, test], maxAttempts: 2 }
   pageChecks:
     - { service: web, path: /orders, expectStatus: 200, expectText: 주문 목록 }
+    - service: web
+      path: /orders
+      expectFromApi: { service: api, path: /api/orders, jsonPath: "$[0].customerName" }
+    - { service: web, path: /dashboard, expectStatus: 200, expectAnyText: ["45000", "45,000"] }
     - { service: web, path: /, mode: browser, expectText: 주문, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
     - service: web
       path: /orders
@@ -226,7 +230,7 @@ workflow:
 |---|---|
 | `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`concurrency_check`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests`·`concurrencyChecks` 단계를 더합니다 |
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
-| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다 |
+| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `expectAnyText`는 그중 **하나라도 있으면 통과**하는 문구 목록(1~5개)입니다(같은 값의 표기가 갈릴 때, 예: `45000`/`45,000`). `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다. `expectFromApi`를 적으면 api를 먼저 불러 그 값이 화면 글자에 있는지 확인합니다(아래 'api 값 확인') |
 | `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
 | `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
@@ -236,9 +240,42 @@ workflow:
 불러올 때 검사하는 규칙:
 
 - `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가, `concurrency_check`가 있으면 `concurrencyChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
-- `tests`·`pageChecks`·`concurrencyChecks`의 `service`는 `source: managed` 서비스여야 합니다.
+- `tests`·`pageChecks`·`concurrencyChecks`의 `service`는 `source: managed` 서비스여야 합니다. `pageChecks.expectFromApi.service`(값을 꺼낼 api)도 마찬가지입니다.
 - 테스트·동시 요청 확인 이름은 중복될 수 없습니다.
 - `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
+
+### api 값 확인 (`expectFromApi`)
+
+`pageChecks` 항목에 `expectFromApi`를 적으면, 게이트가 **api를 먼저 불러** `jsonPath` 값(문자열·숫자)을 꺼내고, 그 값이 화면 글자에 있는지 확인합니다. 화면이 다른 필드 이름·모양을 읽고 있는 불일치를, 사람이 값을 미리 적지 않고도 잡습니다(E2에서 레인 경계의 필드 이름 불일치가 통합 게이트를 그대로 통과한 것을 보강, [#124](https://github.com/dj258255/b-studio/issues/124)).
+
+**필드 이름을 정한 계약이 있을 때 씁니다.** 요구가 필드 이름을 정하지 않아 api와 화면이 일관되게 다른 이름을 써도 정상인 경우에는, `expectText`·`expectAnyText`로 화면에 보이는 샘플 값을 확인하는 편이 맞습니다(`expectFromApi`는 그 이름의 값이 없으면 실패합니다).
+
+```yaml
+pageChecks:
+  - service: web
+    path: /orders
+    expectFromApi: { service: api, path: /api/orders, jsonPath: "$[0].customerName" }
+```
+
+- `service`(필수) — 값을 꺼낼 api 서비스. 모호함을 없애려고 생략을 두지 않습니다. `source: managed` 서비스여야 합니다.
+- `path`(필수) — 그 api의 경로(페이지 경로가 아님). `ready.path`와 같은 규칙으로 `//host`를 거부합니다.
+- `jsonPath`(필수) — 응답 JSON에서 꺼낼 값. **`$.a.b`와 `$[0].a`, `$.items[0].qty` 정도만** 지원합니다(필터·와일드카드·함수 없음).
+- `mode`의 `http`·`browser` **둘 다**에서 씁니다. `http`는 응답 본문에서, `browser`는 렌더링된 글자에서 값을 찾습니다(`expectText`를 보는 같은 위치).
+
+게이트는 이 순서로 확인합니다: ① api 호출 → ② 값 꺼내기 → ③ 페이지 열기 → ④ 값 포함 확인. ②까지 실패하면 페이지를 열지 않습니다. 실패 문구는 에이전트가 그대로 보고 고칠 수 있게 구체적으로 남깁니다.
+
+- api가 2xx가 아님: `api GET /api/orders가 HTTP 500을 돌려줬습니다`
+- 응답에 값이 없음: `api 응답에 $[0].customerName이 없습니다. 응답 앞부분: {…}`
+- 값이 객체·배열·빈 문자열(확인 설정 오류): `$[0].statusCounts는 배열입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`
+- 화면에 없음: `api의 $[0].customerName 값 '홍길동'이 /orders 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다`
+
+숫자는 원문과 천 단위 구분 표기(`12,000`)를 둘 다 인정합니다. 실패는 `browser_check` 단계 실패로 기록되고, 실패 서명도 확인 종류(api 상태·화면에 없음 등)별로 구분됩니다.
+
+한계:
+
+- **값 하나만 봅니다.** `jsonPath`가 가리키는 값 하나만 확인하므로, 목록의 다른 항목이나 다른 필드가 어긋나는 것은 잡지 못합니다.
+- **`jsonPath` 범위가 좁습니다.** 필터·와일드카드·함수는 없습니다. 정확한 경로를 적어야 합니다.
+- **캐시된 화면은 잡지 못합니다.** 확인은 지금 요청의 응답/렌더링만 봅니다. 페이지나 api가 캐시·CDN에 오래 남아 있으면 확인 시점의 결과를 봅니다.
 
 ### 디자인 비교 (`compare`)
 
