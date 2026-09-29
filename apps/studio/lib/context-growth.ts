@@ -72,13 +72,13 @@ const REPEATED_HINT = '같은 도구를 같은 입력으로 반복 호출했습�
 function hintForTool(name: string): string {
   switch (name) {
     case 'read_file':
-      return '파일 일부만 읽게(줄 범위) 요청하세요';
+      return '큰 파일을 통째로 읽었습니다. 필요한 파일만 읽게 하거나 run_in_service로 grep·sed -n 범위만 보게 하세요';
     case 'run_in_service':
       return '명령 출력을 grep/tail로 좁히게 하세요';
     case 'list_files':
       return '찾는 조건을 좁혀 결과 수를 줄이세요';
     case 'service_logs':
-      return '로그 범위를 좁혀 받으세요';
+      return 'lines를 줄여 최근 로그만 받으세요';
     case 'http_request':
     case 'call_external_api':
       return '응답에서 필요한 필드만 받도록 요청을 좁히세요';
