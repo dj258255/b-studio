@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
 import type { ProjectSummary } from '@/lib/studio-events';
 import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
+import { PlanGraphView } from './plan-graph';
 
 const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
   S2: 'S2 계약 먼저',
@@ -208,6 +209,8 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
 
 function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView; deciding: boolean; onDecide: (approve: boolean, reason?: string) => void; onResume: () => void }) {
   const [reason, setReason] = useState('');
+  /** 레인·통합 카드로 보는 기존 목록 보기와, 관계를 한 그림으로 보는 그래프 보기를 겹쳐 둔다 */
+  const [view, setView] = useState<'list' | 'graph'>('list');
   return (
     <div className="space-y-4">
       {plan.status === 'interrupted' && (
@@ -261,7 +264,22 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
             <p className="text-sm font-medium text-muted">{plan.projectId} · 작업 분해 {plan.id} · {plan.modelId}</p>
             <h2 className="mt-1 text-xl font-semibold leading-8 whitespace-pre-wrap">{plan.request}</h2>
           </div>
-          <span className={`glass-soft rounded-full px-3 py-1.5 text-sm font-medium ${plan.status === 'done' ? 'text-pass' : plan.status === 'failed' || plan.status === 'rejected' ? 'text-fail' : 'text-wait'}`}>{PLAN_STATUS[plan.status]}</span>
+          <div className="flex shrink-0 flex-col items-end gap-2">
+            <span className={`glass-soft rounded-full px-3 py-1.5 text-sm font-medium ${plan.status === 'done' ? 'text-pass' : plan.status === 'failed' || plan.status === 'rejected' ? 'text-fail' : 'text-wait'}`}>{PLAN_STATUS[plan.status]}</span>
+            <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="보기 방식">
+              {(['list', 'graph'] as const).map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  aria-pressed={view === kind}
+                  onClick={() => setView(kind)}
+                  className={`rounded-md px-3 py-1 font-medium transition-colors ${view === kind ? 'bg-panel text-ink ring-1 ring-line' : 'text-muted hover:text-ink'}`}
+                >
+                  {kind === 'list' ? '목록' : '그래프'}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
         {plan.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.error}</p>}
         {plan.rejectedReason && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">거부 사유: {plan.rejectedReason}</p>}
@@ -300,57 +318,63 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
         </section>
       )}
 
-      <div className={`grid gap-4 ${plan.lanes.length >= 3 ? '2xl:grid-cols-3' : 'lg:grid-cols-2'}`}>
-        {plan.lanes.map((lane) => (
-          <article key={lane.id} className="min-w-0 rounded-panel border border-line bg-panel p-5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-lg font-semibold">{lane.id}</p>
-                <p className="mt-0.5 break-all font-mono text-xs text-muted">쓰기 범위: {lane.paths.join(', ')}</p>
-              </div>
-              <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[lane.status]}`}>{STEP_STATUS[lane.status]}</span>
-            </div>
-            <ol className="mt-4 space-y-2">
-              {lane.tasks.map((task, index) => (
-                <li key={task.id} className="rounded-md border border-line bg-panel p-3 text-sm">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="font-medium">{index + 1}. {task.title}</span>
-                    <span className={`shrink-0 text-xs font-medium ${STEP_COLOR[task.status]}`}>{STEP_STATUS[task.status]}</span>
+      {view === 'graph' ? (
+        <PlanGraphView plan={plan} />
+      ) : (
+        <>
+          <div className={`grid gap-4 ${plan.lanes.length >= 3 ? '2xl:grid-cols-3' : 'lg:grid-cols-2'}`}>
+            {plan.lanes.map((lane) => (
+              <article key={lane.id} className="min-w-0 rounded-panel border border-line bg-panel p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-lg font-semibold">{lane.id}</p>
+                    <p className="mt-0.5 break-all font-mono text-xs text-muted">쓰기 범위: {lane.paths.join(', ')}</p>
                   </div>
-                  <p className="mt-1 break-all font-mono text-xs text-muted">{task.paths.join(', ')}{task.dependsOn.length > 0 ? ` · 선행: ${task.dependsOn.join(', ')}` : ''}</p>
-                  {task.summary && <p className="mt-2 text-xs leading-5 whitespace-pre-wrap text-muted">{task.summary}</p>}
-                  {task.checkpoint && <p className="mt-1 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{task.checkpoint.shortSha}</span></p>}
-                </li>
-              ))}
-            </ol>
-            {lane.error && <p className="mt-3 text-xs text-fail whitespace-pre-wrap">{lane.error}</p>}
-            {lane.sessionId && <Link href={`/sessions/${lane.sessionId}`} className="mt-4 inline-block rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">레인 세션 보기</Link>}
-          </article>
-        ))}
-      </div>
-
-      {plan.integration && (
-        <article className={`rounded-panel border border-line bg-panel p-5 ${plan.integration.status === 'done' ? 'ring-2 ring-pass' : ''}`}>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-lg font-semibold">통합</p>
-              <p className="mt-0.5 text-sm text-muted">레인들의 최종 파일 {plan.integration.files.length}개를 새 세션에서 같은 게이트로 다시 검증합니다</p>
-            </div>
-            <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[plan.integration.status]}`}>{STEP_STATUS[plan.integration.status]}</span>
+                  <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[lane.status]}`}>{STEP_STATUS[lane.status]}</span>
+                </div>
+                <ol className="mt-4 space-y-2">
+                  {lane.tasks.map((task, index) => (
+                    <li key={task.id} className="rounded-md border border-line bg-panel p-3 text-sm">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="font-medium">{index + 1}. {task.title}</span>
+                        <span className={`shrink-0 text-xs font-medium ${STEP_COLOR[task.status]}`}>{STEP_STATUS[task.status]}</span>
+                      </div>
+                      <p className="mt-1 break-all font-mono text-xs text-muted">{task.paths.join(', ')}{task.dependsOn.length > 0 ? ` · 선행: ${task.dependsOn.join(', ')}` : ''}</p>
+                      {task.summary && <p className="mt-2 text-xs leading-5 whitespace-pre-wrap text-muted">{task.summary}</p>}
+                      {task.checkpoint && <p className="mt-1 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{task.checkpoint.shortSha}</span></p>}
+                    </li>
+                  ))}
+                </ol>
+                {lane.error && <p className="mt-3 text-xs text-fail whitespace-pre-wrap">{lane.error}</p>}
+                {lane.sessionId && <Link href={`/sessions/${lane.sessionId}`} className="mt-4 inline-block rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">레인 세션 보기</Link>}
+              </article>
+            ))}
           </div>
-          {plan.integration.files.length > 0 && <p className="mt-3 break-all font-mono text-xs text-muted">{plan.integration.files.join(', ')}</p>}
-          {(plan.integration.deleted ?? []).length > 0 && (
-            <p className="mt-1 break-all font-mono text-xs text-fail">삭제 {plan.integration.deleted.length}개: {plan.integration.deleted.join(', ')}</p>
+
+          {plan.integration && (
+            <article className={`rounded-panel border border-line bg-panel p-5 ${plan.integration.status === 'done' ? 'ring-2 ring-pass' : ''}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-lg font-semibold">통합</p>
+                  <p className="mt-0.5 text-sm text-muted">레인들의 최종 파일 {plan.integration.files.length}개를 새 세션에서 같은 게이트로 다시 검증합니다</p>
+                </div>
+                <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[plan.integration.status]}`}>{STEP_STATUS[plan.integration.status]}</span>
+              </div>
+              {plan.integration.files.length > 0 && <p className="mt-3 break-all font-mono text-xs text-muted">{plan.integration.files.join(', ')}</p>}
+              {(plan.integration.deleted ?? []).length > 0 && (
+                <p className="mt-1 break-all font-mono text-xs text-fail">삭제 {plan.integration.deleted.length}개: {plan.integration.deleted.join(', ')}</p>
+              )}
+              {plan.integration.repair && (
+                <p className={`mt-3 text-sm ${plan.integration.repair.status === 'done' ? 'text-pass' : 'text-fail'}`}>
+                  S4 수리 요청 {plan.integration.repair.status === 'done' ? '성공' : '실패'} · {plan.integration.repair.status}
+                </p>
+              )}
+              {plan.integration.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.integration.error}</p>}
+              {plan.integration.checkpoint && <p className="mt-3 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{plan.integration.checkpoint.shortSha}</span></p>}
+              {plan.integration.sessionId && <Link href={`/sessions/${plan.integration.sessionId}`} className="mt-4 inline-block rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel">통합 세션·diff 보기</Link>}
+            </article>
           )}
-          {plan.integration.repair && (
-            <p className={`mt-3 text-sm ${plan.integration.repair.status === 'done' ? 'text-pass' : 'text-fail'}`}>
-              S4 수리 요청 {plan.integration.repair.status === 'done' ? '성공' : '실패'} · {plan.integration.repair.status}
-            </p>
-          )}
-          {plan.integration.error && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">{plan.integration.error}</p>}
-          {plan.integration.checkpoint && <p className="mt-3 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{plan.integration.checkpoint.shortSha}</span></p>}
-          {plan.integration.sessionId && <Link href={`/sessions/${plan.integration.sessionId}`} className="mt-4 inline-block rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel">통합 세션·diff 보기</Link>}
-        </article>
+        </>
       )}
     </div>
   );
