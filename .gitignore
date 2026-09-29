@@ -12,6 +12,9 @@ next-env.d.ts
 .gradle/
 build/
 !gradle/wrapper/gradle-wrapper.jar
+# 데스크톱 앱 아이콘 원본(icon.svg)과 생성물(.icns·.png)은 저장소에 둔다.
+# 빌드하는 CI에는 macOS 아이콘 도구가 없어서 electron-builder가 쓸 파일이 필요하다
+!apps/desktop/build/
 __pycache__/
 .venv/
 .pytest_cache/

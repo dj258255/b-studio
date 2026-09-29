@@ -10,11 +10,18 @@ files:
   - dist/**
   - src/*.html
   - src/*.js
+  # 창 아이콘(리눅스·윈도우). 앱을 만들 때 원본 SVG에서 굽는다(pnpm desktop:icon)
+  - build/icon.png
   - package.json
 mac:
   # 현재 아키텍처의 .app 디렉터리만 만든다(dmg·zip 없음)
   target:
     - dir
   category: public.app-category.developer-tools
+  # Dock·Finder 아이콘. 원본은 build/icon.svg, 굽는 것은 `pnpm desktop:icon`
+  icon: build/icon.icns
   # 서명 없음(로컬 설치용). 처음 한 번은 우클릭 → 열기로 열어야 한다
   identity: null
+linux:
+  # 리눅스는 PNG 하나로 크기별 아이콘을 만든다(mac만 패키징하지만 설정은 두는 편이 낫다)
+  icon: build/icon.png

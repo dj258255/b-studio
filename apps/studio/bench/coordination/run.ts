@@ -50,7 +50,7 @@ import { redact } from './redact';
 import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
 import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
-import { contractAskFromClient, planLanes, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
+import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
 import type { AgentUsage, Topology } from '@b-studio/agent';
 import { costForUsageByModel, parsePriceTable, type TokenPrices } from '../../lib/token-types';
@@ -553,7 +553,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
  * 실패(형식 오류·사용 한도·연결 실패)는 삼키지 않는다: 계약 없이 돌리면 그 행은 S1을 S2라고 적는 것이 된다.
  */
 async function askModelContracts(context: RunContext, task: BenchTask, planJson: PlannedPlan, name: string): Promise<LaneContractsResult> {
-  const lanes = planLanes(planJson);
+  // 계획 상한도 제품과 같은 설정을 본다(B_STUDIO_MAX_LANES). 레인을 늘리는 실험에서 벤치가 먼저 막지 않게
+  const lanes = planLanes(planJson, planLimitsFromEnv());
   const project = await loadProject(context.projectDir);
   const asked = await requestLaneContracts(await contractAskFor(context), project, task.request, lanes);
   await context.saveContracts(name, {
