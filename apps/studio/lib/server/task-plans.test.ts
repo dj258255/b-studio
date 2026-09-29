@@ -59,6 +59,8 @@ const fake = vi.hoisted(() => ({
   sourceFiles: {} as Record<string, string>,
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   stopped: [] as string[],
+  /** stopAndDeleteSession을 부른 세션 id들(순서 그대로, 계획·플릿을 지울 때 구성원 세션도 지우는지 확인한다) */
+  stopAndDeleted: [] as string[],
   stopOrder: { integrationCreatedAfterStops: false },
   /** 원본 저장소의 상태. originUrl이 없으면 원격 저장소가 아니다 */
   source: { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' } as { base: string; originUrl?: string; dirtyFiles: number; subdir: string } | undefined,
@@ -171,6 +173,10 @@ vi.mock('./sessions', () => ({
   stopSession: async (id: string) => {
     fake.stopped.push(id);
   },
+  stopAndDeleteSession: async (id: string) => {
+    fake.stopAndDeleted.push(id);
+    fake.sessions.delete(id);
+  },
   subscribe: (id: string, listener: (event: StudioEvent) => void) => {
     // 실제 세션과 같이 지금까지의 기록을 먼저 보낸다(레인 조율이 실패 서명을 읽는 경로)
     for (const event of fake.history.get(id) ?? []) listener(event);
@@ -236,7 +242,7 @@ vi.mock('./sessions', () => ({
 }));
 
 import { StudioError } from './errors';
-import { approveTaskPlan, createTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
+import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
 const saved = {
@@ -263,6 +269,7 @@ beforeEach(() => {
   fake.sourceFiles = {};
   fake.sends = [];
   fake.stopped = [];
+  fake.stopAndDeleted = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
   fake.modelCalls = 0;
   fake.contractCalls = 0;
@@ -1385,4 +1392,58 @@ describe('로컬 Claude Code로 계획 받기', () => {
     }
   });
 
+});
+
+describe('deleteTaskPlan', () => {
+  it('실행·통합·계획 짜는 중이면 지우지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: 'fail', b: { 'web/b/one.md': 'b' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    const waiting = await awaiting(created.id);
+    expect(waiting.status).toBe('awaiting_approval');
+    approveTaskPlan(created.id, 'kim');
+    // 승인 직후에는 레인이 running 상태다(레인 하나가 실패로 끝나기 전)
+    await expect(deleteTaskPlan(created.id, 'kim')).rejects.toThrow(/진행 중인 작업 계획/);
+    await finished(created.id);
+  });
+
+  it('승인 대기 계획은 세션이 아직 없어 지우면 기록만 사라진다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    await deleteTaskPlan(created.id, 'kim');
+
+    expect(fake.stopAndDeleted).toEqual([]);
+    expect(() => getTaskPlan(created.id, 'kim')).toThrow('찾을 수 없습니다');
+    expect(() => readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${created.id}.json`), 'utf8')).toThrow();
+  });
+
+  it('내 계획이 아니면 지울 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    await expect(deleteTaskPlan(created.id, 'mallory')).rejects.toThrow(/볼 수 없습니다/);
+  });
+
+  it('끝난 계획을 지우면 레인·통합 세션 기록도 함께 지운다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    expect(plan.status).toBe('done');
+    const laneSessionIds = plan.lanes.map((lane) => lane.sessionId!);
+    const integrationId = plan.integration!.sessionId!;
+
+    await deleteTaskPlan(plan.id, 'kim');
+
+    expect(fake.stopAndDeleted.sort()).toEqual([...laneSessionIds, integrationId].sort());
+    expect(() => getTaskPlan(plan.id, 'kim')).toThrow('찾을 수 없습니다');
+    expect(() => readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`), 'utf8')).toThrow();
+  });
+
+  it('없는 계획은 404로 알린다', async () => {
+    await expect(deleteTaskPlan('nope', 'kim')).rejects.toThrow(/찾을 수 없습니다/);
+  });
 });

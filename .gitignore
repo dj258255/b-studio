@@ -27,3 +27,6 @@ __pycache__/
 .vscode/
 .playwright-mcp/
 .serena/
+
+# 에이전트 작업 트리(도구가 만드는 임시 폴더). 저장소에 넣지 않는다
+.claude/worktrees/

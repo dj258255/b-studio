@@ -15,6 +15,10 @@ const fake = vi.hoisted(() => ({
   }),
   sendMessage: vi.fn((...args: [string, string, { allowBreaking: boolean; by: string }]) => ({ runId: `run-${args[0]}` })),
   getSnapshot: vi.fn(() => undefined),
+  stopAndDeleteSession: vi.fn(async (...args: [string]) => {
+    fake.stopAndDeleted.push(args[0]);
+  }),
+  stopAndDeleted: [] as string[],
   models: [
     {
       id: 'model-a',
@@ -58,6 +62,7 @@ vi.mock('./sessions', async (importOriginal) => {
     createSession: fake.createSession,
     getSnapshot: fake.getSnapshot,
     sendMessage: fake.sendMessage,
+    stopAndDeleteSession: fake.stopAndDeleteSession,
     subscribe: (id: string, listener: (event: StudioEvent) => void) => {
       fake.listeners.set(id, listener);
       listener({ type: 'snapshot', snapshot: { status: 'ready' } as never });
@@ -69,7 +74,7 @@ vi.mock('./sessions', async (importOriginal) => {
 vi.mock('./projects', () => ({ findProject: async () => ({ root: fake.root }) }));
 
 import { StudioError } from './errors';
-import { chooseFleetWinner, createFleet, defaultFleetCandidates, getFleet, listFleets } from './fleets';
+import { chooseFleetWinner, createFleet, defaultFleetCandidates, deleteFleet, getFleet, listFleets } from './fleets';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-fleets-'));
 const saved = {
@@ -82,6 +87,8 @@ beforeEach(() => {
   fake.listeners.clear();
   fake.createSession.mockClear();
   fake.sendMessage.mockClear();
+  fake.stopAndDeleteSession.mockClear();
+  fake.stopAndDeleted = [];
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_FLEETS_DIR = directory;
   // 허용 목록은 서버 모드 하나뿐이다. 넓히는 테스트만 직접 세운다
@@ -270,5 +277,54 @@ describe('Agent Fleet', () => {
     const saved = JSON.parse(readFileSync(path.join(directory, `${fleet.id}.json`), 'utf8')) as { members: Array<{ status: string; turns?: number }> };
     expect(saved.members.map((member) => member.status)).toEqual(['done', 'done']);
     expect(saved.members.map((member) => member.turns)).toEqual([3, 3]);
+  });
+});
+
+describe('deleteFleet', () => {
+  it('진행 중인 참가자가 있으면 지우지 않는다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'kay' });
+    // 멤버가 아직 running 상태다(끝나는 이벤트를 보내지 않았다)
+
+    await expect(deleteFleet(fleet.id, 'kay')).rejects.toThrow(/진행 중인 참가자/);
+    expect(fake.stopAndDeleteSession).not.toHaveBeenCalled();
+    expect(getFleet(fleet.id, 'kay')).toMatchObject({ id: fleet.id });
+  });
+
+  it('내가 만든 Fleet이 아니면 지울 수 없다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'kay' });
+
+    await expect(deleteFleet(fleet.id, 'mallory')).rejects.toThrow(/지울 수 없습니다/);
+  });
+
+  it('없는 Fleet은 404로 알린다', async () => {
+    await expect(deleteFleet('nope', 'kay')).rejects.toThrow(/찾을 수 없습니다/);
+  });
+
+  it('모든 참가자가 끝나면 지우고, 끝난 참가자의 세션도 함께 지운다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'kay' });
+    for (const member of fleet.members) {
+      fake.listeners.get(member.sessionId)?.({ type: 'run_finished', runId: member.runId!, status: 'done', summary: '끝', turns: 1 });
+    }
+
+    await deleteFleet(fleet.id, 'kay');
+
+    expect(fake.stopAndDeleteSession).toHaveBeenCalledTimes(2);
+    expect(fake.stopAndDeleteSession.mock.calls.map((call) => call[0]).sort()).toEqual(fleet.members.map((member) => member.sessionId).sort());
+    expect(() => getFleet(fleet.id, 'kay')).toThrow('찾을 수 없습니다');
+    expect(() => readFileSync(path.join(directory, `${fleet.id}.json`), 'utf8')).toThrow();
+  });
+
+  it('세션을 만들지 못해 실패한 참가자(`failed-`)는 지우기를 부르지 않는다', async () => {
+    fake.createSession.mockImplementationOnce(async () => {
+      throw new Error('샌드박스를 켜지 못했습니다');
+    });
+    const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'kay' });
+    expect(fleet.members[0]!.status).toBe('error');
+    fake.listeners.get(fleet.members[1]!.sessionId)?.({ type: 'run_finished', runId: fleet.members[1]!.runId!, status: 'done', summary: '끝', turns: 1 });
+
+    await deleteFleet(fleet.id, 'kay');
+
+    expect(fake.stopAndDeleteSession).toHaveBeenCalledTimes(1);
+    expect(fake.stopAndDeleteSession).toHaveBeenCalledWith(fleet.members[1]!.sessionId);
   });
 });

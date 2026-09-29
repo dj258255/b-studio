@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { RemoteBrowser, RemoteBrowserOptions, RemoteBrowserPick, RemoteBrowserViewport } from '@b-studio/agent';
+import type { RemoteBrowser, RemoteBrowserOptions, RemoteBrowserPick, RemoteBrowserRect, RemoteBrowserViewport } from '@b-studio/agent';
 import { publish, publishBlocked } from './live-frames';
 
 /**
@@ -183,11 +183,40 @@ export async function inputRemoteBrowser(sessionId: string, input: RemoteBrowser
   }
 }
 
+/** pick 계열 응답에 함께 실어 보내는, 고른 순간의 뷰포트 크기. 클라이언트가 프리셋이 바뀌었는지(오버레이가 낡았는지) 판단하는 데 쓴다 */
+export type RemoteBrowserPickResult = RemoteBrowserPick & { viewport: RemoteBrowserViewport };
+
 /** 좌표의 요소를 골라 선택자·HTML·CSS·잘라 낸 스크린샷을 돌려준다. 산출물 저장은 호출자가 한다 */
-export async function pickRemoteBrowser(sessionId: string, x: number, y: number): Promise<RemoteBrowserPick> {
+export async function pickRemoteBrowser(sessionId: string, x: number, y: number): Promise<RemoteBrowserPickResult> {
   const entry = requireEntry(sessionId);
   entry.state.lastAt = Date.now();
-  return entry.browser.pick(assertCoord(x, 'x', entry.viewport.width), assertCoord(y, 'y', entry.viewport.height));
+  const pick = await entry.browser.pick(assertCoord(x, 'x', entry.viewport.width), assertCoord(y, 'y', entry.viewport.height));
+  return { ...pick, viewport: entry.viewport };
+}
+
+/** 뷰포트 범위 안으로 사각형을 자른다. 비었으면(드래그가 화면 밖에서 끝나는 등) 오류로 알린다 */
+function clampRectToViewport(rect: RemoteBrowserRect, entry: Pick<BrowserEntry, 'viewport'>): RemoteBrowserRect {
+  const x = assertCoord(rect.x, 'x', entry.viewport.width);
+  const y = assertCoord(rect.y, 'y', entry.viewport.height);
+  const width = Math.min(rect.width, entry.viewport.width - x);
+  const height = Math.min(rect.height, entry.viewport.height - y);
+  if (width <= 0 || height <= 0) throw new RemoteBrowserError(400, '드래그 영역이 비어 있습니다');
+  return { x, y, width, height };
+}
+
+/** 드래그한 사각형(뷰포트 좌표)이 덮는 요소를 골라 선택자·HTML·CSS·잘라 낸 스크린샷을 돌려준다. 고르는 규칙은 pickRect 참고 */
+export async function pickRectRemoteBrowser(sessionId: string, rect: RemoteBrowserRect): Promise<RemoteBrowserPickResult> {
+  const entry = requireEntry(sessionId);
+  entry.state.lastAt = Date.now();
+  const pick = await entry.browser.pickRect(clampRectToViewport(rect, entry));
+  return { ...pick, viewport: entry.viewport };
+}
+
+/** 좌표 아래 요소의 뷰포트 영역만 가볍게 돌려준다(스크린샷 없이). 고르기 모드의 마우스 오버 강조용이라 산출물을 남기지 않는다 */
+export async function hoverRemoteBrowser(sessionId: string, x: number, y: number): Promise<{ rect: RemoteBrowserRect } | null> {
+  const entry = requireEntry(sessionId);
+  entry.state.lastAt = Date.now();
+  return entry.browser.hover(assertCoord(x, 'x', entry.viewport.width), assertCoord(y, 'y', entry.viewport.height));
 }
 
 /** 원격 브라우저를 닫는다. 열려 있지 않으면 아무것도 하지 않는다 */
@@ -215,6 +244,7 @@ const viewportSchema = z.object({
   height: z.number().int().min(240).max(3840),
 });
 const coord = z.number().min(0).max(4096);
+const rectSchema = z.object({ x: coord, y: coord, width: z.number().min(1).max(4096), height: z.number().min(1).max(4096) });
 
 const inputSchema = z.discriminatedUnion('type', [
   z.object({
@@ -241,6 +271,8 @@ export const remoteBrowserRequestSchema = z.union([
   z.object({ action: z.literal('start'), service: z.string().min(1).max(63), viewport: viewportSchema.optional() }),
   z.object({ action: z.literal('stop') }),
   z.object({ action: z.literal('pick'), x: coord, y: coord }),
+  z.object({ action: z.literal('pickRect'), rect: rectSchema }),
+  z.object({ action: z.literal('hover'), x: coord, y: coord }),
   z.object({ action: z.literal('input'), input: inputSchema }),
 ]);
 
