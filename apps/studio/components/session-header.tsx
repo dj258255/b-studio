@@ -48,7 +48,8 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
 
   return (
     <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-panel px-5 py-3">
-      <Link href="/" className="font-semibold tracking-tight hover:underline">
+      {/* 이 화면이 곧 첫 화면(개발 화면)이라, 로고는 다른 프로젝트·방식으로 시작하는 곳으로 간다 */}
+      <Link href="/start" className="font-semibold tracking-tight hover:underline" title="다른 프로젝트로 시작하거나 여러 명 비교·나눠서 병렬로 보냅니다">
         b-studio
       </Link>
 
@@ -116,7 +117,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         </button>
         {snapshot.status === "stopped" ? (
           <>
-            <Link href="/" className="text-sm font-medium hover:underline">
+            <Link href="/start" className="text-sm font-medium hover:underline">
               프로젝트 목록
             </Link>
             <button

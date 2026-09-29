@@ -302,7 +302,7 @@ export function SplitPicker({ sessions }: { sessions: SessionSummary[] }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
         <Link href="/" className="glass-soft rounded-control px-3 py-1.5 text-sm font-medium text-ink hover:bg-panel">
-          홈으로
+          개발 화면으로
         </Link>
       </div>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">나란히 볼 세션을 고르세요</h1>
