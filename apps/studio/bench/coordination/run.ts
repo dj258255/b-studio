@@ -93,6 +93,10 @@ interface Args {
   contracts?: string;
   escalateTo?: string;
   escalateAfter?: number;
+  /** 서명과 무관하게 게이트 실패 N번이면 승격(선택). 기본 없음 */
+  escalateAfterFailures?: number;
+  /** 승격 뒤 새로 주는 게이트 재시도 횟수. 기본 2 */
+  escalateRetryBudget?: number;
   /** `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` 반복. 레인마다 백엔드를 고른다 */
   laneBackends?: string[];
   /** 모델 이름 일부 → 단가 표 JSON 파일. 모델별 API 환산 비용을 계산한다 */
@@ -127,6 +131,8 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--context-clearing') args.contextClearing = next(argv, index++, '--context-clearing');
     else if (arg === '--escalate-to') args.escalateTo = next(argv, index++, '--escalate-to');
     else if (arg === '--escalate-after') args.escalateAfter = Number(next(argv, index++, '--escalate-after'));
+    else if (arg === '--escalate-after-failures') args.escalateAfterFailures = Number(next(argv, index++, '--escalate-after-failures'));
+    else if (arg === '--escalate-retry-budget') args.escalateRetryBudget = Number(next(argv, index++, '--escalate-retry-budget'));
     else if (arg === '--lane-backend') (args.laneBackends ??= []).push(next(argv, index++, '--lane-backend'));
     else if (arg === '--prices') args.prices = next(argv, index++, '--prices');
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
@@ -142,6 +148,8 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
     else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
     else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
+    else if (arg.startsWith('--escalate-after-failures=')) args.escalateAfterFailures = Number(arg.slice('--escalate-after-failures='.length));
+    else if (arg.startsWith('--escalate-retry-budget=')) args.escalateRetryBudget = Number(arg.slice('--escalate-retry-budget='.length));
     else if (arg.startsWith('--lane-backend=')) (args.laneBackends ??= []).push(arg.slice('--lane-backend='.length));
     else if (arg.startsWith('--prices=')) args.prices = arg.slice('--prices='.length);
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
@@ -308,6 +316,10 @@ interface RunContext {
   escalateTo?: string;
   /** --escalate-after */
   escalateAfter: number;
+  /** --escalate-after-failures. 없으면 서명 규칙만 쓴다 */
+  escalateAfterFailures?: number;
+  /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수 */
+  escalateRetryBudget: number;
   /** --prices 단가 표(모델 이름 일부 → 단가). 없으면 모델별 API 환산 비용을 계산하지 않는다 */
   prices?: Record<string, TokenPrices>;
 
@@ -389,7 +401,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   const observedModels = readObservedModels(sessions, sessionIds);
   const sessionEvents = readSessionEvents(sessions, sessionIds);
   // 승격은 세션 기록의 model_escalated 이벤트로 확인한다. 설정하지 않았으면 escalated=false
-  const escalation = readEscalation(sessionEvents, context.escalateTo, context.escalateAfter);
+  const escalation = readEscalation(sessionEvents, escalationRecord(context));
   // trace 계산이 실패해도 실행 결과(성공·분류)는 바뀌지 않게, 그 세션의 trace만 생략하고 경고를 남긴다
   const traces: LaneTrace[] = [];
   for (const id of laneSessionIds) {
@@ -667,7 +679,7 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     // P0는 b-studio 러너를 쓰지 않으므로 오래된 도구 결과 비우기와 무관하다
     contextCleared: { count: 0, chars: 0 },
     // P0는 b-studio 게이트가 없어 승격 판정이 일어나지 않는다. 설정값만 남기고 승격은 없음으로 적는다
-    escalation: { after: context.escalateAfter, escalated: false },
+    escalation: escalationRecord(context),
     metrics,
     acceptance,
     success,
@@ -738,16 +750,26 @@ function readObservedModels(sessions: SessionsModule, sessionIds: string[]): str
   return [...models];
 }
 
+/** 승격 설정(컨텍스트)을 행에 적을 모양으로. 실제 승격 여부는 readEscalation이 세션 기록에서 채운다 */
+function escalationRecord(context: RunContext): BenchEscalation {
+  return {
+    ...(context.escalateTo ? { to: context.escalateTo } : {}),
+    after: context.escalateAfter,
+    ...(context.escalateAfterFailures === undefined ? {} : { afterFailures: context.escalateAfterFailures }),
+    retryBudget: context.escalateRetryBudget,
+    escalated: false,
+  };
+}
+
 /** 세션 기록에서 승격 이벤트를 찾는다. 승격은 한 실행에 한 번이므로 첫 이벤트만 본다 */
-function readEscalation(eventsBySession: Map<string, StudioEvent[]>, to: string | undefined, after: number): BenchEscalation {
-  const result: BenchEscalation = { ...(to ? { to } : {}), after, escalated: false };
-  if (!to) return result;
+function readEscalation(eventsBySession: Map<string, StudioEvent[]>, base: BenchEscalation): BenchEscalation {
+  if (!base.to) return base;
   for (const events of eventsBySession.values()) {
     for (const event of events) {
-      if (event.type === 'agent' && event.event.type === 'model_escalated') return { ...result, escalated: true, attempt: event.event.attempt };
+      if (event.type === 'agent' && event.event.type === 'model_escalated') return { ...base, escalated: true, attempt: event.event.attempt };
     }
   }
-  return result;
+  return base;
 }
 
 /** 세션 기록을 통째로 다시 받아 온다. 읽기 실패는 빈 결과로 두고 실행을 막지 않는다 */
@@ -864,6 +886,8 @@ async function main(): Promise<void> {
     laneBackends: [...laneBackendChoices.values()].map((lane) => lane.backend),
     escalateTo: args.escalateTo,
     escalateAfter: args.escalateAfter,
+    escalateAfterFailures: args.escalateAfterFailures,
+    escalateRetryBudget: args.escalateRetryBudget,
   });
   // 단가 표도 시작 전에 읽는다. 값은 파일로만 받고 코드에 적지 않는다(잘못된 파일이면 Docker를 건드리기 전에 멈춘다)
   const prices = args.prices ? await loadPriceTable(args.prices) : undefined;
@@ -987,8 +1011,16 @@ async function main(): Promise<void> {
     } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
-      // 시작 모델은 --model, 승격 대상은 --escalate-to. 세션·레인·통합이 모두 이 설정을 쓴다
-      if (escalation.to) Object.assign(benchEnv, { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: escalation.to, B_STUDIO_ESCALATE_AFTER: String(escalation.after) });
+      // 시작 모델은 --model, 승격 대상은 --escalate-to. 세션·레인·통합이 모두 이 설정을 쓴다.
+      // 승격 규칙(실패 N번·재시도 예산)도 함께 넘겨 스튜디오가 읽게 한다
+      if (escalation.to) {
+        Object.assign(benchEnv, {
+          B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: escalation.to,
+          B_STUDIO_ESCALATE_AFTER: String(escalation.after),
+          B_STUDIO_ESCALATE_RETRY_BUDGET: String(escalation.retryBudget),
+        });
+        if (escalation.afterFailures !== undefined) benchEnv.B_STUDIO_ESCALATE_AFTER_FAILURES = String(escalation.afterFailures);
+      }
     } else if (backend === 'codex') {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
@@ -1042,6 +1074,8 @@ async function main(): Promise<void> {
       contractsSource,
       ...(escalation.to ? { escalateTo: escalation.to } : {}),
       escalateAfter: escalation.after,
+      ...(escalation.afterFailures === undefined ? {} : { escalateAfterFailures: escalation.afterFailures }),
+      escalateRetryBudget: escalation.retryBudget,
       ...(prices ? { prices } : {}),
 
       projectDir,
@@ -1120,6 +1154,8 @@ async function main(): Promise<void> {
           contracts: contractsSource,
           escalateTo: escalation.to,
           escalateAfter: escalation.after,
+          escalateAfterFailures: escalation.afterFailures,
+          escalateRetryBudget: escalation.retryBudget,
           pricesPath: args.prices,
           repeats,
           runs: rows.length,
