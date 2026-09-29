@@ -213,8 +213,10 @@ pnpm studio sandbox prune
 
 | 실행 | 기동 수신 | 기동 시간 | 비고 |
 |---|---|---|---|
-| 캐시 없음 | | | 공유 캐시 볼륨을 비우고 `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`로 실행 |
-| 캐시 있음 | | | 같은 프로젝트로 변수 없이 다시 실행 |
+| 캐시 없음 | web 114MB · api 27KB · db 29KB | 58.8초 | 공유 캐시 볼륨을 비우고 `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`로 실행 |
+| 캐시 있음 | web 4.46MB · api 27KB · db 29KB | 22.6초 | 같은 프로젝트로 변수 없이 다시 실행 |
+
+2026-09-29 `examples/orders`, 커밋 7e845fe에서 잰 값입니다. pnpm 저장소 캐시(`b-studio-cache-pnpm`)가 web 기동의 수신을 **96%**, 기동 시간을 **62%** 줄였습니다. api는 Gradle 의존성을 이미지에 구워 두어 두 경우 모두 기동 중 수신이 거의 없습니다. 대신 캐시 없는 빌드에서 받은 의존성은 이미지 빌드 단계라 이 표에 잡히지 않습니다(아래 한계). 베이스 이미지(`FROM`)는 `--no-cache`로도 다시 받지 않습니다.
 
 `boot-probe`는 샌드박스를 띄워 준비될 때까지 기다린 뒤 기동 시간(ms)과 서비스별 수신·송신 바이트(edge 제외)를 내고 곧바로 내립니다(`keep` 없음). `--json`이면 `{"bootMs":…,"network":[{"service":"api","rxBytes":…,"txBytes":…}]}` 한 줄을 출력합니다. 준비에 실패하면 종료 코드 1과 이유를 냅니다(진행 안내는 stdout에 쓰지 않습니다).
 

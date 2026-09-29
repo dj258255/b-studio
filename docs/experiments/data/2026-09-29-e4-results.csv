@@ -1,0 +1,28 @@
+condition,order,repeat,task,strategy,model_start,success,category,end_to_end_ms,model_calls,input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,repair_from_trace,escalated,escalation_attempt,sonnet_output_tokens,contracts_count,contract_tokens,cost_usd_recomputed,detail
+E4-a,1,1,orders-list,S4,sonnet,False,acceptance,696418,59,3315,1499224,97024,39348,True,False,,39294,,,0.93905,"web /orders: 문구 누락: 이영희, 박철수 · 본문: Create Next App 주문 목록 주문번호 고객명 상품명 수량 금액 상태 주문일시 3 박도윤 모니터 스탠드 1 32,000 원 결제 대기 2026."
+E4-a,2,1,order-detail,S4,sonnet,True,none,229589,24,2312,256814,29489,10001,False,False,,9967,,,0.22729,통과
+E4-a,3,1,order-summary,S4,sonnet,True,none,733299,56,3314,1495111,92540,38102,True,False,,38056,,,0.91459,통과
+E4-a,4,2,orders-list,S4,sonnet,True,none,229553,20,2234,163271,21760,8639,False,False,,8601,,,0.17553,통과
+E4-a,5,2,order-detail,S4,sonnet,True,none,294549,34,2332,556133,37080,12556,False,False,,12518,,,0.3317,통과
+E4-a,6,2,order-summary,S4,sonnet,True,none,560851,47,3296,1040567,79272,32551,True,False,,32482,,,0.73485,통과
+E4-a,7,3,orders-list,S4,sonnet,True,none,255367,32,2258,410870,32834,11685,False,False,,11653,,,0.28327,통과
+E4-a,8,3,order-detail,S4,sonnet,True,none,213481,22,2308,219404,27223,8843,False,False,,8810,,,0.20256,통과
+E4-a,9,3,order-summary,S4,sonnet,True,none,728055,60,3322,1749528,87926,34993,True,False,,34932,,,0.92279,통과
+E4-b,1,1,orders-list,S4,haiku,False,acceptance,702267,90,15582,1675621,94249,48090,True,False,,,,,0.54141,web /orders: 문구 누락: 박철수 · 본문: Create Next App 주문 목록 로딩 중... requestAnimationFrame(function(){$RT=performance.now()}); se
+E4-b,2,1,order-detail,S4,haiku,False,integration_gate,775072,85,15668,1599313,94499,45773,True,False,,,,,0.52259,합친 결과가 게이트를 통과하지 못했습니다: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-b,3,1,order-summary,S4,haiku,True,none,730008,89,15500,1693147,113029,41483,True,True,2,3568,,,0.63699,통과
+E4-b,4,2,orders-list,S4,haiku,False,lane_gate,936081,57,10408,975878,82510,27380,False,True,2,5637,,,0.45322,orders-list-web: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-b,5,2,order-detail,S4,haiku,False,lane_gate,240473,48,10523,550688,45551,24553,False,False,,,,,0.2453,order-detail-api: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-b,6,2,order-summary,S4,haiku,False,integration_gate,614824,66,15355,890976,66039,30527,True,False,,,,,0.33964,합친 결과가 게이트를 통과하지 못했습니다: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-b,7,3,orders-list,S4,haiku,False,lane_gate,378661,59,10440,1242268,102882,32471,False,True,2,4049,,,0.53344,orders-list-web: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-b,8,3,order-detail,S4,haiku,False,lane_gate,276549,60,10645,1181574,62141,28076,False,False,,,,,0.34686,order-detail-api: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-b,9,3,order-summary,S4,haiku,False,integration_gate,505660,54,15211,647466,95032,25465,True,True,2,1652,,,0.39215,합친 결과가 게이트를 통과하지 못했습니다: failed 검증 게이트를 3번 통과하지 못했습니다
+E4-c,1,1,orders-list,S2,sonnet,True,none,229565,24,2302,252547,29045,8050,False,False,,8015,1,2647,0.2058,통과
+E4-c,2,1,order-detail,S2,sonnet,True,none,210582,24,2372,226625,25328,7372,False,False,,7347,1,2814,0.18466,통과
+E4-c,3,1,order-summary,S2,sonnet,True,none,249407,26,2309,273683,19237,7241,False,False,,7195,1,2691,0.17737,통과
+E4-c,4,2,orders-list,S2,sonnet,True,none,214328,24,2302,244925,23030,6695,False,False,,6660,1,2642,0.17568,통과
+E4-c,5,2,order-detail,S2,sonnet,True,none,205676,24,2372,218290,24722,6986,False,False,,6952,1,2821,0.17757,통과
+E4-c,6,2,order-summary,S2,sonnet,True,none,233400,21,2299,207004,16586,5727,False,False,,5681,1,2701,0.14225,통과
+E4-c,7,3,orders-list,S2,sonnet,True,none,245422,37,2328,481700,28944,9369,False,False,,9337,1,2650,0.26463,통과
+E4-c,8,3,order-detail,S2,sonnet,True,none,217349,25,2374,279926,27593,7759,False,False,,7723,1,2827,0.2048,통과
+E4-c,9,3,order-summary,S2,sonnet,True,none,213481,22,2301,177925,18070,5638,False,False,,5596,1,2700,0.13928,통과
