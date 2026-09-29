@@ -39,6 +39,8 @@ interface DraftRun {
   request: string;
   currentTurn?: number;
   turns: Array<{ turn: number; contextTokens: number; output: number; cacheRead: number }>;
+  /** 턴별로 비운 도구 결과(횟수·글자). 비우기는 그 턴의 모델 호출 전에 일어나 turn_usage보다 먼저 온다 */
+  clearedByTurn: Map<number, { count: number; chars: number }>;
   pending: PendingCall[];
   results: RecordedResult[];
   usage: AgentUsage;
@@ -55,7 +57,7 @@ export function buildTokenReports(events: readonly StudioEvent[], prices?: Token
 
   for (const event of events) {
     if (event.type === 'run_started') {
-      current = { runId: event.runId, request: event.request, turns: [], pending: [], results: [], usage: emptyUsage() };
+      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), pending: [], results: [], usage: emptyUsage() };
       runs.push(current);
       continue;
     }
@@ -86,6 +88,12 @@ function applyAgentEvent(run: DraftRun, event: Exclude<AgentEvent, { type: 'toke
     case 'turn_usage':
       run.turns.push({ turn: event.turn, contextTokens: event.contextTokens, output: event.outputTokens, cacheRead: event.cacheReadTokens });
       break;
+    case 'context_cleared': {
+      // 같은 턴에 여러 번 올 수 있어 더한다(보통은 한 번)
+      const previous = run.clearedByTurn.get(event.turn) ?? { count: 0, chars: 0 };
+      run.clearedByTurn.set(event.turn, { count: previous.count + event.clearedCount, chars: previous.chars + event.clearedChars });
+      break;
+    }
     case 'tool_call':
       run.pending.push({ name: event.name, input: event.input, turn: run.currentTurn });
       break;
@@ -108,6 +116,7 @@ function finalize(run: DraftRun, prices: TokenPrices | undefined): TokenReport {
   for (const turn of run.turns) {
     const results = run.results.filter((result) => result.turn === turn.turn);
     const biggest = results.reduce<RecordedResult | undefined>((max, result) => (max === undefined || result.chars > max.chars ? result : max), undefined);
+    const cleared = run.clearedByTurn.get(turn.turn);
     turns.push({
       turn: turn.turn,
       contextTokens: turn.contextTokens,
@@ -115,6 +124,7 @@ function finalize(run: DraftRun, prices: TokenPrices | undefined): TokenReport {
       output: turn.output,
       cacheRead: turn.cacheRead,
       ...(biggest ? { biggestTool: { name: biggest.name, input: summarizeInput(biggest.name, biggest.input), chars: biggest.chars } } : {}),
+      ...(cleared ? { cleared } : {}),
     });
     previous = turn.contextTokens;
   }
@@ -145,6 +155,7 @@ function finalize(run: DraftRun, prices: TokenPrices | undefined): TokenReport {
     warnings: warningsFor(run, turns),
     totals: run.usage,
     cacheHitRatio: cacheHitRatio(run.usage),
+    cleared: clearedTotals(run.clearedByTurn),
   };
   // 단가가 없으면 비용 칸을 비우고 문구만 남긴다
   return prices ? { ...report, estimatedCostUsd: estimateCostUsd(run.usage, prices) } : { ...report, priceNote: '단가 미설정' };
@@ -179,6 +190,17 @@ function warningsFor(run: DraftRun, turns: TokenTurn[]): TokenWarning[] {
   }
   // 읽기 쉽게 턴 순서로 정렬하되, 턴이 없는 경고는 뒤로 보낸다
   return warnings.sort((a, b) => (a.turn ?? Number.MAX_SAFE_INTEGER) - (b.turn ?? Number.MAX_SAFE_INTEGER));
+}
+
+/** 실행 전체에서 오래된 도구 결과를 비운 합계 */
+function clearedTotals(byTurn: Map<number, { count: number; chars: number }>): { count: number; chars: number } {
+  let count = 0;
+  let chars = 0;
+  for (const entry of byTurn.values()) {
+    count += entry.count;
+    chars += entry.chars;
+  }
+  return { count, chars };
 }
 
 function cacheHitRatio(usage: AgentUsage): number {

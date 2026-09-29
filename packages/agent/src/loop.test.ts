@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
@@ -7,6 +7,7 @@ import type { OpenApiDocument } from './contract-diff';
 import { runAgent, type AgentEvent, type ModelClient, type RunAgentOptions } from './loop';
 import { ScriptedModelClient } from './scripted-client';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
+import { CLEARED_TOOL_RESULT_PREFIX } from './context-clearing';
 
 let project: LoadedProject;
 
@@ -492,5 +493,136 @@ describe('runAgent', () => {
 
     expect(result.status).toBe('done');
     expect(client.requests[0]!.messages.some((m) => typeof m.content === 'string' && m.content.includes('[진행 중 지시]'))).toBe(false);
+  });
+
+
+
+  describe('오래된 도구 결과 비우기', () => {
+    /** 도구 결과가 세 턴에 걸쳐 쌓이는 스크립트. 세 번째 턴 직전에 오래된 결과를 비울 수 있다 */
+    function stackedToolResults() {
+      return new ScriptedModelClient([
+        { toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] },
+        { toolCalls: [{ name: 'list_files', input: { path: 'api' } }] },
+        { text: '설명했습니다.' },
+      ]);
+    }
+
+    function toolResultContents(conversation: Parameters<typeof runAgent>[0]['conversation']): string[] {
+      return (conversation ?? []).flatMap((message) =>
+        Array.isArray(message.content)
+          ? message.content.flatMap((block) => (block.type === 'tool_result' && typeof block.content === 'string' ? [block.content] : []))
+          : [],
+      );
+    }
+
+    it('직전 턴의 컨텍스트가 임계치를 넘으면 다음 호출 전에 묶어서 비운다', async () => {
+      const conversation: NonNullable<Parameters<typeof runAgent>[0]['conversation']> = [];
+      const events: AgentEvent[] = [];
+
+      await runAgent({
+        request: '설명해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        client: withUsage(stackedToolResults()),
+        conversation,
+        // 기본 정책(최근 4개 유지)으로는 두 개뿐이라 비우지 않으므로, 이 실행만 좁혀서 확인한다
+        contextClearing: { triggerTokens: 1_000, keepRecent: 1, clearAtLeastChars: 10 },
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      });
+
+      const cleared = events.filter((event) => event.type === 'context_cleared');
+      expect(cleared).toHaveLength(1);
+      expect(cleared[0]).toMatchObject({ turn: 3, clearedCount: 1 });
+      // 첫 도구 결과만 표시 문구로 바뀌고, 최근 결과는 그대로 남는다
+      const contents = toolResultContents(conversation);
+      expect(contents).toHaveLength(2);
+      expect(contents[0]!.startsWith(CLEARED_TOOL_RESULT_PREFIX)).toBe(true);
+      expect(contents[1]!.startsWith(CLEARED_TOOL_RESULT_PREFIX)).toBe(false);
+      // tool_use와 짝이 맞는 tool_result는 그대로 남아 있어야 한다(API 규칙)
+      const ids = conversation.flatMap((message) => (Array.isArray(message.content) ? message.content.flatMap((block) => (block.type === 'tool_result' ? [block.tool_use_id] : [])) : []));
+      expect(ids).toHaveLength(2);
+    });
+
+    it('임계치를 넘지 않으면 비우지 않는다', async () => {
+      const conversation: NonNullable<Parameters<typeof runAgent>[0]['conversation']> = [];
+      const events: AgentEvent[] = [];
+
+      await runAgent({
+        request: '설명해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        client: withUsage(stackedToolResults()),
+        conversation,
+        contextClearing: { triggerTokens: 1_000_000, keepRecent: 1, clearAtLeastChars: 10 },
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      });
+
+      expect(events.some((event) => event.type === 'context_cleared')).toBe(false);
+      expect(toolResultContents(conversation).every((content) => !content.startsWith(CLEARED_TOOL_RESULT_PREFIX))).toBe(true);
+    });
+
+    it('기본은 꺼져 있다(정책도 환경 변수도 없으면 비우지 않는다)', async () => {
+      const conversation: NonNullable<Parameters<typeof runAgent>[0]['conversation']> = [];
+      const events: AgentEvent[] = [];
+
+      await runAgent({
+        request: '설명해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        client: withUsage(stackedToolResults()),
+        conversation,
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      });
+
+      expect(events.some((event) => event.type === 'context_cleared')).toBe(false);
+    });
+
+    it('B_STUDIO_CONTEXT_CLEARING=on이면 기본 정책(최근 4개 유지·20,000자)으로 켜지고, false를 넘기면 그보다 우선해 꺼진다', async () => {
+      // 기본 정책은 최근 4개를 남기므로, 결과 6개(각 12,000자로 잘림)를 쌓아 오래된 2개(24,000자)를 비우게 한다
+      const files = ['api/src/big-a.txt', 'api/src/big-b.txt'];
+      for (const file of files) await writeFile(path.join(project.root, file), 'x'.repeat(30_000));
+      const stacked = () =>
+        new ScriptedModelClient([...[0, 1, 0, 1, 0, 1].map((index) => ({ toolCalls: [{ name: 'read_file', input: { path: files[index]! } }] })), { text: '설명했습니다.' }]);
+      // 60k 임계치를 넘기려면 입력이 커야 한다: input 60,000
+      const big = (scripted: ScriptedModelClient): ModelClient =>
+        withUsageSequence(scripted, [{ input_tokens: 60_000, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }]);
+      const previous = process.env.B_STUDIO_CONTEXT_CLEARING;
+      process.env.B_STUDIO_CONTEXT_CLEARING = 'on';
+      try {
+        const events: AgentEvent[] = [];
+        await runAgent({
+          request: '설명해줘',
+          project,
+          sandbox: fakeSandbox(project, []),
+          client: big(stacked()),
+          fetcher: async () => contract,
+          onEvent: collect(events),
+        });
+
+        const cleared = events.filter((event) => event.type === 'context_cleared');
+        expect(cleared).toHaveLength(1);
+        expect(cleared[0]).toMatchObject({ turn: 7, clearedCount: 2 });
+        // 자르기 안내 줄이 붙어 정확히 12,000자는 아니지만, 최소 감소량(20,000)은 넘는다
+        expect((cleared[0] as { clearedChars: number }).clearedChars).toBeGreaterThanOrEqual(20_000);
+
+        const off: AgentEvent[] = [];
+        await runAgent({
+          request: '설명해줘',
+          project,
+          sandbox: fakeSandbox(project, []),
+          client: big(stacked()),
+          contextClearing: false,
+          fetcher: async () => contract,
+          onEvent: collect(off),
+        });
+        expect(off.some((event) => event.type === 'context_cleared')).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.B_STUDIO_CONTEXT_CLEARING;
+        else process.env.B_STUDIO_CONTEXT_CLEARING = previous;
+      }
+    });
   });
 });

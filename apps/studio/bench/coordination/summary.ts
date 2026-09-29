@@ -61,6 +61,8 @@ export interface BenchRow {
   explore: { filesReadTotal: number; filesReadUnionAcrossLanes: number; readCallsTotal: number };
   /** 검증기가 낸 실패 서명 합계 */
   failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
+  /** 오래된 도구 결과를 묶어서 비운 합계(레인·통합). 비우기를 끄면 0 */
+  contextCleared: { count: number; chars: number };
   metrics?: TaskPlanMetrics;
   acceptance?: AcceptanceResult[];
   success: boolean;
@@ -75,6 +77,8 @@ export interface BenchRow {
 export interface SummaryMeta {
   backend: string;
   requestedModel: string;
+  /** 오래된 도구 결과 비우기를 켰는지. 기본 off(ADR-055 보강) */
+  contextClearing?: boolean;
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'environment', 'timeout', 'unknown'];
@@ -104,6 +108,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '읽은 파일 수 중앙값',
     '실패 서명 중앙값',
     '반복 실패 중앙값',
+    '비운 도구 결과 중앙값',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -140,6 +145,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         '|',
         count(medianValue(group, (row) => withLaneSessions(row, row.failures.repeatedFailures))),
         '|',
+        count(medianValue(group, (row) => withLaneSessions(row, row.contextCleared.count))),
+        '|',
       ].join(' '),
     );
   }
@@ -154,7 +161,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'}`,
     '',
     '## 과제 × 전략',
     '',
