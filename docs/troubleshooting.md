@@ -1624,8 +1624,14 @@ Configuration cache entry discarded due to serialization error.
 - 디스크(Docker VM 95%)도 처음에 의심했습니다. 하지만 기록 어디에도 `No space left`가 없었고, 429는 직접 재현됐습니다.
 
 ### 해결
-- `downloadDependencies`에 `testRuntimeClasspath`·`testCompileClasspath`를 넣어, 테스트 의존성도 이미지의 읽기 전용 캐시에 굽습니다.
-- 이제 샌드박스는 테스트 때문에 Maven Central에 가지 않습니다.
+- `downloadDependencies`에 `testRuntimeClasspath`·`testCompileClasspath`를 넣어, 테스트 의존성도 이미지의 읽기 전용 캐시에 굽습니다. 예제와 Spring Boot 템플릿 둘 다 고쳤습니다(템플릿에도 같은 빈틈이 있었습니다).
+- 이미지의 Gradle 홈에 init 스크립트(`gradle/mirror.init.gradle` → `/gradle-home/init.d`)를 넣어, **Google이 운영하는 Maven Central 공식 미러**(`maven-central.storage-download.googleapis.com`)에서 먼저 받습니다. 미러에 없으면 `build.gradle`의 `mavenCentral()`로 넘어갑니다. 프로젝트의 `build.gradle`은 바꾸지 않습니다.
+- 샌드박스 egress 기본 허용 목록에 미러 호스트를 더했습니다.
+
+### 확인 (2026-09-29 09:30 KST, Maven Central은 여전히 429)
+- 같은 시각 미러는 `200`, `repo.maven.apache.org`·`repo1.maven.org`는 `429`였습니다.
+- 예제 api 이미지를 다시 빌드했습니다. 테스트 의존성(`spring-boot-starter-test-4.1.1.jar`)이 `/cache/gradle-ro`에 구워졌습니다.
+- 그 이미지에서 **네트워크를 끊고**(`docker run --network none`) `./gradlew test --offline`을 돌려 `BUILD SUCCESSFUL in 14s`를 확인했습니다. 샌드박스는 테스트 때문에 밖으로 나가지 않습니다.
 
 ### 재발 방지와 확인
 - 요청 한도가 풀린 뒤 이미지를 다시 빌드하고, 테스트 실행 중 api 컨테이너가 받은 바이트([#94](https://github.com/dj258255/b-studio/issues/94)의 기록)가 줄었는지 확인합니다.

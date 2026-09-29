@@ -13,6 +13,8 @@ export const DEFAULT_EGRESS_ALLOW = [
   'fonts.gstatic.com',
   'repo.maven.apache.org',
   'repo1.maven.org',
+  // Google이 운영하는 Maven Central 공식 미러. Spring Boot 템플릿이 먼저 쓴다(docs/troubleshooting.md 45)
+  'maven-central.storage-download.googleapis.com',
   'plugins.gradle.org',
   'plugins-artifacts.gradle.org',
   'services.gradle.org',
