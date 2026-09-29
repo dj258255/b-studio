@@ -44,6 +44,8 @@ CI는 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)을 기준으로 
 | PR 미리보기·계획 이슈화 | 로컬 Gitea 1.27.3(Docker)에 `repository.ts`의 실제 함수를 직접 호출 | 이슈 3개 생성, `Closes #4`·`#5`가 든 PR 생성, 같은 PR 재요청 시 409 → 기존 PR 재사용, PR 병합 뒤 이슈 #4·#5 `closed`. Gitea는 하위 이슈 API가 없어 `{supported:false}` → 체크리스트로 대체. 스튜디오 화면 흐름은 [#128](https://github.com/dj258255/b-studio/issues/128)로 남김 |
 | 토큰 탭 모델별 비용 | 데모 모드 스튜디오 + 실제 브라우저, 로컬 확인용으로 가공한 세션 기록 복사본 | 모델별 표(haiku $0.0428, sonnet $0.0757), 합계 $0.1184·"모델별 단가", 승격 줄 표시. 토큰 0인 `scripted` 행이 "단가 없음"으로 남는 문제를 찾아 고침([#141](https://github.com/dj258255/b-studio/pull/141)). 390px 확인은 창 크기 조절이 적용되지 않아 못 함 |
 | 기준선·도구 결과 예산·승격 | 실험 E3, 실제 Docker·로컬 Claude Code 구독, 27회 | 그냥 Claude Code(P0) 9/9·성공 1건당 토큰 217,711, b-studio S0 9/9·437,427, Haiku 시작 6/9·승격 0회. S0 캐시 읽기는 E1보다 −34% ([보고서](experiments/2026-09-29-e3-baseline-budget-escalation.md)) |
+| 의존성 캐시 효과 | `pnpm studio boot-probe examples/orders --json`, 실제 Docker. 캐시 없음은 b-studio 공유 캐시 볼륨만 지우고 `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`(다른 프로젝트 캐시는 그대로) | 캐시 없음 58.8초·web 수신 114MB → 캐시 있음 22.6초·4.46MB(수신 −96%, 시간 −62%). 이미지 빌드 단계의 다운로드는 컨테이너 수신에 잡히지 않음 |
+| 계획 모델 계약·수리·승격 | 실험 E4, 실제 Docker·로컬 Claude Code 구독, 27회 | 모델 계약 S2 9/9(계약 호출 토큰 0.9%), 통합 확인을 켠 S4 8/9·수리 4회, Haiku 시작 승격 4회·1/9 ([보고서](experiments/2026-09-29-e4-repair-escalation-model-contracts.md)) |
 
 ## 동시성·부하 확인
 

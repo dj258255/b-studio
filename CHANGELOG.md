@@ -6,6 +6,10 @@
 
 ### 추가
 
+- 세션마다 백엔드(api·Claude Code·Codex·Command Code)를 고르고, 작업 분해의 고정 계획에서 레인마다 다른 백엔드로 한 계획을 돌립니다(`B_STUDIO_BACKENDS`, 기본은 서버 모드 하나). 세션을 이어서 할 때도 지금 서버의 허용 목록을 확인합니다 ([#145](https://github.com/dj258255/b-studio/pull/145)).
+- 게이트가 이번 실행에서 바뀐 Next.js 페이지를 찾아 열어 보는 `workflow.autoPageChecks`를 추가했습니다(기본 끔). 상태가 200이어도 Next.js 오류 화면 문구가 보이면 실패로 봅니다 ([#142](https://github.com/dj258255/b-studio/pull/142)).
+- 화면 확인에 모두 있어야 통과하는 `expectAllText`를 추가했습니다 ([#144](https://github.com/dj258255/b-studio/pull/144)).
+- 샌드박스 이미지만 캐시 없이 빌드하는 `B_STUDIO_SANDBOX_BUILD_NO_CACHE`와 기동 시간·수신 바이트를 재는 `pnpm studio boot-probe`를 추가했습니다. 캐시 측정 절차에서 다른 프로젝트 캐시까지 지우는 `docker builder prune`을 뺐습니다 ([#146](https://github.com/dj258255/b-studio/pull/146)).
 - Command Code 백엔드를 추가했습니다. 로그인된 Command Code CLI를 b-studio 도구만 쓰게 제한해 돌리고, 세션마다 모델을 고릅니다. 실제 계정 실행에서 찾은 "다음 실행에서 세션을 이어받지 못함"을 세션별 고정 상태 폴더로 고쳤습니다 ([#61](https://github.com/dj258255/b-studio/pull/61), 트러블슈팅 47).
 - 싼 모델로 시작하고 게이트가 같은 실패 서명을 두 번 내면 비싼 모델로 올리는 승격을 추가했습니다(기본 끔). 모델별 사용량(`metrics.usageByModel`)을 남기고, 벤치 `--prices`로 모델별 단가를 곱합니다 ([#98](https://github.com/dj258255/b-studio/pull/98), ADR-060).
 - 토큰 탭에 모델별 사용량과 모델별 단가(`B_STUDIO_TOKEN_PRICES_JSON`)로 환산한 비용, 승격 줄을 보이고, 작업 분해 계획 카드에 토큰 합계를 더했습니다 ([#134](https://github.com/dj258255/b-studio/pull/134)).
@@ -41,6 +45,8 @@
 
 ### 수정
 
+- 벤치가 S4의 통합 후 수리를 행과 요약에 기록하지 않던 문제와, 통합 확인이 인수 검사보다 약하던(샘플 값 하나만 보던) 문제를 고쳤습니다 ([#144](https://github.com/dj258255/b-studio/pull/144)).
+- 토큰 탭 모델별 표에 토큰을 쓰지 않은 가짜 모델이 "단가 없음"으로 보이던 문제를 고쳤습니다 ([#141](https://github.com/dj258255/b-studio/pull/141)).
 - 벤치의 P0가 고친 프로젝트 복사본을 되돌리지 않아, 뒤따르는 전략이 이미 구현된 상태에서 시작하던 문제를 고쳤습니다 ([#132](https://github.com/dj258255/b-studio/pull/132), 트러블슈팅 46).
 - 토큰을 쓰지 않은 가짜 모델 때문에 모델별 비용 계산 전체가 "단가 없음"이 되던 문제를 고쳤습니다 ([#135](https://github.com/dj258255/b-studio/pull/135)).
 - 같은 세션 파일에 저장이 겹치면 임시 파일 이름이 부딪혀 저장이 통째로 사라지던 문제를 고쳤습니다. 동시 쓰기·부하 스모크·두 세션 동시 기동을 테스트로 고정했습니다 ([#118](https://github.com/dj258255/b-studio/pull/118), 트러블슈팅 44).
@@ -54,6 +60,7 @@
 
 ### 문서
 
+- 실험 E4 보고서를 추가했습니다. 통합 게이트가 실패를 보자 S4 수리가 4회 시작됐고(3회 성공), Haiku로 시작한 승격은 4회 일어났지만 1/9로 Sonnet만(8/9)보다 나빴습니다. 계획 모델이 쓴 계약으로 S2는 9/9였습니다. ADR-059·ADR-060에 측정 절을, README에 실험 결과 절을 더했습니다.
 - 실험 E3 보고서를 추가했습니다. 같은 과제에서 그냥 Claude Code(P0)는 9/9 성공에 토큰이 b-studio S0의 절반이었고, 도구 결과 예산은 S0의 캐시 읽기를 E1보다 34% 줄였습니다. Haiku로 시작한 승격 조건은 승격이 한 번도 일어나지 않았습니다(게이트가 실패를 보지 못함). ADR-055·ADR-060에 측정 절을 더했습니다.
 - 여러 에이전트를 한곳에서 관리하는 해외 도구(관제·나란히 보기·실행 중 지시)와, 테스트 품질·부하·동시성을 빅테크가 어떻게 재는지 조사한 문서를 추가했습니다(`docs/research/2026-09-29-*`) ([#107](https://github.com/dj258255/b-studio/pull/107), [#119](https://github.com/dj258255/b-studio/pull/119)).
 - 로드맵에 M10~M12 마일스톤과 최근 병합을 반영했습니다 ([#92](https://github.com/dj258255/b-studio/pull/92)).
