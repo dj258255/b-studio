@@ -1,0 +1,132 @@
+import type { AgentUsage } from '@b-studio/agent';
+
+/** 토큰 탭이 주고받는 형태. 서버(token-report)와 화면(token-view)이 함께 쓴다(서버 전용 코드는 담지 않는다) */
+
+/** 100만 토큰당 단가(달러). 네 값이 모두 있어야 비용을 계산한다 */
+export interface TokenPrices {
+  inputPerM: number;
+  outputPerM: number;
+  cacheReadPerM: number;
+  cacheWritePerM: number;
+}
+
+/**
+ * 추정 비용(달러). 청구 금액이 아니라 단가를 넣었을 때의 환산값이다.
+ * 토큰 탭(서버)과 벤치가 같은 계산을 쓰도록 여기(순수 모듈)에 둔다.
+ */
+export function estimateCostUsd(usage: AgentUsage, prices: TokenPrices): number {
+  return (
+    (usage.inputTokens * prices.inputPerM + usage.outputTokens * prices.outputPerM + usage.cacheReadTokens * prices.cacheReadPerM + usage.cacheWriteTokens * prices.cacheWritePerM) /
+    1_000_000
+  );
+}
+
+/**
+ * 단가 표에서 모델 이름에 맞는 단가를 찾는다. 키가 모델 이름에 포함되면 매칭하고, 여러 개면 가장 긴 키를 쓴다.
+ * 예: `{ "haiku-4-5": ... }`는 `claude-haiku-4-5-20251001`에 맞는다
+ */
+export function matchTokenPrices(table: Record<string, TokenPrices>, model: string): TokenPrices | undefined {
+  let best: { key: string; prices: TokenPrices } | undefined;
+  for (const [key, prices] of Object.entries(table)) {
+    if (!model.includes(key)) continue;
+    if (!best || key.length > best.key.length) best = { key, prices };
+  }
+  return best?.prices;
+}
+
+/** `--prices` 파일 JSON을 검증해 단가 표로 만든다. 값이 하나라도 잘못됐으면 오류를 낸다 */
+export function parsePriceTable(input: unknown): Record<string, TokenPrices> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('단가 파일은 { "<모델 이름 일부>": { inputPerM, outputPerM, cacheReadPerM, cacheWritePerM } } 형식이어야 합니다');
+  }
+  const table: Record<string, TokenPrices> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`단가 항목이 올바르지 않습니다: ${key}`);
+    const entry = value as Record<string, unknown>;
+    const read = (name: string): number => {
+      const number = entry[name];
+      if (typeof number !== 'number' || !Number.isFinite(number) || number < 0) throw new Error(`단가 ${key}.${name}은 0 이상의 숫자여야 합니다`);
+      return number;
+    };
+    table[key] = { inputPerM: read('inputPerM'), outputPerM: read('outputPerM'), cacheReadPerM: read('cacheReadPerM'), cacheWritePerM: read('cacheWritePerM') };
+  }
+  if (Object.keys(table).length === 0) throw new Error('단가 파일에 항목이 없습니다');
+  return table;
+}
+
+/**
+ * 모델별 사용량의 비용을 더한다. 단가가 없는 모델이 하나라도 있으면 비용 대신 사유를 돌려준다
+ * (일부만 계산하면 합계가 실제보다 싸 보이므로 아예 쓰지 않는다).
+ */
+export function costForUsageByModel(usageByModel: Record<string, AgentUsage>, table: Record<string, TokenPrices>): { costUsd?: number; costNote?: string } {
+  const models = Object.keys(usageByModel);
+  if (models.length === 0) return {};
+  let total = 0;
+  const missing: string[] = [];
+  for (const model of models) {
+    const prices = matchTokenPrices(table, model);
+    if (!prices) {
+      missing.push(model);
+      continue;
+    }
+    total += estimateCostUsd(usageByModel[model]!, prices);
+  }
+  if (missing.length > 0) return { costNote: `단가 없음: ${missing.join(', ')}` };
+  return { costUsd: total };
+}
+
+export interface TokenTurn {
+  turn: number;
+  contextTokens: number;
+  /** 직전 턴 대비 컨텍스트 증가량. 첫 턴은 contextTokens와 같다(줄어들면 음수일 수 있다) */
+  delta: number;
+  output: number;
+  cacheRead: number;
+  /** 그 턴에서 모델에 간 결과가 가장 큰 도구 */
+  biggestTool?: { name: string; input: string; chars: number };
+  /** 그 턴 직전에 오래된 도구 결과를 묶어서 비운 기록. 비우지 않았으면 없다 */
+  cleared?: { count: number; chars: number };
+}
+
+export interface TokenToolTotal {
+  name: string;
+  calls: number;
+  /** 모델에 간 결과 글자 합 */
+  chars: number;
+  /** 전체 결과 글자에서 이 도구가 차지하는 비중(0-1) */
+  share: number;
+}
+
+export interface TokenBigResult {
+  name: string;
+  input: string;
+  chars: number;
+  rawChars: number;
+  turn?: number;
+}
+
+export type TokenWarningKind = 'big_result' | 'repeated_result' | 'node_modules' | 'context_jump';
+
+export interface TokenWarning {
+  kind: TokenWarningKind;
+  message: string;
+  turn?: number;
+  tool?: string;
+}
+
+export interface TokenReport {
+  runId: string;
+  request: string;
+  turns: TokenTurn[];
+  toolTotals: TokenToolTotal[];
+  biggest: TokenBigResult[];
+  warnings: TokenWarning[];
+  totals: AgentUsage;
+  /** 캐시 읽기 / (입력 + 캐시 읽기 + 캐시 쓰기). 분모가 0이면 0 */
+  cacheHitRatio: number;
+  /** 실행 중 오래된 도구 결과를 비운 합계(횟수·글자). 비운 적이 없으면 0 */
+  cleared: { count: number; chars: number };
+  estimatedCostUsd?: number;
+  /** 단가가 없을 때 화면이 보여줄 문구 */
+  priceNote?: string;
+}

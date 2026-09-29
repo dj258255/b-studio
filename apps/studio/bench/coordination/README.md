@@ -1,12 +1,32 @@
 # 협업 벤치마크 (`pnpm bench:coordination`)
 
-작업 분해의 두 전략을 같은 과제·같은 모델로 반복 실행해 비교할 원자료를 남깁니다.
+작업 분해 전략(S0~S5)과 기준선(P0)을 같은 과제·같은 모델로 반복 실행해 비교할 원자료를 남깁니다.
 
+- **P0 기준선(그냥 Claude Code)**: 작업 분해·조율 없이 Claude Code 하나가 과제 전체를 한 번에 처리합니다. `--backend claude-code` 전용입니다.
 - **S0 직렬화**: api 작업과 web 작업을 한 레인에 넣습니다(web이 api에 의존). web 작업은 api가 바꾼 파일을 같은 세션에서 봅니다.
 - **S1 격리 병렬**: 두 작업을 다른 레인에서 동시에 돌립니다. 서로의 변경을 보지 못합니다(현재 ADR-051 동작).
 - 알고 싶은 것은 "쓰기 범위가 겹치지 않아도 인터페이스로 엮인 작업(api 응답 ↔ web 화면)에서 S1이 통합 뒤 실제로 맞물리는가, 그 대신 시간·토큰은 얼마나 아끼는가"입니다.
 
 결과는 `docs/experiments/`에 실험 보고서 양식으로 옮겨 적습니다(실험 #45).
+
+## 기준선 P0 (그냥 Claude Code)
+
+`--backend claude-code`에서만 쓸 수 있는 비교 기준입니다. 작업 분해·조율 없이 Claude Code 하나가 과제 전체(전체 요청 + api 요청 + web 요청)를 한 번에 처리합니다. "같은 과제를 그냥 Claude Code로 하면 어떻게 되는가"를 S0~S5와 같은 방식으로 재기 위한 것입니다. 다른 백엔드는 Docker·모델을 건드리기 전에 거부합니다.
+
+P0 실행 한 번은 이렇게 돕니다.
+
+1. 새 프로젝트 복사본을 만듭니다(반복마다 처음 상태로 되돌립니다).
+2. 복사본에서 Claude Code를 한 번 돌립니다. 시스템 프롬프트는 Claude Code 프리셋(`{ type: 'preset', preset: 'claude_code' }`), 도구는 `Read`·`Edit`·`Write`·`Glob`·`Grep`, 설정은 복사본의 프로젝트 설정만(`settingSources: ['project']`) 씁니다.
+3. 그 복사본으로 **세션만 만들어** 샌드박스를 띄우고(에이전트 요청 없음) 서비스가 준비되면 기존 인수 검사(`runAcceptance`)를 돌립니다.
+4. 세션·샌드박스를 다른 전략과 같은 경로로 정리합니다(남은 컨테이너 검사 포함).
+
+무엇을 재는지: 토큰(입력·캐시읽기·캐시쓰기·출력), 모델 호출 수, 최대 컨텍스트, 실행 전후 복사본에서 바뀐 파일, 종단 시간, 샌드박스 기동 시간, 인수 검사 결과입니다. 요약 표의 **성공 1건당 토큰** 열로 S0~S5와 같은 기준에서 비교합니다.
+
+**한계 — Bash가 없어 스스로 실행해 볼 수 없습니다.** P0는 모델에게 `Bash`·`WebFetch`·`WebSearch`·`Task`를 주지 않습니다(호스트에서 명령을 돌리지 않게 하려는 것입니다). 그래서 모델이 스스로 빌드·테스트를 돌리거나 서비스를 띄워 확인할 수 없습니다. 결과가 나쁘게 나와도 "모델이 못 만들어서"인지 "스스로 확인할 도구가 없어서"인지 이 실행만으로는 가릴 수 없습니다. 그 확인은 뒤에서 스튜디오가 세션을 띄워 대신 합니다.
+
+```bash
+pnpm bench:coordination --backend claude-code --model sonnet --strategies P0,S0 --tasks orders-list,order-detail,order-summary --repeats 3
+```
 
 ## 실행
 
@@ -40,10 +60,21 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 - `--backend claude-code|codex|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
 - `--model <이름>` — `claude-code`·`codex`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `codex`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CODEX_MODEL`)
-- `--tasks a,b`, `--strategies S0,S1`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
+- `--tasks a,b`, `--strategies P0,S0,S1,S2,S3,S4,S5`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
+  - `--strategies`의 기본값은 `S0,S1`이고 P0는 넣어야 돕니다. `P0`는 `--backend claude-code`에서만 쓸 수 있습니다. `--dry`는 P0를 모릅니다(항상 `S0,S1`만 돕니다)
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
+- `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
 - `--escalate-to <모델>` — `claude-code`에서만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). 다른 백엔드에 주면 시작 전에 오류를 낸다
 - `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
+- `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
+
+`--prices` 파일 형식(키는 모델 이름에 포함되면 매칭합니다. 예 `haiku-4-5`. 값은 100만 토큰당 달러이고, 예시는 형식만 보여 줍니다):
+
+```json
+{
+  "<모델 이름 일부>": { "inputPerM": …, "outputPerM": …, "cacheReadPerM": …, "cacheWritePerM": … }
+}
+```
 
 **claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
 
@@ -64,9 +95,9 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
 
-- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용).
-- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표("승격 건수" 열 포함), 전략별 실패 원인 표.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, 승격 설정(`escalateTo`·`escalateAfter`), git 커밋.
+- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`)
+- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "API 환산 비용($)" 열이 있습니다.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, 승격 설정(`escalateTo`·`escalateAfter`), 단가 파일 경로(`pricesPath`), git 커밋.
 
 행의 `escalation`은 `{ to, after, escalated, attempt? }`입니다. `to`·`after`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).
 

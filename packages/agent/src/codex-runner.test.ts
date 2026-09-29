@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Board } from './coordination';
 import { runCodexAgent, type CodexConfig, type CodexSdk, type CodexThread } from './codex-runner';
 import type { AgentEvent } from './loop';
-import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
+import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;
 /** 이 PC의 진짜 ~/.codex 대신 테스트가 만든 원본 CODEX_HOME. 러너가 여기서 auth.json만 링크한다 */
@@ -284,6 +284,11 @@ describe('runCodexAgent', () => {
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 12, cacheReadTokens: 30, cacheWriteTokens: 3 });
     // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
     expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
+    // turn.completed마다 그 턴 하나의 사용량을 남긴다(컨텍스트 = input + cacheRead + cacheWrite)
+    expect(events.flatMap((event) => (event.type === 'turn_usage' ? [event] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 1, contextTokens: 111 },
+      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 7, cacheReadTokens: 20, cacheWriteTokens: 2, contextTokens: 222 },
+    ]);
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(222);
     // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
@@ -302,25 +307,41 @@ describe('runCodexAgent', () => {
     ).rejects.toThrow('이어받기를 지원하지 않습니다');
   });
 
-  it('승격 옵션을 받으면 지원하지 않는다고 경고를 한 번 낸다', async () => {
-    const { sdk } = fakeCodex([{ steps: [{ text: 'ok' }] }]);
+  it('턴 사이에 실행 중 지시를 다음 턴 입력 뒤에 붙인다', async () => {
+    const { sdk, state } = fakeCodex([
+      {
+        steps: [
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } },
+          { text: '메모를 추가했습니다.' },
+        ],
+      },
+      { steps: [{ text: '지시를 반영했습니다.' }] },
+    ]);
+    const queue = fakeSteering();
     const events: AgentEvent[] = [];
 
     const result = await runCodexAgent({
-      request: '안녕',
-      intent: 'ask',
+      request: '주문에 메모 필드 추가',
       project,
-      sandbox: fakeSandbox(project, []),
+      sandbox: fakeSandbox(project, [false, true]),
       sdk,
-      escalation: { to: 'sonnet' },
+      steering: queue.steering,
       fetcher: async () => contract,
-      onEvent: (event) => events.push(event),
+      onEvent: (event) => {
+        events.push(event);
+        // 첫 턴이 도는 동안 사용자가 지시를 보낸다 → 다음 턴 입력에 들어간다
+        if (event.type === 'tool_result') queue.push('테스트도 추가해줘');
+      },
     });
 
-    expect(result).toMatchObject({ status: 'done' });
-    const warnings = events.filter((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]!.message).toContain('승격을 지원하지 않습니다');
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 1, turns: 2 });
+    expect(state.prompts).toHaveLength(2);
+    // 게이트 피드백 뒤에 지시가 붙는다
+    const second = state.prompts[1]!;
+    expect(second).toContain('[b-studio 검증 게이트]');
+    expect(second).toContain('[진행 중 지시] 테스트도 추가해줘');
+    expect(second.indexOf('[b-studio 검증 게이트]')).toBeLessThan(second.indexOf('[진행 중 지시]'));
+    expect(events.filter((event) => event.type === 'steer_applied')).toHaveLength(1);
   });
 
   it('사용자 ~/.codex 대신 임시 CODEX_HOME을 넘기고, 로그인 파일만 링크한다', async () => {
@@ -370,5 +391,51 @@ describe('runCodexAgent', () => {
     expect(result).toMatchObject({ status: 'done' });
     expect(entries).toEqual([]);
     await expect(stat(tempHome)).rejects.toThrow();
+  });
+
+  it('ask_user가 질문을 남기면 그 턴이 끝날 때 멈추고 awaiting_input으로 끝낸다', async () => {
+    const { sdk } = fakeCodex([
+      { steps: [{ tool: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: false } }], usage: usage(50) },
+    ]);
+    const sandbox = fakeSandbox(project, []);
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox,
+      sdk,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', turns: 1 });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: false });
+    expect(events.find((event) => event.type === 'question')).toBeTruthy();
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    expect(sandbox.restarts).toEqual([]);
+  });
+
+  it('승격 옵션을 받으면 지원하지 않는다고 경고를 한 번 낸다', async () => {
+    const { sdk } = fakeCodex([{ steps: [{ text: 'ok' }] }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '안녕',
+      intent: 'ask',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      escalation: { to: 'sonnet' },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done' });
+    const warnings = events.filter((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.message).toContain('승격을 지원하지 않습니다');
   });
 });

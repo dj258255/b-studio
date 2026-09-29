@@ -16,6 +16,7 @@ import {
   DatabaseBranches,
   describeDatabaseState,
   estimateCost,
+  fetchIssue,
   formatVerificationReport,
   formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
@@ -32,6 +33,7 @@ import {
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
+  workflowStages,
   Workspace,
   type AgentEvent,
   type AgentResult,
@@ -46,6 +48,8 @@ import {
   type EscalationPolicy,
   type GitAuthor,
   type ModelClient,
+  type PullRequestDraft,
+  type RepositoryInfo,
   type RoutingDecision,
   type RemoteSyncResult,
   type ServiceCheck,
@@ -84,6 +88,7 @@ import type {
   CodeSearch,
   CodeTree,
   DesignView,
+  ExportPreview,
   ExportResult,
   ProxyResponse,
   RepositoryView,
@@ -102,6 +107,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
+import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
@@ -128,6 +134,8 @@ type Listener = (event: StudioEvent) => void;
 /** 처리 중인 에이전트 요청 */
 interface ActiveRun {
   id: string;
+  /** 요청을 시작한 시각(ISO). 관제 화면이 진행 시간을 잰다 */
+  startedAt: string;
   /** 사용자가 요청을 취소하면 abort한다. 에이전트가 끝나 체크포인트를 남기기 시작하면 세션에서 떼어 더는 취소를 받지 않는다 */
   cancel: AbortController;
   /** 요청을 시작할 때의 세션 토큰 합계 */
@@ -141,6 +149,11 @@ interface ActiveRun {
   stopReason?: 'user' | 'budget';
   /** 한도로 멈췄을 때 어느 한도인지 */
   limitKind?: 'session' | 'user';
+  /**
+   * 실행 중 지시 큐. 사람이 보는 단일 세션이 이 실행을 시작했을 때만 있다(작업 분해 레인·플릿은 없다).
+   * 러너가 다음 모델 호출 직전에 꺼내 가고, 남은 지시는 실행이 끝날 때 버림으로 기록한다
+   */
+  steering?: SteeringQueue;
 }
 
 interface Session {
@@ -272,6 +285,33 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
     updatedAt,
   };
+}
+
+/** 관제 화면이 세션마다 받는 최근 이벤트 수. 전체 기록을 복사하지 않고 마지막 것만 준다 */
+const OVERVIEW_TAIL = 40;
+
+/**
+ * 관제 화면용: 세션마다 스냅샷과 최근 이벤트 몇 개만 준다(전체 기록을 복사하지 않는다).
+ * 실행 중이면 runningSince(요청 시작 시각)를 함께 준다. 진행 시간과 마지막 활동을 여기서 계산한다.
+ */
+export async function overviewSessions(): Promise<Array<{ snapshot: SessionSnapshot; recent: StudioEvent[]; updatedAt: string; runningSince?: string; lastRequest?: string }>> {
+  await recoverSessions();
+  const tail = (events: readonly StudioEvent[]): StudioEvent[] => events.slice(-OVERVIEW_TAIL);
+  // 마지막 요청은 최근 이벤트에 없을 수 있어(도구 호출이 많으면 잘린다) 전체 기록에서 찾는다
+  const lastRequestOf = (events: readonly StudioEvent[]): string | undefined => {
+    const started = events.findLast((event) => event.type === 'run_started');
+    return started?.type === 'run_started' ? started.request : undefined;
+  };
+  return [
+    ...[...store.sessions.values()].map((session) => ({
+      snapshot: session.snapshot,
+      recent: tail(session.history),
+      lastRequest: lastRequestOf(session.history),
+      updatedAt: session.updatedAt,
+      ...(session.run ? { runningSince: session.run.startedAt } : {}),
+    })),
+    ...[...archived.values()].map((entry) => ({ snapshot: entry.snapshot, recent: tail(entry.history), lastRequest: lastRequestOf(entry.history), updatedAt: entry.data.savedAt })),
+  ];
 }
 
 export async function createSession(
@@ -476,6 +516,17 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
+/**
+ * 세션 기록을 통째로 읽는다. 구독을 등록해 replay(스냅샷 + 기록 + 로그)를 받은 뒤 바로 푼다.
+ * 토큰 탭이 이 기록에서 실행별 보고서를 만든다(token-report). 없는 세션은 subscribe가 404로 알린다.
+ */
+export function sessionHistory(id: string): StudioEvent[] {
+  const events: StudioEvent[] = [];
+  const unsubscribe = subscribe(id, (event) => events.push(event));
+  unsubscribe();
+  return events;
+}
+
 export function sendMessage(
   id: string,
   text: string,
@@ -486,6 +537,8 @@ export function sendMessage(
     writableScope,
     scriptedTurns,
     board,
+    steering,
+    interactive = false,
   }: {
     allowBreaking: boolean;
     by?: string;
@@ -496,6 +549,10 @@ export function sendMessage(
     scriptedTurns?: ScriptedTurn[];
     /** 서버 안에서만 쓴다(레인 조율). 레인 신원으로 감싼 게시판. HTTP로는 받지 않는다 */
     board?: BoardAccess;
+    /** 실행 중 지시를 받을 실행인지. 사람이 보는 단일 세션(메시지 라우트)만 켠다. 레인·플릿·벤치는 켜지 않는다 */
+    steering?: boolean;
+    /** 서버 안에서만 쓴다. true면 되묻기(ask_user) 도구를 넣는다. 사람이 보낸 단일 세션 요청(messages 라우트)만 켠다 */
+    interactive?: boolean;
   },
 ): { runId: string } {
   const session = requireSession(id);
@@ -518,20 +575,27 @@ export function sendMessage(
     );
   }
 
+  // 되묻기(ask_user)는 사람이 보낸 단일 세션 요청에만 켠다. 레인·플릿·벤치·CLI는 도구 목록이 그대로다
   const plan = {
     ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)),
     writableScope,
     board,
+    interactive,
   };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
+    startedAt: new Date().toISOString(),
     cancel: new AbortController(),
     baseTokens: session.snapshot.tokens,
     tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
     by,
+    // 데모(스크립트)는 실행 중 지시를 반영할 모델 호출이 없어 큐를 만들지 않는다
+    ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
   };
   session.run = run;
   session.snapshot.running = true;
+  // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
+  session.snapshot.pendingQuestion = undefined;
   emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined });
   void execute(session, run, request, plan);
   return { runId: run.id };
@@ -550,6 +614,23 @@ export function cancelRun(id: string, runId: string): void {
   session.snapshot.cancelling = 'user';
   emit(session, { type: 'run_cancelling', runId });
   run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+}
+
+/**
+ * 실행 중인 요청에 진행 중 지시를 넣는다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다.
+ * 지금 하던 도구 호출을 끊지 않는다. 사람이 보는 단일 세션(steering 큐가 있는 실행)만 받는다.
+ */
+export function steerRun(id: string, text: string): { runId: string } {
+  const session = requireSession(id);
+  if (session.snapshot.mode === 'demo') throw new StudioError(409, '이 모드는 실행 중 지시를 지원하지 않습니다');
+  const run = session.run;
+  if (!run) throw new StudioError(409, '실행 중이 아닙니다. 새 요청으로 보내세요');
+  if (!run.steering) throw new StudioError(409, '이 실행은 진행 중 지시를 받지 않습니다');
+  const directive = text.trim();
+  if (!directive) throw new StudioError(400, '지시 내용을 입력하세요');
+  run.steering.push(directive);
+  emit(session, { type: 'steer_queued', runId: run.id, text: directive });
+  return { runId: run.id };
 }
 
 export async function stopSession(id: string): Promise<SessionSnapshot> {
@@ -966,6 +1047,11 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
+      // 서비스가 준비된 직후 읽은 기동 중 수신/송신 바이트를 세션 기록에 남긴다(작업 분해 지표도 이 스냅샷에서 읽는다)
+      onBootNetwork: (network) => {
+        session.snapshot.bootNetwork = network;
+        emit(session, { type: 'boot_network', at: new Date().toISOString(), network });
+      },
     });
     const head = session.snapshot.checkpoints[0]!;
     if (!resumed) {
@@ -1005,7 +1091,7 @@ type RunPlan = (
     }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent; escalation?: EscalationPolicy }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[]; board?: BoardAccess };
+) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
@@ -1028,8 +1114,21 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     return { kind: 'model', client: new ScriptedModelClient(question.turns), allowBreaking: false, intent };
   }
   if (!scenario) throw new StudioError(409, '데모 모드에서 실행할 수 있는 요청을 모두 실행했습니다');
+  // 되묻기 답: 대본의 질문에 대한 답이면 이어서 대본을 실행한다(모델 없이 화면 흐름을 확인하는 용도)
+  if (scenario.ask && isDemoAnswer(request, scenario.ask.question)) {
+    return { kind: 'model', client: new ScriptedModelClient(scenario.turns), allowBreaking: scenario.allowBreaking ?? false, maxVerifyAttempts: scenario.maxVerifyAttempts, intent };
+  }
   if (scenario.request !== request) {
     throw new StudioError(409, `데모 모드는 준비된 요청을 순서대로 실행합니다. 다음 요청: "${scenario.request}"`);
+  }
+  // 되묻기 단계가 있으면 먼저 ask_user를 부르는 대본을 돌려, 모델 없이 질문 카드를 보여 준다
+  if (scenario.ask) {
+    return {
+      kind: 'model',
+      client: new ScriptedModelClient([{ text: scenario.ask.question, toolCalls: [{ name: 'ask_user', input: { ...scenario.ask } }] }]),
+      allowBreaking: false,
+      intent,
+    };
   }
   return {
     kind: 'model',
@@ -1038,6 +1137,11 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     maxVerifyAttempts: scenario.maxVerifyAttempts,
     intent,
   };
+}
+
+/** 데모 모드에서 질문 카드의 답으로 보낸 요청인지. 화면은 `[질문] …\n[답] …` 형식으로 보낸다 */
+function isDemoAnswer(request: string, question: string): boolean {
+  return request.startsWith('[질문]') && request.includes('[답]') && request.includes(question);
 }
 
 /** 승격 임계치. 같은 실패 서명 집합이 이만큼 연속으로 나오면 올린다(기본 2) */
@@ -1123,10 +1227,23 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       }
     }
 
+    // 되묻고 멈췄으면 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답은 다음 요청으로 온다
+    if (result.status === 'awaiting_input' && result.question) {
+      session.snapshot.pendingQuestion = {
+        runId: run.id,
+        question: result.question.question,
+        options: result.question.options,
+        allowOther: result.question.allowOther,
+      };
+    }
     if (!ask) {
-      // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-      if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
-      else await revertRun(session, run.id);
+      // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
+      // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
+      if (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok)) {
+        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
+      } else if (result.status !== 'awaiting_input') {
+        await revertRun(session, run.id);
+      }
     }
     finished = { status: result.status, summary: result.summary, turns: result.turns, metrics: result.metrics, durationMs: Math.round(performance.now() - agentStarted) };
   } catch (error) {
@@ -1158,14 +1275,18 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     }
   } finally {
     session.run = undefined;
-    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
-    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask) {
+    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다.
+    // 되묻고 멈춘 경우는 아직 시나리오가 끝나지 않았으므로 다음 단계로 넘기지 않는다(답을 받아 이어서 실행한다)
+    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask && finished?.status !== 'awaiting_input') {
       session.demoIndex += 1;
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
       session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
     }
     session.snapshot.running = false;
     session.snapshot.cancelling = undefined;
+    // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
+    const dropped = run.steering?.take() ?? [];
+    if (!session.stop.signal.aborted && dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
     if (!session.stop.signal.aborted && finished) {
       session.settledConversation = session.conversation.length;
       emit(session, {
@@ -1253,8 +1374,12 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       }),
     // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
     design: designSourceFor(session, run.id),
+    // 되묻기(ask_user) 도구는 사람이 있는 단일 세션 요청에만 넣는다
+    interactive: plan.interactive === true,
     signal,
     onEvent: (event: AgentEvent) => {
+      // 질문은 세션 기록에 따로 남겨 화면이 카드로 그린다(대화 흐름에 남는다)
+      if (event.type === 'question') return emit(session, { type: 'question', runId: run.id, question: event.question, options: event.options, allowOther: event.allowOther });
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
       run.tokens = event.usage;
       // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다
@@ -1291,6 +1416,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       resume: claudeCode.sessionId,
       // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
       model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
+      steering: run.steering,
       // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
       escalation: plan.escalation,
       account: preflight.account,
@@ -1312,6 +1439,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
       // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
       model: process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. Codex는 턴 사이에만 넣는다
+      steering: run.steering,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 알림과 이전 맥락이 그대로 남는다
     codex.notes = [];
@@ -1345,6 +1474,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     client: plan.client,
     conversation: session.conversation,
     maxVerifyAttempts: plan.maxVerifyAttempts,
+    // 실행 중 지시 큐. 없으면(레인·플릿·데모) 지시를 받지 않는다
+    steering: run.steering,
     // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
     escalation: plan.escalation,
   });
@@ -1547,8 +1678,146 @@ export function restoreCheckpoint(id: string, sha: string): void {
   })();
 }
 
+/** PR에 연결할 이슈 번호. 생략은 undefined, 잘못된 값은 400이다 */
+export function parseIssueInput(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 10_000_000) {
+    throw new StudioError(400, 'issue는 1 이상 10,000,000 이하의 정수여야 합니다');
+  }
+  return value;
+}
+
+/**
+ * 요청 본문에서 연결할 이슈 번호 목록을 만든다. 이전 형식 issue(단수)와 issues(배열)를 합치고 중복을 없앤다.
+ * 이슈 입력이 아예 없으면 undefined를 돌려줘, 부르는 쪽이 기본값(통합 세션의 하위 이슈)을 쓸지 정하게 한다
+ */
+export function parseIssueList({ issue, issues }: { issue?: unknown; issues?: unknown }): number[] | undefined {
+  if (issue === undefined && issues === undefined) return undefined;
+  const list: number[] = [];
+  const single = parseIssueInput(issue);
+  if (single !== undefined) list.push(single);
+  if (issues !== undefined && issues !== null) {
+    if (!Array.isArray(issues)) throw new StudioError(400, 'issues는 이슈 번호 배열이어야 합니다');
+    for (const value of issues) {
+      const parsed = parseIssueInput(value);
+      if (parsed === undefined) throw new StudioError(400, 'issues의 각 항목은 1 이상 10,000,000 이하의 정수여야 합니다');
+      list.push(parsed);
+    }
+  }
+  return [...new Set(list)];
+}
+
+type IssueLookupResult = { ok: true; state: 'open' | 'closed'; title: string } | { ok: false; error: string };
+
+/**
+ * 미리보기의 확인 목록을 만든다. 세션 없이 계산할 수 있도록 순수 함수로 둔다.
+ * 어떤 항목이 false여도 올리기를 막지는 않는다. 사람이 보고 판단한다
+ */
+export function buildExportChecks({
+  issues,
+  issueLookups,
+  missing,
+  uncheckpointed,
+  running,
+}: {
+  issues: readonly number[];
+  /** 이슈 번호별 원격 조회 결과. 없는 번호는 확인하지 못한 것으로 둔다 */
+  issueLookups?: ReadonlyArray<{ issue: number; lookup: IssueLookupResult }>;
+  missing: ReadonlyArray<{ shortSha: string; subject: string; stages: readonly string[] }>;
+  uncheckpointed: number;
+  running: boolean;
+}): ExportPreview['checks'] {
+  const checks: ExportPreview['checks'] = [
+    {
+      id: 'issue_linked',
+      ok: issues.length > 0,
+      detail: issues.length === 0 ? '이슈 번호를 넣지 않았습니다. 선택 사항입니다' : `${issues.map((number) => `#${number}`).join(', ')} 이슈를 PR에 연결합니다`,
+    },
+  ];
+
+  if (issues.length === 0) {
+    checks.push({ id: 'issue_open', ok: 'unknown', detail: '이슈 번호를 넣으면 원격 이슈 상태를 확인합니다' });
+  } else {
+    const parts = issues.map((issue) => {
+      const lookup = issueLookups?.find((entry) => entry.issue === issue)?.lookup;
+      if (lookup?.ok) return { ok: lookup.state === 'open', detail: `#${issue} ${lookup.title} (${lookup.state === 'open' ? '열림' : '닫힘'})` };
+      const reason = lookup?.error ?? '알 수 없는 오류';
+      return { ok: 'unknown' as const, detail: `#${issue} 이슈를 확인하지 못했습니다: ${reason}` };
+    });
+    const ok: boolean | 'unknown' = parts.some((part) => part.ok === 'unknown') ? 'unknown' : parts.every((part) => part.ok === true);
+    checks.push({ id: 'issue_open', ok, detail: parts.map((part) => part.detail).join(', ') });
+  }
+
+  checks.push({
+    id: 'stages_passed',
+    ok: missing.length === 0,
+    detail: missing.length === 0 ? '모든 커밋이 필수 단계를 통과했습니다' : `필수 단계 기록이 없는 커밋 ${missing.length}개가 있습니다`,
+  });
+  checks.push({
+    id: 'uncheckpointed_changes',
+    ok: uncheckpointed === 0,
+    detail: uncheckpointed === 0 ? '체크포인트 밖 변경이 없습니다' : `체크포인트로 남기지 않은 변경 ${uncheckpointed}개가 있습니다. 올리기 전에 체크포인트로 남겨야 합니다`,
+  });
+  checks.push({
+    id: 'running',
+    ok: !running,
+    detail: running ? '작업이 진행 중입니다. 끝난 뒤에 올릴 수 있습니다' : '진행 중인 작업이 없습니다',
+  });
+  return checks;
+}
+
+/** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
+async function pullRequestDraft(session: Session, issues: readonly number[]): Promise<PullRequestDraft & { info: RepositoryInfo }> {
+  const info = (await session.checkpoints.repository())!;
+  const draft = buildPullRequest({
+    projectName: session.project.spec.name,
+    base: info.base,
+    branch: info.branch,
+    commits: await session.checkpoints.sessionCommits(),
+    issues,
+    requiredStages: workflowStages(session.project),
+  });
+  return { info, ...draft };
+}
+
+/**
+ * 올리기 전 미리보기. 제목·본문과 확인 목록(이슈 연결·원격 이슈 상태·누락 단계·체크포인트 밖 변경)을 돌려준다.
+ * 누락을 보여 주기만 하고 막지는 않는다. 실제 생성은 exportSession이 같은 함수로 본문을 다시 만들어 한다
+ */
+export async function previewExport(id: string, { issues = [] }: { issues?: readonly number[] } = {}): Promise<ExportPreview> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
+
+  const { info, title, body, missing } = await pullRequestDraft(session, issues);
+  const remote = parseRemote(info.remoteUrl);
+  const issueLookups = await Promise.all(
+    issues.map(async (issue) => ({
+      issue,
+      lookup: await fetchIssue(remote, issue).then(
+        (lookup): IssueLookupResult => ({ ok: true, state: lookup.state, title: lookup.title }),
+        (error: unknown): IssueLookupResult => ({ ok: false, error: describe(error) }),
+      ),
+    })),
+  );
+
+  return {
+    title,
+    body,
+    canCreate: canCreatePullRequest(remote),
+    existingPullRequest: info.pullRequestUrl,
+    issues: [...issues],
+    checks: buildExportChecks({
+      issues,
+      issueLookups,
+      missing,
+      uncheckpointed: (await session.checkpoints.pendingFiles()).length,
+      running: session.snapshot.running,
+    }),
+  };
+}
+
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
-export async function exportSession(id: string, { pullRequest }: { pullRequest: boolean }): Promise<ExportResult> {
+export async function exportSession(id: string, { pullRequest, issues = [] }: { pullRequest: boolean; issues?: readonly number[] }): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
   if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
@@ -1567,12 +1836,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
     let pullRequestError: string | undefined;
     if (pullRequest && !info.pullRequestUrl) {
       try {
-        const { title, body } = buildPullRequest({
-          projectName: session.project.spec.name,
-          base: info.base,
-          branch: info.branch,
-          commits: await session.checkpoints.sessionCommits(),
-        });
+        const { title, body } = await pullRequestDraft(session, issues);
         const result = await createPullRequest(parseRemote(info.remoteUrl), { title, body, base: info.base, branch: info.branch });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
@@ -1591,6 +1855,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
       forced: pushed.forced,
       pullRequest: created,
       pullRequestError,
+      issues: created && issues.length > 0 ? [...issues] : undefined,
     };
     emit(session, { type: 'exported', ...result });
     return result;

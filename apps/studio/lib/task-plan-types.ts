@@ -15,6 +15,8 @@ export interface TaskPlanNoteView {
   lane: string;
   task?: string;
   by: 'model' | 'platform';
+  /** 계층 구조(hierarchical)의 그룹. 작성 레인의 첫 쓰기 범위 */
+  group?: string;
   priority: number;
   at: string;
 }
@@ -73,10 +75,28 @@ export interface TaskPlanLaneView {
   error?: string;
   /** 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
+  /** 기동 중 이 레인 세션이 받은 바이트(서비스 합). 못 읽었으면 없다 */
+  bootRxBytes?: number;
   /** 세션을 만들기 직전 시각 */
   startedAt?: string;
   /** 레인이 성공·실패로 끝난 시각 */
   finishedAt?: string;
+}
+
+/** 원격 저장소에 올린 이슈 하나 */
+export interface TaskPlanIssueRef {
+  number: number;
+  url: string;
+}
+
+/** 승인 뒤 원격 저장소에 올린 추적 이슈와 작업별 하위 이슈 */
+export interface TaskPlanIssuesView {
+  /** 계획 전체를 나타내는 추적 이슈 */
+  tracking?: TaskPlanIssueRef;
+  /** 작업 id → 하위 이슈 */
+  tasks: Record<string, TaskPlanIssueRef>;
+  /** 이슈를 올리다 실패한 이유. 실패해도 계획 실행·상태 전이는 바뀌지 않는다 */
+  error?: string;
 }
 
 export interface TaskPlanIntegrationView {
@@ -90,6 +110,8 @@ export interface TaskPlanIntegrationView {
   error?: string;
   /** 통합 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
+  /** 기동 중 통합 세션이 받은 바이트(서비스 합). 못 읽었으면 없다 */
+  bootRxBytes?: number;
   /** 통합 실행의 지표 */
   run?: TaskPlanRunMetricsView;
   /** S4: 통합 게이트가 실패해 모델에 수리를 한 번 요청한 기록 */
@@ -126,5 +148,7 @@ export interface TaskPlanView {
   board?: TaskPlanBoardView;
   lanes: TaskPlanLaneView[];
   integration?: TaskPlanIntegrationView;
+  /** 승인 때 "이슈로 올리기"를 골랐을 때 만든 추적 이슈·하위 이슈 */
+  issues?: TaskPlanIssuesView;
   error?: string;
 }

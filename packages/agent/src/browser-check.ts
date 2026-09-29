@@ -39,6 +39,8 @@ export interface BrowserPageResult {
   blockedRequests: string[];
   /** 문서 너비가 화면 너비를 넘는 픽셀 수. 0이면 가로 스크롤이 없다 */
   horizontalOverflowPx: number;
+  /** measureLoad를 켰을 때 워밍업 뒤 이동의 load까지 걸린 시간(ms). 재지 못했으면 없다 */
+  loadMs?: number;
   /** 페이지를 연 직후와 각 단계의 결과. 첫 항목은 `open <경로>` */
   steps: BrowserPageStep[];
 }
@@ -56,6 +58,11 @@ export interface BrowserPageOptions {
   allowedOrigins?: string[];
   /** CDP screencast 프레임. 초당 5장 상한으로 거른 뒤 넘긴다 */
   onFrame?: (frame: BrowserFrame) => void;
+  /**
+   * true면 화면 로드를 잰다. 개발 서버 첫 컴파일(콜드 스타트) 때문에 첫 이동이 튀므로
+   * 한 번 워밍업 이동을 한 뒤 다음 이동의 load까지 걸린 시간을 Performance API로 잰다(loadEventEnd - startTime).
+   */
+  measureLoad?: boolean;
   signal?: AbortSignal;
 }
 
@@ -201,7 +208,7 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   };
 }
 
-export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, steps = [], capture = false, allowedOrigins, onFrame, signal }) => {
+export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
   signal?.throwIfAborted();
   const browser = await launchBrowser();
   const abort = () => void browser.close();
@@ -242,6 +249,16 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
     };
     try {
       if (screencast) await screencast.start(viewport.width);
+      if (measureLoad) {
+        // 개발 서버 첫 컴파일(콜드 스타트)이 첫 로드를 튀게 한다. 한 번 워밍업 이동 뒤에 잰다
+        await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+        // 워밍업 이동의 오류·실패 요청은 측정 대상이 아니므로 비운다
+        pageErrors.length = 0;
+        consoleErrors.length = 0;
+        failedRequests.length = 0;
+        failedUrls.clear();
+        blockedUrls.clear();
+      }
       const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
       await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
       await record(`open ${new URL(url).pathname}`, true);
@@ -267,7 +284,21 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       const { text, overflow } = await page.evaluate<{ text: string; overflow: number }>(
         `({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })`,
       );
-      return { status: response?.status() ?? null, text, pageErrors, consoleErrors, failedRequests, blockedRequests: [...blockedUrls], horizontalOverflowPx: overflow, steps: recorded };
+      // 이동의 load까지 걸린 시간. 워밍업 뒤 이동이라 개발 서버 콜드 스타트가 섞이지 않는다
+      const loadMs = measureLoad
+        ? await page.evaluate<number | null>(`(() => { const nav = performance.getEntriesByType('navigation')[0]; return nav ? Math.round(nav.loadEventEnd - nav.startTime) : null; })()`)
+        : null;
+      return {
+        status: response?.status() ?? null,
+        text,
+        pageErrors,
+        consoleErrors,
+        failedRequests,
+        blockedRequests: [...blockedUrls],
+        horizontalOverflowPx: overflow,
+        ...(loadMs !== null ? { loadMs } : {}),
+        steps: recorded,
+      };
     } finally {
       await screencast?.stop();
     }

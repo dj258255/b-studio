@@ -11,10 +11,26 @@
  *  - S3 게시판    레인이 contract·fact를 쓰고 읽음. topology로 읽기 범위 제한
  *  - S4 통합 후 수리 공유 없음. 통합 게이트 실패 시 통합 세션에 모델 수리 요청 한 번
  *  - S5 실패 서명만 작업마다 플랫폼이 검증 실패 서명을 failure 메모로 게시. 레인은 읽기만
+ *
+ *  - P0 기준선   작업 분해 없이 Claude Code 하나가 과제 전체를 한 번에 한다(비교 기준, `--backend claude-code` 전용)
  */
 import type { Topology } from '@b-studio/agent';
 
-export type Strategy = 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5';
+export type Strategy = 'P0' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5';
+
+/** 실행기가 받는 전략 전체(순서대로). P0는 작업 분해를 쓰지 않는다 */
+export const STRATEGIES: readonly Strategy[] = ['P0', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
+
+/** 전략 표시 이름 */
+export const STRATEGY_LABELS: Record<Strategy, string> = {
+  P0: '그냥 Claude Code',
+  S0: 'S0 직렬화',
+  S1: 'S1 격리 병렬',
+  S2: 'S2 계약 먼저',
+  S3: 'S3 게시판',
+  S4: 'S4 통합 후 수리',
+  S5: 'S5 실패 서명만',
+};
 
 export interface AcceptanceCheck {
   service: 'api' | 'web';
@@ -161,6 +177,9 @@ export interface PlannedPlan {
  * - S2~S5: 레인 둘(격리 병렬)에 조율 설정을 얹는다. topology는 S3에서만 쓴다
  */
 export function planFor(task: BenchTask, strategy: Strategy, topology: Topology = 'mesh'): PlannedPlan {
+  // P0는 작업 분해 없이 Claude Code 하나가 과제 전체를 한다(plain-baseline.ts). 레인 계획을 만들지 않는다
+  if (strategy === 'P0') throw new Error('P0(그냥 Claude Code)는 작업 분해 계획을 쓰지 않습니다');
+
   const apiId = `${task.id}-api`;
   const webId = `${task.id}-web`;
   const coordination: PlannedPlan['coordination'] =
@@ -185,7 +204,7 @@ export function planFor(task: BenchTask, strategy: Strategy, topology: Topology 
  * 전략이 실제로는 "공유 없음"(S1)과 같아진다. 그런 실행은 측정이 무의미하므로 시작 전에 막는다(E2 첫 시작에서 실제로 그랬다)
  */
 export function missingCoordinationTools(strategy: Strategy, allowedTools: readonly string[] | undefined): string[] {
-  const needed: Record<Strategy, string[]> = { S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'] };
+  const needed: Record<Strategy, string[]> = { P0: [], S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'] };
   if (!allowedTools) return [];
   return needed[strategy].filter((name) => !allowedTools.includes(name));
 }

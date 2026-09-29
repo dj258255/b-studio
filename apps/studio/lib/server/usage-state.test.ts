@@ -57,6 +57,15 @@ describe('사람별 사용량 기록', () => {
     expect(userUsage('alice', 'day', day, dir)).toEqual({ inputTokens: 20, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0 });
   });
 
+  // 서로 다른 사람의 합계는 같은 파일의 다른 필드다. 한 번에 들어와도 나중 쓰기가 앞의 갱신을 덮어쓰면 안 된다
+  it('동시에 서로 다른 사람의 합계를 더해도 둘 다 남는다', async () => {
+    const dir = await stateDir();
+    const day = new Date(2026, 8, 12);
+    await Promise.all([addUserUsage('alice', usage(3), 'day', day, dir), addUserUsage('bob', usage(5), 'day', day, dir)]);
+    expect(userTokens('alice', 'day', day, dir)).toBe(13);
+    expect(userTokens('bob', 'day', day, dir)).toBe(15);
+  });
+
   it('다른 프로세스가 파일을 바꾸면 다시 읽고, 형식이 틀리면 던진다', async () => {
     const dir = await stateDir();
     const day = new Date(2026, 8, 12);

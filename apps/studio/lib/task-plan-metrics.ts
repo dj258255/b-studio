@@ -11,6 +11,8 @@ export interface TaskPlanMetrics {
   endToEndMs?: number;
   /** 계획 호출 + 모든 작업 실행 + 통합 실행의 합 */
   usage: AgentUsage;
+  /** 모델 이름별 사용량 합계. 승격 등으로 실행 중 모델이 바뀐 경우 모델별 비용을 계산할 수 있게 한다. 없으면 모델을 구분할 수 없다 */
+  usageByModel?: Record<string, AgentUsage>;
   /** 계획 호출 1회를 포함한 모델 호출 수 */
   modelCalls: number;
   /** 모든 실행 중 한 호출의 최대 입력 크기 (계획 호출은 input+cacheRead+cacheWrite로 계산해 포함) */
@@ -19,6 +21,8 @@ export interface TaskPlanMetrics {
   bootMsTotal: number;
   /** 레인 + 통합 기동 시간 중 최댓값 */
   bootMsMax: number;
+  /** 레인 + 통합 기동 중 받은 바이트 합. 읽지 못한 세션은 0으로 둔다 */
+  bootRxBytesTotal: number;
   /** 모든 실행의 모델 호출 시간 합 */
   modelMs: number;
   /** 모든 실행의 도구 실행 시간 합 */
@@ -40,6 +44,14 @@ function emptyUsage(): AgentUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
 
+/** 사용량을 다른 곳에 더한다 */
+function addUsageTo(target: AgentUsage, source: AgentUsage): void {
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.cacheWriteTokens += source.cacheWriteTokens;
+}
+
 function emptyBoardStats(): BoardStats {
   return { posts: 0, rejected: 0, reads: 0, bytesRead: 0, byKind: { contract: 0, failure: 0, fact: 0 } };
 }
@@ -52,6 +64,8 @@ function contextOf(usage: AgentUsage): number {
 /** 계획 하나의 지표를 합계로 낸다. 입력을 바꾸지 않는다 */
 export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   const usage = emptyUsage();
+  const usageByModel: Record<string, AgentUsage> = {};
+  let hasUsageByModel = false;
   let modelCalls = 0;
   let maxContextTokens = 0;
   let modelMs = 0;
@@ -65,13 +79,19 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     usage.cacheReadTokens += value.cacheReadTokens;
     usage.cacheWriteTokens += value.cacheWriteTokens;
   };
+  const addModelUsage = (value: Record<string, AgentUsage> | undefined): void => {
+    if (!value) return;
+    hasUsageByModel = true;
+    for (const [model, entry] of Object.entries(value)) addUsageTo((usageByModel[model] ??= emptyUsage()), entry);
+  };
   const addRun = (
-    run: { usage?: AgentUsage; metrics?: { modelCalls: number; maxContextTokens: number; modelMs: number; toolMs: number; gateMs: number } } | undefined,
+    run: { usage?: AgentUsage; metrics?: { modelCalls: number; maxContextTokens: number; modelMs: number; toolMs: number; gateMs: number; usageByModel?: Record<string, AgentUsage> } } | undefined,
     countModel = true,
   ): void => {
     if (!run) return;
     addUsage(run.usage);
     if (!run.metrics) return;
+    addModelUsage(run.metrics.usageByModel);
     toolMs += run.metrics.toolMs;
     gateMs += run.metrics.gateMs;
     if (!countModel) return;
@@ -96,6 +116,7 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   const boots = [...plan.lanes.map((lane) => lane.bootMs ?? 0), plan.integration?.bootMs ?? 0];
   const bootMsTotal = boots.reduce((sum, value) => sum + value, 0);
   const bootMsMax = boots.reduce((max, value) => Math.max(max, value), 0);
+  const bootRxBytesTotal = [...plan.lanes.map((lane) => lane.bootRxBytes ?? 0), plan.integration?.bootRxBytes ?? 0].reduce((sum, value) => sum + value, 0);
 
   const sessions = plan.lanes.filter((lane) => Boolean(lane.sessionId)).length + (plan.integration?.sessionId ? 1 : 0);
 
@@ -105,10 +126,12 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
   return {
     endToEndMs,
     usage,
+    ...(hasUsageByModel ? { usageByModel } : {}),
     modelCalls,
     maxContextTokens,
     bootMsTotal,
     bootMsMax,
+    bootRxBytesTotal,
     modelMs,
     toolMs,
     gateMs,

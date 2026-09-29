@@ -9,11 +9,14 @@ export {
   type ModelPreflight,
   type RunAgentOptions,
   type RunMetrics,
+  type Steering,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
+  ClaudeCodeUsageTracker,
   describeAccount,
+  describeResultFailure,
   preflightClaudeCode,
   runClaudeCodeAgent,
   type ClaudeCodeAccount,
@@ -30,7 +33,7 @@ export {
   type CodexThread,
 } from './codex-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
-export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
+export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
 export {
   BrowserUnavailableError,
   launchBrowser,
@@ -83,17 +86,25 @@ export {
   type SourceRepository,
 } from './checkpoints';
 export {
+  addSubIssue,
   buildPullRequest,
   canCreatePullRequest,
   compareUrl,
+  createIssue,
   createPullRequest,
+  fetchIssue,
   parseRemote,
   PullRequestError,
   type GitHostKind,
+  type IssueInput,
+  type IssueLookup,
+  type IssueResult,
+  type PullRequestDraft,
   type PullRequestResult,
   type RemoteLocation,
+  type SubIssueResult,
 } from './repository';
-export { buildTools, executeTool, type BoardAccess, type ToolBuildOptions } from './tools';
+export { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {
   Board,
   canRead,
@@ -122,6 +133,34 @@ export {
   type Reader,
   type Topology,
 } from './coordination';
+export {
+  clipCommandOutput,
+  clipText,
+  COMMAND_OUTPUT_BUDGET,
+  createToolResultCache,
+  dedupeResult,
+  HTTP_BODY_BUDGET,
+  invalidateReadCache,
+  isHtmlContent,
+  isRepeatNote,
+  LOGS_OUTPUT_LIMIT,
+  READ_FILE_BUDGET,
+  REPEAT_NOTE_PREFIX,
+  repeatNote,
+  visibleHtml,
+  type ToolResultCache,
+} from './tool-output';
+export {
+  clearedToolResultNote,
+  clearOldToolResults,
+  CLEARED_TOOL_RESULT_PREFIX,
+  contextClearingFromEnv,
+  DEFAULT_CONTEXT_CLEARING,
+  isClearedToolResult,
+  resolveContextClearing,
+  type ClearToolResults,
+  type ContextClearingPolicy,
+} from './context-clearing';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   DEFAULT_WORKFLOW,

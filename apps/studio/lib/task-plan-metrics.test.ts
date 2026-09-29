@@ -47,6 +47,7 @@ function basePlan(): TaskPlanView {
         status: 'done',
         sessionId: 's1',
         bootMs: 100,
+        bootRxBytes: 1_000_000,
         tasks: [
           task('a1', run({ durationMs: 1_000, usage: usage(200, 20, 2_000), metrics: { modelCalls: 2, maxContextTokens: 2_200, modelMs: 100, toolMs: 10, gateMs: 50 } })),
           task('a2', run({ durationMs: 900, usage: usage(300, 30, 3_000), metrics: { modelCalls: 3, maxContextTokens: 3_300, modelMs: 150, toolMs: 20, gateMs: 60 } })),
@@ -58,6 +59,7 @@ function basePlan(): TaskPlanView {
         status: 'done',
         sessionId: 's2',
         bootMs: 300,
+        bootRxBytes: 2_000_000,
         tasks: [
           task('b1', run({ durationMs: 800, usage: usage(400, 40, 4_000), metrics: { modelCalls: 1, maxContextTokens: 4_400, modelMs: 200, toolMs: 30, gateMs: 70 } })),
         ],
@@ -69,6 +71,7 @@ function basePlan(): TaskPlanView {
       files: [],
       deleted: [],
       bootMs: 200,
+      bootRxBytes: 500_000,
       run: run({ durationMs: 700, usage: usage(500, 50), metrics: { modelCalls: 1, maxContextTokens: 500, modelMs: 250, toolMs: 40, gateMs: 80 } }),
     },
   };
@@ -90,6 +93,8 @@ describe('summarizeTaskPlan', () => {
     expect(summary.maxContextTokens).toBe(4_400);
     expect(summary.bootMsTotal).toBe(600);
     expect(summary.bootMsMax).toBe(300);
+    // 레인·통합 기동 수신 합: 1.0MB + 2.0MB + 0.5MB
+    expect(summary.bootRxBytesTotal).toBe(3_500_000);
     // 레인 실행 modelMs 100+150+200. 통합의 250은 세지 않는다
     expect(summary.modelMs).toBe(450);
     // toolMs·gateMs는 통합도 더한다: 10+20+30+40, 50+60+70+80
@@ -121,6 +126,24 @@ describe('summarizeTaskPlan', () => {
     expect(summary.gateMs).toBe(80);
   });
 
+  it('실행들의 모델별 사용량을 합치고, 없으면 필드를 만들지 않는다', () => {
+    const base = basePlan();
+    const plan: TaskPlanView = {
+      ...base,
+      planning: undefined,
+      integration: undefined,
+      lanes: base.lanes.map((lane) => ({
+        ...lane,
+        tasks: lane.tasks.map((task) => ({ ...task, run: task.run ? { ...task.run, metrics: { ...task.run.metrics!, usageByModel: { haiku: usage(10, 1) } } } : undefined })),
+      })),
+    };
+
+    // a1·a2·b1 세 실행의 haiku 사용량이 합쳐진다
+    expect(summarizeTaskPlan(plan).usageByModel).toEqual({ haiku: usage(30, 3) });
+    // 모델별 사용량을 내는 실행이 없으면 필드를 만들지 않는다(basePlan의 실행들에는 없다)
+    expect(summarizeTaskPlan(base).usageByModel).toBeUndefined();
+  });
+
   it('지표가 없는 실행은 usage만 더하고, 승인 전 계획은 endToEndMs가 없다', () => {
     const plan: TaskPlanView = {
       ...basePlan(),
@@ -140,6 +163,7 @@ describe('summarizeTaskPlan', () => {
     expect(summary.toolMs).toBe(0);
     expect(summary.gateMs).toBe(0);
     expect(summary.bootMsTotal).toBe(0);
+    expect(summary.bootRxBytesTotal).toBe(0);
     expect(summary.sessions).toBe(1);
     expect(summary.endToEndMs).toBeUndefined();
   });
