@@ -73,18 +73,18 @@ describe('탭·개수', () => {
     item({ id: 'm1', kind: 'fleet', group: { kind: 'fleet', id: 'f1', href: '/fleets?id=f1' } }),
   ]);
 
-  it('방식과 개입 필요로 거른다', () => {
+  it('개입 필요·작업 중·전체로 거르고, 방식으로는 나누지 않는다', () => {
     expect(filterWork(works, 'all')).toHaveLength(3);
     expect(filterWork(works, 'attention').map((work) => work.key)).toEqual(['session:s1']);
-    expect(filterWork(works, 'single')).toHaveLength(2);
-    expect(filterWork(works, 'fleet').map((work) => work.key)).toEqual(['fleet:f1']);
-    expect(filterWork(works, 'split')).toEqual([]);
-    expect(workCounts(works)).toEqual({ all: 3, attention: 1, single: 2, fleet: 1, split: 0 });
+    expect(filterWork(works, 'working')).toEqual([]);
+    expect(workCounts(works)).toEqual({ attention: 1, working: 0, all: 3 });
+    const busy = groupWork([item({ id: 'b1', state: 'booting' }), item({ id: 'w1', state: 'working' }), item({ id: 'i1' })]);
+    expect(filterWork(busy, 'working').map((work) => work.key).sort()).toEqual(['session:b1', 'session:w1']);
   });
 
   it('개입 필요가 있으면 그 탭부터, 없으면 전체부터 연다', () => {
     expect(initialWorkTab(works)).toBe('attention');
-    expect(initialWorkTab(filterWork(works, 'fleet'))).toBe('all');
+    expect(initialWorkTab(filterWork(works, 'all').filter((work) => !work.attention))).toBe('all');
   });
 });
 

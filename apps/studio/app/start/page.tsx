@@ -30,7 +30,7 @@ const TIME = new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: 
 
 /**
  * 새로 시작·프로젝트 고르기. 앱의 첫 화면(`/`)은 마지막 개발 화면을 바로 열고(ADR-066), 여기서는 다른 프로젝트로 시작하거나
- * 여러 명 비교·나눠서 병렬을 모델·위치까지 골라 보내고, 진행 중 목록과 최근 세션을 본다
+ * 폴더를 열고(ADR-067), 진행 중 목록과 최근 세션을 본다. 방식(비교·병렬)은 고르지 않는다 — 대화에서 에이전트가 제안한다(ADR-068·069)
  */
 export default async function StartPage() {
   const viewer = await pageUser();
@@ -64,7 +64,7 @@ export default async function StartPage() {
 
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">무엇을 만들까요?</h1>
       <p className="mt-3 max-w-[60ch] leading-7 text-muted">
-        다른 프로젝트로 시작하거나, 여러 명에게 같은 요청을 맡겨 비교하거나, 나눠서 병렬로 돌릴 때 씁니다. 앱을 켜면 마지막 개발 화면이 바로 열립니다.
+        다른 프로젝트로 시작하거나 내 폴더를 열 때 씁니다. 앱을 켜면 마지막 개발 화면이 바로 열리고, 나눠서 하거나 여러 안을 비교할 만하면 대화에서 에이전트가 제안합니다.
       </p>
       <Link href="/" className="mt-4 inline-block rounded-control bg-ink px-4 py-2 text-sm font-semibold text-panel hover:bg-ink/85">
         개발 화면 열기

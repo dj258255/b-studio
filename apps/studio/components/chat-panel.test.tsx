@@ -74,6 +74,21 @@ describe("ChatPanel 입력", () => {
     expect(html).toContain(">한 명으로 계속</button>");
   });
 
+  it("제안을 받아 넘긴 요청은 대화 안에 진행 카드로 남는다(화면을 옮기지 않는다)", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "주문 API와 화면" },
+        { type: "question", runId: "r1", question: "나눌까요?", options: ["나눠서 병렬로 하기", "한 명으로 계속"], allowOther: false, proposal: { mode: "split", request: "주문 API와 화면" } },
+        { type: "run_finished", runId: "r1", status: "awaiting_input", summary: "제안" },
+        { type: "question_dismissed", runId: "r1", to: "split", href: "/task-plans?id=p1" },
+      ]),
+    );
+
+    expect(html).toContain("제안을 받아 이 요청을 나눠서 병렬로 넘겼습니다");
+    expect(html).toContain('aria-label="나눠서 병렬 진행"');
+    expect(html).not.toContain("에이전트의 제안 · 나눠서 병렬");
+  });
+
   it("읽기만 스위치는 세션마다 저장된 값을 쓰고, 켜지면 파일을 바꾸지 않는다고 알린다", () => {
     // 저장된 값을 읽는 훅은 브라우저 저장소를 쓴다. 여기서는 저장소가 없는 서버 렌더라 기본값을 본다
     const html = render(view(asked));

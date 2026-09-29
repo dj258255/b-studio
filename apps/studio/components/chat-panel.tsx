@@ -13,6 +13,7 @@ import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionVie
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
+import { HandoffCard } from "./handoff-card";
 import { Markdown } from "./markdown";
 import { formatElementSelections, useElementSelections } from "./selection-context";
 import { useSessionAccess, type SessionAccess } from "./session-access";
@@ -129,7 +130,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   /**
    * 에이전트의 제안(ADR-068)을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘긴다. 홈과 같은 경로(submitEntry)로 만들고,
-   * 넘긴 사실을 세션에 남긴 뒤(질문 카드가 사라지고 대화에 한 줄 남는다) 그 화면으로 간다. 모델은 서버 기본(구독 CLI 모드)을 쓴다
+   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069). 모델은 서버 기본(구독 CLI 모드)을 쓴다
    */
   async function handOff(proposal: { mode: Exclude<ChatMethod, "single">; request: string }, questionRunId: string) {
     setSending(true);
@@ -148,13 +149,14 @@ export function ChatPanel({ view }: { view: SessionView }) {
       setError(result.error);
       return;
     }
-    await fetch(`/api/sessions/${snapshot.id}/handoff`, {
+    const recorded = await fetch(`/api/sessions/${snapshot.id}/handoff`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ runId: questionRunId, to: proposal.mode, href: result.href }),
     }).catch(() => undefined);
     setSending(false);
-    router.push(result.href);
+    // 기록하지 못했으면 카드가 대화에 생기지 않으므로 그 화면으로 보낸다(만든 비교·계획을 잃지 않게)
+    if (!recorded?.ok) router.push(result.href);
   }
 
   /** 실행 중이면 진행 중 지시로, 아니면 이 세션에 요청으로 보낸다 */
@@ -587,14 +589,7 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
       );
 
     case "handoff":
-      return (
-        <p className="text-sm text-muted">
-          제안을 받아 이 요청을 {item.to === "split" ? "나눠서 병렬로" : "여러 명 비교로"} 넘겼습니다 ·{" "}
-          <Link href={item.href} className="underline underline-offset-2 hover:text-ink">
-            {item.to === "split" ? "계획 화면" : "비교 화면"} 열기
-          </Link>
-        </p>
-      );
+      return <HandoffEntry to={item.to} href={item.href} />;
     case "reverted":
       return (
         <div className={`rounded-md border px-3 py-2 text-sm ${item.cancelled ? "border-line" : "border-wait/40 bg-wait/10"}`}>
@@ -770,6 +765,17 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
  * 에이전트가 되물은 질문 카드. 선택지를 누르면 `[질문] …\n[답] …` 요청으로 보내 이 대화를 이어서 만든다.
  * 실행을 붙잡고 기다리지 않고 질문을 남기고 끝난 뒤, 답을 다음 요청으로 받는 흐름의 화면이다
  */
+/** 넘긴 요청의 진행 카드. 대화 안에서 계획 승인·레인 진행·비교 고르기를 한다(ADR-069) */
+function HandoffEntry({ to, href }: { to: "split" | "fleet"; href: string }) {
+  const access = useSessionAccess();
+  return (
+    <div>
+      <p className="mb-1.5 text-sm text-muted">제안을 받아 이 요청을 {to === "split" ? "나눠서 병렬로" : "여러 명 비교로"} 넘겼습니다</p>
+      <HandoffCard href={href} canManage={access.canManage} />
+    </div>
+  );
+}
+
 /**
  * 에이전트의 제안 카드(ADR-068). 첫 선택지는 이 요청을 나눠서 병렬·여러 명 비교로 넘기고, 둘째는 한 명으로 계속한다(보통 답처럼 대화를 이어 감).
  * 이 서버에서 바로 넘길 수 없으면(API 모드는 모델을 골라야 함) 이유와 새로 시작 화면 링크를 보여 준다

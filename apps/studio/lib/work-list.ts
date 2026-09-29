@@ -40,7 +40,8 @@ export interface WorkItem {
   sessionIds: string[];
 }
 
-export type WorkTab = 'all' | 'attention' | WorkMode;
+/** 목록 탭. 방식(한 명·비교·병렬)으로는 나누지 않는다 — 방식은 줄마다 작은 표시로만 보인다(ADR-069) */
+export type WorkTab = 'attention' | 'working' | 'all';
 
 /** 에이전트 항목을 작업 단위로 묶고, 개입 필요 → 작업 중 → 최근 활동 순으로 세운다 */
 export function groupWork(items: readonly AgentItem[]): WorkItem[] {
@@ -99,17 +100,15 @@ function compareWork(a: WorkItem, b: WorkItem): number {
 export function filterWork(works: readonly WorkItem[], tab: WorkTab): WorkItem[] {
   if (tab === 'all') return [...works];
   if (tab === 'attention') return works.filter((work) => work.attention);
-  return works.filter((work) => work.mode === tab);
+  return works.filter((work) => work.state === 'working' || work.state === 'booting');
 }
 
 /** 탭마다 개수. 탭 이름 옆에 보여 준다 */
 export function workCounts(works: readonly WorkItem[]): Record<WorkTab, number> {
   return {
-    all: works.length,
     attention: works.filter((work) => work.attention).length,
-    single: works.filter((work) => work.mode === 'single').length,
-    fleet: works.filter((work) => work.mode === 'fleet').length,
-    split: works.filter((work) => work.mode === 'split').length,
+    working: works.filter((work) => work.state === 'working' || work.state === 'booting').length,
+    all: works.length,
   };
 }
 
