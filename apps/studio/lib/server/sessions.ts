@@ -164,6 +164,9 @@ interface ActiveRun {
   steering?: SteeringQueue;
 }
 
+/** eager: 세션을 만들 때 샌드박스를 바로 켠다(레인·플릿·벤치·이어서 하기). on-demand: 첫 필요 때 켠다(사람이 만든 일반 세션) */
+export type BootMode = 'eager' | 'on-demand';
+
 interface Session {
   snapshot: SessionSnapshot;
   project: LoadedProject;
@@ -230,6 +233,12 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
+  /**
+   * 샌드박스를 필요할 때 켜는 세션인지(사람이 만든 일반 세션). 켜기 전까지 snapshot.status는 idle이다.
+   * 켜는 중에는 bootPromise를 공유해 동시 호출에도 한 번만 켠다
+   */
+  lazy: boolean;
+  bootPromise?: Promise<void>;
   usageTimer?: NodeJS.Timeout;
   /** 에이전트 도구를 거치지 않은 파일 변경(서비스 안에서 명령이 만든 파일 등)을 코드 화면에 알린다 */
   fileWatcher?: FileWatcher;
@@ -345,7 +354,7 @@ export async function createSession(
   projectId: string,
   owner: string,
   workspace: WorkspaceKind = 'copy',
-  options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
+  options: { modelId?: string; backend?: string; boot?: BootMode; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
   // 요청이 백엔드를 고르면 허용 목록에서만 받는다. 없으면 서버 모드라 지금과 같다
@@ -359,7 +368,9 @@ export async function createSession(
   await recoverSessions();
   const release = workspace === 'local' ? claimFolder(source.root) : undefined;
   try {
-    return await startSession({ projectId, owner, workspace, source, mode, backend, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
+    // 기본은 eager(지금과 같다). 사람이 만든 일반 세션의 라우트만 on-demand를 넘긴다
+    const boot = options.boot ?? 'eager';
+    return await startSession({ projectId, owner, workspace, source, mode, backend, boot, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
@@ -373,6 +384,7 @@ async function startSession({
   source,
   mode,
   backend,
+  boot,
   tokenLimit,
   preview,
   modelId,
@@ -386,6 +398,7 @@ async function startSession({
   mode: SessionMode;
   /** 이 세션이 실제로 쓰는 백엔드. 실행 경로가 이 값을 본다 */
   backend: SessionMode;
+  boot: BootMode;
   tokenLimit: number | undefined;
   preview: PreviewConfig | undefined;
   modelId?: string;
@@ -394,6 +407,8 @@ async function startSession({
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
+  // 지연 기동 세션은 샌드박스를 켜지 않고 idle로 둔다
+  const lazy = boot === 'on-demand';
   // 승격 대상 모델 id가 레지스트리에 없으면 샌드박스를 띄우기 전에 거부한다(조용히 승격 없이 돌지 않게)
   if (backend === 'api') apiEscalation();
 
@@ -449,14 +464,15 @@ async function startSession({
       workDir,
       workspace,
       stateDir,
-      status: 'starting',
+      // 지연 기동 세션은 샌드박스가 꺼진 채 idle로 시작한다. 서비스도 꺼진 것으로 보여 준다
+      status: lazy ? 'idle' : 'starting',
       mode,
       backend,
       modelId,
       running: false,
       tokenLimit,
       owner,
-      ...projectViews(project),
+      ...projectViews(project, lazy ? 'stopped' : 'starting'),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[0]?.question?.request : undefined,
       runtime: provider.isolation,
@@ -476,6 +492,7 @@ async function startSession({
     commandCode: { notes: [] },
     openCode: { notes: [] },
     sourceDirtyFiles,
+    lazy,
     previewToken: randomBytes(16).toString('hex'),
   });
   // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
@@ -486,7 +503,8 @@ async function startSession({
   if (preview) ensurePreviewGateway(preview);
   // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
   void flushPersist(session);
-  void boot(session);
+  // 지연 기동 세션은 여기서 켜지 않는다. 첫 만들기 요청·샌드박스 도구·"지금 켜기"가 켠다
+  if (!lazy) session.bootPromise = startBoot(session);
   return session.snapshot;
 }
 
@@ -507,6 +525,7 @@ type NewSession = Pick<
   | 'commandCode'
   | 'openCode'
   | 'sourceDirtyFiles'
+  | 'lazy'
 >;
 
 function newSession(fields: NewSession): Session {
@@ -525,13 +544,14 @@ function newSession(fields: NewSession): Session {
   };
 }
 
-function projectViews(project: LoadedProject): Pick<SessionSnapshot, 'services' | 'externals'> {
+function projectViews(project: LoadedProject, state: 'starting' | 'stopped' = 'starting'): Pick<SessionSnapshot, 'services' | 'externals'> {
   return {
     services: project.managed.map(([name, service]) => ({
       name,
       template: service.template,
       preview: service.preview,
-      state: 'starting',
+      // 지연 기동 세션(idle)은 샌드박스가 꺼져 있으므로 서비스도 꺼진 것으로 시작한다
+      state,
       hasContract: Boolean(service.contract),
     })),
     externals: (project.external ?? []).map(([name, service]) => ({
@@ -603,7 +623,8 @@ export function sendMessage(
   },
 ): { runId: string } {
   const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
+  // 지연 기동 세션(idle)은 요청을 받아들인다. 읽기만 하면 이대로 끝나고, 필요하면 실행 중에 샌드박스를 켠다
+  if (session.snapshot.status !== 'ready' && session.snapshot.status !== 'idle') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
   if (session.snapshot.running) throw new StudioError(409, '이전 요청을 처리하는 중입니다');
   if (session.exporting) throw new StudioError(409, '원격 저장소에 올리는 중입니다');
 
@@ -799,6 +820,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 이 필드가 생기기 전에 저장한 기록에는 없다
       openCode: { sessionId: data.openCode?.sessionId, notes: [...(data.openCode?.notes ?? [])] },
       sourceDirtyFiles: data.sourceDirtyFiles,
+      // 이어서 작업하기는 샌드박스를 바로 켠다(지연 기동이 아니다)
+      lazy: false,
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
@@ -823,7 +846,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     if (preview) ensurePreviewGateway(preview);
     for (const listener of session.listeners) replay(session, listener);
     void flushPersist(session);
-    void boot(session, { discarded, databaseFrom: localEdits ? previous.sha : undefined });
+    // 이어서 작업하기는 만들자마자 켠다. bootPromise를 남겨 지연 기동 경로(ensureBooted)와 같은 규칙을 쓴다
+    session.bootPromise = boot(session, { discarded, databaseFrom: localEdits ? previous.sha : undefined });
     return session.snapshot;
   } finally {
     resuming.delete(id);
@@ -847,7 +871,8 @@ async function recover(): Promise<void> {
     // 같은 세션 폴더를 쓰는 다른 스튜디오 프로세스가 실행 중이면 그 세션은 건드리지 않는다
     if (data.owner.pid !== process.pid && isProcessAlive(data.owner.pid)) continue;
 
-    const interrupted = data.snapshot.status !== 'stopped';
+    // idle은 샌드박스를 한 번도 켜지 않은 세션이라 정리할 컨테이너가 없다. 끼어든 요청도 없다
+    const interrupted = data.snapshot.status !== 'stopped' && data.snapshot.status !== 'idle';
     const entry: ArchivedSession = {
       data,
       snapshot: archivedSnapshot(data, interrupted ? '스튜디오 서버가 다시 시작돼 이전 샌드박스를 정리하는 중입니다.' : undefined),
@@ -1084,6 +1109,38 @@ export async function externalRequest(id: string, name: string, input: { method:
 }
 
 /**
+ * 샌드박스를 켠다. 동시에 여러 번 불려도 한 번만 켜도록 bootPromise를 공유한다.
+ * 이미 켜져 있으면 그냥 돌아오고, 실패·중지 상태면 이유와 함께 거부한다.
+ * 지연 기동 세션의 첫 필요(샌드박스 도구·첫 파일 변경·게이트·"지금 켜기")가 모두 이 한 곳을 지난다
+ */
+async function ensureBooted(session: Session): Promise<void> {
+  if (session.snapshot.status === 'ready') return;
+  if (session.snapshot.status === 'failed') throw new StudioError(409, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
+  if (session.snapshot.status === 'stopped') throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
+  if (!session.bootPromise) {
+    // 처음 켤 때는 의존성 설치 때문에 몇 분 걸릴 수 있다. 켜는 동안 도구 호출·게이트는 이 promise를 기다린다
+    emit(session, { type: 'notice', text: '샌드박스를 켜는 중입니다 (처음이면 1분 안팎)', at: new Date().toISOString() });
+    session.bootPromise = startBoot(session);
+  }
+  await session.bootPromise;
+  // boot가 실패하면 상태가 failed로 바뀐다(위 가드의 타입 좁히기를 피하려고 단언한다)
+  if ((session.snapshot.status as SessionStatus) !== 'ready') throw new StudioError(502, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
+}
+
+/** 상태를 starting으로 옮기고 boot를 시작한다. 이미 starting이면(즉시 기동 세션) 다시 알리지 않는다 */
+function startBoot(session: Session): Promise<void> {
+  if (session.snapshot.status !== 'starting') setStatus(session, 'starting');
+  return boot(session);
+}
+
+/** "지금 켜기": 샌드박스를 지금 켠다. 진행은 이벤트로 알린다(boot API가 쓴다) */
+export async function bootSession(id: string): Promise<SessionSnapshot> {
+  const session = requireSession(id);
+  await ensureBooted(session);
+  return session.snapshot;
+}
+
+/**
  * resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다.
  * databaseFrom은 이어서 작업하기 전에 폴더의 수정을 새 체크포인트로 남겼을 때, 데이터베이스 상태를 가져올 그 앞 체크포인트다
  */
@@ -1308,11 +1365,13 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       };
     }
     if (!ask) {
-      // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
-      // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
-      if (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok)) {
+      // 지연 기동 세션이 샌드박스를 켜지 않았다면 바뀐 것이 없다(바뀌었으면 도구/게이트가 켰다).
+      // 체크포인트도 되돌리기도 샌드박스가 필요하므로, 켠 세션에서만 한다
+      if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok))) {
+        // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
+        // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
-      } else if (result.status !== 'awaiting_input') {
+      } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
         await revertRun(session, run.id);
       }
     }
@@ -1330,7 +1389,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     if (!cancelled) session.run = undefined;
     let reverted: string[] | undefined;
     let revertError: unknown;
-    if (!session.stop.signal.aborted && !ask) {
+    // 샌드박스가 켜져 있을 때만 되돌린다. 지연 기동 세션이 켜지기 전에 실패하면 되돌릴 샌드박스가 없다
+    if (!session.stop.signal.aborted && !ask && session.snapshot.status === 'ready') {
       // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
       const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
       reverted = await revertRun(session, run.id, { cancelled, alsoRestart: unsettled }).catch((cause: unknown) => {
@@ -1476,6 +1536,10 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
   };
 
+  // 지연 기동 세션은 러너에게 ensureSandbox를 넘겨, 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다(게이트는 그 뒤에 만든다).
+  // API·데모(model)·CLI(claude-code·codex·commandcode·opencode) 경로가 같은 규칙을 쓴다
+  const lazyEnsureSandbox = session.lazy ? () => ensureBooted(session) : undefined;
+
   if (plan.kind === 'claude-code') {
     const preflight = await preflightClaudeCode({ cwd: session.project.root });
     if (!preflight.ok) return { preflightError: preflight.reason };
@@ -1483,6 +1547,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const { claudeCode } = session;
     const result = await runClaudeCodeAgent({
       ...shared,
+      ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
       // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수(계획 기본)를 쓴다. 기록용 id는 무시한다
@@ -1507,6 +1572,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const { codex } = session;
     const result = await runCodexAgent({
       ...shared,
+      ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
       // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수를 쓴다. 기록용 id는 무시한다
       model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined),
@@ -1530,6 +1596,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const { commandCode } = session;
     const result = await runCommandCodeAgent({
       ...shared,
+      ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...commandCode.notes, request].join('\n\n'),
       resume: commandCode.sessionId,
       // cmd는 세션을 HOME과 cwd로 찾는다. 둘을 세션마다 고정해 다음 요청이 이어받게 한다(세션 기록·아티팩트와 같은 폴더 아래)
@@ -1554,6 +1621,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const { openCode } = session;
     const result = await runOpenCodeAgent({
       ...shared,
+      ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...openCode.notes, request].join('\n\n'),
       resume: openCode.sessionId,
       // opencode는 세션 DB를 HOME·XDG 아래에 둔다. 둘을 세션마다 고정해 다음 요청이 이어받게 한다(세션 기록·아티팩트와 같은 폴더 아래)
@@ -1599,6 +1667,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     steering: run.steering,
     // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
     escalation: plan.escalation,
+    // 지연 기동 세션이면 샌드박스 도구·첫 파일 변경 때 runAgent가 이걸로 켠다
+    ...(session.lazy ? { ensureSandbox: () => ensureBooted(session) } : {}),
   });
 }
 
@@ -1722,7 +1792,8 @@ function claimFolder(root: string, sessionId?: string): () => void {
 
 /** 체크포인트 시점의 데이터베이스 상태를 남긴다. 실패해도 작업은 계속하고 로그로 알린다 */
 async function saveDatabases(session: Session, sha: string): Promise<DatabaseState[]> {
-  if (!session.databases.enabled) return [];
+  // 샌드박스를 한 번도 켜지 않은 지연 기동 세션은 덤프를 뜰 컨테이너가 없다. 켜는 중(bootPromise)이거나 켜진 뒤에만 뜬다
+  if (!session.databases.enabled || !session.bootPromise) return [];
   const states = await session.databases.save(sha, session.stop.signal);
   for (const state of states) {
     emit(session, {

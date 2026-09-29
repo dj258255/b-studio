@@ -13,6 +13,7 @@ export const SESSION_BACKEND_LABEL: Record<SessionMode, string> = {
 };
 
 export const SESSION_STATUS_LABEL: Record<SessionStatus, string> = {
+  idle: "대기(샌드박스 꺼짐)",
   starting: "샌드박스 준비 중",
   ready: "준비됨",
   failed: "시작 실패",

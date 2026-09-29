@@ -559,3 +559,77 @@ describe('zodShape', () => {
     expect(events.some((event) => event.type === 'steer_applied')).toBe(false);
   });
 });
+
+describe('claude-code 러너의 샌드박스 지연 기동(ensureSandbox)', () => {
+  it('읽기 도구만 쓰는 요청은 샌드박스를 켜지 않고 게이트도 만들지 않는다(계약 기준을 잡지 않는다)', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ tool: 'read_file', input: { path: 'api/src/Order.java' } }, { text: '읽었습니다.' }]] });
+    let boots = 0;
+    let fetches = 0;
+
+    const result = await runClaudeCodeAgent({
+      request: '읽고 설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => {
+        fetches += 1;
+        return contract;
+      },
+      ensureSandbox: async () => void (boots += 1),
+    });
+
+    expect(result).toMatchObject({ status: 'done', summary: '읽었습니다.', changedFiles: [] });
+    expect(boots).toBe(0);
+    // 게이트를 만들지 않았으므로 계약 기준도 잡지 않는다
+    expect(fetches).toBe(0);
+    expect(result.report).toBeUndefined();
+  });
+
+  it('쓰기 도구 첫 호출 때 한 번 켜고, 계약 기준을 그때 잡은 뒤 결과에서 게이트가 돈다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }, { text: '추가했습니다.' }]] });
+    let boots = 0;
+    let fetches = 0;
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '새 클래스 추가',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      sdk,
+      fetcher: async () => {
+        fetches += 1;
+        return contract;
+      },
+      ensureSandbox: async () => void (boots += 1),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(boots).toBe(1);
+    // 게이트를 만들며 계약 기준을 잡았다(샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서).
+    // 기준(1회) + 변경 뒤 계약 확인(1회)이라 2회 이상이다(읽기만 하는 지연 기동은 0회)
+    expect(fetches).toBeGreaterThan(0);
+    expect(result).toMatchObject({ status: 'done' });
+    expect(result.changedFiles).toContain('api/src/New.java');
+    expect(events.some((event) => event.type === 'verify_start')).toBe(true);
+  });
+
+  it('eager(ensureSandbox 없음)는 지금처럼 시작할 때 게이트를 만든다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ tool: 'read_file', input: { path: 'api/src/Order.java' } }, { text: '읽었습니다.' }]] });
+    let fetches = 0;
+
+    const result = await runClaudeCodeAgent({
+      request: '읽어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => {
+        fetches += 1;
+        return contract;
+      },
+    });
+
+    expect(result.status).toBe('done');
+    // 시작할 때 게이트를 만들어 계약 기준을 잡았다(지연 기동이 아니다)
+    expect(fetches).toBe(1);
+  });
+});

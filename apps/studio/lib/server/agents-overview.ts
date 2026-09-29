@@ -16,7 +16,8 @@ import { overviewSessions, sessionBackend } from './sessions';
 import { listTaskPlans } from './task-plans';
 
 export type AgentKind = 'session' | 'lane' | 'fleet';
-export type AgentState = 'working' | 'idle' | 'booting' | 'stopped' | 'error';
+/** dormant: 샌드박스를 아직 켜지 않은 세션(지연 기동). idle: 켜져 있지만 요청을 처리하지 않는다 */
+export type AgentState = 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'error';
 /** 개입이 필요한 이유. 여러 개면 우선순위가 높은 것 하나만 남긴다 */
 export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'error' | 'budget';
 
@@ -226,6 +227,8 @@ function stateOf(row: AgentRow): AgentState {
   if (snapshot.status === 'failed') return 'error';
   if (snapshot.status === 'starting') return 'booting';
   if (snapshot.status === 'stopped') return 'stopped';
+  // 샌드박스를 아직 켜지 않은 세션(지연 기동)은 "대기(샌드박스 꺼짐)"로 보여 준다
+  if (snapshot.status === 'idle') return 'dormant';
   return snapshot.running ? 'working' : 'idle';
 }
 

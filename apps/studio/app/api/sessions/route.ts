@@ -25,7 +25,9 @@ export async function POST(request: Request) {
         : backend === 'opencode'
           ? await validateOpenCodeModelSelection(requestedModel)
           : requestedModel;
-    return Response.json(await createSession(body.projectId, user, workspace, { modelId, backend }), { status: 201 });
+    // 사람이 만든 일반 세션은 샌드박스를 지연 기동한다(첫 만들기 요청·"지금 켜기" 때 켠다).
+    // 레인·플릿·벤치는 createSession을 직접 불러 기본 eager로 켠다
+    return Response.json(await createSession(body.projectId, user, workspace, { modelId, backend, boot: 'on-demand' }), { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

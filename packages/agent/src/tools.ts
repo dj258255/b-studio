@@ -110,12 +110,46 @@ export interface ToolContext {
    * 넘기지 않으면 executeTool이 이 컨텍스트에 하나 만들어 쓴다(러너가 컨텍스트를 실행 내내 재사용할 때).
    */
   toolResults?: ToolResultCache;
+  /**
+   * 샌드박스가 필요한 도구(SANDBOX_TOOLS)를 처음 실행하기 직전에 부른다. 세션을 지연 기동할 때만 넘긴다.
+   * 없으면 이미 켜져 있다고 보고 그냥 실행한다(레인·플릿·벤치·CLI 경로).
+   */
+  ensureSandbox?: () => Promise<void>;
 }
 
 /** 질문 모드에서 거부하는 도구. 게시판에 쓰는 post_note도 상태를 바꾸므로 포함한다(읽기 read_notes는 허용) */
 const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_in_service', 'restart_service', 'post_note']);
 /** 성공하면 읽기 캐시를 비우는 쓰기 도구. 같은 경로를 다시 읽으면 내용이 달라졌을 수 있다 */
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
+export const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
+
+/**
+ * 샌드박스(컨테이너)가 있어야 실행되는 도구. 세션을 지연 기동하는 경우, 이 도구를 처음 부를 때 샌드박스를 켠다
+ * (executeTool의 `ensureSandbox`). 새 도구를 더할 때 분류를 빠뜨리지 않도록 tools.test.ts가 모든 도구가
+ * SANDBOX_TOOLS나 LOCAL_TOOLS 중 하나에 들어 있는지 확인한다.
+ */
+export const SANDBOX_TOOLS: ReadonlySet<string> = new Set([
+  'run_in_service',
+  'restart_service',
+  'service_logs',
+  'service_stats',
+  'http_request',
+  'call_external_api',
+  'get_contract',
+]);
+
+/** 샌드박스 없이 작업 공간·게시판·디자인·되묻기만 다루는 도구. 샌드박스를 켜지 않는다 */
+export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  'list_files',
+  'read_file',
+  'write_file',
+  'edit_file',
+  'delete_file',
+  'post_note',
+  'read_notes',
+  'design_frames',
+  'design_frame',
+  'ask_user',
+]);
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
 const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.';
@@ -293,6 +327,8 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       context.onPolicyDecision?.(decision);
     }
     const args = asRecord(input);
+    // 샌드박스가 필요한 도구의 첫 호출이면 여기서 켠다(켜는 동안 기다린다). 없으면 그냥 실행한다
+    if (context.ensureSandbox && SANDBOX_TOOLS.has(name)) await context.ensureSandbox();
     const outcome = await runTool(name, args, context);
     // 같은 도구·같은 입력의 결과가 앞과 완전히 같으면 본문을 참조로 바꾼다(실행 단위). 모든 러너가 이 한 곳을 지나간다
     const cache = (context.toolResults ??= createToolResultCache());

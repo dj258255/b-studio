@@ -67,7 +67,9 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   const personalLimit = personal?.limit;
   const personalReached = personalLimit !== undefined && personal !== undefined && personal.used >= personalLimit;
-  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
+  // idle(샌드박스 꺼짐)이면 요청을 보낼 수 있다. 읽기만 하면 그대로 끝나고, 필요하면 실행 중에 샌드박스를 켠다
+  const awake = snapshot.status === "ready" || snapshot.status === "idle";
+  const canSend = awake && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
   // 실행 중에는 새 요청 대신 진행 중 지시를 보낸다. 데모(스크립트)는 반영할 모델 호출이 없어 제외한다
   const canSteer = snapshot.status === "ready" && snapshot.running && snapshot.mode !== "demo" && !sending && !budgetReached && !personalReached && access.canManage;
 
@@ -384,6 +386,9 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
           {item.text}
         </p>
       );
+
+    case "notice":
+      return <p className="border-l-[3px] border-line pl-3 text-sm text-muted">{item.text}</p>;
 
     case "steer": {
       const label = item.status === "applied" ? "지시(반영됨)" : item.status === "dropped" ? "지시(적용되지 못함)" : "지시(대기)";
@@ -780,6 +785,7 @@ function hintFor({ snapshot, chat }: SessionView, access: SessionAccess, persona
   if (snapshot.status === "ready" && !snapshot.running && snapshot.tokenLimit !== undefined && totalTokens(snapshot.tokens) >= snapshot.tokenLimit) {
     return "이 세션은 토큰 한도에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요.";
   }
+  if (snapshot.status === "idle") return "샌드박스는 아직 꺼져 있습니다. 첫 만들기 요청이나 미리보기의 '지금 켜기'를 누를 때 켭니다. 질문만 하면 켜지 않습니다.";
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";

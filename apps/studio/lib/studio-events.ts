@@ -3,7 +3,11 @@ import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
-export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
+/**
+ * idle: 샌드박스를 아직 켜지 않았다(첫 만들기 요청·지금 켜기로 켠다). 작업 공간과 체크포인트는 준비돼 있다.
+ * starting: 켜는 중. ready: 켜짐. failed: 켜지 못함. stopped: 중지했다(이어서 작업하면 다시 켠다)
+ */
+export type SessionStatus = 'idle' | 'starting' | 'ready' | 'failed' | 'stopped';
 /** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, commandcode: 이 PC에 로그인한 Command Code, opencode: 이 PC에 설치된 OpenCode CLI, demo: 준비된 스크립트 */
 export type SessionMode = 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'demo';
 /** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
@@ -218,6 +222,8 @@ export interface SessionSummary {
 export type StudioEvent =
   | { type: 'snapshot'; snapshot: SessionSnapshot }
   | { type: 'status'; status: SessionStatus; error?: string }
+  /** 플랫폼이 대화에 남기는 한 줄 안내(예: 샌드박스를 켜는 중). 모델 발언이 아니다 */
+  | { type: 'notice'; text: string; at: string }
   | { type: 'service'; service: string; state: ServiceState; url?: string; previewUrl?: string; detail?: string }
   /** 서비스가 준비된 직후 기동 중 받은/보낸 바이트를 남긴다. 컨테이너 수명 누계이고, edge 프록시는 뺀다 */
   | { type: 'boot_network'; at: string; network: BootNetwork }
