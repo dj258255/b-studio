@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { AgentAttention, AgentItem, AgentKind, AgentState, AgentTotals } from "@/lib/server/agents-overview";
+import { ATTENTION_LABEL, readNotifyEnabled, writeNotifyEnabled } from "@/lib/attention-notify";
 import { Dot, TONE_TEXT, type Tone } from "./status";
 
 /** 관제 화면이 다시 읽는 간격. 보이는 탭일 때만 읽는다 */
@@ -14,14 +15,6 @@ const STATE: Record<AgentState, { label: string; tone: Tone }> = {
   idle: { label: "대기", tone: "idle" },
   stopped: { label: "중지", tone: "idle" },
   error: { label: "오류", tone: "fail" },
-};
-
-const ATTENTION: Record<AgentAttention, string> = {
-  question: "답을 기다립니다",
-  approval: "계획 승인을 기다립니다",
-  gate_failed: "검증 실패",
-  error: "오류",
-  budget: "토큰 한도",
 };
 
 /** 실패에 가까운 사유만 빨강, 나머지는 확인 중 색 */
@@ -92,6 +85,7 @@ export function AgentsOverview({ initial }: { initial: { items: AgentItem[]; tot
         <span className="font-medium">작업 중 {data.totals.working}</span>
         <span className={data.totals.attention > 0 ? "font-medium text-fail" : "text-muted"}>개입 필요 {data.totals.attention}</span>
         <span className="text-muted">토큰 합 {formatCount(totalTokens(data.totals.tokens))}</span>
+        <NotifyButton />
         <span className="ml-auto text-xs text-muted" aria-live="polite">
           {updatedAt ? `마지막 갱신 ${timeOf(updatedAt)}` : "…"}
         </span>
@@ -146,7 +140,7 @@ function AgentRow({ item }: { item: AgentItem }) {
             <span className={`text-sm font-medium ${TONE_TEXT[state.tone]}`}>{state.label}</span>
           </span>
           <span className="glass-soft rounded-full px-2 py-0.5 text-xs font-medium text-muted">{KIND[item.kind]}</span>
-          {item.attention && <span className={`text-sm font-medium ${ATTENTION_TONE[item.attention]}`}>{ATTENTION[item.attention]}</span>}
+          {item.attention && <span className={`text-sm font-medium ${ATTENTION_TONE[item.attention]}`}>{ATTENTION_LABEL[item.attention]}</span>}
           <span className="ml-auto text-xs text-muted">{timeOf(item.lastActivityAt)}</span>
         </div>
         <p className="mt-1.5 font-medium break-words">{item.title}</p>
@@ -159,6 +153,54 @@ function AgentRow({ item }: { item: AgentItem }) {
         </p>
       </Link>
     </li>
+  );
+}
+
+type NotifyState = "off" | "on" | "denied" | "unsupported";
+
+// 권한·설정은 React 바깥 상태라 구독으로 읽는다(SSR에는 window가 없다). 설정을 바꾸면 emit으로 다시 읽게 한다
+const notifyListeners = new Set<() => void>();
+function emitNotifyChange(): void {
+  for (const listener of notifyListeners) listener();
+}
+function snapshotNotify(): NotifyState {
+  if (typeof Notification === "undefined") return "unsupported";
+  if (readNotifyEnabled(window.localStorage) && Notification.permission === "granted") return "on";
+  if (Notification.permission === "denied") return "denied";
+  return "off";
+}
+function subscribeNotify(listener: () => void): () => void {
+  notifyListeners.add(listener);
+  return () => notifyListeners.delete(listener);
+}
+
+/** 브라우저 알림을 켜는 버튼. 거절·미지원이면 버튼 문구로 알린다 */
+function NotifyButton() {
+  const state = useSyncExternalStore(subscribeNotify, snapshotNotify, () => "off" as NotifyState);
+
+  async function toggle() {
+    if (typeof Notification === "undefined") return;
+    if (state === "on") {
+      writeNotifyEnabled(window.localStorage, false);
+      emitNotifyChange();
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    if (permission === "granted") writeNotifyEnabled(window.localStorage, true);
+    emitNotifyChange();
+  }
+
+  const label = state === "on" ? "알림 켜짐" : state === "denied" ? "알림이 차단됨" : state === "unsupported" ? "이 브라우저는 알림을 지원하지 않습니다" : "알림 켜기";
+  return (
+    <button
+      type="button"
+      onClick={() => void toggle()}
+      disabled={state === "unsupported"}
+      title={state === "denied" ? "브라우저 설정에서 이 사이트의 알림을 허용하세요" : undefined}
+      className={`glass-soft rounded-control px-3 py-1 text-xs font-medium ${state === "on" ? "text-ink" : "text-muted hover:text-ink"} disabled:opacity-70`}
+    >
+      {label}
+    </button>
   );
 }
 
