@@ -205,10 +205,11 @@ describe('세션 백엔드 확정은 두 번 불러도 같다', () => {
 });
 
 describe('자가 확인 범위(B_STUDIO_SELF_CHECK)', () => {
-  it('설정하지 않거나 full이면 지금과 같고, lean만 받는다', () => {
-    expect(selfCheckMode({})).toBe('full');
-    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: 'full' })).toBe('full');
+  it('설정하지 않으면 lean(ADR-064), full을 주면 이전 동작이다', () => {
+    expect(selfCheckMode({})).toBe('lean');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: '' })).toBe('lean');
     expect(selfCheckMode({ B_STUDIO_SELF_CHECK: ' lean ' })).toBe('lean');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: 'full' })).toBe('full');
   });
 
   it('모르는 값은 조용히 full로 떨어뜨리지 않고 설정 오류로 알린다', () => {

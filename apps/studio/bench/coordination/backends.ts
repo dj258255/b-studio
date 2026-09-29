@@ -83,7 +83,10 @@ export function resolveVerify(value: string | undefined): BenchVerify {
   throw new Error(`--verify는 full 또는 light여야 합니다 (지금 값: ${value})`);
 }
 
-/** 자가 확인 범위(--self-check). 기본 full(지금과 같다), lean이면 B_STUDIO_SELF_CHECK=lean으로 모든 세션에 적용한다 */
+/**
+ * 자가 확인 범위(--self-check). 벤치 기본은 full이다 — 스튜디오 기본(lean, ADR-064)과 다르지만 E1~E7과 같은 조건으로 비교하려고 둔다.
+ * 벤치는 이 값을 B_STUDIO_SELF_CHECK에 명시적으로 넣어 모든 세션에 적용한다
+ */
 export function resolveSelfCheck(value: string | undefined): SelfCheckMode {
   const trimmed = value?.trim().toLowerCase();
   if (trimmed === undefined || trimmed === '' || trimmed === 'full') return 'full';
