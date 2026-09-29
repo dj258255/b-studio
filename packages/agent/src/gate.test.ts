@@ -4,10 +4,12 @@ import { PNG } from 'pngjs';
 import type { ExecResult } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { StepFailedError, type BrowserPageOptions, type BrowserPageResult } from './browser-check';
-import { VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
+import { StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
+import { autoPageCheck, nextErrorMarker, VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
+import { signatureFromCheck, signatureKey } from './coordination/signature';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
+import type { WorkflowCheck } from './workflow';
 import { Workspace } from './workspace';
 
 /** 단색 배경에 원하는 색을 칠한 PNG 버퍼를 만든다 */
@@ -38,7 +40,7 @@ function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
 
 async function setup(
   target: LoadedProject,
-  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher } = {},
+  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
   const commands: string[][] = [];
@@ -56,6 +58,7 @@ async function setup(
     maxVerifyAttempts: 3,
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
+    ...(options.browser ? { browserRunner: options.browser } : {}),
     onEvent: (event) => events.push(event),
   });
   return { gate, workspace, events, commands };
@@ -879,5 +882,210 @@ describe('VerificationGate api 값 확인', () => {
 
     const failing = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) } }), { ...rendered, text: '주문 목록' });
     expect(failFeedback(await failing.check())).toContain("api의 $[0].customerName 값 '홍길동'이 /orders 화면에 없습니다");
+  });
+});
+
+describe('자동 페이지 확인 (autoPageChecks)', () => {
+  /** 자동 페이지 확인은 Next.js(nextjs) 관리형 서비스가 필요하다. 예제 픽스처에 web 서비스를 더한다 */
+  function nextjs(target: LoadedProject, workflow: Partial<WorkflowSpec>): LoadedProject {
+    return {
+      ...target,
+      spec: { ...target.spec, workflow },
+      managed: [...target.managed, ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' }]],
+    } as unknown as LoadedProject;
+  }
+
+  /** 설정의 기본값을 채운 autoPageChecks. 테스트마다 필요한 값만 바꾼다 */
+  function auto(over: Partial<NonNullable<WorkflowSpec['autoPageChecks']>> = {}): NonNullable<WorkflowSpec['autoPageChecks']> {
+    return { service: 'web', mode: 'http', expectStatus: 200, maxPages: 5, ...over };
+  }
+
+  it('이번 실행에서 바뀐 페이지를 찾아 열어 보고, 500이면 자동 표시와 함께 실패로 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return url.includes('/dashboard') ? { status: 500, text: 'Internal Server Error' } : { status: 200, text: '주문 목록' };
+      },
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+    await workspace.write('web/app/orders/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(requested.some((url) => url.endsWith('/dashboard'))).toBe(true);
+    expect(requested.some((url) => url.endsWith('/orders'))).toBe(true);
+    const autoCheck = gate.checks.find((check) => check.name === 'web /dashboard (자동)')!;
+    expect(autoCheck).toMatchObject({ stage: 'browser_check', ok: false });
+    expect(autoCheck.detail).toContain('자동 페이지 /dashboard: HTTP 500 (기대 200)');
+    expect(gate.checks.find((check) => check.name === 'web /orders (자동)')!.ok).toBe(true);
+    expect(gate.passedStages.has('browser_check')).toBe(false);
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('자동 페이지 /dashboard: HTTP 500 (기대 200)');
+  });
+
+  it('상태가 200이어도 본문이 Next.js 오류 화면이면 실패한다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const { gate, workspace } = await setup(target, {
+      page: async () => ({ status: 200, text: '<main><h2>Application error: a server-side exception has occurred</h2></main>' }),
+    });
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((check) => check.name === 'web /dashboard (자동)')!.detail).toContain(
+      "Next.js 오류 화면: 'Application error: a server-side exception has occurred'",
+    );
+  });
+
+  it('동적 세그먼트는 sampleParams 값으로 채워 열고, 값이 없으면 건너뜀 check로 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ sampleParams: { id: '7' } }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 200, text: '주문 상세' };
+      },
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
+    await workspace.write('web/app/items/[itemId]/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // 값이 있는 동적 세그먼트는 채워서 열고, 없는 라우트는 열지 않는다
+    expect(requested.some((url) => url.endsWith('/orders/7'))).toBe(true);
+    expect(requested.some((url) => url.includes('itemId'))).toBe(false);
+    const skipped = gate.checks.find((check) => check.name === 'web web/app/items/[itemId]/page.tsx (자동, 건너뜀)')!;
+    expect(skipped).toMatchObject({ stage: 'browser_check', ok: true });
+    expect(skipped.detail).toContain("동적 세그먼트 'itemId'의 값이 없습니다");
+  });
+
+  it('이미 선언한 같은 경로는 두 번 열지 않고 건너뜀 check로 남긴다', async () => {
+    const target = nextjs(project, {
+      pageChecks: [{ service: 'web', path: '/dashboard', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false }],
+      autoPageChecks: auto(),
+    });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 200, text: '대시보드' };
+      },
+    });
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.filter((url) => url.endsWith('/dashboard'))).toHaveLength(1);
+    expect(gate.checks.find((check) => check.name === 'web web/app/dashboard/page.tsx (자동, 건너뜀)')!.detail).toContain('두 번 열지 않았습니다');
+    expect(gate.checks.some((check) => check.name === 'web /dashboard (자동)')).toBe(false);
+  });
+
+  it('바뀐 페이지가 없으면 자동 check를 만들지 않는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const { gate, workspace, events } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((check) => check.name.includes('자동'))).toBe(false);
+    // 열어 볼 페이지가 없으면 browser_check 단계를 돌았다고 세지도 않는다
+    expect(stages(events)).not.toContain('browser_check');
+  });
+
+  it('browser 모드면 정한 창 크기로 열고, 오류 표지도 렌더링된 글자에서 본다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser', viewport: { width: 390, height: 844 } }) });
+    const seen: Array<{ url: string; viewport?: { width: number; height: number } }> = [];
+    const rendered = { status: 200, text: '대시보드', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const passing = await setup(target, {
+      browser: async (url, options) => {
+        seen.push({ url, viewport: options.viewport });
+        return rendered;
+      },
+    });
+    await passing.workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await passing.gate.check()).toEqual({ kind: 'pass' });
+    expect(seen[0]!.viewport).toEqual({ width: 390, height: 844 });
+
+    const failing = await setup(target, { browser: async (url, options) => ({ ...rendered, url, viewport: options.viewport, text: 'Unhandled Runtime Error' }) });
+    await failing.workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+    expect(await failing.gate.check()).not.toEqual({ kind: 'pass' });
+    expect(failing.gate.checks.find((check) => check.name === 'web /dashboard (자동)')!.detail).toContain("Next.js 오류 화면: 'Unhandled Runtime Error'");
+  });
+
+  it('관리형 서비스에 없는 이름이면 이유를 남기고 넘어간다', async () => {
+    // web 서비스가 없는 프로젝트(설정 오류를 게이트가 조용히 삼키지 않는지)
+    const target = { ...project, spec: { ...project.spec, workflow: { autoPageChecks: auto() } } } as LoadedProject;
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const skipped = gate.checks.find((check) => check.name.includes('자동'))!;
+    expect(skipped).toMatchObject({ stage: 'browser_check', ok: true });
+    expect(skipped.detail).toContain("autoPageChecks.service 'web'를 이 프로젝트의 관리형 서비스에서 찾지 못했습니다");
+  });
+
+  it('nextjs가 아닌 서비스를 가리키면(불러올 때 막는 조합) 열어 볼 페이지를 찾지 못해 check를 만들지 않는다', async () => {
+    const target = { ...project, spec: { ...project.spec, workflow: { autoPageChecks: auto({ service: 'api' }) } } } as LoadedProject;
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((check) => check.name.includes('자동'))).toBe(false);
+  });
+
+  it('자동 페이지 설정이 없으면 이전과 똑같이 돈다', async () => {
+    const target = nextjs(project, {});
+    const { gate, workspace, events } = await setup(target);
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((check) => check.name.includes('자동'))).toBe(false);
+    expect(stages(events)).not.toContain('browser_check');
+  });
+});
+
+describe('자동 페이지 확인의 오류 표지와 서명', () => {
+  it('서버·클라이언트 예외 표지를 찾고, 404 화면은 404를 기대할 때만 통과시킨다', () => {
+    expect(nextErrorMarker('<h2>Application error: a server-side exception has occurred</h2>', 200)).toBe('Application error: a server-side exception has occurred');
+    expect(nextErrorMarker('<nextjs-portal>Unhandled Runtime Error</nextjs-portal>', 200)).toBe('Unhandled Runtime Error');
+    expect(nextErrorMarker('<h1>This page could not be found</h1>', 200)).toBe('This page could not be found');
+    // 404를 기대한 확인에서는 404 화면이 오류가 아니다
+    expect(nextErrorMarker('<h1>This page could not be found</h1>', 404)).toBeUndefined();
+    expect(nextErrorMarker('<h1>주문 목록</h1>', 200)).toBeUndefined();
+  });
+
+  it('autoPageChecks를 pageChecks 모양으로 바꾼다', () => {
+    expect(autoPageCheck({ service: 'web', mode: 'browser', expectStatus: 201, maxPages: 5, viewport: { width: 390, height: 844 } }, '/orders')).toEqual({
+      service: 'web',
+      path: '/orders',
+      mode: 'browser',
+      expectStatus: 201,
+      allowConsoleErrors: false,
+      noHorizontalScroll: false,
+      viewport: { width: 390, height: 844 },
+    });
+    // http 모드에서는 viewport를 넘기지 않는다
+    expect(autoPageCheck({ service: 'web', mode: 'http', expectStatus: 200, maxPages: 5 }, '/orders')).toEqual({
+      service: 'web',
+      path: '/orders',
+      mode: 'http',
+      expectStatus: 200,
+      allowConsoleErrors: false,
+      noHorizontalScroll: false,
+    });
+  });
+
+  it('자동 페이지 실패는 경로를 앞에 붙여 선언한 pageChecks 실패와 서명이 갈린다', () => {
+    const declared: WorkflowCheck = { stage: 'browser_check', name: 'web /dashboard', ok: false, attempts: 1, detail: 'HTTP 500 (기대 200)' };
+    const auto: WorkflowCheck = { stage: 'browser_check', name: 'web /dashboard (자동)', ok: false, attempts: 1, detail: '자동 페이지 /dashboard: HTTP 500 (기대 200)' };
+
+    // 서명은 첫 줄만 남기고 숫자를 N으로 바꾼다(같은 원인의 실패를 하나로 묶기 위해)
+    expect(signatureFromCheck(auto).message).toBe('자동 페이지 /dashboard: HTTP N (기대 N)');
+    expect(signatureKey(signatureFromCheck(auto))).not.toBe(signatureKey(signatureFromCheck(declared)));
+    // 이름에만 "(자동)"이 붙고 detail이 같으면 서명은 갈리지 않는다(그래서 자동 실패에는 경로를 앞에 붙인다)
+    const namedOnly: WorkflowCheck = { ...auto, detail: declared.detail };
+    expect(signatureKey(signatureFromCheck(namedOnly))).toBe(signatureKey(signatureFromCheck(declared)));
   });
 });

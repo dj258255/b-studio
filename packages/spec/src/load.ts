@@ -150,6 +150,19 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     if (!managedNames.has(check.service)) issues.push(`workflow.concurrencyChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
   });
 
+  // 자동 페이지 확인은 Next.js 앱 라우터(app/**/page.*)에서 열어 볼 경로를 찾는다. 관리형이면서 템플릿이 nextjs인 서비스에만 쓸 수 있다
+  const autoPages = spec.workflow?.autoPageChecks;
+  if (autoPages) {
+    const service = managed.find(([name]) => name === autoPages.service);
+    if (!service) {
+      issues.push(`workflow.autoPageChecks.service: '${autoPages.service}'은(는) source: managed 서비스가 아닙니다`);
+    } else if (service[1].template !== 'nextjs') {
+      issues.push(
+        `workflow.autoPageChecks.service: '${autoPages.service}'의 템플릿이 ${service[1].template}입니다. app 라우터를 쓰는 Next.js(nextjs) 서비스에서만 자동 페이지 확인을 켤 수 있습니다`,
+      );
+    }
+  }
+
   for (const [name, secret] of Object.entries(spec.secrets ?? {})) {
     for (const service of secret.services) {
       if (!composeServices.has(service)) issues.push(`secrets.${name}.services: ${spec.compose}에 '${service}' 서비스가 없습니다`);
