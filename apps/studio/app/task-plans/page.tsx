@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { TaskPlanWorkbench } from '@/components/task-plan-workbench';
 import { pageUser } from '@/lib/server/access';
+import { studioCapabilities } from '@/lib/server/capabilities';
 import { listModelOptions } from '@/lib/server/model-registry';
 import { canPublishIssues, listProjects } from '@/lib/server/projects';
 import { listTaskPlans } from '@/lib/server/task-plans';
@@ -14,6 +15,13 @@ export default async function TaskPlansPage() {
   );
   const models = listModelOptions();
   const initial = listTaskPlans(user);
+  // 계획을 어떻게 받을 수 있는지는 서버가 정한다(api=모델 선택, claude-code=이 PC의 구독 CLI, 그 밖=고정 계획만)
+  const capabilities = studioCapabilities();
+  const planner = {
+    mode: capabilities.mode,
+    enabled: capabilities.split.enabled,
+    ...(capabilities.split.reason ? { reason: capabilities.split.reason } : {}),
+  };
 
   return (
     <main className="mx-auto max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">
@@ -26,7 +34,7 @@ export default async function TaskPlansPage() {
           프로젝트로 돌아가기
         </Link>
       </header>
-      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} />
+      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} planner={planner} />
     </main>
   );
 }

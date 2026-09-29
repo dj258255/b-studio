@@ -1339,8 +1339,9 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       return;
     }
 
-    // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다
-    if (!ask && plan.kind === 'model' && plan.route) {
+    // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다.
+    // 입력이 하나로 합쳐진 뒤로는 "바꾼 파일 없이 답만 한" 만들기 요청도 여기 오므로, 파일을 바꾼 실행만 관측값으로 남긴다
+    if (!ask && result.changedFiles.length > 0 && plan.kind === 'model' && plan.route) {
       try {
         recordObservation({
           modelId: plan.route.selected.id,
@@ -2611,8 +2612,11 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
   return project.spec.name === 'orders' ? ORDERS_DEMO_SCENARIOS : [];
 }
 
-/** 오타가 조용히 다른 모드(특히 비용이 드는 모드)로 떨어지지 않도록 모르는 값은 거부한다 */
-function sessionMode(env: Record<string, string | undefined> = process.env): SessionMode {
+/**
+ * 지금 서버 모드. 오타가 조용히 다른 모드(특히 비용이 드는 모드)로 떨어지지 않도록 모르는 값은 거부한다.
+ * capabilities가 같은 값을 읽어 "지금 쓸 수 있는 방식"을 알린다 — 두 곳이 갈라지지 않게 한 곳에서 읽는다
+ */
+export function sessionMode(env: Record<string, string | undefined> = process.env): SessionMode {
   const value = env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
   if (value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'demo') return value;
