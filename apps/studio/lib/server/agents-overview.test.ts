@@ -57,8 +57,7 @@ describe('state 판정', () => {
 
 describe('attention 판정', () => {
   it('되묻기(pendingQuestion)가 있으면 question', () => {
-    const withQuestion = snapshot() as SessionSnapshot & { pendingQuestion?: unknown };
-    withQuestion.pendingQuestion = { question: '어느 쪽으로 할까요?' };
+    const withQuestion = snapshot({ pendingQuestion: { runId: 'r0', question: '어느 쪽으로 할까요?', options: ['표', '카드'], allowOther: false } });
     const { items } = overview({ sessions: [source({ snapshot: withQuestion })] });
     expect(items[0]!.attention).toBe('question');
   });
@@ -95,8 +94,7 @@ describe('attention 판정', () => {
   });
 
   it('여러 사유가 겹치면 우선순위가 높은 하나만 남긴다(question > approval > gate_failed > error > budget)', () => {
-    const withQuestion = snapshot({ status: 'failed', error: '오류' }) as SessionSnapshot & { pendingQuestion?: unknown };
-    withQuestion.pendingQuestion = {};
+    const withQuestion = snapshot({ status: 'failed', error: '오류', pendingQuestion: { runId: 'r0', question: '어느 쪽으로 할까요?', options: ['표', '카드'], allowOther: false } });
     const { items } = overview({ sessions: [source({ snapshot: withQuestion, recent: [cancelling('r1', 'budget'), finished('r1', 'failed')] })] });
     // question이 이기고, gate_failed·error·budget은 남지 않는다
     expect(items[0]!.attention).toBe('question');

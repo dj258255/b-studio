@@ -222,7 +222,7 @@ function stateOf(row: AgentRow): AgentState {
 
 /**
  * 개입 사유 하나를 고른다(우선순위: question > approval > gate_failed > error > budget).
- * question은 스냅샷에 `pendingQuestion` 필드가 있을 때만 본다 — 아직 main에 없는 필드라 선택적으로 읽는다.
+ * question은 스냅샷의 `pendingQuestion`(되묻기 대기, ADR-056)으로 본다.
  */
 function attentionOf(row: AgentRow): AgentAttention | undefined {
   const snapshot = row.snapshot;
@@ -239,9 +239,7 @@ function attentionOf(row: AgentRow): AgentAttention | undefined {
 }
 
 function hasPendingQuestion(snapshot: SessionSnapshot | undefined): boolean {
-  if (!snapshot) return false;
-  const value = (snapshot as unknown as { pendingQuestion?: unknown }).pendingQuestion;
-  return value !== undefined && value !== null;
+  return snapshot?.pendingQuestion !== undefined;
 }
 
 function lastFinishedRun(recent: readonly StudioEvent[]): { runId: string; status: string } | undefined {

@@ -100,6 +100,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
+import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, routingDecision } from './model-registry';
@@ -141,6 +142,11 @@ interface ActiveRun {
   stopReason?: 'user' | 'budget';
   /** 한도로 멈췄을 때 어느 한도인지 */
   limitKind?: 'session' | 'user';
+  /**
+   * 실행 중 지시 큐. 사람이 보는 단일 세션이 이 실행을 시작했을 때만 있다(작업 분해 레인·플릿은 없다).
+   * 러너가 다음 모델 호출 직전에 꺼내 가고, 남은 지시는 실행이 끝날 때 버림으로 기록한다
+   */
+  steering?: SteeringQueue;
 }
 
 interface Session {
@@ -501,6 +507,17 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   if ('logs' in target) for (const event of target.logs) listener(event);
 }
 
+/**
+ * 세션 기록을 통째로 읽는다. 구독을 등록해 replay(스냅샷 + 기록 + 로그)를 받은 뒤 바로 푼다.
+ * 토큰 탭이 이 기록에서 실행별 보고서를 만든다(token-report). 없는 세션은 subscribe가 404로 알린다.
+ */
+export function sessionHistory(id: string): StudioEvent[] {
+  const events: StudioEvent[] = [];
+  const unsubscribe = subscribe(id, (event) => events.push(event));
+  unsubscribe();
+  return events;
+}
+
 export function sendMessage(
   id: string,
   text: string,
@@ -510,6 +527,8 @@ export function sendMessage(
     intent = 'build',
     writableScope,
     scriptedTurns,
+    steering,
+    interactive = false,
   }: {
     allowBreaking: boolean;
     by?: string;
@@ -518,6 +537,10 @@ export function sendMessage(
     writableScope?: readonly string[];
     /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
     scriptedTurns?: ScriptedTurn[];
+    /** 실행 중 지시를 받을 실행인지. 사람이 보는 단일 세션(메시지 라우트)만 켠다. 레인·플릿·벤치는 켜지 않는다 */
+    steering?: boolean;
+    /** 서버 안에서만 쓴다. true면 되묻기(ask_user) 도구를 넣는다. 사람이 보낸 단일 세션 요청(messages 라우트)만 켠다 */
+    interactive?: boolean;
   },
 ): { runId: string } {
   const session = requireSession(id);
@@ -540,7 +563,12 @@ export function sendMessage(
     );
   }
 
-  const plan = { ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)), writableScope };
+  // 되묻기(ask_user)는 사람이 보낸 단일 세션 요청에만 켠다. 레인·플릿·벤치·CLI는 도구 목록이 그대로다
+  const plan = {
+    ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)),
+    writableScope,
+    interactive,
+  };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
     startedAt: new Date().toISOString(),
@@ -548,9 +576,13 @@ export function sendMessage(
     baseTokens: session.snapshot.tokens,
     tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
     by,
+    // 데모(스크립트)는 실행 중 지시를 반영할 모델 호출이 없어 큐를 만들지 않는다
+    ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
   };
   session.run = run;
   session.snapshot.running = true;
+  // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
+  session.snapshot.pendingQuestion = undefined;
   emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined });
   void execute(session, run, request, plan);
   return { runId: run.id };
@@ -569,6 +601,23 @@ export function cancelRun(id: string, runId: string): void {
   session.snapshot.cancelling = 'user';
   emit(session, { type: 'run_cancelling', runId });
   run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+}
+
+/**
+ * 실행 중인 요청에 진행 중 지시를 넣는다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다.
+ * 지금 하던 도구 호출을 끊지 않는다. 사람이 보는 단일 세션(steering 큐가 있는 실행)만 받는다.
+ */
+export function steerRun(id: string, text: string): { runId: string } {
+  const session = requireSession(id);
+  if (session.snapshot.mode === 'demo') throw new StudioError(409, '이 모드는 실행 중 지시를 지원하지 않습니다');
+  const run = session.run;
+  if (!run) throw new StudioError(409, '실행 중이 아닙니다. 새 요청으로 보내세요');
+  if (!run.steering) throw new StudioError(409, '이 실행은 진행 중 지시를 받지 않습니다');
+  const directive = text.trim();
+  if (!directive) throw new StudioError(400, '지시 내용을 입력하세요');
+  run.steering.push(directive);
+  emit(session, { type: 'steer_queued', runId: run.id, text: directive });
+  return { runId: run.id };
 }
 
 export async function stopSession(id: string): Promise<SessionSnapshot> {
@@ -1020,7 +1069,7 @@ type RunPlan = (
   | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
   | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[] };
+) & { writableScope?: readonly string[]; interactive?: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
@@ -1039,8 +1088,21 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     return { kind: 'model', client: new ScriptedModelClient(question.turns), allowBreaking: false, intent };
   }
   if (!scenario) throw new StudioError(409, '데모 모드에서 실행할 수 있는 요청을 모두 실행했습니다');
+  // 되묻기 답: 대본의 질문에 대한 답이면 이어서 대본을 실행한다(모델 없이 화면 흐름을 확인하는 용도)
+  if (scenario.ask && isDemoAnswer(request, scenario.ask.question)) {
+    return { kind: 'model', client: new ScriptedModelClient(scenario.turns), allowBreaking: scenario.allowBreaking ?? false, maxVerifyAttempts: scenario.maxVerifyAttempts, intent };
+  }
   if (scenario.request !== request) {
     throw new StudioError(409, `데모 모드는 준비된 요청을 순서대로 실행합니다. 다음 요청: "${scenario.request}"`);
+  }
+  // 되묻기 단계가 있으면 먼저 ask_user를 부르는 대본을 돌려, 모델 없이 질문 카드를 보여 준다
+  if (scenario.ask) {
+    return {
+      kind: 'model',
+      client: new ScriptedModelClient([{ text: scenario.ask.question, toolCalls: [{ name: 'ask_user', input: { ...scenario.ask } }] }]),
+      allowBreaking: false,
+      intent,
+    };
   }
   return {
     kind: 'model',
@@ -1049,6 +1111,11 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     maxVerifyAttempts: scenario.maxVerifyAttempts,
     intent,
   };
+}
+
+/** 데모 모드에서 질문 카드의 답으로 보낸 요청인지. 화면은 `[질문] …\n[답] …` 형식으로 보낸다 */
+function isDemoAnswer(request: string, question: string): boolean {
+  return request.startsWith('[질문]') && request.includes('[답]') && request.includes(question);
 }
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
@@ -1100,10 +1167,23 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       }
     }
 
+    // 되묻고 멈췄으면 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답은 다음 요청으로 온다
+    if (result.status === 'awaiting_input' && result.question) {
+      session.snapshot.pendingQuestion = {
+        runId: run.id,
+        question: result.question.question,
+        options: result.question.options,
+        allowOther: result.question.allowOther,
+      };
+    }
     if (!ask) {
-      // 게이트를 통과한 변경만 체크포인트로 남기고, 통과하지 못한 변경은 되돌려 샌드박스를 이전 상태로 맞춘다
-      if (result.status === 'done') await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
-      else await revertRun(session, run.id);
+      // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
+      // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
+      if (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok)) {
+        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
+      } else if (result.status !== 'awaiting_input') {
+        await revertRun(session, run.id);
+      }
     }
     finished = { status: result.status, summary: result.summary, turns: result.turns, metrics: result.metrics, durationMs: Math.round(performance.now() - agentStarted) };
   } catch (error) {
@@ -1135,14 +1215,18 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     }
   } finally {
     session.run = undefined;
-    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다
-    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask) {
+    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다.
+    // 되묻고 멈춘 경우는 아직 시나리오가 끝나지 않았으므로 다음 단계로 넘기지 않는다(답을 받아 이어서 실행한다)
+    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask && finished?.status !== 'awaiting_input') {
       session.demoIndex += 1;
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
       session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
     }
     session.snapshot.running = false;
     session.snapshot.cancelling = undefined;
+    // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
+    const dropped = run.steering?.take() ?? [];
+    if (!session.stop.signal.aborted && dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
     if (!session.stop.signal.aborted && finished) {
       session.settledConversation = session.conversation.length;
       emit(session, {
@@ -1228,8 +1312,12 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       }),
     // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
     design: designSourceFor(session, run.id),
+    // 되묻기(ask_user) 도구는 사람이 있는 단일 세션 요청에만 넣는다
+    interactive: plan.interactive === true,
     signal,
     onEvent: (event: AgentEvent) => {
+      // 질문은 세션 기록에 따로 남겨 화면이 카드로 그린다(대화 흐름에 남는다)
+      if (event.type === 'question') return emit(session, { type: 'question', runId: run.id, question: event.question, options: event.options, allowOther: event.allowOther });
       if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
       run.tokens = event.usage;
       // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다
@@ -1266,6 +1354,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       resume: claudeCode.sessionId,
       // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
       model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
+      steering: run.steering,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
@@ -1285,6 +1375,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
       // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
       model: process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. Codex는 턴 사이에만 넣는다
+      steering: run.steering,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 알림과 이전 맥락이 그대로 남는다
     codex.notes = [];
@@ -1318,6 +1410,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     client: plan.client,
     conversation: session.conversation,
     maxVerifyAttempts: plan.maxVerifyAttempts,
+    // 실행 중 지시 큐. 없으면(레인·플릿·데모) 지시를 받지 않는다
+    steering: run.steering,
   });
 }
 
