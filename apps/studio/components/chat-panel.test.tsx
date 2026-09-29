@@ -1,8 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
 import { ChatPanel } from "./chat-panel";
+
+// 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
+vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
 
 const snapshot: SessionSnapshot = {
   id: "s1",
@@ -46,6 +49,23 @@ describe("ChatPanel 입력", () => {
     expect(html).toContain("질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다");
     // 기본 경로에서는 호환성 파괴 허용을 고를 수 있다
     expect(html).toContain("필드 삭제나 타입 변경 허용");
+  });
+
+  it("방식(한 명·여러 명 비교·나눠서 병렬)을 고를 수 있고, 기본은 한 명이다", () => {
+    const html = render(view());
+
+    expect(html).toContain('role="radiogroup" aria-label="방식"');
+    expect(html).toMatch(/role="radio" aria-checked="true"[^>]*>한 명</);
+    // 서버가 쓸 수 있다고 알려 주기 전(첫 그리기)에는 비교·병렬을 막아 둔다
+    expect(html).toMatch(/role="radio" aria-checked="false" disabled=""[^>]*>여러 명 비교</);
+    expect(html).toMatch(/role="radio" aria-checked="false" disabled=""[^>]*>나눠서 병렬</);
+    expect(html).toContain("요청 보내기");
+  });
+
+  it("실행 중에는 방식을 고르지 않는다(진행 중 지시만 보낸다)", () => {
+    const html = render(view([{ type: "run_started", runId: "r9", request: "주문 목록" }]));
+
+    expect(html).not.toContain('aria-label="방식"');
   });
 
   it("읽기만 스위치는 세션마다 저장된 값을 쓰고, 켜지면 파일을 바꾸지 않는다고 알린다", () => {

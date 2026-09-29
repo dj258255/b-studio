@@ -18,7 +18,7 @@ export default async function WorkPage() {
           </p>
         </div>
         <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          홈으로
+          개발 화면으로
         </Link>
       </header>
       <WorkOverview initial={initial} />

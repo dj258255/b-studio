@@ -1150,6 +1150,20 @@ export async function bootSession(id: string): Promise<SessionSnapshot> {
 }
 
 /**
+ * 첫 화면(바로 개발, ADR-066)이 쓴다. 지연 기동 세션의 샌드박스 켜기를 **시작만** 하고 기다리지 않는다.
+ * 켜는 동안 사람은 개발 화면에서 요청을 적는다. 진행과 실패는 이벤트로 화면에 간다(여기서 던지지 않는다)
+ */
+export function startBooting(id: string): SessionSnapshot {
+  const session = requireSession(id);
+  if (session.snapshot.status === 'idle') {
+    ensureBooted(session).catch((error: unknown) => {
+      console.error(`[b-studio] 세션 ${id}의 샌드박스를 켜지 못했습니다: ${describe(error)}`);
+    });
+  }
+  return session.snapshot;
+}
+
+/**
  * resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다.
  * databaseFrom은 이어서 작업하기 전에 폴더의 수정을 새 체크포인트로 남겼을 때, 데이터베이스 상태를 가져올 그 앞 체크포인트다
  */
