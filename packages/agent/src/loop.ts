@@ -7,7 +7,7 @@ import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy
 import { VerificationGate, type GateOptions, type PageFetcher, type VerifyMode } from './gate';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { createToolResultCache } from './tool-output';
+import { createToolResultCache, type SelfCheckMode } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
@@ -259,6 +259,11 @@ export interface RunAgentOptions {
    * 테스트·화면 확인·동시 요청·리뷰는 건너뛴다. 건너뛴 단계는 결과의 skippedStages로 남고 배포 조건이 막는다
    */
   verify?: VerifyMode;
+  /**
+   * 자가 확인 범위(기본 full). lean이면 프롬프트가 게이트와 겹치는 확인(전체 빌드·테스트, 끝난 변경의 재시작·HTTP 확인)을
+   * 하지 말라고 안내하고, 성공한 run_in_service 출력을 짧게 돌려준다
+   */
+  selfCheck?: SelfCheckMode;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -331,7 +336,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       onEvent,
     }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
-  const system = buildSystemPrompt(project) + workflowContext(project);
+  const system = buildSystemPrompt(project, { selfCheck: options.selfCheck }) + workflowContext(project);
   const policy = options.policy ?? executionPolicyFor(project);
   const tools = buildTools(project, {
     ...(options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {}),
@@ -458,6 +463,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           project,
           workspace,
           sandbox,
+          selfCheck: options.selfCheck,
           fetcher,
           signal,
           onServiceStatus,

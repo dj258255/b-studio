@@ -18,6 +18,16 @@ export const READ_FILE_BUDGET = 12_000;
 /** service_logs는 줄 수 상한(1-400)을 그대로 두고, 글자 상한만 지금 값을 유지한다 */
 export const LOGS_OUTPUT_LIMIT = 30_000;
 
+/**
+ * 에이전트의 자가 확인 범위. full은 지금과 같고, lean은 게이트가 어차피 하는 확인(전체 빌드·테스트, 끝난 변경의 재시작·HTTP 확인)을
+ * 에이전트가 되풀이하지 않게 안내하고, 성공한 명령의 출력을 짧게 돌려준다.
+ * E6에서 b-studio의 호출은 그냥 Claude Code의 3.4배였고, 문맥 합의 32.7%가 run_in_service 결과를 다시 읽은 양이었다.
+ */
+export type SelfCheckMode = 'full' | 'lean';
+
+/** lean에서 성공한(종료 코드 0) 명령 출력 예산. 성공 로그는 대개 "통과"만 알면 되므로 끝부분 위주로 짧게 남긴다 */
+export const LEAN_SUCCESS_OUTPUT_BUDGET = 800;
+
 /** 자른 사실을 숨기지 않고 한 줄로 알린다 */
 function clipNote(total: number, omitted: number, hint?: string): string {
   return `[... 전체 ${total}자 중 ${omitted}자 생략${hint ? `. ${hint}` : ''} ...]`;

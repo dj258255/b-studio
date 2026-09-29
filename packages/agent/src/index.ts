@@ -201,11 +201,13 @@ export {
   invalidateReadCache,
   isHtmlContent,
   isRepeatNote,
+  LEAN_SUCCESS_OUTPUT_BUDGET,
   LOGS_OUTPUT_LIMIT,
   READ_FILE_BUDGET,
   REPEAT_NOTE_PREFIX,
   repeatNote,
   visibleHtml,
+  type SelfCheckMode,
   type ToolResultCache,
 } from './tool-output';
 export {

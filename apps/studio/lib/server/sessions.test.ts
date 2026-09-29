@@ -9,6 +9,7 @@ import {
   parseIssueList,
   planKindForBackend,
   resolveSessionBackend,
+  selfCheckMode,
   sessionBackend,
 } from './sessions';
 
@@ -200,5 +201,18 @@ describe('세션 백엔드 확정은 두 번 불러도 같다', () => {
       const env = { B_STUDIO_MODE: mode };
       expect(resolveSessionBackend(resolveSessionBackend(undefined, env), env)).toBe(mode);
     }
+  });
+});
+
+describe('자가 확인 범위(B_STUDIO_SELF_CHECK)', () => {
+  it('설정하지 않거나 full이면 지금과 같고, lean만 받는다', () => {
+    expect(selfCheckMode({})).toBe('full');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: 'full' })).toBe('full');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: ' lean ' })).toBe('lean');
+  });
+
+  it('모르는 값은 조용히 full로 떨어뜨리지 않고 설정 오류로 알린다', () => {
+    expect(() => selfCheckMode({ B_STUDIO_SELF_CHECK: 'LEAN' })).toThrow(StudioError);
+    expect(() => selfCheckMode({ B_STUDIO_SELF_CHECK: 'on' })).toThrow(/full 또는 lean/);
   });
 });

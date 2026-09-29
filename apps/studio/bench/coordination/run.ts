@@ -36,6 +36,7 @@ import {
   resolveContractsSource,
   resolveEscalation,
   resolveRateLimitPolicy,
+  resolveSelfCheck,
   resolveVerify,
   sessionBackendOf,
   verifyNotice,
@@ -55,7 +56,7 @@ import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, S
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
-import type { AgentUsage, Topology } from '@b-studio/agent';
+import type { AgentUsage, SelfCheckMode, Topology } from '@b-studio/agent';
 import { costForUsageByModel, parsePriceTable, type TokenPrices } from '../../lib/token-types';
 import type { SessionSnapshot, StudioEvent } from '../../lib/studio-events';
 import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
@@ -94,6 +95,7 @@ interface Args {
   integrationChecks?: boolean;
   /** 검증 범위(full|light). 기본 full. light면 레인·통합 실행이 가볍게 확인한다 */
   verify?: string;
+  selfCheck?: string;
   /** 레인 사이 계약의 출처(human|model). 기본 human. model은 S2에서만 */
   contracts?: string;
   escalateTo?: string;
@@ -123,6 +125,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--force') args.force = true;
     else if (arg === '--integration-checks') args.integrationChecks = true;
     else if (arg === '--verify') args.verify = next(argv, index++, '--verify');
+    else if (arg === '--self-check') args.selfCheck = next(argv, index++, '--self-check');
     else if (arg === '--tasks') args.taskIds = split(next(argv, index++, '--tasks'));
     else if (arg === '--strategies') args.strategies = split(next(argv, index++, '--strategies')) as Strategy[];
     else if (arg === '--repeats') args.repeats = Number(next(argv, index++, '--repeats'));
@@ -153,6 +156,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--contracts=')) args.contracts = arg.slice('--contracts='.length);
     else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
     else if (arg.startsWith('--verify=')) args.verify = arg.slice('--verify='.length);
+    else if (arg.startsWith('--self-check=')) args.selfCheck = arg.slice('--self-check='.length);
     else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
     else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
     else if (arg.startsWith('--escalate-after-failures=')) args.escalateAfterFailures = Number(arg.slice('--escalate-after-failures='.length));
@@ -319,6 +323,8 @@ interface RunContext {
   integrationChecks: boolean;
   /** 검증 범위(--verify). 'light'면 레인·통합 실행에 가볍게 확인을 넘긴다. 기본 full */
   verify: BenchVerify;
+  /** 자가 확인 범위(--self-check). lean이면 B_STUDIO_SELF_CHECK=lean으로 모든 b-studio 세션에 적용한다. P0는 영향 없음 */
+  selfCheck: SelfCheckMode;
   /** 레인 사이 계약의 출처(--contracts). S2에서만 뜻이 있다 */
   contractsSource: ContractsSource;
   /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
@@ -507,6 +513,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     strategy,
     integrationChecks: context.integrationChecks,
     verify: context.verify,
+    selfCheck: context.selfCheck,
     model: context.requestedModel,
     observedModels,
     startedAt,
@@ -680,6 +687,7 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     strategy: 'P0',
     integrationChecks: context.integrationChecks,
     verify: context.verify,
+    // P0는 b-studio 프롬프트·도구를 쓰지 않아 자가 확인 범위와 무관하다. 필드를 남기지 않는다
     model: context.requestedModel,
     observedModels: baseline ? Object.keys(baseline.usageByModel).sort() : [],
     startedAt,
@@ -890,6 +898,9 @@ async function main(): Promise<void> {
   const contextClearing = resolveContextClearing(args.contextClearing);
   // 검증 범위(--verify). 기본 full(지금과 같다). light면 레인·통합 실행이 가볍게 확인한다
   const verify = resolveVerify(args.verify);
+  // 자가 확인 범위(--self-check). 스튜디오 서버 코드가 같은 프로세스에서 돌므로 환경 변수로 모든 세션에 적용한다
+  const selfCheck = resolveSelfCheck(args.selfCheck);
+  process.env.B_STUDIO_SELF_CHECK = selfCheck;
   if (contextClearing && backend !== 'openai') throw new Error('--context-clearing은 --backend openai(API 루프)에서만 쓸 수 있습니다. 로컬 CLI 러너는 대화를 직접 다루지 않습니다');
   // 레인 백엔드(--lane-backend)도 시작 전에 확정한다. 모르는 레인 그룹·백엔드는 여기서 오류를 낸다
   const laneBackendChoices = parseLaneBackends(args.laneBackends);
@@ -1091,6 +1102,7 @@ async function main(): Promise<void> {
       laneBackends,
       integrationChecks: args.integrationChecks ?? false,
       verify,
+      selfCheck,
       contractsSource,
       ...(escalation.to ? { escalateTo: escalation.to } : {}),
       escalateAfter: escalation.after,
@@ -1184,6 +1196,7 @@ async function main(): Promise<void> {
           contextClearing,
           integrationChecks: args.integrationChecks ?? false,
           verify,
+          selfCheck,
           abortReason,
         },
         null,

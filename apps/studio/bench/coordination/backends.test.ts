@@ -12,6 +12,7 @@ import {
   resolveContractsSource,
   resolveEscalation,
   resolveRateLimitPolicy,
+  resolveSelfCheck,
   resolveVerify,
   sessionBackendOf,
   verifyNotice,
@@ -81,6 +82,15 @@ describe('resolveContextClearing', () => {
 
   it('모르는 값은 거부한다', () => {
     expect(() => resolveContextClearing('yes')).toThrow(/on 또는 off/);
+  });
+});
+
+describe('자가 확인 범위(--self-check)', () => {
+  it('기본은 full이고, lean만 받는다. 모르는 값은 거부한다', () => {
+    expect(resolveSelfCheck(undefined)).toBe('full');
+    expect(resolveSelfCheck('full')).toBe('full');
+    expect(resolveSelfCheck(' LEAN ')).toBe('lean');
+    expect(() => resolveSelfCheck('light')).toThrow(/full 또는 lean/);
   });
 });
 

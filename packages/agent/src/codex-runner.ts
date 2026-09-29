@@ -145,6 +145,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   const context: ToolContext = {
     project,
+    selfCheck: options.selfCheck,
     workspace,
     sandbox,
     fetcher,
@@ -259,7 +260,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
 
     // Codex SDK에는 systemPrompt 옵션이 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다.
     // (설정의 developer_instructions로 넘기는 방법도 있으나 내장 도구 안내를 덮어쓸 위험이 있어 쓰지 않았다)
-    let pending = `${buildSystemPrompt(project, { toolName })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
     let announced = false;
 
     for (let turn = 1; turn <= maxTurns; turn++) {

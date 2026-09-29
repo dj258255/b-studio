@@ -116,6 +116,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   const context: ToolContext = {
     project,
+    selfCheck: options.selfCheck,
     workspace,
     sandbox,
     fetcher,
@@ -249,7 +250,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       prompt: input,
       options: {
         cwd: project.root,
-        systemPrompt: buildSystemPrompt(project, { toolName }) + workflowContext(project),
+        systemPrompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project),
         // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
         tools: [],
         mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },

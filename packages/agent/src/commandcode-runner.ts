@@ -201,6 +201,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   const context: ToolContext = {
     project,
+    selfCheck: options.selfCheck,
     workspace,
     sandbox,
     fetcher,
@@ -322,7 +323,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     await linkAuthFile(home);
 
     // cmd에는 systemPrompt 자리가 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다
-    let pending = `${buildSystemPrompt(project, { toolName })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
 
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();

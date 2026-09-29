@@ -9,14 +9,17 @@ import { servicesForFiles } from './services';
 import {
   clipCommandOutput,
   clipText,
+  COMMAND_OUTPUT_BUDGET,
   createToolResultCache,
   dedupeResult,
   HTTP_BODY_BUDGET,
   invalidateReadCache,
   isHtmlContent,
+  LEAN_SUCCESS_OUTPUT_BUDGET,
   LOGS_OUTPUT_LIMIT,
   READ_FILE_BUDGET,
   visibleHtml,
+  type SelfCheckMode,
   type ToolResultCache,
 } from './tool-output';
 import type { ContractFetcher } from './verify';
@@ -115,6 +118,8 @@ export interface ToolContext {
    * 없으면 이미 켜져 있다고 보고 그냥 실행한다(레인·플릿·벤치·CLI 경로).
    */
   ensureSandbox?: () => Promise<void>;
+  /** 자가 확인 범위(기본 full). lean이면 성공한 run_in_service 출력을 LEAN_SUCCESS_OUTPUT_BUDGET으로 줄인다 */
+  selfCheck?: SelfCheckMode;
 }
 
 /** 질문 모드에서 거부하는 도구. 게시판에 쓰는 post_note도 상태를 바꾸므로 포함한다(읽기 read_notes는 허용) */
@@ -375,7 +380,9 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       });
       // stdout과 stderr를 합쳐 한 예산으로 자른다. 테스트·빌드 로그의 실패 요약이 뒤에 있어 뒤쪽을 더 남긴다
       const raw = `exit code ${result.exitCode}\n--- stdout\n${result.stdout}\n--- stderr\n${result.stderr}`;
-      return { ok: result.exitCode === 0, content: clipCommandOutput(raw), rawChars: raw.length };
+      // lean이면 성공한 명령은 짧게 돌려준다. 실패는 원인을 봐야 하므로 기본 예산 그대로다
+      const budget = context.selfCheck === 'lean' && result.exitCode === 0 ? LEAN_SUCCESS_OUTPUT_BUDGET : COMMAND_OUTPUT_BUDGET;
+      return { ok: result.exitCode === 0, content: clipCommandOutput(raw, budget), rawChars: raw.length };
     }
     case 'restart_service': {
       const target = serviceName(context, args);

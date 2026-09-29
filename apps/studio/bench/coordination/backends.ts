@@ -5,6 +5,7 @@
  * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex·commandcode·opencode=본인 PC CLI, openai=유료 API).
  */
 
+import type { SelfCheckMode } from '@b-studio/agent';
 import type { Strategy } from './tasks';
 
 export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'openai';
@@ -80,6 +81,14 @@ export function resolveVerify(value: string | undefined): BenchVerify {
   if (trimmed === undefined || trimmed === '' || trimmed === 'full') return 'full';
   if (trimmed === 'light') return 'light';
   throw new Error(`--verify는 full 또는 light여야 합니다 (지금 값: ${value})`);
+}
+
+/** 자가 확인 범위(--self-check). 기본 full(지금과 같다), lean이면 B_STUDIO_SELF_CHECK=lean으로 모든 세션에 적용한다 */
+export function resolveSelfCheck(value: string | undefined): SelfCheckMode {
+  const trimmed = value?.trim().toLowerCase();
+  if (trimmed === undefined || trimmed === '' || trimmed === 'full') return 'full';
+  if (trimmed === 'lean') return 'lean';
+  throw new Error(`--self-check는 full 또는 lean이어야 합니다 (지금 값: ${value})`);
 }
 
 /**

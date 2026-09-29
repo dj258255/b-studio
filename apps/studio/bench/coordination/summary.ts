@@ -6,6 +6,7 @@
 import type { TaskPlanCoordinationMetrics, TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanRunMetricsView } from '../../lib/task-plan-types';
 import type { AcceptanceResult } from './acceptance';
+import type { SelfCheckMode } from '@b-studio/agent';
 import type { BenchVerify } from './backends';
 import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
@@ -103,6 +104,8 @@ export interface BenchRow {
   integrationChecks: boolean;
   /** 검증 범위(--verify). full은 지금과 같고, light는 레인·통합 게이트가 재시작·준비·계약만 확인한다 */
   verify: BenchVerify;
+  /** 자가 확인 범위(--self-check). 이 필드가 생기기 전 결과에는 없다(full과 같다) */
+  selfCheck?: SelfCheckMode;
   /** 모델 승격 설정과 이 실행의 승격 결과 */
   escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;

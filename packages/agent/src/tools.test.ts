@@ -212,6 +212,27 @@ describe('도구 결과 예산', () => {
     expect(outcome.content).toContain('grep·tail로 좁혀 다시 실행');
   });
 
+  it('lean이면 성공한 명령 출력은 짧게, 실패한 명령은 기본 예산 그대로 돌려준다', async () => {
+    const log = `${'a'.repeat(10_000)}\nBUILD SUCCESSFUL`;
+    const run = (exitCode: number, selfCheck?: 'full' | 'lean') => {
+      const sandbox = { ...context.sandbox, exec: async () => ({ exitCode, stdout: log, stderr: '' }) } as unknown as Sandbox;
+      return executeTool('run_in_service', { service: 'api', command: ['./gradlew', 'build'] }, { ...context, sandbox, ...(selfCheck ? { selfCheck } : {}) });
+    };
+
+    const leanSuccess = await run(0, 'lean');
+    expect(leanSuccess.ok).toBe(true);
+    // 끝부분(성공 문구)은 남고, 800자 예산에 생략 안내 한 줄만 더해진다
+    expect(leanSuccess.content).toContain('BUILD SUCCESSFUL');
+    expect(leanSuccess.content.length).toBeLessThan(900);
+    expect(leanSuccess.rawChars).toBeGreaterThan(10_000);
+
+    const leanFailure = await run(1, 'lean');
+    expect(leanFailure.content.length).toBeGreaterThan(5_900);
+
+    const fullSuccess = await run(0);
+    expect(fullSuccess.content.length).toBeGreaterThan(5_900);
+  });
+
   it('HTML 응답은 태그를 벗긴 보이는 글자만 남긴다', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>

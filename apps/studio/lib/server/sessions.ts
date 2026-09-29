@@ -59,6 +59,7 @@ import {
   type RemoteSyncResult,
   type ServiceCheck,
   type VerificationReport,
+  type SelfCheckMode,
   type VerifyMode,
 } from '@b-studio/agent';
 import {
@@ -1297,6 +1298,17 @@ function escalateAfter(): number {
   return integerEnv('B_STUDIO_ESCALATE_AFTER', 1) ?? 2;
 }
 
+/**
+ * 에이전트의 자가 확인 범위(B_STUDIO_SELF_CHECK=full|lean, 기본 full).
+ * lean은 게이트가 하는 전체 빌드·테스트와 끝난 변경의 재시작·HTTP 확인을 되풀이하지 말라고 안내하고, 성공한 명령 출력을 짧게 돌려준다
+ */
+export function selfCheckMode(env: Record<string, string | undefined> = process.env): SelfCheckMode {
+  const raw = env.B_STUDIO_SELF_CHECK?.trim();
+  if (!raw || raw === 'full') return 'full';
+  if (raw === 'lean') return 'lean';
+  throw new StudioError(500, `B_STUDIO_SELF_CHECK는 full 또는 lean이어야 합니다 (지금 값: ${raw})`);
+}
+
 function integerEnv(name: string, min: number): number | undefined {
   const raw = process.env[name]?.trim();
   if (!raw) return undefined;
@@ -1533,6 +1545,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     intent: plan.intent,
     // 가볍게 확인(light)이면 게이트가 재시작·준비·계약만 돈다. 생략(full)이면 지금과 같다
     verify: plan.verify,
+    // 자가 확인 범위(B_STUDIO_SELF_CHECK). lean이면 게이트와 겹치는 확인을 줄이게 안내한다. 설정하지 않으면 지금과 같다
+    selfCheck: selfCheckMode(),
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
     // 레인 조율 게시판. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음)
