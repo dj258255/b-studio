@@ -109,6 +109,30 @@ describe('P0 기준선 전략', () => {
   });
 });
 
+describe('레인 백엔드(--lane-backend)', () => {
+  it('laneBackends를 주면 그 그룹 레인 작업에만 backend·model을 싣는다', () => {
+    const laneBackends = new Map([
+      ['api', { backend: 'claude-code' as const, model: 'sonnet' }],
+      ['web', { backend: 'commandcode' as const }],
+    ]);
+    const plan = planFor(BENCH_TASKS[0]!, 'S1', 'mesh', laneBackends);
+    expect(plan.tasks.map((task) => [task.paths[0], task.backend, task.model])).toEqual([
+      ['api', 'claude-code', 'sonnet'],
+      ['web', 'commandcode', undefined],
+    ]);
+    // 주지 않으면 지금과 같다(backend 없음 → 서버 모드)
+    expect(planFor(BENCH_TASKS[0]!, 'S1').tasks.every((task) => task.backend === undefined)).toBe(true);
+  });
+
+  it('레인 백엔드를 실은 계획도 planLanes 검증을 통과한다(S1)', () => {
+    const laneBackends = new Map([
+      ['api', { backend: 'claude-code' as const }],
+      ['web', { backend: 'commandcode' as const }],
+    ]);
+    expect(() => planLanes(planFor(BENCH_TASKS[0]!, 'S1', 'mesh', laneBackends))).not.toThrow();
+  });
+});
+
 describe('integrationChecksFor (통합 게이트 샘플 값 확인)', () => {
   const task = (id: string) => BENCH_TASKS.find((candidate) => candidate.id === id)!;
 

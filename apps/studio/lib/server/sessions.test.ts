@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
-import { buildExportChecks, parseIssueInput, parseIssueList } from './sessions';
+import { allowedBackends, assertBackendReady, assertResumableBackend, buildExportChecks, parseIssueInput, parseIssueList, resolveSessionBackend, sessionBackend } from './sessions';
 
 describe('parseIssueInput', () => {
   it('생략은 undefined, 1~10,000,000 정수만 받고 나머지는 400으로 거부한다', () => {
@@ -95,5 +95,65 @@ describe('buildExportChecks', () => {
 
     expect(checks.find((check) => check.id === 'issue_linked')).toMatchObject({ ok: false });
     expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: 'unknown' });
+  });
+});
+
+describe('세션 백엔드', () => {
+  it('서버 모드는 기본값이고, B_STUDIO_BACKENDS가 허용 목록을 넓힌다. 목록 밖은 400으로 거부한다', () => {
+    const env = { B_STUDIO_MODE: 'api' };
+    // 아무것도 설정하지 않으면 서버 모드 하나뿐이라 지금과 같다
+    expect([...allowedBackends('api', env)]).toEqual(['api']);
+    expect(resolveSessionBackend(undefined, env)).toBe('api');
+    expect(() => resolveSessionBackend('claude-code', env)).toThrow(StudioError);
+
+    const withList = { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'claude-code,commandcode' };
+    expect([...allowedBackends('api', withList)].sort()).toEqual(['api', 'claude-code', 'commandcode']);
+    expect(resolveSessionBackend('commandcode', withList)).toBe('commandcode');
+    // 요청이 없으면 여전히 서버 모드(계획 기본·통합 세션)
+    expect(resolveSessionBackend(undefined, withList)).toBe('api');
+    expect(() => resolveSessionBackend('codex', withList)).toThrow(/쓸 수 없는 백엔드/);
+    // 목록에 모르는 값이 있으면 서버 설정 오류로 거부한다
+    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'opencode' })).toThrow(/B_STUDIO_BACKENDS/);
+  });
+
+  it('demo 서버에서는 백엔드를 고를 수 없다', () => {
+    expect(resolveSessionBackend(undefined, { B_STUDIO_MODE: 'demo' })).toBe('demo');
+    expect(() => resolveSessionBackend('api', { B_STUDIO_MODE: 'demo' })).toThrow(/데모/);
+  });
+
+  it('레거시 기록(backend 없음)은 mode를 백엔드로 읽는다', () => {
+    expect(sessionBackend({ mode: 'claude-code' })).toBe('claude-code');
+    expect(sessionBackend({ mode: 'api', backend: 'codex' })).toBe('codex');
+  });
+
+  it('CLI 백엔드는 세션을 만들기 전에 로그인을 확인하고, 실패하면 이유와 함께 거부한다', async () => {
+    const ready = {
+      claudeCode: async () => ({ ok: true as const }),
+      codex: async () => ({ ok: true as const }),
+      commandCode: async () => ({ ok: true as const }),
+    };
+    await expect(assertBackendReady('claude-code', '/x', ready)).resolves.toBeUndefined();
+    await expect(assertBackendReady('codex', '/x', ready)).resolves.toBeUndefined();
+    await expect(assertBackendReady('commandcode', '/x', ready)).resolves.toBeUndefined();
+    // api는 CLI가 아니라 확인하지 않는다(preflight를 주지 않아도 통과)
+    await expect(assertBackendReady('api', '/x', {})).resolves.toBeUndefined();
+
+    const fail = { codex: async () => ({ ok: false as const, reason: '로그인이 필요합니다' }) };
+    await expect(assertBackendReady('codex', '/x', fail)).rejects.toThrow('로그인이 필요합니다');
+  });
+});
+
+describe('세션 이어서 하기의 백엔드 확인', () => {
+  it('지금 서버가 허용하는 백엔드면 그 백엔드로 이어 간다', () => {
+    expect(assertResumableBackend({ mode: 'api', backend: 'claude-code' }, 'api', { B_STUDIO_BACKENDS: 'claude-code' })).toBe('claude-code');
+    // backend가 없는 옛 기록은 만들 때의 서버 모드로 본다
+    expect(assertResumableBackend({ mode: 'api' }, 'api', {})).toBe('api');
+  });
+
+  it('허용하지 않는 백엔드로 만든 세션은 이어서 돌리지 않는다(예: 개인 PC의 claude-code 세션을 API 모드 공유 서버에서)', () => {
+    expect(() => assertResumableBackend({ mode: 'claude-code' }, 'api', {})).toThrow(/claude-code 백엔드로 만들었는데/);
+    expect(() => assertResumableBackend({ mode: 'api', backend: 'codex' }, 'api', { B_STUDIO_BACKENDS: 'claude-code' })).toThrow(/B_STUDIO_BACKENDS/);
+    // 데모 세션은 데모 서버에서만
+    expect(() => assertResumableBackend({ mode: 'demo' }, 'api', {})).toThrow();
   });
 });

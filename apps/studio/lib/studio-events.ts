@@ -69,6 +69,11 @@ export interface SessionSnapshot {
   status: SessionStatus;
   error?: string;
   mode: SessionMode;
+  /**
+   * 이 세션이 실제로 쓰는 백엔드(B_STUDIO_BACKENDS로 고른 값). 없으면 mode를 쓴다(이 필드가 생기기 전 기록).
+   * mode는 세션을 만들 때의 서버 모드라, 레인이 백엔드를 고르면 backend가 그 값이고 mode와 다를 수 있다
+   */
+  backend?: SessionMode;
   /** API 모드에서 이 세션에 고정한 모델. 없으면 요청마다 라우터가 선택한다 */
   modelId?: string;
   /** 세션을 만든 사람. 인증을 켜면 만든 사람과 관리자만 세션을 바꿀 수 있다 */
@@ -199,7 +204,10 @@ export interface SessionSummary {
   id: string;
   projectName: string;
   status: SessionStatus;
+  /** 세션을 만들 때의 서버 모드 */
   mode: SessionMode;
+  /** 실제로 쓰는 백엔드. 없으면 mode(레거시) */
+  backend?: SessionMode;
   owner?: string;
   workspace: WorkspaceKind;
   checkpoints: number;

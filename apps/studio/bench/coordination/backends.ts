@@ -73,16 +73,71 @@ export interface EscalationChoice {
 
 /**
  * 승격 인자를 확정한다. --escalate-to는 승격을 지원하는 claude-code 백엔드에서만 쓸 수 있다.
- * 모델 경로를 조용히 고르지 않는 원칙과 같게, 다른 백엔드에 주면 시작 전에 오류를 낸다.
+ * 레인마다 백엔드를 고를 수 있으므로(레인 백엔드) 레인 중 하나라도 claude-code면 허용한다.
+ * 모델 경로를 조용히 고르지 않는 원칙과 같게, claude-code가 하나도 없는데 주면 시작 전에 오류를 낸다.
  */
-export function resolveEscalation(input: { backend: Backend; escalateTo?: string; escalateAfter?: number }): EscalationChoice {
+export function resolveEscalation(input: { backend: Backend; laneBackends?: Iterable<Backend>; escalateTo?: string; escalateAfter?: number }): EscalationChoice {
   const after = input.escalateAfter ?? 2;
   if (!Number.isInteger(after) || after < 1) throw new Error(`--escalate-after는 1 이상의 정수여야 합니다 (지금 값: ${input.escalateAfter})`);
   // --escalate-after만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
   const to = input.escalateTo?.trim();
   if (!to) return { after };
-  if (input.backend !== 'claude-code') throw new Error(`--escalate-to는 --backend claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${input.backend})`);
+  const backends = new Set<Backend>([input.backend, ...(input.laneBackends ?? [])]);
+  if (!backends.has('claude-code')) throw new Error(`--escalate-to는 claude-code 백엔드에서만 쓸 수 있습니다 (지금 백엔드: ${[...backends].join(', ')})`);
   return { to, after };
+}
+
+/** 벤치 레인 그룹(레인의 첫 쓰기 경로). planFor가 만드는 레인은 api·web 둘이다 */
+export const BENCH_LANE_GROUPS = ['api', 'web'] as const;
+export type BenchLaneGroup = (typeof BENCH_LANE_GROUPS)[number];
+
+export interface LaneBackendChoice {
+  group: BenchLaneGroup;
+  backend: Backend;
+  model?: string;
+}
+
+/**
+ * `--lane-backend api=claude-code:sonnet` 한 줄을 해석한다. 레인 그룹은 정해진 것만, 백엔드는 --backend와 같은 목록만 받는다.
+ * 모델은 선택이고, 백엔드마다 뜻이 다르다(api=레지스트리 id, commandcode=cmd 모델 id, CLI=러너에 넘길 모델 이름).
+ */
+export function parseLaneBackend(value: string): LaneBackendChoice {
+  const eq = value.indexOf('=');
+  if (eq < 0) throw new Error(`--lane-backend는 <레인 그룹>=<백엔드>[:<모델>] 형식이어야 합니다 (지금 값: ${value})`);
+  const group = value.slice(0, eq).trim();
+  const rest = value.slice(eq + 1).trim();
+  if (!(BENCH_LANE_GROUPS as readonly string[]).includes(group)) {
+    throw new Error(`모르는 레인 그룹입니다: ${group} (가능: ${BENCH_LANE_GROUPS.join(', ')})`);
+  }
+  const colon = rest.indexOf(':');
+  const backend = (colon < 0 ? rest : rest.slice(0, colon)).trim();
+  const model = colon < 0 ? undefined : rest.slice(colon + 1).trim() || undefined;
+  if (!isBackend(backend)) throw new Error(`알 수 없는 레인 백엔드입니다: ${backend} (claude-code, codex, commandcode 또는 openai)`);
+  return { group: group as BenchLaneGroup, backend, ...(model ? { model } : {}) };
+}
+
+/** 반복해 준 --lane-backend를 레인 그룹 → 선택으로 모은다. 같은 그룹을 두 번 주면 오류 */
+export function parseLaneBackends(values: readonly string[] | undefined): Map<BenchLaneGroup, LaneBackendChoice> {
+  const map = new Map<BenchLaneGroup, LaneBackendChoice>();
+  for (const value of values ?? []) {
+    const choice = parseLaneBackend(value);
+    if (map.has(choice.group)) throw new Error(`레인 그룹이 중복됩니다: ${choice.group}`);
+    map.set(choice.group, choice);
+  }
+  return map;
+}
+
+/** 벤치 백엔드 → 세션 백엔드. openai는 api 세션이다 */
+export function sessionBackendOf(backend: Backend): 'api' | 'claude-code' | 'codex' | 'commandcode' {
+  return backend === 'openai' ? 'api' : backend;
+}
+
+/** 이 실행이 쓰는 CLI 백엔드(계획 기본 + 레인). 쓰는 CLI마다 시작 전에 로그인을 확인한다 */
+export function cliBackendsInUse(backend: Backend, laneBackends: ReadonlyMap<BenchLaneGroup, LaneBackendChoice>): Backend[] {
+  const clis = new Set<Backend>();
+  if (backend !== 'openai') clis.add(backend);
+  for (const choice of laneBackends.values()) if (choice.backend !== 'openai') clis.add(choice.backend);
+  return [...clis];
 }
 
 /**

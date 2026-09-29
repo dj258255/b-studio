@@ -73,6 +73,11 @@ pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 -
 # commandcode: 이 PC에 로그인된 Command Code CLI. 무료 모델로 비용 없이 돌린다 (모델을 생략하면 계정 기본 모델)
 pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free --free-only --tasks orders-list --strategies S0,S1 --repeats 1
 
+# 레인마다 다른 백엔드: api 레인은 Claude Code, web 레인은 Command Code. 통합 세션은 --backend(계획 기본)를 쓴다
+pnpm bench:coordination --backend claude-code --model sonnet \
+  --lane-backend api=claude-code --lane-backend web=commandcode \
+  --tasks orders-list --strategies S1 --repeats 1
+
 # 일부만 (openai)
 pnpm bench:coordination --backend openai --tasks orders-list,independent --strategies S0,S1 --repeats 2 --out /tmp/bench-run
 ```
@@ -88,8 +93,9 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
 - `--integration-checks`(기본 꺼짐) — 엮인 과제 3개의 **통합 게이트**에만, 과제 요청에 적힌 샘플 값이 web 화면에 보이는지 확인(`pageChecks.expectText`·`expectAnyText`)을 덧붙입니다(orders-list `김민수`, order-detail `문 앞에 놓아 주세요`, order-summary `45000`/`45,000`). 필드 이름은 쓰지 않습니다. 이 값들은 인수 검사(`runAcceptance`)와 **같은 값**이라, 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면 S4 수리가 시작되는가"를 재는 것입니다([#124](https://github.com/dj258255/b-studio/issues/124), E2 H10). 각 실행 행에 `integrationChecks: true/false`를 남기고 `meta.json`에도 기록합니다. 레인 게이트는 그대로이고 통합 게이트만 바뀝니다(서버 안에서만 넘기는 `createTaskPlan.integrationChecks`)
 - `--contracts human|model`(기본 `human`) — S2에서 레인 사이 계약을 누가 쓰는지 정합니다. `model`은 계획 모델에게 한 번 받아 씁니다(S2에서만, `--backend openai|claude-code`에서만). 위의 "레인 사이 계약" 절을 보세요
-- `--escalate-to <모델>` — `claude-code`에서만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). 다른 백엔드에 주면 시작 전에 오류를 낸다
+- `--escalate-to <모델>` — claude-code 백엔드(계획 기본 또는 레인 중 하나)가 있을 때만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). claude-code가 하나도 없는데 주면 시작 전에 오류를 낸다
 - `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
+- `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` — 반복할 수 있습니다. 레인 그룹은 `api`·`web`(레인의 첫 쓰기 경로)입니다. 모르는 그룹·백엔드면 시작 전에 오류를 냅니다. 쓰는 CLI는 시작 전에 각각 로그인을 확인합니다. 요약표 "레인 백엔드" 열(예 `api:claude-code web:commandcode`)과 행의 레인별 `backend`·`model`로 남습니다. `--backend`는 계획 기본(통합 세션)으로 남습니다
 - `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
 
 `--prices` 파일 형식(키는 모델 이름에 포함되면 매칭합니다. 예 `haiku-4-5`. 값은 100만 토큰당 달러이고, 예시는 형식만 보여 줍니다):

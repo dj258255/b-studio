@@ -292,6 +292,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     projectName: snapshot.projectName,
     status: snapshot.status,
     mode: snapshot.mode,
+    backend: sessionBackend(snapshot),
     owner: snapshot.owner,
     workspace: snapshot.workspace ?? 'copy',
     checkpoints: snapshot.checkpoints.length,
@@ -331,9 +332,11 @@ export async function createSession(
   projectId: string,
   owner: string,
   workspace: WorkspaceKind = 'copy',
-  options: { modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
+  options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
+  // 요청이 백엔드를 고르면 허용 목록에서만 받는다. 없으면 서버 모드라 지금과 같다
+  const backend = resolveSessionBackend(options.backend);
   const tokenLimit = sessionTokenLimit();
   const preview = previewConfig();
   if (workspace === 'local') assertLocalFolderAllowed();
@@ -343,7 +346,7 @@ export async function createSession(
   await recoverSessions();
   const release = workspace === 'local' ? claimFolder(source.root) : undefined;
   try {
-    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
+    return await startSession({ projectId, owner, workspace, source, mode, backend, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
@@ -356,6 +359,7 @@ async function startSession({
   workspace,
   source,
   mode,
+  backend,
   tokenLimit,
   preview,
   modelId,
@@ -365,7 +369,10 @@ async function startSession({
   owner: string;
   workspace: WorkspaceKind;
   source: LoadedProject;
+  /** 세션을 만들 때의 서버 모드(B_STUDIO_MODE). 화면·레거시 호환용으로 남긴다 */
   mode: SessionMode;
+  /** 이 세션이 실제로 쓰는 백엔드. 실행 경로가 이 값을 본다 */
+  backend: SessionMode;
   tokenLimit: number | undefined;
   preview: PreviewConfig | undefined;
   modelId?: string;
@@ -375,7 +382,7 @@ async function startSession({
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
   // 승격 대상 모델 id가 레지스트리에 없으면 샌드박스를 띄우기 전에 거부한다(조용히 승격 없이 돌지 않게)
-  if (mode === 'api') apiEscalation();
+  if (backend === 'api') apiEscalation();
 
   // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 폴더의 시작 상태를 체크포인트로 둔다
   const author = gitAuthor();
@@ -414,6 +421,8 @@ async function startSession({
   if (extraPageChecks && extraPageChecks.length > 0) {
     project.spec.workflow = { ...project.spec.workflow, pageChecks: [...(project.spec.workflow?.pageChecks ?? []), ...extraPageChecks] };
   }
+  // CLI 백엔드는 샌드박스를 띄우기 전에 로그인을 확인한다. 실패하면 세션을 만들지 않고 이유를 돌려준다
+  await assertBackendReady(backend, project.root);
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
@@ -429,6 +438,7 @@ async function startSession({
       stateDir,
       status: 'starting',
       mode,
+      backend,
       modelId,
       running: false,
       tokenLimit,
@@ -706,12 +716,12 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       history = entry!.history;
     }
 
-    const mode = sessionMode();
     // 이어서 작업하는 세션도 지금 스튜디오 서버에 설정한 한도를 따른다
     const tokenLimit = sessionTokenLimit();
-    if (data.snapshot.mode !== mode) {
-      throw new StudioError(409, `이 세션은 ${data.snapshot.mode} 모드로 만들었습니다. B_STUDIO_MODE=${data.snapshot.mode}로 스튜디오를 실행한 뒤 이어서 작업하세요`);
-    }
+    // 실행 경로는 이 세션이 저장한 backend를 따른다. 다만 **지금 서버가 허용하는 백엔드**여야 한다.
+    // 예전의 "만들 때 모드와 같아야 한다" 검사가 막던 것(예: 개인 PC에서 claude-code로 만든 세션을 API 모드 공유 서버에서
+    // 이어서 돌리면 서버에서 로컬 CLI를 부르게 된다)을 허용 목록으로 계속 막는다
+    const backend = assertResumableBackend(data.snapshot);
     const { workDir } = data.snapshot;
     const local = data.snapshot.workspace === 'local';
     if (local) assertLocalFolderAllowed();
@@ -755,8 +765,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
         runtime: provider.isolation,
         checkpoints: list,
         repository: await describeRepository(checkpoints, data.sourceDirtyFiles),
-        nextDemoRequest: mode === 'demo' ? demoScenarios(project)[data.demoIndex]?.request : undefined,
-        nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[data.demoIndex]?.question?.request : undefined,
+        nextDemoRequest: backend === 'demo' ? demoScenarios(project)[data.demoIndex]?.request : undefined,
+        nextDemoQuestion: backend === 'demo' ? demoScenarios(project)[data.demoIndex]?.question?.request : undefined,
       },
       project,
       sandbox,
@@ -1118,17 +1128,19 @@ type RunPlan = (
 ) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean };
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
-  if (session.snapshot.mode === 'api') {
+  // 실행 경로는 서버 모드(B_STUDIO_MODE)가 아니라 **세션의 backend**를 본다. 이 필드가 없으면 mode가 곧 서버 모드다
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'api') {
     const route = routingDecision(request, intent, session.snapshot.modelId);
     const escalation = apiEscalation();
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
-  if (session.snapshot.mode === 'claude-code') {
+  if (backend === 'claude-code') {
     const escalation = claudeCodeEscalation();
     return { kind: 'claude-code', allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
-  if (session.snapshot.mode === 'codex') return { kind: 'codex', allowBreaking, intent };
-  if (session.snapshot.mode === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
+  if (backend === 'codex') return { kind: 'codex', allowBreaking, intent };
+  if (backend === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
@@ -1439,8 +1451,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...shared,
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
-      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
-      model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
+      // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수(계획 기본)를 쓴다. 기록용 id는 무시한다
+      model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
       steering: run.steering,
       // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
@@ -1462,8 +1474,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const result = await runCodexAgent({
       ...shared,
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
-      // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
-      model: process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined,
+      // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수를 쓴다. 기록용 id는 무시한다
+      model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined),
       // 실행 중 지시 큐. Codex는 턴 사이에만 넣는다
       steering: run.steering,
     });
@@ -1665,9 +1677,11 @@ async function saveDatabases(session: Session, sha: string): Promise<DatabaseSta
 
 /** 대화 밖에서 바뀐 사실(되돌리기, 새 샌드박스, 가져온 원격 커밋)을 다음 요청에서 모델이 알게 한다 */
 function noteForModel(session: Session, text: string): void {
-  if (session.snapshot.mode === 'claude-code') session.claudeCode.notes.push(text);
-  else if (session.snapshot.mode === 'codex') session.codex.notes.push(text);
-  else if (session.snapshot.mode === 'commandcode') session.commandCode.notes.push(text);
+  // 알림을 어디에 넣을지는 이 세션이 실제로 쓰는 백엔드를 따른다(레인이 서버 모드와 다른 백엔드를 쓸 수 있다)
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'claude-code') session.claudeCode.notes.push(text);
+  else if (backend === 'codex') session.codex.notes.push(text);
+  else if (backend === 'commandcode') session.commandCode.notes.push(text);
   else session.conversation.push({ role: 'user', content: text });
   session.settledConversation = session.conversation.length;
 }
@@ -2466,11 +2480,110 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
 }
 
 /** 오타가 조용히 다른 모드(특히 비용이 드는 모드)로 떨어지지 않도록 모르는 값은 거부한다 */
-function sessionMode(): SessionMode {
-  const value = process.env.B_STUDIO_MODE?.trim();
+function sessionMode(env: Record<string, string | undefined> = process.env): SessionMode {
+  const value = env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
   if (value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'demo') return value;
   throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, codex, commandcode, demo 중 하나여야 합니다 (지금 값: ${value})`);
+}
+
+/** 세션 백엔드로 고를 수 있는 값(demo 제외). 서버 모드는 기본값이고 B_STUDIO_BACKENDS가 허용 목록을 넓힌다 */
+export const SESSION_BACKENDS = ['api', 'claude-code', 'codex', 'commandcode'] as const;
+
+/**
+ * 이 서버에서 쓸 수 있는 백엔드. 서버 모드는 언제나 포함하고(계획 기본·통합 세션) B_STUDIO_BACKENDS가 더한다.
+ * 비우면 서버 모드 하나뿐이라 지금과 한 글자도 다르지 않다. demo면 고를 수 없다(데모는 섞지 않는다).
+ */
+/**
+ * 저장된 세션을 이어서 돌려도 되는 백엔드인지 확인하고 그 백엔드를 돌려준다. 지금 서버가 허용하지 않으면 409.
+ * 저장된 backend가 없는 옛 기록은 만들 때의 서버 모드(mode)로 본다
+ */
+export function assertResumableBackend(
+  snapshot: Pick<SessionSnapshot, 'mode' | 'backend'>,
+  serverMode: SessionMode = sessionMode(),
+  env: Record<string, string | undefined> = process.env,
+): SessionMode {
+  const backend = sessionBackend(snapshot);
+  if (!allowedBackends(serverMode, env).has(backend)) {
+    throw new StudioError(
+      409,
+      `이 세션은 ${backend} 백엔드로 만들었는데, 지금 스튜디오는 이 백엔드를 허용하지 않습니다. B_STUDIO_MODE=${backend}로 실행하거나 B_STUDIO_BACKENDS에 ${backend}를 넣은 뒤 이어서 작업하세요`,
+    );
+  }
+  return backend;
+}
+
+export function allowedBackends(serverMode: SessionMode = sessionMode(), env: Record<string, string | undefined> = process.env): Set<SessionMode> {
+  if (serverMode === 'demo') return new Set<SessionMode>(['demo']);
+  const allowed = new Set<SessionMode>([serverMode]);
+  for (const raw of (env.B_STUDIO_BACKENDS ?? '').split(',')) {
+    const value = raw.trim();
+    if (!value) continue;
+    if (!(SESSION_BACKENDS as readonly string[]).includes(value)) {
+      throw new StudioError(500, `B_STUDIO_BACKENDS에 알 수 없는 백엔드가 있습니다: ${value} (api, claude-code, codex, commandcode)`);
+    }
+    allowed.add(value as SessionMode);
+  }
+  return allowed;
+}
+
+/**
+ * 세션 백엔드를 확정한다. 요청이 없으면 서버 모드, 있으면 허용 목록에서만 받는다(HTTP 400).
+ * demo 서버에서는 백엔드를 고를 수 없다(데모는 섞지 않는다).
+ */
+export function resolveSessionBackend(requested: string | undefined, env: Record<string, string | undefined> = process.env): SessionMode {
+  const serverMode = sessionMode(env);
+  const allowed = allowedBackends(serverMode, env);
+  if (serverMode === 'demo') {
+    if (requested) throw new StudioError(400, '데모 모드에서는 백엔드를 고를 수 없습니다');
+    return 'demo';
+  }
+  if (!requested) return serverMode;
+  if (!allowed.has(requested as SessionMode)) {
+    throw new StudioError(400, `이 서버에서 쓸 수 없는 백엔드입니다: ${requested} (쓸 수 있는 백엔드: ${[...allowed].join(', ')})`);
+  }
+  return requested as SessionMode;
+}
+
+/** 이 세션이 실제로 쓰는 백엔드. 이 필드가 생기기 전 기록은 mode를 쓴다(그때 mode가 곧 서버 모드였다) */
+export function sessionBackend(snapshot: Pick<SessionSnapshot, 'mode' | 'backend'>): SessionMode {
+  return snapshot.backend ?? snapshot.mode;
+}
+
+/**
+ * CLI 러너에 넘길 모델. 레인 세션은 고른 모델을 snapshot.modelId에 담는다(예: `sonnet`).
+ * 계획의 기록용 id(`local-cli:...`)는 실제 모델 이름이 아니므로 넘기지 않고 환경 변수로 떨어진다.
+ */
+function cliModelOverride(modelId: string | undefined): string | undefined {
+  const value = modelId?.trim();
+  return value && !value.startsWith('local-cli') ? value : undefined;
+}
+
+export interface BackendPreflights {
+  claudeCode?: (input: { cwd: string }) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  codex?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  commandCode?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+}
+
+/**
+ * CLI 백엔드는 세션을 만들기 전에 로그인을 확인한다. 실패하면 샌드박스를 띄우지 않고 이유를 돌려준다.
+ * 확인 함수를 주입할 수 있게 빼 두어(테스트) 실제 CLI를 부르지 않고 검사할 수 있다.
+ */
+export async function assertBackendReady(backend: SessionMode, cwd: string, preflights: BackendPreflights = {}): Promise<void> {
+  if (backend === 'claude-code') {
+    const result = await (preflights.claudeCode ?? preflightClaudeCode)({ cwd });
+    if (!result.ok) throw new StudioError(409, `로컬 Claude Code를 쓸 수 없습니다: ${result.reason}`);
+    return;
+  }
+  if (backend === 'codex') {
+    const result = await (preflights.codex ?? preflightCodex)();
+    if (!result.ok) throw new StudioError(409, `로컬 Codex를 쓸 수 없습니다: ${result.reason}`);
+    return;
+  }
+  if (backend === 'commandcode') {
+    const result = await (preflights.commandCode ?? preflightCommandCode)();
+    if (!result.ok) throw new StudioError(409, `로컬 Command Code를 쓸 수 없습니다: ${result.reason}`);
+  }
 }
 
 /** 운영자가 정한 세션 토큰 한도. 잘못 적은 값이 "한도 없음"으로 넘어가지 않도록 샌드박스를 만들기 전에 거부한다 */
