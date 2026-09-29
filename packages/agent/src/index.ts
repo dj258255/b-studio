@@ -12,6 +12,7 @@ export {
   type Steering,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
+export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
   ClaudeCodeUsageTracker,
   describeAccount,
@@ -107,18 +108,23 @@ export {
   type SourceRepository,
 } from './checkpoints';
 export {
+  addSubIssue,
   buildPullRequest,
   canCreatePullRequest,
   compareUrl,
+  createIssue,
   createPullRequest,
   fetchIssue,
   parseRemote,
   PullRequestError,
   type GitHostKind,
+  type IssueInput,
   type IssueLookup,
+  type IssueResult,
   type PullRequestDraft,
   type PullRequestResult,
   type RemoteLocation,
+  type SubIssueResult,
 } from './repository';
 export { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {

@@ -143,6 +143,8 @@ describe('runPlainBaseline', () => {
     expect(result.maxContextTokens).toBe(2_207);
     // usage는 result의 누적값(modelUsage)을 쓴다
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 1, cacheWriteTokens: 2 });
+    // 모델별 단가로 환산하려고 모델 이름별 토큰도 남긴다(S0 행과 같은 계산)
+    expect(result.usageByModel).toEqual({ 'test-model': { inputTokens: 10, outputTokens: 5, cacheReadTokens: 1, cacheWriteTokens: 2 } });
   });
 
   it('사용 한도 문구가 있으면 rate_limited로 본다', async () => {

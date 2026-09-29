@@ -417,6 +417,13 @@ function ChatEntry({ item }: { item: ChatItem }) {
         </p>
       );
 
+    case "escalation":
+      return (
+        <p className="text-sm text-muted">
+          같은 실패가 {item.times}번 반복되어 <span className="font-mono text-ink">{item.to}</span>으로 올렸습니다
+        </p>
+      );
+
     case "stage":
       return <p className="text-xs font-medium tracking-wide text-muted">작업 단계 · {stageLabel(item.stage)}</p>;
 
@@ -560,7 +567,9 @@ function ChatEntry({ item }: { item: ChatItem }) {
               <a href={item.pullRequest.url} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-2">
                 {item.pullRequest.created ? `${label}을 만들었습니다` : `이미 열려 있는 ${label}을 찾았습니다`}
               </a>
-              {item.issue !== undefined && <span className="ml-2 text-muted">#{item.issue} 이슈를 함께 닫습니다</span>}
+              {item.issues && item.issues.length > 0 && (
+                <span className="ml-2 text-muted">{item.issues.map((issue) => `#${issue}`).join(", ")} 이슈를 함께 닫습니다</span>
+              )}
             </p>
           )}
           {item.pullRequestError && (

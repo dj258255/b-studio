@@ -27,6 +27,18 @@ export interface BenchIntegrationRow {
   error?: string;
 }
 
+/** 한 실행의 승격 결과. 승격을 설정하지 않은 실행은 to가 없다 */
+export interface BenchEscalation {
+  /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
+  to?: string;
+  /** --escalate-after */
+  after: number;
+  /** 이 실행에서 한 번이라도 승격이 일어났는지 */
+  escalated: boolean;
+  /** 승격이 일어난 뒤의 게이트 시도(실패) 횟수 */
+  attempt?: number;
+}
+
 export interface BenchProxyStats {
   forwardedCalls: number;
   requestBytes: number;
@@ -72,6 +84,8 @@ export interface BenchRow {
   failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
   /** 오래된 도구 결과를 묶어서 비운 합계(레인·통합). 비우기를 끄면 0 */
   contextCleared: { count: number; chars: number };
+  /** 모델 승격 설정과 이 실행의 승격 결과 */
+  escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;
   /** S2에서 쓴 계약의 출처와 수(모델 계약이면 호출 usage). 계약을 쓰지 않는 전략이면 없다 */
   contracts?: BenchContractsRow;
@@ -85,6 +99,10 @@ export interface BenchRow {
   proxy?: BenchProxyStats;
   leftoverContainers: string[];
   estimatedCostUsd: number;
+  /** --prices가 있으면 모델별 사용량으로 계산한 API 환산 비용(달러). 단가가 없는 모델이 하나라도 있으면 없다 */
+  costUsd?: number;
+  /** costUsd를 쓰지 못한 사유(단가 없는 모델 등) */
+  costNote?: string;
 }
 
 export interface SummaryMeta {
@@ -126,6 +144,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '반복 실패 중앙값',
     '게시·읽기 바이트 중앙값',
     '비운 도구 결과 중앙값',
+    '승격 건수',
+    'API 환산 비용($)',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -168,6 +188,10 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         '|',
         count(medianValue(group, (row) => withLaneSessions(row, row.contextCleared.count))),
         '|',
+        String(group.filter((row) => row.escalation.escalated).length),
+        '|',
+        costCell(group),
+        '|',
       ].join(' '),
     );
   }
@@ -206,6 +230,20 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
  */
 function withLaneSessions(row: BenchRow, value: number): number | undefined {
   return row.lanes.some((lane) => lane.sessionId) ? value : undefined;
+}
+
+/** 그룹의 API 환산 비용을 "합계 / 중앙값"(달러)으로 적는다. costUsd가 있는 실행이 없으면 — */
+function costCell(rows: BenchRow[]): string {
+  const values = rows.map((row) => row.costUsd).filter((value): value is number => typeof value === 'number');
+  if (values.length === 0) return '—';
+  const sum = values.reduce((total, value) => total + value, 0);
+  return `${sum.toFixed(4)} / ${medianOf(values).toFixed(4)}`;
+}
+
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
 function medianValue(rows: BenchRow[], pick: (row: BenchRow) => number | undefined): number | undefined {

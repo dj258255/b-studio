@@ -495,7 +495,132 @@ describe('runAgent', () => {
     expect(client.requests[0]!.messages.some((m) => typeof m.content === 'string' && m.content.includes('[진행 중 지시]'))).toBe(false);
   });
 
+  it('같은 실패 서명이 2번 반복되면 다음 호출을 승격 클라이언트로 바꾸고, 한 번만 올린다', async () => {
+    // 게이트가 두 번 같은 'run' 실패를 낸다. 그 뒤 호출은 승격 클라이언트가 받는다
+    const base = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
+      { text: '메모 필드를 추가했습니다.' },
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '컴파일 에러를 고쳤습니다.' },
+    ]);
+    const big = new ScriptedModelClient([{ text: '그래도 같은 실패라 다시 고쳤습니다.' }]);
+    const events: AgentEvent[] = [];
 
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, true]),
+      client: base,
+      escalation: { to: 'sonnet', client: big },
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 2 });
+    // 두 번 실패 뒤에 올렸다
+    expect(result.metrics?.escalatedAt).toBe(2);
+    // 승격 전까지는 시작 클라이언트가, 승격 뒤에는 승격 클라이언트가 불렸다
+    expect(base.requests).toHaveLength(4);
+    expect(big.requests).toHaveLength(1);
+    expect(big.requests[0]!.messages.at(-1)).toMatchObject({ role: 'user' });
+
+    const escalated = events.filter((event): event is Extract<AgentEvent, { type: 'model_escalated' }> => event.type === 'model_escalated');
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0]).toMatchObject({ from: 'scripted', to: 'sonnet', attempt: 2, sameSignatureTimes: 2 });
+    expect(escalated[0]!.signature).toContain('run|api|');
+  });
+
+  it('승격 지점을 지나도 이미 올렸으면 다시 올리지 않는다', async () => {
+    const base = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
+      { text: '1' },
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '2' },
+    ]);
+    // 승격 뒤에도 게이트가 계속 실패한다. 승격은 한 번만 일어나야 한다
+    const big = new ScriptedModelClient([{ text: '3' }, { text: '4' }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, false, false]),
+      client: base,
+      escalation: { to: 'sonnet', client: big },
+      maxVerifyAttempts: 4,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.metrics?.escalatedAt).toBe(2);
+    expect(events.filter((event) => event.type === 'model_escalated')).toHaveLength(1);
+    expect(big.requests).toHaveLength(2);
+  });
+
+  it('escalation을 주지 않으면 게이트가 반복 실패해도 승격하지 않는다(기본값)', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
+      { text: '고쳤습니다.' },
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '다시 고쳤습니다.' },
+    ]);
+    const events: AgentEvent[] = [];
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, true]),
+      client,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result.status).toBe('done');
+    expect(events.some((event) => event.type === 'model_escalated')).toBe(false);
+    expect(result.metrics?.escalatedAt).toBeUndefined();
+  });
+
+  it('승격으로 클라이언트가 바뀌면 모델별 사용량을 나누어 남긴다', async () => {
+    const baseScripted = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
+      { text: '1' },
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '2' },
+    ]);
+    const bigScripted = new ScriptedModelClient([{ text: '3' }]);
+    // 두 클라이언트가 서로 다른 모델 id를 알린다(승격 전후로 모델이 바뀐 상황)
+    const base: ModelClient = {
+      info: { provider: 'scripted', backend: 'test', model: 'haiku' },
+      async createMessage(request) {
+        const message = await baseScripted.createMessage(request);
+        return { ...message, usage: { ...message.usage, input_tokens: 100, output_tokens: 10 } };
+      },
+    };
+    const big: ModelClient = {
+      info: { provider: 'scripted', backend: 'test', model: 'sonnet' },
+      async createMessage(request) {
+        const message = await bigScripted.createMessage(request);
+        return { ...message, usage: { ...message.usage, input_tokens: 200, output_tokens: 20 } };
+      },
+    };
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, true]),
+      client: base,
+      escalation: { to: 'sonnet', client: big },
+      fetcher: async () => contract,
+    });
+
+    expect(result.status).toBe('done');
+    // 승격 전 haiku 4회(400/40), 승격 뒤 sonnet 1회(200/20)
+    expect(result.metrics?.usageByModel).toEqual({
+      haiku: { inputTokens: 400, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      sonnet: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    });
+  });
 
   describe('오래된 도구 결과 비우기', () => {
     /** 도구 결과가 세 턴에 걸쳐 쌓이는 스크립트. 세 번째 턴 직전에 오래된 결과를 비울 수 있다 */

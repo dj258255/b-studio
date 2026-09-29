@@ -126,6 +126,24 @@ describe('summarizeTaskPlan', () => {
     expect(summary.gateMs).toBe(80);
   });
 
+  it('실행들의 모델별 사용량을 합치고, 없으면 필드를 만들지 않는다', () => {
+    const base = basePlan();
+    const plan: TaskPlanView = {
+      ...base,
+      planning: undefined,
+      integration: undefined,
+      lanes: base.lanes.map((lane) => ({
+        ...lane,
+        tasks: lane.tasks.map((task) => ({ ...task, run: task.run ? { ...task.run, metrics: { ...task.run.metrics!, usageByModel: { haiku: usage(10, 1) } } } : undefined })),
+      })),
+    };
+
+    // a1·a2·b1 세 실행의 haiku 사용량이 합쳐진다
+    expect(summarizeTaskPlan(plan).usageByModel).toEqual({ haiku: usage(30, 3) });
+    // 모델별 사용량을 내는 실행이 없으면 필드를 만들지 않는다(basePlan의 실행들에는 없다)
+    expect(summarizeTaskPlan(base).usageByModel).toBeUndefined();
+  });
+
   it('지표가 없는 실행은 usage만 더하고, 승인 전 계획은 endToEndMs가 없다', () => {
     const plan: TaskPlanView = {
       ...basePlan(),

@@ -64,6 +64,9 @@ pnpm bench:coordination --backend openai
 # claude-code: 이 PC에 로그인된 구독 CLI (유료 API 없이 E1을 돌린다)
 pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list --strategies S0,S1 --repeats 1
 
+# claude-code 승격(H5): haiku로 시작해 게이트가 같은 실패 서명을 2번 내면 sonnet으로 올린다
+pnpm bench:coordination --backend claude-code --model haiku --escalate-to sonnet --tasks orders-list --strategies S0 --repeats 1
+
 # codex: 이 PC에 ChatGPT로 로그인된 Codex CLI. --model을 생략하면 로그인 계정의 기본 모델을 쓴다
 pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 --repeats 1
 
@@ -80,6 +83,17 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 - `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
 - `--contracts human|model`(기본 `human`) — S2에서 레인 사이 계약을 누가 쓰는지 정합니다. `model`은 계획 모델에게 한 번 받아 씁니다(S2에서만, `--backend openai|claude-code`에서만). 위의 "레인 사이 계약" 절을 보세요
+- `--escalate-to <모델>` — `claude-code`에서만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). 다른 백엔드에 주면 시작 전에 오류를 낸다
+- `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
+- `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
+
+`--prices` 파일 형식(키는 모델 이름에 포함되면 매칭합니다. 예 `haiku-4-5`. 값은 100만 토큰당 달러이고, 예시는 형식만 보여 줍니다):
+
+```json
+{
+  "<모델 이름 일부>": { "inputPerM": …, "outputPerM": …, "cacheReadPerM": …, "cacheWritePerM": … }
+}
+```
 
 **claude-code**는 프록시와 상류를 띄우지 않고 `BENCH_UPSTREAM_*`도 요구하지 않습니다. 모델 레지스트리도 쓰지 않습니다(계획은 `presetPlan`으로 서버 안에서 넘기고, 세션은 레지스트리를 요구하지 않습니다). 실행 전에 `preflightClaudeCode`로 로그인을 확인하고, 실패하면 종료 코드 3으로 멈춥니다.
 
@@ -100,10 +114,12 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
 
-- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 수용 확인, 분류, 프록시 통계, 관측한 모델, 추정 비용, `contracts`).
+- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`, 계약 `contracts`)
 - `contracts/`: `--contracts model`일 때 모델이 쓴 계약 원문(`<과제>-r<반복>-<순번>.json`). 불일치 원인을 나중에 보려고 남깁니다.
-- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`) 열이 있습니다.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, **계약 출처(`contracts`)**, git 커밋.
+- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "API 환산 비용($)" 열이 있습니다.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`), 단가 파일 경로(`pricesPath`), git 커밋.
+
+행의 `escalation`은 `{ to, after, escalated, attempt? }`입니다. `to`·`after`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).
 
 원자료에는 레인·통합 세션마다의 탐색·실패 흔적도 남깁니다.
 

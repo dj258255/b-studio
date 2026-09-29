@@ -23,6 +23,7 @@ function metrics(over: Partial<TaskPlanMetrics> = {}): TaskPlanMetrics {
 
 function row(over: Partial<BenchRow>): BenchRow {
   return {
+    escalation: { after: 2, escalated: false },
     order: 0,
     repeat: 1,
     taskId: 'orders-list',
@@ -235,6 +236,34 @@ describe('summarize', () => {
     );
     expect(markdown).toContain('| S3 | 1/1 |');
     expect(markdown).toContain('| 4,096 |');
+  });
+
+  it('승격 건수 열에 escalated 실행 수를 센다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: true, attempt: 2 } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: false } }),
+        row({ taskId: 'orders-list', strategy: 'S0' }),
+      ],
+      meta,
+    );
+    expect(markdown).toMatch(/\| \S+ 건수 \|/);
+    expect(markdown).toContain('| orders-list | O | S0 | 3/3 | — | — | — | — | — | — | — | — | — | — | — | — | — | 1 |');
+  });
+
+  it('API 환산 비용 열에 costUsd가 있는 실행만으로 합계/중앙값을 낸다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', costUsd: 0.01 }),
+        row({ taskId: 'orders-list', strategy: 'S0', costUsd: 0.03 }),
+        row({ taskId: 'orders-list', strategy: 'S0' }),
+      ],
+      meta,
+    );
+    expect(markdown).toContain('| API 환산 비용($) |');
+    expect(markdown).toContain('| orders-list | O | S0 | 3/3 | — | — | — | — | — | — | — | — | — | — | — | — | — | 0 | 0.0400 / 0.0200 |');
+    // costUsd가 하나도 없으면 —로 둔다
+    expect(summarize([row({})], meta)).toContain('| orders-list | O | S0 | 1/1 | — | — | — | — | — | — | — | — | — | — | — | — | — | 0 | — |');
   });
 
   it('성공 1건당 토큰은 (입력+캐시+출력) 합을 성공 수로 나누고, 성공이 없으면 —다', () => {
