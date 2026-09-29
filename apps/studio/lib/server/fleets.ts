@@ -11,6 +11,11 @@ import { createSession, getSnapshot, sendMessage, subscribe } from './sessions';
 
 const MAX_MEMBERS = 4;
 const MAX_REQUEST = 20_000;
+/**
+ * 여러 모델을 나란히 비교하는 Agent Fleet을 쓸 수 있는 모드. 모델 API를 직접 부르므로 유료 API 모드뿐이다.
+ * capabilities가 같은 목록을 화면에 알린다 — 두 곳이 갈라지지 않게 여기 한 곳에 둔다
+ */
+export const FLEET_MODES = ['api'] as const;
 const fleets = new Map<string, FleetView>();
 const subscribed = new Set<string>();
 let loaded = false;
@@ -22,7 +27,8 @@ export async function createFleet(input: {
   owner: string;
   allowBreaking?: boolean;
 }): Promise<FleetView> {
-  if ((process.env.B_STUDIO_MODE?.trim() || 'api') !== 'api') throw new StudioError(409, '병렬 모델 Fleet은 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
+  const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
+  if (!(FLEET_MODES as readonly string[]).includes(mode)) throw new StudioError(409, `병렬 모델 Fleet은 B_STUDIO_MODE=${FLEET_MODES.join(' 또는 ')}에서만 사용할 수 있습니다 (지금 모드: ${mode})`);
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);

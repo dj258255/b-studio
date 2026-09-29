@@ -176,6 +176,29 @@ export function parsePlannerReply(text: string): unknown {
 }
 
 /**
+ * 모델을 부르는 방법을 바깥에서 준다(계획·레인 계약 공용). 부르는 쪽이 ModelClient를 주든,
+ * 로컬 Claude Code CLI를 도구 없이 한 번 부르든, 같은 프롬프트·같은 검증을 쓰게 한다.
+ */
+export interface ModelAskInput {
+  system: string;
+  user: string;
+}
+
+export type ModelAsk = (input: ModelAskInput, signal?: AbortSignal) => Promise<{ text: string; usage: AgentUsage }>;
+
+/** 계획 호출에 쓰는 이름. 레인 계약(lane-contracts의 ContractAsk)과 같은 모양이다 */
+export type PlanAsk = ModelAsk;
+
+/** ModelClient로 계획을 받는다. tools를 주지 않고(모델이 JSON만 내게) usage도 같은 규칙으로 옮긴다 */
+export function planAskFromClient(client: ModelClient): PlanAsk {
+  return async ({ system, user }, signal) => {
+    const message = await client.createMessage({ system, tools: [], messages: [{ role: 'user', content: user }] }, signal);
+    const text = message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
+    return { text, usage: usageFromMessage(message.usage) };
+  };
+}
+
+/**
  * 모델 응답의 usage를 세션 지표 모양으로 옮긴다. 계획 호출(requestTaskPlan)과
  * 레인 사이 계약 호출(lane-contracts)이 같은 매핑을 쓴다 — 두 곳이 갈라지면 토큰 합계를 비교할 수 없다.
  * loop.ts의 addUsage와 같은 규칙이다(그 함수는 세션 토큰 한도를 쓰므로 여기서 같은 모양으로 바꾼다).
@@ -194,18 +217,20 @@ export function usageFromMessage(usage: {
   };
 }
 
-/** 모델에게 계획을 받아 검증까지 마친 레인을 돌려준다. 계획이 틀리면 한 작업으로 몰래 바꾸지 않고 실패시킨다 */
+/**
+ * 모델에게 계획을 받아 검증까지 마친 레인을 돌려준다. 계획이 틀리면 한 작업으로 몰래 바꾸지 않고 실패시킨다.
+ * 부르는 방법은 바깥에서 준다(PlanAsk) — API 모드는 ModelClient 어댑터, 로컬 CLI 모드는 도구 없는 한 번 호출.
+ */
 export async function requestTaskPlan(
-  client: ModelClient,
+  ask: PlanAsk,
   project: LoadedProject,
   request: string,
   signal?: AbortSignal,
 ): Promise<{ lanes: TaskLane[]; raw: unknown; usage: AgentUsage; durationMs: number }> {
   const started = performance.now();
-  const message = await client.createMessage({ system: buildPlannerSystem(project), tools: [], messages: [{ role: 'user', content: request }] }, signal);
+  const answer = await ask({ system: buildPlannerSystem(project), user: request }, signal);
   const durationMs = Math.round(performance.now() - started);
-  const text = message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
-  const usage = usageFromMessage(message.usage);
+  const { text, usage } = answer;
   try {
     const raw = parsePlannerReply(text);
     return { lanes: planLanes(raw), raw, usage, durationMs };
