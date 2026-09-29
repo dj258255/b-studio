@@ -35,7 +35,8 @@ function main(): void {
   // ③ 설정 파일. 창 크기처럼 이미 있는 값은 남긴다
   const file = configPath();
   const previous = readConfig(file);
-  writeConfig({ ...previous, root, node: process.execPath, pnpm, mode: previous?.mode ?? 'local' }, file);
+  // 터미널 PATH도 기록한다. Dock에서 켠 앱에는 docker·colima가 있는 Homebrew 폴더가 PATH에 없다
+  writeConfig({ ...previous, root, node: process.execPath, pnpm, ...(process.env.PATH ? { path: process.env.PATH } : {}), mode: previous?.mode ?? 'local' }, file);
 
   console.log(`\n설치했습니다: ${target}`);
   console.log(`설정 파일: ${file}`);

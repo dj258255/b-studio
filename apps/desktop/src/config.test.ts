@@ -44,6 +44,11 @@ describe('readConfig', () => {
     });
   });
 
+  it('설치 시점 PATH를 읽고, 비어 있으면 넣지 않는다(Dock에서 켠 앱이 docker·colima를 찾게)', () => {
+    expect(parseConfig(JSON.stringify({ ...config, path: '/opt/homebrew/bin:/usr/bin' }))).toMatchObject({ path: '/opt/homebrew/bin:/usr/bin' });
+    expect(parseConfig(JSON.stringify({ ...config, path: '' }))).not.toHaveProperty('path');
+  });
+
   it('형식이 틀리면 이유를 담아 던진다', () => {
     const broken = file('broken.json');
     writeFileSync(broken, '{ not json');

@@ -93,7 +93,7 @@ async function start(): Promise<void> {
     return;
   }
 
-  const runner = createSpawnRunner(config.node);
+  const runner = createSpawnRunner(config.node, config.path);
   let launched: LaunchResult;
   const controller = new AbortController();
   launching = controller;

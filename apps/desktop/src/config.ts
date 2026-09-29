@@ -16,6 +16,11 @@ export interface DesktopConfig {
   node: string;
   /** 설치 시점의 pnpm 실행 파일(`command -v pnpm`) */
   pnpm: string;
+  /**
+   * 설치 시점의 터미널 PATH. Finder·Dock에서 켠 앱의 PATH는 `/usr/bin:/bin:/usr/sbin:/sbin`뿐이라
+   * Homebrew의 docker·colima(`/opt/homebrew/bin`, `/usr/local/bin`)를 찾지 못해 launch가 멈췄다(설치 확인에서 발견)
+   */
+  path?: string;
   /** 서버 모드. 기본 local(이 PC에 로그인한 CLI로 실행) */
   mode: string;
   /** 서버 포트. 없으면 CLI가 고른다 */
@@ -77,6 +82,7 @@ export function parseConfig(raw: string, file = 'desktop.json'): DesktopConfig {
     root: text('root'),
     node: text('node'),
     pnpm: text('pnpm'),
+    ...(typeof value.path === 'string' && value.path.trim() !== '' ? { path: value.path } : {}),
     mode: typeof value.mode === 'string' && value.mode.trim() !== '' ? value.mode.trim() : DEFAULT_MODE,
     ...(port === undefined ? {} : { port: port as number }),
     ...(isBounds(value.window) ? { window: value.window } : {}),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DesktopConfig } from './config';
-import { launchArgs, launchLogDir, launchStudio, parseLaunchResult, parseStopResult, stopArgs, stopIfStarted, stopStudio, type CommandRunner } from './launch';
+import { childPath, launchArgs, launchLogDir, launchStudio, parseLaunchResult, parseStopResult, stopArgs, stopIfStarted, stopStudio, type CommandRunner } from './launch';
 
 const config: DesktopConfig = { root: '/repo/b-studio', node: '/nvm/v22/bin/node', pnpm: '/nvm/v22/bin/pnpm', mode: 'local' };
 
@@ -130,5 +130,19 @@ describe('stopStudio / stopIfStarted', () => {
   it('stopStudio는 결과 JSON을 읽는다', async () => {
     const { runner } = fakeRunner(() => ({ code: 0, stdout: '{"stopped":false}', stderr: '' }));
     expect(await stopStudio(config, runner)).toEqual({ stopped: false });
+  });
+});
+
+describe('childPath (Dock에서 켠 앱의 PATH)', () => {
+  const node = '/Users/me/.nvm/versions/node/v22/bin/node';
+  it('설치 시점 node 폴더와 터미널 PATH를 앞에 두고, 지금 PATH를 뒤에 붙이며 중복을 뺀다', () => {
+    expect(childPath(node, '/opt/homebrew/bin:/usr/local/bin:/usr/bin', '/usr/bin:/bin')).toBe(
+      '/Users/me/.nvm/versions/node/v22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+    );
+  });
+  it('설치 시점 PATH가 없으면 Homebrew 폴더를 넣는다(Finder의 PATH에는 docker·colima가 없다)', () => {
+    expect(childPath(node, undefined, '/usr/bin:/bin:/usr/sbin:/sbin')).toBe(
+      '/Users/me/.nvm/versions/node/v22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+    );
   });
 });

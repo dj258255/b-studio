@@ -159,13 +159,25 @@ function append(current: string, text: string): string {
  * 실제 실행기. Dock·Finder에서 켠 앱에는 터미널 PATH(nvm·corepack)가 없어서,
  * pnpm의 shebang(`#!/usr/bin/env node`)이 실패할 수 있다 — 설치 시점 node의 폴더를 PATH 앞에 넣는다.
  */
-export function createSpawnRunner(nodePath: string): CommandRunner {
+/** Finder·Dock에서 켠 앱에도 있어야 할 폴더. 설치 시점 PATH가 없을 때 쓰는 대비책(Homebrew의 docker·colima) */
+const FALLBACK_PATHS = ['/opt/homebrew/bin', '/usr/local/bin'];
+
+/**
+ * 자식 프로세스 PATH: 설치 시점 node 폴더 → 설치 시점 터미널 PATH(없으면 Homebrew 폴더) → 지금 PATH 순서, 중복 제거.
+ * Dock에서 켠 앱은 로그인 셸 PATH를 받지 못한다. node만 넣으면 launch가 docker·colima를 찾지 못한다
+ */
+export function childPath(nodePath: string, installPath: string | undefined, current: string | undefined): string {
+  const parts = [path.dirname(nodePath), ...(installPath ? installPath.split(path.delimiter) : FALLBACK_PATHS), ...(current ?? '').split(path.delimiter)];
+  return [...new Set(parts.filter((part) => part.trim() !== ''))].join(path.delimiter);
+}
+
+export function createSpawnRunner(nodePath: string, installPath?: string): CommandRunner {
   return {
     run(command, args, options) {
       return new Promise<CommandResult>((resolve, reject) => {
         const child = spawn(command, [...args], {
           cwd: options.cwd,
-          env: { ...process.env, PATH: `${path.dirname(nodePath)}${path.delimiter}${process.env.PATH ?? ''}` },
+          env: { ...process.env, PATH: childPath(nodePath, installPath, process.env.PATH) },
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         let stdout = '';
