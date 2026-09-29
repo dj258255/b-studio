@@ -4,8 +4,9 @@ import { breakdownByCondition, breakdownMarkdown } from './breakdown';
 import type { BenchRow } from './summary';
 import { tokenBreakdown, turnsFromEvents, TurnRecorder, type TurnRecord } from './turns';
 
-function turn(context: number, output: number, tools: Array<[string, number]> = []): TurnRecord {
-  return { context, output, cacheRead: 0, cacheWrite: 0, tools: tools.map(([name, chars]) => ({ name, chars })) };
+/** outputChars: 그 응답에서 모델이 쓴 글·도구 입력 글자 수 */
+function turn(context: number, outputChars: number, tools: Array<[string, number]> = []): TurnRecord {
+  return { context, output: 0, outputChars, cacheRead: 0, cacheWrite: 0, tools: tools.map(([name, chars]) => ({ name, chars })) };
 }
 
 function reread(breakdown: ReturnType<typeof tokenBreakdown>): number {
@@ -14,9 +15,9 @@ function reread(breakdown: ReturnType<typeof tokenBreakdown>): number {
 
 describe('tokenBreakdown', () => {
   it('고정 문맥과 재읽기로 나누고, 합이 문맥 합과 맞는다', () => {
-    // 호출 0: 문맥 10,000, 출력 100, read_file 결과 → 호출 1은 10,500(+500: 출력 100 + 도구 400)
-    // 호출 1: 출력 50, http_request 결과 → 호출 2는 10,750(+250: 출력 50 + 도구 200)
-    const turns = [turn(10_000, 100, [['read_file', 1_600]]), turn(10_500, 50, [['http_request', 800]]), turn(10_750, 30)];
+    // 호출 0: 모델이 400자, read_file 결과 1,600자 → 호출 1은 +500(출력 1/5 = 100, 도구 4/5 = 400)
+    // 호출 1: 모델이 200자, http_request 결과 800자 → 호출 2는 +250(출력 50, 도구 200)
+    const turns = [turn(10_000, 400, [['read_file', 1_600]]), turn(10_500, 200, [['http_request', 800]]), turn(10_750, 30)];
     const result = tokenBreakdown(turns);
 
     expect(result.calls).toBe(3);
@@ -50,6 +51,14 @@ describe('tokenBreakdown', () => {
     expect(result.toolReread).toEqual({});
   });
 
+  it('Write처럼 입력이 크고 결과가 작은 도구는 대부분 모델 출력으로 센다', () => {
+    // 파일 내용 9,000자를 쓰고 결과는 "작성함" 1,000자 → 늘어난 1,000 중 900은 출력, 100은 도구 결과
+    const result = tokenBreakdown([turn(5_000, 9_000, [['Write', 1_000]]), turn(6_000, 0)]);
+
+    expect(result.outputReread).toBe(900);
+    expect(result.toolReread).toEqual({ Write: 100 });
+  });
+
   it('호출이 없으면 모두 0이다', () => {
     expect(tokenBreakdown([])).toMatchObject({ calls: 0, contextTotal: 0, fixed: 0, outputReread: 0, clearedSaving: 0 });
   });
@@ -60,6 +69,7 @@ describe('turnsFromEvents', () => {
     const events: StudioEvent[] = [
       { type: 'run_started', runId: 'r1', request: 'x' },
       { type: 'agent', runId: 'r1', event: { type: 'turn_usage', turn: 1, inputTokens: 3, outputTokens: 40, cacheReadTokens: 900, cacheWriteTokens: 100, contextTokens: 1_003 } },
+      { type: 'agent', runId: 'r1', event: { type: 'text', text: '읽어 볼게요' } },
       { type: 'agent', runId: 'r1', event: { type: 'tool_call', name: 'read_file', input: { path: 'a.ts' } } },
       { type: 'agent', runId: 'r1', event: { type: 'tool_result', name: 'read_file', ok: true, content: 'abcdef', chars: 6, rawChars: 6 } },
       { type: 'agent', runId: 'r1', event: { type: 'tool_result', name: 'list_files', ok: true, content: 'abc' } },
@@ -67,8 +77,15 @@ describe('turnsFromEvents', () => {
     ];
 
     expect(turnsFromEvents(events)).toEqual([
-      { context: 1_003, output: 40, cacheRead: 900, cacheWrite: 100, tools: [{ name: 'read_file', chars: 6 }, { name: 'list_files', chars: 3 }] },
-      { context: 1_021, output: 5, cacheRead: 1_000, cacheWrite: 20, tools: [] },
+      {
+        context: 1_003,
+        output: 40,
+        outputChars: '읽어 볼게요'.length + JSON.stringify({ path: 'a.ts' }).length,
+        cacheRead: 900,
+        cacheWrite: 100,
+        tools: [{ name: 'read_file', chars: 6 }, { name: 'list_files', chars: 3 }],
+      },
+      { context: 1_021, output: 5, outputChars: 0, cacheRead: 1_000, cacheWrite: 20, tools: [] },
     ]);
   });
 });
@@ -78,15 +95,15 @@ describe('TurnRecorder', () => {
     const recorder = new TurnRecorder();
     const usage = { input_tokens: 2, output_tokens: 10, cache_read_input_tokens: 500, cache_creation_input_tokens: 50 };
     recorder.observeAssistant({ id: 'm1', usage, content: [{ type: 'text', text: '읽어 볼게요' }] });
-    recorder.observeAssistant({ id: 'm1', usage: { ...usage, output_tokens: 30 }, content: [{ type: 'tool_use', id: 't1', name: 'Read' }] });
+    recorder.observeAssistant({ id: 'm1', usage: { ...usage, output_tokens: 30 }, content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a' } }] });
     recorder.observeUser([{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: '12345' }] }]);
     recorder.observeUser([{ type: 'tool_result', tool_use_id: 'unknown', content: 'x' }]);
     recorder.observeUser('문자열 내용은 무시');
     recorder.observeAssistant({ id: 'm2', usage: { input_tokens: 1, output_tokens: 3, cache_read_input_tokens: 560 }, content: [] });
 
     expect(recorder.turns).toEqual([
-      { context: 552, output: 30, cacheRead: 500, cacheWrite: 50, tools: [{ name: 'Read', chars: 5 }] },
-      { context: 561, output: 3, cacheRead: 560, cacheWrite: 0, tools: [] },
+      { context: 552, output: 30, outputChars: '읽어 볼게요'.length + JSON.stringify({ file_path: 'a' }).length, cacheRead: 500, cacheWrite: 50, tools: [{ name: 'Read', chars: 5 }] },
+      { context: 561, output: 3, outputChars: 0, cacheRead: 560, cacheWrite: 0, tools: [] },
     ]);
   });
 });

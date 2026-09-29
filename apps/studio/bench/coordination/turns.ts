@@ -7,7 +7,9 @@
  * 분해는 실제 문맥 크기로 한다. 호출 t의 문맥을 c_t, 호출 수를 N이라 하면
  *   Σ c_t = N·c_0 + Σ_t (c_{t+1} − c_t)·(N − 1 − t)
  * 이다. 앞 항이 고정 문맥, 뒤 항은 호출 t 뒤에 늘어난 양이 그 뒤 호출마다 다시 읽힌 양이다.
- * 늘어난 양은 그 호출의 출력(모델이 쓴 글·도구 입력)과 도구 결과로 나누고, 도구끼리는 결과 글자 수 비율로 나눈다.
+ * 늘어난 양은 그 호출의 출력(모델이 쓴 글·도구 입력)과 도구 결과로 **글자 수 비율**로 나누고, 도구끼리도 결과 글자 수 비율로 나눈다.
+ * 출력 토큰 값으로 나누지 않는 이유: 로컬 Claude Code는 응답 첫 조각의 사용량만 알려 출력이 1~16 토큰처럼 거의 0으로 잡힌다.
+ * 그러면 Write로 쓴 파일 내용처럼 모델이 쓴 것이 도구 결과로 넘어간다(E6 첫 시도에서 발견).
  * 오래된 결과를 비워 문맥이 줄면 늘어난 양이 음수가 되고, 그만큼을 '비워서 줄어든 양'으로 따로 센다.
  */
 import type { StudioEvent } from '../../lib/studio-events';
@@ -21,7 +23,10 @@ export interface TurnTool {
 export interface TurnRecord {
   /** 이 호출의 입력 크기 = input + cacheRead + cacheWrite */
   context: number;
+  /** 알려진 출력 토큰. 로컬 Claude Code에서는 첫 조각 값이라 덜 잡힌다. 분해에는 outputChars를 쓴다 */
   output: number;
+  /** 이 호출의 응답에서 모델이 쓴 글과 도구 입력(JSON)의 글자 수 */
+  outputChars: number;
   cacheRead: number;
   cacheWrite: number;
   /** 이 호출의 응답이 부른 도구와 결과 크기(부른 순서) */
@@ -59,8 +64,15 @@ export function turnsFromEvents(events: readonly StudioEvent[]): TurnRecord[] {
         output: agent.outputTokens,
         cacheRead: agent.cacheReadTokens,
         cacheWrite: agent.cacheWriteTokens,
+        outputChars: 0,
         tools: [],
       });
+      continue;
+    }
+    // 러너는 turn_usage 다음에 그 응답의 글(text)과 도구 호출(tool_call)을 보낸다
+    if (agent.type === 'text' || agent.type === 'tool_call') {
+      const turn = turns.at(-1);
+      if (turn) turn.outputChars += agent.type === 'text' ? agent.text.length : inputChars(agent.input);
       continue;
     }
     if (agent.type === 'tool_result') {
@@ -85,6 +97,7 @@ interface SdkBlock {
   tool_use_id?: string;
   content?: unknown;
   text?: string;
+  input?: unknown;
 }
 
 /**
@@ -103,7 +116,7 @@ export class TurnRecorder {
       const input = usage.input_tokens ?? 0;
       const cacheRead = usage.cache_read_input_tokens ?? 0;
       const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-      turn = { context: input + cacheRead + cacheWrite, output: usage.output_tokens ?? 0, cacheRead, cacheWrite, tools: [] };
+      turn = { context: input + cacheRead + cacheWrite, output: usage.output_tokens ?? 0, outputChars: 0, cacheRead, cacheWrite, tools: [] };
       this.#byMessage.set(message.id, turn);
       this.turns.push(turn);
     } else if (message.usage?.output_tokens) {
@@ -111,7 +124,11 @@ export class TurnRecorder {
       turn.output = Math.max(turn.output, message.usage.output_tokens);
     }
     for (const block of message.content) {
-      if (block.type === 'tool_use' && block.id && block.name) this.#toolTurn.set(block.id, { turn, name: block.name });
+      if (block.type === 'text' && typeof block.text === 'string') turn.outputChars += block.text.length;
+      if (block.type === 'tool_use' && block.id && block.name) {
+        this.#toolTurn.set(block.id, { turn, name: block.name });
+        turn.outputChars += inputChars(block.input);
+      }
     }
   }
 
@@ -122,6 +139,16 @@ export class TurnRecorder {
       const owner = this.#toolTurn.get(block.tool_use_id);
       if (owner) owner.turn.tools.push({ name: owner.name, chars: resultChars(block.content) });
     }
+  }
+}
+
+function inputChars(input: unknown): number {
+  if (input === undefined || input === null) return 0;
+  if (typeof input === 'string') return input.length;
+  try {
+    return JSON.stringify(input).length;
+  } catch {
+    return 0;
   }
 }
 
@@ -155,23 +182,22 @@ export function tokenBreakdown(turns: readonly TurnRecord[]): TokenBreakdown {
       clearedSaving += -growth * remaining;
       continue;
     }
-    // 늘어난 양 중 출력만큼은 모델이 쓴 것, 나머지는 도구 결과다. 출력 값이 늘어난 양보다 크면 늘어난 양까지만 센다
-    const fromOutput = Math.min(turn.output, growth);
-    outputReread += fromOutput * remaining;
-    const fromTools = growth - fromOutput;
+    // 늘어난 양을 모델이 쓴 글자와 도구 결과 글자의 비율로 나눈다. 둘 다 0이면(기록이 없는 옛 행 등) 출력 쪽으로 센다
     const toolChars = turn.tools.reduce((sum, tool) => sum + tool.chars, 0);
-    if (fromTools === 0) continue;
+    const writtenChars = turn.outputChars ?? 0;
     if (toolChars === 0) {
-      // 도구 결과가 없는데 문맥이 늘었으면(출력 값이 덜 잡힌 경우 등) 출력 쪽으로 센다
-      outputReread += fromTools * remaining;
+      outputReread += growth * remaining;
       continue;
     }
+    const fromTools = (growth * toolChars) / (toolChars + writtenChars);
+    outputReread += (growth - fromTools) * remaining;
     for (const tool of turn.tools) {
       toolReread[tool.name] = (toolReread[tool.name] ?? 0) + (fromTools * remaining * tool.chars) / toolChars;
     }
   }
 
   for (const name of Object.keys(toolReread)) toolReread[name] = Math.round(toolReread[name]!);
+  outputReread = Math.round(outputReread);
   return {
     calls,
     contextTotal,
