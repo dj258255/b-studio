@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canCreatePullRequest, CheckpointStore, parseRemote } from '@b-studio/agent';
 import { loadProject, SpecError, type LoadedProject } from '@b-studio/spec';
 import type { ProjectSummary } from '@/lib/studio-events';
+import { readRegistry } from './project-registry';
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -21,31 +22,48 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
   for (const entry of entries) {
     if (!entry.isDirectory() || !PROJECT_ID.test(entry.name)) continue;
-    try {
-      const project = await loadProject(path.join(/*turbopackIgnore: true*/ root, entry.name));
-      projects.push({
-        id: entry.name,
-        name: project.spec.name,
-        services: project.managed.map(([name, service]) => ({ name, template: service.template, preview: service.preview })),
-      });
-    } catch (error) {
-      // studio.yaml이 없는 폴더는 프로젝트가 아니다
-      if (error instanceof SpecError && error.message.startsWith('파일이 없습니다')) continue;
-      projects.push({ id: entry.name, name: entry.name, services: [], error: error instanceof Error ? error.message : String(error) });
-    }
+    const summary = await summarize(entry.name, path.join(/*turbopackIgnore: true*/ root, entry.name));
+    if (summary) projects.push(summary);
+  }
+  // 등록한 폴더(ADR-067). 예제 폴더와 id가 겹치면 예제 폴더가 이긴다(등록할 때 겹치지 않게 id를 정한다)
+  for (const registered of await readRegistry()) {
+    if (projects.some((project) => project.id === registered.id)) continue;
+    const summary = await summarize(registered.id, registered.path, true);
+    if (summary) projects.push({ ...summary, folder: registered.path });
   }
   return projects.sort((a, b) => (a.id < b.id ? -1 : 1));
 }
 
+/** 폴더 하나를 프로젝트 요약으로. studio.yaml이 없는 예제 폴더는 프로젝트가 아니다(등록한 폴더는 오류로 보여 준다) */
+async function summarize(id: string, dir: string, registered = false): Promise<ProjectSummary | undefined> {
+  try {
+    const project = await loadProject(dir);
+    return {
+      id,
+      name: project.spec.name,
+      services: project.managed.map(([name, service]) => ({ name, template: service.template, preview: service.preview })),
+    };
+  } catch (error) {
+    if (!registered && error instanceof SpecError && error.message.startsWith('파일이 없습니다')) return undefined;
+    return { id, name: registered ? path.basename(dir) : id, services: [], error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** 등록한 폴더면 그 경로, 아니면 예제 폴더 아래 */
+async function projectDir(id: string): Promise<string> {
+  const registered = (await readRegistry()).find((entry) => entry.id === id);
+  return registered ? registered.path : path.join(/*turbopackIgnore: true*/ projectsRoot(), id);
+}
+
 /** 프로젝트 폴더의 절대 경로. 로컬 폴더 세션을 고르는 화면에 보여 준다 */
-export function projectPath(id: string): string {
-  return path.join(/*turbopackIgnore: true*/ projectsRoot(), id);
+export async function projectPath(id: string): Promise<string> {
+  return projectDir(id);
 }
 
 export async function findProject(id: string): Promise<LoadedProject | undefined> {
   if (!PROJECT_ID.test(id)) return undefined;
   const project = (await listProjects()).find((candidate) => candidate.id === id && !candidate.error);
-  return project ? loadProject(path.join(/* turbopackIgnore: true */ projectsRoot(), id)) : undefined;
+  return project ? loadProject(await projectDir(id)) : undefined;
 }
 
 /**

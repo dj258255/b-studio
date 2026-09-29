@@ -125,6 +125,7 @@ import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
+import { overlayGeneratedFiles } from './project-registry';
 import {
   archivedSnapshot,
   closeUnfinished,
@@ -441,6 +442,8 @@ async function startSession({
       checkpoints = cloned.store;
       firstCheckpoint = cloned.start;
       sourceDirtyFiles = cloned.source.dirtyFiles;
+      // 폴더 열기로 등록한 프로젝트(ADR-067)는 b-studio가 만든 설정 파일이 커밋돼 있지 않아 복제에 빠진다. 복사본에 넣고 추적에서 뺀다
+      await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
     } else {
       await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
       checkpoints = new CheckpointStore(workDir, { author });

@@ -194,6 +194,8 @@ export interface ProjectSummary {
   /** 원격 저장소 + 토큰이 있어 작업 분해 계획의 이슈를 올릴 수 있는가 (작업 분해 화면에서만 채운다) */
   canPublishIssues?: boolean;
   error?: string;
+  /** 등록한 폴더(ADR-067)면 그 절대 경로. 예제 폴더 아래 프로젝트는 없다 */
+  folder?: string;
 }
 
 /** 원격 세션 브랜치에서 가져온 커밋 (리뷰어가 올린 커밋 등) */
