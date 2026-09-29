@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { AgentsBadge } from "@/components/agents-badge";
+import { HomeEntry } from "@/components/home-entry";
+import { HomeInbox } from "@/components/home-inbox";
 import { LogoutButton } from "@/components/logout-button";
 import { pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
+import { listModelOptions } from "@/lib/server/model-registry";
 import { listProjects, projectPath } from "@/lib/server/projects";
 import { listSessions, localFolderAllowed } from "@/lib/server/sessions";
-import { StartSessionButton } from "@/components/start-session-button";
 import { SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "@/components/status";
 import type { SessionStatus } from "@/lib/studio-events";
 
@@ -33,74 +34,40 @@ export default async function HomePage() {
   const mode = process.env.B_STUDIO_MODE?.trim() || "api";
   const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, codex, commandcode, opencode, demo 중 하나로 실행하세요.`;
   const localAllowed = localFolderAllowed();
+  const models = listModelOptions();
+  // 내 폴더를 고를 수 있으면 "자세히"에서 실제 경로를 보여 준다
+  const projectItems = projects.map((project) => ({ ...project, folder: localAllowed && !project.error ? projectPath(project.id) : undefined }));
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-16">
+    <main className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
-        <div className="flex items-center gap-3 text-sm text-muted">
-          <AgentsBadge />
-          <Link href="/fleets" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
-            Agent Fleet
-          </Link>
-          <Link href="/task-plans" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
-            작업 분해
-          </Link>
-          {auth !== "none" && (
-            <>
+        {auth !== "none" && (
+          <div className="flex items-center gap-3 text-sm text-muted">
             <span>{viewer}</span>
             {auth === "token" && <LogoutButton />}
-            </>
-          )}
-        </div>
+          </div>
+        )}
       </div>
-      <h1 className="mt-2 text-3xl font-semibold tracking-tight">프로젝트를 열어 샌드박스를 시작하세요</h1>
+
+      <h1 className="mt-2 text-3xl font-semibold tracking-tight">무엇을 만들까요?</h1>
       <p className="mt-3 max-w-[60ch] leading-7 text-muted">
-        {localAllowed
-          ? "프로젝트 복사본이나 내 폴더에서 서비스를 띄웁니다. "
-          : "세션마다 프로젝트 복사본으로 서비스를 띄웁니다. "}
-        에이전트가 작업을 끝내면 스튜디오가 바뀐 서비스를 재시작하고 API 계약을 비교해, 통과한 결과만 완료로 보여줍니다.
+        요청을 한 곳에서 보냅니다. 한 명에게 맡길지, 여러 명에게 같은 요청을 맡겨 비교할지, 나눠서 병렬로 돌릴지 고르세요. 에이전트가 끝내면 스튜디오가 바뀐
+        서비스를 재시작하고 API 계약을 비교해, 통과한 결과만 완료로 보여줍니다.
       </p>
 
       <p className="mt-6 rounded-panel border border-line bg-panel px-4 py-3 text-sm leading-6 text-muted">{note}</p>
 
-      <ul className="glass mt-10 divide-y divide-line overflow-hidden rounded-panel">
-        {projects.length === 0 && (
-          <li className="px-5 py-6 text-muted">열 수 있는 프로젝트가 없습니다. studio.yaml이 있는 폴더를 B_STUDIO_PROJECTS_DIR에 두세요.</li>
-        )}
-        {projects.map((project) => (
-          <li key={project.id} className="flex flex-wrap items-center gap-4 px-5 py-5">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-lg font-semibold">{project.name}</h2>
-              {project.error ? (
-                <p className="mt-1 text-sm text-fail">{project.error}</p>
-              ) : (
-                <p className="mt-1 text-sm text-muted">
-                  {project.services.map((service) => `${service.name} (${service.template})`).join(", ")}
-                </p>
-              )}
-            </div>
-            {!project.error && (
-              <StartSessionButton
-                projectId={project.id}
-                folder={localAllowed ? projectPath(project.id) : undefined}
-                modelsBackend={mode === "commandcode" || mode === "opencode" ? mode : undefined}
-              />
-            )}
-          </li>
-        ))}
-      </ul>
+      <div className="mt-8 grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <HomeEntry projects={projectItems} models={models} localAllowed={localAllowed} />
+        <HomeInbox />
+      </div>
 
       {sessions.length > 0 && (
         <section className="mt-14" aria-labelledby="sessions-heading">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 id="sessions-heading" className="text-lg font-semibold">
-              최근 세션
-            </h2>
-            <Link href="/split" className="glass-soft rounded-control px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-panel">
-              나란히 보기
-            </Link>
-          </div>
+          <h2 id="sessions-heading" className="text-lg font-semibold">
+            최근 세션
+          </h2>
           <p className="mt-1 text-sm text-muted">중지된 세션도 작업 복사본과 체크포인트가 남아 있어 열어서 이어서 작업할 수 있습니다.</p>
           <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-panel">
             {sessions.slice(0, RECENT_SESSIONS).map((session) => (
