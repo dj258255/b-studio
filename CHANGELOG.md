@@ -4,6 +4,10 @@
 
 ## 아직 릴리스하지 않음
 
+## [0.2.0] - 2026-09-30
+
+개발 화면 중심으로 바꾼 릴리스입니다. 앱을 켜면 바로 개발 화면이 열리고, 방식은 대화에서 에이전트가 제안하며, 아무 폴더나 프로젝트로 엽니다. 요약은 [릴리스 노트](https://github.com/dj258255/b-studio/releases/tag/v0.2.0)에 있습니다.
+
 ### 변경
 
 - 방식(한 명·여러 명 비교·나눠서 병렬)을 사람이 고르는 곳을 없앴습니다. 새로 시작 화면도 입력창 하나이고, 나눌지는 대화에서 에이전트가 제안합니다(ADR-069).
@@ -252,4 +256,5 @@
 - README, 설계 결정 기록, 트러블슈팅을 추가했습니다 ([6d6dd8d](https://github.com/dj258255/b-studio/commit/6d6dd8d)).
 - 에이전트 루프 설계 결정, 검증 결과, 게이트 버그 트러블슈팅을 적었습니다 ([28b1e9f](https://github.com/dj258255/b-studio/commit/28b1e9f)).
 
+[0.2.0]: https://github.com/dj258255/b-studio/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dj258255/b-studio/releases/tag/v0.1.0
