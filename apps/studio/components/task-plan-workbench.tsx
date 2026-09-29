@@ -95,7 +95,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
     }
   }
 
-  async function decide(approve: boolean, reason?: string) {
+  async function decide(approve: boolean, reason?: string, publishIssues?: boolean) {
     if (!selectedId) return;
     setDeciding(true);
     setError(undefined);
@@ -103,7 +103,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
       const response = await fetch(`/api/task-plans/${encodeURIComponent(selectedId)}/approval`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(approve ? { approve: true } : { approve: false, reason }),
+        body: JSON.stringify(approve ? { approve: true, publishIssues: publishIssues === true } : { approve: false, reason }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
@@ -200,15 +200,35 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             <div><p className="font-medium text-ink">실행한 작업 분해가 아직 없습니다</p><p className="mt-2 text-sm">여러 영역에 걸친 요청을 나눠 동시에 실행해 보세요.</p></div>
           </div>
         ) : (
-          <PlanResult plan={selected} deciding={deciding} onDecide={(approve, reason) => void decide(approve, reason)} onResume={() => void resume()} />
+          <PlanResult
+            plan={selected}
+            canPublish={projects.find((project) => project.id === selected.projectId)?.canPublishIssues === true}
+            deciding={deciding}
+            onDecide={(approve, reason, publishIssues) => void decide(approve, reason, publishIssues)}
+            onResume={() => void resume()}
+          />
         )}
       </section>
     </div>
   );
 }
 
-function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView; deciding: boolean; onDecide: (approve: boolean, reason?: string) => void; onResume: () => void }) {
+function PlanResult({
+  plan,
+  canPublish,
+  deciding,
+  onDecide,
+  onResume,
+}: {
+  plan: TaskPlanView;
+  /** 원격 저장소 + 토큰이 있어 "이슈로 올리기"를 고를 수 있는가 */
+  canPublish: boolean;
+  deciding: boolean;
+  onDecide: (approve: boolean, reason?: string, publishIssues?: boolean) => void;
+  onResume: () => void;
+}) {
   const [reason, setReason] = useState('');
+  const [publishIssues, setPublishIssues] = useState(true);
   /** 레인·통합 카드로 보는 기존 목록 보기와, 관계를 한 그림으로 보는 그래프 보기를 겹쳐 둔다 */
   const [view, setView] = useState<'list' | 'graph'>('list');
   return (
@@ -237,11 +257,17 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
             placeholder="거부 사유 (선택)"
             className="mt-4 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm placeholder:text-muted"
           />
+          {canPublish && (
+            <label className="mt-3 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={publishIssues} onChange={(event) => setPublishIssues(event.target.checked)} className="size-4" />
+              이슈로 올리기 (추적 이슈와 작업별 하위 이슈를 원격 저장소에 만듭니다)
+            </label>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
               disabled={deciding}
-              onClick={() => onDecide(true)}
+              onClick={() => onDecide(true, undefined, canPublish && publishIssues)}
               className="rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
             >
               승인하고 실행
@@ -285,6 +311,31 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
         {plan.rejectedReason && <p className="mt-3 text-sm text-fail whitespace-pre-wrap">거부 사유: {plan.rejectedReason}</p>}
         <p className="mt-3 text-sm text-muted">통합 결과는 자동으로 병합·푸시·배포하지 않습니다. 통합 세션에서 diff와 검증 근거를 확인한 뒤 내보내세요.</p>
       </header>
+
+      {plan.issues && (
+        <section className="rounded-panel border border-line bg-panel p-4 text-sm">
+          <p className="font-medium">이슈</p>
+          {plan.issues.tracking && (
+            <p className="mt-1">
+              추적 이슈{' '}
+              <a href={plan.issues.tracking.url} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-2">
+                #{plan.issues.tracking.number}
+              </a>
+            </p>
+          )}
+          {Object.values(plan.issues.tasks).length > 0 && (
+            <p className="mt-1 text-muted">
+              하위 이슈{' '}
+              {Object.values(plan.issues.tasks).map((ref) => (
+                <a key={ref.number} href={ref.url} target="_blank" rel="noreferrer" className="mr-2 font-medium underline underline-offset-2">
+                  #{ref.number}
+                </a>
+              ))}
+            </p>
+          )}
+          {plan.issues.error && <p className="mt-1 text-fail">이슈를 올리지 못했습니다: {plan.issues.error}</p>}
+        </section>
+      )}
 
       {plan.coordination && (
         <section className="glass rounded-panel p-5">

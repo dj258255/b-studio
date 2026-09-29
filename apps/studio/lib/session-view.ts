@@ -108,8 +108,8 @@ export type ChatItem =
       forced: boolean;
       pullRequest?: { url: string; created: boolean };
       pullRequestError?: string;
-      /** PR에 연결한 이슈 번호 */
-      issue?: number;
+      /** PR에 연결한 이슈 번호들 */
+      issues?: number[];
     };
 
 type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
@@ -368,7 +368,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             forced: event.forced,
             pullRequest: event.pullRequest,
             pullRequestError: event.pullRequestError,
-            ...(event.issue === undefined ? {} : { issue: event.issue }),
+            ...(event.issues?.length ? { issues: event.issues } : {}),
           },
         ],
       };
