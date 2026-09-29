@@ -10,6 +10,7 @@ import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import { submitEntry } from "@/lib/home-entry";
 import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
+import { useChatDraft } from "./chat-draft-context";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 import { HandoffCard } from "./handoff-card";
@@ -35,10 +36,20 @@ export function ChatPanel({ view }: { view: SessionView }) {
   /** 되돌리는 동작이라 한 번 더 누르게 한다. 요청이 바뀌면 확인 상태도 사라지도록 요청 id로 둔다 */
   const [confirmingCancel, setConfirmingCancel] = useState<string>();
   const listRef = useRef<HTMLOListElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const runId = activeRun(view);
   const asking = isAsking(view);
   const access = useSessionAccess();
   const { selections, remove: removeSelection, clear: clearSelections } = useElementSelections();
+  // 저장소 탭의 "이 이슈로 작업"이 입력창을 채울 수 있도록 채우기 함수를 등록한다(사람이 보고 고친 뒤 직접 보낸다)
+  const draft = useChatDraft();
+  useEffect(() => {
+    draft.register((value) => {
+      setText(value);
+      textareaRef.current?.focus();
+    });
+    return () => draft.register(undefined);
+  }, [draft]);
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
   const budgetReached = limit !== undefined && used >= limit;
@@ -403,6 +414,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
             </label>
             <textarea
               id="request"
+              ref={textareaRef}
               value={text}
               onChange={(event) => setText(event.target.value)}
               onKeyDown={(event) => {

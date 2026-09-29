@@ -438,7 +438,7 @@ async function startSession({
     const allowSubfolder = source.spec.repository?.monorepo === true;
     if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
       // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
-      const cloned = await CheckpointStore.clone(source.root, workDir, { branch: `b-studio/${projectId}-${id}`, author, allowSubfolder });
+      const cloned = await CheckpointStore.clone(source.root, workDir, { branch: sessionBranchName(projectId, id), author, allowSubfolder });
       checkpoints = cloned.store;
       firstCheckpoint = cloned.start;
       sourceDirtyFiles = cloned.source.dirtyFiles;
@@ -1918,6 +1918,17 @@ async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text
   const files = await checkpoints.pendingFiles();
   if (files.length === 0) return undefined;
   return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', { findSecrets });
+}
+
+/** b-studio 세션이 만드는 브랜치 이름. 저장소 화면이 PR 목록에서 b-studio가 만든 브랜치를 찾을 때도 같은 규칙을 쓴다 */
+export function sessionBranchName(projectId: string, sessionId: string): string {
+  return `b-studio/${projectId}-${sessionId}`;
+}
+
+/** branch가 이 프로젝트의 b-studio 세션 브랜치면 그 세션 id, 아니면 undefined */
+export function sessionIdFromBranch(projectId: string, branch: string): string | undefined {
+  const prefix = `b-studio/${projectId}-`;
+  return branch.startsWith(prefix) ? branch.slice(prefix.length) : undefined;
 }
 
 /** 로컬 폴더 세션은 에이전트가 서버의 프로젝트 폴더를 바로 바꾸므로, 인증을 끈 개인 PC에서만 허용한다 */

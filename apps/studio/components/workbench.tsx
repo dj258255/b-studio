@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { SessionSnapshot } from "@/lib/studio-events";
+import { ChatDraftProvider, type ChatDraft } from "./chat-draft-context";
 import { ChatPanel } from "./chat-panel";
 import { PreviewPanel } from "./preview-panel";
 import { ElementSelectionProvider, type ElementSelection } from "./selection-context";
@@ -22,18 +23,27 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
     }),
     [selections],
   );
+  // 저장소 탭의 "이 이슈로 작업"도 같은 자리에서 대화 입력창까지 글을 나른다.
+  // 대화 입력창(ChatPanel)이 자신의 채우기 함수를 등록해 두면, 형제 패널은 그 함수를 직접 부른다(state를 effect에서 동기화하지 않는다)
+  const fillRef = useRef<((text: string) => void) | undefined>(undefined);
+  const draft = useMemo<ChatDraft>(
+    () => ({ fill: (text) => fillRef.current?.(text), register: (setter) => { fillRef.current = setter; } }),
+    [],
+  );
 
   return (
     <SessionAccessProvider value={access}>
       <ElementSelectionProvider value={elements}>
-        {/* 헤더·미리보기·대화를 바탕 위에 떠 있는 시트로 두어, 뒤의 빛이 유리 표면 사이로 보이게 한다 */}
-        <div className="grid h-dvh grid-rows-[auto_minmax(0,1fr)] gap-3 p-3 text-ink">
-          <SessionHeader snapshot={view.snapshot} />
-          <div className="grid min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_27rem] lg:grid-rows-1">
-            <PreviewPanel view={view} />
-            <ChatPanel view={view} />
+        <ChatDraftProvider value={draft}>
+          {/* 헤더·미리보기·대화를 바탕 위에 떠 있는 시트로 두어, 뒤의 빛이 유리 표면 사이로 보이게 한다 */}
+          <div className="grid h-dvh grid-rows-[auto_minmax(0,1fr)] gap-3 p-3 text-ink">
+            <SessionHeader snapshot={view.snapshot} />
+            <div className="grid min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_27rem] lg:grid-rows-1">
+              <PreviewPanel view={view} />
+              <ChatPanel view={view} />
+            </div>
           </div>
-        </div>
+        </ChatDraftProvider>
       </ElementSelectionProvider>
     </SessionAccessProvider>
   );
