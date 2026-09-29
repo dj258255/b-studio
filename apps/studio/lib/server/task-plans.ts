@@ -31,6 +31,7 @@ import {
 import type { Checkpoint } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
+import type { WorkflowPageCheck } from '@b-studio/spec';
 import type { StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
 import type {
@@ -75,6 +76,11 @@ const boards = new Map<string, Board>();
  * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
  */
 const redactors = new Map<string, Redactor>();
+/**
+ * 계획별 통합 게이트 전용 pageChecks(S 서버 안에서만 넘긴다). 레인 게이트는 그대로 두고 통합 세션에만 덧붙인다.
+ * 게시판처럼 서버 메모리에만 있고 재시작하면 사라진다(그때는 통합을 다시 시도해도 확인 없이 돈다)
+ */
+const integrationPageChecks = new Map<string, readonly WorkflowPageCheck[]>();
 let loaded = false;
 
 /**
@@ -106,6 +112,11 @@ export async function createTaskPlan(input: {
   presetPlan?: unknown;
   /** 서버 안에서만 넘긴다(벤치마크·테스트). 조율 전략 S2~S5와 topology·계약. HTTP 라우트는 이 필드를 넘기지 않는다 */
   coordination?: CoordinationInput;
+  /**
+   * 서버 안에서만 넘긴다(벤치마크·테스트). 통합 게이트에만 덧붙일 pageChecks. HTTP 라우트는 이 필드를 넘기지 않는다.
+   * presetPlan·coordination과 같은 규칙이다. 레인 게이트는 그대로 두고 통합 세션에만 더한다
+   */
+  integrationChecks?: { pageChecks?: WorkflowPageCheck[] };
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
@@ -152,6 +163,7 @@ export async function createTaskPlan(input: {
   };
   plans.set(plan.id, plan);
   attachCoordination(plan, input.coordination, redactor);
+  if (input.integrationChecks?.pageChecks?.length) integrationPageChecks.set(plan.id, input.integrationChecks.pageChecks);
   persist(plan);
   void execute(plan, preset).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
@@ -543,7 +555,9 @@ async function integrate(plan: TaskPlanView): Promise<void> {
 
     integration.startedAt = new Date().toISOString();
     const bootStarted = performance.now();
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId });
+    // 통합 게이트에만 확인을 덧붙인다(레인·통합 모두 이 세션에서 파일을 적용한 뒤 같은 루프·게이트를 돈다)
+    const extraPageChecks = integrationPageChecks.get(plan.id);
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId, ...(extraPageChecks ? { extraPageChecks } : {}) });
     Object.assign(integration, { sessionId: snapshot.id });
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
     const integrationRoot = getSnapshot(snapshot.id)?.workDir;

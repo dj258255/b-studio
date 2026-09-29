@@ -84,6 +84,8 @@ export interface BenchRow {
   failures: { signaturesTotal: number; distinctSignatures: number; repeatedFailures: number };
   /** 오래된 도구 결과를 묶어서 비운 합계(레인·통합). 비우기를 끄면 0 */
   contextCleared: { count: number; chars: number };
+  /** 통합 게이트에 api 값 확인을 덧붙였는지(--integration-checks). 기본 꺼짐이면 false */
+  integrationChecks: boolean;
   /** 모델 승격 설정과 이 실행의 승격 결과 */
   escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;

@@ -51,6 +51,20 @@ describe('signatureFromCheck', () => {
     // detail이 없으면 이름을 쓴다
     expect(signatureFromCheck({ stage: 'review', name: 'review', ok: false, attempts: 1 })).toEqual({ stage: 'review', message: 'review' });
   });
+
+  it('api 값 확인 실패도 browser_check 서명으로 나타나고, 확인 종류별로 구분된다', () => {
+    const check = (detail: string): WorkflowCheck => ({ stage: 'browser_check', name: 'api /orders', ok: false, attempts: 1, detail });
+
+    const apiError = signatureFromCheck(check('api GET /api/orders가 HTTP 500을 돌려줬습니다'));
+    const notOnScreen = signatureFromCheck(check("api의 $[0].customerName 값 '홍길동'이 /orders 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다"));
+    const textMissing = signatureFromCheck(check("렌더링된 화면에 '주문 목록'가 없습니다"));
+
+    expect(apiError.stage).toBe('browser_check');
+    // 숫자열은 N으로 정규화된다
+    expect(apiError.message).toBe('api GET /api/orders가 HTTP N을 돌려줬습니다');
+    // api 상태 오류·화면에 값 없음·기대 문구 없음은 서로 다른 서명이다(S5가 원인을 가릴 수 있게)
+    expect(new Set([apiError, notOnScreen, textMissing].map(signatureKey)).size).toBe(3);
+  });
 });
 
 describe('failureNotesFromReport', () => {

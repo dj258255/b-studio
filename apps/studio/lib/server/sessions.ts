@@ -69,7 +69,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { loadProject, figmaFileKey, type LoadedProject } from '@b-studio/spec';
+import { loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import {
   addTokens,
@@ -318,7 +318,7 @@ export async function createSession(
   projectId: string,
   owner: string,
   workspace: WorkspaceKind = 'copy',
-  options: { modelId?: string } = {},
+  options: { modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
   const tokenLimit = sessionTokenLimit();
@@ -330,7 +330,7 @@ export async function createSession(
   await recoverSessions();
   const release = workspace === 'local' ? claimFolder(source.root) : undefined;
   try {
-    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview, modelId: options.modelId });
+    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
@@ -346,6 +346,7 @@ async function startSession({
   tokenLimit,
   preview,
   modelId,
+  extraPageChecks,
 }: {
   projectId: string;
   owner: string;
@@ -355,6 +356,8 @@ async function startSession({
   tokenLimit: number | undefined;
   preview: PreviewConfig | undefined;
   modelId?: string;
+  /** 이 세션에만 덧붙일 pageChecks(작업 분해 통합 게이트). HTTP 라우트는 넘기지 않는다 */
+  extraPageChecks?: readonly WorkflowPageCheck[];
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
@@ -394,6 +397,10 @@ async function startSession({
   }
 
   const project = await loadProject(await checkpoints.projectRoot());
+  // 이 세션에만 pageChecks를 덧붙인다(작업 분해 통합 게이트). 프로젝트 객체는 세션마다 새로 읽으므로 다른 세션·레인에는 새지 않는다
+  if (extraPageChecks && extraPageChecks.length > 0) {
+    project.spec.workflow = { ...project.spec.workflow, pageChecks: [...(project.spec.workflow?.pageChecks ?? []), ...extraPageChecks] };
+  }
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();

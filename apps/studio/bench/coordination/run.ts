@@ -40,7 +40,7 @@ import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type PlannedPlan, type Strategy } from './tasks';
+import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
@@ -78,6 +78,8 @@ interface Args {
   /** 컨텍스트 비우기(on|off). 기본 off */
   contextClearing?: string;
   topology?: string;
+  /** 통합 게이트에 api 값 확인을 덧붙일지. 기본 꺼짐 */
+  integrationChecks?: boolean;
   /** 레인 사이 계약의 출처(human|model). 기본 human. model은 S2에서만 */
   contracts?: string;
   escalateTo?: string;
@@ -99,6 +101,7 @@ function parseArgs(argv: string[]): Args {
     const arg = argv[index]!;
     if (arg === '--dry') args.dry = true;
     else if (arg === '--force') args.force = true;
+    else if (arg === '--integration-checks') args.integrationChecks = true;
     else if (arg === '--tasks') args.taskIds = split(next(argv, index++, '--tasks'));
     else if (arg === '--strategies') args.strategies = split(next(argv, index++, '--strategies')) as Strategy[];
     else if (arg === '--repeats') args.repeats = Number(next(argv, index++, '--repeats'));
@@ -256,6 +259,8 @@ interface RunContext {
   planModelId: string;
   /** S3의 읽기 범위. 다른 전략에는 영향이 없다 */
   topology: Topology;
+  /** 통합 게이트에 api 값 확인을 덧붙이는지. 행마다 기록한다 */
+  integrationChecks: boolean;
   /** 레인 사이 계약의 출처(--contracts). S2에서만 뜻이 있다 */
   contractsSource: ContractsSource;
   /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
@@ -280,6 +285,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   const startedAt = new Date().toISOString();
   const { taskPlans, sessions, localUser } = context;
   const planJson = planFor(task, strategy, context.topology);
+  // --integration-checks일 때만 엮인 과제의 통합 게이트에 확인을 더한다(독립 과제는 없다)
+  const integrationChecks = context.integrationChecks ? integrationChecksFor(task) : undefined;
   // 계약의 출처. S2에서만 뜻이 있다(다른 전략은 계약을 쓰지 않는다)
   let contracts: BenchRow['contracts'] =
     strategy === 'S2' ? { source: context.contractsSource, count: planJson.coordination?.contracts?.length ?? 0 } : undefined;
@@ -307,6 +314,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       ...(context.backend === 'openai' ? {} : { presetPlan: planJson }),
       // S2~S5의 조율 설정은 서버 안에서만 넘긴다. S0·S1은 없다
       ...(coordination ? { coordination } : {}),
+      // 통합 게이트 전용 확인도 서버 안에서만 넘긴다(--integration-checks)
+      ...(integrationChecks ? { integrationChecks } : {}),
     });
     planId = created.id;
     plan = await waitForPlan(taskPlans, created.id, localUser, ['awaiting_approval', 'failed'], APPROVAL_TIMEOUT_MS, '계획이 승인 대기에 이르지 않았습니다', activeSessions);
@@ -432,6 +441,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     taskId: task.id,
     coupled: task.coupled,
     strategy,
+    integrationChecks: context.integrationChecks,
     model: context.requestedModel,
     observedModels,
     startedAt,
@@ -582,6 +592,7 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     taskId: task.id,
     coupled: task.coupled,
     strategy: 'P0',
+    integrationChecks: context.integrationChecks,
     model: context.requestedModel,
     observedModels: baseline ? Object.keys(baseline.usageByModel).sort() : [],
     startedAt,
@@ -903,6 +914,7 @@ async function main(): Promise<void> {
       requestedModel,
       planModelId: planModelId(backend, requestedModel, MODEL_ID),
       topology,
+      integrationChecks: args.integrationChecks ?? false,
       contractsSource,
       ...(escalation.to ? { escalateTo: escalation.to } : {}),
       escalateAfter: escalation.after,
@@ -988,6 +1000,7 @@ async function main(): Promise<void> {
           onRateLimit: rateLimit.policy,
           rateLimitWaitMinutes: rateLimit.waitMinutes,
           contextClearing,
+          integrationChecks: args.integrationChecks ?? false,
           abortReason,
         },
         null,
