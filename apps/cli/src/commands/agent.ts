@@ -2,20 +2,27 @@ import { styleText } from 'node:util';
 import {
   AnthropicModelClient,
   describeAccount,
+  listCommandCodeModels,
   preflightClaudeCode,
   preflightCodex,
+  preflightCommandCode,
   runAgent,
   runClaudeCodeAgent,
   runCodexAgent,
+  runCommandCodeAgent,
   type AgentEvent,
   type AgentUsage,
+  type CommandCodeModel,
   type Effort,
 } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { runSandboxSession } from '../session';
 import { print, type Label } from '../ui';
 
-export type Backend = 'api' | 'claude-code' | 'codex';
+export type Backend = 'api' | 'claude-code' | 'codex' | 'commandcode';
+
+/** `--backend`로 고를 수 있는 실행 방식 */
+export const BACKENDS: readonly Backend[] = ['api', 'claude-code', 'codex', 'commandcode'];
 
 export interface AgentCommandOptions {
   keep: boolean;
@@ -24,13 +31,22 @@ export interface AgentCommandOptions {
   backend: Backend;
   model?: string;
   effort?: Effort;
+  /** commandcode 모드에서 무료 모델만 쓰도록 강제한다. 무료가 아닌 --model이면 거부한다 */
+  freeOnly?: boolean;
 }
 
 /** 샌드박스를 띄우고 요청을 에이전트에게 맡긴다. 검증 게이트를 통과해야 종료 코드 0 */
 export async function agent(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
   if (options.backend === 'claude-code') return withClaudeCode(project, request, options);
   if (options.backend === 'codex') return withCodex(project, request, options);
+  if (options.backend === 'commandcode') return withCommandCode(project, request, options);
   return withApi(project, request, options);
+}
+
+/** `--free-only`에서 고른 모델이 무료가 아니면 오류 문구를 돌려준다(목록에 없어 확인할 수 없으면 통과시킨다) */
+export function freeOnlyViolation(model: string, models: readonly CommandCodeModel[]): string | undefined {
+  const found = models.find((candidate) => candidate.id === model);
+  return found && !found.free ? `--free-only: ${model}은(는) 무료 모델이 아닙니다` : undefined;
 }
 
 async function withApi(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
@@ -101,6 +117,40 @@ async function withCodex(project: LoadedProject, request: string, options: Agent
       sandbox,
       model: options.model,
       effort: options.effort,
+      allowBreaking: options.allowBreaking,
+      signal,
+      onEvent: printAgentEvent(label),
+    });
+    return result.status === 'done' ? 0 : 1;
+  });
+}
+
+/**
+ * 이 PC에 로그인한 Command Code CLI로 실행한다. 모델을 고를 수 있고, --free-only면 무료 모델만 쓴다.
+ * 모델을 주지 않으면 계정 기본 모델(보통 DeepSeek)을 쓴다. 한 번 실행이라 이어받을 대화가 없어 맥락도 넘기지 않는다.
+ */
+async function withCommandCode(project: LoadedProject, request: string, options: AgentCommandOptions): Promise<number> {
+  const preflight = await preflightCommandCode();
+  if (!preflight.ok) {
+    console.error(preflight.reason);
+    return 2;
+  }
+
+  if (options.freeOnly && options.model) {
+    const violation = freeOnlyViolation(options.model, await listCommandCodeModels().catch(() => []));
+    if (violation) {
+      console.error(violation);
+      return 2;
+    }
+  }
+
+  return runSandboxSession(project, { keep: options.keep, followLogs: options.logs }, async ({ sandbox, signal, label }) => {
+    print(label('studio'), `에이전트 시작: 로컬 Command Code Agent${options.model ? ` (${options.model})` : ' (계정 기본 모델)'}`);
+    const result = await runCommandCodeAgent({
+      request,
+      project,
+      sandbox,
+      model: options.model,
       allowBreaking: options.allowBreaking,
       signal,
       onEvent: printAgentEvent(label),

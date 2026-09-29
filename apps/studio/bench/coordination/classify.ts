@@ -24,6 +24,7 @@ export interface Classification {
 /**
  * 사용 한도 신호. environment보다 먼저 본다.
  * 부분 문자열이 아니라 경계가 있는 정규식으로 찾는다 — '1429ms'·'4290 bytes'·'unlimited' 같은 값을 한도로 오인하지 않게.
+ * Command Code 러너는 종료 코드 5(한도)와 10(크레딧 부족)을 "…사용 한도…"/"…크레딧이 부족…" 문구로 알린다. 둘 다 rate_limited로 묶고 detail로 구분한다.
  */
 const RATE_LIMIT_PATTERNS: RegExp[] = [
   /\b429\b/,
@@ -32,6 +33,8 @@ const RATE_LIMIT_PATTERNS: RegExp[] = [
   /\bhit your (usage )?limit\b/i,
   /\blimit reached\b/i,
   /\boverloaded\b/i,
+  /크레딧이 부족/,
+  /\binsufficient credits?\b/i,
 ];
 const ENVIRONMENT_NEEDLES = ['준비하지 못했습니다', 'no space left', 'ENOSPC', 'OOM', 'ECONNREFUSED', '502'];
 const DETAIL_LIMIT = 300;

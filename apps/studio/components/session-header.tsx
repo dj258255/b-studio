@@ -15,6 +15,7 @@ const MODE_LABEL: Record<SessionMode, string> = {
   api: "Claude API",
   "claude-code": "로컬 Claude Agent",
   codex: "로컬 ChatGPT Agent",
+  commandcode: "로컬 Command Code Agent",
   demo: "데모 모드",
 };
 

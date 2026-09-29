@@ -122,9 +122,9 @@ export async function createTaskPlan(input: {
   const preset = input.presetPlan;
   if (preset === undefined) {
     if (mode !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
-  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex') {
-    // 고정 계획은 모델을 부르지 않으므로 claude-code·codex 모드에서도 쓴다. demo는 지금처럼 거부한다
-    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code 또는 codex에서만 사용할 수 있습니다');
+  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode') {
+    // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode 모드에서도 쓴다. demo는 지금처럼 거부한다
+    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex 또는 commandcode에서만 사용할 수 있습니다');
   }
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
@@ -474,7 +474,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
   persist(plan);
   const bootStarted = performance.now();
   try {
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId });
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', sessionModelOption(plan.modelId));
     lane.sessionId = snapshot.id;
     persist(plan);
     await waitForReady(snapshot.id);
@@ -557,7 +557,11 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const bootStarted = performance.now();
     // 통합 게이트에만 확인을 덧붙인다(레인·통합 모두 이 세션에서 파일을 적용한 뒤 같은 루프·게이트를 돈다)
     const extraPageChecks = integrationPageChecks.get(plan.id);
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { modelId: plan.modelId, ...(extraPageChecks ? { extraPageChecks } : {}) });
+    // Command Code 모드는 모델을 세션에 고정하지 않으므로 sessionModelOption이 빈 객체를 돌려준다(빈 모델 id를 넘기지 않는다)
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', {
+      ...sessionModelOption(plan.modelId),
+      ...(extraPageChecks ? { extraPageChecks } : {}),
+    });
     Object.assign(integration, { sessionId: snapshot.id });
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
     const integrationRoot = getSnapshot(snapshot.id)?.workDir;
@@ -614,6 +618,14 @@ async function integrate(plan: TaskPlanView): Promise<void> {
 
 async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
   await Promise.all(plan.lanes.map((lane) => (lane.sessionId ? stopSession(lane.sessionId).catch(() => {}) : undefined)));
+}
+
+/**
+ * commandcode 모드는 세션 모델을 고른 모델(`B_STUDIO_CMD_MODEL`)이나 세션 선택에서 정한다.
+ * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 `cmd -m`으로 나가므로 넘기지 않는다
+ */
+function sessionModelOption(modelId: string): { modelId?: string } {
+  return process.env.B_STUDIO_MODE?.trim() === 'commandcode' ? {} : { modelId };
 }
 
 function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number): string {

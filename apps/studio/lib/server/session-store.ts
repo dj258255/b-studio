@@ -25,6 +25,8 @@ export interface PersistedSession {
   design?: { fileUrl: string; fileKey: string };
   /** codex 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해 요약만 넘긴다. 이 필드가 생기기 전 기록에는 없다 */
   codex?: { notes: string[]; recent: Array<{ request: string; summary: string; status: string }> };
+  /** commandcode 모드의 이어받을 세션과 알림. 이 필드가 생기기 전 기록에는 없다 */
+  commandCode?: { sessionId?: string; notes: string[] };
   sourceDirtyFiles: number;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };
@@ -39,6 +41,17 @@ export function sessionFile(stateDir: string): string {
 /** 세션 상태를 두는 폴더. 작업 복사본 세션은 작업 복사본 자체이고, 로컬 폴더 세션은 사용자 폴더 밖의 세션 폴더다 */
 export function stateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>): string {
   return snapshot.stateDir ?? snapshot.workDir;
+}
+
+/**
+ * Command Code 러너가 쓰는 세션별 고정 상태 폴더(HOME·작업 폴더를 이 아래에 둔다).
+ *
+ * cmd는 대화 세션을 `$HOME/.commandcode/projects/<cwd 이름>/`에 저장하므로 이어받으려면 HOME과 cwd가 실행 사이에도 같아야 한다.
+ * `session.json`·아티팩트와 같은 `.git/b-studio/` 아래에 두면 에이전트 도구가 닿지 않고 커밋에도 들어가지 않는다
+ * (작업 폴더에 두면 `git add -A`가 체크포인트에 넣고 되돌리기의 `git clean -fd`가 지운다).
+ */
+export function commandCodeStateDirOf(snapshot: Pick<SessionSnapshot, 'workDir' | 'stateDir'>): string {
+  return path.join(stateDirOf(snapshot), '.git', 'b-studio', 'commandcode');
 }
 
 /**

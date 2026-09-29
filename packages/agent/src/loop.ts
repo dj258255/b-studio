@@ -179,7 +179,11 @@ export type AgentEvent =
   | { type: 'steer_applied'; count: number }
   /** 게이트의 실패 서명이 같은 값으로 반복돼 더 비싼 모델로 올렸다 */
   | { type: 'model_escalated'; from: string; to: string; attempt: number; signature: string; sameSignatureTimes: number }
-  /** 이 러너가 승격을 지원하지 않아 옵션을 무시했다 */
+  /**
+   * 실행은 이어가지만 사람이 알면 좋은 사실. 지금은 두 가지다.
+   *  - 이어받기를 요청했는데 상태 폴더가 없어 새 대화로 시작한다(구독 CLI 러너)
+   *  - 이 러너가 모델 승격을 지원하지 않아 옵션을 무시했다
+   */
   | { type: 'warning'; message: string }
   | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }

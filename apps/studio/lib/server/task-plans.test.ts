@@ -513,8 +513,8 @@ describe('작업 분해 실행', () => {
 });
 
 describe('고정 계획(presetPlan)', () => {
-  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex 모드 포함)', async () => {
-    for (const mode of ['claude-code', 'codex']) {
+  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex·commandcode 모드 포함)', async () => {
+    for (const mode of ['claude-code', 'codex', 'commandcode']) {
       process.env.B_STUDIO_MODE = mode;
       const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: mode, owner: 'kim', presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] } });
       const waiting = await awaiting(created.id);
@@ -563,7 +563,7 @@ describe('고정 계획(presetPlan)', () => {
     process.env.B_STUDIO_MODE = 'demo';
     await expect(
       createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'claude-code', owner: 'kim', presetPlan: { tasks: [task('a', ['web/a'])] } }),
-    ).rejects.toThrow('api, claude-code 또는 codex');
+    ).rejects.toThrow('api, claude-code, codex 또는 commandcode');
   });
 
   it('presetPlan이 규칙을 어기면 세션을 만들지 않고 실패한다', async () => {

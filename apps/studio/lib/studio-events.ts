@@ -4,8 +4,8 @@ import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
 export type SessionStatus = 'starting' | 'ready' | 'failed' | 'stopped';
-/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, demo: 준비된 스크립트 */
-export type SessionMode = 'api' | 'claude-code' | 'codex' | 'demo';
+/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, commandcode: 이 PC에 로그인한 Command Code, demo: 준비된 스크립트 */
+export type SessionMode = 'api' | 'claude-code' | 'codex' | 'commandcode' | 'demo';
 /** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
 export type WorkspaceKind = 'copy' | 'local';
 /** stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다 */

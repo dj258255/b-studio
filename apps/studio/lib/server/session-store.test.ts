@@ -8,6 +8,7 @@ import type { SessionSnapshot, StudioEvent } from '../studio-events';
 import {
   archivedSnapshot,
   closeUnfinished,
+  commandCodeStateDirOf,
   isProcessAlive,
   PERSISTED_HISTORY_LIMIT,
   readSessions,
@@ -125,6 +126,10 @@ describe('세션 저장', () => {
 
     expect(stateDirOf(data.snapshot)).toBe(stateDir);
     expect(stateDirOf(snapshot(folder))).toBe(folder);
+    // Command Code의 HOME·작업 폴더는 세션 상태 폴더 아래 .git/b-studio에 둔다(에이전트 도구가 닿지 않고 커밋에도 안 들어간다)
+    expect(commandCodeStateDirOf(data.snapshot)).toBe(path.join(stateDir, '.git', 'b-studio', 'commandcode'));
+    // 작업 복사본 세션은 작업 폴더가 곧 상태 폴더다(stateDir이 없다)
+    expect(commandCodeStateDirOf(snapshot(folder))).toBe(path.join(folder, '.git', 'b-studio', 'commandcode'));
     expect(await readSessions(root)).toEqual([data]);
     expect(await readdir(folder)).toEqual([]);
   });
