@@ -2838,6 +2838,50 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-072 개발 화면에서 GitHub 이슈·PR을 보고 이슈로 바로 작업한다
+
+상태: 채택
+관련: #228
+
+### 맥락
+- b-studio 에이전트가 이슈·PR을 직접 다루는 일이 늘었다(ADR-020의 PR 만들기, ADR-061의 이슈 연결·작업 분해 계획의 이슈 올리기). 그런데 정작 그 이슈·PR을 보려면 스튜디오를 나가 GitHub을 따로 열어야 했다. 어떤 이슈로 작업할지 고르는 것도, 방금 세션이 올린 PR의 CI가 통과했는지 보는 것도 전부 딴 곳에서 했다.
+- 저장소 연동 자체는 이미 있다(`packages/agent/src/repository.ts`의 `parseRemote`·`createPullRequest`·`fetchIssue`, `sessions.ts`의 원격 동기화). 목록 조회(이슈 여러 개·PR 여러 개)만 없었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 링크만 둔다(원격 주소를 열기 버튼) | 지금도 `RepositoryBar`가 하고 있다. 여러 이슈·PR을 훑어보거나 CI 상태를 한눈에 보지 못한다 |
+| **B. 개발 화면에 "저장소" 탭을 두고 이슈·PR 목록을 직접 보여준다** | 채택. 새 서버 함수·API·화면이 필요하지만, 기존 탭 구조(화면/API/디자인/코드/기록/배포/로그/리소스)에 자연스럽게 끼워 넣을 수 있다 |
+| C. 이슈·PR을 스튜디오 DB에 동기화해 둔다 | 캐시 하나 더 두는 셈이라 정합성 문제(웹훅 없이는 즉시 반영 안 됨)만 늘고, 30초 캐시로 충분한 요구를 넘어선다 |
+
+### 결정
+- **서버**: `packages/agent/src/repository.ts`에 `listIssues`·`listPullRequests`를 추가했다. GitHub·Gitea REST(`GET /repos/{owner}/{repo}/issues`·`/pulls`, 기존 `gitHubStyleApi` 헬퍼 재사용)로 조회하고, GitLab은 화면 모양이 달라(REST에 이 모양이 없다) 아직 지원하지 않는다고 명확히 오류를 던진다. 이슈 목록 API가 PR도 섞어 주므로 `pull_request` 필드로 걸러내고, 본문(`body`)도 목록 응답에 이미 들어 있어 "이 이슈로 작업"에 그대로 쓴다(이슈 하나를 다시 조회하지 않는다).
+  - GitHub PR은 목록 앞쪽 25개까지만 Checks API(`commits/{sha}/check-runs`)로 CI 결합 상태를, 리뷰 목록(`pulls/{n}/reviews`)에서 계산한 리뷰 판정을 더 받는다. 둘 다 실패해도(권한 부족, GitHub Actions 미사용 등) `'unknown'`으로 두고 목록 자체는 그대로 보여준다. Gitea는 이 두 값을 비워 둔다(추가 요청 없이 목록만).
+  - 사용량 한도는 응답 헤더(`x-ratelimit-remaining: 0`)로 구분해 `RepositoryRateLimitError`로 던지고, 그 밖의 실패는 기존 `PullRequestError` 문구 형식을 따른다.
+- **스튜디오 서버**(`apps/studio/lib/server/repository-panel.ts`)가 프로젝트 id로 원격 주소를 찾아(`canPublishIssues`와 같은 방식, `CheckpointStore.inspectSource`) 토큰을 고르고 30초 캐시한다. 토큰은 `B_STUDIO_GITHUB_TOKEN`·`B_STUDIO_GITEA_TOKEN`을 먼저 보고, 개인 PC 모드(`localFolderAllowed()`, 인증 없음)에서 GitHub 토큰이 없으면 `gh auth token`으로 로그인한 CLI 토큰을 대신 쓴다(여러 사람이 쓰는 서버에서는 쓰지 않는다). 토큰 값은 어떤 응답에도, 로그에도 넣지 않는다. 원격 없음·지원하지 않는 호스트·토큰 없음·사용량 한도를 모두 `{ ok:false, reason, detail }`로 돌려주고 던지지 않아, 화면이 상태별로 다른 안내를 보여줄 수 있다.
+- 세션 브랜치 이름 규칙(`b-studio/${projectId}-${sessionId}`)을 `sessions.ts`의 `sessionBranchName`·`sessionIdFromBranch`로 뽑아내(기존에는 만드는 자리에 인라인으로만 있었다), PR 목록에서 헤드 브랜치가 이 프로젝트의 b-studio 세션이 만든 것이면 `sessionId`를 채운다. 화면은 이 값이 있는 PR에 "b-studio" 배지를 달고 그 세션(`/sessions/[id]`)으로 링크한다.
+- **API**: `GET /api/projects/[id]/repository/issues`·`.../pulls`(둘 다 `?state=open|closed|all`, 기본 `open`). 보기는 로그인한 누구나 할 수 있다(토큰 보고서와 같은 ADR-040 기준, 이슈·PR을 바꾸지 않는다).
+- **화면**: 개발 화면(미리보기 탭 줄)에 "저장소" 탭을 더했다. 이슈/PR 하위 탭 + 열림/닫힘/전체 필터, 행마다 상태 점·번호·제목·라벨·작성자·시간, PR은 CI 상태·리뷰 판정·b-studio 배지, "GitHub·Gitea에서 열기" 링크. 이슈 행의 "이 이슈로 작업"은 대화 입력창에 `#N 이슈를 해결해줘: <제목>\n\n<본문 일부>`를 채운다(바로 보내지 않고 사람이 보고 고쳐서 보낸다).
+  - 입력창 채우기는 새 `ChatDraft` context(`chat-draft-context.tsx`, 요소 선택과 같은 자리에서 `Workbench`가 들고 있는다)로 한다. `ChatPanel`이 마운트되면 자신의 채우기 함수(`setText` + 포커스)를 등록해 두고, 저장소 탭은 그 함수를 이벤트 핸들러에서 직접 부른다. 값이 바뀔 때 `useEffect`로 `setState`를 동기화하는 대신 "함수를 등록해 두고 이벤트에서 부르는" 모양으로 짜, `react-hooks/set-state-in-effect` 린트가 막는 패턴(연쇄 렌더를 부르는 effect 안 setState)을 피했다.
+  - 목록은 하위 탭·상태 필터가 바뀔 때마다 `key`로 다시 마운트해(`DesignPanel`과 같은 방식) "불러오는 중"부터 다시 보여준다. 이 역시 effect 안에서 상태를 초기화하는 setState를 쓰지 않기 위해서다.
+
+### 검증 결과
+- `packages/agent/src/repository.test.ts`에 `listIssues`·`listPullRequests` 단위 테스트 35개(목록·PR 응답 매핑, PR 섞임 제거, 본문 포함, 세션 id 매핑, CI·리뷰 판정 조합, 사용량 한도, 토큰·호스트 오류)를 더했다.
+- `apps/studio/lib/server/repository-panel.test.ts`에 토큰 선택(환경 변수 우선, 개인 PC 모드에서만 `gh` CLI 대체, Gitea는 CLI로 대체하지 않음, CLI 실패는 조용히 undefined)과 캐시(ttl 안 재사용, 키 분리), 프로젝트별 조회 결과 매핑을 mock으로 확인했다(실제 GitHub API·`gh` 프로세스는 부르지 않는다).
+- API 라우트 테스트(`route.test.ts` 2개)로 인증·`state` 검증·실패 이유가 200으로 그대로 내려가는지 확인했다.
+- `repository-panel.test.tsx`로 탭·필터 렌더와 `IssueRow`·`PullRow`의 상태 점·CI·리뷰·b-studio 배지·초안 표시를 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류), `pnpm test`(1522개, 무관한 사전 존재 테스트 3개가 기기 부하로 5000ms 안에 못 끝나 실패했다가 따로 돌리면 통과 — `packages/sandbox/src/docker/format.test.ts`는 타임아웃을 늘리면 통과)를 확인했다.
+- 실제 GitHub 저장소로는 `gh api repos/dj258255/b-studio/issues?per_page=1`로 응답 모양만 한 번 확인했다. 브라우저로 화면을 직접 열어 보는 확인과 로컬 Gitea 확인은 하지 않았다(Gitea는 Docker가 필요하다).
+
+### 감수한 트레이드오프
+- GitLab은 이 화면에서 아직 지원하지 않는다. REST 응답 모양이 달라 `listIssues`·`listPullRequests`를 그대로 못 쓰고, PR 만들기·이슈 연결처럼 필요해지면 따로 추가한다.
+- CI 결합 상태는 GitHub Checks API(체크 앱·GitHub Actions 기준)만 본다. Statuses API만 쓰는 옛 CI(일부 서드파티 연동)는 체크가 없는 것처럼(`unknown`) 보일 수 있다.
+- CI·리뷰 판정은 목록 앞쪽 25개 PR까지만 채운다. 그 뒤는 상태 점과 라벨만 보인다(사용량 한도를 지키기 위한 절충).
+- 30초 캐시라 방금 GitHub에서 닫은 이슈나 방금 올린 커밋의 체크 상태가 즉시 반영되지 않을 수 있다. 새로고침 대신 캐시가 풀리길 기다리거나 하위 탭을 전환하면(다른 캐시 키) 그사이에 갱신된 값을 볼 수도 있다.
+- `gh auth token` 대체는 개인 PC 모드(인증 없음)에서만 켠다. 여러 사람이 쓰는 서버에서 관리자 개인의 `gh` 로그인을 다른 사용자의 요청에 새는 것을 막기 위해서다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
