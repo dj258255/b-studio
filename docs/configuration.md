@@ -246,6 +246,15 @@ workflow:
 - 테스트·동시 요청 확인 이름은 중복될 수 없습니다.
 - `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
 
+### 가볍게 확인 (요청 옵션 `verify`)
+
+대화 입력창의 **"가볍게 확인"** 스위치는 요청마다 `verify: light`를 보냅니다(기본 `full`). `full`은 지금과 한 글자도 다르지 않고, `light`는 게이트가 **서비스 재시작·준비 판정·계약 비교(`run`·`contract_check`)만** 실행하고 `test`·`browser_check`·`concurrency_check`·`review`는 건너뜁니다. `workflow.required` 대조는 건너뛴 단계를 "건너뜀"으로만 기록하고 실패로 보지 않습니다.
+
+- **체크포인트 표기**: `full`은 통과한 단계를 `Workflow-Passed` 트레일러로 남깁니다. `light`는 실제로 통과한 단계만 적고 `Workflow-Verify: light`를 더합니다. 다시 켜서 읽어도 같은 값입니다.
+- **배포는 자연히 막힙니다**: `releaseRequires`는 건너뛴 단계를 채우지 못하므로, `light` 체크포인트는 `test`·`review` 같은 조건이 있으면 배포가 거부됩니다. 배포 화면은 "가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다"라고 안내합니다. 전체 검증(`full`)을 한 번 더 통과해 새 체크포인트를 만들면 배포할 수 있습니다.
+- **쓰이는 곳**: 사람이 보낸 단일 세션 요청에만 쓰입니다. 작업 분해 레인·Fleet·벤치·CLI 경로는 `full` 그대로입니다.
+- **한계**: 효과는 E3(`docs/experiments/2026-09-29-e3-baseline-budget-escalation.md`)에서 **작은 과제에 한해** 잰 결과입니다. 큰 변경이나 계약이 얽힌 작업에서는 `full`로 확인하세요.
+
 ### 바뀐 페이지 자동 확인 (`autoPageChecks`)
 
 E1~E4 내내 반복된 원인 하나: 게이트의 화면 확인은 `pageChecks`에 적어 둔 페이지만 열어서, **이번 실행이 새로 만든 페이지가 500을 내도 게이트는 통과**했습니다(E2의 order-summary). `autoPageChecks`를 켜면 게이트가 이번 실행에서 바뀐 파일에서 Next.js 페이지를 찾아 스스로 열어 봅니다.

@@ -90,6 +90,22 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
   return `${WORKFLOW_TRAILER}: ${stages.length > 0 ? stages.join(', ') : 'none'}`;
 }
 
+/** 가볍게 확인(light) 실행임을 체크포인트 커밋 본문 끝에 남기는 트레일러. 배포 화면이 이 값으로 안내를 바꾼다 */
+export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
+
+export function formatVerifyTrailer(mode: 'light'): string {
+  return `${WORKFLOW_VERIFY_TRAILER}: ${mode}`;
+}
+
+/** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'가 아니면 undefined(전체 검증 실행) */
+export function parseVerifyTrailerValues(values: readonly string[]): 'light' | undefined {
+  const value = values
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .at(-1);
+  return value === 'light' ? 'light' : undefined;
+}
+
 /**
  * git이 트레일러 블록(본문 마지막 문단)에서 읽은 Workflow-Passed 값. 없으면 undefined로, 스튜디오 밖에서 바꾼 파일이나 이전 버전의 체크포인트다.
  * 본문 전체에서 찾으면 에이전트 요약에 쓴 같은 모양의 줄로 통과 기록을 위조할 수 있어 트레일러 블록 값만 받는다.

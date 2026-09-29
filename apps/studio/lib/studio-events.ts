@@ -260,6 +260,8 @@ export type StudioEvent =
       metrics?: RunMetrics;
       /** 요청을 시작한 뒤 끝난 시각까지의 벽시계 시간 */
       durationMs?: number;
+      /** 가볍게 확인(light) 실행이면 'light'. 테스트·화면 확인·동시 요청·리뷰를 건너뛰었다 */
+      verify?: 'light';
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
       nextDemoQuestion?: string;

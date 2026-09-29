@@ -4,7 +4,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
-import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
+import { VerificationGate, type GateOptions, type PageFetcher, type VerifyMode } from './gate';
 import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
@@ -136,6 +136,10 @@ export interface AgentResult {
   checks?: WorkflowCheck[];
   /** 마지막 검증에서 통과한 워크플로 검증 단계 */
   passedStages?: import('@b-studio/spec').WorkflowStage[];
+  /** 'light'(가볍게 확인)면 테스트·화면 확인·동시 요청·리뷰를 건너뛰었다. full이면 없다 */
+  verify?: VerifyMode;
+  /** light에서 건너뛴 검증 단계(workflow.required 대조에서 실패로 보지 않음) */
+  skippedStages?: import('@b-studio/spec').WorkflowStage[];
   verifyAttempts: number;
   turns: number;
   usage: AgentUsage;
@@ -250,6 +254,11 @@ export interface RunAgentOptions {
    * 그때 켠 뒤에 만든다 — 계약 기준을 샌드박스가 켜진 뒤, 변경 전에 잡기 위해서다. 없으면 지금처럼 시작할 때 만든다
    */
   ensureSandbox?: () => Promise<void>;
+  /**
+   * 검증 범위(기본 full). light(가볍게 확인)면 게이트가 서비스 재시작·준비 판정·계약만 돌리고
+   * 테스트·화면 확인·동시 요청·리뷰는 건너뛴다. 건너뛴 단계는 결과의 skippedStages로 남고 배포 조건이 막는다
+   */
+  verify?: VerifyMode;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -311,6 +320,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       workspace,
       allowBreaking,
       maxVerifyAttempts,
+      verify: options.verify,
       fetcher,
       pageFetcher,
       browserRunner,
@@ -359,6 +369,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
+      ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns,
       usage,

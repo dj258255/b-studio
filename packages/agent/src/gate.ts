@@ -19,6 +19,12 @@ export type GateOutcome =
   | { kind: 'retry'; feedback: string }
   | { kind: 'exhausted'; summary: string };
 
+/**
+ * 검증 범위. full은 지금과 같고, light(가볍게 확인)는 서비스 재시작·준비 판정·계약만 돌린다.
+ * 작은 변경에서 빠른 피드백을 받으려는 것이라, 건너뛴 단계는 배포 조건(releaseRequires)이 자연히 막는다.
+ */
+export type VerifyMode = 'full' | 'light';
+
 /** browser_check에서 화면 경로를 불러오는 함수. 테스트에서 네트워크 없이 바꿔 끼운다 */
 export type PageFetcher = (url: string, signal?: AbortSignal) => Promise<{ status: number; text: string }>;
 
@@ -94,6 +100,8 @@ export interface GateOptions {
   workspace: Workspace;
   allowBreaking: boolean;
   maxVerifyAttempts: number;
+  /** 검증 범위(기본 full). light면 재시작·준비 판정·계약만 돌리고 나머지 단계는 건너뛴다 */
+  verify?: VerifyMode;
   fetcher: ContractFetcher;
   pageFetcher?: PageFetcher;
   browserRunner?: BrowserRunner;
@@ -124,6 +132,8 @@ export class VerificationGate {
   checks: WorkflowCheck[] = [];
   /** 마지막 검증에서 통과한 검증 단계 */
   passedStages = new Set<WorkflowStage>();
+  /** light에서 건너뛴 필수 검증 단계. workflow.required 대조에서 실패로 보지 않는다(full에서는 빈 배열) */
+  skippedStages: WorkflowStage[] = [];
   /** 바뀐 파일을 실제로 검증해 통과했는지. 바뀐 파일이 없어 검증 없이 끝났다면 false라서 체크포인트 단계로 넘어가지 않는다 */
   verified = false;
   readonly #options: GateOptions;
@@ -183,20 +193,30 @@ export class VerificationGate {
     if (report.ok) {
       this.passedStages.add('run');
       this.passedStages.add('contract_check');
-      const checks = await this.#runDeclaredChecks();
-      signal?.throwIfAborted();
-      this.#stage('review');
-      checks.push(...reviewChanges(project, workspace.changedFiles()));
-      this.checks = checks;
-      for (const check of checks) onEvent({ type: 'workflow_check', check });
-      for (const stage of ['browser_check', 'test', 'concurrency_check', 'review'] as const) {
-        const ofStage = checks.filter((check) => check.stage === stage);
-        if (ofStage.length > 0 && ofStage.every((check) => check.ok)) this.passedStages.add(stage);
+      if (this.#options.verify === 'light') {
+        // 가볍게 확인: 재시작·준비 판정·계약만 돌린다. 건너뛴 단계는 기록만 하고 실패로 보지 않는다
+        this.skippedStages = missingVerificationStages(project, this.passedStages);
+      } else {
+        const checks = await this.#runDeclaredChecks();
+        signal?.throwIfAborted();
+        this.#stage('review');
+        checks.push(...reviewChanges(project, workspace.changedFiles()));
+        this.checks = checks;
+        for (const check of checks) onEvent({ type: 'workflow_check', check });
+        for (const stage of ['browser_check', 'test', 'concurrency_check', 'review'] as const) {
+          const ofStage = checks.filter((check) => check.stage === stage);
+          if (ofStage.length > 0 && ofStage.every((check) => check.ok)) this.passedStages.add(stage);
+        }
       }
     }
 
     const failedChecks = this.checks.filter((check) => !check.ok);
     if (report.ok && failedChecks.length === 0) {
+      // light는 건너뛴 단계를 실패로 보지 않는다. 통과한 단계만 남겨 배포 조건(releaseRequires)이 자연히 막는다
+      if (this.#options.verify === 'light') {
+        this.verified = true;
+        return { kind: 'pass' };
+      }
       // 스키마가 실행 수단 없는 필수 단계를 막지만, 어떤 경로로든 단계가 돌지 않았다면 통과로 보지 않는다
       const missing = missingVerificationStages(project, this.passedStages);
       if (missing.length > 0) return { kind: 'exhausted', summary: `워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: ${missing.join(', ')}` };

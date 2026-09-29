@@ -26,4 +26,21 @@ describe('chatRequestBody', () => {
     // 스위치를 안 보내면 false로 둔다
     expect(chatRequestBody({ text: '질문', intent: 'ask' }).allowBreaking).toBe(false);
   });
+
+  it('가볍게 확인이 켜지면 만들기 요청에 verify light를 싣고, 질문 경로에는 싣지 않는다', () => {
+    expect(chatRequestBody({ text: '메모 추가', intent: 'build', lightVerify: true })).toEqual({
+      text: '메모 추가',
+      allowBreaking: false,
+      intent: 'build',
+      verify: 'light',
+    });
+    // 꺼져 있으면 보내지 않는다(서버 기본 full)
+    expect(chatRequestBody({ text: '메모 추가', intent: 'build', lightVerify: false })).toEqual({
+      text: '메모 추가',
+      allowBreaking: false,
+      intent: 'build',
+    });
+    // 질문 경로는 게이트를 돌리지 않으므로 가볍게 확인이 뜻이 없다
+    expect(chatRequestBody({ text: '질문', intent: 'ask', lightVerify: true }).verify).toBeUndefined();
+  });
 });

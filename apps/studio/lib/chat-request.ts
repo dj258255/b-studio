@@ -18,13 +18,17 @@ export interface ChatRequestBody {
   text: string;
   allowBreaking: boolean;
   intent: ChatIntent;
+  /** 가볍게 확인이면 'light'. 전체 검증(full)이면 보내지 않는다 */
+  verify?: 'light';
 }
 
-export function chatRequestBody(input: { text: string; intent: ChatIntent; allowBreaking?: boolean }): ChatRequestBody {
+export function chatRequestBody(input: { text: string; intent: ChatIntent; allowBreaking?: boolean; lightVerify?: boolean }): ChatRequestBody {
   return {
     text: input.text,
     // 질문 경로는 파일을 바꾸지 않으므로 호환성 파괴 허용은 뜻이 없다 — 보내지 않는다
     allowBreaking: input.intent === 'build' && input.allowBreaking === true,
     intent: input.intent,
+    // 가볍게 확인은 만들기 경로에만 뜻이 있다(질문은 게이트를 돌리지 않는다)
+    ...(input.intent === 'build' && input.lightVerify ? { verify: 'light' as const } : {}),
   };
 }

@@ -18,6 +18,7 @@ import {
   estimateCost,
   fetchIssue,
   formatVerificationReport,
+  formatVerifyTrailer,
   formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
   parseRemote,
@@ -58,6 +59,7 @@ import {
   type RemoteSyncResult,
   type ServiceCheck,
   type VerificationReport,
+  type VerifyMode,
 } from '@b-studio/agent';
 import {
   defaultDeployRoot,
@@ -606,6 +608,7 @@ export function sendMessage(
     board,
     steering,
     interactive = false,
+    verify,
   }: {
     allowBreaking: boolean;
     by?: string;
@@ -620,6 +623,8 @@ export function sendMessage(
     steering?: boolean;
     /** 서버 안에서만 쓴다. true면 되묻기(ask_user) 도구를 넣는다. 사람이 보낸 단일 세션 요청(messages 라우트)만 켠다 */
     interactive?: boolean;
+    /** 검증 범위. 'light'(가볍게 확인)면 재시작·준비·계약만 돌린다. 생략하면 full */
+    verify?: VerifyMode;
   },
 ): { runId: string } {
   const session = requireSession(id);
@@ -649,6 +654,8 @@ export function sendMessage(
     writableScope,
     board,
     interactive,
+    // 가볍게 확인은 검증 범위만 바꾼다. 질문(intent ask)은 게이트를 돌리지 않으므로 뜻이 없다
+    ...(verify === 'light' ? { verify: 'light' as const } : {}),
   };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
@@ -1200,7 +1207,7 @@ type RunPlan = (
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean };
+) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean; verify?: VerifyMode };
 
 /**
  * 세션 백엔드 → 실행 방식. 데모는 준비된 대본이라 여기 없다(호출자가 시나리오를 고른다).
@@ -1307,7 +1314,7 @@ function claudeCodeEscalation(): EscalationPolicy | undefined {
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
-  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs'> | undefined;
+  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs' | 'verify'> | undefined;
   let cancelled = false;
   /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
   let notStarted = false;
@@ -1375,7 +1382,14 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         await revertRun(session, run.id);
       }
     }
-    finished = { status: result.status, summary: result.summary, turns: result.turns, metrics: result.metrics, durationMs: Math.round(performance.now() - agentStarted) };
+    finished = {
+      status: result.status,
+      summary: result.summary,
+      turns: result.turns,
+      metrics: result.metrics,
+      durationMs: Math.round(performance.now() - agentStarted),
+      ...(result.verify === 'light' ? { verify: 'light' as const } : {}),
+    };
   } catch (error) {
     if (error instanceof LocalEditsError) {
       // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
@@ -1487,6 +1501,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     sandbox: session.sandbox,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
+    // 가볍게 확인(light)이면 게이트가 재시작·준비·계약만 돈다. 생략(full)이면 지금과 같다
+    verify: plan.verify,
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
     // 레인 조율 게시판. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음)
@@ -1684,7 +1700,11 @@ function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
 
 /** 배포할 때 releaseRequires와 대조하는 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
 function checkpointTrailers(result: AgentResult): string[] {
-  return result.passedStages ? [formatWorkflowTrailer(result.passedStages)] : [];
+  if (!result.passedStages) return [];
+  const trailers = [formatWorkflowTrailer(result.passedStages)];
+  // 가볍게 확인한 체크포인트는 건너뛴 단계를 채우지 못한다(배포 조건이 막는다). 화면이 안내를 바꾸도록 표시를 남긴다
+  if (result.verify === 'light') trailers.push(formatVerifyTrailer('light'));
+  return trailers;
 }
 
 async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = []): Promise<void> {
@@ -2075,9 +2095,11 @@ export function deploySession(id: string, { by, sha }: { by?: string; sha?: stri
   // 규칙은 체크포인트 안의 studio.yaml이 아니라 실행 중인 세션의 것을 쓴다. 같은 변경에서 규칙을 느슨하게 고쳐 배포하지 못하게 한다
   const blockers = releaseBlockers(session.project, checkpoint.passedStages);
   if (blockers.length > 0) {
+    // 가볍게 확인한 체크포인트는 건너뛴 단계가 통과 기록에 없어 여기서 자연히 막힌다. 이유를 분명히 알려 준다
+    const light = checkpoint.verify === 'light' ? ' 가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다.' : '';
     throw new StudioError(
       409,
-      `체크포인트 ${checkpoint.shortSha}는 배포 조건을 채우지 못했습니다. 통과 기록이 없는 단계: ${blockers.join(', ')}${checkpoint.passedStages ? '' : ' (검증 게이트를 거치지 않은 체크포인트입니다)'}`,
+      `체크포인트 ${checkpoint.shortSha}는 배포 조건을 채우지 못했습니다. 통과 기록이 없는 단계: ${blockers.join(', ')}${checkpoint.passedStages ? '' : ' (검증 게이트를 거치지 않은 체크포인트입니다)'}${light}`,
     );
   }
 

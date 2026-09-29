@@ -3,7 +3,7 @@ import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
-import { parseWorkflowTrailerValues, WORKFLOW_TRAILER } from './workflow';
+import { parseVerifyTrailerValues, parseWorkflowTrailerValues, WORKFLOW_TRAILER, WORKFLOW_VERIFY_TRAILER } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +17,8 @@ export interface Checkpoint {
   files: string[];
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 체크포인트다 */
   passedStages?: WorkflowStage[];
+  /** 가볍게 확인(light) 실행으로 만든 체크포인트면 'light'. 전체 검증이면 없다 */
+  verify?: 'light';
 }
 
 export interface GitAuthor {
@@ -617,21 +619,34 @@ export class CheckpointStore {
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
     // 트레일러는 git이 마지막 문단에서만 읽는다. 본문(에이전트 요약)에 같은 모양의 줄이 있어도 통과 기록이 되지 않는다
-    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = ''] = (
-      await this.#git(['show', '-s', `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)`, ref])
+    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = '', verifyTrailers = ''] = (
+      await this.#git([
+        'show', '-s',
+        `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)`,
+        ref,
+      ])
     )
       .trim()
       .split('\0');
     // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다. 원격에 쓸 수 있는 사람이 커밋 메시지에 트레일러를 적어 가져온 체크포인트를 배포 조건 통과처럼 보이게 하지 못하게 한다
-    const passedStages =
-      authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+    const ours = authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase();
+    const passedStages = ours ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+    const verify = ours ? parseVerifyTrailerValues(verifyTrailers.split('\x1f')) : undefined;
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');
       const files = await this.#fromRoot((await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean));
       return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
     }
-    return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha), ...(passedStages ? { passedStages } : {}) };
+    return {
+      sha,
+      shortSha,
+      message: subject,
+      createdAt,
+      files: await this.#changedFiles(sha),
+      ...(passedStages ? { passedStages } : {}),
+      ...(verify ? { verify } : {}),
+    };
   }
 
   /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */

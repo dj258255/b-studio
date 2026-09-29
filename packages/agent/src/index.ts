@@ -58,7 +58,7 @@ export {
   type OpenCodeRunResult,
 } from './opencode-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
-export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
+export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest, type VerifyMode } from './gate';
 export {
   BrowserUnavailableError,
   launchBrowser,
@@ -219,8 +219,10 @@ export {
   DEFAULT_WORKFLOW,
   describeWorkflow,
   executionPolicyFor,
+  formatVerifyTrailer,
   formatWorkflowTrailer,
   missingVerificationStages,
+  parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
   piPolicyEnvironment,
   releaseBlockers,
@@ -228,6 +230,7 @@ export {
   scopedExecutionPolicy,
   VERIFICATION_STAGES,
   WORKFLOW_TRAILER,
+  WORKFLOW_VERIFY_TRAILER,
   workflowContext,
   workflowReleaseRequirements,
   workflowStages,

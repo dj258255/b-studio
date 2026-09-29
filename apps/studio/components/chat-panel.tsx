@@ -12,6 +12,7 @@ import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
 import { formatElementSelections, useElementSelections } from "./selection-context";
 import { useSessionAccess, type SessionAccess } from "./session-access";
+import { useLightVerify } from "./use-light-verify";
 import { useReadOnly } from "./use-read-only";
 
 type Intent = "build" | "ask";
@@ -40,6 +41,11 @@ export function ChatPanel({ view }: { view: SessionView }) {
    * 꺼져 있으면 만들기 경로로 보낸다 — 에이전트가 요청을 보고 답만 하거나 바꾼다
    */
   const [readOnly, setReadOnly] = useReadOnly(snapshot.id);
+  /**
+   * "가볍게 확인"은 읽기만이 꺼져 있을 때만 보인다. 켜면 게이트가 재시작·준비 판정·계약만 돌리고
+   * 테스트·화면 확인·리뷰는 건너뛴다(세션마다 기억하되, 읽기만 중에도 값은 남긴다)
+   */
+  const [lightVerify, setLightVerify] = useLightVerify(snapshot.id);
   const intent: Intent = intentFor(readOnly);
   /** 파일을 바꾼 실행. 결과 줄에서 "답만 했습니다"와 "완료"를 가른다 */
   const changedRuns = runsWithChanges(chat);
@@ -91,7 +97,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking })),
+      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, lightVerify })),
     });
     if (response.ok) {
       setText("");
@@ -297,8 +303,27 @@ export function ChatPanel({ view }: { view: SessionView }) {
               >
                 읽기만
               </button>
+              {/* 읽기만이 켜지면 숨긴다 — 질문은 게이트를 돌리지 않으므로 가볍게 확인이 뜻이 없다 */}
+              {!readOnly && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={lightVerify}
+                  onClick={() => setLightVerify(!lightVerify)}
+                  title="테스트·화면 확인·리뷰를 건너뛰고 서비스 재시작·계약만 확인합니다. 이런 체크포인트는 배포할 수 없습니다"
+                  className={`rounded-control px-3 py-1 text-sm font-medium transition-colors ${
+                    lightVerify ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                  }`}
+                >
+                  가볍게 확인
+                </button>
+              )}
               <p className="text-xs text-muted">
-                {readOnly ? "파일은 바꾸지 않고 답과 계획만 받습니다" : "질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다"}
+                {readOnly
+                  ? "파일은 바꾸지 않고 답과 계획만 받습니다"
+                  : lightVerify
+                    ? "테스트·화면 확인·리뷰를 건너뜁니다. 배포하려면 전체 검증이 필요합니다"
+                    : "질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다"}
               </p>
             </div>
             <label htmlFor="request" className="sr-only">
@@ -660,6 +685,7 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
         <div className="text-sm">
           {/* 바꾼 파일이 없으면 "답만 했습니다"로 알린다(입력이 하나로 합쳐진 뒤의 기본 경로) */}
           <p className={tone}>{outcomeText(item, changedRuns.has(item.runId))}</p>
+          {item.verify === "light" && <p className="mt-0.5 text-xs text-muted">가볍게 확인: 테스트·화면 확인·리뷰를 건너뛰었습니다</p>}
           {hasTokens(item.usage) && <p className="mt-0.5 text-xs text-muted">{describeTokens(item.usage)}</p>}
         </div>
       );

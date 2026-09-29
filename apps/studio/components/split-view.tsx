@@ -16,6 +16,7 @@ import { answerRequest } from "@/lib/question-answer";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import type { SessionSnapshot, SessionStatus, SessionSummary } from "@/lib/studio-events";
 import { Dot, SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "./status";
+import { useLightVerify } from "./use-light-verify";
 import { useReadOnly } from "./use-read-only";
 import { useSession } from "./use-session";
 
@@ -95,6 +96,8 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
   const steering = view.snapshot.running;
   /** 대화 화면과 같은 입력 규칙을 쓴다: "읽기만"이면 질문 경로, 아니면 만들기 경로(칸마다 기억한다) */
   const [readOnly, setReadOnly] = useReadOnly(snapshot.id);
+  // 대화 화면과 같게, 읽기만이 켜지면 숨기되 값을 세션마다 기억한다
+  const [lightVerify, setLightVerify] = useLightVerify(snapshot.id);
 
   useEffect(() => {
     const list = listRef.current;
@@ -109,7 +112,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
     const response = await fetch(`/api/sessions/${snapshot.id}/${steering ? "steer" : "messages"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(steering ? { text: request } : chatRequestBody({ text: request, intent: intentFor(readOnly) })),
+      body: JSON.stringify(steering ? { text: request } : chatRequestBody({ text: request, intent: intentFor(readOnly), lightVerify })),
     });
     if (response.ok && override === undefined) setText("");
     // 권한은 서버가 판단한다. 403이면 만든 사람이 아니라는 뜻이다
@@ -224,7 +227,24 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
                 >
                   읽기만
                 </button>
-                <span className="min-w-0 text-muted">{readOnly ? "파일은 바꾸지 않습니다" : "바꾸면 게이트를 통과해야 남습니다"}</span>
+                {/* 읽기만이 켜지면 숨긴다(질문은 게이트를 돌리지 않는다). 대화 화면과 같은 규칙 */}
+                {!readOnly && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={lightVerify}
+                    onClick={() => setLightVerify(!lightVerify)}
+                    title="테스트·화면 확인·리뷰를 건너뛰고 서비스 재시작·계약만 확인합니다"
+                    className={`rounded-control px-2 py-0.5 font-medium transition-colors ${
+                      lightVerify ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                    }`}
+                  >
+                    가볍게 확인
+                  </button>
+                )}
+                <span className="min-w-0 text-muted">
+                  {readOnly ? "파일은 바꾸지 않습니다" : lightVerify ? "테스트·화면 확인·리뷰를 건너뜁니다" : "바꾸면 게이트를 통과해야 남습니다"}
+                </span>
               </div>
             )}
             {error && <p className="mt-1.5 text-xs text-fail">{error}</p>}
