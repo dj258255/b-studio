@@ -40,7 +40,7 @@ function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
 
 async function setup(
   target: LoadedProject,
-  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner } = {},
+  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner; verify?: 'full' | 'light' } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
   const commands: string[][] = [];
@@ -56,6 +56,7 @@ async function setup(
     workspace,
     allowBreaking: false,
     maxVerifyAttempts: 3,
+    ...(options.verify ? { verify: options.verify } : {}),
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
     ...(options.browser ? { browserRunner: options.browser } : {}),
@@ -1136,5 +1137,37 @@ describe('자동 페이지 확인의 오류 표지와 서명', () => {
     // 이름에만 "(자동)"이 붙고 detail이 같으면 서명은 갈리지 않는다(그래서 자동 실패에는 경로를 앞에 붙인다)
     const namedOnly: WorkflowCheck = { ...auto, detail: declared.detail };
     expect(signatureKey(signatureFromCheck(namedOnly))).toBe(signatureKey(signatureFromCheck(declared)));
+  });
+});
+
+describe('가볍게 확인(verify light)', () => {
+  const target = () =>
+    withWorkflow({
+      tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }],
+      pageChecks: [{ service: 'api', path: '/orders', mode: 'http', expectStatus: 200, expectText: '주문 목록', allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+
+  it('테스트·화면 확인·리뷰를 건너뛰고 재시작·준비 판정·계약만 돌린다', async () => {
+    const { gate, workspace, events, commands } = await setup(target(), { verify: 'light' });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.verified).toBe(true);
+    // 통과한 단계는 재시작(run)·계약(contract_check)뿐이다. 건너뛴 단계는 실패가 아니라 기록으로 남는다
+    expect([...gate.passedStages].sort()).toEqual(['contract_check', 'run']);
+    expect([...gate.skippedStages].sort()).toEqual(['browser_check', 'review', 'test']);
+    expect(stages(events)).toEqual(['run', 'contract_check']);
+    expect(commands).toEqual([]);
+    expect(gate.checks).toEqual([]);
+  });
+
+  it('full(기본)은 지금처럼 선언한 테스트·화면 확인·리뷰를 모두 돌린다', async () => {
+    const { gate, workspace, commands } = await setup(target());
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(commands).toEqual([['./gradlew', 'test']]);
+    expect(gate.skippedStages).toEqual([]);
+    expect([...gate.passedStages].sort()).toEqual(['browser_check', 'contract_check', 'review', 'run', 'test']);
   });
 });

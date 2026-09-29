@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError } from './checkpoints';
-import { formatWorkflowTrailer } from './workflow';
+import { formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -90,6 +90,24 @@ describe('CheckpointStore', () => {
     expect(latest!.passedStages).toEqual(['run', 'contract_check', 'review']);
     expect(local2!.passedStages).toBeUndefined();
     expect(previous!.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
+  });
+
+  it('Workflow-Verify 트레일러가 있으면 가볍게 확인한 체크포인트로 읽고, 다시 읽어도 같은 값이 나온다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const light = await store.commit('요청: 메모 추가', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check'])}\n${formatVerifyTrailer('light')}`);
+    expect(light?.passedStages).toEqual(['run', 'contract_check']);
+    expect(light?.verify).toBe('light');
+
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    const full = await store.commit('요청: 메모 추가 2', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check', 'test'])}`);
+    expect(full?.verify).toBeUndefined();
+
+    const [latest, previous] = await store.list();
+    expect(latest!.verify).toBeUndefined();
+    expect(previous!.verify).toBe('light');
+    expect(previous!.passedStages).toEqual(['run', 'contract_check']);
   });
 
   it('다른 사람이 만든 커밋의 트레일러는 무시하고, 스튜디오가 만든 체크포인트의 통과 기록은 그대로 읽는다', async () => {

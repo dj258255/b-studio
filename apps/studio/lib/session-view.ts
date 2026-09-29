@@ -56,6 +56,8 @@ export type ChatItem =
       usage?: AgentUsage;
       /** 질문 모드 요청의 결과 */
       intent?: 'ask';
+      /** 가볍게 확인(light)으로 끝난 요청. 테스트·화면 확인·리뷰를 건너뛰었다 */
+      verify?: 'light';
     }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   /** 로컬 폴더 세션에서 스튜디오 밖에서 바꾼 파일을 남긴 체크포인트 */
@@ -218,7 +220,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         }),
         chat: [
           ...markInterrupted(view.chat, event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,

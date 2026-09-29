@@ -197,7 +197,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   let gate: VerificationGate | undefined;
   let gatePromise: Promise<VerificationGate> | undefined;
   const gateFor = (): Promise<VerificationGate> =>
-    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   const context: ToolContext = {
     project,
@@ -247,6 +247,8 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
+      ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns: completedTurns,
       usage,
