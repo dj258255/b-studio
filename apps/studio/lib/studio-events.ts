@@ -48,6 +48,14 @@ export interface DesignView {
   hasToken: boolean;
 }
 
+/** 에이전트가 되물은 질문. 사용자가 답을 보내면 지운다 */
+export interface PendingQuestion {
+  runId: string;
+  question: string;
+  options: string[];
+  allowOther: boolean;
+}
+
 export interface SessionSnapshot {
   id: string;
   projectId: string;
@@ -77,6 +85,8 @@ export interface SessionSnapshot {
   externals?: ExternalApiView[];
   /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
   design?: DesignView;
+  /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */
+  pendingQuestion?: PendingQuestion;
   /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
@@ -203,6 +213,8 @@ export type StudioEvent =
   | { type: 'boot_network'; at: string; network: BootNetwork }
   /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
   | { type: 'design'; design?: DesignView }
+  /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
+  | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean }
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
@@ -222,8 +234,8 @@ export type StudioEvent =
   | {
       type: 'run_finished';
       runId: string;
-      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다 */
-      status: 'done' | 'failed' | 'error' | 'cancelled';
+      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다. awaiting_input: 답을 기다린다 */
+      status: 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
       summary: string;
       turns?: number;
       /** 이번 요청이 쓴 토큰. 모델을 부르지 않았으면 없다 */

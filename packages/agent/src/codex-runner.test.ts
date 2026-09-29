@@ -256,6 +256,11 @@ describe('runCodexAgent', () => {
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 12, cacheReadTokens: 30, cacheWriteTokens: 3 });
     // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
     expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
+    // turn.completed마다 그 턴 하나의 사용량을 남긴다(컨텍스트 = input + cacheRead + cacheWrite)
+    expect(events.flatMap((event) => (event.type === 'turn_usage' ? [event] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 1, contextTokens: 111 },
+      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 7, cacheReadTokens: 20, cacheWriteTokens: 2, contextTokens: 222 },
+    ]);
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(222);
     // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
@@ -358,5 +363,30 @@ describe('runCodexAgent', () => {
     expect(result).toMatchObject({ status: 'done' });
     expect(entries).toEqual([]);
     await expect(stat(tempHome)).rejects.toThrow();
+  });
+
+  it('ask_user가 질문을 남기면 그 턴이 끝날 때 멈추고 awaiting_input으로 끝낸다', async () => {
+    const { sdk } = fakeCodex([
+      { steps: [{ tool: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: false } }], usage: usage(50) },
+    ]);
+    const sandbox = fakeSandbox(project, []);
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox,
+      sdk,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', turns: 1 });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: false });
+    expect(events.find((event) => event.type === 'question')).toBeTruthy();
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    expect(sandbox.restarts).toEqual([]);
   });
 });

@@ -234,6 +234,8 @@ describe('runAgent', () => {
       { inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 },
     ]);
     expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 });
+    // 실행 누적값(tokens)과 별개로, 턴 하나의 사용량을 남긴다. 이 스크립트는 응답마다 같은 값을 주므로 두 턴이 같다
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e.contextTokens] : []))).toEqual([1_100, 1_100]);
   });
 
   it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남긴다', async () => {
@@ -248,11 +250,17 @@ describe('runAgent', () => {
       ],
     );
 
-    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+    const events: AgentEvent[] = [];
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract, onEvent: collect(events) });
 
     // 두 번 호출했고, 한 호출의 입력 크기는 input+cacheRead+cacheWrite: 1105, 2207이다
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // 턴 하나의 사용량을 그대로 남긴다(실행 누적값 tokens와 다르다)
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 5, contextTokens: 1_105 },
+      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 7, contextTokens: 2_207 },
+    ]);
     // usage 합계는 캐시를 입력에 섞지 않은 기존 값 그대로다
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 30, cacheReadTokens: 3_000, cacheWriteTokens: 12 });
     for (const ms of [result.metrics!.modelMs, result.metrics!.toolMs, result.metrics!.gateMs]) {
@@ -330,6 +338,63 @@ describe('runAgent', () => {
       fetcher: async () => contract,
     });
     expect(result).toMatchObject({ status: 'failed', summary: '모델이 요청을 거절했습니다 (scripted)' });
+  });
+
+  it('ask_user가 질문을 남기면 도구 결과를 넣고 실행을 끝내 답을 기다린다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    const conversation: NonNullable<RunAgentOptions['conversation']> = [];
+
+    const result = await runAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client,
+      conversation,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', changedFiles: [], verifyAttempts: 0, turns: 1 });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(events.find((event) => event.type === 'question')).toMatchObject({ options: ['표', '카드'], allowOther: true });
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    // 도구 결과가 대화에 남아 다음 요청이 맥락을 그대로 잇는다
+    expect(conversation).toHaveLength(3);
+  });
+
+  it('질문 전에 파일을 바꿨으면 게이트를 돌리고, interactive가 아니면 ask_user가 도구 목록에 없다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }] },
+      { toolCalls: [{ name: 'ask_user', input: { question: '계속할까요?', options: ['예', '아니오'], allowOther: false } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      request: '새 클래스 추가',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      client,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '계속할까요?', changedFiles: ['api/src/New.java'] });
+    expect(result.report?.ok).toBe(true);
+    expect(events.some((event) => event.type === 'verify_start')).toBe(true);
+
+    // interactive를 넘기지 않으면(레인·벤치·CLI) 도구 목록이 지금과 같다
+    const plain = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: plain, fetcher: async () => contract });
+    expect(plain.requests[0]!.tools.map((tool) => tool.name)).not.toContain('ask_user');
+
+    const withAsk = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: withAsk, interactive: true, fetcher: async () => contract });
+    expect(withAsk.requests[0]!.tools.map((tool) => tool.name)).toContain('ask_user');
   });
 
   it('실행 중 지시는 다음 모델 호출 직전에 도구 결과 뒤에 붙는다(도구 호출 도중에 끼어들지 않는다)', async () => {

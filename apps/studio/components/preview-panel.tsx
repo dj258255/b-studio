@@ -14,6 +14,7 @@ import { QaView } from "./qa-view";
 import { RemoteBrowserView } from "./remote-browser";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { TokenView } from "./token-view";
 
 type Tab = { id: string; label: string; service?: ServiceView; external?: ExternalApiView };
 
@@ -23,6 +24,7 @@ const CODE_TAB = "code";
 const RESOURCES_TAB = "resources";
 const DEPLOY_TAB = "deploy";
 const DESIGN_TAB = "design";
+const TOKENS_TAB = "tokens";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
@@ -36,6 +38,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     { id: DEPLOY_TAB, label: "배포" },
     { id: LOGS_TAB, label: "로그" },
     { id: RESOURCES_TAB, label: "리소스" },
+    { id: TOKENS_TAB, label: "토큰" },
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0]!;
@@ -71,6 +74,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <DeployPanel view={view} />
         ) : active.id === RESOURCES_TAB ? (
           <ResourcePanel view={view} />
+        ) : active.id === TOKENS_TAB ? (
+          <TokenView view={view} />
         ) : active.external ? (
           <ExternalApiPanel sessionId={view.snapshot.id} external={active.external} ready={view.snapshot.status === "ready"} revision={view.completedRuns} />
         ) : active.id === LOGS_TAB || !active.service ? (

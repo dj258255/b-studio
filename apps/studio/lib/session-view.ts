@@ -44,7 +44,7 @@ export type ChatItem =
   | {
       kind: 'outcome';
       runId: string;
-      status: 'done' | 'failed' | 'error' | 'cancelled';
+      status: 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
       summary: string;
       turns?: number;
       usage?: AgentUsage;
@@ -163,6 +163,10 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       });
     case 'design':
       return patchSnapshot(view, { design: event.design });
+    case 'question':
+      // 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답을 보내면(run_started) 지운다.
+      // 대화 항목으로는 넣지 않는다 — 답을 보내면 요청 줄에 질문과 답이 함께 남는다
+      return patchSnapshot(view, { pendingQuestion: { runId: event.runId, question: event.question, options: event.options, allowOther: event.allowOther } });
     case 'boot_network':
       return {
         ...patchSnapshot(view, { bootNetwork: event.network }),
@@ -175,7 +179,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     }
     case 'run_started':
       return {
-        ...patchSnapshot(view, { running: true }),
+        ...patchSnapshot(view, { running: true, pendingQuestion: undefined }),
         chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
       };
     case 'agent':
@@ -196,6 +200,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ...patchSnapshot(view, {
           running: false,
           cancelling: undefined,
+          // 되묻고 멈춘 실행만 질문을 남긴다. 끝난 실행이 남긴 질문은 지운다
+          pendingQuestion: event.status === 'awaiting_input' ? view.snapshot.pendingQuestion : undefined,
           nextDemoRequest: event.nextDemoRequest,
           nextDemoQuestion: event.nextDemoQuestion,
           tokens: event.sessionTokens ?? view.snapshot.tokens,
