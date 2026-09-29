@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveEscalation, resolveRateLimitPolicy } from './backends';
+import {
+  assertContractsBackend,
+  assertContractsStrategy,
+  assertPlainBaselineBackend,
+  planModelId,
+  resolveBackend,
+  resolveContextClearing,
+  resolveContractsSource,
+  resolveEscalation,
+  resolveRateLimitPolicy,
+} from './backends';
 
 describe('resolveBackend', () => {
   it('--dry는 --backend·--model과 함께 쓸 수 없고 항상 openai다', () => {
@@ -98,5 +108,29 @@ describe('assertPlainBaselineBackend', () => {
     expect(() => assertPlainBaselineBackend('codex', ['S0', 'P0'])).toThrow(/claude-code에서만/);
     // P0가 없으면 백엔드를 가리지 않는다
     expect(() => assertPlainBaselineBackend('codex', ['S0', 'S1'])).not.toThrow();
+  });
+});
+
+describe('레인 사이 계약(--contracts)', () => {
+  it('기본은 human이고 human|model만 받는다', () => {
+    expect(resolveContractsSource(undefined)).toBe('human');
+    expect(resolveContractsSource('')).toBe('human');
+    expect(resolveContractsSource(' human ')).toBe('human');
+    expect(resolveContractsSource('MODEL')).toBe('model');
+    expect(() => resolveContractsSource('auto')).toThrow(/human 또는 model/);
+  });
+
+  it('model 계약은 S2에서만 쓸 수 있다 (계약을 쓰지 않는 전략에 주면 무엇을 잰 것인지 알 수 없다)', () => {
+    expect(() => assertContractsStrategy('human', ['P0', 'S0', 'S1', 'S2', 'S3'])).not.toThrow();
+    expect(() => assertContractsStrategy('model', ['S2'])).not.toThrow();
+    expect(() => assertContractsStrategy('model', ['S2', 'S1'])).toThrow(/S2에서만/);
+    expect(() => assertContractsStrategy('model', ['S3'])).toThrow(/S2에서만/);
+  });
+
+  it('model 계약은 openai와 claude-code에서만 부를 수 있다 (codex는 한 번 호출 경로가 없다)', () => {
+    expect(() => assertContractsBackend('human', 'codex')).not.toThrow();
+    expect(() => assertContractsBackend('model', 'openai')).not.toThrow();
+    expect(() => assertContractsBackend('model', 'claude-code')).not.toThrow();
+    expect(() => assertContractsBackend('model', 'codex')).toThrow(/openai 또는 claude-code/);
   });
 });

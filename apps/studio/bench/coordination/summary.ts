@@ -47,6 +47,15 @@ export interface BenchProxyStats {
   upstreamErrors: number;
 }
 
+/** S2에서 쓴 계약. human=과제 정의에 사람이 써 둔 것, model=계획 모델이 쓴 것 */
+export interface BenchContractsRow {
+  source: 'human' | 'model';
+  count: number;
+  /** 계약 호출의 usage(모델 계약만). 사람 계약은 호출이 없어 없다 */
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
+  durationMs?: number;
+}
+
 export interface BenchRow {
   order: number;
   /** 사용 한도로 다시 시도한 실행이면 원래 실행의 order */
@@ -78,6 +87,8 @@ export interface BenchRow {
   /** 모델 승격 설정과 이 실행의 승격 결과 */
   escalation: BenchEscalation;
   metrics?: TaskPlanMetrics;
+  /** S2에서 쓴 계약의 출처와 수(모델 계약이면 호출 usage). 계약을 쓰지 않는 전략이면 없다 */
+  contracts?: BenchContractsRow;
   /** S2~S5의 게시판 지표. 공유 없음(S0·S1)이면 없다 */
   coordination?: TaskPlanCoordinationMetrics;
   acceptance?: AcceptanceResult[];
@@ -99,6 +110,8 @@ export interface SummaryMeta {
   requestedModel: string;
   /** 오래된 도구 결과 비우기를 켰는지. 기본 off(ADR-055 보강) */
   contextClearing?: boolean;
+  /** 레인 사이 계약(S2)의 출처. 기본 human */
+  contracts?: 'human' | 'model';
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'environment', 'timeout', 'unknown'];
@@ -193,7 +206,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'}`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}`,
     '',
     '## 과제 × 전략',
     '',
@@ -244,6 +257,9 @@ function medianValue(rows: BenchRow[], pick: (row: BenchRow) => number | undefin
 /**
  * 성공 1건당 토큰 = (입력 + 캐시읽기 + 캐시쓰기 + 출력) 합 ÷ 성공 수. 성공이 없으면 '—'.
  * 실패한 실행이 쓴 토큰도 분자에 넣는다 — 같은 성과를 내는 데 실제로 쓴 총량을 본다.
+ * **계약 호출 토큰도 넣는다**(빼면 모델 계약이 공짜처럼 보인다). 벤치가 직접 부른 계약(--contracts model)은
+ * 스튜디오 지표에 없어 `row.contracts.usage`로 더하고, 제품 경로에서 계획 모델이 쓴 계약은 이미
+ * `metrics.usage`에 들어 있어 겹치지 않는다.
  */
 function tokensPerSuccess(group: BenchRow[]): string {
   const ok = group.filter((row) => row.success).length;
@@ -251,7 +267,7 @@ function tokensPerSuccess(group: BenchRow[]): string {
   // 지표가 있는 실행만 더한다. 하나도 없으면 다른 열처럼 '—'다
   const withMetrics = group.filter((row) => row.metrics);
   if (withMetrics.length === 0) return '—';
-  const total = withMetrics.reduce((sum, row) => sum + usageTokens(row.metrics!.usage), 0);
+  const total = group.reduce((sum, row) => sum + usageTokens(row.metrics?.usage) + usageTokens(row.contracts?.usage), 0);
   return count(total / ok);
 }
 

@@ -164,6 +164,33 @@ describe('summarize', () => {
     expect(limited).toContain('| S0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |');
   });
 
+  it('계약 호출 토큰을 성공 1건당 토큰에 포함하고, 계약 출처를 맨 위에 적는다', () => {
+    const markdown = summarize(
+      [
+        row({
+          taskId: 'orders-list',
+          strategy: 'S2',
+          success: true,
+          metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
+          contracts: { source: 'model', count: 1, usage: { inputTokens: 40, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        }),
+      ],
+      { ...meta, contracts: 'model' },
+    );
+
+    // (100+10) + 계약(40+4) = 154 / 성공 1건. 빼면 모델 계약이 공짜처럼 보인다
+    expect(markdown).toContain('| orders-list | O | S2 | 1/1 | 154 |');
+    expect(markdown).toContain('계약 model');
+
+    // 사람 계약은 호출이 없어 usage가 없다 → 계약 토큰을 더하지 않는다
+    const human = summarize(
+      [row({ taskId: 'orders-list', strategy: 'S2', success: true, metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 } }), contracts: { source: 'human', count: 1 } })],
+      meta,
+    );
+    expect(human).toContain('| orders-list | O | S2 | 1/1 | 110 |');
+    expect(human).toContain('계약 human');
+  });
+
   it('맨 위에 백엔드·요청한 모델·관측한 모델·실행 수를 적는다', () => {
     const withObserved = [
       row({ observedModels: ['claude-sonnet-4-5', 'claude-haiku-4-5'] }),

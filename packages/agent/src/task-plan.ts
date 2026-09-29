@@ -141,18 +141,40 @@ Rules:
 - Tasks without dependencies run in parallel in separate workspaces, so their paths must not overlap.`;
 }
 
-/** 모델 응답에서 JSON 객체를 꺼낸다. 코드 펜스나 앞뒤 설명이 있어도 첫 객체만 읽는다 */
+/**
+ * 모델 응답에서 JSON 객체를 꺼낸다. 코드 펜스나 앞뒤 설명이 있어도 첫 객체만 읽는다.
+ * 계획 요청과 레인 사이 계약 요청이 함께 쓴다 — 그래서 문구에 "작업 계획"이라고 박아 두지 않는다
+ */
 export function parsePlannerReply(text: string): unknown {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text)?.[1];
   const source = fenced ?? text;
   const start = source.indexOf('{');
   const end = source.lastIndexOf('}');
-  if (start === -1 || end <= start) throw new TaskPlanError('작업 계획 응답에서 JSON을 찾지 못했습니다');
+  if (start === -1 || end <= start) throw new TaskPlanError('모델 응답에서 JSON을 찾지 못했습니다');
   try {
     return JSON.parse(source.slice(start, end + 1));
   } catch (error) {
-    throw new TaskPlanError(`작업 계획 JSON을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    throw new TaskPlanError(`모델 응답 JSON을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/**
+ * 모델 응답의 usage를 세션 지표 모양으로 옮긴다. 계획 호출(requestTaskPlan)과
+ * 레인 사이 계약 호출(lane-contracts)이 같은 매핑을 쓴다 — 두 곳이 갈라지면 토큰 합계를 비교할 수 없다.
+ * loop.ts의 addUsage와 같은 규칙이다(그 함수는 세션 토큰 한도를 쓰므로 여기서 같은 모양으로 바꾼다).
+ */
+export function usageFromMessage(usage: {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}): AgentUsage {
+  return {
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+  };
 }
 
 /** 모델에게 계획을 받아 검증까지 마친 레인을 돌려준다. 계획이 틀리면 한 작업으로 몰래 바꾸지 않고 실패시킨다 */
@@ -166,13 +188,7 @@ export async function requestTaskPlan(
   const message = await client.createMessage({ system: buildPlannerSystem(project), tools: [], messages: [{ role: 'user', content: request }] }, signal);
   const durationMs = Math.round(performance.now() - started);
   const text = message.content.flatMap((block) => (block.type === 'text' ? [block.text] : [])).join('\n');
-  // loop.ts의 addUsage와 같은 매핑. 그 함수는 세션 토큰 한도가 쓰므로 그대로 두고 여기서 같은 모양으로 바꾼다
-  const usage: AgentUsage = {
-    inputTokens: message.usage.input_tokens ?? 0,
-    outputTokens: message.usage.output_tokens ?? 0,
-    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
-    cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
-  };
+  const usage = usageFromMessage(message.usage);
   try {
     const raw = parsePlannerReply(text);
     return { lanes: planLanes(raw), raw, usage, durationMs };

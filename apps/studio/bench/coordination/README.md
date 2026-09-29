@@ -9,6 +9,24 @@
 
 결과는 `docs/experiments/`에 실험 보고서 양식으로 옮겨 적습니다(실험 #45).
 
+## 레인 사이 계약 (`--contracts`)
+
+S2(계약 먼저)에서 **계약을 누가 쓰는가**만 바꿉니다. 고정 계획(레인·작업)은 그대로 두기 때문에 전략 차이와 계약 출처 차이를 섞지 않고 잴 수 있습니다.
+
+- `--contracts human`(기본): 과제 정의에 사람이 써 둔 계약을 그대로 씁니다([`tasks.ts`](./tasks.ts)의 `contract`). E2와 같은 조건입니다.
+- `--contracts model`: 고정 계획의 레인으로 계획 모델에게 계약을 받아 `coordination.contracts`로 넘깁니다. 제품(studio의 `B_STUDIO_PLAN_CONTRACTS`)과 **같은 함수·같은 프롬프트**(`requestLaneContracts`·`buildContractSystem`)를 씁니다.
+
+```bash
+pnpm bench:coordination --backend claude-code --model sonnet --strategies S2 --contracts model --tasks orders-list,order-detail,order-summary --repeats 3
+```
+
+- `--contracts model`은 **S2에서만** 쓸 수 있습니다. 다른 전략과 함께 주면 시작 전에 거부합니다(계약을 쓰지 않는 전략에 주면 그 행이 무엇을 잰 것인지 알 수 없습니다).
+- 백엔드는 `openai`(상류 ModelClient, 프록시 경유)와 `claude-code`(Claude Agent SDK `query` 한 번: 도구 없음·`maxTurns: 1`·설정 없음·세션 저장 없음)에서만 됩니다. `codex`는 한 번 호출 경로를 만들지 않아 시작 전에 거부합니다.
+- `--contracts model`인데 모델 계약을 못 받으면(형식 오류·사용 한도·연결 실패) **그 실행을 실패로 남깁니다.** 계약 없이 레인을 돌리면 그 행은 S1을 S2라고 적는 것이 되기 때문입니다(제품은 반대로 계약 없이 진행하고 경고를 남깁니다 — 가용성이 먼저입니다).
+- 행의 `contracts: { source, count, usage? }`에 출처·계약 수·호출 토큰이 남고, 요약표의 **성공 1건당 토큰**에 계약 호출 토큰이 포함됩니다(빼면 모델 계약이 공짜처럼 보입니다). 맨 위 줄에도 `계약 human|model`이 적힙니다.
+- 모델이 쓴 계약 **원문**은 결과 폴더의 `contracts/<과제>-r<반복>-<순번>.json`에 저장합니다(나중에 불일치 원인을 보려고). 본문은 JSONL·요약에 넣지 않습니다.
+- 레인이 2개 미만이면 모델을 부르지 않습니다(레인 사이 경계가 없습니다).
+
 ## 기준선 P0 (그냥 Claude Code)
 
 `--backend claude-code`에서만 쓸 수 있는 비교 기준입니다. 작업 분해·조율 없이 Claude Code 하나가 과제 전체(전체 요청 + api 요청 + web 요청)를 한 번에 처리합니다. "같은 과제를 그냥 Claude Code로 하면 어떻게 되는가"를 S0~S5와 같은 방식으로 재기 위한 것입니다. 다른 백엔드는 Docker·모델을 건드리기 전에 거부합니다.
@@ -64,6 +82,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
   - `--strategies`의 기본값은 `S0,S1`이고 P0는 넣어야 돕니다. `P0`는 `--backend claude-code`에서만 쓸 수 있습니다. `--dry`는 P0를 모릅니다(항상 `S0,S1`만 돕니다)
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 - `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
+- `--contracts human|model`(기본 `human`) — S2에서 레인 사이 계약을 누가 쓰는지 정합니다. `model`은 계획 모델에게 한 번 받아 씁니다(S2에서만, `--backend openai|claude-code`에서만). 위의 "레인 사이 계약" 절을 보세요
 - `--escalate-to <모델>` — `claude-code`에서만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). 다른 백엔드에 주면 시작 전에 오류를 낸다
 - `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
 - `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
@@ -95,9 +114,10 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
 
-- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`)
+- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`, 계약 `contracts`)
+- `contracts/`: `--contracts model`일 때 모델이 쓴 계약 원문(`<과제>-r<반복>-<순번>.json`). 불일치 원인을 나중에 보려고 남깁니다.
 - `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "API 환산 비용($)" 열이 있습니다.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, 승격 설정(`escalateTo`·`escalateAfter`), 단가 파일 경로(`pricesPath`), git 커밋.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`), 단가 파일 경로(`pricesPath`), git 커밋.
 
 행의 `escalation`은 `{ to, after, escalated, attempt? }`입니다. `to`·`after`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).
 
@@ -112,7 +132,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 ## 한계
 
 - **본인 PC에서 본인이 로그인한 CLI만 씁니다.** `claude-code` 백엔드는 개인 구독 계정용이고, 공유 서버에서는 쓰지 않습니다(ADR의 로컬 CLI 원칙).
-- **고정 계획이라 계획 모델의 품질은 재지 않습니다.** 전략 차이만 재기 위해 계획은 과제마다 미리 정해 둡니다(openai는 로컬 프록시가, claude-code는 `presetPlan`이 그대로 넘깁니다).
+- **고정 계획이라 계획 모델의 품질은 재지 않습니다.** 전략 차이만 재기 위해 계획은 과제마다 미리 정해 둡니다(openai는 로컬 프록시가, claude-code는 `presetPlan`이 그대로 넘깁니다). `--contracts model`만 예외로, **계약 문장의 품질**은 재게 됩니다(계획 품질은 여전히 재지 않습니다).
 - **로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다.** 0은 "재지 않음"이고, 추측값을 넣지 않습니다. 비용은 청구가 없고, 단가를 주면 API 단가 환산 추정치만 계산합니다.
 - 실패 서명 메시지는 숫자열을 `N`으로 바꿉니다. 그래서 `exit code 1`과 `exit code 2`, 다른 포트 번호가 같은 서명이 됩니다. 줄 번호·시각·해시 때문에 같은 원인이 갈라지지 않게 한 선택입니다.
 - `repeatedFailures`는 **한 세션 안에서** 같은 서명이 다시 나온 횟수이고, `distinctSignatures`는 실행 전체(레인 + 통합)의 서로 다른 서명 수입니다. 두 값의 범위가 다릅니다.

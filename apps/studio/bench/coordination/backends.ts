@@ -92,6 +92,35 @@ export function assertPlainBaselineBackend(backend: Backend, strategies: readonl
   }
 }
 
+/**
+ * 레인 사이 계약(S2)의 출처. 기본 human(과제 정의에 사람이 써 둔 것, E2와 같다).
+ * model이면 고정 계획은 그대로 두고 계약만 계획 모델에게 받는다(계획 품질은 재지 않는다).
+ */
+export type ContractsSource = 'human' | 'model';
+
+export function resolveContractsSource(value: string | undefined): ContractsSource {
+  const trimmed = value?.trim().toLowerCase() || 'human';
+  if (trimmed !== 'human' && trimmed !== 'model') throw new Error(`--contracts는 human 또는 model이어야 합니다 (지금 값: ${value})`);
+  return trimmed;
+}
+
+/**
+ * 모델 계약은 S2에서만 뜻이 있다. 계약을 쓰지 않는 전략과 함께 주면 무엇을 잰 것인지 알 수 없다.
+ * 조용히 human으로 돌리면 "model 계약"이라고 적힌 행이 실제로는 사람 계약이 되어 결과가 거짓말이 된다.
+ */
+export function assertContractsStrategy(source: ContractsSource, strategies: readonly Strategy[]): void {
+  if (source !== 'model') return;
+  const wrong = strategies.filter((strategy) => strategy !== 'S2');
+  if (wrong.length > 0) throw new Error(`--contracts model은 S2에서만 쓸 수 있습니다 (지금 전략: ${wrong.join(', ')})`);
+}
+
+/** 모델 계약을 부를 수 있는 백엔드. codex는 한 번 호출 경로를 만들지 않았다(계획도 presetPlan으로 넘긴다) */
+export function assertContractsBackend(source: ContractsSource, backend: Backend): void {
+  if (source !== 'model') return;
+  if (backend === 'openai' || backend === 'claude-code') return;
+  throw new Error(`--contracts model은 --backend openai 또는 claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${backend})`);
+}
+
 export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinutes: number | undefined): { policy: RateLimitPolicy; waitMinutes: number } {
   const value = onRateLimit?.trim() || 'stop';
   if (value !== 'stop' && value !== 'wait') throw new Error(`--on-rate-limit은 stop 또는 wait여야 합니다 (지금 값: ${onRateLimit})`);

@@ -33,9 +33,17 @@ export interface TaskPlanMetrics {
   integrationMs?: number;
   /** 만든 세션 수 (sessionId가 있는 레인 + 통합) */
   sessions: number;
+  /**
+   * 계획 모델이 레인 사이 계약을 받은 호출(B_STUDIO_PLAN_CONTRACTS). 계획 호출 지표 옆에 따로 남긴다.
+   * 이 호출의 usage·호출 수는 위 합계에도 들어간다 — 계약이 공짜처럼 보이면 안 된다
+   */
+  contracts?: TaskPlanContractsMetrics;
   /** 조율(S2~S5)을 켠 계획의 게시판 지표. 켜지 않았으면 없다 */
   coordination?: TaskPlanCoordinationMetrics;
 }
+
+/** 계약 호출 한 번의 지표. count는 그 호출로 받은 계약(게시한 계약 메모) 수 */
+export type TaskPlanContractsMetrics = { count: number; usage: AgentUsage; durationMs: number };
 
 /** 게시판 통계와 전략·topology. 게시·읽기의 양을 벤치에서 전략별로 비교한다 */
 export type TaskPlanCoordinationMetrics = { strategy: TaskPlanStrategy; topology: Topology } & BoardStats;
@@ -107,6 +115,13 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     maxContextTokens = Math.max(maxContextTokens, contextOf(plan.planning.usage));
   }
 
+  // 레인 사이 계약 호출도 계획 단계의 실제 모델 호출이다. 합계에 넣어야 계약이 공짜처럼 보이지 않는다
+  if (plan.contracts?.usage) {
+    addUsage(plan.contracts.usage);
+    modelCalls += 1;
+    maxContextTokens = Math.max(maxContextTokens, contextOf(plan.contracts.usage));
+  }
+
   for (const lane of plan.lanes) for (const task of lane.tasks) addRun(task.run);
   // 통합은 모델 없이 레인 결과를 다시 적용하는 스크립트 턴이라 모델 호출로 세지 않는다
   addRun(plan.integration?.run, false);
@@ -137,6 +152,9 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     gateMs,
     integrationMs: plan.integration?.run?.durationMs,
     sessions,
+    ...(plan.contracts?.usage
+      ? { contracts: { count: plan.contracts.count, usage: plan.contracts.usage, durationMs: plan.contracts.durationMs ?? 0 } }
+      : {}),
     ...(plan.coordination ? { coordination: { ...plan.coordination, ...(plan.board?.stats ?? emptyBoardStats()) } } : {}),
   };
 }

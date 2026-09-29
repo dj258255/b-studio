@@ -68,6 +68,11 @@ const fake = vi.hoisted(() => ({
   failIssue: false,
   /** 계획 모델을 부른 횟수. 고정 계획(presetPlan)은 0이어야 한다 */
   modelCalls: 0,
+  /** 그중 레인 사이 계약 호출 횟수(B_STUDIO_PLAN_CONTRACTS) */
+  contractCalls: 0,
+  /** 계약 호출이 돌려주는 텍스트와 usage */
+  contractText: '{"contracts":[{"body":"GET /api/orders → 200 JSON 배열","refs":["api"]}]}',
+  contractUsage: { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
   /** 통합 스크립트 턴의 게이트 결과. S4 수리를 부르려면 'failed'로 둔다 */
   integration: 'done' as 'done' | 'failed',
   /** S4 수리 요청의 게이트 결과 */
@@ -103,8 +108,14 @@ vi.mock('./model-registry', () => ({
   listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
   modelById: (id: string) => ({ id }),
   clientForModel: () => ({
-    createMessage: async () => {
+    createMessage: async (request: { system?: string }) => {
       fake.modelCalls += 1;
+      // 계약 호출과 계획 호출은 시스템 프롬프트로 갈린다(제품과 벤치가 같은 문구를 쓴다)
+      const contract = typeof request?.system === 'string' && request.system.startsWith('You write the interface contracts');
+      if (contract) {
+        fake.contractCalls += 1;
+        return { content: [{ type: 'text', text: fake.contractText }], stop_reason: 'end_turn', usage: fake.contractUsage };
+      }
       return { content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } };
     },
   }),
@@ -207,6 +218,7 @@ const saved = {
   token: process.env.B_STUDIO_GITHUB_TOKEN,
   giteaToken: process.env.B_STUDIO_GITEA_TOKEN,
   provider: process.env.B_STUDIO_GIT_PROVIDER,
+  contracts: process.env.B_STUDIO_PLAN_CONTRACTS,
 };
 
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `[id:${id}] ${id} 작업`, paths, dependsOn });
@@ -225,6 +237,9 @@ beforeEach(() => {
   fake.stopped = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
   fake.modelCalls = 0;
+  fake.contractCalls = 0;
+  fake.contractText = '{"contracts":[{"body":"GET /api/orders → 200 JSON 배열","refs":["api"]}]}';
+  fake.contractUsage = { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   fake.integration = 'done';
   fake.repair = 'done';
   fake.source = { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' };
@@ -234,6 +249,8 @@ beforeEach(() => {
   fake.failIssue = false;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
+  // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
+  delete process.env.B_STUDIO_PLAN_CONTRACTS;
   delete process.env.B_STUDIO_GITHUB_TOKEN;
   delete process.env.B_STUDIO_GITEA_TOKEN;
   delete process.env.B_STUDIO_GIT_PROVIDER;
@@ -243,6 +260,7 @@ afterAll(() => {
   for (const [key, value] of [
     ['B_STUDIO_MODE', saved.mode],
     ['B_STUDIO_TASK_PLANS_DIR', saved.dir],
+    ['B_STUDIO_PLAN_CONTRACTS', saved.contracts],
     ['B_STUDIO_GITHUB_TOKEN', saved.token],
     ['B_STUDIO_GITEA_TOKEN', saved.giteaToken],
     ['B_STUDIO_GIT_PROVIDER', saved.provider],
@@ -872,6 +890,153 @@ describe('레인 조율 전략', () => {
       expect(posted.ok && posted.note.body).not.toContain(secret);
       // 계층 구조의 그룹 비교가 성립하도록 레인의 첫 쓰기 범위가 그룹으로 남는다
       expect(stored.group).toBe('web/a');
+    } finally {
+      delete process.env.B_STUDIO_SECRET_PAYMENT_API_KEY;
+    }
+  });
+});
+
+describe('레인 사이 계약 (B_STUDIO_PLAN_CONTRACTS)', () => {
+  const contractBody = 'GET /api/orders → 200 JSON 배열. 항목: id(number), customerName(string)';
+
+  it('기본은 꺼짐이다: 계약 호출도 게시판도 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '계약 끔', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(fake.contractCalls).toBe(0);
+    // 계획 호출 한 번만 했다
+    expect(fake.modelCalls).toBe(1);
+    expect(plan.contracts).toBeUndefined();
+    expect(plan.coordination).toBeUndefined();
+    expect(plan.metrics?.contracts).toBeUndefined();
+  });
+
+  it('켜면 레인을 돌리기 전에 계약을 받아 S2로 게시하고, 계약 호출 지표를 따로 남긴다', async () => {
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.contractText = JSON.stringify({ contracts: [{ body: contractBody, refs: ['api'] }] });
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '계약 켬', modelId: 'model-a', owner: 'kim' });
+    const waiting = await awaiting(created.id);
+
+    // 승인 전에 계약을 받아 게시해 둔다(레인이 시작하기 전이어야 한다)
+    expect(fake.contractCalls).toBe(1);
+    expect(waiting.status).toBe('awaiting_approval');
+    expect(fake.sessions.size).toBe(0);
+    expect(waiting.coordination).toEqual({ strategy: 'S2', topology: 'mesh' });
+    expect(waiting.contracts).toMatchObject({ source: 'model', count: 1 });
+    expect(waiting.contracts?.usage).toEqual({ inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(typeof waiting.contracts?.durationMs).toBe('number');
+    expect(waiting.board?.notes).toHaveLength(1);
+    expect(waiting.board?.notes[0]).toMatchObject({ kind: 'contract', lane: 'plan', by: 'platform', refs: ['api'], body: contractBody });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    expect(laneSends).toHaveLength(2);
+    // S2는 레인 읽기 전용이다(계약을 읽고 자기 몫만 만든다)
+    expect(laneSends.every((send) => send.options.board!.modelWrites === false)).toBe(true);
+    expect(laneSends.every((send) => send.request.includes('[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요'))).toBe(true);
+    // 계약 호출의 usage·시간을 따로 남기고, 호출 수·토큰 합계에도 넣는다(계획 1 + 계약 1 + 레인 2×2)
+    expect(plan.metrics?.contracts).toEqual({
+      count: 1,
+      usage: { inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      durationMs: expect.any(Number),
+    });
+    expect(plan.metrics?.modelCalls).toBe(6);
+    expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S2', posts: 1 });
+  });
+
+  it('계약을 받지 못하면 계약 없이 진행하고 경고 한 줄을 남긴다', async () => {
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    // JSON이 없는 응답: 형식 오류로 계약을 못 받는다
+    fake.contractText = '계약을 쓸 수 없습니다';
+
+    const plan = await run({ projectId: 'orders', request: '계약 실패', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.contracts?.source).toBe('model');
+    expect(plan.contracts?.count).toBe(0);
+    expect(plan.contracts?.warning).toContain('계약 없이 진행합니다');
+    expect(plan.contracts?.warning).toContain('JSON을 찾지 못했습니다');
+    // 실패해도 그때까지 쓴 토큰은 버리지 않는다
+    expect(plan.contracts?.usage).toEqual({ inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(plan.metrics?.contracts?.count).toBe(0);
+    // 계약이 없으므로 S2 게시판도 붙지 않고, 레인은 조율 없이 그대로 돈다
+    expect(plan.coordination).toBeUndefined();
+    expect(plan.board).toBeUndefined();
+    expect(fake.sends.filter((send) => send.options.board)).toHaveLength(0);
+  });
+
+  it('레인이 하나면 계약을 받지 않는다', async () => {
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '레인 하나', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(fake.contractCalls).toBe(0);
+    expect(plan.contracts).toBeUndefined();
+    expect(plan.coordination).toBeUndefined();
+  });
+
+  it('조율 입력이 있으면(벤치 고정 계약) 모델을 부르지 않고 그 계약을 쓴다', async () => {
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: '고정 계약',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S2', contracts: [{ body: contractBody, refs: ['api'] }] },
+    });
+    const waiting = await awaiting(created.id);
+
+    expect(fake.contractCalls).toBe(0);
+    // 사람이 쓴 계약이라 호출 지표가 없다
+    expect(waiting.contracts).toBeUndefined();
+    expect(waiting.board?.notes).toHaveLength(1);
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+    expect(plan.status).toBe('done');
+    expect(plan.metrics?.contracts).toBeUndefined();
+  });
+
+  it('모델이 시크릿 값을 계약에 담으면 게시 전에 가린다', async () => {
+    const secret = 'sk_test_contract_secret';
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    process.env.B_STUDIO_SECRET_PAYMENT_API_KEY = secret;
+    fake.project = {
+      spec: { name: 'orders' },
+      managed: [['web', { template: 'nextjs', path: 'web' }]],
+      secrets: [['PAYMENT_API_KEY', { services: ['web'] }]],
+    };
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.contractText = JSON.stringify({ contracts: [{ body: `GET /api/orders → 헤더 x-api-key: ${secret}`, refs: ['api'] }] });
+    try {
+      const created = await createTaskPlan({ projectId: 'orders', request: '계약 가림', modelId: 'model-a', owner: 'kim' });
+      const waiting = await awaiting(created.id);
+
+      const posted = waiting.board!.notes[0]!;
+      expect(posted.body).not.toContain(secret);
+      expect(posted.body).toContain('[PAYMENT_API_KEY 가림]');
+
+      approveTaskPlan(created.id, 'kim');
+      const plan = await finished(created.id);
+      expect(plan.status).toBe('done');
     } finally {
       delete process.env.B_STUDIO_SECRET_PAYMENT_API_KEY;
     }

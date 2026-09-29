@@ -167,4 +167,27 @@ describe('summarizeTaskPlan', () => {
     expect(summary.sessions).toBe(1);
     expect(summary.endToEndMs).toBeUndefined();
   });
+
+  it('레인 사이 계약 호출을 따로 남기고 합계에도 넣는다', () => {
+    const plan: TaskPlanView = {
+      ...basePlan(),
+      contracts: { source: 'model', count: 2, usage: usage(60, 6, 600, 2), durationMs: 400 },
+    };
+
+    const summary = summarizeTaskPlan(plan);
+
+    expect(summary.contracts).toEqual({ count: 2, usage: usage(60, 6, 600, 2), durationMs: 400 });
+    // 계약 호출도 계획 단계의 실제 모델 호출이다. 합계에 들어가야 계약이 공짜처럼 보이지 않는다
+    expect(summary.usage).toEqual({ inputTokens: 1_560, outputTokens: 156, cacheReadTokens: 10_600, cacheWriteTokens: 7 });
+    expect(summary.modelCalls).toBe(8);
+    // 계약 호출의 입력 크기(60+600+2)는 레인 실행의 최댓값 4,400보다 작다
+    expect(summary.maxContextTokens).toBe(4_400);
+  });
+
+  it('계약을 받지 않았으면 contracts 지표가 없고 합계도 그대로다', () => {
+    const summary = summarizeTaskPlan(basePlan());
+
+    expect(summary.contracts).toBeUndefined();
+    expect(summary.modelCalls).toBe(7);
+  });
 });
