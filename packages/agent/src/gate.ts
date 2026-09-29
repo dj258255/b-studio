@@ -248,7 +248,7 @@ export class VerificationGate {
     const api = await this.#apiValue(page, pageFetcher, signal);
     const endpoint = await sandbox.endpoint(page.service);
     const url = new URL(page.path, endpoint.url);
-    if (url.origin !== new URL(endpoint.url).origin) throw new Error('api 경로는 서비스 호스트 안에 있어야 합니다');
+    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
     if (page.mode === 'browser') {
       let result: BrowserPageResult;
       try {
@@ -316,7 +316,7 @@ export class VerificationGate {
     const { sandbox } = this.#options;
     const endpoint = await sandbox.endpoint(expect.service);
     const url = new URL(expect.path, endpoint.url);
-    if (url.origin !== new URL(endpoint.url).origin) throw new Error('api 경로는 서비스 호스트 안에 있어야 합니다');
+    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
     const { status, text } = await fetcher(url.href, signal);
     if (status < 200 || status >= 300) throw new Error(sandbox.redact(`${expect.service} GET ${expect.path}가 HTTP ${status}을 돌려줬습니다`));
     const value = readJsonPath(text, expect.jsonPath);
@@ -412,7 +412,7 @@ export class VerificationGate {
     const request = this.#options.requestService ?? requestService;
     const endpoint = await sandbox.endpoint(check.service);
     const url = new URL(check.path, endpoint.url);
-    if (url.origin !== new URL(endpoint.url).origin) throw new Error('api 경로는 서비스 호스트 안에 있어야 합니다');
+    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
 
     const responses = await Promise.all(
       Array.from({ length: check.concurrent }, () =>
@@ -447,7 +447,7 @@ export class VerificationGate {
     }
     if (then) {
       const thenUrl = new URL(then.path, endpoint.url);
-      if (thenUrl.origin !== new URL(endpoint.url).origin) throw new Error('api 경로는 서비스 호스트 안에 있어야 합니다');
+      if (thenUrl.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
       const response = await request(thenUrl.href, { method: 'GET', signal });
       const actual = readJsonPath(response.text, then.jsonPath);
       parts.push(`${then.jsonPath} = ${JSON.stringify(actual)}`);
