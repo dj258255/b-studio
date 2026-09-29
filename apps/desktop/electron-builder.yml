@@ -1,0 +1,20 @@
+# 데스크톱 앱 패키징 설정. `.app`만 만든다(mac dir 타깃) — 배포·서명은 하지 않는다
+appId: ai.b-studio.desktop
+productName: b-studio
+directories:
+  # TS 컴파일 출력(dist)과 섞이지 않게 패키징 결과는 따로 둔다
+  output: dist-app
+# 앱에 들어갈 파일: 컴파일된 JS + 껍데기 화면(HTML·JS) + package.json.
+# node_modules는 필요 없다(앱은 electron만 쓰고, 서버는 저장소의 pnpm으로 켠다)
+files:
+  - dist/**
+  - src/*.html
+  - src/*.js
+  - package.json
+mac:
+  # 현재 아키텍처의 .app 디렉터리만 만든다(dmg·zip 없음)
+  target:
+    - dir
+  category: public.app-category.developer-tools
+  # 서명 없음(로컬 설치용). 처음 한 번은 우클릭 → 열기로 열어야 한다
+  identity: null

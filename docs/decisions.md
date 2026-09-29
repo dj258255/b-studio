@@ -76,6 +76,7 @@
 - [ADR-058 게이트의 동시성 확인: 선언적 동시 요청과 결과 불변식으로 한다](#adr-058-게이트의-동시성-확인-선언적-동시-요청과-결과-불변식으로-한다)
 - [ADR-059 계약으로 엮인 병렬 작업은 계약을 먼저 게시하고(S2), 조율은 켤 때만 한다](#adr-059-계약으로-엮인-병렬-작업은-계약을-먼저-게시하고s2-조율은-켤-때만-한다)
 - [ADR-061 PR 미리보기: 누락은 보이되 PR 생성은 막지 않는다](#adr-061-pr-미리보기-누락은-보이되-pr-생성은-막지-않는다)
+- [ADR-062 데스크톱은 얇은 Electron 껍데기로 두고 웹 스튜디오를 본체로 남긴다](#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)
 
 ---
 
@@ -2444,6 +2445,43 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - `createIssue`는 GitHub·Gitea `POST /repos/{owner}/{repo}/issues`, GitLab `POST /projects/{id}/issues`를 씁니다. 하위 이슈 API는 GitHub에만 있어(`POST /repos/{owner}/{repo}/issues/{n}/sub_issues`, `sub_issue_id`는 번호가 아니라 id라 `GET /issues/{child}`로 먼저 얻습니다) Gitea·GitLab은 추적 이슈 본문에 `- [ ] #N 제목` 체크리스트를 넣고 `addSubIssue`가 `{ supported: false }`를 돌려줍니다. 토큰은 오류 메시지에 넣지 않습니다.
 - `buildPullRequest`·`previewExport`·`exportSession`은 이슈 번호 여러 개(`issues`)를 받습니다. 기존 `issue`(단수)는 남겨 두고 둘 다 오면 합칩니다. 통합 세션 미리보기는 그 세션이 `plan.integration.sessionId`인 계획을 찾아 하위 이슈 번호를 기본값으로 채우고, 확인 목록 `issue_linked`가 여러 이슈를 이어 붙여 보여 줍니다.
 - 검증 결과: 가짜 fetch로 세 호스트 이슈 생성, GitHub 하위 이슈 id 조회·연결, 실패 시 토큰 미노출을 단위 테스트로 확인했고, 승인 라우트가 `publishIssues`만 넘기는지 라우트 테스트로 고정했습니다. 계획 승인 뒤 이슈 생성·실패 시 상태 유지·원격/토큰 없음 건너뛰기·재생성 방지를 task-plans 테스트로 확인했습니다. 로컬 Gitea 확인은 Docker가 필요해 하지 않았습니다.
+
+---
+
+## ADR-062 데스크톱은 얇은 Electron 껍데기로 두고 웹 스튜디오를 본체로 남긴다
+
+상태: 제안
+관련: #155
+
+### 맥락
+- b-studio의 화면은 이미 전부 웹 스튜디오(`apps/studio`)에 있습니다. 세션·미리보기·QA·작업 분해·플릿·벤치가 모두 그 서버가 주는 화면입니다.
+- 매일 쓰는 사람의 첫 동작은 터미널에서 `pnpm studio:local`(또는 `studio:demo`)을 치고, 서버가 뜨면 브라우저로 `127.0.0.1:3000`을 여는 것입니다. "더블클릭으로 켜지는 앱"이 없어 시작이 번거롭고, 미리보기 포트로 옮겨 다닐 때 주소를 사람이 관리해야 합니다.
+- 큰 제품들은 웹을 본체로 두고 데스크톱은 그 웹을 감싸는 **얇은 껍데기**로 냅니다. 그 껍데기는 창·주소·메뉴·알림처럼 브라우저 탭이 못 하는 것만 네이티브로 합니다([VS Code 소스 구조](https://github.com/microsoft/vscode/wiki/source-code-organization), [Electron 프로세스 모델](https://www.electronjs.org/docs/latest/tutorial/process-model), [토스 테크](https://toss.tech/)의 POS·SLASH24 사례처럼 웹뷰와 네이티브를 나눠 웹을 고쳐도 앱을 다시 내지 않습니다).
+
+### 검토한 선택지
+
+| 선택지 | 내용 | 판단 |
+|---|---|---|
+| 브라우저 + CLI만 (현재) | 앱을 만들지 않고 문서로 안내 | 설치할 것이 없지만 더블클릭으로 켜지지 않고, 서버 주소·미리보기 포트를 사람이 관리해야 합니다 |
+| AppleScript·셸 런처 앱 | 서버를 켜고 기본 브라우저를 여는 얇은 앱 | 창이 없어 주소창·미리보기 이동이 브라우저 탭과 섞이고, 서버 상태(켜짐·실패)를 앱이 보여 줄 수 없습니다 |
+| Tauri | Rust 셸 + 시스템 웹뷰. 용량이 수 MB | **서버가 Node(Next.js)라서 Tauri 앱도 Node를 함께 넣어야 합니다.** 그러면 용량 이점이 대부분 사라지고(Rust 툴체인·크로스 빌드·업데이트 경로가 하나 더 늘어남) 얻는 것이 없습니다 |
+| **Electron 껍데기(선택)** | 창·도구 막대(주소창)·메뉴·종료만 네이티브, 화면은 서버가 주는 웹 | 지금의 웹 자산을 그대로 쓰고, 스튜디오를 고쳐도 앱을 다시 만들 필요가 없습니다. 용량·서명 문제를 감수합니다 |
+
+### 결정
+- `apps/desktop`은 Electron 창·서버 켜기·도구 막대·메뉴·종료만 합니다. **화면 코드(`apps/studio`)에는 Electron 전용 코드를 넣지 않습니다.** 스튜디오를 고치면(`git pull`) 앱은 다시 만들 필요가 없습니다.
+- 앱은 서버를 **계약으로만** 다룹니다: `<pnpm> studio launch --json` → `{"url","port","mode","pid","started"}`, `<pnpm> studio stop --json` → `{"stopped":bool}`. 서버 내부(CLI·Docker·콜리마)는 앱이 모릅니다.
+- 앱이 켠 서버(`started: true`)만 앱을 닫을 때 끕니다. 사람이 이미 켜 둔 서버는 그대로 둡니다.
+- 주소는 **이 PC 루프백**(`127.0.0.1`·`localhost`·`[::1]`, 아무 포트)만 앱 안에서 엽니다. 그 밖의 http/https는 기본 브라우저로 넘기고, `file:`·`javascript:` 같은 것은 거부합니다. 화면 안의 링크 이동·새 창에도 같은 규칙을 씁니다.
+- 스튜디오 화면(웹 콘텐츠)에는 preload·Node를 주지 않습니다(`contextIsolation`·`sandbox`, 권한 요청은 알림만 허용). 도구 막대만 좁은 preload 통로를 씁니다.
+- Dock·Finder에서 켠 앱에는 터미널 PATH가 없으므로, `pnpm desktop:install`이 설치 시점의 저장소 루트·node·pnpm 경로를 `~/.config/b-studio/desktop.json`에 적습니다. 파일이 없으면 앱은 설치 안내 화면을 띄웁니다.
+- 서명하지 않고 `.app`(mac `dir` 타깃)만 만듭니다. 처음 한 번은 Finder에서 우클릭 → 열기로 열어야 합니다.
+
+### 감수한 트레이드오프
+- **앱 용량이 약 100MB 이상**(Electron 런타임+Chromium) 늘어납니다. "웹만 있으면 된다"는 장점을 포기하는 대신, 더블클릭으로 켜지고 창·주소창·메뉴를 얻습니다.
+- **서명·공증이 없습니다.** Gatekeeper가 첫 실행을 막아 우클릭 → 열기가 필요하고, 자동 업데이트도 없습니다. 배포하려면 서명·공증·업데이트 경로를 따로 만들어야 합니다(별도 작업).
+- 창의 Chromium과 스튜디오가 쓰는 브라우저 미리보기(Playwright)가 서로 다른 브라우저라 렌더링이 미세하게 다를 수 있습니다. 앱은 스튜디오 화면 자체만 보여 주므로 QA 화면 비교에는 영향이 없습니다.
+- 설정 파일이 저장소 밖(`~/.config/b-studio/desktop.json`)에 생깁니다. 저장소를 옮기면 `pnpm desktop:install`을 다시 실행해야 합니다.
+- 모드 기본값은 `local`(이 PC에 로그인한 CLI)입니다. 여러 사람이 쓰는 서버용이 아니라 개인 PC용이라는 지금 원칙을 그대로 따릅니다.
 
 ---
 

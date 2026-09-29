@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <!-- 로컬 껍데기 화면이다. 원격 코드를 싣지 않는다 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'unsafe-inline'; img-src data:" />
+    <title>도구 막대</title>
+    <style>
+      :root {
+        --ground: #fbfdfc;
+        --panel: #fbfdfc;
+        --ink: #102a2b;
+        --muted: #55706b;
+        --line: rgb(16 42 43 / 0.13);
+        --fail: #b4233a;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --ground: #101c1b;
+          --panel: #101c1b;
+          --ink: #e3eeeb;
+          --muted: #93aaa5;
+          --line: rgb(227 238 235 / 0.12);
+          --fail: #f26b7f;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: var(--ground);
+        color: var(--ink);
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        /* 창을 끌어 옮길 수 있게 막대 전체를 드래그 영역으로 둔다(입력·버튼은 아래에서 해제) */
+        -webkit-app-region: drag;
+      }
+      .bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 100%;
+        padding: 0 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      button, input { -webkit-app-region: no-drag; }
+      button {
+        min-width: 30px;
+        height: 26px;
+        padding: 0 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover { border-color: var(--muted); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      input {
+        flex: 1;
+        min-width: 0;
+        height: 26px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+      }
+      input:focus { outline: 2px solid var(--muted); outline-offset: -1px; }
+      #status {
+        max-width: 42ch;
+        margin: 0;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #status[data-tone="fail"] { color: var(--fail); }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <button id="back" type="button" title="뒤로" aria-label="뒤로">←</button>
+      <button id="forward" type="button" title="앞으로" aria-label="앞으로">→</button>
+      <button id="reload" type="button" title="새로고침" aria-label="새로고침">⟳</button>
+      <input id="address" type="text" spellcheck="false" autocomplete="off" aria-label="주소" placeholder="127.0.0.1:3000, 3100(미리보기 포트) 또는 /sessions/…" />
+      <button id="browser" type="button" title="기본 브라우저에서 열기">브라우저에서 열기</button>
+      <p id="status" role="status" hidden></p>
+    </div>
+    <script src="./toolbar.js"></script>
+  </body>
+</html>

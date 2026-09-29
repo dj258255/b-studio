@@ -4,18 +4,22 @@ FROM node:22-bookworm-slim AS build
 
 RUN corepack enable
 WORKDIR /repo
+# ELECTRON_SKIP_BINARY_DOWNLOAD: 데스크톱 셸(apps/desktop)의 Electron 바이너리는 운영 이미지에 필요 없다
 ENV NEXT_TELEMETRY_DISABLED=1 \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     npm_config_update_notifier=false \
-    npm_config_store_dir=/pnpm/store
+    npm_config_store_dir=/pnpm/store \
+    ELECTRON_SKIP_BINARY_DOWNLOAD=1
 
 # 잠금 파일과 패키지 목록이 같으면 의존성 층을 다시 쓴다
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/studio/package.json apps/studio/
 COPY apps/cli/package.json apps/cli/
+COPY apps/desktop/package.json apps/desktop/
 COPY packages/agent/package.json packages/agent/
 COPY packages/sandbox/package.json packages/sandbox/
 COPY packages/spec/package.json packages/spec/
+# --filter로 스튜디오에 필요한 것만 설치한다(데스크톱 앱은 이미지에 들어가지 않는다)
 RUN --mount=type=cache,id=b-studio-pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter "@b-studio/studio..."
 COPY packages ./packages
 COPY apps/studio ./apps/studio
