@@ -25,6 +25,11 @@ const BACKGROUND = '#fbfdfc';
  * 패키징한 앱에서는 electron-builder의 files가 `dist/**`와 `src/*.html`·`src/*.js`를 같은 모양으로 넣는다
  */
 const ASSETS = path.join(__dirname, '..', 'src');
+/**
+ * 창 아이콘(리눅스·윈도우). macOS는 앱 번들의 .icns를 쓰므로 넘기지 않는다.
+ * 컴파일된 main.js는 dist에 있으므로 `../build`가 같은 자리다(electron-builder의 files가 `build/icon.png`를 넣는다)
+ */
+const WINDOW_ICON = path.join(__dirname, '..', 'build', 'icon.png');
 
 interface Studio {
   config: DesktopConfig;
@@ -75,6 +80,8 @@ async function start(): Promise<void> {
     height: config?.window?.height ?? 900,
     ...(config?.window?.x === undefined ? {} : { x: config.window.x }),
     ...(config?.window?.y === undefined ? {} : { y: config.window.y }),
+    // macOS는 앱 번들 아이콘을 쓰므로 넘기지 않는다(넘겨도 무시된다)
+    ...(process.platform === 'darwin' ? {} : { icon: WINDOW_ICON }),
     backgroundColor: BACKGROUND,
   });
   win.on('resize', () => layout());

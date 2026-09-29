@@ -54,16 +54,24 @@ export interface PlannerCapability {
   reason?: string;
 }
 
+/** 이 서버의 계획 상한(설정에서 온다). 화면이 몇 개까지 계획하는지 그대로 보여 준다 */
+export interface PlanLimitView {
+  maxLanes: number;
+  maxTasks: number;
+}
+
 export function TaskPlanWorkbench({
   projects,
   models,
   initialPlans,
   planner,
+  limits,
 }: {
   projects: ProjectSummary[];
   models: ModelOption[];
   initialPlans: TaskPlanView[];
   planner: PlannerCapability;
+  limits: PlanLimitView;
 }) {
   // 로컬 Claude Code 구독 모드는 모델 레지스트리가 아니라 그 CLI가 모델을 정한다(모델 선택 칸을 쓰지 않는다)
   const localCli = planner.enabled && planner.mode === 'claude-code';
@@ -162,6 +170,9 @@ export function TaskPlanWorkbench({
           <h2 className="text-lg font-semibold">새 작업 분해</h2>
           <p className="mt-1 text-sm leading-6 text-muted">
             모델이 작업·쓰기 범위·의존 관계를 제안하고 스튜디오가 검증합니다. 이어진 작업은 한 세션에서 차례로, 독립 작업은 다른 세션에서 동시에 돌린 뒤 결과를 새 세션에서 합쳐 다시 검증합니다.
+          </p>
+          <p className="mt-1 text-xs text-muted">
+            이 서버는 작업 {limits.maxTasks}개·레인 {limits.maxLanes}개까지 계획합니다(독립 레인은 최대 {limits.maxLanes}개가 동시에 돕니다).
           </p>
 
           <label className="mt-5 block text-sm font-medium" htmlFor="plan-project">프로젝트</label>

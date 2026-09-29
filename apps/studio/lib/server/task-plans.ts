@@ -11,14 +11,15 @@ import {
   createIssue,
   failureNotesFromEvents,
   isInScope,
-  MAX_PLAN_LANES,
   parseRemote,
   planAskFromClient,
   planLanes,
+  planLimitsFromEnv,
   requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
   TaskPlanError,
+  type PlanLimits,
   type AgentUsage,
   type BoardAccess,
   type Note,
@@ -100,6 +101,12 @@ export interface CoordinationInput {
   /** S2: 레인 시작 전에 플랫폼이 게시할 인터페이스 계약 */
   contracts?: Array<{ body: string; refs: string[] }>;
 }
+
+/**
+ * 이 서버의 계획 상한. 시작할 때 설정에서 한 번 읽는다(B_STUDIO_MAX_LANES·B_STUDIO_MAX_PLAN_TASKS).
+ * 잘못된 값은 기본값(3·6)으로 돌리고 경고를 남긴다 — 화면도 이 값을 보여 준다.
+ */
+export const PLAN_LIMITS: PlanLimits = planLimitsFromEnv();
 
 /**
  * 모델에게 계획을 받을 수 있는 모드. 유료 API(api)와 이 PC에 로그인한 Claude Code 구독(claude-code)뿐이다.
@@ -432,12 +439,12 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
   let lanes: TaskLane[];
   try {
     if (preset === undefined) {
-      const planned = await requestTaskPlan(plannerAskFor(plan, project), project, plan.request);
+      const planned = await requestTaskPlan(plannerAskFor(plan, project), project, plan.request, undefined, PLAN_LIMITS);
       plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
       lanes = planned.lanes;
     } else {
       // 고정 계획은 모델을 부르지 않는다. plan.planning은 남기지 않는다(모델 호출이 없었다)
-      lanes = planLanes(preset);
+      lanes = planLanes(preset, PLAN_LIMITS);
     }
   } catch (error) {
     // 계획 검증이 실패해도 모델 호출에 쓴 토큰과 시간은 남긴다. 아래 fail()이 지표를 계산한다
@@ -512,7 +519,7 @@ async function runApprovedPlan(plan: TaskPlanView): Promise<void> {
   // 레인끼리는 의존 관계가 없으므로 작업 그래프로 동시에 돌린다. 한 레인이 실패해도 다른 레인은 끝까지 돌려 결과를 남긴다
   const results = await runTaskGraph(
     plan.lanes.map((lane) => ({ id: lane.id, run: () => runLane(plan, lane) })),
-    { concurrency: MAX_PLAN_LANES },
+    { concurrency: PLAN_LIMITS.maxLanes },
   );
   const failed = results.filter((result) => result.status !== 'succeeded');
   if (failed.length > 0) return fail(plan, `레인이 게이트를 통과하지 못해 통합하지 않습니다: ${failed.map((result) => `${result.id} (${result.error})`).join(', ')}`);
