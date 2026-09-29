@@ -77,6 +77,7 @@ export {
   type RemoteBrowserMouseEvent,
   type RemoteBrowserOptions,
   type RemoteBrowserPick,
+  type RemoteBrowserRect,
   type RemoteBrowserViewport,
 } from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
