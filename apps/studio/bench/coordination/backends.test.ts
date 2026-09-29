@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { planModelId, resolveBackend, resolveRateLimitPolicy } from './backends';
+import { planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy } from './backends';
 
 describe('resolveBackend', () => {
   it('--dry는 --backend·--model과 함께 쓸 수 없고 항상 openai다', () => {
@@ -38,6 +38,19 @@ describe('planModelId', () => {
 
   it('codex에 모델이 없으면 default로 적는다', () => {
     expect(planModelId('codex', '', 'bench-coordination')).toBe('local-cli-chatgpt:default');
+  });
+});
+
+describe('resolveContextClearing', () => {
+  it('기본은 꺼짐이고 on일 때만 켠다', () => {
+    expect(resolveContextClearing(undefined)).toBe(false);
+    expect(resolveContextClearing('off')).toBe(false);
+    expect(resolveContextClearing('on')).toBe(true);
+    expect(resolveContextClearing(' ON ')).toBe(true);
+  });
+
+  it('모르는 값은 거부한다', () => {
+    expect(() => resolveContextClearing('yes')).toThrow(/on 또는 off/);
   });
 });
 

@@ -19,6 +19,8 @@ export interface TokenTurn {
   cacheRead: number;
   /** 그 턴에서 모델에 간 결과가 가장 큰 도구 */
   biggestTool?: { name: string; input: string; chars: number };
+  /** 그 턴 직전에 오래된 도구 결과를 묶어서 비운 기록. 비우지 않았으면 없다 */
+  cleared?: { count: number; chars: number };
 }
 
 export interface TokenToolTotal {
@@ -57,6 +59,8 @@ export interface TokenReport {
   totals: AgentUsage;
   /** 캐시 읽기 / (입력 + 캐시 읽기 + 캐시 쓰기). 분모가 0이면 0 */
   cacheHitRatio: number;
+  /** 실행 중 오래된 도구 결과를 비운 합계(횟수·글자). 비운 적이 없으면 0 */
+  cleared: { count: number; chars: number };
   estimatedCostUsd?: number;
   /** 단가가 없을 때 화면이 보여줄 문구 */
   priceNote?: string;

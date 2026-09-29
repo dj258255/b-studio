@@ -96,6 +96,7 @@ function RunDetail({ report }: { report: TokenReport }) {
           <Stat label="캐시 쓰기" value={number(report.totals.cacheWriteTokens)} />
           <Stat label="캐시 적중률" value={percent(report.cacheHitRatio)} />
           <Stat label="추정 비용" value={report.estimatedCostUsd === undefined ? (report.priceNote ?? "단가 미설정") : `$${report.estimatedCostUsd.toFixed(4)}`} />
+          <Stat label="비운 도구 결과" value={report.cleared.count === 0 ? "없음" : `${number(report.cleared.count)}개 · ${number(report.cleared.chars)}자`} />
         </dl>
         <p className="mt-1 text-xs text-muted">캐시 적중률은 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기)입니다. 추정 비용은 단가 환경 변수를 넣었을 때만 계산합니다.</p>
       </section>
@@ -108,7 +109,7 @@ function RunDetail({ report }: { report: TokenReport }) {
           <>
             <ContextChart turns={report.turns} />
             <div className="mt-3 overflow-x-auto">
-              <table className="w-full min-w-[36rem] text-left text-sm">
+              <table className="w-full min-w-[40rem] text-left text-sm">
                 <thead className="border-b border-line text-muted">
                   <tr>
                     <th scope="col" className="py-2 pr-4 font-medium">턴</th>
@@ -116,6 +117,7 @@ function RunDetail({ report }: { report: TokenReport }) {
                     <th scope="col" className="py-2 pr-4 font-medium">증가</th>
                     <th scope="col" className="py-2 pr-4 font-medium">출력</th>
                     <th scope="col" className="py-2 pr-4 font-medium">캐시 읽기</th>
+                    <th scope="col" className="py-2 pr-4 font-medium">비움</th>
                     <th scope="col" className="py-2 font-medium">가장 큰 도구 결과</th>
                   </tr>
                 </thead>
@@ -127,6 +129,9 @@ function RunDetail({ report }: { report: TokenReport }) {
                       <td className={`py-2 pr-4 font-mono text-xs ${turn.delta > 20_000 ? "text-fail" : ""}`}>+{number(turn.delta)}</td>
                       <td className="py-2 pr-4 font-mono text-xs">{number(turn.output)}</td>
                       <td className="py-2 pr-4 font-mono text-xs">{number(turn.cacheRead)}</td>
+                      <td className="py-2 pr-4 text-muted">
+                        {turn.cleared ? `도구 결과 ${number(turn.cleared.count)}개 비움(${number(turn.cleared.chars)}자)` : "-"}
+                      </td>
                       <td className="py-2 text-muted">
                         {turn.biggestTool ? `${turn.biggestTool.name} ${turn.biggestTool.input} · ${number(turn.biggestTool.chars)}자` : "-"}
                       </td>

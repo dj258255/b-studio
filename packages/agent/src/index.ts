@@ -30,7 +30,7 @@ export {
   type CodexThread,
 } from './codex-runner';
 export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
-export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher } from './gate';
+export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
 export {
   BrowserUnavailableError,
   launchBrowser,
@@ -111,6 +111,17 @@ export {
   visibleHtml,
   type ToolResultCache,
 } from './tool-output';
+export {
+  clearedToolResultNote,
+  clearOldToolResults,
+  CLEARED_TOOL_RESULT_PREFIX,
+  contextClearingFromEnv,
+  DEFAULT_CONTEXT_CLEARING,
+  isClearedToolResult,
+  resolveContextClearing,
+  type ClearToolResults,
+  type ContextClearingPolicy,
+} from './context-clearing';
 export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   DEFAULT_WORKFLOW,

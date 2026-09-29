@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
+import { answerRequest } from "@/lib/question-answer";
 import { artifactUrl } from "@/lib/artifact-url";
 import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
@@ -68,7 +69,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   /** 질문 카드의 답을 한 요청으로 보낸다. 기존 전송 경로를 그대로 쓴다(첨부 칩도 함께 실린다) */
   function answerQuestion(value: string) {
     if (!pending) return;
-    void send(`[질문] ${pending.question}\n[답] ${value}`, "build");
+    void send(answerRequest(pending.question, value), "build");
   }
 
   async function send(request: string, sendIntent: Intent = intent) {
@@ -718,6 +719,7 @@ function stageLabel(stage: string): string {
       run: "실행",
       browser_check: "브라우저 확인",
       contract_check: "API 계약 확인",
+      concurrency_check: "동시 요청 확인",
       test: "테스트",
       review: "리뷰",
       checkpoint: "체크포인트",
