@@ -4,7 +4,7 @@ import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
 import { listModelOptions } from '@/lib/server/model-registry';
 import { canPublishIssues, listProjects } from '@/lib/server/projects';
-import { listTaskPlans } from '@/lib/server/task-plans';
+import { listTaskPlans, PLAN_LIMITS } from '@/lib/server/task-plans';
 
 export default async function TaskPlansPage() {
   const user = await pageUser();
@@ -34,7 +34,7 @@ export default async function TaskPlansPage() {
           프로젝트로 돌아가기
         </Link>
       </header>
-      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} planner={planner} />
+      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} planner={planner} limits={PLAN_LIMITS} />
     </main>
   );
 }

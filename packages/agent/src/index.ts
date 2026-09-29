@@ -84,18 +84,23 @@ export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export {
   buildPlannerSystem,
+  DEFAULT_PLAN_LIMITS,
   isInScope,
   MAX_PLAN_LANES,
+  MAX_PLAN_LANES_CAP,
   MAX_PLAN_TASKS,
+  MAX_PLAN_TASKS_CAP,
   PlanBackendSchema,
   planAskFromClient,
   planLanes,
+  planLimitsFromEnv,
   requestTaskPlan,
   TaskPlanError,
   type ModelAsk,
   type ModelAskInput,
   type PlanAsk,
   type PlanBackend,
+  type PlanLimits,
   type PlannedTask,
   type TaskLane,
 } from './task-plan';
