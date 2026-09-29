@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -111,5 +111,25 @@ describe('Agent Fleet', () => {
     expect(fake.listeners.has(member.sessionId)).toBe(false);
     expect(() => chooseFleetWinner(fleet.id, fleet.members[1]!.sessionId, 'bob')).toThrow('검증을 통과한 결과만');
     expect(() => getFleet(fleet.id, 'mallory')).toThrow('볼 수 없습니다');
+  });
+
+  // Fleet은 메모리의 객체가 원본이고 persist는 그 객체 전체를 쓴다. 두 멤버가 동시에 끝나도 한쪽 결과가 저장에서 빠지면 안 된다
+  it('여러 멤버의 결과가 동시에 들어와도 저장 파일에 모두 남는다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '검색을 추가해줘', modelIds: ['model-a', 'model-b'], owner: 'carol' });
+    const [first, second] = fleet.members;
+    const finish = (member: typeof first) =>
+      fake.listeners.get(member.sessionId)!({
+        type: 'run_finished',
+        runId: member.runId!,
+        status: 'done',
+        summary: `${member.label} 완료`,
+        turns: 3,
+        usage: { inputTokens: 1_000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      });
+    await Promise.all([Promise.resolve().then(() => finish(first!)), Promise.resolve().then(() => finish(second!))]);
+
+    const saved = JSON.parse(readFileSync(path.join(directory, `${fleet.id}.json`), 'utf8')) as { members: Array<{ status: string; turns?: number }> };
+    expect(saved.members.map((member) => member.status)).toEqual(['done', 'done']);
+    expect(saved.members.map((member) => member.turns)).toEqual([3, 3]);
   });
 });

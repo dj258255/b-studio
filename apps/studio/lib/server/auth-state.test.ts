@@ -36,6 +36,14 @@ describe('로그인 무효화 기록', () => {
     expect(Object.keys(readRevocations(dir).sessions)).toHaveLength(20);
   });
 
+  // 세션 무효화와 사용자 무효화는 같은 파일의 다른 필드다. 한 번에 들어와도 나중 쓰기가 앞의 갱신을 덮어쓰면 안 된다
+  it('세션 무효화와 사용자 무효화가 동시에 들어와도 둘 다 남는다', async () => {
+    const dir = await stateDir();
+    const sid = 'c'.repeat(32);
+    await Promise.all([revokeSession({ sid, expiresAt: 10_000 }, 0, dir), revokeUser('dave', 0, dir)]);
+    expect(readRevocations(dir)).toEqual({ sessions: { [sid]: 10_000 }, users: { dave: 0 } });
+  });
+
   it('다른 프로세스가 파일을 바꾸면 다시 읽고, 형식이 틀리면 던진다', async () => {
     const dir = await stateDir();
     await revokeUser('alice', 1, dir);
