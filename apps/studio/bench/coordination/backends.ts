@@ -51,6 +51,16 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
 }
 
 /**
+ * 컨텍스트 비우기(`--context-clearing`). 기본은 꺼짐이다 — 효과를 재기 전이라(ADR-055 보강)
+ * 켠 실행과 끈 실행을 같은 조건에서 비교해 재려고 인자로 뺐다.
+ */
+export function resolveContextClearing(value: string | undefined): boolean {
+  const trimmed = value?.trim().toLowerCase() || 'off';
+  if (trimmed !== 'on' && trimmed !== 'off') throw new Error(`--context-clearing은 on 또는 off여야 합니다 (지금 값: ${value})`);
+  return trimmed === 'on';
+}
+
+/**
  * P0(그냥 Claude Code) 기준선은 로컬 Claude Code로만 돌 수 있다. 다른 백엔드는 Claude Code가 아니라 비교 기준이 아니다.
  * Docker·모델을 건드리기 전에 막는다.
  */

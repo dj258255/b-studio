@@ -12,6 +12,7 @@ function metrics(over: Partial<TaskPlanMetrics> = {}): TaskPlanMetrics {
     maxContextTokens: 0,
     bootMsTotal: 0,
     bootMsMax: 0,
+    bootRxBytesTotal: 0,
     modelMs: 0,
     toolMs: 0,
     gateMs: 0,
@@ -36,6 +37,7 @@ function row(over: Partial<BenchRow>): BenchRow {
     traces: [],
     explore: { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 },
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
+    contextCleared: { count: 0, chars: 0 },
     success: true,
     category: 'none',
     detail: '',
@@ -55,6 +57,7 @@ const rows: BenchRow[] = [
     lanes: [{ id: 'lane-1', sessionId: 's1', status: 'done', tasks: [] }],
     explore: { filesReadTotal: 4, filesReadUnionAcrossLanes: 3, readCallsTotal: 6 },
     failures: { signaturesTotal: 1, distinctSignatures: 1, repeatedFailures: 0 },
+    contextCleared: { count: 2, chars: 24_000 },
   }),
   row({
     taskId: 'orders-list',
@@ -87,55 +90,32 @@ describe('summarize', () => {
   it('과제·전략별 성공 건수와 중앙값을 낸다', () => {
     const markdown = summarize(rows, meta);
 
-    // orders-list S0: 2회 중 1회 성공, 값이 있는 실행만으로 중앙값을 낸다. 성공 1건당 토큰 = (100+10)/1 = 110
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 110 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 3 | 2 | 1 | — |');
+    // orders-list S0: 2회 중 1회 성공, 값이 있는 실행만으로 중앙값을 낸다. 기동 수신은 0KiB
+    // 비운 도구 결과는 [2, 0]의 중앙값 1이다
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | 110 | 30.0 | 100 | 10 | 5 | 1,000 | 5.0 | 0KiB | 3 | 2 | 1 | — | 1 |');
     // 나머지 행은 레인 세션이 없어 탐색·실패 열이 —다
-    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 220 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | — | — | — | — |');
-    expect(markdown).toContain('| independent | X | S0 | 1/1 | 55 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | — | — | — | — |');
+    expect(markdown).toContain('| orders-list | O | S1 | 1/1 | 220 | 20.0 | 200 | 20 | 4 | 900 | 4.0 | 0KiB | — | — | — | — | — |');
+    expect(markdown).toContain('| independent | X | S0 | 1/1 | 55 | 10.0 | 50 | 5 | 3 | 500 | 2.0 | 0KiB | — | — | — | — | — |');
   });
 
-  it('탐색·실패·조율 열을 표 1에 더한다', () => {
+  it('탐색·실패 열을 표 1에 더한다', () => {
     const markdown = summarize(rows, meta);
-    expect(markdown).toContain('| 성공 | 성공 1건당 토큰 | 종단 시간 중앙값(s) |');
-    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 |');
+    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 기동 수신(중앙값) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 | 비운 도구 결과 중앙값 |');
   });
 
-  it('성공 1건당 토큰은 (입력+캐시+출력) 합을 성공 수로 나누고, 성공이 없으면 —다', () => {
+  it('기동 수신(중앙값) 열에 bootRxBytesTotal 중앙값을 사람이 읽는 크기로 낸다', () => {
     const markdown = summarize(
       [
-        row({ taskId: 'orders-list', strategy: 'P0', success: true, metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 5 } }) }),
-        row({
-          taskId: 'orders-list',
-          strategy: 'P0',
-          success: false,
-          category: 'acceptance',
-          metrics: metrics({ usage: { inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
-        }),
+        row({ taskId: 'orders-list', strategy: 'S0', metrics: metrics({ bootRxBytesTotal: 1_048_576 }) }),
+        row({ taskId: 'orders-list', strategy: 'S0', metrics: metrics({ bootRxBytesTotal: 3 * 1_048_576 }) }),
       ],
       meta,
     );
-    // (100+20+5+10) + (50+0+0+5) = 190 / 성공 1건 = 190
-    expect(markdown).toContain('| orders-list | O | P0 | 1/2 | 190 |');
+    // 중앙값 = 2MiB
+    expect(markdown).toContain('| orders-list | O | S0 | 2/2 |');
+    expect(markdown).toContain('| 2.0MiB |');
 
-    const none = summarize(
-      [row({ taskId: 'order-detail', strategy: 'P0', success: false, category: 'acceptance', metrics: metrics({ usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }) })],
-      meta,
-    );
-    expect(none).toContain('| order-detail | O | P0 | 0/1 | — |');
-  });
-
-  it('조율 게시판의 읽은 바이트 중앙값을 낸다', () => {
-    const markdown = summarize(
-      [
-        row({
-          strategy: 'S3',
-          coordination: { strategy: 'S3', topology: 'mesh', posts: 2, rejected: 0, reads: 3, bytesRead: 4_096, byKind: { contract: 1, failure: 0, fact: 1 } },
-        }),
-      ],
-      meta,
-    );
-    expect(markdown).toContain('| S3 | 1/1 |');
-    expect(markdown).toContain('| 4,096 |');
+    expect(summarize([row({ metrics: metrics({ bootRxBytesTotal: 2_048 }) })], meta)).toContain('| 2KiB |');
   });
 
   it('레인 세션이 없던 실행은 탐색·실패 중앙값에서 뺀다', () => {
@@ -161,7 +141,7 @@ describe('summarize', () => {
       ],
       meta,
     );
-    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | — | 10 | 4 | 0 | — |');
+    expect(markdown).toContain('| orders-list | O | S0 | 1/2 | — | — | — | — | — | — | — | — | 10 | 4 | 0 | — | 0 |');
   });
 
   it('값이 하나도 없으면 —로 둔다', () => {
@@ -209,5 +189,48 @@ describe('summarize', () => {
     const markdown = summarize([], meta);
     expect(markdown).toContain('| 과제 | 엮임 | 전략 | 성공 |');
     expect(markdown).not.toContain('orders-list');
+  });
+
+  it('탐색·실패·조율 열을 표 1에 더한다', () => {
+    const markdown = summarize(rows, meta);
+    expect(markdown).toContain('| 기동 시간 합 중앙값(s) | 기동 수신(중앙값) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 | 비운 도구 결과 중앙값 |');
+  });
+
+  it('조율 게시판의 읽은 바이트 중앙값을 낸다', () => {
+    const markdown = summarize(
+      [
+        row({
+          strategy: 'S3',
+          coordination: { strategy: 'S3', topology: 'mesh', posts: 2, rejected: 0, reads: 3, bytesRead: 4_096, byKind: { contract: 1, failure: 0, fact: 1 } },
+        }),
+      ],
+      meta,
+    );
+    expect(markdown).toContain('| S3 | 1/1 |');
+    expect(markdown).toContain('| 4,096 |');
+  });
+
+  it('성공 1건당 토큰은 (입력+캐시+출력) 합을 성공 수로 나누고, 성공이 없으면 —다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'P0', success: true, metrics: metrics({ usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 5 } }) }),
+        row({
+          taskId: 'orders-list',
+          strategy: 'P0',
+          success: false,
+          category: 'acceptance',
+          metrics: metrics({ usage: { inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } }),
+        }),
+      ],
+      meta,
+    );
+    // (100+20+5+10) + (50+0+0+5) = 190 / 성공 1건 = 190
+    expect(markdown).toContain('| orders-list | O | P0 | 1/2 | 190 |');
+
+    const none = summarize(
+      [row({ taskId: 'order-detail', strategy: 'P0', success: false, category: 'acceptance', metrics: metrics({ usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }) })],
+      meta,
+    );
+    expect(none).toContain('| order-detail | O | P0 | 0/1 | — |');
   });
 });

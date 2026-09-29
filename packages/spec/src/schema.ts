@@ -174,6 +174,7 @@ export const WorkflowStageSchema = z.enum([
   'browser_check',
   'contract_check',
   'test',
+  'concurrency_check',
   'review',
   'checkpoint',
 ]);
@@ -185,6 +186,70 @@ export const WorkflowTestSchema = z.object({
   command: z.array(z.string().min(1)).min(1),
   /** 불안정한 테스트를 몇 번까지 다시 돌릴지. 재시도 횟수는 결과에 남는다 */
   maxAttempts: z.number().int().min(1).max(3).default(1),
+});
+
+/** 인증 정보를 담는 헤더. studio.yaml은 저장소에 커밋되므로 값(비밀 값)을 여기 적을 수 없다 */
+const CREDENTIAL_HEADERS = new Set(['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key']);
+const HEADER_NAME = /^[A-Za-z0-9-]+$/;
+const MAX_CONCURRENCY_CHECKS = 10;
+const MAX_CONCURRENCY_HEADERS = 5;
+const MAX_CONCURRENCY_BODY = 8 * 1024;
+
+/**
+ * 같은 요청을 동시에 여러 번 보낸 뒤 결과가 기대대로인지 확인한다. 최소 하나는 적어야 한다.
+ * 값이 어긋나면 게이트가 실패로 알리되, 원인을 추정하지 않고 숫자만 남긴다.
+ */
+export const ConcurrencyExpectSchema = z
+  .object({
+    /** 성공(2xx) 건수. exactly와 atMost 중 최소 하나를 적는다 */
+    successCount: z
+      .object({
+        exactly: z.number().int().min(0).optional(),
+        atMost: z.number().int().min(0).optional(),
+      })
+      .refine((value) => value.exactly !== undefined || value.atMost !== undefined, 'successCount에는 exactly나 atMost 중 하나가 필요합니다')
+      .optional(),
+    /** 모든 응답의 상태 코드가 이 목록 안에 있어야 한다 */
+    allStatusIn: z.array(z.number().int().min(100).max(599)).min(1).optional(),
+    /** 동시 요청 뒤 서비스 상태가 기대대로인지 GET으로 확인한다 */
+    then: z
+      .object({
+        method: z.literal('GET'),
+        path: SERVICE_PATH,
+        /** 응답 JSON에서 꺼낼 값. 예: `$.stock` */
+        jsonPath: z.string().min(1),
+        /** jsonPath 값이 이것과 같아야 통과 */
+        equals: z.union([z.number(), z.string()]),
+      })
+      .optional(),
+  })
+  .refine(
+    (value) => value.successCount !== undefined || value.allStatusIn !== undefined || value.then !== undefined,
+    'expect에는 successCount·allStatusIn·then 중 하나가 필요합니다',
+  );
+
+/**
+ * 같은 요청 N개를 동시에 보내 정합성(정확히 1건 성공, 합계 일치)을 확인하는 선언적 검사.
+ * DB 격리 수준과 타이밍에 따라 결과가 흔들릴 수 있어 임계값은 넉넉히 잡는다. 한 번 실패를 재시도로 덮지 않는다(재시도하면 경합이 숨는다).
+ */
+export const WorkflowConcurrencyCheckSchema = z.object({
+  name: z.string().regex(NAME),
+  service: z.string().regex(NAME),
+  method: z.enum(['POST', 'PUT', 'PATCH', 'DELETE', 'GET']),
+  path: SERVICE_PATH,
+  /** JSON 문자열. GET에는 보내지 않는다 */
+  body: z.string().max(MAX_CONCURRENCY_BODY, `body는 ${MAX_CONCURRENCY_BODY}자 이하여야 합니다`).optional(),
+  headers: z
+    .record(z.string().regex(HEADER_NAME, 'HTTP 헤더 이름이어야 합니다'), z.string().min(1))
+    .refine((headers) => Object.keys(headers).length <= MAX_CONCURRENCY_HEADERS, `headers는 최대 ${MAX_CONCURRENCY_HEADERS}개까지 쓸 수 있습니다`)
+    .refine(
+      (headers) => Object.keys(headers).every((name) => !CREDENTIAL_HEADERS.has(name.toLowerCase())),
+      '비밀 값을 담는 인증 헤더는 쓸 수 없습니다. 인증이 필요하면 서비스가 secrets의 환경 변수를 읽게 하세요',
+    )
+    .optional(),
+  /** 동시에 보낼 요청 수 */
+  concurrent: z.number().int().min(2).max(20),
+  expect: ConcurrencyExpectSchema,
 });
 
 /**
@@ -268,6 +333,8 @@ export const WorkflowPageCheckSchema = z
     allowConsoleErrors: z.boolean().default(false),
     /** browser 전용. 문서가 창보다 넓어 가로 스크롤이 생기면 실패 */
     noHorizontalScroll: z.boolean().default(false),
+    /** browser 전용. 워밍업 뒤 첫 이동의 load까지 이 시간(ms)을 넘으면 실패. 재지 못해도 통과로 보지 않는다 */
+    maxLoadMs: z.number().int().positive().optional(),
     /** browser 전용. 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교한다 */
     compare: WorkflowPageCompareSchema.optional(),
   })
@@ -278,6 +345,7 @@ export const WorkflowPageCheckSchema = z
     if (check.viewport) ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
     if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.maxLoadMs !== undefined) ctx.addIssue({ code: 'custom', path: ['maxLoadMs'], message: 'maxLoadMs는 mode: browser에서만 쓸 수 있습니다' });
     if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
   });
 
@@ -290,6 +358,8 @@ export const WorkflowSchema = z
     tests: z.array(WorkflowTestSchema).optional(),
     /** required에 browser_check를 넣으면 최소 하나가 필요하다 */
     pageChecks: z.array(WorkflowPageCheckSchema).optional(),
+    /** required에 concurrency_check를 넣으면 최소 하나가 필요하다. 선언적 동시 요청과 결과 불변식으로 정합성을 본다 */
+    concurrencyChecks: z.array(WorkflowConcurrencyCheckSchema).max(MAX_CONCURRENCY_CHECKS, `concurrencyChecks는 최대 ${MAX_CONCURRENCY_CHECKS}개까지 쓸 수 있습니다`).optional(),
     /** review 단계에서 한 번의 요청이 바꿀 수 있는 파일 수 상한. 넘으면 나눠서 요청하게 한다 */
     maxChangedFiles: z.number().int().min(1).optional(),
     /** 이 목록 밖의 도구는 모델이 요청해도 실행하지 않는다 */
@@ -312,10 +382,17 @@ export const WorkflowSchema = z
     if (required.has('browser_check') && !workflow.pageChecks?.length) {
       ctx.addIssue({ code: 'custom', path: ['pageChecks'], message: 'required에 browser_check가 있으면 확인할 pageChecks가 최소 1개 필요합니다' });
     }
+    if (required.has('concurrency_check') && !workflow.concurrencyChecks?.length) {
+      ctx.addIssue({ code: 'custom', path: ['concurrencyChecks'], message: 'required에 concurrency_check가 있으면 실행할 concurrencyChecks가 최소 1개 필요합니다' });
+    }
     const names = new Set<string>();
     workflow.tests?.forEach((test, index) => {
       if (names.has(test.name)) ctx.addIssue({ code: 'custom', path: ['tests', index, 'name'], message: `테스트 이름 '${test.name}'이 중복됩니다` });
       names.add(test.name);
+    });
+    workflow.concurrencyChecks?.forEach((check, index) => {
+      if (names.has(check.name)) ctx.addIssue({ code: 'custom', path: ['concurrencyChecks', index, 'name'], message: `동시 요청 확인 이름 '${check.name}'이 중복됩니다` });
+      names.add(check.name);
     });
   });
 
@@ -389,6 +466,8 @@ export type DesignSpec = z.infer<typeof DesignSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
+export type WorkflowConcurrencyCheck = z.infer<typeof WorkflowConcurrencyCheckSchema>;
+export type ConcurrencyExpect = z.infer<typeof ConcurrencyExpectSchema>;
 export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
 export type WorkflowPageCompare = z.infer<typeof WorkflowPageCompareSchema>;

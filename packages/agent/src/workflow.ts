@@ -5,7 +5,7 @@ import { DEFAULT_DENIED_COMMANDS, isProtectedPath, type ExecutionPolicy } from '
  * 모델의 도구 호출이나 턴 종료로 진입을 알 수 있는 진행 단계와 달리, 플랫폼이 직접 실행해 통과 여부를 판정하는 단계.
  * 이 단계가 필수인데 통과 기록이 없으면 게이트가 완료로 인정하지 않는다.
  */
-export const VERIFICATION_STAGES: readonly WorkflowStage[] = ['run', 'browser_check', 'contract_check', 'test', 'review'];
+export const VERIFICATION_STAGES: readonly WorkflowStage[] = ['run', 'browser_check', 'contract_check', 'test', 'concurrency_check', 'review'];
 
 /** workflow를 선언하지 않았을 때도 플랫폼이 항상 실행하는 단계만 둔다. 실행 수단이 없는 단계를 기본값에 넣으면 통과처럼 보이기만 한다 */
 export const DEFAULT_WORKFLOW: readonly WorkflowStage[] = ['plan', 'implement', 'run', 'contract_check', 'review', 'checkpoint'];
@@ -30,7 +30,7 @@ export interface WorkflowCompare {
 }
 
 export interface WorkflowCheck {
-  stage: 'browser_check' | 'test' | 'review';
+  stage: 'browser_check' | 'test' | 'concurrency_check' | 'review';
   name: string;
   ok: boolean;
   attempts: number;
@@ -39,6 +39,8 @@ export interface WorkflowCheck {
   steps?: WorkflowStepCheck[];
   /** 디자인 기준 이미지와 비교했으면 그 결과. compare를 선언하지 않았으면 없다 */
   compare?: WorkflowCompare;
+  /** 측정값. browser 모드 화면 확인의 로드 시간(loadMs). 예산(maxLoadMs)을 적은 확인만 잰다 */
+  metrics?: { loadMs?: number };
 }
 
 /** studio.yaml의 선언을 실행기 정책으로 변환한다. 프롬프트와 별개로 항상 적용된다. */
@@ -73,6 +75,7 @@ export function workflowStages(project: LoadedProject): readonly WorkflowStage[]
   const insertBefore = (stage: WorkflowStage, before: WorkflowStage) => stages.splice(stages.indexOf(before), 0, stage);
   if (workflow?.pageChecks?.length) insertBefore('browser_check', 'contract_check');
   if (workflow?.tests?.length) insertBefore('test', 'review');
+  if (workflow?.concurrencyChecks?.length) insertBefore('concurrency_check', 'review');
   return stages;
 }
 
@@ -162,13 +165,14 @@ export function workflowContext(project: LoadedProject): string {
   const protectedPaths = workflow?.protectedPaths?.join(', ') || '없음';
   const tests = workflow?.tests?.map((test) => `${test.name}(${test.service}: ${test.command.join(' ')})`).join(', ');
   const pages = workflow?.pageChecks?.map((check) => `${check.service} ${check.path}`).join(', ');
+  const concurrency = workflow?.concurrencyChecks?.map((check) => `${check.name}(${check.service} ${check.method} ${check.path} ×${check.concurrent})`).join(', ');
   return `
 [b-studio workflow]
 이 프로젝트의 작업은 다음 순서로 진행합니다: ${stages.join(' → ')}.
 에이전트의 완료 선언은 완료 판정이 아닙니다. 턴을 끝내면 플랫폼이 서비스 재시작·API 계약${pages ? '·화면 확인' : ''}${tests ? '·테스트' : ''}·리뷰를 직접 실행하고, 모두 통과해야 체크포인트를 만듭니다.
 허용 도구: ${tools}
 보호 경로: ${protectedPaths}
-${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
+${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}${concurrency ? `플랫폼이 동시에 보낼 요청: ${concurrency}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
 `;
 }
 

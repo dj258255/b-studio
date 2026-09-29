@@ -187,6 +187,7 @@ function noteView(note: Note): TaskPlanNoteView {
     lane: note.author.lane,
     ...(note.author.task !== undefined ? { task: note.author.task } : {}),
     by: note.author.by,
+    ...(note.group !== undefined ? { group: note.group } : {}),
     priority: note.priority,
     at: note.at,
   };
@@ -306,6 +307,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     persist(plan);
     await waitForReady(snapshot.id);
     lane.bootMs = Math.round(performance.now() - bootStarted);
+    lane.bootRxBytes = bootRxBytes(snapshot.id);
     lane.status = 'running';
     persist(plan);
 
@@ -394,6 +396,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     persist(plan);
     await waitForReady(snapshot.id);
     integration.bootMs = Math.round(performance.now() - bootStarted);
+    integration.bootRxBytes = bootRxBytes(snapshot.id);
     integration.status = 'running';
     persist(plan);
 
@@ -480,7 +483,14 @@ function laneBoard(plan: TaskPlanView, lane: TaskPlanLaneView, taskId: string): 
     lane: lane.id,
     task: taskId,
     modelWrites: board.modelWrites,
-    post: (input) => board.post({ kind: input.kind, body: redact(input.body), ...(input.refs ? { refs: input.refs.map(redact) } : {}) }, { lane: lane.id, task: taskId, by: 'model' }),
+    // 계층 구조의 같은 그룹 비교(note.group === reader.group)가 성립하도록, 읽을 때와 같은 기준(laneGroup)으로 그룹을 넣는다
+    post: (input) => {
+      const group = laneGroup(lane);
+      return board.post(
+        { kind: input.kind, body: redact(input.body), ...(input.refs ? { refs: input.refs.map(redact) } : {}), ...(group !== undefined ? { group } : {}) },
+        { lane: lane.id, task: taskId, by: 'model' },
+      );
+    },
     read: (options) => {
       const result = board.read({ lane: lane.id, group: laneGroup(lane) }, options);
       // 읽기 통계도 화면·지표에 남도록 스냅샷을 갱신한다(저장은 다음 상태 전이가 한다)
@@ -514,6 +524,12 @@ function readSessionEvents(sessionId: string): StudioEvent[] {
     // 없는 세션이거나 기록을 읽지 못하면 서명도 없다
   }
   return events;
+}
+
+/** 기동 직후 세션 스냅샷이 읽은 수신 바이트 합. 못 읽었으면 undefined */
+function bootRxBytes(sessionId: string): number | undefined {
+  const network = getSnapshot(sessionId)?.bootNetwork;
+  return network ? network.reduce((sum, entry) => sum + entry.rxBytes, 0) : undefined;
 }
 
 function waitForReady(sessionId: string): Promise<void> {
