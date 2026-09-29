@@ -194,26 +194,35 @@ pnpm studio sandbox prune
 
 같은 프로젝트로 캐시를 비운 기동과 캐시가 찬 기동을 비교합니다.
 
-1. **캐시를 비운다(사용자가 직접).** 아래 캐시 목록을 지웁니다. 실행 중인 샌드박스가 쓰는 볼륨은 지워지지 않으므로 그 세션을 먼저 멈춥니다.
+1. **캐시를 비우고 첫 기동을 잰다.** `docker builder prune`는 **쓰지 마세요** — 이 PC의 모든 프로젝트 빌드 캐시를 지워 다른 프로젝트에 영향을 줍니다. 대신 공유 캐시 볼륨을 지우고(있는 것만) `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`로 `boot-probe`를 돌립니다. 실행 중인 샌드박스가 쓰는 볼륨은 지워지지 않으므로 그 세션을 먼저 멈춥니다.
 
    ```bash
-   docker volume rm b-studio-cache-pnpm b-studio-cache-gradle
-   docker builder prune -f   # 이미지 빌드 레이어 캐시
+   docker volume rm b-studio-cache-pnpm b-studio-cache-gradle   # 있으면. 프로젝트마다 이름이 다르다
+   B_STUDIO_SANDBOX_BUILD_NO_CACHE=1 pnpm studio boot-probe examples/orders --json
    ```
 
-2. **첫 기동을 기록한다.** 새 세션을 띄우고 기동 시간과 받은 바이트를 적습니다.
-3. **세션을 멈추고 같은 프로젝트로 두 번째 기동을 기록한다.** 세션을 멈추면 샌드박스 볼륨은 지워지지만 공유 캐시는 남습니다.
-4. 두 실행의 **수신 바이트**와 **기동 시간**을 표로 비교합니다(벤치 요약의 기동 수신 열, 리소스 탭의 받음, 작업 분해 지표).
+   `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`은 **이 샌드박스 프로젝트의 이미지만** `compose build --no-cache`로 빌드하고, 스냅샷 볼륨도 쓰지 않습니다(스냅샷 볼륨을 지우지는 않습니다 — 다른 세션이 쓸 수 있습니다). 다른 프로젝트의 빌드 캐시는 건드리지 않습니다.
+
+2. **캐시가 찬 기동을 잰다.** 같은 프로젝트로 변수 없이 다시 실행합니다.
+
+   ```bash
+   pnpm studio boot-probe examples/orders --json
+   ```
+
+3. 두 실행의 **수신 바이트**와 **기동 시간**을 표로 비교합니다.
 
 | 실행 | 기동 수신 | 기동 시간 | 비고 |
 |---|---|---|---|
-| 캐시 없음 | | | 공유 캐시·빌드 캐시를 비우고 기동 |
-| 캐시 있음 | | | 같은 프로젝트로 다시 기동 |
+| 캐시 없음 | | | 공유 캐시 볼륨을 비우고 `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`로 실행 |
+| 캐시 있음 | | | 같은 프로젝트로 변수 없이 다시 실행 |
+
+`boot-probe`는 샌드박스를 띄워 준비될 때까지 기다린 뒤 기동 시간(ms)과 서비스별 수신·송신 바이트(edge 제외)를 내고 곧바로 내립니다(`keep` 없음). `--json`이면 `{"bootMs":…,"network":[{"service":"api","rxBytes":…,"txBytes":…}]}` 한 줄을 출력합니다. 준비에 실패하면 종료 코드 1과 이유를 냅니다(진행 안내는 stdout에 쓰지 않습니다).
 
 ### 어떤 볼륨·이미지가 캐시인가
 
 - **공유 캐시 볼륨**: 프로젝트 `compose.yaml`에서 `external: true` + 고정 이름으로 선언한 볼륨입니다(`b-studio-cache-pnpm`, `b-studio-cache-gradle`, `b-studio-cache-uv` 등). 예: `examples/orders`의 `pnpm-store` → `b-studio-cache-pnpm`. 샌드박스를 지워도 남아 다음 기동을 빠르게 합니다.
-- **이미지 빌드 캐시**: `docker build`가 남기는 레이어 캐시입니다. 샌드박스 이미지 자체는 세션 정리 때 지워지지만(이름에 세션 id가 붙음) 빌드 레이어는 `docker builder prune`으로 지웁니다.
+- **이미지 빌드 캐시**: `docker build`가 남기는 레이어 캐시입니다. 샌드박스 이미지 자체는 세션 정리 때 지워지지만(이름에 세션 id가 붙음) 빌드 레이어는 남아 다음 빌드를 빠르게 합니다. `docker builder prune`는 이 PC의 **모든** 프로젝트 빌드 캐시를 지우므로 캐시 효과를 잴 때 쓰지 말고, 이 프로젝트만 재려면 `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`로 실행하세요.
+- **스냅샷 볼륨**(`b-studio-snapshot-*`): 설치 결과를 다음 기동의 출발점으로 재사용하는 캐시입니다(`services.*.snapshots`). `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`이면 쓰지 않습니다(볼륨은 남습니다 — 다른 세션이 쓸 수 있습니다). 정말 지우려면 사용자가 `docker volume rm b-studio-snapshot-…`로 직접 지웁니다.
 - **샌드박스 전용 볼륨**(일반 named volume: `node_modules`, `.next`, DB 데이터 등)은 세션을 멈추면 함께 지워지므로 캐시로 세지 않습니다.
 
 ### 한계

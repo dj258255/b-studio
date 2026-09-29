@@ -212,11 +212,14 @@ class LocalDockerSandbox implements Sandbox {
     for (const [name] of this.project.managed) options.onStatus?.({ service: name, phase: 'starting' });
     await this.#ensureSharedVolumes();
 
+    // B_STUDIO_SANDBOX_BUILD_NO_CACHE=1이면 이 샌드박스 프로젝트의 이미지만 레이어 캐시 없이 빌드하고,
+    // 스냅샷 볼륨도 쓰지 않는다(다른 프로젝트의 빌드 캐시는 건드리지 않는다). 스냅샷 볼륨을 지우지는 않는다.
+    const noCache = sandboxBuildNoCache();
     // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다
     const plans = await this.#planSnapshots();
     const [seeded] = await Promise.all([
-      Promise.all(plans.map((plan) => this.#seedSnapshot(plan, options))),
-      this.#composeOrThrow(['build'], options.signal),
+      noCache ? Promise.resolve(plans.map(() => false)) : Promise.all(plans.map((plan) => this.#seedSnapshot(plan, options))),
+      this.#composeOrThrow(noCache ? ['build', '--no-cache'] : ['build'], options.signal),
     ]);
 
     await this.#composeOrThrow(['up', '--detach', '--remove-orphans'], options.signal);
@@ -640,6 +643,15 @@ class LocalDockerSandbox implements Sandbox {
 /** 스튜디오 서버·CLI 환경 변수 B_STUDIO_CONTAINER_RUNTIME. 격리 수준은 프로젝트가 아니라 운영자가 정한다 */
 export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
   return env.B_STUDIO_CONTAINER_RUNTIME?.trim() || undefined;
+}
+
+/**
+ * `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`이면 이 샌드박스 프로젝트의 이미지를 레이어 캐시 없이 빌드하고 스냅샷도 쓰지 않는다.
+ * `docker builder prune`처럼 다른 프로젝트의 빌드 캐시까지 지우지 않는다 — 이 샌드박스에만 적용된다.
+ */
+export function sandboxBuildNoCache(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.B_STUDIO_SANDBOX_BUILD_NO_CACHE?.trim().toLowerCase();
+  return value === '1' || value === 'true';
 }
 
 async function assertRuntime(dockerBin: string, runtime: string): Promise<void> {
