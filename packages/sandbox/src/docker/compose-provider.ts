@@ -330,7 +330,8 @@ class LocalDockerSandbox implements Sandbox {
     // docker stats는 CPU 사용률을 재느라 1초 남짓 걸리므로 실행 중인 컨테이너만 묻는다
     const running = rows.filter((row) => row.state === 'running').map((row) => row.name);
     const stats = running.length > 0 ? await this.#docker(['stats', '--no-stream', '--format', '{{json .}}', ...running]) : undefined;
-    return mergeUsage(rows, stats?.exitCode === 0 ? parseStatsOutput(stats.stdout) : []);
+    const managedNames = new Set(this.project.managed.map(([name]) => name));
+    return mergeUsage(rows, stats?.exitCode === 0 ? parseStatsOutput(stats.stdout) : [], managedNames);
   }
 
   async *logs({ services = [], tail = 200, follow = true, signal }: LogOptions = {}): AsyncIterable<LogLine> {

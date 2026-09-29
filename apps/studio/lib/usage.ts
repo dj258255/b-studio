@@ -1,5 +1,5 @@
 import type { AgentUsage } from '@b-studio/agent';
-import type { ServiceUsage } from '@b-studio/sandbox';
+import type { ContainerHealth, ServiceUsage } from '@b-studio/sandbox';
 import type { LogEntry } from './session-view';
 
 const TOKEN_FORMAT = new Intl.NumberFormat('ko-KR', { notation: 'compact', maximumFractionDigits: 1 });
@@ -110,6 +110,30 @@ export function endedReason(usage: ServiceUsage): string | undefined {
   if (usage.oomKilled) return `메모리 한도를 넘어 종료 (종료 코드 ${usage.exitCode})`;
   if (usage.exitCode === 137) return '강제 종료 (종료 코드 137, 메모리 부족일 수 있음)';
   return `종료 코드 ${usage.exitCode}`;
+}
+
+const HEALTH_LABEL: Record<ContainerHealth, string> = { healthy: '정상', unhealthy: '불량', starting: '점검 중' };
+
+/** 헬스체크를 건 컨테이너만 값이 있다. 걸지 않았으면 없다 */
+export function healthLabel(health: ContainerHealth | undefined): string | undefined {
+  return health ? HEALTH_LABEL[health] : undefined;
+}
+
+/**
+ * 가동 시간을 "3분", "2시간 5분", "1일 4시간"처럼 줄인다. 시작 시각을 모르거나 못 읽으면 없다.
+ * now는 테스트에서 고정 시각을 주기 위한 것이고, 화면에서는 지금 시각을 그대로 쓴다
+ */
+export function formatUptime(startedAt: string | undefined, now: number = Date.now()): string | undefined {
+  if (!startedAt) return undefined;
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) return undefined;
+  const minutes = Math.floor(Math.max(0, now - started) / 60_000);
+  if (minutes < 1) return '방금 시작';
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}시간 ${minutes % 60}분`;
+  const days = Math.floor(hours / 24);
+  return `${days}일 ${hours % 24}시간`;
 }
 
 /** 로그 한 줄이 알려 주는 단계. 나중에 나온 줄이 지금 단계다 */
