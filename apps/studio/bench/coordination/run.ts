@@ -487,7 +487,16 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
         tasks: lane.tasks.map((item) => ({ id: item.id, status: item.status, run: item.run })),
       }),
     ),
-    integration: plan.integration ? { status: plan.integration.status, bootMs: plan.integration.bootMs, run: plan.integration.run, error: plan.integration.error } : undefined,
+    integration: plan.integration
+      ? {
+          status: plan.integration.status,
+          bootMs: plan.integration.bootMs,
+          run: plan.integration.run,
+          error: plan.integration.error,
+          // S4 수리 여부. 전에는 행에 옮기지 않아 E4 첫 묶음에서 수리 4회가 요약에 보이지 않았다(통합 세션 도구 기록으로 되찾음)
+          ...(plan.integration.repair ? { repair: { attempted: plan.integration.repair.attempted, status: plan.integration.repair.status } } : {}),
+        }
+      : undefined,
     traces,
     integrationTrace,
     explore,
