@@ -48,6 +48,14 @@ export interface DesignView {
   hasToken: boolean;
 }
 
+/** 에이전트가 되물은 질문. 사용자가 답을 보내면 지운다 */
+export interface PendingQuestion {
+  runId: string;
+  question: string;
+  options: string[];
+  allowOther: boolean;
+}
+
 export interface SessionSnapshot {
   id: string;
   projectId: string;
@@ -77,6 +85,8 @@ export interface SessionSnapshot {
   externals?: ExternalApiView[];
   /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
   design?: DesignView;
+  /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */
+  pendingQuestion?: PendingQuestion;
   /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
@@ -203,6 +213,8 @@ export type StudioEvent =
   | { type: 'boot_network'; at: string; network: BootNetwork }
   /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
   | { type: 'design'; design?: DesignView }
+  /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
+  | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean }
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
@@ -211,6 +223,10 @@ export type StudioEvent =
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
   | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask' }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
+  /** 실행 중 보낸 지시를 큐에 넣었다. 러너가 이어서 쓰면 agent 이벤트 steer_applied로 온다 */
+  | { type: 'steer_queued'; runId: string; text: string }
+  /** 실행이 끝났는데 적용되지 못한 지시. 화면에서 다시 보내라고 알린다 */
+  | { type: 'steer_dropped'; runId: string; texts: string[] }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
   | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }
   /** reason이 없으면 사용자가 취소했다 */
@@ -218,8 +234,8 @@ export type StudioEvent =
   | {
       type: 'run_finished';
       runId: string;
-      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다 */
-      status: 'done' | 'failed' | 'error' | 'cancelled';
+      /** cancelled: 사용자가 취소했거나 세션 토큰 한도에 도달해 이번 요청의 변경을 되돌렸다. awaiting_input: 답을 기다린다 */
+      status: 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
       summary: string;
       turns?: number;
       /** 이번 요청이 쓴 토큰. 모델을 부르지 않았으면 없다 */

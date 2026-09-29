@@ -87,7 +87,9 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
   const lines = splitLines(view.chat);
   const state = paneState(view.snapshot);
   const elapsed = useElapsed(view.snapshot.running);
-  const canSend = view.snapshot.status === "ready" && !view.snapshot.running;
+  const canSend = view.snapshot.status === "ready";
+  // 실행 중이면 새 요청 대신 진행 중 지시로 보낸다(다음 모델 호출 직전에 들어간다, ADR-057)
+  const steering = view.snapshot.running;
 
   useEffect(() => {
     const list = listRef.current;
@@ -99,10 +101,10 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
     if (!request || !canSend || sending) return;
     setSending(true);
     setError(undefined);
-    const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
+    const response = await fetch(`/api/sessions/${snapshot.id}/${steering ? "steer" : "messages"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: request, allowBreaking: false, intent: "build" }),
+      body: JSON.stringify(steering ? { text: request } : { text: request, allowBreaking: false, intent: "build" }),
     });
     if (response.ok) setText("");
     // 권한은 서버가 판단한다. 403이면 만든 사람이 아니라는 뜻이다
@@ -154,7 +156,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
           >
             {view.snapshot.running && (
               <p role="status" className="mb-1.5 text-xs text-wait">
-                실행이 끝나면 보낼 수 있습니다
+                작업 중입니다. 보내면 진행 중 지시로 다음 모델 호출 직전에 들어갑니다
               </p>
             )}
             <div className="flex items-end gap-2">
@@ -173,7 +175,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
                 }}
                 rows={2}
                 disabled={!canSend}
-                placeholder={canSend ? "이 세션에 보낼 요청" : "지금은 보낼 수 없습니다"}
+                placeholder={!canSend ? "지금은 보낼 수 없습니다" : steering ? "진행 중 지시" : "이 세션에 보낼 요청"}
                 className="min-w-0 flex-1 resize-none rounded-control border border-line bg-panel px-2 py-1.5 text-sm leading-5 placeholder:text-muted disabled:opacity-60"
               />
               <button
@@ -181,7 +183,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
                 disabled={!canSend || sending || !text.trim()}
                 className="rounded-control bg-ink px-3 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
               >
-                {sending ? "보내는 중" : "보내기"}
+                {sending ? "보내는 중" : steering ? "진행 중 지시" : "보내기"}
               </button>
             </div>
             {error && <p className="mt-1.5 text-xs text-fail">{error}</p>}

@@ -129,6 +129,36 @@ describe('세션 저장', () => {
     expect(await readdir(folder)).toEqual([]);
   });
 
+  // Node는 단일 스레드라 이 테스트는 "읽고→고치고→쓰는" 사이에 await가 끼어드는 인터리빙만 잡는다.
+  // 여러 프로세스가 같은 세션 파일을 동시에 고치는 경우는 재현하지 못한다(그래서 세션 파일에는 owner.pid를 남긴다)
+  it('같은 세션 파일에 동시에 써도 실패하거나 깨지지 않고 온전한 스냅샷 하나가 남는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'session-store-race-'));
+    const workDir = path.join(root, 'orders-ab12cd34');
+    const base: PersistedSession = {
+      version: 1,
+      savedAt: '2026-09-11T00:00:00Z',
+      owner: { pid: 4242 },
+      snapshot: snapshot(workDir),
+      history: [],
+      conversation: [],
+      demoIndex: 0,
+      claudeCode: { notes: [] },
+      sourceDirtyFiles: 0,
+      sandbox: { id: 'studio-orders-1a2b3c', provider: 'local-docker' },
+    };
+
+    // 서로 다른 필드를 바꾸는 두 저장이 겹칠 때, 임시 파일 이름이 겹치면 rename이 깨져 저장이 통째로 사라진다
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await Promise.all([writeSession({ ...base, demoIndex: 1, history: [{ type: 'run_started', runId: 'r1', request: 'A' }] }), writeSession({ ...base, demoIndex: 2, history: [] })]);
+    }
+
+    const [saved] = await readSessions(root);
+    // 마지막에 남은 파일은 둘 중 하나여야 한다. 필드가 섞이거나 비어 있으면 동시 쓰기가 서로를 망가뜨린 것이다
+    expect(saved).toBeDefined();
+    expect([1, 2]).toContain(saved!.demoIndex);
+    expect(saved!.history).toEqual(saved!.demoIndex === 1 ? [{ type: 'run_started', runId: 'r1', request: 'A' }] : []);
+  });
+
   it('끝난 프로세스와 살아 있는 프로세스를 구분한다', () => {
     const exited = spawnSync('true');
     expect(exited.pid).toBeGreaterThan(0);

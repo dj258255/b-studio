@@ -6,6 +6,7 @@ import { useState } from "react";
 import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
 import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
+import { AgentsBadge } from "./agents-badge";
 import { LogoutButton } from "./logout-button";
 import { useSessionAccess } from "./session-access";
 import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
@@ -86,6 +87,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
+        <AgentsBadge />
         {access.viewer && (
           <span className="text-xs text-muted">
             {access.viewer}
