@@ -11,7 +11,7 @@ import {
   type ClaudeCodeSdk,
 } from './claude-code-runner';
 import type { AgentEvent } from './loop';
-import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
+import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 import { buildTools } from './tools';
 
 let project: LoadedProject;
@@ -158,6 +158,8 @@ describe('runClaudeCodeAgent', () => {
     expect(result.usage.inputTokens).toBe(40);
     // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
     expect(events.flatMap((e) => (e.type === 'tokens' ? [e.usage.inputTokens] : []))).toEqual([20, 40]);
+    // 이 스크립트는 assistant usage를 주지 않으므로 턴 사용량 이벤트가 없다(기록된 값만 남긴다)
+    expect(events.filter((e) => e.type === 'turn_usage')).toEqual([]);
 
     expect(state.prompts).toHaveLength(2);
     expect(state.prompts[1]).toContain('[b-studio 검증 게이트]');
@@ -177,13 +179,19 @@ describe('runClaudeCodeAgent', () => {
       ],
     });
 
-    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+    const events: AgentEvent[] = [];
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract, onEvent: (event) => events.push(event) });
 
     expect(result.status).toBe('done');
     // 서로 다른 assistant 메시지 id가 2개다 (id 2개, 메시지 3개)
     expect(result.metrics?.modelCalls).toBe(2);
     // 호출 한 번의 입력 크기 최댓값: 200 + 2,000 + 7 = 2,207
     expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // 같은 메시지 id가 여러 번 와도 그 턴의 사용량은 처음 값으로 한 번만 남긴다(컨텍스트 = input + cacheRead + cacheWrite)
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 5, contextTokens: 1_105 },
+      { type: 'turn_usage', turn: 2, inputTokens: 50, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 0, contextTokens: 150 },
+    ]);
     // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
     expect(result.metrics?.modelMs).toBe(0);
     for (const ms of [result.metrics!.toolMs, result.metrics!.gateMs]) {
@@ -256,6 +264,39 @@ describe('runClaudeCodeAgent', () => {
     ).rejects.toThrow('스크립트에 남은 턴이 없습니다');
     expect(state.closed).toBe(true);
   });
+
+  it('ask_user가 질문을 남기면 쿼리를 중단하고 awaiting_input으로 끝내 세션 id를 남긴다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [[{ tool: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true } }]],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', sessionId: 'new-session' });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(events.find((event) => event.type === 'question')).toMatchObject({ allowOther: true });
+    // 되묻기 도구는 interactive일 때만 허용 목록에 들어간다
+    expect(state.options?.allowedTools).toContain('mcp__b-studio__ask_user');
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+  });
+
+  it('interactive가 아니면 허용 목록에 ask_user가 없다(레인·벤치·CLI)', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '주문 API입니다.' }]] });
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('done');
+    expect(state.options?.allowedTools).not.toContain('mcp__b-studio__ask_user');
+  });
 });
 
 describe('preflightClaudeCode', () => {
@@ -287,5 +328,42 @@ describe('zodShape', () => {
     expect(tools.run_in_service!.safeParse({ service: 'db', command: ['psql'] }).success).toBe(false);
     expect(tools.service_logs!.safeParse({ service: 'api', lines: 1.5 }).success).toBe(false);
     expect(tools.http_request!.safeParse({ service: 'api', method: 'TRACE', path: '/', body: '' }).success).toBe(false);
+
+    // ask_user의 boolean 필드도 zod 형태로 옮긴다
+    const interactive = Object.fromEntries(buildTools(project, { interactive: true }).map((tool) => [tool.name, z.object(zodShape(tool.input_schema))]));
+    expect(interactive.ask_user!.safeParse({ question: 'q', options: ['a', 'b'], allowOther: true }).success).toBe(true);
+    expect(interactive.ask_user!.safeParse({ question: 'q', options: ['a', 'b'], allowOther: 'yes' }).success).toBe(false);
+  });
+
+  it('실행 중 지시를 스트리밍 입력 큐에 넣어 다음 턴에 반영한다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }, { text: '추가했습니다.' }],
+        [{ text: '지시를 반영했습니다.' }],
+        // 지시가 먼저 들어간 뒤 게이트 피드백이 큐에 남는다. 러너가 결과를 받은 뒤 큐를 비우며 처리한다
+        [{ text: '게이트 피드백을 처리했습니다.' }],
+      ],
+    });
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '새 클래스를 추가해줘',
+      project,
+      sandbox: fakeSandbox(project, [false, true]),
+      sdk,
+      steering: queue.steering,
+      fetcher: async () => contract,
+      onEvent: (event) => {
+        events.push(event);
+        // 도구가 끝난 뒤(턴이 끝나기 전) 사용자가 지시를 보낸다 → 입력 큐에 들어간다
+        if (event.type === 'tool_result') queue.push('테스트도 추가해줘');
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 1 });
+    // 지시가 입력 큐에 들어가 다음 사용자 메시지로 처리된다
+    expect(state.prompts[1]).toBe('[진행 중 지시] 테스트도 추가해줘');
+    expect(events.filter((event): event is Extract<AgentEvent, { type: 'steer_applied' }> => event.type === 'steer_applied')).toMatchObject([{ count: 1 }]);
   });
 });

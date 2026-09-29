@@ -5,6 +5,8 @@
  * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex·commandcode·opencode=본인 PC CLI, openai=유료 API).
  */
 
+import type { Strategy } from './tasks';
+
 export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'openai';
 export type RateLimitPolicy = 'stop' | 'wait';
 
@@ -55,6 +57,26 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
   if (backend === 'commandcode') return `local-cli-commandcode:${requestedModel || 'default'}`;
   if (backend === 'opencode') return `local-cli-opencode:${requestedModel || 'default'}`;
   return upstreamModelId;
+}
+
+/**
+ * 컨텍스트 비우기(`--context-clearing`). 기본은 꺼짐이다 — 효과를 재기 전이라(ADR-055 보강)
+ * 켠 실행과 끈 실행을 같은 조건에서 비교해 재려고 인자로 뺐다.
+ */
+export function resolveContextClearing(value: string | undefined): boolean {
+  const trimmed = value?.trim().toLowerCase() || 'off';
+  if (trimmed !== 'on' && trimmed !== 'off') throw new Error(`--context-clearing은 on 또는 off여야 합니다 (지금 값: ${value})`);
+  return trimmed === 'on';
+}
+
+/**
+ * P0(그냥 Claude Code) 기준선은 로컬 Claude Code로만 돌 수 있다. 다른 백엔드는 Claude Code가 아니라 비교 기준이 아니다.
+ * Docker·모델을 건드리기 전에 막는다.
+ */
+export function assertPlainBaselineBackend(backend: Backend, strategies: readonly Strategy[]): void {
+  if (strategies.includes('P0') && backend !== 'claude-code') {
+    throw new Error(`P0(그냥 Claude Code)는 --backend claude-code에서만 쓸 수 있습니다 (지금 백엔드: ${backend})`);
+  }
 }
 
 export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinutes: number | undefined): { policy: RateLimitPolicy; waitMinutes: number } {

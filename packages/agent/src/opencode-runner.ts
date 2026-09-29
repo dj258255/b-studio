@@ -173,6 +173,9 @@ export interface OpenCodeRunResult extends AgentResult {
  * b-studio 경계("모델은 b-studio 도구만")를 지키려면 내장 도구를 꺼야 하므로, 이 검사를 통과하려고 경계를 풀지 않는다 —
  * 보안 후퇴이고 제공자 정책 우회다. 대신 그 사실을 그대로 실패로 알리고(OPENCODE_PROVIDER_GATE_MESSAGE) **재시도하지 않는다**.
  * 정상 경로는 로그인한 제공자의 모델을 고르는 것이다(그래서 linkAuth 기본값이 true다).
+ *
+ * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
+ * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
  */
 export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<OpenCodeRunResult> {
   const {

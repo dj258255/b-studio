@@ -1,9 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
+import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
+import { AgentsBadge } from "./agents-badge";
 import { LogoutButton } from "./logout-button";
 import { useSessionAccess } from "./session-access";
 import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
@@ -25,6 +28,15 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string>();
   const access = useSessionAccess();
+  const router = useRouter();
+
+  /** 최근에 나란히 본 세션들(localStorage)에 이 세션을 붙여 /split으로 간다. 저장소 접근은 실패해도 무시한다 */
+  function addToSplit() {
+    const storage = typeof window === "undefined" ? undefined : window.localStorage;
+    const ids = nextSplitIds(readStoredSplitIds(storage), snapshot.id);
+    storeSplitIds(storage, ids);
+    router.push(splitHref(ids));
+  }
 
   async function stop() {
     setStopping(true);
@@ -77,6 +89,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
+        <AgentsBadge />
         {access.viewer && (
           <span className="text-xs text-muted">
             {access.viewer}
@@ -107,6 +120,9 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         >
           {MODE_LABEL[snapshot.mode]}
         </span>
+        <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
+          나란히 보기에 추가
+        </button>
         {snapshot.status === "stopped" ? (
           <>
             <Link href="/" className="text-sm font-medium hover:underline">
