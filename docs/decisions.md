@@ -9,7 +9,7 @@
 | 주제 | ADR |
 |---|---|
 | 프로젝트 모델과 런타임 | 001–009, 021, 028, 032, 044 |
-| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053–054 |
+| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053–055 |
 | 웹 스튜디오와 세션 | 015–020, 029–031, 033, 040–041, 045–046, 052 |
 | 데이터·자원·보안 | 022–027, 038, 040, 045 |
 | 운영 배포 | 020, 030, 032–033, 043–045 |
@@ -70,6 +70,7 @@
 - [ADR-052 미리보기 QA: 서버 소유 브라우저 화면을 중계하고 입력을 되돌려 보낸다](#adr-052-미리보기-qa-서버-소유-브라우저-화면을-중계하고-입력을-되돌려-보낸다)
 - [ADR-053 시각 비교: 디자인 이미지를 저장소에 두고 결정론적으로 비교한다](#adr-053-시각-비교-디자인-이미지를-저장소에-두고-결정론적으로-비교한다)
 - [ADR-054 디자인(Figma) 연동: REST API와 서버 토큰을 쓰고 이미지는 모델에 넘기지 않는다](#adr-054-디자인figma-연동-rest-api와-서버-토큰을-쓰고-이미지는-모델에-넘기지-않는다)
+- [ADR-055 게이트의 동시성 확인: 선언적 동시 요청과 결과 불변식으로 한다](#adr-055-게이트의-동시성-확인-선언적-동시-요청과-결과-불변식으로-한다)
 
 ---
 
@@ -2148,6 +2149,42 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 
 ---
 
+## ADR-055 게이트의 동시성 확인: 선언적 동시 요청과 결과 불변식으로 한다
+
+### 맥락
+- 게이트의 `test` 단계는 선언한 명령의 종료 코드만 본다(통과 여부만 판정). 동시 요청에서 재고·중복주문 같은 정합성(race, lost update)이 깨지는지는 전혀 재지 않는다.
+- orders 도메인의 핵심 리스크가 이중 주문·재고 초과인데, studio.yaml의 `pageChecks`·`tests`에 병렬 요청 검사가 없었다.
+- 조사([docs/research/2026-09-29-testing-load-concurrency.md](research/2026-09-29-testing-load-concurrency.md)): Jepsen·jcstress·FoundationDB/TigerBeetle DST는 "동시 요청에서 정합성을 유지하는가"를 잰다. 1인·노트북 규모에서는 전체 도입보다 원칙의 축소판이 맞다. 부하 도구(k6·Locust)는 처리량·지연을 재는 도구로, 정합성 불변식과는 목적이 다르다.
+
+### 검토한 선택지
+
+| 선택지 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| 부하 도구(k6)를 샌드박스에 넣기 | 처리량·지연·시나리오 스크립트 | 새 의존성·이미지, 스크립트가 코드 실행 경로가 됨, 노트북 자원 제약 |
+| 결정론적 시뮬레이션(DST) | 인터리빙을 체계적으로 탐색 | 앱을 시뮬레이터 안에서 돌릴 수 없음(HTTP 서비스), 도입 비용 과함 |
+| **선언적 동시 요청 + 결과 불변식** | 새 의존성 없이 `Promise.all`로 동시 요청, 기대(정확히 1건 성공·상태 분포·then 값)를 studio.yaml에 선언 | 처리량·지연은 못 잼. 격리 수준·타이밍에 따라 결과가 흔들릴 수 있음 |
+
+### 결정
+- `workflow.concurrencyChecks`(최대 10개)를 추가하고, 게이트에 `concurrency_check` 단계를 둔다(`test`와 같은 시점, 서비스 준비 뒤).
+- 같은 요청을 `concurrent`(2~20)개 **서버에서 `Promise.all`로 동시에** 보낸다. 요청마다 타임아웃을 건다. 요청은 **세션 서비스의 출처로만** 보낸다(#75 규칙과 같게).
+- `expect`는 `successCount`(정확히/최대), `allStatusIn`, `then`(동시 요청 뒤 `GET`으로 JSON 값이 기대와 같은지) 중 최소 하나. 실패하면 게이트 실패로 모델에게 돌아가되 **원인을 추정하지 않고 숫자만** 남긴다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남긴다.
+- `required`·`releaseRequires`에 `concurrency_check`를 쓸 수 있다. **한 번의 실패를 재시도로 덮지 않는다**(재시도하면 경합이 숨는다).
+- 함께 넣은 것: `pageChecks[].maxLoadMs`(화면 로드 예산, 워밍업 뒤 측정)와 프롬프트의 "테스트를 쓸 때 실패·경계 사례를 최소 하나 넣고 무엇을 잡는지 요약에 적는다" 기준. 조사 문서가 지적한 "통과만 보면 얕은 테스트로 수렴한다"는 문제에 대한 최소 대응이다.
+
+### 감수한 트레이드오프
+- **부하 테스트가 아니다.** 동시성 정합성만 보고 처리량·지연·지속 부하는 재지 않는다. k6/Locust가 필요한 대규모 부하는 별도 도구의 몫이다.
+- **DB 격리 수준·타이밍에 따라 흔들린다.** 격리 수준이 낮으면 정상 코드도 실패로 보일 수 있어 임계값은 넉넉히 잡아야 한다. 재시도로 덮지 않으므로 일시적 흔들림이 곧 실패다.
+- **`then`의 JSON 경로는 최소 구현**이다(`$.a.b`, `$.items[0].qty` 정도). 복잡한 선택·연산은 지원하지 않는다.
+- `concurrencyChecks.headers`에 비밀 값(인증 헤더)을 적을 수 없다(studio.yaml은 저장소에 커밋된다). 인증이 필요하면 서비스가 `secrets` 환경 변수를 읽게 해야 한다.
+- 실제 Docker 샌드박스에서는 아직 돌리지 않았다(가짜 요청 함수 단위 테스트와 실제 Chromium 로드 측정만 확인).
+
+### 검증 결과
+- 스키마: `concurrent` 범위(2~20), `//host` 경로 거부, 인증 헤더 거부, 헤더 5개·본문 8KB 상한, `expect` 조건 필수, 필수 단계 수단 검사, 이름 중복을 단위 테스트로 확인했습니다.
+- 게이트: 10개를 실제로 동시에 보내 최대 동시 수 10을 확인하고, 성공 건수·상태 분포·`then` 값 판정, 출처 밖 경로 거부, 타임아웃 실패를 가짜 요청 함수로 확인했습니다.
+- 로드 예산: 가짜 브라우저 러너로 예산 초과 실패·예산 내 통과·측정값 기록·재지 못함 실패를, 실제 Chromium으로 워밍업 뒤 측정을 확인했습니다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -2172,3 +2209,5 @@ Playwright(Chromium)로 데모 세션 화면을 열고 미디어 설정을 바�
 - mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
 - Figma, [REST API](https://www.figma.com/developers/api) (개인 액세스 토큰, `file_content:read`)
 - OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)
+- Grafana k6, [부하 테스트 도구 비교](https://qainsights.com/jmeter-vs-k6-vs-locust-in-2026-which-load-testing-tool-should-you-pick/) · Jepsen, [블로그](https://jepsen.io/blog) · Apple, [FoundationDB Testing](https://apple.github.io/foundationdb/testing.html)
+- web.dev, [Lighthouse CI](https://web.dev/articles/lighthouse-ci)
