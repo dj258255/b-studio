@@ -179,4 +179,27 @@ describe('세션 저장', () => {
     expect(archived.services).toEqual([{ name: 'web', template: 'nextjs', preview: 'browser', state: 'stopped', url: undefined, detail: undefined, hasContract: false }]);
     expect(archived.checkpoints).toEqual([checkpoint]);
   });
+
+  it('세션 backend를 저장하고 그대로 복구한다(옛 기록은 backend가 없어도 읽힌다)', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'session-store-backend-'));
+    const workDir = path.join(root, 'orders-ab12cd34');
+    const base: PersistedSession = {
+      version: 1,
+      savedAt: '2026-09-11T00:00:00Z',
+      owner: { pid: 4242 },
+      // 백엔드가 서버 모드(mode)와 다를 수 있다(레인이 고른 backend). 둘 다 저장한다
+      snapshot: { ...snapshot(workDir), mode: 'api', backend: 'claude-code' },
+      history: [],
+      conversation: [],
+      demoIndex: 0,
+      claudeCode: { notes: [] },
+      sourceDirtyFiles: 0,
+      sandbox: { id: 'studio-orders-1a2b3c', provider: 'local-docker' },
+    };
+    await writeSession(base);
+
+    const [saved] = await readSessions(root);
+    expect(saved!.snapshot.backend).toBe('claude-code');
+    expect(saved!.snapshot.mode).toBe('api');
+  });
 });

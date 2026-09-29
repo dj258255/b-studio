@@ -37,6 +37,35 @@ describe('작업 계획', () => {
     expect(isInScope('web/app/orders-old/page.tsx', ['web/app/orders'])).toBe(false);
   });
 
+  it('작업마다 backend·model을 실을 수 있고, 한 레인 안에서 다르면 거부한다', () => {
+    const withBackend = (id: string, paths: string[], dependsOn: string[], backend?: string, model?: string) => ({
+      ...task(id, paths, dependsOn),
+      ...(backend ? { backend } : {}),
+      ...(model ? { model } : {}),
+    });
+
+    // 같은 레인의 작업(의존으로 이어짐)은 같은 backend·model을 공유한다
+    const lanes = planLanes({
+      tasks: [withBackend('api', ['api'], [], 'claude-code', 'sonnet'), withBackend('web', ['web'], ['api'], 'claude-code', 'sonnet')],
+    });
+    expect(lanes[0]!.tasks.map((item) => [item.id, item.backend, item.model])).toEqual([
+      ['api', 'claude-code', 'sonnet'],
+      ['web', 'claude-code', 'sonnet'],
+    ]);
+
+    // 독립 레인은 서로 다른 backend를 쓸 수 있다
+    const mixed = planLanes({ tasks: [withBackend('a', ['a'], [], 'claude-code'), withBackend('b', ['b'], [], 'commandcode')] });
+    expect(mixed.map((lane) => lane.tasks[0]!.backend)).toEqual(['claude-code', 'commandcode']);
+
+    // 같은 레인 안에서 backend나 model이 다르면 실행 전에 거부한다
+    expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'claude-code'), withBackend('b', ['api/sub'], ['a'], 'codex')] })).toThrow(/backend가 같아야/);
+    expect(() =>
+      planLanes({ tasks: [withBackend('a', ['api'], [], 'claude-code', 'sonnet'), withBackend('b', ['api/sub'], ['a'], 'claude-code', 'opus')] }),
+    ).toThrow(/model이 같아야/);
+    // 모르는 backend는 스키마가 거부한다
+    expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'opencode')] })).toThrow(/형식이 올바르지 않습니다/);
+  });
+
   it('모델 응답의 코드 펜스·설명을 걷어내고 JSON을 읽는다', () => {
     expect(parsePlannerReply('계획입니다.\n```json\n{"tasks":[]}\n```')).toEqual({ tasks: [] });
     expect(parsePlannerReply('{"tasks":[{"id":"a"}]}')).toEqual({ tasks: [{ id: 'a' }] });

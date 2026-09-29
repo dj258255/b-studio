@@ -1,4 +1,4 @@
-import type { AgentUsage, BoardStats, NoteKind, RunMetrics, Topology } from '@b-studio/agent';
+import type { AgentUsage, BoardStats, NoteKind, PlanBackend, RunMetrics, Topology } from '@b-studio/agent';
 import type { TaskPlanMetrics } from './task-plan-metrics';
 
 export type TaskPlanStatus = 'planning' | 'awaiting_approval' | 'running' | 'integrating' | 'interrupted' | 'done' | 'failed' | 'rejected';
@@ -54,6 +54,10 @@ export interface TaskPlanTaskView {
   request: string;
   paths: string[];
   dependsOn: string[];
+  /** 이 작업을 돌릴 세션 백엔드(고정 계획만). 없으면 서버 모드 */
+  backend?: PlanBackend;
+  /** 이 작업에 고정한 모델(백엔드마다 뜻이 다르다) */
+  model?: string;
   status: TaskPlanStepStatus;
   summary?: string;
   checkpoint?: TaskPlanCheckpointView;
@@ -65,6 +69,9 @@ export interface TaskPlanLaneView {
   id: string;
   /** 레인이 쓰는 세션. 세션을 만들기 전이면 없다 */
   sessionId?: string;
+  /** 이 레인 세션의 백엔드·모델(레인 작업들이 공유한다). 없으면 서버 모드 */
+  backend?: PlanBackend;
+  model?: string;
   /** 레인 세션의 작업 폴더. 세션이 사라진 뒤에도 통합이 결과를 다시 읽을 수 있게 남긴다 */
   workDir?: string;
   /** 레인이 바꾼 파일 (세션 시작 체크포인트를 뺀 체크포인트들의 파일 합집합, 정렬) */

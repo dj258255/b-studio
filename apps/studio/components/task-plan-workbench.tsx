@@ -452,6 +452,7 @@ function PlanResult({
                   <div className="min-w-0">
                     <p className="text-lg font-semibold">{lane.id}</p>
                     <p className="mt-0.5 break-all font-mono text-xs text-muted">쓰기 범위: {lane.paths.join(', ')}</p>
+                    <p className="mt-0.5 text-xs text-muted">백엔드: {lane.backend ?? '서버 기본'}{lane.model ? ` (${lane.model})` : ''}</p>
                   </div>
                   <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[lane.status]}`}>{STEP_STATUS[lane.status]}</span>
                 </div>

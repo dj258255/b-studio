@@ -19,6 +19,13 @@ const SCOPE_PATH = z
   .transform((value) => value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, ''))
   .refine((value) => value !== '' && value !== '.', '프로젝트 전체를 쓰기 범위로 둘 수 없습니다');
 
+/**
+ * 고정 계획(presetPlan)이 작업마다 지정할 수 있는 세션 백엔드. 실행기(studio)가 아는 값만 받는다.
+ * 모델이 만든 계획(API 모드 계획 호출)에는 이 필드를 쓰지 않는다 — 계획 프롬프트는 바꾸지 않는다.
+ */
+export const PlanBackendSchema = z.enum(['api', 'claude-code', 'codex', 'commandcode']);
+export type PlanBackend = z.infer<typeof PlanBackendSchema>;
+
 export const TaskPlanSchema = z.object({
   tasks: z
     .array(
@@ -29,6 +36,10 @@ export const TaskPlanSchema = z.object({
         /** 이 작업이 파일을 쓸 수 있는 경로. 실행기가 이 밖의 쓰기를 막는다 */
         paths: z.array(SCOPE_PATH).min(1).max(8),
         dependsOn: z.array(z.string()).default([]),
+        /** 이 작업을 돌릴 세션 백엔드. 없으면 서버 모드. 같은 레인의 작업은 모두 같아야 한다(레인은 한 세션) */
+        backend: PlanBackendSchema.optional(),
+        /** 이 작업에 고정할 모델. 백엔드마다 뜻이 다르다(api=레지스트리 id, commandcode=cmd 모델 id, claude-code·codex=무시) */
+        model: z.string().min(1).max(120).optional(),
       }),
     )
     .min(1)
@@ -87,6 +98,12 @@ export function planLanes(input: unknown): TaskLane[] {
 
   const lanes = [...groups.values()].map((group, index) => {
     const ordered = topologicalOrder(group);
+    // 한 레인의 작업은 한 세션에서 차례로 돈다. 백엔드·모델이 섞이면 세션 하나로 돌릴 수 없으므로 실행 전에 막는다
+    const head = ordered[0]!;
+    for (const task of ordered) {
+      if (task.backend !== head.backend) throw new TaskPlanError(`같은 레인의 작업은 backend가 같아야 합니다: ${head.id}(${head.backend ?? '서버 기본'}) ↔ ${task.id}(${task.backend ?? '서버 기본'})`);
+      if (task.model !== head.model) throw new TaskPlanError(`같은 레인의 작업은 model이 같아야 합니다: ${head.id}(${head.model ?? '기본'}) ↔ ${task.id}(${task.model ?? '기본'})`);
+    }
     return { id: `lane-${index + 1}`, tasks: ordered, paths: [...new Set(ordered.flatMap((task) => task.paths))].sort() };
   });
   if (lanes.length > MAX_PLAN_LANES) throw new TaskPlanError(`동시에 돌릴 레인은 ${MAX_PLAN_LANES}개까지입니다 (계획: ${lanes.length}개)`);

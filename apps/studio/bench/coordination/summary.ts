@@ -14,6 +14,11 @@ export interface BenchLaneRow {
   id: string;
   /** 레인 세션 id. 세션을 만들기 전에 실패하면 없다 */
   sessionId?: string;
+  /** 레인 그룹(첫 쓰기 경로). 백엔드 요약에 쓴다 */
+  group?: string;
+  /** 이 레인이 고른 백엔드·모델(--lane-backend). 없으면 계획 기본(서버 모드) */
+  backend?: string;
+  model?: string;
   status: string;
   bootMs?: number;
   error?: string;
@@ -151,6 +156,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '승격 건수',
     '수리(시도/성공)',
     'API 환산 비용($)',
+    '레인 백엔드',
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -199,6 +205,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         '|',
         costCell(group),
         '|',
+        laneBackendLabel(head),
+        '|',
       ].join(' '),
     );
   }
@@ -237,6 +245,12 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
  */
 function withLaneSessions(row: BenchRow, value: number): number | undefined {
   return row.lanes.some((lane) => lane.sessionId) ? value : undefined;
+}
+
+/** 레인별 백엔드 요약(예: `api:claude-code web:commandcode`). 고른 레인이 없으면 '—' */
+function laneBackendLabel(row: BenchRow): string {
+  const parts = row.lanes.filter((lane) => lane.backend).map((lane) => `${lane.group ?? lane.id}:${lane.backend}${lane.model ? `:${lane.model}` : ''}`);
+  return parts.length > 0 ? parts.join(' ') : '—';
 }
 
 /** 그룹의 API 환산 비용을 "합계 / 중앙값"(달러)으로 적는다. costUsd가 있는 실행이 없으면 — */

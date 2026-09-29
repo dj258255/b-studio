@@ -114,10 +114,10 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           </span>
         )}
         <span
-          className={`glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium ${snapshot.mode === "demo" ? "text-wait" : "text-muted"}`}
+          className={`glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium ${(snapshot.backend ?? snapshot.mode) === "demo" ? "text-wait" : "text-muted"}`}
           title="에이전트 실행 방식"
         >
-          {MODE_LABEL[snapshot.mode]}
+          {MODE_LABEL[snapshot.backend ?? snapshot.mode]}
         </span>
         <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
           나란히 보기에 추가

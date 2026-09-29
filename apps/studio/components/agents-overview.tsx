@@ -146,6 +146,7 @@ function AgentRow({ item }: { item: AgentItem }) {
         <p className="mt-1.5 font-medium break-words">{item.title}</p>
         <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
           <span>{item.projectName}</span>
+          {item.backend && <span>백엔드 {item.backend}</span>}
           {item.runningForMs !== undefined && <span>진행 {formatDuration(item.runningForMs)}</span>}
           {item.tokens && <span>토큰 {formatCount(totalTokens(item.tokens))}</span>}
           {item.activity && <span>{item.activity}</span>}

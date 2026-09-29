@@ -304,3 +304,29 @@ describe('summarize', () => {
     expect(none).toContain('| order-detail | O | P0 | 0/1 | — |');
   });
 });
+
+describe('레인 백엔드 열(--lane-backend)', () => {
+  it('레인별 backend·model을 레인 그룹과 함께 적는다', () => {
+    const markdown = summarize(
+      [
+        row({
+          taskId: 'orders-list',
+          strategy: 'S1',
+          lanes: [
+            { id: 'lane-1', sessionId: 's1', status: 'done', group: 'api', backend: 'claude-code', model: 'sonnet', tasks: [] },
+            { id: 'lane-2', sessionId: 's2', status: 'done', group: 'web', backend: 'commandcode', tasks: [] },
+          ],
+        }),
+      ],
+      meta,
+    );
+
+    expect(markdown).toContain('레인 백엔드');
+    expect(markdown).toContain('api:claude-code:sonnet web:commandcode');
+  });
+
+  it('고른 레인이 없으면 —로 둔다', () => {
+    const markdown = summarize([row({ taskId: 'orders-list', strategy: 'S1', lanes: [{ id: 'lane-1', sessionId: 's1', status: 'done', tasks: [] }] })], meta);
+    expect(markdown.split('\n').find((line) => line.includes('orders-list'))).toContain('| — |');
+  });
+});

@@ -313,6 +313,7 @@ function NodeDetail({ plan, node }: { plan: TaskPlanView; node: PlanGraphNode })
           <p className="mt-1 text-xs font-medium">
             {STATE_ICON[node.state]} {STATE_LABEL[node.state]}
             {lane.bootMs !== undefined && <span className="text-muted"> · 준비 {formatDuration(lane.bootMs)}</span>}
+            <span className="text-muted"> · 백엔드 {lane.backend ?? '서버 기본'}{lane.model ? ` (${lane.model})` : ''}</span>
           </p>
         </div>
         <Section title="쓰기 범위">

@@ -26,13 +26,17 @@ import {
   assertContractsBackend,
   assertContractsStrategy,
   assertPlainBaselineBackend,
+  cliBackendsInUse,
+  parseLaneBackends,
   planModelId,
   resolveBackend,
   resolveContextClearing,
   resolveContractsSource,
   resolveEscalation,
   resolveRateLimitPolicy,
+  sessionBackendOf,
   type Backend,
+  type BenchLaneGroup,
   type ContractsSource,
 } from './backends';
 import { classify } from './classify';
@@ -42,7 +46,7 @@ import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type PlannedPlan, type Strategy } from './tasks';
+import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
 import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
@@ -87,6 +91,8 @@ interface Args {
   contracts?: string;
   escalateTo?: string;
   escalateAfter?: number;
+  /** `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` 반복. 레인마다 백엔드를 고른다 */
+  laneBackends?: string[];
   /** 모델 이름 일부 → 단가 표 JSON 파일. 모델별 API 환산 비용을 계산한다 */
   prices?: string;
 }
@@ -119,6 +125,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--context-clearing') args.contextClearing = next(argv, index++, '--context-clearing');
     else if (arg === '--escalate-to') args.escalateTo = next(argv, index++, '--escalate-to');
     else if (arg === '--escalate-after') args.escalateAfter = Number(next(argv, index++, '--escalate-after'));
+    else if (arg === '--lane-backend') (args.laneBackends ??= []).push(next(argv, index++, '--lane-backend'));
     else if (arg === '--prices') args.prices = next(argv, index++, '--prices');
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
@@ -133,6 +140,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
     else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
     else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
+    else if (arg.startsWith('--lane-backend=')) (args.laneBackends ??= []).push(arg.slice('--lane-backend='.length));
     else if (arg.startsWith('--prices=')) args.prices = arg.slice('--prices='.length);
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
@@ -273,6 +281,8 @@ interface RunContext {
   planModelId: string;
   /** S3의 읽기 범위. 다른 전략에는 영향이 없다 */
   topology: Topology;
+  /** 레인 그룹 → 그 레인 세션의 backend·model(--lane-backend). 비어 있으면 모든 레인이 계획 기본(서버 모드) */
+  laneBackends: LaneBackends;
   /** 통합 게이트에 api 값 확인을 덧붙이는지. 행마다 기록한다 */
   integrationChecks: boolean;
   /** 레인 사이 계약의 출처(--contracts). S2에서만 뜻이 있다 */
@@ -298,7 +308,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
 
   const startedAt = new Date().toISOString();
   const { taskPlans, sessions, localUser } = context;
-  const planJson = planFor(task, strategy, context.topology);
+  const planJson = planFor(task, strategy, context.topology, context.laneBackends);
   // --integration-checks일 때만 엮인 과제의 통합 게이트에 확인을 더한다(독립 과제는 없다)
   const integrationChecks = context.integrationChecks ? integrationChecksFor(task) : undefined;
   // 계약의 출처. S2에서만 뜻이 있다(다른 전략은 계약을 쓰지 않는다)
@@ -468,6 +478,10 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
         id: lane.id,
         sessionId: lane.sessionId,
         status: lane.status,
+        // 레인 그룹(첫 쓰기 경로)과 이 레인이 고른 백엔드·모델(--lane-backend). 없으면 계획 기본
+        group: lane.paths[0],
+        backend: lane.backend,
+        model: lane.model,
         bootMs: lane.bootMs,
         error: lane.error,
         tasks: lane.tasks.map((item) => ({ id: item.id, status: item.status, run: item.run })),
@@ -765,6 +779,42 @@ function timestamp(): string {
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
+/**
+ * CLI 백엔드 로그인 확인. 쓰는 CLI마다 시작 전에 한 번 부른다(계획 기본 + 레인 백엔드).
+ * 실패하면 false를 돌려주고 호출자가 종료 코드 3으로 멈춘다. 프롬프트를 보내지 않으므로 모델 사용량을 쓰지 않는다
+ */
+async function preflightCli(backend: Backend, cwd: string): Promise<boolean> {
+  if (backend === 'openai') return true;
+  if (backend === 'claude-code') {
+    const { preflightClaudeCode } = await import('@b-studio/agent');
+    const preflight = await preflightClaudeCode({ cwd });
+    if (!preflight.ok) {
+      console.error(`로컬 Claude Code를 쓸 수 없습니다: ${preflight.reason}`);
+      return false;
+    }
+    console.log(`로컬 Claude Code 로그인 확인: ${preflight.account.subscriptionType ?? preflight.account.apiKeySource ?? '로그인 계정'}`);
+    return true;
+  }
+  if (backend === 'codex') {
+    const { preflightCodex } = await import('@b-studio/agent');
+    const preflight = await preflightCodex();
+    if (!preflight.ok) {
+      console.error(`로컬 Codex를 쓸 수 없습니다: ${preflight.reason}`);
+      return false;
+    }
+    console.log('로컬 Codex 로그인 확인');
+    return true;
+  }
+  const { preflightCommandCode } = await import('@b-studio/agent');
+  const preflight = await preflightCommandCode();
+  if (!preflight.ok) {
+    console.error(`로컬 Command Code를 쓸 수 없습니다: ${preflight.reason}`);
+    return false;
+  }
+  console.log('로컬 Command Code 로그인 확인');
+  return true;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   // 백엔드와 사용 한도 정책은 Docker를 건드리기 전에 확정한다(모델 경로를 조용히 고르지 않는다)
@@ -775,8 +825,18 @@ async function main(): Promise<void> {
   // 오래된 도구 결과 비우기. 기본은 끔이고, API 루프(openai)에서만 뜻이 있다 — 로컬 CLI는 각자 자체 압축을 한다
   const contextClearing = resolveContextClearing(args.contextClearing);
   if (contextClearing && backend !== 'openai') throw new Error('--context-clearing은 --backend openai(API 루프)에서만 쓸 수 있습니다. 로컬 CLI 러너는 대화를 직접 다루지 않습니다');
-  // 승격 설정도 시작 전에 확정한다. claude-code가 아니면 --escalate-to는 여기서 오류를 낸다
-  const escalation = resolveEscalation({ backend, escalateTo: args.escalateTo, escalateAfter: args.escalateAfter });
+  // 레인 백엔드(--lane-backend)도 시작 전에 확정한다. 모르는 레인 그룹·백엔드는 여기서 오류를 낸다
+  const laneBackendChoices = parseLaneBackends(args.laneBackends);
+  const laneBackends: LaneBackends = new Map(
+    [...laneBackendChoices].map(([group, lane]) => [group, { backend: sessionBackendOf(lane.backend), ...(lane.model ? { model: lane.model } : {}) }]),
+  );
+  // 승격 설정도 시작 전에 확정한다. claude-code 백엔드(계획 기본 또는 레인)가 하나도 없으면 --escalate-to는 여기서 오류를 낸다
+  const escalation = resolveEscalation({
+    backend,
+    laneBackends: [...laneBackendChoices.values()].map((lane) => lane.backend),
+    escalateTo: args.escalateTo,
+    escalateAfter: args.escalateAfter,
+  });
   // 단가 표도 시작 전에 읽는다. 값은 파일로만 받고 코드에 적지 않는다(잘못된 파일이면 Docker를 건드리기 전에 멈춘다)
   const prices = args.prices ? await loadPriceTable(args.prices) : undefined;
   const dry = args.dry;
@@ -791,6 +851,14 @@ async function main(): Promise<void> {
   const contractsSource = resolveContractsSource(args.contracts);
   assertContractsStrategy(contractsSource, strategies);
   assertContractsBackend(contractsSource, backend);
+  // S0는 api·web 작업을 한 레인에 넣는다. 레인 백엔드가 갈리면 한 세션으로 돌릴 수 없으므로 시작 전에 막는다
+  if (strategies.includes('S0')) {
+    const serverLaneBackend = sessionBackendOf(backend);
+    const effective = (group: BenchLaneGroup) => (laneBackendChoices.get(group) ? sessionBackendOf(laneBackendChoices.get(group)!.backend) : serverLaneBackend);
+    if (effective('api') !== effective('web')) {
+      throw new Error(`S0는 api·web 작업을 한 레인에 넣어 레인 백엔드가 갈릴 수 없습니다 (api: ${effective('api')}, web: ${effective('web')}). S1 이상에서 쓰세요`);
+    }
+  }
 
   // 1. 사전 확인 — 다른 프로젝트 컨테이너가 있으면 여기서 멈춘다
   const dockerMemTotal = preflight(args.force);
@@ -902,37 +970,16 @@ async function main(): Promise<void> {
       Object.assign(benchEnv, { B_STUDIO_MODE: 'commandcode' });
       if (choice.model) benchEnv.B_STUDIO_CMD_MODEL = choice.model;
     }
+    // 레인이 서버 모드와 다른 백엔드를 고르면 스튜디오가 세션별로 허용해야 한다(허용 목록은 서버가 정한다)
+    const laneSessionBackends = [...new Set([...laneBackendChoices.values()].map((lane) => sessionBackendOf(lane.backend)))];
+    if (laneSessionBackends.length > 0) benchEnv.B_STUDIO_BACKENDS = laneSessionBackends.join(',');
     Object.assign(process.env, benchEnv);
 
-    if (backend !== 'openai') {
-      // 4. 로컬 CLI 로그인 확인. 프롬프트를 보내지 않으므로 모델 사용량을 쓰지 않는다
-      if (backend === 'claude-code') {
-        const { preflightClaudeCode } = await import('@b-studio/agent');
-        const preflight = await preflightClaudeCode({ cwd: projectDir });
-        if (!preflight.ok) {
-          console.error(`로컬 Claude Code를 쓸 수 없습니다: ${preflight.reason}`);
-          process.exitCode = 3;
-          return;
-        }
-        console.log(`로컬 Claude Code 로그인 확인: ${preflight.account.subscriptionType ?? preflight.account.apiKeySource ?? '로그인 계정'} · 모델 ${requestedModel}`);
-      } else if (backend === 'codex') {
-        const { preflightCodex } = await import('@b-studio/agent');
-        const preflight = await preflightCodex();
-        if (!preflight.ok) {
-          console.error(`로컬 Codex를 쓸 수 없습니다: ${preflight.reason}`);
-          process.exitCode = 3;
-          return;
-        }
-        console.log(`로컬 Codex 로그인 확인 · 모델 ${choice.model ?? '계정 기본값'}`);
-      } else {
-        const { preflightCommandCode } = await import('@b-studio/agent');
-        const preflight = await preflightCommandCode();
-        if (!preflight.ok) {
-          console.error(`로컬 Command Code를 쓸 수 없습니다: ${preflight.reason}`);
-          process.exitCode = 3;
-          return;
-        }
-        console.log(`로컬 Command Code 로그인 확인 · 모델 ${choice.model ?? '계정 기본값'}`);
+    // 4. 로컬 CLI 로그인 확인. 쓰는 CLI마다 한 번씩(계획 기본 + 레인 백엔드). 프롬프트를 보내지 않으므로 모델 사용량을 쓰지 않는다
+    for (const cli of cliBackendsInUse(backend, laneBackendChoices)) {
+      if (!(await preflightCli(cli, projectDir))) {
+        process.exitCode = 3;
+        return;
       }
     }
 
@@ -958,6 +1005,7 @@ async function main(): Promise<void> {
       requestedModel,
       planModelId: planModelId(backend, requestedModel, MODEL_ID),
       topology,
+      laneBackends,
       integrationChecks: args.integrationChecks ?? false,
       contractsSource,
       ...(escalation.to ? { escalateTo: escalation.to } : {}),
@@ -1035,6 +1083,8 @@ async function main(): Promise<void> {
           tasks: tasks.map((task) => task.id),
           strategies,
           topology,
+          // 레인 그룹 → { backend, model }. 비어 있으면 모든 레인이 계획 기본(서버 모드)
+          laneBackends: Object.fromEntries(laneBackends),
           contracts: contractsSource,
           escalateTo: escalation.to,
           escalateAfter: escalation.after,
