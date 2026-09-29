@@ -76,6 +76,11 @@ pnpm bench:coordination --backend commandcode --model poolside/laguna-s-2.1-free
 # opencode: 이 PC에 설치된 OpenCode CLI. --model이 필수다(무료 Zen 모델은 내장 도구를 끈 b-studio 구성에서 거절된다)
 pnpm bench:coordination --backend opencode --model <로그인한 제공자의 모델> --tasks orders-list --strategies S0,S1 --repeats 1
 
+# 레인마다 다른 백엔드: api 레인은 Claude Code, web 레인은 Command Code. 통합 세션은 --backend(계획 기본)를 쓴다
+pnpm bench:coordination --backend claude-code --model sonnet \
+  --lane-backend api=claude-code --lane-backend web=commandcode \
+  --tasks orders-list --strategies S1 --repeats 1
+
 # 일부만 (openai)
 pnpm bench:coordination --backend openai --tasks orders-list,independent --strategies S0,S1 --repeats 2 --out /tmp/bench-run
 ```
@@ -89,10 +94,11 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
   - `--strategies`의 기본값은 `S0,S1`이고 P0는 넣어야 돕니다. `P0`는 `--backend claude-code`에서만 쓸 수 있습니다. `--dry`는 P0를 모릅니다(항상 `S0,S1`만 돕니다)
 - `--on-rate-limit stop|wait`(기본 `stop`), `--rate-limit-wait-minutes N`(기본 30)
 - `--context-clearing on|off`(기본 `off`) — 컨텍스트가 커지면 오래된 도구 결과를 묶어서 비웁니다(`B_STUDIO_CONTEXT_CLEARING=on`으로 넘어갑니다). `--backend openai`(API 루프)에서만 쓸 수 있습니다. 행의 `contextCleared`와 요약표의 "비운 도구 결과 중앙값"으로 몇 개를 비웠는지 봅니다
-- `--integration-checks`(기본 꺼짐) — 엮인 과제 3개의 **통합 게이트**에만, 과제 요청에 적힌 샘플 값이 web 화면에 보이는지 확인(`pageChecks.expectText`·`expectAnyText`)을 덧붙입니다(orders-list `김민수`, order-detail `문 앞에 놓아 주세요`, order-summary `45000`/`45,000`). 필드 이름은 쓰지 않습니다. 이 값들은 인수 검사(`runAcceptance`)와 **같은 값**이라, 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면 S4 수리가 시작되는가"를 재는 것입니다([#124](https://github.com/dj258255/b-studio/issues/124), E2 H10). 각 실행 행에 `integrationChecks: true/false`를 남기고 `meta.json`에도 기록합니다. 레인 게이트는 그대로이고 통합 게이트만 바뀝니다(서버 안에서만 넘기는 `createTaskPlan.integrationChecks`)
+- `--integration-checks`(기본 꺼짐) — 엮인 과제 3개의 **통합 게이트**에만, 과제 요청에 적힌 샘플 값이 web 화면에 보이는지 확인(`pageChecks.expectAllText`·`expectAnyText`)을 덧붙입니다(orders-list `김민수`·`이영희`·`박철수` 모두, order-detail `김민수`·`문 앞에 놓아 주세요` 모두, order-summary `45000`/`45,000` 중 하나). 인수 검사와 **같은 값을 같은 규칙(모두/하나라도)으로** 봅니다 — E4 첫 묶음에서 첫 값 하나만 보던 확인은 '김민수'만 보이는 화면을 통과시켰습니다. 필드 이름은 쓰지 않습니다. 이 값들은 인수 검사(`runAcceptance`)와 **같은 값**이라, 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면 S4 수리가 시작되는가"를 재는 것입니다([#124](https://github.com/dj258255/b-studio/issues/124), E2 H10). 각 실행 행에 `integrationChecks: true/false`를 남기고 `meta.json`에도 기록합니다. 레인 게이트는 그대로이고 통합 게이트만 바뀝니다(서버 안에서만 넘기는 `createTaskPlan.integrationChecks`)
 - `--contracts human|model`(기본 `human`) — S2에서 레인 사이 계약을 누가 쓰는지 정합니다. `model`은 계획 모델에게 한 번 받아 씁니다(S2에서만, `--backend openai|claude-code`에서만). 위의 "레인 사이 계약" 절을 보세요
-- `--escalate-to <모델>` — `claude-code`에서만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). 다른 백엔드에 주면 시작 전에 오류를 낸다
+- `--escalate-to <모델>` — claude-code 백엔드(계획 기본 또는 레인 중 하나)가 있을 때만. `--model`로 시작해 게이트가 **같은 실패 서명**을 `--escalate-after`번 내면 이 모델로 올린다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`). claude-code가 하나도 없는데 주면 시작 전에 오류를 낸다
 - `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
+- `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` — 반복할 수 있습니다. 레인 그룹은 `api`·`web`(레인의 첫 쓰기 경로)입니다. 모르는 그룹·백엔드면 시작 전에 오류를 냅니다. 쓰는 CLI는 시작 전에 각각 로그인을 확인합니다. 요약표 "레인 백엔드" 열(예 `api:claude-code web:commandcode`)과 행의 레인별 `backend`·`model`로 남습니다. `--backend`는 계획 기본(통합 세션)으로 남습니다
 - `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
 
 `--prices` 파일 형식(키는 모델 이름에 포함되면 매칭합니다. 예 `haiku-4-5`. 값은 100만 토큰당 달러이고, 예시는 형식만 보여 줍니다):
@@ -128,7 +134,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 - `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`, 계약 `contracts`)
 - `contracts/`: `--contracts model`일 때 모델이 쓴 계약 원문(`<과제>-r<반복>-<순번>.json`). 불일치 원인을 나중에 보려고 남깁니다.
-- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "API 환산 비용($)" 열이 있습니다.
+- `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "수리(시도/성공)"(S4가 통합 실패 뒤 모델 수리를 요청한 실행 수 / 수리 실행이 done으로 끝난 수), "API 환산 비용($)" 열이 있습니다.
 - `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`), 단가 파일 경로(`pricesPath`), git 커밋.
 
 행의 `escalation`은 `{ to, after, escalated, attempt? }`입니다. `to`·`after`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).

@@ -3,6 +3,7 @@ import type { Effort } from '@b-studio/agent';
 import { loadProject, SpecError } from '@b-studio/spec';
 import { agent, BACKENDS, type Backend } from './commands/agent';
 import { authToken } from './commands/auth';
+import { bootProbe } from './commands/boot-probe';
 import { deploy } from './commands/deploy';
 import { sandboxPrune } from './commands/sandbox';
 import { up } from './commands/up';
@@ -13,6 +14,7 @@ const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
+  studio boot-probe <프로젝트 경로> [--json]
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
   studio workflow <프로젝트 경로> [--pi-env]
@@ -26,6 +28,11 @@ verify:
   --allow-breaking   계약을 깨는 변경(필드·엔드포인트 삭제, 타입 변경)을 허용한다
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
   --logs             서비스 로그를 함께 출력한다
+
+boot-probe:
+  샌드박스를 띄워 기동 시간(ms)과 서비스별 받은·보낸 바이트를 재고 곧바로 내린다(keep 없음). 캐시 없음/있음 기동 비교에 쓴다
+  B_STUDIO_SANDBOX_BUILD_NO_CACHE=1을 함께 주면 이 프로젝트 이미지만 레이어 캐시 없이 빌드하고 스냅샷도 쓰지 않는다
+  --json   사람이 읽는 한 줄 대신 한 줄 JSON을 출력한다
 
 workflow:
   studio.yaml에서 강제할 단계, 테스트, 화면 확인, 보호 경로, 배포 조건을 보여 준다
@@ -78,12 +85,22 @@ async function main(argv: string[]): Promise<number> {
       volumes: { type: 'boolean', default: false },
       'pi-env': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
+      json: { type: 'boolean', default: false },
     },
   });
   const [command, dir, request] = positionals;
 
   if (command === 'up' && dir) {
     return up(await loadProject(dir), { keep: values.keep });
+  }
+
+  if (command === 'boot-probe' && dir) {
+    // 재는 명령이라 모르는 인자를 조용히 무시하지 않는다
+    if (request !== undefined) {
+      console.error(USAGE);
+      return 2;
+    }
+    return bootProbe(await loadProject(dir), { json: values.json });
   }
 
   if (command === 'deploy' && dir) {

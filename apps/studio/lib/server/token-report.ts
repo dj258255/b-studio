@@ -89,7 +89,11 @@ export function buildTokenReports(events: readonly StudioEvent[], pricing: Token
     if (event.type === 'run_finished' && event.runId === current.runId) {
       if (event.usage) current.usage = event.usage;
       // 모델별 사용량은 run_finished.metrics에 실려 온다(#98)
-      if (event.metrics?.usageByModel) current.usageByModel = event.metrics.usageByModel;
+      // 토큰을 하나도 쓰지 않은 모델(고정 계획의 가짜 클라이언트 'scripted' 등)은 표에 "단가 없음"으로만 보여 헷갈리므로 뺀다
+      if (event.metrics?.usageByModel) {
+        const used = Object.entries(event.metrics.usageByModel).filter(([, usage]) => usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens > 0);
+        if (used.length > 0) current.usageByModel = Object.fromEntries(used);
+      }
       current = undefined;
     }
   }

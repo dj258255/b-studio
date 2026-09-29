@@ -349,6 +349,11 @@ export const WorkflowPageCheckSchema = z
      */
     expectAnyText: z.array(z.string().min(1)).min(1).max(PAGE_EXPECT_ANY_MAX, `expectAnyText는 최대 ${PAGE_EXPECT_ANY_MAX}개까지 쓸 수 있습니다`).optional(),
     /**
+     * 모두 들어 있어야 통과하는 문구 목록(1~5개). 한 화면에 여러 값이 함께 보여야 할 때 쓴다(예: 샘플 주문 세 건의 고객 이름).
+     * expectText와 같은 자리에서 확인한다
+     */
+    expectAllText: z.array(z.string().min(1)).min(1).max(PAGE_EXPECT_ANY_MAX, `expectAllText는 최대 ${PAGE_EXPECT_ANY_MAX}개까지 쓸 수 있습니다`).optional(),
+    /**
      * api를 불러 jsonPath 값(문자열·숫자)을 꺼내, 그 값이 화면 글자에 있는지 확인한다. http·browser 모드 모두에서 쓴다.
      * 화면이 다른 필드 이름·모양을 읽고 있는 불일치를 사람이 값을 미리 몰라도 잡는다
      */
@@ -377,6 +382,40 @@ export const WorkflowPageCheckSchema = z
     if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
   });
 
+/** 자동 페이지 확인이 한 번에 열어 보는 페이지 수. 기본 5, 상한 10 */
+export const AUTO_PAGE_DEFAULT = 5;
+export const AUTO_PAGE_MAX = 10;
+/** 동적 세그먼트에 넣는 값과 세그먼트 이름. 경로 조각으로 안전한 문자만 받는다 */
+const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
+const SAMPLE_PARAM_VALUE = z.string().regex(SAFE_SEGMENT, '경로 조각으로 안전한 문자(영문·숫자·_·-)만 쓸 수 있습니다');
+
+/**
+ * 이번 실행에서 바뀐 Next.js 페이지를 게이트가 스스로 찾아 열어 보게 한다.
+ * 선언한 pageChecks는 "사람이 아는 화면"만 보므로, 새로 만든 페이지가 500을 내도 통과했다(E2 order-summary).
+ */
+export const AutoPageChecksSchema = z
+  .object({
+    /** 바뀐 페이지를 찾을 관리형 서비스. 템플릿이 nextjs여야 한다(load에서 확인) */
+    service: z.string().regex(NAME),
+    mode: z.enum(['http', 'browser']).default('http'),
+    expectStatus: z.number().int().min(100).max(599).default(200),
+    /** 한 번에 열어 보는 페이지 수 */
+    maxPages: z.number().int().min(1).max(AUTO_PAGE_MAX, `maxPages는 최대 ${AUTO_PAGE_MAX}개까지 쓸 수 있습니다`).default(AUTO_PAGE_DEFAULT),
+    /** 동적 세그먼트 `[id]`에 넣을 값. 값이 없는 세그먼트가 있는 라우트는 건너뛴다 */
+    sampleParams: z.record(z.string(), SAMPLE_PARAM_VALUE).optional(),
+    /** browser 모드에서만. 자동으로 연 페이지를 확인할 창 크기 */
+    viewport: ViewportSchema.optional(),
+  })
+  .superRefine((config, ctx) => {
+    if (config.viewport && config.mode !== 'browser') {
+      ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
+    }
+    // record의 키는 zod가 잡지 않아(값만 검사한다) 여기서 세그먼트 이름 규칙을 본다. 경로에 들어갈 수 없는 이름은 미리 막는다
+    for (const name of Object.keys(config.sampleParams ?? {})) {
+      if (!SAFE_SEGMENT.test(name)) ctx.addIssue({ code: 'custom', path: ['sampleParams', name], message: '세그먼트 이름은 영문·숫자·_·-만 쓸 수 있습니다' });
+    }
+  });
+
 /** 모델 프롬프트가 아니라 실행기에서 적용하는 프로젝트별 워크플로 정책 */
 export const WorkflowSchema = z
   .object({
@@ -388,6 +427,8 @@ export const WorkflowSchema = z
     pageChecks: z.array(WorkflowPageCheckSchema).optional(),
     /** required에 concurrency_check를 넣으면 최소 하나가 필요하다. 선언적 동시 요청과 결과 불변식으로 정합성을 본다 */
     concurrencyChecks: z.array(WorkflowConcurrencyCheckSchema).max(MAX_CONCURRENCY_CHECKS, `concurrencyChecks는 최대 ${MAX_CONCURRENCY_CHECKS}개까지 쓸 수 있습니다`).optional(),
+    /** 이번 실행에서 바뀐 Next.js 페이지를 게이트가 스스로 찾아 열어 본다(선택). example 프로젝트에는 켜지 않는다 */
+    autoPageChecks: AutoPageChecksSchema.optional(),
     /** review 단계에서 한 번의 요청이 바꿀 수 있는 파일 수 상한. 넘으면 나눠서 요청하게 한다 */
     maxChangedFiles: z.number().int().min(1).optional(),
     /** 이 목록 밖의 도구는 모델이 요청해도 실행하지 않는다 */
@@ -499,6 +540,7 @@ export type ConcurrencyExpect = z.infer<typeof ConcurrencyExpectSchema>;
 export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 export type WorkflowPageExpectFromApi = z.infer<typeof WorkflowPageExpectFromApiSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
+export type AutoPageChecks = z.infer<typeof AutoPageChecksSchema>;
 export type WorkflowPageCompare = z.infer<typeof WorkflowPageCompareSchema>;
 export type CompareMask = z.infer<typeof CompareMaskSchema>;
 export type PolicyRule = z.infer<typeof PolicyRuleSchema>;

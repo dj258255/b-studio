@@ -40,6 +40,13 @@ CI는 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)을 기준으로 
 | 인증과 한도 | token/proxy 모드, 실제 모델 | 세션 권한, 사용자별·세션별 토큰 차단 확인 |
 | 동시 요청 확인(`concurrency_check`) | 가짜 요청 함수 단위 테스트 | 10개를 실제로 동시에 보냄(최대 동시 수 확인), 성공 건수·상태 분포·`then` 값 판정, 출처 밖 경로 거부, 타임아웃 실패. **실제 Docker 샌드박스에서는 아직 돌리지 않음** |
 | 화면 로드 시간 예산(`maxLoadMs`) | 가짜 브라우저 러너 단위 테스트 + 실제 Chromium(`measureLoad`) | 워밍업 뒤 로드 측정, 예산 초과 실패 문구(`로드 2,340ms (예산 2,000ms)`), 예산을 적은 확인만 재어 `metrics.loadMs`에 기록(예산이 없으면 워밍업·측정 없음), 재지 못하면 실패 |
+| Command Code 백엔드 | 실제 계정(계정 기본 모델), `bench:coordination --backend commandcode --tasks independent --strategies S0` | 1차: 같은 레인 두 번째 작업이 `No session … found to resume`으로 실패(실행마다 임시 HOME·작업 폴더를 지워 세션을 잃음). 세션별 고정 상태 폴더로 고친 2차: api 165초·web 44초(앞 세션 이어받음), 인수 검사 2/2, 남은 컨테이너 0 ([#61](https://github.com/dj258255/b-studio/pull/61), [트러블슈팅 47](troubleshooting.md)) |
+| PR 미리보기·계획 이슈화 | 로컬 Gitea 1.27.3(Docker)에 `repository.ts`의 실제 함수를 직접 호출 | 이슈 3개 생성, `Closes #4`·`#5`가 든 PR 생성, 같은 PR 재요청 시 409 → 기존 PR 재사용, PR 병합 뒤 이슈 #4·#5 `closed`. Gitea는 하위 이슈 API가 없어 `{supported:false}` → 체크리스트로 대체. 스튜디오 화면 흐름은 [#128](https://github.com/dj258255/b-studio/issues/128)로 남김 |
+| PR 미리보기 화면 흐름 | 데모 모드 스튜디오 + 실제 브라우저 + 로컬 Gitea 1.27.3, 원본 프로젝트의 origin을 Gitea로 | 세션 시작 → 되묻기에 답 → 게이트 통과 체크포인트 → "올리고 PR 만들기" 미리보기에서 이슈 #1을 Gitea에서 조회(제목·열림), 필수 단계·체크포인트 밖 변경 확인 → PR 생성(본문 첫 줄 `Closes #1`) → Gitea에서 병합하자 이슈 #1 `closed`. 확인 중 #145가 만든 회귀(데모 서버에서 세션을 만들 수 없음)를 찾아 고침. 작업 계획을 화면에서 만드는 것은 API 모드(유료 키)에서만 되어 계획 이슈화 화면 흐름은 확인하지 못함(실제 함수로는 확인) |
+| 토큰 탭 모델별 비용 | 데모 모드 스튜디오 + 실제 브라우저, 로컬 확인용으로 가공한 세션 기록 복사본 | 모델별 표(haiku $0.0428, sonnet $0.0757), 합계 $0.1184·"모델별 단가", 승격 줄 표시. 토큰 0인 `scripted` 행이 "단가 없음"으로 남는 문제를 찾아 고침([#141](https://github.com/dj258255/b-studio/pull/141)). 390px 확인은 창 크기 조절이 적용되지 않아 못 함 |
+| 기준선·도구 결과 예산·승격 | 실험 E3, 실제 Docker·로컬 Claude Code 구독, 27회 | 그냥 Claude Code(P0) 9/9·성공 1건당 토큰 217,711, b-studio S0 9/9·437,427, Haiku 시작 6/9·승격 0회. S0 캐시 읽기는 E1보다 −34% ([보고서](experiments/2026-09-29-e3-baseline-budget-escalation.md)) |
+| 의존성 캐시 효과 | `pnpm studio boot-probe examples/orders --json`, 실제 Docker. 캐시 없음은 b-studio 공유 캐시 볼륨만 지우고 `B_STUDIO_SANDBOX_BUILD_NO_CACHE=1`(다른 프로젝트 캐시는 그대로) | 캐시 없음 58.8초·web 수신 114MB → 캐시 있음 22.6초·4.46MB(수신 −96%, 시간 −62%). 이미지 빌드 단계의 다운로드는 컨테이너 수신에 잡히지 않음 |
+| 계획 모델 계약·수리·승격 | 실험 E4, 실제 Docker·로컬 Claude Code 구독, 27회 | 모델 계약 S2 9/9(계약 호출 토큰 0.9%), 통합 확인을 켠 S4 8/9·수리 4회, Haiku 시작 승격 4회·1/9 ([보고서](experiments/2026-09-29-e4-repair-escalation-model-contracts.md)) |
 
 ## 동시성·부하 확인
 

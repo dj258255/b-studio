@@ -9,10 +9,10 @@
  */
 import type { AgentEvent, AgentUsage } from '@b-studio/agent';
 import type { FleetView } from '@/lib/fleet-types';
-import type { SessionSnapshot, StudioEvent } from '@/lib/studio-events';
+import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-events';
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
-import { overviewSessions } from './sessions';
+import { overviewSessions, sessionBackend } from './sessions';
 import { listTaskPlans } from './task-plans';
 
 export type AgentKind = 'session' | 'lane' | 'fleet';
@@ -36,6 +36,8 @@ export interface AgentItem {
   owner?: string;
   state: AgentState;
   attention?: AgentAttention;
+  /** 이 항목이 실제로 쓰는 백엔드(레인은 그 레인이 고른 backend). 알 수 없으면 없다 */
+  backend?: SessionMode;
   lastActivityAt: string;
   /** 실행 중일 때 요청 시작부터 지난 시간 */
   runningForMs?: number;
@@ -89,6 +91,8 @@ interface AgentRow {
   fallbackAttention?: AgentAttention;
   /** 계획 승인 대기(세션 밖 사실) */
   approval?: boolean;
+  /** 이 항목이 쓰는 백엔드 */
+  backend?: SessionMode;
   /** 스냅샷이 없을 때의 토큰 */
   tokens?: AgentUsage;
 }
@@ -138,6 +142,8 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         ...(source
           ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}) }
           : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane) }),
+        // 레인은 그 레인이 고른 백엔드(세션이 있으면 스냅샷)를 보여 준다
+        backend: source ? sessionBackend(source.snapshot) : lane.backend,
       });
     }
   }
@@ -157,6 +163,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         ...(source
           ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}) }
           : { updatedAt: member.finishedAt ?? member.startedAt ?? fleet.createdAt, fallbackState: fleetMemberState(member.status), fallbackAttention: fleetMemberAttention(member.status) }),
+        backend: source ? sessionBackend(source.snapshot) : undefined,
         tokens: source?.snapshot.tokens ?? member.usage,
       });
     }
@@ -175,6 +182,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
       snapshot: source.snapshot,
       recent: source.recent,
       updatedAt: source.updatedAt,
+      backend: sessionBackend(source.snapshot),
       ...(source.runningSince ? { runningSince: source.runningSince } : {}),
     });
   }
@@ -204,6 +212,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.owner ? { owner: row.owner } : {}),
     state,
     ...(attention ? { attention } : {}),
+    ...(row.backend ? { backend: row.backend } : {}),
     lastActivityAt: row.updatedAt,
     ...(runningForMs !== undefined ? { runningForMs } : {}),
     ...(tokens ? { tokens } : {}),

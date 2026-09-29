@@ -43,8 +43,8 @@ const fake = vi.hoisted(() => ({
   /** findProject가 돌려주는 프로젝트. 시크릿 가림 테스트는 여기에 secrets를 넣고 환경 변수를 세운다 */
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
-  /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지 확인한다 */
-  sessionOptions: [] as Array<{ modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
+  /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지, 레인에만 backend가 붙는지 확인한다 */
+  sessionOptions: [] as Array<{ modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
   /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
   bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
@@ -129,7 +129,7 @@ vi.mock('./projects', () => ({
 }));
 
 vi.mock('./sessions', () => ({
-  createSession: async (_projectId: string, _owner: string, _workspace: string, options: { modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {}) => {
+  createSession: async (_projectId: string, _owner: string, _workspace: string, options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {}) => {
     fake.sessionOptions.push(options);
     const id = `session-${++fake.counter}`;
     // 두 레인 세션이 모두 멈춘 뒤에 만들어진 세션이면 통합 세션이다
@@ -479,6 +479,35 @@ describe('작업 분해 실행', () => {
     expect(fake.sessionOptions).toHaveLength(3);
     expect(fake.sessionOptions.slice(0, 2).every((options) => options.extraPageChecks === undefined)).toBe(true);
     expect(fake.sessionOptions[2]!.extraPageChecks).toEqual(pageChecks);
+  });
+
+  it('고정 계획의 레인 backend·model로 레인 세션을 만들고, 레인 뷰에 남긴다', async () => {
+    const lane = (id: string, paths: string[], backend: string, model?: string) => ({ ...task(id, paths), backend, ...(model ? { model } : {}) });
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' }, c: { 'web/c/one.md': 'c' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: '레인 백엔드',
+      modelId: 'model-a',
+      owner: 'kim',
+      presetPlan: {
+        tasks: [lane('a', ['web/a'], 'claude-code', 'sonnet'), lane('b', ['web/b'], 'commandcode'), lane('c', ['web/c'], 'opencode', 'opencode/mimo-v2.6-flash-free')],
+      },
+    });
+
+    expect(plan.status).toBe('done');
+    // 레인 세션은 그 레인의 backend로 만들고, 모델을 고른 CLI 레인은 그 모델을 세션에 싣는다(modelId)
+    expect(fake.sessionOptions.find((options) => options.backend === 'claude-code')?.modelId).toBe('sonnet');
+    expect(fake.sessionOptions.find((options) => options.backend === 'commandcode')?.modelId).toBeUndefined();
+    expect(fake.sessionOptions.find((options) => options.backend === 'opencode')?.modelId).toBe('opencode/mimo-v2.6-flash-free');
+    // 통합 세션은 계획 기본(서버 모드)이라 backend가 없다
+    expect(fake.sessionOptions[3]!.backend).toBeUndefined();
+    // 레인 뷰에 backend·model이 남아 화면·서버 기록에서 볼 수 있다
+    expect(plan.lanes.map((item) => [item.backend, item.model])).toEqual([
+      ['claude-code', 'sonnet'],
+      ['commandcode', undefined],
+      ['opencode', 'opencode/mimo-v2.6-flash-free'],
+    ]);
   });
 
   it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {

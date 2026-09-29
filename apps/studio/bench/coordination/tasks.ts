@@ -14,7 +14,7 @@
  *
  *  - P0 기준선   작업 분해 없이 Claude Code 하나가 과제 전체를 한 번에 한다(비교 기준, `--backend claude-code` 전용)
  */
-import type { Topology } from '@b-studio/agent';
+import type { PlanBackend, Topology } from '@b-studio/agent';
 import type { WorkflowPageCheck } from '@b-studio/spec';
 
 export type Strategy = 'P0' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5';
@@ -61,7 +61,14 @@ export interface PlannedTask {
   request: string;
   paths: string[];
   dependsOn: string[];
+  /** 이 작업을 돌릴 세션 백엔드(--lane-backend). 없으면 계획 기본(서버 모드) */
+  backend?: PlanBackend;
+  /** 이 작업에 고정할 모델(백엔드마다 뜻이 다르다) */
+  model?: string;
 }
+
+/** 레인 그룹(첫 쓰기 경로) → 그 레인 세션의 backend·model. run.ts가 --lane-backend를 해석해 만든다 */
+export type LaneBackends = ReadonlyMap<string, { backend: PlanBackend; model?: string }>;
 
 /**
  * 과제 4개. api 요청에는 경로와 샘플 값을 적고, web 요청에는 화면 경로만 적는다(api 경로·필드 이름은 적지 않는다).
@@ -176,8 +183,11 @@ export interface PlannedPlan {
  * - S0 직렬화: web이 api에 의존 → 한 레인에서 api 다음 web이 차례로 돈다
  * - S1 격리 병렬: 둘 다 의존 없음 → 다른 레인에서 동시에 돈다(공유 없음)
  * - S2~S5: 레인 둘(격리 병렬)에 조율 설정을 얹는다. topology는 S3에서만 쓴다
+ *
+ * laneBackends(레인 그룹 → backend·model)를 주면 그 그룹의 레인 작업에 backend·model을 싣는다. 한 레인은 한 세션이라
+ * 같은 레인의 작업은 같은 backend·model을 쓴다(레인 그룹이 다르므로 api·web이 각각 다르다).
  */
-export function planFor(task: BenchTask, strategy: Strategy, topology: Topology = 'mesh'): PlannedPlan {
+export function planFor(task: BenchTask, strategy: Strategy, topology: Topology = 'mesh', laneBackends?: LaneBackends): PlannedPlan {
   // P0는 작업 분해 없이 Claude Code 하나가 과제 전체를 한다(plain-baseline.ts). 레인 계획을 만들지 않는다
   if (strategy === 'P0') throw new Error('P0(그냥 Claude Code)는 작업 분해 계획을 쓰지 않습니다');
 
@@ -191,10 +201,16 @@ export function planFor(task: BenchTask, strategy: Strategy, topology: Topology 
         : strategy === 'S4' || strategy === 'S5'
           ? { strategy }
           : undefined;
+  // 레인 그룹은 작업의 첫 쓰기 경로다(laneGroup과 같은 기준). 그룹에 backend가 있으면 그 작업에 싣는다
+  const withBackend = (planned: PlannedTask): PlannedTask => {
+    const group = planned.paths[0];
+    const choice = group ? laneBackends?.get(group) : undefined;
+    return choice ? { ...planned, backend: choice.backend, ...(choice.model ? { model: choice.model } : {}) } : planned;
+  };
   return {
     tasks: [
-      { id: apiId, title: task.api.title, request: `[task:${apiId}] ${task.api.request}`, paths: ['api'], dependsOn: [] },
-      { id: webId, title: task.web.title, request: `[task:${webId}] ${task.web.request}`, paths: ['web'], dependsOn: strategy === 'S0' ? [apiId] : [] },
+      withBackend({ id: apiId, title: task.api.title, request: `[task:${apiId}] ${task.api.request}`, paths: ['api'], dependsOn: [] }),
+      withBackend({ id: webId, title: task.web.title, request: `[task:${webId}] ${task.web.request}`, paths: ['web'], dependsOn: strategy === 'S0' ? [apiId] : [] }),
     ],
     ...(coordination ? { coordination } : {}),
   };
@@ -219,14 +235,17 @@ export function missingCoordinationTools(strategy: Strategy, allowedTools: reado
  * **인수 검사(`runAcceptance`)의 기대값과 같다.** 그래서 이 확인은 "통합 게이트가 인수 검사와 같은 신호를 보게 되면
  * (게이트가 실패하면) S4 수리가 시작되는가"를 재는 것이다 — H10을 그렇게 판정한다.
  *
+ * 인수 검사가 여러 값을 모두 요구하면 확인도 모두 요구한다(expectAllText). E4 첫 묶음에서 첫 값 하나만 보는 확인이
+ * '김민수'는 있고 '이영희'·'박철수'가 없는 화면을 통과시켰다 — 확인이 인수 검사보다 약하면 수리할 계기를 놓친다.
+ *
  * mode는 http로 둔다(web 요청이 "서버에서 요청할 때마다 새로" 받으라고 한다). 독립 과제는 api↔web을 엮지 않으므로 확인을 두지 않는다.
  */
 export function integrationChecksFor(task: BenchTask): { pageChecks: WorkflowPageCheck[] } | undefined {
   switch (task.id) {
     case 'orders-list':
-      return { pageChecks: [sampleValuePageCheck('/orders', { expectText: '김민수' })] };
+      return { pageChecks: [sampleValuePageCheck('/orders', { expectAllText: ['김민수', '이영희', '박철수'] })] };
     case 'order-detail':
-      return { pageChecks: [sampleValuePageCheck('/orders/1', { expectText: '문 앞에 놓아 주세요' })] };
+      return { pageChecks: [sampleValuePageCheck('/orders/1', { expectAllText: ['김민수', '문 앞에 놓아 주세요'] })] };
     case 'order-summary':
       return { pageChecks: [sampleValuePageCheck('/dashboard', { expectAnyText: ['45000', '45,000'] })] };
     default:
@@ -235,6 +254,6 @@ export function integrationChecksFor(task: BenchTask): { pageChecks: WorkflowPag
 }
 
 /** web 페이지(service: web)에 과제의 샘플 값이 그려지는지 보는 http 확인 하나 */
-function sampleValuePageCheck(path: string, expect: Pick<WorkflowPageCheck, 'expectText' | 'expectAnyText'>): WorkflowPageCheck {
+function sampleValuePageCheck(path: string, expect: Pick<WorkflowPageCheck, 'expectAllText' | 'expectAnyText'>): WorkflowPageCheck {
   return { service: 'web', path, mode: 'http', expectStatus: 200, ...expect, allowConsoleErrors: false, noHorizontalScroll: false };
 }

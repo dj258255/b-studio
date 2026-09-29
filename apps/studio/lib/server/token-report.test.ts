@@ -166,6 +166,16 @@ describe('buildTokenReports', () => {
     expect(report!.escalation).toEqual({ from: 'haiku', to: 'sonnet', attempt: 2 });
   });
 
+  it('토큰을 쓰지 않은 모델(고정 계획의 scripted)은 모델별 표와 비용에서 뺀다', () => {
+    const events = modelEvents();
+    const finished = events.find((event) => event.type === 'run_finished') as Extract<StudioEvent, { type: 'run_finished' }>;
+    finished.metrics!.usageByModel!.scripted = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const [report] = buildTokenReports(events, { byModel: { haiku: prices(1, 5), sonnet: prices(3, 15) } });
+    expect(Object.keys(report!.usageByModel ?? {})).toEqual(['haiku', 'sonnet']);
+    expect(report!.priceNote).toBeUndefined();
+    expect(report!.priceSource).toBe('by-model');
+  });
+
   it('모델별 단가 표가 있으면 모델별로 계산하고(단일 단가보다 우선) 모델별 비용도 남긴다', () => {
     const byModel = { haiku: prices(1, 5), sonnet: prices(3, 15) };
     const [report] = buildTokenReports(modelEvents(), { byModel, single: prices(100, 100) });

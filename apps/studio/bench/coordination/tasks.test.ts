@@ -109,14 +109,38 @@ describe('P0 기준선 전략', () => {
   });
 });
 
+describe('레인 백엔드(--lane-backend)', () => {
+  it('laneBackends를 주면 그 그룹 레인 작업에만 backend·model을 싣는다', () => {
+    const laneBackends = new Map([
+      ['api', { backend: 'claude-code' as const, model: 'sonnet' }],
+      ['web', { backend: 'commandcode' as const }],
+    ]);
+    const plan = planFor(BENCH_TASKS[0]!, 'S1', 'mesh', laneBackends);
+    expect(plan.tasks.map((task) => [task.paths[0], task.backend, task.model])).toEqual([
+      ['api', 'claude-code', 'sonnet'],
+      ['web', 'commandcode', undefined],
+    ]);
+    // 주지 않으면 지금과 같다(backend 없음 → 서버 모드)
+    expect(planFor(BENCH_TASKS[0]!, 'S1').tasks.every((task) => task.backend === undefined)).toBe(true);
+  });
+
+  it('레인 백엔드를 실은 계획도 planLanes 검증을 통과한다(S1)', () => {
+    const laneBackends = new Map([
+      ['api', { backend: 'claude-code' as const }],
+      ['web', { backend: 'commandcode' as const }],
+    ]);
+    expect(() => planLanes(planFor(BENCH_TASKS[0]!, 'S1', 'mesh', laneBackends))).not.toThrow();
+  });
+});
+
 describe('integrationChecksFor (통합 게이트 샘플 값 확인)', () => {
   const task = (id: string) => BENCH_TASKS.find((candidate) => candidate.id === id)!;
 
   it('엮인 과제마다 과제 요청의 샘플 값을 web 화면에서 확인한다(필드 이름을 쓰지 않는다)', () => {
     expect(integrationChecksFor(task('orders-list'))?.pageChecks).toEqual([
-      { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, expectText: '김민수', allowConsoleErrors: false, noHorizontalScroll: false },
+      { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, expectAllText: ['김민수', '이영희', '박철수'], allowConsoleErrors: false, noHorizontalScroll: false },
     ]);
-    expect(integrationChecksFor(task('order-detail'))?.pageChecks[0]).toMatchObject({ path: '/orders/1', mode: 'http', expectText: '문 앞에 놓아 주세요' });
+    expect(integrationChecksFor(task('order-detail'))?.pageChecks[0]).toMatchObject({ path: '/orders/1', mode: 'http', expectAllText: ['김민수', '문 앞에 놓아 주세요'] });
     expect(integrationChecksFor(task('order-summary'))?.pageChecks[0]).toMatchObject({ path: '/dashboard', mode: 'http', expectAnyText: ['45000', '45,000'] });
     // 필드 이름 대신 샘플 값만 본다
     for (const coupled of BENCH_TASKS.filter((candidate) => candidate.coupled)) {
@@ -128,15 +152,14 @@ describe('integrationChecksFor (통합 게이트 샘플 값 확인)', () => {
     expect(integrationChecksFor(task('independent'))).toBeUndefined();
   });
 
-  it('확인 값은 그 과제의 web 인수 검사 기대값과 같다(H10 판정 기준)', () => {
+  it('확인은 그 과제의 web 인수 검사와 같은 값을 같은 규칙(모두/하나라도)으로 본다(H10 판정 기준)', () => {
+    // 확인이 인수 검사보다 약하면(값 하나만 보면) 인수 검사가 잡는 실패를 게이트가 통과시켜 수리할 계기를 놓친다
     for (const coupled of BENCH_TASKS.filter((candidate) => candidate.coupled)) {
       const check = integrationChecksFor(coupled)!.pageChecks[0]!;
       const acceptance = coupled.acceptance.find((item) => item.service === 'web')!;
       expect(acceptance.path, coupled.id).toBe(check.path);
-      const values = check.expectAnyText ?? [check.expectText!];
-      const expected = acceptance.expectAny ?? acceptance.expectAll ?? [];
-      expect(values.length, coupled.id).toBeGreaterThan(0);
-      expect(values.every((value) => expected.includes(value)), coupled.id).toBe(true);
+      if (acceptance.expectAll) expect(check.expectAllText, coupled.id).toEqual(acceptance.expectAll);
+      if (acceptance.expectAny) expect(check.expectAnyText, coupled.id).toEqual(acceptance.expectAny);
     }
   });
 });

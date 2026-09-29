@@ -3,12 +3,16 @@ import {
   assertContractsBackend,
   assertContractsStrategy,
   assertPlainBaselineBackend,
+  cliBackendsInUse,
+  parseLaneBackend,
+  parseLaneBackends,
   planModelId,
   resolveBackend,
   resolveContextClearing,
   resolveContractsSource,
   resolveEscalation,
   resolveRateLimitPolicy,
+  sessionBackendOf,
 } from './backends';
 
 describe('resolveBackend', () => {
@@ -105,11 +109,11 @@ describe('resolveEscalation', () => {
   });
 
   it('승격을 지원하지 않는 백엔드에 --escalate-to를 주면 시작 전에 오류를 낸다', () => {
-    expect(() => resolveEscalation({ backend: 'openai', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
-    expect(() => resolveEscalation({ backend: 'codex', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+    expect(() => resolveEscalation({ backend: 'openai', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 claude-code/);
+    expect(() => resolveEscalation({ backend: 'codex', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 claude-code/);
     // Command Code·OpenCode 러너도 승격을 지원하지 않는다. 조용히 무시하지 않고 시작 전에 거부한다
-    expect(() => resolveEscalation({ backend: 'commandcode', escalateTo: 'deepseek/deepseek-v4-flash' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
-    expect(() => resolveEscalation({ backend: 'opencode', escalateTo: 'opencode/mimo-v2.6-flash-free' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+    expect(() => resolveEscalation({ backend: 'commandcode', escalateTo: 'deepseek/deepseek-v4-flash' })).toThrow(/--escalate-to는 claude-code/);
+    expect(() => resolveEscalation({ backend: 'opencode', escalateTo: 'opencode/mimo-v2.6-flash-free' })).toThrow(/--escalate-to는 claude-code/);
   });
 
   it('--escalate-after는 1 이상의 정수여야 한다', () => {
@@ -154,5 +158,42 @@ describe('레인 사이 계약(--contracts)', () => {
     // human이면 백엔드를 가리지 않는다
     expect(() => assertContractsBackend('human', 'commandcode')).not.toThrow();
     expect(() => assertContractsBackend('human', 'opencode')).not.toThrow();
+  });
+});
+
+describe('레인 백엔드(--lane-backend)', () => {
+  it('레인 그룹=백엔드[:모델]을 해석하고, 모르는 그룹·백엔드는 거부한다', () => {
+    expect(parseLaneBackend('api=claude-code:sonnet')).toEqual({ group: 'api', backend: 'claude-code', model: 'sonnet' });
+    expect(parseLaneBackend('web=commandcode')).toEqual({ group: 'web', backend: 'commandcode' });
+    expect(parseLaneBackend('web=opencode:opencode/mimo-v2.6-flash-free')).toEqual({ group: 'web', backend: 'opencode', model: 'opencode/mimo-v2.6-flash-free' });
+    expect(parseLaneBackend(' api = openai ')).toEqual({ group: 'api', backend: 'openai' });
+    expect(() => parseLaneBackend('api')).toThrow(/형식/);
+    expect(() => parseLaneBackend('db=codex')).toThrow(/모르는 레인 그룹/);
+    expect(() => parseLaneBackend('api=gemini')).toThrow(/알 수 없는 레인 백엔드/);
+  });
+
+  it('반복해 준 레인 백엔드를 모으고, 같은 그룹이 두 번이면 거부한다', () => {
+    const map = parseLaneBackends(['api=claude-code:sonnet', 'web=commandcode']);
+    expect([...map.keys()]).toEqual(['api', 'web']);
+    expect(map.get('api')).toEqual({ group: 'api', backend: 'claude-code', model: 'sonnet' });
+    expect(() => parseLaneBackends(['api=claude-code', 'api=codex'])).toThrow(/중복/);
+    expect(parseLaneBackends(undefined).size).toBe(0);
+  });
+
+  it('openai는 api 세션이고, 쓰는 CLI만 로그인 확인 목록에 모은다', () => {
+    expect(sessionBackendOf('openai')).toBe('api');
+    expect(sessionBackendOf('commandcode')).toBe('commandcode');
+    expect(sessionBackendOf('opencode')).toBe('opencode');
+    const lanes = parseLaneBackends(['api=claude-code', 'web=commandcode']);
+    expect(cliBackendsInUse('openai', lanes).sort()).toEqual(['claude-code', 'commandcode']);
+    expect(cliBackendsInUse('codex', parseLaneBackends([]))).toEqual(['codex']);
+    // opencode 레인도 로그인 확인 목록에 들어간다(레인마다 다른 백엔드)
+    expect(cliBackendsInUse('opencode', parseLaneBackends([]))).toEqual(['opencode']);
+    expect(cliBackendsInUse('openai', parseLaneBackends(['web=opencode:opencode/mimo-v2.6-flash-free']))).toEqual(['opencode']);
+  });
+
+  it('claude-code 레인이 하나라도 있으면 --escalate-to를 허용한다', () => {
+    expect(resolveEscalation({ backend: 'openai', laneBackends: ['claude-code'], escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
+    expect(() => resolveEscalation({ backend: 'openai', laneBackends: ['codex'], escalateTo: 'sonnet' })).toThrow(/claude-code/);
   });
 });

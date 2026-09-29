@@ -401,9 +401,15 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
     }
     return fail(plan, `작업 계획을 만들지 못했습니다: ${describe(error)}`);
   }
-  plan.lanes = lanes.map((lane) => ({
+  // 모델이 만든 계획(API 모드)은 backend를 쓰지 않는다 — 계획 프롬프트를 바꾸지 않았으므로 모델이 실수로 넣어도 무시한다.
+  // 고정 계획(presetPlan, 서버 안에서만)만 backend·model을 쓴다
+  const laneTasks = preset === undefined ? lanes.map((lane) => ({ ...lane, tasks: lane.tasks.map((task) => ({ ...task, backend: undefined, model: undefined })) })) : lanes;
+  plan.lanes = laneTasks.map((lane) => ({
     id: lane.id,
     paths: lane.paths,
+    // 레인이 고른 백엔드·모델을 화면·기록에 남긴다(레인 작업들이 공유한다)
+    ...(lane.tasks[0]?.backend ? { backend: lane.tasks[0].backend } : {}),
+    ...(lane.tasks[0]?.model ? { model: lane.tasks[0].model } : {}),
     status: 'queued',
     tasks: lane.tasks.map((task) => ({ ...task, status: 'queued' })),
   }));
@@ -474,7 +480,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
   persist(plan);
   const bootStarted = performance.now();
   try {
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', sessionModelOption(plan.modelId));
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', laneSessionOption(plan, lane));
     lane.sessionId = snapshot.id;
     persist(plan);
     await waitForReady(snapshot.id);
@@ -627,6 +633,21 @@ async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
 function sessionModelOption(modelId: string): { modelId?: string } {
   const mode = process.env.B_STUDIO_MODE?.trim();
   return mode === 'commandcode' || mode === 'opencode' ? {} : { modelId };
+}
+
+/**
+ * 레인 세션을 만들 때의 옵션. 레인 작업이 backend·model을 실었으면 그것으로 세션을 만든다(레인마다 다른 백엔드).
+ * 없으면 기존처럼 계획의 modelId와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
+ */
+function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; backend?: string } {
+  const head = lane.tasks[0];
+  const backend = head?.backend;
+  if (!backend) return sessionModelOption(plan.modelId);
+  // api는 모델 레지스트리 id를, commandcode·opencode는 그 CLI의 모델 id를 세션에 넘긴다. claude-code·codex도 고른 모델을 세션에 실어
+  // 러너가 그 값을 쓰게 한다(없으면 환경 변수 = 계획 기본)
+  if (backend === 'commandcode' || backend === 'opencode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
+  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId };
+  return { backend, ...(head.model ? { modelId: head.model } : {}) };
 }
 
 function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number): string {

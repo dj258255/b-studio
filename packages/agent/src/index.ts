@@ -87,9 +87,11 @@ export {
   isInScope,
   MAX_PLAN_LANES,
   MAX_PLAN_TASKS,
+  PlanBackendSchema,
   planLanes,
   requestTaskPlan,
   TaskPlanError,
+  type PlanBackend,
   type PlannedTask,
   type TaskLane,
 } from './task-plan';
