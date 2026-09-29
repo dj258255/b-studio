@@ -100,6 +100,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
+import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, routingDecision } from './model-registry';
@@ -139,6 +140,11 @@ interface ActiveRun {
   stopReason?: 'user' | 'budget';
   /** 한도로 멈췄을 때 어느 한도인지 */
   limitKind?: 'session' | 'user';
+  /**
+   * 실행 중 지시 큐. 사람이 보는 단일 세션이 이 실행을 시작했을 때만 있다(작업 분해 레인·플릿은 없다).
+   * 러너가 다음 모델 호출 직전에 꺼내 가고, 남은 지시는 실행이 끝날 때 버림으로 기록한다
+   */
+  steering?: SteeringQueue;
 }
 
 interface Session {
@@ -492,6 +498,7 @@ export function sendMessage(
     intent = 'build',
     writableScope,
     scriptedTurns,
+    steering,
     interactive = false,
   }: {
     allowBreaking: boolean;
@@ -501,6 +508,8 @@ export function sendMessage(
     writableScope?: readonly string[];
     /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
     scriptedTurns?: ScriptedTurn[];
+    /** 실행 중 지시를 받을 실행인지. 사람이 보는 단일 세션(메시지 라우트)만 켠다. 레인·플릿·벤치는 켜지 않는다 */
+    steering?: boolean;
     /** 서버 안에서만 쓴다. true면 되묻기(ask_user) 도구를 넣는다. 사람이 보낸 단일 세션 요청(messages 라우트)만 켠다 */
     interactive?: boolean;
   },
@@ -537,6 +546,8 @@ export function sendMessage(
     baseTokens: session.snapshot.tokens,
     tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
     by,
+    // 데모(스크립트)는 실행 중 지시를 반영할 모델 호출이 없어 큐를 만들지 않는다
+    ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
   };
   session.run = run;
   session.snapshot.running = true;
@@ -560,6 +571,23 @@ export function cancelRun(id: string, runId: string): void {
   session.snapshot.cancelling = 'user';
   emit(session, { type: 'run_cancelling', runId });
   run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+}
+
+/**
+ * 실행 중인 요청에 진행 중 지시를 넣는다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다.
+ * 지금 하던 도구 호출을 끊지 않는다. 사람이 보는 단일 세션(steering 큐가 있는 실행)만 받는다.
+ */
+export function steerRun(id: string, text: string): { runId: string } {
+  const session = requireSession(id);
+  if (session.snapshot.mode === 'demo') throw new StudioError(409, '이 모드는 실행 중 지시를 지원하지 않습니다');
+  const run = session.run;
+  if (!run) throw new StudioError(409, '실행 중이 아닙니다. 새 요청으로 보내세요');
+  if (!run.steering) throw new StudioError(409, '이 실행은 진행 중 지시를 받지 않습니다');
+  const directive = text.trim();
+  if (!directive) throw new StudioError(400, '지시 내용을 입력하세요');
+  run.steering.push(directive);
+  emit(session, { type: 'steer_queued', runId: run.id, text: directive });
+  return { runId: run.id };
 }
 
 export async function stopSession(id: string): Promise<SessionSnapshot> {
@@ -1166,6 +1194,9 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     }
     session.snapshot.running = false;
     session.snapshot.cancelling = undefined;
+    // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
+    const dropped = run.steering?.take() ?? [];
+    if (!session.stop.signal.aborted && dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
     if (!session.stop.signal.aborted && finished) {
       session.settledConversation = session.conversation.length;
       emit(session, {
@@ -1293,6 +1324,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       resume: claudeCode.sessionId,
       // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
       model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
+      steering: run.steering,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
@@ -1312,6 +1345,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
       // 고정하지 않으면 로그인 계정의 기본 모델을 쓴다
       model: process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined,
+      // 실행 중 지시 큐. Codex는 턴 사이에만 넣는다
+      steering: run.steering,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 알림과 이전 맥락이 그대로 남는다
     codex.notes = [];
@@ -1345,6 +1380,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     client: plan.client,
     conversation: session.conversation,
     maxVerifyAttempts: plan.maxVerifyAttempts,
+    // 실행 중 지시 큐. 없으면(레인·플릿·데모) 지시를 받지 않는다
+    steering: run.steering,
   });
 }
 

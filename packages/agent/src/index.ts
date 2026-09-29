@@ -9,6 +9,7 @@ export {
   type ModelPreflight,
   type RunAgentOptions,
   type RunMetrics,
+  type Steering,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export {

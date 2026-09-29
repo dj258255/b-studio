@@ -467,4 +467,24 @@ describe('reduceSession', () => {
     expect(view.logs).toHaveLength(LOG_LIMIT);
     expect(view.logs.at(-1)?.text).toBe(`line ${LOG_LIMIT + 4}`);
   });
+
+  it('진행 중 지시를 대기로 넣고, 반영되면 반영됨, 끝까지 남으면 적용 실패로 표시한다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      { type: 'steer_queued', runId: 'r1', text: '지시1' },
+      { type: 'steer_queued', runId: 'r1', text: '지시2' },
+      { type: 'agent', runId: 'r1', event: { type: 'steer_applied', count: 1 } },
+    ]);
+
+    expect(view.chat.filter((item) => item.kind === 'steer')).toEqual([
+      { kind: 'steer', runId: 'r1', text: '지시1', status: 'applied' },
+      { kind: 'steer', runId: 'r1', text: '지시2', status: 'queued' },
+    ]);
+
+    const dropped = fold([{ type: 'steer_dropped', runId: 'r1', texts: ['지시2'] }], view);
+    expect(dropped.chat.filter((item) => item.kind === 'steer')).toEqual([
+      { kind: 'steer', runId: 'r1', text: '지시1', status: 'applied' },
+      { kind: 'steer', runId: 'r1', text: '지시2', status: 'dropped' },
+    ]);
+  });
 });

@@ -13,7 +13,7 @@ import {
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
 import { VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, type AskUserQuestion, type ToolContext } from './tools';
@@ -24,6 +24,8 @@ import { Workspace } from './workspace';
 const SERVER = 'b-studio';
 /** 화면 표기. Agent SDK 브랜딩 가이드는 제품 안에서 "Claude Code"라는 이름을 쓰지 않도록 한다 */
 const BACKEND = '로컬 Claude Agent';
+/** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
+const STEERING_POLL_MS = 300;
 
 /** 실제 SDK와 테스트용 가짜를 바꿔 끼우는 지점 */
 export interface ClaudeCodeSdk {
@@ -92,6 +94,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     sdk = DEFAULT_SDK,
     interactive = false,
     intent = 'build',
+    steering,
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
@@ -173,6 +176,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     },
   });
   input.push(ask ? buildAskRequest(request, { toolName }) : request);
+
+  // 진행 중 지시는 스트리밍 입력 큐에 사용자 메시지로 넣는다.
+  // SDK는 스트리밍 입력에서 큐에 들어온 사용자 메시지를(현재 도구 호출이 끝난 뒤) 다음 모델 호출에서 처리한다.
+  // 지금 하던 도구 호출을 중간에 끊지 않는 것은 이 방식의 성질이다(아래 주석 근거는 결과 문서에 적음)
+  const detachSteering = attachSteering(steering, input, onEvent);
 
   const usage = emptyUsage();
   const messageIds = new Set<string>();
@@ -317,6 +325,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     conversation.close();
     throw error;
   } finally {
+    detachSteering();
     input.close();
     signal?.removeEventListener('abort', onAbort);
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
@@ -326,6 +335,24 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   signal?.throwIfAborted();
   if (!result) throw new Error('Claude Code가 결과를 보내지 않고 종료됐습니다');
   return result;
+}
+
+/**
+ * 진행 중 지시를 스트리밍 입력 큐에 넣는다. 알림(onPush)이 있으면 즉시, 없으면 짧은 주기로 확인한다.
+ * 돌려준 함수로 구독이나 주기 확인을 멈춘다.
+ */
+function attachSteering(steering: Steering | undefined, input: InputQueue, onEvent: (event: AgentEvent) => void): () => void {
+  if (!steering) return () => {};
+  const flush = () => {
+    const texts = takeSteering(steering);
+    if (texts.length === 0) return;
+    input.push(formatSteering(texts));
+    onEvent({ type: 'steer_applied', count: texts.length });
+  };
+  if (steering.onPush) return steering.onPush(flush);
+  const timer = setInterval(flush, STEERING_POLL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /**

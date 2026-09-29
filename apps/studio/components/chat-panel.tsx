@@ -58,6 +58,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const personalLimit = personal?.limit;
   const personalReached = personalLimit !== undefined && personal !== undefined && personal.used >= personalLimit;
   const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
+  // 실행 중에는 새 요청 대신 진행 중 지시를 보낸다. 데모(스크립트)는 반영할 모델 호출이 없어 제외한다
+  const canSteer = snapshot.status === "ready" && snapshot.running && snapshot.mode !== "demo" && !sending && !budgetReached && !personalReached && access.canManage;
 
   const planRequest = snapshot.mode === "demo" ? snapshot.nextDemoRequest : BUILD_FROM_PLAN;
   /** 에이전트가 되물은 질문. 답을 보내면 지워진다 */
@@ -87,6 +89,20 @@ export function ChatPanel({ view }: { view: SessionView }) {
       setText("");
       clearSelections();
     } else setError((await response.json()).error ?? "요청을 보내지 못했습니다");
+    setSending(false);
+  }
+
+  /** 실행 중 지시를 보낸다. 러너가 다음 모델 호출(또는 다음 턴)에 대화로 넣는다 */
+  async function steer(request: string) {
+    setSending(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${snapshot.id}/steer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: request }),
+    });
+    if (response.ok) setText("");
+    else setError((await response.json()).error ?? "지시를 보내지 못했습니다");
     setSending(false);
   }
 
@@ -161,7 +177,9 @@ export function ChatPanel({ view }: { view: SessionView }) {
         className="border-t border-line px-5 py-4"
         onSubmit={(event) => {
           event.preventDefault();
-          if (canSend && text.trim()) void send(text);
+          if (runId) {
+            if (canSteer && text.trim()) void steer(text);
+          } else if (canSend && text.trim()) void send(text);
         }}
       >
         {selections.length > 0 && (
@@ -284,13 +302,26 @@ export function ChatPanel({ view }: { view: SessionView }) {
               value={text}
               onChange={(event) => setText(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && canSend && text.trim()) {
-                  event.preventDefault();
-                  void send(text);
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && text.trim()) {
+                  if (runId) {
+                    if (canSteer) {
+                      event.preventDefault();
+                      void steer(text);
+                    }
+                  } else if (canSend) {
+                    event.preventDefault();
+                    void send(text);
+                  }
                 }
               }}
               rows={3}
-              placeholder={intent === "ask" ? "코드나 동작을 묻거나, 만들기 전에 계획을 세워 보세요" : "만들거나 바꾸고 싶은 내용을 적어 주세요"}
+              placeholder={
+                runId
+                  ? "실행 중 지시를 적어 주세요. 다음 모델 호출(또는 다음 턴)에 반영됩니다"
+                  : intent === "ask"
+                    ? "코드나 동작을 묻거나, 만들기 전에 계획을 세워 보세요"
+                    : "만들거나 바꾸고 싶은 내용을 적어 주세요"
+              }
               className="w-full resize-none rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
             <div className="mt-2 flex items-center justify-between gap-3">
@@ -304,10 +335,10 @@ export function ChatPanel({ view }: { view: SessionView }) {
               )}
               <button
                 type="submit"
-                disabled={!canSend || !text.trim()}
+                disabled={runId ? !canSteer || !text.trim() : !canSend || !text.trim()}
                 className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
               >
-                {intent === "ask" ? "질문하기" : "요청 보내기"}
+                {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
               </button>
             </div>
           </>
@@ -341,6 +372,20 @@ function ChatEntry({ item }: { item: ChatItem }) {
           )}
         </div>
       );
+
+    case "steer": {
+      const label = item.status === "applied" ? "지시(반영됨)" : item.status === "dropped" ? "지시(적용되지 못함)" : "지시(대기)";
+      return (
+        <div className={`border-l-[3px] pl-3 ${item.status === "dropped" ? "border-fail" : "border-wait"}`}>
+          <p className="text-xs text-muted">
+            <span className="mr-1.5 rounded-full border border-line px-1.5 py-px">{label}</span>
+            {item.status === "queued" && "다음 모델 호출에 반영됩니다"}
+            {item.status === "dropped" && <span className="text-fail">적용되지 못했습니다 — 다시 보내세요</span>}
+          </p>
+          <p className="whitespace-pre-wrap text-sm leading-6">{item.text}</p>
+        </div>
+      );
+    }
 
     case "route": {
       const selected = item.candidates.find((candidate) => candidate.id === item.selectedId);

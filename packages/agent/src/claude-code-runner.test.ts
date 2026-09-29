@@ -11,7 +11,7 @@ import {
   type ClaudeCodeSdk,
 } from './claude-code-runner';
 import type { AgentEvent } from './loop';
-import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
+import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 import { buildTools } from './tools';
 
 let project: LoadedProject;
@@ -333,5 +333,37 @@ describe('zodShape', () => {
     const interactive = Object.fromEntries(buildTools(project, { interactive: true }).map((tool) => [tool.name, z.object(zodShape(tool.input_schema))]));
     expect(interactive.ask_user!.safeParse({ question: 'q', options: ['a', 'b'], allowOther: true }).success).toBe(true);
     expect(interactive.ask_user!.safeParse({ question: 'q', options: ['a', 'b'], allowOther: 'yes' }).success).toBe(false);
+  });
+
+  it('실행 중 지시를 스트리밍 입력 큐에 넣어 다음 턴에 반영한다', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }, { text: '추가했습니다.' }],
+        [{ text: '지시를 반영했습니다.' }],
+        // 지시가 먼저 들어간 뒤 게이트 피드백이 큐에 남는다. 러너가 결과를 받은 뒤 큐를 비우며 처리한다
+        [{ text: '게이트 피드백을 처리했습니다.' }],
+      ],
+    });
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '새 클래스를 추가해줘',
+      project,
+      sandbox: fakeSandbox(project, [false, true]),
+      sdk,
+      steering: queue.steering,
+      fetcher: async () => contract,
+      onEvent: (event) => {
+        events.push(event);
+        // 도구가 끝난 뒤(턴이 끝나기 전) 사용자가 지시를 보낸다 → 입력 큐에 들어간다
+        if (event.type === 'tool_result') queue.push('테스트도 추가해줘');
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 1 });
+    // 지시가 입력 큐에 들어가 다음 사용자 메시지로 처리된다
+    expect(state.prompts[1]).toBe('[진행 중 지시] 테스트도 추가해줘');
+    expect(events.filter((event): event is Extract<AgentEvent, { type: 'steer_applied' }> => event.type === 'steer_applied')).toMatchObject([{ count: 1 }]);
   });
 });

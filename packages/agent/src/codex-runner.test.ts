@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runCodexAgent, type CodexConfig, type CodexSdk, type CodexThread } from './codex-runner';
 import type { AgentEvent } from './loop';
-import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
+import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;
 /** 이 PC의 진짜 ~/.codex 대신 테스트가 만든 원본 CODEX_HOME. 러너가 여기서 auth.json만 링크한다 */
@@ -277,6 +277,43 @@ describe('runCodexAgent', () => {
     await expect(
       runCodexAgent({ request: '이어서 해줘', project, sandbox: fakeSandbox(project, []), sdk, resume: 'previous-thread', fetcher: async () => contract }),
     ).rejects.toThrow('이어받기를 지원하지 않습니다');
+  });
+
+  it('턴 사이에 실행 중 지시를 다음 턴 입력 뒤에 붙인다', async () => {
+    const { sdk, state } = fakeCodex([
+      {
+        steps: [
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } },
+          { text: '메모를 추가했습니다.' },
+        ],
+      },
+      { steps: [{ text: '지시를 반영했습니다.' }] },
+    ]);
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, true]),
+      sdk,
+      steering: queue.steering,
+      fetcher: async () => contract,
+      onEvent: (event) => {
+        events.push(event);
+        // 첫 턴이 도는 동안 사용자가 지시를 보낸다 → 다음 턴 입력에 들어간다
+        if (event.type === 'tool_result') queue.push('테스트도 추가해줘');
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 1, turns: 2 });
+    expect(state.prompts).toHaveLength(2);
+    // 게이트 피드백 뒤에 지시가 붙는다
+    const second = state.prompts[1]!;
+    expect(second).toContain('[b-studio 검증 게이트]');
+    expect(second).toContain('[진행 중 지시] 테스트도 추가해줘');
+    expect(second.indexOf('[b-studio 검증 게이트]')).toBeLessThan(second.indexOf('[진행 중 지시]'));
+    expect(events.filter((event) => event.type === 'steer_applied')).toHaveLength(1);
   });
 
   it('사용자 ~/.codex 대신 임시 CODEX_HOME을 넘기고, 로그인 파일만 링크한다', async () => {

@@ -223,6 +223,10 @@ export type StudioEvent =
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
   | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask' }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
+  /** 실행 중 보낸 지시를 큐에 넣었다. 러너가 이어서 쓰면 agent 이벤트 steer_applied로 온다 */
+  | { type: 'steer_queued'; runId: string; text: string }
+  /** 실행이 끝났는데 적용되지 못한 지시. 화면에서 다시 보내라고 알린다 */
+  | { type: 'steer_dropped'; runId: string; texts: string[] }
   /** API 키 모드는 모델 응답마다, 로컬 로그인 계정 모드는 턴을 끝낼 때마다 온다. 세션 합계를 함께 보내 기록을 다시 재생해도 두 번 더하지 않는다 */
   | { type: 'tokens'; runId: string; usage: AgentUsage; sessionTokens: AgentUsage }
   /** reason이 없으면 사용자가 취소했다 */
