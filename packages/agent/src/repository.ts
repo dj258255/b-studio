@@ -61,6 +61,58 @@ export class PullRequestError extends Error {
   }
 }
 
+/** GitHub·Gitea의 API 사용량 한도에 걸렸다. 토큰 값은 담지 않는다 */
+export class RepositoryRateLimitError extends PullRequestError {
+  /** 한도가 풀리는 시각(ISO 8601). 응답 헤더에 없으면 없다 */
+  readonly retryAt?: string;
+  constructor(message: string, retryAt?: string) {
+    super(message);
+    this.name = 'RepositoryRateLimitError';
+    this.retryAt = retryAt;
+  }
+}
+
+export type RepositoryListState = 'all' | 'open' | 'closed';
+
+/** 저장소 화면(이슈 탭)의 이슈 한 줄 */
+export interface IssueSummary {
+  number: number;
+  title: string;
+  author: string;
+  labels: string[];
+  /** ISO 8601 */
+  updatedAt: string;
+  url: string;
+  state: 'open' | 'closed';
+  /** 본문(마크다운). GitHub·Gitea 모두 목록 API가 통째로 돌려줘 따로 조회하지 않는다. 없으면(빈 이슈) 없다 */
+  body?: string;
+}
+
+/** GitHub Checks API로 얻는 커밋의 결합 CI 상태. 값을 못 얻으면(권한·API 미지원) 'unknown' */
+export type CheckStatus = 'success' | 'failure' | 'pending' | 'unknown';
+/** 리뷰 판정. GraphQL 전용 필드라 REST 리뷰 목록에서 직접 계산한다 */
+export type ReviewDecision = 'approved' | 'changes_requested' | 'review_required' | 'unknown';
+
+/** 저장소 화면(PR 탭)의 PR 한 줄 */
+export interface PullRequestSummary {
+  number: number;
+  title: string;
+  author: string;
+  labels: string[];
+  /** ISO 8601 */
+  updatedAt: string;
+  url: string;
+  state: 'open' | 'closed';
+  draft: boolean;
+  headBranch: string;
+  headSha: string;
+  /** GitHub만 채운다(Gitea·GitLab은 값을 싸게 얻을 방법이 없어 비워 둔다) */
+  checkStatus?: CheckStatus;
+  reviewDecision?: ReviewDecision;
+  /** 헤드 브랜치가 b-studio 세션이 만든 브랜치면 그 세션 id */
+  sessionId?: string;
+}
+
 type Env = Record<string, string | undefined>;
 type Fetch = typeof fetch;
 
@@ -73,6 +125,10 @@ const TOKEN_ENV: Record<(typeof PROVIDERS)[number], string> = {
 const API_TIMEOUT_MS = 30_000;
 /** GitHub PR 본문 한도(65,536자)보다 여유 있게 자른다 */
 const MAX_PULL_REQUEST_BODY = 60_000;
+/** 저장소 화면 한 쪽에 보여 줄 최대 개수. 화면은 열림만 기본으로 보여 더 넘길 일이 드물다 */
+const LIST_PAGE_SIZE = 50;
+/** CI 상태·리뷰 판정은 PR마다 API 호출이 더 들어, 목록 앞쪽 이만큼만 채운다 */
+const MAX_PR_DETAILS = 25;
 
 /**
  * git 원격 주소를 해석한다. https, ssh://, scp 형식(git@host:owner/repo), 로컬 경로를 지원한다.
@@ -274,6 +330,177 @@ export async function fetchIssue(
   if (!response.ok) throw new PullRequestError(`${label} 이슈 조회가 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
   const data = (await response.json()) as { state: string; title: string; html_url: string };
   return { state: data.state === 'open' ? 'open' : 'closed', title: data.title, url: data.html_url };
+}
+
+interface RawLabel {
+  name?: string;
+}
+interface RawIssue {
+  number: number;
+  title: string;
+  user?: { login?: string };
+  labels?: Array<RawLabel | string>;
+  updated_at: string;
+  html_url: string;
+  state: string;
+  body?: string | null;
+  /** GitHub·Gitea 모두 이슈 목록에 PR도 섞어 주고, 이 필드가 있으면 PR이다 */
+  pull_request?: unknown;
+}
+interface RawPull {
+  number: number;
+  title: string;
+  user?: { login?: string };
+  labels?: Array<RawLabel | string>;
+  updated_at: string;
+  html_url: string;
+  state: string;
+  draft?: boolean;
+  head: { ref: string; sha: string };
+}
+
+function labelNames(labels: Array<RawLabel | string> | undefined): string[] {
+  return (labels ?? []).map((label) => (typeof label === 'string' ? label : (label.name ?? ''))).filter(Boolean);
+}
+
+/**
+ * 원격 저장소 화면의 이슈 탭 목록. GitHub·Gitea는 `GET /repos/{owner}/{repo}/issues`를 쓴다(PR도 섞여 오므로 뺀다).
+ * GitLab은 아직 지원하지 않는다(호스트별 화면 모양이 달라 REST 응답을 그대로 맞추기보다 필요해지면 추가한다).
+ */
+export async function listIssues(
+  remote: RemoteLocation,
+  { state = 'open', env = process.env, fetch: fetchFn = fetch, token }: { state?: RepositoryListState; env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<IssueSummary[]> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('이슈 목록을 볼 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  if (!remote.host || !remote.path) throw new PullRequestError('저장소 주소를 해석하지 못했습니다');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈 목록을 볼 수 없습니다`);
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const response = await fetchFn(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues?state=${state}&per_page=${LIST_PAGE_SIZE}`, {
+    headers,
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  await assertListOk(response, label, '이슈 목록');
+  const data = (await response.json()) as RawIssue[];
+  return data
+    .filter((item) => !item.pull_request)
+    .map((item) => ({
+      number: item.number,
+      title: item.title,
+      author: item.user?.login ?? '알 수 없음',
+      labels: labelNames(item.labels),
+      updatedAt: item.updated_at,
+      url: item.html_url,
+      state: item.state === 'open' ? 'open' : 'closed',
+      body: item.body ?? undefined,
+    }));
+}
+
+/**
+ * 원격 저장소 화면의 PR 탭 목록. GitHub·Gitea는 `GET /repos/{owner}/{repo}/pulls`를 쓴다.
+ * GitHub는 목록 앞쪽 `MAX_PR_DETAILS`개만 CI 결합 상태(Checks API)와 리뷰 판정(리뷰 목록에서 계산)을 더 받아 채운다.
+ * `branchSessionId`를 주면 헤드 브랜치에서 b-studio 세션 id를 뽑아 `sessionId`에 채운다(브랜치 이름 규칙은 studio 쪽이 안다).
+ */
+export async function listPullRequests(
+  remote: RemoteLocation,
+  {
+    state = 'open',
+    env = process.env,
+    fetch: fetchFn = fetch,
+    token,
+    branchSessionId,
+  }: { state?: RepositoryListState; env?: Env; fetch?: Fetch; token?: string; branchSessionId?: (branch: string) => string | undefined } = {},
+): Promise<PullRequestSummary[]> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('PR 목록을 볼 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  if (!remote.host || !remote.path) throw new PullRequestError('저장소 주소를 해석하지 못했습니다');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 PR 목록을 볼 수 없습니다`);
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const response = await fetchFn(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=${state}&per_page=${LIST_PAGE_SIZE}`, {
+    headers,
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  await assertListOk(response, label, 'PR 목록');
+  const data = (await response.json()) as RawPull[];
+  const summaries: PullRequestSummary[] = data.map((item) => ({
+    number: item.number,
+    title: item.title,
+    author: item.user?.login ?? '알 수 없음',
+    labels: labelNames(item.labels),
+    updatedAt: item.updated_at,
+    url: item.html_url,
+    state: item.state === 'open' ? 'open' : 'closed',
+    draft: item.draft === true,
+    headBranch: item.head.ref,
+    headSha: item.head.sha,
+    sessionId: branchSessionId?.(item.head.ref),
+  }));
+
+  if (remote.kind === 'github') {
+    await Promise.all(summaries.slice(0, MAX_PR_DETAILS).map((summary) => attachChecksAndReviews(summary, { api, headers, owner, repo }, fetchFn)));
+  }
+  return summaries;
+}
+
+/** 응답 헤더로 사용량 한도를 구분해 던진다. 그 밖의 실패는 기존 오류 문구 형식을 따른다 */
+async function assertListOk(response: Response, label: string, what: string): Promise<void> {
+  if (response.ok) return;
+  if ((response.status === 403 || response.status === 429) && response.headers.get('x-ratelimit-remaining') === '0') {
+    const resetHeader = response.headers.get('x-ratelimit-reset');
+    const retryAt = resetHeader ? new Date(Number(resetHeader) * 1000).toISOString() : undefined;
+    throw new RepositoryRateLimitError(`${label} API 사용량 한도에 걸렸습니다${retryAt ? ` (${retryAt}에 풀립니다)` : ''}`, retryAt);
+  }
+  throw new PullRequestError(`${label} API가 ${what} 조회를 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+}
+
+/**
+ * PR 하나에 CI 결합 상태와 리뷰 판정을 더한다. 실패해도(권한·API 미지원) 목록 자체는 보여 줘야 하므로 'unknown'으로 두고 던지지 않는다.
+ * Checks API(`commits/{sha}/check-runs`)는 GitHub Actions 등 체크 앱 기준이라, 그 밖의 상태 API(Statuses)만 쓰는 CI는 잡지 못할 수 있다.
+ */
+async function attachChecksAndReviews(
+  summary: PullRequestSummary,
+  ctx: { api: string; headers: Record<string, string>; owner: string; repo: string },
+  fetchFn: Fetch,
+): Promise<void> {
+  const base = `${ctx.api}/repos/${encodeURIComponent(ctx.owner)}/${encodeURIComponent(ctx.repo)}`;
+  const [checks, reviews] = await Promise.all([
+    fetchFn(`${base}/commits/${summary.headSha}/check-runs?per_page=100`, { headers: ctx.headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+      (response) => (response.ok ? (response.json() as Promise<{ check_runs: Array<{ status: string; conclusion: string | null }> }>) : undefined),
+      () => undefined,
+    ),
+    fetchFn(`${base}/pulls/${summary.number}/reviews?per_page=100`, { headers: ctx.headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+      (response) => (response.ok ? (response.json() as Promise<Array<{ user?: { login?: string }; state: string; submitted_at: string }>>) : undefined),
+      () => undefined,
+    ),
+  ]);
+  summary.checkStatus = checks ? combineCheckStatus(checks.check_runs) : 'unknown';
+  summary.reviewDecision = reviews ? combineReviewDecision(reviews) : 'unknown';
+}
+
+/** 체크가 하나라도 안 끝났으면 pending, 끝났는데 실패·취소·조치 필요가 있으면 failure, 아니면 success */
+function combineCheckStatus(runs: Array<{ status: string; conclusion: string | null }>): CheckStatus {
+  if (runs.length === 0) return 'unknown';
+  if (runs.some((run) => run.status !== 'completed')) return 'pending';
+  const FAILING = new Set(['failure', 'timed_out', 'cancelled', 'action_required']);
+  if (runs.some((run) => run.conclusion && FAILING.has(run.conclusion))) return 'failure';
+  return 'success';
+}
+
+/** 리뷰어별 마지막 판정만 센다(코멘트만 남긴 리뷰는 판정에 안 넣는다) */
+function combineReviewDecision(reviews: Array<{ user?: { login?: string }; state: string; submitted_at: string }>): ReviewDecision {
+  const latest = new Map<string, string>();
+  for (const review of [...reviews].sort((a, b) => a.submitted_at.localeCompare(b.submitted_at))) {
+    const reviewer = review.user?.login;
+    if (!reviewer || review.state === 'COMMENTED') continue;
+    latest.set(reviewer, review.state);
+  }
+  const states = [...latest.values()];
+  if (states.length === 0) return 'unknown';
+  if (states.includes('CHANGES_REQUESTED')) return 'changes_requested';
+  if (states.every((entry) => entry === 'APPROVED')) return 'approved';
+  return 'review_required';
 }
 
 /**

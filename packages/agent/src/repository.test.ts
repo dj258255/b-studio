@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { addSubIssue, buildPullRequest, canCreatePullRequest, compareUrl, createIssue, createPullRequest, fetchIssue, parseRemote, PullRequestError } from './repository';
+import {
+  addSubIssue,
+  buildPullRequest,
+  canCreatePullRequest,
+  compareUrl,
+  createIssue,
+  createPullRequest,
+  fetchIssue,
+  listIssues,
+  listPullRequests,
+  parseRemote,
+  PullRequestError,
+  RepositoryRateLimitError,
+} from './repository';
 
 describe('parseRemote', () => {
   it.each([
@@ -42,7 +55,7 @@ describe('compareUrl · canCreatePullRequest', () => {
   });
 });
 
-function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
+function fakeFetch(responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }>) {
   const calls: Array<{ url: string; method: string; headers: Record<string, string>; body?: unknown }> = [];
   const fn = (async (url: string | URL | Request, init?: RequestInit) => {
     calls.push({
@@ -53,7 +66,7 @@ function fakeFetch(responses: Array<{ status: number; body: unknown }>) {
     });
     const next = responses.shift();
     if (!next) throw new Error('예상하지 못한 요청');
-    return new Response(JSON.stringify(next.body), { status: next.status, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(next.body), { status: next.status, headers: { 'content-type': 'application/json', ...next.headers } });
   }) as typeof fetch;
   return { fn, calls };
 }
@@ -256,6 +269,192 @@ describe('fetchIssue', () => {
     const none = fakeFetch([]);
     await expect(fetchIssue(parseRemote('git@github.com:acme/orders.git', {}), 57, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
     await expect(fetchIssue(parseRemote('/Users/dev/orders', {}), 57, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
+    expect(none.calls).toHaveLength(0);
+  });
+});
+
+describe('listIssues', () => {
+  it('GitHub·Gitea 이슈 목록을 저장소 화면 모양으로 바꾸고, PR이 섞여 있으면 뺀다', async () => {
+    const github = fakeFetch([
+      {
+        status: 200,
+        body: [
+          { number: 12, title: '로그인 오류', user: { login: 'yuna' }, labels: [{ name: 'bug' }, 'p1'], updated_at: '2026-09-20T00:00:00Z', html_url: 'https://github.com/acme/orders/issues/12', state: 'open' },
+          { number: 13, title: 'PR인데 이슈 API에 섞여 옴', user: { login: 'bot' }, labels: [], updated_at: '2026-09-21T00:00:00Z', html_url: 'https://github.com/acme/orders/pull/13', state: 'open', pull_request: {} },
+        ],
+      },
+    ]);
+    const issues = await listIssues(parseRemote('git@github.com:acme/orders.git', {}), { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: github.fn });
+
+    expect(issues).toEqual([
+      { number: 12, title: '로그인 오류', author: 'yuna', labels: ['bug', 'p1'], updatedAt: '2026-09-20T00:00:00Z', url: 'https://github.com/acme/orders/issues/12', state: 'open' },
+    ]);
+    expect(github.calls[0]?.url).toBe('https://api.github.com/repos/acme/orders/issues?state=open&per_page=50');
+
+    const giteaCall = fakeFetch([
+      {
+        status: 200,
+        body: [{ number: 3, title: '닫힌 이슈', user: { login: 'dev' }, labels: [], updated_at: '2026-09-19T00:00:00Z', html_url: 'https://git.corp.local/dev/orders/issues/3', state: 'closed' }],
+      },
+    ]);
+    const gitea = await listIssues(parseRemote('https://git.corp.local/dev/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitea' }), {
+      state: 'closed',
+      env: { B_STUDIO_GITEA_TOKEN: 't' },
+      fetch: giteaCall.fn,
+    });
+    expect(gitea).toEqual([{ number: 3, title: '닫힌 이슈', author: 'dev', labels: [], updatedAt: '2026-09-19T00:00:00Z', url: 'https://git.corp.local/dev/orders/issues/3', state: 'closed' }]);
+    expect(giteaCall.calls[0]?.url).toBe('https://git.corp.local/api/v1/repos/dev/orders/issues?state=closed&per_page=50');
+  });
+
+  it('목록 응답에 이미 들어 있는 본문을 그대로 담아, 이슈를 따로 조회하지 않아도 되게 한다', async () => {
+    const { fn } = fakeFetch([
+      {
+        status: 200,
+        body: [
+          { number: 9, title: '본문 있음', user: { login: 'yuna' }, labels: [], updated_at: '2026-09-20T00:00:00Z', html_url: 'https://github.com/acme/orders/issues/9', state: 'open', body: '재현 방법...' },
+          { number: 10, title: '본문 없음', user: { login: 'yuna' }, labels: [], updated_at: '2026-09-20T00:00:00Z', html_url: 'https://github.com/acme/orders/issues/10', state: 'open', body: null },
+        ],
+      },
+    ]);
+    const issues = await listIssues(parseRemote('git@github.com:acme/orders.git', {}), { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+    expect(issues[0]?.body).toBe('재현 방법...');
+    expect(issues[1]?.body).toBeUndefined();
+  });
+
+  it('작성자가 없으면 "알 수 없음"으로 채운다', async () => {
+    const { fn } = fakeFetch([{ status: 200, body: [{ number: 1, title: '작성자 없음', labels: [], updated_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/orders/issues/1', state: 'open' }] }]);
+    const issues = await listIssues(parseRemote('git@github.com:acme/orders.git', {}), { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+    expect(issues[0]?.author).toBe('알 수 없음');
+  });
+
+  it('GitLab이나 사용량 한도, 토큰 없음은 명확한 오류로 알린다', async () => {
+    const none = fakeFetch([]);
+    await expect(listIssues(parseRemote('/Users/dev/orders', {}), { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
+    await expect(listIssues(parseRemote('git@gitlab.corp.local:platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' }), { env: { B_STUDIO_GITLAB_TOKEN: 't' }, fetch: none.fn })).rejects.toThrow(
+      'GitHub·Gitea만 지원합니다',
+    );
+    await expect(listIssues(parseRemote('git@github.com:acme/orders.git', {}), { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    expect(none.calls).toHaveLength(0);
+
+    const limited = fakeFetch([{ status: 403, body: { message: 'API rate limit exceeded' }, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '1780000000' } }]);
+    const error = await listIssues(parseRemote('git@github.com:acme/orders.git', {}), { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: limited.fn }).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(RepositoryRateLimitError);
+    expect((error as RepositoryRateLimitError).retryAt).toBe(new Date(1_780_000_000 * 1000).toISOString());
+  });
+});
+
+describe('listPullRequests', () => {
+  const pull = (overrides: Record<string, unknown> = {}) => ({
+    number: 21,
+    title: '주문 목록 API',
+    user: { login: 'yuna' },
+    labels: [{ name: 'feature' }],
+    updated_at: '2026-09-22T00:00:00Z',
+    html_url: 'https://github.com/acme/orders/pull/21',
+    state: 'open',
+    draft: false,
+    head: { ref: 'b-studio/orders-s1', sha: 'abc123' },
+    ...overrides,
+  });
+
+  it('PR 목록을 저장소 화면 모양으로 바꾸고, 브랜치로 세션 id를 찾아 채운다', async () => {
+    const { fn, calls } = fakeFetch([
+      { status: 200, body: [pull()] },
+      { status: 200, body: { check_runs: [{ status: 'completed', conclusion: 'success' }] } },
+      { status: 200, body: [{ user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-09-22T01:00:00Z' }] },
+    ]);
+    const pulls = await listPullRequests(parseRemote('git@github.com:acme/orders.git', {}), {
+      env: { B_STUDIO_GITHUB_TOKEN: 't' },
+      fetch: fn,
+      branchSessionId: (branch) => (branch === 'b-studio/orders-s1' ? 's1' : undefined),
+    });
+
+    expect(pulls).toEqual([
+      {
+        number: 21,
+        title: '주문 목록 API',
+        author: 'yuna',
+        labels: ['feature'],
+        updatedAt: '2026-09-22T00:00:00Z',
+        url: 'https://github.com/acme/orders/pull/21',
+        state: 'open',
+        draft: false,
+        headBranch: 'b-studio/orders-s1',
+        headSha: 'abc123',
+        sessionId: 's1',
+        checkStatus: 'success',
+        reviewDecision: 'approved',
+      },
+    ]);
+    expect(calls[0]?.url).toBe('https://api.github.com/repos/acme/orders/pulls?state=open&per_page=50');
+    expect(calls[1]?.url).toBe('https://api.github.com/repos/acme/orders/commits/abc123/check-runs?per_page=100');
+    expect(calls[2]?.url).toBe('https://api.github.com/repos/acme/orders/pulls/21/reviews?per_page=100');
+  });
+
+  it('b-studio가 만든 브랜치가 아니면 세션 id를 채우지 않는다', async () => {
+    const { fn } = fakeFetch([
+      { status: 200, body: [pull({ head: { ref: 'feature/manual', sha: 'def456' } })] },
+      { status: 200, body: { check_runs: [] } },
+      { status: 200, body: [] },
+    ]);
+    const pulls = await listPullRequests(parseRemote('git@github.com:acme/orders.git', {}), {
+      env: { B_STUDIO_GITHUB_TOKEN: 't' },
+      fetch: fn,
+      branchSessionId: () => undefined,
+    });
+    expect(pulls[0]?.sessionId).toBeUndefined();
+    expect(pulls[0]?.checkStatus).toBe('unknown');
+    expect(pulls[0]?.reviewDecision).toBe('unknown');
+  });
+
+  it('체크가 진행 중이거나 실패했으면 pending·failure로, 변경 요청이 있으면 changes_requested로 판정한다', async () => {
+    const pending = fakeFetch([
+      { status: 200, body: [pull()] },
+      { status: 200, body: { check_runs: [{ status: 'in_progress', conclusion: null }] } },
+      { status: 200, body: [] },
+    ]);
+    const pendingResult = await listPullRequests(parseRemote('git@github.com:acme/orders.git', {}), { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: pending.fn });
+    expect(pendingResult[0]?.checkStatus).toBe('pending');
+
+    const failed = fakeFetch([
+      { status: 200, body: [pull({ number: 22 })] },
+      { status: 200, body: { check_runs: [{ status: 'completed', conclusion: 'failure' }] } },
+      { status: 200, body: [{ user: { login: 'reviewer' }, state: 'CHANGES_REQUESTED', submitted_at: '2026-09-22T01:00:00Z' }] },
+    ]);
+    const failedResult = await listPullRequests(parseRemote('git@github.com:acme/orders.git', {}), { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: failed.fn });
+    expect(failedResult[0]?.checkStatus).toBe('failure');
+    expect(failedResult[0]?.reviewDecision).toBe('changes_requested');
+  });
+
+  it('Gitea는 CI·리뷰 정보를 채우지 않고(추가 요청 없이) 목록만 준다', async () => {
+    const { fn, calls } = fakeFetch([
+      {
+        status: 200,
+        body: [
+          {
+            number: 5,
+            title: '기능 추가',
+            user: { login: 'dev' },
+            labels: [],
+            updated_at: '2026-09-18T00:00:00Z',
+            html_url: 'https://git.corp.local/dev/orders/pulls/5',
+            state: 'open',
+            draft: false,
+            head: { ref: 'feature/x', sha: 'zzz' },
+          },
+        ],
+      },
+    ]);
+    const pulls = await listPullRequests(parseRemote('https://git.corp.local/dev/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitea' }), { env: { B_STUDIO_GITEA_TOKEN: 't' }, fetch: fn });
+    expect(pulls[0]?.checkStatus).toBeUndefined();
+    expect(pulls[0]?.reviewDecision).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('토큰이 없거나 지원하지 않는 호스트면 요청하지 않는다', async () => {
+    const none = fakeFetch([]);
+    await expect(listPullRequests(parseRemote('git@github.com:acme/orders.git', {}), { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    await expect(listPullRequests(parseRemote('/Users/dev/orders', {}), { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
     expect(none.calls).toHaveLength(0);
   });
 });
