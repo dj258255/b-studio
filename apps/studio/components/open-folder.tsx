@@ -3,12 +3,23 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+interface InfraProposal {
+  name: string;
+  engine: string;
+  image: string;
+  /** 기존 compose에서 가져왔으면 그 파일, 새로 제안했으면 없다(reason을 대신 보여준다) */
+  sourceFile?: string;
+  reason?: string;
+}
+
 interface Proposal {
   detection: {
     folder: string;
     name: string;
     hasSpec: boolean;
     services: Array<{ name: string; template: string; path: string; port: number; notes: string[] }>;
+    /** 기존 compose에서 가져오거나 새로 제안한 부가 서비스(DB·캐시 등, ADR-073) */
+    infra: InfraProposal[];
     warnings: string[];
   };
   files: Array<{ path: string; content: string }>;
@@ -16,6 +27,22 @@ interface Proposal {
 }
 
 const TEMPLATE_LABEL: Record<string, string> = { nextjs: "Next.js", vite: "Vite", "spring-boot": "Spring Boot", fastapi: "FastAPI" };
+const ENGINE_LABEL: Record<string, string> = {
+  postgres: "PostgreSQL",
+  mysql: "MySQL",
+  mariadb: "MariaDB",
+  redis: "Redis",
+  valkey: "Valkey",
+  kafka: "Kafka",
+  zookeeper: "ZooKeeper",
+  rabbitmq: "RabbitMQ",
+  mongodb: "MongoDB",
+  elasticsearch: "Elasticsearch",
+  opensearch: "OpenSearch",
+  minio: "MinIO",
+  mailpit: "Mailpit",
+  localstack: "LocalStack",
+};
 
 /**
  * 아무 폴더나 프로젝트로 연다(ADR-067). 경로를 넣으면 먼저 무엇을 할지(알아낸 서비스·만들 파일) 보여 주고,
@@ -122,6 +149,27 @@ export function OpenFolder() {
                   </li>
                 ))}
               </ul>
+              {proposal.detection.infra.length > 0 && (
+                <div>
+                  <p className="text-muted">부가 서비스(DB·캐시 등, ADR-073)</p>
+                  <ul className="mt-1 space-y-1.5" aria-label="찾거나 제안한 부가 서비스">
+                    {proposal.detection.infra.map((service) => (
+                      <li key={service.name}>
+                        <span className="font-medium">{service.name}</span>
+                        <span className="text-muted">
+                          {" "}
+                          · {ENGINE_LABEL[service.engine] ?? service.engine} · <span className="font-mono">{service.image}</span>
+                        </span>
+                        {service.sourceFile ? (
+                          <p className="text-xs text-muted">{service.sourceFile}에서 가져왔습니다</p>
+                        ) : (
+                          <p className="text-xs text-wait">새로 제안: {service.reason}</p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div>
                 <p className="text-muted">만들 파일(git 추적에서 빼 둡니다, 저장소 기록은 바뀌지 않습니다)</p>
                 <ul className="mt-1 flex flex-wrap gap-1.5">

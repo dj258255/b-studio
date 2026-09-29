@@ -124,6 +124,112 @@ describe('detectProject', () => {
   });
 });
 
+const springJpaGradle = `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'org.postgresql:postgresql'\n}`;
+
+describe('detectProject: 부가 서비스(ADR-073)', () => {
+  it('compose.yaml에서 postgres·redis를 가져오고, Spring 설정에서 참조를 찾아 접속 환경 변수를 채운다', async () => {
+    const root = await repo({
+      'build.gradle': springJpaGradle,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\nspring.data.redis.host=localhost\n',
+      'compose.yaml': [
+        'services:',
+        '  db:',
+        '    image: postgres:17-alpine',
+        '    ports: ["5432:5432"]',
+        '    environment:',
+        '      POSTGRES_DB: app',
+        '      POSTGRES_USER: app',
+        '      POSTGRES_PASSWORD: app',
+        '    healthcheck:',
+        '      test: ["CMD-SHELL", "pg_isready -U app -d app"]',
+        '  cache:',
+        '    image: redis:7-alpine',
+        '  app:',
+        '    build: { context: . }',
+        '    depends_on: [db, cache]',
+        '',
+      ].join('\n'),
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.infra.map((service) => service.name).sort()).toEqual(['cache', 'db']);
+    const db = detection.infra.find((service) => service.name === 'db')!;
+    expect(db.proposed).toBeUndefined();
+    expect('sourceFile' in db && db.sourceFile).toBe('compose.yaml');
+
+    const service = detection.services[0]!;
+    expect(service.environment).toMatchObject({ SPRING_DATASOURCE_URL: 'jdbc:postgresql://db:5432/app', SPRING_DATA_REDIS_HOST: 'cache' });
+    expect(service.dependsOn.sort()).toEqual(['cache', 'db']);
+    expect(service.notes.some((note) => note.includes('POSTGRES_'))).toBe(true);
+
+    const files = generateFiles(detection);
+    const compose = files.find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('# compose.yaml에서 가져왔습니다');
+    // 콜론·슬래시가 있는 값은 따옴표로 감싼다(yamlString)
+    expect(compose).toContain('SPRING_DATASOURCE_URL: "jdbc:postgresql://db:5432/app"');
+    // db는 healthcheck가 있어 service_healthy, cache는 없어 service_started — 목록·맵 문법이 섞이면 잘못된 YAML이라 모두 맵 문법으로 통일한다
+    expect(compose).toContain('db: { condition: service_healthy }');
+    expect(compose).toContain('cache: { condition: service_started }');
+
+    const spec = files.find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('databases:');
+    expect(spec).toContain('db: { engine: postgres, database: app, user: app }');
+
+    // 실제로 b-studio가 파싱할 수 있어야 한다(depends_on의 목록·맵 문법이 섞이면 여기서 걸린다)
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+      await writeFile(path.join(root, file.path), file.content);
+    }
+    await expect(loadProject(root)).resolves.toBeDefined();
+  });
+
+  it('compose가 없어도 JPA+postgresql 의존성이 있으면 postgres를 새로 제안한다', async () => {
+    const root = await repo({ 'build.gradle': springJpaGradle });
+
+    const detection = await detectProject(root);
+
+    expect(detection.infra).toHaveLength(1);
+    const proposed = detection.infra[0]!;
+    expect(proposed.proposed).toBe(true);
+    expect(proposed.engine).toBe('postgres');
+    expect('reason' in proposed && proposed.reason).toContain('postgres');
+
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('# 확인:');
+    expect(compose).toContain('image: postgres:17-alpine');
+  });
+
+  it('부가 서비스가 있어도 b-studio가 만든 파일을 그대로 읽는다', async () => {
+    const root = await repo({
+      'build.gradle': springJpaGradle,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\n',
+      'compose.yaml': 'services:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n',
+    });
+    const detection = await detectProject(root);
+    const files = generateFiles(detection);
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+      await writeFile(path.join(root, file.path), file.content);
+    }
+
+    const project = await loadProject(root);
+    expect(project.composeServices).toContain('db');
+    expect(project.databases.map(([name]) => name)).toEqual(['db']);
+  });
+
+  it('build가 있는 서비스(앱 자신)와 profiles가 있는 서비스는 가져오지 않는다', async () => {
+    const root = await repo({
+      'package.json': nextPackage,
+      'compose.yaml': ['services:', '  db:', '    image: postgres:17-alpine', '  web:', '    build: { context: . }', '  metrics:', '    image: prom/prometheus:v2.54.1', '    profiles: ["monitoring"]', ''].join('\n'),
+    });
+
+    const { infra } = await detectProject(root);
+
+    expect(infra.map((service) => service.name)).toEqual(['db']);
+  });
+});
+
 describe('sanitize', () => {
   it('studio.yaml 이름 규칙(소문자로 시작, 소문자·숫자·-)에 맞춘다', () => {
     expect(sanitize('My_App 2')).toBe('my-app-2');
