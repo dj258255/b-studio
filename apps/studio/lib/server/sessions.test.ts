@@ -157,3 +157,21 @@ describe('세션 이어서 하기의 백엔드 확인', () => {
     expect(() => assertResumableBackend({ mode: 'demo' }, 'api', {})).toThrow();
   });
 });
+
+describe('세션 백엔드 확정은 두 번 불러도 같다', () => {
+  it('데모 서버에서 라우트가 확정한 demo를 createSession이 다시 확정해도 통과한다', () => {
+    const env = { B_STUDIO_MODE: 'demo' };
+    const first = resolveSessionBackend(undefined, env);
+    expect(first).toBe('demo');
+    expect(resolveSessionBackend(first, env)).toBe('demo');
+    // 데모 서버에서 다른 백엔드는 여전히 거부한다
+    expect(() => resolveSessionBackend('claude-code', env)).toThrow(/데모 모드에서는/);
+  });
+
+  it('다른 서버 모드에서도 확정한 값을 다시 확정하면 같은 값이다', () => {
+    for (const mode of ['api', 'claude-code', 'codex', 'commandcode']) {
+      const env = { B_STUDIO_MODE: mode };
+      expect(resolveSessionBackend(resolveSessionBackend(undefined, env), env)).toBe(mode);
+    }
+  });
+});

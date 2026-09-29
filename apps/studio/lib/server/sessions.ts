@@ -2535,7 +2535,9 @@ export function resolveSessionBackend(requested: string | undefined, env: Record
   const serverMode = sessionMode(env);
   const allowed = allowedBackends(serverMode, env);
   if (serverMode === 'demo') {
-    if (requested) throw new StudioError(400, '데모 모드에서는 백엔드를 고를 수 없습니다');
+    // 라우트가 확정한 값('demo')을 createSession이 다시 확정하므로, 같은 값은 통과시켜야 한다(두 번 불러도 같은 결과).
+    // 이 검사가 없던 때 데모 서버에서 세션을 하나도 만들 수 없었다(#128 화면 확인에서 발견)
+    if (requested && requested !== 'demo') throw new StudioError(400, '데모 모드에서는 백엔드를 고를 수 없습니다');
     return 'demo';
   }
   if (!requested) return serverMode;
