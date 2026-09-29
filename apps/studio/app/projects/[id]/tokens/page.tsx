@@ -16,8 +16,8 @@ export default async function ProjectTokensPage(props: PageProps<"/projects/[id]
   if (loaded.kind === "missing") notFound();
   return (
     <main className="mx-auto max-w-5xl px-4 py-10 sm:px-6">
-      <Link href="/start" className="text-sm text-muted hover:text-ink">
-        ← 새로 시작
+      <Link href={`/?project=${encodeURIComponent(id)}`} className="text-sm text-muted hover:text-ink">
+        ← 개발 화면으로
       </Link>
       {loaded.kind === "bad-range" ? (
         <div className="mt-4">

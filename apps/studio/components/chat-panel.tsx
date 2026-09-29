@@ -1,12 +1,11 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
 import { answerRequest } from "@/lib/question-answer";
 import { artifactUrl } from "@/lib/artifact-url";
-import { API_MODE_REASON, chatMethodAvailability, type ChatCapabilities, type ChatMethod } from "@/lib/chat-methods";
+import { chatMethodAvailability, type ChatCapabilities, type ChatMethod } from "@/lib/chat-methods";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import { submitEntry } from "@/lib/home-entry";
 import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionView } from "@/lib/session-view";
@@ -778,7 +777,7 @@ function HandoffEntry({ to, href }: { to: "split" | "fleet"; href: string }) {
 
 /**
  * 에이전트의 제안 카드(ADR-068). 첫 선택지는 이 요청을 나눠서 병렬·여러 명 비교로 넘기고, 둘째는 한 명으로 계속한다(보통 답처럼 대화를 이어 감).
- * 이 서버에서 바로 넘길 수 없으면(API 모드는 모델을 골라야 함) 이유와 새로 시작 화면 링크를 보여 준다
+ * 이 서버에서 바로 넘길 수 없으면(API 모드는 모델을 골라야 함) 이유만 보여 준다 — 모델을 고르는 화면이 따로 없다
  */
 function ProposalCard({
   reason,
@@ -828,11 +827,6 @@ function ProposalCard({
           {decline}
         </button>
       </div>
-      {!available.enabled && available.reason === API_MODE_REASON && (
-        <Link href="/start" className="mt-2 inline-block text-xs text-muted underline underline-offset-2 hover:text-ink">
-          새로 시작 화면에서 모델을 골라 보내기
-        </Link>
-      )}
     </div>
   );
 }

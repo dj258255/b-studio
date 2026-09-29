@@ -29,7 +29,7 @@ function openOnce(projectId: string | undefined): Promise<Opened> {
   return promise;
 }
 
-/** 개발 세션을 열고 그 화면으로 넘어간다. 실패하면 이유와 "새로 시작" 링크를 보여 준다 */
+/** 개발 세션을 열고 그 화면으로 넘어간다. 실패하면 이유와 처음 화면으로 돌아가는 링크를 보여 준다 */
 export function WorkspaceLauncher({ projectId }: { projectId?: string }) {
   const router = useRouter();
   const [error, setError] = useState<string>();
@@ -61,8 +61,8 @@ export function WorkspaceLauncher({ projectId }: { projectId?: string }) {
             <button type="button" onClick={() => location.reload()} className="rounded-control bg-ink px-4 py-2 text-sm font-semibold text-panel hover:bg-ink/85">
               다시 시도
             </button>
-            <Link href="/start" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-              새로 시작 화면으로
+            <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+              처음 화면으로
             </Link>
           </div>
         </>
@@ -70,11 +70,8 @@ export function WorkspaceLauncher({ projectId }: { projectId?: string }) {
         <>
           <h1 className="mt-2 text-2xl font-semibold tracking-tight">개발 화면을 여는 중</h1>
           <p className="mt-3 text-sm leading-6 text-muted" aria-live="polite">
-            마지막 프로젝트를 열고 샌드박스를 켭니다. 켜는 동안 요청을 적을 수 있습니다.
+            마지막 프로젝트를 열고 샌드박스를 켭니다. 켜는 동안 요청을 적을 수 있습니다. 다른 프로젝트로 시작하려면 열린 뒤 머리의 프로젝트 이름을 누르세요.
           </p>
-          <Link href="/start" className="mt-6 text-sm text-muted underline underline-offset-2 hover:text-ink">
-            다른 프로젝트로 시작하기
-          </Link>
         </>
       )}
     </main>

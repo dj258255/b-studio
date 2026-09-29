@@ -7,7 +7,7 @@ describe('chatMethodAvailability', () => {
     expect(result).toEqual({ single: { enabled: true }, fleet: { enabled: true }, split: { enabled: true } });
   });
 
-  it('API 모드는 모델을 골라야 해서 막고 새로 시작 화면으로 안내한다', () => {
+  it('API 모드는 모델을 골라야 하는데 고를 화면이 없어 막는다', () => {
     const result = chatMethodAvailability({ mode: 'api', fleet: { enabled: true }, split: { enabled: true } });
     expect(result.fleet).toEqual({ enabled: false, reason: API_MODE_REASON });
     expect(result.split).toEqual({ enabled: false, reason: API_MODE_REASON });

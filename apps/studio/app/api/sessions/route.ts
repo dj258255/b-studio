@@ -2,7 +2,24 @@ import { requireUser } from '@/lib/server/access';
 import { validateCommandCodeModelSelection } from '@/lib/server/commandcode-models';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { validateOpenCodeModelSelection } from '@/lib/server/opencode-models';
-import { createSession, resolveSessionBackend } from '@/lib/server/sessions';
+import { createSession, listSessions, resolveSessionBackend } from '@/lib/server/sessions';
+import { recentSessionsFor } from '@/lib/project-menu';
+
+/** 개발 화면 머리의 프로젝트 메뉴(ADR-070)가 "최근 세션"에 쓴다. projectId를 주면 그 프로젝트만, limit로 앞의 몇 개만 자른다 */
+const DEFAULT_LIMIT = 20;
+
+export async function GET(request: Request) {
+  try {
+    requireUser(request.headers);
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get('projectId');
+    const limit = Number(url.searchParams.get('limit') ?? DEFAULT_LIMIT);
+    const sessions = await listSessions();
+    return Response.json(projectId ? recentSessionsFor(sessions, projectId, Number.isFinite(limit) && limit > 0 ? limit : DEFAULT_LIMIT) : sessions);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
 
 export async function POST(request: Request) {
   try {

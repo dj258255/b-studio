@@ -9,13 +9,15 @@
  *   후보마다 backend를 고를 수 있어 로컬 구독 CLI 모드에서도 쓴다(후보의 backend는 허용 목록 안이어야 한다).
  * - `split`: 작업 분해(계획 → 레인 병렬). 모델에게 계획을 받을 수 있는 모드에서만 된다(api·claude-code).
  * - `backends`: 이 서버에서 세션 백엔드로 고를 수 있는 값(서버 모드 + B_STUDIO_BACKENDS).
+ * - `openFolder`: 이 PC의 폴더를 프로젝트로 열 수 있는가(ADR-067). 인증을 끈 개인 PC 모드에서만 된다 —
+ *   개발 화면 머리의 프로젝트 메뉴(ADR-070)가 이 값으로 "폴더 열기…" 항목을 보일지 정한다.
  *
  * 목록은 각 기능이 실제로 막는 곳과 같은 상수(FLEET_MODES·PLANNER_MODES)를 쓴다 — 두 곳이 갈라지면
  * 화면이 되는 것처럼 보이는데 서버는 거부하는 상태가 된다.
  */
 import type { SessionMode } from '@/lib/studio-events';
 import { FLEET_MODES } from './fleets';
-import { allowedBackends, sessionMode } from './sessions';
+import { allowedBackends, localFolderAllowed, sessionMode } from './sessions';
 import { PLANNER_MODES } from './task-plans';
 
 export interface CapabilityState {
@@ -30,10 +32,11 @@ export interface StudioCapabilities {
   fleet: CapabilityState;
   split: CapabilityState;
   backends: SessionMode[];
+  openFolder: boolean;
 }
 
 /** 순수 계산. 라우트와 테스트가 같은 함수를 쓴다 */
-export function buildCapabilities(input: { mode: SessionMode; backends: readonly SessionMode[] }): StudioCapabilities {
+export function buildCapabilities(input: { mode: SessionMode; backends: readonly SessionMode[]; openFolder: boolean }): StudioCapabilities {
   const { mode } = input;
   return {
     mode,
@@ -46,11 +49,12 @@ export function buildCapabilities(input: { mode: SessionMode; backends: readonly
       ? { enabled: true }
       : { enabled: false, reason: `계획을 모델에게 받으려면 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}여야 합니다 (지금 모드: ${mode})` },
     backends: [...input.backends],
+    openFolder: input.openFolder,
   };
 }
 
-/** 지금 서버 설정(B_STUDIO_MODE·B_STUDIO_BACKENDS)으로 계산한 값 */
+/** 지금 서버 설정(B_STUDIO_MODE·B_STUDIO_BACKENDS·B_STUDIO_AUTH)으로 계산한 값 */
 export function studioCapabilities(): StudioCapabilities {
   const mode = sessionMode();
-  return buildCapabilities({ mode, backends: [...allowedBackends(mode)] });
+  return buildCapabilities({ mode, backends: [...allowedBackends(mode)], openFolder: localFolderAllowed() });
 }

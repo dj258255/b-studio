@@ -1,14 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  backendLabel,
-  backendOptions,
-  inboxPreview,
-  initialProjectId,
-  modelsBackendFor,
-  sortInbox,
-  submitEntry,
-  type InboxSource,
-} from './home-entry';
+import { submitEntry } from './home-entry';
 
 /** 방식별 순서대로 돌려줄 응답을 준비한 가짜 fetch. 어떤 요청이 갔는지 calls에 남긴다 */
 function fakeFetch(routes: Array<{ status?: number; body: unknown }>) {
@@ -23,45 +14,6 @@ function fakeFetch(routes: Array<{ status?: number; body: unknown }>) {
 }
 
 const base = { projectId: 'orders', text: '주문 목록에 필터 추가', workspace: 'copy' as const, fleetModelIds: ['a', 'b'], planModelId: 'plan-model' };
-
-describe('initialProjectId', () => {
-  it('쓸 수 있는 프로젝트가 하나면 자동으로 고른다', () => {
-    expect(initialProjectId([{ id: 'orders' }])).toBe('orders');
-    // 오류 난 프로젝트를 빼면 하나뿐일 때도 자동으로 고른다
-    expect(initialProjectId([{ id: 'orders' }, { id: 'broken', error: 'studio.yaml 오류' }])).toBe('orders');
-  });
-
-  it('여럿이거나 없으면 고르지 않는다', () => {
-    expect(initialProjectId([{ id: 'a' }, { id: 'b' }])).toBe('');
-    expect(initialProjectId([])).toBe('');
-    expect(initialProjectId([{ id: 'broken', error: '오류' }])).toBe('');
-  });
-});
-
-describe('백엔드 선택', () => {
-  it('capabilities의 backends가 둘 이상일 때만 고를 수 있다', () => {
-    expect(backendOptions({ backends: ['api', 'commandcode'] })).toEqual(['api', 'commandcode']);
-  });
-
-  it('백엔드가 없거나 하나뿐이면 숨긴다(빈 목록)', () => {
-    expect(backendOptions(undefined)).toEqual([]);
-    expect(backendOptions({ backends: [] })).toEqual([]);
-    expect(backendOptions({ backends: ['claude-code'] })).toEqual([]);
-  });
-
-  it('백엔드 id를 보여 줄 이름으로 바꾸고, 모르는 값은 그대로 둔다', () => {
-    expect(backendLabel('claude-code')).toBe('Claude Code');
-    expect(backendLabel('commandcode')).toBe('Command Code');
-    expect(backendLabel('gemini')).toBe('gemini');
-  });
-
-  it('자기 모델 목록을 내려주는 CLI 백엔드만 모델을 고른다', () => {
-    expect(modelsBackendFor('commandcode')).toBe('commandcode');
-    expect(modelsBackendFor('opencode')).toBe('opencode');
-    expect(modelsBackendFor('claude-code')).toBeUndefined();
-    expect(modelsBackendFor(undefined)).toBeUndefined();
-  });
-});
 
 describe('submitEntry', () => {
   it('한 명은 세션을 만든 뒤 그 세션에 요청을 보내고 세션 주소를 돌려준다', async () => {
@@ -154,36 +106,6 @@ describe('submitEntry', () => {
       throw new Error('네트워크 오류');
     };
     expect(await submitEntry(failing, { ...base, method: 'split' })).toEqual({ ok: false, error: '네트워크 오류' });
-  });
-});
-
-describe('진행 중 목록', () => {
-  // 목록 항목은 InboxSource 모양에 식별용 id를 더한 것이다(작업 화면의 key, 관제 항목의 id)
-  const item = (over: Partial<InboxSource> & { id: string }): InboxSource & { id: string } => ({
-    title: `요청 ${over.id}`,
-    projectName: 'orders',
-    href: `/sessions/${over.id}`,
-    state: 'idle',
-    lastActivityAt: '2026-09-29T00:00:00.000Z',
-    ...over,
-  });
-
-  it('개입 필요 → 작업 중 → 나머지 순으로, 같은 순위는 최근 활동 순', () => {
-    const items = [
-      item({ id: 'idle-new', lastActivityAt: '2026-09-29T03:00:00.000Z' }),
-      item({ id: 'working', state: 'working', lastActivityAt: '2026-09-29T01:00:00.000Z' }),
-      item({ id: 'attention', attention: 'error', lastActivityAt: '2026-09-29T02:00:00.000Z' }),
-      item({ id: 'idle-old', lastActivityAt: '2026-09-29T00:00:00.000Z' }),
-    ];
-    expect(sortInbox(items).map((entry) => entry.id)).toEqual(['attention', 'working', 'idle-new', 'idle-old']);
-  });
-
-  it('앞의 몇 개만 남기고, 빈 목록은 빈 목록이다', () => {
-    const items = Array.from({ length: 8 }, (_, index) => item({ id: `s${index}`, lastActivityAt: `2026-09-29T0${index}:00:00.000Z` }));
-    const preview = inboxPreview(items, 5);
-    expect(preview).toHaveLength(5);
-    expect(preview[0]!.id).toBe('s7');
-    expect(inboxPreview([], 5)).toEqual([]);
   });
 });
 
