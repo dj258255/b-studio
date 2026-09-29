@@ -101,6 +101,11 @@ describe('splitLines', () => {
     expect(lines.some((line) => line.text.includes('실패 본문'))).toBe(false);
   });
 
+  it('되묻기로 끝난 실행은 취소가 아니라 답을 기다리는 줄로 보인다', () => {
+    const asked: ChatItem = { kind: 'outcome', runId: 'r2', status: 'awaiting_input', summary: '어떤 형태로 만들까요?', turns: 1 };
+    expect(splitLines([asked])).toMatchObject([{ kind: 'outcome', text: '답을 기다립니다 · 어떤 형태로 만들까요?', tone: 'wait' }]);
+  });
+
   it('긴 줄은 줄이고, 최근 것만 남긴다', () => {
     const long: ChatItem = { kind: 'reply', runId: 'r1', text: 'x'.repeat(2_000) };
     expect(splitLines([long])[0]!.text.endsWith('…')).toBe(true);

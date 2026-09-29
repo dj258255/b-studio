@@ -12,6 +12,7 @@ import {
   splitLines,
   type SplitLine,
 } from "@/lib/split";
+import { answerRequest } from "@/lib/question-answer";
 import type { SessionSnapshot, SessionStatus, SessionSummary } from "@/lib/studio-events";
 import { Dot, SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "./status";
 import { useSession } from "./use-session";
@@ -96,8 +97,8 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
     if (list) list.scrollTop = list.scrollHeight;
   }, [lines.length]);
 
-  async function send() {
-    const request = text.trim();
+  async function send(override?: string) {
+    const request = (override ?? text).trim();
     if (!request || !canSend || sending) return;
     setSending(true);
     setError(undefined);
@@ -106,7 +107,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
       headers: { "content-type": "application/json" },
       body: JSON.stringify(steering ? { text: request } : { text: request, allowBreaking: false, intent: "build" }),
     });
-    if (response.ok) setText("");
+    if (response.ok && override === undefined) setText("");
     // 권한은 서버가 판단한다. 403이면 만든 사람이 아니라는 뜻이다
     else if (response.status === 403) setError("이 세션은 만든 사람만 바꿀 수 있습니다");
     else setError(((await response.json().catch(() => ({}))) as { error?: string }).error ?? "요청을 보내지 못했습니다");
@@ -154,6 +155,24 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
               void send();
             }}
           >
+            {view.snapshot.pendingQuestion && !view.snapshot.running && (
+              <div className="mb-2 rounded-control border border-line bg-panel px-2 py-1.5" role="group" aria-label="에이전트의 질문">
+                <p className="text-xs font-medium">{view.snapshot.pendingQuestion.question}</p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {view.snapshot.pendingQuestion.options.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      disabled={sending || !canSend}
+                      onClick={() => void send(answerRequest(view.snapshot.pendingQuestion!.question, option))}
+                      className="glass-soft rounded-control px-2 py-1 text-xs hover:bg-panel disabled:opacity-50"
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {view.snapshot.running && (
               <p role="status" className="mb-1.5 text-xs text-wait">
                 작업 중입니다. 보내면 진행 중 지시로 다음 모델 호출 직전에 들어갑니다

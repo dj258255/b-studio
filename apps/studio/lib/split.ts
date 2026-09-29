@@ -141,8 +141,8 @@ export function splitLines(chat: readonly ChatItem[], limit = LINE_LIMIT): Split
         lines.push({
           key: `o${index}`,
           kind: 'outcome',
-          text: `${item.status === 'done' ? (item.intent === 'ask' ? '답변 완료' : '완료') : item.status === 'failed' ? '완료하지 못함' : '취소됨'} · ${clip(item.summary, SUMMARY_MAX)}`,
-          tone: item.status === 'done' ? 'pass' : item.status === 'cancelled' ? 'idle' : 'fail',
+          text: `${item.status === 'done' ? (item.intent === 'ask' ? '답변 완료' : '완료') : item.status === 'awaiting_input' ? '답을 기다립니다' : item.status === 'failed' ? '완료하지 못함' : '취소됨'} · ${clip(item.summary, SUMMARY_MAX)}`,
+          tone: item.status === 'done' ? 'pass' : item.status === 'awaiting_input' ? 'wait' : item.status === 'cancelled' ? 'idle' : 'fail',
         });
         break;
       case 'checkpoint':
