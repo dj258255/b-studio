@@ -24,7 +24,8 @@ describe("나란히 보기 칸 입력", () => {
   it("대화 화면과 같이 입력창 하나와 읽기만 스위치를 둔다", () => {
     const html = render();
 
-    expect(html.match(/<textarea/g)).toHaveLength(1);
+    // 위쪽 "모두에게 보내기" 입력창 하나 + 칸 자체 입력창 하나
+    expect(html.match(/<textarea/g)).toHaveLength(2);
     expect(html).toContain('role="switch"');
     expect(html).toContain('aria-checked="false"');
     expect(html).toContain("읽기만");
@@ -40,5 +41,26 @@ describe("나란히 보기 칸 입력", () => {
     expect(html).toContain("진행 중 지시");
     expect(html).not.toContain('role="switch"');
     expect(html).not.toContain("읽기만");
+  });
+});
+
+describe("나란히 보기 머리·칸 구성", () => {
+  it("배치 토글·상태 칩·모두에게 보내기·칸 탭을 둔다", () => {
+    const html = render();
+
+    expect(html).toContain("그리드");
+    expect(html).toContain("집중");
+    expect(html).toContain("모두에게 보내기");
+    expect(html).toContain("바뀐 파일");
+    expect(html).toContain("미리보기");
+    expect(html).toContain("세션 화면");
+    expect(html).toContain("빼기");
+    // 백엔드 이름을 칸 머리에 보여준다
+    expect(html).toContain("Claude API");
+  });
+
+  it("검증을 통과한(대기 중) 칸은 '검증 통과'로, 실패한 칸은 강조 테두리로 보인다", () => {
+    expect(render()).toContain("검증 통과");
+    expect(render({ status: "failed" })).toContain("ring-fail");
   });
 });

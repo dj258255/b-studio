@@ -85,6 +85,7 @@
 - [ADR-068 대화는 한 명이 처리하고, 나눌 만하면 에이전트가 제안한다](#adr-068-대화는-한-명이-처리하고-나눌-만하면-에이전트가-제안한다)
 - [ADR-069 넘긴 작업도 대화 안에서 보고, 방식은 어디서도 고르게 하지 않는다](#adr-069-넘긴-작업도-대화-안에서-보고-방식은-어디서도-고르게-하지-않는다)
 - [ADR-070 새로 시작 화면을 없애고 개발 화면 머리에 프로젝트 메뉴를 둔다](#adr-070-새로-시작-화면을-없애고-개발-화면-머리에-프로젝트-메뉴를-둔다)
+- [ADR-071 나란히 보기: 집중 모드·칸별 탭·모두에게 보내기로 다시 짠다](#adr-071-나란히-보기-집중-모드칸별-탭모두에게-보내기로-다시-짠다)
 
 ---
 
@@ -2791,6 +2792,52 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-071 나란히 보기: 집중 모드·칸별 탭·모두에게 보내기로 다시 짠다
+
+상태: 채택
+관련: #224
+
+### 맥락
+- 나란히 보기(`/split?ids=`)는 세션 2~4개를 항상 같은 크기의 그리드로만 보여줬다. 칸마다 대화 요약과 입력창뿐이라, 칸이 3~4개면 하나하나가 너무 좁아 읽기 어려웠고, 어떤 칸이 답을 기다리는지·실패했는지는 점 하나(Dot)로만 구분됐다.
+- 바뀐 파일을 보려면 "세션 화면으로 열기"를 눌러 화면을 옮겨야 했고, 미리보기는 아예 없었다.
+- 여러 후보를 비교(Agent Fleet, ADR와 무관하게 이미 있던 기능)해도 나란히 보기에서 승자를 뽑을 방법이 없어, 비교 화면과 나란히 보기가 따로 놀았다.
+- 유사한 다중 세션 도구를 살펴봤다: StablyAI Orca, Conductor, Claude Squad, Devin, VS Code Agent Sessions(미리보기), Zed, Warp, Codex best-of-N. 공통된 결론은 다음과 같다.
+  - 상태는 색만이 아니라 점 + 짧은 글자로 준다.
+  - 고정된 균등 그리드보다 "개요(칩) + 하나 집중"이 낫다 — 칸이 늘어도 읽는 칸은 크게 유지된다.
+  - diff·미리보기는 대화 스크롤에 섞지 않고 탭으로 분리한다.
+  - 칸 전환은 키보드로도 되어야 한다.
+  - 같은 지시를 여러 칸에 한 번에 보내는 방송 입력이 있다.
+  - 여러 후보 비교는 "승자 고르기"로 끝난다(사람이 표로 채점하지 않는다).
+  - 개입이 필요한 칸(질문·실패)은 눈에 띄게 강조한다.
+  - 좁은 화면은 그리드 대신 탭으로 하나씩 본다.
+
+### 검토한 선택지
+| 방식 | 참고한 도구 | 문제 |
+|---|---|---|
+| A. 지금처럼 고정 그리드만 유지 | (기존 나란히 보기) | 칸이 늘수록 각 칸이 좁아지고, 강조할 방법이 없다 |
+| B. 개요 칩 + 한 칸 집중 | Zed, Warp, VS Code Agent Sessions | 채택 — 그리드와 병행해 "비교"와 "집중"을 모두 지원 |
+| C. 탭 전환만 두고 그리드는 없앤다 | Claude Squad, Conductor | 여러 칸을 한눈에 비교하지 못해 그리드 자체를 없애지는 않았다 |
+| D. diff·미리보기를 대화 줄에 섞어 보여준다 | (기존) | 스크롤이 길어지고 최근 대화를 찾기 어렵다 — 탭으로 분리 |
+| E. 비교는 사람이 표로 점수를 매긴다 | Codex best-of-N 초기 UX | 손이 많이 간다 — 이미 있는 Agent Fleet 승자 API(`/api/fleets/[id]/winner`)를 그대로 재사용해 "이것으로 채택" 버튼 하나로 줄였다 |
+
+### 결정
+- **머리(상단)에 배치 토글(그리드 / 집중), 상태 칩, "모두에게 보내기" 입력을 둔다.** 상태 칩은 점 + 짧은 이름이고, 강조가 필요한 칸(질문·실패)은 테두리로 강조한다. 이 칩 줄은 집중 모드에서 "다른 칸을 접은 얇은 띠"도 겸한다 — 같은 요소를 두 자리에 다시 만들지 않았다.
+- **"모두에게 보내기"는 칸마다 상태를 보고 요청·지시·건너뜀을 스스로 고른다.** 순수 함수 `broadcastTarget(snapshot)`(`lib/split.ts`)이 대기 중이면 `request`, 실행 중이면 `steer`, 그 밖(준비 중·실패·중지)이면 `skip`을 돌려주고, 칸은 그 결과를 짧은 메모로 보여준다.
+- **집중 모드**는 클릭한 칸(또는 칸 머리 더블클릭)을 크게 보여주고 나머지는 칩으로 접는다. 칸은 숨겨도 마운트를 유지해 SSE 연결이 끊기지 않는다(`paneDisplay`가 `grid`/`big`/`hidden`을 정한다). 좁은 화면(<900px)은 그리드를 그릴 수 없으므로 강제로 같은 화면을 쓴다(`effectiveLayoutMode`).
+- **키보드**: ⌘/Ctrl+1~4로 그 칸을 집중하고(글자를 치는 중에도 동작), Esc로 집중을 나간다(입력 중에는 무시해 타이핑을 방해하지 않는다). 이 매핑은 `splitKeyAction`(`lib/split.ts`) 순수 함수로 분리해 테스트했다. ⌘/Ctrl+Enter로 보내기는 기존처럼 칸의 입력창이 직접 처리한다.
+- **칸 탭**: [대화]는 기존 `splitLines` 요약을 간격만 손봐서 쓴다. [바뀐 파일]은 가장 최근 체크포인트(`snapshot.checkpoints[0]`)의 파일 목록과, 기록 화면과 같은 API(`/api/sessions/[id]/checkpoints/[sha]`)로 받은 patch를 `DiffView`로 보여준다 — 새 서버 API를 만들지 않았다. [미리보기]는 화면 서비스마다 "열기" 링크만 준다. 원격 미리보기 게이트웨이는 1회용 티켓 발급이 필요해(`preview-access`), 칸 안에 그 흐름을 다시 구현하는 대신 새 탭으로 열게 했다.
+- **칸이 모두 같은 Agent Fleet 멤버면 "이것으로 채택"을 보여준다.** `/api/fleets`에서 받은 목록을 순수 함수 `fleetForIds(fleets, ids)`로 걸러 찾고, 완료(`done`)한 멤버에 버튼을, 승자에는 "채택됨" 배지를 보여준다. 클릭하면 기존 `/api/fleets/[id]/winner`를 그대로 부른다.
+- **칸 상태 문구를 6가지로 정리했다**: 작업 중 · 검증 통과 · 답을 기다림 · 실패 · 준비 중 · 중지(`paneState`, `lib/split.ts`). 질문 대기·실패는 `attention`을 참으로 돌려줘 칸과 칩에 강조 테두리를 준다.
+- 이 화면의 상태 판단·방송 대상·키보드 매핑·배치 전환은 모두 `lib/split.ts`의 순수 함수로 두고 vitest로 검증했다. 서버 API는 새로 만들지 않고 기존 체크포인트·Fleet API를 그대로 재사용했다.
+
+### 감수한 트레이드오프
+- [미리보기] 탭은 세션 화면처럼 iframe으로 내장하지 않는다. 게이트웨이 티켓 발급(`preview-access`)까지 칸 안에서 다시 구현하면 복잡도가 커져, 새 탭으로 여는 링크만 준다. 내장 미리보기가 필요하면 "세션 화면으로 열기"를 쓴다.
+- Fleet 매칭은 목록을 한 번 받고, 칸들의 상태(tone)가 바뀔 때만(완료 등) 다시 받는다. 아주 짧은 간격의 상태 변화는 다음 변화가 있을 때 함께 반영된다.
+- 좁은 화면 판정(`matchMedia`)은 클라이언트에서만 되므로, 서버 렌더 직후 아주 잠깐 넓은 화면 레이아웃이 보일 수 있다.
+- 칩 줄이 "칸 전환 탭" 역할도 겸해서, 칸이 4개면 좁은 화면에서 칩 줄이 두 줄로 접힐 수 있다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -2815,3 +2862,6 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
 - Figma, [REST API](https://www.figma.com/developers/api) (개인 액세스 토큰, `file_content:read`)
 - OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)
+- Conductor, [conductor.build](https://conductor.build) · smtg-ai, [Claude Squad](https://github.com/smtg-ai/claude-squad) · Cognition, [Devin](https://devin.ai)
+- Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
+- OpenAI, [Codex](https://openai.com/codex/)
