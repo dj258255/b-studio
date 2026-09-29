@@ -1600,3 +1600,40 @@ const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
 `apps/studio/lib/server/session-store.test.ts`가 같은 파일에 동시에 쓰는 상황을 반복해, 저장이 실패하거나 깨지지 않고 끝에 온전한 스냅샷 하나가 남는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
 
 Node는 단일 스레드라 이 테스트는 "읽고 → 고치고 → 다시 쓰는" 사이에 `await`가 끼는 인터리빙만 잡습니다. 여러 프로세스가 같은 세션 파일을 동시에 고치는 경우는 재현하지 못합니다(그래서 세션 파일에는 `owner.pid`를 남기고, 다른 프로세스가 살아 있으면 복구하지 않습니다).
+`apps/studio/bench/coordination/load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+## 45. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐
+
+**구분:** 실험 중 발견(E2 27·28회) → 기록에서 원인 추적 → 네트워크로 재현 → 수정([#116](https://github.com/dj258255/b-studio/issues/116))
+
+### 현상
+- E2의 두 실행에서 api 레인이 게이트를 3번 모두 통과하지 못했습니다. 앞의 26회는 같은 과제로 모두 통과했습니다.
+- 게이트의 `api-unit`(`./gradlew test`)이 다음처럼 끝났습니다.
+
+```
+- Task `:compileTestJava` of type `org.gradle.api.tasks.compile.JavaCompile`: error writing value of type 'org.gradle.api.internal.file.collections.DefaultConfigurableFileCollection'
+Configuration cache entry discarded due to serialization error.
+```
+
+- 에이전트는 테스트 의존성(`spring-boot-starter-test`)을 캐시에서 찾고, Maven Central에 `curl`로 확인하고, `build.gradle`의 `downloadDependencies`를 고쳤습니다. 그러자 이미지를 다시 빌드하는 단계까지 실패했습니다.
+
+### 원인
+- 호스트와 Docker 안에서 모두 Maven Central이 `429 Too Many Requests`를 돌려줬습니다(2026-09-29 08:50 KST).
+- 예제 이미지는 `downloadDependencies`로 **런타임·컴파일 classpath만** 미리 받아 굽고 있었습니다. 테스트 classpath는 샌드박스가 테스트를 돌릴 때마다 edge 프록시를 거쳐 새로 받습니다.
+- E1·E2로 수십 번 실행하면서 이 내려받기가 쌓여 요청 한도에 걸렸습니다. 의존성 해석이 실패하면 Gradle은 설정 캐시를 쓰는 단계에서 위의 직렬화 오류를 냅니다. 그래서 원인이 "네트워크"가 아니라 "설정 캐시"처럼 보였습니다.
+- 디스크(Docker VM 95%)도 처음에 의심했습니다. 하지만 기록 어디에도 `No space left`가 없었고, 429는 직접 재현됐습니다.
+
+### 해결
+- `downloadDependencies`에 `testRuntimeClasspath`·`testCompileClasspath`를 넣어, 테스트 의존성도 이미지의 읽기 전용 캐시에 굽습니다. 예제와 Spring Boot 템플릿 둘 다 고쳤습니다(템플릿에도 같은 빈틈이 있었습니다).
+- 이미지의 Gradle 홈에 init 스크립트(`gradle/mirror.init.gradle` → `/gradle-home/init.d`)를 넣어, **Google이 운영하는 Maven Central 공식 미러**(`maven-central.storage-download.googleapis.com`)에서 먼저 받습니다. 미러에 없으면 `build.gradle`의 `mavenCentral()`로 넘어갑니다. 프로젝트의 `build.gradle`은 바꾸지 않습니다.
+- 샌드박스 egress 기본 허용 목록에 미러 호스트를 더했습니다.
+
+### 확인 (2026-09-29 09:30 KST, Maven Central은 여전히 429)
+- 같은 시각 미러는 `200`, `repo.maven.apache.org`·`repo1.maven.org`는 `429`였습니다.
+- 예제 api 이미지를 다시 빌드했습니다. 테스트 의존성(`spring-boot-starter-test-4.1.1.jar`)이 `/cache/gradle-ro`에 구워졌습니다.
+- 그 이미지에서 **네트워크를 끊고**(`docker run --network none`) `./gradlew test --offline`을 돌려 `BUILD SUCCESSFUL in 14s`를 확인했습니다. 샌드박스는 테스트 때문에 밖으로 나가지 않습니다.
+
+### 재발 방지와 확인
+- 요청 한도가 풀린 뒤 이미지를 다시 빌드하고, 테스트 실행 중 api 컨테이너가 받은 바이트([#94](https://github.com/dj258255/b-studio/issues/94)의 기록)가 줄었는지 확인합니다.
+- 실험 결과에서는 이 두 실행을 조율 전략의 실패가 아니라 환경 실패로 따로 분류하고 다시 돌립니다.
+- 교훈: 모델이 "고치려고" 빌드 파일을 건드리면 원인이 더 가려집니다. 게이트 실패 출력의 **앞부분**은 설정 캐시 오류였고, 진짜 원인(`Received status code 429 from server: Too Many Requests`)은 긴 출력의 **뒤쪽**에 있었습니다. 명령 출력을 뒤쪽 위주로 남기는 도구 결과 예산([#96](https://github.com/dj258255/b-studio/pull/96))이 이런 경우를 돕습니다.
