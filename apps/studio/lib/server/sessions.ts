@@ -127,6 +127,8 @@ type Listener = (event: StudioEvent) => void;
 /** 처리 중인 에이전트 요청 */
 interface ActiveRun {
   id: string;
+  /** 요청을 시작한 시각(ISO). 관제 화면이 진행 시간을 잰다 */
+  startedAt: string;
   /** 사용자가 요청을 취소하면 abort한다. 에이전트가 끝나 체크포인트를 남기기 시작하면 세션에서 떼어 더는 취소를 받지 않는다 */
   cancel: AbortController;
   /** 요청을 시작할 때의 세션 토큰 합계 */
@@ -276,6 +278,33 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
     updatedAt,
   };
+}
+
+/** 관제 화면이 세션마다 받는 최근 이벤트 수. 전체 기록을 복사하지 않고 마지막 것만 준다 */
+const OVERVIEW_TAIL = 40;
+
+/**
+ * 관제 화면용: 세션마다 스냅샷과 최근 이벤트 몇 개만 준다(전체 기록을 복사하지 않는다).
+ * 실행 중이면 runningSince(요청 시작 시각)를 함께 준다. 진행 시간과 마지막 활동을 여기서 계산한다.
+ */
+export async function overviewSessions(): Promise<Array<{ snapshot: SessionSnapshot; recent: StudioEvent[]; updatedAt: string; runningSince?: string; lastRequest?: string }>> {
+  await recoverSessions();
+  const tail = (events: readonly StudioEvent[]): StudioEvent[] => events.slice(-OVERVIEW_TAIL);
+  // 마지막 요청은 최근 이벤트에 없을 수 있어(도구 호출이 많으면 잘린다) 전체 기록에서 찾는다
+  const lastRequestOf = (events: readonly StudioEvent[]): string | undefined => {
+    const started = events.findLast((event) => event.type === 'run_started');
+    return started?.type === 'run_started' ? started.request : undefined;
+  };
+  return [
+    ...[...store.sessions.values()].map((session) => ({
+      snapshot: session.snapshot,
+      recent: tail(session.history),
+      lastRequest: lastRequestOf(session.history),
+      updatedAt: session.updatedAt,
+      ...(session.run ? { runningSince: session.run.startedAt } : {}),
+    })),
+    ...[...archived.values()].map((entry) => ({ snapshot: entry.snapshot, recent: tail(entry.history), lastRequest: lastRequestOf(entry.history), updatedAt: entry.data.savedAt })),
+  ];
 }
 
 export async function createSession(
@@ -542,6 +571,7 @@ export function sendMessage(
   };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
+    startedAt: new Date().toISOString(),
     cancel: new AbortController(),
     baseTokens: session.snapshot.tokens,
     tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
