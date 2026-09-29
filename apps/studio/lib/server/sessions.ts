@@ -121,6 +121,7 @@ import {
   closeUnfinished,
   commandCodeStateDirOf,
   isProcessAlive,
+  openCodeStateDirOf,
   readSessions,
   stateDirOf,
   trimHistory,
@@ -1464,6 +1465,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...shared,
       request: [...openCode.notes, request].join('\n\n'),
       resume: openCode.sessionId,
+      // opencode는 세션 DB를 HOME·XDG 아래에 둔다. 둘을 세션마다 고정해 다음 요청이 이어받게 한다(세션 기록·아티팩트와 같은 폴더 아래)
+      stateDir: openCodeStateDirOf(session.snapshot),
       // 세션에서 고른 모델 → B_STUDIO_OPENCODE_MODEL → 없음(러너가 "모델을 골라야 합니다" 오류를 낸다)
       model: resolveOpenCodeModel(session.snapshot.modelId, process.env.B_STUDIO_OPENCODE_MODEL),
       // 무료 Zen 모델은 이 구성에서 거절되므로, 로그인 파일이 있으면 링크해 로그인한 제공자의 모델을 쓴다(없으면 링크하지 않는다)

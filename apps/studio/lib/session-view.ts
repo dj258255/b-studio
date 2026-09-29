@@ -24,6 +24,8 @@ export type ChatItem =
   | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
   /** 실행 중 보낸 지시. queued: 아직 반영 전, applied: 대화에 들어감, dropped: 끝날 때까지 반영되지 못함 */
   | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
+  /** 러너가 무언가를 하지 못했다는 안내(예: 상태 폴더가 없어 이전 대화를 이어받지 못함). 실행은 계속된다 */
+  | { kind: 'warning'; runId: string; text: string }
   | {
       kind: 'route';
       runId: string;
@@ -445,6 +447,10 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
 
     case 'steer_applied':
       return applySteerApplied(chat, runId, event.count);
+
+    // 러너가 하지 못한 것을 조용히 넘기지 않고 대화에 남긴다(예: 상태 폴더가 없어 이어받지 못함)
+    case 'warning':
+      return [...chat, { kind: 'warning', runId, text: event.message }];
 
     case 'stage':
       return [...chat, { kind: 'stage', runId, stage: event.stage }];
