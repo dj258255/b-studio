@@ -4,21 +4,27 @@ const mocks = vi.hoisted(() => ({
   createSession: vi.fn(async (projectId: string, owner: string, workspace: string, options: Record<string, unknown>) => ({ id: 'session-1', projectId, owner, workspace, ...options })),
   validateModel: vi.fn(async (modelId: string | undefined) => modelId),
   validateOpenCodeModel: vi.fn(async (modelId: string | undefined) => modelId),
+  listSessions: vi.fn(async () => [] as Array<{ id: string; projectId: string }>),
+  requireUser: vi.fn((): string => 'kim'),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim' }));
+vi.mock('@/lib/server/access', () => ({ requireUser: mocks.requireUser }));
 vi.mock('@/lib/server/commandcode-models', () => ({ validateCommandCodeModelSelection: mocks.validateModel }));
 vi.mock('@/lib/server/opencode-models', () => ({ validateOpenCodeModelSelection: mocks.validateOpenCodeModel }));
-// createSession만 바꿔 끼우고 resolveSessionBackend(허용 목록 검증)는 실제 것을 쓴다
+// createSession·listSessions만 바꿔 끼우고 resolveSessionBackend(허용 목록 검증)는 실제 것을 쓴다
 vi.mock('@/lib/server/sessions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/server/sessions')>();
-  return { ...actual, createSession: mocks.createSession };
+  return { ...actual, createSession: mocks.createSession, listSessions: mocks.listSessions };
 });
 
-import { POST } from './route';
+import { GET, POST } from './route';
 
 function post(body: unknown): Promise<Response> {
   return POST(new Request('http://localhost/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+}
+
+function get(query = ''): Promise<Response> {
+  return GET(new Request(`http://localhost/api/sessions${query}`));
 }
 
 const saved = { mode: process.env.B_STUDIO_MODE, backends: process.env.B_STUDIO_BACKENDS };
@@ -27,6 +33,9 @@ beforeEach(() => {
   mocks.createSession.mockClear();
   mocks.validateModel.mockClear();
   mocks.validateOpenCodeModel.mockClear();
+  mocks.listSessions.mockClear();
+  mocks.listSessions.mockResolvedValue([]);
+  mocks.requireUser.mockImplementation(() => 'kim');
   process.env.B_STUDIO_MODE = 'api';
   delete process.env.B_STUDIO_BACKENDS;
 });
@@ -80,5 +89,41 @@ describe('POST /api/sessions', () => {
     const response = await post({ projectId: 'orders', backend: 3 });
     expect(response.status).toBe(400);
     expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/sessions', () => {
+  it('projectId가 없으면 전체 목록을 그대로 돌려준다', async () => {
+    mocks.listSessions.mockResolvedValue([{ id: 's1', projectId: 'orders' }, { id: 's2', projectId: 'pay' }]);
+
+    const response = await get();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([{ id: 's1', projectId: 'orders' }, { id: 's2', projectId: 'pay' }]);
+  });
+
+  it('projectId를 주면 그 프로젝트의 세션만, limit로 앞의 몇 개만 돌려준다(개발 화면 머리의 최근 세션)', async () => {
+    mocks.listSessions.mockResolvedValue([
+      { id: 's1', projectId: 'orders' },
+      { id: 's2', projectId: 'pay' },
+      { id: 's3', projectId: 'orders' },
+      { id: 's4', projectId: 'orders' },
+    ]);
+
+    const response = await get('?projectId=orders&limit=2');
+
+    expect(await response.json()).toEqual([{ id: 's1', projectId: 'orders' }, { id: 's3', projectId: 'orders' }]);
+  });
+
+  it('로그인하지 않았으면 401을 돌려주고 목록을 읽지 않는다', async () => {
+    const { StudioError } = await import('@/lib/server/errors');
+    mocks.requireUser.mockImplementationOnce(() => {
+      throw new StudioError(401, '로그인이 필요합니다');
+    });
+
+    const response = await get();
+
+    expect(response.status).toBe(401);
+    expect(mocks.listSessions).not.toHaveBeenCalled();
   });
 });
