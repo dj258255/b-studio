@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -77,7 +78,8 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
 export async function writeSession(data: PersistedSession): Promise<void> {
   const file = sessionFile(stateDirOf(data.snapshot));
   await mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
+  // 임시 파일 이름은 호출마다 달라야 한다. 같으면 같은 세션 파일에 동시에 쓰는 두 저장이 서로의 임시 파일을 지우고 rename이 ENOENT로 깨진다
+  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   await writeFile(temp, JSON.stringify(data));
   await rename(temp, file);
 }
