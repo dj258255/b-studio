@@ -5,7 +5,8 @@
  * 그래서 모양이 곧 계약이다 — 필드 이름과 값의 뜻을 테스트로 고정한다.
  *
  * - `single`: 한 세션에 요청 하나(만들기·질문). 모든 모드에서 된다.
- * - `fleet`: 여러 모델을 나란히 비교(Agent Fleet). 모델 API를 직접 부르므로 유료 API 모드에서만 된다.
+ * - `fleet`: 여러 후보를 나란히 비교(Agent Fleet). 데모만 빼고 모든 모드에서 된다 —
+ *   후보마다 backend를 고를 수 있어 로컬 구독 CLI 모드에서도 쓴다(후보의 backend는 허용 목록 안이어야 한다).
  * - `split`: 작업 분해(계획 → 레인 병렬). 모델에게 계획을 받을 수 있는 모드에서만 된다(api·claude-code).
  * - `backends`: 이 서버에서 세션 백엔드로 고를 수 있는 값(서버 모드 + B_STUDIO_BACKENDS).
  *
@@ -40,7 +41,7 @@ export function buildCapabilities(input: { mode: SessionMode; backends: readonly
     single: { enabled: true },
     fleet: (FLEET_MODES as readonly string[]).includes(mode)
       ? { enabled: true }
-      : { enabled: false, reason: `여러 모델을 나란히 비교하는 방식은 B_STUDIO_MODE=${FLEET_MODES.join(' 또는 ')}에서만 쓸 수 있습니다 (지금 모드: ${mode})` },
+      : { enabled: false, reason: `여러 후보를 나란히 비교하는 방식은 데모 모드에서 쓸 수 없습니다 (지금 모드: ${mode})` },
     split: (PLANNER_MODES as readonly string[]).includes(mode)
       ? { enabled: true }
       : { enabled: false, reason: `계획을 모델에게 받으려면 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}여야 합니다 (지금 모드: ${mode})` },

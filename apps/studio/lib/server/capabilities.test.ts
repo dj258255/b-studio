@@ -18,26 +18,28 @@ describe('buildCapabilities', () => {
     expect(caps.split.reason).toBeUndefined();
   });
 
-  it('로컬 Claude Code 모드는 계획(나눠서 병렬)은 되지만 여러 모델 비교는 안 된다', () => {
+  it('로컬 Claude Code 모드는 계획(나눠서 병렬)도 여러 후보 비교도 된다', () => {
     const caps = buildCapabilities({ mode: 'claude-code', backends: ['claude-code'] });
 
     expect(caps.single).toEqual({ enabled: true });
     expect(caps.split).toEqual({ enabled: true });
-    expect(caps.fleet.enabled).toBe(false);
-    expect(caps.fleet.reason).toContain('claude-code');
+    // 후보마다 backend를 고를 수 있어 구독 CLI 모드에서도 비교한다
+    expect(caps.fleet).toEqual({ enabled: true });
   });
 
-  it('계획 호출 경로가 없는 모드(codex·commandcode·opencode·demo)는 나눠서 병렬을 못 한다', () => {
+  it('데모만 여러 후보 비교를 못 하고, 계획 경로가 없는 모드는 나눠서 병렬을 못 한다', () => {
     for (const mode of ['codex', 'commandcode', 'opencode', 'demo'] as const) {
       const caps = buildCapabilities({ mode, backends: [mode] });
 
       // 한 명에게 시키는 것은 어떤 모드에서도 된다(데모는 준비된 대본)
       expect(caps.single, mode).toEqual({ enabled: true });
-      expect(caps.fleet.enabled, mode).toBe(false);
       expect(caps.split.enabled, mode).toBe(false);
       // 이유에 지금 모드가 들어가 화면이 그대로 보여 줄 수 있다
       expect(caps.split.reason, mode).toContain(mode);
       expect(caps.backends, mode).toEqual([mode]);
+      // 여러 후보 비교는 데모에서만 못 한다(후보의 backend만 허용 목록 안이면 된다)
+      expect(caps.fleet.enabled, mode).toBe(mode !== 'demo');
+      if (mode === 'demo') expect(caps.fleet.reason).toContain('데모');
     }
   });
 
