@@ -136,7 +136,9 @@ describe('목록·합계·정렬', () => {
   });
 
   it('플릿 구성원은 fleet 종류로 올린다', () => {
-    const fleet = fleetView({ members: [{ sessionId: 's1', modelId: 'm', label: 'M', provider: 'openai', status: 'running', usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }] });
+    const fleet = fleetView({
+      members: [{ sessionId: 's1', backend: 'api', modelId: 'm', label: 'M', provider: 'openai', status: 'running', usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }],
+    });
     const { items } = overview({ sessions: [source({ snapshot: snapshot({ id: 's1', running: true }) })], fleets: [fleet] });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: 'fleet', id: 's1', projectName: 'orders', title: '같은 요청' });

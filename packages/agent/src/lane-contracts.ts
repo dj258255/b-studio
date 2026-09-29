@@ -20,7 +20,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { z } from 'zod';
 import type { AgentUsage, ModelClient } from './loop';
-import { parsePlannerReply, TaskPlanError, usageFromMessage, type TaskLane } from './task-plan';
+import { parsePlannerReply, TaskPlanError, usageFromMessage, type ModelAsk, type ModelAskInput, type TaskLane } from './task-plan';
 
 /** 한 계획에 받는 계약 수 상한 */
 export const MAX_LANE_CONTRACTS = 6;
@@ -39,15 +39,12 @@ export const LaneContractsSchema = z.object({ contracts: z.array(LaneContractSch
 export type LaneContract = z.infer<typeof LaneContractSchema>;
 
 /**
- * 모델을 부르는 방법을 바깥에서 준다. 제품은 ModelClient로, 벤치는 API 클라이언트나 로컬 CLI 한 번 호출로 채운다.
+ * 모델을 부르는 방법을 바깥에서 준다. 제품은 ModelClient나 로컬 CLI 한 번 호출로, 벤치는 API 클라이언트나 로컬 CLI로 채운다.
  * 계약 받기가 러너에 묶이지 않아야 같은 프롬프트를 제품과 벤치가 함께 쓸 수 있다.
+ * 모양은 계획 호출(task-plan의 PlanAsk)과 같아 공용 타입(ModelAsk)을 그대로 쓴다.
  */
-export interface ContractAskInput {
-  system: string;
-  user: string;
-}
-
-export type ContractAsk = (input: ContractAskInput, signal?: AbortSignal) => Promise<{ text: string; usage: AgentUsage }>;
+export type ContractAskInput = ModelAskInput;
+export type ContractAsk = ModelAsk;
 
 const ZERO_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 

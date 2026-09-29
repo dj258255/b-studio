@@ -6,8 +6,10 @@ import type { StudioEvent } from '../studio-events';
 
 const fake = vi.hoisted(() => ({
   counter: 0,
+  /** CLI 로그인 확인에 넘기는 프로젝트 루트 */
+  root: '/tmp/orders-project',
   listeners: new Map<string, (event: StudioEvent) => void>(),
-  createSession: vi.fn(async (...args: [string, string, 'copy', { modelId?: string }]) => {
+  createSession: vi.fn(async (...args: [string, string, 'copy', { modelId?: string; backend?: string }]) => {
     const projectId = args[0];
     return { id: `session-${++fake.counter}`, projectName: projectId === 'orders' ? 'Orders' : projectId, status: 'ready' };
   }),
@@ -48,22 +50,33 @@ vi.mock('./model-registry', () => ({
   modelById: (id: string) => fake.models.find((model) => model.id === id),
 }));
 
-vi.mock('./sessions', () => ({
-  createSession: fake.createSession,
-  getSnapshot: fake.getSnapshot,
-  sendMessage: fake.sendMessage,
-  subscribe: (id: string, listener: (event: StudioEvent) => void) => {
-    fake.listeners.set(id, listener);
-    listener({ type: 'snapshot', snapshot: { status: 'ready' } as never });
-    return () => fake.listeners.delete(id);
-  },
-}));
+// 허용 목록·백엔드 확정·로그인 확인은 실제 함수를 쓰고(서버 동작 그대로), 세션 객체만 바꿔 끼운다
+vi.mock('./sessions', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sessions')>();
+  return {
+    ...actual,
+    createSession: fake.createSession,
+    getSnapshot: fake.getSnapshot,
+    sendMessage: fake.sendMessage,
+    subscribe: (id: string, listener: (event: StudioEvent) => void) => {
+      fake.listeners.set(id, listener);
+      listener({ type: 'snapshot', snapshot: { status: 'ready' } as never });
+      return () => fake.listeners.delete(id);
+    },
+  };
+});
 
-import { chooseFleetWinner, createFleet, getFleet } from './fleets';
+vi.mock('./projects', () => ({ findProject: async () => ({ root: fake.root }) }));
+
+import { StudioError } from './errors';
+import { chooseFleetWinner, createFleet, defaultFleetCandidates, getFleet, listFleets } from './fleets';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-fleets-'));
-const originalMode = process.env.B_STUDIO_MODE;
-const originalDirectory = process.env.B_STUDIO_FLEETS_DIR;
+const saved = {
+  mode: process.env.B_STUDIO_MODE,
+  backends: process.env.B_STUDIO_BACKENDS,
+  dir: process.env.B_STUDIO_FLEETS_DIR,
+};
 
 beforeEach(() => {
   fake.listeners.clear();
@@ -71,14 +84,29 @@ beforeEach(() => {
   fake.sendMessage.mockClear();
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_FLEETS_DIR = directory;
+  // 허용 목록은 서버 모드 하나뿐이다. 넓히는 테스트만 직접 세운다
+  delete process.env.B_STUDIO_BACKENDS;
 });
 
 afterAll(() => {
-  if (originalMode === undefined) delete process.env.B_STUDIO_MODE;
-  else process.env.B_STUDIO_MODE = originalMode;
-  if (originalDirectory === undefined) delete process.env.B_STUDIO_FLEETS_DIR;
-  else process.env.B_STUDIO_FLEETS_DIR = originalDirectory;
+  for (const [key, value] of [
+    ['B_STUDIO_MODE', saved.mode],
+    ['B_STUDIO_BACKENDS', saved.backends],
+    ['B_STUDIO_FLEETS_DIR', saved.dir],
+  ] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   rmSync(directory, { recursive: true, force: true });
+});
+
+describe('defaultFleetCandidates', () => {
+  it('허용 백엔드가 하나면 같은 백엔드로 두 번, 둘 이상이면 백엔드마다 하나', () => {
+    // 모델이 하나여도 독립 시도 두 개를 비교하는 것이 Fleet의 원래 뜻이다
+    expect(defaultFleetCandidates(['api'])).toEqual([{ backend: 'api' }, { backend: 'api' }]);
+    expect(defaultFleetCandidates(['claude-code', 'claude-code'])).toEqual([{ backend: 'claude-code' }, { backend: 'claude-code' }]);
+    expect(defaultFleetCandidates(['api', 'codex'])).toEqual([{ backend: 'api' }, { backend: 'codex' }]);
+  });
 });
 
 describe('Agent Fleet', () => {
@@ -87,7 +115,12 @@ describe('Agent Fleet', () => {
 
     expect(fleet.members).toHaveLength(2);
     expect(fleet.members.every((member) => member.status === 'running')).toBe(true);
-    expect(fake.createSession.mock.calls.map((call) => call[3])).toEqual([{ modelId: 'model-a' }, { modelId: 'model-b' }]);
+    // 기존 API 입력(모델 id 목록)은 {backend:'api', model:<id>} 후보와 같다
+    expect(fake.createSession.mock.calls.map((call) => call[3])).toEqual([{ backend: 'api', modelId: 'model-a' }, { backend: 'api', modelId: 'model-b' }]);
+    expect(fleet.members.map((member) => [member.backend, member.modelId, member.label])).toEqual([
+      ['api', 'model-a', 'Model A'],
+      ['api', 'model-b', 'Model B'],
+    ]);
     expect(fake.sendMessage.mock.calls.map((call) => [call[0], call[1]])).toEqual(
       fleet.members.map((member) => [member.sessionId, '주문 검색을 추가해줘']),
     );
@@ -111,6 +144,112 @@ describe('Agent Fleet', () => {
     expect(fake.listeners.has(member.sessionId)).toBe(false);
     expect(() => chooseFleetWinner(fleet.id, fleet.members[1]!.sessionId, 'bob')).toThrow('검증을 통과한 결과만');
     expect(() => getFleet(fleet.id, 'mallory')).toThrow('볼 수 없습니다');
+  });
+
+  it('CLI 후보는 그 백엔드로 멤버 세션을 만들고, 만들기 전에 로그인을 한 번 확인한다', async () => {
+    process.env.B_STUDIO_BACKENDS = 'claude-code';
+    const preflights = { claudeCode: vi.fn(async () => ({ ok: true as const })) };
+
+    const fleet = await createFleet({
+      projectId: 'orders',
+      request: '구독으로 비교해줘',
+      candidates: [{ backend: 'claude-code', model: 'sonnet' }, { backend: 'claude-code' }],
+      owner: 'dora',
+      preflights,
+    });
+
+    expect(fleet.members).toHaveLength(2);
+    // 같은 CLI 백엔드는 한 번만 확인한다(멤버 수만큼 부르지 않는다)
+    expect(preflights.claudeCode).toHaveBeenCalledTimes(1);
+    // 멤버 세션은 레인과 같은 방식으로 backend·model을 싣는다(모델이 없으면 그 CLI의 계정 기본)
+    expect(fake.createSession.mock.calls.map((call) => call[3])).toEqual([{ backend: 'claude-code', modelId: 'sonnet' }, { backend: 'claude-code' }]);
+    expect(fleet.members.map((member) => [member.backend, member.modelId, member.label, member.provider])).toEqual([
+      ['claude-code', 'sonnet', 'sonnet', 'claude-code'],
+      ['claude-code', undefined, '계정 기본', 'claude-code'],
+    ]);
+  });
+
+  it('허용 목록 밖 백엔드 후보는 세션을 만들기 전에 거부한다', async () => {
+    const error = await createFleet({ projectId: 'orders', request: '요청', candidates: [{ backend: 'codex' }, { backend: 'codex' }], owner: 'eve' }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toBeInstanceOf(StudioError);
+    expect((error as StudioError).status).toBe(400);
+    expect((error as StudioError).message).toContain('쓸 수 없는 백엔드');
+    expect(fake.createSession).not.toHaveBeenCalled();
+  });
+
+  it('CLI 로그인 확인에 실패하면 Fleet을 만들지 않는다(절반만 뜬 비교를 남기지 않는다)', async () => {
+    process.env.B_STUDIO_BACKENDS = 'claude-code';
+    const error = await createFleet({
+      projectId: 'orders',
+      request: '요청',
+      candidates: [{ backend: 'claude-code' }, { backend: 'api', model: 'model-a' }],
+      owner: 'fred',
+      preflights: { claudeCode: async () => ({ ok: false as const, reason: '로그인이 필요합니다' }) },
+    }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+
+    expect((error as Error).message).toContain('로그인이 필요합니다');
+    expect(fake.createSession).not.toHaveBeenCalled();
+    expect(listFleets('fred')).toEqual([]);
+  });
+
+  it('후보를 주지 않으면 허용 백엔드가 하나일 때 같은 백엔드로 두 번 만든다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '기본 후보', owner: 'gina' });
+
+    // 같은 백엔드로 독립 시도 두 개. 모델은 고르지 않으므로 요청마다 라우터가 고른다
+    expect(fleet.members).toHaveLength(2);
+    expect(fleet.members.map((member) => [member.backend, member.modelId, member.label])).toEqual([
+      ['api', undefined, '서버 기본 모델'],
+      ['api', undefined, '서버 기본 모델'],
+    ]);
+    expect(fake.createSession.mock.calls.map((call) => call[3])).toEqual([{ backend: 'api' }, { backend: 'api' }]);
+  });
+
+  it('후보를 주지 않으면 허용 백엔드마다 하나씩 만든다', async () => {
+    process.env.B_STUDIO_BACKENDS = 'claude-code,codex';
+
+    const fleet = await createFleet({
+      projectId: 'orders',
+      request: '백엔드마다 하나',
+      owner: 'gina',
+      preflights: { claudeCode: async () => ({ ok: true as const }), codex: async () => ({ ok: true as const }) },
+    });
+
+    expect(fleet.members.map((member) => member.backend).sort()).toEqual(['api', 'claude-code', 'codex']);
+  });
+
+  it('데모 모드에서는 여러 후보 비교를 만들지 않는다', async () => {
+    process.env.B_STUDIO_MODE = 'demo';
+
+    await expect(createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'iris' })).rejects.toThrow(/데모가 아닌 모드/);
+    expect(fake.createSession).not.toHaveBeenCalled();
+  });
+
+  it('실행이 모델을 바꿔 돌았으면 모델별 사용량을 멤버에 남긴다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '승격 실행', modelIds: ['model-a', 'model-b'], owner: 'hana' });
+    const member = fleet.members[0]!;
+    const usageByModel = {
+      'model-a': { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      'model-b': { inputTokens: 20, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    };
+
+    fake.listeners.get(member.sessionId)?.({
+      type: 'run_finished',
+      runId: member.runId!,
+      status: 'done',
+      summary: '검증 통과',
+      turns: 2,
+      usage: { inputTokens: 30, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      metrics: { modelCalls: 3, maxContextTokens: 100, modelMs: 1, toolMs: 1, gateMs: 1, usageByModel },
+    });
+
+    expect(getFleet(fleet.id, 'hana').members[0]!.usageByModel).toEqual(usageByModel);
   });
 
   // Fleet은 메모리의 객체가 원본이고 persist는 그 객체 전체를 쓴다. 두 멤버가 동시에 끝나도 한쪽 결과가 저장에서 빠지면 안 된다

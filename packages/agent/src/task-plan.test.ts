@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { ModelClient } from './loop';
-import { isInScope, parsePlannerReply, planLanes, requestTaskPlan, TaskPlanError } from './task-plan';
+import { isInScope, parsePlannerReply, planAskFromClient, planLanes, requestTaskPlan, TaskPlanError } from './task-plan';
 
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `${id} 작업`, paths, dependsOn });
 
@@ -88,10 +88,27 @@ describe('작업 계획', () => {
       },
     };
     const project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown as LoadedProject;
-    const { lanes } = await requestTaskPlan(client, project, '두 화면 추가');
+    const { lanes } = await requestTaskPlan(planAskFromClient(client), project, '두 화면 추가');
     expect(lanes).toHaveLength(2);
     expect(seen[0]!.tools).toBe(0);
     expect(seen[0]!.system).toContain('paths must not overlap');
+  });
+
+  it('계획 호출 방법을 바깥에서 주입한다(PlanAsk) — 로컬 CLI도 같은 프롬프트·같은 검증을 쓴다', async () => {
+    const seen: Array<{ system: string; user: string }> = [];
+    const ask = async ({ system, user }: { system: string; user: string }) => {
+      seen.push({ system, user });
+      return { text: JSON.stringify({ tasks: [task('a', ['web/a'])] }), usage: { inputTokens: 9, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+    };
+    const project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown as LoadedProject;
+
+    const result = await requestTaskPlan(ask, project, '한 화면 추가');
+
+    expect(result.lanes).toHaveLength(1);
+    expect(result.usage).toEqual({ inputTokens: 9, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    // 프롬프트는 어댑터를 쓸 때와 같다(계획 프롬프트 하나만 있다)
+    expect(seen[0]!.system).toContain('You split a web development request');
+    expect(seen[0]!.user).toBe('한 화면 추가');
   });
 
   it('계획 호출의 usage와 걸린 시간을 함께 돌려준다', async () => {
@@ -106,7 +123,7 @@ describe('작업 계획', () => {
     };
     const project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown as LoadedProject;
 
-    const result = await requestTaskPlan(client, project, '한 화면 추가');
+    const result = await requestTaskPlan(planAskFromClient(client), project, '한 화면 추가');
 
     expect(result.lanes).toHaveLength(1);
     // addUsage와 같은 모양으로 바꾼다 (캐시 분을 따로 센다)
@@ -127,7 +144,7 @@ describe('작업 계획', () => {
     };
     const project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown as LoadedProject;
 
-    const error = await requestTaskPlan(client, project, '빈 계획').then(
+    const error = await requestTaskPlan(planAskFromClient(client), project, '빈 계획').then(
       () => undefined,
       (cause: unknown) => cause,
     );

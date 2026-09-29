@@ -4,13 +4,15 @@ import { useEffect, useRef, useState } from "react";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
 import { answerRequest } from "@/lib/question-answer";
 import { artifactUrl } from "@/lib/artifact-url";
-import { activeRun, type ChatItem, type SessionView } from "@/lib/session-view";
+import { chatRequestBody, intentFor } from "@/lib/chat-request";
+import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { DiffView } from "./diff-view";
 import { GateTrack } from "./gate-track";
 import { Markdown } from "./markdown";
 import { formatElementSelections, useElementSelections } from "./selection-context";
 import { useSessionAccess, type SessionAccess } from "./session-access";
+import { useReadOnly } from "./use-read-only";
 
 type Intent = "build" | "ask";
 
@@ -21,7 +23,6 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
   const [text, setText] = useState("");
   const [allowBreaking, setAllowBreaking] = useState(false);
-  const [intent, setIntent] = useState<Intent>("build");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   /** 되돌리는 동작이라 한 번 더 누르게 한다. 요청이 바뀌면 확인 상태도 사라지도록 요청 id로 둔다 */
@@ -34,6 +35,14 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
   const budgetReached = limit !== undefined && used >= limit;
+  /**
+   * 입력은 하나다. "읽기만"이 켜져 있으면 질문 경로(intent `ask`, 읽기 전용 도구)로 보내고,
+   * 꺼져 있으면 만들기 경로로 보낸다 — 에이전트가 요청을 보고 답만 하거나 바꾼다
+   */
+  const [readOnly, setReadOnly] = useReadOnly(snapshot.id);
+  const intent: Intent = intentFor(readOnly);
+  /** 파일을 바꾼 실행. 결과 줄에서 "답만 했습니다"와 "완료"를 가른다 */
+  const changedRuns = runsWithChanges(chat);
   /** 내 사용량은 세션을 보는 모든 사람에게 방송되지 않으므로 따로 받아 온다 */
   const [personal, setPersonal] = useState<{ used: number; limit?: number; window: "day" | "month" }>();
 
@@ -58,7 +67,9 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   const personalLimit = personal?.limit;
   const personalReached = personalLimit !== undefined && personal !== undefined && personal.used >= personalLimit;
-  const canSend = snapshot.status === "ready" && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
+  // idle(샌드박스 꺼짐)이면 요청을 보낼 수 있다. 읽기만 하면 그대로 끝나고, 필요하면 실행 중에 샌드박스를 켠다
+  const awake = snapshot.status === "ready" || snapshot.status === "idle";
+  const canSend = awake && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
   // 실행 중에는 새 요청 대신 진행 중 지시를 보낸다. 데모(스크립트)는 반영할 모델 호출이 없어 제외한다
   const canSteer = snapshot.status === "ready" && snapshot.running && snapshot.mode !== "demo" && !sending && !budgetReached && !personalReached && access.canManage;
 
@@ -80,11 +91,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        text: attachments ? `${attachments}\n\n${request}` : request,
-        allowBreaking: sendIntent === "build" && allowBreaking,
-        intent: sendIntent,
-      }),
+      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking })),
     });
     if (response.ok) {
       setText("");
@@ -110,7 +117,6 @@ export function ChatPanel({ view }: { view: SessionView }) {
   /** 질문의 답을 계획으로 삼아 만들기 요청을 보낸다 */
   function buildFromPlan() {
     if (!planRequest) return;
-    setIntent("build");
     void send(planRequest, "build");
   }
 
@@ -153,7 +159,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
         {chat.map((item, index) => (
           <li key={index}>
-            <ChatEntry item={item} />
+            <ChatEntry item={item} changedRuns={changedRuns} />
             {index === chat.length - 1 && item.kind === "outcome" && item.intent === "ask" && item.status === "done" && access.canManage && (
               <button
                 type="button"
@@ -249,27 +255,22 @@ export function ChatPanel({ view }: { view: SessionView }) {
               ))}
           </div>
         )}
-        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-          <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="요청 종류">
-            {(["build", "ask"] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                aria-pressed={intent === kind}
-                onClick={() => setIntent(kind)}
-                className={`rounded-md px-3 py-1 font-medium transition-colors ${
-                  intent === kind ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
-                }`}
-              >
-                {kind === "build" ? "만들기" : "질문"}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted">{intent === "ask" ? "파일은 바꾸지 않고 답과 계획만 받습니다" : "검증 게이트를 통과한 변경만 남습니다"}</p>
-        </div>
         {snapshot.mode === "demo" ? (
-          intent === "ask" ? (
-            snapshot.nextDemoQuestion ? (
+          // 데모는 준비된 대본을 순서대로 실행한다. 만들기와 질문이 각각 준비돼 있으면 둘 다 보여 준다
+          <div className="space-y-2">
+            {snapshot.nextDemoRequest ? (
+              <button
+                type="button"
+                disabled={!canSend}
+                onClick={() => void send(snapshot.nextDemoRequest!, "build")}
+                className="w-full rounded-control bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+              >
+                다음 요청 보내기: {snapshot.nextDemoRequest}
+              </button>
+            ) : (
+              <p className="text-sm text-muted">준비된 데모 요청을 모두 실행했습니다.</p>
+            )}
+            {snapshot.nextDemoQuestion && (
               <button
                 type="button"
                 disabled={!canSend}
@@ -278,23 +279,28 @@ export function ChatPanel({ view }: { view: SessionView }) {
               >
                 질문하기: {snapshot.nextDemoQuestion}
               </button>
-            ) : (
-              <p className="text-sm text-muted">지금 단계에는 준비된 데모 질문이 없습니다.</p>
-            )
-          ) : snapshot.nextDemoRequest ? (
-            <button
-              type="button"
-              disabled={!canSend}
-              onClick={() => void send(snapshot.nextDemoRequest!, "build")}
-              className="w-full rounded-control bg-ink px-4 py-2.5 text-left text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
-            >
-              다음 요청 보내기: {snapshot.nextDemoRequest}
-            </button>
-          ) : (
-            <p className="text-sm text-muted">준비된 데모 요청을 모두 실행했습니다.</p>
-          )
+            )}
+          </div>
         ) : (
           <>
+            {/* 입력은 하나다. "읽기만"을 켜면 파일을 바꾸지 않고 답과 계획만 받는다(세션마다 기억한다) */}
+            <div className="mb-2.5 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={readOnly}
+                onClick={() => setReadOnly(!readOnly)}
+                title="켜면 파일을 바꾸지 않고 답과 계획만 받습니다"
+                className={`rounded-control px-3 py-1 text-sm font-medium transition-colors ${
+                  readOnly ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                }`}
+              >
+                읽기만
+              </button>
+              <p className="text-xs text-muted">
+                {readOnly ? "파일은 바꾸지 않고 답과 계획만 받습니다" : "질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다"}
+              </p>
+            </div>
             <label htmlFor="request" className="sr-only">
               {intent === "ask" ? "질문" : "요청"}
             </label>
@@ -350,7 +356,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   );
 }
 
-function ChatEntry({ item }: { item: ChatItem }) {
+function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: ReadonlySet<string> }) {
   switch (item.kind) {
     case "boot": {
       const rx = item.network.reduce((sum, entry) => sum + entry.rxBytes, 0);
@@ -380,6 +386,9 @@ function ChatEntry({ item }: { item: ChatItem }) {
           {item.text}
         </p>
       );
+
+    case "notice":
+      return <p className="border-l-[3px] border-line pl-3 text-sm text-muted">{item.text}</p>;
 
     case "steer": {
       const label = item.status === "applied" ? "지시(반영됨)" : item.status === "dropped" ? "지시(적용되지 못함)" : "지시(대기)";
@@ -647,17 +656,10 @@ function ChatEntry({ item }: { item: ChatItem }) {
 
     case "outcome": {
       const tone = item.status === "done" ? "text-pass" : item.status === "awaiting_input" ? "text-wait" : item.status === "cancelled" ? "text-muted" : "text-fail";
-      const text =
-        item.status === "done"
-          ? `${item.intent === "ask" ? "답변 완료" : "완료"}, ${item.turns ?? 0}턴`
-          : item.status === "awaiting_input"
-            ? "답을 기다립니다"
-            : item.status === "cancelled"
-              ? item.summary
-              : `${item.status === "failed" ? "완료하지 못함" : "오류"}: ${item.summary}`;
       return (
         <div className="text-sm">
-          <p className={tone}>{text}</p>
+          {/* 바꾼 파일이 없으면 "답만 했습니다"로 알린다(입력이 하나로 합쳐진 뒤의 기본 경로) */}
+          <p className={tone}>{outcomeText(item, changedRuns.has(item.runId))}</p>
           {hasTokens(item.usage) && <p className="mt-0.5 text-xs text-muted">{describeTokens(item.usage)}</p>}
         </div>
       );
@@ -783,6 +785,7 @@ function hintFor({ snapshot, chat }: SessionView, access: SessionAccess, persona
   if (snapshot.status === "ready" && !snapshot.running && snapshot.tokenLimit !== undefined && totalTokens(snapshot.tokens) >= snapshot.tokenLimit) {
     return "이 세션은 토큰 한도에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요.";
   }
+  if (snapshot.status === "idle") return "샌드박스는 아직 꺼져 있습니다. 첫 만들기 요청이나 미리보기의 '지금 켜기'를 누를 때 켭니다. 질문만 하면 켜지 않습니다.";
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
   if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";

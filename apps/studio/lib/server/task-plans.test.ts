@@ -73,6 +73,12 @@ const fake = vi.hoisted(() => ({
   modelCalls: 0,
   /** 그중 레인 사이 계약 호출 횟수(B_STUDIO_PLAN_CONTRACTS) */
   contractCalls: 0,
+  /** 로컬 Claude Code 호출(계획·계약 공용)이 만든 ask의 옵션과, 실제로 불린 횟수 */
+  claudeCodeAsks: [] as Array<{ cwd: string; model?: string }>,
+  claudeCodeCalls: 0,
+  /** 로컬 CLI가 돌려주는 usage. 어댑터를 거치지 않고 ask가 직접 주므로 이미 세션 지표 모양(camelCase)이다 */
+  claudeCodePlanUsage: { inputTokens: 21, outputTokens: 7, cacheReadTokens: 3, cacheWriteTokens: 0 },
+  claudeCodeContractUsage: { inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
   /** 계약 호출이 돌려주는 텍스트와 usage */
   contractText: '{"contracts":[{"body":"GET /api/orders → 200 JSON 배열","refs":["api"]}]}',
   contractUsage: { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
@@ -122,6 +128,22 @@ vi.mock('./model-registry', () => ({
       return { content: [{ type: 'text', text: JSON.stringify(fake.plan) }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } };
     },
   }),
+}));
+
+// 로컬 Claude Code 구독으로 계획·계약을 받는 경로. 실제 SDK·모델 호출 없이 옵션과 호출 수만 본다
+vi.mock('./claude-code-ask', () => ({
+  claudeCodeAsk: (options: { cwd: string; model?: string }) => {
+    fake.claudeCodeAsks.push(options);
+    return async (request: { system: string; user: string }) => {
+      // 계약과 계획은 시스템 프롬프트로 갈린다(제품·벤치가 같은 문구를 쓴다)
+      if (request.system.startsWith('You write the interface contracts')) {
+        fake.contractCalls += 1;
+        return { text: fake.contractText, usage: fake.claudeCodeContractUsage };
+      }
+      fake.claudeCodeCalls += 1;
+      return { text: JSON.stringify(fake.plan), usage: fake.claudeCodePlanUsage };
+    };
+  },
 }));
 
 vi.mock('./projects', () => ({
@@ -243,6 +265,8 @@ beforeEach(() => {
   fake.stopOrder.integrationCreatedAfterStops = false;
   fake.modelCalls = 0;
   fake.contractCalls = 0;
+  fake.claudeCodeAsks = [];
+  fake.claudeCodeCalls = 0;
   fake.contractText = '{"contracts":[{"body":"GET /api/orders → 200 JSON 배열","refs":["api"]}]}';
   fake.contractUsage = { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   fake.integration = 'done';
@@ -582,10 +606,15 @@ describe('고정 계획(presetPlan)', () => {
     expect(fake.modelCalls).toBe(0);
   });
 
-  it('presetPlan이 없으면 claude-code 모드에서 거부한다', async () => {
-    process.env.B_STUDIO_MODE = 'claude-code';
-    await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
-    expect(fake.modelCalls).toBe(0);
+  it('presetPlan이 없으면 계획 호출 경로가 없는 모드(codex·commandcode·opencode·demo)에서 거부한다', async () => {
+    for (const mode of ['codex', 'commandcode', 'opencode', 'demo']) {
+      process.env.B_STUDIO_MODE = mode;
+
+      // claude-code는 이제 허용된다(로컬 구독으로 계획을 받는다). 그 밖의 모드는 이유와 함께 거부한다
+      await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow(`(지금 모드: ${mode})`);
+      expect(fake.modelCalls).toBe(0);
+      expect(fake.claudeCodeCalls).toBe(0);
+    }
   });
 
   it('presetPlan이 있어도 demo 모드에서는 거부한다', async () => {
@@ -1253,4 +1282,68 @@ describe('승인 뒤 이슈로 올리기', () => {
     expect(plan.issues?.tracking?.number).toBe(9);
     expect(plan.issues?.tasks.a?.number).toBe(8);
   });
+});
+
+describe('로컬 Claude Code로 계획 받기', () => {
+  const optionKeys = ['B_STUDIO_MODE', 'B_STUDIO_CLAUDE_CODE_MODEL'] as const;
+  const before = Object.fromEntries(optionKeys.map((key) => [key, process.env[key]]));
+
+  afterAll(() => {
+    for (const key of optionKeys) {
+      const value = before[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('API 키 없이 계획을 받고, 기록에는 그 CLI 모델 id를 남긴다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    process.env.B_STUDIO_CLAUDE_CODE_MODEL = ' sonnet ';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '두 화면 추가', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    // 모델 레지스트리(유료 API 키)는 부르지 않는다 — 로컬 Claude Code 구독으로만 부른다
+    expect(fake.modelCalls).toBe(0);
+    expect(fake.claudeCodeCalls).toBe(1);
+    // 이어서 하는 계획(resume)도 같은 규칙을 타도록 기록에 CLI 모델 id가 남는다(앞뒤 공백은 떼고)
+    expect(plan.modelId).toBe('local-cli:sonnet');
+    expect(fake.claudeCodeAsks[0]).toMatchObject({ model: 'sonnet' });
+    // 계획 호출 토큰은 기존 계획 지표에 그대로 들어간다
+    expect(plan.planning?.usage).toEqual({ inputTokens: 21, outputTokens: 7, cacheReadTokens: 3, cacheWriteTokens: 0 });
+  });
+
+  it('모델을 정하지 않았으면 계정 기본 모델로 부르고 기록은 local-cli:default다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    delete process.env.B_STUDIO_CLAUDE_CODE_MODEL;
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '한 화면', owner: 'kim' });
+
+    expect(plan.modelId).toBe('local-cli:default');
+    expect(fake.claudeCodeAsks[0]?.model).toBeUndefined();
+  });
+
+  it('계약도 같은 호출로 받는다(B_STUDIO_PLAN_CONTRACTS=on)', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    try {
+      const plan = await run({ projectId: 'orders', request: '두 화면', owner: 'kim' });
+
+      // 계획 한 번 + 계약 한 번, 둘 다 같은 공용 함수(같은 ask 옵션)를 쓴다
+      expect(fake.claudeCodeCalls).toBe(1);
+      expect(fake.contractCalls).toBe(1);
+      expect(plan.contracts).toMatchObject({ source: 'model', count: 1 });
+      expect(plan.contracts?.usage).toEqual(fake.claudeCodeContractUsage);
+    } finally {
+      delete process.env.B_STUDIO_PLAN_CONTRACTS;
+    }
+  });
+
 });

@@ -26,6 +26,8 @@ export type ChatItem =
   | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
   /** 러너가 무언가를 하지 못했다는 안내(예: 상태 폴더가 없어 이전 대화를 이어받지 못함). 실행은 계속된다 */
   | { kind: 'warning'; runId: string; text: string }
+  /** 플랫폼이 대화에 남기는 한 줄 안내(예: 샌드박스를 켜는 중). 모델 발언이 아니다 */
+  | { kind: 'notice'; text: string }
   | {
       kind: 'route';
       runId: string;
@@ -152,6 +154,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return createView(event.snapshot);
     case 'status':
       return patchSnapshot(view, { status: event.status, error: event.error });
+    case 'notice':
+      return { ...view, chat: [...view.chat, { kind: 'notice', text: event.text }] };
     case 'service':
       return patchSnapshot(view, {
         services: view.snapshot.services.map((service) =>
@@ -530,6 +534,34 @@ export function activeRun({ snapshot, chat }: Pick<SessionView, 'snapshot' | 'ch
   const request = chat.findLast((item): item is Extract<ChatItem, { kind: 'request' }> => item.kind === 'request');
   if (!request) return undefined;
   return chat.some((item) => item.kind === 'outcome' && item.runId === request.runId) ? undefined : request.runId;
+}
+
+/**
+ * 파일을 바꾼 실행 id들. 서버가 게이트를 돌렸다는 것은 바뀐 파일이 있었다는 뜻이고
+ * (바뀐 파일이 없으면 게이트는 검증 없이 통과합니다), 체크포인트도 게이트를 통과한 변경에만 남습니다.
+ * 입력이 하나로 합쳐진 뒤로는 "질문에 답만 한" 만들기 실행도 있으므로, 결과 줄을 가르는 데 씁니다
+ */
+export function runsWithChanges(chat: readonly ChatItem[]): Set<string> {
+  const runs = new Set<string>();
+  for (const item of chat) {
+    if (item.kind === 'gate' || item.kind === 'checkpoint' || item.kind === 'reverted') runs.add(item.runId);
+  }
+  return runs;
+}
+
+/** 이번 실행이 파일을 바꿨는가 */
+export function runHasChanges(chat: readonly ChatItem[], runId: string): boolean {
+  return runsWithChanges(chat).has(runId);
+}
+
+type OutcomeItem = Extract<ChatItem, { kind: 'outcome' }>;
+
+/** 실행 결과 한 줄. 바꾼 파일이 없으면 "답만 했습니다"로 알린다(대화 화면과 나란히 보기 칸이 같은 문구를 쓴다) */
+export function outcomeText(item: OutcomeItem, hasChanges: boolean): string {
+  if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}, ${item.turns ?? 0}턴`;
+  if (item.status === 'awaiting_input') return '답을 기다립니다';
+  if (item.status === 'cancelled') return item.summary;
+  return `${item.status === 'failed' ? '완료하지 못함' : '오류'}: ${item.summary}`;
 }
 
 export function describeToolCall(name: string, input: unknown): string {

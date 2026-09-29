@@ -13,6 +13,7 @@ const STATE: Record<AgentState, { label: string; tone: Tone }> = {
   working: { label: "작업 중", tone: "pass" },
   booting: { label: "준비 중", tone: "wait" },
   idle: { label: "대기", tone: "idle" },
+  dormant: { label: "대기(샌드박스 꺼짐)", tone: "idle" },
   stopped: { label: "중지", tone: "idle" },
   error: { label: "오류", tone: "fail" },
 };

@@ -3,22 +3,13 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
+import type { SessionSnapshot } from "@/lib/studio-events";
 import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
 import { AgentsBadge } from "./agents-badge";
 import { LogoutButton } from "./logout-button";
 import { useSessionAccess } from "./session-access";
-import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
-
-const MODE_LABEL: Record<SessionMode, string> = {
-  api: "Claude API",
-  "claude-code": "로컬 Claude Agent",
-  codex: "로컬 ChatGPT Agent",
-  commandcode: "로컬 Command Code Agent",
-  opencode: "로컬 OpenCode Agent",
-  demo: "데모 모드",
-};
+import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
 
 /** Docker 런타임 이름(runsc)과 Kubernetes RuntimeClass 이름(gvisor) */
 const GVISOR_RUNTIMES = new Set(["runsc", "gvisor"]);
@@ -118,7 +109,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           className={`glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium ${(snapshot.backend ?? snapshot.mode) === "demo" ? "text-wait" : "text-muted"}`}
           title="에이전트 실행 방식"
         >
-          {MODE_LABEL[snapshot.backend ?? snapshot.mode]}
+          {SESSION_BACKEND_LABEL[snapshot.backend ?? snapshot.mode]}
         </span>
         <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
           나란히 보기에 추가

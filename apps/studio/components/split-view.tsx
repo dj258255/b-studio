@@ -13,8 +13,10 @@ import {
   type SplitLine,
 } from "@/lib/split";
 import { answerRequest } from "@/lib/question-answer";
+import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import type { SessionSnapshot, SessionStatus, SessionSummary } from "@/lib/studio-events";
 import { Dot, SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "./status";
+import { useReadOnly } from "./use-read-only";
 import { useSession } from "./use-session";
 
 export interface SplitPaneInit {
@@ -91,6 +93,8 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
   const canSend = view.snapshot.status === "ready";
   // 실행 중이면 새 요청 대신 진행 중 지시로 보낸다(다음 모델 호출 직전에 들어간다, ADR-057)
   const steering = view.snapshot.running;
+  /** 대화 화면과 같은 입력 규칙을 쓴다: "읽기만"이면 질문 경로, 아니면 만들기 경로(칸마다 기억한다) */
+  const [readOnly, setReadOnly] = useReadOnly(snapshot.id);
 
   useEffect(() => {
     const list = listRef.current;
@@ -105,7 +109,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
     const response = await fetch(`/api/sessions/${snapshot.id}/${steering ? "steer" : "messages"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(steering ? { text: request } : { text: request, allowBreaking: false, intent: "build" }),
+      body: JSON.stringify(steering ? { text: request } : chatRequestBody({ text: request, intent: intentFor(readOnly) })),
     });
     if (response.ok && override === undefined) setText("");
     // 권한은 서버가 판단한다. 403이면 만든 사람이 아니라는 뜻이다
@@ -194,7 +198,7 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
                 }}
                 rows={2}
                 disabled={!canSend}
-                placeholder={!canSend ? "지금은 보낼 수 없습니다" : steering ? "진행 중 지시" : "이 세션에 보낼 요청"}
+                placeholder={!canSend ? "지금은 보낼 수 없습니다" : steering ? "진행 중 지시" : readOnly ? "이 세션에 보낼 질문" : "이 세션에 보낼 요청"}
                 className="min-w-0 flex-1 resize-none rounded-control border border-line bg-panel px-2 py-1.5 text-sm leading-5 placeholder:text-muted disabled:opacity-60"
               />
               <button
@@ -205,6 +209,24 @@ function SessionPane({ snapshot, onClose }: { snapshot: SessionSnapshot; onClose
                 {sending ? "보내는 중" : steering ? "진행 중 지시" : "보내기"}
               </button>
             </div>
+            {/* 실행 중에는 지시만 보내므로 스위치를 감춘다. 대화 화면과 같은 규칙(읽기만 → 질문 경로) */}
+            {!steering && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={readOnly}
+                  onClick={() => setReadOnly(!readOnly)}
+                  title="켜면 파일을 바꾸지 않고 답과 계획만 받습니다"
+                  className={`rounded-control px-2 py-0.5 font-medium transition-colors ${
+                    readOnly ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                  }`}
+                >
+                  읽기만
+                </button>
+                <span className="min-w-0 text-muted">{readOnly ? "파일은 바꾸지 않습니다" : "바꾸면 게이트를 통과해야 남습니다"}</span>
+              </div>
+            )}
             {error && <p className="mt-1.5 text-xs text-fail">{error}</p>}
           </form>
         </>
@@ -244,7 +266,7 @@ function useElapsed(running: boolean): string | undefined {
   return running ? formatElapsed(elapsed) : undefined;
 }
 
-const STATUS_TONE: Record<SessionStatus, Tone> = { starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
+const STATUS_TONE: Record<SessionStatus, Tone> = { idle: "idle", starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
 
 /** id가 없는 `/split`에서 세션을 고르는 화면. 최근 순 목록에서 최대 4개를 고른다 */
 export function SplitPicker({ sessions }: { sessions: SessionSummary[] }) {

@@ -8,7 +8,7 @@ import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
@@ -245,6 +245,11 @@ export interface RunAgentOptions {
   requestApproval?: ToolContext['requestApproval'];
   /** 레인 조율 게시판. 주면 read_notes·(모델이 쓰는 전략이면) post_note 도구가 목록에 오른다 */
   board?: BoardAccess;
+  /**
+   * 샌드박스를 지금 켠다(지연 기동 세션). 주면 게이트를 실행 시작 때 만들지 않고, 첫 파일 변경·샌드박스 도구 때
+   * 그때 켠 뒤에 만든다 — 계약 기준을 샌드박스가 켜진 뒤, 변경 전에 잡기 위해서다. 없으면 지금처럼 시작할 때 만든다
+   */
+  ensureSandbox?: () => Promise<void>;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -294,24 +299,28 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth });
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({
-        project,
-        sandbox,
-        workspace,
-        allowBreaking,
-        maxVerifyAttempts,
-        fetcher,
-        pageFetcher,
-        browserRunner,
-        saveArtifact,
-        onBrowserFrame,
-        signal,
-        onServiceStatus,
-        onEvent,
-      });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다.
+  // 계약 기준은 샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서 잡아야 하기 때문이다
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({
+      project,
+      sandbox,
+      workspace,
+      allowBreaking,
+      maxVerifyAttempts,
+      fetcher,
+      pageFetcher,
+      browserRunner,
+      saveArtifact,
+      onBrowserFrame,
+      signal,
+      onServiceStatus,
+      onEvent,
+    }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
   const system = buildSystemPrompt(project) + workflowContext(project);
   const policy = options.policy ?? executionPolicyFor(project);
   const tools = buildTools(project, {
@@ -425,6 +434,11 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       const results: BetaToolResultBlockParam[] = [];
       for (const call of toolUses) {
         onEvent({ type: 'tool_call', name: call.name, input: call.input });
+        // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+        if (options.ensureSandbox && (SANDBOX_TOOLS.has(call.name) || WRITE_TOOLS.has(call.name))) {
+          await options.ensureSandbox();
+          gate ??= await gateFor();
+        }
         const toolStarted = performance.now();
         const outcome = await executeTool(call.name, call.input, {
           project,

@@ -10,7 +10,7 @@ import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -237,10 +237,13 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
   if (options.escalation) onEvent({ type: 'warning', message: '로컬 OpenCode Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
   const context: ToolContext = {
     project,
     workspace,
@@ -254,6 +257,8 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+    // 지연 기동 세션이면 샌드박스 도구를 실행하기 직전에 켠다(핸들러가 게이트 생성까지 한다)
+    ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
   const specs = buildTools(project);
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
@@ -332,6 +337,11 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
           // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
           signal?.throwIfAborted();
           onEvent({ type: 'tool_call', name, input: args });
+          // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+          if (options.ensureSandbox && (SANDBOX_TOOLS.has(name) || WRITE_TOOLS.has(name))) {
+            await options.ensureSandbox();
+            gate = await gateFor();
+          }
           const toolStarted = performance.now();
           const outcome = await executeTool(name, args, context);
           metrics.toolMs += Math.round(performance.now() - toolStarted);
@@ -447,16 +457,18 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
       const text = turnText || lastText;
       if (text) lastText = text;
 
-      // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
-      if (!gate) {
+      // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트.
+      // 지연 기동 세션이 아무것도 바꾸지 않았으면 게이트가 없다 → 샌드박스 없이 끝난다
+      const activeGate = gate;
+      if (!activeGate) {
         finish('done', lastText);
         break;
       }
       const gateStarted = performance.now();
-      const outcome = await gate.check();
+      const outcome = await activeGate.check();
       metrics.gateMs += Math.round(performance.now() - gateStarted);
       if (outcome.kind === 'pass') {
-        if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+        if (activeGate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
         finish('done', lastText);
         break;
       }

@@ -5,7 +5,7 @@ import type { Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Board } from './coordination';
-import { buildTools, executeTool, type ToolContext } from './tools';
+import { buildTools, executeTool, LOCAL_TOOLS, SANDBOX_TOOLS, type BoardAccess, type ToolContext } from './tools';
 import { Workspace } from './workspace';
 
 const project = {
@@ -330,5 +330,37 @@ describe('조율 도구', () => {
 
     const read = await executeTool('read_notes', { kinds: [] }, readOnly);
     expect(read.ok).toBe(true);
+  });
+});
+
+describe('도구 분류 (샌드박스 필요 여부)', () => {
+  it('모든 도구가 SANDBOX_TOOLS나 LOCAL_TOOLS 중 하나에 들어 있다 (새 도구를 빠뜨리지 않게)', () => {
+    // 모든 조건부 도구(외부 API·계약·게시판·디자인·되묻기)를 켠 프로젝트로 도구 목록을 만든다
+    const full = {
+      ...project,
+      managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }]],
+      external: [['users', { source: 'external', baseUrl: 'https://users.example.com', policy: { mask: [], maskPatterns: [] } }]],
+    } as unknown as LoadedProject;
+    const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, design: true, interactive: true }).map((candidate) => candidate.name);
+
+    for (const name of names) {
+      expect(SANDBOX_TOOLS.has(name) || LOCAL_TOOLS.has(name), `분류가 없는 도구: ${name}`).toBe(true);
+    }
+    // 두 분류는 겹치지 않는다
+    for (const name of SANDBOX_TOOLS) expect(LOCAL_TOOLS.has(name), name).toBe(false);
+    // 분류표에만 있고 실제 도구 목록에 없는 이름도 없어야 한다(이름이 바뀌면 분류표도 고쳐야 한다)
+    for (const name of [...SANDBOX_TOOLS, ...LOCAL_TOOLS]) expect(names, name).toContain(name);
+  });
+
+  it('샌드박스가 필요한 도구만 ensureSandbox를 부른다', async () => {
+    let boots = 0;
+    const ctx: ToolContext = { ...context, ensureSandbox: async () => void (boots += 1) };
+
+    // 작업 공간 도구는 샌드박스를 켜지 않는다
+    await executeTool('read_file', { path: 'missing.txt' }, ctx);
+    expect(boots).toBe(0);
+    // 샌드박스 도구는 실행 전에 부른다(세션 쪽에서 동시 호출에도 한 번만 켜도록 dedup한다)
+    await executeTool('service_stats', {}, ctx);
+    expect(boots).toBe(1);
   });
 });

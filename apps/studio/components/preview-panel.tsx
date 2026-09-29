@@ -80,6 +80,9 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <ExternalApiPanel sessionId={view.snapshot.id} external={active.external} ready={view.snapshot.status === "ready"} revision={view.completedRuns} />
         ) : active.id === LOGS_TAB || !active.service ? (
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
+        ) : view.snapshot.status === "idle" ? (
+          // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다
+          <IdleServicePanel sessionId={view.snapshot.id} service={active.service} />
         ) : !active.service.url ? (
           <ServicePending service={active.service} />
         ) : (
@@ -311,6 +314,41 @@ function RestartBanner({ service }: { service: ServiceView }) {
       {service.detail ? `: ${service.detail}` : ""}
       {failed ? ". 대화의 검증 게이트에서 원인을 확인하세요." : ". 준비되면 새 주소로 다시 불러옵니다."}
     </p>
+  );
+}
+
+/**
+ * 지연 기동 세션의 미리보기. 아직 샌드박스를 켜지 않았으므로 빈 화면 대신 켜는 방법을 보여 준다.
+ * "지금 켜기"는 boot API를 부르고, 진행 상태는 SSE 이벤트로 스냅샷에 반영된다
+ */
+function IdleServicePanel({ sessionId, service }: { sessionId: string; service: ServiceView }) {
+  const [booting, setBooting] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function boot() {
+    setBooting(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/boot`, { method: "POST" });
+    if (!response.ok) setError(((await response.json().catch(() => ({}))) as { error?: string }).error ?? "샌드박스를 켜지 못했습니다");
+    setBooting(false);
+  }
+
+  return (
+    <div className="flex h-full flex-col justify-center px-10">
+      <p className="text-lg font-semibold text-muted">대기(샌드박스 꺼짐)</p>
+      <p className="mt-2 max-w-[60ch] text-sm leading-6 text-muted">
+        {service.name}는 아직 켜지 않았습니다. 첫 만들기 요청 때 켭니다. 질문만 하면 켜지 않습니다.
+      </p>
+      <button
+        type="button"
+        onClick={boot}
+        disabled={booting}
+        className="mt-4 self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+      >
+        {booting ? "켜는 중" : "지금 켜기"}
+      </button>
+      {error && <p className="mt-2 text-sm text-fail">{error}</p>}
+    </div>
   );
 }
 
