@@ -41,9 +41,11 @@ function overlaps(a: PlanGraphNode, b: PlanGraphNode): boolean {
 }
 
 describe('buildPlanGraph 좌표', () => {
-  it('레인 1~4개·작업 레인당 1~6개까지 노드가 겹치지 않고 크기 안에 들어간다', () => {
-    for (let laneCount = 1; laneCount <= 4; laneCount++) {
-      for (let perLane = 1; perLane <= 6; perLane++) {
+  // 상한을 설정으로 올릴 수 있게 되면서(B_STUDIO_MAX_LANES·B_STUDIO_MAX_PLAN_TASKS) 배치가 최대치까지 버티는지 본다
+  it('레인 1~8개·작업 레인당 1~16개까지 노드가 겹치지 않고 크기 안에 들어간다', () => {
+    for (let laneCount = 1; laneCount <= 8; laneCount++) {
+      for (let perLane = 1; perLane <= 16; perLane++) {
+        const where = `${laneCount}레인 × ${perLane}작업`;
         const lanes = Array.from({ length: laneCount }, (_, index) =>
           lane(
             `lane-${index + 1}`,
@@ -53,22 +55,24 @@ describe('buildPlanGraph 좌표', () => {
         );
         const graph = buildPlanGraph(plan({ lanes, integration: integration() }));
 
-        for (const node of graph.nodes) {
-          expect(node.x, `${node.id} x`).toBeGreaterThanOrEqual(0);
-          expect(node.y, `${node.id} y`).toBeGreaterThanOrEqual(0);
-          expect(node.x + node.width).toBeLessThanOrEqual(graph.width);
-          expect(node.y + node.height).toBeLessThanOrEqual(graph.height);
-        }
+        const outside = graph.nodes
+          .filter((node) => node.x < 0 || node.y < 0 || node.x + node.width > graph.width || node.y + node.height > graph.height)
+          .map((node) => node.id);
+        expect(outside, `${where}: 그림 밖으로 나간 노드`).toEqual([]);
+
+        const collisions: string[] = [];
         for (let a = 0; a < graph.nodes.length; a++) {
           for (let b = a + 1; b < graph.nodes.length; b++) {
-            expect(overlaps(graph.nodes[a]!, graph.nodes[b]!), `${graph.nodes[a]!.id} ↔ ${graph.nodes[b]!.id} 겹침`).toBe(false);
+            if (overlaps(graph.nodes[a]!, graph.nodes[b]!)) collisions.push(`${graph.nodes[a]!.id} ↔ ${graph.nodes[b]!.id}`);
           }
         }
-        expect(graph.laneCount).toBe(laneCount);
-        expect(graph.maxTasks).toBe(perLane);
+        expect(collisions, `${where}: 겹친 노드`).toEqual([]);
+
+        expect(graph.laneCount, where).toBe(laneCount);
+        expect(graph.maxTasks, where).toBe(perLane);
         // 레인 열 하나 + 통합 한 칸
-        expect(graph.nodes.filter((node) => node.kind === 'lane')).toHaveLength(laneCount);
-        expect(graph.nodes.find((node) => node.id === INTEGRATION_NODE_ID)!.x).toBeGreaterThan(
+        expect(graph.nodes.filter((node) => node.kind === 'lane'), where).toHaveLength(laneCount);
+        expect(graph.nodes.find((node) => node.id === INTEGRATION_NODE_ID)!.x, where).toBeGreaterThan(
           graph.nodes.find((node) => node.id === laneNodeId(`lane-${laneCount}`))!.x,
         );
       }

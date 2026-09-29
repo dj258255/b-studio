@@ -10,6 +10,42 @@ import { isProtectedPath } from './policy';
  */
 export const MAX_PLAN_TASKS = 6;
 export const MAX_PLAN_LANES = 3;
+/** 설정으로 올릴 수 있는 절대 상한. 이 위는 스키마도 검증도 받지 않는다 */
+export const MAX_PLAN_LANES_CAP = 8;
+export const MAX_PLAN_TASKS_CAP = 16;
+
+/** 계획 상한. 기본값은 위 상수와 같고, 실행기(studio)·벤치가 설정에서 읽어 넘긴다 */
+export interface PlanLimits {
+  /** 동시에 돌릴 수 있는 레인 수 */
+  maxLanes: number;
+  /** 한 계획이 만들 수 있는 작업 수 */
+  maxTasks: number;
+}
+
+export const DEFAULT_PLAN_LIMITS: PlanLimits = { maxLanes: MAX_PLAN_LANES, maxTasks: MAX_PLAN_TASKS };
+
+/**
+ * 설정에서 계획 상한을 읽는다. `B_STUDIO_MAX_LANES`(1~8)·`B_STUDIO_MAX_PLAN_TASKS`(1~16), 기본 3·6.
+ * 잘못된 값은 기본값으로 돌리고 이유를 경고로 남긴다 — 오타 하나로 계획 기능이 멈추는 것보다 낫다.
+ */
+export function planLimitsFromEnv(env: Record<string, string | undefined> = process.env): PlanLimits {
+  return {
+    maxLanes: readPlanLimit(env.B_STUDIO_MAX_LANES, 'B_STUDIO_MAX_LANES', MAX_PLAN_LANES, MAX_PLAN_LANES_CAP),
+    maxTasks: readPlanLimit(env.B_STUDIO_MAX_PLAN_TASKS, 'B_STUDIO_MAX_PLAN_TASKS', MAX_PLAN_TASKS, MAX_PLAN_TASKS_CAP),
+  };
+}
+
+/** 값 하나를 읽는다. 비었으면 기본값, 정수가 아니거나 1~상한 밖이면 경고하고 기본값 */
+function readPlanLimit(raw: string | undefined, name: string, fallback: number, cap: number): number {
+  const value = raw?.trim();
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > cap) {
+    console.warn(`[b-studio] ${name}=${value}을(를) 쓸 수 없습니다. 1~${cap} 사이 정수여야 합니다. 기본값 ${fallback}으로 진행합니다`);
+    return fallback;
+  }
+  return parsed;
+}
 
 const TASK_ID = /^[a-z][a-z0-9-]{0,39}$/;
 const SCOPE_PATH = z
@@ -43,7 +79,8 @@ export const TaskPlanSchema = z.object({
       }),
     )
     .min(1)
-    .max(MAX_PLAN_TASKS),
+    // 스키마는 절대 상한만 막는다. 설정값(기본 6)은 planLanes가 그 실행의 상한으로 따로 본다
+    .max(MAX_PLAN_TASKS_CAP),
 });
 
 export type TaskPlan = z.infer<typeof TaskPlanSchema>;
@@ -63,13 +100,17 @@ export class TaskPlanError extends Error {
   durationMs?: number;
 }
 
-/** 계획을 검증하고 레인으로 묶는다. 모델이 만든 계획이라도 이 검사를 통과하지 못하면 실행하지 않는다 */
-export function planLanes(input: unknown): TaskLane[] {
+/**
+ * 계획을 검증하고 레인으로 묶는다. 모델이 만든 계획이라도 이 검사를 통과하지 못하면 실행하지 않는다.
+ * 상한(작업 수·레인 수)은 그 실행의 설정값을 따른다 — 기본은 6·3이다
+ */
+export function planLanes(input: unknown, limits: PlanLimits = DEFAULT_PLAN_LIMITS): TaskLane[] {
   const parsed = TaskPlanSchema.safeParse(input);
   if (!parsed.success) {
     throw new TaskPlanError(`작업 계획 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   }
   const tasks = parsed.data.tasks;
+  if (tasks.length > limits.maxTasks) throw new TaskPlanError(`작업은 ${limits.maxTasks}개까지입니다 (계획: ${tasks.length}개)`);
   const byId = new Map(tasks.map((task) => [task.id, task]));
   if (byId.size !== tasks.length) throw new TaskPlanError('작업 id가 중복됩니다');
   for (const task of tasks) {
@@ -106,7 +147,7 @@ export function planLanes(input: unknown): TaskLane[] {
     }
     return { id: `lane-${index + 1}`, tasks: ordered, paths: [...new Set(ordered.flatMap((task) => task.paths))].sort() };
   });
-  if (lanes.length > MAX_PLAN_LANES) throw new TaskPlanError(`동시에 돌릴 레인은 ${MAX_PLAN_LANES}개까지입니다 (계획: ${lanes.length}개)`);
+  if (lanes.length > limits.maxLanes) throw new TaskPlanError(`동시에 돌릴 레인은 ${limits.maxLanes}개까지입니다 (계획: ${lanes.length}개)`);
 
   // 병렬 레인의 쓰기 범위가 겹치면 합칠 때 어느 쪽 결과가 맞는지 정할 수 없다. 실행 전에 막는다
   for (let a = 0; a < lanes.length; a++) {
@@ -143,8 +184,8 @@ function topologicalOrder(tasks: PlannedTask[]): PlannedTask[] {
   return ordered;
 }
 
-/** 작업 계획을 받을 때 쓰는 시스템 프롬프트. 도구 없이 JSON만 받는다 */
-export function buildPlannerSystem(project: LoadedProject): string {
+/** 작업 계획을 받을 때 쓰는 시스템 프롬프트. 도구 없이 JSON만 받는다. 상한은 그 실행의 설정값을 따른다 */
+export function buildPlannerSystem(project: LoadedProject, limits: PlanLimits = DEFAULT_PLAN_LIMITS): string {
   const services = project.managed.map(([name, service]) => `- ${name}: ${service.template}, 폴더 ${service.path}`).join('\n');
   return `You split a web development request for project "${project.spec.name}" into independent tasks for coding agents.
 Services:
@@ -152,7 +193,7 @@ ${services}
 
 Reply with ONLY a JSON object: {"tasks":[{"id":"kebab-id","title":"short","request":"full instruction for one agent","paths":["folder/or/file the task may write"],"dependsOn":["id"]}]}
 Rules:
-- At most ${MAX_PLAN_TASKS} tasks. Use one task if the request is small. Do not split for the sake of splitting.
+- At most ${limits.maxTasks} tasks and at most ${limits.maxLanes} groups of dependent tasks (lanes) running at the same time. Use one task if the request is small. Do not split for the sake of splitting.
 - paths are project-relative. An agent is blocked from writing anywhere else, so include every folder the task must change.
 - Tasks that need another task's changes must list it in dependsOn; they run later in the same workspace.
 - Tasks without dependencies run in parallel in separate workspaces, so their paths must not overlap.`;
@@ -226,14 +267,15 @@ export async function requestTaskPlan(
   project: LoadedProject,
   request: string,
   signal?: AbortSignal,
+  limits: PlanLimits = DEFAULT_PLAN_LIMITS,
 ): Promise<{ lanes: TaskLane[]; raw: unknown; usage: AgentUsage; durationMs: number }> {
   const started = performance.now();
-  const answer = await ask({ system: buildPlannerSystem(project), user: request }, signal);
+  const answer = await ask({ system: buildPlannerSystem(project, limits), user: request }, signal);
   const durationMs = Math.round(performance.now() - started);
   const { text, usage } = answer;
   try {
     const raw = parsePlannerReply(text);
-    return { lanes: planLanes(raw), raw, usage, durationMs };
+    return { lanes: planLanes(raw, limits), raw, usage, durationMs };
   } catch (error) {
     // 계획 검증이 실패해도 호출에 쓴 토큰과 시간은 잃지 않도록 오류에 남겨 다시 던진다
     if (error instanceof TaskPlanError) {
