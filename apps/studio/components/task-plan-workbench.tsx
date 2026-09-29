@@ -323,7 +323,11 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
       ) : (
         <>
           <div className={`grid gap-4 ${plan.lanes.length >= 3 ? '2xl:grid-cols-3' : 'lg:grid-cols-2'}`}>
-            {plan.lanes.map((lane) => (
+            {plan.lanes.map((lane) => {
+              // 레인 합계는 그 레인 작업들의 실행 기록에서 더한다. 계획 전체 합계(plan.metrics)만으로는 레인별 비중을 알 수 없다
+              const laneCacheRead = lane.tasks.reduce((sum, task) => sum + (task.run?.usage?.cacheReadTokens ?? 0), 0);
+              const laneOutput = lane.tasks.reduce((sum, task) => sum + (task.run?.usage?.outputTokens ?? 0), 0);
+              return (
               <article key={lane.id} className="min-w-0 rounded-panel border border-line bg-panel p-5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -345,10 +349,17 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
                     </li>
                   ))}
                 </ol>
+                {(laneCacheRead > 0 || laneOutput > 0) && (
+                  <p className="mt-3 text-xs text-muted">
+                    레인 합계 · 캐시 읽기 <span className="font-mono text-ink">{laneCacheRead.toLocaleString('ko-KR')}</span> · 출력{' '}
+                    <span className="font-mono text-ink">{laneOutput.toLocaleString('ko-KR')}</span>
+                  </p>
+                )}
                 {lane.error && <p className="mt-3 text-xs text-fail whitespace-pre-wrap">{lane.error}</p>}
                 {lane.sessionId && <Link href={`/sessions/${lane.sessionId}`} className="mt-4 inline-block rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink">레인 세션 보기</Link>}
               </article>
-            ))}
+              );
+            })}
           </div>
 
           {plan.integration && (

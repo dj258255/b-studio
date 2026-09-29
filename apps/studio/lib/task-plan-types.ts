@@ -15,6 +15,8 @@ export interface TaskPlanNoteView {
   lane: string;
   task?: string;
   by: 'model' | 'platform';
+  /** 계층 구조(hierarchical)의 그룹. 작성 레인의 첫 쓰기 범위 */
+  group?: string;
   priority: number;
   at: string;
 }
@@ -73,6 +75,8 @@ export interface TaskPlanLaneView {
   error?: string;
   /** 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
+  /** 기동 중 이 레인 세션이 받은 바이트(서비스 합). 못 읽었으면 없다 */
+  bootRxBytes?: number;
   /** 세션을 만들기 직전 시각 */
   startedAt?: string;
   /** 레인이 성공·실패로 끝난 시각 */
@@ -90,6 +94,8 @@ export interface TaskPlanIntegrationView {
   error?: string;
   /** 통합 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
+  /** 기동 중 통합 세션이 받은 바이트(서비스 합). 못 읽었으면 없다 */
+  bootRxBytes?: number;
   /** 통합 실행의 지표 */
   run?: TaskPlanRunMetricsView;
   /** S4: 통합 게이트가 실패해 모델에 수리를 한 번 요청한 기록 */

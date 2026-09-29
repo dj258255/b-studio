@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AgentsBadge } from "@/components/agents-badge";
 import { LogoutButton } from "@/components/logout-button";
 import { pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
@@ -34,6 +35,7 @@ export default async function HomePage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-muted">b-studio</p>
         <div className="flex items-center gap-3 text-sm text-muted">
+          <AgentsBadge />
           <Link href="/fleets" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
             Agent Fleet
           </Link>
@@ -81,9 +83,14 @@ export default async function HomePage() {
 
       {sessions.length > 0 && (
         <section className="mt-14" aria-labelledby="sessions-heading">
-          <h2 id="sessions-heading" className="text-lg font-semibold">
-            최근 세션
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 id="sessions-heading" className="text-lg font-semibold">
+              최근 세션
+            </h2>
+            <Link href="/split" className="glass-soft rounded-control px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-panel">
+              나란히 보기
+            </Link>
+          </div>
           <p className="mt-1 text-sm text-muted">중지된 세션도 작업 복사본과 체크포인트가 남아 있어 열어서 이어서 작업할 수 있습니다.</p>
           <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-panel">
             {sessions.slice(0, RECENT_SESSIONS).map((session) => (

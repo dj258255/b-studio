@@ -13,9 +13,10 @@ import {
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
 import { VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool, type BoardAccess, type ToolContext } from './tools';
+import { createToolResultCache } from './tool-output';
+import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -23,6 +24,8 @@ import { Workspace } from './workspace';
 const SERVER = 'b-studio';
 /** 화면 표기. Agent SDK 브랜딩 가이드는 제품 안에서 "Claude Code"라는 이름을 쓰지 않도록 한다 */
 const BACKEND = '로컬 Claude Agent';
+/** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
+const STEERING_POLL_MS = 300;
 
 /** 실제 SDK와 테스트용 가짜를 바꿔 끼우는 지점 */
 export interface ClaudeCodeSdk {
@@ -89,7 +92,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     effort = 'high',
     account,
     sdk = DEFAULT_SDK,
+    interactive = false,
     intent = 'build',
+    steering,
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
@@ -108,16 +113,23 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onServiceStatus,
     readOnly: ask,
     design: options.design,
+    onQuestion: (question) => {
+      asked = question;
+      onEvent({ type: 'question', ...question });
+    },
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     board: options.board,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+    // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
+    toolResults: createToolResultCache(),
   };
   const specs = buildTools(project, {
     ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}),
     design: options.design !== undefined,
+    interactive,
   });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
@@ -135,7 +147,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         const toolStarted = performance.now();
         const outcome = await executeTool(spec.name, args, context);
         metrics.toolMs += Math.round(performance.now() - toolStarted);
-        onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content });
+        onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
         return { content: [{ type: 'text' as const, text: outcome.content }], isError: !outcome.ok };
       }),
     ),
@@ -170,20 +182,28 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   });
   input.push(ask ? buildAskRequest(request, { toolName }) : request);
 
+  // 진행 중 지시는 스트리밍 입력 큐에 사용자 메시지로 넣는다.
+  // SDK는 스트리밍 입력에서 큐에 들어온 사용자 메시지를(현재 도구 호출이 끝난 뒤) 다음 모델 호출에서 처리한다.
+  // 지금 하던 도구 호출을 중간에 끊지 않는 것은 이 방식의 성질이다(아래 주석 근거는 결과 문서에 적음)
+  const detachSteering = attachSteering(steering, input, onEvent);
+
   const usage = emptyUsage();
   const messageIds = new Set<string>();
   let sessionId: string | undefined;
   let lastText = '';
   let announced = false;
   let result: ClaudeCodeResult | undefined;
+  // ask_user가 남긴 질문. 있으면 쿼리를 중단하고 awaiting_input으로 끝내 사용자 답을 기다린다
+  let asked: AskUserQuestion | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion): void => {
     // 본 대화의 서로 다른 assistant 메시지 수. 이미 있는 messageIds Set의 크기와 같다
     metrics.modelCalls = messageIds.size;
     result = {
       status,
       summary,
       changedFiles: workspace.changedFiles(),
+      ...(question ? { question } : {}),
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
@@ -193,7 +213,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       metrics: { ...metrics },
       sessionId,
     };
-    onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
+    onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다
     input.close();
   };
@@ -225,16 +245,29 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           if (message.parent_tool_use_id) break;
           // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
           const messageUsage = message.message.usage;
+          const turnContext = messageUsage
+            ? (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0)
+            : 0;
           if (messageUsage) {
-            metrics.maxContextTokens = Math.max(
-              metrics.maxContextTokens,
-              (messageUsage.input_tokens ?? 0) + (messageUsage.cache_read_input_tokens ?? 0) + (messageUsage.cache_creation_input_tokens ?? 0),
-            );
+            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
           }
           if (!messageIds.has(message.message.id)) {
             messageIds.add(message.message.id);
-            onEvent({ type: 'turn', turn: messageIds.size });
-            if (messageIds.size > maxTurns) {
+            const turn = messageIds.size;
+            onEvent({ type: 'turn', turn });
+            // 턴 하나의 사용량. 같은 메시지 id가 여러 번 와도 한 번만 남긴다(누적값 tokens와 다르다)
+            if (messageUsage) {
+              onEvent({
+                type: 'turn_usage',
+                turn,
+                inputTokens: messageUsage.input_tokens ?? 0,
+                outputTokens: messageUsage.output_tokens ?? 0,
+                cacheReadTokens: messageUsage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: messageUsage.cache_creation_input_tokens ?? 0,
+                contextTokens: turnContext,
+              });
+            }
+            if (turn > maxTurns) {
               await conversation.interrupt().catch(() => {});
               finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
               break;
@@ -257,6 +290,19 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           const failure = describeResultFailure(message);
           if (failure) {
             finish('failed', failure);
+            break;
+          }
+          // 되묻고 멈추기: ask_user가 질문을 남겼으면 쿼리를 중단하고 실행을 끝낸다.
+          // 세션 id는 그대로 저장되어 다음 요청이 이 대화를 이어받는다.
+          // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
+          if (asked) {
+            await conversation.interrupt().catch(() => {});
+            if (gate && workspace.changedFiles().length > 0) {
+              const gateStarted = performance.now();
+              await gate.check();
+              metrics.gateMs += Math.round(performance.now() - gateStarted);
+            }
+            finish('awaiting_input', asked.question, asked);
             break;
           }
           // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
@@ -284,6 +330,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     conversation.close();
     throw error;
   } finally {
+    detachSteering();
     input.close();
     signal?.removeEventListener('abort', onAbort);
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
@@ -293,6 +340,24 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   signal?.throwIfAborted();
   if (!result) throw new Error('Claude Code가 결과를 보내지 않고 종료됐습니다');
   return result;
+}
+
+/**
+ * 진행 중 지시를 스트리밍 입력 큐에 넣는다. 알림(onPush)이 있으면 즉시, 없으면 짧은 주기로 확인한다.
+ * 돌려준 함수로 구독이나 주기 확인을 멈춘다.
+ */
+function attachSteering(steering: Steering | undefined, input: InputQueue, onEvent: (event: AgentEvent) => void): () => void {
+  if (!steering) return () => {};
+  const flush = () => {
+    const texts = takeSteering(steering);
+    if (texts.length === 0) return;
+    input.push(formatSteering(texts));
+    onEvent({ type: 'steer_applied', count: texts.length });
+  };
+  if (steering.onPush) return steering.onPush(flush);
+  const timer = setInterval(flush, STEERING_POLL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /**
@@ -382,6 +447,7 @@ export function zodShape(schema: { properties?: unknown }): Record<string, z.Zod
     if (value.type === 'string' && value.enum?.length) type = z.enum(value.enum.map(String) as [string, ...string[]]);
     else if (value.type === 'string') type = z.string();
     else if (value.type === 'integer') type = z.number().int();
+    else if (value.type === 'boolean') type = z.boolean();
     else if (value.type === 'array' && value.items?.type === 'string') type = z.array(z.string());
     else throw new Error(`지원하지 않는 도구 입력 형식입니다: ${key} ${JSON.stringify(value)}`);
     shape[key] = value.description ? type.describe(value.description) : type;

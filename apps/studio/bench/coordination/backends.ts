@@ -48,6 +48,16 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
   return upstreamModelId;
 }
 
+/**
+ * 컨텍스트 비우기(`--context-clearing`). 기본은 꺼짐이다 — 효과를 재기 전이라(ADR-055 보강)
+ * 켠 실행과 끈 실행을 같은 조건에서 비교해 재려고 인자로 뺐다.
+ */
+export function resolveContextClearing(value: string | undefined): boolean {
+  const trimmed = value?.trim().toLowerCase() || 'off';
+  if (trimmed !== 'on' && trimmed !== 'off') throw new Error(`--context-clearing은 on 또는 off여야 합니다 (지금 값: ${value})`);
+  return trimmed === 'on';
+}
+
 export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinutes: number | undefined): { policy: RateLimitPolicy; waitMinutes: number } {
   const value = onRateLimit?.trim() || 'stop';
   if (value !== 'stop' && value !== 'wait') throw new Error(`--on-rate-limit은 stop 또는 wait여야 합니다 (지금 값: ${onRateLimit})`);

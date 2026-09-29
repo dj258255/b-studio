@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,11 +7,12 @@ import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
-type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[] };
+type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
 type SendOptions = {
   allowBreaking: boolean;
   by?: string;
   writableScope?: readonly string[];
+  steering?: boolean;
   scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }>;
   board?: BoardAccess;
 };
@@ -41,6 +42,8 @@ const fake = vi.hoisted(() => ({
   /** findProject가 돌려주는 프로젝트. 시크릿 가림 테스트는 여기에 secrets를 넣고 환경 변수를 세운다 */
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
+  /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
+  bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
   /** 세션별 이벤트 기록. subscribe가 다시 보내 주므로 S5가 실패 서명을 읽는다 */
   history: new Map<string, StudioEvent[]>(),
@@ -94,7 +97,7 @@ vi.mock('./sessions', () => ({
       mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
       writeFileSync(path.join(workDir, file), content);
     }
-    fake.sessions.set(id, { id, status: 'ready', workDir, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
+    fake.sessions.set(id, { id, status: 'ready', workDir, bootNetwork: fake.bootNetwork, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
     return { id };
   },
   getSnapshot: (id: string) => fake.sessions.get(id),
@@ -178,6 +181,7 @@ beforeEach(() => {
   fake.counter = 0;
   fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };
   fake.sessions.clear();
+  fake.bootNetwork = [];
   fake.listeners.clear();
   fake.history.clear();
   fake.deletes = {};
@@ -251,6 +255,8 @@ describe('작업 분해 실행', () => {
     const sendsA = fake.sends.filter((send) => send.sessionId === laneA.sessionId);
     expect(sendsA.map((send) => send.options.writableScope)).toEqual([['web/a'], ['web/a']]);
     expect(sendsA[1]!.request).toContain('같은 작업 공간에서 먼저 끝난 작업:\n- a1');
+    // 레인·통합 실행에는 실행 중 지시(steering)를 켜지 않는다(사람이 보는 단일 세션만)
+    expect(fake.sends.every((send) => send.options.steering === undefined)).toBe(true);
     expect(laneB.sessionId).not.toBe(laneA.sessionId);
 
     const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
@@ -354,9 +360,25 @@ describe('작업 분해 실행', () => {
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
   });
 
+  // 계획은 메모리의 객체가 원본이고 persist는 그 객체 전체를 쓴다. 레인들이 동시에 끝나도 먼저 끝난 레인 결과가 저장에서 빠지면 안 된다
+  it('여러 레인이 동시에 끝나도 계획 파일에 모든 레인 결과가 남는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '동시 저장', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    const saved = JSON.parse(readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`), 'utf8')) as TaskPlanView;
+    expect(saved.lanes.map((lane) => lane.status)).toEqual(['done', 'done']);
+    expect(saved.lanes.every((lane) => (lane.changedFiles?.length ?? 0) > 0)).toBe(true);
+    expect(saved.integration?.status).toBe('done');
+  });
+
   it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] };
     fake.writes = { a1: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    // 모든 세션이 기동 중 1,000바이트를 받은 것으로 둔다 (레인 2 + 통합 1)
+    fake.bootNetwork = [{ service: 'web', rxBytes: 1_000, txBytes: 100 }];
 
     const plan = await run({ projectId: 'orders', request: '지표 기록', modelId: 'model-a', owner: 'kim' });
 
@@ -366,6 +388,7 @@ describe('작업 분해 실행', () => {
 
     const lane = plan.lanes.find((candidate) => candidate.tasks[0]!.id === 'a1')!;
     expect(lane.bootMs).toBeGreaterThanOrEqual(0);
+    expect(lane.bootRxBytes).toBe(1_000);
     expect(typeof lane.startedAt).toBe('string');
     expect(typeof lane.finishedAt).toBe('string');
     // run_finished의 지표가 작업 실행 기록으로 그대로 옮겨진다
@@ -376,6 +399,8 @@ describe('작업 분해 실행', () => {
     // 계획 호출 1회 + 레인 작업 실행 2회 × 2회 = 5 (통합은 스크립트 턴이라 세지 않는다), 최대 입력 크기는 9, 세션은 레인 2 + 통합 1
     expect(plan.metrics).toMatchObject({ modelCalls: 5, maxContextTokens: 9, sessions: 3 });
     expect(plan.metrics!.bootMsTotal).toBeGreaterThanOrEqual(0);
+    // 레인 2 + 통합 1의 기동 수신 합
+    expect(plan.metrics!.bootRxBytesTotal).toBe(3_000);
     expect(typeof plan.metrics!.endToEndMs).toBe('number');
   });
 });
@@ -786,6 +811,8 @@ describe('레인 조율 전략', () => {
       expect(stored.refs.join(' ')).not.toContain(secret);
       expect(stored.refs.join(' ')).toContain('[PAYMENT_API_KEY 가림]');
       expect(posted.ok && posted.note.body).not.toContain(secret);
+      // 계층 구조의 그룹 비교가 성립하도록 레인의 첫 쓰기 범위가 그룹으로 남는다
+      expect(stored.group).toBe('web/a');
     } finally {
       delete process.env.B_STUDIO_SECRET_PAYMENT_API_KEY;
     }

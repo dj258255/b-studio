@@ -6,6 +6,8 @@
 
 ### 추가
 
+- 작업 분해에 레인 간 조율 게시판과 전략 S2(계약 먼저)·S3(게시판)·S4(통합 후 수리)·S5(실패 서명)를 추가했습니다. 크기·쓰기·읽기 예산과 topology(star·hierarchical·mesh)가 있고, 기본은 공유 없음입니다. 실험 E2에서 계약을 먼저 게시한 S2가 엮인 과제 9/9를 성공했습니다([#76](https://github.com/dj258255/b-studio/pull/76), ADR-059).
+- 미리보기에 원격 브라우저·QA 보기를 추가했습니다. 게이트의 화면 확인을 실시간 프레임과 단계 스크린샷으로 보고, 서버 소유 브라우저를 조작하며, 고른 요소를 요청에 첨부합니다. Figma 프레임을 세션으로 가져와 실제 화면과 픽셀 차이 비율로 비교합니다 ([#81](https://github.com/dj258255/b-studio/pull/81)).
 - 착수 명세·버그·실험 이슈 양식 3종과 PR 템플릿을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - 프로젝트 로드맵(`ROADMAP.md`)과 변경 기록(`CHANGELOG.md`)을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
 - ADR 양식(`docs/templates/adr.md`)과 실험 보고서 양식(`docs/templates/experiment-report.md`)을 추가했습니다 ([#46](https://github.com/dj258255/b-studio/pull/46)).
@@ -21,6 +23,8 @@
 
 ### 수정
 
+- ChatGPT 구독 러너가 ESM 전용 SDK를 정적으로 불러와, tsx로 도는 협업 벤치가 시작하지 못하던 문제를 고쳤습니다. SDK는 첫 실행 때 불러옵니다 ([#86](https://github.com/dj258255/b-studio/pull/86)).
+- 게이트의 화면 확인도 세션 서비스 출처 밖 요청을 막고 service worker를 차단합니다 ([#81](https://github.com/dj258255/b-studio/pull/81)).
 - 협업 벤치의 `meta.json`이 커밋을 끝날 때 읽어, 실행 중 main이 바뀌면 다른 커밋을 적던 문제를 고쳤습니다. 시작할 때 읽고, 끝날 때 다르면 `gitCommitAtEnd`를 함께 적습니다.
 - 격리 샌드박스의 Node 서비스가 edge 프록시를 쓰도록 `NODE_USE_ENV_PROXY=1`을 넘깁니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#69](https://github.com/dj258255/b-studio/issues/69)).
 - 예제 api 컨테이너의 메모리 한도를 1536m에서 2048m으로 올려, 개발 서버 옆에서 테스트를 돌릴 때 OOM으로 실패하지 않게 합니다 ([#71](https://github.com/dj258255/b-studio/pull/71), 이슈 [#70](https://github.com/dj258255/b-studio/issues/70)).
@@ -28,6 +32,7 @@
 
 ### 문서
 
+- 실험 E2 보고서를 추가했습니다. 계약을 공유한 전략(S2+S3) 17/18 대 공유하지 않은 전략(S1+S4) 9/18(p = 0.007)이었고, 모든 실패가 레인 경계의 계약 불일치였습니다([#76](https://github.com/dj258255/b-studio/pull/76)).
 - 실험 E1 보고서를 추가했습니다. 인터페이스로 엮인 과제에서 격리 병렬은 9회 중 4회, 직렬화는 9회 모두 성공했고, 실패 5건은 모두 통합 게이트를 통과했습니다. ADR-051에 보강 절을 더했습니다.
 - PR 본문에 이슈를 닫는 키워드와 필수 절이 있는지 검사하는 `pr-body` 워크플로를 추가하고, 추적 이슈·하위 이슈 규칙을 CONTRIBUTING에 적었습니다. 문서의 이슈·PR·커밋 번호를 링크로 바꿨습니다 ([#59](https://github.com/dj258255/b-studio/pull/59)).
 - 에이전트 간 지식 공유와 작업 중 모델 교체를 결정 전에 검토한 문서를 추가했습니다 ([#50](https://github.com/dj258255/b-studio/pull/50)).
