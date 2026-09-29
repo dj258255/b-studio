@@ -1282,8 +1282,9 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       return;
     }
 
-    // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다
-    if (!ask && plan.kind === 'model' && plan.route) {
+    // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다.
+    // 입력이 하나로 합쳐진 뒤로는 "바꾼 파일 없이 답만 한" 만들기 요청도 여기 오므로, 파일을 바꾼 실행만 관측값으로 남긴다
+    if (!ask && result.changedFiles.length > 0 && plan.kind === 'model' && plan.route) {
       try {
         recordObservation({
           modelId: plan.route.selected.id,

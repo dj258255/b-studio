@@ -106,6 +106,17 @@ describe('splitLines', () => {
     expect(splitLines([asked])).toMatchObject([{ kind: 'outcome', text: '답을 기다립니다 · 어떤 형태로 만들까요?', tone: 'wait' }]);
   });
 
+  it('파일을 바꾸지 않은 실행은 "답만 했습니다"로 보인다 (대화 화면과 같은 규칙)', () => {
+    const answered: ChatItem = { kind: 'outcome', runId: 'r3', status: 'done', summary: '이 함수는 이렇게 동작합니다', turns: 1 };
+    expect(splitLines([answered])).toMatchObject([
+      { kind: 'outcome', text: '답만 했습니다(바꾼 파일 없음), 1턴 · 이 함수는 이렇게 동작합니다', tone: 'pass' },
+    ]);
+
+    // 게이트를 돌았다면(파일을 바꿨다면) 지금처럼 완료로 보인다
+    const withGate = splitLines([{ ...gate, runId: 'r3' }, answered]);
+    expect(withGate.at(-1)!.text).toContain('완료, 1턴');
+  });
+
   it('긴 줄은 줄이고, 최근 것만 남긴다', () => {
     const long: ChatItem = { kind: 'reply', runId: 'r1', text: 'x'.repeat(2_000) };
     expect(splitLines([long])[0]!.text.endsWith('…')).toBe(true);

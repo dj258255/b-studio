@@ -1,4 +1,4 @@
-import type { ChatItem } from './session-view';
+import { outcomeText, runsWithChanges, type ChatItem } from './session-view';
 import type { SessionSnapshot } from './studio-events';
 
 /** 한 화면에 나란히 볼 수 있는 세션 수 상한 */
@@ -111,6 +111,8 @@ const LINE_LIMIT = 80;
  */
 export function splitLines(chat: readonly ChatItem[], limit = LINE_LIMIT): SplitLine[] {
   const lines: SplitLine[] = [];
+  // 결과 줄에서 "답만 했습니다"를 가르는 기준. 대화 화면과 같은 규칙을 쓴다
+  const changedRuns = runsWithChanges(chat);
   chat.forEach((item, index) => {
     switch (item.kind) {
       case 'request':
@@ -141,7 +143,8 @@ export function splitLines(chat: readonly ChatItem[], limit = LINE_LIMIT): Split
         lines.push({
           key: `o${index}`,
           kind: 'outcome',
-          text: `${item.status === 'done' ? (item.intent === 'ask' ? '답변 완료' : '완료') : item.status === 'awaiting_input' ? '답을 기다립니다' : item.status === 'failed' ? '완료하지 못함' : '취소됨'} · ${clip(item.summary, SUMMARY_MAX)}`,
+          // 결과 문구는 대화 화면과 같게(outcomeText) 두되, 칸에는 요약을 조금 더 붙인다
+          text: `${outcomeText(item, changedRuns.has(item.runId))} · ${clip(item.summary, SUMMARY_MAX)}`,
           tone: item.status === 'done' ? 'pass' : item.status === 'awaiting_input' ? 'wait' : item.status === 'cancelled' ? 'idle' : 'fail',
         });
         break;
