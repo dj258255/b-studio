@@ -114,6 +114,16 @@ describe('buildTokenReports', () => {
     expect(unpriced!.priceSource).toBe('none');
   });
 
+  it('턴별 컨텍스트 증가 원인(문맥 급증) 분석을 함께 싣는다', () => {
+    const [report] = buildTokenReports(sampleEvents());
+    expect(report!.contextGrowth).toBeDefined();
+    expect(report!.contextGrowth!.turns).toHaveLength(2);
+    // 턴 2는 31,100 토큰 증가로 급증(4,000 토큰 이상)이고, 원인에 run_in_service 도구 결과가 잡힌다
+    const jump = report!.contextGrowth!.jumps.find((entry) => entry.turn === 2);
+    expect(jump).toBeDefined();
+    expect(jump!.sources.some((source) => source.name === 'run_in_service')).toBe(true);
+  });
+
   it('여러 실행은 최신이 먼저 오고, 도구 결과가 없는 실행도 남는다', () => {
     const events: StudioEvent[] = [
       { type: 'run_started', runId: 'r1', request: '첫 요청' },
