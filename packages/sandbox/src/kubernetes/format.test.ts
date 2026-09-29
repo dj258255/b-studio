@@ -41,7 +41,8 @@ describe('kubectl 출력 해석', () => {
 });
 
 describe('Pod 상태와 사용량', () => {
-  const running = { metadata: { name: 'api', labels: { 'b-studio.service': 'api' } }, status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }], containerStatuses: [{ restartCount: 0, state: { running: {} } }] } };
+  const MANAGED = new Set(['api']);
+  const running = { metadata: { name: 'api', labels: { 'b-studio.service': 'api' } }, status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }], containerStatuses: [{ restartCount: 0, state: { running: { startedAt: '2026-09-11T04:00:00Z' } } }] } };
 
   it('컨테이너 상태를 샌드박스 상태로 옮긴다', () => {
     expect(podState(running)).toBe('running');
@@ -57,10 +58,31 @@ describe('Pod 상태와 사용량', () => {
     const restarted = {
       metadata: { name: 'api', labels: { 'b-studio.service': 'api' } },
       spec: { containers: [{ resources: { limits: { memory: '1536Mi', cpu: '500m' } } }] },
-      status: { containerStatuses: [{ restartCount: 1, state: { running: {} }, lastState: { terminated: { exitCode: 137, reason: 'OOMKilled' } } }] },
+      status: { containerStatuses: [{ restartCount: 1, state: { running: { startedAt: '2026-09-11T05:00:00Z' } }, lastState: { terminated: { exitCode: 137, reason: 'OOMKilled' } } }] },
     };
-    expect(podUsage(restarted)).toEqual({ service: 'api', state: 'running', memoryLimitBytes: 1536 * 2 ** 20, cpuLimit: 0.5, exitCode: 137, oomKilled: true });
-    expect(podUsage(running)).toEqual({ service: 'api', state: 'running', oomKilled: false });
+    expect(podUsage(restarted, MANAGED)).toEqual({
+      service: 'api',
+      containerName: 'api',
+      role: 'managed',
+      state: 'running',
+      memoryLimitBytes: 1536 * 2 ** 20,
+      cpuLimit: 0.5,
+      restartCount: 1,
+      startedAt: '2026-09-11T05:00:00Z',
+      exitCode: 137,
+      oomKilled: true,
+    });
+    expect(podUsage(running, MANAGED)).toEqual({
+      service: 'api',
+      containerName: 'api',
+      role: 'managed',
+      state: 'running',
+      restartCount: 0,
+      startedAt: '2026-09-11T04:00:00Z',
+      oomKilled: false,
+    });
+    // managedNames를 안 주면(옛 호출자) supporting으로 분류한다
+    expect(podUsage(running).role).toBe('supporting');
   });
 
   it('Kubernetes 수량 표기를 읽는다', () => {
