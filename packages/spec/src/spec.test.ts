@@ -149,6 +149,69 @@ describe('parseSpec', () => {
     expect(empty.issues).toEqual(['workflow.pageChecks.0.steps.0: 단계에는 click, fill, press, waitFor 중 정확히 하나를 적어야 합니다']);
   });
 
+  it('동시 요청 확인은 범위·경로·헤더 비밀 금지를 검사하고, expect에 조건이 필요하다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:
+  concurrencyChecks:
+    - name: stock
+      service: api
+      method: POST
+      path: /api/products/1/orders
+      body: '{"qty":1}'
+      headers: { content-type: application/json }
+      concurrent: 10
+      expect:
+        successCount: { exactly: 1 }
+        then: { method: GET, path: /api/products/1, jsonPath: "$.stock", equals: 0 }
+`);
+    expect(spec.workflow?.concurrencyChecks?.[0]).toMatchObject({
+      name: 'stock',
+      service: 'api',
+      method: 'POST',
+      path: '/api/products/1/orders',
+      body: '{"qty":1}',
+      headers: { 'content-type': 'application/json' },
+      concurrent: 10,
+      expect: { successCount: { exactly: 1 }, then: { method: 'GET', path: '/api/products/1', jsonPath: '$.stock', equals: 0 } },
+    });
+
+    const oneLiner = (line: string) => captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  concurrencyChecks:\n    - ${line}\n`));
+    // concurrent는 2~20만 받는다
+    expect(oneLiner('{ name: a, service: api, method: GET, path: /, concurrent: 1, expect: { allStatusIn: [200] } }').issues).toEqual(expect.arrayContaining([expect.stringContaining('concurrent')]));
+    expect(oneLiner('{ name: a, service: api, method: GET, path: /, concurrent: 21, expect: { allStatusIn: [200] } }').issues).toEqual(expect.arrayContaining([expect.stringContaining('concurrent')]));
+    // //host 경로는 다른 호스트를 가리키므로 거부
+    expect(oneLiner('{ name: a, service: api, method: GET, path: //evil.example.com, concurrent: 2, expect: { allStatusIn: [200] } }').issues.some((issue) => issue.startsWith('workflow.concurrencyChecks.0.path'))).toBe(true);
+    // 비밀 값을 담는 인증 헤더는 거부
+    expect(oneLiner('{ name: a, service: api, method: GET, path: /, headers: { Authorization: "Bearer x" }, concurrent: 2, expect: { allStatusIn: [200] } }').issues).toEqual([
+      'workflow.concurrencyChecks.0.headers: 비밀 값을 담는 인증 헤더는 쓸 수 없습니다. 인증이 필요하면 서비스가 secrets의 환경 변수를 읽게 하세요',
+    ]);
+    // 헤더는 5개까지
+    expect(oneLiner('{ name: a, service: api, method: GET, path: /, headers: { a: "1", b: "2", c: "3", d: "4", e: "5", f: "6" }, concurrent: 2, expect: { allStatusIn: [200] } }').issues.some((issue) => issue.startsWith('workflow.concurrencyChecks.0.headers'))).toBe(true);
+    // expect에는 조건이 최소 하나 필요하다
+    expect(oneLiner('{ name: a, service: api, method: GET, path: /, concurrent: 2, expect: {} }').issues).toEqual(expect.arrayContaining([expect.stringContaining('expect에는')]));
+    // successCount에는 exactly나 atMost가 필요하다
+    expect(oneLiner('{ name: a, service: api, method: GET, path: /, concurrent: 2, expect: { successCount: {} } }').issues).toEqual(expect.arrayContaining([expect.stringContaining('successCount에는')]));
+
+    // required에 concurrency_check가 있으면 최소 하나 필요
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [concurrency_check]\n`)).issues).toEqual([
+      'workflow.concurrencyChecks: required에 concurrency_check가 있으면 실행할 concurrencyChecks가 최소 1개 필요합니다',
+    ]);
+    // 이름 중복
+    const duplicate = captureError(() =>
+      parseSpec(
+        `${ORDERS_SPEC}workflow:\n  concurrencyChecks:\n    - { name: same, service: api, method: GET, path: /, concurrent: 2, expect: { allStatusIn: [200] } }\n    - { name: same, service: web, method: GET, path: /, concurrent: 2, expect: { allStatusIn: [200] } }\n`,
+      ),
+    );
+    expect(duplicate.issues).toEqual(["workflow.concurrencyChecks.1.name: 동시 요청 확인 이름 'same'이 중복됩니다"]);
+  });
+
+  it('maxLoadMs는 browser 모드에서만 받는다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, maxLoadMs: 2000 }\n`).workflow?.pageChecks?.[0]).toMatchObject({
+      maxLoadMs: 2000,
+    });
+    const http = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, maxLoadMs: 2000 }\n`));
+    expect(http.issues).toEqual(['workflow.pageChecks.0.maxLoadMs: maxLoadMs는 mode: browser에서만 쓸 수 있습니다']);
+  });
+
   it('디자인 비교는 프로젝트 안 .png와 허용 비율을 받고, http 모드나 프로젝트 밖 경로는 거부한다', () => {
     const compareOf = (line: string) =>
       parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - ${line}\n`).workflow?.pageChecks?.[0]?.compare;

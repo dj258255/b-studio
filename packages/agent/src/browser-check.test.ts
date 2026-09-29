@@ -210,4 +210,16 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
     expect(result.blockedRequests).toEqual([]);
     expect(result.failedRequests).toEqual([`404 ${base}/chunk.js`]);
   });
+
+  it('measureLoad를 켜면 워밍업 뒤 이동의 로드 시간을 잰다', async () => {
+    const result = await runInBrowser(`${base}/ok`, { measureLoad: true });
+    expect(result.text).toContain('주문 목록');
+    expect(result.loadMs).toBeGreaterThanOrEqual(0);
+    // 워밍업과 측정 두 번 이동하므로 첫 이동의 오류·실패 요청은 측정 결과에 남지 않는다
+    expect(result.failedRequests).toEqual([]);
+  });
+
+  it('measureLoad를 켜지 않으면 로드 시간을 남기지 않는다', async () => {
+    expect((await runInBrowser(`${base}/ok`, {})).loadMs).toBeUndefined();
+  });
 });

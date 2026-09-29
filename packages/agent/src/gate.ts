@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
-import type { LoadedProject, WorkflowPageCheck, WorkflowPageCompare, WorkflowStage, WorkflowTest } from '@b-studio/spec';
+import type { ConcurrencyExpect, LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowPageCompare, WorkflowStage, WorkflowTest } from '@b-studio/spec';
 import { runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { servicesForFiles } from './services';
@@ -23,12 +23,33 @@ export type PageFetcher = (url: string, signal?: AbortSignal) => Promise<{ statu
 
 const PAGE_TIMEOUT_MS = 30_000;
 const TEST_TIMEOUT_MS = 10 * 60_000;
+/** 동시 요청 확인에서 요청 하나가 기다릴 시간 */
+const REQUEST_TIMEOUT_MS = 15_000;
 const CHECK_CONCURRENCY = 2;
 const OUTPUT_TAIL_LINES = 30;
 
 export const fetchPage: PageFetcher = async (url, signal) => {
   const timeout = AbortSignal.timeout(PAGE_TIMEOUT_MS);
   const response = await fetch(url, { redirect: 'manual', signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  return { status: response.status, text: await response.text() };
+};
+
+/** 게이트가 세션 서비스에 직접 보내는 요청. 동시 요청 확인에서 테스트가 네트워크 없이 바꿔 끼운다 */
+export type ServiceRequest = (
+  url: string,
+  init: { method: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+) => Promise<{ status: number; text: string }>;
+
+const requestService: ServiceRequest = async (url, init) => {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const response = await fetch(url, {
+    method: init.method,
+    ...(init.headers ? { headers: init.headers } : {}),
+    // GET·HEAD에는 본문을 보낼 수 없다
+    ...(init.body !== undefined && init.method !== 'GET' ? { body: init.body } : {}),
+    redirect: 'manual',
+    signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
+  });
   return { status: response.status, text: await response.text() };
 };
 
@@ -51,6 +72,8 @@ export interface GateOptions {
   saveArtifact?: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => Promise<string>;
   /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
   onBrowserFrame?: (input: { check: string; frame: BrowserFrame }) => void;
+  /** 동시 요청 확인이 세션 서비스에 보내는 요청. 넘기지 않으면 실제 fetch를 쓴다 */
+  requestService?: ServiceRequest;
 }
 
 /**
@@ -78,6 +101,10 @@ export class VerificationGate {
   #pageCompares = new Map<string, WorkflowCompare>();
   /** 화면 확인 이름 → 허용 출처 밖이라 막은 요청. 앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않고 기록만 한다 */
   #pageBlocked = new Map<string, string[]>();
+  /** 화면 확인 이름 → 측정한 로드 시간(ms). 예산을 적은 확인만 재어 결과에 남긴다 */
+  #pageLoadMs = new Map<string, number>();
+  /** 동시 요청 확인 이름 → 통과했을 때의 요약(성공 건수·상태 분포·then 값) */
+  #concurrencyNotes = new Map<string, string>();
 
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
@@ -127,7 +154,7 @@ export class VerificationGate {
       checks.push(...reviewChanges(project, workspace.changedFiles()));
       this.checks = checks;
       for (const check of checks) onEvent({ type: 'workflow_check', check });
-      for (const stage of ['browser_check', 'test', 'review'] as const) {
+      for (const stage of ['browser_check', 'test', 'concurrency_check', 'review'] as const) {
         const ofStage = checks.filter((check) => check.stage === stage);
         if (ofStage.length > 0 && ofStage.every((check) => check.ok)) this.passedStages.add(stage);
       }
@@ -156,18 +183,21 @@ export class VerificationGate {
     this.#options.onEvent({ type: 'stage', stage, source: 'platform' });
   }
 
-  /** studio.yaml에 선언한 화면 확인과 테스트는 서로 기다릴 이유가 없으므로 작업 그래프로 동시에 돌린다 */
+  /** studio.yaml에 선언한 화면 확인·테스트·동시 요청 확인은 서로 기다릴 이유가 없으므로 작업 그래프로 동시에 돌린다 */
   async #runDeclaredChecks(): Promise<WorkflowCheck[]> {
     const workflow = this.#options.project.spec.workflow;
     const pages = workflow?.pageChecks ?? [];
     const tests = workflow?.tests ?? [];
-    if (pages.length === 0 && tests.length === 0) return [];
+    const concurrency = workflow?.concurrencyChecks ?? [];
+    if (pages.length === 0 && tests.length === 0 && concurrency.length === 0) return [];
 
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     const nodes: TaskNode<void>[] = [];
     this.#pageSteps.clear();
     this.#pageCompares.clear();
     this.#pageBlocked.clear();
+    this.#pageLoadMs.clear();
+    this.#concurrencyNotes.clear();
     for (const page of pages) {
       const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
       const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
@@ -179,17 +209,27 @@ export class VerificationGate {
       meta.push({ stage: 'test', name: test.name });
       nodes.push({ id: `test:${test.name}`, maxAttempts: test.maxAttempts, run: ({ signal }) => this.#runTest(test, signal) });
     }
+    for (const check of concurrency) {
+      meta.push({ stage: 'concurrency_check', name: check.name });
+      nodes.push({ id: `concurrency:${check.name}`, run: ({ signal }) => this.#runConcurrencyCheck(check, check.name, signal) });
+    }
     if (pages.length > 0) this.#stage('browser_check');
     if (tests.length > 0) this.#stage('test');
+    if (concurrency.length > 0) this.#stage('concurrency_check');
 
     const results = await runTaskGraph(nodes, { concurrency: CHECK_CONCURRENCY, signal: this.#options.signal });
     return results.map((result, index) => {
       const entry = meta[index]!;
       const steps = this.#pageSteps.get(entry.name);
       const compare = this.#pageCompares.get(entry.name);
+      const loadMs = this.#pageLoadMs.get(entry.name);
+      // 동시 요청 확인은 통과해도 결과 요약을 남긴다(성공 건수·상태 분포·then 값)
+      const note = this.#concurrencyNotes.get(entry.name);
       // 실패 사유에 막은 요청 수를 한 줄 덧붙인다. 통과해도 남겨 QA 보기에서 볼 수 있게 한다
       const blocked = this.#pageBlocked.get(entry.name) ?? [];
-      const detail = [result.error, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined].filter((line) => line !== undefined).join('\n');
+      const detail = [result.error, note, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined]
+        .filter((line) => line !== undefined)
+        .join('\n');
       return {
         ...entry,
         ok: result.status === 'succeeded',
@@ -197,6 +237,7 @@ export class VerificationGate {
         detail: detail || undefined,
         ...(steps ? { steps } : {}),
         ...(compare ? { compare } : {}),
+        ...(loadMs !== undefined ? { metrics: { loadMs } } : {}),
       };
     });
   }
@@ -213,6 +254,9 @@ export class VerificationGate {
           viewport: page.viewport,
           steps: page.steps,
           signal,
+          // 로드 예산을 적은 확인만 잰다. 재려면 워밍업 이동을 한 번 더 해야 해서(게이트 시간이 늘고, 워밍업 때의 오류는 비운다)
+          // 예산이 없는 확인까지 두 번 열면 첫 로드에서만 나는 오류를 놓칠 수 있다
+          measureLoad: page.maxLoadMs !== undefined,
           // 스크린샷을 저장할 곳이 있거나 디자인 비교를 할 때만 찍는다
           capture: saveArtifact !== undefined || page.compare !== undefined,
           // 세션 서비스의 출처 밖으로는 요청이 나가지 못하게 한다(모델이 만든 페이지를 통한 요청 위조 차단)
@@ -233,6 +277,14 @@ export class VerificationGate {
       if (!page.allowConsoleErrors && result.consoleErrors.length > 0) problems.push(`console.error: ${result.consoleErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.failedRequests.length > 0) problems.push(`실패한 요청: ${result.failedRequests.slice(0, 3).join(' | ')}`);
       if (page.noHorizontalScroll && result.horizontalOverflowPx > 1) problems.push(`가로로 ${result.horizontalOverflowPx}px 넘칩니다`);
+      if (result.loadMs !== undefined) this.#pageLoadMs.set(name, result.loadMs);
+      if (page.maxLoadMs !== undefined) {
+        // 예산을 적었는데 재지 못했으면 "검사 안 함"이 통과로 보이지 않도록 실패로 본다
+        if (result.loadMs === undefined) problems.push(`로드 시간을 재지 못했습니다 (예산 ${page.maxLoadMs.toLocaleString('ko-KR')}ms)`);
+        else if (result.loadMs > page.maxLoadMs) {
+          problems.push(`로드 ${result.loadMs.toLocaleString('ko-KR')}ms (예산 ${page.maxLoadMs.toLocaleString('ko-KR')}ms)`);
+        }
+      }
       // 화면 출력에 시크릿 값이 섞여 있을 수 있어 가린 뒤 모델에게 돌려준다
       if (problems.length > 0) throw new Error(sandbox.redact(problems.join('\n')));
       if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
@@ -318,6 +370,63 @@ export class VerificationGate {
   }
 
   /**
+   * 같은 요청을 동시에 보낸 뒤 기대한 불변식을 확인한다. **세션 서비스의 출처로만** 요청한다(화면 확인과 같은 규칙).
+   * 한 번의 실패를 재시도로 덮지 않는다 — 재시도하면 경합이 숨는다. DB 트랜잭션 격리 수준과 타이밍에 따라 결과가 흔들릴 수 있어 임계값은 넉넉히 잡는다.
+   */
+  async #runConcurrencyCheck(check: WorkflowConcurrencyCheck, name: string, signal: AbortSignal): Promise<void> {
+    const { sandbox } = this.#options;
+    const request = this.#options.requestService ?? requestService;
+    const endpoint = await sandbox.endpoint(check.service);
+    const url = new URL(check.path, endpoint.url);
+    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
+
+    const responses = await Promise.all(
+      Array.from({ length: check.concurrent }, () =>
+        request(url.href, {
+          method: check.method,
+          ...(check.headers ? { headers: check.headers } : {}),
+          ...(check.method !== 'GET' && check.body !== undefined ? { body: check.body } : {}),
+          signal,
+        }),
+      ),
+    );
+    const successCount = responses.filter((response) => response.status >= 200 && response.status < 300).length;
+    const counts = new Map<number, number>();
+    for (const response of responses) counts.set(response.status, (counts.get(response.status) ?? 0) + 1);
+    const statusDetail = [...counts.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([status, count]) => `${status}:${count}`)
+      .join(', ');
+
+    const parts = [`성공 ${successCount}/${check.concurrent} (기대: ${describeConcurrencyExpect(check.expect)})`, `상태 ${statusDetail}`];
+    const problems: string[] = [];
+    const { successCount: expectedCount, allStatusIn, then } = check.expect;
+    if (expectedCount?.exactly !== undefined && successCount !== expectedCount.exactly) {
+      problems.push(`성공 ${successCount}/${check.concurrent} (기대: 정확히 ${expectedCount.exactly})`);
+    }
+    if (expectedCount?.atMost !== undefined && successCount > expectedCount.atMost) {
+      problems.push(`성공 ${successCount}/${check.concurrent} (기대: 최대 ${expectedCount.atMost})`);
+    }
+    if (allStatusIn && !responses.every((response) => allStatusIn.includes(response.status))) {
+      const outside = [...new Set(responses.map((response) => response.status).filter((status) => !allStatusIn.includes(status)))].join(', ');
+      problems.push(`기대 밖 상태 코드: ${outside} (기대: ${allStatusIn.join(', ')})`);
+    }
+    if (then) {
+      const thenUrl = new URL(then.path, endpoint.url);
+      if (thenUrl.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
+      const response = await request(thenUrl.href, { method: 'GET', signal });
+      const actual = readJsonPath(response.text, then.jsonPath);
+      parts.push(`${then.jsonPath} = ${JSON.stringify(actual)}`);
+      if (actual !== then.equals) problems.push(`${then.jsonPath} 값이 ${JSON.stringify(actual)} (기대: ${JSON.stringify(then.equals)})`);
+    }
+
+    // 원인을 추정하지 않고 숫자만 남긴다
+    const note = parts.join(' · ');
+    if (problems.length > 0) throw new Error(sandbox.redact([note, ...problems].join('\n')));
+    this.#concurrencyNotes.set(name, note);
+  }
+
+  /**
    * 화면 확인이 요청해도 되는 출처. 세션의 모든 managed 서비스가 게이트에서 쓰는 주소(endpoint)의 출처를 모은다.
    * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 화면이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
    */
@@ -357,4 +466,40 @@ function formatFailedChecks(checks: readonly WorkflowCheck[]): string {
 /** 디자인 비교 실패 문구. 비율과 허용치, 비교한 크기를 함께 적는다 */
 function compareDetail(comparison: CompareResult, max: number): string {
   return `디자인 차이 ${(comparison.ratio * 100).toFixed(1)}% (허용 ${(max * 100).toFixed(1)}%, 비교 ${comparison.width}×${comparison.height})`;
+}
+
+/** 동시 요청 확인의 기대를 사람이 읽는 한 줄로. then 값은 따로 적으므로 여기 넣지 않는다 */
+function describeConcurrencyExpect(expect: ConcurrencyExpect): string {
+  const parts: string[] = [];
+  if (expect.successCount?.exactly !== undefined) parts.push(`정확히 ${expect.successCount.exactly}`);
+  else if (expect.successCount?.atMost !== undefined) parts.push(`최대 ${expect.successCount.atMost}`);
+  if (expect.allStatusIn) parts.push(`상태 ${expect.allStatusIn.join('/')}`);
+  return parts.join(', ');
+}
+
+/**
+ * 응답 JSON에서 값을 꺼낸다. `$.a.b`와 `$[0].a`, `$.items[0].qty` 정도만 지원하고 그 밖은 undefined를 돌려준다.
+ * 외부 라이브러리(k6 등) 없이 결과 불변식만 보려는 최소 구현이다
+ */
+function readJsonPath(text: string, jsonPath: string): unknown {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  for (const segment of jsonPath.replace(/^\$\.?/, '').split('.').filter(Boolean)) {
+    const match = /^([^[\]]*)((?:\[\d+\])*)$/.exec(segment);
+    if (!match) return undefined;
+    const key = match[1]!;
+    if (key) {
+      if (typeof value !== 'object' || value === null) return undefined;
+      value = (value as Record<string, unknown>)[key];
+    }
+    for (const index of match[2]!.match(/\d+/g) ?? []) {
+      if (!Array.isArray(value)) return undefined;
+      value = value[Number(index)];
+    }
+  }
+  return value;
 }

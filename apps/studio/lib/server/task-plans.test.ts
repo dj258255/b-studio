@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,7 @@ import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
 type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
-type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
+type SendOptions = { allowBreaking: boolean; by?: string; writableScope?: readonly string[]; steering?: boolean; scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }> };
 
 const fake = vi.hoisted(() => ({
   root: '',
@@ -190,6 +190,8 @@ describe('작업 분해 실행', () => {
     const sendsA = fake.sends.filter((send) => send.sessionId === laneA.sessionId);
     expect(sendsA.map((send) => send.options.writableScope)).toEqual([['web/a'], ['web/a']]);
     expect(sendsA[1]!.request).toContain('같은 작업 공간에서 먼저 끝난 작업:\n- a1');
+    // 레인·통합 실행에는 실행 중 지시(steering)를 켜지 않는다(사람이 보는 단일 세션만)
+    expect(fake.sends.every((send) => send.options.steering === undefined)).toBe(true);
     expect(laneB.sessionId).not.toBe(laneA.sessionId);
 
     const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
@@ -291,6 +293,20 @@ describe('작업 분해 실행', () => {
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'unknown', owner: 'kim' })).rejects.toThrow('등록되지 않은 모델');
     process.env.B_STUDIO_MODE = 'demo';
     await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
+  });
+
+  // 계획은 메모리의 객체가 원본이고 persist는 그 객체 전체를 쓴다. 레인들이 동시에 끝나도 먼저 끝난 레인 결과가 저장에서 빠지면 안 된다
+  it('여러 레인이 동시에 끝나도 계획 파일에 모든 레인 결과가 남는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '동시 저장', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    const saved = JSON.parse(readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`), 'utf8')) as TaskPlanView;
+    expect(saved.lanes.map((lane) => lane.status)).toEqual(['done', 'done']);
+    expect(saved.lanes.every((lane) => (lane.changedFiles?.length ?? 0) > 0)).toBe(true);
+    expect(saved.integration?.status).toBe('done');
   });
 
   it('계획 호출·레인 기동·작업 실행·통합 지표를 계획에 기록한다', async () => {

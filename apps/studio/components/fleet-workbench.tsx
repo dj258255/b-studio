@@ -16,6 +16,7 @@ const STATUS: Record<FleetMemberStatus, string> = {
   failed: '검증 실패',
   error: '실행 오류',
   cancelled: '취소됨',
+  awaiting_input: '답 대기',
 };
 
 const STATUS_COLOR: Record<FleetMemberStatus, string> = {
@@ -25,6 +26,7 @@ const STATUS_COLOR: Record<FleetMemberStatus, string> = {
   failed: 'text-fail',
   error: 'text-fail',
   cancelled: 'text-muted',
+  awaiting_input: 'text-wait',
 };
 
 export function FleetWorkbench({
