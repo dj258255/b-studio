@@ -212,6 +212,54 @@ describe('parseSpec', () => {
     expect(http.issues).toEqual(['workflow.pageChecks.0.maxLoadMs: maxLoadMs는 mode: browser에서만 쓸 수 있습니다']);
   });
 
+  it('expectFromApi는 api 서비스·경로·jsonPath를 받고, 경로와 jsonPath를 좁게 검사한다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:
+  pageChecks:
+    - service: web
+      path: /orders
+      expectText: 주문 목록
+      expectFromApi: { service: api, path: /api/orders, jsonPath: "$[0].customerName" }
+`);
+    expect(spec.workflow?.pageChecks?.[0]).toMatchObject({
+      service: 'web',
+      path: '/orders',
+      mode: 'http',
+      expectStatus: 200,
+      expectText: '주문 목록',
+      expectFromApi: { service: 'api', path: '/api/orders', jsonPath: '$[0].customerName' },
+    });
+
+    // api 경로도 페이지 경로와 같은 규칙으로 //host를 거부한다
+    expect(() =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectFromApi: { service: api, path: //evil.example/x, jsonPath: "$.a" } }\n`),
+    ).toThrow(SpecError);
+    // jsonPath는 비어 있을 수 없다
+    const empty = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectFromApi: { service: api, path: /api, jsonPath: "" } }\n`));
+    expect(empty.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.expectFromApi.jsonPath'))).toBe(true);
+  });
+
+  it('expectAnyText는 1~5개의 문구를 받고, expectText와 함께 쓸 수 있다', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:
+  pageChecks:
+    - { service: web, path: /dashboard, expectStatus: 200, expectText: 주문, expectAnyText: ["45000", "45,000"] }
+`);
+    expect(spec.workflow?.pageChecks?.[0]).toMatchObject({
+      service: 'web',
+      path: '/dashboard',
+      mode: 'http',
+      expectStatus: 200,
+      expectText: '주문',
+      expectAnyText: ['45000', '45,000'],
+    });
+
+    // 빈 목록은 거부한다
+    const empty = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectAnyText: [] }\n`));
+    expect(empty.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.expectAnyText'))).toBe(true);
+    // 5개까지 받는다
+    const tooMany = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectAnyText: [a, b, c, d, e, f] }\n`));
+    expect(tooMany.issues).toEqual(['workflow.pageChecks.0.expectAnyText: expectAnyText는 최대 5개까지 쓸 수 있습니다']);
+  });
+
   it('디자인 비교는 프로젝트 안 .png와 허용 비율을 받고, http 모드나 프로젝트 밖 경로는 거부한다', () => {
     const compareOf = (line: string) =>
       parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - ${line}\n`).workflow?.pageChecks?.[0]?.compare;
@@ -456,7 +504,7 @@ workflow:
     - { name: unit, service: api, command: [./gradlew, test] }
     - { name: db, service: db, command: [pg_isready] }
   pageChecks:
-    - { service: web, path: / }
+    - { service: web, path: /, expectFromApi: { service: db, path: /api/orders, jsonPath: "$[0].customerName" } }
 `,
     );
     await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
@@ -468,6 +516,7 @@ workflow:
     expect(error.issues).toEqual([
       "workflow.tests.1.service: 'db'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.service: 'web'은(는) source: managed 서비스가 아닙니다",
+      "workflow.pageChecks.0.expectFromApi.service: 'db'은(는) source: managed 서비스가 아닙니다",
     ]);
   });
 

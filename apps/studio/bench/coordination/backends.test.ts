@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { assertPlainBaselineBackend, planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy } from './backends';
+import {
+  assertContractsBackend,
+  assertContractsStrategy,
+  assertPlainBaselineBackend,
+  planModelId,
+  resolveBackend,
+  resolveContextClearing,
+  resolveContractsSource,
+  resolveEscalation,
+  resolveRateLimitPolicy,
+} from './backends';
 
 describe('resolveBackend', () => {
   it('--dry는 --backend·--model과 함께 쓸 수 없고 항상 openai다', () => {
@@ -83,6 +93,31 @@ describe('resolveRateLimitPolicy', () => {
   });
 });
 
+describe('resolveEscalation', () => {
+  it('--escalate-to를 주지 않으면 기본 임계치만 두고 승격하지 않는다', () => {
+    expect(resolveEscalation({ backend: 'claude-code' })).toEqual({ after: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateAfter: 3 })).toEqual({ after: 3 });
+  });
+
+  it('claude-code 백엔드에서만 --escalate-to를 받는다', () => {
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: ' sonnet ', escalateAfter: 4 })).toEqual({ to: 'sonnet', after: 4 });
+  });
+
+  it('승격을 지원하지 않는 백엔드에 --escalate-to를 주면 시작 전에 오류를 낸다', () => {
+    expect(() => resolveEscalation({ backend: 'openai', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+    expect(() => resolveEscalation({ backend: 'codex', escalateTo: 'sonnet' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+    // Command Code·OpenCode 러너도 승격을 지원하지 않는다. 조용히 무시하지 않고 시작 전에 거부한다
+    expect(() => resolveEscalation({ backend: 'commandcode', escalateTo: 'deepseek/deepseek-v4-flash' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+    expect(() => resolveEscalation({ backend: 'opencode', escalateTo: 'opencode/mimo-v2.6-flash-free' })).toThrow(/--escalate-to는 --backend claude-code에서만/);
+  });
+
+  it('--escalate-after는 1 이상의 정수여야 한다', () => {
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateAfter: 0 })).toThrow(/--escalate-after는 1 이상의 정수/);
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfter: 1.5 })).toThrow(/--escalate-after는 1 이상의 정수/);
+  });
+});
+
 describe('assertPlainBaselineBackend', () => {
   it('P0는 claude-code에서만 쓸 수 있고, 다른 백엔드는 시작 전에 거부한다', () => {
     expect(() => assertPlainBaselineBackend('claude-code', ['P0', 'S0'])).not.toThrow();
@@ -90,5 +125,34 @@ describe('assertPlainBaselineBackend', () => {
     expect(() => assertPlainBaselineBackend('codex', ['S0', 'P0'])).toThrow(/claude-code에서만/);
     // P0가 없으면 백엔드를 가리지 않는다
     expect(() => assertPlainBaselineBackend('codex', ['S0', 'S1'])).not.toThrow();
+  });
+});
+
+describe('레인 사이 계약(--contracts)', () => {
+  it('기본은 human이고 human|model만 받는다', () => {
+    expect(resolveContractsSource(undefined)).toBe('human');
+    expect(resolveContractsSource('')).toBe('human');
+    expect(resolveContractsSource(' human ')).toBe('human');
+    expect(resolveContractsSource('MODEL')).toBe('model');
+    expect(() => resolveContractsSource('auto')).toThrow(/human 또는 model/);
+  });
+
+  it('model 계약은 S2에서만 쓸 수 있다 (계약을 쓰지 않는 전략에 주면 무엇을 잰 것인지 알 수 없다)', () => {
+    expect(() => assertContractsStrategy('human', ['P0', 'S0', 'S1', 'S2', 'S3'])).not.toThrow();
+    expect(() => assertContractsStrategy('model', ['S2'])).not.toThrow();
+    expect(() => assertContractsStrategy('model', ['S2', 'S1'])).toThrow(/S2에서만/);
+    expect(() => assertContractsStrategy('model', ['S3'])).toThrow(/S2에서만/);
+  });
+
+  it('model 계약은 openai와 claude-code에서만 부를 수 있다 (codex·commandcode·opencode는 한 번 호출 경로가 없다)', () => {
+    expect(() => assertContractsBackend('human', 'codex')).not.toThrow();
+    expect(() => assertContractsBackend('model', 'openai')).not.toThrow();
+    expect(() => assertContractsBackend('model', 'claude-code')).not.toThrow();
+    expect(() => assertContractsBackend('model', 'codex')).toThrow(/openai 또는 claude-code/);
+    expect(() => assertContractsBackend('model', 'commandcode')).toThrow(/openai 또는 claude-code/);
+    expect(() => assertContractsBackend('model', 'opencode')).toThrow(/openai 또는 claude-code/);
+    // human이면 백엔드를 가리지 않는다
+    expect(() => assertContractsBackend('human', 'commandcode')).not.toThrow();
+    expect(() => assertContractsBackend('human', 'opencode')).not.toThrow();
   });
 });

@@ -109,6 +109,50 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(outcome.kind === 'retry' && outcome.feedback).toContain("응답 본문에 '주문 목록'가 없습니다");
   });
 
+  it('expectAnyText는 하나라도 있으면 통과하고, 어느 것도 없으면 문구를 알린다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/dashboard', mode: 'http', expectStatus: 200, expectAnyText: ['45000', '45,000'], allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+
+    const passing = await setup(target, { page: async () => ({ status: 200, text: '<p>총매출 45,000원</p>' }) });
+    await passing.workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    expect(await passing.gate.check()).toEqual({ kind: 'pass' });
+
+    const failing = await setup(target, { page: async () => ({ status: 200, text: '<p>총매출 없음</p>' }) });
+    await failing.workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    const outcome = await failing.gate.check();
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain("화면에 '45000', '45,000' 중 어느 것도 없습니다");
+  });
+
+  it('browser 모드에서도 expectAnyText를 렌더링된 글자에 대해 확인한다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/dashboard', mode: 'browser', expectStatus: 200, expectAnyText: ['45000', '45,000'], allowConsoleErrors: false, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => ({
+        status: 200,
+        text: '총매출 45,000원',
+        pageErrors: [],
+        consoleErrors: [],
+        failedRequests: [],
+        blockedRequests: [],
+        horizontalOverflowPx: 0,
+        steps: [],
+      }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+  });
+
   it('browser 모드는 렌더링 결과의 문구·스크립트 예외·console.error·가로 넘침을 모두 실패 사유로 돌려준다', async () => {
     const target = withWorkflow({
       pageChecks: [
@@ -711,5 +755,129 @@ describe('VerificationGate 로드 시간 예산', () => {
     const { gate } = await loadGate(withWorkflow({ pageChecks: [browserPage({ maxLoadMs: 2000 })] }), {});
     const outcome = await gate.check();
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('로드 시간을 재지 못했습니다 (예산 2,000ms)');
+  });
+});
+
+describe('VerificationGate api 값 확인', () => {
+  const pageCheck = (extra: Partial<WorkflowPageCheck> = {}): WorkflowPageCheck => ({
+    service: 'api',
+    path: '/orders',
+    mode: 'http',
+    expectStatus: 200,
+    allowConsoleErrors: false,
+    noHorizontalScroll: false,
+    expectFromApi: { service: 'api', path: '/api/orders', jsonPath: '$[0].customerName' },
+    ...extra,
+  });
+
+  /** api 경로는 JSON을, 페이지 경로는 HTML을 돌려주는 fetcher. fakeSandbox의 서비스 주소는 http://127.0.0.1:1이다 */
+  function routingFetcher(routes: Record<string, { status: number; text: string }>): PageFetcher {
+    return async (url) => {
+      const route = routes[new URL(url).pathname];
+      if (!route) throw new Error(`예상하지 못한 요청: ${url}`);
+      return route;
+    };
+  }
+
+  async function apiGate(target: LoadedProject, pageFetcher: PageFetcher, browserResult?: BrowserPageResult) {
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher,
+      ...(browserResult ? { browserRunner: async () => browserResult } : {}),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  const failFeedback = (outcome: Awaited<ReturnType<VerificationGate['check']>>) => (outcome.kind === 'retry' ? outcome.feedback : '');
+
+  it('api에서 꺼낸 값이 화면 글자에 있으면 통과한다', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck()] });
+    const gate = await apiGate(
+      target,
+      routingFetcher({
+        '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) },
+        '/orders': { status: 200, text: '<table><tr><td>홍길동</td></tr></table>' },
+      }),
+    );
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.stage === 'browser_check')?.ok).toBe(true);
+  });
+
+  it('화면이 다른 필드 이름을 읽으면 값이 없음을 구체적으로 알린다', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck()] });
+    const gate = await apiGate(
+      target,
+      routingFetcher({
+        '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) },
+        '/orders': { status: 200, text: '<td>이름 없음</td>' },
+      }),
+    );
+
+    const outcome = await gate.check();
+    expect(failFeedback(outcome)).toContain("api의 $[0].customerName 값 '홍길동'이 /orders 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다");
+    expect(gate.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('api 상태가 2xx가 아니면 상태 코드를 알리고 화면을 열지 않는다', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck()] });
+    // 페이지 경로를 주지 않아, api가 실패하면 페이지를 부르지 않는 것까지 확인한다
+    const gate = await apiGate(target, routingFetcher({ '/api/orders': { status: 500, text: 'boom' } }));
+
+    const outcome = await gate.check();
+    expect(failFeedback(outcome)).toContain('api GET /api/orders가 HTTP 500을 돌려줬습니다');
+  });
+
+  it('api 응답에 값이 없으면 응답 앞부분과 함께 알린다', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck()] });
+    const body = JSON.stringify({ items: [] });
+    const gate = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: body } }));
+
+    const outcome = await gate.check();
+    expect(failFeedback(outcome)).toContain('api 응답에 $[0].customerName이 없습니다. 응답 앞부분: ');
+    expect(failFeedback(outcome)).toContain(body);
+  });
+
+  it('가리킨 값이 배열·객체·빈 문자열이면 확인 설정 오류로 알린다', async () => {
+    const withValue = async (value: unknown, jsonPath: string) => {
+      const target = withWorkflow({ pageChecks: [pageCheck({ expectFromApi: { service: 'api', path: '/api/orders', jsonPath } })] });
+      const gate = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: JSON.stringify(value) } }));
+      return failFeedback(await gate.check());
+    };
+
+    expect(await withValue({ statusCounts: [1, 2] }, '$.statusCounts')).toContain('$.statusCounts는 배열입니다. 화면에 그려질 문자열·숫자 값을 가리키세요');
+    expect(await withValue({ shippingNote: { text: 'x' } }, '$.shippingNote')).toContain('$.shippingNote는 객체입니다. 화면에 그려질 문자열·숫자 값을 가리키세요');
+    expect(await withValue({ customerName: '   ' }, '$.customerName')).toContain('$.customerName 값이 빈 문자열입니다. 화면에 그려질 문자열·숫자 값을 가리키세요');
+  });
+
+  it('숫자 값은 원문과 천 단위 구분으로 그린 화면을 둘 다 인정한다', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck({ expectFromApi: { service: 'api', path: '/api/orders/summary', jsonPath: '$.totalRevenue' } })] });
+    const gate = await apiGate(
+      target,
+      routingFetcher({
+        '/api/orders/summary': { status: 200, text: JSON.stringify({ totalRevenue: 45000 }) },
+        '/orders': { status: 200, text: '<p>총매출 45,000원</p>' },
+      }),
+    );
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+  });
+
+  it('browser 모드에서도 렌더링된 글자에 같은 확인을 한다', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck({ mode: 'browser' })] });
+    const rendered = { status: 200, text: '주문 목록\n홍길동', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const passing = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) } }), rendered);
+    expect(await passing.check()).toEqual({ kind: 'pass' });
+
+    const failing = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) } }), { ...rendered, text: '주문 목록' });
+    expect(failFeedback(await failing.check())).toContain("api의 $[0].customerName 값 '홍길동'이 /orders 화면에 없습니다");
   });
 });

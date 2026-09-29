@@ -141,6 +141,10 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
   });
   spec.workflow?.pageChecks?.forEach((check, index) => {
     if (!managedNames.has(check.service)) issues.push(`workflow.pageChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
+    // expectFromApi는 값을 꺼낼 api 서비스다. concurrencyChecks.service와 같은 규칙으로 관리형 서비스만 받는다
+    if (check.expectFromApi && !managedNames.has(check.expectFromApi.service)) {
+      issues.push(`workflow.pageChecks.${index}.expectFromApi.service: '${check.expectFromApi.service}'은(는) source: managed 서비스가 아닙니다`);
+    }
   });
   spec.workflow?.concurrencyChecks?.forEach((check, index) => {
     if (!managedNames.has(check.service)) issues.push(`workflow.concurrencyChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);

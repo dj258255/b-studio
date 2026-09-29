@@ -244,6 +244,8 @@ export class VerificationGate {
 
   async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal): Promise<void> {
     const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
+    // ① api를 불러 값을 꺼내 둔다. 여기서 실패하면 화면을 열지 않고 멈춘다(렌더링을 낭비하지 않는다)
+    const api = await this.#apiValue(page, pageFetcher, signal);
     const endpoint = await sandbox.endpoint(page.service);
     const url = new URL(page.path, endpoint.url);
     if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
@@ -273,6 +275,10 @@ export class VerificationGate {
       const problems: string[] = [];
       if (result.status !== page.expectStatus) problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
       if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
+      // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
+      if (page.expectAnyText && !page.expectAnyText.some((candidate) => result.text.includes(candidate))) problems.push(missingAnyText(page.expectAnyText));
+      // ④ api에서 꺼낸 값이 렌더링된 글자에 있는지. expectText와 같은 위치에서 본다
+      if (api && !containsApiValue(result.text, api.value)) problems.push(missingApiValue(api, page.path));
       if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.consoleErrors.length > 0) problems.push(`console.error: ${result.consoleErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.failedRequests.length > 0) problems.push(`실패한 요청: ${result.failedRequests.slice(0, 3).join(' | ')}`);
@@ -293,6 +299,34 @@ export class VerificationGate {
     const { status, text } = await pageFetcher(url.href, signal);
     if (status !== page.expectStatus) throw new Error(`HTTP ${status} (기대 ${page.expectStatus})`);
     if (page.expectText && !text.includes(page.expectText)) throw new Error(`응답 본문에 '${page.expectText}'가 없습니다`);
+    // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
+    if (page.expectAnyText && !page.expectAnyText.some((candidate) => text.includes(candidate))) throw new Error(missingAnyText(page.expectAnyText));
+    // ④ api에서 꺼낸 값이 응답 본문(http) 글자에 있는지
+    if (api && !containsApiValue(text, api.value)) throw new Error(sandbox.redact(missingApiValue(api, page.path)));
+  }
+
+  /**
+   * pageChecks.expectFromApi가 있으면 api를 불러 jsonPath 값(문자열·숫자)을 꺼낸다. 없으면 undefined.
+   * 동시 요청 확인과 같은 규칙으로 **세션 서비스의 출처로만** 요청한다.
+   * 상태·값이 없음은 에이전트가 문구만 보고 고칠 수 있게 구체적으로 알리고, 객체·배열·빈 문자열은 확인 설정 오류로 본다.
+   */
+  async #apiValue(page: WorkflowPageCheck, fetcher: PageFetcher, signal: AbortSignal): Promise<ApiValue | undefined> {
+    const expect = page.expectFromApi;
+    if (!expect) return undefined;
+    const { sandbox } = this.#options;
+    const endpoint = await sandbox.endpoint(expect.service);
+    const url = new URL(expect.path, endpoint.url);
+    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
+    const { status, text } = await fetcher(url.href, signal);
+    if (status < 200 || status >= 300) throw new Error(sandbox.redact(`${expect.service} GET ${expect.path}가 HTTP ${status}을 돌려줬습니다`));
+    const value = readJsonPath(text, expect.jsonPath);
+    if (value === undefined || value === null) {
+      throw new Error(sandbox.redact(`${expect.service} 응답에 ${expect.jsonPath}이 없습니다. 응답 앞부분: ${text.slice(0, 200)}`));
+    }
+    if (typeof value === 'object') throw new Error(`${expect.jsonPath}는 ${Array.isArray(value) ? '배열' : '객체'}입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
+    if (typeof value !== 'string' && typeof value !== 'number') throw new Error(`${expect.jsonPath}는 ${typeof value}입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
+    if (typeof value === 'string' && value.trim() === '') throw new Error(`${expect.jsonPath} 값이 빈 문자열입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
+    return { service: expect.service, jsonPath: expect.jsonPath, value };
   }
 
   /**
@@ -475,6 +509,29 @@ function describeConcurrencyExpect(expect: ConcurrencyExpect): string {
   else if (expect.successCount?.atMost !== undefined) parts.push(`최대 ${expect.successCount.atMost}`);
   if (expect.allStatusIn) parts.push(`상태 ${expect.allStatusIn.join('/')}`);
   return parts.join(', ');
+}
+
+/** api에서 꺼낸 값. 화면 글자와 비교한다 */
+interface ApiValue {
+  service: string;
+  jsonPath: string;
+  value: string | number;
+}
+
+/** api 값이 화면 글자에 있는지. 숫자는 원문과 천 단위 구분(12,000) 표기를 둘 다 인정한다 */
+function containsApiValue(text: string, value: string | number): boolean {
+  if (typeof value === 'number') return text.includes(String(value)) || text.includes(value.toLocaleString('en-US'));
+  return text.includes(value);
+}
+
+/** api 값이 화면에 없을 때의 문구. 화면이 다른 필드 이름을 읽고 있을 수 있음을 알린다 */
+function missingApiValue(api: ApiValue, pagePath: string): string {
+  return `${api.service}의 ${api.jsonPath} 값 '${String(api.value)}'이 ${pagePath} 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다`;
+}
+
+/** expectAnyText 실패 문구. 적은 문구 중 어느 것도 없을 때 */
+function missingAnyText(values: readonly string[]): string {
+  return `화면에 ${values.map((value) => `'${value}'`).join(', ')} 중 어느 것도 없습니다`;
 }
 
 /**

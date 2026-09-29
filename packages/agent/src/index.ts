@@ -12,6 +12,7 @@ export {
   type Steering,
 } from './loop';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
+export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
   ClaudeCodeUsageTracker,
   describeAccount,
@@ -81,7 +82,29 @@ export {
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
 export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
-export { isInScope, MAX_PLAN_LANES, MAX_PLAN_TASKS, planLanes, requestTaskPlan, TaskPlanError, type PlannedTask, type TaskLane } from './task-plan';
+export {
+  buildPlannerSystem,
+  isInScope,
+  MAX_PLAN_LANES,
+  MAX_PLAN_TASKS,
+  planLanes,
+  requestTaskPlan,
+  TaskPlanError,
+  type PlannedTask,
+  type TaskLane,
+} from './task-plan';
+export {
+  buildContractSystem,
+  buildContractUser,
+  contractAskFromClient,
+  LaneContractSchema,
+  LaneContractsSchema,
+  MAX_LANE_CONTRACTS,
+  requestLaneContracts,
+  type ContractAsk,
+  type LaneContract,
+  type LaneContractsResult,
+} from './lane-contracts';
 export { ORDERS_DEMO_SCENARIOS, type DemoScenario } from './demo/orders-scenarios';
 export { diffContracts, formatContractChanges, summarizeContract, type ContractChange, type OpenApiDocument } from './contract-diff';
 export {
@@ -110,15 +133,23 @@ export {
   type SourceRepository,
 } from './checkpoints';
 export {
+  addSubIssue,
   buildPullRequest,
   canCreatePullRequest,
   compareUrl,
+  createIssue,
   createPullRequest,
+  fetchIssue,
   parseRemote,
   PullRequestError,
   type GitHostKind,
+  type IssueInput,
+  type IssueLookup,
+  type IssueResult,
+  type PullRequestDraft,
   type PullRequestResult,
   type RemoteLocation,
+  type SubIssueResult,
 } from './repository';
 export { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {

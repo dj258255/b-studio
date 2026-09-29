@@ -126,6 +126,24 @@ describe('summarizeTaskPlan', () => {
     expect(summary.gateMs).toBe(80);
   });
 
+  it('실행들의 모델별 사용량을 합치고, 없으면 필드를 만들지 않는다', () => {
+    const base = basePlan();
+    const plan: TaskPlanView = {
+      ...base,
+      planning: undefined,
+      integration: undefined,
+      lanes: base.lanes.map((lane) => ({
+        ...lane,
+        tasks: lane.tasks.map((task) => ({ ...task, run: task.run ? { ...task.run, metrics: { ...task.run.metrics!, usageByModel: { haiku: usage(10, 1) } } } : undefined })),
+      })),
+    };
+
+    // a1·a2·b1 세 실행의 haiku 사용량이 합쳐진다
+    expect(summarizeTaskPlan(plan).usageByModel).toEqual({ haiku: usage(30, 3) });
+    // 모델별 사용량을 내는 실행이 없으면 필드를 만들지 않는다(basePlan의 실행들에는 없다)
+    expect(summarizeTaskPlan(base).usageByModel).toBeUndefined();
+  });
+
   it('지표가 없는 실행은 usage만 더하고, 승인 전 계획은 endToEndMs가 없다', () => {
     const plan: TaskPlanView = {
       ...basePlan(),
@@ -148,5 +166,28 @@ describe('summarizeTaskPlan', () => {
     expect(summary.bootRxBytesTotal).toBe(0);
     expect(summary.sessions).toBe(1);
     expect(summary.endToEndMs).toBeUndefined();
+  });
+
+  it('레인 사이 계약 호출을 따로 남기고 합계에도 넣는다', () => {
+    const plan: TaskPlanView = {
+      ...basePlan(),
+      contracts: { source: 'model', count: 2, usage: usage(60, 6, 600, 2), durationMs: 400 },
+    };
+
+    const summary = summarizeTaskPlan(plan);
+
+    expect(summary.contracts).toEqual({ count: 2, usage: usage(60, 6, 600, 2), durationMs: 400 });
+    // 계약 호출도 계획 단계의 실제 모델 호출이다. 합계에 들어가야 계약이 공짜처럼 보이지 않는다
+    expect(summary.usage).toEqual({ inputTokens: 1_560, outputTokens: 156, cacheReadTokens: 10_600, cacheWriteTokens: 7 });
+    expect(summary.modelCalls).toBe(8);
+    // 계약 호출의 입력 크기(60+600+2)는 레인 실행의 최댓값 4,400보다 작다
+    expect(summary.maxContextTokens).toBe(4_400);
+  });
+
+  it('계약을 받지 않았으면 contracts 지표가 없고 합계도 그대로다', () => {
+    const summary = summarizeTaskPlan(basePlan());
+
+    expect(summary.contracts).toBeUndefined();
+    expect(summary.modelCalls).toBe(7);
   });
 });

@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
 import type { ProjectSummary } from '@/lib/studio-events';
 import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
+import { describeTokens, hasTokens } from '@/lib/usage';
 import { PlanGraphView } from './plan-graph';
 
 const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
@@ -95,7 +96,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
     }
   }
 
-  async function decide(approve: boolean, reason?: string) {
+  async function decide(approve: boolean, reason?: string, publishIssues?: boolean) {
     if (!selectedId) return;
     setDeciding(true);
     setError(undefined);
@@ -103,7 +104,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
       const response = await fetch(`/api/task-plans/${encodeURIComponent(selectedId)}/approval`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(approve ? { approve: true } : { approve: false, reason }),
+        body: JSON.stringify(approve ? { approve: true, publishIssues: publishIssues === true } : { approve: false, reason }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
@@ -200,17 +201,45 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
             <div><p className="font-medium text-ink">실행한 작업 분해가 아직 없습니다</p><p className="mt-2 text-sm">여러 영역에 걸친 요청을 나눠 동시에 실행해 보세요.</p></div>
           </div>
         ) : (
-          <PlanResult plan={selected} deciding={deciding} onDecide={(approve, reason) => void decide(approve, reason)} onResume={() => void resume()} />
+          <PlanResult
+            plan={selected}
+            canPublish={projects.find((project) => project.id === selected.projectId)?.canPublishIssues === true}
+            deciding={deciding}
+            onDecide={(approve, reason, publishIssues) => void decide(approve, reason, publishIssues)}
+            onResume={() => void resume()}
+          />
         )}
       </section>
     </div>
   );
 }
 
-function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView; deciding: boolean; onDecide: (approve: boolean, reason?: string) => void; onResume: () => void }) {
+function PlanResult({
+  plan,
+  canPublish,
+  deciding,
+  onDecide,
+  onResume,
+}: {
+  plan: TaskPlanView;
+  /** 원격 저장소 + 토큰이 있어 "이슈로 올리기"를 고를 수 있는가 */
+  canPublish: boolean;
+  deciding: boolean;
+  onDecide: (approve: boolean, reason?: string, publishIssues?: boolean) => void;
+  onResume: () => void;
+}) {
   const [reason, setReason] = useState('');
+  const [publishIssues, setPublishIssues] = useState(true);
   /** 레인·통합 카드로 보는 기존 목록 보기와, 관계를 한 그림으로 보는 그래프 보기를 겹쳐 둔다 */
   const [view, setView] = useState<'list' | 'graph'>('list');
+  /**
+   * 레인 사이 계약(S2)은 아래 "레인 사이 계약" 절에서 본문·refs·출처를 보여 준다.
+   * 같은 메모가 게시판 목록에도 나오면 두 번 보이므로, 게시판 목록에서는 플랫폼이 게시한 계약 메모를 뺀다
+   * (S3에서 레인이 쓴 계약 메모는 게시판에 그대로 남는다 — 누가 언제 썼는지가 거기 있다).
+   */
+  const platformContracts = (plan.board?.notes ?? []).filter((note) => note.kind === 'contract' && note.by === 'platform');
+  const showContracts = plan.contracts !== undefined || platformContracts.length > 0;
+  const boardNotes = (plan.board?.notes ?? []).filter((note) => !showContracts || !(note.kind === 'contract' && note.by === 'platform'));
   return (
     <div className="space-y-4">
       {plan.status === 'interrupted' && (
@@ -237,11 +266,17 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
             placeholder="거부 사유 (선택)"
             className="mt-4 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm placeholder:text-muted"
           />
+          {canPublish && (
+            <label className="mt-3 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={publishIssues} onChange={(event) => setPublishIssues(event.target.checked)} className="size-4" />
+              이슈로 올리기 (추적 이슈와 작업별 하위 이슈를 원격 저장소에 만듭니다)
+            </label>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
               disabled={deciding}
-              onClick={() => onDecide(true)}
+              onClick={() => onDecide(true, undefined, canPublish && publishIssues)}
               className="rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
             >
               승인하고 실행
@@ -286,6 +321,31 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
         <p className="mt-3 text-sm text-muted">통합 결과는 자동으로 병합·푸시·배포하지 않습니다. 통합 세션에서 diff와 검증 근거를 확인한 뒤 내보내세요.</p>
       </header>
 
+      {plan.issues && (
+        <section className="rounded-panel border border-line bg-panel p-4 text-sm">
+          <p className="font-medium">이슈</p>
+          {plan.issues.tracking && (
+            <p className="mt-1">
+              추적 이슈{' '}
+              <a href={plan.issues.tracking.url} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-2">
+                #{plan.issues.tracking.number}
+              </a>
+            </p>
+          )}
+          {Object.values(plan.issues.tasks).length > 0 && (
+            <p className="mt-1 text-muted">
+              하위 이슈{' '}
+              {Object.values(plan.issues.tasks).map((ref) => (
+                <a key={ref.number} href={ref.url} target="_blank" rel="noreferrer" className="mr-2 font-medium underline underline-offset-2">
+                  #{ref.number}
+                </a>
+              ))}
+            </p>
+          )}
+          {plan.issues.error && <p className="mt-1 text-fail">이슈를 올리지 못했습니다: {plan.issues.error}</p>}
+        </section>
+      )}
+
       {plan.coordination && (
         <section className="glass rounded-panel p-5">
           <div className="flex flex-wrap items-center gap-2">
@@ -298,9 +358,9 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
               메모 {plan.board.stats.posts}개 · 거부 {plan.board.stats.rejected} · 읽기 {plan.board.stats.reads}회 · 읽은 바이트 {plan.board.stats.bytesRead.toLocaleString('ko-KR')}
             </p>
           )}
-          {plan.board && plan.board.notes.length > 0 ? (
+          {boardNotes.length > 0 ? (
             <ul className="mt-3 space-y-2">
-              {plan.board.notes.map((note, index) => (
+              {boardNotes.map((note, index) => (
                 <li key={`${note.at}-${index}`} className="rounded-md border border-line bg-panel p-3">
                   <p className="text-xs font-medium">
                     [{note.kind}·{note.priority}] {note.lane}
@@ -313,8 +373,45 @@ function PlanResult({ plan, deciding, onDecide, onResume }: { plan: TaskPlanView
               ))}
             </ul>
           ) : (
-            <p className="mt-2 text-sm text-muted">아직 게시된 메모가 없습니다.</p>
+            <p className="mt-2 text-sm text-muted">{showContracts ? '레인 사이 계약 말고는 아직 게시된 메모가 없습니다.' : '아직 게시된 메모가 없습니다.'}</p>
           )}
+        </section>
+      )}
+
+      {showContracts && (
+        <section className="glass rounded-panel p-5">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-lg font-semibold">레인 사이 계약</h2>
+            <span className="glass-soft rounded-full px-3 py-1 text-sm font-medium text-wait">
+              계약 {plan.contracts?.count ?? platformContracts.length}개
+            </span>
+            <span className="text-sm text-muted">출처: {plan.contracts?.source === 'model' ? '계획 모델' : '사람'}</span>
+            {plan.contracts?.usage && hasTokens(plan.contracts.usage) && (
+              <span className="text-xs text-muted">
+                {describeTokens(plan.contracts.usage)}
+                {plan.contracts.durationMs !== undefined && ` · ${(plan.contracts.durationMs / 1_000).toFixed(1)}초`}
+              </span>
+            )}
+          </div>
+          {plan.contracts?.warning && <p className="mt-2 text-sm text-fail">{plan.contracts.warning}</p>}
+          {platformContracts.length > 0 ? (
+            <ul className="mt-3 space-y-2">
+              {platformContracts.map((note, index) => (
+                <li key={`${note.at}-${index}`} className="rounded-md border border-line bg-panel p-3">
+                  <p className="text-sm leading-5 whitespace-pre-wrap">{note.body}</p>
+                  {note.refs.length > 0 && <p className="mt-1 break-all font-mono text-xs text-muted">{note.refs.join(', ')}</p>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-sm text-muted">게시된 계약이 없습니다. 레인끼리 맞물리는 인터페이스가 없다고 판단했습니다.</p>
+          )}
+          {plan.contracts !== undefined && plan.contracts.count > platformContracts.length && (
+            <p className="mt-2 text-sm text-fail">
+              계약 {plan.contracts.count - platformContracts.length}개가 게시되지 않았습니다. refs가 없는 계약은 게시판이 거부합니다.
+            </p>
+          )}
+          <p className="mt-2 text-xs text-muted">레인은 시작 전에 read_notes로 이 계약을 읽습니다.</p>
         </section>
       )}
 

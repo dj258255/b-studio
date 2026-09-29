@@ -408,6 +408,29 @@ describe('runOpenCodeAgent', () => {
     }
   });
 
+  it('승격 옵션을 받으면 무시하지 않고 경고 이벤트를 한 번 알린다', async () => {
+    const { process } = fakeOpenCode([success('ses_1', 'ok')]);
+    const events: AgentEvent[] = [];
+
+    const result = await runOpenCodeAgent({
+      request: '안녕',
+      intent: 'ask',
+      project,
+      sandbox: fakeSandbox(project, []),
+      process,
+      model: MODEL,
+      // 이 러너는 승격을 지원하지 않는다. 조용히 무시하면 재는 사람이 승격이 걸린 줄 안다
+      escalation: { to: 'sonnet' },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done' });
+    const warnings = events.filter((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.message).toContain('승격을 지원하지 않습니다');
+  });
+
   it('b-studio 도구가 아닌 호출을 실제 이벤트대로 기록한다: 실행은 allow, 거부는 deny, b-studio 도구는 기록하지 않는다', async () => {
     const { process } = fakeOpenCode([
       {

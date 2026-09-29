@@ -56,6 +56,8 @@ export interface SessionCommit {
   subject: string;
   body: string;
   files: string[];
+  /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 커밋이다 */
+  passedStages?: WorkflowStage[];
 }
 
 export interface PushResult {
@@ -464,14 +466,23 @@ export class CheckpointStore {
   /** 세션 시작 이후 체크포인트 커밋. 오래된 것부터. 원격에서 가져온 커밋은 병합 커밋으로만 들어간다 */
   async sessionCommits(): Promise<SessionCommit[]> {
     const start = await this.#startSha();
-    const records = (await this.#git(['log', '--first-parent', '--reverse', '--format=%H%x00%h%x00%s%x00%b%x1e', `${start}..HEAD`]))
+    const records = (
+      await this.#git([
+        'log', '--first-parent', '--reverse',
+        '--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=Workflow-Passed,valueonly,separator=%x1f)%x1e',
+        `${start}..HEAD`,
+      ])
+    )
       .split('\x1e')
       .map((record) => record.replace(/^\n/, ''))
       .filter(Boolean);
     return Promise.all(
       records.map(async (record) => {
-        const [sha = '', shortSha = '', subject = '', body = ''] = record.split('\0');
-        return { sha, shortSha, subject, body: body.trim(), files: await this.#changedFiles(sha) };
+        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = ''] = record.split('\0');
+        // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
+        const passedStages =
+          authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+        return { sha, shortSha, subject, body: body.trim(), files: await this.#changedFiles(sha), ...(passedStages ? { passedStages } : {}) };
       }),
     );
   }

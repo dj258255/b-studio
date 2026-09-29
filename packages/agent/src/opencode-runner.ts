@@ -5,6 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
 import { serialQueue } from './claude-code-runner';
+import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
@@ -134,11 +135,13 @@ const DEFAULT_PROCESS: OpenCodeProcess = {
   },
 };
 
-export interface OpenCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation'> {
+export interface OpenCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation' | 'escalation'> {
   /** 이전 실행의 opencode 세션 id. 주면 `--session <id> --fork`로 갈라 이어받는다 */
   resume?: string;
   /** 필수. 모델은 항상 `-m`으로 명시한다. 없으면 OPENCODE_MODEL_REQUIRED 오류를 낸다(기본 모델을 추측하지 않는다) */
   model?: string;
+  /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex·Command Code 러너와 같다) */
+  escalation?: EscalationPolicy;
   /**
    * 사용자 로그인 파일(`~/.local/share/opencode/auth.json`)을 임시 HOME으로 심볼릭 링크로 빌려온다. 기본 true.
    * 무료 Zen 모델은 이 구성에서 거절되므로(PROVIDER_GATE) 로그인한 제공자의 모델을 쓰는 것이 정상 경로다.
@@ -194,6 +197,7 @@ export interface OpenCodeRunResult extends AgentResult {
  *
  * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
  * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
+ * 모델 승격(`escalation`)은 타입으로는 받지만 지원하지 않는다 — 무시하지 않고 warning 이벤트로 알린다(codex·Command Code 러너와 같다).
  */
 export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<OpenCodeRunResult> {
   const {
@@ -228,6 +232,9 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
   if (resume !== undefined && stateDir === undefined) {
     onEvent({ type: 'warning', message: '이 실행은 이전 대화를 이어받지 못합니다: 상태 폴더 없음' });
   }
+  // 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex·Command Code 러너와 같은 규칙).
+  // 벤치는 --escalate-to를 claude-code에서만 받으므로 여기까지 오지 않지만, 옵션을 직접 넘기는 경로도 조용히 넘기지 않는다
+  if (options.escalation) onEvent({ type: 'warning', message: '로컬 OpenCode Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다

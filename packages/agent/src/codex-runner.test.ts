@@ -417,4 +417,25 @@ describe('runCodexAgent', () => {
     expect(events.some((event) => event.type === 'verify_start')).toBe(false);
     expect(sandbox.restarts).toEqual([]);
   });
+
+  it('승격 옵션을 받으면 지원하지 않는다고 경고를 한 번 낸다', async () => {
+    const { sdk } = fakeCodex([{ steps: [{ text: 'ok' }] }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runCodexAgent({
+      request: '안녕',
+      intent: 'ask',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      escalation: { to: 'sonnet' },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done' });
+    const warnings = events.filter((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.message).toContain('승격을 지원하지 않습니다');
+  });
 });

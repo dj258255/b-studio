@@ -16,6 +16,7 @@ import {
   DatabaseBranches,
   describeDatabaseState,
   estimateCost,
+  fetchIssue,
   formatVerificationReport,
   formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
@@ -36,6 +37,7 @@ import {
   ScriptedModelClient,
   type ScriptedTurn,
   verifyChanges,
+  workflowStages,
   Workspace,
   type AgentEvent,
   type AgentResult,
@@ -47,8 +49,11 @@ import {
   type DemoScenario,
   type DesignFrameInfo,
   type DesignSource,
+  type EscalationPolicy,
   type GitAuthor,
   type ModelClient,
+  type PullRequestDraft,
+  type RepositoryInfo,
   type RoutingDecision,
   type RemoteSyncResult,
   type ServiceCheck,
@@ -68,7 +73,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { loadProject, figmaFileKey, type LoadedProject } from '@b-studio/spec';
+import { loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import {
   addTokens,
@@ -87,6 +92,7 @@ import type {
   CodeSearch,
   CodeTree,
   DesignView,
+  ExportPreview,
   ExportResult,
   ProxyResponse,
   RepositoryView,
@@ -110,7 +116,7 @@ import { resolveOpenCodeModel } from './opencode-models';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
-import { clientForModel, routingDecision } from './model-registry';
+import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
@@ -338,7 +344,7 @@ export async function createSession(
   projectId: string,
   owner: string,
   workspace: WorkspaceKind = 'copy',
-  options: { modelId?: string } = {},
+  options: { modelId?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
   const tokenLimit = sessionTokenLimit();
@@ -350,7 +356,7 @@ export async function createSession(
   await recoverSessions();
   const release = workspace === 'local' ? claimFolder(source.root) : undefined;
   try {
-    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview, modelId: options.modelId });
+    return await startSession({ projectId, owner, workspace, source, mode, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
@@ -366,6 +372,7 @@ async function startSession({
   tokenLimit,
   preview,
   modelId,
+  extraPageChecks,
 }: {
   projectId: string;
   owner: string;
@@ -375,9 +382,13 @@ async function startSession({
   tokenLimit: number | undefined;
   preview: PreviewConfig | undefined;
   modelId?: string;
+  /** 이 세션에만 덧붙일 pageChecks(작업 분해 통합 게이트). HTTP 라우트는 넘기지 않는다 */
+  extraPageChecks?: readonly WorkflowPageCheck[];
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
+  // 승격 대상 모델 id가 레지스트리에 없으면 샌드박스를 띄우기 전에 거부한다(조용히 승격 없이 돌지 않게)
+  if (mode === 'api') apiEscalation();
 
   // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 폴더의 시작 상태를 체크포인트로 둔다
   const author = gitAuthor();
@@ -412,6 +423,10 @@ async function startSession({
   }
 
   const project = await loadProject(await checkpoints.projectRoot());
+  // 이 세션에만 pageChecks를 덧붙인다(작업 분해 통합 게이트). 프로젝트 객체는 세션마다 새로 읽으므로 다른 세션·레인에는 새지 않는다
+  if (extraPageChecks && extraPageChecks.length > 0) {
+    project.spec.workflow = { ...project.spec.workflow, pageChecks: [...(project.spec.workflow?.pageChecks ?? []), ...extraPageChecks] };
+  }
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
@@ -1104,8 +1119,17 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
 type Intent = 'build' | 'ask';
 
 type RunPlan = (
-  | { kind: 'model'; client: ModelClient; route?: RoutingDecision; allowBreaking: boolean; maxVerifyAttempts?: number; intent: Intent }
-  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent }
+  | {
+      kind: 'model';
+      client: ModelClient;
+      route?: RoutingDecision;
+      allowBreaking: boolean;
+      maxVerifyAttempts?: number;
+      intent: Intent;
+      /** 게이트 실패 서명이 반복되면 쓸 승격 클라이언트. 설정하지 않으면 승격 없음 */
+      escalation?: EscalationPolicy & { client: ModelClient };
+    }
+  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent; escalation?: EscalationPolicy }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
@@ -1114,9 +1138,13 @@ type RunPlan = (
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
   if (session.snapshot.mode === 'api') {
     const route = routingDecision(request, intent, session.snapshot.modelId);
-    return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent };
+    const escalation = apiEscalation();
+    return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
-  if (session.snapshot.mode === 'claude-code') return { kind: 'claude-code', allowBreaking, intent };
+  if (session.snapshot.mode === 'claude-code') {
+    const escalation = claudeCodeEscalation();
+    return { kind: 'claude-code', allowBreaking, intent, ...(escalation ? { escalation } : {}) };
+  }
   if (session.snapshot.mode === 'codex') return { kind: 'codex', allowBreaking, intent };
   if (session.snapshot.mode === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
   if (session.snapshot.mode === 'opencode') return { kind: 'opencode', allowBreaking, intent };
@@ -1158,6 +1186,40 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
 /** 데모 모드에서 질문 카드의 답으로 보낸 요청인지. 화면은 `[질문] …\n[답] …` 형식으로 보낸다 */
 function isDemoAnswer(request: string, question: string): boolean {
   return request.startsWith('[질문]') && request.includes('[답]') && request.includes(question);
+}
+
+/** 승격 임계치. 같은 실패 서명 집합이 이만큼 연속으로 나오면 올린다(기본 2) */
+function escalateAfter(): number {
+  const raw = process.env.B_STUDIO_ESCALATE_AFTER?.trim();
+  if (!raw) return 2;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) throw new StudioError(500, `B_STUDIO_ESCALATE_AFTER는 1 이상의 정수여야 합니다 (지금 값: ${raw})`);
+  return value;
+}
+
+/**
+ * API 모드 승격 대상. 모델 레지스트리 id(B_STUDIO_ESCALATE_MODEL_ID)로 지정한다.
+ * 없는 id면 기동 시 오류를 내고, 설정하지 않으면 승격하지 않는다(지금 동작과 같다).
+ */
+function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefined {
+  const id = process.env.B_STUDIO_ESCALATE_MODEL_ID?.trim();
+  if (!id) return undefined;
+  const model = (() => {
+    try {
+      return modelById(id);
+    } catch (error) {
+      throw new StudioError(500, `B_STUDIO_ESCALATE_MODEL_ID=${id}: ${describe(error)}`);
+    }
+  })();
+  // 로컬 Claude 모드와 같은 임계치를 쓴다. 사람이 읽는 이름은 모델 라벨을 쓴다
+  return { to: model.label || model.id, sameSignatureTimes: escalateAfter(), client: clientForModel(model) };
+}
+
+/** 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet) */
+function claudeCodeEscalation(): EscalationPolicy | undefined {
+  const to = process.env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim();
+  if (!to) return undefined;
+  return { to, sameSignatureTimes: escalateAfter() };
 }
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
@@ -1400,6 +1462,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       model: process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined,
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
       steering: run.steering,
+      // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
+      escalation: plan.escalation,
       account: preflight.account,
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
@@ -1506,6 +1570,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     maxVerifyAttempts: plan.maxVerifyAttempts,
     // 실행 중 지시 큐. 없으면(레인·플릿·데모) 지시를 받지 않는다
     steering: run.steering,
+    // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
+    escalation: plan.escalation,
   });
 }
 
@@ -1708,8 +1774,146 @@ export function restoreCheckpoint(id: string, sha: string): void {
   })();
 }
 
+/** PR에 연결할 이슈 번호. 생략은 undefined, 잘못된 값은 400이다 */
+export function parseIssueInput(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 10_000_000) {
+    throw new StudioError(400, 'issue는 1 이상 10,000,000 이하의 정수여야 합니다');
+  }
+  return value;
+}
+
+/**
+ * 요청 본문에서 연결할 이슈 번호 목록을 만든다. 이전 형식 issue(단수)와 issues(배열)를 합치고 중복을 없앤다.
+ * 이슈 입력이 아예 없으면 undefined를 돌려줘, 부르는 쪽이 기본값(통합 세션의 하위 이슈)을 쓸지 정하게 한다
+ */
+export function parseIssueList({ issue, issues }: { issue?: unknown; issues?: unknown }): number[] | undefined {
+  if (issue === undefined && issues === undefined) return undefined;
+  const list: number[] = [];
+  const single = parseIssueInput(issue);
+  if (single !== undefined) list.push(single);
+  if (issues !== undefined && issues !== null) {
+    if (!Array.isArray(issues)) throw new StudioError(400, 'issues는 이슈 번호 배열이어야 합니다');
+    for (const value of issues) {
+      const parsed = parseIssueInput(value);
+      if (parsed === undefined) throw new StudioError(400, 'issues의 각 항목은 1 이상 10,000,000 이하의 정수여야 합니다');
+      list.push(parsed);
+    }
+  }
+  return [...new Set(list)];
+}
+
+type IssueLookupResult = { ok: true; state: 'open' | 'closed'; title: string } | { ok: false; error: string };
+
+/**
+ * 미리보기의 확인 목록을 만든다. 세션 없이 계산할 수 있도록 순수 함수로 둔다.
+ * 어떤 항목이 false여도 올리기를 막지는 않는다. 사람이 보고 판단한다
+ */
+export function buildExportChecks({
+  issues,
+  issueLookups,
+  missing,
+  uncheckpointed,
+  running,
+}: {
+  issues: readonly number[];
+  /** 이슈 번호별 원격 조회 결과. 없는 번호는 확인하지 못한 것으로 둔다 */
+  issueLookups?: ReadonlyArray<{ issue: number; lookup: IssueLookupResult }>;
+  missing: ReadonlyArray<{ shortSha: string; subject: string; stages: readonly string[] }>;
+  uncheckpointed: number;
+  running: boolean;
+}): ExportPreview['checks'] {
+  const checks: ExportPreview['checks'] = [
+    {
+      id: 'issue_linked',
+      ok: issues.length > 0,
+      detail: issues.length === 0 ? '이슈 번호를 넣지 않았습니다. 선택 사항입니다' : `${issues.map((number) => `#${number}`).join(', ')} 이슈를 PR에 연결합니다`,
+    },
+  ];
+
+  if (issues.length === 0) {
+    checks.push({ id: 'issue_open', ok: 'unknown', detail: '이슈 번호를 넣으면 원격 이슈 상태를 확인합니다' });
+  } else {
+    const parts = issues.map((issue) => {
+      const lookup = issueLookups?.find((entry) => entry.issue === issue)?.lookup;
+      if (lookup?.ok) return { ok: lookup.state === 'open', detail: `#${issue} ${lookup.title} (${lookup.state === 'open' ? '열림' : '닫힘'})` };
+      const reason = lookup?.error ?? '알 수 없는 오류';
+      return { ok: 'unknown' as const, detail: `#${issue} 이슈를 확인하지 못했습니다: ${reason}` };
+    });
+    const ok: boolean | 'unknown' = parts.some((part) => part.ok === 'unknown') ? 'unknown' : parts.every((part) => part.ok === true);
+    checks.push({ id: 'issue_open', ok, detail: parts.map((part) => part.detail).join(', ') });
+  }
+
+  checks.push({
+    id: 'stages_passed',
+    ok: missing.length === 0,
+    detail: missing.length === 0 ? '모든 커밋이 필수 단계를 통과했습니다' : `필수 단계 기록이 없는 커밋 ${missing.length}개가 있습니다`,
+  });
+  checks.push({
+    id: 'uncheckpointed_changes',
+    ok: uncheckpointed === 0,
+    detail: uncheckpointed === 0 ? '체크포인트 밖 변경이 없습니다' : `체크포인트로 남기지 않은 변경 ${uncheckpointed}개가 있습니다. 올리기 전에 체크포인트로 남겨야 합니다`,
+  });
+  checks.push({
+    id: 'running',
+    ok: !running,
+    detail: running ? '작업이 진행 중입니다. 끝난 뒤에 올릴 수 있습니다' : '진행 중인 작업이 없습니다',
+  });
+  return checks;
+}
+
+/** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
+async function pullRequestDraft(session: Session, issues: readonly number[]): Promise<PullRequestDraft & { info: RepositoryInfo }> {
+  const info = (await session.checkpoints.repository())!;
+  const draft = buildPullRequest({
+    projectName: session.project.spec.name,
+    base: info.base,
+    branch: info.branch,
+    commits: await session.checkpoints.sessionCommits(),
+    issues,
+    requiredStages: workflowStages(session.project),
+  });
+  return { info, ...draft };
+}
+
+/**
+ * 올리기 전 미리보기. 제목·본문과 확인 목록(이슈 연결·원격 이슈 상태·누락 단계·체크포인트 밖 변경)을 돌려준다.
+ * 누락을 보여 주기만 하고 막지는 않는다. 실제 생성은 exportSession이 같은 함수로 본문을 다시 만들어 한다
+ */
+export async function previewExport(id: string, { issues = [] }: { issues?: readonly number[] } = {}): Promise<ExportPreview> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
+
+  const { info, title, body, missing } = await pullRequestDraft(session, issues);
+  const remote = parseRemote(info.remoteUrl);
+  const issueLookups = await Promise.all(
+    issues.map(async (issue) => ({
+      issue,
+      lookup: await fetchIssue(remote, issue).then(
+        (lookup): IssueLookupResult => ({ ok: true, state: lookup.state, title: lookup.title }),
+        (error: unknown): IssueLookupResult => ({ ok: false, error: describe(error) }),
+      ),
+    })),
+  );
+
+  return {
+    title,
+    body,
+    canCreate: canCreatePullRequest(remote),
+    existingPullRequest: info.pullRequestUrl,
+    issues: [...issues],
+    checks: buildExportChecks({
+      issues,
+      issueLookups,
+      missing,
+      uncheckpointed: (await session.checkpoints.pendingFiles()).length,
+      running: session.snapshot.running,
+    }),
+  };
+}
+
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
-export async function exportSession(id: string, { pullRequest }: { pullRequest: boolean }): Promise<ExportResult> {
+export async function exportSession(id: string, { pullRequest, issues = [] }: { pullRequest: boolean; issues?: readonly number[] }): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
   if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
@@ -1728,12 +1932,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
     let pullRequestError: string | undefined;
     if (pullRequest && !info.pullRequestUrl) {
       try {
-        const { title, body } = buildPullRequest({
-          projectName: session.project.spec.name,
-          base: info.base,
-          branch: info.branch,
-          commits: await session.checkpoints.sessionCommits(),
-        });
+        const { title, body } = await pullRequestDraft(session, issues);
         const result = await createPullRequest(parseRemote(info.remoteUrl), { title, body, base: info.base, branch: info.branch });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
@@ -1752,6 +1951,7 @@ export async function exportSession(id: string, { pullRequest }: { pullRequest: 
       forced: pushed.forced,
       pullRequest: created,
       pullRequestError,
+      issues: created && issues.length > 0 ? [...issues] : undefined,
     };
     emit(session, { type: 'exported', ...result });
     return result;
