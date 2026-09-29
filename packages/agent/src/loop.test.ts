@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
@@ -6,7 +6,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { runAgent, type AgentEvent, type ModelClient, type RunAgentOptions } from './loop';
 import { ScriptedModelClient } from './scripted-client';
-import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
+import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
+import { CLEARED_TOOL_RESULT_PREFIX } from './context-clearing';
 
 let project: LoadedProject;
 
@@ -234,6 +235,8 @@ describe('runAgent', () => {
       { inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 },
     ]);
     expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 0 });
+    // 실행 누적값(tokens)과 별개로, 턴 하나의 사용량을 남긴다. 이 스크립트는 응답마다 같은 값을 주므로 두 턴이 같다
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e.contextTokens] : []))).toEqual([1_100, 1_100]);
   });
 
   it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남긴다', async () => {
@@ -248,11 +251,17 @@ describe('runAgent', () => {
       ],
     );
 
-    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+    const events: AgentEvent[] = [];
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract, onEvent: collect(events) });
 
     // 두 번 호출했고, 한 호출의 입력 크기는 input+cacheRead+cacheWrite: 1105, 2207이다
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(2_207);
+    // 턴 하나의 사용량을 그대로 남긴다(실행 누적값 tokens와 다르다)
+    expect(events.flatMap((e) => (e.type === 'turn_usage' ? [e] : []))).toEqual([
+      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 5, contextTokens: 1_105 },
+      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 20, cacheReadTokens: 2_000, cacheWriteTokens: 7, contextTokens: 2_207 },
+    ]);
     // usage 합계는 캐시를 입력에 섞지 않은 기존 값 그대로다
     expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 30, cacheReadTokens: 3_000, cacheWriteTokens: 12 });
     for (const ms of [result.metrics!.modelMs, result.metrics!.toolMs, result.metrics!.gateMs]) {
@@ -330,5 +339,290 @@ describe('runAgent', () => {
       fetcher: async () => contract,
     });
     expect(result).toMatchObject({ status: 'failed', summary: '모델이 요청을 거절했습니다 (scripted)' });
+  });
+
+  it('ask_user가 질문을 남기면 도구 결과를 넣고 실행을 끝내 답을 기다린다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    const conversation: NonNullable<RunAgentOptions['conversation']> = [];
+
+    const result = await runAgent({
+      request: '주문 화면 만들어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client,
+      conversation,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?', changedFiles: [], verifyAttempts: 0, turns: 1 });
+    expect(result.question).toEqual({ question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true });
+    expect(events.find((event) => event.type === 'question')).toMatchObject({ options: ['표', '카드'], allowOther: true });
+    // 변경 파일이 없으면 게이트를 돌리지 않는다
+    expect(events.some((event) => event.type === 'verify_start')).toBe(false);
+    // 도구 결과가 대화에 남아 다음 요청이 맥락을 그대로 잇는다
+    expect(conversation).toHaveLength(3);
+  });
+
+  it('질문 전에 파일을 바꿨으면 게이트를 돌리고, interactive가 아니면 ask_user가 도구 목록에 없다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }] },
+      { toolCalls: [{ name: 'ask_user', input: { question: '계속할까요?', options: ['예', '아니오'], allowOther: false } }] },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      request: '새 클래스 추가',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      client,
+      interactive: true,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result).toMatchObject({ status: 'awaiting_input', summary: '계속할까요?', changedFiles: ['api/src/New.java'] });
+    expect(result.report?.ok).toBe(true);
+    expect(events.some((event) => event.type === 'verify_start')).toBe(true);
+
+    // interactive를 넘기지 않으면(레인·벤치·CLI) 도구 목록이 지금과 같다
+    const plain = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: plain, fetcher: async () => contract });
+    expect(plain.requests[0]!.tools.map((tool) => tool.name)).not.toContain('ask_user');
+
+    const withAsk = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: withAsk, interactive: true, fetcher: async () => contract });
+    expect(withAsk.requests[0]!.tools.map((tool) => tool.name)).toContain('ask_user');
+  });
+
+  it('실행 중 지시는 다음 모델 호출 직전에 도구 결과 뒤에 붙는다(도구 호출 도중에 끼어들지 않는다)', async () => {
+    const queue = fakeSteering();
+    const events: AgentEvent[] = [];
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] },
+      { text: '주문 API입니다.' },
+    ]);
+    // 첫 모델 응답 뒤(도구를 쓰는 동안) 사용자가 지시를 보낸다
+    const wrapped: ModelClient = {
+      async createMessage(request) {
+        const message = await client.createMessage(request);
+        if (client.requests.length === 1) {
+          queue.push('메모 필드도 추가해줘');
+          queue.push('테스트도 추가해줘');
+        }
+        return message;
+      },
+    };
+
+    const result = await runAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client: wrapped,
+      steering: queue.steering,
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result.status).toBe('done');
+    // 첫 모델 호출에는 지시가 없다
+    expect(client.requests[0]!.messages.some((m) => typeof m.content === 'string' && m.content.includes('[진행 중 지시]'))).toBe(false);
+
+    // 두 번째 호출에는 도구 결과(user 배열) 뒤에 지시가 텍스트 블록으로 붙는다. 연속 user 메시지를 만들지 않는다
+    const second = client.requests[1]!.messages;
+    const last = second.at(-1)!;
+    expect(Array.isArray(last.content)).toBe(true);
+    const directive = (last.content as Array<{ type: string; text?: string }>).find((block) => block.type === 'text' && block.text?.includes('[진행 중 지시]'));
+    expect(directive?.text).toBe('[진행 중 지시] 메모 필드도 추가해줘\n테스트도 추가해줘');
+    expect(second.filter((m) => m.role === 'user')).toHaveLength(2); // 요청 + (도구 결과 + 지시)
+
+    expect(events.filter((event): event is Extract<AgentEvent, { type: 'steer_applied' }> => event.type === 'steer_applied')).toMatchObject([{ count: 2 }]);
+  });
+
+  it('게이트 피드백과 지시가 함께 있으면 둘 다 넣고 지시를 뒤에 둔다', async () => {
+    const queue = fakeSteering();
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
+      { text: '메모를 추가했습니다.' },
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '고쳤습니다.' },
+    ]);
+    const base = fakeSandbox(project, [false, true]);
+    // 게이트가 서비스를 다시 띄우는 동안 사용자가 지시를 보낸다
+    const sandbox = {
+      ...base,
+      async restart(service: string, options?: StartOptions) {
+        queue.push('테스트도 추가해줘');
+        return base.restart(service, options);
+      },
+    };
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox,
+      client,
+      steering: queue.steering,
+      fetcher: async () => contract,
+    });
+
+    expect(result.status).toBe('done');
+    // 게이트 피드백이 먼저 들어가고, 다음 모델 호출 직전에 지시가 그 뒤에 붙는다
+    const retry = client.requests[2]!.messages.at(-1)!;
+    const content = String(retry.content);
+    expect(content).toContain('[b-studio 검증 게이트]');
+    expect(content).toContain('[진행 중 지시] 테스트도 추가해줘');
+    expect(content.indexOf('[b-studio 검증 게이트]')).toBeLessThan(content.indexOf('[진행 중 지시]'));
+  });
+
+  it('steering을 주지 않으면 지시가 있어도 대화에 넣지 않는다(기본값)', async () => {
+    const queue = fakeSteering();
+    queue.push('무시되어야 한다');
+    const client = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+
+    const result = await runAgent({
+      request: '설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      client,
+      fetcher: async () => contract,
+    });
+
+    expect(result.status).toBe('done');
+    expect(client.requests[0]!.messages.some((m) => typeof m.content === 'string' && m.content.includes('[진행 중 지시]'))).toBe(false);
+  });
+
+
+
+  describe('오래된 도구 결과 비우기', () => {
+    /** 도구 결과가 세 턴에 걸쳐 쌓이는 스크립트. 세 번째 턴 직전에 오래된 결과를 비울 수 있다 */
+    function stackedToolResults() {
+      return new ScriptedModelClient([
+        { toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] },
+        { toolCalls: [{ name: 'list_files', input: { path: 'api' } }] },
+        { text: '설명했습니다.' },
+      ]);
+    }
+
+    function toolResultContents(conversation: Parameters<typeof runAgent>[0]['conversation']): string[] {
+      return (conversation ?? []).flatMap((message) =>
+        Array.isArray(message.content)
+          ? message.content.flatMap((block) => (block.type === 'tool_result' && typeof block.content === 'string' ? [block.content] : []))
+          : [],
+      );
+    }
+
+    it('직전 턴의 컨텍스트가 임계치를 넘으면 다음 호출 전에 묶어서 비운다', async () => {
+      const conversation: NonNullable<Parameters<typeof runAgent>[0]['conversation']> = [];
+      const events: AgentEvent[] = [];
+
+      await runAgent({
+        request: '설명해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        client: withUsage(stackedToolResults()),
+        conversation,
+        // 기본 정책(최근 4개 유지)으로는 두 개뿐이라 비우지 않으므로, 이 실행만 좁혀서 확인한다
+        contextClearing: { triggerTokens: 1_000, keepRecent: 1, clearAtLeastChars: 10 },
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      });
+
+      const cleared = events.filter((event) => event.type === 'context_cleared');
+      expect(cleared).toHaveLength(1);
+      expect(cleared[0]).toMatchObject({ turn: 3, clearedCount: 1 });
+      // 첫 도구 결과만 표시 문구로 바뀌고, 최근 결과는 그대로 남는다
+      const contents = toolResultContents(conversation);
+      expect(contents).toHaveLength(2);
+      expect(contents[0]!.startsWith(CLEARED_TOOL_RESULT_PREFIX)).toBe(true);
+      expect(contents[1]!.startsWith(CLEARED_TOOL_RESULT_PREFIX)).toBe(false);
+      // tool_use와 짝이 맞는 tool_result는 그대로 남아 있어야 한다(API 규칙)
+      const ids = conversation.flatMap((message) => (Array.isArray(message.content) ? message.content.flatMap((block) => (block.type === 'tool_result' ? [block.tool_use_id] : [])) : []));
+      expect(ids).toHaveLength(2);
+    });
+
+    it('임계치를 넘지 않으면 비우지 않는다', async () => {
+      const conversation: NonNullable<Parameters<typeof runAgent>[0]['conversation']> = [];
+      const events: AgentEvent[] = [];
+
+      await runAgent({
+        request: '설명해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        client: withUsage(stackedToolResults()),
+        conversation,
+        contextClearing: { triggerTokens: 1_000_000, keepRecent: 1, clearAtLeastChars: 10 },
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      });
+
+      expect(events.some((event) => event.type === 'context_cleared')).toBe(false);
+      expect(toolResultContents(conversation).every((content) => !content.startsWith(CLEARED_TOOL_RESULT_PREFIX))).toBe(true);
+    });
+
+    it('기본은 꺼져 있다(정책도 환경 변수도 없으면 비우지 않는다)', async () => {
+      const conversation: NonNullable<Parameters<typeof runAgent>[0]['conversation']> = [];
+      const events: AgentEvent[] = [];
+
+      await runAgent({
+        request: '설명해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        client: withUsage(stackedToolResults()),
+        conversation,
+        fetcher: async () => contract,
+        onEvent: collect(events),
+      });
+
+      expect(events.some((event) => event.type === 'context_cleared')).toBe(false);
+    });
+
+    it('B_STUDIO_CONTEXT_CLEARING=on이면 기본 정책(최근 4개 유지·20,000자)으로 켜지고, false를 넘기면 그보다 우선해 꺼진다', async () => {
+      // 기본 정책은 최근 4개를 남기므로, 결과 6개(각 12,000자로 잘림)를 쌓아 오래된 2개(24,000자)를 비우게 한다
+      const files = ['api/src/big-a.txt', 'api/src/big-b.txt'];
+      for (const file of files) await writeFile(path.join(project.root, file), 'x'.repeat(30_000));
+      const stacked = () =>
+        new ScriptedModelClient([...[0, 1, 0, 1, 0, 1].map((index) => ({ toolCalls: [{ name: 'read_file', input: { path: files[index]! } }] })), { text: '설명했습니다.' }]);
+      // 60k 임계치를 넘기려면 입력이 커야 한다: input 60,000
+      const big = (scripted: ScriptedModelClient): ModelClient =>
+        withUsageSequence(scripted, [{ input_tokens: 60_000, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }]);
+      const previous = process.env.B_STUDIO_CONTEXT_CLEARING;
+      process.env.B_STUDIO_CONTEXT_CLEARING = 'on';
+      try {
+        const events: AgentEvent[] = [];
+        await runAgent({
+          request: '설명해줘',
+          project,
+          sandbox: fakeSandbox(project, []),
+          client: big(stacked()),
+          fetcher: async () => contract,
+          onEvent: collect(events),
+        });
+
+        const cleared = events.filter((event) => event.type === 'context_cleared');
+        expect(cleared).toHaveLength(1);
+        expect(cleared[0]).toMatchObject({ turn: 7, clearedCount: 2 });
+        // 자르기 안내 줄이 붙어 정확히 12,000자는 아니지만, 최소 감소량(20,000)은 넘는다
+        expect((cleared[0] as { clearedChars: number }).clearedChars).toBeGreaterThanOrEqual(20_000);
+
+        const off: AgentEvent[] = [];
+        await runAgent({
+          request: '설명해줘',
+          project,
+          sandbox: fakeSandbox(project, []),
+          client: big(stacked()),
+          contextClearing: false,
+          fetcher: async () => contract,
+          onEvent: collect(off),
+        });
+        expect(off.some((event) => event.type === 'context_cleared')).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.B_STUDIO_CONTEXT_CLEARING;
+        else process.env.B_STUDIO_CONTEXT_CLEARING = previous;
+      }
+    });
   });
 });

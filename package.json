@@ -17,8 +17,10 @@
     "e2e:fleet": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/fleet-local.ts",
     "e2e:deploy-gate": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/deploy-gate-local.ts",
     "e2e:task-plan": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/task-plan-local.ts",
+    "e2e:two-sessions": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/two-sessions-local.ts",
     "bench:boot": "tsx packages/sandbox/bench/boot.ts",
     "bench:coordination": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/run.ts",
+    "bench:studio-load": "tsx --tsconfig apps/studio/bench/load/tsconfig.json apps/studio/bench/load/studio-load.ts",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck"
   },

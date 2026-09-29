@@ -1,0 +1,17 @@
+// Maven Central을 Google이 운영하는 공식 미러에서 먼저 받는다. 미러에 없으면 build.gradle의 mavenCentral()로 넘어간다.
+// 샌드박스가 늘어나 같은 의존성을 자주 받으면 Maven Central이 요청 한도(429)로 막는다(docs/troubleshooting.md 45).
+// 프로젝트의 build.gradle은 바꾸지 않고, 이미지의 Gradle 홈(init.d)에서만 적용한다
+def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+
+beforeSettings { settings ->
+	settings.pluginManagement.repositories {
+		maven { url = mirror }
+		gradlePluginPortal()
+	}
+}
+
+allprojects {
+	repositories {
+		maven { url = mirror }
+	}
+}

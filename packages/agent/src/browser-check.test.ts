@@ -1,7 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runInBrowser } from './browser-check';
+import { runInBrowser, StepFailedError, type BrowserFrame } from './browser-check';
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8]);
+/** 1×1 투명 PNG */
+const PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 
 // 실제 헤드리스 Chromium을 띄운다. 브라우저가 없으면 건너뛰지 않고 실패한다. 건너뛰면 검사 안 함이 통과처럼 보인다
 const PAGES: Record<string, string> = {
@@ -13,22 +18,66 @@ const PAGES: Record<string, string> = {
   '/interactive': `<html><body><input id="q"><button id="go" onclick="document.getElementById('out').textContent = document.getElementById('q').value">검색</button><p id="out"></p></body></html>`,
   // 입력칸에서 Enter를 누르면 폼이 제출되는 페이지
   '/form': `<html><body><form onsubmit="event.preventDefault(); document.getElementById('done').textContent = '제출됨'"><input id="name"></form><p id="done"></p></body></html>`,
+  // screencast가 볼 화면 변화를 계속 만드는 페이지
+  '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => clearInterval(timer), 1500);</script></body></html>`,
 };
 
 let server: Server;
-let base: string;
+let other: Server;
+let base = '';
+let otherBase = '';
+/** 허용하지 않은 서버로 실제 요청이 닿았는지. 라우트가 막으면 0이어야 한다 */
+let otherHits = 0;
+
+/** 기준 서버에 없는, 허용하지 않은 출처를 참조하는 페이지들. 그때그때 만든다 */
+function dynamicPages(): Record<string, string> {
+  return {
+    '/mixed': `<html><body><img src="${otherBase}/pixel.png"><script>fetch('${otherBase}/data.json').catch(() => {});</script></body></html>`,
+    '/fetch-ok': `<html><body><div id="out">pending</div><script>fetch('/data.json').then((response) => response.json()).then((data) => { document.getElementById('out').textContent = 'ok:' + data.value; }).catch(() => { document.getElementById('out').textContent = 'fail'; });</script></body></html>`,
+    '/sw': `<html><body><div id="out">pending</div><script>navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.getRegistrations()).then((registrations) => { document.getElementById('out').textContent = 'registered:' + registrations.length; }).catch(() => { document.getElementById('out').textContent = 'failed'; });</script></body></html>`,
+  };
+}
 
 beforeAll(async () => {
   server = createServer((request, response) => {
-    const body = PAGES[request.url ?? ''];
+    const path = request.url ?? '';
+    if (path === '/data.json') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"value":"allowed"}');
+      return;
+    }
+    if (path === '/pixel.png') {
+      response.writeHead(200, { 'content-type': 'image/png' });
+      response.end(PIXEL);
+      return;
+    }
+    if (path === '/sw.js') {
+      response.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+      response.end('self.addEventListener("install", () => {});');
+      return;
+    }
+    const body = PAGES[path] ?? dynamicPages()[path];
     response.writeHead(body ? 200 : 404, { 'content-type': 'text/html; charset=utf-8' });
     response.end(body ?? 'not found');
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  other = createServer((_request, response) => {
+    otherHits += 1;
+    response.writeHead(200, { 'content-type': 'text/plain' });
+    response.end('other');
+  });
+  await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+  otherBase = `http://127.0.0.1:${(other.address() as AddressInfo).port}`;
 });
 
-afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+afterAll(
+  () =>
+    new Promise<void>((resolve) => {
+      other.close(() => server.close(() => resolve()));
+    }),
+);
 
 describe('runInBrowser', { timeout: 60_000 }, () => {
   it('클라이언트 스크립트가 만든 텍스트를 렌더링 뒤에 읽는다 (HTTP 본문에는 없는 문구)', async () => {
@@ -85,5 +134,92 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
     await expect(runInBrowser(`${base}/interactive`, { steps: [{ click: '#go' }, {} as never] })).rejects.toThrow(
       '2번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)',
     );
+  });
+
+  it('capture를 켜면 열기와 단계마다 결과를 남기고 PNG 스크린샷을 찍는다', async () => {
+    const result = await runInBrowser(`${base}/interactive`, {
+      capture: true,
+      steps: [{ fill: { selector: '#q', text: '김토스' } }, { click: '#go' }],
+    });
+    expect(result.steps.map((step) => [step.label, step.ok])).toEqual([
+      ['open /interactive', true],
+      ['fill #q', true],
+      ['click #go', true],
+    ]);
+    for (const step of result.steps) expect(step.screenshot?.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+  });
+
+  it('capture를 끄면 스크린샷 없이 단계 결과만 남긴다', async () => {
+    const result = await runInBrowser(`${base}/interactive`, { steps: [{ click: '#go' }] });
+    expect(result.steps.map((step) => step.label)).toEqual(['open /interactive', 'click #go']);
+    expect(result.steps.every((step) => step.screenshot === undefined)).toBe(true);
+  });
+
+  it('단계가 실패하면 던지기 전에 실패 단계의 스크린샷을 예외에 담는다', async () => {
+    const error = await runInBrowser(`${base}/interactive`, {
+      capture: true,
+      steps: [{ click: '#go' }, { click: '[data-testid=missing]' }],
+    }).then(
+      () => expect.unreachable('단계 실패로 끝나야 합니다'),
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(StepFailedError);
+    const steps = (error as StepFailedError).steps;
+    expect(steps.map((step) => [step.label, step.ok])).toEqual([
+      ['open /interactive', true],
+      ['click #go', true],
+      ['click [data-testid=missing]', false],
+    ]);
+    expect(steps.at(-1)?.detail).toBeTruthy();
+    expect(steps.at(-1)?.screenshot?.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+  });
+
+  it('onFrame으로 JPEG 프레임을 받되 초당 5장 상한을 넘지 않는다', async () => {
+    const frames: BrowserFrame[] = [];
+    await runInBrowser(`${base}/animation`, { viewport: { width: 400, height: 300 }, onFrame: (frame) => frames.push(frame) });
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames[0]?.data.subarray(0, 2)).toEqual(JPEG_SIGNATURE);
+    expect(frames[0]?.width).toBe(400);
+    // 콜백은 시간 기준으로 걸러지므로 연속한 프레임 간격이 200ms보다 좁을 수 없다
+    for (const [index, frame] of frames.slice(1).entries()) expect(frame.at - frames[index]!.at).toBeGreaterThanOrEqual(190);
+  });
+
+  it('allowedOrigins가 있으면 허용한 출처 밖 요청을 막고, 실패가 아니라 기록으로 남긴다', async () => {
+    otherHits = 0;
+    const result = await runInBrowser(`${base}/mixed`, { allowedOrigins: [base] });
+    expect(result.failedRequests).toEqual([]);
+    expect([...result.blockedRequests].sort()).toEqual([`${otherBase}/data.json`, `${otherBase}/pixel.png`]);
+    // 실제로 그 서버에 요청이 닿지 않았다
+    expect(otherHits).toBe(0);
+  });
+
+  it('허용한 출처의 요청은 막지 않는다', async () => {
+    const result = await runInBrowser(`${base}/fetch-ok`, { allowedOrigins: [base] });
+    expect(result.blockedRequests).toEqual([]);
+    expect(result.failedRequests).toEqual([]);
+    expect(result.text).toContain('ok:allowed');
+  });
+
+  it('allowedOrigins가 있으면 서비스 워커 등록을 막는다', async () => {
+    const result = await runInBrowser(`${base}/sw`, { allowedOrigins: [base] });
+    expect(result.text).toMatch(/failed|registered:0/);
+  });
+
+  it('allowedOrigins를 넘기지 않으면 막지 않고 blockedRequests는 비어 있다', async () => {
+    const result = await runInBrowser(`${base}/missing-chunk`, {});
+    expect(result.blockedRequests).toEqual([]);
+    expect(result.failedRequests).toEqual([`404 ${base}/chunk.js`]);
+  });
+
+  it('measureLoad를 켜면 워밍업 뒤 이동의 로드 시간을 잰다', async () => {
+    const result = await runInBrowser(`${base}/ok`, { measureLoad: true });
+    expect(result.text).toContain('주문 목록');
+    expect(result.loadMs).toBeGreaterThanOrEqual(0);
+    // 워밍업과 측정 두 번 이동하므로 첫 이동의 오류·실패 요청은 측정 결과에 남지 않는다
+    expect(result.failedRequests).toEqual([]);
+  });
+
+  it('measureLoad를 켜지 않으면 로드 시간을 남기지 않는다', async () => {
+    expect((await runInBrowser(`${base}/ok`, {})).loadMs).toBeUndefined();
   });
 });

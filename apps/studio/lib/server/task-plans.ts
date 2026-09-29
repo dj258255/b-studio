@@ -3,11 +3,37 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { isInScope, MAX_PLAN_LANES, planLanes, requestTaskPlan, runTaskGraph, TaskPlanError, type AgentUsage, type RunMetrics, type ScriptedTurn, type TaskLane } from '@b-studio/agent';
+import {
+  Board,
+  failureNotesFromEvents,
+  isInScope,
+  MAX_PLAN_LANES,
+  planLanes,
+  requestTaskPlan,
+  runTaskGraph,
+  TaskPlanError,
+  type AgentUsage,
+  type BoardAccess,
+  type Note,
+  type RunMetrics,
+  type ScriptedTurn,
+  type TaskLane,
+  type Topology,
+} from '@b-studio/agent';
 import type { Checkpoint } from '@b-studio/agent';
+import { Redactor, resolveSecrets } from '@b-studio/sandbox';
 import type { StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
-import type { TaskPlanCheckpointView, TaskPlanIntegrationView, TaskPlanLaneView, TaskPlanStepStatus, TaskPlanView } from '@/lib/task-plan-types';
+import type {
+  TaskPlanBoardView,
+  TaskPlanCheckpointView,
+  TaskPlanIntegrationView,
+  TaskPlanLaneView,
+  TaskPlanNoteView,
+  TaskPlanStepStatus,
+  TaskPlanStrategy,
+  TaskPlanView,
+} from '@/lib/task-plan-types';
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
@@ -29,7 +55,30 @@ const RUN_TIMEOUT_MS = 30 * 60_000;
 const MAX_INTEGRATION_FILE_BYTES = 256 * 1024;
 
 const plans = new Map<string, TaskPlanView>();
+/** 계획별 조율 게시판. 서버 메모리에만 있고, 재시작하면 사라진다(그때는 조율 없이 이어서 한다) */
+const boards = new Map<string, Board>();
+/**
+ * S3에서 모델이 게시판에 쓴 본문·refs를 게시 전에 가리는 가림기. 조율 모듈(coordination/)이 아니라
+ * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
+ */
+const redactors = new Map<string, Redactor>();
 let loaded = false;
+
+/**
+ * 조율 전략 S2~S5. presetPlan과 같은 규칙으로 서버 안에서만 넘긴다(HTTP 라우트는 받지 않는다).
+ * 이 필드가 없으면 지금 동작(공유 없음)과 한 글자도 다르지 않다.
+ *  - S2 계약 먼저: 계획의 인터페이스 계약을 레인 시작 전에 플랫폼이 게시. 레인은 읽기만
+ *  - S3 게시판: 레인이 contract·fact를 쓰고 읽음. topology로 읽기 범위를 제한
+ *  - S4 통합 후 수리: 공유 없음. 통합 게이트 실패 시 통합 세션에 모델 수리 요청 한 번
+ *  - S5 실패 서명만: 작업마다 플랫폼이 검증 실패 서명을 게시. 레인은 읽기만(모델 쓰기 끔)
+ */
+export interface CoordinationInput {
+  strategy: TaskPlanStrategy;
+  /** 읽기 범위 topology. S3에서만 의미가 있고 기본 mesh */
+  topology?: Topology;
+  /** S2: 레인 시작 전에 플랫폼이 게시할 인터페이스 계약 */
+  contracts?: Array<{ body: string; refs: string[] }>;
+}
 
 export async function createTaskPlan(input: {
   projectId: string;
@@ -42,6 +91,8 @@ export async function createTaskPlan(input: {
    * 있으면 모델 레지스트리 확인을 건너뛰고 이 계획을 planLanes로 검증해 쓴다.
    */
   presetPlan?: unknown;
+  /** 서버 안에서만 넘긴다(벤치마크·테스트). 조율 전략 S2~S5와 topology·계약. HTTP 라우트는 이 필드를 넘기지 않는다 */
+  coordination?: CoordinationInput;
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
@@ -70,6 +121,9 @@ export async function createTaskPlan(input: {
 
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
+  // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
+  // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
+  const redactor = input.coordination?.strategy === 'S3' ? new Redactor(await resolveSecrets(project)) : undefined;
 
   ensureLoaded();
   const plan: TaskPlanView = {
@@ -84,9 +138,59 @@ export async function createTaskPlan(input: {
     ...(preset === undefined ? {} : { preset: true as const }),
   };
   plans.set(plan.id, plan);
+  attachCoordination(plan, input.coordination, redactor);
   persist(plan);
   void execute(plan, preset).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
+}
+
+/**
+ * 조율을 켠 계획에 게시판을 붙인다. S2·S5는 모델 쓰기를 끄고(레인은 읽기만), S3만 레인이 쓴다.
+ * 게시판은 계획이 끝나면 함께 사라진다(저장하지 않는다). 상태는 plan.board로 복사해 기록에 남긴다.
+ */
+function attachCoordination(plan: TaskPlanView, input: CoordinationInput | undefined, redactor?: Redactor): void {
+  if (!input) return;
+  const topology = input.topology ?? 'mesh';
+  const board = new Board({
+    topology,
+    hub: 'plan',
+    // S2·S5는 레인 읽기 전용이다. 끄면 실행기가 post_note를 도구 목록에서 뺀다
+    modelWrites: input.strategy === 'S3',
+    onChange: () => {
+      syncBoard(plan, board);
+      persist(plan);
+    },
+  });
+  boards.set(plan.id, board);
+  if (redactor) redactors.set(plan.id, redactor);
+  plan.coordination = { strategy: input.strategy, topology };
+  if (input.strategy === 'S2') {
+    // 계약은 레인 시작 전에 플랫폼이 한 번 게시한다. 같은 본문은 게시판이 중복으로 걸러 준다
+    for (const contract of input.contracts ?? []) {
+      board.post({ kind: 'contract', body: contract.body, refs: contract.refs }, { lane: 'plan', by: 'platform' });
+    }
+  }
+  syncBoard(plan, board);
+}
+
+/** 게시판 상태를 계획 기록용으로 복사한다. 메모 id는 화면에 쓰지 않아 뺀다 */
+function syncBoard(plan: TaskPlanView, board: Board): void {
+  const view: TaskPlanBoardView = { notes: board.snapshot().map(noteView), stats: board.stats() };
+  plan.board = view;
+}
+
+function noteView(note: Note): TaskPlanNoteView {
+  return {
+    kind: note.kind,
+    body: note.body,
+    refs: note.refs,
+    lane: note.author.lane,
+    ...(note.author.task !== undefined ? { task: note.author.task } : {}),
+    by: note.author.by,
+    ...(note.group !== undefined ? { group: note.group } : {}),
+    priority: note.priority,
+    at: note.at,
+  };
 }
 
 export function listTaskPlans(owner: string): TaskPlanView[] {
@@ -203,13 +307,17 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     persist(plan);
     await waitForReady(snapshot.id);
     lane.bootMs = Math.round(performance.now() - bootStarted);
+    lane.bootRxBytes = bootRxBytes(snapshot.id);
     lane.status = 'running';
     persist(plan);
 
     for (const [index, task] of lane.tasks.entries()) {
       task.status = 'running';
       persist(plan);
-      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), { by: plan.owner, writableScope: task.paths });
+      const board = laneBoard(plan, lane, task.id);
+      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), { by: plan.owner, writableScope: task.paths, ...(board ? { board } : {}) });
+      // S5: 성공·실패와 무관하게 그 실행의 검증 실패 서명을 플랫폼이 게시해 다른 레인이 읽게 한다
+      if (plan.coordination?.strategy === 'S5') postFailures(plan, lane, snapshot.id);
       task.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
       task.summary = outcome.summary;
       if (outcome.status !== 'done') {
@@ -288,6 +396,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     persist(plan);
     await waitForReady(snapshot.id);
     integration.bootMs = Math.round(performance.now() - bootStarted);
+    integration.bootRxBytes = bootRxBytes(snapshot.id);
     integration.status = 'running';
     persist(plan);
 
@@ -300,13 +409,18 @@ async function integrate(plan: TaskPlanView): Promise<void> {
       },
       { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
     ];
-    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, {
-      by: plan.owner,
-      scriptedTurns: turns,
-      writableScope: [...new Set(plan.lanes.flatMap((lane) => lane.paths))],
-    });
-    integration.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
-    if (outcome.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${outcome.status} ${outcome.summary}`);
+    const writableScope = [...new Set(plan.lanes.flatMap((lane) => lane.paths))];
+    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, { by: plan.owner, scriptedTurns: turns, writableScope });
+    integration.run = runView(outcome);
+    let settled = outcome;
+    // S4: 통합 게이트가 실패하면 한 번만 통합 세션에 모델 수리를 요청한다(공유 없이 실패 뒤에만 비용을 내는 대조군).
+    // scriptedTurns 없이 보내므로 세션의 기본 모델 경로(API 모드는 계획의 모델, 로컬 CLI는 그 러너)로 실제 호출된다
+    if (outcome.status !== 'done' && plan.coordination?.strategy === 'S4') {
+      const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope });
+      integration.repair = { attempted: true, status: repair.status, run: runView(repair) };
+      settled = repair;
+    }
+    if (settled.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${settled.status} ${settled.summary}`);
     Object.assign(integration, { status: 'done', checkpoint: checkpointView(getSnapshot(snapshot.id)?.checkpoints[0]) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
@@ -339,10 +453,91 @@ function sessionModelOption(modelId: string): { modelId?: string } {
 function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number): string {
   const task = lane.tasks[index]!;
   const previous = lane.tasks.slice(0, index).map((item) => `- ${item.title}`).join('\n');
-  return `${task.request}
+  const request = `${task.request}
 
 [작업 분해] 전체 요청: ${plan.request}
 이 작업이 파일을 쓸 수 있는 경로: ${task.paths.join(', ')} (그 밖의 쓰기는 실행기가 막습니다)${previous ? `\n같은 작업 공간에서 먼저 끝난 작업:\n${previous}` : ''}`;
+  // 조율을 켠 실행에서만 요청 끝에 한 줄을 더한다. 도구는 실행기가 알아서 목록에 넣는다
+  const guidance = coordinationGuidance(plan.coordination?.strategy);
+  return guidance ? `${request}\n${guidance}` : request;
+}
+
+function coordinationGuidance(strategy: TaskPlanStrategy | undefined): string | undefined {
+  switch (strategy) {
+    case 'S2':
+      return '[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요';
+    case 'S3':
+      return '[조율] 다른 레인과 맞물리는 인터페이스를 정하면 post_note(contract)로 남기고, 시작 전과 끝내기 전에 read_notes로 확인하세요';
+    case 'S5':
+      return '[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요';
+    default:
+      // S4는 공유 없음. 레인에는 아무것도 넘기지 않는다
+      return undefined;
+  }
+}
+
+/**
+ * 레인 작업 요청에 넘길 게시판 접근. 레인 id와 작업 id로 신원을 고정하고, 쓰기 여부는 전략이 정한다.
+ * S4(공유 없음)이거나 게시판이 없으면 넘기지 않아 도구 목록이 지금과 같다.
+ */
+function laneBoard(plan: TaskPlanView, lane: TaskPlanLaneView, taskId: string): BoardAccess | undefined {
+  const board = boards.get(plan.id);
+  const strategy = plan.coordination?.strategy;
+  if (!board || !strategy || strategy === 'S4') return undefined;
+  const redactor = redactors.get(plan.id);
+  // 모델이 쓴 본문·refs는 계획 기록과 화면에 남는다. 게시 전에 프로젝트 시크릿 값을 가린다(가림 형식은 샌드박스와 같다)
+  const redact = (text: string) => (redactor ? redactor.redact(text) : text);
+  return {
+    lane: lane.id,
+    task: taskId,
+    modelWrites: board.modelWrites,
+    // 계층 구조의 같은 그룹 비교(note.group === reader.group)가 성립하도록, 읽을 때와 같은 기준(laneGroup)으로 그룹을 넣는다
+    post: (input) => {
+      const group = laneGroup(lane);
+      return board.post(
+        { kind: input.kind, body: redact(input.body), ...(input.refs ? { refs: input.refs.map(redact) } : {}), ...(group !== undefined ? { group } : {}) },
+        { lane: lane.id, task: taskId, by: 'model' },
+      );
+    },
+    read: (options) => {
+      const result = board.read({ lane: lane.id, group: laneGroup(lane) }, options);
+      // 읽기 통계도 화면·지표에 남도록 스냅샷을 갱신한다(저장은 다음 상태 전이가 한다)
+      syncBoard(plan, board);
+      return result;
+    },
+  };
+}
+
+/** 계층 구조에서 같은 그룹으로 묶는 기준: 레인의 첫 쓰기 범위. 병렬 레인의 범위는 겹치지 않으므로 서로 다른 그룹이 된다 */
+function laneGroup(lane: TaskPlanLaneView): string | undefined {
+  return lane.paths[0];
+}
+
+/** S5: 레인 세션 기록에서 검증 실패 서명을 뽑아 플랫폼 이름으로 게시한다 */
+function postFailures(plan: TaskPlanView, lane: TaskPlanLaneView, sessionId: string): void {
+  const board = boards.get(plan.id);
+  if (!board) return;
+  for (const note of failureNotesFromEvents(readSessionEvents(sessionId))) {
+    board.post({ kind: 'failure', body: note.body, refs: note.refs }, { lane: lane.id, by: 'platform' });
+  }
+}
+
+/** 세션 기록을 다시 보내 주는 subscribe를 등록→즉시 해제해 통째로 읽는다. 읽기 실패는 빈 배열로 둔다 */
+function readSessionEvents(sessionId: string): StudioEvent[] {
+  const events: StudioEvent[] = [];
+  try {
+    const unsubscribe = subscribe(sessionId, (event) => events.push(event));
+    unsubscribe();
+  } catch {
+    // 없는 세션이거나 기록을 읽지 못하면 서명도 없다
+  }
+  return events;
+}
+
+/** 기동 직후 세션 스냅샷이 읽은 수신 바이트 합. 못 읽었으면 undefined */
+function bootRxBytes(sessionId: string): number | undefined {
+  const network = getSnapshot(sessionId)?.bootNetwork;
+  return network ? network.reduce((sum, entry) => sum + entry.rxBytes, 0) : undefined;
 }
 
 function waitForReady(sessionId: string): Promise<void> {
@@ -364,7 +559,7 @@ function waitForReady(sessionId: string): Promise<void> {
 async function runAndWait(
   sessionId: string,
   request: string,
-  options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[] },
+  options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[]; board?: BoardAccess },
 ): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number }> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;
@@ -378,6 +573,18 @@ async function runAndWait(
   } finally {
     unsubscribe();
   }
+}
+
+function runView(outcome: { status: string; durationMs?: number; usage?: AgentUsage; metrics?: RunMetrics }) {
+  return { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
+}
+
+/** S4: 통합 게이트 실패를 모델에 되돌려 준다. 원래 요청 + 실패 요약 + 쓰기 범위 안에서 고치라는 지시 */
+function repairRequest(plan: TaskPlanView, summary: string): string {
+  return `${plan.request}
+
+[조율] 레인 ${plan.lanes.length}개의 결과를 합친 뒤 검증이 실패했습니다: ${summary}
+쓰기 범위 안에서 고쳐 검증을 다시 통과시키세요.`;
 }
 
 async function waitForEvent(sessionId: string, check: () => { done: boolean; error?: string }, timeoutMs: number): Promise<void> {

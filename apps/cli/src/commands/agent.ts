@@ -214,6 +214,7 @@ function stageLabel(stage: string): string {
       browser_check: '브라우저 확인',
       contract_check: 'API 계약 확인',
       test: '테스트',
+      concurrency_check: '동시 요청 확인',
       review: '리뷰',
       checkpoint: '체크포인트',
     } as Record<string, string>

@@ -1,0 +1,39 @@
+batch,order,task,strategy,valid,success,category,end_to_end_ms,gate_ms,model_calls,cache_read_tokens,output_tokens,posts,reads,bytes_read,repair_attempted,web_acceptance
+e2,1,orders-list,S2,True,True,none,209056,161464,17,132980,5807,1,2,318,False,ok
+e2,2,orders-list,S3,True,True,none,239606,140719,23,296077,7614,2,3,167,False,ok
+e2,3,orders-list,S4,True,False,acceptance,243597,161318,24,258011,7138,0,0,0,False,"status 200, missing text"
+e2,4,orders-list,S5,True,True,none,243623,134263,24,316746,8983,0,2,0,False,ok
+e2,5,order-detail,S2,True,True,none,226647,139150,25,370195,7567,1,2,500,False,ok
+e2,6,order-detail,S3,True,True,none,226933,131417,26,410658,8247,2,3,233,False,ok
+e2,7,order-detail,S4,True,True,none,227503,136680,20,211997,8272,0,0,0,False,ok
+e2,8,order-detail,S5,True,False,acceptance,237888,137369,22,221424,8343,0,2,0,False,"status 200, missing text"
+e2,9,order-summary,S2,True,True,none,259600,163522,23,270271,7128,1,2,292,False,ok
+e2,10,order-summary,S3,True,True,none,244739,162977,22,349016,8207,2,3,368,False,ok
+e2,11,order-summary,S4,True,False,acceptance,221813,132269,17,124813,7103,0,0,0,False,status 500
+e2,12,order-summary,S5,True,True,none,233816,166746,16,110902,6699,0,2,0,False,ok
+e2,13,orders-list,S5,True,True,none,258750,130271,26,444934,10678,0,3,0,False,ok
+e2,14,orders-list,S4,True,True,none,281791,166240,25,329941,9167,0,0,0,False,ok
+e2,15,orders-list,S3,True,True,none,266114,168008,26,266453,9857,3,3,459,False,ok
+e2,16,orders-list,S2,True,True,none,229724,168975,21,229709,5281,1,3,318,False,ok
+e2,17,order-detail,S5,True,True,none,281990,132431,24,417893,10582,0,3,0,False,ok
+e2,18,order-detail,S4,True,True,none,241605,135106,19,231931,9143,0,0,0,False,ok
+e2,19,order-detail,S3,True,True,none,227661,172022,24,225559,7486,2,2,0,False,ok
+e2,20,order-detail,S2,True,True,none,238892,150097,24,336983,7287,1,2,500,False,ok
+e2,21,order-summary,S5,True,True,none,318794,169153,29,491285,11795,0,2,0,False,ok
+e2,22,order-summary,S4,True,False,acceptance,293934,132138,27,512191,11077,0,0,0,False,status 500
+e2,23,order-summary,S3,True,True,none,240934,160000,23,214580,7270,2,3,485,False,ok
+e2,24,order-summary,S2,True,True,none,250704,157946,17,120502,7074,1,2,292,False,ok
+e2,25,orders-list,S2,True,True,none,244734,174471,26,356188,7265,1,2,318,False,ok
+e2,26,orders-list,S3,True,True,none,251528,160776,23,251887,8904,1,3,375,False,ok
+e2,27,orders-list,S4,False,False,lane_gate,690819,138702,44,874445,22789,0,0,0,False,not run
+e2,28,orders-list,S5,False,False,lane_gate,581746,151707,60,1649801,37410,2,2,0,False,not run
+e2-rest,1,order-detail,S2,True,True,none,296898,132129,37,896943,10681,1,2,500,False,ok
+e2-rest,2,order-detail,S3,True,True,none,249824,129707,28,422136,10339,2,3,503,False,ok
+e2-rest,3,order-detail,S4,True,True,none,238112,155490,20,182488,8974,0,0,0,False,ok
+e2-rest,4,order-detail,S5,True,True,none,241930,134190,21,230320,10555,0,2,0,False,ok
+e2-rest,5,order-summary,S2,True,True,none,213832,157369,20,153484,5254,1,2,292,False,ok
+e2-rest,6,order-summary,S3,True,False,acceptance,249817,153238,23,308731,6913,2,2,0,False,status 500
+e2-rest,7,order-summary,S4,True,False,acceptance,241946,154166,21,229103,6794,0,0,0,False,status 500
+e2-rest,8,order-summary,S5,True,True,none,264804,153266,22,264290,10085,0,2,0,False,ok
+e2-rerun,1,orders-list,S4,True,True,none,236818,154878,18,180771,6735,0,0,0,False,ok
+e2-rerun,2,orders-list,S5,True,True,none,218477,116633,20,178619,7139,0,2,0,False,ok

@@ -58,6 +58,7 @@
 - [39. 개발 서버를 강제로 끄면 다음 next build 가 .next/dev/types 의 잘린 파일 때문에 실패함](#39-개발-서버를-강제로-끄면-다음-next-build-가-nextdevtypes-의-잘린-파일-때문에-실패함)
 - [40. 베이스 이미지 갱신 뒤 격리 샌드박스의 web이 pnpm을 받지 못해 기동에 실패함](#40-베이스-이미지-갱신-뒤-격리-샌드박스의-web이-pnpm을-받지-못해-기동에-실패함)
 - [41. 개발 서버 옆에서 api 테스트를 돌리면 컨테이너 한도 1536MiB를 넘어 OOM으로 실패함](#41-개발-서버-옆에서-api-테스트를-돌리면-컨테이너-한도-1536mib를-넘어-oom으로-실패함)
+- [42. 부하가 걸리면 문법 강조 테스트 하나가 가끔 실패함](#42-부하가-걸리면-문법-강조-테스트-하나가-가끔-실패함)
 
 ---
 
@@ -1509,3 +1510,130 @@ api 단위 테스트는 2026-09-16 예제에 추가됐고(2eed4ea), 작업 분�
 
 ### 수정 후 검증
 api 한도를 2048m로 올린 뒤 `pnpm e2e:task-plan`이 통과했습니다(168.1초, 레인 2개 동시 실행, 통합 체크포인트가 5단계 재통과). 실행 동안 VM 커널 기록에 새 OOM 종료가 없었습니다. 2026-09-16 기록 98.1초보다 긴 것은 그 뒤 추가된 api 테스트 단계(2eed4ea) 때문입니다.
+
+## 42. 부하가 걸리면 문법 강조 테스트 하나가 가끔 실패함
+
+**구분:** 실제 실행에서 발견(호스트 메모리 95% 전후에서 두 번 관측) → 부하로 재현해 원인 확인 → 수정
+
+### 현상
+`pnpm test`에서 `apps/studio/lib/highlight.test.ts`의 "지원하는 언어는 모두 WASM 없이 불러오고, 줄마다 밝은·어두운 테마 색을 붙인다"가 가끔 실패합니다. 단독 실행은 8/8 통과합니다. 부하를 걸어 재현한 실패 출력의 원인 줄은 시간 초과였습니다.
+
+```
+× apps/studio/lib/highlight.test.ts > highlightLines > 지원하는 언어는 모두 WASM 없이 불러오고, 줄마다 밝은·어두운 테마 색을 붙인다 5444ms
+  → Test timed out in 5000ms.
+Error: Test timed out in 5000ms.
+There was 1 failed test.
+```
+
+### 원인
+이 테스트는 `SUPPORTED_LANGUAGES`의 문법 40여 개를 처음부터 불러옵니다. 한가할 때는 기본 시간 제한 5초 안에 끝나지만, CPU가 밀리면 같은 작업이 5초를 넘습니다.
+
+### 측정
+`--reporter=verbose`로 이 테스트 한 건만 재었습니다.
+
+| 조건 | 이 테스트 한 건 |
+|---|---|
+| 한가할 때 | 1,075ms |
+| 동시 실행 8개 + CPU 점유 | 4,383~4,620ms |
+| 동시 실행 14개 + CPU 점유 | 5,444ms (시간 초과로 실패) |
+
+### 해결
+원인이 시간 초과이므로 전역 시간 제한은 그대로 두고, 이 테스트에만 이유를 적어 넉넉한 제한을 줍니다.
+
+```ts
+it('지원하는 언어는 모두 …', async () => {
+  …
+}, 30_000);
+```
+
+## 43. ChatGPT 구독 러너를 넣은 뒤 협업 벤치가 시작하자마자 끝남
+
+**구분:** 실제 실행에서 발견(E2 시작) → `--dry`로 재현 → 원인 확인 → 수정([#85](https://github.com/dj258255/b-studio/issues/85))
+
+### 현상
+`pnpm bench:coordination`이 `--dry`로도 첫 실행 전에 끝납니다.
+
+```
+Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No "exports" main defined in packages/agent/node_modules/@openai/codex-sdk/package.json
+```
+
+### 원인
+- `apps/studio/package.json`에는 `"type": "module"`이 없습니다. 그래서 tsx는 벤치 파일을 CommonJS로 옮기고, 그 파일이 부르는 `@b-studio/agent`의 소스도 `require`로 불러옵니다.
+- [#51](https://github.com/dj258255/b-studio/pull/51)의 codex 러너는 `@openai/codex-sdk`를 정적으로 import합니다. 이 패키지의 `exports`에는 `import` 조건만 있어 `require`로는 해석되지 않습니다.
+- 단위 테스트는 vitest(ESM)로 돌아 이 경로를 밟지 않았습니다. 스튜디오(Next 번들)와 CLI(`"type": "module"`)도 영향이 없었습니다. E1은 #51 병합 전에 시작한 프로세스라 문제를 드러내지 않았습니다.
+
+### 확인
+- 같은 SDK를 CommonJS 파일에서 `await import()`로 불러오면 `loaded function`이 나옵니다. 동적 import는 두 방식 모두에서 동작합니다.
+
+### 해결
+러너가 SDK를 첫 `runStreamed`에서 `await import('@openai/codex-sdk')`로 불러옵니다. 타입은 `import type`으로만 씁니다. codex 모드를 쓰지 않는 실행은 SDK를 아예 불러오지 않습니다.
+
+### 재발 방지
+`apps/studio/bench/coordination/module-load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+## 44. 같은 세션 파일에 두 저장이 겹치면 임시 파일 이름이 부딪혀 저장이 통째로 사라짐
+
+**구분:** 동시 쓰기 테스트([#114](https://github.com/dj258255/b-studio/issues/114))를 쓰다가 발견 → 재현 → 수정
+
+### 현상
+`writeSession()`을 같은 세션 파일에 동시에 두 번 부르면 `rename`이 `ENOENT`로 실패합니다. 실패한 저장은 그 회차 내용이 통째로 사라집니다.
+
+```
+Error: ENOENT: no such file or directory, rename '.../session.json.82042.tmp' -> '.../session.json'
+```
+
+동시에 두 번 쓰기를 200회 반복해 보면 200회 모두 `Promise.all`이 거부됐고, 그 결과 폴더에서 다시 읽히는 세션은 107개뿐이었습니다.
+
+### 원인
+`writeSession`이 임시 파일 이름을 `${file}.${process.pid}.tmp`로 고정으로 씁니다. 두 저장이 같은 임시 파일을 열어 서로의 내용을 덮어쓰고, 먼저 `rename`한 쪽이 임시 파일을 옮겨버리면 다른 쪽 `rename`은 원본이 없어 `ENOENT`가 됩니다.
+
+### 해결
+임시 파일 이름에 호출마다 다른 값을 넣습니다.
+
+```ts
+const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+```
+
+세션 파일은 메모리 스냅샷을 통째로 쓰는 것이라, 두 저장이 겹치면 마지막 것이 이기는 게 맞습니다. 문제는 그 전에 `rename`이 깨져 저장이 실패·유실되는 것이었습니다. `writeSessionSync`는 종료 신호 처리용이라 이미 `.exit.tmp`로 이름을 달리해 두었습니다.
+
+### 재발 방지
+`apps/studio/lib/server/session-store.test.ts`가 같은 파일에 동시에 쓰는 상황을 반복해, 저장이 실패하거나 깨지지 않고 끝에 온전한 스냅샷 하나가 남는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+Node는 단일 스레드라 이 테스트는 "읽고 → 고치고 → 다시 쓰는" 사이에 `await`가 끼는 인터리빙만 잡습니다. 여러 프로세스가 같은 세션 파일을 동시에 고치는 경우는 재현하지 못합니다(그래서 세션 파일에는 `owner.pid`를 남기고, 다른 프로세스가 살아 있으면 복구하지 않습니다).
+`apps/studio/bench/coordination/load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+## 45. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐
+
+**구분:** 실험 중 발견(E2 27·28회) → 기록에서 원인 추적 → 네트워크로 재현 → 수정([#116](https://github.com/dj258255/b-studio/issues/116))
+
+### 현상
+- E2의 두 실행에서 api 레인이 게이트를 3번 모두 통과하지 못했습니다. 앞의 26회는 같은 과제로 모두 통과했습니다.
+- 게이트의 `api-unit`(`./gradlew test`)이 다음처럼 끝났습니다.
+
+```
+- Task `:compileTestJava` of type `org.gradle.api.tasks.compile.JavaCompile`: error writing value of type 'org.gradle.api.internal.file.collections.DefaultConfigurableFileCollection'
+Configuration cache entry discarded due to serialization error.
+```
+
+- 에이전트는 테스트 의존성(`spring-boot-starter-test`)을 캐시에서 찾고, Maven Central에 `curl`로 확인하고, `build.gradle`의 `downloadDependencies`를 고쳤습니다. 그러자 이미지를 다시 빌드하는 단계까지 실패했습니다.
+
+### 원인
+- 호스트와 Docker 안에서 모두 Maven Central이 `429 Too Many Requests`를 돌려줬습니다(2026-09-29 08:50 KST).
+- 예제 이미지는 `downloadDependencies`로 **런타임·컴파일 classpath만** 미리 받아 굽고 있었습니다. 테스트 classpath는 샌드박스가 테스트를 돌릴 때마다 edge 프록시를 거쳐 새로 받습니다.
+- E1·E2로 수십 번 실행하면서 이 내려받기가 쌓여 요청 한도에 걸렸습니다. 의존성 해석이 실패하면 Gradle은 설정 캐시를 쓰는 단계에서 위의 직렬화 오류를 냅니다. 그래서 원인이 "네트워크"가 아니라 "설정 캐시"처럼 보였습니다.
+- 디스크(Docker VM 95%)도 처음에 의심했습니다. 하지만 기록 어디에도 `No space left`가 없었고, 429는 직접 재현됐습니다.
+
+### 해결
+- `downloadDependencies`에 `testRuntimeClasspath`·`testCompileClasspath`를 넣어, 테스트 의존성도 이미지의 읽기 전용 캐시에 굽습니다. 예제와 Spring Boot 템플릿 둘 다 고쳤습니다(템플릿에도 같은 빈틈이 있었습니다).
+- 이미지의 Gradle 홈에 init 스크립트(`gradle/mirror.init.gradle` → `/gradle-home/init.d`)를 넣어, **Google이 운영하는 Maven Central 공식 미러**(`maven-central.storage-download.googleapis.com`)에서 먼저 받습니다. 미러에 없으면 `build.gradle`의 `mavenCentral()`로 넘어갑니다. 프로젝트의 `build.gradle`은 바꾸지 않습니다.
+- 샌드박스 egress 기본 허용 목록에 미러 호스트를 더했습니다.
+
+### 확인 (2026-09-29 09:30 KST, Maven Central은 여전히 429)
+- 같은 시각 미러는 `200`, `repo.maven.apache.org`·`repo1.maven.org`는 `429`였습니다.
+- 예제 api 이미지를 다시 빌드했습니다. 테스트 의존성(`spring-boot-starter-test-4.1.1.jar`)이 `/cache/gradle-ro`에 구워졌습니다.
+- 그 이미지에서 **네트워크를 끊고**(`docker run --network none`) `./gradlew test --offline`을 돌려 `BUILD SUCCESSFUL in 14s`를 확인했습니다. 샌드박스는 테스트 때문에 밖으로 나가지 않습니다.
+
+### 재발 방지와 확인
+- 요청 한도가 풀린 뒤 이미지를 다시 빌드하고, 테스트 실행 중 api 컨테이너가 받은 바이트([#94](https://github.com/dj258255/b-studio/issues/94)의 기록)가 줄었는지 확인합니다.
+- 실험 결과에서는 이 두 실행을 조율 전략의 실패가 아니라 환경 실패로 따로 분류하고 다시 돌립니다.
+- 교훈: 모델이 "고치려고" 빌드 파일을 건드리면 원인이 더 가려집니다. 게이트 실패 출력의 **앞부분**은 설정 캐시 오류였고, 진짜 원인(`Received status code 429 from server: Too Many Requests`)은 긴 출력의 **뒤쪽**에 있었습니다. 명령 출력을 뒤쪽 위주로 남기는 도구 결과 예산([#96](https://github.com/dj258255/b-studio/pull/96))이 이런 경우를 돕습니다.

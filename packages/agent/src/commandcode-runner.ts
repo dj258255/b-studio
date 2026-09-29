@@ -130,6 +130,9 @@ export interface CommandCodeRunResult extends AgentResult {
  *
  * 완료 판정은 직접 만든 루프·Codex 러너와 같은 검증 게이트가 한다. `cmd -p` 한 번이 모델 턴 하나이고,
  * 턴이 끝날 때마다 게이트를 돌리고 실패하면 같은 세션을 `--resume <id> --fork-session`으로 이어 피드백을 넣는다.
+ *
+ * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
+ * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
  */
 export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promise<CommandCodeRunResult> {
   const {

@@ -1,4 +1,5 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
+import type { BootNetwork } from '@b-studio/sandbox';
 import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
 export interface LogEntry {
@@ -19,7 +20,10 @@ export interface ToolCallView {
 }
 
 export type ChatItem =
+  | { kind: 'boot'; network: BootNetwork }
   | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
+  /** 실행 중 보낸 지시. queued: 아직 반영 전, applied: 대화에 들어감, dropped: 끝날 때까지 반영되지 못함 */
+  | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
   | {
       kind: 'route';
       runId: string;
@@ -31,8 +35,8 @@ export type ChatItem =
     }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
   | { kind: 'stage'; runId: string; stage: string }
-  /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과 */
-  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string }
+  /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과. browser_check면 단계별 스크린샷 식별자(steps)와 디자인 비교(compare)가 함께 온다 */
+  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */
@@ -40,7 +44,7 @@ export type ChatItem =
   | {
       kind: 'outcome';
       runId: string;
-      status: 'done' | 'failed' | 'error' | 'cancelled';
+      status: 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
       summary: string;
       turns?: number;
       usage?: AgentUsage;
@@ -157,6 +161,17 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             : service,
         ),
       });
+    case 'design':
+      return patchSnapshot(view, { design: event.design });
+    case 'question':
+      // 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답을 보내면(run_started) 지운다.
+      // 대화 항목으로는 넣지 않는다 — 답을 보내면 요청 줄에 질문과 답이 함께 남는다
+      return patchSnapshot(view, { pendingQuestion: { runId: event.runId, question: event.question, options: event.options, allowOther: event.allowOther } });
+    case 'boot_network':
+      return {
+        ...patchSnapshot(view, { bootNetwork: event.network }),
+        chat: [...view.chat, { kind: 'boot', network: event.network }],
+      };
     case 'log': {
       const logs = view.logs.length >= LOG_LIMIT ? view.logs.slice(view.logs.length - LOG_LIMIT + 1) : [...view.logs];
       logs.push({ service: event.service, text: event.text, at: event.at });
@@ -164,11 +179,15 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     }
     case 'run_started':
       return {
-        ...patchSnapshot(view, { running: true }),
+        ...patchSnapshot(view, { running: true, pendingQuestion: undefined }),
         chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
       };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };
+    case 'steer_queued':
+      return { ...view, chat: [...view.chat, { kind: 'steer', runId: event.runId, text: event.text, status: 'queued' }] };
+    case 'steer_dropped':
+      return { ...view, chat: settleSteering(view.chat, event.runId) };
     case 'tokens':
       // 합계를 더하지 않고 서버가 보낸 값으로 바꿔서, 다시 연결해 기록을 재생해도 두 번 세지 않는다
       return { ...patchSnapshot(view, { tokens: event.sessionTokens }), runTokens: { runId: event.runId, usage: event.usage } };
@@ -181,6 +200,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ...patchSnapshot(view, {
           running: false,
           cancelling: undefined,
+          // 되묻고 멈춘 실행만 질문을 남긴다. 끝난 실행이 남긴 질문은 지운다
+          pendingQuestion: event.status === 'awaiting_input' ? view.snapshot.pendingQuestion : undefined,
           nextDemoRequest: event.nextDemoRequest,
           nextDemoQuestion: event.nextDemoQuestion,
           tokens: event.sessionTokens ?? view.snapshot.tokens,
@@ -362,6 +383,23 @@ function markInterrupted(chat: ChatItem[], runId: string): ChatItem[] {
   });
 }
 
+/** 지시가 대화에 들어간 만큼 앞에서부터 반영됨으로 표시한다 */
+function applySteerApplied(chat: ChatItem[], runId: string, count: number): ChatItem[] {
+  let remaining = count;
+  return chat.map((item) => {
+    if (remaining > 0 && item.kind === 'steer' && item.runId === runId && item.status === 'queued') {
+      remaining -= 1;
+      return { ...item, status: 'applied' as const };
+    }
+    return item;
+  });
+}
+
+/** 실행이 끝날 때까지 반영되지 못한 지시를 적용 실패로 표시한다 */
+function settleSteering(chat: ChatItem[], runId: string): ChatItem[] {
+  return chat.map((item) => (item.kind === 'steer' && item.runId === runId && item.status === 'queued' ? { ...item, status: 'dropped' as const } : item));
+}
+
 function settleRemoteSync(chat: ChatItem[], result: NonNullable<RemoteSyncItem['result']>): ChatItem[] {
   const index = chat.findLastIndex((item) => item.kind === 'remoteSync' && !item.result);
   // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
@@ -404,6 +442,9 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
 
     case 'session':
       return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
+
+    case 'steer_applied':
+      return applySteerApplied(chat, runId, event.count);
 
     case 'stage':
       return [...chat, { kind: 'stage', runId, stage: event.stage }];

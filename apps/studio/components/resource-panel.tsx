@@ -27,6 +27,7 @@ export function ResourcePanel({ view }: { view: SessionView }) {
               <th scope="col" className="py-2 pr-4 font-medium">상태</th>
               <th scope="col" className="py-2 pr-4 font-medium">CPU</th>
               <th scope="col" className="py-2 pr-4 font-medium">메모리</th>
+              <th scope="col" className="py-2 pr-4 font-medium">받음 / 보냄</th>
               <th scope="col" className="py-2 font-medium">최근 단계</th>
             </tr>
           </thead>
@@ -60,6 +61,9 @@ export function ResourcePanel({ view }: { view: SessionView }) {
                         <span className={`block h-full rounded-full ${ratio >= 0.9 ? "bg-fail" : ratio >= 0.7 ? "bg-wait" : "bg-pass"}`} style={{ width: `${ratio * 100}%` }} />
                       </span>
                     )}
+                  </td>
+                  <td className="py-2.5 pr-4 font-mono text-xs" title="컨테이너가 받은/보낸 누적 바이트">
+                    {formatBytes(service.networkRxBytes)} / {formatBytes(service.networkTxBytes)}
                   </td>
                   <td className="py-2.5 text-muted">{phase ?? "-"}</td>
                 </tr>

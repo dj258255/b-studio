@@ -39,6 +39,14 @@ const RATE_LIMIT_PATTERNS: RegExp[] = [
 const ENVIRONMENT_NEEDLES = ['준비하지 못했습니다', 'no space left', 'ENOSPC', 'OOM', 'ECONNREFUSED', '502'];
 const DETAIL_LIMIT = 300;
 
+/**
+ * 문자열에 사용 한도 신호가 있는지. 기준선(P0)은 TaskPlanView가 없어 분류기에 계획을 만들 수 없으므로,
+ * 같은 규칙을 여기서 그대로 쓴다.
+ */
+export function isRateLimited(text: string): boolean {
+  return RATE_LIMIT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export function classify(plan: TaskPlanView, acceptance: AcceptanceResult[] | undefined, harnessError?: string): Classification {
   const errors = [plan.error, ...plan.lanes.map((lane) => lane.error), plan.integration?.error].filter((value): value is string => Boolean(value));
   const combined = [harnessError, ...errors].filter((value): value is string => Boolean(value)).join('\n');
