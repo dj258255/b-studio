@@ -2,7 +2,7 @@
 
 이 문서는 현재 어디까지 왔고, 각 단계의 완료 조건과 예상·실제가 무엇인지 한 곳에 모읍니다. 무엇을 왜 만들기로 했는지는 이슈에서, 무엇이 들어갔는지는 [변경 기록](CHANGELOG.md)에서 봅니다. 이슈 상태가 바뀌거나 PR이 병합되면 이 문서를 갱신합니다.
 
-마지막 갱신: 2026-09-28
+마지막 갱신: 2026-09-29
 
 ## 상태 표기
 
@@ -29,9 +29,12 @@
 | M7 디자인 비교 | Figma 프레임을 가져와 실제 화면과 픽셀 차이 비율로 비교합니다 | [#65](https://github.com/dj258255/b-studio/issues/65), [#77](https://github.com/dj258255/b-studio/issues/77) | 검증 중 | 1~2일 | 기능 병합 ([#81](https://github.com/dj258255/b-studio/pull/81)). 실제 Figma 파일·과제 화면 확인 전 | 과제 화면에서 잰 차이 비율로 허용치를 정함 |
 | M8 계획 이슈화 | 승인한 작업 계획을 추적 이슈·하위 이슈로 올리고 통합 PR이 닫습니다 | [#66](https://github.com/dj258255/b-studio/issues/66), [#68](https://github.com/dj258255/b-studio/pull/68) | 구현 중 | 1일 | — | 실제 Gitea·GitHub에서 하위 이슈 생성과 PR 닫힘 확인 |
 | M9 채용 과제 | 과제를 b-studio 에이전트로 구현하고 게이트·QA·PR로 검증합니다 | [#67](https://github.com/dj258255/b-studio/issues/67) | 보류 | 2~3일 | — | M6·M7이 병합되고 Figma 가져오기가 동작한 뒤 착수 |
-| M10 토큰 절감 | 어디서 토큰이 새는지 턴 단위로 보이고, 도구 결과 예산으로 줄인 효과를 잽니다 | [#87](https://github.com/dj258255/b-studio/issues/87), 실험 [#90](https://github.com/dj258255/b-studio/issues/90) | 구현 중 | 1~2일 + 실험 | — | 같은 과제에서 캐시 읽기 토큰이 줄고 통합 성공이 줄지 않음 |
-| M11 되묻기 | 요청이 모호하면 에이전트가 만들기 전에 선택지로 묻고, 답을 받아 이어 갑니다 | [#88](https://github.com/dj258255/b-studio/issues/88) | 구현 중 | 1일 | — | 질문 카드로 답하면 같은 세션이 이어서 만듦 |
-| M12 모델 승격 | 싼 모델로 시작하고 게이트가 같은 실패를 두 번 내면 비싼 모델로 올립니다 | [#89](https://github.com/dj258255/b-studio/issues/89) | 구현 중 | 1일 + 실험 | — | 가설 H5(비용 감소·성공 유지)를 같은 과제로 판정 |
+| M10 토큰 절감 | 어디서 토큰이 새는지 턴 단위로 보이고, 도구 결과 예산으로 줄인 효과를 잽니다 | [#87](https://github.com/dj258255/b-studio/issues/87), 실험 [#90](https://github.com/dj258255/b-studio/issues/90) | 검증 중 | 1~2일 + 실험 | 도구 결과 예산·토큰 탭 [#96](https://github.com/dj258255/b-studio/pull/96), 묶어서 비우기 [#120](https://github.com/dj258255/b-studio/pull/120)(기본 끔), 기준선 P0 [#93](https://github.com/dj258255/b-studio/pull/93) 병합. E3 측정 전 | 같은 과제에서 캐시 읽기 토큰이 줄고 통합 성공이 줄지 않음 |
+| M11 되묻기 | 요청이 모호하면 에이전트가 만들기 전에 선택지로 묻고, 답을 받아 이어 갑니다 | [#88](https://github.com/dj258255/b-studio/issues/88) | 완료 | 1일 | 약 반나절 ([#99](https://github.com/dj258255/b-studio/pull/99)). 예제 허용 도구에서 빠져 있던 것을 실제 실행에서 찾아 고침 | 질문 카드로 답하면 같은 세션이 이어서 만듦 |
+| M12 모델 승격 | 싼 모델로 시작하고 게이트가 같은 실패를 두 번 내면 비싼 모델로 올립니다 | [#89](https://github.com/dj258255/b-studio/issues/89), [#98](https://github.com/dj258255/b-studio/pull/98) | 구현 중 | 1일 + 실험 | API 루프는 구현. 로컬 Claude 러너는 main의 되묻기·실행 중 지시 위에 다시 얹는 중 | 가설 H5(비용 감소·성공 유지)를 같은 과제로 판정 |
+| M13 여러 에이전트 관리 | 관제 화면·나란히 보기·실행 중 지시·알림·관계 그래프로 여러 에이전트를 한곳에서 다룹니다 | [#100](https://github.com/dj258255/b-studio/issues/100) | 완료 | 2~3일 | 약 1일 ([#106](https://github.com/dj258255/b-studio/pull/106), [#107](https://github.com/dj258255/b-studio/pull/107), [#108](https://github.com/dj258255/b-studio/pull/108), [#117](https://github.com/dj258255/b-studio/pull/117), [#122](https://github.com/dj258255/b-studio/pull/122)) | 개입이 필요한 에이전트가 관제 화면 맨 위에 오고, 실행 중 지시가 다음 모델 호출에 들어감 |
+| M14 테스트 품질·부하·동시성 | 앱 게이트에 동시 요청 확인·로드 예산을 넣고, b-studio 자체의 동시 쓰기·부하를 테스트로 고정합니다 | [#112](https://github.com/dj258255/b-studio/issues/112) | 구현 중 | 2일 | 게이트 확인 [#119](https://github.com/dj258255/b-studio/pull/119), 동시 쓰기·부하 [#118](https://github.com/dj258255/b-studio/pull/118)(세션 저장 유실 버그를 찾아 고침). 변이 테스트 [#115](https://github.com/dj258255/b-studio/issues/115)는 보류 | 동시 요청 불변식이 게이트에서 실패를 잡고, 스튜디오 부하 스모크에서 이벤트 유실 0 |
+| M15 조율 후속 | E2가 남긴 한계를 줄입니다: 계획 모델이 계약을 직접 쓰기, 게이트가 api 값이 화면에 그려지는지 확인 | [#123](https://github.com/dj258255/b-studio/issues/123), [#124](https://github.com/dj258255/b-studio/issues/124) | 구현 중 | 1~2일 + 실험 | — | 모델 계약 S2가 사람 계약 S2와 구별되지 않음(H9), 데이터 확인으로 S4 수리가 시작됨(H10) |
 
 ## 왜 이 순서인가
 
