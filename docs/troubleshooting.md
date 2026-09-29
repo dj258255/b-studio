@@ -1569,9 +1569,40 @@ Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No "exports" main defined in packages/age
 러너가 SDK를 첫 `runStreamed`에서 `await import('@openai/codex-sdk')`로 불러옵니다. 타입은 `import type`으로만 씁니다. codex 모드를 쓰지 않는 실행은 SDK를 아예 불러오지 않습니다.
 
 ### 재발 방지
+`apps/studio/bench/coordination/module-load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+## 44. 같은 세션 파일에 두 저장이 겹치면 임시 파일 이름이 부딪혀 저장이 통째로 사라짐
+
+**구분:** 동시 쓰기 테스트([#114](https://github.com/dj258255/b-studio/issues/114))를 쓰다가 발견 → 재현 → 수정
+
+### 현상
+`writeSession()`을 같은 세션 파일에 동시에 두 번 부르면 `rename`이 `ENOENT`로 실패합니다. 실패한 저장은 그 회차 내용이 통째로 사라집니다.
+
+```
+Error: ENOENT: no such file or directory, rename '.../session.json.82042.tmp' -> '.../session.json'
+```
+
+동시에 두 번 쓰기를 200회 반복해 보면 200회 모두 `Promise.all`이 거부됐고, 그 결과 폴더에서 다시 읽히는 세션은 107개뿐이었습니다.
+
+### 원인
+`writeSession`이 임시 파일 이름을 `${file}.${process.pid}.tmp`로 고정으로 씁니다. 두 저장이 같은 임시 파일을 열어 서로의 내용을 덮어쓰고, 먼저 `rename`한 쪽이 임시 파일을 옮겨버리면 다른 쪽 `rename`은 원본이 없어 `ENOENT`가 됩니다.
+
+### 해결
+임시 파일 이름에 호출마다 다른 값을 넣습니다.
+
+```ts
+const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+```
+
+세션 파일은 메모리 스냅샷을 통째로 쓰는 것이라, 두 저장이 겹치면 마지막 것이 이기는 게 맞습니다. 문제는 그 전에 `rename`이 깨져 저장이 실패·유실되는 것이었습니다. `writeSessionSync`는 종료 신호 처리용이라 이미 `.exit.tmp`로 이름을 달리해 두었습니다.
+
+### 재발 방지
+`apps/studio/lib/server/session-store.test.ts`가 같은 파일에 동시에 쓰는 상황을 반복해, 저장이 실패하거나 깨지지 않고 끝에 온전한 스냅샷 하나가 남는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+
+Node는 단일 스레드라 이 테스트는 "읽고 → 고치고 → 다시 쓰는" 사이에 `await`가 끼는 인터리빙만 잡습니다. 여러 프로세스가 같은 세션 파일을 동시에 고치는 경우는 재현하지 못합니다(그래서 세션 파일에는 `owner.pid`를 남기고, 다른 프로세스가 살아 있으면 복구하지 않습니다).
 `apps/studio/bench/coordination/load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
 
-## 44. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐
+## 45. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐
 
 **구분:** 실험 중 발견(E2 27·28회) → 기록에서 원인 추적 → 네트워크로 재현 → 수정([#116](https://github.com/dj258255/b-studio/issues/116))
 
