@@ -526,6 +526,8 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     // P0는 b-studio 러너를 쓰지 않으므로 오래된 도구 결과 비우기와 무관하다
     contextCleared: { count: 0, chars: 0 },
+    // P0는 b-studio 게이트가 없어 승격 판정이 일어나지 않는다. 설정값만 남기고 승격은 없음으로 적는다
+    escalation: { after: context.escalateAfter, escalated: false },
     metrics,
     acceptance,
     success,
