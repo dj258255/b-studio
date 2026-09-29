@@ -3,6 +3,7 @@ import type { ServiceState, SessionStatus } from "@/lib/studio-events";
 export type Tone = "pass" | "fail" | "wait" | "idle";
 
 export const SESSION_STATUS_LABEL: Record<SessionStatus, string> = {
+  idle: "대기(샌드박스 꺼짐)",
   starting: "샌드박스 준비 중",
   ready: "준비됨",
   failed: "시작 실패",

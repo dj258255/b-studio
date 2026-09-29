@@ -26,6 +26,8 @@ export type ChatItem =
   | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
   /** 러너가 무언가를 하지 못했다는 안내(예: 상태 폴더가 없어 이전 대화를 이어받지 못함). 실행은 계속된다 */
   | { kind: 'warning'; runId: string; text: string }
+  /** 플랫폼이 대화에 남기는 한 줄 안내(예: 샌드박스를 켜는 중). 모델 발언이 아니다 */
+  | { kind: 'notice'; text: string }
   | {
       kind: 'route';
       runId: string;
@@ -152,6 +154,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return createView(event.snapshot);
     case 'status':
       return patchSnapshot(view, { status: event.status, error: event.error });
+    case 'notice':
+      return { ...view, chat: [...view.chat, { kind: 'notice', text: event.text }] };
     case 'service':
       return patchSnapshot(view, {
         services: view.snapshot.services.map((service) =>

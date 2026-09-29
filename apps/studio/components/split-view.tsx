@@ -244,7 +244,7 @@ function useElapsed(running: boolean): string | undefined {
   return running ? formatElapsed(elapsed) : undefined;
 }
 
-const STATUS_TONE: Record<SessionStatus, Tone> = { starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
+const STATUS_TONE: Record<SessionStatus, Tone> = { idle: "idle", starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
 
 /** id가 없는 `/split`에서 세션을 고르는 화면. 최근 순 목록에서 최대 4개를 고른다 */
 export function SplitPicker({ sessions }: { sessions: SessionSummary[] }) {

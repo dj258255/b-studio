@@ -17,7 +17,7 @@ import { VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -106,10 +106,14 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const ask = intent === 'ask';
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다.
+  // 계약 기준은 샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서 잡아야 하기 때문이다(API 경로와 같은 규칙)
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
   const context: ToolContext = {
     project,
     workspace,
@@ -131,6 +135,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
     // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
     toolResults: createToolResultCache(),
+    // 지연 기동 세션이면 샌드박스 도구를 실행하기 직전에 켠다(핸들러가 게이트 생성까지 함께 한다).
+    // 세션의 ensureBooted가 동시 호출을 하나로 합치므로 중복 호출은 무해하다
+    ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
   const specs = buildTools(project, {
     ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}),
@@ -150,6 +157,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
         signal?.throwIfAborted();
         onEvent({ type: 'tool_call', name: spec.name, input: args });
+        // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+        if (options.ensureSandbox && (SANDBOX_TOOLS.has(spec.name) || WRITE_TOOLS.has(spec.name))) {
+          await options.ensureSandbox();
+          gate = await gateFor();
+        }
         const toolStarted = performance.now();
         const outcome = await executeTool(spec.name, args, context);
         metrics.toolMs += Math.round(performance.now() - toolStarted);
@@ -348,40 +360,43 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
             if (asked) {
               await conversation.interrupt().catch(() => {});
-              if (gate && workspace.changedFiles().length > 0) {
+              const openGate = gate;
+              if (openGate && workspace.changedFiles().length > 0) {
                 const gateStarted = performance.now();
-                await gate.check();
+                await openGate.check();
                 metrics.gateMs += Math.round(performance.now() - gateStarted);
               }
               finish('awaiting_input', asked.question, asked);
               break;
             }
-            // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
-            if (!gate) {
+            // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트.
+            // 지연 기동 세션이 아무것도 바꾸지 않았으면 게이트가 없다 → 샌드박스 없이 끝난다
+            const activeGate = gate;
+            if (!activeGate) {
               finish('done', lastText);
               break;
             }
             const gateStarted = performance.now();
-            const outcome = await gate.check();
+            const outcome = await activeGate.check();
             metrics.gateMs += Math.round(performance.now() - gateStarted);
             if (outcome.kind === 'pass') {
-              if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+              if (activeGate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
               finish('done', lastText);
             }
             else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
             else {
               lastText = '';
               if (escalation && !escalated) {
-                const key = signatureSetKey(gate.report, gate.checks);
+                const key = signatureSetKey(activeGate.report, activeGate.checks);
                 escalationHistory.push(key);
                 const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
                 if (shouldEscalate(escalationHistory, times)) {
                   escalated = true;
-                  metrics.escalatedAt = gate.attempts;
+                  metrics.escalatedAt = activeGate.attempts;
                   // 닫히는 입력 큐로 지시가 들어가 사라지지 않게, close보다 먼저 이 query의 지시 연결을 끊는다.
                   // 그 뒤 들어온 지시는 큐에 남아 새 query가 연결할 때 flush로 가져간다
                   detachSteeringOnce();
-                  onEvent({ type: 'model_escalated', from: modelForQuery ?? '기본 모델', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
+                  onEvent({ type: 'model_escalated', from: modelForQuery ?? '기본 모델', to: escalation.to, attempt: activeGate.attempts, signature: key, sameSignatureTimes: times });
                   modelForQuery = escalation.to;
                   resumeForQuery = sessionId;
                   pendingPrompt = outcome.feedback;

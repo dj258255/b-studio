@@ -44,7 +44,7 @@ describe('POST /api/sessions', () => {
     const response = await post({ projectId: 'orders', backend: 'commandcode', modelId: 'free-1' });
 
     expect(response.status).toBe(201);
-    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'free-1', backend: 'commandcode' });
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'free-1', backend: 'commandcode', boot: 'on-demand' });
     // commandcode 백엔드일 때만 모델 목록을 검증한다(서버 모드가 아니라 이 세션의 백엔드를 본다)
     expect(mocks.validateModel).toHaveBeenCalledWith('free-1');
   });
@@ -54,7 +54,7 @@ describe('POST /api/sessions', () => {
     const response = await post({ projectId: 'orders', backend: 'opencode', model: 'opencode/mimo-v2.6-flash-free' });
 
     expect(response.status).toBe(201);
-    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'opencode/mimo-v2.6-flash-free', backend: 'opencode' });
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'opencode/mimo-v2.6-flash-free', backend: 'opencode', boot: 'on-demand' });
     expect(mocks.validateOpenCodeModel).toHaveBeenCalledWith('opencode/mimo-v2.6-flash-free');
     // 다른 CLI 백엔드의 검증기는 부르지 않는다
     expect(mocks.validateModel).not.toHaveBeenCalled();
@@ -72,7 +72,7 @@ describe('POST /api/sessions', () => {
 
     expect(response.status).toBe(201);
     // 서버 모드(api)가 확정되어 넘어간다
-    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'm', backend: 'api' });
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'm', backend: 'api', boot: 'on-demand' });
     expect(mocks.validateModel).not.toHaveBeenCalled();
   });
 
