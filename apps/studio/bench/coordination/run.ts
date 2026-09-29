@@ -20,7 +20,7 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
-import { planModelId, resolveBackend, resolveRateLimitPolicy, type Backend } from './backends';
+import { planModelId, resolveBackend, resolveContextClearing, resolveRateLimitPolicy, type Backend } from './backends';
 import { classify } from './classify';
 import { startDryProvider } from './dry-provider';
 import { startProxy, type ProxyHandle } from './proxy';
@@ -52,6 +52,8 @@ interface Args {
   model?: string;
   onRateLimit?: string;
   rateLimitWaitMinutes?: number;
+  /** 컨텍스트 비우기(on|off). 기본 off */
+  contextClearing?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -68,6 +70,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--model') args.model = next(argv, index++, '--model');
     else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
     else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
+    else if (arg === '--context-clearing') args.contextClearing = next(argv, index++, '--context-clearing');
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -76,6 +79,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--model=')) args.model = arg.slice('--model='.length);
     else if (arg.startsWith('--on-rate-limit=')) args.onRateLimit = arg.slice('--on-rate-limit='.length);
     else if (arg.startsWith('--rate-limit-wait-minutes=')) args.rateLimitWaitMinutes = Number(arg.slice('--rate-limit-wait-minutes='.length));
+    else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;
@@ -261,6 +265,17 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     console.warn(`탐색·실패 합계를 계산하지 못했습니다: ${describe(error)}`);
   }
 
+  // 오래된 도구 결과를 비운 합계. 세션 기록의 context_cleared 이벤트를 센다(레인·통합 모두).
+  // --context-clearing off(기본)면 이벤트가 없어 0이다
+  const contextCleared = { count: 0, chars: 0 };
+  for (const events of sessionEvents.values()) {
+    for (const event of events) {
+      if (event.type !== 'agent' || event.event.type !== 'context_cleared') continue;
+      contextCleared.count += event.event.clearedCount;
+      contextCleared.chars += event.event.clearedChars;
+    }
+  }
+
   // 세션을 모두 내린다. 실패·시간 초과로 끝났어도 남기지 않는다.
   // stopSession이 실패하면 activeSessions에 남겨, 남은 컨테이너가 있을 때 다시 시도한다
   for (const id of sessionIds) {
@@ -322,6 +337,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     integrationTrace,
     explore,
     failures,
+    contextCleared,
     metrics,
     acceptance,
     success,
@@ -405,6 +421,9 @@ async function main(): Promise<void> {
   const choice = resolveBackend({ dry: args.dry, backend: args.backend, model: args.model });
   const backend = choice.backend;
   const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
+  // 오래된 도구 결과 비우기. 기본은 끔이고, API 루프(openai)에서만 뜻이 있다 — 로컬 CLI는 각자 자체 압축을 한다
+  const contextClearing = resolveContextClearing(args.contextClearing);
+  if (contextClearing && backend !== 'openai') throw new Error('--context-clearing은 --backend openai(API 루프)에서만 쓸 수 있습니다. 로컬 CLI 러너는 대화를 직접 다루지 않습니다');
   const dry = args.dry;
   const repeats = args.repeats ?? (dry ? 1 : 3);
   if (!Number.isInteger(repeats) || repeats < 1) throw new Error(`--repeats는 1 이상의 정수여야 합니다 (지금 값: ${args.repeats})`);
@@ -496,6 +515,8 @@ async function main(): Promise<void> {
         { mode: 0o600 },
       );
       Object.assign(benchEnv, { B_STUDIO_MODE: 'api', B_STUDIO_MODEL_REGISTRY: registryFile, B_STUDIO_BENCH_PROXY_KEY: 'local' });
+      // 스튜디오 API 모드가 이 값을 읽어 러너에 넘긴다(loop.ts). 켠 실행과 끈 실행을 비교해 효과를 잰다
+      if (contextClearing) benchEnv.B_STUDIO_CONTEXT_CLEARING = 'on';
     } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
@@ -592,7 +613,7 @@ async function main(): Promise<void> {
 
   const finishedAt = new Date().toISOString();
   const observedModels = [...new Set(rows.flatMap((row) => row.observedModels))];
-  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel }), secrets));
+  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing }), secrets));
   await writeFile(
     path.join(outRoot, 'meta.json'),
     redact(
@@ -614,6 +635,7 @@ async function main(): Promise<void> {
           runs: rows.length,
           onRateLimit: rateLimit.policy,
           rateLimitWaitMinutes: rateLimit.waitMinutes,
+          contextClearing,
           abortReason,
         },
         null,

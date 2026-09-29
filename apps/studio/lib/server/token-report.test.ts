@@ -98,6 +98,31 @@ describe('buildTokenReports', () => {
     const [report] = buildTokenReports(events);
     expect(report!.totals).toEqual({ inputTokens: 5, outputTokens: 2, cacheReadTokens: 1, cacheWriteTokens: 0 });
   });
+
+  it('오래된 도구 결과를 비운 기록을 턴 표와 실행 합계에 담는다', () => {
+    const events: StudioEvent[] = [
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      agent('r1', { type: 'turn', turn: 1 }),
+      agent('r1', { type: 'turn_usage', turn: 1, inputTokens: 60_000, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 60_000 }),
+      agent('r1', { type: 'turn', turn: 2 }),
+      // 비우기는 그 턴의 모델 호출 **전**에 일어나 turn_usage보다 먼저 온다
+      agent('r1', { type: 'context_cleared', turn: 2, clearedCount: 3, clearedChars: 24_000 }),
+      agent('r1', { type: 'turn_usage', turn: 2, inputTokens: 20_000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 20_000 }),
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: 'ok', turns: 2 },
+    ];
+
+    const [report] = buildTokenReports(events);
+
+    expect(report!.turns[0]!.cleared).toBeUndefined();
+    expect(report!.turns[1]!.cleared).toEqual({ count: 3, chars: 24_000 });
+    expect(report!.cleared).toEqual({ count: 3, chars: 24_000 });
+  });
+
+  it('비운 적이 없으면 합계가 0이다', () => {
+    const [report] = buildTokenReports(sampleEvents());
+    expect(report!.cleared).toEqual({ count: 0, chars: 0 });
+    expect(report!.turns.every((turn) => turn.cleared === undefined)).toBe(true);
+  });
 });
 
 describe('summarizeInput', () => {

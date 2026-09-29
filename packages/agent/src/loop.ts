@@ -3,6 +3,7 @@ import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
+import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
 import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
 import { buildAskRequest, buildSystemPrompt } from './prompts';
 import { createToolResultCache } from './tool-output';
@@ -153,6 +154,11 @@ export type AgentEvent =
    * contextTokens = input + cacheRead + cacheWrite (한 요청이 모델에 보낸 입력 크기).
    */
   | { type: 'turn_usage'; turn: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; contextTokens: number }
+  /**
+   * 직전 턴의 컨텍스트가 임계치를 넘어 오래된 도구 결과를 묶어서 비웠다.
+   * clearedCount: 표시 문구로 바꾼 도구 결과 수, clearedChars: 그때 줄어든 글자 수
+   */
+  | { type: 'context_cleared'; turn: number; clearedCount: number; clearedChars: number }
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   /** chars: 모델에 간 글자 수(자르기·반복 대체 뒤). rawChars: 자르기 전 원래 글자 수. 토큰 탭이 이 둘로 낭비를 찾는다 */
@@ -208,6 +214,12 @@ export interface RunAgentOptions {
   interactive?: boolean;
   /** 도구 호출을 실행기에서 통제하는 정책 */
   policy?: ExecutionPolicy;
+  /**
+   * 컨텍스트가 커졌을 때 오래된 도구 결과를 묶어서 비우는 정책. **기본은 끔**(효과를 재기 전).
+   * `B_STUDIO_CONTEXT_CLEARING=on`이면 기본 정책으로 켠다. `false`로 넘기면 환경 변수보다 우선해 끈다.
+   * Claude Code·Codex 러너는 대화를 직접 다루지 않는다(각 CLI가 자체 압축을 한다). 이 옵션은 쓰지 않는다.
+   */
+  contextClearing?: ContextClearingPolicy | false;
   approvalToken?: string;
   requestApproval?: ToolContext['requestApproval'];
 }
@@ -289,6 +301,10 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   let asked: AskUserQuestion | undefined;
   // 실행 단위 도구 결과 캐시. 한 실행 안에서 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
   const toolCache = createToolResultCache();
+  // 기본은 끔 — 효과를 재기 전이다. B_STUDIO_CONTEXT_CLEARING=on이면 기본 정책으로 켠다
+  const contextClearing = resolveContextClearing(options.contextClearing, process.env);
+  // 직전 턴이 모델에 보낸 입력 크기. 이 값이 임계치를 넘으면 다음 호출 전에 오래된 도구 결과를 묶어서 비운다
+  let previousContextTokens = 0;
 
   const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion): AgentResult => {
     const result: AgentResult = {
@@ -311,6 +327,16 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   for (let turn = 1; turn <= maxTurns; turn++) {
     signal?.throwIfAborted();
     onEvent({ type: 'turn', turn });
+
+    // 오래된 도구 결과를 **한 번에 묶어서** 비운다. 매 턴 조금씩 지우면 그때마다 그 지점부터 프롬프트 캐시가 깨진다
+    if (contextClearing && previousContextTokens >= contextClearing.triggerTokens) {
+      const cleared = clearOldToolResults(messages, contextClearing);
+      if (cleared.clearedCount > 0) {
+        // 대화 배열은 호출자가 쥐고 있으므로 같은 배열을 그대로 채운다(참조를 바꾸지 않는다)
+        messages.splice(0, messages.length, ...cleared.messages);
+        onEvent({ type: 'context_cleared', turn, clearedCount: cleared.clearedCount, clearedChars: cleared.clearedChars });
+      }
+    }
 
     // 진행 중 지시는 다음 모델 호출 직전에만 넣는다. 도구 결과가 들어간 뒤라 도구 호출 도중에 끼어들지 않는다
     const steering = takeSteering(options.steering);
@@ -338,6 +364,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
       contextTokens: turnContext,
     });
+    // 다음 턴은 이 크기를 보고 오래된 도구 결과를 비울지 정한다
+    previousContextTokens = turnContext;
     // thinking·fallback 블록까지 응답 전체를 그대로 이어 붙여야 다음 요청이 올바르게 이어진다
     messages.push({ role: 'assistant', content: message.content });
 
