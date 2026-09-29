@@ -1,6 +1,7 @@
 {
   "name": "@b-studio/desktop",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "웹 스튜디오를 감싸는 얇은 Electron 껍데기. 화면은 스튜디오 서버가 준다",
   "main": "dist/main.js",
