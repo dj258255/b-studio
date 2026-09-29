@@ -266,6 +266,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 | [E2](docs/experiments/2026-09-29-e2-coordination-strategies.md) | 조율 전략이 통합 실패를 줄이는가 | 계약을 먼저 게시한 S2 9/9. 계약을 공유한 전략 17/18 대 공유하지 않은 전략 9/18(p = 0.007) → 엮인 작업은 S2를 기본으로(ADR-059) |
 | [E3](docs/experiments/2026-09-29-e3-baseline-budget-escalation.md) | b-studio는 그냥 Claude Code보다 싼가, 도구 결과 예산·승격은 효과가 있는가 | 그냥 Claude Code 9/9·성공 1건당 토큰 약 22만, b-studio 9/9·약 44만. **이 과제들에서는 b-studio가 2배를 썼다.** 도구 결과 예산은 b-studio 안에서 캐시 읽기 −34%. Haiku 시작 승격은 게이트가 실패를 못 봐 0회 |
 | [E4](docs/experiments/2026-09-29-e4-repair-escalation-model-contracts.md) | 게이트가 실패를 보면 수리·승격이 일어나는가, 모델이 쓴 계약도 통하는가 | 통합 확인을 켜자 수리 4회(3회 성공), 8/9. Haiku 시작 승격은 4회 일어났지만 1/9로 Sonnet만(8/9)보다 나쁨(p = 0.003). **계획 모델이 쓴 계약으로 S2 9/9**, 계약 호출은 토큰의 0.9% |
+| [E5](docs/experiments/2026-09-29-e5-light-verify.md) | 무거운 검증을 건너뛰는 가볍게 확인은 토큰을 줄이는가 | 성공 9/9 대 9/9, 종단 시간 −15%·게이트 시간 −53%. **토큰은 줄지 않았다**(성공 1건당 +19%, p = 0.203). 게이트는 모델을 부르지 않고, 토큰은 에이전트 자신의 호출 수 × 문맥 크기로 정해짐 |
 
 ## 문서
 
