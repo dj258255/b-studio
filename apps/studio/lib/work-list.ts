@@ -146,7 +146,8 @@ export function deleteHref(key: string): string {
  */
 export function deleteBlockReason(work: WorkItem): string | undefined {
   if (work.mode === 'single') {
-    return work.state === 'stopped' || work.state === 'dormant' ? undefined : '세션이 아직 실행 중입니다. 먼저 멈춘 뒤 지울 수 있습니다';
+    // 켜지 못한(error) 세션은 서버가 정리하고 지운다
+    return work.state === 'stopped' || work.state === 'dormant' || work.state === 'error' ? undefined : '세션이 아직 실행 중입니다. 먼저 멈춘 뒤 지울 수 있습니다';
   }
   const active = work.members.some((member) => member.state === 'working' || member.state === 'booting');
   return active ? '진행 중인 참가자가 있습니다. 끝나거나 멈춘 뒤 지울 수 있습니다' : undefined;

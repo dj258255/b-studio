@@ -141,14 +141,17 @@ describe('deleteHref', () => {
 });
 
 describe('deleteBlockReason', () => {
-  it('한 명은 중지·대기(샌드박스 꺼짐)일 때만 지울 수 있다', () => {
+  it('한 명은 중지·대기(샌드박스 꺼짐)·켜지 못함(서버가 정리하고 지움)일 때 지울 수 있다', () => {
     const works = groupWork([item({ id: 's1', state: 'stopped' })]);
     expect(deleteBlockReason(works[0]!)).toBeUndefined();
 
     const dormant = groupWork([item({ id: 's2', state: 'dormant' })]);
     expect(deleteBlockReason(dormant[0]!)).toBeUndefined();
 
-    for (const state of ['working', 'booting', 'idle', 'error'] as const) {
+    const failed = groupWork([item({ id: 's4', state: 'error' })]);
+    expect(deleteBlockReason(failed[0]!)).toBeUndefined();
+
+    for (const state of ['working', 'booting', 'idle'] as const) {
       const blocked = groupWork([item({ id: 's3', state })]);
       expect(deleteBlockReason(blocked[0]!)).toBeDefined();
     }

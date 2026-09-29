@@ -764,6 +764,8 @@ export async function deleteSession(id: string): Promise<void> {
   const live = store.sessions.get(id);
   const entry = archived.get(id);
   if (!live && !entry) throw new StudioError(404, '세션을 찾을 수 없습니다');
+  // 켜지 못한(failed) 세션은 목록에 멈출 버튼이 없다. 남은 컨테이너를 먼저 정리(중지)하고 지운다
+  if (live?.snapshot.status === 'failed') await stopSession(id).catch(() => {});
   const snapshot = (live ?? entry)!.snapshot;
   // idle(지연 기동, 아직 켜지 않음)은 지울 샌드박스가 없어 그대로 지울 수 있다. 그 밖의 실행 중 상태는 먼저 멈춰야 한다
   if (snapshot.status !== 'stopped' && snapshot.status !== 'idle') {
