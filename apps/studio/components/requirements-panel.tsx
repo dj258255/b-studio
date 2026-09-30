@@ -276,12 +276,16 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
 }
 
 type SourceTab = "paste" | "file" | "issue";
+/** 파일 선택으로 읽을 명세 파일의 상한. 명세 글은 보통 수십 KB 안이다 */
+const MAX_SPEC_FILE_BYTES = 512 * 1024;
 
 /** ImportFlow는 테스트(용어 검사·렌더)에서도 직접 쓸 수 있게 내보낸다 */
 export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onApplied: (snapshot: RequirementsSnapshot) => void; onCancel?: () => void }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
   const [specText, setSpecText] = useState("");
-  const [filePath, setFilePath] = useState("");
+  /** 파일 선택 창으로 고른 파일의 이름과 내용. 내용은 브라우저에서 바로 읽어 붙여넣기처럼 보낸다 */
+  const [pickedFile, setPickedFile] = useState<{ name: string; text: string }>();
+  const [fileError, setFileError] = useState<string>();
   const [issueNumber, setIssueNumber] = useState("");
   const [preview, setPreview] = useState<ExtractionPreview>();
   const [drafts, setDrafts] = useState<RequirementDraft[]>([]);
@@ -296,7 +300,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
   function sourceBody(withAnswers: boolean) {
     const body: Record<string, unknown> = {};
     if (sourceTab === "paste") body.specText = specText;
-    else if (sourceTab === "file") body.filePath = filePath;
+    else if (sourceTab === "file") body.specText = pickedFile?.text ?? "";
     else if (issueNumber.trim()) body.issueNumber = Number(issueNumber);
     if (withAnswers && preview) {
       body.answers = preview.questions.map((question, index) => ({ question, answer: answers[index]?.trim() || "(답변 없음)" })).filter((item) => item.answer !== "(답변 없음)");
@@ -393,7 +397,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
     setDrafts((current) => current.filter((_, i) => i !== index));
   }
 
-  const canExtract = sourceTab === "paste" ? specText.trim().length > 0 : sourceTab === "file" ? filePath.trim().length > 0 : issueNumber.trim().length > 0;
+  const canExtract = sourceTab === "paste" ? specText.trim().length > 0 : sourceTab === "file" ? (pickedFile?.text.trim().length ?? 0) > 0 : issueNumber.trim().length > 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -406,7 +410,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
         {(
           [
             { id: "paste", label: "붙여넣기" },
-            { id: "file", label: "작업 복사본 파일" },
+            { id: "file", label: "파일에서" },
             { id: "issue", label: "저장소 이슈" },
           ] as const
         ).map((tab) => (
@@ -432,12 +436,33 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
           className="rounded-control border border-line bg-ground px-3 py-2 text-sm"
         />
       ) : sourceTab === "file" ? (
-        <input
-          value={filePath}
-          onChange={(event) => setFilePath(event.target.value)}
-          placeholder="예: 요구사항.md, README.md, docs/spec.md"
-          className="rounded-control border border-line bg-ground px-3 py-2 text-sm"
-        />
+        <div className="flex flex-col gap-1.5">
+          <label className="glass-soft w-fit cursor-pointer rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+            {pickedFile ? "다른 파일 선택…" : "파일 선택…"}
+            <input
+              type="file"
+              accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.html,.adoc,.rst"
+              className="sr-only"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                if (file.size > MAX_SPEC_FILE_BYTES) {
+                  setFileError(`파일이 너무 큽니다(${Math.round(file.size / 1024).toLocaleString("ko-KR")}KB). ${MAX_SPEC_FILE_BYTES / 1024}KB 이하 텍스트 파일을 골라 주세요`);
+                  return;
+                }
+                setFileError(undefined);
+                void file.text().then((text) => setPickedFile({ name: file.name, text }));
+              }}
+            />
+          </label>
+          {pickedFile && (
+            <p className="text-xs text-muted">
+              <span className="font-mono">{pickedFile.name}</span> · {pickedFile.text.length.toLocaleString("ko-KR")}자
+            </p>
+          )}
+          {fileError && <p className="text-xs text-fail">{fileError}</p>}
+        </div>
       ) : (
         <input
           value={issueNumber}
@@ -604,7 +629,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
           </div>
 
           <p className="text-xs text-muted">
-            저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 저장소 탭의 올리기 전 점검표가 이걸로 완료 여부를 판단합니다.
+            저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 저장소 탭의 "올리기 전 점검"이 이걸로 완료 여부를 판단합니다.
           </p>
           <button
             type="button"

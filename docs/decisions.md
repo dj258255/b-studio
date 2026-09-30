@@ -100,6 +100,7 @@
 - [ADR-083 세션에서 띄울 서비스를 고르고, 부가 서비스는 기대는 것만 기본으로 켠다](#adr-083-세션에서-띄울-서비스를-고르고-부가-서비스는-기대는-것만-기본으로-켠다)
 - [ADR-084 테스트 탭에서 백엔드·프론트 테스트를 한 줄씩 보고 돌린다](#adr-084-테스트-탭에서-백엔드프론트-테스트를-한-줄씩-보고-돌린다)
 - [ADR-085 폴더 열기를 경로 입력 대신 폴더 선택 창·탐색 모달로 바꾼다](#adr-085-폴더-열기를-경로-입력-대신-폴더-선택-창탐색-모달로-바꾼다)
+- [ADR-086 기본 egress에 GitHub 릴리스 호스트를 연다(Gradle 배포판)](#adr-086-기본-egress에-github-릴리스-호스트를-연다gradle-배포판)
 - [ADR-087 개발 화면 탭을 일곱 개로 묶고 올리기 전 점검을 저장소 탭으로 옮긴다](#adr-087-개발-화면-탭을-일곱-개로-묶고-올리기-전-점검을-저장소-탭으로-옮긴다)
 
 ---
@@ -3510,6 +3511,29 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 스튜디오 화면에 처음으로 preload를 하나 열었다("서버가 준 콘텐츠에는 아무것도 주지 않는다"는 이전 원칙의 유일한 예외). 노출한 메서드는 `pickFolder` 하나뿐이고 보낸이를 이중으로 확인하지만, 앞으로 비슷한 필요가 늘면 이 원칙을 다시 볼 필요가 있다.
 - 폴더 실마리는 그 폴더 바로 아래만 본다(하위 폴더까지 뒤지지 않는다). 모노레포처럼 앱이 한 단계 아래에 있으면(ADR-067의 `detectProject`는 이것도 찾는다) 목록에서는 실마리 칩이 비어 보일 수 있다 — 실제로 들어가 보거나 고르면 제안(`detectProject`)이 정확하게 찾아준다.
 - 500개를 넘는 폴더는 이름순 앞부분만 보여준다. 아주 많은 하위 폴더를 가진 자리(예: 전체 홈 디렉터리 바로 아래에 수천 개 폴더가 있는 경우)에서는 찾는 폴더가 상한 밖에 있으면 이름으로 거르기 전에는 안 보일 수 있다 — 바로가기나 더 안쪽 폴더로 먼저 들어가는 것으로 피할 수 있다.
+
+---
+
+## ADR-086 기본 egress에 GitHub 릴리스 호스트를 연다(Gradle 배포판)
+
+상태: 채택
+관련: #288
+
+### 맥락
+- 사용자가 연 Spring 프로젝트의 backend가 `Unable to tunnel through proxy. Proxy returns "HTTP/1.1 403 Forbidden"`로 종료됐다. Gradle 래퍼가 배포판(`gradle-8.14-bin.zip`)을 받는 중이었다.
+- `services.gradle.org/distributions/…`와 `downloads.gradle.org/…`는 이제 `github.com/gradle/gradle-distributions/releases/download/…`로 307을 주고, 거기서 다시 `release-assets.githubusercontent.com`으로 302를 준다(2026-10-01 실측). 앞의 두 호스트만 허용해 두어서 리다이렉트 대상에서 막혔다.
+
+### 결정
+- 기본 허용 목록(`DEFAULT_EGRESS_ALLOW`)에 `github.com`, `release-assets.githubusercontent.com`, `objects.githubusercontent.com`을 더한다.
+- 경로로 좁히지 않는다. HTTPS는 CONNECT 터널이라 edge가 경로·메서드를 볼 수 없고, 경로 규칙이 붙은 호스트의 CONNECT는 막는다(`edge.mjs`, "CONNECT 터널은 경로·메서드 규칙을 검사할 수 없음").
+
+### 검토한 선택지
+- `github.com`에 경로 규칙(`/gradle/gradle-distributions/releases/download/**`)을 건다 → CONNECT에서 막혀 동작하지 않는다.
+- 배포판을 미리 받아 볼륨에 넣는다 → 버전마다 다르고, 첫 기동에는 여전히 네트워크가 필요하다.
+- 프로젝트마다 `egress`에 적게 한다 → 폴더 열기로 연 Spring 프로젝트가 처음부터 실패한다.
+
+### 감수한 트레이드오프
+- 샌드박스가 github.com 전체와 GitHub 릴리스 파일에 닿는다. 인증 정보는 샌드박스에 없어 쓰기는 막히지만, 읽기와 GET 요청을 통한 유출 경로는 넓어진다. npm·Go 의존성도 GitHub에서 받는 경우가 많아 개발 샌드박스의 관례(Codespaces 등)와 같은 수준으로 본다. 더 좁혀야 하는 조직은 프로젝트 `egress`로 대신하고 이 기본값을 끄는 설정을 뒤에 둔다.
 
 ---
 
