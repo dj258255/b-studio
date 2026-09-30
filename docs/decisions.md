@@ -96,6 +96,7 @@
 - [ADR-079 명세를 요구사항으로 나누고 요구사항마다 검증 근거를 추적한다](#adr-079-명세를-요구사항으로-나누고-요구사항마다-검증-근거를-추적한다)
 - [ADR-080 제출 준비 점검표로 요구사항·테스트·README·시드·비밀 값·커밋 기록을 확인한다](#adr-080-제출-준비-점검표로-요구사항테스트readme시드비밀-값커밋-기록을-확인한다)
 - [ADR-081 저장소 탭에서 이슈·PR 상세를 열어 체크리스트·CI·리뷰까지 확인한다](#adr-081-저장소-탭에서-이슈pr-상세를-열어-체크리스트ci리뷰까지-확인한다)
+- [ADR-082 명세 탭이 참조 파일을 따라가 읽고 모호한 점에 추천 값을 채운다](#adr-082-명세-탭이-참조-파일을-따라가-읽고-모호한-점에-추천-값을-채운다)
 
 ---
 
@@ -3320,6 +3321,49 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 연결된 이슈·PR은 closes/fixes/resolves 문구로만 찾는다. 그 문구 없이 다른 방식으로만 연결된(예: 프로젝트 보드) 이슈·PR은 찾지 못한다.
 - 큰 PR의 diff는 파일당·전체 글자 수로 자른다. 아주 큰 변경은 옆 패널에서 전체를 못 보고 GitHub에서 봐야 한다.
 - "세션에서 다시 검증"은 넣지 않았다. 세션에 게이트를 처음부터 다시 돌리는 진입점이 생기면 추가한다.
+
+---
+
+## ADR-082 명세 탭이 참조 파일을 따라가 읽고 모호한 점에 추천 값을 채운다
+
+상태: 채택
+관련: #274
+
+### 맥락
+- ADR-079가 만든 "명세" 탭을 범수 님이 실제 풀스택 과제 명세로 써 보고 다섯 가지를 지적했다: (1) 입력 placeholder·안내가 "과제 명세를 붙여넣으세요"처럼 과제 전형 용어에 치우쳐 제품 전반에 쓰기 어색하다, (2) "docs/requirements.md로 저장"을 누른 뒤 뭘 해야 하는지 불분명하고 추출된 목록도 "성의 없다"는 인상이다, (3) 명세가 `seed/seed.json` 같은 경로를 언급해도 그 파일을 실제로 읽지 않아 추출이 실제 데이터 규모를 반영하지 못한다, (4) "모호한 점" 질문에 업계 관례로 답을 채워주는 길이 없다, (5) 데이터 규모·동시성/트래픽·성능 관련 제약 같은 "가정"을 남길 자리가 없다.
+- claude-code 백엔드의 단발 호출(`claude-code-ask.ts`)은 지금까지 도구를 전부 닫아 뒀다(파일·명령 접근이 필요 없는 JSON 한 덩어리 응답이라서, ADR-079·ADR-075). "추천 값"에 진짜 출처 링크를 붙이려면 이 경계를 건드리지 않고 이 호출 하나에만 예외를 낼 방법이 필요했다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 추출 프롬프트만 고치고 참조 파일·추천 값·가정은 다음 라운드로 미룬다 | 피드백 다섯 가지가 서로 얽혀 있다(추천 값은 모호한 점 질문에, 가정은 참조 파일이 준 데이터 규모에 기댄다) — 나눠서 하면 "가정"이 지어낸 값이 되기 쉽다 |
+| B. 참조 파일 전체를 추출 문맥에 그대로 붙인다 | `seed/seed.json`처럼 수백 KB가 될 수 있는 파일을 통째로 넣으면 문맥이 시드 데이터로 채워진다. 요약(JSON은 최상위 키·배열 길이, 그 밖은 앞 줄)만 붙이고 전체 참조 파일 합쳐 ~6,000자 상한을 뒀다(채택) |
+| **C. claude-code 백엔드에 한해 "추천 값" 호출 하나만 WebSearch·WebFetch를 연다(파일·명령 도구는 그대로 닫는다), api 백엔드는 도구 없이 답하고 "출처 확인 필요"로 표시한다** | 채택. 추출·계획 등 다른 모든 단발 호출은 지금처럼 도구를 전부 닫아 두고, 이 호출 하나만 `claude-code-ask.ts`에 `webTools` 옵션(파일·명령 도구는 여전히 닫은 채 `tools`/`allowedTools`를 `['WebSearch','WebFetch']`로, `maxTurns`를 1에서 6으로 늘린다)을 opt-in으로 추가했다 |
+| D. api 백엔드에도 검색 도구를 연다 | api 백엔드의 `ModelAsk`는 `ModelClient` 어댑터를 거치는 별개 경로라 웹 검색 도구가 없다 — 새 어댑터를 만드는 대신 도구 없이 모델 지식만으로 답하고 "출처 확인 필요"로 정직하게 표시했다(채택) |
+
+### 결정
+1. **용어**: `requirements-panel.tsx`의 사용자에게 보이는 문구에서 "과제"를 뺐다. 붙여넣기 placeholder는 "만들 것을 적어 주세요", 파일 탭 placeholder는 "예: 요구사항.md, README.md, docs/spec.md"로 바꿨다. 탭 헤더("명세 → 요구사항 → 검증 추적")는 그대로 뒀다(지시된 범위). 주석은 "과제"를 그대로 쓸 수 있다(사람이 읽는 내부 설명이라 제품 용어 제약과 무관하다).
+2. **저장 안내 + 다음 단계 바**: 저장 버튼 위에 "저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 제출 준비 점검표가 이걸로 완료 여부를 판단합니다"를 고정 문구로 붙였다. 저장 뒤 목록 화면에는 "다음 단계" 상자(설명 + "전체 계획 세우기" 기본 버튼)를 둬, must 요구사항이 있으면 항상 보이게 했다(카드마다 있는 "이 요구사항 작업" 버튼과 짝을 이룬다).
+3. **추출 품질**: `buildExtractionSystemPrompt`(`packages/agent/src/requirements.ts`) 규칙을 다시 썼다 — 인수 조건은 실제 입력/출력·상태 코드를 쓰고 UI는 로딩/빈 화면/오류 상태까지 담게 했고, 서로 연관된 항목(한 리소스의 CRUD, 한 화면의 상태들)은 하나의 요구사항으로 묶게 했고, "X 미포함" 같은 부정형 문장은 요구사항으로 만들지 않고 새 `outOfScope` 목록("범위 밖" 노트, 저장하지 않고 미리보기에서만 보여준다)으로 빼게 했고, 재추출 시 같은 요구사항은 같은 id를 유지하라고 명시했다(id에 근거가 매여 있어서다, ADR-079).
+4. **참조 파일**: `extractPathReferences`(정규식으로 `디렉터리/파일.확장자`나 `파일.확장자` 모양을 찾는다, URL 경로는 제외)로 명세 글에서 경로처럼 보이는 낱말을 뽑고, `resolveReferencedFiles`(`packages/agent/src/requirements.ts`, `Workspace`를 그대로 써서 프로젝트 밖 경로·`.env` 같은 비밀 파일·`node_modules` 같은 생성물 경로는 다른 도구와 똑같이 막는다)로 세션 작업 복사본에서 찾는다. 존재하면 크기와 미리보기(JSON은 `summarizeJsonPreview`로 최상위 키마다 배열이면 길이를 담아 "posts 42개, comments 2,076개"처럼, 그 밖은 앞 5줄)를, 없으면 missing으로 담아 화면의 "참조 파일" 목록에 그대로 보여준다. 존재하는 파일의 요약은 `buildReferencedFilesContext`로 합쳐(전체 ~6,000자 상한, `REFERENCED_FILES_CONTEXT_MAX_CHARS`) 추출 프롬프트의 "[참조 파일 요약]" 절에 붙이고, 없는 파일은 `buildMissingReferenceQuestion`으로 "모호한 점" 질문에 자동으로 올린다(모델이 낸 질문과 합쳐 상한 5개 안으로 자른다).
+5. **모호한 점에 추천 값**: 새 `RecommendationReplySchema`(질문마다 답·근거 한 줄·출처 링크 최대 2개)와 `requestQuestionRecommendations`(`packages/agent/src/requirements.ts`)를 추가했다. claude-code 백엔드는 `requirementsRecommendationAsk`가 `claudeCodeAsk({ ..., webTools: true })`로 이 호출 하나만 WebSearch·WebFetch를 열어 실제 출처를 찾게 하고, api 백엔드는 도구 없이 모델 지식만으로 답한다 — `labelRecommendationSource`가 웹 검색을 못 쓴 경우 `sourced: 'model'`로 표시하고 화면은 "출처 확인 필요" 배지를 붙인다. `POST /api/sessions/[id]/requirements/recommend`가 새 진입점이고, 화면의 "추천 값으로 채우기" 버튼이 답을 입력칸에 채우되(편집 가능) 그 밑에 근거·출처·배지를 보여주며, 기존 "스펙을 고치고 다시 뽑기"를 그대로 써 반영한다.
+6. **가정**: `ExtractionReplySchema`에 `assumptions`(데이터 규모 — 참조 파일 요약이 있으면 그 값을 근거로 삼는다, 명세가 실마리를 줄 때만 동시성/트래픽, 페이지네이션·인덱스 같은 성능 제약 — 서버 사양은 절대 묻지 않는다)를 추가했다. `docs/requirements.md`에 "## 가정" 절로 저장하고(`serializeRequirementsMarkdown`의 세 번째 인자), 다시 읽을 때(`parseRequirementsMarkdown`)도 사람 편집 우선 원칙을 그대로 따른다 — 절이 남아 있으면 그 글머리 기호를 읽고, 사람이 절을 통째로 지우면 가정 없음으로 본다. 저장 JSON 주석 블록은 `{requirements, assumptions}` 모양으로 바뀌었지만, 이 기능 전에 저장된 옛 배열 형식도 그대로 읽는다(`LEGACY_JSON_BLOCK`/`JSON_BLOCK_SHAPE` 둘 다 시도).
+7. **저장 API 모양 변경**: `POST .../requirements/apply`의 요청 본문이 배열에서 `{ requirements, assumptions? }`로 바뀌었다(가정을 함께 저장해야 해서). 이 API는 스튜디오 화면만 부르는 내부 API라(ADR-079 이후 공개된 계약이 아니다) 과거 형식과의 호환은 두지 않고 라우트·컴포넌트를 함께 바꿨다.
+
+### 검증 결과
+- `packages/agent/src/requirements.test.ts`(신규 33건): `extractPathReferences`(경로 추출·중복 제거·URL 제외), `summarizeJsonPreview`/`buildReferencedFilePreview`/`buildReferencedFilesContext`(요약·전체 글자 수 상한에서 자르기), `resolveReferencedFiles`(임시 폴더로 있음/없음/생성물 경로 거부), `RecommendationReplySchema`/`parseRecommendationReply`/`requestQuestionRecommendations`(파싱·검증·usage·오류), `labelRecommendationSource`, "## 가정" 절 왕복·절을 지우면 빈 배열·옛 JSON 배열 형식 호환을 확인했다.
+- `apps/studio/lib/server/claude-code-ask.test.ts`(신규, 이 모듈의 첫 테스트): 가짜 SDK로 `webTools` 없을 때(`tools: []`, `maxTurns: 1`)와 있을 때(`tools: ['WebSearch','WebFetch']`, `maxTurns` 증가, `settingSources`·`mcpServers`는 그대로 닫혀 있음)를 확인했다. 실제 모델·네트워크 호출은 하지 않았다.
+- `apps/studio/app/api/sessions/[id]/requirements/{extract,apply,recommend}/route.test.ts`(신규 recommend 4건, extract·apply 갱신): 새 응답 필드(`referencedFiles`·`outOfScope`·`assumptions`)가 그대로 전달되는지, apply가 새 `{requirements, assumptions}` 본문을 검증하는지(배열만 보내면 400), recommend가 질문마다 추천을 돌려주고 빈 질문·백엔드 미지원 오류를 그대로 전하는지 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`(보강): `ImportFlow`를 내보내 렌더한 뒤 "과제"가 한 글자도 없는지, "만들 것을 적어 주세요"가 있는지 확인했다.
+- `pnpm --filter @b-studio/agent typecheck`·`pnpm --filter @b-studio/studio typecheck`(둘 다 오류 없음), `pnpm --filter @b-studio/studio lint`(0 오류, 기존 이미지 경고만), `pnpm vitest run apps/studio`(121개 파일·1,016건 통과), `pnpm --filter @b-studio/agent exec vitest run`(41개 파일·671건 통과)를 확인했다. 저장소 전체 `pnpm test`는 `packages/sandbox/src/docker/format.test.ts`(Kubernetes 경로 확인, 이번 변경과 무관)만 기기 부하로 인한 사전 존재 플레이키였고 따로 돌려도 재현됐다(다른 두 플레이키 후보 `checkpoints.test.ts`·`sessions-review.test.ts`는 이번 실행에서는 통과했다).
+- 실제 Docker 샌드박스·모델 호출은 부르지 않았다(지시된 조건). `resolveReferencedFiles`만 실제 임시 폴더 파일시스템으로 검증했고, `requestQuestionRecommendations`·추출 호출은 스크립트 응답(`ModelAsk`)으로 검증했다.
+
+### 감수한 트레이드오프
+- **참조 파일 추출은 정규식 휴리스틱이다.** 코드 블록 안에 우연히 등장한 `파일.json` 같은 낱말도 참조로 잡을 수 있고, 공백이 든 경로("my file.json")는 잡지 못한다. 실제 과제 명세에서 관찰한 형태(슬래시로 구분된 상대 경로, 확장자 있는 파일명)를 우선했다.
+- **참조 파일 미리보기는 JSON 최상위 한 단계만 본다.** 중첩된 배열(예: `{"data":{"posts":[...]}}`)은 길이를 보여주지 못하고 그냥 키 이름만 나열한다 — 다음 라운드에서 필요해지면 재귀 요약을 추가한다.
+- **api 백엔드의 추천 값은 출처를 붙이지 못한다.** `ModelAsk`가 `ModelClient` 어댑터를 거치는 구조라 이번 라운드에서는 새 어댑터를 만들지 않고 "출처 확인 필요" 표시로 정직하게 남겼다 — api 백엔드에도 검색이 필요해지면 별도 ADR로 어댑터를 넓힌다.
+- **"모호한 점 자동 질문"(참조 파일 없음)은 모델이 낸 질문과 합쳐 5개 상한을 나눠 쓴다.** 참조 파일이 여러 개 없으면 모델이 낸 진짜 모호함 질문이 상한에 밀려날 수 있다 — 우선순위는 모델 질문을 앞에 두고 남는 자리만 참조 파일 질문으로 채운다.
+- **저장 API 본문 형식이 바뀌어 예전 요청 본문(배열)은 이제 400이 난다.** 외부에 공개된 계약이 아니라(스튜디오 화면 전용) 과거 형식 호환을 넣지 않았다 — 같은 커밋에서 라우트·컴포넌트·테스트를 함께 바꿨다.
 
 ---
 

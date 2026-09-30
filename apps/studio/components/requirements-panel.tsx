@@ -44,6 +44,26 @@ interface RequirementsSnapshot {
   requirements: RequirementView[];
   coverage?: RequirementCoverage;
   allMustHavesPrefill?: string;
+  assumptions: string[];
+}
+
+interface ReferencedFileView {
+  path: string;
+  exists: boolean;
+  sizeBytes?: number;
+  preview?: string;
+}
+
+interface RecommendationSource {
+  url: string;
+  title?: string;
+}
+
+interface RecommendationView {
+  question: string;
+  answer: string;
+  rationale: string;
+  sources: RecommendationSource[];
 }
 
 interface ExtractionPreview {
@@ -51,6 +71,9 @@ interface ExtractionPreview {
   questions: string[];
   source: "model" | "fallback";
   reason?: string;
+  referencedFiles: ReferencedFileView[];
+  outOfScope: string[];
+  assumptions: string[];
 }
 
 const KIND_LABEL: Record<RequirementKind, string> = { api: "API", ui: "화면", data: "데이터", nonfunctional: "비기능", docs: "문서" };
@@ -158,19 +181,33 @@ function RequirementsList({
         </div>
       )}
       {canManage && snapshot.allMustHavesPrefill && (
-        <button
-          type="button"
-          onClick={() => onWork(snapshot.allMustHavesPrefill!)}
-          className="self-start rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85"
-        >
-          전체 계획 세우기(필수 요구사항)
-        </button>
+        <div className="flex flex-col gap-1.5 rounded-control border border-line bg-panel p-3">
+          <p className="text-sm font-medium text-ink">다음 단계</p>
+          <p className="text-xs text-muted">에이전트가 매 요청마다 이 목록을 읽고 요구사항별로 작업·검증 근거를 추적합니다. 한 번에 시작하거나, 아래에서 요구사항 하나씩 골라 시작할 수 있습니다.</p>
+          <button
+            type="button"
+            onClick={() => onWork(snapshot.allMustHavesPrefill!)}
+            className="mt-1 self-start rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85"
+          >
+            전체 계획 세우기(필수 요구사항)
+          </button>
+        </div>
       )}
       <ul className="flex flex-col gap-3">
         {snapshot.requirements.map((requirement) => (
           <RequirementCard key={requirement.id} requirement={requirement} canManage={canManage} onWork={() => onWork(requirement.workPrefill)} />
         ))}
       </ul>
+      {snapshot.assumptions.length > 0 && (
+        <div className="rounded-control border border-line bg-panel p-3">
+          <p className="text-sm font-medium text-ink">가정</p>
+          <ul className="mt-1 list-inside list-disc space-y-0.5 text-sm text-muted">
+            {snapshot.assumptions.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <p className="text-xs text-muted">파일: docs/requirements.md · 세션 작업 복사본에 저장되어 체크포인트·PR에 그대로 실립니다. 세션 id: {sessionId}</p>
     </div>
   );
@@ -240,14 +277,19 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
 
 type SourceTab = "paste" | "file" | "issue";
 
-function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onApplied: (snapshot: RequirementsSnapshot) => void; onCancel?: () => void }) {
+/** ImportFlow는 테스트(용어 검사·렌더)에서도 직접 쓸 수 있게 내보낸다 */
+export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onApplied: (snapshot: RequirementsSnapshot) => void; onCancel?: () => void }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
   const [specText, setSpecText] = useState("");
   const [filePath, setFilePath] = useState("");
   const [issueNumber, setIssueNumber] = useState("");
   const [preview, setPreview] = useState<ExtractionPreview>();
   const [drafts, setDrafts] = useState<RequirementDraft[]>([]);
+  const [assumptions, setAssumptions] = useState<string[]>([]);
   const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [recommendations, setRecommendations] = useState<Record<number, RecommendationView>>({});
+  const [recommendationSource, setRecommendationSource] = useState<"web" | "model">();
+  const [recommending, setRecommending] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -278,11 +320,47 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
       }
       setPreview(data);
       setDrafts(data.requirements);
+      setAssumptions(data.assumptions);
       setAnswers({});
+      setRecommendations({});
+      setRecommendationSource(undefined);
     } catch {
       setError("요구사항을 뽑지 못했습니다");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function recommend() {
+    if (!preview || preview.questions.length === 0) return;
+    setRecommending(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/recommend`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ questions: preview.questions, ...(sourceTab === "paste" ? { specText } : {}) }),
+      });
+      const data = await readJson<{ recommendations: RecommendationView[]; sourced: "web" | "model" }>(response);
+      if (!response.ok) {
+        setError(data.error ?? "추천 값을 받지 못했습니다");
+        return;
+      }
+      const byIndex: Record<number, RecommendationView> = {};
+      const nextAnswers: Record<number, string> = { ...answers };
+      data.recommendations.forEach((recommendation) => {
+        const index = preview.questions.indexOf(recommendation.question);
+        if (index === -1) return;
+        byIndex[index] = recommendation;
+        nextAnswers[index] = recommendation.answer;
+      });
+      setRecommendations(byIndex);
+      setRecommendationSource(data.sourced);
+      setAnswers(nextAnswers);
+    } catch {
+      setError("추천 값을 받지 못했습니다");
+    } finally {
+      setRecommending(false);
     }
   }
 
@@ -293,7 +371,7 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
       const response = await fetch(`/api/sessions/${sessionId}/requirements/apply`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(drafts),
+        body: JSON.stringify({ requirements: drafts, assumptions }),
       });
       const data = await readJson<RequirementsSnapshot>(response);
       if (!response.ok) {
@@ -324,7 +402,7 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
           ← 목록으로
         </button>
       )}
-      <div className="glass-soft inline-flex w-fit rounded-control p-0.5 text-sm" role="tablist" aria-label="명세 입력 방법">
+      <div className="glass-soft inline-flex w-fit rounded-control p-0.5 text-sm" role="tablist" aria-label="요구사항 입력 방법">
         {(
           [
             { id: "paste", label: "붙여넣기" },
@@ -350,14 +428,14 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
           value={specText}
           onChange={(event) => setSpecText(event.target.value)}
           rows={8}
-          placeholder="과제 명세를 붙여넣으세요"
+          placeholder="만들 것을 적어 주세요"
           className="rounded-control border border-line bg-ground px-3 py-2 text-sm"
         />
       ) : sourceTab === "file" ? (
         <input
           value={filePath}
           onChange={(event) => setFilePath(event.target.value)}
-          placeholder="예: 과제.md, README.md, docs/spec.md"
+          placeholder="예: 요구사항.md, README.md, docs/spec.md"
           className="rounded-control border border-line bg-ground px-3 py-2 text-sm"
         />
       ) : (
@@ -385,19 +463,66 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
           <p className="text-sm text-muted">
             {preview.source === "model" ? "추출 모델이 나눴습니다." : `결정론적 방식으로 나눴습니다${preview.reason ? `: ${preview.reason}` : ""}`}
           </p>
+
+          {preview.referencedFiles.length > 0 && (
+            <div className="flex flex-col gap-1.5 rounded-control bg-ground px-3 py-2">
+              <p className="text-sm font-medium text-ink">참조 파일</p>
+              <ul className="flex flex-col gap-1 text-xs text-muted">
+                {preview.referencedFiles.map((file) => (
+                  <li key={file.path} className={file.exists ? undefined : "text-fail"}>
+                    <span className="font-mono">{file.path}</span>
+                    {file.exists ? (
+                      <>
+                        {" "}
+                        · 있음{file.sizeBytes !== undefined ? ` (${file.sizeBytes.toLocaleString("ko-KR")} bytes)` : ""}
+                        {file.preview ? ` · ${file.preview}` : ""}
+                      </>
+                    ) : (
+                      " · 작업 복사본에 없음"
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {preview.questions.length > 0 && (
             <div className="flex flex-col gap-2 rounded-control bg-ground px-3 py-2">
-              <p className="text-sm font-medium text-ink">모호한 점 (최대 5개) — 답하고 &ldquo;스펙을 고치고 다시 뽑기&rdquo;를 눌러 보세요</p>
-              {preview.questions.map((question, index) => (
-                <label key={index} className="flex flex-col gap-1 text-sm">
-                  <span>{question}</span>
-                  <input
-                    value={answers[index] ?? ""}
-                    onChange={(event) => setAnswers((current) => ({ ...current, [index]: event.target.value }))}
-                    className="rounded-control border border-line bg-panel px-2 py-1 text-sm"
-                  />
-                </label>
-              ))}
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-medium text-ink">모호한 점 (최대 5개) — 답하고 &ldquo;스펙을 고치고 다시 뽑기&rdquo;를 눌러 보세요</p>
+                <button
+                  type="button"
+                  disabled={recommending}
+                  onClick={recommend}
+                  className="ml-auto shrink-0 rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-60"
+                >
+                  {recommending ? "추천 값 찾는 중" : "추천 값으로 채우기"}
+                </button>
+              </div>
+              {preview.questions.map((question, index) => {
+                const recommendation = recommendations[index];
+                return (
+                  <label key={index} className="flex flex-col gap-1 text-sm">
+                    <span>{question}</span>
+                    <input
+                      value={answers[index] ?? ""}
+                      onChange={(event) => setAnswers((current) => ({ ...current, [index]: event.target.value }))}
+                      className="rounded-control border border-line bg-panel px-2 py-1 text-sm"
+                    />
+                    {recommendation && (
+                      <p className="text-xs text-muted">
+                        {recommendation.rationale}
+                        {recommendationSource === "model" && <span className="ml-1 font-medium text-wait">출처 확인 필요</span>}
+                        {recommendation.sources.map((source, sourceIndex) => (
+                          <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer" className="ml-1 underline">
+                            {source.title ?? source.url}
+                          </a>
+                        ))}
+                      </p>
+                    )}
+                  </label>
+                );
+              })}
               <button
                 type="button"
                 disabled={busy}
@@ -406,6 +531,17 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
               >
                 스펙을 고치고 다시 뽑기
               </button>
+            </div>
+          )}
+
+          {preview.outOfScope.length > 0 && (
+            <div className="flex flex-col gap-1 rounded-control bg-ground px-3 py-2">
+              <p className="text-sm font-medium text-ink">범위 밖</p>
+              <ul className="list-inside list-disc text-sm text-muted">
+                {preview.outOfScope.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
             </div>
           )}
 
@@ -456,6 +592,20 @@ function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onA
             ))}
           </ul>
 
+          <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
+            <p className="text-sm font-medium text-ink">가정</p>
+            <textarea
+              value={assumptions.join("\n")}
+              onChange={(event) => setAssumptions(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
+              rows={Math.max(2, assumptions.length)}
+              placeholder="가정(줄마다 하나) — 데이터 규모·동시성/트래픽(명세가 실마리를 줄 때만)·페이지네이션 등"
+              className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
+            />
+          </div>
+
+          <p className="text-xs text-muted">
+            저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 제출 준비 점검표가 이걸로 완료 여부를 판단합니다.
+          </p>
           <button
             type="button"
             disabled={busy || drafts.length === 0}
