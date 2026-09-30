@@ -418,6 +418,11 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { name: '비밀번호·시크릿 대입', pattern: /(password|passwd|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{6,}['"]/i },
 ];
 const EXAMPLE_FILE = /(^|\/)\.env\.(example|sample|template)$|\.(example|sample)\.[a-z]+$|example|sample/i;
+/**
+ * 테스트·픽스처 코드. 여기 있는 비밀번호·시크릿은 테스트용 고정값이라 제출물의 비밀 값 유출이 아니다
+ * (pay 복제본에서 18건 중 대부분이 src/test의 JWT·웹훅 테스트 시크릿이었다)
+ */
+const TEST_OR_FIXTURE_FILE = /(^|\/)(src\/test|tests?|__tests__|fixtures?|__mocks__|mocks?|testdata)\/|\.(test|spec)\.[cm]?[jt]sx?$|(Test|Tests|IT|Spec)\.(java|kt)$|_test\.(py|go)$|(^|\/)test_[^/]+\.py$/;
 
 export async function checkSecrets(root: string): Promise<ChecklistItem> {
   const id = 'secrets';
@@ -425,7 +430,7 @@ export async function checkSecrets(root: string): Promise<ChecklistItem> {
   const files = await listFiles(root);
   const leaks: string[] = [];
   for (const file of files) {
-    if (EXAMPLE_FILE.test(file)) continue;
+    if (EXAMPLE_FILE.test(file) || TEST_OR_FIXTURE_FILE.test(file)) continue;
     const ext = path.extname(file);
     if (BINARY_EXTENSIONS.has(ext) || LOCK_FILES.has(path.basename(file))) continue;
     const text = await readTextSafe(path.join(root, file));
