@@ -143,6 +143,22 @@ describe('findRepeatedActions — 반복 순서', () => {
     expect(candidates).toHaveLength(1);
   });
 
+  it('쓰기·고치기만 이어진 순서는 반복 후보로 보지 않는다(매번 다른 내용을 쓰는 실제 작업이다)', () => {
+    const writeFile = (path: string) => ({ name: 'write_file', input: { path }, chars: 60 });
+    const steps = () => [writeFile('api/A.java'), writeFile('api/B.java'), writeFile('api/C.java')];
+    const sessions = [sessionOf('s1', run('r1', steps()), run('r2', steps()), run('r3', steps()))];
+
+    expect(findRepeatedActions(sessions).filter((c) => c.kind === 'sequence')).toHaveLength(0);
+  });
+
+  it('같은 실행들에서 한 칸씩 밀린 창은 하나로 합친다', () => {
+    const steps = () => [listFiles('src'), readFile('src/a.ts'), readFile('src/b.ts'), readFile('src/c.ts'), runCommand('web', ['pnpm', 'test'])];
+    const sessions = [sessionOf('s1', run('r1', steps()), run('r2', steps()), run('r3', steps()))];
+
+    // 길이 4 창이 두 개(0~3, 1~4) 나오지만 같은 실행 3개에서 한 칸 밀린 것이라 하나만 남는다
+    expect(findRepeatedActions(sessions).filter((c) => c.kind === 'sequence')).toHaveLength(1);
+  });
+
   it('도구 이름은 같아도 입력(경로)이 다르면 다른 신호로 본다', () => {
     const sessions = [
       sessionOf(

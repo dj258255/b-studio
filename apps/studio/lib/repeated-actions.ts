@@ -332,6 +332,36 @@ function containsWindow(long: readonly string[], short: readonly string[]): bool
   return false;
 }
 
+/** 파일을 바꾸는 도구. 이것만으로 이뤄진 순서는 반복 후보로 보지 않는다 */
+const MUTATING_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file', 'delete_file']);
+
+function totalCharsOf(agg: SequenceAgg): number {
+  return agg.occurrences.reduce((sum, occurrence) => sum + occurrence.chars, 0);
+}
+
+function sameRuns(a: SequenceAgg, b: SequenceAgg): boolean {
+  const left = new Set(a.occurrences.map((occurrence) => occurrence.runId));
+  const right = new Set(b.occurrences.map((occurrence) => occurrence.runId));
+  return left.size === right.size && [...left].every((id) => right.has(id));
+}
+
+/** 한쪽 끝을 한 칸 이상 밀면 짧은 쪽 길이-1 이상이 겹치는지(A→B→C와 B→C→D) */
+function overlapsByShift(a: readonly string[], b: readonly string[]): boolean {
+  const need = Math.min(a.length, b.length) - 1;
+  if (need < 1) return false;
+  for (let shift = -(b.length - 1); shift <= a.length - 1; shift += 1) {
+    let run = 0;
+    for (let i = 0; i < b.length; i += 1) {
+      const j = i + shift;
+      if (j >= 0 && j < a.length && a[j] === b[i]) {
+        run += 1;
+        if (run >= need) return true;
+      } else run = 0;
+    }
+  }
+  return false;
+}
+
 function findRepeatedSequences(runs: readonly RunRecord[]): RepeatedActionCandidate[] {
   // 길이별로 따로 모은다(2, 3, 4). 인덱스 0이 길이 2
   const byLength: Array<Map<string, SequenceAgg>> = [new Map(), new Map(), new Map()];
@@ -357,12 +387,21 @@ function findRepeatedSequences(runs: readonly RunRecord[]): RepeatedActionCandid
     for (const agg of byLength[index]!.values()) {
       const runIds = new Set(agg.occurrences.map((occurrence) => occurrence.runId));
       if (runIds.size < MIN_SEQUENCE_RUNS) continue;
+      // 쓰기·고치기만 이어진 순서는 매번 다른 내용을 쓰는 실제 작업이지 스크립트로 굳힐 반복이 아니다
+      if (!agg.exampleCalls.some((call) => !MUTATING_TOOLS.has(call.name))) continue;
       if (accepted.some((longer) => longer.tokens.length > agg.tokens.length && containsWindow(longer.tokens, agg.tokens))) continue;
       accepted.push(agg);
     }
   }
 
-  return accepted.map((agg) => buildSequenceCandidate(agg));
+  // 같은 실행들에서 한 칸씩 밀린 창(A→B→C→D와 B→C→D→E)은 사실상 같은 반복이다. 결과 글자가 큰 것 하나만 남긴다
+  const bySize = [...accepted].sort((a, b) => totalCharsOf(b) - totalCharsOf(a));
+  const kept: SequenceAgg[] = [];
+  for (const agg of bySize) {
+    if (kept.some((other) => sameRuns(other, agg) && overlapsByShift(other.tokens, agg.tokens))) continue;
+    kept.push(agg);
+  }
+  return kept.map((agg) => buildSequenceCandidate(agg));
 }
 
 function buildSequenceCandidate(agg: SequenceAgg): RepeatedActionCandidate {

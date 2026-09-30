@@ -31,7 +31,8 @@ export async function projectRepeatedActions(projectId: string, options: { now?:
   const project = await findProject(projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
   // listSessions()는 최근에 바뀐 것부터 정렬해 돌려준다(sessions.ts) — findRepeatedActions가 그중 최근 N개만 본다
-  const sessions = (await listSessions()).filter((session) => session.projectId === projectId);
+  // 데모 세션은 준비된 대본을 되풀이할 뿐이라 에이전트의 반복 행동이 아니다. 분석에서 뺀다
+  const sessions = (await listSessions()).filter((session) => session.projectId === projectId && (session.backend ?? session.mode) !== 'demo');
   const inputs = sessions.map((session) => ({ sessionId: session.id, events: sessionHistory(session.id) }));
   const all = findRepeatedActions(inputs);
   const ignored = readIgnoreList(projectId);
