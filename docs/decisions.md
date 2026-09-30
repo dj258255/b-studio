@@ -103,6 +103,7 @@
 - [ADR-086 기본 egress에 GitHub 릴리스 호스트를 연다(Gradle 배포판)](#adr-086-기본-egress에-github-릴리스-호스트를-연다gradle-배포판)
 - [ADR-087 개발 화면 탭을 일곱 개로 묶고 올리기 전 점검을 저장소 탭으로 옮긴다](#adr-087-개발-화면-탭을-일곱-개로-묶고-올리기-전-점검을-저장소-탭으로-옮긴다)
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
+- [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
 
 ---
 
@@ -3615,6 +3616,37 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 진짜 멀티 모듈 Gradle(루트에만 래퍼·`settings.gradle`)은 자동으로 고치지 않았다 — 확인 메모로 사람이 `studio.yaml`을 손보게 한다. 테스트 탭의 실행 계획을 서브프로젝트 인식으로 다시 설계하는 것은 더 큰 작업이라 이번 범위에서 뺐다.
 - pnpm/npm 워크스페이스의 루트 `node_modules`는 볼륨으로 캐시하지 않는다 — 세션마다(또는 컨테이너 재생성마다) 루트 설치를 다시 하므로, pnpm 콘텐츠 스토어(`/cache/pnpm`)는 캐시돼도 링크 단계는 매번 다시 돈다. 올바르게 동작하지만 예전(서비스 폴더 자체가 루트인 경우)보다 기동이 조금 느릴 수 있다.
 - 이 변경은 실제 사용 중 발견한 버그 보고로 시작했고, 이 작업 세션에서는 새 GitHub 이슈를 만들 수 없는 정책이라 "관련:" 이슈 번호를 달지 못했다 — PR 본문에 같은 맥락을 남겨 대신한다.
+
+---
+
+## ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다
+
+상태: 채택
+관련: 없음(도그푸딩 중 발견)
+
+### 맥락
+- claude-code 백엔드의 모델 선택(`CLAUDE_CODE_ALIASES`)은 별칭(opus·sonnet·haiku·fable)이 실제로 풀리는 모델 id·공식 단가를 한 번의 실험(E8, 2026-09-30)에서 관측해 하드코딩한 표였다. dc803b9에서 Fable 5.1을 추가하고 이름에 버전을 붙였는데, 이런 값(별칭이 무엇으로 풀리는지, 새 모델이 생겼는지, 버전이 올라갔는지)은 로그인한 계정·Claude Code CLI 버전이 바뀔 때마다 사람이 다시 확인하고 코드를 고쳐야 갱신되는 구조였다.
+- Claude Agent SDK의 `query(...).supportedModels()`가 바로 이 정보(관측이 아니라 CLI 자신이 보고하는 값)를 `ModelInfo[]`로 준다는 것을 2026-10-01(Claude Agent SDK 0.3.267, Claude Code 2.1.285)에 확인했다: `value`(고를 값)·`resolvedModel`(별칭이 실제로 풀리는 id)·`displayName`·`description`·`supportsEffort`/`supportedEffortLevels`(모델마다 다르다 — 이번에 처음 확인한 사실: Haiku는 노력 단계를 지원하지 않는다). 하드코딩 표 대신 이 목록을 쓰면 별칭이 바뀌거나 새 모델(예: 다음 세대)이 나와도 스튜디오 코드를 고치지 않고 그대로 반영된다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 하드코딩 표를 계속 손으로 갱신한다 | 매번 실험(E8 같은)으로 관측해야 하고, 갱신이 늦으면 화면이 실제와 어긋난다(이미 한 번 벌어진 일) |
+| B. Anthropic 공개 모델 목록 API(`client.models.list()`, 일반 Messages API)를 쓴다 | claude-code 백엔드는 API 키가 아니라 로그인한 Claude Code 구독으로 돈다 — 어떤 별칭이 그 계정·CLI 버전에서 실제로 고를 수 있는지는 Messages API가 아니라 Claude Code 자신만 안다 |
+| **C. Claude Agent SDK의 `supportedModels()`를 그대로 쓴다** | 채택. 세션이 실제로 쓰는 것과 같은 SDK·같은 로그인 경로로 물어보므로 별칭 해석이 어긋날 일이 없다. 다만 CLI 프로세스를 하나 더 띄워야 해 비용·지연이 있다(아래 완화) |
+
+### 결정
+- `packages/agent/src/claude-code-runner.ts`에 `fetchClaudeCodeModels()`를 추가한다. `preflightClaudeCode`와 같은 모양으로(아무것도 내보내지 않는 프롬프트로 `query()`를 열고, 필요한 정보만 받은 뒤 바로 닫는다) `supportedModels()`를 부르고, 15초 안에 응답하지 않으면 실패로 본다.
+- `apps/studio/lib/server/claude-code-models.ts`가 이 호출을 1시간 캐시하고(`loadClaudeCodeModels`), 캐시가 비어 있는 동안 동시에 들어온 요청은 진행 중인 호출 하나를 함께 기다린다(in-flight 중복 제거) — 화면을 여러 번 열어도 Claude Code 프로세스를 여러 번 띄우지 않는다.
+- `apps/studio/lib/server/model-picker.ts`가 `ModelInfo`를 `ModelPickerOption`으로 옮긴다: `id`는 SDK의 `value`를 그대로 쓰고(SDK의 "기본" 행은 `value === ''`라 우리 기존 "기본" 옵션과 그대로 맞아떨어진다), `label`은 설명의 첫 세그먼트에서 버전 이름을 뽑고("Opus 5 with 1M context" → "Opus 5 · 1M"), 한국어 안내(hint·badges)는 `resolvedModel` 접두어로 가른 계열(opus·sonnet·haiku·fable)에 예전부터 쓰던 문구를 그대로 붙인다(계열을 모르면 SDK 설명을 그대로 보여준다). 어떤 실패든(CLI 없음·로그인 안 됨·타임아웃) `CLAUDE_CODE_ALIASES`(예전 하드코딩 표)로 되돌아가고 "모델 목록을 불러오지 못해 알려진 목록을 보여줍니다"를 note로 남긴다.
+- **단가는 지어내지 않는다.** SDK는 단가를 주지 않으므로, E8이 실측한 것만 담은 작은 표(`claude-opus-5`→5/25, `claude-sonnet-5`→2/10, `claude-haiku-4-5`→1/5, 백만 토큰당 USD)를 `resolvedModel`에서 `[1m]` 접미사와 날짜 접미사(`-YYYYMMDD`)를 지운 뒤 정확히 일치할 때만 붙인다. Fable처럼 확인하지 못한 모델은 이 표에 없어 단가를 보여주지 않는다 — 이 표가 새 세대(예: Opus 6)를 자동으로 알아내지 못한다는 한계는 그대로 남는다(가격이 바뀌면 사람이 확인해서 고쳐야 한다).
+- **노력 단계는 모델마다 판단한다.** `ModelInfo.supportedEffortLevels`가 없는 모델(Haiku)은 `supportsEffort: false`로 옮기고, `effortPickerFor`가 고른 모델을 찾아 노력 단계 선택 자체를 "이 모델은 노력 단계를 지원하지 않습니다"로 막는다(전에는 claude-code 백엔드 전체가 항상 지원한다고 봤다).
+- **예전에 저장된 세션 값과의 호환.** SDK가 돌려주는 실제 `value`는 CLI 버전에 따라 형태가 바뀔 수 있다(관측: `opus` 별칭이 `opus[1m]`로, `fable`이 `claude-fable-5-1[1m]`로 나타났다 — `sonnet`·`haiku`는 그대로였다). 예전에 저장한 세션의 `modelId`(구버전 화면이 쓰던 `opus`·`sonnet`·`haiku`·`fable`)는 값으로 먼저 찾고, 없으면 `resolvedModel` 접두어로 같은 계열의 옵션을 찾아(`findClaudeCodeOption`) 그 옵션의 실제 id로 바꿔 돌려준다 — 화면은 `option.id === current`로 체크 표시를 매기므로, 이 정규화가 없으면 예전 세션이 고른 모델의 체크 표시가 사라져 보인다.
+
+### 감수한 트레이드오프
+- 모델 목록을 물어보는 데 Claude Code 프로세스를 하나 더 띄운다(관측: 수 초). 1시간 캐시·in-flight 중복 제거로 평소에는 거의 발생하지 않지만, 캐시가 갓 비워진 직후 여러 사용자가 동시에 화면을 열면 그 한 번의 호출을 함께 기다린다.
+- 단가 표는 여전히 사람이 관리한다(SDK가 주지 않는 정보라 지어낼 수 없다). 새 세대 모델이 나오면 단가가 없는 채로(가격 안내 없이) 옵션에 나타난다 — 잘못된 단가를 보여주는 것보다 안전하다고 판단했다.
+- `resolvedModel`의 정확한 형태(접미사 포함 여부)가 CLI 버전마다 달라질 수 있어, 계열 판정(`claudeFamilyOfResolvedId`)과 단가 정규화(`normalizeResolvedId`)는 접두어 매칭·정규식으로 느슨하게 짰다 — 언젠가 접두어 자체가 바뀌면(예: `claude-opus-6`) 다시 계열 표를 넓혀야 한다.
 
 ---
 
