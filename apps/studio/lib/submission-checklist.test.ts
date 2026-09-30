@@ -281,3 +281,28 @@ describe('buildSubmissionChecklist / scoreOf', () => {
     expect(report.score.passed).toBe(scoreOf(report.items).passed);
   });
 });
+
+describe('checkRequirements — 명세 탭 상태', () => {
+  it('명세 탭이 쓰는 "상태: 검증됨"을 끝난 것으로 본다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-req-'));
+    await mkdir(path.join(root, 'docs'), { recursive: true });
+    await writeFile(path.join(root, 'docs', 'requirements.md'), '# 요구사항\n\n## R1. 목록 API\n- 상태: 검증됨\n\n## R2. 목록 화면\n- 상태: 검증됨\n');
+    expect((await checkRequirements(root)).status).toBe('pass');
+  });
+
+  it('실시간 상태가 있으면 파일보다 그것을 쓰고, 필수가 남으면 실패, 선택만 남으면 경고다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-req-'));
+    const must = await checkRequirements(root, [
+      { id: 'R1', title: '목록 API', priority: 'must', status: '검증됨' },
+      { id: 'R2', title: '목록 화면', priority: 'must', status: '작업 중' },
+    ]);
+    expect(must.status).toBe('fail');
+    expect(must.reason).toContain('R2 목록 화면(작업 중)');
+    const should = await checkRequirements(root, [
+      { id: 'R1', title: '목록 API', priority: 'must', status: '검증됨' },
+      { id: 'R3', title: '정렬', priority: 'should', status: '미착수' },
+    ]);
+    expect(should.status).toBe('warn');
+    expect((await checkRequirements(root, [{ id: 'R1', title: '목록 API', priority: 'must', status: '검증됨' }])).status).toBe('pass');
+  });
+});
