@@ -99,7 +99,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다
           <IdleServicePanel sessionId={view.snapshot.id} service={active.service} />
         ) : !active.service.url ? (
-          <ServicePending service={active.service} />
+          <ServicePending sessionId={view.snapshot.id} service={active.service} />
         ) : (
           // 재시작 중에도 미리보기를 지우지 않아 입력한 경로와 요청이 유지된다. 준비되면 새 주소로 다시 불러온다
           <div className="flex h-full flex-col">
@@ -367,19 +367,47 @@ function IdleServicePanel({ sessionId, service }: { sessionId: string; service: 
   );
 }
 
-function ServicePending({ service }: { service: ServiceView }) {
+function ServicePending({ sessionId, service }: { sessionId: string; service: ServiceView }) {
   const tone = toneOfService(service.state);
+  const [turningOn, setTurningOn] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function turnOn() {
+    setTurningOn(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/services/${service.name}/selection`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ on: true }),
+    });
+    if (!response.ok) setError(((await response.json().catch(() => ({}))) as { error?: string }).error ?? "서비스를 켜지 못했습니다");
+    setTurningOn(false);
+  }
+
   return (
     <div className="flex h-full flex-col justify-center px-10">
       <p className={`text-lg font-semibold ${TONE_TEXT[tone]}`}>
-        {service.name} {SERVICE_STATE_LABEL[service.state]}
+        {service.name} {service.state === "off" ? "꺼 둔 서비스입니다" : SERVICE_STATE_LABEL[service.state]}
       </p>
       {service.detail && <p className="mt-2 max-w-[70ch] font-mono text-sm break-words text-muted">{service.detail}</p>}
       <p className="mt-4 max-w-[60ch] text-sm leading-6 text-muted">
-        {service.state === "stopped"
-          ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
-          : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다."}
+        {service.state === "off"
+          ? "서비스 선택에서 이 서비스를 꺼 뒀습니다. 켜면 이미지를 다시 빌드하고 준비될 때까지 기다립니다."
+          : service.state === "stopped"
+            ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
+            : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다."}
       </p>
+      {service.state === "off" && (
+        <button
+          type="button"
+          onClick={turnOn}
+          disabled={turningOn}
+          className="mt-4 self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+        >
+          {turningOn ? "켜는 중" : "켜기"}
+        </button>
+      )}
+      {error && <p className="mt-2 text-sm text-fail">{error}</p>}
     </div>
   );
 }

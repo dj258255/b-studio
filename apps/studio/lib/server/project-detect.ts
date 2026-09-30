@@ -20,6 +20,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
   databaseSpecFor,
+  dependencyClosure,
   detectEnvReferences,
   importSupportingServices,
   needsDevDefaultCredentials,
@@ -68,6 +69,8 @@ export interface ProjectDetection {
   services: DetectedService[];
   /** 기존 compose에서 가져오거나 새로 제안한 부가 서비스(DB·캐시·메시지 큐 등, ADR-073) */
   infra: InfraService[];
+  /** infra 중 앱 서비스가 실제로 기대는(닫힘) 이름(ADR-083). 폴더 열기 미리보기의 체크박스 기본값이다 — 아무도 기대지 않는 부가 서비스는 기본으로 켜지 않는다 */
+  defaultInfra: string[];
   warnings: string[];
 }
 
@@ -88,7 +91,7 @@ export async function detectProject(folder: string): Promise<ProjectDetection> {
   const info = await stat(root).catch(() => undefined);
   if (!info?.isDirectory()) throw new Error(`폴더가 아닙니다: ${root}`);
   const name = path.basename(root);
-  if (await exists(path.join(root, SPEC_FILE))) return { folder: root, name, hasSpec: true, services: [], infra: [], warnings: [] };
+  if (await exists(path.join(root, SPEC_FILE))) return { folder: root, name, hasSpec: true, services: [], infra: [], defaultInfra: [], warnings: [] };
 
   const childDirNames = await childDirs(root);
   const candidates = ['.', ...childDirNames];
@@ -103,13 +106,16 @@ export async function detectProject(folder: string): Promise<ProjectDetection> {
   const warnings: string[] = [];
   if (services.length === 0) {
     warnings.push('Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다. studio.yaml을 직접 쓰거나 지원하는 스택인지 확인하세요');
-    return { folder: root, name, hasSpec: false, services, infra: [], warnings };
+    return { folder: root, name, hasSpec: false, services, infra: [], defaultInfra: [], warnings };
   }
 
   const infra = await detectInfra(root, services, childDirNames);
   await wireServiceEnvironments(root, services, infra);
   await disableSpringDockerCompose(root, services);
-  return { folder: root, name, hasSpec: false, services, infra, warnings };
+  // 서비스 선택(ADR-083)의 기본값과 같은 규칙: 앱 서비스가 기대는 부가 서비스 + 그 부가 서비스끼리의 기댐 닫힘.
+  // 아무도 기대지 않는 부가 서비스(예: 가져왔지만 안 쓰는 카프카)는 기본으로 체크하지 않는다
+  const defaultInfra = [...dependencyClosure(services.flatMap((service) => service.dependsOn), Object.fromEntries(infra.map((service) => [service.name, service.dependsOn])))];
+  return { folder: root, name, hasSpec: false, services, infra, defaultInfra, warnings };
 }
 
 /**

@@ -12,8 +12,11 @@ export type SessionStatus = 'idle' | 'starting' | 'ready' | 'failed' | 'stopped'
 export type SessionMode = 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'demo';
 /** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
 export type WorkspaceKind = 'copy' | 'local';
-/** stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다 */
-export type ServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped';
+/**
+ * stopped: 샌드박스를 중지했거나 이전 스튜디오 프로세스가 남긴 세션이라 서비스가 실행되고 있지 않다.
+ * off: 서비스 선택(ADR-083)에서 사용자가 꺼 둬 이번 기동에서 띄우지 않았다 — 실패가 아니다, 언제든 켤 수 있다
+ */
+export type ServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped' | 'off';
 
 export interface ServiceView {
   name: string;

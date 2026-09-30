@@ -22,6 +22,8 @@ interface Proposal {
     services: Array<{ name: string; template: string; path: string; port: number; notes: string[] }>;
     /** 기존 compose에서 가져오거나 새로 제안한 부가 서비스(DB·캐시 등, ADR-073) */
     infra: InfraProposal[];
+    /** infra 중 앱이 실제로 기대는(닫힘) 이름(ADR-083). 아래 체크박스의 기본 선택값이다 */
+    defaultInfra: string[];
     warnings: string[];
   };
   files: Array<{ path: string; content: string }>;
@@ -54,6 +56,7 @@ export function OpenFolder() {
   const router = useRouter();
   const [folder, setFolder] = useState("");
   const [proposal, setProposal] = useState<Proposal>();
+  const [selectedInfra, setSelectedInfra] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [shown, setShown] = useState<string>();
@@ -64,7 +67,7 @@ export function OpenFolder() {
     const response = await fetch("/api/projects/open", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path: folder, ...(apply ? { apply: true } : {}) }),
+      body: JSON.stringify({ path: folder, ...(apply ? { apply: true, selectedInfra: [...selectedInfra] } : {}) }),
     }).catch(() => undefined);
     const body = response ? await response.json().catch(() => ({})) : {};
     setBusy(false);
@@ -73,10 +76,22 @@ export function OpenFolder() {
       return;
     }
     if (!apply) {
-      setProposal(body as Proposal);
+      const next = body as Proposal;
+      setProposal(next);
+      // 기본값(ADR-083): 앱이 기대는 부가 서비스만 체크한다 — 아무도 기대지 않는 부가 서비스(가져온 카프카 등)는 기본으로 끈다
+      setSelectedInfra(new Set(next.detection.defaultInfra));
       return;
     }
     router.push(`/?project=${encodeURIComponent(body.id)}`);
+  }
+
+  function toggleInfra(name: string, on: boolean) {
+    setSelectedInfra((current) => {
+      const next = new Set(current);
+      if (on) next.add(name);
+      else next.delete(name);
+      return next;
+    });
   }
 
   const services = proposal?.detection.services ?? [];
@@ -153,22 +168,29 @@ export function OpenFolder() {
               </ul>
               {proposal.detection.infra.length > 0 && (
                 <div>
-                  <p className="text-muted">부가 서비스(DB·캐시 등, ADR-073)</p>
+                  <p className="text-muted">부가 서비스(DB·캐시 등, ADR-073) — 기본으로 띄울 서비스를 고르세요. 앱이 기대지 않는 서비스는 기본으로 껐습니다</p>
                   <ul className="mt-1 space-y-1.5" aria-label="찾거나 제안한 부가 서비스">
                     {proposal.detection.infra.map((service) => (
                       <li key={service.name}>
-                        <span className="font-medium">{service.name}</span>
-                        <span className="text-muted">
-                          {" "}
-                          · {ENGINE_LABEL[service.engine] ?? service.engine} · <span className="font-mono">{service.image}</span>
-                        </span>
+                        <label className="flex items-center gap-1.5">
+                          <input
+                            type="checkbox"
+                            checked={selectedInfra.has(service.name)}
+                            onChange={(event) => toggleInfra(service.name, event.target.checked)}
+                            className="accent-ink"
+                          />
+                          <span className="font-medium">{service.name}</span>
+                          <span className="text-muted">
+                            · {ENGINE_LABEL[service.engine] ?? service.engine} · <span className="font-mono">{service.image}</span>
+                          </span>
+                        </label>
                         {service.sourceFile ? (
-                          <p className="text-xs text-muted">{service.sourceFile}에서 가져왔습니다</p>
+                          <p className="ml-6 text-xs text-muted">{service.sourceFile}에서 가져왔습니다</p>
                         ) : (
-                          <p className="text-xs text-wait">새로 제안: {service.reason}</p>
+                          <p className="ml-6 text-xs text-wait">새로 제안: {service.reason}</p>
                         )}
                         {service.notes?.map((note) => (
-                          <p key={note} className="text-xs text-wait">
+                          <p key={note} className="ml-6 text-xs text-wait">
                             확인: {note}
                           </p>
                         ))}

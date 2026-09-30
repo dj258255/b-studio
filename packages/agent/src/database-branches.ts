@@ -27,11 +27,14 @@ type Database = LoadedProject['databases'][number][1];
 export class DatabaseBranches {
   readonly #sandbox: Sandbox;
   readonly #databases: ReadonlyArray<[string, Database]>;
+  /** 서비스 선택(ADR-083)에서 꺼 둔 데이터베이스 서비스 이름. 컨테이너가 없어 덤프·복원을 시도하지 않는다 */
+  readonly #offServices: ReadonlySet<string>;
   readonly #dir: string;
 
   constructor(sandbox: Sandbox, project: LoadedProject, dir: string) {
     this.#sandbox = sandbox;
     this.#databases = project.databases ?? [];
+    this.#offServices = project.offServices ?? new Set();
     this.#dir = dir;
   }
 
@@ -39,10 +42,11 @@ export class DatabaseBranches {
     return this.#databases.length > 0;
   }
 
-  /** 지금 상태를 체크포인트에 묶어 저장한다 */
+  /** 지금 상태를 체크포인트에 묶어 저장한다. 꺼 둔 데이터베이스는 컨테이너가 없어 건드리지 않고 건너뛴 것으로 남긴다 */
   async save(sha: string, signal?: AbortSignal): Promise<DatabaseState[]> {
     return Promise.all(
       this.#databases.map(async ([service, database]): Promise<DatabaseState> => {
+        if (this.#offServices.has(service)) return { service, action: 'missing', detail: '서비스 선택에서 꺼 둬 건너뛰었습니다' };
         const started = Date.now();
         const folder = path.join(this.#dir, service);
         await mkdir(folder, { recursive: true });
@@ -61,6 +65,7 @@ export class DatabaseBranches {
   /** 체크포인트 이후 데이터베이스가 바뀌었는지. 파일은 그대로인데 데이터만 바꾼 요청을 알아보는 데 쓴다 */
   async changedSince(sha: string, signal?: AbortSignal): Promise<boolean> {
     for (const [service, database] of this.#databases) {
+      if (this.#offServices.has(service)) continue;
       const saved = this.#file(service, sha);
       if (!(await exists(saved))) continue;
       const current = this.#tempFile(service, sha, 'changed');
@@ -82,6 +87,7 @@ export class DatabaseBranches {
   async restore(sha: string, signal?: AbortSignal): Promise<{ states: DatabaseState[]; dependents: string[] }> {
     const states = await Promise.all(
       this.#databases.map(async ([service, database]): Promise<DatabaseState> => {
+        if (this.#offServices.has(service)) return { service, action: 'missing', detail: '서비스 선택에서 꺼 둬 건너뛰었습니다' };
         const started = Date.now();
         const saved = this.#file(service, sha);
         if (!(await exists(saved))) return { service, action: 'missing', detail: '이 체크포인트의 데이터베이스 상태가 저장되지 않았습니다' };

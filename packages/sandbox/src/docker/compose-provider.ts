@@ -37,6 +37,7 @@ import type {
 import { runCommandFromFile, runCommandToFile } from '../stream-exec';
 import {
   buildOverride,
+  composeUpArgs,
   EDGE_SERVICE,
   edgePortFor,
   parseContainerState,
@@ -209,20 +210,28 @@ class LocalDockerSandbox implements Sandbox {
   }
 
   async start(options: StartOptions = {}): Promise<ServiceEndpoint[]> {
-    for (const [name] of this.project.managed) options.onStatus?.({ service: name, phase: 'starting' });
+    // 서비스 선택(ADR-083): services를 주면 그 서비스만 띄우고, 나머지 managed 서비스는 'off'로 알린다(실패가 아니다).
+    // 주지 않으면 옛 동작대로 모든 서비스를 띄운다(다른 제공자 호출부·고정 픽스처와 호환)
+    const selected = options.services ? new Set(options.services) : undefined;
+    const isSelected = (name: string) => !selected || selected.has(name);
+    const startingManaged = this.project.managed.filter(([name]) => isSelected(name));
+    for (const [name] of this.project.managed) options.onStatus?.(isSelected(name) ? { service: name, phase: 'starting' } : { service: name, phase: 'off' });
     await this.#ensureSharedVolumes();
 
     // B_STUDIO_SANDBOX_BUILD_NO_CACHE=1이면 이 샌드박스 프로젝트의 이미지만 레이어 캐시 없이 빌드하고,
     // 스냅샷 볼륨도 쓰지 않는다(다른 프로젝트의 빌드 캐시는 건드리지 않는다). 스냅샷 볼륨을 지우지는 않는다.
     const noCache = sandboxBuildNoCache();
-    // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다
-    const plans = await this.#planSnapshots();
+    // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다. 꺼 둔 서비스는 스냅샷도 건드리지 않는다
+    const plans = (await this.#planSnapshots()).filter((plan) => isSelected(plan.service));
+    // 선택이 있는데 띄울 게 없으면(전부 꺼 둠) build를 부르지 않는다 — 인자 없는 build는 "전부 빌드"라는 뜻이라서다
+    const buildBase = noCache ? ['build', '--no-cache'] : ['build'];
+    const buildArgs = !selected ? buildBase : selected.size === 0 ? undefined : [...buildBase, ...selected];
     const [seeded] = await Promise.all([
       noCache ? Promise.resolve(plans.map(() => false)) : Promise.all(plans.map((plan) => this.#seedSnapshot(plan, options))),
-      this.#composeOrThrow(noCache ? ['build', '--no-cache'] : ['build'], options.signal),
+      buildArgs ? this.#composeOrThrow(buildArgs, options.signal) : Promise.resolve(),
     ]);
 
-    await this.#composeOrThrow(['up', '--detach', '--remove-orphans'], options.signal);
+    await this.#composeOrThrow(['up', '--detach', '--remove-orphans', ...composeUpArgs(options.services, EDGE_SERVICE)], options.signal);
 
     // 한 서비스가 준비에 실패하면 나머지 서비스의 준비 확인도 멈춘다. 그러지 않으면 실패를 돌려준 뒤에도
     // 다른 서비스가 제한 시간(수 분)까지 확인을 계속하며 프로세스와 샌드박스 정리를 붙잡는다
@@ -239,7 +248,7 @@ class LocalDockerSandbox implements Sandbox {
           )
       : undefined;
     const endpoints = await Promise.all(
-      this.project.managed.map(([name]) =>
+      startingManaged.map(([name]) =>
         this.#awaitReady(name, { ...options, signal, onStatus }).catch((error: unknown) => {
           failedFirst ??= name;
           giveUp.abort(error);
@@ -254,6 +263,16 @@ class LocalDockerSandbox implements Sandbox {
     // 설치 단계만 끝나고 에이전트가 아직 도구를 쓰지 않은 시점의 볼륨을 다음 기동용으로 남긴다
     await Promise.all(plans.filter((_, index) => !seeded[index]).map((plan) => this.#captureSnapshot(plan, options)));
     return endpoints;
+  }
+
+  /**
+   * 서비스 하나를 켜거나 끈다(ADR-083). 켤 때는 이미지를 다시 빌드해 최신 코드로 컨테이너를 만들고,
+   * 다른 서비스는 따라 띄우지 않는다(--no-deps). 끌 때는 컨테이너를 멈추기만 한다(볼륨은 남는다, restart()의 force-recreate와 다르다).
+   * 준비 판정은 하지 않는다 — 호출자가 managed 서비스를 켰다면 restart()나 endpoint()로 상태를 반영한다
+   */
+  async setServiceRunning(name: string, running: boolean, { signal }: { signal?: AbortSignal } = {}): Promise<void> {
+    if (!this.project.composeServices.includes(name)) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 compose 서비스가 아닙니다 (${this.id})`);
+    await this.#composeOrThrow(running ? ['up', '--detach', '--build', '--no-deps', name] : ['stop', name], signal);
   }
 
   /**

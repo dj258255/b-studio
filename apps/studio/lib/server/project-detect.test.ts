@@ -5,6 +5,7 @@ import { loadProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
 import { detectProject, GENERATED_COMPOSE, generateFiles, sanitize } from './project-detect';
 import { excludeFromGit, projectIdFor, readRegistry, registerFolder, unregisterProject } from './project-registry';
+import { readServiceSelection } from './service-selection';
 
 const made: string[] = [];
 
@@ -249,6 +250,21 @@ describe('detectProject: 부가 서비스(ADR-073)', () => {
     expect(project.databases.map(([name]) => name)).toEqual(['db']);
   });
 
+  it('defaultInfra(ADR-083)는 앱이 기대는 부가 서비스만 담고, 아무도 참조하지 않는 부가 서비스는 뺀다', async () => {
+    const root = await repo({
+      'build.gradle': springJpaGradle,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\n',
+      'compose.yaml': ['services:', '  db:', '    image: postgres:17-alpine', '    environment:', '      POSTGRES_DB: app', '      POSTGRES_USER: app', '  cache:', '    image: redis:7-alpine', ''].join(
+        '\n',
+      ),
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.infra.map((service) => service.name).sort()).toEqual(['cache', 'db']);
+    expect(detection.defaultInfra).toEqual(['db']);
+  });
+
   it('build가 있는 서비스(앱 자신)와 profiles가 있는 서비스는 가져오지 않는다', async () => {
     const root = await repo({
       'package.json': nextPackage,
@@ -420,6 +436,37 @@ describe('폴더 등록', () => {
 
     expect(await unregisterProject(first.id, registry)).toBe(true);
     expect(await readRegistry(registry)).toEqual([]);
+  });
+
+  it('부가 서비스가 있으면 서비스 선택(ADR-083)을 함께 저장한다: 안 고르면 defaultInfra, 고르면 고른 것만', async () => {
+    const files = {
+      'build.gradle': springJpaGradle,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\n',
+      'compose.yaml': ['services:', '  db:', '    image: postgres:17-alpine', '    environment:', '      POSTGRES_DB: app', '      POSTGRES_USER: app', '  cache:', '    image: redis:7-alpine', ''].join(
+        '\n',
+      ),
+    };
+    const registry = path.join(await repo({}), 'projects.json');
+    const stateDir = await repo({});
+
+    // registerFolder는 서비스 선택을 기본 상태 폴더(~/.cache/b-studio/projects)에 쓰므로, 테스트는 사용자 홈을 건드리지 않도록 바꿔 끼운다
+    const previous = process.env.B_STUDIO_PROJECTS_STATE_DIR;
+    process.env.B_STUDIO_PROJECTS_STATE_DIR = stateDir;
+    try {
+      const root2 = await repo(files);
+      const byDefault = await registerFolder(root2, new Set(), registry, {});
+      const defaultSelection = await readServiceSelection(byDefault.id, stateDir);
+      expect(defaultSelection?.selected).toContain('db');
+      expect(defaultSelection?.selected).not.toContain('cache');
+
+      const root3 = await repo(files);
+      const withCache = await registerFolder(root3, new Set(), registry, { selectedInfra: ['db', 'cache'] });
+      const chosenSelection = await readServiceSelection(withCache.id, stateDir);
+      expect(chosenSelection?.selected).toEqual(expect.arrayContaining(['db', 'cache']));
+    } finally {
+      if (previous === undefined) delete process.env.B_STUDIO_PROJECTS_STATE_DIR;
+      else process.env.B_STUDIO_PROJECTS_STATE_DIR = previous;
+    }
   });
 
   it('스택을 못 찾은 폴더는 등록하지 않는다', async () => {
