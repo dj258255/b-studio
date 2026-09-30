@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { desktopBridge } from "@/lib/desktop-bridge";
 import { recentSessionsFor, selectableProjects } from "@/lib/project-menu";
 import type { ProjectSummary, SessionSummary } from "@/lib/studio-events";
 import { OpenFolderModal } from "./open-folder-modal";
@@ -22,6 +23,8 @@ interface MenuCapabilities {
 export function ProjectMenu({ projectId, projectName }: { projectId: string; projectName: string }) {
   const [open, setOpen] = useState(false);
   const [folderOpen, setFolderOpen] = useState(false);
+  /** 데스크톱 폴더 선택 창에서 고른 경로. 있으면 확인 창(찾은 서비스·만들 파일)만 띄운다 */
+  const [pickedFolder, setPickedFolder] = useState<string>();
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   return (
@@ -44,11 +47,23 @@ export function ProjectMenu({ projectId, projectName }: { projectId: string; pro
           onClose={() => setOpen(false)}
           onOpenFolder={() => {
             setOpen(false);
-            setFolderOpen(true);
+            // 데스크톱 앱은 곧바로 OS 폴더 선택 창을 띄우고, 고른 뒤에만 확인 창을 연다. 취소하면 아무것도 열지 않는다
+            const bridge = desktopBridge();
+            if (!bridge) {
+              setFolderOpen(true);
+              return;
+            }
+            void bridge
+              .pickFolder()
+              .catch(() => undefined)
+              .then((path) => {
+                if (path) setPickedFolder(path);
+              });
           }}
         />
       )}
       {folderOpen && <OpenFolderModal onClose={() => setFolderOpen(false)} />}
+      {pickedFolder && <OpenFolderModal initialPath={pickedFolder} onClose={() => setPickedFolder(undefined)} />}
     </>
   );
 }

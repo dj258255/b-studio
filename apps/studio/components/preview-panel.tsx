@@ -50,7 +50,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     { id: LOGS_TAB, label: "로그" },
     { id: RESOURCES_TAB, label: "리소스" },
     { id: REPOSITORY_TAB, label: "저장소" },
-    { id: SUBMISSION_TAB, label: "제출 준비" },
+    { id: SUBMISSION_TAB, label: "점검" },
     { id: TOKENS_TAB, label: "토큰" },
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
