@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { describeFailedResponse } from "@/lib/fetch-error";
 
 type Opened = { id: string; projectId: string; action: "opened" | "booting" | "resumed" | "created" };
 
@@ -16,11 +17,14 @@ function openOnce(projectId: string | undefined): Promise<Opened> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(projectId ? { projectId } : {}),
-  }).then(async (response) => {
-    const body = (await response.json().catch(() => ({}))) as Partial<Opened> & { error?: string };
-    if (!response.ok || !body.id) throw new Error(body.error ?? "개발 화면을 열지 못했습니다");
-    return body as Opened;
-  });
+  })
+    .catch(() => undefined)
+    .then(async (response) => {
+      const body = response ? ((await response.json().catch(() => ({}))) as Partial<Opened> & { error?: string }) : {};
+      // 서버가 JSON 없이 실패했으면(네트워크 끊김, 오래된 개발 서버의 HTML 404 등) 상태 코드와 힌트를 보여 준다
+      if (!response?.ok || !body.id) throw new Error(body.error ?? describeFailedResponse(response, "개발 화면을 열지 못했습니다"));
+      return body as Opened;
+    });
   pending = { key, promise };
   // 끝나면 비워 둔다. 나중에 첫 화면으로 다시 오면 그때의 상태로 다시 고른다
   promise.finally(() => {
