@@ -102,6 +102,7 @@
 - [ADR-085 폴더 열기를 경로 입력 대신 폴더 선택 창·탐색 모달로 바꾼다](#adr-085-폴더-열기를-경로-입력-대신-폴더-선택-창탐색-모달로-바꾼다)
 - [ADR-086 기본 egress에 GitHub 릴리스 호스트를 연다(Gradle 배포판)](#adr-086-기본-egress에-github-릴리스-호스트를-연다gradle-배포판)
 - [ADR-087 개발 화면 탭을 일곱 개로 묶고 올리기 전 점검을 저장소 탭으로 옮긴다](#adr-087-개발-화면-탭을-일곱-개로-묶고-올리기-전-점검을-저장소-탭으로-옮긴다)
+- [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
 
 ---
 
@@ -3575,6 +3576,44 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 위 탭 수는 줄었지만 눌러야 하는 횟수는 늘 수 있다(예: 배포를 보려면 "실행"을 누른 뒤 "배포" 하위 탭을 한 번 더 눌러야 한다). 자주 같이 보는 것끼리 묶었다고 판단했지만, 실제 사용 빈도가 다르면 다시 나눠야 할 수 있다.
 - 묶음별 하위 탭 기억(localStorage)과 화면 탭의 하위 탭(컴포넌트 상태, 기억하지 않음)이 서로 다른 규칙을 쓴다 — 화면 탭은 QA 자동 전환(ADR-001 계열)과 얽혀 있어 이번에는 건드리지 않고 문서로만 남겨 둔다.
 - 이 변경을 시작한 사용자 피드백에 딸린 GitHub 이슈 번호를 달지 못했다(이 작업 세션에서는 새 이슈를 만들 수 없는 정책이었다) — PR 본문에 같은 맥락을 남겨 대신한다.
+
+---
+
+## ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다
+
+상태: 채택
+
+### 맥락
+- 폴더 열기(ADR-067)가 만드는 `compose.b-studio.yaml`은 서비스마다 자기 폴더만 컨테이너에 마운트했다(`./commerce:/app`, `WORKDIR /app`, Gradle 프로젝트 캐시는 `/app/.gradle`·`/app/build`, node_modules는 `/app/node_modules`). 실제 사용에서 문제가 드러났다: pay 저장소 복제본을 열어 `commerce` 서비스의 Gradle 테스트를 돌리니 `commerce/build.gradle`의 test 태스크가 `$rootDir/../docs`를 입력으로 선언하는데, 컨테이너 안에서는 `$rootDir`가 `/app`(=`commerce` 폴더 자신)이라 `$rootDir/../docs`가 `/docs`를 가리켜 없는 폴더라서 `gradle test`가 "Type 'Test' property 'docs' specifies directory '/docs' which doesn't exist"로 죽었다.
+- 이 실패는 `commerce`만의 특이한 설정이 아니라 서비스 폴더만 마운트하는 방식 자체의 한계다. 실제 저장소는 서비스 폴더 밖을 흔히 참조한다: 저장소 루트에만 `settings.gradle`·Gradle 래퍼가 있고 서비스 폴더는 그 서브프로젝트인 멀티 모듈 빌드, 잠금 파일과 공유 패키지가 루트에 있는 pnpm/npm 워크스페이스, 형제 폴더의 공유 설정(`tsconfig.base.json`, 루트의 `.env.example`) 등. 서비스 폴더만 보이면 이런 참조가 전부 깨진다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 그대로 두고 case-by-case로 볼륨을 더 마운트한다(예: `../docs:/docs`) | 폴더 열기는 저장소 구조를 미리 알 수 없어 어떤 형제 폴더를 더 마운트해야 하는지 일반적으로 찾을 수 없다. 특정 저장소 하나만 고치는 임시방편이다 |
+| B. 프로젝트 루트를 통째로 복제해 서비스 폴더 기준으로 심볼릭 링크를 만든다 | 컨테이너 시작 전에 링크를 만드는 단계가 추가되고, 링크 밖 경로 참조는 여전히 깨진다. 실질적으로 A와 같은 문제를 더 복잡하게 풀 뿐이다 |
+| **C. 모든 관리형 서비스가 프로젝트 루트 전체를 `/workspace`로 마운트하고, `working_dir`로 자기 서비스 폴더에서 실행한다** | 채택. 서비스 폴더 밖 참조가 전부 보여서 근본적으로 고쳐진다. 대신 프로젝트 전체가 모든 서비스 컨테이너에 노출된다(아래 트레이드오프) |
+
+### 결정
+- 관리형 서비스 compose 정의가 `volumes: [".:/workspace"]`(프로젝트 루트 전체)로 바뀌고, `working_dir: /workspace/<service.path>`(path가 `.`이면 `/workspace`)로 그 서비스 폴더에서 돌게 한다. Dockerfile의 `WORKDIR`도 서비스마다 다른 값 대신 공통값 `/workspace`로 통일한다(실제 작업 폴더는 compose의 `working_dir`가 컨테이너 생성 시점에 덮어쓴다) — `docker compose exec`(테스트 탭·검증 게이트가 쓰는 `sandbox.exec`)는 별도 `-w` 없이 이 기본 작업 폴더에서 실행되므로, Gradle/Maven 보고서 상대 경로(`build/test-results/...`)를 포함해 기존 실행기 코드(`packages/agent/src/test-run.ts`)는 그대로 쓸 수 있다.
+- 프로젝트별 캐시 볼륨(Gradle 프로젝트 캐시 `.gradle`·빌드 출력 `build`/`target`·`node_modules`·`.next`)도 서비스 폴더 기준 상대 경로로 옮긴다(`project-detect.ts`의 `DetectedService.volumes`는 이제 `/`로 시작하면 절대 경로, 아니면 `working_dir` 기준 상대 경로로 본다). 의존성 캐시(Gradle 홈 `/gradle-home`, Maven 홈 `/root/.m2`, pnpm 스토어 `/cache/pnpm`)는 여러 서비스가 같은 도구를 쓸 때 공유해야 하므로 워크스페이스 밖 절대 경로 그대로 둔다.
+- **멀티 모듈 Gradle 감지**: 서비스 폴더에 자기 `settings.gradle(.kts)`·`gradlew`가 없는데 저장소 루트의 `settings.gradle(.kts)`이 `include`로 그 폴더 이름을 포함하면, 진짜 멀티 모듈 서브프로젝트일 가능성이 크다. 이번에는 `:서비스:bootRun`/`:서비스:test`처럼 루트에서 서브프로젝트 경로를 지정해 실행하도록 명령을 바꾸지 않았다(테스트 탭의 실행 계획·보고서 수집 경로 전체를 다시 설계해야 한다) — 대신 서비스 폴더를 working_dir로 그대로 쓰되, `studio.yaml`에 "루트에만 래퍼·settings.gradle이 있는 구조면 path를 저장소 루트로 옮기고 명령에 서브프로젝트 경로를 직접 적으라"는 확인 메모를 남긴다. pay의 `commerce`처럼 서비스 폴더 자신이 Gradle 루트(자기 `settings.gradle`이나 최소한 `gradlew`를 가진)인 경우는 이 감지에 걸리지 않고, 마운트 확장만으로 바로 고쳐진다.
+- **pnpm/npm/yarn 워크스페이스 감지**: 서비스 폴더가 아닌 저장소 루트에 `pnpm-workspace.yaml`이나 `package.json`의 `workspaces` 필드가 있으면, 잠금 파일이 루트에 있다고 보고 설치를 루트에서 한다(`cd /workspace && pnpm install --frozen-lockfile && cd /workspace/<path> && exec pnpm exec next dev ...`). 루트 `node_modules`는 별도 볼륨으로 캐시하지 않는다(아래 트레이드오프).
+- **샌드박스 파일 알림(`packages/sandbox/src/docker/relay.ts`)**: 세션이 "내 폴더"(ADR-067) 워크스페이스일 때 파일 변경을 컨테이너 안 감시기에 알리는 `planRelay`는 지금까지 바인드 마운트 source 길이로 "더 좁게 겹치는 서비스"를 가려 왔다. 모든 서비스가 같은 루트를 마운트하면 source 길이가 전부 같아져 가릴 수 없다 — `bindMounts()`에 서비스별 `servicePaths`(=`LoadedProject.managed`의 `path`)를 더 주면 각 마운트의 `subroot`(그 서비스가 실제 일하는 호스트 절대 경로)를 계산해 두고, `planRelay`가 변경 파일이 그 subroot 안에 있는 서비스를 우선 고르게 했다. `compose-provider.ts`가 이 인자를 넘긴다.
+- **Kubernetes 제공자는 그대로 둔다**: `packages/sandbox/src/kubernetes`는 compose의 바인드 마운트를 hostPath 볼륨으로 그대로 옮기고(`kubernetes-provider.ts`의 `#syncTargets`도 `docker compose config`가 뱉은 바인드 정의를 그대로 읽어 컨테이너 안 경로를 계산한다), `working_dir`도 이미 파드 컨테이너 스펙에 그대로 전달하고 있었다(`manifests.ts`). 모든 서비스가 같은 루트 hostPath를 쓰게 되어도 `#syncTargets`는 "그 파일이 (아무 파드에나) 보이는지" 확인하는 용도라, 어느 서비스 파드로 확인하든 호스트 파일시스템은 동일해 결과가 같다 — Docker의 relay와 달리 "어느 컨테이너에 알릴지" 선택이 아니라 "보이는지 확인"이라 subroot 없이도 정확하다. 코드 변경이 필요 없었다.
+- **뒤로 호환**: `project-detect.ts`의 `generateFiles`는 `studio.yaml`이 이미 있으면 아무것도 만들지 않는다(`detectProject`가 `hasSpec: true`로 일찍 돌아온다). 이미 등록한 프로젝트는 다시 열어도 예전 `compose.b-studio.yaml`·`Dockerfile.b-studio`(`./service:/app` 마운트)를 그대로 쓴다 — 새 마운트 방식은 `studio.yaml`이 아직 없는 폴더를 처음 열 때만 적용된다. `packages/spec`의 `loadProject`는 compose 서비스를 `z.unknown()`으로 파싱해 필드를 가정하지 않으므로 옛 파일·새 파일 모두 그대로 읽는다.
+
+### 검증 결과
+- `apps/studio/lib/server/project-detect.test.ts`: 폴더 바로 아래 서비스(`working_dir: /workspace`)·하위 폴더 서비스(`working_dir: /workspace/backend`, Gradle 캐시가 `/workspace/backend/.gradle`·`/workspace/backend/build`로, 의존성 캐시 `/gradle-home`은 그대로)·pay 흉내(서비스 폴더 밖 `docs/`를 참조하는 시나리오가 루트 마운트로 열림)·진짜 멀티 모듈(루트 `settings.gradle`이 서브프로젝트로 포함할 때 확인 메모)·pnpm 워크스페이스(설치가 루트에서 실행) 다섯 시나리오를 새로 추가하고, 기존 스냅샷 중 `/app` 경로를 직접 비교하던 것(Vite 서비스의 `node-modules` 볼륨)을 새 상대 경로 표기로 고쳤다. 모두 실제로 디스크에 쓴 뒤 `loadProject`로 다시 읽어 파싱이 되는지 확인한다.
+- `packages/sandbox/src/docker/relay.test.ts`: 두 서비스가 같은 프로젝트 루트를 마운트해도(`servicePaths`로 각자 subroot를 주면) 변경 파일이 속한 서비스에만 알리는 사례를 추가했다. 기존 사례(서비스마다 다른 source)는 `servicePaths`를 주지 않아도 그대로 통과해 호환을 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`, `pnpm test`(2,150개 중 2,149개 통과 — 실패 1개는 이번에 건드리지 않은 `packages/sandbox/src/docker/format.test.ts`의 Docker 의존 타임아웃으로, 따로 돌려도 재현되는 사전 존재 플레이키다).
+- 확인하지 못한 범위: 실제 Docker 컨테이너를 띄워 pay 복제본에서 `gradle test`가 통과하는지는 이 세션의 정책(실제 샌드박스 금지)상 확인하지 못했다 — `$rootDir/../docs`가 컨테이너 안에서 존재 경로가 된다는 것은 마운트 구조(볼륨 전체 마운트 시 상대 경로가 호스트와 같아진다는 사실)로 추론했다.
+
+### 감수한 트레이드오프
+- 프로젝트 전체가 모든 서비스 컨테이너에 노출된다(전에는 서비스 폴더만 보였다). "내 폴더" 세션은 어차피 에이전트가 저장소 전체를 작업 대상으로 삼고("copy" 세션도 세션 작업 복사본 전체가 이미 `project.root`다), 바인드 마운트 자체가 새 접근 경로를 늘리지 않는다고 봤다 — 다만 한 서비스 컨테이너가 침해당하면 다른 서비스 폴더까지 읽고 쓸 수 있다는 차이는 있다(격리 단위가 서비스별 폴더에서 프로젝트 전체로 넓어진다).
+- 진짜 멀티 모듈 Gradle(루트에만 래퍼·`settings.gradle`)은 자동으로 고치지 않았다 — 확인 메모로 사람이 `studio.yaml`을 손보게 한다. 테스트 탭의 실행 계획을 서브프로젝트 인식으로 다시 설계하는 것은 더 큰 작업이라 이번 범위에서 뺐다.
+- pnpm/npm 워크스페이스의 루트 `node_modules`는 볼륨으로 캐시하지 않는다 — 세션마다(또는 컨테이너 재생성마다) 루트 설치를 다시 하므로, pnpm 콘텐츠 스토어(`/cache/pnpm`)는 캐시돼도 링크 단계는 매번 다시 돈다. 올바르게 동작하지만 예전(서비스 폴더 자체가 루트인 경우)보다 기동이 조금 느릴 수 있다.
+- 이 변경은 실제 사용 중 발견한 버그 보고로 시작했고, 이 작업 세션에서는 새 GitHub 이슈를 만들 수 없는 정책이라 "관련:" 이슈 번호를 달지 못했다 — PR 본문에 같은 맥락을 남겨 대신한다.
 
 ---
 

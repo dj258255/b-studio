@@ -418,8 +418,11 @@ class LocalDockerSandbox implements Sandbox {
     });
 
     const managed = new Set(this.project.managed.map(([name]) => name));
+    // ADR-088: managed 서비스가 전부 프로젝트 루트를 통째로 마운트하므로, 서비스 폴더(subroot)로 한 번 더 좁혀야
+    // 같은 루트를 마운트한 다른 서비스로 잘못 알리지 않는다
+    const servicePaths = Object.fromEntries(this.project.managed.map(([name, spec]) => [name, spec.path]));
     const relayed: RelayedPath[] = [];
-    for (const [service, targets] of planRelay(this.project.root, changes, bindMounts(config.services, managed))) {
+    for (const [service, targets] of planRelay(this.project.root, changes, bindMounts(config.services, managed, servicePaths))) {
       const args = targets.map((target) => `${target.action === 'move' ? 'm' : 'n'}:${target.containerPath}`);
       const result = await this.#compose(['exec', '-T', service, 'sh', '-c', RELAY_SCRIPT, 'sh', ...args], signal);
       // 컨테이너가 재시작 중이면 알리지 못한 경로가 생긴다. 다시 뜬 서비스는 파일을 처음부터 읽으므로 알린 경로만 돌려준다
