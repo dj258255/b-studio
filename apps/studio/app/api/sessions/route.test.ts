@@ -7,12 +7,13 @@ const mocks = vi.hoisted(() => ({
   listSessions: vi.fn(async () => [] as Array<{ id: string; projectId: string }>),
   requireUser: vi.fn((): string => 'kim'),
   projectModelDefault: vi.fn((): string | undefined => undefined),
+  projectEffortDefault: vi.fn((): string | undefined => undefined),
 }));
 
 vi.mock('@/lib/server/access', () => ({ requireUser: mocks.requireUser }));
 vi.mock('@/lib/server/commandcode-models', () => ({ validateCommandCodeModelSelection: mocks.validateModel }));
 vi.mock('@/lib/server/opencode-models', () => ({ validateOpenCodeModelSelection: mocks.validateOpenCodeModel }));
-vi.mock('@/lib/server/model-defaults', () => ({ projectModelDefault: mocks.projectModelDefault }));
+vi.mock('@/lib/server/model-defaults', () => ({ projectModelDefault: mocks.projectModelDefault, projectEffortDefault: mocks.projectEffortDefault }));
 // createSession·listSessions만 바꿔 끼우고 resolveSessionBackend(허용 목록 검증)는 실제 것을 쓴다
 vi.mock('@/lib/server/sessions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/server/sessions')>();
@@ -40,6 +41,8 @@ beforeEach(() => {
   mocks.requireUser.mockImplementation(() => 'kim');
   mocks.projectModelDefault.mockClear();
   mocks.projectModelDefault.mockReturnValue(undefined);
+  mocks.projectEffortDefault.mockClear();
+  mocks.projectEffortDefault.mockReturnValue(undefined);
   process.env.B_STUDIO_MODE = 'api';
   delete process.env.B_STUDIO_BACKENDS;
 });
@@ -113,6 +116,17 @@ describe('POST /api/sessions', () => {
 
     expect(response.status).toBe(201);
     expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'opus', backend: 'api', boot: 'on-demand' });
+  });
+
+  it('기억한 노력 단계 기본값(model-defaults)도 새 세션 기본값으로 쓴다', async () => {
+    mocks.projectEffortDefault.mockReturnValue('high');
+    process.env.B_STUDIO_BACKENDS = 'claude-code';
+
+    const response = await post({ projectId: 'orders', backend: 'claude-code' });
+
+    expect(response.status).toBe(201);
+    expect(mocks.projectEffortDefault).toHaveBeenCalledWith('orders', 'claude-code');
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: undefined, effort: 'high', backend: 'claude-code', boot: 'on-demand' });
   });
 
   it('기억한 기본값이 "기본"(빈 문자열)이면 오버라이드 없이 만든다', async () => {

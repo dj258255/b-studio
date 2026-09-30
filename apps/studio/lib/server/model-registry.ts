@@ -8,6 +8,7 @@ import {
   createProviderClient,
   routeModel,
   validateModelProfiles,
+  type Effort,
   type ModelClient,
   type ModelProfile,
   type RouteIntent,
@@ -37,7 +38,12 @@ export function modelById(id: string): ModelProfile {
   return model;
 }
 
-export function clientForModel(model: ModelProfile): ModelClient {
+/**
+ * effort(노력 단계)는 Anthropic API에서만 보낸다. OpenAI 호환·Google 클라이언트(provider-clients.ts)는
+ * 이 값을 받는 자리가 없어(직접 만든 얇은 fetch 클라이언트라 reasoning_effort·thinkingBudget 같은 공급자별
+ * 옵션을 아직 넣지 않았다) 조용히 무시하지 않고 호출한 쪽이 지원 여부를 먼저 물어보게 한다(model-picker.ts의 effortSupportedFor)
+ */
+export function clientForModel(model: ModelProfile, effort?: Effort): ModelClient {
   if (model.provider === 'anthropic') {
     const name = model.apiKeyEnv ?? 'ANTHROPIC_API_KEY';
     const credential = process.env[name]?.trim();
@@ -46,6 +52,7 @@ export function clientForModel(model: ModelProfile): ModelClient {
       baseURL: model.baseUrl,
       ...(name === 'ANTHROPIC_AUTH_TOKEN' ? { authToken: credential } : { apiKey: credential }),
       authLabel: name,
+      ...(effort ? { effort } : {}),
     });
   }
   return createProviderClient({ profile: model });

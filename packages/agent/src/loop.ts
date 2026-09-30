@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
+import type { Effort } from './anthropic-client';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
@@ -32,6 +33,8 @@ export interface ModelClientInfo {
   backend: string;
   model: string;
   auth?: string;
+  /** 이 호출에 실제로 적용한 노력 단계. 클라이언트가 노력 단계를 지원하지 않으면(openai·google 호환 클라이언트) 없다 */
+  effort?: Effort;
 }
 
 export type ModelPreflight = { ok: true } | { ok: false; reason: string };
@@ -152,7 +155,7 @@ export interface AgentResult {
 
 export type AgentEvent =
   /** 실제로 요청을 처리하는 실행 환경. 로컬 Claude Code처럼 모델과 인증을 밖에서 정할 때 알린다 */
-  | { type: 'session'; backend: string; model: string; auth?: string }
+  | { type: 'session'; backend: string; model: string; auth?: string; effort?: Effort }
   | {
       type: 'route';
       selectedId: string;
@@ -313,7 +316,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   } = options;
   const ask = intent === 'ask';
 
-  if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth });
+  if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth, effort: client.info.effort });
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.

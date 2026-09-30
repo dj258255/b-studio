@@ -2,7 +2,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { projectModelDefault, rememberProjectModelDefault, resetProjectModelDefaultsCache } from './model-defaults';
+import {
+  projectEffortDefault,
+  projectModelDefault,
+  rememberProjectEffortDefault,
+  rememberProjectModelDefault,
+  resetProjectModelDefaultsCache,
+} from './model-defaults';
 
 let dir: string;
 
@@ -43,5 +49,29 @@ describe('projectModelDefault / rememberProjectModelDefault', () => {
     rememberProjectModelDefault('orders', 'claude-code', undefined);
 
     expect(projectModelDefault('orders', 'claude-code')).toBe('');
+  });
+});
+
+describe('projectEffortDefault / rememberProjectEffortDefault', () => {
+  it('고른 적이 없으면 undefined다', () => {
+    expect(projectEffortDefault('orders', 'claude-code')).toBeUndefined();
+  });
+
+  it('모델 기본값과 같은 파일에, 다른 키로 프로젝트·백엔드별로 따로 기억한다', () => {
+    rememberProjectModelDefault('orders', 'claude-code', 'opus');
+    rememberProjectEffortDefault('orders', 'claude-code', 'high');
+
+    expect(projectModelDefault('orders', 'claude-code')).toBe('opus');
+    expect(projectEffortDefault('orders', 'claude-code')).toBe('high');
+
+    resetProjectModelDefaultsCache();
+    expect(projectEffortDefault('orders', 'claude-code')).toBe('high');
+  });
+
+  it('"기본"으로 되돌리면(undefined) 빈 문자열로 남는다', () => {
+    rememberProjectEffortDefault('orders', 'claude-code', 'max');
+    rememberProjectEffortDefault('orders', 'claude-code', undefined);
+
+    expect(projectEffortDefault('orders', 'claude-code')).toBe('');
   });
 });

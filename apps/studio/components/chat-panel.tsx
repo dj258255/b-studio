@@ -1,14 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
 import { answerRequest } from "@/lib/question-answer";
 import { artifactUrl } from "@/lib/artifact-url";
 import { chatMethodAvailability, type ChatCapabilities, type ChatMethod } from "@/lib/chat-methods";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import { submitEntry } from "@/lib/home-entry";
-import type { ModelPickerOption, ModelPickerView } from "@/lib/server/model-picker";
+import type { EffortPickerView, ModelPickerOption, ModelPickerView } from "@/lib/server/model-picker";
 import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { useChatDraft } from "./chat-draft-context";
@@ -126,14 +127,25 @@ export function ChatPanel({ view }: { view: SessionView }) {
   /** 모델을 바꾼다. 다음 요청부터 적용되고(진행 중 요청에는 영향이 없다), 실패하면 이전 선택으로 되돌린다 */
   async function changeModel(modelId: string) {
     if (!picker) return;
+    await changeSelection({ modelId }, { ...picker, current: modelId });
+  }
+
+  /** 노력 단계를 바꾼다. 모델과 같은 API를 쓰고, 같은 실패 규칙(되돌리기)을 따른다 */
+  async function changeEffort(effort: string) {
+    if (!picker) return;
+    await changeSelection({ effort }, { ...picker, effort: { ...picker.effort, current: (effort || undefined) as EffortPickerView["current"] } });
+  }
+
+  async function changeSelection(body: { modelId?: string; effort?: string }, optimistic: ModelPickerView) {
+    if (!picker) return;
     const previous = picker;
     setChangingModel(true);
     setModelError(undefined);
-    setPicker({ ...picker, current: modelId });
+    setPicker(optimistic);
     const response = await fetch(`/api/sessions/${snapshot.id}/model`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ modelId }),
+      body: JSON.stringify(body),
     });
     if (response.ok) setPicker((await response.json()) as ModelPickerView);
     else {
@@ -488,7 +500,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
                     picker={picker}
                     disabled={!access.canManage || snapshot.running || changingModel}
                     disabledReason={snapshot.running ? "요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" : undefined}
-                    onChange={(value) => void changeModel(value)}
+                    onChangeModel={(value) => void changeModel(value)}
+                    onChangeEffort={(value) => void changeEffort(value)}
                   />
                 )}
                 <button
@@ -594,6 +607,7 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
       return (
         <p className="text-sm text-muted">
           {item.backend}에서 <span className="font-mono text-ink">{item.model}</span> 모델로 실행합니다
+          {item.effort && ` (노력: ${EFFORT_LABEL[item.effort] ?? item.effort})`}
           {item.auth && ` (${item.auth})`}
         </p>
       );
@@ -1001,47 +1015,268 @@ function QuestionCard({
   );
 }
 
+/** 노력 단계 id → 화면 표기(대화 기록·run 헤더에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
+const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
+/** 노력 단계를 지원하지 않는 백엔드에서도 네 단계 버튼을 회색으로 그리기 위한 자리표(레이블만 쓰고, 실제 값·순서는 항상 서버가 내려준 picker.effort.levels를 우선한다) */
+const EFFORT_PLACEHOLDER: Array<{ id: string; label: string; hint: string }> = [
+  { id: "low", label: "낮음", hint: "빠르고 싸게" },
+  { id: "medium", label: "보통", hint: "속도와 깊이의 기본 균형" },
+  { id: "high", label: "높음", hint: "느리지만 더 깊게 생각합니다" },
+  { id: "max", label: "최대", hint: "가장 느리고 비싸지만 가장 깊게 생각합니다" },
+];
+/** 목록이 이보다 길면 검색창을 보여준다(commandcode·opencode는 모델이 많을 수 있다) */
+const SEARCH_THRESHOLD = 8;
+const PROVIDER_LABEL: Record<string, string> = { anthropic: "Anthropic", openai: "OpenAI 호환", google: "Google Gemini" };
+
 /**
- * 대화 입력창의 모델 선택. 세션 백엔드가 고를 수 있는 목록을 그대로 `<select>`로 그린다(키보드로 접근 가능, 팝오버가
- * 없어 포털이 필요 없다). 고르면 다음 요청부터 그 모델로 돈다. 요청을 처리하는 동안에는 disabled로 막는다.
+ * 대화 입력창의 모델 선택(#283). "모델 · 노력" 버튼을 누르면 팝오버가 열려 모델과 노력 단계를 함께 고른다.
+ * 팝오버는 body로 포털해 레이아웃에 영향을 주지 않고, Esc·바깥 클릭으로 닫힌다. 요청을 처리하는 동안에는 버튼 자체를 막는다.
  */
 export function ModelPicker({
   picker,
   disabled,
   disabledReason,
-  onChange,
+  onChangeModel,
+  onChangeEffort,
 }: {
   picker: ModelPickerView;
   disabled: boolean;
   disabledReason?: string;
-  onChange: (modelId: string) => void;
+  onChangeModel: (modelId: string) => void;
+  onChangeEffort: (effort: string) => void;
 }) {
-  const value = picker.current ?? "";
-  const current = picker.options.find((option) => option.id === value);
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const current = picker.options.find((option) => option.id === (picker.current ?? ""));
+  const currentEffortLabel = picker.effort.supported ? (EFFORT_LABEL[picker.effort.current ?? "medium"] ?? "보통") : undefined;
+  const label = [current?.label ?? "기본", currentEffortLabel].filter(Boolean).join(" · ");
   const title = disabledReason ?? [current?.hint, formatPrice(current?.price), current?.resolvedId && `실제 모델: ${current.resolvedId}`, picker.note].filter(Boolean).join(" · ");
+
   return (
-    <label className="flex items-center gap-1.5 text-sm">
-      <span className="sr-only">모델</span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled || picker.options.length <= 1}
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        disabled={disabled}
         title={title || undefined}
-        className="rounded-control border border-line bg-panel px-2 py-2 text-sm text-ink disabled:opacity-50"
+        onClick={() => setOpen((value) => !value)}
+        className="flex items-center gap-1 rounded-control border border-line bg-panel px-2.5 py-2 text-sm text-ink disabled:opacity-50"
       >
-        {picker.options.map((option) => (
-          <option key={option.id} value={option.id} disabled={option.disabled} title={[option.hint, formatPrice(option.price)].filter(Boolean).join(" · ") || undefined}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
+        <span className="max-w-[12rem] truncate">{label}</span>
+        <span aria-hidden className="text-xs text-muted">
+          ▾
+        </span>
+      </button>
+      {open && !disabled && (
+        <ModelPickerPopover
+          anchor={buttonRef}
+          picker={picker}
+          onClose={() => setOpen(false)}
+          onChangeModel={(modelId) => {
+            setOpen(false);
+            onChangeModel(modelId);
+          }}
+          onChangeEffort={onChangeEffort}
+        />
+      )}
+    </>
   );
+}
+
+/**
+ * 모델 목록 + 노력 단계를 담은 팝오버. body로 포털하는 바깥 껍데기(ModelPickerPopover)와
+ * 실제 그리는 내용(ModelPickerDialog)을 나눠, 내용은 포털 없이 단독으로도 그릴 수 있게 한다(테스트용 —
+ * 포털은 `document`가 있는 실제 브라우저에서만 의미가 있고, 서버 렌더 테스트에는 `document`가 없다).
+ */
+function ModelPickerPopover({
+  anchor,
+  picker,
+  onClose,
+  onChangeModel,
+  onChangeEffort,
+}: {
+  anchor: RefObject<HTMLButtonElement | null>;
+  picker: ModelPickerView;
+  onClose: () => void;
+  onChangeModel: (modelId: string) => void;
+  onChangeEffort: (effort: string) => void;
+}) {
+  // 여는 자리는 눌린 버튼 바로 아래(body로 포털하므로 화면 좌표로 잡는다). 프로젝트 메뉴 팝오버와 같은 방식
+  const [position] = useState<{ top: number; left: number }>(() => {
+    const box = anchor.current?.getBoundingClientRect();
+    return box ? { top: box.bottom + 8, left: box.left } : { top: 0, left: 0 };
+  });
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="fixed inset-0 z-40">
+      {/* 바깥을 누르면 닫는다. 팝오버 자신은 이 뒤(DOM 순서상 위)에 그려 클릭이 여기로 새지 않는다 */}
+      <button type="button" aria-label="모델 선택 닫기" onClick={onClose} className="absolute inset-0 cursor-default bg-transparent" />
+      <ModelPickerDialog style={{ top: position.top, left: position.left }} picker={picker} onChangeModel={onChangeModel} onChangeEffort={onChangeEffort} />
+    </div>,
+    document.body,
+  );
+}
+
+/** 팝오버가 실제로 그리는 내용(검색창 · 모델 목록 · 노력 단계). 포털을 감싸지 않아 단독으로도 그릴 수 있다 */
+export function ModelPickerDialog({
+  style,
+  picker,
+  onChangeModel,
+  onChangeEffort,
+}: {
+  style?: { top: number; left: number };
+  picker: ModelPickerView;
+  onChangeModel: (modelId: string) => void;
+  onChangeEffort: (effort: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const term = query.trim().toLowerCase();
+  const filtered = term ? picker.options.filter((option) => `${option.label} ${option.hint ?? ""}`.toLowerCase().includes(term)) : picker.options;
+  const groups = groupOptions(picker.backend, filtered);
+  const currentId = picker.current ?? "";
+
+  return (
+    <div
+      role="dialog"
+      aria-label="모델·노력 선택"
+      style={style}
+      className="glass fixed max-h-[calc(100vh-2rem)] w-80 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-panel p-2 text-sm shadow-xl"
+    >
+      {picker.options.length > SEARCH_THRESHOLD && (
+        <input
+          type="text"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="모델 검색"
+          autoFocus
+          className="mb-1 w-full rounded-control border border-line bg-panel px-2 py-1.5 text-sm placeholder:text-muted"
+        />
+      )}
+      {picker.note && <p className="px-2 pb-1 text-xs text-muted">{picker.note}</p>}
+      {groups.map((group) => (
+        <div key={group.title ?? "__all"}>
+          {group.title && <p className="px-2 pb-1 pt-1.5 text-xs font-medium text-muted">{group.title}</p>}
+          <ul>
+            {group.options.map((option) => (
+              <li key={option.id}>
+                <ModelOptionRow option={option} selected={option.id === currentId} onSelect={() => onChangeModel(option.id)} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      {filtered.length === 0 && <p className="px-2 py-1.5 text-muted">검색 결과가 없습니다</p>}
+
+      <EffortControl effort={picker.effort} onChange={onChangeEffort} />
+    </div>
+  );
+}
+
+function ModelOptionRow({ option, selected, onSelect }: { option: ModelPickerOption; selected: boolean; onSelect: () => void }) {
+  const detail = [option.hint, formatPrice(option.price), formatContextWindow(option.contextWindow), option.resolvedId && `실제 모델: ${option.resolvedId}`]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      disabled={option.disabled}
+      title={option.disabled ? option.disabledReason : detail || undefined}
+      onClick={onSelect}
+      className={`flex w-full items-start gap-2 rounded-control px-2 py-1.5 text-left hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50 ${selected ? "bg-panel" : ""}`}
+    >
+      <span aria-hidden className="mt-0.5 w-3 shrink-0 text-center text-xs">
+        {selected ? "✓" : ""}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span className="font-medium">{option.label}</span>
+          {option.badges?.map((badge) => (
+            <span key={badge} className="rounded-full border border-line px-1.5 py-px text-[10px] text-muted">
+              {badge}
+            </span>
+          ))}
+        </span>
+        {option.hint && <span className="block text-xs text-muted">{option.hint}</span>}
+        {(option.price || option.contextWindow) && (
+          <span className="block text-xs text-muted">{[formatPrice(option.price), formatContextWindow(option.contextWindow)].filter(Boolean).join(" · ")}</span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+/** 노력 단계 네 칸 버튼(segmented control). 지원하지 않는 백엔드는 자리표 네 칸을 회색으로 두고 이유를 툴팁에 남긴다 */
+function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChange: (id: string) => void }) {
+  const levels = effort.levels.length > 0 ? effort.levels : EFFORT_PLACEHOLDER;
+  const current = effort.current ?? "medium";
+  const disabledTitle = effort.supported ? undefined : (effort.reason ?? "이 백엔드는 노력 단계를 지원하지 않습니다");
+  return (
+    <div className="mt-2 border-t border-line pt-2">
+      <p className="px-2 pb-1 text-xs font-medium text-muted">노력</p>
+      <div role="radiogroup" aria-label="노력 단계" title={disabledTitle} className="flex gap-1 px-2">
+        {levels.map((level) => (
+          <button
+            key={level.id}
+            type="button"
+            role="radio"
+            aria-checked={effort.supported && current === level.id}
+            disabled={!effort.supported}
+            title={effort.supported ? level.hint : disabledTitle}
+            onClick={() => onChange(level.id)}
+            className={`flex-1 rounded-control border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
+              effort.supported && current === level.id ? "border-ink bg-ink text-panel" : "border-line bg-panel text-ink hover:bg-panel/70"
+            }`}
+          >
+            {level.label}
+          </button>
+        ))}
+      </div>
+      {effort.supported ? (
+        <p className="px-2 pt-1 text-xs text-muted">{levels.find((level) => level.id === current)?.hint}</p>
+      ) : (
+        <p className="px-2 pt-1 text-xs text-muted">{disabledTitle}</p>
+      )}
+      {effort.note && <p className="px-2 pt-1 text-xs text-muted">{effort.note}</p>}
+    </div>
+  );
+}
+
+/** api 백엔드는 공급자가 둘 이상이면 공급자별로 묶는다. 그 밖(claude-code·codex·commandcode·opencode)은 한 백엔드의 목록이라 묶지 않는다 */
+function groupOptions(backend: ModelPickerView["backend"], options: ModelPickerOption[]): Array<{ title?: string; options: ModelPickerOption[] }> {
+  if (backend !== "api") return [{ options }];
+  const head = options.filter((option) => option.id === "");
+  const rest = options.filter((option) => option.id !== "");
+  const providers = new Set(rest.map((option) => option.provider).filter(Boolean));
+  if (providers.size < 2) return [{ options: [...head, ...rest] }];
+  const groups: Array<{ title?: string; options: ModelPickerOption[] }> = head.length > 0 ? [{ options: head }] : [];
+  for (const provider of providers) {
+    groups.push({ title: PROVIDER_LABEL[provider!] ?? provider, options: rest.filter((option) => option.provider === provider) });
+  }
+  const noProvider = rest.filter((option) => !option.provider);
+  if (noProvider.length > 0) groups.push({ options: noProvider });
+  return groups;
 }
 
 function formatPrice(price?: ModelPickerOption["price"]): string | undefined {
   if (!price) return undefined;
   return `백만 토큰당 입력 $${price.inputPerMillion}/출력 $${price.outputPerMillion}`;
+}
+
+function formatContextWindow(tokens?: number): string | undefined {
+  if (!tokens) return undefined;
+  return tokens >= 1000 ? `컨텍스트 ${Math.round(tokens / 1000)}K 토큰` : `컨텍스트 ${tokens} 토큰`;
 }
 
 function stageLabel(stage: string): string {

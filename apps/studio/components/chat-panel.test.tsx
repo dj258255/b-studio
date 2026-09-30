@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel, ModelPicker } from "./chat-panel";
+import { ChatPanel, ModelPicker, ModelPickerDialog } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -133,39 +133,87 @@ describe("ModelPicker(대화 입력창의 모델 선택)", () => {
     current: "sonnet",
     options: [
       { id: "", label: "기본", hint: "로그인한 계정의 기본 모델을 그대로 씁니다" },
-      { id: "opus", label: "Opus", hint: "어려운 설계·디버깅에 강합니다", resolvedId: "claude-opus-5", price: { inputPerMillion: 5, outputPerMillion: 25 } },
-      { id: "sonnet", label: "Sonnet", hint: "대부분의 작업에 균형 잡힌 선택입니다", resolvedId: "claude-sonnet-5", price: { inputPerMillion: 2, outputPerMillion: 10 } },
-      { id: "haiku", label: "Haiku", hint: "가장 저렴하고 빠릅니다. 작은 수정에 적합합니다", resolvedId: "claude-haiku-4-5", price: { inputPerMillion: 1, outputPerMillion: 5 } },
+      { id: "opus", label: "Opus", hint: "어려운 설계·디버깅에 강합니다", badges: ["깊은 추론"], resolvedId: "claude-opus-5", price: { inputPerMillion: 5, outputPerMillion: 25 } },
+      { id: "sonnet", label: "Sonnet", hint: "대부분의 작업에 균형 잡힌 선택입니다", badges: ["권장"], resolvedId: "claude-sonnet-5", price: { inputPerMillion: 2, outputPerMillion: 10 } },
+      { id: "haiku", label: "Haiku", hint: "가장 저렴하고 빠릅니다. 작은 수정에 적합합니다", badges: ["빠름", "저렴"], resolvedId: "claude-haiku-4-5", price: { inputPerMillion: 1, outputPerMillion: 5 } },
     ],
+    effort: { supported: true, current: "high", levels: [{ id: "low", label: "낮음", hint: "빠르고 싸게" }, { id: "medium", label: "보통", hint: "균형" }, { id: "high", label: "높음", hint: "느리지만 더 깊게" }, { id: "max", label: "최대", hint: "가장 깊게" }] },
   };
 
-  it("고를 수 있는 모델을 모두 옵션으로 그리고, 지금 값을 고른 채로 그린다", () => {
-    const html = renderToStaticMarkup(<ModelPicker picker={claudeCode} disabled={false} onChange={() => undefined} />);
+  it("닫힌 첫 그리기는 '모델 · 노력' 버튼만 그린다(팝오버는 열어야 뜬다)", () => {
+    const html = renderToStaticMarkup(<ModelPicker picker={claudeCode} disabled={false} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
 
-    expect(html).toContain(">기본</option>");
-    expect(html).toContain('<option value="opus"');
-    expect(html).toMatch(/<option value="sonnet"[^>]*selected=""/);
-    expect(html).toContain('<option value="haiku"');
-    // 지금 고른 모델의 공식 단가는 옵션 title에, 관측한 실제 모델 id(claude-sonnet-5)는 select 전체의 title(호버 안내)에 들어간다
-    expect(html).toMatch(/<option value="opus"[^>]*title="[^"]*\$5/);
-    expect(html).toMatch(/<select[^>]*title="[^"]*claude-sonnet-5/);
+    expect(html).toContain("Sonnet · 높음");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain('role="dialog"');
   });
 
-  it("요청을 처리하는 동안에는(disabled) 고르지 못하게 막고 이유를 안내한다", () => {
+  it("요청을 처리하는 동안에는(disabled) 버튼을 막고 이유를 안내한다", () => {
     const html = renderToStaticMarkup(
-      <ModelPicker picker={claudeCode} disabled={true} disabledReason="요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" onChange={() => undefined} />,
+      <ModelPicker picker={claudeCode} disabled={true} disabledReason="요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" onChangeModel={() => undefined} onChangeEffort={() => undefined} />,
     );
 
-    expect(html).toMatch(/<select[^>]*disabled=""/);
+    expect(html).toMatch(/<button[^>]*disabled=""/);
     expect(html).toContain('title="요청을 처리하는 동안에는 모델을 바꿀 수 없습니다"');
   });
 
-  it("고를 것이 '기본'뿐이면(예: codex) 저절로 막는다", () => {
-    const codex: ModelPickerView = { backend: "codex", options: [{ id: "", label: "기본" }], note: "Codex는 스튜디오가 미리 아는 모델 목록이 없습니다" };
+  it("팝오버는 모델마다 이름·설명·배지·단가와 지금 고른 표시를 그린다", () => {
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={claudeCode} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
 
-    const html = renderToStaticMarkup(<ModelPicker picker={codex} disabled={false} onChange={() => undefined} />);
+    expect(html).toContain("Opus");
+    expect(html).toContain("깊은 추론");
+    expect(html).toContain("권장");
+    expect(html).toContain("빠름");
+    expect(html).toMatch(/aria-selected="true"[^>]*>[\s\S]*?Sonnet|Sonnet[\s\S]*?aria-selected="true"/);
+    expect(html).toContain("$5");
+  });
 
-    expect(html).toMatch(/<select[^>]*disabled=""/);
+  it("노력 단계는 낮음·보통·높음·최대 네 칸으로 그리고, 지금 고른 값을 표시한다", () => {
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={claudeCode} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+
+    expect(html).toContain("낮음");
+    expect(html).toContain("보통");
+    expect(html).toContain("높음");
+    expect(html).toContain("최대");
+    expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>높음/);
+  });
+
+  it("노력 단계를 지원하지 않는 백엔드는 네 칸을 disabled로 그리고 이유를 툴팁에 남긴다", () => {
+    const demo: ModelPickerView = {
+      backend: "demo",
+      options: [{ id: "", label: "기본" }],
+      effort: { supported: false, levels: [], reason: "이 백엔드는 노력 단계를 지원하지 않습니다" },
+    };
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={demo} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+
+    expect(html.match(/role="radio"[^>]*disabled=""/g)).toHaveLength(4);
+    expect(html).toContain("이 백엔드는 노력 단계를 지원하지 않습니다");
+  });
+
+  it("목록이 길면(9개 넘게) 검색창을 보여준다", () => {
+    const many: ModelPickerView = {
+      backend: "commandcode",
+      options: [{ id: "", label: "기본" }, ...Array.from({ length: 9 }, (_, i) => ({ id: `m${i}`, label: `모델 ${i}` }))],
+      effort: { supported: true, levels: claudeCode.effort.levels },
+    };
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={many} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+
+    expect(html).toContain('placeholder="모델 검색"');
+  });
+
+  it("고를 것이 '기본'뿐이면(예: codex) 검색창 없이 목록만 그린다", () => {
+    const codex: ModelPickerView = {
+      backend: "codex",
+      options: [{ id: "", label: "기본" }],
+      note: "Codex는 스튜디오가 미리 아는 모델 목록이 없습니다",
+      effort: { supported: true, levels: claudeCode.effort.levels },
+    };
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={codex} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+
+    expect(html).not.toContain('placeholder="모델 검색"');
     expect(html).toContain("Codex는 스튜디오가 미리 아는 모델 목록이 없습니다");
   });
 });

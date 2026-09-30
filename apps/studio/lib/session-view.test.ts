@@ -223,6 +223,20 @@ describe('reduceSession', () => {
     });
   });
 
+  it('실행 환경 알림에 노력 단계가 실려 있으면 함께 남긴다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '주문 수 API 추가' },
+      { type: 'agent', runId: 'r1', event: { type: 'session', backend: 'Anthropic API', model: 'claude-sonnet-5', effort: 'max' } },
+    ]);
+    expect(view.chat.at(-1)).toMatchObject({ kind: 'backend', model: 'claude-sonnet-5', effort: 'max' });
+  });
+
+  it('model 이벤트는 모델과 노력 단계를 함께 스냅샷에 반영한다', () => {
+    const view = fold([{ type: 'model', modelId: 'opus', effort: 'low' }]);
+    expect(view.snapshot.modelId).toBe('opus');
+    expect(view.snapshot.effort).toBe('low');
+  });
+
   it('검증 게이트는 확인 중으로 나타났다가 결과로 채워진다', () => {
     const pending = fold([{ type: 'agent', runId: 'r1', event: { type: 'verify_start', files: ['api/Order.java'] } }]);
     expect(pending.chat).toEqual([{ kind: 'gate', runId: 'r1', files: ['api/Order.java'] }]);

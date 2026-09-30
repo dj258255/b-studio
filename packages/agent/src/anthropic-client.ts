@@ -35,7 +35,7 @@ export class AnthropicModelClient implements ModelClient {
     this.effort = effort;
     this.#maxTokens = maxTokens;
     this.#credentials = { apiKey, authToken, baseURL };
-    this.info = { provider: 'anthropic', backend: 'Anthropic API', model, auth: authLabel };
+    this.info = { provider: 'anthropic', backend: 'Anthropic API', model, auth: authLabel, effort: this.effort };
   }
 
   /** 샌드박스를 띄우기 전에 인증과 모델 접근 권한을 토큰 소비 없이 확인한다 */

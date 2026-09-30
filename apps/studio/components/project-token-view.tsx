@@ -215,6 +215,7 @@ export function ProjectTokenView({ report }: { report: ProjectTokenReport }) {
                   <th scope="col" className="py-1.5 pr-2 font-medium">요청</th>
                   <th scope="col" className="py-1.5 pr-2 text-right font-medium">토큰</th>
                   <th scope="col" className="py-1.5 pr-2 text-right font-medium">비용</th>
+                  <th scope="col" className="py-1.5 pr-2 font-medium">노력</th>
                   <th scope="col" className="py-1.5 font-medium">결과</th>
                 </tr>
               </thead>
@@ -259,6 +260,7 @@ function RequestRow({ request }: { request: ProjectRequestRow }) {
       </th>
       <td className="py-1.5 pr-2 text-right font-mono">{formatTokens(totalTokens(request.usage))}</td>
       <td className="py-1.5 pr-2 text-right font-mono">{formatCost(request.costUsd)}</td>
+      <td className="py-1.5 pr-2">{request.effort ?? "—"}</td>
       <td className="py-1.5">{REQUEST_RESULT_LABEL[request.result]}</td>
     </tr>
   );

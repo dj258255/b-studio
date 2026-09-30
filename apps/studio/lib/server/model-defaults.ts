@@ -22,8 +22,24 @@ export function projectModelDefault(projectId: string, backend: SessionMode): st
 
 /** 대화에서 모델을 바꿀 때마다 부른다. 빈 문자열(기본)도 그대로 남겨 다음 세션이 같은 선택을 이어받는다 */
 export function rememberProjectModelDefault(projectId: string, backend: SessionMode, modelId: string | undefined): void {
+  write(key(projectId, backend), modelId);
+}
+
+/** 이 프로젝트·백엔드에 저장된 마지막 노력 단계 선택. modelId와 같은 파일에 다른 키로 둔다(model-defaults.json) */
+export function projectEffortDefault(projectId: string, backend: SessionMode): string | undefined {
   const store = load();
-  const next = { ...store, [key(projectId, backend)]: modelId ?? '' };
+  const value = store[effortKey(projectId, backend)];
+  return value === undefined ? undefined : value;
+}
+
+/** 대화에서 노력 단계를 바꿀 때마다 부른다. 빈 문자열(기본)도 그대로 남겨 다음 세션이 같은 선택을 이어받는다 */
+export function rememberProjectEffortDefault(projectId: string, backend: SessionMode, effort: string | undefined): void {
+  write(effortKey(projectId, backend), effort);
+}
+
+function write(storeKey: string, value: string | undefined): void {
+  const store = load();
+  const next = { ...store, [storeKey]: value ?? '' };
   cache = next;
   const file = filePath();
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -34,6 +50,10 @@ export function rememberProjectModelDefault(projectId: string, backend: SessionM
 
 function key(projectId: string, backend: SessionMode): string {
   return `${projectId}:${backend}`;
+}
+
+function effortKey(projectId: string, backend: SessionMode): string {
+  return `${projectId}:${backend}:effort`;
 }
 
 function load(): Store {
