@@ -78,6 +78,8 @@ export interface BenchRow {
   taskId: string;
   coupled: boolean;
   strategy: Strategy;
+  /** --concurrency N. 이 필드가 생기기 전 결과에는 없다(직렬 실행 1과 같다). 동시 실행의 시간 지표는 직렬 실행과 비교할 수 없다 */
+  concurrency?: number;
   model: string;
   /** 세션 이벤트에서 읽은 실제 모델 이름 (중복 제거) */
   observedModels: string[];
@@ -144,6 +146,8 @@ export interface SummaryMeta {
   planModel?: string;
   /** 계획-실행 분리의 실행 모델(--execute-model). 없으면 requestedModel을 그대로 실행에도 쓴다 */
   executeModel?: string;
+  /** --concurrency N. 1(기본, 직렬)보다 크면 이 실행의 시간 지표는 직렬 실행과 비교할 수 없다 */
+  concurrency?: number;
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'provider_gate', 'environment', 'timeout', 'unknown'];
@@ -246,7 +250,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 검증 ${meta.verify === 'light' ? 'light(가볍게)' : 'full'} · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}${meta.planModel ? ` · 계획-실행 분리: 계획 ${meta.planModel} → 실행 ${meta.executeModel ?? meta.requestedModel}` : ''}`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 검증 ${meta.verify === 'light' ? 'light(가볍게)' : 'full'} · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}${meta.planModel ? ` · 계획-실행 분리: 계획 ${meta.planModel} → 실행 ${meta.executeModel ?? meta.requestedModel}` : ''}${meta.concurrency && meta.concurrency > 1 ? ` · 동시 실행 ${meta.concurrency}(시간 지표는 직렬 실행과 비교할 수 없음)` : ''}`,
     ...(planBriefLine ? ['', planBriefLine] : []),
     '',
     '## 과제 × 전략',
