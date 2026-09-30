@@ -13,7 +13,7 @@ import { decideInput, decideUrl } from './url-policy';
  * 스튜디오를 고쳐도(git pull) 앱을 다시 만들 필요가 없다(Figma·Slack·VS Code·토스 POS와 같은 구조).
  *
  * 창은 BaseWindow + WebContentsView 두 개다(위: 도구 막대, 아래: 스튜디오). BrowserView는 폐기 예정이라 쓰지 않는다.
- * 스튜디오 화면에는 Node를 주지 않는다. preload도 기본은 주지 않되, 폴더 선택 창(ADR-082)만은 웹 페이지 스스로
+ * 스튜디오 화면에는 Node를 주지 않는다. preload도 기본은 주지 않되, 폴더 선택 창(ADR-085)만은 웹 페이지 스스로
  * 열 방법이 없어 `content-preload.ts`로 `pickFolder` 하나만 좁게 열었다(`pick-folder.ts`가 보낸이를 확인한다).
  */
 
@@ -173,7 +173,7 @@ function createView(name: 'toolbar' | 'loading'): WebContentsView {
 
 /**
  * 스튜디오 화면. 서버가 준 웹 콘텐츠라 Node는 주지 않는다. preload는 `content-preload.ts` 하나만 붙여
- * `window.bStudioDesktop.pickFolder()` 딱 하나만 열어 둔다(ADR-082) — 나머지는 이전처럼 아무것도 주지 않는다
+ * `window.bStudioDesktop.pickFolder()` 딱 하나만 열어 둔다(ADR-085) — 나머지는 이전처럼 아무것도 주지 않는다
  */
 function createStudioView(url: string): WebContentsView {
   const view = new WebContentsView({
@@ -270,7 +270,7 @@ function registerIpc(): void {
     await shell.openPath(launchLogDir());
   });
 
-  // 스튜디오 화면의 "폴더 선택…"(ADR-082). OS 기본 폴더 선택 창을 띄우고 고른 절대 경로를 돌려준다(취소하면 undefined)
+  // 스튜디오 화면의 "폴더 선택…"(ADR-085). OS 기본 폴더 선택 창을 띄우고 고른 절대 경로를 돌려준다(취소하면 undefined)
   ipcMain.handle('b-studio:pick-folder', async (event) => {
     const trusted = canPickFolder({ senderId: event.sender.id, senderUrl: event.sender.getURL(), contentId: content?.webContents.id });
     if (!trusted || !win) return undefined;

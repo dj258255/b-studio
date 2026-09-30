@@ -7,7 +7,7 @@ import { DesktopFolderPicker } from "./desktop-folder-picker";
 import { FolderBrowser } from "./folder-browser";
 
 /**
- * 프로젝트 메뉴(ADR-070)의 "폴더 열기…"를 모달로 띄운다(ADR-082). 경로를 손으로 입력하는 대신 고른다 —
+ * 프로젝트 메뉴(ADR-070)의 "폴더 열기…"를 모달로 띄운다(ADR-085). 경로를 손으로 입력하는 대신 고른다 —
  * 데스크톱 앱(`window.bStudioDesktop.pickFolder`가 있으면)은 OS 기본 폴더 선택 창을, 그 밖(브라우저)은
  * 더블클릭으로 오가는 탐색 모달을 쓴다. 확인하면 파일을 만들고 그 프로젝트의 개발 화면으로 이동한다.
  * body에 포털로 그린다 — 머리의 유리 효과(backdrop-filter)가 안쪽 fixed 요소의 기준을 머리로 바꿔 갇힌다(work-drawer와 같은 이유)

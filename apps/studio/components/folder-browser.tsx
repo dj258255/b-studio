@@ -8,7 +8,7 @@ import { OpenFolder } from "./open-folder";
 import { useFolderProposal } from "./use-folder-proposal";
 
 /**
- * 더블클릭으로 폴더를 고르는 탐색 모달 본문(ADR-082). 경로를 입력하는 대신 홈 폴더부터 시작해 하위 폴더를
+ * 더블클릭으로 폴더를 고르는 탐색 모달 본문(ADR-085). 경로를 입력하는 대신 홈 폴더부터 시작해 하위 폴더를
  * 오가며 고른다. 고른 폴더는 바로 `useFolderProposal`로 제안을 받아 그 자리에서 보여준다 — 따로
  * "살펴보기" 단계가 없다. 데스크톱 앱은 OS 기본 대화상자(`desktop-folder-picker.tsx`)를 대신 쓴다.
  */

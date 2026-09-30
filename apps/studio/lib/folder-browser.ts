@@ -1,7 +1,7 @@
 import type { FolderHint } from "@/lib/server/folder-browser";
 
 /**
- * 폴더 선택 모달(ADR-082, `components/folder-browser.tsx`)의 순수 로직. 화면 그리기와 분리해 두면 테스트가
+ * 폴더 선택 모달(ADR-085, `components/folder-browser.tsx`)의 순수 로직. 화면 그리기와 분리해 두면 테스트가
  * DOM·이벤트 시뮬레이션 없이도 "더블클릭으로 들어간다", "Enter로 들어간다", "Backspace로 위로 간다" 같은
  * 동작을 그대로 확인할 수 있다 — 화면 쪽은 이 함수들이 돌려준 동작(action)을 실행만 한다.
  */

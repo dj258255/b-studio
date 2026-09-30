@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * 데스크톱 앱(apps/desktop)이 스튜디오 화면에 여는 좁은 통로(ADR-082). 브라우저에서 그냥 열면 없다(undefined) —
+ * 데스크톱 앱(apps/desktop)이 스튜디오 화면에 여는 좁은 통로(ADR-085). 브라우저에서 그냥 열면 없다(undefined) —
  * 화면은 이 값의 있고 없음만으로 "OS 폴더 선택 창을 쓸 수 있는가"를 판단한다(따로 서버에 묻지 않는다).
  */
 export interface DesktopBridge {

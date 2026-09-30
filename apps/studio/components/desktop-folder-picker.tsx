@@ -6,7 +6,7 @@ import { FolderProposalView } from "./folder-proposal-view";
 import { useFolderProposal } from "./use-folder-proposal";
 
 /**
- * 데스크톱 앱(apps/desktop)에서 "폴더 선택…"을 누르면 OS 기본 폴더 선택 창을 띄운다(ADR-082).
+ * 데스크톱 앱(apps/desktop)에서 "폴더 선택…"을 누르면 OS 기본 폴더 선택 창을 띄운다(ADR-085).
  * `window.bStudioDesktop.pickFolder()`가 있을 때만 쓴다(`open-folder-modal.tsx`가 있고 없음을 미리 본다) —
  * 고른 경로는 바로 제안을 받아 보여주고, 따로 "살펴보기" 단계가 없다.
  */

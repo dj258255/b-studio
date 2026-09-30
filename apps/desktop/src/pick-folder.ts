@@ -1,7 +1,7 @@
 import { isLocalHost } from './url-policy';
 
 /**
- * 폴더 선택 대화상자(`b-studio:pick-folder`, ADR-082)를 부를 수 있는 보낸이인지 확인하는 순수 함수.
+ * 폴더 선택 대화상자(`b-studio:pick-folder`, ADR-085)를 부를 수 있는 보낸이인지 확인하는 순수 함수.
  *
  * 스튜디오 화면(서버가 준 웹 콘텐츠)에만 좁은 preload로 `pickFolder`를 노출하지만, 도구 막대·로딩 화면도
  * 같은 프로세스 안의 WebContentsView라 원칙적으로 같은 IPC 채널에 말을 걸 수 있다. 그래서 ipcMain.handle 안에서
