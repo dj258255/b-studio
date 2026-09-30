@@ -7,10 +7,14 @@ import {
   createIssue,
   createPullRequest,
   fetchIssue,
+  fetchIssueDetail,
+  fetchPullRequestDetail,
   listIssues,
   listPullRequests,
+  parseClosingReferences,
   parsePullRequestNumber,
   parseRemote,
+  parseTaskList,
   postComment,
   PullRequestError,
   RepositoryRateLimitError,
@@ -607,5 +611,207 @@ describe('addSubIssue', () => {
     );
     expect((error as Error).message).toContain('HTTP 410');
     expect((error as Error).message).not.toContain('ghp_secret');
+  });
+});
+
+describe('parseTaskList', () => {
+  it('체크리스트 항목의 총 개수와 완료 개수를 센다', () => {
+    const body = ['할 일', '', '- [ ] 첫 번째', '- [x] 두 번째', '- [X] 세 번째(대문자)', '그냥 글', '- 체크박스 아닌 목록'].join('\n');
+    expect(parseTaskList(body)).toEqual({
+      total: 3,
+      checked: 2,
+      items: [
+        { text: '첫 번째', checked: false },
+        { text: '두 번째', checked: true },
+        { text: '세 번째(대문자)', checked: true },
+      ],
+    });
+  });
+
+  it('체크리스트가 없거나 본문이 없으면 total 0을 돌려준다', () => {
+    expect(parseTaskList(undefined)).toEqual({ total: 0, checked: 0, items: [] });
+    expect(parseTaskList('그냥 글')).toEqual({ total: 0, checked: 0, items: [] });
+  });
+});
+
+describe('parseClosingReferences', () => {
+  it('close·fix·resolve 계열 문구에서 번호를 뽑고 중복을 없앤다', () => {
+    expect(parseClosingReferences('Closes #12, fixes #7 그리고 Resolved: #12')).toEqual([12, 7]);
+    expect(parseClosingReferences('closed #3')).toEqual([3]);
+    expect(parseClosingReferences('그냥 #12 언급(닫는 문구 아님)')).toEqual([]);
+    expect(parseClosingReferences(undefined)).toEqual([]);
+  });
+});
+
+describe('fetchIssueDetail', () => {
+  it('본문·담당자·최근 댓글·체크리스트·연결된 PR을 담는다', async () => {
+    const { fn, calls } = fakeFetch([
+      {
+        status: 200,
+        body: {
+          number: 57,
+          title: '주문 목록이 느립니다',
+          body: '재현 방법\n\n- [ ] 인덱스 추가\n- [x] 쿼리 프로파일링',
+          user: { login: 'yuna' },
+          labels: [{ name: 'bug' }],
+          updated_at: '2026-09-20T00:00:00Z',
+          html_url: 'https://github.com/acme/orders/issues/57',
+          state: 'open',
+          assignees: [{ login: 'kim' }, { login: 'dev' }],
+        },
+      },
+      { status: 200, body: [{ user: { login: 'kim' }, body: '진행 중입니다', created_at: '2026-09-20T01:00:00Z', html_url: 'https://github.com/acme/orders/issues/57#issuecomment-1' }] },
+      {
+        status: 200,
+        body: [
+          { number: 60, title: 'fixes #57', body: '', user: { login: 'yuna' }, labels: [], updated_at: '2026-09-21T00:00:00Z', html_url: 'https://github.com/acme/orders/pull/60', state: 'open', draft: false, head: { ref: 'fix/57', sha: 'a' } },
+          { number: 61, title: '상관없는 PR', body: '', user: { login: 'yuna' }, labels: [], updated_at: '2026-09-21T00:00:00Z', html_url: 'https://github.com/acme/orders/pull/61', state: 'open', draft: false, head: { ref: 'other', sha: 'b' } },
+        ],
+      },
+    ]);
+
+    const issue = await fetchIssueDetail(parseRemote('git@github.com:acme/orders.git', {}), 57, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+
+    expect(issue.assignees).toEqual(['kim', 'dev']);
+    expect(issue.taskList).toEqual({ total: 2, checked: 1, items: [{ text: '인덱스 추가', checked: false }, { text: '쿼리 프로파일링', checked: true }] });
+    expect(issue.comments).toEqual([{ author: 'kim', body: '진행 중입니다', createdAt: '2026-09-20T01:00:00Z', url: 'https://github.com/acme/orders/issues/57#issuecomment-1' }]);
+    expect(issue.totalComments).toBe(1);
+    expect(issue.commentsTruncated).toBe(false);
+    expect(issue.linkedPulls).toEqual([{ number: 60, title: 'fixes #57', url: 'https://github.com/acme/orders/pull/60', state: 'open', draft: false }]);
+    expect(calls[0]?.url).toBe('https://api.github.com/repos/acme/orders/issues/57');
+    expect(calls[1]?.url).toBe('https://api.github.com/repos/acme/orders/issues/57/comments?per_page=100');
+    expect(calls[2]?.url).toBe('https://api.github.com/repos/acme/orders/pulls?state=all&per_page=50');
+  });
+
+  it('댓글이 20개보다 많으면 최근 20개만 담고 truncated를 켠다', async () => {
+    const many = Array.from({ length: 25 }, (_unused, index) => ({ user: { login: `u${index}` }, body: `댓글 ${index}`, created_at: `2026-09-${(index % 28) + 1}T00:00:00Z`, html_url: `#${index}` }));
+    const { fn } = fakeFetch([
+      { status: 200, body: { number: 1, title: '이슈', user: {}, labels: [], updated_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/orders/issues/1', state: 'open' } },
+      { status: 200, body: many },
+      { status: 200, body: [] },
+    ]);
+    const issue = await fetchIssueDetail(parseRemote('git@github.com:acme/orders.git', {}), 1, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+    expect(issue.comments).toHaveLength(20);
+    expect(issue.comments[0]?.body).toBe('댓글 5');
+    expect(issue.totalComments).toBe(25);
+    expect(issue.commentsTruncated).toBe(true);
+  });
+
+  it('토큰이 없거나 지원하지 않는 호스트면 요청하지 않는다', async () => {
+    const none = fakeFetch([]);
+    await expect(fetchIssueDetail(parseRemote('git@github.com:acme/orders.git', {}), 1, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    await expect(fetchIssueDetail(parseRemote('/Users/dev/orders', {}), 1, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
+    expect(none.calls).toHaveLength(0);
+  });
+});
+
+describe('fetchPullRequestDetail', () => {
+  it('GitHub는 파일·체크·리뷰·리뷰 댓글을 모두 담는다', async () => {
+    const { fn, calls } = fakeFetch([
+      {
+        status: 200,
+        body: {
+          number: 21,
+          title: '주문 목록 API',
+          body: 'closes #10',
+          user: { login: 'yuna' },
+          labels: [{ name: 'feature' }],
+          updated_at: '2026-09-22T00:00:00Z',
+          html_url: 'https://github.com/acme/orders/pull/21',
+          state: 'open',
+          draft: false,
+          head: { ref: 'b-studio/orders-s1', sha: 'abc123' },
+          base: { ref: 'main' },
+          mergeable: true,
+          mergeable_state: 'clean',
+        },
+      },
+      { status: 200, body: [{ user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-09-22T01:00:00Z' }] },
+      { status: 200, body: { check_runs: [{ name: '빌드', status: 'completed', conclusion: 'success', html_url: 'https://ci/1', started_at: '2026-09-22T00:00:00Z', completed_at: '2026-09-22T00:05:00Z' }] } },
+      { status: 200, body: [{ filename: 'src/orders.ts', status: 'modified', additions: 10, deletions: 2, patch: '@@ -1,2 +1,10 @@' }, { filename: 'logo.png', status: 'added', additions: 0, deletions: 0 }] },
+      { status: 200, body: [{ user: { login: 'reviewer' }, body: '여기 고쳐주세요', path: 'src/orders.ts', line: 5, html_url: 'https://github.com/acme/orders/pull/21#r1', created_at: '2026-09-22T01:00:00Z' }] },
+    ]);
+
+    const pull = await fetchPullRequestDetail(parseRemote('git@github.com:acme/orders.git', {}), 21, {
+      env: { B_STUDIO_GITHUB_TOKEN: 't' },
+      fetch: fn,
+      branchSessionId: (branch) => (branch === 'b-studio/orders-s1' ? 's1' : undefined),
+    });
+
+    expect(pull.sessionId).toBe('s1');
+    expect(pull.baseBranch).toBe('main');
+    expect(pull.mergeable).toBe(true);
+    expect(pull.mergeableState).toBe('clean');
+    expect(pull.checkStatus).toBe('success');
+    expect(pull.reviewDecision).toBe('approved');
+    expect(pull.linkedIssues).toEqual([10]);
+    expect(pull.filesSupported).toBe(true);
+    expect(pull.files).toEqual([
+      { path: 'src/orders.ts', status: 'modified', additions: 10, deletions: 2, patch: '@@ -1,2 +1,10 @@', binary: false, truncated: false },
+      { path: 'logo.png', status: 'added', additions: 0, deletions: 0, patch: undefined, binary: true, truncated: false },
+    ]);
+    expect(pull.checksSupported).toBe(true);
+    expect(pull.checkRuns).toEqual([{ name: '빌드', status: 'completed', conclusion: 'success', url: 'https://ci/1', durationMs: 300_000 }]);
+    expect(pull.reviews).toEqual([{ author: 'reviewer', state: 'approved', submittedAt: '2026-09-22T01:00:00Z' }]);
+    expect(pull.reviewCommentsSupported).toBe(true);
+    expect(pull.reviewComments).toEqual([{ author: 'reviewer', body: '여기 고쳐주세요', path: 'src/orders.ts', line: 5, url: 'https://github.com/acme/orders/pull/21#r1', createdAt: '2026-09-22T01:00:00Z' }]);
+    expect(calls[0]?.url).toBe('https://api.github.com/repos/acme/orders/pulls/21');
+    expect(calls[1]?.url).toBe('https://api.github.com/repos/acme/orders/pulls/21/reviews?per_page=100');
+    expect(calls[2]?.url).toBe('https://api.github.com/repos/acme/orders/commits/abc123/check-runs?per_page=100');
+    expect(calls[3]?.url).toBe('https://api.github.com/repos/acme/orders/pulls/21/files?per_page=100');
+    expect(calls[4]?.url).toBe('https://api.github.com/repos/acme/orders/pulls/21/comments?per_page=100');
+  });
+
+  it('파일 patch가 한도를 넘으면 자르고 truncated를 켠다', async () => {
+    const bigPatch = '+'.repeat(25_000);
+    const { fn } = fakeFetch([
+      { status: 200, body: { number: 1, title: 'PR', body: '', user: {}, labels: [], updated_at: '2026-09-01T00:00:00Z', html_url: 'https://github.com/acme/orders/pull/1', state: 'open', draft: false, head: { ref: 'x', sha: 's' }, base: { ref: 'main' } } },
+      { status: 200, body: [] },
+      { status: 200, body: { check_runs: [] } },
+      { status: 200, body: [{ filename: 'big.ts', status: 'modified', additions: 1, deletions: 1, patch: bigPatch }] },
+      { status: 200, body: [] },
+    ]);
+    const pull = await fetchPullRequestDetail(parseRemote('git@github.com:acme/orders.git', {}), 1, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+    expect(pull.files[0]?.truncated).toBe(true);
+    expect(pull.files[0]?.patch?.length).toBeLessThan(bigPatch.length);
+  });
+
+  it('Gitea는 리뷰는 지원하지만 파일·체크·리뷰 댓글은 이유와 함께 지원하지 않는다', async () => {
+    const { fn, calls } = fakeFetch([
+      {
+        status: 200,
+        body: {
+          number: 5,
+          title: '기능 추가',
+          body: '',
+          user: { login: 'dev' },
+          labels: [],
+          updated_at: '2026-09-18T00:00:00Z',
+          html_url: 'https://git.corp.local/dev/orders/pulls/5',
+          state: 'open',
+          draft: false,
+          head: { ref: 'feature/x', sha: 'zzz' },
+          base: { ref: 'main' },
+        },
+      },
+      { status: 200, body: [{ user: { login: 'reviewer' }, state: 'APPROVED', submitted_at: '2026-09-18T01:00:00Z' }] },
+    ]);
+    const pull = await fetchPullRequestDetail(parseRemote('https://git.corp.local/dev/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitea' }), 5, { env: { B_STUDIO_GITEA_TOKEN: 't' }, fetch: fn });
+
+    expect(pull.checkStatus).toBeUndefined();
+    expect(pull.reviewDecision).toBeUndefined();
+    expect(pull.reviews).toEqual([{ author: 'reviewer', state: 'approved', submittedAt: '2026-09-18T01:00:00Z' }]);
+    expect(pull.filesSupported).toBe(false);
+    expect(pull.filesUnsupportedReason).toContain('지원하지 않습니다');
+    expect(pull.checksSupported).toBe(false);
+    expect(pull.reviewCommentsSupported).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('토큰이 없거나 지원하지 않는 호스트면 요청하지 않는다', async () => {
+    const none = fakeFetch([]);
+    await expect(fetchPullRequestDetail(parseRemote('git@github.com:acme/orders.git', {}), 1, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    await expect(fetchPullRequestDetail(parseRemote('/Users/dev/orders', {}), 1, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
+    expect(none.calls).toHaveLength(0);
   });
 });

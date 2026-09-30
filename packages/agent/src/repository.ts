@@ -113,6 +113,131 @@ export interface PullRequestSummary {
   sessionId?: string;
 }
 
+/** 체크리스트("- [ ] ", "- [x] ") 항목 하나 */
+export interface TaskListItem {
+  text: string;
+  checked: boolean;
+}
+
+/** 이슈·PR 본문의 체크리스트 진행도. 항목이 없으면 total이 0이다 */
+export interface TaskListProgress {
+  total: number;
+  checked: number;
+  items: TaskListItem[];
+}
+
+/** 저장소 화면(이슈 상세)의 댓글 하나 */
+export interface IssueComment {
+  author: string;
+  /** 마크다운 원문 */
+  body: string;
+  /** ISO 8601 */
+  createdAt: string;
+  url: string;
+}
+
+/** 이슈·PR이 서로 가리키는 관계. closes/fixes/resolves #n 문구나 제목·본문의 교차 참조로 찾는다 */
+export interface LinkedReference {
+  number: number;
+  title: string;
+  url: string;
+  state: 'open' | 'closed';
+  draft?: boolean;
+}
+
+/** 저장소 화면(이슈 상세) 하나 */
+export interface IssueDetail extends IssueSummary {
+  assignees: string[];
+  /** 최근 것부터가 아니라 오래된 것부터(대화 순서). 최근 MAX_ISSUE_COMMENTS개만 담는다 */
+  comments: IssueComment[];
+  /** 지금까지 읽은 댓글 수(comments.length 이상일 수 있다. 더 있으면 truncated) */
+  totalComments: number;
+  commentsTruncated: boolean;
+  taskList: TaskListProgress;
+  /** 본문·제목에 closes/fixes/resolves #이슈번호로 이 이슈를 가리키는 PR들 */
+  linkedPulls: LinkedReference[];
+}
+
+/** 저장소 화면(PR 상세)의 파일 하나. 이진 파일은 patch가 없다(GitHub·Gitea 모두 diff를 안 준다) */
+export interface PullFile {
+  path: string;
+  /** GitHub 원문 그대로(added/removed/modified/renamed/copied/changed/unchanged) */
+  status: string;
+  additions: number;
+  deletions: number;
+  /** unified diff 조각. 이진 파일이거나 너무 커서 자르면 없다 */
+  patch?: string;
+  binary: boolean;
+  /** 파일이나 전체 한도를 넘어 patch를 자르거나 아예 뺐다 */
+  truncated: boolean;
+}
+
+/** 저장소 화면(PR 상세)의 CI 체크 하나 */
+export interface CheckRun {
+  name: string;
+  /** GitHub 원문 그대로(queued/in_progress/completed) */
+  status: string;
+  /** completed일 때만(success/failure/neutral/cancelled/timed_out/action_required/stale/skipped) */
+  conclusion?: string;
+  url?: string;
+  durationMs?: number;
+}
+
+export type IndividualReviewState = 'approved' | 'changes_requested' | 'commented' | 'dismissed' | 'pending' | 'unknown';
+
+/** 저장소 화면(PR 상세)의 리뷰 하나(리뷰어별 마지막 판정이 아니라, 있었던 리뷰 각각) */
+export interface PullReview {
+  author: string;
+  state: IndividualReviewState;
+  /** ISO 8601. 대기 중(PENDING)이면 없다 */
+  submittedAt?: string;
+}
+
+/** 저장소 화면(PR 상세)의 리뷰 인라인 댓글 하나(파일·줄에 붙은 댓글) */
+export interface PullReviewComment {
+  author: string;
+  body: string;
+  path: string;
+  /** 줄에 못 붙었으면(파일 댓글) 없다 */
+  line?: number;
+  url: string;
+  createdAt: string;
+}
+
+/** 저장소 화면(PR 상세) 하나. files·checkRuns·reviewComments는 host가 지원하지 않으면 빈 배열에 이유를 남긴다 */
+export interface PullDetail extends PullRequestSummary {
+  body?: string;
+  baseBranch: string;
+  /** GitHub·Gitea 모두 계산에 시간이 걸려 결과가 없을 때(null)가 있다 */
+  mergeable?: boolean;
+  mergeableState?: string;
+  files: PullFile[];
+  filesSupported: boolean;
+  filesUnsupportedReason?: string;
+  /** 100개 넘게 있어 더 있을 수 있다(다음 쪽을 부르지 않는다, "cheap" 원칙) */
+  filesTruncated: boolean;
+  checkRuns: CheckRun[];
+  checksSupported: boolean;
+  checksUnsupportedReason?: string;
+  reviews: PullReview[];
+  reviewComments: PullReviewComment[];
+  reviewCommentsSupported: boolean;
+  reviewCommentsUnsupportedReason?: string;
+  /** 본문·제목에 closes/fixes/resolves #이슈번호로 이 PR이 가리키는 이슈 번호들 */
+  linkedIssues: number[];
+}
+
+const GITEA_FILES_UNSUPPORTED = 'Gitea REST API에는 파일별 변경 내용을 안전하게 흉내 낼 표준 API가 없어 아직 지원하지 않습니다';
+const GITEA_CHECKS_UNSUPPORTED = 'Gitea는 GitHub 스타일의 체크 실행(check-runs) API가 없어 아직 지원하지 않습니다';
+const GITEA_REVIEW_COMMENTS_UNSUPPORTED = 'Gitea는 리뷰 댓글을 리뷰 하나씩 따로 불러와야 해(N+1 호출) 아직 지원하지 않습니다';
+
+/** 이슈 상세에서 보여 줄 댓글 수(가장 최근 것부터) */
+const MAX_ISSUE_COMMENTS = 20;
+/** 파일 하나의 patch 글자 수 한도 */
+const MAX_FILE_PATCH_CHARS = 20_000;
+/** PR 전체 patch 글자 수 한도. 이 한도를 넘으면 그 뒤 파일은 patch를 아예 빼고 truncated만 남긴다 */
+const MAX_TOTAL_PATCH_CHARS = 200_000;
+
 type Env = Record<string, string | undefined>;
 type Fetch = typeof fetch;
 
@@ -411,6 +536,60 @@ function labelNames(labels: Array<RawLabel | string> | undefined): string[] {
   return (labels ?? []).map((label) => (typeof label === 'string' ? label : (label.name ?? ''))).filter(Boolean);
 }
 
+const TASK_ITEM = /^\s*[-*]\s+\[([ xX])\]\s+(.+)$/;
+
+/** 이슈·PR 본문에서 "- [ ] 할 일"·"- [x] 한 일" 체크리스트를 뽑는다. 들여쓴 하위 항목도 하나로 센다(중첩 진행도는 화면에서 필요치 않다) */
+export function parseTaskList(body: string | undefined): TaskListProgress {
+  const items: TaskListItem[] = [];
+  for (const line of (body ?? '').split('\n')) {
+    const match = TASK_ITEM.exec(line);
+    if (!match) continue;
+    items.push({ checked: match[1]!.toLowerCase() === 'x', text: match[2]!.trim() });
+  }
+  return { total: items.length, checked: items.filter((item) => item.checked).length, items };
+}
+
+const CLOSING_REFERENCE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
+
+/** "Closes #12", "fixes #7" 같은 닫기 문구에서 참조한 이슈·PR 번호를 뽑는다(중복 없이, 나온 순서대로) */
+export function parseClosingReferences(text: string | undefined): number[] {
+  const numbers: number[] = [];
+  for (const match of (text ?? '').matchAll(CLOSING_REFERENCE)) {
+    const number = Number(match[1]);
+    if (!numbers.includes(number)) numbers.push(number);
+  }
+  return numbers;
+}
+
+/** GitHub·Gitea 리뷰 상태 문구를 화면이 쓰는 값으로 바꾼다. 둘 다 대문자 스네이크 케이스를 쓴다 */
+function mapReviewState(raw: string): IndividualReviewState {
+  switch (raw.toUpperCase()) {
+    case 'APPROVED':
+      return 'approved';
+    case 'CHANGES_REQUESTED':
+    case 'REQUEST_CHANGES':
+      return 'changes_requested';
+    case 'COMMENTED':
+    case 'COMMENT':
+      return 'commented';
+    case 'DISMISSED':
+      return 'dismissed';
+    case 'PENDING':
+      return 'pending';
+    default:
+      return 'unknown';
+  }
+}
+
+/** patch를 파일·전체 한도에 맞춰 자른다. runningTotal은 지금까지 쓴 글자 수(호출부가 누적해 넘긴다) */
+function capPatch(patch: string | undefined, runningTotal: number): { patch?: string; truncated: boolean } {
+  if (patch === undefined) return { truncated: false };
+  if (runningTotal >= MAX_TOTAL_PATCH_CHARS) return { truncated: true };
+  const budget = Math.min(MAX_FILE_PATCH_CHARS, MAX_TOTAL_PATCH_CHARS - runningTotal);
+  if (patch.length <= budget) return { patch, truncated: false };
+  return { patch: `${patch.slice(0, budget)}\n\n(patch가 길어 뒷부분을 생략했습니다)`, truncated: true };
+}
+
 /**
  * 원격 저장소 화면의 이슈 탭 목록. GitHub·Gitea는 `GET /repos/{owner}/{repo}/issues`를 쓴다(PR도 섞여 오므로 뺀다).
  * GitLab은 아직 지원하지 않는다(호스트별 화면 모양이 달라 REST 응답을 그대로 맞추기보다 필요해지면 추가한다).
@@ -443,6 +622,80 @@ export async function listIssues(
       state: item.state === 'open' ? 'open' : 'closed',
       body: item.body ?? undefined,
     }));
+}
+
+interface RawIssueComment {
+  user?: { login?: string };
+  body?: string | null;
+  created_at: string;
+  html_url: string;
+}
+interface RawAssignee {
+  login?: string;
+}
+
+/**
+ * 저장소 화면 이슈 상세. 본문·라벨·담당자에 더해, 최근 댓글(MAX_ISSUE_COMMENTS개)과 체크리스트 진행도,
+ * 이 이슈를 closes/fixes/resolves로 가리키는 PR을 담는다. GitHub·Gitea 모두 이슈·댓글 API 모양이 같다.
+ * 연결된 PR은 열림·닫힘을 모두 뒤져(한 번의 목록 호출) 본문·제목에서 closes 문구를 찾는다(호스트별 교차 참조 API 대신 —
+ * 두 호스트에 똑같이 통하고 API 호출이 하나뿐이라 더 싸다).
+ */
+export async function fetchIssueDetail(
+  remote: RemoteLocation,
+  number: number,
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<IssueDetail> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('이슈 상세를 볼 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  if (!remote.host || !remote.path) throw new PullRequestError('저장소 주소를 해석하지 못했습니다');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈 상세를 볼 수 없습니다`);
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const base = `${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+
+  const issueResponse = await fetchFn(`${base}/issues/${number}`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  await assertListOk(issueResponse, label, '이슈');
+  const raw = (await issueResponse.json()) as RawIssue & { assignees?: RawAssignee[] };
+
+  const [commentsResult, pullsResult] = await Promise.all([
+    fetchFn(`${base}/issues/${number}/comments?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+      (response) => (response.ok ? (response.json() as Promise<RawIssueComment[]>) : undefined),
+      () => undefined,
+    ),
+    fetchFn(`${base}/pulls?state=all&per_page=${LIST_PAGE_SIZE}`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+      (response) => (response.ok ? (response.json() as Promise<Array<RawPull & { body?: string | null }>>) : undefined),
+      () => undefined,
+    ),
+  ]);
+
+  const allComments = commentsResult ?? [];
+  const recent = allComments.slice(-MAX_ISSUE_COMMENTS).map((comment) => ({
+    author: comment.user?.login ?? '알 수 없음',
+    body: comment.body ?? '',
+    createdAt: comment.created_at,
+    url: comment.html_url,
+  }));
+
+  const linkedPulls: LinkedReference[] = (pullsResult ?? [])
+    .filter((pull) => parseClosingReferences(`${pull.title} ${pull.body ?? ''}`).includes(number))
+    .map((pull) => ({ number: pull.number, title: pull.title, url: pull.html_url, state: pull.state === 'open' ? 'open' : 'closed', draft: pull.draft === true }));
+
+  return {
+    number: raw.number,
+    title: raw.title,
+    author: raw.user?.login ?? '알 수 없음',
+    labels: labelNames(raw.labels),
+    updatedAt: raw.updated_at,
+    url: raw.html_url,
+    state: raw.state === 'open' ? 'open' : 'closed',
+    body: raw.body ?? undefined,
+    assignees: (raw.assignees ?? []).map((assignee) => assignee.login).filter((login): login is string => Boolean(login)),
+    comments: recent,
+    totalComments: allComments.length,
+    commentsTruncated: allComments.length > MAX_ISSUE_COMMENTS,
+    taskList: parseTaskList(raw.body ?? undefined),
+    linkedPulls,
+  };
 }
 
 /**
@@ -549,6 +802,174 @@ function combineReviewDecision(reviews: Array<{ user?: { login?: string }; state
   if (states.includes('CHANGES_REQUESTED')) return 'changes_requested';
   if (states.every((entry) => entry === 'APPROVED')) return 'approved';
   return 'review_required';
+}
+
+interface RawPullDetail {
+  number: number;
+  title: string;
+  body?: string | null;
+  user?: { login?: string };
+  labels?: Array<RawLabel | string>;
+  updated_at: string;
+  html_url: string;
+  state: string;
+  draft?: boolean;
+  head: { ref: string; sha: string };
+  base: { ref: string };
+  /** GitHub만 채운다. 계산이 끝나기 전이면 null */
+  mergeable?: boolean | null;
+  mergeable_state?: string;
+}
+interface RawCheckRun {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  html_url?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+interface RawReview {
+  user?: { login?: string };
+  state: string;
+  submitted_at?: string;
+}
+interface RawReviewComment {
+  user?: { login?: string };
+  body?: string | null;
+  path: string;
+  line?: number | null;
+  original_line?: number | null;
+  html_url: string;
+  created_at: string;
+}
+interface RawPullFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
+/**
+ * 저장소 화면 PR 상세. 제목·본문·base←head에 더해 GitHub는 바뀐 파일(패치 포함)·체크 실행·리뷰·리뷰 댓글을 모두 담는다.
+ * Gitea는 리뷰 API 모양이 GitHub와 같아 리뷰는 함께 지원하지만, 파일별 diff·체크 실행·리뷰 댓글은 한 번에 싸게 받을 API가 없어
+ * `*Supported: false`와 이유만 돌려준다(빈 배열로 조용히 감추지 않는다).
+ */
+export async function fetchPullRequestDetail(
+  remote: RemoteLocation,
+  number: number,
+  {
+    env = process.env,
+    fetch: fetchFn = fetch,
+    token,
+    branchSessionId,
+  }: { env?: Env; fetch?: Fetch; token?: string; branchSessionId?: (branch: string) => string | undefined } = {},
+): Promise<PullDetail> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('PR 상세를 볼 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  if (!remote.host || !remote.path) throw new PullRequestError('저장소 주소를 해석하지 못했습니다');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 PR 상세를 볼 수 없습니다`);
+  const github = remote.kind === 'github';
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const base = `${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+
+  const pullResponse = await fetchFn(`${base}/pulls/${number}`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  await assertListOk(pullResponse, label, 'PR');
+  const raw = (await pullResponse.json()) as RawPullDetail;
+
+  const [reviewsResult, checksResult, filesResult, reviewCommentsResult] = await Promise.all([
+    fetchFn(`${base}/pulls/${number}/reviews?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+      (response) => (response.ok ? (response.json() as Promise<RawReview[]>) : undefined),
+      () => undefined,
+    ),
+    github
+      ? fetchFn(`${base}/commits/${raw.head.sha}/check-runs?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+          (response) => (response.ok ? (response.json() as Promise<{ check_runs: RawCheckRun[] }>) : undefined),
+          () => undefined,
+        )
+      : Promise.resolve(undefined),
+    github
+      ? fetchFn(`${base}/pulls/${number}/files?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+          async (response) => (response.ok ? { files: (await response.json()) as RawPullFile[], hasMore: hasNextPage(response) } : undefined),
+          () => undefined,
+        )
+      : Promise.resolve(undefined),
+    github
+      ? fetchFn(`${base}/pulls/${number}/comments?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then(
+          (response) => (response.ok ? (response.json() as Promise<RawReviewComment[]>) : undefined),
+          () => undefined,
+        )
+      : Promise.resolve(undefined),
+  ]);
+
+  let runningTotal = 0;
+  const files: PullFile[] = (filesResult?.files ?? []).map((file) => {
+    const binary = file.patch === undefined;
+    const capped = capPatch(file.patch, runningTotal);
+    runningTotal += capped.patch?.length ?? 0;
+    return { path: file.filename, status: file.status, additions: file.additions, deletions: file.deletions, patch: capped.patch, binary, truncated: capped.truncated };
+  });
+
+  const checkRuns: CheckRun[] = (checksResult?.check_runs ?? []).map((run) => ({
+    name: run.name,
+    status: run.status,
+    conclusion: run.conclusion ?? undefined,
+    url: run.html_url,
+    durationMs: run.started_at && run.completed_at ? new Date(run.completed_at).getTime() - new Date(run.started_at).getTime() : undefined,
+  }));
+
+  const reviews: PullReview[] = (reviewsResult ?? []).map((review) => ({
+    author: review.user?.login ?? '알 수 없음',
+    state: mapReviewState(review.state),
+    submittedAt: review.submitted_at,
+  }));
+
+  const reviewComments: PullReviewComment[] = (reviewCommentsResult ?? []).map((comment) => ({
+    author: comment.user?.login ?? '알 수 없음',
+    body: comment.body ?? '',
+    path: comment.path,
+    line: comment.line ?? comment.original_line ?? undefined,
+    url: comment.html_url,
+    createdAt: comment.created_at,
+  }));
+
+  return {
+    number: raw.number,
+    title: raw.title,
+    author: raw.user?.login ?? '알 수 없음',
+    labels: labelNames(raw.labels),
+    updatedAt: raw.updated_at,
+    url: raw.html_url,
+    state: raw.state === 'open' ? 'open' : 'closed',
+    draft: raw.draft === true,
+    headBranch: raw.head.ref,
+    headSha: raw.head.sha,
+    sessionId: branchSessionId?.(raw.head.ref),
+    checkStatus: github ? combineCheckStatus(checksResult?.check_runs ?? []) : undefined,
+    reviewDecision: github ? combineReviewDecision((reviewsResult ?? []).filter((review): review is RawReview & { submitted_at: string } => Boolean(review.submitted_at))) : undefined,
+    body: raw.body ?? undefined,
+    baseBranch: raw.base.ref,
+    mergeable: raw.mergeable ?? undefined,
+    mergeableState: raw.mergeable_state,
+    files,
+    filesSupported: github,
+    filesUnsupportedReason: github ? undefined : GITEA_FILES_UNSUPPORTED,
+    filesTruncated: filesResult?.hasMore ?? false,
+    checkRuns,
+    checksSupported: github,
+    checksUnsupportedReason: github ? undefined : GITEA_CHECKS_UNSUPPORTED,
+    reviews,
+    reviewComments,
+    reviewCommentsSupported: github,
+    reviewCommentsUnsupportedReason: github ? undefined : GITEA_REVIEW_COMMENTS_UNSUPPORTED,
+    linkedIssues: parseClosingReferences(`${raw.title} ${raw.body ?? ''}`),
+  };
+}
+
+/** Link 응답 헤더에 rel="next"가 있으면 더 있다(다음 쪽은 부르지 않는다 — "cheap" 원칙) */
+function hasNextPage(response: Response): boolean {
+  return /rel="next"/.test(response.headers.get('link') ?? '');
 }
 
 /**

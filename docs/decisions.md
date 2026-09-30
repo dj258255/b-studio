@@ -93,6 +93,7 @@
 - [ADR-076 세션 브랜치가 main보다 뒤처지면 병합으로 따라잡고 다시 검증한다](#adr-076-세션-브랜치가-main보다-뒤처지면-병합으로-따라잡고-다시-검증한다)
 - [ADR-077 반복 행동을 스크립트로 굳히기](#adr-077-반복-행동을-스크립트로-굳히기)
 - [ADR-078 검증 게이트가 로딩에서 멈춘 화면·실패한 데이터 요청·동적 경로 404를 잡는다](#adr-078-검증-게이트가-로딩에서-멈춘-화면실패한-데이터-요청동적-경로-404를-잡는다)
+- [ADR-081 저장소 탭에서 이슈·PR 상세를 열어 체크리스트·CI·리뷰까지 확인한다](#adr-081-저장소-탭에서-이슈pr-상세를-열어-체크리스트ci리뷰까지-확인한다)
 
 ---
 
@@ -3177,6 +3178,51 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **HTTP 모드의 로딩 경고는 게이트를 막지 않는다.** 자동으로 연 페이지가 HTTP 모드이고 실제로 클라이언트 fetch가 실패해도, 참고 문구만 남고 검증은 통과한다 — 확실히 잡으려면 `autoPageChecks.mode: browser`가 필요하다(경고 문구에 안내한다).
 - **로딩 문구 판정은 "모든 줄이 로딩뿐"이라는 보수적 규칙이라, 로딩 스피너와 고정된 내비게이션·헤더가 함께 있는 화면**(로딩이 아닌 줄이 섞여 "모든 줄"을 못 채움)은 실제로 멈춰 있어도 놓칠 수 있다 — 오탐(false positive)보다 미탐(false negative)을 택한 절충이다.
 - `examples/orders/studio.yaml`은 그대로 뒀다(위 검증 결과 참고) — 이 저장소의 예제가 E8과 같은 버그를 실제로 다시 막는지는 다음 라운드에서 Docker로 재현할 때 확인한다.
+
+---
+
+## ADR-081 저장소 탭에서 이슈·PR 상세를 열어 체크리스트·CI·리뷰까지 확인한다
+
+상태: 채택
+관련: #ISSUE
+
+### 맥락
+- ADR-072가 저장소 탭에 이슈·PR **목록**을 띄웠다. 그런데 목록 줄만 보고는 체크리스트가 얼마나 남았는지, PR에 어떤 파일이 바뀌었는지, CI가 왜 실패했는지, 리뷰가 어디를 지적했는지 알 수 없어 결국 GitHub을 또 열어야 했다. 에이전트가 이슈·PR을 직접 다루는 일이 늘수록(ADR-020의 PR 만들기, ADR-074의 AI 리뷰), 사람이 작업을 맡기기 전에 먼저 안을 들여다볼 수 있어야 한다.
+- 목록 API는 상세(파일별 diff, 체크 실행, 리뷰, 리뷰 댓글)를 담지 않는다. 상세를 보려면 이슈·PR마다 몇 번 더 API를 불러야 한다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 목록 줄의 링크로 GitHub을 새 탭에 연다(지금과 같다) | 여전히 스튜디오를 벗어난다. 체크리스트 진행도·연결된 PR처럼 b-studio가 계산해 보여줄 수 있는 정보를 놓친다 |
+| **B. 행을 누르면 옆에 상세 패널을 띄운다** | 채택. 목록은 그대로 두고(가벼운 API), 상세만 새 엔드포인트로 따로 부른다. 작업 흐름(체크리스트 항목으로 작업, 요구 사항 대조)도 같은 자리에서 이어진다 |
+| C. 이슈·PR을 위한 페이지를 따로 둔다(`/repository/issues/[n]`) | 뒤로 가기·목록 컨텍스트 유지가 더 번거롭고, 작업 중 잠깐 보고 닫는 용도에는 페이지 전환이 과하다 |
+
+### 결정
+- **agent 패키지**(`packages/agent/src/repository.ts`)에 `fetchIssueDetail`·`fetchPullRequestDetail`을 추가했다.
+  - 이슈 상세: 본문·라벨·담당자·최근 댓글(최대 20개, `totalComments`·`commentsTruncated`로 더 있음을 알린다)에 더해, 본문의 `- [ ] `/`- [x] ` 줄을 세는 `parseTaskList`로 체크리스트 진행도를 계산한다. 연결된 PR은 열림·닫힘 PR 목록(한 번의 API 호출)을 `parseClosingReferences`(closes/fixes/resolves #n)로 걸러 찾는다 — GitHub·Gitea 둘 다에 통하고, 호스트별 교차 참조 API보다 싸다.
+  - PR 상세: base←head, 병합 가능 여부에 더해 GitHub는 파일별 diff(patch)·체크 실행(check-runs)·리뷰·리뷰 인라인 댓글을 모두 받는다. Gitea는 리뷰 API 모양이 같아 리뷰는 함께 지원하지만, 파일별 diff·체크 실행·리뷰 댓글은 한 번에 싸게 받을 표준 API가 없어 `filesSupported`·`checksSupported`·`reviewCommentsSupported`를 `false`로 두고 이유 문구(`*UnsupportedReason`)를 돌려준다(빈 배열로 조용히 감추지 않는다).
+  - 큰 diff는 파일당 20,000자, PR 전체 200,000자로 자르고 `truncated`를 켠다. 이진 파일(patch 없음)은 `binary: true`로만 표시한다.
+- **스튜디오 서버**(`repository-panel.ts`)에 `projectRepositoryIssue`·`projectRepositoryPull`을 추가했다. 목록과 같은 토큰·오류 처리 경로를 타고, 상세는 목록(30초)보다 짧은 20초로 캐시한다(파일·체크·리뷰까지 더 불러 API 호출이 늘어난다).
+- **API**: `GET /api/projects/[id]/repository/issues/[number]`·`.../pulls/[number]`. 목록과 같은 인증 기준(로그인한 누구나 볼 수 있다). 번호가 정수가 아니면 400으로 거절하고 조회하지 않는다.
+- **화면**: 저장소 탭 행을 누르면 `document.body`에 포털로 띄운 옆 패널이 연다(`WorkDrawer`와 같은 이유로 포털을 쓴다 — 머리의 유리 효과가 `fixed` 요소의 기준을 머리로 바꿔 패널이 갇힌다). 행의 외부 링크(↗)는 그대로 두어 GitHub·Gitea로도 바로 갈 수 있다.
+  - 이슈 패널: 마크다운 본문(기존 `Markdown` 컴포넌트 재사용, `dangerouslySetInnerHTML` 없이 HTML은 글자로 남긴다), 라벨·담당자, 체크리스트 진행도, 연결된 PR, 최근 댓글. "이 이슈로 작업"에 더해 미완료 체크리스트 항목마다 "체크리스트 항목으로 작업"(그 항목만 요청에 넣어 채운다)을 둔다.
+  - PR 패널: base←head, CI·리뷰 요약, 바뀐 파일 목록(펼치면 기록 탭·나란히 보기와 같은 `DiffView`로 unified diff를 보여준다), 체크 실행, 리뷰와 파일·줄별로 묶은 리뷰 댓글, 연결된 이슈. 헤드 브랜치가 b-studio 세션이면 세션 배지와 기존 `ReviewCard`(AI 리뷰 상태·"AI 리뷰 돌리기")를 그대로 재사용한다(그 세션 스냅샷을 따로 한 번 불러온다).
+  - "확인" 액션: "요구 사항 대조"는 연결된 이슈마다 체크리스트를 모아 "PR diff와 대조해 반영 여부·빠진 부분을 알려줘" 요청을 채운다. "PR 브랜치로 작업"은 헤드 브랜치 이름을 넣어 이어서 작업할 요청을 채운다. 둘 다 채우기만 하고 보내지 않는다(기존 ChatDraft 관례, 위험한 git 작업은 스튜디오가 대신 하지 않는다). "세션에서 다시 검증"은 세션에 게이트를 처음부터 다시 돌리는 진입점이 아직 없어 이번에는 넣지 않았다.
+  - 데이터 불러오기(`useEffect`+`fetch`)와 렌더(`IssueDetailBody`·`PullDetailBody`)를 나눠, 렌더 쪽은 서버 렌더 테스트로 확인할 수 있게 했다. 패널은 `number`를 key로 받아 다른 이슈·PR을 열면 통째로 새로 마운트한다(목록의 `key={state}`와 같은 이유로 effect 안 setState를 피한다, `react-hooks/set-state-in-effect`).
+
+### 검증 결과
+- `packages/agent/src/repository.test.ts`에 `fetchIssueDetail`·`fetchPullRequestDetail`·`parseTaskList`·`parseClosingReferences` 테스트 10개를 더했다(GitHub 전체 지원, Gitea 부분 지원과 이유 문구, patch 자르기, 댓글 잘림, 토큰·호스트 오류).
+- `apps/studio/lib/server/repository-panel.test.ts`에 상세 캐시·세션 id 매핑 테스트를 더했다.
+- API 라우트 테스트(`route.test.ts` 2개, 번호 파싱 400 포함)를 더했다.
+- `apps/studio/components/repository-detail.test.tsx`(신규)로 `IssueDetailBody`·`PullDetailBody` 렌더(체크리스트·연결된 항목·지원하지 않음 이유·확인 액션 유무·AI 리뷰 카드 유무)를 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류), `pnpm test`(1,780개, `packages/sandbox/src/docker/format.test.ts`의 타임아웃 1건은 기기 부하로 인한 사전 존재 플레이키 — 따로 돌려도 재현되고 이번 변경과 무관한 Docker 동기화 스크립트 테스트다)를 확인했다.
+- 실제 GitHub 저장소로 `gh api repos/dj258255/b-studio/pulls/247/files?per_page=2`·`.../commits/<sha>/check-runs`로 응답 모양만 한 번 확인했다(읽기 전용). 브라우저로 화면을 직접 열어 보는 확인과 로컬 Gitea 확인은 하지 않았다(실험 중이라 Docker·실제 세션을 쓸 수 없었다).
+
+### 감수한 트레이드오프
+- Gitea는 파일별 diff·체크 실행·리뷰 댓글을 지원하지 않는다(표준 API가 없거나 N+1 호출이 필요해 "싸다"는 기준을 넘는다). 리뷰 상태(승인/변경 요청)만 GitHub와 같은 수준으로 본다.
+- 연결된 이슈·PR은 closes/fixes/resolves 문구로만 찾는다. 그 문구 없이 다른 방식으로만 연결된(예: 프로젝트 보드) 이슈·PR은 찾지 못한다.
+- 큰 PR의 diff는 파일당·전체 글자 수로 자른다. 아주 큰 변경은 옆 패널에서 전체를 못 보고 GitHub에서 봐야 한다.
+- "세션에서 다시 검증"은 넣지 않았다. 세션에 게이트를 처음부터 다시 돌리는 진입점이 생기면 추가한다.
 
 ---
 
