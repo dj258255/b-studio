@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
-import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
+import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { withRemovedDirectories } from '../sync-paths';
@@ -475,7 +475,23 @@ class LocalDockerSandbox implements Sandbox {
           onProbe: (probe) => onStatus?.({ service: name, phase: 'probing', probe }),
         });
       } catch (error) {
-        onStatus?.({ service: name, phase: 'failed', reason: error instanceof Error ? error.message : String(error) });
+        let reason = error instanceof Error ? error.message : String(error);
+        // 컨테이너가 죽었으면 앱 로그의 마지막 오류 줄을 이유에 붙인다. 로그를 못 읽어도 원래 이유는 그대로 둔다
+        const crashed = error instanceof ReadinessError && ['exited', 'dead'].includes(error.history.at(-1)?.containerState ?? '');
+        if (crashed) {
+          const lines: string[] = [];
+          try {
+            for await (const line of this.logs({ services: [name], tail: 60, follow: false })) lines.push(line.text);
+          } catch {
+            // 로그를 못 읽어도 실패 이유는 남긴다
+          }
+          const excerpt = crashLogExcerpt(lines);
+          if (excerpt.length > 0) {
+            reason = `${reason}\n앱 로그 마지막 줄:\n${excerpt.join('\n')}`;
+            if (error instanceof Error) error.message = reason;
+          }
+        }
+        onStatus?.({ service: name, phase: 'failed', reason });
         throw error;
       }
     }

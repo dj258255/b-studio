@@ -36,7 +36,7 @@ export function decideReadiness(
 
   // 프로세스가 죽었으면 타임아웃까지 기다릴 이유가 없다. 에이전트가 몇 초 만에 에러를 받아 고칠 수 있게 한다
   if (latest.containerState === 'exited' || latest.containerState === 'dead') {
-    return { kind: 'failed', reason: `컨테이너가 종료됐습니다 (마지막 확인: ${describeProbe(latest)})` };
+    return { kind: 'failed', reason: `앱이 켜지다가 종료됐습니다 (컨테이너 ${latest.containerState})` };
   }
 
   // 기동 직후 잠깐 성공했다가 흔들리는 경우를 걸러내기 위해 연속 성공만 센다
@@ -121,4 +121,20 @@ function describeFetchError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   const code = (error.cause as { code?: unknown } | undefined)?.code;
   return typeof code === 'string' ? code : error.message;
+}
+
+/** 오류를 알려 주는 줄. 스택 프레임(`at …`)과 평범한 INFO 줄은 빼고 원인이 적힌 줄을 고른다 */
+const CRASH_SIGNAL = /exception|error|fail|fatal|denied|forbidden|refused|not found|no such|cannot|unable|panic|traceback|killed|out of memory|\b[45]\d\d\b/i;
+const STACK_FRAME = /^\s*(at |\.\.\. \d+ more|File ".*", line \d+)/;
+
+/**
+ * 죽은 컨테이너의 마지막 로그에서 원인을 보여 줄 줄을 고른다(최대 `max`줄, 오래된 것부터).
+ * 오류다운 줄이 없으면 마지막 몇 줄을 그대로 쓴다. "UND_ERR_SOCKET" 같은 연결 오류 대신 앱이 왜 죽었는지 보이려는 것이다
+ * (Gradle 래퍼가 프록시 403으로 죽었는데 화면에는 소켓 오류만 보였다)
+ */
+export function crashLogExcerpt(lines: readonly string[], max = 6): string[] {
+  const cleaned = lines.map((line) => line.replace(/\s+$/, '')).filter((line) => line.trim() !== '');
+  const signals = cleaned.filter((line) => !STACK_FRAME.test(line) && CRASH_SIGNAL.test(line));
+  const picked = (signals.length > 0 ? signals : cleaned).slice(-max);
+  return picked.map((line) => (line.length > 300 ? `${line.slice(0, 300)}…` : line));
 }
