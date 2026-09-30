@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { describeFailedResponse } from "@/lib/fetch-error";
 
 export interface InfraProposal {
   name: string;
@@ -54,7 +55,9 @@ export function useFolderProposal() {
     const body = response ? ((await response.json().catch(() => ({}))) as Record<string, unknown>) : {};
     setBusy(false);
     if (!response?.ok) {
-      setError(typeof body.error === "string" ? body.error : apply ? "폴더를 열지 못했습니다" : "폴더를 살펴보지 못했습니다");
+      const fallback = apply ? "폴더를 열지 못했습니다" : "폴더를 살펴보지 못했습니다";
+      // 서버가 JSON 없이 실패했으면(네트워크 끊김, 오래된 개발 서버의 HTML 404 등) 상태 코드와 힌트를 보여 준다
+      setError(typeof body.error === "string" ? body.error : describeFailedResponse(response, fallback));
       if (!apply) setProposal(undefined);
       return undefined;
     }

@@ -19,9 +19,21 @@ const READY_TIMEOUT_MS = 90_000;
 const READY_INTERVAL_MS = 1_000;
 const LOG_TAIL_LINES = 20;
 
+/**
+ * 중첩 라우트가 살아 있는지 확인하는 경로(`app/api/health/routes/route.ts`). 오래 켜둔 dev 서버가
+ * 병합을 여러 번 겪으면 최상위 라우트(`/`, `/api/health`)는 응답해도 이 라우트는 스테일한 라우트 표 때문에
+ * HTML 404를 돌려주는 경우가 있었다 — 그 차이로 "이미 떠 있는 서버"가 재시작이 필요한지를 가른다.
+ */
+const NESTED_HEALTH_PATH = '/api/health/routes';
+/** 스테일한 서버를 죽인 뒤 포트가 풀릴 때까지 기다리는 한도·간격 */
+const EXIT_WAIT_TIMEOUT_MS = 5_000;
+const EXIT_WAIT_INTERVAL_MS = 200;
+
 export interface ProbeResult {
   /** 응답을 받았는지(상태 코드와 무관) */
   reachable: boolean;
+  /** HTTP 상태 코드(응답을 못 받았으면 0) */
+  status: number;
   body: string;
 }
 
@@ -51,6 +63,10 @@ export interface LaunchDeps {
   spawn: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string }) => { pid: number | undefined };
   /** 브라우저 열기 */
   open: (url: string) => Promise<void>;
+  /** pid가 살아 있는지(스테일한 서버를 죽이기 전에 확인한다) */
+  isAlive: (pid: number) => boolean;
+  /** 분리해 띄운 프로세스 그룹에 신호를 보낸다(`studio stop`과 같은 방식) */
+  killGroup: (pid: number, signal: NodeJS.Signals) => void;
   readyTimeoutMs?: number;
   readyIntervalMs?: number;
 }
@@ -114,7 +130,7 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
   // 진행 안내는 --json일 때 stderr로 보낸다. stdout에는 JSON 한 줄만 남긴다
   const info = (text: string) => (json ? console.error(text) : console.log(text));
 
-  // 1. 이미 떠 있나 — 새로 띄우지 않고 브라우저만 연다
+  // 1. 이미 떠 있나 — 새로 띄우지 않고 브라우저만 연다. 단, 중첩 라우트 표가 스테일하면(아래) 재시작한다
   const existing = await deps.probe(url);
   if (existing.reachable) {
     if (!isBStudio(existing.body)) {
@@ -122,14 +138,31 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
       return 1;
     }
     const stored = await readPidFile(deps.paths.pid, envMode);
-    if (json) {
-      console.log(launchResultJson({ url: origin, port: options.port, mode: stored.mode, pid: stored.pid, started: false }));
+    // 오래 켜둔 dev 서버는 병합을 여러 번 겪으면 최상위 라우트는 응답해도 중첩 라우트 표가 스테일해질 수 있다.
+    // 그러면 여기서 재사용하지 않고 죽인 뒤 2·3단계로 내려가 새로 띄운다
+    const nested = await deps.probe(`${origin}${NESTED_HEALTH_PATH}`);
+    const stale = !nested.reachable || nested.status !== 200;
+    if (!stale) {
+      if (json) {
+        console.log(launchResultJson({ url: origin, port: options.port, mode: stored.mode, pid: stored.pid, started: false }));
+        return 0;
+      }
+      info(`이미 스튜디오가 ${url}에서 실행 중입니다.`);
+      if (open) await deps.open(url);
+      else info(url);
       return 0;
     }
-    info(`이미 스튜디오가 ${url}에서 실행 중입니다.`);
-    if (open) await deps.open(url);
-    else info(url);
-    return 0;
+    info(`스튜디오가 떠 있지만 라우트 표가 오래된 것 같아 다시 켭니다 (포트 ${options.port}).`);
+    if (stored.pid !== null && deps.isAlive(stored.pid)) {
+      try {
+        deps.killGroup(stored.pid, 'SIGTERM');
+      } catch (error) {
+        console.error(`스테일한 서버(PID ${stored.pid})를 멈추지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+        return 1;
+      }
+      await waitForExit(deps, stored.pid);
+    }
+    // 여기서 return하지 않고 2·3단계(Docker 확인 → 새로 띄우기)로 이어진다
   }
 
   // 2. Docker — 이미 켜져 있으면 건드리지 않는다
@@ -202,6 +235,13 @@ async function waitForReady(deps: LaunchDeps, url: string, timeoutMs: number, in
   return false;
 }
 
+/** 스테일한 서버에 SIGTERM을 보낸 뒤 포트가 풀릴 때까지(프로세스가 죽을 때까지) 잠깐 기다린다 */
+async function waitForExit(deps: LaunchDeps, pid: number): Promise<void> {
+  for (let waited = 0; waited < EXIT_WAIT_TIMEOUT_MS && deps.isAlive(pid); waited += EXIT_WAIT_INTERVAL_MS) {
+    await deps.sleep(EXIT_WAIT_INTERVAL_MS);
+  }
+}
+
 async function tailLog(file: string, lines: number): Promise<string[]> {
   const text = await readFile(file, 'utf8').catch(() => '');
   return text.split('\n').filter((line) => line.length > 0).slice(-lines);
@@ -210,9 +250,9 @@ async function tailLog(file: string, lines: number): Promise<string[]> {
 async function realProbe(url: string): Promise<ProbeResult> {
   try {
     const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(5_000) });
-    return { reachable: true, body: await response.text().catch(() => '') };
+    return { reachable: true, status: response.status, body: await response.text().catch(() => '') };
   } catch {
-    return { reachable: false, body: '' };
+    return { reachable: false, status: 0, body: '' };
   }
 }
 
@@ -258,6 +298,18 @@ export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform:
     exec: realExec,
     spawn: realSpawn,
     open: realOpen(platform),
+    // `studio stop`과 같은 방식: 살아 있는지는 신호 0으로, 죽이기는 프로세스 그룹(-pid)으로
+    isAlive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    killGroup: (pid, signal) => {
+      process.kill(-pid, signal);
+    },
   };
 }
 

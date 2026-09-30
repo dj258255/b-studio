@@ -158,6 +158,8 @@ describe('decideRequest', () => {
     expect(decideRequest(request('/api/projects', { headers: { [USER_HEADER]: 'alice' } }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
     expect(decideRequest(request('/login'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
     expect(decideRequest(request('/api/health'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
+    // 스테일 라우트 확인도 인증 없이 통과해야 한다(401이면 멀쩡한 서버를 재시작한다)
+    expect(decideRequest(request('/api/health/routes'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
     expect(decideRequest(request('/api/projects', { cookie: signSession('alice', SECRET, NOW, 1) }), TOKEN_ENV, NOW)).toEqual({ kind: 'allow', user: 'alice' });
   });
 
