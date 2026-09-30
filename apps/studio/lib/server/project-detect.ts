@@ -15,6 +15,12 @@
  *
  * 만드는 파일은 사용자 파일과 이름이 겹치지 않게 `studio.yaml`·`compose.b-studio.yaml`·서비스 폴더의 `Dockerfile.b-studio`다.
  * 쓰기는 이 모듈이 하지 않는다(제안만). 쓰는 쪽(project-registry)이 git 추적에서 빼 둔다.
+ *
+ * 컨테이너 마운트(ADR-088): 서비스 폴더만 마운트하면(예전 `./commerce:/app`) 실제 저장소의 멀티 모듈 Gradle·pnpm/npm
+ * 워크스페이스·서비스 폴더 밖 공유 설정을 참조하는 빌드가 깨진다(`$rootDir/../docs`처럼). 그래서 모든 관리형 서비스가
+ * 프로젝트 루트 전체를 `/workspace`로 마운트하고(`.:/workspace`), `working_dir`로 자기 서비스 폴더에서 실행한다.
+ * 캐시 볼륨(예: Gradle 프로젝트 캐시·node_modules·build 출력)도 이 서비스 폴더 기준 경로로 옮기고, 의존성 캐시(Gradle
+ * 홈·pnpm 스토어)는 워크스페이스 밖 절대 경로 그대로 둔다.
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -51,7 +57,11 @@ export interface DetectedService {
   contract?: string;
   /** Dockerfile 본문 */
   dockerfile: string;
-  /** compose 서비스에 더 붙일 볼륨(이름 → 컨테이너 경로) */
+  /**
+   * compose 서비스에 더 붙일 볼륨(이름 → 컨테이너 경로). '/'로 시작하면 절대 경로(워크스페이스 밖 의존성 캐시,
+   * 예: Gradle 홈·pnpm 스토어)로 그대로 쓰고, 아니면 이 서비스의 working_dir(`/workspace/<path>`) 기준 상대 경로로 본다
+   * (예: Gradle 프로젝트 캐시·node_modules·build 출력)
+   */
   volumes: Record<string, string>;
   /** 부가 서비스(DB 등) 접속 정보로 채운 환경 변수. 추측이라 notes에 "확인:" 메모가 함께 붙는다 */
   environment: Record<string, string>;
@@ -84,6 +94,14 @@ export const SPEC_FILE = 'studio.yaml';
 export const GENERATED_COMPOSE = 'compose.b-studio.yaml';
 export const GENERATED_DOCKERFILE = 'Dockerfile.b-studio';
 
+/** 컨테이너 안에서 프로젝트 루트 전체를 마운트하는 자리(ADR-088). Dockerfile의 기본 WORKDIR이자 compose 바인드 마운트의 대상이다 */
+export const CONTAINER_WORKSPACE_ROOT = '/workspace';
+
+/** 서비스가 실제로 일하는 컨테이너 안 폴더. path가 '.'이면 워크스페이스 루트 자체다 */
+function containerWorkDir(servicePath: string): string {
+  return servicePath === '.' ? CONTAINER_WORKSPACE_ROOT : `${CONTAINER_WORKSPACE_ROOT}/${servicePath}`;
+}
+
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'build', 'dist', 'target', '.gradle', '.venv', 'venv', '__pycache__', '.idea', '.vscode']);
 
 export async function detectProject(folder: string): Promise<ProjectDetection> {
@@ -97,7 +115,7 @@ export async function detectProject(folder: string): Promise<ProjectDetection> {
   const candidates = ['.', ...childDirNames];
   const found: Array<Omit<DetectedService, 'name'>> = [];
   for (const relative of candidates) {
-    const service = await detectDir(path.join(root, relative), relative);
+    const service = await detectDir(root, path.join(root, relative), relative);
     if (service) found.push(service);
   }
   // 폴더 바로 아래가 앱이면(단일 앱 저장소) 하위 폴더에서 찾은 것은 그 앱의 일부일 가능성이 커서 버린다
@@ -281,25 +299,32 @@ export function sanitize(value: string): string {
     .replace(/-{2,}/g, '-');
 }
 
-async function detectDir(dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
-  return (await detectNode(dir, relative)) ?? (await detectSpring(dir, relative)) ?? (await detectFastApi(dir, relative));
+async function detectDir(root: string, dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+  return (await detectNode(root, dir, relative)) ?? (await detectSpring(root, dir, relative)) ?? (await detectFastApi(dir, relative));
 }
 
 /** Next.js 또는 Vite 앱. Next가 있으면 Next로 본다 */
-async function detectNode(dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+async function detectNode(root: string, dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
   const pkg = await readJson(path.join(dir, 'package.json'));
   if (!pkg) return undefined;
   const deps = { ...(pkg.dependencies as Record<string, string> | undefined), ...(pkg.devDependencies as Record<string, string> | undefined) };
   const template: DetectedTemplate | undefined = deps.next ? 'nextjs' : deps.vite ? 'vite' : undefined;
   if (!template) return undefined;
-  const manager = await packageManager(dir, pkg);
-  const lockless = manager === 'npm' && !(await exists(path.join(dir, 'package-lock.json')));
+  // pnpm/npm/yarn 워크스페이스(ADR-088)의 구성원이면 잠금 파일이 저장소 루트에 있어, 그 루트 매니저·잠금 파일로 설치해야 한다
+  const workspaceManager = relative === '.' ? undefined : await workspaceRootManager(root);
+  const manager = workspaceManager ?? (await packageManager(dir, pkg));
+  const lockless = manager === 'npm' && !(await exists(path.join(workspaceManager ? root : dir, 'package-lock.json')));
   const install = lockless ? 'npm install' : { pnpm: 'pnpm install --frozen-lockfile', yarn: 'yarn install --frozen-lockfile', npm: 'npm ci' }[manager];
   const exec = { pnpm: 'pnpm exec', yarn: 'yarn', npm: 'npx' }[manager];
   const port = template === 'nextjs' ? 3000 : 5173;
   const dev = template === 'nextjs' ? `${exec} next dev --hostname 0.0.0.0 --port ${port}` : `${exec} vite --host 0.0.0.0 --port ${port} --strictPort`;
   const notes: string[] = [];
   if (lockless) notes.push('잠금 파일이 없어 npm install로 설치합니다(버전이 달라질 수 있습니다)');
+  // 워크스페이스 구성원은 루트에서 설치하고(잠금 파일이 거기 있다) 서비스 폴더로 돌아와 개발 서버를 띄운다
+  const command = workspaceManager
+    ? `cd ${CONTAINER_WORKSPACE_ROOT} && ${install} && cd ${containerWorkDir(relative)} && exec ${dev}`
+    : `${install} && exec ${dev}`;
+  if (workspaceManager) notes.push(`pnpm/npm/yarn 워크스페이스로 보여 의존성 설치를 저장소 루트에서 합니다(잠금 파일이 루트에 있습니다)`);
   return {
     template,
     path: relative,
@@ -311,22 +336,30 @@ async function detectNode(dir: string, relative: string): Promise<Omit<DetectedS
       'FROM node:22-bookworm-slim',
       '',
       'RUN corepack enable',
-      'WORKDIR /app',
+      `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
       'ENV NEXT_TELEMETRY_DISABLED=1 \\',
       '    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \\',
-      // pnpm은 저장소를 마운트한 소스 폴더(/app) 안에 만들 수 있다. 사용자 폴더와 체크포인트에 섞이지 않게 컨테이너 볼륨에 둔다
+      // pnpm은 저장소를 마운트한 소스 폴더(워크스페이스 루트) 안에 만들 수 있다. 사용자 폴더와 체크포인트에 섞이지 않게 컨테이너 볼륨에 둔다
       '    npm_config_update_notifier=false \\',
       '    npm_config_store_dir=/cache/pnpm',
       '',
       `EXPOSE ${port}`,
-      `CMD ["sh", "-c", "${install} && exec ${dev}"]`,
+      `CMD ["sh", "-c", "${command}"]`,
       '',
     ].join('\n'),
-    volumes: { 'node-modules': '/app/node_modules', ...(template === 'nextjs' ? { next: '/app/.next' } : {}), ...(manager === 'pnpm' ? { 'pnpm-store': '/cache/pnpm' } : {}) },
+    volumes: { 'node-modules': 'node_modules', ...(template === 'nextjs' ? { next: '.next' } : {}), ...(manager === 'pnpm' ? { 'pnpm-store': '/cache/pnpm' } : {}) },
     environment: {},
     dependsOn: [],
     notes,
   };
+}
+
+/** 저장소 루트가 pnpm/npm/yarn 워크스페이스면 그 관리자를 돌려준다. 서비스 자신이 루트일 때는 부르지 않는다(워크스페이스 개념이 없다) */
+async function workspaceRootManager(root: string): Promise<'pnpm' | 'yarn' | 'npm' | undefined> {
+  if (await exists(path.join(root, 'pnpm-workspace.yaml'))) return 'pnpm';
+  const rootPkg = await readJson(path.join(root, 'package.json'));
+  if (!rootPkg || !('workspaces' in rootPkg)) return undefined;
+  return packageManager(root, rootPkg);
 }
 
 async function packageManager(dir: string, pkg: Record<string, unknown>): Promise<'pnpm' | 'yarn' | 'npm'> {
@@ -337,7 +370,7 @@ async function packageManager(dir: string, pkg: Record<string, unknown>): Promis
   return 'npm';
 }
 
-async function detectSpring(dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+async function detectSpring(root: string, dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
   const gradleFile = (await exists(path.join(dir, 'build.gradle.kts'))) ? 'build.gradle.kts' : (await exists(path.join(dir, 'build.gradle'))) ? 'build.gradle' : undefined;
   const gradle = gradleFile ? await readText(path.join(dir, gradleFile)) : undefined;
   const pom = await readText(path.join(dir, 'pom.xml'));
@@ -362,6 +395,19 @@ async function detectSpring(dir: string, relative: string): Promise<Omit<Detecte
       : '["mvn", "-q", "spring-boot:run"]';
   const image = wrapper ? `eclipse-temurin:${java}-jdk` : isGradle ? `gradle:jdk${java}` : `maven:3-eclipse-temurin-${java}`;
   if (!wrapper) notes.push(`${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다`);
+  // 이 폴더에 자기 gradlew·settings.gradle이 없는데 저장소 루트의 settings.gradle(.kts)이 이 폴더를 서브프로젝트로 포함하면
+  // 진짜 멀티 모듈 빌드의 모듈일 가능성이 크다. 지금은 이 폴더를 그대로 작업 폴더로 써서 gradlew/gradle을 돌리는데(ADR-088),
+  // 루트에만 래퍼·settings.gradle이 있는 구조라면 실패할 수 있다 — 그럴 때는 studio.yaml의 path를 저장소 루트로 옮기고
+  // Dockerfile.b-studio·테스트 명령에 `:폴더이름:bootRun`/`:폴더이름:test`처럼 서브프로젝트 경로를 직접 적어야 한다
+  if (isGradle && relative !== '.' && !(await exists(path.join(dir, 'settings.gradle.kts'))) && !(await exists(path.join(dir, 'settings.gradle')))) {
+    if (await isGradleSubproject(root, relative)) {
+      notes.push(
+        '저장소 루트의 settings.gradle(.kts)이 이 폴더를 서브프로젝트로 포함하는 것으로 보입니다. ' +
+          '지금은 이 폴더에서 바로 실행합니다 — 루트에만 Gradle 래퍼·settings.gradle이 있는 진짜 멀티 모듈 빌드라면 ' +
+          '실패할 수 있으니, studio.yaml의 path를 저장소 루트로 옮기고 bootRun·test 명령에 `:' + relative + ':작업`처럼 서브프로젝트 경로를 직접 적으세요',
+      );
+    }
+  }
   return {
     template: 'spring-boot',
     path: relative,
@@ -373,17 +419,25 @@ async function detectSpring(dir: string, relative: string): Promise<Omit<Detecte
       '# b-studio가 만든 개발용 이미지(ADR-067). 소스는 compose에서 마운트하고, 의존성은 첫 기동 때 받는다(프록시 설정은 샌드박스가 넣는다)',
       `FROM ${image}`,
       '',
-      'WORKDIR /app',
+      `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
       ...(isGradle ? ['ENV GRADLE_USER_HOME=/gradle-home', ''] : []),
       `EXPOSE ${port}`,
       `CMD ${run}`,
       '',
     ].join('\n'),
-    volumes: isGradle ? { 'gradle-home': '/gradle-home', 'gradle-project': '/app/.gradle', build: '/app/build' } : { 'maven-home': '/root/.m2', target: '/app/target' },
+    volumes: isGradle ? { 'gradle-home': '/gradle-home', 'gradle-project': '.gradle', build: 'build' } : { 'maven-home': '/root/.m2', target: 'target' },
     environment: {},
     dependsOn: [],
     notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
   };
+}
+
+/** 저장소 루트의 settings.gradle(.kts)이 이 폴더 이름을 서브프로젝트로 포함하는지(`include 'commerce'`, `include(":commerce")` 등) */
+async function isGradleSubproject(root: string, relative: string): Promise<boolean> {
+  const settings = (await readText(path.join(root, 'settings.gradle.kts'))) ?? (await readText(path.join(root, 'settings.gradle')));
+  if (!settings) return false;
+  const escaped = relative.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`['"]:?${escaped}['"]`).test(settings);
 }
 
 function javaVersion(build: string): number | undefined {
@@ -424,7 +478,7 @@ async function detectFastApi(dir: string, relative: string): Promise<Omit<Detect
       '# b-studio가 만든 개발용 이미지(ADR-067). 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
       'FROM python:3.12-slim',
       '',
-      'WORKDIR /app',
+      `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
       'ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1',
       '',
       'EXPOSE 8000',
@@ -497,15 +551,18 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
   const volumes: string[] = [];
   for (const service of services) {
     const context = service.path === '.' ? '.' : `./${service.path}`;
-    lines.push(`  ${service.name}:`, `    build: { context: ${context}, dockerfile: ${GENERATED_DOCKERFILE} }`);
+    const workDir = containerWorkDir(service.path);
+    lines.push(`  ${service.name}:`, `    build: { context: ${context}, dockerfile: ${GENERATED_DOCKERFILE} }`, `    working_dir: ${workDir}`);
     if (Object.keys(service.environment).length > 0) {
       lines.push('    environment:');
       for (const [key, value] of Object.entries(service.environment)) lines.push(`      ${key}: ${yamlString(value)}`);
     }
-    lines.push('    volumes:', `      - ${context}:/app`);
+    // 프로젝트 루트 전체를 마운트한다(ADR-088) — 서비스 폴더만 마운트하면 멀티 모듈 빌드·워크스페이스·폴더 밖 공유 설정 참조가 깨진다
+    lines.push('    volumes:', `      - .:${CONTAINER_WORKSPACE_ROOT}`);
     for (const [volume, target] of Object.entries(service.volumes)) {
       const name = `${service.name}-${volume}`;
-      lines.push(`      - ${name}:${target}`);
+      const containerPath = target.startsWith('/') ? target : posixJoin(workDir, target);
+      lines.push(`      - ${name}:${containerPath}`);
       volumes.push(name);
     }
     if (service.dependsOn.length > 0) {

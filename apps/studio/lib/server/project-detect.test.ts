@@ -96,7 +96,8 @@ describe('detectProject', () => {
 
     expect(service).toMatchObject({ name: 'frontend', template: 'vite', port: 5173, preview: 'browser' });
     expect(service!.dockerfile).toContain('npm ci && exec npx vite --host 0.0.0.0 --port 5173 --strictPort');
-    expect(service!.volumes).toEqual({ 'node-modules': '/app/node_modules' });
+    // 볼륨은 이 서비스의 working_dir(/workspace/frontend) 기준 상대 경로로 남긴다(ADR-088). 실제 컨테이너 경로는 composeYaml이 붙인다
+    expect(service!.volumes).toEqual({ 'node-modules': 'node_modules' });
   });
 
   it('FastAPI 앱 모듈을 찾고, 상태 확인 경로를 모르는 Spring은 추측이라고 알린다', async () => {
@@ -146,6 +147,104 @@ describe('detectProject', () => {
     ]);
   });
 });
+
+describe('detectProject: 컨테이너 마운트는 프로젝트 루트 전체를 쓴다(ADR-088)', () => {
+  it('폴더 바로 아래 앱(path: .)은 워크스페이스 루트에서 바로 일한다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'pnpm-lock.yaml': '' });
+    const detection = await detectProject(root);
+
+    const [service] = detection.services;
+    expect(service!.dockerfile).toContain('WORKDIR /workspace');
+    expect(service!.volumes).toEqual({ 'node-modules': 'node_modules', next: '.next', 'pnpm-store': '/cache/pnpm' });
+
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('working_dir: /workspace');
+    expect(compose).toContain('- .:/workspace');
+    expect(compose).toContain('web-node-modules:/workspace/node_modules');
+    expect(compose).toContain('web-next:/workspace/.next');
+    // 의존성 캐시(pnpm 스토어)는 워크스페이스 밖 절대 경로 그대로 둔다
+    expect(compose).toContain('web-pnpm-store:/cache/pnpm');
+
+    const project = await writeAndLoad(root, generateFiles(detection));
+    expect(project.managed[0]![1].path).toBe('.');
+  });
+
+  it('하위 폴더 서비스는 working_dir로 자기 폴더에서 일하고, Gradle 캐시도 그 폴더 기준 경로로 옮긴다', async () => {
+    const root = await repo({ 'backend/build.gradle': springGradle, 'backend/gradlew': '#!/bin/sh' });
+    const detection = await detectProject(root);
+
+    const [service] = detection.services;
+    expect(service!.dockerfile).toContain('WORKDIR /workspace');
+    expect(service!.volumes).toEqual({ 'gradle-home': '/gradle-home', 'gradle-project': '.gradle', build: 'build' });
+
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('working_dir: /workspace/backend');
+    expect(compose).toContain('- .:/workspace');
+    expect(compose).toContain('backend-gradle-project:/workspace/backend/.gradle');
+    expect(compose).toContain('backend-build:/workspace/backend/build');
+    // 의존성 캐시(Gradle 홈)는 서비스 폴더와 무관하게 그대로 둔다
+    expect(compose).toContain('backend-gradle-home:/gradle-home');
+
+    await writeAndLoad(root, generateFiles(detection));
+  });
+
+  it('pay 복제본처럼 서비스 폴더 밖(형제 폴더)을 참조하는 빌드가 루트를 마운트해 열린다: $rootDir/../docs가 이제 보인다', async () => {
+    // 실제 버그: ./commerce만 /app으로 마운트하면 commerce/build.gradle의 $rootDir/../docs가 컨테이너 안 /docs를 가리켜(없음) 테스트가 깨졌다.
+    // 루트를 통째로 마운트하면 같은 참조가 /workspace/docs를 가리켜(있음) 문제가 없다
+    const root = await repo({
+      'commerce/build.gradle': springGradle,
+      'commerce/gradlew': '#!/bin/sh',
+      'docs/README.md': '# 사이드카 문서\n',
+    });
+    const detection = await detectProject(root);
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('working_dir: /workspace/commerce');
+    expect(compose).toContain('- .:/workspace');
+    // docs/는 commerce 폴더 밖이지만 루트 마운트 덕에 /workspace/docs로 컨테이너 안에서 보인다
+  });
+
+  it('루트 settings.gradle이 서비스 폴더를 서브프로젝트로 포함하면(진짜 멀티 모듈 빌드), 실패할 수 있다고 확인 메모를 남긴다', async () => {
+    const root = await repo({
+      'settings.gradle': "rootProject.name = 'pay'\ninclude 'commerce'\n",
+      'commerce/build.gradle': springGradle,
+      // commerce 자신은 gradlew·settings.gradle이 없다 — 루트에만 있는 진짜 멀티 모듈 구조
+    });
+
+    const detection = await detectProject(root);
+    const [service] = detection.services;
+
+    expect(service!.notes.some((note) => note.includes('서브프로젝트'))).toBe(true);
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('# 확인:');
+    expect(spec.toLowerCase()).toContain('서브프로젝트'.toLowerCase());
+  });
+
+  it('pnpm 워크스페이스(pnpm-workspace.yaml) 구성원은 설치를 저장소 루트에서 하고 개발 서버는 자기 폴더에서 띄운다', async () => {
+    const root = await repo({
+      'pnpm-workspace.yaml': "packages:\n  - 'frontend'\n",
+      'package.json': JSON.stringify({ name: 'monorepo', private: true, workspaces: ['frontend'] }),
+      'pnpm-lock.yaml': '',
+      'frontend/package.json': nextPackage,
+    });
+
+    const detection = await detectProject(root);
+    const [service] = detection.services;
+
+    expect(service!.notes.some((note) => note.includes('워크스페이스'))).toBe(true);
+    expect(service!.dockerfile).toContain('cd /workspace && pnpm install --frozen-lockfile && cd /workspace/frontend && exec pnpm exec next dev');
+
+    await writeAndLoad(root, generateFiles(detection));
+  });
+});
+
+/** 만든 파일을 실제로 디스크에 쓰고 loadProject로 읽는다(실제 파싱 검증) */
+async function writeAndLoad(root: string, files: ReturnType<typeof generateFiles>) {
+  for (const file of files) {
+    await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+    await writeFile(path.join(root, file.path), file.content);
+  }
+  return loadProject(root);
+}
 
 const springJpaGradle = `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'org.postgresql:postgresql'\n}`;
 
