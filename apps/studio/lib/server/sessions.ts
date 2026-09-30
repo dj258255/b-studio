@@ -14,6 +14,7 @@ import {
   CheckpointStore,
   compareUrl,
   createPullRequest,
+  generateCommitSubject,
   DatabaseBranches,
   describeDatabaseState,
   estimateCost,
@@ -87,6 +88,7 @@ import {
 } from '@b-studio/sandbox';
 import { loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
+import { buildSubmissionChecklist, type ChecklistService, type SubmissionReport } from '@/lib/submission-checklist';
 import {
   addTokens,
   describeWindow,
@@ -1945,7 +1947,10 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     session.databases.enabled &&
     (await session.checkpoints.pendingFiles()).length === 0 &&
     (await session.databases.changedSince(head, session.stop.signal));
-  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body, {
+  const subject = session.project.spec.checkpoints.conventionalCommits
+    ? generateCommitSubject(request, await session.checkpoints.pendingChanges())
+    : `요청: ${request}`;
+  const checkpoint = await session.checkpoints.commit(subject, body, {
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers,
@@ -2273,6 +2278,35 @@ export async function previewExport(id: string, { issues = [] }: { issues?: read
     }),
     review: { auto: session.project.spec.review.auto, maxRounds: session.project.spec.review.maxRounds },
   };
+}
+
+/**
+ * "제출 준비" 패널(ADR-080)의 점검표. 요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서를 한 번에 확인한다.
+ * 실제 점검 규칙은 세션을 모르는 순수 함수(lib/submission-checklist.ts)에 있고, 여기서는 세션이 들고 있는 프로젝트 폴더·
+ * 체크포인트·저장소 상태를 그 함수가 받는 모양으로 조립하기만 한다
+ */
+export async function submissionReport(id: string): Promise<SubmissionReport> {
+  const session = requireSession(id);
+  const services: ChecklistService[] = session.project.managed.map(([name, service]) => ({
+    name,
+    template: service.template,
+    path: service.path,
+    port: service.port,
+  }));
+  const [pendingFilesCount, commits, repository] = await Promise.all([
+    session.checkpoints.pendingFiles().then((files) => files.length),
+    session.checkpoints.sessionCommits(),
+    session.checkpoints.repository(),
+  ]);
+  return buildSubmissionChecklist({
+    root: session.project.root,
+    services,
+    hasDatabase: session.project.databases.length > 0,
+    latestPassedStages: session.snapshot.checkpoints[0]?.passedStages,
+    pendingFilesCount,
+    repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
+    commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 } })),
+  });
 }
 
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */

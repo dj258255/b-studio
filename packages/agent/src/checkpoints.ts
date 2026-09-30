@@ -58,6 +58,8 @@ export interface SessionCommit {
   subject: string;
   body: string;
   files: string[];
+  /** 바뀐 줄 수(추가·삭제). 제출 준비 점검(ADR-080)이 한 커밋이 전체 변경을 독차지하는지 볼 때 쓴다. sessionCommits()가 항상 채운다 */
+  stat?: { insertions: number; deletions: number };
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 커밋이다 */
   passedStages?: WorkflowStage[];
 }
@@ -509,9 +511,37 @@ export class CheckpointStore {
         // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
         const passedStages =
           authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
-        return { sha, shortSha, subject, body: body.trim(), files: await this.#changedFiles(sha), ...(passedStages ? { passedStages } : {}) };
+        return {
+          sha,
+          shortSha,
+          subject,
+          body: body.trim(),
+          files: await this.#changedFiles(sha),
+          stat: await this.#commitStat(sha),
+          ...(passedStages ? { passedStages } : {}),
+        };
       }),
     );
+  }
+
+  /** 커밋 하나가 바꾼 줄 수(추가·삭제). 제출 준비 점검(ADR-080)이 한 커밋이 전체 변경을 독차지하는지 볼 때 쓴다 */
+  async #commitStat(sha: string): Promise<{ insertions: number; deletions: number }> {
+    const parent = await this.#firstParent(sha);
+    const relative = await this.#relative();
+    const output = parent
+      ? await this.#git(['diff', '--numstat', ...relative, parent, sha])
+      : await this.#git(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', ...relative, sha]);
+    let insertions = 0;
+    let deletions = 0;
+    for (const line of output.split('\n')) {
+      const [added, removed] = line.split('\t');
+      // 이진 파일은 "-\t-\t경로"로 나와 줄 수를 셀 수 없으니 건너뛴다
+      if (added && removed && added !== '-' && removed !== '-') {
+        insertions += Number(added) || 0;
+        deletions += Number(removed) || 0;
+      }
+    }
+    return { insertions, deletions };
   }
 
   /**
