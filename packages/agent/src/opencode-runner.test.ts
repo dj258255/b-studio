@@ -186,6 +186,33 @@ describe('runOpenCodeAgent', () => {
     expect(await readFile(path.join(originalHome, '.local', 'share', 'opencode', 'auth.json'), 'utf8')).toBe('{"token":"secret"}\n');
   });
 
+  it('effort를 넘기면 --variant 인자로 전달하고 세션 알림에도 남긴다', async () => {
+    const { process, state } = fakeOpenCode([success('ses_1', '완료')]);
+    const events: AgentEvent[] = [];
+
+    await runOpenCodeAgent({
+      request: '요청',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      model: MODEL,
+      effort: 'high',
+      process,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(state.calls[0]!.args).toEqual(expect.arrayContaining(['--variant', 'high']));
+    expect(events.find((event) => event.type === 'session')).toMatchObject({ backend: '로컬 OpenCode Agent', effort: 'high' });
+  });
+
+  it('effort를 넘기지 않으면 --variant 인자를 붙이지 않는다', async () => {
+    const { process, state } = fakeOpenCode([success('ses_1', '완료')]);
+
+    await runOpenCodeAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), model: MODEL, process, fetcher: async () => contract });
+
+    expect(state.calls[0]!.args).not.toContain('--variant');
+  });
+
   it('linkAuth=false면 로그인 파일을 링크하지 않는다', async () => {
     const { process } = fakeOpenCode([success('ses_1', 'ok')], {
       onStart: async ({ env }) => {

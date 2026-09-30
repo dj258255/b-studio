@@ -9,6 +9,14 @@ const hasCredentials =
   Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_PROFILE) ||
   existsSync(path.join(homedir(), '.config/anthropic'));
 
+describe('AnthropicModelClient의 effort', () => {
+  it('기본값은 high이고, info.effort에 그대로 실린다(화면 표시·실행 지표가 여기서 읽는다)', () => {
+    expect(new AnthropicModelClient().info.effort).toBe('high');
+    expect(new AnthropicModelClient({ effort: 'low' }).info.effort).toBe('low');
+    expect(new AnthropicModelClient({ effort: 'max' }).effort).toBe('max');
+  });
+});
+
 describe('AnthropicModelClient.preflight', () => {
   const originalBaseUrl = process.env.ANTHROPIC_BASE_URL;
   afterEach(() => {

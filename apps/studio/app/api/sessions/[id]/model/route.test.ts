@@ -60,13 +60,13 @@ describe('POST /api/sessions/[id]/model', () => {
     const response = await post({ modelId: 'opus' });
 
     expect(response.status).toBe(200);
-    expect(mocks.setSessionModel).toHaveBeenCalledWith('s1', 'opus');
+    expect(mocks.setSessionModel).toHaveBeenCalledWith('s1', 'opus', undefined);
     expect((await response.json()).current).toBe('opus');
   });
 
   it('modelId를 비우면 "기본"으로 되돌린다', async () => {
     await post({ modelId: '' });
-    expect(mocks.setSessionModel).toHaveBeenCalledWith('s1', '');
+    expect(mocks.setSessionModel).toHaveBeenCalledWith('s1', '', undefined);
   });
 
   it('modelId가 문자열이 아니면 400을 돌려주고 저장하지 않는다', async () => {
@@ -91,5 +91,31 @@ describe('POST /api/sessions/[id]/model', () => {
     const response = await post({ modelId: 'opus' });
 
     expect(response.status).toBe(409);
+  });
+
+  it('effort를 함께 보내면 modelId와 함께 그대로 전달한다', async () => {
+    await post({ modelId: 'opus', effort: 'high' });
+    expect(mocks.setSessionModel).toHaveBeenCalledWith('s1', 'opus', 'high');
+  });
+
+  it('effort만 보내도(modelId 없이) 그대로 전달한다', async () => {
+    await post({ effort: 'low' });
+    expect(mocks.setSessionModel).toHaveBeenCalledWith('s1', undefined, 'low');
+  });
+
+  it('effort가 문자열이 아니면 400을 돌려주고 저장하지 않는다', async () => {
+    const response = await post({ effort: 7 });
+
+    expect(response.status).toBe(400);
+    expect(mocks.setSessionModel).not.toHaveBeenCalled();
+  });
+
+  it('이 백엔드에서 고를 수 없는 노력 단계면(서버가 400을 던지면) 그대로 전한다', async () => {
+    mocks.setSessionModel.mockRejectedValueOnce(new StudioError(400, '이 백엔드에서 고를 수 없는 노력 단계입니다: ultra'));
+
+    const response = await post({ effort: 'ultra' });
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain('고를 수 없는 노력 단계');
   });
 });

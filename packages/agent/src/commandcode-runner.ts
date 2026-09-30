@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
+import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
@@ -109,8 +110,8 @@ export interface CommandCodeRunOptions extends Omit<RunAgentOptions, 'client' | 
   model?: string;
   /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex 러너와 같다) */
   escalation?: EscalationPolicy;
-  /** 모델별 추론 강도. 넘기면 `--effort <level>`로 전달한다 */
-  effort?: string;
+  /** 노력 단계. 넘기면 `--effort <level>`로 전달한다(0단계 근거: `cmd --help`, `low|medium|high|xhigh|max`) */
+  effort?: Effort;
   /**
    * 세션마다 고정된 상태 폴더. 주면 HOME을 `<stateDir>/home`, 작업 폴더(cwd)를 `<stateDir>/work`로 고정한다.
    *
@@ -359,7 +360,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
             // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
             if (!announced) {
               announced = true;
-              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델' });
+              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델', effort });
             }
             break;
           case 'model_request_end': {
@@ -452,7 +453,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
 }
 
 /** `cmd -p` 한 번의 인자. `--yolo`·`--tools-all`은 쓰지 않는다: 헤드리스 기본 차단을 그대로 유지해야 b-studio 도구 경계가 선다 */
-function commandArgs(input: { pending: string; sessionId?: string; model?: string; effort?: string; maxTurns: number }): string[] {
+function commandArgs(input: { pending: string; sessionId?: string; model?: string; effort?: Effort; maxTurns: number }): string[] {
   const args = ['-p', input.pending, '--output-format', 'json', '--skip-onboarding', '--no-auto-update', '--no-skills', '--max-turns', String(input.maxTurns)];
   if (input.model) args.push('-m', input.model);
   if (input.effort) args.push('--effort', input.effort);

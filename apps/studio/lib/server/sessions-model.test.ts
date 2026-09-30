@@ -66,7 +66,7 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
 
 import { createSession, sessionModelPicker, setSessionModel, stopSession } from './sessions';
 import { StudioError } from './errors';
-import { projectModelDefault, resetProjectModelDefaultsCache } from './model-defaults';
+import { projectEffortDefault, projectModelDefault, resetProjectModelDefaultsCache } from './model-defaults';
 
 let root: string;
 const saved = {
@@ -156,6 +156,46 @@ describe('sessionModelPicker / setSessionModel', () => {
     await setSessionModel(id, 'haiku');
 
     expect(projectModelDefault('modelproj', 'claude-code')).toBe('haiku');
+    await stopSession(id).catch(() => {});
+  });
+
+  it('노력 단계를 바꾸면 세션 스냅샷에 남고, 이 프로젝트·백엔드의 다음 새 세션 기본값으로도 남긴다', async () => {
+    const { id } = await createSession('modelproj', 'kim', 'copy', { boot: 'on-demand' });
+
+    const result = await setSessionModel(id, 'sonnet', 'high');
+
+    expect(result.effort.current).toBe('high');
+    expect((await sessionModelPicker(id)).effort.current).toBe('high');
+    expect(projectEffortDefault('modelproj', 'claude-code')).toBe('high');
+    await stopSession(id).catch(() => {});
+  });
+
+  it('modelId를 넘기지 않고 effort만 바꿀 수 있다(지금 모델은 그대로 둔다)', async () => {
+    const { id } = await createSession('modelproj', 'kim', 'copy', { boot: 'on-demand' });
+    await setSessionModel(id, 'opus');
+
+    const result = await setSessionModel(id, undefined, 'low');
+
+    expect(result.current).toBe('opus');
+    expect(result.effort.current).toBe('low');
+    await stopSession(id).catch(() => {});
+  });
+
+  it('effort를 넘기지 않으면(undefined) 지금 노력 단계를 그대로 둔다', async () => {
+    const { id } = await createSession('modelproj', 'kim', 'copy', { boot: 'on-demand' });
+    await setSessionModel(id, 'opus', 'max');
+
+    const result = await setSessionModel(id, 'sonnet');
+
+    expect(result.effort.current).toBe('max');
+    await stopSession(id).catch(() => {});
+  });
+
+  it('이 백엔드에서 고를 수 없는 노력 단계는 400으로 거부하고 세션을 바꾸지 않는다', async () => {
+    const { id } = await createSession('modelproj', 'kim', 'copy', { boot: 'on-demand' });
+
+    await expect(setSessionModel(id, 'sonnet', 'ultra')).rejects.toThrow(StudioError);
+    expect((await sessionModelPicker(id)).effort.current).toBeUndefined();
     await stopSession(id).catch(() => {});
   });
 });

@@ -221,6 +221,33 @@ describe('buildProjectTokenReport', () => {
     expect(results['s-fleet:running']).toBe('running');
   });
 
+  it('실행 환경 알림(agent session 이벤트)에 실린 노력 단계를 요청 행에 남긴다', () => {
+    const report = buildProjectTokenReport({
+      projectId: 'orders',
+      projectName: 'orders',
+      generatedAt: '2026-09-03T00:00:00.000Z',
+      sessions: [
+        {
+          sessionId: 's-effort',
+          kind: 'normal',
+          events: [
+            { type: 'run_started', runId: 'e1', request: '깊게 봐줘' },
+            agent('e1', { type: 'session', backend: 'Anthropic API', model: 'claude-opus-5', effort: 'max' }),
+            { type: 'run_finished', runId: 'e1', status: 'done', summary: 'ok', usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+          ],
+        },
+      ],
+    });
+
+    expect(report.requests[0]!.effort).toBe('max');
+  });
+
+  it('러너가 노력 단계를 알리지 않으면 요청 행에 effort가 없다', () => {
+    const report = buildProjectTokenReport({ projectId: 'orders', projectName: 'orders', generatedAt: '2026-09-03T00:00:00.000Z', sessions: [{ sessionId: 's', kind: 'normal', events: changedSession() }] });
+
+    expect(report.requests[0]!.effort).toBeUndefined();
+  });
+
   it('세션 종류별 합을 낸다', () => {
     const report = build({ pricing: byModelPricing });
 
@@ -308,9 +335,9 @@ describe('buildProjectTokenReport', () => {
 
 ## 요청별 (최근 순, 최대 50)
 
-| 시각 (UTC) | 세션 | 요청 | 토큰 | 비용 | 결과 |
-| --- | --- | --- | --- | --- | --- |
-| 2026-09-01 10:00 UTC | 일반 · s-normal | 주문 목록에 필터를 추가하고 테스트를 돌려줘 | 33,210 | $0.0178 | 바꿈 |
+| 시각 (UTC) | 세션 | 요청 | 토큰 | 비용 | 노력 | 결과 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-01 10:00 UTC | 일반 · s-normal | 주문 목록에 필터를 추가하고 테스트를 돌려줘 | 33,210 | $0.0178 | — | 바꿈 |
 
 비용은 공식 단가로 환산한 추정치이며 구독 요금과 다릅니다
 `);

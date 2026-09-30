@@ -98,6 +98,7 @@ import {
   type DemoScenario,
   type DesignFrameInfo,
   type DesignSource,
+  type Effort,
   type EscalationPolicy,
   type GateCheckResult,
   type GitAuthor,
@@ -190,8 +191,8 @@ import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from '
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
-import { isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
-import { rememberProjectModelDefault } from './model-defaults';
+import { isSelectableEffort, isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
+import { rememberProjectEffortDefault, rememberProjectModelDefault } from './model-defaults';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -460,7 +461,7 @@ export async function createSession(
   projectId: string,
   owner: string,
   workspace: WorkspaceKind = 'copy',
-  options: { modelId?: string; backend?: string; boot?: BootMode; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
+  options: { modelId?: string; effort?: string; backend?: string; boot?: BootMode; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
   // 요청이 백엔드를 고르면 허용 목록에서만 받는다. 없으면 서버 모드라 지금과 같다
@@ -476,7 +477,7 @@ export async function createSession(
   try {
     // 기본은 eager(지금과 같다). 사람이 만든 일반 세션의 라우트만 on-demand를 넘긴다
     const boot = options.boot ?? 'eager';
-    return await startSession({ projectId, owner, workspace, source, mode, backend, boot, tokenLimit, preview, modelId: options.modelId, extraPageChecks: options.extraPageChecks });
+    return await startSession({ projectId, owner, workspace, source, mode, backend, boot, tokenLimit, preview, modelId: options.modelId, effort: options.effort, extraPageChecks: options.extraPageChecks });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
@@ -494,6 +495,7 @@ async function startSession({
   tokenLimit,
   preview,
   modelId,
+  effort,
   extraPageChecks,
 }: {
   projectId: string;
@@ -508,6 +510,8 @@ async function startSession({
   tokenLimit: number | undefined;
   preview: PreviewConfig | undefined;
   modelId?: string;
+  /** 새 세션의 노력 단계 기본값(model-defaults.ts에 기억된 값). 고른 적이 없으면 없다 */
+  effort?: string;
   /** 이 세션에만 덧붙일 pageChecks(작업 분해 통합 게이트). HTTP 라우트는 넘기지 않는다 */
   extraPageChecks?: readonly WorkflowPageCheck[];
 }): Promise<SessionSnapshot> {
@@ -579,6 +583,7 @@ async function startSession({
       mode,
       backend,
       modelId,
+      effort: effort as Effort | undefined,
       running: false,
       tokenLimit,
       owner,
@@ -1292,28 +1297,42 @@ export function setSessionDesign(id: string, fileUrl: string): DesignView | unde
   return design;
 }
 
-/** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값을 함께 돌려준다 */
+/** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값(모델·노력 단계)을 함께 돌려준다 */
 export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
   const session = requireSession(id);
-  return listSelectableModels(sessionBackend(session.snapshot), session.snapshot.modelId);
+  return listSelectableModels(sessionBackend(session.snapshot), session.snapshot.modelId, session.snapshot.effort);
 }
 
 /**
- * 대화 입력창에서 이 세션이 쓸 모델을 바꾼다. 다음 요청부터 적용된다(planRun이 매번 session.snapshot.modelId를 다시 읽는다).
- * 빈 문자열이나 undefined는 "기본"(오버라이드 없음)을 뜻한다. 요청을 처리하는 동안에는 바꾸지 못한다(실행 중인 요청과 엇갈리지 않게).
- * 고른 값은 이 프로젝트·백엔드의 다음 새 세션 기본값으로도 남긴다(model-defaults.ts)
+ * 대화 입력창에서 이 세션이 쓸 모델·노력 단계를 바꾼다. 다음 요청부터 적용된다
+ * (planRun이 매번 session.snapshot.modelId·effort를 다시 읽는다).
+ * 요청을 처리하는 동안에는 바꾸지 못한다(실행 중인 요청과 엇갈리지 않게).
+ *
+ * modelId·effort 둘 다 **넘기지 않으면(undefined) 지금 값을 그대로 둔다** — 팝오버가 둘 중 하나만 바꿀 수 있다(PATCH와 같은 규칙).
+ * 값을 넘기면(빈 문자열 포함) 그 필드를 그 값으로 바꾼다. 빈 문자열은 "기본"(오버라이드 없음)으로 되돌리는 명시적 요청이다.
+ * 바뀐 값은 이 프로젝트·백엔드의 다음 새 세션 기본값으로도 남긴다(model-defaults.ts)
  */
-export async function setSessionModel(id: string, modelId: string | undefined): Promise<ModelPickerView> {
+export async function setSessionModel(id: string, modelId: string | undefined, effort?: string): Promise<ModelPickerView> {
   const session = requireSession(id);
   if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 모델을 바꿀 수 없습니다');
   const backend = sessionBackend(session.snapshot);
-  const trimmed = modelId?.trim() ?? '';
-  const check = await isSelectableModel(backend, trimmed);
-  if (!check.ok) throw new StudioError(400, check.reason ?? `이 백엔드에서 고를 수 없는 모델입니다: ${trimmed}`);
-  session.snapshot.modelId = trimmed || undefined;
-  emit(session, { type: 'model', modelId: session.snapshot.modelId });
-  rememberProjectModelDefault(session.snapshot.projectId, backend, session.snapshot.modelId);
-  return listSelectableModels(backend, session.snapshot.modelId);
+  if (modelId !== undefined) {
+    const trimmedModel = modelId.trim();
+    const modelCheck = await isSelectableModel(backend, trimmedModel);
+    if (!modelCheck.ok) throw new StudioError(400, modelCheck.reason ?? `이 백엔드에서 고를 수 없는 모델입니다: ${trimmedModel}`);
+    session.snapshot.modelId = trimmedModel || undefined;
+    rememberProjectModelDefault(session.snapshot.projectId, backend, session.snapshot.modelId);
+  }
+  if (effort !== undefined) {
+    const trimmedEffort = effort.trim();
+    // modelId도 이번 호출에서 함께 바뀌었으면 그 새 모델을 기준으로 노력 단계를 확인한다(api 백엔드는 모델마다 지원이 다르다)
+    const effortCheck = isSelectableEffort(backend, session.snapshot.modelId, trimmedEffort);
+    if (!effortCheck.ok) throw new StudioError(400, effortCheck.reason ?? `이 백엔드에서 고를 수 없는 노력 단계입니다: ${trimmedEffort}`);
+    session.snapshot.effort = (trimmedEffort || undefined) as Effort | undefined;
+    rememberProjectEffortDefault(session.snapshot.projectId, backend, session.snapshot.effort);
+  }
+  emit(session, { type: 'model', modelId: session.snapshot.modelId, effort: session.snapshot.effort });
+  return listSelectableModels(backend, session.snapshot.modelId, session.snapshot.effort);
 }
 
 /** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
@@ -1550,7 +1569,8 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
     const route = routingDecision(request, intent, session.snapshot.modelId ?? split.execute);
     // 사람이 대화에서 직접 고른 모델일 때만 "같은 모델로 승격" no-op을 본다. 라우터가 고른 값은 다음 요청에서 바뀔 수 있어 대상이 아니다
     const escalation = apiEscalation(split.plan, process.env, session.snapshot.modelId ? route.selected.id : undefined);
-    return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
+    // effort는 Anthropic 모델에만 실제로 전달된다(clientForModel의 anthropic 분기만 받는다). 다른 공급자는 조용히 무시한다
+    return { kind: 'model', client: clientForModel(route.selected, session.snapshot.effort), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'claude-code') {
     const chosenModel = cliModelOverride(session.snapshot.modelId);
@@ -2019,6 +2039,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       resume: claudeCode.sessionId,
       // 세션(레인)에서 고른 모델 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
       model: cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
+      // 세션에서 고른 노력 단계. 없으면 러너 기본값('high')을 그대로 쓴다
+      ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
       steering: run.steering,
       // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
@@ -2043,6 +2065,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
       // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수를 쓴다. 기록용 id는 무시한다
       model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined),
+      // 세션에서 고른 노력 단계. 없으면 넘기지 않는다(계정 기본값)
+      ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
       // 실행 중 지시 큐. Codex는 턴 사이에만 넣는다
       steering: run.steering,
     });
@@ -2070,6 +2094,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       stateDir: commandCodeStateDirOf(session.snapshot),
       // 세션에서 고른 모델 → B_STUDIO_CMD_MODEL → 없음(계정 기본)
       model: resolveCommandCodeModel(session.snapshot.modelId, process.env.B_STUDIO_CMD_MODEL),
+      // 세션에서 고른 노력 단계. 없으면 넘기지 않는다(계정 기본값)
+      ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
     });
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
     commandCode.notes = [];
@@ -2095,6 +2121,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       stateDir: openCodeStateDirOf(session.snapshot),
       // 세션에서 고른 모델 → B_STUDIO_OPENCODE_MODEL → 없음(러너가 "모델을 골라야 합니다" 오류를 낸다)
       model: resolveOpenCodeModel(session.snapshot.modelId, process.env.B_STUDIO_OPENCODE_MODEL),
+      // 세션에서 고른 노력 단계. 없으면 넘기지 않는다(`--variant`를 붙이지 않는다)
+      ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
       // 무료 Zen 모델은 이 구성에서 거절되므로, 로그인 파일이 있으면 링크해 로그인한 제공자의 모델을 쓴다(없으면 링크하지 않는다)
       linkAuth: true,
     });

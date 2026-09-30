@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
+import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
@@ -141,6 +142,12 @@ export interface OpenCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'co
   resume?: string;
   /** 필수. 모델은 항상 `-m`으로 명시한다. 없으면 OPENCODE_MODEL_REQUIRED 오류를 낸다(기본 모델을 추측하지 않는다) */
   model?: string;
+  /**
+   * 노력 단계. 넘기면 `--variant <level>`로 전달한다(0단계 근거: `opencode run --help`의
+   * "model variant (provider-specific reasoning effort, e.g., high, max, minimal)").
+   * 모델·제공자마다 실제로 받아들이는 값이 다를 수 있어(opencode가 내부에서 매핑), 지원 여부를 단언하지 않는다
+   */
+  effort?: Effort;
   /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex·Command Code 러너와 같다) */
   escalation?: EscalationPolicy;
   /**
@@ -216,6 +223,7 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
     browserRunner,
     resume,
     model,
+    effort,
     linkAuth = true,
     stateDir,
     process: proc = DEFAULT_PROCESS,
@@ -378,7 +386,12 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
       // 이 턴만 중단하는 컨트롤러. 치명적 오류를 받으면 자식을 죽인다
       const turnAbort = new AbortController();
       const turnSignal = signal ? AbortSignal.any([signal, turnAbort.signal]) : turnAbort.signal;
-      const { lines, exitCode, stderr } = proc.run({ args: commandArgs({ pending, sessionId, model: chosenModel }), cwd: workdir, env: runEnv(home, configPath, toolServer.token), signal: turnSignal });
+      const { lines, exitCode, stderr } = proc.run({
+        args: commandArgs({ pending, sessionId, model: chosenModel, effort }),
+        cwd: workdir,
+        env: runEnv(home, configPath, toolServer.token),
+        signal: turnSignal,
+      });
 
       let errorMessage = '';
       let turnText = '';
@@ -406,7 +419,7 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
             // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
             if (!announced) {
               announced = true;
-              onEvent({ type: 'session', backend: BACKEND, model: chosenModel });
+              onEvent({ type: 'session', backend: BACKEND, model: chosenModel, effort });
             }
             break;
           case 'text': {
@@ -507,8 +520,9 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
 }
 
 /** `opencode run` 한 번의 인자. 모델은 항상 `-m`으로 명시한다(계정 기본값을 추측하지 않는다) */
-function commandArgs(input: { pending: string; sessionId?: string; model: string }): string[] {
+function commandArgs(input: { pending: string; sessionId?: string; model: string; effort?: Effort }): string[] {
   const args = ['run', '--format', 'json', '--pure', '--agent', AGENT, '-m', input.model];
+  if (input.effort) args.push('--variant', input.effort);
   // --fork는 --continue/--session과 함께 써야 한다. 세션을 갈라 이어받아 원본을 보존한다
   if (input.sessionId) args.push('--session', input.sessionId, '--fork');
   args.push(input.pending);

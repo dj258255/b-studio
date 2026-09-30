@@ -169,7 +169,9 @@ describe('runClaudeCodeAgent', () => {
     expect(state.prompts).toHaveLength(2);
     expect(state.prompts[1]).toContain('[b-studio 검증 게이트]');
     expect(state.prompts[1]).toContain('cannot find symbol');
-    expect(events[0]).toEqual({ type: 'session', backend: '로컬 Claude Agent (CLI 9.9.9)', model: 'test-model', auth: 'Claude Max 구독' });
+    // effort를 넘기지 않으면 기본값 'high'가 그대로 query 옵션과 세션 알림에 실린다
+    expect(state.options?.effort).toBe('high');
+    expect(events[0]).toEqual({ type: 'session', backend: '로컬 Claude Agent (CLI 9.9.9)', model: 'test-model', auth: 'Claude Max 구독', effort: 'high' });
     expect(events.filter((e) => e.type === 'tool_result').map((e) => e.type === 'tool_result' && e.ok)).toEqual([true, true]);
   });
 
