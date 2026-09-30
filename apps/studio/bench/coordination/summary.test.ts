@@ -218,6 +218,30 @@ describe('summarize', () => {
     expect(summarize([row({})], { ...meta, planModel: 'opus', executeModel: 'haiku' })).toContain('계획-실행 분리: 계획 opus → 실행 haiku');
   });
 
+  it('계획 호출이 남긴 계획 원문이 있으면 건수·평균 길이 줄을 더하고, 없으면 더하지 않는다', () => {
+    expect(summarize([row({})], meta)).not.toContain('계획 호출');
+
+    const withBriefs = summarize(
+      [
+        row({
+          planExecute: { plan: 'opus', execute: 'haiku' },
+          planBriefs: [
+            { sessionId: 's1', runId: 'run-1', model: 'opus', text: 'a'.repeat(100), usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 10 },
+          ],
+        }),
+        row({
+          planExecute: { plan: 'opus', execute: 'haiku' },
+          planBriefs: [
+            { sessionId: 's2', runId: 'run-2', model: 'opus', text: 'b'.repeat(200), usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 20 },
+          ],
+        }),
+      ],
+      { ...meta, planModel: 'opus', executeModel: 'haiku' },
+    );
+    // 평균 길이 = (100 + 200) / 2 = 150
+    expect(withBriefs).toContain('계획 호출 2건, 계획 글 평균 길이 150자.');
+  });
+
   it('claude-code 백엔드면 modelMs 한계 줄을 더한다', () => {
     const local = summarize([row({})], { backend: 'claude-code', requestedModel: 'sonnet' });
     expect(local).toContain('로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다.');

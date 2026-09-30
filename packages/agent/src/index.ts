@@ -283,7 +283,10 @@ export { createProviderClient, GoogleModelClient, OpenAICompatibleModelClient } 
 export {
   appendPlanToRequest,
   buildPlanBriefSystem,
-  PLAN_BRIEF_MAX_WORDS,
+  PLAN_BRIEF_MAX_CHARS,
+  PLAN_BRIEF_MAX_WORDS_LONG,
+  PLAN_BRIEF_MAX_WORDS_SHORT,
+  planWordLimit,
   PlanBriefError,
   requestPlanBrief,
   shouldPlanBrief,
