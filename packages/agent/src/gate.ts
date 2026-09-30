@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
-import type { AutoPageChecks, ConcurrencyExpect, LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowPageCompare, WorkflowStage, WorkflowTest } from '@b-studio/spec';
+import { SAFE_SEGMENT, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
-import { routesFromChangedFiles } from './next-routes';
+import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromChangedFiles } from './next-routes';
 import { servicesForFiles } from './services';
+import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
@@ -150,6 +151,8 @@ export class VerificationGate {
   #pageBlocked = new Map<string, string[]>();
   /** 화면 확인 이름 → 측정한 로드 시간(ms). 예산을 적은 확인만 재어 결과에 남긴다 */
   #pageLoadMs = new Map<string, number>();
+  /** 화면 확인 이름 → 게이트를 막지 않는 참고 문구(ADR-078). HTTP 모드의 로딩 문구 경고처럼, 확정할 수 없지만 알려 둘 만한 것을 담는다 */
+  #pageWarnings = new Map<string, string[]>();
   /** 동시 요청 확인 이름 → 통과했을 때의 요약(성공 건수·상태 분포·then 값) */
   #concurrencyNotes = new Map<string, string>();
 
@@ -259,7 +262,7 @@ export class VerificationGate {
     const tests = workflow?.tests ?? [];
     const concurrency = workflow?.concurrencyChecks ?? [];
     // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
-    const auto = this.#autoPages(pages);
+    const auto = await this.#autoPages(pages);
     if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
 
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
@@ -268,6 +271,7 @@ export class VerificationGate {
     this.#pageCompares.clear();
     this.#pageBlocked.clear();
     this.#pageLoadMs.clear();
+    this.#pageWarnings.clear();
     this.#concurrencyNotes.clear();
     for (const page of pages) {
       const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
@@ -278,8 +282,11 @@ export class VerificationGate {
     }
     for (const entry of auto.pages) {
       meta.push({ stage: 'browser_check', name: entry.name });
-      // 자동 페이지는 같은 #checkPage로 돌리되 오류 화면 표지까지 본다
-      nodes.push({ id: `page:${entry.name}`, run: ({ signal }) => this.#checkPage(entry.page, entry.name, signal, { auto: true }) });
+      // 자동 페이지는 같은 #checkPage로 돌리되 오류 화면 표지까지 본다. 추정한 id로 연 동적 경로는 probedId를 함께 넘겨 관대하게 판정한다
+      nodes.push({
+        id: `page:${entry.name}`,
+        run: ({ signal }) => this.#checkPage(entry.page, entry.name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}) }),
+      });
     }
     for (const test of tests) {
       meta.push({ stage: 'test', name: test.name });
@@ -304,7 +311,9 @@ export class VerificationGate {
       const note = this.#concurrencyNotes.get(entry.name);
       // 실패 사유에 막은 요청 수를 한 줄 덧붙인다. 통과해도 남겨 QA 보기에서 볼 수 있게 한다
       const blocked = this.#pageBlocked.get(entry.name) ?? [];
-      const detail = [result.error, note, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined]
+      // 게이트를 막지 않는 참고 문구(HTTP 모드의 로딩 문구 경고 등). 통과해도 남긴다
+      const warnings = this.#pageWarnings.get(entry.name) ?? [];
+      const detail = [result.error, note, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined, ...warnings]
         .filter((line) => line !== undefined)
         .join('\n');
       return {
@@ -325,8 +334,9 @@ export class VerificationGate {
    * 이번 실행에서 바뀐 Next.js 페이지 중 자동으로 열어 볼 것을 고른다(`workflow.autoPageChecks`).
    * page 파일만 본다 — 같은 폴더의 layout·loading·error만 바뀐 경우는 열지 않는다(next-routes.ts의 범위 주석 참고).
    * 선언한 pageChecks와 같은 service+path는 두 번 열지 않고 건너뜀 check로 남긴다.
+   * 동적 세그먼트에 sampleParams 값이 없어도(ADR-078) id처럼 보이는 이름이면 추정한 값으로 열어 보고, 그 라우트는 probedId를 함께 돌려준다.
    */
-  #autoPages(declared: readonly WorkflowPageCheck[]): { pages: Array<{ page: WorkflowPageCheck; name: string }>; skipped: WorkflowCheck[] } {
+  async #autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string }>; skipped: WorkflowCheck[] }> {
     const config = this.#options.project.spec.workflow?.autoPageChecks;
     if (!config) return { pages: [], skipped: [] };
     const service = this.#options.project.managed.find(([name]) => name === config.service);
@@ -338,16 +348,23 @@ export class VerificationGate {
       };
     }
 
-    const found = routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages);
+    const fallbackValue = await this.#dynamicRouteFallback(config);
+    const found = routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue);
     const declaredKeys = new Set(declared.map((page) => `${page.service} ${page.path}`));
-    const pages: Array<{ page: WorkflowPageCheck; name: string }> = [];
+    const pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string }> = [];
     const skipped = found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason));
     for (const route of found.routes) {
       if (declaredKeys.has(`${config.service} ${route.path}`)) {
         skipped.push(this.#autoSkipCheck(config.service, route.file, `${route.path}은(는) 이미 선언한 pageChecks에 있어 두 번 열지 않았습니다`));
         continue;
       }
-      pages.push({ page: autoPageCheck(config, route.path), name: `${config.service} ${route.path} (자동)` });
+      // id를 추정해 채운 동적 경로는 이름에 표시하고, 404·500만 실패로 보도록 probedId를 남긴다
+      const probed = (route.usedFallbackParams?.length ?? 0) > 0 && fallbackValue !== undefined;
+      pages.push({
+        page: autoPageCheck(config, route.path),
+        name: `${config.service} ${route.path} (자동${probed ? ', id 추정' : ''})`,
+        ...(probed ? { probedId: fallbackValue } : {}),
+      });
     }
     return { pages, skipped };
   }
@@ -357,7 +374,39 @@ export class VerificationGate {
     return { stage: 'browser_check', name: `${service} ${file} (자동, 건너뜀)`, ok: true, attempts: 1, detail: reason };
   }
 
-  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean } = {}): Promise<void> {
+  /**
+   * 동적 세그먼트를 값 없이 건너뛰지 않고 추정 값으로 채워 열어 보게 한다(ADR-078).
+   * config.dynamicRouteProbe가 false면(꺼져 있으면) undefined를 돌려줘 예전처럼 건너뛴다.
+   * sampleIdFrom을 적었으면 그 api를 불러 jsonPath 값을 꺼내 쓰고, 없거나 불러오기를 실패하면 기본값('1')으로 물러난다 —
+   * 이 확인은 "값을 하나라도 넣어 보는" 목적이라 api 실패까지 게이트 실패로 만들지 않는다
+   */
+  async #dynamicRouteFallback(config: AutoPageChecks): Promise<string | undefined> {
+    if (config.dynamicRouteProbe === false) return undefined;
+    const from = config.sampleIdFrom;
+    if (!from) return DEFAULT_DYNAMIC_ROUTE_FALLBACK;
+    try {
+      const { sandbox, pageFetcher = fetchPage, signal } = this.#options;
+      const endpoint = await sandbox.endpoint(from.service);
+      const url = new URL(from.path, endpoint.url);
+      if (url.origin !== new URL(endpoint.url).origin) return DEFAULT_DYNAMIC_ROUTE_FALLBACK;
+      const { status, text } = await pageFetcher(url.href, signal);
+      if (status < 200 || status >= 300) return DEFAULT_DYNAMIC_ROUTE_FALLBACK;
+      const value = readJsonPath(text, from.jsonPath);
+      if ((typeof value === 'string' || typeof value === 'number') && SAFE_SEGMENT.test(String(value))) return String(value);
+      return DEFAULT_DYNAMIC_ROUTE_FALLBACK;
+    } catch {
+      return DEFAULT_DYNAMIC_ROUTE_FALLBACK;
+    }
+  }
+
+  /** 게이트를 막지 않는 참고 문구를 이름별로 모아 둔다. detail에 붙여 QA 보기·모델 피드백에서 볼 수 있게 한다 */
+  #addWarning(name: string, message: string): void {
+    const list = this.#pageWarnings.get(name) ?? [];
+    list.push(message);
+    this.#pageWarnings.set(name, list);
+  }
+
+  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string } = {}): Promise<void> {
     const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
     // 자동으로 연 페이지의 실패는 경로를 앞에 붙여, 실패 서명에서 선언한 pageChecks의 실패와 구분되게 한다
     const fail = (message: string) => new Error(sandbox.redact(options.auto ? `자동 페이지 ${page.path}: ${message}` : message));
@@ -390,7 +439,12 @@ export class VerificationGate {
       if (saveArtifact) this.#pageSteps.set(name, await this.#saveSteps(name, result.steps));
       if (result.blockedRequests.length > 0) this.#pageBlocked.set(name, result.blockedRequests);
       const problems: string[] = [];
-      if (result.status !== page.expectStatus) problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
+      if (options.probedId !== undefined) {
+        // 추정한 id로 연 동적 경로(ADR-078): id가 실제로 없을 수도 있어 404·500만 실패로 본다
+        if (result.status === 404 || (result.status !== null && result.status >= 500)) problems.push(dynamicProbeStatusProblem(options.probedId, result.status));
+      } else if (result.status !== page.expectStatus) {
+        problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
+      }
       if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
       // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
       if (page.expectAnyText && !page.expectAnyText.some((candidate) => result.text.includes(candidate))) problems.push(missingAnyText(page.expectAnyText));
@@ -402,6 +456,15 @@ export class VerificationGate {
       if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.consoleErrors.length > 0) problems.push(`console.error: ${result.consoleErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.failedRequests.length > 0) problems.push(`실패한 요청: ${result.failedRequests.slice(0, 3).join(' | ')}`);
+      // 데이터를 못 받아 로딩 상태에서 멈춘 화면(ADR-078). 실패한 요청·콘솔 오류·스크립트 예외를 증거로 함께 본다
+      if (!page.allowLoadingPlaceholder) {
+        const stuck = detectStuckLoading(result.text, {
+          failedRequests: result.failedRequests.length,
+          consoleErrors: result.consoleErrors.length,
+          pageErrors: result.pageErrors.length,
+        });
+        if (stuck) problems.push(stuck);
+      }
       if (page.noHorizontalScroll && result.horizontalOverflowPx > 1) problems.push(`가로로 ${result.horizontalOverflowPx}px 넘칩니다`);
       if (result.loadMs !== undefined) this.#pageLoadMs.set(name, result.loadMs);
       if (page.maxLoadMs !== undefined) {
@@ -422,10 +485,18 @@ export class VerificationGate {
       return;
     }
     const { status, text } = await pageFetcher(url.href, signal);
-    if (status !== page.expectStatus) throw fail(`HTTP ${status} (기대 ${page.expectStatus})`);
+    if (options.probedId !== undefined) {
+      // 추정한 id로 연 동적 경로(ADR-078): id가 실제로 없을 수도 있어 404·500만 실패로 본다
+      if (status === 404 || status >= 500) throw fail(dynamicProbeStatusProblem(options.probedId, status));
+    } else if (status !== page.expectStatus) {
+      throw fail(`HTTP ${status} (기대 ${page.expectStatus})`);
+    }
     if (options.auto) {
       const marker = nextErrorMarker(text, page.expectStatus);
       if (marker) throw fail(`Next.js 오류 화면: '${marker}'`);
+      // HTTP 확인은 자바스크립트를 실행하지 않아 클라이언트 fetch가 실패했는지 확정할 수 없다. 보수적으로 경고만 남긴다(ADR-078)
+      const stuck = detectStuckLoading(stripHtml(text));
+      if (stuck) this.#addWarning(name, `[참고] ${stuck} — HTTP 확인은 자바스크립트를 실행하지 않아 확정할 수 없습니다. 확실히 판정하려면 autoPageChecks.mode: browser를 쓰세요`);
     }
     if (page.expectText && !text.includes(page.expectText)) throw fail(`응답 본문에 '${page.expectText}'가 없습니다`);
     // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
@@ -669,6 +740,21 @@ function missingAllText(values: readonly string[]): string {
 /** expectAnyText 실패 문구. 적은 문구 중 어느 것도 없을 때 */
 function missingAnyText(values: readonly string[]): string {
   return `화면에 ${values.map((value) => `'${value}'`).join(', ')} 중 어느 것도 없습니다`;
+}
+
+/** 추정한 id로 연 동적 경로가 404·500을 돌려줬을 때의 문구(ADR-078). id가 실제로 없을 수도 있다는 것과 고치는 방법을 함께 적는다 */
+function dynamicProbeStatusProblem(probedId: string, status: number | null): string {
+  return `동적 경로를 추정한 id(${probedId})로 열었더니 HTTP ${status}을 돌려줬습니다 — id가 실제로 없을 수 있습니다. autoPageChecks.sampleParams나 sampleIdFrom으로 실제 값을 알려주면 더 정확히 확인합니다`;
+}
+
+/** HTTP 확인 응답 본문(HTML)에서 태그를 걷어내 로딩 문구 판정에 쓸 평문을 만든다. 자바스크립트는 실행하지 않는다 */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
 }
 
 /**

@@ -991,7 +991,7 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
     );
   });
 
-  it('동적 세그먼트는 sampleParams 값으로 채워 열고, 값이 없으면 건너뜀 check로 남긴다', async () => {
+  it('동적 세그먼트는 sampleParams 값으로 채워 열고, id로 보이지 않는 이름은 값이 없으면 건너뜀 check로 남긴다', async () => {
     const target = nextjs(project, { autoPageChecks: auto({ sampleParams: { id: '7' } }) });
     const requested: string[] = [];
     const { gate, workspace } = await setup(target, {
@@ -1001,15 +1001,88 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
       },
     });
     await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
-    await workspace.write('web/app/items/[itemId]/page.tsx', 'export default function Page() { return null; }\n');
+    await workspace.write('web/app/tags/[slug]/page.tsx', 'export default function Page() { return null; }\n');
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
-    // 값이 있는 동적 세그먼트는 채워서 열고, 없는 라우트는 열지 않는다
+    // 값이 있는 동적 세그먼트는 채워서 열고, id로 보이지 않는 이름(slug)은 값이 없으면 열지 않는다
     expect(requested.some((url) => url.endsWith('/orders/7'))).toBe(true);
-    expect(requested.some((url) => url.includes('itemId'))).toBe(false);
-    const skipped = gate.checks.find((check) => check.name === 'web web/app/items/[itemId]/page.tsx (자동, 건너뜀)')!;
+    expect(requested.some((url) => url.includes('slug'))).toBe(false);
+    const skipped = gate.checks.find((check) => check.name === 'web web/app/tags/[slug]/page.tsx (자동, 건너뜀)')!;
     expect(skipped).toMatchObject({ stage: 'browser_check', ok: true });
-    expect(skipped.detail).toContain("동적 세그먼트 'itemId'의 값이 없습니다");
+    expect(skipped.detail).toContain("동적 세그먼트 'slug'의 값이 없습니다");
+  });
+
+  it('id로 보이는 세그먼트는 sampleParams가 없어도(ADR-078) "1"로 채워 열고, 404·500만 실패로 본다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return url.endsWith('/orders/1') ? { status: 404, text: 'Not Found' } : { status: 200, text: '주문 상세' };
+      },
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+
+    expect(requested.some((url) => url.endsWith('/orders/1'))).toBe(true);
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /orders/1 (자동, id 추정)')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('추정한 id(1)로 열었더니 HTTP 404');
+  });
+
+  it('id를 추정해 연 동적 경로는 404·500이 아니면 다른 상태 코드라도 실패로 보지 않는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const { gate, workspace } = await setup(target, { page: async () => ({ status: 403, text: '접근 권한이 없습니다' }) });
+    await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
+
+    // id를 짐작한 것이라 403·401 같은 상태는 실제 버그일 수도, id가 없어서일 수도 있어 관대하게 통과시킨다
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+  });
+
+  it('dynamicRouteProbe: false면 예전처럼 값이 없는 동적 세그먼트를 건너뛴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ dynamicRouteProbe: false }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, { page: async (url) => (requested.push(url), { status: 200, text: '주문 상세' }) });
+    await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested).toEqual([]);
+    const skipped = gate.checks.find((check) => check.name === 'web web/app/orders/[id]/page.tsx (자동, 건너뜀)')!;
+    expect(skipped.detail).toContain("동적 세그먼트 'id'의 값이 없습니다");
+  });
+
+  it('sampleIdFrom을 적으면 그 api에서 꺼낸 값으로 동적 경로를 연다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ sampleIdFrom: { service: 'api', path: '/api/orders', jsonPath: '$[0].id' } }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        if (url.includes('/api/orders')) return { status: 200, text: '[{"id": 42}]' };
+        return { status: 200, text: '주문 상세' };
+      },
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.some((url) => url.endsWith('/orders/42'))).toBe(true);
+  });
+
+  it('sampleIdFrom 조회가 실패하면 기본값 "1"로 물러난다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ sampleIdFrom: { service: 'api', path: '/api/orders', jsonPath: '$[0].id' } }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        if (url.includes('/api/orders')) return { status: 500, text: 'boom' };
+        return { status: 200, text: '주문 상세' };
+      },
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.some((url) => url.endsWith('/orders/1'))).toBe(true);
   });
 
   it('이미 선언한 같은 경로는 두 번 열지 않고 건너뜀 check로 남긴다', async () => {
@@ -1062,6 +1135,76 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
     await failing.workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
     expect(await failing.gate.check()).not.toEqual({ kind: 'pass' });
     expect(failing.gate.checks.find((check) => check.name === 'web /dashboard (자동)')!.detail).toContain("Next.js 오류 화면: 'Unhandled Runtime Error'");
+  });
+
+  it('browser 모드에서 렌더링된 글자가 로딩 문구뿐이면 실패로 본다(E8 haiku의 "Loading..."만 남은 화면, ADR-078)', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser' }) });
+    const stuck = { status: 200, text: 'Loading...', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const { gate, workspace } = await setup(target, { browser: async () => stuck });
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /dashboard (자동)')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('화면이 로딩 문구만 보여 준 채 멈췄습니다');
+  });
+
+  it('browser 모드에서 빈 화면은 실패한 요청 같은 증거가 있을 때만 실패로 본다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser' }) });
+    const emptyWithFailure = {
+      status: 200,
+      text: '',
+      pageErrors: [],
+      consoleErrors: [],
+      failedRequests: ['404 http://127.0.0.1:1/api/orders'],
+      blockedRequests: [],
+      horizontalOverflowPx: 0,
+      steps: [],
+    };
+    const { gate, workspace } = await setup(target, { browser: async () => emptyWithFailure });
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /dashboard (자동)')!;
+    // 실패한 요청도, 빈 화면 사유도 함께 남는다
+    expect(check.detail).toContain('실패한 요청');
+    expect(check.detail).toContain('화면에 표시된 내용이 없습니다');
+  });
+
+  it('allowLoadingPlaceholder를 켜면 로딩 문구만 있는 화면도 통과시킨다(선언한 pageChecks)', async () => {
+    const target = withWorkflow({
+      pageChecks: [
+        {
+          service: 'api',
+          path: '/progress',
+          mode: 'browser',
+          expectStatus: 200,
+          allowConsoleErrors: false,
+          noHorizontalScroll: false,
+          allowLoadingPlaceholder: true,
+        },
+      ],
+    });
+    const stuck = { status: 200, text: '로딩 중입니다...', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const { gate, workspace } = await setup(target, { browser: async () => stuck });
+    await workspace.write('api/src/Progress.java', 'class Progress {}\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+  });
+
+  it('HTTP 모드의 자동 페이지 확인은 로딩 문구로 보이는 본문을 실패시키지 않고 참고 문구로만 남긴다(보수적 판정)', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const { gate, workspace } = await setup(target, { page: async () => ({ status: 200, text: '<html><body><div id="root">Loading...</div></body></html>' }) });
+    await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const check = gate.checks.find((c) => c.name === 'web /dashboard (자동)')!;
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain('[참고]');
+    expect(check.detail).toContain('화면이 로딩 문구만 보여 준 채 멈췄습니다');
   });
 
   it('관리형 서비스에 없는 이름이면 이유를 남기고 넘어간다', async () => {

@@ -370,6 +370,12 @@ export const WorkflowPageCheckSchema = z
     maxLoadMs: z.number().int().positive().optional(),
     /** browser 전용. 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교한다 */
     compare: WorkflowPageCompareSchema.optional(),
+    /**
+     * browser 전용(ADR-078). 기본(생략·false)은 네트워크가 잠잠해진 뒤 렌더링된 글자가 "Loading…"·"로딩 중"·"불러오는 중" 같은
+     * 로딩 문구뿐이거나(스켈레톤이라 글자가 거의 없으면서 콘솔 오류·실패한 요청이 있으면) 실패로 본다.
+     * 의도적으로 로딩 상태를 오래 보여주는 화면(진행률 표시 등)에서만 true로 꺼 둔다
+     */
+    allowLoadingPlaceholder: z.boolean().optional(),
   })
   .superRefine((check, ctx) => {
     if (check.mode === 'browser') return;
@@ -380,13 +386,16 @@ export const WorkflowPageCheckSchema = z
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
     if (check.maxLoadMs !== undefined) ctx.addIssue({ code: 'custom', path: ['maxLoadMs'], message: 'maxLoadMs는 mode: browser에서만 쓸 수 있습니다' });
     if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.allowLoadingPlaceholder !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['allowLoadingPlaceholder'], message: 'allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다' });
+    }
   });
 
 /** 자동 페이지 확인이 한 번에 열어 보는 페이지 수. 기본 5, 상한 10 */
 export const AUTO_PAGE_DEFAULT = 5;
 export const AUTO_PAGE_MAX = 10;
-/** 동적 세그먼트에 넣는 값과 세그먼트 이름. 경로 조각으로 안전한 문자만 받는다 */
-const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
+/** 동적 세그먼트에 넣는 값과 세그먼트 이름. 경로 조각으로 안전한 문자만 받는다. 게이트가 api에서 뽑은 id 값을 같은 규칙으로 검증할 때도 쓴다(export) */
+export const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
 const SAMPLE_PARAM_VALUE = z.string().regex(SAFE_SEGMENT, '경로 조각으로 안전한 문자(영문·숫자·_·-)만 쓸 수 있습니다');
 
 /**
@@ -405,6 +414,14 @@ export const AutoPageChecksSchema = z
     sampleParams: z.record(z.string(), SAMPLE_PARAM_VALUE).optional(),
     /** browser 모드에서만. 자동으로 연 페이지를 확인할 창 크기 */
     viewport: ViewportSchema.optional(),
+    /**
+     * ADR-078. `id`·`orderId`처럼 id로 보이는 동적 세그먼트에 sampleParams 값이 없으면
+     * sampleIdFrom이 돌려준 값이나 '1'로 채워 열어 보고, 404·500만 실패로 본다(그 밖 상태는 id가 존재하지 않을 수 있어 넘어간다).
+     * 생략하면 켠 것과 같다. false로 끄면 예전처럼 값이 없는 세그먼트가 있는 라우트를 건너뛴다
+     */
+    dynamicRouteProbe: z.boolean().optional(),
+    /** dynamicRouteProbe가 켜져 있을 때, 이 api를 불러 jsonPath로 꺼낸 첫 값을 기본값('1') 대신 쓴다(목록 api에서 실제 id를 뽑을 때) */
+    sampleIdFrom: WorkflowPageExpectFromApiSchema.optional(),
   })
   .superRefine((config, ctx) => {
     if (config.viewport && config.mode !== 'browser') {
@@ -413,6 +430,9 @@ export const AutoPageChecksSchema = z
     // record의 키는 zod가 잡지 않아(값만 검사한다) 여기서 세그먼트 이름 규칙을 본다. 경로에 들어갈 수 없는 이름은 미리 막는다
     for (const name of Object.keys(config.sampleParams ?? {})) {
       if (!SAFE_SEGMENT.test(name)) ctx.addIssue({ code: 'custom', path: ['sampleParams', name], message: '세그먼트 이름은 영문·숫자·_·-만 쓸 수 있습니다' });
+    }
+    if (config.sampleIdFrom && config.dynamicRouteProbe === false) {
+      ctx.addIssue({ code: 'custom', path: ['sampleIdFrom'], message: 'sampleIdFrom은 dynamicRouteProbe를 끄면 쓰이지 않습니다' });
     }
   });
 

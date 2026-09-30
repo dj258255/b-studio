@@ -20,6 +20,11 @@ export interface NextRoute {
   path: string;
   /** 그 경로를 만든 바뀐 파일(프로젝트 루트 기준) */
   file: string;
+  /**
+   * sampleParams에 값이 없어 fallbackValue로 채운 세그먼트 이름(ADR-078). 비어 있으면 모두 sampleParams로 채운 것이다.
+   * 값이 있으면 호출자는 이 경로가 "추정한 id"로 열렸다는 뜻으로, 404·500만 실패로 보는 등 관대하게 판정해야 한다
+   */
+  usedFallbackParams?: string[];
 }
 
 export interface SkippedNextRoute {
@@ -40,6 +45,19 @@ const INTERCEPT_SEGMENT = /^\(\.{1,2}\)+/;
 const GROUP_SEGMENT = /^\(.+\)$/;
 /** 단순 동적 세그먼트: [id] */
 const DYNAMIC_SEGMENT = /^\[([^[\]]+)\]$/;
+/** 값이 없는 id류 세그먼트에 기본으로 채우는 값(ADR-078). autoPageChecks.sampleIdFrom이 없거나 실패하면 이 값을 쓴다 */
+export const DEFAULT_DYNAMIC_ROUTE_FALLBACK = '1';
+
+/**
+ * 세그먼트 이름이 id처럼 보이는지(ADR-078). 그런 이름만 fallbackValue로 채운다 — `slug`처럼 '1'이 말이 안 되는 이름은 그대로 건너뛴다.
+ * "grid"처럼 우연히 "id"로 끝나는 이름을 잘못 채우지 않으려고 camelCase 경계(대문자 I)나 구분자(_·-)를 요구한다
+ */
+export function isIdLikeSegment(name: string): boolean {
+  if (/^id$/i.test(name)) return true; // id, ID
+  if (/[a-z0-9]Id$/.test(name)) return true; // orderId, userId (대문자 I가 있어야 한다 — grid는 빠진다)
+  if (/[_-]id$/i.test(name)) return true; // order_id, order-id
+  return false;
+}
 
 type Segment =
   | { kind: 'group' }
@@ -74,7 +92,9 @@ function normalizePath(value: string): string {
 /**
  * 바뀐 파일에서 열어 볼 페이지를 고른다.
  *  - 서비스 폴더(`servicePath`) 밖의 파일은 보지 않는다
- *  - 동적 세그먼트는 `sampleParams`에 값이 있을 때만 채운다(없으면 skipped에 이유와 함께 남긴다)
+ *  - 동적 세그먼트는 `sampleParams`에 값이 있을 때만 채운다. 없고 `fallbackValue`도 없으면 skipped에 이유와 함께 남긴다.
+ *    `fallbackValue`를 주면(ADR-078) `id`처럼 보이는 세그먼트(isIdLikeSegment)만 그 값으로 채우고 `route.usedFallbackParams`에 이름을 남긴다 —
+ *    `slug`처럼 id로 보이지 않는 이름은 fallbackValue가 있어도 그대로 건너뛴다(값을 짐작할 근거가 없다)
  *  - 경로 기준으로 중복을 없애고 정렬한 뒤 `maxPages`까지만 돌려준다(넘은 것은 skipped)
  */
 export function routesFromChangedFiles(
@@ -82,6 +102,7 @@ export function routesFromChangedFiles(
   servicePath: string,
   sampleParams: Readonly<Record<string, string>> = {},
   maxPages: number = AUTO_PAGE_DEFAULT,
+  fallbackValue?: string,
 ): NextRoutes {
   const prefix = normalizePath(servicePath);
   const limit = Math.max(1, Math.min(Math.floor(maxPages), AUTO_PAGE_MAX));
@@ -98,6 +119,7 @@ export function routesFromChangedFiles(
     const folder = (match[1] ?? '').replace(/\/$/, '');
     const segments = folder === '' ? [] : folder.split('/');
     const parts: string[] = [];
+    const usedFallback: string[] = [];
     let reason: string | undefined;
     for (const segment of segments) {
       const classified = classify(segment);
@@ -108,12 +130,17 @@ export function routesFromChangedFiles(
       if (classified.kind === 'group') continue;
       if (classified.kind === 'dynamic') {
         const value = sampleParams[classified.name];
-        if (value === undefined || value === '') {
-          reason = `동적 세그먼트 '${classified.name}'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요`;
-          break;
+        if (value !== undefined && value !== '') {
+          parts.push(encodeURIComponent(value));
+          continue;
         }
-        parts.push(encodeURIComponent(value));
-        continue;
+        if (fallbackValue !== undefined && isIdLikeSegment(classified.name)) {
+          parts.push(encodeURIComponent(fallbackValue));
+          usedFallback.push(classified.name);
+          continue;
+        }
+        reason = `동적 세그먼트 '${classified.name}'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요`;
+        break;
       }
       parts.push(segment);
     }
@@ -122,7 +149,7 @@ export function routesFromChangedFiles(
       continue;
     }
     const path = `/${parts.join('/')}`;
-    if (!routes.has(path)) routes.set(path, { path, file });
+    if (!routes.has(path)) routes.set(path, { path, file, ...(usedFallback.length > 0 ? { usedFallbackParams: usedFallback } : {}) });
   }
 
   const sorted = [...routes.values()].sort((a, b) => a.path.localeCompare(b.path));
