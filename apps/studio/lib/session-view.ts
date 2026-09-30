@@ -38,6 +38,8 @@ export type ChatItem =
       complexity: 'simple' | 'normal' | 'complex';
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+      /** claude-code 자동 모델 선택(ADR-089)이면 true. 화면이 점수표 대신 한 줄 안내를 보여준다 */
+      auto?: boolean;
     }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string; effort?: Effort }
   /** 게이트의 같은 실패 서명이 반복돼 더 비싼 모델로 올렸다 */
@@ -529,6 +531,7 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
           complexity: event.complexity,
           risk: event.risk,
           candidates: event.candidates,
+          ...(event.auto ? { auto: true } : {}),
         },
       ];
 

@@ -280,6 +280,7 @@ export { Workspace, WorkspaceError } from './workspace';
 export {
   aggregateModelStats,
   classifyComplexity,
+  classifyRisk,
   estimateCost,
   estimateTokens,
   routeModel,
@@ -296,6 +297,7 @@ export {
   type RoutingDecision,
 } from './model-router';
 export { createProviderClient, GoogleModelClient, OpenAICompatibleModelClient } from './provider-clients';
+export { CLI_TIERS, higherCliTier, nextCliTier, routeCliTier, tierLabel, type CliRouteDecision, type CliRouteRequest, type CliTier } from './cli-router';
 export {
   appendPlanToRequest,
   buildPlanBriefSystem,

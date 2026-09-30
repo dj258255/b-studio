@@ -36,6 +36,10 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'claude-code', model: ' opus ' })).toEqual({ backend: 'claude-code', model: 'opus' });
   });
 
+  it('claude-code는 자동 모델 선택(--model auto, ADR-089 E10)도 그대로 받는다', () => {
+    expect(resolveBackend({ dry: false, backend: 'claude-code', model: 'auto' })).toEqual({ backend: 'claude-code', model: 'auto' });
+  });
+
   it('codex는 모델을 고정할 수도, 계정 기본 모델을 쓰게 둘 수도 있다', () => {
     expect(resolveBackend({ dry: false, backend: 'codex' })).toEqual({ backend: 'codex' });
     expect(resolveBackend({ dry: false, backend: 'codex', model: ' gpt-5-codex ' })).toEqual({ backend: 'codex', model: 'gpt-5-codex' });

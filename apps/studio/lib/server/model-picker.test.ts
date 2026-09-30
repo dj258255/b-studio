@@ -23,7 +23,10 @@ describe('listSelectableModels', () => {
     const picker = await listSelectableModels('claude-code', 'sonnet');
 
     expect(picker.current).toBe('sonnet');
-    expect(picker.options.map((option) => option.id)).toEqual(['', 'opus', 'sonnet', 'haiku']);
+    expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'opus', 'sonnet', 'haiku']);
+    const auto = picker.options.find((option) => option.id === 'auto');
+    expect(auto?.label).toBe('자동');
+    expect(auto?.hint).toContain('검증에 실패하면 한 단계 올립니다');
     const opus = picker.options.find((option) => option.id === 'opus');
     expect(opus?.resolvedId).toBe('claude-opus-5');
     expect(opus?.price).toEqual({ inputPerMillion: 5, outputPerMillion: 25 });
@@ -101,6 +104,10 @@ describe('isSelectableModel', () => {
   it('목록에 있는 값만 허용한다', async () => {
     expect(await isSelectableModel('claude-code', 'opus')).toEqual({ ok: true });
     expect(await isSelectableModel('claude-code', 'gpt-5')).toEqual({ ok: false });
+  });
+
+  it('자동(auto)도 고를 수 있다', async () => {
+    expect(await isSelectableModel('claude-code', 'auto')).toEqual({ ok: true });
   });
 });
 

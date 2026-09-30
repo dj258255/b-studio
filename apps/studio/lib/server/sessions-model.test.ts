@@ -118,7 +118,7 @@ describe('sessionModelPicker / setSessionModel', () => {
 
     expect(picker.backend).toBe('claude-code');
     expect(picker.current).toBeUndefined();
-    expect(picker.options.map((option) => option.id)).toEqual(['', 'opus', 'sonnet', 'haiku']);
+    expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'opus', 'sonnet', 'haiku']);
     await stopSession(id).catch(() => {});
   });
 

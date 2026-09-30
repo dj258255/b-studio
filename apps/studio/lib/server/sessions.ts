@@ -83,6 +83,13 @@ import {
   runOpenCodeAgent,
   ScriptedModelClient,
   type ScriptedTurn,
+  CLI_TIERS,
+  higherCliTier,
+  nextCliTier,
+  routeCliTier,
+  tierLabel,
+  type CliRouteDecision,
+  type CliTier,
   verifyChanges,
   workflowStages,
   Workspace,
@@ -274,6 +281,8 @@ interface Session {
     sessionId?: string;
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
+    /** claude-code 자동 모델 선택(ADR-089)의 stickiness: 이 세션에서 이미 성공적으로 쓴 가장 높은 단계 */
+    autoTier?: CliTier;
   };
   /**
    * 로컬 ChatGPT Agent(Codex) 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해(설치된 SDK에 fork가 없다)
@@ -1030,7 +1039,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       listeners: live?.listeners ?? entry!.listeners,
       conversation: data.conversation as Conversation,
       demoIndex: data.demoIndex,
-      claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
+      claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes], autoTier: data.claudeCode.autoTier },
       // 이 필드가 생기기 전에 저장한 기록에는 없다
       codex: { notes: [...(data.codex?.notes ?? [])], recent: [...(data.codex?.recent ?? [])] },
       commandCode: { sessionId: data.commandCode?.sessionId, notes: [...(data.commandCode?.notes ?? [])] },
@@ -1539,6 +1548,8 @@ type RunPlan = (
       escalation?: EscalationPolicy;
       /** 계획-실행 분리(ADR-075)로 정한 실행 모델. session.snapshot.modelId(레인이 고른 모델)보다는 아래고, B_STUDIO_CLAUDE_CODE_MODEL보다는 위다 */
       executeModel?: string;
+      /** claude-code 자동 모델 선택(ADR-089). 세션에서 고른 모델이 'auto'일 때만 있다. tier가 실제로 넘길 모델 이름이다 */
+      autoRoute?: CliRouteDecision;
     }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
@@ -1574,6 +1585,15 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   }
   if (kind === 'claude-code') {
     const chosenModel = cliModelOverride(session.snapshot.modelId);
+    // 자동 모델 선택(ADR-089). 대화에서 고르거나(session.snapshot.modelId === 'auto') 서버 기본값(B_STUDIO_CLAUDE_CODE_MODEL=auto)으로 켤 수 있다
+    // — 벤치(apps/studio/bench)가 세션마다 고르는 대신 서버 기본값으로 시작 모델을 넘기므로, 두 경로가 같은 규칙을 따라야 한다.
+    // 질문(intent === 'ask')도 읽기만 하는 요청으로 그대로 분류에 넘긴다(routeCliTier가 haiku로 고른다)
+    const effectiveModel = chosenModel ?? split.execute ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined);
+    if (effectiveModel === 'auto') {
+      const autoRoute = routeCliTier({ prompt: request, intent, stickyTier: session.claudeCode.autoTier });
+      const escalation = claudeCodeAutoEscalation(autoRoute.tier);
+      return { kind: 'claude-code', allowBreaking, intent, autoRoute, ...(escalation ? { escalation } : {}) };
+    }
     const escalation = claudeCodeEscalation(split.plan, process.env, chosenModel);
     return { kind: 'claude-code', allowBreaking, intent, ...(split.execute ? { executeModel: split.execute } : {}), ...(escalation ? { escalation } : {}) };
   }
@@ -1699,6 +1719,29 @@ export function claudeCodeEscalation(
   // 사람이 대화에서 이미 이 모델(별칭)을 실행 모델로 골랐으면, 올려도 같은 모델이라 승격은 아무 효과가 없다(no-op)
   if (skipIfSameAs && to === skipIfSameAs) return undefined;
   return { ...escalationRules(), to };
+}
+
+/**
+ * claude-code 자동 모델 선택(ADR-089)의 승격 대상. 계획 모델이나 환경 변수가 아니라 고른 단계의 바로 위 단계로 올린다
+ * (haiku→sonnet, sonnet→opus). 이미 opus(최고 단계)면 더 올릴 곳이 없어 승격하지 않는다(fable은 자동 후보가 아니다).
+ * 두 승격 러너와 같은 임계치(escalationRules)를 쓴다 — 서명이 반복되는 규칙은 단계 선택 방식과 무관하다.
+ */
+export function claudeCodeAutoEscalation(tier: CliTier): EscalationPolicy | undefined {
+  const to = nextCliTier(tier);
+  if (!to) return undefined;
+  return { ...escalationRules(), to };
+}
+
+/**
+ * 자동 모델 선택(ADR-089)의 stickiness 갱신. 요청이 끝난 뒤 한 번 부른다.
+ * 질문(ask)이거나 검증 게이트를 통과하지 못했으면(done이 아니면) 아무것도 기억하지 않고 지금 값을 그대로 돌려준다
+ * (ADR-047과 같은 원칙 — 질문 완료·실패한 시도는 구현 품질의 증거가 아니다).
+ * 승격이 일어났으면(게이트가 반복 실패해 한 단계 올렸으면) 그 올라간 단계를 기억한다.
+ */
+export function nextAutoTier(current: CliTier | undefined, autoRoute: CliRouteDecision, outcome: { intent: Intent; status: 'done' | 'failed' | 'awaiting_input'; escalated: boolean }): CliTier | undefined {
+  if (outcome.intent !== 'build' || outcome.status !== 'done') return current;
+  const usedTier = outcome.escalated ? (nextCliTier(autoRoute.tier) ?? autoRoute.tier) : autoRoute.tier;
+  return higherCliTier(current, usedTier);
 }
 
 /**
@@ -2031,14 +2074,27 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const preflight = await preflightClaudeCode({ cwd: session.project.root });
     if (!preflight.ok) return { preflightError: preflight.reason };
 
+    // 자동 모델 선택(ADR-089). 대화에 한 줄 안내를 남긴다(같은 'route' 이벤트를 api 라우터(ADR-047)와 공유한다 — auto:true만 다르다)
+    if (plan.autoRoute) {
+      shared.onEvent({
+        type: 'route',
+        selectedId: plan.autoRoute.tier,
+        reason: plan.autoRoute.reason,
+        complexity: plan.autoRoute.complexity,
+        risk: plan.autoRoute.risk,
+        candidates: CLI_TIERS.map((tier) => ({ id: tier, label: tierLabel(tier), eligible: tier === plan.autoRoute!.tier, score: 0 })),
+        auto: true,
+      });
+    }
+
     const { claudeCode } = session;
     const result = await runClaudeCodeAgent({
       ...shared,
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
-      // 세션(레인)에서 고른 모델 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
-      model: cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
+      // 세션(레인)에서 고른 모델 → 자동 선택이 고른 단계 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
+      model: plan.autoRoute ? plan.autoRoute.tier : (cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined)),
       // 세션에서 고른 노력 단계. 없으면 러너 기본값('high')을 그대로 쓴다
       ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
@@ -2050,6 +2106,15 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
     claudeCode.notes = [];
     if (result.sessionId) claudeCode.sessionId = result.sessionId;
+    // 자동 모델 선택의 stickiness(ADR-089). 다음 요청도 이번에 실제로 쓴 단계부터 시작해 모델을 다시 낮췄다
+    // 올리는 캐시 재생성을 피한다(E8/E9). status가 'awaiting_input'(되묻고 멈춤)이면 아직 끝나지 않아 기억하지 않는다
+    if (plan.autoRoute && (result.status === 'done' || result.status === 'failed')) {
+      claudeCode.autoTier = nextAutoTier(claudeCode.autoTier, plan.autoRoute, {
+        intent: plan.intent,
+        status: result.status,
+        escalated: Boolean(result.metrics?.escalatedAt),
+      });
+    }
     return result;
   }
 

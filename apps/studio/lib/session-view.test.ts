@@ -58,6 +58,29 @@ describe('reduceSession', () => {
     expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
   });
 
+  it('claude-code 자동 모델 선택(ADR-089)은 같은 route 이벤트에 auto:true로 남는다', () => {
+    const initial = createView(snapshot);
+    const view = reduceSession(initial, {
+      type: 'agent',
+      runId: 'r1',
+      event: {
+        type: 'route',
+        selectedId: 'sonnet',
+        reason: '단순한 만들기 요청이라 Sonnet 5을 선택합니다',
+        complexity: 'simple',
+        risk: 'normal',
+        candidates: [
+          { id: 'haiku', label: 'Haiku', eligible: false, score: 0 },
+          { id: 'sonnet', label: 'Sonnet 5', eligible: true, score: 0 },
+          { id: 'opus', label: 'Opus', eligible: false, score: 0 },
+        ],
+        auto: true,
+      },
+    });
+
+    expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'sonnet', auto: true });
+  });
+
   it('계획-실행 분리(ADR-075)의 계획을 "계획(모델명)" 접기 블록으로 대화에 남긴다', () => {
     const view = fold([
       { type: 'run_started', runId: 'r1', request: '주문 목록 화면을 만들어줘' },

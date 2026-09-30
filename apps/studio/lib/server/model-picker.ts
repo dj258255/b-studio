@@ -124,6 +124,20 @@ const CLAUDE_CODE_ALIASES: ModelPickerOption[] = [
 ];
 
 /**
+ * claude-code 자동 모델 선택(ADR-089). CLAUDE_CODE_ALIASES와 별도 함수로 둬, SDK의 supportedModels에서 별칭
+ * 목록을 새로 만드는 변경과 합칠 때 이 한 줄만 더하면 되게 한다(model-list-from-sdk 브랜치 참고).
+ * 실제 단계 선택은 cli-router.ts의 routeCliTier가 세션·요청마다 한다 — 여기서는 화면에 옵션 하나만 더한다.
+ */
+function claudeCodeAutoOption(): ModelPickerOption {
+  return {
+    id: 'auto',
+    label: '자동',
+    hint: '요청마다 알맞은 모델을 고르고, 검증에 실패하면 한 단계 올립니다',
+    badges: ['자동'],
+  };
+}
+
+/**
  * 이 세션 백엔드에서 고를 수 있는 모델 목록. current는 세션에 저장된 값을 그대로 돌려준다(화면 표시용).
  * currentEffort는 세션에 저장된 노력 단계(화면 표시용) — 고를 수 있는지는 backend(·api는 현재 modelId)로 따로 판단한다.
  */
@@ -141,7 +155,7 @@ export async function listSelectableModels(backend: SessionMode, current?: strin
     return {
       backend,
       current,
-      options: [{ id: '', label: DEFAULT_LABEL, hint: '로그인한 계정의 기본 모델을 그대로 씁니다' }, ...CLAUDE_CODE_ALIASES],
+      options: [{ id: '', label: DEFAULT_LABEL, hint: '로그인한 계정의 기본 모델을 그대로 씁니다' }, claudeCodeAutoOption(), ...CLAUDE_CODE_ALIASES],
       effort: effortPickerFor(backend, current, currentEffort),
     };
   }
