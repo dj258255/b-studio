@@ -6,11 +6,24 @@ import type { FolderHint } from "@/lib/server/folder-browser";
  * 동작을 그대로 확인할 수 있다 — 화면 쪽은 이 함수들이 돌려준 동작(action)을 실행만 한다.
  */
 
-/** 타이핑한 글자가 이름에 들어간 폴더만 남긴다(대소문자 구분 없이) */
-export function filterFolders<T extends { name: string }>(children: readonly T[], query: string): T[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [...children];
-  return children.filter((child) => child.name.toLowerCase().includes(needle));
+/**
+ * 타이핑한 글자가 이름에 들어간 폴더만 남긴다(대소문자 구분 없이). 숨김 폴더(.로 시작)는 토글이 꺼져 있으면
+ * 걸러 내지만, 찾는 글자 자체가 "."으로 시작하면(예: ".env") 토글과 무관하게 남긴다 — 무엇을 찾는지가 뻔한데
+ * 토글부터 켜야 하면 번거롭다
+ */
+export function filterFolders<T extends { name: string }>(children: readonly T[], query: string, showHidden = false): T[] {
+  const trimmed = query.trim();
+  const needle = trimmed.toLowerCase();
+  const includeHidden = showHidden || trimmed.startsWith(".");
+  const base = includeHidden ? children : children.filter((child) => !child.name.startsWith("."));
+  if (!needle) return [...base];
+  return base.filter((child) => child.name.toLowerCase().includes(needle));
+}
+
+/** 필터 칸에 절대 경로(/로 시작)나 ~ 경로를 쳤는지. 그러면 후보 목록 대신 그 경로로 바로 옮긴다(붙여넣기 대응) */
+export function looksLikePastedPath(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith("/") || trimmed.startsWith("~");
 }
 
 const HINT_LABEL: Record<FolderHint, string> = {

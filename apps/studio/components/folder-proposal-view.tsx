@@ -76,7 +76,7 @@ export function FolderProposalView({
           </ul>
           {proposal.detection.infra.length > 0 && (
             <div>
-              <p className="text-muted">부가 서비스(DB·캐시 등, ADR-073) — 기본으로 띄울 서비스를 고르세요. 앱이 기대지 않는 서비스는 기본으로 껐습니다</p>
+              <p className="text-muted">부가 서비스(DB·캐시 등) — 기본으로 띄울 서비스를 고르세요. 앱이 기대지 않는 서비스는 기본으로 껐습니다</p>
               <ul className="mt-1 space-y-1.5" aria-label="찾거나 제안한 부가 서비스">
                 {proposal.detection.infra.map((service) => (
                   <li key={service.name}>
