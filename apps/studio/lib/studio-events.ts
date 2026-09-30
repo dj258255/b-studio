@@ -114,6 +114,10 @@ export interface SessionSnapshot {
   bootNetwork?: BootNetwork;
   /** 프로젝트 폴더의 파일이 바뀔 때마다 늘어난다. 서비스 안에서 명령이 만든 파일도 코드 화면이 다시 불러오는 기준이다 */
   fileRevision?: number;
+  /** "테스트" 탭(ADR-084). 테스트를 실행하거나 게이트가 새 결과를 모을 때마다 늘어난다. 탭이 이 값을 보고 다시 불러온다 */
+  testsRevision?: number;
+  /** 지금 테스트를 실행 중인 서비스 이름. 다른 브라우저 탭에서도 "실행 중"을 보여 준다 */
+  testsRunning?: string[];
   /** 이 세션에서 시작한 운영 배포나 되돌리기가 진행 중이다. lines는 최근 진행 줄 */
   deploying?: DeployingView;
   /** PR 자동 리뷰 라운드(ADR-074) 진행 상태. PR을 아직 만들지 않았거나 리뷰를 한 번도 돌리지 않았으면 없다 */
@@ -273,6 +277,8 @@ export type StudioEvent =
   | { type: 'usage'; at: string; services: ServiceUsage[] }
   /** 파일 변경을 모아 알린다. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'files_changed'; revision: number }
+  /** "테스트" 탭(ADR-084)이 다시 불러올 때가 됐다는 신호. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
+  | { type: 'tests_changed'; revision: number; running: string[] }
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
   | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask'; /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */ at?: string }
   /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. 화면은 "계획(모델명)" 접기 블록으로 보여준다 */

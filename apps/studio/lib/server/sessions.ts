@@ -8,24 +8,32 @@ import path from 'node:path';
 import { z } from 'zod';
 import {
   appendPlanToRequest,
+  attachResults,
+  buildAddTestPrefill,
   buildAllMustHavesPrefill,
+  buildFixTestPrefill,
   buildPullRequest,
   buildRequirementWorkPrefill,
+  buildTestRunPlan,
   canCreatePullRequest,
   captureBaselines,
   CheckpointError,
   CheckpointStore,
   compareUrl,
   computeRequirementStatus,
+  countByStatus,
   createPullRequest,
   generateCommitSubject,
   DatabaseBranches,
   describeDatabaseState,
+  detectRunner,
+  discoverTestsInFile,
   estimateCost,
   extractRequirementsHeuristically,
   fetchIssue,
   findCheckpointMentions,
   findGateCheckMentions,
+  flattenDiscoveredFile,
   formatVerificationReport,
   formatVerifyTrailer,
   formatWorkflowTrailer,
@@ -33,6 +41,8 @@ import {
   listIssues,
   MAX_REQUIREMENTS,
   ORDERS_DEMO_SCENARIOS,
+  parseJestLikeJson,
+  parseJUnitXml,
   parsePullRequestNumber,
   parseRemote,
   parseRequirementsMarkdown,
@@ -43,9 +53,11 @@ import {
   REQUIREMENTS_FILE,
   RequirementSchema,
   requirementConfidence,
+  runnerLabel,
   scanTestFilesForRequirementId,
   serializeRequirementsMarkdown,
   shouldPlanBrief,
+  splitCollectedReports,
   summarizeCoverage,
   preflightClaudeCode,
   preflightCodex,
@@ -90,11 +102,16 @@ import {
   type RepositoryInfo,
   type RoutingDecision,
   type RunMetrics,
+  type ParsedTestRun,
   type RemoteSyncResult,
+  type Runner,
   type ScannedFile,
   type ServiceCheck,
   type VerificationReport,
   type SelfCheckMode,
+  type TestFramework,
+  type TestRow,
+  type TestTarget,
   type VerifyMode,
   type WorkflowCheck,
 } from '@b-studio/agent';
@@ -158,6 +175,7 @@ import { resolveRepositoryToken } from './repo-token';
 import { runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
+import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from './test-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -299,6 +317,23 @@ interface Session {
    * 실행(질문·되돌림)에서는 갱신하지 않는다 — "최근 체크포인트"의 결과여야 하기 때문이다
    */
   lastGateChecks?: WorkflowCheck[];
+  /**
+   * "테스트" 탭(ADR-084)이 서비스마다 저장해 둔 마지막 실행 결과. 사람이 직접 돌렸거나(run) 검증 게이트의
+   * test 단계가 남긴 보고서를 다시 실행하지 않고 모았을 때(gate) 채운다. 서버를 다시 시작하면 사라진다(체크포인트처럼 영속하지 않는다)
+   */
+  testResults?: Map<string, StoredTestRun>;
+  /** 서비스별로 지금 도는 테스트를 취소할 수 있게 든 컨트롤러. 서비스 하나당 한 번에 하나만 돈다 */
+  testControllers?: Map<string, AbortController>;
+}
+
+/** 서비스 하나의 마지막 테스트 실행 결과 */
+interface StoredTestRun {
+  at: string;
+  source: 'run' | 'gate';
+  runner?: Runner;
+  run: ParsedTestRun;
+  /** 실행기 자체가 실패했을 때(컴파일 오류 등 보고서를 하나도 남기지 못한 경우)의 원인 요약 */
+  error?: string;
 }
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
@@ -1639,6 +1674,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
         if (result.checks) session.lastGateChecks = result.checks;
+        // 게이트가 test 단계를 돌렸다면 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
+        void collectGateTestReports(session).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
         await revertRun(session, run.id);
       }
@@ -3150,6 +3187,309 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
   return getSessionRequirements(id);
 }
 
+// ---------------------------------------------------------------------------
+// "테스트" 탭(ADR-084): 백엔드·프론트 테스트 케이스를 한 줄씩 보여 주고 돌린다.
+// ---------------------------------------------------------------------------
+
+/** 한 번에 도는 테스트 실행의 상한. 게이트의 TEST_TIMEOUT_MS와 같은 값(느린 Gradle 첫 실행도 버틴다) */
+const TEST_RUN_TIMEOUT_MS = 10 * 60_000;
+/** 보고서를 모아오는 cat/find 명령은 테스트 자체보다 훨씬 짧게 끝나야 한다 */
+const REPORT_COLLECT_TIMEOUT_MS = 30_000;
+const GATE_REPORT_COLLECT_TIMEOUT_MS = 15_000;
+/** 실행기가 보고서를 하나도 남기지 못했을 때(컴파일 오류 등) 사람에게 보여 줄 출력 꼬리 줄 수 */
+const RUN_FAILURE_TAIL_LINES = 30;
+
+type ManagedSpec = LoadedProject['managed'][number][1];
+
+/** test-discovery.ts의 결과에 framework를 함께 붙인 행. attachResults는 구조적으로 호환되는 TestRow만 보고 돌려주므로, 돌아온 값도 이 모양 그대로다(as로 되돌린다) */
+interface ServiceTestRow extends TestRow {
+  framework: TestFramework;
+}
+
+export interface TestRowView {
+  file: string;
+  framework: TestFramework;
+  suitePath: string[];
+  name: string;
+  displayName: string;
+  line: number;
+  skipped: boolean;
+  requirementIds: string[];
+  status: 'pass' | 'fail' | 'skip' | 'not-run';
+  durationMs?: number;
+  failureMessage?: string;
+  stack?: string[];
+  /** 실패한 테스트에서만 있다. "이 테스트 고쳐 줘" 버튼이 그대로 채운다 */
+  fixPrefill?: string;
+}
+
+export interface TestServiceView {
+  service: string;
+  template: string;
+  /** 지금 이 서비스에서 테스트가 도는 중인지 */
+  running: boolean;
+  /** 테스트 실행기를 알아냈는지(false면 실행 버튼을 숨기고 이유를 error에 남긴다) */
+  supported: boolean;
+  /** 사람이 읽는 실행기 이름(예: "Gradle (JUnit)") */
+  runner?: string;
+  counts: { pass: number; fail: number; skip: number; notRun: number };
+  lastRunAt?: string;
+  lastRunSource?: 'run' | 'gate';
+  error?: string;
+  rows: TestRowView[];
+}
+
+export interface RequirementWithoutTest {
+  id: string;
+  title: string;
+  /** "테스트 추가" 버튼이 채우는 글 */
+  prefill: string;
+}
+
+export interface TestsSnapshot {
+  services: TestServiceView[];
+  requirementsWithoutTests: RequirementWithoutTest[];
+}
+
+/** 서비스 폴더 안에서 테스트 파일을 찾아 케이스를 뽑는다. 파일 IO만 하고 판정은 하지 않는다(순수 함수는 test-discovery.ts에 있다) */
+async function discoverServiceTestRows(session: Session, spec: ManagedSpec): Promise<ServiceTestRow[]> {
+  const files = await walkServiceTestFiles(session.project.root, spec.path);
+  const rows: ServiceTestRow[] = [];
+  for (const file of files) {
+    const discovered = discoverTestsInFile(file.path, file.content);
+    if (!discovered) continue;
+    for (const row of flattenDiscoveredFile(discovered)) rows.push({ ...row, framework: discovered.framework });
+  }
+  return rows;
+}
+
+/** 서비스 폴더의 힌트(템플릿, package.json, pom.xml)로 테스트 실행기를 고른다 */
+async function detectServiceRunner(session: Session, spec: ManagedSpec): Promise<Runner | undefined> {
+  const [packageJson, hasPomXml] = await Promise.all([
+    readServicePackageJson(session.project.root, spec.path),
+    serviceHasPomXml(session.project.root, spec.path),
+  ]);
+  return detectRunner({ template: spec.template, hasPomXml, packageJson });
+}
+
+function testRowStatus(row: ServiceTestRow): TestRowView['status'] {
+  return row.result?.status ?? 'not-run';
+}
+
+function toTestRowView(row: ServiceTestRow): TestRowView {
+  const status = testRowStatus(row);
+  return {
+    file: row.file,
+    framework: row.framework,
+    suitePath: row.suitePath,
+    name: row.name,
+    displayName: row.displayName,
+    line: row.line,
+    skipped: row.skipped || row.suiteSkipped,
+    requirementIds: row.requirementIds,
+    status,
+    ...(row.result?.durationMs !== undefined ? { durationMs: row.result.durationMs } : {}),
+    ...(row.result?.failureMessage ? { failureMessage: row.result.failureMessage } : {}),
+    ...(row.result?.stack ? { stack: row.result.stack } : {}),
+    ...(status === 'fail' ? { fixPrefill: buildFixTestPrefill(row) } : {}),
+  };
+}
+
+async function buildTestServiceView(session: Session, serviceName: string): Promise<TestServiceView> {
+  const entry = session.project.managed.find(([name]) => name === serviceName);
+  const template = entry?.[1].template ?? '';
+  const running = session.testControllers?.has(serviceName) ?? false;
+  const serviceState = session.snapshot.services.find((candidate) => candidate.name === serviceName);
+  if (!entry || serviceState?.state !== 'ready') {
+    return {
+      service: serviceName,
+      template,
+      running,
+      supported: false,
+      counts: { pass: 0, fail: 0, skip: 0, notRun: 0 },
+      rows: [],
+      error: '서비스가 꺼져 있습니다',
+    };
+  }
+
+  const [rawRows, runner] = await Promise.all([discoverServiceTestRows(session, entry[1]), detectServiceRunner(session, entry[1])]);
+  const stored = session.testResults?.get(serviceName);
+  // attachResults는 TestRow[]를 돌려주지만 spread로 원래 값(framework 포함)을 그대로 옮기므로 형태를 되돌려도 안전하다
+  const attached = (stored ? attachResults(rawRows, stored.run) : rawRows) as ServiceTestRow[];
+  return {
+    service: serviceName,
+    template,
+    running,
+    supported: runner !== undefined,
+    ...(runner ? { runner: runnerLabel(runner) } : {}),
+    counts: countByStatus(attached),
+    ...(stored ? { lastRunAt: stored.at, lastRunSource: stored.source } : {}),
+    ...(!runner ? { error: '이 서비스의 테스트 실행기를 알아내지 못했습니다(vitest·jest devDependency나 pom.xml/build.gradle을 확인하세요)' } : stored?.error ? { error: stored.error } : {}),
+    rows: attached.map(toTestRowView),
+  };
+}
+
+/** docs/requirements.md에는 있지만 어느 서비스 테스트 이름에도 id가 나타나지 않는 요구사항 */
+async function requirementsWithoutTests(session: Session, services: readonly TestServiceView[]): Promise<RequirementWithoutTest[]> {
+  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  if (!raw) return [];
+  const { requirements } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return [];
+  const covered = new Set<string>();
+  for (const service of services) for (const row of service.rows) for (const id of row.requirementIds) covered.add(id);
+  return requirements
+    .filter((requirement) => !covered.has(requirement.id))
+    .map((requirement) => ({ id: requirement.id, title: requirement.title, prefill: buildAddTestPrefill(requirement.id, requirement.title) }));
+}
+
+/** "테스트" 탭이 연다: 서비스마다 테스트를 찾고 마지막으로 저장해 둔 결과를 이어 붙인다 */
+export async function getSessionTests(id: string): Promise<TestsSnapshot> {
+  const session = requireSession(id);
+  const services = await Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name)));
+  return { services, requirementsWithoutTests: await requirementsWithoutTests(session, services) };
+}
+
+function markTestsChanged(session: Session): void {
+  const revision = (session.snapshot.testsRevision ?? 0) + 1;
+  const running = session.testControllers ? [...session.testControllers.keys()] : [];
+  session.snapshot.testsRevision = revision;
+  session.snapshot.testsRunning = running;
+  emit(session, { type: 'tests_changed', revision, running });
+}
+
+function testFilePathBase(filePath: string): string {
+  const segment = filePath.split('/').pop() ?? filePath;
+  return segment.replace(/\.[^.]+$/, '');
+}
+
+/**
+ * 화면이 보낸 "무엇을 좁혀 돌릴지"(파일·스위트 경로·테스트 이름)를 실행기별 대상으로 바꾼다.
+ * JVM(Gradle/Maven)은 파일 경로를 받지 않으므로 파일 이름에서 클래스 이름을 되짚고, 중첩 스위트(@Nested)는
+ * 파일의 대표 클래스 뒤에 `$`로 붙인다. pytest는 마지막 스위트(class Test*)만 본다(중첩 클래스를 쓰지 않는 관례라서다)
+ */
+function toTestTarget(runner: Runner, input: { file?: string; suitePath?: string[]; testName?: string }): TestTarget | undefined {
+  if (!input.file && !input.testName) return undefined;
+  if (runner === 'gradle' || runner === 'maven') {
+    if (!input.file) return input.testName ? { testName: input.testName } : undefined;
+    const nested = (input.suitePath ?? []).slice(1);
+    const className = nested.length > 0 ? [testFilePathBase(input.file), ...nested].join('$') : testFilePathBase(input.file);
+    return { className, ...(input.testName ? { testName: input.testName } : {}) };
+  }
+  if (runner === 'pytest') {
+    return {
+      ...(input.file ? { file: input.file } : {}),
+      ...(input.suitePath && input.suitePath.length > 0 ? { className: input.suitePath[input.suitePath.length - 1] } : {}),
+      ...(input.testName ? { testName: input.testName } : {}),
+    };
+  }
+  return { ...(input.file ? { file: input.file } : {}), ...(input.testName ? { testName: input.testName } : {}) };
+}
+
+/** 컨테이너 안에서 명령을 돌려 보고서 글자를 모으고 파싱한다. 실패해도(취소 포함) 던지지 않고 결과만 돌려준다 */
+async function collectParsedRun(
+  session: Session,
+  serviceName: string,
+  plan: ReturnType<typeof buildTestRunPlan>,
+  signal: AbortSignal,
+): Promise<ParsedTestRun> {
+  const collected = await session.sandbox.exec(serviceName, plan.collect, { signal }).catch(() => undefined);
+  if (!collected) return { cases: [] };
+  const reportText = splitCollectedReports(collected.stdout)
+    .map((part) => part.content)
+    .join('\n\n');
+  if (!reportText.trim()) return { cases: [] };
+  return plan.format === 'junit-xml' ? parseJUnitXml(reportText) : parseJestLikeJson(reportText);
+}
+
+/**
+ * 서비스 하나의 테스트를 돌린다(서비스당 한 번에 하나만). 좁힐 대상이 없으면 서비스의 테스트 전체를 돌린다.
+ * 실행기 자체가 실패해도(컴파일 오류 등) 예외를 던지지 않고 결과에 원인을 담아 돌려준다 — 사람이 "테스트" 탭에서 바로 보게 하려는 것이다.
+ * 취소하면(cancelSessionTests) 저장된 결과를 건드리지 않고 그대로 돌아온다.
+ */
+export async function runSessionTests(
+  id: string,
+  input: { service: string; file?: string; suitePath?: string[]; testName?: string },
+): Promise<TestsSnapshot> {
+  const session = requireSession(id);
+  const entry = session.project.managed.find(([name]) => name === input.service);
+  if (!entry) throw new StudioError(404, `${input.service} 서비스가 없습니다`);
+  const serviceState = session.snapshot.services.find((candidate) => candidate.name === input.service);
+  if (serviceState?.state !== 'ready') throw new StudioError(409, '서비스가 꺼져 있습니다');
+
+  session.testControllers ??= new Map();
+  if (session.testControllers.has(input.service)) throw new StudioError(409, '이미 테스트를 실행하는 중입니다');
+
+  const runner = await detectServiceRunner(session, entry[1]);
+  if (!runner) throw new StudioError(400, `${input.service} 서비스의 테스트 실행기를 알아내지 못했습니다`);
+
+  const plan = buildTestRunPlan(runner, toTestTarget(runner, input));
+  const controller = new AbortController();
+  session.testControllers.set(input.service, controller);
+  markTestsChanged(session);
+  try {
+    const runSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(TEST_RUN_TIMEOUT_MS)]);
+    let execResult: Awaited<ReturnType<Sandbox['exec']>> | undefined;
+    try {
+      execResult = await session.sandbox.exec(input.service, plan.command, { signal: runSignal });
+    } catch (error) {
+      if (controller.signal.aborted) return getSessionTests(id); // 취소됐다 — 저장된 결과는 그대로 둔다
+      throw error;
+    }
+
+    const run = await collectParsedRun(session, input.service, plan, AbortSignal.timeout(REPORT_COLLECT_TIMEOUT_MS));
+    session.testResults ??= new Map();
+    if (run.cases.length > 0) {
+      session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run });
+    } else {
+      const tail = `${execResult.stdout}\n${execResult.stderr}`.trim().split('\n').slice(-RUN_FAILURE_TAIL_LINES).join('\n');
+      session.testResults.set(input.service, {
+        at: new Date().toISOString(),
+        source: 'run',
+        runner,
+        run: { cases: [] },
+        ...(execResult.exitCode !== 0
+          ? { error: session.sandbox.redact(`테스트 실행이 실패했습니다(종료 코드 ${execResult.exitCode})\n${tail}`) }
+          : {}),
+      });
+    }
+  } finally {
+    session.testControllers.delete(input.service);
+    markTestsChanged(session);
+  }
+  return getSessionTests(id);
+}
+
+/** 도는 중인 테스트를 취소한다. 실행 중이 아니면 404 */
+export function cancelSessionTests(id: string, service: string): void {
+  const session = requireSession(id);
+  const controller = session.testControllers?.get(service);
+  if (!controller) throw new StudioError(404, '실행 중인 테스트가 없습니다');
+  controller.abort();
+}
+
+/**
+ * 검증 게이트가 test 단계를 돌린 뒤(runAgent 결과에 checks가 있을 때) 다시 실행하지 않고 같은 보고서 파일을 모아 본다.
+ * 사람이 지금 그 서비스의 테스트를 돌리고 있으면 건드리지 않는다. 무엇을 모으든 실패해도 요청 결과에 영향이 없다(최선만 한다)
+ */
+async function collectGateTestReports(session: Session): Promise<void> {
+  if (session.snapshot.status !== 'ready') return;
+  let changed = false;
+  for (const [name, spec] of session.project.managed) {
+    if (session.testControllers?.has(name)) continue;
+    const serviceState = session.snapshot.services.find((candidate) => candidate.name === name);
+    if (serviceState?.state !== 'ready') continue;
+    const runner = await detectServiceRunner(session, spec);
+    if (!runner) continue;
+    const plan = buildTestRunPlan(runner);
+    const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
+    if (run.cases.length === 0) continue;
+    session.testResults ??= new Map();
+    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run });
+    changed = true;
+  }
+  if (changed) markTestsChanged(session);
+}
+
 function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
   const service = session.snapshot.services.find((candidate) => candidate.name === event.service);
   if (!service) return;
@@ -3281,7 +3621,7 @@ function followLogs(session: Session, tail: number): void {
 
 function emit(session: Session, event: StudioEvent): void {
   // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient = event.type === 'usage' || event.type === 'files_changed' || event.type === 'deploy_log';
+  const transient = event.type === 'usage' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log';
   if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);

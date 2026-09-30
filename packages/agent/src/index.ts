@@ -373,3 +373,48 @@ export {
 } from './requirements';
 export { loadProjectGuide, type ProjectGuide } from './project-guide';
 export { projectGuideSection } from './prompts';
+export {
+  discoverJsFile,
+  discoverJunitFile,
+  discoverPytestFile,
+  discoverTestsInFile,
+  detectJsFramework,
+  extractRequirementIds,
+  flattenDiscoveredFile,
+  isTestFilePath,
+  JS_TEST_FILE_PATTERN,
+  JUNIT_FILE_PATTERN,
+  PYTEST_FILE_PATTERN,
+  type DiscoveredFile,
+  type DiscoveredSuite,
+  type DiscoveredTestCase,
+  type FlatDiscoveredTest,
+  type TestFramework,
+} from './test-discovery';
+export {
+  attachResults,
+  buildAddTestPrefill,
+  buildFixTestPrefill,
+  countByStatus,
+  parseJestLikeJson,
+  parseJUnitXml,
+  type ParsedTestCase,
+  type ParsedTestRun,
+  type TestCaseResult,
+  type TestCounts,
+  type TestRow,
+  type TestStatus,
+} from './test-results';
+export {
+  buildTestRunPlan,
+  detectRunner,
+  JEST_LIKE_REPORT_PATH,
+  PYTEST_REPORT_PATH,
+  runnerLabel,
+  splitCollectedReports,
+  type DetectRunnerInput,
+  type PackageJsonInfo,
+  type Runner,
+  type TestRunPlan,
+  type TestTarget,
+} from './test-run';

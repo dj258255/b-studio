@@ -1,0 +1,107 @@
+import { describe, expect, it } from 'vitest';
+import { buildTestRunPlan, detectRunner, JEST_LIKE_REPORT_PATH, PYTEST_REPORT_PATH, splitCollectedReports } from './test-run';
+
+describe('buildTestRunPlan', () => {
+  it('gradle: 전체 실행', () => {
+    const plan = buildTestRunPlan('gradle');
+    expect(plan.command).toEqual(['./gradlew', 'test', '--no-daemon', '--console=plain']);
+    expect(plan.format).toBe('junit-xml');
+    expect(plan.collect[0]).toBe('sh');
+  });
+
+  it('gradle: 클래스 하나로 좁히기', () => {
+    const plan = buildTestRunPlan('gradle', { className: 'com.example.OrderServiceTest' });
+    expect(plan.command).toEqual(['./gradlew', 'test', '--no-daemon', '--console=plain', '--tests', 'com.example.OrderServiceTest']);
+  });
+
+  it('gradle: 테스트 하나로 좁히기(클래스+메서드)', () => {
+    const plan = buildTestRunPlan('gradle', { className: 'com.example.OrderServiceTest', testName: 'createOrderReducesStock' });
+    expect(plan.command).toEqual(['./gradlew', 'test', '--no-daemon', '--console=plain', '--tests', 'com.example.OrderServiceTest.createOrderReducesStock']);
+  });
+
+  it('maven: 클래스+메서드로 좁히기', () => {
+    const plan = buildTestRunPlan('maven', { className: 'OrderServiceTest', testName: 'createOrderReducesStock' });
+    expect(plan.command).toEqual(['mvn', '-q', 'test', '-Dtest=OrderServiceTest#createOrderReducesStock']);
+  });
+
+  it('vitest: 파일+테스트 이름으로 좁히기', () => {
+    const plan = buildTestRunPlan('vitest', { file: 'src/order.test.ts', testName: 'creates an order' });
+    expect(plan.command).toEqual(['npx', 'vitest', 'run', '--reporter=json', `--outputFile=${JEST_LIKE_REPORT_PATH}`, 'src/order.test.ts', '-t', 'creates an order']);
+    expect(plan.collect).toEqual(['cat', JEST_LIKE_REPORT_PATH]);
+    expect(plan.format).toBe('jest-json');
+  });
+
+  it('jest: 파일만으로 좁히기', () => {
+    const plan = buildTestRunPlan('jest', { file: 'src/order.test.ts' });
+    expect(plan.command).toEqual(['npx', 'jest', '--json', `--outputFile=${JEST_LIKE_REPORT_PATH}`, 'src/order.test.ts']);
+  });
+
+  it('pytest: 노드 id로 좁히기(파일::클래스::테스트)', () => {
+    const plan = buildTestRunPlan('pytest', { file: 'tests/test_orders.py', className: 'TestOrders', testName: 'test_creates_order' });
+    expect(plan.command).toEqual(['pytest', `--junitxml=${PYTEST_REPORT_PATH}`, 'tests/test_orders.py::TestOrders::test_creates_order']);
+  });
+
+  it('pytest: 파일만으로 좁히기', () => {
+    const plan = buildTestRunPlan('pytest', { file: 'tests/test_orders.py' });
+    expect(plan.command).toEqual(['pytest', `--junitxml=${PYTEST_REPORT_PATH}`, 'tests/test_orders.py']);
+  });
+
+  it('pytest: 전체 실행에는 파일 인자를 붙이지 않는다', () => {
+    const plan = buildTestRunPlan('pytest');
+    expect(plan.command).toEqual(['pytest', `--junitxml=${PYTEST_REPORT_PATH}`]);
+  });
+});
+
+describe('splitCollectedReports', () => {
+  it('경계 표지가 없으면 단일 보고서로 본다(cat 결과)', () => {
+    const parts = splitCollectedReports('{"testResults":[]}');
+    expect(parts).toEqual([{ file: 'report', content: '{"testResults":[]}' }]);
+  });
+
+  it('빈 출력은 빈 배열', () => {
+    expect(splitCollectedReports('')).toEqual([]);
+    expect(splitCollectedReports('   \n')).toEqual([]);
+  });
+
+  it('경계 표지로 나눈 여러 보고서 파일을 나눈다(find+cat 결과)', () => {
+    const stdout = [
+      '@@@b-studio-test-report@@@build/test-results/test/OrderServiceTest.xml',
+      '<testsuite>A</testsuite>',
+      '',
+      '@@@b-studio-test-report@@@build/test-results/test/GreetingTest.xml',
+      '<testsuite>B</testsuite>',
+      '',
+    ].join('\n');
+    const parts = splitCollectedReports(stdout);
+    expect(parts).toEqual([
+      { file: 'build/test-results/test/OrderServiceTest.xml', content: '<testsuite>A</testsuite>' },
+      { file: 'build/test-results/test/GreetingTest.xml', content: '<testsuite>B</testsuite>' },
+    ]);
+  });
+});
+
+describe('detectRunner', () => {
+  it('spring-boot 템플릿은 gradle(기본) 또는 maven(pom.xml이 있으면)', () => {
+    expect(detectRunner({ template: 'spring-boot' })).toBe('gradle');
+    expect(detectRunner({ template: 'spring-boot', hasPomXml: true })).toBe('maven');
+  });
+
+  it('fastapi 템플릿은 pytest', () => {
+    expect(detectRunner({ template: 'fastapi' })).toBe('pytest');
+  });
+
+  it('nextjs/vite 템플릿은 package.json의 devDependencies로 vitest/jest를 가른다', () => {
+    expect(detectRunner({ template: 'nextjs', packageJson: { devDependencies: { vitest: '^2.0.0' } } })).toBe('vitest');
+    expect(detectRunner({ template: 'vite', packageJson: { devDependencies: { jest: '^29.0.0' } } })).toBe('jest');
+  });
+
+  it('devDependencies가 없으면 test 스크립트 글자로 가른다', () => {
+    expect(detectRunner({ template: 'nextjs', packageJson: { scripts: { test: 'vitest run' } } })).toBe('vitest');
+    expect(detectRunner({ template: 'nextjs', packageJson: { scripts: { test: 'jest --ci' } } })).toBe('jest');
+  });
+
+  it('아무 단서도 없으면 undefined', () => {
+    expect(detectRunner({ template: 'nextjs' })).toBeUndefined();
+    expect(detectRunner({ template: 'unknown-template' })).toBeUndefined();
+  });
+});
