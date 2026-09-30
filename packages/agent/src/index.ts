@@ -129,6 +129,7 @@ export {
   type ServiceCheck,
   type VerificationReport,
 } from './verify';
+export { classifyCommit, generateCommitSubject, type CommitType } from './commit-message';
 export {
   CheckpointError,
   CheckpointStore,
