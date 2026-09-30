@@ -416,6 +416,19 @@ models:
 
 절 자체를 생략하거나 두 필드를 모두 비우면 환경 변수(`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 보고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 합니다. 이 절이 있으면 환경 변수보다 우선합니다. 자세한 동작은 [운영 문서](operations.md)의 "계획-실행 분리"를 보세요.
 
+## 체크포인트 커밋 제목 (ADR-080)
+
+```yaml
+checkpoints:
+  conventionalCommits: false
+```
+
+| 필드 | 설명 |
+|---|---|
+| `checkpoints.conventionalCommits` | 기본 `true`. 체크포인트 커밋 제목을 요청 글과 바뀐 파일에서 conventional commit 형식(`feat`/`fix`/`test`/`docs`/`refactor`/`chore` 접두어 + 72자 이내 한국어 요약)으로 만듭니다. `false`로 끄면 예전처럼 `요청: <요청 글>` 형식을 그대로 씁니다 |
+
+사내 저장소가 이미 다른 커밋 메시지 규칙을 강제한다면 꺼서 기존 형식을 유지할 수 있습니다. "제출 준비" 탭(개발 화면)이 이 제목 규칙을 포함해 커밋 기록·요구사항·테스트·README·시드·비밀 값을 점검합니다.
+
 ## 모노레포
 
 ```yaml

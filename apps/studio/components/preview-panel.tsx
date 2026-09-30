@@ -16,6 +16,7 @@ import { RepositoryPanel } from "./repository-panel";
 import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { SubmissionPanel } from "./submission-panel";
 import { TokenView } from "./token-view";
 
 type Tab = { id: string; label: string; service?: ServiceView; external?: ExternalApiView };
@@ -29,6 +30,7 @@ const DESIGN_TAB = "design";
 const TOKENS_TAB = "tokens";
 const REPOSITORY_TAB = "repository";
 const REQUIREMENTS_TAB = "requirements";
+const SUBMISSION_TAB = "submission";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
@@ -44,6 +46,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     { id: LOGS_TAB, label: "로그" },
     { id: RESOURCES_TAB, label: "리소스" },
     { id: REPOSITORY_TAB, label: "저장소" },
+    { id: SUBMISSION_TAB, label: "제출 준비" },
     { id: TOKENS_TAB, label: "토큰" },
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
@@ -84,6 +87,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <RepositoryPanel view={view} />
         ) : active.id === REQUIREMENTS_TAB ? (
           <RequirementsPanel view={view} />
+        ) : active.id === SUBMISSION_TAB ? (
+          <SubmissionPanel view={view} />
         ) : active.id === TOKENS_TAB ? (
           <TokenView view={view} />
         ) : active.external ? (
