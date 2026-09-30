@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel, ModelPicker, ModelPickerDialog, popoverPositionFor } from "./chat-panel";
+import { ChatPanel, handoffModelInput, ModelPicker, ModelPickerDialog, popoverPositionFor } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -231,5 +231,31 @@ describe("popoverPositionFor(모델 선택 팝오버를 여는 자리)", () => {
 
   it("왼쪽 가장자리 밖으로도 나가지 않는다", () => {
     expect(popoverPositionFor({ top: 20, bottom: 44, left: -30 }, viewport)).toEqual({ top: 52, left: 8 });
+  });
+});
+
+describe("handoffModelInput(나눠서 병렬이 이어받을 세션 모델)", () => {
+  const claudeCode: ModelPickerView = {
+    backend: "claude-code",
+    current: "sonnet",
+    options: [{ id: "", label: "기본" }, { id: "sonnet", label: "Sonnet 5" }],
+    effort: { supported: true, current: "medium", levels: [{ id: "medium", label: "보통", hint: "균형" }] },
+  };
+
+  it("고른 모델·노력 단계를 그대로 돌려준다(사용자가 대화에서 Sonnet·보통을 골랐을 때)", () => {
+    expect(handoffModelInput(claudeCode)).toEqual({ sessionModelId: "sonnet", sessionEffort: "medium" });
+  });
+
+  it("모델을 아직 안 골랐으면(current 없음) 빈 문자열을 넘긴다 — '기본'도 명시적인 값이다", () => {
+    expect(handoffModelInput({ ...claudeCode, current: undefined }).sessionModelId).toBe("");
+  });
+
+  it("이 백엔드가 노력 단계를 지원하지 않으면 sessionEffort를 넣지 않는다", () => {
+    const noEffort: ModelPickerView = { ...claudeCode, effort: { supported: false, levels: [] } };
+    expect(handoffModelInput(noEffort)).toEqual({ sessionModelId: "sonnet" });
+  });
+
+  it("아직 모델 선택을 못 받았으면(picker 없음) 아무것도 넘기지 않아 서버 기본을 쓴다", () => {
+    expect(handoffModelInput(undefined)).toEqual({});
   });
 });

@@ -45,7 +45,7 @@ const fake = vi.hoisted(() => ({
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
   /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지, 레인에만 backend가 붙는지 확인한다 */
-  sessionOptions: [] as Array<{ modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
+  sessionOptions: [] as Array<{ modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
   /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
   bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
@@ -77,7 +77,7 @@ const fake = vi.hoisted(() => ({
   /** 그중 레인 사이 계약 호출 횟수(B_STUDIO_PLAN_CONTRACTS) */
   contractCalls: 0,
   /** 로컬 Claude Code 호출(계획·계약 공용)이 만든 ask의 옵션과, 실제로 불린 횟수 */
-  claudeCodeAsks: [] as Array<{ cwd: string; model?: string }>,
+  claudeCodeAsks: [] as Array<{ cwd: string; model?: string; effort?: string }>,
   claudeCodeCalls: 0,
   /** 로컬 CLI가 돌려주는 usage. 어댑터를 거치지 않고 ask가 직접 주므로 이미 세션 지표 모양(camelCase)이다 */
   claudeCodePlanUsage: { inputTokens: 21, outputTokens: 7, cacheReadTokens: 3, cacheWriteTokens: 0 },
@@ -135,7 +135,7 @@ vi.mock('./model-registry', () => ({
 
 // 로컬 Claude Code 구독으로 계획·계약을 받는 경로. 실제 SDK·모델 호출 없이 옵션과 호출 수만 본다
 vi.mock('./claude-code-ask', () => ({
-  claudeCodeAsk: (options: { cwd: string; model?: string }) => {
+  claudeCodeAsk: (options: { cwd: string; model?: string; effort?: string }) => {
     fake.claudeCodeAsks.push(options);
     return async (request: { system: string; user: string }) => {
       // 계약과 계획은 시스템 프롬프트로 갈린다(제품·벤치가 같은 문구를 쓴다)
@@ -154,7 +154,12 @@ vi.mock('./projects', () => ({
 }));
 
 vi.mock('./sessions', () => ({
-  createSession: async (_projectId: string, _owner: string, _workspace: string, options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {}) => {
+  createSession: async (
+    _projectId: string,
+    _owner: string,
+    _workspace: string,
+    options: { modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
+  ) => {
     fake.sessionOptions.push(options);
     const id = `session-${++fake.counter}`;
     // 두 레인 세션이 모두 멈춘 뒤에 만들어진 세션이면 통합 세션이다
@@ -1371,6 +1376,40 @@ describe('로컬 Claude Code로 계획 받기', () => {
 
     expect(plan.modelId).toBe('local-cli:default');
     expect(fake.claudeCodeAsks[0]?.model).toBeUndefined();
+  });
+
+  it('세션에서 이어받은 모델·노력 단계를 계획 호출과 레인·통합 세션에 그대로 넘긴다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    // 서버 기본 환경 변수는 다른 모델을 가리키지만, 넘긴 modelId가 이긴다(세션에서 이어받은 값이 우선이어야 한다)
+    process.env.B_STUDIO_CLAUDE_CODE_MODEL = 'haiku';
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '세션 모델 이어받기', owner: 'kim', modelId: 'sonnet', effort: 'medium' });
+
+    expect(plan.status).toBe('done');
+    // 기록에는 접두어가 붙지만(local-cli:sonnet), 계획 호출에는 별칭과 노력 단계를 그대로 넘긴다
+    expect(plan.modelId).toBe('local-cli:sonnet');
+    expect(plan.effort).toBe('medium');
+    expect(fake.claudeCodeAsks[0]).toMatchObject({ model: 'sonnet', effort: 'medium' });
+    // 레인·통합 세션에는 기록용 접두어(local-cli:)를 뗀 실제 별칭만 넘긴다 — 접두어가 그대로 가면 세션이 서버 기본으로 떨어진다(버그였다)
+    expect(fake.sessionOptions.length).toBeGreaterThan(0);
+    for (const options of fake.sessionOptions) {
+      expect(options.modelId).toBe('sonnet');
+      expect(options.effort).toBe('medium');
+    }
+  });
+
+  it('세션에서 "기본"을 이어받으면(빈 문자열) 레인·통합 세션에 모델을 강제하지 않는다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    delete process.env.B_STUDIO_CLAUDE_CODE_MODEL;
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '기본 이어받기', owner: 'kim', modelId: '' });
+
+    expect(plan.modelId).toBe('local-cli:default');
+    for (const options of fake.sessionOptions) expect(options.modelId).toBeUndefined();
   });
 
   it('계약도 같은 호출로 받는다(B_STUDIO_PLAN_CONTRACTS=on)', async () => {

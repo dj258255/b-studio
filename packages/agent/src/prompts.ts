@@ -2,6 +2,15 @@ import type { ExternalPolicy, LoadedProject } from '@b-studio/spec';
 import type { ProjectGuide } from './project-guide';
 import type { SelfCheckMode } from './tool-output';
 
+/**
+ * 사용자에게 보이는 설명·요약·질문의 언어 지침. buildSystemPrompt가 다섯 백엔드(claude-code·codex·commandcode·
+ * opencode 러너와 API 루프) 모두의 시스템 프롬프트를 만드는 공용 함수라 여기 한 곳에 두면 다섯 곳 모두에 적용된다.
+ * 아직 이 스튜디오에 로캘 설정이 없어 한국어를 기본값으로 둔다 — 로캘 설정이 생기면 이 상수를 그 값으로 바꾼다.
+ * 코드·명령·식별자는 원문 그대로 두라고 명시해, 한국어를 쓰라는 지시가 코드 블록·파일 경로·변수 이름까지
+ * 번역하게 만들지 않는다.
+ */
+export const AGENT_LANGUAGE_INSTRUCTION = '사용자에게 보이는 설명·요약·질문은 한국어로 쓴다(코드·명령·식별자는 원문 그대로).';
+
 /** 정책을 모델이 읽을 한 줄로: 누가 어떤 메서드·경로를 부를 수 있는지와 가리는 필드 */
 function describeAccess(policy: ExternalPolicy): string {
   const access = policy.allow
@@ -80,6 +89,7 @@ ${
   }
 
 Rules:
+- ${AGENT_LANGUAGE_INSTRUCTION}
 - A request can be a question, a change, or both. If it asks about the code (why, how, what happens if), answer from the code and leave the files alone; change files only when a change is asked for. If that is ambiguous, or a decision only the user can make blocks a correct change, call ${t('ask_user')} when it is in your tools (a person is watching this run); otherwise pick the safest reading and say what you assumed. Rarely, when the work clearly divides into independent parts in different services or the user asks for alternatives to compare, call ${t('propose_mode')} (when it is in your tools) once before making changes instead of doing it all yourself; otherwise just do the work. Answering without changing files is a normal outcome: the platform records the reply and creates no checkpoint.
 - Do exactly what the request asks. Do not refactor, rename, reformat, or add features, tests, or files that were not asked for.
 - When the request includes tests, or you change logic and must fix existing tests, cover at least one failure or boundary case in addition to the happy path, and state in one line in your summary what the test catches. A test that only passes proves nothing.

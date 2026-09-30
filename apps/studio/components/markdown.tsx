@@ -82,9 +82,11 @@ const COMPONENTS: Components = {
     </ol>
   ),
   blockquote: ({ children }) => <blockquote className="space-y-2 border-l-2 border-line pl-3 text-muted">{children}</blockquote>,
-  // 각주처럼 같은 답변 안을 가리키는 링크는 새 탭으로 열지 않는다
+  // 각주처럼 같은 답변 안을 가리키는 링크(#)와, 이 스튜디오 안의 다른 화면을 가리키는 상대 경로(/로 시작, 예:
+  // 작업 분해 화면 /task-plans?id=…)는 새 탭을 열지 않는다 — 지금 대화가 있던 탭이 그대로 그 화면으로 넘어간다.
+  // 그 밖(다른 사이트로 나가는 http(s) 링크 등)만 새 탭으로 연다
   a: ({ href, children }) =>
-    href?.startsWith("#") ? (
+    href?.startsWith("#") || (href?.startsWith("/") && !href.startsWith("//")) ? (
       <a href={href} className="underline underline-offset-2">
         {children}
       </a>

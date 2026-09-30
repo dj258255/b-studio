@@ -1,5 +1,19 @@
-import type { AgentUsage, BoardStats, NoteKind, PlanBackend, RunMetrics, Topology } from '@b-studio/agent';
+import type { AgentUsage, BoardStats, Effort, NoteKind, PlanBackend, RunMetrics, Topology } from '@b-studio/agent';
 import type { TaskPlanMetrics } from './task-plan-metrics';
+
+/** 로컬 CLI 계획의 기록용 모델 id 접두어(task-plans.ts와 같은 값). 여기 둬 화면 쪽도 서버 파일을 몰라도 쓸 수 있게 한다 */
+const LOCAL_CLI_MODEL_PREFIX = 'local-cli:';
+
+/**
+ * 계획 기록의 모델 id(`local-cli:sonnet`처럼 기록용 접두어가 붙을 수 있다)에서 레인·통합 세션에 실제로 넘길
+ * 값(별칭 또는 모델 레지스트리 id)을 꺼낸다. "새 작업 분해" 폼의 기본값과 레인 카드 표시에 쓴다.
+ * 접두어가 없으면(API 모드) modelId를 그대로 돌려준다. `local-cli:default`는 빈 문자열(= 계정 기본)로 돌려준다
+ */
+export function planModelAlias(modelId: string): string {
+  if (!modelId.startsWith(LOCAL_CLI_MODEL_PREFIX)) return modelId;
+  const alias = modelId.slice(LOCAL_CLI_MODEL_PREFIX.length);
+  return alias === 'default' ? '' : alias;
+}
 
 export type TaskPlanStatus = 'planning' | 'awaiting_approval' | 'running' | 'integrating' | 'interrupted' | 'done' | 'failed' | 'rejected';
 export type TaskPlanStepStatus = 'queued' | 'booting' | 'running' | 'done' | 'failed' | 'skipped';
@@ -146,6 +160,8 @@ export interface TaskPlanView {
   projectId: string;
   request: string;
   modelId: string;
+  /** 이 계획이 쓰는 노력(추론 강도) 단계. 세션에서 이어받거나(나눠서 병렬 제안 수락) 폼에서 직접 골랐을 때만 있다 */
+  effort?: Effort;
   status: TaskPlanStatus;
   createdAt: string;
   finishedAt?: string;
