@@ -342,3 +342,22 @@ describe('checkSecrets — 테스트 코드', () => {
     expect(item.reason).not.toContain('admin-local-only');
   });
 });
+
+describe('checkEnvExample — 필요한 변수만', () => {
+  it('compose·CI YAML의 치환 변수, 기본값 있는 변수, 테스트 코드는 세지 않는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-env-'));
+    await mkdir(path.join(root, 'api/src/main/resources'), { recursive: true });
+    await mkdir(path.join(root, 'api/src/test/java'), { recursive: true });
+    await mkdir(path.join(root, 'monitoring'), { recursive: true });
+    await writeFile(path.join(root, 'compose.yaml'), 'services:\n  db:\n    image: mysql\n    environment:\n      MYSQL_PASSWORD: ${DB_PASSWORD}\n');
+    await writeFile(path.join(root, 'monitoring/prometheus.yml'), 'target: ${GRAFANA_HOST}\n');
+    await writeFile(path.join(root, 'api/src/main/resources/application.yml'), 'server:\n  port: ${PORT:8080}\nslack:\n  webhook: ${SLACK_WEBHOOK_URL}\n');
+    await writeFile(path.join(root, 'api/src/test/java/AppTest.java'), 'System.getenv("TEST_ONLY_TOKEN");\n');
+    const item = await checkEnvExample(root);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('1개');
+    expect(item.reason).toContain('SLACK_WEBHOOK_URL');
+    expect(item.reason).not.toContain('GRAFANA_HOST');
+    expect(item.reason).not.toContain('PORT');
+  });
+});
