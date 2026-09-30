@@ -5,6 +5,7 @@ import type { CheckStatus, IssueSummary, PullRequestSummary, ReviewDecision } fr
 import type { RepositoryIssuesResult, RepositoryPullsResult, RepositoryQueryReason } from "@/lib/server/repository-panel";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
+import { IssueDetailPanel, PullDetailPanel } from "./repository-detail";
 import { useSessionAccess } from "./session-access";
 
 type SubTab = "issues" | "pulls";
@@ -23,7 +24,7 @@ const STATE_FILTERS: Array<{ id: ListState; label: string }> = [
 
 const TIME = new Intl.DateTimeFormat("ko-KR", { dateStyle: "short", timeStyle: "short" });
 
-const REASON_TEXT: Record<RepositoryQueryReason, (detail: string) => string> = {
+export const REASON_TEXT: Record<RepositoryQueryReason, (detail: string) => string> = {
   no_remote: () => "이 프로젝트는 원격 저장소가 없어 이슈·PR을 볼 수 없습니다.",
   unsupported_host: (detail) => detail,
   no_token: (detail) => detail,
@@ -112,6 +113,7 @@ interface ListProps {
 
 function IssueList({ projectId, state, subTab, onSubTab, onState }: ListProps) {
   const [loaded, setLoaded] = useState<{ result?: RepositoryIssuesResult; error?: string }>();
+  const [openNumber, setOpenNumber] = useState<number>();
   const access = useSessionAccess();
   const draft = useChatDraft();
 
@@ -148,19 +150,26 @@ function IssueList({ projectId, state, subTab, onSubTab, onState }: ListProps) {
         ) : loaded.result.issues && loaded.result.issues.length > 0 ? (
           <ul className="divide-y divide-line">
             {loaded.result.issues.map((issue) => (
-              <IssueRow key={issue.number} issue={issue} onWork={access.canManage ? () => workOnIssue(issue) : undefined} />
+              <IssueRow
+                key={issue.number}
+                issue={issue}
+                onWork={access.canManage ? () => workOnIssue(issue) : undefined}
+                onOpen={() => setOpenNumber(issue.number)}
+              />
             ))}
           </ul>
         ) : (
           <p className="p-6 text-sm text-muted">조건에 맞는 이슈가 없습니다.</p>
         )}
       </div>
+      {openNumber !== undefined && <IssueDetailPanel key={openNumber} projectId={projectId} number={openNumber} onClose={() => setOpenNumber(undefined)} />}
     </div>
   );
 }
 
 function PullList({ projectId, state, subTab, onSubTab, onState }: ListProps) {
   const [loaded, setLoaded] = useState<{ result?: RepositoryPullsResult; error?: string }>();
+  const [openNumber, setOpenNumber] = useState<number>();
 
   useEffect(() => {
     let cancelled = false;
@@ -190,25 +199,29 @@ function PullList({ projectId, state, subTab, onSubTab, onState }: ListProps) {
         ) : loaded.result.pulls && loaded.result.pulls.length > 0 ? (
           <ul className="divide-y divide-line">
             {loaded.result.pulls.map((pull) => (
-              <PullRow key={pull.number} pull={pull} />
+              <PullRow key={pull.number} pull={pull} onOpen={() => setOpenNumber(pull.number)} />
             ))}
           </ul>
         ) : (
           <p className="p-6 text-sm text-muted">조건에 맞는 PR이 없습니다.</p>
         )}
       </div>
+      {openNumber !== undefined && <PullDetailPanel key={openNumber} projectId={projectId} number={openNumber} onClose={() => setOpenNumber(undefined)} />}
     </div>
   );
 }
 
-const STATE_DOT = { open: "bg-pass", closed: "bg-line" } as const;
+export const STATE_DOT = { open: "bg-pass", closed: "bg-line" } as const;
 
-export function IssueRow({ issue, onWork }: { issue: IssueSummary; onWork?: () => void }) {
+export function IssueRow({ issue, onWork, onOpen }: { issue: IssueSummary; onWork?: () => void; onOpen: () => void }) {
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-sm">
       <span aria-hidden className={`inline-block size-2 shrink-0 rounded-full ${STATE_DOT[issue.state]}`} title={issue.state === "open" ? "열림" : "닫힘"} />
-      <a href={issue.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate hover:underline" title={issue.title}>
+      <button type="button" onClick={onOpen} className="min-w-0 flex-1 truncate text-left hover:underline" title={issue.title}>
         <span className="font-mono text-muted">#{issue.number}</span> {issue.title}
+      </button>
+      <a href={issue.url} target="_blank" rel="noreferrer" title="GitHub·Gitea에서 보기" aria-label="GitHub·Gitea에서 보기" className="shrink-0 text-muted hover:text-ink">
+        ↗
       </a>
       {issue.labels.length > 0 && (
         <span className="flex flex-wrap gap-1">
@@ -230,20 +243,23 @@ export function IssueRow({ issue, onWork }: { issue: IssueSummary; onWork?: () =
   );
 }
 
-const CHECK_LABEL: Record<CheckStatus, string> = { success: "통과", failure: "실패", pending: "진행 중", unknown: "-" };
-const CHECK_TONE: Record<CheckStatus, string> = { success: "text-pass", failure: "text-fail", pending: "text-wait", unknown: "text-muted" };
-const REVIEW_LABEL: Record<ReviewDecision, string> = { approved: "승인", changes_requested: "변경 요청", review_required: "리뷰 대기", unknown: "-" };
-const REVIEW_TONE: Record<ReviewDecision, string> = { approved: "text-pass", changes_requested: "text-fail", review_required: "text-wait", unknown: "text-muted" };
+export const CHECK_LABEL: Record<CheckStatus, string> = { success: "통과", failure: "실패", pending: "진행 중", unknown: "-" };
+export const CHECK_TONE: Record<CheckStatus, string> = { success: "text-pass", failure: "text-fail", pending: "text-wait", unknown: "text-muted" };
+export const REVIEW_LABEL: Record<ReviewDecision, string> = { approved: "승인", changes_requested: "변경 요청", review_required: "리뷰 대기", unknown: "-" };
+export const REVIEW_TONE: Record<ReviewDecision, string> = { approved: "text-pass", changes_requested: "text-fail", review_required: "text-wait", unknown: "text-muted" };
 
-export function PullRow({ pull }: { pull: PullRequestSummary }) {
+export function PullRow({ pull, onOpen }: { pull: PullRequestSummary; onOpen: () => void }) {
   const check = pull.checkStatus ?? "unknown";
   const review = pull.reviewDecision ?? "unknown";
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-sm">
       <span aria-hidden className={`inline-block size-2 shrink-0 rounded-full ${STATE_DOT[pull.state]}`} title={pull.state === "open" ? "열림" : "닫힘"} />
-      <a href={pull.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate hover:underline" title={pull.title}>
+      <button type="button" onClick={onOpen} className="min-w-0 flex-1 truncate text-left hover:underline" title={pull.title}>
         <span className="font-mono text-muted">#{pull.number}</span> {pull.title}
         {pull.draft && <span className="ml-1.5 text-xs text-muted">(초안)</span>}
+      </button>
+      <a href={pull.url} target="_blank" rel="noreferrer" title="GitHub·Gitea에서 보기" aria-label="GitHub·Gitea에서 보기" className="shrink-0 text-muted hover:text-ink">
+        ↗
       </a>
       {pull.labels.length > 0 && (
         <span className="flex flex-wrap gap-1">
