@@ -45,9 +45,10 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}deploy:\n  services:\n    web: { dockerfile: ../Dockerfile }\n`)).toThrow(SpecError);
   });
 
-  it('모노레포 하위 폴더 연동은 명시해야 켜진다', () => {
-    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false });
-    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true });
+  it('모노레포 하위 폴더 연동은 명시해야 켜지고, main 따라잡기(autoCatchUp)는 기본으로 켜진다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false, autoCatchUp: true });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true, autoCatchUp: true });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  autoCatchUp: false\n`).repository).toEqual({ monorepo: false, autoCatchUp: false });
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
@@ -67,6 +68,13 @@ describe('parseSpec', () => {
     expect(parseSpec(`${ORDERS_SPEC}guide:\n  enabled: false\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: false });
     expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: 0\n`)).toThrow(SpecError);
     expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: -1\n`)).toThrow(SpecError);
+  });
+
+  it('계획-실행 분리 모델 설정은 절이 없으면 undefined이고, 있으면 plan·execute를 그대로 읽는다', () => {
+    expect(parseSpec(ORDERS_SPEC).models).toBeUndefined();
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n  execute: sonnet\n`).models).toEqual({ plan: 'opus', execute: 'sonnet' });
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n`).models).toEqual({ plan: 'opus' });
+    expect(() => parseSpec(`${ORDERS_SPEC}models:\n  plan: ""\n`)).toThrow(SpecError);
   });
 
   it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {

@@ -275,6 +275,8 @@ export type StudioEvent =
   | { type: 'files_changed'; revision: number }
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
   | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask'; /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */ at?: string }
+  /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. 화면은 "계획(모델명)" 접기 블록으로 보여준다 */
+  | { type: 'plan_brief'; runId: string; model: string; text: string; usage: AgentUsage; durationMs: number }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** 실행 중 보낸 지시를 큐에 넣었다. 러너가 이어서 쓰면 agent 이벤트 steer_applied로 온다 */
   | { type: 'steer_queued'; runId: string; text: string }
@@ -366,6 +368,36 @@ export type StudioEvent =
       commits?: RemoteCommitView[];
       files?: string[];
       /** 가져온 변경이 검증을 통과하지 못해 되돌렸을 때의 게이트 결과 */
+      report?: VerificationReport;
+      restarted?: ServiceCheck[];
+      checkpoints?: Checkpoint[];
+    }
+  /** main 따라잡기(ADR-076)를 시작했다 */
+  | { type: 'base_sync_started' }
+  | {
+      type: 'base_synced';
+      /** up-to-date면 따라잡을 커밋이 없었다 */
+      status: 'up-to-date' | 'merged';
+      /** 이번에 병합으로 따라잡은 기준 브랜치 커밋 수 */
+      commits: number;
+      files: string[];
+      checkpoint?: Checkpoint;
+      report?: VerificationReport;
+      checkpoints: Checkpoint[];
+      repository: RepositoryView;
+    }
+  | {
+      type: 'base_sync_failed';
+      error: string;
+      /** 충돌한 파일. 작업 복사본은 병합을 시작하기 전 그대로다 */
+      conflicts?: string[];
+      /**
+       * "에이전트에게 충돌 해결 맡기기"로 시도했을 때만 채운다. 자동으로 보내지 않고 화면이 대화 입력창에 미리 채워
+       * 사람이 보고 다듬어 보내게 한다(ADR-076의 안전한 대안 — docs/decisions.md 참고)
+       */
+      agentRequest?: string;
+      files?: string[];
+      /** 병합한 변경이 검증을 통과하지 못해 되돌렸을 때의 게이트 결과 */
       report?: VerificationReport;
       restarted?: ServiceCheck[];
       checkpoints?: Checkpoint[];

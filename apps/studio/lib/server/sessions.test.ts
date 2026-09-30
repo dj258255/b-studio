@@ -1,12 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import type { LoadedProject } from '@b-studio/spec';
+import { afterEach, describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
 import {
   allowedBackends,
+  apiEscalation,
   assertBackendReady,
   assertResumableBackend,
   buildExportChecks,
+  claudeCodeEscalation,
   parseIssueInput,
   parseIssueList,
+  planExecuteConfig,
   planKindForBackend,
   resolveSessionBackend,
   selfCheckMode,
@@ -201,6 +205,58 @@ describe('세션 백엔드 확정은 두 번 불러도 같다', () => {
       const env = { B_STUDIO_MODE: mode };
       expect(resolveSessionBackend(resolveSessionBackend(undefined, env), env)).toBe(mode);
     }
+  });
+});
+
+describe('계획-실행 분리(ADR-075) 설정', () => {
+  const fakeProject = (models?: { plan?: string; execute?: string }): LoadedProject => ({ spec: { name: 'orders', models } }) as unknown as LoadedProject;
+
+  it('studio.yaml의 models가 같은 이름의 환경 변수보다 우선한다', () => {
+    const env = { B_STUDIO_PLAN_MODEL: 'env-plan', B_STUDIO_EXECUTE_MODEL: 'env-execute' };
+    expect(planExecuteConfig(fakeProject({ plan: 'yaml-plan', execute: 'yaml-execute' }), env)).toEqual({ plan: 'yaml-plan', execute: 'yaml-execute' });
+  });
+
+  it('studio.yaml에 없으면 환경 변수를 쓴다', () => {
+    const env = { B_STUDIO_PLAN_MODEL: 'env-plan', B_STUDIO_EXECUTE_MODEL: 'env-execute' };
+    expect(planExecuteConfig(fakeProject(), env)).toEqual({ plan: 'env-plan', execute: 'env-execute' });
+    expect(planExecuteConfig(fakeProject(), { ...env, B_STUDIO_PLAN_BRIEF: 'always' })).toEqual({ plan: 'env-plan', execute: 'env-execute', always: true });
+    expect(() => planExecuteConfig(fakeProject(), { ...env, B_STUDIO_PLAN_BRIEF: 'sometimes' })).toThrow(/auto 또는 always/);
+  });
+
+  it('둘 다 없으면 빈 객체를 돌려준다(계획 호출을 하지 않는, 지금과 같은 동작)', () => {
+    expect(planExecuteConfig(fakeProject(), {})).toEqual({});
+  });
+});
+
+describe('모델 승격의 기본 대상(ADR-075: 계획 모델로 올린다)', () => {
+  afterEach(() => {
+    delete process.env.B_STUDIO_MODEL_REGISTRY;
+  });
+
+  it('로컬 Claude 모드: 명시적 승격 대상(B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL)이 있으면 그것을 쓴다', () => {
+    const env = { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: 'opus' };
+    expect(claudeCodeEscalation('sonnet', env)?.to).toBe('opus');
+  });
+
+  it('로컬 Claude 모드: 명시적 승격 대상이 없으면 계획 모델로 올린다', () => {
+    expect(claudeCodeEscalation('opus', {})?.to).toBe('opus');
+  });
+
+  it('로컬 Claude 모드: 계획 모델도 없으면 승격하지 않는다(지금과 같은 동작)', () => {
+    expect(claudeCodeEscalation(undefined, {})).toBeUndefined();
+  });
+
+  it('API 모드: 명시적 승격 대상(B_STUDIO_ESCALATE_MODEL_ID)이 있으면 그것을 쓴다', () => {
+    const env = { B_STUDIO_ESCALATE_MODEL_ID: 'anthropic-default' };
+    expect(apiEscalation('other-plan-id', env)?.to).toBe('Claude 기본 모델');
+  });
+
+  it('API 모드: 명시적 승격 대상이 없으면 계획 모델 id로 올린다', () => {
+    expect(apiEscalation('anthropic-default', {})?.to).toBe('Claude 기본 모델');
+  });
+
+  it('API 모드: 계획 모델도 없으면 승격하지 않는다(지금과 같은 동작)', () => {
+    expect(apiEscalation(undefined, {})).toBeUndefined();
   });
 });
 

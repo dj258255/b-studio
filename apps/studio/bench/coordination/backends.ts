@@ -148,6 +148,32 @@ function integer(value: number | undefined, flag: string, min: number): number |
   return value;
 }
 
+/** 벤치가 넘길 계획-실행 분리(ADR-075) 설정. claude-code 백엔드에서만 쓴다 */
+export interface PlanExecuteChoice {
+  /** --plan-model. 없으면 계획 호출을 하지 않는다(지금과 같은 동작) */
+  plan?: string;
+  /** --execute-model. 없으면 --model(시작 모델)을 그대로 실행에도 쓴다 */
+  execute?: string;
+}
+
+/**
+ * 계획-실행 분리 인자를 확정한다(ADR-075: "계획은 큰 모델, 실행은 작은 모델").
+ * `--escalate-to`와 같은 원칙 — 계획 호출 경로(도구 없는 한 번의 ModelAsk)가 제품에서 claude-code·api에만 있고,
+ * 벤치는 openai 백엔드에서 실행마다 레지스트리 파일을 새로 만들어(단일 모델) 계획 모델을 위한 두 번째 모델을
+ * 안전하게 끼워 넣을 자리가 없어(레지스트리·프록시를 다시 설계해야 한다) claude-code 백엔드에서만 지원한다.
+ * `--dry`(항상 openai)와 함께 주면 이 함수가 시작 전에 거부해, 모델 경로를 조용히 무시하지 않는다.
+ */
+export function resolvePlanExecute(input: { backend: Backend; laneBackends?: Iterable<Backend>; planModel?: string; executeModel?: string }): PlanExecuteChoice {
+  const plan = input.planModel?.trim();
+  const execute = input.executeModel?.trim();
+  if (!plan && !execute) return {};
+  const backends = new Set<Backend>([input.backend, ...(input.laneBackends ?? [])]);
+  if (!backends.has('claude-code')) {
+    throw new Error(`--plan-model·--execute-model은 claude-code 백엔드에서만 쓸 수 있습니다 (지금 백엔드: ${[...backends].join(', ')})`);
+  }
+  return { ...(plan ? { plan } : {}), ...(execute ? { execute } : {}) };
+}
+
 /** 벤치 레인 그룹(레인의 첫 쓰기 경로). planFor가 만드는 레인은 api·web 둘이다 */
 export const BENCH_LANE_GROUPS = ['api', 'web'] as const;
 export type BenchLaneGroup = (typeof BENCH_LANE_GROUPS)[number];

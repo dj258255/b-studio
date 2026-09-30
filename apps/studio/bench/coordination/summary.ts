@@ -108,6 +108,8 @@ export interface BenchRow {
   selfCheck?: SelfCheckMode;
   /** 모델 승격 설정과 이 실행의 승격 결과 */
   escalation: BenchEscalation;
+  /** 계획-실행 분리(ADR-075, --plan-model·--execute-model) 설정. 둘 다 없으면 이 실행은 계획 호출을 하지 않았다 */
+  planExecute?: { plan?: string; execute?: string };
   metrics?: TaskPlanMetrics;
   /** S2에서 쓴 계약의 출처와 수(모델 계약이면 호출 usage). 계약을 쓰지 않는 전략이면 없다 */
   contracts?: BenchContractsRow;
@@ -136,6 +138,10 @@ export interface SummaryMeta {
   contracts?: 'human' | 'model';
   /** 검증 범위(--verify). 기본 full */
   verify?: BenchVerify;
+  /** 계획-실행 분리(ADR-075, --plan-model). 없으면 계획 호출 없이 지금과 같이 실행만 한다 */
+  planModel?: string;
+  /** 계획-실행 분리의 실행 모델(--execute-model). 없으면 requestedModel을 그대로 실행에도 쓴다 */
+  executeModel?: string;
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'provider_gate', 'environment', 'timeout', 'unknown'];
@@ -236,7 +242,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 검증 ${meta.verify === 'light' ? 'light(가볍게)' : 'full'} · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 검증 ${meta.verify === 'light' ? 'light(가볍게)' : 'full'} · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}${meta.planModel ? ` · 계획-실행 분리: 계획 ${meta.planModel} → 실행 ${meta.executeModel ?? meta.requestedModel}` : ''}`,
     '',
     '## 과제 × 전략',
     '',

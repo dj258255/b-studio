@@ -401,6 +401,21 @@ design:
 - `.fig` 파일은 Figma에 한 번 Import해야 파일 키가 생깁니다.
 - 토큰 발급 방법과 운영 주의는 [운영 문서](operations.md)의 "Figma 연동"을 보세요.
 
+## 계획-실행 분리 (ADR-075)
+
+```yaml
+models:
+  plan: opus
+  execute: sonnet
+```
+
+| 필드 | 설명 |
+|---|---|
+| `models.plan` | 계획을 쓰는 모델. claude-code 백엔드는 Claude Code에 넘기는 모델 이름(예: `opus`), api 백엔드는 모델 레지스트리 id입니다 |
+| `models.execute` | 실행을 맡는 모델(뜻은 `plan`과 같은 규칙). 생략하면 세션이 원래 쓰던 모델을 그대로 씁니다 |
+
+절 자체를 생략하거나 두 필드를 모두 비우면 환경 변수(`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 보고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 합니다. 이 절이 있으면 환경 변수보다 우선합니다. 자세한 동작은 [운영 문서](operations.md)의 "계획-실행 분리"를 보세요.
+
 ## 모노레포
 
 ```yaml

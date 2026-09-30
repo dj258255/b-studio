@@ -6,6 +6,7 @@ import { cp, mkdir, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  appendPlanToRequest,
   buildPullRequest,
   canCreatePullRequest,
   captureBaselines,
@@ -25,6 +26,8 @@ import {
   parseRemote,
   planAskFromClient,
   postComment,
+  requestPlanBrief,
+  shouldPlanBrief,
   preflightClaudeCode,
   preflightCodex,
   preflightCommandCode,
@@ -46,6 +49,7 @@ import {
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
+  type BaseStatus,
   type BoardAccess,
   type BrowserFrame,
   type Checkpoint,
@@ -60,6 +64,7 @@ import {
   type PullRequestDraft,
   type RepositoryInfo,
   type RoutingDecision,
+  type RunMetrics,
   type RemoteSyncResult,
   type ServiceCheck,
   type VerificationReport,
@@ -1305,7 +1310,14 @@ type RunPlan = (
       /** 게이트 실패 서명이 반복되면 쓸 승격 클라이언트. 설정하지 않으면 승격 없음 */
       escalation?: EscalationPolicy & { client: ModelClient };
     }
-  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent; escalation?: EscalationPolicy }
+  | {
+      kind: 'claude-code';
+      allowBreaking: boolean;
+      intent: Intent;
+      escalation?: EscalationPolicy;
+      /** 계획-실행 분리(ADR-075)로 정한 실행 모델. session.snapshot.modelId(레인이 고른 모델)보다는 아래고, B_STUDIO_CLAUDE_CODE_MODEL보다는 위다 */
+      executeModel?: string;
+    }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
@@ -1328,14 +1340,17 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   // 실행 경로는 서버 모드(B_STUDIO_MODE)가 아니라 **세션의 backend**를 본다. 이 필드가 없으면 mode가 곧 서버 모드다
   const backend = sessionBackend(session.snapshot);
   const kind = planKindForBackend(backend);
+  // 계획-실행 분리(ADR-075) 설정. 둘 다 없으면 아래 로직은 지금과 한 글자도 다르지 않게 움직인다
+  const split = planExecuteConfig(session.project);
   if (kind === 'model') {
-    const route = routingDecision(request, intent, session.snapshot.modelId);
-    const escalation = apiEscalation();
+    // 세션이 고른 모델(사람이 직접 선택)이 실행 모델 설정보다 우선한다
+    const route = routingDecision(request, intent, session.snapshot.modelId ?? split.execute);
+    const escalation = apiEscalation(split.plan);
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'claude-code') {
-    const escalation = claudeCodeEscalation();
-    return { kind: 'claude-code', allowBreaking, intent, ...(escalation ? { escalation } : {}) };
+    const escalation = claudeCodeEscalation(split.plan);
+    return { kind: 'claude-code', allowBreaking, intent, ...(split.execute ? { executeModel: split.execute } : {}), ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'codex') return { kind: 'codex', allowBreaking, intent };
   if (kind === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
@@ -1421,9 +1436,11 @@ function integerEnv(name: string, min: number): number | undefined {
 /**
  * API 모드 승격 대상. 모델 레지스트리 id(B_STUDIO_ESCALATE_MODEL_ID)로 지정한다.
  * 없는 id면 기동 시 오류를 내고, 설정하지 않으면 승격하지 않는다(지금 동작과 같다).
+ * planModelId: 계획-실행 분리(ADR-075)의 계획 모델 id. 명시적 승격 대상이 없으면 이쪽으로 올린다
+ * (이미 계획을 세운 큰 모델이니 실행 모델이 게이트를 반복해서 실패하면 다시 불러오는 것이 자연스럽다).
  */
-function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefined {
-  const id = process.env.B_STUDIO_ESCALATE_MODEL_ID?.trim();
+export function apiEscalation(planModelId?: string, env: Record<string, string | undefined> = process.env): (EscalationPolicy & { client: ModelClient }) | undefined {
+  const id = env.B_STUDIO_ESCALATE_MODEL_ID?.trim() || planModelId;
   if (!id) return undefined;
   const model = (() => {
     try {
@@ -1436,11 +1453,30 @@ function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefin
   return { ...escalationRules(), to: model.label || model.id, client: clientForModel(model) };
 }
 
-/** 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet) */
-function claudeCodeEscalation(): EscalationPolicy | undefined {
-  const to = process.env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim();
+/**
+ * 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet).
+ * planModel: 계획-실행 분리(ADR-075)의 계획 모델 이름. 명시적 승격 대상(B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL)이
+ * 없으면 이쪽으로 올린다 — 계획 모델로 기본 승격 대상을 삼는다.
+ */
+export function claudeCodeEscalation(planModel?: string, env: Record<string, string | undefined> = process.env): EscalationPolicy | undefined {
+  const to = env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim() || planModel;
   if (!to) return undefined;
   return { ...escalationRules(), to };
+}
+
+/**
+ * 계획-실행 분리(ADR-075) 설정. studio.yaml의 `models`가 같은 이름의 환경 변수보다 우선한다.
+ * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름, api는 모델 레지스트리 id다.
+ * 둘 다 없으면(기본) 이 함수가 항상 undefined만 돌려주므로 나머지 로직은 지금과 같이 움직인다.
+ */
+export function planExecuteConfig(project: LoadedProject, env: Record<string, string | undefined> = process.env): { plan?: string; execute?: string; always?: boolean } {
+  const models = project.spec.models;
+  const plan = models?.plan?.trim() || env.B_STUDIO_PLAN_MODEL?.trim() || undefined;
+  const execute = models?.execute?.trim() || env.B_STUDIO_EXECUTE_MODEL?.trim() || undefined;
+  // B_STUDIO_PLAN_BRIEF=always면 요청 복잡도와 무관하게 계획을 세운다(실험·짧은 요청이 많은 프로젝트용). 기본 auto는 simple을 건너뛴다
+  const when = env.B_STUDIO_PLAN_BRIEF?.trim() || 'auto';
+  if (when !== 'auto' && when !== 'always') throw new StudioError(500, `B_STUDIO_PLAN_BRIEF는 auto 또는 always여야 합니다 (지금 값: ${when})`);
+  return { ...(plan ? { plan } : {}), ...(execute ? { execute } : {}), ...(when === 'always' ? { always: true } : {}) };
 }
 
 /** 두 러너가 함께 쓰는 승격 규칙(임계치·실패 횟수·재시도 예산) */
@@ -1451,6 +1487,37 @@ function escalationRules(): Pick<EscalationPolicy, 'sameSignatureTimes' | 'after
     ...(afterFailures === undefined ? {} : { afterFailures }),
     retryBudget: escalateRetryBudget(),
   };
+}
+
+/**
+ * 계획-실행 분리(ADR-075). 계획 모델이 설정돼 있고, 이 요청이 만들기(build) 요청이며(질문은 대상이 아니다),
+ * 백엔드가 claude-code·api 중 하나이고(PR 리뷰·작업 계획과 같은 제약 — 그 밖의 백엔드는 도구 없는 단발 호출 경로가 없다),
+ * 라우팅 복잡도가 simple이 아니면(shouldPlanBrief), 실행 전에 도구 없이 한 번 계획 모델을 불러 짧은 계획을 받는다.
+ * 계획은 `plan_brief` 이벤트로 대화에 남기고(화면은 "계획(모델명)" 접기 블록으로 보여준다), 실행기에 넘길 요청 끝에
+ * 구분선으로 붙인다. 원래 요청(request)은 손대지 않으므로 체크포인트 제목·기록에는 계획이 섞이지 않는다.
+ * 계획 호출이 실패해도(모델 오류·빈 응답 등) 원래 요청 그대로 실행을 이어간다 — 계획은 돕는 역할이지 필수 관문이 아니다.
+ */
+async function withPlanBrief(
+  session: Session,
+  run: ActiveRun,
+  request: string,
+  plan: RunPlan,
+  signal: AbortSignal,
+): Promise<{ request: string; planUsage?: { model: string; usage: AgentUsage } }> {
+  if (plan.intent === 'ask' || (plan.kind !== 'claude-code' && plan.kind !== 'model')) return { request };
+  const split = planExecuteConfig(session.project);
+  if (!split.plan || (!split.always && !shouldPlanBrief(request))) return { request };
+
+  const ask: ModelAsk =
+    plan.kind === 'claude-code' ? claudeCodeAsk({ cwd: session.project.root, model: split.plan }) : planAskFromClient(clientForModel(modelById(split.plan)));
+  try {
+    const brief = await requestPlanBrief(ask, session.project, request, signal);
+    emit(session, { type: 'plan_brief', runId: run.id, model: split.plan, text: brief.text, usage: brief.usage, durationMs: brief.durationMs });
+    return { request: appendPlanToRequest(request, brief.text), planUsage: { model: split.plan, usage: brief.usage } };
+  } catch (error) {
+    emit(session, { type: 'notice', text: `계획 호출이 실패해 계획 없이 실행합니다: ${describe(error)}`, at: new Date().toISOString() });
+    return { request };
+  }
 }
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
@@ -1478,13 +1545,21 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       );
     }
     const agentStarted = performance.now();
-    const result = await runPlan(session, run, request, plan, signal);
+    // 계획-실행 분리(ADR-075). 설정이 없거나 이 요청이 대상이 아니면 원래 요청 그대로 돌려준다(지금과 같은 동작)
+    const { request: executionRequest, planUsage } = await withPlanBrief(session, run, request, plan, signal);
+    const result = await runPlan(session, run, executionRequest, plan, signal);
     // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
     if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
     session.run = undefined;
     if ('preflightError' in result) {
       finished = { status: 'error', summary: result.preflightError };
       return;
+    }
+    // 계획 호출 토큰을 이 실행의 모델별 사용량에 "계획: <모델>"로 합친다(토큰 탭이 그대로 표로 보여준다).
+    // 세션·사람 토큰 한도에는 반영하지 않는다(계획 호출은 실행 루프 밖의 별도 호출이라 그 예산 계산과 겹치면 부정확해진다) — 알려진 한계로 남긴다
+    if (planUsage) {
+      const metrics: RunMetrics = result.metrics ?? { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+      result.metrics = { ...metrics, usageByModel: { ...metrics.usageByModel, [`계획: ${planUsage.model}`]: planUsage.usage } };
     }
 
     // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다.
@@ -1713,8 +1788,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
-      // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수(계획 기본)를 쓴다. 기록용 id는 무시한다
-      model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
+      // 세션(레인)에서 고른 모델 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
+      model: cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
       steering: run.steering,
       // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
@@ -2203,6 +2278,8 @@ export async function exportSession(
 
   session.exporting = true;
   try {
+    // main 따라잡기(ADR-076): 기준 브랜치가 앞서 있고 깨끗하게 병합할 수 있으면 올리기 전에 조용히 먼저 따라잡는다
+    await autoCatchUpBase(session);
     const pushed = await session.checkpoints.push().catch((error: unknown) => {
       // git 명령 자체가 실패하면(인증, 네트워크) 원격 문제이고, 나머지는 지금 상태로는 올릴 수 없다는 뜻이다
       const gitFailure = error instanceof CheckpointError && error.message.startsWith('git ');
@@ -2321,6 +2398,9 @@ export async function runReviewRound(id: string, { restart = false }: { restart?
   if (session.snapshot.review && !restart) {
     throw new StudioError(409, '이미 리뷰가 끝났습니다. 다시 돌리려면 "다시 돌리기"를 누르세요');
   }
+
+  // main 따라잡기(ADR-076): 기준 브랜치가 앞서 있고 깨끗하게 병합할 수 있으면 리뷰 라운드를 돌리기 전에 조용히 먼저 따라잡는다
+  await autoCatchUpBase(session);
 
   const cfg = session.project.spec.review;
   const requests = await sessionRequestTexts(session);
@@ -2507,6 +2587,166 @@ async function undoRemoteSync(
   } catch (undoError) {
     return { type: 'remote_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, commits, files: result.files, report };
   }
+}
+
+/**
+ * 기준 브랜치(main 등)가 이 세션보다 얼마나 앞서 있는지 확인한다(ADR-076). 원격 연동이 없는 세션은 확인할 것이 없다.
+ * 화면(repository-bar)이 가볍게(예: 60초마다) 물어 "N커밋 앞서 있습니다 · 따라잡기"를 보여 준다
+ */
+export async function baseStatus(id: string, options: { force?: boolean } = {}): Promise<BaseStatus> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 확인할 기준 브랜치가 없습니다');
+  return session.checkpoints.baseStatus(options);
+}
+
+/**
+ * 세션 브랜치가 갈라져 나온 기준 브랜치(main 등)를 병합으로 따라잡는다(ADR-076, "main 따라잡기").
+ * 원격 세션 브랜치 가져오기(syncRemote)와 같은 흐름이다: 병합 결과도 에이전트의 변경처럼 검증 게이트를 거치고,
+ * 통과하지 못하면 파일과 데이터베이스를 병합 전으로 되돌린다. 충돌하면 병합을 시작하기 전 상태 그대로 두고 사람에게
+ * 넘긴다(기본 정책). "에이전트에게 충돌 해결 맡기기"는 resolveBaseConflictsWithAgent가 맡는다
+ */
+export function catchUpBase(id: string): void {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 따라잡을 기준 브랜치가 없습니다');
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 따라잡을 수 있습니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+
+  session.snapshot.running = true;
+  emit(session, { type: 'base_sync_started' });
+  void (async () => {
+    const event = await runBaseCatchUp(session);
+    session.snapshot.running = false;
+    if (!session.stop.signal.aborted) emit(session, event);
+  })();
+}
+
+/**
+ * "에이전트에게 충돌 해결 맡기기"(ADR-076). 병합을 시도해 충돌 없이 따라잡을 수 있으면 catchUpBase와 똑같이 끝낸다.
+ * 충돌하면(병합은 이미 시도 전으로 되돌아간 뒤) 자동으로 고치게 보내는 대신, 충돌한 파일과 무엇을 할지 알려 주는
+ * 요청 문구를 만들어 돌려준다 — 화면이 이 문구를 대화 입력창에 미리 채워 사람이 보고 다듬어 보내게 한다.
+ * 병합 커밋을 충돌 표시(conflict marker)째로 만들어 곧바로 에이전트에게 보내는 방식은 체크포인트 커밋 경계
+ * (#checkpoint, MERGE_HEAD 처리)를 크게 건드려야 해서, 더 안전한 이 대안을 택했다(docs/decisions.md ADR-076 참고)
+ */
+export async function resolveBaseConflictsWithAgent(id: string): Promise<{ request?: string; conflicts?: string[] }> {
+  const session = requireSession(id);
+  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 따라잡을 기준 브랜치가 없습니다');
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 따라잡을 수 있습니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+
+  session.snapshot.running = true;
+  emit(session, { type: 'base_sync_started' });
+  const event = await runBaseCatchUp(session);
+  session.snapshot.running = false;
+  if (event.type !== 'base_sync_failed' || !event.conflicts || event.conflicts.length === 0) {
+    if (!session.stop.signal.aborted) emit(session, event);
+    return {};
+  }
+
+  const info = (await session.checkpoints.repository())!;
+  const request = buildBaseConflictRequest(info.base, event.conflicts);
+  if (!session.stop.signal.aborted) emit(session, { ...event, agentRequest: request });
+  return { request, conflicts: event.conflicts };
+}
+
+/** "에이전트에게 충돌 해결 맡기기"가 화면 대화 입력창에 미리 채울 문구. 자동으로 보내지 않고 사람이 보고 다듬어 보낸다 */
+function buildBaseConflictRequest(base: string, conflicts: readonly string[]): string {
+  return (
+    `${base} 브랜치를 병합해 따라잡으려 했지만 다음 파일에서 이 세션의 변경과 충돌했습니다: ${conflicts.join(', ')}. ` +
+    `병합은 시도하기 전으로 되돌려 두었습니다. 각 파일에서 ${base} 브랜치가 그사이 바꾼 내용을 확인하고(예: git show origin/${base}:<파일 경로>), ` +
+    `이 세션의 의도를 지키면서 그 변경을 손으로 반영해 주세요. 자동 병합은 다시 시도하지 말고 코드를 직접 맞춰 주세요.`
+  );
+}
+
+async function runBaseCatchUp(session: Session): Promise<StudioEvent> {
+  const start: StartOptions = { signal: session.stop.signal, onStatus: (status) => onServiceStatus(session, status) };
+  let baselines: Awaited<ReturnType<typeof captureBaselines>>;
+  let result: RemoteSyncResult;
+  try {
+    // 계약 비교 기준은 병합한 변경이 반영되기 전에 잡는다
+    baselines = await captureBaselines(session.sandbox, session.project);
+    result = await session.checkpoints.integrateBase();
+  } catch (error) {
+    return { type: 'base_sync_failed', error: describe(error), conflicts: error instanceof RemoteConflictError ? error.conflicts : undefined };
+  }
+
+  if (result.status === 'up-to-date') {
+    const repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
+    session.snapshot.repository = repository;
+    return { type: 'base_synced', status: 'up-to-date', commits: 0, files: [], checkpoints: session.snapshot.checkpoints, repository };
+  }
+
+  let report: VerificationReport | undefined;
+  try {
+    // 기준 브랜치가 의도한 API 변경은 막지 않고 결과로 보여 준다(리뷰어 커밋 가져오기와 같은 이유). 기동 실패와 시크릿 값은 막는다
+    report = await verifyChanges({ sandbox: session.sandbox, project: session.project, changedFiles: result.files, baselines, allowBreaking: true, start });
+    if (!report.ok) return await undoBaseSync(session, result, report, '따라잡은 변경이 검증 게이트를 통과하지 못해 따라잡기 전 체크포인트로 되돌렸습니다', start);
+
+    const checkpoint = result.checkpoint!;
+    await saveDatabases(session, checkpoint.sha);
+    session.snapshot.checkpoints = await session.checkpoints.list();
+    let repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
+    // PR이 이미 있는 세션은 뒤처진 채 두지 않고 바로 밀어 둔다(다음 리뷰·머지가 최신 기준으로 돈다). PR을 새로 만들지는 않는다
+    if (repository.pullRequestUrl) {
+      await session.checkpoints.push();
+      repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
+    }
+    session.snapshot.repository = repository;
+    noteForModel(
+      session,
+      `[b-studio] ${repository.base} 브랜치가 앞서 있던 커밋 ${result.commits.length}개를 병합으로 따라잡아 체크포인트 ${checkpoint.shortSha}로 남겼습니다. 바뀐 파일: ${result.files.slice(0, 20).join(', ')}. 다음 작업은 이 변경을 전제로 하세요.`,
+    );
+    return {
+      type: 'base_synced',
+      status: 'merged',
+      commits: result.commits.length,
+      files: result.files,
+      checkpoint,
+      report,
+      checkpoints: session.snapshot.checkpoints,
+      repository,
+    };
+  } catch (error) {
+    return undoBaseSync(session, result, report, `따라잡은 변경을 확인하지 못해 따라잡기 전 체크포인트로 되돌렸습니다: ${describe(error)}`, start);
+  }
+}
+
+/** 검증된 체크포인트만 남긴다. 파일과 데이터베이스를 병합 전으로 되돌리고 바뀐 서비스를 다시 띄운다 */
+async function undoBaseSync(
+  session: Session,
+  result: RemoteSyncResult,
+  report: VerificationReport | undefined,
+  error: string,
+  start: StartOptions,
+): Promise<StudioEvent> {
+  try {
+    const { files } = await session.checkpoints.restore(result.previous);
+    const database = await session.databases.restore(result.previous, session.stop.signal);
+    const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
+    session.snapshot.checkpoints = await session.checkpoints.list();
+    return { type: 'base_sync_failed', error, files: result.files, report, restarted: restart.restarted, checkpoints: session.snapshot.checkpoints };
+  } catch (undoError) {
+    return { type: 'base_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, files: result.files, report };
+  }
+}
+
+/**
+ * repository.autoCatchUp(기본 켬)이 켜져 있고 기준 브랜치가 앞서 있으면, AI 리뷰 라운드를 돌리거나 올리기 전에
+ * 조용히 먼저 따라잡는다(ADR-076). 충돌하면(사람이 따로 처리해야 하면) 건드리지 않고 그대로 진행한다 —
+ * 리뷰나 올리기 자체를 막지 않는다. 이미 다른 작업이 진행 중이면(드문 경쟁) 이번에는 건너뛴다
+ */
+async function autoCatchUpBase(session: Session): Promise<void> {
+  if (!session.snapshot.repository) return;
+  if (session.project.spec.repository?.autoCatchUp === false) return;
+  if (session.snapshot.running) return;
+
+  const status = await session.checkpoints.baseStatus().catch(() => undefined);
+  if (!status || status.behind === 0) return;
+
+  session.snapshot.running = true;
+  emit(session, { type: 'base_sync_started' });
+  const event = await runBaseCatchUp(session);
+  session.snapshot.running = false;
+  emit(session, event);
 }
 
 async function describeRepository(store: CheckpointStore, sourceDirtyFiles: number): Promise<RepositoryView | undefined> {

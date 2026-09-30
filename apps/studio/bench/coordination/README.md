@@ -67,6 +67,9 @@ pnpm bench:coordination --backend claude-code --model sonnet --tasks orders-list
 # claude-code 승격(H5): haiku로 시작해 게이트가 같은 실패 서명을 2번 내면 sonnet으로 올린다
 pnpm bench:coordination --backend claude-code --model haiku --escalate-to sonnet --tasks orders-list --strategies S0 --repeats 1
 
+# 계획-실행 분리(ADR-075, E8): opus가 계획을 한 번 쓰고, haiku가 그 계획을 붙여 실행한다
+pnpm bench:coordination --backend claude-code --model haiku --plan-model opus --execute-model haiku --tasks orders-list --strategies S0,S1 --repeats 3
+
 # 가볍게 확인(E5): 레인·통합 게이트가 서비스 재시작·준비·계약만 확인한다(테스트·화면·리뷰는 건너뜀)
 pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --verify light --tasks orders-list,order-detail,order-summary --repeats 3
 
@@ -107,6 +110,8 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--escalate-after <n>` — 기본 2. `--escalate-to`와 함께 쓴다(`B_STUDIO_ESCALATE_AFTER`)
 - `--escalate-after-failures <n>` — 서명과 무관하게 게이트 실패가 N번이면 올린다(기본 없음). 서명이 매번 달라 승격 계기가 없는 실행(E4의 5회)을 재기 위한 규칙이다(`B_STUDIO_ESCALATE_AFTER_FAILURES`)
 - `--escalate-retry-budget <n>` — 기본 2. 승격한 뒤 게이트 재시도를 **새로** 주는 횟수다. 남은 횟수에 더하지 않고 "지금까지 시도한 수 + N"으로 상한을 다시 잡는다(E4에서 승격 뒤 한 번밖에 남지 않던 것을 겨냥). `0`이면 새 예산 없음 = 승격 규칙을 넣기 전과 같다(`B_STUDIO_ESCALATE_RETRY_BUDGET`)
+- `--plan-model <모델>`, `--execute-model <모델>` — 계획-실행 분리(ADR-075, "계획은 큰 모델, 실행은 작은 모델"). claude-code 백엔드(계획 기본 또는 레인 중 하나)가 있을 때만 쓸 수 있다(`--escalate-to`와 같은 제약 — 계획 호출 경로가 claude-code·api에만 있고, 벤치 openai는 실행마다 단일 모델 레지스트리라 계획 모델을 끼울 자리가 없다). `--plan-model`만 주면 계획은 그 모델이 쓰고 실행은 `--model`을 그대로 쓴다. 둘 다 서버 프로세스 환경 변수(`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)로 넘어가 스튜디오 코드와 같은 경로(`planExecuteConfig`)를 탄다. 행마다 `planExecute: { plan?, execute? }`로 남고, `meta.json`에도 `planModel`·`executeModel`로, 요약 맨 위 줄에도 `계획-실행 분리: 계획 X → 실행 Y`로 남는다
+- `--plan-always` — 요청 복잡도와 무관하게 계획을 세운다(`B_STUDIO_PLAN_BRIEF=always`). 벤치 과제는 짧아 기본(auto)이면 `simple`로 분류돼 계획을 건너뛴다. 계획-실행 분리를 재려면 함께 준다
 - `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` — 반복할 수 있습니다. 레인 그룹은 `api`·`web`(레인의 첫 쓰기 경로)입니다. 모르는 그룹·백엔드면 시작 전에 오류를 냅니다. 쓰는 CLI는 시작 전에 각각 로그인을 확인합니다. 요약표 "레인 백엔드" 열(예 `api:claude-code web:commandcode`)과 행의 레인별 `backend`·`model`로 남습니다. `--backend`는 계획 기본(통합 세션)으로 남습니다
 - `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
 
@@ -141,10 +146,10 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
 
-- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`, 계약 `contracts`)
+- `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 계획-실행 분리 설정 `planExecute`, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`, 계약 `contracts`)
 - `contracts/`: `--contracts model`일 때 모델이 쓴 계약 원문(`<과제>-r<반복>-<순번>.json`). 불일치 원인을 나중에 보려고 남깁니다.
 - `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "수리(시도/성공)"(S4가 통합 실패 뒤 모델 수리를 요청한 실행 수 / 수리 실행이 done으로 끝난 수), "API 환산 비용($)" 열이 있습니다.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`·`escalateAfterFailures`·`escalateRetryBudget`), 단가 파일 경로(`pricesPath`), git 커밋.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`·`escalateAfterFailures`·`escalateRetryBudget`), 계획-실행 분리 설정(`planModel`·`executeModel`), 단가 파일 경로(`pricesPath`), git 커밋.
 
 행의 `escalation`은 `{ to, after, afterFailures?, retryBudget, escalated, attempt? }`입니다. `to`·`after`·`afterFailures`·`retryBudget`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).
 
