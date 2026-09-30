@@ -27,6 +27,8 @@ export interface ReviewRoundDeps {
   diff: () => Promise<string>;
   /** 세션의 원래 사용자 요청들(오래된 것부터) */
   requests: () => readonly string[];
+  /** 이 PR이 구현하는 요구사항의 압축 목록(ADR-089). 없으면 undefined(요구사항을 안 쓰거나 계산이 실패했다 — 리뷰는 그대로 진행한다) */
+  requirementsContext?: () => string;
   /** PR에 댓글 하나를 남긴다. 실패하면 던진다 — 이 모듈이 잡아 commentError로만 남기고 라운드는 계속한다 */
   postComment: (body: string) => Promise<{ url?: string }>;
   /** 같은 세션에 고침을 요청하고 검증 게이트를 통과한 체크포인트까지 기다린다 */
@@ -74,7 +76,7 @@ export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, 
       const diff = await deps.diff();
       const truncated = truncateDiff(diff);
       omittedFiles = [...truncated.omittedFiles];
-      const result = await requestPrReview(deps.ask, { diff: truncated.diff, requests: deps.requests(), round, omittedFiles });
+      const result = await requestPrReview(deps.ask, { diff: truncated.diff, requests: deps.requests(), round, omittedFiles, requirementsContext: deps.requirementsContext?.() });
       findings = result.findings;
       tokens = result.usage;
     } catch (error) {

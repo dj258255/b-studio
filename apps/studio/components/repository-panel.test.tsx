@@ -78,6 +78,17 @@ describe("IssueRow", () => {
     expect(open).toContain("bg-pass");
     expect(closed).toContain("bg-line");
   });
+
+  it("b-studio:req 라벨 + [Rn] 제목이면 요구사항 id 칩을 보여준다(ADR-089)", () => {
+    const html = renderToStaticMarkup(<IssueRow issue={issue({ title: "[R4] 로그인 API", labels: ["b-studio:req", "kind:api"] })} onOpen={() => {}} />);
+    expect(html).toContain("요구사항 이슈");
+    expect(html).toContain(">R4<");
+  });
+
+  it("라벨이 없으면 제목이 [Rn] 형태여도 칩을 보여주지 않는다", () => {
+    const html = renderToStaticMarkup(<IssueRow issue={issue({ title: "[R4] 로그인 API", labels: ["bug"] })} onOpen={() => {}} />);
+    expect(html).not.toContain("요구사항 이슈");
+  });
 });
 
 describe("PullRow", () => {

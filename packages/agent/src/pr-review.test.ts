@@ -3,6 +3,7 @@ import type { AgentUsage } from './loop';
 import {
   buildPrReviewComment,
   buildPrReviewFixRequest,
+  buildPrReviewUserPrompt,
   hasBlockingFindings,
   MAX_PR_REVIEW_FINDINGS,
   nextPrReviewStep,
@@ -155,6 +156,20 @@ describe('buildPrReviewFixRequest', () => {
     expect(request).toContain('C');
     expect(request).toContain('이렇게 고치세요');
     expect(request).toContain('관련 없는 다른 변경은 하지 마세요');
+  });
+});
+
+describe('buildPrReviewUserPrompt', () => {
+  it('requirementsContext를 주면 diff 앞에 끼워 넣고, 없으면 그대로 둔다(ADR-089)', () => {
+    const withContext = buildPrReviewUserPrompt({ diff: 'd', requests: ['요청1'], round: 1, requirementsContext: '[이 PR이 구현하는 요구사항]\n- R1. 로그인' });
+    expect(withContext).toContain('[이 PR이 구현하는 요구사항]');
+    expect(withContext).toContain('- R1. 로그인');
+
+    const withoutContext = buildPrReviewUserPrompt({ diff: 'd', requests: ['요청1'], round: 1 });
+    expect(withoutContext).not.toContain('요구사항');
+
+    const blank = buildPrReviewUserPrompt({ diff: 'd', requests: ['요청1'], round: 1, requirementsContext: '   ' });
+    expect(blank).not.toContain('요구사항');
   });
 });
 

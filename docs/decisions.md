@@ -103,6 +103,7 @@
 - [ADR-086 기본 egress에 GitHub 릴리스 호스트를 연다(Gradle 배포판)](#adr-086-기본-egress에-github-릴리스-호스트를-연다gradle-배포판)
 - [ADR-087 개발 화면 탭을 일곱 개로 묶고 올리기 전 점검을 저장소 탭으로 옮긴다](#adr-087-개발-화면-탭을-일곱-개로-묶고-올리기-전-점검을-저장소-탭으로-옮긴다)
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
+- [ADR-090 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-090-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
 
 ---
 
@@ -3618,6 +3619,59 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-090 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다
+
+상태: 채택
+관련: -
+
+### 맥락
+- ADR-079가 `docs/requirements.md`(요구사항 + 증거 기반 상태)를 만들었지만, 그 상태는 세션 화면 안에서만 보인다. 여러 사람이 같이 보는 곳(팀 채널에 붙이는 이슈 링크, 이슈 트래커의 검색·필터·마일스톤)에서는 요구사항이 전혀 보이지 않는다. ADR-072(이슈로 바로 작업)·ADR-081(이슈·PR 상세)이 이미 저장소 이슈를 읽는 경로를 만들어 뒀으니, 이번에는 반대 방향(파일 → 이슈)을 잇는다.
+- task-plans.ts의 `publishPlanIssues`(작업 계획을 추적 이슈 + 하위 이슈로 올리는 기존 기능)가 좋은 선례다: 하위 이슈를 먼저 만들고, GitHub이면 `sub_issues` API로 연결하고, 그 밖의 호스트는 추적 이슈 본문에 체크리스트로 대신한다. 이번 기능은 "작업 계획" 대신 "요구사항"을 그 패턴에 태운다.
+- 관건은 **한 방향**을 지키는 것이다: `docs/requirements.md`가 언제나 원본이고, 이슈는 그 내용을 보여 주는 거울이어야 한다. 그런데 GitHub 이슈는 누구나 웹에서 바로 고칠 수 있어, "파일에서 편 값"과 "이슈에 지금 적힌 값"이 어긋날 수 있다 — 조용히 한쪽으로 덮어쓰면 사람이 이슈에서 고친 내용을 잃는다. 그래서 발행은 dry-run 계획을 먼저 세우고, 어긋남(충돌)을 감지하면 사람에게 가져오기·덮어쓰기·무시를 고르게 한다.
+- 다른 에이전트가 같은 시점에 `requirements.ts`의 `Requirement`에 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace` 필드를 추가하는 중이었다(ADR 조율 중, 아직 main 미병합). 이 기능은 그 필드들이 있으면 쓰고 없어도 동작해야 했다.
+- GitHub 하위 이슈 API(Sub-issues REST API, 2024년 일반 공개)는 GitHub에만 있다. Gitea·GitLab은 그런 API가 없어 ADR-072와 같은 경계로 GitHub·Gitea만 지원하고(GitLab은 대상 밖), 하위 이슈 연결은 GitHub에서만 한다.
+
+### 결정
+1. **순수 계산은 `packages/agent/src/requirement-issues.ts`에 모은다**(파일 IO·네트워크 없음): 관리형 영역(`<!-- b-studio:req id=R4 rev=2 hash=… --> … <!-- /b-studio:req -->`, EARS·시나리오·NFR·인수 조건을 담는다) 빌드·파싱, 라벨 집합(`b-studio:req`·`kind:*`·`priority:*`·`status:*`), 추적 이슈·하위 이슈 본문, 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists), 고정 상태 댓글, PR 본문 조립(`Closes #n`·`Implements: Rn@revN`), 이슈 폼 파싱, API 경로 화이트리스트. `Requirement`의 선택 필드(`rev`·`ears`·`scenarios`·`nfr`·`trace`)는 전부 optional인 별도 구조 타입(`RequirementForIssues`)으로 방어적으로 읽는다 — 다른 에이전트의 작업이 병합되기 전에도, 병합된 뒤에도 그대로 호환된다.
+2. **충돌 판정은 "우리가 마지막으로 쓴 해시"를 기준으로 삼는다.** 이슈 본문을 사람이 GitHub에서 직접 고쳐도 관리형 영역 헤더의 `hash=` 속성은 안 건드릴 수 있으므로, 그 속성을 믿지 않고 본문 내용을 다시 해시해 우리가 저장해 둔 `published.hash`와 비교한다. 다르면(원격이 바뀌었다) conflict, 로컬 해시가 그것과 다르면(내용이 바뀌었다) update(열려 있으면)/reverify(닫혀 있으면 다시 열고 재확인 필요로 표시), 같으면 unchanged(닫혀 있는데 검증 안 됨이면 closed_but_requirement_exists로 따로 알린다).
+3. **발행 기록은 `docs/requirements.issues.json`(사이드카 파일)에 둔다**(`docs/requirements.md` 자체는 건드리지 않는다). 요구사항 id마다 `{issue, rev, publishedHash, publishedAt}`을 담고, 추적 이슈 번호도 함께 둔다. `docs/requirements.md`의 저장 형식은 다른 에이전트가 동시에 고치고 있어 직접 필드를 더하면 병합 충돌·형식 드리프트 위험이 컸다 — 완전히 분리된 파일로 옆에 두면 그 위험이 없어지고, 재시작해도(세션 파일이라 커밋된다) 발행 상태를 잃지 않는다.
+4. **발행 orchestrator는 `apps/studio/lib/server/requirement-issues.ts`에 둔다**: `packages/agent`의 이슈 API(`createIssue`·`addSubIssue`·`updateIssue`·`listIssueComments`·`updateComment`·`ensureLabels`)를 부르고, `docs/requirements.issues.json`을 읽고 쓴다. **`sessions.ts`를 import하지 않는다**(원격·토큰·요구사항·상태 같은 순수 데이터만 받는다) — `sessions.ts`가 이 모듈을 부르는 한쪽 방향 의존만 있어 task-plans.ts와 sessions.ts 사이의 기존 관계와 같은 모양이다.
+5. **must·should만 하위 이슈, could·docs는 추적 이슈 체크리스트.** 추적 이슈 제목은 "요구사항: <프로젝트>", 표에 id·제목·종류·우선순위·상태·하위 이슈 링크를 담는다.
+6. **상태 반영은 요구사항마다 고정 댓글 하나만 계속 편집한다**(새 댓글을 쌓지 않는다). 표(시나리오·테스트·결과·커밋·게이트)를 담고, `status:*` 라벨도 같이 바꾼다. **검증됨 + 이 세션의 PR이 실제로 병합됐을 때만**(`PullDetail.merged`, GitHub·Gitea PR 상세에 새로 더한 필드) 하위 이슈를 닫는다 — `state: closed`만으로는 병합 없이 닫힌 PR과 구분이 안 되므로, `merged` 필드를 새로 읽어야 했다.
+7. **PR 본문·AI 리뷰에 요구사항을 잇는다.** 세션 커밋 제목의 "[R4]" 언급을 모아(`extractRequirementMentions`) `Closes #n`(검증됨 + 발행된 이슈만)·`Implements: Rn`(또는 `Rn@revN`)을 PR 본문 끝에 붙이고(`buildRequirementsAddendum`, `Closes #n`은 기본 브랜치로 여는 PR에서만 동작한다는 안내를 함께 남긴다), AI 리뷰 라운드의 사용자 프롬프트에도 구현한 요구사항의 제목·시나리오 압축 목록을 붙인다(`buildReviewRequirementsContext`). 올리기(export) 미리보기·생성 API가 사람이 이슈 번호를 입력하지 않았을 때 이 세션이 구현한(발행된) 요구사항의 이슈 번호를 통합 계획 이슈와 합쳐 기본값으로 쓴다 — 기존 텍스트 입력 칸에 자동으로 채워지는 방식이라 새 체크박스 UI 없이도 "기본 선택"이 된다. "이 요구사항 작업"·"전체 계획 세우기" 프리필도 발행된 이슈 번호를 `[R7] 제목 (#12)`로 덧붙인다.
+8. **UI**: "명세" 탭에 "이슈로 발행" 버튼 → dry-run 미리보기(행동별 개수 + 목록, 충돌마다 가져오기·덮어쓰기·무시 버튼) → 확인 후 발행. "다음 단계" 박스는 원격이 GitHub이면 "이슈로 발행"을 "전체 계획 세우기"보다 앞세우고, 아직 발행하지 않은 채 "전체 계획 세우기"를 누르면 한 번만("아직 이슈로 발행하지 않았습니다 — 먼저 발행할까요?") 물어보고 답하면 그 세션 동안 다시 묻지 않는다. 요구사항 카드에 발행된 이슈 번호 칩을 달고, 저장소 탭 이슈 목록은 `b-studio:req` 라벨 + `[Rn]` 제목이면 R-id 칩을 보여준다.
+9. **안전장치**: 이 기능이 부르는 API 경로는 이슈·하위 이슈·댓글·라벨만 화이트리스트로 못 박는다(`ALLOWED_REQUIREMENT_ENDPOINTS`, `assertAllowedRequirementEndpoint`). 협업자·권한·저장소 설정·웹훅·브랜치 보호 엔드포인트는 이 목록에 없고, repository.ts의 새 함수(`updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`)는 모두 실제 호출 전에 이 확인을 거친다. 라벨 생성만 예외로 허용한다(디자인에서 명시한 유일한 "설정 비슷한" 쓰기) — 그 밖의 저장소 설정은 절대 건드리지 않는다. 개인 PC 모드는 저장소 화면과 같은 `gh auth token` 폴백을 쓴다(`createIssue`·`addSubIssue`에 `token` 오버라이드를 새로 더했다 — 예전에는 환경 변수만 읽었다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 발행 기록(이슈 번호·해시)을 `docs/requirements.md`의 JSON 블록에 같이 넣는다 | 그 파일 형식을 다른 에이전트가 동시에 고치고 있어 병합 충돌·형식 드리프트 위험이 크다. 완전히 분리된 사이드카 파일(`docs/requirements.issues.json`)로 뒀다(채택) |
+| B. 충돌 판정을 관리형 영역 헤더의 `hash=` 속성만 보고 한다 | 사람이 GitHub에서 눈에 보이는 본문만 고치고 헤더 속성은 그대로 두면 충돌을 놓친다. 헤더를 신뢰하지 않고 본문 내용을 다시 해시해 우리가 저장한 값과 비교한다(채택) |
+| C. orchestrator가 `sessions.ts`의 세션 객체를 직접 받는다(편하게 `session.project.root` 등을 바로 쓴다) | `sessions.ts` → orchestrator → (다시) `sessions.ts` 순환이 생기거나, 세션 타입에 orchestrator가 얽매인다. 원격·토큰·프로젝트 루트 같은 순수 데이터만 받게 해 `sessions.ts`가 한쪽으로만 의존하게 했다(채택, task-plans.ts와 같은 방향) |
+| D. "검증됨"이면(PR 병합 여부와 무관하게) 하위 이슈를 바로 닫는다 | 검증됨은 세션 안의 증거일 뿐, 그 변경이 실제로 main에 들어갔다는 보장이 아니다(PR이 아직 열려 있거나 병합 없이 닫혔을 수 있다). `PullDetail.merged`를 새로 읽어 "검증됨 + 실제 병합" 둘 다 확인했을 때만 닫는다(채택) |
+| E. 이슈 번호 선택을 위해 저장소 탭처럼 체크박스 목록 UI를 새로 만든다 | 올리기 화면은 이미 쉼표 구분 텍스트 입력 한 칸으로 이슈 번호를 받고, 서버가 기본값을 미리 채워 준다(첫 미리보기 호출에서). 그 기존 통로에 발행된 요구사항 이슈 번호를 기본값으로 더 섞어 주는 쪽이 새 UI보다 작고 일관됐다(채택) |
+
+### 검증 결과
+- `packages/agent/src/requirement-issues.test.ts`(신규, 30건): 관리형 영역 왕복, 라벨 집합, 추적 이슈 본문(표 + 체크리스트), 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists, 멱등성), 고정 상태 댓글, PR 본문 조립(Closes/Implements), 이슈 가져오기(관리형 영역·이슈 폼·평문 세 경로), API 경로 화이트리스트(허용·거부 양쪽).
+- `packages/agent/src/repository.test.ts`(보강): `updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`·`ensureLabels` 신규 함수를 페이크 fetch로 확인했다.
+- `apps/studio/lib/server/requirement-issues.test.ts`(신규, 12건): 임시 폴더 + 페이크 `@b-studio/agent` 함수로 발행 계획·발행 실행(하위 이슈 연결 실패해도 계속 진행)·충돌 세 갈래(가져오기·덮어쓰기·무시)·상태 동기화(고정 댓글 편집, PR 병합 시에만 닫기)를 확인했다.
+- `apps/studio/lib/server/sessions.test.ts`(보강): 프리필에 발행된 이슈 번호를 붙이는 `annotateWithIssue`·`annotateAllMustHavesPrefill`.
+- `apps/studio/app/api/sessions/[id]/requirements/{publish,publish/preview,publish/conflict,publish/sync,import-issue}/route.test.ts`(신규), `apps/studio/app/api/sessions/[id]/export/{,preview/}route.test.ts`(신규): 라우트 위임과, 입력이 없을 때 통합 계획 이슈 + 발행된 요구사항 이슈를 합쳐 기본값으로 쓰는 것을 확인했다.
+- `packages/agent/src/pr-review.test.ts`·`apps/studio/lib/server/review-round.test.ts`(보강): `requirementsContext`가 리뷰어 프롬프트에 그대로 실리는 것을 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`·`repository-panel.test.tsx`(보강): "다음 단계" 순서(GitHub이면 이슈로 발행이 먼저), 확인 게이트 순수 로직(`shouldConfirmBeforePlanAll`), R-id 칩 렌더링을 확인했다(이 저장소의 컴포넌트 테스트 관례대로 `renderToStaticMarkup`만 쓴다 — 상호작용 테스트 도구가 없어 클릭 흐름 자체는 그 안에 든 순수 로직으로 나눠 검증했다).
+- `pnpm -r typecheck`(6개 패키지) 통과, `pnpm --filter @b-studio/studio lint` 0 errors(기존 경고 7개는 이 변경과 무관), 전체 `vitest run`은 이 변경분 기준으로 새로 실패한 테스트가 없다(기존에도 알려진 부하 플레이키 — Docker 스크립트·체크포인트 git clone·아티팩트 정리 테스트가 전체 스위트를 한 번에 돌릴 때만 가끔 5초 타임아웃에 걸린다 — 단독 실행하면 통과한다).
+- 실제 GitHub·Gitea API 호출은 하지 않았다(이번 라운드 조건: 네트워크 금지). 모든 네트워크 경로는 페이크 `fetch`/모킹한 `@b-studio/agent` 함수로만 검증했다.
+
+### 감수한 트레이드오프
+- **발행 기록이 두 파일(`docs/requirements.md` + `docs/requirements.issues.json`)로 나뉜다.** 사람이 `docs/requirements.md`만 보고 "이 요구사항이 몇 번 이슈인지" 바로 알 수 없다(화면의 이슈 칩으로 봐야 한다). `docs/requirements.md`의 소유권 충돌을 피하려 감수했다 — 그 파일의 필드가 안정된 뒤 통합할 수 있는 여지는 남겨 뒀다(사이드카 파일의 필드 이름을 그대로 옮기면 된다).
+- **GitLab은 지원하지 않는다**(GitHub·Gitea만). GitLab은 하위 이슈 개념이 다르고(epic·related issue), 라벨·이슈 API 모양도 달라 이번 범위에 넣지 않았다.
+- **이슈 목록 조회(`listIssues`)가 첫 페이지(최대 50개)만 본다** — ADR-079의 트레이드오프와 같다. 요구사항이 50개를 훌쩍 넘고 옛 이슈가 뒤로 밀리면 `trace.issue`(사이드카 파일) 없이는 id 마커로 못 찾을 수 있다.
+- **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
+- **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
+- **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
@@ -3645,3 +3699,4 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - Conductor, [conductor.build](https://conductor.build) · smtg-ai, [Claude Squad](https://github.com/smtg-ai/claude-squad) · Cognition, [Devin](https://devin.ai)
 - Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
 - OpenAI, [Codex](https://openai.com/codex/)
+- GitHub Docs, [Sub-issues REST API](https://docs.github.com/en/rest/issues/sub-issues) · [Adding sub-issues](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-sub-issues) · [Syntax for issue forms](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms) · [Linking a pull request to an issue](https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue)

@@ -1,5 +1,6 @@
 import type { WorkflowStage } from '@b-studio/spec';
 import type { SessionCommit } from './checkpoints';
+import { assertAllowedRequirementEndpoint } from './requirement-issues';
 import { VERIFICATION_STAGES } from './workflow';
 
 export type GitHostKind = 'github' | 'gitlab' | 'gitea' | 'other' | 'local';
@@ -211,6 +212,8 @@ export interface PullDetail extends PullRequestSummary {
   /** GitHub·Gitea 모두 계산에 시간이 걸려 결과가 없을 때(null)가 있다 */
   mergeable?: boolean;
   mergeableState?: string;
+  /** 실제로 병합됐는지(state가 closed라도 병합 없이 닫혔을 수 있다 — 요구사항 이슈를 닫을지 판단하는 유일하게 믿을 수 있는 신호다) */
+  merged?: boolean;
   files: PullFile[];
   filesSupported: boolean;
   filesUnsupportedReason?: string;
@@ -819,6 +822,7 @@ interface RawPullDetail {
   /** GitHub만 채운다. 계산이 끝나기 전이면 null */
   mergeable?: boolean | null;
   mergeable_state?: string;
+  merged?: boolean;
 }
 interface RawCheckRun {
   name: string;
@@ -952,6 +956,7 @@ export async function fetchPullRequestDetail(
     baseBranch: raw.base.ref,
     mergeable: raw.mergeable ?? undefined,
     mergeableState: raw.mergeable_state,
+    merged: raw.merged,
     files,
     filesSupported: github,
     filesUnsupportedReason: github ? undefined : GITEA_FILES_UNSUPPORTED,
@@ -979,12 +984,13 @@ function hasNextPage(response: Response): boolean {
 export async function createIssue(
   remote: RemoteLocation,
   input: IssueInput,
-  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+  { env = process.env, fetch: fetchFn = fetch, token: tokenOverride }: { env?: Env; fetch?: Fetch; token?: string } = {},
 ): Promise<IssueResult> {
   if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
     throw new PullRequestError('이슈를 만들 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
   }
-  const token = env[TOKEN_ENV[remote.kind]];
+  // 개인 PC 모드의 gh CLI 토큰 폴백을 쓸 수 있게(저장소 화면·요구사항 발행기와 같은 경계), 넘겨받은 토큰을 env보다 앞세운다
+  const token = tokenOverride ?? env[TOKEN_ENV[remote.kind]];
   if (!token) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈를 만들 수 없습니다`);
 
   if (remote.kind === 'gitlab') {
@@ -1021,11 +1027,11 @@ export async function addSubIssue(
   remote: RemoteLocation,
   parent: number,
   child: number,
-  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+  { env = process.env, fetch: fetchFn = fetch, token: tokenOverride }: { env?: Env; fetch?: Fetch; token?: string } = {},
 ): Promise<SubIssueResult> {
   if (remote.kind !== 'github') return { supported: false };
   if (!remote.host || !remote.path) throw new PullRequestError('하위 이슈를 연결할 수 있는 저장소 호스트가 아닙니다');
-  const token = env[TOKEN_ENV.github];
+  const token = tokenOverride ?? env[TOKEN_ENV.github];
   if (!token) throw new PullRequestError(`${TOKEN_ENV.github} 토큰이 없어 하위 이슈를 연결할 수 없습니다`);
   const { api, headers } = gitHubStyleApi(remote, token, env);
   const issues = `${api}/repos/${encodeURIComponent(remote.path.split('/')[0]!)}/${encodeURIComponent(remote.path.split('/')[1]!)}/issues`;
@@ -1042,6 +1048,121 @@ export async function addSubIssue(
   });
   if (response.status !== 201) throw new PullRequestError(`GitHub 하위 이슈 연결이 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
   return { supported: true };
+}
+
+/** 이슈 본문·라벨·열림 상태를 고친다(요구사항 발행기, ADR-089). GitHub·Gitea만 지원한다(gitHubStyleApi와 같은 경계) */
+export async function updateIssue(
+  remote: RemoteLocation,
+  number: number,
+  input: { body?: string; labels?: string[]; state?: 'open' | 'closed' },
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<void> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('이슈를 고칠 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈를 고칠 수 없습니다`);
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const path = `/repos/${owner}/${repo}/issues/${number}`;
+  assertAllowedRequirementEndpoint(path);
+  const response = await fetchFn(`${api}${path}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      ...(input.body !== undefined ? { body: capBody(input.body) } : {}),
+      ...(input.labels !== undefined ? { labels: input.labels } : {}),
+      ...(input.state !== undefined ? { state: input.state } : {}),
+    }),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new PullRequestError(`${label} API가 이슈 수정을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+}
+
+export interface IssueCommentRef {
+  id: number;
+  body: string;
+  url: string;
+}
+
+/**
+ * 이슈의 댓글 전부(최대 100개)를 읽는다. 요구사항 발행기가 이 안에서 고정 상태 댓글(`b-studio:req-status` 마커)을
+ * 찾아 편집만 하고 새로 남기지 않는다(`findPinnedStatusComment`, requirement-issues.ts).
+ */
+export async function listIssueComments(
+  remote: RemoteLocation,
+  number: number,
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<IssueCommentRef[]> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('댓글을 볼 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 댓글을 볼 수 없습니다`);
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const path = `/repos/${owner}/${repo}/issues/${number}/comments`;
+  assertAllowedRequirementEndpoint(path);
+  const response = await fetchFn(`${api}${path}?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  if (!response.ok) throw new PullRequestError(`${label} API가 댓글 목록 조회를 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  const data = (await response.json()) as Array<{ id: number; body?: string | null; html_url: string }>;
+  return data.map((comment) => ({ id: comment.id, body: comment.body ?? '', url: comment.html_url }));
+}
+
+/** 이미 있는 댓글 하나를 고친다(요구사항 발행기의 고정 상태 댓글 갱신 — 새 댓글을 남기지 않는다) */
+export async function updateComment(
+  remote: RemoteLocation,
+  commentId: number,
+  body: string,
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<void> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('댓글을 고칠 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 댓글을 고칠 수 없습니다`);
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const path = `/repos/${owner}/${repo}/issues/comments/${commentId}`;
+  assertAllowedRequirementEndpoint(path);
+  const response = await fetchFn(`${api}${path}`, { method: 'PATCH', headers, body: JSON.stringify({ body: capBody(body) }), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  if (!response.ok) throw new PullRequestError(`${label} API가 댓글 수정을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+}
+
+/** 저장소의 라벨 이름 전부(최대 100개)를 읽는다. 요구사항 발행기가 라벨을 붙이기 전에 있는지 확인하는 용도다 */
+export async function listLabels(
+  remote: RemoteLocation,
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<string[]> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('라벨을 볼 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 라벨을 볼 수 없습니다`);
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const path = `/repos/${owner}/${repo}/labels`;
+  assertAllowedRequirementEndpoint(path);
+  const response = await fetchFn(`${api}${path}?per_page=100`, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  if (!response.ok) throw new PullRequestError(`${label} API가 라벨 목록 조회를 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  const data = (await response.json()) as Array<{ name: string }>;
+  return data.map((item) => item.name);
+}
+
+/** 저장소에 라벨 하나를 만든다(없을 때만 불러야 한다 — 이미 있으면 GitHub·Gitea 모두 422를 준다. 이 함수는 그 오류를 조용히 삼킨다) */
+export async function createLabel(
+  remote: RemoteLocation,
+  name: string,
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<void> {
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new PullRequestError('라벨을 만들 수 있는 저장소 호스트가 아닙니다(GitHub·Gitea만 지원합니다)');
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 라벨을 만들 수 없습니다`);
+  const { api, headers, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const path = `/repos/${owner}/${repo}/labels`;
+  assertAllowedRequirementEndpoint(path);
+  const response = await fetchFn(`${api}${path}`, { method: 'POST', headers, body: JSON.stringify({ name }), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  // 이미 있으면(422) 조용히 넘어간다 — ensureLabels가 목록을 먼저 보지만, 동시에 두 발행이 겹치면 경쟁이 생길 수 있다
+  if (!response.ok && response.status !== 422) throw new PullRequestError(`라벨 생성이 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+}
+
+/** 주어진 라벨 이름 중 저장소에 없는 것만 만든다(라벨 생성은 이 기능이 허용받은 유일한 "설정 비슷한" 쓰기다 — 그 밖의 저장소 설정은 절대 건드리지 않는다) */
+export async function ensureLabels(
+  remote: RemoteLocation,
+  names: readonly string[],
+  deps: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<void> {
+  const existing = new Set(await listLabels(remote, deps));
+  const missing = names.filter((name) => !existing.has(name));
+  for (const name of missing) await createLabel(remote, name, deps);
 }
 
 /** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
