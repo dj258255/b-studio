@@ -535,6 +535,15 @@ export const GuideSchema = z.object({
 });
 
 /**
+ * 체크포인트 커밋 제목 규칙(ADR-080). 켜면 요청 글과 바뀐 파일에서 conventional commit 형식(타입 접두어 + 한국어 요약)의
+ * 제목을 만든다. 끄면 기존 "요청: ..." 형식을 그대로 쓴다. 절을 생략해도(아래 StudioSpecSchema의 `.default({})`) 켬이 기본값이다
+ */
+export const CheckpointsSchema = z.object({
+  /** 체크포인트 커밋 제목에 conventional commit 규칙을 적용하는지 */
+  conventionalCommits: z.boolean().default(true),
+});
+
+/**
  * 계획-실행 분리(ADR-075)에서 쓸 모델. 절이 없거나 필드를 생략하면 같은 이름의 환경 변수
  * (`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 쓰고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 한다.
  * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름(예: `opus`),
@@ -593,6 +602,8 @@ export const StudioSpecSchema = z.object({
   guide: GuideSchema.default({ file: 'AGENTS.md', maxChars: 8_000, enabled: true }),
   /** 계획-실행 분리(ADR-075). 절이 없으면 환경 변수만 본다(둘 다 없으면 계획 호출 없음) */
   models: ModelsSchema.optional(),
+  /** 체크포인트 커밋 제목 규칙(ADR-080). 절이 없어도 기본값(conventional commits 켬)이 채워진다 */
+  checkpoints: CheckpointsSchema.default({ conventionalCommits: true }),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
@@ -606,6 +617,7 @@ export type DesignSpec = z.infer<typeof DesignSchema>;
 export type ReviewSpec = z.infer<typeof ReviewSchema>;
 export type GuideSpec = z.infer<typeof GuideSchema>;
 export type ModelsSpec = z.infer<typeof ModelsSchema>;
+export type CheckpointsSpec = z.infer<typeof CheckpointsSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;

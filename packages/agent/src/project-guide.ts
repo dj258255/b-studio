@@ -11,6 +11,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { GuideSpec, LoadedProject } from '@b-studio/spec';
+import { parseRequirementsMarkdown, REQUIREMENTS_FILE, summarizeRequirementsForGuide } from './requirements';
 
 /** guide 절을 아예 생략한 studio.yaml(스키마가 없는 옛 프로젝트 픽스처 포함)에 쓰는 기본값 */
 const DEFAULT_GUIDE: GuideSpec = { file: 'AGENTS.md', maxChars: 8_000, enabled: true };
@@ -27,11 +28,25 @@ export interface ProjectGuide {
 }
 
 /**
- * 프로젝트 루트에서 지침 파일을 읽는다. 꺼져 있거나(guide.enabled=false) 파일이 없으면 undefined를 돌려주고,
- * 호출자(각 러너)는 이때 시스템 프롬프트에 아무것도 더하지 않는다 — 있지도 않은 파일 때문에 고정 문맥이 늘지 않는다.
+ * 프로젝트 루트에서 지침 파일을 읽는다. 꺼져 있거나(guide.enabled=false) 파일이 없으면 그 부분은 건너뛴다 —
+ * 호출자(각 러너)는 둘 다 없으면 시스템 프롬프트에 아무것도 더하지 않는다(있지도 않은 파일 때문에 고정 문맥이 늘지 않는다).
  * 읽기는 매 실행마다 새로 한다(캐시하지 않는다): 이전 실행이나 사람이 방금 고친 내용을 이번 실행부터 반영해야 하기 때문이다.
+ *
+ * docs/requirements.md(ADR-079, "명세 → 요구사항 → 검증 추적")가 있으면 그 요약(요구사항 id·제목·우선순위, must/should만,
+ * ≤1,500자, summarizeRequirementsForGuide)을 같은 절 끝에 이어 붙인다 — projectGuideSection이 감싸는 하나의 블록으로 모델에
+ * 전달되고, guideChars 지표(loop.ts 등 각 러너가 이미 guide.charsUsed를 metrics.guideChars에 옮긴다)에도 자연히 합쳐진다.
+ * AGENTS.md 없이 요구사항 파일만 있어도(guide.enabled=false가 아닌 한) 이 절은 만들어진다 — 두 지침은 별개의 관심사다.
  */
 export async function loadProjectGuide(project: LoadedProject): Promise<ProjectGuide | undefined> {
+  const base = await loadAgentsGuide(project);
+  const requirementsSection = await loadRequirementsGuideSection(project);
+  if (!base && !requirementsSection) return undefined;
+  const text = base && requirementsSection ? `${base.text}\n\n${requirementsSection}` : (base?.text ?? requirementsSection)!;
+  return { file: base?.file ?? REQUIREMENTS_FILE, text, charsUsed: text.length };
+}
+
+/** AGENTS.md(또는 대체 이름)를 읽는다. loadProjectGuide의 기존 동작 그대로다 */
+async function loadAgentsGuide(project: LoadedProject): Promise<Pick<ProjectGuide, 'file' | 'text'> | undefined> {
   const config = project.spec.guide ?? DEFAULT_GUIDE;
   if (!config.enabled) return undefined;
   const file = config.file ?? DEFAULT_GUIDE.file;
@@ -42,12 +57,22 @@ export async function loadProjectGuide(project: LoadedProject): Promise<ProjectG
   for (const candidate of candidates) {
     const raw = await tryRead(path.join(project.root, candidate));
     if (raw === undefined) continue;
-    if (raw.length <= maxChars) return { file: candidate, text: raw, charsUsed: raw.length };
+    if (raw.length <= maxChars) return { file: candidate, text: raw };
     const cutChars = raw.length - maxChars;
     const text = `${raw.slice(0, maxChars)}\n\n[...나머지 ${cutChars.toLocaleString('ko-KR')}자는 길이 제한으로 잘렸습니다. 필요하면 read_file로 ${candidate} 전체를 읽으세요]`;
-    return { file: candidate, text, charsUsed: text.length };
+    return { file: candidate, text };
   }
   return undefined;
+}
+
+/** docs/requirements.md가 있으면 요약해 돌려준다. 없거나 요구사항을 하나도 못 읽으면(파일이 깨졌거나 비어 있음) undefined */
+async function loadRequirementsGuideSection(project: LoadedProject): Promise<string | undefined> {
+  const raw = await tryRead(path.join(project.root, REQUIREMENTS_FILE));
+  if (raw === undefined) return undefined;
+  const { requirements } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return undefined;
+  const summary = summarizeRequirementsForGuide(requirements);
+  return summary || undefined;
 }
 
 async function tryRead(file: string): Promise<string | undefined> {

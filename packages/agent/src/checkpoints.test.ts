@@ -158,6 +158,19 @@ describe('CheckpointStore', () => {
     expect(commits[1]!.passedStages).toBeUndefined();
   });
 
+  it('sessionCommits는 커밋마다 바뀐 줄 수(추가·삭제)를 담는다(제출 준비 점검, ADR-080)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order {\n  String a;\n  String b;\n}\n');
+    await store.commit('요청: 필드 두 개 추가');
+    await write('api/src/Order.java', 'class Order {\n  String a;\n}\n');
+    await store.commit('요청: 필드 하나 지움');
+
+    const commits = await store.sessionCommits();
+    expect(commits[0]!.stat).toEqual({ insertions: 4, deletions: 1 });
+    expect(commits[1]!.stat).toEqual({ insertions: 0, deletions: 1 });
+  });
+
   it('sessionDiff는 세션 시작부터 지금까지의 변경을 모두 담는다(PR 자동 리뷰가 보는 범위, ADR-074)', async () => {
     const store = new CheckpointStore(root);
     await store.init();

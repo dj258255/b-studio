@@ -77,6 +77,12 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}models:\n  plan: ""\n`)).toThrow(SpecError);
   });
 
+  it('체크포인트 커밋 제목 설정(ADR-080)은 절이 없어도 기본값(conventional commits 켬)이 채워지고, 끌 수 있다', () => {
+    expect(parseSpec(ORDERS_SPEC).checkpoints).toEqual({ conventionalCommits: true });
+    expect(parseSpec(`${ORDERS_SPEC}checkpoints: {}\n`).checkpoints).toEqual({ conventionalCommits: true });
+    expect(parseSpec(`${ORDERS_SPEC}checkpoints:\n  conventionalCommits: false\n`).checkpoints).toEqual({ conventionalCommits: false });
+  });
+
   it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
     expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
       fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',

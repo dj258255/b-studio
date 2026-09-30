@@ -2,32 +2,51 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { z } from 'zod';
 import {
   appendPlanToRequest,
+  buildAllMustHavesPrefill,
   buildPullRequest,
+  buildRequirementWorkPrefill,
   canCreatePullRequest,
   captureBaselines,
   CheckpointError,
   CheckpointStore,
   compareUrl,
+  computeRequirementStatus,
   createPullRequest,
+  generateCommitSubject,
   DatabaseBranches,
   describeDatabaseState,
   estimateCost,
+  extractRequirementsHeuristically,
   fetchIssue,
+  findCheckpointMentions,
+  findGateCheckMentions,
   formatVerificationReport,
   formatVerifyTrailer,
   formatWorkflowTrailer,
+  isLikelyTestFile,
+  listIssues,
+  MAX_REQUIREMENTS,
   ORDERS_DEMO_SCENARIOS,
   parsePullRequestNumber,
   parseRemote,
+  parseRequirementsMarkdown,
   planAskFromClient,
   postComment,
   requestPlanBrief,
+  requestRequirementsExtraction,
+  REQUIREMENTS_FILE,
+  RequirementSchema,
+  requirementConfidence,
+  scanTestFilesForRequirementId,
+  serializeRequirementsMarkdown,
   shouldPlanBrief,
+  summarizeCoverage,
   preflightClaudeCode,
   preflightCodex,
   preflightCommandCode,
@@ -52,24 +71,32 @@ import {
   type BaseStatus,
   type BoardAccess,
   type BrowserFrame,
+  type CheckpointRef,
   type Checkpoint,
   type DatabaseState,
   type DemoScenario,
   type DesignFrameInfo,
   type DesignSource,
   type EscalationPolicy,
+  type GateCheckResult,
   type GitAuthor,
   type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
+  type Requirement,
+  type RequirementCoverage,
+  type RequirementEvidence,
+  type RequirementStatus,
   type RepositoryInfo,
   type RoutingDecision,
   type RunMetrics,
   type RemoteSyncResult,
+  type ScannedFile,
   type ServiceCheck,
   type VerificationReport,
   type SelfCheckMode,
   type VerifyMode,
+  type WorkflowCheck,
 } from '@b-studio/agent';
 import {
   defaultDeployRoot,
@@ -87,6 +114,7 @@ import {
 } from '@b-studio/sandbox';
 import { loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
+import { buildSubmissionChecklist, type ChecklistService, type SubmissionReport } from '@/lib/submission-checklist';
 import {
   addTokens,
   describeWindow,
@@ -265,6 +293,12 @@ interface Session {
   /** 마지막으로 대화나 상태가 바뀐 시각. 세션 목록 정렬에 쓴다 */
   updatedAt: string;
   persist: { timer?: NodeJS.Timeout; chain: Promise<void> };
+  /**
+   * 가장 최근 체크포인트를 만든 실행의 게이트 확인 결과(테스트·화면 확인 등 이름 붙은 확인, AgentResult.checks).
+   * "명세" 탭(ADR-079)이 이름에 요구사항 id가 들어간 확인의 통과·실패를 증거로 삼는다. 체크포인트를 남기지 못한
+   * 실행(질문·되돌림)에서는 갱신하지 않는다 — "최근 체크포인트"의 결과여야 하기 때문이다
+   */
+  lastGateChecks?: WorkflowCheck[];
 }
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
@@ -1604,6 +1638,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
+        if (result.checks) session.lastGateChecks = result.checks;
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
         await revertRun(session, run.id);
       }
@@ -1945,7 +1980,10 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     session.databases.enabled &&
     (await session.checkpoints.pendingFiles()).length === 0 &&
     (await session.databases.changedSince(head, session.stop.signal));
-  const checkpoint = await session.checkpoints.commit(`요청: ${request}`, body, {
+  const subject = session.project.spec.checkpoints.conventionalCommits
+    ? generateCommitSubject(request, await session.checkpoints.pendingChanges())
+    : `요청: ${request}`;
+  const checkpoint = await session.checkpoints.commit(subject, body, {
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers,
@@ -2273,6 +2311,35 @@ export async function previewExport(id: string, { issues = [] }: { issues?: read
     }),
     review: { auto: session.project.spec.review.auto, maxRounds: session.project.spec.review.maxRounds },
   };
+}
+
+/**
+ * "제출 준비" 패널(ADR-080)의 점검표. 요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서를 한 번에 확인한다.
+ * 실제 점검 규칙은 세션을 모르는 순수 함수(lib/submission-checklist.ts)에 있고, 여기서는 세션이 들고 있는 프로젝트 폴더·
+ * 체크포인트·저장소 상태를 그 함수가 받는 모양으로 조립하기만 한다
+ */
+export async function submissionReport(id: string): Promise<SubmissionReport> {
+  const session = requireSession(id);
+  const services: ChecklistService[] = session.project.managed.map(([name, service]) => ({
+    name,
+    template: service.template,
+    path: service.path,
+    port: service.port,
+  }));
+  const [pendingFilesCount, commits, repository] = await Promise.all([
+    session.checkpoints.pendingFiles().then((files) => files.length),
+    session.checkpoints.sessionCommits(),
+    session.checkpoints.repository(),
+  ]);
+  return buildSubmissionChecklist({
+    root: session.project.root,
+    services,
+    hasDatabase: session.project.databases.length > 0,
+    latestPassedStages: session.snapshot.checkpoints[0]?.passedStages,
+    pendingFilesCount,
+    repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
+    commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 } })),
+  });
 }
 
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
@@ -2851,6 +2918,225 @@ export async function checkpointPatch(id: string, sha: string): Promise<string> 
     throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
   }
   return session.checkpoints.patch(sha);
+}
+
+// ---------------------------------------------------------------------------
+// 명세 → 요구사항 → 검증 추적(ADR-079). "명세" 탭이 쓴다.
+// ---------------------------------------------------------------------------
+
+/** docs/requirements.md를 다시 읽을 때, 화면이 요구사항마다 보여 줄 근거·상태·확신 표시·대화창 채우기 글을 합친 모양 */
+export interface RequirementView extends Requirement {
+  status: RequirementStatus;
+  confidence: '🟢' | '🟡' | '🔴';
+  evidence: RequirementEvidence;
+  /** "이 요구사항 작업" 버튼이 채운다(서버가 만든 글을 그대로 쓴다 — 화면은 조립하지 않는다) */
+  workPrefill: string;
+}
+
+export interface RequirementsSnapshot {
+  /** docs/requirements.md가 세션 작업 복사본에 있는지. 없으면 requirements는 항상 빈 배열이다 */
+  exists: boolean;
+  requirements: RequirementView[];
+  coverage?: RequirementCoverage;
+  /** "전체 계획 세우기" 버튼이 채운다. must 요구사항이 하나도 없으면 없다 */
+  allMustHavesPrefill?: string;
+}
+
+const TEST_SCAN_IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.gradle', '.venv', '__pycache__', 'coverage', 'design']);
+/** 테스트 파일 스캔이 너무 오래 걸리지 않게 두는 안전판(대부분의 과제 저장소는 이 안에 다 들어온다) */
+const TEST_SCAN_MAX_FILES = 400;
+const TEST_SCAN_MAX_FILE_BYTES = 200_000;
+
+/**
+ * 세션 작업 복사본에서 테스트로 보이는 파일을 찾아 읽는다(JUnit *.Test.java, Jest/Vitest/Playwright *.test.ts 등).
+ * node_modules·생성물 폴더는 건너뛰고, 파일 수·크기에 안전판을 둔다 — 요구사항 탭을 열 때마다 도는 동기 스캔이라
+ * 과제 저장소 크기를 벗어나면 값싸게 멈춰야 한다.
+ */
+async function scanWorkingCopyTestFiles(root: string): Promise<ScannedFile[]> {
+  const files: ScannedFile[] = [];
+  async function walk(dir: string): Promise<void> {
+    if (files.length >= TEST_SCAN_MAX_FILES) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true, encoding: 'utf8' });
+    } catch {
+      return; // 권한 없음 등은 조용히 건너뛴다 — 증거 하나 놓치는 것이 탭 전체를 실패시키는 것보다 낫다
+    }
+    for (const entry of entries) {
+      if (files.length >= TEST_SCAN_MAX_FILES) return;
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || TEST_SCAN_IGNORED_DIRS.has(entry.name)) continue;
+        await walk(path.join(dir, entry.name));
+      } else if (entry.isFile() && isLikelyTestFile(entry.name)) {
+        const absolute = path.join(dir, entry.name);
+        try {
+          const stats = await stat(absolute);
+          if (stats.size > TEST_SCAN_MAX_FILE_BYTES) continue;
+          const content = await readFile(absolute, 'utf8');
+          files.push({ path: path.relative(root, absolute).replaceAll(path.sep, '/'), content });
+        } catch {
+          // 읽는 사이 지워졌거나 이진 파일이면 건너뛴다
+        }
+      }
+    }
+  }
+  await walk(root);
+  return files;
+}
+
+/**
+ * 추출 모델을 부르는 방법. 도구 없이 한 번만 묻는 호출 경로가 claude-code(로컬 CLI)·api(모델 레지스트리) 두 모드에만 있어
+ * (계획·PR 리뷰 호출과 같은 제약) 그 밖의 백엔드에서는 undefined를 돌려준다 — 호출하는 쪽이 결정론적 대체 파서로 넘어간다.
+ */
+function requirementsAsk(session: Session): ModelAsk | undefined {
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
+  if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('요구사항 추출', 'build', session.snapshot.modelId).selected));
+  return undefined;
+}
+
+/** 저장소 이슈 본문을 가져온다. repository-panel.ts와 같은 자료원(listIssues)을 쓰지만, 그 모듈은 sessions.ts를 가져오므로 순환을 피해 직접 부른다 */
+async function fetchIssueBodyForSession(session: Session, issueNumber: number): Promise<string> {
+  const info = await session.checkpoints.repository();
+  if (!info) throw new StudioError(409, '이 프로젝트는 원격 저장소가 없어 이슈를 가져올 수 없습니다');
+  const remote = parseRemote(info.remoteUrl);
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') {
+    throw new StudioError(400, `${remote.display}는 이슈 가져오기를 지원하지 않습니다(GitHub·Gitea만 지원합니다)`);
+  }
+  const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
+  if (!token) throw new StudioError(400, '이슈를 가져올 토큰이 없습니다');
+  const issues = await listIssues(remote, { state: 'all', token });
+  const issue = issues.find((candidate) => candidate.number === issueNumber);
+  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
+  const body = issue.body?.trim();
+  return body ? `${issue.title}\n\n${body}` : issue.title;
+}
+
+export interface RequirementsExtractionInput {
+  /** 붙여넣은 명세 글 */
+  specText?: string;
+  /** 세션 작업 복사본의 파일 경로(예: 과제.md, README.md, docs/spec.md) */
+  filePath?: string;
+  /** 저장소 이슈 번호. 있으면 이슈 제목·본문을 명세로 쓴다 */
+  issueNumber?: number;
+  /** "스펙을 고치고 다시 뽑기": 지난 추출의 질문과 답을 스펙 끝에 덧붙여 다시 추출한다(Spec Kit의 /clarify 응답 반영과 같은 자리) */
+  answers?: Array<{ question: string; answer: string }>;
+}
+
+async function resolveSpecText(session: Session, input: RequirementsExtractionInput): Promise<string> {
+  let text: string;
+  if (input.specText?.trim()) {
+    text = input.specText;
+  } else if (input.filePath) {
+    text = await new Workspace(session.project.root).read(input.filePath);
+  } else if (input.issueNumber !== undefined) {
+    text = await fetchIssueBodyForSession(session, input.issueNumber);
+  } else {
+    throw new StudioError(400, '명세 글, 파일 경로, 이슈 번호 중 하나가 필요합니다');
+  }
+  if (input.answers && input.answers.length > 0) {
+    const answered = input.answers.map((item, index) => `${index + 1}. ${item.question}\n   답: ${item.answer}`).join('\n');
+    text = `${text}\n\n---\n[질문 답변]\n${answered}`;
+  }
+  if (!text.trim()) throw new StudioError(400, '명세 글이 비어 있습니다');
+  return text;
+}
+
+export interface RequirementsExtractionPreview {
+  requirements: Requirement[];
+  questions: string[];
+  /** 추출 모델을 불러 얻었는지(model), 도구 없는 단발 호출을 지원하지 않는 백엔드거나 모델 호출이 실패해 결정론적 파서로 대신했는지(fallback) */
+  source: 'model' | 'fallback';
+  /** source가 fallback일 때만 있다. 화면이 그대로 보여 준다 */
+  reason?: string;
+}
+
+/**
+ * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
+ * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다.
+ */
+export async function previewSessionRequirementsExtraction(id: string, input: RequirementsExtractionInput): Promise<RequirementsExtractionPreview> {
+  const session = requireSession(id);
+  const specText = await resolveSpecText(session, input);
+  const backend = sessionBackend(session.snapshot);
+  const ask = requirementsAsk(session);
+  if (!ask) {
+    return {
+      requirements: extractRequirementsHeuristically(specText),
+      questions: [],
+      source: 'fallback',
+      reason: `이 세션 백엔드(${backend})는 도구 없이 한 번만 묻는 모델 호출을 지원하지 않아, 헤딩·글머리 기호로 요구사항을 나누는 결정론적 방식으로 대신했습니다`,
+    };
+  }
+  try {
+    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal);
+    return { requirements: result.requirements, questions: result.questions, source: 'model' };
+  } catch (error) {
+    return {
+      requirements: extractRequirementsHeuristically(specText),
+      questions: [],
+      source: 'fallback',
+      reason: `추출 모델 호출이 실패해 결정론적 방식으로 대신했습니다: ${describe(error)}`,
+    };
+  }
+}
+
+/** 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다 */
+function evaluateRequirement(requirement: Requirement, checkpoints: readonly CheckpointRef[], testFiles: readonly ScannedFile[], gateChecks: readonly GateCheckResult[]): RequirementView {
+  const evidence: RequirementEvidence = {
+    checkpoints: findCheckpointMentions(checkpoints, requirement.id),
+    tests: scanTestFilesForRequirementId(testFiles, requirement.id),
+    gateChecks: findGateCheckMentions(gateChecks, requirement.id),
+  };
+  const status = computeRequirementStatus(evidence);
+  return { ...requirement, status, confidence: requirementConfidence(status), evidence, workPrefill: buildRequirementWorkPrefill(requirement) };
+}
+
+/** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
+export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
+  const session = requireSession(id);
+  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  if (raw === undefined) return { exists: false, requirements: [] };
+  const { requirements } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return { exists: true, requirements: [] };
+
+  const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
+  const testFiles = await scanWorkingCopyTestFiles(session.project.root);
+  const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
+
+  const views = requirements.map((requirement) => evaluateRequirement(requirement, checkpoints, testFiles, gateChecks));
+  const statusById = Object.fromEntries(views.map((view) => [view.id, view.status]));
+  const mustHaves = requirements.filter((requirement) => requirement.priority === 'must');
+  return {
+    exists: true,
+    requirements: views,
+    coverage: summarizeCoverage(requirements, statusById),
+    ...(mustHaves.length > 0 ? { allMustHavesPrefill: buildAllMustHavesPrefill(requirements) } : {}),
+  };
+}
+
+const ApplyRequirementSchema = RequirementSchema;
+
+/**
+ * 요구사항을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
+ * 저장 시점의 증거로 상태를 다시 매겨 사람이 읽는 상태 줄에 스냅샷으로 남긴다(다시 열 때는 항상 증거로 새로 계산한다).
+ */
+export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
+  const parsed = z.array(ApplyRequirementSchema).min(1).max(MAX_REQUIREMENTS).safeParse(input);
+  if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  const ids = parsed.data.map((requirement) => requirement.id);
+  if (new Set(ids).size !== ids.length) throw new StudioError(400, '요구사항 id가 중복됩니다');
+
+  const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
+  const testFiles = await scanWorkingCopyTestFiles(session.project.root);
+  const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
+  const statusById = Object.fromEntries(parsed.data.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
+
+  const markdown = serializeRequirementsMarkdown(parsed.data, statusById);
+  await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
+  return getSessionRequirements(id);
 }
 
 function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
