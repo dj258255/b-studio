@@ -9,7 +9,8 @@ import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { loadProjectGuide } from './project-guide';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
@@ -143,6 +144,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   const gateFor = (): Promise<VerificationGate> =>
     (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(project.root — 아래 workdir은 Codex 전용 빈 임시 폴더라 여기 쓰지 않는다)의 AGENTS.md를 읽는다(ADR-077)
+  const guide = await loadProjectGuide(project);
   const context: ToolContext = {
     project,
     selfCheck: options.selfCheck,
@@ -178,7 +181,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   const serial = serialQueue();
   // 실행 지표. modelMs는 모델 응답 대기가 SDK 안(하위 프로세스)에서 일어나 이 러너가 관찰하지 못하므로 0으로 둔다.
   // 0은 "재지 않음"이고, 전체 시간에서 도구·게이트 시간을 뺀 추측값을 넣지 않는다
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   // Codex 작업 폴더는 실행마다 만드는 빈 임시 폴더다. project.root를 넘기면 모델이 apply_patch로 작업 공간을 직접 바꿀 수 있다
   const workdir = await mkdtemp(path.join(tmpdir(), WORKDIR_PREFIX));
@@ -260,7 +263,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
 
     // Codex SDK에는 systemPrompt 옵션이 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다.
     // (설정의 developer_instructions로 넘기는 방법도 있으나 내장 도구 안내를 덮어쓸 위험이 있어 쓰지 않았다)
-    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}${projectGuideSection(guide)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
     let announced = false;
 
     for (let turn = 1; turn <= maxTurns; turn++) {

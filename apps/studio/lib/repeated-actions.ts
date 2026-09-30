@@ -480,7 +480,11 @@ export function findRepeatedActions(
 
 /**
  * "스크립트로 만들기" 버튼이 대화 입력창에 채울 요청 글. 사람이 검토해 고친 뒤 직접 보낸다(자동으로 보내지 않는다).
- * command·sequence 후보에만 쓴다(big_read는 buildNoteSummaryRequest를 쓴다)
+ * command·sequence 후보에만 쓴다(big_read는 buildNoteSummaryRequest를 쓴다).
+ *
+ * AGENTS.md에 한 줄을 남겨 달라고도 함께 요청한다 — b-studio가 매 실행 시작마다 프로젝트 루트(작업 복사본)의
+ * AGENTS.md를 읽어 모델에게 넘기므로(ADR-077), 이 한 줄이 있어야 다음 실행부터 실제로 스크립트를 쓴다.
+ * 스크립트만 만들고 이 줄을 남기지 않으면 스크립트는 존재하되 아무도 참조하지 않는 죽은 파일이 된다
  */
 export function buildScriptRequest(candidate: RepeatedActionCandidate): string {
   const name = candidate.suggestion.scriptName ?? 'repeated-action';
@@ -495,15 +499,21 @@ export function buildScriptRequest(candidate: RepeatedActionCandidate): string {
     '```',
     '',
     `1) ${scriptPath}로 저장하고 실행 권한을 줘(chmod +x).`,
-    `2) 앞으로는 "${original}" 대신 ${scriptPath}를 실행하도록 프로젝트 노트에 한 줄 남겨줘.`,
+    `2) AGENTS.md(프로젝트 루트, 없으면 새로 만들어)에 "## 스크립트" 절을 만들거나 이어서 이 줄을 추가해줘(이미 비슷한 줄이 있으면 새로 만들지 말고 그 줄을 고쳐줘):`,
+    `   - ${original}: \`${scriptPath}\` (${original} 대신 사용)`,
   ].join('\n');
 }
 
-/** "노트에 요약 남기기" 버튼이 채울 요청 글. big_read 후보에만 쓴다 */
+/**
+ * "노트에 요약 남기기" 버튼이 채울 요청 글. big_read 후보에만 쓴다.
+ * AGENTS.md의 "## 메모" 절에 요약을 남겨 달라고 요청한다 — 매 실행 시작마다 b-studio가 이 파일을 읽어 모델에게
+ * 넘기므로(ADR-077), 다음부터는 파일을 다시 읽지 않고 이 요약만 보고도 판단할 수 있다
+ */
 export function buildNoteSummaryRequest(candidate: RepeatedActionCandidate): string {
   const path = candidate.examples[0]?.input ?? candidate.title;
   return [
     `"${path}" 파일을 여러 실행에서 크게(총 ${candidate.totalChars.toLocaleString('ko-KR')}자) 반복해서 읽고 있어.`,
-    '이 파일의 핵심 내용을 프로젝트 노트에 요약해서 남겨줘. 다음부터는 이 노트를 먼저 보고, 필요할 때만 파일을 다시 읽어줘.',
+    `이 파일의 핵심 내용을 AGENTS.md(프로젝트 루트, 없으면 새로 만들어)의 "## 메모" 절에 간결하게 요약해서 남겨줘(이미 이 파일에 대한 메모가 있으면 새로 만들지 말고 갱신해줘).`,
+    '다음부터는 이 요약을 먼저 보고, 필요할 때만 파일을 다시 읽어줘.',
   ].join('\n');
 }

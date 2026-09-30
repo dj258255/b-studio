@@ -60,6 +60,15 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 4\n`)).toThrow(SpecError);
   });
 
+  it('프로젝트 지침 설정은 절이 없어도 기본값(켬·AGENTS.md·8,000자)이 채워지고, 값을 바꿀 수 있다', () => {
+    expect(parseSpec(ORDERS_SPEC).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide: {}\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide:\n  file: CLAUDE.md\n  maxChars: 2000\n`).guide).toEqual({ file: 'CLAUDE.md', maxChars: 2_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide:\n  enabled: false\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: false });
+    expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: 0\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: -1\n`)).toThrow(SpecError);
+  });
+
   it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
     expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
       fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',

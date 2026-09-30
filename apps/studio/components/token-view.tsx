@@ -115,6 +115,7 @@ export function RunDetail({ report }: { report: TokenReport }) {
           <Stat label="캐시 적중률" value={percent(report.cacheHitRatio)} />
           <Stat label="추정 비용" value={costText(report)} />
           <Stat label="비운 도구 결과" value={report.cleared.count === 0 ? "없음" : `${number(report.cleared.count)}개 · ${number(report.cleared.chars)}자`} />
+          {report.guideChars !== undefined && <Stat label="고정 문맥(AGENTS.md)" value={`${number(report.guideChars)}자`} />}
         </dl>
         <p className="mt-1 text-xs text-muted">캐시 적중률은 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기)입니다. 추정 비용은 단가 환경 변수를 넣었을 때만 계산합니다.</p>
         {report.escalation && (

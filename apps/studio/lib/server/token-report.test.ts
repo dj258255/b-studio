@@ -186,6 +186,17 @@ describe('buildTokenReports', () => {
     expect(report!.escalation).toEqual({ from: 'haiku', to: 'sonnet', attempt: 2 });
   });
 
+  it('run_finished.metrics.guideChars(프로젝트 지침, ADR-077)를 보고서에 싣고, 없으면 칸 자체가 없다', () => {
+    const events = modelEvents();
+    const finished = events.find((event) => event.type === 'run_finished') as Extract<StudioEvent, { type: 'run_finished' }>;
+    finished.metrics!.guideChars = 1_234;
+    const [withGuide] = buildTokenReports(events);
+    expect(withGuide!.guideChars).toBe(1_234);
+
+    const [withoutGuide] = buildTokenReports(sampleEvents());
+    expect(withoutGuide!.guideChars).toBeUndefined();
+  });
+
   it('토큰을 쓰지 않은 모델(고정 계획의 scripted)은 모델별 표와 비용에서 뺀다', () => {
     const events = modelEvents();
     const finished = events.find((event) => event.type === 'run_finished') as Extract<StudioEvent, { type: 'run_finished' }>;

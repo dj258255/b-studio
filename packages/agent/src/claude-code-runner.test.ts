@@ -1,3 +1,5 @@
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import type { AccountInfo, McpServerConfig, Options, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -664,5 +666,27 @@ describe('claude-code 러너의 샌드박스 지연 기동(ensureSandbox)', () =
     expect(result.status).toBe('done');
     // 시작할 때 게이트를 만들어 계약 기준을 잡았다(지연 기동이 아니다)
     expect(fetches).toBe(1);
+  });
+});
+
+describe('runClaudeCodeAgent 프로젝트 지침 주입(ADR-077)', () => {
+  it('project.root의 AGENTS.md를 systemPrompt 옵션에 명확히 구분된 절로 넣고, metrics.guideChars에 글자 수를 남긴다', async () => {
+    await writeFile(path.join(project.root, 'AGENTS.md'), '## 스크립트\n- pnpm test 대신 scripts/web-test.sh를 실행\n');
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '읽었습니다.' }]] });
+
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(state.options?.systemPrompt).toContain('[b-studio project guide: AGENTS.md]');
+    expect(state.options?.systemPrompt).toContain('scripts/web-test.sh');
+    expect(result.metrics!.guideChars).toBe('## 스크립트\n- pnpm test 대신 scripts/web-test.sh를 실행\n'.length);
+  });
+
+  it('AGENTS.md가 없으면 systemPrompt에 절을 더하지 않는다', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '읽었습니다.' }]] });
+
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(state.options?.systemPrompt).not.toContain('[b-studio project guide');
+    expect(result.metrics!.guideChars).toBeUndefined();
   });
 });

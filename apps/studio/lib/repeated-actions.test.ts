@@ -236,18 +236,19 @@ describe('findRepeatedActions — 비용 대리 지표와 정렬', () => {
 // ---------- 대화 프리필 ----------
 
 describe('buildScriptRequest / buildNoteSummaryRequest', () => {
-  it('스크립트 요청은 파일 경로·초안·실행 권한·노트 안내를 담는다', () => {
+  it('스크립트 요청은 파일 경로·초안·실행 권한·AGENTS.md의 "## 스크립트" 절 안내를 담는다', () => {
     const [candidate] = findRepeatedActions([
       sessionOf('s1', run('r1', [runCommand('web', ['pnpm', 'test'])]), run('r2', [runCommand('web', ['pnpm', 'test'])]), run('r3', [runCommand('web', ['pnpm', 'test'])])),
     ]);
     const text = buildScriptRequest(candidate!);
     expect(text).toContain(`scripts/${candidate!.suggestion.scriptName}.sh`);
     expect(text).toContain('chmod +x');
-    expect(text).toContain('프로젝트 노트');
+    expect(text).toContain('AGENTS.md');
+    expect(text).toContain('## 스크립트');
     expect(text).toContain('pnpm test');
   });
 
-  it('노트 요약 요청은 파일 경로와 요약 지시를 담는다', () => {
+  it('노트 요약 요청은 파일 경로와 AGENTS.md의 "## 메모" 절 안내를 담는다', () => {
     const sessions = [
       sessionOf('s1', run('r1', [readFile('docs/spec.md', BIG_READ_CHARS + 100)]), run('r2', [readFile('docs/spec.md', BIG_READ_CHARS + 100)])),
       sessionOf('s2', run('r3', [readFile('docs/spec.md', BIG_READ_CHARS + 100)])),
@@ -255,6 +256,7 @@ describe('buildScriptRequest / buildNoteSummaryRequest', () => {
     const candidate = findRepeatedActions(sessions).find((c) => c.kind === 'big_read')!;
     const text = buildNoteSummaryRequest(candidate);
     expect(text).toContain('docs/spec.md');
-    expect(text).toContain('프로젝트 노트');
+    expect(text).toContain('AGENTS.md');
+    expect(text).toContain('## 메모');
   });
 });
