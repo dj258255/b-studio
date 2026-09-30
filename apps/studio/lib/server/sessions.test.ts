@@ -10,6 +10,7 @@ import {
   claudeCodeEscalation,
   parseIssueInput,
   parseIssueList,
+  planBriefBackend,
   planExecuteConfig,
   planKindForBackend,
   resolveSessionBackend,
@@ -271,5 +272,15 @@ describe('자가 확인 범위(B_STUDIO_SELF_CHECK)', () => {
   it('모르는 값은 조용히 full로 떨어뜨리지 않고 설정 오류로 알린다', () => {
     expect(() => selfCheckMode({ B_STUDIO_SELF_CHECK: 'LEAN' })).toThrow(StudioError);
     expect(() => selfCheckMode({ B_STUDIO_SELF_CHECK: 'on' })).toThrow(/full 또는 lean/);
+  });
+});
+
+describe('planBriefBackend', () => {
+  it('계획 호출은 api·claude-code 세션에서만 하고, 데모(대본)·다른 백엔드는 건너뛴다', () => {
+    expect(planBriefBackend('api')).toBe('api');
+    expect(planBriefBackend('claude-code')).toBe('claude-code');
+    expect(planBriefBackend('demo')).toBeUndefined();
+    expect(planBriefBackend('codex')).toBeUndefined();
+    expect(planBriefBackend('opencode')).toBeUndefined();
   });
 });
