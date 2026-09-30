@@ -1,24 +1,45 @@
-import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { AgentUsage } from './loop';
+import type { ModelAsk } from './task-plan';
 import {
   buildAllMustHavesPrefill,
   buildExtractionUserPrompt,
+  buildMissingReferenceQuestion,
+  buildReferencedFilePreview,
+  buildReferencedFilesContext,
   buildRequirementWorkPrefill,
   computeRequirementStatus,
+  extractPathReferences,
   extractRequirementsHeuristically,
   findCheckpointMentions,
   findGateCheckMentions,
+  labelRecommendationSource,
   mentionsRequirementId,
+  missingReferencedFile,
   parseExtractionReply,
+  parseRecommendationReply,
   parseRequirementsMarkdown,
+  RecommendationReplySchema,
+  requestQuestionRecommendations,
   REQUIREMENTS_GUIDE_MAX_CHARS,
   RequirementsError,
   requirementConfidence,
+  resolveReferencedFiles,
   scanTestFilesForRequirementId,
   serializeRequirementsMarkdown,
   summarizeCoverage,
+  summarizeJsonPreview,
   summarizeRequirementsForGuide,
   type Requirement,
 } from './requirements';
+
+const noUsage: AgentUsage = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 };
+function scriptedAsk(text: string): ModelAsk {
+  return async () => ({ text, usage: noUsage });
+}
 
 const sample: Requirement = {
   id: 'R1',
@@ -64,6 +85,82 @@ describe('parseExtractionReply', () => {
 describe('buildExtractionUserPrompt', () => {
   it('스펙 원문을 그대로 담는다', () => {
     expect(buildExtractionUserPrompt('  과제: 로그인을 만드세요  ')).toContain('과제: 로그인을 만드세요');
+  });
+
+  it('참조 파일 요약이 있으면 뒤에 붙인다', () => {
+    const prompt = buildExtractionUserPrompt('스펙', '- seed/seed.json (120 bytes): posts 3개');
+    expect(prompt).toContain('스펙');
+    expect(prompt).toContain('[참조 파일 요약]');
+    expect(prompt).toContain('seed/seed.json');
+  });
+
+  it('참조 파일 요약이 없으면 절을 붙이지 않는다', () => {
+    expect(buildExtractionUserPrompt('스펙')).not.toContain('[참조 파일 요약]');
+  });
+});
+
+describe('extractPathReferences', () => {
+  it('디렉터리/파일.확장자와 파일.확장자만 있는 이름을 모두 찾는다', () => {
+    const spec = '시드 데이터는 seed/seed.json에 있고, API 설명은 openapi.yaml과 docs/api.md, 스키마는 schema.sql을 보세요.';
+    expect(extractPathReferences(spec)).toEqual(['seed/seed.json', 'openapi.yaml', 'docs/api.md', 'schema.sql']);
+  });
+
+  it('같은 경로가 여러 번 나와도 한 번만 담는다', () => {
+    expect(extractPathReferences('seed/seed.json을 읽고 seed/seed.json 형식을 맞추세요')).toEqual(['seed/seed.json']);
+  });
+
+  it('URL 안의 경로는 참조 파일로 보지 않는다', () => {
+    expect(extractPathReferences('명세는 https://example.com/spec.json 에 있습니다')).toEqual([]);
+  });
+
+  it('참조할 확장자가 없는 낱말은 찾지 않는다', () => {
+    expect(extractPathReferences('로그인 API를 만드세요')).toEqual([]);
+  });
+});
+
+describe('summarizeJsonPreview', () => {
+  it('배열이면 길이를 담는다', () => {
+    expect(summarizeJsonPreview(JSON.stringify([1, 2, 3]))).toBe('배열, 3개 항목');
+  });
+
+  it('객체면 키마다 배열 길이를 담아 요약한다', () => {
+    const content = JSON.stringify({ posts: new Array(42).fill(0), comments: new Array(2076).fill(0), meta: { ok: true } });
+    expect(summarizeJsonPreview(content)).toBe('posts 42개, comments 2,076개, meta');
+  });
+
+  it('JSON이 아니면 앞 몇 줄로 대신한다', () => {
+    expect(summarizeJsonPreview('그냥 텍스트\n둘째 줄')).toBe('그냥 텍스트\n둘째 줄');
+  });
+});
+
+describe('buildReferencedFilePreview / buildReferencedFilesContext', () => {
+  it('JSON 파일은 요약을, 그 밖은 앞 줄을 미리보기로 담는다', () => {
+    const json = buildReferencedFilePreview('seed/seed.json', JSON.stringify({ posts: [1, 2] }), 42);
+    expect(json).toEqual({ path: 'seed/seed.json', exists: true, sizeBytes: 42, preview: 'posts 2개' });
+
+    const md = buildReferencedFilePreview('docs/api.md', '# API\n설명', 10);
+    expect(md.preview).toBe('# API\n설명');
+  });
+
+  it('없는 참조 파일은 missingReferencedFile로 만든다', () => {
+    expect(missingReferencedFile('seed/seed.json')).toEqual({ path: 'seed/seed.json', exists: false });
+  });
+
+  it('없는 파일에는 참조 파일 질문을 만든다', () => {
+    expect(buildMissingReferenceQuestion('seed/seed.json')).toContain('seed/seed.json');
+  });
+
+  it('전체 글자 수 상한을 넘으면 뒤는 자른다', () => {
+    const files = Array.from({ length: 200 }, (_, index) => buildReferencedFilePreview(`docs/file-${index}.md`, '내용', 10));
+    const context = buildReferencedFilesContext(files, 200);
+    expect(context.length).toBeLessThanOrEqual(200);
+    expect(context).toContain('docs/file-0.md');
+  });
+
+  it('상한을 넉넉히 주면 있음/없음 모두 담는다', () => {
+    const context = buildReferencedFilesContext([buildReferencedFilePreview('seed/seed.json', '{}', 2), missingReferencedFile('docs/api.md')]);
+    expect(context).toContain('seed/seed.json (2 bytes)');
+    expect(context).toContain('docs/api.md: 파일 없음');
   });
 });
 
@@ -141,6 +238,34 @@ describe('serializeRequirementsMarkdown / parseRequirementsMarkdown', () => {
 
   it('아무 구조도 JSON 블록도 없으면 빈 배열', () => {
     expect(parseRequirementsMarkdown('그냥 아무 텍스트').requirements).toEqual([]);
+  });
+
+  it('"## 가정" 절도 왕복한다', () => {
+    const markdown = serializeRequirementsMarkdown([sample], {}, ['seed 데이터 기준 게시글 42건', '페이지네이션 필요']);
+    expect(markdown).toContain('## 가정');
+    expect(markdown).toContain('- seed 데이터 기준 게시글 42건');
+    const { assumptions } = parseRequirementsMarkdown(markdown);
+    expect(assumptions).toEqual(['seed 데이터 기준 게시글 42건', '페이지네이션 필요']);
+  });
+
+  it('가정이 없으면 "## 가정" 절 자체를 쓰지 않는다', () => {
+    const markdown = serializeRequirementsMarkdown([sample]);
+    expect(markdown).not.toContain('## 가정');
+    expect(parseRequirementsMarkdown(markdown).assumptions).toEqual([]);
+  });
+
+  it('사람이 "## 가정" 절을 통째로 지우면 가정 없음으로 본다', () => {
+    const markdown = serializeRequirementsMarkdown([sample], {}, ['지울 가정']);
+    const withoutAssumptions = markdown.replace(/## 가정\n- 지울 가정\n\n/, '');
+    expect(parseRequirementsMarkdown(withoutAssumptions).assumptions).toEqual([]);
+  });
+
+  it('이 기능 전에 저장된 옛 JSON 블록(배열 형식)도 읽는다', () => {
+    const legacy = `# 요구사항\n\n## R1. 로그인 API\n\n<!-- b-studio-requirements\n${JSON.stringify([sample], null, 2)}\n-->\n`;
+    const broken = `구조가 깨졌습니다.\n\n${legacy.slice(legacy.indexOf('<!--'))}`;
+    const { requirements, assumptions } = parseRequirementsMarkdown(broken);
+    expect(requirements).toEqual([sample]);
+    expect(assumptions).toEqual([]);
   });
 });
 
@@ -282,5 +407,92 @@ describe('prefill', () => {
     const text = buildAllMustHavesPrefill(requirements);
     expect(text).toContain('[R1] 로그인 API');
     expect(text).not.toContain('보너스');
+  });
+});
+
+describe('resolveReferencedFiles', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'requirements-references-'));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('작업 복사본에 있는 파일은 크기·미리보기를 담는다', async () => {
+    await mkdir(path.join(root, 'seed'), { recursive: true });
+    await writeFile(path.join(root, 'seed', 'seed.json'), JSON.stringify({ posts: [1, 2, 3] }));
+
+    const files = await resolveReferencedFiles(root, '시드 데이터는 seed/seed.json에 있습니다');
+
+    expect(files).toEqual([{ path: 'seed/seed.json', exists: true, sizeBytes: expect.any(Number), preview: 'posts 3개' }]);
+  });
+
+  it('없는 파일은 missing으로 담는다', async () => {
+    const files = await resolveReferencedFiles(root, 'openapi.yaml을 참고하세요');
+    expect(files).toEqual([{ path: 'openapi.yaml', exists: false }]);
+  });
+
+  it('node_modules 같은 생성물 경로는 Workspace가 거부하므로 없는 것으로 본다(내용을 읽지 않는다)', async () => {
+    await mkdir(path.join(root, 'node_modules'), { recursive: true });
+    await writeFile(path.join(root, 'node_modules', 'seed.json'), '{"secret":true}');
+    const files = await resolveReferencedFiles(root, 'node_modules/seed.json을 참고하세요');
+    expect(files).toEqual([{ path: 'node_modules/seed.json', exists: false }]);
+  });
+
+  it('명세에 참조 파일이 없으면 빈 배열', async () => {
+    expect(await resolveReferencedFiles(root, '로그인 API를 만드세요')).toEqual([]);
+  });
+});
+
+describe('labelRecommendationSource', () => {
+  it('웹 검색을 쓸 수 있으면 web, 아니면 model', () => {
+    expect(labelRecommendationSource(true)).toBe('web');
+    expect(labelRecommendationSource(false)).toBe('model');
+  });
+});
+
+describe('parseRecommendationReply / RecommendationReplySchema', () => {
+  it('추천 답 JSON을 파싱한다', () => {
+    const text = JSON.stringify({
+      recommendations: [{ question: '비밀번호 최소 길이는?', answer: '8자 이상', rationale: 'OWASP 권장', sources: [{ url: 'https://owasp.org', title: 'OWASP' }] }],
+    });
+    const reply = parseRecommendationReply(text);
+    expect(reply.recommendations).toHaveLength(1);
+    expect(reply.recommendations[0]!.answer).toBe('8자 이상');
+  });
+
+  it('sources를 생략해도 빈 배열로 채운다(도구 없이 답할 때)', () => {
+    const text = JSON.stringify({ recommendations: [{ question: 'q', answer: 'a', rationale: 'r' }] });
+    expect(parseRecommendationReply(text).recommendations[0]!.sources).toEqual([]);
+  });
+
+  it('JSON이 아니면 RequirementsError', () => {
+    expect(() => parseRecommendationReply('그냥 텍스트')).toThrow(RequirementsError);
+  });
+
+  it('recommendations가 비어 있으면 스키마 위반(적어도 하나는 있어야 한다)', () => {
+    expect(RecommendationReplySchema.safeParse({ recommendations: [] }).success).toBe(false);
+  });
+
+  it('sources가 2개를 넘으면 스키마 위반', () => {
+    const tooManySources = { recommendations: [{ question: 'q', answer: 'a', rationale: 'r', sources: [{ url: 'a' }, { url: 'b' }, { url: 'c' }] }] };
+    expect(RecommendationReplySchema.safeParse(tooManySources).success).toBe(false);
+  });
+});
+
+describe('requestQuestionRecommendations', () => {
+  it('모델 응답을 파싱해 usage·durationMs와 함께 돌려준다', async () => {
+    const text = JSON.stringify({ recommendations: [{ question: 'q', answer: 'a', rationale: 'r', sources: [] }] });
+    const result = await requestQuestionRecommendations(scriptedAsk(text), ['q'], '스펙', false);
+    expect(result.recommendations).toHaveLength(1);
+    expect(result.usage).toEqual(noUsage);
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('응답 형식이 틀리면 RequirementsError(usage·durationMs를 실어서)', async () => {
+    await expect(requestQuestionRecommendations(scriptedAsk('그냥 텍스트'), ['q'], '스펙', false)).rejects.toThrow(RequirementsError);
   });
 });

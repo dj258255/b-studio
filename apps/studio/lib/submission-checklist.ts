@@ -318,6 +318,15 @@ const ENV_USAGE_PATTERNS = [
   /os\.getenv\(\s*['"]([A-Z][A-Z0-9_]*)['"]/g,
 ];
 const YAML_PLACEHOLDER = /\$\{([A-Z][A-Z0-9_]*)(:[^}]*)?\}/g;
+/** Spring 등 앱이 직접 읽는 설정 파일. 여기의 \${VAR}만 앱 실행에 필요한 환경 변수로 본다 */
+const APP_CONFIG_FILE = /(^|\/)(application|bootstrap)(-[\w.-]+)?\.(ya?ml|properties)$/;
+
+/** 기본값이 없는 \${VAR}만 모은다. \${PORT:8080}·\${PORT:-8080}은 없어도 돌아간다 */
+function collectRequiredPlaceholders(text: string, names: Set<string>): void {
+  for (const match of text.matchAll(YAML_PLACEHOLDER)) {
+    if (match[2] === undefined) names.add(match[1]!);
+  }
+}
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.kt', '.py']);
 const YAML_EXTENSIONS = new Set(['.yml', '.yaml', '.properties']);
 const REAL_ENV_FILES = new Set(['.env', '.env.local', '.env.production', '.env.development']);
@@ -341,11 +350,15 @@ export async function checkEnvExample(root: string): Promise<ChecklistItem> {
   const names = new Set<string>();
   for (const file of files) {
     const ext = path.extname(file);
-    if (!SOURCE_EXTENSIONS.has(ext) && !YAML_EXTENSIONS.has(ext)) continue;
+    // 테스트 코드가 읽는 변수는 앱 실행에 필요한 것이 아니다
+    if (TEST_OR_FIXTURE_FILE.test(file)) continue;
+    const appConfig = APP_CONFIG_FILE.test(file);
+    if (!SOURCE_EXTENSIONS.has(ext) && !appConfig) continue;
     const text = await readTextSafe(path.join(root, file));
     if (text === undefined) continue;
-    collectMatches(text, ENV_USAGE_PATTERNS, names);
-    if (YAML_EXTENSIONS.has(ext)) collectMatches(text, [YAML_PLACEHOLDER], names);
+    if (SOURCE_EXTENSIONS.has(ext)) collectMatches(text, ENV_USAGE_PATTERNS, names);
+    // compose·CI·모니터링 YAML의 치환 변수는 앱이 읽는 것이 아니다(pay에서 215개로 부풀었다). 앱 설정 파일만, 기본값 없는 것만 센다
+    if (appConfig) collectRequiredPlaceholders(text, names);
   }
   if (names.size === 0) return { id, title, status: 'skip', reason: '코드에서 환경 변수를 읽는 곳을 찾지 못했습니다.' };
 

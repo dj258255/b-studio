@@ -83,7 +83,11 @@ export interface SessionSnapshot {
    * mode는 세션을 만들 때의 서버 모드라, 레인이 백엔드를 고르면 backend가 그 값이고 mode와 다를 수 있다
    */
   backend?: SessionMode;
-  /** API 모드에서 이 세션에 고정한 모델. 없으면 요청마다 라우터가 선택한다 */
+  /**
+   * 이 세션에 고정한 모델. 대화 입력창의 모델 선택(#271 다음 요청)으로 바꾼다.
+   * api는 모델 레지스트리 id, claude-code·codex는 CLI에 넘기는 모델 이름(별칭), commandcode·opencode는 그 CLI의 모델 id다.
+   * 없으면 api는 요청마다 라우터가 고르고, 나머지는 계정 기본 모델을 쓴다
+   */
   modelId?: string;
   /** 세션을 만든 사람. 인증을 켜면 만든 사람과 관리자만 세션을 바꿀 수 있다 */
   owner?: string;
@@ -267,6 +271,8 @@ export type StudioEvent =
   | { type: 'boot_network'; at: string; network: BootNetwork }
   /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
   | { type: 'design'; design?: DesignView }
+  /** 대화 입력창에서 이 세션이 쓸 모델을 바꿨다. 없으면 "기본"(계정·레지스트리 기본)으로 되돌린 것이다 */
+  | { type: 'model'; modelId?: string }
   /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
   | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean; proposal?: { mode: 'split' | 'fleet'; request: string } }
   /** 사람이 제안을 받아 다른 방식으로 넘겼다. 대화를 이어 가지 않고 질문 카드만 치운다(ADR-068) */

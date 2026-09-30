@@ -8,8 +8,11 @@ import path from 'node:path';
 import { z } from 'zod';
 import {
   appendPlanToRequest,
+  AssumptionSchema,
   buildAllMustHavesPrefill,
+  buildMissingReferenceQuestion,
   buildPullRequest,
+  buildReferencedFilesContext,
   buildRequirementWorkPrefill,
   canCreatePullRequest,
   captureBaselines,
@@ -30,7 +33,10 @@ import {
   formatVerifyTrailer,
   formatWorkflowTrailer,
   isLikelyTestFile,
+  labelRecommendationSource,
   listIssues,
+  MAX_ASSUMPTIONS,
+  MAX_CLARIFYING_QUESTIONS,
   MAX_REQUIREMENTS,
   ORDERS_DEMO_SCENARIOS,
   parsePullRequestNumber,
@@ -38,11 +44,14 @@ import {
   parseRequirementsMarkdown,
   planAskFromClient,
   postComment,
+  REFERENCED_FILES_CONTEXT_MAX_CHARS,
   requestPlanBrief,
+  requestQuestionRecommendations,
   requestRequirementsExtraction,
   REQUIREMENTS_FILE,
   RequirementSchema,
   requirementConfidence,
+  resolveReferencedFiles,
   scanTestFilesForRequirementId,
   serializeRequirementsMarkdown,
   shouldPlanBrief,
@@ -83,6 +92,8 @@ import {
   type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
+  type ReferencedFile,
+  type Recommendation,
   type Requirement,
   type RequirementCoverage,
   type RequirementEvidence,
@@ -161,6 +172,8 @@ import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
+import { isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
+import { rememberProjectModelDefault } from './model-defaults';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -1244,6 +1257,30 @@ export function setSessionDesign(id: string, fileUrl: string): DesignView | unde
   return design;
 }
 
+/** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값을 함께 돌려준다 */
+export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
+  const session = requireSession(id);
+  return listSelectableModels(sessionBackend(session.snapshot), session.snapshot.modelId);
+}
+
+/**
+ * 대화 입력창에서 이 세션이 쓸 모델을 바꾼다. 다음 요청부터 적용된다(planRun이 매번 session.snapshot.modelId를 다시 읽는다).
+ * 빈 문자열이나 undefined는 "기본"(오버라이드 없음)을 뜻한다. 요청을 처리하는 동안에는 바꾸지 못한다(실행 중인 요청과 엇갈리지 않게).
+ * 고른 값은 이 프로젝트·백엔드의 다음 새 세션 기본값으로도 남긴다(model-defaults.ts)
+ */
+export async function setSessionModel(id: string, modelId: string | undefined): Promise<ModelPickerView> {
+  const session = requireSession(id);
+  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 모델을 바꿀 수 없습니다');
+  const backend = sessionBackend(session.snapshot);
+  const trimmed = modelId?.trim() ?? '';
+  const check = await isSelectableModel(backend, trimmed);
+  if (!check.ok) throw new StudioError(400, check.reason ?? `이 백엔드에서 고를 수 없는 모델입니다: ${trimmed}`);
+  session.snapshot.modelId = trimmed || undefined;
+  emit(session, { type: 'model', modelId: session.snapshot.modelId });
+  rememberProjectModelDefault(session.snapshot.projectId, backend, session.snapshot.modelId);
+  return listSelectableModels(backend, session.snapshot.modelId);
+}
+
 /** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
 export async function sessionDesignFrames(id: string): Promise<{ design?: DesignView; frames: DesignFrameInfo[] }> {
   const session = requireSession(id);
@@ -1476,11 +1513,13 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   if (kind === 'model') {
     // 세션이 고른 모델(사람이 직접 선택)이 실행 모델 설정보다 우선한다
     const route = routingDecision(request, intent, session.snapshot.modelId ?? split.execute);
-    const escalation = apiEscalation(split.plan);
+    // 사람이 대화에서 직접 고른 모델일 때만 "같은 모델로 승격" no-op을 본다. 라우터가 고른 값은 다음 요청에서 바뀔 수 있어 대상이 아니다
+    const escalation = apiEscalation(split.plan, process.env, session.snapshot.modelId ? route.selected.id : undefined);
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'claude-code') {
-    const escalation = claudeCodeEscalation(split.plan);
+    const chosenModel = cliModelOverride(session.snapshot.modelId);
+    const escalation = claudeCodeEscalation(split.plan, process.env, chosenModel);
     return { kind: 'claude-code', allowBreaking, intent, ...(split.execute ? { executeModel: split.execute } : {}), ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'codex') return { kind: 'codex', allowBreaking, intent };
@@ -1570,9 +1609,15 @@ function integerEnv(name: string, min: number): number | undefined {
  * planModelId: 계획-실행 분리(ADR-075)의 계획 모델 id. 명시적 승격 대상이 없으면 이쪽으로 올린다
  * (이미 계획을 세운 큰 모델이니 실행 모델이 게이트를 반복해서 실패하면 다시 불러오는 것이 자연스럽다).
  */
-export function apiEscalation(planModelId?: string, env: Record<string, string | undefined> = process.env): (EscalationPolicy & { client: ModelClient }) | undefined {
+export function apiEscalation(
+  planModelId?: string,
+  env: Record<string, string | undefined> = process.env,
+  skipIfSameAs?: string,
+): (EscalationPolicy & { client: ModelClient }) | undefined {
   const id = env.B_STUDIO_ESCALATE_MODEL_ID?.trim() || planModelId;
   if (!id) return undefined;
+  // 사람이 대화에서 이미 이 모델을 실행 모델로 골랐으면, 올려도 같은 모델이라 승격은 아무 효과가 없다(no-op)
+  if (skipIfSameAs && id === skipIfSameAs) return undefined;
   const model = (() => {
     try {
       return modelById(id);
@@ -1589,9 +1634,15 @@ export function apiEscalation(planModelId?: string, env: Record<string, string |
  * planModel: 계획-실행 분리(ADR-075)의 계획 모델 이름. 명시적 승격 대상(B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL)이
  * 없으면 이쪽으로 올린다 — 계획 모델로 기본 승격 대상을 삼는다.
  */
-export function claudeCodeEscalation(planModel?: string, env: Record<string, string | undefined> = process.env): EscalationPolicy | undefined {
+export function claudeCodeEscalation(
+  planModel?: string,
+  env: Record<string, string | undefined> = process.env,
+  skipIfSameAs?: string,
+): EscalationPolicy | undefined {
   const to = env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim() || planModel;
   if (!to) return undefined;
+  // 사람이 대화에서 이미 이 모델(별칭)을 실행 모델로 골랐으면, 올려도 같은 모델이라 승격은 아무 효과가 없다(no-op)
+  if (skipIfSameAs && to === skipIfSameAs) return undefined;
   return { ...escalationRules(), to };
 }
 
@@ -3048,6 +3099,8 @@ export interface RequirementsSnapshot {
   coverage?: RequirementCoverage;
   /** "전체 계획 세우기" 버튼이 채운다. must 요구사항이 하나도 없으면 없다 */
   allMustHavesPrefill?: string;
+  /** "## 가정" 절(데이터 규모·동시성/트래픽·성능 관련 제약). docs/requirements.md가 없거나 절이 없으면 빈 배열 */
+  assumptions: string[];
 }
 
 const TEST_SCAN_IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.gradle', '.venv', '__pycache__', 'coverage', 'design']);
@@ -3100,6 +3153,18 @@ function requirementsAsk(session: Session): ModelAsk | undefined {
   const backend = sessionBackend(session.snapshot);
   if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
   if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('요구사항 추출', 'build', session.snapshot.modelId).selected));
+  return undefined;
+}
+
+/**
+ * "모호한 점"에 추천 값을 물을 때만 쓰는 호출. claude-code 백엔드에서는 이 호출 하나만 WebSearch·WebFetch를 연다
+ * (`claude-code-ask.ts`의 `webTools`, 파일·명령 도구는 절대 열지 않는다) — 실제 업계 관례 출처를 붙이기 위해서다.
+ * api 백엔드는 기존 모델 호출 그대로(도구 없음)라 웹 검색이 없고, 호출하는 쪽이 "출처 확인 필요"로 표시한다.
+ */
+function requirementsRecommendationAsk(session: Session): { ask: ModelAsk; webSearchAvailable: boolean } | undefined {
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'claude-code') return { ask: claudeCodeAsk({ cwd: session.project.root, webTools: true }), webSearchAvailable: true };
+  if (backend === 'api') return { ask: planAskFromClient(clientForModel(routingDecision('모호한 점 추천', 'build', session.snapshot.modelId).selected)), webSearchAvailable: false };
   return undefined;
 }
 
@@ -3157,36 +3222,96 @@ export interface RequirementsExtractionPreview {
   source: 'model' | 'fallback';
   /** source가 fallback일 때만 있다. 화면이 그대로 보여 준다 */
   reason?: string;
+  /** 명세가 경로처럼 언급한 파일(seed/seed.json 등)이 작업 복사본에 있는지·크기·미리보기 */
+  referencedFiles: ReferencedFile[];
+  /** 요구사항으로 만들지 않고 뺀 "범위 밖" 항목(결정론적 대체 파서는 만들지 못한다) */
+  outOfScope: string[];
+  /** "## 가정" 절 초안(데이터 규모·동시성/트래픽·성능 관련 제약, 결정론적 대체 파서는 만들지 못한다) */
+  assumptions: string[];
+}
+
+/** 참조 파일이 없을 때 자동으로 덧붙이는 질문과, 모델이 직접 낸 질문을 합쳐 상한(5개) 안으로 자른다 */
+function mergeQuestionsWithMissingReferences(questions: readonly string[], referencedFiles: readonly ReferencedFile[]): string[] {
+  const missing = referencedFiles.filter((file) => !file.exists).map((file) => buildMissingReferenceQuestion(file.path));
+  const merged: string[] = [];
+  for (const question of [...questions, ...missing]) {
+    if (merged.length >= MAX_CLARIFYING_QUESTIONS) break;
+    if (!merged.includes(question)) merged.push(question);
+  }
+  return merged;
 }
 
 /**
  * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
+ * 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출 모델 문맥에 붙이고
+ * (데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
  * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다.
  */
 export async function previewSessionRequirementsExtraction(id: string, input: RequirementsExtractionInput): Promise<RequirementsExtractionPreview> {
   const session = requireSession(id);
   const specText = await resolveSpecText(session, input);
+  const referencedFiles = await resolveReferencedFiles(session.project.root, specText);
+  const referencedFilesContext = buildReferencedFilesContext(referencedFiles, REFERENCED_FILES_CONTEXT_MAX_CHARS);
   const backend = sessionBackend(session.snapshot);
   const ask = requirementsAsk(session);
   if (!ask) {
     return {
       requirements: extractRequirementsHeuristically(specText),
-      questions: [],
+      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
       reason: `이 세션 백엔드(${backend})는 도구 없이 한 번만 묻는 모델 호출을 지원하지 않아, 헤딩·글머리 기호로 요구사항을 나누는 결정론적 방식으로 대신했습니다`,
+      referencedFiles,
+      outOfScope: [],
+      assumptions: [],
     };
   }
   try {
-    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal);
-    return { requirements: result.requirements, questions: result.questions, source: 'model' };
+    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal, referencedFilesContext);
+    return {
+      requirements: result.requirements,
+      questions: mergeQuestionsWithMissingReferences(result.questions, referencedFiles),
+      source: 'model',
+      referencedFiles,
+      outOfScope: result.outOfScope,
+      assumptions: result.assumptions,
+    };
   } catch (error) {
     return {
       requirements: extractRequirementsHeuristically(specText),
-      questions: [],
+      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
       reason: `추출 모델 호출이 실패해 결정론적 방식으로 대신했습니다: ${describe(error)}`,
+      referencedFiles,
+      outOfScope: [],
+      assumptions: [],
     };
   }
+}
+
+export interface RequirementRecommendationsInput {
+  questions: string[];
+  specText?: string;
+}
+
+export interface RequirementRecommendations {
+  recommendations: Recommendation[];
+  /** 'web'이면 claude-code 백엔드가 이 호출에 한해 WebSearch로 찾은 출처, 'model'이면 도구 없이 모델 지식만으로 답해 "출처 확인 필요" */
+  sourced: 'web' | 'model';
+}
+
+/**
+ * "모호한 점" 질문마다 업계 관례에 근거한 추천 답·근거·출처를 한 번에 받는다. claude-code 백엔드만 이 호출에서
+ * WebSearch를 열어 실제 링크를 찾고(그 밖의 도구는 열지 않는다), 그 밖의 백엔드는 모델 지식만으로 답해
+ * `sourced: 'model'`로 표시한다(화면이 "출처 확인 필요"로 보여 준다). 추천 호출을 지원하지 않는 백엔드는 오류를 던진다.
+ */
+export async function recommendSessionRequirementQuestions(id: string, input: RequirementRecommendationsInput): Promise<RequirementRecommendations> {
+  const session = requireSession(id);
+  if (input.questions.length === 0) throw new StudioError(400, '추천을 받을 질문이 없습니다');
+  const resolved = requirementsRecommendationAsk(session);
+  if (!resolved) throw new StudioError(400, `이 세션 백엔드(${sessionBackend(session.snapshot)})는 추천 답 호출을 지원하지 않습니다`);
+  const specText = input.specText?.trim() ?? '';
+  const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, session.stop.signal);
+  return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
 }
 
 /** 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다 */
@@ -3204,9 +3329,9 @@ function evaluateRequirement(requirement: Requirement, checkpoints: readonly Che
 export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
-  if (raw === undefined) return { exists: false, requirements: [] };
-  const { requirements } = parseRequirementsMarkdown(raw);
-  if (requirements.length === 0) return { exists: true, requirements: [] };
+  if (raw === undefined) return { exists: false, requirements: [], assumptions: [] };
+  const { requirements, assumptions } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return { exists: true, requirements: [], assumptions };
 
   const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
@@ -3220,29 +3345,34 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     requirements: views,
     coverage: summarizeCoverage(requirements, statusById),
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: buildAllMustHavesPrefill(requirements) } : {}),
+    assumptions,
   };
 }
 
 const ApplyRequirementSchema = RequirementSchema;
+const ApplyRequirementsSchema = z.object({
+  requirements: z.array(ApplyRequirementSchema).min(1).max(MAX_REQUIREMENTS),
+  assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).default([]),
+});
 
 /**
- * 요구사항을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
+ * 요구사항(+가정)을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
  * 저장 시점의 증거로 상태를 다시 매겨 사람이 읽는 상태 줄에 스냅샷으로 남긴다(다시 열 때는 항상 증거로 새로 계산한다).
  */
 export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
-  const parsed = z.array(ApplyRequirementSchema).min(1).max(MAX_REQUIREMENTS).safeParse(input);
+  const parsed = ApplyRequirementsSchema.safeParse(input);
   if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
-  const ids = parsed.data.map((requirement) => requirement.id);
+  const ids = parsed.data.requirements.map((requirement) => requirement.id);
   if (new Set(ids).size !== ids.length) throw new StudioError(400, '요구사항 id가 중복됩니다');
 
   const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
-  const statusById = Object.fromEntries(parsed.data.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
+  const statusById = Object.fromEntries(parsed.data.requirements.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
 
-  const markdown = serializeRequirementsMarkdown(parsed.data, statusById);
+  const markdown = serializeRequirementsMarkdown(parsed.data.requirements, statusById, parsed.data.assumptions);
   await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
   return getSessionRequirements(id);
 }
@@ -3629,7 +3759,7 @@ export function sessionBackend(snapshot: Pick<SessionSnapshot, 'mode' | 'backend
  * CLI 러너에 넘길 모델. 레인 세션은 고른 모델을 snapshot.modelId에 담는다(예: `sonnet`).
  * 계획의 기록용 id(`local-cli:...`)는 실제 모델 이름이 아니므로 넘기지 않고 환경 변수로 떨어진다.
  */
-function cliModelOverride(modelId: string | undefined): string | undefined {
+export function cliModelOverride(modelId: string | undefined): string | undefined {
   const value = modelId?.trim();
   return value && !value.startsWith('local-cli') ? value : undefined;
 }
