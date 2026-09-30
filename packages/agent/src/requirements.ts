@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import type { AgentUsage } from './loop';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
+import { Workspace, WorkspaceError } from './workspace';
 
 export const REQUIREMENT_KINDS = ['api', 'ui', 'data', 'nonfunctional', 'docs'] as const;
 export type RequirementKind = (typeof REQUIREMENT_KINDS)[number];
@@ -23,10 +24,14 @@ export type RequirementKind = (typeof REQUIREMENT_KINDS)[number];
 export const REQUIREMENT_PRIORITIES = ['must', 'should', 'could'] as const;
 export type RequirementPriority = (typeof REQUIREMENT_PRIORITIES)[number];
 
-/** 한 문서에 담을 수 있는 요구사항 수 상한. 과제 명세 하나 분량을 넘어서면 추출이 잘못됐다고 본다 */
+/** 한 문서에 담을 수 있는 요구사항 수 상한. 명세 하나 분량을 넘어서면 추출이 잘못됐다고 본다 */
 export const MAX_REQUIREMENTS = 60;
 /** Spec Kit의 /clarify처럼 "물어볼 가치가 있는 모호함"만 최대 5개 */
 export const MAX_CLARIFYING_QUESTIONS = 5;
+/** "## 가정" 절에 담을 수 있는 가정 수 상한 */
+export const MAX_ASSUMPTIONS = 10;
+/** "범위 밖" 노트로 뺄 수 있는 항목 수 상한(요구사항으로 만들지 않는 부정형 문장) */
+export const MAX_OUT_OF_SCOPE = 20;
 
 const REQUIREMENT_ID = /^R[1-9][0-9]*$/;
 
@@ -40,10 +45,18 @@ export const RequirementSchema = z.object({
 });
 export type Requirement = z.infer<typeof RequirementSchema>;
 
+/** "## 가정" 절의 항목 하나. 데이터 규모·동시성/트래픽(명세가 실마리를 줄 때만)·페이지네이션/인덱스 같은 성능 관련 제약 — 서버 사양은 다루지 않는다 */
+export const AssumptionSchema = z.string().min(1).max(300);
+
+/** 요구사항으로 만들지 않고 "범위 밖" 노트로 빼는 부정형 문장(예: "결제 연동은 포함하지 않는다") */
+export const OutOfScopeItemSchema = z.string().min(1).max(300);
+
 export const ExtractionReplySchema = z
   .object({
     requirements: z.array(RequirementSchema).min(1).max(MAX_REQUIREMENTS),
     questions: z.array(z.string().min(1).max(300)).max(MAX_CLARIFYING_QUESTIONS),
+    outOfScope: z.array(OutOfScopeItemSchema).max(MAX_OUT_OF_SCOPE).default([]),
+    assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).default([]),
   })
   .refine((value) => new Set(value.requirements.map((requirement) => requirement.id)).size === value.requirements.length, {
     message: '요구사항 id가 중복됩니다',
@@ -62,23 +75,29 @@ export class RequirementsError extends Error {
 
 /** 추출 모델에게 주는 고정 시스템 프롬프트. pr-review.ts와 같은 문체(영어 지시, JSON만 받는다) */
 export function buildExtractionSystemPrompt(): string {
-  return `You turn a full-stack coding-assignment spec into a requirements list with testable acceptance criteria, in the style of GitHub Spec Kit's /specify step.
-You see ONLY the spec text below — you have no tools to read the actual project code.
+  return `You turn a full-stack product spec into a requirements list with concrete, testable acceptance criteria, in the style of GitHub Spec Kit's /specify step.
+You see ONLY the spec text below (it may include a "[참조 파일 요약]" section — compact summaries of files the spec references, such as seed data — and a previous round's answered questions appended at the end) — you have no tools to read the actual project code.
 Reply with ONLY a JSON object, no prose before or after:
-{"requirements":[{"id":"R1","title":"short title","kind":"api"|"ui"|"data"|"nonfunctional"|"docs","acceptance":["testable criterion", "..."],"priority":"must"|"should"|"could"}],"questions":["short clarifying question", "..."]}
+{"requirements":[{"id":"R1","title":"short title","kind":"api"|"ui"|"data"|"nonfunctional"|"docs","acceptance":["testable criterion", "..."],"priority":"must"|"should"|"could"}],"questions":["short clarifying question", "..."],"outOfScope":["explicitly excluded item", "..."],"assumptions":["short assumption", "..."]}
 Rules:
-- id: "R1","R2",... in the order requirements appear in the spec. No gaps, no repeats.
-- title: one short line.
-- acceptance: 1 or more testable statements a reviewer could check off (not a restatement of the title). Write them so a test name or manual check could reference them directly.
+- id: "R1","R2",... in the order requirements appear in the spec. No gaps, no repeats. Keep the SAME id for the SAME requirement across re-extractions when its meaning hasn't materially changed — saved status and evidence are keyed by id, so churn here throws that away.
+- title: one short line. Group closely related sub-items under one requirement (e.g. all CRUD endpoints of one resource, or one screen's loading/empty/error/success states) instead of splitting them one-by-one.
+- acceptance: 1 or more concrete, testable statements a reviewer could check off without guessing — use the actual inputs/outputs the spec gives (request/response fields, status codes), and for UI list every state the spec implies (loading/empty/error, not just the happy path). Never just restate the title.
 - kind: api(서버 엔드포인트·비즈니스 로직), ui(화면·컴포넌트), data(스키마·마이그레이션), nonfunctional(성능·보안·가용성 등 비기능 요구), docs(문서화). Pick the closest one.
-- priority: must(없으면 과제 제출이 안 됨), should(있어야 완성도 있음), could(있으면 좋음, 보너스). Default to "must" unless the spec explicitly marks an item optional/bonus/nice-to-have.
+- priority: must(없으면 제출이 안 됨), should(있어야 완성도 있음), could(있으면 좋음, 보너스). Default to "must" unless the spec explicitly marks an item optional/bonus/nice-to-have.
+- Never turn a negative statement ("X is not included", "X 미포함", "X는 하지 않는다") into its own requirement — put it in "outOfScope" instead (a short note, not an acceptance criterion). At most ${MAX_OUT_OF_SCOPE} items.
 - questions: at most ${MAX_CLARIFYING_QUESTIONS} short clarifying questions about real ambiguities that would change requirements or acceptance criteria (Spec Kit's /clarify style — do not ask about things the spec already answers). If nothing is ambiguous, reply with an empty array.
-- Write title/acceptance/questions text in Korean. Keep id/kind/priority values in English exactly as listed above.`;
+- assumptions: at most ${MAX_ASSUMPTIONS} short, concrete assumptions this extraction relied on — data volume (derive it from any "[참조 파일 요약]" you were given, e.g. "seed 데이터 기준 게시글 42건"), expected concurrency/traffic ONLY if the spec itself hints at it, and performance-relevant constraints the spec implies (pagination, indexing). Never assume or ask about server hardware specs. Leave empty if nothing applies.
+- Write title/acceptance/questions/outOfScope/assumptions text in Korean. Keep id/kind/priority values in English exactly as listed above.`;
 }
 
-/** 추출 모델에게 주는 사용자 메시지. 스펙 원문 그대로 넘긴다(질문 답변이 있으면 스펙 끝에 이미 덧붙여 온다 — "스펙을 고치고 다시 뽑기") */
-export function buildExtractionUserPrompt(specText: string): string {
-  return `Assignment spec:\n\n${specText.trim()}`;
+/**
+ * 추출 모델에게 주는 사용자 메시지. 스펙 원문 그대로 넘기고(질문 답변이 있으면 스펙 끝에 이미 덧붙여 온다 — "스펙을 고치고 다시 뽑기"),
+ * 명세가 참조하는 파일들의 압축 요약이 있으면 뒤에 붙인다(데이터 규모를 지어내지 않고 실제 값으로 가정을 쓰게 한다, ~6,000자 상한은 호출하는 쪽이 이미 잘라 준다)
+ */
+export function buildExtractionUserPrompt(specText: string, referencedFilesContext?: string): string {
+  const context = referencedFilesContext?.trim();
+  return `Product spec:\n\n${specText.trim()}${context ? `\n\n[참조 파일 요약]\n${context}` : ''}`;
 }
 
 /** 모델 응답에서 JSON을 꺼내 검증한다. 형식이 틀리면 RequirementsError */
@@ -100,9 +119,14 @@ export function parseExtractionReply(text: string): ExtractionReply {
  * 추출 모델을 도구 없이 한 번 불러 요구사항·질문을 받는다. 부르는 방법은 바깥에서 준다(ModelAsk) —
  * claude-code 모드는 도구 없는 로컬 CLI 한 번 호출, api 모드는 ModelClient 어댑터(계획·리뷰 호출과 같은 경계).
  */
-export async function requestRequirementsExtraction(ask: ModelAsk, specText: string, signal?: AbortSignal): Promise<ExtractionReply & { usage: AgentUsage; durationMs: number }> {
+export async function requestRequirementsExtraction(
+  ask: ModelAsk,
+  specText: string,
+  signal?: AbortSignal,
+  referencedFilesContext?: string,
+): Promise<ExtractionReply & { usage: AgentUsage; durationMs: number }> {
   const started = performance.now();
-  const answer = await ask({ system: buildExtractionSystemPrompt(), user: buildExtractionUserPrompt(specText) }, signal);
+  const answer = await ask({ system: buildExtractionSystemPrompt(), user: buildExtractionUserPrompt(specText, referencedFilesContext) }, signal);
   const durationMs = Math.round(performance.now() - started);
   const { text, usage } = answer;
   try {
@@ -224,6 +248,203 @@ export function extractRequirementsHeuristically(specText: string): Requirement[
 }
 
 // ---------------------------------------------------------------------------
+// 참조 파일: 명세가 가리키는 경로(seed/seed.json, docs/api.md, openapi.yaml, schema.sql 등)를 찾아
+// 존재 여부·크기·미리보기를 붙인다(sessions.ts가 실제 파일을 읽어 이 모양으로 만든다 — 여기 함수는 순수하다).
+// ---------------------------------------------------------------------------
+
+/** 경로처럼 보이는 낱말(디렉터리/파일.확장자 또는 파일.확장자)을 명세 글에서 찾는다. URL의 일부(도메인/경로)는 건너뛴다 */
+const PATH_LIKE_REFERENCE = /\b(?:[\w.-]+\/)*[\w-]+\.(?:json|ya?ml|sql|md|csv|txt|env|proto|graphql)\b/gi;
+
+export function extractPathReferences(specText: string): string[] {
+  const seen = new Set<string>();
+  const results: string[] = [];
+  for (const match of specText.matchAll(PATH_LIKE_REFERENCE)) {
+    const index = match.index ?? 0;
+    const before = specText.slice(Math.max(0, index - 10), index);
+    if (before.includes('://')) continue; // https://example.com/page.json 같은 URL의 경로 부분은 참조 파일이 아니다
+    const raw = match[0];
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    results.push(raw);
+  }
+  return results;
+}
+
+export interface ReferencedFile {
+  path: string;
+  exists: boolean;
+  sizeBytes?: number;
+  /** JSON이면 최상위 키·배열 길이 요약("posts 42개, comments 2,076개"), 그 밖은 앞 몇 줄 */
+  preview?: string;
+}
+
+function firstLinesPreview(content: string, maxLines = 5, maxChars = 300): string {
+  const joined = content
+    .split(/\r?\n/)
+    .slice(0, maxLines)
+    .join('\n')
+    .trim();
+  return joined.length > maxChars ? `${joined.slice(0, maxChars)}…` : joined;
+}
+
+/** JSON 파일의 최상위 모양을 요약한다: 배열이면 길이, 객체면 키마다(배열 값이면 길이와 함께) 나열한다. JSON이 아니면 앞 몇 줄로 대신한다 */
+export function summarizeJsonPreview(content: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return firstLinesPreview(content);
+  }
+  if (Array.isArray(parsed)) return `배열, ${parsed.length.toLocaleString('ko-KR')}개 항목`;
+  if (parsed && typeof parsed === 'object') {
+    const entries = Object.entries(parsed as Record<string, unknown>).map(([key, value]) => (Array.isArray(value) ? `${key} ${value.length.toLocaleString('ko-KR')}개` : key));
+    return entries.length > 0 ? entries.join(', ') : '(빈 객체)';
+  }
+  return firstLinesPreview(content);
+}
+
+/** 존재하는 참조 파일 하나의 미리보기를 만든다(내용·크기는 호출하는 쪽이 읽어서 준다 — 이 함수는 파일 IO를 하지 않는다) */
+export function buildReferencedFilePreview(path: string, content: string, sizeBytes: number): ReferencedFile {
+  return { path, exists: true, sizeBytes, preview: /\.json$/i.test(path) ? summarizeJsonPreview(content) : firstLinesPreview(content) };
+}
+
+/** 추출 모델에게 알려줄 게 없는 참조 파일(없음)을 만든다 */
+export function missingReferencedFile(path: string): ReferencedFile {
+  return { path, exists: false };
+}
+
+/** "이 요구사항이 참조한 파일이 작업 복사본에 없다"는 모호함을 질문 목록에 자연스럽게 올린다 */
+export function buildMissingReferenceQuestion(path: string): string {
+  return `참조한 파일 ${path}이(가) 작업 복사본에 없습니다. 어디서 가져와야 하나요, 아니면 새로 만들어야 하나요?`;
+}
+
+/** 참조 파일 미리보기는 요약이면 충분하다 — 아주 큰 파일(시드 데이터 등)도 존재·크기만 보고하고 앞부분만 읽어 요약한다 */
+const REFERENCE_FILE_TOO_BIG = /너무 큽니다 \((\d+) bytes\)/;
+
+/**
+ * 명세 글이 경로처럼 언급한 파일(`extractPathReferences`)을 주어진 루트(세션 작업 복사본)에서 찾는다.
+ * `Workspace`를 그대로 써서 프로젝트 밖 경로·.env 같은 비밀 파일은 다른 도구와 똑같이 막는다. 없으면 missing,
+ * 있으면 크기·미리보기를 담는다(너무 큰 파일은 크기만 보고하고 미리보기는 만들지 않는다).
+ */
+export async function resolveReferencedFiles(root: string, specText: string): Promise<ReferencedFile[]> {
+  const workspace = new Workspace(root);
+  const files: ReferencedFile[] = [];
+  for (const path of extractPathReferences(specText)) {
+    try {
+      const content = await workspace.read(path);
+      files.push(buildReferencedFilePreview(path, content, Buffer.byteLength(content, 'utf8')));
+    } catch (error) {
+      const tooBig = error instanceof WorkspaceError ? REFERENCE_FILE_TOO_BIG.exec(error.message) : null;
+      if (tooBig) {
+        files.push({ path, exists: true, sizeBytes: Number(tooBig[1]), preview: '(파일이 커서 미리보기를 만들지 못했습니다)' });
+        continue;
+      }
+      files.push(missingReferencedFile(path));
+    }
+  }
+  return files;
+}
+
+/** 참조 파일 상한(전체 글자 수 기준). "seed/seed.json" 같은 큰 시드 파일을 통째로 넣지 않고 요약만 잘라 넣는다 */
+export const REFERENCED_FILES_CONTEXT_MAX_CHARS = 6_000;
+
+/** 참조 파일 목록을 추출 모델 문맥에 붙일 압축 텍스트로 만든다. 상한을 넘으면 앞에서부터 채우고 자른다 */
+export function buildReferencedFilesContext(files: readonly ReferencedFile[], maxChars: number = REFERENCED_FILES_CONTEXT_MAX_CHARS): string {
+  const lines: string[] = [];
+  let used = 0;
+  for (const file of files) {
+    const line = file.exists ? `- ${file.path} (${file.sizeBytes ?? 0} bytes): ${file.preview ?? ''}` : `- ${file.path}: 파일 없음`;
+    if (used + line.length + 1 > maxChars) break;
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// 모호한 점에 추천 값 채우기: 업계 관례에 근거한 답·근거·출처를 한 번 더 묻는다(ModelAsk 재사용).
+// claude-code 백엔드는 이 호출에 한해 WebSearch/WebFetch만 여는 선택적 경로가 있다(claude-code-ask.ts의 webTools) —
+// 그 경로가 없는 api 백엔드나 도구가 없을 때는 모델 지식만으로 답하고, 호출하는 쪽(studio)이 "출처 확인 필요"로 표시한다.
+// ---------------------------------------------------------------------------
+
+export const RecommendationSourceSchema = z.object({
+  url: z.string().min(1).max(500),
+  title: z.string().min(1).max(200).optional(),
+});
+
+export const RecommendationSchema = z.object({
+  question: z.string().min(1).max(300),
+  answer: z.string().min(1).max(500),
+  rationale: z.string().min(1).max(300),
+  sources: z.array(RecommendationSourceSchema).max(2).default([]),
+});
+export type Recommendation = z.infer<typeof RecommendationSchema>;
+
+export const RecommendationReplySchema = z.object({
+  recommendations: z.array(RecommendationSchema).min(1).max(MAX_CLARIFYING_QUESTIONS),
+});
+export type RecommendationReply = z.infer<typeof RecommendationReplySchema>;
+
+/** 추천 답에 실제 웹 검색이 쓰였는지에 따라 화면이 보여줄 라벨을 정한다(model이면 "출처 확인 필요") */
+export function labelRecommendationSource(webSearchAvailable: boolean): 'web' | 'model' {
+  return webSearchAvailable ? 'web' : 'model';
+}
+
+export function buildRecommendationSystemPrompt(webSearchAvailable: boolean): string {
+  return `You recommend concrete answers to open questions about a product spec, grounded in widely used industry practice${webSearchAvailable ? ' — you have WebSearch/WebFetch, use them to find real, current sources' : ' — you have no tools, answer from what you already know'}.
+Reply with ONLY a JSON object, no prose before or after:
+{"recommendations":[{"question":"<one of the given questions, verbatim>","answer":"recommended value/decision","rationale":"one-line reason","sources":[{"url":"https://...","title":"optional short title"}]}]}
+Rules:
+- Cover every question given, in the same order, "question" matching the input verbatim.
+- answer: a concrete, usable default a competent engineer would pick absent more context (not "it depends").
+- rationale: one short line, in Korean.
+- sources: ${webSearchAvailable ? 'up to 2 real links you found via web search just now (prefer official docs/specs over blog posts)' : 'leave empty — without a tool call you cannot verify a link, so do not invent one'}.
+- Write answer/rationale in Korean. Keep JSON keys in English exactly as listed above.`;
+}
+
+export function buildRecommendationUserPrompt(questions: readonly string[], specText: string): string {
+  const list = questions.map((question, index) => `${index + 1}. ${question}`).join('\n');
+  return `Product spec:\n\n${specText.trim()}\n\nOpen questions:\n${list}`;
+}
+
+export function parseRecommendationReply(text: string): RecommendationReply {
+  let raw: unknown;
+  try {
+    raw = parsePlannerReply(text);
+  } catch (error) {
+    throw new RequirementsError(error instanceof Error ? error.message : String(error));
+  }
+  const parsed = RecommendationReplySchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new RequirementsError(`추천 응답 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  }
+  return parsed.data;
+}
+
+/** 추천 모델을 도구 없이(또는 claude-code 한정 웹 도구만 열고) 한 번 불러 질문마다 추천 답·근거·출처를 받는다 */
+export async function requestQuestionRecommendations(
+  ask: ModelAsk,
+  questions: readonly string[],
+  specText: string,
+  webSearchAvailable: boolean,
+  signal?: AbortSignal,
+): Promise<RecommendationReply & { usage: AgentUsage; durationMs: number }> {
+  const started = performance.now();
+  const answer = await ask({ system: buildRecommendationSystemPrompt(webSearchAvailable), user: buildRecommendationUserPrompt(questions, specText) }, signal);
+  const durationMs = Math.round(performance.now() - started);
+  const { text, usage } = answer;
+  try {
+    return { ...parseRecommendationReply(text), usage, durationMs };
+  } catch (error) {
+    if (error instanceof RequirementsError) {
+      error.usage = usage;
+      error.durationMs = durationMs;
+    }
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 사람이 읽는 마크다운 저장/불러오기(docs/requirements.md)
 // ---------------------------------------------------------------------------
 
@@ -243,32 +464,68 @@ const KIND_PRIORITY_LINE = /^-\s*종류:\s*(\S+)\s*·\s*우선순위:\s*(\S+)\s*
 const ACCEPTANCE_HEADER = /^-\s*인수\s*조건:\s*$/;
 const ACCEPTANCE_ITEM = /^\s+-\s+(.+?)\s*$/;
 const REQUIREMENT_HEADING = /^##\s+(R[1-9][0-9]*)\.\s*(.+?)\s*$/;
+const ASSUMPTIONS_HEADING = /^##\s*가정\s*$/;
+const ASSUMPTION_ITEM = /^-\s+(.+?)\s*$/;
+
+/** "## 가정" 절 바로 아래의 글머리 기호 줄만 모은다. 다음 "##" 헤딩을 만나면 멈춘다(사람이 절을 통째로 지웠으면 빈 배열) */
+function extractAssumptionsSection(lines: readonly string[]): string[] {
+  const assumptions: string[] = [];
+  let collecting = false;
+  for (const line of lines) {
+    if (ASSUMPTIONS_HEADING.test(line)) {
+      collecting = true;
+      continue;
+    }
+    if (!collecting) continue;
+    if (/^##\s+/.test(line)) {
+      collecting = false;
+      continue;
+    }
+    const item = ASSUMPTION_ITEM.exec(line);
+    if (item) assumptions.push(item[1]!);
+  }
+  return assumptions;
+}
 
 /**
  * 요구사항 목록을 사람이 읽는 마크다운으로 바꾼다: 요구사항마다 헤딩·종류/우선순위·인수 조건·상태 줄을 두고,
- * 끝에 안정적으로 다시 읽을 수 있는 HTML 주석 JSON 블록(id·kind·priority·acceptance)을 붙인다.
- * statusById에 없는 요구사항은 "미착수"로 쓴다(상태는 저장 시점의 스냅샷일 뿐이고, 다시 읽을 때는 증거로 새로 계산한다).
+ * assumptions가 있으면 "## 가정" 절을 이어 붙이고, 끝에 안정적으로 다시 읽을 수 있는 HTML 주석 JSON 블록
+ * (requirements·assumptions)을 붙인다. statusById에 없는 요구사항은 "미착수"로 쓴다(상태는 저장 시점의 스냅샷일
+ * 뿐이고, 다시 읽을 때는 증거로 새로 계산한다).
  */
-export function serializeRequirementsMarkdown(requirements: readonly Requirement[], statusById: Readonly<Record<string, RequirementStatus>> = {}): string {
+export function serializeRequirementsMarkdown(
+  requirements: readonly Requirement[],
+  statusById: Readonly<Record<string, RequirementStatus>> = {},
+  assumptions: readonly string[] = [],
+): string {
   const blocks = requirements.map((requirement) => {
     const acceptance = requirement.acceptance.map((item) => `  - ${item}`).join('\n');
     const status = statusById[requirement.id] ?? '미착수';
     return `${requirementHeading(requirement)}\n- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}\n- 인수 조건:\n${acceptance}\n- 상태: ${status}`;
   });
+  const assumptionsBlock = assumptions.length > 0 ? `\n\n## 가정\n${assumptions.map((item) => `- ${item}`).join('\n')}` : '';
   const json = JSON.stringify(
-    requirements.map(({ id, title, kind, priority, acceptance }) => ({ id, title, kind, priority, acceptance })),
+    {
+      requirements: requirements.map(({ id, title, kind, priority, acceptance }) => ({ id, title, kind, priority, acceptance })),
+      assumptions,
+    },
     null,
     2,
   );
-  return `# 요구사항\n\n${blocks.join('\n\n')}\n\n<!-- b-studio-requirements\n${json}\n-->\n`;
+  return `# 요구사항\n\n${blocks.join('\n\n')}${assumptionsBlock}\n\n<!-- b-studio-requirements\n${json}\n-->\n`;
 }
+
+const LEGACY_JSON_BLOCK = z.array(RequirementSchema);
+const JSON_BLOCK_SHAPE = z.object({ requirements: z.array(RequirementSchema), assumptions: z.array(AssumptionSchema).optional() });
 
 /**
  * docs/requirements.md를 다시 읽는다. 사람이 헤딩·제목·인수 조건을 손으로 고쳐도(구조 표지 — "## R1.", "종류: … · 우선순위: …",
- * "인수 조건:" — 는 그대로 둔 채) 그 값을 그대로 반영한다(사람 편집을 우선한다). 구조가 깨져 하나도 못 읽으면
- * 끝의 JSON 블록(마지막으로 저장한 값)으로 되돌아간다. 둘 다 실패하면 빈 배열을 돌려준다 — 호출하는 쪽이 "명세를 다시 뽑아 주세요"로 안내한다.
+ * "인수 조건:" — 는 그대로 둔 채) 그 값을 그대로 반영한다(사람 편집을 우선한다). "## 가정" 절도 같은 자리에서 읽되,
+ * 절이 통째로 지워졌으면 가정 없음으로 본다. 구조가 깨져 요구사항을 하나도 못 읽으면 끝의 JSON 블록(마지막으로 저장한 값,
+ * 새 형식 {requirements, assumptions}·이 기능 전에 저장된 옛 형식 배열 둘 다 읽는다)으로 되돌아간다. 둘 다 실패하면
+ * 빈 배열을 돌려준다 — 호출하는 쪽이 "명세를 다시 뽑아 주세요"로 안내한다.
  */
-export function parseRequirementsMarkdown(raw: string): { requirements: Requirement[] } {
+export function parseRequirementsMarkdown(raw: string): { requirements: Requirement[]; assumptions: string[] } {
   const withoutJsonBlock = raw.replace(JSON_BLOCK, '');
   const lines = withoutJsonBlock.split(/\r?\n/);
   const drafts: Array<{ id: string; title: string; kind?: string; priority?: string; acceptance: string[] }> = [];
@@ -308,20 +565,25 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
 
   const parsedFromMarkdown = drafts.map((draft) => RequirementSchema.safeParse(draft));
   if (drafts.length > 0 && parsedFromMarkdown.every((result) => result.success)) {
-    return { requirements: parsedFromMarkdown.map((result) => (result as z.ZodSafeParseSuccess<Requirement>).data) };
+    return {
+      requirements: parsedFromMarkdown.map((result) => (result as z.ZodSafeParseSuccess<Requirement>).data),
+      assumptions: extractAssumptionsSection(lines),
+    };
   }
 
   const jsonMatch = JSON_BLOCK.exec(raw);
   if (jsonMatch) {
     try {
       const json = JSON.parse(jsonMatch[1]!);
-      const parsed = z.array(RequirementSchema).safeParse(json);
-      if (parsed.success) return { requirements: parsed.data };
+      const shaped = JSON_BLOCK_SHAPE.safeParse(json);
+      if (shaped.success) return { requirements: shaped.data.requirements, assumptions: shaped.data.assumptions ?? [] };
+      const legacy = LEGACY_JSON_BLOCK.safeParse(json);
+      if (legacy.success) return { requirements: legacy.data, assumptions: [] };
     } catch {
       // 주석 블록도 사람이 손으로 깨뜨렸을 수 있다 — 아래에서 빈 배열로 마무리한다
     }
   }
-  return { requirements: [] };
+  return { requirements: [], assumptions: [] };
 }
 
 // ---------------------------------------------------------------------------
