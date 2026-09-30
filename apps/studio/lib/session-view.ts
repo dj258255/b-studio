@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, Effort, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
 import type { BootNetwork } from '@b-studio/sandbox';
 import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
@@ -39,7 +39,7 @@ export type ChatItem =
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
     }
-  | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
+  | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string; effort?: Effort }
   /** 게이트의 같은 실패 서명이 반복돼 더 비싼 모델로 올렸다 */
   | { kind: 'escalation'; runId: string; from: string; to: string; times: number; attempt: number }
   | { kind: 'stage'; runId: string; stage: string }
@@ -197,7 +197,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'design':
       return patchSnapshot(view, { design: event.design });
     case 'model':
-      return patchSnapshot(view, { modelId: event.modelId });
+      return patchSnapshot(view, { modelId: event.modelId, effort: event.effort });
     case 'question':
       // 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답을 보내면(run_started) 지운다.
       // 대화 항목으로는 넣지 않는다 — 답을 보내면 요청 줄에 질문과 답이 함께 남는다
@@ -533,7 +533,7 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
       ];
 
     case 'session':
-      return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
+      return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth, effort: event.effort }];
 
     case 'steer_applied':
       return applySteerApplied(chat, runId, event.count);

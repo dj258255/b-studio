@@ -1,7 +1,7 @@
 import { requireUser } from '@/lib/server/access';
 import { validateCommandCodeModelSelection } from '@/lib/server/commandcode-models';
 import { errorResponse, StudioError } from '@/lib/server/errors';
-import { projectModelDefault } from '@/lib/server/model-defaults';
+import { projectEffortDefault, projectModelDefault } from '@/lib/server/model-defaults';
 import { validateOpenCodeModelSelection } from '@/lib/server/opencode-models';
 import { createSession, listSessions, resolveSessionBackend } from '@/lib/server/sessions';
 import { recentSessionsFor } from '@/lib/project-menu';
@@ -46,9 +46,11 @@ export async function POST(request: Request) {
         : backend === 'opencode'
           ? await validateOpenCodeModelSelection(requestedOrRemembered)
           : requestedOrRemembered;
+    // 노력 단계는 이 새 세션에서 직접 고를 수 없다(모델처럼 요청 바디로 받지 않는다) — 대화로 마지막에 고른 값만 이어받는다
+    const effort = (typeof body.projectId === 'string' ? projectEffortDefault(body.projectId, backend) : undefined) || undefined;
     // 사람이 만든 일반 세션은 샌드박스를 지연 기동한다(첫 만들기 요청·"지금 켜기" 때 켠다).
     // 레인·플릿·벤치는 createSession을 직접 불러 기본 eager로 켠다
-    return Response.json(await createSession(body.projectId, user, workspace, { modelId, backend, boot: 'on-demand' }), { status: 201 });
+    return Response.json(await createSession(body.projectId, user, workspace, { modelId, effort, backend, boot: 'on-demand' }), { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

@@ -304,6 +304,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 backend: `${BACKEND} (CLI ${message.claude_code_version})`,
                 model: message.model,
                 auth: account ? describeAccount(account) : undefined,
+                effort,
               });
             }
             break;

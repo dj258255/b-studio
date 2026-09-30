@@ -124,5 +124,6 @@ E2E는 이미지 다운로드, 컨테이너 생성, 포트 사용, 모델 인증
 - 동시 쓰기 검사는 Node가 단일 스레드라 "읽고 → 고치고 → 다시 쓰는" 사이에 `await`가 끼는 인터리빙만 잡습니다. 여러 프로세스가 같은 파일을 동시에 고치는 경우(예: 두 스튜디오 프로세스가 같은 세션 폴더를 여는 경우)는 `owner.pid`로 막을 뿐 자동 검사로는 재지 않습니다.
 
 - 대화 입력창의 모델 선택(claude-code 백엔드)에서 보여주는 별칭→실제 모델 id·단가(예: `opus` → `claude-opus-5`)는 [E8 실험](experiments/2026-09-30-e8-plan-execute-split.md)에서 관측한 값을 그대로 씁니다. 이번 변경에서 새로 실측하지 않았고, Claude Code가 별칭이 풀리는 모델을 바꾸면 화면 표시가 실제와 어긋날 수 있습니다.
+- 노력(추론 강도) 단계는 각 백엔드가 실제로 받는 옵션·플래그(Claude Agent SDK의 `effort`, Codex SDK `ThreadOptions.modelReasoningEffort`, Command Code `--effort`, OpenCode `--variant`)에 그대로 실어 보낼 뿐, 그 값을 각 CLI·모델이 내부에서 어떻게 반영하는지는 확인하지 않았습니다(모델 호출을 실행하지 않는 조건에서 개발했습니다). 특히 OpenCode의 `--variant`는 CLI 도움말이 "제공자별 추론 강도"라고만 설명해 모델마다 받아들이는 값이 다를 수 있고, 팝오버에 그 사실을 안내는 하지만 어떤 모델이 어떤 값을 실제로 받는지는 실측하지 않았습니다. API 모드는 Anthropic 공급자 모델에만 `output_config.effort`를 보내고, OpenAI 호환·Google 클라이언트(provider-clients.ts)는 이 옵션을 보내는 자리가 아직 없어 지원하지 않습니다.
 
 새 검증을 추가할 때는 사용한 환경, 입력, 기대 결과, 실제 결과를 함께 기록하세요.
