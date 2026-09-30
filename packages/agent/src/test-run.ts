@@ -38,16 +38,20 @@ function collectGlobCommand(glob: string): string[] {
   return ['sh', '-c', `for f in ${glob}; do [ -f "$f" ] && { echo '${REPORT_BOUNDARY}'"$f"; cat "$f"; echo; }; done`];
 }
 
-/** runner·대상에 맞는 테스트 실행 명령과 보고서 수거 명령을 만든다 */
-export function buildTestRunPlan(runner: Runner, target?: TestTarget): TestRunPlan {
+/**
+ * runner·대상에 맞는 테스트 실행 명령과 보고서 수거 명령을 만든다.
+ * `wrapper`는 서비스 폴더에 Gradle·Maven 래퍼(gradlew·mvnw)가 있는지다. 없으면 이미지의 gradle·mvn을 쓴다(주지 않으면 이전 동작: Gradle은 래퍼, Maven은 mvn) —
+ * 폴더 열기가 래퍼 없는 Spring 서비스를 gradle 이미지로 띄우기 때문이다(pay 복제본에서 `./gradlew`가 없어 실패했다)
+ */
+export function buildTestRunPlan(runner: Runner, target?: TestTarget, { wrapper }: { wrapper?: boolean } = {}): TestRunPlan {
   switch (runner) {
     case 'gradle': {
-      const command = ['./gradlew', 'test', '--no-daemon', '--console=plain'];
+      const command = [wrapper === false ? 'gradle' : './gradlew', 'test', '--no-daemon', '--console=plain'];
       if (target?.className) command.push('--tests', target.testName ? `${target.className}.${target.testName}` : target.className);
       return { command, collect: collectGlobCommand(GRADLE_REPORT_GLOB), format: 'junit-xml' };
     }
     case 'maven': {
-      const command = ['mvn', '-q', 'test'];
+      const command = [wrapper === true ? './mvnw' : 'mvn', '-q', 'test'];
       if (target?.className) command.push(`-Dtest=${target.testName ? `${target.className}#${target.testName}` : target.className}`);
       return { command, collect: collectGlobCommand(MAVEN_REPORT_GLOB), format: 'junit-xml' };
     }

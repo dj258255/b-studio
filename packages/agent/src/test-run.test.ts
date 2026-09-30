@@ -105,3 +105,12 @@ describe('detectRunner', () => {
     expect(detectRunner({ template: 'unknown-template' })).toBeUndefined();
   });
 });
+
+describe('buildTestRunPlan — 래퍼', () => {
+  it('래퍼가 없으면 이미지의 gradle·mvn을 쓴다', () => {
+    expect(buildTestRunPlan('gradle', { className: 'FooTest' }, { wrapper: false }).command.slice(0, 2)).toEqual(['gradle', 'test']);
+    expect(buildTestRunPlan('gradle', { className: 'FooTest' }).command[0]).toBe('./gradlew');
+    expect(buildTestRunPlan('maven', undefined, { wrapper: false }).command[0]).toBe('mvn');
+    expect(buildTestRunPlan('maven', undefined, { wrapper: true }).command[0]).toBe('./mvnw');
+  });
+});
