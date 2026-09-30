@@ -4,7 +4,7 @@
  * run.ts가 모듈을 불러오면 바로 실행되기 때문에(main() 즉시 호출), 인자 해석만 따로 떼어
  * 실행 없이 테스트할 수 있게 한다.
  */
-import type { Strategy } from './tasks';
+import { STRATEGIES, type Strategy } from './tasks';
 import type { Topology } from '@b-studio/agent';
 
 export interface Args {
@@ -156,4 +156,19 @@ export function resolveConcurrency(value: number | undefined): number {
  */
 export function concurrencyLabel(args: Pick<Args, 'concurrency' | 'childConcurrency'>): number {
   return args.childConcurrency ?? resolveConcurrency(args.concurrency);
+}
+
+/** --dry의 가짜 제공자가 돌 수 있는 기준선 전략 */
+const DRY_STRATEGIES: readonly Strategy[] = ['S0', 'S1'];
+
+/**
+ * 돌릴 전략을 고른다. --dry의 가짜 제공자는 S2~S5의 조율과 P0(로컬 Claude Code)을 모르므로 S0·S1 안에서만 고른다.
+ * 그 안에서는 준 전략을 따른다 — 동시 실행(--concurrency)의 자식은 전략 하나만 받는데, 이를 무시하면 자식마다 일을 두 배로 한다
+ */
+export function selectStrategies(strategies: Strategy[] | undefined, dry: boolean): Strategy[] {
+  const asked = strategies && strategies.length > 0 ? strategies : undefined;
+  const values = dry ? (asked?.filter((strategy) => DRY_STRATEGIES.includes(strategy)) ?? []) : (asked ?? []);
+  if (values.length === 0) return [...DRY_STRATEGIES];
+  for (const value of values) if (!STRATEGIES.includes(value)) throw new Error(`전략은 ${STRATEGIES.join(', ')} 중 하나여야 합니다: ${value}`);
+  return [...new Set(values)];
 }

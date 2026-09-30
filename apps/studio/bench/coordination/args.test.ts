@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { concurrencyLabel, parseArgs, parseTopology, resolveConcurrency } from './args';
+import { concurrencyLabel, parseArgs, parseTopology, resolveConcurrency, selectStrategies } from './args';
 
 describe('parseArgs', () => {
   it('기본값은 dry·force 모두 꺼짐이고 나머지는 없다', () => {
@@ -75,5 +75,21 @@ describe('concurrencyLabel', () => {
   it('자식이 아니면 이 프로세스 자신의 --concurrency(없으면 1)를 쓴다', () => {
     expect(concurrencyLabel({})).toBe(1);
     expect(concurrencyLabel({ concurrency: 3 })).toBe(3);
+  });
+});
+
+describe('selectStrategies', () => {
+  it('--dry에서도 S0·S1 안에서는 준 전략을 따른다(동시 실행 자식이 전략 하나만 돌게)', () => {
+    expect(selectStrategies(['S1'], true)).toEqual(['S1']);
+    expect(selectStrategies(['S0'], true)).toEqual(['S0']);
+    expect(selectStrategies(['S2', 'S0'], true)).toEqual(['S0']);
+    expect(selectStrategies(['S3'], true)).toEqual(['S0', 'S1']);
+    expect(selectStrategies(undefined, true)).toEqual(['S0', 'S1']);
+  });
+
+  it('실제 실행은 준 전략을 그대로 쓰고, 없으면 S0·S1이다', () => {
+    expect(selectStrategies(['S2', 'S2', 'S0'], false)).toEqual(['S2', 'S0']);
+    expect(selectStrategies(undefined, false)).toEqual(['S0', 'S1']);
+    expect(() => selectStrategies(['S9' as never], false)).toThrow(/전략은/);
   });
 });

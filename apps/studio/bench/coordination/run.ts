@@ -24,7 +24,7 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
-import { concurrencyLabel, parseArgs, parseTopology, resolveConcurrency } from './args';
+import { concurrencyLabel, parseArgs, parseTopology, resolveConcurrency, selectStrategies } from './args';
 import { runConcurrent } from './concurrent-run';
 import {
   assertContractsBackend,
@@ -56,7 +56,7 @@ import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
+import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
 import { planBriefsFromEvents, signatureKey, traceFromEvents, type LaneTrace, type PlanBriefRecord } from './trace';
@@ -103,14 +103,6 @@ function selectTasks(taskIds: string[] | undefined, dry: boolean): BenchTask[] {
     if (!task) throw new Error(`알 수 없는 과제입니다: ${id} (가능: ${BENCH_TASKS.map((candidate) => candidate.id).join(', ')})`);
     return task;
   });
-}
-
-function selectStrategies(strategies: Strategy[] | undefined, dry: boolean): Strategy[] {
-  // --dry의 가짜 제공자는 S2~S5의 조율과 P0(로컬 Claude Code)을 모른다. 기준선 S0·S1만 돈다
-  const values: Strategy[] | undefined = dry ? ['S0', 'S1'] : strategies;
-  if (!values || values.length === 0) return ['S0', 'S1'];
-  for (const value of values) if (!STRATEGIES.includes(value)) throw new Error(`전략은 ${STRATEGIES.join(', ')} 중 하나여야 합니다: ${value}`);
-  return [...new Set(values)];
 }
 
 /** 사전 확인(원칙 5). 다른 프로젝트 컨테이너가 있으면 --force 없이는 종료 코드 2로 멈춘다 */
