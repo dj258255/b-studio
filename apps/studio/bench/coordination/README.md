@@ -114,6 +114,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--plan-always` — 요청 복잡도와 무관하게 계획을 세운다(`B_STUDIO_PLAN_BRIEF=always`). 벤치 과제는 짧아 기본(auto)이면 `simple`로 분류돼 계획을 건너뛴다. 계획-실행 분리를 재려면 함께 준다
 - `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` — 반복할 수 있습니다. 레인 그룹은 `api`·`web`(레인의 첫 쓰기 경로)입니다. 모르는 그룹·백엔드면 시작 전에 오류를 냅니다. 쓰는 CLI는 시작 전에 각각 로그인을 확인합니다. 요약표 "레인 백엔드" 열(예 `api:claude-code web:commandcode`)과 행의 레인별 `backend`·`model`로 남습니다. `--backend`는 계획 기본(통합 세션)으로 남습니다
 - `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
+- `--concurrency N`(기본 1) — 여러 실행을 동시에 돌립니다. 아래 "동시 실행" 절을 보세요
 
 `--prices` 파일 형식(키는 모델 이름에 포함되면 매칭합니다. 예 `haiku-4-5`. 값은 100만 토큰당 달러이고, 예시는 형식만 보여 줍니다):
 
@@ -142,6 +143,23 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 시작 전에 `docker ps`를 보고 `studio-`로 시작하지 않는 컨테이너가 있으면 목록과 함께 종료 코드 2로 멈춥니다. 메모리를 나눠 쓰면 다른 프로젝트 DB가 OOM으로 죽을 수 있기 때문입니다. 정말 진행하려면 `--force`를 줍니다(경고만 하고 진행). 이 저장소는 한 번에 계획 하나만 돌리고, 끝나면 그 계획의 세션을 모두 내린 뒤 남은 `studio-<벤치 프로젝트>-` 컨테이너가 0개인지 확인합니다. 남아 있으면 다음 실행을 시작하지 않고 멈춥니다.
 
+## 동시 실행 (`--concurrency`)
+
+`--concurrency N`(기본 1, 지금까지와 같은 직렬 실행)을 주면 계획한 실행(과제 × 전략 × 반복)을 최대 N개까지 동시에 돌립니다. 실험을 여러 번 나눠 돌리는 대신 한 번에 끝내려는 것입니다.
+
+```bash
+pnpm bench:coordination --backend claude-code --model sonnet --strategies S0,S1 --tasks orders-list,order-detail,order-summary --repeats 3 --concurrency 3
+```
+
+- **어떻게 도는가**: 이 프로세스는 실행을 직접 돌리지 않습니다. 자기 자신(`run.ts`)을 자식 프로세스로 최대 N개까지 띄우고, 자식마다 실행 하나(과제 하나 · 전략 하나 · 반복 하나)를 맡깁니다. 자식마다 프로세스가 다르므로 `B_STUDIO_SESSIONS_DIR`·`B_STUDIO_PROJECTS_DIR` 같은 환경 변수, 임시 작업 폴더(workRoot), 프로젝트 복사본이 자연히 따로입니다. 프록시(`--backend openai`)는 자식마다 새로 떠서 빈 포트를 스스로 고르고(포트 0으로 열어 OS가 배정), 샌드박스 compose 프로젝트 이름도 자식마다 `bench-orders-<순번>`으로 겹치지 않습니다(샌드박스 컨테이너 이름 자체에도 세션마다 무작위 16진수 6자리가 더 붙어 이중으로 안전합니다). 그래서 동시에 여러 실행이 떠도 서로의 세션·포트·컨테이너를 침범하지 않습니다.
+- **순서와 결과**: `order`는 직렬 실행이었다면 매겼을 값과 같습니다(반복 → 과제 → 전략, 반복마다 전략 순서를 뒤집는 규칙도 그대로). `results.jsonl`은 완료되는 순서대로 한 줄씩 쌓이지만 각 행에 `order`가 남아 분석에는 영향이 없고, `summary.md`는 항상 `order`로 정렬한 뒤 만들어 완료 순서와 무관하게 같은 표가 나옵니다. 행과 `meta.json`에 `concurrency`가 남습니다 — **동시 실행일 때의 시간 지표(종단 시간·기동 시간 등)는 직렬 실행과 같은 기준으로 비교할 수 없습니다**(Docker VM 자원을 나눠 쓰기 때문입니다). `summary.md` 맨 위 줄에도 이 사실을 함께 적습니다.
+- **메모리**: 시작 전에 필요한 메모리(`N × 샌드박스 한 벌` — `examples/orders/studio.yaml`의 `resources`(api·web·db) 합 + edge 컨테이너 오버헤드(128MB) + 여유분 2GB)를 Docker VM의 남은 메모리(전체 메모리 − 이미 도는 컨테이너가 쓰는 메모리)와 비교합니다. 모자라면 `--concurrency`를 낮추거나 Docker VM 메모리를 늘리라는 안내와 함께 종료 코드 2로 멈춥니다(예: `colima stop && colima start --cpu 8 --memory 16`). 정말 진행하려면 `--force`를 줍니다. 이 계산은 "동시 실행 하나 = 샌드박스 한 벌"로 어림잡습니다 — S1 이상의 전략은 레인·통합 세션이 여러 개 동시에 뜰 수 있어 실제로는 더 쓸 수 있으니, 여유를 넉넉히 두거나 `--force` 판단은 신중히 하세요.
+- **사용 한도**: 실행 하나가 사용 한도(`rate_limited`)에 걸리면 그 뒤로 새 실행을 더 띄우지 않습니다(이미 도는 실행은 끝까지 돕니다). `--on-rate-limit wait`의 "기다렸다 같은 실행을 한 번만 다시 시도" 동작은 그 실행을 맡은 자식 안에서 그대로 일어납니다.
+- **남은 컨테이너**: 어느 실행이든 남은 컨테이너를 남기면(정리 실패) 그 뒤로 새 실행을 더 띄우지 않습니다(직렬 실행의 "남은 컨테이너" 중단과 같은 규칙).
+- **Ctrl-C**: 새 실행을 더 띄우지 않고, 도는 자식 프로세스 모두에 SIGINT를 보냅니다. 자식은 직렬 실행과 같은 정리 경로(세션 내리기·임시 폴더 지우기)를 그대로 밟습니다. 정리할 시간을 준 뒤에도 남아 있는 자식은 강제 종료합니다.
+- **결과 폴더**: `--out` 아래 `.units/<order>/`에 자식마다 결과 폴더(자식이 만든 `results.jsonl`·`summary.md`·`meta.json`·`child.log`)가 남습니다. 부모가 합친 `results.jsonl`·`summary.md`·`meta.json`은 평소와 같은 자리(`--out` 바로 아래)에 남습니다.
+- 자식 프로세스가 결과를 하나도 남기지 못하고 죽으면(설정 단계에서 실패 등) 그 실행은 실패 행(`category: unknown`, 로그 마지막 줄 포함)으로 채워 실험에서 그 자리를 잃지 않게 합니다.
+
 ## 결과 파일
 
 `--out`(기본 `~/.cache/b-studio/bench/coordination/<YYYYMMDD-HHmmss>`) 아래에 남깁니다.
@@ -149,7 +167,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `results.jsonl`: 실행 한 번이 한 줄입니다(계획·레인·통합 지표, 모델별 사용량 `metrics.usageByModel`, 수용 확인, 분류, 프록시 통계, 관측한 모델, 승격 결과, 계획-실행 분리 설정 `planExecute`, 추정 비용 `estimatedCostUsd`, `--prices`가 있으면 모델별 API 환산 비용 `costUsd` 또는 사유 `costNote`, 계약 `contracts`)
 - `contracts/`: `--contracts model`일 때 모델이 쓴 계약 원문(`<과제>-r<반복>-<순번>.json`). 불일치 원인을 나중에 보려고 남깁니다.
 - `summary.md`: 백엔드·요청한 모델·관측한 모델·실행 수, 과제 × 전략 표, 전략별 실패 원인 표. 과제 × 전략 표에는 **성공 1건당 토큰**(입력+캐시읽기+캐시쓰기+출력 합 ÷ 성공 수, 성공 0이면 `—`), "승격 건수", "수리(시도/성공)"(S4가 통합 실패 뒤 모델 수리를 요청한 실행 수 / 수리 실행이 done으로 끝난 수), "API 환산 비용($)" 열이 있습니다.
-- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`·`escalateAfterFailures`·`escalateRetryBudget`), 계획-실행 분리 설정(`planModel`·`executeModel`), 단가 파일 경로(`pricesPath`), git 커밋.
+- `meta.json`: 시작·끝 시각, Docker 메모리, 백엔드, 요청한 모델, 관측한 모델, 과제·전략·반복, topology, 계약 출처(`contracts`), 승격 설정(`escalateTo`·`escalateAfter`·`escalateAfterFailures`·`escalateRetryBudget`), 계획-실행 분리 설정(`planModel`·`executeModel`), 단가 파일 경로(`pricesPath`), git 커밋, 동시성(`concurrency`, `--concurrency`를 안 줬으면 1).
 
 행의 `escalation`은 `{ to, after, afterFailures?, retryBudget, escalated, attempt? }`입니다. `to`·`after`·`afterFailures`·`retryBudget`는 설정값이고, `escalated`·`attempt`는 세션 기록의 `model_escalated` 이벤트에서 읽습니다(설정하지 않았으면 `escalated: false`).
 
