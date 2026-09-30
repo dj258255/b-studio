@@ -632,3 +632,99 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     );
   });
 });
+
+/** 세션이 갈라져 나온 뒤(main) 브랜치에 다른 사람이 커밋을 올린다 */
+async function pushToBase(base: string, remote: string, file: string, content: string, message: string): Promise<string> {
+  const other = await mkdtemp(path.join(base, 'main-writer-'));
+  await execFileAsync('git', ['clone', '-q', '--branch', 'main', remote, other]);
+  await mkdir(path.dirname(path.join(other, file)), { recursive: true });
+  await writeFile(path.join(other, file), content);
+  await git(other, 'add', '-A');
+  await git(other, 'commit', '-q', '-m', message);
+  await git(other, 'push', '-q', 'origin', 'HEAD');
+  return git(other, 'rev-parse', 'HEAD');
+}
+
+describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
+  it('기준 브랜치가 앞서 있으면 behind로 세고, 다시 가져올 때까지는(throttle) 새 커밋을 보지 못한다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    expect(await store.baseStatus()).toMatchObject({ base: 'main', behind: 0 });
+
+    await pushToBase(base, remote, 'CHANGELOG.md', '# changes\n', 'main 변경');
+    // 방금 가져왔으므로(throttle 안) 강제로 다시 가져오지 않으면 새 커밋을 보지 못한다
+    const throttled = await store.baseStatus();
+    expect(throttled).toMatchObject({ base: 'main', behind: 0 });
+
+    const forced = await store.baseStatus({ force: true });
+    expect(forced).toMatchObject({ base: 'main', behind: 1 });
+    expect(Date.parse(forced.lastFetchedAt)).toBeGreaterThanOrEqual(Date.parse(throttled.lastFetchedAt));
+  });
+
+  it('가져올 것이 없으면 병합하지 않고 up-to-date를 돌려준다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const head = await git(workDir, 'rev-parse', 'HEAD');
+
+    expect(await store.integrateBase()).toMatchObject({ status: 'up-to-date', commits: [], files: [] });
+    expect(await git(workDir, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
+  it('main을 병합 커밋으로 따라잡는다: 첫 부모는 이 세션, 두 번째 부모는 main이다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+    await writeFile(order, 'class Order { String mine; }\n');
+    const mine = (await store.commit('요청: 내 변경'))!;
+
+    const theirs = await pushToBase(base, remote, 'CHANGELOG.md', '# changes\n', 'main 변경');
+
+    const result = await store.integrateBase();
+    expect(result).toMatchObject({
+      status: 'merged',
+      remoteSha: theirs,
+      files: ['CHANGELOG.md'],
+      previous: mine.sha,
+      commits: [{ sha: theirs, subject: 'main 변경', author: 'test' }],
+      checkpoint: { message: 'main을 따라잡는다 (1커밋)', files: ['CHANGELOG.md'] },
+    });
+    expect(await readFile(path.join(workDir, 'CHANGELOG.md'), 'utf8')).toBe('# changes\n');
+    // 내 변경은 그대로 남는다
+    expect(await readFile(order, 'utf8')).toBe('class Order { String mine; }\n');
+
+    const parents = (await git(workDir, 'rev-list', '--parents', '-n1', result.checkpoint!.sha)).split(' ');
+    expect(parents[0]).toBe(result.checkpoint!.sha);
+    expect(parents[1]).toBe(mine.sha);
+    expect(parents[2]).toBe(theirs);
+  });
+
+  it('main과 같은 곳을 고쳤으면 아무것도 바꾸지 않고 충돌한 파일을 알린다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+    await writeFile(order, 'class Order { String mine; }\n');
+    const mine = (await store.commit('요청: 내 변경'))!;
+
+    await pushToBase(base, remote, 'api/src/Order.java', 'class Order { String main; }\n', 'main 변경');
+
+    const error = await store.integrateBase().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(RemoteConflictError);
+    expect((error as RemoteConflictError).conflicts).toEqual(['api/src/Order.java']);
+    expect(await git(workDir, 'rev-parse', 'HEAD')).toBe(mine.sha);
+    expect(await store.pendingFiles()).toEqual([]);
+    expect(await readFile(order, 'utf8')).toBe('class Order { String mine; }\n');
+    await expect(git(workDir, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD')).rejects.toThrow();
+  });
+
+  it('체크포인트로 남기지 않은 변경이 있으면 따라잡지 않는다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String pending; }\n');
+
+    await expect(store.integrateBase()).rejects.toThrow('체크포인트로 저장하지 않은 변경');
+  });
+});

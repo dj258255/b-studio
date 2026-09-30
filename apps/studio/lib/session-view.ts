@@ -122,12 +122,29 @@ export type ChatItem =
       pullRequestError?: string;
       /** PR에 연결한 이슈 번호들 */
       issues?: number[];
+    }
+  /** main 따라잡기(ADR-076) */
+  | {
+      kind: 'baseSync';
+      result?:
+        | { ok: true; status: 'up-to-date' | 'merged'; commits: number; files: string[]; checkpoint?: Checkpoint; report?: VerificationReport }
+        | {
+            ok: false;
+            error: string;
+            conflicts?: string[];
+            /** "에이전트에게 충돌 해결 맡기기"로 시도했을 때만 있다. 대화 입력창에 미리 채운다 */
+            agentRequest?: string;
+            files?: string[];
+            report?: VerificationReport;
+            restarted?: ServiceCheck[];
+          };
     };
 
 type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
 type GateItem = Extract<ChatItem, { kind: 'gate' }>;
 type RestoreItem = Extract<ChatItem, { kind: 'restore' }>;
 type RemoteSyncItem = Extract<ChatItem, { kind: 'remoteSync' }>;
+type BaseSyncItem = Extract<ChatItem, { kind: 'baseSync' }>;
 type DeployItem = Extract<ChatItem, { kind: 'deploy' }>;
 
 export interface SessionView {
@@ -352,6 +369,33 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
       };
 
+    case 'base_sync_started':
+      return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'baseSync' }] };
+
+    case 'base_synced':
+      return {
+        ...patchSnapshot(view, { running: false, checkpoints: event.checkpoints, repository: event.repository }),
+        chat: settleBaseSync(view.chat, { ok: true, status: event.status, commits: event.commits, files: event.files, checkpoint: event.checkpoint, report: event.report }),
+        // 파일이 바뀌었으면 미리보기와 계약을 다시 불러오게 한다
+        completedRuns: event.status === 'up-to-date' ? view.completedRuns : view.completedRuns + 1,
+      };
+
+    case 'base_sync_failed':
+      return {
+        ...patchSnapshot(view, { running: false, ...(event.checkpoints ? { checkpoints: event.checkpoints } : {}) }),
+        chat: settleBaseSync(view.chat, {
+          ok: false,
+          error: event.error,
+          conflicts: event.conflicts,
+          agentRequest: event.agentRequest,
+          files: event.files,
+          report: event.report,
+          restarted: event.restarted,
+        }),
+        // 병합한 변경을 반영했다가 되돌렸으면 서비스가 다시 떴다
+        completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
+      };
+
     case 'deploy_started':
       return {
         ...patchSnapshot(view, { deploying: { action: event.action, target: event.target, startedAt: event.at, by: event.by, lines: [] } }),
@@ -441,6 +485,13 @@ function settleRemoteSync(chat: ChatItem[], result: NonNullable<RemoteSyncItem['
   // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
   if (index === -1) return [...chat, { kind: 'remoteSync', result }];
   return chat.map((item, i) => (i === index ? { kind: 'remoteSync', result } : item));
+}
+
+function settleBaseSync(chat: ChatItem[], result: NonNullable<BaseSyncItem['result']>): ChatItem[] {
+  const index = chat.findLastIndex((item) => item.kind === 'baseSync' && !item.result);
+  // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
+  if (index === -1) return [...chat, { kind: 'baseSync', result }];
+  return chat.map((item, i) => (i === index ? { kind: 'baseSync', result } : item));
 }
 
 function settleDeploy(chat: ChatItem[], action: DeployAction, result: NonNullable<DeployItem['result']>): ChatItem[] {

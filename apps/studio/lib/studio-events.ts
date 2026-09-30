@@ -372,6 +372,36 @@ export type StudioEvent =
       restarted?: ServiceCheck[];
       checkpoints?: Checkpoint[];
     }
+  /** main 따라잡기(ADR-076)를 시작했다 */
+  | { type: 'base_sync_started' }
+  | {
+      type: 'base_synced';
+      /** up-to-date면 따라잡을 커밋이 없었다 */
+      status: 'up-to-date' | 'merged';
+      /** 이번에 병합으로 따라잡은 기준 브랜치 커밋 수 */
+      commits: number;
+      files: string[];
+      checkpoint?: Checkpoint;
+      report?: VerificationReport;
+      checkpoints: Checkpoint[];
+      repository: RepositoryView;
+    }
+  | {
+      type: 'base_sync_failed';
+      error: string;
+      /** 충돌한 파일. 작업 복사본은 병합을 시작하기 전 그대로다 */
+      conflicts?: string[];
+      /**
+       * "에이전트에게 충돌 해결 맡기기"로 시도했을 때만 채운다. 자동으로 보내지 않고 화면이 대화 입력창에 미리 채워
+       * 사람이 보고 다듬어 보내게 한다(ADR-076의 안전한 대안 — docs/decisions.md 참고)
+       */
+      agentRequest?: string;
+      files?: string[];
+      /** 병합한 변경이 검증을 통과하지 못해 되돌렸을 때의 게이트 결과 */
+      report?: VerificationReport;
+      restarted?: ServiceCheck[];
+      checkpoints?: Checkpoint[];
+    }
   | {
       type: 'exported';
       repository: RepositoryView;

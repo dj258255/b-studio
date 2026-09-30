@@ -45,9 +45,10 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}deploy:\n  services:\n    web: { dockerfile: ../Dockerfile }\n`)).toThrow(SpecError);
   });
 
-  it('모노레포 하위 폴더 연동은 명시해야 켜진다', () => {
-    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false });
-    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true });
+  it('모노레포 하위 폴더 연동은 명시해야 켜지고, main 따라잡기(autoCatchUp)는 기본으로 켜진다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false, autoCatchUp: true });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true, autoCatchUp: true });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  autoCatchUp: false\n`).repository).toEqual({ monorepo: false, autoCatchUp: false });
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
