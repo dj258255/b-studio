@@ -16,7 +16,7 @@ const baseSnapshot: SessionSnapshot = {
   services: [],
 };
 
-describe("PreviewPanel 위 탭(ADR-086)", () => {
+describe("PreviewPanel 위 탭(ADR-087)", () => {
   it("서비스가 없으면 코드·요구사항·실행·저장소·토큰 다섯 자리만 보여준다(위 탭 묶기)", () => {
     const html = renderToStaticMarkup(<PreviewPanel view={createView(baseSnapshot)} />);
 

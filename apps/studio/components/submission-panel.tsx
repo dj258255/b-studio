@@ -29,7 +29,7 @@ const STATUS_LABEL: Record<ChecklistStatus, string> = { pass: "통과", warn: "�
 const STATUS_TEXT: Record<ChecklistStatus, string> = { pass: "text-pass", warn: "text-wait", fail: "text-fail", skip: "text-muted" };
 
 /**
- * "저장소" 탭의 "올리기 전 점검" 하위 탭(ADR-080, ADR-086). PR을 올리거나 저장소를 넘기기 전 점검 기준
+ * "저장소" 탭의 "올리기 전 점검" 하위 탭(ADR-080, ADR-087). PR을 올리거나 저장소를 넘기기 전 점검 기준
  * (요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서)을 점검표로 보여 준다. 요청이 끝날
  * 때마다(체크포인트·커밋이 바뀔 수 있으므로) key로 다시 마운트해 다시 불러온다
  * (RepositoryPanel과 같은 방식. effect 안에서 "불러오는 중"으로 되돌리는 setState를 하지 않아도 된다)
