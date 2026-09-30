@@ -3136,7 +3136,7 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 ## ADR-078 검증 게이트가 로딩에서 멈춘 화면·실패한 데이터 요청·동적 경로 404를 잡는다
 
 상태: 채택
-관련: #ISSUE
+관련: #249
 
 ### 맥락
 - [E8](experiments/2026-09-30-e8-plan-execute-split.md)에서 27회 중 6건이 실패했는데, 그중 3건은 **검증 게이트를 통과한 뒤 인수 확인(`apps/studio/bench/coordination/acceptance.ts`)에서만 잡혔다**: haiku 단독 2회는 `/dashboard`가 데이터를 받지 못해 "Loading..."으로 끝났고(합계 45,000이 없음), split 조건 1회는 `/orders/1`이 404였다. 또 다른 1회(split r3)는 서버 컴포넌트가 상대 주소 `/api/orders`를 fetch해 "Failed to parse URL"로 죽었다. `acceptance.ts`는 게이트와 달리 자바스크립트를 실행하지 않는 순수 HTTP 확인인데도, 응답 본문에서 기대 문구(`expectAll`)가 빠진 것만으로 이 실패들을 잡았다 — 게이트가 애초에 이 페이지들을 열어 보지 않았기 때문이다.
