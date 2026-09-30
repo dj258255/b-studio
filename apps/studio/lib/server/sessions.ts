@@ -3520,7 +3520,7 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
 }
 
 /**
- * 추적 매트릭스(ADR-089): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 모으고, 역방향 목록
+ * 추적 매트릭스(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 모으고, 역방향 목록
  * (주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 돌려준다. "요구사항" 탭의 추적 매트릭스 하위 화면이 연다.
  */
 export async function getSessionRequirementsMatrix(id: string): Promise<TraceabilityMatrix> {

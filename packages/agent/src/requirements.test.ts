@@ -517,7 +517,7 @@ describe('requestQuestionRecommendations', () => {
 });
 
 // ---------------------------------------------------------------------------
-// ADR-089: EARS·시나리오·NFR·개정/재확인·재추출 병합·추적 매트릭스
+// ADR-090: EARS·시나리오·NFR·개정/재확인·재추출 병합·추적 매트릭스
 // ---------------------------------------------------------------------------
 
 const withEars: Requirement = {
@@ -638,7 +638,7 @@ describe('carryForwardRequirementRevision', () => {
   });
 });
 
-describe('computeRequirementStatus — 재확인 필요(ADR-089)', () => {
+describe('computeRequirementStatus — 재확인 필요(ADR-090)', () => {
   const emptyEvidence = { checkpoints: [], tests: [], gateChecks: [] };
 
   it('requirement를 안 주면(기존 호출) 예전 규칙 그대로다', () => {
@@ -862,7 +862,22 @@ describe('buildTraceabilityMatrix / buildMatrixCsv', () => {
   });
 });
 
-describe('isManualStepText / partitionManualSteps — 사람이 할 일 가드(ADR-089)', () => {
+describe('isManualStepText / partitionManualSteps — 사람이 할 일 가드(ADR-090)', () => {
+  it('앱 기능으로 흔한 표현은 저장소 맥락이 없으면 요구사항으로 남긴다', () => {
+    expect(isManualStepText('결제 webhook을 받아 주문 상태를 바꾸는 API')).toBe(false);
+    expect(isManualStepText('관리자는 사용자 권한을 변경할 수 있다')).toBe(false);
+    expect(isManualStepText('팀원을 이메일로 초대하는 기능')).toBe(false);
+    expect(isManualStepText('게시글의 공개 범위를 전체·친구·비공개로 설정한다')).toBe(false);
+    expect(isManualStepText('API 키 같은 secret은 환경 변수로 읽는다')).toBe(false);
+  });
+
+  it('같은 표현이라도 저장소·계정 맥락과 함께면 사람이 할 일로 본다', () => {
+    expect(isManualStepText('GitHub 저장소에 배포 webhook을 등록한다')).toBe(true);
+    expect(isManualStepText('레포를 private으로 바꾼다')).toBe(true);
+    expect(isManualStepText('저장소에 팀원을 초대한다')).toBe(true);
+    expect(isManualStepText('APRCORPORATION을 collaborator로 추가한다')).toBe(true);
+  });
+
   it('실제 제출 절차 예시를 사람이 할 일로 잡는다', () => {
     expect(isManualStepText('제출 방법: private 저장소 생성, APRCORPORATION을 collaborator로 추가, PR 병합, 메일로 제출')).toBe(true);
   });
@@ -904,7 +919,7 @@ describe('summarizeManualStepsForGuide', () => {
   });
 });
 
-describe('추천 스펙 우선(ADR-089): specQuote 검증·basis', () => {
+describe('추천 스펙 우선(ADR-090): specQuote 검증·basis', () => {
   it('basis가 spec인데 specQuote가 실제 스펙에 없으면 practice로 강등한다', () => {
     const specText = '응답은 { "content": "..." } 형태를 그대로 지켜주세요.';
     const text = JSON.stringify({

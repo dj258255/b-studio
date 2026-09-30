@@ -34,7 +34,7 @@ export const MAX_ASSUMPTIONS = 10;
 /** "범위 밖" 노트로 뺄 수 있는 항목 수 상한(요구사항으로 만들지 않는 부정형 문장) */
 export const MAX_OUT_OF_SCOPE = 20;
 
-/** 요구사항 id는 영구적이다 — 절대 다시 매기거나 재사용하지 않는다(ADR-089). 시나리오 id(R4.1)는 SCENARIO_ID를 따로 쓴다 */
+/** 요구사항 id는 영구적이다 — 절대 다시 매기거나 재사용하지 않는다(ADR-090). 시나리오 id(R4.1)는 SCENARIO_ID를 따로 쓴다 */
 const REQUIREMENT_ID = /^R[1-9][0-9]*$/;
 const SCENARIO_ID = /^R[1-9][0-9]*\.[1-9][0-9]*$/;
 
@@ -121,25 +121,36 @@ export const ManualStepItemSchema = z.string().min(1).max(300);
 
 /**
  * 명세가 요구사항처럼 적어도 실제로는 코드·문서 밖에서 사람이 손으로 해야 하는 절차(저장소 권한·협업자·공개 범위
- * 변경, 이메일·메시지로 제출, 계정 생성 등)를 결정론적으로 거른다(ADR-089). 모델이 프롬프트 규칙을 놓쳐도
+ * 변경, 이메일·메시지로 제출, 계정 생성 등)를 결정론적으로 거른다(ADR-090). 모델이 프롬프트 규칙을 놓쳐도
  * 에이전트가 GitHub 저장소 권한을 바꾸는 작업을 "요구사항"으로 착각해 시도하지 않도록 이 가드가 항상 한 번 더 본다.
+ *
+ * 아래는 그 자체로 "사람이 할 일"인 표현이다. 앱 기능 이름으로 거의 쓰이지 않는다(GitHub 용어 collaborator, 제출 절차).
  */
-const MANUAL_STEP_PATTERNS: readonly RegExp[] = [
-  /collaborator|협업자|공동\s*작업자/i,
-  /\binvite(?:s|d)?\b|초대/i,
-  /\bvisibility\b|공개\s*범위|저장소를?\s*(?:private|public)(?:으)?로/i,
-  /권한\s*(?:추가|부여|변경|설정)|\bpermission/i,
+const MANUAL_STEP_STANDALONE: readonly RegExp[] = [
+  /\bcollaborators?\b/i,
   /branch\s*protection/i,
-  /\bwebhook\b/i,
   /deploy\s*key/i,
-  /secret\s*(?:값)?\s*설정/i,
   /메일(?:로)?\s*제출|이메일(?:로)?\s*제출|email\s*(?:로)?\s*제출/i,
   /제출\s*(?:방법|절차)/i,
 ];
+/**
+ * 앱 기능으로도 흔한 표현(결제 webhook, 사용자 권한 변경, 팀원 초대, 게시글 공개 범위 등). 저장소·계정 맥락과
+ * 함께 나올 때만 "사람이 할 일"로 본다 — 맥락 없이 걸면 정상 요구사항이 에이전트 작업 목록에서 빠진다
+ */
+const MANUAL_STEP_IN_REPO_CONTEXT: readonly RegExp[] = [
+  /협업자|공동\s*작업자/,
+  /\binvite(?:s|d)?\b|초대/i,
+  /\bvisibility\b|공개\s*범위|\bprivate\b|\bpublic\b|비공개|공개로/i,
+  /권한|\bpermission/i,
+  /\bwebhook\b|웹훅/i,
+  /\bsecrets?\b|시크릿/i,
+];
+const REPO_CONTEXT = /저장소|레포|\brepo(?:sitory)?\b|github|깃허브|gitlab|organization|조직\s*설정|계정\s*설정/i;
 
 /** 텍스트가 "사람이 할 일"(에이전트가 절대 하면 안 되는 절차)로 보이는지 */
 export function isManualStepText(text: string): boolean {
-  return MANUAL_STEP_PATTERNS.some((pattern) => pattern.test(text));
+  if (MANUAL_STEP_STANDALONE.some((pattern) => pattern.test(text))) return true;
+  return REPO_CONTEXT.test(text) && MANUAL_STEP_IN_REPO_CONTEXT.some((pattern) => pattern.test(text));
 }
 
 /**
@@ -1099,7 +1110,7 @@ export function scanTestFilesForOrphans(files: readonly ScannedFile[]): TestMatc
 }
 
 /**
- * 요구사항의 안정적 내용 해시(ADR-089). title·ears·scenarios·nfr만 본다 — 이 넷이 "무엇을 어떻게 검증하는가"를
+ * 요구사항의 안정적 내용 해시(ADR-090). title·ears·scenarios·nfr만 본다 — 이 넷이 "무엇을 어떻게 검증하는가"를
  * 정하는 실질 내용이고, acceptance·priority·trace·id는 해시에 넣지 않는다(우선순위를 바꿨다고 재확인이 필요한 건
  * 아니고, acceptance는 scenarios가 있으면 그로부터 파생되는 표시용 값이라 이중으로 세지 않는다).
  */
@@ -1149,7 +1160,7 @@ export function carryForwardRequirementRevision(next: Requirement, previous: Req
 }
 
 /**
- * 상태 규칙(ADR-079, 재확인 필요는 ADR-089): 내용이 지금 드리프트돼 있으면(아직 저장 전) 곧바로 재확인 필요.
+ * 상태 규칙(ADR-079, 재확인 필요는 ADR-090): 내용이 지금 드리프트돼 있으면(아직 저장 전) 곧바로 재확인 필요.
  * 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴 체크포인트·게이트 확인이 하나라도
  * 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다 — 없으면 재확인 필요에 머문다. 평소 규칙: 미착수 → 작업
  * 중(체크포인트가 참조하거나 테스트가 있다) → 검증됨(id가 붙은 게이트 확인이 모두 통과) / 실패(하나라도 실패).
@@ -1301,7 +1312,7 @@ export function buildAllMustHavesPrefill(requirements: readonly Requirement[]): 
 }
 
 // ---------------------------------------------------------------------------
-// 요구사항 스멜 린트(ADR-089): QVscribe류 도구가 잡는 "약한 표현"과 구조적 흠을 결정론적으로 찾는다.
+// 요구사항 스멜 린트(ADR-090): QVscribe류 도구가 잡는 "약한 표현"과 구조적 흠을 결정론적으로 찾는다.
 // 모델 호출 없이 문자열만 본다 — 추출 모델이 프롬프트 규칙을 놓쳐도 화면에서 바로 잡아낼 안전망이다.
 // ---------------------------------------------------------------------------
 
@@ -1382,7 +1393,7 @@ export function requirementsReadyBadge(requirements: readonly Requirement[]): bo
 }
 
 // ---------------------------------------------------------------------------
-// 재추출 병합(ADR-089): 모델이 다시 뽑은 요구사항(id는 항상 R1..Rn부터 새로 매겨져 온다)을 제목·EARS 문장·종류
+// 재추출 병합(ADR-090): 모델이 다시 뽑은 요구사항(id는 항상 R1..Rn부터 새로 매겨져 온다)을 제목·EARS 문장·종류
 // 유사도로 기존 저장된 요구사항과 짝지어 id를 지킨다. 같은 입력을 두 번 돌리면 id가 하나도 바뀌지 않아야 한다.
 // ---------------------------------------------------------------------------
 
@@ -1527,7 +1538,7 @@ export function mergeReextractedRequirements(incoming: readonly Requirement[], e
 }
 
 // ---------------------------------------------------------------------------
-// 추적 매트릭스(ADR-089): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 한 줄로 모으고,
+// 추적 매트릭스(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 한 줄로 모으고,
 // 역방향 목록(주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 만든다. "요구사항" 탭의 추적 매트릭스 하위 화면이 쓴다.
 // ---------------------------------------------------------------------------
 

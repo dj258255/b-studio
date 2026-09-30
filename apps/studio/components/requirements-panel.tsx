@@ -316,7 +316,7 @@ interface TraceabilityMatrixView {
   mustHavesWithoutTests: Array<{ id: string; title: string }>;
 }
 
-/** "추적 매트릭스" 하위 화면(ADR-089): 요구사항·시나리오 행마다 개정·우선순위·커밋·테스트·게이트·상태를 한 줄로 보여주고, CSV로 내보낸다 */
+/** "추적 매트릭스" 하위 화면(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·커밋·테스트·게이트·상태를 한 줄로 보여주고, CSV로 내보낸다 */
 function MatrixView({ sessionId }: { sessionId: string }) {
   const [state, setState] = useState<{ data?: TraceabilityMatrixView; error?: string }>();
 
@@ -485,7 +485,7 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
   );
 }
 
-/** "재추출 병합" 미리보기(ADR-089): 이미 저장된 문서가 있을 때만 있다. 개수만 요약해 보여 준다(자세한 내용은 아래 편집 목록에서 본다) */
+/** "재추출 병합" 미리보기(ADR-090): 이미 저장된 문서가 있을 때만 있다. 개수만 요약해 보여 준다(자세한 내용은 아래 편집 목록에서 본다) */
 function DiffSummary({ diff }: { diff: RequirementDiffEntry[] }) {
   const counts = (["added", "changed", "unchanged", "removed"] as const).map((status) => ({
     status,
