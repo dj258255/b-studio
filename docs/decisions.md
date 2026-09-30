@@ -92,6 +92,7 @@
 - [ADR-075 계획은 큰 모델로 한 번 세우고 실행은 작은 모델로 한다](#adr-075-계획은-큰-모델로-한-번-세우고-실행은-작은-모델로-한다)
 - [ADR-076 세션 브랜치가 main보다 뒤처지면 병합으로 따라잡고 다시 검증한다](#adr-076-세션-브랜치가-main보다-뒤처지면-병합으로-따라잡고-다시-검증한다)
 - [ADR-077 반복 행동을 스크립트로 굳히기](#adr-077-반복-행동을-스크립트로-굳히기)
+- [ADR-078 검증 게이트가 로딩에서 멈춘 화면·실패한 데이터 요청·동적 경로 404를 잡는다](#adr-078-검증-게이트가-로딩에서-멈춘-화면실패한-데이터-요청동적-경로-404를-잡는다)
 
 ---
 
@@ -3130,6 +3131,52 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **AGENTS.md가 계속 커지기만 하면(스크립트 한 줄씩 쌓고 정리는 안 하면) 매 실행 고정 비용이 늘어난다.** 예산(기본 8,000자)과 `guideChars`를 토큰 탭에 보여주는 것까지만 했고, 오래된 줄을 자동으로 정리하는 기능은 없다 — 사람이 주기적으로 훑어봐야 한다.
 - 되풀이 감지 → AGENTS.md 갱신 → 다음 실행이 실제로 반복을 줄이는 고리 전체를 실측하지는 않았다(사니티 체크는 감지까지만 했다). "반복 작업" 구역의 후보 수가 시간이 지나며 실제로 줄어드는지는 이번 라운드의 범위 밖이다.
 - Codex·Command Code·OpenCode 러너는 코드 변경(guide 주입)은 같은 패턴으로 반영했지만, claude-code-runner.test.ts·loop.test.ts만큼 러너별 전용 테스트를 새로 쓰지는 않았다(세 러너 모두 같은 `buildSystemPrompt(...) + workflowContext(...) + projectGuideSection(guide)` 조립을 그대로 재사용하므로 회귀 위험은 낮다고 보았다) — 필요하면 각 러너 테스트 파일에 같은 패턴의 테스트를 추가한다.
+
+---
+
+## ADR-078 검증 게이트가 로딩에서 멈춘 화면·실패한 데이터 요청·동적 경로 404를 잡는다
+
+상태: 채택
+관련: #249
+
+### 맥락
+- [E8](experiments/2026-09-30-e8-plan-execute-split.md)에서 27회 중 6건이 실패했는데, 그중 3건은 **검증 게이트를 통과한 뒤 인수 확인(`apps/studio/bench/coordination/acceptance.ts`)에서만 잡혔다**: haiku 단독 2회는 `/dashboard`가 데이터를 받지 못해 "Loading..."으로 끝났고(합계 45,000이 없음), split 조건 1회는 `/orders/1`이 404였다. 또 다른 1회(split r3)는 서버 컴포넌트가 상대 주소 `/api/orders`를 fetch해 "Failed to parse URL"로 죽었다. `acceptance.ts`는 게이트와 달리 자바스크립트를 실행하지 않는 순수 HTTP 확인인데도, 응답 본문에서 기대 문구(`expectAll`)가 빠진 것만으로 이 실패들을 잡았다 — 게이트가 애초에 이 페이지들을 열어 보지 않았기 때문이다.
+- 게이트에는 이미 화면을 여는 두 경로가 있다. (1) `studio.yaml`에 **사람이 적은** `pageChecks`(ADR-050: `mode: http`가 기본, `mode: browser`는 헤드리스 Chromium으로 렌더링된 글자·스크립트 예외·`console.error`·실패한 요청(4xx·5xx·연결 실패)·가로 넘침을 본다). (2) `autoPageChecks`(#142, 전용 ADR 없이 추가됨) — 이번 실행에서 **바뀐** Next.js 페이지를 스스로 찾아 같은 방식으로 열어 보고, 동적 세그먼트(`[id]`)는 `sampleParams`에 값이 있을 때만 채우고 없으면 건너뛴다. 예제 프로젝트(`examples/orders/studio.yaml`)는 `pageChecks`에 `/`만 선언했고 `autoPageChecks`는 켜지 않았다(README: "자동 확인은 기본 끔"). 그래서 E8이 새로 만든 `/dashboard`·`/orders/[id]`는 어느 경로로도 열리지 않았다 — 이번 실패들은 "화면 확인이 틀리게 판정했다"가 아니라 "그 화면을 아예 열어 보지 않았다"는 문제다.
+- `browser_check`(ADR-050)는 이미 렌더링된 글자·실패한 요청·콘솔 오류·스크립트 예외를 모은다. 하지만 "렌더링된 글자가 로딩 문구뿐이다" 자체는 실패 조건이 아니었다 — `expectText` 같은 사람이 적은 기대값이 있을 때만 부수적으로 걸렸다. `autoPageChecks`로 자동으로 연 페이지는 애초에 `expectText`가 없어(사람이 그 페이지의 문구를 미리 모른다), 로딩 문구만 남아도 상태 코드가 200이면 통과했다.
+- 동적 라우트는 `sampleParams`가 없으면 조용히 건너뛰었다(check로는 남지만 `ok: true`) — "id를 모르니 확인 안 함"이 "확인해서 통과"처럼 보였다. `/orders/1`(split r2) 같은 404는 `sampleParams`를 미리 적어 두지 않는 한 원천적으로 못 잡는 구조였다.
+
+### 결정
+1. **로딩에서 멈춘 화면 판정(`packages/agent/src/stuck-loading.ts`, `detectStuckLoading`)**: `browser_check`의 `mode: browser`(선언한 `pageChecks`와 `autoPageChecks` 모두)에서 기본으로 켠다. 네트워크가 잠잠해진 뒤(ADR-050이 이미 `waitForLoadState('networkidle', { timeout: 5_000 })`로 걸어 둔 것을 그대로 쓴다 — 새 타임아웃을 추가하지 않았다) 렌더링된 글자를 줄 단위로 나눠 **모든 줄이 로딩 문구뿐**이면("Loading...", "로딩 중입니다", "불러오는 중" 등, 정규식 목록) 실패로 본다. 한 줄이라도 실제 내용이면 통과시켜, "Loading Dock 안내" 같은 문장 일부의 "로딩"이나 본문 중 한 군데 남은 "Loading..." 스피너 라벨을 오탐하지 않는다(각주 대신 `stuck-loading.test.ts`에 근거 사례로 남겼다). 글자가 아예 없으면(스켈레톤·스피너만 있는 화면) 실패한 요청·콘솔 오류·스크립트 예외 중 하나라도 있을 때만("증거") 실패로 본다 — 증거 없는 빈 화면은 의도된 빈 화면(스플래시 등)일 수 있어 판정하지 않는다. `pageChecks[].allowLoadingPlaceholder`(browser 전용, 기본 꺼짐)로 의도적으로 로딩 상태를 오래 보여주는 화면만 예외로 둔다.
+2. **HTTP 모드는 실패시키지 않고 참고 문구만 남긴다.** `mode: http`는 자바스크립트를 실행하지 않아 클라이언트 fetch가 실패했는지 알 방법이 없다 — 그래서 `autoPageChecks`(자동으로 연 페이지)에 한해 응답 본문(HTML 태그를 걷어낸 평문)이 로딩 문구뿐이면 `[참고] ... HTTP 확인은 자바스크립트를 실행하지 않아 확정할 수 없습니다`를 `WorkflowCheck.detail`에 덧붙이되 게이트는 막지 않는다(`#pageWarnings`). 선언한 `pageChecks`(사람이 이미 `expectText` 등으로 직접 통제하는 확인)에는 이 경고를 넣지 않는다 — 놀라움을 줄이려고 범위를 "이번 실행이 자동으로 찾은 페이지"로 좁혔다.
+3. **실패한 데이터 요청**은 ADR-050이 이미 잡는다(`failedRequests`: 4xx·5xx·연결 실패, `consoleErrors`, `pageErrors`) — 이번에는 새로 만들지 않고, 1번의 "증거" 판정에 그대로 재사용했다.
+4. **동적 경로 404 확인**(`packages/agent/src/next-routes.ts`, `isIdLikeSegment`·`routesFromChangedFiles`의 새 `fallbackValue` 인자): `autoPageChecks.dynamicRouteProbe`(생략하면 켠 것과 같다, `false`로만 끌 수 있다)가 켜져 있으면, `sampleParams`에 값이 없어도 **`id`·`orderId`·`order_id`처럼 id로 보이는 세그먼트만**(`grid`·`slug`처럼 우연히 "id"로 끝나거나 값을 짐작할 근거가 없는 이름은 그대로 건너뛴다) `autoPageChecks.sampleIdFrom`(api를 불러 jsonPath로 첫 값을 꺼낸다, `WorkflowPageExpectFromApiSchema`와 같은 모양)이나 기본값 `'1'`로 채워 열어 본다. **이렇게 추정한 id로 연 경로는 404·500만 실패로 본다**(그 밖 상태, 예: 403·401은 id가 실제로 없을 수 있어 넘어간다) — E8 split r2(`/orders/1`이 404)와 같은 사례를 정확히 잡되, 빈 DB에서 존재하지 않는 id를 추정해 우연히 404가 나는 경우까지 실패로 만들지 않으려는 절충이다. `sampleIdFrom` 조회가 실패해도(api가 없거나 빈 배열이거나 상태가 아니면) 기본값 `'1'`로 물러나 게이트 실패로 이어지지 않는다.
+5. **기본값 결정: `autoPageChecks` 자체는 여전히 프로젝트가 켜야 한다(README의 "자동 확인은 기본 끔"을 유지).** 이 프로젝트가 "웹 스튜디오가 만드는 예제"라는 특성상 어떤 프로젝트든 Next.js 서비스가 있으면 자동으로 브라우저를 띄우게 하는 것은 이번 범위를 넘는 더 큰 기본값 변경이라, 검증 없이 넣지 않았다. 대신 **`autoPageChecks`를 이미 켠 프로젝트 안에서는 이번 세 확인을 모두 기본으로 켠다**(로딩 판정·HTTP 경고·동적 경로 추정 모두 opt-out만 있고 opt-in 설정이 없다) — 이미 "바뀐 페이지를 스스로 확인하겠다"고 선택한 프로젝트에서, 그 확인이 놓치던 흔한 실패 모양을 추가로 덮는 것은 새 비용이 아니라 기존 기능의 완성도 문제이기 때문이다. `examples/orders/studio.yaml`에 `autoPageChecks`를 새로 켜는 것은 이번 변경에 넣지 않았다 — 실제 Docker 샌드박스로 재현·검증하지 않은 채 예제 동작을 바꾸는 것은 이번 범위(가짜 클라이언트로만 검증) 밖이라고 판단했다(감수한 트레이드오프에 남긴다).
+6. **게이트 시간 증가**: 로딩 판정·HTTP 경고는 이미 갖고 있던 `result.text`/응답 본문을 재사용해 새 네트워크 호출이 없다(추가 비용은 문자열 비교 수준, 무시할 만하다). 동적 경로 추정은 (a) `sampleIdFrom`을 적었을 때만 api 목록 조회 1회가 늘고(수십~수백ms, 기존 `PAGE_TIMEOUT_MS` 30초 상한 안), (b) 이전엔 건너뛰던 동적 페이지를 이제 실제로 열어 본다 — 이는 새로운 종류의 비용이 아니라 ADR-050이 이미 실측한 "화면 확인 1건당" 비용(HTTP 모드 수십~수백ms, browser 모드 브라우저 기동 포함 1~3초)이 그 페이지 수만큼 늘어나는 것이다. 실제 Docker·헤드리스 브라우저를 이 라운드에서 띄우지 않아 새로 측정하지는 못했다(추정치로 남긴다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. `autoPageChecks`를 모든 Next.js 프로젝트에 기본으로 켠다 | 헤드리스 브라우저를 프로젝트 설정 없이도 항상 띄우는 더 큰 기본값 변경이라, 이번처럼 가짜 클라이언트로만 검증한 라운드에서 넣기에는 근거가 얕다. `autoPageChecks`는 그대로 opt-in으로 두고, 이미 켠 프로젝트 안의 확인만 강화했다(채택) |
+| B. api 경로를 정규식으로 짐작해(`/orders/[id]` → `/api/orders`) 목록에서 id를 자동으로 뽑는다 | 프론트·백 라우트 이름이 다르면(REST 관례를 안 따르면) 틀린 api를 불러 노이즈만 늘린다. 대신 **명시적** `sampleIdFrom`(사람이 어느 api·jsonPath인지 적는다) + 기본값 `'1'`로 좁혔다(채택) — `expectFromApi`가 이미 쓰는 같은 스키마를 재사용해 새 개념을 만들지 않는다 |
+| C. HTTP 모드도 로딩 문구를 실패로 본다 | 자바스크립트를 실행하지 않는 확인은 "클라이언트 fetch가 진짜 실패했는지" 알 방법이 없다. 브라우저 없는 배포에서 정적으로 로딩 UI를 먼저 그리는 정상적인 페이지(느린 3G 대응 스켈레톤)까지 오탐할 위험이 있어, 막지 않는 참고 문구로 낮췄다(채택) |
+| D. 추정 id로 연 동적 경로도 `expectStatus`(기본 200)와 정확히 맞아야 통과 | 빈 DB·시드 데이터가 없는 샌드박스에서 존재하지 않는 id는 정상적으로 404가 난다. 추정값 하나로 모든 상태를 실패로 몰면 오탐이 너무 잦다 — 404·500만 실패로 보고 나머지는 "확인 못 함"으로 넘어간다(채택) |
+| E. `routesFromChangedFiles`가 모든 값 없는 동적 세그먼트를 `'1'`로 채운다(id처럼 보이는지 가리지 않는다) | `[slug]`·`[locale]`처럼 숫자 id가 아닌 세그먼트에 `'1'`을 넣으면 거의 항상 404라 신호가 아니라 소음이 된다. `isIdLikeSegment`로 이름을 가려 확률이 높은 것만 추정한다(채택) |
+
+### 검증 결과
+- `packages/agent/src/stuck-loading.test.ts`(신규): 영어·한국어 로딩 문구 단독(참·E8과 같은 "Loading..." 단독 사례 포함), 여러 줄 반복 로딩 문구, **문장 일부에 "로딩"이 섞였거나 다른 줄에 실제 내용이 있으면 통과**(거짓, 오탐 방지 사례), 빈 화면은 증거(실패한 요청·콘솔 오류·스크립트 예외) 없이는 통과, 증거가 있으면 실패, 일반적인 짧은 안내 화면은 통과를 확인했다.
+- `packages/agent/src/next-routes.test.ts`(보강): `isIdLikeSegment`(id·ID·orderId·order_id·order-id는 참, grid·slug·category·locale·valid는 거짓), `routesFromChangedFiles`에 `fallbackValue`를 주면 id류 세그먼트만 채우고 `usedFallbackParams`를 남기며, `slug` 같은 이름은 fallbackValue가 있어도 건너뛰고, 세그먼트가 여럿이면 모두 채우는지 확인했다.
+- `packages/agent/src/gate.test.ts`(보강): browser 모드에서 렌더링 글자가 "Loading..."뿐이면 실패(E8 haiku 재현), 빈 화면은 실패한 요청 같은 증거가 있을 때만 실패, `allowLoadingPlaceholder`로 예외 처리, HTTP 모드 자동 페이지는 로딩 문구를 실패시키지 않고 `[참고]`로만 남김, id로 보이는 세그먼트는 `sampleParams` 없이도 `'1'`로 열어 404면 실패(E8 split r2 재현)하되 403 같은 다른 상태는 통과, `dynamicRouteProbe: false`면 예전처럼 건너뜀, `sampleIdFrom`이 api에서 꺼낸 값(예: 42)으로 여는지, 조회 실패 시 `'1'`로 물러나는지, id로 보이지 않는 이름(slug)은 여전히 건너뛰는지를 확인했다.
+- `packages/spec/src/spec.test.ts`(보강): `autoPageChecks.dynamicRouteProbe`·`sampleIdFrom` 파싱과 기본값(생략하면 undefined), 둘을 함께(`dynamicRouteProbe: false` + `sampleIdFrom`) 적으면 거부, `pageChecks[].allowLoadingPlaceholder`가 `mode: browser` 전용인지 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류)를 확인했다. `pnpm test`는 이 변경과 무관한 사전 존재 플레이키(`packages/sandbox/src/docker/format.test.ts`, 기기 부하로 5000ms 타임아웃)가 1건 있었으나 따로 돌리면 통과했다(1737개 전부 통과, `docs/troubleshooting.md`에 남긴 것과 같은 종류) — 이번에 새로 만든 테스트는 전부 한 번에 통과했다.
+- 실제 Docker 샌드박스·헤드리스 브라우저·모델 호출은 부르지 않았다(계획대로 가짜 `browserRunner`·`pageFetcher`만 썼다). `examples/orders/studio.yaml`로 실제 E8 시나리오를 다시 돌려 게이트가 실제로 막는지는 확인하지 못했다 — 아래 트레이드오프에 남긴다.
+
+### 감수한 트레이드오프
+- **실제 재현 미검증**: E8이 실패한 세 사례를 가짜 `browserRunner`/`pageFetcher`로 흉내 낸 단위 테스트로만 확인했다. `examples/orders/studio.yaml`에 `autoPageChecks`를 켜고 실제 Docker 샌드박스로 E8을 다시 돌려 게이트가 실제로 막는지는 이번 라운드에서 검증하지 못했다(Docker·모델 호출 금지 조건 때문).
+- **id 추정은 틀릴 수 있다**: `isIdLikeSegment`는 이름 규칙(camelCase의 `Id`, `_id`, `-id`)에 기댄 휴리스틱이라, `[no]`(주문 번호를 `no`로 지었다면)처럼 id지만 이름이 다른 세그먼트는 여전히 건너뛴다. 반대로 `sampleIdFrom` 없이 기본값 `'1'`로 추정했는데 실제로 그 프로젝트의 id가 1부터 시작하지 않으면(빈 DB, UUID id 등) 404가 나도 "id가 없어서"인지 "라우트가 고장 나서"인지 게이트가 구분하지 못하고 실패로 본다 — `dynamicRouteProbe: false`나 `sampleParams`로 실제 값을 적어 오탐을 피할 수 있다.
+- **여러 id류 세그먼트가 한 라우트에 있으면 같은 추정값을 함께 쓴다**(`/u/[userId]/posts/[postId]` → 둘 다 `1`). 서로 다른 리소스인데 같은 값을 쓰는 것은 의미상 맞지 않을 수 있다 — 첫 버전은 단순함을 택했고, 필요해지면 세그먼트별로 다른 `sampleIdFrom`을 받도록 넓힌다.
+- **HTTP 모드의 로딩 경고는 게이트를 막지 않는다.** 자동으로 연 페이지가 HTTP 모드이고 실제로 클라이언트 fetch가 실패해도, 참고 문구만 남고 검증은 통과한다 — 확실히 잡으려면 `autoPageChecks.mode: browser`가 필요하다(경고 문구에 안내한다).
+- **로딩 문구 판정은 "모든 줄이 로딩뿐"이라는 보수적 규칙이라, 로딩 스피너와 고정된 내비게이션·헤더가 함께 있는 화면**(로딩이 아닌 줄이 섞여 "모든 줄"을 못 채움)은 실제로 멈춰 있어도 놓칠 수 있다 — 오탐(false positive)보다 미탐(false negative)을 택한 절충이다.
+- `examples/orders/studio.yaml`은 그대로 뒀다(위 검증 결과 참고) — 이 저장소의 예제가 E8과 같은 버그를 실제로 다시 막는지는 다음 라운드에서 Docker로 재현할 때 확인한다.
 
 ---
 

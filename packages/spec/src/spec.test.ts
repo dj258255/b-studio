@@ -169,6 +169,38 @@ describe('parseSpec', () => {
     ]);
   });
 
+  it('autoPageChecks.dynamicRouteProbe·sampleIdFrom을 읽고, 함께 끄면 거부한다(ADR-078)', () => {
+    // 생략하면 undefined(켠 것과 같다). 굳이 기본값을 채우지 않아 이전 설정과 그대로 호환된다
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web }\n`).workflow?.autoPageChecks?.dynamicRouteProbe).toBeUndefined();
+
+    const off = parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, dynamicRouteProbe: false }\n`).workflow?.autoPageChecks;
+    expect(off?.dynamicRouteProbe).toBe(false);
+
+    const from = parseSpec(
+      `${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, sampleIdFrom: { service: api, path: /api/orders, jsonPath: "$[0].id" } }\n`,
+    ).workflow?.autoPageChecks;
+    expect(from?.sampleIdFrom).toEqual({ service: 'api', path: '/api/orders', jsonPath: '$[0].id' });
+
+    // dynamicRouteProbe를 끄면 sampleIdFrom은 쓰이지 않으므로, 함께 적으면 설정 오류로 거부한다
+    expect(
+      captureError(() =>
+        parseSpec(
+          `${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, dynamicRouteProbe: false, sampleIdFrom: { service: api, path: /api/orders, jsonPath: "$[0].id" } }\n`,
+        ),
+      ).issues,
+    ).toEqual(['workflow.autoPageChecks.sampleIdFrom: sampleIdFrom은 dynamicRouteProbe를 끄면 쓰이지 않습니다']);
+  });
+
+  it('pageChecks.allowLoadingPlaceholder는 browser 전용이다(ADR-078)', () => {
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, allowLoadingPlaceholder: true }\n`)).issues).toEqual([
+      'workflow.pageChecks.0.allowLoadingPlaceholder: allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다',
+    ]);
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, allowLoadingPlaceholder: true }\n`).workflow?.pageChecks?.[0]
+        ?.allowLoadingPlaceholder,
+    ).toBe(true);
+  });
+
   it('browser 모드의 상호작용 단계를 읽고, http 모드나 잘못된 단계를 거부한다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}workflow:
   pageChecks:
