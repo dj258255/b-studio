@@ -52,6 +52,8 @@ interface DraftRun {
   usageByModel?: Record<string, AgentUsage>;
   /** model_escalated 이벤트. 한 실행에 한 번만 온다 */
   escalation?: { from: string; to: string; attempt: number };
+  /** run_finished.metrics.guideChars. 프로젝트 지침(AGENTS.md, ADR-077)을 읽어 시스템 프롬프트에 더했을 때만 있다 */
+  guideChars?: number;
 }
 
 /** 보고서에 적용할 단가. 모델별 표가 있으면 단일 단가보다 우선한다 */
@@ -98,6 +100,7 @@ export function buildTokenReports(events: readonly StudioEvent[], pricing: Token
         const used = Object.entries(event.metrics.usageByModel).filter(([, usage]) => usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens > 0);
         if (used.length > 0) current.usageByModel = Object.fromEntries(used);
       }
+      if (event.metrics?.guideChars !== undefined) current.guideChars = event.metrics.guideChars;
       current = undefined;
     }
   }
@@ -196,6 +199,7 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
     ...(cost.estimatedCostUsd !== undefined ? { estimatedCostUsd: cost.estimatedCostUsd } : {}),
     ...(cost.priceNote ? { priceNote: cost.priceNote } : {}),
     ...(run.escalation ? { escalation: run.escalation } : {}),
+    ...(run.guideChars !== undefined ? { guideChars: run.guideChars } : {}),
     contextGrowth: analyzeContextGrowth(run.rawEvents),
   };
 }

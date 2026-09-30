@@ -15,7 +15,8 @@ import type { Effort } from './anthropic-client';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { loadProjectGuide } from './project-guide';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
@@ -114,6 +115,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const gateFor = (): Promise<VerificationGate> =>
     (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(세션 작업 복사본)의 AGENTS.md를 실행마다 새로 읽는다(ADR-077). 승격으로 runQuery를 다시 열어도
+  // 같은 실행 안이므로 다시 읽지 않고 이 값을 그대로 재사용한다(아래 클로저가 캡처한다)
+  const guide = await loadProjectGuide(project);
   const context: ToolContext = {
     project,
     selfCheck: options.selfCheck,
@@ -151,7 +155,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const serial = serialQueue();
   // 실행 지표. modelMs는 모델 응답 대기가 SDK 안에서 일어나 이 러너가 관찰하지 못하므로 0으로 둔다.
   // 0은 "재지 않음"이고, 전체 시간에서 도구·게이트 시간을 뺀 추측값을 넣지 않는다
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
   const definitions = specs.map((spec) =>
     tool(spec.name, spec.description ?? '', zodShape(spec.input_schema), (args) =>
       serial(async () => {
@@ -250,7 +254,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       prompt: input,
       options: {
         cwd: project.root,
-        systemPrompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project),
+        systemPrompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide),
         // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
         tools: [],
         mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },

@@ -831,3 +831,25 @@ describe('runAgent', () => {
     });
   });
 });
+
+describe('runAgent 프로젝트 지침 주입(ADR-077)', () => {
+  it('AGENTS.md가 있으면 시스템 프롬프트에 명확히 구분된 절로 넣고, 그 글자 수를 metrics.guideChars에 남긴다', async () => {
+    await writeFile(path.join(project.root, 'AGENTS.md'), '- pnpm test 대신 scripts/web-test.sh를 실행\n');
+    const client = new ScriptedModelClient([{ text: '설명했습니다.' }]);
+
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+
+    expect(client.requests[0]!.system).toContain('[b-studio project guide: AGENTS.md]');
+    expect(client.requests[0]!.system).toContain('scripts/web-test.sh');
+    expect(result.metrics!.guideChars).toBe('- pnpm test 대신 scripts/web-test.sh를 실행\n'.length);
+  });
+
+  it('AGENTS.md가 없으면 아무 절도 더하지 않고 metrics.guideChars도 없다', async () => {
+    const client = new ScriptedModelClient([{ text: '설명했습니다.' }]);
+
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+
+    expect(client.requests[0]!.system).not.toContain('[b-studio project guide');
+    expect(result.metrics!.guideChars).toBeUndefined();
+  });
+});

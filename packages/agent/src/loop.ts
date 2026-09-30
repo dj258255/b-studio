@@ -6,7 +6,8 @@ import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
 import { VerificationGate, type GateOptions, type PageFetcher, type VerifyMode } from './gate';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
+import { loadProjectGuide } from './project-guide';
 import { createToolResultCache, type SelfCheckMode } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
@@ -121,6 +122,8 @@ export interface RunMetrics {
    * 모델을 구분할 수 없는 러너는 채우지 않는다
    */
   usageByModel?: Record<string, AgentUsage>;
+  /** 프로젝트 지침(AGENTS.md, ADR-077)이 시스템 프롬프트에 더한 글자 수. 파일이 없거나 꺼져 있으면 없다(고정 문맥 비용을 눈에 보이게 한다) */
+  guideChars?: number;
 }
 
 export interface AgentResult {
@@ -336,7 +339,10 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       onEvent,
     }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
-  const system = buildSystemPrompt(project, { selfCheck: options.selfCheck }) + workflowContext(project);
+  // 프로젝트 루트(세션 작업 복사본)의 AGENTS.md를 매 실행 시작마다 새로 읽는다(ADR-077) — 이전 실행이나
+  // 사람이 방금 고친 내용을 이번 실행부터 반영하기 위해서다. 파일이 없거나 꺼져 있으면 빈 문자열이라 고정 문맥이 늘지 않는다
+  const guide = await loadProjectGuide(project);
+  const system = buildSystemPrompt(project, { selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide);
   const policy = options.policy ?? executionPolicyFor(project);
   const tools = buildTools(project, {
     ...(options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {}),
@@ -351,6 +357,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   // 모델 id별 사용량. 승격으로 클라이언트가 바뀌면 승격 전후가 다른 키로 쌓인다
   const usageByModel: Record<string, AgentUsage> = {};
   metrics.usageByModel = usageByModel;
+  if (guide) metrics.guideChars = guide.charsUsed;
   // 이번 턴에 ask_user가 남긴 질문. 있으면 도구 결과를 넣은 뒤 실행을 끝내고 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
   // 실행 단위 도구 결과 캐시. 한 실행 안에서 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다

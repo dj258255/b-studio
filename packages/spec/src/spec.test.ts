@@ -61,6 +61,15 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 4\n`)).toThrow(SpecError);
   });
 
+  it('프로젝트 지침 설정은 절이 없어도 기본값(켬·AGENTS.md·8,000자)이 채워지고, 값을 바꿀 수 있다', () => {
+    expect(parseSpec(ORDERS_SPEC).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide: {}\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide:\n  file: CLAUDE.md\n  maxChars: 2000\n`).guide).toEqual({ file: 'CLAUDE.md', maxChars: 2_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide:\n  enabled: false\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: false });
+    expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: 0\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: -1\n`)).toThrow(SpecError);
+  });
+
   it('계획-실행 분리 모델 설정은 절이 없으면 undefined이고, 있으면 plan·execute를 그대로 읽는다', () => {
     expect(parseSpec(ORDERS_SPEC).models).toBeUndefined();
     expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n  execute: sonnet\n`).models).toEqual({ plan: 'opus', execute: 'sonnet' });

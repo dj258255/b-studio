@@ -5,6 +5,7 @@ import type { AgentUsage } from "@b-studio/agent";
 import type { SessionView } from "@/lib/session-view";
 import type { ContextJump, TokenReport, TokenWarningKind } from "@/lib/token-types";
 import { formatTokenCount } from "@/lib/usage";
+import { RepeatedActionsSection } from "./repeated-actions-section";
 
 const number = (value: number) => value.toLocaleString("ko-KR");
 const percent = (ratio: number) => `${(ratio * 100).toFixed(0)}%`;
@@ -58,38 +59,44 @@ export function TokenView({ view }: { view: SessionView }) {
     };
   }, [sessionId, revision]);
 
-  if (error) return <p role="alert" className="p-6 text-sm text-fail">{error}</p>;
-  if (!reports) return <p role="status" className="p-6 text-sm text-muted">토큰 보고서를 불러오는 중</p>;
-  if (reports.length === 0) {
-    return <p className="p-6 text-sm text-muted">아직 끝난 요청이 없습니다. 요청을 하나 보내면 턴별 컨텍스트와 도구 결과 크기를 여기서 볼 수 있습니다.</p>;
-  }
-
-  const active = reports.find((report) => report.runId === selected) ?? reports[0]!;
+  const active = reports?.find((report) => report.runId === selected) ?? reports?.[0];
 
   return (
     <div className="flex h-full flex-col">
-      <div role="tablist" aria-label="실행" className="flex flex-wrap gap-1 border-b border-line bg-panel px-3 py-2">
-        {reports.map((report) => (
-          <button
-            key={report.runId}
-            role="tab"
-            type="button"
-            aria-selected={report.runId === active.runId}
-            onClick={() => setSelected(report.runId)}
-            className={`min-w-0 max-w-[16rem] rounded-control px-3 py-1 text-left text-sm ${
-              report.runId === active.runId ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
-            }`}
-          >
-            <span className="block truncate">{report.request || "(요청 없음)"}</span>
-            <span className="text-xs text-muted">
-              {report.turns.length}턴 · 입력 {number(report.totals.inputTokens)} · 캐시 {number(report.totals.cacheReadTokens)}
-            </span>
-          </button>
-        ))}
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <RunDetail report={active} />
-      </div>
+      {/* 이 프로젝트의 모든 세션을 훑는 프로젝트 단위 구역이라, 실행별 보고서가 아직 없어도(로딩·오류·빈 상태) 따로 보여 준다 */}
+      <RepeatedActionsSection projectId={view.snapshot.projectId} />
+      {error ? (
+        <p role="alert" className="p-6 text-sm text-fail">{error}</p>
+      ) : !reports ? (
+        <p role="status" className="p-6 text-sm text-muted">토큰 보고서를 불러오는 중</p>
+      ) : reports.length === 0 || !active ? (
+        <p className="p-6 text-sm text-muted">아직 끝난 요청이 없습니다. 요청을 하나 보내면 턴별 컨텍스트와 도구 결과 크기를 여기서 볼 수 있습니다.</p>
+      ) : (
+        <>
+          <div role="tablist" aria-label="실행" className="flex flex-wrap gap-1 border-b border-line bg-panel px-3 py-2">
+            {reports.map((report) => (
+              <button
+                key={report.runId}
+                role="tab"
+                type="button"
+                aria-selected={report.runId === active.runId}
+                onClick={() => setSelected(report.runId)}
+                className={`min-w-0 max-w-[16rem] rounded-control px-3 py-1 text-left text-sm ${
+                  report.runId === active.runId ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
+                }`}
+              >
+                <span className="block truncate">{report.request || "(요청 없음)"}</span>
+                <span className="text-xs text-muted">
+                  {report.turns.length}턴 · 입력 {number(report.totals.inputTokens)} · 캐시 {number(report.totals.cacheReadTokens)}
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-4">
+            <RunDetail report={active} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -108,6 +115,7 @@ export function RunDetail({ report }: { report: TokenReport }) {
           <Stat label="캐시 적중률" value={percent(report.cacheHitRatio)} />
           <Stat label="추정 비용" value={costText(report)} />
           <Stat label="비운 도구 결과" value={report.cleared.count === 0 ? "없음" : `${number(report.cleared.count)}개 · ${number(report.cleared.chars)}자`} />
+          {report.guideChars !== undefined && <Stat label="고정 문맥(AGENTS.md)" value={`${number(report.guideChars)}자`} />}
         </dl>
         <p className="mt-1 text-xs text-muted">캐시 적중률은 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기)입니다. 추정 비용은 단가 환경 변수를 넣었을 때만 계산합니다.</p>
         {report.escalation && (

@@ -161,6 +161,8 @@ export interface TokenReport {
   priceNote?: string;
   /** 승격이 있었으면 어느 게이트 실패 뒤에 무엇으로 올렸는지 */
   escalation?: { from: string; to: string; attempt: number };
+  /** 프로젝트 지침(AGENTS.md, ADR-077)이 시스템 프롬프트에 더한 글자 수. 파일이 없거나 꺼져 있으면 없다 */
+  guideChars?: number;
   /** 턴별 컨텍스트 증가와 급증(jump) 분석. 기존 보고서와 호환하도록 선택 필드로 둔다 */
   contextGrowth?: ContextGrowthReport;
   /** PR 자동 리뷰(ADR-074)의 리뷰어 호출이면 'review'. 없으면 보통의 요청 실행이다 */

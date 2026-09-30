@@ -9,7 +9,8 @@ import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { loadProjectGuide } from './project-guide';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
@@ -199,6 +200,8 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   const gateFor = (): Promise<VerificationGate> =>
     (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(project.root)의 AGENTS.md를 읽는다(ADR-077). 이 러너의 자체 workdir과는 다른 폴더다
+  const guide = await loadProjectGuide(project);
   const context: ToolContext = {
     project,
     selfCheck: options.selfCheck,
@@ -223,7 +226,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent·Codex 러너와 같은 큐를 쓴다
   const serial = serialQueue();
   // 실행 지표. modelMs는 그 이벤트에 시간이 있을 때만 더한다(없으면 0 = "재지 않음")
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   // 작업 폴더(cwd). project.root를 cwd로 주면 모델이 내장 도구로 작업 공간을 직접 바꿀 수 있다.
   // 상태 폴더를 주면 그 아래 고정 경로를 쓴다 — cmd가 세션을 cwd로 찾으므로 다음 실행에서도 같아야 이어받는다
@@ -323,7 +326,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     await linkAuthFile(home);
 
     // cmd에는 systemPrompt 자리가 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다
-    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}${projectGuideSection(guide)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
 
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();

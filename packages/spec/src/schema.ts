@@ -501,6 +501,20 @@ export const ReviewSchema = z.object({
 });
 
 /**
+ * 프로젝트 지침 파일(ADR-077). 매 실행 시작마다 세션 작업 복사본(프로젝트 루트)에서 이 파일을 읽어
+ * 모델에게 넘긴다 — "반복 행동을 스크립트로 굳히기"가 만든 스크립트·요약을 다음 실행이 실제로 찾아 쓰게 하는 통로다.
+ * 절 자체를 생략해도(아래 StudioSpecSchema의 `.default({})`) 필드별 기본값(켬·AGENTS.md·8,000자)이 채워진다
+ */
+export const GuideSchema = z.object({
+  /** 읽을 파일 이름(프로젝트 루트 기준). 없으면 CLAUDE.md를 대신 찾는다(이 필드를 기본값 그대로 뒀을 때만) */
+  file: z.string().default('AGENTS.md'),
+  /** 프롬프트에 넣을 최대 글자 수. 넘으면 앞부분만 자르고 잘렸다는 안내를 덧붙인다 */
+  maxChars: z.number().int().positive().default(8_000),
+  /** 꺼두면 파일이 있어도 읽지 않는다(고정 문맥을 조금도 늘리지 않는다) */
+  enabled: z.boolean().default(true),
+});
+
+/**
  * 계획-실행 분리(ADR-075)에서 쓸 모델. 절이 없거나 필드를 생략하면 같은 이름의 환경 변수
  * (`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 쓰고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 한다.
  * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름(예: `opus`),
@@ -555,6 +569,8 @@ export const StudioSpecSchema = z.object({
     .optional(),
   /** PR 자동 리뷰 라운드(ADR-074). 절이 없어도 기본값(켬·2라운드)이 채워진다 */
   review: ReviewSchema.default({ auto: true, maxRounds: 2 }),
+  /** 프로젝트 지침 파일(ADR-077). 절이 없어도 기본값(켬·AGENTS.md·8,000자)이 채워진다 */
+  guide: GuideSchema.default({ file: 'AGENTS.md', maxChars: 8_000, enabled: true }),
   /** 계획-실행 분리(ADR-075). 절이 없으면 환경 변수만 본다(둘 다 없으면 계획 호출 없음) */
   models: ModelsSchema.optional(),
 });
@@ -568,6 +584,7 @@ export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
 export type DesignSpec = z.infer<typeof DesignSchema>;
 export type ReviewSpec = z.infer<typeof ReviewSchema>;
+export type GuideSpec = z.infer<typeof GuideSchema>;
 export type ModelsSpec = z.infer<typeof ModelsSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;

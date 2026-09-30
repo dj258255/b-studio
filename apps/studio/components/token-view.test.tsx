@@ -89,6 +89,11 @@ describe("RunDetail 모델별", () => {
     expect(render(report({ estimatedCostUsd: 0.5, priceSource: "single" }))).toContain("$0.5000 · 단일 단가");
     expect(render(report({ priceSource: "none" }))).toContain("단가 미설정");
   });
+
+  it("프로젝트 지침(AGENTS.md, ADR-077) 글자 수가 있으면 고정 문맥 칸을 보여주고, 없으면 보여주지 않는다", () => {
+    expect(render(report({ guideChars: 1234 }))).toContain("고정 문맥(AGENTS.md)");
+    expect(render(report({}))).not.toContain("고정 문맥(AGENTS.md)");
+  });
 });
 
 describe("RunDetail 문맥 급증", () => {
