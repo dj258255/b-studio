@@ -13,6 +13,7 @@ import { LogPanel } from "./log-panel";
 import { QaView } from "./qa-view";
 import { RemoteBrowserView } from "./remote-browser";
 import { RepositoryPanel } from "./repository-panel";
+import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 import { TokenView } from "./token-view";
@@ -27,6 +28,7 @@ const DEPLOY_TAB = "deploy";
 const DESIGN_TAB = "design";
 const TOKENS_TAB = "tokens";
 const REPOSITORY_TAB = "repository";
+const REQUIREMENTS_TAB = "requirements";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
   const tabs: Tab[] = [
@@ -35,6 +37,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
     ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
     { id: DESIGN_TAB, label: "디자인" },
+    { id: REQUIREMENTS_TAB, label: "명세" },
     { id: CODE_TAB, label: "코드" },
     { id: HISTORY_TAB, label: "기록" },
     { id: DEPLOY_TAB, label: "배포" },
@@ -79,6 +82,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <ResourcePanel view={view} />
         ) : active.id === REPOSITORY_TAB ? (
           <RepositoryPanel view={view} />
+        ) : active.id === REQUIREMENTS_TAB ? (
+          <RequirementsPanel view={view} />
         ) : active.id === TOKENS_TAB ? (
           <TokenView view={view} />
         ) : active.external ? (

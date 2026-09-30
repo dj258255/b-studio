@@ -1,8 +1,9 @@
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadProjectGuide } from './project-guide';
+import { REQUIREMENTS_FILE, serializeRequirementsMarkdown, type Requirement } from './requirements';
 import { createOrdersProject } from './test-helpers';
 
 const roots: string[] = [];
@@ -86,5 +87,53 @@ describe('loadProjectGuide', () => {
     const guide = await loadProjectGuide(loaded);
     expect(guide?.file).toBe('AGENTS.md');
     expect(guide?.text).toBe('기본값 확인');
+  });
+});
+
+describe('loadProjectGuide — docs/requirements.md(ADR-079)', () => {
+  const sample: Requirement = {
+    id: 'R1',
+    title: '로그인 API',
+    kind: 'api',
+    acceptance: ['이메일·비밀번호로 로그인하면 토큰을 돌려준다'],
+    priority: 'must',
+  };
+
+  it('AGENTS.md 없이 요구사항 파일만 있어도 요약을 절로 만든다', async () => {
+    const loaded = await project();
+    await mkdir(path.join(loaded.root, 'docs'), { recursive: true });
+    await writeFile(path.join(loaded.root, REQUIREMENTS_FILE), serializeRequirementsMarkdown([sample]));
+
+    const guide = await loadProjectGuide(loaded);
+    expect(guide?.text).toContain('R1. 로그인 API (must)');
+    expect(guide?.charsUsed).toBe(guide?.text.length);
+  });
+
+  it('AGENTS.md와 요구사항 파일이 둘 다 있으면 한 절에 이어 붙인다', async () => {
+    const loaded = await project();
+    await writeFile(path.join(loaded.root, 'AGENTS.md'), '- 지침 한 줄\n');
+    await mkdir(path.join(loaded.root, 'docs'), { recursive: true });
+    await writeFile(path.join(loaded.root, REQUIREMENTS_FILE), serializeRequirementsMarkdown([sample]));
+
+    const guide = await loadProjectGuide(loaded);
+    expect(guide?.file).toBe('AGENTS.md');
+    expect(guide?.text).toContain('지침 한 줄');
+    expect(guide?.text).toContain('R1. 로그인 API (must)');
+  });
+
+  it('요구사항 파일이 없으면 아무것도 더하지 않는다', async () => {
+    const loaded = await project();
+    await writeFile(path.join(loaded.root, 'AGENTS.md'), '- 지침 한 줄\n');
+
+    const guide = await loadProjectGuide(loaded);
+    expect(guide?.text).toBe('- 지침 한 줄\n');
+  });
+
+  it('요구사항 파일이 있어도 하나도 못 읽으면(빈 파일) 아무것도 더하지 않는다', async () => {
+    const loaded = await project();
+    await mkdir(path.join(loaded.root, 'docs'), { recursive: true });
+    await writeFile(path.join(loaded.root, REQUIREMENTS_FILE), '이 파일은 요구사항이 아닙니다');
+
+    expect(await loadProjectGuide(loaded)).toBeUndefined();
   });
 });
