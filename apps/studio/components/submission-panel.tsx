@@ -29,8 +29,9 @@ const STATUS_LABEL: Record<ChecklistStatus, string> = { pass: "통과", warn: "�
 const STATUS_TEXT: Record<ChecklistStatus, string> = { pass: "text-pass", warn: "text-wait", fail: "text-fail", skip: "text-muted" };
 
 /**
- * "제출 준비" 탭(ADR-080). 과제 채점 기준(요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서)을
- * 점검표로 보여 준다. 요청이 끝날 때마다(체크포인트·커밋이 바뀔 수 있으므로) key로 다시 마운트해 다시 불러온다
+ * "저장소" 탭의 "올리기 전 점검" 하위 탭(ADR-080, ADR-086). PR을 올리거나 저장소를 넘기기 전 점검 기준
+ * (요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서)을 점검표로 보여 준다. 요청이 끝날
+ * 때마다(체크포인트·커밋이 바뀔 수 있으므로) key로 다시 마운트해 다시 불러온다
  * (RepositoryPanel과 같은 방식. effect 안에서 "불러오는 중"으로 되돌리는 setState를 하지 않아도 된다)
  */
 export function SubmissionPanel({ view }: { view: SessionView }) {
@@ -76,13 +77,13 @@ function SubmissionList({ sessionId }: { sessionId: string }) {
   return (
     <div className="h-full min-h-0 overflow-y-auto p-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-medium">제출 준비</h3>
+        <h3 className="font-medium">올리기 전 점검</h3>
         <span className="text-sm text-muted">
           {report.score.passed}/{report.score.total} 통과
         </span>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted">
-        과제 채점 기준(요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리와 원격·문서)을 확인합니다. “고치기”는 대화 입력창에 요청 글만 채우고 바로 보내지 않습니다.
+        PR을 올리거나 저장소를 넘기기 전에 테스트·실행 방법·환경 변수·비밀 값·커밋 기록·문서를 확인합니다. “고치기”는 대화 입력창에 요청 글만 채우고 바로 보내지 않습니다.
       </p>
       <ul className="mt-3 space-y-2">
         {report.items.map((item) => (

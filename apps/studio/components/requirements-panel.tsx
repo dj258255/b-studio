@@ -604,7 +604,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
           </div>
 
           <p className="text-xs text-muted">
-            저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 제출 준비 점검표가 이걸로 완료 여부를 판단합니다.
+            저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 저장소 탭의 올리기 전 점검표가 이걸로 완료 여부를 판단합니다.
           </p>
           <button
             type="button"
