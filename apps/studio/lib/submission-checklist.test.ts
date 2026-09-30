@@ -326,3 +326,19 @@ describe('checkReadmeSections — 실제 README 제목', () => {
     expect(item.reason).toContain('개요');
   });
 });
+
+describe('checkSecrets — 테스트 코드', () => {
+  it('테스트·픽스처 파일의 고정 시크릿은 세지 않고, 앱 코드의 것은 센다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-secret-'));
+    await mkdir(path.join(root, 'api/src/test/java/app'), { recursive: true });
+    await mkdir(path.join(root, 'web/app'), { recursive: true });
+    await writeFile(path.join(root, 'api/src/test/java/app/JwtServiceTest.java'), 'String secret = "test-secret-value-123";\n');
+    await writeFile(path.join(root, 'web/app/login.test.ts'), "const password = 'fixture-pass-1';\n");
+    expect((await checkSecrets(root)).status).toBe('pass');
+    await writeFile(path.join(root, 'web/app/admin.ts'), "login({ username: 'admin', password: 'admin-local-only' });\n");
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('fail');
+    expect(item.reason).toContain('web/app/admin.ts:1');
+    expect(item.reason).not.toContain('admin-local-only');
+  });
+});
