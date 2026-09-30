@@ -446,6 +446,15 @@ export class CheckpointStore {
     return path.join(dest, await this.#subdir());
   }
 
+  /**
+   * 세션 시작(첫 체크포인트) 이후 지금 HEAD까지의 전체 변경. PR의 base...head diff와 같다(시작 커밋이 세션 브랜치가
+   * 갈라진 지점이라서다). AI 리뷰가 보는 diff가 이 함수로 만든다. 크기 제한은 부르는 쪽(pr-review.ts의 truncateDiff)이 한다
+   */
+  async sessionDiff(): Promise<string> {
+    const start = await this.#startSha();
+    return this.#git(['diff', '--no-color', ...(await this.#relative()), start, 'HEAD']);
+  }
+
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
   async repository(): Promise<RepositoryInfo | undefined> {
     const [base, branch] = await Promise.all([this.#getMeta('base'), this.#getMeta('branch')]);

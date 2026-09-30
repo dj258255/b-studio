@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import { ExportPreview } from "./export-preview";
+import { ReviewCard } from "./review-card";
 import { useSessionAccess } from "./session-access";
 
 /** 세션 브랜치를 원격에 올리고 PR을 만드는 영역. 원본 프로젝트가 Git 저장소인 세션에서만 쓸 수 있다 */
@@ -150,6 +151,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
       )}
       {error && <p className="mt-1 text-sm text-fail">{error}</p>}
       {previewing && showCreate && <ExportPreview sessionId={snapshot.id} label={label} onClose={() => setPreviewing(false)} />}
+      <ReviewCard sessionId={snapshot.id} review={snapshot.review} canManage={access.canManage} hasPullRequest={Boolean(repository.pullRequestUrl)} />
     </div>
   );
 }

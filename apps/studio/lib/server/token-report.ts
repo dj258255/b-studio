@@ -9,7 +9,7 @@
  */
 import { isRepeatNote, type AgentEvent, type AgentUsage } from '@b-studio/agent';
 import { analyzeContextGrowth } from '../context-growth';
-import type { StudioEvent } from '../studio-events';
+import type { ReviewStateView, StudioEvent } from '../studio-events';
 import { costForUsageByModel, estimateCostUsd, matchTokenPrices, parsePriceTable, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTrimmed, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
 
 export { estimateCostUsd } from '../token-types';
@@ -372,4 +372,36 @@ export function tokenPricing(env: Record<string, string | undefined>): TokenPric
     return { ...base, error: `단가 표를 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
+
+/**
+ * PR 자동 리뷰 라운드(ADR-074)의 리뷰어 호출 토큰을 실행별 보고서와 같은 모양으로 만든다.
+ * 리뷰어 호출은 도구 없는 한 번의 질문이라 세션 기록에 run_started/run_finished 이벤트를 남기지 않으므로,
+ * 이벤트가 아니라 스냅샷의 review.rounds에 남긴 토큰을 그대로 읽는다. 턴별 분석은 없어(한 번만 묻는다) turns·toolTotals는 비워 둔다.
+ * 토큰 탭·프로젝트 보고서가 `buildTokenReports`의 결과에 이 목록을 이어 붙여 "review"로 표시한다
+ */
+export function reviewTokenReports(review: ReviewStateView | undefined, pricing: TokenPricing = {}): TokenReport[] {
+  if (!review) return [];
+  return review.rounds
+    .filter((round): round is typeof round & { tokens: AgentUsage } => round.tokens !== undefined)
+    .map((round) => {
+      const estimatedCostUsd = pricing.single ? estimateCostUsd(round.tokens, pricing.single) : undefined;
+      return {
+        runId: `review-${round.round}`,
+        request: `[AI 리뷰] ${round.round}라운드 검토`,
+        turns: [],
+        toolTotals: [],
+        biggest: [],
+        warnings: [],
+        totals: round.tokens,
+        cacheHitRatio: cacheHitRatio(round.tokens),
+        cleared: { count: 0, chars: 0 },
+        trimmed: { chars: 0, repeated: 0, estimatedTokens: 0 },
+        priceSource: pricing.single ? ('single' as const) : ('none' as const),
+        ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+        kind: 'review' as const,
+      };
+    })
+    .reverse();
+}
+
 

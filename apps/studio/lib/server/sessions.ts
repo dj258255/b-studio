@@ -21,7 +21,10 @@ import {
   formatVerifyTrailer,
   formatWorkflowTrailer,
   ORDERS_DEMO_SCENARIOS,
+  parsePullRequestNumber,
   parseRemote,
+  planAskFromClient,
+  postComment,
   preflightClaudeCode,
   preflightCodex,
   preflightCommandCode,
@@ -52,6 +55,7 @@ import {
   type DesignSource,
   type EscalationPolicy,
   type GitAuthor,
+  type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
   type RepositoryInfo,
@@ -109,6 +113,7 @@ import type {
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
+import { claudeCodeAsk } from './claude-code-ask';
 import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
@@ -116,6 +121,8 @@ import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
 import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
+import { resolveRepositoryToken } from './repo-token';
+import { runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
@@ -2180,11 +2187,15 @@ export async function previewExport(id: string, { issues = [] }: { issues?: read
       uncheckpointed: (await session.checkpoints.pendingFiles()).length,
       running: session.snapshot.running,
     }),
+    review: { auto: session.project.spec.review.auto, maxRounds: session.project.spec.review.maxRounds },
   };
 }
 
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
-export async function exportSession(id: string, { pullRequest, issues = [] }: { pullRequest: boolean; issues?: readonly number[] }): Promise<ExportResult> {
+export async function exportSession(
+  id: string,
+  { pullRequest, issues = [], review }: { pullRequest: boolean; issues?: readonly number[]; /** 생략하면 studio.yaml의 review.auto를 따른다(화면 체크박스가 명시하면 그 값) */ review?: boolean },
+): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
   if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
@@ -2225,10 +2236,116 @@ export async function exportSession(id: string, { pullRequest, issues = [] }: { 
       issues: created && issues.length > 0 ? [...issues] : undefined,
     };
     emit(session, { type: 'exported', ...result });
+    // 이번에 이 세션이 PR을 새로 연결했고(이미 있던 PR을 이어서 쓰는 export가 아니고) 설정이 켜져 있으면 AI 리뷰를 자동으로 시작한다(ADR-074).
+    // 이미 열려 있던 PR에 새 커밋만 올린 export는 자동으로 다시 돌리지 않는다 — 사람이 화면의 "다시 돌리기"로 부른다
+    if (created && (review ?? session.project.spec.review.auto)) {
+      void runReviewRound(id).catch((error: unknown) => console.error('[b-studio] AI 리뷰 자동 시작 실패', describe(error)));
+    }
     return result;
   } finally {
     session.exporting = false;
   }
+}
+
+/** PR 자동 리뷰 라운드(ADR-074)의 고침 요청 대기 시간 상한. 계획 실행의 레인 시간 상한(task-plans.ts RUN_TIMEOUT_MS)과 같다 */
+const REVIEW_FIX_TIMEOUT_MS = 30 * 60_000;
+
+/** 세션의 원래 요청 문구들. 체크포인트 커밋 제목에서 "요청: " 접두어를 뗀다(repository.ts가 PR 본문에 쓰는 것과 같은 규칙) */
+async function sessionRequestTexts(session: Session): Promise<string[]> {
+  const commits = await session.checkpoints.sessionCommits();
+  return commits.map((commit) => commit.subject.replace(/^요청:\s*/, ''));
+}
+
+/**
+ * 리뷰어를 부르는 방법. 도구 없이 한 번만 묻는 호출 경로가 claude-code(로컬 CLI)·api(모델 레지스트리) 두 모드에만 있어
+ * (계획 호출과 같은 제약, task-plans.ts의 PLANNER_MODES) 그 밖의 백엔드에서는 undefined를 돌려준다 —
+ * review-round.ts의 runReviewRounds가 이를 보고 라운드를 시작하기 전에 바로 멈춘다(stopped)
+ */
+function reviewAsk(session: Session): ModelAsk | undefined {
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
+  if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('AI 리뷰', 'build', session.snapshot.modelId).selected));
+  return undefined;
+}
+
+/** PR에 리뷰 코멘트를 올린다. review-round.ts가 실패를 잡아 commentError로만 남기므로 여기서는 그대로 던진다 */
+async function reviewPostComment(session: Session, body: string): Promise<{ url?: string }> {
+  const info = await session.checkpoints.repository();
+  if (!info?.pullRequestUrl) throw new Error('PR 주소가 없습니다');
+  const remote = parseRemote(info.remoteUrl);
+  const number = parsePullRequestNumber(info.pullRequestUrl);
+  if (number === undefined) throw new Error('PR 주소에서 번호를 읽지 못했습니다');
+  // GitLab은 postComment가 환경 변수 토큰을 직접 읽는다. gh CLI 대체는 GitHub·Gitea에서만 뜻이 있다(저장소 화면과 같은 경계)
+  const token = remote.kind === 'github' || remote.kind === 'gitea' ? await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() }) : undefined;
+  return postComment(remote, number, body, { token });
+}
+
+/** sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
+async function reviewRequestFix(session: Session, request: string): Promise<ReviewFixResult> {
+  const id = session.snapshot.id;
+  let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
+  let runId: string | undefined;
+  const unsubscribe = subscribe(id, (event) => {
+    if (event.type === 'run_finished' && (runId === undefined || event.runId === runId)) finished = event;
+  });
+  try {
+    ({ runId } = sendMessage(id, request, { allowBreaking: false, by: 'ai-review' }));
+    const started = Date.now();
+    while (finished?.runId !== runId) {
+      if (Date.now() - started > REVIEW_FIX_TIMEOUT_MS) {
+        return { ok: false, error: `AI 리뷰의 고침 요청이 ${Math.round(REVIEW_FIX_TIMEOUT_MS / 60_000)}분 안에 끝나지 않았습니다` };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    if (finished.status !== 'done') return { ok: false, error: finished.summary };
+    const checkpoint = session.snapshot.checkpoints[0];
+    return { ok: true, checkpoint: checkpoint ? { sha: checkpoint.sha, shortSha: checkpoint.shortSha } : undefined };
+  } finally {
+    unsubscribe();
+  }
+}
+
+/**
+ * PR 자동 리뷰 라운드(ADR-074)를 시작한다. exportSession이 PR을 새로 연결한 뒤 설정(auto)이 켜져 있으면 자동으로,
+ * 화면의 "AI 리뷰 돌리기"·"다시 돌리기" 버튼으로 사람이 부른다. 실제 순서(리뷰 → 댓글 → 필요하면 고침 → 다음 라운드)는
+ * review-round.ts의 runReviewRounds(순수 상태 기계, vitest로 따로 검증)가 정하고, 여기서는 세션의 diff·댓글·고침 요청·올리기를
+ * 함수로 이어 준다. 한 번 부르면 1라운드부터 상한까지(또는 통과·오류까지) 안에서 이어간다. 절대 병합하지 않고, 강제 푸시도 하지 않는다.
+ * 리뷰어 호출 토큰은 token-report.ts의 reviewTokenReports가 스냅샷의 review.rounds[].tokens를 그대로 읽어 "review"로 표시한다.
+ */
+export async function runReviewRound(id: string, { restart = false }: { restart?: boolean } = {}): Promise<void> {
+  const session = requireSession(id);
+  const info = await session.checkpoints.repository();
+  if (!info?.pullRequestUrl) throw new StudioError(409, 'PR을 먼저 만들어야 AI 리뷰를 돌릴 수 있습니다');
+  if (session.snapshot.review?.state === 'running') throw new StudioError(409, '이미 AI 리뷰를 돌리는 중입니다');
+  // 이미 끝난(통과·상한·멈춤) 리뷰가 있으면 "다시 돌리기"로만 새로 돈다(위에서 running은 이미 걸렀다). 실수로 다시 누르는 것을 막는다
+  if (session.snapshot.review && !restart) {
+    throw new StudioError(409, '이미 리뷰가 끝났습니다. 다시 돌리려면 "다시 돌리기"를 누르세요');
+  }
+
+  const cfg = session.project.spec.review;
+  const requests = await sessionRequestTexts(session);
+  const deps: ReviewRoundDeps = {
+    ask: reviewAsk(session),
+    diff: () => session.checkpoints.sessionDiff(),
+    requests: () => requests,
+    postComment: (body) => reviewPostComment(session, body),
+    requestFix: (text) => reviewRequestFix(session, text),
+    push: async () => {
+      await session.checkpoints.push();
+      const repository = await describeRepository(session.checkpoints, session.sourceDirtyFiles);
+      if (repository) session.snapshot.repository = repository;
+    },
+  };
+
+  session.snapshot.review = { state: 'running', maxRounds: cfg.maxRounds, rounds: [] };
+  void runReviewRounds(deps, cfg.maxRounds, (state) => {
+    session.snapshot.review = state;
+    emit(session, { type: 'review_round', review: state });
+  }).catch((error: unknown) => {
+    session.snapshot.review = { state: 'stopped', maxRounds: cfg.maxRounds, rounds: session.snapshot.review?.rounds ?? [] };
+    emit(session, { type: 'review_round', review: session.snapshot.review });
+    console.error('[b-studio] AI 리뷰 라운드가 예기치 않게 실패했습니다', describe(error));
+  });
 }
 
 /** 배포 진행 줄은 최근 것만 스냅샷에 둔다. 빌드 출력이 수백 줄이라 전부 두면 새로 연결할 때 무겁다 */

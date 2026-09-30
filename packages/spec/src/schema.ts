@@ -488,6 +488,18 @@ export const DesignSchema = z
   })
   .optional();
 
+/**
+ * PR 자동 리뷰 라운드(ADR-074) 설정. PR을 만든 뒤 읽기 전용 리뷰어가 diff를 보고 지적하면,
+ * 지적이 심각(blocker·major)할 때만 같은 세션에 고침을 요청하고 다시 리뷰한다. 결과는 항상 사람이 검토한다(자동 병합 없음).
+ * 절 자체를 생략해도(아래 StudioSpecSchema의 `.default({})`) 필드별 기본값(켬·2라운드)이 채워진다
+ */
+export const ReviewSchema = z.object({
+  /** PR을 만들거나 갱신한 뒤 자동으로 리뷰 라운드를 도는지. auto는 화면 체크박스의 기본값으로도 쓴다 */
+  auto: z.boolean().default(true),
+  /** 고치고 다시 리뷰하는 라운드 상한(1~3). 넘으면 사람에게 넘긴다 */
+  maxRounds: z.number().int().min(1).max(3).default(2),
+});
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -522,6 +534,8 @@ export const StudioSpecSchema = z.object({
       monorepo: z.boolean().default(false),
     })
     .optional(),
+  /** PR 자동 리뷰 라운드(ADR-074). 절이 없어도 기본값(켬·2라운드)이 채워진다 */
+  review: ReviewSchema.default({ auto: true, maxRounds: 2 }),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
@@ -532,6 +546,7 @@ export type SecretSpec = z.infer<typeof SecretSchema>;
 export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
 export type DesignSpec = z.infer<typeof DesignSchema>;
+export type ReviewSpec = z.infer<typeof ReviewSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;

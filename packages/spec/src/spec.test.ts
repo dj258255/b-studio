@@ -51,6 +51,15 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
   });
 
+  it('PR 자동 리뷰 설정은 절이 없어도 기본값(켬·2라운드)이 채워지고, 범위를 벗어나면 거부한다', () => {
+    expect(parseSpec(ORDERS_SPEC).review).toEqual({ auto: true, maxRounds: 2 });
+    expect(parseSpec(`${ORDERS_SPEC}review: {}\n`).review).toEqual({ auto: true, maxRounds: 2 });
+    expect(parseSpec(`${ORDERS_SPEC}review:\n  auto: false\n  maxRounds: 1\n`).review).toEqual({ auto: false, maxRounds: 1 });
+    expect(parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 3\n`).review).toEqual({ auto: true, maxRounds: 3 });
+    expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 0\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 4\n`)).toThrow(SpecError);
+  });
+
   it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
     expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
       fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',

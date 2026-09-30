@@ -332,6 +332,54 @@ export async function fetchIssue(
   return { state: data.state === 'open' ? 'open' : 'closed', title: data.title, url: data.html_url };
 }
 
+/** PR/MR 주소에서 번호를 뽑는다(github.com/o/r/pull/N, gitea .../pulls/N, gitlab .../-/merge_requests/N). 못 찾으면 undefined */
+export function parsePullRequestNumber(url: string): number | undefined {
+  const match = /\/(?:pull|pulls|merge_requests)\/(\d+)(?:[/?#]|$)/.exec(url);
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * PR(MR)에 댓글 하나를 단다. GitHub·Gitea는 이슈 댓글 API(PR도 이슈 번호를 공유한다)를,
+ * GitLab은 머지 리퀘스트 노트 API를 쓴다. PR 자동 리뷰(ADR-074)가 라운드마다 한 번씩 부른다.
+ */
+export async function postComment(
+  remote: RemoteLocation,
+  number: number,
+  body: string,
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<{ url?: string }> {
+  if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
+    throw new PullRequestError('댓글을 남길 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
+  }
+  // 토큰을 직접 주면(개인 PC 모드의 gh CLI 폴백 등) 그것을 쓰고, 아니면 환경 변수를 본다
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 댓글을 남길 수 없습니다`);
+
+  if (remote.kind === 'gitlab') {
+    const api = env.B_STUDIO_GITLAB_API_URL ?? `${originOf(remote)}/api/v4`;
+    const response = await fetchFn(`${api}/projects/${encodeURIComponent(remote.path)}/merge_requests/${number}/notes`, {
+      method: 'POST',
+      headers: { 'private-token': auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+    if (response.status !== 201) throw new PullRequestError(`GitLab API가 댓글 작성을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+    const data = (await response.json()) as { id: number };
+    return { url: `${remote.webUrl}/-/merge_requests/${number}#note_${data.id}` };
+  }
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, auth, env);
+  const response = await fetchFn(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${number}/comments`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ body }),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  });
+  if (response.status !== 201) throw new PullRequestError(`${label} API가 댓글 작성을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  const data = (await response.json()) as { html_url: string };
+  return { url: data.html_url };
+}
+
 interface RawLabel {
   name?: string;
 }

@@ -158,6 +158,23 @@ describe('CheckpointStore', () => {
     expect(commits[1]!.passedStages).toBeUndefined();
   });
 
+  it('sessionDiff는 세션 시작부터 지금까지의 변경을 모두 담는다(PR 자동 리뷰가 보는 범위, ADR-074)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    expect(await store.sessionDiff()).toBe('');
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가');
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    await store.commit('요청: 메모 필드 추가');
+
+    const diff = await store.sessionDiff();
+    expect(diff).toContain('diff --git a/api/src/Order.java b/api/src/Order.java');
+    expect(diff).toContain('+class Order { String memo; String note; }');
+    // 첫 커밋에서 두 번째로 가는 중간 상태(memo만 있는 버전)는 diff에 남지 않는다 — 세션 시작 대비 최종 상태만 본다
+    expect(diff).not.toContain('+class Order { String memo; }\n');
+  });
+
   it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {
     // 사용자가 쓰던 저장소: 커밋 하나, 무시하는 로그 파일, 아직 커밋하지 않은 초안
     await write('.gitignore', '*.log\n');

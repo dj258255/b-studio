@@ -4,10 +4,9 @@
  * 프로젝트 폴더의 origin 원격 주소로 호스트를 찾아(`canPublishIssues`와 같은 방식), GitHub·Gitea REST API를 부른다.
  * 토큰은 `B_STUDIO_GITHUB_TOKEN`·`B_STUDIO_GITEA_TOKEN`을 먼저 보고, 개인 PC 모드(인증 없음)에서 GitHub 토큰이 없으면
  * `gh auth token`으로 로그인한 CLI 토큰을 대신 쓴다(여러 사람이 쓰는 서버에서는 쓰지 않는다. 로컬 폴더 세션과 같은 경계).
+ * 토큰을 찾는 부분은 repo-token.ts에 따로 둬 PR 자동 리뷰(sessions.ts, ADR-074)와 함께 쓰면서도 순환 참조를 만들지 않는다.
  * 응답은 30초 캐시해 목록을 자주 열어도 API 사용량 한도에 잘 걸리지 않게 한다.
  */
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
   CheckpointStore,
   listIssues,
@@ -21,11 +20,8 @@ import {
   type RepositoryListState,
 } from '@b-studio/agent';
 import { findProject } from './projects';
+import { ghCliToken, REPOSITORY_TOKEN_ENV as TOKEN_ENV, resolveRepositoryToken as resolveToken } from './repo-token';
 import { localFolderAllowed, sessionIdFromBranch } from './sessions';
-
-const execFileAsync = promisify(execFile);
-
-const TOKEN_ENV: Record<'github' | 'gitea', string> = { github: 'B_STUDIO_GITHUB_TOKEN', gitea: 'B_STUDIO_GITEA_TOKEN' };
 
 /** 목록을 다시 불러오기까지의 간격. API 사용량 한도(GitHub는 시간당 5,000회)에 여유를 둔다 */
 export const REPOSITORY_LIST_TTL_MS = 30_000;
@@ -54,33 +50,15 @@ export interface RepositoryPullsResult {
   pulls?: PullRequestSummary[];
 }
 
-/** `gh auth token`을 부른다. 실행 파일이 없거나 로그인하지 않았으면 undefined(오류로 던지지 않는다) */
-async function ghCliToken(run: (cmd: string, args: string[]) => Promise<{ stdout: string }> = (cmd, args) => execFileAsync(cmd, args, { timeout: 5_000 })): Promise<string | undefined> {
-  try {
-    const { stdout } = await run('gh', ['auth', 'token']);
-    const token = stdout.trim();
-    return token || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * 이 호스트에 쓸 토큰을 찾는다. 환경 변수가 있으면 그것을 쓰고, 없으면(GitHub만) 개인 PC 모드에서 `gh` CLI 토큰을 대신 쓴다.
- * `ghToken`을 주입할 수 있어 테스트에서 하위 프로세스를 실행하지 않는다.
+ * `ghToken`을 주입할 수 있어 테스트에서 하위 프로세스를 실행하지 않는다. 실제 검색은 repo-token.ts에 있다(PR 자동 리뷰와 공유).
  */
 export async function resolveRepositoryToken(
   kind: 'github' | 'gitea',
   { env = process.env, allowGhCli = localFolderAllowed(), ghToken = ghCliToken }: { env?: Record<string, string | undefined>; allowGhCli?: boolean; ghToken?: () => Promise<string | undefined> } = {},
 ): Promise<string | undefined> {
-  const fromEnv = env[TOKEN_ENV[kind]]?.trim();
-  if (fromEnv) return fromEnv;
-  if (kind !== 'github' || !allowGhCli) return undefined;
-  try {
-    return await ghToken();
-  } catch {
-    return undefined;
-  }
+  return resolveToken(kind, { env, allowGhCli, ghToken });
 }
 
 type RepositoryContext =

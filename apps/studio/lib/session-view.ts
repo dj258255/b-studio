@@ -200,6 +200,9 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return { ...view, logs };
     }
     case 'run_started':
+      // PR 자동 리뷰(ADR-074)의 리뷰어 호출은 세션의 보통 요청이 아니라 토큰 보고서에 잡히려고 같은 이벤트를 빌려 쓴 것뿐이다.
+      // 대화 줄이나 "작업 중" 표시를 만들지 않는다 — 그 진행은 AI 리뷰 카드가 따로 보여준다(runId는 review-로 시작한다)
+      if (event.runId.startsWith('review-')) return view;
       return {
         ...patchSnapshot(view, { running: true, pendingQuestion: undefined }),
         chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
@@ -216,6 +219,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'run_cancelling':
       return patchSnapshot(view, { cancelling: event.reason ?? 'user' });
     case 'run_finished': {
+      // run_started와 같은 이유로 대화·"작업 중" 상태는 건드리지 않는다. 세션 토큰 합계만 반영한다
+      if (event.runId.startsWith('review-')) return patchSnapshot(view, { tokens: event.sessionTokens ?? view.snapshot.tokens });
       const request = view.chat.find((item) => item.kind === 'request' && item.runId === event.runId);
       const intent = request?.kind === 'request' ? request.intent : undefined;
       return {
@@ -392,6 +397,10 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           },
         ],
       };
+
+    case 'review_round':
+      // 리뷰 상태는 통째로 바꾸므로(exported와 같은 규칙) 기록을 다시 재생해도 결과가 같다
+      return patchSnapshot(view, { review: event.review });
   }
 }
 
