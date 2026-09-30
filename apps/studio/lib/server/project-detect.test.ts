@@ -63,6 +63,28 @@ describe('detectProject', () => {
     expect(services[1]!.dockerfile).toContain('npm ci && exec npx next dev');
   });
 
+  it('spring-boot-docker-compose가 있으면 샌드박스에서 끈다(부가 서비스가 없어도)', async () => {
+    const root = await repo({
+      'backend/build.gradle': `${springGradle}\ndependencies { developmentOnly 'org.springframework.boot:spring-boot-docker-compose' }\n`,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.environment).toMatchObject({ SPRING_DOCKER_COMPOSE_ENABLED: 'false' });
+    expect(service!.notes.join(' ')).toContain('spring-boot-docker-compose');
+    const compose = generateFiles(await detectProject(root)).find((file) => file.path === 'compose.b-studio.yaml')!.content;
+    expect(compose).toContain('SPRING_DOCKER_COMPOSE_ENABLED');
+  });
+
+  it('spring-boot-docker-compose가 없으면 환경 변수를 넣지 않는다', async () => {
+    const root = await repo({ 'backend/build.gradle': springGradle, 'backend/gradlew': '#!/bin/sh' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.environment.SPRING_DOCKER_COMPOSE_ENABLED).toBeUndefined();
+  });
+
   it('Vite 앱(Vue·React 등)을 5173 포트로 찾는다. Next가 있으면 Next로 본다', async () => {
     const root = await repo({
       'frontend/package.json': JSON.stringify({ dependencies: { vue: '3.5.0' }, devDependencies: { vite: '7.0.0' } }),
