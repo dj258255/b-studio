@@ -2318,6 +2318,12 @@ export async function previewExport(id: string, { issues = [] }: { issues?: read
  * 실제 점검 규칙은 세션을 모르는 순수 함수(lib/submission-checklist.ts)에 있고, 여기서는 세션이 들고 있는 프로젝트 폴더·
  * 체크포인트·저장소 상태를 그 함수가 받는 모양으로 조립하기만 한다
  */
+/** compose 파일에 DB 이미지(postgres·mysql·mariadb·mongo 등)를 쓰는 서비스가 있는지 */
+async function composeHasDatabase(composePath: string): Promise<boolean> {
+  const text = await readFile(composePath, 'utf8').catch(() => '');
+  return /^\s*image:\s*["']?[^\s"']*\b(postgres|postgis|timescaledb|mysql|mariadb|mongo|mongodb)\b/im.test(text);
+}
+
 export async function submissionReport(id: string): Promise<SubmissionReport> {
   const session = requireSession(id);
   const services: ChecklistService[] = session.project.managed.map(([name, service]) => ({
@@ -2334,7 +2340,8 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
   return buildSubmissionChecklist({
     root: session.project.root,
     services,
-    hasDatabase: session.project.databases.length > 0,
+    // studio.yaml의 databases(스냅샷 대상)만 보면 compose에서 가져온 mysql·mongo를 놓친다. compose 파일의 DB 이미지도 본다
+    hasDatabase: session.project.databases.length > 0 || (await composeHasDatabase(session.project.composePath)),
     latestPassedStages: session.snapshot.checkpoints[0]?.passedStages,
     pendingFilesCount,
     repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
