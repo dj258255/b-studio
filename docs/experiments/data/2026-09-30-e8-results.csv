@@ -1,0 +1,28 @@
+run,arm,repeat,order,task,success,category,tokens,cost_usd,plan_tokens,plan_cost_usd,escalated_opus_cost_usd,model_calls,end_to_end_ms,models,detail
+e8-haiku-r1,haiku,1,1,orders-list,True,none,233844,0.099386,0,0,0,21,372124,"claude-haiku-4-5-20251001,scripted",통과
+e8-haiku-r1,haiku,1,2,order-detail,True,none,203537,0.081222,0,0,0,17,342211,"claude-haiku-4-5-20251001,scripted",통과
+e8-haiku-r1,haiku,1,3,order-summary,False,acceptance,693715,0.203037,0,0,0,34,531091,"claude-haiku-4-5-20251001,scripted","web /dashboard: 기대 문구 없음: 45000 또는 45,000 · 본문: Create Next App Loading... self.__next_r=""IEULBwnC_5"
+e8-haiku-r2,haiku,2,1,orders-list,True,none,277922,0.099689,0,0,0,21,442844,"claude-haiku-4-5-20251001,scripted",통과
+e8-haiku-r2,haiku,2,2,order-detail,True,none,944188,0.221419,0,0,0,39,436931,"claude-haiku-4-5-20251001,scripted",통과
+e8-haiku-r2,haiku,2,3,order-summary,False,acceptance,1071624,0.255475,0,0,0,42,424830,"claude-haiku-4-5-20251001,scripted","web /dashboard: 기대 문구 없음: 45000 또는 45,000 · 본문: Create Next App Order Summary Dashboard Loading... s"
+e8-haiku-r3,haiku,3,1,orders-list,True,none,1042817,0.251064,0,0,0,42,441167,"claude-haiku-4-5-20251001,scripted",통과
+e8-haiku-r3,haiku,3,2,order-detail,True,none,1506933,0.297085,0,0,0,55,550038,"claude-haiku-4-5-20251001,scripted",통과
+e8-haiku-r3,haiku,3,3,order-summary,True,none,103944,0.056418,0,0,0,13,297502,"claude-haiku-4-5-20251001,scripted",통과
+e8-sonnet-r1,sonnet,1,1,orders-list,True,none,407382,0.21212,0,0,0,24,678047,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r1,sonnet,1,2,order-detail,True,none,349352,0.207456,0,0,0,21,606811,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r1,sonnet,1,3,order-summary,True,none,340148,0.17977,0,0,0,22,519019,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r2,sonnet,2,1,orders-list,True,none,666572,0.294469,0,0,0,33,307918,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r2,sonnet,2,2,order-detail,True,none,425583,0.227661,0,0,0,22,335798,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r2,sonnet,2,3,order-summary,True,none,415870,0.21195,0,0,0,26,339664,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r3,sonnet,3,1,orders-list,True,none,461653,0.212595,0,0,0,28,371432,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r3,sonnet,3,2,order-detail,True,none,617463,0.292227,0,0,0,28,419139,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-sonnet-r3,sonnet,3,3,order-summary,True,none,516062,0.260526,0,0,0,27,373729,"claude-haiku-4-5-20251001,claude-sonnet-5,scripted",통과
+e8-split-r1,split,1,1,orders-list,True,none,1331406,0.629782,18128,0.340949,0,48,1009118,"claude-haiku-4-5-20251001,scripted,계획: opus",통과
+e8-split-r1,split,1,2,order-detail,False,lane_gate,4338698,2.485228,11990,0.217411,1.749353,86,1221098,"claude-haiku-4-5-20251001,claude-opus-5,계획: opus",order-detail-web: failed 검증 게이트를 4번 통과하지 못했습니다
+e8-split-r1,split,1,3,order-summary,True,none,1526626,0.71876,19799,0.382455,0,49,891009,"claude-haiku-4-5-20251001,scripted,계획: opus",통과
+e8-split-r2,split,2,1,orders-list,True,none,1345923,0.624382,18446,0.34888,0,51,836771,"claude-haiku-4-5-20251001,scripted,계획: opus",통과
+e8-split-r2,split,2,2,order-detail,False,acceptance,1434808,0.643676,18171,0.339311,0,49,707509,"claude-haiku-4-5-20251001,scripted,계획: opus","web /orders/1: 상태 404 · 본문: Create Next App self.__next_r=""2OZFKieOdpP5DD3qaDmsw"";if(document.cookie"
+e8-split-r2,split,2,3,order-summary,True,none,2022226,0.796732,19318,0.370299,0,57,913768,"claude-haiku-4-5-20251001,scripted,계획: opus",통과
+e8-split-r3,split,3,1,orders-list,False,acceptance,1645361,0.647435,16250,0.294017,0,53,959404,"claude-haiku-4-5-20251001,scripted,계획: opus","web /orders: 문구 누락: 김민수, 이영희, 박철수 · 본문: Create Next App Orders Failed to parse URL from /api/orders "
+e8-split-r3,split,3,2,order-detail,True,none,2935782,0.893791,18168,0.339161,0,72,1201299,"claude-haiku-4-5-20251001,scripted,계획: opus",통과
+e8-split-r3,split,3,3,order-summary,False,lane_gate,0,0,0,0,0,0,696429,,order-summary-api: error Claude Code returned an error result: [ede_diagnostic] result_type=user las
