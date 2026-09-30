@@ -11,7 +11,7 @@ import { useFolderProposal } from "./use-folder-proposal";
  */
 export function OpenFolder() {
   const [folder, setFolder] = useState("");
-  const { proposal, busy, error, propose, apply } = useFolderProposal();
+  const { proposal, busy, error, propose, apply, selectedInfra, toggleInfra } = useFolderProposal();
 
   return (
     <section className="glass rounded-panel p-5" aria-labelledby="open-folder-manual">
@@ -51,7 +51,7 @@ export function OpenFolder() {
 
       {proposal && (
         <div className="mt-4">
-          <FolderProposalView proposal={proposal} busy={busy} onApply={() => void apply(proposal.detection.folder)} />
+          <FolderProposalView proposal={proposal} busy={busy} onApply={() => void apply(proposal.detection.folder)} selectedInfra={selectedInfra} onToggleInfra={toggleInfra} />
         </div>
       )}
     </section>

@@ -116,6 +116,17 @@ export function parseRuntimes(stdout: string): string[] {
   }
 }
 
+/**
+ * `docker compose up`에 붙일 서비스 인자(ADR-083, 서비스 선택). `explicit`이 없으면(옛 동작과 호환)
+ * 빈 배열을 돌려줘 compose 파일의 모든 서비스를 띄운다. 있으면 그 서비스들과 edge 프록시만 이름 순으로 적고,
+ * `--no-deps`를 붙여 목록에 없는 의존 서비스를 compose가 몰래 따라 띄우지 않게 한다 — 사용자가 의존 서비스를
+ * 명시적으로 뺐을 수 있어서다(뺀 적이 없어 의존 서비스가 이미 목록에 있다면 --no-deps를 붙여도 결과는 같다)
+ */
+export function composeUpArgs(explicit: readonly string[] | undefined, edgeService: string): string[] {
+  if (!explicit) return [];
+  return ['--no-deps', ...[...new Set([...explicit, edgeService])].sort()];
+}
+
 /** `docker compose port <service> <port>` 출력에서 호스트 포트를 읽는다 */
 export function parseHostPort(stdout: string): number {
   const match = stdout.trim().split('\n').at(-1)?.match(/:(\d+)$/);

@@ -5,10 +5,21 @@ interface ExtractionPreview {
   questions: string[];
   source: 'model' | 'fallback';
   reason?: string;
+  referencedFiles: Array<{ path: string; exists: boolean; sizeBytes?: number; preview?: string }>;
+  outOfScope: string[];
+  assumptions: string[];
 }
 
 const mocks = vi.hoisted(() => ({
-  previewSessionRequirementsExtraction: vi.fn<() => Promise<ExtractionPreview>>(async () => ({ requirements: [], questions: [], source: 'fallback', reason: 'test' })),
+  previewSessionRequirementsExtraction: vi.fn<() => Promise<ExtractionPreview>>(async () => ({
+    requirements: [],
+    questions: [],
+    source: 'fallback',
+    reason: 'test',
+    referencedFiles: [],
+    outOfScope: [],
+    assumptions: [],
+  })),
   authorizeSession: vi.fn(async () => {}),
 }));
 
@@ -24,7 +35,15 @@ function post(body: unknown, id = 's1'): Promise<Response> {
 
 beforeEach(() => {
   mocks.previewSessionRequirementsExtraction.mockClear();
-  mocks.previewSessionRequirementsExtraction.mockImplementation(async () => ({ requirements: [], questions: [], source: 'fallback' as const, reason: 'test' }));
+  mocks.previewSessionRequirementsExtraction.mockImplementation(async () => ({
+    requirements: [],
+    questions: [],
+    source: 'fallback' as const,
+    reason: 'test',
+    referencedFiles: [],
+    outOfScope: [],
+    assumptions: [],
+  }));
   mocks.authorizeSession.mockClear();
   mocks.authorizeSession.mockImplementation(async () => {});
 });
@@ -35,6 +54,9 @@ describe('POST /api/sessions/[id]/requirements/extract', () => {
       requirements: [{ id: 'R1', title: '로그인', kind: 'api', priority: 'must', acceptance: ['a'] }],
       questions: ['비밀번호 최소 길이는?'],
       source: 'model',
+      referencedFiles: [{ path: 'seed/seed.json', exists: true, sizeBytes: 1024, preview: 'posts 42개' }],
+      outOfScope: ['결제 연동은 포함하지 않는다'],
+      assumptions: ['seed 데이터 기준 게시글 42건'],
     });
 
     const response = await post({ specText: '로그인 기능을 만드세요' });
@@ -44,6 +66,9 @@ describe('POST /api/sessions/[id]/requirements/extract', () => {
     const body = await response.json();
     expect(body.source).toBe('model');
     expect(body.questions).toHaveLength(1);
+    expect(body.referencedFiles[0].path).toBe('seed/seed.json');
+    expect(body.outOfScope).toEqual(['결제 연동은 포함하지 않는다']);
+    expect(body.assumptions).toEqual(['seed 데이터 기준 게시글 42건']);
   });
 
   it('입력이 하나도 없으면 400', async () => {

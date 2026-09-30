@@ -194,7 +194,7 @@ describe('splitLines', () => {
     kind: 'gate',
     runId: 'r1',
     files: ['api/src/Order.java'],
-    report: { ok: true, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [] },
+    report: { ok: true, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [] },
   };
   const outcome: ChatItem = { kind: 'outcome', runId: 'r1', status: 'done', summary: '완료했습니다', turns: 2 };
 

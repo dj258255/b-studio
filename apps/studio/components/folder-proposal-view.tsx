@@ -26,7 +26,20 @@ const ENGINE_LABEL: Record<string, string> = {
  * `useFolderProposal`이 받아온 결과를 그리기만 하는 순수 표시 컴포넌트라, 경로 직접 입력(`open-folder.tsx`)과
  * 폴더 선택 모달(`folder-browser.tsx`·`desktop-folder-picker.tsx`)이 그대로 함께 쓴다
  */
-export function FolderProposalView({ proposal, busy, onApply }: { proposal: Proposal; busy: boolean; onApply: () => void }) {
+export function FolderProposalView({
+  proposal,
+  busy,
+  onApply,
+  selectedInfra,
+  onToggleInfra,
+}: {
+  proposal: Proposal;
+  busy: boolean;
+  onApply: () => void;
+  /** 기본으로 띄울 부가 서비스(ADR-083). 앱이 기대는 것만 처음에 골라져 있다 */
+  selectedInfra: ReadonlySet<string>;
+  onToggleInfra: (name: string, on: boolean) => void;
+}) {
   const [shown, setShown] = useState<string>();
   const services = proposal.detection.services;
   const canApply = proposal.detection.hasSpec || proposal.files.length > 0;
@@ -63,22 +76,29 @@ export function FolderProposalView({ proposal, busy, onApply }: { proposal: Prop
           </ul>
           {proposal.detection.infra.length > 0 && (
             <div>
-              <p className="text-muted">부가 서비스(DB·캐시 등, ADR-073)</p>
+              <p className="text-muted">부가 서비스(DB·캐시 등, ADR-073) — 기본으로 띄울 서비스를 고르세요. 앱이 기대지 않는 서비스는 기본으로 껐습니다</p>
               <ul className="mt-1 space-y-1.5" aria-label="찾거나 제안한 부가 서비스">
                 {proposal.detection.infra.map((service) => (
                   <li key={service.name}>
-                    <span className="font-medium">{service.name}</span>
-                    <span className="text-muted">
-                      {" "}
-                      · {ENGINE_LABEL[service.engine] ?? service.engine} · <span className="font-mono">{service.image}</span>
-                    </span>
+                    <label className="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedInfra.has(service.name)}
+                        onChange={(event) => onToggleInfra(service.name, event.target.checked)}
+                        className="accent-ink"
+                      />
+                      <span className="font-medium">{service.name}</span>
+                      <span className="text-muted">
+                        · {ENGINE_LABEL[service.engine] ?? service.engine} · <span className="font-mono">{service.image}</span>
+                      </span>
+                    </label>
                     {service.sourceFile ? (
-                      <p className="text-xs text-muted">{service.sourceFile}에서 가져왔습니다</p>
+                      <p className="ml-6 text-xs text-muted">{service.sourceFile}에서 가져왔습니다</p>
                     ) : (
-                      <p className="text-xs text-wait">새로 제안: {service.reason}</p>
+                      <p className="ml-6 text-xs text-wait">새로 제안: {service.reason}</p>
                     )}
                     {service.notes?.map((note) => (
-                      <p key={note} className="text-xs text-wait">
+                      <p key={note} className="ml-6 text-xs text-wait">
                         확인: {note}
                       </p>
                     ))}

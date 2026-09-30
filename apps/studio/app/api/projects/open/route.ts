@@ -12,7 +12,7 @@ export async function POST(request: Request) {
   try {
     requireUser(request.headers);
     if (!localFolderAllowed()) throw new StudioError(403, '이 서버에서는 폴더를 열 수 없습니다. 개인 PC 모드(로컬 CLI)에서만 씁니다');
-    const body = (await request.json().catch(() => ({}))) as { path?: unknown; apply?: unknown };
+    const body = (await request.json().catch(() => ({}))) as { path?: unknown; apply?: unknown; selectedInfra?: unknown };
     const folder = typeof body.path === 'string' ? body.path.trim() : '';
     if (!folder) throw new StudioError(400, '폴더 경로를 적어 주세요');
     if (!folder.startsWith('/') && !folder.startsWith('~')) throw new StudioError(400, '절대 경로(/로 시작)나 ~로 시작하는 경로를 적어 주세요');
@@ -20,7 +20,9 @@ export async function POST(request: Request) {
     try {
       if (body.apply !== true) return Response.json(await proposeFolder(resolved));
       const taken = new Set((await listProjects()).filter((project) => !project.folder).map((project) => project.id));
-      return Response.json(await registerFolder(resolved, taken), { status: 201 });
+      // 폴더 열기 미리보기에서 고른, 기본으로 띄울 부가 서비스(ADR-083). 안 주면 detection.defaultInfra를 쓴다
+      const selectedInfra = Array.isArray(body.selectedInfra) ? body.selectedInfra.filter((name): name is string => typeof name === 'string') : undefined;
+      return Response.json(await registerFolder(resolved, taken, undefined, { selectedInfra }), { status: 201 });
     } catch (error) {
       // 경로·스택 문제는 사람이 고칠 수 있는 입력 오류로 돌려준다
       if (error instanceof StudioError) throw error;

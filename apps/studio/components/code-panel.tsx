@@ -5,6 +5,7 @@ import { ancestorsOf, buildFileTree, type FileTreeNode } from "@/lib/file-tree";
 import { languageFor, type HighlightedLine } from "@/lib/highlight";
 import { latestWrite, type SessionView } from "@/lib/session-view";
 import type { CodeFile, CodeSearch, CodeTree } from "@/lib/studio-events";
+import { useCodeOpen } from "./code-open-context";
 import { CodeTokens, useHighlightedCode } from "./code-tokens";
 import { DiffView } from "./diff-view";
 
@@ -25,6 +26,8 @@ type SearchMode = "path" | "content";
 export function CodePanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
   const write = useMemo(() => latestWrite(chat), [chat]);
+  const codeOpen = useCodeOpen();
+  const [highlightLine, setHighlightLine] = useState<number>();
   const [tree, setTree] = useState<CodeTree>();
   const [files, setFiles] = useState<string[]>([]);
   // 결과를 요청 조건과 함께 두어, 조건이 바뀌면 효과에서 상태를 되돌리지 않고도 헌 결과를 쓰지 않는다
@@ -106,11 +109,25 @@ export function CodePanel({ view }: { view: SessionView }) {
 
   const changes = tree?.changes ?? [];
   const changeOf = (path: string) => changes.find((change) => change.file === path)?.change;
-  const open = (path: string) => {
+  const open = (path: string, line?: number) => {
     setFollow(false);
     setSelected(path);
     setShowDiff(false);
+    setHighlightLine(line);
   };
+
+  // "테스트" 탭의 file:line 링크(codeOpen.open())가 여기로도 전해진다 — 코드 탭이 마운트돼 있지 않았어도, 전환된 뒤 반영한다.
+  // useEffect 안에서 자기 상태를 바로 바꾸지 않도록, 위 appliedReveal과 같은 방식으로 렌더 중 비교해 반영하고,
+  // 신호를 끊는 것(codeOpen.clear, 이 컴포넌트의 상태가 아니다)만 효과로 한다
+  const [appliedCodeOpenTarget, setAppliedCodeOpenTarget] = useState(codeOpen.target);
+  if (codeOpen.target && codeOpen.target !== appliedCodeOpenTarget) {
+    setAppliedCodeOpenTarget(codeOpen.target);
+    open(codeOpen.target.path, codeOpen.target.line);
+  }
+  useEffect(() => {
+    if (appliedCodeOpenTarget) codeOpen.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- codeOpen.clear()로 반영한 신호만 끊는다(codeOpen 자체는 매 렌더 새 참조)
+  }, [appliedCodeOpenTarget]);
   const treeNodes = useMemo(() => buildFileTree(files), [files]);
   const toggleFolder = (path: string) => {
     setExpanded((prev) => {
@@ -319,7 +336,7 @@ export function CodePanel({ view }: { view: SessionView }) {
                   {file.patch && <DiffView patch={file.patch} />}
                 </div>
               ) : (
-                <CodeLines path={file.path} content={file.content} />
+                <CodeLines path={file.path} content={file.content} highlightLine={highlightLine} />
               )}
             </div>
           </>
@@ -447,27 +464,36 @@ function FileIcon() {
   );
 }
 
-/** 줄 번호와 함께 보여 준다. 아직 강조하지 않은 줄과 강조하지 않는 파일은 평문으로 두고, 긴 줄은 가로로 스크롤한다 */
-function CodeLines({ path, content }: { path: string; content: string }) {
+/**
+ * 줄 번호와 함께 보여 준다. 아직 강조하지 않은 줄과 강조하지 않는 파일은 평문으로 두고, 긴 줄은 가로로 스크롤한다.
+ * highlightLine이 있으면("테스트" 탭의 file:line 링크) 그 줄로 스크롤하고 배경을 잠깐 강조한다
+ */
+function CodeLines({ path, content, highlightLine }: { path: string; content: string; highlightLine?: number }) {
   const highlighted = useHighlightedCode(content, languageFor(path));
   const lines = useMemo(() => {
     const split = content.split("\n");
     if (split.at(-1) === "") split.pop();
     return split;
   }, [content]);
+
+  useEffect(() => {
+    if (!highlightLine) return;
+    document.getElementById(`code-line-${highlightLine}`)?.scrollIntoView({ block: "center" });
+  }, [path, highlightLine]);
+
   return (
     <pre className="min-w-max py-2 font-mono text-xs leading-5">
       {lines.map((line, index) => (
-        <CodeLine key={index} number={index + 1} text={line} tokens={highlighted?.[index]} />
+        <CodeLine key={index} number={index + 1} text={line} tokens={highlighted?.[index]} highlighted={index + 1 === highlightLine} />
       ))}
     </pre>
   );
 }
 
 /** 조각을 강조할 때마다 목록 전체가 다시 그려지므로, 이미 그린 줄은 건너뛴다 */
-const CodeLine = memo(function CodeLine({ number, text, tokens }: { number: number; text: string; tokens?: HighlightedLine }) {
+const CodeLine = memo(function CodeLine({ number, text, tokens, highlighted }: { number: number; text: string; tokens?: HighlightedLine; highlighted?: boolean }) {
   return (
-    <div className="flex">
+    <div id={`code-line-${number}`} className={`flex ${highlighted ? "bg-wait/20" : ""}`}>
       <span aria-hidden className="w-12 shrink-0 pr-3 text-right text-muted select-none">
         {number}
       </span>

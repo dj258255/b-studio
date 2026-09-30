@@ -96,6 +96,9 @@
 - [ADR-079 명세를 요구사항으로 나누고 요구사항마다 검증 근거를 추적한다](#adr-079-명세를-요구사항으로-나누고-요구사항마다-검증-근거를-추적한다)
 - [ADR-080 제출 준비 점검표로 요구사항·테스트·README·시드·비밀 값·커밋 기록을 확인한다](#adr-080-제출-준비-점검표로-요구사항테스트readme시드비밀-값커밋-기록을-확인한다)
 - [ADR-081 저장소 탭에서 이슈·PR 상세를 열어 체크리스트·CI·리뷰까지 확인한다](#adr-081-저장소-탭에서-이슈pr-상세를-열어-체크리스트ci리뷰까지-확인한다)
+- [ADR-082 명세 탭이 참조 파일을 따라가 읽고 모호한 점에 추천 값을 채운다](#adr-082-명세-탭이-참조-파일을-따라가-읽고-모호한-점에-추천-값을-채운다)
+- [ADR-083 세션에서 띄울 서비스를 고르고, 부가 서비스는 기대는 것만 기본으로 켠다](#adr-083-세션에서-띄울-서비스를-고르고-부가-서비스는-기대는-것만-기본으로-켠다)
+- [ADR-084 테스트 탭에서 백엔드·프론트 테스트를 한 줄씩 보고 돌린다](#adr-084-테스트-탭에서-백엔드프론트-테스트를-한-줄씩-보고-돌린다)
 - [ADR-085 폴더 열기를 경로 입력 대신 폴더 선택 창·탐색 모달로 바꾼다](#adr-085-폴더-열기를-경로-입력-대신-폴더-선택-창탐색-모달로-바꾼다)
 
 ---
@@ -3321,6 +3324,148 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 연결된 이슈·PR은 closes/fixes/resolves 문구로만 찾는다. 그 문구 없이 다른 방식으로만 연결된(예: 프로젝트 보드) 이슈·PR은 찾지 못한다.
 - 큰 PR의 diff는 파일당·전체 글자 수로 자른다. 아주 큰 변경은 옆 패널에서 전체를 못 보고 GitHub에서 봐야 한다.
 - "세션에서 다시 검증"은 넣지 않았다. 세션에 게이트를 처음부터 다시 돌리는 진입점이 생기면 추가한다.
+
+---
+
+## ADR-082 명세 탭이 참조 파일을 따라가 읽고 모호한 점에 추천 값을 채운다
+
+상태: 채택
+관련: #274
+
+### 맥락
+- ADR-079가 만든 "명세" 탭을 범수 님이 실제 풀스택 과제 명세로 써 보고 다섯 가지를 지적했다: (1) 입력 placeholder·안내가 "과제 명세를 붙여넣으세요"처럼 과제 전형 용어에 치우쳐 제품 전반에 쓰기 어색하다, (2) "docs/requirements.md로 저장"을 누른 뒤 뭘 해야 하는지 불분명하고 추출된 목록도 "성의 없다"는 인상이다, (3) 명세가 `seed/seed.json` 같은 경로를 언급해도 그 파일을 실제로 읽지 않아 추출이 실제 데이터 규모를 반영하지 못한다, (4) "모호한 점" 질문에 업계 관례로 답을 채워주는 길이 없다, (5) 데이터 규모·동시성/트래픽·성능 관련 제약 같은 "가정"을 남길 자리가 없다.
+- claude-code 백엔드의 단발 호출(`claude-code-ask.ts`)은 지금까지 도구를 전부 닫아 뒀다(파일·명령 접근이 필요 없는 JSON 한 덩어리 응답이라서, ADR-079·ADR-075). "추천 값"에 진짜 출처 링크를 붙이려면 이 경계를 건드리지 않고 이 호출 하나에만 예외를 낼 방법이 필요했다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 추출 프롬프트만 고치고 참조 파일·추천 값·가정은 다음 라운드로 미룬다 | 피드백 다섯 가지가 서로 얽혀 있다(추천 값은 모호한 점 질문에, 가정은 참조 파일이 준 데이터 규모에 기댄다) — 나눠서 하면 "가정"이 지어낸 값이 되기 쉽다 |
+| B. 참조 파일 전체를 추출 문맥에 그대로 붙인다 | `seed/seed.json`처럼 수백 KB가 될 수 있는 파일을 통째로 넣으면 문맥이 시드 데이터로 채워진다. 요약(JSON은 최상위 키·배열 길이, 그 밖은 앞 줄)만 붙이고 전체 참조 파일 합쳐 ~6,000자 상한을 뒀다(채택) |
+| **C. claude-code 백엔드에 한해 "추천 값" 호출 하나만 WebSearch·WebFetch를 연다(파일·명령 도구는 그대로 닫는다), api 백엔드는 도구 없이 답하고 "출처 확인 필요"로 표시한다** | 채택. 추출·계획 등 다른 모든 단발 호출은 지금처럼 도구를 전부 닫아 두고, 이 호출 하나만 `claude-code-ask.ts`에 `webTools` 옵션(파일·명령 도구는 여전히 닫은 채 `tools`/`allowedTools`를 `['WebSearch','WebFetch']`로, `maxTurns`를 1에서 6으로 늘린다)을 opt-in으로 추가했다 |
+| D. api 백엔드에도 검색 도구를 연다 | api 백엔드의 `ModelAsk`는 `ModelClient` 어댑터를 거치는 별개 경로라 웹 검색 도구가 없다 — 새 어댑터를 만드는 대신 도구 없이 모델 지식만으로 답하고 "출처 확인 필요"로 정직하게 표시했다(채택) |
+
+### 결정
+1. **용어**: `requirements-panel.tsx`의 사용자에게 보이는 문구에서 "과제"를 뺐다. 붙여넣기 placeholder는 "만들 것을 적어 주세요", 파일 탭 placeholder는 "예: 요구사항.md, README.md, docs/spec.md"로 바꿨다. 탭 헤더("명세 → 요구사항 → 검증 추적")는 그대로 뒀다(지시된 범위). 주석은 "과제"를 그대로 쓸 수 있다(사람이 읽는 내부 설명이라 제품 용어 제약과 무관하다).
+2. **저장 안내 + 다음 단계 바**: 저장 버튼 위에 "저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 제출 준비 점검표가 이걸로 완료 여부를 판단합니다"를 고정 문구로 붙였다. 저장 뒤 목록 화면에는 "다음 단계" 상자(설명 + "전체 계획 세우기" 기본 버튼)를 둬, must 요구사항이 있으면 항상 보이게 했다(카드마다 있는 "이 요구사항 작업" 버튼과 짝을 이룬다).
+3. **추출 품질**: `buildExtractionSystemPrompt`(`packages/agent/src/requirements.ts`) 규칙을 다시 썼다 — 인수 조건은 실제 입력/출력·상태 코드를 쓰고 UI는 로딩/빈 화면/오류 상태까지 담게 했고, 서로 연관된 항목(한 리소스의 CRUD, 한 화면의 상태들)은 하나의 요구사항으로 묶게 했고, "X 미포함" 같은 부정형 문장은 요구사항으로 만들지 않고 새 `outOfScope` 목록("범위 밖" 노트, 저장하지 않고 미리보기에서만 보여준다)으로 빼게 했고, 재추출 시 같은 요구사항은 같은 id를 유지하라고 명시했다(id에 근거가 매여 있어서다, ADR-079).
+4. **참조 파일**: `extractPathReferences`(정규식으로 `디렉터리/파일.확장자`나 `파일.확장자` 모양을 찾는다, URL 경로는 제외)로 명세 글에서 경로처럼 보이는 낱말을 뽑고, `resolveReferencedFiles`(`packages/agent/src/requirements.ts`, `Workspace`를 그대로 써서 프로젝트 밖 경로·`.env` 같은 비밀 파일·`node_modules` 같은 생성물 경로는 다른 도구와 똑같이 막는다)로 세션 작업 복사본에서 찾는다. 존재하면 크기와 미리보기(JSON은 `summarizeJsonPreview`로 최상위 키마다 배열이면 길이를 담아 "posts 42개, comments 2,076개"처럼, 그 밖은 앞 5줄)를, 없으면 missing으로 담아 화면의 "참조 파일" 목록에 그대로 보여준다. 존재하는 파일의 요약은 `buildReferencedFilesContext`로 합쳐(전체 ~6,000자 상한, `REFERENCED_FILES_CONTEXT_MAX_CHARS`) 추출 프롬프트의 "[참조 파일 요약]" 절에 붙이고, 없는 파일은 `buildMissingReferenceQuestion`으로 "모호한 점" 질문에 자동으로 올린다(모델이 낸 질문과 합쳐 상한 5개 안으로 자른다).
+5. **모호한 점에 추천 값**: 새 `RecommendationReplySchema`(질문마다 답·근거 한 줄·출처 링크 최대 2개)와 `requestQuestionRecommendations`(`packages/agent/src/requirements.ts`)를 추가했다. claude-code 백엔드는 `requirementsRecommendationAsk`가 `claudeCodeAsk({ ..., webTools: true })`로 이 호출 하나만 WebSearch·WebFetch를 열어 실제 출처를 찾게 하고, api 백엔드는 도구 없이 모델 지식만으로 답한다 — `labelRecommendationSource`가 웹 검색을 못 쓴 경우 `sourced: 'model'`로 표시하고 화면은 "출처 확인 필요" 배지를 붙인다. `POST /api/sessions/[id]/requirements/recommend`가 새 진입점이고, 화면의 "추천 값으로 채우기" 버튼이 답을 입력칸에 채우되(편집 가능) 그 밑에 근거·출처·배지를 보여주며, 기존 "스펙을 고치고 다시 뽑기"를 그대로 써 반영한다.
+6. **가정**: `ExtractionReplySchema`에 `assumptions`(데이터 규모 — 참조 파일 요약이 있으면 그 값을 근거로 삼는다, 명세가 실마리를 줄 때만 동시성/트래픽, 페이지네이션·인덱스 같은 성능 제약 — 서버 사양은 절대 묻지 않는다)를 추가했다. `docs/requirements.md`에 "## 가정" 절로 저장하고(`serializeRequirementsMarkdown`의 세 번째 인자), 다시 읽을 때(`parseRequirementsMarkdown`)도 사람 편집 우선 원칙을 그대로 따른다 — 절이 남아 있으면 그 글머리 기호를 읽고, 사람이 절을 통째로 지우면 가정 없음으로 본다. 저장 JSON 주석 블록은 `{requirements, assumptions}` 모양으로 바뀌었지만, 이 기능 전에 저장된 옛 배열 형식도 그대로 읽는다(`LEGACY_JSON_BLOCK`/`JSON_BLOCK_SHAPE` 둘 다 시도).
+7. **저장 API 모양 변경**: `POST .../requirements/apply`의 요청 본문이 배열에서 `{ requirements, assumptions? }`로 바뀌었다(가정을 함께 저장해야 해서). 이 API는 스튜디오 화면만 부르는 내부 API라(ADR-079 이후 공개된 계약이 아니다) 과거 형식과의 호환은 두지 않고 라우트·컴포넌트를 함께 바꿨다.
+
+### 검증 결과
+- `packages/agent/src/requirements.test.ts`(신규 33건): `extractPathReferences`(경로 추출·중복 제거·URL 제외), `summarizeJsonPreview`/`buildReferencedFilePreview`/`buildReferencedFilesContext`(요약·전체 글자 수 상한에서 자르기), `resolveReferencedFiles`(임시 폴더로 있음/없음/생성물 경로 거부), `RecommendationReplySchema`/`parseRecommendationReply`/`requestQuestionRecommendations`(파싱·검증·usage·오류), `labelRecommendationSource`, "## 가정" 절 왕복·절을 지우면 빈 배열·옛 JSON 배열 형식 호환을 확인했다.
+- `apps/studio/lib/server/claude-code-ask.test.ts`(신규, 이 모듈의 첫 테스트): 가짜 SDK로 `webTools` 없을 때(`tools: []`, `maxTurns: 1`)와 있을 때(`tools: ['WebSearch','WebFetch']`, `maxTurns` 증가, `settingSources`·`mcpServers`는 그대로 닫혀 있음)를 확인했다. 실제 모델·네트워크 호출은 하지 않았다.
+- `apps/studio/app/api/sessions/[id]/requirements/{extract,apply,recommend}/route.test.ts`(신규 recommend 4건, extract·apply 갱신): 새 응답 필드(`referencedFiles`·`outOfScope`·`assumptions`)가 그대로 전달되는지, apply가 새 `{requirements, assumptions}` 본문을 검증하는지(배열만 보내면 400), recommend가 질문마다 추천을 돌려주고 빈 질문·백엔드 미지원 오류를 그대로 전하는지 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`(보강): `ImportFlow`를 내보내 렌더한 뒤 "과제"가 한 글자도 없는지, "만들 것을 적어 주세요"가 있는지 확인했다.
+- `pnpm --filter @b-studio/agent typecheck`·`pnpm --filter @b-studio/studio typecheck`(둘 다 오류 없음), `pnpm --filter @b-studio/studio lint`(0 오류, 기존 이미지 경고만), `pnpm vitest run apps/studio`(121개 파일·1,016건 통과), `pnpm --filter @b-studio/agent exec vitest run`(41개 파일·671건 통과)를 확인했다. 저장소 전체 `pnpm test`는 `packages/sandbox/src/docker/format.test.ts`(Kubernetes 경로 확인, 이번 변경과 무관)만 기기 부하로 인한 사전 존재 플레이키였고 따로 돌려도 재현됐다(다른 두 플레이키 후보 `checkpoints.test.ts`·`sessions-review.test.ts`는 이번 실행에서는 통과했다).
+- 실제 Docker 샌드박스·모델 호출은 부르지 않았다(지시된 조건). `resolveReferencedFiles`만 실제 임시 폴더 파일시스템으로 검증했고, `requestQuestionRecommendations`·추출 호출은 스크립트 응답(`ModelAsk`)으로 검증했다.
+
+### 감수한 트레이드오프
+- **참조 파일 추출은 정규식 휴리스틱이다.** 코드 블록 안에 우연히 등장한 `파일.json` 같은 낱말도 참조로 잡을 수 있고, 공백이 든 경로("my file.json")는 잡지 못한다. 실제 과제 명세에서 관찰한 형태(슬래시로 구분된 상대 경로, 확장자 있는 파일명)를 우선했다.
+- **참조 파일 미리보기는 JSON 최상위 한 단계만 본다.** 중첩된 배열(예: `{"data":{"posts":[...]}}`)은 길이를 보여주지 못하고 그냥 키 이름만 나열한다 — 다음 라운드에서 필요해지면 재귀 요약을 추가한다.
+- **api 백엔드의 추천 값은 출처를 붙이지 못한다.** `ModelAsk`가 `ModelClient` 어댑터를 거치는 구조라 이번 라운드에서는 새 어댑터를 만들지 않고 "출처 확인 필요" 표시로 정직하게 남겼다 — api 백엔드에도 검색이 필요해지면 별도 ADR로 어댑터를 넓힌다.
+- **"모호한 점 자동 질문"(참조 파일 없음)은 모델이 낸 질문과 합쳐 5개 상한을 나눠 쓴다.** 참조 파일이 여러 개 없으면 모델이 낸 진짜 모호함 질문이 상한에 밀려날 수 있다 — 우선순위는 모델 질문을 앞에 두고 남는 자리만 참조 파일 질문으로 채운다.
+- **저장 API 본문 형식이 바뀌어 예전 요청 본문(배열)은 이제 400이 난다.** 외부에 공개된 계약이 아니라(스튜디오 화면 전용) 과거 형식 호환을 넣지 않았다 — 같은 커밋에서 라우트·컴포넌트·테스트를 함께 바꿨다.
+
+---
+
+## ADR-083 세션에서 띄울 서비스를 고르고, 부가 서비스는 기대는 것만 기본으로 켠다
+
+상태: 채택
+관련: #278
+
+### 맥락
+- 사용자 피드백: "b-studio 키면 카프카 mysql redis 뭐 이런거 강제로 실행해야 해? 안 할 수도 있잖아. 실제로 개발하는 것 위주로 그것들만 딱 뜨게 하고 싶은데, 안 킬 수도 있잖아, 개발만 할 수 있고."
+- 지금까지 세션의 샌드박스는 `docker compose up`을 서비스 이름 없이 불러(`packages/sandbox/src/docker/compose-provider.ts`) 프로젝트 compose의 **모든** 서비스를 띄웠다 — studio.yaml의 관리형(managed) 서비스든, ADR-073으로 폴더 열기에서 가져온 카프카·레디스 같은 부가 서비스든 예외가 없었다.
+- ADR-073이 부가 서비스를 자동으로 가져오는 것 자체는 옳다(안 가져오면 첫 기동이 실패한다). 문제는 "가져왔으면 항상 다 켠다"는 다음 전제였다 — 가져온 카프카를 앱이 실제로 쓰지 않는데도 켜지면 기동이 느려지고 자원을 쓴다. 반대로 프론트엔드만 고치는 동안에는 managed 서비스 중 일부(백엔드)조차 필요 없을 수 있다.
+- studio.yaml의 `databases`는 dependents(그 DB를 compose depends_on으로 기대는 managed 서비스)만 알고 있었고, DB가 아닌 부가 서비스(카프카 등)나 부가 서비스끼리의 기댐은 어디에도 기록되지 않았다. "누가 이 서비스를 실제로 쓰는지" 알아낼 자료가 없었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 지금처럼 항상 전부 켠다 | 사용자 피드백 그대로. 안 쓰는 인프라도 강제로 기다려야 한다 |
+| B. 앱이 실제로 기대는 서비스만 자동으로 골라 강제한다(사용자가 못 바꾼다) | 자동 판정이 늘 맞지 않는다 — 수동 테스트용으로 부가 서비스를 잠깐 더 켜고 싶거나, 반대로 자동으로는 켜지는 서비스를 아예 끄고 싶을 때(디버깅, 자원 절약) 손을 댈 곳이 없다 |
+| **C. 기본값은 "관리형 + 그 서비스가 기대는(depends_on) 서비스의 닫힘"으로 자동 계산하고, 그 위에 사용자가 프로젝트별로 켜고 끌 수 있게 한다** | 채택. B의 합리적인 기본값에 A가 없던 통제권을 더한다 |
+
+### 결정
+- **기본 선택 알고리즘**(`packages/spec/src/service-selection.ts`): `dependencyClosure(roots, graph)`가 뿌리(관리형 서비스 이름)에서 `depends_on` 그래프를 따라가며 닫힘을 모은다. `defaultServiceSelection(project)`은 관리형 서비스 전부를 뿌리로 써서, "관리형 + 기대는 서비스"를 기본값으로 낸다 — 아무도 기대지 않는 부가 서비스(가져왔지만 안 쓰는 카프카 등)는 기본으로 빠진다. `missingDependencies`·`dependentsOf`는 "고른 서비스 중 기대는 서비스가 선택에서 빠진 쌍"과 "이 서비스를 끄면 기댈 곳을 잃는 지금 선택된 서비스"를 계산해 끄기 전 경고·compose 인자 결정에 쓴다.
+- **depends_on 원본 그래프**(`packages/spec/src/load.ts`): `LoadedProject.dependsOn: Record<string, string[]>`을 추가했다. compose 파일의 모든 서비스(관리형·부가 모두)를 대상으로, 원래 `databases`의 dependents 계산에만 쓰던 `dependsOn()` 헬퍼를 일반화해 만든다. `LoadedProject.offServices?: ReadonlySet<string>`도 함께 추가했는데, `loadProject()`는 채우지 않고(항상 undefined) 세션을 다루는 쪽(스튜디오 서버)이 프로젝트를 읽은 뒤 붙인다 — 이 프로젝트 객체는 세션 동안 재시작·체크포인트 복원·되돌리기에 계속 같은 참조로 넘어가므로, 한 번 붙이면 검증 게이트를 포함한 모든 곳이 최신 선택을 본다(파일 하나 더 스레딩하지 않고, 이미 어디든 넘어가는 `project`에 얹었다 — `extraPageChecks`를 `project.spec.workflow`에 얹는 기존 관례와 같다).
+- **선택 저장**(`apps/studio/lib/server/service-selection.ts`): 사용자의 선택은 프로젝트 저장소가 아니라 스튜디오 상태 폴더 `~/.cache/b-studio/projects/<프로젝트 id>/services.json`에 둔다(`B_STUDIO_PROJECTS_STATE_DIR`로 바꿀 수 있다, 테스트는 임시 폴더로 바꿔 끼운다). `serviceSelectionFor(project, projectId)`는 저장한 선택이 있으면 그것을(compose에서 없어진 이름은 걸러낸다), 없거나 다 걸러졌으면 기본값을 돌려준다.
+- **샌드박스가 선택을 따른다**(`packages/sandbox`): `StartOptions.services?: readonly string[]`를 추가했다 — 주면 그 서비스만 `compose up`하고, 목록에 없는 managed 서비스는 `ServiceStatusEvent`의 새 단계 `'off'`로 알린다(실패가 아니다). 순수 함수 `composeUpArgs(explicit, edgeService)`(`docker/format.ts`)가 인자를 만든다: 선택이 없으면(옛 동작과 호환) 빈 배열, 있으면 `--no-deps` + 고른 서비스 + edge 프록시 — `--no-deps`는 사용자가 의존 서비스를 명시적으로 뺐을 때 compose가 그 의존 서비스를 몰래 따라 띄우지 않게 막는다. `LocalDockerSandbox.start()`는 꺼 둔 서비스의 스냅샷도 건드리지 않고, 선택이 있는데 아무것도 안 골랐으면(`selected.size === 0`) `compose build`를 아예 부르지 않는다(인자 없는 build는 "전부 빌드"라는 뜻이라서다). 서비스 하나만 켜고 끄는 `Sandbox.setServiceRunning?(service, running)`(선택적 인터페이스 메서드)도 추가했다 — 켤 때는 `up --detach --build --no-deps`, 끌 때는 `stop`(볼륨은 남긴다). Kubernetes 제공자는 아직 구현하지 않아 undefined로 두고, 호출자가 501로 안내한다.
+- **세션이 선택을 계산하고 반영한다**(`apps/studio/lib/server/sessions.ts`): `resolveServiceSelection(project, projectId)`가 세션을 만들거나 이어서 작업할 때마다 선택을 다시 계산해 `project.offServices`에 붙이고, `Session.serviceSelection`(compose 서비스 이름 Set)에 남긴다. `boot()`는 `sandbox.start({ services: [...session.serviceSelection] })`로 넘긴다. `onServiceStatus`의 `'off'` 케이스는 서비스 상태를 `off`로 두고 url을 지워 미리보기가 "꺼 둔 서비스" 안내로 바뀌게 한다. 새 함수 `listServiceSelection(id)`·`setSessionServiceSelection(id, service, on)`이 화면에 목록을 주고 켜고 끄기를 처리한다 — 끌 때 지금 선택 중 그 서비스에 기대는 서비스가 있으면 경고 문구를 돌려주되 막지는 않는다. 관리형 서비스를 켤 때는 `restart()`(빌드 + 준비 판정)를, 그 밖은 `setServiceRunning()`을 쓴다.
+- **API**: `GET /api/sessions/[id]/services`(목록), `POST /api/sessions/[id]/services/[service]/selection`(켜고 끄기, `{ on: boolean }`) — 서비스 라우트와 같은 인증(만든 사람·관리자만 바꿀 수 있다).
+- **검증 게이트가 꺼 둔 서비스를 건너뛴다**(`packages/agent/src/verify.ts`): `restartServicesFor`는 재시작 대상에서 `project.offServices`에 있는 서비스를 빼고 `RestartReport.skippedOff`로 남긴다. `verifyChanges`는 꺼 둔 서비스의 계약도 확인하지 않는다(재시작을 안 했으니 확인할 수 없다). `VerificationReport.skippedOff`가 보고서에 남아 `formatVerificationReport`가 "꺼 둔 서비스라 확인을 건너뜀(검증에 포함되지 않음)" 줄을 붙인다 — "검증됨"이 실제보다 부풀려 보이지 않게 하려는 것이다. `captureBaselines`·`VerificationGate#serviceOrigins`도 꺼 둔 서비스는 건드리지 않는다. `DatabaseBranches`(`packages/agent/src/database-branches.ts`)도 꺼 둔 데이터베이스는 덤프·복원을 시도하지 않고 `action: 'missing'`으로 남긴다(컨테이너가 없어 시도하면 오류가 나므로).
+- **화면**: 헤더의 "+N" 부가 서비스 칩(`SupportingServicesChip`)을 "서비스" 메뉴로 바꿨다 — 부가 서비스가 없어도 항상 보이고, 누르면 관리형·부가 서비스를 모두 켜고 끄는 체크박스 목록이 열린다(관리형이 위, `depends_on`도 함께 보여준다). "개발만" 버튼은 지금 켜진 부가 서비스를 한 번에 끈다(프론트만으로도 도는 프로젝트에서 인프라 없이 빠르게 켜고 싶을 때). 미리보기 탭은 꺼 둔 서비스를 "꺼 둔 서비스입니다"로 안내하고 "켜기" 버튼을 둔다. 리소스 탭은 꺼 둔 서비스 이름을 "꺼 둔 서비스라 빠짐" 문구로 남긴다(컨테이너가 없어 자원 사용량 목록에 안 나오는 이유를 설명한다).
+- **폴더 열기 미리보기**(ADR-067·073): `ProjectDetection.defaultInfra: string[]`(`apps/studio/lib/server/project-detect.ts`)를 추가했다 — 감지한 앱 서비스가 기대는 부가 서비스 + 부가 서비스끼리의 기댐 닫힘(서비스 선택 기본값과 같은 `dependencyClosure`를 쓴다). `open-folder.tsx`는 부가 서비스마다 체크박스를 보여주고 기본값으로 `defaultInfra`를 체크해 둔다. 등록할 때(`registerFolder`) 고른 목록을 `writeServiceSelection`으로 저장해, 처음 여는 순간부터 기대지 않는 부가 서비스가 뜨지 않는다.
+
+### 검증 결과
+- `packages/spec/src/service-selection.test.ts`(신규): `dependencyClosure`·`defaultServiceSelection`·`missingDependencies`·`dependentsOf` — 뿌리에서 닫힘 계산, 아무도 기대지 않는 서비스 제외, 순환 의존 종료, 선택에서 빠진 의존 쌍, 끄기 전 경고 대상.
+- `packages/spec/src/spec.test.ts`: `loadProject`가 `LoadedProject.dependsOn` 원본 그래프를 만드는지.
+- `packages/sandbox/src/docker/format.test.ts`: `composeUpArgs` — 선택 없음(빈 배열, 옛 동작 호환)·선택 있음(`--no-deps` + 정렬)·edge 중복 방지·빈 선택.
+- `packages/agent/src/verify.test.ts`: `restartServicesFor`가 꺼 둔 서비스를 건너뛰고 보고서에 남기는지, `verifyChanges`가 꺼 둔 서비스의 계약을 확인하지 않는지.
+- `packages/agent/src/database-branches.test.ts`: 꺼 둔 데이터베이스는 컨테이너를 건드리지 않고 `missing`으로 남기는지.
+- `apps/studio/lib/server/service-selection.test.ts`(신규): 저장·읽기·기본값 적용·compose에서 없어진 이름 걸러내기·프로젝트별 분리.
+- `apps/studio/lib/server/project-detect.test.ts`: `defaultInfra`가 기대는 부가 서비스만 담는지, `registerFolder`가 고른 목록(또는 기본값)으로 선택을 저장하는지.
+- `apps/studio/components/supporting-services-chip.test.tsx`(신규): 닫힌 첫 그리기(팝오버 없음), 부가 서비스가 없어도 메뉴가 보이는지.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류), 바뀐 패키지(spec·sandbox·agent·studio)의 관련 테스트 스위트를 확인했다. `packages/sandbox/src/docker/format.test.ts`의 `SYNC_SCRIPT` 타임아웃 1건은 실제 Docker 컨테이너를 쓰는 사전 존재 플레이키(문서에 적힌 대로)이고 이번 변경과 무관하다 — 같은 파일의 `composeUpArgs` 테스트는 통과했다.
+- 실제 Docker·세션으로 띄워 보는 확인(개발 서버·실제 샌드박스)은 하지 않았다(작업 지침상 금지).
+
+### 감수한 트레이드오프
+- 켜고 끄기는 항상 `--no-deps`를 쓴다(기대는 서비스가 선택에 이미 있어도). 조건부로 계산하지 않아 동작이 예측하기 쉽지만, compose가 원래 해 주는 "기댐 자동 기동"에는 기대지 않는다 — 선택 목록 자체가 이미 닫힘을 담고 있어야 한다.
+- "개발만"은 지금 켜진 부가 서비스를 한 번에 모두 끄는 버튼이다. 관리형 서비스는 체크박스로 따로 고른다 — "개발만 켤 관리형 서비스를 한 화면에서 함께 고르는" 마법사형 UI는 만들지 않았다.
+- Kubernetes 제공자는 `setServiceRunning`을 아직 구현하지 않아 서비스 켜고 끄기를 지원하지 않는다(로컬 Docker만 된다). 호출하면 501로 분명히 안내한다.
+- 꺼 둔 데이터베이스는 체크포인트 사이 덤프·복원을 건너뛴다 — 꺼 둔 채로 있다가 나중에 켜면 마지막으로 켜져 있던 시점 이후의 데이터베이스 변경은 체크포인트에 남지 않는다.
+
+---
+
+## ADR-084 테스트 탭에서 백엔드·프론트 테스트를 한 줄씩 보고 돌린다
+
+상태: 채택
+관련: #281
+
+### 맥락
+- 사용자 요청: "테스트 코드 관리도 있었으면 좋겠는데 백엔드 프론트. 테스트코드들 한줄 한줄 딱 보일 수 있게." 지금까지 테스트는 게이트(`gate.ts`의 `test` 단계, `studio.yaml`의 `workflow.tests`)가 통과/실패만 판정했고, 사람은 개별 테스트 이름도 결과도 화면에서 볼 수 없었다. 실패한 테스트 하나를 고치려면 로그 탭에서 Gradle/Jest 출력을 직접 읽어야 했다.
+- 재사용할 것이 이미 있었다: 요구사항 탭(ADR-079)의 `isLikelyTestFile`·`scanTestFilesForRequirementId`(테스트 이름에서 `R3` 같은 id를 찾는 정규식), `chat-draft-context.tsx`(채우기만 하고 보내지 않는 관례), 게이트의 `sandbox.exec(service, command)`(컨테이너 안 명령 실행), `files_changed`/`fileRevision`(파일 변경을 스냅샷 값 하나로 알려 탭이 다시 불러오게 하는 패턴).
+- `workflow.tests`의 `command`는 `string[]`라서 이미 셸을 거치지 않는다(인자 하나하나가 배열 원소라 이스케이프가 필요 없다) — 이 탭도 같은 방식으로 명령을 만든다.
+- compose.yaml을 보면 Gradle의 `build/`, Maven의 `target/`은 세션 작업 복사본과 바인드 마운트가 아니라 **컨테이너 전용 이름 있는 볼륨**이다(`api-build:/app/build`, 예제 프로젝트 compose.yaml). 즉 JUnit 보고서는 호스트 파일시스템에서 보이지 않고, 컨테이너 안에서 `sandbox.exec`로 직접 읽어야 한다. 반면 테스트 **소스 파일**은 서비스 폴더 전체가 바인드 마운트(`./api:/app`)라 호스트에서 바로 읽을 수 있다 — 그래서 발견(소스를 읽어 테스트 이름을 찾는 것)과 결과 수집(보고서를 읽는 것)의 구현 방식이 다르다.
+
+### 결정
+1. **순수 함수 3개(`packages/agent/src`)로 나눴다** — 세션·샌드박스를 몰라 임시 문자열만으로 테스트할 수 있다.
+   - `test-discovery.ts`: 파일 경로·내용을 받아 테스트 파일인지(JUnit `*Test(s).java/.kt`·`*IT.java`, Vitest/Jest/Playwright `*.test|spec.[cm]?[jt]sx?`, pytest `test_*.py`/`*_test.py`) 가르고, 프레임워크별 파서(`discoverJunitFile`·`discoverJsFile`·`discoverPytestFile`)로 클래스/describe/class Test*를 스위트로, `@Test`·`it()`/`test()`·`def test_*`를 테스트로, 줄 번호와 함께 트리로 뽑는다. 정규식과 중괄호/들여쓰기 깊이 추적만 쓰는 가벼운 토큰화라 완벽한 파서는 아니다(제목 문자열이 여러 줄에 걸치면 못 잡는 식) — "포맷이 흔들려도 최대한 잡되, 완벽하지 않아도 된다"는 과제 지시를 그대로 따랐다. `@Nested`·`.skip`/`.only`/`.todo`/`.each`·`@Disabled`·`@pytest.mark.skip`도 본다. 테스트 이름·`@DisplayName`에서 `R\d+` 형태의 요구사항 id를 뽑는다(ADR-079와 같은 관례).
+   - `test-results.ts`: JUnit XML(정규식으로 `<testcase>`/`<failure>`/`<skipped>`를 찾는다, Gradle `build/test-results/test/*.xml`·Maven `target/surefire-reports/*.xml`·pytest `--junitxml` 모두 같은 포맷)과 Jest/Vitest json(`--json`/`--reporter=json`이 같은 `testResults[].assertionResults[]` 모양을 낸다, 파서 하나로 충분)을 파싱한다. 새 XML/JSON 라이브러리는 쓰지 않았다(보고서 형식이 단순해 가벼운 정규식으로 충분하고, "새 의존성 금지" 지시를 따랐다). `attachResults`가 발견한 테스트에 결과를 잇는다: 우선 파일+이름으로 정확히 맞추고, 후보가 여럿이면 classname/파일 경로에 파일 이름·스위트 이름이 들어 있는 쪽을 점수로 고른다(느슨한 매칭). 결과가 없는 테스트는 "안 돌림"으로 남는다.
+   - `test-run.ts`: 실행기(`gradle`·`maven`·`vitest`·`jest`·`pytest`)와 좁힐 대상(파일/클래스/테스트 이름)을 받아 실행 명령과 보고서 수거 명령을 만든다. Gradle/Maven은 출력 경로를 못 정해(관례 경로에만 남긴다) `find`+`cat`으로 모으고(`sh -c`, 경계 표지 `@@@b-studio-test-report@@@`로 여러 파일을 한 번의 exec 출력에서 나눈다), Vitest/Jest/pytest는 `/tmp` 아래 고정 경로로 출력을 지정해 `cat` 한 번으로 받는다. `detectRunner`는 `template`(spring-boot→gradle, pom.xml 있으면 maven / fastapi→pytest)과 프런트 서비스는 `package.json`의 `devDependencies`(vitest/jest)나 `scripts.test` 글자로 가른다.
+2. **서버 쪽 조립은 `apps/studio/lib/server/sessions.ts`에 있다**(요구사항 탭과 같은 이유 — `requireSession`이 파일 밖에서 쓰이지 않는다). 새 `apps/studio/lib/server/test-files.ts`가 서비스 폴더 안에서 테스트 파일을 훑고(요구사항 탭의 `scanWorkingCopyTestFiles`와 같은 안전판: 무시 폴더·파일 수 400개·파일당 200KB 상한) `package.json`/`pom.xml`을 읽는다.
+   - `getSessionTests`: 서비스마다 소스를 다시 훑어(파일이 늘 최신이도록) 테스트를 찾고, 세션에 저장해 둔 마지막 결과(`Session.testResults`, `Map<service, {run, source, at}>` — 체크포인트처럼 영속하지 않고 서버를 다시 시작하면 사라진다)를 이어 붙인다.
+   - `runSessionTests`: 서비스당 한 번에 하나만 돈다(`Session.testControllers`에 `AbortController`를 하나 두고, 이미 있으면 409). 실행기가 컴파일 오류 등으로 보고서를 하나도 못 남겨도 예외를 던지지 않고 종료 코드와 출력 꼬리를 결과에 담아 돌려준다(사람이 탭에서 바로 원인을 보게 한다). 취소하면(`cancelSessionTests`) 저장된 결과를 건드리지 않고 그대로 돌아온다.
+   - **게이트가 이미 돌린 test 단계를 다시 실행하지 않고 모은다**: `result.checks`를 `session.lastGateChecks`에 남기는 자리(`sessions.ts`)에서 `collectGateTestReports`를 함께 불러, 사람이 지금 그 서비스를 돌리고 있지 않으면 보고서만 최선으로 모아 본다(실패해도 요청 결과에 영향 없음).
+   - `testsRevision`/`testsRunning`을 스냅샷에 더하고 새 이벤트 `tests_changed`(파일 변경의 `files_changed`와 같은 자리, 기록에 쌓지 않는 트랜지언트)로 "테스트" 탭이 다시 불러올 때를 안다.
+3. **API**: `GET /api/sessions/[id]/tests`(발견+마지막 결과), `POST .../tests/run`(`{service, file?, suitePath?, testName?}`, 서비스가 꺼져 있으면 409 "서비스가 꺼져 있습니다"), `POST .../tests/cancel`(`{service}`). 다른 세션 API와 같은 `requireUser`/`authorizeSession`.
+4. **UI(`tests-panel.tsx`)**: 서비스마다 통과/실패/건너뜀/안 돌림 개수와 실행기 이름, 필터(전체/실패만/요구사항 연결), 파일→스위트(접고 펼 수 있다)→테스트 한 줄(상태 점(`status.tsx`의 기존 `Dot`/`Tone` 재사용) · 표시 이름 · R-id 칩 · 소요 시간 · `file:line`)을 보여준다. 버튼은 전체 실행(지원하는 서비스를 차례로)·서비스 실행·파일 실행·이 테스트만 실행, 실패한 줄에는 "이 테스트 고쳐 줘"(실패 메시지·스택 앞부분·위치를 채운다), `docs/requirements.md`에는 있지만 어느 테스트 이름에도 id가 없는 요구사항에는 "테스트 추가"를 둔다 — 전부 `chat-draft-context.tsx`로 채우기만 한다(ADR-079·080과 같은 관례, 자동으로 보내지 않는다).
+5. **`file:line`은 "코드" 탭을 그 줄로 연다.** 형제 탭(둘 다 `PreviewPanel`의 자식)이라 대화 채우기와 같은 자리에 새 컨텍스트(`code-open-context.tsx`)를 두어 `Workbench`가 들고, "테스트" 탭이 `open({path, line})`을 부르면 `PreviewPanel`이 코드 탭으로 전환하고 `CodePanel`이 그 파일을 열어 해당 줄로 스크롤하며 배경을 강조한다. `PreviewPanel`의 탭 목록은 한 줄(`{ id: TESTS_TAB, label: "테스트" }`)과 한 분기만 더했다(같은 파일을 나란히 고치는 다른 작업과 충돌을 줄이려는 것).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 게이트의 test 단계 결과(통과/실패)만 그대로 보여준다 | "한 줄 한 줄" 요청과 맞지 않는다. 게이트는 명령 종료 코드만 보고 개별 테스트 이름을 모른다 |
+| **B. 소스를 정적으로 읽어 테스트 케이스를 찾고(발견), 실행은 따로 하되 보고서로 결과를 잇는다** | 채택. 발견은 소스만 있으면(서비스를 안 띄워도) 되고, 실행·결과는 컨테이너가 준비됐을 때만 하면 된다 — 두 관심사를 나누면 각각 순수 함수로 테스트하기 쉽다 |
+| C. 실행기의 표준 출력을 직접 파싱한다(보고서 파일 대신) | Gradle·pytest 콘솔 출력은 색상 코드·진행 표시줄이 섞여 있고 포맷이 버전마다 다르다. JUnit XML·Jest json은 안정된 기계가 읽는 포맷이라 이쪽을 신뢰했다 |
+| D. 테스트 결과를 체크포인트처럼 영속시킨다(파일에 저장) | 결과는 "지금 돌리면 통과하는가"를 보여주는 게 목적이라, 코드가 바뀌면 바로 헌 결과가 된다. 세션 메모리에만 두고(서버 재시작 시 사라짐) 다시 돌리거나 게이트가 새로 모으면 채워지게 했다 |
+
+### 검증 결과
+- `packages/agent/src/test-discovery.test.ts`(신규, 9건): JUnit(클래스·`@Nested`·`@DisplayName`·`@Disabled`·`@ParameterizedTest`/`@RepeatedTest`·Kotlin `fun`), Vitest/Jest(중첩 `describe`·`.skip`·최상위 `it`/`test`), Playwright(`test.describe`로 프레임워크를 가른다), pytest(모듈 함수·`class Test*`·`@pytest.mark.skip`·`@pytest.mark.parametrize`), 확장자·이름 관례로 프레임워크를 고르는 `isTestFilePath`/`discoverTestsInFile`, 중첩 스위트를 평평하게 펴는 `flattenDiscoveredFile`을 확인했다.
+- `packages/agent/src/test-results.test.ts`(신규, 11건): Gradle 스타일·pytest `--junitxml`(`<testsuites>`로 감싼 경우 포함) JUnit XML, Jest/Vitest json 파싱(통과/건너뜀/실패, 실패 메시지·스택), 깨진 JSON을 던지지 않고 빈 결과로 돌려주는지, JUnit/Vitest/pytest 세 프레임워크 각각 발견 결과에 결과를 파일+이름으로 잇는지, 결과 없는 테스트가 "안 돌림"으로 남는지, 상태별 개수 집계, "이 테스트 고쳐 줘"/"테스트 추가" 프리필 문구를 확인했다.
+- `packages/agent/src/test-run.test.ts`(신규, 17건): gradle/maven/vitest/jest/pytest 각각 전체 실행·파일로 좁히기·테스트 하나로 좁히기(클래스+메서드, 파일+`-t`, 노드 id `파일::클래스::테스트`) 명령, 보고서 수거 명령 출력을 경계 표지로 나누는 `splitCollectedReports`(단일 파일·빈 출력·여러 파일), `template`·`package.json`·`pom.xml` 유무로 실행기를 고르는 `detectRunner`를 확인했다. 명령은 모두 `string[]`(셸을 거치지 않는다)이라 이스케이프 문제가 애초에 없다 — "셸 따옴표" 대신 배열 원소 하나하나가 그 자체로 안전한 인자임을 확인하는 테스트다.
+- `apps/studio/components/tests-panel.test.tsx`(신규), API 라우트 테스트 3개(`tests/route.test.ts`·`tests/run/route.test.ts`·`tests/cancel/route.test.ts`, `sessions.ts`를 모킹해 권한·입력 검증·오류 상태 코드 전달을 확인했다)를 더했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류), `pnpm test`(1,993개, 모두 이번 변경과 무관한 사전 존재 플레이키 — `checkpoints.test.ts`·`format.test.ts`·`artifacts.test.ts`·`sessions-review.test.ts`·`task-plans-limits.test.ts`의 5초 타임아웃, 기기 부하에 따라 매번 다른 조합으로 실패한다(예: 한 번은 6건, 다음은 10건) — 을 확인했다. `format.test.ts`는 혼자 돌려도 가끔 타임아웃돼 지시대로 "아는 플레이키"로 남겼다. 이 기능의 새 테스트 파일(`test-discovery.test.ts`·`test-results.test.ts`·`test-run.test.ts`·`tests-panel.test.tsx`·`tests/route.test.ts`·`tests/run/route.test.ts`·`tests/cancel/route.test.ts`, 총 47건)은 매번 통과했다.
+- 실제 Docker 샌드박스·모델 호출은 부르지 않았다(지시 조건). 실행·보고서 수거 경로(`runSessionTests`·`collectGateTestReports`의 `sandbox.exec` 호출 자체)는 위 순수 함수 테스트로만 간접 검증했고, 실제 Gradle/Vitest/pytest 컨테이너에서 `sandbox.exec`로 돌려 보는 통합 확인은 하지 못했다.
+
+### 감수한 트레이드오프
+- **발견 파서는 완벽한 AST 파서가 아니다.** 제목 문자열이 여러 줄에 걸치거나, `it.each`의 표 인자가 여러 줄이면 못 잡는다. 지시대로 "가벼운 토큰화"를 택했다 — 대부분의 실제 테스트 파일(한 줄에 제목)에는 통하지만, 극단적으로 포맷을 흩트린 파일은 놓칠 수 있다.
+- **매칭(발견 ↔ 결과)은 이름+경로 휴리스틱이다.** 같은 이름의 테스트가 여러 파일에 있고 보고서의 classname이 모호하면(드물지만) 엉뚱한 테스트에 결과가 붙을 수 있다.
+- **테스트 결과는 세션 메모리에만 있다.** 서버가 재시작되면 "안 돌림"으로 돌아간다 — 실제로 안 돌린 것과 구분이 안 된다. 체크포인트만큼 중요한 정보는 아니라고 보고 영속시키지 않았다.
+- **JUnit `--tests` 대상은 파일 이름에서 클래스 이름을 되짚는다**(`OrderServiceTest.java` → `OrderServiceTest`). 파일의 공개 클래스 이름이 파일 이름과 다른(관례를 어긴) 프로젝트에서는 "파일 실행"·"이 테스트만 실행"이 빗나갈 수 있다.
+- **"전체 실행"은 지원하는 서비스를 순서대로 하나씩 돈다**(동시에 여러 서비스를 돌리지 않는다) — 서비스당 한 번에 하나만 돈다는 규칙과 화면이 "지금 어느 서비스가 도는지" 보여줘야 한다는 요구를 단순하게 맞춘 선택이다. 여러 서비스를 병렬로 돌리는 것은 다음 과제로 남긴다.
 
 ---
 

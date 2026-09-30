@@ -214,7 +214,13 @@ export function FolderBrowser() {
       )}
       {proposal.proposal && (
         <div className="border-t border-line px-4 py-3">
-          <FolderProposalView proposal={proposal.proposal} busy={proposal.busy} onApply={() => void proposal.apply(proposal.proposal!.detection.folder)} />
+          <FolderProposalView
+            proposal={proposal.proposal}
+            busy={proposal.busy}
+            onApply={() => void proposal.apply(proposal.proposal!.detection.folder)}
+            selectedInfra={proposal.selectedInfra}
+            onToggleInfra={proposal.toggleInfra}
+          />
         </div>
       )}
     </div>

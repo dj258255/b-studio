@@ -8,44 +8,65 @@ import path from 'node:path';
 import { z } from 'zod';
 import {
   appendPlanToRequest,
+  AssumptionSchema,
+  attachResults,
+  buildAddTestPrefill,
   buildAllMustHavesPrefill,
+  buildFixTestPrefill,
+  buildMissingReferenceQuestion,
   buildPullRequest,
+  buildReferencedFilesContext,
   buildRequirementWorkPrefill,
+  buildTestRunPlan,
   canCreatePullRequest,
   captureBaselines,
   CheckpointError,
   CheckpointStore,
   compareUrl,
   computeRequirementStatus,
+  countByStatus,
   createPullRequest,
   generateCommitSubject,
   DatabaseBranches,
   describeDatabaseState,
+  detectRunner,
+  discoverTestsInFile,
   estimateCost,
   extractRequirementsHeuristically,
   fetchIssue,
   findCheckpointMentions,
   findGateCheckMentions,
+  flattenDiscoveredFile,
   formatVerificationReport,
   formatVerifyTrailer,
   formatWorkflowTrailer,
   isLikelyTestFile,
+  labelRecommendationSource,
   listIssues,
+  MAX_ASSUMPTIONS,
+  MAX_CLARIFYING_QUESTIONS,
   MAX_REQUIREMENTS,
   ORDERS_DEMO_SCENARIOS,
+  parseJestLikeJson,
+  parseJUnitXml,
   parsePullRequestNumber,
   parseRemote,
   parseRequirementsMarkdown,
   planAskFromClient,
   postComment,
+  REFERENCED_FILES_CONTEXT_MAX_CHARS,
   requestPlanBrief,
+  requestQuestionRecommendations,
   requestRequirementsExtraction,
   REQUIREMENTS_FILE,
   RequirementSchema,
   requirementConfidence,
+  resolveReferencedFiles,
+  runnerLabel,
   scanTestFilesForRequirementId,
   serializeRequirementsMarkdown,
   shouldPlanBrief,
+  splitCollectedReports,
   summarizeCoverage,
   preflightClaudeCode,
   preflightCodex,
@@ -83,6 +104,8 @@ import {
   type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
+  type ReferencedFile,
+  type Recommendation,
   type Requirement,
   type RequirementCoverage,
   type RequirementEvidence,
@@ -90,11 +113,16 @@ import {
   type RepositoryInfo,
   type RoutingDecision,
   type RunMetrics,
+  type ParsedTestRun,
   type RemoteSyncResult,
+  type Runner,
   type ScannedFile,
   type ServiceCheck,
   type VerificationReport,
   type SelfCheckMode,
+  type TestFramework,
+  type TestRow,
+  type TestTarget,
   type VerifyMode,
   type WorkflowCheck,
 } from '@b-studio/agent';
@@ -112,7 +140,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
+import { dependentsOf, loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import { buildSubmissionChecklist, type ChecklistService, type SubmissionReport } from '@/lib/submission-checklist';
 import {
@@ -158,6 +186,7 @@ import { resolveRepositoryToken } from './repo-token';
 import { runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
+import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from './test-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -168,6 +197,7 @@ import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch'
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import { overlayGeneratedFiles } from './project-registry';
+import { offManagedServices, serviceSelectionFor, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
   closeUnfinished,
@@ -301,6 +331,29 @@ interface Session {
    * 실행(질문·되돌림)에서는 갱신하지 않는다 — "최근 체크포인트"의 결과여야 하기 때문이다
    */
   lastGateChecks?: WorkflowCheck[];
+  /**
+   * 이 세션이 띄울 compose 서비스 이름(managed·부가 서비스 모두, ADR-083). project.offServices(managed 중 꺼 둔 것)와
+   * 함께 쓰인다 — 여기서 뺀 managed 서비스가 project.offServices에 들어간다. 프로젝트별 저장 선택이 없으면 기본값
+   * (관리형 + 기댐 닫힘)이다. sandbox.start()에 그대로 넘겨 그 서비스만 compose up한다
+   */
+  serviceSelection: Set<string>;
+  /**
+   * "테스트" 탭(ADR-084)이 서비스마다 저장해 둔 마지막 실행 결과. 사람이 직접 돌렸거나(run) 검증 게이트의
+   * test 단계가 남긴 보고서를 다시 실행하지 않고 모았을 때(gate) 채운다. 서버를 다시 시작하면 사라진다(체크포인트처럼 영속하지 않는다)
+   */
+  testResults?: Map<string, StoredTestRun>;
+  /** 서비스별로 지금 도는 테스트를 취소할 수 있게 든 컨트롤러. 서비스 하나당 한 번에 하나만 돈다 */
+  testControllers?: Map<string, AbortController>;
+}
+
+/** 서비스 하나의 마지막 테스트 실행 결과 */
+interface StoredTestRun {
+  at: string;
+  source: 'run' | 'gate';
+  runner?: Runner;
+  run: ParsedTestRun;
+  /** 실행기 자체가 실패했을 때(컴파일 오류 등 보고서를 하나도 남기지 못한 경우)의 원인 요약 */
+  error?: string;
 }
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
@@ -507,6 +560,8 @@ async function startSession({
   // CLI 백엔드는 샌드박스를 띄우기 전에 로그인을 확인한다. 실패하면 세션을 만들지 않고 이유를 돌려준다
   await assertBackendReady(backend, project.root);
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
+  // 이 프로젝트에서 띄울 서비스를 정한다(ADR-083). 저장한 선택이 없으면 기본값(관리형 + 기댐 닫힘)이다
+  const serviceSelection = await resolveServiceSelection(project, projectId);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
   const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
@@ -527,7 +582,7 @@ async function startSession({
       running: false,
       tokenLimit,
       owner,
-      ...projectViews(project, lazy ? 'stopped' : 'starting'),
+      ...projectViews(project, lazy ? 'stopped' : 'starting', project.offServices),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[0]?.question?.request : undefined,
       runtime: provider.isolation,
@@ -548,6 +603,7 @@ async function startSession({
     openCode: { notes: [] },
     sourceDirtyFiles,
     lazy,
+    serviceSelection,
     previewToken: randomBytes(16).toString('hex'),
   });
   // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
@@ -581,6 +637,7 @@ type NewSession = Pick<
   | 'openCode'
   | 'sourceDirtyFiles'
   | 'lazy'
+  | 'serviceSelection'
 >;
 
 function newSession(fields: NewSession): Session {
@@ -599,14 +656,19 @@ function newSession(fields: NewSession): Session {
   };
 }
 
-function projectViews(project: LoadedProject, state: 'starting' | 'stopped' = 'starting'): Pick<SessionSnapshot, 'services' | 'externals'> {
+function projectViews(
+  project: LoadedProject,
+  state: 'starting' | 'stopped' = 'starting',
+  offManaged: ReadonlySet<string> = new Set(),
+): Pick<SessionSnapshot, 'services' | 'externals'> {
   return {
     services: project.managed.map(([name, service]) => ({
       name,
       template: service.template,
       preview: service.preview,
-      // 지연 기동 세션(idle)은 샌드박스가 꺼져 있으므로 서비스도 꺼진 것으로 시작한다
-      state,
+      // 지연 기동 세션(idle)은 샌드박스가 꺼져 있으므로 서비스도 꺼진 것으로 시작한다.
+      // 서비스 선택(ADR-083)에서 꺼 둔 서비스는 샌드박스가 켜져도 계속 off다(실패가 아니다)
+      state: offManaged.has(name) ? 'off' : state,
       hasContract: Boolean(service.contract),
     })),
     externals: (project.external ?? []).map(([name, service]) => ({
@@ -620,6 +682,18 @@ function projectViews(project: LoadedProject, state: 'starting' | 'stopped' = 's
       authenticated: Boolean(service.policy.auth),
     })),
   };
+}
+
+/**
+ * 이 세션이 띄울 서비스를 정하고, 검증 게이트가 보도록 project.offServices에 남긴다(ADR-083).
+ * project는 세션 동안 계속 같은 객체를 쓰므로(체크포인트 복원·되돌리기도 같은 project를 넘겨받는다),
+ * 한 번 붙이면 이후의 재시작·검증이 모두 최신 선택을 본다
+ */
+async function resolveServiceSelection(project: LoadedProject, projectId: string): Promise<Set<string>> {
+  const resolved = await serviceSelectionFor(project, projectId);
+  const selected = new Set(resolved.selected);
+  project.offServices = offManagedServices(project, selected);
+  return selected;
 }
 
 /** 새 구독자에게 지금 상태와 지금까지의 기록을 보낸 뒤 실시간 이벤트를 전달한다 */
@@ -921,13 +995,15 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     }
     const list = await checkpoints.list();
     const head = list[0]!;
+    // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
+    const serviceSelection = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
     const sandbox = await provider.create(project, { secrets });
 
     const session = newSession({
       snapshot: {
         ...data.snapshot,
-        ...projectViews(project),
+        ...projectViews(project, 'starting', project.offServices),
         status: 'starting',
         error: undefined,
         running: false,
@@ -958,6 +1034,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 이어서 작업하기는 샌드박스를 바로 켠다(지연 기동이 아니다)
       lazy: false,
+      serviceSelection,
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
@@ -1061,6 +1138,70 @@ export async function endpointFor(id: string, service: string): Promise<string> 
   if (!session.project.managed.some(([name]) => name === service)) throw new StudioError(404, `${service} 서비스가 없습니다`);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
   return (await session.sandbox.endpoint(service)).url;
+}
+
+/** 헤더의 "+N" 팝오버·서비스 메뉴가 보여 줄 서비스 목록 한 줄 */
+export interface ServiceSelectionView {
+  name: string;
+  role: 'managed' | 'supporting';
+  selected: boolean;
+  /** 이 서비스가 기대는(compose depends_on) 서비스 이름 */
+  dependsOn: string[];
+  /** 지금 선택 중 이 서비스에 기대는 서비스 이름. 끄기 전 경고에 쓴다(비어 있으면 안전하게 끌 수 있다) */
+  dependents: string[];
+}
+
+/** 이 세션이 띄울 수 있는 서비스와 지금 선택 상태(ADR-083) */
+export function listServiceSelection(id: string): ServiceSelectionView[] {
+  const session = requireSession(id);
+  const { project, serviceSelection } = session;
+  const managedNames = new Set(project.managed.map(([name]) => name));
+  return [...project.composeServices]
+    .sort((a, b) => Number(managedNames.has(b)) - Number(managedNames.has(a)) || a.localeCompare(b))
+    .map((name) => ({
+      name,
+      role: managedNames.has(name) ? 'managed' : 'supporting',
+      selected: serviceSelection.has(name),
+      dependsOn: project.dependsOn[name] ?? [],
+      dependents: dependentsOf(name, serviceSelection, project.dependsOn),
+    }));
+}
+
+/**
+ * 서비스 하나를 켜거나 끈다(ADR-083). 껐는데 다른 선택된 서비스가 기대고 있어도 막지 않고 경고 문구만 돌려준다.
+ * 선택은 프로젝트 상태 폴더에 저장해 다음 세션·기동에도 이어진다. 세션이 떠 있으면 컨테이너도 바로 켜거나 끈다
+ * (관리형 서비스를 켤 때는 restart()로 다시 빌드하고 준비될 때까지 기다린다. 끌 때·부가 서비스는 setServiceRunning을 쓴다)
+ */
+export async function setSessionServiceSelection(id: string, service: string, on: boolean): Promise<{ selection: ServiceSelectionView[]; warning?: string }> {
+  const session = requireSession(id);
+  const { project } = session;
+  if (!project.composeServices.includes(service)) throw new StudioError(404, `'${service}'은(는) 이 프로젝트의 서비스가 아닙니다`);
+  const isManaged = project.managed.some(([name]) => name === service);
+  const dependents = !on ? dependentsOf(service, session.serviceSelection, project.dependsOn) : [];
+  const warning = dependents.length > 0 ? `${dependents.join(', ')}가 ${service}에 기댑니다 — 끄면 ${dependents.join(', ')}가 여기에 붙지 못할 수 있습니다` : undefined;
+
+  const next = new Set(session.serviceSelection);
+  if (on) next.add(service);
+  else next.delete(service);
+  session.serviceSelection = next;
+  project.offServices = offManagedServices(project, next);
+  await writeServiceSelection(session.snapshot.projectId, [...next]);
+
+  // 세션이 아직 켜지지 않았으면(idle) 다음 기동 때 선택이 반영되므로 지금 컨테이너를 건드리지 않는다
+  if (session.snapshot.status === 'ready' || session.snapshot.status === 'starting') {
+    if (isManaged && on) {
+      // restart()가 빌드하고 준비 판정까지 기다리며, 화면 상태(starting → probing → ready/failed)도 직접 알린다
+      await session.sandbox.restart(service, { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) });
+    } else if (!session.sandbox.setServiceRunning) {
+      throw new StudioError(501, '이 샌드박스 제공자는 서비스를 켜고 끄는 것을 지원하지 않습니다');
+    } else {
+      await session.sandbox.setServiceRunning(service, on, { signal: session.stop.signal });
+      // 관리형 서비스를 껐을 때만 화면 상태가 있다(부가 서비스는 ServiceView가 없다)
+      if (isManaged) onServiceStatus(session, { service, phase: 'off' });
+    }
+  }
+
+  return { selection: listServiceSelection(id), ...(warning ? { warning } : {}) };
 }
 
 /** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
@@ -1325,6 +1466,8 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
     await session.sandbox.start({
       signal,
       onStatus,
+      // 이 세션이 고른 서비스만 띄운다(ADR-083). 목록에 없는 managed 서비스는 onStatus가 'off'로 알린다
+      services: [...session.serviceSelection],
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
@@ -1679,6 +1822,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
         if (result.checks) session.lastGateChecks = result.checks;
+        // 게이트가 test 단계를 돌렸다면 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
+        void collectGateTestReports(session).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
         await revertRun(session, run.id);
       }
@@ -2991,6 +3136,8 @@ export interface RequirementsSnapshot {
   coverage?: RequirementCoverage;
   /** "전체 계획 세우기" 버튼이 채운다. must 요구사항이 하나도 없으면 없다 */
   allMustHavesPrefill?: string;
+  /** "## 가정" 절(데이터 규모·동시성/트래픽·성능 관련 제약). docs/requirements.md가 없거나 절이 없으면 빈 배열 */
+  assumptions: string[];
 }
 
 const TEST_SCAN_IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.gradle', '.venv', '__pycache__', 'coverage', 'design']);
@@ -3043,6 +3190,18 @@ function requirementsAsk(session: Session): ModelAsk | undefined {
   const backend = sessionBackend(session.snapshot);
   if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
   if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('요구사항 추출', 'build', session.snapshot.modelId).selected));
+  return undefined;
+}
+
+/**
+ * "모호한 점"에 추천 값을 물을 때만 쓰는 호출. claude-code 백엔드에서는 이 호출 하나만 WebSearch·WebFetch를 연다
+ * (`claude-code-ask.ts`의 `webTools`, 파일·명령 도구는 절대 열지 않는다) — 실제 업계 관례 출처를 붙이기 위해서다.
+ * api 백엔드는 기존 모델 호출 그대로(도구 없음)라 웹 검색이 없고, 호출하는 쪽이 "출처 확인 필요"로 표시한다.
+ */
+function requirementsRecommendationAsk(session: Session): { ask: ModelAsk; webSearchAvailable: boolean } | undefined {
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'claude-code') return { ask: claudeCodeAsk({ cwd: session.project.root, webTools: true }), webSearchAvailable: true };
+  if (backend === 'api') return { ask: planAskFromClient(clientForModel(routingDecision('모호한 점 추천', 'build', session.snapshot.modelId).selected)), webSearchAvailable: false };
   return undefined;
 }
 
@@ -3100,36 +3259,96 @@ export interface RequirementsExtractionPreview {
   source: 'model' | 'fallback';
   /** source가 fallback일 때만 있다. 화면이 그대로 보여 준다 */
   reason?: string;
+  /** 명세가 경로처럼 언급한 파일(seed/seed.json 등)이 작업 복사본에 있는지·크기·미리보기 */
+  referencedFiles: ReferencedFile[];
+  /** 요구사항으로 만들지 않고 뺀 "범위 밖" 항목(결정론적 대체 파서는 만들지 못한다) */
+  outOfScope: string[];
+  /** "## 가정" 절 초안(데이터 규모·동시성/트래픽·성능 관련 제약, 결정론적 대체 파서는 만들지 못한다) */
+  assumptions: string[];
+}
+
+/** 참조 파일이 없을 때 자동으로 덧붙이는 질문과, 모델이 직접 낸 질문을 합쳐 상한(5개) 안으로 자른다 */
+function mergeQuestionsWithMissingReferences(questions: readonly string[], referencedFiles: readonly ReferencedFile[]): string[] {
+  const missing = referencedFiles.filter((file) => !file.exists).map((file) => buildMissingReferenceQuestion(file.path));
+  const merged: string[] = [];
+  for (const question of [...questions, ...missing]) {
+    if (merged.length >= MAX_CLARIFYING_QUESTIONS) break;
+    if (!merged.includes(question)) merged.push(question);
+  }
+  return merged;
 }
 
 /**
  * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
+ * 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출 모델 문맥에 붙이고
+ * (데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
  * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다.
  */
 export async function previewSessionRequirementsExtraction(id: string, input: RequirementsExtractionInput): Promise<RequirementsExtractionPreview> {
   const session = requireSession(id);
   const specText = await resolveSpecText(session, input);
+  const referencedFiles = await resolveReferencedFiles(session.project.root, specText);
+  const referencedFilesContext = buildReferencedFilesContext(referencedFiles, REFERENCED_FILES_CONTEXT_MAX_CHARS);
   const backend = sessionBackend(session.snapshot);
   const ask = requirementsAsk(session);
   if (!ask) {
     return {
       requirements: extractRequirementsHeuristically(specText),
-      questions: [],
+      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
       reason: `이 세션 백엔드(${backend})는 도구 없이 한 번만 묻는 모델 호출을 지원하지 않아, 헤딩·글머리 기호로 요구사항을 나누는 결정론적 방식으로 대신했습니다`,
+      referencedFiles,
+      outOfScope: [],
+      assumptions: [],
     };
   }
   try {
-    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal);
-    return { requirements: result.requirements, questions: result.questions, source: 'model' };
+    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal, referencedFilesContext);
+    return {
+      requirements: result.requirements,
+      questions: mergeQuestionsWithMissingReferences(result.questions, referencedFiles),
+      source: 'model',
+      referencedFiles,
+      outOfScope: result.outOfScope,
+      assumptions: result.assumptions,
+    };
   } catch (error) {
     return {
       requirements: extractRequirementsHeuristically(specText),
-      questions: [],
+      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
       reason: `추출 모델 호출이 실패해 결정론적 방식으로 대신했습니다: ${describe(error)}`,
+      referencedFiles,
+      outOfScope: [],
+      assumptions: [],
     };
   }
+}
+
+export interface RequirementRecommendationsInput {
+  questions: string[];
+  specText?: string;
+}
+
+export interface RequirementRecommendations {
+  recommendations: Recommendation[];
+  /** 'web'이면 claude-code 백엔드가 이 호출에 한해 WebSearch로 찾은 출처, 'model'이면 도구 없이 모델 지식만으로 답해 "출처 확인 필요" */
+  sourced: 'web' | 'model';
+}
+
+/**
+ * "모호한 점" 질문마다 업계 관례에 근거한 추천 답·근거·출처를 한 번에 받는다. claude-code 백엔드만 이 호출에서
+ * WebSearch를 열어 실제 링크를 찾고(그 밖의 도구는 열지 않는다), 그 밖의 백엔드는 모델 지식만으로 답해
+ * `sourced: 'model'`로 표시한다(화면이 "출처 확인 필요"로 보여 준다). 추천 호출을 지원하지 않는 백엔드는 오류를 던진다.
+ */
+export async function recommendSessionRequirementQuestions(id: string, input: RequirementRecommendationsInput): Promise<RequirementRecommendations> {
+  const session = requireSession(id);
+  if (input.questions.length === 0) throw new StudioError(400, '추천을 받을 질문이 없습니다');
+  const resolved = requirementsRecommendationAsk(session);
+  if (!resolved) throw new StudioError(400, `이 세션 백엔드(${sessionBackend(session.snapshot)})는 추천 답 호출을 지원하지 않습니다`);
+  const specText = input.specText?.trim() ?? '';
+  const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, session.stop.signal);
+  return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
 }
 
 /** 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다 */
@@ -3147,9 +3366,9 @@ function evaluateRequirement(requirement: Requirement, checkpoints: readonly Che
 export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
-  if (raw === undefined) return { exists: false, requirements: [] };
-  const { requirements } = parseRequirementsMarkdown(raw);
-  if (requirements.length === 0) return { exists: true, requirements: [] };
+  if (raw === undefined) return { exists: false, requirements: [], assumptions: [] };
+  const { requirements, assumptions } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return { exists: true, requirements: [], assumptions };
 
   const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
@@ -3163,31 +3382,339 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     requirements: views,
     coverage: summarizeCoverage(requirements, statusById),
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: buildAllMustHavesPrefill(requirements) } : {}),
+    assumptions,
   };
 }
 
 const ApplyRequirementSchema = RequirementSchema;
+const ApplyRequirementsSchema = z.object({
+  requirements: z.array(ApplyRequirementSchema).min(1).max(MAX_REQUIREMENTS),
+  assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).default([]),
+});
 
 /**
- * 요구사항을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
+ * 요구사항(+가정)을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
  * 저장 시점의 증거로 상태를 다시 매겨 사람이 읽는 상태 줄에 스냅샷으로 남긴다(다시 열 때는 항상 증거로 새로 계산한다).
  */
 export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
-  const parsed = z.array(ApplyRequirementSchema).min(1).max(MAX_REQUIREMENTS).safeParse(input);
+  const parsed = ApplyRequirementsSchema.safeParse(input);
   if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
-  const ids = parsed.data.map((requirement) => requirement.id);
+  const ids = parsed.data.requirements.map((requirement) => requirement.id);
   if (new Set(ids).size !== ids.length) throw new StudioError(400, '요구사항 id가 중복됩니다');
 
   const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
-  const statusById = Object.fromEntries(parsed.data.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
+  const statusById = Object.fromEntries(parsed.data.requirements.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
 
-  const markdown = serializeRequirementsMarkdown(parsed.data, statusById);
+  const markdown = serializeRequirementsMarkdown(parsed.data.requirements, statusById, parsed.data.assumptions);
   await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
   return getSessionRequirements(id);
+}
+
+// ---------------------------------------------------------------------------
+// "테스트" 탭(ADR-084): 백엔드·프론트 테스트 케이스를 한 줄씩 보여 주고 돌린다.
+// ---------------------------------------------------------------------------
+
+/** 한 번에 도는 테스트 실행의 상한. 게이트의 TEST_TIMEOUT_MS와 같은 값(느린 Gradle 첫 실행도 버틴다) */
+const TEST_RUN_TIMEOUT_MS = 10 * 60_000;
+/** 보고서를 모아오는 cat/find 명령은 테스트 자체보다 훨씬 짧게 끝나야 한다 */
+const REPORT_COLLECT_TIMEOUT_MS = 30_000;
+const GATE_REPORT_COLLECT_TIMEOUT_MS = 15_000;
+/** 실행기가 보고서를 하나도 남기지 못했을 때(컴파일 오류 등) 사람에게 보여 줄 출력 꼬리 줄 수 */
+const RUN_FAILURE_TAIL_LINES = 30;
+
+type ManagedSpec = LoadedProject['managed'][number][1];
+
+/** test-discovery.ts의 결과에 framework를 함께 붙인 행. attachResults는 구조적으로 호환되는 TestRow만 보고 돌려주므로, 돌아온 값도 이 모양 그대로다(as로 되돌린다) */
+interface ServiceTestRow extends TestRow {
+  framework: TestFramework;
+}
+
+export interface TestRowView {
+  file: string;
+  framework: TestFramework;
+  suitePath: string[];
+  name: string;
+  displayName: string;
+  line: number;
+  skipped: boolean;
+  requirementIds: string[];
+  status: 'pass' | 'fail' | 'skip' | 'not-run';
+  durationMs?: number;
+  failureMessage?: string;
+  stack?: string[];
+  /** 실패한 테스트에서만 있다. "이 테스트 고쳐 줘" 버튼이 그대로 채운다 */
+  fixPrefill?: string;
+}
+
+export interface TestServiceView {
+  service: string;
+  template: string;
+  /** 지금 이 서비스에서 테스트가 도는 중인지 */
+  running: boolean;
+  /** 테스트 실행기를 알아냈는지(false면 실행 버튼을 숨기고 이유를 error에 남긴다) */
+  supported: boolean;
+  /** 사람이 읽는 실행기 이름(예: "Gradle (JUnit)") */
+  runner?: string;
+  counts: { pass: number; fail: number; skip: number; notRun: number };
+  lastRunAt?: string;
+  lastRunSource?: 'run' | 'gate';
+  error?: string;
+  rows: TestRowView[];
+}
+
+export interface RequirementWithoutTest {
+  id: string;
+  title: string;
+  /** "테스트 추가" 버튼이 채우는 글 */
+  prefill: string;
+}
+
+export interface TestsSnapshot {
+  services: TestServiceView[];
+  requirementsWithoutTests: RequirementWithoutTest[];
+}
+
+/** 서비스 폴더 안에서 테스트 파일을 찾아 케이스를 뽑는다. 파일 IO만 하고 판정은 하지 않는다(순수 함수는 test-discovery.ts에 있다) */
+async function discoverServiceTestRows(session: Session, spec: ManagedSpec): Promise<ServiceTestRow[]> {
+  const files = await walkServiceTestFiles(session.project.root, spec.path);
+  const rows: ServiceTestRow[] = [];
+  for (const file of files) {
+    const discovered = discoverTestsInFile(file.path, file.content);
+    if (!discovered) continue;
+    for (const row of flattenDiscoveredFile(discovered)) rows.push({ ...row, framework: discovered.framework });
+  }
+  return rows;
+}
+
+/** 서비스 폴더의 힌트(템플릿, package.json, pom.xml)로 테스트 실행기를 고른다 */
+async function detectServiceRunner(session: Session, spec: ManagedSpec): Promise<Runner | undefined> {
+  const [packageJson, hasPomXml] = await Promise.all([
+    readServicePackageJson(session.project.root, spec.path),
+    serviceHasPomXml(session.project.root, spec.path),
+  ]);
+  return detectRunner({ template: spec.template, hasPomXml, packageJson });
+}
+
+function testRowStatus(row: ServiceTestRow): TestRowView['status'] {
+  return row.result?.status ?? 'not-run';
+}
+
+function toTestRowView(row: ServiceTestRow): TestRowView {
+  const status = testRowStatus(row);
+  return {
+    file: row.file,
+    framework: row.framework,
+    suitePath: row.suitePath,
+    name: row.name,
+    displayName: row.displayName,
+    line: row.line,
+    skipped: row.skipped || row.suiteSkipped,
+    requirementIds: row.requirementIds,
+    status,
+    ...(row.result?.durationMs !== undefined ? { durationMs: row.result.durationMs } : {}),
+    ...(row.result?.failureMessage ? { failureMessage: row.result.failureMessage } : {}),
+    ...(row.result?.stack ? { stack: row.result.stack } : {}),
+    ...(status === 'fail' ? { fixPrefill: buildFixTestPrefill(row) } : {}),
+  };
+}
+
+async function buildTestServiceView(session: Session, serviceName: string): Promise<TestServiceView> {
+  const entry = session.project.managed.find(([name]) => name === serviceName);
+  const template = entry?.[1].template ?? '';
+  const running = session.testControllers?.has(serviceName) ?? false;
+  const serviceState = session.snapshot.services.find((candidate) => candidate.name === serviceName);
+  if (!entry || serviceState?.state !== 'ready') {
+    return {
+      service: serviceName,
+      template,
+      running,
+      supported: false,
+      counts: { pass: 0, fail: 0, skip: 0, notRun: 0 },
+      rows: [],
+      error: '서비스가 꺼져 있습니다',
+    };
+  }
+
+  const [rawRows, runner] = await Promise.all([discoverServiceTestRows(session, entry[1]), detectServiceRunner(session, entry[1])]);
+  const stored = session.testResults?.get(serviceName);
+  // attachResults는 TestRow[]를 돌려주지만 spread로 원래 값(framework 포함)을 그대로 옮기므로 형태를 되돌려도 안전하다
+  const attached = (stored ? attachResults(rawRows, stored.run) : rawRows) as ServiceTestRow[];
+  return {
+    service: serviceName,
+    template,
+    running,
+    supported: runner !== undefined,
+    ...(runner ? { runner: runnerLabel(runner) } : {}),
+    counts: countByStatus(attached),
+    ...(stored ? { lastRunAt: stored.at, lastRunSource: stored.source } : {}),
+    ...(!runner ? { error: '이 서비스의 테스트 실행기를 알아내지 못했습니다(vitest·jest devDependency나 pom.xml/build.gradle을 확인하세요)' } : stored?.error ? { error: stored.error } : {}),
+    rows: attached.map(toTestRowView),
+  };
+}
+
+/** docs/requirements.md에는 있지만 어느 서비스 테스트 이름에도 id가 나타나지 않는 요구사항 */
+async function requirementsWithoutTests(session: Session, services: readonly TestServiceView[]): Promise<RequirementWithoutTest[]> {
+  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  if (!raw) return [];
+  const { requirements } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return [];
+  const covered = new Set<string>();
+  for (const service of services) for (const row of service.rows) for (const id of row.requirementIds) covered.add(id);
+  return requirements
+    .filter((requirement) => !covered.has(requirement.id))
+    .map((requirement) => ({ id: requirement.id, title: requirement.title, prefill: buildAddTestPrefill(requirement.id, requirement.title) }));
+}
+
+/** "테스트" 탭이 연다: 서비스마다 테스트를 찾고 마지막으로 저장해 둔 결과를 이어 붙인다 */
+export async function getSessionTests(id: string): Promise<TestsSnapshot> {
+  const session = requireSession(id);
+  const services = await Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name)));
+  return { services, requirementsWithoutTests: await requirementsWithoutTests(session, services) };
+}
+
+function markTestsChanged(session: Session): void {
+  const revision = (session.snapshot.testsRevision ?? 0) + 1;
+  const running = session.testControllers ? [...session.testControllers.keys()] : [];
+  session.snapshot.testsRevision = revision;
+  session.snapshot.testsRunning = running;
+  emit(session, { type: 'tests_changed', revision, running });
+}
+
+function testFilePathBase(filePath: string): string {
+  const segment = filePath.split('/').pop() ?? filePath;
+  return segment.replace(/\.[^.]+$/, '');
+}
+
+/**
+ * 화면이 보낸 "무엇을 좁혀 돌릴지"(파일·스위트 경로·테스트 이름)를 실행기별 대상으로 바꾼다.
+ * JVM(Gradle/Maven)은 파일 경로를 받지 않으므로 파일 이름에서 클래스 이름을 되짚고, 중첩 스위트(@Nested)는
+ * 파일의 대표 클래스 뒤에 `$`로 붙인다. pytest는 마지막 스위트(class Test*)만 본다(중첩 클래스를 쓰지 않는 관례라서다)
+ */
+function toTestTarget(runner: Runner, input: { file?: string; suitePath?: string[]; testName?: string }): TestTarget | undefined {
+  if (!input.file && !input.testName) return undefined;
+  if (runner === 'gradle' || runner === 'maven') {
+    if (!input.file) return input.testName ? { testName: input.testName } : undefined;
+    const nested = (input.suitePath ?? []).slice(1);
+    const className = nested.length > 0 ? [testFilePathBase(input.file), ...nested].join('$') : testFilePathBase(input.file);
+    return { className, ...(input.testName ? { testName: input.testName } : {}) };
+  }
+  if (runner === 'pytest') {
+    return {
+      ...(input.file ? { file: input.file } : {}),
+      ...(input.suitePath && input.suitePath.length > 0 ? { className: input.suitePath[input.suitePath.length - 1] } : {}),
+      ...(input.testName ? { testName: input.testName } : {}),
+    };
+  }
+  return { ...(input.file ? { file: input.file } : {}), ...(input.testName ? { testName: input.testName } : {}) };
+}
+
+/** 컨테이너 안에서 명령을 돌려 보고서 글자를 모으고 파싱한다. 실패해도(취소 포함) 던지지 않고 결과만 돌려준다 */
+async function collectParsedRun(
+  session: Session,
+  serviceName: string,
+  plan: ReturnType<typeof buildTestRunPlan>,
+  signal: AbortSignal,
+): Promise<ParsedTestRun> {
+  const collected = await session.sandbox.exec(serviceName, plan.collect, { signal }).catch(() => undefined);
+  if (!collected) return { cases: [] };
+  const reportText = splitCollectedReports(collected.stdout)
+    .map((part) => part.content)
+    .join('\n\n');
+  if (!reportText.trim()) return { cases: [] };
+  return plan.format === 'junit-xml' ? parseJUnitXml(reportText) : parseJestLikeJson(reportText);
+}
+
+/**
+ * 서비스 하나의 테스트를 돌린다(서비스당 한 번에 하나만). 좁힐 대상이 없으면 서비스의 테스트 전체를 돌린다.
+ * 실행기 자체가 실패해도(컴파일 오류 등) 예외를 던지지 않고 결과에 원인을 담아 돌려준다 — 사람이 "테스트" 탭에서 바로 보게 하려는 것이다.
+ * 취소하면(cancelSessionTests) 저장된 결과를 건드리지 않고 그대로 돌아온다.
+ */
+export async function runSessionTests(
+  id: string,
+  input: { service: string; file?: string; suitePath?: string[]; testName?: string },
+): Promise<TestsSnapshot> {
+  const session = requireSession(id);
+  const entry = session.project.managed.find(([name]) => name === input.service);
+  if (!entry) throw new StudioError(404, `${input.service} 서비스가 없습니다`);
+  const serviceState = session.snapshot.services.find((candidate) => candidate.name === input.service);
+  if (serviceState?.state !== 'ready') throw new StudioError(409, '서비스가 꺼져 있습니다');
+
+  session.testControllers ??= new Map();
+  if (session.testControllers.has(input.service)) throw new StudioError(409, '이미 테스트를 실행하는 중입니다');
+
+  const runner = await detectServiceRunner(session, entry[1]);
+  if (!runner) throw new StudioError(400, `${input.service} 서비스의 테스트 실행기를 알아내지 못했습니다`);
+
+  const plan = buildTestRunPlan(runner, toTestTarget(runner, input));
+  const controller = new AbortController();
+  session.testControllers.set(input.service, controller);
+  markTestsChanged(session);
+  try {
+    const runSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(TEST_RUN_TIMEOUT_MS)]);
+    let execResult: Awaited<ReturnType<Sandbox['exec']>> | undefined;
+    try {
+      execResult = await session.sandbox.exec(input.service, plan.command, { signal: runSignal });
+    } catch (error) {
+      if (controller.signal.aborted) return getSessionTests(id); // 취소됐다 — 저장된 결과는 그대로 둔다
+      throw error;
+    }
+
+    const run = await collectParsedRun(session, input.service, plan, AbortSignal.timeout(REPORT_COLLECT_TIMEOUT_MS));
+    session.testResults ??= new Map();
+    if (run.cases.length > 0) {
+      session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run });
+    } else {
+      const tail = `${execResult.stdout}\n${execResult.stderr}`.trim().split('\n').slice(-RUN_FAILURE_TAIL_LINES).join('\n');
+      session.testResults.set(input.service, {
+        at: new Date().toISOString(),
+        source: 'run',
+        runner,
+        run: { cases: [] },
+        ...(execResult.exitCode !== 0
+          ? { error: session.sandbox.redact(`테스트 실행이 실패했습니다(종료 코드 ${execResult.exitCode})\n${tail}`) }
+          : {}),
+      });
+    }
+  } finally {
+    session.testControllers.delete(input.service);
+    markTestsChanged(session);
+  }
+  return getSessionTests(id);
+}
+
+/** 도는 중인 테스트를 취소한다. 실행 중이 아니면 404 */
+export function cancelSessionTests(id: string, service: string): void {
+  const session = requireSession(id);
+  const controller = session.testControllers?.get(service);
+  if (!controller) throw new StudioError(404, '실행 중인 테스트가 없습니다');
+  controller.abort();
+}
+
+/**
+ * 검증 게이트가 test 단계를 돌린 뒤(runAgent 결과에 checks가 있을 때) 다시 실행하지 않고 같은 보고서 파일을 모아 본다.
+ * 사람이 지금 그 서비스의 테스트를 돌리고 있으면 건드리지 않는다. 무엇을 모으든 실패해도 요청 결과에 영향이 없다(최선만 한다)
+ */
+async function collectGateTestReports(session: Session): Promise<void> {
+  if (session.snapshot.status !== 'ready') return;
+  let changed = false;
+  for (const [name, spec] of session.project.managed) {
+    if (session.testControllers?.has(name)) continue;
+    const serviceState = session.snapshot.services.find((candidate) => candidate.name === name);
+    if (serviceState?.state !== 'ready') continue;
+    const runner = await detectServiceRunner(session, spec);
+    if (!runner) continue;
+    const plan = buildTestRunPlan(runner);
+    const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
+    if (run.cases.length === 0) continue;
+    session.testResults ??= new Map();
+    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run });
+    changed = true;
+  }
+  if (changed) markTestsChanged(session);
 }
 
 function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
@@ -3212,6 +3739,10 @@ function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
       break;
     case 'failed':
       Object.assign(service, { state: 'failed', detail: event.reason });
+      break;
+    case 'off':
+      // 서비스 선택(ADR-083)에서 꺼 둔 서비스. 실패가 아니므로 url을 지워 미리보기가 "꺼 둔 서비스" 안내로 바뀌게 한다
+      Object.assign(service, { state: 'off', url: undefined, previewUrl: undefined, detail: undefined });
       break;
   }
   emit(session, { type: 'service', service: service.name, state: service.state, url: service.url, previewUrl: service.previewUrl, detail: service.detail });
@@ -3321,7 +3852,7 @@ function followLogs(session: Session, tail: number): void {
 
 function emit(session: Session, event: StudioEvent): void {
   // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient = event.type === 'usage' || event.type === 'files_changed' || event.type === 'deploy_log';
+  const transient = event.type === 'usage' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log';
   if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);

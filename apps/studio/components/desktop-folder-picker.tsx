@@ -45,7 +45,13 @@ export function DesktopFolderPicker() {
       )}
       {proposal.proposal && (
         <div className="mt-4">
-          <FolderProposalView proposal={proposal.proposal} busy={proposal.busy} onApply={() => void proposal.apply(proposal.proposal!.detection.folder)} />
+          <FolderProposalView
+            proposal={proposal.proposal}
+            busy={proposal.busy}
+            onApply={() => void proposal.apply(proposal.proposal!.detection.folder)}
+            selectedInfra={proposal.selectedInfra}
+            onToggleInfra={proposal.toggleInfra}
+          />
         </div>
       )}
     </div>

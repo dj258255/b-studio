@@ -4,6 +4,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { SessionView, ChatItem } from "@/lib/session-view";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
+import { useCodeOpen } from "./code-open-context";
 import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
 import { DesignPanel } from "./design-panel";
@@ -17,6 +18,7 @@ import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 import { SubmissionPanel } from "./submission-panel";
+import { TestsPanel } from "./tests-panel";
 import { TokenView } from "./token-view";
 
 type Tab = { id: string; label: string; service?: ServiceView; external?: ExternalApiView };
@@ -30,6 +32,7 @@ const DESIGN_TAB = "design";
 const TOKENS_TAB = "tokens";
 const REPOSITORY_TAB = "repository";
 const REQUIREMENTS_TAB = "requirements";
+const TESTS_TAB = "tests";
 const SUBMISSION_TAB = "submission";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
@@ -40,6 +43,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
     { id: DESIGN_TAB, label: "디자인" },
     { id: REQUIREMENTS_TAB, label: "명세" },
+    { id: TESTS_TAB, label: "테스트" },
     { id: CODE_TAB, label: "코드" },
     { id: HISTORY_TAB, label: "기록" },
     { id: DEPLOY_TAB, label: "배포" },
@@ -51,6 +55,14 @@ export function PreviewPanel({ view }: { view: SessionView }) {
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0]!;
+  // "테스트" 탭의 file:line 링크가 codeOpen.open()을 부르면 "코드" 탭으로 전환한다(코드 탭 자신은 그 자리에서 파일·줄을 연다).
+  // useEffect 안에서 자기 상태를 바로 바꾸지 않도록, 코드 탭의 appliedReveal과 같은 방식으로 렌더 중 비교해 반영한다
+  const codeOpen = useCodeOpen();
+  const [appliedCodeOpenTarget, setAppliedCodeOpenTarget] = useState(codeOpen.target);
+  if (codeOpen.target && codeOpen.target !== appliedCodeOpenTarget) {
+    setAppliedCodeOpenTarget(codeOpen.target);
+    setActiveId(CODE_TAB);
+  }
 
   return (
     <section className="flex min-h-0 flex-col gap-2" aria-label="미리보기">
@@ -87,6 +99,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <RepositoryPanel view={view} />
         ) : active.id === REQUIREMENTS_TAB ? (
           <RequirementsPanel view={view} />
+        ) : active.id === TESTS_TAB ? (
+          <TestsPanel view={view} />
         ) : active.id === SUBMISSION_TAB ? (
           <SubmissionPanel view={view} />
         ) : active.id === TOKENS_TAB ? (
@@ -99,7 +113,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다
           <IdleServicePanel sessionId={view.snapshot.id} service={active.service} />
         ) : !active.service.url ? (
-          <ServicePending service={active.service} />
+          <ServicePending sessionId={view.snapshot.id} service={active.service} />
         ) : (
           // 재시작 중에도 미리보기를 지우지 않아 입력한 경로와 요청이 유지된다. 준비되면 새 주소로 다시 불러온다
           <div className="flex h-full flex-col">
@@ -367,19 +381,47 @@ function IdleServicePanel({ sessionId, service }: { sessionId: string; service: 
   );
 }
 
-function ServicePending({ service }: { service: ServiceView }) {
+function ServicePending({ sessionId, service }: { sessionId: string; service: ServiceView }) {
   const tone = toneOfService(service.state);
+  const [turningOn, setTurningOn] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function turnOn() {
+    setTurningOn(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/services/${service.name}/selection`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ on: true }),
+    });
+    if (!response.ok) setError(((await response.json().catch(() => ({}))) as { error?: string }).error ?? "서비스를 켜지 못했습니다");
+    setTurningOn(false);
+  }
+
   return (
     <div className="flex h-full flex-col justify-center px-10">
       <p className={`text-lg font-semibold ${TONE_TEXT[tone]}`}>
-        {service.name} {SERVICE_STATE_LABEL[service.state]}
+        {service.name} {service.state === "off" ? "꺼 둔 서비스입니다" : SERVICE_STATE_LABEL[service.state]}
       </p>
       {service.detail && <p className="mt-2 max-w-[70ch] font-mono text-sm break-words text-muted">{service.detail}</p>}
       <p className="mt-4 max-w-[60ch] text-sm leading-6 text-muted">
-        {service.state === "stopped"
-          ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
-          : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다."}
+        {service.state === "off"
+          ? "서비스 선택에서 이 서비스를 꺼 뒀습니다. 켜면 이미지를 다시 빌드하고 준비될 때까지 기다립니다."
+          : service.state === "stopped"
+            ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
+            : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다."}
       </p>
+      {service.state === "off" && (
+        <button
+          type="button"
+          onClick={turnOn}
+          disabled={turningOn}
+          className="mt-4 self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+        >
+          {turningOn ? "켜는 중" : "켜기"}
+        </button>
+      )}
+      {error && <p className="mt-2 text-sm text-fail">{error}</p>}
     </div>
   );
 }

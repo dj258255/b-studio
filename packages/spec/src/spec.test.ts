@@ -565,6 +565,8 @@ databases:
 
     const project = await loadProject(dir);
     expect(project.databases).toEqual([['db', { engine: 'postgres', database: 'app', user: 'app', dependents: ['api', 'worker'] }]]);
+    // 서비스 선택(ADR-083)의 기본값 계산이 쓰는 원본 depends_on 그래프. compose에 없는 이름은 걸러진다
+    expect(project.dependsOn).toEqual({ web: ['api'], api: ['db'], worker: ['db'], db: [] });
   });
 
   it('자원 한도는 compose 서비스에만 걸 수 있고 docker 메모리 표기를 쓴다', async () => {
