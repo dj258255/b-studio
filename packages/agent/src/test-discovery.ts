@@ -39,9 +39,10 @@ export interface DiscoveredFile {
   tests: DiscoveredTestCase[];
 }
 
-const REQUIREMENT_ID_PATTERN = /\bR[1-9][0-9]*\b/g;
+/** 요구사항 id(R1)뿐 아니라 시나리오 id(R4.1)도 통째로 한 토큰으로 잡는다(requirements.ts의 REQUIREMENT_MENTION_PATTERN과 같은 모양) */
+const REQUIREMENT_ID_PATTERN = /\bR\d+(?:\.\d+)?\b/g;
 
-/** 이름·표시 이름 글자에서 요구사항 id(R1, R2…)를 찾는다. 중복은 뺀다 */
+/** 이름·표시 이름 글자에서 요구사항 id(R1, R2…)·시나리오 id(R4.1…)를 찾는다. 중복은 뺀다 */
 export function extractRequirementIds(text: string): string[] {
   const found = new Set<string>();
   for (const match of text.matchAll(REQUIREMENT_ID_PATTERN)) found.add(match[0]);

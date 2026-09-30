@@ -104,6 +104,7 @@
 - [ADR-087 개발 화면 탭을 일곱 개로 묶고 올리기 전 점검을 저장소 탭으로 옮긴다](#adr-087-개발-화면-탭을-일곱-개로-묶고-올리기-전-점검을-저장소-탭으로-옮긴다)
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
 - [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
+- [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
 
 ---
 
@@ -3647,6 +3648,48 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 모델 목록을 물어보는 데 Claude Code 프로세스를 하나 더 띄운다(관측: 수 초). 1시간 캐시·in-flight 중복 제거로 평소에는 거의 발생하지 않지만, 캐시가 갓 비워진 직후 여러 사용자가 동시에 화면을 열면 그 한 번의 호출을 함께 기다린다.
 - 단가 표는 여전히 사람이 관리한다(SDK가 주지 않는 정보라 지어낼 수 없다). 새 세대 모델이 나오면 단가가 없는 채로(가격 안내 없이) 옵션에 나타난다 — 잘못된 단가를 보여주는 것보다 안전하다고 판단했다.
 - `resolvedModel`의 정확한 형태(접미사 포함 여부)가 CLI 버전마다 달라질 수 있어, 계열 판정(`claudeFamilyOfResolvedId`)과 단가 정규화(`normalizeResolvedId`)는 접두어 매칭·정규식으로 느슨하게 짰다 — 언젠가 접두어 자체가 바뀌면(예: `claude-opus-6`) 다시 계열 표를 넓혀야 한다.
+
+---
+
+## ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다
+
+상태: 채택
+관련: 이 작업 세션에서는 새 GitHub 이슈를 만들 수 없는 정책이라 이슈 번호를 달지 못했다 — PR 본문에 맥락을 남긴다
+
+### 맥락
+- ADR-079가 만든 "명세 → 요구사항 → 검증 추적"은 요구사항을 `{id, title, kind, acceptance, priority}`로만 나눈다. 인수 조건은 자연어 문장이라 "테스트 가능한가"를 사람이 다시 판단해야 하고, 비기능 요구사항("빠르게 응답한다")은 측정 기준이 없어 검증 자체가 불가능하며, 요구사항 id는 영구적이라고 문서에 적어 놓고도 재추출 시 짝짓는 로직이 없어 실제로는 매번 새 모델 호출이 매기는 순번에 의존했다(모델이 우연히 같은 순서로 나눠 주지 않으면 id가 흔들리고, 그 순간 evidence·status가 전부 새 id 기준으로 리셋된다).
+- 업계 요구사항 기법을 찾아보면 이 틈을 메우는 재료가 이미 있다: EARS(Easy Approach to Requirements Syntax, alistairmavin.com/ears)는 "…해야 한다"로 끝나는 단수 문장을 다섯 패턴(ubiquitous/event/state/unwanted/optional)으로 강제해 복합 요구사항이 끼어들 틈을 없앤다. Gherkin의 Given-When-Then은 인수 조건을 실행 가능한 시나리오로 못 박는다(AWS Kiro의 `requirements.md`도 이 조합을 쓴다). GitHub Spec Kit의 `[NEEDS CLARIFICATION]` 표시는 모호함을 요구사항 문장에 남기지 않고 질문으로 분리한다. QVscribe류 요구사항 스멜 검사는 "빠르게", "적절히" 같은 약한 표현을 결정론적으로 잡아낸다. Doorstop·StrictDoc·sphinx-needs 같은 요구사항 관리 도구는 id를 영구 자산으로 삼고, 내용의 리비전 지문(해시)이 바뀌면 그 id를 참조하는 링크를 "suspect"(의심, 재확인 필요)로 낮춘다.
+- 실제 사용(dogfooding) 중 두 가지 위험한 틈도 함께 드러났다: (1) "모호한 점 추천 값으로 채우기"가 명세가 이미 답을 정한 것(응답 필드 모양, 프로젝트가 이미 쓰는 DB 엔진)과 충돌하는 "업계 관례" 답을 추천했다(예: 명세가 `content` 필드로 응답하라고 예시까지 보여줬는데 `excerpt`를 추천, Postgres 프로젝트에 MySQL 문법을 추천). (2) 과제성 명세의 "제출 방법"(private 저장소 생성 → APRCORPORATION을 collaborator로 추가 → PR 병합 → 메일로 제출)이 추출 모델에 의해 그대로 필수(must) 요구사항 R1로 저장됐다 — 이 문서를 읽고 작업하는 에이전트가 실제로 GitHub 저장소 권한을 바꾸려 시도할 수 있는 위험한 경로다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. EARS·시나리오·NFR을 스키마에 필수 필드로 추가한다 | 이미 저장된 `docs/requirements.md`(ADR-079 이후 문서 전부)가 파싱에 실패한다 — "옛 문서도 그대로 읽는다"는 이 모듈의 원칙을 깬다 |
+| B. 재추출마다 id를 늘 새로 매긴다(지금 방식 유지), 사람이 손으로 옛 id와 맞춰 고친다 | 재추출을 쓸 때마다 evidence·status가 리셋되는 걸 사람이 매번 감수해야 한다 — "재추출해도 같은 요구사항은 같은 id를 유지한다"던 ADR-082의 약속을 프롬프트 지시로만 남겨 두고 실제로 보장하지 못한다 |
+| **C. 모든 새 필드(rev·ears·scenarios·nfr·trace·hash)를 선택(optional)으로 스키마에 더하고, 사람이 읽는 몸통은 값이 있을 때만 줄을 더 쓰고, hash·개정은 내용이 실제로 바뀌었을 때만 계산해 올린다** | 채택. 옛 문서는 그 필드들이 애초에 없어 파싱·직렬화가 똑같이 동작한다. 새 필드는 저장할 때마다 새로 계산되므로 사람이 관리할 부담이 없다 |
+
+### 결정
+1. **스키마 확장**(`packages/agent/src/requirements.ts`): `Requirement`에 `rev?`(개정, 1부터), `ears?: {pattern, statement}`(EARS 다섯 패턴 중 하나, "…해야 한다" 단수 문장), `scenarios?: [{id: "R4.1", given, when, then}]`(소속 요구사항 id로 시작해야 한다는 걸 zod `refine`으로 강제), `nfr?: {metric, threshold, condition, method}`(kind가 nonfunctional이면 있어야 lintRequirement가 "Ready"로 본다 — 스키마 자체는 옛 문서 호환을 위해 선택), `trace?: {issue, dependsOn, supersedes}`(issue·rev·hash는 저장소 이슈 발행을 맡은 별도 모듈 `requirement-issues.ts`가 그대로 읽으므로 이름을 그대로 유지한다), `hash?`(title+ears+scenarios+nfr의 안정적 해시), `revisedAt?`(마지막 개정 시각). `acceptance`는 그대로 둔다(시나리오가 있으면 화면이 그로부터 표시를 파생할 수 있지만, 호환을 위해 여전히 독립적으로 저장한다).
+2. **경계 안전 정규식**: 모든 증거 매칭이 `\bR\d+(?:\.\d+)?\b`로 토큰을 뽑는다(`findMentionedIds`) — "R1"이 "R10"의 일부로 걸리지 않고, 시나리오 id(R4.1)도 통째로 한 토큰이다. `mentionsRequirementId(text, "R4")`는 "R4" 자체뿐 아니라 "R4.1" 같은 하위 시나리오 언급도 상위 요구사항을 가리킨 것으로 본다(시나리오는 요구사항의 일부라서). 커밋 메시지·PR 본문의 `Implements: R4` / `Implements: R4.1@rev2` 트레일러(`extractImplementsTrailers`)는 있으면 자유 언급보다 우선한다(`findCheckpointMentions`).
+3. **리비전·재확인 필요**(suspect 링크): `computeRequirementHash`가 title+ears+scenarios+nfr만 보고 해시를 매긴다(acceptance·priority·trace는 실질 검증 내용이 아니라고 봐서 뺐다). 저장(`applySessionRequirements`)마다 `carryForwardRequirementRevision`으로 같은 id의 이전 rev·hash·revisedAt을 먼저 물려받고(클라이언트가 안 보내도), `reviseRequirementIfChanged`가 해시가 달라졌으면 개정을 올리고 새 시각을 적는다. 새 상태 `재확인 필요`(검증됨보다 낮은 확신, 🟡)는 (a) 지금 내용이 기록된 해시와 다르면(아직 저장 전) 즉시, (b) 저장은 됐지만 그 개정 시각(`revisedAt`) 뒤에 생긴 체크포인트·게이트 확인이 하나도 없으면 매겨진다 — `computeRequirementStatus`에 선택 인자로 요구사항 자체를 더 주면 이 판정이 켜지고, 안 주면(기존 호출) 예전 규칙 그대로다(하위 호환).
+4. **재추출 병합**: 모델은 재추출 때마다 여전히 R1..Rn을 새로 매겨 오지만(id 자체를 신뢰하지 않는다), `mergeReextractedRequirements`가 제목+EARS 문장의 문자 2-그램 자카드 유사도(한국어 교착어 특성상 공백 토큰화보다 안정적이다) + kind 일치로 기존 저장분과 그리디로 1:1 짝짓고 기존 id를 그대로 물려준다. 짝을 못 찾은 새 항목은 기존 최대 id 번호+1부터 매겨(id를 다시 쓰지 않는다), 짝을 못 찾은 기존 항목은 목록에서 지우지 않고 그대로 남긴 채 `removed`로 표시한다(사람이 "빼기"로 명시적으로 지우기 전까지는 id가 살아 있다). 같은 내용을 두 번 병합하면 결과가 완전히 같다(모든 항목이 `unchanged`, id 변화 0). `previewSessionRequirementsExtraction`은 `docs/requirements.md`가 이미 있으면 이 병합을 거쳐 `diff`(added/changed/unchanged/removed 목록)를 미리보기에 함께 돌려준다.
+5. **요구사항 스멜 린트**(`lintRequirement`): 한국어·영어 약한 표현 목록(빠르게/적절히/사용자 친화적/등/기타/가능하면 …, fast/user-friendly/etc./appropriate/as needed/TBD …), 시나리오 없음, `nonfunctional`인데 NFR 없음, 한 EARS 문장에 "해야 한다"가 여럿(요구사항이 사실 둘 이상 섞였다는 신호) 은 반드시 고쳐야 할 경고(mustFix)로, EARS 형태가 아닌 문장은 권고로 표시한다. 문서 전체의 "Ready" 배지(`requirementsReadyBadge`)는 필수(must) 요구사항이 모두 이 흠 없이 통과할 때만 켜진다.
+6. **추적 매트릭스**(`buildTraceabilityMatrix`/`buildMatrixCsv`): 요구사항·시나리오마다 한 행(개정·우선순위·이슈·커밋·테스트·게이트 확인·상태)을 만들고, 역방향으로 "주인 없는 테스트"(`scanTestFilesForOrphans`, 어느 id도 언급하지 않는 테스트)와 "테스트 없는 필수 요구사항"을 모은다. "요구사항" 탭에 "추적 매트릭스" 하위 화면(`GET /api/sessions/[id]/requirements/matrix`, `?format=csv`로 CSV 내려받기)을 더했다.
+7. **추출 프롬프트**가 EARS 문장+Given-When-Then 시나리오(참조 파일 요약의 실제 값 사용)+NFR(수치 임계값 필수)+약한 표현 금지+모호하면 요구사항 대신 `questions`에 `[NEEDS CLARIFICATION]`을 올리라고 지시한다. "이 요구사항 작업" 프리필은 테스트 이름에 시나리오 id(있으면)·요구사항 id를 넣으라는 안내에 더해 커밋·PR에 `Implements: R4@rev1` 트레일러를 남기라고 안내한다.
+8. **"모호한 점 추천 값"의 스펙 우선 원칙**(dogfooding 발견 #1): `Recommendation`에 `basis: 'spec' | 'practice'`·`specQuote?`를 더했다. 프롬프트가 "명세(또는 참조 파일·프로젝트 스택)가 이미 답을 정했으면 그 값을 그대로 따르고 근거 문장을 인용하라, 업계 관례는 명세가 열어 둔 것에만 쓰라"고 못박고, `verifySpecQuote`가 공백을 정규화해 `specQuote`가 실제로 스펙 원문의 부분 문자열인지 서버에서 검증한다 — 아니면 `basis`를 `practice`로 강등하고 인용을 지운다(지어낸 인용을 막는다). `buildRecommendationUserPrompt`에 세션의 managed 서비스 템플릿·데이터베이스 엔진 한 줄 요약(`[프로젝트 스택]`)을 붙여, 이미 고른 프레임워크·DB와 어긋나는 추천(Postgres 프로젝트에 MySQL 등)을 막는다. 화면은 `basis: 'spec'`에 "명세에 있음" 배지(웹/모델 출처 표시와는 다른 배지)와 인용문을 보여 준다.
+9. **"사람이 할 일" 가드**(dogfooding 발견 #2, 안전): 추출 응답에 `manualSteps`(코드·문서 밖에서 사람이 손으로 할 절차)를 더하고, 프롬프트가 저장소 권한·협업자·공개 범위 변경, 이메일·메시지 제출 같은 항목을 요구사항 대신 여기 넣으라고 지시한다. 모델이 그래도 잘못 분류할 수 있으므로 `isManualStepText`/`partitionManualSteps`가 결정론적 정규식(collaborator/협업자/초대/invite/visibility/공개 범위/권한/permission/branch protection/webhook/deploy key/secret 설정/메일로 제출/email 제출 등)으로 추출 응답과 저장(apply) 응답 둘 다에서 한 번 더 걸러 `docs/requirements.md`의 별도 "## 사람이 할 일 (에이전트 금지)" 절로 옮긴다 — 이 절은 `parseRequirementsMarkdown`이 요구사항으로 취급하지 않고, `project-guide.ts`가 매 실행 AGENTS.md 절 끝에 "에이전트는 이 항목을 절대 하지 않는다"는 문장과 함께 이어 붙인다(`summarizeManualStepsForGuide`). 화면도 "사람이 할 일 (에이전트 금지)"를 읽기 전용으로 분명히 표시한다.
+
+### 검증 결과
+- `packages/agent/src/requirements.test.ts`에 경계 정규식(R1 vs R10, R4 vs R4.1)·해시/개정 상승과 재확인 필요(드리프트 즉시·개정 후 미확인·신선한 증거로 해제)·`carryForwardRequirementRevision`·재추출 병합(같은 입력 두 번 → id 변화 0, 유사도로 짝짓기, id 재사용 안 함, removed 보존)·약한 표현 린트(한/영)·NFR 필수 필드·마크다운 왕복(새 필드 있음/없음 둘 다, 사람이 몸통을 고쳐도 hash는 JSON 블록 값을 지킨다)·추적 매트릭스(정방향 행·역방향 목록)·CSV·`isManualStepText`/`partitionManualSteps`(과제 예시 문장 그대로)·추천 스펙 우선(`specQuote` 검증·강등, 스택 요약)까지 130개 넘는 사례를 새로 더했다.
+- `packages/agent/src/test-discovery.test.ts`(테스트 탭의 `extractRequirementIds` 정규식도 시나리오 id를 포함하도록 함께 넓혔다)·`project-guide.test.ts`(요구사항+"사람이 할 일" 절이 함께 AGENTS.md 절에 붙는지)는 회귀 없이 그대로 통과했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 errors), `pnpm test` — 이번에 건드리지 않은 사전 존재 플레이키(`packages/sandbox/src/docker/format.test.ts`의 Docker 의존 타임아웃) 하나만 남고 나머지는 모두 통과(따로 돌리면 그 파일도 통과한다).
+- 확인하지 못한 범위: 실제 모델 호출로 EARS·시나리오·NFR을 포함한 추출 응답을 받아 보지는 못했다(이번 세션 정책상 모델 호출 금지) — 프롬프트·zod 스키마·결정론적 가드(`partitionManualSteps`)만 검증했다. 재추출 병합의 유사도 문턱(`MERGE_MATCH_THRESHOLD = 0.35`)은 손으로 만든 예시로 튜닝했고, 실제 추출 모델이 내는 제목·문장 분포에서 최적인지는 실 사용으로 다시 봐야 한다.
+
+### 감수한 트레이드오프
+- 사람이 읽는 몸통(`docs/requirements.md`)에서 EARS·시나리오·NFR·추적 줄을 손으로 고치면 그 값을 우선하지만, `hash`·`revisedAt`은 몸통에 전혀 쓰지 않고 끝의 JSON 주석 블록에서만 읽는다 — 그 블록을 사람이 통째로 지우면 개정 이력이 끊기고 다음 저장에서 "처음 저장"으로 리셋된다(기존 JSON 블록 전체 의존과 같은 한계).
+- 재추출 병합에서 명세에서 완전히 사라진 요구사항은 자동으로 지우지 않고 `removed`로 표시만 한다 — id를 다시 쓰지 않으려는 안전판이지만, 사용자가 화면에서 직접 "빼기"를 누르지 않으면 문서에 계속 남는다(정말 필요 없는 항목은 사람이 한 번 더 손대야 한다).
+- 약한 표현 목록·"사람이 할 일" 정규식은 고정된 한국어·영어 어휘 목록이다 — 목록에 없는 새로운 약한 표현이나 새로운 종류의 권한 변경 절차(이번에 다룬 것 밖의 것)는 걸러지지 않는다.
+- `verifySpecQuote`는 공백만 정규화한 부분 문자열 비교라, 모델이 스펙 문장을 의미는 같지만 토씨를 바꿔 인용하면(예: 어순만 바꾼 요약) "지어낸 인용"으로 오판해 `practice`로 강등할 수 있다 — 안전한 쪽으로 치우친 보수적 검증이다.
 
 ---
 
