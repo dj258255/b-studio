@@ -275,6 +275,8 @@ export type StudioEvent =
   | { type: 'files_changed'; revision: number }
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
   | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask'; /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */ at?: string }
+  /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. 화면은 "계획(모델명)" 접기 블록으로 보여준다 */
+  | { type: 'plan_brief'; runId: string; model: string; text: string; usage: AgentUsage; durationMs: number }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }
   /** 실행 중 보낸 지시를 큐에 넣었다. 러너가 이어서 쓰면 agent 이벤트 steer_applied로 온다 */
   | { type: 'steer_queued'; runId: string; text: string }

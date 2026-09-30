@@ -492,6 +492,16 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
     case "notice":
       return <p className="border-l-[3px] border-line pl-3 text-sm text-muted">{item.text}</p>;
 
+    case "planBrief":
+      return (
+        <details className="rounded-md border border-line bg-panel/60 px-3 py-2 text-sm">
+          <summary className="cursor-pointer text-muted hover:text-ink">계획({item.model})</summary>
+          <div className="mt-2 border-t border-line pt-2">
+            <Markdown text={item.text} />
+          </div>
+        </details>
+      );
+
     case "steer": {
       const label = item.status === "applied" ? "지시(반영됨)" : item.status === "dropped" ? "지시(적용되지 못함)" : "지시(대기)";
       return (

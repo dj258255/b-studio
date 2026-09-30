@@ -2975,6 +2975,53 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-075 계획은 큰 모델로 한 번 세우고 실행은 작은 모델로 한다
+
+상태: 채택
+관련: #ISSUE
+
+### 맥락
+- b-studio는 이미 게이트 실패가 반복되면 싼 모델에서 비싼 모델로 승격하는 규칙을 갖고 있다(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`·`B_STUDIO_ESCALATE_MODEL_ID`, `escalationRules()`). 방향이 반대다 — 처음엔 싸게 시작해서 실패하면 올리는 것이지, 큰 모델이 미리 설계해 작은 모델이 그대로 실행하게 하는 것은 아니다.
+- PR 자동 리뷰 조사([research/2026-09-30-pr-agent-workflows.md](research/2026-09-30-pr-agent-workflows.md) 4절)를 보면 큰 팀들이 이미 이 반대 방향(계획은 비싼 모델, 실행은 싼 모델)을 쓴다. **Cognition Devin Fusion**은 FrontierCode 1.1에서 63.1점을 과제당 $1.35에 냈다(Opus 5는 63.6점에 $3.51 — 거의 같은 점수에 61% 싸다). **Aider architect/editor**도 설계 모델과 편집 모델을 짝지으면 대부분 단독보다 점수가 올랐다고 보고한다.
+- b-studio는 이미 이 방향의 절반을 갖고 있다 — PR 자동 리뷰(ADR-074)와 작업 계획(task-plan.ts)이 "도구 없이 한 번만 묻는다"(`ModelAsk`) 호출 경로를 claude-code·api 백엔드에 이미 갖추고 있다. 남은 것은 이 경로를 만들기(build) 요청 자체의 실행 앞에 한 번 더 꽂는 것이다.
+
+### 결정
+- **계획 호출은 기존 ModelAsk 경로를 그대로 재사용한다.** 새 실행 경로를 만들지 않고, PR 리뷰·작업 계획과 같은 "도구 없이 한 번만 묻고 텍스트만 받는다" 방식(`claudeCodeAsk`·`planAskFromClient`)을 그대로 쓴다(`packages/agent/src/plan-brief.ts`의 `requestPlanBrief`). 계획 모델에게는 파일 읽기·명령 실행 도구를 주지 않는다 — 계획은 요청 문구와 프로젝트의 managed 서비스 요약만 보고 쓴다.
+- **설정은 두 자리, 우선순위는 studio.yaml > 환경 변수.** `B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL` 환경 변수와 `studio.yaml`의 `models: { plan?, execute? }`(`packages/spec/src/schema.ts`의 `ModelsSchema`)가 있고, 값의 뜻은 세션 백엔드에 따라 다르다(claude-code=Claude Code에 넘기는 모델 이름, api=모델 레지스트리 id) — 승격 설정(`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`/`B_STUDIO_ESCALATE_MODEL_ID`)이 이미 쓰던 것과 같은 비대칭이다. **둘 다 없으면(기본) 지금 동작과 한 글자도 다르지 않다** — `apps/studio/lib/server/sessions.ts`의 `planExecuteConfig()`가 항상 빈 객체를 돌려주고, 나머지 로직은 그 결과가 있을 때만 갈라진다.
+- **건너뛰는 기준은 새 휴리스틱이 아니라 모델 라우팅이 이미 쓰는 복잡도 판정이다.** 모델 라우터(`model-router.ts`)가 API 모드에서 모델을 고를 때 쓰는 `classifyComplexity`(신호: 아키텍처/마이그레이션 같은 키워드, 요청 길이, 줄바꿈 수 → simple/normal/complex)를 그대로 내보내 `shouldPlanBrief()`(`plan-brief.ts`)가 재사용한다. `simple`이면(짧고 평이한 요청) 계획 호출을 건너뛰고 지금처럼 바로 실행한다. 질문(intent `ask`)은 애초에 대상이 아니다(파일을 바꾸지 않으니 계획이 뜻이 없다). "크다/작다"의 뜻을 라우팅과 계획-실행 분리 두 곳에서 따로 정의하지 않는다.
+- **실행 순서**: `sessions.ts`의 `execute()`가 `runPlan()`(실제 에이전트 루프)을 부르기 **전에** `withPlanBrief()`를 부른다. 계획 모델이 설정돼 있고, 만들기 요청이며, 백엔드가 claude-code·api 중 하나이고, `shouldPlanBrief`가 참이면 계획을 한 번 받아 `plan_brief` 이벤트로 대화에 남기고(화면은 "계획(모델명)" 접기 블록), `appendPlanToRequest()`로 원래 요청 끝에 구분선(`[계획 — …] … [계획 끝]`)을 붙여 **실행기에 넘길 요청에만** 반영한다. 체크포인트 제목·요청 기록에 쓰는 원래 `request` 변수는 손대지 않는다. 계획 호출이 실패해도(모델 오류·빈 응답) 원래 요청 그대로 실행을 이어간다 — 계획은 돕는 역할이지 필수 관문이 아니다.
+- **실행 모델 선택**: api 백엔드는 `routingDecision`의 `preferredModelId`를 `session.snapshot.modelId ?? split.execute`로 넘겨, 사람이 세션에서 직접 고른 모델이 있으면 그것을 우선하고 없으면 실행 모델 설정을 라우터의 "사용자 지정" 취급으로 넘긴다. claude-code 백엔드는 `cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? B_STUDIO_CLAUDE_CODE_MODEL` 순서로 모델 이름을 고른다.
+- **승격 기본 대상은 계획 모델이다.** `apiEscalation()`·`claudeCodeEscalation()`이 명시적 승격 대상(`B_STUDIO_ESCALATE_MODEL_ID`/`B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL`)을 우선 쓰고, 없으면 계획 모델로 올린다 — 이미 계획을 세운 큰 모델이니 실행 모델이 게이트를 반복 실패하면 다시 불러오는 것이 자연스럽다. 아무것도 없으면(둘 다 미설정) 승격하지 않는다(지금과 같다).
+- **토큰 기록**: 계획 호출 토큰은 그 실행의 `metrics.usageByModel`에 `계획: <모델>` 키로 더해져(`execute()`가 `runPlan()` 결과에 직접 합친다) 토큰 탭의 "모델별" 표에 한 줄로 나타난다. **세션·사람의 토큰 합계(budget)에는 반영하지 않는다** — 계획 호출은 실행 루프 밖의 별도 호출이라, 실행기의 누적 사용량 갱신 방식(턴마다 "지금까지 총량"을 덮어쓰는 방식)과 섞으면 이중 계산이나 유실이 생길 위험이 있어 표시 전용으로 한정했다(아래 트레이드오프에도 남긴다).
+- **벤치(E8)**: `apps/studio/bench/coordination`에 `--plan-model`·`--execute-model` 플래그를 추가했다(`resolvePlanExecute()`, `backends.ts`). `--escalate-to`와 같은 제약 — claude-code 백엔드(계획 기본 또는 레인)가 있을 때만 쓸 수 있고, 없는데 주면 시작 전에 오류를 낸다(벤치의 openai 백엔드는 실행마다 단일 모델 레지스트리를 새로 만들어 계획 모델을 위한 두 번째 모델을 안전하게 끼울 자리가 없다). 설정은 `B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL` 환경 변수로 그대로 넘어가 제품과 같은 경로(`planExecuteConfig`)를 탄다. 행마다 `planExecute: { plan?, execute? }`로 남고, `meta.json`과 요약 맨 위 줄(`계획-실행 분리: 계획 X → 실행 Y`)에도 남는다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 계획 호출에 새 시스템(도구 있는 별도 에이전트, 구조화 JSON 계획)을 만든다 | task-plan.ts(작업 분해)와 매우 비슷한 모양이 하나 더 생겨 혼동한다(과제 설명도 "task-plans.ts는 다른 기능(레인 나누기)이니 섞지 말 것"을 명시했다). 계획은 실행기에게 주는 안내문이지 실행기가 검증해야 하는 계약이 아니므로 자유 형식 텍스트로 충분하다 |
+| **B. 기존 ModelAsk(도구 없이 한 번, 텍스트) 재사용, 계획은 요청에 구분선으로 첨부** | 채택. PR 리뷰·작업 계획과 같은 호출 경계를 그대로 쓰고, 실행기 프롬프트 조립도 새 메커니즘 없이 문자열 결합으로 끝난다 |
+| C. 계획 건너뛰기 기준을 새로 만든다(예: 글자 수 상한) | 모델 라우팅의 "복잡도" 개념과 뜻이 갈라진다. 같은 요청이 라우팅에서는 simple인데 계획-실행 분리에서는 크다고 판단되면 두 기능의 "작다"가 서로 다른 뜻이 되어 설명하기 어렵다 |
+| D. 계획 토큰을 세션 예산(budget)에도 합산한다 | 실행기의 누적 사용량 갱신이 "이번 턴까지의 총량"을 통째로 덮어쓰는 구조라, 계획 호출(그 갱신 밖에서 일어난 별도 호출)의 토큰을 안전하게 섞어 넣으려면 실행 회계 코드를 다시 설계해야 한다. 표시(토큰 탭의 모델별 행)만으로도 "계획 호출에 얼마나 썼는지"는 볼 수 있어, 이번 범위에서는 표시로 그쳤다 |
+
+### 검증 결과
+- `packages/agent/src/model-router.test.ts`: 기존 스위트가 `classifyComplexity`·`estimateTokens`를 내보낸 뒤에도 그대로 통과하는지 확인했다.
+- `packages/agent/src/plan-brief.test.ts`: `shouldPlanBrief`(단순 요청 건너뜀·빈 요청 건너뜀·복잡한 요청은 만듦·줄바꿈 많은 요청도 만듦), `buildPlanBriefSystem`(프로젝트 이름·managed 서비스·단어 상한 안내), `appendPlanToRequest`(원래 요청 보존·구분선·계획 끝 표식), `requestPlanBrief`(정상 응답의 텍스트 다듬기·사용량·시간, 빈 응답이면 토큰·시간을 담아 `PlanBriefError`)를 확인했다.
+- `packages/spec/src/spec.test.ts`: `models` 절이 없으면 undefined, 있으면 `plan`·`execute`를 그대로 읽고, 빈 문자열은 거부하는지 확인했다.
+- `apps/studio/lib/server/sessions.test.ts`: `planExecuteConfig`(studio.yaml이 환경 변수보다 우선, 둘 다 없으면 빈 설정), `claudeCodeEscalation`·`apiEscalation`의 승격 기본 대상(명시적 대상 우선 → 계획 모델로 대체 → 계획 모델도 없으면 승격 안 함)을 확인했다.
+- `apps/studio/bench/coordination/backends.test.ts`: `resolvePlanExecute`(둘 다 없으면 빈 설정·`--dry` 호환, claude-code에서 값 받기·공백 정리, 계획 호출 경로가 없는 백엔드에는 시작 전 거부, 레인 중 하나라도 claude-code면 허용)를 확인했다.
+- `apps/studio/bench/coordination/summary.test.ts`: 계획-실행 분리를 설정했을 때만 요약 맨 위 줄에 "계획-실행 분리: 계획 X → 실행 Y"가 붙는지 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류)를 확인했다.
+- 실제 모델 호출, 실제 Claude Code CLI, 실제 벤치 실행(Docker)은 부르지 않았다(계획대로 단위 테스트만 썼다). 화면을 브라우저로 직접 열어 "계획(모델명)" 접기 블록이 실제로 펼쳐지는지는 확인하지 않았다.
+
+### 감수한 트레이드오프
+- 계획 호출 토큰은 토큰 탭의 모델별 표에만 나타나고, 세션·사람의 토큰 한도(budget)에는 반영되지 않는다. 한도에 걸릴 만큼 큰 계획을 자주 쓰는 배포라면 실제 소비보다 한도 소진이 늦게 잡힐 수 있다.
+- 실행 모델 설정(`execute`)이 모델 레지스트리에 없는 id거나(api) 잘못된 모델 이름(claude-code)이어도 시작 시점에 검증하지 않는다 — api는 `routingDecision`의 `preferredModelId`가 조용히 정상 라우팅으로 떨어지고(기존 "사람이 세션에서 고른 모델" 필드와 같은 관대한 규칙), claude-code는 그 이름 그대로 CLI에 넘겨 CLI 쪽 오류로 드러난다.
+- 벤치는 openai 백엔드에서 계획-실행 분리를 지원하지 않는다(실행마다 단일 모델 레지스트리를 새로 만드는 구조와 맞지 않는다). E8은 claude-code 백엔드로만 잰다.
+- codex·commandcode·opencode 백엔드는 계획 호출 경로가 없어 이 기능의 대상이 아니다(PR 자동 리뷰·작업 계획과 같은 한계). 그 러너들에 도구 없는 단발 호출 경로가 생기면 `withPlanBrief`에 분기를 추가한다.
+- 실제 모델로 "계획이 실제로 실행 품질을 올리는가"는 이번 변경으로 재지 않았다. 벤치 플래그만 마련했고, 성공률·토큰 비교(E8)는 뒤에서 잰다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)

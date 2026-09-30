@@ -11,6 +11,7 @@ import {
   resolveContextClearing,
   resolveContractsSource,
   resolveEscalation,
+  resolvePlanExecute,
   resolveRateLimitPolicy,
   resolveSelfCheck,
   resolveVerify,
@@ -172,6 +173,33 @@ describe('resolveEscalation', () => {
     expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfter: 1.5 })).toThrow(/--escalate-after는 1 이상의 정수/);
     expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfterFailures: 0 })).toThrow(/--escalate-after-failures는 1 이상의 정수/);
     expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateRetryBudget: -1 })).toThrow(/--escalate-retry-budget는 0 이상의 정수/);
+  });
+});
+
+describe('resolvePlanExecute(계획-실행 분리, ADR-075)', () => {
+  it('둘 다 주지 않으면(기본, --dry 포함) 빈 설정이라 백엔드를 가리지 않는다', () => {
+    expect(resolvePlanExecute({ backend: 'claude-code' })).toEqual({});
+    // --dry는 항상 openai 백엔드다. 아무 값도 주지 않으면 그대로 통과한다(지금 동작과 같다)
+    expect(resolvePlanExecute({ backend: 'openai' })).toEqual({});
+  });
+
+  it('claude-code 백엔드에서 --plan-model·--execute-model을 받고, 앞뒤 공백을 지운다', () => {
+    expect(resolvePlanExecute({ backend: 'claude-code', planModel: 'opus', executeModel: 'haiku' })).toEqual({ plan: 'opus', execute: 'haiku' });
+    expect(resolvePlanExecute({ backend: 'claude-code', planModel: ' opus ' })).toEqual({ plan: 'opus' });
+    // 실행 모델 없이 계획 모델만 줄 수도 있다(실행은 --model을 그대로 쓴다)
+    expect(resolvePlanExecute({ backend: 'claude-code', planModel: 'opus' })).toEqual({ plan: 'opus' });
+  });
+
+  it('계획 호출 경로가 없는 백엔드에 주면 시작 전에 오류를 낸다(--dry와 함께 주는 것도 여기서 걸린다)', () => {
+    expect(() => resolvePlanExecute({ backend: 'openai', planModel: 'opus' })).toThrow(/--plan-model·--execute-model은 claude-code/);
+    expect(() => resolvePlanExecute({ backend: 'codex', executeModel: 'haiku' })).toThrow(/claude-code 백엔드에서만/);
+    expect(() => resolvePlanExecute({ backend: 'commandcode', planModel: 'opus' })).toThrow(/claude-code 백엔드에서만/);
+    expect(() => resolvePlanExecute({ backend: 'opencode', planModel: 'opus' })).toThrow(/claude-code 백엔드에서만/);
+  });
+
+  it('claude-code 레인이 하나라도 있으면 계획 기본 백엔드가 openai여도 허용한다', () => {
+    expect(resolvePlanExecute({ backend: 'openai', laneBackends: ['claude-code'], planModel: 'opus' })).toEqual({ plan: 'opus' });
+    expect(() => resolvePlanExecute({ backend: 'openai', laneBackends: ['codex'], planModel: 'opus' })).toThrow(/claude-code/);
   });
 });
 

@@ -235,13 +235,22 @@ function rank(
   return { model, eligible, score: eligible ? score : -1, estimatedCostUsd, quality, latencyMs, reasons };
 }
 
-function estimateTokens(text: string): number {
+/**
+ * 요청 글자 수에서 토큰을 대충 잡는다(라우팅용 추정, 실제 비용은 공급자 usage로 따로 기록한다).
+ * 계획-실행 분리(ADR-075)의 "계획을 건너뛸 만큼 작은 요청인가" 판정도 이 추정을 그대로 재사용한다(plan-brief.ts).
+ */
+export function estimateTokens(text: string): number {
   // 라우팅 전에 별도 토크나이저를 호출하지 않고 보수적으로 잡는다. 실제 비용은 공급자 usage로 다시 기록한다
   const ascii = [...text].filter((character) => character.codePointAt(0)! <= 0x7f).length;
   return Math.max(1, Math.ceil(ascii / 4 + (text.length - ascii) / 1.5));
 }
 
-function classifyComplexity(prompt: string, inputTokens: number): RoutingDecision['complexity'] {
+/**
+ * 요청의 복잡도를 simple/normal/complex로 나눈다. 모델 라우팅(routeModel)의 비용·품질 가중치뿐 아니라
+ * 계획-실행 분리(ADR-075)가 "계획 호출을 할 만큼 큰 요청인가"를 판정할 때도 그대로 재사용한다(plan-brief.ts의 shouldPlanBrief) —
+ * "크다/작다"의 뜻을 두 곳에서 따로 정의하지 않는다.
+ */
+export function classifyComplexity(prompt: string, inputTokens: number): RoutingDecision['complexity'] {
   const signals = (COMPLEX.test(prompt) ? 1 : 0) + (inputTokens >= 800 ? 1 : 0) + ((prompt.match(/\n/g)?.length ?? 0) >= 12 ? 1 : 0);
   return signals >= 2 ? 'complex' : signals === 1 ? 'normal' : 'simple';
 }

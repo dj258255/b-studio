@@ -28,6 +28,8 @@ export type ChatItem =
   | { kind: 'warning'; runId: string; text: string }
   /** 플랫폼이 대화에 남기는 한 줄 안내(예: 샌드박스를 켜는 중). 모델 발언이 아니다 */
   | { kind: 'notice'; text: string }
+  /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. "계획(모델명)" 접기 블록으로 보여준다 */
+  | { kind: 'planBrief'; runId: string; model: string; text: string }
   | {
       kind: 'route';
       runId: string;
@@ -207,6 +209,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ...patchSnapshot(view, { running: true, pendingQuestion: undefined }),
         chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
       };
+    case 'plan_brief':
+      return { ...view, chat: [...view.chat, { kind: 'planBrief', runId: event.runId, model: event.model, text: event.text }] };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };
     case 'steer_queued':

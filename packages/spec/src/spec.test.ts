@@ -60,6 +60,13 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 4\n`)).toThrow(SpecError);
   });
 
+  it('계획-실행 분리 모델 설정은 절이 없으면 undefined이고, 있으면 plan·execute를 그대로 읽는다', () => {
+    expect(parseSpec(ORDERS_SPEC).models).toBeUndefined();
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n  execute: sonnet\n`).models).toEqual({ plan: 'opus', execute: 'sonnet' });
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n`).models).toEqual({ plan: 'opus' });
+    expect(() => parseSpec(`${ORDERS_SPEC}models:\n  plan: ""\n`)).toThrow(SpecError);
+  });
+
   it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
     expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
       fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',

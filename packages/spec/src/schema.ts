@@ -500,6 +500,20 @@ export const ReviewSchema = z.object({
   maxRounds: z.number().int().min(1).max(3).default(2),
 });
 
+/**
+ * 계획-실행 분리(ADR-075)에서 쓸 모델. 절이 없거나 필드를 생략하면 같은 이름의 환경 변수
+ * (`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 쓰고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 한다.
+ * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름(예: `opus`),
+ * api는 모델 레지스트리 id다. 그 밖의 백엔드(codex·commandcode·opencode)는 아직 도구 없는 단발 호출 경로가 없어
+ * (PR 리뷰·작업 계획과 같은 제약) 이 설정이 있어도 계획 호출을 하지 않는다.
+ */
+export const ModelsSchema = z.object({
+  /** 계획을 쓰는 모델(보통 크고 비싼 모델) */
+  plan: z.string().min(1).max(120).optional(),
+  /** 실행을 맡는 모델(보통 작고 싼 모델) */
+  execute: z.string().min(1).max(120).optional(),
+});
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -536,6 +550,8 @@ export const StudioSpecSchema = z.object({
     .optional(),
   /** PR 자동 리뷰 라운드(ADR-074). 절이 없어도 기본값(켬·2라운드)이 채워진다 */
   review: ReviewSchema.default({ auto: true, maxRounds: 2 }),
+  /** 계획-실행 분리(ADR-075). 절이 없으면 환경 변수만 본다(둘 다 없으면 계획 호출 없음) */
+  models: ModelsSchema.optional(),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
@@ -547,6 +563,7 @@ export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
 export type DesignSpec = z.infer<typeof DesignSchema>;
 export type ReviewSpec = z.infer<typeof ReviewSchema>;
+export type ModelsSpec = z.infer<typeof ModelsSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;

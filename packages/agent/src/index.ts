@@ -262,7 +262,9 @@ export { buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
 export {
   aggregateModelStats,
+  classifyComplexity,
   estimateCost,
+  estimateTokens,
   routeModel,
   validateModelProfiles,
   type ModelCapability,
@@ -277,6 +279,15 @@ export {
   type RoutingDecision,
 } from './model-router';
 export { createProviderClient, GoogleModelClient, OpenAICompatibleModelClient } from './provider-clients';
+export {
+  appendPlanToRequest,
+  buildPlanBriefSystem,
+  PLAN_BRIEF_MAX_WORDS,
+  PlanBriefError,
+  requestPlanBrief,
+  shouldPlanBrief,
+  type PlanBrief,
+} from './plan-brief';
 export {
   buildPrReviewComment,
   buildPrReviewFixRequest,

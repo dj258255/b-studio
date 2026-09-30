@@ -6,6 +6,7 @@ import { cp, mkdir, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  appendPlanToRequest,
   buildPullRequest,
   canCreatePullRequest,
   captureBaselines,
@@ -25,6 +26,8 @@ import {
   parseRemote,
   planAskFromClient,
   postComment,
+  requestPlanBrief,
+  shouldPlanBrief,
   preflightClaudeCode,
   preflightCodex,
   preflightCommandCode,
@@ -60,6 +63,7 @@ import {
   type PullRequestDraft,
   type RepositoryInfo,
   type RoutingDecision,
+  type RunMetrics,
   type RemoteSyncResult,
   type ServiceCheck,
   type VerificationReport,
@@ -1305,7 +1309,14 @@ type RunPlan = (
       /** 게이트 실패 서명이 반복되면 쓸 승격 클라이언트. 설정하지 않으면 승격 없음 */
       escalation?: EscalationPolicy & { client: ModelClient };
     }
-  | { kind: 'claude-code'; allowBreaking: boolean; intent: Intent; escalation?: EscalationPolicy }
+  | {
+      kind: 'claude-code';
+      allowBreaking: boolean;
+      intent: Intent;
+      escalation?: EscalationPolicy;
+      /** 계획-실행 분리(ADR-075)로 정한 실행 모델. session.snapshot.modelId(레인이 고른 모델)보다는 아래고, B_STUDIO_CLAUDE_CODE_MODEL보다는 위다 */
+      executeModel?: string;
+    }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
@@ -1328,14 +1339,17 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   // 실행 경로는 서버 모드(B_STUDIO_MODE)가 아니라 **세션의 backend**를 본다. 이 필드가 없으면 mode가 곧 서버 모드다
   const backend = sessionBackend(session.snapshot);
   const kind = planKindForBackend(backend);
+  // 계획-실행 분리(ADR-075) 설정. 둘 다 없으면 아래 로직은 지금과 한 글자도 다르지 않게 움직인다
+  const split = planExecuteConfig(session.project);
   if (kind === 'model') {
-    const route = routingDecision(request, intent, session.snapshot.modelId);
-    const escalation = apiEscalation();
+    // 세션이 고른 모델(사람이 직접 선택)이 실행 모델 설정보다 우선한다
+    const route = routingDecision(request, intent, session.snapshot.modelId ?? split.execute);
+    const escalation = apiEscalation(split.plan);
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'claude-code') {
-    const escalation = claudeCodeEscalation();
-    return { kind: 'claude-code', allowBreaking, intent, ...(escalation ? { escalation } : {}) };
+    const escalation = claudeCodeEscalation(split.plan);
+    return { kind: 'claude-code', allowBreaking, intent, ...(split.execute ? { executeModel: split.execute } : {}), ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'codex') return { kind: 'codex', allowBreaking, intent };
   if (kind === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
@@ -1421,9 +1435,11 @@ function integerEnv(name: string, min: number): number | undefined {
 /**
  * API 모드 승격 대상. 모델 레지스트리 id(B_STUDIO_ESCALATE_MODEL_ID)로 지정한다.
  * 없는 id면 기동 시 오류를 내고, 설정하지 않으면 승격하지 않는다(지금 동작과 같다).
+ * planModelId: 계획-실행 분리(ADR-075)의 계획 모델 id. 명시적 승격 대상이 없으면 이쪽으로 올린다
+ * (이미 계획을 세운 큰 모델이니 실행 모델이 게이트를 반복해서 실패하면 다시 불러오는 것이 자연스럽다).
  */
-function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefined {
-  const id = process.env.B_STUDIO_ESCALATE_MODEL_ID?.trim();
+export function apiEscalation(planModelId?: string, env: Record<string, string | undefined> = process.env): (EscalationPolicy & { client: ModelClient }) | undefined {
+  const id = env.B_STUDIO_ESCALATE_MODEL_ID?.trim() || planModelId;
   if (!id) return undefined;
   const model = (() => {
     try {
@@ -1436,11 +1452,27 @@ function apiEscalation(): (EscalationPolicy & { client: ModelClient }) | undefin
   return { ...escalationRules(), to: model.label || model.id, client: clientForModel(model) };
 }
 
-/** 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet) */
-function claudeCodeEscalation(): EscalationPolicy | undefined {
-  const to = process.env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim();
+/**
+ * 로컬 Claude 모드 승격 대상. Claude Code에 넘기는 모델 이름이다(예: sonnet).
+ * planModel: 계획-실행 분리(ADR-075)의 계획 모델 이름. 명시적 승격 대상(B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL)이
+ * 없으면 이쪽으로 올린다 — 계획 모델로 기본 승격 대상을 삼는다.
+ */
+export function claudeCodeEscalation(planModel?: string, env: Record<string, string | undefined> = process.env): EscalationPolicy | undefined {
+  const to = env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim() || planModel;
   if (!to) return undefined;
   return { ...escalationRules(), to };
+}
+
+/**
+ * 계획-실행 분리(ADR-075) 설정. studio.yaml의 `models`가 같은 이름의 환경 변수보다 우선한다.
+ * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름, api는 모델 레지스트리 id다.
+ * 둘 다 없으면(기본) 이 함수가 항상 undefined만 돌려주므로 나머지 로직은 지금과 같이 움직인다.
+ */
+export function planExecuteConfig(project: LoadedProject, env: Record<string, string | undefined> = process.env): { plan?: string; execute?: string } {
+  const models = project.spec.models;
+  const plan = models?.plan?.trim() || env.B_STUDIO_PLAN_MODEL?.trim() || undefined;
+  const execute = models?.execute?.trim() || env.B_STUDIO_EXECUTE_MODEL?.trim() || undefined;
+  return { ...(plan ? { plan } : {}), ...(execute ? { execute } : {}) };
 }
 
 /** 두 러너가 함께 쓰는 승격 규칙(임계치·실패 횟수·재시도 예산) */
@@ -1451,6 +1483,37 @@ function escalationRules(): Pick<EscalationPolicy, 'sameSignatureTimes' | 'after
     ...(afterFailures === undefined ? {} : { afterFailures }),
     retryBudget: escalateRetryBudget(),
   };
+}
+
+/**
+ * 계획-실행 분리(ADR-075). 계획 모델이 설정돼 있고, 이 요청이 만들기(build) 요청이며(질문은 대상이 아니다),
+ * 백엔드가 claude-code·api 중 하나이고(PR 리뷰·작업 계획과 같은 제약 — 그 밖의 백엔드는 도구 없는 단발 호출 경로가 없다),
+ * 라우팅 복잡도가 simple이 아니면(shouldPlanBrief), 실행 전에 도구 없이 한 번 계획 모델을 불러 짧은 계획을 받는다.
+ * 계획은 `plan_brief` 이벤트로 대화에 남기고(화면은 "계획(모델명)" 접기 블록으로 보여준다), 실행기에 넘길 요청 끝에
+ * 구분선으로 붙인다. 원래 요청(request)은 손대지 않으므로 체크포인트 제목·기록에는 계획이 섞이지 않는다.
+ * 계획 호출이 실패해도(모델 오류·빈 응답 등) 원래 요청 그대로 실행을 이어간다 — 계획은 돕는 역할이지 필수 관문이 아니다.
+ */
+async function withPlanBrief(
+  session: Session,
+  run: ActiveRun,
+  request: string,
+  plan: RunPlan,
+  signal: AbortSignal,
+): Promise<{ request: string; planUsage?: { model: string; usage: AgentUsage } }> {
+  if (plan.intent === 'ask' || (plan.kind !== 'claude-code' && plan.kind !== 'model')) return { request };
+  const split = planExecuteConfig(session.project);
+  if (!split.plan || !shouldPlanBrief(request)) return { request };
+
+  const ask: ModelAsk =
+    plan.kind === 'claude-code' ? claudeCodeAsk({ cwd: session.project.root, model: split.plan }) : planAskFromClient(clientForModel(modelById(split.plan)));
+  try {
+    const brief = await requestPlanBrief(ask, session.project, request, signal);
+    emit(session, { type: 'plan_brief', runId: run.id, model: split.plan, text: brief.text, usage: brief.usage, durationMs: brief.durationMs });
+    return { request: appendPlanToRequest(request, brief.text), planUsage: { model: split.plan, usage: brief.usage } };
+  } catch (error) {
+    emit(session, { type: 'notice', text: `계획 호출이 실패해 계획 없이 실행합니다: ${describe(error)}`, at: new Date().toISOString() });
+    return { request };
+  }
 }
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
@@ -1478,13 +1541,21 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       );
     }
     const agentStarted = performance.now();
-    const result = await runPlan(session, run, request, plan, signal);
+    // 계획-실행 분리(ADR-075). 설정이 없거나 이 요청이 대상이 아니면 원래 요청 그대로 돌려준다(지금과 같은 동작)
+    const { request: executionRequest, planUsage } = await withPlanBrief(session, run, request, plan, signal);
+    const result = await runPlan(session, run, executionRequest, plan, signal);
     // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
     if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
     session.run = undefined;
     if ('preflightError' in result) {
       finished = { status: 'error', summary: result.preflightError };
       return;
+    }
+    // 계획 호출 토큰을 이 실행의 모델별 사용량에 "계획: <모델>"로 합친다(토큰 탭이 그대로 표로 보여준다).
+    // 세션·사람 토큰 한도에는 반영하지 않는다(계획 호출은 실행 루프 밖의 별도 호출이라 그 예산 계산과 겹치면 부정확해진다) — 알려진 한계로 남긴다
+    if (planUsage) {
+      const metrics: RunMetrics = result.metrics ?? { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+      result.metrics = { ...metrics, usageByModel: { ...metrics.usageByModel, [`계획: ${planUsage.model}`]: planUsage.usage } };
     }
 
     // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다.
@@ -1713,8 +1784,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
-      // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수(계획 기본)를 쓴다. 기록용 id는 무시한다
-      model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
+      // 세션(레인)에서 고른 모델 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
+      model: cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
       steering: run.steering,
       // 설정하지 않으면 승격하지 않는다(지금 동작과 같다)
