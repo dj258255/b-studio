@@ -3582,6 +3582,7 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 ## ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다
 
 상태: 채택
+관련: #296
 
 ### 맥락
 - 폴더 열기(ADR-067)가 만드는 `compose.b-studio.yaml`은 서비스마다 자기 폴더만 컨테이너에 마운트했다(`./commerce:/app`, `WORKDIR /app`, Gradle 프로젝트 캐시는 `/app/.gradle`·`/app/build`, node_modules는 `/app/node_modules`). 실제 사용에서 문제가 드러났다: pay 저장소 복제본을 열어 `commerce` 서비스의 Gradle 테스트를 돌리니 `commerce/build.gradle`의 test 태스크가 `$rootDir/../docs`를 입력으로 선언하는데, 컨테이너 안에서는 `$rootDir`가 `/app`(=`commerce` 폴더 자신)이라 `$rootDir/../docs`가 `/docs`를 가리켜 없는 폴더라서 `gradle test`가 "Type 'Test' property 'docs' specifies directory '/docs' which doesn't exist"로 죽었다.
