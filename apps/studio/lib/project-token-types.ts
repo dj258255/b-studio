@@ -3,7 +3,7 @@
  *
  * 여기 있는 문구·숫자 표기를 서버와 화면이 같이 쓰는 이유는, 화면과 내려받는 마크다운이 다른 말을 하지 않게 하기 위해서다.
  */
-import type { AgentUsage } from '@b-studio/agent';
+import type { AgentUsage, Effort } from '@b-studio/agent';
 
 /** 이 세션이 무엇으로 만들어졌는가. 레인·통합·플릿 멤버는 계획·플릿 기록에서 찾는다 */
 export type ProjectSessionKind = 'normal' | 'lane' | 'integration' | 'fleet';
@@ -48,6 +48,8 @@ export interface ProjectRequestRow {
   costUsd?: number;
   turns?: number;
   result: ProjectRequestResult;
+  /** 이 요청이 실제로 쓴 노력 단계(agent 'session' 이벤트에서 읽는다). 러너가 알리지 않았으면(effort를 안 바꿨고 기본값도 안 실었으면) 없다 */
+  effort?: Effort;
 }
 
 export interface ProjectKindTotals {

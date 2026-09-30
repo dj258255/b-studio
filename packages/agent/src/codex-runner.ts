@@ -287,7 +287,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
             // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
             if (!announced) {
               announced = true;
-              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델' });
+              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델', effort });
             }
             break;
 

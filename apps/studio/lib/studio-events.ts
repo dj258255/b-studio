@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, Effort, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
@@ -89,6 +89,11 @@ export interface SessionSnapshot {
    * 없으면 api는 요청마다 라우터가 고르고, 나머지는 계정 기본 모델을 쓴다
    */
   modelId?: string;
+  /**
+   * 이 세션에 고정한 노력(추론 강도) 단계. 백엔드마다 지원 여부·값이 다르다(model-picker.ts의 effortSupportedFor).
+   * 없으면 러너·클라이언트의 기본값을 그대로 쓴다(claude-code·api는 'high')
+   */
+  effort?: Effort;
   /** 세션을 만든 사람. 인증을 켜면 만든 사람과 관리자만 세션을 바꿀 수 있다 */
   owner?: string;
   running: boolean;
@@ -275,8 +280,8 @@ export type StudioEvent =
   | { type: 'boot_network'; at: string; network: BootNetwork }
   /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
   | { type: 'design'; design?: DesignView }
-  /** 대화 입력창에서 이 세션이 쓸 모델을 바꿨다. 없으면 "기본"(계정·레지스트리 기본)으로 되돌린 것이다 */
-  | { type: 'model'; modelId?: string }
+  /** 대화 입력창에서 이 세션이 쓸 모델이나 노력 단계를 바꿨다. 없으면 각각 "기본"(계정·레지스트리 기본)으로 되돌린 것이다 */
+  | { type: 'model'; modelId?: string; effort?: Effort }
   /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
   | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean; proposal?: { mode: 'split' | 'fleet'; request: string } }
   /** 사람이 제안을 받아 다른 방식으로 넘겼다. 대화를 이어 가지 않고 질문 카드만 치운다(ADR-068) */

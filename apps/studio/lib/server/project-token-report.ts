@@ -8,7 +8,7 @@
  *  - **측정값**: 기록에 남은 사실(토큰, 환산 비용, 잘라낸 글자, 비운 글자, 반복 대체 횟수).
  *  - **추정**: 잘린 결과가 남은 호출마다 다시 읽혔을 양. 글자 수를 4로 나눈 근사라서 화면·마크다운에서 따로 표시한다.
  */
-import type { AgentUsage } from '@b-studio/agent';
+import type { AgentUsage, Effort } from '@b-studio/agent';
 import {
   MAX_REQUEST_ROWS,
   PRICE_DISCLAIMER,
@@ -173,6 +173,7 @@ export function buildProjectTokenReport(input: {
     const status = runStatus(events);
     const calls = modelCallsOf(events);
     const turns = turnsOf(events);
+    const efforts = effortOf(events);
 
     for (const report of reports) {
       const at = timestamps.get(report.runId);
@@ -241,6 +242,7 @@ export function buildProjectTokenReport(input: {
         usage: report.totals,
         ...(report.estimatedCostUsd === undefined ? {} : { costUsd: report.estimatedCostUsd }),
         ...(turns.get(report.runId) === undefined ? {} : { turns: turns.get(report.runId)! }),
+        ...(efforts.get(report.runId) === undefined ? {} : { effort: efforts.get(report.runId) as Effort }),
         result,
       });
     }
@@ -368,6 +370,15 @@ function turnsOf(events: readonly StudioEvent[]): Map<string, number> {
     if (event.type === 'run_finished' && event.turns !== undefined) turns.set(event.runId, event.turns);
   }
   return turns;
+}
+
+/** 실행마다 실제로 쓴 노력 단계. 러너가 실행 환경을 알릴 때(agent 'session' 이벤트) 함께 싣는다(loop.ts·claude-code-runner.ts 등) */
+function effortOf(events: readonly StudioEvent[]): Map<string, string> {
+  const efforts = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === 'agent' && event.event.type === 'session' && event.event.effort) efforts.set(event.runId, event.event.effort);
+  }
+  return efforts;
 }
 
 function cacheHitRatio(usage: AgentUsage): number {
@@ -508,13 +519,13 @@ export function projectTokenMarkdown(report: ProjectTokenReport, options: { requ
 
   if (report.requests.length > 0) {
     lines.push(`## 요청별 (최근 순, 최대 ${limit})`, '');
-    lines.push('| 시각 (UTC) | 세션 | 요청 | 토큰 | 비용 | 결과 |', '| --- | --- | --- | --- | --- | --- |');
+    lines.push('| 시각 (UTC) | 세션 | 요청 | 토큰 | 비용 | 노력 | 결과 |', '| --- | --- | --- | --- | --- | --- | --- |');
     for (const request of report.requests.slice(0, limit)) {
       const session = `${SESSION_KIND_LABEL[request.kind]} · ${request.sessionId.slice(0, 8)}`;
       lines.push(
         `| ${request.at ? formatUtcStamp(request.at) : '—'} | ${session} | ${escapeCell(request.request)} | ${formatTokens(totalTokens(request.usage))} | ${
           request.costUsd === undefined ? '단가 없음' : `$${request.costUsd.toFixed(4)}`
-        } | ${REQUEST_RESULT_LABEL[request.result]} |`,
+        } | ${request.effort ?? '—'} | ${REQUEST_RESULT_LABEL[request.result]} |`,
       );
     }
     if (report.requests.length > limit) lines.push('', `(최근 ${limit}개만 적었습니다. 전체 ${formatTokens(report.requests.length)}개)`);

@@ -10,7 +10,7 @@ vi.mock('./commandcode-models', () => ({ listStudioCommandCodeModels: mocks.list
 vi.mock('./opencode-models', () => ({ listStudioOpenCodeModels: mocks.listStudioOpenCodeModels, OPENCODE_LOGIN_HINT: '쓸 수 있는 모델이 없습니다' }));
 vi.mock('./model-registry', () => ({ listModelOptions: mocks.listModelOptions }));
 
-import { isSelectableModel, listSelectableModels } from './model-picker';
+import { effortPickerFor, isSelectableEffort, isSelectableModel, listSelectableModels } from './model-picker';
 
 beforeEach(() => {
   mocks.listStudioCommandCodeModels.mockReset().mockResolvedValue({ models: [], freeOnly: false });
@@ -101,5 +101,54 @@ describe('isSelectableModel', () => {
   it('목록에 있는 값만 허용한다', async () => {
     expect(await isSelectableModel('claude-code', 'opus')).toEqual({ ok: true });
     expect(await isSelectableModel('claude-code', 'gpt-5')).toEqual({ ok: false });
+  });
+});
+
+describe('effortPickerFor', () => {
+  it('claude-code·codex·commandcode는 낮음·보통·높음·최대 네 단계를 그대로 지원한다', () => {
+    for (const backend of ['claude-code', 'codex', 'commandcode'] as const) {
+      const picker = effortPickerFor(backend, undefined, 'high');
+      expect(picker.supported).toBe(true);
+      expect(picker.levels.map((level) => level.id)).toEqual(['low', 'medium', 'high', 'max']);
+      expect(picker.current).toBe('high');
+    }
+  });
+
+  it('opencode는 지원하지만 모델마다 다를 수 있다는 안내를 남긴다', () => {
+    const picker = effortPickerFor('opencode', undefined, undefined);
+    expect(picker.supported).toBe(true);
+    expect(picker.note).toContain('모델');
+  });
+
+  it('demo는 지원하지 않는다', () => {
+    const picker = effortPickerFor('demo', undefined, undefined);
+    expect(picker.supported).toBe(false);
+    expect(picker.levels).toEqual([]);
+  });
+
+  it('api는 기본(라우터)에서는 지원하지 않고, Anthropic 모델을 고르면 지원한다', () => {
+    mocks.listModelOptions.mockReturnValue([
+      { id: 'anthropic-sonnet', label: 'Claude Sonnet', provider: 'anthropic', configured: true, pricing: { inputPerMillion: 2, outputPerMillion: 10 } },
+      { id: 'openai-gpt', label: 'GPT', provider: 'openai', configured: true, pricing: { inputPerMillion: 1, outputPerMillion: 4 } },
+    ]);
+
+    expect(effortPickerFor('api', undefined, undefined).supported).toBe(false);
+    expect(effortPickerFor('api', 'anthropic-sonnet', undefined).supported).toBe(true);
+    expect(effortPickerFor('api', 'openai-gpt', undefined).supported).toBe(false);
+  });
+});
+
+describe('isSelectableEffort', () => {
+  it('빈 문자열(기본)은 언제나 허용한다', () => {
+    expect(isSelectableEffort('demo', undefined, '')).toEqual({ ok: true });
+  });
+
+  it('지원하는 백엔드에서 목록에 있는 값만 허용한다', () => {
+    expect(isSelectableEffort('claude-code', undefined, 'high')).toEqual({ ok: true });
+    expect(isSelectableEffort('claude-code', undefined, 'ultra')).toEqual({ ok: false, reason: expect.stringContaining('ultra') });
+  });
+
+  it('지원하지 않는 백엔드는 이유와 함께 거절한다', () => {
+    expect(isSelectableEffort('demo', undefined, 'high')).toEqual({ ok: false, reason: expect.stringContaining('지원하지 않습니다') });
   });
 });
