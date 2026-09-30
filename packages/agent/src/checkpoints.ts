@@ -84,6 +84,18 @@ export interface RemoteCommit {
   author: string;
 }
 
+/** 기준 브랜치(세션이 갈라져 나온 브랜치, 보통 main)가 이 세션보다 얼마나 앞서 있는지(ADR-076) */
+export interface BaseStatus {
+  /** 세션이 갈라져 나온 기준 브랜치 이름 */
+  base: string;
+  /** 기준 브랜치에는 있지만 이 세션에는 없는 커밋 수. 0이면 따라잡을 것이 없다 */
+  behind: number;
+  /** 이 세션이 기준 브랜치와 갈라진 뒤 만든 커밋 수 */
+  aheadCommits?: number;
+  /** 기준 브랜치를 마지막으로 가져온(fetch) 시각(ISO). 화면이 자주 물어도 이 값이 오래되지 않았으면 새로 가져오지 않는다 */
+  lastFetchedAt: string;
+}
+
 export interface RemoteSyncResult {
   /**
    * up-to-date: 가져올 커밋이 없다 (원격에 브랜치가 없거나 이미 기록에 들어 있다)
@@ -135,6 +147,10 @@ export class RemoteConflictError extends CheckpointError {
 const SHA = /^[0-9a-f]{7,40}$/;
 /** 가져오기 전에 원격 세션 브랜치를 받아 두는 곳. origin/*는 원본 폴더의 브랜치를 가리킬 수 있어 쓰지 않는다 */
 const REMOTE_REF = 'refs/b-studio/remote';
+/** 기준 브랜치(main 등)를 받아 두는 곳 (ADR-076) */
+const BASE_REF = 'refs/b-studio/base';
+/** 기준 브랜치 확인(baseStatus)을 이 시간 안에 다시 부르면 새로 가져오지 않는다. 화면이 자주 물어도 origin에 부담을 주지 않는다 */
+const BASE_FETCH_THROTTLE_MS = 60_000;
 const MAX_PATCH_CHARS = 200_000;
 const MAX_BODY_CHARS = 8_000;
 const CLONE_TIMEOUT_MS = 300_000;
@@ -602,6 +618,82 @@ export class CheckpointStore {
     await this.#setMeta('remote', result.remoteSha);
   }
 
+  /**
+   * 기준 브랜치(main 따라잡기, ADR-076)가 이 세션보다 얼마나 앞서 있는지 가볍게 확인한다.
+   * 화면이 자주(예: 60초마다) 물어도 origin에 부담을 주지 않도록, 마지막으로 가져온 지 BASE_FETCH_THROTTLE_MS 안이면
+   * 새로 가져오지 않고 이미 받아 둔 상태로 다시 센다. force면 그 시간과 상관없이 새로 가져온다
+   */
+  async baseStatus({ force = false }: { force?: boolean } = {}): Promise<BaseStatus> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원본 저장소와 연결되지 않은 세션입니다');
+
+    const lastFetchedAt = await this.#getMeta('baseFetchedAt');
+    const stale = force || !lastFetchedAt || Date.now() - Date.parse(lastFetchedAt) >= BASE_FETCH_THROTTLE_MS;
+    if (stale) await this.#fetchBase(info.base);
+    const fetchedAt = (await this.#getMeta('baseFetchedAt')) ?? new Date().toISOString();
+
+    const baseSha = await this.#git(['rev-parse', '--verify', '--quiet', BASE_REF]).then(
+      (out) => out.trim(),
+      () => undefined,
+    );
+    if (!baseSha) return { base: info.base, behind: 0, lastFetchedAt: fetchedAt };
+
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    const behind = Number((await this.#git(['rev-list', '--count', `${head}..${baseSha}`])).trim());
+    const aheadCommits = Number((await this.#git(['rev-list', '--count', `${baseSha}..${head}`])).trim());
+    return { base: info.base, behind, aheadCommits, lastFetchedAt: fetchedAt };
+  }
+
+  async #fetchBase(base: string): Promise<void> {
+    await this.#git(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${base}:${BASE_REF}`], { timeout: PUSH_TIMEOUT_MS });
+    await this.#setMeta('baseFetchedAt', new Date().toISOString());
+  }
+
+  /**
+   * 세션 브랜치가 갈라져 나온 기준 브랜치(main 등, ADR-076)를 병합으로 따라잡는다.
+   * integrateRemote와 같은 이유로 리베이스 대신 병합 커밋을 쓴다: 체크포인트마다 DB 덤프를 커밋 ID로 저장하므로
+   * 기존 체크포인트의 ID를 바꾸는 리베이스를 쓸 수 없다. 강제 푸시도 하지 않는다(세션 브랜치를 올릴 때는 그대로 push()를 쓴다).
+   * 충돌하면 작업 복사본을 병합을 시작하기 전 그대로 두고 충돌한 파일을 알린다(RemoteConflictError).
+   * 가져온 결과는 검증을 통과한 뒤에만 받아들여야 한다(runBaseCatchUp이 검증 게이트와 체크포인트/데이터베이스 스냅샷을
+   * integrateRemote·runRemoteSync와 같은 방식으로 잇는다)
+   */
+  async integrateBase(): Promise<RemoteSyncResult> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원본 저장소와 연결되지 않은 세션입니다');
+    if ((await this.pendingFiles()).length > 0) {
+      throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 기준 브랜치를 따라잡을 수 없습니다');
+    }
+
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    await this.#fetchBase(info.base);
+    const baseSha = (await this.#git(['rev-parse', BASE_REF])).trim();
+
+    if (await this.#isAncestor(baseSha, head)) return { status: 'up-to-date', commits: [], files: [], previous: head };
+
+    const mergeBase = (await this.#git(['merge-base', head, baseSha])).trim();
+    const commits = await this.#remoteCommits(mergeBase, baseSha);
+
+    try {
+      await this.#git(['merge', '--no-ff', '--no-commit', baseSha]);
+    } catch (error) {
+      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U', ...(await this.#relative())])).split('\0').filter(Boolean).sort();
+      await this.#git(['merge', '--abort']).catch(() => {});
+      await this.#git(['reset', '-q', '--hard', head]);
+      await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
+      if (conflicts.length > 0) throw new RemoteConflictError(conflicts);
+      throw error;
+    }
+
+    const body = commits.map((commit) => `- ${commit.shortSha} ${commit.subject} (${commit.author})`).join('\n');
+    await this.#git([
+      'commit', '-q', '--allow-empty', '--cleanup=whitespace',
+      '-m', `${withObjectParticle(info.base)} 따라잡는다 (${commits.length}커밋)`, ...(body ? ['-m', capText(body, MAX_BODY_CHARS)] : []),
+    ]);
+    // 프로젝트 밖 변경도 함께 들어올 수 있지만(모노레포), 게이트가 확인할 파일은 프로젝트 폴더 안의 것뿐이다
+    const files = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), head, 'HEAD'])).split('\0').filter(Boolean).sort();
+    return { status: 'merged', remoteSha: baseSha, commits, files, checkpoint: await this.#checkpoint('HEAD'), previous: head };
+  }
+
   async #remoteCommits(from: string, remote: string): Promise<RemoteCommit[]> {
     return (await this.#git(['log', '--reverse', '--format=%H%x00%h%x00%s%x00%an%x1e', `${from}..${remote}`]))
       .split('\x1e')
@@ -781,6 +873,12 @@ export function redactCredentials(text: string): string {
 
 async function resolveReal(target: string): Promise<string> {
   return realpath(target).catch(() => path.resolve(target));
+}
+
+/** 한글 조사 '을/를'을 고른다. 브랜치 이름은 대개 영문이라 마지막 글자의 발음(모음이면 '를')으로 대략 고른다 */
+function withObjectParticle(word: string): string {
+  const last = word.trim().slice(-1).toLowerCase();
+  return /[aeiou]/.test(last) ? `${word}를` : `${word}을`;
 }
 
 function oneLine(message: string): string {

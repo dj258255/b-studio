@@ -532,6 +532,11 @@ export const StudioSpecSchema = z.object({
        * 끄면(기본) 저장소 루트가 아닌 폴더는 복사본으로 시작하고 원격 연동이 없다
        */
       monorepo: z.boolean().default(false),
+      /**
+       * main 따라잡기(ADR-076). 기준 브랜치(main 등)가 앞서 있고 깨끗하게 병합할 수 있으면
+       * AI 리뷰 라운드를 돌리거나 올리기 전에 조용히 먼저 따라잡는다. 충돌하면 건드리지 않고 넘어간다(사람이 화면에서 처리)
+       */
+      autoCatchUp: z.boolean().default(true),
     })
     .optional(),
   /** PR 자동 리뷰 라운드(ADR-074). 절이 없어도 기본값(켬·2라운드)이 채워진다 */

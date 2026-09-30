@@ -134,6 +134,7 @@ export {
   CheckpointStore,
   redactCredentials,
   RemoteConflictError,
+  type BaseStatus,
   type Checkpoint,
   type GitAuthor,
   type PendingChange,
