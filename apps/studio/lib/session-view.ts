@@ -38,7 +38,7 @@ export type ChatItem =
       complexity: 'simple' | 'normal' | 'complex';
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
-      /** claude-code 자동 모델 선택(ADR-089)이면 true. 화면이 점수표 대신 한 줄 안내를 보여준다 */
+      /** claude-code 자동 모델 선택(ADR-091)이면 true. 화면이 점수표 대신 한 줄 안내를 보여준다 */
       auto?: boolean;
     }
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string; effort?: Effort }

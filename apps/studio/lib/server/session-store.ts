@@ -23,7 +23,7 @@ export interface PersistedSession {
   claudeCode: {
     sessionId?: string;
     notes: string[];
-    /** claude-code 자동 모델 선택(ADR-089)의 stickiness: 이 세션에서 이미 성공적으로 쓴 가장 높은 단계. 이 필드가 생기기 전 기록에는 없다 */
+    /** claude-code 자동 모델 선택(ADR-091)의 stickiness: 이 세션에서 이미 성공적으로 쓴 가장 높은 단계. 이 필드가 생기기 전 기록에는 없다 */
     autoTier?: CliTier;
   };
   /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml을 스튜디오가 고치지 않고 여기에 둔다 */

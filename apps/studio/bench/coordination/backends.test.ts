@@ -36,7 +36,7 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'claude-code', model: ' opus ' })).toEqual({ backend: 'claude-code', model: 'opus' });
   });
 
-  it('claude-code는 자동 모델 선택(--model auto, ADR-089 E10)도 그대로 받는다', () => {
+  it('claude-code는 자동 모델 선택(--model auto, ADR-091 E10)도 그대로 받는다', () => {
     expect(resolveBackend({ dry: false, backend: 'claude-code', model: 'auto' })).toEqual({ backend: 'claude-code', model: 'auto' });
   });
 

@@ -126,7 +126,7 @@ describe("ChatPanel 결과 표시", () => {
     expect(render(view(asked))).not.toContain("이대로 만들기");
   });
 
-  it("claude-code 자동 모델 선택(ADR-089)은 점수표 대신 한 줄 안내로 보여준다", () => {
+  it("claude-code 자동 모델 선택(ADR-091)은 점수표 대신 한 줄 안내로 보여준다", () => {
     const html = render(
       view([
         { type: "run_started", runId: "r1", request: "버튼 문구를 바꿔줘" },

@@ -124,7 +124,7 @@ const CLAUDE_CODE_ALIASES: ModelPickerOption[] = [
 ];
 
 /**
- * claude-code 자동 모델 선택(ADR-089). CLAUDE_CODE_ALIASES와 별도 함수로 둬, SDK의 supportedModels에서 별칭
+ * claude-code 자동 모델 선택(ADR-091). CLAUDE_CODE_ALIASES와 별도 함수로 둬, SDK의 supportedModels에서 별칭
  * 목록을 새로 만드는 변경과 합칠 때 이 한 줄만 더하면 되게 한다(model-list-from-sdk 브랜치 참고).
  * 실제 단계 선택은 cli-router.ts의 routeCliTier가 세션·요청마다 한다 — 여기서는 화면에 옵션 하나만 더한다.
  */

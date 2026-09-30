@@ -279,7 +279,7 @@ describe('모델 승격의 기본 대상(ADR-075: 계획 모델로 올린다)', 
   });
 });
 
-describe('claude-code 자동 모델 선택(ADR-089)', () => {
+describe('claude-code 자동 모델 선택(ADR-091)', () => {
   it('승격은 고른 단계의 바로 위 단계다(haiku→sonnet, sonnet→opus)', () => {
     expect(claudeCodeAutoEscalation('haiku')?.to).toBe('sonnet');
     expect(claudeCodeAutoEscalation('sonnet')?.to).toBe('opus');

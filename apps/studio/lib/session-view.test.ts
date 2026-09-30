@@ -58,7 +58,7 @@ describe('reduceSession', () => {
     expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
   });
 
-  it('claude-code 자동 모델 선택(ADR-089)은 같은 route 이벤트에 auto:true로 남는다', () => {
+  it('claude-code 자동 모델 선택(ADR-091)은 같은 route 이벤트에 auto:true로 남는다', () => {
     const initial = createView(snapshot);
     const view = reduceSession(initial, {
       type: 'agent',
