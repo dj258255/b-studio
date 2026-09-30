@@ -68,6 +68,19 @@ export interface SubmissionInputs {
   repository?: ChecklistRepository;
   /** 세션 시작 이후 커밋(체크포인트). 오래된 것부터 */
   commits: ChecklistCommit[];
+  /**
+   * 명세 탭(ADR-079)이 지금 계산한 요구사항 상태. 있으면 docs/requirements.md의 저장 당시 상태 줄 대신 이것을 쓴다
+   * (파일의 상태 줄은 저장할 때 값이라 시간이 지나면 낡는다)
+   */
+  requirements?: ChecklistRequirement[];
+}
+
+export interface ChecklistRequirement {
+  id: string;
+  title: string;
+  priority: 'must' | 'should' | 'could';
+  /** 명세 탭의 상태. '검증됨'만 끝난 것으로 본다 */
+  status: string;
 }
 
 const BACKEND_TEMPLATES = new Set(['spring-boot', 'fastapi']);
@@ -129,15 +142,32 @@ function parseRequirementsDoc(text: string): { total: number; unresolved: number
     const status = /상태\s*[:：]\s*(.+)/.exec(line);
     if (status) {
       total++;
-      if (!/^(완료|통과|done|pass(ed)?|ok)(\W|$)/i.test(status[1]!.trim())) unresolved++;
+      if (!/^(완료|통과|검증됨|done|pass(ed)?|ok|verified)(\W|$)/i.test(status[1]!.trim())) unresolved++;
     }
   }
   return { total, unresolved };
 }
 
-export async function checkRequirements(root: string): Promise<ChecklistItem> {
+/** 명세 탭이 계산한 상태로 판정한다. must가 하나라도 검증되지 않았으면 실패, should·could만 남았으면 경고 */
+function requirementsFromLive(id: string, title: string, live: readonly ChecklistRequirement[]): ChecklistItem {
+  const open = live.filter((requirement) => requirement.status !== '검증됨');
+  if (open.length === 0) return { id, title, status: 'pass', reason: `요구사항 ${live.length}개가 모두 검증됐습니다.` };
+  const mustOpen = open.filter((requirement) => requirement.priority === 'must');
+  const list = (items: readonly ChecklistRequirement[]) =>
+    items
+      .slice(0, 5)
+      .map((requirement) => `${requirement.id} ${requirement.title}(${requirement.status})`)
+      .join(', ') + (items.length > 5 ? ` 외 ${items.length - 5}개` : '');
+  if (mustOpen.length > 0) {
+    return { id, title, status: 'fail', reason: `필수 요구사항 ${mustOpen.length}개가 아직 검증되지 않았습니다: ${list(mustOpen)}` };
+  }
+  return { id, title, status: 'warn', reason: `선택 요구사항 ${open.length}개가 아직 검증되지 않았습니다: ${list(open)}` };
+}
+
+export async function checkRequirements(root: string, live?: readonly ChecklistRequirement[]): Promise<ChecklistItem> {
   const id = 'requirements';
   const title = '요구사항';
+  if (live && live.length > 0) return requirementsFromLive(id, title, live);
   const text = await readTextSafe(path.join(root, 'docs', 'requirements.md'));
   if (text === undefined) {
     return { id, title, status: 'skip', reason: 'docs/requirements.md가 없어 건너뜁니다.' };
@@ -505,7 +535,7 @@ export async function checkReadmeSections(root: string, services: ChecklistServi
 
 export async function buildSubmissionChecklist(inputs: SubmissionInputs): Promise<SubmissionReport> {
   const items = await Promise.all([
-    checkRequirements(inputs.root),
+    checkRequirements(inputs.root, inputs.requirements),
     checkTests(inputs.root, inputs.services, inputs.latestPassedStages),
     checkRunInstructions(inputs.root, inputs.services),
     checkEnvExample(inputs.root),
