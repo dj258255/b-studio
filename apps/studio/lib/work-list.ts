@@ -162,3 +162,26 @@ export function membersSummary(work: WorkItem): string | undefined {
   const working = sessions.filter((member) => member.state === 'working').length;
   return working > 0 ? `${unit} · 작업 중 ${working}` : unit;
 }
+
+/** 작업 줄의 체크박스를 켤 수 있는지. 세션이 아직 없는 작업(계획 승인 대기 등)은 고를 수 없다 */
+export function isSelectable(work: WorkItem): boolean {
+  return work.sessionIds.length > 0;
+}
+
+/** 지금 보이는 목록 기준 "전체 선택" 상태. 고를 수 있는 것이 없으면 none(체크박스를 끈다) */
+export function selectAllState(shown: readonly WorkItem[], selectedKeys: readonly string[]): 'all' | 'some' | 'none' | 'empty' {
+  const selectable = shown.filter(isSelectable);
+  if (selectable.length === 0) return 'empty';
+  const picked = selectable.filter((work) => selectedKeys.includes(work.key)).length;
+  return picked === 0 ? 'none' : picked === selectable.length ? 'all' : 'some';
+}
+
+/**
+ * "전체 선택"을 눌렀을 때의 새 선택. 보이는 것이 모두 골라져 있으면 보이는 것만 풀고, 아니면 보이는 것 중 고를 수 있는 것을 모두 더한다.
+ * 다른 탭에서 고른 것은 건드리지 않는다
+ */
+export function toggleSelectAll(shown: readonly WorkItem[], selectedKeys: readonly string[]): string[] {
+  const keys = shown.filter(isSelectable).map((work) => work.key);
+  if (selectAllState(shown, selectedKeys) === 'all') return selectedKeys.filter((key) => !keys.includes(key));
+  return [...selectedKeys, ...keys.filter((key) => !selectedKeys.includes(key))];
+}

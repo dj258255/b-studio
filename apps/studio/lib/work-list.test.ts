@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ATTENTION_PRIORITY, type AgentItem } from './server/agents-overview';
 import { MAX_SPLIT } from './split';
-import { deleteBlockReason, deleteHref, filterWork, groupWork, initialWorkTab, membersSummary, splitSelection, WORK_ATTENTION_PRIORITY, workCounts } from './work-list';
+import { deleteBlockReason, deleteHref, filterWork, groupWork, initialWorkTab, membersSummary, selectAllState, splitSelection, toggleSelectAll, WORK_ATTENTION_PRIORITY, workCounts, type WorkItem } from './work-list';
 
 function item(overrides: Partial<AgentItem> & Pick<AgentItem, 'id'>): AgentItem {
   return {
@@ -164,5 +164,23 @@ describe('deleteBlockReason', () => {
 
     const idleMembers = groupWork([item({ id: 'm3', kind: 'fleet', group: fleet, state: 'stopped' }), item({ id: 'm4', kind: 'fleet', group: fleet, state: 'error' })]);
     expect(deleteBlockReason(idleMembers[0]!)).toBeUndefined();
+  });
+});
+
+describe('전체 선택', () => {
+  const work = (key: string, sessions: string[]): WorkItem => ({ key, sessionIds: sessions }) as unknown as WorkItem;
+  const shown = [work('a', ['s1']), work('b', ['s2']), work('plan', [])];
+
+  it('보이는 것 중 고를 수 있는 것 기준으로 상태를 정한다', () => {
+    expect(selectAllState(shown, [])).toBe('none');
+    expect(selectAllState(shown, ['a'])).toBe('some');
+    expect(selectAllState(shown, ['a', 'b'])).toBe('all');
+    expect(selectAllState([work('plan', [])], [])).toBe('empty');
+  });
+
+  it('모두 골랐으면 보이는 것만 풀고, 아니면 고를 수 있는 것을 모두 더한다. 다른 탭에서 고른 것은 남긴다', () => {
+    expect(toggleSelectAll(shown, ['other'])).toEqual(['other', 'a', 'b']);
+    expect(toggleSelectAll(shown, ['a'])).toEqual(['a', 'b']);
+    expect(toggleSelectAll(shown, ['other', 'a', 'b'])).toEqual(['other']);
   });
 });
