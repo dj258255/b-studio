@@ -15,14 +15,19 @@ export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, 
 export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
   ClaudeCodeUsageTracker,
+  DEFAULT_CLAUDE_CODE_EFFORT,
   describeAccount,
   describeResultFailure,
+  fetchClaudeCodeModels,
   preflightClaudeCode,
   runClaudeCodeAgent,
   type ClaudeCodeAccount,
+  type ClaudeCodeQuery,
   type ClaudeCodeResult,
   type ClaudeCodeRunOptions,
+  type ClaudeCodeSdk,
 } from './claude-code-runner';
+export type { ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 export {
   preflightCodex,
   runCodexAgent,

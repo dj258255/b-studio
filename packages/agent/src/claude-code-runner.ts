@@ -4,6 +4,7 @@ import {
   tool,
   type AccountInfo,
   type McpServerConfig,
+  type ModelInfo,
   type Options,
   type SDKMessage,
   type SDKResultMessage,
@@ -26,6 +27,12 @@ import { Workspace } from './workspace';
 const SERVER = 'b-studio';
 /** 화면 표기. Agent SDK 브랜딩 가이드는 제품 안에서 "Claude Code"라는 이름을 쓰지 않도록 한다 */
 const BACKEND = '로컬 Claude Agent';
+/**
+ * 세션이 노력 단계를 고르지 않았을 때 실제로 쓰이는 기본값. runClaudeCodeAgent의 기본 인자와 이 상수가 어긋나면
+ * 실행 중 표시(노력: 높음)와 아직 아무것도 고르지 않은 화면(모델 선택 팝오버)이 서로 다른 값을 보여주게 된다 —
+ * 리터럴을 두 곳에 따로 적지 않고 이 상수 하나로 맞춘다(apps/studio/lib/server/model-picker.ts가 그대로 쓴다).
+ */
+export const DEFAULT_CLAUDE_CODE_EFFORT: Effort = 'high';
 /** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
 const STEERING_POLL_MS = 300;
 
@@ -37,6 +44,8 @@ export interface ClaudeCodeSdk {
 
 export interface ClaudeCodeQuery extends AsyncIterable<SDKMessage> {
   accountInfo(): Promise<AccountInfo>;
+  /** 로그인한 계정이 실제로 쓸 수 있는 모델 목록(별칭이 풀리는 id·설명·노력 단계 지원 여부 포함) */
+  supportedModels(): Promise<ModelInfo[]>;
   interrupt(): Promise<unknown>;
   close(): void;
 }
@@ -96,7 +105,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onBrowserFrame,
     resume,
     model,
-    effort = 'high',
+    effort = DEFAULT_CLAUDE_CODE_EFFORT,
     account,
     sdk = DEFAULT_SDK,
     interactive = false,
@@ -532,6 +541,36 @@ export async function preflightClaudeCode(
   } finally {
     clearTimeout(timer);
     input.close();
+    conversation.close();
+  }
+}
+
+/**
+ * 로그인한 계정의 Claude Code가 실제로 보고하는 모델 목록. 프롬프트를 보내지 않으므로 사용량을 쓰지 않는다
+ * (preflightClaudeCode와 같은 모양: 아무것도 내보내지 않는 프롬프트로 query를 열고 필요한 정보만 받은 뒤 바로 닫는다).
+ * 별칭(opus·sonnet·haiku·fable)이 실제로 풀리는 모델 id·공식 설명·노력 단계 지원 여부가 로그인 계정·CLI 버전에 따라 바뀌므로
+ * 스튜디오가 미리 표를 외우는 대신 이 목록을 그대로 쓴다(apps/studio/lib/server/claude-code-models.ts가 캐시·대체 표를 맡는다).
+ */
+export async function fetchClaudeCodeModels(
+  { sdk = DEFAULT_SDK, cwd = process.cwd(), timeoutMs = 15_000 }: { sdk?: ClaudeCodeSdk; cwd?: string; timeoutMs?: number } = {},
+): Promise<ModelInfo[]> {
+  const input = new InputQueue();
+  const conversation = sdk.query({
+    prompt: input,
+    options: { cwd, tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false },
+  });
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      conversation.supportedModels(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${timeoutMs / 1000}초 안에 응답하지 않았습니다`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    input.close();
+    await conversation.interrupt().catch(() => {});
     conversation.close();
   }
 }

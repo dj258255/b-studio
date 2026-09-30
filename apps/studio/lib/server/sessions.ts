@@ -1336,7 +1336,7 @@ export async function setSessionModel(id: string, modelId: string | undefined, e
   if (effort !== undefined) {
     const trimmedEffort = effort.trim();
     // modelId도 이번 호출에서 함께 바뀌었으면 그 새 모델을 기준으로 노력 단계를 확인한다(api 백엔드는 모델마다 지원이 다르다)
-    const effortCheck = isSelectableEffort(backend, session.snapshot.modelId, trimmedEffort);
+    const effortCheck = await isSelectableEffort(backend, session.snapshot.modelId, trimmedEffort);
     if (!effortCheck.ok) throw new StudioError(400, effortCheck.reason ?? `이 백엔드에서 고를 수 없는 노력 단계입니다: ${trimmedEffort}`);
     session.snapshot.effort = (trimmedEffort || undefined) as Effort | undefined;
     rememberProjectEffortDefault(session.snapshot.projectId, backend, session.snapshot.effort);

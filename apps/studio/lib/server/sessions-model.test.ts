@@ -58,10 +58,18 @@ vi.mock('./projects', () => ({
 }));
 
 // claude-code 백엔드는 세션을 만들 때 실제 CLI 로그인을 확인한다(preflightClaudeCode). 이 테스트는 모델 선택 목록·저장만
-// 보므로 CLI를 부르지 않고 바로 통과시킨다(sessions-lazy.test.ts가 샌드박스를 가짜로 바꾸는 것과 같은 이유)
+// 보므로 CLI를 부르지 않고 바로 통과시킨다(sessions-lazy.test.ts가 샌드박스를 가짜로 바꾸는 것과 같은 이유).
+// fetchClaudeCodeModels도 실제 CLI를 띄우므로 늘 실패하게 해 model-picker.ts가 알려진 대체 표(CLAUDE_CODE_ALIASES)로
+// 되돌아가게 한다(SDK 응답 매핑 자체는 model-picker.test.ts가 별도로 확인한다)
 vi.mock('@b-studio/agent', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@b-studio/agent')>();
-  return { ...actual, preflightClaudeCode: async () => ({ ok: true as const }) };
+  return {
+    ...actual,
+    preflightClaudeCode: async () => ({ ok: true as const }),
+    fetchClaudeCodeModels: async () => {
+      throw new Error('테스트에서는 실제 Claude Code를 부르지 않습니다');
+    },
+  };
 });
 
 import { createSession, sessionModelPicker, setSessionModel, stopSession } from './sessions';
@@ -118,7 +126,9 @@ describe('sessionModelPicker / setSessionModel', () => {
 
     expect(picker.backend).toBe('claude-code');
     expect(picker.current).toBeUndefined();
+    // fetchClaudeCodeModels를 늘 실패하게 해 뒀으므로(위 mock) 알려진 대체 표로 되돌아간다
     expect(picker.options.map((option) => option.id)).toEqual(['', 'fable', 'opus', 'sonnet', 'haiku']);
+    expect(picker.note).toContain('모델 목록을 불러오지 못해');
     await stopSession(id).catch(() => {});
   });
 
