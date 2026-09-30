@@ -459,6 +459,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
 }
 
 function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: ReadonlySet<string> }) {
+  // baseSync(main 따라잡기, ADR-076)의 "대화 입력창에 채우기"가 쓴다. 조건 없이 맨 위에서 불러 훅 순서를 지킨다
+  const draft = useChatDraft();
   switch (item.kind) {
     case "boot": {
       const rx = item.network.reduce((sum, entry) => sum + entry.rxBytes, 0);
@@ -731,6 +733,42 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
               {result.conflicts && <p className="mt-0.5 text-muted">PR이나 원격 브랜치에서 충돌을 해결한 뒤 다시 가져오세요.</p>}
               {result.restarted && <p className="mt-0.5 text-muted">{restartSummary(result.restarted)}</p>}
               {commitList}
+            </div>
+          )}
+          {result.report && <GateTrack files={result.files ?? []} report={result.report} />}
+        </div>
+      );
+    }
+
+    case "baseSync": {
+      const { result } = item;
+      if (!result) return <p className="text-sm text-wait motion-safe:animate-pulse">기준 브랜치(main)를 따라잡는 중</p>;
+      if (result.ok && result.status === "up-to-date") return <p className="text-sm text-muted">이미 기준 브랜치를 따라잡았습니다.</p>;
+      return (
+        <div className="space-y-2">
+          {result.ok ? (
+            <p className="text-sm text-pass">
+              기준 브랜치의 커밋 {result.commits}개를 병합으로 따라잡아 체크포인트 <span className="font-mono">{result.checkpoint?.shortSha}</span>에 저장했습니다. 바뀐 파일{" "}
+              {result.files.length}개
+            </p>
+          ) : (
+            <div className="rounded-md border border-fail/40 bg-fail/10 px-3 py-2 text-sm">
+              <p className="font-medium text-fail">기준 브랜치를 따라잡지 못했습니다: {result.error}</p>
+              {result.conflicts && result.conflicts.length > 0 && (
+                <p className="mt-0.5 text-muted">
+                  충돌한 파일: <span className="break-all font-mono text-xs">{result.conflicts.join(", ")}</span>
+                </p>
+              )}
+              {result.agentRequest && (
+                <button
+                  type="button"
+                  onClick={() => draft.fill(result.agentRequest!)}
+                  className="mt-1.5 rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink"
+                >
+                  대화 입력창에 채우기
+                </button>
+              )}
+              {result.restarted && <p className="mt-0.5 text-muted">{restartSummary(result.restarted)}</p>}
             </div>
           )}
           {result.report && <GateTrack files={result.files ?? []} report={result.report} />}
