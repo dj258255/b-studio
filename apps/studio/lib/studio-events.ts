@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
@@ -116,6 +116,36 @@ export interface SessionSnapshot {
   fileRevision?: number;
   /** 이 세션에서 시작한 운영 배포나 되돌리기가 진행 중이다. lines는 최근 진행 줄 */
   deploying?: DeployingView;
+  /** PR 자동 리뷰 라운드(ADR-074) 진행 상태. PR을 아직 만들지 않았거나 리뷰를 한 번도 돌리지 않았으면 없다 */
+  review?: ReviewStateView;
+}
+
+/**
+ * PR 자동 리뷰 라운드 한 번. running: 리뷰어를 부르는 중. blocked_continue: 차단·중요 지적이 있고 라운드가 남아 고치는 중.
+ * fix_failed: 고침 요청이 검증 게이트를 통과하지 못해 멈췄다. 댓글 올리기 실패는 라운드를 막지 않고 commentError에만 남는다
+ */
+export type ReviewRoundStatus = 'running' | 'passed' | 'blocked_continue' | 'blocked_capped' | 'fixing' | 'fix_failed' | 'error';
+
+export interface ReviewRoundView {
+  round: number;
+  status: ReviewRoundStatus;
+  findings?: PrReviewFinding[];
+  /** 이 라운드의 리뷰어 호출이 쓴 토큰(고침 요청 자체의 토큰은 세션의 보통 실행 토큰에 잡힌다) */
+  tokens?: AgentUsage;
+  commentUrl?: string;
+  commentError?: string;
+  /** 고침 요청이 만든 체크포인트(성공했을 때만) */
+  fixCheckpoint?: { sha: string; shortSha: string };
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+/** state: running(진행 중) · passed(리뷰 통과) · capped(라운드 상한) · stopped(멈춤, 오류·고침 실패) */
+export interface ReviewStateView {
+  state: 'running' | 'passed' | 'capped' | 'stopped';
+  maxRounds: number;
+  rounds: ReviewRoundView[];
 }
 
 export type DeployAction = 'deploy' | 'rollback';
@@ -366,7 +396,9 @@ export type StudioEvent =
       urls: Record<string, string>;
       previous?: string;
     }
-  | { type: 'deploy_failed'; action: DeployAction; target: string; error: string; detail?: string };
+  | { type: 'deploy_failed'; action: DeployAction; target: string; error: string; detail?: string }
+  /** PR 자동 리뷰(ADR-074) 상태가 바뀔 때마다 통째로 온다. 다시 재생해도 결과가 같도록 review 전체를 담는다(exported와 같은 규칙) */
+  | { type: 'review_round'; review: ReviewStateView };
 
 export type ExportResult = Omit<Extract<StudioEvent, { type: 'exported' }>, 'type'>;
 
@@ -386,6 +418,8 @@ export interface ExportPreview {
     ok: boolean | 'unknown';
     detail: string;
   }>;
+  /** PR 자동 리뷰 라운드(ADR-074)의 studio.yaml 기본값. 화면 체크박스·라운드 수 입력의 기본값으로 쓴다 */
+  review: { auto: boolean; maxRounds: number };
 }
 
 export interface ProxyResponse {

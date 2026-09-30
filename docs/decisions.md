@@ -2882,6 +2882,55 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-074 PR을 만든 뒤 AI 리뷰를 최대 두 라운드 돌리고 지적을 고친 뒤 사람에게 넘긴다
+
+상태: 채택
+관련: #ISSUE
+
+### 맥락
+- b-studio 세션이 PR을 만든 뒤에는 사람이 직접 diff를 읽고 검토한다. 검증 게이트(재시작·계약·테스트·화면 확인)는 이미 통과했지만, 게이트가 보지 않는 것들 — 논리 오류, 보안, 빠진 테스트, 원래 요청과의 어긋남 — 은 여전히 사람만 본다.
+- 빅테크 PR 자동화 조사([research/2026-09-30-pr-agent-workflows.md](research/2026-09-30-pr-agent-workflows.md))를 보면 공통된 결론이 있다: **라운드 수에 상한을 두고, 머지 판단은 사람이 한다.** Stripe Minions는 CI 피드백을 두 라운드로 자르고 그 뒤엔 사람에게 돌려보낸다. Cursor Bugbot은 PR당 자동 수정을 최대 3회로 제한한다. Uber uReview는 리뷰 코멘트의 75%가 유용하다는 평가를 받고 65% 넘게 반영되지만, 머지 자체는 언제나 사람이 한다.
+- b-studio는 이미 계획을 이슈로 발행하고(ADR-061), PR 미리보기와 검증 결과 요약을 갖고 있다(ADR-020 등). 남은 것은 "PR이 열린 뒤 사람이 보기 전에, 검증 게이트가 보지 않는 것을 짚어 주는 자동 리뷰 라운드"다.
+
+### 결정
+- **리뷰어는 diff만 본다.** `CheckpointStore.sessionDiff()`(`packages/agent/src/checkpoints.ts`)로 세션 시작(=PR 기준 브랜치가 갈라진 지점)부터 지금 HEAD까지의 전체 unified diff를 만들고, `truncateDiff`(`packages/agent/src/pr-review.ts`)로 60,000자 상한 아래로 줄인다. 상한을 넘으면 가장 큰 파일부터 본문을 생략 노트로 바꾸고, 어떤 파일을 생략했는지 리뷰어와 PR 코멘트 양쪽에 알린다. 도구(읽기·쓰기·실행)는 하나도 주지 않는다 — 계획 호출(task-plan.ts)과 같은 "도구 없이 한 번만 묻고 JSON만 받는다" 방식(`requestPrReview` + `ModelAsk`)이라, 리뷰어가 diff 밖의 파일을 읽거나 명령을 실행할 방법이 없다.
+- **모델 호출은 세션과 같은 백엔드를 쓴다.** claude-code 세션은 이 PC에 로그인한 Claude Code를 도구 없이 한 번 부르고(`claudeCodeAsk`), api 세션은 모델 레지스트리 클라이언트를 쓴다(`planAskFromClient`). 그 밖의 백엔드(codex·commandcode·opencode)는 아직 도구 없는 단발 호출 경로가 없어(task-plan.ts의 `PLANNER_MODES`와 같은 제약), 그 백엔드의 세션은 리뷰를 거부하고 이유를 알린다 — 나중에 그 러너들에 같은 호출 경로가 생기면 그때 넣는다.
+- **응답은 구조화된 JSON만 받는다.** `{"findings":[{"severity":"blocker"|"major"|"minor"|"nit","file","line?","title","detail","suggestion?"}]}`을 zod로 검증하고(`PrReviewFindingSchema`), 형식이 틀리면(스키마 불일치, 상한 초과, JSON을 못 찾음) 그때까지 쓴 토큰·시간을 오류에 남기고 라운드를 멈춤으로 끝낸다. 프롬프트는 정확성·보안·빠진 테스트·요청과의 어긋남에 집중하라고 지시하고, 스타일 지적을 `blocker`·`major`로 매기는 것을 명시적으로 금지한다(그 등급은 `minor`·`nit`만 쓴다).
+- **라운드 상태 기계는 순수 함수 하나(`nextPrReviewStep`)로 정한다**: 차단(`blocker`)·주요(`major`) 지적이 없으면 `pass`(사람 검토 대기, 리뷰 통과) → 있고 라운드가 남았으면 `fix`(고치고 다시 리뷰) → 있는데 라운드 상한에 닿았으면 `cap`(사람 검토 대기, 라운드 상한). `fix`일 때만 같은 세션의 **정상 요청 경로**(`sendMessage`)로 지적을 고치라고 보낸다 — 검증 게이트·체크포인트를 새로 만들지 않고 그대로 거친다. 그 요청이 검증을 통과하지 못하면(`status !== 'done'`) 라운드를 `fix_failed`로 멈추고 사람에게 넘긴다(다음 라운드로 이어가지 않는다). 통과하면 `session.checkpoints.push()`로 브랜치만 갱신하고(새 PR을 만들지 않는다) 다음 라운드를 이어간다.
+- **PR 댓글은 라운드마다 하나, 한국어 표.** 심각도·위치·제목·설명을 표로 압축하고 숨은 표식 `<!-- b-studio-review round=N -->`을 마지막 줄에 남긴다(`buildPrReviewComment`). GitHub·Gitea는 이슈 댓글 API(PR도 이슈 번호를 공유한다), GitLab은 머지 리퀘스트 노트 API를 쓴다(`postComment`, `packages/agent/src/repository.ts`). 토큰은 저장소 화면(ADR-072)과 같은 규칙 — 환경 변수 우선, 개인 PC 모드는 `gh auth token` CLI 대체(`apps/studio/lib/server/repo-token.ts`로 뽑아내 `repository-panel.ts`와 `sessions.ts`가 함께 쓰면서도 순환 참조를 만들지 않는다). **댓글이 실패해도 라운드는 멈추지 않는다** — 이유만 `commentError`에 남기고 계속 간다.
+- **자동 시작은 PR을 새로 연결했을 때만.** `exportSession`이 이번 호출로 PR을 처음 만들었고(`created`) `studio.yaml`의 `review.auto`가 켜져 있으면 자동으로 1라운드를 시작한다. 이미 열려 있던 PR에 커밋만 더 올린 export는 자동으로 다시 돌리지 않는다 — 사람이 화면의 "다시 돌리기"로 부른다. 화면(`ExportPreview`)에는 "PR을 만든 뒤 AI 리뷰를 최대 N번 돌리기" 체크박스를 두어(기본값은 `studio.yaml`의 `review.auto`), 이번 PR만 자동 시작을 켜거나 끌 수 있다(`exportSession`의 `review` 옵션이 `studio.yaml` 기본값을 덮어쓴다).
+- **설정**: `packages/spec/src/schema.ts`에 `review: { auto: boolean, maxRounds: 1~3 }`을 추가했다. 절이 없어도 기본값(켬·2라운드)이 채워진다(`.default({...})`) — 개인 PC 모드를 겨냥한 기본값이라, 아무 설정 없이 연 프로젝트도 PR을 만들면 리뷰가 자동으로 돈다.
+- **화면**: 저장소 바(`RepositoryBar`)에 AI 리뷰 카드(`ReviewCard`)를 둔다. PR이 있어야 보이고, 라운드별로 심각도별 지적 수·리뷰어 토큰·PR 코멘트 링크·(지적을 펼치면) 파일·줄·제목·설명·제안을 보여준다. 전체 상태 배지는 `진행 중`·`사람 검토 대기(리뷰 통과)`·`사람 검토 대기(라운드 상한)`·`멈춤` 넷 중 하나다. "AI 리뷰 돌리기"(아직 안 돌렸을 때)·"다시 돌리기"(끝난 뒤 처음부터 다시)는 새 API(`POST /api/sessions/[id]/review`)를 부른다.
+- **토큰 기록**: 리뷰어 호출은 도구 없는 한 번의 질문이라 세션의 보통 실행 같은 대화 턴이 없다. 그래서 `run_started`·`run_finished` 이벤트로 흉내 내는 대신, 라운드마다 쓴 토큰을 스냅샷의 `review.rounds[].tokens`에 그대로 남긴다. 토큰 탭(`/api/sessions/[id]/tokens`)은 `buildTokenReports`(세션 실행 기록)의 결과 뒤에 `reviewTokenReports`(`token-report.ts`)가 이 값을 실행별 보고서와 같은 모양으로 바꿔 이어 붙이고, `kind: 'review'`로 표시한다. 대화에는 등장하지 않으므로(세션 실행이 아니다) 가짜 요청 말풍선이 끼어들 일도 없다.
+- **절대 하지 않는 것**: 자동 머지, 강제 푸시(`push()`는 기존 규칙대로 `--force-with-lease`만 쓴다), 3라운드를 넘는 반복.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 도구(read_file·list_files)를 준 별도 에이전트 실행으로 리뷰 | 계획 호출과 다른 실행 경로가 하나 더 생기고(도구 승인·정책·MCP 노출), diff보다 넓게 볼 수 있어 "이 PR의 변경만 본다"는 경계가 흐려진다. diff 자체에 파일·줄·문맥이 이미 있어 대부분의 리뷰에는 그걸로 충분하다 |
+| **B. 도구 없이 diff+요청만 주고 JSON 하나만 받는다(계획 호출과 같은 모양)** | 채택. 기존 `task-plan.ts`의 `ModelAsk`·`parsePlannerReply`를 그대로 재사용해 새 실행 경로를 만들지 않는다 |
+| C. 라운드마다 새 PR을 만든다 | 사람이 리뷰 스레드·CI 기록을 잃는다. 기존 PR을 그대로 갱신(push)하는 것이 GitHub·Gitea·GitLab 모두의 관례와 맞다 |
+| D. 라운드 상한 없이 통과할 때까지 계속 | 모델이 같은 지적을 되풀이하거나 새 지적을 계속 만들면 끝나지 않는다. Stripe·Cursor 모두 상한을 둔다 |
+
+### 검증 결과
+- `packages/agent/src/pr-review.test.ts`: 지적 파싱·검증(형식 오류·상한 초과), 차단 판정과 라운드 상태 기계 판단 함수(`nextPrReviewStep`, 통과·고침·상한), diff 자르기(상한 안·큰 파일부터 생략·구분자 없는 입력·여러 파일), PR 코멘트 표·숨은 표식, 고침 요청 문구, 모델 호출 성공·실패(토큰·시간 보존)를 확인했다.
+- `packages/agent/src/repository.test.ts`: PR 주소에서 번호 뽑기(GitHub·Gitea·GitLab), `postComment`(GitHub·Gitea 이슈 댓글, GitLab 노트, 토큰 없음·호스트 미지원 오류)를 확인했다.
+- `packages/agent/src/checkpoints.test.ts`: `sessionDiff()`가 세션 시작부터 HEAD까지의 diff를 만드는지 확인했다.
+- `packages/spec/src/spec.test.ts`: `review` 설정이 절이 없어도 기본값(켬·2라운드)을 채우고, 범위를 벗어나면 거부하는지 확인했다.
+- `apps/studio/lib/server/review-round.test.ts`: sessions.ts가 실제로 타는 순수 상태 기계(`runReviewRounds`)를 세션·git·네트워크 없이 가짜 `ReviewRoundDeps`로 돌려, 1라운드 통과·차단 지적을 고쳐 다음 라운드에서 통과·라운드 상한·고침 검증 실패·리뷰어 호출 자체 실패·댓글 실패(라운드는 안 멈춤)·지원하지 않는 백엔드를 확인했다.
+- `apps/studio/lib/server/sessions-review.test.ts`: 위 상태 기계를 실제 `runReviewRound`·`sendMessage`·`exportSession`으로 끝까지 돌렸다. 로컬 bare 저장소·체크포인트·검증 게이트(테스트 실행)는 진짜로 돌고, 샌드박스(Docker)·GitHub API(`createPullRequest`·`postComment`)·모델 호출만 가짜로 바꿨다. 1라운드 통과, 차단 지적을 고쳐 검증을 통과시키고 다음 라운드에서 통과(고침 체크포인트가 남는다), `studio.yaml`의 `maxRounds: 1`이면 고치지 않고 바로 라운드 상한, 고침이 검증(테스트)에 실패하면 멈춤을 확인했다.
+- `apps/studio/lib/server/repository-panel.test.ts`: 토큰 선택을 `repo-token.ts`로 옮긴 뒤에도 동작이 같은지 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류)를 확인했다. `pnpm test`는 기기 부하로 일부 사전 존재 테스트가 5000ms 안에 못 끝나 실패했다가 따로 돌리면 통과했다(`docs/troubleshooting.md`에 남긴 것과 같은 종류).
+- 실제 GitHub·Gitea API, 실제 모델 호출, 실제 샌드박스는 부르지 않았다(계획대로 fake만 썼다). 화면을 브라우저로 직접 열어 보는 확인은 하지 않았다.
+
+### 감수한 트레이드오프
+- 리뷰어가 codex·commandcode·opencode 백엔드 세션에서는 아직 돌지 않는다. 그 러너들에 도구 없는 단발 호출 경로가 생기면 `reviewAsk`에 분기를 추가한다.
+- 리뷰어는 diff만 보고 나머지 저장소는 보지 못한다. 변경과 무관한 파일의 문맥이 필요한 지적(예: 다른 곳의 관례와의 불일치)은 놓칠 수 있다.
+- "다시 돌리기"는 라운드 기록을 지우고 1라운드부터 다시 돈다(이어서 하지 않는다) — 사람이 PR을 직접 고친 뒤 "처음부터 다시 봐 달라"는 뜻으로 쓰기 좋게 골랐다. 상한에 걸린 라운드 하나만 더 보고 싶다는 요구는 이번 범위 밖이다.
+- 리뷰 댓글은 GitHub·Gitea·GitLab만 지원한다(그 밖의 호스트는 저장소 화면·PR 만들기와 같은 경계로 지원하지 않는다).
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)

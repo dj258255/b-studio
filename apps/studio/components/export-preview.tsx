@@ -12,6 +12,9 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string>();
   const [showBody, setShowBody] = useState(false);
+  // 미리보기가 studio.yaml의 기본값을 주면 그 값으로 맞춘다(사람이 건드리면 그 뒤로는 사람 선택을 따른다)
+  const [review, setReview] = useState<boolean>();
+  const reviewTouched = useRef(false);
   // 첫 미리보기만 이슈 입력을 비워 보내, 서버가 채운 기본 이슈(통합 세션의 하위 이슈)를 받는다. 그 뒤로는 입력값을 그대로 보낸다
   const requestedDefaults = useRef(false);
   const parsed = useMemo(() => parseIssues(issue), [issue]);
@@ -42,6 +45,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
             const defaults: number[] = Array.isArray(data.issues) ? data.issues : [];
             if (defaults.length > 0) setIssue(defaults.join(", "));
           }
+          if (!reviewTouched.current) setReview(Boolean((data as ExportPreviewData).review?.auto));
         } catch (reason) {
           if (!cancelled) setError(String(reason));
         } finally {
@@ -63,7 +67,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
       const response = await fetch(`/api/sessions/${sessionId}/export`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pullRequest: true, issues: parsed.ok ? parsed.issues : [] }),
+        body: JSON.stringify({ pullRequest: true, issues: parsed.ok ? parsed.issues : [], review }),
       });
       const data = await response.json();
       if (!response.ok) setError(data.error ?? `${label}을 만들지 못했습니다`);
@@ -96,6 +100,22 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
           className="mt-1 w-56 rounded-control border border-line bg-panel px-3 py-1.5 text-sm"
         />
         <p className="mt-1 text-xs text-muted">넣으면 PR 본문 첫 줄들에 Closes #N을 넣어 이슈를 함께 닫습니다.</p>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          id="export-review"
+          type="checkbox"
+          checked={review ?? preview?.review.auto ?? true}
+          onChange={(event) => {
+            reviewTouched.current = true;
+            setReview(event.target.checked);
+          }}
+          className="rounded-control border border-line"
+        />
+        <label htmlFor="export-review" className="text-sm">
+          {label}을 만든 뒤 AI 리뷰를 최대 {preview?.review.maxRounds ?? 2}번 돌리기
+        </label>
       </div>
 
       {!parsed.ok && <p className="mt-3 text-sm text-fail">이슈 번호는 쉼표로 구분한 1 이상 10,000,000 이하의 정수여야 합니다</p>}

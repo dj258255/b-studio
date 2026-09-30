@@ -9,7 +9,9 @@ import {
   fetchIssue,
   listIssues,
   listPullRequests,
+  parsePullRequestNumber,
   parseRemote,
+  postComment,
   PullRequestError,
   RepositoryRateLimitError,
 } from './repository';
@@ -135,6 +137,57 @@ describe('createPullRequest', () => {
     await expect(createPullRequest(parseRemote('git@github.com:acme/orders.git', {}), input, { env: {}, fetch: fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
     await expect(createPullRequest(parseRemote('/Users/dev/orders', {}), input, { env: {}, fetch: fn })).rejects.toThrow(PullRequestError);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('parsePullRequestNumber', () => {
+  it.each([
+    ['https://github.com/acme/orders/pull/12', 12],
+    ['https://git.corp.local/dev/orders/pulls/7', 7],
+    ['https://gitlab.corp.local/platform/orders/-/merge_requests/3', 3],
+    ['https://gitlab.corp.local/platform/orders/-/merge_requests/3#note_9', 3],
+    ['https://github.com/acme/orders', undefined],
+  ])('%s → %s', (url, expected) => {
+    expect(parsePullRequestNumber(url)).toBe(expected);
+  });
+});
+
+describe('postComment', () => {
+  it('GitHub·Gitea는 이슈 댓글 API로 PR(MR)에 댓글을 단다', async () => {
+    const { fn, calls } = fakeFetch([{ status: 201, body: { html_url: 'https://github.com/acme/orders/pull/12#issuecomment-1' } }]);
+    const result = await postComment(parseRemote('git@github.com:acme/orders.git', {}), 12, '### AI 리뷰\n\n표', {
+      env: { B_STUDIO_GITHUB_TOKEN: 'ghp_test' },
+      fetch: fn,
+    });
+    expect(result.url).toBe('https://github.com/acme/orders/pull/12#issuecomment-1');
+    expect(calls[0]!.url).toBe('https://api.github.com/repos/acme/orders/issues/12/comments');
+    expect(calls[0]!.body).toEqual({ body: '### AI 리뷰\n\n표' });
+  });
+
+  it('GitLab은 머지 리퀘스트 노트 API로 댓글을 달고, 응답의 id로 주소를 만든다', async () => {
+    const { fn, calls } = fakeFetch([{ status: 201, body: { id: 9 } }]);
+    const remote = parseRemote('https://gitlab.corp.local/platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' });
+    const result = await postComment(remote, 3, '표', { env: { B_STUDIO_GITLAB_TOKEN: 'glpat' }, fetch: fn });
+    expect(result.url).toBe('https://gitlab.corp.local/platform/orders/-/merge_requests/3#note_9');
+    expect(calls[0]!.url).toContain('/merge_requests/3/notes');
+  });
+
+  it('환경 변수 토큰보다 넘겨준 token을 우선한다(gh CLI 폴백 재사용)', async () => {
+    const { fn, calls } = fakeFetch([{ status: 201, body: { html_url: 'https://github.com/acme/orders/pull/12#issuecomment-2' } }]);
+    await postComment(parseRemote('git@github.com:acme/orders.git', {}), 12, '표', { env: {}, fetch: fn, token: 'gh-cli-token' });
+    expect(calls[0]!.headers.authorization).toBe('Bearer gh-cli-token');
+  });
+
+  it('토큰이 없거나 지원하지 않는 호스트면 요청하지 않는다', async () => {
+    const { fn, calls } = fakeFetch([]);
+    await expect(postComment(parseRemote('git@github.com:acme/orders.git', {}), 12, '표', { env: {}, fetch: fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    await expect(postComment(parseRemote('/Users/dev/orders', {}), 12, '표', { env: {}, fetch: fn })).rejects.toThrow(PullRequestError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('거절 사유를 알려 준다', async () => {
+    const { fn } = fakeFetch([{ status: 404, body: { message: 'Not Found' } }]);
+    await expect(postComment(parseRemote('git@github.com:acme/orders.git', {}), 12, '표', { env: { B_STUDIO_GITHUB_TOKEN: 'ghp_test' }, fetch: fn })).rejects.toThrow('HTTP 404');
   });
 });
 

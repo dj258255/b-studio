@@ -163,4 +163,6 @@ export interface TokenReport {
   escalation?: { from: string; to: string; attempt: number };
   /** 턴별 컨텍스트 증가와 급증(jump) 분석. 기존 보고서와 호환하도록 선택 필드로 둔다 */
   contextGrowth?: ContextGrowthReport;
+  /** PR 자동 리뷰(ADR-074)의 리뷰어 호출이면 'review'. 없으면 보통의 요청 실행이다 */
+  kind?: 'review';
 }
