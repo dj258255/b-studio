@@ -56,7 +56,7 @@ import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } fro
 import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
-import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
+import { planBriefsFromEvents, signatureKey, traceFromEvents, type LaneTrace, type PlanBriefRecord } from './trace';
 import type { AgentUsage, SelfCheckMode, Topology } from '@b-studio/agent';
 import { costForUsageByModel, parsePriceTable, type TokenPrices } from '../../lib/token-types';
 import type { SessionSnapshot, StudioEvent } from '../../lib/studio-events';
@@ -435,6 +435,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   const sessionEvents = readSessionEvents(sessions, sessionIds);
   // 승격은 세션 기록의 model_escalated 이벤트로 확인한다. 설정하지 않았으면 escalated=false
   const escalation = readEscalation(sessionEvents, escalationRecord(context));
+  // 계획-실행 분리(ADR-075)의 계획 원문을 세션을 내리기 전에 남긴다. E8은 벤치가 세션 폴더를 지워 계획 텍스트를 보지 못했다
+  const planBriefs: PlanBriefRecord[] = [...sessionEvents.entries()].flatMap(([id, events]) => planBriefsFromEvents(id, events));
   // trace 계산이 실패해도 실행 결과(성공·분류)는 바뀌지 않게, 그 세션의 trace만 생략하고 경고를 남긴다
   const traces: LaneTrace[] = [];
   for (const id of laneSessionIds) {
@@ -568,6 +570,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     contextCleared,
     escalation,
     ...(context.planModel || context.executeModel ? { planExecute: { ...(context.planModel ? { plan: context.planModel } : {}), ...(context.executeModel ? { execute: context.executeModel } : {}) } } : {}),
+    ...(planBriefs.length > 0 ? { planBriefs } : {}),
     metrics,
     coordination: plan.metrics?.coordination,
     contracts,

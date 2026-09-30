@@ -1,7 +1,7 @@
 import { normalizeMessage, signatureKey, type VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
 import type { StudioEvent } from '../../lib/studio-events';
-import { traceFromEvents } from './trace';
+import { planBriefsFromEvents, traceFromEvents } from './trace';
 
 const agent = (event: unknown): StudioEvent => ({ type: 'agent', runId: 'run-1', event }) as StudioEvent;
 const toolCall = (name: string, input: unknown): StudioEvent => agent({ type: 'tool_call', name, input });
@@ -94,6 +94,22 @@ describe('traceFromEvents', () => {
     expect(trace.toolCalls['__proto__']).toBe(2);
     expect(trace.toolCalls['constructor']).toBe(1);
     expect(Object.keys(trace.toolCalls).sort()).toEqual(['__proto__', 'constructor']);
+  });
+});
+
+describe('planBriefsFromEvents', () => {
+  it('plan_brief 이벤트만 뽑아 세션 id를 붙인다', () => {
+    const usage = { inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const events: StudioEvent[] = [
+      { type: 'notice', text: '무시', at: '' },
+      { type: 'plan_brief', runId: 'run-1', model: 'opus', text: '1. 파일을 고친다', usage, durationMs: 500 },
+      toolCall('read_file', { path: 'a.ts' }),
+    ];
+    expect(planBriefsFromEvents('s1', events)).toEqual([{ sessionId: 's1', runId: 'run-1', model: 'opus', text: '1. 파일을 고친다', usage, durationMs: 500 }]);
+  });
+
+  it('plan_brief 이벤트가 없으면 빈 배열이다', () => {
+    expect(planBriefsFromEvents('s1', [toolCall('read_file', { path: 'a.ts' })])).toEqual([]);
   });
 });
 
