@@ -108,6 +108,7 @@ export async function detectProject(folder: string): Promise<ProjectDetection> {
 
   const infra = await detectInfra(root, services, childDirNames);
   await wireServiceEnvironments(root, services, infra);
+  await disableSpringDockerCompose(root, services);
   return { folder: root, name, hasSpec: false, services, infra, warnings };
 }
 
@@ -211,6 +212,21 @@ async function wireServiceEnvironments(root: string, services: DetectedService[]
     service.dependsOn = wiring.dependsOn;
     // specYaml이 notes를 "# 확인: ..." 형태로 찍으므로 여기서는 접두사 없이 그대로 쌓는다
     service.notes.push(...wiring.notes);
+  }
+}
+
+/**
+ * Spring Boot의 spring-boot-docker-compose 모듈을 끈다. 이 모듈은 개발 실행 때 앱이 직접 docker compose를 띄우려 하는데,
+ * 샌드박스 안에는 compose 파일이 없어 "No Docker Compose file found"로 앱이 바로 죽는다(pay 복제본으로 실제 확인).
+ * 샌드박스는 부가 서비스를 이미 띄우고 접속 정보까지 넣으므로 이 모듈이 할 일이 없다. start.spring.io의 "Docker Compose Support"가 넣는 흔한 의존성이다
+ */
+async function disableSpringDockerCompose(root: string, services: DetectedService[]): Promise<void> {
+  for (const service of services) {
+    if (service.template !== 'spring-boot') continue;
+    const dependencyText = await appDependencyText(path.join(root, service.path), 'spring-boot');
+    if (!/spring-boot-docker-compose/.test(dependencyText)) continue;
+    service.environment = { ...service.environment, SPRING_DOCKER_COMPOSE_ENABLED: 'false' };
+    service.notes.push('spring-boot-docker-compose가 있어 샌드박스에서는 끕니다(SPRING_DOCKER_COMPOSE_ENABLED=false). 부가 서비스는 b-studio가 띄웁니다');
   }
 }
 
