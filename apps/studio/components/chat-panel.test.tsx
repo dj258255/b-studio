@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel, ModelPicker, ModelPickerDialog } from "./chat-panel";
+import { ChatPanel, ModelPicker, ModelPickerDialog, popoverPositionFor } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -215,5 +215,21 @@ describe("ModelPicker(대화 입력창의 모델 선택)", () => {
 
     expect(html).not.toContain('placeholder="모델 검색"');
     expect(html).toContain("Codex는 스튜디오가 미리 아는 모델 목록이 없습니다");
+  });
+});
+
+describe("popoverPositionFor(모델 선택 팝오버를 여는 자리)", () => {
+  const viewport = { width: 1512, height: 785 };
+
+  it("화면 아래 절반의 버튼(대화 입력창)이면 버튼 위로 연다 — 아래로 열면 목록이 화면 밖으로 나간다", () => {
+    expect(popoverPositionFor({ top: 736, bottom: 764, left: 1342 }, viewport)).toEqual({ bottom: 785 - 736 + 8, left: 1512 - 320 - 8 });
+  });
+
+  it("화면 위쪽 버튼이면 버튼 아래로 연다", () => {
+    expect(popoverPositionFor({ top: 20, bottom: 44, left: 100 }, viewport)).toEqual({ top: 52, left: 100 });
+  });
+
+  it("왼쪽 가장자리 밖으로도 나가지 않는다", () => {
+    expect(popoverPositionFor({ top: 20, bottom: 44, left: -30 }, viewport)).toEqual({ top: 52, left: 8 });
   });
 });

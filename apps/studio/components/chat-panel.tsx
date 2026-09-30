@@ -485,7 +485,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
               }
               className="w-full resize-none rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
-            <div className="mt-2 flex items-center justify-between gap-3">
+            {/* 대화 칸이 좁아 모델 이름이 길어지면 버튼 글자가 두 줄로 꺾였다 — 줄이 모자라면 체크박스 줄을 위로 넘긴다 */}
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
               {intent === "build" ? (
                 <label className="flex items-center gap-2 text-sm text-muted">
                   <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
@@ -494,7 +495,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               ) : (
                 <span />
               )}
-              <div className="flex items-center gap-2">
+              <div className="ml-auto flex shrink-0 items-center gap-2">
                 {picker && (
                   <ModelPicker
                     picker={picker}
@@ -507,7 +508,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
                 <button
                   type="submit"
                   disabled={!text.trim() || (runId ? !canSteer : !canSend)}
-                  className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+                  className="whitespace-nowrap rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
                 >
                   {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
                 </button>
@@ -1103,10 +1104,11 @@ function ModelPickerPopover({
   onChangeModel: (modelId: string) => void;
   onChangeEffort: (effort: string) => void;
 }) {
-  // 여는 자리는 눌린 버튼 바로 아래(body로 포털하므로 화면 좌표로 잡는다). 프로젝트 메뉴 팝오버와 같은 방식
-  const [position] = useState<{ top: number; left: number }>(() => {
+  // 여는 자리는 눌린 버튼 곁(body로 포털하므로 화면 좌표로 잡는다). 모델 버튼은 화면 아래쪽 입력창에 있어
+  // 아래로 열면 목록이 화면 밖으로 나가 고를 수 없었다 — 버튼이 화면 아래 절반에 있으면 위로 연다
+  const [position] = useState<PopoverPosition>(() => {
     const box = anchor.current?.getBoundingClientRect();
-    return box ? { top: box.bottom + 8, left: box.left } : { top: 0, left: 0 };
+    return box ? popoverPositionFor(box, { width: window.innerWidth, height: window.innerHeight }) : { top: 0, left: 0 };
   });
 
   useEffect(() => {
@@ -1121,10 +1123,26 @@ function ModelPickerPopover({
     <div className="fixed inset-0 z-40">
       {/* 바깥을 누르면 닫는다. 팝오버 자신은 이 뒤(DOM 순서상 위)에 그려 클릭이 여기로 새지 않는다 */}
       <button type="button" aria-label="모델 선택 닫기" onClick={onClose} className="absolute inset-0 cursor-default bg-transparent" />
-      <ModelPickerDialog style={{ top: position.top, left: position.left }} picker={picker} onChangeModel={onChangeModel} onChangeEffort={onChangeEffort} />
+      <ModelPickerDialog style={position} picker={picker} onChangeModel={onChangeModel} onChangeEffort={onChangeEffort} />
     </div>,
     document.body,
   );
+}
+
+/** 팝오버 폭(w-80 = 20rem)과 화면 가장자리 여백 */
+const POPOVER_WIDTH = 320;
+const POPOVER_GAP = 8;
+
+export type PopoverPosition = { left: number } & ({ top: number } | { bottom: number });
+
+/**
+ * 버튼 위치와 화면 크기로 팝오버를 열 자리를 정한다. 버튼이 화면 아래 절반이면 버튼 위로(bottom 기준),
+ * 아니면 버튼 아래로(top 기준) 연다. 오른쪽으로 넘치지 않게 left를 화면 안으로 당긴다
+ */
+export function popoverPositionFor(box: { top: number; bottom: number; left: number }, viewport: { width: number; height: number }): PopoverPosition {
+  const left = Math.max(POPOVER_GAP, Math.min(box.left, viewport.width - POPOVER_WIDTH - POPOVER_GAP));
+  if (box.top > viewport.height / 2) return { bottom: viewport.height - box.top + POPOVER_GAP, left };
+  return { top: box.bottom + POPOVER_GAP, left };
 }
 
 /** 팝오버가 실제로 그리는 내용(검색창 · 모델 목록 · 노력 단계). 포털을 감싸지 않아 단독으로도 그릴 수 있다 */
@@ -1134,7 +1152,7 @@ export function ModelPickerDialog({
   onChangeModel,
   onChangeEffort,
 }: {
-  style?: { top: number; left: number };
+  style?: PopoverPosition;
   picker: ModelPickerView;
   onChangeModel: (modelId: string) => void;
   onChangeEffort: (effort: string) => void;
