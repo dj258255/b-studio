@@ -6,11 +6,13 @@ const mocks = vi.hoisted(() => ({
   validateOpenCodeModel: vi.fn(async (modelId: string | undefined) => modelId),
   listSessions: vi.fn(async () => [] as Array<{ id: string; projectId: string }>),
   requireUser: vi.fn((): string => 'kim'),
+  projectModelDefault: vi.fn((): string | undefined => undefined),
 }));
 
 vi.mock('@/lib/server/access', () => ({ requireUser: mocks.requireUser }));
 vi.mock('@/lib/server/commandcode-models', () => ({ validateCommandCodeModelSelection: mocks.validateModel }));
 vi.mock('@/lib/server/opencode-models', () => ({ validateOpenCodeModelSelection: mocks.validateOpenCodeModel }));
+vi.mock('@/lib/server/model-defaults', () => ({ projectModelDefault: mocks.projectModelDefault }));
 // createSession·listSessions만 바꿔 끼우고 resolveSessionBackend(허용 목록 검증)는 실제 것을 쓴다
 vi.mock('@/lib/server/sessions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/server/sessions')>();
@@ -36,6 +38,8 @@ beforeEach(() => {
   mocks.listSessions.mockClear();
   mocks.listSessions.mockResolvedValue([]);
   mocks.requireUser.mockImplementation(() => 'kim');
+  mocks.projectModelDefault.mockClear();
+  mocks.projectModelDefault.mockReturnValue(undefined);
   process.env.B_STUDIO_MODE = 'api';
   delete process.env.B_STUDIO_BACKENDS;
 });
@@ -89,6 +93,35 @@ describe('POST /api/sessions', () => {
     const response = await post({ projectId: 'orders', backend: 3 });
     expect(response.status).toBe(400);
     expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it('모델을 따로 고르지 않으면 이 프로젝트·백엔드에서 대화로 마지막에 고른 모델(model-defaults)을 새 세션 기본값으로 쓴다', async () => {
+    mocks.projectModelDefault.mockReturnValue('haiku');
+    process.env.B_STUDIO_BACKENDS = 'claude-code';
+
+    const response = await post({ projectId: 'orders', backend: 'claude-code' });
+
+    expect(response.status).toBe(201);
+    expect(mocks.projectModelDefault).toHaveBeenCalledWith('orders', 'claude-code');
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'haiku', backend: 'claude-code', boot: 'on-demand' });
+  });
+
+  it('요청이 모델을 고르면 기억한 기본값보다 우선한다', async () => {
+    mocks.projectModelDefault.mockReturnValue('haiku');
+
+    const response = await post({ projectId: 'orders', modelId: 'opus' });
+
+    expect(response.status).toBe(201);
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: 'opus', backend: 'api', boot: 'on-demand' });
+  });
+
+  it('기억한 기본값이 "기본"(빈 문자열)이면 오버라이드 없이 만든다', async () => {
+    mocks.projectModelDefault.mockReturnValue('');
+
+    const response = await post({ projectId: 'orders' });
+
+    expect(response.status).toBe(201);
+    expect(mocks.createSession).toHaveBeenCalledWith('orders', 'kim', 'copy', { modelId: undefined, backend: 'api', boot: 'on-demand' });
   });
 });
 
