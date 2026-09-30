@@ -2,7 +2,7 @@
  * 대화 입력창의 모델 선택(#271 다음 요청, #283 다음 노력 단계). 세션 백엔드마다 고를 수 있는 모델 목록과
  * 노력(추론 강도) 단계를 만든다.
  *
- * claude-code는 스튜디오가 아는 별칭(opus·sonnet·haiku)만 보여준다. 별칭이 실제로 풀리는 모델 id와 공식 단가는
+ * claude-code는 스튜디오가 아는 별칭(fable·opus·sonnet·haiku)만 보여준다. 별칭이 실제로 풀리는 모델 id와 공식 단가는
  * E8 실험(2026-09-30)에서 관측·확인한 값이다(docs/experiments/2026-09-30-e8-plan-execute-split.md) — 추정치가 아니라
  * 그 실행에서 모델별 사용량에 그대로 찍힌 값이다. codex는 스튜디오가 미리 아는 모델 목록이 없어 기본만 내려준다.
  * commandcode·opencode는 각 CLI가 돌려주는 목록(이미 세션을 만들 때 쓰던 목록)을 그대로 재사용한다.
@@ -94,12 +94,22 @@ const NOT_SUPPORTED_REASON = '이 백엔드는 노력 단계를 지원하지 않
 
 /**
  * Claude Code 별칭. E8에서 관측한 대로: opus → claude-opus-5, sonnet → claude-sonnet-5, haiku → claude-haiku-4-5.
- * 단가는 그 실험이 확인한 공식 단가다(입력/출력, 백만 토큰당 USD). Claude Code가 별칭을 바꾸면 이 표도 따라 바뀔 수 있다.
+ * fable → claude-fable-5-1은 2026-10-01 Claude Code 2.1.285에서 `claude -p --model fable`의 modelUsage로 확인했다.
+ * 단가는 E8이 확인한 공식 단가다(입력/출력, 백만 토큰당 USD). fable은 공식 단가를 확인하지 못해 비워 둔다(지어내지 않는다) —
+ * 같은 실행에서 캐시 쓰기 27,468토큰이 $0.55로 찍혀 opus보다 비싸다는 것만 안다.
+ * 이름에 버전을 붙여 보여준다 — "Opus"만으로는 어느 세대인지 알 수 없다는 피드백. Claude Code가 별칭을 바꾸면 이 표도 따라 바뀐다.
  */
 const CLAUDE_CODE_ALIASES: ModelPickerOption[] = [
   {
+    id: 'fable',
+    label: 'Fable 5.1',
+    hint: '가장 새롭고 강한 모델입니다. Opus보다 비쌉니다',
+    badges: ['최신'],
+    resolvedId: 'claude-fable-5-1',
+  },
+  {
     id: 'opus',
-    label: 'Opus',
+    label: 'Opus 5',
     hint: '어려운 설계·디버깅에 강합니다',
     badges: ['깊은 추론'],
     resolvedId: 'claude-opus-5',
@@ -107,7 +117,7 @@ const CLAUDE_CODE_ALIASES: ModelPickerOption[] = [
   },
   {
     id: 'sonnet',
-    label: 'Sonnet',
+    label: 'Sonnet 5',
     hint: '대부분의 작업에 균형 잡힌 선택입니다',
     badges: ['권장'],
     resolvedId: 'claude-sonnet-5',
@@ -115,7 +125,7 @@ const CLAUDE_CODE_ALIASES: ModelPickerOption[] = [
   },
   {
     id: 'haiku',
-    label: 'Haiku',
+    label: 'Haiku 4.5',
     hint: '가장 저렴하고 빠릅니다. 작은 수정에 적합합니다',
     badges: ['빠름', '저렴'],
     resolvedId: 'claude-haiku-4-5',

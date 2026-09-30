@@ -25,6 +25,8 @@
 
 ### 수정
 
+- 대화 입력창의 모델·노력 팝오버가 버튼 아래로 열려 화면 밖으로 잘리고 고를 수 없던 것을 고칩니다. 버튼이 화면 아래쪽이면 위로 열고, 오른쪽 가장자리를 넘지 않게 당깁니다. 모델 이름이 길어지면 "요청 보내기"가 두 줄로 꺾이던 것도 고쳤습니다.
+- 모델 이름에 버전을 붙였습니다(Opus 5·Sonnet 5·Haiku 4.5). 로컬 Claude Agent에서 Fable 5.1(`fable` → `claude-fable-5-1`)도 고를 수 있습니다. Fable은 공식 단가를 확인하지 못해 단가를 표시하지 않습니다.
 - 기본 egress에 `github.com`·`release-assets.githubusercontent.com`·`objects.githubusercontent.com`을 더했습니다. Gradle 래퍼 배포판이 GitHub 릴리스로 넘어가 샌드박스에서 `403`으로 막히던 것을 고칩니다(ADR-086).
 - 폴더 열기(ADR-067)가 만드는 compose·Dockerfile이 서비스 폴더만 마운트하던 것을 프로젝트 루트 전체(`/workspace`) 마운트로 바꿨습니다. 멀티 모듈 Gradle·pnpm/npm 워크스페이스·서비스 폴더 밖 공유 설정(`$rootDir/../docs` 등)을 참조하는 빌드가 서비스 폴더만 보여 실패하던 문제를 고칩니다. 서비스는 `working_dir`로 자기 폴더에서 그대로 실행하고, Gradle·node_modules·build 출력 같은 프로젝트별 캐시 볼륨도 그 폴더 기준 경로로 옮겼습니다(의존성 캐시인 Gradle 홈·pnpm 스토어는 그대로 둡니다). 이미 열어 둔 프로젝트의 기존 생성 파일은 다시 열 때까지 그대로 둡니다(ADR-088).
 
