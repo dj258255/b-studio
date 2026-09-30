@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyCommit, generateCommitSubject } from './commit-message';
+import { classifyCommit, generateCommitSubject, toCommitMood } from './commit-message';
 import type { PendingChange } from './checkpoints';
 
 function change(file: string, kind: PendingChange['change'] = 'modified'): PendingChange {
@@ -22,21 +22,22 @@ describe('classifyCommit', () => {
     expect(classifyCommit('주문 취소 API 추가', [change('api/src/main/java/CancelOrder.java', 'added')])).toBe('feat');
   });
 
-  it('테스트·문서·새 파일이 아니면 요청 글의 낱말로 refactor·chore를 고르고, 없으면 fix로 둔다', () => {
+  it('테스트·문서·새 파일이 아니면 요청 글의 낱말로 fix·refactor·chore를 고르고, 없으면 feat로 둔다', () => {
     expect(classifyCommit('주문 서비스 구조 정리(리팩터링)', [change('api/src/main/java/Order.java')])).toBe('refactor');
     expect(classifyCommit('의존성 버전 올리기', [change('api/build.gradle')])).toBe('chore');
-    expect(classifyCommit('주문에 메모 필드 추가', [change('api/src/main/java/Order.java')])).toBe('fix');
+    expect(classifyCommit('주문에 메모 필드 추가', [change('api/src/main/java/Order.java')])).toBe('feat');
+    expect(classifyCommit('대시보드가 로딩에서 멈추는 버그를 고쳐 줘', [change('web/app/dashboard/page.tsx')])).toBe('fix');
   });
 
   it('바뀐 파일이 섞여 있으면(테스트+일반) test·docs·feat 전용 규칙에 걸리지 않는다', () => {
-    expect(classifyCommit('메모 필드 추가', [change('api/src/main/java/Order.java'), change('api/src/test/java/OrderTest.java', 'added')])).toBe('fix');
+    expect(classifyCommit('메모 필드 추가', [change('api/src/main/java/Order.java'), change('api/src/test/java/OrderTest.java', 'added')])).toBe('feat');
   });
 });
 
 describe('generateCommitSubject', () => {
   it('"타입: 요약" 형식으로 만들고 72자를 넘지 않는다', () => {
     const subject = generateCommitSubject('주문에 메모 필드 추가', [change('api/src/main/java/Order.java')]);
-    expect(subject).toBe('fix: 주문에 메모 필드 추가');
+    expect(subject).toBe('feat: 주문에 메모 필드 추가');
     expect(subject.length).toBeLessThanOrEqual(72);
   });
 
@@ -49,10 +50,20 @@ describe('generateCommitSubject', () => {
   });
 
   it('여러 줄 요청은 첫 줄만 쓴다', () => {
-    expect(generateCommitSubject('메모 필드 추가\n\n상세 설명은 여기', [change('api/src/main/java/Order.java')])).toBe('fix: 메모 필드 추가');
+    expect(generateCommitSubject('메모 필드 추가\n\n상세 설명은 여기', [change('api/src/main/java/Order.java')])).toBe('feat: 메모 필드 추가');
   });
 
   it('빈 요청은 "체크포인트"로 대신한다', () => {
-    expect(generateCommitSubject('   ', [change('api/src/main/java/Order.java')])).toBe('fix: 체크포인트');
+    expect(generateCommitSubject('   ', [change('api/src/main/java/Order.java')])).toBe('feat: 체크포인트');
+  });
+});
+
+describe('toCommitMood', () => {
+  it('부탁하는 말투를 커밋 문체로 바꾸고, 모르는 끝맺음은 그대로 둔다', () => {
+    expect(toCommitMood('주문 목록 API와 주문 목록 화면을 만들어 줘.')).toBe('주문 목록 API와 주문 목록 화면을 만든다');
+    expect(toCommitMood('대시보드 로딩 버그를 고쳐 주세요')).toBe('대시보드 로딩 버그를 고친다');
+    expect(toCommitMood('주문 취소 기능을 추가해 줘')).toBe('주문 취소 기능을 추가한다');
+    expect(toCommitMood('README를 써 줘')).toBe('README를 쓴다');
+    expect(toCommitMood('[R3] 주문 취소 API')).toBe('[R3] 주문 취소 API');
   });
 });
