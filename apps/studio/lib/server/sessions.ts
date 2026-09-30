@@ -3649,7 +3649,7 @@ export async function runSessionTests(
   const runner = await detectServiceRunner(session, entry[1]);
   if (!runner) throw new StudioError(400, `${input.service} 서비스의 테스트 실행기를 알아내지 못했습니다`);
 
-  const plan = buildTestRunPlan(runner, toTestTarget(runner, input));
+  const plan = buildTestRunPlan(runner, toTestTarget(runner, input), { wrapper: await hasBuildWrapper(session, entry[1].path, runner) });
   const controller = new AbortController();
   session.testControllers.set(input.service, controller);
   markTestsChanged(session);
@@ -3698,6 +3698,13 @@ export function cancelSessionTests(id: string, service: string): void {
  * 검증 게이트가 test 단계를 돌린 뒤(runAgent 결과에 checks가 있을 때) 다시 실행하지 않고 같은 보고서 파일을 모아 본다.
  * 사람이 지금 그 서비스의 테스트를 돌리고 있으면 건드리지 않는다. 무엇을 모으든 실패해도 요청 결과에 영향이 없다(최선만 한다)
  */
+/** 서비스 폴더에 빌드 도구 래퍼(gradlew·mvnw)가 있는지. 없으면 테스트도 이미지의 gradle·mvn으로 돌린다 */
+async function hasBuildWrapper(session: Session, servicePath: string, runner: string): Promise<boolean> {
+  const name = runner === 'gradle' ? 'gradlew' : runner === 'maven' ? 'mvnw' : undefined;
+  if (!name) return true;
+  return stat(path.join(session.project.root, servicePath, name)).then(() => true, () => false);
+}
+
 async function collectGateTestReports(session: Session): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
   let changed = false;
@@ -3707,7 +3714,7 @@ async function collectGateTestReports(session: Session): Promise<void> {
     if (serviceState?.state !== 'ready') continue;
     const runner = await detectServiceRunner(session, spec);
     if (!runner) continue;
-    const plan = buildTestRunPlan(runner);
+    const plan = buildTestRunPlan(runner, undefined, { wrapper: await hasBuildWrapper(session, spec.path, runner) });
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
     if (run.cases.length === 0) continue;
     session.testResults ??= new Map();
