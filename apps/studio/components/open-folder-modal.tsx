@@ -12,7 +12,7 @@ import { FolderBrowser } from "./folder-browser";
  * 더블클릭으로 오가는 탐색 모달을 쓴다. 확인하면 파일을 만들고 그 프로젝트의 개발 화면으로 이동한다.
  * body에 포털로 그린다 — 머리의 유리 효과(backdrop-filter)가 안쪽 fixed 요소의 기준을 머리로 바꿔 갇힌다(work-drawer와 같은 이유)
  */
-export function OpenFolderModal({ onClose }: { onClose: () => void }) {
+export function OpenFolderModal({ onClose, initialPath }: { onClose: () => void; /** 데스크톱 선택 창에서 이미 고른 폴더. 있으면 선택 단계 없이 제안부터 보인다 */ initialPath?: string }) {
   // 데스크톱 판단은 마운트 뒤(클라이언트에서)만 된다 — 서버 렌더는 항상 브라우저 쪽(FolderBrowser)으로 그려 SSR과 어긋나지 않게 한다
   const desktop = useHasDesktopBridge();
 
@@ -36,7 +36,7 @@ export function OpenFolderModal({ onClose }: { onClose: () => void }) {
             닫기
           </button>
         </div>
-        {desktop ? <DesktopFolderPicker /> : <FolderBrowser />}
+        {desktop || initialPath ? <DesktopFolderPicker initialPath={initialPath} /> : <FolderBrowser />}
       </div>
     </div>,
     document.body,

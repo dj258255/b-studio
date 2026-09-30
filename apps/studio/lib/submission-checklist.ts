@@ -242,7 +242,7 @@ function testFix(missing: ChecklistService[]): ChecklistFix {
     .join(', ');
   return {
     label: '테스트 추가',
-    prefill: `${detail}에 핵심 로직을 검증하는 단위 테스트를 추가해 주세요. 채점자가 clone 후 테스트 명령 하나로 결과를 확인할 수 있어야 합니다.`,
+    prefill: `${detail}에 핵심 로직을 검증하는 단위 테스트를 추가해 주세요. 다른 사람이 clone 후 테스트 명령 하나로 결과를 확인할 수 있어야 합니다.`,
   };
 }
 
@@ -408,7 +408,7 @@ export async function checkSeedData(root: string, hasDatabase: boolean): Promise
     fix: {
       label: '시드 데이터 만들기',
       prefill:
-        '채점자가 clone 후 바로 데이터를 볼 수 있도록, 여러 번 실행해도 같은 결과가 되는(idempotent) 시드 스크립트를 만들고 ' +
+        '다른 사람이 clone 후 바로 데이터를 볼 수 있도록, 여러 번 실행해도 같은 결과가 되는(idempotent) 시드 스크립트를 만들고 ' +
         '한 번의 명령(docker compose up 뒤 자동 실행되거나 별도 스크립트 하나)으로 마이그레이션과 시드 데이터가 함께 들어가게 해주세요.',
     },
   };

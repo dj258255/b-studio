@@ -2527,9 +2527,9 @@ export async function previewExport(id: string, { issues = [] }: { issues?: read
 }
 
 /**
- * "제출 준비" 패널(ADR-080)의 점검표. 요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서를 한 번에 확인한다.
- * 실제 점검 규칙은 세션을 모르는 순수 함수(lib/submission-checklist.ts)에 있고, 여기서는 세션이 들고 있는 프로젝트 폴더·
- * 체크포인트·저장소 상태를 그 함수가 받는 모양으로 조립하기만 한다
+ * "저장소" 탭의 "올리기 전 점검" 하위 탭(ADR-080, ADR-087)의 점검표. 요구사항·테스트·실행·환경 변수·데이터·비밀 값·
+ * 커밋 기록·작업 트리/원격·문서를 한 번에 확인한다. 실제 점검 규칙은 세션을 모르는 순수 함수(lib/submission-checklist.ts)에
+ * 있고, 여기서는 세션이 들고 있는 프로젝트 폴더·체크포인트·저장소 상태를 그 함수가 받는 모양으로 조립하기만 한다
  */
 /** compose 파일에 DB 이미지(postgres·mysql·mariadb·mongo 등)를 쓰는 서비스가 있는지 */
 async function composeHasDatabase(composePath: string): Promise<boolean> {

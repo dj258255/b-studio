@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { desktopBridge } from "@/lib/desktop-bridge";
 import { FolderProposalView } from "./folder-proposal-view";
 import { useFolderProposal } from "./use-folder-proposal";
@@ -10,9 +10,19 @@ import { useFolderProposal } from "./use-folder-proposal";
  * `window.bStudioDesktop.pickFolder()`가 있을 때만 쓴다(`open-folder-modal.tsx`가 있고 없음을 미리 본다) —
  * 고른 경로는 바로 제안을 받아 보여주고, 따로 "살펴보기" 단계가 없다.
  */
-export function DesktopFolderPicker() {
+export function DesktopFolderPicker({ initialPath }: { initialPath?: string } = {}) {
   const [pending, setPending] = useState(false);
   const proposal = useFolderProposal();
+  const proposed = useRef(false);
+
+  // 메뉴에서 이미 폴더를 골라 왔으면(데스크톱) 선택 단계 없이 바로 제안을 받는다
+  useEffect(() => {
+    if (!initialPath || proposed.current) return;
+    proposed.current = true;
+    void proposal.propose(initialPath);
+    // proposal은 매 렌더 새 객체라 의존성에서 뺀다(처음 한 번만 부른다)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPath]);
 
   async function pick(): Promise<void> {
     const bridge = desktopBridge();
@@ -26,9 +36,13 @@ export function DesktopFolderPicker() {
   return (
     <div className="p-5">
       <h2 className="text-lg font-semibold">폴더 열기</h2>
-      <p className="mt-1 text-sm leading-6 text-muted">
-        이 PC의 프로젝트 폴더를 엽니다. studio.yaml이 없으면 폴더를 보고 Next.js·Vite·Spring Boot·FastAPI를 찾아 실행 설정을 만들어 보여 줍니다.
-      </p>
+      {initialPath ? (
+        <p className="mt-1 break-all font-mono text-xs text-muted">{initialPath}</p>
+      ) : (
+        <p className="mt-1 text-sm leading-6 text-muted">
+          이 PC의 프로젝트 폴더를 엽니다. studio.yaml이 없으면 폴더를 보고 Next.js·Vite·Spring Boot·FastAPI를 찾아 실행 설정을 만들어 보여 줍니다.
+        </p>
+      )}
       <button
         type="button"
         onClick={() => void pick()}
