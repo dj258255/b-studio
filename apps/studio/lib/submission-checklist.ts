@@ -511,20 +511,35 @@ export async function checkWorkingTree(pendingFilesCount: number, repository: Ch
 // 9. 문서 (README 구성)
 // ---------------------------------------------------------------------------
 
+/** 제목 앞의 번호("3. ", "3) ")까지 허용한다. 실제 README(pay)의 "### 3. 테스트"를 놓치던 것을 고쳤다 */
+const HEADING = String.raw`^#{1,4}\s*(?:\d+[.)]\s*)?`;
 const README_SECTIONS: Array<{ label: string; pattern: RegExp }> = [
-  { label: '개요', pattern: /^#{1,3}\s*(개요|overview|introduction)/im },
-  { label: '실행 방법', pattern: /^#{1,3}\s*(실행\s*방법|실행|how to run|getting started|quick ?start)/im },
-  { label: 'API', pattern: /^#{1,3}\s*api\b/im },
-  { label: '테스트', pattern: /^#{1,3}\s*(테스트|test(ing)?)/im },
-  { label: '설계 결정', pattern: /^#{1,3}\s*(설계\s*결정|트레이드오프|design decisions?|trade-?offs?)/im },
+  { label: '개요', pattern: new RegExp(`${HEADING}(개요|소개|요약|핵심\\s*결과|overview|introduction|about|summary)`, 'im') },
+  { label: '실행 방법', pattern: new RegExp(`${HEADING}(실행|시작하기|빠른\\s*시작|설치|how to run|getting started|quick ?start|setup|installation|run)`, 'im') },
+  { label: 'API', pattern: new RegExp(`${HEADING}(api\\b|엔드포인트|endpoints?|swagger|openapi|rest\\b)`, 'im') },
+  { label: '테스트', pattern: new RegExp(`${HEADING}(테스트|test(ing|s)?)`, 'im') },
+  { label: '설계 결정', pattern: new RegExp(`${HEADING}(설계|아키텍처|트레이드오프|결정|architecture|design|trade-?offs?)`, 'im') },
 ];
+
+/** 첫 제목 바로 아래에 소개 문단이 있으면 개요가 있다고 본다(많은 README가 "개요" 제목 없이 소개로 시작한다) */
+function hasIntroParagraph(readme: string): boolean {
+  const lines = readme.split('\n');
+  const first = lines.findIndex((line) => /^#\s/.test(line));
+  if (first === -1) return false;
+  for (const line of lines.slice(first + 1)) {
+    if (/^#{1,6}\s/.test(line)) return false;
+    const text = line.replace(/!\[[^\]]*\]\([^)]*\)|\[!\[.*$|<[^>]+>/g, '').trim();
+    if (text.length >= 20) return true;
+  }
+  return false;
+}
 
 export async function checkReadmeSections(root: string, services: ChecklistService[]): Promise<ChecklistItem> {
   const id = 'docs';
   const title = '문서';
   const readme = await findReadme(root);
   if (readme === undefined) return { id, title, status: 'fail', reason: 'README가 없습니다.', fix: readmeFix(services) };
-  const missing = README_SECTIONS.filter((section) => !section.pattern.test(readme)).map((section) => section.label);
+  const missing = README_SECTIONS.filter((section) => !section.pattern.test(readme) && !(section.label === '개요' && hasIntroParagraph(readme))).map((section) => section.label);
   if (missing.length === 0) return { id, title, status: 'pass', reason: '개요·실행 방법·API·테스트·설계 결정 항목이 README에 모두 있습니다.' };
   return { id, title, status: 'warn', reason: `README에 없는 항목: ${missing.join(', ')}.`, fix: readmeFix(services) };
 }

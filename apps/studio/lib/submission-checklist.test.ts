@@ -306,3 +306,23 @@ describe('checkRequirements — 명세 탭 상태', () => {
     expect((await checkRequirements(root, [{ id: 'R1', title: '목록 API', priority: 'must', status: '검증됨' }])).status).toBe('pass');
   });
 });
+
+describe('checkReadmeSections — 실제 README 제목', () => {
+  it('번호 붙은 제목·아키텍처·핵심 설계·첫 제목 아래 소개 문단을 인정한다(pay README 구조)', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-readme-'));
+    await writeFile(
+      path.join(root, 'README.md'),
+      '# BE-commerce\n\n결제와 정산을 다루는 커머스 백엔드입니다. 실패를 지우지 않고 확정하는 흐름을 보여 줍니다.\n\n## 아키텍처\n\n## 핵심 설계\n\n## 실행\n\n### 1. 애플리케이션\n\n### 3. 테스트\n\n## API 목록\n',
+    );
+    const item = await checkReadmeSections(root, []);
+    expect(item.status).toBe('pass');
+  });
+
+  it('소개 문단도 개요 제목도 없으면 개요가 없다고 한다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-readme-'));
+    await writeFile(path.join(root, 'README.md'), '# 앱\n\n## 실행\n\n## API\n\n## 테스트\n\n## 설계 결정\n');
+    const item = await checkReadmeSections(root, []);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('개요');
+  });
+});
