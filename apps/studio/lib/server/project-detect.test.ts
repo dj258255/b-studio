@@ -124,6 +124,250 @@ describe('detectProject', () => {
   });
 });
 
+const springJpaGradle = `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'org.postgresql:postgresql'\n}`;
+
+describe('detectProject: 부가 서비스(ADR-073)', () => {
+  it('compose.yaml에서 postgres·redis를 가져오고, Spring 설정에서 참조를 찾아 접속 환경 변수를 채운다', async () => {
+    const root = await repo({
+      'build.gradle': springJpaGradle,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\nspring.data.redis.host=localhost\n',
+      'compose.yaml': [
+        'services:',
+        '  db:',
+        '    image: postgres:17-alpine',
+        '    ports: ["5432:5432"]',
+        '    environment:',
+        // 일부러 'app'과 다른 이름·비밀번호를 써서, 지어낸 고정값이 아니라 실제 compose 값을 읽었는지 확인한다
+        '      POSTGRES_DB: shop',
+        '      POSTGRES_USER: shopuser',
+        '      POSTGRES_PASSWORD: shopsecret',
+        '    healthcheck:',
+        '      test: ["CMD-SHELL", "pg_isready -U shopuser -d shop"]',
+        '  cache:',
+        '    image: redis:7-alpine',
+        '  app:',
+        '    build: { context: . }',
+        '    depends_on: [db, cache]',
+        '',
+      ].join('\n'),
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.infra.map((service) => service.name).sort()).toEqual(['cache', 'db']);
+    const db = detection.infra.find((service) => service.name === 'db')!;
+    expect(db.proposed).toBeUndefined();
+    expect('sourceFile' in db && db.sourceFile).toBe('compose.yaml');
+
+    const service = detection.services[0]!;
+    // compose의 실제 POSTGRES_DB/USER/PASSWORD(shop/shopuser/shopsecret)로 채워야 한다 — 'app'/'app' 같은 지어낸 값이면 안 된다
+    expect(service.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:postgresql://db:5432/shop',
+      SPRING_DATASOURCE_USERNAME: 'shopuser',
+      SPRING_DATASOURCE_PASSWORD: 'shopsecret',
+      SPRING_DATA_REDIS_HOST: 'cache',
+    });
+    expect(service.dependsOn.sort()).toEqual(['cache', 'db']);
+    expect(service.notes.some((note) => note.includes('환경 변수에서 그대로 가져왔습니다'))).toBe(true);
+
+    const files = generateFiles(detection);
+    const compose = files.find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('# compose.yaml에서 가져왔습니다');
+    // 콜론·슬래시가 있는 값은 따옴표로 감싼다(yamlString)
+    expect(compose).toContain('SPRING_DATASOURCE_URL: "jdbc:postgresql://db:5432/shop"');
+    expect(compose).toContain('SPRING_DATASOURCE_USERNAME: shopuser');
+    // db는 원래 healthcheck가 있었고, cache(redis)는 없었지만 기본 healthcheck(redis-cli ping)를 붙여 둘 다 service_healthy를 쓴다
+    expect(compose).toContain('db: { condition: service_healthy }');
+    expect(compose).toContain('cache: { condition: service_healthy }');
+    expect(compose).toContain("test: [\"CMD\",\"redis-cli\",\"ping\"]");
+
+    const spec = files.find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('databases:');
+    expect(spec).toContain('db: { engine: postgres, database: shop, user: shopuser }');
+
+    // 실제로 b-studio가 파싱할 수 있어야 한다(depends_on의 목록·맵 문법이 섞이면 여기서 걸린다)
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+      await writeFile(path.join(root, file.path), file.content);
+    }
+    await expect(loadProject(root)).resolves.toBeDefined();
+  });
+
+  it('compose가 없어도 JPA+postgresql 의존성이 있으면 postgres를 새로 제안한다', async () => {
+    const root = await repo({ 'build.gradle': springJpaGradle });
+
+    const detection = await detectProject(root);
+
+    expect(detection.infra).toHaveLength(1);
+    const proposed = detection.infra[0]!;
+    expect(proposed.proposed).toBe(true);
+    expect(proposed.engine).toBe('postgres');
+    expect('reason' in proposed && proposed.reason).toContain('postgres');
+
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('# 확인:');
+    expect(compose).toContain('image: postgres:17-alpine');
+  });
+
+  it('부가 서비스가 있어도 b-studio가 만든 파일을 그대로 읽는다', async () => {
+    const root = await repo({
+      'build.gradle': springJpaGradle,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\n',
+      'compose.yaml': 'services:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_DB: app\n      POSTGRES_USER: app\n',
+    });
+    const detection = await detectProject(root);
+    const files = generateFiles(detection);
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+      await writeFile(path.join(root, file.path), file.content);
+    }
+
+    const project = await loadProject(root);
+    expect(project.composeServices).toContain('db');
+    expect(project.databases.map(([name]) => name)).toEqual(['db']);
+  });
+
+  it('build가 있는 서비스(앱 자신)와 profiles가 있는 서비스는 가져오지 않는다', async () => {
+    const root = await repo({
+      'package.json': nextPackage,
+      'compose.yaml': ['services:', '  db:', '    image: postgres:17-alpine', '  web:', '    build: { context: . }', '  metrics:', '    image: prom/prometheus:v2.54.1', '    profiles: ["monitoring"]', ''].join('\n'),
+    });
+
+    const { infra } = await detectProject(root);
+
+    expect(infra.map((service) => service.name)).toEqual(['db']);
+  });
+
+  it('pay를 본뜬 mysql·kafka 픽스처: 지어낸 app/app이 아니라 실제 MYSQL_*·Kafka 광고 리스너 값으로 채운다(읽기 전용으로 확인한 실제 저장소 값)', async () => {
+    const root = await repo({
+      'build.gradle': `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'com.mysql:mysql-connector-j'\n}`,
+      'src/main/resources/application.properties': ['spring.datasource.url=jdbc:mysql://localhost:3306/becommerce', 'spring.kafka.bootstrap-servers=localhost:9092', ''].join('\n'),
+      'compose.yaml': [
+        'services:',
+        '  mysql:',
+        '    image: mysql:8.4',
+        '    ports: ["3306:3306"]',
+        '    environment:',
+        '      MYSQL_DATABASE: becommerce',
+        '      MYSQL_USER: becommerce',
+        '      MYSQL_PASSWORD: becommerce',
+        '      MYSQL_ROOT_PASSWORD: root',
+        '  kafka:',
+        '    image: apache/kafka:3.8.0',
+        '    ports: ["9092:9092"]',
+        '    environment:',
+        '      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:29092"',
+        '  app:',
+        '    profiles: ["app"]',
+        '    build: { context: . }',
+        '    depends_on: [mysql, kafka]',
+        '',
+      ].join('\n'),
+    });
+
+    const detection = await detectProject(root);
+    const service = detection.services[0]!;
+
+    expect(service.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:mysql://mysql:3306/becommerce',
+      SPRING_DATASOURCE_USERNAME: 'becommerce',
+      SPRING_DATASOURCE_PASSWORD: 'becommerce',
+      // kafka:29092(INTERNAL)가 컨테이너 사이 주소다. kafka:9092로 추측하면 광고된 listener(localhost:9092, PLAINTEXT)로 리다이렉트돼 접속에 실패한다
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: 'kafka:29092',
+    });
+
+    // mysql은 healthcheck가 없었지만 기본값(mysqladmin ping)을 붙여 service_healthy를 쓰고, kafka는 기본 healthcheck 대상이 아니라 service_started를 쓴다
+    // — 둘 다 맵 문법이라 목록·맵이 섞이는 잘못된 YAML이 되지 않는다
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('mysql: { condition: service_healthy }');
+    expect(compose).toContain('kafka: { condition: service_started }');
+    expect(compose).toContain('test: ["CMD","mysqladmin","ping","-h","localhost","-ubecommerce","-pbecommerce"]');
+  });
+
+  const edumeetCompose = [
+    'services:',
+    '  mysql:',
+    '    image: mysql:8.0',
+    '    container_name: edumeet-mysql',
+    // 실제 edumeet은 자격 증명을 environment가 아니라 env_file(.env)로만 받는다 — 이 버그의 핵심
+    '    env_file: .env',
+    '    ports: ["3306:3306"]',
+    '  redis:',
+    '    image: redis:7-alpine',
+    '    container_name: edumeet-redis',
+    '    command: redis-server --appendonly yes',
+    '  app:',
+    '    image: ${DOCKER_HUB_REPO}:${IMAGE_TAG:-latest}',
+    '    env_file: .env',
+    '    depends_on: [mysql, redis]',
+    '',
+  ].join('\n');
+
+  it('edumeet을 본뜬 픽스처: mysql이 env_file(.env)로만 자격 증명을 받고 저장소에 .env가 없으면, 개발용 값(app/app/app, root)을 채우고 확인 메모를 남긴다', async () => {
+    const root = await repo({
+      'build.gradle': `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'com.mysql:mysql-connector-j'\n}`,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:mysql://localhost:3306/edumeet\nspring.data.redis.host=localhost\n',
+      'compose.yaml': edumeetCompose,
+    });
+
+    const detection = await detectProject(root);
+
+    const mysql = detection.infra.find((service) => service.name === 'mysql')!;
+    expect(mysql.environment).toEqual({ MYSQL_DATABASE: 'app', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app', MYSQL_ROOT_PASSWORD: 'root' });
+    expect(mysql.notes).toEqual(['원래 compose는 env_file(.env)로 받는데 저장소에 없어 개발용 값을 넣었습니다']);
+    // healthcheck가 없었으니 기본값(mysqladmin ping)을 붙여 depends_on이 service_healthy를 쓸 수 있게 한다
+    expect(mysql.healthcheck).toEqual({ test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uapp', '-papp'], interval: '5s', timeout: '3s', retries: 10 });
+
+    const redis = detection.infra.find((service) => service.name === 'redis')!;
+    expect(redis.healthcheck).toEqual({ test: ['CMD', 'redis-cli', 'ping'], interval: '2s', timeout: '3s', retries: 10 });
+
+    // 앱 서비스는 (지어낸 것이 아니라) mysql에 채운 개발용 기본값과 같은 값으로 배선되고, 그 값이 기본값이라는 확인 메모가 남는다
+    const service = detection.services[0]!;
+    expect(service.environment).toEqual({
+      SPRING_DATASOURCE_URL: 'jdbc:mysql://mysql:3306/app',
+      SPRING_DATASOURCE_USERNAME: 'app',
+      SPRING_DATASOURCE_PASSWORD: 'app',
+      SPRING_DATA_REDIS_HOST: 'redis',
+    });
+    expect(service.notes.some((note) => note.includes('개발용 기본값'))).toBe(true);
+
+    const files = generateFiles(detection);
+    const compose = files.find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('# 확인: 원래 compose는 env_file(.env)로 받는데 저장소에 없어 개발용 값을 넣었습니다');
+    expect(compose).toContain('mysql: { condition: service_healthy }');
+    expect(compose).toContain('redis: { condition: service_healthy }');
+
+    // 실제로 파싱되는지도 확인한다(healthcheck·환경 변수가 유효한 YAML인지)
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+      await writeFile(path.join(root, file.path), file.content);
+    }
+    await expect(loadProject(root)).resolves.toBeDefined();
+  });
+
+  it('edumeet을 본뜬 픽스처: .env가 저장소에 있어도 내용을 읽지 않고, 메모 문구만 "샌드박스 복사본에는 담기지 않는다"로 바뀐다', async () => {
+    const root = await repo({
+      'build.gradle': `plugins { id 'org.springframework.boot' version '3.5.0' }\ndependencies {\n  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'\n  runtimeOnly 'com.mysql:mysql-connector-j'\n}`,
+      'src/main/resources/application.properties': 'spring.datasource.url=jdbc:mysql://localhost:3306/edumeet\n',
+      'compose.yaml': edumeetCompose,
+      // 실제 비밀값이 든 것처럼 꾸민 .env — 절대 읽거나 생성 파일에 담기지 않아야 한다
+      '.env': 'MYSQL_ROOT_PASSWORD=super-secret-value\nMYSQL_DATABASE=real_db\n',
+    });
+
+    const detection = await detectProject(root);
+    const mysql = detection.infra.find((service) => service.name === 'mysql')!;
+
+    expect(mysql.notes).toEqual(['원래 compose는 env_file(.env)로 받는데, 샌드박스 복사본에는 .env가 들어가지 않아 개발용 값을 넣었습니다']);
+    // .env가 있어도 내용은 여전히 읽지 않는다 — 개발용 기본값(app)을 그대로 쓴다
+    expect(mysql.environment).toEqual({ MYSQL_DATABASE: 'app', MYSQL_USER: 'app', MYSQL_PASSWORD: 'app', MYSQL_ROOT_PASSWORD: 'root' });
+
+    const compose = generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).not.toContain('super-secret-value');
+    expect(compose).not.toContain('real_db');
+    expect(compose).toContain('샌드박스 복사본에는 .env가 들어가지 않아');
+  });
+});
+
 describe('sanitize', () => {
   it('studio.yaml 이름 규칙(소문자로 시작, 소문자·숫자·-)에 맞춘다', () => {
     expect(sanitize('My_App 2')).toBe('my-app-2');

@@ -2882,10 +2882,54 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-073 폴더를 열 때 기존 compose의 DB·Redis·Kafka 같은 부가 서비스를 함께 가져온다
+
+상태: 채택
+관련: #230
+
+### 맥락
+- ADR-067("아무 폴더나 프로젝트로 연다")은 감수한 트레이드오프로 "DB 같은 부가 서비스는 만들지 않습니다. 앱이 DB를 요구하면 첫 기동이 실패할 수 있고, compose에 직접 더해야 합니다"라고 적어 두었다. 실제로 pay·edumeet·dbtower처럼 DB·Redis·Kafka가 있어야 도는 저장소는 폴더 열기만으로는 첫 기동이 실패했다.
+- 이 저장소들은 이미 `compose.yaml`이나 `docker-compose.yml`에 부가 서비스를 선언해 뒀다. 사람이 다시 적을 필요 없이 거기서 읽어 오면 된다.
+- 샌드박스 네트워크는 edge 프록시로 격리돼 있어(`packages/sandbox/src/edge-config.ts`) 부가 컨테이너 이미지를 받는 것은 프록시를 거치지 않고 Docker 데몬이 직접 한다 — 격리 모델을 건드리지 않는다.
+- 개발 화면 머리(session-header)의 서비스 상태 줄은 관리형 서비스(studio.yaml에 적은 것)만 하드코딩해 보여줬다. 부가 서비스가 생기면 이 줄에도 나와야 하는데, 관리형과 똑같이 한 줄씩 늘어놓으면 부가 서비스가 여럿인 저장소(dbtower처럼 DB가 여러 엔진)에서 줄이 너무 길어진다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 여전히 사람이 compose.b-studio.yaml에 부가 서비스를 직접 적는다(지금 방식) | ADR-067이 이미 감수하기로 한 트레이드오프지만, 매번 반복 작업이고 저장소에 이미 있는 정보를 다시 베껴 적어야 한다 |
+| B. 알려진 이미지 이름으로 기존 compose에서 부가 서비스를 가져오고, 없으면 의존성을 보아 postgres를 제안한다(채택) | 이미 있는 정보를 재사용한다. 이미지 이름 매칭이라는 휴리스틱을 쓰지만 사람이 확인하는 제안 화면을 거치므로 틀려도 고칠 수 있다 |
+| C. Testcontainers처럼 앱 실행 시점에 컨테이너를 동적으로 띄운다 | b-studio의 실행 단위는 compose 파일이라 이 방식은 전체 아키텍처(스냅샷·체크포인트·관제)와 맞지 않는다 |
+
+### 결정
+- **가져오는 곳은 `apps/studio/lib/server/project-detect.ts`, 순수 판단 로직은 `packages/spec/src/compose-import.ts`에 둔다.** apps/studio는 `yaml` 패키지를 직접 물고 있지 않고(직접 의존성이 아니면 pnpm이 해석해 주지 않는다), `@b-studio/spec`은 이미 그 패키지를 쓰고 있다. 새 의존성을 추가하지 않고 기존 경계(파일을 찾고 읽는 I/O는 apps/studio, YAML을 해석하고 판단하는 순수 함수는 packages/spec)를 그대로 지켰다.
+- **compose 파일 찾기**: 프로젝트 폴더 바로 아래, 그다음 한 단계 아래에서 `compose.yaml → compose.yml → docker-compose.yml → docker-compose.yaml → docker-compose.dev.yml → docker-compose.local.yml` 순서로 찾는다. 운영용으로 보이는 이름(`*.prod.*`, `*.production.*`)은 개발용이 있으면 건너뛴다. pay(`compose.yaml`)·edumeet(`docker-compose.yml`, `docker-compose.prod.yml`은 건너뜀)·dbtower(`docker-compose.yml`)로 실제 확인했다.
+- **가져오는 기준(휴리스틱)**: `image`가 postgres·mysql·mariadb·redis·valkey·kafka(bitnami/confluent/apache)·zookeeper·rabbitmq·mongo·elasticsearch/opensearch·minio·mailhog/mailpit·localstack 계열이면 가져온다. `build`가 있는 서비스(이미지를 pull하지 않고 직접 빌드하는, 저장소의 앱 자신일 가능성이 큰 서비스)와 `profiles`가 있는 서비스(CDC·관측성처럼 기본 기동에 포함되지 않는 것)는 뺀다. 호스트 포트 발행·호스트 바인드 마운트·`container_name`·`networks`·`build`는 버리고, 이름 있는 볼륨만 서비스 접두사를 붙여 새로 가져온다. `environment`·`command`·`healthcheck`·(가져온 서비스끼리의) `depends_on`은 그대로 옮긴다.
+- **compose가 없어도** Spring(`spring-boot-starter-data-jpa` + `postgresql` 드라이버)이나 FastAPI(`psycopg`, 또는 SQLAlchemy+postgres) 의존성이 보이면 postgres 하나를 새로 제안한다(프로젝트당 하나만). 두 경우 모두 사람이 확인하는 폴더 열기 미리보기 화면(`open-folder.tsx`)에 부가 서비스 목록으로 나오고, 가져왔으면 어느 파일에서 왔는지, 제안이면 왜 제안했는지를 함께 보여준다.
+- **접속 환경 변수 채우기**: 관리형 서비스의 설정(Spring `application.properties`/`.yml`, FastAPI·Next·Vite의 `.env.example`)에서 `jdbc:postgresql`·`psycopg`·`spring.data.redis`·`REDIS_HOST`·`spring.kafka`·`KAFKA_BOOTSTRAP` 같은 문구를 찾아, 맞는 부가 서비스가 있으면 Spring은 `SPRING_DATASOURCE_URL`/`_USERNAME`/`_PASSWORD`·`SPRING_DATA_REDIS_HOST`·`SPRING_KAFKA_BOOTSTRAP_SERVERS`를, 그 밖은 `DATABASE_URL`·`REDIS_HOST`/`REDIS_URL`·`KAFKA_BOOTSTRAP_SERVERS`를 채운다.
+  - **데이터베이스 이름·계정·비밀번호는 고정값을 지어내지 않고, 가져오거나 제안한 서비스의 실제 환경 변수에서 읽는다.** mysql/mariadb는 `MYSQL_DATABASE`/`MYSQL_USER`/`MYSQL_PASSWORD`(MariaDB는 `MARIADB_*`)를 보고, 전용 계정이 없으면(pay의 mysql처럼 `MYSQL_USER`가 없을 수 있는 compose도 있어) `root` + `MYSQL_ROOT_PASSWORD`로 내려간다. postgres는 `POSTGRES_DB`/`POSTGRES_USER`/`POSTGRES_PASSWORD`를 보되, 공식 이미지 기본값(`POSTGRES_USER` 없으면 `postgres`, `POSTGRES_DB` 없으면 `POSTGRES_USER` 값)을 따른다. `${VAR:-기본값}` 형태의 compose 변수 치환은 기본값만 취하고, 기본값 없는 `${VAR}`는 알 수 없는 값으로 보아 쓰지 않는다.
+  - **env_file로만 자격 증명을 받거나(edumeet의 mysql처럼) 아예 값이 없어 실제로 쓸 수 있는 비밀번호를 못 구하면, 가져온 서비스 자체에 개발용 기본값을 채운다**(mysql: `MYSQL_DATABASE/USER/PASSWORD=app`, `MYSQL_ROOT_PASSWORD=root`, postgres: `POSTGRES_DB/USER/PASSWORD=app`) — 공식 이미지는 비밀번호 없이는 아예 기동을 거부하므로(postgres는 `POSTGRES_PASSWORD` 없이, mysql은 루트 비밀번호 없이), 값을 채우지 않고 두면 부가 서비스 자체가 못 뜬다. `env_file`은 이름만 기록하고(예: `.env`) 내용은 절대 읽지 않는다 — 저장소에 파일이 있어도, 세션 폴더 복사본에는 담기지 않으므로 어차피 못 쓴다. 이미 있는 키(예: `MYSQL_DATABASE`만 적혀 있음)는 그대로 두고 없는 키만 채우며, "# 확인: 원래 compose는 env_file(.env)로 받는데 저장소에 없어 개발용 값을 넣었습니다"(파일이 저장소에도 있으면 "샌드박스 복사본에는 .env가 들어가지 않아"로 문구만 바뀐다) 주석을 남긴다. 앱 쪽 배선에도 같은 값을 쓰고, 개발용 기본값임을 알리는 별도 메모를 남긴다. 제안한 postgres는 애초에 이 환경 변수를 우리가 채워 두므로 같은 경로를 타 항상 값을 찾는다.
+  - **Kafka 부트스트랩 주소는 `KAFKA_ADVERTISED_LISTENERS`(bitnami는 `KAFKA_CFG_ADVERTISED_LISTENERS`)를 파싱해, 광고 호스트가 서비스 이름과 같은 리스너를 고른다.** pay처럼 `PLAINTEXT://localhost:9092,INTERNAL://kafka:29092`로 광고하면 `localhost:9092`(호스트 전용)가 아니라 `kafka:29092`(컨테이너 사이 주소, INTERNAL 리스너)를 쓴다 — 기본 포트로만 추측하면 컨테이너 안에서 `kafka:9092`로 접속했다가 광고된 `localhost`로 리다이렉트돼 실패한다. 맞는 리스너를 못 찾으면 기본 포트(9092)로 추측하고 "확인:" 메모를 남긴다.
+  - **redis·postgres는 `command`에 `--port`/`-p`로 포트를 바꿨으면 그 값을 쓴다**(간단한 형태만 파싱하고, 복잡하면 건너뛴다).
+  - 모두 부분적으로는 추측(포트·리스너 매칭 실패 시 기본값 등)일 수 있어 studio.yaml·compose.b-studio.yaml에 "확인:" 주석을 함께 남긴다.
+- **databases: 항목**은 가져오거나 제안한 postgres가 `POSTGRES_DB`·`POSTGRES_USER`를 SQL 식별자로 갖고 있을 때만(schema.ts의 `DatabaseSchema` 요건) studio.yaml에 적어, 체크포인트 스냅샷 대상이 되게 한다. mysql 등 다른 엔진은 스키마가 postgres만 받으므로 databases: 항목을 만들지 않는다(부가 서비스로는 여전히 뜬다).
+- **healthcheck가 없는 postgres/mysql/mariadb/redis/valkey는 기본 healthcheck를 붙인다**(`pg_isready`, `mysqladmin ping`, `redis-cli ping`) — edumeet의 mysql·redis처럼 healthcheck가 아예 없으면 `depends_on`이 `service_started`만 쓸 수 있어, 컨테이너가 뜨자마자(포트를 열기 전에) Spring 등이 접속을 시도하다 깨지는 경합이 생긴다. mysql/mariadb의 healthcheck는 (개발용 기본값을 채운 뒤의) 실제 계정으로 `mysqladmin ping -u<user> -p<password>`를 만든다 — 계정을 아직 못 구했으면 붙이지 않는다(순서: 자격 증명 채우기 → healthcheck 채우기).
+- **compose.b-studio.yaml의 depends_on은 항상 맵 문법(`{ condition: ... }`)으로 통일한다.** 한 서비스가 헬스체크 있는 부가 서비스와 없는 부가 서비스에 함께 의존하면 목록 문법(`- name`)과 맵 문법이 섞여 잘못된 YAML이 된다 — 실제로 테스트에서 이 조합으로 걸렸다(`project-detect.test.ts`가 생성한 파일을 `loadProject`로 다시 읽어 검증한다).
+- **개발 화면 머리**: 관리형 서비스는 지금처럼 줄로 보여주고, 그 밖의 컨테이너(부가 서비스·edge 플랫폼)는 `snapshot.usage.services`의 `role`(리소스 탭이 쓰는 것과 같은 값)로 걸러 "+N" 칩 하나로 압축한다(`lib/header-services.ts`). 누르면 이름·갈래·상태를 나열한 팝오버가 열린다. 머리에 `backdrop-filter`(유리 효과)가 있어 팝오버는 `document.body`에 포털로 그린다(work-drawer·project-menu와 같은 이유).
+
+### 감수한 트레이드오프
+- 이미지 이름 매칭은 정해 둔 목록 안에서만 작동한다. mssql·oracle처럼 목록에 없는 엔진은(dbtower에 둘 다 있다) 가져오지 않는다 — 필요하면 목록을 늘리거나 compose.b-studio.yaml을 사람이 고친다. 이미지 이름은 경로 조각부터 나눈 뒤 마지막 조각에서 태그를 뗀다 — 태그부터 떼면 `localhost:5000/postgres:16`처럼 포트가 있는 사설 레지스트리 주소에서 "localhost"를 엔진 이름으로 잘못 읽는다(실제로 이 순서가 뒤바뀐 채로 한 번 나갔다가 버그로 잡혀 고쳤다).
+- 호스트 바인드 마운트로 넣는 초기화 스크립트(`docker-entrypoint-initdb.d`의 SQL·JS 파일 등)는 가져오지 않는다. 이름 있는 볼륨만 옮기므로, 이런 스크립트에 기대는 서비스는 첫 기동 뒤 데이터를 직접 채워야 한다.
+- `build`가 있는 서비스는 이미지 이름이 알려진 엔진과 같아도(dbtower의 `postgres` 서비스처럼 postgres 베이스에 커스텀 Dockerfile을 얹은 경우) 가져오지 않는다 — 로컬 빌드 컨텍스트가 세션 복사본에 없을 수 있어서다.
+- Kafka 리스너·redis/postgres의 `--port`/`-p`처럼 compose를 직접 파싱해 알아낼 수 있는 것은 실제 값을 쓰지만, 그 밖의 포트는 여전히 엔진 기본 포트를 가정한다.
+- env_file로만 받거나 없는 계정에 채우는 개발용 기본값(`app`/`app`/`root`)은 저장소의 실제 값과 다르다 — 운영 데이터가 이미 있는 DB를 이 값으로 접속하면 실패한다. "확인:" 메모로 알리지만 사람이 직접 실제 값으로 바꿔야 한다.
+- 확인 범위: pay·edumeet·dbtower의 실제 compose 파일을 읽기 전용으로 확인해 매칭 결과를 맞췄다(가져오는 실제 기동은 아직 재지 않았다). 순수 함수는 pay(mysql·Kafka 환경 변수)와 edumeet(mysql의 env_file(.env)만 있고 environment가 없는 경우)의 실제 값·구조를 그대로 본뜬 조각(fixture)으로 vitest를 붙여, 지어낸 고정값이 아니라 그 값이 그대로 나오는지, .env가 저장소에 있어도 내용이 생성 파일에 섞이지 않는지 검증했다.
+
+---
+
 ## ADR-074 PR을 만든 뒤 AI 리뷰를 최대 두 라운드 돌리고 지적을 고친 뒤 사람에게 넘긴다
 
 상태: 채택
-관련: #ISSUE
+관련: #232
 
 ### 맥락
 - b-studio 세션이 PR을 만든 뒤에는 사람이 직접 diff를 읽고 검토한다. 검증 게이트(재시작·계약·테스트·화면 확인)는 이미 통과했지만, 게이트가 보지 않는 것들 — 논리 오류, 보안, 빠진 테스트, 원래 요청과의 어긋남 — 은 여전히 사람만 본다.

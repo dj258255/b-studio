@@ -4,6 +4,11 @@
 
 ## 아직 릴리스하지 않음
 
+### 추가
+
+- 폴더 열기(ADR-067)가 이제 기존 compose 파일(`compose.yaml`·`docker-compose.yml` 등)에서 postgres·mysql·redis·kafka·mongo·minio 같은 부가 서비스를 함께 가져옵니다. compose가 없어도 Spring(JPA+postgresql)·FastAPI(psycopg·SQLAlchemy+postgres) 의존성이 보이면 postgres를 새로 제안합니다. 앱 설정에서 접속 정보를 찾아 데이터베이스·Redis·Kafka 환경 변수도 채우되, 실제 compose 값(mysql/mariadb는 `MYSQL_*`/`MARIADB_*`, postgres는 `POSTGRES_*`, Kafka는 `KAFKA_ADVERTISED_LISTENERS`)에서 읽어 지어내지 않습니다. `env_file`로만 자격 증명을 받거나 값이 아예 없으면(내용은 절대 읽지 않습니다) 개발용 기본값을 채우고 확인 메모를 남기며, healthcheck가 없는 postgres/mysql/redis에는 기본 healthcheck를 붙여 앱이 DB보다 먼저 뜨는 경합을 막습니다. 폴더 열기 미리보기에서 가져오거나 제안한 목록과 확인 메모를 볼 수 있습니다(ADR-073).
+- 개발 화면 머리의 서비스 상태 줄이 관리형 서비스 말고도 부가 서비스·플랫폼 컨테이너를 "+N" 칩으로 보여주고, 누르면 이름·갈래·상태 목록이 열립니다(ADR-073).
+
 ### 변경
 
 - 새로 시작 화면(`/start`)을 없앴습니다. 다른 프로젝트로 바꾸기·폴더 열기·새 대화로 시작·최근 세션·토큰 보고서를 개발 화면 머리의 프로젝트 메뉴(프로젝트 이름을 누르면 뜨는 팝오버)로 옮겼습니다(ADR-070). `/start`로 오면 첫 화면(`/`)으로 넘어갑니다.

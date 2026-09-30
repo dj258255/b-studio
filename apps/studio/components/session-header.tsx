@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { supportingContainers } from "@/lib/header-services";
 import type { SessionSnapshot } from "@/lib/studio-events";
 import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
@@ -11,6 +12,7 @@ import { LogoutButton } from "./logout-button";
 import { ProjectMenu } from "./project-menu";
 import { useSessionAccess } from "./session-access";
 import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { SupportingServicesChip } from "./supporting-services-chip";
 
 /** Docker 런타임 이름(runsc)과 Kubernetes RuntimeClass 이름(gvisor) */
 const GVISOR_RUNTIMES = new Set(["runsc", "gvisor"]);
@@ -46,6 +48,9 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   }
 
   const statusTone = snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
+  // 관리형 서비스(studio.yaml)는 줄로 하나하나 보여주고, 그 밖의 컨테이너(DB 등 부가 서비스·edge 플랫폼, ADR-073)는 칩 하나로 압축한다
+  const managedNames = new Set(snapshot.services.map((service) => service.name));
+  const supporting = supportingContainers(managedNames, snapshot.usage?.services);
 
   return (
     <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-panel px-5 py-3">
@@ -82,6 +87,11 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             </li>
           );
         })}
+        {supporting.length > 0 && (
+          <li>
+            <SupportingServicesChip services={supporting} />
+          </li>
+        )}
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
