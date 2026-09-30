@@ -113,6 +113,8 @@ interface Args {
   planModel?: string;
   /** 계획-실행 분리의 실행 모델. 없으면 --model을 그대로 실행에도 쓴다(지금과 같다) */
   executeModel?: string;
+  /** --plan-always. 요청 복잡도와 무관하게 계획을 세운다(B_STUDIO_PLAN_BRIEF=always). 벤치 과제는 짧아 기본 auto면 계획을 건너뛴다 */
+  planAlways?: boolean;
 }
 
 /** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
@@ -151,6 +153,7 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--prices') args.prices = next(argv, index++, '--prices');
     else if (arg === '--plan-model') args.planModel = next(argv, index++, '--plan-model');
     else if (arg === '--execute-model') args.executeModel = next(argv, index++, '--execute-model');
+    else if (arg === '--plan-always') args.planAlways = true;
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -1076,6 +1079,7 @@ async function main(): Promise<void> {
       // studio.yaml의 models가 아니라 서버 프로세스 환경 변수로 넘긴다(벤치 프로젝트는 이 절을 쓰지 않는다)
       if (planExecute.plan) benchEnv.B_STUDIO_PLAN_MODEL = planExecute.plan;
       if (planExecute.execute) benchEnv.B_STUDIO_EXECUTE_MODEL = planExecute.execute;
+      if (planExecute.plan && args.planAlways) benchEnv.B_STUDIO_PLAN_BRIEF = 'always';
     } else if (backend === 'codex') {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });

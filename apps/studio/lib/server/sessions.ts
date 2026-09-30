@@ -1468,11 +1468,14 @@ export function claudeCodeEscalation(planModel?: string, env: Record<string, str
  * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름, api는 모델 레지스트리 id다.
  * 둘 다 없으면(기본) 이 함수가 항상 undefined만 돌려주므로 나머지 로직은 지금과 같이 움직인다.
  */
-export function planExecuteConfig(project: LoadedProject, env: Record<string, string | undefined> = process.env): { plan?: string; execute?: string } {
+export function planExecuteConfig(project: LoadedProject, env: Record<string, string | undefined> = process.env): { plan?: string; execute?: string; always?: boolean } {
   const models = project.spec.models;
   const plan = models?.plan?.trim() || env.B_STUDIO_PLAN_MODEL?.trim() || undefined;
   const execute = models?.execute?.trim() || env.B_STUDIO_EXECUTE_MODEL?.trim() || undefined;
-  return { ...(plan ? { plan } : {}), ...(execute ? { execute } : {}) };
+  // B_STUDIO_PLAN_BRIEF=always면 요청 복잡도와 무관하게 계획을 세운다(실험·짧은 요청이 많은 프로젝트용). 기본 auto는 simple을 건너뛴다
+  const when = env.B_STUDIO_PLAN_BRIEF?.trim() || 'auto';
+  if (when !== 'auto' && when !== 'always') throw new StudioError(500, `B_STUDIO_PLAN_BRIEF는 auto 또는 always여야 합니다 (지금 값: ${when})`);
+  return { ...(plan ? { plan } : {}), ...(execute ? { execute } : {}), ...(when === 'always' ? { always: true } : {}) };
 }
 
 /** 두 러너가 함께 쓰는 승격 규칙(임계치·실패 횟수·재시도 예산) */
@@ -1502,7 +1505,7 @@ async function withPlanBrief(
 ): Promise<{ request: string; planUsage?: { model: string; usage: AgentUsage } }> {
   if (plan.intent === 'ask' || (plan.kind !== 'claude-code' && plan.kind !== 'model')) return { request };
   const split = planExecuteConfig(session.project);
-  if (!split.plan || !shouldPlanBrief(request)) return { request };
+  if (!split.plan || (!split.always && !shouldPlanBrief(request))) return { request };
 
   const ask: ModelAsk =
     plan.kind === 'claude-code' ? claudeCodeAsk({ cwd: session.project.root, model: split.plan }) : planAskFromClient(clientForModel(modelById(split.plan)));

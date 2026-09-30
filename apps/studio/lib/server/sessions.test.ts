@@ -219,6 +219,8 @@ describe('계획-실행 분리(ADR-075) 설정', () => {
   it('studio.yaml에 없으면 환경 변수를 쓴다', () => {
     const env = { B_STUDIO_PLAN_MODEL: 'env-plan', B_STUDIO_EXECUTE_MODEL: 'env-execute' };
     expect(planExecuteConfig(fakeProject(), env)).toEqual({ plan: 'env-plan', execute: 'env-execute' });
+    expect(planExecuteConfig(fakeProject(), { ...env, B_STUDIO_PLAN_BRIEF: 'always' })).toEqual({ plan: 'env-plan', execute: 'env-execute', always: true });
+    expect(() => planExecuteConfig(fakeProject(), { ...env, B_STUDIO_PLAN_BRIEF: 'sometimes' })).toThrow(/auto 또는 always/);
   });
 
   it('둘 다 없으면 빈 객체를 돌려준다(계획 호출을 하지 않는, 지금과 같은 동작)', () => {

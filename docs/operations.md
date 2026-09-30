@@ -45,6 +45,7 @@
 
 - `B_STUDIO_PLAN_MODEL` — 계획을 쓰는 모델. claude-code 모드는 Claude Code에 넘기는 모델 이름(예: `opus`), API 모드는 모델 레지스트리 id입니다. 없으면 계획 호출을 하지 않습니다(지금과 같은 동작).
 - `B_STUDIO_EXECUTE_MODEL` — 실행을 맡는 모델(뜻은 `B_STUDIO_PLAN_MODEL`과 같은 규칙). 없으면 세션이 원래 쓰던 모델(사람이 고른 모델이 없으면 계정·라우터 기본)을 그대로 씁니다.
+- `B_STUDIO_PLAN_BRIEF` — `auto`(기본)는 라우터 복잡도가 `simple`인 짧은 요청에서 계획을 건너뜁니다. `always`면 모든 만들기 요청에서 계획을 세웁니다.
 - 프로젝트별로 `studio.yaml`의 `models: { plan, execute }`가 이 두 환경 변수보다 우선합니다.
 - 그 밖의 백엔드(codex·commandcode·opencode)는 도구 없는 단발 호출 경로가 없어(PR 자동 리뷰·작업 계획과 같은 제약) 이 설정이 있어도 계획 호출을 하지 않습니다.
 - 계획 호출 토큰은 그 실행의 모델별 사용량에 `계획: <모델>`로 더해져 토큰 탭에 나타납니다(세션·사람 토큰 한도에는 반영하지 않습니다 — 알려진 한계입니다).
