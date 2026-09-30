@@ -5,7 +5,7 @@ import { FolderProposalView } from "./folder-proposal-view";
 import { useFolderProposal } from "./use-folder-proposal";
 
 /**
- * 경로를 손으로 입력해 아무 폴더나 프로젝트로 연다(ADR-067). 폴더 선택 모달(ADR-082, `folder-browser-modal.tsx`)의
+ * 경로를 손으로 입력해 아무 폴더나 프로젝트로 연다(ADR-067). 폴더 선택 모달(ADR-082, `open-folder-modal.tsx`→`folder-browser.tsx`)의
  * "경로 직접 입력" 토글이 쓰는 대비용 화면이다 — 기본은 더블클릭으로 고르는 탐색 모달이고, 이 화면은
  * 탐색으로 갈 수 없는 경로(예: 마운트한 다른 볼륨)를 위해 남겨 둔다.
  */
@@ -14,8 +14,8 @@ export function OpenFolder() {
   const { proposal, busy, error, propose, apply } = useFolderProposal();
 
   return (
-    <section className="glass rounded-panel p-5" aria-labelledby="open-folder">
-      <h2 id="open-folder" className="text-lg font-semibold">
+    <section className="glass rounded-panel p-5" aria-labelledby="open-folder-manual">
+      <h2 id="open-folder-manual" className="text-lg font-semibold">
         경로로 폴더 열기
       </h2>
       <p className="mt-1 text-sm leading-6 text-muted">
