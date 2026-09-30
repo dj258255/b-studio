@@ -87,11 +87,9 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             </li>
           );
         })}
-        {supporting.length > 0 && (
-          <li>
-            <SupportingServicesChip services={supporting} />
-          </li>
-        )}
+        <li>
+          <SupportingServicesChip sessionId={snapshot.id} services={supporting} />
+        </li>
       </ul>
 
       <div className="ml-auto flex items-center gap-3">

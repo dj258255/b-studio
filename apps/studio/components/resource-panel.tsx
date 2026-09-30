@@ -48,12 +48,15 @@ export function ResourcePanel({ view }: { view: SessionView }) {
 
   const groups = groupByRole(usage.services);
   const total = usage.services.reduce((sum, service) => sum + (service.memoryBytes ?? 0), 0);
+  // 서비스 선택(ADR-083)에서 꺼 둔 서비스는 컨테이너 자체가 없어 목록에 나오지 않는다. 숫자가 적어 보이지 않게 이유를 남긴다
+  const offServices = view.snapshot.services.filter((service) => service.state === "off").map((service) => service.name);
 
   return (
     <div className="h-full overflow-auto p-4">
       <p className="pb-3 text-sm text-muted">
         컨테이너 {usage.services.length}개, 메모리 합계 {formatBytes(total)}.{" "}
         {new Date(usage.at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}에 잼
+        {offServices.length > 0 && ` · 꺼 둔 서비스라 빠짐: ${offServices.join(", ")}`}
       </p>
       <div className="flex flex-col gap-6">
         {groups.map((group) => (

@@ -123,7 +123,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
+import { dependentsOf, loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import { buildSubmissionChecklist, type ChecklistService, type SubmissionReport } from '@/lib/submission-checklist';
 import {
@@ -179,6 +179,7 @@ import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch'
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import { overlayGeneratedFiles } from './project-registry';
+import { offManagedServices, serviceSelectionFor, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
   closeUnfinished,
@@ -312,6 +313,12 @@ interface Session {
    * 실행(질문·되돌림)에서는 갱신하지 않는다 — "최근 체크포인트"의 결과여야 하기 때문이다
    */
   lastGateChecks?: WorkflowCheck[];
+  /**
+   * 이 세션이 띄울 compose 서비스 이름(managed·부가 서비스 모두, ADR-083). project.offServices(managed 중 꺼 둔 것)와
+   * 함께 쓰인다 — 여기서 뺀 managed 서비스가 project.offServices에 들어간다. 프로젝트별 저장 선택이 없으면 기본값
+   * (관리형 + 기댐 닫힘)이다. sandbox.start()에 그대로 넘겨 그 서비스만 compose up한다
+   */
+  serviceSelection: Set<string>;
 }
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
@@ -518,6 +525,8 @@ async function startSession({
   // CLI 백엔드는 샌드박스를 띄우기 전에 로그인을 확인한다. 실패하면 세션을 만들지 않고 이유를 돌려준다
   await assertBackendReady(backend, project.root);
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
+  // 이 프로젝트에서 띄울 서비스를 정한다(ADR-083). 저장한 선택이 없으면 기본값(관리형 + 기댐 닫힘)이다
+  const serviceSelection = await resolveServiceSelection(project, projectId);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
   const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
@@ -538,7 +547,7 @@ async function startSession({
       running: false,
       tokenLimit,
       owner,
-      ...projectViews(project, lazy ? 'stopped' : 'starting'),
+      ...projectViews(project, lazy ? 'stopped' : 'starting', project.offServices),
       nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
       nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[0]?.question?.request : undefined,
       runtime: provider.isolation,
@@ -559,6 +568,7 @@ async function startSession({
     openCode: { notes: [] },
     sourceDirtyFiles,
     lazy,
+    serviceSelection,
     previewToken: randomBytes(16).toString('hex'),
   });
   // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
@@ -592,6 +602,7 @@ type NewSession = Pick<
   | 'openCode'
   | 'sourceDirtyFiles'
   | 'lazy'
+  | 'serviceSelection'
 >;
 
 function newSession(fields: NewSession): Session {
@@ -610,14 +621,19 @@ function newSession(fields: NewSession): Session {
   };
 }
 
-function projectViews(project: LoadedProject, state: 'starting' | 'stopped' = 'starting'): Pick<SessionSnapshot, 'services' | 'externals'> {
+function projectViews(
+  project: LoadedProject,
+  state: 'starting' | 'stopped' = 'starting',
+  offManaged: ReadonlySet<string> = new Set(),
+): Pick<SessionSnapshot, 'services' | 'externals'> {
   return {
     services: project.managed.map(([name, service]) => ({
       name,
       template: service.template,
       preview: service.preview,
-      // 지연 기동 세션(idle)은 샌드박스가 꺼져 있으므로 서비스도 꺼진 것으로 시작한다
-      state,
+      // 지연 기동 세션(idle)은 샌드박스가 꺼져 있으므로 서비스도 꺼진 것으로 시작한다.
+      // 서비스 선택(ADR-083)에서 꺼 둔 서비스는 샌드박스가 켜져도 계속 off다(실패가 아니다)
+      state: offManaged.has(name) ? 'off' : state,
       hasContract: Boolean(service.contract),
     })),
     externals: (project.external ?? []).map(([name, service]) => ({
@@ -631,6 +647,18 @@ function projectViews(project: LoadedProject, state: 'starting' | 'stopped' = 's
       authenticated: Boolean(service.policy.auth),
     })),
   };
+}
+
+/**
+ * 이 세션이 띄울 서비스를 정하고, 검증 게이트가 보도록 project.offServices에 남긴다(ADR-083).
+ * project는 세션 동안 계속 같은 객체를 쓰므로(체크포인트 복원·되돌리기도 같은 project를 넘겨받는다),
+ * 한 번 붙이면 이후의 재시작·검증이 모두 최신 선택을 본다
+ */
+async function resolveServiceSelection(project: LoadedProject, projectId: string): Promise<Set<string>> {
+  const resolved = await serviceSelectionFor(project, projectId);
+  const selected = new Set(resolved.selected);
+  project.offServices = offManagedServices(project, selected);
+  return selected;
 }
 
 /** 새 구독자에게 지금 상태와 지금까지의 기록을 보낸 뒤 실시간 이벤트를 전달한다 */
@@ -932,13 +960,15 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     }
     const list = await checkpoints.list();
     const head = list[0]!;
+    // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
+    const serviceSelection = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
     const sandbox = await provider.create(project, { secrets });
 
     const session = newSession({
       snapshot: {
         ...data.snapshot,
-        ...projectViews(project),
+        ...projectViews(project, 'starting', project.offServices),
         status: 'starting',
         error: undefined,
         running: false,
@@ -969,6 +999,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 이어서 작업하기는 샌드박스를 바로 켠다(지연 기동이 아니다)
       lazy: false,
+      serviceSelection,
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
@@ -1072,6 +1103,70 @@ export async function endpointFor(id: string, service: string): Promise<string> 
   if (!session.project.managed.some(([name]) => name === service)) throw new StudioError(404, `${service} 서비스가 없습니다`);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
   return (await session.sandbox.endpoint(service)).url;
+}
+
+/** 헤더의 "+N" 팝오버·서비스 메뉴가 보여 줄 서비스 목록 한 줄 */
+export interface ServiceSelectionView {
+  name: string;
+  role: 'managed' | 'supporting';
+  selected: boolean;
+  /** 이 서비스가 기대는(compose depends_on) 서비스 이름 */
+  dependsOn: string[];
+  /** 지금 선택 중 이 서비스에 기대는 서비스 이름. 끄기 전 경고에 쓴다(비어 있으면 안전하게 끌 수 있다) */
+  dependents: string[];
+}
+
+/** 이 세션이 띄울 수 있는 서비스와 지금 선택 상태(ADR-083) */
+export function listServiceSelection(id: string): ServiceSelectionView[] {
+  const session = requireSession(id);
+  const { project, serviceSelection } = session;
+  const managedNames = new Set(project.managed.map(([name]) => name));
+  return [...project.composeServices]
+    .sort((a, b) => Number(managedNames.has(b)) - Number(managedNames.has(a)) || a.localeCompare(b))
+    .map((name) => ({
+      name,
+      role: managedNames.has(name) ? 'managed' : 'supporting',
+      selected: serviceSelection.has(name),
+      dependsOn: project.dependsOn[name] ?? [],
+      dependents: dependentsOf(name, serviceSelection, project.dependsOn),
+    }));
+}
+
+/**
+ * 서비스 하나를 켜거나 끈다(ADR-083). 껐는데 다른 선택된 서비스가 기대고 있어도 막지 않고 경고 문구만 돌려준다.
+ * 선택은 프로젝트 상태 폴더에 저장해 다음 세션·기동에도 이어진다. 세션이 떠 있으면 컨테이너도 바로 켜거나 끈다
+ * (관리형 서비스를 켤 때는 restart()로 다시 빌드하고 준비될 때까지 기다린다. 끌 때·부가 서비스는 setServiceRunning을 쓴다)
+ */
+export async function setSessionServiceSelection(id: string, service: string, on: boolean): Promise<{ selection: ServiceSelectionView[]; warning?: string }> {
+  const session = requireSession(id);
+  const { project } = session;
+  if (!project.composeServices.includes(service)) throw new StudioError(404, `'${service}'은(는) 이 프로젝트의 서비스가 아닙니다`);
+  const isManaged = project.managed.some(([name]) => name === service);
+  const dependents = !on ? dependentsOf(service, session.serviceSelection, project.dependsOn) : [];
+  const warning = dependents.length > 0 ? `${dependents.join(', ')}가 ${service}에 기댑니다 — 끄면 ${dependents.join(', ')}가 여기에 붙지 못할 수 있습니다` : undefined;
+
+  const next = new Set(session.serviceSelection);
+  if (on) next.add(service);
+  else next.delete(service);
+  session.serviceSelection = next;
+  project.offServices = offManagedServices(project, next);
+  await writeServiceSelection(session.snapshot.projectId, [...next]);
+
+  // 세션이 아직 켜지지 않았으면(idle) 다음 기동 때 선택이 반영되므로 지금 컨테이너를 건드리지 않는다
+  if (session.snapshot.status === 'ready' || session.snapshot.status === 'starting') {
+    if (isManaged && on) {
+      // restart()가 빌드하고 준비 판정까지 기다리며, 화면 상태(starting → probing → ready/failed)도 직접 알린다
+      await session.sandbox.restart(service, { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) });
+    } else if (!session.sandbox.setServiceRunning) {
+      throw new StudioError(501, '이 샌드박스 제공자는 서비스를 켜고 끄는 것을 지원하지 않습니다');
+    } else {
+      await session.sandbox.setServiceRunning(service, on, { signal: session.stop.signal });
+      // 관리형 서비스를 껐을 때만 화면 상태가 있다(부가 서비스는 ServiceView가 없다)
+      if (isManaged) onServiceStatus(session, { service, phase: 'off' });
+    }
+  }
+
+  return { selection: listServiceSelection(id), ...(warning ? { warning } : {}) };
 }
 
 /** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
@@ -1336,6 +1431,8 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
     await session.sandbox.start({
       signal,
       onStatus,
+      // 이 세션이 고른 서비스만 띄운다(ADR-083). 목록에 없는 managed 서비스는 onStatus가 'off'로 알린다
+      services: [...session.serviceSelection],
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
@@ -3302,6 +3399,10 @@ function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
       break;
     case 'failed':
       Object.assign(service, { state: 'failed', detail: event.reason });
+      break;
+    case 'off':
+      // 서비스 선택(ADR-083)에서 꺼 둔 서비스. 실패가 아니므로 url을 지워 미리보기가 "꺼 둔 서비스" 안내로 바뀌게 한다
+      Object.assign(service, { state: 'off', url: undefined, previewUrl: undefined, detail: undefined });
       break;
   }
   emit(session, { type: 'service', service: service.name, state: service.state, url: service.url, previewUrl: service.previewUrl, detail: service.detail });

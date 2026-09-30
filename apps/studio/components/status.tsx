@@ -26,12 +26,13 @@ export const SERVICE_STATE_LABEL: Record<ServiceState, string> = {
   ready: "준비됨",
   failed: "실패",
   stopped: "중지됨",
+  off: "꺼 둠",
 };
 
 export function toneOfService(state: ServiceState): Tone {
   if (state === "ready") return "pass";
   if (state === "failed") return "fail";
-  if (state === "stopped") return "idle";
+  if (state === "stopped" || state === "off") return "idle";
   return "wait";
 }
 

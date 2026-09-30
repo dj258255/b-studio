@@ -4,7 +4,7 @@ import type { WorkflowCheck } from '../workflow';
 import { failureNotesFromEvents, failureNotesFromReport, signatureFromCheck, signatureKey, signaturesFromReport } from './signature';
 
 function report(over: Partial<VerificationReport>): VerificationReport {
-  return { ok: false, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], ...over };
+  return { ok: false, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [], ...over };
 }
 
 describe('signatureKey', () => {

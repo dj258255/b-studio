@@ -138,6 +138,17 @@ describe('verifyChanges', () => {
     expect(formatVerificationReport(report, { allowBreaking: false })).toContain('파일 반영 확인 실패');
   });
 
+  it('꺼 둔 서비스는 계약도 확인하지 않는다(재시작을 안 했으니 확인할 수 없다)', async () => {
+    const sandbox = fakeSandbox();
+    const off = { ...project, offServices: new Set(['api']) } as unknown as LoadedProject;
+
+    const report = await verifyChanges({ sandbox, project: off, changedFiles: ['api/src/main/java/Order.java'], baselines: new Map([['api', baseline]]), allowBreaking: false });
+
+    expect(report.contracts).toEqual([]);
+    expect(report.skippedOff).toEqual(['api']);
+    expect(report.ok).toBe(true);
+  });
+
   it('재시작에 실패하면 마지막 로그를 담고 그 서비스의 계약은 건너뛴다', async () => {
     const report = await verifyChanges({
       sandbox: fakeSandbox(['api']),
@@ -185,6 +196,18 @@ describe('restartServicesFor', () => {
     };
     return { sandbox, restarts: base.restarts };
   }
+
+  it('서비스 선택(ADR-083)에서 꺼 둔 서비스는 재시작하지 않고 건너뛴 것으로 남긴다', async () => {
+    const sandbox = fakeSandbox();
+    const off = { ...project, offServices: new Set(['api']) } as unknown as LoadedProject;
+
+    const report = await restartServicesFor(sandbox, off, ['web/app/page.tsx', 'api/src/main/java/Order.java']);
+
+    expect(sandbox.restarts).toEqual(['web']);
+    expect(report.restarted).toEqual([{ service: 'web', ready: true }]);
+    expect(report.skippedOff).toEqual(['api']);
+    expect(formatVerificationReport({ ok: true, contracts: [], secretLeaks: [], ...report }, { allowBreaking: false })).toContain('꺼 둔 서비스라 확인을 건너뜀(검증에 포함되지 않음): api');
+  });
 
   it('지운 파일을 읽다 실패한 서비스는 잠시 뒤 한 번만 다시 재시작한다', async () => {
     const { sandbox, restarts } = flakySandbox(
@@ -259,7 +282,9 @@ describe('restartServicesFor', () => {
     expect(report.restarted[0]?.blockedEgress).toEqual(['registry.example.com:443 (허용 목록에 없는 호스트나 포트)']);
     // 시계 차이를 감안해 재시작 직전보다 조금 이른 시점부터 묻는다
     expect(asked!.getTime()).toBeLessThan(recent.getTime());
-    expect(formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: report.restarted, contracts: [], unverifiedFiles: [], secretLeaks: [] }, { allowBreaking: false })).toContain(
+    expect(
+      formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: report.restarted, contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [] }, { allowBreaking: false }),
+    ).toContain(
       '막힌 외부 접속 (studio.yaml network.egress에 없는 호스트): registry.example.com:443',
     );
   });
@@ -274,7 +299,7 @@ describe('restartServicesFor', () => {
     const leaks = await findSecretLeaks(sandbox, root, ['api/src/PaymentClient.java', 'api/src/Order.java', 'api/src/Deleted.java']);
 
     expect(leaks).toEqual([{ file: 'api/src/PaymentClient.java', secrets: ['PAYMENT_API_KEY'] }]);
-    const text = formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: leaks }, { allowBreaking: false });
+    const text = formatVerificationReport({ ok: false, sync: { elapsedMs: 0 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: leaks, skippedOff: [] }, { allowBreaking: false });
     expect(text).toContain('시크릿 값이 파일에 들어갔습니다: api/src/PaymentClient.java (PAYMENT_API_KEY)');
     expect(text).not.toContain('sk_live_1234567890');
   });

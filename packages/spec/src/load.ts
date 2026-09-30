@@ -40,6 +40,14 @@ export interface LoadedProject {
   resources: Record<string, ResourceLimit>;
   /** compose 파일의 모든 서비스 이름 (부가 서비스 포함) */
   composeServices: string[];
+  /** compose 서비스 이름 → 그 서비스가 depends_on으로 기다리는 compose 서비스 이름(부가 서비스끼리의 기댐도 포함). 서비스 선택의 기본값(관리형 + 기댐 닫힘, ADR-083)을 계산할 때 쓴다 */
+  dependsOn: Record<string, string[]>;
+  /**
+   * 이 세션에서 꺼 둔(띄우지 않는) compose 서비스 이름(ADR-083). loadProject()는 채우지 않는다(항상 undefined) —
+   * 서비스 선택을 다루는 쪽(studio 서버)이 프로젝트를 불러온 뒤 세션마다 붙인다. 검증 게이트는 여기 있는 서비스를
+   * 재시작·확인하지 않고 건너뛴 것으로 기록한다
+   */
+  offServices?: ReadonlySet<string>;
   /** 기본 패키지 저장소 외에 외부 접속을 허용할 호스트나 평문 HTTP 경로·메서드 규칙 */
   egress: EgressRule[];
   /** 시크릿 이름(컨테이너 환경 변수 이름) → 받을 서비스. 값은 들어 있지 않다 */
@@ -188,6 +196,9 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     .filter(([, volume]) => volume?.external === true)
     .map(([key, volume]) => volume?.name ?? key);
 
+  const dependsOnGraph: LoadedProject['dependsOn'] = {};
+  for (const name of composeServices) dependsOnGraph[name] = dependsOnNames(compose.data.services[name]).filter((dependency) => composeServices.has(dependency));
+
   return {
     root,
     spec,
@@ -197,6 +208,7 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     databases,
     resources: spec.resources ?? {},
     composeServices: [...composeServices],
+    dependsOn: dependsOnGraph,
     egress: spec.network?.egress ?? [],
     secrets: Object.entries(spec.secrets ?? {}),
     external,
@@ -206,9 +218,15 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
 
 /** compose depends_on은 목록(["db"])이나 맵({ db: { condition } })으로 쓴다 */
 function dependsOn(service: unknown, target: string): boolean {
+  return dependsOnNames(service).includes(target);
+}
+
+/** compose 서비스 하나의 depends_on 대상 이름 목록 */
+function dependsOnNames(service: unknown): string[] {
   const dependencies = (service as { depends_on?: unknown } | null)?.depends_on;
-  if (Array.isArray(dependencies)) return dependencies.includes(target);
-  return typeof dependencies === 'object' && dependencies !== null && target in dependencies;
+  if (Array.isArray(dependencies)) return dependencies.filter((entry): entry is string => typeof entry === 'string');
+  if (dependencies && typeof dependencies === 'object') return Object.keys(dependencies);
+  return [];
 }
 
 /** compose 서비스의 volumes 항목(짧은 문법 "이름:경로", 긴 문법 { source })에 볼륨이 있는지 */
