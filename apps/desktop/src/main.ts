@@ -19,6 +19,15 @@ import { decideInput, decideUrl } from './url-policy';
 
 /** 도구 막대 높이(px) */
 const TOOLBAR_HEIGHT = 44;
+/**
+ * 중첩 라우트가 살아 있는지 확인하는 경로(`apps/studio/app/api/health/routes/route.ts`). 오래 켜둔 dev 서버가
+ * 병합을 여러 번 겪으면 최상위 라우트(`/`, `/api/health`)는 응답해도 이 라우트는 스테일한 라우트 표 때문에
+ * HTML 404를 돌려주는 경우가 있었다. `studio launch`(apps/cli)는 새로 켤 때마다 이걸 확인해 스테일하면
+ * 알아서 재시작하지만, 이 앱은 이미 띄워 둔 서버를 그대로 쓰는 동안(껐다 켜지 않는 한) 알아챌 길이 없다 —
+ * 창이 다시 포커스를 받을 때마다 가볍게 확인해, 스테일하면 도구 막대에 안내만 띄운다(이 창에서 서버를 고칠
+ * 방법은 없고, 다시 여는 것만 고칠 수 있다).
+ */
+const NESTED_ROUTE_HEALTH_PATH = '/api/health/routes';
 /** 로딩·안내 화면의 글자색 배경. 스튜디오 토큰과 맞춘다 */
 const BACKGROUND = '#fbfdfc';
 /**
@@ -88,6 +97,8 @@ async function start(): Promise<void> {
   });
   win.on('resize', () => layout());
   win.on('close', () => rememberBounds(file));
+  // 최소 침습: 매번 확인하는 대신 창이 다시 포커스를 받을 때만(다른 앱 갔다 돌아올 때) 가볍게 확인한다
+  win.on('focus', () => void warnIfRoutesAreStale());
 
   // 서버가 뜰 때까지(콜리마 켜기 포함 몇 분) 로딩 화면을 보여 준다
   loading = createView('loading');
@@ -227,6 +238,20 @@ function toolbarUrl(url: string): void {
 /** 도구 막대 아래 한 줄에 안내·이유를 보여 준다 */
 function toolbarMessage(text: string): void {
   toolbar?.webContents.send('b-studio:message', text);
+}
+
+/** 중첩 라우트가 스테일해졌는지 가볍게 확인한다(설명은 NESTED_ROUTE_HEALTH_PATH 선언부) */
+async function warnIfRoutesAreStale(): Promise<void> {
+  const target = studio;
+  if (!target) return;
+  try {
+    const response = await fetch(`${target.launched.url}${NESTED_ROUTE_HEALTH_PATH}`, { signal: AbortSignal.timeout(3_000) });
+    if (response.status === 404) {
+      toolbarMessage('앱 서버가 오래된 것 같습니다(라우트 응답 이상) — 스튜디오 메뉴에서 "스튜디오 중지" 후 앱을 다시 여세요.');
+    }
+  } catch {
+    // 확인 자체가 실패하면(네트워크 순간 끊김 등) 그냥 넘어간다 — 서버가 진짜 죽었으면 화면 쪽에서 이미 알아챈다
+  }
 }
 
 function loadingSend(payload: unknown): void {

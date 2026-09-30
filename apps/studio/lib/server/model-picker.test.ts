@@ -19,11 +19,17 @@ beforeEach(() => {
 });
 
 describe('listSelectableModels', () => {
-  it('claude-code: 기본 + opus·sonnet·haiku 별칭을 관측한 실제 모델 id·공식 단가와 함께 내려준다', async () => {
+  it('claude-code: 기본 + fable·opus·sonnet·haiku 별칭을 관측한 실제 모델 id·공식 단가·버전 이름과 함께 내려준다', async () => {
     const picker = await listSelectableModels('claude-code', 'sonnet');
 
     expect(picker.current).toBe('sonnet');
-    expect(picker.options.map((option) => option.id)).toEqual(['', 'opus', 'sonnet', 'haiku']);
+    expect(picker.options.map((option) => option.id)).toEqual(['', 'fable', 'opus', 'sonnet', 'haiku']);
+    // 이름만으로 세대를 알 수 있게 버전을 붙인다
+    expect(picker.options.map((option) => option.label)).toEqual(['기본', 'Fable 5.1', 'Opus 5', 'Sonnet 5', 'Haiku 4.5']);
+    const fable = picker.options.find((option) => option.id === 'fable');
+    expect(fable?.resolvedId).toBe('claude-fable-5-1');
+    // 공식 단가를 확인하지 못한 모델은 단가를 지어내지 않는다
+    expect(fable?.price).toBeUndefined();
     const opus = picker.options.find((option) => option.id === 'opus');
     expect(opus?.resolvedId).toBe('claude-opus-5');
     expect(opus?.price).toEqual({ inputPerMillion: 5, outputPerMillion: 25 });

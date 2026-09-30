@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { desktopBridge } from "@/lib/desktop-bridge";
-import { recentSessionsFor, selectableProjects } from "@/lib/project-menu";
+import { describeFailedResponse } from "@/lib/fetch-error";
+import { collapseEmptySessions, recentSessionsFor, relativeTime, selectableProjects, shortSessionId } from "@/lib/project-menu";
 import type { ProjectSummary, SessionSummary } from "@/lib/studio-events";
 import { OpenFolderModal } from "./open-folder-modal";
 
@@ -134,14 +135,15 @@ function ProjectMenuPopover({
     const body = response ? ((await response.json().catch(() => ({}))) as { id?: string; error?: string }) : {};
     if (!response?.ok || typeof body.id !== "string") {
       setCreating(false);
-      setError(body.error ?? "세션을 만들지 못했습니다");
+      setError(body.error ?? describeFailedResponse(response, "세션을 만들지 못했습니다"));
       return;
     }
     router.push(`/sessions/${body.id}`);
   }
 
   const usable = projects && selectableProjects(projects, projectId);
-  const recent = sessions && recentSessionsFor(sessions, projectId, RECENT_LIMIT);
+  // 한 번도 요청을 보내지 않은 세션은 여러 개 있어도 서로 구별되지 않으니(모두 같은 문구) 가장 최근 것 하나만 남긴다
+  const recent = sessions && collapseEmptySessions(recentSessionsFor(sessions, projectId, RECENT_LIMIT));
 
   return createPortal(
     <div className="fixed inset-0 z-40">
@@ -219,7 +221,8 @@ function ProjectMenuPopover({
               {recent.map((session) => (
                 <li key={session.id}>
                   <Link href={`/sessions/${session.id}`} role="menuitem" onClick={onClose} className="block truncate rounded-control px-2 py-1.5 hover:bg-panel">
-                    {session.lastRequest ?? "아직 보낸 요청이 없습니다"}
+                    {/* 빈 세션(요청 없음)은 만든 때·짧은 id를 보여 구별한다 — 여러 개면 가장 최근 것만 여기 남아 있다(collapseEmptySessions) */}
+                    {session.lastRequest ?? `빈 세션 · ${relativeTime(session.updatedAt)} · ${shortSessionId(session.id)}`}
                   </Link>
                 </li>
               ))}
