@@ -11,7 +11,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { GuideSpec, LoadedProject } from '@b-studio/spec';
-import { parseRequirementsMarkdown, REQUIREMENTS_FILE, summarizeRequirementsForGuide } from './requirements';
+import { parseRequirementsMarkdown, REQUIREMENTS_FILE, summarizeManualStepsForGuide, summarizeRequirementsForGuide } from './requirements';
 
 /** guide 절을 아예 생략한 studio.yaml(스키마가 없는 옛 프로젝트 픽스처 포함)에 쓰는 기본값 */
 const DEFAULT_GUIDE: GuideSpec = { file: 'AGENTS.md', maxChars: 8_000, enabled: true };
@@ -65,14 +65,19 @@ async function loadAgentsGuide(project: LoadedProject): Promise<Pick<ProjectGuid
   return undefined;
 }
 
-/** docs/requirements.md가 있으면 요약해 돌려준다. 없거나 요구사항을 하나도 못 읽으면(파일이 깨졌거나 비어 있음) undefined */
+/**
+ * docs/requirements.md가 있으면 요약해 돌려준다. 없거나 요구사항을 하나도 못 읽으면(파일이 깨졌거나 비어 있음) undefined.
+ * "## 사람이 할 일"(저장소 권한·협업자 추가, 이메일 제출 등)이 있으면 별도 절로 이어 붙여, 에이전트가 이 절차를
+ * 요구사항으로 착각해 시도하지 않도록 매 실행마다 못박는다(ADR-089) — 요구사항이 하나도 없어도 이 절은 만들어진다.
+ */
 async function loadRequirementsGuideSection(project: LoadedProject): Promise<string | undefined> {
   const raw = await tryRead(path.join(project.root, REQUIREMENTS_FILE));
   if (raw === undefined) return undefined;
-  const { requirements } = parseRequirementsMarkdown(raw);
-  if (requirements.length === 0) return undefined;
-  const summary = summarizeRequirementsForGuide(requirements);
-  return summary || undefined;
+  const { requirements, manualSteps } = parseRequirementsMarkdown(raw);
+  const requirementsSummary = requirements.length > 0 ? summarizeRequirementsForGuide(requirements) : '';
+  const manualStepsSummary = summarizeManualStepsForGuide(manualSteps);
+  const combined = [requirementsSummary, manualStepsSummary].filter(Boolean).join('\n\n');
+  return combined || undefined;
 }
 
 async function tryRead(file: string): Promise<string | undefined> {
