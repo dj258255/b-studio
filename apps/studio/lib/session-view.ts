@@ -429,6 +429,9 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'files_changed':
       return patchSnapshot(view, { fileRevision: event.revision });
 
+    case 'tests_changed':
+      return patchSnapshot(view, { testsRevision: event.revision, testsRunning: event.running });
+
     case 'exported':
       // 원격 상태는 통째로 바꾸므로 기록을 다시 재생해도 결과가 같다
       return {

@@ -4,6 +4,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { SessionView, ChatItem } from "@/lib/session-view";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { ApiExplorer } from "./api-explorer";
+import { useCodeOpen } from "./code-open-context";
 import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
 import { DesignPanel } from "./design-panel";
@@ -17,6 +18,7 @@ import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
 import { SubmissionPanel } from "./submission-panel";
+import { TestsPanel } from "./tests-panel";
 import { TokenView } from "./token-view";
 
 type Tab = { id: string; label: string; service?: ServiceView; external?: ExternalApiView };
@@ -30,6 +32,7 @@ const DESIGN_TAB = "design";
 const TOKENS_TAB = "tokens";
 const REPOSITORY_TAB = "repository";
 const REQUIREMENTS_TAB = "requirements";
+const TESTS_TAB = "tests";
 const SUBMISSION_TAB = "submission";
 
 export function PreviewPanel({ view }: { view: SessionView }) {
@@ -40,6 +43,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
     { id: DESIGN_TAB, label: "디자인" },
     { id: REQUIREMENTS_TAB, label: "명세" },
+    { id: TESTS_TAB, label: "테스트" },
     { id: CODE_TAB, label: "코드" },
     { id: HISTORY_TAB, label: "기록" },
     { id: DEPLOY_TAB, label: "배포" },
@@ -51,6 +55,14 @@ export function PreviewPanel({ view }: { view: SessionView }) {
   ];
   const [activeId, setActiveId] = useState(tabs[0]!.id);
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0]!;
+  // "테스트" 탭의 file:line 링크가 codeOpen.open()을 부르면 "코드" 탭으로 전환한다(코드 탭 자신은 그 자리에서 파일·줄을 연다).
+  // useEffect 안에서 자기 상태를 바로 바꾸지 않도록, 코드 탭의 appliedReveal과 같은 방식으로 렌더 중 비교해 반영한다
+  const codeOpen = useCodeOpen();
+  const [appliedCodeOpenTarget, setAppliedCodeOpenTarget] = useState(codeOpen.target);
+  if (codeOpen.target && codeOpen.target !== appliedCodeOpenTarget) {
+    setAppliedCodeOpenTarget(codeOpen.target);
+    setActiveId(CODE_TAB);
+  }
 
   return (
     <section className="flex min-h-0 flex-col gap-2" aria-label="미리보기">
@@ -87,6 +99,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <RepositoryPanel view={view} />
         ) : active.id === REQUIREMENTS_TAB ? (
           <RequirementsPanel view={view} />
+        ) : active.id === TESTS_TAB ? (
+          <TestsPanel view={view} />
         ) : active.id === SUBMISSION_TAB ? (
           <SubmissionPanel view={view} />
         ) : active.id === TOKENS_TAB ? (

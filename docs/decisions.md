@@ -98,6 +98,7 @@
 - [ADR-081 저장소 탭에서 이슈·PR 상세를 열어 체크리스트·CI·리뷰까지 확인한다](#adr-081-저장소-탭에서-이슈pr-상세를-열어-체크리스트ci리뷰까지-확인한다)
 - [ADR-082 명세 탭이 참조 파일을 따라가 읽고 모호한 점에 추천 값을 채운다](#adr-082-명세-탭이-참조-파일을-따라가-읽고-모호한-점에-추천-값을-채운다)
 - [ADR-083 세션에서 띄울 서비스를 고르고, 부가 서비스는 기대는 것만 기본으로 켠다](#adr-083-세션에서-띄울-서비스를-고르고-부가-서비스는-기대는-것만-기본으로-켠다)
+- [ADR-084 테스트 탭에서 백엔드·프론트 테스트를 한 줄씩 보고 돌린다](#adr-084-테스트-탭에서-백엔드프론트-테스트를-한-줄씩-보고-돌린다)
 
 ---
 
@@ -3414,6 +3415,56 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - "개발만"은 지금 켜진 부가 서비스를 한 번에 모두 끄는 버튼이다. 관리형 서비스는 체크박스로 따로 고른다 — "개발만 켤 관리형 서비스를 한 화면에서 함께 고르는" 마법사형 UI는 만들지 않았다.
 - Kubernetes 제공자는 `setServiceRunning`을 아직 구현하지 않아 서비스 켜고 끄기를 지원하지 않는다(로컬 Docker만 된다). 호출하면 501로 분명히 안내한다.
 - 꺼 둔 데이터베이스는 체크포인트 사이 덤프·복원을 건너뛴다 — 꺼 둔 채로 있다가 나중에 켜면 마지막으로 켜져 있던 시점 이후의 데이터베이스 변경은 체크포인트에 남지 않는다.
+
+---
+
+## ADR-084 테스트 탭에서 백엔드·프론트 테스트를 한 줄씩 보고 돌린다
+
+상태: 채택
+관련: #281
+
+### 맥락
+- 사용자 요청: "테스트 코드 관리도 있었으면 좋겠는데 백엔드 프론트. 테스트코드들 한줄 한줄 딱 보일 수 있게." 지금까지 테스트는 게이트(`gate.ts`의 `test` 단계, `studio.yaml`의 `workflow.tests`)가 통과/실패만 판정했고, 사람은 개별 테스트 이름도 결과도 화면에서 볼 수 없었다. 실패한 테스트 하나를 고치려면 로그 탭에서 Gradle/Jest 출력을 직접 읽어야 했다.
+- 재사용할 것이 이미 있었다: 요구사항 탭(ADR-079)의 `isLikelyTestFile`·`scanTestFilesForRequirementId`(테스트 이름에서 `R3` 같은 id를 찾는 정규식), `chat-draft-context.tsx`(채우기만 하고 보내지 않는 관례), 게이트의 `sandbox.exec(service, command)`(컨테이너 안 명령 실행), `files_changed`/`fileRevision`(파일 변경을 스냅샷 값 하나로 알려 탭이 다시 불러오게 하는 패턴).
+- `workflow.tests`의 `command`는 `string[]`라서 이미 셸을 거치지 않는다(인자 하나하나가 배열 원소라 이스케이프가 필요 없다) — 이 탭도 같은 방식으로 명령을 만든다.
+- compose.yaml을 보면 Gradle의 `build/`, Maven의 `target/`은 세션 작업 복사본과 바인드 마운트가 아니라 **컨테이너 전용 이름 있는 볼륨**이다(`api-build:/app/build`, 예제 프로젝트 compose.yaml). 즉 JUnit 보고서는 호스트 파일시스템에서 보이지 않고, 컨테이너 안에서 `sandbox.exec`로 직접 읽어야 한다. 반면 테스트 **소스 파일**은 서비스 폴더 전체가 바인드 마운트(`./api:/app`)라 호스트에서 바로 읽을 수 있다 — 그래서 발견(소스를 읽어 테스트 이름을 찾는 것)과 결과 수집(보고서를 읽는 것)의 구현 방식이 다르다.
+
+### 결정
+1. **순수 함수 3개(`packages/agent/src`)로 나눴다** — 세션·샌드박스를 몰라 임시 문자열만으로 테스트할 수 있다.
+   - `test-discovery.ts`: 파일 경로·내용을 받아 테스트 파일인지(JUnit `*Test(s).java/.kt`·`*IT.java`, Vitest/Jest/Playwright `*.test|spec.[cm]?[jt]sx?`, pytest `test_*.py`/`*_test.py`) 가르고, 프레임워크별 파서(`discoverJunitFile`·`discoverJsFile`·`discoverPytestFile`)로 클래스/describe/class Test*를 스위트로, `@Test`·`it()`/`test()`·`def test_*`를 테스트로, 줄 번호와 함께 트리로 뽑는다. 정규식과 중괄호/들여쓰기 깊이 추적만 쓰는 가벼운 토큰화라 완벽한 파서는 아니다(제목 문자열이 여러 줄에 걸치면 못 잡는 식) — "포맷이 흔들려도 최대한 잡되, 완벽하지 않아도 된다"는 과제 지시를 그대로 따랐다. `@Nested`·`.skip`/`.only`/`.todo`/`.each`·`@Disabled`·`@pytest.mark.skip`도 본다. 테스트 이름·`@DisplayName`에서 `R\d+` 형태의 요구사항 id를 뽑는다(ADR-079와 같은 관례).
+   - `test-results.ts`: JUnit XML(정규식으로 `<testcase>`/`<failure>`/`<skipped>`를 찾는다, Gradle `build/test-results/test/*.xml`·Maven `target/surefire-reports/*.xml`·pytest `--junitxml` 모두 같은 포맷)과 Jest/Vitest json(`--json`/`--reporter=json`이 같은 `testResults[].assertionResults[]` 모양을 낸다, 파서 하나로 충분)을 파싱한다. 새 XML/JSON 라이브러리는 쓰지 않았다(보고서 형식이 단순해 가벼운 정규식으로 충분하고, "새 의존성 금지" 지시를 따랐다). `attachResults`가 발견한 테스트에 결과를 잇는다: 우선 파일+이름으로 정확히 맞추고, 후보가 여럿이면 classname/파일 경로에 파일 이름·스위트 이름이 들어 있는 쪽을 점수로 고른다(느슨한 매칭). 결과가 없는 테스트는 "안 돌림"으로 남는다.
+   - `test-run.ts`: 실행기(`gradle`·`maven`·`vitest`·`jest`·`pytest`)와 좁힐 대상(파일/클래스/테스트 이름)을 받아 실행 명령과 보고서 수거 명령을 만든다. Gradle/Maven은 출력 경로를 못 정해(관례 경로에만 남긴다) `find`+`cat`으로 모으고(`sh -c`, 경계 표지 `@@@b-studio-test-report@@@`로 여러 파일을 한 번의 exec 출력에서 나눈다), Vitest/Jest/pytest는 `/tmp` 아래 고정 경로로 출력을 지정해 `cat` 한 번으로 받는다. `detectRunner`는 `template`(spring-boot→gradle, pom.xml 있으면 maven / fastapi→pytest)과 프런트 서비스는 `package.json`의 `devDependencies`(vitest/jest)나 `scripts.test` 글자로 가른다.
+2. **서버 쪽 조립은 `apps/studio/lib/server/sessions.ts`에 있다**(요구사항 탭과 같은 이유 — `requireSession`이 파일 밖에서 쓰이지 않는다). 새 `apps/studio/lib/server/test-files.ts`가 서비스 폴더 안에서 테스트 파일을 훑고(요구사항 탭의 `scanWorkingCopyTestFiles`와 같은 안전판: 무시 폴더·파일 수 400개·파일당 200KB 상한) `package.json`/`pom.xml`을 읽는다.
+   - `getSessionTests`: 서비스마다 소스를 다시 훑어(파일이 늘 최신이도록) 테스트를 찾고, 세션에 저장해 둔 마지막 결과(`Session.testResults`, `Map<service, {run, source, at}>` — 체크포인트처럼 영속하지 않고 서버를 다시 시작하면 사라진다)를 이어 붙인다.
+   - `runSessionTests`: 서비스당 한 번에 하나만 돈다(`Session.testControllers`에 `AbortController`를 하나 두고, 이미 있으면 409). 실행기가 컴파일 오류 등으로 보고서를 하나도 못 남겨도 예외를 던지지 않고 종료 코드와 출력 꼬리를 결과에 담아 돌려준다(사람이 탭에서 바로 원인을 보게 한다). 취소하면(`cancelSessionTests`) 저장된 결과를 건드리지 않고 그대로 돌아온다.
+   - **게이트가 이미 돌린 test 단계를 다시 실행하지 않고 모은다**: `result.checks`를 `session.lastGateChecks`에 남기는 자리(`sessions.ts`)에서 `collectGateTestReports`를 함께 불러, 사람이 지금 그 서비스를 돌리고 있지 않으면 보고서만 최선으로 모아 본다(실패해도 요청 결과에 영향 없음).
+   - `testsRevision`/`testsRunning`을 스냅샷에 더하고 새 이벤트 `tests_changed`(파일 변경의 `files_changed`와 같은 자리, 기록에 쌓지 않는 트랜지언트)로 "테스트" 탭이 다시 불러올 때를 안다.
+3. **API**: `GET /api/sessions/[id]/tests`(발견+마지막 결과), `POST .../tests/run`(`{service, file?, suitePath?, testName?}`, 서비스가 꺼져 있으면 409 "서비스가 꺼져 있습니다"), `POST .../tests/cancel`(`{service}`). 다른 세션 API와 같은 `requireUser`/`authorizeSession`.
+4. **UI(`tests-panel.tsx`)**: 서비스마다 통과/실패/건너뜀/안 돌림 개수와 실행기 이름, 필터(전체/실패만/요구사항 연결), 파일→스위트(접고 펼 수 있다)→테스트 한 줄(상태 점(`status.tsx`의 기존 `Dot`/`Tone` 재사용) · 표시 이름 · R-id 칩 · 소요 시간 · `file:line`)을 보여준다. 버튼은 전체 실행(지원하는 서비스를 차례로)·서비스 실행·파일 실행·이 테스트만 실행, 실패한 줄에는 "이 테스트 고쳐 줘"(실패 메시지·스택 앞부분·위치를 채운다), `docs/requirements.md`에는 있지만 어느 테스트 이름에도 id가 없는 요구사항에는 "테스트 추가"를 둔다 — 전부 `chat-draft-context.tsx`로 채우기만 한다(ADR-079·080과 같은 관례, 자동으로 보내지 않는다).
+5. **`file:line`은 "코드" 탭을 그 줄로 연다.** 형제 탭(둘 다 `PreviewPanel`의 자식)이라 대화 채우기와 같은 자리에 새 컨텍스트(`code-open-context.tsx`)를 두어 `Workbench`가 들고, "테스트" 탭이 `open({path, line})`을 부르면 `PreviewPanel`이 코드 탭으로 전환하고 `CodePanel`이 그 파일을 열어 해당 줄로 스크롤하며 배경을 강조한다. `PreviewPanel`의 탭 목록은 한 줄(`{ id: TESTS_TAB, label: "테스트" }`)과 한 분기만 더했다(같은 파일을 나란히 고치는 다른 작업과 충돌을 줄이려는 것).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 게이트의 test 단계 결과(통과/실패)만 그대로 보여준다 | "한 줄 한 줄" 요청과 맞지 않는다. 게이트는 명령 종료 코드만 보고 개별 테스트 이름을 모른다 |
+| **B. 소스를 정적으로 읽어 테스트 케이스를 찾고(발견), 실행은 따로 하되 보고서로 결과를 잇는다** | 채택. 발견은 소스만 있으면(서비스를 안 띄워도) 되고, 실행·결과는 컨테이너가 준비됐을 때만 하면 된다 — 두 관심사를 나누면 각각 순수 함수로 테스트하기 쉽다 |
+| C. 실행기의 표준 출력을 직접 파싱한다(보고서 파일 대신) | Gradle·pytest 콘솔 출력은 색상 코드·진행 표시줄이 섞여 있고 포맷이 버전마다 다르다. JUnit XML·Jest json은 안정된 기계가 읽는 포맷이라 이쪽을 신뢰했다 |
+| D. 테스트 결과를 체크포인트처럼 영속시킨다(파일에 저장) | 결과는 "지금 돌리면 통과하는가"를 보여주는 게 목적이라, 코드가 바뀌면 바로 헌 결과가 된다. 세션 메모리에만 두고(서버 재시작 시 사라짐) 다시 돌리거나 게이트가 새로 모으면 채워지게 했다 |
+
+### 검증 결과
+- `packages/agent/src/test-discovery.test.ts`(신규, 9건): JUnit(클래스·`@Nested`·`@DisplayName`·`@Disabled`·`@ParameterizedTest`/`@RepeatedTest`·Kotlin `fun`), Vitest/Jest(중첩 `describe`·`.skip`·최상위 `it`/`test`), Playwright(`test.describe`로 프레임워크를 가른다), pytest(모듈 함수·`class Test*`·`@pytest.mark.skip`·`@pytest.mark.parametrize`), 확장자·이름 관례로 프레임워크를 고르는 `isTestFilePath`/`discoverTestsInFile`, 중첩 스위트를 평평하게 펴는 `flattenDiscoveredFile`을 확인했다.
+- `packages/agent/src/test-results.test.ts`(신규, 11건): Gradle 스타일·pytest `--junitxml`(`<testsuites>`로 감싼 경우 포함) JUnit XML, Jest/Vitest json 파싱(통과/건너뜀/실패, 실패 메시지·스택), 깨진 JSON을 던지지 않고 빈 결과로 돌려주는지, JUnit/Vitest/pytest 세 프레임워크 각각 발견 결과에 결과를 파일+이름으로 잇는지, 결과 없는 테스트가 "안 돌림"으로 남는지, 상태별 개수 집계, "이 테스트 고쳐 줘"/"테스트 추가" 프리필 문구를 확인했다.
+- `packages/agent/src/test-run.test.ts`(신규, 17건): gradle/maven/vitest/jest/pytest 각각 전체 실행·파일로 좁히기·테스트 하나로 좁히기(클래스+메서드, 파일+`-t`, 노드 id `파일::클래스::테스트`) 명령, 보고서 수거 명령 출력을 경계 표지로 나누는 `splitCollectedReports`(단일 파일·빈 출력·여러 파일), `template`·`package.json`·`pom.xml` 유무로 실행기를 고르는 `detectRunner`를 확인했다. 명령은 모두 `string[]`(셸을 거치지 않는다)이라 이스케이프 문제가 애초에 없다 — "셸 따옴표" 대신 배열 원소 하나하나가 그 자체로 안전한 인자임을 확인하는 테스트다.
+- `apps/studio/components/tests-panel.test.tsx`(신규), API 라우트 테스트 3개(`tests/route.test.ts`·`tests/run/route.test.ts`·`tests/cancel/route.test.ts`, `sessions.ts`를 모킹해 권한·입력 검증·오류 상태 코드 전달을 확인했다)를 더했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류), `pnpm test`(1,993개, 모두 이번 변경과 무관한 사전 존재 플레이키 — `checkpoints.test.ts`·`format.test.ts`·`artifacts.test.ts`·`sessions-review.test.ts`·`task-plans-limits.test.ts`의 5초 타임아웃, 기기 부하에 따라 매번 다른 조합으로 실패한다(예: 한 번은 6건, 다음은 10건) — 을 확인했다. `format.test.ts`는 혼자 돌려도 가끔 타임아웃돼 지시대로 "아는 플레이키"로 남겼다. 이 기능의 새 테스트 파일(`test-discovery.test.ts`·`test-results.test.ts`·`test-run.test.ts`·`tests-panel.test.tsx`·`tests/route.test.ts`·`tests/run/route.test.ts`·`tests/cancel/route.test.ts`, 총 47건)은 매번 통과했다.
+- 실제 Docker 샌드박스·모델 호출은 부르지 않았다(지시 조건). 실행·보고서 수거 경로(`runSessionTests`·`collectGateTestReports`의 `sandbox.exec` 호출 자체)는 위 순수 함수 테스트로만 간접 검증했고, 실제 Gradle/Vitest/pytest 컨테이너에서 `sandbox.exec`로 돌려 보는 통합 확인은 하지 못했다.
+
+### 감수한 트레이드오프
+- **발견 파서는 완벽한 AST 파서가 아니다.** 제목 문자열이 여러 줄에 걸치거나, `it.each`의 표 인자가 여러 줄이면 못 잡는다. 지시대로 "가벼운 토큰화"를 택했다 — 대부분의 실제 테스트 파일(한 줄에 제목)에는 통하지만, 극단적으로 포맷을 흩트린 파일은 놓칠 수 있다.
+- **매칭(발견 ↔ 결과)은 이름+경로 휴리스틱이다.** 같은 이름의 테스트가 여러 파일에 있고 보고서의 classname이 모호하면(드물지만) 엉뚱한 테스트에 결과가 붙을 수 있다.
+- **테스트 결과는 세션 메모리에만 있다.** 서버가 재시작되면 "안 돌림"으로 돌아간다 — 실제로 안 돌린 것과 구분이 안 된다. 체크포인트만큼 중요한 정보는 아니라고 보고 영속시키지 않았다.
+- **JUnit `--tests` 대상은 파일 이름에서 클래스 이름을 되짚는다**(`OrderServiceTest.java` → `OrderServiceTest`). 파일의 공개 클래스 이름이 파일 이름과 다른(관례를 어긴) 프로젝트에서는 "파일 실행"·"이 테스트만 실행"이 빗나갈 수 있다.
+- **"전체 실행"은 지원하는 서비스를 순서대로 하나씩 돈다**(동시에 여러 서비스를 돌리지 않는다) — 서비스당 한 번에 하나만 돈다는 규칙과 화면이 "지금 어느 서비스가 도는지" 보여줘야 한다는 요구를 단순하게 맞춘 선택이다. 여러 서비스를 병렬로 돌리는 것은 다음 과제로 남긴다.
 
 ---
 
