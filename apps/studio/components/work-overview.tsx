@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { AgentAttention, AgentItem, AgentState, AgentTotals } from "@/lib/server/agents-overview";
 import { ATTENTION_LABEL, readNotifyEnabled, writeNotifyEnabled } from "@/lib/attention-notify";
 import { MAX_SPLIT, splitHref } from "@/lib/split";
@@ -12,8 +12,11 @@ import {
   filterWork,
   groupWork,
   initialWorkTab,
+  isSelectable,
   membersSummary,
+  selectAllState,
   splitSelection,
+  toggleSelectAll,
   WORK_MODE_LABEL,
   workCounts,
   type WorkItem,
@@ -174,6 +177,10 @@ export function WorkOverview({
         </p>
       ) : (
         <ul className="flex flex-col gap-2">
+          <li className="flex items-center gap-3 px-4 text-sm text-muted">
+            <SelectAllBox state={selectAllState(shown, liveSelected)} onToggle={() => setSelected((current) => toggleSelectAll(shown, current))} />
+            <span>전체 선택</span>
+          </li>
           {shown.map((work) => (
             <WorkRow key={work.key} work={work} checked={liveSelected.includes(work.key)} onToggle={() => toggle(work.key)} onDeleted={() => onDeleted(work.key)} />
           ))}
@@ -220,7 +227,7 @@ export function WorkOverview({
 function WorkRow({ work, checked, onToggle, onDeleted }: { work: WorkItem; checked: boolean; onToggle: () => void; onDeleted: () => void }) {
   const state = STATE[work.state];
   const summary = membersSummary(work);
-  const selectable = work.sessionIds.length > 0;
+  const selectable = isSelectable(work);
   const blockReason = deleteBlockReason(work);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -398,4 +405,24 @@ function formatDuration(ms: number): string {
 
 function timeOf(iso: string): string {
   return new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/** 전체 선택 체크박스. 일부만 골랐으면 반쯤 채운 표시(indeterminate)를 쓴다 */
+function SelectAllBox({ state, onToggle }: { state: 'all' | 'some' | 'none' | 'empty'; onToggle: () => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = state === 'some';
+  }, [state]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={state === 'all'}
+      disabled={state === 'empty'}
+      onChange={onToggle}
+      aria-label="보이는 작업 전체 선택"
+      title={state === 'empty' ? "고를 수 있는 작업이 없습니다" : undefined}
+      className="size-4 shrink-0 accent-ink disabled:opacity-40"
+    />
+  );
 }
