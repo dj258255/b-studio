@@ -155,7 +155,8 @@ describe('가볍게 확인(verify light)', () => {
 
     const snapshot = getSnapshot(created)!;
     const checkpoint = snapshot.checkpoints[0]!;
-    expect(checkpoint.message).toBe('요청: 주문에 메모 필드 추가');
+    // conventional commits(ADR-080)가 기본으로 켜져 있어, 고침 낱말이 없는 요청은 feat: 접두어가 붙는다
+    expect(checkpoint.message).toBe('feat: 주문에 메모 필드 추가');
     // 통과한 단계는 run·contract_check뿐이고, 가볍게 확인 표시가 남는다
     expect(checkpoint.passedStages).toEqual(['run', 'contract_check']);
     expect(checkpoint.verify).toBe('light');
