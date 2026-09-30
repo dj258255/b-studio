@@ -96,6 +96,7 @@
 - [ADR-079 명세를 요구사항으로 나누고 요구사항마다 검증 근거를 추적한다](#adr-079-명세를-요구사항으로-나누고-요구사항마다-검증-근거를-추적한다)
 - [ADR-080 제출 준비 점검표로 요구사항·테스트·README·시드·비밀 값·커밋 기록을 확인한다](#adr-080-제출-준비-점검표로-요구사항테스트readme시드비밀-값커밋-기록을-확인한다)
 - [ADR-081 저장소 탭에서 이슈·PR 상세를 열어 체크리스트·CI·리뷰까지 확인한다](#adr-081-저장소-탭에서-이슈pr-상세를-열어-체크리스트ci리뷰까지-확인한다)
+- [ADR-082 폴더 열기를 경로 입력 대신 폴더 선택 창·탐색 모달로 바꾼다](#adr-082-폴더-열기를-경로-입력-대신-폴더-선택-창탐색-모달로-바꾼다)
 
 ---
 
@@ -3320,6 +3321,49 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 연결된 이슈·PR은 closes/fixes/resolves 문구로만 찾는다. 그 문구 없이 다른 방식으로만 연결된(예: 프로젝트 보드) 이슈·PR은 찾지 못한다.
 - 큰 PR의 diff는 파일당·전체 글자 수로 자른다. 아주 큰 변경은 옆 패널에서 전체를 못 보고 GitHub에서 봐야 한다.
 - "세션에서 다시 검증"은 넣지 않았다. 세션에 게이트를 처음부터 다시 돌리는 진입점이 생기면 추가한다.
+
+---
+
+## ADR-082 폴더 열기를 경로 입력 대신 폴더 선택 창·탐색 모달로 바꾼다
+
+상태: 채택
+관련: #280
+
+### 맥락
+- ADR-067의 폴더 열기는 경로를 손으로 입력하고 "살펴보기"를 눌러야 했다. macOS 사용자는 Finder에서 경로를 복사해 붙여넣는 수고가 들었고, 오타로 경로를 틀리기 쉬웠다.
+- 데스크톱 앱(ADR-062, `apps/desktop`)은 OS가 기본으로 주는 폴더 선택 창을 쓸 수 있지만, 스튜디오 화면(`apps/studio`)은 서버가 준 웹 콘텐츠라 Node·파일 시스템 접근이 없다. 지금까지 스튜디오 화면에는 어떤 preload도 주지 않았다("신뢰하지 않는 콘텐츠"라서) — 폴더 선택 창을 웹 화면에서 직접 쓰려면 이 원칙에 처음으로 예외를 둬야 했다.
+- 웹(브라우저)에서는 OS 폴더 선택 창을 쓸 방법이 아예 없다(`<input type="file" webkitdirectory>`는 폴더는 고르지만 절대 경로를 주지 않는다 — 보안상 브라우저가 로컬 경로를 감춘다). 곧바로 열 폴더의 절대 경로가 있어야 하는 이 기능에는 맞지 않는다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 지금처럼 경로 입력만 유지 | 사용자 요청과 어긋난다. 매번 Finder·터미널에서 경로를 복사해야 한다 |
+| B. `<input type="file" webkitdirectory>`로 폴더를 고르게 한다 | 브라우저가 절대 경로를 주지 않는다(`File.path`가 없다, 보안 모델상 의도된 제약). 골라도 서버가 열 수 있는 경로를 얻지 못한다 |
+| **C. 데스크톱은 OS 네이티브 대화상자(Electron IPC), 웹은 서버가 주는 폴더 목록을 더블클릭으로 오가는 자체 탐색 모달** | 채택. 두 환경이 근본적으로 다른 제약(데스크톱은 Node 프로세스가 있어 `dialog.showOpenDialog`를 쓸 수 있고, 웹은 없다)이라 하나로 억지로 맞추지 않고 각자 가장 자연스러운 방법을 쓴다. 구현이 둘로 늘지만, 이 PC의 폴더를 여는 기능 자체가 이미 개인 PC 모드 전용(ADR-067)이라 범위가 넓지 않다 |
+
+### 결정
+- **데스크톱: `window.bStudioDesktop.pickFolder()`.** 스튜디오 화면(`content`, `apps/desktop/src/main.ts`의 `createStudioView`)에 처음으로 preload(`content-preload.ts`)를 하나 열었다 — `contextBridge`로 `pickFolder` 메서드 딱 하나만 노출하고, `contextIsolation: true`·`sandbox: true`·Node 통합은 그대로 끈 채다. 메인 프로세스는 `ipcMain.handle('b-studio:pick-folder', ...)`에서 `dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] })`를 띄우고 고른 절대 경로(취소하면 `undefined`)를 돌려준다.
+  - **보낸이 확인(`pick-folder.ts`의 `canPickFolder`, 순수 함수)**: ① `event.sender`가 지금 띄운 스튜디오 화면(`content.webContents`) 그 자신이어야 한다(도구 막대·로딩 화면 같은 다른 뷰가 흉내 낼 수 없다) ② 그 화면의 주소가 이 PC 루프백(`url-policy.ts`의 `isLocalHost`)이어야 한다(외부 사이트로 옮겨간 화면은 통과하지 못한다). 둘 다 통과해야 대화상자를 띄운다.
+  - 스튜디오 UI는 `window.bStudioDesktop?.pickFolder`가 있으면(데스크톱) `DesktopFolderPicker`(`components/desktop-folder-picker.tsx`)를 그린다. "폴더 선택…"을 누르면 대화상자가 뜨고, 고른 경로로 바로 제안(`POST /api/projects/open`)을 받아 보여준다 — 따로 "살펴보기" 단계가 없다.
+- **웹: `GET /api/folders`로 하위 폴더 목록을 받아 더블클릭으로 오가는 탐색 모달.** 폴더 열기(`POST /api/projects/open`)와 같은 가드(`requireUser` + `localFolderAllowed()`, 개인 PC 모드 전용)를 쓴다.
+  - 서버(`lib/server/folder-browser.ts`)는 주어진 경로(기본 홈 폴더)의 하위 폴더를 이름순으로 돌려준다. 점으로 시작하는 폴더는 기본으로 숨기고(`showHidden=1`로 보임), `node_modules`·`.git` 내부는 항상 뺀다. 각 폴더마다 실마리(`package.json`의 `next`/`vite` 의존성, `build.gradle(.kts)`/`pom.xml`의 Spring Boot, `requirements.txt`/`pyproject.toml`의 FastAPI, compose 파일, `.git`, `studio.yaml`, 이미 등록한 폴더)를 가볍게(해당 폴더 바로 아래만, 하위로 뒤지지 않음) 찾아 칩으로 보여준다. 심볼릭 링크로 이어진 폴더도 목록에 넣고(`fs.realpath`로 입력 경로의 링크는 풀되, 자식 폴더는 링크 이름 그대로 보여준다), 500개를 넘으면 앞에서부터 그만큼만 담고 잘렸다고 알린다. 빵부스러기·바로가기(홈·바탕화면·문서·Developer/Projects 있으면·등록 목록에서 최신순 최대 8개의 최근 연 폴더)도 함께 돌려준다.
+  - 화면(`components/folder-browser.tsx`)은 빵부스러기·바로가기·이름으로 거르는 입력·폴더 목록을 보여준다. 한 번 누르면 고르고, 두 번 누르거나 Enter를 누르면 들어간다. Backspace(또는 ↑)는 한 단계 위로, 화살표는 고른 줄을 옮긴다(`lib/folder-browser.ts`의 `resolveListKey`가 키를 동작으로 바꾸는 순수 함수라, DOM 없이도 그 동작을 테스트한다). 고른 폴더는 바로 제안을 받아 그 자리에서 보여준다.
+  - 경로 직접 입력은 없애지 않고 작게 토글로 남겼다(`open-folder.tsx`, 탐색으로 갈 수 없는 마운트 경로 등을 위해).
+  - 제안을 받고 적용하는 로직(`POST /api/projects/open` 호출)과 그 결과를 보여주는 화면은 `useFolderProposal` 훅과 `FolderProposalView` 컴포넌트로 공용화해, 데스크톱·웹·경로 직접 입력 세 곳이 같은 코드를 쓴다.
+
+### 검증 결과
+- `apps/desktop/src/pick-folder.test.ts`(5개): 스튜디오 화면 자신·이 PC 주소일 때만 허용, 다른 뷰·외부 주소·주소를 못 읽을 때는 거부.
+- `apps/studio/lib/server/folder-browser.test.ts`(12개, 임시 폴더): 실마리 찾기(Next.js·Spring·compose·studio.yaml·등록됨), 숨김 폴더 거르기(node_modules·.git은 항상 숨김), hasChildren, 심볼릭 링크, 500개 상한과 truncated, 빵부스러기·부모, 폴더 아님/없음/상대 경로 400, 바로가기(최근 8개·최신순).
+- `apps/studio/app/api/folders/route.test.ts`(5개): 쿼리 전달, 401·403 가드, listFolder가 던진 StudioError 상태 코드 전달.
+- `apps/studio/lib/folder-browser.test.ts`(9개): filterFolders·hintLabel·resolveListKey(Enter/Backspace/화살표)·folderListQuery·moveSelectionIndex 순수 함수.
+- `apps/studio/components/folder-browser.test.tsx`·`desktop-folder-picker.test.tsx`·`open-folder.test.tsx`(정적 렌더, `react-dom/server`): 첫 그리기 구조 확인. 이 저장소에는 jsdom·testing-library가 없어 더블클릭 같은 실제 이벤트는 시뮬레이션하지 못해, 그 동작은 위 순수 함수 테스트로 대신 확인했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 오류, 기존 경고만 남음), `pnpm test`(2,015개 중 1,997개 통과 — 실패 18개는 모두 이번에 건드리지 않은 파일(`checkpoints.test.ts`·`format.test.ts`·`artifacts.test.ts`·`sessions-base-catch-up.test.ts`·`sessions-review.test.ts`)의 5~20초 타임아웃으로, 기기 부하로 인한 사전 존재 플레이키다).
+- 데스크톱 앱을 실제로 띄워 대화상자를 확인하지는 않았다(`pnpm desktop:install`·빌드를 새로 하지 않는 범위였다) — `canPickFolder`의 보낸이 확인 로직과 preload 배선은 코드 확인과 단위 테스트로만 검증했다.
+
+### 감수한 트레이드오프
+- 스튜디오 화면에 처음으로 preload를 하나 열었다("서버가 준 콘텐츠에는 아무것도 주지 않는다"는 이전 원칙의 유일한 예외). 노출한 메서드는 `pickFolder` 하나뿐이고 보낸이를 이중으로 확인하지만, 앞으로 비슷한 필요가 늘면 이 원칙을 다시 볼 필요가 있다.
+- 폴더 실마리는 그 폴더 바로 아래만 본다(하위 폴더까지 뒤지지 않는다). 모노레포처럼 앱이 한 단계 아래에 있으면(ADR-067의 `detectProject`는 이것도 찾는다) 목록에서는 실마리 칩이 비어 보일 수 있다 — 실제로 들어가 보거나 고르면 제안(`detectProject`)이 정확하게 찾아준다.
+- 500개를 넘는 폴더는 이름순 앞부분만 보여준다. 아주 많은 하위 폴더를 가진 자리(예: 전체 홈 디렉터리 바로 아래에 수천 개 폴더가 있는 경우)에서는 찾는 폴더가 상한 밖에 있으면 이름으로 거르기 전에는 안 보일 수 있다 — 바로가기나 더 안쪽 폴더로 먼저 들어가는 것으로 피할 수 있다.
 
 ---
 
