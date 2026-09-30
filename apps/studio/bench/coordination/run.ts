@@ -35,6 +35,7 @@ import {
   resolveContextClearing,
   resolveContractsSource,
   resolveEscalation,
+  resolvePlanExecute,
   resolveRateLimitPolicy,
   resolveSelfCheck,
   resolveVerify,
@@ -108,6 +109,12 @@ interface Args {
   laneBackends?: string[];
   /** 모델 이름 일부 → 단가 표 JSON 파일. 모델별 API 환산 비용을 계산한다 */
   prices?: string;
+  /** 계획-실행 분리(ADR-075). 큰 모델로 계획을 한 번 받은 뒤 실행은 --model(또는 --execute-model)로 돈다. claude-code에서만 */
+  planModel?: string;
+  /** 계획-실행 분리의 실행 모델. 없으면 --model을 그대로 실행에도 쓴다(지금과 같다) */
+  executeModel?: string;
+  /** --plan-always. 요청 복잡도와 무관하게 계획을 세운다(B_STUDIO_PLAN_BRIEF=always). 벤치 과제는 짧아 기본 auto면 계획을 건너뛴다 */
+  planAlways?: boolean;
 }
 
 /** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
@@ -144,6 +151,9 @@ function parseArgs(argv: string[]): Args {
     else if (arg === '--escalate-retry-budget') args.escalateRetryBudget = Number(next(argv, index++, '--escalate-retry-budget'));
     else if (arg === '--lane-backend') (args.laneBackends ??= []).push(next(argv, index++, '--lane-backend'));
     else if (arg === '--prices') args.prices = next(argv, index++, '--prices');
+    else if (arg === '--plan-model') args.planModel = next(argv, index++, '--plan-model');
+    else if (arg === '--execute-model') args.executeModel = next(argv, index++, '--execute-model');
+    else if (arg === '--plan-always') args.planAlways = true;
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -163,6 +173,8 @@ function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--escalate-retry-budget=')) args.escalateRetryBudget = Number(arg.slice('--escalate-retry-budget='.length));
     else if (arg.startsWith('--lane-backend=')) (args.laneBackends ??= []).push(arg.slice('--lane-backend='.length));
     else if (arg.startsWith('--prices=')) args.prices = arg.slice('--prices='.length);
+    else if (arg.startsWith('--plan-model=')) args.planModel = arg.slice('--plan-model='.length);
+    else if (arg.startsWith('--execute-model=')) args.executeModel = arg.slice('--execute-model='.length);
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;
@@ -335,6 +347,10 @@ interface RunContext {
   escalateAfterFailures?: number;
   /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수 */
   escalateRetryBudget: number;
+  /** --plan-model(ADR-075). 없으면 계획 호출 없이 지금과 같이 실행만 한다 */
+  planModel?: string;
+  /** --execute-model(ADR-075). 없으면 --model을 그대로 실행에도 쓴다 */
+  executeModel?: string;
   /** --prices 단가 표(모델 이름 일부 → 단가). 없으면 모델별 API 환산 비용을 계산하지 않는다 */
   prices?: Record<string, TokenPrices>;
 
@@ -551,6 +567,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     failures,
     contextCleared,
     escalation,
+    ...(context.planModel || context.executeModel ? { planExecute: { ...(context.planModel ? { plan: context.planModel } : {}), ...(context.executeModel ? { execute: context.executeModel } : {}) } } : {}),
     metrics,
     coordination: plan.metrics?.coordination,
     contracts,
@@ -916,6 +933,13 @@ async function main(): Promise<void> {
     escalateAfterFailures: args.escalateAfterFailures,
     escalateRetryBudget: args.escalateRetryBudget,
   });
+  // 계획-실행 분리(ADR-075)도 시작 전에 확정한다. claude-code 백엔드(계획 기본 또는 레인)가 하나도 없으면 여기서 오류를 낸다
+  const planExecute = resolvePlanExecute({
+    backend,
+    laneBackends: [...laneBackendChoices.values()].map((lane) => lane.backend),
+    planModel: args.planModel,
+    executeModel: args.executeModel,
+  });
   // 단가 표도 시작 전에 읽는다. 값은 파일로만 받고 코드에 적지 않는다(잘못된 파일이면 Docker를 건드리기 전에 멈춘다)
   const prices = args.prices ? await loadPriceTable(args.prices) : undefined;
   const dry = args.dry;
@@ -1051,6 +1075,11 @@ async function main(): Promise<void> {
         });
         if (escalation.afterFailures !== undefined) benchEnv.B_STUDIO_ESCALATE_AFTER_FAILURES = String(escalation.afterFailures);
       }
+      // 계획-실행 분리(ADR-075): --plan-model·--execute-model → B_STUDIO_PLAN_MODEL·B_STUDIO_EXECUTE_MODEL.
+      // studio.yaml의 models가 아니라 서버 프로세스 환경 변수로 넘긴다(벤치 프로젝트는 이 절을 쓰지 않는다)
+      if (planExecute.plan) benchEnv.B_STUDIO_PLAN_MODEL = planExecute.plan;
+      if (planExecute.execute) benchEnv.B_STUDIO_EXECUTE_MODEL = planExecute.execute;
+      if (planExecute.plan && args.planAlways) benchEnv.B_STUDIO_PLAN_BRIEF = 'always';
     } else if (backend === 'codex') {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
@@ -1108,6 +1137,8 @@ async function main(): Promise<void> {
       escalateAfter: escalation.after,
       ...(escalation.afterFailures === undefined ? {} : { escalateAfterFailures: escalation.afterFailures }),
       escalateRetryBudget: escalation.retryBudget,
+      ...(planExecute.plan ? { planModel: planExecute.plan } : {}),
+      ...(planExecute.execute ? { executeModel: planExecute.execute } : {}),
       ...(prices ? { prices } : {}),
 
       projectDir,
@@ -1162,7 +1193,10 @@ async function main(): Promise<void> {
 
   const finishedAt = new Date().toISOString();
   const observedModels = [...new Set(rows.flatMap((row) => row.observedModels))];
-  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource, verify }), secrets));
+  await writeFile(
+    path.join(outRoot, 'summary.md'),
+    redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource, verify, planModel: planExecute.plan, executeModel: planExecute.execute }), secrets),
+  );
   await writeFile(
     path.join(outRoot, 'meta.json'),
     redact(
@@ -1188,6 +1222,8 @@ async function main(): Promise<void> {
           escalateAfter: escalation.after,
           escalateAfterFailures: escalation.afterFailures,
           escalateRetryBudget: escalation.retryBudget,
+          planModel: planExecute.plan,
+          executeModel: planExecute.execute,
           pricesPath: args.prices,
           repeats,
           runs: rows.length,

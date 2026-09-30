@@ -58,6 +58,16 @@ describe('reduceSession', () => {
     expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
   });
 
+  it('계획-실행 분리(ADR-075)의 계획을 "계획(모델명)" 접기 블록으로 대화에 남긴다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '주문 목록 화면을 만들어줘' },
+      { type: 'plan_brief', runId: 'r1', model: 'opus', text: '1. web/orders 목록 화면을 만든다', usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 1200 },
+    ]);
+
+    expect(view.chat.map((item) => item.kind)).toEqual(['request', 'planBrief']);
+    expect(view.chat[1]).toMatchObject({ kind: 'planBrief', runId: 'r1', model: 'opus', text: '1. web/orders 목록 화면을 만든다' });
+  });
+
   it('되묻기 질문을 스냅샷에 남기고, 다음 요청을 보내면 지운다', () => {
     const asked = fold([
       { type: 'question', runId: 'r1', question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true },

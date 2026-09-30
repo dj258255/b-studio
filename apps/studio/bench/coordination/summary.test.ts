@@ -212,6 +212,12 @@ describe('summarize', () => {
     expect(summarize([row({ verify: 'light' })], { ...meta, verify: 'light' })).toContain('검증 light(가볍게)');
   });
 
+  it('계획-실행 분리(ADR-075)를 설정했으면 맨 위 줄에 계획·실행 모델을 적고, 설정하지 않으면 아무것도 더하지 않는다', () => {
+    expect(summarize([row({})], meta)).not.toContain('계획-실행 분리');
+    expect(summarize([row({})], { ...meta, planModel: 'opus' })).toContain('계획-실행 분리: 계획 opus → 실행 test-model');
+    expect(summarize([row({})], { ...meta, planModel: 'opus', executeModel: 'haiku' })).toContain('계획-실행 분리: 계획 opus → 실행 haiku');
+  });
+
   it('claude-code 백엔드면 modelMs 한계 줄을 더한다', () => {
     const local = summarize([row({})], { backend: 'claude-code', requestedModel: 'sonnet' });
     expect(local).toContain('로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다.');
