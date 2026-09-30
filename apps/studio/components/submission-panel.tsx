@@ -76,13 +76,13 @@ function SubmissionList({ sessionId }: { sessionId: string }) {
   return (
     <div className="h-full min-h-0 overflow-y-auto p-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-medium">제출 준비</h3>
+        <h3 className="font-medium">공유 전 점검</h3>
         <span className="text-sm text-muted">
           {report.score.passed}/{report.score.total} 통과
         </span>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted">
-        과제 채점 기준(요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리와 원격·문서)을 확인합니다. “고치기”는 대화 입력창에 요청 글만 채우고 바로 보내지 않습니다.
+        저장소를 넘기거나 PR을 올리기 전에 요구사항·테스트·실행 방법·환경 변수·데이터·비밀 값·커밋 기록·작업 트리와 원격·문서를 확인합니다. “고치기”는 대화 입력창에 요청 글만 채우고 바로 보내지 않습니다.
       </p>
       <ul className="mt-3 space-y-2">
         {report.items.map((item) => (
