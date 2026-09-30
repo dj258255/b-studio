@@ -1489,6 +1489,11 @@ function escalationRules(): Pick<EscalationPolicy, 'sameSignatureTimes' | 'after
   };
 }
 
+/** 계획 호출(ADR-075)을 할 수 있는 세션 백엔드. 도구 없이 한 번 묻는 경로가 있는 api·claude-code만 되고, 데모·그 밖의 백엔드는 undefined */
+export function planBriefBackend(backend: SessionMode): 'api' | 'claude-code' | undefined {
+  return backend === 'api' || backend === 'claude-code' ? backend : undefined;
+}
+
 /**
  * 계획-실행 분리(ADR-075). 계획 모델이 설정돼 있고, 이 요청이 만들기(build) 요청이며(질문은 대상이 아니다),
  * 백엔드가 claude-code·api 중 하나이고(PR 리뷰·작업 계획과 같은 제약 — 그 밖의 백엔드는 도구 없는 단발 호출 경로가 없다),
@@ -1504,13 +1509,17 @@ async function withPlanBrief(
   plan: RunPlan,
   signal: AbortSignal,
 ): Promise<{ request: string; planUsage?: { model: string; usage: AgentUsage } }> {
-  if (plan.intent === 'ask' || (plan.kind !== 'claude-code' && plan.kind !== 'model')) return { request };
+  // 실행 계획 종류(plan.kind)가 아니라 세션 백엔드로 고른다. 데모·대본 세션(작업 계획의 통합 단계 등)도 plan.kind가 'model'이라
+  // 그대로 두면 API 모델 레지스트리에서 계획 모델을 찾다가 실패한다(E8 첫 실행에서 드러남)
+  const backend = planBriefBackend(sessionBackend(session.snapshot));
+  if (plan.intent === 'ask' || !backend) return { request };
   const split = planExecuteConfig(session.project);
   if (!split.plan || (!split.always && !shouldPlanBrief(request))) return { request };
 
-  const ask: ModelAsk =
-    plan.kind === 'claude-code' ? claudeCodeAsk({ cwd: session.project.root, model: split.plan }) : planAskFromClient(clientForModel(modelById(split.plan)));
   try {
+    // 계획 호출 준비(모델 조회)도 실패할 수 있으므로 try 안에 둔다 — 계획은 돕는 역할이라 실패하면 계획 없이 실행한다
+    const ask: ModelAsk =
+      backend === 'claude-code' ? claudeCodeAsk({ cwd: session.project.root, model: split.plan }) : planAskFromClient(clientForModel(modelById(split.plan)));
     const brief = await requestPlanBrief(ask, session.project, request, signal);
     emit(session, { type: 'plan_brief', runId: run.id, model: split.plan, text: brief.text, usage: brief.usage, durationMs: brief.durationMs });
     return { request: appendPlanToRequest(request, brief.text), planUsage: { model: split.plan, usage: brief.usage } };
