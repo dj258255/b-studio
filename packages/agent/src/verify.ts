@@ -44,6 +44,11 @@ export interface VerificationReport {
   unverifiedFiles: string[];
   /** 시크릿 값이 들어간 바뀐 파일. 체크포인트로 커밋되지 않게 게이트를 실패시킨다 */
   secretLeaks: SecretLeak[];
+  /**
+   * 사용자가 서비스 선택(ADR-083)에서 꺼 둬 재시작·계약 확인을 건너뛴 managed 서비스.
+   * "검증됨"이 실제보다 부풀려 보이지 않도록 남긴다 — 실패로 세지는 않는다
+   */
+  skippedOff: string[];
 }
 
 export interface SecretLeak {
@@ -73,12 +78,13 @@ export interface VerifyOptions {
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
   const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
   const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
-  const { sync, restarted, unverifiedFiles } = await restartServicesFor(sandbox, project, changedFiles, start);
-  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks };
+  const { sync, restarted, unverifiedFiles, skippedOff } = await restartServicesFor(sandbox, project, changedFiles, start);
+  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff };
 
-  // 재시작에 실패한 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
+  // 재시작에 실패했거나(서비스가 준비 안 됨) 꺼 둬 재시작을 건너뛴 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
   const failed = new Set(restarted.filter((check) => !check.ready).map((check) => check.service));
-  const contractServices = project.managed.filter(([name, service]) => service.contract && !failed.has(name));
+  const off = new Set(skippedOff);
+  const contractServices = project.managed.filter(([name, service]) => service.contract && !failed.has(name) && !off.has(name));
 
   const contracts = await Promise.all(
     contractServices.map(async ([name, service]): Promise<ContractCheck> => {
@@ -99,7 +105,7 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     (allowBreaking || !breaking) &&
     secretLeaks.length === 0;
 
-  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks };
+  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff };
 }
 
 /**
@@ -122,6 +128,8 @@ export interface RestartReport {
   restarted: ServiceCheck[];
   /** 서비스에 속하지 않아 재시작으로 확인할 수 없는 파일 */
   unverifiedFiles: string[];
+  /** 사용자가 꺼 둬(ADR-083) 재시작을 건너뛴 managed 서비스. 실패로 세지 않는다 */
+  skippedOff: string[];
 }
 
 /**
@@ -143,7 +151,12 @@ export async function restartServicesFor(
   { alsoRestart = [], deletedFileRetryDelayMs = 3_000 }: RestartOptions = {},
 ): Promise<RestartReport> {
   const owned = servicesForFiles(project, files);
-  const services = [...new Set([...owned.services, ...alsoRestart])];
+  const wanted = [...new Set([...owned.services, ...alsoRestart])];
+  // 사용자가 서비스 선택(ADR-083)에서 꺼 둔 서비스는 재시작하지 않는다(껐는데 다시 켜 버리면 선택을 무시하는 셈이다).
+  // 건너뛴 사실은 검증 보고서에 남겨, 확인하지 않은 서비스를 "검증됨"으로 부풀리지 않게 한다
+  const off = project.offServices;
+  const services = off ? wanted.filter((service) => !off.has(service)) : wanted;
+  const skippedOff = off ? wanted.filter((service) => off.has(service)) : [];
   const unmatched = owned.unmatched;
   const deleted = await deletedFiles(project.root, files);
 
@@ -152,7 +165,7 @@ export async function restartServicesFor(
   try {
     sync = { elapsedMs: (await sandbox.sync([...files], { signal: start?.signal })).elapsedMs };
   } catch (error) {
-    return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched };
+    return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched, skippedOff };
   }
 
   const restarted = await Promise.all(
@@ -167,7 +180,7 @@ export async function restartServicesFor(
     }),
   );
 
-  return { sync, restarted, unverifiedFiles: unmatched };
+  return { sync, restarted, unverifiedFiles: unmatched, skippedOff };
 }
 
 async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptions): Promise<ServiceCheck> {
@@ -235,7 +248,7 @@ export async function captureBaselines(
 ): Promise<Map<string, OpenApiDocument>> {
   const baselines = new Map<string, OpenApiDocument>();
   for (const [name, service] of project.managed) {
-    if (!service.contract) continue;
+    if (!service.contract || project.offServices?.has(name)) continue;
     try {
       const endpoint = await sandbox.endpoint(name);
       baselines.set(name, await fetcher(new URL(service.contract.extract, endpoint.url).toString()));
@@ -278,6 +291,9 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
 
   if (report.unverifiedFiles.length > 0) {
     lines.push(`- 재시작으로 확인하지 못한 파일: ${report.unverifiedFiles.join(', ')}`);
+  }
+  if (report.skippedOff.length > 0) {
+    lines.push(`- 꺼 둔 서비스라 확인을 건너뜀(검증에 포함되지 않음): ${report.skippedOff.join(', ')}`);
   }
   for (const leak of report.secretLeaks) {
     lines.push(`- 시크릿 값이 파일에 들어갔습니다: ${leak.file} (${leak.secrets.join(', ')}). 값은 코드에서 환경 변수로 읽고 파일에 쓰지 마세요`);

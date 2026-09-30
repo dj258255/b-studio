@@ -27,7 +27,9 @@ export type ServiceStatusEvent =
   | { service: string; phase: 'starting' }
   | { service: string; phase: 'probing'; probe: ProbeResult }
   | { service: string; phase: 'ready'; endpoint: ServiceEndpoint }
-  | { service: string; phase: 'failed'; reason: string };
+  | { service: string; phase: 'failed'; reason: string }
+  /** 사용자가 서비스 선택(ADR-083)에서 꺼 둬 이번 기동에서 띄우지 않았다. 실패가 아니다 */
+  | { service: string; phase: 'off' };
 
 /** 기동 가속용 스냅샷을 쓰거나 만든 결과. 실패해도 기동은 스냅샷 없이 계속된다 */
 export type SnapshotEvent =
@@ -57,6 +59,13 @@ export interface StartOptions {
    * edge 프록시 컨테이너는 서비스 트래픽이 지나가므로 뺀다(더하면 이중 계산).
    */
   onBootNetwork?: (network: BootNetwork) => void;
+  /**
+   * 띄울 compose 서비스 이름(ADR-083). 주지 않으면 지금처럼 compose 파일의 모든 서비스를 띄운다(옛 동작과 호환).
+   * 주면 이 목록의 서비스만 띄우고(+ 제공자가 항상 필요로 하는 edge 프록시), 목록에 없는 managed 서비스는
+   * 'off' 상태로 알린다. 목록에 없는 서비스를 의존하는 서비스가 있으면 compose가 그 의존 서비스를 몰래
+   * 따라 띄우지 않도록 --no-deps를 함께 쓴다(선택에서 뺀 의존 서비스를 정말로 띄우지 않기 위해서다)
+   */
+  services?: readonly string[];
 }
 
 export interface LogLine {
@@ -227,6 +236,14 @@ export interface Sandbox {
    * 샌드박스 서비스의 호출과 같은 정책·인증·응답 가림·감사 기록을 거친다. via는 감사 기록에 남길 경로다
    */
   callExternal(name: string, request: ExternalCallRequest, options: { via: string; signal?: AbortSignal }): Promise<ExternalCallResult>;
+  /**
+   * 서비스 하나를 켜거나 끈다(ADR-083, 서비스 선택). managed·supporting 어느 쪽이든 쓸 수 있다.
+   * 켤 때는 이미지를 빌드하고(managed 서비스가 소스를 바꿨을 수 있어서) 컨테이너를 만들어 기동하되,
+   * 다른 서비스를 따라 띄우지 않는다(--no-deps). 끌 때는 컨테이너를 멈추기만 하고 지우지 않는다(볼륨이 남는다).
+   * 준비 판정(ready)은 하지 않는다 — managed 서비스를 켠 뒤 화면에 반영하려면 restart()로 기다린다.
+   * 구현하지 않는 제공자는 undefined로 둔다(호출자가 지원 여부를 안내한다)
+   */
+  setServiceRunning?(service: string, running: boolean, options?: { signal?: AbortSignal }): Promise<void>;
   destroy(): Promise<void>;
 }
 

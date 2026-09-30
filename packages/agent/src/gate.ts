@@ -671,6 +671,7 @@ export class VerificationGate {
     const { sandbox, project } = this.#options;
     const origins = new Set<string>();
     for (const [name] of project.managed) {
+      if (project.offServices?.has(name)) continue;
       try {
         origins.add(new URL((await sandbox.endpoint(name)).url).origin);
       } catch {

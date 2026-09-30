@@ -27,7 +27,7 @@ function failureEvent(runId: string): StudioEvent {
     event: {
       type: 'verify_result',
       text: '',
-      report: { ok: false, sync: { elapsedMs: 1 }, restarted: [{ service: 'web', ready: false, error: 'cannot find symbol at line 42' }], contracts: [], unverifiedFiles: [], secretLeaks: [] },
+      report: { ok: false, sync: { elapsedMs: 1 }, restarted: [{ service: 'web', ready: false, error: 'cannot find symbol at line 42' }], contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [] },
     },
   } as StudioEvent;
 }

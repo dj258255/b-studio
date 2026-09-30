@@ -59,6 +59,17 @@ describe('DatabaseBranches', () => {
     expect(calls[0]?.outputFile).toContain(`${SHA_A}.save.`);
   });
 
+  it('서비스 선택(ADR-083)에서 꺼 둔 데이터베이스는 컨테이너가 없어 건드리지 않고 건너뛴다', async () => {
+    const { sandbox, calls } = fakeSandbox([]);
+    const off = { ...project, offServices: new Set(['db']) } as unknown as LoadedProject;
+    const branches = new DatabaseBranches(sandbox, off, dir);
+
+    expect(await branches.save(SHA_A)).toMatchObject([{ service: 'db', action: 'missing' }]);
+    expect(await branches.restore(SHA_A)).toMatchObject({ states: [{ service: 'db', action: 'missing' }], dependents: [] });
+    expect(await branches.changedSince(SHA_A)).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   it('지금 상태가 체크포인트와 같으면 되돌리지 않고, 서비스도 재시작하지 않는다', async () => {
     // 무작위 키만 다른 덤프는 같은 상태로 본다
     const { sandbox, calls } = fakeSandbox([dump('CREATE TABLE orders ();', 'k1'), dump('CREATE TABLE orders ();', 'k2')]);

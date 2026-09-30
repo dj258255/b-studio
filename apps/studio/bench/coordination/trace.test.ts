@@ -7,7 +7,7 @@ const agent = (event: unknown): StudioEvent => ({ type: 'agent', runId: 'run-1',
 const toolCall = (name: string, input: unknown): StudioEvent => agent({ type: 'tool_call', name, input });
 
 function report(over: Partial<VerificationReport>): VerificationReport {
-  return { ok: false, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], ...over };
+  return { ok: false, sync: { elapsedMs: 1 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [], ...over };
 }
 
 describe('traceFromEvents', () => {

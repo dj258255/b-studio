@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
 import { detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, SPEC_FILE, type GeneratedFile, type ProjectDetection } from './project-detect';
+import { writeServiceSelection } from './service-selection';
 
 export interface RegisteredProject {
   id: string;
@@ -76,9 +77,16 @@ export async function proposeFolder(folder: string, file = registryPath()): Prom
 
 /**
  * 폴더를 등록한다. 제안 파일을 쓰고(사용자 파일은 덮어쓰지 않는다) git 추적에서 뺀 뒤, b-studio가 실제로 읽을 수 있는지 확인하고 목록에 올린다.
- * takenIds는 다른 곳(예제 폴더)의 프로젝트 id. 같은 폴더를 다시 등록하면 기존 id를 돌려준다
+ * takenIds는 다른 곳(예제 폴더)의 프로젝트 id. 같은 폴더를 다시 등록하면 기존 id를 돌려준다.
+ * selectedInfra를 주면(폴더 열기 미리보기의 체크박스, ADR-083) 그 부가 서비스만 기본으로 띄우도록 서비스 선택을 저장한다.
+ * 주지 않으면 detection.defaultInfra(앱이 기대는 부가 서비스의 닫힘)를 쓴다 — 아무도 기대지 않는 부가 서비스는 기본으로 뜨지 않는다
  */
-export async function registerFolder(folder: string, takenIds: ReadonlySet<string>, file = registryPath()): Promise<{ id: string; created: boolean; written: string[]; excluded: boolean }> {
+export async function registerFolder(
+  folder: string,
+  takenIds: ReadonlySet<string>,
+  file = registryPath(),
+  { selectedInfra }: { selectedInfra?: readonly string[] } = {},
+): Promise<{ id: string; created: boolean; written: string[]; excluded: boolean }> {
   const proposal = await proposeFolder(folder, file);
   const root = proposal.detection.folder;
   if (!proposal.detection.hasSpec && proposal.files.length === 0) {
@@ -101,10 +109,16 @@ export async function registerFolder(folder: string, takenIds: ReadonlySet<strin
 
   const projects = await readRegistry(file);
   const existing = projects.find((entry) => entry.path === root);
-  if (existing) return { id: existing.id, created: false, written, excluded };
-  const id = projectIdFor(root, new Set([...takenIds, ...projects.map((entry) => entry.id)]));
-  await writeRegistry([...projects, { id, path: root, addedAt: new Date().toISOString() }], file);
-  return { id, created: true, written, excluded };
+  const id = existing?.id ?? projectIdFor(root, new Set([...takenIds, ...projects.map((entry) => entry.id)]));
+  if (!existing) await writeRegistry([...projects, { id, path: root, addedAt: new Date().toISOString() }], file);
+
+  if (proposal.detection.infra.length > 0) {
+    const infraSelected = new Set(selectedInfra ?? proposal.detection.defaultInfra);
+    const selected = [...proposal.detection.services.map((service) => service.name), ...proposal.detection.infra.filter((service) => infraSelected.has(service.name)).map((service) => service.name)];
+    await writeServiceSelection(id, selected);
+  }
+
+  return { id, created: !existing, written, excluded };
 }
 
 /** 목록에서만 뺀다. 폴더와 만든 파일은 그대로 둔다 */
