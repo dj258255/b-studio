@@ -1,8 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
+import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel } from "./chat-panel";
+import { ChatPanel, ModelPicker } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -123,5 +124,48 @@ describe("ChatPanel 결과 표시", () => {
 
     // 만들기 경로에서 답만 한 실행에는 붙지 않는다(파일을 바꾸지 않아도 읽기만 실행이 아니다)
     expect(render(view(asked))).not.toContain("이대로 만들기");
+  });
+});
+
+describe("ModelPicker(대화 입력창의 모델 선택)", () => {
+  const claudeCode: ModelPickerView = {
+    backend: "claude-code",
+    current: "sonnet",
+    options: [
+      { id: "", label: "기본", hint: "로그인한 계정의 기본 모델을 그대로 씁니다" },
+      { id: "opus", label: "Opus", hint: "어려운 설계·디버깅에 강합니다", resolvedId: "claude-opus-5", price: { inputPerMillion: 5, outputPerMillion: 25 } },
+      { id: "sonnet", label: "Sonnet", hint: "대부분의 작업에 균형 잡힌 선택입니다", resolvedId: "claude-sonnet-5", price: { inputPerMillion: 2, outputPerMillion: 10 } },
+      { id: "haiku", label: "Haiku", hint: "가장 저렴하고 빠릅니다. 작은 수정에 적합합니다", resolvedId: "claude-haiku-4-5", price: { inputPerMillion: 1, outputPerMillion: 5 } },
+    ],
+  };
+
+  it("고를 수 있는 모델을 모두 옵션으로 그리고, 지금 값을 고른 채로 그린다", () => {
+    const html = renderToStaticMarkup(<ModelPicker picker={claudeCode} disabled={false} onChange={() => undefined} />);
+
+    expect(html).toContain(">기본</option>");
+    expect(html).toContain('<option value="opus"');
+    expect(html).toMatch(/<option value="sonnet"[^>]*selected=""/);
+    expect(html).toContain('<option value="haiku"');
+    // 지금 고른 모델의 공식 단가는 옵션 title에, 관측한 실제 모델 id(claude-sonnet-5)는 select 전체의 title(호버 안내)에 들어간다
+    expect(html).toMatch(/<option value="opus"[^>]*title="[^"]*\$5/);
+    expect(html).toMatch(/<select[^>]*title="[^"]*claude-sonnet-5/);
+  });
+
+  it("요청을 처리하는 동안에는(disabled) 고르지 못하게 막고 이유를 안내한다", () => {
+    const html = renderToStaticMarkup(
+      <ModelPicker picker={claudeCode} disabled={true} disabledReason="요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" onChange={() => undefined} />,
+    );
+
+    expect(html).toMatch(/<select[^>]*disabled=""/);
+    expect(html).toContain('title="요청을 처리하는 동안에는 모델을 바꿀 수 없습니다"');
+  });
+
+  it("고를 것이 '기본'뿐이면(예: codex) 저절로 막는다", () => {
+    const codex: ModelPickerView = { backend: "codex", options: [{ id: "", label: "기본" }], note: "Codex는 스튜디오가 미리 아는 모델 목록이 없습니다" };
+
+    const html = renderToStaticMarkup(<ModelPicker picker={codex} disabled={false} onChange={() => undefined} />);
+
+    expect(html).toMatch(/<select[^>]*disabled=""/);
+    expect(html).toContain("Codex는 스튜디오가 미리 아는 모델 목록이 없습니다");
   });
 });

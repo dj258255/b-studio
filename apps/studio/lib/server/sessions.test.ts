@@ -8,6 +8,7 @@ import {
   assertResumableBackend,
   buildExportChecks,
   claudeCodeEscalation,
+  cliModelOverride,
   parseIssueInput,
   parseIssueList,
   planBriefBackend,
@@ -258,6 +259,34 @@ describe('모델 승격의 기본 대상(ADR-075: 계획 모델로 올린다)', 
 
   it('API 모드: 계획 모델도 없으면 승격하지 않는다(지금과 같은 동작)', () => {
     expect(apiEscalation(undefined, {})).toBeUndefined();
+  });
+
+  it('로컬 Claude 모드: 사람이 대화에서 이미 승격 대상과 같은 모델을 실행 모델로 골랐으면 승격하지 않는다(no-op)', () => {
+    const env = { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: 'opus' };
+    expect(claudeCodeEscalation('sonnet', env, 'opus')).toBeUndefined();
+    // 다른 모델을 골랐으면 그대로 승격한다
+    expect(claudeCodeEscalation('sonnet', env, 'haiku')?.to).toBe('opus');
+    // 아무것도 고르지 않았으면(undefined) 지금과 같이 승격한다
+    expect(claudeCodeEscalation('sonnet', env, undefined)?.to).toBe('opus');
+  });
+
+  it('API 모드: 사람이 대화에서 이미 승격 대상과 같은 모델을 실행 모델로 골랐으면 승격하지 않는다(no-op)', () => {
+    const env = { B_STUDIO_ESCALATE_MODEL_ID: 'anthropic-default' };
+    expect(apiEscalation('other-plan-id', env, 'anthropic-default')).toBeUndefined();
+    expect(apiEscalation('other-plan-id', env, 'other-model')?.to).toBe('Claude 기본 모델');
+  });
+});
+
+describe('cliModelOverride(CLI 러너에 넘길 모델)', () => {
+  it('대화에서 고른 모델(별칭·id)을 그대로 넘긴다', () => {
+    expect(cliModelOverride('opus')).toBe('opus');
+    expect(cliModelOverride(' sonnet ')).toBe('sonnet');
+  });
+
+  it('고르지 않았거나(undefined) 작업 분해 레인의 기록용 id(local-cli:...)는 넘기지 않는다(환경 변수로 떨어진다)', () => {
+    expect(cliModelOverride(undefined)).toBeUndefined();
+    expect(cliModelOverride('')).toBeUndefined();
+    expect(cliModelOverride('local-cli:claude-code:sonnet')).toBeUndefined();
   });
 });
 
