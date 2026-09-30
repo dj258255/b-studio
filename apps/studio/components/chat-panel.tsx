@@ -8,6 +8,7 @@ import { artifactUrl } from "@/lib/artifact-url";
 import { chatMethodAvailability, type ChatCapabilities, type ChatMethod } from "@/lib/chat-methods";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import { submitEntry } from "@/lib/home-entry";
+import type { ModelPickerOption, ModelPickerView } from "@/lib/server/model-picker";
 import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionView } from "@/lib/session-view";
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { useChatDraft } from "./chat-draft-context";
@@ -33,6 +34,10 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const [allowBreaking, setAllowBreaking] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
+  /** 대화 입력창의 모델 선택(고를 수 있는 목록 + 지금 값). 데모 세션은 모델을 부르지 않으므로 불러오지 않는다 */
+  const [picker, setPicker] = useState<ModelPickerView>();
+  const [modelError, setModelError] = useState<string>();
+  const [changingModel, setChangingModel] = useState(false);
   /** 되돌리는 동작이라 한 번 더 누르게 한다. 요청이 바뀌면 확인 상태도 사라지도록 요청 id로 둔다 */
   const [confirmingCancel, setConfirmingCancel] = useState<string>();
   const listRef = useRef<HTMLOListElement>(null);
@@ -102,6 +107,41 @@ export function ChatPanel({ view }: { view: SessionView }) {
     };
   }, []);
   const methods = chatMethodAvailability(capabilities);
+
+  // 대화 입력창의 모델 선택. 세션 id가 바뀔 때만 다시 불러온다(백엔드는 세션 동안 바뀌지 않는다)
+  useEffect(() => {
+    if (snapshot.mode === "demo") return;
+    let cancelled = false;
+    fetch(`/api/sessions/${snapshot.id}/model`)
+      .then(async (response) => (response.ok ? ((await response.json()) as ModelPickerView) : undefined))
+      .then((data) => {
+        if (!cancelled && data) setPicker(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot.id, snapshot.mode]);
+
+  /** 모델을 바꾼다. 다음 요청부터 적용되고(진행 중 요청에는 영향이 없다), 실패하면 이전 선택으로 되돌린다 */
+  async function changeModel(modelId: string) {
+    if (!picker) return;
+    const previous = picker;
+    setChangingModel(true);
+    setModelError(undefined);
+    setPicker({ ...picker, current: modelId });
+    const response = await fetch(`/api/sessions/${snapshot.id}/model`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ modelId }),
+    });
+    if (response.ok) setPicker((await response.json()) as ModelPickerView);
+    else {
+      setPicker(previous);
+      setModelError((await response.json()).error ?? "모델을 바꾸지 못했습니다");
+    }
+    setChangingModel(false);
+  }
 
   const personalLimit = personal?.limit;
   const personalReached = personalLimit !== undefined && personal !== undefined && personal.used >= personalLimit;
@@ -442,16 +482,27 @@ export function ChatPanel({ view }: { view: SessionView }) {
               ) : (
                 <span />
               )}
-              <button
-                type="submit"
-                disabled={!text.trim() || (runId ? !canSteer : !canSend)}
-                className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
-              >
-                {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
-              </button>
+              <div className="flex items-center gap-2">
+                {picker && (
+                  <ModelPicker
+                    picker={picker}
+                    disabled={!access.canManage || snapshot.running || changingModel}
+                    disabledReason={snapshot.running ? "요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" : undefined}
+                    onChange={(value) => void changeModel(value)}
+                  />
+                )}
+                <button
+                  type="submit"
+                  disabled={!text.trim() || (runId ? !canSteer : !canSend)}
+                  className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+                >
+                  {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
+                </button>
+              </div>
             </div>
           </>
         )}
+        {modelError && <p className="mt-2 text-sm text-fail">{modelError}</p>}
         {error && <p className="mt-2 text-sm text-fail">{error}</p>}
       </form>
     </section>
@@ -948,6 +999,49 @@ function QuestionCard({
       <p className="mt-2 text-xs text-muted">답을 보내면 이 대화를 이어서 만듭니다.</p>
     </div>
   );
+}
+
+/**
+ * 대화 입력창의 모델 선택. 세션 백엔드가 고를 수 있는 목록을 그대로 `<select>`로 그린다(키보드로 접근 가능, 팝오버가
+ * 없어 포털이 필요 없다). 고르면 다음 요청부터 그 모델로 돈다. 요청을 처리하는 동안에는 disabled로 막는다.
+ */
+export function ModelPicker({
+  picker,
+  disabled,
+  disabledReason,
+  onChange,
+}: {
+  picker: ModelPickerView;
+  disabled: boolean;
+  disabledReason?: string;
+  onChange: (modelId: string) => void;
+}) {
+  const value = picker.current ?? "";
+  const current = picker.options.find((option) => option.id === value);
+  const title = disabledReason ?? [current?.hint, formatPrice(current?.price), current?.resolvedId && `실제 모델: ${current.resolvedId}`, picker.note].filter(Boolean).join(" · ");
+  return (
+    <label className="flex items-center gap-1.5 text-sm">
+      <span className="sr-only">모델</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled || picker.options.length <= 1}
+        title={title || undefined}
+        className="rounded-control border border-line bg-panel px-2 py-2 text-sm text-ink disabled:opacity-50"
+      >
+        {picker.options.map((option) => (
+          <option key={option.id} value={option.id} disabled={option.disabled} title={[option.hint, formatPrice(option.price)].filter(Boolean).join(" · ") || undefined}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function formatPrice(price?: ModelPickerOption["price"]): string | undefined {
+  if (!price) return undefined;
+  return `백만 토큰당 입력 $${price.inputPerMillion}/출력 $${price.outputPerMillion}`;
 }
 
 function stageLabel(stage: string): string {

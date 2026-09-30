@@ -161,6 +161,8 @@ import { searchFiles, walkFiles } from './code-files';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
+import { isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
+import { rememberProjectModelDefault } from './model-defaults';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -1149,6 +1151,30 @@ export function setSessionDesign(id: string, fileUrl: string): DesignView | unde
   return design;
 }
 
+/** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값을 함께 돌려준다 */
+export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
+  const session = requireSession(id);
+  return listSelectableModels(sessionBackend(session.snapshot), session.snapshot.modelId);
+}
+
+/**
+ * 대화 입력창에서 이 세션이 쓸 모델을 바꾼다. 다음 요청부터 적용된다(planRun이 매번 session.snapshot.modelId를 다시 읽는다).
+ * 빈 문자열이나 undefined는 "기본"(오버라이드 없음)을 뜻한다. 요청을 처리하는 동안에는 바꾸지 못한다(실행 중인 요청과 엇갈리지 않게).
+ * 고른 값은 이 프로젝트·백엔드의 다음 새 세션 기본값으로도 남긴다(model-defaults.ts)
+ */
+export async function setSessionModel(id: string, modelId: string | undefined): Promise<ModelPickerView> {
+  const session = requireSession(id);
+  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 모델을 바꿀 수 없습니다');
+  const backend = sessionBackend(session.snapshot);
+  const trimmed = modelId?.trim() ?? '';
+  const check = await isSelectableModel(backend, trimmed);
+  if (!check.ok) throw new StudioError(400, check.reason ?? `이 백엔드에서 고를 수 없는 모델입니다: ${trimmed}`);
+  session.snapshot.modelId = trimmed || undefined;
+  emit(session, { type: 'model', modelId: session.snapshot.modelId });
+  rememberProjectModelDefault(session.snapshot.projectId, backend, session.snapshot.modelId);
+  return listSelectableModels(backend, session.snapshot.modelId);
+}
+
 /** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
 export async function sessionDesignFrames(id: string): Promise<{ design?: DesignView; frames: DesignFrameInfo[] }> {
   const session = requireSession(id);
@@ -1379,11 +1405,13 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   if (kind === 'model') {
     // 세션이 고른 모델(사람이 직접 선택)이 실행 모델 설정보다 우선한다
     const route = routingDecision(request, intent, session.snapshot.modelId ?? split.execute);
-    const escalation = apiEscalation(split.plan);
+    // 사람이 대화에서 직접 고른 모델일 때만 "같은 모델로 승격" no-op을 본다. 라우터가 고른 값은 다음 요청에서 바뀔 수 있어 대상이 아니다
+    const escalation = apiEscalation(split.plan, process.env, session.snapshot.modelId ? route.selected.id : undefined);
     return { kind: 'model', client: clientForModel(route.selected), route, allowBreaking, intent, ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'claude-code') {
-    const escalation = claudeCodeEscalation(split.plan);
+    const chosenModel = cliModelOverride(session.snapshot.modelId);
+    const escalation = claudeCodeEscalation(split.plan, process.env, chosenModel);
     return { kind: 'claude-code', allowBreaking, intent, ...(split.execute ? { executeModel: split.execute } : {}), ...(escalation ? { escalation } : {}) };
   }
   if (kind === 'codex') return { kind: 'codex', allowBreaking, intent };
@@ -1473,9 +1501,15 @@ function integerEnv(name: string, min: number): number | undefined {
  * planModelId: 계획-실행 분리(ADR-075)의 계획 모델 id. 명시적 승격 대상이 없으면 이쪽으로 올린다
  * (이미 계획을 세운 큰 모델이니 실행 모델이 게이트를 반복해서 실패하면 다시 불러오는 것이 자연스럽다).
  */
-export function apiEscalation(planModelId?: string, env: Record<string, string | undefined> = process.env): (EscalationPolicy & { client: ModelClient }) | undefined {
+export function apiEscalation(
+  planModelId?: string,
+  env: Record<string, string | undefined> = process.env,
+  skipIfSameAs?: string,
+): (EscalationPolicy & { client: ModelClient }) | undefined {
   const id = env.B_STUDIO_ESCALATE_MODEL_ID?.trim() || planModelId;
   if (!id) return undefined;
+  // 사람이 대화에서 이미 이 모델을 실행 모델로 골랐으면, 올려도 같은 모델이라 승격은 아무 효과가 없다(no-op)
+  if (skipIfSameAs && id === skipIfSameAs) return undefined;
   const model = (() => {
     try {
       return modelById(id);
@@ -1492,9 +1526,15 @@ export function apiEscalation(planModelId?: string, env: Record<string, string |
  * planModel: 계획-실행 분리(ADR-075)의 계획 모델 이름. 명시적 승격 대상(B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL)이
  * 없으면 이쪽으로 올린다 — 계획 모델로 기본 승격 대상을 삼는다.
  */
-export function claudeCodeEscalation(planModel?: string, env: Record<string, string | undefined> = process.env): EscalationPolicy | undefined {
+export function claudeCodeEscalation(
+  planModel?: string,
+  env: Record<string, string | undefined> = process.env,
+  skipIfSameAs?: string,
+): EscalationPolicy | undefined {
   const to = env.B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL?.trim() || planModel;
   if (!to) return undefined;
+  // 사람이 대화에서 이미 이 모델(별칭)을 실행 모델로 골랐으면, 올려도 같은 모델이라 승격은 아무 효과가 없다(no-op)
+  if (skipIfSameAs && to === skipIfSameAs) return undefined;
   return { ...escalationRules(), to };
 }
 
@@ -3528,7 +3568,7 @@ export function sessionBackend(snapshot: Pick<SessionSnapshot, 'mode' | 'backend
  * CLI 러너에 넘길 모델. 레인 세션은 고른 모델을 snapshot.modelId에 담는다(예: `sonnet`).
  * 계획의 기록용 id(`local-cli:...`)는 실제 모델 이름이 아니므로 넘기지 않고 환경 변수로 떨어진다.
  */
-function cliModelOverride(modelId: string | undefined): string | undefined {
+export function cliModelOverride(modelId: string | undefined): string | undefined {
   const value = modelId?.trim();
   return value && !value.startsWith('local-cli') ? value : undefined;
 }
