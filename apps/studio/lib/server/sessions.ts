@@ -274,6 +274,7 @@ import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
+import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
 import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
@@ -1073,6 +1074,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   await session.sandbox.destroy().catch(() => {});
   // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
   await closeRemoteBrowser(id).catch(() => {});
+  // 로컬 미리보기 프록시(ADR-113)도 가리키던 서비스가 없어지므로 함께 닫는다
+  await closeServicePreviewProxies(id).catch(() => {});
   clearFrames(id);
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
@@ -1474,6 +1477,19 @@ export async function readSessionArtifact(id: string, segments: readonly string[
 export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
   const session = requireSession(id);
   return saveArtifact(stateDirOf(session.snapshot), 'pick', input);
+}
+
+/**
+ * 화면 미리보기 iframe이 열 로컬 프록시 주소(ADR-113). 원격 미리보기 게이트웨이(previewUrl)를 켰으면 그 주소가
+ * 이미 studio와 다른 출처로 위치 알림을 스크립트로 심어 보내므로, 이 로컬 프록시는 게이트웨이를 안 쓸 때만 부른다.
+ * 서비스가 재시작해 포트가 바뀌어도 프록시는 유지하고 가리키는 주소만 바꾼다
+ */
+export async function localPreviewUrl(id: string, service: string): Promise<string> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 미리보기를 열 수 있습니다');
+  const view = session.snapshot.services.find((candidate) => candidate.name === service);
+  if (!view?.url) throw new StudioError(409, `${service} 서비스의 주소가 없습니다. 서비스가 준비된 뒤 다시 시도하세요`);
+  return ensureServicePreviewProxy(id, service, view.url);
 }
 
 /**
@@ -6102,6 +6118,7 @@ function registerCleanup(): void {
     cleaning = true;
     // 남은 원격 브라우저 프로세스를 함께 내린다. 기다릴 수 없으므로 최선 노력으로 끝낸다
     void closeAllRemoteBrowsers();
+    void closeAllServicePreviewProxies();
     for (const session of store.sessions.values()) {
       if (session.snapshot.status === 'stopped') continue;
       session.stop.abort();
