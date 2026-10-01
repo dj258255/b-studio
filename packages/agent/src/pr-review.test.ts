@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentUsage } from './loop';
+import { AGENT_LANGUAGE_INSTRUCTION } from './prompts';
 import {
   buildPrReviewComment,
+  buildPrReviewExternalContext,
   buildPrReviewFixRequest,
+  buildPrReviewResolvedContext,
+  buildPrReviewSystemPrompt,
   buildPrReviewUserPrompt,
+  buildReviewResolutionComment,
+  diffFilePaths,
+  extractDiffReferencedNames,
+  extractPrReviewFixTitles,
   hasBlockingFindings,
+  isBlockingFinding,
   MAX_PR_REVIEW_FINDINGS,
   nextPrReviewStep,
   parsePrReviewReply,
@@ -71,6 +80,13 @@ describe('hasBlockingFindings · nextPrReviewStep', () => {
     expect(nextPrReviewStep([finding('major')], 2, 2)).toBe('cap');
     expect(nextPrReviewStep([finding('major')], 3, 2)).toBe('cap');
   });
+
+  it('isBlockingFinding은 심각도 하나만 보고 차단·주요를 가린다(사람이 지적 하나를 오탐으로 닫을 때도 같은 기준, 과제 67-b)', () => {
+    expect(isBlockingFinding({ severity: 'blocker' })).toBe(true);
+    expect(isBlockingFinding({ severity: 'major' })).toBe(true);
+    expect(isBlockingFinding({ severity: 'minor' })).toBe(false);
+    expect(isBlockingFinding({ severity: 'nit' })).toBe(false);
+  });
 });
 
 describe('severityCounts', () => {
@@ -112,6 +128,94 @@ describe('truncateDiff', () => {
     expect(result.omittedFiles).toEqual(['a.ts', 'b.ts']);
     expect(result.diff).toContain('c.ts');
     expect(result.diff.length).toBeLessThan(diff.length);
+  });
+});
+
+describe('buildPrReviewSystemPrompt', () => {
+  it('모델 계열과 관계없이 지적을 한국어로 쓰라고 못박는다(과제 65: 1라운드 한국어, 2라운드 영어로 섞이던 버그)', () => {
+    const prompt = buildPrReviewSystemPrompt();
+    expect(prompt).toContain(AGENT_LANGUAGE_INSTRUCTION);
+    expect(prompt).toContain('Korean');
+  });
+});
+
+describe('diffFilePaths · extractDiffReferencedNames', () => {
+  it('diffFilePaths는 diff에 실제로 들어 있는 파일 경로만 모은다', () => {
+    const diff = 'diff --git a/a/Seed.java b/a/Seed.java\n+x\ndiff --git a/b.ts b/b.ts\n+y\n';
+    expect(diffFilePaths(diff)).toEqual(['a/Seed.java', 'b.ts']);
+  });
+
+  it('추가된 줄의 상대 경로 import에서 파일 이름을 뽑는다(지운 줄은 보지 않는다)', () => {
+    const diff = "diff --git a/a.ts b/a.ts\n+import { SeedLoader } from './seed-loader';\n-import { OldLoader } from './old-loader';\n";
+    const names = extractDiffReferencedNames(diff);
+    expect(names).toContain('seed-loader');
+    expect(names).not.toContain('old-loader');
+  });
+
+  it('Java import문의 마지막 이름을 뽑는다', () => {
+    const diff = 'diff --git a/A.java b/A.java\n+import com.example.seed.SeedLoader;\n';
+    expect(extractDiffReferencedNames(diff)).toContain('SeedLoader');
+  });
+
+  it('파스칼 케이스 식별자를 클래스 이름 후보로 뽑고, 전부 대문자인 약어는 뺀다', () => {
+    const diff = 'diff --git a/A.java b/A.java\n+        seedLoader.load(SQL_PATH); // SeedLoader가 시퀀스를 복원한다\n';
+    const names = extractDiffReferencedNames(diff);
+    expect(names).toContain('SeedLoader');
+    expect(names).not.toContain('SQL_PATH'); // 전부 대문자(약어)는 뺀다
+  });
+});
+
+describe('buildPrReviewExternalContext', () => {
+  it('파일이 없으면 빈 문자열', () => {
+    expect(buildPrReviewExternalContext([])).toBe('');
+  });
+
+  it('파일 미리보기를 묶고, 상한을 넘으면 앞에서부터만 담는다', () => {
+    const context = buildPrReviewExternalContext([{ path: 'api/SeedLoader.java', excerpt: 'class SeedLoader { ALTER TABLE ... RESTART WITH }' }]);
+    expect(context).toContain('diff 밖 참고 파일');
+    expect(context).toContain('api/SeedLoader.java');
+    expect(context).toContain('RESTART WITH');
+
+    const big = buildPrReviewExternalContext(
+      [
+        { path: 'a.java', excerpt: 'x'.repeat(50) },
+        { path: 'b.java', excerpt: 'y'.repeat(50) },
+      ],
+      80,
+    );
+    expect(big).not.toContain('b.java');
+  });
+});
+
+describe('buildPrReviewResolvedContext · buildReviewResolutionComment', () => {
+  it('빈 목록이면 빈 문자열', () => {
+    expect(buildPrReviewResolvedContext([])).toBe('');
+  });
+
+  it('사람이 오탐으로 닫은 지적을 "이미 확인했다"는 섹션으로 만든다', () => {
+    const context = buildPrReviewResolvedContext([{ severity: 'blocker', file: 'api/Seed.java', line: 10, title: '시퀀스 미복원', reason: '실제 PostgreSQL에서 새 글 id 43·44 확인' }]);
+    expect(context).toContain('이미 사람이 확인한 지적');
+    expect(context).toContain('api/Seed.java:10');
+    expect(context).toContain('시퀀스 미복원');
+    expect(context).toContain('새 글 id 43·44 확인');
+  });
+
+  it('오탐 닫기 댓글은 지적 위치·제목·이유를 담는다', () => {
+    const comment = buildReviewResolutionComment(finding('blocker', { title: '시퀀스 미복원', line: 10 }), '실제 PostgreSQL에서 새 글 id 43·44 확인');
+    expect(comment).toContain('사람이 리뷰 지적을 확인했습니다');
+    expect(comment).toContain('시퀀스 미복원');
+    expect(comment).toContain('새 글 id 43·44 확인');
+  });
+});
+
+describe('extractPrReviewFixTitles', () => {
+  it('AI 리뷰 고침 요청이 아니면 undefined', () => {
+    expect(extractPrReviewFixTitles('대시보드 로딩 버그를 고쳐 주세요')).toBeUndefined();
+  });
+
+  it('AI 리뷰 고침 요청이면 굵게 감싼 지적 제목들을 순서대로 뽑는다', () => {
+    const request = buildPrReviewFixRequest([finding('blocker', { title: '시드 id 시퀀스 검증' }), finding('major', { title: '마이그레이션 테스트' })]);
+    expect(extractPrReviewFixTitles(request)).toEqual(['시드 id 시퀀스 검증', '마이그레이션 테스트']);
   });
 });
 
@@ -170,6 +274,22 @@ describe('buildPrReviewUserPrompt', () => {
 
     const blank = buildPrReviewUserPrompt({ diff: 'd', requests: ['요청1'], round: 1, requirementsContext: '   ' });
     expect(blank).not.toContain('요구사항');
+  });
+
+  it('externalContext·resolvedContext를 주면 그대로 싣고, 없으면 그대로 둔다(과제 67)', () => {
+    const withBoth = buildPrReviewUserPrompt({
+      diff: 'd',
+      requests: ['요청1'],
+      round: 1,
+      externalContext: '[diff 밖 참고 파일]\nSeedLoader',
+      resolvedContext: '[이미 사람이 확인한 지적]\n시퀀스 미복원',
+    });
+    expect(withBoth).toContain('SeedLoader');
+    expect(withBoth).toContain('시퀀스 미복원');
+
+    const withoutBoth = buildPrReviewUserPrompt({ diff: 'd', requests: ['요청1'], round: 1 });
+    expect(withoutBoth).not.toContain('참고 파일');
+    expect(withoutBoth).not.toContain('이미 사람이 확인한');
   });
 });
 

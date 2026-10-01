@@ -12,9 +12,26 @@
  *  - PR 댓글 올리기가 실패해도 라운드 자체는 멈추지 않는다(commentError로만 남긴다)
  *  - 절대 병합하지 않고, 강제 푸시도 하지 않는다(이 모듈은 그런 도구를 아예 받지 않는다)
  */
-import { buildPrReviewComment, buildPrReviewFixRequest, nextPrReviewStep, PrReviewError, requestPrReview, truncateDiff, type ModelAsk, type PrReviewFinding } from '@b-studio/agent';
+import { buildPrReviewComment, buildPrReviewFixRequest, nextPrReviewStep, PrReviewError, requestPrReview, truncateDiff, type ModelAsk, type PrReviewFinding, type PrReviewResolvedFinding } from '@b-studio/agent';
 import type { AgentUsage } from '@b-studio/agent';
 import type { ReviewRoundView, ReviewStateView } from '../studio-events';
+
+/**
+ * 이전 리뷰의 라운드들에서 사람이 오탐으로 닫은 지적을 모은다(과제 67-b) — runReviewRound가 "다시 돌리기"로 새 리뷰를
+ * 시작하기 전에(새 리뷰는 rounds를 비운 채 시작한다) 불러, 다음 라운드의 리뷰어 문맥에 "이미 확인했다"고 알린다.
+ */
+export function collectHumanResolvedFindings(review: ReviewStateView | undefined): PrReviewResolvedFinding[] {
+  if (!review) return [];
+  const resolved: PrReviewResolvedFinding[] = [];
+  for (const round of review.rounds) {
+    if (!round.humanResolutions || !round.findings) continue;
+    for (const [indexKey, resolution] of Object.entries(round.humanResolutions)) {
+      const finding = round.findings[Number(indexKey)];
+      if (finding) resolved.push({ severity: finding.severity, file: finding.file, line: finding.line, title: finding.title, reason: resolution.reason });
+    }
+  }
+  return resolved;
+}
 
 /** 고침 요청(sendMessage) 한 번의 결과. 검증을 통과하지 못했거나 시간 안에 끝나지 않았으면 ok:false */
 export type ReviewFixResult = { ok: true; checkpoint?: { sha: string; shortSha: string } } | { ok: false; error: string };
@@ -29,6 +46,10 @@ export interface ReviewRoundDeps {
   requests: () => readonly string[];
   /** 이 PR이 구현하는 요구사항의 압축 목록(ADR-092). 없으면 undefined(요구사항을 안 쓰거나 계산이 실패했다 — 리뷰는 그대로 진행한다) */
   requirementsContext?: () => string;
+  /** diff가 가리키지만 보여주지 않는 바깥 파일의 짧은 미리보기(과제 67-a). diff를 받아 계산하므로 diff 인자를 준다. 없으면 undefined */
+  externalContext?: (diff: string) => Promise<string | undefined>;
+  /** 이전 리뷰에서 사람이 오탐으로 닫은 지적(과제 67-b, collectHumanResolvedFindings로 runReviewRound가 미리 계산해 클로저로 넘긴다). 없으면 undefined */
+  resolvedContext?: () => string;
   /** PR에 댓글 하나를 남긴다. 실패하면 던진다 — 이 모듈이 잡아 commentError로만 남기고 라운드는 계속한다 */
   postComment: (body: string) => Promise<{ url?: string }>;
   /** 같은 세션에 고침을 요청하고 검증 게이트를 통과한 체크포인트까지 기다린다 */
@@ -76,7 +97,17 @@ export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, 
       const diff = await deps.diff();
       const truncated = truncateDiff(diff);
       omittedFiles = [...truncated.omittedFiles];
-      const result = await requestPrReview(deps.ask, { diff: truncated.diff, requests: deps.requests(), round, omittedFiles, requirementsContext: deps.requirementsContext?.() });
+      // 바깥 참고 파일(과제 67-a)은 원본 diff로 고른다 — 생략한 파일의 import·식별자도 놓치지 않는다
+      const externalContext = await deps.externalContext?.(diff);
+      const result = await requestPrReview(deps.ask, {
+        diff: truncated.diff,
+        requests: deps.requests(),
+        round,
+        omittedFiles,
+        requirementsContext: deps.requirementsContext?.(),
+        externalContext,
+        resolvedContext: deps.resolvedContext?.(),
+      });
       findings = result.findings;
       tokens = result.usage;
     } catch (error) {
