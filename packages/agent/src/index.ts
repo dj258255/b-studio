@@ -142,6 +142,7 @@ export {
   RemoteConflictError,
   type BaseStatus,
   type Checkpoint,
+  type DiscardBackup,
   type GitAuthor,
   type PendingChange,
   type PushResult,

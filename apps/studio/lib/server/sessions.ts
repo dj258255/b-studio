@@ -152,6 +152,7 @@ import {
   type ConflictResolution,
   type DatabaseState,
   type DemoScenario,
+  type DiscardBackup,
   type DesignFrameInfo,
   type DesignSource,
   type Effort,
@@ -1132,6 +1133,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     const secrets = await resolveSecrets(project);
     const previous = (await checkpoints.list())[0]!;
     let discarded: string[] = [];
+    let discardBackup: DiscardBackup | undefined;
     let localEdits: Checkpoint | undefined;
     if (local) {
       // 샌드박스를 멈춘 동안 IDE에서 고친 파일일 수 있어 버리지 않고 체크포인트로 남긴다
@@ -1141,8 +1143,13 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       });
       if (localEdits) history = [...history, { type: 'local_edits_saved', checkpoint: localEdits, reason: 'resume' }];
     } else {
-      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리고 마지막 체크포인트에서 시작한다
-      ({ files: discarded } = await checkpoints.discard());
+      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-099)
+      // 남은 변경은 되살릴 수 있게 백업한 뒤에야 마지막 체크포인트에서 시작한다
+      const redactor = new Redactor(secrets);
+      const { docsCheckpoint, files, backup } = await discardWorkingCopy(checkpoints, (text) => redactor.find(text));
+      discarded = files;
+      discardBackup = backup;
+      if (docsCheckpoint) history = [...history, { type: 'docs_checkpoint', checkpoint: docsCheckpoint }];
     }
     const list = await checkpoints.list();
     const head = list[0]!;
@@ -1196,7 +1203,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
       `[b-studio] 세션을 새 샌드박스에서 이어서 시작했습니다. ${local ? '작업 폴더와' : '작업 복사본과'} 데이터베이스는 체크포인트 ${head.shortSha}("${head.message}") 상태입니다.`,
-      ...(discarded.length > 0 ? [`체크포인트에 없던 변경 ${discarded.length}개는 버렸습니다: ${discarded.slice(0, 20).join(', ')}`] : []),
+      ...(discarded.length > 0 ? [discardedNote(discarded, discardBackup)] : []),
       ...(localEdits
         ? [`중지한 동안 폴더에서 바뀐 파일 ${localEdits.files.length}개를 이 체크포인트로 남겼습니다: ${localEdits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`]
         : []),
@@ -1211,7 +1218,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     for (const listener of session.listeners) replay(session, listener);
     void flushPersist(session);
     // 이어서 작업하기는 만들자마자 켠다. bootPromise를 남겨 지연 기동 경로(ensureBooted)와 같은 규칙을 쓴다
-    session.bootPromise = boot(session, { discarded, databaseFrom: localEdits ? previous.sha : undefined });
+    session.bootPromise = boot(session, { discarded, discardBackup, databaseFrom: localEdits ? previous.sha : undefined });
     return session.snapshot;
   } finally {
     resuming.delete(id);
@@ -1624,7 +1631,7 @@ export function startBooting(id: string): SessionSnapshot {
  * resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다.
  * databaseFrom은 이어서 작업하기 전에 폴더의 수정을 새 체크포인트로 남겼을 때, 데이터베이스 상태를 가져올 그 앞 체크포인트다
  */
-async function boot(session: Session, resumed?: { discarded: string[]; databaseFrom?: string }): Promise<void> {
+async function boot(session: Session, resumed?: { discarded: string[]; discardBackup?: DiscardBackup; databaseFrom?: string }): Promise<void> {
   const signal = session.stop.signal;
   const onStatus = (event: ServiceStatusEvent) => onServiceStatus(session, event);
   try {
@@ -1656,7 +1663,7 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
         // 복원한 데이터베이스에 붙어 있던 연결과 캐시를 버리도록 의존 서비스를 다시 띄운다
         restarted = (await restartServicesFor(session.sandbox, session.project, [], { signal, onStatus }, { alsoRestart: database.dependents })).restarted;
       }
-      emit(session, { type: 'resumed', checkpoint: head, discarded: resumed.discarded, databases: database.states, restarted });
+      emit(session, { type: 'resumed', checkpoint: head, discarded: resumed.discarded, databases: database.states, restarted, backup: resumed.discardBackup });
     }
     setStatus(session, 'ready');
   } catch (error) {
@@ -2419,7 +2426,12 @@ async function revertRun(
   runId: string,
   { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
 ): Promise<string[]> {
-  const { files, patch } = await session.checkpoints.discard();
+  // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
+  const { docsCheckpoint, files, patch, backup } = await discardWorkingCopy(session.checkpoints, (text) => session.sandbox.findSecrets(text));
+  if (docsCheckpoint) {
+    session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
+    emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
+  }
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다
   const database = await session.databases.restore(session.snapshot.checkpoints[0]!.sha, session.stop.signal);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
@@ -2441,6 +2453,7 @@ async function revertRun(
     restarted: report.restarted,
     databases: database.states,
     sync: report.sync,
+    backup,
   });
   return files;
 }
@@ -2480,6 +2493,49 @@ const DOC_PATH = /^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$/;
 
 export function isDocPath(file: string): boolean {
   return DOC_PATH.test(file);
+}
+
+// ---------------------------------------------------------------------------
+// 절대 조용히 지우지 않는다(ADR-099): 끝내지 못한 요청이 남긴 변경을 "이어서 작업"이 체크포인트로 되돌리며 버리던
+// 중, 문서(docs/requirements.md 등 — 문서 체크포인트 커밋이 실패해 아직 커밋되지 않은 채였다)까지 함께 사라지는
+// 사고가 있었다(2026-10-01, docs/troubleshooting.md 50). CheckpointStore.discard()/restore()가 버리기 직전에
+// 백업을 남기는 것과 짝을 이뤄, 여기서는 "HEAD로 되돌리는(discard) 경로"에서 문서 경로만 먼저 체크포인트로
+// 지킨다 — discard()는 HEAD를 그대로 두고 pending만 지우므로, 미리 커밋한 문서는 되돌린 뒤에도 그대로 남는다.
+// restore(sha)로 더 이전 체크포인트로 되돌리는 경로(restoreCheckpoint·원격·기준 브랜치 되돌리기 실패 처리)는
+// 문서를 미리 커밋해도 그 커밋 자체가 되돌리는 대상보다 뒤에 있어 함께 사라지므로(오히려 백업에서도 빠져 더
+// 나쁘다) 여기서 손대지 않고, CheckpointStore.restore()의 백업만으로 지킨다.
+// ---------------------------------------------------------------------------
+
+/** discard() 직전에 문서 경로(docs/** 등)만 먼저 체크포인트로 남긴다. 남길 문서가 없으면 아무것도 하지 않는다(undefined) */
+async function protectPendingDocsBeforeDiscard(checkpoints: CheckpointStore, findSecrets: (text: string) => string[]): Promise<Checkpoint | undefined> {
+  const pending = (await checkpoints.pendingFiles()).filter(isDocPath);
+  if (pending.length === 0) return undefined;
+  return checkpoints.commitPaths(pending, '지키기: 되돌리기 전에 문서를 체크포인트로 남긴다', undefined, {
+    findSecrets,
+    trailers: [formatVerifyTrailer('docs')],
+  });
+}
+
+/**
+ * discard()로 되돌리기 전에 문서를 지키고(protectPendingDocsBeforeDiscard), 남은 변경은 discard() 자신이
+ * 백업한 뒤에 버리게 한다. resumeSession·revertRun처럼 "HEAD로 되돌리는" 모든 경로가 이 순서를 따른다.
+ */
+async function discardWorkingCopy(
+  checkpoints: CheckpointStore,
+  findSecrets: (text: string) => string[],
+): Promise<{ docsCheckpoint?: Checkpoint; files: string[]; patch: string; backup?: DiscardBackup }> {
+  const docsCheckpoint = await protectPendingDocsBeforeDiscard(checkpoints, findSecrets);
+  const { files, patch, backup } = await checkpoints.discard();
+  return { docsCheckpoint, files, patch, backup };
+}
+
+/** "체크포인트에 없던 변경 N개를 버렸습니다/백업했습니다" 안내문. files가 비어 있으면 빈 문자열 */
+function discardedNote(files: readonly string[], backup?: DiscardBackup): string {
+  if (files.length === 0) return '';
+  const list = files.slice(0, 20).join(', ');
+  return backup
+    ? `체크포인트에 없던 변경 ${files.length}개를 백업했습니다: ${list} · 되살리기 id: ${backup.id}`
+    : `체크포인트에 없던 변경 ${files.length}개는 버렸습니다(백업하지 못했습니다): ${list}`;
 }
 
 /**
@@ -2613,7 +2669,8 @@ export function restoreCheckpoint(id: string, sha: string): void {
     let event: StudioEvent;
     try {
       await session.relaying;
-      const { files } = await session.checkpoints.restore(sha);
+      // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099)
+      const { files, backup } = await session.checkpoints.restore(sha);
       // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다
       const database = await session.databases.restore(sha, session.stop.signal);
       const report = await restartServicesFor(
@@ -2625,7 +2682,12 @@ export function restoreCheckpoint(id: string, sha: string): void {
       );
       session.snapshot.checkpoints = await session.checkpoints.list();
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
-      noteForModel(session, `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`);
+      noteForModel(
+        session,
+        `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 체크포인트는 모두 사라졌습니다.${
+          backup ? ` 아직 체크포인트로 남기지 않았던 변경 ${backup.files.length}개는 백업했습니다(되살리기 id: ${backup.id}).` : ''
+        }`,
+      );
       if (session.snapshot.mode === 'demo') {
         // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 요청 체크포인트 수에 맞춰 다음 요청을 다시 정한다.
         // 내 폴더 세션의 직접 수정 체크포인트는 요청이 아니므로 세지 않는다
@@ -2643,12 +2705,39 @@ export function restoreCheckpoint(id: string, sha: string): void {
         checkpoints: session.snapshot.checkpoints,
         nextDemoRequest: session.snapshot.nextDemoRequest,
         nextDemoQuestion: session.snapshot.nextDemoQuestion,
+        backup,
       };
     } catch (error) {
       event = { type: 'restore_failed', checkpoint: target, error: describe(error) };
     }
     // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
     session.snapshot.running = false;
+    if (!session.stop.signal.aborted) emit(session, event);
+  })();
+}
+
+/**
+ * discard()·restore()가 버리기 직전에 남긴 백업(ADR-099)을 작업 복사본에 되살린다. 그 사이에 같은 파일이
+ * 다시 바뀌어 깨끗하게 들어가지 않으면(git apply 충돌) 거부한다 — 일부만 들어가 상태를 더 헷갈리게 만들지 않는다.
+ */
+export function restoreDiscardedBackup(id: string, backupId: string): void {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되살릴 수 있습니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+
+  void (async () => {
+    let event: StudioEvent;
+    try {
+      const { files } = await session.checkpoints.restoreBackup(backupId);
+      const report =
+        files.length > 0
+          ? await restartServicesFor(session.sandbox, session.project, files, { signal: session.stop.signal, onStatus: (status) => onServiceStatus(session, status) })
+          : undefined;
+      noteForModel(session, `[b-studio] 백업을 되살렸습니다. 파일 ${files.length}개: ${files.slice(0, 20).join(', ')}. 다루기 전에 다시 읽으세요.`);
+      event = { type: 'backup_restored', backupId, files, restarted: report?.restarted ?? [] };
+    } catch (error) {
+      event = { type: 'backup_restore_failed', backupId, error: describe(error) };
+    }
     if (!session.stop.signal.aborted) emit(session, event);
   })();
 }
@@ -3152,11 +3241,21 @@ async function undoRemoteSync(
   start: StartOptions,
 ): Promise<StudioEvent> {
   try {
-    const { files } = await session.checkpoints.restore(result.previous);
+    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
+    const { files, backup } = await session.checkpoints.restore(result.previous);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
-    return { type: 'remote_sync_failed', error, commits, files: result.files, report, restarted: restart.restarted, checkpoints: session.snapshot.checkpoints };
+    return {
+      type: 'remote_sync_failed',
+      error,
+      commits,
+      files: result.files,
+      report,
+      restarted: restart.restarted,
+      checkpoints: session.snapshot.checkpoints,
+      backup,
+    };
   } catch (undoError) {
     return { type: 'remote_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, commits, files: result.files, report };
   }
@@ -3292,11 +3391,20 @@ async function undoBaseSync(
   start: StartOptions,
 ): Promise<StudioEvent> {
   try {
-    const { files } = await session.checkpoints.restore(result.previous);
+    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
+    const { files, backup } = await session.checkpoints.restore(result.previous);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
-    return { type: 'base_sync_failed', error, files: result.files, report, restarted: restart.restarted, checkpoints: session.snapshot.checkpoints };
+    return {
+      type: 'base_sync_failed',
+      error,
+      files: result.files,
+      report,
+      restarted: restart.restarted,
+      checkpoints: session.snapshot.checkpoints,
+      backup,
+    };
   } catch (undoError) {
     return { type: 'base_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, files: result.files, report };
   }
