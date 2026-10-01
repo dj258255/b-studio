@@ -28,6 +28,8 @@ import {
   lintRequirement,
   mentionsRequirementId,
   mergeReextractedRequirements,
+  MERGE_MATCH_THRESHOLD,
+  requirementSimilarity,
   alignScenarioIds,
   missingReferencedFile,
   parseExtractionReply,
@@ -1085,3 +1087,29 @@ describe('요구사항 추출 — 깨진 JSON 고쳐 읽기·한 번 다시 묻�
     expect(calls).toBe(2);
   });
 });
+
+describe('requirementSimilarity — 재추출 병합이 같은 요구사항을 알아본다', () => {
+  const r = (id: string, title: string, extra: Partial<Requirement> = {}): Requirement => ({ id, title, kind: 'api', priority: 'must', acceptance: ['a'], ...extra });
+
+  it('한쪽에만 EARS가 있어도 제목이 같은 뜻이면 짝짓는다', () => {
+    const old = r('R3', '`docker compose up` 단일 명령 기동 및 포트 환경변수화', { kind: 'nonfunctional', acceptance: ['저장소 클론 후 docker compose up 한 번으로 모두 기동된다'] });
+    const fresh = r('R20', 'docker compose up 단일 명령 전체 기동과 포트 환경변수 지원', {
+      kind: 'nonfunctional',
+      ears: { pattern: 'ubiquitous', statement: '시스템은 docker compose up 한 번으로 db·backend·frontend를 모두 기동해야 한다' },
+    });
+    expect(requirementSimilarity(old, fresh)).toBeGreaterThanOrEqual(MERGE_MATCH_THRESHOLD);
+  });
+
+  it('API 시그니처가 같으면 같은 요구사항, 다르면 다른 요구사항이다', () => {
+    expect(requirementSimilarity(r('R7', 'GET /api/posts — 최신순 목록 + 분할 조회'), r('R23', 'GET /api/posts — page·size 페이지네이션'))).toBe(1);
+    expect(requirementSimilarity(r('R7', 'GET /api/posts — 최신순 목록'), r('R25', 'GET /api/posts/{postId} — 게시글 상세'))).toBe(0);
+  });
+
+  it('재추출 병합이 기존 id를 지킨다(실사용 사례)', () => {
+    const existing = [r('R6', '소프트 삭제 정책 (게시글·댓글 공통)'), r('R7', 'GET /api/posts — 최신순 목록 + 분할 조회'), r('R9', 'GET /api/posts/{postId} — 게시글 상세')];
+    const incoming = [r('R1', '게시글·댓글 공통 소프트 삭제 정책'), r('R2', 'GET /api/posts/{postId} 게시글 상세 조회'), r('R3', 'GET /api/posts — 최신순 목록, page·size 페이지네이션')];
+    const ids = mergeReextractedRequirements(incoming, existing).merged.map((requirement) => requirement.id).sort();
+    expect(ids).toEqual(['R6', 'R7', 'R9']);
+  });
+});
+
