@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionView, ChatItem } from "@/lib/session-view";
+import { previewPathFromHref, readPreviewLocationMessage } from "@/lib/preview-message";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
 import { buildTopTabs, CODE_SUB_TABS, mapLegacyTab, REPOSITORY_SUB_TABS, REQUIREMENTS_SUB_TABS, RUN_SUB_TABS, type SubTabOption } from "@/lib/tab-model";
 import { ApiExplorer } from "./api-explorer";
@@ -268,6 +269,7 @@ function AppPreview({ sessionId, service, revision }: { sessionId: string; servi
   const [path, setPath] = useState("/");
   const [draft, setDraft] = useState("/");
   const [reloads, setReloads] = useState(0);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   // 원격 미리보기 게이트웨이를 켰으면 다른 PC에서도 열리는 주소를 쓴다
   const base = service.previewUrl ?? service.url;
   const load = `${base}|${path}|${reloads}|${revision}`;
@@ -293,7 +295,49 @@ function AppPreview({ sessionId, service, revision }: { sessionId: string; servi
     };
   }, [load, path, service.name, service.previewUrl, sessionId]);
   const current = access?.load === load ? access : undefined;
-  const src = service.previewUrl ? current?.src : new URL(path, base).toString();
+
+  // 게이트웨이를 안 쓰면(기본값) studio가 같은 PC에 띄운 로컬 프록시 주소를 받아 쓴다(ADR-113).
+  // 이 프록시가 지나가는 HTML에 위치 알림 스크립트를 심어 줘서, 앱 안의 클라이언트 쪽 이동(pushState)을
+  // 아래 message 수신으로 따라갈 수 있다. 못 받아 오면 예전처럼 서비스 주소를 직접 연다
+  const [proxy, setProxy] = useState<{ load: string; src: string }>();
+  useEffect(() => {
+    if (service.previewUrl || !service.url) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/services/${service.name}/preview-proxy`, { method: "POST" })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as { url?: string };
+        if (!cancelled && response.ok && body.url) setProxy({ load, src: body.url });
+      })
+      .catch(() => {
+        // 로컬 프록시를 못 받아도 아래 base 그대로 직접 여는 쪽으로 빠진다
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [load, service.name, service.previewUrl, service.url, sessionId]);
+  const currentProxy = proxy?.load === load ? proxy : undefined;
+
+  const src = service.previewUrl ? current?.src : new URL(path, currentProxy?.src ?? base).toString();
+
+  // 샌드박스 앱이 postMessage로 알려온 지금 위치로 주소 입력칸만 갱신한다. path(=iframe의 key)는 바꾸지 않아
+  // iframe을 다시 불러오지 않는다 — "열기"로 직접 이동할 때만 path가 바뀌어 다시 불러온다
+  useEffect(() => {
+    if (!src) return;
+    let expectedOrigin: string | undefined;
+    try {
+      expectedOrigin = new URL(src).origin;
+    } catch {
+      return;
+    }
+    const handle = (event: MessageEvent) => {
+      const href = readPreviewLocationMessage(event, { origin: expectedOrigin, source: iframeRef.current?.contentWindow });
+      if (href === undefined) return;
+      const next = previewPathFromHref(href);
+      if (next !== undefined) setDraft(next);
+    };
+    window.addEventListener("message", handle);
+    return () => window.removeEventListener("message", handle);
+  }, [src]);
 
   return (
     <div className="flex h-full flex-col">
@@ -323,7 +367,7 @@ function AppPreview({ sessionId, service, revision }: { sessionId: string; servi
       </form>
       {/* 요청이 끝날 때마다, 그리고 재시작으로 주소가 바뀌면 새로 불러온다 */}
       {src ? (
-        <iframe key={load} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
+        <iframe ref={iframeRef} key={load} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
       ) : (
         <p role={current?.error ? "alert" : "status"} className={`px-4 py-3 text-sm ${current?.error ? "text-fail" : "text-muted"}`}>
           {current?.error ?? "미리보기를 여는 중"}
