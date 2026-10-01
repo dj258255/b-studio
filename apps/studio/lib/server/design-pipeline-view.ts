@@ -86,7 +86,8 @@ function reviewInputFromState(review: ReviewStateView | undefined): DesignPipeli
   const findingsCount = review.rounds.at(-1)?.findings?.length;
   return {
     ran,
-    passed: review.state === 'passed',
+    // resolved: 라운드 상한에 걸렸지만 사람이 막는 지적을 모두 오탐으로 닫아 더는 막지 않는다(과제 67-b) — passed와 같이 본다
+    passed: review.state === 'passed' || review.state === 'resolved',
     independence: review.independence ?? 'unknown',
     ...(findingsCount !== undefined ? { findingsCount } : {}),
     ...(review.reviewerModelId ? { reviewerLabel: review.reviewerModelId } : {}),

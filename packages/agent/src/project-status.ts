@@ -56,7 +56,8 @@ export interface ProjectStatusInput {
   /** 최근 체크포인트가 먼저 오도록 호출하는 쪽이 정렬해 넘긴다 */
   checkpoints: readonly ProjectStatusCheckpointRef[];
   pullRequestUrl?: string;
-  reviewState?: { state: 'running' | 'passed' | 'capped' | 'stopped'; rounds: number };
+  /** resolved: 라운드 상한에 걸렸지만 사람이 막는 지적을 모두 오탐으로 닫아 더는 막지 않는다(과제 67-b) — "위험"으로 보지 않는다 */
+  reviewState?: { state: 'running' | 'passed' | 'capped' | 'stopped' | 'resolved'; rounds: number };
   /** 지금 failed 상태인 서비스 이름들 */
   failedServices: readonly string[];
   /** 작업별 예상·실제 시간. 작업 분해 계획에 예상 시간 입력이 없으면 생략(undefined) — "추정 없음"으로 보여준다 */

@@ -107,7 +107,7 @@ vi.mock('./model-registry', async (importOriginal) => {
   };
 });
 
-import { createSession, exportSession, getSnapshot, runReviewRound, sendMessage, stopSession, subscribe } from './sessions';
+import { createSession, exportSession, getSnapshot, resolveReviewFinding, runReviewRound, sendMessage, stopSession, subscribe } from './sessions';
 
 let root: string;
 const saved = {
@@ -277,8 +277,8 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     expect(review.state).toBe('passed');
     expect(review.rounds.map((round) => round.status)).toEqual(['blocked_continue', 'passed']);
     expect(review.rounds[0]!.fixCheckpoint).toBeDefined();
-    // 고침이 검증을 통과해 새 체크포인트로 남았다
-    expect(getSnapshot(id)!.checkpoints[0]!.message).toContain('AI 리뷰');
+    // 고침이 검증을 통과해 새 체크포인트로 남았다 — 요청 글의 공통 문구가 아니라 지적 제목("문제")으로 커밋 제목을 만든다(과제 66)
+    expect(getSnapshot(id)!.checkpoints[0]!.message).toBe('fix: 리뷰 지적 1건 반영 — 문제');
 
     await stopSession(id).catch(() => {});
   }, 50_000);
@@ -314,6 +314,40 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     const review = getSnapshot(id)!.review!;
     expect(review.rounds.map((round) => round.status)).toEqual(['fix_failed']);
     expect(review.rounds[0]!.error).toBeTruthy();
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('라운드 상한에 걸린 지적을 사람이 오탐으로 닫으면 라운드는 "사람이 확인함"으로, 리뷰 상태는 resolved로 바뀌고 PR에 답글을 남긴다', async () => {
+    await useMaxRounds(1);
+    const id = await setupSessionWithPullRequest();
+    fake.modelQueue.push(new ScriptedModelClient([{ text: blockerFinding() }]));
+
+    await runReviewRound(id);
+    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'capped', 20_000);
+    fake.postComment.mockClear();
+
+    const snapshot = await resolveReviewFinding(id, { round: 1, findingIndex: 0, reason: '실제 PostgreSQL에서 새 글 id 43·44 확인', by: 'kim' });
+    expect(snapshot.review!.state).toBe('resolved');
+    expect(snapshot.review!.rounds[0]).toMatchObject({ status: 'resolved_by_human' });
+    expect(snapshot.review!.rounds[0]!.humanResolutions?.[0]).toMatchObject({ reason: '실제 PostgreSQL에서 새 글 id 43·44 확인', by: 'kim' });
+    expect(fake.postComment).toHaveBeenCalledTimes(1);
+    expect((fake.postComment.mock.calls[0] as unknown[])[2]).toContain('새 글 id 43·44 확인');
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('지적을 찾지 못하거나 이유가 비어 있으면 거부한다', async () => {
+    await useMaxRounds(1);
+    const id = await setupSessionWithPullRequest();
+    fake.modelQueue.push(new ScriptedModelClient([{ text: blockerFinding() }]));
+
+    await runReviewRound(id);
+    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'capped', 20_000);
+
+    await expect(resolveReviewFinding(id, { round: 1, findingIndex: 0, reason: '   ' })).rejects.toThrow('이유');
+    await expect(resolveReviewFinding(id, { round: 1, findingIndex: 99, reason: '근거' })).rejects.toThrow('지적');
+    await expect(resolveReviewFinding(id, { round: 99, findingIndex: 0, reason: '근거' })).rejects.toThrow('라운드');
 
     await stopSession(id).catch(() => {});
   }, 20_000);
