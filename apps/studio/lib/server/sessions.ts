@@ -108,21 +108,35 @@ import {
   workflowStages,
   Workspace,
   adrFilePath,
+  appendExperimentEntry,
   appendRoadmapTradeoffEntry,
   appendTroubleshootingEntry,
+  appendVerificationEntry,
   buildAdrTemplate,
   buildDesignDocTemplate,
   buildDocSummary,
+  buildExperimentEntry,
+  buildProjectStatus,
+  buildRoadmapTemplate,
   buildRoadmapTradeoffEntry,
   buildTroubleshootingEntry,
+  buildVerificationEntry,
   designDocFilePath,
   DOCS_README_PATH,
+  EXPERIMENT_LOG_PATH,
+  lintText,
   nextAdrNumber,
   nextDesignDocNumber,
   regenerateDocsReadme,
+  regenerateRoadmapStatus,
+  ROADMAP_PATH,
   ROADMAP_TRADEOFFS_PATH,
   TROUBLESHOOTING_LOG_PATH,
+  VERIFICATION_LOG_PATH,
+  type DocLintFinding,
   type DocSummary,
+  type ProjectStatusInput,
+  type ProjectStatusView,
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
@@ -3923,7 +3937,7 @@ async function commitDocTabChange(id: string, file: string, message: string): Pr
   });
 }
 
-export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap';
+export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap' | 'verification' | 'experiment' | 'roadmap-plan';
 
 export interface NewDocInput {
   kind: NewDocKind;
@@ -3968,11 +3982,33 @@ async function createSessionDocFile(id: string, input: NewDocInput): Promise<{ p
     await workspace.write(TROUBLESHOOTING_LOG_PATH, content);
     return { path: TROUBLESHOOTING_LOG_PATH, content };
   }
-  const existing = await workspace.read(ROADMAP_TRADEOFFS_PATH).catch(() => undefined);
-  const entry = input.body?.trim() || buildRoadmapTradeoffEntry(title);
-  const content = appendRoadmapTradeoffEntry(existing, entry);
-  await workspace.write(ROADMAP_TRADEOFFS_PATH, content);
-  return { path: ROADMAP_TRADEOFFS_PATH, content };
+  if (input.kind === 'roadmap') {
+    const existing = await workspace.read(ROADMAP_TRADEOFFS_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildRoadmapTradeoffEntry(title);
+    const content = appendRoadmapTradeoffEntry(existing, entry);
+    await workspace.write(ROADMAP_TRADEOFFS_PATH, content);
+    return { path: ROADMAP_TRADEOFFS_PATH, content };
+  }
+  if (input.kind === 'verification') {
+    const existing = await workspace.read(VERIFICATION_LOG_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildVerificationEntry(title);
+    const content = appendVerificationEntry(existing, entry);
+    await workspace.write(VERIFICATION_LOG_PATH, content);
+    return { path: VERIFICATION_LOG_PATH, content };
+  }
+  if (input.kind === 'experiment') {
+    const existing = await workspace.read(EXPERIMENT_LOG_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildExperimentEntry(title);
+    const content = appendExperimentEntry(existing, entry);
+    await workspace.write(EXPERIMENT_LOG_PATH, content);
+    return { path: EXPERIMENT_LOG_PATH, content };
+  }
+  // 'roadmap-plan': docs/ROADMAP.md 자체는 이미 있으면 손대지 않는다(단계·마일스톤처럼 손으로 쓴 글이 있을 수 있다) — 없을 때만 템플릿으로 만든다
+  const existingRoadmap = await workspace.read(ROADMAP_PATH).catch(() => undefined);
+  if (existingRoadmap !== undefined) return { path: ROADMAP_PATH, content: existingRoadmap };
+  const content = input.body?.trim() || buildRoadmapTemplate();
+  await workspace.write(ROADMAP_PATH, content);
+  return { path: ROADMAP_PATH, content };
 }
 
 /** "색인 갱신": docs/README.md의 관리 구간만 다시 만든다(문서마다 첫 H1·첫 문단을 읽어 표를 채운다) */
@@ -3995,6 +4031,82 @@ async function regenerateSessionDocsIndexFile(id: string): Promise<{ path: strin
   const content = regenerateDocsReadme(existingReadme, summaries);
   await workspace.write(DOCS_README_PATH, content);
   return { path: DOCS_README_PATH, content };
+}
+
+/**
+ * "ROADMAP 갱신": `docs/ROADMAP.md`의 "진행 현황" 구간만 저장된 요구사항 상태(상태별 개수, 필수(must)·권장(should)
+ * 진행도)로 다시 만든다 — 단계(POC/MVP/Beta/v1)·마일스톤·현재 위치처럼 손으로 쓴 글은 그대로 둔다(색인 갱신과 같은
+ * 관리되는 구간 방식, ADR-0XX). 요구사항이 저장돼 있지 않아도 실패하지 않고 "집계할 수 없다"는 안내로 채운다.
+ */
+export async function regenerateSessionRoadmap(id: string): Promise<{ path: string; content: string }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 갱신할 수 있습니다');
+  const snapshot = await getSessionRequirements(id);
+  const byStatus: Record<string, number> = {};
+  for (const requirement of snapshot.requirements) byStatus[requirement.status] = (byStatus[requirement.status] ?? 0) + 1;
+  const mustHaves = snapshot.requirements.filter((requirement) => requirement.priority === 'must');
+  const shouldHaves = snapshot.requirements.filter((requirement) => requirement.priority === 'should');
+  const summary = {
+    byStatus,
+    must: { total: mustHaves.length, done: mustHaves.filter((requirement) => requirement.status === '검증됨').length },
+    should: { total: shouldHaves.length, done: shouldHaves.filter((requirement) => requirement.status === '검증됨').length },
+  };
+  const workspace = new Workspace(session.project.root);
+  const existing = await workspace.read(ROADMAP_PATH).catch(() => undefined);
+  const content = regenerateRoadmapStatus(existing, summary);
+  await workspace.write(ROADMAP_PATH, content);
+  await commitDocTabChange(id, ROADMAP_PATH, 'docs: 로드맵 진행 현황을 갱신한다');
+  return { path: ROADMAP_PATH, content };
+}
+
+/**
+ * "문서" 탭의 모호한 표현 린트와 "올리기" 미리보기의 "모호한 표현" 경고가 함께 쓴다(ADR-0XX) — 세션별 계정 확인만
+ * 하고 나머지는 packages/agent의 순수 함수(lintText)에 그대로 맡긴다. 세션을 몰라도 되는 계산이지만, 그 밖의
+ * 문서 탭 API와 같은 인가 경계를 쓰려고 세션 id를 받는다.
+ */
+export function lintSessionDocText(id: string, text: string): DocLintFinding[] {
+  requireSession(id);
+  return lintText(text);
+}
+
+// ---------------------------------------------------------------------------
+// "현황" 탭(ADR-0XX): 세션·요구사항·체크포인트를 다시 재지 않고 있는 그대로 재배열한다(읽기 전용 집계).
+// 실제 모양 맞추기는 packages/agent의 순수 함수(buildProjectStatus)가 하고, 여기서는 세션이 들고 있는 조각들을
+// 그 함수가 받는 모양으로 모으기만 한다.
+// ---------------------------------------------------------------------------
+
+/** 세션 기록에서 마지막으로 시작한 요청 글(관제 화면의 overviewSessions와 같은 방식 — run_started를 뒤에서 찾는다) */
+function lastRunStartedRequest(history: readonly StudioEvent[]): string | undefined {
+  const started = history.findLast((event) => event.type === 'run_started');
+  return started?.type === 'run_started' ? started.request : undefined;
+}
+
+export async function getSessionStatus(id: string): Promise<ProjectStatusView> {
+  const session = requireSession(id);
+  const snapshot = session.snapshot;
+  const requirementsSnapshot = await getSessionRequirements(id).catch(() => ({ exists: false, requirements: [], assumptions: [], manualSteps: [] }) as RequirementsSnapshot);
+
+  const input: ProjectStatusInput = {
+    projectName: snapshot.projectName,
+    running: snapshot.running,
+    currentRequestSummary: snapshot.running ? lastRunStartedRequest(session.history) : undefined,
+    requirements: requirementsSnapshot.requirements.map((requirement) => ({
+      id: requirement.id,
+      title: requirement.title,
+      priority: requirement.priority,
+      status: requirement.status,
+      ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}),
+    })),
+    openQuestion: snapshot.pendingQuestion?.question,
+    manualSteps: requirementsSnapshot.manualSteps,
+    checkpoints: snapshot.checkpoints.slice(0, 5).map((checkpoint) => ({ shortSha: checkpoint.shortSha, message: checkpoint.message, createdAt: checkpoint.createdAt })),
+    pullRequestUrl: snapshot.repository?.pullRequestUrl,
+    reviewState: snapshot.review ? { state: snapshot.review.state, rounds: snapshot.review.rounds.length } : undefined,
+    failedServices: snapshot.services.filter((service) => service.state === 'failed').map((service) => service.name),
+    // 작업 분해 계획에 작업별 예상 시간 입력이 아직 없다 — 지어내지 않고 생략한다(buildProjectStatus가 "추정 없음"으로 보여준다)
+    links: { roadmap: ROADMAP_PATH, changelog: 'CHANGELOG.md', docsIndex: DOCS_README_PATH },
+  };
+  return buildProjectStatus(input);
 }
 
 // ---------------------------------------------------------------------------
