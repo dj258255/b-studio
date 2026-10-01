@@ -1390,6 +1390,19 @@ export function requirementVerificationSource(evidence: RequirementEvidence, req
   return 'test';
 }
 
+/** 추적 매트릭스가 "검증 출처" 배지로 쓰는 값. requirementVerificationSource의 'test'를 "테스트 탭 실행"과 "게이트"로
+ * 더 가른다(매트릭스엔 테스트·게이트 열이 따로 있어 목록보다 자세히 보여줄 수 있다). status는 다시 구하지 않고
+ * 그대로 받는다(이미 구해 둔 값과 어긋날 일이 없게 — 매트릭스 행의 상태와 배지가 서로 다른 계산을 거치지 않는다) */
+export type MatrixVerificationBadge = '테스트 탭' | '게이트' | '문서 확인' | '사람 확인' | 'none';
+export function matrixVerificationBadge(status: RequirementStatus, evidence: RequirementEvidence, requirement?: Requirement): MatrixVerificationBadge {
+  if (status !== '검증됨') return 'none';
+  if (evidence.gateChecks.length > 0) return '게이트';
+  if (evidence.testRun && evidence.testRun.passed > 0 && evidence.testRun.failed === 0) return '테스트 탭';
+  if (evidence.docEvidence?.satisfied) return '문서 확인';
+  if (requirement?.manualVerification) return '사람 확인';
+  return '테스트 탭';
+}
+
 /** Devin 스타일 확신 표시. 검증됨=🟢, 작업 중·재확인 필요=🟡(둘 다 "더 봐야 한다"), 그 밖(미착수·실패)=🔴 */
 export function requirementConfidence(status: RequirementStatus): '🟢' | '🟡' | '🔴' {
   if (status === '검증됨') return '🟢';
@@ -1773,6 +1786,34 @@ export function mergeReextractedRequirements(incoming: readonly Requirement[], e
 // 역방향 목록(주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 만든다. "요구사항" 탭의 추적 매트릭스 하위 화면이 쓴다.
 // ---------------------------------------------------------------------------
 
+/** 매트릭스 테스트 열의 테스트 하나. 지금 체크포인트(HEAD)의 테스트 탭 실행에 이 테스트가 있었으면 그 결과까지 붙인다
+ * (실행 자체가 없었거나 이 테스트가 그 실행에 없었으면 result가 없다 — 화면이 "안 돌림"으로 보여준다) */
+export interface MatrixTestMatch extends TestMatch {
+  result?: 'pass' | 'fail' | 'not-run';
+}
+
+/** 지금 체크포인트에서 돈 테스트 탭 실행 결과를 테스트 하나하나 단위로, 그 테스트 이름에 붙은 요구사항·시나리오 id별로
+ * 펼친 목록(studio의 buildMatrixTestRunRows가 만든다). RequirementEvidence.testRun(목록이 쓰는 집계된 통과·실패 수)과는
+ * 결이 달라(매트릭스는 테스트 하나하나를 보여줘야 한다) 따로 둔다 — 한 테스트가 여러 id를 언급하면 id마다 한 행씩 있다 */
+export interface MatrixTestRunRow {
+  id: string;
+  file: string;
+  name: string;
+  status: 'pass' | 'fail' | 'skip' | 'not-run';
+  at: string;
+  sha: string;
+  shortSha: string;
+}
+
+/** studio가 이미 계산한 요구사항 하나의 평가("명세" 탭의 목록이 보여주는 것과 완전히 같은 값). 매트릭스의 요구사항 행이
+ * 이 값을 받으면 상태를 다시 계산하지 않고 그대로 쓴다 — 추적 매트릭스가 테스트 탭 실행·문서 확인·사람 확인을 모른 채
+ * 체크포인트·테스트 파일 이름·게이트만으로 다시 계산해 목록과 다른 상태를 보여주던 문제를 원천적으로 막는다 */
+export interface RequirementEvaluation {
+  status: RequirementStatus;
+  evidence: RequirementEvidence;
+  verifiedBy: 'test' | 'docs' | 'manual' | 'none';
+}
+
 export interface MatrixRow {
   kind: 'requirement' | 'scenario';
   id: string;
@@ -1783,17 +1824,22 @@ export interface MatrixRow {
   priority: RequirementPriority;
   issue?: number;
   checkpoints: CheckpointRef[];
-  tests: TestMatch[];
+  tests: MatrixTestMatch[];
   gateChecks: GateCheckResult[];
   status: RequirementStatus;
+  /** "검증됨"을 만든 증거(테스트 탭/게이트/문서 확인/사람 확인). 검증됨이 아니면 'none' */
+  verifiedBy: MatrixVerificationBadge;
 }
 
 export interface TraceabilityMatrix {
   rows: MatrixRow[];
   /** 어느 요구사항·시나리오 id도 언급하지 않은 테스트("주인 없는 테스트") */
   orphanTests: TestMatch[];
-  /** 테스트가 하나도 없는 필수(must) 요구사항(시나리오 테스트도 없을 때만) */
+  /** 테스트가 하나도 없고(시나리오 테스트 포함) 아직 검증됨도 아닌 필수(must) 요구사항 — 손봐야 할 진짜 공백 */
   mustHavesWithoutTests: Requirement[];
+  /** 테스트는 없지만 문서 확인·사람 확인으로 이미 검증됨인 필수 요구사항 — 공백이 아니라 "다른 방식으로 검증됐다"는
+   * 안내로 따로 보여준다(테스트가 없다고 "테스트 없는 필수 요구사항"에 섞이면 이미 끝난 일을 또 손보라는 뜻처럼 보인다) */
+  mustHavesVerifiedWithoutTests: Requirement[];
 }
 
 export interface BuildTraceabilityMatrixInput {
@@ -1801,10 +1847,74 @@ export interface BuildTraceabilityMatrixInput {
   checkpoints: readonly CheckpointRef[];
   testFiles: readonly ScannedFile[];
   gateChecks: readonly GateCheckResult[];
+  /** 요구사항 id별로 이미 평가된 상태·증거(studio의 evaluateRequirementWithContext가 "명세" 탭 목록과 똑같이 만든
+   * 값). 있으면 요구사항 행은 이 값을 그대로 쓴다(따로 계산하지 않는다 — 목록과 어긋날 수가 없다). 없으면(이 모듈의
+   * 단위 테스트처럼 studio 컨텍스트 없이 부르는 경우) 체크포인트·테스트 파일 이름·게이트만으로 예전처럼 계산한다 */
+  evaluationByRequirementId?: Readonly<Record<string, RequirementEvaluation>>;
+  /** 지금 체크포인트에서 돈 테스트 탭 실행 결과를 테스트 단위로 펼친 목록(있으면 테스트 열에 통과·실패·안 돌림을 붙인다) */
+  testRunRows?: readonly MatrixTestRunRow[];
 }
 
-/** 요구사항 하나(또는 시나리오 하나)의 행을 만든다. 공통 로직을 요구사항 행·시나리오 행이 함께 쓴다 */
-function buildMatrixRow(params: {
+/** 매트릭스 테스트 열 — 파일을 스캔해 찾은 테스트에, 지금 체크포인트에서 돈 테스트 탭 실행 결과가 있으면 이름으로 맞춰
+ * 붙인다. 실행에만 있고 스캔에는 안 걸린 테스트(테스트 탭의 발견 파서가 이 모듈의 가벼운 정규식과 다르게 파싱한 경우
+ * 등)도 빠뜸없이 보여준다. skip은 "안 돌림"으로 합쳐 보여준다(매트릭스는 통과·실패·안 돌림 세 가지만 구분한다) */
+function mergeTestMatchesWithRunRows(scanned: readonly TestMatch[], runRows: readonly MatrixTestRunRow[], id: string): MatrixTestMatch[] {
+  const toResult = (status: MatrixTestRunRow['status']): 'pass' | 'fail' | 'not-run' => (status === 'skip' ? 'not-run' : status);
+  const matchedRuns = runRows.filter((row) => row.id === id);
+  const resultByName = new Map(matchedRuns.map((row) => [row.name, toResult(row.status)]));
+  const merged = new Map<string, MatrixTestMatch>();
+  for (const test of scanned) {
+    const result = resultByName.get(test.name);
+    merged.set(test.name, result !== undefined ? { ...test, result } : { ...test });
+  }
+  for (const row of matchedRuns) {
+    if (merged.has(row.name)) continue;
+    merged.set(row.name, { file: row.file, name: row.name, result: toResult(row.status) });
+  }
+  return [...merged.values()];
+}
+
+/** 시나리오 하나의 증거를 만든다. 체크포인트·테스트·게이트는 시나리오 id로만 좁히고(요구사항 전체 증거를 섞지 않는다),
+ * 요구사항 전체에만 있는 두 증거는 부모에서 정해진 규칙대로 물려받는다: ① 테스트 탭 실행(testRun)은 이 시나리오 id가
+ * 붙은 테스트만 따로 모아 다시 센다 — 요구사항 전체 집계를 그대로 쓰면 "다른 시나리오의 테스트가 통과했다"는 이유로
+ * 이 시나리오까지 검증됨으로 보일 수 있다. ② 문서 확인(docEvidence)은 애초에 시나리오 단위로 매칭하지 않으므로(인수
+ * 조건은 요구사항 전체의 것이다), 부모가 "전부 만족"일 때만 그대로 물려준다 — 일부만 맞은 상태를 물려주면 이 시나리오
+ * 자신의 증거가 하나도 없어도 "작업 중"으로 보여 과대평가된다. 사람 확인(manualVerification)·내용 드리프트는 부모
+ * 요구사항 객체 자체를 보고 판정하므로(computeRequirementStatus가 requirementForStatus로 받는다) 따로 다루지 않는다
+ * — 이 규칙 덕에 시나리오 행의 상태는 "요구사항 목록과 같은 함수로, 증거만 시나리오로 좁혀" 계산된다 */
+function buildScenarioEvidence(params: {
+  scenarioId: string;
+  checkpoints: readonly CheckpointRef[];
+  testFiles: readonly ScannedFile[];
+  gateChecks: readonly GateCheckResult[];
+  testRunRows: readonly MatrixTestRunRow[];
+  parentEvidence?: RequirementEvidence;
+}): RequirementEvidence {
+  const matchedRuns = params.testRunRows.filter((row) => row.id === params.scenarioId);
+  const passed = matchedRuns.filter((row) => row.status === 'pass').length;
+  const failed = matchedRuns.filter((row) => row.status === 'fail').length;
+  const testRun: TestRunEvidence | undefined =
+    passed + failed > 0
+      ? {
+          at: matchedRuns.reduce((latest, row) => (row.at > latest ? row.at : latest), matchedRuns[0]!.at),
+          sha: matchedRuns[0]!.sha,
+          shortSha: matchedRuns[0]!.shortSha,
+          passed,
+          failed,
+        }
+      : undefined;
+  const docEvidence = params.parentEvidence?.docEvidence?.satisfied ? params.parentEvidence.docEvidence : undefined;
+  return {
+    checkpoints: findCheckpointMentions(params.checkpoints, params.scenarioId),
+    tests: scanTestFilesForScenarioId(params.testFiles, params.scenarioId),
+    gateChecks: findGateCheckMentions(params.gateChecks, params.scenarioId),
+    ...(testRun ? { testRun } : {}),
+    ...(docEvidence ? { docEvidence } : {}),
+  };
+}
+
+/** 증거·상태가 다 정해진 행 하나를 MatrixRow 모양으로 마무리한다(요구사항 행·시나리오 행이 공통으로 쓴다) */
+function finalizeMatrixRow(params: {
   kind: 'requirement' | 'scenario';
   id: string;
   parentId?: string;
@@ -1812,16 +1922,11 @@ function buildMatrixRow(params: {
   rev: number;
   priority: RequirementPriority;
   issue?: number;
-  checkpoints: readonly CheckpointRef[];
-  tests: TestMatch[];
-  gateChecks: readonly GateCheckResult[];
+  evidence: RequirementEvidence;
+  status: RequirementStatus;
   requirementForStatus: Requirement;
+  testRunRows: readonly MatrixTestRunRow[];
 }): MatrixRow {
-  const evidence: RequirementEvidence = {
-    checkpoints: findCheckpointMentions(params.checkpoints, params.id),
-    tests: params.tests,
-    gateChecks: findGateCheckMentions(params.gateChecks, params.id),
-  };
   return {
     kind: params.kind,
     id: params.id,
@@ -1830,41 +1935,61 @@ function buildMatrixRow(params: {
     rev: params.rev,
     priority: params.priority,
     ...(params.issue !== undefined ? { issue: params.issue } : {}),
-    checkpoints: evidence.checkpoints,
-    tests: evidence.tests,
-    gateChecks: evidence.gateChecks,
-    status: computeRequirementStatus(evidence, params.requirementForStatus),
+    checkpoints: params.evidence.checkpoints,
+    tests: mergeTestMatchesWithRunRows(params.evidence.tests, params.testRunRows, params.id),
+    gateChecks: params.evidence.gateChecks,
+    status: params.status,
+    verifiedBy: matrixVerificationBadge(params.status, params.evidence, params.requirementForStatus),
   };
 }
 
-/** 요구사항·시나리오마다 추적 행을 만들고, 주인 없는 테스트·테스트 없는 필수 요구사항을 모은다 */
+/** 요구사항·시나리오마다 추적 행을 만들고, 주인 없는 테스트·테스트 없는 필수 요구사항을 모은다. 요구사항 행의
+ * 증거·상태는 evaluationByRequirementId가 있으면 그대로 쓰고(목록과 똑같다), 없으면 체크포인트·테스트·게이트만으로
+ * 계산한다(studio 컨텍스트 없이 부르는 이 모듈의 단위 테스트가 이 경로를 쓴다) */
 export function buildTraceabilityMatrix(input: BuildTraceabilityMatrixInput): TraceabilityMatrix {
   const rows: MatrixRow[] = [];
   const mustHavesWithoutTests: Requirement[] = [];
+  const mustHavesVerifiedWithoutTests: Requirement[] = [];
+  const testRunRows = input.testRunRows ?? [];
 
   for (const requirement of input.requirements) {
-    const ownTests = scanTestFilesForRequirementId(input.testFiles, requirement.id);
+    const evaluation = input.evaluationByRequirementId?.[requirement.id];
+    const evidence: RequirementEvidence = evaluation
+      ? evaluation.evidence
+      : {
+          checkpoints: findCheckpointMentions(input.checkpoints, requirement.id),
+          tests: scanTestFilesForRequirementId(input.testFiles, requirement.id),
+          gateChecks: findGateCheckMentions(input.gateChecks, requirement.id),
+        };
+    const status = evaluation ? evaluation.status : computeRequirementStatus(evidence, requirement);
     rows.push(
-      buildMatrixRow({
+      finalizeMatrixRow({
         kind: 'requirement',
         id: requirement.id,
         title: requirement.title,
         rev: requirement.rev ?? 1,
         priority: requirement.priority,
         issue: requirement.trace?.issue,
-        checkpoints: input.checkpoints,
-        tests: ownTests,
-        gateChecks: input.gateChecks,
+        evidence,
+        status,
         requirementForStatus: requirement,
+        testRunRows,
       }),
     );
 
     let scenarioTestCount = 0;
     for (const scenario of requirement.scenarios ?? []) {
-      const scenarioTests = scanTestFilesForScenarioId(input.testFiles, scenario.id);
-      scenarioTestCount += scenarioTests.length;
+      const scenarioEvidence = buildScenarioEvidence({
+        scenarioId: scenario.id,
+        checkpoints: input.checkpoints,
+        testFiles: input.testFiles,
+        gateChecks: input.gateChecks,
+        testRunRows,
+        parentEvidence: evidence,
+      });
+      scenarioTestCount += scenarioEvidence.tests.length;
       rows.push(
-        buildMatrixRow({
+        finalizeMatrixRow({
           kind: 'scenario',
           id: scenario.id,
           parentId: requirement.id,
@@ -1872,27 +1997,32 @@ export function buildTraceabilityMatrix(input: BuildTraceabilityMatrixInput): Tr
           rev: requirement.rev ?? 1,
           priority: requirement.priority,
           issue: requirement.trace?.issue,
-          checkpoints: input.checkpoints,
-          tests: scenarioTests,
-          gateChecks: input.gateChecks,
+          evidence: scenarioEvidence,
+          status: computeRequirementStatus(scenarioEvidence, requirement),
           requirementForStatus: requirement,
+          testRunRows,
         }),
       );
     }
 
-    if (requirement.priority === 'must' && ownTests.length === 0 && scenarioTestCount === 0) mustHavesWithoutTests.push(requirement);
+    if (requirement.priority === 'must' && evidence.tests.length === 0 && scenarioTestCount === 0) {
+      if (status === '검증됨') mustHavesVerifiedWithoutTests.push(requirement);
+      else mustHavesWithoutTests.push(requirement);
+    }
   }
 
-  return { rows, orphanTests: scanTestFilesForOrphans(input.testFiles), mustHavesWithoutTests };
+  return { rows, orphanTests: scanTestFilesForOrphans(input.testFiles), mustHavesWithoutTests, mustHavesVerifiedWithoutTests };
 }
 
 function csvCell(value: string): string {
   return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
+const MATRIX_TEST_RESULT_LABEL: Record<'pass' | 'fail' | 'not-run', string> = { pass: '통과', fail: '실패', 'not-run': '안 돌림' };
+
 /** 추적 매트릭스를 CSV(쉼표 구분, CRLF 줄바꿈)로 만든다. "CSV로 내보내기" 버튼이 그대로 내려받게 한다 */
 export function buildMatrixCsv(matrix: TraceabilityMatrix): string {
-  const header = ['종류', 'id', '상위 id', '제목', '개정', '우선순위', '이슈', '커밋', '테스트', '게이트', '상태'];
+  const header = ['종류', 'id', '상위 id', '제목', '개정', '우선순위', '이슈', '커밋', '테스트', '게이트', '검증 출처', '상태'];
   const rows = matrix.rows.map((row) => [
     row.kind === 'requirement' ? '요구사항' : '시나리오',
     row.id,
@@ -1902,8 +2032,9 @@ export function buildMatrixCsv(matrix: TraceabilityMatrix): string {
     row.priority,
     row.issue !== undefined ? `#${row.issue}` : '',
     row.checkpoints.map((checkpoint) => checkpoint.shortSha).join(' '),
-    row.tests.map((test) => test.name).join(' | '),
+    row.tests.map((test) => (test.result ? `${test.name}(${MATRIX_TEST_RESULT_LABEL[test.result]})` : test.name)).join(' | '),
     row.gateChecks.map((check) => `${check.name}:${check.ok ? '통과' : '실패'}`).join(' | '),
+    row.verifiedBy === 'none' ? '' : row.verifiedBy,
     row.status,
   ]);
   return [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');

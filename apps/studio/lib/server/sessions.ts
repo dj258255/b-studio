@@ -176,6 +176,7 @@ import {
   type ImplementedRequirementRef,
   type IssueSummary,
   type ManualVerification,
+  type MatrixTestRunRow,
   type ModelAsk,
   type ModelClient,
   type ModelClientInfo,
@@ -186,6 +187,7 @@ import {
   type Requirement,
   type RequirementCoverage,
   type RequirementDiffEntry,
+  type RequirementEvaluation,
   type RequirementEvidence,
   type RequirementIssueDraft,
   type RequirementStatus,
@@ -4608,16 +4610,30 @@ export async function clearRequirementManualVerification(id: string, requirement
 }
 
 /**
- * 추적 매트릭스(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 모으고, 역방향 목록
- * (주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 돌려준다. "요구사항" 탭의 추적 매트릭스 하위 화면이 연다.
+ * 추적 매트릭스(ADR-090, 요구사항 행의 증거는 ADR-106): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·
+ * 검증 출처·상태를 모으고, 역방향 목록(주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 돌려준다. "요구사항" 탭의
+ * 추적 매트릭스 하위 화면이 연다. 요구사항 행의 증거·상태는 "명세" 탭 목록과 똑같은 평가 맥락(buildRequirementEvaluationContext
+ * · evaluateRequirementWithContext)으로 계산한다 — 그래야 테스트 탭 실행·문서 확인·사람 확인까지 목록과 완전히 같은
+ * 값으로 반영된다(매트릭스가 체크포인트·테스트 파일 이름·게이트만 보고 따로 계산해 목록과 다른 상태를 보여주던 문제).
  */
 export async function getSessionRequirementsMatrix(id: string): Promise<TraceabilityMatrix> {
   const session = requireSession(id);
   const requirements = await readSavedRequirements(session);
-  const checkpoints = sessionCheckpointRefs(session);
-  const testFiles = await scanWorkingCopyTestFiles(session.project.root);
-  const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
-  return buildTraceabilityMatrix({ requirements, checkpoints, testFiles, gateChecks });
+  const context = await buildRequirementEvaluationContext(session);
+  const evaluationByRequirementId: Record<string, RequirementEvaluation> = {};
+  for (const requirement of requirements) {
+    const view = evaluateRequirementWithContext(requirement, context);
+    evaluationByRequirementId[requirement.id] = { status: view.status, evidence: view.evidence, verifiedBy: view.verifiedBy };
+  }
+  const testRunRows = buildMatrixTestRunRows(context.testServices, context.head, context.pendingFilesCount);
+  return buildTraceabilityMatrix({
+    requirements,
+    checkpoints: context.checkpoints,
+    testFiles: context.testFiles,
+    gateChecks: context.gateChecks,
+    evaluationByRequirementId,
+    testRunRows,
+  });
 }
 
 /** 추적 매트릭스를 CSV로 내려받는다("CSV로 내보내기" 버튼) */
@@ -5452,6 +5468,32 @@ export function buildRequirementTestRunEvidence(
   }
   if (passed === 0 && failed === 0) return undefined;
   return { at: at ?? new Date().toISOString(), sha: head.sha, shortSha: head.shortSha, passed, failed };
+}
+
+/**
+ * 추적 매트릭스의 테스트 열(MatrixTestRunRow, @b-studio/agent)이 쓸, 지금 체크포인트에서 돈 테스트 탭 실행 결과를
+ * 테스트 하나하나 단위로 펼친 목록. buildRequirementTestRunEvidence와 같은 "지금 체크포인트와 맞는 실행만 증거로
+ * 친다" 규칙(testRunMatchesHead)을 쓰되, 집계한 통과·실패 수가 아니라 테스트 한 줄 한 줄의 결과를 그대로 남긴다 —
+ * 매트릭스는 "이 테스트가 통과했는지 실패했는지"를 보여줘야 하지, 요구사항 전체의 통과 개수만으로는 부족하다.
+ * 한 테스트 이름에 여러 id(예: "R1과 R2를 함께 확인한다")가 붙어 있으면 id마다 한 행씩 낸다.
+ */
+export function buildMatrixTestRunRows(
+  services: readonly TestServiceView[],
+  head: { sha: string; shortSha: string } | undefined,
+  pendingFilesCount: number,
+): MatrixTestRunRow[] {
+  if (!head) return [];
+  const rows: MatrixTestRunRow[] = [];
+  for (const service of services) {
+    if (!testRunMatchesHead(service, head.sha, pendingFilesCount)) continue;
+    const at = service.lastRunAt ?? new Date().toISOString();
+    for (const row of service.rows) {
+      for (const id of row.requirementIds) {
+        rows.push({ id, file: row.file, name: row.displayName, status: row.status, at, sha: head.sha, shortSha: head.shortSha });
+      }
+    }
+  }
+  return rows;
 }
 
 function markTestsChanged(session: Session): void {
