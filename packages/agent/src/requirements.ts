@@ -257,6 +257,10 @@ export function buildExtractionUserPrompt(specText: string, referencedFilesConte
 export function repairExtractionReply(raw: unknown): unknown {
   if (!raw || typeof raw !== 'object') return raw;
   const reply = { ...(raw as Record<string, unknown>) };
+  // 최상위 목록도 null이면 빈 목록으로 본다(기본값이 있는 항목들)
+  for (const key of ['questions', 'outOfScope', 'assumptions', 'manualSteps']) {
+    if (reply[key] === null) reply[key] = [];
+  }
   const cap = (key: string, max: number) => {
     if (Array.isArray(reply[key]) && (reply[key] as unknown[]).length > max) reply[key] = (reply[key] as unknown[]).slice(0, max);
   };
@@ -269,6 +273,10 @@ export function repairExtractionReply(raw: unknown): unknown {
     reply.requirements = (reply.requirements as unknown[]).map((requirement) => {
       if (!requirement || typeof requirement !== 'object') return requirement;
       const candidate = { ...(requirement as Record<string, unknown>) };
+      // 모델은 해당 사항이 없는 선택 항목을 빼지 않고 null로 채우곤 한다("nfr": null). 스키마는 "없음"만 받으므로 지운다
+      for (const key of ['ears', 'scenarios', 'nfr', 'trace', 'rev', 'hash', 'revisedAt']) {
+        if (candidate[key] === null) delete candidate[key];
+      }
       if (Array.isArray(candidate.scenarios)) {
         if (candidate.scenarios.length > 20) candidate.scenarios = candidate.scenarios.slice(0, 20);
         const scenarios = candidate.scenarios as unknown[];
