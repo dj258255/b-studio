@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createView } from "@/lib/session-view";
 import type { SessionSnapshot } from "@/lib/studio-events";
-import { formatElapsed, ImportFlow, RequirementPublishFlow, RequirementsList, RequirementsPanel, shouldConfirmBeforePlanAll } from "./requirements-panel";
+import { DiffSummary, formatElapsed, ImportFlow, RequirementPublishFlow, RequirementsList, RequirementsPanel, shouldConfirmBeforePlanAll } from "./requirements-panel";
 
 const baseSnapshot: SessionSnapshot = {
   id: "s1",
@@ -153,5 +153,23 @@ describe("RequirementPublishFlow(ADR-092)", () => {
     expect(html).toContain("요구사항을 GitHub 이슈로 발행");
     expect(html).toContain("docs/requirements.md");
     expect(html).toContain("미리보기를 만드는 중");
+  });
+});
+
+describe("DiffSummary(재추출 병합 요약)", () => {
+  const entry = (status: "added" | "changed" | "unchanged" | "removed", id: string) => ({
+    status,
+    id,
+    requirement: { id, title: id, kind: "api" as const, priority: "must" as const, acceptance: ["a"] },
+  });
+
+  it("명세에서 사라진 항목이 있으면 한 번에 빼는 버튼을 보여 준다", () => {
+    const html = renderToStaticMarkup(<DiffSummary diff={[entry("added", "R1"), entry("removed", "R3"), entry("removed", "R4")]} onDropRemoved={() => {}} />);
+    expect(html).toContain("사라진 2개도 목록에서 빼기");
+  });
+
+  it("사라진 항목이 없으면 버튼이 없다", () => {
+    const html = renderToStaticMarkup(<DiffSummary diff={[entry("unchanged", "R1")]} onDropRemoved={() => {}} />);
+    expect(html).not.toContain("목록에서 빼기");
   });
 });
