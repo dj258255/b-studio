@@ -79,6 +79,7 @@ import {
   REQUIREMENTS_FILE,
   RequirementSchema,
   requirementConfidence,
+  requirementVerificationSource,
   reviseRequirementIfChanged,
   resolveReferencedFiles,
   runnerLabel,
@@ -157,12 +158,14 @@ import {
   type DiscardBackup,
   type DesignFrameInfo,
   type DesignSource,
+  type DocEvidence,
   type Effort,
   type EscalationPolicy,
   type GateCheckResult,
   type GitAuthor,
   type ImplementedRequirementRef,
   type IssueSummary,
+  type ManualVerification,
   type ModelAsk,
   type ModelClient,
   type ModelClientInfo,
@@ -210,7 +213,14 @@ import {
 } from '@b-studio/sandbox';
 import { dependentsOf, loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import { buildSubmissionChecklist, type ChecklistService, type ChecklistTestEvidence, type SubmissionReport } from '@/lib/submission-checklist';
+import {
+  buildSubmissionChecklist,
+  matchAcceptanceAgainstDocs,
+  type ChecklistService,
+  type ChecklistTestEvidence,
+  type DocMatchSource,
+  type SubmissionReport,
+} from '@/lib/submission-checklist';
 import {
   addTokens,
   describeWindow,
@@ -2977,7 +2987,7 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
     commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 } })),
     // 명세 탭이 지금 계산한 상태를 넘긴다. 요구사항 파일을 못 읽으면 점검표가 파일의 상태 줄로 대신한다
     requirements: await getSessionRequirements(id)
-      .then((snapshot) => snapshot.requirements.map(({ id: requirementId, title, priority, status }) => ({ id: requirementId, title, priority, status })))
+      .then((snapshot) => snapshot.requirements.map(({ id: requirementId, title, priority, status, verifiedBy }) => ({ id: requirementId, title, priority, status, verifiedBy })))
       .catch(() => undefined),
     // 게이트가 test 단계를 통과한 기록이 없어도, 테스트 탭에서 지금 체크포인트(HEAD)에 직접 돌린 결과가 있으면
     // 증거로 센다(버그 리포트: "전체 실행"으로 백엔드·프런트엔드 모두 통과했는데 "확인 필요"로 남던 문제)
@@ -3613,6 +3623,8 @@ export interface RequirementView extends Requirement {
   workPrefill: string;
   /** 이슈로 발행했을 때 생긴 하위 이슈 번호. 발행하지 않았으면 없다 */
   issue?: number;
+  /** "검증됨"을 만든 증거의 종류(ADR-0XX). 검증됨이 아니면 'none' */
+  verifiedBy: 'test' | 'docs' | 'manual' | 'none';
 }
 
 export interface RequirementsSnapshot {
@@ -3674,6 +3686,21 @@ async function scanWorkingCopyTestFiles(root: string): Promise<ScannedFile[]> {
   }
   await walk(root);
   return files;
+}
+
+/**
+ * kind: 'docs' 요구사항의 인수 조건을 맞춰볼 문서(README.md·docs/**\/*.md)를 읽는다(ADR-0XX). "문서" 탭(ADR-094)이
+ * 이미 같은 범위를 다루므로 그 탭의 listDocsDirFiles를 그대로 재사용한다 — 실제 매칭(키워드 추출·제목/문단 비교)은
+ * 순수 함수(submission-checklist.ts의 matchAcceptanceAgainstDocs)에 맡기고 여기서는 파일만 모은다.
+ */
+async function scanWorkingCopyDocSources(root: string): Promise<DocMatchSource[]> {
+  const workspace = new Workspace(root);
+  const rootFiles = await workspace.list('.', 1).catch(() => [] as string[]);
+  const readmeName = rootFiles.find((file) => /^readme\.md$/i.test(file));
+  const docsFiles = await listDocsDirFiles(workspace);
+  const paths = [...(readmeName ? [readmeName] : []), ...docsFiles];
+  const sources = await Promise.all(paths.map(async (docPath) => ({ path: docPath, content: await workspace.read(docPath).catch(() => '') })));
+  return sources.filter((source) => source.content.length > 0);
 }
 
 /**
@@ -4120,7 +4147,9 @@ export async function recommendSessionRequirementQuestions(
 
 /**
  * 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다. 내용이 드리프트됐거나(hash 불일치) 개정 후 새 증거가 없으면
- * "재확인 필요"로 매긴다. 발행된 이슈 번호가 있으면(ADR-092) 프리필에 안내를 덧붙이고 issue 필드를 채운다
+ * "재확인 필요"로 매긴다. 발행된 이슈 번호가 있으면(ADR-092) 프리필에 안내를 덧붙이고 issue 필드를 채운다.
+ * kind: 'docs' 요구사항은 docSources(README.md·docs/**\/*.md)가 있으면 인수 조건을 그 문서와 맞춰 docEvidence를
+ * 만든다(ADR-0XX) — 그 밖의 kind는 문서 매칭을 하지 않는다(테스트·게이트가 있는데 억지로 문서로도 통과시키지 않는다).
  */
 function evaluateRequirement(
   requirement: Requirement,
@@ -4129,16 +4158,27 @@ function evaluateRequirement(
   gateChecks: readonly GateCheckResult[],
   issueNumber?: number,
   testRun?: TestRunEvidence,
+  docSources?: readonly DocMatchSource[],
 ): RequirementView {
+  const docEvidence: DocEvidence | undefined = requirement.kind === 'docs' && docSources ? matchAcceptanceAgainstDocs(requirement.acceptance, docSources) : undefined;
   const evidence: RequirementEvidence = {
     checkpoints: findCheckpointMentions(checkpoints, requirement.id),
     tests: scanTestFilesForRequirementId(testFiles, requirement.id),
     gateChecks: findGateCheckMentions(gateChecks, requirement.id),
     ...(testRun ? { testRun } : {}),
+    ...(docEvidence ? { docEvidence } : {}),
   };
   const status = computeRequirementStatus(evidence, requirement);
   const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
-  return { ...requirement, status, confidence: requirementConfidence(status), evidence, workPrefill, ...(issueNumber !== undefined ? { issue: issueNumber } : {}) };
+  return {
+    ...requirement,
+    status,
+    confidence: requirementConfidence(status),
+    evidence,
+    workPrefill,
+    verifiedBy: requirementVerificationSource(evidence, requirement),
+    ...(issueNumber !== undefined ? { issue: issueNumber } : {}),
+  };
 }
 
 /** 세션의 지금 체크포인트(HEAD)와 커밋하지 않은 변경 수를 한 번에 모은다. 테스트 탭 실행이 그 체크포인트의 증거인지 비교하는 데 쓴다 */
@@ -4164,7 +4204,52 @@ function sessionCheckpointRefs(session: Session): CheckpointRef[] {
   return session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message, createdAt: checkpoint.createdAt }));
 }
 
-/** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
+interface RequirementEvaluationContext {
+  checkpoints: CheckpointRef[];
+  testFiles: ScannedFile[];
+  gateChecks: GateCheckResult[];
+  docSources: DocMatchSource[];
+  testServices: TestServiceView[];
+  head?: { sha: string; shortSha: string };
+  pendingFilesCount: number;
+}
+
+/**
+ * 요구사항 평가(evaluateRequirement)가 요구사항마다 되풀이해 쓰는 입력(체크포인트·테스트 파일·게이트 결과·문서
+ * 소스·테스트 탭 실행 증거)을 한 번만 모은다. getSessionRequirements·applySessionRequirements·사람 확인
+ * 저장/취소가 모두 이 자리를 쓴다(저장소 I/O를 세 번 따로 하지 않는다)
+ */
+async function buildRequirementEvaluationContext(session: Session): Promise<RequirementEvaluationContext> {
+  const [testFiles, docSources, testServices, headInfo] = await Promise.all([
+    scanWorkingCopyTestFiles(session.project.root),
+    scanWorkingCopyDocSources(session.project.root),
+    Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
+    headForTestEvidence(session),
+  ]);
+  return {
+    checkpoints: sessionCheckpointRefs(session),
+    testFiles,
+    gateChecks: (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok })),
+    docSources,
+    testServices,
+    head: headInfo.head,
+    pendingFilesCount: headInfo.pendingFilesCount,
+  };
+}
+
+function evaluateRequirementWithContext(requirement: Requirement, context: RequirementEvaluationContext, issueNumber?: number): RequirementView {
+  return evaluateRequirement(
+    requirement,
+    context.checkpoints,
+    context.testFiles,
+    context.gateChecks,
+    issueNumber,
+    buildRequirementTestRunEvidence(context.testServices, requirement.id, context.head, context.pendingFilesCount),
+    context.docSources,
+  );
+}
+
+/** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과·문서에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
 export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const draft = await getSessionRequirementExtractionDraft(id);
@@ -4173,27 +4258,13 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps, ...(draft ? { draft } : {}) };
 
-  const checkpoints = sessionCheckpointRefs(session);
-  const testFiles = await scanWorkingCopyTestFiles(session.project.root);
-  const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
   // 사이드카 파일만 읽는다(원격·토큰 없이도 동작한다) — 발행한 적이 없으면 빈 채로 빠르게 끝난다
-  const issueNumbers = await publishedIssueNumbers(session.project.root, requirements.map((requirement) => requirement.id)).catch(() => ({}) as Record<string, number>);
-  // 게이트가 test 단계를 돌리지 않았어도, 테스트 탭에서 지금 체크포인트에 직접 돌린 결과를 증거로 센다(버그 리포트)
-  const [testServices, { head, pendingFilesCount }] = await Promise.all([
-    Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
-    headForTestEvidence(session),
+  const [issueNumbers, context] = await Promise.all([
+    publishedIssueNumbers(session.project.root, requirements.map((requirement) => requirement.id)).catch(() => ({}) as Record<string, number>),
+    buildRequirementEvaluationContext(session),
   ]);
 
-  const views = requirements.map((requirement) =>
-    evaluateRequirement(
-      requirement,
-      checkpoints,
-      testFiles,
-      gateChecks,
-      issueNumbers[requirement.id],
-      buildRequirementTestRunEvidence(testServices, requirement.id, head, pendingFilesCount),
-    ),
-  );
+  const views = requirements.map((requirement) => evaluateRequirementWithContext(requirement, context, issueNumbers[requirement.id]));
   const statusById = Object.fromEntries(views.map((view) => [view.id, view.status]));
   const mustHaves = requirements.filter((requirement) => requirement.priority === 'must');
   return {
@@ -4260,19 +4331,8 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
   const { requirements: guarded, manualSteps: guardedManualSteps } = partitionManualSteps(parsed.data.requirements, parsed.data.manualSteps);
   const revisedRequirements = guarded.map((requirement) => reviseRequirementIfChanged(carryForwardRequirementRevision(requirement, savedById.get(requirement.id)), now));
 
-  const checkpoints = sessionCheckpointRefs(session);
-  const testFiles = await scanWorkingCopyTestFiles(session.project.root);
-  const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
-  const [testServices, { head, pendingFilesCount }] = await Promise.all([
-    Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
-    headForTestEvidence(session),
-  ]);
-  const statusById = Object.fromEntries(
-    revisedRequirements.map((requirement) => [
-      requirement.id,
-      evaluateRequirement(requirement, checkpoints, testFiles, gateChecks, undefined, buildRequirementTestRunEvidence(testServices, requirement.id, head, pendingFilesCount)).status,
-    ]),
-  );
+  const context = await buildRequirementEvaluationContext(session);
+  const statusById = Object.fromEntries(revisedRequirements.map((requirement) => [requirement.id, evaluateRequirementWithContext(requirement, context).status]));
 
   const markdown = serializeRequirementsMarkdown(revisedRequirements, statusById, parsed.data.assumptions, guardedManualSteps);
   await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
@@ -4291,6 +4351,69 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
       console.error(`[b-studio] 세션 ${id}의 요구사항 추출 결과에 저장 시각을 남기지 못했습니다`, error);
     },
   );
+  return getSessionRequirements(id);
+}
+
+const MANUAL_VERIFICATION_NOTE_MAX = 500;
+
+/** 요구사항 목록을 다시 저장하고 문서 체크포인트를 남긴다(사람 확인 남기기·취소가 공유하는 마무리 단계) */
+async function writeAndCommitRequirements(
+  id: string,
+  session: Session,
+  requirements: readonly Requirement[],
+  assumptions: readonly string[],
+  manualSteps: readonly string[],
+  commitMessage: string,
+): Promise<void> {
+  const context = await buildRequirementEvaluationContext(session);
+  const statusById = Object.fromEntries(requirements.map((requirement) => [requirement.id, evaluateRequirementWithContext(requirement, context).status]));
+  const markdown = serializeRequirementsMarkdown(requirements, statusById, assumptions, manualSteps);
+  await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
+  await commitWorkingCopyDocs(id, [REQUIREMENTS_FILE], commitMessage).catch((error: unknown) => {
+    console.error(`[b-studio] 세션 ${id}의 요구사항 문서 체크포인트를 남기지 못했습니다`, error);
+  });
+}
+
+/**
+ * 사람이 "직접 확인함"을 누른다(owner/admin만, 라우트의 authorizeSession이 막는다, ADR-0XX). 테스트·게이트가 돌지
+ * 않는 요구사항(문서, 디자인과 눈으로 맞춰 봐야 하는 UI, could 우선순위 항목 등)도 사람이 직접 보고 확인했다는
+ * 사실을 "누가·언제·어느 체크포인트·무엇을 어떻게"로 docs/requirements.md에 남긴다(저장소에 같이 커밋돼 PR에도
+ * 실린다). 지금 체크포인트(HEAD)가 없으면 가리킬 시점이 없으므로 받지 않는다. 실패한 테스트·게이트는 이 기록으로
+ * 절대 뒤집지 않는다 — computeRequirementStatus가 게이트·테스트 탭 실행을 항상 먼저 본다.
+ */
+export async function markRequirementManualVerification(id: string, requirementId: string, input: { note: string }, by: string): Promise<RequirementsSnapshot> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인할 수 있습니다');
+  const note = input.note?.trim() ?? '';
+  if (!note) throw new StudioError(400, '무엇을 어떻게 확인했는지 메모를 적어야 합니다');
+  if (note.length > MANUAL_VERIFICATION_NOTE_MAX) throw new StudioError(400, `메모는 ${MANUAL_VERIFICATION_NOTE_MAX}자 이내로 적어 주세요`);
+  const checkpoint = session.snapshot.checkpoints[0];
+  if (!checkpoint) throw new StudioError(409, '체크포인트가 하나도 없어 확인한 시점을 남길 수 없습니다 — 먼저 체크포인트를 만들어 주세요');
+
+  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
+  const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
+  if (!requirements.some((requirement) => requirement.id === requirementId)) throw new StudioError(404, '요구사항을 찾을 수 없습니다');
+
+  const manualVerification: ManualVerification = { by, at: new Date().toISOString().slice(0, 10), sha: checkpoint.shortSha, note };
+  const updated = requirements.map((requirement) => (requirement.id === requirementId ? { ...requirement, manualVerification } : requirement));
+  await writeAndCommitRequirements(id, session, updated, assumptions, manualSteps, `docs: ${requirementId} 사람 확인을 남긴다`);
+  return getSessionRequirements(id);
+}
+
+/** "확인 취소" — manualVerification을 지운다. 이미 없으면(두 번 눌렀거나 다른 사람이 먼저 지웠으면) 그냥 지금 상태를 돌려준다 */
+export async function clearRequirementManualVerification(id: string, requirementId: string): Promise<RequirementsSnapshot> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인을 취소할 수 있습니다');
+  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
+  const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
+  const target = requirements.find((requirement) => requirement.id === requirementId);
+  if (!target) throw new StudioError(404, '요구사항을 찾을 수 없습니다');
+  if (!target.manualVerification) return getSessionRequirements(id);
+
+  const updated = requirements.map((requirement) => (requirement.id === requirementId ? { ...requirement, manualVerification: undefined } : requirement));
+  await writeAndCommitRequirements(id, session, updated, assumptions, manualSteps, `docs: ${requirementId} 사람 확인을 취소한다`);
   return getSessionRequirements(id);
 }
 

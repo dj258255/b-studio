@@ -45,6 +45,7 @@ import {
   requirementConfidence,
   requirementIsReady,
   requirementsReadyBadge,
+  requirementVerificationSource,
   reviseRequirementIfChanged,
   resolveReferencedFiles,
   scanTestFilesForOrphans,
@@ -719,6 +720,84 @@ describe('requirementConfidence — 재확인 필요', () => {
   });
 });
 
+describe('computeRequirementStatus — 문서 확인·사람 확인(ADR-0XX)', () => {
+  const emptyEvidence = { checkpoints: [], tests: [], gateChecks: [] };
+
+  it('docEvidence가 모두 만족되면(satisfied) 검증됨', () => {
+    const docEvidence = { matched: ['a', 'b'], missing: [], satisfied: true, sourceSummary: 'README.md(개요)' };
+    expect(computeRequirementStatus({ ...emptyEvidence, docEvidence })).toBe('검증됨');
+  });
+
+  it('docEvidence가 일부만 매칭되면(만족 못 함) 작업 중 — 부풀리지 않는다', () => {
+    const docEvidence = { matched: ['a'], missing: ['b'], satisfied: false };
+    expect(computeRequirementStatus({ ...emptyEvidence, docEvidence })).toBe('작업 중');
+  });
+
+  it('docEvidence가 하나도 못 찾으면(matched 0) 미착수', () => {
+    const docEvidence = { matched: [], missing: ['a', 'b'], satisfied: false };
+    expect(computeRequirementStatus({ ...emptyEvidence, docEvidence })).toBe('미착수');
+  });
+
+  it('사람이 "직접 확인함"으로 남긴 기록이 있으면 검증됨', () => {
+    const verified: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'c57d72f', note: '화면을 직접 눌러 확인했습니다' } };
+    expect(computeRequirementStatus(emptyEvidence, verified)).toBe('검증됨');
+  });
+
+  it('실패한 게이트 확인은 사람 확인이 있어도 뒤집지 않는다(실패가 늘 이긴다)', () => {
+    const verified: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'c57d72f', note: '확인함' } };
+    const evidenceWithFailingGate = { checkpoints: [], tests: [], gateChecks: [{ name: 'R1', ok: false }] };
+    expect(computeRequirementStatus(evidenceWithFailingGate, verified)).toBe('실패');
+  });
+
+  it('실패한 테스트 탭 실행도 사람 확인이 있어도 뒤집지 않는다', () => {
+    const verified: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'c57d72f', note: '확인함' } };
+    const testRun = { at: '2026-10-01T00:00:00.000Z', sha: 'c57d72f', shortSha: 'c57d72f', passed: 0, failed: 1 };
+    expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [], testRun }, verified)).toBe('실패');
+  });
+
+  it('개정이 오른 뒤(revisedAt) 사람 확인이 그 전 날짜면 재확인 필요에 머문다', () => {
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
+    const staleManual = { ...revised, manualVerification: { by: '범수', at: '2026-01-10', sha: 'a', note: '예전에 확인함' } };
+    expect(computeRequirementStatus(emptyEvidence, staleManual)).toBe('재확인 필요');
+  });
+
+  it('개정이 오른 뒤라도 그 뒤 날짜의 사람 확인이면 재확인됐다고 본다', () => {
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
+    const freshManual = { ...revised, manualVerification: { by: '범수', at: '2026-03-01', sha: 'a', note: '다시 확인함' } };
+    expect(computeRequirementStatus(emptyEvidence, freshManual)).toBe('검증됨');
+  });
+});
+
+describe('requirementVerificationSource — 근거 종류 구분(ADR-0XX)', () => {
+  const emptyEvidence = { checkpoints: [], tests: [], gateChecks: [] };
+
+  it('검증됨이 아니면 none', () => {
+    expect(requirementVerificationSource(emptyEvidence)).toBe('none');
+  });
+
+  it('게이트 확인이 통과면 test', () => {
+    expect(requirementVerificationSource({ ...emptyEvidence, gateChecks: [{ name: 'R1', ok: true }] })).toBe('test');
+  });
+
+  it('문서 확인만 만족되면 docs', () => {
+    const docEvidence = { matched: ['a'], missing: [], satisfied: true };
+    expect(requirementVerificationSource({ ...emptyEvidence, docEvidence })).toBe('docs');
+  });
+
+  it('사람 확인만 있으면 manual', () => {
+    const verified: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'a', note: '확인함' } };
+    expect(requirementVerificationSource(emptyEvidence, verified)).toBe('manual');
+  });
+
+  it('문서 확인과 사람 확인이 둘 다 있으면 문서 확인(자동)을 우선한다', () => {
+    const docEvidence = { matched: ['a'], missing: [], satisfied: true };
+    const verified: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'a', note: '확인함' } };
+    expect(requirementVerificationSource({ ...emptyEvidence, docEvidence }, verified)).toBe('docs');
+  });
+});
+
 describe('lintRequirement / requirementIsReady / requirementsReadyBadge', () => {
   it('한국어 약한 표현을 찾는다', () => {
     const warnings = lintRequirement({ ...withEars, title: '빠르게 로그인하는 API' });
@@ -816,6 +895,42 @@ describe('마크다운 왕복 — 새 필드(rev·EARS·시나리오·NFR·trace
     expect(requirements[0]!.title).toBe('로그인 API(이메일)');
     expect(requirements[0]!.hash).toBe(saved.hash);
     expect(requirements[0]!.rev).toBe(saved.rev);
+  });
+
+  it('사람 확인(manualVerification)을 몸통 줄("- 확인: …")로 왕복한다(ADR-0XX)', () => {
+    const requirement: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'c57d72f', note: '디자인 시안과 화면을 눈으로 맞춰 봤습니다' } };
+    const markdown = serializeRequirementsMarkdown([requirement]);
+    expect(markdown).toContain('- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 디자인 시안과 화면을 눈으로 맞춰 봤습니다');
+    const { requirements } = parseRequirementsMarkdown(markdown);
+    expect(requirements).toEqual([requirement]);
+  });
+
+  it('사람 확인이 없으면 "- 확인:" 줄 자체를 쓰지 않는다', () => {
+    const markdown = serializeRequirementsMarkdown([sample]);
+    expect(markdown).not.toContain('- 확인:');
+  });
+
+  it('구조가 깨져도 사람 확인은 JSON 블록에서 되돌아온다', () => {
+    const requirement: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'c57d72f', note: '확인함' } };
+    const markdown = serializeRequirementsMarkdown([requirement]);
+    const broken = `완전히 다시 쓰였습니다.\n\n${markdown.slice(markdown.indexOf('<!--'))}`;
+    const { requirements } = parseRequirementsMarkdown(broken);
+    expect(requirements).toEqual([requirement]);
+  });
+});
+
+describe('carryForwardRequirementRevision — 사람 확인(manualVerification)', () => {
+  it('다음 값이 manualVerification을 안 보내면 이전 값을 물려받는다(편집 화면이 이 필드를 모를 때 조용히 지워지지 않는다)', () => {
+    const saved: Requirement = { ...withEars, manualVerification: { by: '범수', at: '2026-10-01', sha: 'a', note: '확인함' } };
+    const next = carryForwardRequirementRevision({ ...withEars, title: '로그인 API(이메일)' }, saved);
+    expect(next.manualVerification).toEqual(saved.manualVerification);
+  });
+
+  it('다음 값이 이미 manualVerification을 갖고 있으면 그 값을 존중한다', () => {
+    const saved: Requirement = { ...withEars, manualVerification: { by: '범수', at: '2026-10-01', sha: 'a', note: '확인함' } };
+    const newer = { by: '다른사람', at: '2026-11-01', sha: 'b', note: '다시 확인함' };
+    const next = carryForwardRequirementRevision({ ...withEars, manualVerification: newer }, saved);
+    expect(next.manualVerification).toEqual(newer);
   });
 });
 

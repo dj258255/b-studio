@@ -6,6 +6,7 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import type { DocEvidence } from '@b-studio/agent';
 
 export type ChecklistStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
@@ -88,6 +89,11 @@ export interface ChecklistRequirement {
   priority: 'must' | 'should' | 'could';
   /** 명세 탭의 상태. '검증됨'만 끝난 것으로 본다 */
   status: string;
+  /**
+   * 검증됨을 만든 증거의 종류(ADR-0XX, requirementVerificationSource). 요구사항 항목이 "N개 중 M개 검증됨"
+   * 말고도 사람 확인·문서 확인이 몇 개였는지 구분해 보여준다. 검증됨이 아니면 'none'
+   */
+  verifiedBy?: 'test' | 'docs' | 'manual' | 'none';
 }
 
 export interface ChecklistTestEvidence {
@@ -165,10 +171,30 @@ function parseRequirementsDoc(text: string): { total: number; unresolved: number
   return { total, unresolved };
 }
 
+const VERIFIED_BY_LABEL: Record<'test' | 'docs' | 'manual', string> = { test: '테스트/게이트', docs: '문서 확인', manual: '사람 확인' };
+
+/**
+ * "N개 검증됨" 뒤에 "(사람 확인 2개 · 문서 확인 1개)"처럼 테스트·게이트가 아닌 방법으로 검증된 개수를 덧붙인다.
+ * 전부 테스트·게이트(또는 verifiedBy 정보가 없는 옛 호출)면 덧붙이지 않아 기존 문구를 그대로 지킨다(ADR-0XX) —
+ * "요구사항 탭에서 이미 검증됐다고 나오는데 왜 점검표만 안 믿냐"는 버그 리포트의 반대쪽, "누가·무엇으로 검증했는지"를
+ * 숨기지 않는다.
+ */
+function verificationBreakdownSuffix(verified: readonly ChecklistRequirement[]): string {
+  const counts = { docs: 0, manual: 0 };
+  for (const requirement of verified) {
+    if (requirement.verifiedBy === 'docs') counts.docs++;
+    else if (requirement.verifiedBy === 'manual') counts.manual++;
+  }
+  const parts = (['docs', 'manual'] as const).filter((kind) => counts[kind] > 0).map((kind) => `${VERIFIED_BY_LABEL[kind]} ${counts[kind]}개`);
+  return parts.length > 0 ? ` (${parts.join(' · ')})` : '';
+}
+
 /** 명세 탭이 계산한 상태로 판정한다. must가 하나라도 검증되지 않았으면 실패, should·could만 남았으면 경고 */
 function requirementsFromLive(id: string, title: string, live: readonly ChecklistRequirement[]): ChecklistItem {
   const open = live.filter((requirement) => requirement.status !== '검증됨');
-  if (open.length === 0) return { id, title, status: 'pass', reason: `요구사항 ${live.length}개가 모두 검증됐습니다.` };
+  if (open.length === 0) {
+    return { id, title, status: 'pass', reason: `요구사항 ${live.length}개가 모두 검증됐습니다.${verificationBreakdownSuffix(live)}` };
+  }
   const mustOpen = open.filter((requirement) => requirement.priority === 'must');
   const list = (items: readonly ChecklistRequirement[]) =>
     items
@@ -624,6 +650,125 @@ export async function checkReadmeSections(root: string, services: ChecklistServi
   const missing = README_SECTIONS.filter((section) => !section.pattern.test(readme) && !(section.label === '개요' && hasIntroParagraph(readme))).map((section) => section.label);
   if (missing.length === 0) return { id, title, status: 'pass', reason: '개요·실행 방법·API·테스트·설계 결정 항목이 README에 모두 있습니다.' };
   return { id, title, status: 'warn', reason: `README에 없는 항목: ${missing.join(', ')}.`, fix: readmeFix(services) };
+}
+
+// ---------------------------------------------------------------------------
+// 10. 요구사항(kind: docs)의 인수 조건을 프로젝트 문서(README.md·docs/**\/*.md)와 맞춰 본다(ADR-0XX).
+//
+// 문서화를 요구하는 요구사항("README에 기술 선택·상태 설계를 설명한다")은 테스트·게이트가 돌지 않아 영원히
+// "작업 중"에 머물던 버그를 고친다. 결정론적이고 설명 가능하게 두려고(모델을 부르지 않는다) 아주 단순한 규칙만
+// 쓴다: 인수 조건 한 줄에서 조사를 뗀 명사형 낱말(키워드)을 뽑고, 문서를 "## 제목" 단위로 쪼갠 다음, 그 제목이나
+// 바로 아래 문단에 그 낱말이 전부 있으면 "이 조건을 찾았다"고 본다. 못 찾은 조건은 그대로 "빠진 조건"으로 보여준다
+// (근거를 숨기지 않는다 — 조건 중 일부만 맞아도 "검증됨"으로 부풀리지 않는다).
+// ---------------------------------------------------------------------------
+
+export interface DocMatchSource {
+  /** "README.md" 또는 "docs/architecture.md"처럼 사람이 읽는 출처 이름 */
+  path: string;
+  content: string;
+}
+
+/** 조사(을/를/이/가/의/에서/에게/에는/에도/에/로/으로/와/과/은/는/도/만/까지/부터)를 낱말 끝에서 뗀다. 2글자보다 짧아지면 포기한다(의미가 날아간다) */
+const TRAILING_PARTICLE = /(에서|에게|에는|에도|까지|부터|으로|이다|한다|했다|를|을|이|가|의|에|로|와|과|은|는|도|만)$/;
+function stripTrailingParticle(word: string): string {
+  const stripped = word.replace(TRAILING_PARTICLE, '');
+  return stripped.length >= 2 ? stripped : word;
+}
+
+/**
+ * 문서 매칭에서 의미 없는 흔한 동사·연결어와, "문서 자신"을 가리키는 낱말(README·리드미·문서 — 인수 조건이
+ * "README에 ~~을 설명한다"처럼 적혀도 README 자신이 그 글자를 담고 있을 필요는 없다). 너무 흔해 어떤 제목에나
+ * 걸려 매칭을 의미 없게 만든다
+ */
+const DOC_MATCH_STOPWORDS = new Set([
+  '한다', '해야', '해야한다', '있다', '없다', '있어야', '되어야', '된다', '것', '수', '등', '및', '그리고', '또는', '혹은',
+  '설명', '기재', '명시', '포함', '작성', '정리', '추가', '한다면', '하면', '위해', '통해', '대해', '대한',
+  'readme', '리드미', '문서',
+]);
+
+/** 인수 조건 한 줄에서 매칭에 쓸 키워드를 뽑는다. 조사를 떼고 2글자 미만·불용어(대소문자 구분 없이)는 버린다(너무 흔해 아무 제목에나 걸린다) */
+function acceptanceKeywords(acceptance: string): string[] {
+  const words = acceptance
+    .replace(/[.,!?()[\]{}:;"'`]/g, ' ')
+    .split(/\s+/)
+    .map((word) => stripTrailingParticle(word.trim()))
+    .filter((word) => word.length >= 2 && !DOC_MATCH_STOPWORDS.has(word.toLowerCase()));
+  return [...new Set(words)];
+}
+
+interface DocSection {
+  heading: string;
+  body: string;
+}
+
+/** 문서를 "#~###### 제목" 단위로 쪼갠다(제목이 없는 맨 앞부분은 heading: ''인 섹션 하나로 둔다) */
+function splitDocSections(content: string): DocSection[] {
+  const sections: DocSection[] = [];
+  let heading = '';
+  let body: string[] = [];
+  const flush = () => {
+    if (heading || body.length > 0) sections.push({ heading, body: body.join('\n') });
+    body = [];
+  };
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^#{1,6}\s*(?:\d+[.)]\s*)?(.+?)\s*$/.exec(line);
+    if (match) {
+      flush();
+      heading = match[1]!;
+      continue;
+    }
+    body.push(line);
+  }
+  flush();
+  return sections;
+}
+
+/** 섹션(제목+문단)이 키워드를 전부 담고 있는지(대소문자 구분 없이, 부분 문자열 포함이면 된다) */
+function sectionMatchesKeywords(section: DocSection, keywords: readonly string[]): boolean {
+  const haystack = `${section.heading}\n${section.body}`.toLowerCase();
+  return keywords.every((keyword) => haystack.includes(keyword.toLowerCase()));
+}
+
+/**
+ * 요구사항의 인수 조건마다 docs(README.md·docs/**\/*.md)에서 그 내용을 설명하는 제목·문단을 찾는다(ADR-0XX).
+ * 키워드가 하나도 안 남는 조건(불용어뿐인 아주 짧은 문장)은 찾을 수 없으므로 "빠진 조건"으로 둔다 — 억지로
+ * 통과시키지 않는다. @b-studio/agent의 RequirementEvidence.docEvidence 모양 그대로 돌려준다.
+ */
+export function matchAcceptanceAgainstDocs(acceptance: readonly string[], docs: readonly DocMatchSource[]): DocEvidence {
+  const sources = docs.map((doc) => ({ path: doc.path, sections: splitDocSections(doc.content) }));
+  const matched: string[] = [];
+  const missing: string[] = [];
+  const matchedHeadingsByPath = new Map<string, Set<string>>();
+
+  for (const line of acceptance) {
+    const keywords = acceptanceKeywords(line);
+    let found = false;
+    if (keywords.length > 0) {
+      for (const source of sources) {
+        const hit = source.sections.find((section) => sectionMatchesKeywords(section, keywords));
+        if (hit) {
+          found = true;
+          const headings = matchedHeadingsByPath.get(source.path) ?? new Set<string>();
+          headings.add(hit.heading || source.path);
+          matchedHeadingsByPath.set(source.path, headings);
+          break;
+        }
+      }
+    }
+    if (found) matched.push(line);
+    else missing.push(line);
+  }
+
+  const sourceSummary = [...matchedHeadingsByPath.entries()]
+    .map(([sourcePath, headings]) => (headings.has(sourcePath) && headings.size === 1 ? sourcePath : `${sourcePath}(${[...headings].join(', ')})`))
+    .join(' · ');
+
+  return {
+    matched,
+    missing,
+    satisfied: matched.length > 0 && missing.length === 0,
+    ...(sourceSummary ? { sourceSummary } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
