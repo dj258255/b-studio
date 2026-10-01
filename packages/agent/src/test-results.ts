@@ -169,6 +169,11 @@ function normalizeName(text: string): string {
     .replace(/\s+/g, ' ');
 }
 
+/** 표시 이름 비교용: 앞뒤 공백·연속 공백·대소문자만 맞춘다(괄호는 그대로 둔다) */
+function plainName(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 function baseName(filePath: string): string {
   const segment = filePath.split(/[/\\]/).pop() ?? filePath;
   return segment.replace(/\.[^.]+$/, '');
@@ -181,17 +186,27 @@ function baseName(filePath: string): string {
  */
 export function attachResults(rows: readonly TestRow[], run: ParsedTestRun): TestRow[] {
   const byNormalizedName = new Map<string, ParsedTestCase[]>();
+  // Gradle의 JUnit XML은 @DisplayName이 있으면 testcase name에 메서드 이름 대신 표시 이름("R7: 게시글 목록은 …")을 쓴다.
+  // 표시 이름에는 괄호가 흔해 normalizeName(괄호 꼬리 제거)을 쓰지 않고 공백·대소문자만 맞춘 키로 따로 찾는다
+  const byPlainName = new Map<string, ParsedTestCase[]>();
   for (const testCase of run.cases) {
-    const key = normalizeName(testCase.name);
-    const list = byNormalizedName.get(key) ?? [];
-    list.push(testCase);
-    byNormalizedName.set(key, list);
+    for (const [map, key] of [
+      [byNormalizedName, normalizeName(testCase.name)],
+      [byPlainName, plainName(testCase.name)],
+    ] as const) {
+      const list = map.get(key) ?? [];
+      list.push(testCase);
+      map.set(key, list);
+    }
   }
 
   const used = new Set<ParsedTestCase>();
   const pickFor = (row: TestRow): ParsedTestCase | undefined => {
     const rowKey = normalizeName(row.name);
-    const candidates = (byNormalizedName.get(rowKey) ?? []).filter((candidate) => !used.has(candidate));
+    let candidates = (byNormalizedName.get(rowKey) ?? []).filter((candidate) => !used.has(candidate));
+    if (candidates.length === 0 && row.displayName) {
+      candidates = (byPlainName.get(plainName(row.displayName)) ?? []).filter((candidate) => !used.has(candidate));
+    }
     if (candidates.length === 0) return undefined;
     if (candidates.length === 1) return candidates[0];
     // 이름이 같은 후보가 여럿이면 classOrFile/suite 경로가 파일 이름이나 스위트 이름을 담고 있는 것을 우선한다

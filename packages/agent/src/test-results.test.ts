@@ -110,6 +110,30 @@ class OrderServiceTest {
     expect(byName.refundsPayment).toBe('fail');
   });
 
+  it('@DisplayName을 쓴 JUnit 테스트는 Gradle 보고서의 표시 이름(괄호 포함)으로 잇는다', () => {
+    const content = `
+class PostApiTest {
+  @Test
+  @DisplayName("R7: 게시글 목록은 최신순이고 items · total 봉투로 나눠 내려준다")
+  void r7_listsLatestFirst() {}
+  @Test
+  @DisplayName("R9: 상세(단일 객체)는 isLiked를 포함한다")
+  void r9_detail() {}
+}
+`;
+    const discovered = discoverJunitFile('src/test/java/com/apr/PostApiTest.java', content);
+    const rows = flattenDiscoveredFile(discovered).map((row) => ({ ...row }));
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.apr.PostApiTest" tests="2" skipped="0" failures="1" errors="0">
+  <testcase name="R7: 게시글 목록은 최신순이고 items · total 봉투로 나눠 내려준다" classname="com.apr.PostApiTest" time="0.1"/>
+  <testcase name="R9: 상세(단일 객체)는 isLiked를 포함한다" classname="com.apr.PostApiTest" time="0.1"><failure message="boom">trace</failure></testcase>
+</testsuite>`;
+    const attached = attachResults(rows, parseJUnitXml(xml));
+    const byName = Object.fromEntries(attached.map((row) => [row.name, row.result?.status]));
+    expect(byName.r7_listsLatestFirst).toBe('pass');
+    expect(byName.r9_detail).toBe('fail');
+  });
+
   it('Vitest 발견 결과에 json 결과를 제목으로 잇는다', () => {
     const content = `
 describe('OrderService', () => {
