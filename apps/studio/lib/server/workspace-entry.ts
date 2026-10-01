@@ -4,9 +4,10 @@
  *
  * 고르는 순서:
  *  1) 켜져 있거나 켜는 중인 세션 → 그대로 연다
- *  2) 샌드박스를 아직 켜지 않은 세션(지연 기동) → 켜기 시작하고 연다
- *  3) 중지된 세션 → 같은 작업 복사본으로 이어서 연다(작업이 이어진다)
- *  4) 없으면 → 그 프로젝트로 새 세션을 만들고 바로 켠다
+ *  2) 샌드박스를 아직 켜지 않은 세션(지연 기동)·중지된 세션 → "이어서 열기"를 눌러야 켠다(ADR-104) —
+ *     서버를 막 재시작했을 때는 모든 세션이 중지로 보이는데, 예전처럼 첫 화면을 열자마자 되살리면 다른
+ *     프로젝트로 시작하려던 사람에게는 헛된 기동이다(샌드박스 켜기는 비용이 든다)
+ *  3) 고를 세션이 아예 없으면(새 프로젝트) → 잃을 것이 없으니 그 프로젝트로 새 세션을 만들고 바로 켠다
  * 여러 명 비교 참가자·나눠서 병렬 레인·통합 세션은 사람이 직접 개발하는 세션이 아니라 고르지 않는다.
  */
 import type { SessionSummary, WorkspaceKind } from '../studio-events';
@@ -76,14 +77,35 @@ export function excludedSessions(viewer: string): Set<string> {
   return ids;
 }
 
+export type WorkspaceChoice =
+  | { kind: 'live'; id: string }
+  | { kind: 'resumable'; sessionId: string; projectId: string; projectName: string; updatedAt: string }
+  | { kind: 'start'; projectId?: string };
+
 /**
- * 이미 켜져 있거나 켜는 중인 개발 세션이 있으면 그 id(읽기만 한다). 첫 화면(`/`)이 "여는 중" 화면 없이 바로 보내는 데 쓴다.
- * 켜야 하거나(지연 기동·중지) 새로 만들어야 하면 undefined — 그때는 화면이 POST /api/workspace로 연다(GET이 세션을 만들지 않게)
+ * pickWorkspace가 고른 결과를 첫 화면이 보여줄 모양으로 바꾼다(순수 함수 — 부작용 없이 테스트한다, ADR-104).
+ *  - live: 이미 켜져 있거나 켜는 중 → 읽기만 하고 바로 그 화면으로 보낸다
+ *  - resumable: 지연 기동·중지 세션이 있다 → 사람이 "이어서 열기"를 눌러야 샌드박스를 켠다
+ *  - start: 고를 세션이 없다(새 프로젝트) → 잃을 것이 없으니 바로 만들어 켠다(기존 흐름, WorkspaceLauncher)
  */
-export async function findOpenWorkspace(viewer: string, options: { projectId?: string } = {}): Promise<string | undefined> {
+export function workspaceChoiceFor(pick: WorkspacePick): WorkspaceChoice {
+  const session = pick.session;
+  if (session?.status === 'ready' || session?.status === 'starting') return { kind: 'live', id: session.id };
+  if (session?.status === 'idle' || session?.status === 'stopped') {
+    return { kind: 'resumable', sessionId: session.id, projectId: session.projectId, projectName: session.projectName, updatedAt: session.updatedAt };
+  }
+  return { kind: 'start', ...(pick.projectId ? { projectId: pick.projectId } : {}) };
+}
+
+/**
+ * 첫 화면(`/`)이 고를 선택을 만든다(읽기만 한다 — 세션을 만들거나 켜지 않는다). live면 화면이 곧바로 그 세션으로
+ * 가고, resumable이면 "이어서 열기"를 보여주고, start면 화면이 POST /api/workspace로 새로 연다
+ * (GET인 이 함수 자체는 세션을 만들지 않는다).
+ */
+export async function findWorkspaceChoice(viewer: string, options: { projectId?: string } = {}): Promise<WorkspaceChoice> {
   const projects = (await listProjects()).filter((project) => !project.error);
   const projectIds = projects.map((project) => project.id);
-  if (options.projectId && !projectIds.includes(options.projectId)) return undefined;
+  if (options.projectId && !projectIds.includes(options.projectId)) return { kind: 'start', projectId: options.projectId };
   const pick = pickWorkspace({
     sessions: await listSessions(),
     excluded: excludedSessions(viewer),
@@ -93,8 +115,7 @@ export async function findOpenWorkspace(viewer: string, options: { projectId?: s
     ...(options.projectId ? { projectId: options.projectId } : {}),
     localAllowed: localFolderAllowed(),
   });
-  const status = pick.session?.status;
-  return status === 'ready' || status === 'starting' ? pick.session!.id : undefined;
+  return workspaceChoiceFor(pick);
 }
 
 // 첫 화면이 두 번 불려도(React 개발 모드의 이중 실행, 탭 두 개) 세션을 두 개 만들지 않도록 사람마다 한 번에 하나만 연다
