@@ -4036,7 +4036,7 @@ async function regenerateSessionDocsIndexFile(id: string): Promise<{ path: strin
 /**
  * "ROADMAP 갱신": `docs/ROADMAP.md`의 "진행 현황" 구간만 저장된 요구사항 상태(상태별 개수, 필수(must)·권장(should)
  * 진행도)로 다시 만든다 — 단계(POC/MVP/Beta/v1)·마일스톤·현재 위치처럼 손으로 쓴 글은 그대로 둔다(색인 갱신과 같은
- * 관리되는 구간 방식, ADR-0XX). 요구사항이 저장돼 있지 않아도 실패하지 않고 "집계할 수 없다"는 안내로 채운다.
+ * 관리되는 구간 방식, ADR-098). 요구사항이 저장돼 있지 않아도 실패하지 않고 "집계할 수 없다"는 안내로 채운다.
  */
 export async function regenerateSessionRoadmap(id: string): Promise<{ path: string; content: string }> {
   const session = requireSession(id);
@@ -4060,7 +4060,7 @@ export async function regenerateSessionRoadmap(id: string): Promise<{ path: stri
 }
 
 /**
- * "문서" 탭의 모호한 표현 린트와 "올리기" 미리보기의 "모호한 표현" 경고가 함께 쓴다(ADR-0XX) — 세션별 계정 확인만
+ * "문서" 탭의 모호한 표현 린트와 "올리기" 미리보기의 "모호한 표현" 경고가 함께 쓴다(ADR-098) — 세션별 계정 확인만
  * 하고 나머지는 packages/agent의 순수 함수(lintText)에 그대로 맡긴다. 세션을 몰라도 되는 계산이지만, 그 밖의
  * 문서 탭 API와 같은 인가 경계를 쓰려고 세션 id를 받는다.
  */
@@ -4070,7 +4070,7 @@ export function lintSessionDocText(id: string, text: string): DocLintFinding[] {
 }
 
 // ---------------------------------------------------------------------------
-// "현황" 탭(ADR-0XX): 세션·요구사항·체크포인트를 다시 재지 않고 있는 그대로 재배열한다(읽기 전용 집계).
+// "현황" 탭(ADR-098): 세션·요구사항·체크포인트를 다시 재지 않고 있는 그대로 재배열한다(읽기 전용 집계).
 // 실제 모양 맞추기는 packages/agent의 순수 함수(buildProjectStatus)가 하고, 여기서는 세션이 들고 있는 조각들을
 // 그 함수가 받는 모양으로 모으기만 한다.
 // ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
     };
   }, [parsed, sessionId]);
 
-  // PR 본문에 "모호한 표현"(수치 없는 성능 주장, 약한 표현, 헷갈리는 용어)이 있으면 막지 않고 알려만 준다(ADR-0XX).
+  // PR 본문에 "모호한 표현"(수치 없는 성능 주장, 약한 표현, 헷갈리는 용어)이 있으면 막지 않고 알려만 준다(ADR-098).
   // 미리보기를 아직 불러오지 못했을 때만(초기 상태) body가 없고, 그때 lintFindings는 이미 빈 배열이라 따로 비우지 않는다
   useEffect(() => {
     const body = preview?.body;
