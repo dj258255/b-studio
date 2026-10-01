@@ -72,6 +72,11 @@ function echoUpstream() {
       response.end();
       return;
     }
+    if (request.url === '/page') {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end('<html><head></head><body>hi</body></html>');
+      return;
+    }
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ url: request.url, host: request.headers.host, origin: request.headers.origin ?? null, cookie: request.headers.cookie ?? null }));
   });
@@ -148,6 +153,11 @@ describe('createPreviewGateway', () => {
     const echoed = await upgrade(gatewayPort, host);
     expect(echoed).toContain('HTTP/1.1 101 Switching Protocols');
     expect(echoed).toContain('echo:ping');
+
+    // 게이트웨이도 studio와는 다른 출처라, HTML 응답에는 위치 알림 스크립트를 심는다(ADR-113).
+    // JSON은 위에서 이미 그대로(건드리지 않고) 돌아오는 것을 확인했다
+    const html = await send(gatewayPort, '/page', { host });
+    expect(html.body).toContain('b-studio:location');
   });
 
   it('접근 확인을 켜면 티켓을 쿠키로 바꿔 주고, 쿠키가 없는 요청과 웹소켓은 거부하며, 접근 쿠키는 서비스에 넘기지 않는다', async () => {
