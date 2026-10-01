@@ -1030,3 +1030,19 @@ describe('parseExtractionReply — 사소한 형식 어긋남은 고쳐서 받�
     expect(() => parseExtractionReply(JSON.stringify({ requirements: [], questions: [] }))).toThrow();
   });
 });
+
+describe('parseExtractionReply — 선택 항목이 null이어도 받는다', () => {
+  it('nfr·ears·scenarios가 null이면 없는 것으로 보고, 최상위 목록이 null이면 빈 목록으로 본다', () => {
+    const reply = parseExtractionReply(
+      JSON.stringify({
+        requirements: [{ id: 'R1', title: '목록', kind: 'api', priority: 'must', acceptance: ['200'], nfr: null, ears: null, scenarios: null }],
+        questions: null,
+        outOfScope: null,
+      }),
+    );
+    expect(reply.requirements[0]!.nfr).toBeUndefined();
+    expect(reply.questions).toEqual([]);
+    expect(reply.outOfScope).toEqual([]);
+  });
+});
+

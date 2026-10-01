@@ -89,7 +89,9 @@ export function buildRegionContent(requirement: RequirementForIssues): string {
   const acceptance = requirement.acceptance.map((item) => `- ${item}`).join('\n');
   const sections: string[] = [`- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}`];
   if (requirement.ears) {
-    sections.push('', '### EARS', `- EARS(${requirement.ears.pattern}): ${requirement.ears.statement}`);
+    // 이슈를 처음 보는 사람이 "무엇을 하는 요구사항인가"를 먼저 읽도록 EARS 문장을 "기능 요구사항"이라는 이름으로 맨 위에 둔다.
+    // 줄 모양(`- EARS(pattern): …`)은 그대로 둬 draftManagedRequirement가 되읽을 수 있다
+    sections.push('', '### 기능 요구사항', `- EARS(${requirement.ears.pattern}): ${requirement.ears.statement}`);
   }
   if (requirement.scenarios && requirement.scenarios.length > 0) {
     sections.push(
