@@ -28,6 +28,7 @@ import {
   lintRequirement,
   mentionsRequirementId,
   mergeReextractedRequirements,
+  alignScenarioIds,
   missingReferencedFile,
   parseExtractionReply,
   parseRecommendationReply,
@@ -965,5 +966,32 @@ describe('buildRecommendationUserPrompt — 프로젝트 스택', () => {
 
   it('stackSummary가 없으면 절을 붙이지 않는다', () => {
     expect(buildRecommendationUserPrompt(['q'], '스펙')).not.toContain('[프로젝트 스택]');
+  });
+});
+
+describe('alignScenarioIds — 요구사항 id가 바뀌면 시나리오 id도 따라간다', () => {
+  const scenario = (id: string) => ({ id, given: 'g', when: 'w', then: 't' });
+
+  it('앞부분만 요구사항 id로 바꾸고 뒤 번호는 유지한다', () => {
+    const aligned = alignScenarioIds({ id: 'R7', scenarios: [scenario('R6.1'), scenario('R6.2')] });
+    expect(aligned.scenarios!.map((item) => item.id)).toEqual(['R7.1', 'R7.2']);
+  });
+
+  it('이미 맞으면 그대로 돌려준다(같은 객체)', () => {
+    const requirement = { id: 'R7', scenarios: [scenario('R7.1')] };
+    expect(alignScenarioIds(requirement)).toBe(requirement);
+  });
+
+  it('바꾸다 번호가 겹치면 다음 빈 번호를 쓴다', () => {
+    const aligned = alignScenarioIds({ id: 'R7', scenarios: [scenario('R7.1'), scenario('R6.1')] });
+    expect(aligned.scenarios!.map((item) => item.id)).toEqual(['R7.1', 'R7.2']);
+  });
+
+  it('재추출 병합이 기존 id로 맞출 때 시나리오 id도 함께 맞춘다', () => {
+    const existing = [{ id: 'R7', title: 'GET /api/posts 게시글 목록 조회', kind: 'api' as const, priority: 'must' as const, acceptance: ['a'] }];
+    const incoming = [{ id: 'R6', title: 'GET /api/posts 게시글 목록 조회', kind: 'api' as const, priority: 'must' as const, acceptance: ['a'], scenarios: [scenario('R6.1')] }];
+    const result = mergeReextractedRequirements(incoming, existing);
+    const merged = result.merged.find((requirement) => requirement.id === 'R7')!;
+    expect(merged.scenarios!.map((item) => item.id)).toEqual(['R7.1']);
   });
 });

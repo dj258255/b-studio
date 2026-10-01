@@ -63,6 +63,26 @@ export const ScenarioSchema = z.object({
 });
 export type Scenario = z.infer<typeof ScenarioSchema>;
 
+/**
+ * 시나리오 id의 앞부분을 요구사항 id에 맞춘다(`R6.2` → `R7.2`). 재추출 병합이 모델이 붙인 id(R6)를 기존 id(R7)로
+ * 바꿀 때 시나리오 id는 그대로 남아, 저장 검증(시나리오 id는 요구사항 id로 시작)에 걸리거나 추적 매트릭스가 테스트를
+ * 엉뚱한 요구사항에 붙였다. 뒤 번호는 유지하고, 겹치면 다음 빈 번호를 쓴다
+ */
+export function alignScenarioIds<T extends { id: string; scenarios?: ReadonlyArray<{ id: string }> }>(requirement: T): T {
+  if (!requirement.scenarios || requirement.scenarios.length === 0) return requirement;
+  const prefix = `${requirement.id}.`;
+  if (requirement.scenarios.every((scenario) => scenario.id.startsWith(prefix))) return requirement;
+  const used = new Set<number>();
+  const scenarios = requirement.scenarios.map((scenario) => {
+    const suffix = Number(/\.(\d+)$/.exec(scenario.id)?.[1] ?? NaN);
+    let number = Number.isInteger(suffix) && suffix > 0 && !used.has(suffix) ? suffix : 1;
+    while (used.has(number)) number += 1;
+    used.add(number);
+    return { ...scenario, id: `${requirement.id}.${number}` };
+  });
+  return { ...requirement, scenarios };
+}
+
 /** 비기능 요구사항(kind: nonfunctional)의 측정 가능한 기준. QVscribe류 요구사항 스멜 검사가 요구하는 "수치화된 임계값"을 강제한다 */
 export const NfrSchema = z.object({
   metric: z.string().min(1).max(200),
@@ -1492,14 +1512,14 @@ export function mergeReextractedRequirements(incoming: readonly Requirement[], e
   incoming.forEach((candidate, incomingIndex) => {
     const existingIndex = matchedIncoming.get(incomingIndex);
     if (existingIndex === undefined) {
-      const withId: Requirement = { ...candidate, id: `R${nextIdNumber++}` };
+      const withId: Requirement = alignScenarioIds({ ...candidate, id: `R${nextIdNumber++}` });
       const revised = reviseRequirementIfChanged(withId, now);
       merged.push(revised);
       added.push({ status: 'added', id: revised.id, requirement: revised });
       return;
     }
     const prior = existing[existingIndex]!;
-    const withId = carryForwardRequirementRevision({ ...candidate, id: prior.id }, prior);
+    const withId = carryForwardRequirementRevision(alignScenarioIds({ ...candidate, id: prior.id }), prior);
     const revised = reviseRequirementIfChanged(withId, now);
     merged.push(revised);
     if (revised.hash === prior.hash) {

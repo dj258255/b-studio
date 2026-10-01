@@ -391,6 +391,7 @@ export {
   type TruncatedDiff,
 } from './pr-review';
 export {
+  alignScenarioIds,
   AssumptionSchema,
   buildAllMustHavesPrefill,
   buildExtractionSystemPrompt,
