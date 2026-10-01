@@ -33,10 +33,26 @@ const STATUS_TEXT: Record<ChecklistStatus, string> = { pass: "text-pass", warn: 
  * "저장소" 탭의 "올리기 전 점검" 하위 탭(ADR-080, ADR-087). PR을 올리거나 저장소를 넘기기 전 점검 기준
  * (요구사항·테스트·실행·환경 변수·데이터·비밀 값·커밋 기록·작업 트리/원격·문서)을 점검표로 보여 준다. 요청이 끝날
  * 때마다(체크포인트·커밋이 바뀔 수 있으므로) key로 다시 마운트해 다시 불러온다
- * (RepositoryPanel과 같은 방식. effect 안에서 "불러오는 중"으로 되돌리는 setState를 하지 않아도 된다)
+ * (RepositoryPanel과 같은 방식. effect 안에서 "불러오는 중"으로 되돌리는 setState를 하지 않아도 된다).
+ * 올리기 버튼·PR 미리보기(RepositoryUploadActions)는 이 key 바깥에 따로 둔다 — 안에 두면 사람이 "올리고 PR
+ * 만들기" 미리보기를 펼쳐 둔 사이에 다른 요청이 끝나(예: 서비스가 재시작해 "준비 확인 중"에서 "준비됨"으로
+ * 바뀌어도 completedRuns가 늘어난다) 점검표와 함께 통째로 다시 마운트되며 미리보기가 저절로 닫히던 문제가
+ * 있었다(버그 리포트). 점검표만 다시 불러오면 되고, 사람이 입력 중인 미리보기 상태는 그대로 지켜야 한다
  */
 export function SubmissionPanel({ view }: { view: SessionView }) {
-  return <SubmissionList key={`${view.snapshot.id}:${view.completedRuns}`} view={view} />;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SubmissionList key={`${view.snapshot.id}:${view.completedRuns}`} view={view} />
+      </div>
+      {view.snapshot.repository && (
+        <div className="shrink-0 border-t border-line p-4">
+          <p className="mb-2 text-xs text-muted">점검표를 확인했으면 바로 올릴 수 있습니다. PR 본문에 이 점검표 요약이 함께 실립니다.</p>
+          <RepositoryUploadActions view={view} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function SubmissionList({ view }: { view: SessionView }) {
@@ -77,7 +93,7 @@ function SubmissionList({ view }: { view: SessionView }) {
   const report = loaded.report!;
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto p-4">
+    <div className="p-4">
       <div className="flex items-center justify-between">
         <h3 className="font-medium">올리기 전 점검</h3>
         <span className="text-sm text-muted">
@@ -116,12 +132,6 @@ function SubmissionList({ view }: { view: SessionView }) {
           </li>
         ))}
       </ul>
-      {view.snapshot.repository && (
-        <div className="mt-4 border-t border-line pt-3">
-          <p className="mb-2 text-xs text-muted">점검표를 확인했으면 바로 올릴 수 있습니다. PR 본문에 이 점검표 요약이 함께 실립니다.</p>
-          <RepositoryUploadActions view={view} />
-        </div>
-      )}
     </div>
   );
 }

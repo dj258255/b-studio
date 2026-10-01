@@ -158,6 +158,20 @@ describe('CheckpointStore', () => {
     expect(commits[1]!.passedStages).toBeUndefined();
   });
 
+  it('sessionCommits는 커밋 본문의 Workflow-Verify 트레일러도 함께 읽는다(PR 본문이 문서 체크포인트를 구분한다)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await mkdir(path.join(root, 'docs'), { recursive: true });
+    await write('docs/requirements.md', '# 요구사항\n');
+    await store.commit('docs: 요구사항을 정리한다', undefined, { trailers: [formatVerifyTrailer('docs')] });
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run', 'contract_check', 'review'])] });
+
+    const commits = await store.sessionCommits();
+    expect(commits[0]).toMatchObject({ subject: 'docs: 요구사항을 정리한다', verify: 'docs' });
+    expect(commits[1]!.verify).toBeUndefined();
+  });
+
   it('sessionCommits는 커밋마다 바뀐 줄 수(추가·삭제)를 담는다(제출 준비 점검, ADR-080)', async () => {
     const store = new CheckpointStore(root);
     await store.init();

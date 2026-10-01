@@ -440,10 +440,15 @@ export function extractRequirementMentions(texts: readonly string[]): string[] {
  * PR 본문에 덧붙일 절을 만든다: 검증됨 + 이슈가 있는 요구사항만 `Closes #n`(병합되면 자동으로 닫는다),
  * 구현한 요구사항 전부 `Implements: Rn`(또는 `Rn@revN`). `Closes #n`은 기본 브랜치로 여는 PR에서만 동작한다는
  * 안내를 함께 붙인다(GitLab 스타일 MR closes 문구와 달리 GitHub는 이 규칙이 있다).
+ *
+ * `includeCloses: false`를 주면 `Implements:` 줄만 돌려준다 — studio의 pullRequestDraft(sessions.ts)처럼
+ * 같은 이슈 번호를 본문 맨 위(buildPullRequest의 issues 인자)에서 이미 `Closes #n`으로 적었을 때, 이 절이
+ * 똑같은 줄을 한 번 더 적어 중복되는 것을 막는다(버그 리포트: Closes #20이 본문에 두 번 나왔다).
  */
-export function buildRequirementsAddendum(refs: readonly ImplementedRequirementRef[]): string {
+export function buildRequirementsAddendum(refs: readonly ImplementedRequirementRef[], options: { includeCloses?: boolean } = {}): string {
+  const includeCloses = options.includeCloses ?? true;
   if (refs.length === 0) return '';
-  const closes = refs.filter((ref) => ref.issue !== undefined && ref.status === '검증됨').map((ref) => `Closes #${ref.issue}`);
+  const closes = includeCloses ? refs.filter((ref) => ref.issue !== undefined && ref.status === '검증됨').map((ref) => `Closes #${ref.issue}`) : [];
   const implementsLines = refs.map((ref) => implementsTrailer(ref));
   const note = closes.length > 0 ? '\n\n(`Closes #n`은 이 PR이 기본 브랜치로 열릴 때만 이슈를 자동으로 닫습니다.)' : '';
   return `\n\n${[...closes, ...implementsLines].join('\n')}${note}`;

@@ -124,6 +124,7 @@
 - [ADR-107 PR 생성도 이슈 발행과 같은 토큰을 찾고, "올리기 전 점검"에서도 바로 올릴 수 있게 한다](#adr-107-pr-생성도-이슈-발행과-같은-토큰을-찾고-올리기-전-점검에서도-바로-올릴-수-있게-한다)
 - [ADR-108 로컬 폴더 모드 도그푸딩: 서버를 띄우기 전 의존성을 설치하고, 뜬 뒤 코드가 바뀌면 화면에 알린다](#adr-108-로컬-폴더-모드-도그푸딩-서버를-띄우기-전-의존성을-설치하고-뜬-뒤-코드가-바뀌면-화면에-알린다)
 - [ADR-109 재연결은 기록 재생이 아니라 지금 스냅샷이 이기게 하고, 서비스가 뜨는 중에도 사이드카의 마지막 테스트 결과를 보여준다](#adr-109-재연결은-기록-재생이-아니라-지금-스냅샷이-이기게-하고-서비스가-뜨는-중에도-사이드카의-마지막-테스트-결과를-보여준다)
+- [ADR-110 작업 분해 통합 세션의 PR 초안 품질을 고친다: 기본 연결 이슈·토큰·문서 체크포인트·제목·미리보기 유지](#adr-110-작업-분해-통합-세션의-pr-초안-품질을-고친다-기본-연결-이슈토큰문서-체크포인트제목미리보기-유지)
 
 ---
 
@@ -4507,6 +4508,41 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **`snapshot_sync`는 `repository`·`checkpoints`·`review` 세 필드만 다시 맞춘다.** 다른 필드(`status`·`services` 등)는 항상 같은 함수(`setStatus` 등)가 상태를 바꾸는 동시에 이벤트를 내보내 기록과 지금 값이 어긋날 일이 없다고 보고 뺐다 — 앞으로 "그 순간 값을 통째로 담는" 새 필드·이벤트가 생기면 이 목록에 같이 넣어야 한다.
 - **서비스가 꺼져 있을 때 되살린 행은 `file`·`line`·`suitePath`가 비어 있다(보고서에 없는 정보다).** "코드 보기" 버튼을 눌러도 파일 맨 위로만 간다 — 서비스가 뜨면(소스 파일을 다시 읽으면) 평소대로 정확한 줄로 돌아온다.
 - **PR 생성 토큰처럼 "그 순간" 계산이 실제로 달라지는 경우만 눈에 띄게 재현된다.** 테스트는 그 계산 함수를 통제해 흉내 냈지만, 실제 운영에서는 gh CLI 토큰을 새로 찾는 것처럼 드물게만 값이 달라진다 — 그래도 한 번 어긋나면 사람이 "버튼이 없어졌다"고 오해하기 쉬워 고칠 가치가 있다고 판단했다.
+
+---
+
+## ADR-110 작업 분해 통합 세션의 PR 초안 품질을 고친다: 기본 연결 이슈·토큰·문서 체크포인트·제목·미리보기 유지
+
+상태: 채택
+관련: ADR-080, ADR-092, ADR-096, ADR-102, ADR-107
+
+### 맥락
+- 과제로 b-studio를 도그푸딩하며, 20개 요구사항(R2~R23)을 작업 분해로 병렬 구현한 뒤 통합 세션(레인 병합 feat 커밋 1개 + 문서 체크포인트 4개 + 에이전트 커밋 3개)에서 "올리고 PR 만들기"를 눌렀을 때 PR 초안의 품질이 낮았다. 다섯 가지가 한 세션에서 함께 드러났다.
+- **기본 연결 이슈가 하나만 잡혔다.** 미리보기 라우트의 기본값은 `sessionRequirementIssueNumbers`였는데, 이 함수는 세션 커밋 "제목"이 `[R4]` 모양으로 **언급한** 요구사항만 모았다(`implementedRequirementRefs`가 `extractRequirementMentions(커밋 제목들)`로 뽑았다). 레인을 하나로 합친 병합 커밋은 모든 요구사항을 제목에 다시 적지 않으므로(통합 요청 글 자체만 언급), 검증됨 요구사항 20개 중 1개(R20)만 기본으로 연결됐고, PR 본문의 `Implements:`도 "R20@rev1" 한 줄뿐이었다. 같은 이슈 번호가 본문 맨 위(`buildPullRequest`의 `Closes` 블록)와 요구사항 절(`buildRequirementsAddendum`의 `Closes`) 양쪽에서 또 나와, `Closes #20`이 두 번 나왔다.
+- **이슈 확인 점검이 토큰 없이 돌았다.** 미리보기의 `issue_open` 점검은 `fetchIssue(remote, issue)`를 토큰 없이 불렀다(`packages/agent/src/repository.ts`) — PR 생성(`createPullRequest`)은 ADR-107의 `cachedRepositoryToken`(gh CLI 폴백 포함)을 쓰지만 이슈 조회는 `env`만 봐, 환경 변수가 없는 개인 PC 모드에서는 항상 "토큰이 없어 확인할 수 없습니다"로 실패했다.
+- **문서 체크포인트가 "기록 없는 커밋"으로 세졌다.** `buildPullRequest`의 `missing` 계산은 모든 커밋에 `requiredStages`(run·contract_check·review 등) 통과 기록을 요구했는데, ADR-096의 문서 체크포인트(`Workflow-Verify: docs`)는 애초에 그 게이트를 거치지 않게 만든 체크포인트다. 통합 세션의 문서 체크포인트 4개가 모두 "필수 단계 기록이 없는 커밋"으로 잡혀 `stages_passed` 점검이 ✗였고, 본문의 "## 돌리지 않은 검증"에도 "기록 없음: run, contract_check, review"로 나왔다.
+- **PR 제목이 어색하게 잘렸다.** 제목은 늘 "첫 커밋 제목 + 외 N건"을 120자에서 그냥 `slice`했다 — 통합 세션의 첫 커밋 제목이 이미 72자 가까이 길어(ADR-102로 요약돼도) 거기에 "외 7건"이 붙으면서 "(기술스택, docker compose 외 7건"처럼 단어 중간에서 잘렸다.
+- **PR 미리보기 패널이 서비스 상태가 바뀔 때 저절로 닫혔다.** "저장소" 탭 "올리기 전 점검"(`SubmissionPanel`)은 요청이 끝날 때마다(`completedRuns`) `key`로 점검표를 다시 마운트하는데, 올리기 버튼·`ExportPreview`가 그 키 안에 함께 있었다 — 사람이 미리보기를 펼쳐 둔 사이에 다른 요청이 끝나(서비스가 재시작해 "준비 확인 중"→"준비됨") `completedRuns`가 늘면, 점검표와 함께 미리보기도 통째로 다시 마운트되며 입력하던 이슈 번호·펼친 본문까지 사라졌다.
+
+### 결정
+1. **기본 연결 이슈·`Closes`·`Implements`를 모두 "지금 세션 HEAD의 요구사항 상태"에서 뽑는다, 커밋 제목 언급이 아니다.** 새 `verifiedRequirementSummary`(sessions.ts)가 `getSessionRequirements`(이미 있는 `computeRequirementStatus` 평가)로 "검증됨 + 이슈로 발행됨"인 요구사항만 추려 `sessionRequirementIssueNumbers`·`pullRequestDraft`가 함께 쓴다. `Closes`는 `buildPullRequest`의 `issues` 인자(본문 맨 위) 한 곳에서만 쓰고, `buildRequirementsAddendum`에 `includeCloses: false`를 줘 요구사항 절은 `Implements: Rn@revN`만 적게 해 중복을 없앴다. 추적 이슈(`관련: #19`)는 그 요구사항들이 전부 검증됐을 때만 `Closes`로 함께 닫고, 아직 남았으면 그대로 `관련:`로 둔다.
+2. **이슈 확인도 PR 생성과 같은 토큰을 쓰고, 많은 이슈는 목록 조회 한 번으로 효율적으로 확인한다.** `fetchIssue`(repository.ts)가 `token` 옵션을 받게 했다(`listIssues`·`postComment`와 같은 규칙). studio의 새 `lookupIssues`는 GitHub·Gitea면 `listIssues({state:'all'})` 한 번으로 번호별 상태를 채우고, 거기 없는 번호(여러 페이지)나 GitLab만 `fetchIssue`로 따로(병렬로) 확인한다. `buildExportChecks`의 `issue_open`·`issue_linked`는 이슈가 5개를 넘으면 "연결한 이슈 19개 모두 열려 있습니다"로 요약하고, 문제가 있으면 닫힌·확인 못한 이슈만 짚어 보여준다(열려 있는 이슈까지 나열하지 않는다).
+3. **문서 체크포인트를 "게이트 대상 아님"으로 구분한다, 트레일러만 믿지 않는다.** `SessionCommit`에 `verify?: 'light'|'docs'` 필드를 더하고 `sessionCommits()`가 `Workflow-Verify` 트레일러를 함께 읽는다. `buildPullRequest`는 `verify === 'docs'`이고 실제로 바뀐 파일이 모두 문서 경로(새 `isDocCheckpointPath`, workflow.ts — studio의 `isDocPath`가 이 함수를 그대로 쓴다)일 때만 "문서 체크포인트"로 예외 처리해 `missing`에서 뺀다. 본문의 "## 검증"에는 "문서 체크포인트(게이트 대상 아님)", "## 돌리지 않은 검증"에는 "문서만 바뀜(게이트 대상 아님)"으로 적는다 — 트레일러는 붙어 있지만 코드가 섞인 커밋은 예외를 주지 않고 평소대로 "기록 없음"으로 센다.
+4. **PR 제목은 요구사항이 걸려 있으면 그 수·범위로, 아니면 가장 많이 바뀐 커밋 제목을 요약한다.** 새 `buildPullRequestTitle`(repository.ts)은 `requirementIds`(검증됨+발행된 요구사항 id, sessions.ts가 넘긴다)가 있으면 "feat: 요구사항 N개 구현과 검증 (R2~R23)"으로, 없으면 줄 수(없으면 파일 수) 기준으로 가장 큰 커밋의 제목을 쓴다. 두 경우 모두 ADR-102(#355)의 체크포인트 제목 요약 함수(`commit-message.ts`의 `summarize` — 단어 경계에서 자른다)를 그대로 재사용해 72자 안팎을 넘지 않는다("외 N건"을 덧붙이던 것을 없앴다).
+5. **올리기 버튼·PR 미리보기는 점검표가 다시 마운트되는 `key` 바깥에 둔다.** `SubmissionPanel`을 점검표(`SubmissionList`, `completedRuns`로 계속 다시 마운트)와 올리기 영역(`RepositoryUploadActions`, 다시 마운트되지 않는다)으로 나눠 형제로 둔다 — 점검표만 다시 불러오면 되고, 사람이 입력하던 이슈 번호·펼친 본문·체크 여부는 그대로 지킨다.
+
+### 검증 결과
+- `packages/agent/src/repository.test.ts`: `buildPullRequest`가 가장 많이 바뀐 커밋을 제목으로 요약하는 것, `requirementIds`를 주면 "요구사항 N개 구현과 검증 (R…~R…)"으로 요약하는 것, 제목이 72자 안팎을 넘지 않는 것, 여러 이슈를 받아도 `Closes`가 한 블록에 한 번씩만 나오는 것(`body.match(/Closes #57/g)`가 1개), `verify: 'docs'`이고 파일이 모두 문서 경로인 커밋은 `missing`에서 빠지고 "문서 체크포인트(게이트 대상 아님)"·"문서만 바뀜(게이트 대상 아님)"으로 나오는 것, `docs` 트레일러가 있어도 코드 파일이 섞이면 예외를 주지 않는 것, `fetchIssue`가 주입한 토큰을 환경 변수보다 먼저 쓰는 것을 확인했다.
+- `packages/agent/src/checkpoints.test.ts`: `sessionCommits()`가 `Workflow-Verify` 트레일러를 읽어 `verify: 'docs'`를 채우는 것을 확인했다.
+- `packages/agent/src/requirement-issues.test.ts`: `buildRequirementsAddendum`에 `includeCloses: false`를 주면 `Implements` 줄만 돌려주는 것을 확인했다.
+- `apps/studio/lib/server/sessions.test.ts`: `buildExportChecks`가 이슈 5개 이하면 하나씩, 5개를 넘으면 "연결한 이슈 N개 모두 열려 있습니다"로 요약하는 것, 일부가 닫혀 있으면 닫힌 이슈만 짚는 것을 확인했다.
+- `apps/studio/components/submission-panel.test.tsx`: 점검표를 불러오는 중에도 "올리고 PR 만들기" 버튼이 이미 그려져 있는 것(점검표·올리기 영역이 같은 key로 함께 마운트되지 않는 것)을 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **추적 이슈는 모든 요구사항이 검증됐을 때만 자동으로 닫는다.** 하위 이슈 일부만 검증된 상태로 PR을 올리면(흔한 중간 상태) 추적 이슈는 계속 `관련:`으로만 남는다 — 사람이 나머지를 검증한 뒤 다시 올려야 추적 이슈도 자동으로 닫힌다.
+- **이슈 확인 요약(5개 초과)은 열려 있는 이슈의 제목을 더 이상 보여주지 않는다.** 올리기 전 점검에서 "무엇에 연결되는지"를 하나씩 확인하려면 본문 미리보기(`Implements:` 줄)를 펼쳐야 한다 — 점검 줄 하나가 수십 개 이슈 제목으로 넘치는 것보다 낫다고 판단했다.
+- **PR 제목의 요구사항 요약은 범위(`R2~R23`)만 보여주고 중간에 빠진 번호(R3·R4 등 존재하지 않는 id)를 가려내지 않는다.** 범위 표기가 "20개 전부가 R2부터 R23까지 빠짐없이"라는 뜻은 아니다 — 정확한 목록은 본문의 `Implements:` 줄에 있다.
 
 ---
 

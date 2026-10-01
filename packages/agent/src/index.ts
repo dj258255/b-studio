@@ -318,6 +318,7 @@ export {
   executionPolicyFor,
   formatVerifyTrailer,
   formatWorkflowTrailer,
+  isDocCheckpointPath,
   missingVerificationStages,
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,

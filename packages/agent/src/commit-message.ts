@@ -87,8 +87,13 @@ function describeChangeFromFiles(changes: readonly PendingChange[]): string {
   return `${area}를 ${verb}`;
 }
 
-/** 후보 글을 남은 글자 수에 맞춰 자른다. 단어 경계에서 끊고, 비어 있으면 "체크포인트"로 대신한다 */
-function summarize(text: string, maxChars: number): string {
+/**
+ * 후보 글을 남은 글자 수에 맞춰 자른다. 단어 경계에서 끊고, 비어 있으면 "체크포인트"로 대신한다.
+ * 체크포인트 제목(generateCommitSubject)뿐 아니라 PR 제목(repository.ts의 buildPullRequest, ADR-110)도
+ * "가장 중요한 커밋 제목을 요약"할 때 이 함수를 그대로 재사용한다 — 단어 중간을 자르지 않는 규칙을 두 곳에서
+ * 따로 구현하지 않는다(버그 리포트: PR 제목을 120자에서 그냥 slice해 단어 중간이 잘렸다).
+ */
+export function summarize(text: string, maxChars: number): string {
   const trimmed = text.trim();
   if (!trimmed) return '체크포인트';
   if (trimmed.length <= maxChars) return trimmed;

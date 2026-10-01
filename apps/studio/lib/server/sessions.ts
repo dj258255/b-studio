@@ -53,6 +53,7 @@ import {
   formatVerificationReport,
   formatVerifyTrailer,
   formatWorkflowTrailer,
+  isDocCheckpointPath,
   isLikelyTestFile,
   labelRecommendationSource,
   listIssues,
@@ -2572,11 +2573,11 @@ async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text
 // 문제가 있어(docs/가 세션 작업 복사본에 커밋되지 않은 채로 남는다), 저장 직후 여기서 체크포인트로 남긴다.
 // ---------------------------------------------------------------------------
 
-/** docs/** 전부(마크다운·JSON 사이드카 모두), 저장소 루트의 *.md, .github/pull_request_template.md만 문서 경로로 인정한다 */
-const DOC_PATH = /^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$/;
-
+/** docs/** 전부(마크다운·JSON 사이드카 모두), 저장소 루트의 *.md, .github/pull_request_template.md만 문서 경로로 인정한다.
+ * 규칙 자체는 packages/agent(isDocCheckpointPath)에 두고 여기서는 이름만 studio 쪽 호출부에 익숙한 대로 다시 내보낸다 —
+ * buildPullRequest(repository.ts)가 문서 체크포인트를 PR 본문에서 다시 확인할 때도 같은 규칙을 쓴다(ADR-110) */
 export function isDocPath(file: string): boolean {
-  return DOC_PATH.test(file);
+  return isDocCheckpointPath(file);
 }
 
 // ---------------------------------------------------------------------------
@@ -2852,6 +2853,10 @@ export function parseIssueList({ issue, issues }: { issue?: unknown; issues?: un
 
 type IssueLookupResult = { ok: true; state: 'open' | 'closed'; title: string } | { ok: false; error: string };
 
+/** 이 개수를 넘는 이슈를 연결하면 한 줄에 전부 나열하지 않고 개수로 요약한다(버그 리포트: 요구사항 20개를 묶은
+ * 통합 세션에서 이슈 목록 한 줄이 너무 길었다) */
+const SUMMARIZE_ISSUE_LIST_THRESHOLD = 5;
+
 /**
  * 미리보기의 확인 목록을 만든다. 세션 없이 계산할 수 있도록 순수 함수로 둔다.
  * 어떤 항목이 false여도 올리기를 막지는 않는다. 사람이 보고 판단한다
@@ -2874,7 +2879,12 @@ export function buildExportChecks({
     {
       id: 'issue_linked',
       ok: issues.length > 0,
-      detail: issues.length === 0 ? '이슈 번호를 넣지 않았습니다. 선택 사항입니다' : `${issues.map((number) => `#${number}`).join(', ')} 이슈를 PR에 연결합니다`,
+      detail:
+        issues.length === 0
+          ? '이슈 번호를 넣지 않았습니다. 선택 사항입니다'
+          : issues.length > SUMMARIZE_ISSUE_LIST_THRESHOLD
+            ? `이슈 ${issues.length}개를 PR에 연결합니다: ${issues.map((number) => `#${number}`).join(', ')}`
+            : `${issues.map((number) => `#${number}`).join(', ')} 이슈를 PR에 연결합니다`,
     },
   ];
 
@@ -2883,12 +2893,26 @@ export function buildExportChecks({
   } else {
     const parts = issues.map((issue) => {
       const lookup = issueLookups?.find((entry) => entry.issue === issue)?.lookup;
-      if (lookup?.ok) return { ok: lookup.state === 'open', detail: `#${issue} ${lookup.title} (${lookup.state === 'open' ? '열림' : '닫힘'})` };
-      const reason = lookup?.error ?? '알 수 없는 오류';
-      return { ok: 'unknown' as const, detail: `#${issue} 이슈를 확인하지 못했습니다: ${reason}` };
+      if (lookup?.ok) return { issue, ok: lookup.state === 'open', title: lookup.title };
+      return { issue, ok: 'unknown' as const, reason: lookup?.error ?? '알 수 없는 오류' };
     });
-    const ok: boolean | 'unknown' = parts.some((part) => part.ok === 'unknown') ? 'unknown' : parts.every((part) => part.ok === true);
-    checks.push({ id: 'issue_open', ok, detail: parts.map((part) => part.detail).join(', ') });
+    const closed = parts.filter((part): part is { issue: number; ok: false; title: string } => part.ok === false);
+    const unknown = parts.filter((part): part is { issue: number; ok: 'unknown'; reason: string } => part.ok === 'unknown');
+    const ok: boolean | 'unknown' = unknown.length > 0 ? 'unknown' : closed.length === 0;
+    // 많은 이슈가 전부 열려 있으면 한 줄로 요약하고, 문제가 있으면(닫힘·확인 못함) 그 이슈만 짚어 보여준다 —
+    // 열려 있는 이슈까지 전부 나열하지 않는다(19개를 전부 적으면 오히려 무엇이 문제인지 묻힌다)
+    const detail =
+      ok === true
+        ? issues.length > SUMMARIZE_ISSUE_LIST_THRESHOLD
+          ? `연결한 이슈 ${issues.length}개 모두 열려 있습니다`
+          : parts.map((part) => `#${part.issue} ${(part as { title: string }).title} (열림)`).join(', ')
+        : [
+            closed.length > 0 ? `닫힘: ${closed.map((part) => `#${part.issue} ${part.title}`).join(', ')}` : '',
+            unknown.length > 0 ? `확인 못함: ${unknown.map((part) => `#${part.issue}(${part.reason})`).join(', ')}` : '',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+    checks.push({ id: 'issue_open', ok, detail });
   }
 
   checks.push({
@@ -2925,26 +2949,61 @@ export function buildChecklistAddendum(report: SubmissionReport): string {
 async function pullRequestDraft(session: Session, issues: readonly number[]): Promise<PullRequestDraft & { info: RepositoryInfo }> {
   const info = (await session.checkpoints.repository())!;
   const commits = await session.checkpoints.sessionCommits();
+  // 지금 세션 HEAD에서 검증됨 + 이슈로 발행된 요구사항(ADR-092 개정, 버그 리포트: 레인을 하나로 합친 통합
+  // 세션은 커밋 제목 하나에 모든 요구사항 "[Rn]"이 남지 않아, 그 언급만 보면 일부만 잡혔다) — 제목·Closes·
+  // Implements가 모두 이 기준을 쓴다
+  const { refs, allVerified } = await verifiedRequirementSummary(session);
   const draft = buildPullRequest({
     projectName: session.project.spec.name,
     base: info.base,
     branch: info.branch,
     commits,
     issues,
+    requirementIds: refs.map((ref) => ref.id),
     requiredStages: workflowStages(session.project),
   });
-  // 커밋 제목이 "[R4]"로 언급한 요구사항이 있으면 Closes(검증됨+발행된 이슈만)·Implements 줄을 덧붙인다(ADR-092)
-  const refs = await implementedRequirementRefs(session, commits.map((commit) => commit.subject));
-  const requirementsAddendum = buildRequirementsAddendum(refs);
-  // 요구사항을 이슈로 발행했으면(ADR-092) 추적 이슈도 가리킨다 — 개별 Closes는 검증된 요구사항의 하위 이슈만 가리키므로,
-  // 아직 검증되지 않은 요구사항이 있어도 PR에서 추적 이슈로 돌아갈 수 있게 "관련:" 한 줄을 더한다
+  // Closes는 위 draft.body 맨 위(issues 인자)가 이미 책임지므로, 여기서는 Implements: Rn@revN만 덧붙인다 —
+  // 같은 이슈 번호를 두 번 Closes로 적지 않는다(버그 리포트: Closes #20이 본문에 두 번 나왔다)
+  const requirementsAddendum = buildRequirementsAddendum(refs, { includeCloses: false });
+  // 요구사항을 이슈로 발행했으면(ADR-092) 추적 이슈도 가리킨다. 요구사항이 전부 검증됐으면 추적 이슈도 함께
+  // 닫고(Closes), 아직 남았으면 "관련:" 한 줄로 PR에서 추적 이슈로 돌아갈 수 있게 한다(이미 위 Closes
+  // 목록에 들어 있으면 — 사람이 직접 추적 이슈를 골랐으면 — 다시 적지 않는다)
   const tracking = await publishedTrackingIssue(session.project.root).catch(() => undefined);
-  const trackingAddendum = tracking && !refs.some((ref) => ref.issue === tracking.issue) ? `\n\n관련: #${tracking.issue}` : '';
+  const trackingAddendum = tracking && !issues.includes(tracking.issue) ? (allVerified ? `\n\nCloses #${tracking.issue}` : `\n\n관련: #${tracking.issue}`) : '';
   // 올리기 전 점검표 요약(ADR-107, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다)
   const checklistAddendum = await submissionReport(session.snapshot.id)
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
   return { info, ...draft, body: `${draft.body}${requirementsAddendum}${trackingAddendum}${checklistAddendum}` };
+}
+
+/**
+ * 미리보기가 연결할 이슈들의 열림·닫힘을 확인한다. GitHub·Gitea는 목록 조회 한 번으로 끝내고(저장소 탭이
+ * 쓰는 토큰 캐시(cachedRepositoryToken, ADR-107)를 재사용 — 버그 리포트: fetchIssue가 토큰을 안 받아
+ * B_STUDIO_GITHUB_TOKEN이 없으면 매번 실패했다), 그 목록에 없는 번호(여러 페이지에 걸치는 경우)나
+ * GitLab은 이슈별로 따로 확인한다(그래도 병렬로, 순서대로 하나씩 묻지 않는다).
+ */
+async function lookupIssues(remote: RemoteLocation, issues: readonly number[], token: string | undefined): Promise<Array<{ issue: number; lookup: IssueLookupResult }>> {
+  if (issues.length === 0) return [];
+  const byNumber = new Map<number, IssueLookupResult>();
+  if (remote.kind === 'github' || remote.kind === 'gitea') {
+    try {
+      for (const item of await listIssues(remote, { state: 'all', token })) byNumber.set(item.number, { ok: true, state: item.state, title: item.title });
+    } catch {
+      // 목록 조회가 실패해도(토큰 없음 등) 아래에서 이슈별로 다시 시도해 이유를 남긴다
+    }
+  }
+  return Promise.all(
+    issues.map(async (issue) => {
+      const cached = byNumber.get(issue);
+      if (cached) return { issue, lookup: cached };
+      const lookup = await fetchIssue(remote, issue, { token }).then(
+        (result): IssueLookupResult => ({ ok: true, state: result.state, title: result.title }),
+        (error: unknown): IssueLookupResult => ({ ok: false, error: describe(error) }),
+      );
+      return { issue, lookup };
+    }),
+  );
 }
 
 /**
@@ -2957,18 +3016,10 @@ export async function previewExport(id: string, { issues = [] }: { issues?: read
 
   const { info, title, body, missing } = await pullRequestDraft(session, issues);
   const remote = parseRemote(info.remoteUrl);
-  const [issueLookups, token] = await Promise.all([
-    Promise.all(
-      issues.map(async (issue) => ({
-        issue,
-        lookup: await fetchIssue(remote, issue).then(
-          (lookup): IssueLookupResult => ({ ok: true, state: lookup.state, title: lookup.title }),
-          (error: unknown): IssueLookupResult => ({ ok: false, error: describe(error) }),
-        ),
-      })),
-    ),
-    repositoryPullRequestToken(remote),
-  ]);
+  // PR 생성(exportSession)과 같은 토큰을 먼저 찾아 이슈 확인에도 그대로 쓴다(ADR-107) — 이슈 조회만 토큰 없이
+  // 돌다 실패하고 PR 생성은 되던 어긋남을 막는다
+  const token = await repositoryPullRequestToken(remote);
+  const issueLookups = await lookupIssues(remote, issues, token);
 
   return {
     title,
@@ -4895,20 +4946,51 @@ async function reviewRequirementsContext(session: Session, requestTexts: readonl
   }
 }
 
+/** verifiedRequirementSummary가 돌려주는 값 */
+interface VerifiedRequirementSummary {
+  /** 지금 HEAD에서 "검증됨"이고 이슈로 발행된 요구사항들의 참조(id·rev·이슈 번호·상태) */
+  refs: ImplementedRequirementRef[];
+  /** 요구사항이 하나 이상 있고 전부 검증됨이면 true — 추적 이슈를 Closes로 자동으로 닫을지 결정하는 데 쓴다 */
+  allVerified: boolean;
+}
+
 /**
- * 이 세션이 구현한(커밋 제목이 "[R4]"로 언급한) 요구사항 중 이슈로 발행된 것들의 번호(중복 없이).
- * 올리기(export) 미리보기·생성 라우트가 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-092) —
- * 그래야 PR 본문에 그 요구사항들의 `Closes #n`이 자동으로 실린다. 실패해도(원격 없음 등) 빈 배열.
+ * 지금 세션 HEAD의 요구사항 상태(getSessionRequirements — computeRequirementStatus가 체크포인트·테스트·게이트·
+ * 문서 증거로 다시 매긴 값)에서 "검증됨 + 이슈로 발행됨"인 것만 추린다. 커밋 제목이 "[R4]"로 언급했는지는
+ * 보지 않는다 — 레인을 하나로 합친 통합 세션(병합 커밋 하나)은 커밋 제목에 모든 요구사항이 남지 않기
+ * 때문이다(버그 리포트: 통합 세션의 PR이 R20만 Implements·Closes로 실었다).
+ * PR 본문의 기본 연결 이슈(sessionRequirementIssueNumbers)·`Closes #n`·`Implements: Rn`(exportSession)이
+ * 모두 이 함수를 쓴다. 실패해도(원격 없음, 요구사항 파일 없음 등) 빈 결과 — 이 기능이 꺼져 있어도 PR 흐름은
+ * 그대로 동작해야 한다.
+ */
+async function verifiedRequirementSummary(session: Session): Promise<VerifiedRequirementSummary> {
+  try {
+    const snapshot = await getSessionRequirements(session.snapshot.id);
+    if (!snapshot.exists || snapshot.requirements.length === 0) return { refs: [], allVerified: false };
+    const refs = snapshot.requirements
+      .filter((requirement) => requirement.status === '검증됨' && requirement.issue !== undefined)
+      .map((requirement) => ({
+        id: requirement.id,
+        ...(requirement.rev !== undefined ? { rev: requirement.rev } : {}),
+        issue: requirement.issue,
+        status: requirement.status,
+      }));
+    const allVerified = snapshot.requirements.every((requirement) => requirement.status === '검증됨');
+    return { refs, allVerified };
+  } catch {
+    return { refs: [], allVerified: false };
+  }
+}
+
+/**
+ * 이 세션 HEAD에서 검증됨이고 이슈로 발행된 요구사항들의 번호(중복 없이). 올리기(export) 미리보기·생성 라우트가
+ * 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-092) — 그래야 PR 본문에 그 요구사항들의
+ * `Closes #n`이 자동으로 실린다. 실패해도(원격 없음 등) 빈 배열.
  */
 export async function sessionRequirementIssueNumbers(id: string): Promise<number[]> {
   const session = requireSession(id);
-  try {
-    const requests = await sessionRequestTexts(session);
-    const refs = await implementedRequirementRefs(session, requests);
-    return [...new Set(refs.flatMap((ref) => (ref.issue !== undefined ? [ref.issue] : [])))];
-  } catch {
-    return [];
-  }
+  const { refs } = await verifiedRequirementSummary(session);
+  return [...new Set(refs.flatMap((ref) => (ref.issue !== undefined ? [ref.issue] : [])))];
 }
 
 /** 저장소 이슈 하나(제목+본문)를 요구사항 초안으로 가져온다("이슈에서 가져오기" — docs/requirements.md에는 쓰지 않는다, 화면이 "적용"으로 반영한다) */

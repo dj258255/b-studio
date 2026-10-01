@@ -62,6 +62,9 @@ export interface SessionCommit {
   stat?: { insertions: number; deletions: number };
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 커밋이다 */
   passedStages?: WorkflowStage[];
+  /** 커밋 본문의 Workflow-Verify 트레일러. 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'.
+   * PR 본문(buildPullRequest)이 이 값으로 "필수 단계 기록이 없다"가 아니라 "문서 체크포인트"로 보여준다 */
+  verify?: 'light' | 'docs';
 }
 
 export interface PushResult {
@@ -677,7 +680,7 @@ export class CheckpointStore {
     const records = (
       await this.#git([
         'log', '--first-parent', '--reverse',
-        '--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=Workflow-Passed,valueonly,separator=%x1f)%x1e',
+        `--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x1e`,
         `${start}..HEAD`,
       ])
     )
@@ -686,10 +689,11 @@ export class CheckpointStore {
       .filter(Boolean);
     return Promise.all(
       records.map(async (record) => {
-        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = ''] = record.split('\0');
-        // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
-        const passedStages =
-          authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = '', verifyTrailers = ''] = record.split('\0');
+        // 통과 기록·문서 체크포인트 표시는 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
+        const ours = authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase();
+        const passedStages = ours ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+        const verify = ours ? parseVerifyTrailerValues(verifyTrailers.split('\x1f')) : undefined;
         return {
           sha,
           shortSha,
@@ -698,6 +702,7 @@ export class CheckpointStore {
           files: await this.#changedFiles(sha),
           stat: await this.#commitStat(sha),
           ...(passedStages ? { passedStages } : {}),
+          ...(verify ? { verify } : {}),
         };
       }),
     );
