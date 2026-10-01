@@ -600,6 +600,13 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
 
     case "route": {
       const selected = item.candidates.find((candidate) => candidate.id === item.selectedId);
+      if (item.auto) {
+        return (
+          <p className="text-sm text-muted">
+            자동 선택: <span className="font-medium text-ink">{selected?.label ?? item.selectedId}</span> — {item.reason}
+          </p>
+        );
+      }
       return (
         <details className="rounded-md border border-line bg-panel/60 px-3 py-2 text-sm">
           <summary className="cursor-pointer text-muted hover:text-ink">

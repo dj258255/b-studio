@@ -146,7 +146,7 @@ export function routeModel(profiles: readonly ModelProfile[], request: RouteRequ
 
   const inputTokens = estimateTokens(prompt);
   const complexity = classifyComplexity(prompt, inputTokens);
-  const risk = HIGH_RISK.test(prompt) ? 'high' : 'normal';
+  const risk = classifyRisk(prompt);
   const outputTokens = request.intent === 'build' ? (complexity === 'complex' ? 4_000 : complexity === 'normal' ? 2_000 : 1_000) : complexity === 'complex' ? 1_500 : 700;
   const required = new Set<ModelCapability>(request.requiredCapabilities ?? (request.intent === 'build' ? ['tools'] : []));
 
@@ -253,6 +253,15 @@ export function estimateTokens(text: string): number {
 export function classifyComplexity(prompt: string, inputTokens: number): RoutingDecision['complexity'] {
   const signals = (COMPLEX.test(prompt) ? 1 : 0) + (inputTokens >= 800 ? 1 : 0) + ((prompt.match(/\n/g)?.length ?? 0) >= 12 ? 1 : 0);
   return signals >= 2 ? 'complex' : signals === 1 ? 'normal' : 'simple';
+}
+
+/**
+ * 요청에 인증·결제·마이그레이션처럼 실패 비용이 큰 키워드가 있는지(ADR-047의 HIGH_RISK 목록).
+ * routeModel의 위험도 판정과 CLI 백엔드 자동 모델 선택(cli-router.ts)이 이 하나의 분류를 함께 쓴다 —
+ * "위험하다"의 뜻을 두 라우터가 따로 정의하지 않는다.
+ */
+export function classifyRisk(prompt: string): RoutingDecision['risk'] {
+  return HIGH_RISK.test(prompt) ? 'high' : 'normal';
 }
 
 function positive(value: unknown, name: string): asserts value is number {

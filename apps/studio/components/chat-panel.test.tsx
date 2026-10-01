@@ -125,6 +125,37 @@ describe("ChatPanel 결과 표시", () => {
     // 만들기 경로에서 답만 한 실행에는 붙지 않는다(파일을 바꾸지 않아도 읽기만 실행이 아니다)
     expect(render(view(asked))).not.toContain("이대로 만들기");
   });
+
+  it("claude-code 자동 모델 선택(ADR-091)은 점수표 대신 한 줄 안내로 보여준다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "버튼 문구를 바꿔줘" },
+        {
+          type: "agent",
+          runId: "r1",
+          event: {
+            type: "route",
+            selectedId: "sonnet",
+            reason: "단순한 만들기 요청이라 Sonnet 5을 선택합니다",
+            complexity: "simple",
+            risk: "normal",
+            candidates: [
+              { id: "haiku", label: "Haiku", eligible: false, score: 0 },
+              { id: "sonnet", label: "Sonnet 5", eligible: true, score: 0 },
+              { id: "opus", label: "Opus", eligible: false, score: 0 },
+            ],
+            auto: true,
+          },
+        },
+      ]),
+    );
+
+    expect(html).toContain("자동 선택");
+    expect(html).toContain("Sonnet 5");
+    expect(html).toContain("단순한 만들기 요청이라 Sonnet 5을 선택합니다");
+    // api 라우터(ADR-047)의 점수표 접기 블록은 쓰지 않는다
+    expect(html).not.toContain("<details");
+  });
 });
 
 describe("ModelPicker(대화 입력창의 모델 선택)", () => {

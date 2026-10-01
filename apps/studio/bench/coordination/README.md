@@ -76,6 +76,11 @@ pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --v
 # 자가 확인 lean(E7): 게이트와 겹치는 전체 빌드·테스트·확인을 줄이게 안내하고, 성공한 명령 출력을 800자로 줄인다(B_STUDIO_SELF_CHECK=lean). P0에는 적용되지 않는다
 pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --self-check lean --tasks orders-list,order-detail,order-summary --repeats 3
 
+# 자동 모델 선택(ADR-091, E10 계획 — 아직 실행하지 않음): 요청마다 haiku(질문)·sonnet(단순 만들기)·opus(복잡·위험)를 고르고,
+# 세션 안에서는 성공한 단계를 유지한다(캐시 재생성 비용을 피한다, E8/E9). sonnet 고정과 성공률·성공 1건당 비용을 비교한다
+pnpm bench:coordination --backend claude-code --model auto --strategies S0 --tasks orders-list,order-detail,order-summary --repeats 3
+pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --tasks orders-list,order-detail,order-summary --repeats 3
+
 # codex: 이 PC에 ChatGPT로 로그인된 Codex CLI. --model을 생략하면 로그인 계정의 기본 모델을 쓴다
 pnpm bench:coordination --backend codex --tasks orders-list --strategies S0,S1 --repeats 1
 
@@ -98,6 +103,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 - `--backend claude-code|codex|commandcode|opencode|openai` — 필수(`--dry` 제외). `--dry`와 함께 쓰면 오류
 - `--model <이름>` — `claude-code`·`codex`·`commandcode`·`opencode`에서만. `claude-code` 기본 `sonnet`(`B_STUDIO_CLAUDE_CODE_MODEL`로 넘어간다), `codex`는 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CODEX_MODEL`), `commandcode`도 기본이 없어 생략하면 계정 기본 모델을 쓴다(`B_STUDIO_CMD_MODEL`), `opencode`는 **필수**다(기본 모델을 추측하지 않는다. `B_STUDIO_OPENCODE_MODEL`)
+  - `--model auto` — `claude-code`에서만(ADR-091, E10 계획). 고정 별칭이 아니라 요청마다 스튜디오가 haiku·sonnet·opus 중 하나를 고른다(`routeCliTier`, ADR-047의 복잡도·위험도 분류 재사용). 세션 안에서는 stickiness로 이미 성공한 단계를 내리지 않는다. S2(`--contracts model`)의 계약 호출과 레인(`--lane-backend`)에는 아직 연결하지 않았다
 - `--free-only` — `commandcode`·`opencode`에서만. commandcode는 무료가 아닌 `--model`이면 오류, opencode는 `usable`한 무료 모델만 고르고 쓸 수 있는 무료 모델이 하나도 없으면 시작 전에 멈춘다
 - `--tasks a,b`, `--strategies P0,S0,S1,S2,S3,S4,S5`, `--repeats N`(기본 3, `--dry`는 1), `--out <dir>`, `--force`
   - `--strategies`의 기본값은 `S0,S1`이고 P0는 넣어야 돕니다. `P0`는 `--backend claude-code`에서만 쓸 수 있습니다. `--dry`는 P0를 모릅니다(항상 `S0,S1`만 돕니다)
