@@ -96,7 +96,8 @@ describe('fetchOriginMain(ADR-101, 원격 main 받아오기)', () => {
     async () => {
       const { root } = await setupRepo();
       const result = await fetchOriginMain(root);
-      expect(result).toEqual({ branch: 'main', status: 'up-to-date', commits: [] });
+      expect(result).toMatchObject({ branch: 'main', status: 'up-to-date', commits: [] });
+      expect(result.previousShortSha).toBe(result.shortSha);
     },
     15_000,
   );
@@ -110,7 +111,7 @@ describe('fetchOriginMain(ADR-101, 원격 main 받아오기)', () => {
       await git(root, 'commit', '-q', '-m', '아직 안 올림');
 
       const result = await fetchOriginMain(root);
-      expect(result).toEqual({ branch: 'main', status: 'up-to-date', commits: [] });
+      expect(result).toMatchObject({ branch: 'main', status: 'up-to-date', commits: [] });
     },
     15_000,
   );
@@ -119,6 +120,7 @@ describe('fetchOriginMain(ADR-101, 원격 main 받아오기)', () => {
     '원격에 새 커밋이 있으면 fast-forward로 받아오고, 받은 커밋 목록과 작업 트리 내용을 돌려준다',
     async () => {
       const { remote, root } = await setupRepo();
+      const before = await git(root, 'rev-parse', '--short', 'HEAD');
       await pushToRemote(remote, 'CHANGELOG.md', '# changes\n', 'PR 머지됨');
 
       const result = await fetchOriginMain(root);
@@ -128,6 +130,32 @@ describe('fetchOriginMain(ADR-101, 원격 main 받아오기)', () => {
       expect(result.commits).toHaveLength(1);
       expect(result.commits[0]).toMatchObject({ subject: 'PR 머지됨' });
       await expect(readFile(path.join(root, 'CHANGELOG.md'), 'utf8')).resolves.toBe('# changes\n');
+      // 화면이 "main을 <old>→<new>로 받아왔습니다"를 보여줄 수 있게 받아오기 전후 짧은 SHA를 함께 돌려준다
+      expect(result.previousShortSha).toBe(before);
+      expect(result.shortSha).toBe(await git(root, 'rev-parse', '--short', 'HEAD'));
+      expect(result.previousShortSha).not.toBe(result.shortSha);
+    },
+    15_000,
+  );
+
+  it(
+    '같은 폴더를 동시에 두 번 받아오면(화면이 요청을 두 번 보내는 등) 참조 잠금 경합 없이 둘 다 끝나고, ' +
+      '줄을 서느라 늦게 처리된 쪽도 "이미 최신"이 아니라 실제로 받아온 커밋을 성공으로 보여준다',
+    async () => {
+      const { remote, root } = await setupRepo();
+      const before = await git(root, 'rev-parse', '--short', 'HEAD');
+      await pushToRemote(remote, 'CHANGELOG.md', '# changes\n', 'PR 머지됨');
+
+      const [first, second] = await Promise.all([fetchOriginMain(root), fetchOriginMain(root)]);
+
+      // 둘 다 "cannot lock ref"로 깨지지 않고 끝나야 하고(이 테스트는 그 자체로 그것을 검증한다 — 하나라도 던지면 실패한다),
+      // 둘 다 같은 커밋을 성공으로 보여줘야 한다(둘 중 하나가 "이미 최신"으로 조용히 끝나면 안 된다)
+      for (const result of [first, second]) {
+        expect(result.status).toBe('fast-forwarded');
+        expect(result.commits.map((commit) => commit.subject)).toEqual(['PR 머지됨']);
+        expect(result.previousShortSha).toBe(before);
+        expect(result.shortSha).toBe(await git(root, 'rev-parse', '--short', 'HEAD'));
+      }
     },
     15_000,
   );
@@ -178,4 +206,28 @@ describe('fetchOriginMain(ADR-101, 원격 main 받아오기)', () => {
     const root = await tmp();
     await expect(fetchOriginMain(root)).rejects.toBeInstanceOf(StudioError);
   });
+
+  it(
+    '다른 git 프로세스가 origin/main 참조를 잠깐 쥐고 있었어도(cannot lock ref) 한 번 더 시도해 받아온다',
+    async () => {
+      const { remote, root } = await setupRepo();
+      // 로컬의 origin/main 추적 참조를 먼저 만들어 둔다(이 커밋을 가리킨다). pushToRemote로 원격만 앞서가게 해
+      // 다음 fetch가 실제로 이 참조를 옮기려다 잠금과 부딪히게 만든다
+      await git(root, 'fetch', '-q', '--no-tags', 'origin', 'main');
+      await pushToRemote(remote, 'CHANGELOG.md', '# changes\n', 'PR 머지됨');
+
+      const lockFile = path.join(root, '.git', 'refs', 'remotes', 'origin', 'main.lock');
+      await writeFile(lockFile, '');
+      // 첫 시도가 잠금에 걸려 실패할 시간을 준 뒤, 재시도 사이의 대기 시간(LOCK_RETRY_DELAY_MS) 안에 잠금을 치워
+      // "다른 프로세스가 막 끝낸" 상황을 흉내 낸다
+      const clearLock = new Promise((resolve) => setTimeout(resolve, 60)).then(() => rm(lockFile, { force: true }));
+
+      const result = await fetchOriginMain(root);
+      await clearLock;
+
+      expect(result.status).toBe('fast-forwarded');
+      expect(result.commits.map((commit) => commit.subject)).toEqual(['PR 머지됨']);
+    },
+    15_000,
+  );
 });
