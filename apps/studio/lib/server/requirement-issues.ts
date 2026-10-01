@@ -167,7 +167,8 @@ export async function planRequirementIssuePublish(
   };
 }
 
-export interface RequirementPublishResult extends RequirementPlanResult {
+/** 발행 결과. 미리보기의 계획·요약은 그대로 담고, 추적 이슈는 "무엇을 할지" 대신 실제로 쓴 이슈 번호·주소를 돌려준다 */
+export interface RequirementPublishResult extends Omit<RequirementPlanResult, 'tracking' | 'repository'> {
   tracking?: { issue: number; url: string };
   /** 하위 이슈·추적 이슈 중 일부가 실패해도 나머지는 계속 진행한다. 실패한 요구사항 id와 이유 */
   errors: Array<{ id: string; message: string }>;
