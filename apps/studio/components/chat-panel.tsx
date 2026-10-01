@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -1194,6 +1195,14 @@ export function ModelPickerDialog({
         />
       )}
       {picker.note && <p className="px-2 pb-1 text-xs text-muted">{picker.note}</p>}
+      {needsAccountConnect(picker.options) && (
+        <p className="mb-1 rounded-control bg-panel px-2 py-1.5 text-xs text-muted">
+          로그인이 안 돼 못 쓰는 모델이 있습니다.{" "}
+          <Link href="/accounts" className="font-medium text-ink underline">
+            계정 연결로 가기
+          </Link>
+        </p>
+      )}
       {groups.map((group) => (
         <div key={group.title ?? "__all"}>
           {group.title && <p className="px-2 pb-1 pt-1.5 text-xs font-medium text-muted">{group.title}</p>}
@@ -1290,6 +1299,11 @@ function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChang
       {effort.note && <p className="px-2 pt-1 text-xs text-muted">{effort.note}</p>}
     </div>
   );
+}
+
+/** 로그인이 안 돼 고를 수 없는 모델이 있으면 "계정 연결로 가기" 안내를 보여준다(ADR-0XX) */
+export function needsAccountConnect(options: ModelPickerOption[]): boolean {
+  return options.some((option) => option.disabled && /로그인/.test(option.disabledReason ?? ""));
 }
 
 /** api 백엔드는 공급자가 둘 이상이면 공급자별로 묶는다. 그 밖(claude-code·codex·commandcode·opencode)은 한 백엔드의 목록이라 묶지 않는다 */

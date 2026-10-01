@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel, ModelPicker, ModelPickerDialog, popoverPositionFor } from "./chat-panel";
+import { ChatPanel, ModelPicker, ModelPickerDialog, needsAccountConnect, popoverPositionFor } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -225,6 +225,27 @@ describe("ModelPicker(대화 입력창의 모델 선택)", () => {
     const html = renderToStaticMarkup(<ModelPickerDialog picker={many} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
 
     expect(html).toContain('placeholder="모델 검색"');
+  });
+
+  it("로그인이 안 돼 못 쓰는 모델이 있으면 계정 연결로 가는 안내를 보여준다", () => {
+    const needsLogin: ModelPickerView = {
+      ...claudeCode,
+      options: [...claudeCode.options, { id: "opus-4", label: "Opus 4", disabled: true, disabledReason: "Claude Code에 로그인돼 있지 않습니다" }],
+    };
+
+    expect(needsAccountConnect(needsLogin.options)).toBe(true);
+    expect(needsAccountConnect(claudeCode.options)).toBe(false);
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={needsLogin} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+    expect(html).toContain("계정 연결로 가기");
+    expect(html).toContain('href="/accounts"');
+  });
+
+  it("요청 처리 중처럼 로그인과 무관한 이유로 막혔으면 계정 연결 안내를 보여주지 않는다", () => {
+    const busy: ModelPickerView = { ...claudeCode, options: [...claudeCode.options, { id: "opus-4", label: "Opus 4", disabled: true, disabledReason: "지금은 고를 수 없습니다" }] };
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={busy} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+    expect(html).not.toContain("계정 연결로 가기");
   });
 
   it("고를 것이 '기본'뿐이면(예: codex) 검색창 없이 목록만 그린다", () => {
