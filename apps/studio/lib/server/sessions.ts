@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -37,8 +37,10 @@ import {
   describeDatabaseState,
   detectRunner,
   discoverTestsInFile,
+  draftManagedRequirement,
   draftRequirementFromIssue,
   estimateCost,
+  extractTrackingSubIssueNumbers,
   extractRequirementMentions,
   extractRequirementsHeuristically,
   fetchIssue,
@@ -52,6 +54,7 @@ import {
   isLikelyTestFile,
   labelRecommendationSource,
   listIssues,
+  managedRequirementToRequirement,
   ManualStepItemSchema,
   MAX_ASSUMPTIONS,
   MAX_CLARIFYING_QUESTIONS,
@@ -68,6 +71,7 @@ import {
   planAskFromClient,
   postComment,
   REFERENCED_FILES_CONTEXT_MAX_CHARS,
+  REQUIREMENT_LABEL,
   requestPlanBrief,
   requestQuestionRecommendations,
   requestRequirementsExtraction,
@@ -151,7 +155,6 @@ import {
   type RequirementDiffEntry,
   type RequirementEvidence,
   type RequirementIssueDraft,
-  type RequirementScenario,
   type RequirementStatus,
   type RepositoryInfo,
   type RoutingDecision,
@@ -4019,10 +4022,17 @@ function requireRequirementIssuesContext(context: RequirementIssuesContext | und
   return context;
 }
 
+/**
+ * 발행에 쓸 요구사항 전체(ears·scenarios·nfr·rev·hash·trace까지)와 상태를 모은다. 전에는 snapshot.requirements의
+ * id·title·kind·priority·acceptance만 추려 써서(평가용 view 모양) EARS·시나리오·NFR이 몸통에 전혀 안 실렸다
+ * (B 버그 — 이슈 본문이 항상 "(정의되지 않음)"/"(없음)"으로 찍혔다). 같은 docs/requirements.md를 다시 읽어
+ * (readSavedRequirements) 전체 필드를 들고, 상태만 snapshot의 평가 결과에서 가져온다.
+ */
 async function requirementsForIssues(id: string): Promise<{ requirements: Requirement[]; statusById: Record<string, RequirementStatus> }> {
+  const session = requireSession(id);
   const snapshot = await getSessionRequirements(id);
   if (!snapshot.exists || snapshot.requirements.length === 0) throw new StudioError(400, '저장된 요구사항이 없습니다. 먼저 "명세" 탭에서 요구사항을 저장하세요');
-  const requirements = snapshot.requirements.map(({ id: requirementId, title, kind, priority, acceptance }) => ({ id: requirementId, title, kind, priority, acceptance }) as Requirement);
+  const requirements = await readSavedRequirements(session);
   const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
   return { requirements, statusById };
 }
@@ -4115,8 +4125,9 @@ async function implementedRequirementRefs(session: Session, requestTexts: readon
     return mentioned.flatMap((id): ImplementedRequirementRef[] => {
       const requirement = byId.get(id);
       if (!requirement) return [];
-      const rev = (requirement as Requirement & { rev?: number }).rev;
-      return [{ id, ...(rev !== undefined ? { rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status }];
+      return [
+        { id, ...(requirement.rev !== undefined ? { rev: requirement.rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status },
+      ];
     });
   } catch {
     return [];
@@ -4132,7 +4143,7 @@ async function reviewRequirementsContext(session: Session, requestTexts: readonl
     const byId = new Map(snapshot.requirements.map((requirement) => [requirement.id, requirement]));
     const entries = refs.flatMap((ref) => {
       const requirement = byId.get(ref.id);
-      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: (requirement as Requirement & { scenarios?: RequirementScenario[] }).scenarios }] : [];
+      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: requirement.scenarios }] : [];
     });
     return buildReviewRequirementsContext(entries);
   } catch {

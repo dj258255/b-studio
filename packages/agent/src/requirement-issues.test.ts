@@ -11,12 +11,15 @@ import {
   buildStatusComment,
   buildSubIssueBody,
   buildTrackingIssueBody,
+  draftManagedRequirement,
   draftRequirementFromIssue,
   extractRequirementMentions,
+  extractTrackingSubIssueNumbers,
   findExistingRemoteIssue,
   findPinnedStatusComment,
   implementsTrailer,
   isStatusComment,
+  managedRequirementToRequirement,
   parseManagedRegion,
   parseRequirementIssueForm,
   planRequirementPublish,
@@ -37,7 +40,11 @@ function req(overrides: Partial<RequirementForIssues> = {}): RequirementForIssue
 
 describe('managed region 왕복', () => {
   it('build 뒤 parse하면 id·rev·hash·content가 그대로 돌아온다', () => {
-    const requirement = req({ ears: '사용자가 로그인을 요청하면 시스템은 토큰을 발급해야 한다', scenarios: [{ given: '유효한 자격 증명', when: '로그인 요청', then: '토큰 발급' }], nfr: ['응답 200ms 이내'] });
+    const requirement = req({
+      ears: { pattern: 'event', statement: '사용자가 로그인을 요청하면 시스템은 토큰을 발급해야 한다' },
+      scenarios: [{ id: 'R1.1', given: '유효한 자격 증명', when: '로그인 요청', then: '토큰 발급' }],
+      nfr: { metric: '응답 시간', threshold: '200ms 이하', condition: 'p95', method: 'k6 부하 테스트' },
+    });
     const body = buildManagedRegion(requirement, 2);
     const parsed = parseManagedRegion(body);
     expect(parsed).toBeDefined();
@@ -45,13 +52,20 @@ describe('managed region 왕복', () => {
     expect(parsed!.rev).toBe(2);
     expect(parsed!.content).toBe(buildRegionContent(requirement));
     expect(parsed!.hash).toBe(requirementContentHash(requirement));
+    expect(parsed!.content).toContain('### EARS');
+    expect(parsed!.content).toContain('### 시나리오');
+    expect(parsed!.content).toContain('### 비기능 요구사항');
   });
 
-  it('필드가 없으면 "(없음)"·"(정의되지 않음)"으로 채운다', () => {
+  it('EARS·시나리오·NFR이 없으면 그 절 자체를 뺀다(자리표시자를 남기지 않는다)', () => {
     const content = buildRegionContent(req());
-    expect(content).toContain('(정의되지 않음)');
-    expect(content).toContain('(없음)');
+    expect(content).not.toContain('### EARS');
+    expect(content).not.toContain('### 시나리오');
+    expect(content).not.toContain('### 비기능 요구사항');
+    expect(content).not.toContain('(정의되지 않음)');
+    expect(content).not.toContain('(없음)');
     expect(content).toContain('종류: api · 우선순위: must');
+    expect(content).toContain('### 인수 조건');
   });
 
   it('마커가 없는 본문은 undefined를 돌려준다', () => {
@@ -64,6 +78,70 @@ describe('managed region 왕복', () => {
     expect(requirementIdFromIssueTitle(subIssueTitle(requirement))).toBe('R1');
     expect(requirementIdFromIssueTitle('그냥 이슈 제목')).toBeUndefined();
     expect(buildSubIssueBody(requirement, 1)).toBe(buildManagedRegion(requirement, 1));
+  });
+});
+
+describe('관리형 이슈를 모델 없이 그대로 되읽기(ADR-0XX, "저장소 이슈" 가져오기)', () => {
+  it('draftManagedRequirement: 관리형 영역을 담은 하위 이슈를 EARS·시나리오·NFR까지 되읽는다', () => {
+    const requirement = req({
+      ears: { pattern: 'event', statement: '사용자가 로그인을 요청하면 시스템은 토큰을 발급해야 한다' },
+      scenarios: [{ id: 'R1.1', given: '유효한 자격 증명', when: '로그인 요청', then: '토큰 발급' }],
+      nfr: { metric: '응답 시간', threshold: '200ms 이하', condition: 'p95', method: 'k6 부하 테스트' },
+    });
+    const body = buildManagedRegion(requirement, 3);
+    const draft = draftManagedRequirement(subIssueTitle(requirement), body);
+    expect(draft).toEqual({
+      id: 'R1',
+      rev: 3,
+      title: '로그인 API',
+      kind: 'api',
+      priority: 'must',
+      acceptance: requirement.acceptance,
+      ears: requirement.ears,
+      scenarios: requirement.scenarios,
+      nfr: requirement.nfr,
+    });
+  });
+
+  it('draftManagedRequirement: 관리형 영역이 없으면(사람이 쓴 평문 이슈 등) undefined — 모델 추출로 넘어갈 신호', () => {
+    expect(draftManagedRequirement('버그: 목록이 안 보임', '증상:\n- 새로고침하면 빈 화면')).toBeUndefined();
+  });
+
+  it('draftManagedRequirement: EARS·시나리오·NFR이 없는 관리형 영역은 그 필드들을 비워 둔다', () => {
+    const requirement = req();
+    const body = buildManagedRegion(requirement, 1);
+    const draft = draftManagedRequirement(subIssueTitle(requirement), body);
+    expect(draft?.ears).toBeUndefined();
+    expect(draft?.scenarios).toBeUndefined();
+    expect(draft?.nfr).toBeUndefined();
+    expect(draft?.acceptance).toEqual(requirement.acceptance);
+  });
+
+  it('managedRequirementToRequirement: draft를 docs/requirements.md에 그대로 저장할 수 있는 모양으로 바꾼다', () => {
+    const requirement = req({ ears: { pattern: 'ubiquitous', statement: '시스템은 항상 로그를 남겨야 한다' } });
+    const draft = draftManagedRequirement(subIssueTitle(requirement), buildManagedRegion(requirement, 2))!;
+    expect(managedRequirementToRequirement(draft)).toEqual({
+      id: 'R1',
+      rev: 2,
+      title: '로그인 API',
+      kind: 'api',
+      priority: 'must',
+      acceptance: requirement.acceptance,
+      ears: requirement.ears,
+    });
+  });
+
+  it('extractTrackingSubIssueNumbers: 추적 이슈 표의 #N 링크를 순서대로, 중복 없이 뽑는다', () => {
+    const body = buildTrackingIssueBody('orders', [
+      { requirement: { id: 'R1', title: '로그인', kind: 'api', priority: 'must' }, status: '검증됨', issue: 10, checklistOnly: false },
+      { requirement: { id: 'R2', title: '주문', kind: 'api', priority: 'must' }, status: '미착수', issue: 11, checklistOnly: false },
+      { requirement: { id: 'R3', title: 'README', kind: 'docs', priority: 'must' }, status: '미착수', checklistOnly: true },
+    ]);
+    expect(extractTrackingSubIssueNumbers(body)).toEqual([10, 11]);
+  });
+
+  it('extractTrackingSubIssueNumbers: 하위 이슈 링크가 없으면 빈 배열', () => {
+    expect(extractTrackingSubIssueNumbers('그냥 사람이 쓴 이슈입니다')).toEqual([]);
   });
 });
 
@@ -214,7 +292,7 @@ describe('PR 본문 조립', () => {
   });
 
   it('AI 리뷰 문맥에 요구사항 제목·시나리오를 압축해 담는다', () => {
-    const context = buildReviewRequirementsContext([{ id: 'R1', title: '로그인', scenarios: [{ given: 'a', when: 'b', then: 'c' }] }]);
+    const context = buildReviewRequirementsContext([{ id: 'R1', title: '로그인', scenarios: [{ id: 'R1.1', given: 'a', when: 'b', then: 'c' }] }]);
     expect(context).toContain('R1. 로그인');
     expect(context).toContain('Given a When b Then c');
   });

@@ -82,6 +82,8 @@ interface RequirementPlanSummary {
   conflict: number;
   reverify: number;
   closedButRequirementExists: number;
+  /** could·docs라 하위 이슈 없이 추적 이슈 체크리스트로만 남는 항목 수(이들은 create에 세지 않는다) */
+  checklistOnly: number;
 }
 
 const PLAN_ACTION_LABEL: Record<RequirementPlanAction, string> = {
