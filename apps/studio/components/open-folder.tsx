@@ -36,6 +36,8 @@ export function OpenFolder() {
           value={folder}
           onChange={(event) => setFolder(event.target.value)}
           placeholder="~/Desktop/my-app"
+          // 폴더 목록 모달에서 "경로 직접 입력"으로 바꾸면 이 화면이 새로 그려진다 — 바로 타이핑할 수 있게 포커스를 준다
+          autoFocus
           className="min-w-0 flex-1 rounded-control border border-line bg-panel px-3 py-2 font-mono text-sm"
         />
         <button type="submit" disabled={busy || !folder.trim()} className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel disabled:opacity-50">

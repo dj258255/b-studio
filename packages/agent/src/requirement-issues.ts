@@ -1,5 +1,5 @@
 /**
- * 요구사항(docs/requirements.md) → GitHub 이슈 발행·동기화(ADR-089).
+ * 요구사항(docs/requirements.md) → GitHub 이슈 발행·동기화(ADR-092).
  *
  * 한 방향(파일 → 이슈)이다: `docs/requirements.md`가 언제나 원본이고, 이슈는 그 내용을 보여 주는 거울이다.
  * 추적 이슈 하나("요구사항: <프로젝트>")와 must·should 요구사항마다 하위 이슈 하나를 만든다(task-plans.ts의

@@ -27,7 +27,11 @@ export function OpenFolderModal({ onClose, initialPath }: { onClose: () => void;
   return createPortal(
     <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="open-folder">
       <button type="button" aria-label="닫기" onClick={onClose} className="absolute inset-0 bg-ink/15" />
-      <div className="glass absolute left-1/2 top-1/2 max-h-[85vh] w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-panel shadow-xl">
+      {/*
+        세로 가운데 정렬(top-1/2 -translate-y-1/2) 대신 위에서 고정된 자리에 둔다. 폴더 목록 길이가 바뀔 때마다
+        모달 전체 높이가 바뀌면 가운데 정렬은 그 자리도 따라 움직여 탐색 중 화면이 튄다 — 고정 자리는 안 움직인다
+      */}
+      <div className="glass absolute left-1/2 top-[10vh] max-h-[80vh] w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 overflow-y-auto rounded-panel shadow-xl">
         <h2 id="open-folder" className="sr-only">
           폴더 열기
         </h2>

@@ -51,9 +51,10 @@ const snapshot = {
   ],
   allMustHavesPrefill: "다음 필수(must) 요구사항을 모두 구현해 주세요.\n\n- [R1] 로그인 API",
   assumptions: [],
+  manualSteps: [],
 };
 
-describe("RequirementsList 다음 단계 순서(ADR-089)", () => {
+describe("RequirementsList 다음 단계 순서(ADR-092)", () => {
   it("원격이 GitHub이고 아직 발행하지 않았으면 이슈로 발행이 전체 계획 세우기보다 먼저 나온다", () => {
     const html = renderToStaticMarkup(<RequirementsList sessionId="s1" snapshot={snapshot} canManage isGithub onWork={() => {}} onRefresh={() => {}} />);
     const publishIndex = html.indexOf("이슈로 발행");
@@ -77,7 +78,7 @@ describe("RequirementsList 다음 단계 순서(ADR-089)", () => {
   });
 });
 
-describe("RequirementPublishFlow(ADR-089)", () => {
+describe("RequirementPublishFlow(ADR-092)", () => {
   it("미리보기를 불러오는 동안 안내 문구와 설명을 보여준다(서버 렌더는 effect를 돌리지 않아 fetch가 일어나지 않는다)", () => {
     const html = renderToStaticMarkup(<RequirementPublishFlow sessionId="s1" onRefresh={() => {}} />);
 

@@ -20,13 +20,18 @@ interface Harness {
   execs: Array<{ command: string; args: string[] }>;
   spawns: Array<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; logPath: string }>;
   opens: string[];
+  killed: Array<{ pid: number; signal: NodeJS.Signals }>;
 }
 
-function harness(options: { probe?: ProbeResult[]; exec?: ExecResult[]; platform?: NodeJS.Platform } = {}): Harness {
+function harness(
+  options: { probe?: ProbeResult[]; exec?: ExecResult[]; platform?: NodeJS.Platform; alivePids?: number[] } = {},
+): Harness {
   const probes: string[] = [];
   const execs: Harness['execs'] = [];
   const spawns: Harness['spawns'] = [];
   const opens: string[] = [];
+  const killed: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const alive = new Set(options.alivePids ?? []);
   const probeQueue = [...(options.probe ?? [])];
   const execQueue = [...(options.exec ?? [])];
   const deps: LaunchDeps = {
@@ -36,7 +41,7 @@ function harness(options: { probe?: ProbeResult[]; exec?: ExecResult[]; platform
     paths: { log: path.join(dir, 'studio.log'), pid: path.join(dir, 'studio.pid') },
     probe: async (url) => {
       probes.push(url);
-      return probeQueue.shift() ?? { reachable: false, body: '' };
+      return probeQueue.shift() ?? { reachable: false, status: 0, body: '' };
     },
     sleep: async () => {},
     exec: async (command, args) => {
@@ -50,16 +55,25 @@ function harness(options: { probe?: ProbeResult[]; exec?: ExecResult[]; platform
     open: async (url) => {
       opens.push(url);
     },
+    isAlive: (pid) => alive.has(pid),
+    killGroup: (pid, signal) => {
+      alive.delete(pid);
+      killed.push({ pid, signal });
+    },
     readyTimeoutMs: 3,
     readyIntervalMs: 1,
   };
-  return { deps, probes, execs, spawns, opens };
+  return { deps, probes, execs, spawns, opens, killed };
 }
 
 const OK: ExecResult = { code: 0, stdout: '', stderr: '' };
 const FAIL: ExecResult = { code: 1, stdout: '', stderr: 'fail' };
-const up: ProbeResult = { reachable: true, body: '<title>b-studio</title>' };
-const down: ProbeResult = { reachable: false, body: '' };
+const up: ProbeResult = { reachable: true, status: 200, body: '<title>b-studio</title>' };
+const upOther: ProbeResult = { reachable: true, status: 200, body: '<title>something else</title>' };
+/** 최상위 라우트는 응답하지만(reachable) 중첩 라우트 표가 스테일해 404를 돌려주는 상태 */
+const stale: ProbeResult = { reachable: true, status: 404, body: '<!doctype html>Not Found' };
+const nestedOk: ProbeResult = { reachable: true, status: 200, body: '{"ok":true}' };
+const down: ProbeResult = { reachable: false, status: 0, body: '' };
 
 describe('launch 유틸', () => {
   it('모드와 인자를 만든다', () => {
@@ -95,7 +109,7 @@ describe('runLaunch --json', () => {
 
   it('이미 떠 있으면 started=false와 PID 파일의 pid·모드를 쓴다', async () => {
     await writeFile(path.join(dir, 'studio.pid'), JSON.stringify({ pid: 999, port: 3000, mode: 'demo' }));
-    const h = harness({ probe: [up] });
+    const h = harness({ probe: [up, nestedOk] });
     const out = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -117,7 +131,7 @@ describe('runLaunch --json', () => {
 
 describe('runLaunch', () => {
   it('이미 스튜디오가 떠 있으면 새로 띄우지 않고 브라우저만 연다', async () => {
-    const h = harness({ probe: [up] });
+    const h = harness({ probe: [up, nestedOk] });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: true }, h.deps)).toBe(0);
@@ -127,7 +141,7 @@ describe('runLaunch', () => {
   });
 
   it('다른 프로그램이 그 포트에 있으면 다른 포트를 안내하고 종료 코드 1', async () => {
-    const h = harness({ probe: [{ reachable: true, body: '<title>something else</title>' }] });
+    const h = harness({ probe: [upOther] });
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: true }, h.deps)).toBe(1);
@@ -187,5 +201,37 @@ describe('runLaunch', () => {
     expect(text).toContain('line 25');
     expect(text).not.toContain('line 5');
     expect(h.opens).toEqual([]);
+  });
+});
+
+describe('runLaunch: 스테일한 중첩 라우트(데스크톱 셸이 오래된 라우트 표를 잡아내는 확인)', () => {
+  it('최상위 라우트는 응답하지만 중첩 라우트가 스테일하면 기존 서버를 죽이고 새로 띄운다', async () => {
+    await writeFile(path.join(dir, 'studio.pid'), JSON.stringify({ pid: 555, port: 3000, mode: 'demo' }));
+    const h = harness({ probe: [up, stale, up], exec: [OK], alivePids: [555] });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    // 루트("/")와 중첩 라우트(/api/health/routes)를 둘 다 확인한다
+    expect(h.probes[0]).toBe('http://127.0.0.1:3000/');
+    expect(h.probes[1]).toBe('http://127.0.0.1:3000/api/health/routes');
+    // 스테일한 기존 프로세스(PID 555)에 SIGTERM을 보내고
+    expect(h.killed).toEqual([{ pid: 555, signal: 'SIGTERM' }]);
+    // 새로 띄운다(재사용하지 않는다)
+    expect(h.spawns).toHaveLength(1);
+    expect(log.mock.calls.flat().join('\n')).toContain('라우트 표가 오래된 것 같아');
+    expect(JSON.parse(await readFile(path.join(dir, 'studio.pid'), 'utf8'))).toEqual({ pid: 4242, port: 3000, mode: 'local' });
+  });
+
+  it('스테일한 서버가 이미 죽어 있으면 죽이지 않고 바로 새로 띄운다', async () => {
+    await writeFile(path.join(dir, 'studio.pid'), JSON.stringify({ pid: 555, port: 3000, mode: 'demo' }));
+    // alivePids를 주지 않으면 isAlive(555)는 항상 false다
+    const h = harness({ probe: [up, stale, up], exec: [OK] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.killed).toEqual([]);
+    expect(h.spawns).toHaveLength(1);
   });
 });

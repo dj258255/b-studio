@@ -40,7 +40,7 @@ describe('runReviewRounds', () => {
     expect(requestFix).not.toHaveBeenCalled();
   });
 
-  it('requirementsContext를 주면 리뷰어 호출의 사용자 메시지에 그대로 실린다(ADR-089)', async () => {
+  it('requirementsContext를 주면 리뷰어 호출의 사용자 메시지에 그대로 실린다(ADR-092)', async () => {
     const ask = askReturning('{"findings":[]}');
     const deps = baseDeps({ ask, requirementsContext: () => '[이 PR이 구현하는 요구사항]\n- R1. 로그인' });
     await collect(deps, 1);

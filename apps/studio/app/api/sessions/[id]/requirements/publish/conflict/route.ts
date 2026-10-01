@@ -4,7 +4,7 @@ import { resolveSessionRequirementConflict } from '@/lib/server/sessions';
 
 const RESOLUTIONS = new Set(['import', 'overwrite', 'ignore']);
 
-/** 발행된 요구사항 하나의 충돌을 가져오기·덮어쓰기·무시 중 하나로 푼다(ADR-089). 본문은 `{ requirementId, resolution }` */
+/** 발행된 요구사항 하나의 충돌을 가져오기·덮어쓰기·무시 중 하나로 푼다(ADR-092). 본문은 `{ requirementId, resolution }` */
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/requirements/publish/conflict'>) {
   try {
     const user = requireUser(request.headers);

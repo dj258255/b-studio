@@ -175,7 +175,7 @@ export function buildPrReviewUserPrompt({
   requests: readonly string[];
   round: number;
   omittedFiles?: readonly string[];
-  /** 이 PR이 구현하는 요구사항의 압축 목록(requirement-issues.ts의 buildReviewRequirementsContext, ADR-089). 없으면(요구사항을 안 쓰거나 이 PR이 구현한 게 없으면) 빈 문자열 */
+  /** 이 PR이 구현하는 요구사항의 압축 목록(requirement-issues.ts의 buildReviewRequirementsContext, ADR-092). 없으면(요구사항을 안 쓰거나 이 PR이 구현한 게 없으면) 빈 문자열 */
   requirementsContext?: string;
 }): string {
   const requestList = requests.length > 0 ? requests.map((request, index) => `${index + 1}. ${request}`).join('\n') : '(기록 없음)';

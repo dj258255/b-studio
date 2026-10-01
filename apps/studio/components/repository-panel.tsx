@@ -213,7 +213,7 @@ function PullList({ projectId, state, subTab, onSubTab, onState }: ListProps) {
 
 export const STATE_DOT = { open: "bg-pass", closed: "bg-line" } as const;
 
-/** subIssueTitle(requirement-issues.ts, ADR-089)이 붙인 "[R4] " 접두어에서 요구사항 id를 뽑는다(순수 정규식이라 여기서 되풀이한다 — @b-studio/agent를 부르면 node:crypto가 클라이언트 번들에 끼어든다) */
+/** subIssueTitle(requirement-issues.ts, ADR-092)이 붙인 "[R4] " 접두어에서 요구사항 id를 뽑는다(순수 정규식이라 여기서 되풀이한다 — @b-studio/agent를 부르면 node:crypto가 클라이언트 번들에 끼어든다) */
 function requirementIdFromIssueTitle(title: string): string | undefined {
   return /^\[(R[1-9][0-9]*)\]/.exec(title.trim())?.[1];
 }

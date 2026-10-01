@@ -79,7 +79,7 @@ describe("IssueRow", () => {
     expect(closed).toContain("bg-line");
   });
 
-  it("b-studio:req 라벨 + [Rn] 제목이면 요구사항 id 칩을 보여준다(ADR-089)", () => {
+  it("b-studio:req 라벨 + [Rn] 제목이면 요구사항 id 칩을 보여준다(ADR-092)", () => {
     const html = renderToStaticMarkup(<IssueRow issue={issue({ title: "[R4] 로그인 API", labels: ["b-studio:req", "kind:api"] })} onOpen={() => {}} />);
     expect(html).toContain("요구사항 이슈");
     expect(html).toContain(">R4<");

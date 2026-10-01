@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { filterFolders, folderListQuery, hintLabel, moveSelectionIndex, resolveListKey } from "./folder-browser";
+import { filterFolders, folderListQuery, hintLabel, looksLikePastedPath, moveSelectionIndex, resolveListKey } from "./folder-browser";
 
 describe("filterFolders", () => {
   const children = [{ name: "web" }, { name: "api" }, { name: "web-legacy" }];
+  const withHidden = [...children, { name: ".env" }, { name: ".git" }];
 
   it("빈 글자면 그대로 돌려준다", () => {
     expect(filterFolders(children, "")).toEqual(children);
@@ -13,6 +14,33 @@ describe("filterFolders", () => {
     expect(filterFolders(children, "WEB")).toEqual([{ name: "web" }, { name: "web-legacy" }]);
     expect(filterFolders(children, "api")).toEqual([{ name: "api" }]);
     expect(filterFolders(children, "zzz")).toEqual([]);
+  });
+
+  it("토글이 꺼져 있으면 숨김 폴더를 걸러 낸다", () => {
+    expect(filterFolders(withHidden, "")).toEqual(children);
+  });
+
+  it("토글이 켜져 있으면 숨김 폴더도 남긴다", () => {
+    expect(filterFolders(withHidden, "", true)).toEqual(withHidden);
+  });
+
+  it("토글이 꺼져 있어도 '.'으로 시작하는 검색어는 숨김 폴더를 남긴다", () => {
+    expect(filterFolders(withHidden, ".env")).toEqual([{ name: ".env" }]);
+    expect(filterFolders(withHidden, ".")).toEqual([{ name: ".env" }, { name: ".git" }]);
+  });
+});
+
+describe("looksLikePastedPath", () => {
+  it("절대 경로나 ~ 경로면 true", () => {
+    expect(looksLikePastedPath("/Users/kim/Desktop")).toBe(true);
+    expect(looksLikePastedPath("~/Desktop/my-app")).toBe(true);
+    expect(looksLikePastedPath("  /Users/kim  ")).toBe(true);
+  });
+
+  it("그 밖의 이름 검색어는 false", () => {
+    expect(looksLikePastedPath("web")).toBe(false);
+    expect(looksLikePastedPath("")).toBe(false);
+    expect(looksLikePastedPath(".env")).toBe(false);
   });
 });
 

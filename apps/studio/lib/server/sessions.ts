@@ -13,6 +13,7 @@ import {
   buildAddTestPrefill,
   buildAllMustHavesPrefill,
   buildFixTestPrefill,
+  buildMatrixCsv,
   buildMissingReferenceQuestion,
   buildPullRequest,
   buildReferencedFilesContext,
@@ -20,8 +21,10 @@ import {
   buildRequirementWorkPrefill,
   buildReviewRequirementsContext,
   buildTestRunPlan,
+  buildTraceabilityMatrix,
   canCreatePullRequest,
   captureBaselines,
+  carryForwardRequirementRevision,
   CheckpointError,
   CheckpointStore,
   compareUrl,
@@ -48,15 +51,19 @@ import {
   isLikelyTestFile,
   labelRecommendationSource,
   listIssues,
+  ManualStepItemSchema,
   MAX_ASSUMPTIONS,
   MAX_CLARIFYING_QUESTIONS,
+  MAX_MANUAL_STEPS,
   MAX_REQUIREMENTS,
+  mergeReextractedRequirements,
   ORDERS_DEMO_SCENARIOS,
   parseJestLikeJson,
   parseJUnitXml,
   parsePullRequestNumber,
   parseRemote,
   parseRequirementsMarkdown,
+  partitionManualSteps,
   planAskFromClient,
   postComment,
   REFERENCED_FILES_CONTEXT_MAX_CHARS,
@@ -66,6 +73,7 @@ import {
   REQUIREMENTS_FILE,
   RequirementSchema,
   requirementConfidence,
+  reviseRequirementIfChanged,
   resolveReferencedFiles,
   runnerLabel,
   scanTestFilesForRequirementId,
@@ -116,6 +124,7 @@ import {
   type Recommendation,
   type Requirement,
   type RequirementCoverage,
+  type RequirementDiffEntry,
   type RequirementEvidence,
   type RequirementIssueDraft,
   type RequirementScenario,
@@ -133,6 +142,7 @@ import {
   type TestFramework,
   type TestRow,
   type TestTarget,
+  type TraceabilityMatrix,
   type VerifyMode,
   type WorkflowCheck,
 } from '@b-studio/agent';
@@ -1348,7 +1358,7 @@ export async function setSessionModel(id: string, modelId: string | undefined, e
   if (effort !== undefined) {
     const trimmedEffort = effort.trim();
     // modelId도 이번 호출에서 함께 바뀌었으면 그 새 모델을 기준으로 노력 단계를 확인한다(api 백엔드는 모델마다 지원이 다르다)
-    const effortCheck = isSelectableEffort(backend, session.snapshot.modelId, trimmedEffort);
+    const effortCheck = await isSelectableEffort(backend, session.snapshot.modelId, trimmedEffort);
     if (!effortCheck.ok) throw new StudioError(400, effortCheck.reason ?? `이 백엔드에서 고를 수 없는 노력 단계입니다: ${trimmedEffort}`);
     session.snapshot.effort = (trimmedEffort || undefined) as Effort | undefined;
     rememberProjectEffortDefault(session.snapshot.projectId, backend, session.snapshot.effort);
@@ -2511,7 +2521,7 @@ async function pullRequestDraft(session: Session, issues: readonly number[]): Pr
     issues,
     requiredStages: workflowStages(session.project),
   });
-  // 커밋 제목이 "[R4]"로 언급한 요구사항이 있으면 Closes(검증됨+발행된 이슈만)·Implements 줄을 덧붙인다(ADR-089)
+  // 커밋 제목이 "[R4]"로 언급한 요구사항이 있으면 Closes(검증됨+발행된 이슈만)·Implements 줄을 덧붙인다(ADR-092)
   const refs = await implementedRequirementRefs(session, commits.map((commit) => commit.subject));
   const addendum = buildRequirementsAddendum(refs);
   return { info, ...draft, body: addendum ? `${draft.body}${addendum}` : draft.body };
@@ -3184,7 +3194,7 @@ export interface RequirementView extends Requirement {
   status: RequirementStatus;
   confidence: '🟢' | '🟡' | '🔴';
   evidence: RequirementEvidence;
-  /** "이 요구사항 작업" 버튼이 채운다(서버가 만든 글을 그대로 쓴다 — 화면은 조립하지 않는다). 발행된 이슈가 있으면 번호를 함께 안내한다(ADR-089) */
+  /** "이 요구사항 작업" 버튼이 채운다(서버가 만든 글을 그대로 쓴다 — 화면은 조립하지 않는다). 발행된 이슈가 있으면 번호를 함께 안내한다(ADR-092) */
   workPrefill: string;
   /** 이슈로 발행했을 때 생긴 하위 이슈 번호. 발행하지 않았으면 없다 */
   issue?: number;
@@ -3199,6 +3209,8 @@ export interface RequirementsSnapshot {
   allMustHavesPrefill?: string;
   /** "## 가정" 절(데이터 규모·동시성/트래픽·성능 관련 제약). docs/requirements.md가 없거나 절이 없으면 빈 배열 */
   assumptions: string[];
+  /** "## 사람이 할 일" 절(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 에이전트가 절대 하지 않는다 */
+  manualSteps: string[];
 }
 
 const TEST_SCAN_IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.gradle', '.venv', '__pycache__', 'coverage', 'design']);
@@ -3283,6 +3295,16 @@ async function fetchIssueBodyForSession(session: Session, issueNumber: number): 
   return body ? `${issue.title}\n\n${body}` : issue.title;
 }
 
+/** managed 서비스 템플릿·데이터베이스 엔진을 한 줄로 요약한다("추천 값으로 채우기"가 스택에 맞는 답을 내도록 프롬프트에 붙인다) */
+function buildProjectStackSummary(project: LoadedProject): string {
+  const services = project.managed.map(([name, service]) => `${name}(${service.template})`).join(', ');
+  const databases = project.databases.map(([name, database]) => `${name}(${database.engine})`).join(', ');
+  const parts: string[] = [];
+  if (services) parts.push(`서비스: ${services}`);
+  if (databases) parts.push(`데이터베이스: ${databases}`);
+  return parts.join(' · ');
+}
+
 export interface RequirementsExtractionInput {
   /** 붙여넣은 명세 글 */
   specText?: string;
@@ -3326,6 +3348,10 @@ export interface RequirementsExtractionPreview {
   outOfScope: string[];
   /** "## 가정" 절 초안(데이터 규모·동시성/트래픽·성능 관련 제약, 결정론적 대체 파서는 만들지 못한다) */
   assumptions: string[];
+  /** "사람이 할 일"로 걸러낸 절차(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 읽기 전용으로만 보여 준다 */
+  manualSteps: string[];
+  /** docs/requirements.md가 이미 있어 재추출 병합(제목·EARS 유사도로 기존 id를 지킨다)을 했을 때만 있다. 화면의 "무엇이 바뀌는가" 미리보기가 쓴다 */
+  diff?: RequirementDiffEntry[];
 }
 
 /** 참조 파일이 없을 때 자동으로 덧붙이는 질문과, 모델이 직접 낸 질문을 합쳐 상한(5개) 안으로 자른다 */
@@ -3339,11 +3365,31 @@ function mergeQuestionsWithMissingReferences(questions: readonly string[], refer
   return merged;
 }
 
+/** 지금 저장된 docs/requirements.md가 있으면 그 요구사항 목록을, 없으면 빈 배열을 읽는다(재추출 병합 기준점) */
+async function readSavedRequirements(session: Session): Promise<Requirement[]> {
+  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  if (raw === undefined) return [];
+  return parseRequirementsMarkdown(raw).requirements;
+}
+
+/**
+ * 재추출로 막 뽑은 요구사항을 이미 저장된 문서가 있으면 제목·EARS 유사도로 병합해 id를 지킨다(mergeReextractedRequirements).
+ * 저장된 문서가 없으면(첫 추출) 병합할 대상이 없으므로 그대로 돌려준다.
+ */
+async function mergeWithSavedRequirements(session: Session, extracted: readonly Requirement[]): Promise<{ requirements: Requirement[]; diff?: RequirementDiffEntry[] }> {
+  const saved = await readSavedRequirements(session);
+  if (saved.length === 0) return { requirements: [...extracted] };
+  const { merged, diff } = mergeReextractedRequirements(extracted, saved);
+  return { requirements: merged, diff };
+}
+
 /**
  * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
  * 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출 모델 문맥에 붙이고
  * (데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
  * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다.
+ * 어느 경로든 "사람이 할 일"(저장소 권한·협업자 추가, 이메일 제출 등)로 보이는 항목은 결정론적 가드로 한 번 더 걸러내고,
+ * 이미 저장된 문서가 있으면 제목·EARS 유사도로 병합해 기존 id를 지킨다(재추출해도 같은 요구사항이 같은 id를 유지한다).
  */
 export async function previewSessionRequirementsExtraction(id: string, input: RequirementsExtractionInput): Promise<RequirementsExtractionPreview> {
   const session = requireSession(id);
@@ -3353,35 +3399,46 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
   const backend = sessionBackend(session.snapshot);
   const ask = requirementsAsk(session);
   if (!ask) {
+    const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
+    const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
     return {
-      requirements: extractRequirementsHeuristically(specText),
+      requirements,
       questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
       reason: `이 세션 백엔드(${backend})는 도구 없이 한 번만 묻는 모델 호출을 지원하지 않아, 헤딩·글머리 기호로 요구사항을 나누는 결정론적 방식으로 대신했습니다`,
       referencedFiles,
       outOfScope: [],
       assumptions: [],
+      manualSteps,
+      ...(diff ? { diff } : {}),
     };
   }
   try {
     const result = await requestRequirementsExtraction(ask, specText, session.stop.signal, referencedFilesContext);
+    const { requirements, diff } = await mergeWithSavedRequirements(session, result.requirements);
     return {
-      requirements: result.requirements,
+      requirements,
       questions: mergeQuestionsWithMissingReferences(result.questions, referencedFiles),
       source: 'model',
       referencedFiles,
       outOfScope: result.outOfScope,
       assumptions: result.assumptions,
+      manualSteps: result.manualSteps,
+      ...(diff ? { diff } : {}),
     };
   } catch (error) {
+    const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
+    const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
     return {
-      requirements: extractRequirementsHeuristically(specText),
+      requirements,
       questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
       reason: `추출 모델 호출이 실패해 결정론적 방식으로 대신했습니다: ${describe(error)}`,
       referencedFiles,
       outOfScope: [],
       assumptions: [],
+      manualSteps,
+      ...(diff ? { diff } : {}),
     };
   }
 }
@@ -3401,6 +3458,9 @@ export interface RequirementRecommendations {
  * "모호한 점" 질문마다 업계 관례에 근거한 추천 답·근거·출처를 한 번에 받는다. claude-code 백엔드만 이 호출에서
  * WebSearch를 열어 실제 링크를 찾고(그 밖의 도구는 열지 않는다), 그 밖의 백엔드는 모델 지식만으로 답해
  * `sourced: 'model'`로 표시한다(화면이 "출처 확인 필요"로 보여 준다). 추천 호출을 지원하지 않는 백엔드는 오류를 던진다.
+ * 명세(또는 참조 파일)가 이미 답을 정해 준 질문은 "스펙 먼저" 원칙으로 명세 원문을 인용해 답하고(basis: 'spec',
+ * requestQuestionRecommendations가 서버에서 인용문이 실제로 스펙에 있는지 검증한다), 프로젝트 스택(서비스 템플릿·DB
+ * 엔진)을 함께 알려줘 스택과 어긋나는 추천(예: Postgres 프로젝트에 MySQL 제안)을 막는다.
  */
 export async function recommendSessionRequirementQuestions(id: string, input: RequirementRecommendationsInput): Promise<RequirementRecommendations> {
   const session = requireSession(id);
@@ -3408,11 +3468,15 @@ export async function recommendSessionRequirementQuestions(id: string, input: Re
   const resolved = requirementsRecommendationAsk(session);
   if (!resolved) throw new StudioError(400, `이 세션 백엔드(${sessionBackend(session.snapshot)})는 추천 답 호출을 지원하지 않습니다`);
   const specText = input.specText?.trim() ?? '';
-  const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, session.stop.signal);
+  const stackSummary = buildProjectStackSummary(session.project);
+  const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, session.stop.signal, stackSummary);
   return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
 }
 
-/** 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다. 발행된 이슈 번호가 있으면(ADR-089) 프리필에 안내를 덧붙이고 issue 필드를 채운다 */
+/**
+ * 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다. 내용이 드리프트됐거나(hash 불일치) 개정 후 새 증거가 없으면
+ * "재확인 필요"로 매긴다. 발행된 이슈 번호가 있으면(ADR-092) 프리필에 안내를 덧붙이고 issue 필드를 채운다
+ */
 function evaluateRequirement(
   requirement: Requirement,
   checkpoints: readonly CheckpointRef[],
@@ -3425,14 +3489,14 @@ function evaluateRequirement(
     tests: scanTestFilesForRequirementId(testFiles, requirement.id),
     gateChecks: findGateCheckMentions(gateChecks, requirement.id),
   };
-  const status = computeRequirementStatus(evidence);
+  const status = computeRequirementStatus(evidence, requirement);
   const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
   return { ...requirement, status, confidence: requirementConfidence(status), evidence, workPrefill, ...(issueNumber !== undefined ? { issue: issueNumber } : {}) };
 }
 
 /**
  * 프리필 글의 "[R4] 제목" 첫머리에 발행된 이슈 번호를 "(#12)"로 붙인다("이 요구사항 작업"·"전체 계획 세우기" 프리필,
- * ADR-089) — 세션이 이 텍스트로 커밋을 남기면 PR 본문의 `Closes #12`로 이어진다. requirements.ts의 공용 프리필
+ * ADR-092) — 세션이 이 텍스트로 커밋을 남기면 PR 본문의 `Closes #12`로 이어진다. requirements.ts의 공용 프리필
  * 함수는 건드리지 않고(다른 에이전트가 동시에 그 파일을 고치는 중이라 충돌을 줄인다) 결과 문자열만 studio 쪽에서 덧붙인다.
  */
 export function annotateWithIssue(prefill: string, requirement: Pick<Requirement, 'id' | 'title'>, issueNumber: number | undefined): string {
@@ -3441,15 +3505,20 @@ export function annotateWithIssue(prefill: string, requirement: Pick<Requirement
   return prefill.replace(bullet, `${bullet} (#${issueNumber})`);
 }
 
+/** 세션의 체크포인트를 requirements.ts의 CheckpointRef 모양(createdAt 포함)으로 옮긴다. 증거 신선도(재확인 필요 해제) 판정에 쓴다 */
+function sessionCheckpointRefs(session: Session): CheckpointRef[] {
+  return session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message, createdAt: checkpoint.createdAt }));
+}
+
 /** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
 export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
-  if (raw === undefined) return { exists: false, requirements: [], assumptions: [] };
-  const { requirements, assumptions } = parseRequirementsMarkdown(raw);
-  if (requirements.length === 0) return { exists: true, requirements: [], assumptions };
+  if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [] };
+  const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
+  if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps };
 
-  const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
+  const checkpoints = sessionCheckpointRefs(session);
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
   // 사이드카 파일만 읽는다(원격·토큰 없이도 동작한다) — 발행한 적이 없으면 빈 채로 빠르게 끝난다
@@ -3464,6 +3533,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     coverage: summarizeCoverage(requirements, statusById),
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
+    manualSteps,
   };
 }
 
@@ -3482,11 +3552,16 @@ const ApplyRequirementSchema = RequirementSchema;
 const ApplyRequirementsSchema = z.object({
   requirements: z.array(ApplyRequirementSchema).min(1).max(MAX_REQUIREMENTS),
   assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).default([]),
+  manualSteps: z.array(ManualStepItemSchema).max(MAX_MANUAL_STEPS).default([]),
 });
 
 /**
- * 요구사항(+가정)을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
- * 저장 시점의 증거로 상태를 다시 매겨 사람이 읽는 상태 줄에 스냅샷으로 남긴다(다시 열 때는 항상 증거로 새로 계산한다).
+ * 요구사항(+가정+사람이 할 일)을 docs/requirements.md로 저장한다(세션 작업 복사본 — 다음 체크포인트·PR에 그대로 실린다).
+ * 저장 전에 이미 저장돼 있던 값을 id로 찾아 개정 관련 필드(rev·hash·revisedAt)를 물려받고(carryForwardRequirementRevision),
+ * 내용 해시가 달라졌으면 개정을 올린다(reviseRequirementIfChanged) — 클라이언트가 이 필드들을 안 보내도(대개 그렇다)
+ * 서버가 기준점을 잃지 않는다. "사람이 할 일"로 보이는 요구사항은 결정론적 가드로 한 번 더 걸러 manualSteps로 옮긴다
+ * (화면이 걸러 보내지 않았어도 파일에 요구사항으로 남지 않는다). 저장 시점의 증거로 상태를 다시 매겨 사람이 읽는 상태
+ * 줄에 스냅샷으로 남긴다(다시 열 때는 항상 증거로 새로 계산한다).
  */
 export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
@@ -3496,18 +3571,41 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
   const ids = parsed.data.requirements.map((requirement) => requirement.id);
   if (new Set(ids).size !== ids.length) throw new StudioError(400, '요구사항 id가 중복됩니다');
 
-  const checkpoints: CheckpointRef[] = session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message }));
+  const savedById = new Map((await readSavedRequirements(session)).map((requirement) => [requirement.id, requirement]));
+  const now = new Date().toISOString();
+  const { requirements: guarded, manualSteps: guardedManualSteps } = partitionManualSteps(parsed.data.requirements, parsed.data.manualSteps);
+  const revisedRequirements = guarded.map((requirement) => reviseRequirementIfChanged(carryForwardRequirementRevision(requirement, savedById.get(requirement.id)), now));
+
+  const checkpoints = sessionCheckpointRefs(session);
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
-  const statusById = Object.fromEntries(parsed.data.requirements.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
+  const statusById = Object.fromEntries(revisedRequirements.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
 
-  const markdown = serializeRequirementsMarkdown(parsed.data.requirements, statusById, parsed.data.assumptions);
+  const markdown = serializeRequirementsMarkdown(revisedRequirements, statusById, parsed.data.assumptions, guardedManualSteps);
   await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
   return getSessionRequirements(id);
 }
 
+/**
+ * 추적 매트릭스(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 모으고, 역방향 목록
+ * (주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 돌려준다. "요구사항" 탭의 추적 매트릭스 하위 화면이 연다.
+ */
+export async function getSessionRequirementsMatrix(id: string): Promise<TraceabilityMatrix> {
+  const session = requireSession(id);
+  const requirements = await readSavedRequirements(session);
+  const checkpoints = sessionCheckpointRefs(session);
+  const testFiles = await scanWorkingCopyTestFiles(session.project.root);
+  const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
+  return buildTraceabilityMatrix({ requirements, checkpoints, testFiles, gateChecks });
+}
+
+/** 추적 매트릭스를 CSV로 내려받는다("CSV로 내보내기" 버튼) */
+export async function getSessionRequirementsMatrixCsv(id: string): Promise<string> {
+  return buildMatrixCsv(await getSessionRequirementsMatrix(id));
+}
+
 // ---------------------------------------------------------------------------
-// 요구사항 → GitHub 이슈 발행·동기화(ADR-089). 순수 계산은 requirement-issues.ts(agent 패키지)가,
+// 요구사항 → GitHub 이슈 발행·동기화(ADR-092). 순수 계산은 requirement-issues.ts(agent 패키지)가,
 // 원격 읽기/쓰기·발행 기록은 apps/studio/lib/server/requirement-issues.ts(orchestrator)가 맡는다.
 // 이 절은 세션 상태(작업 복사본·원격·토큰)를 그 orchestrator가 받는 모양으로 조립하기만 한다.
 // ---------------------------------------------------------------------------
@@ -3636,7 +3734,7 @@ async function reviewRequirementsContext(session: Session, requestTexts: readonl
 
 /**
  * 이 세션이 구현한(커밋 제목이 "[R4]"로 언급한) 요구사항 중 이슈로 발행된 것들의 번호(중복 없이).
- * 올리기(export) 미리보기·생성 라우트가 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-089) —
+ * 올리기(export) 미리보기·생성 라우트가 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-092) —
  * 그래야 PR 본문에 그 요구사항들의 `Closes #n`이 자동으로 실린다. 실패해도(원격 없음 등) 빈 배열.
  */
 export async function sessionRequirementIssueNumbers(id: string): Promise<number[]> {

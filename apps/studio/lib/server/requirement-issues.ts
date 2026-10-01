@@ -1,5 +1,5 @@
 /**
- * 요구사항(docs/requirements.md) → GitHub 이슈 발행·동기화 orchestrator(ADR-089).
+ * 요구사항(docs/requirements.md) → GitHub 이슈 발행·동기화 orchestrator(ADR-092).
  *
  * 순수 계산(발행 계획·본문·해시)은 `@b-studio/agent`의 `requirement-issues.ts`가 맡는다. 이 파일은 그 계산에
  * 필요한 원격 이슈를 실제로 읽고(`listIssues`), 쓰고(`createIssue`·`updateIssue`·`addSubIssue`·`postComment`·

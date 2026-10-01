@@ -33,7 +33,7 @@ describe('POST /api/sessions/[id]/export', () => {
     expect(mocks.exportSession).toHaveBeenCalledWith('s1', { pullRequest: true, issues: [3], review: undefined });
   });
 
-  it('입력이 없으면 통합 계획 이슈 + 발행된 요구사항 이슈를 합쳐 기본값으로 쓴다(ADR-089, 중복 없이)', async () => {
+  it('입력이 없으면 통합 계획 이슈 + 발행된 요구사항 이슈를 합쳐 기본값으로 쓴다(ADR-092, 중복 없이)', async () => {
     mocks.integrationIssues.mockReturnValue([10]);
     mocks.sessionRequirementIssueNumbers.mockResolvedValue([10, 12]);
     await post({ pullRequest: true });

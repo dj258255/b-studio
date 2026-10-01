@@ -34,7 +34,7 @@ describe('POST /api/sessions/[id]/export/preview', () => {
     expect(mocks.sessionRequirementIssueNumbers).not.toHaveBeenCalled();
   });
 
-  it('입력이 없으면 통합 계획 이슈 + 이 세션이 구현한(발행된) 요구사항 이슈를 합쳐 기본값으로 쓴다(ADR-089)', async () => {
+  it('입력이 없으면 통합 계획 이슈 + 이 세션이 구현한(발행된) 요구사항 이슈를 합쳐 기본값으로 쓴다(ADR-092)', async () => {
     mocks.integrationIssues.mockReturnValue([10]);
     mocks.sessionRequirementIssueNumbers.mockResolvedValue([10, 12]);
     await post({});

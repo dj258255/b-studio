@@ -10,7 +10,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const { id } = await context.params;
     await authorizeSession(id, user);
     const body = (await request.json().catch(() => ({}))) as { issue?: unknown; issues?: unknown };
-    // 이슈 입력이 없으면 통합 세션이면 그 계획의 하위 이슈를, 이 세션이 구현한 요구사항이 이슈로 발행돼 있으면 그 번호도 기본값으로 더한다(ADR-089)
+    // 이슈 입력이 없으면 통합 세션이면 그 계획의 하위 이슈를, 이 세션이 구현한 요구사항이 이슈로 발행돼 있으면 그 번호도 기본값으로 더한다(ADR-092)
     const issues = parseIssueList(body) ?? [...new Set([...integrationIssues(id), ...(await sessionRequirementIssueNumbers(id))])];
     return Response.json(await previewExport(id, { issues }));
   } catch (error) {

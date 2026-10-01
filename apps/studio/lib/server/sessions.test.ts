@@ -53,7 +53,7 @@ describe('parseIssueList', () => {
   });
 });
 
-describe('annotateWithIssue · annotateAllMustHavesPrefill(ADR-089)', () => {
+describe('annotateWithIssue · annotateAllMustHavesPrefill(ADR-092)', () => {
   const requirement = { id: 'R7', title: '로그인 API' };
 
   it('발행된 이슈 번호가 있으면 "[R7] 제목" 뒤에 "(#12)"를 붙인다', () => {

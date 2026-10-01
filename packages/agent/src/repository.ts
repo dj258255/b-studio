@@ -1050,7 +1050,7 @@ export async function addSubIssue(
   return { supported: true };
 }
 
-/** 이슈 본문·라벨·열림 상태를 고친다(요구사항 발행기, ADR-089). GitHub·Gitea만 지원한다(gitHubStyleApi와 같은 경계) */
+/** 이슈 본문·라벨·열림 상태를 고친다(요구사항 발행기, ADR-092). GitHub·Gitea만 지원한다(gitHubStyleApi와 같은 경계) */
 export async function updateIssue(
   remote: RemoteLocation,
   number: number,

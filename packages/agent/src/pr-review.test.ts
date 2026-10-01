@@ -160,7 +160,7 @@ describe('buildPrReviewFixRequest', () => {
 });
 
 describe('buildPrReviewUserPrompt', () => {
-  it('requirementsContext를 주면 diff 앞에 끼워 넣고, 없으면 그대로 둔다(ADR-089)', () => {
+  it('requirementsContext를 주면 diff 앞에 끼워 넣고, 없으면 그대로 둔다(ADR-092)', () => {
     const withContext = buildPrReviewUserPrompt({ diff: 'd', requests: ['요청1'], round: 1, requirementsContext: '[이 PR이 구현하는 요구사항]\n- R1. 로그인' });
     expect(withContext).toContain('[이 PR이 구현하는 요구사항]');
     expect(withContext).toContain('- R1. 로그인');
