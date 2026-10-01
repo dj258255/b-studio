@@ -87,9 +87,9 @@ describe('parseExtractionReply', () => {
     expect(() => parseExtractionReply(text)).toThrow(RequirementsError);
   });
 
-  it('질문이 5개를 넘으면 RequirementsError', () => {
+  it('질문이 5개를 넘으면 오류 대신 앞의 5개만 받는다(긴 추출 답을 형식 하나로 버리지 않는다)', () => {
     const text = JSON.stringify({ requirements: [sample], questions: ['a', 'b', 'c', 'd', 'e', 'f'] });
-    expect(() => parseExtractionReply(text)).toThrow(RequirementsError);
+    expect(parseExtractionReply(text).questions).toEqual(['a', 'b', 'c', 'd', 'e']);
   });
 
   it('JSON이 아니면 RequirementsError', () => {
@@ -595,11 +595,11 @@ describe('computeRequirementHash / requirementContentDrifted / reviseRequirement
     expect(requirementContentDrifted(withEars)).toBe(false);
   });
 
-  it('첫 저장은 rev 1로 채우고 드리프트로 보지 않는다', () => {
+  it('첫 저장은 rev 1로 채우고 드리프트로 보지 않는다 — revisedAt은 건드리지 않는다(비교할 이전 값이 없다, ADR-097)', () => {
     const saved = reviseRequirementIfChanged(withEars, '2026-01-01T00:00:00.000Z');
     expect(saved.rev).toBe(1);
     expect(saved.hash).toBe(computeRequirementHash(withEars));
-    expect(saved.revisedAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(saved.revisedAt).toBeUndefined();
   });
 
   it('내용이 안 바뀌면 다시 저장해도 rev·hash·revisedAt이 그대로다', () => {
@@ -654,21 +654,30 @@ describe('computeRequirementStatus — 재확인 필요(ADR-090)', () => {
     expect(computeRequirementStatus(evidenceWithGate, drifted)).toBe('재확인 필요');
   });
 
-  it('개정이 오른 뒤 새 증거가 없으면 재확인 필요', () => {
-    const revised = reviseRequirementIfChanged(withEars, '2026-02-01T00:00:00.000Z');
+  it('개정이 오른 뒤 새 증거가 없으면 재확인 필요(첫 저장만으로는 재확인 필요가 되지 않는다 — 진짜 두 번째 저장이어야 한다)', () => {
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
     const staleCheckpoint = { sha: 'a', shortSha: 'a', message: 'R1', createdAt: '2026-01-01T00:00:00.000Z' };
     expect(computeRequirementStatus({ checkpoints: [staleCheckpoint], tests: [], gateChecks: [] }, revised)).toBe('재확인 필요');
   });
 
   it('개정이 오른 뒤(revisedAt) 그 시각보다 나중인 체크포인트가 있으면 평소 규칙으로 돌아간다', () => {
-    const revised = reviseRequirementIfChanged(withEars, '2026-02-01T00:00:00.000Z');
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
     const freshCheckpoint = { sha: 'a', shortSha: 'a', message: 'R1', createdAt: '2026-03-01T00:00:00.000Z' };
     expect(computeRequirementStatus({ checkpoints: [freshCheckpoint], tests: [], gateChecks: [] }, revised)).toBe('작업 중');
   });
 
   it('개정이 오른 뒤라도 게이트 확인이 있으면(항상 최신 실행이라 본다) 재확인됐다고 본다', () => {
-    const revised = reviseRequirementIfChanged(withEars, '2026-02-01T00:00:00.000Z');
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
     expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [{ name: 'R1', ok: true }] }, revised)).toBe('검증됨');
+  });
+
+  it('첫 저장 직후에는(비교할 이전 값이 없다) 저장 전에 생긴 체크포인트·테스트만으로도 재확인 필요가 되지 않는다(ADR-097)', () => {
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const staleCheckpoint = { sha: 'a', shortSha: 'a', message: 'R1', createdAt: '2026-01-01T00:00:00.000Z' };
+    expect(computeRequirementStatus({ checkpoints: [staleCheckpoint], tests: [], gateChecks: [] }, firstSave)).toBe('작업 중');
   });
 });
 
@@ -993,5 +1002,31 @@ describe('alignScenarioIds — 요구사항 id가 바뀌면 시나리오 id도 �
     const result = mergeReextractedRequirements(incoming, existing);
     const merged = result.merged.find((requirement) => requirement.id === 'R7')!;
     expect(merged.scenarios!.map((item) => item.id)).toEqual(['R7.1']);
+  });
+});
+
+describe('parseExtractionReply — 사소한 형식 어긋남은 고쳐서 받는다(긴 추출 답 전체를 버리지 않는다)', () => {
+  const requirement = (id: string, scenarioIds: string[]) => ({
+    id,
+    title: '게시글 목록',
+    kind: 'api',
+    priority: 'must',
+    acceptance: ['200을 반환한다'],
+    scenarios: scenarioIds.map((scenarioId) => ({ id: scenarioId, given: 'g', when: 'w', then: 't' })),
+  });
+
+  it('시나리오 id가 요구사항 id와 어긋나도 앞부분을 맞춰 받는다', () => {
+    const reply = parseExtractionReply(JSON.stringify({ requirements: [requirement('R7', ['R6.1', 'R6.2'])], questions: [] }));
+    expect(reply.requirements[0]!.scenarios!.map((scenario) => scenario.id)).toEqual(['R7.1', 'R7.2']);
+  });
+
+  it('질문이 상한보다 많으면 앞에서부터 상한만큼만 받는다', () => {
+    const questions = Array.from({ length: 8 }, (_, index) => `질문 ${index + 1}`);
+    const reply = parseExtractionReply(JSON.stringify({ requirements: [requirement('R1', ['R1.1'])], questions }));
+    expect(reply.questions).toHaveLength(5);
+  });
+
+  it('고칠 수 없는 형식(요구사항이 없음)은 여전히 거부한다', () => {
+    expect(() => parseExtractionReply(JSON.stringify({ requirements: [], questions: [] }))).toThrow();
   });
 });

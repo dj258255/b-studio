@@ -62,7 +62,7 @@ describe('POST /api/sessions/[id]/requirements/extract', () => {
     const response = await post({ specText: '로그인 기능을 만드세요' });
 
     expect(response.status).toBe(200);
-    expect(mocks.previewSessionRequirementsExtraction).toHaveBeenCalledWith('s1', { specText: '로그인 기능을 만드세요' });
+    expect(mocks.previewSessionRequirementsExtraction).toHaveBeenCalledWith('s1', { specText: '로그인 기능을 만드세요' }, { signal: expect.any(AbortSignal) });
     const body = await response.json();
     expect(body.source).toBe('model');
     expect(body.questions).toHaveLength(1);

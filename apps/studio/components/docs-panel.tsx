@@ -19,14 +19,23 @@ interface DocContent {
   content: string;
 }
 
-type NewDocKind = "design" | "adr" | "troubleshooting" | "roadmap";
+type NewDocKind = "design" | "adr" | "troubleshooting" | "roadmap" | "verification" | "experiment" | "roadmap-plan";
 
 const NEW_DOC_LABEL: Record<NewDocKind, string> = {
   design: "설계 문서",
   adr: "ADR(아키텍처 결정 기록)",
   troubleshooting: "트러블슈팅 항목",
-  roadmap: "로드맵·트레이드오프",
+  roadmap: "로드맵·트레이드오프 항목",
+  verification: "검증 기록",
+  experiment: "실험 기록",
+  "roadmap-plan": "로드맵(단계·마일스톤)",
 };
+
+interface DocLintFindingView {
+  line: number;
+  code: string;
+  message: string;
+}
 
 async function readJson<T>(response: Response): Promise<T & { error?: string }> {
   return (await response.json().catch(() => ({}))) as T & { error?: string };
@@ -46,6 +55,8 @@ export function DocsPanel({ view }: { view: SessionView }) {
   const [creating, setCreating] = useState(false);
   const [reindexing, setReindexing] = useState(false);
   const [reindexNotice, setReindexNotice] = useState<string>();
+  const [roadmapUpdating, setRoadmapUpdating] = useState(false);
+  const [roadmapNotice, setRoadmapNotice] = useState<string>();
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -80,6 +91,21 @@ export function DocsPanel({ view }: { view: SessionView }) {
       return;
     }
     setReindexNotice("docs/README.md 색인을 갱신했습니다");
+    setRevision((value) => value + 1);
+    setSelected(data.path);
+  }
+
+  async function updateRoadmap() {
+    setRoadmapUpdating(true);
+    setRoadmapNotice(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/docs/roadmap`, { method: "POST" });
+    const data = await readJson<DocContent>(response);
+    setRoadmapUpdating(false);
+    if (!response.ok) {
+      setRoadmapNotice(data.error ?? "로드맵을 갱신하지 못했습니다");
+      return;
+    }
+    setRoadmapNotice("docs/ROADMAP.md 진행 현황을 갱신했습니다");
     setRevision((value) => value + 1);
     setSelected(data.path);
   }
@@ -127,6 +153,15 @@ export function DocsPanel({ view }: { view: SessionView }) {
               {reindexing ? "갱신하는 중" : "색인 갱신"}
             </button>
             {reindexNotice && <p className="mt-1 text-xs text-muted">{reindexNotice}</p>}
+            <button
+              type="button"
+              onClick={() => void updateRoadmap()}
+              disabled={roadmapUpdating}
+              className="mt-1 block text-xs font-medium text-muted hover:text-ink disabled:opacity-50"
+            >
+              {roadmapUpdating ? "갱신하는 중" : "ROADMAP 갱신"}
+            </button>
+            {roadmapNotice && <p className="mt-1 text-xs text-muted">{roadmapNotice}</p>}
           </div>
         )}
       </div>
@@ -170,6 +205,31 @@ function DocViewer({ sessionId, path, canManage, onSaved }: { sessionId: string;
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string>();
+  const [lintFindings, setLintFindings] = useState<DocLintFindingView[]>([]);
+
+  // 편집 중에만, 입력이 멈춘 뒤 한 번씩 "모호한 표현"을 검사한다(막지 않는다 — 결과는 안내용일 뿐 저장을 가로막지 않는다)
+  useEffect(() => {
+    if (mode !== "edit") return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void fetch(`/api/sessions/${sessionId}/docs/lint`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: draft }),
+      })
+        .then((response) => readJson<{ findings?: DocLintFindingView[] }>(response))
+        .then((data) => {
+          if (!cancelled) setLintFindings(data.findings ?? []);
+        })
+        .catch(() => {
+          // 린트 실패는 편집을 막지 않는다 — 조용히 넘어간다
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [draft, mode, sessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -247,6 +307,15 @@ function DocViewer({ sessionId, path, canManage, onSaved }: { sessionId: string;
               onChange={(event) => setDraft(event.target.value)}
               className="min-h-0 flex-1 resize-none rounded-control border border-line bg-ground p-3 font-mono text-sm leading-6"
             />
+            {lintFindings.length > 0 && (
+              <ul className="max-h-32 shrink-0 overflow-y-auto rounded-control border border-line bg-ground px-3 py-2 text-xs text-muted" aria-label="모호한 표현">
+                {lintFindings.map((finding, index) => (
+                  <li key={index}>
+                    {finding.line}번째 줄: {finding.message}
+                  </li>
+                ))}
+              </ul>
+            )}
             <div className="flex items-center gap-2">
               <button
                 type="button"

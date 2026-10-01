@@ -282,6 +282,88 @@ describe('CheckpointStore', () => {
     expect(await store.pendingFiles()).toEqual([]);
   });
 
+  it('버리기 전에 백업을 남기고, 되살리기로 그대로 되돌린다(ADR-099, "절대 조용히 지우지 않는다")', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+    await write('api/src/New.java', 'class New {}\n');
+
+    const { files, backup } = await store.discard();
+    expect(files).toEqual(['api/src/New.java', 'api/src/Order.java']);
+    expect(backup).toMatchObject({ files: ['api/src/New.java', 'api/src/Order.java'] });
+    expect(await read('api/src/Order.java')).toBe('class Order {}\n');
+    await expect(read('api/src/New.java')).rejects.toThrow();
+
+    const restored = await store.restoreBackup(backup!.id);
+    expect(restored.files.sort()).toEqual(['api/src/New.java', 'api/src/Order.java']);
+    expect(await read('api/src/Order.java')).toBe('class Order { int broken }\n');
+    expect(await read('api/src/New.java')).toBe('class New {}\n');
+    // 되살려도 체크포인트 기록 자체는 그대로다(되살린 변경은 다시 pending이다)
+    expect(await store.pendingFiles()).toEqual(['api/src/New.java', 'api/src/Order.java']);
+  });
+
+  it('버릴 변경이 없으면 백업을 남기지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    expect(await store.discard()).toEqual({ files: [], patch: '' });
+  });
+
+  it('그 사이에 같은 파일이 다시 바뀌면 백업 되살리기를 거부하고 아무것도 바꾸지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+    const { backup } = await store.discard();
+
+    await write('api/src/Order.java', 'class Order { String other; }\n');
+    await expect(store.restoreBackup(backup!.id)).rejects.toThrow('충돌');
+    // 거부됐으니 그 사이에 쓴 내용은 그대로여야 한다
+    expect(await read('api/src/Order.java')).toBe('class Order { String other; }\n');
+  });
+
+  it('존재하지 않는 백업 id는 되살리기를 거부한다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await expect(store.restoreBackup('2026-01-01T00-00-00-000Z-0001')).rejects.toThrow('찾을 수 없습니다');
+    await expect(store.restoreBackup('; rm -rf /')).rejects.toThrow(CheckpointError);
+  });
+
+  it('이전 체크포인트로 되돌리기 전에도 아직 커밋하지 않은 변경을 백업한다', async () => {
+    const store = new CheckpointStore(root);
+    const start = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모');
+    await write('api/src/Draft.java', 'class Draft {}\n');
+
+    const { backup } = await store.restore(start.sha);
+    expect(backup).toMatchObject({ files: ['api/src/Draft.java'] });
+    await expect(read('api/src/Draft.java')).rejects.toThrow();
+
+    const restored = await store.restoreBackup(backup!.id);
+    expect(restored.files).toEqual(['api/src/Draft.java']);
+    expect(await read('api/src/Draft.java')).toBe('class Draft {}\n');
+  });
+
+  it('백업은 최근 10개까지만 남기고 오래된 것부터 지우며, 방금 만든 백업은 지우지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      await write('api/src/Order.java', `class Order { int v${i}; }\n`);
+      const { backup } = await store.discard();
+      ids.push(backup!.id);
+    }
+
+    const remaining = await store.discardedBackups();
+    expect(remaining).toHaveLength(10);
+    const remainingIds = new Set(remaining.map((entry) => entry.id));
+    // 가장 최근 10개(마지막에 만든 것부터)만 남고, 가장 먼저 만든 2개는 지워졌다
+    expect(remainingIds.has(ids[0]!)).toBe(false);
+    expect(remainingIds.has(ids[1]!)).toBe(false);
+    expect(remainingIds.has(ids[ids.length - 1]!)).toBe(true);
+    // 가장 최근 백업은 한도를 넘겨도 지우지 않는다
+    await expect(store.restoreBackup(ids[ids.length - 1]!)).resolves.toMatchObject({ files: ['api/src/Order.java'] });
+  });
+
   it('마지막 체크포인트 이후 추가·수정·삭제한 파일과 파일 하나의 변경 내용을 돌려준다', async () => {
     const store = new CheckpointStore(root);
     await write('api/src/Gone.java', 'class Gone {}\n');

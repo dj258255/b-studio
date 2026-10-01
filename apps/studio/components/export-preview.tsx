@@ -12,6 +12,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string>();
   const [showBody, setShowBody] = useState(false);
+  const [lintFindings, setLintFindings] = useState<Array<{ line: number; message: string }>>([]);
   // 미리보기가 studio.yaml의 기본값을 주면 그 값으로 맞춘다(사람이 건드리면 그 뒤로는 사람 선택을 따른다)
   const [review, setReview] = useState<boolean>();
   const reviewTouched = useRef(false);
@@ -58,6 +59,29 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
       clearTimeout(timer);
     };
   }, [parsed, sessionId]);
+
+  // PR 본문에 "모호한 표현"(수치 없는 성능 주장, 약한 표현, 헷갈리는 용어)이 있으면 막지 않고 알려만 준다(ADR-098).
+  // 미리보기를 아직 불러오지 못했을 때만(초기 상태) body가 없고, 그때 lintFindings는 이미 빈 배열이라 따로 비우지 않는다
+  useEffect(() => {
+    const body = preview?.body;
+    if (!body) return;
+    let cancelled = false;
+    void fetch(`/api/sessions/${sessionId}/docs/lint`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: body }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!cancelled) setLintFindings(Array.isArray(data?.findings) ? data.findings : []);
+      })
+      .catch(() => {
+        // 린트 실패는 PR 만들기를 막지 않는다 — 조용히 넘어간다
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preview?.body, sessionId]);
 
   /** 브랜치 올리기와 PR 만들기를 한 번에 한다. 누락이 있어도 막지 않는다 */
   async function create() {
@@ -141,6 +165,19 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
               </li>
             ))}
           </ul>
+
+          {lintFindings.length > 0 && (
+            <div className="mt-3 rounded-control border border-line bg-panel px-3 py-2" aria-label="모호한 표현">
+              <p className="text-xs font-medium text-wait">모호한 표현 {lintFindings.length}개(올리기를 막지는 않습니다)</p>
+              <ul className="mt-1 max-h-24 space-y-0.5 overflow-y-auto text-xs text-muted">
+                {lintFindings.map((finding, index) => (
+                  <li key={index}>
+                    {finding.line}번째 줄: {finding.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div className="mt-3">
             <button
