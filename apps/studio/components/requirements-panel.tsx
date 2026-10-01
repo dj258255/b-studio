@@ -982,10 +982,8 @@ export function ImportFlow({
   // A: "뽑는 중 · 2분 13초" 경과 시간과 취소 — busy/recommending이 켜질 때마다 0부터 다시 잰다
   const [elapsedMs, setElapsedMs] = useState(0);
   const [recommendElapsedMs, setRecommendElapsedMs] = useState(0);
-  const extractAbortRef = useRef<AbortController>();
-  const recommendAbortRef = useRef<AbortController>();
-  // A: 저장하지 않은 채 남은 추출 결과(새로고침·서버 재시작으로 화면이 끊겨도 서버가 세션 상태 폴더에 남겨 둔 것)
-  const [resumableDraft, setResumableDraft] = useState<PersistedExtractionDraft>();
+  const extractAbortRef = useRef<AbortController | undefined>(undefined);
+  const recommendAbortRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
     if (!busy) {
@@ -1042,23 +1040,9 @@ export function ImportFlow({
     };
   }, [sessionId, initialSpecText]);
 
-  // A: initialSpecText로 바로 추출하는 경우가 아니면, 저장 안 한 채 남은 추출 결과가 있는지 마운트 때 한 번 확인한다
-  // (페이지 새로고침·서버 재시작 뒤에도 "이어서 보기/버리기"로 되찾을 수 있게)
-  useEffect(() => {
-    if (initialSpecText) return;
-    let cancelled = false;
-    fetch(`/api/sessions/${sessionId}/requirements/extract`)
-      .then((response) => (response.ok ? (response.json() as Promise<{ draft?: PersistedExtractionDraft }>) : undefined))
-      .then((data) => {
-        if (!cancelled && data?.draft) setResumableDraft(data.draft);
-      })
-      .catch(() => {
-        // 저장된 초안이 없거나 읽지 못해도 화면은 평소대로 빈 상태로 시작한다
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId, initialSpecText]);
+  // A: "요구사항" 탭이 받은 스냅샷에 저장 안 한 추출 결과가 실려 있으면(세션 상태 폴더에 남아 있던 것) 그대로 이어받는다.
+  // initialSpecText로 바로 추출하는 경우(요구사항에 반영)는 그 결과가 곧 새로 덮어쓰므로 배너를 띄우지 않는다
+  const [resumableDraft, setResumableDraft] = useState(() => (initialSpecText ? undefined : draft));
 
   function resumeDraft() {
     if (!resumableDraft) return;
