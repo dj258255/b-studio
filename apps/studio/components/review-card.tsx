@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { PrReviewFinding } from "@b-studio/agent";
 import type { ReviewStateView } from "@/lib/studio-events";
 import { useChatDraft } from "./chat-draft-context";
@@ -54,15 +54,18 @@ export function ReviewCard({
   const [error, setError] = useState<string>();
   const [expanded, setExpanded] = useState<number>();
   // 저장소 상세(repository-detail.tsx)는 세션을 한 번만 fetch해 review를 들고 있어, 오탐 닫기 응답이 SSE 없이도
-  // 바로 반영되도록 로컬로 덮어쓴다. 실시간 구독이 있는 화면(repository-bar.tsx)은 새 prop이 오면 그대로 따라간다
+  // 바로 반영되도록 로컬로 덮어쓴다. 실시간 구독이 있는 화면(repository-bar.tsx)은 새 prop이 오면 그대로 따라간다.
+  // prop이 바뀌면 렌더 중에 바로 맞춘다(리액트가 권하는 "프롭이 바뀌면 상태를 조정" 패턴 — useEffect로 하면 한 번 더
+  // 그리고 나서 고쳐 그리므로 렌더 중 setState로 그 왕복을 없앤다)
   const [localReview, setLocalReview] = useState(review);
+  const [prevReviewProp, setPrevReviewProp] = useState(review);
+  if (review !== prevReviewProp) {
+    setPrevReviewProp(review);
+    setLocalReview(review);
+  }
   const [resolving, setResolving] = useState<string>(); // `${round}-${index}` — 오탐 닫기 이유 입력창이 열린 지적
   const [reason, setReason] = useState("");
   const draft = useChatDraft();
-
-  useEffect(() => {
-    setLocalReview(review);
-  }, [review]);
 
   if (!hasPullRequest) return null;
   const effectiveReview = localReview;

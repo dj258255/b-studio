@@ -179,8 +179,6 @@ import {
   type ModelAsk,
   type ModelClient,
   type ModelClientInfo,
-  type PrReviewFinding,
-  type PrReviewResolvedFinding,
   type PullRequestDraft,
   type ReferencedFile,
   type Recommendation,
