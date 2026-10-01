@@ -25,18 +25,24 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  corsEnvironmentFrom,
   databaseSpecFor,
   dependencyClosure,
+  detectBackendUrlEnvFromCode,
+  detectBackendUrlEnvFromEnvironment,
   detectEnvReferences,
   importSupportingServices,
   needsDevDefaultCredentials,
+  originalComposeServiceFor,
   proposePostgresService,
+  publicUrlPlaceholder,
   suggestsPostgresNeed,
   wireAppEnvironment,
   withDefaultHealthcheck,
   withDevDefaultCredentials,
   COMPOSE_FILE_CANDIDATES,
   isProdComposeFile,
+  type BackendUrlReference,
   type ImportedInfraService,
   type InfraService,
   type WirableInfraService,
@@ -82,6 +88,11 @@ export interface ProjectDetection {
   /** infra 중 앱 서비스가 실제로 기대는(닫힘) 이름(ADR-083). 폴더 열기 미리보기의 체크박스 기본값이다 — 아무도 기대지 않는 부가 서비스는 기본으로 켜지 않는다 */
   defaultInfra: string[];
   warnings: string[];
+  /**
+   * 프론트엔드가 백엔드 주소를 환경 변수로 받도록 자동으로 연결했으면(fix/frontend-backend-url) 남는다.
+   * specYaml이 이 값으로 workflow.pageChecks 기본 확인(화면이 백엔드 호출에 실패하면 게이트가 잡는다)을 만든다
+   */
+  frontendBackendWiring?: { frontendService: string; backendService: string; backendProbePath: string };
 }
 
 export interface GeneratedFile {
@@ -130,10 +141,11 @@ export async function detectProject(folder: string): Promise<ProjectDetection> {
   const infra = await detectInfra(root, services, childDirNames);
   await wireServiceEnvironments(root, services, infra);
   await disableSpringDockerCompose(root, services);
+  const frontendBackendWiring = await wireFrontendBackendUrl(root, services, childDirNames);
   // 서비스 선택(ADR-083)의 기본값과 같은 규칙: 앱 서비스가 기대는 부가 서비스 + 그 부가 서비스끼리의 기댐 닫힘.
   // 아무도 기대지 않는 부가 서비스(예: 가져왔지만 안 쓰는 카프카)는 기본으로 체크하지 않는다
   const defaultInfra = [...dependencyClosure(services.flatMap((service) => service.dependsOn), Object.fromEntries(infra.map((service) => [service.name, service.dependsOn])))];
-  return { folder: root, name, hasSpec: false, services, infra, defaultInfra, warnings };
+  return { folder: root, name, hasSpec: false, services, infra, defaultInfra, warnings, ...(frontendBackendWiring ? { frontendBackendWiring } : {}) };
 }
 
 /**
@@ -252,6 +264,82 @@ async function disableSpringDockerCompose(root: string, services: DetectedServic
     service.environment = { ...service.environment, SPRING_DOCKER_COMPOSE_ENABLED: 'false' };
     service.notes.push('spring-boot-docker-compose가 있어 샌드박스에서는 끕니다(SPRING_DOCKER_COMPOSE_ENABLED=false). 부가 서비스는 b-studio가 띄웁니다');
   }
+}
+
+/**
+ * 프론트엔드(Next.js·Vite) 코드가 읽는 소스 안의 흔한 자리. lib/api.ts(실제 저장소에서 확인한 자리, docs/decisions.md ADR-0XX 참고)를
+ * 먼저 보고, 없으면 흔히 쓰는 몇 자리만 본다 — appConfigText와 같은 생각으로, 저장소 전체를 훑지 않고 알려진 자리만 본다
+ */
+const FRONTEND_API_CLIENT_CANDIDATES = [
+  'lib/api.ts', 'lib/api.js', 'lib/api.tsx',
+  'src/lib/api.ts', 'src/lib/api.js',
+  'app/lib/api.ts', 'src/api.ts', 'src/config.ts', 'src/lib/config.ts',
+  '.env.local', '.env',
+];
+
+/**
+ * 프론트엔드 서비스 하나가 백엔드 주소를 어느 환경 변수로 받는지 찾는다(fix/frontend-backend-url).
+ * 1) 원본 compose(이미 있다면)에 그 서비스의 environment로 선언돼 있으면 그 값을 가장 믿는다(사람이 적어 둔 것이다).
+ * 2) 없으면 코드에서 `process.env.NEXT_PUBLIC_API_BASE_URL` 같은 접근을 찾는다(추정이라 notes에 남긴다).
+ */
+async function detectFrontendBackendRef(
+  root: string,
+  service: DetectedService,
+  composeText: string | undefined,
+): Promise<{ ref: BackendUrlReference; fromCompose: boolean } | undefined> {
+  if (composeText) {
+    const original = originalComposeServiceFor(composeText, service.path, service.name);
+    const ref = original && detectBackendUrlEnvFromEnvironment(original.environment);
+    if (ref) return { ref, fromCompose: true };
+  }
+  for (const file of FRONTEND_API_CLIENT_CANDIDATES) {
+    const text = await readText(path.join(root, service.path, file));
+    if (!text) continue;
+    const ref = detectBackendUrlEnvFromCode(text);
+    if (ref) return { ref, fromCompose: false };
+  }
+  return undefined;
+}
+
+/**
+ * 폴더에 프론트엔드와 백엔드가 함께 있으면(풀스택), 프론트엔드가 읽는 백엔드 주소 환경 변수를 찾아 샌드박스 주소로
+ * 자동 연결한다. 실제 호스트 포트는 `docker compose up` 뒤에야 정해지므로(샌드박스가 무작위로 고른다), 값 대신
+ * 자리 표시자(`${b-studio:services.<백엔드>.publicUrl}`)를 적어 두고 packages/sandbox가 띄우기 직전에 채운다.
+ * 백엔드가 CORS 허용 출처를 환경 변수로 받고 있었으면(원본 compose) 그 값도 그대로 가져온다.
+ * 둘 이상의 프론트엔드·백엔드 후보가 있으면 처음 찾은 한 쌍만 연결한다(알려진 한계, ADR-0XX에 남긴다).
+ */
+async function wireFrontendBackendUrl(
+  root: string,
+  services: DetectedService[],
+  childDirNames: readonly string[],
+): Promise<ProjectDetection['frontendBackendWiring']> {
+  const frontend = services.find((service) => service.template === 'nextjs' || service.template === 'vite');
+  const backend = services.find((service) => service !== frontend && (service.template === 'spring-boot' || service.template === 'fastapi' || service.template === 'nextjs' || service.template === 'vite'));
+  if (!frontend || !backend) return undefined;
+
+  const composeFile = await findComposeFile(root, childDirNames);
+  const composeText = composeFile ? await readText(composeFile.absolute) : undefined;
+
+  const found = await detectFrontendBackendRef(root, frontend, composeText);
+  if (!found) return undefined;
+
+  frontend.environment = { ...frontend.environment, [found.ref.envKey]: `${publicUrlPlaceholder(backend.name)}${found.ref.suffix}` };
+  if (!frontend.dependsOn.includes(backend.name)) frontend.dependsOn = [...frontend.dependsOn, backend.name];
+  frontend.notes.push(
+    `${frontend.name}가 ${backend.name} 주소를 ${found.ref.envKey}로 받습니다 — 샌드박스 주소로 자동 연결합니다` +
+      (found.fromCompose ? '' : ` (원본 compose에 선언돼 있지 않아 코드에서 추정했습니다. 다른 변수를 쓰면 ${found.ref.envKey} 대신 studio.yaml의 값을 고치세요)`),
+  );
+
+  if (composeText) {
+    const originalBackend = originalComposeServiceFor(composeText, backend.path, backend.name);
+    const cors = originalBackend ? corsEnvironmentFrom(originalBackend.environment) : {};
+    if (Object.keys(cors).length > 0) {
+      backend.environment = { ...backend.environment, ...cors };
+      backend.notes.push(`CORS 허용 출처 설정을 원본 compose(${composeFile!.relative})에서 그대로 가져왔습니다: ${Object.keys(cors).join(', ')}`);
+    }
+  }
+
+  return { frontendService: frontend.name, backendService: backend.name, backendProbePath: backend.ready.path };
 }
 
 async function appConfigText(root: string, service: DetectedService): Promise<string> {
@@ -530,8 +618,28 @@ function specYaml(detection: ProjectDetection): string {
     for (const note of service.notes) lines.push(`    # 확인: ${note}`);
   }
   lines.push(...databasesYaml(detection.infra));
+  lines.push(...workflowYaml(detection.frontendBackendWiring));
   lines.push('');
   return lines.join('\n');
+}
+
+/**
+ * 프론트엔드→백엔드 주소를 자동 연결했으면(fix/frontend-backend-url), 화면이 떠도 API 호출이 깨지는 것을 검증 게이트가
+ * 잡도록 기본 pageChecks 하나를 만든다. 헤드리스 브라우저를 쓸 수 없는 샌드박스에서는 fallbackProbe가 대신
+ * 백엔드 주소로 HTTP 확인만 한다(packages/agent/src/gate.ts). 다시 만들려면(studio.yaml을 직접 더 고치고 싶으면)
+ * studio.yaml·compose.b-studio.yaml과 각 서비스 폴더의 Dockerfile.b-studio를 지우고 폴더를 다시 열면 된다
+ */
+function workflowYaml(wiring: ProjectDetection['frontendBackendWiring']): string[] {
+  if (!wiring) return [];
+  return [
+    '',
+    '# 프론트엔드가 백엔드 주소를 자동으로 연결해 받습니다(위 서비스의 "확인:" 메모 참고). 화면은 뜨는데 API 호출만 깨지는',
+    '# 경우를 검증 게이트가 잡도록 기본 화면 확인을 하나 만들었습니다. 다시 만들려면 이 파일과 compose.b-studio.yaml·',
+    '# 각 서비스 폴더의 Dockerfile.b-studio를 지우고 폴더를 다시 여세요',
+    'workflow:',
+    '  pageChecks:',
+    `    - { service: ${wiring.frontendService}, path: /, mode: browser, fallbackProbe: { service: ${wiring.backendService}, path: ${yamlString(wiring.backendProbePath)} } }`,
+  ];
 }
 
 /** postgres 부가 서비스 중 databases: 요건(POSTGRES_DB·POSTGRES_USER가 SQL 식별자)에 맞는 것만 체크포인트 스냅샷 대상으로 적는다 */

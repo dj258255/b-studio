@@ -207,6 +207,18 @@ describe('parseSpec', () => {
     ).toBe(true);
   });
 
+  it('pageChecks.fallbackProbe는 browser 전용이고, 그 자리를 가리키는 서비스는 managed여야 한다(fix/frontend-backend-url)', () => {
+    expect(
+      captureError(() =>
+        parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, fallbackProbe: { service: api, path: /actuator/health } }\n`),
+      ).issues,
+    ).toEqual(['workflow.pageChecks.0.fallbackProbe: fallbackProbe는 mode: browser에서만 쓸 수 있습니다']);
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, fallbackProbe: { service: api, path: /actuator/health } }\n`).workflow
+        ?.pageChecks?.[0]?.fallbackProbe,
+    ).toEqual({ service: 'api', path: '/actuator/health' });
+  });
+
   it('browser 모드의 상호작용 단계를 읽고, http 모드나 잘못된 단계를 거부한다', () => {
     const spec = parseSpec(`${ORDERS_SPEC}workflow:
   pageChecks:
@@ -610,6 +622,7 @@ workflow:
     - { name: db, service: db, command: [pg_isready] }
   pageChecks:
     - { service: web, path: /, expectFromApi: { service: db, path: /api/orders, jsonPath: "$[0].customerName" } }
+    - { service: api, path: /, mode: browser, fallbackProbe: { service: db, path: /health } }
 `,
     );
     await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
@@ -622,6 +635,7 @@ workflow:
       "workflow.tests.1.service: 'db'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.service: 'web'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.expectFromApi.service: 'db'은(는) source: managed 서비스가 아닙니다",
+      "workflow.pageChecks.1.fallbackProbe.service: 'db'은(는) source: managed 서비스가 아닙니다",
     ]);
   });
 
@@ -657,6 +671,55 @@ workflow:
       (e: unknown) => e as SpecError,
     );
     expect(notManaged.issues).toEqual(["workflow.autoPageChecks.service: 'db'은(는) source: managed 서비스가 아닙니다"]);
+  });
+
+  it('런타임 공개 URL 자리 표시자를 compose의 environment에서 찾아 publicUrlRefs로 모은다(fix/frontend-backend-url)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-publicurl-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  frontend: { source: managed, template: nextjs, path: frontend, port: 3000, preview: browser }
+  backend: { source: managed, template: spring-boot, path: backend, port: 8080, preview: openapi }
+`,
+    );
+    await writeFile(
+      path.join(dir, 'compose.yaml'),
+      `services:
+  frontend:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "\${b-studio:services.backend.publicUrl}/api"
+  backend:
+    build: ./backend
+`,
+    );
+
+    const project = await loadProject(dir);
+    expect(project.publicUrlRefs).toEqual([
+      { service: 'frontend', envKey: 'NEXT_PUBLIC_API_BASE_URL', template: '${b-studio:services.backend.publicUrl}/api', targetService: 'backend' },
+    ]);
+  });
+
+  it('공개 URL 자리 표시자가 가리키는 서비스가 managed가 아니면 거부한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-publicurl-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      'version: 1\nname: x\nservices:\n  frontend: { source: managed, template: nextjs, path: frontend, port: 3000, preview: browser }\n',
+    );
+    await writeFile(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  frontend: { build: ./frontend, environment: { NEXT_PUBLIC_API_BASE_URL: "${b-studio:services.backend.publicUrl}" } }\n  backend: { image: nginx }\n',
+    );
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual([
+      "frontend.environment.NEXT_PUBLIC_API_BASE_URL: ${b-studio:services.backend.publicUrl}이 가리키는 'backend'이(가) source: managed 서비스가 아닙니다",
+    ]);
   });
 
   it('시크릿은 환경 변수 이름으로 적고, 받을 서비스는 compose에 있어야 한다', async () => {

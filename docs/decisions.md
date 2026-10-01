@@ -3693,6 +3693,49 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-0XX 폴더 열기가 프론트엔드의 백엔드 주소를 자동으로 연결하고, 검증 게이트가 그 연결이 실패하면 잡는다
+
+상태: 채택
+
+### 맥락
+- b-studio로 과제(apr, `~/.cache/b-studio/sessions/apr-0e6e4f04`)를 도그푸딩하다가 실제로 겪은 버그다. 폴더 열기(ADR-067)로 들여온 Next.js `frontend/` + Spring Boot `backend/` + postgres `db` 프로젝트를 세션으로 띄우면, 세션 미리보기의 글 목록 화면이 "게시글을 불러오지 못했습니다"로 멈췄다. 원인은 `frontend/lib/api.ts`가 `process.env.NEXT_PUBLIC_API_BASE_URL || process.env.API_BASE_URL || "http://localhost:8080"`로 백엔드 주소를 읽는데, b-studio가 만든 `compose.b-studio.yaml`에는 프론트엔드에 그 환경 변수를 전혀 넣어 주지 않아 하드코딩된 `http://localhost:8080`으로 떨어졌기 때문이다. 샌드박스 안에서 백엔드는 edge 프록시가 무작위로 고른 호스트 포트(예: 세션 미리보기가 `http://127.0.0.1:32869`로 뜨는데, 백엔드는 또 다른 임의 포트)에 떠 있어 `localhost:8080`과는 전혀 다른 주소다.
+- 원본 프로젝트의 `docker-compose.yml`은 이 문제를 이미 알고 있었다 — 프론트엔드에 `NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}/api}`를, 백엔드에 `APP_CORS_ALLOWED_ORIGIN_PATTERNS: "${CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"`를 선언해 둔 compose면 호스트에서 직접 `docker compose up`할 때는 포트를 고정해 맞춰 주면 그만이었다. project-detect.ts(ADR-067)는 postgres 같은 부가 서비스 참조는 가져오면서도(ADR-073) 이 프론트엔드→백엔드 주소 참조는 보지 않았다.
+- 검증 게이트(ADR-050·ADR-078)는 이 버그를 잡지 못했다. 폴더 열기가 만드는 `studio.yaml`에는 애초에 `workflow.pageChecks`가 없어(`specYaml()`이 `workflow:` 절을 전혀 만들지 않았다) 화면 확인 자체가 돌지 않았다 — ADR-078의 "로딩에서 멈춘 화면" 판정조차 실행될 기회가 없었다.
+- 더 근본적인 문제는 샌드박스의 호스트 포트가 **`docker compose up` 뒤에야** 정해진다는 것이다(`packages/sandbox/src/docker/format.ts`의 edge는 `127.0.0.1::<edge 포트>`로 호스트 포트를 비워 docker가 고르게 한다, `compose-provider.ts`의 `endpoint()`가 `up` 뒤 `docker compose port`로 읽는다). 환경 변수는 컨테이너가 뜨기 **전에** 정해져야 하므로, 값을 채우려면 포트를 미리 알아야 하는 순환이 있었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 모든 managed 서비스의 호스트 포트를 항상 미리 정한다(자동 배정을 없앤다) | 참조가 없는 대부분의 프로젝트에도 불필요한 포트 선점·경합 구간을 늘린다. 참조가 있는 서비스만(보통 백엔드 하나) 미리 정한다(채택) |
+| B. 두 단계 기동(참조되는 서비스를 먼저 띄운 뒤 포트를 읽어 참조하는 서비스의 환경을 다시 써서 띄운다) | 컨테이너를 두 번 기동해야 하고(재시작 비용), 이미 떠 있는 edge·네트워크 설정을 다시 써야 해 구조가 복잡해진다. 포트 사전 할당(A의 범위를 좁힌 것)이 기존 구조(override 파일 하나를 `up` 전에 완성해 넘긴다)에 자연스럽게 들어간다(채택) |
+| C. 자리 표시자를 docker compose 자신의 `${VAR:-default}` 문법으로 적고 `.env`나 프로세스 환경으로 채운다 | compose가 그 자리를 스스로 치환해 버려 우리가 끼어들 틈이 없고, 가짜 기본값이 섞이면(`:-`) 틀린 주소로 조용히 기동할 위험이 있다. compose가 모르는 문법(`${b-studio:services.<이름>.publicUrl}`, 콜론·점·하이픈이 섞여 compose의 변수 이름 규칙에 맞지 않는다)으로 적어 컴포즈가 건드리지 못하게 하고 우리가 직접 치환한다(채택) |
+| D. 검증 게이트가 모든 폴더 열기 프로젝트에 헤드리스 브라우저 화면 확인을 기본으로 켠다 | ADR-078이 이미 검토하고 기각한 더 큰 기본값 변경이다(`autoPageChecks`는 여전히 opt-in). 이번에는 "프론트엔드→백엔드 주소를 자동으로 연결했을 때"에만 그 한 화면(`/`)의 확인을 만든다 — 새 기본값이 아니라 우리가 새로 만든 연결 자체의 안전장치다(채택) |
+
+### 결정
+1. **런타임 공개 URL 주입** (`packages/spec/src/public-url.ts`, `packages/sandbox/src/docker/{free-port,format,compose-provider}.ts`): compose의 environment 값에 자리 표시자 `${b-studio:services.<서비스>.publicUrl}`을 적어 두면(접미사 포함, 예: `${b-studio:services.backend.publicUrl}/api`), `LoadedProject.publicUrlRefs`로 모아 둔다(`findPublicUrlRefs`, `loadProject`가 가리키는 서비스가 managed인지도 검증한다). `LocalDockerProvider.create()`가 참조당 호스트 포트 하나를 `findFreeHostPort()`(포트 0으로 소켓을 열어 OS가 고른 빈 포트를 받고 바로 닫는, 흔히 쓰는 "find free port" 패턴 — 닫은 뒤 `compose up`이 집기 전까지 다른 프로세스가 먼저 쓸 수 있는 좁은 경합이 있다는 한계는 그대로 남는다)로 미리 정해 `buildOverride()`에 넘기면, edge는 그 서비스만 `127.0.0.1::<edge 포트>`(자동 배정) 대신 `127.0.0.1:<미리 정한 포트>:<edge 포트>`로 공개하고, 참조한 서비스의 environment를 `http://127.0.0.1:<미리 정한 포트>`로 채운 override를 함께 쓴다. `127.0.0.1`로 통일한다 — 세션 미리보기 오리진과 같고, 쿠키는 포트가 아니라 호스트 단위라 `x-user-id` 같은 쿠키도 그대로 동작한다. 참조가 없는 대부분의 프로젝트는 예전처럼 포트가 전부 자동 배정된다(하위 호환).
+2. **폴더 열기 탐지** (`apps/studio/lib/server/project-detect.ts`, `packages/spec/src/compose-import.ts`): `wireFrontendBackendUrl`이 프론트엔드(nextjs·vite) 서비스 하나와 그 밖의 앱 서비스(보통 backend) 하나를 찾아, 원본 compose(있으면, `originalComposeServiceFor`가 `build.context`로 폴더와 compose 서비스 이름을 연결한다 — 폴더 이름과 compose 서비스 이름이 달라도 찾는다)의 environment에서 `NEXT_PUBLIC_*`·`VITE_*`·`REACT_APP_*` 중 API·BACKEND·SERVER·BASE_URL이 섞인 이름(`FRONTEND_BACKEND_ENV_NAME`)을 찾는다. 없으면 프론트엔드 코드의 흔한 자리(`lib/api.ts` 등, `detectBackendUrlEnvFromCode`)에서 `process.env.<이름>` 접근과 같은 줄의 문자열 폴백을 본다. 찾으면 그 환경 변수를 자리 표시자(+ 원래 값에 있던 포트 뒤 경로 접미사, `suffixFromUrlValue`)로 채우고 `depends_on`에 더하며, 백엔드가 CORS 허용 출처를 환경 변수로 받고 있었으면(이름에 `CORS`가 들어간 모든 키, `corsEnvironmentFrom`) 원본 compose 값 그대로 가져온다. 미리보기(`folder-proposal-view.tsx`)에 보이는 "확인:" 메모로 "frontend가 backend 주소를 NEXT_PUBLIC_API_BASE_URL로 받습니다 — 샌드박스 주소로 자동 연결합니다"를 남긴다(코드에서 추정했을 때는 그 사실도 덧붙인다). 이미 연 프로젝트는 기존 규칙대로 생성 파일을 그대로 둔다 — 다시 만들려면 `studio.yaml`·`compose.b-studio.yaml`·각 서비스 폴더의 `Dockerfile.b-studio`를 지우고 폴더를 다시 열면 된다(이 안내를 생성한 `studio.yaml`의 주석과 미리보기 메모에도 남겼다).
+3. **검증 게이트 기본 확인** (`packages/spec/src/schema.ts`의 `WorkflowPageCheckSchema.fallbackProbe`, `packages/agent/src/gate.ts`): 2번이 연결을 만들었으면 `specYaml()`이 `workflow.pageChecks`에 프론트엔드 `/`의 `mode: browser` 확인 하나를 자동으로 만든다. ADR-050의 browser 모드는 이미 실패한 요청(연결 거부·4xx·5xx)이 있으면 실패시키므로(`result.failedRequests`), 이 확인 하나로 "화면은 뜨는데 API 호출이 깨진" 이번 버그 유형을 그대로 잡는다 — 새 판정 로직을 만들 필요가 없었다. 헤드리스 브라우저를 아예 못 띄우는 샌드박스에서는(ADR-050은 원래 그 자리에서 실패시킨다) `fallbackProbe: { service, path }`가 있으면 그 자리로 평범한 HTTP 요청을 한 번 보내 — 응답을 받으면(상태 코드와 무관하게) 주소가 살아 있다는 뜻이라 통과시키고 "화면 단위 문제는 확인하지 못했다"는 참고 문구를 남기며, 연결 자체가 안 되면 실패시킨다. 사람이 직접 적은 `pageChecks`는 `fallbackProbe`가 없으면 ADR-050의 결정(브라우저를 못 띄우면 실패)을 그대로 따른다 — 이번 결정은 우리가 자동으로 추가한 확인에만 적용된다.
+
+### 검증 결과
+- `packages/spec/src/public-url.test.ts`(신규): 자리 표시자 생성·치환(접미사 있음/없음, 값 하나에 여러 자리 표시자), docker compose 자신의 `${VAR:-default}` 문법과 안 겹치는지, `findPublicUrlRefs`가 맵·목록 문법 environment 모두에서 찾는지 확인했다.
+- `packages/spec/src/compose-import.test.ts`(보강): `FRONTEND_BACKEND_ENV_NAME`(NEXT_PUBLIC_*·VITE_*·REACT_APP_* 중 API/BACKEND/SERVER/BASE_URL이 섞인 것만), `suffixFromUrlValue`(중첩 치환이 섞인 실제 값에서도 포트 뒤 경로만), `detectBackendUrlEnvFromEnvironment`·`detectBackendUrlEnvFromCode`(실제 apr `frontend/lib/api.ts`를 재현한 폴백 체인), `originalComposeServiceFor`(폴더 이름과 compose 서비스 이름이 달라도 `build.context`로 찾고, 못 찾으면 이름으로 물러난다), `corsEnvironmentFrom`을 확인했다.
+- `packages/spec/src/spec.test.ts`(보강): `publicUrlRefs`가 compose에서 파싱돼 `LoadedProject`에 실리는지, 가리키는 서비스가 managed가 아니면 거부하는지, `fallbackProbe`가 `mode: browser` 전용이고 가리키는 서비스도 managed여야 하는지 확인했다.
+- `packages/sandbox/src/docker/free-port.test.ts`(신규): 127.0.0.1에서 실제로 바인드할 수 있는 포트를 돌려주는지, 거듭 불러도 서로 다른 포트인지 확인했다. `format.test.ts`(보강): `hostPorts`를 주면 edge가 그 포트를 그대로 공개하고 참조한 서비스의 environment를 실제 주소로 채우는지, 안 주면(대부분의 프로젝트) 예전과 똑같이 자동 배정되는지, `publicUrlRefs`가 없는(이전) 프로젝트 픽스처도 그대로 받아들이는지(하위 호환) 확인했다. `compose-provider.test.ts`(신규): `preallocatePublicUrlPorts`가 참조당 포트 하나씩만 만들고, 참조가 없으면 빈 객체를 돌려주는지 확인했다.
+- `packages/agent/src/gate.test.ts`(보강): `fallbackProbe`가 있으면 `BrowserUnavailableError`를 잡아 그 서비스·경로로 HTTP 확인을 대신하고(응답을 받으면 통과 + 참고 문구, 연결 자체가 안 되면 실패), `fallbackProbe`가 없는 기존 확인은 ADR-050대로 그대로 실패하는지(회귀 없음) 확인했다.
+- `apps/studio/lib/server/project-detect.test.ts`(보강): 실제 apr 프로젝트의 `docker-compose.yml`을 본뜬 조각으로 원본 compose의 환경 변수 선언에서 찾아 자리 표시자로 바꾸고 CORS를 가져오는지, 원본 compose가 없을 때 `frontend/lib/api.ts`를 본뜬 코드에서 추정하고 그 사실을 메모에 남기는지, 생성한 `studio.yaml`·`compose.b-studio.yaml`이 실제로 `loadProject()`를 통과하는지(publicUrlRefs 검증 포함), 프론트엔드만 있고 연결할 다른 앱 서비스가 없으면 아무 것도 만들지 않는지 확인했다.
+- `pnpm typecheck`(6개 패키지 Done), `pnpm --filter @b-studio/studio lint`(0 오류, 기존 경고 7개는 이번 변경과 무관), 저장소 루트에서 `pnpm exec vitest run --exclude '.claude/**'`(2,328개 중 2,327개 통과) — 유일한 실패(`packages/sandbox/src/docker/format.test.ts`의 "Kubernetes 파드처럼 절대 경로를 넘기면…")는 이번 변경 전 커밋에서도 똑같이 타임아웃하는 사전 존재 플레이키임을 직접 확인했다(`docs/troubleshooting.md`에 이미 남아 있는 것과 같은 종류, 기기 부하로 5초 제한에 걸린다).
+- 실제 Docker 샌드박스로 apr 프로젝트를 다시 열어 재현·검증하지는 못했다(이번 라운드는 Docker를 띄우지 않고 단위 테스트로만 확인했다) — 아래 트레이드오프와 재현 절차에 남긴다.
+
+### 감수한 트레이드오프
+- **실제 재현 미검증**: apr 프로젝트로 실제 Docker 샌드박스를 다시 띄워 화면이 실제로 뜨는지, 게이트가 실제로 이 버그를 잡는지는 이번 라운드에서 확인하지 못했다. 재현하려면: `~/.cache/b-studio/sessions/apr-0e6e4f04`의 `studio.yaml`·`compose.b-studio.yaml`·`backend/Dockerfile.b-studio`·`frontend/Dockerfile.b-studio`를 지우고 b-studio로 그 폴더를 다시 열면(ADR-067) 이번 변경이 적용된 새 생성 파일이 나온다 — 거기서 세션을 띄워 미리보기 글 목록이 뜨는지, 검증 게이트의 `browser_check`가 통과하는지 보면 된다.
+- **Kubernetes 제공자는 아직 포트 사전 할당을 하지 않는다**: `packages/sandbox/src/kubernetes/`는 이번 변경에 넣지 않았다. `LoadedProject.publicUrlRefs`는 제공자와 무관하게 채워지지만(로더 단계), 자리 표시자를 실제 주소로 바꾸는 쪽은 `docker/format.ts`·`docker/compose-provider.ts`에만 있다 — Kubernetes로 띄운 폴더 열기 프로젝트는 당분간 이 연결의 혜택을 받지 못한다.
+- **프론트엔드·백엔드 후보가 둘 이상이면 처음 찾은 한 쌍만 연결한다**: 앱 서비스가 셋 이상이면(프론트엔드 둘, 백엔드 둘 등) 나머지는 보지 않는다 — 사람이 `studio.yaml`에 직접 `${b-studio:services.<이름>.publicUrl}`을 적으면 똑같이 동작한다(이 자리 표시자 자체는 공개 API다).
+- **코드에서 추정한 백엔드 주소 참조는 정확하지 않을 수 있다**: `detectBackendUrlEnvFromCode`는 같은 줄에 적힌 폴백만 본다(여러 줄에 걸친 폴백 체인은 놓친다) — 놓치면 자동 연결을 안 하고 넘어갈 뿐 틀린 연결을 만들지는 않는다(보수적인 쪽으로 기울였다).
+- **`fallbackProbe`의 HTTP 확인은 상태 코드를 가리지 않는다**: 404·500이 와도 "연결은 됐다"고 보아 통과시킨다 — 주소가 살아 있는지만 보려는 의도적인 선택이라, 화면 자체가 깨졌는지는 헤드리스 브라우저가 있는 환경에서만 확실히 잡는다.
+- **포트 사전 할당의 좁은 경합 구간**: `findFreeHostPort()`가 돌려준 포트를 `docker compose up`이 실제로 집기 전까지(보통 수백 ms 안쪽) 다른 프로세스가 그 포트를 먼저 쓸 수 있다 — 흔히 쓰는 "find free port" 패턴과 같은 한계이고, 실패하면 `compose up`이 포트 충돌로 바로 실패해(조용히 틀린 주소가 되는 것이 아니라) 다시 시도하면 된다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)

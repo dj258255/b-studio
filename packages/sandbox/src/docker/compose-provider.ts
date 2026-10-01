@@ -35,6 +35,7 @@ import type {
   SyncResult,
 } from '../types';
 import { runCommandFromFile, runCommandToFile } from '../stream-exec';
+import { findFreeHostPort } from './free-port';
 import {
   buildOverride,
   composeUpArgs,
@@ -171,7 +172,8 @@ export class LocalDockerProvider implements SandboxProvider {
     const workDir = await mkdtemp(path.join(tmpdir(), 'b-studio-'));
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
-    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime })));
+    const hostPorts = await preallocatePublicUrlPorts(project);
+    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts })));
     return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript);
   }
 }
@@ -677,6 +679,18 @@ class LocalDockerSandbox implements Sandbox {
   #environment(): NodeJS.ProcessEnv {
     return { ...process.env, ...this.#secrets };
   }
+}
+
+/**
+ * 런타임 공개 URL 주입(fix/frontend-backend-url): project.publicUrlRefs가 가리키는 서비스(보통 백엔드)마다
+ * 호스트 포트를 하나씩 미리 정한다(`docker compose up` 전에 알아야 환경 변수에 실제 주소를 넣을 수 있다).
+ * 참조가 없으면(대부분의 프로젝트) 빈 객체를 돌려줘 포트 자동 배정이라는 기존 동작을 그대로 둔다
+ */
+export async function preallocatePublicUrlPorts(project: LoadedProject): Promise<Record<string, number>> {
+  const targets = [...new Set((project.publicUrlRefs ?? []).map((ref) => ref.targetService))];
+  if (targets.length === 0) return {};
+  const ports = await Promise.all(targets.map(() => findFreeHostPort()));
+  return Object.fromEntries(targets.map((name, index) => [name, ports[index]!]));
 }
 
 /** 스튜디오 서버·CLI 환경 변수 B_STUDIO_CONTAINER_RUNTIME. 격리 수준은 프로젝트가 아니라 운영자가 정한다 */
