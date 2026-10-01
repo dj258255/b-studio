@@ -505,6 +505,97 @@ describe('detectProject: 부가 서비스(ADR-073)', () => {
   });
 });
 
+describe('detectProject: 프론트엔드→백엔드 주소 자동 연결(fix/frontend-backend-url)', () => {
+  // 실제 저장소(~/.cache/b-studio/sessions/apr-0e6e4f04, 읽기 전용으로 확인)를 본뜬 조각
+  const APR_DOCKER_COMPOSE = [
+    'services:',
+    '  backend:',
+    '    build: { context: ./backend, dockerfile: Dockerfile }',
+    '    environment:',
+    '      APP_CORS_ALLOWED_ORIGIN_PATTERNS: "${CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"',
+    '  frontend:',
+    '    build: { context: ./frontend, dockerfile: Dockerfile }',
+    '    environment:',
+    '      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}/api}',
+    '',
+  ].join('\n');
+
+  it('원본 compose가 선언한 NEXT_PUBLIC_API_BASE_URL을 찾아 자리 표시자로 바꾸고, 백엔드의 CORS 설정도 가져온다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+      'docker-compose.yml': APR_DOCKER_COMPOSE,
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.frontendBackendWiring).toEqual({ frontendService: 'frontend', backendService: 'backend', backendProbePath: '/actuator/health' });
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    const backend = detection.services.find((service) => service.name === 'backend')!;
+
+    expect(frontend.environment.NEXT_PUBLIC_API_BASE_URL).toBe('${b-studio:services.backend.publicUrl}/api');
+    expect(frontend.dependsOn).toContain('backend');
+    expect(frontend.notes).toContain('frontend가 backend 주소를 NEXT_PUBLIC_API_BASE_URL로 받습니다 — 샌드박스 주소로 자동 연결합니다');
+
+    expect(backend.environment).toEqual({ APP_CORS_ALLOWED_ORIGIN_PATTERNS: '${CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}' });
+    expect(backend.notes.some((note) => note.includes('CORS 허용 출처 설정을'))).toBe(true);
+
+    const files = generateFiles(detection);
+    const compose = files.find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('NEXT_PUBLIC_API_BASE_URL: "${b-studio:services.backend.publicUrl}/api"');
+    expect(compose).toContain('APP_CORS_ALLOWED_ORIGIN_PATTERNS');
+    const spec = files.find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('workflow:');
+    expect(spec).toContain('pageChecks:');
+    expect(spec).toContain('fallbackProbe: { service: backend, path: /actuator/health }');
+
+    // b-studio 자신이 그 파일을 실제로 읽을 수 있어야 한다(publicUrlRefs 검증 포함)
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+      await writeFile(path.join(root, file.path), file.content);
+    }
+    const project = await loadProject(root);
+    expect(project.publicUrlRefs).toEqual([
+      { service: 'frontend', envKey: 'NEXT_PUBLIC_API_BASE_URL', template: '${b-studio:services.backend.publicUrl}/api', targetService: 'backend' },
+    ]);
+  });
+
+  it('원본 compose가 없으면 프론트엔드 코드(lib/api.ts)의 process.env 폴백에서 추정하고, 추정했다는 메모를 남긴다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/lib/api.ts': [
+        'const DEFAULT_BASE_URL = "http://localhost:8080";',
+        'export function apiBaseUrl(): string {',
+        '  const raw = process.env.NEXT_PUBLIC_API_BASE_URL || process.env.API_BASE_URL || DEFAULT_BASE_URL;',
+        '  return raw;',
+        '}',
+        '',
+      ].join('\n'),
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const detection = await detectProject(root);
+
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.NEXT_PUBLIC_API_BASE_URL).toBe('${b-studio:services.backend.publicUrl}');
+    expect(frontend.notes.some((note) => note.includes('코드에서 추정했습니다'))).toBe(true);
+  });
+
+  it('프론트엔드만 있고 다른 앱 서비스가 없으면 아무것도 연결하지 않는다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'pnpm-lock.yaml': '' });
+
+    const detection = await detectProject(root);
+
+    expect(detection.frontendBackendWiring).toBeUndefined();
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).not.toContain('workflow:');
+  });
+});
+
 describe('sanitize', () => {
   it('studio.yaml 이름 규칙(소문자로 시작, 소문자·숫자·-)에 맞춘다', () => {
     expect(sanitize('My_App 2')).toBe('my-app-2');

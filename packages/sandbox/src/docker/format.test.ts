@@ -130,6 +130,35 @@ describe('buildOverride 시크릿', () => {
   });
 });
 
+describe('buildOverride 런타임 공개 URL 주입(fix/frontend-backend-url)', () => {
+  const withRef = {
+    ...ORDERS,
+    publicUrlRefs: [{ service: 'web', envKey: 'NEXT_PUBLIC_API_BASE_URL', template: '${b-studio:services.api.publicUrl}/api', targetService: 'api' }],
+  } as unknown as LoadedProject;
+
+  it('hostPorts에 미리 정한 포트가 있으면 그 포트를 그대로 edge에 공개하고, 참조한 서비스의 environment를 실제 주소로 채운다', () => {
+    const { services } = buildOverride(withRef, 's1', { hostPorts: { api: 54_321 } });
+    expect(services[EDGE_SERVICE]!.ports).toEqual(['127.0.0.1::20000', '127.0.0.1:54321:20001']);
+    expect((services.web!.environment as Record<string, string>).NEXT_PUBLIC_API_BASE_URL).toBe('http://127.0.0.1:54321/api');
+  });
+
+  it('hostPorts를 안 주면 자동 배정 그대로 두고, 참조한 서비스의 environment도 바꾸지 않는다', () => {
+    const { services } = buildOverride(withRef, 's1');
+    expect(services[EDGE_SERVICE]!.ports).toEqual(['127.0.0.1::20000', '127.0.0.1::20001']);
+    expect(services.web!.environment).not.toHaveProperty('NEXT_PUBLIC_API_BASE_URL');
+  });
+
+  it('publicUrlRefs가 없는 프로젝트는 예전과 똑같이 동작한다(하위 호환)', () => {
+    const { services } = buildOverride(ORDERS, 's1', { hostPorts: { api: 1 } });
+    // ORDERS에는 참조가 없으니 hostPorts를 줘도 web의 environment는 그대로다
+    expect(services.web!.environment).not.toHaveProperty('NEXT_PUBLIC_API_BASE_URL');
+  });
+
+  it('publicUrlRefs가 아예 undefined인 프로젝트 객체도 받아들인다(이전 테스트 픽스처와 호환)', () => {
+    expect(() => buildOverride(ORDERS, 's1')).not.toThrow();
+  });
+});
+
 describe('parseEgressDenial', () => {
   it('edge 감사 로그에서 거부 기록만 읽는다', () => {
     expect(

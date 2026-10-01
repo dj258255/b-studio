@@ -1,4 +1,4 @@
-import type { LoadedProject } from '@b-studio/spec';
+import { publicUrlPlaceholder, resolvePublicUrlPlaceholders, type LoadedProject } from '@b-studio/spec';
 import { directHosts, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, edgeEnvironment, edgePortFor, proxyEnvironment } from '../edge-config';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
 
@@ -14,11 +14,15 @@ const EGRESS_NETWORK = 'b-studio-egress';
  *  - 모든 서비스를 외부로 나갈 수 없는 internal 네트워크에만 붙인다 (운영 DB, 사내망, 인터넷 차단)
  *  - internal 네트워크의 컨테이너는 포트를 공개할 수 없으므로 edge가 루프백의 빈 포트로 대신 공개해 넘긴다
  *  - HTTP(S) 도구는 edge 프록시를 거쳐 허용한 호스트로만 나간다
+ *  - 다른 서비스의 공개 주소를 참조하는 환경 변수(`project.publicUrlRefs`, fix/frontend-backend-url)가 있으면,
+ *    그 대상 서비스는 `hostPorts`로 미리 정한 호스트 포트를 그대로 공개하고(자동 배정 대신), 참조한 서비스의
+ *    environment에 실제 주소(`http://127.0.0.1:<포트>`)로 채운 값을 넣는다. 포트를 `docker compose up` 뒤에야
+ *    아는 서비스는(hostPorts에 없으면) 예전처럼 자동 배정한다
  */
 export function buildOverride(
   project: LoadedProject,
   sandboxId: string,
-  { edgeScript = '', runtime }: { edgeScript?: string; runtime?: string } = {},
+  { edgeScript = '', runtime, hostPorts = {} }: { edgeScript?: string; runtime?: string; hostPorts?: Record<string, number> } = {},
 ) {
   const composeServices = project.composeServices ?? project.managed.map(([name]) => name);
   const externals = project.external ?? [];
@@ -44,6 +48,20 @@ export function buildOverride(
     }
   }
 
+  // 런타임 공개 URL 주입(fix/frontend-backend-url): hostPorts로 미리 정한 포트만 실제 주소로 바꿀 수 있다.
+  // (loadProject가 targetService를 managed 서비스로만 검증해 두어, 여기 없는 이름은 호출자가 hostPorts를 안 채운 경우뿐이다 —
+  // 그런 자리 표시자는 바뀌지 않은 채 남는다. 값 하나에 자리 표시자가 둘 이상이어도 서비스별로 맞는 포트를 찾아 바꾼다)
+  const publicUrlFor = (service: string): string => {
+    const port = hostPorts[service];
+    return port === undefined ? publicUrlPlaceholder(service) : `http://127.0.0.1:${port}`;
+  };
+  for (const ref of project.publicUrlRefs ?? []) {
+    if (!(ref.targetService in hostPorts)) continue;
+    const current = services[ref.service] ?? {};
+    const resolved = resolvePublicUrlPlaceholders(ref.template, publicUrlFor);
+    services[ref.service] = { ...current, environment: { ...(current.environment as Record<string, unknown> | undefined), [ref.envKey]: resolved } };
+  }
+
   services[EDGE_SERVICE] = {
     image: EDGE_IMAGE,
     ...isolation,
@@ -67,8 +85,13 @@ export function buildOverride(
       start_interval: '200ms',
       start_period: '10s',
     },
-    // 루프백의 빈 포트에만 공개해서 같은 네트워크의 다른 PC에서 접근하지 못하게 한다
-    ports: project.managed.map(([name]) => `127.0.0.1::${edgePortFor(project, name)}`),
+    // 루프백의 빈 포트에만 공개해서 같은 네트워크의 다른 PC에서 접근하지 못하게 한다.
+    // hostPorts에 미리 정한 포트가 있는 서비스(다른 서비스가 publicUrl로 참조하는 서비스)는 그 포트를 그대로 공개한다 —
+    // 그래야 `up`보다 먼저 쓴 환경 변수의 주소가 실제로 공개되는 포트와 어긋나지 않는다. 없으면 예전처럼 자동 배정한다
+    ports: project.managed.map(([name]) => {
+      const port = hostPorts[name];
+      return port === undefined ? `127.0.0.1::${edgePortFor(project, name)}` : `127.0.0.1:${port}:${edgePortFor(project, name)}`;
+    }),
     labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': EDGE_SERVICE },
     deploy: { resources: { limits: { memory: '128m', cpus: '0.5' } } },
   };

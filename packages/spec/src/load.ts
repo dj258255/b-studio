@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
+import { findPublicUrlRefs, type PublicUrlRef } from './public-url';
 import {
   STUDIO_CALLER,
   StudioSpecSchema,
@@ -56,6 +57,12 @@ export interface LoadedProject {
   external: Array<[name: string, service: ExternalServiceSpec]>;
   /** managed 서비스 이름 → 운영 배포 설정. 적지 않은 서비스도 기본값(Dockerfile)으로 채운다 */
   deploy: Record<string, DeployServiceSpec>;
+  /**
+   * 런타임 공개 URL 주입(fix/frontend-backend-url). compose의 environment 값에 `${b-studio:services.<서비스>.publicUrl}`
+   * 자리 표시자가 있으면 여기 담는다. 샌드박스 제공자가 띄우기 직전에 targetService의 호스트 포트를 먼저 정해(pre-allocate)
+   * 이 자리를 실제 주소로 채운다(packages/sandbox/src/docker/compose-provider.ts)
+   */
+  publicUrlRefs: PublicUrlRef[];
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -153,10 +160,22 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     if (check.expectFromApi && !managedNames.has(check.expectFromApi.service)) {
       issues.push(`workflow.pageChecks.${index}.expectFromApi.service: '${check.expectFromApi.service}'은(는) source: managed 서비스가 아닙니다`);
     }
+    // fallbackProbe(fix/frontend-backend-url)도 같은 규칙: 헤드리스 브라우저가 없을 때 대신 부를 서비스라 관리형이어야 한다
+    if (check.fallbackProbe && !managedNames.has(check.fallbackProbe.service)) {
+      issues.push(`workflow.pageChecks.${index}.fallbackProbe.service: '${check.fallbackProbe.service}'은(는) source: managed 서비스가 아닙니다`);
+    }
   });
   spec.workflow?.concurrencyChecks?.forEach((check, index) => {
     if (!managedNames.has(check.service)) issues.push(`workflow.concurrencyChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
   });
+
+  // 런타임 공개 URL 자리 표시자(fix/frontend-backend-url)가 가리키는 서비스도 샌드박스가 포트를 공개하는 관리형 서비스여야 한다
+  const publicUrlRefs = findPublicUrlRefs(compose.data.services);
+  for (const ref of publicUrlRefs) {
+    if (!managedNames.has(ref.targetService)) {
+      issues.push(`${ref.service}.environment.${ref.envKey}: \${b-studio:services.${ref.targetService}.publicUrl}이 가리키는 '${ref.targetService}'이(가) source: managed 서비스가 아닙니다`);
+    }
+  }
 
   // 자동 페이지 확인은 Next.js 앱 라우터(app/**/page.*)에서 열어 볼 경로를 찾는다. 관리형이면서 템플릿이 nextjs인 서비스에만 쓸 수 있다
   const autoPages = spec.workflow?.autoPageChecks;
@@ -213,6 +232,7 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     secrets: Object.entries(spec.secrets ?? {}),
     external,
     deploy: Object.fromEntries(managed.map(([name]) => [name, spec.deploy?.services[name] ?? { dockerfile: 'Dockerfile' }])),
+    publicUrlRefs,
   };
 }
 
