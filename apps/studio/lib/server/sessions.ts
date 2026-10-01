@@ -72,6 +72,7 @@ import {
   postComment,
   REFERENCED_FILES_CONTEXT_MAX_CHARS,
   REQUIREMENT_LABEL,
+  RecommendationSchema,
   requestPlanBrief,
   requestQuestionRecommendations,
   requestRequirementsExtraction,
@@ -3569,9 +3570,9 @@ export interface RequirementsSnapshot {
   /** "## 사람이 할 일" 절(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 에이전트가 절대 하지 않는다 */
   manualSteps: string[];
   /**
-   * 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(버그 리포트 A). 화면이 "저장 안 한 추출
-   * 결과가 있습니다 · 이어서 보기 / 버리기" 배너로 보여 준다 — 페이지를 새로고침하거나 "뽑는 중"에 개발 서버가
-   * 재시작돼도 끝까지 마친 추출 결과를 잃지 않는다.
+   * 마지막 추출 결과가 세션 상태 폴더에 남아 있으면 있다(버그 리포트 A, ADR-097 개정). "추출 결과" 하위 화면이
+   * 배너 없이 항상 그대로 보여준다 — 페이지를 새로고침하거나 "뽑는 중"에 개발 서버가 재시작돼도, docs/requirements.md로
+   * 저장(apply)한 뒤에도 "지우기"를 직접 누르기 전까지 잃지 않는다.
    */
   draft?: PersistedRequirementsExtractionDraft;
 }
@@ -3799,30 +3800,39 @@ const REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS = 3 * 60_000;
 
 const REQUIREMENTS_DRAFT_FILE = path.join('.git', 'b-studio', 'requirements-draft.json');
 
-/** 저장 안 한(아직 apply하지 않은) 추출 결과를 세션 상태 폴더에 남긴 모양. `.git/` 아래라 커밋에도, 에이전트 도구에도 걸리지 않는다 */
+/**
+ * 추출 결과를 세션 상태 폴더에 남긴 모양. `.git/` 아래라 커밋에도, 에이전트 도구에도, 체크포인트로
+ * 되돌리기(`git reset --hard`·`git clean -fd`는 `.git/` 안을 건드리지 않는다, ADR-099)에도 걸리지 않는다.
+ *
+ * ADR-097 개정: 처음에는 "저장(apply)하지 않은 추출 결과"만 담아 apply에 성공하면 지웠다(배너로 "이어서
+ * 보기/버리기"만 보여줬다). 이제는 "지우기"를 직접 누르기 전까지 끝까지 보관해, apply한 뒤에도 사람이
+ * 답한 질문·추천 값·편집 내용까지 그대로 남긴다(요구사항 탭의 "추출 결과" 하위 화면이 항상 보여준다).
+ */
 export interface PersistedRequirementsExtractionDraft extends RequirementsExtractionPreview {
+  /** 이 추출(또는 재추출)이 완료된 시각. 재추출하면 그 시점으로 갱신되고 answers·recommendations는 비워진다 */
   savedAt: string;
+  /** 이 파일에 가장 마지막으로 쓴 시각(재추출·자동 저장·apply 모두 갱신한다) — 상태줄이 "저장한 뒤 바뀜"을 판단하는 기준 */
+  updatedAt: string;
+  /** docs/requirements.md로 저장(apply)한 시각. 저장한 적이 없으면 없다("아직 저장 안 함") */
+  appliedAt?: string;
+  /**
+   * 이 추출에 쓴 원래 입력(답변은 뺀다 — answers로 따로 관리한다). "스펙을 고치고 다시 뽑기"가 새로고침·서버
+   * 재시작 뒤에도 같은 명세로 재추출할 수 있게 한다(ImportFlow가 들고 있던 specText 등 화면 상태에 더는 의존하지 않는다)
+   */
+  sourceInput?: Pick<RequirementsExtractionInput, 'specText' | 'filePath' | 'issueNumber'>;
+  /** "모호한 점" 질문 인덱스(문자열 키) → 사람이 입력한 답. 자동 저장(PATCH)이 채운다 */
+  answers?: Record<string, string>;
+  /** 질문 인덱스(문자열 키) → "추천 값으로 채우기"가 받은 추천. 자동 저장이 채운다 */
+  recommendations?: Record<string, Recommendation>;
+  /** recommendations를 받았을 때 그 출처(web=실제 검색, model=모델 지식만) */
+  recommendationSource?: 'web' | 'model';
 }
 
 function requirementsDraftFile(session: Session): string {
   return path.join(stateDirOf(session.snapshot), REQUIREMENTS_DRAFT_FILE);
 }
 
-/**
- * 추출 미리보기를 세션 상태 폴더에 남긴다(사이드카 — docs/ 밖이라 git 작업 복사본에도, 커밋에도 안 들어간다).
- * "요구사항 뽑기"가 3~6분 걸리는 동안 개발 서버가 재시작되면 화면은 "뽑는 중"에 멈춰 있어도 서버 쪽 작업은
- * 통째로 사라진다(버그 리포트 A) — 적어도 끝까지 마친 추출 결과는 다시 열었을 때 보이도록 남긴다.
- */
-async function saveRequirementExtractionDraft(session: Session, preview: RequirementsExtractionPreview): Promise<void> {
-  const file = requirementsDraftFile(session);
-  await mkdir(path.dirname(file), { recursive: true });
-  const draft: PersistedRequirementsExtractionDraft = { ...preview, savedAt: new Date().toISOString() };
-  await writeFile(file, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600 });
-}
-
-/** 저장 안 한 추출 결과가 있으면 돌려준다("이어서 보기"). 없으면 undefined — 화면은 이때 안내 배너를 띄우지 않는다 */
-export async function getSessionRequirementExtractionDraft(id: string): Promise<PersistedRequirementsExtractionDraft | undefined> {
-  const session = requireSession(id);
+async function readRequirementExtractionDraftFile(session: Session): Promise<PersistedRequirementsExtractionDraft | undefined> {
   try {
     return JSON.parse(await readFile(requirementsDraftFile(session), 'utf8')) as PersistedRequirementsExtractionDraft;
   } catch {
@@ -3830,15 +3840,96 @@ export async function getSessionRequirementExtractionDraft(id: string): Promise<
   }
 }
 
-/** 저장 안 한 추출 결과를 지운다("버리기", 또는 apply가 성공해 더 들고 있을 필요가 없을 때) */
+async function writeRequirementExtractionDraftFile(session: Session, draft: PersistedRequirementsExtractionDraft): Promise<void> {
+  const file = requirementsDraftFile(session);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600 });
+}
+
+/** finishExtractionPreview가 draft에 함께 남길 원래 입력(답변은 뺀다). 아무것도 없으면 undefined */
+function sanitizeDraftSourceInput(input: RequirementsExtractionInput): PersistedRequirementsExtractionDraft['sourceInput'] {
+  const { specText, filePath, issueNumber } = input;
+  if (specText === undefined && filePath === undefined && issueNumber === undefined) return undefined;
+  return { ...(specText !== undefined ? { specText } : {}), ...(filePath !== undefined ? { filePath } : {}), ...(issueNumber !== undefined ? { issueNumber } : {}) };
+}
+
+/**
+ * 추출 미리보기를 세션 상태 폴더에 남긴다(사이드카 — docs/ 밖이라 git 작업 복사본에도, 커밋에도 안 들어간다).
+ * "요구사항 뽑기"가 3~6분 걸리는 동안 개발 서버가 재시작되면 화면은 "뽑는 중"에 멈춰 있어도 서버 쪽 작업은
+ * 통째로 사라진다(버그 리포트 A) — 적어도 끝까지 마친 추출 결과는 다시 열었을 때 보이도록 남긴다.
+ * 재추출(이 함수를 다시 부르는 것)은 이전 draft를 통째로 대신한다 — answers·recommendations·appliedAt은 새 결과에는
+ * 아직 없으므로 비워진다(화면이 재추출 전에 "이전 추출 결과를 새 결과로 바꿉니다"를 확인받는다, ADR-097 개정).
+ */
+async function saveRequirementExtractionDraft(
+  session: Session,
+  preview: RequirementsExtractionPreview,
+  sourceInput?: PersistedRequirementsExtractionDraft['sourceInput'],
+): Promise<void> {
+  const now = new Date().toISOString();
+  const draft: PersistedRequirementsExtractionDraft = { ...preview, savedAt: now, updatedAt: now, ...(sourceInput ? { sourceInput } : {}) };
+  await writeRequirementExtractionDraftFile(session, draft);
+}
+
+/** 지금 남아 있는 추출 결과를 돌려준다("추출 결과" 하위 화면이 항상 보여준다). 없으면 undefined */
+export async function getSessionRequirementExtractionDraft(id: string): Promise<PersistedRequirementsExtractionDraft | undefined> {
+  return readRequirementExtractionDraftFile(requireSession(id));
+}
+
+/** 추출 결과를 지운다("지우기" 버튼, 확인을 거친 뒤 호출된다 — 확인 자체는 화면이 맡는다) */
 export async function discardSessionRequirementExtractionDraft(id: string): Promise<void> {
   const session = requireSession(id);
   await rm(requirementsDraftFile(session), { force: true });
 }
 
+const RequirementExtractionDraftPatchSchema = z.object({
+  requirements: z.array(RequirementSchema).max(MAX_REQUIREMENTS).optional(),
+  assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).optional(),
+  manualSteps: z.array(ManualStepItemSchema).max(MAX_MANUAL_STEPS).optional(),
+  answers: z.record(z.string(), z.string().max(2_000)).optional(),
+  recommendations: z.record(z.string(), RecommendationSchema).optional(),
+  recommendationSource: z.enum(['web', 'model']).optional(),
+});
+
+/**
+ * 추출 결과를 부분적으로 고쳐 쓴다(자동 저장, ADR-097 개정). "추출 결과" 화면에서 요구사항·가정·사람이 할 일을
+ * 고치거나, 질문에 답하거나, 추천 값을 받으면 800ms 정지 뒤 이 함수로 자동 저장한다 — 새로고침·서버 재시작 뒤에도
+ * 편집 내용을 잃지 않는다. 저장 안 한 추출 결과가 아예 없으면(이미 지웠거나 한 번도 추출한 적 없음) 404.
+ */
+export async function updateSessionRequirementExtractionDraft(id: string, patch: unknown): Promise<PersistedRequirementsExtractionDraft> {
+  const session = requireSession(id);
+  const parsed = RequirementExtractionDraftPatchSchema.safeParse(patch);
+  if (!parsed.success) throw new StudioError(400, `자동 저장할 내용의 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  const current = await readRequirementExtractionDraftFile(session);
+  if (!current) throw new StudioError(404, '저장 안 한 추출 결과가 없습니다');
+  const next: PersistedRequirementsExtractionDraft = { ...current, ...parsed.data, updatedAt: new Date().toISOString() };
+  await writeRequirementExtractionDraftFile(session, next);
+  return next;
+}
+
+/**
+ * docs/requirements.md로 저장(apply)한 내용을 추출 결과에 그대로 반영하고 appliedAt을 남긴다(ADR-097 개정 — apply는
+ * 더는 추출 결과를 지우지 않는다). 저장 안 한 추출 결과가 아예 없었다면(드문 경로 — 가져오기 화면을 거치지 않고 다른
+ * 자리에서 바로 적용한 경우) 지금 저장한 내용 그대로 새 draft를 만든다, 지어내지 않고 있는 값만 채운다.
+ */
+async function markRequirementExtractionDraftApplied(
+  session: Session,
+  applied: { requirements: Requirement[]; assumptions: string[]; manualSteps: string[] },
+): Promise<void> {
+  const now = new Date().toISOString();
+  const current = await readRequirementExtractionDraftFile(session);
+  const next: PersistedRequirementsExtractionDraft = current
+    ? { ...current, ...applied, appliedAt: now, updatedAt: now }
+    : { ...applied, questions: [], source: 'model', referencedFiles: [], outOfScope: [], savedAt: now, updatedAt: now, appliedAt: now };
+  await writeRequirementExtractionDraftFile(session, next);
+}
+
 /** previewSessionRequirementsExtraction의 모든 반환 경로가 거친다: 완료된 결과를 드래프트로 남기고 그대로 돌려준다 */
-async function finishExtractionPreview(session: Session, preview: RequirementsExtractionPreview): Promise<RequirementsExtractionPreview> {
-  await saveRequirementExtractionDraft(session, preview).catch((error: unknown) => {
+async function finishExtractionPreview(
+  session: Session,
+  preview: RequirementsExtractionPreview,
+  sourceInput?: PersistedRequirementsExtractionDraft['sourceInput'],
+): Promise<RequirementsExtractionPreview> {
+  await saveRequirementExtractionDraft(session, preview, sourceInput).catch((error: unknown) => {
     console.error(`[b-studio] 세션 ${session.snapshot.id}의 요구사항 추출 임시 결과를 남기지 못했습니다`, error);
   });
   return preview;
@@ -3874,7 +3965,7 @@ export async function previewSessionRequirementsExtraction(
         outOfScope: [],
         assumptions: [],
         manualSteps: [],
-      });
+      }, { issueNumber: input.issueNumber });
     }
   }
 
@@ -3896,7 +3987,7 @@ export async function previewSessionRequirementsExtraction(
       assumptions: [],
       manualSteps,
       ...(diff ? { diff } : {}),
-    });
+    }, sanitizeDraftSourceInput(input));
   }
   const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_EXTRACTION_TIMEOUT_MS);
   const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
@@ -3912,7 +4003,7 @@ export async function previewSessionRequirementsExtraction(
       assumptions: result.assumptions,
       manualSteps: result.manualSteps,
       ...(diff ? { diff } : {}),
-    });
+    }, sanitizeDraftSourceInput(input));
   } catch (error) {
     if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
     if (timeoutSignal.aborted) {
@@ -4104,8 +4195,13 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
       console.error(`[b-studio] 세션 ${id}의 요구사항 문서 체크포인트를 남기지 못했습니다`, error);
     },
   );
-  // 저장이 끝났으니 "저장 안 한 추출 결과" 배너가 더는 필요 없다(실패해도 다음에 또 지우면 되니 조용히 넘어간다)
-  await discardSessionRequirementExtractionDraft(id).catch(() => {});
+  // 저장했다고 추출 결과를 지우지 않는다(ADR-097 개정) — appliedAt만 남겨 "추출 결과" 화면이 계속 보여준다.
+  // 실패해도 docs/requirements.md 저장 자체는 이미 끝났으므로 화면에는 알리지 않고 로그만 남긴다
+  await markRequirementExtractionDraftApplied(session, { requirements: revisedRequirements, assumptions: parsed.data.assumptions, manualSteps: guardedManualSteps }).catch(
+    (error: unknown) => {
+      console.error(`[b-studio] 세션 ${id}의 요구사항 추출 결과에 저장 시각을 남기지 못했습니다`, error);
+    },
+  );
   return getSessionRequirements(id);
 }
 

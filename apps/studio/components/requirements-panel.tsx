@@ -165,9 +165,24 @@ interface ExtractionPreview {
   diff?: RequirementDiffEntry[];
 }
 
-/** 저장하지 않은 추출 결과를 세션 상태 폴더에 남긴 것(서버 재시작·새로고침 뒤에도 이어서 볼 수 있다, ADR-097) */
+/**
+ * 추출 결과를 세션 상태 폴더에 남긴 것(서버 재시작·새로고침 뒤에도 "추출 결과" 하위 화면이 그대로 보여준다, ADR-097 개정).
+ * "지우기"를 직접 누르기 전까지는 docs/requirements.md로 저장(apply)한 뒤에도 사라지지 않는다.
+ */
 interface PersistedExtractionDraft extends ExtractionPreview {
+  /** 이 추출(또는 재추출)이 끝난 시각 */
   savedAt: string;
+  /** 가장 마지막으로 이 결과를 고친 시각(재추출·자동 저장·apply 모두 갱신한다) */
+  updatedAt: string;
+  /** docs/requirements.md로 저장(apply)한 시각. 저장한 적이 없으면 없다 */
+  appliedAt?: string;
+  /** 이 추출에 쓴 원래 입력(답변은 뺀다). "스펙을 고치고 다시 뽑기"가 재사용한다 — 없으면(옛 draft) 그 버튼을 숨긴다 */
+  sourceInput?: { specText?: string; filePath?: string; issueNumber?: number };
+  /** "모호한 점" 질문 인덱스(문자열 키) → 사람이 입력한 답 */
+  answers?: Record<string, string>;
+  /** 질문 인덱스(문자열 키) → 받은 추천 */
+  recommendations?: Record<string, RecommendationView>;
+  recommendationSource?: "web" | "model";
 }
 
 const KIND_LABEL: Record<RequirementKind, string> = { api: "API", ui: "화면", data: "데이터", nonfunctional: "비기능", docs: "문서" };
@@ -187,17 +202,42 @@ export function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
 }
 
+/** "추출 결과" 상태줄의 시각 표기("10월 1일 16:20") — 로케일에 기대지 않고 결정론적으로 맞춘다(ADR-097 개정) */
+export function formatDraftTimestamp(iso: string): string {
+  const date = new Date(iso);
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${month}월 ${day}일 ${hours}:${minutes}`;
+}
+
+/** "추출 결과" 상태줄: "저장됨 · 10월 1일 16:20"(+"저장한 뒤 바뀜") 또는 "아직 저장 안 함"(ADR-097 개정) */
+export function requirementsDraftStatusLine(appliedAt: string | undefined, updatedAt: string): string {
+  if (!appliedAt) return "아직 저장 안 함";
+  const base = `저장됨 · ${formatDraftTimestamp(appliedAt)}`;
+  return updatedAt > appliedAt ? `${base} · 저장한 뒤 바뀜` : base;
+}
+
+/** 재추출이 이전 추출 결과를 덮어쓰기 전에 확인을 받아야 하는지(ADR-097 개정): 저장한 적이 없거나, 저장한 뒤에 또 바뀌었으면 */
+export function hasUnsavedDraftEdits(draft: PersistedExtractionDraft | undefined): boolean {
+  if (!draft) return false;
+  return !draft.appliedAt || draft.updatedAt > draft.appliedAt;
+}
+
 /**
  * 개발 화면의 "명세" 탭(ADR-079). 과제 명세를 요구사항으로 나누고, 요구사항마다 무엇이 됐다는 증거를 추적한다.
+ * "추출 결과"(ADR-097 개정)는 마지막 추출 결과를 배너 뒤에 숨기지 않고 항상 보여준다 — "지우기"를 직접 누르기
+ * 전까지는 docs/requirements.md로 저장한 뒤에도 그대로 남는다.
  * "파이프라인"(ADR-100)은 설계 먼저·구현은 따로 하는 요구사항의 진행을 보여 준다 — 요구사항 탭이 이미 요구사항
  * id·추적 매트릭스를 다루고 있어 설계·작업 묶음·구현·검토·검증까지 한곳에서 이어 보기 좋다(새 최상위 탭을 만들지 않았다).
  */
-type PanelView = "list" | "matrix" | "pipeline";
+type PanelView = "list" | "extraction" | "matrix" | "pipeline";
 
 export function RequirementsPanel({ view }: { view: SessionView }) {
   const sessionId = view.snapshot.id;
   const access = useSessionAccess();
-  const draft = useChatDraft();
+  const chatDraft = useChatDraft();
   const [snapshot, setSnapshot] = useState<{ data?: RequirementsSnapshot; error?: string }>();
   const [importing, setImporting] = useState(false);
   const [panelView, setPanelView] = useState<PanelView>("list");
@@ -224,7 +264,16 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
         const data = await readJson<RequirementsSnapshot>(response);
         if (cancelled) return;
         setSnapshot(response.ok ? { data } : { error: data.error ?? "요구사항을 불러오지 못했습니다" });
-        if (response.ok && !data.exists) setImporting(true);
+        if (!response.ok) return;
+        if (!data.exists) {
+          // 저장한 요구사항이 아직 없다 — 추출 결과가 남아 있으면(지우기 전) 배너 없이 그 화면부터 보여주고,
+          // 추출한 적도 없으면 가져오기부터 시작한다
+          if (data.draft) setPanelView("extraction");
+          else setImporting(true);
+        } else {
+          // 방금 "지우기"를 눌러 추출 결과가 사라졌는데 "추출 결과" 화면을 보던 중이었다면 목록으로 돌아간다
+          setPanelView((current) => (current === "extraction" && !data.draft ? "list" : current));
+        }
       })
       .catch(() => {
         if (!cancelled) setSnapshot({ error: "요구사항을 불러오지 못했습니다" });
@@ -234,24 +283,35 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
     };
   }, [sessionId, revision]);
 
+  /** "요구사항 뽑기"가 끝났다(아직 저장 전) — 가져오기 화면을 닫고 "추출 결과"로 넘어가, 서버가 막 남긴 draft를 다시 읽는다 */
+  function onExtracted() {
+    setImporting(false);
+    setPanelView("extraction");
+    setRevision((value) => value + 1);
+  }
+
   function onApplied(next: RequirementsSnapshot) {
     setSnapshot({ data: next });
-    setImporting(false);
   }
+
+  function onDiscarded() {
+    setRevision((value) => value + 1);
+  }
+
+  const showTabs = Boolean(snapshot?.data?.exists || snapshot?.data?.draft) && !importing;
+  const tabs = [
+    ...(snapshot?.data?.exists ? ([{ id: "list", label: "목록" }] as const) : []),
+    ...(snapshot?.data?.draft ? ([{ id: "extraction", label: "추출 결과" }] as const) : []),
+    ...(snapshot?.data?.exists ? ([{ id: "matrix", label: "추적 매트릭스" }, { id: "pipeline", label: "파이프라인" }] as const) : []),
+  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
         <p className="text-sm font-medium text-ink">명세 → 요구사항 → 검증 추적</p>
-        {snapshot?.data?.exists && !importing && (
+        {showTabs && (
           <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="tablist" aria-label="요구사항 하위 화면">
-            {(
-              [
-                { id: "list", label: "목록" },
-                { id: "matrix", label: "추적 매트릭스" },
-                { id: "pipeline", label: "파이프라인" },
-              ] as const
-            ).map((tab) => (
+            {tabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
@@ -265,7 +325,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
             ))}
           </div>
         )}
-        {snapshot?.data?.exists && access.canManage && (
+        {(snapshot?.data?.exists || snapshot?.data?.draft) && access.canManage && (
           <button
             type="button"
             onClick={() => {
@@ -273,7 +333,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
               setImportSpecText(undefined);
               setImporting((value) => !value);
             }}
-            className={`${panelView === "matrix" || panelView === "pipeline" ? "" : "ml-auto"} shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink`}
+            className={`${showTabs ? "" : "ml-auto"} shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink`}
           >
             {importing ? "목록으로" : "명세 다시 가져오기"}
           </button>
@@ -287,11 +347,13 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
         ) : importing ? (
           <ImportFlow
             sessionId={sessionId}
-            onApplied={onApplied}
-            onCancel={snapshot.data?.exists ? () => setImporting(false) : undefined}
+            onExtracted={onExtracted}
+            onCancel={snapshot.data?.exists || snapshot.data?.draft ? () => setImporting(false) : undefined}
             initialSpecText={importSpecText}
             draft={snapshot.data?.draft}
           />
+        ) : panelView === "extraction" && snapshot.data?.draft ? (
+          <ExtractionResultView sessionId={sessionId} draft={snapshot.data.draft} onApplied={onApplied} onDiscarded={onDiscarded} onRefresh={() => setRevision((value) => value + 1)} />
         ) : panelView === "matrix" ? (
           <MatrixView sessionId={sessionId} />
         ) : panelView === "pipeline" ? (
@@ -302,7 +364,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
             snapshot={snapshot.data!}
             canManage={access.canManage}
             isGithub={view.snapshot.repository?.kind === "github"}
-            onWork={(text) => draft.fill(text)}
+            onWork={(text) => chatDraft.fill(text)}
             onRefresh={() => setRevision((value) => value + 1)}
           />
         )}
@@ -965,20 +1027,25 @@ type SourceTab = "paste" | "file" | "issue";
 /** 파일 선택으로 읽을 명세 파일의 상한. 명세 글은 보통 수십 KB 안이다 */
 const MAX_SPEC_FILE_BYTES = 512 * 1024;
 
-/** ImportFlow는 테스트(용어 검사·렌더)에서도 직접 쓸 수 있게 내보낸다 */
+/**
+ * ImportFlow는 테스트(용어 검사·렌더)에서도 직접 쓸 수 있게 내보낸다. 입력(붙여넣기/파일/저장소 이슈)을 모아
+ * "요구사항 뽑기"만 맡는다 — 뽑은 결과의 편집·질문 답변·저장(apply)·지우기는 모두 "추출 결과" 화면
+ * (ExtractionResultView)이 맡는다(ADR-097 개정: 전에는 이 화면이 미리보기·편집까지 전부 가지고 있었다).
+ */
 export function ImportFlow({
   sessionId,
-  onApplied,
+  onExtracted,
   onCancel,
   initialSpecText,
   draft,
 }: {
   sessionId: string;
-  onApplied: (snapshot: RequirementsSnapshot) => void;
+  /** 추출이 끝나 서버에 결과가 남았다 — 부모가 "추출 결과" 화면으로 넘어간다 */
+  onExtracted: () => void;
   onCancel?: () => void;
   /** "요구사항에 반영"(대화 메시지 → 요구사항 패치, ADR-094)이 채운다 — 붙여넣기 칸을 채우고 바로 한 번 추출한다 */
   initialSpecText?: string;
-  /** 저장 안 한 채 남은 추출 결과(세션 요구사항 스냅샷이 함께 돌려준다, ADR-097) — 있으면 "이어서 보기/버리기" 배너를 보여준다 */
+  /** 지금 남아 있는 추출 결과. 저장한 뒤 또 바뀐 게 있으면 재추출 전에 "이전 추출 결과를 새 결과로 바꿉니다"로 확인을 받는다(ADR-097 개정) */
   draft?: PersistedExtractionDraft;
 }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
@@ -987,29 +1054,20 @@ export function ImportFlow({
   const [pickedFile, setPickedFile] = useState<{ name: string; text: string }>();
   const [fileError, setFileError] = useState<string>();
   const [issueNumber, setIssueNumber] = useState("");
-  const [preview, setPreview] = useState<ExtractionPreview>();
-  const [drafts, setDrafts] = useState<RequirementDraft[]>([]);
-  const [assumptions, setAssumptions] = useState<string[]>([]);
-  const [manualSteps, setManualSteps] = useState<string[]>([]);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [recommendations, setRecommendations] = useState<Record<number, RecommendationView>>({});
-  const [recommendationSource, setRecommendationSource] = useState<"web" | "model">();
-  const [recommending, setRecommending] = useState(false);
   // initialSpecText가 있으면(요구사항에 반영) 마운트 때부터 뽑는 중으로 시작한다 — effect 안에서 setState를
   // 곧바로 부르지 않고 초기값으로 미리 반영해 두는 식이다(리액트 컴파일러 린트가 막는 패턴을 피한다)
   const [busy, setBusy] = useState(() => Boolean(initialSpecText));
   const [error, setError] = useState<string>();
-  // A: "뽑는 중 · 2분 13초" 경과 시간과 취소 — 시작 시각은 busy/recommending을 켜는 쪽(extract·recommend·초기 추출
-  // effect)이 setState와 같은 틱에 ref로 남긴다. 아래 effect는 그 값을 기준으로 간격만 재깍여 setState를 구독
-  // 콜백 안에서만 부른다(effect 본문에서 곧바로 부르지 않는다 — 리액트 컴파일러 린트가 막는 패턴이다)
+  // 저장한 뒤 또 바뀐 추출 결과가 있으면 재추출 전에 한 번 확인을 받는다
+  const [confirmingOverwrite, setConfirmingOverwrite] = useState(false);
+  // A: "뽑는 중 · 2분 13초" 경과 시간과 취소 — 시작 시각은 busy를 켜는 쪽(extract·초기 추출 effect)이 setState와
+  // 같은 틱에 ref로 남긴다. 아래 effect는 그 값을 기준으로 간격만 재깍여 setState를 구독 콜백 안에서만 부른다
+  // (effect 본문에서 곧바로 부르지 않는다 — 리액트 컴파일러 린트가 막는 패턴이다)
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [recommendElapsedMs, setRecommendElapsedMs] = useState(0);
   // 0은 렌더 중에 Date.now()를 부르지 않으려는 자리표시값일 뿐이다(리액트 컴파일러 린트가 렌더 중 비순수 호출을
-  // 막는다) — mount 때 뽑는 중으로 시작하면(initialSpecText) 아래 effect가, 사람이 누르면 extract·recommend가 채운다
+  // 막는다) — mount 때 뽑는 중으로 시작하면(initialSpecText) 아래 effect가, 사람이 누르면 extract가 채운다
   const extractStartedAtRef = useRef(0);
-  const recommendStartedAtRef = useRef(0);
   const extractAbortRef = useRef<AbortController | undefined>(undefined);
-  const recommendAbortRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
     if (!busy) return;
@@ -1017,13 +1075,7 @@ export function ImportFlow({
     return () => clearInterval(timer);
   }, [busy]);
 
-  useEffect(() => {
-    if (!recommending) return;
-    const timer = setInterval(() => setRecommendElapsedMs(Date.now() - recommendStartedAtRef.current), 1000);
-    return () => clearInterval(timer);
-  }, [recommending]);
-
-  // "요구사항에 반영"이 initialSpecText를 주면 붙여넣기 칸을 채운 뒤 바로 한 번 추출해 병합 diff를 보여 준다.
+  // "요구사항에 반영"이 initialSpecText를 주면 붙여넣기 칸을 채운 뒤 바로 한 번 추출하고 "추출 결과" 화면으로 넘어간다.
   // state(specText)를 거치지 않고 바로 이 값으로 요청해야 "방금 setSpecText한 값"을 또 기다리는 경합이 없다
   useEffect(() => {
     if (!initialSpecText) return;
@@ -1041,10 +1093,7 @@ export function ImportFlow({
           setError(data.error ?? "요구사항을 뽑지 못했습니다");
           return;
         }
-        setPreview(data);
-        setDrafts(data.requirements);
-        setAssumptions(data.assumptions);
-        setManualSteps(data.manualSteps);
+        onExtracted();
       })
       .catch(() => {
         if (!cancelled) setError("요구사항을 뽑지 못했습니다");
@@ -1055,38 +1104,18 @@ export function ImportFlow({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onExtracted는 부모가 매 렌더 새로 만드는 콜백이라 뺀다(최초 한 번만 돈다)
   }, [sessionId, initialSpecText]);
 
-  // A: "요구사항" 탭이 받은 스냅샷에 저장 안 한 추출 결과가 실려 있으면(세션 상태 폴더에 남아 있던 것) 그대로 이어받는다.
-  // initialSpecText로 바로 추출하는 경우(요구사항에 반영)는 그 결과가 곧 새로 덮어쓰므로 배너를 띄우지 않는다
-  const [resumableDraft, setResumableDraft] = useState(() => (initialSpecText ? undefined : draft));
-
-  function resumeDraft() {
-    if (!resumableDraft) return;
-    setPreview(resumableDraft);
-    setDrafts(resumableDraft.requirements);
-    setAssumptions(resumableDraft.assumptions);
-    setManualSteps(resumableDraft.manualSteps);
-    setResumableDraft(undefined);
-  }
-
-  async function discardDraft() {
-    setResumableDraft(undefined);
-    await fetch(`/api/sessions/${sessionId}/requirements/draft`, { method: "DELETE" }).catch(() => {});
-  }
-
-  function sourceBody(withAnswers: boolean) {
+  function sourceBody(): Record<string, unknown> {
     const body: Record<string, unknown> = {};
     if (sourceTab === "paste") body.specText = specText;
     else if (sourceTab === "file") body.specText = pickedFile?.text ?? "";
     else if (issueNumber.trim()) body.issueNumber = Number(issueNumber);
-    if (withAnswers && preview) {
-      body.answers = preview.questions.map((question, index) => ({ question, answer: answers[index]?.trim() || "(답변 없음)" })).filter((item) => item.answer !== "(답변 없음)");
-    }
     return body;
   }
 
-  async function extract(withAnswers: boolean) {
+  async function extract() {
     setBusy(true);
     setElapsedMs(0);
     extractStartedAtRef.current = Date.now();
@@ -1097,7 +1126,7 @@ export function ImportFlow({
       const response = await fetch(`/api/sessions/${sessionId}/requirements/extract`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(sourceBody(withAnswers)),
+        body: JSON.stringify(sourceBody()),
         signal: controller.signal,
       });
       const data = await readJson<ExtractionPreview>(response);
@@ -1105,15 +1134,7 @@ export function ImportFlow({
         setError(data.error ?? "요구사항을 뽑지 못했습니다");
         return;
       }
-      setPreview(data);
-      setDrafts(data.requirements);
-      setAssumptions(data.assumptions);
-      setManualSteps(data.manualSteps);
-      setAnswers({});
-      setRecommendations({});
-      setRecommendationSource(undefined);
-      // 방금 받은 결과가 화면에 떴으니 "저장 안 한 결과가 있습니다" 배너는 더 보여줄 필요가 없다(저장 전까지는 서버가 계속 들고 있다)
-      setResumableDraft(undefined);
+      onExtracted();
     } catch (err) {
       setError(err instanceof DOMException && err.name === "AbortError" ? "요구사항 뽑기를 취소했습니다" : "요구사항을 뽑지 못했습니다");
     } finally {
@@ -1122,81 +1143,18 @@ export function ImportFlow({
     }
   }
 
+  function onExtractClick() {
+    if (hasUnsavedDraftEdits(draft) && !confirmingOverwrite) {
+      setConfirmingOverwrite(true);
+      return;
+    }
+    setConfirmingOverwrite(false);
+    void extract();
+  }
+
   /** "취소" 버튼 — 브라우저 쪽 fetch를 끊는다(AbortSignal이 라우트를 거쳐 서버 쪽 모델 호출까지 그대로 이어진다) */
   function cancelExtract() {
     extractAbortRef.current?.abort();
-  }
-
-  async function recommend() {
-    if (!preview || preview.questions.length === 0) return;
-    setRecommending(true);
-    setRecommendElapsedMs(0);
-    recommendStartedAtRef.current = Date.now();
-    setError(undefined);
-    const controller = new AbortController();
-    recommendAbortRef.current = controller;
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}/requirements/recommend`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ questions: preview.questions, ...(sourceTab === "paste" ? { specText } : {}) }),
-        signal: controller.signal,
-      });
-      const data = await readJson<{ recommendations: RecommendationView[]; sourced: "web" | "model" }>(response);
-      if (!response.ok) {
-        setError(data.error ?? "추천 값을 받지 못했습니다");
-        return;
-      }
-      const byIndex: Record<number, RecommendationView> = {};
-      const nextAnswers: Record<number, string> = { ...answers };
-      data.recommendations.forEach((recommendation) => {
-        const index = preview.questions.indexOf(recommendation.question);
-        if (index === -1) return;
-        byIndex[index] = recommendation;
-        nextAnswers[index] = recommendation.answer;
-      });
-      setRecommendations(byIndex);
-      setRecommendationSource(data.sourced);
-      setAnswers(nextAnswers);
-    } catch (err) {
-      setError(err instanceof DOMException && err.name === "AbortError" ? "추천 값 찾기를 취소했습니다" : "추천 값을 받지 못했습니다");
-    } finally {
-      setRecommending(false);
-      recommendAbortRef.current = undefined;
-    }
-  }
-
-  function cancelRecommend() {
-    recommendAbortRef.current?.abort();
-  }
-
-  async function apply() {
-    setBusy(true);
-    setError(undefined);
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}/requirements/apply`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requirements: drafts, assumptions, manualSteps }),
-      });
-      const data = await readJson<RequirementsSnapshot>(response);
-      if (!response.ok) {
-        setError(data.error ?? "저장하지 못했습니다");
-        return;
-      }
-      onApplied(data);
-    } catch {
-      setError("저장하지 못했습니다");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function updateDraft(index: number, patch: Partial<RequirementDraft>) {
-    setDrafts((current) => current.map((draft, i) => (i === index ? { ...draft, ...patch } : draft)));
-  }
-  function removeDraft(index: number) {
-    setDrafts((current) => current.filter((_, i) => i !== index));
   }
 
   const canExtract = sourceTab === "paste" ? specText.trim().length > 0 : sourceTab === "file" ? (pickedFile?.text.trim().length ?? 0) > 0 : issueNumber.trim().length > 0;
@@ -1275,14 +1233,14 @@ export function ImportFlow({
         />
       )}
 
-      {resumableDraft && !preview && (
-        <div className="flex flex-wrap items-center gap-2 rounded-control border border-line bg-ground px-3 py-2 text-sm">
-          <p className="flex-1 text-ink">저장 안 한 추출 결과가 있습니다</p>
-          <button type="button" onClick={resumeDraft} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
-            이어서 보기
+      {confirmingOverwrite && (
+        <div className="flex flex-wrap items-center gap-2 rounded-control border border-wait/40 bg-panel px-3 py-2 text-sm">
+          <p className="flex-1 text-ink">이전 추출 결과를 새 결과로 바꿉니다</p>
+          <button type="button" onClick={onExtractClick} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+            계속
           </button>
-          <button type="button" onClick={discardDraft} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
-            버리기
+          <button type="button" onClick={() => setConfirmingOverwrite(false)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+            취소
           </button>
         </div>
       )}
@@ -1291,7 +1249,7 @@ export function ImportFlow({
         <button
           type="button"
           disabled={!canExtract || busy}
-          onClick={() => extract(false)}
+          onClick={onExtractClick}
           className="self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
         >
           {busy ? `뽑는 중 · ${formatElapsed(elapsedMs)}` : "요구사항 뽑기"}
@@ -1303,230 +1261,484 @@ export function ImportFlow({
         )}
       </div>
       {error && <p className="text-sm text-fail">{error}</p>}
+    </div>
+  );
+}
 
-      {preview && (
-        <div className="flex flex-col gap-3 rounded-control border border-line p-3">
-          <p className="text-sm text-muted">
-            {preview.source === "model"
-              ? "추출 모델이 나눴습니다."
-              : preview.source === "managed"
-                ? preview.reason
-                : `결정론적 방식으로 나눴습니다${preview.reason ? `: ${preview.reason}` : ""}`}
-          </p>
+function indexifyRecord<T>(record: Record<string, T> | undefined): Record<number, T> {
+  const result: Record<number, T> = {};
+  for (const [key, value] of Object.entries(record ?? {})) result[Number(key)] = value;
+  return result;
+}
 
-          {preview.diff && (
-            <DiffSummary
-              diff={preview.diff}
-              onDropRemoved={(ids) => {
-                const drop = new Set(ids);
-                setDrafts((current) => current.filter((draft) => !drop.has(draft.id)));
-                setPreview((current) => (current ? { ...current, diff: current.diff?.filter((entry) => !drop.has(entry.id)) } : current));
-              }}
-            />
-          )}
+function stringifyRecord<T>(record: Record<number, T>): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).map(([key, value]) => [String(key), value]));
+}
 
-          {preview.manualSteps.length > 0 && <ManualStepsNotice items={preview.manualSteps} />}
+/**
+ * "추출 결과" 하위 화면(ADR-097 개정). 마지막 추출 결과를 배너 뒤에 숨기지 않고 항상 그대로 보여준다 — 요구사항·
+ * 가정·사람이 할 일을 고치거나 질문에 답하거나 추천 값을 받으면 800ms 정지 뒤 자동 저장(PATCH)하고, docs/requirements.md로
+ * 저장(apply)해도 지워지지 않는다. "지우기"를 직접 눌러 확인해야만 사라진다.
+ */
+export function ExtractionResultView({
+  sessionId,
+  draft,
+  onApplied,
+  onDiscarded,
+  onRefresh,
+}: {
+  sessionId: string;
+  draft: PersistedExtractionDraft;
+  onApplied: (snapshot: RequirementsSnapshot) => void;
+  onDiscarded: () => void;
+  /** "스펙을 고치고 다시 뽑기"가 서버에 새 추출 결과를 남긴 뒤, 부모가 다시 읽어 이 컴포넌트에 새 draft를 내려보낸다 */
+  onRefresh: () => void;
+}) {
+  const [savedAt, setSavedAt] = useState(draft.savedAt);
+  const [drafts, setDrafts] = useState<RequirementDraft[]>(draft.requirements);
+  const [diffEntries, setDiffEntries] = useState(draft.diff);
+  const [assumptions, setAssumptions] = useState<string[]>(draft.assumptions);
+  const [manualSteps, setManualSteps] = useState<string[]>(draft.manualSteps);
+  const [answers, setAnswers] = useState<Record<number, string>>(() => indexifyRecord(draft.answers));
+  const [recommendations, setRecommendations] = useState<Record<number, RecommendationView>>(() => indexifyRecord(draft.recommendations));
+  const [recommendationSource, setRecommendationSource] = useState(draft.recommendationSource);
+  const [appliedAt, setAppliedAt] = useState(draft.appliedAt);
+  const [updatedAt, setUpdatedAt] = useState(draft.updatedAt);
 
-          {preview.referencedFiles.length > 0 && (
-            <div className="flex flex-col gap-1.5 rounded-control bg-ground px-3 py-2">
-              <p className="text-sm font-medium text-ink">참조 파일</p>
-              <ul className="flex flex-col gap-1 text-xs text-muted">
-                {preview.referencedFiles.map((file) => (
-                  <li key={file.path} className={file.exists ? undefined : "text-fail"}>
-                    <span className="font-mono">{file.path}</span>
-                    {file.exists ? (
-                      <>
-                        {" "}
-                        · 있음{file.sizeBytes !== undefined ? ` (${file.sizeBytes.toLocaleString("ko-KR")} bytes)` : ""}
-                        {file.preview ? ` · ${file.preview}` : ""}
-                      </>
-                    ) : (
-                      " · 작업 복사본에 없음"
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+  // 부모가 새 draft를 내려보내면(재추출이 끝남) savedAt이 바뀐다 — 이때만 편집 상태를 통째로 새로 초기화한다
+  // (렌더 중에 비교해 반영한다 — requirementsImport.target과 같은 관례, effect 안에서 곧바로 setState하지 않는다)
+  if (draft.savedAt !== savedAt) {
+    setSavedAt(draft.savedAt);
+    setDrafts(draft.requirements);
+    setDiffEntries(draft.diff);
+    setAssumptions(draft.assumptions);
+    setManualSteps(draft.manualSteps);
+    setAnswers(indexifyRecord(draft.answers));
+    setRecommendations(indexifyRecord(draft.recommendations));
+    setRecommendationSource(draft.recommendationSource);
+    setAppliedAt(draft.appliedAt);
+    setUpdatedAt(draft.updatedAt);
+  }
 
-          {preview.questions.length > 0 && (
-            <div className="flex flex-col gap-2 rounded-control bg-ground px-3 py-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm font-medium text-ink">모호한 점 (최대 5개) — 답하고 &ldquo;스펙을 고치고 다시 뽑기&rdquo;를 눌러 보세요</p>
-                <div className="ml-auto flex shrink-0 items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={recommending}
-                    onClick={recommend}
-                    className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-60"
-                  >
-                    {recommending ? `추천 값 찾는 중 · ${formatElapsed(recommendElapsedMs)}` : "추천 값으로 채우기"}
-                  </button>
-                  {recommending && (
-                    <button type="button" onClick={cancelRecommend} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
-                      취소
-                    </button>
-                  )}
-                </div>
-              </div>
-              {preview.questions.map((question, index) => {
-                const recommendation = recommendations[index];
-                return (
-                  <label key={index} className="flex flex-col gap-1 text-sm">
-                    <span>{question}</span>
-                    <input
-                      value={answers[index] ?? ""}
-                      onChange={(event) => setAnswers((current) => ({ ...current, [index]: event.target.value }))}
-                      className="rounded-control border border-line bg-panel px-2 py-1 text-sm"
-                    />
-                    {recommendation && (
-                      <p className="text-xs text-muted">
-                        {recommendation.basis === "spec" ? (
-                          <span className="mr-1 font-medium text-pass">명세에 있음</span>
-                        ) : (
-                          recommendationSource === "model" && <span className="mr-1 font-medium text-wait">출처 확인 필요</span>
-                        )}
-                        {recommendation.rationale}
-                        {recommendation.basis === "spec" && recommendation.specQuote && <span className="ml-1 italic">&ldquo;{recommendation.specQuote}&rdquo;</span>}
-                        {recommendation.sources.map((source, sourceIndex) => (
-                          <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer" className="ml-1 underline">
-                            {source.title ?? source.url}
-                          </a>
-                        ))}
-                      </p>
-                    )}
-                  </label>
-                );
-              })}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => extract(true)}
-                className="self-start rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-60"
-              >
-                스펙을 고치고 다시 뽑기
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [recommending, setRecommending] = useState(false);
+  const [recommendElapsedMs, setRecommendElapsedMs] = useState(0);
+  const [reExtracting, setReExtracting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const recommendStartedAtRef = useRef(0);
+  const recommendAbortRef = useRef<AbortController | undefined>(undefined);
+  const pendingPatchRef = useRef<Record<string, unknown>>({});
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => {
+    if (!recommending) return;
+    const timer = setInterval(() => setRecommendElapsedMs(Date.now() - recommendStartedAtRef.current), 1000);
+    return () => clearInterval(timer);
+  }, [recommending]);
+
+  function flushAutosave() {
+    if (!saveTimerRef.current) return;
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = undefined;
+    const body = pendingPatchRef.current;
+    pendingPatchRef.current = {};
+    if (Object.keys(body).length === 0) return;
+    void fetch(`/api/sessions/${sessionId}/requirements/draft`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+  }
+
+  // 탭을 떠나거나(언마운트) 세션이 바뀌면, 아직 800ms를 다 기다리지 못한 편집도 잃지 않도록 바로 흘려보낸다
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- flushAutosave는 매 렌더 새로 만드는 클로저라 뺀다(언마운트 시점 것만 돌면 된다)
+  useEffect(() => () => flushAutosave(), [sessionId]);
+
+  /** 800ms 정지 뒤 자동 저장한다(ADR-097 개정). 편집 즉시 상태줄은 "저장한 뒤 바뀜"으로 낙관적으로 먼저 바꾼다 */
+  function scheduleAutosave(patch: Record<string, unknown>) {
+    pendingPatchRef.current = { ...pendingPatchRef.current, ...patch };
+    setUpdatedAt(new Date().toISOString());
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(flushAutosave, 800);
+  }
+
+  function updateDraftItem(index: number, patch: Partial<RequirementDraft>) {
+    setDrafts((current) => {
+      const next = current.map((item, i) => (i === index ? { ...item, ...patch } : item));
+      scheduleAutosave({ requirements: next });
+      return next;
+    });
+  }
+  function removeDraftItem(index: number) {
+    setDrafts((current) => {
+      const next = current.filter((_, i) => i !== index);
+      scheduleAutosave({ requirements: next });
+      return next;
+    });
+  }
+  function updateAssumptions(next: string[]) {
+    setAssumptions(next);
+    scheduleAutosave({ assumptions: next });
+  }
+  function updateManualSteps(next: string[]) {
+    setManualSteps(next);
+    scheduleAutosave({ manualSteps: next });
+  }
+  function updateAnswer(index: number, value: string) {
+    setAnswers((current) => {
+      const next = { ...current, [index]: value };
+      scheduleAutosave({ answers: stringifyRecord(next) });
+      return next;
+    });
+  }
+
+  async function recommend() {
+    if (draft.questions.length === 0) return;
+    setRecommending(true);
+    setRecommendElapsedMs(0);
+    // eslint-disable-next-line react-hooks/purity -- 사람이 누른 버튼 핸들러 안에서만 도는 경과시간 측정 시작점이다(렌더 중 호출이 아니다)
+    recommendStartedAtRef.current = Date.now();
+    setError(undefined);
+    const controller = new AbortController();
+    recommendAbortRef.current = controller;
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/recommend`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ questions: draft.questions, ...(draft.sourceInput?.specText ? { specText: draft.sourceInput.specText } : {}) }),
+        signal: controller.signal,
+      });
+      const data = await readJson<{ recommendations: RecommendationView[]; sourced: "web" | "model" }>(response);
+      if (!response.ok) {
+        setError(data.error ?? "추천 값을 받지 못했습니다");
+        return;
+      }
+      const byIndex: Record<number, RecommendationView> = {};
+      const nextAnswers: Record<number, string> = { ...answers };
+      data.recommendations.forEach((recommendation) => {
+        const index = draft.questions.indexOf(recommendation.question);
+        if (index === -1) return;
+        byIndex[index] = recommendation;
+        nextAnswers[index] = recommendation.answer;
+      });
+      setRecommendations(byIndex);
+      setRecommendationSource(data.sourced);
+      setAnswers(nextAnswers);
+      scheduleAutosave({ recommendations: stringifyRecord(byIndex), recommendationSource: data.sourced, answers: stringifyRecord(nextAnswers) });
+    } catch (err) {
+      setError(err instanceof DOMException && err.name === "AbortError" ? "추천 값 찾기를 취소했습니다" : "추천 값을 받지 못했습니다");
+    } finally {
+      setRecommending(false);
+      recommendAbortRef.current = undefined;
+    }
+  }
+
+  function cancelRecommend() {
+    recommendAbortRef.current?.abort();
+  }
+
+  async function reExtractWithAnswers() {
+    if (!draft.sourceInput) return;
+    setReExtracting(true);
+    setError(undefined);
+    try {
+      const answered = draft.questions.map((question, index) => ({ question, answer: answers[index]?.trim() || "(답변 없음)" })).filter((item) => item.answer !== "(답변 없음)");
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/extract`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...draft.sourceInput, answers: answered }),
+      });
+      const data = await readJson<ExtractionPreview>(response);
+      if (!response.ok) {
+        setError(data.error ?? "요구사항을 뽑지 못했습니다");
+        return;
+      }
+      flushAutosave();
+      onRefresh();
+    } catch {
+      setError("요구사항을 뽑지 못했습니다");
+    } finally {
+      setReExtracting(false);
+    }
+  }
+
+  async function apply() {
+    flushAutosave();
+    setBusy(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/apply`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requirements: drafts, assumptions, manualSteps }),
+      });
+      const data = await readJson<RequirementsSnapshot>(response);
+      if (!response.ok) {
+        setError(data.error ?? "저장하지 못했습니다");
+        return;
+      }
+      const now = new Date().toISOString();
+      setAppliedAt(now);
+      setUpdatedAt(now);
+      onApplied(data);
+    } catch {
+      setError("저장하지 못했습니다");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function discard() {
+    flushAutosave();
+    await fetch(`/api/sessions/${sessionId}/requirements/draft`, { method: "DELETE" }).catch(() => {});
+    onDiscarded();
+  }
+
+  const statusLine = requirementsDraftStatusLine(appliedAt, updatedAt);
+
+  return (
+    <div className="flex flex-col gap-3 rounded-control border border-line p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm font-medium text-ink">{statusLine}</p>
+        <div className="ml-auto">
+          {confirmingDelete ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-control border border-fail/40 bg-fail/10 px-3 py-2 text-sm">
+              <p className="text-ink">추출 결과를 지웁니다. 저장한 요구사항(docs/requirements.md)은 그대로 남습니다.</p>
+              <button type="button" onClick={discard} className="rounded-control border border-fail px-2.5 py-1 text-xs font-medium text-fail hover:bg-fail/10">
+                정말 지우기
+              </button>
+              <button type="button" onClick={() => setConfirmingDelete(false)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+                취소
               </button>
             </div>
+          ) : (
+            <button type="button" onClick={() => setConfirmingDelete(true)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium text-fail hover:border-fail">
+              지우기
+            </button>
           )}
+        </div>
+      </div>
 
-          {preview.outOfScope.length > 0 && (
-            <div className="flex flex-col gap-1 rounded-control bg-ground px-3 py-2">
-              <p className="text-sm font-medium text-ink">범위 밖</p>
-              <ul className="list-inside list-disc text-sm text-muted">
-                {preview.outOfScope.map((item, index) => (
-                  <li key={index}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+      {draft.source === "fallback" ? (
+        <div className="rounded-control border border-fail/40 bg-fail/10 px-3 py-2 text-sm text-fail">
+          <span className="font-medium">모델 호출 없이 결정론적 방식으로 나눴습니다</span>
+          {draft.reason ? ` — ${draft.reason}` : ""}
+        </div>
+      ) : (
+        <p className="text-sm text-muted">{draft.source === "model" ? "추출 모델이 나눴습니다." : draft.reason}</p>
+      )}
 
-          <ul className="flex flex-col gap-2">
-            {drafts.map((requirement, index) => (
-              <li key={index} className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-xs text-muted">{requirement.id}</span>
-                  <input
-                    value={requirement.title}
-                    onChange={(event) => updateDraft(index, { title: event.target.value })}
-                    className="min-w-0 flex-1 rounded-control border border-line bg-ground px-2 py-1 text-sm"
-                  />
-                  <select
-                    value={requirement.kind}
-                    onChange={(event) => updateDraft(index, { kind: event.target.value as RequirementKind })}
-                    className="rounded-control border border-line bg-ground px-1.5 py-1 text-xs"
-                  >
-                    {Object.entries(KIND_LABEL).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={requirement.priority}
-                    onChange={(event) => updateDraft(index, { priority: event.target.value as RequirementPriority })}
-                    className="rounded-control border border-line bg-ground px-1.5 py-1 text-xs"
-                  >
-                    {Object.entries(PRIORITY_LABEL).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                  <button type="button" onClick={() => removeDraft(index)} className="shrink-0 text-xs font-medium text-fail hover:underline">
-                    빼기
-                  </button>
-                </div>
-                <textarea
-                  value={requirement.acceptance.join("\n")}
-                  onChange={(event) => updateDraft(index, { acceptance: event.target.value.split("\n").filter((line) => line.trim().length > 0) })}
-                  rows={Math.max(2, requirement.acceptance.length)}
-                  placeholder="인수 조건(줄마다 하나)"
-                  className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
-                />
-                {(requirement.ears || (requirement.scenarios && requirement.scenarios.length > 0) || requirement.nfr) && (
-                  <div className="flex flex-col gap-0.5 rounded-control bg-ground px-2 py-1.5 text-xs text-muted">
-                    {requirement.rev !== undefined && <p>개정 {requirement.rev}</p>}
-                    {requirement.ears && (
-                      <p>
-                        EARS({requirement.ears.pattern}): {requirement.ears.statement}
-                      </p>
-                    )}
-                    {requirement.scenarios && requirement.scenarios.length > 0 && (
-                      <ul className="list-inside list-disc">
-                        {requirement.scenarios.map((scenario) => (
-                          <li key={scenario.id}>
-                            {scenario.id}: (Given) {scenario.given} (When) {scenario.when} (Then) {scenario.then}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    {requirement.nfr && (
-                      <p>
-                        NFR: {requirement.nfr.metric} {requirement.nfr.threshold} (조건: {requirement.nfr.condition} · 측정: {requirement.nfr.method})
-                      </p>
-                    )}
-                  </div>
+      {diffEntries && (
+        <DiffSummary
+          diff={diffEntries}
+          onDropRemoved={(ids) => {
+            const drop = new Set(ids);
+            setDrafts((current) => {
+              const next = current.filter((item) => !drop.has(item.id));
+              scheduleAutosave({ requirements: next });
+              return next;
+            });
+            setDiffEntries((current) => current?.filter((entry) => !drop.has(entry.id)));
+          }}
+        />
+      )}
+
+      {draft.manualSteps.length > 0 && <ManualStepsNotice items={draft.manualSteps} />}
+
+      {draft.referencedFiles.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-control bg-ground px-3 py-2">
+          <p className="text-sm font-medium text-ink">참조 파일</p>
+          <ul className="flex flex-col gap-1 text-xs text-muted">
+            {draft.referencedFiles.map((file) => (
+              <li key={file.path} className={file.exists ? undefined : "text-fail"}>
+                <span className="font-mono">{file.path}</span>
+                {file.exists ? (
+                  <>
+                    {" "}
+                    · 있음{file.sizeBytes !== undefined ? ` (${file.sizeBytes.toLocaleString("ko-KR")} bytes)` : ""}
+                    {file.preview ? ` · ${file.preview}` : ""}
+                  </>
+                ) : (
+                  " · 작업 복사본에 없음"
                 )}
               </li>
             ))}
           </ul>
-
-          <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
-            <p className="text-sm font-medium text-ink">가정</p>
-            <textarea
-              value={assumptions.join("\n")}
-              onChange={(event) => setAssumptions(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
-              rows={Math.max(2, assumptions.length)}
-              placeholder="가정(줄마다 하나) — 데이터 규모·동시성/트래픽(명세가 실마리를 줄 때만)·페이지네이션 등"
-              className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
-            <p className="text-sm font-medium text-ink">사람이 할 일 (에이전트 금지)</p>
-            <p className="text-xs text-muted">저장소 권한·협업자·공개 범위 변경, 이메일 제출처럼 사람이 손으로 해야 하는 절차입니다. 요구사항으로 저장되지 않고, 에이전트에게도 절대 하지 말라고 안내됩니다.</p>
-            <textarea
-              value={manualSteps.join("\n")}
-              onChange={(event) => setManualSteps(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
-              rows={Math.max(2, manualSteps.length)}
-              placeholder="사람이 할 일(줄마다 하나) — 예: private 저장소를 만들고 협업자를 추가한다"
-              className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
-            />
-          </div>
-
-          <p className="text-xs text-muted">
-            저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 저장소 탭의 &ldquo;올리기 전 점검&rdquo;이 이걸로 완료 여부를 판단합니다.
-          </p>
-          <button
-            type="button"
-            disabled={busy || drafts.length === 0}
-            onClick={apply}
-            className="self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
-          >
-            {busy ? "저장하는 중" : "docs/requirements.md로 저장"}
-          </button>
         </div>
       )}
+
+      {draft.questions.length > 0 && (
+        <div className="flex flex-col gap-2 rounded-control bg-ground px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-medium text-ink">모호한 점 (최대 5개)</p>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <button
+                type="button"
+                disabled={recommending}
+                onClick={recommend}
+                className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-60"
+              >
+                {recommending ? `추천 값 찾는 중 · ${formatElapsed(recommendElapsedMs)}` : "추천 값으로 채우기"}
+              </button>
+              {recommending && (
+                <button type="button" onClick={cancelRecommend} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+                  취소
+                </button>
+              )}
+            </div>
+          </div>
+          {draft.questions.map((question, index) => {
+            const recommendation = recommendations[index];
+            return (
+              <label key={index} className="flex flex-col gap-1 text-sm">
+                <span>{question}</span>
+                <input value={answers[index] ?? ""} onChange={(event) => updateAnswer(index, event.target.value)} className="rounded-control border border-line bg-panel px-2 py-1 text-sm" />
+                {recommendation && (
+                  <p className="text-xs text-muted">
+                    {recommendation.basis === "spec" ? (
+                      <span className="mr-1 font-medium text-pass">명세에 있음</span>
+                    ) : (
+                      recommendationSource === "model" && <span className="mr-1 font-medium text-wait">출처 확인 필요</span>
+                    )}
+                    {recommendation.rationale}
+                    {recommendation.basis === "spec" && recommendation.specQuote && <span className="ml-1 italic">&ldquo;{recommendation.specQuote}&rdquo;</span>}
+                    {recommendation.sources.map((source, sourceIndex) => (
+                      <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer" className="ml-1 underline">
+                        {source.title ?? source.url}
+                      </a>
+                    ))}
+                  </p>
+                )}
+              </label>
+            );
+          })}
+          {draft.sourceInput && (
+            <button
+              type="button"
+              disabled={reExtracting}
+              onClick={reExtractWithAnswers}
+              className="self-start rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-60"
+            >
+              {reExtracting ? "다시 뽑는 중" : "스펙을 고치고 다시 뽑기"}
+            </button>
+          )}
+        </div>
+      )}
+
+      {draft.outOfScope.length > 0 && (
+        <div className="flex flex-col gap-1 rounded-control bg-ground px-3 py-2">
+          <p className="text-sm font-medium text-ink">범위 밖</p>
+          <ul className="list-inside list-disc text-sm text-muted">
+            {draft.outOfScope.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <ul className="flex flex-col gap-2">
+        {drafts.map((requirement, index) => (
+          <li key={index} className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs text-muted">{requirement.id}</span>
+              <input
+                value={requirement.title}
+                onChange={(event) => updateDraftItem(index, { title: event.target.value })}
+                className="min-w-0 flex-1 rounded-control border border-line bg-ground px-2 py-1 text-sm"
+              />
+              <select
+                value={requirement.kind}
+                onChange={(event) => updateDraftItem(index, { kind: event.target.value as RequirementKind })}
+                className="rounded-control border border-line bg-ground px-1.5 py-1 text-xs"
+              >
+                {Object.entries(KIND_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={requirement.priority}
+                onChange={(event) => updateDraftItem(index, { priority: event.target.value as RequirementPriority })}
+                className="rounded-control border border-line bg-ground px-1.5 py-1 text-xs"
+              >
+                {Object.entries(PRIORITY_LABEL).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={() => removeDraftItem(index)} className="shrink-0 text-xs font-medium text-fail hover:underline">
+                빼기
+              </button>
+            </div>
+            <textarea
+              value={requirement.acceptance.join("\n")}
+              onChange={(event) => updateDraftItem(index, { acceptance: event.target.value.split("\n").filter((line) => line.trim().length > 0) })}
+              rows={Math.max(2, requirement.acceptance.length)}
+              placeholder="인수 조건(줄마다 하나)"
+              className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
+            />
+            {(requirement.ears || (requirement.scenarios && requirement.scenarios.length > 0) || requirement.nfr) && (
+              <div className="flex flex-col gap-0.5 rounded-control bg-ground px-2 py-1.5 text-xs text-muted">
+                {requirement.rev !== undefined && <p>개정 {requirement.rev}</p>}
+                {requirement.ears && (
+                  <p>
+                    EARS({requirement.ears.pattern}): {requirement.ears.statement}
+                  </p>
+                )}
+                {requirement.scenarios && requirement.scenarios.length > 0 && (
+                  <ul className="list-inside list-disc">
+                    {requirement.scenarios.map((scenario) => (
+                      <li key={scenario.id}>
+                        {scenario.id}: (Given) {scenario.given} (When) {scenario.when} (Then) {scenario.then}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {requirement.nfr && (
+                  <p>
+                    NFR: {requirement.nfr.metric} {requirement.nfr.threshold} (조건: {requirement.nfr.condition} · 측정: {requirement.nfr.method})
+                  </p>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
+        <p className="text-sm font-medium text-ink">가정</p>
+        <textarea
+          value={assumptions.join("\n")}
+          onChange={(event) => updateAssumptions(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
+          rows={Math.max(2, assumptions.length)}
+          placeholder="가정(줄마다 하나) — 데이터 규모·동시성/트래픽(명세가 실마리를 줄 때만)·페이지네이션 등"
+          className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
+        <p className="text-sm font-medium text-ink">사람이 할 일 (에이전트 금지)</p>
+        <p className="text-xs text-muted">저장소 권한·협업자·공개 범위 변경, 이메일 제출처럼 사람이 손으로 해야 하는 절차입니다. 요구사항으로 저장되지 않고, 에이전트에게도 절대 하지 말라고 안내됩니다.</p>
+        <textarea
+          value={manualSteps.join("\n")}
+          onChange={(event) => updateManualSteps(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
+          rows={Math.max(2, manualSteps.length)}
+          placeholder="사람이 할 일(줄마다 하나) — 예: private 저장소를 만들고 협업자를 추가한다"
+          className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
+        />
+      </div>
+
+      {error && <p className="text-sm text-fail">{error}</p>}
+      <p className="text-xs text-muted">
+        저장하면: 에이전트가 매 요청마다 이 목록을 읽고, 요구사항별로 작업·검증 근거를 추적하고, 저장소 탭의 &ldquo;올리기 전 점검&rdquo;이 이걸로 완료 여부를 판단합니다.
+      </p>
+      <button
+        type="button"
+        disabled={busy || drafts.length === 0}
+        onClick={apply}
+        className="self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+      >
+        {busy ? "저장하는 중" : "docs/requirements.md로 저장"}
+      </button>
     </div>
   );
 }

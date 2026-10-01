@@ -195,6 +195,27 @@ describe('이어서 작업하기가 버리기 전에 지키고 백업한다(ADR-
     await stopSession(id).catch(() => {});
   }, 20_000);
 
+  it('추출 결과 사이드카(.git/b-studio/requirements-draft.json)는 되돌리기 경로를 타도 사라지지 않는다(ADR-097 개정, ADR-099)', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    const workDir = getSnapshot(id)!.workDir;
+    const draftFile = path.join(workDir, '.git', 'b-studio', 'requirements-draft.json');
+    await mkdir(path.dirname(draftFile), { recursive: true });
+    await writeFile(draftFile, '{"requirements":[],"questions":[],"source":"model","referencedFiles":[],"outOfScope":[],"assumptions":[],"manualSteps":[],"savedAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z"}\n');
+
+    await stopSession(id);
+    // "절대 조용히 지우지 않는다" 경로가 버리는 작업 복사본 변경(.git/ 밖)을 함께 흉내 낸다
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String broken; }\n');
+    await resumeSession(id);
+    expect(await waitForReady(id)).toBe('ready');
+
+    // .git/ 아래는 git reset --hard·git clean -fd가 건드리지 않는 자리라 그대로 남는다
+    expect(await readFile(draftFile, 'utf8')).toContain('"source":"model"');
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
   it('이어서 작업할 때 버릴 변경이 없으면 백업·안내 없이 조용히 이어서 작업한다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;
