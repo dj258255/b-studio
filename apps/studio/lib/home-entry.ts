@@ -32,6 +32,12 @@ export interface EntryInput {
    * 구독 CLI 모드에는 레지스트리 모델이 없으므로 비워 보내 서버 기본(Fleet 기본 후보, 로컬 CLI 계획)을 쓴다
    */
   mode?: string;
+  /**
+   * 세션의 넘기기(ADR-068)로 나눠서 병렬을 만들 때 그 세션 id. 있으면(method가 split일 때만 의미가 있다)
+   * 레인·통합 세션이 프로젝트 원본이 아니라 이 세션의 최신 체크포인트에서 시작한다(ADR-096, 요구사항·이슈
+   * 발행 기록을 이어받는다). 홈에서 새로 시작할 때는 없다
+   */
+  sourceSessionId?: string;
 }
 
 export type EntryResult = { ok: true; href: string } | { ok: false; error: string; sessionId?: string };
@@ -91,6 +97,7 @@ export async function submitEntry(fetcher: FetchLike, input: EntryInput): Promis
     request: input.text,
     ...(modelId !== undefined ? { modelId } : {}),
     ...(input.sessionEffort ? { effort: input.sessionEffort } : {}),
+    ...(input.sourceSessionId ? { sourceSessionId: input.sourceSessionId } : {}),
   });
   return created.ok ? { ok: true, href: detailHref('/task-plans', created.body) } : created;
 }

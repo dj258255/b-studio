@@ -85,6 +85,15 @@ describe('submitEntry', () => {
     expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ projectId: 'orders', request: base.text, modelId: 'plan-model' });
   });
 
+  it('세션에서 넘긴 나눠서 병렬(sourceSessionId)은 계획 만들기 본문에 그대로 싣고, 안 넘기면 아예 담지 않는다(ADR-096)', async () => {
+    const { fetchImpl, calls } = fakeFetch([{ status: 201, body: { id: 'p2' } }]);
+
+    const result = await submitEntry(fetchImpl, { ...base, method: 'split', sourceSessionId: 'origin-1' });
+
+    expect(result).toEqual({ ok: true, href: '/task-plans?id=p2' });
+    expect(JSON.parse(String(calls[0]!.init!.body))).toEqual({ projectId: 'orders', request: base.text, modelId: 'plan-model', sourceSessionId: 'origin-1' });
+  });
+
   it('응답에 id가 없으면 목록 화면으로 간다', async () => {
     const { fetchImpl } = fakeFetch([{ status: 201, body: {} }]);
 

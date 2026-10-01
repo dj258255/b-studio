@@ -182,6 +182,12 @@ export interface TaskPlanView {
   coordination?: { strategy: TaskPlanStrategy; topology: Topology };
   /** 검증 범위. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다). light면 레인·통합 실행이 가볍게 확인한다. 없으면 full */
   verify?: 'light';
+  /**
+   * 세션에서 "나눠서 병렬로 하기"로 넘긴 계획이면 그 세션 id(ADR-096). 있으면 레인·통합 세션이 프로젝트 원본이
+   * 아니라 이 세션의 최신 체크포인트에서 시작한다(요구사항·이슈 발행 기록을 이어받는다). 화면의 "계획 만들기"
+   * 탭에서 직접 만든 계획은 없다(프로젝트 원본에서 시작하는 지금 동작 그대로다)
+   */
+  sourceSessionId?: string;
   /** 조율 게시판 상태(메모 목록과 통계). 조율을 켠 계획에만 있다 */
   board?: TaskPlanBoardView;
   lanes: TaskPlanLaneView[];

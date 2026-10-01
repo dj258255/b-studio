@@ -284,6 +284,12 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       };
     }
 
+    case 'docs_checkpoint': {
+      // 요청 밖(요구사항 저장 등)에서 남기므로 대화 줄은 더하지 않는다 — 체크포인트 목록(히스토리 패널)에만 반영한다
+      const known = view.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === event.checkpoint.sha);
+      return known ? view : patchSnapshot(view, { checkpoints: [event.checkpoint, ...view.snapshot.checkpoints] });
+    }
+
     case 'reverted':
       return {
         ...view,

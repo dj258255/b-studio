@@ -78,6 +78,10 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                     {checkpoint.verify === "light" && (
                       <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">가볍게</span>
                     )}
+                    {/* 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(요구사항 저장 등). 배포 조건·"검증됨" 판정의 증거로 쓰지 않는다 */}
+                    {checkpoint.verify === "docs" && (
+                      <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">문서</span>
+                    )}
                   </span>
                   <span className="mt-0.5 block text-xs text-muted">
                     <span className="font-mono">{checkpoint.shortSha}</span>, 파일 {checkpoint.files.length}개{index === 0 && ", 현재"}
@@ -96,11 +100,15 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                 {active.verify === "light" && (
                   <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">가볍게</span>
                 )}
+                {active.verify === "docs" && (
+                  <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">문서</span>
+                )}
               </h3>
               <p className="mt-0.5 text-sm text-muted">
                 <span className="font-mono">{active.shortSha}</span>
                 {active.createdAt && `, ${new Date(active.createdAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`}
                 {active.verify === "light" && ", 가볍게 확인(배포 조건 미충족)"}
+                {active.verify === "docs" && ", 문서만 바꿔 검증 게이트 없이 남긴 체크포인트"}
               </p>
             </div>
 
