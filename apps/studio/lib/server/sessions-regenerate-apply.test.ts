@@ -5,7 +5,7 @@ import type { Sandbox } from '@b-studio/sandbox';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
- * "이 세션에도 적용"(ADR-0XX)을 실제 sessions.ts·project-registry.ts 코드로 끝까지 돌려 본다.
+ * "이 세션에도 적용"(ADR-101)을 실제 sessions.ts·project-registry.ts 코드로 끝까지 돌려 본다.
  * 진짜로 하는 것: 폴더 등록(project-registry), 생성 파일 다시 만들기(project-detect), 세션 작업 복사본, restartServicesFor.
  * 가짜로 바꾸는 것: 샌드박스(Docker)뿐이다 — restart가 실제로 뭘 다시 띄우는지는 sandbox 쪽 책임이라, 여기서는
  * "어떤 서비스를 restart했는지"만 확인한다.
@@ -123,7 +123,7 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   }
 }
 
-describe('applyRegeneratedFilesToSession(ADR-0XX, "이 세션에도 적용")', () => {
+describe('applyRegeneratedFilesToSession(ADR-101, "이 세션에도 적용")', () => {
   it('작업 복사본 세션(copy)에 다시 만든 파일을 덮어쓰고 영향받은 서비스를 다시 띄운다', async () => {
     const { projectId, written } = await registerAndRegenerate();
     expect(written).toContain('Dockerfile.b-studio');

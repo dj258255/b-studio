@@ -5,7 +5,7 @@ import { fetchOriginMain } from '@/lib/server/project-source-sync';
 import { localFolderAllowed } from '@/lib/server/sessions';
 
 /**
- * "원격 main 받아오기"(ADR-0XX). 폴더 열기(ADR-067)로 연 프로젝트의 원본 폴더를 원격(origin)의 같은 브랜치로
+ * "원격 main 받아오기"(ADR-101). 폴더 열기(ADR-067)로 연 프로젝트의 원본 폴더를 원격(origin)의 같은 브랜치로
  * fast-forward만 받는다(힘으로 되돌리거나 덮지 않는다). 폴더 열기와 같은 가드: 개인 PC 모드에서만 받는다.
  */
 export async function POST(request: Request, context: RouteContext<'/api/projects/[id]/fetch-main'>) {

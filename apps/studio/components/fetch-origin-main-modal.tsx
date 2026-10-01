@@ -17,7 +17,7 @@ interface FetchOriginMainResult {
 }
 
 /**
- * 프로젝트 메뉴(ADR-070)의 "원격 main 받아오기"(ADR-0XX). 누르면 바로 받아온다(미리보기 단계 없음) —
+ * 프로젝트 메뉴(ADR-070)의 "원격 main 받아오기"(ADR-101). 누르면 바로 받아온다(미리보기 단계 없음) —
  * fast-forward만 하므로 성공하면 항상 안전하고, 안 되면(갈라짐·작업 중) 이유를 그대로 보여 준다.
  */
 export function FetchOriginMainModal({ projectId, onClose }: { projectId: string; onClose: () => void }) {

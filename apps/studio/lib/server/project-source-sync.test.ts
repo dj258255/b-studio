@@ -50,7 +50,7 @@ afterEach(async () => {
   await Promise.all(made.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe('fetchOriginMain(ADR-0XX, 원격 main 받아오기)', () => {
+describe('fetchOriginMain(ADR-101, 원격 main 받아오기)', () => {
   it('Git 저장소가 아니면 거부한다', async () => {
     const root = await tmp();
     await expect(fetchOriginMain(root)).rejects.toThrow(/Git 저장소/);

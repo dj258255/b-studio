@@ -4,7 +4,7 @@ import { applyRegeneration, proposeRegeneration } from '@/lib/server/project-reg
 import { localFolderAllowed } from '@/lib/server/sessions';
 
 /**
- * "생성 파일 다시 만들기"(ADR-0XX, 폴더 열기 ADR-067의 후속). 폴더 열기와 같은 가드를 쓴다 — 서버가 이 PC의
+ * "생성 파일 다시 만들기"(ADR-101, 폴더 열기 ADR-067의 후속). 폴더 열기와 같은 가드를 쓴다 — 서버가 이 PC의
  * 프로젝트 폴더에 파일을 다시 쓰므로 개인 PC 모드에서만 받는다.
  * GET은 미리보기(아무것도 쓰지 않는다), POST는 사람이 고른 파일만 실제로 다시 쓴다.
  */

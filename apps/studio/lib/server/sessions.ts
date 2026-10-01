@@ -1337,7 +1337,7 @@ export async function setSessionServiceSelection(id: string, service: string, on
 }
 
 /**
- * "이 세션에도 적용"(ADR-0XX): "생성 파일 다시 만들기"가 프로젝트 원본 폴더에 막 다시 쓴 파일(studio.yaml·
+ * "이 세션에도 적용"(ADR-101): "생성 파일 다시 만들기"가 프로젝트 원본 폴더에 막 다시 쓴 파일(studio.yaml·
  * compose.b-studio.yaml·Dockerfile.b-studio)을 이미 떠 있는 이 세션에도 반영한다.
  *
  * 내 폴더 세션(workspace: local)은 작업 폴더가 원본 폴더 그 자체라 이미 최신이므로 파일을 복사하지 않는다.

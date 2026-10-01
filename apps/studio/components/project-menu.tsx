@@ -28,7 +28,7 @@ export function ProjectMenu({ projectId, projectName }: { projectId: string; pro
   const [folderOpen, setFolderOpen] = useState(false);
   /** 데스크톱 폴더 선택 창에서 고른 경로. 있으면 확인 창(찾은 서비스·만들 파일)만 띄운다 */
   const [pickedFolder, setPickedFolder] = useState<string>();
-  /** 폴더 프로젝트 전용 동작(ADR-0XX): 생성 파일 다시 만들기·원격 main 받아오기 */
+  /** 폴더 프로젝트 전용 동작(ADR-101): 생성 파일 다시 만들기·원격 main 받아오기 */
   const [regenerateOpen, setRegenerateOpen] = useState(false);
   const [fetchMainOpen, setFetchMainOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -96,9 +96,9 @@ function ProjectMenuPopover({
   projectId: string;
   onClose: () => void;
   onOpenFolder: () => void;
-  /** 생성 파일 다시 만들기(ADR-0XX). 폴더 프로젝트에서만 보인다 */
+  /** 생성 파일 다시 만들기(ADR-101). 폴더 프로젝트에서만 보인다 */
   onRegenerate: () => void;
-  /** 원격 main 받아오기(ADR-0XX). 폴더 프로젝트에서만 보인다 */
+  /** 원격 main 받아오기(ADR-101). 폴더 프로젝트에서만 보인다 */
   onFetchMain: () => void;
 }) {
   const router = useRouter();
@@ -165,7 +165,7 @@ function ProjectMenuPopover({
   const usable = projects && selectableProjects(projects, projectId);
   // 한 번도 요청을 보내지 않은 세션은 여러 개 있어도 서로 구별되지 않으니(모두 같은 문구) 가장 최근 것 하나만 남긴다
   const recent = sessions && collapseEmptySessions(recentSessionsFor(sessions, projectId, RECENT_LIMIT));
-  // 폴더 열기(ADR-067)로 등록한 프로젝트만 "생성 파일 다시 만들기"·"원격 main 받아오기"를 보여준다(ADR-0XX)
+  // 폴더 열기(ADR-067)로 등록한 프로젝트만 "생성 파일 다시 만들기"·"원격 main 받아오기"를 보여준다(ADR-101)
   const isFolderProject = Boolean(projects?.find((project) => project.id === projectId)?.folder);
 
   return createPortal(

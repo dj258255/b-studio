@@ -26,7 +26,7 @@ interface RunningSession {
 }
 
 /**
- * 프로젝트 메뉴(ADR-070)의 "생성 파일 다시 만들기"(ADR-0XX). 폴더를 다시 훑어 studio.yaml·compose.b-studio.yaml·
+ * 프로젝트 메뉴(ADR-070)의 "생성 파일 다시 만들기"(ADR-101). 폴더를 다시 훑어 studio.yaml·compose.b-studio.yaml·
  * Dockerfile.b-studio를 지금 코드에 맞게 새로 만들 수 있는지 보여 주고, 파일마다 옛 내용과 새 내용의 diff를 보여준다.
  * 사람이 손으로 고친 파일(해시가 b-studio가 마지막으로 쓴 값과 다르다)은 기본으로 "유지"에 두고 경고한다 —
  * 그래도 "덮어쓰기"로 바꾸면 사라진다는 것을 미리 알린다.

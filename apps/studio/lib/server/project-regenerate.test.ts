@@ -23,7 +23,7 @@ afterEach(async () => {
 
 const nextPackageNoLock = JSON.stringify({ name: 'shop', dependencies: { next: '16.0.0', react: '19.0.0' } });
 
-describe('proposeRegeneration / applyRegeneration(ADR-0XX, 생성 파일 다시 만들기)', () => {
+describe('proposeRegeneration / applyRegeneration(ADR-101, 생성 파일 다시 만들기)', () => {
   it('직접 만든 studio.yaml을 쓰는 프로젝트는 다시 만들 것이 없다고 한다(해시를 기록한 적이 없다)', async () => {
     const root = await repo({
       'studio.yaml': 'version: 1\nname: hand\nservices:\n  legacy:\n    source: external\n    baseUrl: https://example.com\n',
@@ -160,7 +160,7 @@ describe('proposeRegeneration / applyRegeneration(ADR-0XX, 생성 파일 다시 
   });
 });
 
-describe('applyGeneratedFilesToWorkingCopy(ADR-0XX, "이 세션에도 적용")', () => {
+describe('applyGeneratedFilesToWorkingCopy(ADR-101, "이 세션에도 적용")', () => {
   it('지정한 파일만 덮어쓰고, 없는 파일은 건너뛰고, git 추적에서 뺀다', async () => {
     const source = await repo({ 'studio.yaml': 'version: 1\n새 내용\n' });
     const projectRoot = await repo({ 'studio.yaml': '옛 내용\n', '.git': '' });

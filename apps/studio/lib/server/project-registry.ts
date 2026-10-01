@@ -19,7 +19,7 @@ export interface RegisteredProject {
   path: string;
   addedAt: string;
   /**
-   * b-studio가 마지막으로 이 폴더에 쓴 생성 파일의 내용 해시(경로 → sha256, ADR-0XX). "생성 파일 다시 만들기"가
+   * b-studio가 마지막으로 이 폴더에 쓴 생성 파일의 내용 해시(경로 → sha256, ADR-101). "생성 파일 다시 만들기"가
    * 디스크의 지금 내용과 비교해, 사람이 그사이 손으로 고쳤는지(해시가 다르면 손으로 고친 것)를 판단하는 기준이다.
    * 직접 만든 studio.yaml을 쓰는 프로젝트(hasSpec)는 애초에 쓴 파일이 없어 이 값이 비어 있다.
    */
@@ -182,7 +182,7 @@ export interface RegenerationProposal {
 }
 
 /**
- * "생성 파일 다시 만들기"(ADR-0XX)의 미리보기: 지금 폴더를 다시 훑어(project-detect) 디스크의 생성 파일과 비교한다.
+ * "생성 파일 다시 만들기"(ADR-101)의 미리보기: 지금 폴더를 다시 훑어(project-detect) 디스크의 생성 파일과 비교한다.
  * 아무것도 쓰지 않는다(proposeFolder와 같은 생각) — 적용은 applyRegeneration이 한다.
  */
 export async function proposeRegeneration(id: string, file = registryPath()): Promise<RegenerationProposal> {
@@ -242,7 +242,7 @@ export async function applyRegeneration(id: string, overwrite: readonly string[]
 }
 
 /**
- * "이 세션에도 적용"(ADR-0XX): 다시 만든 생성 파일을 이미 떠 있는 세션의 작업 복사본에 덮어쓴다.
+ * "이 세션에도 적용"(ADR-101): 다시 만든 생성 파일을 이미 떠 있는 세션의 작업 복사본에 덮어쓴다.
  * overlayGeneratedFiles(세션을 만들 때 쓴다)는 복사본에 이미 있는 파일을 건드리지 않지만, 여기서는 사람이 명시적으로
  * "적용"을 눌렀으므로 넘겨준 파일만 무조건 덮어쓴다. 영향받은 서비스를 재시작하는 것은 호출하는 쪽(sessions.ts)의 일이다.
  */
