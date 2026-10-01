@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -437,6 +437,12 @@ interface Session {
    * test 단계가 남긴 보고서를 다시 실행하지 않고 모았을 때(gate) 채운다. 서버를 다시 시작하면 사라진다(체크포인트처럼 영속하지 않는다)
    */
   testResults?: Map<string, StoredTestRun>;
+  /**
+   * testResults를 사이드카 파일(.git/b-studio/test-results.json)에서 읽어 오는 중(또는 읽은) 약속. 세션
+   * 객체가 막 만들어졌을 때(새로 만들거나 이어서 작업할 때)는 비어 있다가 testResults를 처음 찾을 때 한 번만 채운다
+   * — 동시에 여러 서비스를 조회해도(Promise.all) 파일을 두 번 읽거나 서로의 결과를 덮어쓰지 않는다
+   */
+  testResultsLoadPromise?: Promise<void>;
   /** 서비스별로 지금 도는 테스트를 취소할 수 있게 든 컨트롤러. 서비스 하나당 한 번에 하나만 돈다 */
   testControllers?: Map<string, AbortController>;
 }
@@ -4964,6 +4970,82 @@ async function detectServiceRunner(session: Session, spec: ManagedSpec): Promise
   return detectRunner({ template: spec.template, hasPomXml, packageJson });
 }
 
+// ---------------------------------------------------------------------------
+// 테스트 결과 사이드카(.git/b-studio/test-results.json, 다그푸딩 불편 55): testResults는 지금까지 세션 메모리에만
+// 있어 스튜디오 서버가 재시작하면 통째로 사라졌다 — 체크포인트 sha가 같아 "올리기 전 점검"·요구사항 증거로 치던
+// 실행 결과까지 전부 "재확인 필요"로 되돌아갔다. requirements-draft.json(ADR-097 개정)과 같은 자리(.git/ 아래라
+// 커밋에도, 에이전트 도구에도, 체크포인트 되돌리기에도 걸리지 않는다)에 서비스별 마지막 실행을 남겨 서버가
+// 다시 떠도 이어서 보이게 한다. 복원한 실행이 지금 체크포인트와 다른 sha면(testRunMatchesHead) 증거로는 치지
+// 않지만 "테스트" 탭에는 그대로 보인다 — 화면이 이미 lastRunSha로만 증거 여부를 가리고 행 자체는 항상 보여주므로
+// 따로 "이전 실행" 표시를 덧붙이지 않는다.
+// ---------------------------------------------------------------------------
+
+const TEST_RESULTS_FILE = path.join('.git', 'b-studio', 'test-results.json');
+
+interface PersistedTestResults {
+  version: 1;
+  savedAt: string;
+  results: Record<string, StoredTestRun>;
+}
+
+function testResultsFile(session: Session): string {
+  return path.join(stateDirOf(session.snapshot), TEST_RESULTS_FILE);
+}
+
+/** 사이드카 파일을 읽는다. 없거나(아직 돈 테스트가 없음) 읽을 수 없으면(깨진 파일 등) 조용히 무시하고 undefined */
+async function readTestResultsFile(session: Session): Promise<Record<string, StoredTestRun> | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(testResultsFile(session), 'utf8');
+  } catch {
+    return undefined; // 파일이 없다 — 아직 테스트를 돈 적이 없는 세션의 정상 상태
+  }
+  try {
+    const parsed = JSON.parse(raw) as PersistedTestResults;
+    if (parsed?.version !== 1 || typeof parsed.results !== 'object' || parsed.results === null) throw new Error('알 수 없는 형식');
+    return parsed.results;
+  } catch (error) {
+    console.error(`[b-studio] 세션 ${session.snapshot.id}의 테스트 결과 파일이 깨져 있어 무시합니다`, error);
+    return undefined;
+  }
+}
+
+/** 지금 메모리의 testResults를 사이드카 파일에 남긴다(requirements-draft.json과 같은 임시 파일 + rename 방식) */
+async function writeTestResultsFile(session: Session): Promise<void> {
+  const file = testResultsFile(session);
+  await mkdir(path.dirname(file), { recursive: true });
+  const data: PersistedTestResults = {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    results: Object.fromEntries(session.testResults ?? new Map()),
+  };
+  // 임시 파일 이름은 호출마다 달라야 한다 — 같으면 겹쳐 쓰는 두 저장이 서로의 임시 파일을 지우고 rename이 ENOENT로 깨진다
+  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  await writeFile(temp, JSON.stringify(data, null, 2));
+  await rename(temp, file);
+}
+
+/** 실행이 끝난 뒤 사이드카에 남긴다. 남기지 못해도(디스크 문제 등) 방금 돈 실행 자체는 그대로 쓸 수 있어야 하므로 던지지 않는다 */
+async function persistTestResults(session: Session): Promise<void> {
+  await writeTestResultsFile(session).catch((error: unknown) => {
+    console.error(`[b-studio] 세션 ${session.snapshot.id}의 테스트 결과를 남기지 못했습니다`, error);
+  });
+}
+
+/**
+ * testResults를 처음 찾을 때 사이드카 파일에서 복원한다("테스트" 탭을 열 때·테스트를 돌릴 때 모두 거친다).
+ * 이미 메모리에 있으면(이번 프로세스에서 이미 돌렸거나 이미 복원했음) 다시 읽지 않는다. 동시에 여러 서비스를
+ * 조회해도(Promise.all) session.testResultsLoadPromise를 공유해 파일을 한 번만 읽는다.
+ */
+function ensureTestResultsLoaded(session: Session): Promise<void> {
+  session.testResultsLoadPromise ??= (async () => {
+    if (session.testResults) return;
+    const restored = await readTestResultsFile(session);
+    if (restored) session.testResults = new Map(Object.entries(restored));
+  })();
+  return session.testResultsLoadPromise;
+}
+
 function testRowStatus(row: ServiceTestRow): TestRowView['status'] {
   return row.result?.status ?? 'not-run';
 }
@@ -5004,7 +5086,7 @@ async function buildTestServiceView(session: Session, serviceName: string): Prom
     };
   }
 
-  const [rawRows, runner] = await Promise.all([discoverServiceTestRows(session, entry[1]), detectServiceRunner(session, entry[1])]);
+  const [rawRows, runner] = await Promise.all([discoverServiceTestRows(session, entry[1]), detectServiceRunner(session, entry[1]), ensureTestResultsLoaded(session)]);
   const stored = session.testResults?.get(serviceName);
   // attachResults는 TestRow[]를 돌려주지만 spread로 원래 값(framework 포함)을 그대로 옮기므로 형태를 되돌려도 안전하다
   const attached = (stored ? attachResults(rawRows, stored.run) : rawRows) as ServiceTestRow[];
@@ -5157,6 +5239,8 @@ export async function runSessionTests(
   const serviceState = session.snapshot.services.find((candidate) => candidate.name === input.service);
   if (serviceState?.state !== 'ready') throw new StudioError(409, '서비스가 꺼져 있습니다');
 
+  // 사이드카에 남겨 둔 다른 서비스의 결과를 잃지 않으려면, 이번 실행 결과를 쓰기 전에 먼저 복원해 둬야 한다
+  await ensureTestResultsLoaded(session);
   session.testControllers ??= new Map();
   if (session.testControllers.has(input.service)) throw new StudioError(409, '이미 테스트를 실행하는 중입니다');
 
@@ -5195,6 +5279,7 @@ export async function runSessionTests(
           : {}),
       });
     }
+    await persistTestResults(session);
   } finally {
     session.testControllers.delete(input.service);
     markTestsChanged(session);
@@ -5223,6 +5308,7 @@ async function hasBuildWrapper(session: Session, servicePath: string, runner: st
 
 async function collectGateTestReports(session: Session): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
+  await ensureTestResultsLoaded(session);
   let changed = false;
   for (const [name, spec] of session.project.managed) {
     if (session.testControllers?.has(name)) continue;
@@ -5237,7 +5323,10 @@ async function collectGateTestReports(session: Session): Promise<void> {
     session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: session.snapshot.checkpoints[0]?.sha });
     changed = true;
   }
-  if (changed) markTestsChanged(session);
+  if (changed) {
+    await persistTestResults(session);
+    markTestsChanged(session);
+  }
 }
 
 function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
