@@ -89,7 +89,11 @@ async function saveStore(root: string, store: StoredFile): Promise<void> {
   await new Workspace(root).write(REQUIREMENT_ISSUES_FILE, `${JSON.stringify(store, null, 2)}\n`);
 }
 
-/** `Requirement`를 이슈 발행기가 읽는 모양(`RequirementForIssues`)으로 옮긴다. 발행 기록(사이드카)이 있으면 rev·trace.issue는 그 값을 우선한다 */
+/**
+ * `Requirement`를 이슈 발행기가 읽는 모양(`RequirementForIssues`)으로 옮긴다. rev는 항상 파일(docs/requirements.md)의
+ * 개정 번호를 그대로 쓴다(ADR-0XX) — 발행 기록(사이드카)의 rev는 더는 따로 늘리지 않는, 마지막으로 발행했을 때의
+ * 기록값일 뿐이라 우선하지 않는다. trace.issue만 발행 기록을 우선한다(그래야 재발행 때 같은 이슈를 찾는다)
+ */
 function toRequirementForIssues(requirement: Requirement, record: StoredRecord | undefined): RequirementForIssues {
   return {
     id: requirement.id,
@@ -97,7 +101,7 @@ function toRequirementForIssues(requirement: Requirement, record: StoredRecord |
     kind: requirement.kind,
     priority: requirement.priority,
     acceptance: requirement.acceptance,
-    rev: record?.rev ?? requirement.rev,
+    rev: requirement.rev,
     ears: requirement.ears,
     scenarios: requirement.scenarios,
     nfr: requirement.nfr,
@@ -207,8 +211,10 @@ export async function publishRequirementIssues(
     if (!requirement) continue;
     try {
       const record = store.byId[entry.id];
-      const rev = entry.action === 'create' ? 1 : (record?.rev ?? 1) + 1;
       const requirementForIssues = toRequirementForIssues(requirement, record);
+      // 이슈 헤더의 rev=는 "몇 번째로 발행했나"가 아니라 파일의 개정 번호와 같게 쓴다(ADR-0XX, 버그 리포트 47 —
+      // 발행 횟수와 파일 "개정"이 서로 다른 숫자로 보였다). 파일이 저장된 적 없이 처음 발행되면(드문 경우) 1로 본다
+      const rev = requirement.rev ?? 1;
       const body = buildSubIssueBody(requirementForIssues, rev);
       const labels = requirementLabelSet(requirement, statusById[entry.id] ?? '미착수');
 
@@ -288,7 +294,8 @@ export async function resolveRequirementConflict(
 
   if (resolution === 'overwrite') {
     const requirementForIssues = toRequirementForIssues(requirement, record);
-    const rev = record.rev + 1;
+    // 발행과 같은 규칙: 이슈 헤더의 rev=는 파일의 개정 번호를 그대로 쓴다(ADR-0XX)
+    const rev = requirement.rev ?? 1;
     const body = buildSubIssueBody(requirementForIssues, rev);
     await updateIssue(ctx.remote, record.issue, { body, labels: requirementLabelSet(requirement, status) }, { token: ctx.token });
     store.byId[requirement.id] = { issue: record.issue, rev, publishedHash: requirementContentHash(requirementForIssues), publishedAt: new Date().toISOString() };

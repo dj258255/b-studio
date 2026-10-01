@@ -36,6 +36,7 @@ import {
   DatabaseBranches,
   describeDatabaseState,
   detectRunner,
+  discardRevisionIfNeverSaved,
   discoverTestsInFile,
   draftManagedRequirement,
   draftRequirementFromIssue,
@@ -4329,7 +4330,13 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
   const savedById = new Map((await readSavedRequirements(session)).map((requirement) => [requirement.id, requirement]));
   const now = new Date().toISOString();
   const { requirements: guarded, manualSteps: guardedManualSteps } = partitionManualSteps(parsed.data.requirements, parsed.data.manualSteps);
-  const revisedRequirements = guarded.map((requirement) => reviseRequirementIfChanged(carryForwardRequirementRevision(requirement, savedById.get(requirement.id)), now));
+  // 이 id로 docs/requirements.md에 저장된 적이 한 번도 없으면(savedById에 없다), 들어온 값이 들고 있는
+  // rev·hash·revisedAt은 이 파일의 이전 상태가 아니다(다른 세션의 추출 결과 사이드카를 이어받았을 수 있다) —
+  // carryForwardRequirementRevision에 넘기기 전에 버려서 진짜 첫 저장(개정 1, revisedAt 없음)으로 본다
+  const revisedRequirements = guarded.map((requirement) => {
+    const previouslySaved = savedById.get(requirement.id);
+    return reviseRequirementIfChanged(carryForwardRequirementRevision(discardRevisionIfNeverSaved(requirement, previouslySaved), previouslySaved), now);
+  });
 
   const context = await buildRequirementEvaluationContext(session);
   const statusById = Object.fromEntries(revisedRequirements.map((requirement) => [requirement.id, evaluateRequirementWithContext(requirement, context).status]));
@@ -5031,7 +5038,7 @@ async function requirementsWithoutTests(session: Session, services: readonly Tes
   for (const service of services) for (const row of service.rows) for (const id of row.requirementIds) covered.add(id);
   return requirements
     .filter((requirement) => !covered.has(requirement.id))
-    .map((requirement) => ({ id: requirement.id, title: requirement.title, prefill: buildAddTestPrefill(requirement.id, requirement.title) }));
+    .map((requirement) => ({ id: requirement.id, title: requirement.title, prefill: buildAddTestPrefill(requirement) }));
 }
 
 /** "테스트" 탭이 연다: 서비스마다 테스트를 찾고 마지막으로 저장해 둔 결과를 이어 붙인다 */

@@ -259,3 +259,66 @@ describe('추출 결과 사이드카(요구사항 탭 "추출 결과" 하위 화
     await stopSession(id).catch(() => {});
   }, 20_000);
 });
+
+describe('applySessionRequirements — 첫 저장은 개정이 아니다(버그 리포트 33, 통합 세션에서 R3·R4가 즉시 "재확인 필요"로 보이던 문제)', () => {
+  it('docs/requirements.md에 저장된 적이 없는 id가 rev·hash·revisedAt을 들고 와도(다른 세션의 추출 결과를 이어받은 경우 등) 첫 저장은 개정 1·revisedAt 없음으로 본다', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+
+    // docs/requirements.md는 이 세션에 한 번도 저장된 적이 없다 — 그런데 화면이 보낸 요구사항 중 하나(R3)가
+    // 이미 rev·hash·revisedAt을 들고 있다(다른 세션의 추출 결과 사이드카를 이어받았거나, 재추출 미리보기가
+    // 붙여 둔 값일 수 있다 — 이 파일 입장에서는 "본 적 없는" 값이다)
+    const snapshot = await applySessionRequirements(id, {
+      requirements: [
+        { id: 'R1', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['로그인하면 토큰을 돌려준다'] },
+        {
+          id: 'R3',
+          title: '주문 목록 API',
+          kind: 'api',
+          priority: 'must',
+          acceptance: ['주문 목록을 돌려준다'],
+          rev: 5,
+          hash: '다른-세션에서-온-해시',
+          revisedAt: '2020-01-01T00:00:00.000Z',
+        },
+      ],
+      assumptions: [],
+      manualSteps: [],
+    });
+
+    const r1 = snapshot.requirements.find((requirement) => requirement.id === 'R1')!;
+    const r3 = snapshot.requirements.find((requirement) => requirement.id === 'R3')!;
+    expect(r1.rev).toBe(1);
+    expect(r1.revisedAt).toBeUndefined();
+    expect(r1.status).not.toBe('재확인 필요');
+    // 고쳤으면(discardRevisionIfNeverSaved) R3도 R1과 똑같이 첫 저장으로 본다 — 고치기 전에는
+    // 들고 온 hash가 방금 계산한 해시와 달라 rev가 6으로 오르고 revisedAt이 찍혀 "재확인 필요"가 됐다
+    expect(r3.rev).toBe(1);
+    expect(r3.revisedAt).toBeUndefined();
+    expect(r3.status).not.toBe('재확인 필요');
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('이미 저장된 적이 있는 id는(진짜 재저장) 내용이 바뀌면 그대로 개정이 오르고 revisedAt이 찍힌다', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+
+    await applySessionRequirements(id, {
+      requirements: [{ id: 'R1', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['로그인하면 토큰을 돌려준다'] }],
+      assumptions: [],
+      manualSteps: [],
+    });
+    const second = await applySessionRequirements(id, {
+      requirements: [{ id: 'R1', title: '로그인 API(이메일)', kind: 'api', priority: 'must', acceptance: ['로그인하면 토큰을 돌려준다'] }],
+      assumptions: [],
+      manualSteps: [],
+    });
+
+    const r1 = second.requirements.find((requirement) => requirement.id === 'R1')!;
+    expect(r1.rev).toBe(2);
+    expect(r1.revisedAt).toBeDefined();
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+});

@@ -137,6 +137,29 @@ describe('publishRequirementIssues', () => {
     expect(spies.createIssue.mock.calls[0]![1]).toMatchObject({ title: '요구사항: orders' });
     expect(result.tracking).toEqual({ issue: 5, url: 'y' });
   });
+
+  it('이슈 헤더의 rev=는 발행 횟수가 아니라 파일의 개정 번호를 그대로 쓴다(버그 리포트 47 — 발행 2번째라고 rev=2가 되지 않는다)', async () => {
+    spies.createIssue.mockResolvedValueOnce({ number: 201, url: 'x' }).mockResolvedValueOnce({ number: 1, url: 'y' });
+    await publishRequirementIssues(ctx, [req({ rev: 4 })], { R1: '작업 중' });
+    const body = (spies.createIssue.mock.calls[0]![1] as { body: string }).body;
+    expect(body).toContain('rev=4');
+  });
+
+  it('다시 발행해도(두 번째 발행) rev=는 1씩 늘지 않고 파일의 지금 개정 번호를 그대로 따라간다', async () => {
+    spies.createIssue.mockResolvedValueOnce({ number: 201, url: 'x1' }).mockResolvedValueOnce({ number: 1, url: 'y1' });
+    await publishRequirementIssues(ctx, [req({ rev: 4 })], { R1: '작업 중' });
+    const firstBody = (spies.createIssue.mock.calls[0]![1] as { body: string }).body;
+    expect(firstBody).toContain('rev=4');
+
+    // 원격에 그 하위 이슈가 있다고 보이게 하고, 파일 쪽은 내용이 바뀌어(인수 조건 추가) 개정이 7로 올랐다고 가정한다
+    spies.listIssues.mockResolvedValue([{ number: 201, state: 'open', labels: ['b-studio:req'], body: firstBody }]);
+    await publishRequirementIssues(ctx, [req({ rev: 7, acceptance: ['이메일·비밀번호로 로그인한다', '2단계 인증을 지원한다'] })], { R1: '작업 중' });
+
+    // 발행은 이번이 두 번째지만(옛 방식이면 record.rev+1=5), 헤더는 파일의 지금 개정 번호(7)를 그대로 쓴다
+    const updatedBody = (spies.updateIssue.mock.calls[0]![2] as { body: string }).body;
+    expect(updatedBody).toContain('rev=7');
+    expect(updatedBody).not.toContain('rev=5');
+  });
 });
 
 describe('resolveRequirementConflict', () => {
@@ -153,6 +176,18 @@ describe('resolveRequirementConflict', () => {
     const result = await resolveRequirementConflict(ctx, req(), '작업 중', 'overwrite');
     expect(result).toEqual({ action: 'overwrite' });
     expect(spies.updateIssue).toHaveBeenCalledWith(remote, 10, expect.objectContaining({ body: expect.stringContaining('이메일·비밀번호로 로그인한다') }), expect.anything());
+  });
+
+  it('덮어쓰기도 이슈 헤더의 rev=를 파일의 개정 번호로 쓴다(버그 리포트 47 — record.rev+1이 아니다)', async () => {
+    const originalBody = await publishOne(); // req()는 rev가 없으니 1로 발행됐다
+    expect(originalBody).toContain('rev=1');
+    spies.listIssues.mockResolvedValue([{ number: 10, state: 'open', labels: ['b-studio:req'], body: originalBody.replace('이메일·비밀번호로 로그인한다', '고쳐진 내용') }]);
+
+    // 파일은 그동안 개정 9까지 올랐다(이 충돌 해결과 무관하게) — 덮어쓰면 그 번호를 그대로 써야 한다(옛 방식이면 record.rev+1=2)
+    await resolveRequirementConflict(ctx, req({ rev: 9 }), '작업 중', 'overwrite');
+    const rewrittenBody = (spies.updateIssue.mock.calls[0]![2] as { body: string }).body;
+    expect(rewrittenBody).toContain('rev=9');
+    expect(rewrittenBody).not.toContain('rev=2');
   });
 
   it('무시는 아무것도 쓰지 않고 원격을 새 기준선으로 받아들인다(다음 계획은 update로 본다)', async () => {

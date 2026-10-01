@@ -5,6 +5,7 @@
  * 순수 함수만 둔다(파일 IO·샌드박스 호출 없음) — studio의 서버 쪽 코드가 컨테이너에서 보고서 글자를 읽어 넘긴다.
  * 외부 XML/JSON 파서 라이브러리는 쓰지 않는다(새 의존성 금지) — 보고서 형식이 단순해 가벼운 정규식으로 충분하다.
  */
+import type { Requirement } from './requirements';
 import type { FlatDiscoveredTest } from './test-discovery';
 
 export type TestStatus = 'pass' | 'fail' | 'skip' | 'not-run';
@@ -263,7 +264,22 @@ export function buildFixTestPrefill(row: Pick<TestRow, 'displayName' | 'file' | 
   return `다음 테스트가 실패합니다. 고쳐 주세요.\n\n테스트: ${row.displayName}\n위치: ${row.file}:${row.line}${failure}${stack}`;
 }
 
-/** 요구사항인데 테스트가 없는 항목의 "테스트 추가" 버튼이 채우는 글 */
-export function buildAddTestPrefill(requirementId: string, requirementTitle: string): string {
-  return `[${requirementId}] ${requirementTitle}\n\n이 요구사항의 인수 조건을 검증하는 테스트가 아직 없습니다. 테스트 이름에 ${requirementId}을(를) 넣어 테스트를 추가해 주세요.`;
+/**
+ * 요구사항인데 테스트가 없는 항목의 "테스트 추가" 버튼이 채우는 글. id·제목만으로는 무엇을 테스트해야 하는지
+ * 다시 요구사항 화면을 열어 봐야 했다(버그 리포트 54) — EARS 문장·인수 조건·시나리오(R7.1 같은 id 포함)까지
+ * 간결하게 넣어 이 글만 보고 테스트를 쓸 수 있게 한다(requirement-chat-prefill.ts의 "대화에서 묻기"와 같은 모양).
+ */
+export function buildAddTestPrefill(requirement: Pick<Requirement, 'id' | 'title' | 'acceptance' | 'ears' | 'scenarios'>): string {
+  const lines = [
+    `[${requirement.id}] ${requirement.title}`,
+    '',
+    `이 요구사항의 인수 조건을 검증하는 테스트가 아직 없습니다. 테스트 이름에 ${requirement.id}을(를) 넣어 테스트를 추가해 주세요.`,
+  ];
+  if (requirement.ears) lines.push('', `EARS: ${requirement.ears.statement}`);
+  lines.push('', '인수 조건:', ...requirement.acceptance.map((item) => `- ${item}`));
+  if (requirement.scenarios && requirement.scenarios.length > 0) {
+    lines.push('', '시나리오:');
+    for (const scenario of requirement.scenarios) lines.push(`- ${scenario.id}: (Given) ${scenario.given} (When) ${scenario.when} (Then) ${scenario.then}`);
+  }
+  return lines.join('\n');
 }

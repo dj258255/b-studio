@@ -224,6 +224,22 @@ async function readJson<T>(response: Response): Promise<T & { error?: string }> 
   return (await response.json().catch(() => ({}))) as T & { error?: string };
 }
 
+/** CHANGELOG류 잡음 파일 이름(확장자 앞, 대소문자 무관) — 명세로 고를 만한 글이 아니다 */
+const NOISY_MD_BASENAME = /^changelog$/i;
+
+/**
+ * 작업 복사본 파일 목록(GET /api/sessions/[id]/files)에서 명세로 고를 만한 .md 파일만 추린다(버그 리포트 7).
+ * docs/requirements.md 자신(명세가 아니라 저장 결과다)과 CHANGELOG류(명세가 아니라 기록이다)는 뺀다.
+ */
+export function filterSpecCandidateFiles(files: readonly string[]): string[] {
+  return files.filter((file) => {
+    if (!file.toLowerCase().endsWith(".md")) return false;
+    if (file === "docs/requirements.md") return false;
+    const basename = (file.split("/").pop() ?? file).replace(/\.md$/i, "");
+    return !NOISY_MD_BASENAME.test(basename);
+  });
+}
+
 /** 경과 시간을 "2분 13초"/"13초"로 보여준다(A — "뽑는 중" 버튼 옆에 붙인다) */
 export function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
@@ -253,6 +269,19 @@ export function requirementsDraftStatusLine(appliedAt: string | undefined, updat
 export function hasUnsavedDraftEdits(draft: PersistedExtractionDraft | undefined): boolean {
   if (!draft) return false;
   return !draft.appliedAt || draft.updatedAt > draft.appliedAt;
+}
+
+/** "빼기"가 목록에서 항목 하나를 덜어낸다. 되돌리기(restoreDraftAt)가 같은 자리에 다시 끼워 넣을 수 있게 원래 index도 함께 돌려준다(버그 리포트 14) */
+export function removeDraftAt(drafts: readonly RequirementDraft[], index: number): { next: RequirementDraft[]; removed: RequirementDraft } | undefined {
+  const removed = drafts[index];
+  if (!removed) return undefined;
+  return { next: drafts.filter((_, i) => i !== index), removed };
+}
+
+/** "되돌리기" — 뺐던 자리(index)에 항목을 다시 끼워 넣는다. 그 사이 목록이 더 짧아졌으면(다른 항목도 뺐다면) 끝에 넣는다 */
+export function restoreDraftAt(drafts: readonly RequirementDraft[], item: RequirementDraft, index: number): RequirementDraft[] {
+  const insertAt = Math.min(index, drafts.length);
+  return [...drafts.slice(0, insertAt), item, ...drafts.slice(insertAt)];
 }
 
 /**
@@ -1193,12 +1222,16 @@ export function DiffSummary({
   diff,
   onDropRemoved,
   onMatch,
+  onReplace,
 }: {
   diff: RequirementDiffEntry[];
   onDropRemoved?: (ids: string[]) => void;
   /** 자동 병합이 놓친 짝을 사람이 잇는다: 새로 생긴 항목(addedId)이 사라진 기존 항목(removedId)과 같은 요구사항이다 */
   onMatch?: (addedId: string, removedId: string) => void;
+  /** "기존 목록 버리고 이 결과로 바꾸기"(버그 리포트 43). 확인을 받은 뒤에만 부른다 */
+  onReplace?: () => void;
 }) {
+  const [confirmingReplace, setConfirmingReplace] = useState(false);
   const counts = (["added", "changed", "unchanged", "removed"] as const).map((status) => ({
     status,
     count: diff.filter((entry) => entry.status === status).length,
@@ -1225,6 +1258,36 @@ export function DiffSummary({
           사라진 {removedIds.length}개도 목록에서 빼기
         </button>
       )}
+      {onReplace &&
+        (confirmingReplace ? (
+          <div className="mt-1 flex w-full flex-wrap items-center gap-2 rounded-control border border-fail/40 bg-fail/10 px-3 py-2 text-sm">
+            <p className="text-ink">
+              기존에 저장된 요구사항 목록을 버리고 이번 추출 결과로 통째로 바꿉니다. id가 R1부터 다시 매겨지고, 기존 id에 이어져 있던 개정·발행한 이슈 연결·&ldquo;직접
+              확인함&rdquo; 기록이 모두 끊깁니다(이번 저장 전 내용은 문서 체크포인트로 git 히스토리에 남아 필요하면 되찾을 수 있습니다). 저장을 눌러야 실제로 반영됩니다.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                onReplace();
+                setConfirmingReplace(false);
+              }}
+              className="rounded-control border border-fail px-2.5 py-1 text-xs font-medium text-fail hover:bg-fail/10"
+            >
+              버리고 바꾸기
+            </button>
+            <button type="button" onClick={() => setConfirmingReplace(false)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+              취소
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmingReplace(true)}
+            className="rounded-control border border-line px-2 py-0.5 text-xs text-fail hover:border-fail"
+          >
+            기존 목록 버리고 이 결과로 바꾸기
+          </button>
+        ))}
       {onMatch && removedIds.length > 0 && diff.some((entry) => entry.status === "added") && (
         <div className="mt-1 flex w-full flex-col gap-1.5 border-t border-line pt-2">
           <p className="text-xs text-muted">
@@ -1297,6 +1360,48 @@ export function applyManualMatch(
   return { drafts: renamed, diff: nextDiff };
 }
 
+/** packages/agent의 alignScenarioIds와 같은 규칙(클라이언트 전용 사본 — 이 요구사항의 시나리오 id 앞부분을 요구사항 id에 맞춘다) */
+function realignScenarioIds(requirement: RequirementDraft): RequirementDraft {
+  if (!requirement.scenarios || requirement.scenarios.length === 0) return requirement;
+  const prefix = `${requirement.id}.`;
+  if (requirement.scenarios.every((scenario) => scenario.id.startsWith(prefix))) return requirement;
+  const used = new Set<number>();
+  const scenarios = requirement.scenarios.map((scenario) => {
+    const suffix = Number(/\.(\d+)$/.exec(scenario.id)?.[1] ?? NaN);
+    let number = Number.isInteger(suffix) && suffix > 0 && !used.has(suffix) ? suffix : 1;
+    while (used.has(number)) number += 1;
+    used.add(number);
+    return { ...scenario, id: `${requirement.id}.${number}` };
+  });
+  return { ...requirement, scenarios };
+}
+
+/**
+ * "기존 목록 버리고 이 결과로 바꾸기"(버그 리포트 43) — 자동 병합(제목·EARS 유사도로 기존 id를 지키는 것)이 잘못
+ * 저장된 목록을 그대로 물려받는 문제를 푼다. "명세에서 사라짐"(removed, 기존 문서에만 있던 항목) 항목은 버리고
+ * 나머지(이번 추출이 실제로 낸 결과)만 남겨, id를 R1부터 다시 매긴다 — 기존 id·개정·추적(이슈 연결)·사람 확인은
+ * 전부 끊긴다(의도된 동작이다, 확인 문구가 미리 알린다). 순수 함수라 테스트에서 바로 쓴다. docs/requirements.md의
+ * 이전 내용은 이 함수가 아니라 "저장" 버튼을 눌렀을 때의 기존 문서 체크포인트 커밋이 git 히스토리에 남긴다(ADR-0XX).
+ */
+export function replaceWithExtractionResult(drafts: readonly RequirementDraft[], diff: readonly RequirementDiffEntry[]): RequirementDraft[] {
+  const removedIds = new Set(diff.filter((entry) => entry.status === "removed").map((entry) => entry.id));
+  const kept = drafts.filter((item) => !removedIds.has(item.id));
+  return kept.map((item, index) => {
+    // rev·hash·revisedAt·trace·manualVerification은 옮기지 않는다(새로 매긴 id로 새 요구사항처럼 시작한다)
+    const fresh: RequirementDraft = {
+      id: `R${index + 1}`,
+      title: item.title,
+      kind: item.kind,
+      priority: item.priority,
+      acceptance: item.acceptance,
+      ...(item.ears ? { ears: item.ears } : {}),
+      ...(item.scenarios ? { scenarios: item.scenarios } : {}),
+      ...(item.nfr ? { nfr: item.nfr } : {}),
+    };
+    return realignScenarioIds(fresh);
+  });
+}
+
 type SourceTab = "paste" | "file" | "issue";
 /** 파일 선택으로 읽을 명세 파일의 상한. 명세 글은 보통 수십 KB 안이다 */
 const MAX_SPEC_FILE_BYTES = 512 * 1024;
@@ -1324,9 +1429,15 @@ export function ImportFlow({
 }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
   const [specText, setSpecText] = useState(initialSpecText ?? "");
-  /** 파일 선택 창으로 고른 파일의 이름과 내용. 내용은 브라우저에서 바로 읽어 붙여넣기처럼 보낸다 */
+  /** 파일 선택 창(OS 피커)으로 고른 파일의 이름과 내용. 내용은 브라우저에서 바로 읽어 붙여넣기처럼 보낸다 */
   const [pickedFile, setPickedFile] = useState<{ name: string; text: string }>();
   const [fileError, setFileError] = useState<string>();
+  // 세션 작업 복사본 안의 .md 파일 중에서 고르기(버그 리포트 7) — ASSIGNMENT.md·docs/*.md처럼 이미 작업 복사본에
+  // 있는 명세를 OS 파일 창(브라우저 샌드박스 밖 경로를 요구한다) 없이도 고를 수 있게 한다. "파일에서" 탭을 처음
+  // 열 때만 불러온다(undefined면 아직 안 불러온 것, []는 불러왔지만 후보가 없는 것)
+  const [workspaceFiles, setWorkspaceFiles] = useState<string[]>();
+  const [workspaceFilesError, setWorkspaceFilesError] = useState<string>();
+  const [selectedWorkspaceFile, setSelectedWorkspaceFile] = useState<string>();
   const [issueNumber, setIssueNumber] = useState("");
   // initialSpecText가 있으면(요구사항에 반영) 마운트 때부터 뽑는 중으로 시작한다 — effect 안에서 setState를
   // 곧바로 부르지 않고 초기값으로 미리 반영해 두는 식이다(리액트 컴파일러 린트가 막는 패턴을 피한다)
@@ -1348,6 +1459,25 @@ export function ImportFlow({
     const timer = setInterval(() => setElapsedMs(Date.now() - extractStartedAtRef.current), 1000);
     return () => clearInterval(timer);
   }, [busy]);
+
+  // "파일에서" 탭을 처음 열 때만 작업 복사본의 .md 파일 목록을 불러온다(버그 리포트 7). 코드 탭의 파일 목록과
+  // 같은 API(GET .../files?query=)를 쓰고, query=.md로 서버 쪽에서부터 후보를 좁힌다
+  useEffect(() => {
+    if (sourceTab !== "file" || workspaceFiles !== undefined) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/files?query=${encodeURIComponent(".md")}&limit=500`)
+      .then((response) => readJson<{ files?: string[] }>(response))
+      .then((data) => {
+        if (cancelled) return;
+        setWorkspaceFiles(filterSpecCandidateFiles(data.files ?? []));
+      })
+      .catch(() => {
+        if (!cancelled) setWorkspaceFilesError("작업 복사본의 파일 목록을 가져오지 못했습니다");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceTab, sessionId, workspaceFiles]);
 
   // "요구사항에 반영"이 initialSpecText를 주면 붙여넣기 칸을 채운 뒤 바로 한 번 추출하고 "추출 결과" 화면으로 넘어간다.
   // state(specText)를 거치지 않고 바로 이 값으로 요청해야 "방금 setSpecText한 값"을 또 기다리는 경합이 없다
@@ -1384,8 +1514,12 @@ export function ImportFlow({
   function sourceBody(): Record<string, unknown> {
     const body: Record<string, unknown> = {};
     if (sourceTab === "paste") body.specText = specText;
-    else if (sourceTab === "file") body.specText = pickedFile?.text ?? "";
-    else if (issueNumber.trim()) body.issueNumber = Number(issueNumber);
+    // 작업 복사본 파일을 골랐으면(버그 리포트 7) filePath로 보낸다 — 서버가 세션 작업 복사본에서 직접 읽는다(Workspace.read).
+    // OS 파일 창으로 고른 파일은 브라우저가 이미 읽어 둔 내용을 specText로 그대로 보낸다(종전과 같다)
+    else if (sourceTab === "file") {
+      if (selectedWorkspaceFile) body.filePath = selectedWorkspaceFile;
+      else body.specText = pickedFile?.text ?? "";
+    } else if (issueNumber.trim()) body.issueNumber = Number(issueNumber);
     return body;
   }
 
@@ -1431,7 +1565,12 @@ export function ImportFlow({
     extractAbortRef.current?.abort();
   }
 
-  const canExtract = sourceTab === "paste" ? specText.trim().length > 0 : sourceTab === "file" ? (pickedFile?.text.trim().length ?? 0) > 0 : issueNumber.trim().length > 0;
+  const canExtract =
+    sourceTab === "paste"
+      ? specText.trim().length > 0
+      : sourceTab === "file"
+        ? Boolean(selectedWorkspaceFile) || (pickedFile?.text.trim().length ?? 0) > 0
+        : issueNumber.trim().length > 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -1470,32 +1609,72 @@ export function ImportFlow({
           className="rounded-control border border-line bg-ground px-3 py-2 text-sm"
         />
       ) : sourceTab === "file" ? (
-        <div className="flex flex-col gap-1.5">
-          <label className="glass-soft w-fit cursor-pointer rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-            {pickedFile ? "다른 파일 선택…" : "파일 선택…"}
-            <input
-              type="file"
-              accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.html,.adoc,.rst"
-              className="sr-only"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = "";
-                if (!file) return;
-                if (file.size > MAX_SPEC_FILE_BYTES) {
-                  setFileError(`파일이 너무 큽니다(${Math.round(file.size / 1024).toLocaleString("ko-KR")}KB). ${MAX_SPEC_FILE_BYTES / 1024}KB 이하 텍스트 파일을 골라 주세요`);
-                  return;
-                }
-                setFileError(undefined);
-                void file.text().then((text) => setPickedFile({ name: file.name, text }));
-              }}
-            />
-          </label>
-          {pickedFile && (
-            <p className="text-xs text-muted">
-              <span className="font-mono">{pickedFile.name}</span> · {pickedFile.text.length.toLocaleString("ko-KR")}자
-            </p>
-          )}
-          {fileError && <p className="text-xs text-fail">{fileError}</p>}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs font-medium text-muted">작업 복사본에서 선택</p>
+            {workspaceFiles === undefined ? (
+              <p className="text-xs text-muted">{workspaceFilesError ?? "불러오는 중…"}</p>
+            ) : workspaceFiles.length === 0 ? (
+              <p className="text-xs text-muted">명세로 쓸 만한 .md 파일이 작업 복사본에 없습니다(ASSIGNMENT.md·docs/*.md 등).</p>
+            ) : (
+              <select
+                value={selectedWorkspaceFile ?? ""}
+                onChange={(event) => {
+                  const path = event.target.value || undefined;
+                  setSelectedWorkspaceFile(path);
+                  // 작업 복사본 파일을 고르면 OS 파일 창으로 고른 파일은 잊는다(둘 중 하나만 쓴다 — 헷갈리지 않게)
+                  if (path) {
+                    setPickedFile(undefined);
+                    setFileError(undefined);
+                  }
+                }}
+                className="rounded-control border border-line bg-ground px-2 py-1.5 text-sm"
+              >
+                <option value="">파일 선택 안 함</option>
+                {workspaceFiles.map((file) => (
+                  <option key={file} value={file}>
+                    {file}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-muted">
+            <span className="h-px flex-1 bg-line" />
+            또는
+            <span className="h-px flex-1 bg-line" />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="glass-soft w-fit cursor-pointer rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+              {pickedFile ? "다른 파일 선택…" : "내 컴퓨터에서 파일 선택…"}
+              <input
+                type="file"
+                accept=".md,.markdown,.txt,.json,.yaml,.yml,.csv,.html,.adoc,.rst"
+                className="sr-only"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (!file) return;
+                  if (file.size > MAX_SPEC_FILE_BYTES) {
+                    setFileError(`파일이 너무 큽니다(${Math.round(file.size / 1024).toLocaleString("ko-KR")}KB). ${MAX_SPEC_FILE_BYTES / 1024}KB 이하 텍스트 파일을 골라 주세요`);
+                    return;
+                  }
+                  setFileError(undefined);
+                  // OS 파일 창으로 고르면 작업 복사본 선택은 잊는다(둘 중 하나만 쓴다)
+                  setSelectedWorkspaceFile(undefined);
+                  void file.text().then((text) => setPickedFile({ name: file.name, text }));
+                }}
+              />
+            </label>
+            {pickedFile && (
+              <p className="text-xs text-muted">
+                <span className="font-mono">{pickedFile.name}</span> · {pickedFile.text.length.toLocaleString("ko-KR")}자
+              </p>
+            )}
+            {fileError && <p className="text-xs text-fail">{fileError}</p>}
+          </div>
         </div>
       ) : (
         <input
@@ -1578,6 +1757,9 @@ export function ExtractionResultView({
   const [recommendationSource, setRecommendationSource] = useState(draft.recommendationSource);
   const [appliedAt, setAppliedAt] = useState(draft.appliedAt);
   const [updatedAt, setUpdatedAt] = useState(draft.updatedAt);
+  // "빼기"로 지운 항목을 저장(apply) 전까지 되돌릴 수 있게 따로 쌓아 둔다(버그 리포트 14 — 실수로 눌러도 되돌릴 길이 없었다).
+  // index는 되돌릴 때 원래 있던 자리에 다시 끼워 넣기 위한 값이다
+  const [removedDrafts, setRemovedDrafts] = useState<Array<{ item: RequirementDraft; index: number }>>([]);
 
   // 부모가 새 draft를 내려보내면(재추출이 끝남) savedAt이 바뀐다 — 이때만 편집 상태를 통째로 새로 초기화한다
   // (렌더 중에 비교해 반영한다 — requirementsImport.target과 같은 관례, effect 안에서 곧바로 setState하지 않는다)
@@ -1592,6 +1774,7 @@ export function ExtractionResultView({
     setRecommendationSource(draft.recommendationSource);
     setAppliedAt(draft.appliedAt);
     setUpdatedAt(draft.updatedAt);
+    setRemovedDrafts([]);
   }
 
   const [busy, setBusy] = useState(false);
@@ -1641,8 +1824,20 @@ export function ExtractionResultView({
     });
   }
   function removeDraftItem(index: number) {
+    const result = removeDraftAt(drafts, index);
+    if (!result) return;
+    setDrafts(result.next);
+    scheduleAutosave({ requirements: result.next });
+    setRemovedDrafts((list) => [...list, { item: result.removed, index }]);
+  }
+
+  /** "되돌리기" — 뺀 자리(index)에 다시 끼워 넣는다. 그 뒤 다른 항목을 더 뺐어도 끝자리를 넘지 않게 자리를 보정한다 */
+  function undoRemoveDraftItem(key: number) {
+    const target = removedDrafts[key];
+    if (!target) return;
+    setRemovedDrafts((list) => list.filter((_, i) => i !== key));
     setDrafts((current) => {
-      const next = current.filter((_, i) => i !== index);
+      const next = restoreDraftAt(current, target.item, target.index);
       scheduleAutosave({ requirements: next });
       return next;
     });
@@ -1751,6 +1946,8 @@ export function ExtractionResultView({
       const now = new Date().toISOString();
       setAppliedAt(now);
       setUpdatedAt(now);
+      // 저장이 끝나면 뺀 항목은 되돌릴 대상이 아니다(이미 디스크에 빠진 채로 반영됐다) — 되돌리기 목록을 비운다
+      setRemovedDrafts([]);
       onApplied(data);
     } catch {
       setError("저장하지 못했습니다");
@@ -1816,6 +2013,15 @@ export function ExtractionResultView({
             setDrafts(result.drafts);
             setDiffEntries(result.diff);
             scheduleAutosave({ requirements: result.drafts });
+          }}
+          onReplace={() => {
+            const replaced = replaceWithExtractionResult(drafts, diffEntries);
+            setDrafts(replaced);
+            // 더는 "기존 문서와 병합"이 아니다 — id가 전부 새로 매겨졌으니 병합 비교 자체가 뜻이 없다
+            setDiffEntries(undefined);
+            // id가 전부 새로 매겨져 "빼기 되돌리기" 목록의 자리(index)·내용이 더는 맞지 않는다
+            setRemovedDrafts([]);
+            scheduleAutosave({ requirements: replaced });
           }}
         />
       )}
@@ -1945,7 +2151,12 @@ export function ExtractionResultView({
                   </option>
                 ))}
               </select>
-              <button type="button" onClick={() => removeDraftItem(index)} className="shrink-0 text-xs font-medium text-fail hover:underline">
+              {/* 우선순위 선택과 헷갈리지 않도록 구분선·여백으로 떼어 놓고 맨 끝으로 보낸다(버그 리포트 14) */}
+              <button
+                type="button"
+                onClick={() => removeDraftItem(index)}
+                className="ml-auto shrink-0 border-l border-line pl-2 text-xs font-medium text-fail hover:underline"
+              >
                 빼기
               </button>
             </div>
@@ -1983,6 +2194,21 @@ export function ExtractionResultView({
           </li>
         ))}
       </ul>
+
+      {removedDrafts.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {removedDrafts.map((entry, key) => (
+            <li key={key} className="flex items-center gap-2 rounded-control bg-ground px-2.5 py-1.5 text-xs text-muted">
+              <span>
+                {entry.item.id}({entry.item.title})를 뺐습니다
+              </span>
+              <button type="button" onClick={() => undoRemoveDraftItem(key)} className="font-medium text-ink hover:underline">
+                되돌리기
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
         <p className="text-sm font-medium text-ink">가정</p>
