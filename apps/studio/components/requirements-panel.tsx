@@ -1055,7 +1055,7 @@ export function ImportFlow({
 
   async function discardDraft() {
     setResumableDraft(undefined);
-    await fetch(`/api/sessions/${sessionId}/requirements/extract`, { method: "DELETE" }).catch(() => {});
+    await fetch(`/api/sessions/${sessionId}/requirements/draft`, { method: "DELETE" }).catch(() => {});
   }
 
   function sourceBody(withAnswers: boolean) {
