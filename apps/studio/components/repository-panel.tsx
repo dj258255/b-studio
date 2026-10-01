@@ -213,10 +213,21 @@ function PullList({ projectId, state, subTab, onSubTab, onState }: ListProps) {
 
 export const STATE_DOT = { open: "bg-pass", closed: "bg-line" } as const;
 
+/** subIssueTitle(requirement-issues.ts, ADR-092)이 붙인 "[R4] " 접두어에서 요구사항 id를 뽑는다(순수 정규식이라 여기서 되풀이한다 — @b-studio/agent를 부르면 node:crypto가 클라이언트 번들에 끼어든다) */
+function requirementIdFromIssueTitle(title: string): string | undefined {
+  return /^\[(R[1-9][0-9]*)\]/.exec(title.trim())?.[1];
+}
+
 export function IssueRow({ issue, onWork, onOpen }: { issue: IssueSummary; onWork?: () => void; onOpen: () => void }) {
+  const requirementId = issue.labels.includes("b-studio:req") ? requirementIdFromIssueTitle(issue.title) : undefined;
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-sm">
       <span aria-hidden className={`inline-block size-2 shrink-0 rounded-full ${STATE_DOT[issue.state]}`} title={issue.state === "open" ? "열림" : "닫힘"} />
+      {requirementId && (
+        <span className="glass-soft shrink-0 rounded-control px-1.5 py-0.5 text-xs font-medium text-ink" title="요구사항 이슈">
+          {requirementId}
+        </span>
+      )}
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 truncate text-left hover:underline" title={issue.title}>
         <span className="font-mono text-muted">#{issue.number}</span> {issue.title}
       </button>

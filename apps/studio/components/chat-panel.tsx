@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -14,18 +15,34 @@ import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionVie
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { useChatDraft } from "./chat-draft-context";
 import { DiffView } from "./diff-view";
+import { NewDocDialog } from "./docs-panel";
 import { GateTrack } from "./gate-track";
 import { HandoffCard } from "./handoff-card";
 import { Markdown } from "./markdown";
+import { useRequirementsImport } from "./requirements-import-context";
 import { formatElementSelections, useElementSelections } from "./selection-context";
 import { useSessionAccess, type SessionAccess } from "./session-access";
 import { useLightVerify } from "./use-light-verify";
 import { useReadOnly } from "./use-read-only";
+import { useResearch } from "./use-research";
 
 type Intent = "build" | "ask";
 
 /** 질문의 답을 받아 만들기로 넘어갈 때 보내는 요청. 대화를 이어받으므로 앞의 계획을 가리키기만 한다 */
 const BUILD_FROM_PLAN = "앞에서 정리한 계획대로 만들어줘";
+
+/**
+ * 나눠서 병렬 제안을 수락할 때 이 대화의 모델 선택을 계획에 넘길 값으로 만든다.
+ * 아직 모델 선택을 못 받았으면(picker 없음, 예를 들어 데모 세션) 아무것도 넘기지 않아 서버 기본을 그대로 쓴다.
+ * 노력 단계는 이 백엔드·모델이 지원할 때만 넣는다(지원하지 않는데 값을 넣으면 서버가 조용히 버린다 — 넣지 않는 편이 뜻이 분명하다)
+ */
+export function handoffModelInput(picker: ModelPickerView | undefined): { sessionModelId?: string; sessionEffort?: string } {
+  if (!picker) return {};
+  return {
+    sessionModelId: picker.current ?? "",
+    ...(picker.effort.supported && picker.effort.current ? { sessionEffort: picker.effort.current } : {}),
+  };
+}
 
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
@@ -50,11 +67,15 @@ export function ChatPanel({ view }: { view: SessionView }) {
   // 저장소 탭의 "이 이슈로 작업"이 입력창을 채울 수 있도록 채우기 함수를 등록한다(사람이 보고 고친 뒤 직접 보낸다)
   const draft = useChatDraft();
   useEffect(() => {
-    draft.register((value) => {
+    draft.register((value, mode) => {
       setText(value);
+      // "대화에서 묻기"(요구사항 카드, ADR-094)는 읽기만·조사를 함께 켜 달라고 부탁할 수 있다
+      if (mode?.readOnly) setReadOnly(true);
+      if (mode?.research !== undefined) setResearch(mode.research);
       textareaRef.current?.focus();
     });
     return () => draft.register(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
@@ -69,7 +90,13 @@ export function ChatPanel({ view }: { view: SessionView }) {
    * 테스트·화면 확인·리뷰는 건너뛴다(세션마다 기억하되, 읽기만 중에도 값은 남긴다)
    */
   const [lightVerify, setLightVerify] = useLightVerify(snapshot.id);
+  /**
+   * "조사"는 읽기만이 켜졌을 때만 보인다(ADR-094). 켜면 질문에 웹에서 찾아 답하라는 안내가 붙고,
+   * 이 세션 백엔드가 claude-code면 이번 턴 WebSearch·WebFetch를 실제로 연다(그 밖의 백엔드는 모델 지식만으로 답한다)
+   */
+  const [research, setResearch] = useResearch(snapshot.id);
   const intent: Intent = intentFor(readOnly);
+  const researchWebAvailable = capabilities?.mode === "claude-code";
   /** 파일을 바꾼 실행. 결과 줄에서 "답만 했습니다"와 "완료"를 가른다 */
   const changedRuns = runsWithChanges(chat);
   /** 내 사용량은 세션을 보는 모든 사람에게 방송되지 않으므로 따로 받아 온다 */
@@ -181,7 +208,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, lightVerify })),
+      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, lightVerify, research })),
     });
     if (response.ok) {
       setText("");
@@ -192,7 +219,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   /**
    * 에이전트의 제안(ADR-068)을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘긴다. 홈과 같은 경로(submitEntry)로 만들고,
-   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069). 모델은 서버 기본(구독 CLI 모드)을 쓴다
+   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069).
+   * 나눠서 병렬은 이 대화의 모델 선택(picker)을 그대로 이어받는다 — 레인·통합 세션이 계획과 다른(서버 기본) 모델로 돌던 문제를 막는다
    */
   async function handOff(proposal: { mode: Exclude<ChatMethod, "single">; request: string }, questionRunId: string) {
     setSending(true);
@@ -204,6 +232,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       workspace: "copy",
       fleetModelIds: [],
       planModelId: "",
+      ...(proposal.mode === "split" ? handoffModelInput(picker) : {}),
       ...(capabilities ? { mode: capabilities.mode } : {}),
     });
     if (!result.ok) {
@@ -289,7 +318,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
         {chat.map((item, index) => (
           <li key={index}>
-            <ChatEntry item={item} changedRuns={changedRuns} />
+            <ChatEntry item={item} changedRuns={changedRuns} sessionId={snapshot.id} canManage={access.canManage} />
             {index === chat.length - 1 && item.kind === "outcome" && item.intent === "ask" && item.status === "done" && access.canManage && (
               <button
                 type="button"
@@ -453,9 +482,32 @@ export function ChatPanel({ view }: { view: SessionView }) {
                     가볍게 확인
                   </button>
                 )}
+                {/* "조사"는 읽기만이 켜졌을 때만 보인다 — 질문에 웹에서 찾아 답하라는 안내가 붙는다(ADR-094) */}
+                {readOnly && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={research}
+                    onClick={() => setResearch(!research)}
+                    title={
+                      researchWebAvailable
+                        ? "켜면 이번 질문에서 웹을 검색해 출처를 링크로 답합니다"
+                        : "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"
+                    }
+                    className={`rounded-control px-3 py-1 text-sm font-medium transition-colors ${
+                      research ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                    }`}
+                  >
+                    조사
+                  </button>
+                )}
                 <p className="text-xs text-muted">
                   {readOnly
-                    ? "파일은 바꾸지 않고 답과 계획만 받습니다"
+                    ? research
+                      ? researchWebAvailable
+                        ? "웹을 검색해 출처를 링크로 답합니다"
+                        : "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"
+                      : "파일은 바꾸지 않고 답과 계획만 받습니다"
                     : lightVerify
                       ? "테스트·화면 확인·리뷰를 건너뜁니다. 배포하려면 전체 검증이 필요합니다"
                       : "질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다"}
@@ -523,7 +575,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   );
 }
 
-function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: ReadonlySet<string> }) {
+function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem; changedRuns: ReadonlySet<string>; sessionId: string; canManage: boolean }) {
   // baseSync(main 따라잡기, ADR-076)의 "대화 입력창에 채우기"가 쓴다. 조건 없이 맨 위에서 불러 훅 순서를 지킨다
   const draft = useChatDraft();
   switch (item.kind) {
@@ -585,6 +637,13 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
 
     case "route": {
       const selected = item.candidates.find((candidate) => candidate.id === item.selectedId);
+      if (item.auto) {
+        return (
+          <p className="text-sm text-muted">
+            자동 선택: <span className="font-medium text-ink">{selected?.label ?? item.selectedId}</span> — {item.reason}
+          </p>
+        );
+      }
       return (
         <details className="rounded-md border border-line bg-panel/60 px-3 py-2 text-sm">
           <summary className="cursor-pointer text-muted hover:text-ink">
@@ -635,7 +694,7 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
       );
 
     case "reply":
-      return <Markdown text={item.text} />;
+      return <AssistantReply text={item.text} sessionId={sessionId} canManage={canManage} />;
 
     case "tools": {
       const failed = item.calls.filter((call) => call.ok === false).length;
@@ -887,6 +946,56 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
 }
 
 /**
+ * 에이전트 답변 메시지(ADR-094). 답 아래 작은 글씨 메뉴로 복사·문서로 저장·요구사항에 반영을 둔다.
+ * 복사는 항상 보이고(읽기 권한만 있어도 쓸 수 있다), 문서로 저장·요구사항에 반영은 쓰기 권한(canManage)이 있을 때만 보인다
+ * — 둘 다 세션 작업 복사본에 파일을 더하거나(문서) 요구사항 패치 미리보기를 여는(요구사항) 쓰기 성격의 동작이기 때문이다.
+ */
+function AssistantReply({ text, sessionId, canManage }: { text: string; sessionId: string; canManage: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const [savingDoc, setSavingDoc] = useState(false);
+  const requirementsImport = useRequirementsImport();
+
+  async function copy() {
+    try {
+      await navigator.clipboard?.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // 클립보드 접근이 막힌 환경에서도 화면은 그대로 쓸 수 있어야 한다
+    }
+  }
+
+  return (
+    <div>
+      <Markdown text={text} />
+      <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-muted">
+        <button type="button" onClick={() => void copy()} className="font-medium hover:text-ink">
+          {copied ? "복사됨" : "복사"}
+        </button>
+        {canManage && (
+          <button type="button" onClick={() => setSavingDoc(true)} className="font-medium hover:text-ink">
+            문서로 저장
+          </button>
+        )}
+        {canManage && (
+          <button type="button" onClick={() => requirementsImport.open({ specText: text })} className="font-medium hover:text-ink">
+            요구사항에 반영
+          </button>
+        )}
+      </div>
+      {savingDoc && (
+        <NewDocDialog
+          sessionId={sessionId}
+          initialBody={text}
+          onCreated={() => setSavingDoc(false)}
+          onCancel={() => setSavingDoc(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
  * 에이전트가 되물은 질문 카드. 선택지를 누르면 `[질문] …\n[답] …` 요청으로 보내 이 대화를 이어서 만든다.
  * 실행을 붙잡고 기다리지 않고 질문을 남기고 끝난 뒤, 답을 다음 요청으로 받는 흐름의 화면이다
  */
@@ -1016,8 +1125,8 @@ function QuestionCard({
   );
 }
 
-/** 노력 단계 id → 화면 표기(대화 기록·run 헤더에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
-const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
+/** 노력 단계 id → 화면 표기(대화 기록·run 헤더·작업 분해 레인 카드에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
+export const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
 
 /**
  * 모델·노력 버튼에 쓸 한 줄 노력 표기. 아직 아무것도 고르지 않았으면(effort.current 없음) "보통"을 지어내지 않고
@@ -1194,6 +1303,14 @@ export function ModelPickerDialog({
         />
       )}
       {picker.note && <p className="px-2 pb-1 text-xs text-muted">{picker.note}</p>}
+      {needsAccountConnect(picker.options) && (
+        <p className="mb-1 rounded-control bg-panel px-2 py-1.5 text-xs text-muted">
+          로그인이 안 돼 못 쓰는 모델이 있습니다.{" "}
+          <Link href="/accounts" className="font-medium text-ink underline">
+            계정 연결로 가기
+          </Link>
+        </p>
+      )}
       {groups.map((group) => (
         <div key={group.title ?? "__all"}>
           {group.title && <p className="px-2 pb-1 pt-1.5 text-xs font-medium text-muted">{group.title}</p>}
@@ -1290,6 +1407,11 @@ function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChang
       {effort.note && <p className="px-2 pt-1 text-xs text-muted">{effort.note}</p>}
     </div>
   );
+}
+
+/** 로그인이 안 돼 고를 수 없는 모델이 있으면 "계정 연결로 가기" 안내를 보여준다(ADR-093) */
+export function needsAccountConnect(options: ModelPickerOption[]): boolean {
+  return options.some((option) => option.disabled && /로그인/.test(option.disabledReason ?? ""));
 }
 
 /** api 백엔드는 공급자가 둘 이상이면 공급자별로 묶는다. 그 밖(claude-code·codex·commandcode·opencode)은 한 백엔드의 목록이라 묶지 않는다 */

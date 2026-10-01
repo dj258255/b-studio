@@ -163,6 +163,8 @@ export type AgentEvent =
       complexity: 'simple' | 'normal' | 'complex';
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+      /** claude-code 'auto' 선택(ADR-091)이 낸 결정이면 true. api 라우터(ADR-047)의 점수 비교와 화면 표현이 다르다(한 줄 안내) */
+      auto?: boolean;
     }
   | { type: 'turn'; turn: number }
   /** 이번 실행에서 지금까지 쓴 토큰 누적값. 직접 만든 루프는 모델 응답마다, 로컬 Claude Code는 턴을 끝낼 때마다 온다 */
@@ -225,6 +227,11 @@ export interface RunAgentOptions {
   allowBreaking?: boolean;
   /** ask: 질문 모드. 파일을 바꾸는 도구를 거부하고, 바뀐 파일이 없으므로 검증 게이트를 돌리지 않는다 */
   intent?: 'build' | 'ask';
+  /**
+   * "조사" 모드(intent가 ask일 때만 뜻이 있다). 이 직접 만든 루프(모델은 api 백엔드)는 웹 도구가 없으므로
+   * 요청 앞에 "웹 검색을 지원하지 않아 모델 지식으로 답한다"는 안내만 한 번 더 붙인다(claude-code 러너만 실제로 연다)
+   */
+  research?: boolean;
   maxTurns?: number;
   /** 검증 게이트 실패를 몇 번까지 모델에게 돌려줄지 */
   maxVerifyAttempts?: number;
@@ -313,6 +320,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     design,
     interactive = false,
     intent = 'build',
+    research = false,
   } = options;
   const ask = intent === 'ask';
 
@@ -354,7 +362,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   });
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
-  messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
+  messages.push({ role: 'user', content: ask ? buildAskRequest(request, research ? { research: { webToolsAvailable: false } } : {}) : request });
   const usage = emptyUsage();
   const metrics = emptyMetrics();
   // 모델 id별 사용량. 승격으로 클라이언트가 바뀌면 승격 전후가 다른 키로 쌓인다

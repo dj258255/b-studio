@@ -127,7 +127,7 @@ describe('sessionModelPicker / setSessionModel', () => {
     expect(picker.backend).toBe('claude-code');
     expect(picker.current).toBeUndefined();
     // fetchClaudeCodeModels를 늘 실패하게 해 뒀으므로(위 mock) 알려진 대체 표로 되돌아간다
-    expect(picker.options.map((option) => option.id)).toEqual(['', 'fable', 'opus', 'sonnet', 'haiku']);
+    expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'fable', 'opus', 'sonnet', 'haiku']);
     expect(picker.note).toContain('모델 목록을 불러오지 못해');
     await stopSession(id).catch(() => {});
   });

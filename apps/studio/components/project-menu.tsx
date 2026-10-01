@@ -205,6 +205,12 @@ function ProjectMenuPopover({
           >
             토큰 보고서
           </Link>
+          {/* "폴더 열기…"와 같은 조건(개인 PC 모드)에서만 보인다 — 이 서버의 로컬 CLI 로그인을 다루는 화면이라 같은 기준을 쓴다 */}
+          {capabilities?.openFolder && (
+            <Link href="/accounts" role="menuitem" onClick={onClose} className="rounded-control px-2 py-1.5 hover:bg-panel">
+              계정 연결
+            </Link>
+          )}
         </div>
 
         {error && (

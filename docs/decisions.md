@@ -105,6 +105,11 @@
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
 - [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
 - [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+- [ADR-091 CLI 백엔드 자동 모델 선택](#adr-091-cli-백엔드-자동-모델-선택)
+- [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
+- [ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다](#adr-093-구독-cli-계정-연결-터미널-없이-로그인-상태를-보고-시작한다)
+- [ADR-094 조사(research) 채팅 모드와 "문서" 탭으로 연구 → 문서화 → 요구사항을 한 세션 안에서 잇는다](#adr-094-조사research-채팅-모드와-문서-탭으로-연구--문서화--요구사항을-한-세션-안에서-잇는다)
+- [ADR-095 폴더 열기가 프론트엔드의 백엔드 주소를 자동으로 연결하고, 검증 게이트가 그 연결이 실패하면 잡는다](#adr-095-폴더-열기가-프론트엔드의-백엔드-주소를-자동으로-연결하고-검증-게이트가-그-연결이-실패하면-잡는다)
 
 ---
 
@@ -3690,6 +3695,203 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 재추출 병합에서 명세에서 완전히 사라진 요구사항은 자동으로 지우지 않고 `removed`로 표시만 한다 — id를 다시 쓰지 않으려는 안전판이지만, 사용자가 화면에서 직접 "빼기"를 누르지 않으면 문서에 계속 남는다(정말 필요 없는 항목은 사람이 한 번 더 손대야 한다).
 - 약한 표현 목록·"사람이 할 일" 정규식은 고정된 한국어·영어 어휘 목록이다 — 목록에 없는 새로운 약한 표현이나 새로운 종류의 권한 변경 절차(이번에 다룬 것 밖의 것)는 걸러지지 않는다.
 - `verifySpecQuote`는 공백만 정규화한 부분 문자열 비교라, 모델이 스펙 문장을 의미는 같지만 토씨를 바꿔 인용하면(예: 어순만 바꾼 요약) "지어낸 인용"으로 오판해 `practice`로 강등할 수 있다 — 안전한 쪽으로 치우친 보수적 검증이다.
+
+---
+
+## ADR-091 CLI 백엔드 자동 모델 선택
+
+상태: 채택(1단계, 같은 세션 안에서만)
+관련: ADR-047, ADR-075, [E8](experiments/2026-09-30-e8-plan-execute-split.md), [E9](experiments/2026-10-01-e9-narrow-plan.md), [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)
+
+### 맥락
+- ADR-047의 멀티 모델 라우터는 `api` 백엔드(사용자가 입력한 제공자 API 키)에만 있다. 사용자는 API 예산이 없어 구독 CLI(`claude-code` 백엔드, 로컬 Claude Agent SDK 로그인)로만 돌리는데, 이 경로는 여전히 사람이 대화 입력창에서 opus·sonnet·haiku 중 하나를 매번 손으로 고정해야 한다(model-picker.ts).
+- ADR-047의 라우터는 그대로 옮길 수 없다: 그 라우터는 가격·컨텍스트·실측 통계를 가진 후보 여러 개의 점수를 매기지만, 구독 CLI에는 그런 후보 목록이 없다 — 로그인한 계정의 별칭(이름) 중 하나를 고를 뿐이고 실제 단가도 대화에서 추정한 값이지 API 청구서가 아니다.
+- E8(2026-09-30)과 E9(2026-10-01)은 세션 안에서 모델을 바꾸는 비용을 쟀다. 계획 모델(Opus)과 실행 모델(Haiku)을 매 요청 오가게 한 E8-split은 단일 모델(Sonnet, E8-sonnet) 대비 성공 1건당 비용이 538% 많았다(모델을 바꿀 때마다 프롬프트 캐시가 새로 만들어져 토큰이 약 4배로 늘었다). 계획 프롬프트를 좁힌 E9-split도 여전히 계획 호출 고정비 때문에 Sonnet 단독보다 27% 비쌌다. 두 실험 모두 결론은 같다 — **작은 과제에서는 Sonnet 단독이 가장 싸고 성공률도 같다.** Haiku 단독은 성공 1건당 비용은 Sonnet과 비슷했지만 성공률이 떨어졌다(9건 중 7건 — 로딩에서 멈춘 화면을 인수 확인에서 놓쳤다).
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| ADR-047의 점수 라우터를 claude-code에도 그대로 적용 | 구독 CLI에는 점수를 매길 후보(가격표·실측 컨텍스트)가 없다. 있는 건 이름 세 개뿐이다 |
+| 매 요청 복잡도로 다시 계산(세션 상태 없음) | E8/E9가 쟀듯 모델을 자주 바꾸면 프롬프트 캐시가 깨져 비용이 뛴다. 세션 중간에 sonnet→opus→sonnet으로 오가면 매번 캐시를 다시 만든다 |
+| **세 단계(haiku<sonnet<opus) 규칙표 + 세션 안 stickiness(한 번 성공한 단계는 내리지 않음) + 실패 시 한 단계 승격** | 규칙이 도메인 의미를 완전히 이해하지 못하고, 단가는 대화에서 관측한 값(E8)이지 청구서가 아니다 |
+
+### 결정
+- `packages/agent/src/cli-router.ts`의 `routeCliTier`가 순수 함수로 세 단계(`haiku < sonnet < opus`, `CLI_TIERS`) 중 하나를 고른다. fable은 단가를 몰라 자동 후보에 넣지 않는다(사용자가 대화에서 직접 고를 때만).
+  - 읽기만 하는 질문(intent === `ask`)은 항상 haiku. 질문 완료는 구현 품질의 증거가 아니라는 ADR-047과 같은 원칙으로, stickiness도 적용하지 않는다(세션이 opus로 성공했어도 다음 질문은 haiku로 내려간다 — 질문은 캐시 재사용보다 비용을 우선한다).
+  - 만들기 요청은 단순·보통이면 sonnet, ADR-047의 `classifyComplexity`(길이·줄바꿈·설계 키워드)가 complex거나 `classifyRisk`(인증·결제·정산·마이그레이션·삭제·운영 배포 등)가 high면 opus. E9에서 Haiku 단독의 성공률이 떨어졌으므로 만들기 요청에는 haiku를 후보로 두지 않는다.
+  - **stickiness**: 세션 안에서 이미 성공적으로 쓴 가장 높은 단계(`session.claudeCode.autoTier`)가 이번에 계산한 단계보다 높으면 내리지 않는다 — 읽기 전용 질문이 아닌 한 모델을 바꿔 캐시를 다시 만들지 않는다. 위험도가 올라가 더 높은 단계가 필요하면 그대로 올라간다(하강만 막는다, 상승은 막지 않는다).
+- 복잡도·위험도 분류는 새로 만들지 않고 ADR-047의 `classifyComplexity`(그대로 재사용)·새로 뺀 `classifyRisk`(HIGH_RISK 정규식을 함수로 분리, `model-router.ts`)를 그대로 쓴다 — "복잡하다/위험하다"의 뜻을 두 라우터가 따로 정의하지 않는다.
+- `model-picker.ts`의 claude-code 옵션 목록에 `auto`("자동", 힌트 "요청마다 알맞은 모델을 고르고, 검증에 실패하면 한 단계 올립니다")를 더한다. 기존 별칭 배열(`CLAUDE_CODE_ALIASES`)과 별도 헬퍼 함수(`claudeCodeAutoOption`)로 둬, 같은 시기에 진행 중인 SDK `supportedModels` 기반 재작성(`feature/model-list-from-sdk`)과의 병합을 한 줄 추가로 끝나게 했다.
+- 세션에서 `auto`를 고르거나(`session.snapshot.modelId`) 서버 기본값이 `auto`면(`B_STUDIO_CLAUDE_CODE_MODEL=auto`, 벤치가 이 경로로 시작 모델을 넘긴다) `sessions.ts`의 `planRun`이 `routeCliTier`를 불러 실제 모델 이름(haiku·sonnet·opus)으로 바꿔 러너에 넘긴다 — Claude Code CLI에는 `auto`라는 모델이 없으므로 이 치환이 반드시 실행 전에 끝나야 한다.
+- **승격은 기존 메커니즘을 그대로 쓴다**(`escalation.ts`의 게이트 실패 서명 규칙). 승격 대상만 다르다 — 계획 모델이나 환경 변수가 아니라 고른 단계의 바로 위 단계(`nextCliTier`)로 한 단계만 올린다. 이미 opus(최고 단계)면 승격하지 않는다.
+- 대화 이벤트는 api 라우터(ADR-047)와 같은 `route` 이벤트를 재사용한다(`auto: true` 필드만 다르다). 화면은 api의 점수표 `<details>` 대신 한 줄 안내("자동 선택: Sonnet 5 — 이유")를 보여준다 — CLI 자동 선택에는 비교할 점수·실측 비용이 없어 점수표가 의미가 없기 때문이다.
+- 요청이 끝나면(`nextAutoTier`) 검증 게이트를 통과한(`done`) 만들기 요청만 stickiness를 갱신한다. 승격이 일어났으면 승격된 단계를 기억한다(다음 요청도 그 단계부터 시작해 다시 낮췄다 올리는 캐시 재생성을 피한다). 질문이거나 실패한 시도는 기억하지 않는다.
+- 토큰·비용 관측은 새로 만들지 않는다. `claude-code-runner.ts`는 이미 SDK가 돌려준 실제 모델 이름(`message.model`, 별칭이 아니라 `claude-sonnet-5` 같은 실제 id)으로 `session` 이벤트와 `usageByModel`을 기록한다 — 자동 선택이 고른 별칭을 그대로 `model` 옵션에 넘기기만 하면 기존 토큰 탭·단가표가 그대로 맞물린다.
+
+### 검증 결과
+- `packages/agent/src/cli-router.test.ts`(9개): 질문→haiku, 단순 만들기→sonnet, 복잡·위험 만들기→opus, 만들기 요청에 haiku 미사용, stickiness(하강 안 함·질문엔 미적용·상승은 허용), `nextCliTier`·`higherCliTier` 경계값.
+- `apps/studio/lib/server/sessions.test.ts`: `claudeCodeAutoEscalation`(haiku→sonnet, sonnet→opus, opus는 승격 없음), `nextAutoTier`(done만 기억, 승격 시 올라간 단계 기억, 더 높은 값은 내리지 않음, ask·실패는 무시).
+- `apps/studio/lib/server/model-picker.test.ts`: claude-code 옵션 목록에 `자동`이 포함되고(힌트 문구까지), `isSelectableModel('claude-code', 'auto')`가 통과한다.
+- `apps/studio/bench/coordination/backends.test.ts`: `resolveBackend`가 `--model auto`를 그대로 받는다(E10 벤치 배선).
+- `pnpm typecheck`(모든 워크스페이스 Done), 위 네 테스트 파일과 회귀로 돌린 `model-router.test.ts`·`escalation.test.ts` 전체 통과.
+- 실제 Claude Code CLI 호출로 자동 선택이 도는 것은 확인하지 못했다(사용자가 API 예산이 없어 구독 CLI 실 실행은 비용/사용량을 쓴다 — [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)에 실행 방법만 적어 두고 아직 실행하지 않았다). `pnpm bench:coordination --dry`로 인자 해석·하네스 배선만 확인했다.
+
+### 감수한 트레이드오프
+- 복잡도·위험도 분류가 ADR-047과 같은 한계를 물려받는다(키워드·길이 기반, 도메인 의미를 완전히 이해하지 못함).
+- stickiness는 세션(=하나의 Claude Code 대화) 단위로만 본다. 서버가 재시작되면 `session.claudeCode.autoTier`는 세션 파일에 저장된 값을 그대로 복원하지만, 세션 자체가 끝나면(새 세션) 다시 처음(요청마다 새로 계산)부터 시작한다 — 사용자 전체의 습관을 배우지 않는다.
+- 단가 비교(E8/E9가 쓴 "API 환산 비용")는 대화 관측값이지 실제 구독 청구서가 아니다. 자동 선택이 실제로 돈을 아끼는지는 이 ADR이 아니라 E10(계획만, 아직 실행하지 않음)이 잴 것이다.
+- Phase 2(다른 CLI 백엔드 사이의 자동 전환 — 예: Claude Code 구독 한도에 걸리면 Codex나 Command Code로 넘어가기)는 이번 범위 밖이다. 지금 자동 선택은 한 세션의 한 백엔드 안에서만 단계를 고른다.
+- S2(`--contracts model`)의 계약 호출과 `--lane-backend`(레인별 백엔드·모델)에는 아직 `auto`를 연결하지 않았다 — 두 경로 모두 `claudeCodeAsk`를 직접 부르고 세션의 `planRun`을 거치지 않기 때문이다. 단일 세션 요청(S0/S1)에서만 동작한다.
+
+---
+
+## ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다
+
+상태: 채택
+관련: -
+
+### 맥락
+- ADR-079가 `docs/requirements.md`(요구사항 + 증거 기반 상태)를 만들었지만, 그 상태는 세션 화면 안에서만 보인다. 여러 사람이 같이 보는 곳(팀 채널에 붙이는 이슈 링크, 이슈 트래커의 검색·필터·마일스톤)에서는 요구사항이 전혀 보이지 않는다. ADR-072(이슈로 바로 작업)·ADR-081(이슈·PR 상세)이 이미 저장소 이슈를 읽는 경로를 만들어 뒀으니, 이번에는 반대 방향(파일 → 이슈)을 잇는다.
+- task-plans.ts의 `publishPlanIssues`(작업 계획을 추적 이슈 + 하위 이슈로 올리는 기존 기능)가 좋은 선례다: 하위 이슈를 먼저 만들고, GitHub이면 `sub_issues` API로 연결하고, 그 밖의 호스트는 추적 이슈 본문에 체크리스트로 대신한다. 이번 기능은 "작업 계획" 대신 "요구사항"을 그 패턴에 태운다.
+- 관건은 **한 방향**을 지키는 것이다: `docs/requirements.md`가 언제나 원본이고, 이슈는 그 내용을 보여 주는 거울이어야 한다. 그런데 GitHub 이슈는 누구나 웹에서 바로 고칠 수 있어, "파일에서 편 값"과 "이슈에 지금 적힌 값"이 어긋날 수 있다 — 조용히 한쪽으로 덮어쓰면 사람이 이슈에서 고친 내용을 잃는다. 그래서 발행은 dry-run 계획을 먼저 세우고, 어긋남(충돌)을 감지하면 사람에게 가져오기·덮어쓰기·무시를 고르게 한다.
+- 다른 에이전트가 같은 시점에 `requirements.ts`의 `Requirement`에 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace` 필드를 추가하는 중이었다(ADR 조율 중, 아직 main 미병합). 이 기능은 그 필드들이 있으면 쓰고 없어도 동작해야 했다.
+- GitHub 하위 이슈 API(Sub-issues REST API, 2024년 일반 공개)는 GitHub에만 있다. Gitea·GitLab은 그런 API가 없어 ADR-072와 같은 경계로 GitHub·Gitea만 지원하고(GitLab은 대상 밖), 하위 이슈 연결은 GitHub에서만 한다.
+
+### 결정
+1. **순수 계산은 `packages/agent/src/requirement-issues.ts`에 모은다**(파일 IO·네트워크 없음): 관리형 영역(`<!-- b-studio:req id=R4 rev=2 hash=… --> … <!-- /b-studio:req -->`, EARS·시나리오·NFR·인수 조건을 담는다) 빌드·파싱, 라벨 집합(`b-studio:req`·`kind:*`·`priority:*`·`status:*`), 추적 이슈·하위 이슈 본문, 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists), 고정 상태 댓글, PR 본문 조립(`Closes #n`·`Implements: Rn@revN`), 이슈 폼 파싱, API 경로 화이트리스트. `Requirement`의 선택 필드(`rev`·`ears`·`scenarios`·`nfr`·`trace`)는 전부 optional인 별도 구조 타입(`RequirementForIssues`)으로 방어적으로 읽는다 — 다른 에이전트의 작업이 병합되기 전에도, 병합된 뒤에도 그대로 호환된다.
+2. **충돌 판정은 "우리가 마지막으로 쓴 해시"를 기준으로 삼는다.** 이슈 본문을 사람이 GitHub에서 직접 고쳐도 관리형 영역 헤더의 `hash=` 속성은 안 건드릴 수 있으므로, 그 속성을 믿지 않고 본문 내용을 다시 해시해 우리가 저장해 둔 `published.hash`와 비교한다. 다르면(원격이 바뀌었다) conflict, 로컬 해시가 그것과 다르면(내용이 바뀌었다) update(열려 있으면)/reverify(닫혀 있으면 다시 열고 재확인 필요로 표시), 같으면 unchanged(닫혀 있는데 검증 안 됨이면 closed_but_requirement_exists로 따로 알린다).
+3. **발행 기록은 `docs/requirements.issues.json`(사이드카 파일)에 둔다**(`docs/requirements.md` 자체는 건드리지 않는다). 요구사항 id마다 `{issue, rev, publishedHash, publishedAt}`을 담고, 추적 이슈 번호도 함께 둔다. `docs/requirements.md`의 저장 형식은 다른 에이전트가 동시에 고치고 있어 직접 필드를 더하면 병합 충돌·형식 드리프트 위험이 컸다 — 완전히 분리된 파일로 옆에 두면 그 위험이 없어지고, 재시작해도(세션 파일이라 커밋된다) 발행 상태를 잃지 않는다.
+4. **발행 orchestrator는 `apps/studio/lib/server/requirement-issues.ts`에 둔다**: `packages/agent`의 이슈 API(`createIssue`·`addSubIssue`·`updateIssue`·`listIssueComments`·`updateComment`·`ensureLabels`)를 부르고, `docs/requirements.issues.json`을 읽고 쓴다. **`sessions.ts`를 import하지 않는다**(원격·토큰·요구사항·상태 같은 순수 데이터만 받는다) — `sessions.ts`가 이 모듈을 부르는 한쪽 방향 의존만 있어 task-plans.ts와 sessions.ts 사이의 기존 관계와 같은 모양이다.
+5. **must·should만 하위 이슈, could·docs는 추적 이슈 체크리스트.** 추적 이슈 제목은 "요구사항: <프로젝트>", 표에 id·제목·종류·우선순위·상태·하위 이슈 링크를 담는다.
+6. **상태 반영은 요구사항마다 고정 댓글 하나만 계속 편집한다**(새 댓글을 쌓지 않는다). 표(시나리오·테스트·결과·커밋·게이트)를 담고, `status:*` 라벨도 같이 바꾼다. **검증됨 + 이 세션의 PR이 실제로 병합됐을 때만**(`PullDetail.merged`, GitHub·Gitea PR 상세에 새로 더한 필드) 하위 이슈를 닫는다 — `state: closed`만으로는 병합 없이 닫힌 PR과 구분이 안 되므로, `merged` 필드를 새로 읽어야 했다.
+7. **PR 본문·AI 리뷰에 요구사항을 잇는다.** 세션 커밋 제목의 "[R4]" 언급을 모아(`extractRequirementMentions`) `Closes #n`(검증됨 + 발행된 이슈만)·`Implements: Rn`(또는 `Rn@revN`)을 PR 본문 끝에 붙이고(`buildRequirementsAddendum`, `Closes #n`은 기본 브랜치로 여는 PR에서만 동작한다는 안내를 함께 남긴다), AI 리뷰 라운드의 사용자 프롬프트에도 구현한 요구사항의 제목·시나리오 압축 목록을 붙인다(`buildReviewRequirementsContext`). 올리기(export) 미리보기·생성 API가 사람이 이슈 번호를 입력하지 않았을 때 이 세션이 구현한(발행된) 요구사항의 이슈 번호를 통합 계획 이슈와 합쳐 기본값으로 쓴다 — 기존 텍스트 입력 칸에 자동으로 채워지는 방식이라 새 체크박스 UI 없이도 "기본 선택"이 된다. "이 요구사항 작업"·"전체 계획 세우기" 프리필도 발행된 이슈 번호를 `[R7] 제목 (#12)`로 덧붙인다.
+8. **UI**: "명세" 탭에 "이슈로 발행" 버튼 → dry-run 미리보기(행동별 개수 + 목록, 충돌마다 가져오기·덮어쓰기·무시 버튼) → 확인 후 발행. "다음 단계" 박스는 원격이 GitHub이면 "이슈로 발행"을 "전체 계획 세우기"보다 앞세우고, 아직 발행하지 않은 채 "전체 계획 세우기"를 누르면 한 번만("아직 이슈로 발행하지 않았습니다 — 먼저 발행할까요?") 물어보고 답하면 그 세션 동안 다시 묻지 않는다. 요구사항 카드에 발행된 이슈 번호 칩을 달고, 저장소 탭 이슈 목록은 `b-studio:req` 라벨 + `[Rn]` 제목이면 R-id 칩을 보여준다.
+9. **안전장치**: 이 기능이 부르는 API 경로는 이슈·하위 이슈·댓글·라벨만 화이트리스트로 못 박는다(`ALLOWED_REQUIREMENT_ENDPOINTS`, `assertAllowedRequirementEndpoint`). 협업자·권한·저장소 설정·웹훅·브랜치 보호 엔드포인트는 이 목록에 없고, repository.ts의 새 함수(`updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`)는 모두 실제 호출 전에 이 확인을 거친다. 라벨 생성만 예외로 허용한다(디자인에서 명시한 유일한 "설정 비슷한" 쓰기) — 그 밖의 저장소 설정은 절대 건드리지 않는다. 개인 PC 모드는 저장소 화면과 같은 `gh auth token` 폴백을 쓴다(`createIssue`·`addSubIssue`에 `token` 오버라이드를 새로 더했다 — 예전에는 환경 변수만 읽었다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 발행 기록(이슈 번호·해시)을 `docs/requirements.md`의 JSON 블록에 같이 넣는다 | 그 파일 형식을 다른 에이전트가 동시에 고치고 있어 병합 충돌·형식 드리프트 위험이 크다. 완전히 분리된 사이드카 파일(`docs/requirements.issues.json`)로 뒀다(채택) |
+| B. 충돌 판정을 관리형 영역 헤더의 `hash=` 속성만 보고 한다 | 사람이 GitHub에서 눈에 보이는 본문만 고치고 헤더 속성은 그대로 두면 충돌을 놓친다. 헤더를 신뢰하지 않고 본문 내용을 다시 해시해 우리가 저장한 값과 비교한다(채택) |
+| C. orchestrator가 `sessions.ts`의 세션 객체를 직접 받는다(편하게 `session.project.root` 등을 바로 쓴다) | `sessions.ts` → orchestrator → (다시) `sessions.ts` 순환이 생기거나, 세션 타입에 orchestrator가 얽매인다. 원격·토큰·프로젝트 루트 같은 순수 데이터만 받게 해 `sessions.ts`가 한쪽으로만 의존하게 했다(채택, task-plans.ts와 같은 방향) |
+| D. "검증됨"이면(PR 병합 여부와 무관하게) 하위 이슈를 바로 닫는다 | 검증됨은 세션 안의 증거일 뿐, 그 변경이 실제로 main에 들어갔다는 보장이 아니다(PR이 아직 열려 있거나 병합 없이 닫혔을 수 있다). `PullDetail.merged`를 새로 읽어 "검증됨 + 실제 병합" 둘 다 확인했을 때만 닫는다(채택) |
+| E. 이슈 번호 선택을 위해 저장소 탭처럼 체크박스 목록 UI를 새로 만든다 | 올리기 화면은 이미 쉼표 구분 텍스트 입력 한 칸으로 이슈 번호를 받고, 서버가 기본값을 미리 채워 준다(첫 미리보기 호출에서). 그 기존 통로에 발행된 요구사항 이슈 번호를 기본값으로 더 섞어 주는 쪽이 새 UI보다 작고 일관됐다(채택) |
+
+### 검증 결과
+- `packages/agent/src/requirement-issues.test.ts`(신규, 30건): 관리형 영역 왕복, 라벨 집합, 추적 이슈 본문(표 + 체크리스트), 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists, 멱등성), 고정 상태 댓글, PR 본문 조립(Closes/Implements), 이슈 가져오기(관리형 영역·이슈 폼·평문 세 경로), API 경로 화이트리스트(허용·거부 양쪽).
+- `packages/agent/src/repository.test.ts`(보강): `updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`·`ensureLabels` 신규 함수를 페이크 fetch로 확인했다.
+- `apps/studio/lib/server/requirement-issues.test.ts`(신규, 12건): 임시 폴더 + 페이크 `@b-studio/agent` 함수로 발행 계획·발행 실행(하위 이슈 연결 실패해도 계속 진행)·충돌 세 갈래(가져오기·덮어쓰기·무시)·상태 동기화(고정 댓글 편집, PR 병합 시에만 닫기)를 확인했다.
+- `apps/studio/lib/server/sessions.test.ts`(보강): 프리필에 발행된 이슈 번호를 붙이는 `annotateWithIssue`·`annotateAllMustHavesPrefill`.
+- `apps/studio/app/api/sessions/[id]/requirements/{publish,publish/preview,publish/conflict,publish/sync,import-issue}/route.test.ts`(신규), `apps/studio/app/api/sessions/[id]/export/{,preview/}route.test.ts`(신규): 라우트 위임과, 입력이 없을 때 통합 계획 이슈 + 발행된 요구사항 이슈를 합쳐 기본값으로 쓰는 것을 확인했다.
+- `packages/agent/src/pr-review.test.ts`·`apps/studio/lib/server/review-round.test.ts`(보강): `requirementsContext`가 리뷰어 프롬프트에 그대로 실리는 것을 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`·`repository-panel.test.tsx`(보강): "다음 단계" 순서(GitHub이면 이슈로 발행이 먼저), 확인 게이트 순수 로직(`shouldConfirmBeforePlanAll`), R-id 칩 렌더링을 확인했다(이 저장소의 컴포넌트 테스트 관례대로 `renderToStaticMarkup`만 쓴다 — 상호작용 테스트 도구가 없어 클릭 흐름 자체는 그 안에 든 순수 로직으로 나눠 검증했다).
+- `pnpm -r typecheck`(6개 패키지) 통과, `pnpm --filter @b-studio/studio lint` 0 errors(기존 경고 7개는 이 변경과 무관), 전체 `vitest run`은 이 변경분 기준으로 새로 실패한 테스트가 없다(기존에도 알려진 부하 플레이키 — Docker 스크립트·체크포인트 git clone·아티팩트 정리 테스트가 전체 스위트를 한 번에 돌릴 때만 가끔 5초 타임아웃에 걸린다 — 단독 실행하면 통과한다).
+- 실제 GitHub·Gitea API 호출은 하지 않았다(이번 라운드 조건: 네트워크 금지). 모든 네트워크 경로는 페이크 `fetch`/모킹한 `@b-studio/agent` 함수로만 검증했다.
+
+### 감수한 트레이드오프
+- **발행 기록이 두 파일(`docs/requirements.md` + `docs/requirements.issues.json`)로 나뉜다.** 사람이 `docs/requirements.md`만 보고 "이 요구사항이 몇 번 이슈인지" 바로 알 수 없다(화면의 이슈 칩으로 봐야 한다). `docs/requirements.md`의 소유권 충돌을 피하려 감수했다 — 그 파일의 필드가 안정된 뒤 통합할 수 있는 여지는 남겨 뒀다(사이드카 파일의 필드 이름을 그대로 옮기면 된다).
+- **GitLab은 지원하지 않는다**(GitHub·Gitea만). GitLab은 하위 이슈 개념이 다르고(epic·related issue), 라벨·이슈 API 모양도 달라 이번 범위에 넣지 않았다.
+- **이슈 목록 조회(`listIssues`)가 첫 페이지(최대 50개)만 본다** — ADR-079의 트레이드오프와 같다. 요구사항이 50개를 훌쩍 넘고 옛 이슈가 뒤로 밀리면 `trace.issue`(사이드카 파일) 없이는 id 마커로 못 찾을 수 있다.
+- **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
+- **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
+- **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
+
+---
+
+## ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다
+
+상태: 채택
+관련: ADR-019(로컬 로그인 계정으로 실행)
+
+### 맥락
+- ADR-019 이후 b-studio는 네 가지 구독 CLI(claude-code·codex·commandcode·opencode)를 "이미 로그인된 것"으로 전제하고 돌린다. 로그인이 안 돼 있으면 각 `preflight*`(packages/agent/src/*-runner.ts)가 "터미널에서 `cmd login`으로 로그인하세요" 같은 문장만 돌려주고, 사용자는 실제로 터미널을 열어 명령을 쳐야 한다 — b-studio가 터미널 작업대를 표방하면서도 이 한 가지는 화면 밖으로 밀어낸 셈이다.
+- 네 CLI가 로그인 명령을 어떻게 제공하는지 실행하지 않고(지시에 따라 실제 로그인을 시작하거나 끝내지 않았고, 자격 증명 파일도 읽지 않았다) `--help`만으로 조사했다(2026-10-01, 이 PC에 설치된 버전 기준):
+
+| CLI | 로그인 서브커맨드 | 선택 메뉴를 건너뛰는 플래그 | 상태 확인 | 비고 |
+|---|---|---|---|---|
+| `claude`(Claude Code) | `claude auth login` | `--claudeai`(기본값, Claude 구독) / `--console`(API 키 과금) / `--sso` | `claude auth status --json` | commander 서브커맨드. 알려진 동작(OAuth, 브라우저+로컬 콜백)대로라면 TTY 키 입력 없이 URL을 찍고 기다리는 꼴일 것으로 본다 — 이 추정은 실제로 실행해 확인하지 못했다 |
+| `codex` | `codex login` | **`--device-auth`**(기기 인증 코드 발급) | `codex login status`(이미 `preflightCodex`가 쓴다) | `--device-auth`는 설계 자체가 TTY 없는 환경을 위한 흐름이라, 네 CLI 중 가장 확신을 갖고 스폰할 수 있다 |
+| `cmd`(Command Code) | `cmd login [provider]` | provider 인자를 생략하면 "Command Code 계정"으로 로그인(=BYOK 제공자 로그인과 분리) | `cmd status --json`(이미 `preflightCommandCode`가 쓴다) | `claude auth login`과 같은 commander 서브커맨드 모양이라 같은 OAuth 루프백 흐름으로 추정 |
+| `opencode` | `opencode auth login [provider]` | `-p/--provider`, `-m/--method`로 선택 메뉴를 건너뛸 수 있다 | `opencode --version`(`preflightOpenCode`는 로그인이 아니라 설치 여부만 본다) | opencode 전체(`opencode --help`의 기본 동작이 "opencode tui")가 ink 기반 대화형 CLI다. `-p/-m`으로 제공자·방식 선택은 건너뛰어도 그다음 단계(OAuth든 API 키 붙여넣기든)가 TTY 상호작용을 전제하는지 확인하지 못했다 |
+
+- 위 표에서 claude-code·codex·commandcode 세 곳은 "URL(또는 기기 코드)을 표준출력에 찍고 콜백·폴링으로 끝까지 간다"는 공통된 설계로 보이지만, **실제로 로그인을 실행해 그 출력 문구를 본 적은 없다.** opencode는 반대로 "대화형 CLI 전체의 서브커맨드"라는 더 분명한 근거(메인 `--help`가 자신을 TUI라고 설명한다)로 TTY 필요로 판단했다.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| A. 네 CLI 모두 화면에서 자동으로 로그인을 띄운다 | 실행해 보지 못한 claude-code·cmd의 표준출력 형식을 짐작으로 자동화하는 데다, opencode는 ink 기반 TUI라는 근거가 있는데도 억지로 흉내 내면 화면이 멈춘 것처럼 보이는 조용한 실패를 만든다 |
+| B. 네 CLI 모두 "터미널에서 실행하세요" 안내만 보여준다(지금 상태에 복사 버튼만 추가) | 가장 안전하지만, `--device-auth`처럼 명백히 헤드리스용으로 설계된 codex의 기능을 쓰지 않는다 — 조사한 보람이 없다 |
+| **C. 설계 근거가 분명한 CLI(claude-code·codex·commandcode)는 자식 프로세스로 띄우고 표준출력에서 URL·코드를 정규식으로 뽑아 보여준다. TUI 근거가 있는 opencode만 명령+복사 버튼으로 남긴다** | 채택. CLI별로 다른 확신 수준을 솔직하게 반영한다. 정규식이 실제 CLI 출력과 어긋나도(실행해 보지 못했으므로 그럴 수 있다) 로그인 자체(각 CLI 프로세스)는 그대로 흐르고, 사람이 로그 tail을 보고 URL을 직접 복사할 수 있어 "자동 추출 실패"가 "로그인 실패"로 이어지지 않는다 |
+
+### 결정
+- **상태 확인은 `preflight*`를 그대로 재사용한다**(`apps/studio/lib/server/cli-accounts.ts`의 `checkAccountStatus`). 자격 증명 파일은 어디서도 읽지 않는다 — claude-code만 preflight가 이미 알고 있는 계정 종류(`describeAccount`, 예: "max 구독")를 보여주고, 나머지 세 CLI는 "연결됨/로그인 필요"만 보여준다(지어내지 않는다). preflight 실패 이유 문자열에서 `ENOENT`·`command not found` 류를 정규식으로 가려 "설치 안 됨"과 "로그인만 안 됨"을 구분한다(완벽하지 않다 — preflight가 두 경우를 구조화된 값 대신 문장으로만 돌려주기 때문이다).
+- **로그인 시작은 공식 명령을 자식 프로세스로 스폰한다.** `claude auth login --claudeai` · `codex login --device-auth` · `cmd login`을 `startLogin()`이 띄우고, stdout·stderr을 줄 단위로 모아(`pushLine`) 최근 200줄만 들고 있는다. 각 줄에서 `extractLoginHint()`(URL 정규식 `https?://…` + 기기 코드 정규식 `[A-Z0-9]{4}-[A-Z0-9]{4}` 또는 `[A-Z0-9]{4,10}`, URL 안에 들어있는 글자는 코드로 집지 않는다)가 URL·코드 후보를 뽑는다. 화면은 URL을 "브라우저에서 열기" 버튼으로, 코드를 복사 버튼으로 보여주고 로그 전체를 tail로 띄운다.
+- **opencode는 흉내 내지 않는다.** `loginCommandFor('opencode').spawnable === false`이고, 화면은 정확한 명령(`opencode auth login`)과 복사 버튼, "터미널에서 실행한 뒤 다시 확인해 주세요" 안내만 보여준다. `POST /api/accounts/opencode/login`도 프로세스를 띄우지 않고 `{ spawnable: false, command, note }`만 돌려준다.
+- **백엔드당 로그인은 하나만 돈다.** `startLogin`이 모듈 수준 `Map<백엔드, 세션>`을 들고 있다가, 이미 `running`이면 새로 띄우지 않고 같은 진행 상황을 돌려준다.
+- **자동으로 끊는다.** 사람이 창을 닫고 잊어도 자식 프로세스가 영영 떠 있지 않도록 10분(`LOGIN_TIMEOUT_MS`) 뒤 자동으로 `cancelLogin(..., 'timeout')`이 프로세스를 죽인다. 사람이 직접 취소(`DELETE`)할 수도 있다.
+- **끝나면 한 번만 다시 확인한다.** `GET /api/accounts/[backend]/login`은 프로세스가 `running`이 아니고 아직 재확인하지 않았으면(`progress.status`가 비어 있으면) `checkAccountStatus`를 한 번 불러 채운다(`attachStatus`) — 폴링마다 CLI를 다시 띄우지 않는다.
+- **개인 PC 모드 + 로그인한 사용자만 연다.** 네 라우트(`GET /api/accounts`, `POST·GET·DELETE /api/accounts/[backend]/login`, `POST /api/accounts/[backend]/refresh`) 모두 `requireUser` 다음에 `localFolderAllowed()`(폴더 열기, ADR-067과 같은 게이트)를 확인한다 — 인증을 끈 개인 PC 모드(`B_STUDIO_AUTH=none`)에서는 `requireUser`가 항상 같은 로컬 사용자를 돌려주므로, 사실상 "이 서버의 CLI를 직접 다루는 사람이 바로 이 PC를 쓰는 사람"이라는 전제가 두 조건에 함께 걸려 있다. `backend` 경로 값은 허용 목록(`isCliAccountBackend`, 네 값만)으로만 받는다.
+- **화면.** `/accounts`(헤더의 프로젝트 메뉴에서 "폴더 열기…"와 같은 조건으로 "계정 연결" 항목이 연다)에 CLI별 카드를 두고, 상태(연결됨/로그인 필요/설치 안 됨)·계정 종류·로그인 버튼·진행(URL·코드·로그 tail·취소)을 보여준다. 이미 "로그인돼 있지 않습니다" 같은 문구가 나오던 대화 입력창의 모델 선택 팝오버에도 그 이유가 로그인 관련이면(`needsAccountConnect`, `disabledReason`에 "로그인" 포함 여부로 판단) "계정 연결로 가기" 링크를 더했다. 보안 문구("비밀번호와 토큰은 b-studio가 보지 않습니다. 각 CLI가 직접 저장합니다")를 화면에 고정으로 둔다.
+
+### 검증 결과
+- `apps/studio/lib/server/cli-accounts.test.ts`: `extractLoginHint`를 합성(synthetic, 실제로 관측하지 않은) 픽스처로 검증(URL+코드 동시, URL만, 코드만, 둘 다 없음, URL 쿼리 안 코드처럼 보이는 값은 코드로 집지 않음), `checkAccountStatus`의 네 백엔드 분기(연결/로그인 필요/설치 안 됨), 상태 기계(시작→running, 중복 시작 방지, 정상 종료, 취소, 타임아웃, spawn 오류, 로그 200줄 상한, opencode 시작 거부)를 가짜 `spawn`(진짜 프로세스를 띄우지 않는다)으로 검증했다.
+- `apps/studio/app/api/accounts/**/route.test.ts`: 개인 PC 모드 게이트(403)·인증(401)·허용 목록 밖 백엔드(400)·spawnable 분기(opencode는 명령만 돌려주고 프로세스를 띄우지 않는다)·진행 조회가 끝난 뒤 한 번만 재확인하는지를 검증했다.
+- `apps/studio/components/accounts-panel.test.tsx`·`chat-panel.test.tsx`: 정적 렌더(`renderToStaticMarkup`, 이 저장소 컴포넌트 테스트의 기존 관례)로 상태별 카드 표시와 "계정 연결로 가기" 안내 유무를 검증했다.
+- 확인하지 못한 범위: 네 CLI의 실제 로그인 표준출력 형식(지시에 따라 로그인을 실제로 실행하지 않았다). `extractLoginHint`의 정규식이 실제 CLI 출력과 어긋나면 URL·코드 자동 추출만 못 하고, 로그 tail에는 그대로 찍히므로 사람이 직접 복사할 수 있다 — 다음에 실제 CLI로 한 번 실행해 정규식을 다듬어야 한다.
+
+### 감수한 트레이드오프
+- claude-code·commandcode의 "스폰 가능" 판단은 실제 실행 확인 없이 명령 설계(OAuth 루프백으로 보이는 서브커맨드 구조)만 근거로 삼았다 — 실제로 TTY가 필요하면(예: 추가 확인 프롬프트) 자식 프로세스가 입력을 받지 못해 타임아웃(10분)까지 멈춘 것처럼 보일 수 있다. "취소" 버튼이 있어 사람이 그 전에 끊을 수 있다는 것으로 위험을 줄였다.
+- URL·코드 추출 정규식은 일반적인 OAuth 기기 인증 흐름(GitHub CLI 등 공개 사례)의 생김새를 본뜬 것이지, 이 네 CLI의 실제 출력에서 확인한 값이 아니다.
+- "설치 안 됨" 판정은 preflight의 사람이 읽는 오류 문장에서 `ENOENT` 등을 정규식으로 찾는 방식이라, CLI가 다른 문구로 "없음"을 알리면(예: 셸마다 다른 "command not found" 번역) 로그인 필요로 잘못 분류될 수 있다.
+- opencode는 이번에 로그인 자동화를 포기했다 — 다음에 실제로 `opencode auth login`을 실행해 어느 단계까지 비대화형으로 되는지 확인하면 범위를 넓힐 수 있다.
+
+---
+
+## ADR-094 조사(research) 채팅 모드와 "문서" 탭으로 연구 → 문서화 → 요구사항을 한 세션 안에서 잇는다
+
+상태: 채택
+관련: [ADR-042 질문 모드](#adr-042-질문-모드-같은-대화와-도구-목록을-쓰고-바꾸는-도구는-실행기에서-막음), [ADR-079 명세 → 요구사항 → 검증 추적](#adr-079), [ADR-090 요구사항 EARS·시나리오·추적 매트릭스](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+
+### 맥락
+- 지금까지 스튜디오 밖에서 하던 작업 흐름이 있다: 채팅으로 웹을 찾아보며 논쟁하듯 결론을 다듬고(조사), 그 결론을 저장소 문서로 정리하고(문서화), 문서를 요구사항에 반영하고(적용), 요구사항 하나를 두고 다시 채팅으로 묻는(피드백) 순환이다. 지금 스튜디오는 이 네 동작 중 "질문"(ADR-042)과 "요구사항 ↔ 작업"(ADR-079/090의 workPrefill) 절반만 지원했다 — 조사에 웹 도구가 없고, 문서는 코드 탭에서 읽기만 가능했고(쓰기 경로가 없다), 채팅 답을 요구사항에 반영하려면 사람이 손으로 옮겨 적어야 했다.
+- 범수 님의 BE-commerce 저장소가 이미 이 순환을 반영한 문서 구조를 쓰고 있다: `docs/README.md`의 "처음 읽는 순서"·역할별 표, 번호 매긴 설계 문서(`docs/NN-제목.md`), ADR 한 편당 한 파일(`docs/adr/ADR-NNN-slug.md`), `TROUBLESHOOTING-LOG.md`·`ROADMAP-TRADEOFFS.md`로 "지금 뭐가 열려 있는지"·"트레이드오프 후보"를 분리해 쌓는다. 이 구조를 스튜디오 세션의 작업 복사본 안에서도 만들고 고칠 수 있어야 "조사 → 문서화"가 실제로 이어진다.
+- claude-code 백엔드는 이미 WebSearch/WebFetch를 쓰는 선례가 있다(`claude-code-ask.ts`의 `webTools`, 요구사항 "모호한 점 추천"에서만 연다). 이 선례를 일반 대화의 질문 경로로 넓히되, 그 밖의 백엔드(모델 API 직접 호출, codex, commandcode, opencode)는 웹 도구가 전혀 없으므로 "모델 지식으로만 답한다"는 사실을 숨기지 않아야 한다.
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| "문서" 탭을 "코드" 탭의 세 번째 하위 탭으로 넣는다 | 문서 쓰기는 "코드 읽기"의 부속 기능이 아니라 조사 결과를 저장소에 남기는 별도 작업 흐름이라, 코드 탭 안에 묻으면 눈에 띄지 않는다 |
+| 조사 모드를 완전히 새 `intent` 값(`'research'`)으로 만든다 | 실행기의 읽기 전용 판정(`ToolContext.readOnly`)·게이트 생략·여러 러너의 `ask` 분기 전부를 다시 나눠야 한다 — `ask`가 이미 "읽기 전용"의 전부를 뜻하는데 값만 하나 더 늘리면 중복 분기가 생긴다 |
+| **"문서"를 독립된 위 탭으로 두고, 조사는 `intent: 'ask'`에 올라타는 보조 플래그(`research`)로 둔다 — 읽기 전용 여부는 그대로 `ask`가 정하고, `research`는 그 위에서 "웹에서 찾아 답하라"는 지시(및 claude-code만 실제 웹 도구)를 더할 뿐이다** | 채택. 실행기·게이트 분기를 하나도 늘리지 않고, `buildAskRequest`(모든 백엔드가 공유하는 질문 모드 프롬프트 함수) 한 곳만 확장하면 다섯 백엔드(claude-code·codex·commandcode·opencode·직접 만든 루프) 모두에 안내가 퍼진다 |
+
+### 결정
+
+1. **"문서" 탭**(`apps/studio/lib/tab-model.ts`): `buildTopTabs`가 만드는 고정 탭을 코드·요구사항·실행·저장소·**문서**·토큰 여섯 자리로 늘렸다(`{ kind: 'docs', id: 'docs', label: '문서' }`). 하위 탭은 두지 않는다 — 트리에서 문서를 고르면 미리보기·편집이 같은 화면 안에서 바로 바뀌어 "코드"의 파일/변경 기록처럼 번갈아 보여줄 하위 화면이 필요 없다.
+2. **순수 함수로 템플릿·색인을 만든다**(`packages/agent/src/docs.ts`): `nextDesignDocNumber`/`nextAdrNumber`(기존 `docs/NN-*.md`·`docs/adr/ADR-NNN-*.md`에서 다음 번호 계산), `buildDesignDocTemplate`/`buildAdrTemplate`(BE-commerce 꼴 — ADR은 상태·날짜·관련 머리말 불릿 먼저), `appendTroubleshootingEntry`/`appendRoadmapTradeoffEntry`(파일이 없으면 제목부터 만들고, 있으면 끝에 이어 붙인다), `extractDocSummary`(첫 H1+첫 문단을 뽑는다, 표·목록·주석으로 시작하는 문단은 요약으로 보지 않는다), `regenerateDocsReadme`(`<!-- b-studio:docs-index -->`~`<!-- /b-studio:docs-index -->` 관리 구간만 다시 만들고 그 밖의 손으로 쓴 글은 그대로 둔다. 표지가 아직 없으면 글 끝에 새로 붙인다). 이 모듈은 파일 IO를 하지 않는다 — studio의 `sessions.ts`가 `Workspace`로 읽고 쓴다.
+3. **쓰기는 기존 경로를 그대로 쓴다**: `writeSessionDoc`/`createSessionDoc`/`regenerateSessionDocsIndex`(`apps/studio/lib/server/sessions.ts`)는 `applySessionRequirements`와 똑같이 `new Workspace(session.project.root).write(path, content)`로 세션 작업 복사본에 바로 쓴다 — 다음 체크포인트·PR에 그대로 실린다. 문서 범위는 `docs/**/*.md`·루트의 `README.md`·`CHANGELOG.md`·`CONTRIBUTING.md`로만 제한한다(`isDocPath`).
+4. **조사(research) 채팅 모드**: `ChatIntent`/`Intent`는 그대로 `'build'|'ask'` 두 값을 유지하고, `research?: boolean`을 `ask`에만 뜻이 있는 보조 플래그로 더했다(`chat-request.ts`→`messages` 라우트→`sendMessage`→`RunPlan.research`→`shared.research`로 다섯 러너 호출에 전부 흘러간다, 모든 러너가 `shared`를 스프레드하므로 타입 한 곳만 늘리면 된다). `prompts.ts`의 `buildAskRequest`(다섯 백엔드가 공유하는 질문 모드 프롬프트 함수)에 `research` 옵션을 더해, `webToolsAvailable: true`(claude-code만)면 "WebSearch/WebFetch로 찾아 출처를 링크로 남기라"고, `false`(그 밖의 백엔드)면 "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"라고 모델에게도, 화면에도 똑같이 알린다. claude-code 러너(`claude-code-runner.ts`)만 `researching`(= `ask && research`)일 때 SDK의 `tools`/`allowedTools`에 `WebSearch`·`WebFetch`를 추가로 연다(파일·명령 도구는 절대 열지 않는다 — b-studio 전용 MCP 도구 목록은 그대로다). 화면은 "읽기만"이 켜졌을 때만 "조사" 스위치를 보여준다("가볍게 확인"과 같은 자리 규칙).
+5. **채팅 메시지 동작**: 답변 메시지(`reply`) 아래에 작은 글씨 메뉴(복사·문서로 저장·요구사항에 반영)를 둔다. 복사는 클립보드에 마크다운을 그대로 담고(쓰기 권한 없이도 쓸 수 있다), 문서로 저장은 `NewDocDialog`(문서 탭과 공유하는 작은 다이얼로그)를 메시지 내용을 본문으로 열어 템플릿 종류·제목만 고르면 되게 하고, 요구사항에 반영은 새 `RequirementsImportContext`(코드 탭 열기 `CodeOpenContext`와 같은 자리)로 "요구사항" 탭을 열고 메시지 글을 기존 `/requirements/extract` 미리보기 엔드포인트에 명세로 흘려보낸다 — 이미 있는 재추출 병합(`mergeReextractedRequirements`)이 그대로 추가/변경/그대로/삭제 diff를 만들어 주므로 새 추출 로직을 만들지 않았다.
+6. **요구사항 → 채팅**: 요구사항 카드에 "대화에서 묻기"(읽기만 모드를 켜고 id·제목·EARS·인수 조건·시나리오를 맥락으로 채운 뒤 질문 쓸 자리를 남긴다, `buildRequirementAskPrefill`)와 "복사"(같은 내용을 마크다운으로, `requirementToMarkdown`)를 더했다. 기존 `ChatDraft.fill`을 확장해(`fill(text, { readOnly?, research? })`) "대화에서 묻기"가 읽기만 스위치까지 함께 켤 수 있게 했다 — 기존 "이 요구사항 작업" 프리필 메커니즘을 그대로 재사용한다.
+
+### 검증 결과
+- `packages/agent/src/docs.test.ts`: 슬러그화·다음 번호 계산(두 자리 안/밖 모두)·네 템플릿·`extractDocSummary`(표·목록·주석 시작 문단 제외)·`regenerateDocsReadme`(README 없음/관리 구간 있음/표지 없음/문서 없음/정렬 순서)까지 25개 사례.
+- `packages/agent/src/prompts.test.ts`: `buildAskRequest`가 `research` 생략/웹 도구 있음/없음 세 경우에 올바른 안내를 붙이는지.
+- `packages/agent/src/claude-code-runner.test.ts`: 조사 모드가 `tools`/`allowedTools`에 `WebSearch`·`WebFetch`를 더하고 b-studio 도구는 그대로 두는지, 조사를 끄면(질문 모드라도) 웹 도구를 열지 않는지.
+- `apps/studio/lib/chat-request.test.ts`: `research`가 질문 경로에만 실리고 만들기 경로에는 실리지 않는지.
+- `apps/studio/lib/tab-model.test.ts`: `buildTopTabs`가 문서 탭을 포함한 여섯 고정 탭을 만드는지.
+- `apps/studio/lib/requirement-chat-prefill.test.ts`: 대화 프리필·복사 마크다운이 EARS·시나리오 있음/없음 모두에서 올바른지.
+- `apps/studio/app/api/sessions/[id]/docs/**/*.test.ts`: 목록·내용 읽기/쓰기·새 문서·색인 갱신 네 라우트가 서버 함수를 올바른 인자로 부르고, 거부 사유를 그대로 전하는지(기존 요구사항 라우트 테스트와 같은 모킹 방식).
+- `apps/studio/components/chat-panel.test.tsx`/`requirements-panel.test.tsx`: 답변 메시지 동작이 쓰기 권한에 따라 보이고 숨는지, `ImportFlow`가 `initialSpecText`로 붙여넣기 칸을 채운 채 그려지는지.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 errors), `pnpm vitest run --exclude '.claude/**'` — 이번에 건드리지 않은 사전 존재 플레이키(`packages/sandbox/src/docker/format.test.ts`, `packages/agent/src/checkpoints.test.ts`의 원격 Git 타임아웃) 세 건만 남고 나머지(2324개) 모두 통과.
+- 확인하지 못한 범위: 실제 Claude Code 세션으로 조사 모드가 진짜 웹 검색을 수행해 보지는 못했다(이번 세션 정책상 모델 호출 금지) — 프롬프트·SDK 옵션(가짜 SDK로 캡처)만 검증했다. "문서" 탭의 트리·미리보기·편집도 렌더 문자열 검사(`renderToStaticMarkup`)와 라우트 모킹 테스트까지만 했고, 실제 Docker 샌드박스에서 문서를 고쳐 체크포인트·PR까지 흘러가는지는 보지 못했다.
+
+### 감수한 트레이드오프
+- `docs/README.md` 색인 표는 "문서 | 확인할 내용" 한 종류뿐이다 — BE-commerce처럼 "핵심 설계 문서"·"성능과 복원력"·"운영 자동화와 평가"로 역할을 나눠 묶는 것은 사람의 편집 판단이 필요해서 자동 생성 범위 밖에 뒀다(첫 H1·첫 문단만으로는 "이 문서가 어느 범주인가"를 알 수 없다). 번호 매긴 설계 문서 → ADR → 트러블슈팅/로드맵 → 그 밖, 네 구간으로만 정렬한다.
+- "조사" 모드는 claude-code 백엔드에서만 실제로 웹을 검색한다 — 그 밖의 백엔드(특히 api 모드, 직접 만든 루프)는 Anthropic Messages API에 웹 검색 도구를 연결하는 별도 작업이 필요해 이번 범위에 넣지 않았고, 대신 "모델 지식으로만 답한다"는 사실을 프롬프트와 화면 양쪽에 분명히 알리는 것으로 좁혔다.
+- "요구사항에 반영"은 전용 "패치" 추출 로직을 새로 만드는 대신 기존 "명세 다시 가져오기"(`/requirements/extract`+재추출 병합)를 그대로 태웠다 — 채팅 메시지 한 조각을 "명세 전체"처럼 모델에 넘기므로, 메시지가 요구사항 여러 개를 담고 있지 않고 한두 문단짜리 결론이면 추출 모델이 쪼개는 기준이 거칠 수 있다(기존 추출 프롬프트의 한계를 그대로 물려받는다).
+- 문서 편집은 충돌 해결이 없다 — 같은 문서를 두 사람이 동시에 편집 모드로 열어 저장하면 나중에 저장한 쪽이 이긴다(코드 탭도 사람이 직접 편집하는 경로가 없어 지금까지 이 문제가 없었다. ADR-041의 "내 폴더에서 바로 작업"의 사람 수정 보호(`Workspace`의 `#assertNotStale`)는 "에이전트가 읽은 뒤 바뀜"만 잡고, 화면 두 개가 동시에 쓰는 경우는 잡지 않는다).
 
 ---
 

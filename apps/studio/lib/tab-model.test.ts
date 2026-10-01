@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTopTabs,
   CODE_SUB_TABS,
   defaultSubTab,
   mapLegacyTab,
@@ -37,6 +38,20 @@ describe("mapLegacyTab", () => {
     expect(mapLegacyTab("repository")).toEqual({ group: "repository", subTab: "issues" });
     expect(mapLegacyTab("submission")).toEqual({ group: "repository", subTab: "presubmit" });
     expect(mapLegacyTab("tokens")).toEqual({ group: "tokens" });
+  });
+});
+
+describe("buildTopTabs", () => {
+  it("서비스·사내 API 뒤에 코드·요구사항·실행·저장소·문서·토큰 여섯 고정 탭을 둔다", () => {
+    const tabs = buildTopTabs([{ name: "api", preview: "openapi" } as never], []);
+    const ids = tabs.map((tab) => tab.id);
+    expect(ids).toEqual(["api", "code", "requirements", "run", "repository", "docs", "tokens"]);
+    expect(tabs.find((tab) => tab.id === "docs")).toEqual({ kind: "docs", id: "docs", label: "문서" });
+  });
+
+  it("서비스·사내 API가 없어도 고정 탭 순서는 그대로다", () => {
+    const tabs = buildTopTabs([], []);
+    expect(tabs.map((tab) => tab.id)).toEqual(["code", "requirements", "run", "repository", "docs", "tokens"]);
   });
 });
 
