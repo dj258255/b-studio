@@ -232,6 +232,7 @@ const snapshot = {
       confidence: "🔴" as const,
       evidence: { checkpoints: [], tests: [], gateChecks: [] },
       workPrefill: "[R1] 로그인 API",
+      verifiedBy: "none" as const,
     },
   ],
   allMustHavesPrefill: "다음 필수(must) 요구사항을 모두 구현해 주세요.\n\n- [R1] 로그인 API",

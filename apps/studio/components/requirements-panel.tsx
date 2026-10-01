@@ -33,6 +33,14 @@ interface Trace {
   supersedes?: string;
 }
 
+/** 사람이 "직접 확인함"으로 남긴 검증 기록(ADR-103) */
+interface ManualVerification {
+  by: string;
+  at: string;
+  sha: string;
+  note: string;
+}
+
 interface RequirementDraft {
   id: string;
   title: string;
@@ -46,6 +54,7 @@ interface RequirementDraft {
   trace?: Trace;
   hash?: string;
   revisedAt?: string;
+  manualVerification?: ManualVerification;
 }
 
 /** "테스트" 탭(ADR-084)이 HEAD 체크포인트에서 돌린 결과 중 이 요구사항을 언급하는 행을 모은 증거 하나 */
@@ -57,11 +66,20 @@ interface TestRunEvidence {
   failed: number;
 }
 
+/** kind: 'docs' 요구사항의 인수 조건을 README.md·docs/**\/*.md와 맞춰 본 결과(ADR-103) */
+interface DocEvidence {
+  matched: string[];
+  missing: string[];
+  satisfied: boolean;
+  sourceSummary?: string;
+}
+
 interface RequirementEvidence {
   checkpoints: Array<{ sha: string; shortSha: string; message: string }>;
   tests: Array<{ file: string; name: string }>;
   gateChecks: Array<{ name: string; ok: boolean }>;
   testRun?: TestRunEvidence;
+  docEvidence?: DocEvidence;
 }
 
 interface RequirementView extends RequirementDraft {
@@ -71,6 +89,8 @@ interface RequirementView extends RequirementDraft {
   workPrefill: string;
   /** 이슈로 발행했을 때 생긴 하위 이슈 번호(ADR-092). 발행하지 않았으면 없다 */
   issue?: number;
+  /** "검증됨"을 만든 증거의 종류(ADR-103). 검증됨이 아니면 'none' */
+  verifiedBy: "test" | "docs" | "manual" | "none";
 }
 
 type RequirementPlanAction = "create" | "update" | "unchanged" | "conflict" | "reverify" | "closed_but_requirement_exists";
@@ -498,7 +518,14 @@ export function RequirementsList({
       )}
       <ul className="flex flex-col gap-3">
         {snapshot.requirements.map((requirement) => (
-          <RequirementCard key={requirement.id} requirement={requirement} canManage={canManage} onWork={() => onWork(requirement.workPrefill)} />
+          <RequirementCard
+            key={requirement.id}
+            sessionId={sessionId}
+            requirement={requirement}
+            canManage={canManage}
+            onWork={() => onWork(requirement.workPrefill)}
+            onRefresh={onRefresh}
+          />
         ))}
       </ul>
       {snapshot.assumptions.length > 0 && (
@@ -907,12 +934,98 @@ function MatrixView({ sessionId }: { sessionId: string }) {
   );
 }
 
-function RequirementCard({ requirement, canManage, onWork }: { requirement: RequirementView; canManage: boolean; onWork: () => void }) {
+/** 요구사항 카드의 "직접 확인함" 인라인 폼(canManage만). 메모를 받아 POST하고 끝나면 onDone으로 새로고침을 알린다 */
+function ManualVerificationForm({ sessionId, requirementId, onDone, onCancel }: { sessionId: string; requirementId: string; onDone: () => void; onCancel: () => void }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function submit() {
+    if (!note.trim()) {
+      setError("무엇을 어떻게 확인했는지 적어 주세요");
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requirementId, note: note.trim() }),
+      });
+      const data = await readJson<RequirementsSnapshot>(response);
+      if (!response.ok) {
+        setError(data.error ?? "확인을 남기지 못했습니다");
+        return;
+      }
+      onDone();
+    } catch {
+      setError("확인을 남기지 못했습니다");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 flex flex-col gap-1.5 rounded-control border border-line bg-ground p-2">
+      <label className="text-xs font-medium text-ink" htmlFor={`manual-verify-${requirementId}`}>
+        무엇을 어떻게 확인했나
+      </label>
+      <textarea
+        id={`manual-verify-${requirementId}`}
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        rows={2}
+        placeholder="예: 디자인 시안과 화면을 나란히 놓고 색상·여백을 눈으로 맞춰 봤습니다"
+        className="rounded-control border border-line bg-panel px-2 py-1 text-xs text-ink"
+      />
+      {error && <p className="text-xs text-fail">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy}
+          className="rounded-control bg-ink px-2.5 py-1 text-xs font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+        >
+          {busy ? "남기는 중" : "확인 남기기"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={busy} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+          취소
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const VERIFIED_BY_LABEL: Record<"test" | "docs" | "manual", string> = { test: "테스트/게이트", docs: "문서 확인", manual: "사람 확인" };
+
+function RequirementCard({
+  sessionId,
+  requirement,
+  canManage,
+  onWork,
+  onRefresh,
+}: {
+  sessionId: string;
+  requirement: RequirementView;
+  canManage: boolean;
+  onWork: () => void;
+  onRefresh: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [clearingError, setClearingError] = useState<string>();
   const draft = useChatDraft();
+  const docEvidence = requirement.evidence.docEvidence;
+  const manualVerification = requirement.manualVerification;
   const evidenceCount =
-    requirement.evidence.checkpoints.length + requirement.evidence.tests.length + requirement.evidence.gateChecks.length + (requirement.evidence.testRun ? 1 : 0);
+    requirement.evidence.checkpoints.length +
+    requirement.evidence.tests.length +
+    requirement.evidence.gateChecks.length +
+    (requirement.evidence.testRun ? 1 : 0) +
+    (docEvidence ? docEvidence.matched.length + docEvidence.missing.length : 0) +
+    (manualVerification ? 1 : 0);
 
   async function copy() {
     try {
@@ -923,6 +1036,26 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
       // 클립보드 접근이 막힌 환경(권한 거부 등)에서도 화면은 그대로 쓸 수 있어야 한다
     }
   }
+
+  async function clearVerification() {
+    setClearingError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/verify`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requirementId: requirement.id }),
+      });
+      const data = await readJson<RequirementsSnapshot>(response);
+      if (!response.ok) {
+        setClearingError(data.error ?? "확인 취소를 하지 못했습니다");
+        return;
+      }
+      onRefresh();
+    } catch {
+      setClearingError("확인 취소를 하지 못했습니다");
+    }
+  }
+
   return (
     <li className="rounded-control border border-line bg-panel p-3">
       <div className="flex flex-wrap items-start gap-2">
@@ -937,6 +1070,11 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
             <span className="glass-soft rounded-control px-1.5 py-0.5">{KIND_LABEL[requirement.kind]}</span>
             <span className="glass-soft rounded-control px-1.5 py-0.5">{PRIORITY_LABEL[requirement.priority]}</span>
             <span className={`font-medium ${STATUS_TONE[requirement.status]}`}>{requirement.status}</span>
+            {requirement.verifiedBy !== "none" && requirement.verifiedBy !== "test" && (
+              <span className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-ink" title="이 상태를 만든 증거의 종류">
+                {VERIFIED_BY_LABEL[requirement.verifiedBy]}
+              </span>
+            )}
             {requirement.issue !== undefined && (
               <span className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-ink" title="이슈로 발행됨">
                 #{requirement.issue}
@@ -963,8 +1101,29 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
               이 요구사항 작업
             </button>
           )}
+          {canManage && (manualVerification ? (
+            <button type="button" onClick={() => void clearVerification()} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+              확인 취소
+            </button>
+          ) : (
+            <button type="button" onClick={() => setVerifying((value) => !value)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+              직접 확인함
+            </button>
+          ))}
         </div>
       </div>
+      {clearingError && <p className="mt-1 text-xs text-fail">{clearingError}</p>}
+      {canManage && verifying && !manualVerification && (
+        <ManualVerificationForm
+          sessionId={sessionId}
+          requirementId={requirement.id}
+          onCancel={() => setVerifying(false)}
+          onDone={() => {
+            setVerifying(false);
+            onRefresh();
+          }}
+        />
+      )}
       <ul className="mt-2 list-inside list-disc space-y-0.5 text-sm text-muted">
         {requirement.acceptance.map((item, index) => (
           <li key={index}>{item}</li>
@@ -1001,6 +1160,26 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
                   게이트 확인 &ldquo;{check.name}&rdquo;: {check.ok ? "통과" : "실패"}
                 </p>
               ))}
+              {docEvidence && (
+                <>
+                  {docEvidence.matched.map((line, index) => (
+                    <p key={`doc-matched-${index}`} className="text-pass truncate">
+                      문서 확인{docEvidence.sourceSummary ? ` · ${docEvidence.sourceSummary}` : ""}: {line}
+                    </p>
+                  ))}
+                  {docEvidence.missing.map((line, index) => (
+                    <p key={`doc-missing-${index}`} className="text-fail truncate">
+                      문서에서 못 찾음: {line}
+                    </p>
+                  ))}
+                </>
+              )}
+              {manualVerification && (
+                <p>
+                  사람 확인 · {manualVerification.by} · {manualVerification.at} · 체크포인트 <span className="font-mono">{manualVerification.sha}</span> · 메모{" "}
+                  {manualVerification.note}
+                </p>
+              )}
             </>
           )}
         </div>

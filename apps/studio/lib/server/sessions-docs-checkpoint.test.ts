@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -65,7 +65,19 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { applySessionRequirements, commitPendingWorkingCopyDocs, commitWorkingCopyDocs, createSession, createSessionDoc, getSnapshot, isDocPath, stopSession, writeSessionDoc } from './sessions';
+import {
+  applySessionRequirements,
+  clearRequirementManualVerification,
+  commitPendingWorkingCopyDocs,
+  commitWorkingCopyDocs,
+  createSession,
+  createSessionDoc,
+  getSnapshot,
+  isDocPath,
+  markRequirementManualVerification,
+  stopSession,
+  writeSessionDoc,
+} from './sessions';
 
 let root: string;
 const saved = {
@@ -276,6 +288,60 @@ describe('문서 체크포인트(ADR-096)', () => {
 
     const created = await createSessionDoc(id, { kind: 'adr', title: '결제 재시도 경계' });
     expect(getSnapshot(id)!.checkpoints[0]).toMatchObject({ message: 'docs: 결제 재시도 경계 문서를 더한다', verify: 'docs', files: [created.path] });
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+});
+
+describe('사람이 "직접 확인함"(ADR-103)', () => {
+  it('메모와 함께 남기면 docs/requirements.md에 확인 줄이 남고 검증됨으로 바뀐다', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await applySessionRequirements(id, { requirements: [sample] });
+
+    const snapshot = await markRequirementManualVerification(id, 'R1', { note: '화면을 직접 눌러 확인했습니다' }, 'kim');
+
+    const requirement = snapshot.requirements.find((entry) => entry.id === 'R1')!;
+    expect(requirement.status).toBe('검증됨');
+    expect(requirement.verifiedBy).toBe('manual');
+    expect(requirement.manualVerification).toMatchObject({ by: 'kim', note: '화면을 직접 눌러 확인했습니다' });
+
+    const workDir = getSnapshot(id)!.workDir;
+    const doc = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');
+    expect(doc).toContain('- 확인: kim ·');
+    expect(doc).toContain('메모 화면을 직접 눌러 확인했습니다');
+
+    const checkpoints = getSnapshot(id)!.checkpoints;
+    expect(checkpoints[0]).toMatchObject({ message: 'docs: R1 사람 확인을 남긴다', verify: 'docs' });
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('메모 없이는 거부한다(그냥 누른 버튼과 구분한다)', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await applySessionRequirements(id, { requirements: [sample] });
+
+    await expect(markRequirementManualVerification(id, 'R1', { note: '   ' }, 'kim')).rejects.toThrow('메모');
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('"확인 취소"를 누르면 지워지고 검증됨에서 내려온다', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await applySessionRequirements(id, { requirements: [sample] });
+    await markRequirementManualVerification(id, 'R1', { note: '확인함' }, 'kim');
+
+    const snapshot = await clearRequirementManualVerification(id, 'R1');
+
+    const requirement = snapshot.requirements.find((entry) => entry.id === 'R1')!;
+    expect(requirement.manualVerification).toBeUndefined();
+    expect(requirement.status).not.toBe('검증됨');
+
+    const workDir = getSnapshot(id)!.workDir;
+    const doc = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');
+    expect(doc).not.toContain('- 확인:');
     await stopSession(id).catch(() => {});
   }, 20_000);
 });

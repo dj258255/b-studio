@@ -104,6 +104,25 @@ export const TraceSchema = z.object({
 });
 export type Trace = z.infer<typeof TraceSchema>;
 
+/**
+ * 사람이 "직접 확인함"으로 남긴 검증 기록(ADR-103). 테스트·게이트처럼 자동으로 돌지 않는 요구사항(문서, UI를
+ * 디자인과 맞춰 보는 것, could 우선순위 항목 등)도 사람이 직접 보고 확인했다는 사실을 증거로 남길 수 있게 한다.
+ * docs/requirements.md 몸통에 "- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 …"로 그대로 보인다(저장소에
+ * 같이 남아 커밋·PR에 실린다). computeRequirementStatus는 자동 증거(게이트·테스트 탭 실행)가 실패면 이 기록이
+ * 있어도 절대 뒤집지 않는다. 내용이 개정되면(revisedAt 갱신) 다른 증거와 같은 규칙으로 "재확인 필요"에 들어간다.
+ */
+export const ManualVerificationSchema = z.object({
+  /** 확인한 사람(세션을 연 사용자 이름) */
+  by: z.string().min(1).max(100),
+  /** 확인한 날짜(YYYY-MM-DD). 시각까지는 담지 않는다 — 몸통 줄이 사람이 읽기 좋아야 한다 */
+  at: z.string().regex(/^\d{4}-\d{2}-\d{2}/, 'YYYY-MM-DD 형태여야 합니다'),
+  /** 확인한 시점의 체크포인트(짧은 sha) */
+  sha: z.string().min(4).max(40),
+  /** "무엇을 어떻게 확인했나" — 빈 메모는 받지 않는다(그냥 누른 버튼과 구분한다) */
+  note: z.string().min(1).max(500),
+});
+export type ManualVerification = z.infer<typeof ManualVerificationSchema>;
+
 export const RequirementSchema = z
   .object({
     id: z.string().regex(REQUIREMENT_ID, 'R1, R2… 형태의 id여야 합니다'),
@@ -124,6 +143,8 @@ export const RequirementSchema = z
     hash: z.string().optional(),
     /** 마지막으로 개정이 오른 시각(ISO 8601). 그 뒤에 생긴 증거만 "재확인됨"으로 인정한다(computeRequirementStatus) */
     revisedAt: z.string().optional(),
+    /** 사람이 "직접 확인함"으로 남긴 기록(ADR-103). "확인 취소"를 누르면 지운다 */
+    manualVerification: ManualVerificationSchema.optional(),
   })
   .refine((value) => (value.scenarios ?? []).every((scenario) => scenario.id.startsWith(`${value.id}.`)), {
     message: '시나리오 id는 소속 요구사항 id로 시작해야 합니다(예: R4의 시나리오는 R4.1)',
@@ -728,6 +749,8 @@ const ACCEPTANCE_HEADER = /^-\s*인수\s*조건:\s*$/;
 const ACCEPTANCE_ITEM = /^\s+-\s+(.+?)\s*$/;
 const NFR_LINE = /^-\s*NFR:\s*지표\s+(.+?)\s*·\s*임계값\s+(.+?)\s*·\s*조건\s+(.+?)\s*·\s*측정\s+(.+?)\s*$/;
 const TRACE_LINE = /^-\s*추적:\s*(.+?)\s*$/;
+/** "- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 무엇을 어떻게 확인했나" */
+const MANUAL_VERIFICATION_LINE = /^-\s*확인:\s*(.+?)\s*·\s*(\d{4}-\d{2}-\d{2})\s*·\s*체크포인트\s+(\S+)\s*·\s*메모\s+(.+?)\s*$/;
 const REQUIREMENT_HEADING = /^##\s+(R[1-9][0-9]*)\.\s*(.+?)\s*$/;
 const ASSUMPTIONS_HEADING = /^##\s*가정\s*$/;
 const ASSUMPTION_ITEM = /^-\s+(.+?)\s*$/;
@@ -822,6 +845,10 @@ function requirementBodyLines(requirement: Requirement): string {
     if (requirement.trace.supersedes) bits.push(`대체 ${requirement.trace.supersedes}`);
     if (bits.length > 0) lines.push(`- 추적: ${bits.join(' · ')}`);
   }
+  if (requirement.manualVerification) {
+    const { by, at, sha, note } = requirement.manualVerification;
+    lines.push(`- 확인: ${by} · ${at} · 체크포인트 ${sha} · 메모 ${note}`);
+  }
   return lines.join('\n');
 }
 
@@ -847,7 +874,7 @@ export function serializeRequirementsMarkdown(
     manualSteps.length > 0 ? `\n\n## 사람이 할 일 (에이전트 금지)\n${manualSteps.map((item) => `- ${item}`).join('\n')}` : '';
   const json = JSON.stringify(
     {
-      requirements: requirements.map(({ id, title, kind, priority, acceptance, rev, ears, scenarios, nfr, trace, hash, revisedAt }) => ({
+      requirements: requirements.map(({ id, title, kind, priority, acceptance, rev, ears, scenarios, nfr, trace, hash, revisedAt, manualVerification }) => ({
         id,
         title,
         kind,
@@ -860,6 +887,7 @@ export function serializeRequirementsMarkdown(
         ...(trace ? { trace } : {}),
         ...(hash !== undefined ? { hash } : {}),
         ...(revisedAt !== undefined ? { revisedAt } : {}),
+        ...(manualVerification ? { manualVerification } : {}),
       })),
       assumptions,
       manualSteps,
@@ -904,6 +932,7 @@ function mergeExtendedFieldsFromJsonBlock(requirements: readonly Requirement[], 
       trace: requirement.trace ?? stored.trace,
       hash: stored.hash,
       revisedAt: stored.revisedAt,
+      manualVerification: requirement.manualVerification ?? stored.manualVerification,
     };
   });
 }
@@ -930,6 +959,7 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
     scenarios?: Scenario[];
     nfr?: Nfr;
     trace?: Trace;
+    manualVerification?: ManualVerification;
   }> = [];
   let current: (typeof drafts)[number] | undefined;
   let collectingAcceptance = false;
@@ -1004,6 +1034,12 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
     if (traceLine) {
       const trace = parseTraceLine(traceLine[1]!);
       if (trace) current.trace = trace;
+      continue;
+    }
+
+    const manualVerificationLine = MANUAL_VERIFICATION_LINE.exec(line);
+    if (manualVerificationLine) {
+      current.manualVerification = { by: manualVerificationLine[1]!, at: manualVerificationLine[2]!, sha: manualVerificationLine[3]!, note: manualVerificationLine[4]! };
     }
   }
   if (current) drafts.push(current);
@@ -1072,12 +1108,32 @@ export interface TestRunEvidence {
   failed: number;
 }
 
+/**
+ * 문서(docs/requirements.md가 아니라 README.md·docs/**\/*.md 같은 프로젝트 문서) 안에서 요구사항의 인수 조건을
+ * 찾은 결과(ADR-103). kind: 'docs' 요구사항은 테스트·게이트가 돌지 않으므로, README 제목·문단에서 인수 조건이
+ * 말하는 내용을 찾았는지로 대신 증거를 삼는다. apps/studio/lib/submission-checklist.ts의 matchAcceptanceAgainstDocs가
+ * 만든다(README 항목 탐지를 그 모듈과 공유한다) — 이 모듈(packages/agent)은 파일을 읽지 않는 순수 함수만 두므로
+ * 매칭 결과를 데이터로만 받는다.
+ */
+export interface DocEvidence {
+  /** 매칭을 시도한 인수 조건 줄 */
+  matched: string[];
+  /** 문서에서 찾지 못한 인수 조건 줄("근거 보기"가 "빠진 조건"으로 보여준다) */
+  missing: string[];
+  /** matched.length === matched.length + missing.length && 그 합이 0보다 클 때 */
+  satisfied: boolean;
+  /** "README.md(설계 결정, 상태 설계)" 같은 한 줄 출처 요약. 하나도 못 찾았으면 없다 */
+  sourceSummary?: string;
+}
+
 export interface RequirementEvidence {
   checkpoints: CheckpointRef[];
   tests: TestMatch[];
   gateChecks: GateCheckResult[];
   /** 테스트 탭 실행 증거(있으면). 게이트 확인(gateChecks)이 있으면 그쪽을 우선한다(기존 규칙 그대로) */
   testRun?: TestRunEvidence;
+  /** kind: 'docs' 요구사항의 문서 매칭 증거(있으면) */
+  docEvidence?: DocEvidence;
 }
 
 /** 텍스트에서 `\bR\d+(\.\d+)?\b` 토큰(요구사항 id·시나리오 id)을 모두 뽑는다. "R1"이 "R10"의 일부로 걸리지 않는다 */
@@ -1264,18 +1320,22 @@ export function carryForwardRequirementRevision(next: Requirement, previous: Req
     rev: next.rev ?? previous.rev,
     hash: next.hash ?? previous.hash,
     revisedAt: next.revisedAt ?? previous.revisedAt,
+    // 요구사항 화면의 편집·재추출 저장은 그 요구사항을 건드리지 않았으면 manualVerification을 안 보낸다(클라이언트가
+    // 모르는 필드다) — "확인 취소"를 누른 게 아니라면 저장할 때마다 사람 확인이 조용히 사라지면 안 된다
+    manualVerification: next.manualVerification ?? previous.manualVerification,
   };
 }
 
 /**
- * 상태 규칙(ADR-079, 재확인 필요는 ADR-090): 내용이 지금 드리프트돼 있으면(아직 저장 전) 곧바로 재확인 필요.
- * 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴 체크포인트·게이트 확인·테스트 탭
- * 실행이 하나라도 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다 — 없으면 재확인 필요에 머문다. 평소 규칙:
- * 미착수 → 작업 중(체크포인트가 참조하거나 테스트가 있다) → 검증됨(id가 붙은 게이트 확인이 모두 통과, 없으면
- * 테스트 탭 실행이 통과) / 실패(게이트가 하나라도 실패, 또는 테스트 탭 실행에 실패가 있다).
- * 게이트 확인 증거가 있으면 그것이 우선한다(기존 규칙 그대로) — 체크포인트만 참조하고 실제로 통과했는지 모르는
- * 상태(작업 중)보다 실제 결과(검증됨/실패)를 더 믿을 수 있는 증거로 본다. 테스트 탭 실행은 게이트가 없을 때
- * 같은 역할(실제 결과)을 대신한다 — 사람이 게이트 없이 "테스트" 탭에서 직접 돌린 결과도 증거로 센다(버그 리포트).
+ * 상태 규칙(ADR-079, 재확인 필요는 ADR-090, 문서 확인·사람 확인은 ADR-103): 내용이 지금 드리프트돼 있으면(아직
+ * 저장 전) 곧바로 재확인 필요. 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴
+ * 체크포인트·게이트 확인·테스트 탭 실행·사람 확인이 하나라도 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다
+ * — 없으면 재확인 필요에 머문다. 문서 확인(docEvidence)은 항상 "지금 저장소 상태"를 다시 본 결과라 시점을
+ * 비교할 필요가 없다(저절로 신선하다). 평소 규칙: 미착수 → 작업 중(체크포인트가 참조하거나 테스트가 있다, 또는
+ * 문서 매칭이 일부라도 됐다) → 검증됨(id가 붙은 게이트 확인이 모두 통과, 없으면 테스트 탭 실행이 통과, 없으면
+ * 문서의 인수 조건을 모두 찾았거나 사람이 직접 확인했다) / 실패(게이트가 하나라도 실패, 또는 테스트 탭 실행에
+ * 실패가 있다). 게이트 확인·테스트 탭 실행 증거가 있으면 그것이 늘 우선한다(기존 규칙 그대로) — 실패했다면
+ * 문서 확인·사람 확인이 있어도 절대 뒤집지 않는다("사람 확인이 실패한 테스트를 이기지 않는다").
  */
 export function computeRequirementStatus(evidence: RequirementEvidence, requirement?: Requirement): RequirementStatus {
   if (requirement && requirementContentDrifted(requirement)) return '재확인 필요';
@@ -1283,7 +1343,9 @@ export function computeRequirementStatus(evidence: RequirementEvidence, requirem
     const revisedAt = requirement.revisedAt;
     const freshCheckpoint = evidence.checkpoints.some((checkpoint) => checkpoint.createdAt !== undefined && checkpoint.createdAt > revisedAt);
     const freshTestRun = evidence.testRun !== undefined && evidence.testRun.at > revisedAt;
-    const hasFreshEvidence = freshCheckpoint || evidence.gateChecks.length > 0 || freshTestRun;
+    const freshManualVerification = requirement.manualVerification !== undefined && requirement.manualVerification.at > revisedAt;
+    const freshDocEvidence = evidence.docEvidence?.satisfied === true;
+    const hasFreshEvidence = freshCheckpoint || evidence.gateChecks.length > 0 || freshTestRun || freshManualVerification || freshDocEvidence;
     if (!hasFreshEvidence) return '재확인 필요';
   }
   if (evidence.gateChecks.length > 0) {
@@ -1293,8 +1355,24 @@ export function computeRequirementStatus(evidence: RequirementEvidence, requirem
     if (evidence.testRun.failed > 0) return '실패';
     if (evidence.testRun.passed > 0) return '검증됨';
   }
-  if (evidence.checkpoints.length > 0 || evidence.tests.length > 0) return '작업 중';
+  if (evidence.docEvidence?.satisfied) return '검증됨';
+  if (requirement?.manualVerification) return '검증됨';
+  if (evidence.checkpoints.length > 0 || evidence.tests.length > 0 || (evidence.docEvidence?.matched.length ?? 0) > 0) return '작업 중';
   return '미착수';
+}
+
+/**
+ * "검증됨"을 만든 증거의 종류. "근거 보기"·"올리기 전 점검" 메시지가 자동(게이트·테스트 탭)·문서 확인·사람 확인을
+ * 구분해 보여준다(ADR-103) — computeRequirementStatus와 같은 우선순위(자동 > 문서 확인 > 사람 확인)를 따른다.
+ * 검증됨이 아니면 'none'이다.
+ */
+export function requirementVerificationSource(evidence: RequirementEvidence, requirement?: Requirement): 'test' | 'docs' | 'manual' | 'none' {
+  if (computeRequirementStatus(evidence, requirement) !== '검증됨') return 'none';
+  if (evidence.gateChecks.length > 0) return 'test';
+  if (evidence.testRun && evidence.testRun.passed > 0 && evidence.testRun.failed === 0) return 'test';
+  if (evidence.docEvidence?.satisfied) return 'docs';
+  if (requirement?.manualVerification) return 'manual';
+  return 'test';
 }
 
 /** Devin 스타일 확신 표시. 검증됨=🟢, 작업 중·재확인 필요=🟡(둘 다 "더 봐야 한다"), 그 밖(미착수·실패)=🔴 */
