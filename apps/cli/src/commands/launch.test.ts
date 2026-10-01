@@ -21,16 +21,27 @@ interface Harness {
   spawns: Array<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; logPath: string }>;
   opens: string[];
   killed: Array<{ pid: number; signal: NodeJS.Signals }>;
+  markerWrites: string[];
 }
 
 function harness(
-  options: { probe?: ProbeResult[]; exec?: ExecResult[]; platform?: NodeJS.Platform; alivePids?: number[] } = {},
+  options: {
+    probe?: ProbeResult[];
+    exec?: ExecResult[];
+    platform?: NodeJS.Platform;
+    alivePids?: number[];
+    /** 지금 pnpm-lock.yaml 해시. 생략하면 undefined(실제 저장소가 아닌 테스트에서는 의존성 확인을 건너뛴다) */
+    lockHash?: string;
+    /** 마지막 설치 표지에 적혀 있던 해시 */
+    installMarker?: string;
+  } = {},
 ): Harness {
   const probes: string[] = [];
   const execs: Harness['execs'] = [];
   const spawns: Harness['spawns'] = [];
   const opens: string[] = [];
   const killed: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const markerWrites: string[] = [];
   const alive = new Set(options.alivePids ?? []);
   const probeQueue = [...(options.probe ?? [])];
   const execQueue = [...(options.exec ?? [])];
@@ -60,10 +71,15 @@ function harness(
       alive.delete(pid);
       killed.push({ pid, signal });
     },
+    lockfileHash: async () => options.lockHash,
+    readInstallMarker: async () => options.installMarker,
+    writeInstallMarker: async (hash) => {
+      markerWrites.push(hash);
+    },
     readyTimeoutMs: 3,
     readyIntervalMs: 1,
   };
-  return { deps, probes, execs, spawns, opens, killed };
+  return { deps, probes, execs, spawns, opens, killed, markerWrites };
 }
 
 const OK: ExecResult = { code: 0, stdout: '', stderr: '' };
@@ -201,6 +217,57 @@ describe('runLaunch', () => {
     expect(text).toContain('line 25');
     expect(text).not.toContain('line 5');
     expect(h.opens).toEqual([]);
+  });
+});
+
+describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm install)', () => {
+  it('지금 해시가 마지막 설치 표지와 다르면 pnpm install을 먼저 하고 표지를 갱신한다', async () => {
+    const h = harness({ probe: [down, up], exec: [OK, { code: 0, stdout: 'installed', stderr: '' }], lockHash: 'abc', installMarker: 'old' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'pnpm install --frozen-lockfile --prefer-offline']);
+    expect(h.markerWrites).toEqual(['abc']);
+    expect(h.spawns).toHaveLength(1);
+  });
+
+  it('표지에 적힌 적이 없어도(첫 설치) pnpm install을 한다', async () => {
+    const h = harness({ probe: [down, up], exec: [OK, OK], lockHash: 'abc' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker', 'pnpm']);
+    expect(h.markerWrites).toEqual(['abc']);
+  });
+
+  it('지금 해시가 표지와 같으면 설치를 건너뛴다', async () => {
+    const h = harness({ probe: [down, up], exec: [OK], lockHash: 'abc', installMarker: 'abc' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker']);
+    expect(h.markerWrites).toEqual([]);
+    expect(h.spawns).toHaveLength(1);
+  });
+
+  it('pnpm-lock.yaml 해시를 읽지 못하면(테스트의 가짜 저장소 등) 의존성 확인을 건너뛴다', async () => {
+    const h = harness({ probe: [down, up], exec: [OK] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker']);
+    expect(h.markerWrites).toEqual([]);
+  });
+
+  it('pnpm install이 실패하면 서버를 띄우지 않고 종료 코드 1', async () => {
+    const h = harness({ probe: [down], exec: [OK, { code: 1, stdout: '', stderr: 'network error' }], lockHash: 'abc', installMarker: 'old' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+    expect(h.markerWrites).toEqual([]);
+    expect(error.mock.calls.flat().join('\n')).toContain('pnpm install이 실패했습니다');
   });
 });
 
