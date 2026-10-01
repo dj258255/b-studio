@@ -2,19 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createView } from "@/lib/session-view";
 import type { SessionSnapshot } from "@/lib/studio-events";
-import {
-  DiffSummary,
-  ExtractionResultView,
-  formatDraftTimestamp,
-  formatElapsed,
-  hasUnsavedDraftEdits,
-  ImportFlow,
-  RequirementPublishFlow,
-  requirementsDraftStatusLine,
-  RequirementsList,
-  RequirementsPanel,
-  shouldConfirmBeforePlanAll,
-} from "./requirements-panel";
+import { applyManualMatch, DiffSummary, ExtractionResultView, formatDraftTimestamp, formatElapsed, hasUnsavedDraftEdits, ImportFlow, RequirementPublishFlow, requirementsDraftStatusLine, RequirementsList, RequirementsPanel, shouldConfirmBeforePlanAll } from "./requirements-panel";
 
 const baseSnapshot: SessionSnapshot = {
   id: "s1",
@@ -300,5 +288,43 @@ describe("DiffSummary(재추출 병합 요약)", () => {
   it("사라진 항목이 없으면 버튼이 없다", () => {
     const html = renderToStaticMarkup(<DiffSummary diff={[entry("unchanged", "R1")]} onDropRemoved={() => {}} />);
     expect(html).not.toContain("목록에서 빼기");
+  });
+});
+
+describe("applyManualMatch(자동 병합이 놓친 짝을 사람이 잇기)", () => {
+  const req = (id: string, title: string, scenarioIds: string[] = []) => ({
+    id,
+    title,
+    kind: "data" as const,
+    priority: "must" as const,
+    acceptance: ["a"],
+    ...(scenarioIds.length ? { scenarios: scenarioIds.map((scenarioId) => ({ id: scenarioId, given: "g", when: "w", then: "t" })) } : {}),
+  });
+
+  it("새 항목이 기존 id와 시나리오 id 앞부분을 이어받고, 남아 있던 기존 항목과 사라짐 표시는 빠진다", () => {
+    const drafts = [req("R4", "seed 초기 적재"), req("R21", "seed 멱등 적재", ["R21.1", "R21.2"])];
+    const diff = [
+      { status: "removed" as const, id: "R4", requirement: drafts[0]!, previous: drafts[0]! },
+      { status: "added" as const, id: "R21", requirement: drafts[1]! },
+    ];
+    const result = applyManualMatch(drafts, diff, "R21", "R4");
+    expect(result.drafts.map((item) => item.id)).toEqual(["R4"]);
+    expect(result.drafts[0]!.title).toBe("seed 멱등 적재");
+    expect(result.drafts[0]!.scenarios!.map((scenario) => scenario.id)).toEqual(["R4.1", "R4.2"]);
+    expect(result.diff).toEqual([expect.objectContaining({ status: "changed", id: "R4" })]);
+  });
+
+  it("사라진 항목이 있고 새 항목이 있으면 짝 고르기 상자를 보여 준다", () => {
+    const html = renderToStaticMarkup(
+      <DiffSummary
+        diff={[
+          { status: "removed", id: "R4", requirement: req("R4", "seed 초기 적재"), previous: req("R4", "seed 초기 적재") },
+          { status: "added", id: "R21", requirement: req("R21", "seed 멱등 적재") },
+        ]}
+        onMatch={() => {}}
+      />,
+    );
+    expect(html).toContain("기존 R4와 같음");
+    expect(html).toContain("새 요구사항");
   });
 });
