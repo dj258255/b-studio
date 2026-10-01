@@ -1,4 +1,5 @@
 import type { PendingChange } from './checkpoints';
+import { extractPrReviewFixTitles } from './pr-review';
 
 /** 제목 맨 앞에 붙는 conventional commit 타입 (ADR-080). git 로그에 실제로 쓰는 이름만 받는다 */
 export type CommitType = 'feat' | 'fix' | 'test' | 'docs' | 'refactor' | 'chore';
@@ -103,8 +104,22 @@ export function summarize(text: string, maxChars: number): string {
 }
 
 /**
+ * AI 리뷰 고침 요청(pr-review.ts의 buildPrReviewFixRequest)이면 지적 제목들을 모아 커밋 제목 후보를 만든다(과제 66) —
+ * 이 요청의 요청 글 첫 문장은 "이 PR을 리뷰해 다음 차단·주요 지적을 찾았습니다" 같은 모든 라운드가 공유하는 문구라
+ * generateCommitSubject의 평소 규칙(첫 문장 쓰기)을 그대로 적용하면 "fix: [b-studio AI 리뷰] 이 PR을 리뷰해 다음
+ * 차단·주요 지적을 찾았습니다"처럼 의미 없는 제목이 된다(도그푸딩 버그 리포트). 이 요청은 항상 차단·주요 지적이
+ * 있어야만 보내므로(review-round.ts) 제목 목록이 비어 있을 일은 없다.
+ */
+function reviewFixCandidate(request: string): string | undefined {
+  const titles = extractPrReviewFixTitles(request);
+  return titles ? `리뷰 지적 ${titles.length}건 반영 — ${titles.join(', ')}` : undefined;
+}
+
+/**
  * 요청 글과 바뀐 파일, (있으면) 에이전트 요약에서 체크포인트 커밋 제목을 만든다(ADR-080). "타입: 한국어 요약"
  * 형식이고 72자를 넘지 않는다. 제목 글은 이 순서로 고른다:
+ *  0. AI 리뷰 고침 요청이면(reviewFixCandidate) 지적 제목들로 만든다 — 요청 글 첫 문장이 라운드마다 똑같은
+ *     공통 문구라 아래 1번 규칙을 쓰면 의미 없는 제목이 된다(과제 66).
  *  1. 요청 글 첫 문장이 "무엇이 바뀌었는지" 분명하면 그것을 쓴다 — 여러 문장으로 된 요청이면 첫 문장만 쓴다
  *     (firstSentence). ".env.example 파일을 만들어 주세요. 코드에서 읽는 환경 변수…를 담되…" 같은 요청
  *     전체가 제목에 그대로 들어가던 문제가 여기서 막힌다. 커밋 제목은 사람이 실제로 무엇을 부탁했는지 그대로
@@ -128,7 +143,10 @@ export function generateCommitSubject(request: string, changes: readonly Pending
     .find((line) => line.length > 0);
 
   let candidate: string;
-  if (requestFirstLine && isClearChangeSentence(firstSentence(requestFirstLine))) {
+  const reviewFix = reviewFixCandidate(request);
+  if (reviewFix) {
+    candidate = reviewFix;
+  } else if (requestFirstLine && isClearChangeSentence(firstSentence(requestFirstLine))) {
     candidate = toCommitMood(firstSentence(requestFirstLine));
   } else if (summaryLine && isClearChangeSentence(firstSentence(summaryLine))) {
     candidate = toCommitMood(firstSentence(summaryLine));

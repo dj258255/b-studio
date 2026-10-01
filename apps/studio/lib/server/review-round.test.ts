@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentUsage } from '@b-studio/agent';
 import type { ReviewStateView } from '../studio-events';
-import { REVIEW_UNSUPPORTED_BACKEND, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
+import { collectHumanResolvedFindings, REVIEW_UNSUPPORTED_BACKEND, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 
 const usage: AgentUsage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
@@ -135,5 +135,42 @@ describe('runReviewRounds', () => {
     const last = updates.at(-1)!;
     expect(last.state).toBe('stopped');
     expect(last.rounds[0]!.error).toBe(REVIEW_UNSUPPORTED_BACKEND);
+  });
+
+  it('externalContext·resolvedContext를 주면 리뷰어 호출의 사용자 메시지에 그대로 실린다(과제 67)', async () => {
+    const ask = askReturning('{"findings":[]}');
+    const deps = baseDeps({
+      ask,
+      externalContext: async (diff) => `[diff 밖 참고 파일]\n${diff.length}자짜리 diff가 가리키는 SeedLoader`,
+      resolvedContext: () => '[이미 사람이 확인한 지적]\n시퀀스 미복원',
+    });
+    await collect(deps, 1);
+    const [firstCall] = ask.mock.calls as unknown as Array<[{ user: string }]>;
+    expect(firstCall![0].user).toContain('SeedLoader');
+    expect(firstCall![0].user).toContain('시퀀스 미복원');
+  });
+});
+
+describe('collectHumanResolvedFindings', () => {
+  it('리뷰가 없으면 빈 배열', () => {
+    expect(collectHumanResolvedFindings(undefined)).toEqual([]);
+  });
+
+  it('라운드마다 사람이 오탐으로 닫은 지적을 findings 인덱스로 찾아 이유와 함께 모은다', () => {
+    const review: ReviewStateView = {
+      state: 'capped',
+      maxRounds: 2,
+      rounds: [
+        {
+          round: 1,
+          status: 'resolved_by_human',
+          findings: [{ severity: 'blocker', file: 'api/Seed.java', title: '시퀀스 미복원', detail: '설명' }],
+          startedAt: '2026-01-01T00:00:00.000Z',
+          humanResolutions: { 0: { reason: '실제 PostgreSQL에서 새 글 id 43·44 확인', at: '2026-01-01T00:01:00.000Z' } },
+        },
+      ],
+    };
+    const resolved = collectHumanResolvedFindings(review);
+    expect(resolved).toEqual([{ severity: 'blocker', file: 'api/Seed.java', line: undefined, title: '시퀀스 미복원', reason: '실제 PostgreSQL에서 새 글 id 43·44 확인' }]);
   });
 });

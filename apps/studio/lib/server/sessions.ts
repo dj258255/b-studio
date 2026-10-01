@@ -15,11 +15,14 @@ import {
   buildFixTestPrefill,
   buildMatrixCsv,
   buildMissingReferenceQuestion,
+  buildPrReviewExternalContext,
+  buildPrReviewResolvedContext,
   buildPullRequest,
   buildReferencedFilesContext,
   buildRequirementsAddendum,
   buildRequirementWorkPrefill,
   buildReviewRequirementsContext,
+  buildReviewResolutionComment,
   buildTestRunPlan,
   buildTraceabilityMatrix,
   canCreatePullRequest,
@@ -36,11 +39,13 @@ import {
   DatabaseBranches,
   describeDatabaseState,
   detectRunner,
+  diffFilePaths,
   discardRevisionIfNeverSaved,
   discoverTestsInFile,
   draftManagedRequirement,
   draftRequirementFromIssue,
   estimateCost,
+  extractDiffReferencedNames,
   extractTrackingSubIssueNumbers,
   extractRequirementIds,
   extractRequirementMentions,
@@ -53,6 +58,7 @@ import {
   formatVerificationReport,
   formatVerifyTrailer,
   formatWorkflowTrailer,
+  isBlockingFinding,
   isDocCheckpointPath,
   isLikelyTestFile,
   labelRecommendationSource,
@@ -73,6 +79,7 @@ import {
   partitionManualSteps,
   planAskFromClient,
   postComment,
+  PR_REVIEW_EXTERNAL_CONTEXT_MAX_FILES,
   REFERENCED_FILES_CONTEXT_MAX_CHARS,
   REQUIREMENT_LABEL,
   RecommendationSchema,
@@ -247,6 +254,8 @@ import type {
   ExportResult,
   ProxyResponse,
   RepositoryView,
+  ReviewRoundView,
+  ReviewStateView,
   SessionMode,
   SessionSnapshot,
   SessionStatus,
@@ -267,7 +276,7 @@ import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './cod
 import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
+import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from './test-files';
@@ -3185,6 +3194,36 @@ async function reviewPostComment(session: Session, body: string): Promise<{ url?
   return postComment(remote, number, body, { token });
 }
 
+/**
+ * diff가 가리키지만 보여주지 않는 바깥 파일을 짧게 읽어 리뷰어에게 더 준다(과제 67-a) — 리뷰어는 diff만 보고
+ * SeedLoader 같은 바깥 코드가 이미 처리하는 것을 모르는 채로 같은 거짓 지적을 라운드마다 반복하던 문제를 줄인다.
+ * extractDiffReferencedNames(순수 함수, diff 텍스트만 본다)가 고른 이름마다 파일명이 정확히 일치하는 파일을
+ * 작업 복사본에서 찾아 앞부분만 읽는다. 못 찾거나 못 읽으면 조용히 건너뛴다(리뷰 자체를 막을 이유가 아니다)
+ */
+async function reviewExternalContext(session: Session, diff: string): Promise<string | undefined> {
+  const names = extractDiffReferencedNames(diff);
+  if (names.length === 0) return undefined;
+  const diffFiles = new Set(diffFilePaths(diff));
+  const walk = await walkFiles(session.project.root).catch(() => undefined);
+  if (!walk) return undefined;
+  const workspace = new Workspace(session.project.root);
+  const excerpts: Array<{ path: string; excerpt: string }> = [];
+  for (const name of names) {
+    if (excerpts.length >= PR_REVIEW_EXTERNAL_CONTEXT_MAX_FILES) break;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = walk.files.find((file) => !diffFiles.has(file) && new RegExp(`(^|/)${escaped}\\.[A-Za-z0-9]+$`).test(file));
+    if (!match || excerpts.some((excerpt) => excerpt.path === match)) continue;
+    try {
+      const content = await workspace.read(match);
+      if (content.includes('\u0000')) continue; // 바이너리는 건너뛴다
+      excerpts.push({ path: match, excerpt: content.split('\n').slice(0, 60).join('\n') });
+    } catch {
+      // 너무 크거나 못 읽는 파일은 건너뛴다
+    }
+  }
+  return excerpts.length > 0 ? buildPrReviewExternalContext(excerpts) : undefined;
+}
+
 /** sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
 async function reviewRequestFix(session: Session, request: string): Promise<ReviewFixResult> {
   const id = session.snapshot.id;
@@ -3234,11 +3273,17 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
   const requests = await sessionRequestTexts(session);
   // 요구사항 문맥은 한 번만 계산해 클로저로 넘긴다(리뷰 라운드마다 다시 계산할 필요가 없다 — 같은 세션 안에서 바뀌지 않는다)
   const requirementsContext = await reviewRequirementsContext(session, requests);
+  // "다시 돌리기"로 새 리뷰를 시작하면 session.snapshot.review를 곧 rounds: []로 덮어쓴다 — 그 전에 사람이 오탐으로
+  // 닫은 지적을 모아 둬야 다음 라운드의 리뷰어가 "이미 확인했다"고 알 수 있다(과제 67-b)
+  const resolvedFindings = collectHumanResolvedFindings(session.snapshot.review);
+  const resolvedContext = resolvedFindings.length > 0 ? buildPrReviewResolvedContext(resolvedFindings) : undefined;
   const deps: ReviewRoundDeps = {
     ask: reviewAsk(session, reviewerModelId),
     diff: () => session.checkpoints.sessionDiff(),
     requests: () => requests,
     requirementsContext: () => requirementsContext,
+    externalContext: (diff) => reviewExternalContext(session, diff),
+    ...(resolvedContext ? { resolvedContext: () => resolvedContext } : {}),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -3263,6 +3308,47 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
     emit(session, { type: 'review_round', review: session.snapshot.review });
     console.error('[b-studio] AI 리뷰 라운드가 예기치 않게 실패했습니다', describe(error));
   });
+}
+
+/**
+ * 사람이 리뷰 라운드의 지적 하나를 오탐으로 닫는다(과제 67-b) — 리뷰어는 diff만 보고 실제 PostgreSQL 시퀀스가
+ * 이미 복원됐다는 증거를 볼 수 없어 같은 거짓 지적을 라운드마다 되풀이할 수 있다. 사람이 직접 확인한 이유를 남기면
+ * (1) 그 라운드가 막는 지적을 모두 사람이 확인했을 때 "라운드 상한"처럼 사람을 기다리던 상태를 "사람이 확인함"으로
+ * 바꾸고, (2) 다음 라운드의 리뷰어 문맥에 "이미 확인했다"고 전해 되풀이를 막는다(runReviewRound의 resolvedContext).
+ * 원래 그 라운드가 PR에 댓글을 남겼으면(commentUrl) 같은 댓글 API로 이유를 답글처럼 남긴다 — 실패해도 결정 자체는 막지 않는다
+ */
+export async function resolveReviewFinding(
+  id: string,
+  { round: roundNumber, findingIndex, reason, by }: { round: number; findingIndex: number; reason: string; by?: string },
+): Promise<SessionSnapshot> {
+  const session = requireSession(id);
+  const review = session.snapshot.review;
+  if (!review) throw new StudioError(409, 'AI 리뷰를 아직 돌리지 않았습니다');
+  const round = review.rounds.find((candidate) => candidate.round === roundNumber);
+  if (!round) throw new StudioError(404, `${roundNumber}라운드를 찾을 수 없습니다`);
+  const finding = round.findings?.[findingIndex];
+  if (!finding) throw new StudioError(404, '지적을 찾을 수 없습니다');
+  const trimmedReason = reason.trim();
+  if (!trimmedReason) throw new StudioError(400, '오탐으로 닫는 이유를 입력하세요');
+
+  const humanResolutions = { ...round.humanResolutions, [findingIndex]: { reason: trimmedReason, by, at: new Date().toISOString() } };
+  const blockingIndexes = (round.findings ?? []).reduce<number[]>((acc, candidate, index) => (isBlockingFinding(candidate) ? [...acc, index] : acc), []);
+  const allBlockingResolved = blockingIndexes.length > 0 && blockingIndexes.every((index) => humanResolutions[index] !== undefined);
+  const updatedRound: ReviewRoundView = { ...round, humanResolutions, status: allBlockingResolved ? 'resolved_by_human' : round.status };
+  const rounds = review.rounds.map((candidate) => (candidate.round === roundNumber ? updatedRound : candidate));
+  const state: ReviewStateView['state'] = allBlockingResolved && (review.state === 'capped' || review.state === 'stopped') ? 'resolved' : review.state;
+  session.snapshot.review = { ...review, rounds, state };
+  emit(session, { type: 'review_round', review: session.snapshot.review });
+
+  if (round.commentUrl) {
+    try {
+      await reviewPostComment(session, buildReviewResolutionComment(finding, trimmedReason));
+    } catch (error) {
+      // 댓글 실패는 결정 자체를 막지 않는다(라운드 코멘트와 같은 규칙, review-round.ts의 commentError)
+      console.error('[b-studio] 리뷰 지적 해소 댓글을 남기지 못했습니다', describe(error));
+    }
+  }
+  return session.snapshot;
 }
 
 /** 배포 진행 줄은 최근 것만 스냅샷에 둔다. 빌드 출력이 수백 줄이라 전부 두면 새로 연결할 때 무겁다 */
