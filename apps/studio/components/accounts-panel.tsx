@@ -16,7 +16,7 @@ async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 /**
- * 계정 연결 화면(ADR-0XX). 터미널 없이 구독 CLI 네 가지의 로그인 상태를 보고, 되는 CLI는 바로 로그인을 시작한다.
+ * 계정 연결 화면(ADR-093). 터미널 없이 구독 CLI 네 가지의 로그인 상태를 보고, 되는 CLI는 바로 로그인을 시작한다.
  * 개인 PC 모드가 아니면 서버가 403을 돌려주므로, 이 컴포넌트는 그 안내만 보여준다.
  */
 export function AccountsPanel() {

@@ -1,5 +1,5 @@
 /**
- * 구독 CLI 계정 연결(ADR-0XX). 터미널을 열지 않고도 화면에서 로그인 상태를 보고, 되는 CLI는 로그인을 시작할 수 있게 한다.
+ * 구독 CLI 계정 연결(ADR-093). 터미널을 열지 않고도 화면에서 로그인 상태를 보고, 되는 CLI는 로그인을 시작할 수 있게 한다.
  *
  * 상태 확인은 packages/agent의 `preflight*` 함수를 그대로 재사용한다 — 토큰 파일을 읽지 않고, 각 CLI의 상태 확인
  * 명령(`claude`·`codex login status`·`cmd status`·`opencode --version`)만 부른다(0단계 근거는 각 러너 파일에 있다).
@@ -11,7 +11,7 @@
  * CLI마다 로그인 명령이 헤드리스(TTY 없이)로 끝까지 되는지는 다르다. `claude auth login`·`codex login --device-auth`·
  * `cmd login`은 브라우저 URL(또는 기기 코드)을 표준출력에 찍고 콜백·폴링으로 기다리는 꼴이라 띄울 수 있다고 본다.
  * `opencode auth login`은 opencode 전체가 ink 기반 대화형 CLI라 제공자·인증 방식 선택이 TTY 상호작용을 전제해
- * 여기서는 억지로 흉내 내지 않고 명령만 보여준다(ADR-0XX "CLI별 조사 결과" 참고. 실제로 실행해 관측한 값이 아니라
+ * 여기서는 억지로 흉내 내지 않고 명령만 보여준다(ADR-093 "CLI별 조사 결과" 참고. 실제로 실행해 관측한 값이 아니라
  * `--help`와 각 CLI의 공개된 설계로 미룬 추정이라, 표준출력 형식이 이 추정과 다르면 URL·코드 추출 정규식만 못 맞고
  * 로그인 자체(각 CLI 프로세스)는 그대로 진행된다 — 사람이 로그를 보고 "브라우저에서 열기" 전에 직접 복사할 수 있다).
  */
@@ -62,7 +62,7 @@ export interface LoginCommandSpec {
 }
 
 /**
- * 각 CLI가 공식으로 제공하는 로그인 명령(조사 근거는 ADR-0XX). `--claudeai`·`--device-auth`처럼 선택 메뉴를 건너뛰는
+ * 각 CLI가 공식으로 제공하는 로그인 명령(조사 근거는 ADR-093). `--claudeai`·`--device-auth`처럼 선택 메뉴를 건너뛰는
  * 플래그를 골라, 사람이 화살표 키로 고르지 않아도 되는 경로를 쓴다.
  */
 const LOGIN_COMMANDS: Record<CliAccountBackend, LoginCommandSpec> = {
@@ -134,7 +134,7 @@ const MAX_LINES = 200;
 /** 사람이 끝내지 않고 창을 닫아도 자식 프로세스가 영영 남지 않도록 자동으로 끊는 시간 */
 export const LOGIN_TIMEOUT_MS = 10 * 60_000;
 
-/** 표준출력·표준에러 줄에서 찾는 URL. 각 CLI의 실제 문구는 관측하지 못했다(ADR-0XX) — 일반적인 http(s) URL 모양만 가정한다 */
+/** 표준출력·표준에러 줄에서 찾는 URL. 각 CLI의 실제 문구는 관측하지 못했다(ADR-093) — 일반적인 http(s) URL 모양만 가정한다 */
 const URL_RE = /https?:\/\/[^\s"'<>]+/;
 /** 기기 인증 코드 모양(GitHub·Google 등이 쓰는 "XXXX-XXXX" 꼴을 우선 보고, 그다음 4~10자 대문자/숫자 토큰을 본다). 실제로 관측한 값이 아니라 일반적인 꼴의 추정이다 */
 const CODE_RE = /\b([A-Z0-9]{4}-[A-Z0-9]{4}|[A-Z0-9]{4,10})\b/;

@@ -1301,7 +1301,7 @@ function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChang
   );
 }
 
-/** 로그인이 안 돼 고를 수 없는 모델이 있으면 "계정 연결로 가기" 안내를 보여준다(ADR-0XX) */
+/** 로그인이 안 돼 고를 수 없는 모델이 있으면 "계정 연결로 가기" 안내를 보여준다(ADR-093) */
 export function needsAccountConnect(options: ModelPickerOption[]): boolean {
   return options.some((option) => option.disabled && /로그인/.test(option.disabledReason ?? ""));
 }

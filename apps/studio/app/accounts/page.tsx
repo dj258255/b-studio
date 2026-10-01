@@ -4,7 +4,7 @@ import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
 
 /**
- * 계정 연결 화면(ADR-0XX). 내 폴더에서 바로 작업하기(ADR-067)와 같은 조건(개인 PC 모드)에서만 연다 —
+ * 계정 연결 화면(ADR-093). 내 폴더에서 바로 작업하기(ADR-067)와 같은 조건(개인 PC 모드)에서만 연다 —
  * "이 서버의 CLI에 로그인"이라는 개념이 여러 사람이 쓰는 서버에서는 안전하지 않다.
  */
 export default async function AccountsPage() {
