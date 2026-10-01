@@ -27,6 +27,19 @@ type Intent = "build" | "ask";
 /** 질문의 답을 받아 만들기로 넘어갈 때 보내는 요청. 대화를 이어받으므로 앞의 계획을 가리키기만 한다 */
 const BUILD_FROM_PLAN = "앞에서 정리한 계획대로 만들어줘";
 
+/**
+ * 나눠서 병렬 제안을 수락할 때 이 대화의 모델 선택을 계획에 넘길 값으로 만든다.
+ * 아직 모델 선택을 못 받았으면(picker 없음, 예를 들어 데모 세션) 아무것도 넘기지 않아 서버 기본을 그대로 쓴다.
+ * 노력 단계는 이 백엔드·모델이 지원할 때만 넣는다(지원하지 않는데 값을 넣으면 서버가 조용히 버린다 — 넣지 않는 편이 뜻이 분명하다)
+ */
+export function handoffModelInput(picker: ModelPickerView | undefined): { sessionModelId?: string; sessionEffort?: string } {
+  if (!picker) return {};
+  return {
+    sessionModelId: picker.current ?? "",
+    ...(picker.effort.supported && picker.effort.current ? { sessionEffort: picker.effort.current } : {}),
+  };
+}
+
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
   const router = useRouter();
@@ -192,7 +205,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   /**
    * 에이전트의 제안(ADR-068)을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘긴다. 홈과 같은 경로(submitEntry)로 만들고,
-   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069). 모델은 서버 기본(구독 CLI 모드)을 쓴다
+   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069).
+   * 나눠서 병렬은 이 대화의 모델 선택(picker)을 그대로 이어받는다 — 레인·통합 세션이 계획과 다른(서버 기본) 모델로 돌던 문제를 막는다
    */
   async function handOff(proposal: { mode: Exclude<ChatMethod, "single">; request: string }, questionRunId: string) {
     setSending(true);
@@ -204,6 +218,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       workspace: "copy",
       fleetModelIds: [],
       planModelId: "",
+      ...(proposal.mode === "split" ? handoffModelInput(picker) : {}),
       ...(capabilities ? { mode: capabilities.mode } : {}),
     });
     if (!result.ok) {
@@ -485,7 +500,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
               }
               className="w-full resize-none rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 placeholder:text-muted"
             />
-            <div className="mt-2 flex items-center justify-between gap-3">
+            {/* 대화 칸이 좁아 모델 이름이 길어지면 버튼 글자가 두 줄로 꺾였다 — 줄이 모자라면 체크박스 줄을 위로 넘긴다 */}
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
               {intent === "build" ? (
                 <label className="flex items-center gap-2 text-sm text-muted">
                   <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
@@ -494,7 +510,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
               ) : (
                 <span />
               )}
-              <div className="flex items-center gap-2">
+              <div className="ml-auto flex shrink-0 items-center gap-2">
                 {picker && (
                   <ModelPicker
                     picker={picker}
@@ -507,7 +523,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
                 <button
                   type="submit"
                   disabled={!text.trim() || (runId ? !canSteer : !canSend)}
-                  className="rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+                  className="whitespace-nowrap rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
                 >
                   {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
                 </button>
@@ -1022,8 +1038,21 @@ function QuestionCard({
   );
 }
 
-/** 노력 단계 id → 화면 표기(대화 기록·run 헤더에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
-const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
+/** 노력 단계 id → 화면 표기(대화 기록·run 헤더·작업 분해 레인 카드에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
+export const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
+
+/**
+ * 모델·노력 버튼에 쓸 한 줄 노력 표기. 아직 아무것도 고르지 않았으면(effort.current 없음) "보통"을 지어내지 않고
+ * 백엔드가 실제로 쓰는 기본값(effort.defaultLevel)을 "기본(⟨라벨⟩)"으로 보여준다 — claude-code는 실행 중 표시가
+ * "노력: 높음"인데 고르지 않은 상태의 버튼이 "보통"으로 보여 서로 어긋나던 문제(실제 기본값은 높음)를 고친다.
+ * defaultLevel도 모르는 백엔드(codex·commandcode·opencode)는 예전처럼 "보통"으로 둔다.
+ */
+function effortDisplayLabel(effort: EffortPickerView): string | undefined {
+  if (!effort.supported) return undefined;
+  if (effort.current) return EFFORT_LABEL[effort.current] ?? "보통";
+  if (effort.defaultLevel) return `기본(${EFFORT_LABEL[effort.defaultLevel] ?? effort.defaultLevel})`;
+  return "보통";
+}
 /** 노력 단계를 지원하지 않는 백엔드에서도 네 단계 버튼을 회색으로 그리기 위한 자리표(레이블만 쓰고, 실제 값·순서는 항상 서버가 내려준 picker.effort.levels를 우선한다) */
 const EFFORT_PLACEHOLDER: Array<{ id: string; label: string; hint: string }> = [
   { id: "low", label: "낮음", hint: "빠르고 싸게" },
@@ -1055,7 +1084,7 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const current = picker.options.find((option) => option.id === (picker.current ?? ""));
-  const currentEffortLabel = picker.effort.supported ? (EFFORT_LABEL[picker.effort.current ?? "medium"] ?? "보통") : undefined;
+  const currentEffortLabel = effortDisplayLabel(picker.effort);
   const label = [current?.label ?? "기본", currentEffortLabel].filter(Boolean).join(" · ");
   const title = disabledReason ?? [current?.hint, formatPrice(current?.price), current?.resolvedId && `실제 모델: ${current.resolvedId}`, picker.note].filter(Boolean).join(" · ");
 
@@ -1110,10 +1139,11 @@ function ModelPickerPopover({
   onChangeModel: (modelId: string) => void;
   onChangeEffort: (effort: string) => void;
 }) {
-  // 여는 자리는 눌린 버튼 바로 아래(body로 포털하므로 화면 좌표로 잡는다). 프로젝트 메뉴 팝오버와 같은 방식
-  const [position] = useState<{ top: number; left: number }>(() => {
+  // 여는 자리는 눌린 버튼 곁(body로 포털하므로 화면 좌표로 잡는다). 모델 버튼은 화면 아래쪽 입력창에 있어
+  // 아래로 열면 목록이 화면 밖으로 나가 고를 수 없었다 — 버튼이 화면 아래 절반에 있으면 위로 연다
+  const [position] = useState<PopoverPosition>(() => {
     const box = anchor.current?.getBoundingClientRect();
-    return box ? { top: box.bottom + 8, left: box.left } : { top: 0, left: 0 };
+    return box ? popoverPositionFor(box, { width: window.innerWidth, height: window.innerHeight }) : { top: 0, left: 0 };
   });
 
   useEffect(() => {
@@ -1128,10 +1158,26 @@ function ModelPickerPopover({
     <div className="fixed inset-0 z-40">
       {/* 바깥을 누르면 닫는다. 팝오버 자신은 이 뒤(DOM 순서상 위)에 그려 클릭이 여기로 새지 않는다 */}
       <button type="button" aria-label="모델 선택 닫기" onClick={onClose} className="absolute inset-0 cursor-default bg-transparent" />
-      <ModelPickerDialog style={{ top: position.top, left: position.left }} picker={picker} onChangeModel={onChangeModel} onChangeEffort={onChangeEffort} />
+      <ModelPickerDialog style={position} picker={picker} onChangeModel={onChangeModel} onChangeEffort={onChangeEffort} />
     </div>,
     document.body,
   );
+}
+
+/** 팝오버 폭(w-80 = 20rem)과 화면 가장자리 여백 */
+const POPOVER_WIDTH = 320;
+const POPOVER_GAP = 8;
+
+export type PopoverPosition = { left: number } & ({ top: number } | { bottom: number });
+
+/**
+ * 버튼 위치와 화면 크기로 팝오버를 열 자리를 정한다. 버튼이 화면 아래 절반이면 버튼 위로(bottom 기준),
+ * 아니면 버튼 아래로(top 기준) 연다. 오른쪽으로 넘치지 않게 left를 화면 안으로 당긴다
+ */
+export function popoverPositionFor(box: { top: number; bottom: number; left: number }, viewport: { width: number; height: number }): PopoverPosition {
+  const left = Math.max(POPOVER_GAP, Math.min(box.left, viewport.width - POPOVER_WIDTH - POPOVER_GAP));
+  if (box.top > viewport.height / 2) return { bottom: viewport.height - box.top + POPOVER_GAP, left };
+  return { top: box.bottom + POPOVER_GAP, left };
 }
 
 /** 팝오버가 실제로 그리는 내용(검색창 · 모델 목록 · 노력 단계). 포털을 감싸지 않아 단독으로도 그릴 수 있다 */
@@ -1141,7 +1187,7 @@ export function ModelPickerDialog({
   onChangeModel,
   onChangeEffort,
 }: {
-  style?: { top: number; left: number };
+  style?: PopoverPosition;
   picker: ModelPickerView;
   onChangeModel: (modelId: string) => void;
   onChangeEffort: (effort: string) => void;
@@ -1227,28 +1273,36 @@ function ModelOptionRow({ option, selected, onSelect }: { option: ModelPickerOpt
 /** 노력 단계 네 칸 버튼(segmented control). 지원하지 않는 백엔드는 자리표 네 칸을 회색으로 두고 이유를 툴팁에 남긴다 */
 function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChange: (id: string) => void }) {
   const levels = effort.levels.length > 0 ? effort.levels : EFFORT_PLACEHOLDER;
-  const current = effort.current ?? "medium";
+  // 아직 고르지 않았으면(effort.current 없음) 백엔드 실제 기본값(defaultLevel)을 선택된 것처럼 보여준다.
+  // defaultLevel도 모르면(codex 등) 예전처럼 "보통"을 자리표로 쓴다
+  const current = effort.current ?? effort.defaultLevel ?? "medium";
   const disabledTitle = effort.supported ? undefined : (effort.reason ?? "이 백엔드는 노력 단계를 지원하지 않습니다");
   return (
     <div className="mt-2 border-t border-line pt-2">
       <p className="px-2 pb-1 text-xs font-medium text-muted">노력</p>
       <div role="radiogroup" aria-label="노력 단계" title={disabledTitle} className="flex gap-1 px-2">
-        {levels.map((level) => (
-          <button
-            key={level.id}
-            type="button"
-            role="radio"
-            aria-checked={effort.supported && current === level.id}
-            disabled={!effort.supported}
-            title={effort.supported ? level.hint : disabledTitle}
-            onClick={() => onChange(level.id)}
-            className={`flex-1 rounded-control border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
-              effort.supported && current === level.id ? "border-ink bg-ink text-panel" : "border-line bg-panel text-ink hover:bg-panel/70"
-            }`}
-          >
-            {level.label}
-          </button>
-        ))}
+        {levels.map((level) => {
+          // 지금 고른 게 없어도 이 단계가 백엔드의 실제 기본값이면 늘 "(기본)"을 붙여 둔다 —
+          // 다른 단계를 직접 골랐을 때도 어느 게 기본이었는지 알 수 있게
+          const isDefault = effort.defaultLevel === level.id;
+          return (
+            <button
+              key={level.id}
+              type="button"
+              role="radio"
+              aria-checked={effort.supported && current === level.id}
+              disabled={!effort.supported}
+              title={effort.supported ? level.hint : disabledTitle}
+              onClick={() => onChange(level.id)}
+              className={`flex-1 rounded-control border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
+                effort.supported && current === level.id ? "border-ink bg-ink text-panel" : "border-line bg-panel text-ink hover:bg-panel/70"
+              }`}
+            >
+              {level.label}
+              {isDefault && <span className="ml-1 text-[10px] opacity-70">(기본)</span>}
+            </button>
+          );
+        })}
       </div>
       {effort.supported ? (
         <p className="px-2 pt-1 text-xs text-muted">{levels.find((level) => level.id === current)?.hint}</p>

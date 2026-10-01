@@ -7,7 +7,28 @@ import { useSessionAccess } from "./session-access";
 
 type RequirementKind = "api" | "ui" | "data" | "nonfunctional" | "docs";
 type RequirementPriority = "must" | "should" | "could";
-type RequirementStatus = "미착수" | "작업 중" | "검증됨" | "실패";
+type RequirementStatus = "미착수" | "작업 중" | "검증됨" | "재확인 필요" | "실패";
+type EarsPattern = "ubiquitous" | "event" | "state" | "unwanted" | "optional";
+
+interface Scenario {
+  id: string;
+  given: string;
+  when: string;
+  then: string;
+}
+
+interface Nfr {
+  metric: string;
+  threshold: string;
+  condition: string;
+  method: string;
+}
+
+interface Trace {
+  issue?: number;
+  dependsOn?: string[];
+  supersedes?: string;
+}
 
 interface RequirementDraft {
   id: string;
@@ -15,6 +36,13 @@ interface RequirementDraft {
   kind: RequirementKind;
   priority: RequirementPriority;
   acceptance: string[];
+  rev?: number;
+  ears?: { pattern: EarsPattern; statement: string };
+  scenarios?: Scenario[];
+  nfr?: Nfr;
+  trace?: Trace;
+  hash?: string;
+  revisedAt?: string;
 }
 
 interface RequirementEvidence {
@@ -28,7 +56,48 @@ interface RequirementView extends RequirementDraft {
   confidence: "🟢" | "🟡" | "🔴";
   evidence: RequirementEvidence;
   workPrefill: string;
+  /** 이슈로 발행했을 때 생긴 하위 이슈 번호(ADR-092). 발행하지 않았으면 없다 */
+  issue?: number;
 }
+
+type RequirementPlanAction = "create" | "update" | "unchanged" | "conflict" | "reverify" | "closed_but_requirement_exists";
+
+interface RequirementPlanEntry {
+  id: string;
+  action: RequirementPlanAction;
+  issue?: number;
+  localHash: string;
+  remoteHash?: string;
+  checklistOnly: boolean;
+  note: string;
+}
+
+interface RequirementPlanSummary {
+  total: number;
+  create: number;
+  update: number;
+  unchanged: number;
+  conflict: number;
+  reverify: number;
+  closedButRequirementExists: number;
+}
+
+const PLAN_ACTION_LABEL: Record<RequirementPlanAction, string> = {
+  create: "새로 만들기",
+  update: "본문 갱신",
+  unchanged: "바뀐 것 없음",
+  conflict: "충돌",
+  reverify: "다시 열고 재확인",
+  closed_but_requirement_exists: "닫혔지만 미검증",
+};
+const PLAN_ACTION_TONE: Record<RequirementPlanAction, string> = {
+  create: "text-pass",
+  update: "text-wait",
+  unchanged: "text-muted",
+  conflict: "text-fail",
+  reverify: "text-wait",
+  closed_but_requirement_exists: "text-fail",
+};
 
 interface RequirementCoverage {
   total: number;
@@ -45,6 +114,7 @@ interface RequirementsSnapshot {
   coverage?: RequirementCoverage;
   allMustHavesPrefill?: string;
   assumptions: string[];
+  manualSteps: string[];
 }
 
 interface ReferencedFileView {
@@ -64,6 +134,15 @@ interface RecommendationView {
   answer: string;
   rationale: string;
   sources: RecommendationSource[];
+  basis?: "spec" | "practice";
+  specQuote?: string;
+}
+
+interface RequirementDiffEntry {
+  status: "added" | "changed" | "unchanged" | "removed";
+  id: string;
+  requirement: RequirementDraft;
+  previous?: RequirementDraft;
 }
 
 interface ExtractionPreview {
@@ -74,23 +153,29 @@ interface ExtractionPreview {
   referencedFiles: ReferencedFileView[];
   outOfScope: string[];
   assumptions: string[];
+  manualSteps: string[];
+  diff?: RequirementDiffEntry[];
 }
 
 const KIND_LABEL: Record<RequirementKind, string> = { api: "API", ui: "화면", data: "데이터", nonfunctional: "비기능", docs: "문서" };
 const PRIORITY_LABEL: Record<RequirementPriority, string> = { must: "필수", should: "권장", could: "선택" };
-const STATUS_TONE: Record<RequirementStatus, string> = { 미착수: "text-muted", "작업 중": "text-wait", 검증됨: "text-pass", 실패: "text-fail" };
+const STATUS_TONE: Record<RequirementStatus, string> = { 미착수: "text-muted", "작업 중": "text-wait", 검증됨: "text-pass", "재확인 필요": "text-wait", 실패: "text-fail" };
+const DIFF_LABEL: Record<RequirementDiffEntry["status"], string> = { added: "추가", changed: "변경(개정 상승)", unchanged: "그대로", removed: "명세에서 사라짐(그대로 유지됨)" };
 
 async function readJson<T>(response: Response): Promise<T & { error?: string }> {
   return (await response.json().catch(() => ({}))) as T & { error?: string };
 }
 
 /** 개발 화면의 "명세" 탭(ADR-079). 과제 명세를 요구사항으로 나누고, 요구사항마다 무엇이 됐다는 증거를 추적한다 */
+type PanelView = "list" | "matrix";
+
 export function RequirementsPanel({ view }: { view: SessionView }) {
   const sessionId = view.snapshot.id;
   const access = useSessionAccess();
   const draft = useChatDraft();
   const [snapshot, setSnapshot] = useState<{ data?: RequirementsSnapshot; error?: string }>();
   const [importing, setImporting] = useState(false);
+  const [panelView, setPanelView] = useState<PanelView>("list");
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -119,11 +204,32 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
         <p className="text-sm font-medium text-ink">명세 → 요구사항 → 검증 추적</p>
+        {snapshot?.data?.exists && !importing && (
+          <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="tablist" aria-label="요구사항 하위 화면">
+            {(
+              [
+                { id: "list", label: "목록" },
+                { id: "matrix", label: "추적 매트릭스" },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={panelView === tab.id}
+                onClick={() => setPanelView(tab.id)}
+                className={`rounded-md px-3 py-1 font-medium transition-colors ${panelView === tab.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        )}
         {snapshot?.data?.exists && access.canManage && (
           <button
             type="button"
             onClick={() => setImporting((value) => !value)}
-            className="ml-auto shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink"
+            className={`${panelView === "matrix" ? "" : "ml-auto"} shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink`}
           >
             {importing ? "목록으로" : "명세 다시 가져오기"}
           </button>
@@ -136,11 +242,14 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
           <p className="text-sm text-fail">{snapshot.error}</p>
         ) : importing ? (
           <ImportFlow sessionId={sessionId} onApplied={onApplied} onCancel={snapshot.data?.exists ? () => setImporting(false) : undefined} />
+        ) : panelView === "matrix" ? (
+          <MatrixView sessionId={sessionId} />
         ) : (
           <RequirementsList
             sessionId={sessionId}
             snapshot={snapshot.data!}
             canManage={access.canManage}
+            isGithub={view.snapshot.repository?.kind === "github"}
             onWork={(text) => draft.fill(text)}
             onRefresh={() => setRevision((value) => value + 1)}
           />
@@ -150,23 +259,50 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
   );
 }
 
-function RequirementsList({
+/**
+ * "전체 계획 세우기"를 누르기 전에 "먼저 발행할까요?"를 한 번 물어볼지 정한다(ADR-092).
+ * 원격이 GitHub이고, 아직 하나도 발행하지 않았고, 이 세션에서 아직 묻지 않았을 때만 확인한다(한 번 답하면 다시 묻지 않는다).
+ * 순수 함수로 빼서 UI 렌더 없이도 그대로 테스트한다.
+ */
+export function shouldConfirmBeforePlanAll(isGithub: boolean, hasPublished: boolean, askedOnce: boolean): boolean {
+  return isGithub && !hasPublished && !askedOnce;
+}
+
+/** RequirementsPanel 안의 목록 화면. ImportFlow·RequirementPublishFlow와 같은 이유로 테스트가 직접 렌더링할 수 있게 내보낸다 */
+export function RequirementsList({
   sessionId,
   snapshot,
   canManage,
+  isGithub,
   onWork,
   onRefresh,
 }: {
   sessionId: string;
   snapshot: RequirementsSnapshot;
   canManage: boolean;
+  /** 원격이 GitHub이면(요구사항을 이슈로 발행할 수 있으면) "다음 단계"에서 발행을 계획 세우기보다 앞세운다(ADR-092) */
+  isGithub: boolean;
   onWork: (text: string) => void;
   onRefresh: () => void;
 }) {
+  const [publishOpen, setPublishOpen] = useState(false);
+  // "전체 계획 세우기"를 아직 발행하지 않은 채 누르면 한 번만 "먼저 발행할까요?"를 물어본다(대답하면 이 세션 동안 다시 묻지 않는다)
+  const [confirmPlanAll, setConfirmPlanAll] = useState(false);
+  const [askedOnce, setAskedOnce] = useState(false);
   if (snapshot.requirements.length === 0) {
     return <p className="text-sm text-muted">docs/requirements.md는 있지만 요구사항을 하나도 읽지 못했습니다. &ldquo;명세 다시 가져오기&rdquo;로 다시 뽑아 보세요.</p>;
   }
   const coverage = snapshot.coverage;
+  const hasPublished = snapshot.requirements.some((requirement) => requirement.issue !== undefined);
+
+  function planAll() {
+    if (shouldConfirmBeforePlanAll(isGithub, hasPublished, askedOnce)) {
+      setConfirmPlanAll(true);
+      return;
+    }
+    onWork(snapshot.allMustHavesPrefill!);
+  }
+
   return (
     <div className="flex flex-col gap-4">
       {coverage && (
@@ -174,23 +310,66 @@ function RequirementsList({
           <span className="font-medium text-ink">{coverage.text}</span>
           {coverage.mustGapText && <span className="font-medium text-fail">{coverage.mustGapText}</span>}
           {canManage && (
-            <button type="button" onClick={() => onRefresh()} className="ml-auto rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
-              증거 새로고침
-            </button>
+            <div className="ml-auto flex shrink-0 gap-2">
+              <button type="button" onClick={() => setPublishOpen((value) => !value)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+                {publishOpen ? "발행 닫기" : "이슈로 발행"}
+              </button>
+              <button type="button" onClick={() => onRefresh()} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+                증거 새로고침
+              </button>
+            </div>
           )}
         </div>
       )}
+      {canManage && publishOpen && <RequirementPublishFlow sessionId={sessionId} onRefresh={onRefresh} />}
       {canManage && snapshot.allMustHavesPrefill && (
         <div className="flex flex-col gap-1.5 rounded-control border border-line bg-panel p-3">
           <p className="text-sm font-medium text-ink">다음 단계</p>
           <p className="text-xs text-muted">에이전트가 매 요청마다 이 목록을 읽고 요구사항별로 작업·검증 근거를 추적합니다. 한 번에 시작하거나, 아래에서 요구사항 하나씩 골라 시작할 수 있습니다.</p>
-          <button
-            type="button"
-            onClick={() => onWork(snapshot.allMustHavesPrefill!)}
-            className="mt-1 self-start rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85"
-          >
-            전체 계획 세우기(필수 요구사항)
-          </button>
+          {confirmPlanAll ? (
+            <div className="mt-1 flex flex-col gap-1.5 rounded-control border border-fail/40 bg-fail/10 px-3 py-2">
+              <p className="text-sm text-ink">아직 이슈로 발행하지 않았습니다 — 먼저 발행할까요?</p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmPlanAll(false);
+                    setAskedOnce(true);
+                    setPublishOpen(true);
+                  }}
+                  className="rounded-control bg-ink px-3 py-1 text-xs font-medium text-panel hover:bg-ink/85"
+                >
+                  발행하기
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmPlanAll(false);
+                    setAskedOnce(true);
+                    onWork(snapshot.allMustHavesPrefill!);
+                  }}
+                  className="rounded-control border border-line px-3 py-1 text-xs font-medium hover:border-ink"
+                >
+                  그냥 계속
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-1 flex flex-wrap gap-2">
+              {isGithub && (
+                <button
+                  type="button"
+                  onClick={() => setPublishOpen(true)}
+                  className="self-start rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink"
+                >
+                  이슈로 발행
+                </button>
+              )}
+              <button type="button" onClick={planAll} className="self-start rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85">
+                전체 계획 세우기(필수 요구사항)
+              </button>
+            </div>
+          )}
         </div>
       )}
       <ul className="flex flex-col gap-3">
@@ -208,7 +387,359 @@ function RequirementsList({
           </ul>
         </div>
       )}
+      {snapshot.manualSteps.length > 0 && <ManualStepsNotice items={snapshot.manualSteps} />}
       <p className="text-xs text-muted">파일: docs/requirements.md · 세션 작업 복사본에 저장되어 체크포인트·PR에 그대로 실립니다. 세션 id: {sessionId}</p>
+    </div>
+  );
+}
+
+interface RequirementIssueDraft {
+  title: string;
+  kind: string;
+  priority: string;
+  acceptance: string[];
+  guessed: boolean;
+}
+
+/** "이슈로 발행" 흐름(ADR-092): dry-run 미리보기 → 확인 → 발행, 충돌은 가져오기·덮어쓰기·무시로 하나씩 푼다. ImportFlow와 같은 이유로 테스트가 직접 쓸 수 있게 내보낸다 */
+export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: string; onRefresh: () => void }) {
+  const [preview, setPreview] = useState<{ plan: RequirementPlanEntry[]; summary: RequirementPlanSummary }>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const [publishing, setPublishing] = useState(false);
+  const [published, setPublished] = useState<{ tracking?: { issue: number; url: string }; errors: Array<{ id: string; message: string }> }>();
+  const [resolving, setResolving] = useState<string>();
+  const [imported, setImported] = useState<Record<string, RequirementIssueDraft>>({});
+
+  /** 발행·충돌 해결 뒤 미리보기를 다시 불러온다(이벤트 처리기에서만 부른다 — useEffect는 위의 .then 체인을 따로 쓴다) */
+  async function loadPreview() {
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/publish/preview`, { method: "POST" });
+      const data = await readJson<{ plan: RequirementPlanEntry[]; summary: RequirementPlanSummary }>(response);
+      if (!response.ok) {
+        setError(data.error ?? "미리보기를 만들지 못했습니다");
+        return;
+      }
+      setPreview(data);
+    } catch {
+      setError("미리보기를 만들지 못했습니다");
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    // loadPreview(async 함수)를 그대로 부르면 "effect 안에서 setState를 동기적으로 부른다"는 린트가 막는다
+    // (react-hooks/set-state-in-effect) — RequirementsPanel의 최초 목록 로딩과 같은 모양(.then 체인)으로 대신한다
+    fetch(`/api/sessions/${sessionId}/requirements/publish/preview`, { method: "POST" })
+      .then(async (response) => {
+        const data = await readJson<{ plan: RequirementPlanEntry[]; summary: RequirementPlanSummary }>(response);
+        if (cancelled) return;
+        if (!response.ok) {
+          setError(data.error ?? "미리보기를 만들지 못했습니다");
+        } else {
+          setPreview(data);
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setError("미리보기를 만들지 못했습니다");
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  async function publish() {
+    setPublishing(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/publish`, { method: "POST" });
+      const data = await readJson<{ tracking?: { issue: number; url: string }; errors: Array<{ id: string; message: string }> }>(response);
+      if (!response.ok) {
+        setError(data.error ?? "발행하지 못했습니다");
+        return;
+      }
+      setPublished(data);
+      onRefresh();
+      await loadPreview();
+    } catch {
+      setError("발행하지 못했습니다");
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  async function resolveConflict(requirementId: string, resolution: "import" | "overwrite" | "ignore") {
+    setResolving(requirementId);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/requirements/publish/conflict`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requirementId, resolution }),
+      });
+      const data = await readJson<{ action: string; draft?: RequirementIssueDraft }>(response);
+      if (!response.ok) {
+        setError(data.error ?? "충돌을 풀지 못했습니다");
+        return;
+      }
+      if (data.draft) setImported((current) => ({ ...current, [requirementId]: data.draft! }));
+      await loadPreview();
+    } catch {
+      setError("충돌을 풀지 못했습니다");
+    } finally {
+      setResolving(undefined);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-control border border-line bg-panel p-3">
+      <p className="text-sm font-medium text-ink">요구사항을 GitHub 이슈로 발행</p>
+      <p className="text-xs text-muted">
+        요구사항마다 하위 이슈(필수·권장), 전체를 묶는 추적 이슈를 만들거나 갱신합니다. 선택(could)·문서(docs)는 추적 이슈의 체크리스트로만 남습니다.
+        <code className="ml-1">docs/requirements.md</code>가 언제나 원본입니다(한 방향).
+      </p>
+      {loading ? (
+        <p className="text-sm text-muted">미리보기를 만드는 중</p>
+      ) : error ? (
+        <p className="text-sm text-fail">{error}</p>
+      ) : preview ? (
+        <>
+          <p className="text-sm text-ink">
+            새로 만들기 {preview.summary.create} · 갱신 {preview.summary.update} · 그대로 {preview.summary.unchanged} · 충돌{" "}
+            <span className={preview.summary.conflict > 0 ? "font-medium text-fail" : undefined}>{preview.summary.conflict}</span> · 재확인 {preview.summary.reverify}
+          </p>
+          <ul className="flex flex-col gap-1.5">
+            {preview.plan.map((entry) => (
+              <li key={entry.id} className="flex flex-col gap-1 rounded-control bg-ground px-2.5 py-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-muted">{entry.id}</span>
+                  <span className={`font-medium ${PLAN_ACTION_TONE[entry.action]}`}>{PLAN_ACTION_LABEL[entry.action]}</span>
+                  {entry.issue !== undefined && <span className="text-muted">#{entry.issue}</span>}
+                  {entry.checklistOnly && <span className="text-muted">(체크리스트 전용)</span>}
+                </div>
+                <p className="text-muted">{entry.note}</p>
+                {entry.action === "conflict" && (
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      disabled={resolving === entry.id}
+                      onClick={() => resolveConflict(entry.id, "import")}
+                      className="rounded-control border border-line px-2 py-0.5 font-medium hover:border-ink disabled:opacity-60"
+                    >
+                      가져오기
+                    </button>
+                    <button
+                      type="button"
+                      disabled={resolving === entry.id}
+                      onClick={() => resolveConflict(entry.id, "overwrite")}
+                      className="rounded-control border border-line px-2 py-0.5 font-medium hover:border-ink disabled:opacity-60"
+                    >
+                      덮어쓰기
+                    </button>
+                    <button
+                      type="button"
+                      disabled={resolving === entry.id}
+                      onClick={() => resolveConflict(entry.id, "ignore")}
+                      className="rounded-control border border-line px-2 py-0.5 font-medium hover:border-ink disabled:opacity-60"
+                    >
+                      무시
+                    </button>
+                  </div>
+                )}
+                {imported[entry.id] && (
+                  <div className="rounded-control bg-panel px-2 py-1.5 text-muted">
+                    <p className="font-medium text-ink">이슈에서 가져온 내용(참고 — 파일에는 자동으로 반영하지 않습니다)</p>
+                    <p>
+                      {imported[entry.id]!.kind} · {imported[entry.id]!.priority}
+                      {imported[entry.id]!.guessed && " · 추측값(검토 필요)"}
+                    </p>
+                    <ul className="list-inside list-disc">
+                      {imported[entry.id]!.acceptance.map((item, index) => (
+                        <li key={index}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            disabled={publishing || preview.summary.create + preview.summary.update + preview.summary.reverify === 0}
+            onClick={publish}
+            className="self-start rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+          >
+            {publishing ? "발행하는 중" : "확인하고 발행"}
+          </button>
+          {published && (
+            <div className="rounded-control bg-ground px-2.5 py-2 text-xs text-muted">
+              {published.tracking && (
+                <p>
+                  추적 이슈:{" "}
+                  <a href={published.tracking.url} target="_blank" rel="noreferrer" className="underline">
+                    #{published.tracking.issue}
+                  </a>
+                </p>
+              )}
+              {published.errors.length > 0 && (
+                <ul className="mt-1 list-inside list-disc text-fail">
+                  {published.errors.map((item, index) => (
+                    <li key={index}>
+                      {item.id}: {item.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/** "사람이 할 일" 절 — 요구사항이 아니다, 에이전트가 절대 하지 않는 절차(저장소 권한·협업자 추가, 이메일 제출 등)임을 분명히 한다 */
+function ManualStepsNotice({ items }: { items: string[] }) {
+  return (
+    <div className="rounded-control border border-wait/40 bg-panel p-3">
+      <p className="text-sm font-medium text-ink">사람이 할 일 (에이전트 금지)</p>
+      <p className="mt-0.5 text-xs text-muted">저장소 권한·협업자·공개 범위 변경, 이메일 제출처럼 코드·문서 밖에서 사람이 손으로 해야 하는 절차입니다. 요구사항이 아니므로 에이전트는 이 항목을 시도하지 않습니다.</p>
+      <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-sm text-muted">
+        {items.map((item, index) => (
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+interface MatrixRowView {
+  kind: "requirement" | "scenario";
+  id: string;
+  parentId?: string;
+  title: string;
+  rev: number;
+  priority: RequirementPriority;
+  issue?: number;
+  checkpoints: Array<{ sha: string; shortSha: string; message: string }>;
+  tests: Array<{ file: string; name: string }>;
+  gateChecks: Array<{ name: string; ok: boolean }>;
+  status: RequirementStatus;
+}
+
+interface TraceabilityMatrixView {
+  rows: MatrixRowView[];
+  orphanTests: Array<{ file: string; name: string }>;
+  mustHavesWithoutTests: Array<{ id: string; title: string }>;
+}
+
+/** "추적 매트릭스" 하위 화면(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·커밋·테스트·게이트·상태를 한 줄로 보여주고, CSV로 내보낸다 */
+function MatrixView({ sessionId }: { sessionId: string }) {
+  const [state, setState] = useState<{ data?: TraceabilityMatrixView; error?: string }>();
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/requirements/matrix`)
+      .then(async (response) => {
+        const data = await readJson<TraceabilityMatrixView>(response);
+        if (!cancelled) setState(response.ok ? { data } : { error: data.error ?? "추적 매트릭스를 불러오지 못했습니다" });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ error: "추적 매트릭스를 불러오지 못했습니다" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  if (!state) return <p className="text-sm text-muted">불러오는 중</p>;
+  if (state.error) return <p className="text-sm text-fail">{state.error}</p>;
+  const matrix = state.data!;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted">요구사항·시나리오마다 개정·우선순위·커밋·테스트·게이트·상태를 모읍니다.</p>
+        <a
+          href={`/api/sessions/${sessionId}/requirements/matrix?format=csv`}
+          download={`requirements-matrix-${sessionId}.csv`}
+          className="ml-auto shrink-0 rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink"
+        >
+          CSV로 내보내기
+        </a>
+      </div>
+      <div className="overflow-x-auto rounded-control border border-line">
+        <table className="w-full min-w-[720px] text-left text-sm">
+          <thead className="bg-panel text-xs text-muted">
+            <tr>
+              <th className="px-2.5 py-1.5 font-medium">id</th>
+              <th className="px-2.5 py-1.5 font-medium">제목</th>
+              <th className="px-2.5 py-1.5 font-medium">개정</th>
+              <th className="px-2.5 py-1.5 font-medium">우선순위</th>
+              <th className="px-2.5 py-1.5 font-medium">이슈</th>
+              <th className="px-2.5 py-1.5 font-medium">커밋</th>
+              <th className="px-2.5 py-1.5 font-medium">테스트</th>
+              <th className="px-2.5 py-1.5 font-medium">게이트</th>
+              <th className="px-2.5 py-1.5 font-medium">상태</th>
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.rows.map((row) => (
+              <tr key={row.id} className="border-t border-line align-top">
+                <td className={`px-2.5 py-1.5 font-mono text-xs ${row.kind === "scenario" ? "pl-5 text-muted" : "text-ink"}`}>{row.id}</td>
+                <td className="max-w-[320px] truncate px-2.5 py-1.5 text-ink" title={row.title}>
+                  {row.title}
+                </td>
+                <td className="px-2.5 py-1.5 text-muted">{row.rev}</td>
+                <td className="px-2.5 py-1.5 text-muted">{PRIORITY_LABEL[row.priority]}</td>
+                <td className="px-2.5 py-1.5 text-muted">{row.issue !== undefined ? `#${row.issue}` : "—"}</td>
+                <td className="px-2.5 py-1.5 text-muted">{row.checkpoints.length > 0 ? row.checkpoints.map((c) => c.shortSha).join(", ") : "—"}</td>
+                <td className="px-2.5 py-1.5 text-muted">{row.tests.length > 0 ? `${row.tests.length}개` : "—"}</td>
+                <td className="px-2.5 py-1.5 text-muted">
+                  {row.gateChecks.length > 0 ? row.gateChecks.map((c) => (c.ok ? "통과" : "실패")).join(", ") : "—"}
+                </td>
+                <td className={`px-2.5 py-1.5 font-medium ${STATUS_TONE[row.status]}`}>{row.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-control border border-line bg-panel p-3">
+          <p className="text-sm font-medium text-ink">주인 없는 테스트</p>
+          <p className="text-xs text-muted">어느 요구사항·시나리오 id도 이름에 없는 테스트입니다.</p>
+          {matrix.orphanTests.length === 0 ? (
+            <p className="mt-1 text-sm text-muted">없습니다.</p>
+          ) : (
+            <ul className="mt-1 list-inside list-disc space-y-0.5 text-sm text-muted">
+              {matrix.orphanTests.map((test, index) => (
+                <li key={index} className="truncate" title={test.name}>
+                  <span className="font-mono text-xs">{test.file}</span>: {test.name}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="rounded-control border border-line bg-panel p-3">
+          <p className="text-sm font-medium text-ink">테스트 없는 필수 요구사항</p>
+          <p className="text-xs text-muted">시나리오 테스트를 포함해 테스트가 하나도 없는 필수(must) 요구사항입니다.</p>
+          {matrix.mustHavesWithoutTests.length === 0 ? (
+            <p className="mt-1 text-sm text-muted">없습니다.</p>
+          ) : (
+            <ul className="mt-1 list-inside list-disc space-y-0.5 text-sm text-muted">
+              {matrix.mustHavesWithoutTests.map((requirement) => (
+                <li key={requirement.id}>
+                  [{requirement.id}] {requirement.title}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -230,6 +761,11 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
             <span className="glass-soft rounded-control px-1.5 py-0.5">{KIND_LABEL[requirement.kind]}</span>
             <span className="glass-soft rounded-control px-1.5 py-0.5">{PRIORITY_LABEL[requirement.priority]}</span>
             <span className={`font-medium ${STATUS_TONE[requirement.status]}`}>{requirement.status}</span>
+            {requirement.issue !== undefined && (
+              <span className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-ink" title="이슈로 발행됨">
+                #{requirement.issue}
+              </span>
+            )}
           </p>
         </div>
         {canManage && (
@@ -275,6 +811,26 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
   );
 }
 
+/** "재추출 병합" 미리보기(ADR-090): 이미 저장된 문서가 있을 때만 있다. 개수만 요약해 보여 준다(자세한 내용은 아래 편집 목록에서 본다) */
+function DiffSummary({ diff }: { diff: RequirementDiffEntry[] }) {
+  const counts = (["added", "changed", "unchanged", "removed"] as const).map((status) => ({
+    status,
+    count: diff.filter((entry) => entry.status === status).length,
+  }));
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-control bg-ground px-3 py-2 text-sm">
+      <span className="font-medium text-ink">기존 문서와 병합(제목·EARS 유사도로 id를 지켰습니다)</span>
+      {counts
+        .filter(({ count }) => count > 0)
+        .map(({ status, count }) => (
+          <span key={status} className="glass-soft rounded-control px-1.5 py-0.5 text-xs text-muted">
+            {DIFF_LABEL[status]} {count}개
+          </span>
+        ))}
+    </div>
+  );
+}
+
 type SourceTab = "paste" | "file" | "issue";
 /** 파일 선택으로 읽을 명세 파일의 상한. 명세 글은 보통 수십 KB 안이다 */
 const MAX_SPEC_FILE_BYTES = 512 * 1024;
@@ -290,6 +846,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
   const [preview, setPreview] = useState<ExtractionPreview>();
   const [drafts, setDrafts] = useState<RequirementDraft[]>([]);
   const [assumptions, setAssumptions] = useState<string[]>([]);
+  const [manualSteps, setManualSteps] = useState<string[]>([]);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [recommendations, setRecommendations] = useState<Record<number, RecommendationView>>({});
   const [recommendationSource, setRecommendationSource] = useState<"web" | "model">();
@@ -325,6 +882,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
       setPreview(data);
       setDrafts(data.requirements);
       setAssumptions(data.assumptions);
+      setManualSteps(data.manualSteps);
       setAnswers({});
       setRecommendations({});
       setRecommendationSource(undefined);
@@ -375,7 +933,7 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
       const response = await fetch(`/api/sessions/${sessionId}/requirements/apply`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requirements: drafts, assumptions }),
+        body: JSON.stringify({ requirements: drafts, assumptions, manualSteps }),
       });
       const data = await readJson<RequirementsSnapshot>(response);
       if (!response.ok) {
@@ -489,6 +1047,10 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
             {preview.source === "model" ? "추출 모델이 나눴습니다." : `결정론적 방식으로 나눴습니다${preview.reason ? `: ${preview.reason}` : ""}`}
           </p>
 
+          {preview.diff && <DiffSummary diff={preview.diff} />}
+
+          {preview.manualSteps.length > 0 && <ManualStepsNotice items={preview.manualSteps} />}
+
           {preview.referencedFiles.length > 0 && (
             <div className="flex flex-col gap-1.5 rounded-control bg-ground px-3 py-2">
               <p className="text-sm font-medium text-ink">참조 파일</p>
@@ -536,8 +1098,13 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
                     />
                     {recommendation && (
                       <p className="text-xs text-muted">
+                        {recommendation.basis === "spec" ? (
+                          <span className="mr-1 font-medium text-pass">명세에 있음</span>
+                        ) : (
+                          recommendationSource === "model" && <span className="mr-1 font-medium text-wait">출처 확인 필요</span>
+                        )}
                         {recommendation.rationale}
-                        {recommendationSource === "model" && <span className="ml-1 font-medium text-wait">출처 확인 필요</span>}
+                        {recommendation.basis === "spec" && recommendation.specQuote && <span className="ml-1 italic">&ldquo;{recommendation.specQuote}&rdquo;</span>}
                         {recommendation.sources.map((source, sourceIndex) => (
                           <a key={sourceIndex} href={source.url} target="_blank" rel="noreferrer" className="ml-1 underline">
                             {source.title ?? source.url}
@@ -613,6 +1180,30 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
                   placeholder="인수 조건(줄마다 하나)"
                   className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
                 />
+                {(requirement.ears || (requirement.scenarios && requirement.scenarios.length > 0) || requirement.nfr) && (
+                  <div className="flex flex-col gap-0.5 rounded-control bg-ground px-2 py-1.5 text-xs text-muted">
+                    {requirement.rev !== undefined && <p>개정 {requirement.rev}</p>}
+                    {requirement.ears && (
+                      <p>
+                        EARS({requirement.ears.pattern}): {requirement.ears.statement}
+                      </p>
+                    )}
+                    {requirement.scenarios && requirement.scenarios.length > 0 && (
+                      <ul className="list-inside list-disc">
+                        {requirement.scenarios.map((scenario) => (
+                          <li key={scenario.id}>
+                            {scenario.id}: (Given) {scenario.given} (When) {scenario.when} (Then) {scenario.then}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {requirement.nfr && (
+                      <p>
+                        NFR: {requirement.nfr.metric} {requirement.nfr.threshold} (조건: {requirement.nfr.condition} · 측정: {requirement.nfr.method})
+                      </p>
+                    )}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -624,6 +1215,18 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
               onChange={(event) => setAssumptions(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
               rows={Math.max(2, assumptions.length)}
               placeholder="가정(줄마다 하나) — 데이터 규모·동시성/트래픽(명세가 실마리를 줄 때만)·페이지네이션 등"
+              className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5 rounded-control border border-line p-2.5">
+            <p className="text-sm font-medium text-ink">사람이 할 일 (에이전트 금지)</p>
+            <p className="text-xs text-muted">저장소 권한·협업자·공개 범위 변경, 이메일 제출처럼 사람이 손으로 해야 하는 절차입니다. 요구사항으로 저장되지 않고, 에이전트에게도 절대 하지 말라고 안내됩니다.</p>
+            <textarea
+              value={manualSteps.join("\n")}
+              onChange={(event) => setManualSteps(event.target.value.split("\n").filter((line) => line.trim().length > 0))}
+              rows={Math.max(2, manualSteps.length)}
+              placeholder="사람이 할 일(줄마다 하나) — 예: private 저장소를 만들고 협업자를 추가한다"
               className="rounded-control border border-line bg-ground px-2 py-1 text-sm"
             />
           </div>

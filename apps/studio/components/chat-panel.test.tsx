@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel, ModelPicker, ModelPickerDialog } from "./chat-panel";
+import { ChatPanel, handoffModelInput, ModelPicker, ModelPickerDialog, popoverPositionFor } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -209,6 +209,30 @@ describe("ModelPicker(대화 입력창의 모델 선택)", () => {
     expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>높음/);
   });
 
+  it("아직 노력 단계를 고르지 않았으면(effort.current 없음) '보통'을 지어내지 않고 실제 기본값을 '기본(⟨라벨⟩)'으로 보여준다", () => {
+    // claude-code는 세션이 고르지 않아도 러너가 실제로 '높음'을 쓴다(DEFAULT_CLAUDE_CODE_EFFORT) — 버튼 요약과
+    // 노력 단계 칸 둘 다 이 기본값을 보여줘야, 실행 중 표시("노력: 높음")와 어긋나지 않는다
+    const unset: ModelPickerView = { ...claudeCode, effort: { supported: true, defaultLevel: "high", levels: claudeCode.effort.levels } };
+
+    const buttonHtml = renderToStaticMarkup(<ModelPicker picker={unset} disabled={false} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+    expect(buttonHtml).toContain("기본(높음)");
+    expect(buttonHtml).not.toContain("Sonnet · 보통");
+
+    const dialogHtml = renderToStaticMarkup(<ModelPickerDialog picker={unset} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+    // 기본값(높음) 칸이 선택된 것처럼 보이고, 기본이라는 표시(기본)가 붙는다
+    expect(dialogHtml).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>높음<span[^>]*>\(기본\)<\/span>/);
+  });
+
+  it("다른 단계를 직접 골랐어도(effort.current) 기본값이었던 칸에는 '(기본)' 표시가 그대로 남는다", () => {
+    const chosenLow: ModelPickerView = { ...claudeCode, effort: { supported: true, current: "low", defaultLevel: "high", levels: claudeCode.effort.levels } };
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={chosenLow} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+
+    // 낮음이 선택(aria-checked=true)되면서도, 높음 칸에는 여전히 (기본) 표시가 있다
+    expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>낮음/);
+    expect(html).toMatch(/role="radio"[^>]*aria-checked="false"[^>]*>높음<span[^>]*>\(기본\)<\/span>/);
+  });
+
   it("노력 단계를 지원하지 않는 백엔드는 네 칸을 disabled로 그리고 이유를 툴팁에 남긴다", () => {
     const demo: ModelPickerView = {
       backend: "demo",
@@ -246,5 +270,47 @@ describe("ModelPicker(대화 입력창의 모델 선택)", () => {
 
     expect(html).not.toContain('placeholder="모델 검색"');
     expect(html).toContain("Codex는 스튜디오가 미리 아는 모델 목록이 없습니다");
+  });
+});
+
+describe("popoverPositionFor(모델 선택 팝오버를 여는 자리)", () => {
+  const viewport = { width: 1512, height: 785 };
+
+  it("화면 아래 절반의 버튼(대화 입력창)이면 버튼 위로 연다 — 아래로 열면 목록이 화면 밖으로 나간다", () => {
+    expect(popoverPositionFor({ top: 736, bottom: 764, left: 1342 }, viewport)).toEqual({ bottom: 785 - 736 + 8, left: 1512 - 320 - 8 });
+  });
+
+  it("화면 위쪽 버튼이면 버튼 아래로 연다", () => {
+    expect(popoverPositionFor({ top: 20, bottom: 44, left: 100 }, viewport)).toEqual({ top: 52, left: 100 });
+  });
+
+  it("왼쪽 가장자리 밖으로도 나가지 않는다", () => {
+    expect(popoverPositionFor({ top: 20, bottom: 44, left: -30 }, viewport)).toEqual({ top: 52, left: 8 });
+  });
+});
+
+describe("handoffModelInput(나눠서 병렬이 이어받을 세션 모델)", () => {
+  const claudeCode: ModelPickerView = {
+    backend: "claude-code",
+    current: "sonnet",
+    options: [{ id: "", label: "기본" }, { id: "sonnet", label: "Sonnet 5" }],
+    effort: { supported: true, current: "medium", levels: [{ id: "medium", label: "보통", hint: "균형" }] },
+  };
+
+  it("고른 모델·노력 단계를 그대로 돌려준다(사용자가 대화에서 Sonnet·보통을 골랐을 때)", () => {
+    expect(handoffModelInput(claudeCode)).toEqual({ sessionModelId: "sonnet", sessionEffort: "medium" });
+  });
+
+  it("모델을 아직 안 골랐으면(current 없음) 빈 문자열을 넘긴다 — '기본'도 명시적인 값이다", () => {
+    expect(handoffModelInput({ ...claudeCode, current: undefined }).sessionModelId).toBe("");
+  });
+
+  it("이 백엔드가 노력 단계를 지원하지 않으면 sessionEffort를 넣지 않는다", () => {
+    const noEffort: ModelPickerView = { ...claudeCode, effort: { supported: false, levels: [] } };
+    expect(handoffModelInput(noEffort)).toEqual({ sessionModelId: "sonnet" });
+  });
+
+  it("아직 모델 선택을 못 받았으면(picker 없음) 아무것도 넘기지 않아 서버 기본을 쓴다", () => {
+    expect(handoffModelInput(undefined)).toEqual({});
   });
 });

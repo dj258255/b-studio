@@ -1,7 +1,7 @@
 "use client";
 
 import { type KeyboardEvent, useEffect, useState } from "react";
-import { filterFolders, folderListQuery, hintLabel, moveSelectionIndex, resolveListKey } from "@/lib/folder-browser";
+import { filterFolders, folderListQuery, hintLabel, looksLikePastedPath, moveSelectionIndex, resolveListKey } from "@/lib/folder-browser";
 import type { FolderListing } from "@/lib/server/folder-browser";
 import { FolderProposalView } from "./folder-proposal-view";
 import { OpenFolder } from "./open-folder";
@@ -18,8 +18,13 @@ export function FolderBrowser() {
   const [selected, setSelected] = useState<string>();
   const [filter, setFilter] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  /** 지금 `listing`을 숨김 폴더까지 받아왔는지(토글 상태와는 별개 — 필터 때문에 보충으로 받아온 경우도 있다) */
+  const [listingHidden, setListingHidden] = useState(false);
   const [manual, setManual] = useState(false);
   const proposal = useFolderProposal();
+
+  // 토글이 꺼져 있어도 필터가 "."으로 시작하면(숨김 폴더를 콕 집어 찾는 것이다) 숨김 폴더까지 보여준다
+  const effectiveHidden = showHidden || filter.trim().startsWith(".");
 
   // 이 함수 자체는 async가 아니다 — fetch 결과가 오기 전(.then 안)에서만 setState한다.
   // 마운트 직후 useEffect에서 곧바로 부르므로, 동기로 setState하면 "효과 안 setState" 경고가 난다(work-overview.tsx와 같은 이유)
@@ -32,6 +37,7 @@ export function FolderBrowser() {
           return;
         }
         setListing(body);
+        setListingHidden(hidden);
         setSelected(body.path);
         setFilter("");
         setListError(undefined);
@@ -46,8 +52,27 @@ export function FolderBrowser() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 필터가 "."으로 시작해 숨김 폴더가 필요한데 지금 목록이 그걸 못 받아왔으면, 같은 폴더를 숨김 포함으로 다시 받는다.
+  // 타이핑 중이던 필터·고른 항목은 그대로 두기 위해 load()를 쓰지 않고 따로 받는다
+  useEffect(() => {
+    if (!listing || !effectiveHidden || listingHidden) return;
+    let cancelled = false;
+    fetch(`/api/folders${folderListQuery(listing.path, true)}`, { cache: "no-store" })
+      .then(async (response) => {
+        if (cancelled || !response.ok) return;
+        const body = (await response.json().catch(() => undefined)) as FolderListing | undefined;
+        if (!body) return;
+        setListing(body);
+        setListingHidden(true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveHidden, listingHidden, listing]);
+
   const loading = !listing && !listError;
-  const filtered = listing ? filterFolders(listing.children, filter) : [];
+  const filtered = listing ? filterFolders(listing.children, filter, effectiveHidden) : [];
 
   function moveSelection(delta: number) {
     const index = filtered.findIndex((child) => child.path === selected);
@@ -60,7 +85,7 @@ export function FolderBrowser() {
     if (!action) return;
     event.preventDefault();
     if (action.type === "up") {
-      if (listing?.parent) void load(listing.parent, showHidden);
+      if (listing?.parent) void load(listing.parent, effectiveHidden);
       return;
     }
     if (action.type === "move") {
@@ -68,7 +93,7 @@ export function FolderBrowser() {
       return;
     }
     const target = filtered.find((child) => child.path === selected);
-    if (target) void load(target.path, showHidden);
+    if (target) void load(target.path, effectiveHidden);
   }
 
   if (manual) {
@@ -94,7 +119,7 @@ export function FolderBrowser() {
                 /
               </span>
             )}
-            <button type="button" onClick={() => void load(crumb.path, showHidden)} className="rounded-control px-1 hover:bg-panel hover:underline">
+            <button type="button" onClick={() => void load(crumb.path, effectiveHidden)} className="rounded-control px-1 hover:bg-panel hover:underline">
               {crumb.name}
             </button>
           </span>
@@ -107,7 +132,7 @@ export function FolderBrowser() {
             <button
               key={shortcut.path}
               type="button"
-              onClick={() => void load(shortcut.path, showHidden)}
+              onClick={() => void load(shortcut.path, effectiveHidden)}
               className="glass-soft rounded-control px-2 py-1 text-xs hover:bg-panel"
             >
               {shortcut.label}
@@ -126,8 +151,13 @@ export function FolderBrowser() {
           onChange={(event) => setFilter(event.target.value)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
+            // 절대 경로나 ~ 경로를 쳤거나 붙여넣었으면 후보 목록에서 고르지 않고 그 경로로 바로 옮긴다
+            if (looksLikePastedPath(filter)) {
+              void load(filter.trim(), effectiveHidden);
+              return;
+            }
             const target = filtered.find((child) => child.path === selected) ?? filtered[0];
-            if (target) void load(target.path, showHidden);
+            if (target) void load(target.path, effectiveHidden);
           }}
           placeholder="폴더 이름으로 거르기"
           className="min-w-0 flex-1 rounded-control border border-line bg-panel px-3 py-1.5 text-sm"
@@ -151,7 +181,7 @@ export function FolderBrowser() {
         </p>
       )}
 
-      <ul role="listbox" aria-label="폴더 목록" tabIndex={0} onKeyDown={onListKeyDown} className="mt-2 max-h-64 space-y-0.5 overflow-y-auto px-2 pb-1">
+      <ul role="listbox" aria-label="폴더 목록" tabIndex={0} onKeyDown={onListKeyDown} className="mt-2 h-64 space-y-0.5 overflow-y-auto px-2 pb-1">
         {loading ? (
           <li className="px-2 py-1.5 text-sm text-muted">불러오는 중</li>
         ) : filtered.length === 0 ? (
@@ -164,7 +194,7 @@ export function FolderBrowser() {
                 role="option"
                 aria-selected={selected === child.path}
                 onClick={() => setSelected(child.path)}
-                onDoubleClick={() => void load(child.path, showHidden)}
+                onDoubleClick={() => void load(child.path, effectiveHidden)}
                 className={`flex w-full items-center justify-between gap-2 rounded-control px-2 py-1.5 text-left text-sm hover:bg-panel ${selected === child.path ? "bg-panel font-medium" : ""}`}
               >
                 <span className="min-w-0 truncate">{child.name}</span>

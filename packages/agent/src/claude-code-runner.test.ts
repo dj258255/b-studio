@@ -1,11 +1,12 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { AccountInfo, McpServerConfig, Options, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
+import type { AccountInfo, McpServerConfig, ModelInfo, Options, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   describeAccount,
+  fetchClaudeCodeModels,
   preflightClaudeCode,
   runClaudeCodeAgent,
   zodShape,
@@ -36,13 +37,15 @@ interface FakeOptions {
   account?: AccountInfo;
   /** 사용자 메시지(게이트 재시도 포함)마다 돌려줄 modelUsage. 없으면 기본 계산을 쓴다 */
   modelUsages?: Array<Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }>>;
+  /** supportedModels()가 돌려줄 목록(fetchClaudeCodeModels 테스트용) */
+  models?: ModelInfo[];
 }
 
 /**
  * Claude Code 프로세스를 흉내 내는 가짜 SDK.
  * 사용자 메시지를 받을 때마다 준비된 단계를 실행하고, 도구 단계는 러너가 등록한 MCP 도구 핸들러를 실제로 부른다.
  */
-function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [] }: FakeOptions = {}) {
+function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [], models = [] }: FakeOptions = {}) {
   const state = { prompts: [] as string[], options: undefined as Options | undefined, closed: false };
   let tools: Array<SdkMcpToolDefinition<any>> = [];
 
@@ -93,6 +96,7 @@ function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [
 
       const query: ClaudeCodeQuery = Object.assign(run(), {
         accountInfo: async () => account,
+        supportedModels: async () => models,
         interrupt: async () => {},
         close: () => {
           state.closed = true;
@@ -324,6 +328,45 @@ describe('preflightClaudeCode', () => {
     const { sdk } = fakeClaudeCode({ account: { apiProvider: 'firstParty' } });
     const preflight = await preflightClaudeCode({ sdk });
     expect(preflight).toMatchObject({ ok: false, reason: expect.stringContaining('/login') });
+  });
+});
+
+describe('fetchClaudeCodeModels', () => {
+  const MODELS: ModelInfo[] = [
+    { value: '', resolvedModel: 'claude-opus-5[1m]', displayName: 'Default (recommended)', description: 'Opus 5 with 1M context · Best for everyday, complex tasks', supportedEffortLevels: ['low', 'medium', 'high', 'max'] },
+    { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks', supportedEffortLevels: ['low', 'medium', 'high', 'max'] },
+    { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
+  ];
+
+  it('로그인한 계정의 supportedModels()를 그대로 돌려주고, 프롬프트를 보내지 않고 바로 닫는다', async () => {
+    const { sdk, state } = fakeClaudeCode({ models: MODELS });
+
+    const models = await fetchClaudeCodeModels({ sdk, cwd: '/tmp/project' });
+
+    expect(models).toEqual(MODELS);
+    expect(state.prompts).toEqual([]);
+    expect(state.options).toMatchObject({ cwd: '/tmp/project', tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false });
+    expect(state.closed).toBe(true);
+  });
+
+  it('제한 시간 안에 응답하지 않으면 실패하고, 그래도 연결을 정리한다', async () => {
+    let closed = false;
+    const sdk: ClaudeCodeSdk = {
+      createSdkMcpServer: () => ({ type: 'sdk', name: 'b-studio', instance: {} }) as unknown as McpServerConfig,
+      query: () =>
+        ({
+          [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+          accountInfo: () => new Promise(() => {}),
+          supportedModels: () => new Promise(() => {}), // 응답하지 않는 CLI를 흉내 낸다
+          interrupt: async () => {},
+          close: () => {
+            closed = true;
+          },
+        }) as unknown as ClaudeCodeQuery,
+    };
+
+    await expect(fetchClaudeCodeModels({ sdk, timeoutMs: 5 })).rejects.toThrow('초 안에 응답하지 않았습니다');
+    expect(closed).toBe(true);
   });
 });
 
