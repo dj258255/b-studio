@@ -1213,7 +1213,7 @@ function buildPullRequestTitle(projectName: string, commits: readonly SessionCom
   if (requirementIds.length > 0) {
     // 요구사항이 하나이고 커밋도 하나면(흔한 후속 세션: 요구사항 하나를 커밋 하나로 구현) 그 커밋 제목이 이미
     // 구체적이다 — "요구사항 1개 구현과 검증 (R17)"처럼 뭉뚱그리지 않고 커밋 제목을 그대로 요약해 쓴다
-    // (버그 리포트 ADR-113: 머지돼 닫힌 이전 요구사항 19개까지 그대로 "N개 구현과 검증"으로 다시 내세웠다)
+    // (버그 리포트 ADR-115: 머지돼 닫힌 이전 요구사항 19개까지 그대로 "N개 구현과 검증"으로 다시 내세웠다)
     if (requirementIds.length === 1 && commits.length === 1) return `${PR_TITLE_PREFIX}${summarize(requestName(commits[0]!), budget)}`;
     const range = requirementIdRange(requirementIds);
     const summary = `feat: 요구사항 ${requirementIds.length}개 구현과 검증${range ? ` (${range})` : ''}`;

@@ -396,10 +396,10 @@ function statusOf(action: () => unknown): number {
 
 describe('작업 분해 실행', () => {
   // 이 둘은 반드시 이 describe의 첫 두 테스트여야 한다 — 가짜 세션 id("session-N")는 테스트마다 1부터 다시 세고
-  // (fake.counter), plans 기록은 파일 전체 테스트가 도는 동안 지워지지 않아(ADR-113이 쓰는 plans 조회가 사람이
+  // (fake.counter), plans 기록은 파일 전체 테스트가 도는 동안 지워지지 않아(ADR-115이 쓰는 plans 조회가 사람이
   // 이슈 수를 묻는 integrationIssues와 같은 방식이다) 뒤에서 도는 2레인 테스트와 같은 session-3을 또 쓰면
   // planRequirementIds가 먼저 쌓인(더 오래된) 계획을 잘못 찾는다.
-  it('통합 세션 id로 그 계획의 레인 작업·요청 글이 언급한 요구사항 id를 모은다(ADR-113, 중복 없이)', async () => {
+  it('통합 세션 id로 그 계획의 레인 작업·요청 글이 언급한 요구사항 id를 모은다(ADR-115, 중복 없이)', async () => {
     fake.plan = {
       tasks: [
         { id: 'a', title: '[R2] 로그인 화면', request: '[id:a] [R2] 로그인 화면을 만들어줘', paths: ['web/a'], dependsOn: [] },

@@ -43,7 +43,7 @@ describe('POST /api/sessions/[id]/export/preview', () => {
     expect(mocks.previewExport).toHaveBeenCalledWith('s1', { issues: [10, 12], planRequirementIds: [] });
   });
 
-  it('통합 세션이면(계획이 요구사항을 언급했으면) 그 id들을 그대로 미리보기에 넘긴다(ADR-113)', async () => {
+  it('통합 세션이면(계획이 요구사항을 언급했으면) 그 id들을 그대로 미리보기에 넘긴다(ADR-115)', async () => {
     mocks.planRequirementIds.mockReturnValue(['R2', 'R5']);
     await post({});
     expect(mocks.sessionRequirementIssueNumbers).toHaveBeenCalledWith('s1', ['R2', 'R5']);

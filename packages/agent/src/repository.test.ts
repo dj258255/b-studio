@@ -248,7 +248,7 @@ describe('buildPullRequest', () => {
     expect(title).toBe('[b-studio] feat: 요구사항 3개 구현과 검증 (R2~R23)');
   });
 
-  it('요구사항이 하나이고 커밋도 하나면 "N개 구현과 검증"으로 뭉뚱그리지 않고 그 커밋 제목을 그대로 요약한다(ADR-113)', () => {
+  it('요구사항이 하나이고 커밋도 하나면 "N개 구현과 검증"으로 뭉뚱그리지 않고 그 커밋 제목을 그대로 요약한다(ADR-115)', () => {
     const { title } = buildPullRequest({
       projectName: 'orders',
       base: 'main',

@@ -2965,7 +2965,7 @@ async function pullRequestDraft(
 ): Promise<PullRequestDraft & { info: RepositoryInfo }> {
   const info = (await session.checkpoints.repository())!;
   const commits = await session.checkpoints.sessionCommits();
-  // 지금 세션 HEAD에서 검증됨이고 이번 세션 범위 안인 요구사항(ADR-113, ADR-092 개정) — 제목·Closes·
+  // 지금 세션 HEAD에서 검증됨이고 이번 세션 범위 안인 요구사항(ADR-115, ADR-092 개정) — 제목·Closes·
   // Implements가 모두 이 기준을 쓴다
   const { refs, closedIssues, closesTracking } = await verifiedRequirementSummary(session, commits, info, planRequirementIds);
   const draft = buildPullRequest({

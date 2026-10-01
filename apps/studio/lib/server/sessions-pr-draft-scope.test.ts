@@ -11,7 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const execFileAsync = promisify(execFile);
 
 /**
- * PR 초안의 기본 연결 이슈·제목 범위(ADR-113)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
+ * PR 초안의 기본 연결 이슈·제목 범위(ADR-115)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 체크포인트, 요구사항 평가(getSessionRequirements).
  * 가짜로 바꾸는 것: 샌드박스(Docker)와 원격 이슈 목록 조회(listIssues). 실제 네트워크·Docker 호출은 없다.
  */
@@ -229,7 +229,7 @@ function issue(number: number, state: 'open' | 'closed'): IssueSummary {
   return { number, state, title: `이슈 #${number}`, author: 'kim', labels: [], updatedAt: '2026-01-01T00:00:00.000Z', url: `https://github.com/acme/verifyproj/issues/${number}` };
 }
 
-describe('PR 초안의 요구사항 범위(ADR-113)', () => {
+describe('PR 초안의 요구사항 범위(ADR-115)', () => {
   it('작업 분해 통합 세션(계획이 요구사항을 언급함)은 ADR-110대로 검증된 요구사항을 전부 기본 연결한다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;
