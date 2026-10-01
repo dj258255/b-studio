@@ -438,7 +438,7 @@ describe('작업 분해 실행', () => {
     expect(fake.docsCommitted.map((entry) => entry.sessionId)).toEqual(['origin-1']);
   });
 
-  it('설계 파이프라인(ADR-0XX): 요청이 언급한 요구사항을 다루는 설계가 승인되지 않았으면 레인을 만들기 전에 409로 막는다', async () => {
+  it('설계 파이프라인(ADR-100): 요청이 언급한 요구사항을 다루는 설계가 승인되지 않았으면 레인을 만들기 전에 409로 막는다', async () => {
     const workDir = path.join(fake.root, 'origin-2');
     mkdirSync(path.join(workDir, 'docs/design'), { recursive: true });
     writeFileSync(

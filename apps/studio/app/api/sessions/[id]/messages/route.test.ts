@@ -23,7 +23,7 @@ beforeEach(() => {
   mocks.assertDesignApprovedForRequest.mockImplementation(async () => {});
 });
 
-describe('POST /api/sessions/[id]/messages — 설계 파이프라인 승인 게이트(ADR-0XX)', () => {
+describe('POST /api/sessions/[id]/messages — 설계 파이프라인 승인 게이트(ADR-100)', () => {
   it('구현(build) 요청은 보내기 전에 설계 승인을 확인한다', async () => {
     const response = await post({ text: '[R1] 구현해 주세요', intent: 'build' });
 

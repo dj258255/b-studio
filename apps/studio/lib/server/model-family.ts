@@ -1,5 +1,5 @@
 /**
- * 세션 백엔드·모델을 설계 파이프라인(ADR-0XX)의 모델 계열로 뭉친다.
+ * 세션 백엔드·모델을 설계 파이프라인(ADR-100)의 모델 계열로 뭉친다.
  * "검토는 다른 계열 모델이" 원칙을 지키려면 구현·검토가 같은 계열인지 알아야 한다 — claude-code 백엔드와
  * api 백엔드의 anthropic 모델은 둘 다 claude 계열이고, codex·commandcode(DeepSeek)·opencode는 각자 계열이다.
  * 순수 판정(reviewIndependence)은 @b-studio/agent의 design-pipeline.ts에 있다. 여기는 이 서버가 아는

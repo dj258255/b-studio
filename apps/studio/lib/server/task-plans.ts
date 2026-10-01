@@ -250,7 +250,7 @@ export async function createTaskPlan(input: {
     await commitPendingWorkingCopyDocs(input.sourceSessionId, '문서: 작업을 나누기 전 남은 문서 변경을 정리한다').catch((error: unknown) => {
       console.error(`[b-studio] 세션 ${input.sourceSessionId}의 문서 체크포인트를 남기지 못했습니다`, error);
     });
-    // 설계 파이프라인(ADR-0XX): 레인으로 나누는 것도 구현의 한 형태다. 요청이 언급한 요구사항을 다루는 설계가
+    // 설계 파이프라인(ADR-100): 레인으로 나누는 것도 구현의 한 형태다. 요청이 언급한 요구사항을 다루는 설계가
     // 있는데 아직 승인되지 않았으면 레인을 만들기 전에 막는다(옵트인 — 그 요구사항을 다루는 설계가 없으면 통과)
     await assertDesignApprovedForRequest(input.sourceSessionId, input.request);
   }

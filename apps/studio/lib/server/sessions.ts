@@ -2892,7 +2892,7 @@ async function sessionRequestTexts(session: Session): Promise<string[]> {
  * review-round.ts의 runReviewRounds가 이를 보고 라운드를 시작하기 전에 바로 멈춘다(stopped)
  */
 function reviewAsk(session: Session, reviewerModelId?: string): ModelAsk | undefined {
-  // 설계 파이프라인(ADR-0XX): 사람이 리뷰어 모델을 명시적으로 고르면(구현과 다른 계열을 고르는 용도) 세션 백엔드와 무관하게
+  // 설계 파이프라인(ADR-100): 사람이 리뷰어 모델을 명시적으로 고르면(구현과 다른 계열을 고르는 용도) 세션 백엔드와 무관하게
   // 모델 레지스트리(api 호출 경로)로 그 모델을 부른다. api는 공급자가 여러 개라 레지스트리만으로도 다른 계열 리뷰어를 둘 수 있다
   if (reviewerModelId) {
     try {
@@ -2981,7 +2981,7 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
       if (repository) session.snapshot.repository = repository;
     },
   };
-  // 설계 파이프라인(ADR-0XX): 구현 모델 계열과 리뷰어 계열이 같으면 "같은 계열 검토(독립성 낮음)"로 남긴다 — 통과해도
+  // 설계 파이프라인(ADR-100): 구현 모델 계열과 리뷰어 계열이 같으면 "같은 계열 검토(독립성 낮음)"로 남긴다 — 통과해도
   // 파이프라인의 "성공" 판정에는 세지 않는다(reviewIndependence). 리뷰어를 따로 고르지 않으면 이 세션의 평소 경로를
   // 그대로 쓰므로(reviewAsk) 구현과 같은 계열이다
   const implementerFamily = modelFamily(sessionBackend(session.snapshot), session.snapshot.modelId);

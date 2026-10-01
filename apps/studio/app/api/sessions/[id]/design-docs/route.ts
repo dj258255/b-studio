@@ -3,7 +3,7 @@ import { authorizeSession, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { listSessionDesignDocs, saveSessionDesignDoc } from '@/lib/server/design-pipeline';
 
-/** 설계 파이프라인(ADR-0XX) "파이프라인" 하위 화면: 이 세션의 설계 문서 목록을 읽거나 새로 만든다 */
+/** 설계 파이프라인(ADR-100) "파이프라인" 하위 화면: 이 세션의 설계 문서 목록을 읽거나 새로 만든다 */
 export async function GET(request: Request, context: RouteContext<'/api/sessions/[id]/design-docs'>) {
   try {
     const user = requireUser(request.headers);
