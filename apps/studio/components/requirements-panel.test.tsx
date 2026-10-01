@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createView } from "@/lib/session-view";
 import type { SessionSnapshot } from "@/lib/studio-events";
-import { ImportFlow, RequirementPublishFlow, RequirementsList, RequirementsPanel, shouldConfirmBeforePlanAll } from "./requirements-panel";
+import { formatElapsed, ImportFlow, RequirementPublishFlow, RequirementsList, RequirementsPanel, shouldConfirmBeforePlanAll } from "./requirements-panel";
 
 const baseSnapshot: SessionSnapshot = {
   id: "s1",
@@ -46,6 +46,59 @@ describe("ImportFlow initialSpecText(대화 '요구사항에 반영', ADR-094)",
     const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} />);
 
     expect(html).toContain("만들 것을 적어 주세요");
+  });
+
+  it("마운트 때부터 뽑는 중이면 경과 시간(0초)과 취소 버튼을 함께 보여준다(A)", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} initialSpecText="[R4] 주문 목록 필터" />);
+
+    expect(html).toContain("뽑는 중 · 0초");
+    expect(html).toContain("취소");
+  });
+});
+
+describe("formatElapsed(ADR-0XX, '뽑는 중' 경과 시간 표시)", () => {
+  it("1분 미만은 초만 보여준다", () => {
+    expect(formatElapsed(0)).toBe("0초");
+    expect(formatElapsed(13_000)).toBe("13초");
+    expect(formatElapsed(59_000)).toBe("59초");
+  });
+
+  it("1분 이상은 분·초를 함께 보여준다", () => {
+    expect(formatElapsed(60_000)).toBe("1분 0초");
+    expect(formatElapsed(133_000)).toBe("2분 13초");
+  });
+});
+
+describe("ImportFlow 저장 안 한 추출 결과(ADR-0XX, 버그 리포트 A)", () => {
+  const draft = {
+    savedAt: "2026-01-01T00:00:00.000Z",
+    requirements: [{ id: "R1", title: "로그인 API", kind: "api" as const, priority: "must" as const, acceptance: ["a"] }],
+    questions: [],
+    source: "model" as const,
+    referencedFiles: [],
+    outOfScope: [],
+    assumptions: [],
+    manualSteps: [],
+  };
+
+  it("세션 요구사항 스냅샷에 저장 안 한 추출 결과가 실려 있으면 이어서 보기/버리기 배너를 보여준다", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} draft={draft} />);
+
+    expect(html).toContain("저장 안 한 추출 결과가 있습니다");
+    expect(html).toContain("이어서 보기");
+    expect(html).toContain("버리기");
+  });
+
+  it("draft가 없으면 배너를 보여주지 않는다", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} />);
+
+    expect(html).not.toContain("저장 안 한 추출 결과가 있습니다");
+  });
+
+  it("initialSpecText로 바로 추출하는 경우(요구사항에 반영)는 draft가 있어도 배너를 보여주지 않는다(곧 새 결과로 덮어쓴다)", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} initialSpecText="[R4] 주문 목록 필터" draft={draft} />);
+
+    expect(html).not.toContain("저장 안 한 추출 결과가 있습니다");
   });
 });
 

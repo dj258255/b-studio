@@ -179,7 +179,7 @@ async function readJson<T>(response: Response): Promise<T & { error?: string }> 
 }
 
 /** 경과 시간을 "2분 13초"/"13초"로 보여준다(A — "뽑는 중" 버튼 옆에 붙인다) */
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -979,31 +979,27 @@ export function ImportFlow({
   // 곧바로 부르지 않고 초기값으로 미리 반영해 두는 식이다(리액트 컴파일러 린트가 막는 패턴을 피한다)
   const [busy, setBusy] = useState(() => Boolean(initialSpecText));
   const [error, setError] = useState<string>();
-  // A: "뽑는 중 · 2분 13초" 경과 시간과 취소 — busy/recommending이 켜질 때마다 0부터 다시 잰다
+  // A: "뽑는 중 · 2분 13초" 경과 시간과 취소 — 시작 시각은 busy/recommending을 켜는 쪽(extract·recommend·초기 추출
+  // effect)이 setState와 같은 틱에 ref로 남긴다. 아래 effect는 그 값을 기준으로 간격만 재깍여 setState를 구독
+  // 콜백 안에서만 부른다(effect 본문에서 곧바로 부르지 않는다 — 리액트 컴파일러 린트가 막는 패턴이다)
   const [elapsedMs, setElapsedMs] = useState(0);
   const [recommendElapsedMs, setRecommendElapsedMs] = useState(0);
+  // 0은 렌더 중에 Date.now()를 부르지 않으려는 자리표시값일 뿐이다(리액트 컴파일러 린트가 렌더 중 비순수 호출을
+  // 막는다) — mount 때 뽑는 중으로 시작하면(initialSpecText) 아래 effect가, 사람이 누르면 extract·recommend가 채운다
+  const extractStartedAtRef = useRef(0);
+  const recommendStartedAtRef = useRef(0);
   const extractAbortRef = useRef<AbortController | undefined>(undefined);
   const recommendAbortRef = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
-    if (!busy) {
-      setElapsedMs(0);
-      return;
-    }
-    const startedAt = Date.now();
-    setElapsedMs(0);
-    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    if (!busy) return;
+    const timer = setInterval(() => setElapsedMs(Date.now() - extractStartedAtRef.current), 1000);
     return () => clearInterval(timer);
   }, [busy]);
 
   useEffect(() => {
-    if (!recommending) {
-      setRecommendElapsedMs(0);
-      return;
-    }
-    const startedAt = Date.now();
-    setRecommendElapsedMs(0);
-    const timer = setInterval(() => setRecommendElapsedMs(Date.now() - startedAt), 1000);
+    if (!recommending) return;
+    const timer = setInterval(() => setRecommendElapsedMs(Date.now() - recommendStartedAtRef.current), 1000);
     return () => clearInterval(timer);
   }, [recommending]);
 
@@ -1011,6 +1007,7 @@ export function ImportFlow({
   // state(specText)를 거치지 않고 바로 이 값으로 요청해야 "방금 setSpecText한 값"을 또 기다리는 경합이 없다
   useEffect(() => {
     if (!initialSpecText) return;
+    extractStartedAtRef.current = Date.now();
     let cancelled = false;
     fetch(`/api/sessions/${sessionId}/requirements/extract`, {
       method: "POST",
@@ -1071,6 +1068,8 @@ export function ImportFlow({
 
   async function extract(withAnswers: boolean) {
     setBusy(true);
+    setElapsedMs(0);
+    extractStartedAtRef.current = Date.now();
     setError(undefined);
     const controller = new AbortController();
     extractAbortRef.current = controller;
@@ -1111,6 +1110,8 @@ export function ImportFlow({
   async function recommend() {
     if (!preview || preview.questions.length === 0) return;
     setRecommending(true);
+    setRecommendElapsedMs(0);
+    recommendStartedAtRef.current = Date.now();
     setError(undefined);
     const controller = new AbortController();
     recommendAbortRef.current = controller;

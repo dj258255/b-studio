@@ -3981,6 +3981,44 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-0XX 요구사항 추출·추천 호출에 경과 시간·취소·제한 시간·저장 안 한 결과 되찾기를 더한다
+
+상태: 채택
+관련: ADR-090, ADR-092
+
+### 맥락
+- 실제 사용(dogfooding) 중 "요구사항" 탭을 쓰다가 몇 가지 불편함과 위험한 틈이 드러났다. EARS·시나리오까지 뽑는 "요구사항 뽑기"는 3~6분, "추천 값으로 채우기"는 약 1분이 걸리는데 화면은 "뽑는 중" 버튼 글자만 바뀔 뿐 얼마나 더 걸릴지, 멈출 방법이 있는지 전혀 보여주지 않았다. 더 나쁘게는, 추출이 도는 동안 개발 서버가 재시작되면(코드를 고쳐 핫 리로드) 서버 쪽 작업은 통째로 사라지는데 브라우저는 그 사실을 알 길이 없어 "뽑는 중"에 영원히 멈춘 것처럼 보였다.
+- 같은 라운드에서 "저장소 이슈"로 b-studio가 이미 발행한 추적 이슈(표 + 하위 이슈 링크로 이뤄진 본문)를 가져오면, 그 표까지 그대로 추출 모델에 넘겨 모델이 명세에 없는 인수 조건을 지어내는 문제도 함께 발견했다(이 ADR이 아니라 ADR-092의 범위이지만, 같은 "저장소 이슈" 가져오기 호출 경로를 고치면서 함께 손댔다).
+- 세 문제 모두 "한 번의 긴 모델 호출을 감싸는 방식"이 비슷해 한 ADR로 묶는다: (1) 진행 상황·취소가 보이지 않는다, (2) 제한 시간이 없어 느린 백엔드가 영원히 멈출 수 있다, (3) 서버 재시작·새로고침으로 화면과 서버 상태가 어긋나도 알아챌 방법이 없다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 세션 키로 백그라운드 작업(job)을 띄우고 화면이 폴링·구독한다 | 가장 견고하다(새로고침해도 진행 중인 작업에 다시 붙을 수 있다)지만, 작업 큐·상태 기계를 새로 만들어야 해 이번 라운드 범위에 비해 너무 크다 |
+| **B. 요청-응답은 그대로 두고 AbortSignal을 요청별로 꿰어(취소·제한 시간), 끝까지 마친 결과만 세션 상태 폴더에 사이드카로 남긴다** | 채택. 진행 중인 작업 자체를 재개하지는 못하지만(다시 열면 처음부터 다시 뽑아야 한다), 적어도 끝까지 마친 결과를 잃지 않고 "뽑는 중"에 영원히 멈추는 것은 막는다 — A보다 훨씬 작은 변경으로 실제 불편의 대부분을 없앤다 |
+| C. 클라이언트 쪽 타임아웃만 두고(서버는 그대로) 일정 시간 뒤 "응답이 없습니다"로 포기한다 | 서버 쪽 모델 호출이 계속 도는 채로 남아(리소스 낭비) 다음 요청과 경합할 수 있다. 서버도 함께 멈춰야 한다(채택안의 일부) |
+
+### 결정
+1. **요청별 취소**: 클라이언트가 추출·추천 요청마다 `AbortController`를 만들어 `fetch`의 `signal`로 넘기고, "취소" 버튼이 그 컨트롤러를 끊는다. 두 라우트(`POST /api/sessions/[id]/requirements/{extract,recommend}`)는 Next.js가 주는 `request.signal`(클라이언트가 끊거나 연결이 끊기면 그대로 신호를 받는다)을 그대로 `previewSessionRequirementsExtraction`/`recommendSessionRequirementQuestions`의 `options.signal`로 넘긴다.
+2. **서버 쪽 제한 시간**: 두 함수 모두 `AbortSignal.timeout`(추출 10분·추천 3분)과 세션 전체 중단 신호(`session.stop.signal`), 요청 신호를 `AbortSignal.any`로 묶어 모델 호출에 넘긴다. 제한 시간을 넘기면(추출은 결정론적 대체 파서로 조용히 넘어가는 대신) `StudioError(408, …)`로 분명한 한국어 오류("요구사항 추출이 제한 시간(10분)을 넘어 자동으로 멈췄습니다…")를 던진다. 사람이 직접 취소했으면 400, 세션 자체가 멈췄으면 409로 구분한다.
+3. **저장 안 한 추출 결과를 세션 상태 폴더에 남긴다**: `previewSessionRequirementsExtraction`의 모든 반환 경로가 `finishExtractionPreview`를 거쳐 결과(모델·대체 파서·관리형 되읽기 어느 경로든)를 `<stateDir>/.git/b-studio/requirements-draft.json`에 남긴다(session.json과 같은 자리 — `docs/` 밖이라 커밋에도, 에이전트 도구에도 걸리지 않는다). `GET /api/sessions/[id]/requirements`(요구사항 탭이 열 때 항상 부르는 호출)의 스냅샷에 `draft` 필드로 함께 실어, 화면이 추가 호출 없이 "저장 안 한 추출 결과가 있습니다 · 이어서 보기 / 버리기" 배너를 보여준다. 저장(apply)에 성공하면 더는 초안이 아니므로 그 자리에서 지운다. `DELETE /api/sessions/[id]/requirements/draft`가 "버리기"를 처리한다.
+4. **"저장소 이슈" 가져오기의 모델 호출 생략(ADR-092 보강)**: `previewSessionRequirementsExtraction`이 `issueNumber`를 받으면 먼저 그 이슈(또는 이슈가 `b-studio:req` 라벨을 달고 하위 이슈 번호 표를 담은 추적 이슈라면 그 하위 이슈들)가 b-studio 관리형 영역(`<!-- b-studio:req id=… -->`)을 담고 있는지 본다. 있으면 `packages/agent`의 `draftManagedRequirement`(관리형 영역의 EARS·시나리오·NFR·인수 조건을 모델 없이 그대로 되읽는다, `parseManagedRegion` 재사용)와 `managedRequirementToRequirement`로 같은 id·개정 그대로 복원하고(`extractTrackingSubIssueNumbers`로 추적 이슈 표의 `#N` 링크를 뽑는다 — GitHub의 sub_issues API 대신 표를 쓰면 Gitea에서도 똑같이 동작한다), `source: 'managed'`와 "b-studio가 발행한 이슈에서 그대로 가져왔습니다 (N개)"를 돌려준다. 관리형 영역이 전혀 없으면(사람이 만든 평범한 이슈) 평소대로 모델 추출(또는 결정론적 대체 파서)로 넘어간다.
+
+### 검증 결과
+- `packages/agent/src/requirement-issues.test.ts`(보강): `draftManagedRequirement`(EARS·시나리오·NFR까지 되읽기, 관리형 영역 없으면 undefined, 필드가 없는 관리형 영역은 비워 둔다)·`managedRequirementToRequirement`·`extractTrackingSubIssueNumbers`(표의 `#N` 순서대로·중복 없이, 링크 없으면 빈 배열).
+- `apps/studio/app/api/sessions/[id]/requirements/{extract,recommend}/route.test.ts`(보강): 두 라우트 모두 `{ signal: expect.any(AbortSignal) }`로 호출하는 것을 확인했다.
+- `apps/studio/app/api/sessions/[id]/requirements/draft/route.test.ts`(신규): "버리기" 호출·권한 없음(403)을 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`(보강): `formatElapsed`(초/분초 표기)·마운트 때부터 "뽑는 중"이면 경과 시간·취소 버튼이 함께 보이는 것·`draft` prop이 있으면 배너가 보이고 없으면 안 보이는 것·`initialSpecText`로 바로 추출하는 경우(요구사항에 반영)는 draft가 있어도 배너를 띄우지 않는 것(이 저장소의 컴포넌트 테스트 관례대로 `renderToStaticMarkup`과 마운트 시 동기적으로 계산되는 상태만 확인했다 — fetch 이후 상태 전환은 라우트·서버 쪽 테스트로 갈음한다).
+- `pnpm -r typecheck`(6개 패키지) 통과, `pnpm vitest run --exclude '.claude/**'`은 이 변경 범위 테스트 전부 통과.
+- 확인하지 못한 범위: 실제 느린 백엔드로 10분 제한 시간이 실제로 걸리는 것은 재현하지 않았다(모킹한 `AbortSignal.timeout`/빠른 실패 경로만 코드 리뷰로 확인) — 실 사용에서 제한 시간에 걸리는 사례가 쌓이면 임계값(10분·3분)을 다시 본다.
+
+### 감수한 트레이드오프
+- **진행 중인 작업 자체를 재개하지 못한다(선택지 A를 포기한 대가).** 서버가 재시작되면 그 시점까지의 모델 호출은 사라지고, 다음에 열었을 때는 "처음부터 다시 뽑기"만 할 수 있다 — 다만 *끝까지 마친* 결과는 잃지 않으므로, 가장 흔한 사례(재시작 전에 이미 끝났는데 화면만 몰랐던 경우)는 해결한다.
+- **저장 안 한 추출 결과는 세션당 하나만 남긴다.** 두 번째 추출을 돌리면 첫 번째 결과는 (아직 저장 전이라도) 조용히 덮어쓴다 — 여러 추출 결과를 동시에 들고 비교하는 시나리오는 다루지 않는다.
+- **"저장소 이슈" 관리형 되읽기는 추적 이슈의 표에 적힌 `#N` 링크만 따라간다.** 표를 사람이 직접 지우거나 고치면(원본 파일이 아니라 이슈 쪽을) 하위 이슈를 못 찾아 빈손으로 평소 모델 추출로 넘어간다 — 표는 b-studio가 자동으로 관리하므로 평소에는 문제가 안 되지만, 사람이 이슈를 직접 고치는 드문 경우에는 다시 모델을 부르게 된다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
