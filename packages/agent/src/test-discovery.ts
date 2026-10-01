@@ -64,6 +64,54 @@ const JUNIT_CLASS = /\bclass\s+(\w+)/;
 // public void testFoo(), void testFoo() throws Exception, fun testFoo() (Kotlin)
 const JUNIT_METHOD = /(?:^|\s)(?:fun|void|[\w<>[\],.]+)\s+(\w+)\s*\(/;
 
+/** 인자가 여러 줄에 걸쳐도 이어 읽는 최대 줄 수. 닫는 괄호를 못 찾으면 표시 이름 없이 넘어간다 */
+const ANNOTATION_ARGUMENT_MAX_LINES = 20;
+
+/**
+ * `@DisplayName(` 뒤 인자를 닫는 괄호까지 읽는다. `@DisplayName("앞" + "뒤")`처럼 문자열을 이어 붙이거나 여러 줄에
+ * 걸쳐 써도 받는다 — 한 줄만 보면 첫 문자열만 읽거나(같은 줄) 아예 놓쳐서(여러 줄) 표시 이름이 메서드 이름으로
+ * 남고, 실행 결과(JUnit 보고서의 표시 이름)와 이어지지 않아 "안 돌림"으로 보였다. 문자열 안의 괄호는 세지 않는다
+ */
+function readAnnotationArgument(lines: readonly string[], startLine: number, openIndex: number): { text: string; endLine: number } | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let text = '';
+  const lastLine = Math.min(lines.length - 1, startLine + ANNOTATION_ARGUMENT_MAX_LINES);
+  for (let lineIndex = startLine; lineIndex <= lastLine; lineIndex++) {
+    const line = lines[lineIndex]!;
+    for (let col = lineIndex === startLine ? openIndex : 0; col < line.length; col++) {
+      const char = line[col]!;
+      if (inString) {
+        text += char;
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') {
+        inString = true;
+        text += char;
+      } else if (char === '(') {
+        if (depth > 0) text += char;
+        depth++;
+      } else if (char === ')') {
+        depth--;
+        if (depth === 0) return { text, endLine: lineIndex };
+        text += char;
+      } else if (depth > 0) text += char;
+    }
+    text += '\n';
+  }
+  return undefined;
+}
+
+/** 인자 안의 문자열 조각을 모두 이어 붙인다(`"앞" + "뒤"` → `앞뒤`) */
+function joinStringLiterals(argument: string): string | undefined {
+  const parts = [...argument.matchAll(/"((?:\\.|[^"\\])*)"/g)].map((match) => match[1]!);
+  return parts.length > 0 ? parts.join('') : undefined;
+}
+
 interface JunitStackFrame {
   suite: DiscoveredSuite;
   /** 이 스위트 본문이 끝나는 중괄호 깊이(이 값 아래로 내려가면 스위트를 닫는다) */
@@ -86,14 +134,23 @@ export function discoverJunitFile(filePath: string, content: string): Discovered
     const line = lines[i]!;
     const lineNo = i + 1;
 
+    let argumentEndLine: number | undefined;
     for (const match of line.matchAll(JUNIT_ANNOTATION)) {
       const name = match[1];
       if (name === 'Test' || name === 'ParameterizedTest' || name === 'RepeatedTest') pendingIsTest = true;
       else if (name === 'Disabled') pendingDisabled = true;
       else if (name === 'DisplayName') {
-        const text = /"((?:\\.|[^"\\])*)"/.exec(match[2] ?? '');
-        if (text) pendingDisplayName = text[1];
+        const openIndex = line.indexOf('(', match.index + match[0].indexOf('DisplayName'));
+        const argument = openIndex >= 0 ? readAnnotationArgument(lines, i, openIndex) : undefined;
+        const text = argument ? joinStringLiterals(argument.text) : undefined;
+        if (text !== undefined) pendingDisplayName = text;
+        if (argument && argument.endLine > i) argumentEndLine = argument.endLine;
       }
+    }
+    // 여러 줄에 걸친 인자는 이어지는 줄까지 읽었으므로 건너뛴다(그 줄의 문자열 속 중괄호·괄호를 코드로 세지 않게)
+    if (argumentEndLine !== undefined) {
+      i = argumentEndLine;
+      continue;
     }
 
     const classMatch = JUNIT_CLASS.exec(line);
