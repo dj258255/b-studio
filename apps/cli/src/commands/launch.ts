@@ -1,4 +1,5 @@
 import { execFile, spawn as spawnProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { closeSync, openSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -67,6 +68,15 @@ export interface LaunchDeps {
   isAlive: (pid: number) => boolean;
   /** 분리해 띄운 프로세스 그룹에 신호를 보낸다(`studio stop`과 같은 방식) */
   killGroup: (pid: number, signal: NodeJS.Signals) => void;
+  /**
+   * 지금 pnpm-lock.yaml의 해시. 읽을 수 없으면(예: 테스트의 가짜 repoRoot) undefined를 돌려주고,
+   * 그러면 의존성 확인 단계를 건너뛴다 — 실제 저장소에는 항상 pnpm-lock.yaml이 있다
+   */
+  lockfileHash: () => Promise<string | undefined>;
+  /** 마지막으로 `pnpm install`을 성공시킨 시점의 lockfileHash. 적힌 적 없으면 undefined */
+  readInstallMarker: () => Promise<string | undefined>;
+  /** `pnpm install`이 성공한 뒤 지금 해시를 적어 둔다(다음 launch가 다시 설치하지 않게) */
+  writeInstallMarker: (hash: string) => Promise<void>;
   readyTimeoutMs?: number;
   readyIntervalMs?: number;
 }
@@ -183,14 +193,30 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
     }
   }
 
-  // 3. 띄우기 — 부모가 끝나도 살아 있게 분리하고, 로그·PID를 남긴다
+  // 3. 의존성 — pnpm-lock.yaml이 마지막으로 설치를 끝냈을 때와 달라졌으면 먼저 설치한다.
+  // git pull로 새 의존성이 들어와도 아무도 pnpm install을 불러 주지 않아서, 안 그러면 Next.js가
+  // "Module not found" 오류 화면을 띄운 채로 서버가 뜬다
+  const lockHash = await deps.lockfileHash();
+  if (lockHash !== undefined && lockHash !== (await deps.readInstallMarker())) {
+    info('pnpm-lock.yaml이 바뀌어 의존성을 설치합니다… (pnpm install)');
+    const install = await deps.exec('pnpm', ['install', '--frozen-lockfile', '--prefer-offline']);
+    if (install.stdout.trim()) info(install.stdout.trimEnd());
+    if (install.stderr.trim()) console.error(install.stderr.trimEnd());
+    if (install.code !== 0) {
+      console.error('pnpm install이 실패했습니다. 깨진 서버를 띄우지 않고 멈춥니다. 위 출력을 확인하세요.');
+      return 1;
+    }
+    await deps.writeInstallMarker(lockHash);
+  }
+
+  // 4. 띄우기 — 부모가 끝나도 살아 있게 분리하고, 로그·PID를 남긴다
   await mkdir(path.dirname(deps.paths.pid), { recursive: true });
   const env = { ...deps.env, B_STUDIO_MODE: envMode };
   const child = deps.spawn('pnpm', launchArgs(options.port), { cwd: deps.repoRoot, env, logPath: deps.paths.log });
   await writeFile(deps.paths.pid, `${JSON.stringify({ pid: child.pid, port: options.port, mode: options.mode }, null, 2)}\n`, { mode: 0o600 });
   info(`스튜디오를 시작합니다 (모드 ${options.mode}, 포트 ${options.port}, 로그 ${deps.paths.log})`);
 
-  // 4. 준비 확인 — 최대 90초, 1초 간격
+  // 5. 준비 확인 — 최대 90초, 1초 간격
   const timeoutMs = deps.readyTimeoutMs ?? READY_TIMEOUT_MS;
   const intervalMs = deps.readyIntervalMs ?? READY_INTERVAL_MS;
   const ready = await waitForReady(deps, url, timeoutMs, intervalMs);
@@ -201,7 +227,7 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
     return 1;
   }
 
-  // 5. 열기 / JSON 한 줄
+  // 6. 열기 / JSON 한 줄
   if (json) {
     console.log(launchResultJson({ url: origin, port: options.port, mode: envMode, pid: child.pid ?? null, started: true }));
     return 0;
@@ -277,6 +303,28 @@ function realSpawn(command: string, args: readonly string[], { cwd, env, logPath
   }
 }
 
+/** 저장소 루트의 pnpm-lock.yaml 해시. 파일이 없으면(가짜 repoRoot 등) undefined */
+async function realLockfileHash(repoRoot: string): Promise<string | undefined> {
+  try {
+    const content = await readFile(path.join(repoRoot, 'pnpm-lock.yaml'));
+    return createHash('sha256').update(content).digest('hex');
+  } catch {
+    return undefined;
+  }
+}
+
+/** 마지막 설치 표지 파일. 없으면(한 번도 설치한 적 없음) undefined */
+async function realReadInstallMarker(file: string): Promise<string | undefined> {
+  const raw = await readFile(file, 'utf8').catch(() => undefined);
+  const trimmed = raw?.trim();
+  return trimmed || undefined;
+}
+
+async function realWriteInstallMarker(file: string, hash: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, `${hash}\n`, { mode: 0o600 });
+}
+
 function realOpen(platform: NodeJS.Platform) {
   const command = platform === 'darwin' ? 'open' : 'xdg-open';
   return (url: string): Promise<void> =>
@@ -288,16 +336,21 @@ function realOpen(platform: NodeJS.Platform) {
 /** 실제 환경에서 도는 launch deps */
 export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): LaunchDeps {
   const launchDir = path.join(env.HOME ?? homedir(), '.cache', 'b-studio', 'launch');
+  const repoRoot = path.resolve(import.meta.dirname, '../../../..');
+  const installMarker = path.join(launchDir, 'install.hash');
   return {
     platform,
     env,
-    repoRoot: path.resolve(import.meta.dirname, '../../../..'),
+    repoRoot,
     paths: { log: path.join(launchDir, 'studio.log'), pid: path.join(launchDir, 'studio.pid') },
     probe: realProbe,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     exec: realExec,
     spawn: realSpawn,
     open: realOpen(platform),
+    lockfileHash: () => realLockfileHash(repoRoot),
+    readInstallMarker: () => realReadInstallMarker(installMarker),
+    writeInstallMarker: (hash) => realWriteInstallMarker(installMarker, hash),
     // `studio stop`과 같은 방식: 살아 있는지는 신호 0으로, 죽이기는 프로세스 그룹(-pid)으로
     isAlive: (pid) => {
       try {
