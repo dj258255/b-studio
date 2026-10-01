@@ -267,7 +267,7 @@ async function disableSpringDockerCompose(root: string, services: DetectedServic
 }
 
 /**
- * 프론트엔드(Next.js·Vite) 코드가 읽는 소스 안의 흔한 자리. lib/api.ts(실제 저장소에서 확인한 자리, docs/decisions.md ADR-0XX 참고)를
+ * 프론트엔드(Next.js·Vite) 코드가 읽는 소스 안의 흔한 자리. lib/api.ts(실제 저장소에서 확인한 자리, docs/decisions.md ADR-095 참고)를
  * 먼저 보고, 없으면 흔히 쓰는 몇 자리만 본다 — appConfigText와 같은 생각으로, 저장소 전체를 훑지 않고 알려진 자리만 본다
  */
 const FRONTEND_API_CLIENT_CANDIDATES = [
@@ -306,7 +306,7 @@ async function detectFrontendBackendRef(
  * 자동 연결한다. 실제 호스트 포트는 `docker compose up` 뒤에야 정해지므로(샌드박스가 무작위로 고른다), 값 대신
  * 자리 표시자(`${b-studio:services.<백엔드>.publicUrl}`)를 적어 두고 packages/sandbox가 띄우기 직전에 채운다.
  * 백엔드가 CORS 허용 출처를 환경 변수로 받고 있었으면(원본 compose) 그 값도 그대로 가져온다.
- * 둘 이상의 프론트엔드·백엔드 후보가 있으면 처음 찾은 한 쌍만 연결한다(알려진 한계, ADR-0XX에 남긴다).
+ * 둘 이상의 프론트엔드·백엔드 후보가 있으면 처음 찾은 한 쌍만 연결한다(알려진 한계, ADR-095에 남긴다).
  */
 async function wireFrontendBackendUrl(
   root: string,

@@ -377,7 +377,7 @@ export const WorkflowPageCheckSchema = z
      */
     allowLoadingPlaceholder: z.boolean().optional(),
     /**
-     * browser 전용(fix/frontend-backend-url, ADR-0XX). 헤드리스 브라우저를 띄울 수 없으면(BrowserUnavailableError)
+     * browser 전용(fix/frontend-backend-url, ADR-095). 헤드리스 브라우저를 띄울 수 없으면(BrowserUnavailableError)
      * 화면을 열어 보는 대신 이 서비스·경로로 평범한 HTTP 요청을 한 번 보낸다. 응답을 받으면(상태 코드와 무관하게) 주소가
      * 살아 있다는 뜻이라 통과시키되 참고 문구를 남기고, 연결 자체가 안 되면 실패로 본다. 없으면(기본) ADR-050대로
      * 브라우저를 못 띄우면 그대로 실패한다 — 사람이 직접 적은 pageChecks는 이 결정을 그대로 둔다
