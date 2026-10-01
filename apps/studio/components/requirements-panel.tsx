@@ -402,8 +402,17 @@ interface RequirementIssueDraft {
 }
 
 /** "이슈로 발행" 흐름(ADR-092): dry-run 미리보기 → 확인 → 발행, 충돌은 가져오기·덮어쓰기·무시로 하나씩 푼다. ImportFlow와 같은 이유로 테스트가 직접 쓸 수 있게 내보낸다 */
+/** "이슈로 발행" 미리보기 응답. 외부 저장소에 쓰는 동작이라 대상 저장소와 추적 이슈 처리를 함께 받는다 */
+interface RequirementPublishPreview {
+  plan: RequirementPlanEntry[];
+  summary: RequirementPlanSummary;
+  /** 예: github.com/dj258255/test (옛 서버 응답에는 없을 수 있다) */
+  repository?: string;
+  tracking?: { action: "create" } | { action: "update"; issue: number };
+}
+
 export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: string; onRefresh: () => void }) {
-  const [preview, setPreview] = useState<{ plan: RequirementPlanEntry[]; summary: RequirementPlanSummary }>();
+  const [preview, setPreview] = useState<RequirementPublishPreview>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [publishing, setPublishing] = useState(false);
@@ -416,7 +425,7 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
     setError(undefined);
     try {
       const response = await fetch(`/api/sessions/${sessionId}/requirements/publish/preview`, { method: "POST" });
-      const data = await readJson<{ plan: RequirementPlanEntry[]; summary: RequirementPlanSummary }>(response);
+      const data = await readJson<RequirementPublishPreview>(response);
       if (!response.ok) {
         setError(data.error ?? "미리보기를 만들지 못했습니다");
         return;
@@ -433,7 +442,7 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
     // (react-hooks/set-state-in-effect) — RequirementsPanel의 최초 목록 로딩과 같은 모양(.then 체인)으로 대신한다
     fetch(`/api/sessions/${sessionId}/requirements/publish/preview`, { method: "POST" })
       .then(async (response) => {
-        const data = await readJson<{ plan: RequirementPlanEntry[]; summary: RequirementPlanSummary }>(response);
+        const data = await readJson<RequirementPublishPreview>(response);
         if (cancelled) return;
         if (!response.ok) {
           setError(data.error ?? "미리보기를 만들지 못했습니다");
@@ -508,6 +517,12 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
         <p className="text-sm text-fail">{error}</p>
       ) : preview ? (
         <>
+          {preview.repository && (
+            <p className="text-sm text-ink">
+              대상 저장소 <span className="font-mono">{preview.repository}</span>
+              {preview.tracking && (preview.tracking.action === "update" ? ` · 추적 이슈 #${preview.tracking.issue} 갱신` : " · 추적 이슈 새로 만들기")}
+            </p>
+          )}
           <p className="text-sm text-ink">
             새로 만들기 {preview.summary.create} · 갱신 {preview.summary.update} · 그대로 {preview.summary.unchanged} · 충돌{" "}
             <span className={preview.summary.conflict > 0 ? "font-medium text-fail" : undefined}>{preview.summary.conflict}</span> · 재확인 {preview.summary.reverify}
@@ -573,7 +588,7 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
             onClick={publish}
             className="self-start rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
           >
-            {publishing ? "발행하는 중" : "확인하고 발행"}
+            {publishing ? "발행하는 중" : preview.repository ? `${preview.repository}에 발행` : "확인하고 발행"}
           </button>
           {published && (
             <div className="rounded-control bg-ground px-2.5 py-2 text-xs text-muted">

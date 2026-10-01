@@ -72,6 +72,17 @@ describe('planRequirementIssuePublish', () => {
     expect(spies.createIssue).not.toHaveBeenCalled();
     expect(spies.updateIssue).not.toHaveBeenCalled();
   });
+
+  it('미리보기가 대상 저장소와 추적 이슈 처리(새로 만들기/갱신)를 함께 알려준다', async () => {
+    const fresh = await planRequirementIssuePublish(ctx, [req()], { R1: '미착수' });
+    expect(fresh.repository).toBe('github.com/acme/orders');
+    expect(fresh.tracking).toEqual({ action: 'create' });
+
+    // 다른 세션에서 이미 발행한 추적 이슈가 저장소에 있으면(이 세션엔 발행 기록이 없어도) 갱신으로 본다
+    spies.listIssues.mockResolvedValue([{ number: 19, title: '요구사항: orders', state: 'open', labels: ['b-studio:req'], body: '표' }]);
+    const existing = await planRequirementIssuePublish(ctx, [req()], { R1: '미착수' });
+    expect(existing.tracking).toEqual({ action: 'update', issue: 19 });
+  });
 });
 
 describe('publishRequirementIssues', () => {
@@ -104,6 +115,19 @@ describe('publishRequirementIssues', () => {
     const result = await publishRequirementIssues(ctx, [req()], { R1: '미착수' });
     expect(result.tracking).toEqual({ issue: 2, url: 'y' });
     expect(result.errors).toEqual([{ id: 'R1', message: expect.stringContaining('연결 실패') }]);
+  });
+
+  it('발행 기록이 없는 세션이어도 저장소의 기존 추적 이슈를 이어 써서 중복으로 만들지 않는다', async () => {
+    spies.listIssues.mockResolvedValue([{ number: 19, title: '요구사항: orders', state: 'open', labels: ['b-studio:req'], body: '옛 표', url: 'https://github.com/acme/orders/issues/19' }]);
+    spies.createIssue.mockResolvedValueOnce({ number: 201, url: 'https://github.com/acme/orders/issues/201' }); // 하위 이슈만
+
+    const result = await publishRequirementIssues(ctx, [req()], { R1: '미착수' });
+
+    expect(spies.createIssue).toHaveBeenCalledTimes(1);
+    expect(spies.createIssue.mock.calls[0]![1]).toMatchObject({ title: '[R1] 로그인 API' });
+    expect(spies.updateIssue).toHaveBeenCalledWith(remote, 19, expect.objectContaining({ labels: ['b-studio:req'] }), expect.anything());
+    expect(result.tracking).toEqual({ issue: 19, url: 'https://github.com/acme/orders/issues/19' });
+    expect(spies.addSubIssue).toHaveBeenCalledWith(remote, 19, 201, expect.anything());
   });
 
   it('could 우선순위는 하위 이슈를 만들지 않고 추적 이슈 체크리스트에만 넣는다', async () => {

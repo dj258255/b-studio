@@ -157,6 +157,23 @@ export function trackingIssueTitle(projectNameOrSpecTitle: string): string {
   return `요구사항: ${projectNameOrSpecTitle}`;
 }
 
+/**
+ * 이미 발행한 추적 이슈를 저장소에서 찾는다. 발행 기록(docs/requirements.issues.json)은 세션 작업 복사본에만 있어
+ * 다른 세션(예: 작업 분해 통합 세션)에서 다시 발행하면 기록이 없다 — 그때 새 추적 이슈를 또 만들지 않도록
+ * `b-studio:req` 라벨과 정확한 제목으로 찾는다. 열린 것을 먼저, 그중 가장 먼저 만든(번호가 작은) 것을 고른다
+ */
+export function findTrackingIssue(
+  issues: ReadonlyArray<{ number: number; title: string; labels: readonly string[]; state: 'open' | 'closed'; url?: string }>,
+  projectName: string,
+): { issue: number; url?: string } | undefined {
+  const title = trackingIssueTitle(projectName);
+  const candidates = issues
+    .filter((issue) => issue.labels.includes(REQUIREMENT_LABEL) && typeof issue.title === 'string' && issue.title.trim() === title)
+    .sort((a, b) => (a.state === b.state ? a.number - b.number : a.state === 'open' ? -1 : 1));
+  const found = candidates[0];
+  return found ? { issue: found.number, ...(found.url ? { url: found.url } : {}) } : undefined;
+}
+
 /** 라벨 집합: b-studio:req, kind:<종류>, priority:<우선순위>, status:<상태>(그대로 한글). 없으면 저장소에 만든다(라벨 생성은 허용된 동작이다) */
 export function requirementLabelSet(requirement: Pick<RequirementForIssues, 'kind' | 'priority'>, status: RequirementStatus): string[] {
   return [REQUIREMENT_LABEL, `kind:${requirement.kind}`, `priority:${requirement.priority}`, `status:${status}`];

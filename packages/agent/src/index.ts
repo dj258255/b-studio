@@ -231,6 +231,7 @@ export {
   subIssueTitle,
   summarizeRequirementPlan,
   trackingIssueTitle,
+  findTrackingIssue,
   type ConflictResolution,
   type ImplementedRequirementRef,
   type ParsedManagedRegion,
