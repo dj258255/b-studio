@@ -20,11 +20,28 @@ function describeAccess(policy: ExternalPolicy): string {
 }
 
 /**
- * 질문 모드 요청. 시스템 프롬프트와 도구 목록은 만들기 요청과 같게 두어 프롬프트 캐시와 대화 기록을 함께 쓰고,
- * 이번 요청만 읽기 전용이라는 것을 요청 앞에 붙여 알린다. 실제로 막는 것은 도구 실행기다
+ * "조사" 모드(research)가 켜졌을 때 질문 요청 앞에 더 붙이는 안내. 이 백엔드가 실제로 웹 도구를 열어 줬으면
+ * (claude-code 러너만 해당, webToolsAvailable: true) 찾은 출처를 답에 링크로 남기라고 이르고, 아니면
+ * 웹 검색 없이 모델 지식만으로 답한다는 사실을 모델 스스로도 분명히 하라고 이른다(지어낸 출처를 막는다).
  */
-export function buildAskRequest(request: string, { toolName: t = (name: string) => name }: { toolName?: (name: string) => string } = {}): string {
-  return `[b-studio question mode] Answer or plan only. In this turn you cannot change files, run commands, restart services, or send requests other than GET and HEAD: ${t('write_file')}, ${t('edit_file')}, ${t('run_in_service')} and ${t('restart_service')} are rejected. Read files, logs, contracts, and GET responses as needed. Reply in the user's language. If the question leads to a change, end with a short concrete plan (files, migrations, API and screen changes) that the user can approve with "이대로 만들기".
+export function buildResearchBanner(webToolsAvailable: boolean): string {
+  return webToolsAvailable
+    ? '\n\n[조사 모드] You have WebSearch/WebFetch for this turn — use them to find current, real sources, and cite every source you rely on as a Markdown link in your answer.'
+    : '\n\n[조사 모드] 이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다. Answer from your own knowledge only — do not invent sources or links, and say so if the answer may be outdated.';
+}
+
+/**
+ * 질문 모드 요청. 시스템 프롬프트와 도구 목록은 만들기 요청과 같게 두어 프롬프트 캐시와 대화 기록을 함께 쓰고,
+ * 이번 요청만 읽기 전용이라는 것을 요청 앞에 붙여 알린다. 실제로 막는 것은 도구 실행기다.
+ * "조사" 모드(research)면 출처 안내(buildResearchBanner)를 한 번 더 붙인다 — 실제 웹 도구가 열렸는지는
+ * 호출하는 쪽(러너)이 안다(claude-code만 true), 이 함수는 그 값을 그대로 반영한다.
+ */
+export function buildAskRequest(
+  request: string,
+  { toolName: t = (name: string) => name, research }: { toolName?: (name: string) => string; research?: { webToolsAvailable: boolean } } = {},
+): string {
+  const researchBanner = research ? buildResearchBanner(research.webToolsAvailable) : '';
+  return `[b-studio question mode] Answer or plan only. In this turn you cannot change files, run commands, restart services, or send requests other than GET and HEAD: ${t('write_file')}, ${t('edit_file')}, ${t('run_in_service')} and ${t('restart_service')} are rejected. Read files, logs, contracts, and GET responses as needed. Reply in the user's language. If the question leads to a change, end with a short concrete plan (files, migrations, API and screen changes) that the user can approve with "이대로 만들기".${researchBanner}
 
 ${request}`;
 }

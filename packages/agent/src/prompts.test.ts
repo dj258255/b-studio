@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { ProjectGuide } from './project-guide';
-import { AGENT_LANGUAGE_INSTRUCTION, buildSystemPrompt, projectGuideSection } from './prompts';
+import { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 
 const project = {
   spec: { name: 'orders' },
@@ -100,5 +100,27 @@ describe('projectGuideSection', () => {
   it('CLAUDE.md로 대체해 읽었으면 그 이름을 그대로 절 제목에 쓴다', () => {
     const guide: ProjectGuide = { file: 'CLAUDE.md', text: '메모', charsUsed: 2 };
     expect(projectGuideSection(guide)).toContain('CLAUDE.md');
+  });
+});
+
+describe('buildAskRequest 조사(research) 안내', () => {
+  it('research를 생략하면(지금과 같다) 조사 안내를 붙이지 않는다', () => {
+    const prompt = buildAskRequest('이 함수는 뭐해?');
+    expect(prompt).not.toContain('[조사 모드]');
+    expect(prompt).toContain('이 함수는 뭐해?');
+  });
+
+  it('webToolsAvailable: true면 웹 도구로 출처를 찾아 링크로 남기라고 이른다(claude-code 러너만 실제로 연다)', () => {
+    const prompt = buildAskRequest('최신 결제 PG 수수료 비교', { research: { webToolsAvailable: true } });
+    expect(prompt).toContain('[조사 모드]');
+    expect(prompt).toContain('WebSearch/WebFetch');
+    expect(prompt).toContain('cite every source');
+  });
+
+  it('webToolsAvailable: false면 웹 검색을 지원하지 않는다는 사실과 모델 지식만으로 답하라는 지시를 함께 붙인다', () => {
+    const prompt = buildAskRequest('최신 결제 PG 수수료 비교', { research: { webToolsAvailable: false } });
+    expect(prompt).toContain('[조사 모드]');
+    expect(prompt).toContain('이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다');
+    expect(prompt).toContain('do not invent sources');
   });
 });

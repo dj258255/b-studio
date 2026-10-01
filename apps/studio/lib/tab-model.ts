@@ -45,6 +45,12 @@ export const SUB_TAB_GROUPS = {
   repository: REPOSITORY_SUB_TABS,
 } as const;
 
+// "문서" 탭(ADR-094)은 하위 탭을 두지 않는다 — 문서 목록·미리보기·편집이 한 화면 안에서 함께 움직이고(트리에서 고르면
+// 바로 미리보기·편집이 바뀐다), "코드" 탭의 파일/변경 기록처럼 서로 다른 내용을 번갈아 보여줄 하위 화면이 없다.
+// 코드 탭의 하위 탭으로 넣는 대신 독립된 위 탭으로 둔 이유: 문서 쓰기는 코드를 "보는" 작업이 아니라 조사 결과를
+// 저장소 문서로 정리하는 별도 작업 흐름이라(ADR-094의 연구 → 문서화 → 요구사항 흐름), 요구사항 탭과 같은 급의
+// 눈에 띄는 자리가 필요하다 — 코드 탭 안에 묻으면 "문서 쓰기"가 "코드 읽기"의 부속 기능처럼 보인다.
+
 export type SubTabGroup = keyof typeof SUB_TAB_GROUPS;
 
 /** 묶음의 첫 하위 탭(기본값이자 서버 렌더 값) */
@@ -88,11 +94,12 @@ export type TopTab =
   | { kind: 'service'; id: string; label: string; service: ServiceView }
   | { kind: 'external'; id: string; label: string; external: ExternalApiView }
   | { kind: 'group'; id: SubTabGroup; label: string }
+  | { kind: 'docs'; id: 'docs'; label: string }
   | { kind: 'tokens'; id: 'tokens'; label: string };
 
 /**
  * 개발 화면의 위 탭 목록을 만든다. 화면·API는 서비스마다(로그 전용 서비스는 뺀다), 사내 API는 등록한 것마다,
- * 나머지는 코드·요구사항·실행·저장소·토큰 다섯 자리로 고정한다(ADR-087).
+ * 나머지는 코드·요구사항·실행·저장소·문서·토큰 여섯 자리로 고정한다(ADR-087, 문서는 ADR-094에서 더했다).
  * 서비스 개수와 무관하게 결정론적이라 렌더링 없이 테스트한다(PreviewPanel이 이 목록으로 그린다).
  */
 export function buildTopTabs(services: readonly ServiceView[], externals: readonly ExternalApiView[] = []): TopTab[] {
@@ -105,6 +112,7 @@ export function buildTopTabs(services: readonly ServiceView[], externals: readon
     { kind: 'group', id: 'requirements', label: '요구사항' },
     { kind: 'group', id: 'run', label: '실행' },
     { kind: 'group', id: 'repository', label: '저장소' },
+    { kind: 'docs', id: 'docs', label: '문서' },
     { kind: 'tokens', id: 'tokens', label: '토큰' },
   ];
 }

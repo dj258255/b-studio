@@ -179,6 +179,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     stateDir,
     process: proc = DEFAULT_PROCESS,
     intent = 'build',
+    research = false,
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
@@ -327,7 +328,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     await linkAuthFile(home);
 
     // cmd에는 systemPrompt 자리가 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다
-    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}${projectGuideSection(guide)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}${projectGuideSection(guide)}\n\n${ask ? buildAskRequest(request, { toolName, ...(research ? { research: { webToolsAvailable: false } } : {}) }) : request}`;
 
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();

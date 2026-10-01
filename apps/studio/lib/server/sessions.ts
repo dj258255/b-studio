@@ -106,6 +106,22 @@ import {
   verifyChanges,
   workflowStages,
   Workspace,
+  adrFilePath,
+  appendRoadmapTradeoffEntry,
+  appendTroubleshootingEntry,
+  buildAdrTemplate,
+  buildDesignDocTemplate,
+  buildDocSummary,
+  buildRoadmapTradeoffEntry,
+  buildTroubleshootingEntry,
+  designDocFilePath,
+  DOCS_README_PATH,
+  nextAdrNumber,
+  nextDesignDocNumber,
+  regenerateDocsReadme,
+  ROADMAP_TRADEOFFS_PATH,
+  TROUBLESHOOTING_LOG_PATH,
+  type DocSummary,
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
@@ -776,6 +792,7 @@ export function sendMessage(
     allowBreaking,
     by,
     intent = 'build',
+    research = false,
     writableScope,
     scriptedTurns,
     board,
@@ -786,6 +803,8 @@ export function sendMessage(
     allowBreaking: boolean;
     by?: string;
     intent?: Intent;
+    /** "조사" 모드(ADR-094). intent가 ask일 때만 뜻이 있다 — claude-code 백엔드만 이번 턴 WebSearch·WebFetch를 실제로 연다 */
+    research?: boolean;
     /** 서버 안에서만 쓴다(작업 분해). 이 경로 밖의 파일 쓰기를 실행기가 막는다. HTTP로는 받지 않는다 */
     writableScope?: readonly string[];
     /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
@@ -829,6 +848,8 @@ export function sendMessage(
     interactive,
     // 가볍게 확인은 검증 범위만 바꾼다. 질문(intent ask)은 게이트를 돌리지 않으므로 뜻이 없다
     ...(verify === 'light' ? { verify: 'light' as const } : {}),
+    // "조사" 모드는 질문(ask)에만 뜻이 있다. 만들기 요청에 섞여 와도 각 러너가 다시 한번 ask와 함께 걸러 무시한다
+    ...(intent === 'ask' && research ? { research: true as const } : {}),
   };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
@@ -1586,7 +1607,7 @@ type RunPlan = (
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean; verify?: VerifyMode };
+) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean; verify?: VerifyMode; research?: boolean };
 
 /**
  * 세션 백엔드 → 실행 방식. 데모는 준비된 대본이라 여기 없다(호출자가 시나리오를 고른다).
@@ -2046,6 +2067,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     sandbox: session.sandbox,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
+    // "조사" 모드(ADR-094): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다
+    research: plan.research === true,
     // 가볍게 확인(light)이면 게이트가 재시작·준비·계약만 돈다. 생략(full)이면 지금과 같다
     verify: plan.verify,
     // 자가 확인 범위(B_STUDIO_SELF_CHECK). 기본 lean(게이트와 겹치는 확인을 줄이게 안내, ADR-064). full이면 이전 동작
@@ -3667,6 +3690,138 @@ export async function getSessionRequirementsMatrix(id: string): Promise<Traceabi
 /** 추적 매트릭스를 CSV로 내려받는다("CSV로 내보내기" 버튼) */
 export async function getSessionRequirementsMatrixCsv(id: string): Promise<string> {
   return buildMatrixCsv(await getSessionRequirementsMatrix(id));
+}
+
+// ---------------------------------------------------------------------------
+// "문서" 탭(ADR-094): 세션 작업 복사본의 docs/**/*.md·README.md·CHANGELOG.md·CONTRIBUTING.md를 보여 주고,
+// 그 자리에서 고쳐 쓰거나(저장 즉시 작업 복사본에 반영 — 다음 체크포인트·PR에 그대로 실린다) 템플릿으로 새 문서를
+// 만든다. "색인 갱신"은 docs/README.md의 관리 구간(DOCS_INDEX_START~END)만 다시 만들고, 그 밖의 손으로 쓴 글은
+// 그대로 둔다(packages/agent/src/docs.ts가 템플릿·색인을 만드는 순수 함수를 맡고, 여기는 파일 IO만 한다).
+// ---------------------------------------------------------------------------
+
+/** 문서로 보는 세션 작업 복사본 루트의 파일 이름(docs/ 밖에서는 이 세 개만) */
+const ROOT_DOC_NAMES = ['README.md', 'CHANGELOG.md', 'CONTRIBUTING.md'];
+
+export interface DocEntry {
+  path: string;
+  title: string;
+}
+
+export interface DocsTree {
+  docs: DocEntry[];
+}
+
+/** 세션의 docs 디렉터리가 아직 없으면(새 프로젝트) 빈 배열로 본다 */
+async function listDocsDirFiles(workspace: Workspace): Promise<string[]> {
+  try {
+    return (await workspace.list('docs', 10)).filter((entry) => !entry.endsWith('/') && entry.endsWith('.md'));
+  } catch {
+    return [];
+  }
+}
+
+/** 문서 경로가 이 탭이 다루는 범위 안인지(docs/**\/*.md 또는 루트의 세 파일). 그 밖은 코드 탭이 다룬다 */
+function isDocPath(file: string): boolean {
+  if (ROOT_DOC_NAMES.includes(file)) return true;
+  return /^docs\/.+\.md$/.test(file);
+}
+
+/** "문서" 탭의 파일 목록. 각 파일의 첫 H1을 제목으로 보여 준다(없으면 파일 이름) */
+export async function listSessionDocs(id: string): Promise<DocsTree> {
+  const session = requireSession(id);
+  const workspace = new Workspace(session.project.root);
+  const rootFiles = await workspace.list('.', 1);
+  const rootDocs = ROOT_DOC_NAMES.filter((name) => rootFiles.includes(name));
+  const docsDirFiles = await listDocsDirFiles(workspace);
+  const paths = [...rootDocs, ...docsDirFiles].sort();
+  const docs = await Promise.all(
+    paths.map(async (docPath) => {
+      const content = await workspace.read(docPath).catch(() => '');
+      return { path: docPath, title: buildDocSummary(docPath, content).title };
+    }),
+  );
+  return { docs };
+}
+
+/** 문서 하나의 내용. 경로는 이 탭이 다루는 범위(docs/**\/*.md·루트 세 파일) 안이어야 한다 */
+export async function readSessionDoc(id: string, file: string): Promise<{ path: string; content: string }> {
+  const session = requireSession(id);
+  if (!isDocPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
+  const content = await new Workspace(session.project.root).read(file).catch(() => {
+    throw new StudioError(404, '문서를 찾을 수 없습니다');
+  });
+  return { path: file, content };
+}
+
+/** 문서를 고쳐 쓴다(작업 복사본에 바로 반영 — 다음 체크포인트·PR에 그대로 실린다). 새 문서는 "새 문서"로 만든다 */
+export async function writeSessionDoc(id: string, file: string, content: string): Promise<{ path: string; content: string }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
+  if (!isDocPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
+  await new Workspace(session.project.root).write(file, content);
+  return { path: file, content };
+}
+
+export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap';
+
+export interface NewDocInput {
+  kind: NewDocKind;
+  title: string;
+  /** 템플릿 본문 대신 쓸 내용("문서로 저장"이 대화 메시지 내용을 싣는다). 설계 문서·ADR에서만 쓴다 */
+  body?: string;
+}
+
+/** "새 문서" 버튼: 템플릿으로 다음 번호의 설계 문서·ADR을 만들거나, 트러블슈팅·로드맵 항목을 이어 붙인다 */
+export async function createSessionDoc(id: string, input: NewDocInput): Promise<{ path: string; content: string }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 만들 수 있습니다');
+  const title = input.title.trim();
+  if (!title) throw new StudioError(400, '제목이 필요합니다');
+  const workspace = new Workspace(session.project.root);
+
+  if (input.kind === 'design') {
+    const existing = await listDocsDirFiles(workspace);
+    const path = designDocFilePath(nextDesignDocNumber(existing), title);
+    const content = input.body?.trim() || buildDesignDocTemplate(nextDesignDocNumber(existing), title);
+    await workspace.write(path, content);
+    return { path, content };
+  }
+  if (input.kind === 'adr') {
+    const existing = await listDocsDirFiles(workspace);
+    const number = nextAdrNumber(existing);
+    const path = adrFilePath(number, title);
+    const content = input.body?.trim() || buildAdrTemplate(number, title);
+    await workspace.write(path, content);
+    return { path, content };
+  }
+  if (input.kind === 'troubleshooting') {
+    const existing = await workspace.read(TROUBLESHOOTING_LOG_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildTroubleshootingEntry(title);
+    const content = appendTroubleshootingEntry(existing, entry);
+    await workspace.write(TROUBLESHOOTING_LOG_PATH, content);
+    return { path: TROUBLESHOOTING_LOG_PATH, content };
+  }
+  const existing = await workspace.read(ROADMAP_TRADEOFFS_PATH).catch(() => undefined);
+  const entry = input.body?.trim() || buildRoadmapTradeoffEntry(title);
+  const content = appendRoadmapTradeoffEntry(existing, entry);
+  await workspace.write(ROADMAP_TRADEOFFS_PATH, content);
+  return { path: ROADMAP_TRADEOFFS_PATH, content };
+}
+
+/** "색인 갱신": docs/README.md의 관리 구간만 다시 만든다(문서마다 첫 H1·첫 문단을 읽어 표를 채운다) */
+export async function regenerateSessionDocsIndex(id: string): Promise<{ path: string; content: string }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 갱신할 수 있습니다');
+  const workspace = new Workspace(session.project.root);
+  // 색인 표 자신(docs/README.md)은 표에 넣지 않는다
+  const docsDirFiles = (await listDocsDirFiles(workspace)).filter((docPath) => docPath !== DOCS_README_PATH);
+  const summaries: DocSummary[] = await Promise.all(
+    docsDirFiles.map(async (docPath) => buildDocSummary(docPath, await workspace.read(docPath).catch(() => ''))),
+  );
+  const existingReadme = await workspace.read(DOCS_README_PATH).catch(() => undefined);
+  const content = regenerateDocsReadme(existingReadme, summaries);
+  await workspace.write(DOCS_README_PATH, content);
+  return { path: DOCS_README_PATH, content };
 }
 
 // ---------------------------------------------------------------------------

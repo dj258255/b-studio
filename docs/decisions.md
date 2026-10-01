@@ -108,6 +108,7 @@
 - [ADR-091 CLI 백엔드 자동 모델 선택](#adr-091-cli-백엔드-자동-모델-선택)
 - [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
 - [ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다](#adr-093-구독-cli-계정-연결-터미널-없이-로그인-상태를-보고-시작한다)
+- [ADR-094 조사(research) 채팅 모드와 "문서" 탭으로 연구 → 문서화 → 요구사항을 한 세션 안에서 잇는다](#adr-094-조사research-채팅-모드와-문서-탭으로-연구--문서화--요구사항을-한-세션-안에서-잇는다)
 
 ---
 
@@ -3843,6 +3844,53 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - URL·코드 추출 정규식은 일반적인 OAuth 기기 인증 흐름(GitHub CLI 등 공개 사례)의 생김새를 본뜬 것이지, 이 네 CLI의 실제 출력에서 확인한 값이 아니다.
 - "설치 안 됨" 판정은 preflight의 사람이 읽는 오류 문장에서 `ENOENT` 등을 정규식으로 찾는 방식이라, CLI가 다른 문구로 "없음"을 알리면(예: 셸마다 다른 "command not found" 번역) 로그인 필요로 잘못 분류될 수 있다.
 - opencode는 이번에 로그인 자동화를 포기했다 — 다음에 실제로 `opencode auth login`을 실행해 어느 단계까지 비대화형으로 되는지 확인하면 범위를 넓힐 수 있다.
+
+---
+
+## ADR-094 조사(research) 채팅 모드와 "문서" 탭으로 연구 → 문서화 → 요구사항을 한 세션 안에서 잇는다
+
+상태: 채택
+관련: [ADR-042 질문 모드](#adr-042-질문-모드-같은-대화와-도구-목록을-쓰고-바꾸는-도구는-실행기에서-막음), [ADR-079 명세 → 요구사항 → 검증 추적](#adr-079), [ADR-090 요구사항 EARS·시나리오·추적 매트릭스](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+
+### 맥락
+- 지금까지 스튜디오 밖에서 하던 작업 흐름이 있다: 채팅으로 웹을 찾아보며 논쟁하듯 결론을 다듬고(조사), 그 결론을 저장소 문서로 정리하고(문서화), 문서를 요구사항에 반영하고(적용), 요구사항 하나를 두고 다시 채팅으로 묻는(피드백) 순환이다. 지금 스튜디오는 이 네 동작 중 "질문"(ADR-042)과 "요구사항 ↔ 작업"(ADR-079/090의 workPrefill) 절반만 지원했다 — 조사에 웹 도구가 없고, 문서는 코드 탭에서 읽기만 가능했고(쓰기 경로가 없다), 채팅 답을 요구사항에 반영하려면 사람이 손으로 옮겨 적어야 했다.
+- 범수 님의 BE-commerce 저장소가 이미 이 순환을 반영한 문서 구조를 쓰고 있다: `docs/README.md`의 "처음 읽는 순서"·역할별 표, 번호 매긴 설계 문서(`docs/NN-제목.md`), ADR 한 편당 한 파일(`docs/adr/ADR-NNN-slug.md`), `TROUBLESHOOTING-LOG.md`·`ROADMAP-TRADEOFFS.md`로 "지금 뭐가 열려 있는지"·"트레이드오프 후보"를 분리해 쌓는다. 이 구조를 스튜디오 세션의 작업 복사본 안에서도 만들고 고칠 수 있어야 "조사 → 문서화"가 실제로 이어진다.
+- claude-code 백엔드는 이미 WebSearch/WebFetch를 쓰는 선례가 있다(`claude-code-ask.ts`의 `webTools`, 요구사항 "모호한 점 추천"에서만 연다). 이 선례를 일반 대화의 질문 경로로 넓히되, 그 밖의 백엔드(모델 API 직접 호출, codex, commandcode, opencode)는 웹 도구가 전혀 없으므로 "모델 지식으로만 답한다"는 사실을 숨기지 않아야 한다.
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| "문서" 탭을 "코드" 탭의 세 번째 하위 탭으로 넣는다 | 문서 쓰기는 "코드 읽기"의 부속 기능이 아니라 조사 결과를 저장소에 남기는 별도 작업 흐름이라, 코드 탭 안에 묻으면 눈에 띄지 않는다 |
+| 조사 모드를 완전히 새 `intent` 값(`'research'`)으로 만든다 | 실행기의 읽기 전용 판정(`ToolContext.readOnly`)·게이트 생략·여러 러너의 `ask` 분기 전부를 다시 나눠야 한다 — `ask`가 이미 "읽기 전용"의 전부를 뜻하는데 값만 하나 더 늘리면 중복 분기가 생긴다 |
+| **"문서"를 독립된 위 탭으로 두고, 조사는 `intent: 'ask'`에 올라타는 보조 플래그(`research`)로 둔다 — 읽기 전용 여부는 그대로 `ask`가 정하고, `research`는 그 위에서 "웹에서 찾아 답하라"는 지시(및 claude-code만 실제 웹 도구)를 더할 뿐이다** | 채택. 실행기·게이트 분기를 하나도 늘리지 않고, `buildAskRequest`(모든 백엔드가 공유하는 질문 모드 프롬프트 함수) 한 곳만 확장하면 다섯 백엔드(claude-code·codex·commandcode·opencode·직접 만든 루프) 모두에 안내가 퍼진다 |
+
+### 결정
+
+1. **"문서" 탭**(`apps/studio/lib/tab-model.ts`): `buildTopTabs`가 만드는 고정 탭을 코드·요구사항·실행·저장소·**문서**·토큰 여섯 자리로 늘렸다(`{ kind: 'docs', id: 'docs', label: '문서' }`). 하위 탭은 두지 않는다 — 트리에서 문서를 고르면 미리보기·편집이 같은 화면 안에서 바로 바뀌어 "코드"의 파일/변경 기록처럼 번갈아 보여줄 하위 화면이 필요 없다.
+2. **순수 함수로 템플릿·색인을 만든다**(`packages/agent/src/docs.ts`): `nextDesignDocNumber`/`nextAdrNumber`(기존 `docs/NN-*.md`·`docs/adr/ADR-NNN-*.md`에서 다음 번호 계산), `buildDesignDocTemplate`/`buildAdrTemplate`(BE-commerce 꼴 — ADR은 상태·날짜·관련 머리말 불릿 먼저), `appendTroubleshootingEntry`/`appendRoadmapTradeoffEntry`(파일이 없으면 제목부터 만들고, 있으면 끝에 이어 붙인다), `extractDocSummary`(첫 H1+첫 문단을 뽑는다, 표·목록·주석으로 시작하는 문단은 요약으로 보지 않는다), `regenerateDocsReadme`(`<!-- b-studio:docs-index -->`~`<!-- /b-studio:docs-index -->` 관리 구간만 다시 만들고 그 밖의 손으로 쓴 글은 그대로 둔다. 표지가 아직 없으면 글 끝에 새로 붙인다). 이 모듈은 파일 IO를 하지 않는다 — studio의 `sessions.ts`가 `Workspace`로 읽고 쓴다.
+3. **쓰기는 기존 경로를 그대로 쓴다**: `writeSessionDoc`/`createSessionDoc`/`regenerateSessionDocsIndex`(`apps/studio/lib/server/sessions.ts`)는 `applySessionRequirements`와 똑같이 `new Workspace(session.project.root).write(path, content)`로 세션 작업 복사본에 바로 쓴다 — 다음 체크포인트·PR에 그대로 실린다. 문서 범위는 `docs/**/*.md`·루트의 `README.md`·`CHANGELOG.md`·`CONTRIBUTING.md`로만 제한한다(`isDocPath`).
+4. **조사(research) 채팅 모드**: `ChatIntent`/`Intent`는 그대로 `'build'|'ask'` 두 값을 유지하고, `research?: boolean`을 `ask`에만 뜻이 있는 보조 플래그로 더했다(`chat-request.ts`→`messages` 라우트→`sendMessage`→`RunPlan.research`→`shared.research`로 다섯 러너 호출에 전부 흘러간다, 모든 러너가 `shared`를 스프레드하므로 타입 한 곳만 늘리면 된다). `prompts.ts`의 `buildAskRequest`(다섯 백엔드가 공유하는 질문 모드 프롬프트 함수)에 `research` 옵션을 더해, `webToolsAvailable: true`(claude-code만)면 "WebSearch/WebFetch로 찾아 출처를 링크로 남기라"고, `false`(그 밖의 백엔드)면 "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"라고 모델에게도, 화면에도 똑같이 알린다. claude-code 러너(`claude-code-runner.ts`)만 `researching`(= `ask && research`)일 때 SDK의 `tools`/`allowedTools`에 `WebSearch`·`WebFetch`를 추가로 연다(파일·명령 도구는 절대 열지 않는다 — b-studio 전용 MCP 도구 목록은 그대로다). 화면은 "읽기만"이 켜졌을 때만 "조사" 스위치를 보여준다("가볍게 확인"과 같은 자리 규칙).
+5. **채팅 메시지 동작**: 답변 메시지(`reply`) 아래에 작은 글씨 메뉴(복사·문서로 저장·요구사항에 반영)를 둔다. 복사는 클립보드에 마크다운을 그대로 담고(쓰기 권한 없이도 쓸 수 있다), 문서로 저장은 `NewDocDialog`(문서 탭과 공유하는 작은 다이얼로그)를 메시지 내용을 본문으로 열어 템플릿 종류·제목만 고르면 되게 하고, 요구사항에 반영은 새 `RequirementsImportContext`(코드 탭 열기 `CodeOpenContext`와 같은 자리)로 "요구사항" 탭을 열고 메시지 글을 기존 `/requirements/extract` 미리보기 엔드포인트에 명세로 흘려보낸다 — 이미 있는 재추출 병합(`mergeReextractedRequirements`)이 그대로 추가/변경/그대로/삭제 diff를 만들어 주므로 새 추출 로직을 만들지 않았다.
+6. **요구사항 → 채팅**: 요구사항 카드에 "대화에서 묻기"(읽기만 모드를 켜고 id·제목·EARS·인수 조건·시나리오를 맥락으로 채운 뒤 질문 쓸 자리를 남긴다, `buildRequirementAskPrefill`)와 "복사"(같은 내용을 마크다운으로, `requirementToMarkdown`)를 더했다. 기존 `ChatDraft.fill`을 확장해(`fill(text, { readOnly?, research? })`) "대화에서 묻기"가 읽기만 스위치까지 함께 켤 수 있게 했다 — 기존 "이 요구사항 작업" 프리필 메커니즘을 그대로 재사용한다.
+
+### 검증 결과
+- `packages/agent/src/docs.test.ts`: 슬러그화·다음 번호 계산(두 자리 안/밖 모두)·네 템플릿·`extractDocSummary`(표·목록·주석 시작 문단 제외)·`regenerateDocsReadme`(README 없음/관리 구간 있음/표지 없음/문서 없음/정렬 순서)까지 25개 사례.
+- `packages/agent/src/prompts.test.ts`: `buildAskRequest`가 `research` 생략/웹 도구 있음/없음 세 경우에 올바른 안내를 붙이는지.
+- `packages/agent/src/claude-code-runner.test.ts`: 조사 모드가 `tools`/`allowedTools`에 `WebSearch`·`WebFetch`를 더하고 b-studio 도구는 그대로 두는지, 조사를 끄면(질문 모드라도) 웹 도구를 열지 않는지.
+- `apps/studio/lib/chat-request.test.ts`: `research`가 질문 경로에만 실리고 만들기 경로에는 실리지 않는지.
+- `apps/studio/lib/tab-model.test.ts`: `buildTopTabs`가 문서 탭을 포함한 여섯 고정 탭을 만드는지.
+- `apps/studio/lib/requirement-chat-prefill.test.ts`: 대화 프리필·복사 마크다운이 EARS·시나리오 있음/없음 모두에서 올바른지.
+- `apps/studio/app/api/sessions/[id]/docs/**/*.test.ts`: 목록·내용 읽기/쓰기·새 문서·색인 갱신 네 라우트가 서버 함수를 올바른 인자로 부르고, 거부 사유를 그대로 전하는지(기존 요구사항 라우트 테스트와 같은 모킹 방식).
+- `apps/studio/components/chat-panel.test.tsx`/`requirements-panel.test.tsx`: 답변 메시지 동작이 쓰기 권한에 따라 보이고 숨는지, `ImportFlow`가 `initialSpecText`로 붙여넣기 칸을 채운 채 그려지는지.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 errors), `pnpm vitest run --exclude '.claude/**'` — 이번에 건드리지 않은 사전 존재 플레이키(`packages/sandbox/src/docker/format.test.ts`, `packages/agent/src/checkpoints.test.ts`의 원격 Git 타임아웃) 세 건만 남고 나머지(2324개) 모두 통과.
+- 확인하지 못한 범위: 실제 Claude Code 세션으로 조사 모드가 진짜 웹 검색을 수행해 보지는 못했다(이번 세션 정책상 모델 호출 금지) — 프롬프트·SDK 옵션(가짜 SDK로 캡처)만 검증했다. "문서" 탭의 트리·미리보기·편집도 렌더 문자열 검사(`renderToStaticMarkup`)와 라우트 모킹 테스트까지만 했고, 실제 Docker 샌드박스에서 문서를 고쳐 체크포인트·PR까지 흘러가는지는 보지 못했다.
+
+### 감수한 트레이드오프
+- `docs/README.md` 색인 표는 "문서 | 확인할 내용" 한 종류뿐이다 — BE-commerce처럼 "핵심 설계 문서"·"성능과 복원력"·"운영 자동화와 평가"로 역할을 나눠 묶는 것은 사람의 편집 판단이 필요해서 자동 생성 범위 밖에 뒀다(첫 H1·첫 문단만으로는 "이 문서가 어느 범주인가"를 알 수 없다). 번호 매긴 설계 문서 → ADR → 트러블슈팅/로드맵 → 그 밖, 네 구간으로만 정렬한다.
+- "조사" 모드는 claude-code 백엔드에서만 실제로 웹을 검색한다 — 그 밖의 백엔드(특히 api 모드, 직접 만든 루프)는 Anthropic Messages API에 웹 검색 도구를 연결하는 별도 작업이 필요해 이번 범위에 넣지 않았고, 대신 "모델 지식으로만 답한다"는 사실을 프롬프트와 화면 양쪽에 분명히 알리는 것으로 좁혔다.
+- "요구사항에 반영"은 전용 "패치" 추출 로직을 새로 만드는 대신 기존 "명세 다시 가져오기"(`/requirements/extract`+재추출 병합)를 그대로 태웠다 — 채팅 메시지 한 조각을 "명세 전체"처럼 모델에 넘기므로, 메시지가 요구사항 여러 개를 담고 있지 않고 한두 문단짜리 결론이면 추출 모델이 쪼개는 기준이 거칠 수 있다(기존 추출 프롬프트의 한계를 그대로 물려받는다).
+- 문서 편집은 충돌 해결이 없다 — 같은 문서를 두 사람이 동시에 편집 모드로 열어 저장하면 나중에 저장한 쪽이 이긴다(코드 탭도 사람이 직접 편집하는 경로가 없어 지금까지 이 문제가 없었다. ADR-041의 "내 폴더에서 바로 작업"의 사람 수정 보호(`Workspace`의 `#assertNotStale`)는 "에이전트가 읽은 뒤 바뀜"만 잡고, 화면 두 개가 동시에 쓰는 경우는 잡지 않는다).
 
 ---
 

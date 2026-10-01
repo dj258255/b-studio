@@ -43,4 +43,17 @@ describe('chatRequestBody', () => {
     // 질문 경로는 게이트를 돌리지 않으므로 가볍게 확인이 뜻이 없다
     expect(chatRequestBody({ text: '질문', intent: 'ask', lightVerify: true }).verify).toBeUndefined();
   });
+
+  it('조사가 켜지면 질문 경로에만 research: true를 싣는다(만들기는 애초에 읽기만이 아니다)', () => {
+    expect(chatRequestBody({ text: '최신 PG 수수료는?', intent: 'ask', research: true })).toEqual({
+      text: '최신 PG 수수료는?',
+      allowBreaking: false,
+      intent: 'ask',
+      research: true,
+    });
+    // 꺼져 있으면 보내지 않는다
+    expect(chatRequestBody({ text: '최신 PG 수수료는?', intent: 'ask', research: false }).research).toBeUndefined();
+    // 만들기 경로는 조사가 뜻이 없으므로 보내지 않는다
+    expect(chatRequestBody({ text: '메모 추가', intent: 'build', research: true }).research).toBeUndefined();
+  });
 });
