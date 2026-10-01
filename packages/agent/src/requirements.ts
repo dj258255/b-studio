@@ -1377,9 +1377,10 @@ export const WEAK_WORDS_KO: readonly string[] = ['빠르게', '적절히', '적�
 /** 영어 약한 표현 */
 export const WEAK_WORDS_EN: readonly string[] = ['fast', 'user-friendly', 'appropriate', 'as needed', 'tbd', 'quickly', 'efficient', 'asap', 'soon', 'etc'];
 /** "등"은 한 글자라 단어 경계 정규식으로 오탐이 많다(등록·등급 등) — 조사가 바로 붙는 "…등" 꼴만 따로 본다 */
-const WEAK_WORD_ETC_KO = /[가-힣0-9]\s*등(?:[,.\s]|$)/;
+export const WEAK_WORD_ETC_KO = /[가-힣0-9]\s*등(?:[,.\s]|$)/;
 
-function escapeRegExp(text: string): string {
+/** doc-lint.ts가 같은 단어 경계 규칙으로 약한 표현을 찾을 때 재사용한다(중복 정의하지 않는다) */
+export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
