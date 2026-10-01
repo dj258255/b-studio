@@ -1016,7 +1016,7 @@ function AssistantReply({ text, sessionId, canManage }: { text: string; sessionI
 }
 
 /**
- * 체크포인트로 되돌리며 버린 변경(ADR-0XX)의 백업을 작업 복사본에 되살리는 버튼.
+ * 체크포인트로 되돌리며 버린 변경(ADR-099)의 백업을 작업 복사본에 되살리는 버튼.
  * 되살리기는 세션 이벤트("backupRestored" 대화 줄)로 결과를 알리므로 여기서는 요청만 보내고 끝낸다.
  */
 function BackupRestoreButton({ sessionId, backup, canManage }: { sessionId: string; backup: DiscardBackup; canManage: boolean }) {

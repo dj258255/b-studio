@@ -282,7 +282,7 @@ describe('CheckpointStore', () => {
     expect(await store.pendingFiles()).toEqual([]);
   });
 
-  it('버리기 전에 백업을 남기고, 되살리기로 그대로 되돌린다(ADR-0XX, "절대 조용히 지우지 않는다")', async () => {
+  it('버리기 전에 백업을 남기고, 되살리기로 그대로 되돌린다(ADR-099, "절대 조용히 지우지 않는다")', async () => {
     const store = new CheckpointStore(root);
     await store.init();
     await write('api/src/Order.java', 'class Order { int broken }\n');

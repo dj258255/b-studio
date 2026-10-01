@@ -77,7 +77,7 @@ export type ChatItem =
       patch: string;
       restarted: ServiceCheck[];
       databases: DatabaseState[];
-      /** 버린 변경을 되살릴 수 있게 남긴 백업(ADR-0XX) */
+      /** 버린 변경을 되살릴 수 있게 남긴 백업(ADR-099) */
       backup?: DiscardBackup;
     }
   | {
@@ -95,7 +95,7 @@ export type ChatItem =
       restarted: ServiceCheck[];
       backup?: DiscardBackup;
     }
-  /** discard·revert·restore가 남긴 백업을 작업 복사본에 되살린 결과(ADR-0XX) */
+  /** discard·revert·restore가 남긴 백업을 작업 복사본에 되살린 결과(ADR-099) */
   | { kind: 'backupRestored'; backupId: string; result: { ok: true; files: string[]; restarted: ServiceCheck[] } | { ok: false; error: string } }
   | {
       kind: 'remoteSync';

@@ -11,7 +11,7 @@ import { vi } from 'vitest';
 const execFileAsync = promisify(execFile);
 
 /**
- * "절대 조용히 지우지 않는다"(ADR-0XX)를 실제 sessions.ts 코드로 끝까지 돌려 본다. 중지한 세션을 "이어서
+ * "절대 조용히 지우지 않는다"(ADR-099)를 실제 sessions.ts 코드로 끝까지 돌려 본다. 중지한 세션을 "이어서
  * 작업"할 때(resumeSession) 끝내지 못한 요청이 남긴 변경을 버리는 경로가, 문서는 체크포인트로 지키고(docs 체크
  * 포인트가 실패해 아직 커밋되지 않은 채였다고 해도) 남은 변경은 버리기 전에 백업해 되살릴 수 있게 하는지 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 체크포인트, discard()의 백업·되살리기.
@@ -152,7 +152,7 @@ async function waitFor<T>(predicate: () => T | undefined, timeoutMs = 10_000): P
   }
 }
 
-describe('이어서 작업하기가 버리기 전에 지키고 백업한다(ADR-0XX, "절대 조용히 지우지 않는다")', () => {
+describe('이어서 작업하기가 버리기 전에 지키고 백업한다(ADR-099, "절대 조용히 지우지 않는다")', () => {
   it('문서는 체크포인트로 지키고, 남은 변경은 버리기 전에 백업해 되살릴 수 있게 한다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;

@@ -349,7 +349,7 @@ export type StudioEvent =
       databases: DatabaseState[];
       /** 재시작 전에 샌드박스가 바뀐 파일을 보게 될 때까지 기다린 결과 */
       sync?: { elapsedMs: number } | { error: string };
-      /** 버린 변경이 있으면 되살릴 수 있게 남긴 백업(ADR-0XX). files가 비어 있지 않은데 이것도 없으면 백업하지 못했다는 뜻이다 */
+      /** 버린 변경이 있으면 되살릴 수 있게 남긴 백업(ADR-099). files가 비어 있지 않은데 이것도 없으면 백업하지 못했다는 뜻이다 */
       backup?: DiscardBackup;
     }
   | { type: 'restore_started'; checkpoint: Checkpoint }
@@ -364,7 +364,7 @@ export type StudioEvent =
       checkpoints: Checkpoint[];
       nextDemoRequest?: string;
       nextDemoQuestion?: string;
-      /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-0XX) */
+      /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-099) */
       backup?: DiscardBackup;
     }
   | { type: 'restore_failed'; checkpoint: Checkpoint; error: string }
@@ -376,10 +376,10 @@ export type StudioEvent =
       discarded: string[];
       databases: DatabaseState[];
       restarted: ServiceCheck[];
-      /** discarded가 있으면 되살릴 수 있게 남긴 백업(ADR-0XX) */
+      /** discarded가 있으면 되살릴 수 있게 남긴 백업(ADR-099) */
       backup?: DiscardBackup;
     }
-  /** discarded·reverted·restore가 남긴 백업을 작업 복사본에 되살렸다(ADR-0XX) */
+  /** discarded·reverted·restore가 남긴 백업을 작업 복사본에 되살렸다(ADR-099) */
   | { type: 'backup_restored'; backupId: string; files: string[]; restarted: ServiceCheck[] }
   | { type: 'backup_restore_failed'; backupId: string; error: string }
   | { type: 'remote_sync_started' }
@@ -405,7 +405,7 @@ export type StudioEvent =
       report?: VerificationReport;
       restarted?: ServiceCheck[];
       checkpoints?: Checkpoint[];
-      /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-0XX) */
+      /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-099) */
       backup?: DiscardBackup;
     }
   /** main 따라잡기(ADR-076)를 시작했다 */
@@ -437,7 +437,7 @@ export type StudioEvent =
       report?: VerificationReport;
       restarted?: ServiceCheck[];
       checkpoints?: Checkpoint[];
-      /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-0XX) */
+      /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-099) */
       backup?: DiscardBackup;
     }
   | {

@@ -1776,7 +1776,7 @@ Error from provider (Console): OpenCode's free tier can only be used from within
 `CheckpointStore.discard()`/`restore()`가 작업 복사본을 되돌리기 전에 "이 변경이 사용자가 쓴 것인지, 되살릴 수 있어야 하는지"를 전혀 모르고 통째로 `git reset --hard` + `git clean -fd`로 지웠다. 문서 체크포인트 커밋은 "저장 직후 바로 남긴다"는 안전망(ADR-096)이 있었지만, 그 커밋이 실패하는 경우(예: 동시에 다른 체크포인트 작업이 겹침, 시크릿 검사 거부, 디스크 오류)에 대한 뒷단 안전망이 없어, 실패하면 pending 상태로 남다가 다음 "되돌리는" 동작에 조용히 사라졌다.
 
 ### 수정
-`packages/agent/src/checkpoints.ts`의 `discard()`·`restore()`가 `git reset --hard` 직전에 `git diff --cached --binary HEAD`로 전체 패치를 `<gitDir>/b-studio/discarded/<타임스탬프>/`에 백업해 두고, `restoreBackup(id)`로 되살릴 수 있게 했다(충돌하면 거부). `apps/studio/lib/server/sessions.ts`는 `discard()`로 되돌리는 경로(이어서 작업·실패한 요청 되돌리기)에서 되돌리기 전에 문서 경로(`isDocPath`)만 먼저 체크포인트로 남겨(그 경로는 HEAD로만 되돌리므로 미리 커밋한 문서는 사라지지 않는다), 이벤트와 대화 안내에 "버렸습니다" 대신 "백업했습니다 · 되살리기"를 보여준다. 자세한 결정은 ADR-0XX(`docs/decisions.md`).
+`packages/agent/src/checkpoints.ts`의 `discard()`·`restore()`가 `git reset --hard` 직전에 `git diff --cached --binary HEAD`로 전체 패치를 `<gitDir>/b-studio/discarded/<타임스탬프>/`에 백업해 두고, `restoreBackup(id)`로 되살릴 수 있게 했다(충돌하면 거부). `apps/studio/lib/server/sessions.ts`는 `discard()`로 되돌리는 경로(이어서 작업·실패한 요청 되돌리기)에서 되돌리기 전에 문서 경로(`isDocPath`)만 먼저 체크포인트로 남겨(그 경로는 HEAD로만 되돌리므로 미리 커밋한 문서는 사라지지 않는다), 이벤트와 대화 안내에 "버렸습니다" 대신 "백업했습니다 · 되살리기"를 보여준다. 자세한 결정은 ADR-099(`docs/decisions.md`).
 
 ### 재발 방지와 확인
 - `packages/agent/src/checkpoints.test.ts`가 `discard()`·`restore()`의 백업·되살리기·충돌 거부·보관 한도(최근 10개·200MB, 방금 만든 백업은 지우지 않음)를 실제 git 임시 저장소로 확인한다. 이 테스트는 수정 전에는(백업 필드 자체가 없어) 작성할 수 없었고, 수정 뒤에는 통과한다.

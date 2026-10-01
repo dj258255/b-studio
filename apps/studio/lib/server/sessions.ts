@@ -1129,7 +1129,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       });
       if (localEdits) history = [...history, { type: 'local_edits_saved', checkpoint: localEdits, reason: 'resume' }];
     } else {
-      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-0XX)
+      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-099)
       // 남은 변경은 되살릴 수 있게 백업한 뒤에야 마지막 체크포인트에서 시작한다
       const redactor = new Redactor(secrets);
       const { docsCheckpoint, files, backup } = await discardWorkingCopy(checkpoints, (text) => redactor.find(text));
@@ -2412,7 +2412,7 @@ async function revertRun(
   runId: string,
   { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
 ): Promise<string[]> {
-  // 문서는 먼저 지키고(ADR-0XX), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
+  // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
   const { docsCheckpoint, files, patch, backup } = await discardWorkingCopy(session.checkpoints, (text) => session.sandbox.findSecrets(text));
   if (docsCheckpoint) {
     session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
@@ -2482,7 +2482,7 @@ export function isDocPath(file: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 절대 조용히 지우지 않는다(ADR-0XX): 끝내지 못한 요청이 남긴 변경을 "이어서 작업"이 체크포인트로 되돌리며 버리던
+// 절대 조용히 지우지 않는다(ADR-099): 끝내지 못한 요청이 남긴 변경을 "이어서 작업"이 체크포인트로 되돌리며 버리던
 // 중, 문서(docs/requirements.md 등 — 문서 체크포인트 커밋이 실패해 아직 커밋되지 않은 채였다)까지 함께 사라지는
 // 사고가 있었다(2026-10-01, docs/troubleshooting.md 50). CheckpointStore.discard()/restore()가 버리기 직전에
 // 백업을 남기는 것과 짝을 이뤄, 여기서는 "HEAD로 되돌리는(discard) 경로"에서 문서 경로만 먼저 체크포인트로
@@ -2655,7 +2655,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
     let event: StudioEvent;
     try {
       await session.relaying;
-      // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-0XX)
+      // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099)
       const { files, backup } = await session.checkpoints.restore(sha);
       // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다
       const database = await session.databases.restore(sha, session.stop.signal);
@@ -2703,7 +2703,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
 }
 
 /**
- * discard()·restore()가 버리기 직전에 남긴 백업(ADR-0XX)을 작업 복사본에 되살린다. 그 사이에 같은 파일이
+ * discard()·restore()가 버리기 직전에 남긴 백업(ADR-099)을 작업 복사본에 되살린다. 그 사이에 같은 파일이
  * 다시 바뀌어 깨끗하게 들어가지 않으면(git apply 충돌) 거부한다 — 일부만 들어가 상태를 더 헷갈리게 만들지 않는다.
  */
 export function restoreDiscardedBackup(id: string, backupId: string): void {
@@ -3227,7 +3227,7 @@ async function undoRemoteSync(
   start: StartOptions,
 ): Promise<StudioEvent> {
   try {
-    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-0XX)
+    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
     const { files, backup } = await session.checkpoints.restore(result.previous);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
@@ -3377,7 +3377,7 @@ async function undoBaseSync(
   start: StartOptions,
 ): Promise<StudioEvent> {
   try {
-    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-0XX)
+    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
     const { files, backup } = await session.checkpoints.restore(result.previous);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
