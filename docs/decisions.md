@@ -106,6 +106,7 @@
 - [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
 - [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
 - [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
+- [ADR-091 CLI 백엔드 자동 모델 선택](#adr-091-cli-백엔드-자동-모델-선택)
 
 ---
 
@@ -3744,6 +3745,54 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
 - **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
 - **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
+
+---
+
+## ADR-091 CLI 백엔드 자동 모델 선택
+
+상태: 채택(1단계, 같은 세션 안에서만)
+관련: ADR-047, ADR-075, [E8](experiments/2026-09-30-e8-plan-execute-split.md), [E9](experiments/2026-10-01-e9-narrow-plan.md), [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)
+
+### 맥락
+- ADR-047의 멀티 모델 라우터는 `api` 백엔드(사용자가 입력한 제공자 API 키)에만 있다. 사용자는 API 예산이 없어 구독 CLI(`claude-code` 백엔드, 로컬 Claude Agent SDK 로그인)로만 돌리는데, 이 경로는 여전히 사람이 대화 입력창에서 opus·sonnet·haiku 중 하나를 매번 손으로 고정해야 한다(model-picker.ts).
+- ADR-047의 라우터는 그대로 옮길 수 없다: 그 라우터는 가격·컨텍스트·실측 통계를 가진 후보 여러 개의 점수를 매기지만, 구독 CLI에는 그런 후보 목록이 없다 — 로그인한 계정의 별칭(이름) 중 하나를 고를 뿐이고 실제 단가도 대화에서 추정한 값이지 API 청구서가 아니다.
+- E8(2026-09-30)과 E9(2026-10-01)은 세션 안에서 모델을 바꾸는 비용을 쟀다. 계획 모델(Opus)과 실행 모델(Haiku)을 매 요청 오가게 한 E8-split은 단일 모델(Sonnet, E8-sonnet) 대비 성공 1건당 비용이 538% 많았다(모델을 바꿀 때마다 프롬프트 캐시가 새로 만들어져 토큰이 약 4배로 늘었다). 계획 프롬프트를 좁힌 E9-split도 여전히 계획 호출 고정비 때문에 Sonnet 단독보다 27% 비쌌다. 두 실험 모두 결론은 같다 — **작은 과제에서는 Sonnet 단독이 가장 싸고 성공률도 같다.** Haiku 단독은 성공 1건당 비용은 Sonnet과 비슷했지만 성공률이 떨어졌다(9건 중 7건 — 로딩에서 멈춘 화면을 인수 확인에서 놓쳤다).
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| ADR-047의 점수 라우터를 claude-code에도 그대로 적용 | 구독 CLI에는 점수를 매길 후보(가격표·실측 컨텍스트)가 없다. 있는 건 이름 세 개뿐이다 |
+| 매 요청 복잡도로 다시 계산(세션 상태 없음) | E8/E9가 쟀듯 모델을 자주 바꾸면 프롬프트 캐시가 깨져 비용이 뛴다. 세션 중간에 sonnet→opus→sonnet으로 오가면 매번 캐시를 다시 만든다 |
+| **세 단계(haiku<sonnet<opus) 규칙표 + 세션 안 stickiness(한 번 성공한 단계는 내리지 않음) + 실패 시 한 단계 승격** | 규칙이 도메인 의미를 완전히 이해하지 못하고, 단가는 대화에서 관측한 값(E8)이지 청구서가 아니다 |
+
+### 결정
+- `packages/agent/src/cli-router.ts`의 `routeCliTier`가 순수 함수로 세 단계(`haiku < sonnet < opus`, `CLI_TIERS`) 중 하나를 고른다. fable은 단가를 몰라 자동 후보에 넣지 않는다(사용자가 대화에서 직접 고를 때만).
+  - 읽기만 하는 질문(intent === `ask`)은 항상 haiku. 질문 완료는 구현 품질의 증거가 아니라는 ADR-047과 같은 원칙으로, stickiness도 적용하지 않는다(세션이 opus로 성공했어도 다음 질문은 haiku로 내려간다 — 질문은 캐시 재사용보다 비용을 우선한다).
+  - 만들기 요청은 단순·보통이면 sonnet, ADR-047의 `classifyComplexity`(길이·줄바꿈·설계 키워드)가 complex거나 `classifyRisk`(인증·결제·정산·마이그레이션·삭제·운영 배포 등)가 high면 opus. E9에서 Haiku 단독의 성공률이 떨어졌으므로 만들기 요청에는 haiku를 후보로 두지 않는다.
+  - **stickiness**: 세션 안에서 이미 성공적으로 쓴 가장 높은 단계(`session.claudeCode.autoTier`)가 이번에 계산한 단계보다 높으면 내리지 않는다 — 읽기 전용 질문이 아닌 한 모델을 바꿔 캐시를 다시 만들지 않는다. 위험도가 올라가 더 높은 단계가 필요하면 그대로 올라간다(하강만 막는다, 상승은 막지 않는다).
+- 복잡도·위험도 분류는 새로 만들지 않고 ADR-047의 `classifyComplexity`(그대로 재사용)·새로 뺀 `classifyRisk`(HIGH_RISK 정규식을 함수로 분리, `model-router.ts`)를 그대로 쓴다 — "복잡하다/위험하다"의 뜻을 두 라우터가 따로 정의하지 않는다.
+- `model-picker.ts`의 claude-code 옵션 목록에 `auto`("자동", 힌트 "요청마다 알맞은 모델을 고르고, 검증에 실패하면 한 단계 올립니다")를 더한다. 기존 별칭 배열(`CLAUDE_CODE_ALIASES`)과 별도 헬퍼 함수(`claudeCodeAutoOption`)로 둬, 같은 시기에 진행 중인 SDK `supportedModels` 기반 재작성(`feature/model-list-from-sdk`)과의 병합을 한 줄 추가로 끝나게 했다.
+- 세션에서 `auto`를 고르거나(`session.snapshot.modelId`) 서버 기본값이 `auto`면(`B_STUDIO_CLAUDE_CODE_MODEL=auto`, 벤치가 이 경로로 시작 모델을 넘긴다) `sessions.ts`의 `planRun`이 `routeCliTier`를 불러 실제 모델 이름(haiku·sonnet·opus)으로 바꿔 러너에 넘긴다 — Claude Code CLI에는 `auto`라는 모델이 없으므로 이 치환이 반드시 실행 전에 끝나야 한다.
+- **승격은 기존 메커니즘을 그대로 쓴다**(`escalation.ts`의 게이트 실패 서명 규칙). 승격 대상만 다르다 — 계획 모델이나 환경 변수가 아니라 고른 단계의 바로 위 단계(`nextCliTier`)로 한 단계만 올린다. 이미 opus(최고 단계)면 승격하지 않는다.
+- 대화 이벤트는 api 라우터(ADR-047)와 같은 `route` 이벤트를 재사용한다(`auto: true` 필드만 다르다). 화면은 api의 점수표 `<details>` 대신 한 줄 안내("자동 선택: Sonnet 5 — 이유")를 보여준다 — CLI 자동 선택에는 비교할 점수·실측 비용이 없어 점수표가 의미가 없기 때문이다.
+- 요청이 끝나면(`nextAutoTier`) 검증 게이트를 통과한(`done`) 만들기 요청만 stickiness를 갱신한다. 승격이 일어났으면 승격된 단계를 기억한다(다음 요청도 그 단계부터 시작해 다시 낮췄다 올리는 캐시 재생성을 피한다). 질문이거나 실패한 시도는 기억하지 않는다.
+- 토큰·비용 관측은 새로 만들지 않는다. `claude-code-runner.ts`는 이미 SDK가 돌려준 실제 모델 이름(`message.model`, 별칭이 아니라 `claude-sonnet-5` 같은 실제 id)으로 `session` 이벤트와 `usageByModel`을 기록한다 — 자동 선택이 고른 별칭을 그대로 `model` 옵션에 넘기기만 하면 기존 토큰 탭·단가표가 그대로 맞물린다.
+
+### 검증 결과
+- `packages/agent/src/cli-router.test.ts`(9개): 질문→haiku, 단순 만들기→sonnet, 복잡·위험 만들기→opus, 만들기 요청에 haiku 미사용, stickiness(하강 안 함·질문엔 미적용·상승은 허용), `nextCliTier`·`higherCliTier` 경계값.
+- `apps/studio/lib/server/sessions.test.ts`: `claudeCodeAutoEscalation`(haiku→sonnet, sonnet→opus, opus는 승격 없음), `nextAutoTier`(done만 기억, 승격 시 올라간 단계 기억, 더 높은 값은 내리지 않음, ask·실패는 무시).
+- `apps/studio/lib/server/model-picker.test.ts`: claude-code 옵션 목록에 `자동`이 포함되고(힌트 문구까지), `isSelectableModel('claude-code', 'auto')`가 통과한다.
+- `apps/studio/bench/coordination/backends.test.ts`: `resolveBackend`가 `--model auto`를 그대로 받는다(E10 벤치 배선).
+- `pnpm typecheck`(모든 워크스페이스 Done), 위 네 테스트 파일과 회귀로 돌린 `model-router.test.ts`·`escalation.test.ts` 전체 통과.
+- 실제 Claude Code CLI 호출로 자동 선택이 도는 것은 확인하지 못했다(사용자가 API 예산이 없어 구독 CLI 실 실행은 비용/사용량을 쓴다 — [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)에 실행 방법만 적어 두고 아직 실행하지 않았다). `pnpm bench:coordination --dry`로 인자 해석·하네스 배선만 확인했다.
+
+### 감수한 트레이드오프
+- 복잡도·위험도 분류가 ADR-047과 같은 한계를 물려받는다(키워드·길이 기반, 도메인 의미를 완전히 이해하지 못함).
+- stickiness는 세션(=하나의 Claude Code 대화) 단위로만 본다. 서버가 재시작되면 `session.claudeCode.autoTier`는 세션 파일에 저장된 값을 그대로 복원하지만, 세션 자체가 끝나면(새 세션) 다시 처음(요청마다 새로 계산)부터 시작한다 — 사용자 전체의 습관을 배우지 않는다.
+- 단가 비교(E8/E9가 쓴 "API 환산 비용")는 대화 관측값이지 실제 구독 청구서가 아니다. 자동 선택이 실제로 돈을 아끼는지는 이 ADR이 아니라 E10(계획만, 아직 실행하지 않음)이 잴 것이다.
+- Phase 2(다른 CLI 백엔드 사이의 자동 전환 — 예: Claude Code 구독 한도에 걸리면 Codex나 Command Code로 넘어가기)는 이번 범위 밖이다. 지금 자동 선택은 한 세션의 한 백엔드 안에서만 단계를 고른다.
+- S2(`--contracts model`)의 계약 호출과 `--lane-backend`(레인별 백엔드·모델)에는 아직 `auto`를 연결하지 않았다 — 두 경로 모두 `claudeCodeAsk`를 직접 부르고 세션의 `planRun`을 거치지 않기 때문이다. 단일 세션 요청(S0/S1)에서만 동작한다.
 
 ---
 
