@@ -58,7 +58,8 @@ function countBraceDelta(line: string): number {
 // JUnit 4/5 (Java/Kotlin)
 // ---------------------------------------------------------------------------
 
-const JUNIT_ANNOTATION = /@(Test|ParameterizedTest|RepeatedTest|Nested|Disabled|DisplayName)\b(?:\(([^)]*)\))?/g;
+// 인자가 큰따옴표 문자열이면 그 안의 괄호까지 통째로 읽는다(@DisplayName("상세(단일 객체)…")) — 첫 ")"에서 끊으면 표시 이름을 놓쳤다
+const JUNIT_ANNOTATION = /@(Test|ParameterizedTest|RepeatedTest|Nested|Disabled|DisplayName)\b(?:\((\s*"(?:\\.|[^"\\])*"\s*|[^)]*)\))?/g;
 const JUNIT_CLASS = /\bclass\s+(\w+)/;
 // public void testFoo(), void testFoo() throws Exception, fun testFoo() (Kotlin)
 const JUNIT_METHOD = /(?:^|\s)(?:fun|void|[\w<>[\],.]+)\s+(\w+)\s*\(/;
