@@ -55,7 +55,7 @@ import type {
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
-import { createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
@@ -177,6 +177,12 @@ export async function createTaskPlan(input: {
    * HTTP 라우트는 이 필드를 넘기지 않는다(presetPlan·coordination과 같은 규칙). 없으면 full
    */
   verify?: VerifyMode;
+  /**
+   * 세션의 "나눠서 병렬로 하기"(ADR-068)로 이 계획을 만들 때, 그 세션 id. presetPlan 등과 달리 HTTP 라우트도
+   * 받는다(대화의 넘기기 화면이 보낸다) — 같은 프로젝트·소유자의 세션인지 여기서 확인한다. 있으면 레인·통합
+   * 세션이 프로젝트 원본이 아니라 이 세션의 최신 체크포인트에서 시작한다(ADR-0XX).
+   */
+  sourceSessionId?: string;
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
@@ -216,6 +222,19 @@ export async function createTaskPlan(input: {
 
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
+  // 같은 프로젝트·소유자의 세션에서 넘긴 것인지 확인한다 — 다른 사람·다른 프로젝트의 세션에서 시작하지 못하게 막는다
+  if (input.sourceSessionId !== undefined) {
+    const source = getSnapshot(input.sourceSessionId);
+    if (!source || source.projectId !== input.projectId || source.owner !== input.owner) {
+      throw new StudioError(404, '넘긴 세션을 찾을 수 없습니다');
+    }
+    // 레인·통합이 이 세션의 최신 체크포인트에서 시작한다(ADR-0XX) — 그 시점에 아직 커밋하지 않은 문서 변경(저장
+    // 실패 등으로 작업 복사본에만 남은 docs/)이 있으면 레인을 시작하기 전에 먼저 체크포인트로 남겨 이어받게 한다.
+    // 실패해도(시크릿 오탐 등) 계획은 그대로 진행한다 — 안전망이지 필수 경로가 아니다
+    await commitPendingWorkingCopyDocs(input.sourceSessionId, '문서: 작업을 나누기 전 남은 문서 변경을 정리한다').catch((error: unknown) => {
+      console.error(`[b-studio] 세션 ${input.sourceSessionId}의 문서 체크포인트를 남기지 못했습니다`, error);
+    });
+  }
   // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
   // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
   const redactor = input.coordination?.strategy === 'S3' ? new Redactor(await resolveSecrets(project)) : undefined;
@@ -233,6 +252,7 @@ export async function createTaskPlan(input: {
     ...(preset === undefined ? {} : { preset: true as const }),
     // 가볍게 확인은 레인·통합 실행에 그대로 넘긴다. 없으면(full) 지금과 한 글자도 다르지 않다
     ...(input.verify === 'light' ? { verify: 'light' as const } : {}),
+    ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
   };
   plans.set(plan.id, plan);
   attachCoordination(plan, input.coordination, redactor);
@@ -582,7 +602,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
   persist(plan);
   const bootStarted = performance.now();
   try {
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', laneSessionOption(plan, lane));
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { ...laneSessionOption(plan, lane), ...seedFromSessionOption(plan) });
     lane.sessionId = snapshot.id;
     persist(plan);
     await waitForReady(snapshot.id);
@@ -674,6 +694,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', {
       ...sessionModelOption(plan.modelId),
       ...(extraPageChecks ? { extraPageChecks } : {}),
+      ...seedFromSessionOption(plan),
     });
     Object.assign(integration, { sessionId: snapshot.id });
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
@@ -760,6 +781,15 @@ function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelI
   if (backend === 'commandcode' || backend === 'opencode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
   if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId };
   return { backend, ...(head.model ? { modelId: head.model } : {}) };
+}
+
+/**
+ * 계획이 세션의 "나눠서 병렬로 하기"로 만들어졌으면(sourceSessionId) 레인·통합 세션이 프로젝트 원본이 아니라
+ * 그 세션의 최신 체크포인트에서 시작하게 한다(ADR-0XX). 세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은
+ * sourceSessionId가 없어 빈 객체를 돌려주고, createSession은 지금처럼 프로젝트 원본에서 시작한다.
+ */
+function seedFromSessionOption(plan: TaskPlanView): { seedFromSessionId?: string } {
+  return plan.sourceSessionId ? { seedFromSessionId: plan.sourceSessionId } : {};
 }
 
 function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number): string {

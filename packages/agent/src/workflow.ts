@@ -90,20 +90,23 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
   return `${WORKFLOW_TRAILER}: ${stages.length > 0 ? stages.join(', ') : 'none'}`;
 }
 
-/** 가볍게 확인(light) 실행임을 체크포인트 커밋 본문 끝에 남기는 트레일러. 배포 화면이 이 값으로 안내를 바꾼다 */
+/**
+ * 가볍게 확인(light)했거나 문서만 바꿔(docs) 검증 게이트를 거치지 않은 체크포인트임을 커밋 본문 끝에 남기는 트레일러.
+ * 배포 화면과 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-0XX).
+ */
 export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
 
-export function formatVerifyTrailer(mode: 'light'): string {
+export function formatVerifyTrailer(mode: 'light' | 'docs'): string {
   return `${WORKFLOW_VERIFY_TRAILER}: ${mode}`;
 }
 
-/** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'가 아니면 undefined(전체 검증 실행) */
-export function parseVerifyTrailerValues(values: readonly string[]): 'light' | undefined {
+/** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'·'docs'가 아니면 undefined(전체 검증 실행) */
+export function parseVerifyTrailerValues(values: readonly string[]): 'light' | 'docs' | undefined {
   const value = values
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean)
     .at(-1);
-  return value === 'light' ? 'light' : undefined;
+  return value === 'light' || value === 'docs' ? value : undefined;
 }
 
 /**

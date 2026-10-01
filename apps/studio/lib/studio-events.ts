@@ -333,6 +333,11 @@ export type StudioEvent =
    * request: 요청을 시작하기 전에, resume: 중지한 세션을 이어서 작업하기 전에 남겼다
    */
   | { type: 'local_edits_saved'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
+  /**
+   * 요청·실행과 무관하게 문서만(docs/** 등) 검증 게이트 없이 체크포인트로 남겼다(ADR-0XX).
+   * 요구사항 저장, 이슈 발행·충돌 해결 사이드카가 남긴다. checkpoint.verify === 'docs'다
+   */
+  | { type: 'docs_checkpoint'; checkpoint: Checkpoint }
   | {
       type: 'reverted';
       runId: string;

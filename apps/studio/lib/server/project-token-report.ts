@@ -101,6 +101,8 @@ function timestampOf(event: StudioEvent): string | undefined {
       return event.checkpoint.createdAt;
     case 'local_edits_saved':
       return event.checkpoint.createdAt;
+    case 'docs_checkpoint':
+      return event.checkpoint.createdAt;
     default:
       return undefined;
   }

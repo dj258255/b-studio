@@ -8,7 +8,15 @@ import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
-type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
+type Session = {
+  id: string;
+  projectId: string;
+  owner: string;
+  status: 'ready';
+  workDir: string;
+  checkpoints: Checkpoint[];
+  bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }>;
+};
 type SendOptions = {
   allowBreaking: boolean;
   by?: string;
@@ -45,7 +53,9 @@ const fake = vi.hoisted(() => ({
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
   /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지, 레인에만 backend가 붙는지 확인한다 */
-  sessionOptions: [] as Array<{ modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
+  sessionOptions: [] as Array<{ modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string }>,
+  /** commitPendingWorkingCopyDocs를 부른 세션 id와 메시지(순서대로). sourceSessionId가 있는 계획만 부른다 */
+  docsCommitted: [] as Array<{ sessionId: string; message: string }>,
   /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
   bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
@@ -154,7 +164,16 @@ vi.mock('./projects', () => ({
 }));
 
 vi.mock('./sessions', () => ({
-  createSession: async (_projectId: string, _owner: string, _workspace: string, options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {}) => {
+  commitPendingWorkingCopyDocs: async (sessionId: string, message: string) => {
+    fake.docsCommitted.push({ sessionId, message });
+    return undefined;
+  },
+  createSession: async (
+    projectId: string,
+    owner: string,
+    _workspace: string,
+    options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string } = {},
+  ) => {
     fake.sessionOptions.push(options);
     const id = `session-${++fake.counter}`;
     // 두 레인 세션이 모두 멈춘 뒤에 만들어진 세션이면 통합 세션이다
@@ -166,7 +185,15 @@ vi.mock('./sessions', () => ({
       mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
       writeFileSync(path.join(workDir, file), content);
     }
-    fake.sessions.set(id, { id, status: 'ready', workDir, bootNetwork: fake.bootNetwork, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
+    fake.sessions.set(id, {
+      id,
+      projectId,
+      owner,
+      status: 'ready',
+      workDir,
+      bootNetwork: fake.bootNetwork,
+      checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }],
+    });
     return { id };
   },
   getSnapshot: (id: string) => fake.sessions.get(id),
@@ -262,6 +289,7 @@ beforeEach(() => {
   fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };
   fake.sessions.clear();
   fake.sessionOptions = [];
+  fake.docsCommitted = [];
   fake.bootNetwork = [];
   fake.listeners.clear();
   fake.history.clear();
@@ -385,6 +413,54 @@ describe('작업 분해 실행', () => {
     // 레인 세션은 통합 샌드박스를 띄우기 전에 내려 동시에 뜨는 샌드박스를 레인 수로 제한하고, 통합 세션은 검토용으로 남긴다
     expect([...new Set(fake.stopped)].sort()).toEqual([laneA.sessionId, laneB.sessionId].sort());
     expect(fake.stopOrder.integrationCreatedAfterStops).toBe(true);
+  });
+
+  it('세션에서 "나눠서 병렬로 하기"로 만든 계획은 레인·통합이 그 세션의 최신 체크포인트에서 시작한다(ADR-0XX)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    // 이미 떠 있는 원본 세션(같은 프로젝트·소유자)을 createSession 없이 직접 등록한다
+    fake.sessions.set('origin-1', {
+      id: 'origin-1',
+      projectId: 'orders',
+      owner: 'kim',
+      status: 'ready',
+      workDir: path.join(fake.root, 'origin-1'),
+      checkpoints: [{ sha: 'origin-sha', shortSha: 'origin', message: 'docs: 요구사항을 정리한다', createdAt: '', files: ['docs/requirements.md'] }],
+    });
+
+    const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'origin-1' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.sourceSessionId).toBe('origin-1');
+    // 레인 둘과 통합 하나, 모두 origin-1에서 시작한다
+    expect(fake.sessionOptions.filter((options) => options.seedFromSessionId === 'origin-1')).toHaveLength(3);
+    // 레인을 시작하기 전에 원본 세션에 남아 있을 수 있는 문서 변경을 먼저 체크포인트로 남긴다
+    expect(fake.docsCommitted.map((entry) => entry.sessionId)).toEqual(['origin-1']);
+  });
+
+  it('세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은 지금처럼 프로젝트 원본에서 시작한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.sourceSessionId).toBeUndefined();
+    expect(fake.sessionOptions.every((options) => options.seedFromSessionId === undefined)).toBe(true);
+    expect(fake.docsCommitted).toEqual([]);
+  });
+
+  it('다른 프로젝트·다른 소유자의 세션을 넘기면 404로 거부하고 레인을 시작하지 않는다', async () => {
+    fake.sessions.set('other-project', { id: 'other-project', projectId: 'web-only', owner: 'kim', status: 'ready', workDir: fake.root, checkpoints: [] });
+    await expect(createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'other-project' })).rejects.toThrow(
+      '넘긴 세션을 찾을 수 없습니다',
+    );
+
+    fake.sessions.set('other-owner', { id: 'other-owner', projectId: 'orders', owner: 'lee', status: 'ready', workDir: fake.root, checkpoints: [] });
+    await expect(createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'other-owner' })).rejects.toThrow(
+      '넘긴 세션을 찾을 수 없습니다',
+    );
+    expect(fake.sessions.size).toBe(2);
   });
 
   it('병렬 레인의 쓰기 범위가 겹치는 계획은 세션을 만들기 전에 실패시킨다', async () => {

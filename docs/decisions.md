@@ -3747,6 +3747,48 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-0XX 문서 저장은 검증 게이트 없이 바로 체크포인트로 남기고, 작업 분해는 프로젝트 원본이 아니라 세션의 체크포인트에서 시작한다
+
+상태: 채택
+관련: -
+
+### 맥락
+- 도그푸딩(실제로 b-studio로 b-studio를 개발하며 겪은 문제)에서 드러난 버그다: "요구사항" 탭에서 저장(`applySessionRequirements`, `docs/requirements.md`를 씀)은 세션 작업 복사본에만 쓰고 체크포인트로 남기지 않는다. 그 세션에서 바로 "나눠서 병렬로 하기"를 누르면, 레인·통합 세션이 `createSession(plan.projectId, ...)`으로 **프로젝트 원본**에서 새로 시작한다(task-plans.ts) — 저장한 요구사항, GitHub 이슈 발행 기록(`docs/requirements.issues.json`, ADR-092)이 통째로 사라진다. 결과물 PR에서 요구사항 추적·이슈 번호·`Closes #n` 연결이 끊긴다.
+- 요구사항 문서는 서비스를 재시작하거나 테스트를 돌릴 이유가 없다(코드가 아니다) — 저장할 때마다 전체 검증 게이트(run·test·review…)를 거치게 하면 느리고 부자연스럽다. 이미 비슷한 선례가 있다: `commitLocalEdits`(로컬 폴더 세션이 스튜디오 밖에서 바뀐 파일을 게이트 없이 커밋한다)와 `verify: 'light'`(가볍게 확인한 실행을 표시만 하고 배포 조건 증거로는 안 쓴다, `Workflow-Verify` 트레일러). 이번에도 같은 생각을 문서에 적용한다.
+- 다만 "검증 게이트 없이 커밋"이 코드 변경까지 새는 구멍이 되면 안 된다 — 문서 체크포인트는 **문서 경로로만** 좁게 한정해야 한다.
+- "나눠서 병렬로 하기"는 세션(`handOff`, ADR-068)에서 제안을 받아 넘기는 경로와, 화면의 "계획 만들기" 탭에서 세션 없이 바로 만드는 경로 두 가지가 있다. 전자만 "원본 세션"이 있고, 후자는 지금처럼 프로젝트 원본에서 시작해야 한다(바꾸면 안 된다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 요구사항 저장이 실패하지 않도록 조용히 작업 복사본에만 쓰고, 레인·통합이 시작하기 전에 원본 프로젝트 폴더에도 같은 내용을 복사해 둔다 | 세션 작업 복사본과 프로젝트 원본이 다른 체크포인트 기준(원본은 git 커밋 개념이 없다)이라 "언제 복사할지" 애매하고, 세션을 여러 개 동시에 열면 서로 덮어쓴다 |
+| B. 요구사항 저장도 일반 요청처럼 전체 검증 게이트를 돌려야 체크포인트가 생기게 한다 | 문서만 바꾼 저장이 서비스 재시작·테스트까지 기다려야 해 매 저장이 느려지고, 코드를 전혀 안 건드렸는데 게이트가 실패할 길(예: 서비스가 원래 깨져 있었다)까지 생긴다 |
+| **C. 문서 경로(`docs/**`, 루트 `*.md`, `.github/pull_request_template.md`)만 범위로 검증 게이트 없이 바로 체크포인트로 남기고(`commitWorkingCopyDocs`), 작업 분해는 원본 세션이 있으면(`sourceSessionId`) 그 세션의 최신 체크포인트에서 레인·통합을 시작한다(`seedFromSessionId`)** | 문서 체크포인트가 "검증됨" 판정의 증거로 잘못 쓰이지 않게 `Workflow-Verify: docs` 트레일러로 표시해야 하고(아래 결정 3), 레인·통합이 다른 세션의 작업 복사본을 복제원본으로 쓰는 새 경로가 하나 더 생긴다(채택, 비용은 감수한다) |
+
+### 결정
+1. **문서 체크포인트는 `CheckpointStore.commitPaths(paths, message, body?, opts)`로 좁게 커밋한다**(packages/agent). 지정한 경로만 `git add`·커밋하고, 범위 밖에 바뀐 파일이 있어도 건드리지 않고 그대로 pending으로 남긴다 — 저장 시점에 다른 코드 변경이 진행 중이어도 섞이지 않는다. 범위 안에 바뀐 파일이 없으면 커밋하지 않는다(`undefined`).
+2. **문서 경로 판정은 `apps/studio/lib/server/sessions.ts`의 `isDocPath`(정규식 `^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$`)가 한다.** `docs/` 아래는 전부(마크다운 `docs/requirements.md`뿐 아니라 JSON 사이드카 `docs/requirements.issues.json`도), 저장소 루트의 `*.md`(하위 폴더는 제외), PR 템플릿만 인정한다. `commitWorkingCopyDocs(sessionId, paths, message)`는 `paths` 중 하나라도 이 판정을 통과하지 못하면 **아무것도 커밋하지 않고 거부**한다(호출하는 쪽의 실수로 코드 변경까지 게이트 없이 새는 구멍을 막는다). 어떤 문서 파일이 바뀌었는지 미리 모르는 곳(작업 분해가 레인을 시작하기 전 안전망)은 `commitPendingWorkingCopyDocs(sessionId, message)`로 지금 pending인 파일 중 문서 경로만 걸러 커밋한다.
+3. **문서 체크포인트는 `Workflow-Verify: docs` 트레일러를 남긴다**(`formatVerifyTrailer`/`parseVerifyTrailerValues`를 `'light' | 'docs'`로 넓혔다). `Checkpoint.verify === 'docs'`로 읽혀 체크포인트 화면(히스토리 패널)이 "문서" 배지를 보여 준다. 요구사항 "검증됨" 판정(`computeRequirementStatus`)은 원래부터 체크포인트 자체가 아니라 게이트 확인 결과(`gateChecks`)만 보므로, 문서 체크포인트만으로 "검증됨"이 되는 경로는 애초에 없다 — 이 표시는 배포 조건·체크포인트 화면이 "직접 수정"·"가볍게 확인"과 같은 방식으로 문서 체크포인트를 구분해 보여 주기 위한 것이다.
+4. **요구사항 저장(`applySessionRequirements`)과 이슈 발행·충돌 해결(`publishSessionRequirementIssues`·`resolveSessionRequirementConflict`, 사이드카 `docs/requirements.issues.json`을 쓰는 두 경로)이 쓴 직후 바로 문서 체크포인트를 남긴다.** 요구사항 저장의 커밋 메시지는 "docs: 요구사항을 정리한다 (R2~R20)"처럼 저장한 요구사항 id 범위를 붙인다(`requirementRangeLabel`). 실패해도(시크릿 오탐 등) 저장 자체는 이미 끝났으므로 저장 응답을 막지 않고 로그만 남긴다 — 안전망이지 필수 경로가 아니다.
+5. **작업 분해가 세션에서 시작했으면(`sourceSessionId`) 레인·통합이 그 세션의 최신 체크포인트에서 시작한다.** 대화의 "나눠서 병렬로 하기"(`handOff`, ADR-068)만 세션 id를 넘기고(`submitEntry`의 `sourceSessionId` → `POST /api/task-plans`), 화면의 "계획 만들기" 탭은 넘기지 않아 지금처럼 프로젝트 원본에서 시작한다. `createTaskPlan`은 넘겨받은 `sourceSessionId`가 같은 프로젝트·같은 소유자의 세션인지 확인하고(다른 사람·다른 프로젝트의 세션을 넘기면 404), 레인을 시작하기 전에 그 세션에 남아 있을 수 있는 문서 변경을 `commitPendingWorkingCopyDocs`로 먼저 남긴다("분해 시점" 커밋, 아래 트레이드오프 참고).
+6. **세션 복제는 `CheckpointStore.clone()`에 더한 `ref` 옵션으로 한다.** `ref`를 주면(다른 세션의 작업 복사본을 `source`로) 원본의 기준 브랜치(`info.base`)로 `--branch` 고정 클론을 하지 않고 전체를 복제한 뒤 그 `ref`(세션의 체크포인트 sha)로 체크아웃한다 — 기준 브랜치에는 없을 수 있는 커밋이기 때문이다. `CheckpointStore.inspectSource`는 소스가 다른 b-studio 세션의 작업 복사본이면 지금 체크아웃된 브랜치(세션 자신의 브랜치, 예: `b-studio/orders-s1`) 대신 그 세션이 클론될 때 기록해 둔 기준 브랜치 메타(`b-studio.base`)를 읽는다 — 그래야 레인·통합의 PR 대상이 "원본 세션 브랜치"가 아니라 프로젝트가 실제로 갈라져 나온 기준 브랜치(main 등)로 올바르게 잡힌다. `createSession`의 `seedFromSessionId` 옵션(`startSession`의 `seed: { workDir, sha }`)이 이 경로를 쓴다 — 원본 세션이 **로컬 폴더 세션**(체크포인트가 사용자 폴더 밖 별도 git에 있다)이거나 **git 저장소가 아닌 프로젝트**(기준 브랜치·원격 메타가 없다)면 조용히 무시하고 지금처럼 프로젝트 원본에서 시작한다(세션이 이미 사라졌어도 마찬가지다) — 세션 없이 만든 계획은 한 글자도 다르지 않다.
+
+### 검증 결과
+- `packages/agent/src/checkpoints.test.ts`(보강): `commitPaths`(범위 밖 변경 보존, 범위 안에 변경 없으면 건너뜀, 시크릿 거부), `Workflow-Verify: docs` 트레일러 왕복, `clone({ ref })`로 다른 세션의 체크포인트에서 레인을 시작하되 기준 브랜치는 원본 세션이 물려받은 실제 기준 브랜치를 쓰는 것을 확인했다.
+- `packages/agent/src/workflow.test.ts`(보강): `formatVerifyTrailer`/`parseVerifyTrailerValues`가 `'docs'`를 다루는 것.
+- `apps/studio/lib/server/sessions-docs-checkpoint.test.ts`(신규): `isDocPath` 판정표, `commitWorkingCopyDocs`(문서 아닌 경로 섞이면 거부·범위 밖 변경 보존·변경 없으면 건너뜀·시크릿 거부), `commitPendingWorkingCopyDocs`, `applySessionRequirements`가 저장 직후 문서 체크포인트를 남기고 그 요구사항 상태가 "검증됨"이 되지 않는 것, 여러 요구사항을 저장하면 커밋 메시지에 id 범위가 붙는 것을 실제 git 저장소로 확인했다(샌드박스만 가짜로 바꿨다).
+- `apps/studio/lib/server/sessions-seed-from-session.test.ts`(신규): `createSession`의 `seedFromSessionId`가 실제로 레인을 원본 세션의 체크포인트(저장한 요구사항 포함, 아직 커밋하지 않은 코드 변경은 제외)에서 시작하고 PR 대상 기준 브랜치를 올바르게 물려받는 것, 원본이 로컬 폴더 세션이면 조용히 건너뛰고 프로젝트 원본에서 시작하는 것을 실제 git 저장소로 확인했다.
+- `apps/studio/lib/server/task-plans.test.ts`(보강): `sourceSessionId`가 있으면 레인 2개·통합 1개 모두 `seedFromSessionId`를 받고 분해 전 문서 체크포인트를 한 번 남기는 것, 세션 없이 만든 계획은 영향받지 않는 것, 다른 프로젝트·다른 소유자의 세션을 넘기면 404로 거부하는 것을 확인했다(세션은 가짜로 바꿨다).
+- `pnpm -r typecheck`(6개 패키지) 통과, `pnpm --filter @b-studio/studio lint` 0 errors(기존 경고 7개는 이 변경과 무관, ADR-092와 같은 경고들이다). `vitest run --exclude '.claude/**'`는 이 변경과 관련한 파일은 전부 통과했고(2,383건 중 4건 실패, 전부 이 변경이 손대지 않은 파일: `packages/sandbox/src/docker/format.test.ts`의 Docker 스크립트 테스트 1건은 이 저장소 환경(Colima)에서 단독 실행해도 재현하는 느린 테스트라 기존 문제로 보이고, 체크포인트·PR 리뷰 테스트 2건은 전체 스위트를 한 번에 돌릴 때만 5초 타임아웃에 걸렸다가 단독 실행하면 통과했다 — ADR-092가 이미 적어 둔 "부하 플레이키"와 같은 증상이다).
+
+### 감수한 트레이드오프
+- **분해 시점(`createTaskPlan`)에 원본 세션의 문서 변경을 한 번 커밋하지만, 레인·통합 세션을 만드는 순간에도 다시 한번(`resolveSessionSeed`) 안전망으로 같은 호출을 한다.** 이미 커밋했으면 pending 파일이 없어 곧바로 `undefined`로 끝나 비용은 작지만, 이론적으로는 중복 호출이다 — `seedFromSessionId`를 다른 경로(벤치마크 등)로 직접 넘길 가능성을 생각해 안전망을 남겼다.
+- **문서 체크포인트는 "분해 시점"에만 자동으로 남는다.** 요구사항을 저장한 뒤 분해를 누르지 않고 세션을 그대로 두면(예: "계획 만들기" 탭에서 나중에 세션 없이 새로 시작) 그 세션의 문서 체크포인트는 그 세션 안에서만 의미가 있다 — 의도한 동작이다(세션 없이 만든 계획은 프로젝트 원본에서 시작해야 한다).
+- **로컬 폴더 세션(workspace: local)에서 시작한 분해는 세션의 체크포인트를 물려받지 못한다.** 체크포인트가 사용자 폴더 밖 별도 git에 있어 평범한 클론 원본으로 쓸 수 없기 때문이다 — 지금은 조용히 프로젝트 원본에서 시작하는 것으로 대신한다(저장한 요구사항을 레인이 이어받지 못한다). 로컬 폴더 세션에서의 분해가 잦아지면 다시 볼 조건이다.
+- **`isDocPath`는 저장소 루트의 `*.md`만 문서로 본다.** `apps/studio/README.md`처럼 하위 폴더의 `*.md`는 문서 경로가 아니다(의도한 범위다 — 하위 폴더의 마크다운은 보통 코드 변경과 같이 다뤄야 할 수 있어 넓히지 않았다). "문서" 탭(다른 작업이 진행 중)이 더 넓은 범위가 필요하면 `isDocPath`를 그때 다시 본다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
