@@ -95,11 +95,14 @@ export type TopTab =
   | { kind: 'external'; id: string; label: string; external: ExternalApiView }
   | { kind: 'group'; id: SubTabGroup; label: string }
   | { kind: 'docs'; id: 'docs'; label: string }
+  | { kind: 'status'; id: 'status'; label: string }
   | { kind: 'tokens'; id: 'tokens'; label: string };
 
 /**
  * 개발 화면의 위 탭 목록을 만든다. 화면·API는 서비스마다(로그 전용 서비스는 뺀다), 사내 API는 등록한 것마다,
- * 나머지는 코드·요구사항·실행·저장소·문서·토큰 여섯 자리로 고정한다(ADR-087, 문서는 ADR-094에서 더했다).
+ * 나머지는 코드·요구사항·실행·저장소·문서·현황·토큰 일곱 자리로 고정한다(ADR-087, 문서는 ADR-094, 현황은
+ * ADR-098에서 더했다). "현황"은 코드·요구사항·저장소·문서를 각각 들여다보지 않고도 "지금 어디까지 왔는가"를
+ * 한 화면에서 읽을 수 있게 그 탭들의 데이터를 다시 모아 보여 주는 자리라, 모으는 대상인 저장소·문서 뒤에 둔다.
  * 서비스 개수와 무관하게 결정론적이라 렌더링 없이 테스트한다(PreviewPanel이 이 목록으로 그린다).
  */
 export function buildTopTabs(services: readonly ServiceView[], externals: readonly ExternalApiView[] = []): TopTab[] {
@@ -113,6 +116,7 @@ export function buildTopTabs(services: readonly ServiceView[], externals: readon
     { kind: 'group', id: 'run', label: '실행' },
     { kind: 'group', id: 'repository', label: '저장소' },
     { kind: 'docs', id: 'docs', label: '문서' },
+    { kind: 'status', id: 'status', label: '현황' },
     { kind: 'tokens', id: 'tokens', label: '토큰' },
   ];
 }

@@ -249,6 +249,40 @@ export function buildExtractionUserPrompt(specText: string, referencedFilesConte
 }
 
 /** 모델 응답에서 JSON을 꺼내 검증한다. 형식이 틀리면 RequirementsError */
+/**
+ * 엄격한 검사 전에, 모델 답에서 기계적으로 고칠 수 있는 어긋남을 고친다. 3~6분 걸린 답 전체가 사소한 형식 하나로
+ * 버려지던 문제(시나리오 id가 요구사항 id와 다름, 질문이 상한보다 많음 등)를 막는다. 뜻을 바꾸는 수정은 하지 않는다:
+ * 시나리오 id 앞부분 맞추기(alignScenarioIds), 상한을 넘는 목록 자르기만 한다
+ */
+export function repairExtractionReply(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object') return raw;
+  const reply = { ...(raw as Record<string, unknown>) };
+  const cap = (key: string, max: number) => {
+    if (Array.isArray(reply[key]) && (reply[key] as unknown[]).length > max) reply[key] = (reply[key] as unknown[]).slice(0, max);
+  };
+  cap('requirements', MAX_REQUIREMENTS);
+  cap('questions', MAX_CLARIFYING_QUESTIONS);
+  cap('outOfScope', MAX_OUT_OF_SCOPE);
+  cap('assumptions', MAX_ASSUMPTIONS);
+  cap('manualSteps', MAX_MANUAL_STEPS);
+  if (Array.isArray(reply.requirements)) {
+    reply.requirements = (reply.requirements as unknown[]).map((requirement) => {
+      if (!requirement || typeof requirement !== 'object') return requirement;
+      const candidate = { ...(requirement as Record<string, unknown>) };
+      if (Array.isArray(candidate.scenarios)) {
+        if (candidate.scenarios.length > 20) candidate.scenarios = candidate.scenarios.slice(0, 20);
+        const scenarios = candidate.scenarios as unknown[];
+        const wellFormed = scenarios.every((scenario) => scenario && typeof scenario === 'object' && typeof (scenario as { id?: unknown }).id === 'string');
+        if (typeof candidate.id === 'string' && wellFormed) {
+          return alignScenarioIds(candidate as { id: string; scenarios: Array<{ id: string }> });
+        }
+      }
+      return candidate;
+    });
+  }
+  return reply;
+}
+
 export function parseExtractionReply(text: string): ExtractionReply {
   let raw: unknown;
   try {
@@ -256,7 +290,7 @@ export function parseExtractionReply(text: string): ExtractionReply {
   } catch (error) {
     throw new RequirementsError(error instanceof Error ? error.message : String(error));
   }
-  const parsed = ExtractionReplySchema.safeParse(raw);
+  const parsed = ExtractionReplySchema.safeParse(repairExtractionReply(raw));
   if (!parsed.success) {
     throw new RequirementsError(`추출 응답 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   }
@@ -1156,10 +1190,12 @@ export function requirementContentDrifted(requirement: Requirement): boolean {
 /**
  * 저장(apply) 시점에 부른다: 내용이 드리프트됐으면 개정을 올리고 새 해시·시각을 적는다. 기록된 해시가 없으면
  * (처음 저장하거나 이 기능 이전 문서) 개정 1로 채우기만 하고 "바뀌었다"고 보지 않는다 — 비교할 이전 값이 없기 때문이다.
+ * 이때 revisedAt도 손대지 않는다(건드리면 방금 저장한 요구사항이 전부 "재확인 필요"로 보인다 — 비교 기준이 없는
+ * 첫 저장은 바뀐 게 아니라 그냥 "지금 상태를 처음 기록"하는 것이기 때문이다. computeRequirementStatus 참고).
  */
 export function reviseRequirementIfChanged(requirement: Requirement, now: string = new Date().toISOString()): Requirement {
   const hash = computeRequirementHash(requirement);
-  if (requirement.hash === undefined) return { ...requirement, rev: requirement.rev ?? 1, hash, revisedAt: requirement.revisedAt ?? now };
+  if (requirement.hash === undefined) return { ...requirement, rev: requirement.rev ?? 1, hash };
   if (requirement.hash === hash) return requirement;
   return { ...requirement, rev: (requirement.rev ?? 1) + 1, hash, revisedAt: now };
 }
@@ -1341,9 +1377,10 @@ export const WEAK_WORDS_KO: readonly string[] = ['빠르게', '적절히', '적�
 /** 영어 약한 표현 */
 export const WEAK_WORDS_EN: readonly string[] = ['fast', 'user-friendly', 'appropriate', 'as needed', 'tbd', 'quickly', 'efficient', 'asap', 'soon', 'etc'];
 /** "등"은 한 글자라 단어 경계 정규식으로 오탐이 많다(등록·등급 등) — 조사가 바로 붙는 "…등" 꼴만 따로 본다 */
-const WEAK_WORD_ETC_KO = /[가-힣0-9]\s*등(?:[,.\s]|$)/;
+export const WEAK_WORD_ETC_KO = /[가-힣0-9]\s*등(?:[,.\s]|$)/;
 
-function escapeRegExp(text: string): string {
+/** doc-lint.ts가 같은 단어 경계 규칙으로 약한 표현을 찾을 때 재사용한다(중복 정의하지 않는다) */
+export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 

@@ -42,16 +42,17 @@ describe("mapLegacyTab", () => {
 });
 
 describe("buildTopTabs", () => {
-  it("서비스·사내 API 뒤에 코드·요구사항·실행·저장소·문서·토큰 여섯 고정 탭을 둔다", () => {
+  it("서비스·사내 API 뒤에 코드·요구사항·실행·저장소·문서·현황·토큰 일곱 고정 탭을 둔다", () => {
     const tabs = buildTopTabs([{ name: "api", preview: "openapi" } as never], []);
     const ids = tabs.map((tab) => tab.id);
-    expect(ids).toEqual(["api", "code", "requirements", "run", "repository", "docs", "tokens"]);
+    expect(ids).toEqual(["api", "code", "requirements", "run", "repository", "docs", "status", "tokens"]);
     expect(tabs.find((tab) => tab.id === "docs")).toEqual({ kind: "docs", id: "docs", label: "문서" });
+    expect(tabs.find((tab) => tab.id === "status")).toEqual({ kind: "status", id: "status", label: "현황" });
   });
 
   it("서비스·사내 API가 없어도 고정 탭 순서는 그대로다", () => {
     const tabs = buildTopTabs([], []);
-    expect(tabs.map((tab) => tab.id)).toEqual(["code", "requirements", "run", "repository", "docs", "tokens"]);
+    expect(tabs.map((tab) => tab.id)).toEqual(["code", "requirements", "run", "repository", "docs", "status", "tokens"]);
   });
 });
 

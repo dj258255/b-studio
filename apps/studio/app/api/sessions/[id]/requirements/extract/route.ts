@@ -25,7 +25,8 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     await authorizeSession(id, user);
     const parsed = bodySchema.safeParse(await request.json().catch(() => undefined));
     if (!parsed.success) throw new StudioError(400, 'specText·filePath·issueNumber 중 하나와, 선택적으로 answers가 필요합니다');
-    return Response.json(await previewSessionRequirementsExtraction(id, parsed.data));
+    // request.signal은 클라이언트가 fetch를 취소하거나(취소 버튼) 연결이 끊기면(개발 서버 재시작 등) 신호를 보낸다
+    return Response.json(await previewSessionRequirementsExtraction(id, parsed.data, { signal: request.signal }));
   } catch (error) {
     return errorResponse(error);
   }

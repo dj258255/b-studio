@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -37,8 +37,10 @@ import {
   describeDatabaseState,
   detectRunner,
   discoverTestsInFile,
+  draftManagedRequirement,
   draftRequirementFromIssue,
   estimateCost,
+  extractTrackingSubIssueNumbers,
   extractRequirementMentions,
   extractRequirementsHeuristically,
   fetchIssue,
@@ -52,6 +54,7 @@ import {
   isLikelyTestFile,
   labelRecommendationSource,
   listIssues,
+  managedRequirementToRequirement,
   ManualStepItemSchema,
   MAX_ASSUMPTIONS,
   MAX_CLARIFYING_QUESTIONS,
@@ -68,6 +71,7 @@ import {
   planAskFromClient,
   postComment,
   REFERENCED_FILES_CONTEXT_MAX_CHARS,
+  REQUIREMENT_LABEL,
   requestPlanBrief,
   requestQuestionRecommendations,
   requestRequirementsExtraction,
@@ -109,21 +113,35 @@ import {
   workflowStages,
   Workspace,
   adrFilePath,
+  appendExperimentEntry,
   appendRoadmapTradeoffEntry,
   appendTroubleshootingEntry,
+  appendVerificationEntry,
   buildAdrTemplate,
   buildDesignDocTemplate,
   buildDocSummary,
+  buildExperimentEntry,
+  buildProjectStatus,
+  buildRoadmapTemplate,
   buildRoadmapTradeoffEntry,
   buildTroubleshootingEntry,
+  buildVerificationEntry,
   designDocFilePath,
   DOCS_README_PATH,
+  EXPERIMENT_LOG_PATH,
+  lintText,
   nextAdrNumber,
   nextDesignDocNumber,
   regenerateDocsReadme,
+  regenerateRoadmapStatus,
+  ROADMAP_PATH,
   ROADMAP_TRADEOFFS_PATH,
   TROUBLESHOOTING_LOG_PATH,
+  VERIFICATION_LOG_PATH,
+  type DocLintFinding,
   type DocSummary,
+  type ProjectStatusInput,
+  type ProjectStatusView,
   type AgentEvent,
   type AgentResult,
   type AgentUsage,
@@ -135,6 +153,7 @@ import {
   type ConflictResolution,
   type DatabaseState,
   type DemoScenario,
+  type DiscardBackup,
   type DesignFrameInfo,
   type DesignSource,
   type Effort,
@@ -142,17 +161,18 @@ import {
   type GateCheckResult,
   type GitAuthor,
   type ImplementedRequirementRef,
+  type IssueSummary,
   type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
   type ReferencedFile,
   type Recommendation,
+  type RemoteLocation,
   type Requirement,
   type RequirementCoverage,
   type RequirementDiffEntry,
   type RequirementEvidence,
   type RequirementIssueDraft,
-  type RequirementScenario,
   type RequirementStatus,
   type RepositoryInfo,
   type RoutingDecision,
@@ -1115,6 +1135,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     const secrets = await resolveSecrets(project);
     const previous = (await checkpoints.list())[0]!;
     let discarded: string[] = [];
+    let discardBackup: DiscardBackup | undefined;
     let localEdits: Checkpoint | undefined;
     if (local) {
       // 샌드박스를 멈춘 동안 IDE에서 고친 파일일 수 있어 버리지 않고 체크포인트로 남긴다
@@ -1124,8 +1145,13 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       });
       if (localEdits) history = [...history, { type: 'local_edits_saved', checkpoint: localEdits, reason: 'resume' }];
     } else {
-      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리고 마지막 체크포인트에서 시작한다
-      ({ files: discarded } = await checkpoints.discard());
+      // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-099)
+      // 남은 변경은 되살릴 수 있게 백업한 뒤에야 마지막 체크포인트에서 시작한다
+      const redactor = new Redactor(secrets);
+      const { docsCheckpoint, files, backup } = await discardWorkingCopy(checkpoints, (text) => redactor.find(text));
+      discarded = files;
+      discardBackup = backup;
+      if (docsCheckpoint) history = [...history, { type: 'docs_checkpoint', checkpoint: docsCheckpoint }];
     }
     const list = await checkpoints.list();
     const head = list[0]!;
@@ -1179,7 +1205,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
       `[b-studio] 세션을 새 샌드박스에서 이어서 시작했습니다. ${local ? '작업 폴더와' : '작업 복사본과'} 데이터베이스는 체크포인트 ${head.shortSha}("${head.message}") 상태입니다.`,
-      ...(discarded.length > 0 ? [`체크포인트에 없던 변경 ${discarded.length}개는 버렸습니다: ${discarded.slice(0, 20).join(', ')}`] : []),
+      ...(discarded.length > 0 ? [discardedNote(discarded, discardBackup)] : []),
       ...(localEdits
         ? [`중지한 동안 폴더에서 바뀐 파일 ${localEdits.files.length}개를 이 체크포인트로 남겼습니다: ${localEdits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`]
         : []),
@@ -1194,7 +1220,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     for (const listener of session.listeners) replay(session, listener);
     void flushPersist(session);
     // 이어서 작업하기는 만들자마자 켠다. bootPromise를 남겨 지연 기동 경로(ensureBooted)와 같은 규칙을 쓴다
-    session.bootPromise = boot(session, { discarded, databaseFrom: localEdits ? previous.sha : undefined });
+    session.bootPromise = boot(session, { discarded, discardBackup, databaseFrom: localEdits ? previous.sha : undefined });
     return session.snapshot;
   } finally {
     resuming.delete(id);
@@ -1607,7 +1633,7 @@ export function startBooting(id: string): SessionSnapshot {
  * resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다.
  * databaseFrom은 이어서 작업하기 전에 폴더의 수정을 새 체크포인트로 남겼을 때, 데이터베이스 상태를 가져올 그 앞 체크포인트다
  */
-async function boot(session: Session, resumed?: { discarded: string[]; databaseFrom?: string }): Promise<void> {
+async function boot(session: Session, resumed?: { discarded: string[]; discardBackup?: DiscardBackup; databaseFrom?: string }): Promise<void> {
   const signal = session.stop.signal;
   const onStatus = (event: ServiceStatusEvent) => onServiceStatus(session, event);
   try {
@@ -1639,7 +1665,7 @@ async function boot(session: Session, resumed?: { discarded: string[]; databaseF
         // 복원한 데이터베이스에 붙어 있던 연결과 캐시를 버리도록 의존 서비스를 다시 띄운다
         restarted = (await restartServicesFor(session.sandbox, session.project, [], { signal, onStatus }, { alsoRestart: database.dependents })).restarted;
       }
-      emit(session, { type: 'resumed', checkpoint: head, discarded: resumed.discarded, databases: database.states, restarted });
+      emit(session, { type: 'resumed', checkpoint: head, discarded: resumed.discarded, databases: database.states, restarted, backup: resumed.discardBackup });
     }
     setStatus(session, 'ready');
   } catch (error) {
@@ -2402,7 +2428,12 @@ async function revertRun(
   runId: string,
   { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
 ): Promise<string[]> {
-  const { files, patch } = await session.checkpoints.discard();
+  // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
+  const { docsCheckpoint, files, patch, backup } = await discardWorkingCopy(session.checkpoints, (text) => session.sandbox.findSecrets(text));
+  if (docsCheckpoint) {
+    session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
+    emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
+  }
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다
   const database = await session.databases.restore(session.snapshot.checkpoints[0]!.sha, session.stop.signal);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
@@ -2424,6 +2455,7 @@ async function revertRun(
     restarted: report.restarted,
     databases: database.states,
     sync: report.sync,
+    backup,
   });
   return files;
 }
@@ -2463,6 +2495,49 @@ const DOC_PATH = /^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$/;
 
 export function isDocPath(file: string): boolean {
   return DOC_PATH.test(file);
+}
+
+// ---------------------------------------------------------------------------
+// 절대 조용히 지우지 않는다(ADR-099): 끝내지 못한 요청이 남긴 변경을 "이어서 작업"이 체크포인트로 되돌리며 버리던
+// 중, 문서(docs/requirements.md 등 — 문서 체크포인트 커밋이 실패해 아직 커밋되지 않은 채였다)까지 함께 사라지는
+// 사고가 있었다(2026-10-01, docs/troubleshooting.md 50). CheckpointStore.discard()/restore()가 버리기 직전에
+// 백업을 남기는 것과 짝을 이뤄, 여기서는 "HEAD로 되돌리는(discard) 경로"에서 문서 경로만 먼저 체크포인트로
+// 지킨다 — discard()는 HEAD를 그대로 두고 pending만 지우므로, 미리 커밋한 문서는 되돌린 뒤에도 그대로 남는다.
+// restore(sha)로 더 이전 체크포인트로 되돌리는 경로(restoreCheckpoint·원격·기준 브랜치 되돌리기 실패 처리)는
+// 문서를 미리 커밋해도 그 커밋 자체가 되돌리는 대상보다 뒤에 있어 함께 사라지므로(오히려 백업에서도 빠져 더
+// 나쁘다) 여기서 손대지 않고, CheckpointStore.restore()의 백업만으로 지킨다.
+// ---------------------------------------------------------------------------
+
+/** discard() 직전에 문서 경로(docs/** 등)만 먼저 체크포인트로 남긴다. 남길 문서가 없으면 아무것도 하지 않는다(undefined) */
+async function protectPendingDocsBeforeDiscard(checkpoints: CheckpointStore, findSecrets: (text: string) => string[]): Promise<Checkpoint | undefined> {
+  const pending = (await checkpoints.pendingFiles()).filter(isDocPath);
+  if (pending.length === 0) return undefined;
+  return checkpoints.commitPaths(pending, '지키기: 되돌리기 전에 문서를 체크포인트로 남긴다', undefined, {
+    findSecrets,
+    trailers: [formatVerifyTrailer('docs')],
+  });
+}
+
+/**
+ * discard()로 되돌리기 전에 문서를 지키고(protectPendingDocsBeforeDiscard), 남은 변경은 discard() 자신이
+ * 백업한 뒤에 버리게 한다. resumeSession·revertRun처럼 "HEAD로 되돌리는" 모든 경로가 이 순서를 따른다.
+ */
+async function discardWorkingCopy(
+  checkpoints: CheckpointStore,
+  findSecrets: (text: string) => string[],
+): Promise<{ docsCheckpoint?: Checkpoint; files: string[]; patch: string; backup?: DiscardBackup }> {
+  const docsCheckpoint = await protectPendingDocsBeforeDiscard(checkpoints, findSecrets);
+  const { files, patch, backup } = await checkpoints.discard();
+  return { docsCheckpoint, files, patch, backup };
+}
+
+/** "체크포인트에 없던 변경 N개를 버렸습니다/백업했습니다" 안내문. files가 비어 있으면 빈 문자열 */
+function discardedNote(files: readonly string[], backup?: DiscardBackup): string {
+  if (files.length === 0) return '';
+  const list = files.slice(0, 20).join(', ');
+  return backup
+    ? `체크포인트에 없던 변경 ${files.length}개를 백업했습니다: ${list} · 되살리기 id: ${backup.id}`
+    : `체크포인트에 없던 변경 ${files.length}개는 버렸습니다(백업하지 못했습니다): ${list}`;
 }
 
 /**
@@ -2596,7 +2671,8 @@ export function restoreCheckpoint(id: string, sha: string): void {
     let event: StudioEvent;
     try {
       await session.relaying;
-      const { files } = await session.checkpoints.restore(sha);
+      // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099)
+      const { files, backup } = await session.checkpoints.restore(sha);
       // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다
       const database = await session.databases.restore(sha, session.stop.signal);
       const report = await restartServicesFor(
@@ -2608,7 +2684,12 @@ export function restoreCheckpoint(id: string, sha: string): void {
       );
       session.snapshot.checkpoints = await session.checkpoints.list();
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
-      noteForModel(session, `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 변경은 모두 사라졌습니다.`);
+      noteForModel(
+        session,
+        `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 체크포인트는 모두 사라졌습니다.${
+          backup ? ` 아직 체크포인트로 남기지 않았던 변경 ${backup.files.length}개는 백업했습니다(되살리기 id: ${backup.id}).` : ''
+        }`,
+      );
       if (session.snapshot.mode === 'demo') {
         // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 요청 체크포인트 수에 맞춰 다음 요청을 다시 정한다.
         // 내 폴더 세션의 직접 수정 체크포인트는 요청이 아니므로 세지 않는다
@@ -2626,12 +2707,39 @@ export function restoreCheckpoint(id: string, sha: string): void {
         checkpoints: session.snapshot.checkpoints,
         nextDemoRequest: session.snapshot.nextDemoRequest,
         nextDemoQuestion: session.snapshot.nextDemoQuestion,
+        backup,
       };
     } catch (error) {
       event = { type: 'restore_failed', checkpoint: target, error: describe(error) };
     }
     // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
     session.snapshot.running = false;
+    if (!session.stop.signal.aborted) emit(session, event);
+  })();
+}
+
+/**
+ * discard()·restore()가 버리기 직전에 남긴 백업(ADR-099)을 작업 복사본에 되살린다. 그 사이에 같은 파일이
+ * 다시 바뀌어 깨끗하게 들어가지 않으면(git apply 충돌) 거부한다 — 일부만 들어가 상태를 더 헷갈리게 만들지 않는다.
+ */
+export function restoreDiscardedBackup(id: string, backupId: string): void {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되살릴 수 있습니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+
+  void (async () => {
+    let event: StudioEvent;
+    try {
+      const { files } = await session.checkpoints.restoreBackup(backupId);
+      const report =
+        files.length > 0
+          ? await restartServicesFor(session.sandbox, session.project, files, { signal: session.stop.signal, onStatus: (status) => onServiceStatus(session, status) })
+          : undefined;
+      noteForModel(session, `[b-studio] 백업을 되살렸습니다. 파일 ${files.length}개: ${files.slice(0, 20).join(', ')}. 다루기 전에 다시 읽으세요.`);
+      event = { type: 'backup_restored', backupId, files, restarted: report?.restarted ?? [] };
+    } catch (error) {
+      event = { type: 'backup_restore_failed', backupId, error: describe(error) };
+    }
     if (!session.stop.signal.aborted) emit(session, event);
   })();
 }
@@ -3150,11 +3258,21 @@ async function undoRemoteSync(
   start: StartOptions,
 ): Promise<StudioEvent> {
   try {
-    const { files } = await session.checkpoints.restore(result.previous);
+    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
+    const { files, backup } = await session.checkpoints.restore(result.previous);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
-    return { type: 'remote_sync_failed', error, commits, files: result.files, report, restarted: restart.restarted, checkpoints: session.snapshot.checkpoints };
+    return {
+      type: 'remote_sync_failed',
+      error,
+      commits,
+      files: result.files,
+      report,
+      restarted: restart.restarted,
+      checkpoints: session.snapshot.checkpoints,
+      backup,
+    };
   } catch (undoError) {
     return { type: 'remote_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, commits, files: result.files, report };
   }
@@ -3290,11 +3408,20 @@ async function undoBaseSync(
   start: StartOptions,
 ): Promise<StudioEvent> {
   try {
-    const { files } = await session.checkpoints.restore(result.previous);
+    // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
+    const { files, backup } = await session.checkpoints.restore(result.previous);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
-    return { type: 'base_sync_failed', error, files: result.files, report, restarted: restart.restarted, checkpoints: session.snapshot.checkpoints };
+    return {
+      type: 'base_sync_failed',
+      error,
+      files: result.files,
+      report,
+      restarted: restart.restarted,
+      checkpoints: session.snapshot.checkpoints,
+      backup,
+    };
   } catch (undoError) {
     return { type: 'base_sync_failed', error: `${error}. 되돌리지도 못했습니다: ${describe(undoError)}`, files: result.files, report };
   }
@@ -3441,6 +3568,12 @@ export interface RequirementsSnapshot {
   assumptions: string[];
   /** "## 사람이 할 일" 절(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 에이전트가 절대 하지 않는다 */
   manualSteps: string[];
+  /**
+   * 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(버그 리포트 A). 화면이 "저장 안 한 추출
+   * 결과가 있습니다 · 이어서 보기 / 버리기" 배너로 보여 준다 — 페이지를 새로고침하거나 "뽑는 중"에 개발 서버가
+   * 재시작돼도 끝까지 마친 추출 결과를 잃지 않는다.
+   */
+  draft?: PersistedRequirementsExtractionDraft;
 }
 
 const TEST_SCAN_IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.gradle', '.venv', '__pycache__', 'coverage', 'design']);
@@ -3508,8 +3641,9 @@ function requirementsRecommendationAsk(session: Session): { ask: ModelAsk; webSe
   return undefined;
 }
 
-/** 저장소 이슈 본문을 가져온다. repository-panel.ts와 같은 자료원(listIssues)을 쓰지만, 그 모듈은 sessions.ts를 가져오므로 순환을 피해 직접 부른다 */
-async function fetchIssueBodyForSession(session: Session, issueNumber: number): Promise<string> {
+/** 이 세션의 원격 저장소에서 이슈 목록을 읽을 수 있게 준비한다(원격·토큰 확인까지). repository-panel.ts와 같은 자료원(listIssues)을
+ * 쓰지만, 그 모듈은 sessions.ts를 가져오므로 순환을 피해 직접 부른다. 원격이 없거나 지원하지 않거나 토큰이 없으면 던진다 */
+async function remoteIssuesForSession(session: Session): Promise<{ remote: RemoteLocation; token: string; issues: IssueSummary[] }> {
   const info = await session.checkpoints.repository();
   if (!info) throw new StudioError(409, '이 프로젝트는 원격 저장소가 없어 이슈를 가져올 수 없습니다');
   const remote = parseRemote(info.remoteUrl);
@@ -3519,10 +3653,51 @@ async function fetchIssueBodyForSession(session: Session, issueNumber: number): 
   const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
   if (!token) throw new StudioError(400, '이슈를 가져올 토큰이 없습니다');
   const issues = await listIssues(remote, { state: 'all', token });
+  return { remote, token, issues };
+}
+
+/** 저장소 이슈 본문을 가져온다("요구사항 뽑기"가 이슈를 명세 글로 쓸 때) */
+async function fetchIssueBodyForSession(session: Session, issueNumber: number): Promise<string> {
+  const { issues } = await remoteIssuesForSession(session);
   const issue = issues.find((candidate) => candidate.number === issueNumber);
   if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
   const body = issue.body?.trim();
   return body ? `${issue.title}\n\n${body}` : issue.title;
+}
+
+/**
+ * "저장소 이슈"로 요구사항을 뽑을 때, 그 이슈(또는 추적 이슈의 하위 이슈)가 b-studio 관리형 영역을 담고 있으면
+ * 모델을 부르지 않고 결정론적으로 요구사항을 되읽는다(ADR-097, dogfooding 발견 C — 추적 이슈의 표를 모델에
+ * 그대로 넘기면 모델이 인수 조건을 지어냈다). 관리형 영역이 전혀 없으면 undefined를 돌려줘 호출하는 쪽이
+ * 평소대로 모델 추출(또는 결정론적 대체 파서)로 넘어가게 한다.
+ */
+async function tryImportManagedRequirements(session: Session, issueNumber: number): Promise<Requirement[] | undefined> {
+  const { issues } = await remoteIssuesForSession(session);
+  const issue = issues.find((candidate) => candidate.number === issueNumber);
+  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
+  const body = issue.body ?? '';
+
+  const toRequirement = (draft: ReturnType<typeof draftManagedRequirement>): Requirement | undefined => {
+    if (!draft) return undefined;
+    const parsed = RequirementSchema.safeParse(managedRequirementToRequirement(draft));
+    return parsed.success ? parsed.data : undefined;
+  };
+
+  // 1) 이슈 자신이 관리형 하위 이슈다
+  const own = toRequirement(draftManagedRequirement(issue.title, body));
+  if (own) return [own];
+
+  // 2) 추적 이슈다(b-studio:req 라벨 + 하위 이슈 번호 표) — 하위 이슈를 따라가 하나씩 되읽는다
+  if (!issue.labels.includes(REQUIREMENT_LABEL)) return undefined;
+  const subNumbers = extractTrackingSubIssueNumbers(body);
+  if (subNumbers.length === 0) return undefined;
+  const byNumber = new Map(issues.map((candidate) => [candidate.number, candidate]));
+  const requirements = subNumbers
+    .map((number) => byNumber.get(number))
+    .filter((candidate): candidate is IssueSummary => candidate !== undefined)
+    .map((candidate) => toRequirement(draftManagedRequirement(candidate.title, candidate.body ?? '')))
+    .filter((requirement): requirement is Requirement => requirement !== undefined);
+  return requirements.length > 0 ? requirements : undefined;
 }
 
 /** managed 서비스 템플릿·데이터베이스 엔진을 한 줄로 요약한다("추천 값으로 채우기"가 스택에 맞는 답을 내도록 프롬프트에 붙인다) */
@@ -3568,9 +3743,13 @@ async function resolveSpecText(session: Session, input: RequirementsExtractionIn
 export interface RequirementsExtractionPreview {
   requirements: Requirement[];
   questions: string[];
-  /** 추출 모델을 불러 얻었는지(model), 도구 없는 단발 호출을 지원하지 않는 백엔드거나 모델 호출이 실패해 결정론적 파서로 대신했는지(fallback) */
-  source: 'model' | 'fallback';
-  /** source가 fallback일 때만 있다. 화면이 그대로 보여 준다 */
+  /**
+   * 추출 모델을 불러 얻었는지(model), 도구 없는 단발 호출을 지원하지 않는 백엔드거나 모델 호출이 실패해 결정론적
+   * 파서로 대신했는지(fallback), b-studio가 이미 발행한 이슈(관리형 영역)를 모델 호출 없이 그대로 되읽었는지(managed —
+   * 저장소 이슈 가져오기가 추적 이슈의 표까지 모델에 넘기면 모델이 인수 조건을 지어냈다, 버그 리포트 참고)
+   */
+  source: 'model' | 'fallback' | 'managed';
+  /** source가 fallback·managed일 때만 있다. 화면이 그대로 보여 준다 */
   reason?: string;
   /** 명세가 경로처럼 언급한 파일(seed/seed.json 등)이 작업 복사본에 있는지·크기·미리보기 */
   referencedFiles: ReferencedFile[];
@@ -3613,16 +3792,92 @@ async function mergeWithSavedRequirements(session: Session, extracted: readonly 
   return { requirements: merged, diff };
 }
 
+/** "요구사항 뽑기"(모델 추출)의 제한 시간. EARS·시나리오까지 뽑는 호출이라 3~6분씩 걸려, 10분을 넘으면 멈추고 분명한 오류로 알린다 */
+const REQUIREMENTS_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
+/** "추천 값으로 채우기"의 제한 시간. 추출보다 짧게 끝나야 정상이라 3분으로 둔다 */
+const REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS = 3 * 60_000;
+
+const REQUIREMENTS_DRAFT_FILE = path.join('.git', 'b-studio', 'requirements-draft.json');
+
+/** 저장 안 한(아직 apply하지 않은) 추출 결과를 세션 상태 폴더에 남긴 모양. `.git/` 아래라 커밋에도, 에이전트 도구에도 걸리지 않는다 */
+export interface PersistedRequirementsExtractionDraft extends RequirementsExtractionPreview {
+  savedAt: string;
+}
+
+function requirementsDraftFile(session: Session): string {
+  return path.join(stateDirOf(session.snapshot), REQUIREMENTS_DRAFT_FILE);
+}
+
+/**
+ * 추출 미리보기를 세션 상태 폴더에 남긴다(사이드카 — docs/ 밖이라 git 작업 복사본에도, 커밋에도 안 들어간다).
+ * "요구사항 뽑기"가 3~6분 걸리는 동안 개발 서버가 재시작되면 화면은 "뽑는 중"에 멈춰 있어도 서버 쪽 작업은
+ * 통째로 사라진다(버그 리포트 A) — 적어도 끝까지 마친 추출 결과는 다시 열었을 때 보이도록 남긴다.
+ */
+async function saveRequirementExtractionDraft(session: Session, preview: RequirementsExtractionPreview): Promise<void> {
+  const file = requirementsDraftFile(session);
+  await mkdir(path.dirname(file), { recursive: true });
+  const draft: PersistedRequirementsExtractionDraft = { ...preview, savedAt: new Date().toISOString() };
+  await writeFile(file, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600 });
+}
+
+/** 저장 안 한 추출 결과가 있으면 돌려준다("이어서 보기"). 없으면 undefined — 화면은 이때 안내 배너를 띄우지 않는다 */
+export async function getSessionRequirementExtractionDraft(id: string): Promise<PersistedRequirementsExtractionDraft | undefined> {
+  const session = requireSession(id);
+  try {
+    return JSON.parse(await readFile(requirementsDraftFile(session), 'utf8')) as PersistedRequirementsExtractionDraft;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 저장 안 한 추출 결과를 지운다("버리기", 또는 apply가 성공해 더 들고 있을 필요가 없을 때) */
+export async function discardSessionRequirementExtractionDraft(id: string): Promise<void> {
+  const session = requireSession(id);
+  await rm(requirementsDraftFile(session), { force: true });
+}
+
+/** previewSessionRequirementsExtraction의 모든 반환 경로가 거친다: 완료된 결과를 드래프트로 남기고 그대로 돌려준다 */
+async function finishExtractionPreview(session: Session, preview: RequirementsExtractionPreview): Promise<RequirementsExtractionPreview> {
+  await saveRequirementExtractionDraft(session, preview).catch((error: unknown) => {
+    console.error(`[b-studio] 세션 ${session.snapshot.id}의 요구사항 추출 임시 결과를 남기지 못했습니다`, error);
+  });
+  return preview;
+}
+
 /**
  * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
- * 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출 모델 문맥에 붙이고
- * (데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
- * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다.
+ * "저장소 이슈"로 가져올 때는 그 이슈(또는 추적 이슈의 하위 이슈)가 b-studio 관리형 영역을 담고 있으면 모델을
+ * 부르지 않고 그대로 되읽는다(ADR-097, 버그 리포트 C — 추적 이슈의 표를 모델에 그대로 넘기면 인수 조건을 지어냈다).
+ * 그 밖에는: 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출
+ * 모델 문맥에 붙이고(데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
+ * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다
+ * (단, 호출하는 쪽이 취소했거나 제한 시간(10분)을 넘겼으면 대체 파서로 넘기지 않고 분명한 오류를 던진다 — 버그 리포트 A).
  * 어느 경로든 "사람이 할 일"(저장소 권한·협업자 추가, 이메일 제출 등)로 보이는 항목은 결정론적 가드로 한 번 더 걸러내고,
  * 이미 저장된 문서가 있으면 제목·EARS 유사도로 병합해 기존 id를 지킨다(재추출해도 같은 요구사항이 같은 id를 유지한다).
  */
-export async function previewSessionRequirementsExtraction(id: string, input: RequirementsExtractionInput): Promise<RequirementsExtractionPreview> {
+export async function previewSessionRequirementsExtraction(
+  id: string,
+  input: RequirementsExtractionInput,
+  options: { signal?: AbortSignal } = {},
+): Promise<RequirementsExtractionPreview> {
   const session = requireSession(id);
+
+  if (input.issueNumber !== undefined) {
+    const managed = await tryImportManagedRequirements(session, input.issueNumber).catch(() => undefined);
+    if (managed) {
+      return finishExtractionPreview(session, {
+        requirements: managed,
+        questions: [],
+        source: 'managed',
+        reason: `b-studio가 발행한 이슈에서 그대로 가져왔습니다 (${managed.length}개)`,
+        referencedFiles: [],
+        outOfScope: [],
+        assumptions: [],
+        manualSteps: [],
+      });
+    }
+  }
+
   const specText = await resolveSpecText(session, input);
   const referencedFiles = await resolveReferencedFiles(session.project.root, specText);
   const referencedFilesContext = buildReferencedFilesContext(referencedFiles, REFERENCED_FILES_CONTEXT_MAX_CHARS);
@@ -3631,7 +3886,7 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
   if (!ask) {
     const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
     const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
-    return {
+    return finishExtractionPreview(session, {
       requirements,
       questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
@@ -3641,12 +3896,14 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
       assumptions: [],
       manualSteps,
       ...(diff ? { diff } : {}),
-    };
+    });
   }
+  const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_EXTRACTION_TIMEOUT_MS);
+  const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
   try {
-    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal, referencedFilesContext);
+    const result = await requestRequirementsExtraction(ask, specText, signal, referencedFilesContext);
     const { requirements, diff } = await mergeWithSavedRequirements(session, result.requirements);
-    return {
+    return finishExtractionPreview(session, {
       requirements,
       questions: mergeQuestionsWithMissingReferences(result.questions, referencedFiles),
       source: 'model',
@@ -3655,21 +3912,16 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
       assumptions: result.assumptions,
       manualSteps: result.manualSteps,
       ...(diff ? { diff } : {}),
-    };
+    });
   } catch (error) {
-    const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
-    const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
-    return {
-      requirements,
-      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
-      source: 'fallback',
-      reason: `추출 모델 호출이 실패해 결정론적 방식으로 대신했습니다: ${describe(error)}`,
-      referencedFiles,
-      outOfScope: [],
-      assumptions: [],
-      manualSteps,
-      ...(diff ? { diff } : {}),
-    };
+    if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
+    if (timeoutSignal.aborted) {
+      throw new StudioError(408, `요구사항 추출이 제한 시간(${Math.round(REQUIREMENTS_EXTRACTION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 명세를 줄이거나 다시 시도해 주세요`);
+    }
+    if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 요구사항 추출을 이어갈 수 없습니다');
+    // 모델 답을 쓸 수 없을 때 헤딩으로 나누는 대체 파서로 몰래 바꾸지 않는다 — 긴 명세에서는 "2. 기술 스택" 같은 목차가
+    // 그대로 요구사항이 되어, 사람이 이유 줄을 놓치면 엉뚱한 목록이 저장·발행됐다(대체 파서는 모델이 없는 백엔드에서만 쓴다)
+    throw new StudioError(502, `추출 모델의 답을 쓸 수 없었습니다: ${describe(error)} — 다시 시도해 주세요`);
   }
 }
 
@@ -3692,15 +3944,30 @@ export interface RequirementRecommendations {
  * requestQuestionRecommendations가 서버에서 인용문이 실제로 스펙에 있는지 검증한다), 프로젝트 스택(서비스 템플릿·DB
  * 엔진)을 함께 알려줘 스택과 어긋나는 추천(예: Postgres 프로젝트에 MySQL 제안)을 막는다.
  */
-export async function recommendSessionRequirementQuestions(id: string, input: RequirementRecommendationsInput): Promise<RequirementRecommendations> {
+export async function recommendSessionRequirementQuestions(
+  id: string,
+  input: RequirementRecommendationsInput,
+  options: { signal?: AbortSignal } = {},
+): Promise<RequirementRecommendations> {
   const session = requireSession(id);
   if (input.questions.length === 0) throw new StudioError(400, '추천을 받을 질문이 없습니다');
   const resolved = requirementsRecommendationAsk(session);
   if (!resolved) throw new StudioError(400, `이 세션 백엔드(${sessionBackend(session.snapshot)})는 추천 답 호출을 지원하지 않습니다`);
   const specText = input.specText?.trim() ?? '';
   const stackSummary = buildProjectStackSummary(session.project);
-  const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, session.stop.signal, stackSummary);
-  return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
+  const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS);
+  const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
+  try {
+    const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, signal, stackSummary);
+    return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
+  } catch (error) {
+    if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
+    if (timeoutSignal.aborted) {
+      throw new StudioError(408, `추천 값 찾기가 제한 시간(${Math.round(REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 다시 시도해 주세요`);
+    }
+    if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 추천 값 찾기를 이어갈 수 없습니다');
+    throw error;
+  }
 }
 
 /**
@@ -3743,10 +4010,11 @@ function sessionCheckpointRefs(session: Session): CheckpointRef[] {
 /** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
 export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
+  const draft = await getSessionRequirementExtractionDraft(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
-  if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [] };
+  if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [], ...(draft ? { draft } : {}) };
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
-  if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps };
+  if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps, ...(draft ? { draft } : {}) };
 
   const checkpoints = sessionCheckpointRefs(session);
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
@@ -3764,6 +4032,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
     manualSteps,
+    ...(draft ? { draft } : {}),
   };
 }
 
@@ -3835,6 +4104,8 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
       console.error(`[b-studio] 세션 ${id}의 요구사항 문서 체크포인트를 남기지 못했습니다`, error);
     },
   );
+  // 저장이 끝났으니 "저장 안 한 추출 결과" 배너가 더는 필요 없다(실패해도 다음에 또 지우면 되니 조용히 넘어간다)
+  await discardSessionRequirementExtractionDraft(id).catch(() => {});
   return getSessionRequirements(id);
 }
 
@@ -3940,7 +4211,7 @@ async function commitDocTabChange(id: string, file: string, message: string): Pr
   });
 }
 
-export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap';
+export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap' | 'verification' | 'experiment' | 'roadmap-plan';
 
 export interface NewDocInput {
   kind: NewDocKind;
@@ -3985,11 +4256,33 @@ async function createSessionDocFile(id: string, input: NewDocInput): Promise<{ p
     await workspace.write(TROUBLESHOOTING_LOG_PATH, content);
     return { path: TROUBLESHOOTING_LOG_PATH, content };
   }
-  const existing = await workspace.read(ROADMAP_TRADEOFFS_PATH).catch(() => undefined);
-  const entry = input.body?.trim() || buildRoadmapTradeoffEntry(title);
-  const content = appendRoadmapTradeoffEntry(existing, entry);
-  await workspace.write(ROADMAP_TRADEOFFS_PATH, content);
-  return { path: ROADMAP_TRADEOFFS_PATH, content };
+  if (input.kind === 'roadmap') {
+    const existing = await workspace.read(ROADMAP_TRADEOFFS_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildRoadmapTradeoffEntry(title);
+    const content = appendRoadmapTradeoffEntry(existing, entry);
+    await workspace.write(ROADMAP_TRADEOFFS_PATH, content);
+    return { path: ROADMAP_TRADEOFFS_PATH, content };
+  }
+  if (input.kind === 'verification') {
+    const existing = await workspace.read(VERIFICATION_LOG_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildVerificationEntry(title);
+    const content = appendVerificationEntry(existing, entry);
+    await workspace.write(VERIFICATION_LOG_PATH, content);
+    return { path: VERIFICATION_LOG_PATH, content };
+  }
+  if (input.kind === 'experiment') {
+    const existing = await workspace.read(EXPERIMENT_LOG_PATH).catch(() => undefined);
+    const entry = input.body?.trim() || buildExperimentEntry(title);
+    const content = appendExperimentEntry(existing, entry);
+    await workspace.write(EXPERIMENT_LOG_PATH, content);
+    return { path: EXPERIMENT_LOG_PATH, content };
+  }
+  // 'roadmap-plan': docs/ROADMAP.md 자체는 이미 있으면 손대지 않는다(단계·마일스톤처럼 손으로 쓴 글이 있을 수 있다) — 없을 때만 템플릿으로 만든다
+  const existingRoadmap = await workspace.read(ROADMAP_PATH).catch(() => undefined);
+  if (existingRoadmap !== undefined) return { path: ROADMAP_PATH, content: existingRoadmap };
+  const content = input.body?.trim() || buildRoadmapTemplate();
+  await workspace.write(ROADMAP_PATH, content);
+  return { path: ROADMAP_PATH, content };
 }
 
 /** "색인 갱신": docs/README.md의 관리 구간만 다시 만든다(문서마다 첫 H1·첫 문단을 읽어 표를 채운다) */
@@ -4014,6 +4307,82 @@ async function regenerateSessionDocsIndexFile(id: string): Promise<{ path: strin
   return { path: DOCS_README_PATH, content };
 }
 
+/**
+ * "ROADMAP 갱신": `docs/ROADMAP.md`의 "진행 현황" 구간만 저장된 요구사항 상태(상태별 개수, 필수(must)·권장(should)
+ * 진행도)로 다시 만든다 — 단계(POC/MVP/Beta/v1)·마일스톤·현재 위치처럼 손으로 쓴 글은 그대로 둔다(색인 갱신과 같은
+ * 관리되는 구간 방식, ADR-098). 요구사항이 저장돼 있지 않아도 실패하지 않고 "집계할 수 없다"는 안내로 채운다.
+ */
+export async function regenerateSessionRoadmap(id: string): Promise<{ path: string; content: string }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 갱신할 수 있습니다');
+  const snapshot = await getSessionRequirements(id);
+  const byStatus: Record<string, number> = {};
+  for (const requirement of snapshot.requirements) byStatus[requirement.status] = (byStatus[requirement.status] ?? 0) + 1;
+  const mustHaves = snapshot.requirements.filter((requirement) => requirement.priority === 'must');
+  const shouldHaves = snapshot.requirements.filter((requirement) => requirement.priority === 'should');
+  const summary = {
+    byStatus,
+    must: { total: mustHaves.length, done: mustHaves.filter((requirement) => requirement.status === '검증됨').length },
+    should: { total: shouldHaves.length, done: shouldHaves.filter((requirement) => requirement.status === '검증됨').length },
+  };
+  const workspace = new Workspace(session.project.root);
+  const existing = await workspace.read(ROADMAP_PATH).catch(() => undefined);
+  const content = regenerateRoadmapStatus(existing, summary);
+  await workspace.write(ROADMAP_PATH, content);
+  await commitDocTabChange(id, ROADMAP_PATH, 'docs: 로드맵 진행 현황을 갱신한다');
+  return { path: ROADMAP_PATH, content };
+}
+
+/**
+ * "문서" 탭의 모호한 표현 린트와 "올리기" 미리보기의 "모호한 표현" 경고가 함께 쓴다(ADR-098) — 세션별 계정 확인만
+ * 하고 나머지는 packages/agent의 순수 함수(lintText)에 그대로 맡긴다. 세션을 몰라도 되는 계산이지만, 그 밖의
+ * 문서 탭 API와 같은 인가 경계를 쓰려고 세션 id를 받는다.
+ */
+export function lintSessionDocText(id: string, text: string): DocLintFinding[] {
+  requireSession(id);
+  return lintText(text);
+}
+
+// ---------------------------------------------------------------------------
+// "현황" 탭(ADR-098): 세션·요구사항·체크포인트를 다시 재지 않고 있는 그대로 재배열한다(읽기 전용 집계).
+// 실제 모양 맞추기는 packages/agent의 순수 함수(buildProjectStatus)가 하고, 여기서는 세션이 들고 있는 조각들을
+// 그 함수가 받는 모양으로 모으기만 한다.
+// ---------------------------------------------------------------------------
+
+/** 세션 기록에서 마지막으로 시작한 요청 글(관제 화면의 overviewSessions와 같은 방식 — run_started를 뒤에서 찾는다) */
+function lastRunStartedRequest(history: readonly StudioEvent[]): string | undefined {
+  const started = history.findLast((event) => event.type === 'run_started');
+  return started?.type === 'run_started' ? started.request : undefined;
+}
+
+export async function getSessionStatus(id: string): Promise<ProjectStatusView> {
+  const session = requireSession(id);
+  const snapshot = session.snapshot;
+  const requirementsSnapshot = await getSessionRequirements(id).catch(() => ({ exists: false, requirements: [], assumptions: [], manualSteps: [] }) as RequirementsSnapshot);
+
+  const input: ProjectStatusInput = {
+    projectName: snapshot.projectName,
+    running: snapshot.running,
+    currentRequestSummary: snapshot.running ? lastRunStartedRequest(session.history) : undefined,
+    requirements: requirementsSnapshot.requirements.map((requirement) => ({
+      id: requirement.id,
+      title: requirement.title,
+      priority: requirement.priority,
+      status: requirement.status,
+      ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}),
+    })),
+    openQuestion: snapshot.pendingQuestion?.question,
+    manualSteps: requirementsSnapshot.manualSteps,
+    checkpoints: snapshot.checkpoints.slice(0, 5).map((checkpoint) => ({ shortSha: checkpoint.shortSha, message: checkpoint.message, createdAt: checkpoint.createdAt })),
+    pullRequestUrl: snapshot.repository?.pullRequestUrl,
+    reviewState: snapshot.review ? { state: snapshot.review.state, rounds: snapshot.review.rounds.length } : undefined,
+    failedServices: snapshot.services.filter((service) => service.state === 'failed').map((service) => service.name),
+    // 작업 분해 계획에 작업별 예상 시간 입력이 아직 없다 — 지어내지 않고 생략한다(buildProjectStatus가 "추정 없음"으로 보여준다)
+    links: { roadmap: ROADMAP_PATH, changelog: 'CHANGELOG.md', docsIndex: DOCS_README_PATH },
+  };
+  return buildProjectStatus(input);
+}
+
 // ---------------------------------------------------------------------------
 // 요구사항 → GitHub 이슈 발행·동기화(ADR-092). 순수 계산은 requirement-issues.ts(agent 패키지)가,
 // 원격 읽기/쓰기·발행 기록은 apps/studio/lib/server/requirement-issues.ts(orchestrator)가 맡는다.
@@ -4036,10 +4405,17 @@ function requireRequirementIssuesContext(context: RequirementIssuesContext | und
   return context;
 }
 
+/**
+ * 발행에 쓸 요구사항 전체(ears·scenarios·nfr·rev·hash·trace까지)와 상태를 모은다. 전에는 snapshot.requirements의
+ * id·title·kind·priority·acceptance만 추려 써서(평가용 view 모양) EARS·시나리오·NFR이 몸통에 전혀 안 실렸다
+ * (B 버그 — 이슈 본문이 항상 "(정의되지 않음)"/"(없음)"으로 찍혔다). 같은 docs/requirements.md를 다시 읽어
+ * (readSavedRequirements) 전체 필드를 들고, 상태만 snapshot의 평가 결과에서 가져온다.
+ */
 async function requirementsForIssues(id: string): Promise<{ requirements: Requirement[]; statusById: Record<string, RequirementStatus> }> {
+  const session = requireSession(id);
   const snapshot = await getSessionRequirements(id);
   if (!snapshot.exists || snapshot.requirements.length === 0) throw new StudioError(400, '저장된 요구사항이 없습니다. 먼저 "명세" 탭에서 요구사항을 저장하세요');
-  const requirements = snapshot.requirements.map(({ id: requirementId, title, kind, priority, acceptance }) => ({ id: requirementId, title, kind, priority, acceptance }) as Requirement);
+  const requirements = await readSavedRequirements(session);
   const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
   return { requirements, statusById };
 }
@@ -4132,8 +4508,9 @@ async function implementedRequirementRefs(session: Session, requestTexts: readon
     return mentioned.flatMap((id): ImplementedRequirementRef[] => {
       const requirement = byId.get(id);
       if (!requirement) return [];
-      const rev = (requirement as Requirement & { rev?: number }).rev;
-      return [{ id, ...(rev !== undefined ? { rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status }];
+      return [
+        { id, ...(requirement.rev !== undefined ? { rev: requirement.rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status },
+      ];
     });
   } catch {
     return [];
@@ -4149,7 +4526,7 @@ async function reviewRequirementsContext(session: Session, requestTexts: readonl
     const byId = new Map(snapshot.requirements.map((requirement) => [requirement.id, requirement]));
     const entries = refs.flatMap((ref) => {
       const requirement = byId.get(ref.id);
-      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: (requirement as Requirement & { scenarios?: RequirementScenario[] }).scenarios }] : [];
+      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: requirement.scenarios }] : [];
     });
     return buildReviewRequirementsContext(entries);
   } catch {

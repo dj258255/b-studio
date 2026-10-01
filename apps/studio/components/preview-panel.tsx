@@ -20,6 +20,7 @@ import { useRequirementsImport } from "./requirements-import-context";
 import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { StatusPanel } from "./status-panel";
 import { SubmissionPanel } from "./submission-panel";
 import { TestsPanel } from "./tests-panel";
 import { TokenView } from "./token-view";
@@ -106,12 +107,14 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           </GroupPanel>
         ) : active.kind === "docs" ? (
           <DocsPanel view={view} />
+        ) : active.kind === "status" ? (
+          <StatusPanel view={view} />
         ) : active.kind === "tokens" ? (
           <TokenView view={view} />
         ) : active.kind === "external" ? (
           <ExternalApiPanel sessionId={view.snapshot.id} external={active.external} ready={view.snapshot.status === "ready"} revision={view.completedRuns} />
         ) : active.kind !== "service" ? (
-          // 도달할 일 없는 안전망(위에서 group·tokens·external·service 네 kind를 모두 다뤘다)
+          // 도달할 일 없는 안전망(위에서 group·docs·status·tokens·external·service 여섯 kind를 모두 다뤘다)
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
         ) : view.snapshot.status === "idle" ? (
           // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다

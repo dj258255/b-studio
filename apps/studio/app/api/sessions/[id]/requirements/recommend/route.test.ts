@@ -37,7 +37,11 @@ describe('POST /api/sessions/[id]/requirements/recommend', () => {
     const response = await post({ questions: ['비밀번호 최소 길이는?'], specText: '로그인 기능을 만드세요' });
 
     expect(response.status).toBe(200);
-    expect(mocks.recommendSessionRequirementQuestions).toHaveBeenCalledWith('s1', { questions: ['비밀번호 최소 길이는?'], specText: '로그인 기능을 만드세요' });
+    expect(mocks.recommendSessionRequirementQuestions).toHaveBeenCalledWith(
+      's1',
+      { questions: ['비밀번호 최소 길이는?'], specText: '로그인 기능을 만드세요' },
+      { signal: expect.any(AbortSignal) },
+    );
     const body = await response.json();
     expect(body.sourced).toBe('web');
     expect(body.recommendations[0].answer).toBe('8자 이상');
