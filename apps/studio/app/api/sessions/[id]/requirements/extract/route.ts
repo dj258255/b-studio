@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { authorizeSession, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
-import { previewSessionRequirementsExtraction } from '@/lib/server/sessions';
+import { discardSessionRequirementExtractionDraft, getSessionRequirementExtractionDraft, previewSessionRequirementsExtraction } from '@/lib/server/sessions';
 
 const bodySchema = z
   .object({
@@ -25,7 +25,34 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     await authorizeSession(id, user);
     const parsed = bodySchema.safeParse(await request.json().catch(() => undefined));
     if (!parsed.success) throw new StudioError(400, 'specText·filePath·issueNumber 중 하나와, 선택적으로 answers가 필요합니다');
-    return Response.json(await previewSessionRequirementsExtraction(id, parsed.data));
+    // request.signal은 클라이언트가 fetch를 취소하거나(취소 버튼) 연결이 끊기면(개발 서버 재시작 등) 신호를 보낸다
+    return Response.json(await previewSessionRequirementsExtraction(id, parsed.data, { signal: request.signal }));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** 저장 안 한(아직 apply하지 않은) 추출 결과가 있으면 돌려준다(ADR-0XX) — 화면 새로고침·서버 재시작 뒤에도 "이어서 보기"로 되찾는다 */
+export async function GET(request: Request, context: RouteContext<'/api/sessions/[id]/requirements/extract'>) {
+  try {
+    const user = requireUser(request.headers);
+    const { id } = await context.params;
+    await authorizeSession(id, user);
+    const draft = await getSessionRequirementExtractionDraft(id);
+    return Response.json({ draft: draft ?? null });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/** 저장 안 한 추출 결과를 버린다("버리기" 버튼) */
+export async function DELETE(request: Request, context: RouteContext<'/api/sessions/[id]/requirements/extract'>) {
+  try {
+    const user = requireUser(request.headers);
+    const { id } = await context.params;
+    await authorizeSession(id, user);
+    await discardSessionRequirementExtractionDraft(id);
+    return Response.json({ ok: true });
   } catch (error) {
     return errorResponse(error);
   }

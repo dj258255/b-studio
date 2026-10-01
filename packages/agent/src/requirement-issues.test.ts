@@ -246,6 +246,16 @@ describe('발행 계획', () => {
     ]);
     expect(summary).toMatchObject({ total: 3, create: 1, update: 1, unchanged: 1, conflict: 0 });
   });
+
+  it('체크리스트 전용(could·docs) 항목은 매번 action이 create로 계산돼도 create로 세지 않고 checklistOnly로 센다(버그 리포트)', () => {
+    const summary = summarizeRequirementPlan([
+      { id: 'R1', action: 'create', localHash: 'a', checklistOnly: false, note: '' },
+      { id: 'R20', action: 'create', localHash: 'b', checklistOnly: true, note: '체크리스트 항목으로만 추적 이슈에 남습니다' },
+    ]);
+    expect(summary.create).toBe(1);
+    expect(summary.checklistOnly).toBe(1);
+    expect(summary.total).toBe(2);
+  });
 });
 
 describe('상태 반영 고정 댓글', () => {

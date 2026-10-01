@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { buildRequirementAskPrefill, requirementToMarkdown } from "@/lib/requirement-chat-prefill";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
@@ -119,6 +119,8 @@ interface RequirementsSnapshot {
   allMustHavesPrefill?: string;
   assumptions: string[];
   manualSteps: string[];
+  /** 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(ADR-0XX, A) */
+  draft?: PersistedExtractionDraft;
 }
 
 interface ReferencedFileView {
@@ -152,13 +154,19 @@ interface RequirementDiffEntry {
 interface ExtractionPreview {
   requirements: RequirementDraft[];
   questions: string[];
-  source: "model" | "fallback";
+  /** model=추출 모델, fallback=결정론적 대체 파서, managed=b-studio가 이미 발행한 이슈를 모델 호출 없이 그대로 되읽음(ADR-0XX) */
+  source: "model" | "fallback" | "managed";
   reason?: string;
   referencedFiles: ReferencedFileView[];
   outOfScope: string[];
   assumptions: string[];
   manualSteps: string[];
   diff?: RequirementDiffEntry[];
+}
+
+/** 저장하지 않은 추출 결과를 세션 상태 폴더에 남긴 것(서버 재시작·새로고침 뒤에도 이어서 볼 수 있다, ADR-0XX) */
+interface PersistedExtractionDraft extends ExtractionPreview {
+  savedAt: string;
 }
 
 const KIND_LABEL: Record<RequirementKind, string> = { api: "API", ui: "화면", data: "데이터", nonfunctional: "비기능", docs: "문서" };
@@ -168,6 +176,14 @@ const DIFF_LABEL: Record<RequirementDiffEntry["status"], string> = { added: "추
 
 async function readJson<T>(response: Response): Promise<T & { error?: string }> {
   return (await response.json().catch(() => ({}))) as T & { error?: string };
+}
+
+/** 경과 시간을 "2분 13초"/"13초"로 보여준다(A — "뽑는 중" 버튼 옆에 붙인다) */
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
 }
 
 /** 개발 화면의 "명세" 탭(ADR-079). 과제 명세를 요구사항으로 나누고, 요구사항마다 무엇이 됐다는 증거를 추적한다 */
@@ -268,6 +284,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
             onApplied={onApplied}
             onCancel={snapshot.data?.exists ? () => setImporting(false) : undefined}
             initialSpecText={importSpecText}
+            draft={snapshot.data?.draft}
           />
         ) : panelView === "matrix" ? (
           <MatrixView sessionId={sessionId} />
@@ -443,7 +460,8 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [publishing, setPublishing] = useState(false);
-  const [published, setPublished] = useState<{ tracking?: { issue: number; url: string }; errors: Array<{ id: string; message: string }> }>();
+  // 발행에 성공하면 미리보기·발행 버튼 대신 이 완료 요약만 보여준다(F) — "닫기"를 눌러야 다시 미리보기로 돌아간다
+  const [published, setPublished] = useState<{ tracking?: { issue: number; url: string }; errors: Array<{ id: string; message: string }>; summary: RequirementPlanSummary }>();
   const [resolving, setResolving] = useState<string>();
   const [imported, setImported] = useState<Record<string, RequirementIssueDraft>>({});
 
@@ -493,19 +511,29 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
     setError(undefined);
     try {
       const response = await fetch(`/api/sessions/${sessionId}/requirements/publish`, { method: "POST" });
-      const data = await readJson<{ tracking?: { issue: number; url: string }; errors: Array<{ id: string; message: string }> }>(response);
+      const data = await readJson<{ tracking?: { issue: number; url: string }; errors: Array<{ id: string; message: string }>; summary: RequirementPlanSummary }>(response);
       if (!response.ok) {
         setError(data.error ?? "발행하지 못했습니다");
         return;
       }
+      // 미리보기·발행 버튼 대신 완료 요약만 보여준다(F) — 다시 열면(닫기) 새 미리보기를 받는다
       setPublished(data);
+      setPreview(undefined);
       onRefresh();
-      await loadPreview();
     } catch {
       setError("발행하지 못했습니다");
     } finally {
       setPublishing(false);
     }
+  }
+
+  /** 완료 요약의 "닫기" — 다시 열면 발행 미리보기를 새로 받는다(F) */
+  async function closeCompletion() {
+    setPublished(undefined);
+    setImported({});
+    setLoading(true);
+    await loadPreview();
+    setLoading(false);
   }
 
   async function resolveConflict(requirementId: string, resolution: "import" | "overwrite" | "ignore") {
@@ -538,7 +566,41 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
         요구사항마다 하위 이슈(필수·권장), 전체를 묶는 추적 이슈를 만들거나 갱신합니다. 선택(could)·문서(docs)는 추적 이슈의 체크리스트로만 남습니다.
         <code className="ml-1">docs/requirements.md</code>가 언제나 원본입니다(한 방향).
       </p>
-      {loading ? (
+      {published ? (
+        // 발행에 성공하면 미리보기·발행 버튼 대신 이 완료 요약만 보여준다(F). "닫기"를 눌러야 다시 미리보기를 받는다
+        <div className="flex flex-col gap-2 rounded-control bg-ground px-3 py-2.5 text-sm">
+          <p className="font-medium text-ink">발행했습니다</p>
+          <p className="text-muted">
+            {published.tracking && (
+              <>
+                추적 이슈{" "}
+                <a href={published.tracking.url} target="_blank" rel="noreferrer" className="underline">
+                  #{published.tracking.issue}
+                </a>{" "}
+                ·{" "}
+              </>
+            )}
+            새로 만든 {published.summary.create}개 · 갱신 {published.summary.update}개
+            {published.summary.checklistOnly > 0 && ` · 체크리스트 ${published.summary.checklistOnly}개`}
+          </p>
+          {published.errors.length > 0 && (
+            <ul className="list-inside list-disc text-xs text-fail">
+              {published.errors.map((item, index) => (
+                <li key={index}>
+                  {item.id}: {item.message}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button
+            type="button"
+            onClick={closeCompletion}
+            className="self-start rounded-control border border-line px-3 py-1.5 text-sm font-medium hover:border-ink"
+          >
+            닫기
+          </button>
+        </div>
+      ) : loading ? (
         <p className="text-sm text-muted">미리보기를 만드는 중</p>
       ) : error ? (
         <p className="text-sm text-fail">{error}</p>
@@ -551,7 +613,7 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
             </p>
           )}
           <p className="text-sm text-ink">
-            새로 만들기 {preview.summary.create} · 갱신 {preview.summary.update} · 그대로 {preview.summary.unchanged} · 충돌{" "}
+            새로 만들기 {preview.summary.create} · 체크리스트 {preview.summary.checklistOnly} · 갱신 {preview.summary.update} · 그대로 {preview.summary.unchanged} · 충돌{" "}
             <span className={preview.summary.conflict > 0 ? "font-medium text-fail" : undefined}>{preview.summary.conflict}</span> · 재확인 {preview.summary.reverify}
           </p>
           <ul className="flex flex-col gap-1.5">
@@ -617,27 +679,6 @@ export function RequirementPublishFlow({ sessionId, onRefresh }: { sessionId: st
           >
             {publishing ? "발행하는 중" : preview.repository ? `${preview.repository}에 발행` : "확인하고 발행"}
           </button>
-          {published && (
-            <div className="rounded-control bg-ground px-2.5 py-2 text-xs text-muted">
-              {published.tracking && (
-                <p>
-                  추적 이슈:{" "}
-                  <a href={published.tracking.url} target="_blank" rel="noreferrer" className="underline">
-                    #{published.tracking.issue}
-                  </a>
-                </p>
-              )}
-              {published.errors.length > 0 && (
-                <ul className="mt-1 list-inside list-disc text-fail">
-                  {published.errors.map((item, index) => (
-                    <li key={index}>
-                      {item.id}: {item.message}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
         </>
       ) : null}
     </div>
@@ -910,12 +951,15 @@ export function ImportFlow({
   onApplied,
   onCancel,
   initialSpecText,
+  draft,
 }: {
   sessionId: string;
   onApplied: (snapshot: RequirementsSnapshot) => void;
   onCancel?: () => void;
   /** "요구사항에 반영"(대화 메시지 → 요구사항 패치, ADR-094)이 채운다 — 붙여넣기 칸을 채우고 바로 한 번 추출한다 */
   initialSpecText?: string;
+  /** 저장 안 한 채 남은 추출 결과(세션 요구사항 스냅샷이 함께 돌려준다, ADR-0XX) — 있으면 "이어서 보기/버리기" 배너를 보여준다 */
+  draft?: PersistedExtractionDraft;
 }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
   const [specText, setSpecText] = useState(initialSpecText ?? "");
@@ -935,6 +979,35 @@ export function ImportFlow({
   // 곧바로 부르지 않고 초기값으로 미리 반영해 두는 식이다(리액트 컴파일러 린트가 막는 패턴을 피한다)
   const [busy, setBusy] = useState(() => Boolean(initialSpecText));
   const [error, setError] = useState<string>();
+  // A: "뽑는 중 · 2분 13초" 경과 시간과 취소 — busy/recommending이 켜질 때마다 0부터 다시 잰다
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [recommendElapsedMs, setRecommendElapsedMs] = useState(0);
+  const extractAbortRef = useRef<AbortController>();
+  const recommendAbortRef = useRef<AbortController>();
+  // A: 저장하지 않은 채 남은 추출 결과(새로고침·서버 재시작으로 화면이 끊겨도 서버가 세션 상태 폴더에 남겨 둔 것)
+  const [resumableDraft, setResumableDraft] = useState<PersistedExtractionDraft>();
+
+  useEffect(() => {
+    if (!busy) {
+      setElapsedMs(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsedMs(0);
+    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  useEffect(() => {
+    if (!recommending) {
+      setRecommendElapsedMs(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setRecommendElapsedMs(0);
+    const timer = setInterval(() => setRecommendElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(timer);
+  }, [recommending]);
 
   // "요구사항에 반영"이 initialSpecText를 주면 붙여넣기 칸을 채운 뒤 바로 한 번 추출해 병합 diff를 보여 준다.
   // state(specText)를 거치지 않고 바로 이 값으로 요청해야 "방금 setSpecText한 값"을 또 기다리는 경합이 없다
@@ -969,6 +1042,38 @@ export function ImportFlow({
     };
   }, [sessionId, initialSpecText]);
 
+  // A: initialSpecText로 바로 추출하는 경우가 아니면, 저장 안 한 채 남은 추출 결과가 있는지 마운트 때 한 번 확인한다
+  // (페이지 새로고침·서버 재시작 뒤에도 "이어서 보기/버리기"로 되찾을 수 있게)
+  useEffect(() => {
+    if (initialSpecText) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/requirements/extract`)
+      .then((response) => (response.ok ? (response.json() as Promise<{ draft?: PersistedExtractionDraft }>) : undefined))
+      .then((data) => {
+        if (!cancelled && data?.draft) setResumableDraft(data.draft);
+      })
+      .catch(() => {
+        // 저장된 초안이 없거나 읽지 못해도 화면은 평소대로 빈 상태로 시작한다
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, initialSpecText]);
+
+  function resumeDraft() {
+    if (!resumableDraft) return;
+    setPreview(resumableDraft);
+    setDrafts(resumableDraft.requirements);
+    setAssumptions(resumableDraft.assumptions);
+    setManualSteps(resumableDraft.manualSteps);
+    setResumableDraft(undefined);
+  }
+
+  async function discardDraft() {
+    setResumableDraft(undefined);
+    await fetch(`/api/sessions/${sessionId}/requirements/extract`, { method: "DELETE" }).catch(() => {});
+  }
+
   function sourceBody(withAnswers: boolean) {
     const body: Record<string, unknown> = {};
     if (sourceTab === "paste") body.specText = specText;
@@ -983,11 +1088,14 @@ export function ImportFlow({
   async function extract(withAnswers: boolean) {
     setBusy(true);
     setError(undefined);
+    const controller = new AbortController();
+    extractAbortRef.current = controller;
     try {
       const response = await fetch(`/api/sessions/${sessionId}/requirements/extract`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(sourceBody(withAnswers)),
+        signal: controller.signal,
       });
       const data = await readJson<ExtractionPreview>(response);
       if (!response.ok) {
@@ -1001,22 +1109,33 @@ export function ImportFlow({
       setAnswers({});
       setRecommendations({});
       setRecommendationSource(undefined);
-    } catch {
-      setError("요구사항을 뽑지 못했습니다");
+      // 방금 받은 결과가 화면에 떴으니 "저장 안 한 결과가 있습니다" 배너는 더 보여줄 필요가 없다(저장 전까지는 서버가 계속 들고 있다)
+      setResumableDraft(undefined);
+    } catch (err) {
+      setError(err instanceof DOMException && err.name === "AbortError" ? "요구사항 뽑기를 취소했습니다" : "요구사항을 뽑지 못했습니다");
     } finally {
       setBusy(false);
+      extractAbortRef.current = undefined;
     }
+  }
+
+  /** "취소" 버튼 — 브라우저 쪽 fetch를 끊는다(AbortSignal이 라우트를 거쳐 서버 쪽 모델 호출까지 그대로 이어진다) */
+  function cancelExtract() {
+    extractAbortRef.current?.abort();
   }
 
   async function recommend() {
     if (!preview || preview.questions.length === 0) return;
     setRecommending(true);
     setError(undefined);
+    const controller = new AbortController();
+    recommendAbortRef.current = controller;
     try {
       const response = await fetch(`/api/sessions/${sessionId}/requirements/recommend`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ questions: preview.questions, ...(sourceTab === "paste" ? { specText } : {}) }),
+        signal: controller.signal,
       });
       const data = await readJson<{ recommendations: RecommendationView[]; sourced: "web" | "model" }>(response);
       if (!response.ok) {
@@ -1034,11 +1153,16 @@ export function ImportFlow({
       setRecommendations(byIndex);
       setRecommendationSource(data.sourced);
       setAnswers(nextAnswers);
-    } catch {
-      setError("추천 값을 받지 못했습니다");
+    } catch (err) {
+      setError(err instanceof DOMException && err.name === "AbortError" ? "추천 값 찾기를 취소했습니다" : "추천 값을 받지 못했습니다");
     } finally {
       setRecommending(false);
+      recommendAbortRef.current = undefined;
     }
+  }
+
+  function cancelRecommend() {
+    recommendAbortRef.current?.abort();
   }
 
   async function apply() {
@@ -1146,20 +1270,43 @@ export function ImportFlow({
         />
       )}
 
-      <button
-        type="button"
-        disabled={!canExtract || busy}
-        onClick={() => extract(false)}
-        className="self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
-      >
-        {busy ? "뽑는 중" : "요구사항 뽑기"}
-      </button>
+      {resumableDraft && !preview && (
+        <div className="flex flex-wrap items-center gap-2 rounded-control border border-line bg-ground px-3 py-2 text-sm">
+          <p className="flex-1 text-ink">저장 안 한 추출 결과가 있습니다</p>
+          <button type="button" onClick={resumeDraft} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+            이어서 보기
+          </button>
+          <button type="button" onClick={discardDraft} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+            버리기
+          </button>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!canExtract || busy}
+          onClick={() => extract(false)}
+          className="self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+        >
+          {busy ? `뽑는 중 · ${formatElapsed(elapsedMs)}` : "요구사항 뽑기"}
+        </button>
+        {busy && (
+          <button type="button" onClick={cancelExtract} className="rounded-control border border-line px-3 py-2 text-sm font-medium hover:border-ink">
+            취소
+          </button>
+        )}
+      </div>
       {error && <p className="text-sm text-fail">{error}</p>}
 
       {preview && (
         <div className="flex flex-col gap-3 rounded-control border border-line p-3">
           <p className="text-sm text-muted">
-            {preview.source === "model" ? "추출 모델이 나눴습니다." : `결정론적 방식으로 나눴습니다${preview.reason ? `: ${preview.reason}` : ""}`}
+            {preview.source === "model"
+              ? "추출 모델이 나눴습니다."
+              : preview.source === "managed"
+                ? preview.reason
+                : `결정론적 방식으로 나눴습니다${preview.reason ? `: ${preview.reason}` : ""}`}
           </p>
 
           {preview.diff && <DiffSummary diff={preview.diff} />}
@@ -1192,14 +1339,21 @@ export function ImportFlow({
             <div className="flex flex-col gap-2 rounded-control bg-ground px-3 py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm font-medium text-ink">모호한 점 (최대 5개) — 답하고 &ldquo;스펙을 고치고 다시 뽑기&rdquo;를 눌러 보세요</p>
-                <button
-                  type="button"
-                  disabled={recommending}
-                  onClick={recommend}
-                  className="ml-auto shrink-0 rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-60"
-                >
-                  {recommending ? "추천 값 찾는 중" : "추천 값으로 채우기"}
-                </button>
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={recommending}
+                    onClick={recommend}
+                    className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-60"
+                  >
+                    {recommending ? `추천 값 찾는 중 · ${formatElapsed(recommendElapsedMs)}` : "추천 값으로 채우기"}
+                  </button>
+                  {recommending && (
+                    <button type="button" onClick={cancelRecommend} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+                      취소
+                    </button>
+                  )}
+                </div>
               </div>
               {preview.questions.map((question, index) => {
                 const recommendation = recommendations[index];
