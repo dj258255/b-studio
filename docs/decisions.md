@@ -127,6 +127,8 @@
 - [ADR-110 작업 분해 통합 세션의 PR 초안 품질을 고친다: 기본 연결 이슈·토큰·문서 체크포인트·제목·미리보기 유지](#adr-110-작업-분해-통합-세션의-pr-초안-품질을-고친다-기본-연결-이슈토큰문서-체크포인트제목미리보기-유지)
 - [ADR-111 AI 리뷰를 한국어로 고정하고, 고침 커밋 제목을 지적 요약으로 바꾸고, 사람이 지적을 직접 닫을 수 있게 한다](#adr-111-ai-리뷰를-한국어로-고정하고-고침-커밋-제목을-지적-요약으로-바꾸고-사람이-지적을-직접-닫을-수-있게-한다)
 - [ADR-112 도그푸딩에서 드러난 두 가지 마찰을 고친다: 원격 main 받아오기의 참조 잠금 경합과 생성 파일에 새는 내부 ADR 번호](#adr-112-도그푸딩에서-드러난-두-가지-마찰을-고친다-원격-main-받아오기의-참조-잠금-경합과-생성-파일에-새는-내부-adr-번호)
+- [ADR-113 미리보기 앱 탭의 주소 입력칸이 앱 안의 클라이언트 쪽 이동을 따라가게 한다: 로컬 프록시에 위치 알림 스크립트를 심는다](#adr-113-미리보기-앱-탭의-주소-입력칸이-앱-안의-클라이언트-쪽-이동을-따라가게-한다-로컬-프록시에-위치-알림-스크립트를-심는다)
+- [ADR-114 추적 매트릭스가 요구사항 목록과 같은 증거·평가를 쓰게 한다](#adr-114-추적-매트릭스가-요구사항-목록과-같은-증거평가를-쓰게-한다)
 - [ADR-115 PR 초안의 기본 연결 이슈·제목 범위를 이 세션이 실제로 건드린 요구사항으로 좁힌다(ADR-110 일부 개정)](#adr-115-pr-초안의-기본-연결-이슈제목-범위를-이-세션이-실제로-건드린-요구사항으로-좁힌다adr-110-일부-개정)
 
 ---
@@ -4618,6 +4620,77 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **뮤텍스는 studio 프로세스 하나 안에서만 줄을 세운다.** studio 서버를 여러 프로세스로 띄우거나(지금 구조에서는 안 그런다) 사람이 터미널에서 같은 폴더에 직접 `git fetch`를 돌리면 여전히 부딪힐 수 있다 — 그래서 재시도(결정 2)를 별도로 둔 것이지, 뮤텍스만으로 경합을 완전히 없앤다고 보지 않는다.
 - **재시도는 "cannot lock ref" 한 가지 패턴에만 쓴다.** 다른 일시적 실패(네트워크 끊김 등)는 한 번 더 시도하지 않고 바로 실패를 보여준다 — 참조 잠금은 보통 수백 ms 안에 풀리는 반면, 다른 실패는 다시 시도해도 대개 같은 이유로 또 실패해 사람이 "다시 시도" 버튼을 직접 누르는 쪽이 낫다고 봤다.
 - **"미리보기 앱 탭의 경로 입력칸이 클라이언트 쪽 이동(pushState)을 따라가지 않는 문제"는 조사했지만 고치지 않았다.** 화면 미리보기는 기본적으로 샌드박스 서비스 주소를 iframe에 직접 연결한다(`service.url`, 127.0.0.1의 다른 포트) — studio 자신의 출처(127.0.0.1:3000)와 다른 출처라 `iframe.contentWindow.location`을 읽을 수 없다. 켤 수 있는 "원격 미리보기 게이트웨이"(ADR 미지정, `preview-gateway.ts`)조차 studio와 같은 출처가 아니라 자신만의 호스트·포트를 쓰므로 같은 문제가 남는다. 두 선택지(같은 출처로 바꿔 직접 읽기, 또는 프록시가 지나가는 HTML에 작은 스크립트를 심어 postMessage로 알리기) 모두 지금 없는 "스튜디오 자신의 출처에서 앱 전체(정적 자원·API·HMR 웹소켓 포함)를 중계하는 범용 프록시"를 새로 만들어야 하는데, 기존 프록시(`services/[service]/request`)는 API 탐색기용 단발 요청-응답 중계일 뿐이고 원격 미리보기 게이트웨이는 선택 기능이라 기본 경로를 고치지 못한다. 샌드박스를 실제로 띄워 보며 HMR·실시간 반영이 깨지지 않는지 확인해야 하는 큰 변경이라 이번 수정 범위에서는 조사만 남기고 건드리지 않았다.
+
+---
+
+## ADR-113 미리보기 앱 탭의 주소 입력칸이 앱 안의 클라이언트 쪽 이동을 따라가게 한다: 로컬 프록시에 위치 알림 스크립트를 심는다
+
+상태: 채택
+관련: ADR-112
+
+### 맥락
+- 도그푸딩 마찰 71번(ADR-112에서 "조사했지만 고치지 않았다"로 남긴 것)이다. "화면" 탭의 "앱 미리보기"는 iframe이 샌드박스 서비스 주소(`service.url`, 127.0.0.1의 다른 포트)를 studio(127.0.0.1:3000)와 다른 출처로 직접 연다. 미리보기 안에서 앱이 링크를 눌러 클라이언트 쪽으로 이동(Next.js의 `pushState`)해도 "열기" 옆 경로 입력칸은 계속 "/"만 보여준다 — 다시 불러오지 않는 한 지금 어느 화면을 보고 있는지 입력칸만 보고는 알 수 없다.
+- ADR-112는 이 문제를 "cross-origin이라 `iframe.contentWindow.location`을 읽을 수 없고, 고치려면 studio 자신의 출처에서 정적 자원·API·HMR까지 중계하는 범용 프록시를 새로 만들어야 하는 큰 변경"이라며 조사만 남기고 건드리지 않았다. 이 결론은 절반만 맞다 — `contentWindow.location`을 부모가 직접 읽는 것은 실제로 cross-origin 보안 정책에 막히지만, **반대 방향으로 iframe 쪽에서 `window.parent.postMessage`를 부르는 것은 cross-origin이어도 막히지 않는다.** 즉 "studio가 iframe 안을 들여다보는" 대신 "iframe 안의 앱이 자기 위치를 studio에 알려주는" 방향으로 바꾸면, 같은 출처로 만들 필요 없이 지금 구조 그대로 풀린다. 다만 사용자 코드를 건드리지 않고 그 알림 스크립트를 앱 페이지에 끼워 넣을 방법이 필요하다 — 그래서 "프록시가 지나가는 HTML에 작은 스크립트를 심는다"는 ADR-112가 이미 떠올렸던 선택지가 다시 필요하다.
+- `apps/studio/lib/server/preview-gateway.ts`(원격 미리보기 게이트웨이, ADR 미지정)는 이미 호스트 이름(`<서비스>--<세션>--<토큰>.<도메인>`)으로 여러 세션·서비스를 가리키는 완전한 리버스 프록시(HTTP + 웹소켓 업그레이드, 헤더를 루프백 같은 출처로 바꾸는 `upstreamHeaders`, 리다이렉트를 게이트웨이 주소로 돌리는 `rewriteLocation`)를 갖고 있다. 하지만 이 게이트웨이는 `B_STUDIO_PREVIEW_DOMAIN`을 설정했을 때만 켜지는 선택 기능이라, 기본(로컬) 경로의 "앱 미리보기"는 지금도 전혀 쓰지 않는다 — 마찰 71번은 기본 경로에서 일어나는 문제라 게이트웨이를 켜라고 안내하는 것으로는 고쳐지지 않는다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. studio 자신의 출처에서 정적 자원·API·HMR까지 통째로 중계하는 범용 프록시로 iframe 주소를 바꿔, `contentWindow.location`을 직접 읽는다 | ADR-112가 이미 "큰 변경"이라 본 바로 그 길이다 — Next.js dev 서버가 거는 절대 경로 자원(`/_next/...`)·HMR 웹소켓·API 호출까지 studio 출처 하나로 다시 쓰려면 경로 재작성 규칙이 서비스마다 다른 프레임워크(Next.js·Spring Boot 등)의 가정을 모두 깨지 않아야 해 범위가 크다. 반면 postMessage는 출처를 하나로 합치지 않고도 같은 결과(지금 위치를 앎)를 준다 |
+| B. `preview-gateway.ts`를 로컬 경로의 기본값으로도 켠다(도메인 없이 호스트 기반 라우팅을 쓰도록 바꾼다) | 게이트웨이는 "호스트 이름 하나로 여러 세션·서비스를 구분"하도록 설계돼 있다 — 로컬 기본 경로는 서비스 하나당 프록시 하나면 충분해, 호스트 파싱·도메인 설정·(인증을 켰을 때) 티켓 교환까지 들여올 이유가 없다. 다중 세입자 라우팅의 복잡함 없이 "포트 하나 = 서비스 하나"인 훨씬 작은 서버로 충분하다 |
+| **C(선택). 세션 서비스마다 127.0.0.1에 작은 전용 프록시를 하나씩 새로 두고(포트 하나 = 서비스 하나라 호스트 기반 분기가 없다), 헤더 재작성은 게이트웨이의 `upstreamHeaders`를 재사용한다. HTML 응답에는 위치를 postMessage로 알리는 스크립트를 심는다(순수 함수로 뽑아 게이트웨이에도 재사용한다)** | 가장 작은 변경이다. 다만 CSP를 건 페이지는 인라인 스크립트가 막힐 수 있어, 그런 페이지는 건드리지 않고 건너뛴다(감수한 트레이드오프) |
+
+### 결정
+1. **`apps/studio/lib/server/preview-inject.ts`에 HTML 주입을 순수 함수로 뽑는다.** `injectLocationScript(html)`은 `</head>` 앞(없으면 `<body>` 바로 뒤, 그것도 없으면 `</body>` 앞, 셋 다 없으면 맨 끝)에 작은 스크립트를 심는다. 이 스크립트는 `window.parent === window`(최상위 창)면 아무것도 하지 않고, 아니면 `history.pushState`·`history.replaceState`를 감싸고 `popstate`·`hashchange`·`load`에서 `window.parent.postMessage({type:'b-studio:location', href: location.href}, '*')`를 부른다. `shouldInject(statusCode, headers)`는 304(몸 없음)·`text/html`이 아닌 응답·CSP 헤더가 있는 응답(인라인 스크립트를 막을 수 있어 건드리지 않는다)·모르는 `content-encoding`을 건너뛴다. `pipeMaybeInjected(upstream, response, headers)`는 건너뛸 응답은 그대로 피프(byte-for-byte), 심을 응답은 몸을 모은 뒤(gzip·deflate·br는 `node:zlib`로 풀고) 스크립트를 심어 `content-length`·`content-encoding`을 지우고 한 번에 응답한다 — 압축을 풀지 못하면(손상되었거나 예상과 다르면) 스크립트 없이 원문 그대로 돌려준다(끊어진 페이지보다 낫다).
+2. **`apps/studio/lib/server/preview-proxy.ts`에 서비스 하나를 가리키는 1:1 로컬 프록시 `createPreviewProxy({ resolve })`를 새로 둔다.** `resolve()`는 매 요청 호출돼 "지금 가리키는 서비스 주소"를 돌려주므로(세션 재시작으로 포트가 바뀌어도 프록시를 다시 만들지 않고 다음 요청부터 바로 반영한다), preview-gateway.ts처럼 호스트 이름으로 여러 서비스를 가리킬 필요가 없다. 헤더를 루프백 같은 출처로 바꾸는 `upstreamHeaders`는 preview-gateway.ts에서 그대로 가져다 쓴다(새로 만들지 않는다). 요청을 포워딩한 뒤 응답은 `pipeMaybeInjected`로 돌려주고, 웹소켓 업그레이드(HMR 등)는 게이트웨이와 같은 방식으로 소켓을 그대로 잇는다. 요청 헤더의 `accept-encoding`을 항상 `identity`로 덮어써(로컬 루프백이라 대역폭 비용이 사실상 없다), 로컬 프록시가 압축 해제에 실패할 일을 애초에 줄인다.
+3. **`apps/studio/lib/server/service-preview-proxy.ts`가 세션·서비스별 프록시의 생애주기를 관리한다**(`remote-browsers.ts`와 같은 "HMR에도 살아남는 전역 `Map`" 패턴). `ensureServicePreviewProxy(sessionId, service, target)`는 처음 부르면 127.0.0.1의 임의 포트에 새로 띄우고, 이미 있으면 가리키는 주소(`target`)만 갱신해 같은 프록시를 계속 쓴다(포트가 안 바뀐다 — iframe이 또 reload될 이유가 없다). `closeServicePreviewProxies(sessionId)`는 `stopSession`에서 `closeRemoteBrowser`와 나란히 불러 세션을 멈출 때 함께 닫고, `closeAllServicePreviewProxies()`는 `registerCleanup`의 프로세스 종료 정리에도 더했다.
+4. **`sessions.ts`의 `localPreviewUrl(id, service)`과 새 라우트 `POST /api/sessions/[id]/services/[service]/preview-proxy`가 화면에 프록시 주소를 준다.** 세션이 `ready`이고 서비스 주소가 있어야 하고, 그 밖에는 `preview-access` 라우트와 같은 규칙(로그인한 누구나)만 확인한다 — 이 프록시는 샌드박스 서비스 포트(이미 루프백 전용, ADR-009)와 같은 신뢰 경계만 쓰므로 새 인증을 더하지 않는다. **원격 미리보기 게이트웨이(`previewUrl`)를 켰으면 이 로컬 프록시는 아예 쓰지 않는다** — 게이트웨이도 이미 studio와 다른 출처이므로(결정 5), 굳이 두 겹으로 프록시를 두지 않는다.
+5. **`preview-gateway.ts`의 HTML 응답에도 같은 `pipeMaybeInjected`를 적용한다.** 게이트웨이도 studio 자신과는 다른 호스트·포트를 쓰므로 같은 문제가 있다 — "원격 미리보기를 켜면 다시 깨진다" 같은 반쪽짜리 수정을 남기지 않으려고 두 경로 모두 고쳤다.
+6. **`apps/studio/components/preview-panel.tsx`의 `AppPreview`가 `service.previewUrl`이 없으면(기본 경로) 로컬 프록시 주소를 받아 iframe에 쓰고, 실패하면 예전처럼 서비스 주소를 직접 연다.** `message` 이벤트는 `apps/studio/lib/preview-message.ts`의 순수 함수(`readPreviewLocationMessage`·`previewPathFromHref`, 서버의 `preview-inject.ts`와 메시지 타입 문자열 `b-studio:location`을 공유한다)로 `event.origin`이 지금 iframe의 출처와 같고 `event.source`가 지금 iframe의 `contentWindow`일 때만 받아들인다. 받아들인 위치는 **경로 입력칸(`draft`, 화면 표시용 상태)만 갱신하고, iframe의 `src`/`key`를 만드는 `path` 상태는 건드리지 않는다** — 그래서 앱 안에서 이동할 때마다 iframe이 다시 불러와지지(reload) 않는다. "열기"로 직접 주소를 입력했을 때만 `path`가 바뀌어 지금처럼 다시 불러온다.
+
+### 검증 결과
+- `apps/studio/lib/server/preview-inject.test.ts`(신규): `injectLocationScript`가 `</head>` 유무·대소문자·속성 섞인 태그·표식이 아예 없는 조각까지 네 갈래 모두에서 스크립트를 심는 것, `shouldInject`가 304·비 HTML·CSP·모르는 인코딩을 거르는 것, `pipeMaybeInjected`가 실제 http 소켓(가짜 업스트림 → 중계 서버 → 요청)으로 HTML은 스크립트를 심고 content-length를 지우는 것, JSON은 바이트 그대로(동일 버퍼) 돌려주는 것, gzip HTML은 풀어서 심고 content-encoding을 지우는 것, 손상된 압축 데이터는 원문 그대로(스크립트 없이) 돌려주는 것을 확인했다.
+- `apps/studio/lib/server/preview-proxy.test.ts`(신규): 진짜 로컬 HTTP+웹소켓 서버를 "서비스"로 띄워 `createPreviewProxy`를 실제로 돌려, HTML에 스크립트가 심기는 것·JSON은 바이트 그대로인 것·웹소켓 업그레이드가 echo까지 이어지는 것·`resolve`가 가리키는 주소가 바뀌면(서비스 재시작 흉내) 다음 요청부터 새 주소로 가는 것·주소를 못 찾으면 502인 것을 확인했다.
+- `apps/studio/lib/server/service-preview-proxy.test.ts`(신규): 같은 세션·서비스를 다시 부르면 같은 프록시(포트)를 재사용하면서 가리키는 주소만 갱신하는 것, 세션이 다르면 서로 다른 프록시를 쓰는 것, 닫은 뒤에는 그 포트가 응답하지 않는 것을 실제 소켓 연결로 확인했다.
+- `apps/studio/lib/preview-message.test.ts`(신규): 출처·보낸 창이 모두 맞아야 받아들이는 것(출처만 다르거나 보낸 창만 달라도 거른다), 기대하는 출처가 아직 없으면(주소를 받기 전) 거르는 것, `type`·`href` 모양이 안 맞으면 거르는 것, `previewPathFromHref`가 경로+검색+해시만 남기는 것을 확인했다.
+- `apps/studio/lib/server/preview-gateway.test.ts`(보강): 게이트웨이를 지난 HTML 응답에도 `b-studio:location` 스크립트가 심기는 것을 기존 JSON·웹소켓 검증에 이어 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **CSP(`content-security-policy`) 헤더가 있는 페이지는 스크립트를 심지 않는다.** nonce를 CSP에 끼워 넣는 방법도 검토했지만, 기존 `script-src`·`default-src` 지시문을 정확히 파싱해 끼워 넣어야 해서 깨질 여지(지시문이 없거나 `'strict-dynamic'`처럼 nonce와 상호작용이 다른 값이 섞인 경우)가 더 큰 쪽이라 더 안전한 "건너뛴다"를 택했다 — 이런 페이지의 경로 입력칸은 여전히 "/"에 머문다. `<meta http-equiv="Content-Security-Policy">`(헤더가 아니라 HTML 안에 있는 경우)는 지금 검사하지 않아 걸러내지 못한다 — 드문 경우로 보고 남겨 둔다.
+- **postMessage의 target origin을 `'*'`로 둔다.** 심는 스크립트는 studio가 iframe을 어느 호스트로 열지(로컬 프록시의 임의 포트, 원격 게이트웨이의 호스트) 알 길이 없다 — 담는 값(지금 주소)은 이미 브라우저 네트워크 탭에서도 보이는 값이라, 받는 쪽(`preview-message.ts`)에서만 출처·보낸 창을 확인하면 충분하다고 봤다.
+- **로컬 프록시는 요청 헤더의 `accept-encoding`을 항상 `identity`로 덮어쓴다.** 로컬 루프백이라 압축 안 한 응답의 대역폭 비용이 사실상 없다고 보고 더 단순한 쪽을 택했다 — 반대로 원격 게이트웨이(네트워크를 실제로 타는 경로)는 `accept-encoding`을 그대로 두고, HTML이 압축돼 와도 `pipeMaybeInjected`가 gzip·deflate·br을 풀어 심는다.
+- **프록시 하나가 맡는 서비스는 세션이 끝날 때까지 고정이다.** 서비스 이름이 바뀌는 일은 없으므로 문제는 아니지만, 세션이 오래 떠 있고 서비스를 자주 켰다 껐다 하면 안 쓰는 프록시(포트 하나)가 떠 있는 채로 남는다 — 멈출 때 한꺼번에 닫으므로 누적되지는 않는다.
+
+---
+
+## ADR-114 추적 매트릭스가 요구사항 목록과 같은 증거·평가를 쓰게 한다
+
+상태: 채택
+관련: ADR-090, ADR-102, ADR-103, ADR-105
+
+### 맥락
+- "요구사항" 탭의 추적 매트릭스(ADR-090, `buildTraceabilityMatrix`)는 요구사항·시나리오마다 행 하나로 체크포인트·테스트·게이트·상태를 보여주는데, 그 상태(`buildMatrixRow`가 만드는 `RequirementEvidence`)는 체크포인트 자유 언급·테스트 파일 이름 매칭·게이트 확인 세 가지만 본다.
+- 그 사이 요구사항 목록의 상태(`evaluateRequirement`, sessions.ts)는 세 가지를 더 본다: 테스트 탭이 지금 체크포인트에서 돌린 실행 결과(`testRun`, ADR-102, 서버 재시작에도 사이드카로 남는다, ADR-105), README·`docs/**/*.md`와 맞춰 본 문서 확인(`docEvidence`, kind: 'docs' 요구사항, ADR-103), 사람이 직접 남긴 "직접 확인함"(`manualVerification`, ADR-103).
+- 그 결과 같은 요구사항을 목록은 "검증됨"으로, 매트릭스는 "작업 중"·"재확인 필요"로 서로 다르게 보여줬다 — 예를 들어 README로 검증된 문서 요구사항이나 테스트 탭 실행만으로 검증된 요구사항이 매트릭스에서는 증거가 하나도 없는 것처럼 보였다. 매트릭스의 테스트 열도 테스트 이름만 셀 뿐 테스트 탭의 통과·실패 결과를 전혀 보여주지 않았다.
+
+### 결정
+1. **요구사항 행의 증거·상태는 매트릭스가 다시 계산하지 않고 목록이 쓴 값을 그대로 받는다.** `buildTraceabilityMatrix`(packages/agent)의 입력에 `evaluationByRequirementId?: Record<string, RequirementEvaluation>`(요구사항 id별 `{ status, evidence, verifiedBy }`)를 더했다. studio의 `getSessionRequirementsMatrix`는 목록과 똑같은 평가 맥락(`buildRequirementEvaluationContext`·`evaluateRequirementWithContext`)으로 모든 요구사항을 평가해 이 맵을 채워 넘긴다 — 같은 함수로 만든 값이라 목록과 다른 상태가 나올 수 없다. 값이 없으면(이 모듈의 단위 테스트처럼 studio 컨텍스트 없이 부르는 경우) 예전처럼 체크포인트·테스트 파일 이름·게이트만으로 계산한다.
+2. **시나리오 행은 "요구사항과 같은 함수로, 증거만 시나리오로 좁혀" 계산한다.** 체크포인트·테스트·게이트는 시나리오 id로만 찾고, 테스트 탭 실행(`testRun`)도 그 시나리오 id가 붙은 테스트만 따로 모아 다시 센다(요구사항 전체 집계를 그대로 쓰면 다른 시나리오의 테스트가 통과했다는 이유로 이 시나리오까지 검증됨으로 보일 수 있다). 문서 확인(`docEvidence`)은 애초에 시나리오 단위로 매칭하지 않으므로 부모가 "전부 만족"일 때만 물려받고(일부만 맞은 상태를 물려주면 시나리오 자신의 증거가 없어도 "작업 중"으로 과대평가된다), 사람 확인·내용 드리프트는 부모 요구사항 객체 자체를 보고 판정하는 값이라(`computeRequirementStatus`가 받는 `requirement` 인자) 따로 다룰 필요가 없다.
+3. **매트릭스의 테스트 열에 테스트 탭 실행 결과를 테스트 단위로 붙인다.** studio의 `buildMatrixTestRunRows`가 "지금 체크포인트와 맞는 실행만 증거로 친다" 규칙(`testRunMatchesHead`, ADR-102와 같다)으로 테스트 한 줄 한 줄을, 이름에 붙은 요구사항·시나리오 id별로 펼친 목록(`MatrixTestRunRow[]`)을 만들어 넘긴다. `buildTraceabilityMatrix`는 파일 스캔으로 찾은 테스트(`evidence.tests`)에 이 실행 결과를 이름으로 맞춰 붙여(`MatrixTestMatch.result`, 통과/실패/안 돌림) 보여주고, 실행에만 있고 스캔엔 안 걸린 테스트도 빠뜨리지 않는다.
+4. **행마다 "검증 출처" 배지를 보여준다.** `matrixVerificationBadge`가 목록의 `requirementVerificationSource`(자동/문서 확인/사람 확인)를 더 갈라 "테스트 탭"·"게이트"·"문서 확인"·"사람 확인"·없음 중 하나로 보여준다(매트릭스엔 테스트·게이트 열이 따로 있어 목록보다 자세히 보여줄 수 있다).
+5. **역방향 목록을 "진짜 공백"과 "다른 방식으로 검증됨"으로 가른다.** 테스트가 하나도 없는 필수 요구사항 중 이미 검증됨(문서 확인·사람 확인)인 것은 `mustHavesWithoutTests`가 아니라 새 목록 `mustHavesVerifiedWithoutTests`에 담는다 — 테스트가 없다는 사실만으로 이미 끝난 일을 또 손봐야 하는 것처럼 보이지 않게 한다.
+
+### 검증 결과
+- `packages/agent/src/requirements.test.ts`: 테스트 탭 실행·게이트·문서 확인·사람 확인 네 출처로 검증됨인 요구사항이 매트릭스에서도 같은 상태·배지를 보이는 것(`evaluationByRequirementId`로 목록의 `computeRequirementStatus` 결과를 그대로 넘겨 확인), 사람 확인이 있어도 테스트 탭 실행의 실패가 있으면 실패가 이기는 것, `evaluationByRequirementId`가 없으면 예전 계산으로 돌아가는 것, 문서·사람 확인으로 검증된 테스트 없는 필수 요구사항이 `mustHavesVerifiedWithoutTests`로 따로 담기는 것, 매트릭스 테스트 열이 실행 결과를 이름으로 맞춰 붙이고 스캔에 안 걸린 실행 결과도 빠뜨리지 않는 것, 시나리오 행이 자신의 테스트 탭 실행만 보고(다른 시나리오의 통과에 영향받지 않고) 부모의 문서 확인은 "전부 만족"일 때만 물려받는 것을 확인했다.
+- `apps/studio/lib/server/sessions-requirements-matrix.test.ts`(신규): 실제 임시 git 저장소에서 사람 확인(`markRequirementManualVerification`)·문서 확인(README 매칭)·테스트 탭 실행(가짜 샌드박스가 돌려주는 vitest JSON 리포트, `runSessionTests`)을 모두 갖춘 세션을 만들어, `getSessionRequirements`(목록)와 `getSessionRequirementsMatrix`(매트릭스)가 요구사항마다 완전히 같은 상태를 내는 것, 검증 출처 배지, 테스트 열의 통과 결과, 역방향 목록 분리를 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **`matrixVerificationBadge`는 상태가 이미 정해졌다는 전제로 "출처"만 가른다.** `requirementVerificationSource`와 같은 우선순위(게이트 > 테스트 탭 > 문서 확인 > 사람 확인)를 그대로 되풀이해 적어 둔 것이라, 그 우선순위 자체가 바뀌면 두 곳을 함께 고쳐야 한다 — 다만 상태 판정(`computeRequirementStatus`)은 한 곳에만 있으므로 "검증됨 여부"가 둘 사이에서 어긋날 일은 없다.
+- **`MatrixTestRunRow`는 한 테스트 실행을 요구사항·시나리오 id 개수만큼 복제해 담는다.** 한 테스트 이름에 여러 id가 붙으면(흔치 않다) 행이 그만큼 늘어나지만, 매트릭스 규모(요구사항 수십 개 안팎)에서는 무시할 수 있는 비용이다.
+
+---
 
 ## ADR-115 PR 초안의 기본 연결 이슈·제목 범위를 이 세션이 실제로 건드린 요구사항으로 좁힌다(ADR-110 일부 개정)
 

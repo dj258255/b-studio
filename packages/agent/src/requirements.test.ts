@@ -58,7 +58,10 @@ import {
   summarizeManualStepsForGuide,
   summarizeRequirementsForGuide,
   verifySpecQuote,
+  type DocEvidence,
+  type MatrixTestRunRow,
   type Requirement,
+  type RequirementEvidence,
 } from './requirements';
 
 const noUsage: AgentUsage = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -1060,9 +1063,177 @@ describe('buildTraceabilityMatrix / buildMatrixCsv', () => {
     const matrix = buildTraceabilityMatrix({ requirements: [withEars], checkpoints: [], testFiles: [], gateChecks: [] });
     const csv = buildMatrixCsv(matrix);
     const lines = csv.split('\r\n');
-    expect(lines[0]).toBe('종류,id,상위 id,제목,개정,우선순위,이슈,커밋,테스트,게이트,상태');
+    expect(lines[0]).toBe('종류,id,상위 id,제목,개정,우선순위,이슈,커밋,테스트,게이트,검증 출처,상태');
     expect(lines).toHaveLength(1 + matrix.rows.length);
     expect(lines[1]).toContain('요구사항,R1');
+  });
+});
+
+describe('추적 매트릭스는 목록과 같은 평가를 그대로 쓴다(단일 출처 — evaluationByRequirementId)', () => {
+  const withoutScenarios = (id: string, overrides: Partial<Requirement> = {}): Requirement => ({ ...withEars, id, scenarios: [], ...overrides });
+
+  it.each([
+    ['테스트 탭 실행', withoutScenarios('R2'), { checkpoints: [], tests: [], gateChecks: [], testRun: { at: '2024-01-02T00:00:00.000Z', sha: 'a', shortSha: 'a', passed: 1, failed: 0 } } satisfies RequirementEvidence, '테스트 탭'],
+    ['게이트 확인', withoutScenarios('R3'), { checkpoints: [], tests: [], gateChecks: [{ name: 'contract_check R3', ok: true }] } satisfies RequirementEvidence, '게이트'],
+    ['문서 확인', withoutScenarios('R4', { kind: 'docs' }), { checkpoints: [], tests: [], gateChecks: [], docEvidence: { matched: ['x'], missing: [], satisfied: true } } satisfies RequirementEvidence, '문서 확인'],
+    [
+      '사람 확인',
+      withoutScenarios('R5', { manualVerification: { by: 'kim', at: '2024-02-01', sha: 'a', note: 'ok' } }),
+      { checkpoints: [], tests: [], gateChecks: [] } satisfies RequirementEvidence,
+      '사람 확인',
+    ],
+  ])('%s로 검증됨이면 매트릭스도 검증됨·같은 배지를 보여준다(목록이 쓰는 computeRequirementStatus와 같은 값)', (_label, requirement, evidence, badge) => {
+    const status = computeRequirementStatus(evidence, requirement); // "목록"이 쓰는 것과 똑같은 함수
+    expect(status).toBe('검증됨');
+    const matrix = buildTraceabilityMatrix({
+      requirements: [requirement],
+      checkpoints: [],
+      testFiles: [],
+      gateChecks: [],
+      evaluationByRequirementId: { [requirement.id]: { status, evidence, verifiedBy: requirementVerificationSource(evidence, requirement) } },
+    });
+    const row = matrix.rows.find((candidate) => candidate.id === requirement.id)!;
+    expect(row.status).toBe(status); // 매트릭스가 다시 계산하지 않고 그대로 썼다는 증거
+    expect(row.verifiedBy).toBe(badge);
+  });
+
+  it('사람 확인이 있어도 테스트 탭 실행에 실패가 있으면 실패가 이긴다(목록·매트릭스 둘 다 같은 결론)', () => {
+    const requirement = withoutScenarios('R6', { manualVerification: { by: 'kim', at: '2024-02-01', sha: 'a', note: 'ok' } });
+    const evidence: RequirementEvidence = { checkpoints: [], tests: [], gateChecks: [], testRun: { at: '2024-03-01T00:00:00.000Z', sha: 'a', shortSha: 'a', passed: 0, failed: 1 } };
+    const status = computeRequirementStatus(evidence, requirement);
+    expect(status).toBe('실패');
+    const matrix = buildTraceabilityMatrix({
+      requirements: [requirement],
+      checkpoints: [],
+      testFiles: [],
+      gateChecks: [],
+      evaluationByRequirementId: { R6: { status, evidence, verifiedBy: requirementVerificationSource(evidence, requirement) } },
+    });
+    const row = matrix.rows.find((candidate) => candidate.id === 'R6')!;
+    expect(row.status).toBe('실패');
+    expect(row.verifiedBy).toBe('none');
+  });
+
+  it('evaluationByRequirementId가 없으면(이 모듈을 studio 컨텍스트 없이 부르는 예전 방식) 체크포인트·테스트·게이트만으로 계산한다', () => {
+    const requirement = withoutScenarios('R7');
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles: [], gateChecks: [] });
+    expect(matrix.rows.find((candidate) => candidate.id === 'R7')!.status).toBe('미착수');
+  });
+
+  it('문서·사람 확인으로 검증됐지만 테스트가 없는 필수 요구사항은 "테스트 없는 필수 요구사항"이 아니라 "문서·사람 확인으로 검증된" 쪽에 담긴다', () => {
+    const docRequirement = withoutScenarios('R8', { kind: 'docs' });
+    const docEvidence: DocEvidence = { matched: ['x'], missing: [], satisfied: true };
+    const untested = withoutScenarios('R9');
+    const matrix = buildTraceabilityMatrix({
+      requirements: [docRequirement, untested],
+      checkpoints: [],
+      testFiles: [],
+      gateChecks: [],
+      evaluationByRequirementId: {
+        R8: { status: '검증됨', evidence: { checkpoints: [], tests: [], gateChecks: [], docEvidence }, verifiedBy: 'docs' },
+        R9: { status: '미착수', evidence: { checkpoints: [], tests: [], gateChecks: [] }, verifiedBy: 'none' },
+      },
+    });
+    expect(matrix.mustHavesWithoutTests.map((requirement) => requirement.id)).toEqual(['R9']);
+    expect(matrix.mustHavesVerifiedWithoutTests.map((requirement) => requirement.id)).toEqual(['R8']);
+  });
+});
+
+describe('추적 매트릭스의 테스트 열 — 지금 체크포인트의 테스트 탭 실행 결과를 테스트마다 붙인다', () => {
+  it('파일 스캔으로 찾은 테스트에 실행 결과(통과/실패)를 이름으로 맞춰 붙인다', () => {
+    const requirement: Requirement = { ...withEars, id: 'R1', scenarios: [] };
+    const testFiles = [{ path: 'src/login.test.ts', content: `it('R1 로그인 성공', () => {}); it('R1 로그인 실패', () => {});` }];
+    const testRunRows: MatrixTestRunRow[] = [
+      { id: 'R1', file: 'src/login.test.ts', name: 'R1 로그인 성공', status: 'pass', at: 't', sha: 'a', shortSha: 'a' },
+      { id: 'R1', file: 'src/login.test.ts', name: 'R1 로그인 실패', status: 'fail', at: 't', sha: 'a', shortSha: 'a' },
+    ];
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles, gateChecks: [], testRunRows });
+    const row = matrix.rows.find((candidate) => candidate.id === 'R1')!;
+    expect(row.tests).toEqual([
+      { file: 'src/login.test.ts', name: 'R1 로그인 성공', result: 'pass' },
+      { file: 'src/login.test.ts', name: 'R1 로그인 실패', result: 'fail' },
+    ]);
+  });
+
+  it('실행 결과는 있는데 파일 스캔엔 안 걸린 테스트도(발견 파서 차이) 빠뜨리지 않고 보여준다', () => {
+    const requirement: Requirement = { ...withEars, id: 'R1', scenarios: [] };
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R1', file: 'src/login.test.ts', name: '발견 파서만 잡은 이름', status: 'pass', at: 't', sha: 'a', shortSha: 'a' }];
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles: [], gateChecks: [], testRunRows });
+    expect(matrix.rows.find((candidate) => candidate.id === 'R1')!.tests).toEqual([{ file: 'src/login.test.ts', name: '발견 파서만 잡은 이름', result: 'pass' }]);
+  });
+
+  it('실행 결과가 없는 테스트는 result 없이(화면이 "안 돌림"으로 보여준다) 그대로 둔다', () => {
+    const requirement: Requirement = { ...withEars, id: 'R1', scenarios: [] };
+    const testFiles = [{ path: 'src/login.test.ts', content: `it('R1 로그인 성공', () => {});` }];
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles, gateChecks: [] });
+    expect(matrix.rows.find((candidate) => candidate.id === 'R1')!.tests).toEqual([{ file: 'src/login.test.ts', name: 'R1 로그인 성공' }]);
+  });
+});
+
+describe('추적 매트릭스의 시나리오 행 — 요구사항과 같은 함수로, 증거만 시나리오로 좁혀 계산한다', () => {
+  it('시나리오 id가 붙은 테스트만 따로 세어 통과하면, 그 시나리오가 요구사항 전체 집계와 상관없이 검증됨이 된다', () => {
+    const requirement: Requirement = { ...withEars, id: 'R1', scenarios: [{ id: 'R1.1', given: 'g', when: 'w', then: 't' }] };
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R1.1', file: 'src/login.test.ts', name: 'R1.1 로그인 성공', status: 'pass', at: 't', sha: 'a', shortSha: 'a' }];
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles: [], gateChecks: [], testRunRows });
+    const scenarioRow = matrix.rows.find((candidate) => candidate.id === 'R1.1')!;
+    expect(scenarioRow.status).toBe('검증됨');
+    expect(scenarioRow.tests).toEqual([{ file: 'src/login.test.ts', name: 'R1.1 로그인 성공', result: 'pass' }]);
+  });
+
+  it('다른 시나리오의 테스트가 통과해도(요구사항 전체 집계) 이 시나리오 자신의 증거가 없으면 검증됨으로 보지 않는다', () => {
+    const requirement: Requirement = {
+      ...withEars,
+      id: 'R1',
+      scenarios: [
+        { id: 'R1.1', given: 'g1', when: 'w1', then: 't1' },
+        { id: 'R1.2', given: 'g2', when: 'w2', then: 't2' },
+      ],
+    };
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R1.1', file: 'src/login.test.ts', name: 'R1.1 성공', status: 'pass', at: 't', sha: 'a', shortSha: 'a' }];
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles: [], gateChecks: [], testRunRows });
+    expect(matrix.rows.find((candidate) => candidate.id === 'R1.1')!.status).toBe('검증됨');
+    expect(matrix.rows.find((candidate) => candidate.id === 'R1.2')!.status).toBe('미착수');
+  });
+
+  it('부모가 문서로 전부 검증됐으면(satisfied) 시나리오도 물려받아 검증됨이 되지만, 일부만 맞은 상태는 물려주지 않는다', () => {
+    const satisfiedParent: Requirement = { ...withEars, id: 'R1', kind: 'docs', scenarios: [{ id: 'R1.1', given: 'g', when: 'w', then: 't' }] };
+    const satisfiedEvidence: RequirementEvidence = { checkpoints: [], tests: [], gateChecks: [], docEvidence: { matched: ['x'], missing: [], satisfied: true } };
+    const satisfiedMatrix = buildTraceabilityMatrix({
+      requirements: [satisfiedParent],
+      checkpoints: [],
+      testFiles: [],
+      gateChecks: [],
+      evaluationByRequirementId: { R1: { status: '검증됨', evidence: satisfiedEvidence, verifiedBy: 'docs' } },
+    });
+    expect(satisfiedMatrix.rows.find((candidate) => candidate.id === 'R1.1')!.status).toBe('검증됨');
+
+    const partialParent: Requirement = { ...withEars, id: 'R2', kind: 'docs', scenarios: [{ id: 'R2.1', given: 'g', when: 'w', then: 't' }] };
+    const partialEvidence: RequirementEvidence = { checkpoints: [], tests: [], gateChecks: [], docEvidence: { matched: ['x'], missing: ['y'], satisfied: false } };
+    const partialMatrix = buildTraceabilityMatrix({
+      requirements: [partialParent],
+      checkpoints: [],
+      testFiles: [],
+      gateChecks: [],
+      evaluationByRequirementId: { R2: { status: '작업 중', evidence: partialEvidence, verifiedBy: 'none' } },
+    });
+    expect(partialMatrix.rows.find((candidate) => candidate.id === 'R2.1')!.status).toBe('미착수');
+  });
+
+  it('부모의 사람 확인(manualVerification)은 요구사항 객체 자체에 있어 시나리오도 그대로 적용된다', () => {
+    const requirement: Requirement = {
+      ...withEars,
+      id: 'R1',
+      scenarios: [{ id: 'R1.1', given: 'g', when: 'w', then: 't' }],
+      manualVerification: { by: 'kim', at: '2024-02-01', sha: 'a', note: 'ok' },
+    };
+    const matrix = buildTraceabilityMatrix({
+      requirements: [requirement],
+      checkpoints: [],
+      testFiles: [],
+      gateChecks: [],
+      evaluationByRequirementId: { R1: { status: '검증됨', evidence: { checkpoints: [], tests: [], gateChecks: [] }, verifiedBy: 'manual' } },
+    });
+    expect(matrix.rows.find((candidate) => candidate.id === 'R1.1')!.status).toBe('검증됨');
   });
 });
 

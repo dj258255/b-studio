@@ -836,6 +836,16 @@ function ManualStepsNotice({ items }: { items: string[] }) {
   );
 }
 
+/** 매트릭스 테스트 열의 테스트 하나. result는 지금 체크포인트의 테스트 탭 실행에 있었을 때만 있다 */
+interface MatrixTestMatchView {
+  file: string;
+  name: string;
+  result?: "pass" | "fail" | "not-run";
+}
+
+/** "검증됨"을 만든 증거(ADR-106). 매트릭스엔 테스트·게이트 열이 따로 있어 목록(VERIFIED_BY_LABEL)보다 자세히 가른다 */
+type MatrixVerificationBadge = "테스트 탭" | "게이트" | "문서 확인" | "사람 확인" | "none";
+
 interface MatrixRowView {
   kind: "requirement" | "scenario";
   id: string;
@@ -845,16 +855,20 @@ interface MatrixRowView {
   priority: RequirementPriority;
   issue?: number;
   checkpoints: Array<{ sha: string; shortSha: string; message: string }>;
-  tests: Array<{ file: string; name: string }>;
+  tests: MatrixTestMatchView[];
   gateChecks: Array<{ name: string; ok: boolean }>;
   status: RequirementStatus;
+  verifiedBy: MatrixVerificationBadge;
 }
 
 interface TraceabilityMatrixView {
   rows: MatrixRowView[];
   orphanTests: Array<{ file: string; name: string }>;
   mustHavesWithoutTests: Array<{ id: string; title: string }>;
+  mustHavesVerifiedWithoutTests: Array<{ id: string; title: string }>;
 }
+
+const MATRIX_TEST_RESULT_LABEL: Record<"pass" | "fail" | "not-run", string> = { pass: "통과", fail: "실패", "not-run": "안 돌림" };
 
 /** "추적 매트릭스" 하위 화면(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·커밋·테스트·게이트·상태를 한 줄로 보여주고, CSV로 내보낸다 */
 function MatrixView({ sessionId }: { sessionId: string }) {
@@ -903,6 +917,7 @@ function MatrixView({ sessionId }: { sessionId: string }) {
               <th className="px-2.5 py-1.5 font-medium">커밋</th>
               <th className="px-2.5 py-1.5 font-medium">테스트</th>
               <th className="px-2.5 py-1.5 font-medium">게이트</th>
+              <th className="px-2.5 py-1.5 font-medium">검증 출처</th>
               <th className="px-2.5 py-1.5 font-medium">상태</th>
             </tr>
           </thead>
@@ -917,10 +932,20 @@ function MatrixView({ sessionId }: { sessionId: string }) {
                 <td className="px-2.5 py-1.5 text-muted">{PRIORITY_LABEL[row.priority]}</td>
                 <td className="px-2.5 py-1.5 text-muted">{row.issue !== undefined ? `#${row.issue}` : "—"}</td>
                 <td className="px-2.5 py-1.5 text-muted">{row.checkpoints.length > 0 ? row.checkpoints.map((c) => c.shortSha).join(", ") : "—"}</td>
-                <td className="px-2.5 py-1.5 text-muted">{row.tests.length > 0 ? `${row.tests.length}개` : "—"}</td>
+                <td className="px-2.5 py-1.5 text-muted">
+                  {row.tests.length === 0 ? (
+                    "—"
+                  ) : (
+                    <span title={row.tests.map((test) => `${test.name}${test.result ? ` (${MATRIX_TEST_RESULT_LABEL[test.result]})` : ""}`).join("\n")}>
+                      {row.tests.length}개
+                      {row.tests.some((test) => test.result === "fail") ? <span className="ml-1 text-fail">실패 있음</span> : null}
+                    </span>
+                  )}
+                </td>
                 <td className="px-2.5 py-1.5 text-muted">
                   {row.gateChecks.length > 0 ? row.gateChecks.map((c) => (c.ok ? "통과" : "실패")).join(", ") : "—"}
                 </td>
+                <td className="px-2.5 py-1.5 text-muted">{row.verifiedBy === "none" ? "—" : row.verifiedBy}</td>
                 <td className={`px-2.5 py-1.5 font-medium ${STATUS_TONE[row.status]}`}>{row.status}</td>
               </tr>
             ))}
@@ -945,12 +970,27 @@ function MatrixView({ sessionId }: { sessionId: string }) {
         </div>
         <div className="rounded-control border border-line bg-panel p-3">
           <p className="text-sm font-medium text-ink">테스트 없는 필수 요구사항</p>
-          <p className="text-xs text-muted">시나리오 테스트를 포함해 테스트가 하나도 없는 필수(must) 요구사항입니다.</p>
+          <p className="text-xs text-muted">시나리오 테스트를 포함해 테스트가 하나도 없고, 아직 다른 방식으로도 검증되지 않은 필수(must) 요구사항입니다.</p>
           {matrix.mustHavesWithoutTests.length === 0 ? (
             <p className="mt-1 text-sm text-muted">없습니다.</p>
           ) : (
             <ul className="mt-1 list-inside list-disc space-y-0.5 text-sm text-muted">
               {matrix.mustHavesWithoutTests.map((requirement) => (
+                <li key={requirement.id}>
+                  [{requirement.id}] {requirement.title}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="rounded-control border border-line bg-panel p-3 sm:col-span-2">
+          <p className="text-sm font-medium text-ink">문서·사람 확인으로 검증된 필수 요구사항</p>
+          <p className="text-xs text-muted">테스트는 없지만 문서 확인이나 사람이 직접 확인해 이미 검증됨인 필수(must) 요구사항입니다.</p>
+          {matrix.mustHavesVerifiedWithoutTests.length === 0 ? (
+            <p className="mt-1 text-sm text-muted">없습니다.</p>
+          ) : (
+            <ul className="mt-1 list-inside list-disc space-y-0.5 text-sm text-muted">
+              {matrix.mustHavesVerifiedWithoutTests.map((requirement) => (
                 <li key={requirement.id}>
                   [{requirement.id}] {requirement.title}
                 </li>
