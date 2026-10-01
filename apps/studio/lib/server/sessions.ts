@@ -24,6 +24,7 @@ import {
   buildTraceabilityMatrix,
   canCreatePullRequest,
   captureBaselines,
+  alignScenarioIds,
   carryForwardRequirementRevision,
   CheckpointError,
   CheckpointStore,
@@ -3775,10 +3776,24 @@ const ApplyRequirementsSchema = z.object({
  * (화면이 걸러 보내지 않았어도 파일에 요구사항으로 남지 않는다). 저장 시점의 증거로 상태를 다시 매겨 사람이 읽는 상태
  * 줄에 스냅샷으로 남긴다(다시 열 때는 항상 증거로 새로 계산한다).
  */
+/** 저장 요청의 요구사항마다 시나리오 id 앞부분을 요구사항 id에 맞춘다. 모양이 다르면(검증이 거를 값) 그대로 둔다 */
+function alignScenarioIdsInInput(input: unknown): unknown {
+  if (!input || typeof input !== 'object' || !Array.isArray((input as { requirements?: unknown }).requirements)) return input;
+  const requirements = (input as { requirements: unknown[] }).requirements.map((requirement) => {
+    if (!requirement || typeof requirement !== 'object') return requirement;
+    const candidate = requirement as { id?: unknown; scenarios?: unknown };
+    if (typeof candidate.id !== 'string' || !Array.isArray(candidate.scenarios)) return requirement;
+    if (!candidate.scenarios.every((scenario) => scenario && typeof scenario === 'object' && typeof (scenario as { id?: unknown }).id === 'string')) return requirement;
+    return alignScenarioIds(candidate as { id: string; scenarios: Array<{ id: string }> });
+  });
+  return { ...(input as object), requirements };
+}
+
 export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
-  const parsed = ApplyRequirementsSchema.safeParse(input);
+  // 화면이 보낸 시나리오 id가 요구사항 id와 어긋나면(재추출 병합이 요구사항 id만 바꾼 경우) 검증 전에 맞춘다
+  const parsed = ApplyRequirementsSchema.safeParse(alignScenarioIdsInInput(input));
   if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   const ids = parsed.data.requirements.map((requirement) => requirement.id);
   if (new Set(ids).size !== ids.length) throw new StudioError(400, '요구사항 id가 중복됩니다');
