@@ -678,3 +678,30 @@ describe('폴더 등록', () => {
     expect(await excludeFromGit(root, ['studio.yaml'])).toBe(false);
   });
 });
+
+describe('generateFiles: 생성 파일에 ADR 번호가 남아 있지 않아야 한다', () => {
+  it('studio.yaml·compose.b-studio.yaml·Dockerfile.b-studio 어디에도 ADR-숫자가 없다(부가 서비스 포함)', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'backend/build.gradle': springJpaGradle,
+      'backend/gradlew': '#!/bin/sh',
+      'backend/src/main/resources/application.properties': 'spring.datasource.url=jdbc:postgresql://localhost:5432/app\n',
+      'compose.yaml': ['services:', '  db:', '    image: postgres:17-alpine', '    environment:', '      POSTGRES_DB: app', '      POSTGRES_USER: app', ''].join('\n'),
+      'node_modules/next/package.json': nextPackage,
+      'api/main.py': 'from fastapi import FastAPI\napp = FastAPI()\n',
+      'api/requirements.txt': 'fastapi\n',
+    });
+
+    const detection = await detectProject(root);
+    const files = generateFiles(detection);
+
+    expect(files.length).toBeGreaterThan(0);
+    // 부가 서비스 섹션(ADR-073 메모가 있던 자리)이 실제로 생성됐는지 확인해, 이 검사가 그 줄을 비켜가지 않게 한다
+    const compose = files.find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).toContain('부가 서비스');
+    for (const file of files) {
+      expect(file.content).not.toMatch(/ADR-\d+/);
+    }
+  });
+});

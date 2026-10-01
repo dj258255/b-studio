@@ -422,7 +422,7 @@ async function detectNode(root: string, dir: string, relative: string): Promise<
     preview: 'browser',
     ready: { path: '/' },
     dockerfile: [
-      '# b-studio가 만든 개발용 이미지(ADR-067). 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
+      '# b-studio가 만든 개발용 이미지. 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
       'FROM node:22-bookworm-slim',
       '',
       'RUN corepack enable',
@@ -506,7 +506,7 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
     ready: { ...ready },
     ...(springdoc ? { contract: '/v3/api-docs' } : {}),
     dockerfile: [
-      '# b-studio가 만든 개발용 이미지(ADR-067). 소스는 compose에서 마운트하고, 의존성은 첫 기동 때 받는다(프록시 설정은 샌드박스가 넣는다)',
+      '# b-studio가 만든 개발용 이미지. 소스는 compose에서 마운트하고, 의존성은 첫 기동 때 받는다(프록시 설정은 샌드박스가 넣는다)',
       `FROM ${image}`,
       '',
       `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
@@ -565,7 +565,7 @@ async function detectFastApi(dir: string, relative: string): Promise<Omit<Detect
     ready: { path: '/openapi.json' },
     contract: '/openapi.json',
     dockerfile: [
-      '# b-studio가 만든 개발용 이미지(ADR-067). 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
+      '# b-studio가 만든 개발용 이미지. 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
       'FROM python:3.12-slim',
       '',
       `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
@@ -604,7 +604,7 @@ export function generateFiles(detection: ProjectDetection): GeneratedFile[] {
 
 function specYaml(detection: ProjectDetection): string {
   const lines = [
-    '# b-studio가 폴더를 보고 만든 설정(ADR-067). 이 파일과 compose.b-studio.yaml·Dockerfile.b-studio는 git 추적에서 빼 두었습니다.',
+    '# b-studio가 폴더를 보고 만든 설정. 이 파일과 compose.b-studio.yaml·Dockerfile.b-studio는 git 추적에서 빼 두었습니다.',
     '# 틀린 추측이 있으면 고쳐도 됩니다. 팀과 나누려면 .git/info/exclude에서 빼고 커밋하세요',
     'version: 1',
     `name: ${sanitize(detection.name) || 'project'}`,
@@ -657,7 +657,7 @@ function databasesYaml(infra: readonly InfraService[]): string[] {
 }
 
 function composeYaml(services: readonly DetectedService[], infra: readonly InfraService[]): string {
-  const lines = ['# b-studio가 만든 개발용 compose(ADR-067). 샌드박스가 이 파일로 서비스를 띄운다', 'services:'];
+  const lines = ['# b-studio가 만든 개발용 compose. 샌드박스가 이 파일로 서비스를 띄운다', 'services:'];
   const volumes: string[] = [];
   for (const service of services) {
     const context = service.path === '.' ? '.' : `./${service.path}`;
@@ -685,7 +685,7 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
     }
   }
   if (infra.length > 0) {
-    lines.push('', '  # studio.yaml에 없는 부가 서비스: 샌드박스와 함께 뜨고 함께 사라진다 (기존 compose에서 가져오거나 새로 제안했습니다, ADR-073)');
+    lines.push('', '  # studio.yaml에 없는 부가 서비스: 샌드박스와 함께 뜨고 함께 사라진다 (기존 compose에서 가져오거나 새로 제안했습니다)');
     for (const service of infra) {
       lines.push(`  ${service.name}:`, service.proposed ? `    # 확인: ${service.reason}` : `    # ${service.sourceFile}에서 가져왔습니다`);
       for (const note of service.notes) lines.push(`    # 확인: ${note}`);
