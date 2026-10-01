@@ -9,7 +9,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const execFileAsync = promisify(execFile);
 
 /**
- * createSession의 seedFromSessionId(ADR-0XX, 작업 분해 레인·통합이 프로젝트 원본이 아니라 다른 세션의 최신
+ * createSession의 seedFromSessionId(ADR-096, 작업 분해 레인·통합이 프로젝트 원본이 아니라 다른 세션의 최신
  * 체크포인트에서 시작한다)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 체크포인트, 요구사항 저장. 가짜로 바꾸는 것: 샌드박스(Docker)뿐이다.
  */
@@ -139,7 +139,7 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
 
 const sample = { id: 'R1', title: '로그인', kind: 'api', priority: 'must', acceptance: ['a'] };
 
-describe('createSession의 seedFromSessionId(ADR-0XX)', () => {
+describe('createSession의 seedFromSessionId(ADR-096)', () => {
   it('레인·통합 세션은 프로젝트 원본이 아니라 원본 세션의 최신 체크포인트(저장한 요구사항 포함)에서 시작한다', async () => {
     await setupRepo();
     const originId = (await createSession('verifyproj', 'kim', 'copy')).id;

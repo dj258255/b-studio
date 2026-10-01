@@ -334,7 +334,7 @@ export type StudioEvent =
    */
   | { type: 'local_edits_saved'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
   /**
-   * 요청·실행과 무관하게 문서만(docs/** 등) 검증 게이트 없이 체크포인트로 남겼다(ADR-0XX).
+   * 요청·실행과 무관하게 문서만(docs/** 등) 검증 게이트 없이 체크포인트로 남겼다(ADR-096).
    * 요구사항 저장, 이슈 발행·충돌 해결 사이드카가 남긴다. checkpoint.verify === 'docs'다
    */
   | { type: 'docs_checkpoint'; checkpoint: Checkpoint }

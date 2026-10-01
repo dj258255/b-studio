@@ -52,7 +52,7 @@ describe('POST /api/task-plans', () => {
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
   });
 
-  it('sourceSessionId(ADR-0XX, 세션의 "나눠서 병렬로 하기")를 받으면 그대로 createTaskPlan에 넘긴다', async () => {
+  it('sourceSessionId(ADR-096, 세션의 "나눠서 병렬로 하기")를 받으면 그대로 createTaskPlan에 넘긴다', async () => {
     const response = await post({ projectId: 'orders', request: '요청', modelId: 'model-a', sourceSessionId: 'origin-1' });
 
     expect(response.status).toBe(201);

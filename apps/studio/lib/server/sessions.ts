@@ -501,7 +501,7 @@ export async function createSession(
     boot?: BootMode;
     extraPageChecks?: readonly WorkflowPageCheck[];
     /**
-     * 서버 안에서만 넘긴다(작업 분해 레인·통합, ADR-0XX). 이 세션의 최신 체크포인트에서 작업 복사본을 시작한다
+     * 서버 안에서만 넘긴다(작업 분해 레인·통합, ADR-096). 이 세션의 최신 체크포인트에서 작업 복사본을 시작한다
      * (원본 세션이 로컬 폴더이거나 git 저장소가 아니면 조용히 무시하고 지금처럼 프로젝트 원본에서 시작한다)
      */
     seedFromSessionId?: string;
@@ -544,7 +544,7 @@ export async function createSession(
 }
 
 /**
- * 작업 분해(레인·통합)가 세션에서 시작할 때(ADR-0XX) 그 세션의 작업 복사본 경로와 최신 체크포인트 sha를 찾는다.
+ * 작업 분해(레인·통합)가 세션에서 시작할 때(ADR-096) 그 세션의 작업 복사본 경로와 최신 체크포인트 sha를 찾는다.
  * 로컬 폴더 세션은 체크포인트가 사용자 폴더 밖 별도 git(gitDir)에 있어 평범한 clone 원본으로 쓸 수 없고,
  * 원본이 git 저장소가 아닌 세션은 기준 브랜치·원격 메타가 없어 복제해도 의미가 없다 — 두 경우 모두 undefined를 돌려줘
  * 부르는 쪽이 지금처럼 프로젝트 원본에서 새로 시작하게 한다(세션이 이미 사라졌어도 마찬가지로 안전하게 건너뛴다).
@@ -557,7 +557,7 @@ async function resolveSessionSeed(sessionId: string): Promise<{ workDir: string;
     if (!info) return undefined;
     // 분해 시점에 아직 체크포인트로 남기지 않은 문서(요구사항 저장 등)가 있으면 레인·통합이 시작하기 전에 먼저
     // 남긴다 — 그래야 요구사항·이슈 번호·발행 기록이 레인·통합 세션에도 실린다. createTaskPlan이 이미 한 번
-    // 남기지만(ADR-0XX), 다른 경로로 seedFromSessionId를 넘길 수도 있어 여기서도 한 번 더 안전망을 둔다
+    // 남기지만(ADR-096), 다른 경로로 seedFromSessionId를 넘길 수도 있어 여기서도 한 번 더 안전망을 둔다
     // (이미 커밋했으면 pendingFiles가 비어 있어 아무것도 하지 않는다)
     await commitPendingWorkingCopyDocs(sessionId, 'docs: 나눠서 병렬로 하기 전에 문서를 정리한다').catch((error: unknown) => {
       console.error(`[b-studio] 세션 ${sessionId}의 분해 전 문서 체크포인트를 남기지 못했습니다`, error);
@@ -600,7 +600,7 @@ async function startSession({
   effort?: string;
   /** 이 세션에만 덧붙일 pageChecks(작업 분해 통합 게이트). HTTP 라우트는 넘기지 않는다 */
   extraPageChecks?: readonly WorkflowPageCheck[];
-  /** 작업 분해 레인·통합이 다른 세션의 체크포인트에서 시작할 때(ADR-0XX). resolveSessionSeed가 만든다 */
+  /** 작업 분해 레인·통합이 다른 세션의 체크포인트에서 시작할 때(ADR-096). resolveSessionSeed가 만든다 */
   seed?: { workDir: string; sha: string };
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
@@ -630,7 +630,7 @@ async function startSession({
     // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
     const allowSubfolder = source.spec.repository?.monorepo === true;
     if (seed) {
-      // 작업 분해 레인·통합(ADR-0XX): 프로젝트 원본이 아니라 그 세션의 작업 복사본에서, 그 세션의 최신 체크포인트
+      // 작업 분해 레인·통합(ADR-096): 프로젝트 원본이 아니라 그 세션의 작업 복사본에서, 그 세션의 최신 체크포인트
       // sha로 시작한다. 기준 브랜치·원격은 그 세션이 이미 기록해 둔 값을 그대로 물려받는다(inspectSource가 읽는다)
       const cloned = await CheckpointStore.clone(seed.workDir, workDir, { branch: sessionBranchName(projectId, id), author, allowSubfolder, ref: seed.sha });
       checkpoints = cloned.store;
@@ -2361,7 +2361,7 @@ async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text
 }
 
 // ---------------------------------------------------------------------------
-// 문서 체크포인트(ADR-0XX): 요구사항 저장·이슈 발행 사이드카처럼 docs/** 안의 변경만 검증 게이트 없이 체크포인트로
+// 문서 체크포인트(ADR-096): 요구사항 저장·이슈 발행 사이드카처럼 docs/** 안의 변경만 검증 게이트 없이 체크포인트로
 // 남긴다. 문서는 서비스를 재시작하거나 빌드를 깨뜨리지 않으므로 전체 검증(run·test·review…)을 거칠 이유가 없다.
 // 그대로 두면 "나눠서 병렬로 하기"가 project 원본에서 레인을 시작해 저장한 요구사항·이슈 번호·발행 기록이 사라지는
 // 문제가 있어(docs/가 세션 작업 복사본에 커밋되지 않은 채로 남는다), 저장 직후 여기서 체크포인트로 남긴다.

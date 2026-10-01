@@ -9,7 +9,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const execFileAsync = promisify(execFile);
 
 /**
- * 문서 체크포인트(ADR-0XX)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
+ * 문서 체크포인트(ADR-096)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 체크포인트, 요구사항 저장(applySessionRequirements).
  * 가짜로 바꾸는 것: 샌드박스(Docker)와 findProject(파일을 읽어 그대로 쓴다). 실제 Docker 호출은 없다.
  */
@@ -145,7 +145,7 @@ describe('isDocPath', () => {
   it('docs/** 전부, 루트의 *.md, PR 템플릿만 문서 경로로 인정한다', () => {
     expect(isDocPath('docs/requirements.md')).toBe(true);
     expect(isDocPath('docs/requirements.issues.json')).toBe(true);
-    expect(isDocPath('docs/adr/ADR-0XX.md')).toBe(true);
+    expect(isDocPath('docs/adr/ADR-096.md')).toBe(true);
     expect(isDocPath('README.md')).toBe(true);
     expect(isDocPath('CHANGELOG.md')).toBe(true);
     expect(isDocPath('.github/pull_request_template.md')).toBe(true);
@@ -156,7 +156,7 @@ describe('isDocPath', () => {
   });
 });
 
-describe('문서 체크포인트(ADR-0XX)', () => {
+describe('문서 체크포인트(ADR-096)', () => {
   it('문서가 아닌 경로가 섞이면 거부하고 아무것도 커밋하지 않는다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;

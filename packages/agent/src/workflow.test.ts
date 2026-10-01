@@ -97,7 +97,7 @@ describe('project workflow', () => {
     expect(parseVerifyTrailerValues(['light', 'full'])).toBeUndefined();
     expect(parseVerifyTrailerValues(['full'])).toBeUndefined();
     expect(parseVerifyTrailerValues([''])).toBeUndefined();
-    // 문서만 바꿔 검증 게이트를 거치지 않은 체크포인트(ADR-0XX)도 같은 트레일러로 표시한다
+    // 문서만 바꿔 검증 게이트를 거치지 않은 체크포인트(ADR-096)도 같은 트레일러로 표시한다
     expect(formatVerifyTrailer('docs')).toBe(`${WORKFLOW_VERIFY_TRAILER}: docs`);
     expect(parseVerifyTrailerValues(['docs'])).toBe('docs');
     expect(parseVerifyTrailerValues(['light', 'docs'])).toBe('docs');

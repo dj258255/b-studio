@@ -180,7 +180,7 @@ export async function createTaskPlan(input: {
   /**
    * 세션의 "나눠서 병렬로 하기"(ADR-068)로 이 계획을 만들 때, 그 세션 id. presetPlan 등과 달리 HTTP 라우트도
    * 받는다(대화의 넘기기 화면이 보낸다) — 같은 프로젝트·소유자의 세션인지 여기서 확인한다. 있으면 레인·통합
-   * 세션이 프로젝트 원본이 아니라 이 세션의 최신 체크포인트에서 시작한다(ADR-0XX).
+   * 세션이 프로젝트 원본이 아니라 이 세션의 최신 체크포인트에서 시작한다(ADR-096).
    */
   sourceSessionId?: string;
 }): Promise<TaskPlanView> {
@@ -228,7 +228,7 @@ export async function createTaskPlan(input: {
     if (!source || source.projectId !== input.projectId || source.owner !== input.owner) {
       throw new StudioError(404, '넘긴 세션을 찾을 수 없습니다');
     }
-    // 레인·통합이 이 세션의 최신 체크포인트에서 시작한다(ADR-0XX) — 그 시점에 아직 커밋하지 않은 문서 변경(저장
+    // 레인·통합이 이 세션의 최신 체크포인트에서 시작한다(ADR-096) — 그 시점에 아직 커밋하지 않은 문서 변경(저장
     // 실패 등으로 작업 복사본에만 남은 docs/)이 있으면 레인을 시작하기 전에 먼저 체크포인트로 남겨 이어받게 한다.
     // 실패해도(시크릿 오탐 등) 계획은 그대로 진행한다 — 안전망이지 필수 경로가 아니다
     await commitPendingWorkingCopyDocs(input.sourceSessionId, '문서: 작업을 나누기 전 남은 문서 변경을 정리한다').catch((error: unknown) => {
@@ -785,7 +785,7 @@ function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelI
 
 /**
  * 계획이 세션의 "나눠서 병렬로 하기"로 만들어졌으면(sourceSessionId) 레인·통합 세션이 프로젝트 원본이 아니라
- * 그 세션의 최신 체크포인트에서 시작하게 한다(ADR-0XX). 세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은
+ * 그 세션의 최신 체크포인트에서 시작하게 한다(ADR-096). 세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은
  * sourceSessionId가 없어 빈 객체를 돌려주고, createSession은 지금처럼 프로젝트 원본에서 시작한다.
  */
 function seedFromSessionOption(plan: TaskPlanView): { seedFromSessionId?: string } {

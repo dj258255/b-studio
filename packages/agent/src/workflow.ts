@@ -92,7 +92,7 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
 
 /**
  * 가볍게 확인(light)했거나 문서만 바꿔(docs) 검증 게이트를 거치지 않은 체크포인트임을 커밋 본문 끝에 남기는 트레일러.
- * 배포 화면과 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-0XX).
+ * 배포 화면과 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-096).
  */
 export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
 

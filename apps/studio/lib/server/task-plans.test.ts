@@ -415,7 +415,7 @@ describe('작업 분해 실행', () => {
     expect(fake.stopOrder.integrationCreatedAfterStops).toBe(true);
   });
 
-  it('세션에서 "나눠서 병렬로 하기"로 만든 계획은 레인·통합이 그 세션의 최신 체크포인트에서 시작한다(ADR-0XX)', async () => {
+  it('세션에서 "나눠서 병렬로 하기"로 만든 계획은 레인·통합이 그 세션의 최신 체크포인트에서 시작한다(ADR-096)', async () => {
     fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
     fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
     // 이미 떠 있는 원본 세션(같은 프로젝트·소유자)을 createSession 없이 직접 등록한다

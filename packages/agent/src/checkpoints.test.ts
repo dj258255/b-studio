@@ -639,7 +639,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await expect(store.restore(firstCommit)).rejects.toThrow('세션 기록에 없는');
   });
 
-  it('commitPaths는 지정한 경로만 커밋하고, 범위 밖 변경은 그대로 남기고, 범위 안에 변경이 없으면 건너뛴다(ADR-0XX)', async () => {
+  it('commitPaths는 지정한 경로만 커밋하고, 범위 밖 변경은 그대로 남기고, 범위 안에 변경이 없으면 건너뛴다(ADR-096)', async () => {
     const { source, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
 
@@ -674,7 +674,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(await store.pendingFiles()).toEqual(['docs/requirements.issues.json']);
   });
 
-  it('다른 세션의 작업 복사본과 체크포인트 sha로 레인·통합 세션을 시작할 수 있다(ADR-0XX): 기준 브랜치는 그 세션이 기록해 둔 값을 물려받는다', async () => {
+  it('다른 세션의 작업 복사본과 체크포인트 sha로 레인·통합 세션을 시작할 수 있다(ADR-096): 기준 브랜치는 그 세션이 기록해 둔 값을 물려받는다', async () => {
     const { source, remote, workDir } = await createSourceRepository();
     const origin = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
     await mkdir(path.join(workDir, 'docs'), { recursive: true });

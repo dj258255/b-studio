@@ -205,7 +205,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       fleetModelIds: [],
       planModelId: "",
       ...(capabilities ? { mode: capabilities.mode } : {}),
-      // 나눠서 병렬(split)은 이 세션의 최신 체크포인트에서 레인·통합을 시작한다(ADR-0XX). 여러 명 비교(fleet)는 해당 없다
+      // 나눠서 병렬(split)은 이 세션의 최신 체크포인트에서 레인·통합을 시작한다(ADR-096). 여러 명 비교(fleet)는 해당 없다
       ...(proposal.mode === "split" ? { sourceSessionId: snapshot.id } : {}),
     });
     if (!result.ok) {
