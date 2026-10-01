@@ -31,6 +31,7 @@ import {
   alignScenarioIds,
   missingReferencedFile,
   parseExtractionReply,
+  requestRequirementsExtraction,
   parseRecommendationReply,
   parseRequirementsMarkdown,
   partitionManualSteps,
@@ -1046,3 +1047,41 @@ describe('parseExtractionReply — 선택 항목이 null이어도 받는다', ()
   });
 });
 
+
+describe('요구사항 추출 — 깨진 JSON 고쳐 읽기·한 번 다시 묻기', () => {
+  const okReply = JSON.stringify({ requirements: [{ id: 'R1', title: '목록', kind: 'api', priority: 'must', acceptance: ['200'] }], questions: [] });
+  const usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+  it('문자열 안 큰따옴표가 이스케이프되지 않은 JSON도 고쳐 읽는다', () => {
+    const broken = '{"requirements":[{"id":"R1","title":"목록","kind":"api","priority":"must","acceptance":["응답은 {"items": [], "total": 0} 형태다"]}],"questions":[]}';
+    const reply = parseExtractionReply(broken);
+    expect(reply.requirements[0]!.acceptance[0]).toContain('items');
+  });
+
+  it('펜스 안 문자열에 또 다른 펜스가 있어도 마지막 펜스까지 읽는다', () => {
+    const text = '```json\n' + okReply.replace('"200"', '"예시: ```js 코드```"') + '\n```';
+    expect(parseExtractionReply(text).requirements).toHaveLength(1);
+  });
+
+  it('첫 답을 쓸 수 없으면 이유를 붙여 딱 한 번 다시 묻고, 사용량을 합친다', async () => {
+    const prompts: string[] = [];
+    const ask = async (input: { system: string; user: string }) => {
+      prompts.push(input.user);
+      return { text: prompts.length === 1 ? '그냥 텍스트' : okReply, usage };
+    };
+    const result = await requestRequirementsExtraction(ask, '명세');
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('[이전 답을 쓸 수 없었습니다]');
+    expect(result.usage.inputTokens).toBe(2);
+  });
+
+  it('두 번째도 쓸 수 없으면 오류로 끝난다(세 번 묻지 않는다)', async () => {
+    let calls = 0;
+    const ask = async () => {
+      calls += 1;
+      return { text: '여전히 텍스트', usage };
+    };
+    await expect(requestRequirementsExtraction(ask, '명세')).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+});

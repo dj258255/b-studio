@@ -1,4 +1,5 @@
 import type { LoadedProject } from '@b-studio/spec';
+import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import type { AgentUsage, ModelClient } from './loop';
 import { isProtectedPath } from './policy';
@@ -204,15 +205,24 @@ Rules:
  * 계획 요청과 레인 사이 계약 요청이 함께 쓴다 — 그래서 문구에 "작업 계획"이라고 박아 두지 않는다
  */
 export function parsePlannerReply(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text)?.[1];
-  const source = fenced ?? text;
+  // 코드 펜스는 마지막 펜스까지 잡는다 — 답 안의 문자열에 또 다른 펜스(```)가 있으면 처음 만나는 펜스에서 끊겨
+  // JSON이 중간에 잘렸다(요구사항 추출처럼 긴 답에서 실제로 일어났다)
+  const fenced = /```(?:json)?\s*([\s\S]*)```/.exec(text)?.[1];
+  const source = fenced && fenced.includes('{') ? fenced : text;
   const start = source.indexOf('{');
   const end = source.lastIndexOf('}');
-  if (start === -1 || end <= start) throw new TaskPlanError('모델 응답에서 JSON을 찾지 못했습니다');
+  if (start === -1) throw new TaskPlanError('모델 응답에서 JSON을 찾지 못했습니다');
+  const candidate = end > start ? source.slice(start, end + 1) : source.slice(start);
   try {
-    return JSON.parse(source.slice(start, end + 1));
+    return JSON.parse(candidate);
   } catch (error) {
-    throw new TaskPlanError(`모델 응답 JSON을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    // 모델이 자주 내는 깨진 JSON(문자열 안의 이스케이프 안 된 큰따옴표, 잘린 끝, 끝 쉼표 등)은 한 번 고쳐서 읽는다.
+    // 고친 결과는 이어지는 스키마 검사를 그대로 거치므로, 모양이 틀리면 거기서 걸러진다
+    try {
+      return JSON.parse(jsonrepair(end > start ? source.slice(start) : candidate));
+    } catch {
+      throw new TaskPlanError(`모델 응답 JSON을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
