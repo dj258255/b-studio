@@ -3780,19 +3780,9 @@ export async function previewSessionRequirementsExtraction(
       throw new StudioError(408, `요구사항 추출이 제한 시간(${Math.round(REQUIREMENTS_EXTRACTION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 명세를 줄이거나 다시 시도해 주세요`);
     }
     if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 요구사항 추출을 이어갈 수 없습니다');
-    const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
-    const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
-    return finishExtractionPreview(session, {
-      requirements,
-      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
-      source: 'fallback',
-      reason: `추출 모델 호출이 실패해 결정론적 방식으로 대신했습니다: ${describe(error)}`,
-      referencedFiles,
-      outOfScope: [],
-      assumptions: [],
-      manualSteps,
-      ...(diff ? { diff } : {}),
-    });
+    // 모델 답을 쓸 수 없을 때 헤딩으로 나누는 대체 파서로 몰래 바꾸지 않는다 — 긴 명세에서는 "2. 기술 스택" 같은 목차가
+    // 그대로 요구사항이 되어, 사람이 이유 줄을 놓치면 엉뚱한 목록이 저장·발행됐다(대체 파서는 모델이 없는 백엔드에서만 쓴다)
+    throw new StudioError(502, `추출 모델의 답을 쓸 수 없었습니다: ${describe(error)} — 다시 시도해 주세요`);
   }
 }
 

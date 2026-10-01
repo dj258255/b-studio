@@ -249,6 +249,40 @@ export function buildExtractionUserPrompt(specText: string, referencedFilesConte
 }
 
 /** 모델 응답에서 JSON을 꺼내 검증한다. 형식이 틀리면 RequirementsError */
+/**
+ * 엄격한 검사 전에, 모델 답에서 기계적으로 고칠 수 있는 어긋남을 고친다. 3~6분 걸린 답 전체가 사소한 형식 하나로
+ * 버려지던 문제(시나리오 id가 요구사항 id와 다름, 질문이 상한보다 많음 등)를 막는다. 뜻을 바꾸는 수정은 하지 않는다:
+ * 시나리오 id 앞부분 맞추기(alignScenarioIds), 상한을 넘는 목록 자르기만 한다
+ */
+export function repairExtractionReply(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object') return raw;
+  const reply = { ...(raw as Record<string, unknown>) };
+  const cap = (key: string, max: number) => {
+    if (Array.isArray(reply[key]) && (reply[key] as unknown[]).length > max) reply[key] = (reply[key] as unknown[]).slice(0, max);
+  };
+  cap('requirements', MAX_REQUIREMENTS);
+  cap('questions', MAX_CLARIFYING_QUESTIONS);
+  cap('outOfScope', MAX_OUT_OF_SCOPE);
+  cap('assumptions', MAX_ASSUMPTIONS);
+  cap('manualSteps', MAX_MANUAL_STEPS);
+  if (Array.isArray(reply.requirements)) {
+    reply.requirements = (reply.requirements as unknown[]).map((requirement) => {
+      if (!requirement || typeof requirement !== 'object') return requirement;
+      const candidate = { ...(requirement as Record<string, unknown>) };
+      if (Array.isArray(candidate.scenarios)) {
+        if (candidate.scenarios.length > 20) candidate.scenarios = candidate.scenarios.slice(0, 20);
+        const scenarios = candidate.scenarios as unknown[];
+        const wellFormed = scenarios.every((scenario) => scenario && typeof scenario === 'object' && typeof (scenario as { id?: unknown }).id === 'string');
+        if (typeof candidate.id === 'string' && wellFormed) {
+          return alignScenarioIds(candidate as { id: string; scenarios: Array<{ id: string }> });
+        }
+      }
+      return candidate;
+    });
+  }
+  return reply;
+}
+
 export function parseExtractionReply(text: string): ExtractionReply {
   let raw: unknown;
   try {
@@ -256,7 +290,7 @@ export function parseExtractionReply(text: string): ExtractionReply {
   } catch (error) {
     throw new RequirementsError(error instanceof Error ? error.message : String(error));
   }
-  const parsed = ExtractionReplySchema.safeParse(raw);
+  const parsed = ExtractionReplySchema.safeParse(repairExtractionReply(raw));
   if (!parsed.success) {
     throw new RequirementsError(`추출 응답 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   }
