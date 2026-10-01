@@ -165,6 +165,7 @@ import {
   type IssueSummary,
   type ModelAsk,
   type ModelClient,
+  type ModelClientInfo,
   type PullRequestDraft,
   type ReferencedFile,
   type Recommendation,
@@ -187,6 +188,7 @@ import {
   type SelfCheckMode,
   type TestFramework,
   type TestRow,
+  type TestRunEvidence,
   type TestTarget,
   type TraceabilityMatrix,
   type VerifyMode,
@@ -208,7 +210,7 @@ import {
 } from '@b-studio/sandbox';
 import { dependentsOf, loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import { buildSubmissionChecklist, type ChecklistService, type SubmissionReport } from '@/lib/submission-checklist';
+import { buildSubmissionChecklist, type ChecklistService, type ChecklistTestEvidence, type SubmissionReport } from '@/lib/submission-checklist';
 import {
   addTokens,
   describeWindow,
@@ -437,6 +439,12 @@ interface StoredTestRun {
   run: ParsedTestRun;
   /** 실행기 자체가 실패했을 때(컴파일 오류 등 보고서를 하나도 남기지 못한 경우)의 원인 요약 */
   error?: string;
+  /**
+   * 이 실행 시점의 체크포인트(HEAD) SHA. 지금 체크포인트와 같을 때만(그리고 그 뒤 커밋하지 않은 변경이 없을
+   * 때만) "올리기 전 점검"의 테스트 항목과 요구사항 증거가 이 실행을 믿을 수 있는 증거로 센다(버그 리포트:
+   * 테스트 탭에서 직접 돌린 결과가 증거로 치지 않던 문제). 체크포인트가 하나도 없는 세션이면 undefined
+   */
+  sha?: string;
 }
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
@@ -883,6 +891,7 @@ export function sendMessage(
     research = false,
     writableScope,
     scriptedTurns,
+    scriptedInfo,
     board,
     steering,
     interactive = false,
@@ -895,8 +904,14 @@ export function sendMessage(
     research?: boolean;
     /** 서버 안에서만 쓴다(작업 분해). 이 경로 밖의 파일 쓰기를 실행기가 막는다. HTTP로는 받지 않는다 */
     writableScope?: readonly string[];
-    /** 서버 안에서만 쓴다(레인 결과 통합). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
+    /** 서버 안에서만 쓴다(레인 결과 통합·테스트 대본). 모델 대신 미리 만든 도구 호출을 같은 루프·게이트로 실행한다. HTTP로는 받지 않는다 */
     scriptedTurns?: ScriptedTurn[];
+    /**
+     * scriptedTurns와 함께 쓴다. 채팅의 "backend" 카드가 보여줄 문구를 덮어쓴다(예: 레인 결과 통합은
+     * "데모 스크립트에서 scripted 모델로 실행합니다"가 실제와 달라 보여 "레인 결과 합치기"로 덮어쓴다).
+     * 생략하면 ScriptedModelClient의 기본값("데모 스크립트")을 그대로 쓴다(벤치·테스트 대본 등 그 밖의 쓰임)
+     */
+    scriptedInfo?: Partial<ModelClientInfo>;
     /** 서버 안에서만 쓴다(레인 조율). 레인 신원으로 감싼 게시판. HTTP로는 받지 않는다 */
     board?: BoardAccess;
     /** 실행 중 지시를 받을 실행인지. 사람이 보는 단일 세션(메시지 라우트)만 켠다. 레인·플릿·벤치는 켜지 않는다 */
@@ -930,7 +945,9 @@ export function sendMessage(
 
   // 되묻기(ask_user)는 사람이 보낸 단일 세션 요청에만 켠다. 레인·플릿·벤치·CLI는 도구 목록이 그대로다
   const plan = {
-    ...(scriptedTurns ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns), allowBreaking, intent } as const) : planRun(session, request, allowBreaking, intent)),
+    ...(scriptedTurns
+      ? ({ kind: 'model', client: new ScriptedModelClient(scriptedTurns, scriptedInfo), allowBreaking, intent } as const)
+      : planRun(session, request, allowBreaking, intent)),
     writableScope,
     board,
     interactive,
@@ -2066,7 +2083,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok))) {
         // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
-        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result));
+        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary);
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 단계를 돌렸다면 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         void collectGateTestReports(session).catch(() => {});
@@ -2438,7 +2455,7 @@ function checkpointTrailers(result: AgentResult): string[] {
   return trailers;
 }
 
-async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = []): Promise<void> {
+async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = [], summary?: string): Promise<void> {
   const head = session.snapshot.checkpoints[0]!.sha;
   // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
   const dataOnly =
@@ -2446,7 +2463,7 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     (await session.checkpoints.pendingFiles()).length === 0 &&
     (await session.databases.changedSince(head, session.stop.signal));
   const subject = session.project.spec.checkpoints.conventionalCommits
-    ? generateCommitSubject(request, await session.checkpoints.pendingChanges())
+    ? generateCommitSubject(request, await session.checkpoints.pendingChanges(), summary)
     : `요청: ${request}`;
   const checkpoint = await session.checkpoints.commit(subject, body, {
     allowEmpty: dataOnly,
@@ -2943,10 +2960,11 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
     path: service.path,
     port: service.port,
   }));
-  const [pendingFilesCount, commits, repository] = await Promise.all([
+  const [pendingFilesCount, commits, repository, testServices] = await Promise.all([
     session.checkpoints.pendingFiles().then((files) => files.length),
     session.checkpoints.sessionCommits(),
     session.checkpoints.repository(),
+    Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
   ]);
   return buildSubmissionChecklist({
     root: session.project.root,
@@ -2961,6 +2979,9 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
     requirements: await getSessionRequirements(id)
       .then((snapshot) => snapshot.requirements.map(({ id: requirementId, title, priority, status }) => ({ id: requirementId, title, priority, status })))
       .catch(() => undefined),
+    // 게이트가 test 단계를 통과한 기록이 없어도, 테스트 탭에서 지금 체크포인트(HEAD)에 직접 돌린 결과가 있으면
+    // 증거로 센다(버그 리포트: "전체 실행"으로 백엔드·프런트엔드 모두 통과했는데 "확인 필요"로 남던 문제)
+    testEvidence: buildChecklistTestEvidence(testServices, session.snapshot.checkpoints[0]?.sha, pendingFilesCount),
   });
 }
 
@@ -4107,15 +4128,24 @@ function evaluateRequirement(
   testFiles: readonly ScannedFile[],
   gateChecks: readonly GateCheckResult[],
   issueNumber?: number,
+  testRun?: TestRunEvidence,
 ): RequirementView {
   const evidence: RequirementEvidence = {
     checkpoints: findCheckpointMentions(checkpoints, requirement.id),
     tests: scanTestFilesForRequirementId(testFiles, requirement.id),
     gateChecks: findGateCheckMentions(gateChecks, requirement.id),
+    ...(testRun ? { testRun } : {}),
   };
   const status = computeRequirementStatus(evidence, requirement);
   const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
   return { ...requirement, status, confidence: requirementConfidence(status), evidence, workPrefill, ...(issueNumber !== undefined ? { issue: issueNumber } : {}) };
+}
+
+/** 세션의 지금 체크포인트(HEAD)와 커밋하지 않은 변경 수를 한 번에 모은다. 테스트 탭 실행이 그 체크포인트의 증거인지 비교하는 데 쓴다 */
+async function headForTestEvidence(session: Session): Promise<{ head?: { sha: string; shortSha: string }; pendingFilesCount: number }> {
+  const checkpoint = session.snapshot.checkpoints[0];
+  const pendingFilesCount = (await session.checkpoints.pendingFiles()).length;
+  return { head: checkpoint && { sha: checkpoint.sha, shortSha: checkpoint.shortSha }, pendingFilesCount };
 }
 
 /**
@@ -4148,8 +4178,22 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
   // 사이드카 파일만 읽는다(원격·토큰 없이도 동작한다) — 발행한 적이 없으면 빈 채로 빠르게 끝난다
   const issueNumbers = await publishedIssueNumbers(session.project.root, requirements.map((requirement) => requirement.id)).catch(() => ({}) as Record<string, number>);
+  // 게이트가 test 단계를 돌리지 않았어도, 테스트 탭에서 지금 체크포인트에 직접 돌린 결과를 증거로 센다(버그 리포트)
+  const [testServices, { head, pendingFilesCount }] = await Promise.all([
+    Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
+    headForTestEvidence(session),
+  ]);
 
-  const views = requirements.map((requirement) => evaluateRequirement(requirement, checkpoints, testFiles, gateChecks, issueNumbers[requirement.id]));
+  const views = requirements.map((requirement) =>
+    evaluateRequirement(
+      requirement,
+      checkpoints,
+      testFiles,
+      gateChecks,
+      issueNumbers[requirement.id],
+      buildRequirementTestRunEvidence(testServices, requirement.id, head, pendingFilesCount),
+    ),
+  );
   const statusById = Object.fromEntries(views.map((view) => [view.id, view.status]));
   const mustHaves = requirements.filter((requirement) => requirement.priority === 'must');
   return {
@@ -4219,7 +4263,16 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
   const checkpoints = sessionCheckpointRefs(session);
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
-  const statusById = Object.fromEntries(revisedRequirements.map((requirement) => [requirement.id, evaluateRequirement(requirement, checkpoints, testFiles, gateChecks).status]));
+  const [testServices, { head, pendingFilesCount }] = await Promise.all([
+    Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
+    headForTestEvidence(session),
+  ]);
+  const statusById = Object.fromEntries(
+    revisedRequirements.map((requirement) => [
+      requirement.id,
+      evaluateRequirement(requirement, checkpoints, testFiles, gateChecks, undefined, buildRequirementTestRunEvidence(testServices, requirement.id, head, pendingFilesCount)).status,
+    ]),
+  );
 
   const markdown = serializeRequirementsMarkdown(revisedRequirements, statusById, parsed.data.assumptions, guardedManualSteps);
   await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
@@ -4745,6 +4798,12 @@ export interface TestServiceView {
   counts: { pass: number; fail: number; skip: number; notRun: number };
   lastRunAt?: string;
   lastRunSource?: 'run' | 'gate';
+  /**
+   * 이 실행 시점의 체크포인트(HEAD) SHA. "올리기 전 점검"의 테스트 항목·요구사항 증거가 지금 체크포인트와
+   * 같은지 비교하는 값이다(buildChecklistTestEvidence·buildRequirementTestRunEvidence). 체크포인트가 없던
+   * 세션에서 돈 실행이면 undefined
+   */
+  lastRunSha?: string;
   error?: string;
   rows: TestRowView[];
 }
@@ -4833,7 +4892,7 @@ async function buildTestServiceView(session: Session, serviceName: string): Prom
     supported: runner !== undefined,
     ...(runner ? { runner: runnerLabel(runner) } : {}),
     counts: countByStatus(attached),
-    ...(stored ? { lastRunAt: stored.at, lastRunSource: stored.source } : {}),
+    ...(stored ? { lastRunAt: stored.at, lastRunSource: stored.source, ...(stored.sha !== undefined ? { lastRunSha: stored.sha } : {}) } : {}),
     ...(!runner ? { error: '이 서비스의 테스트 실행기를 알아내지 못했습니다(vitest·jest devDependency나 pom.xml/build.gradle을 확인하세요)' } : stored?.error ? { error: stored.error } : {}),
     rows: attached.map(toTestRowView),
   };
@@ -4857,6 +4916,55 @@ export async function getSessionTests(id: string): Promise<TestsSnapshot> {
   const session = requireSession(id);
   const services = await Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name)));
   return { services, requirementsWithoutTests: await requirementsWithoutTests(session, services) };
+}
+
+// ---------------------------------------------------------------------------
+// 테스트 탭 실행을 체크포인트 증거로 쓰기(버그 리포트): 게이트가 test 단계를 돌리지 않았어도, 사람이 "테스트" 탭에서
+// 지금 체크포인트(HEAD)에서 직접 돌린 결과는 "올리기 전 점검"의 테스트 항목과 요구사항 증거로 센다. 그 사이 커밋하지
+// 않은 변경이 있으면(코드가 바뀌었을 수 있다) 믿지 않는다. 순수 함수라 session을 몰라도 TestServiceView만으로 테스트한다.
+// ---------------------------------------------------------------------------
+
+/** 서비스의 마지막 실행이 지금 체크포인트(HEAD)에서 돈 것이고, 그 뒤로 커밋하지 않은 변경이 없는지 */
+function testRunMatchesHead(service: Pick<TestServiceView, 'lastRunSha'>, headSha: string | undefined, pendingFilesCount: number): boolean {
+  return headSha !== undefined && pendingFilesCount === 0 && service.lastRunSha === headSha;
+}
+
+/** "올리기 전 점검"의 테스트 항목(submission-checklist.ts checkTests)이 쓸 체크포인트 증거 목록을 만든다 */
+export function buildChecklistTestEvidence(services: readonly TestServiceView[], headSha: string | undefined, pendingFilesCount: number): ChecklistTestEvidence[] {
+  return services.map((service) => ({
+    service: service.service,
+    matchesHead: testRunMatchesHead(service, headSha, pendingFilesCount),
+    counts: service.counts,
+    ...(service.lastRunAt !== undefined ? { at: service.lastRunAt } : {}),
+  }));
+}
+
+/**
+ * 요구사항 하나의 테스트 탭 증거(RequirementEvidence.testRun, @b-studio/agent). 지금 체크포인트에서 돈 실행
+ * 중에서 이 요구사항 id가 붙은 행만 모아 통과·실패 수를 센다. 하나도 없으면(테스트가 없거나 실행한 적이
+ * 없거나 체크포인트가 다르면) undefined — computeRequirementStatus가 "증거 없음"으로 받아들인다.
+ */
+export function buildRequirementTestRunEvidence(
+  services: readonly TestServiceView[],
+  requirementId: string,
+  head: { sha: string; shortSha: string } | undefined,
+  pendingFilesCount: number,
+): TestRunEvidence | undefined {
+  if (!head) return undefined;
+  let passed = 0;
+  let failed = 0;
+  let at: string | undefined;
+  for (const service of services) {
+    if (!testRunMatchesHead(service, head.sha, pendingFilesCount)) continue;
+    for (const row of service.rows) {
+      if (!row.requirementIds.includes(requirementId)) continue;
+      if (row.status === 'pass') passed++;
+      else if (row.status === 'fail') failed++;
+    }
+    if (service.lastRunAt !== undefined && (at === undefined || service.lastRunAt > at)) at = service.lastRunAt;
+  }
+  if (passed === 0 && failed === 0) return undefined;
+  return { at: at ?? new Date().toISOString(), sha: head.sha, shortSha: head.shortSha, passed, failed };
 }
 
 function markTestsChanged(session: Session): void {
@@ -4947,9 +5055,10 @@ export async function runSessionTests(
     }
 
     const run = await collectParsedRun(session, input.service, plan, AbortSignal.timeout(REPORT_COLLECT_TIMEOUT_MS));
+    const sha = session.snapshot.checkpoints[0]?.sha;
     session.testResults ??= new Map();
     if (run.cases.length > 0) {
-      session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run });
+      session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run, sha });
     } else {
       const tail = `${execResult.stdout}\n${execResult.stderr}`.trim().split('\n').slice(-RUN_FAILURE_TAIL_LINES).join('\n');
       session.testResults.set(input.service, {
@@ -4957,6 +5066,7 @@ export async function runSessionTests(
         source: 'run',
         runner,
         run: { cases: [] },
+        sha,
         ...(execResult.exitCode !== 0
           ? { error: session.sandbox.redact(`테스트 실행이 실패했습니다(종료 코드 ${execResult.exitCode})\n${tail}`) }
           : {}),
@@ -5001,7 +5111,7 @@ async function collectGateTestReports(session: Session): Promise<void> {
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
     if (run.cases.length === 0) continue;
     session.testResults ??= new Map();
-    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run });
+    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: session.snapshot.checkpoints[0]?.sha });
     changed = true;
   }
   if (changed) markTestsChanged(session);

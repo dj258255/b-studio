@@ -255,6 +255,27 @@ describe("RequirementsList 다음 단계 순서(ADR-092)", () => {
     expect(html).not.toContain("이슈로 발행");
   });
 
+  it("테스트 탭 실행 증거(testRun)가 있으면 근거 수에 포함한다(버그 리포트: 테스트 탭 실행이 근거로 치지 않던 문제)", () => {
+    const withTestRun = {
+      ...snapshot,
+      requirements: [
+        {
+          ...snapshot.requirements[0]!,
+          status: "검증됨" as const,
+          confidence: "🟢" as const,
+          evidence: {
+            checkpoints: [],
+            tests: [],
+            gateChecks: [],
+            testRun: { at: "2026-01-01T09:17:00.000Z", sha: "57cb22c1234", shortSha: "57cb22c", passed: 5, failed: 0 },
+          },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<RequirementsList sessionId="s1" snapshot={withTestRun} canManage isGithub onWork={() => {}} onRefresh={() => {}} />);
+    expect(html).toContain("근거 보기 (1)");
+  });
+
   it("이미 발행된(issue 있음) 요구사항이면 관리 권한이 있어도 확인을 다시 묻지 않는다(순수 로직)", () => {
     expect(shouldConfirmBeforePlanAll(true, false, false)).toBe(true);
     expect(shouldConfirmBeforePlanAll(true, true, false)).toBe(false);

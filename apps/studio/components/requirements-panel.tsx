@@ -48,10 +48,20 @@ interface RequirementDraft {
   revisedAt?: string;
 }
 
+/** "테스트" 탭(ADR-084)이 HEAD 체크포인트에서 돌린 결과 중 이 요구사항을 언급하는 행을 모은 증거 하나 */
+interface TestRunEvidence {
+  at: string;
+  sha: string;
+  shortSha: string;
+  passed: number;
+  failed: number;
+}
+
 interface RequirementEvidence {
   checkpoints: Array<{ sha: string; shortSha: string; message: string }>;
   tests: Array<{ file: string; name: string }>;
   gateChecks: Array<{ name: string; ok: boolean }>;
+  testRun?: TestRunEvidence;
 }
 
 interface RequirementView extends RequirementDraft {
@@ -901,7 +911,8 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const draft = useChatDraft();
-  const evidenceCount = requirement.evidence.checkpoints.length + requirement.evidence.tests.length + requirement.evidence.gateChecks.length;
+  const evidenceCount =
+    requirement.evidence.checkpoints.length + requirement.evidence.tests.length + requirement.evidence.gateChecks.length + (requirement.evidence.testRun ? 1 : 0);
 
   async function copy() {
     try {
@@ -978,6 +989,13 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
                   테스트 <span className="font-mono">{test.file}</span>: {test.name}
                 </p>
               ))}
+              {requirement.evidence.testRun && (
+                <p className={requirement.evidence.testRun.failed > 0 ? "text-fail" : "text-pass"}>
+                  테스트 탭 실행 · {new Date(requirement.evidence.testRun.at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} · 체크포인트{" "}
+                  <span className="font-mono">{requirement.evidence.testRun.shortSha}</span> · 통과 {requirement.evidence.testRun.passed}
+                  {requirement.evidence.testRun.failed > 0 ? ` · 실패 ${requirement.evidence.testRun.failed}` : ""}
+                </p>
+              )}
               {requirement.evidence.gateChecks.map((check, index) => (
                 <p key={`${check.name}:${index}`} className={check.ok ? "text-pass" : "text-fail"}>
                   게이트 확인 &ldquo;{check.name}&rdquo;: {check.ok ? "통과" : "실패"}

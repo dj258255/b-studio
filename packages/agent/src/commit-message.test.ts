@@ -56,6 +56,36 @@ describe('generateCommitSubject', () => {
   it('빈 요청은 "체크포인트"로 대신한다', () => {
     expect(generateCommitSubject('   ', [change('api/src/main/java/Order.java')])).toBe('feat: 체크포인트');
   });
+
+  it('여러 문장으로 된 요청은 첫 문장만 쓰고, 뒷 문장이 제목에 그대로 끌려오지 않는다(도그푸딩 버그 리포트)', () => {
+    const request =
+      '.env.example 파일을 만들어 주세요. 코드에서 읽는 환경 변수(NEXT_PUBLIC_API_BASE_URL, DATABASE_URL)를 모두 담되 실제 값 대신 예시 값을 넣고, 실제 비밀 값이 든 .env는 커밋하지 마세요.';
+    const subject = generateCommitSubject(request, [change('.env.example', 'added')]);
+    expect(subject).toBe('feat: .env.example 파일을 만든다');
+    expect(subject).not.toContain('코드에서 읽는');
+    expect(subject.length).toBeLessThanOrEqual(72);
+  });
+
+  it('요청 글이 부탁 어미뿐이라 알맹이가 없으면(해주세요) 에이전트 요약 첫 문장으로 대신한다', () => {
+    const subject = generateCommitSubject('해주세요', [change('README.md')], 'README에 설계 결정과 환경 변수 예시 절을 추가했습니다.\n\n세부 설명은 아래에.');
+    expect(subject).toBe('docs: README에 설계 결정과 환경 변수 예시 절을 추가했습니다');
+  });
+
+  it('요청 글이 분명하면(알맹이가 있으면) 에이전트 요약보다 요청 글을 우선한다(AI 리뷰 고침 요청처럼 사람이 부탁한 맥락을 유지한다)', () => {
+    const subject = generateCommitSubject('AI 리뷰 지적을 고쳐 주세요', [change('api/src/main/java/Order.java')], '고쳤습니다.');
+    expect(subject).toContain('AI 리뷰');
+  });
+
+  it('요청 글도 요약도 분명하지 않으면 바뀐 파일에서 제목을 뽑는다', () => {
+    const subject = generateCommitSubject('해주세요', [change('.env.example', 'added')]);
+    expect(subject).toBe('feat: 환경 변수 예시를 더한다');
+  });
+
+  it('제목에 부탁하는 말투("해 주세요")를 남기지 않는다', () => {
+    const request = '대시보드 로딩 버그를 고쳐 주세요. 재현 방법은 콘솔을 열고 새로고침하면 됩니다.';
+    const subject = generateCommitSubject(request, [change('web/app/dashboard/page.tsx')]);
+    expect(subject).not.toMatch(/해\s*주세요/);
+  });
 });
 
 describe('toCommitMood', () => {

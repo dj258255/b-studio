@@ -1062,10 +1062,29 @@ export interface GateCheckResult {
   ok: boolean;
 }
 
+/**
+ * "테스트" 탭(ADR-084)이 지금 체크포인트(HEAD)에서 돌린 결과 중 이 요구사항 id가 붙은 테스트 행을 모은 증거 하나
+ * (studio의 sessions.ts가 체크포인트 SHA가 같고 커밋하지 않은 변경이 없을 때만 만든다 — 그 밖의 실행은 "증거 없음"으로 본다).
+ * 게이트가 test 단계를 돌리지 않은 세션도(사람이 테스트 탭에서 직접 "전체 실행"을 눌렀을 뿐이라도) 이 증거로
+ * 검증됨/실패를 매길 수 있다.
+ */
+export interface TestRunEvidence {
+  /** 실행 시각(ISO 8601). "근거 보기"가 사람이 읽는 시각으로 보여준다 */
+  at: string;
+  sha: string;
+  shortSha: string;
+  /** 이 요구사항 id가 붙은 테스트 중 통과한 수 */
+  passed: number;
+  /** 이 요구사항 id가 붙은 테스트 중 실패한 수. 하나라도 있으면 "실패"로 매긴다 */
+  failed: number;
+}
+
 export interface RequirementEvidence {
   checkpoints: CheckpointRef[];
   tests: TestMatch[];
   gateChecks: GateCheckResult[];
+  /** 테스트 탭 실행 증거(있으면). 게이트 확인(gateChecks)이 있으면 그쪽을 우선한다(기존 규칙 그대로) */
+  testRun?: TestRunEvidence;
 }
 
 /** 텍스트에서 `\bR\d+(\.\d+)?\b` 토큰(요구사항 id·시나리오 id)을 모두 뽑는다. "R1"이 "R10"의 일부로 걸리지 않는다 */
@@ -1257,22 +1276,29 @@ export function carryForwardRequirementRevision(next: Requirement, previous: Req
 
 /**
  * 상태 규칙(ADR-079, 재확인 필요는 ADR-090): 내용이 지금 드리프트돼 있으면(아직 저장 전) 곧바로 재확인 필요.
- * 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴 체크포인트·게이트 확인이 하나라도
- * 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다 — 없으면 재확인 필요에 머문다. 평소 규칙: 미착수 → 작업
- * 중(체크포인트가 참조하거나 테스트가 있다) → 검증됨(id가 붙은 게이트 확인이 모두 통과) / 실패(하나라도 실패).
- * 게이트 확인 증거가 있으면 그것이 우선한다 — 체크포인트만 참조하고 실제로 통과했는지 모르는 상태(작업 중)보다
- * 실제 결과(검증됨/실패)를 더 믿을 수 있는 증거로 본다.
+ * 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴 체크포인트·게이트 확인·테스트 탭
+ * 실행이 하나라도 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다 — 없으면 재확인 필요에 머문다. 평소 규칙:
+ * 미착수 → 작업 중(체크포인트가 참조하거나 테스트가 있다) → 검증됨(id가 붙은 게이트 확인이 모두 통과, 없으면
+ * 테스트 탭 실행이 통과) / 실패(게이트가 하나라도 실패, 또는 테스트 탭 실행에 실패가 있다).
+ * 게이트 확인 증거가 있으면 그것이 우선한다(기존 규칙 그대로) — 체크포인트만 참조하고 실제로 통과했는지 모르는
+ * 상태(작업 중)보다 실제 결과(검증됨/실패)를 더 믿을 수 있는 증거로 본다. 테스트 탭 실행은 게이트가 없을 때
+ * 같은 역할(실제 결과)을 대신한다 — 사람이 게이트 없이 "테스트" 탭에서 직접 돌린 결과도 증거로 센다(버그 리포트).
  */
 export function computeRequirementStatus(evidence: RequirementEvidence, requirement?: Requirement): RequirementStatus {
   if (requirement && requirementContentDrifted(requirement)) return '재확인 필요';
   if (requirement?.revisedAt) {
     const revisedAt = requirement.revisedAt;
     const freshCheckpoint = evidence.checkpoints.some((checkpoint) => checkpoint.createdAt !== undefined && checkpoint.createdAt > revisedAt);
-    const hasFreshEvidence = freshCheckpoint || evidence.gateChecks.length > 0;
+    const freshTestRun = evidence.testRun !== undefined && evidence.testRun.at > revisedAt;
+    const hasFreshEvidence = freshCheckpoint || evidence.gateChecks.length > 0 || freshTestRun;
     if (!hasFreshEvidence) return '재확인 필요';
   }
   if (evidence.gateChecks.length > 0) {
     return evidence.gateChecks.every((check) => check.ok) ? '검증됨' : '실패';
+  }
+  if (evidence.testRun) {
+    if (evidence.testRun.failed > 0) return '실패';
+    if (evidence.testRun.passed > 0) return '검증됨';
   }
   if (evidence.checkpoints.length > 0 || evidence.tests.length > 0) return '작업 중';
   return '미착수';

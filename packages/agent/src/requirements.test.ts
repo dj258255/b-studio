@@ -366,6 +366,21 @@ describe('computeRequirementStatus', () => {
       computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [{ name: 'R1 a', ok: true }, { name: 'R1 b', ok: false }] }),
     ).toBe('실패');
   });
+
+  it('게이트 확인이 없어도 테스트 탭 실행에서 통과한 테스트가 있으면 검증됨(버그 리포트: 테스트 탭 실행이 증거로 치지 않던 문제)', () => {
+    const testRun = { at: '2026-01-01T09:17:00.000Z', sha: '57cb22c1', shortSha: '57cb22c', passed: 5, failed: 0 };
+    expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [], testRun })).toBe('검증됨');
+  });
+
+  it('테스트 탭 실행에 실패한 테스트가 있으면 실패', () => {
+    const testRun = { at: '2026-01-01T09:17:00.000Z', sha: '57cb22c1', shortSha: '57cb22c', passed: 3, failed: 1 };
+    expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [], testRun })).toBe('실패');
+  });
+
+  it('게이트 확인과 테스트 탭 실행이 둘 다 있으면 게이트가 우선한다(기존 규칙 그대로)', () => {
+    const testRun = { at: '2026-01-01T09:17:00.000Z', sha: '57cb22c1', shortSha: '57cb22c', passed: 5, failed: 0 };
+    expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [{ name: 'R1', ok: false }], testRun })).toBe('실패');
+  });
 });
 
 describe('requirementConfidence', () => {
@@ -681,6 +696,20 @@ describe('computeRequirementStatus — 재확인 필요(ADR-090)', () => {
     const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
     const staleCheckpoint = { sha: 'a', shortSha: 'a', message: 'R1', createdAt: '2026-01-01T00:00:00.000Z' };
     expect(computeRequirementStatus({ checkpoints: [staleCheckpoint], tests: [], gateChecks: [] }, firstSave)).toBe('작업 중');
+  });
+
+  it('개정이 오른 뒤 그 시각보다 나중인 테스트 탭 실행이 있으면 재확인됐다고 보고 통과 결과대로 검증됨을 매긴다', () => {
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
+    const freshTestRun = { at: '2026-03-01T00:00:00.000Z', sha: 'a', shortSha: 'a', passed: 2, failed: 0 };
+    expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [], testRun: freshTestRun }, revised)).toBe('검증됨');
+  });
+
+  it('개정이 오른 뒤보다 먼저 돈(오래된) 테스트 탭 실행은 재확인 필요에 머문다', () => {
+    const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
+    const revised = reviseRequirementIfChanged({ ...firstSave, title: '다른 제목' }, '2026-02-01T00:00:00.000Z');
+    const staleTestRun = { at: '2026-01-10T00:00:00.000Z', sha: 'a', shortSha: 'a', passed: 2, failed: 0 };
+    expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [], testRun: staleTestRun }, revised)).toBe('재확인 필요');
   });
 });
 

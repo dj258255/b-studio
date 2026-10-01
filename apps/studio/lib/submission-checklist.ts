@@ -73,6 +73,13 @@ export interface SubmissionInputs {
    * (파일의 상태 줄은 저장할 때 값이라 시간이 지나면 낡는다)
    */
   requirements?: ChecklistRequirement[];
+  /**
+   * "테스트" 탭(ADR-084)이 서비스마다 마지막으로 실행한 결과. 게이트가 test 단계를 통과한 기록이 없어도
+   * (latestPassedStages에 'test'가 없어도) 사람이 테스트 탭에서 직접 돌려 지금 체크포인트에서 전부 통과했으면
+   * 이 점검표도 통과로 본다(버그 리포트: 테스트 탭 실행이 증거로 치지 않던 문제). 서비스별로 하나씩, 없으면 그
+   * 서비스는 "실행 기록 없음"으로 본다.
+   */
+  testEvidence?: ChecklistTestEvidence[];
 }
 
 export interface ChecklistRequirement {
@@ -81,6 +88,16 @@ export interface ChecklistRequirement {
   priority: 'must' | 'should' | 'could';
   /** 명세 탭의 상태. '검증됨'만 끝난 것으로 본다 */
   status: string;
+}
+
+export interface ChecklistTestEvidence {
+  /** studio.yaml의 서비스 이름(ChecklistService.name과 같은 값) */
+  service: string;
+  /** 지금 체크포인트(HEAD)에서 실행했고, 그 뒤로 커밋하지 않은 변경이 없는 실행인지 */
+  matchesHead: boolean;
+  counts: { pass: number; fail: number; skip: number; notRun: number };
+  /** 실행 시각(ISO 8601). 사람이 읽는 안내 글에 쓴다 */
+  at?: string;
 }
 
 const BACKEND_TEMPLATES = new Set(['spring-boot', 'fastapi']);
@@ -195,11 +212,56 @@ function hasTestFiles(files: string[], service: ChecklistService): boolean {
   return inService.some((file) => FRONTEND_TEST.test(file));
 }
 
-export async function checkTests(root: string, services: ChecklistService[], latestPassedStages: string[] | undefined): Promise<ChecklistItem> {
+/**
+ * 게이트가 test 단계를 통과한 기록이 없을 때, 테스트 탭 실행 증거(ChecklistTestEvidence)로 대신 판정한다.
+ * 역할(백엔드·프런트엔드)이 있는 서비스 전부가 지금 체크포인트에서 돈 실행이고 실패·미실행이 없어야 통과다.
+ * 모자란 게 있으면 정확히 무엇이 모자란지 말한다(실패 > 체크포인트 불일치 > 미실행 > 실행 기록 없음 순).
+ */
+function testEvidenceVerdict(roleServices: ChecklistService[], testEvidence: ChecklistTestEvidence[]): ChecklistItem {
   const id = 'tests';
   const title = '테스트';
-  const roles = new Set(services.map((service) => serviceRole(service.template)).filter((role): role is 'backend' | 'frontend' => role !== undefined));
-  if (roles.size === 0) return { id, title, status: 'skip', reason: '테스트 여부를 판단할 수 있는 템플릿(백엔드·프런트엔드)이 없습니다.' };
+  const byService = new Map(testEvidence.map((evidence) => [evidence.service, evidence]));
+  const notOnHead: string[] = [];
+  const failing: string[] = [];
+  const notRun: string[] = [];
+  let passedTotal = 0;
+  for (const service of roleServices) {
+    const evidence = byService.get(service.name);
+    if (!evidence || !evidence.matchesHead) {
+      notOnHead.push(service.name);
+      continue;
+    }
+    if (evidence.counts.fail > 0) failing.push(`${service.name}(실패 ${evidence.counts.fail}개)`);
+    if (evidence.counts.notRun > 0) notRun.push(`${service.name}(미실행 ${evidence.counts.notRun}개)`);
+    passedTotal += evidence.counts.pass;
+  }
+  if (failing.length > 0) {
+    return { id, title, status: 'fail', reason: `테스트 탭 실행 결과에 실패한 테스트가 있습니다: ${failing.join(', ')}.` };
+  }
+  if (notOnHead.length > 0) {
+    return {
+      id,
+      title,
+      status: 'warn',
+      reason: `${notOnHead.join(', ')} 서비스는 지금 체크포인트에서 실행한 테스트 탭 결과가 없습니다. 테스트 탭에서 "전체 실행"을 눌러 주세요.`,
+    };
+  }
+  if (notRun.length > 0) {
+    return { id, title, status: 'warn', reason: `테스트 탭 실행 뒤에 추가된 것으로 보이는, 아직 실행하지 않은 테스트가 있습니다: ${notRun.join(', ')}.` };
+  }
+  return { id, title, status: 'pass', reason: `백엔드·프런트엔드 모두 테스트 파일이 있고, 지금 체크포인트에서 실행한 테스트 탭 결과가 모두 통과했습니다(통과 ${passedTotal}개).` };
+}
+
+export async function checkTests(
+  root: string,
+  services: ChecklistService[],
+  latestPassedStages: string[] | undefined,
+  testEvidence?: ChecklistTestEvidence[],
+): Promise<ChecklistItem> {
+  const id = 'tests';
+  const title = '테스트';
+  const roleServices = services.filter((service) => serviceRole(service.template) !== undefined);
+  if (roleServices.length === 0) return { id, title, status: 'skip', reason: '테스트 여부를 판단할 수 있는 템플릿(백엔드·프런트엔드)이 없습니다.' };
 
   const files = await listFiles(root);
   const missing = services.filter((service) => {
@@ -208,7 +270,7 @@ export async function checkTests(root: string, services: ChecklistService[], lat
   });
   const gatePassed = (latestPassedStages ?? []).includes('test');
 
-  if (missing.length === services.filter((service) => serviceRole(service.template) !== undefined).length) {
+  if (missing.length === roleServices.length) {
     return {
       id,
       title,
@@ -227,6 +289,8 @@ export async function checkTests(root: string, services: ChecklistService[], lat
     };
   }
   if (!gatePassed) {
+    // 테스트 탭 실행 증거를 넘겨받았을 때만(세션 쪽이 조립해 준다) 더 자세히 판정한다 — 넘기지 않으면(옛 호출) 기존 문구 그대로다
+    if (testEvidence !== undefined) return testEvidenceVerdict(roleServices, testEvidence);
     return { id, title, status: 'warn', reason: '테스트 파일은 있지만 최신 체크포인트가 test 단계를 통과한 기록이 없습니다.' };
   }
   return { id, title, status: 'pass', reason: '백엔드·프런트엔드 모두 테스트 파일이 있고 최신 체크포인트가 test 단계를 통과했습니다.' };
@@ -569,7 +633,7 @@ export async function checkReadmeSections(root: string, services: ChecklistServi
 export async function buildSubmissionChecklist(inputs: SubmissionInputs): Promise<SubmissionReport> {
   const items = await Promise.all([
     checkRequirements(inputs.root, inputs.requirements),
-    checkTests(inputs.root, inputs.services, inputs.latestPassedStages),
+    checkTests(inputs.root, inputs.services, inputs.latestPassedStages, inputs.testEvidence),
     checkRunInstructions(inputs.root, inputs.services),
     checkEnvExample(inputs.root),
     checkSeedData(inputs.root, inputs.hasDatabase),
