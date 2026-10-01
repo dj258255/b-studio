@@ -22,7 +22,7 @@ beforeEach(() => {
   mocks.authorizeSession.mockImplementation(async () => {});
 });
 
-describe('DELETE /api/sessions/[id]/requirements/draft(ADR-0XX, 버그 리포트 A)', () => {
+describe('DELETE /api/sessions/[id]/requirements/draft(ADR-097, 버그 리포트 A)', () => {
   it('저장 안 한 추출 결과를 버린다', async () => {
     const response = await del();
 

@@ -119,7 +119,7 @@ interface RequirementsSnapshot {
   allMustHavesPrefill?: string;
   assumptions: string[];
   manualSteps: string[];
-  /** 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(ADR-0XX, A) */
+  /** 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(ADR-097, A) */
   draft?: PersistedExtractionDraft;
 }
 
@@ -154,7 +154,7 @@ interface RequirementDiffEntry {
 interface ExtractionPreview {
   requirements: RequirementDraft[];
   questions: string[];
-  /** model=추출 모델, fallback=결정론적 대체 파서, managed=b-studio가 이미 발행한 이슈를 모델 호출 없이 그대로 되읽음(ADR-0XX) */
+  /** model=추출 모델, fallback=결정론적 대체 파서, managed=b-studio가 이미 발행한 이슈를 모델 호출 없이 그대로 되읽음(ADR-097) */
   source: "model" | "fallback" | "managed";
   reason?: string;
   referencedFiles: ReferencedFileView[];
@@ -164,7 +164,7 @@ interface ExtractionPreview {
   diff?: RequirementDiffEntry[];
 }
 
-/** 저장하지 않은 추출 결과를 세션 상태 폴더에 남긴 것(서버 재시작·새로고침 뒤에도 이어서 볼 수 있다, ADR-0XX) */
+/** 저장하지 않은 추출 결과를 세션 상태 폴더에 남긴 것(서버 재시작·새로고침 뒤에도 이어서 볼 수 있다, ADR-097) */
 interface PersistedExtractionDraft extends ExtractionPreview {
   savedAt: string;
 }
@@ -958,7 +958,7 @@ export function ImportFlow({
   onCancel?: () => void;
   /** "요구사항에 반영"(대화 메시지 → 요구사항 패치, ADR-094)이 채운다 — 붙여넣기 칸을 채우고 바로 한 번 추출한다 */
   initialSpecText?: string;
-  /** 저장 안 한 채 남은 추출 결과(세션 요구사항 스냅샷이 함께 돌려준다, ADR-0XX) — 있으면 "이어서 보기/버리기" 배너를 보여준다 */
+  /** 저장 안 한 채 남은 추출 결과(세션 요구사항 스냅샷이 함께 돌려준다, ADR-097) — 있으면 "이어서 보기/버리기" 배너를 보여준다 */
   draft?: PersistedExtractionDraft;
 }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");

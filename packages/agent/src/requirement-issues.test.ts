@@ -81,7 +81,7 @@ describe('managed region 왕복', () => {
   });
 });
 
-describe('관리형 이슈를 모델 없이 그대로 되읽기(ADR-0XX, "저장소 이슈" 가져오기)', () => {
+describe('관리형 이슈를 모델 없이 그대로 되읽기(ADR-097, "저장소 이슈" 가져오기)', () => {
   it('draftManagedRequirement: 관리형 영역을 담은 하위 이슈를 EARS·시나리오·NFR까지 되읽는다', () => {
     const requirement = req({
       ears: { pattern: 'event', statement: '사용자가 로그인을 요청하면 시스템은 토큰을 발급해야 한다' },

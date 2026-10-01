@@ -56,7 +56,7 @@ describe("ImportFlow initialSpecText(대화 '요구사항에 반영', ADR-094)",
   });
 });
 
-describe("formatElapsed(ADR-0XX, '뽑는 중' 경과 시간 표시)", () => {
+describe("formatElapsed(ADR-097, '뽑는 중' 경과 시간 표시)", () => {
   it("1분 미만은 초만 보여준다", () => {
     expect(formatElapsed(0)).toBe("0초");
     expect(formatElapsed(13_000)).toBe("13초");
@@ -69,7 +69,7 @@ describe("formatElapsed(ADR-0XX, '뽑는 중' 경과 시간 표시)", () => {
   });
 });
 
-describe("ImportFlow 저장 안 한 추출 결과(ADR-0XX, 버그 리포트 A)", () => {
+describe("ImportFlow 저장 안 한 추출 결과(ADR-097, 버그 리포트 A)", () => {
   const draft = {
     savedAt: "2026-01-01T00:00:00.000Z",
     requirements: [{ id: "R1", title: "로그인 API", kind: "api" as const, priority: "must" as const, acceptance: ["a"] }],

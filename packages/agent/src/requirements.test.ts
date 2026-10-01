@@ -595,7 +595,7 @@ describe('computeRequirementHash / requirementContentDrifted / reviseRequirement
     expect(requirementContentDrifted(withEars)).toBe(false);
   });
 
-  it('첫 저장은 rev 1로 채우고 드리프트로 보지 않는다 — revisedAt은 건드리지 않는다(비교할 이전 값이 없다, ADR-0XX)', () => {
+  it('첫 저장은 rev 1로 채우고 드리프트로 보지 않는다 — revisedAt은 건드리지 않는다(비교할 이전 값이 없다, ADR-097)', () => {
     const saved = reviseRequirementIfChanged(withEars, '2026-01-01T00:00:00.000Z');
     expect(saved.rev).toBe(1);
     expect(saved.hash).toBe(computeRequirementHash(withEars));
@@ -674,7 +674,7 @@ describe('computeRequirementStatus — 재확인 필요(ADR-090)', () => {
     expect(computeRequirementStatus({ checkpoints: [], tests: [], gateChecks: [{ name: 'R1', ok: true }] }, revised)).toBe('검증됨');
   });
 
-  it('첫 저장 직후에는(비교할 이전 값이 없다) 저장 전에 생긴 체크포인트·테스트만으로도 재확인 필요가 되지 않는다(ADR-0XX)', () => {
+  it('첫 저장 직후에는(비교할 이전 값이 없다) 저장 전에 생긴 체크포인트·테스트만으로도 재확인 필요가 되지 않는다(ADR-097)', () => {
     const firstSave = reviseRequirementIfChanged(withEars, '2026-01-15T00:00:00.000Z');
     const staleCheckpoint = { sha: 'a', shortSha: 'a', message: 'R1', createdAt: '2026-01-01T00:00:00.000Z' };
     expect(computeRequirementStatus({ checkpoints: [staleCheckpoint], tests: [], gateChecks: [] }, firstSave)).toBe('작업 중');
