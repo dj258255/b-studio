@@ -3,6 +3,7 @@ import {
   ALLOWED_REQUIREMENT_ENDPOINTS,
   assertAllowedRequirementEndpoint,
   buildManagedRegion,
+  findTrackingIssue,
   buildRegionContent,
   buildRequirementIssueFormYaml,
   buildRequirementsAddendum,
@@ -285,5 +286,25 @@ describe('API 경로 화이트리스트', () => {
 
   it('화이트리스트 패턴 자체가 owner/repo 밖으로 새지 않는다(슬래시가 더 있으면 거부)', () => {
     expect(ALLOWED_REQUIREMENT_ENDPOINTS.some((pattern) => pattern.test('/repos/acme/orders/issues/42/comments/extra'))).toBe(false);
+  });
+});
+
+describe('findTrackingIssue — 다른 세션에서 만든 추적 이슈 찾기', () => {
+  const issue = (number: number, title: string, labels: string[], state: 'open' | 'closed' = 'open') => ({ number, title, labels, state });
+
+  it('라벨과 정확한 제목이 맞는 열린 이슈 중 가장 먼저 만든 것을 고른다', () => {
+    const found = findTrackingIssue(
+      [issue(30, '요구사항: apr', ['b-studio:req']), issue(19, '요구사항: apr', ['b-studio:req']), issue(5, '요구사항: apr', ['b-studio:req'], 'closed')],
+      'apr',
+    );
+    expect(found).toEqual({ issue: 19 });
+  });
+
+  it('라벨이 없거나 제목이 다르면 고르지 않는다', () => {
+    expect(findTrackingIssue([issue(19, '요구사항: apr', []), issue(20, '요구사항: other', ['b-studio:req']), issue(21, '[R2] 기술 스택', ['b-studio:req'])], 'apr')).toBeUndefined();
+  });
+
+  it('열린 것이 없으면 닫힌 것이라도 이어 쓴다(중복 생성 방지)', () => {
+    expect(findTrackingIssue([issue(7, '요구사항: apr', ['b-studio:req'], 'closed')], 'apr')).toEqual({ issue: 7 });
   });
 });
