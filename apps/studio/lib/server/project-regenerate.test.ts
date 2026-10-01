@@ -39,6 +39,27 @@ describe('proposeRegeneration / applyRegeneration(ADR-101, 생성 파일 다시 
     expect(proposal.files).toEqual([]);
   });
 
+  it('생성 기록(해시)이 생기기 전에 연 프로젝트도 studio.yaml의 b-studio 표시로 알아보고, 직접 고친 여부는 모른다고 알린다', async () => {
+    const root = await repo({ 'package.json': nextPackageNoLock });
+    const registry = path.join(await repo({}), 'projects.json');
+    const registered = await registerFolder(root, new Set(), registry);
+    // 옛 버전 레지스트리처럼 생성 기록을 지운다
+    const raw = JSON.parse(await readFile(registry, 'utf8')) as unknown;
+    const strip = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(strip)
+        : value && typeof value === 'object'
+          ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'generatedHashes').map(([key, inner]) => [key, strip(inner)]))
+          : value;
+    await writeFile(registry, JSON.stringify(strip(raw)));
+
+    const proposal = await proposeRegeneration(registered.id, registry);
+
+    expect(proposal.eligible).toBe(true);
+    expect(proposal.unverified).toBe(true);
+    expect(proposal.reason).toContain('직접 고친 내용이 있는지 알 수 없습니다');
+  });
+
   it('등록한 적 없는 id는 404로 거부한다', async () => {
     const registry = path.join(await repo({}), 'projects.json');
     await expect(proposeRegeneration('없는-id', registry)).rejects.toMatchObject({ status: 404 });

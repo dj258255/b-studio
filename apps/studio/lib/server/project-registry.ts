@@ -179,7 +179,12 @@ export interface RegenerationProposal {
   /** false면 이 프로젝트는 b-studio가 만든 파일을 쓰지 않아(직접 만든 studio.yaml) 다시 만들 것이 없다 */
   eligible: boolean;
   reason?: string;
+  /** 생성 기록(해시)이 없는 옛 프로젝트라 직접 고친 내용인지 알 수 없다 — 화면이 차이를 꼭 확인하라고 안내한다 */
+  unverified?: boolean;
 }
+
+/** 폴더 열기가 만든 studio.yaml의 첫 줄 표시. 생성 기록(해시)이 생기기 전에 연 프로젝트도 이것으로 알아본다 */
+const GENERATED_SPEC_MARKER = '# b-studio가 폴더를 보고 만든 설정';
 
 /**
  * "생성 파일 다시 만들기"(ADR-101)의 미리보기: 지금 폴더를 다시 훑어(project-detect) 디스크의 생성 파일과 비교한다.
@@ -188,7 +193,11 @@ export interface RegenerationProposal {
 export async function proposeRegeneration(id: string, file = registryPath()): Promise<RegenerationProposal> {
   const registered = await findRegisteredProject(id, file);
   if (!registered) throw new StudioError(404, '등록한 폴더 프로젝트를 찾지 못했습니다');
-  if (!registered.generatedHashes || Object.keys(registered.generatedHashes).length === 0) {
+  const hasHashes = Boolean(registered.generatedHashes && Object.keys(registered.generatedHashes).length > 0);
+  // 생성 기록이 생기기 전에 연 프로젝트는 해시가 없다. studio.yaml 첫 줄이 b-studio 표시면 b-studio가 만든 파일로 보고
+  // 다시 만들기를 허용하되, 직접 고친 내용인지는 알 수 없으니 차이를 확인하라고 알린다
+  const legacyGenerated = !hasHashes && ((await readText(path.join(registered.path, 'studio.yaml'))) ?? '').startsWith(GENERATED_SPEC_MARKER);
+  if (!hasHashes && !legacyGenerated) {
     const detection = await detectProject(registered.path);
     return { detection, files: [], eligible: false, reason: '이 프로젝트는 직접 만든 studio.yaml을 씁니다. b-studio가 만든 파일이 없어 다시 만들 것이 없습니다' };
   }
@@ -203,13 +212,20 @@ export async function proposeRegeneration(id: string, file = registryPath()): Pr
   const files: GeneratedFileDiff[] = [];
   for (const generated of freshFiles) {
     const oldContent = await readText(path.join(registered.path, generated.path));
-    const lastHash = registered.generatedHashes[generated.path];
+    const lastHash = registered.generatedHashes?.[generated.path];
     const handEdited = oldContent !== undefined && lastHash !== undefined && sha256(oldContent) !== lastHash;
     const changed = oldContent !== generated.content;
     const diff = changed && oldContent !== undefined ? await unifiedDiff(generated.path, oldContent, generated.content) : '';
     files.push({ path: generated.path, oldContent, newContent: generated.content, handEdited, changed, diff });
   }
-  return { detection, files, eligible: true };
+  return {
+    detection,
+    files,
+    eligible: true,
+    ...(legacyGenerated
+      ? { unverified: true, reason: '이 프로젝트는 생성 기록이 남기 전에 열어, 직접 고친 내용이 있는지 알 수 없습니다. 아래 차이를 확인한 뒤 덮어쓰세요' }
+      : {}),
+  };
 }
 
 /**

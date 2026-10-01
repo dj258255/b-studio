@@ -18,6 +18,8 @@ interface RegenerationProposal {
   files: GeneratedFileDiff[];
   eligible: boolean;
   reason?: string;
+  /** 생성 기록이 없는 옛 프로젝트(직접 고친 내용인지 알 수 없음) */
+  unverified?: boolean;
 }
 
 interface RunningSession {
@@ -143,6 +145,8 @@ export function RegenerateFilesModal({ projectId, onClose }: { projectId: string
           ) : proposal.files.filter((file) => file.changed).length === 0 ? (
             <p className="text-muted">지금 디스크의 생성 파일이 이미 최신입니다. 다시 쓸 내용이 없습니다.</p>
           ) : (
+            <>
+            {proposal.unverified && proposal.reason && <p className="mb-3 text-wait">{proposal.reason}</p>}
             <ul className="space-y-3">
               {proposal.files
                 .filter((file) => file.changed)
@@ -185,6 +189,7 @@ export function RegenerateFilesModal({ projectId, onClose }: { projectId: string
                   </li>
                 ))}
             </ul>
+            </>
           )}
         </div>
 
