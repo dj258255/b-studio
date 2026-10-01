@@ -292,7 +292,7 @@ describe('문서 체크포인트(ADR-096)', () => {
   }, 20_000);
 });
 
-describe('사람이 "직접 확인함"(ADR-0XX)', () => {
+describe('사람이 "직접 확인함"(ADR-103)', () => {
   it('메모와 함께 남기면 docs/requirements.md에 확인 줄이 남고 검증됨으로 바뀐다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;

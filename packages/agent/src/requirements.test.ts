@@ -720,7 +720,7 @@ describe('requirementConfidence — 재확인 필요', () => {
   });
 });
 
-describe('computeRequirementStatus — 문서 확인·사람 확인(ADR-0XX)', () => {
+describe('computeRequirementStatus — 문서 확인·사람 확인(ADR-103)', () => {
   const emptyEvidence = { checkpoints: [], tests: [], gateChecks: [] };
 
   it('docEvidence가 모두 만족되면(satisfied) 검증됨', () => {
@@ -770,7 +770,7 @@ describe('computeRequirementStatus — 문서 확인·사람 확인(ADR-0XX)', (
   });
 });
 
-describe('requirementVerificationSource — 근거 종류 구분(ADR-0XX)', () => {
+describe('requirementVerificationSource — 근거 종류 구분(ADR-103)', () => {
   const emptyEvidence = { checkpoints: [], tests: [], gateChecks: [] };
 
   it('검증됨이 아니면 none', () => {
@@ -897,7 +897,7 @@ describe('마크다운 왕복 — 새 필드(rev·EARS·시나리오·NFR·trace
     expect(requirements[0]!.rev).toBe(saved.rev);
   });
 
-  it('사람 확인(manualVerification)을 몸통 줄("- 확인: …")로 왕복한다(ADR-0XX)', () => {
+  it('사람 확인(manualVerification)을 몸통 줄("- 확인: …")로 왕복한다(ADR-103)', () => {
     const requirement: Requirement = { ...sample, manualVerification: { by: '범수', at: '2026-10-01', sha: 'c57d72f', note: '디자인 시안과 화면을 눈으로 맞춰 봤습니다' } };
     const markdown = serializeRequirementsMarkdown([requirement]);
     expect(markdown).toContain('- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 디자인 시안과 화면을 눈으로 맞춰 봤습니다');

@@ -104,7 +104,7 @@ export const TraceSchema = z.object({
 export type Trace = z.infer<typeof TraceSchema>;
 
 /**
- * 사람이 "직접 확인함"으로 남긴 검증 기록(ADR-0XX). 테스트·게이트처럼 자동으로 돌지 않는 요구사항(문서, UI를
+ * 사람이 "직접 확인함"으로 남긴 검증 기록(ADR-103). 테스트·게이트처럼 자동으로 돌지 않는 요구사항(문서, UI를
  * 디자인과 맞춰 보는 것, could 우선순위 항목 등)도 사람이 직접 보고 확인했다는 사실을 증거로 남길 수 있게 한다.
  * docs/requirements.md 몸통에 "- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 …"로 그대로 보인다(저장소에
  * 같이 남아 커밋·PR에 실린다). computeRequirementStatus는 자동 증거(게이트·테스트 탭 실행)가 실패면 이 기록이
@@ -142,7 +142,7 @@ export const RequirementSchema = z
     hash: z.string().optional(),
     /** 마지막으로 개정이 오른 시각(ISO 8601). 그 뒤에 생긴 증거만 "재확인됨"으로 인정한다(computeRequirementStatus) */
     revisedAt: z.string().optional(),
-    /** 사람이 "직접 확인함"으로 남긴 기록(ADR-0XX). "확인 취소"를 누르면 지운다 */
+    /** 사람이 "직접 확인함"으로 남긴 기록(ADR-103). "확인 취소"를 누르면 지운다 */
     manualVerification: ManualVerificationSchema.optional(),
   })
   .refine((value) => (value.scenarios ?? []).every((scenario) => scenario.id.startsWith(`${value.id}.`)), {
@@ -1117,7 +1117,7 @@ export interface TestRunEvidence {
 
 /**
  * 문서(docs/requirements.md가 아니라 README.md·docs/**\/*.md 같은 프로젝트 문서) 안에서 요구사항의 인수 조건을
- * 찾은 결과(ADR-0XX). kind: 'docs' 요구사항은 테스트·게이트가 돌지 않으므로, README 제목·문단에서 인수 조건이
+ * 찾은 결과(ADR-103). kind: 'docs' 요구사항은 테스트·게이트가 돌지 않으므로, README 제목·문단에서 인수 조건이
  * 말하는 내용을 찾았는지로 대신 증거를 삼는다. apps/studio/lib/submission-checklist.ts의 matchAcceptanceAgainstDocs가
  * 만든다(README 항목 탐지를 그 모듈과 공유한다) — 이 모듈(packages/agent)은 파일을 읽지 않는 순수 함수만 두므로
  * 매칭 결과를 데이터로만 받는다.
@@ -1334,7 +1334,7 @@ export function carryForwardRequirementRevision(next: Requirement, previous: Req
 }
 
 /**
- * 상태 규칙(ADR-079, 재확인 필요는 ADR-090, 문서 확인·사람 확인은 ADR-0XX): 내용이 지금 드리프트돼 있으면(아직
+ * 상태 규칙(ADR-079, 재확인 필요는 ADR-090, 문서 확인·사람 확인은 ADR-103): 내용이 지금 드리프트돼 있으면(아직
  * 저장 전) 곧바로 재확인 필요. 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴
  * 체크포인트·게이트 확인·테스트 탭 실행·사람 확인이 하나라도 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다
  * — 없으면 재확인 필요에 머문다. 문서 확인(docEvidence)은 항상 "지금 저장소 상태"를 다시 본 결과라 시점을
@@ -1370,7 +1370,7 @@ export function computeRequirementStatus(evidence: RequirementEvidence, requirem
 
 /**
  * "검증됨"을 만든 증거의 종류. "근거 보기"·"올리기 전 점검" 메시지가 자동(게이트·테스트 탭)·문서 확인·사람 확인을
- * 구분해 보여준다(ADR-0XX) — computeRequirementStatus와 같은 우선순위(자동 > 문서 확인 > 사람 확인)를 따른다.
+ * 구분해 보여준다(ADR-103) — computeRequirementStatus와 같은 우선순위(자동 > 문서 확인 > 사람 확인)를 따른다.
  * 검증됨이 아니면 'none'이다.
  */
 export function requirementVerificationSource(evidence: RequirementEvidence, requirement?: Requirement): 'test' | 'docs' | 'manual' | 'none' {

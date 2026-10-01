@@ -358,7 +358,7 @@ describe('checkRequirements — 명세 탭 상태', () => {
     expect((await checkRequirements(root, [{ id: 'R1', title: '목록 API', priority: 'must', status: '검증됨' }])).status).toBe('pass');
   });
 
-  it('verifiedBy를 보면 사람 확인·문서 확인 몇 개가 끼어 있는지 메시지에 적는다(ADR-0XX)', async () => {
+  it('verifiedBy를 보면 사람 확인·문서 확인 몇 개가 끼어 있는지 메시지에 적는다(ADR-103)', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'b-studio-req-'));
     const live: ChecklistRequirement[] = [
       { id: 'R1', title: '목록 API', priority: 'must', status: '검증됨', verifiedBy: 'test' },
@@ -379,7 +379,7 @@ describe('checkRequirements — 명세 탭 상태', () => {
   });
 });
 
-describe('matchAcceptanceAgainstDocs — kind: docs 요구사항의 문서 증거(ADR-0XX)', () => {
+describe('matchAcceptanceAgainstDocs — kind: docs 요구사항의 문서 증거(ADR-103)', () => {
   const README = [
     '# b-studio',
     '',

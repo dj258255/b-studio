@@ -7,7 +7,7 @@ const bodySchema = z.object({ requirementId: z.string().min(1), note: z.string()
 const clearBodySchema = z.object({ requirementId: z.string().min(1) });
 
 /**
- * "직접 확인함"(owner/admin만, ADR-0XX). 테스트·게이트가 돌지 않는 요구사항도 사람이 직접 보고 확인했다는 사실을
+ * "직접 확인함"(owner/admin만, ADR-103). 테스트·게이트가 돌지 않는 요구사항도 사람이 직접 보고 확인했다는 사실을
  * "누가·언제·어느 체크포인트·무엇을 어떻게"로 docs/requirements.md에 남긴다. 요청 본문은 `{ requirementId, note }`.
  */
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/requirements/verify'>) {

@@ -33,7 +33,7 @@ interface Trace {
   supersedes?: string;
 }
 
-/** 사람이 "직접 확인함"으로 남긴 검증 기록(ADR-0XX) */
+/** 사람이 "직접 확인함"으로 남긴 검증 기록(ADR-103) */
 interface ManualVerification {
   by: string;
   at: string;
@@ -66,7 +66,7 @@ interface TestRunEvidence {
   failed: number;
 }
 
-/** kind: 'docs' 요구사항의 인수 조건을 README.md·docs/**\/*.md와 맞춰 본 결과(ADR-0XX) */
+/** kind: 'docs' 요구사항의 인수 조건을 README.md·docs/**\/*.md와 맞춰 본 결과(ADR-103) */
 interface DocEvidence {
   matched: string[];
   missing: string[];
@@ -89,7 +89,7 @@ interface RequirementView extends RequirementDraft {
   workPrefill: string;
   /** 이슈로 발행했을 때 생긴 하위 이슈 번호(ADR-092). 발행하지 않았으면 없다 */
   issue?: number;
-  /** "검증됨"을 만든 증거의 종류(ADR-0XX). 검증됨이 아니면 'none' */
+  /** "검증됨"을 만든 증거의 종류(ADR-103). 검증됨이 아니면 'none' */
   verifiedBy: "test" | "docs" | "manual" | "none";
 }
 

@@ -3623,7 +3623,7 @@ export interface RequirementView extends Requirement {
   workPrefill: string;
   /** 이슈로 발행했을 때 생긴 하위 이슈 번호. 발행하지 않았으면 없다 */
   issue?: number;
-  /** "검증됨"을 만든 증거의 종류(ADR-0XX). 검증됨이 아니면 'none' */
+  /** "검증됨"을 만든 증거의 종류(ADR-103). 검증됨이 아니면 'none' */
   verifiedBy: 'test' | 'docs' | 'manual' | 'none';
 }
 
@@ -3689,7 +3689,7 @@ async function scanWorkingCopyTestFiles(root: string): Promise<ScannedFile[]> {
 }
 
 /**
- * kind: 'docs' 요구사항의 인수 조건을 맞춰볼 문서(README.md·docs/**\/*.md)를 읽는다(ADR-0XX). "문서" 탭(ADR-094)이
+ * kind: 'docs' 요구사항의 인수 조건을 맞춰볼 문서(README.md·docs/**\/*.md)를 읽는다(ADR-103). "문서" 탭(ADR-094)이
  * 이미 같은 범위를 다루므로 그 탭의 listDocsDirFiles를 그대로 재사용한다 — 실제 매칭(키워드 추출·제목/문단 비교)은
  * 순수 함수(submission-checklist.ts의 matchAcceptanceAgainstDocs)에 맡기고 여기서는 파일만 모은다.
  */
@@ -4149,7 +4149,7 @@ export async function recommendSessionRequirementQuestions(
  * 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다. 내용이 드리프트됐거나(hash 불일치) 개정 후 새 증거가 없으면
  * "재확인 필요"로 매긴다. 발행된 이슈 번호가 있으면(ADR-092) 프리필에 안내를 덧붙이고 issue 필드를 채운다.
  * kind: 'docs' 요구사항은 docSources(README.md·docs/**\/*.md)가 있으면 인수 조건을 그 문서와 맞춰 docEvidence를
- * 만든다(ADR-0XX) — 그 밖의 kind는 문서 매칭을 하지 않는다(테스트·게이트가 있는데 억지로 문서로도 통과시키지 않는다).
+ * 만든다(ADR-103) — 그 밖의 kind는 문서 매칭을 하지 않는다(테스트·게이트가 있는데 억지로 문서로도 통과시키지 않는다).
  */
 function evaluateRequirement(
   requirement: Requirement,
@@ -4375,7 +4375,7 @@ async function writeAndCommitRequirements(
 }
 
 /**
- * 사람이 "직접 확인함"을 누른다(owner/admin만, 라우트의 authorizeSession이 막는다, ADR-0XX). 테스트·게이트가 돌지
+ * 사람이 "직접 확인함"을 누른다(owner/admin만, 라우트의 authorizeSession이 막는다, ADR-103). 테스트·게이트가 돌지
  * 않는 요구사항(문서, 디자인과 눈으로 맞춰 봐야 하는 UI, could 우선순위 항목 등)도 사람이 직접 보고 확인했다는
  * 사실을 "누가·언제·어느 체크포인트·무엇을 어떻게"로 docs/requirements.md에 남긴다(저장소에 같이 커밋돼 PR에도
  * 실린다). 지금 체크포인트(HEAD)가 없으면 가리킬 시점이 없으므로 받지 않는다. 실패한 테스트·게이트는 이 기록으로

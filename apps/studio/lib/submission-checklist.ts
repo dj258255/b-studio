@@ -90,7 +90,7 @@ export interface ChecklistRequirement {
   /** 명세 탭의 상태. '검증됨'만 끝난 것으로 본다 */
   status: string;
   /**
-   * 검증됨을 만든 증거의 종류(ADR-0XX, requirementVerificationSource). 요구사항 항목이 "N개 중 M개 검증됨"
+   * 검증됨을 만든 증거의 종류(ADR-103, requirementVerificationSource). 요구사항 항목이 "N개 중 M개 검증됨"
    * 말고도 사람 확인·문서 확인이 몇 개였는지 구분해 보여준다. 검증됨이 아니면 'none'
    */
   verifiedBy?: 'test' | 'docs' | 'manual' | 'none';
@@ -175,7 +175,7 @@ const VERIFIED_BY_LABEL: Record<'test' | 'docs' | 'manual', string> = { test: '�
 
 /**
  * "N개 검증됨" 뒤에 "(사람 확인 2개 · 문서 확인 1개)"처럼 테스트·게이트가 아닌 방법으로 검증된 개수를 덧붙인다.
- * 전부 테스트·게이트(또는 verifiedBy 정보가 없는 옛 호출)면 덧붙이지 않아 기존 문구를 그대로 지킨다(ADR-0XX) —
+ * 전부 테스트·게이트(또는 verifiedBy 정보가 없는 옛 호출)면 덧붙이지 않아 기존 문구를 그대로 지킨다(ADR-103) —
  * "요구사항 탭에서 이미 검증됐다고 나오는데 왜 점검표만 안 믿냐"는 버그 리포트의 반대쪽, "누가·무엇으로 검증했는지"를
  * 숨기지 않는다.
  */
@@ -653,7 +653,7 @@ export async function checkReadmeSections(root: string, services: ChecklistServi
 }
 
 // ---------------------------------------------------------------------------
-// 10. 요구사항(kind: docs)의 인수 조건을 프로젝트 문서(README.md·docs/**\/*.md)와 맞춰 본다(ADR-0XX).
+// 10. 요구사항(kind: docs)의 인수 조건을 프로젝트 문서(README.md·docs/**\/*.md)와 맞춰 본다(ADR-103).
 //
 // 문서화를 요구하는 요구사항("README에 기술 선택·상태 설계를 설명한다")은 테스트·게이트가 돌지 않아 영원히
 // "작업 중"에 머물던 버그를 고친다. 결정론적이고 설명 가능하게 두려고(모델을 부르지 않는다) 아주 단순한 규칙만
@@ -730,7 +730,7 @@ function sectionMatchesKeywords(section: DocSection, keywords: readonly string[]
 }
 
 /**
- * 요구사항의 인수 조건마다 docs(README.md·docs/**\/*.md)에서 그 내용을 설명하는 제목·문단을 찾는다(ADR-0XX).
+ * 요구사항의 인수 조건마다 docs(README.md·docs/**\/*.md)에서 그 내용을 설명하는 제목·문단을 찾는다(ADR-103).
  * 키워드가 하나도 안 남는 조건(불용어뿐인 아주 짧은 문장)은 찾을 수 없으므로 "빠진 조건"으로 둔다 — 억지로
  * 통과시키지 않는다. @b-studio/agent의 RequirementEvidence.docEvidence 모양 그대로 돌려준다.
  */
