@@ -115,6 +115,7 @@
 - [ADR-098 문서 템플릿을 측정 가능한 판단 기록으로 바꾸고, 모호한 표현 린트와 "현황" 탭을 더한다](#adr-098-문서-템플릿을-측정-가능한-판단-기록으로-바꾸고-모호한-표현-린트와-현황-탭을-더한다)
 - [ADR-099 체크포인트로 되돌리기 전에 작업 복사본의 커밋하지 않은 변경을 지키고 백업한다](#adr-099-체크포인트로-되돌리기-전에-작업-복사본의-커밋하지-않은-변경을-지키고-백업한다)
 - [ADR-100 설계 먼저, 구현은 따로: 설계 승인을 서버가 강제하고, 검토가 구현과 같은 모델 계열이면 "성공"으로 세지 않는다](#adr-100-설계-먼저-구현은-따로-설계-승인을-서버가-강제하고-검토가-구현과-같은-모델-계열이면-성공으로-세지-않는다)
+- [ADR-101 등록한 폴더 프로젝트에 "생성 파일 다시 만들기"와 "원격 main 받아오기"를 더한다](#adr-101-등록한-폴더-프로젝트에-생성-파일-다시-만들기와-원격-main-받아오기를-더한다)
 
 ---
 
@@ -4146,6 +4147,47 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **설계 문서 생성은 "조사" 모드 질문의 답을 사람이 복사해 양식에 붙여 넣는 수동 한 단계를 거친다.** 대화 메시지에 "이 답을 설계 문서로 저장" 버튼을 바로 붙이려면 기존 "문서로 저장" 흐름(`chat-panel.tsx`의 `AssistantReply`·`NewDocDialog`)을 확장해야 했는데, 그 흐름이 쓰는 `NewDocKind`·템플릿(`packages/agent/src/docs.ts`)은 다른 작업이 동시에 고치고 있어 건드리지 않았다. 지금은 "설계 요청" 버튼이 대화창을 읽기만 모드로 채우고, 사람이 답을 받아 "새 설계 문서" 양식의 내용 칸에 붙여 넣어야 한다 — 한 걸음 더 들지만 안전하다.
 - **작업 묶음 ↔ 레인 매칭은 쓰기 범위(경로) 겹침만 본다.** 한 레인이 여러 작업 묶음의 경로를 동시에 쓰면(설계를 묶음별로 너무 잘게 나누지 않는 한 드물다) 첫 번째로 겹치는 레인에만 매칭된다 — 지표가 거칠어도 "예상 vs 실제"를 전혀 못 보는 것보다는 낫다고 봤다.
 - **리뷰어를 다른 계열로 고르는 선택은 api 모드(모델 레지스트리)로만 된다.** Codex·Command Code(DeepSeek)·OpenCode는 지금 "도구 없이 한 번 묻는" 호출 경로(`ModelAsk`)가 claude-code에만 있어(`claude-code-ask.ts`), 그 CLI들을 리뷰어로 직접 부르는 것은 하지 않았다 — 레지스트리에 openai·google 공급자 모델을 등록해 두면 claude-code 세션의 구현도 다른 계열로 검토할 수 있으므로, 당장은 이 경로로 충분하다고 봤다.
+
+---
+
+## ADR-101 등록한 폴더 프로젝트에 "생성 파일 다시 만들기"와 "원격 main 받아오기"를 더한다
+
+상태: 채택
+관련: ADR-067, ADR-073, ADR-083, ADR-088, ADR-095
+
+### 맥락
+- 도그푸딩에서 드러난 두 가지 불편함이다. 둘 다 폴더 열기(ADR-067)로 등록한 프로젝트가 b-studio 자신의 업그레이드나 원격 저장소의 변화를 뒤늦게 반영한다는 같은 뿌리를 가진다.
+- **생성 파일이 낡는다.** studio.yaml·compose.b-studio.yaml·`<서비스>/Dockerfile.b-studio`는 폴더를 처음 열 때 한 번만 만든다(`detectProject`가 `SPEC_FILE`이 이미 있으면 통째로 건너뛴다, project-detect.ts). b-studio를 업그레이드해 탐지 로직이 좋아져도(예: ADR-095의 프론트엔드→백엔드 주소 자동 연결, ADR-088의 루트 마운트, ADR-083의 서비스 선택 기본값) 이미 등록한 프로젝트는 그 개선을 받을 길이 없었다 — 사람이 생성 파일 세 개를 손으로 지우고 폴더를 다시 여는 것만 유일한 길이었다. 손으로 지우면 b-studio가 이미 넣어 둔 손수정(예: studio.yaml의 `ready` 경로를 고친 것)도 함께 사라진다는 문제도 있었다.
+- **원격보다 뒤처진다.** 세션은 저마다 작업 복사본(또는 내 폴더 세션은 원본 그대로)에서 PR을 올리고 끝나지만, 아무도 프로젝트 원본 폴더의 브랜치를 다시 받아오지 않는다. 다른 사람이 그 PR을 GitHub에서 머지해도 원본 폴더의 main은 그 사실을 모른 채로 남고, 다음에 새 세션을 시작하면 이미 머지된 변경이 없는 낡은 main에서 또 시작한다.
+- 둘 다 "개인 PC에서 b-studio가 이 폴더에 git 명령을 직접 돌린다"는 점에서 폴더 열기와 같은 위험을 진다 — 그래서 같은 가드(`localFolderAllowed()`, `B_STUDIO_AUTH=none`)로 막는다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 생성 파일을 아예 git에 커밋하게 하고, b-studio 업그레이드 때마다 사람이 git diff로 비교해 직접 반영한다 | 생성 파일은 지금도 의도적으로 git 추적에서 뺀다(studio.yaml 주석에 "팀과 나누려면 커밋하세요"라고만 적어 둔다) — 이 선택은 그 설계를 뒤집고, 사람이 직접 비교하는 수고를 b-studio가 대신해야 한다는 애초의 목적에도 안 맞는다 |
+| B. 다시 만들기를 누르면 바로 덮어쓴다(미리보기 없이) | 사람이 생성 파일을 손으로 고친 적이 있으면(studio.yaml의 `ready` 경로를 바꾼 것 등) 조용히 사라진다 — 실제로 이 문제를 겪었다 |
+| **C. 다시 훑어(`detectProject`를 "studio.yaml이 없다고 치고" 다시 돌린다) 파일별 diff를 보여주고, b-studio가 마지막으로 쓴 내용의 해시와 디스크 내용을 비교해 손으로 고친 파일만 따로 경고한 뒤, 사람이 파일별로 "덮어쓰기/유지"를 고른 것만 쓴다. 원격은 fetch + `merge --ff-only`만 허용해 되돌리거나 힘으로 덮지 않는다** | 해시를 어딘가 보관해야 하고(레지스트리에 필드 하나 추가), 이미 떠 있는 세션은 저마다 작업 복사본을 쓰므로 자동으로 반영되지 않는다(아래 결정 4에서 별도로 다룬다) |
+
+### 결정
+1. **등록 레지스트리(`~/.config/b-studio/projects.json`)에 `generatedHashes`(경로 → sha256)를 둔다.** `registerFolder`가 파일을 쓸 때마다(처음 등록할 때만 쓴다 — 이미 studio.yaml이 있으면 전과 같이 아무것도 쓰지 않는다) 그 내용의 해시를 함께 적어 둔다. "생성 파일 다시 만들기"가 나중에 디스크의 지금 내용과 이 해시를 비교해 사람이 손으로 고쳤는지(해시가 다르면 고친 것) 판단하는 유일한 기준이다 — 사이드카 파일(`.git/b-studio/`)보다 레지스트리를 골랐다: 이미 폴더마다 항목이 있고, git 저장소가 아닌 등록 폴더에도 똑같이 쓸 수 있다.
+2. **`detectProject(folder, { ignoreExistingSpec: true })`로 studio.yaml이 있어도 처음 열 때처럼 다시 훑는다(project-detect.ts).** `proposeRegeneration(id)`(project-registry.ts)가 이 결과로 새 생성 파일을 만들고, 디스크의 지금 내용과 비교해 파일마다 `{ changed, handEdited, diff }`를 돌려준다. `diff`는 git `diff --no-index`로 만든다(`text-diff.ts`의 `unifiedDiff`) — 화면이 체크포인트 diff와 똑같은 `DiffView`/`parsePatch`로 그대로 그릴 수 있어 새 diff 그리기 코드가 필요 없다. `applyRegeneration(id, overwrite)`는 사람이 고른 경로만 쓰고 그 해시를 갱신한다 — 손으로 고친 파일을 경고했는데도 사람이 "덮어쓰기"를 고르면 그대로 쓴다(미리보기가 이미 경고했으므로 다시 확인하지 않는다). studio.yaml을 직접 쓰는 프로젝트(`generatedHashes`가 비어 있다)는 `eligible: false`로 "다시 만들 것이 없다"고만 알린다.
+3. **원격 받아오기는 fetch + `merge --ff-only`만 한다(`project-source-sync.ts`의 `fetchOriginMain`).** `reset --hard`나 force는 쓰지 않는다. 작업 트리가 깨끗하지 않거나(커밋하지 않은 변경), 로컬과 원격이 다르게 갈라졌으면(fast-forward 불가능) 그대로 거부하고 아무것도 바꾸지 않는다 — 로컬이 원격보다 앞서 있을 뿐이면(아직 안 올린 커밋) 정상적인 "받을 것 없음"으로 본다. 폴더 자체가 그 저장소의 꼭대기여야 한다(project-registry의 `excludeFromGit`과 같은 전제 — 모노레포의 하위 폴더를 연 것이면 더 큰 저장소의 일부라 이 폴더만 따라잡는 것이 의미가 없다).
+4. **"이 세션에도 적용"(`applyRegeneratedFilesToSession`, sessions.ts)은 이미 떠 있는 세션에 한해 구현했다. 새로 만드는 세션은 원래부터 자동으로 최신을 받는다** — `overlayGeneratedFiles`가 세션을 만들 때 프로젝트 원본에서 생성 파일을 그대로 복사하기 때문이다(세션 시작 시점의 "지금" 원본을 복사하므로, 원본을 먼저 다시 만들면 그 뒤에 만드는 세션은 손댈 것이 없다). 이미 떠 있는 세션은: 내 폴더 세션(workspace: local)은 작업 폴더가 원본 그 자체라 복사가 필요 없고, 작업 복사본 세션은 `applyGeneratedFilesToWorkingCopy`(지정한 파일만 무조건 덮어쓰는, `overlayGeneratedFiles`의 변형)로 세션 복사본에 반영한다. 그다음 `restartServicesFor`로 — 에이전트가 파일을 바꿨을 때와 똑같은 경로로 — 영향받은 서비스를 다시 빌드해 띄운다. `session.project`도 다시 읽어(`loadProject`) 바뀐 환경 변수·마운트·pageChecks가 재시작에 반영되게 한다.
+5. **두 동작 모두 폴더 열기와 같은 가드 뒤에 둔다.** API 라우트(`POST /api/projects/[id]/regenerate`, `POST /api/projects/[id]/fetch-main`)는 `localFolderAllowed()`가 아니면 403이다. 프로젝트 메뉴(project-menu.tsx)는 "폴더 열기…"와 같은 조건(`capabilities.openFolder`)이고, 추가로 그 프로젝트가 폴더로 등록한 것(`ProjectSummary.folder`가 있다)일 때만 "생성 파일 다시 만들기…"·"원격 main 받아오기…" 항목을 보여준다.
+
+### 검증 결과
+- `apps/studio/lib/server/text-diff.test.ts`(신규): `unifiedDiff`가 내용이 같으면 빈 문자열, 다르면 git diff 형식(하위 폴더 경로 포함)을 돌려주고 임시 경로가 새지 않는 것.
+- `apps/studio/lib/server/project-regenerate.test.ts`(신규): 직접 만든 studio.yaml 프로젝트는 `eligible: false`, 등록 직후에는 `changed`가 모두 false, 프로젝트가 바뀌면(pnpm 잠금 파일이 생기는 식으로) diff가 드러나고 고른 파일만 다시 쓰는 것, 손으로 고친 파일은 `handEdited: true`로 경고하고 덮어쓰기를 고르지 않으면 남는 것·고르면 사라지는 것, 서비스를 더는 찾지 못하면 `eligible: false`, `eligible: false`면 `applyRegeneration`이 거부하는 것, `registerFolder`가 해시를 레지스트리에 남기는 것, `applyGeneratedFilesToWorkingCopy`가 지정한 파일만 덮어쓰고 git에서 빼는 것을 실제 임시 폴더로 확인했다.
+- `apps/studio/lib/server/project-source-sync.test.ts`(신규): Git 저장소가 아니거나 저장소 꼭대기가 아니거나 origin이 없으면 거부, 커밋하지 않은 변경이 있으면 거부, 받을 것이 없으면(원격과 같거나 로컬이 앞섬) up-to-date, fast-forward로 받으면 커밋 목록과 작업 트리 내용이 실제로 반영되는 것(여러 커밋도 오래된 것부터), 로컬·원격이 다르게 갈라지면 거부하고 아무것도 바꾸지 않는 것, detached HEAD면 거부하는 것을 실제 로컬 bare 원격으로 확인했다.
+- `apps/studio/lib/server/sessions-regenerate-apply.test.ts`(신규): 작업 복사본 세션은 다시 만든 파일을 덮어쓰고 영향받은 서비스를 재시작하는 것, 내 폴더 세션은 복사 없이도 재시작하는 것, 등록하지 않은 프로젝트의 세션은 거부하는 것, 넘긴 파일이 없으면 아무것도 하지 않는 것을 실제 sessions.ts·project-registry.ts 코드로(샌드박스만 가짜로 바꿔) 확인했다.
+- 라우트 가드 테스트(신규, 목으로 확인): `app/api/projects/[id]/regenerate/route.test.ts`·`app/api/projects/[id]/fetch-main/route.test.ts`·`app/api/sessions/[id]/regenerate/route.test.ts` — 로그인·개인 PC 모드·세션 소유권 가드와 바디 파싱(숫자가 섞인 배열을 걸러내는 것 등)을 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`. `pnpm --filter @b-studio/studio lint` 0 errors(기존 경고 7개는 이 변경과 무관하다). `vitest run --exclude '.claude/**'`는 전체 2,611건 중 2,610건을 통과했고(`packages/sandbox/src/docker/format.test.ts`의 Docker 스크립트 테스트 1건만 실패했는데 이 변경이 손대지 않은 파일이고 단독으로 돌려도 똑같이 실패해 이 저장소 환경(Colima)의 기존 문제로 보인다, ADR-096이 적어 둔 것과 같은 증상이다). git 서브프로세스를 여러 번 돌리는 새 테스트(`project-source-sync.test.ts` 등)는 전체 스위트를 254개 워커로 한꺼번에 돌릴 때만 간헐적으로 기본 5초 타임아웃에 걸렸다가(부하 플레이키, ADR-092·096과 같은 증상) 단독으로 돌리면 항상 통과해, `sessions-base-catch-up.test.ts`처럼 느린 테스트에 명시적 타임아웃(15~20초)을 붙여 두었다.
+
+### 감수한 트레이드오프
+- **"이 세션에도 적용"은 사람이 직접 눌러야 한다.** 레지스트리를 업데이트한다고 떠 있는 모든 세션에 자동으로 밀어 넣지 않는다 — 세션 안에서 에이전트가 같은 파일을 한창 고치고 있을 수도 있어, 조용히 덮어쓰면 그 작업과 충돌할 수 있다. 사람이 세션마다 "지금 적용해도 되는지" 보고 누르는 쪽을 택했다.
+- **구조가 바뀌는 변경(새 서비스가 생기거나 없어짐)은 이미 떠 있는 세션에는 완전히 반영되지 않을 수 있다.** `applyRegeneratedFilesToSession`은 파일을 덮어쓰고 기존 서비스를 재시작할 뿐, 샌드박스가 애초에 모르는 새 서비스를 띄우거나 없앤 서비스의 컨테이너를 정리하지는 않는다 — 실제 도그푸딩에서 겪은 문제(환경 변수·마운트·pageChecks 갱신)는 이 범위로 충분히 풀리지만, 서비스 구성 자체가 바뀌는 큰 변화는 새 세션으로 시작하는 쪽을 권한다.
+- **원격 받아오기는 지금 체크아웃된 브랜치만 다룬다.** `fetchOriginMain`은 `symbolic-ref`로 지금 브랜치를 읽어 그 브랜치의 origin 대응만 받는다 — "항상 main을 받는다"가 아니라 "지금 폴더가 보고 있는 브랜치를 그 원격 대응으로 따라잡는다"는 뜻이다. 보통 그 브랜치가 main이라 메뉴 문구는 "원격 main 받아오기"로 남겨 뒀다.
+- **diff 미리보기는 파일 전체를 통째로 비교한다.** studio.yaml의 주석 한 줄만 바뀌어도 "바뀜"으로 뜬다 — 의미 있는 변경(새 환경 변수 연결 등)과 사소한 변경을 구분하지 않는다. git diff가 줄 단위로는 보여주므로 사람이 한 번 더 보고 판단해야 한다.
 
 ---
 

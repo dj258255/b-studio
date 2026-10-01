@@ -52,14 +52,14 @@ describe('managed region 왕복', () => {
     expect(parsed!.rev).toBe(2);
     expect(parsed!.content).toBe(buildRegionContent(requirement));
     expect(parsed!.hash).toBe(requirementContentHash(requirement));
-    expect(parsed!.content).toContain('### EARS');
+    expect(parsed!.content).toContain('### 기능 요구사항');
     expect(parsed!.content).toContain('### 시나리오');
     expect(parsed!.content).toContain('### 비기능 요구사항');
   });
 
   it('EARS·시나리오·NFR이 없으면 그 절 자체를 뺀다(자리표시자를 남기지 않는다)', () => {
     const content = buildRegionContent(req());
-    expect(content).not.toContain('### EARS');
+    expect(content).not.toContain('### 기능 요구사항');
     expect(content).not.toContain('### 시나리오');
     expect(content).not.toContain('### 비기능 요구사항');
     expect(content).not.toContain('(정의되지 않음)');

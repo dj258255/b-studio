@@ -277,7 +277,7 @@ import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
-import { overlayGeneratedFiles } from './project-registry';
+import { applyGeneratedFilesToWorkingCopy, findRegisteredProject, overlayGeneratedFiles } from './project-registry';
 import { offManagedServices, serviceSelectionFor, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
@@ -1363,6 +1363,42 @@ export async function setSessionServiceSelection(id: string, service: string, on
   }
 
   return { selection: listServiceSelection(id), ...(warning ? { warning } : {}) };
+}
+
+/**
+ * "이 세션에도 적용"(ADR-101): "생성 파일 다시 만들기"가 프로젝트 원본 폴더에 막 다시 쓴 파일(studio.yaml·
+ * compose.b-studio.yaml·Dockerfile.b-studio)을 이미 떠 있는 이 세션에도 반영한다.
+ *
+ * 내 폴더 세션(workspace: local)은 작업 폴더가 원본 폴더 그 자체라 이미 최신이므로 파일을 복사하지 않는다.
+ * 작업 복사본 세션은 overlayGeneratedFiles와 같은 자리(세션 복제 폴더)에 지정한 파일만 덮어쓴다.
+ * 그다음 restartServicesFor로 — 에이전트가 파일을 바꿨을 때와 똑같은 경로로 — 영향받은 서비스를 다시 빌드해 띄운다.
+ * 새로 만드는 세션은 이미 자동으로 최신 파일을 받으므로(overlayGeneratedFiles가 세션 시작 때 원본에서 그대로 복사한다)
+ * 이 함수가 필요한 것은 이미 떠 있는 세션뿐이다.
+ */
+export async function applyRegeneratedFilesToSession(id: string, files: readonly string[]): Promise<{ restarted: ServiceCheck[]; skippedOff: string[] }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 적용할 수 있습니다');
+  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+  if (files.length === 0) return { restarted: [], skippedOff: [] };
+
+  const registered = await findRegisteredProject(session.snapshot.projectId);
+  if (!registered) throw new StudioError(409, '폴더로 연 프로젝트가 아니라 적용할 생성 파일이 없습니다');
+
+  if (session.snapshot.workspace !== 'local') {
+    await applyGeneratedFilesToWorkingCopy(registered.path, session.project.root, session.checkpoints.root, files);
+  }
+  // 바뀐 studio.yaml·compose를 읽어야 새 환경 변수·마운트·pageChecks가 재시작에 반영된다. 못 읽으면(일시적인 디스크 문제 등)
+  // 지금 쓰던 설정을 그대로 두고 재시작만 시도한다 — 세션을 깨뜨리는 대신 다음에 다시 시도할 여지를 남긴다
+  session.project = await loadProject(session.project.root).catch(() => session.project);
+
+  session.snapshot.running = true;
+  try {
+    const start: StartOptions = { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) };
+    const result = await restartServicesFor(session.sandbox, session.project, [...files], start);
+    return { restarted: result.restarted, skippedOff: result.skippedOff };
+  } finally {
+    session.snapshot.running = false;
+  }
 }
 
 /** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */

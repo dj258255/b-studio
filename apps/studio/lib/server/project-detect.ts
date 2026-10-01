@@ -115,12 +115,14 @@ function containerWorkDir(servicePath: string): string {
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'build', 'dist', 'target', '.gradle', '.venv', 'venv', '__pycache__', '.idea', '.vscode']);
 
-export async function detectProject(folder: string): Promise<ProjectDetection> {
+export async function detectProject(folder: string, { ignoreExistingSpec = false }: { ignoreExistingSpec?: boolean } = {}): Promise<ProjectDetection> {
   const root = path.resolve(folder);
   const info = await stat(root).catch(() => undefined);
   if (!info?.isDirectory()) throw new Error(`폴더가 아닙니다: ${root}`);
   const name = path.basename(root);
-  if (await exists(path.join(root, SPEC_FILE))) return { folder: root, name, hasSpec: true, services: [], infra: [], defaultInfra: [], warnings: [] };
+  // ignoreExistingSpec은 "생성 파일 다시 만들기"(ADR-101)가 쓴다: b-studio가 만든 studio.yaml이 이미 있어도
+  // 그 파일이 없다고 치고 폴더를 처음 열 때처럼 다시 훑는다 — 그래야 그사이 생긴 탐지 개선(환경 변수 연결 등)이 반영된다
+  if (!ignoreExistingSpec && (await exists(path.join(root, SPEC_FILE)))) return { folder: root, name, hasSpec: true, services: [], infra: [], defaultInfra: [], warnings: [] };
 
   const childDirNames = await childDirs(root);
   const candidates = ['.', ...childDirNames];
