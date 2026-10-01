@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
 import {
   allowedBackends,
+  annotateAllMustHavesPrefill,
+  annotateWithIssue,
   apiEscalation,
   assertBackendReady,
   assertResumableBackend,
@@ -48,6 +50,35 @@ describe('parseIssueList', () => {
     for (const bad of [{ issues: [0] }, { issues: [1.5] }, { issues: ['57'] }, { issue: 0 }]) {
       expect(() => parseIssueList(bad)).toThrow(StudioError);
     }
+  });
+});
+
+describe('annotateWithIssue · annotateAllMustHavesPrefill(ADR-092)', () => {
+  const requirement = { id: 'R7', title: '로그인 API' };
+
+  it('발행된 이슈 번호가 있으면 "[R7] 제목" 뒤에 "(#12)"를 붙인다', () => {
+    const prefill = '[R7] 로그인 API\n\n인수 조건:\n- a';
+    expect(annotateWithIssue(prefill, requirement, 12)).toBe('[R7] 로그인 API (#12)\n\n인수 조건:\n- a');
+  });
+
+  it('이슈 번호가 없으면 그대로 둔다', () => {
+    const prefill = '[R7] 로그인 API\n\n인수 조건:\n- a';
+    expect(annotateWithIssue(prefill, requirement, undefined)).toBe(prefill);
+  });
+
+  it('allMustHavesPrefill의 목록 줄마다 발행된 요구사항만 이슈 번호를 붙인다', () => {
+    const base = '다음 필수(must) 요구사항을 모두 구현해 주세요.\n\n- [R7] 로그인 API\n- [R8] 목록 API';
+    const annotated = annotateAllMustHavesPrefill(
+      base,
+      [
+        { id: 'R7', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['a'] },
+        { id: 'R8', title: '목록 API', kind: 'api', priority: 'must', acceptance: ['a'] },
+      ],
+      { R7: 12 },
+    );
+    expect(annotated).toContain('- [R7] 로그인 API (#12)');
+    expect(annotated).toContain('- [R8] 목록 API');
+    expect(annotated).not.toContain('R8] 목록 API (#');
   });
 });
 

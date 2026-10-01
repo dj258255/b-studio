@@ -1033,6 +1033,19 @@ function QuestionCard({
 
 /** 노력 단계 id → 화면 표기(대화 기록·run 헤더·작업 분해 레인 카드에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
 export const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
+
+/**
+ * 모델·노력 버튼에 쓸 한 줄 노력 표기. 아직 아무것도 고르지 않았으면(effort.current 없음) "보통"을 지어내지 않고
+ * 백엔드가 실제로 쓰는 기본값(effort.defaultLevel)을 "기본(⟨라벨⟩)"으로 보여준다 — claude-code는 실행 중 표시가
+ * "노력: 높음"인데 고르지 않은 상태의 버튼이 "보통"으로 보여 서로 어긋나던 문제(실제 기본값은 높음)를 고친다.
+ * defaultLevel도 모르는 백엔드(codex·commandcode·opencode)는 예전처럼 "보통"으로 둔다.
+ */
+function effortDisplayLabel(effort: EffortPickerView): string | undefined {
+  if (!effort.supported) return undefined;
+  if (effort.current) return EFFORT_LABEL[effort.current] ?? "보통";
+  if (effort.defaultLevel) return `기본(${EFFORT_LABEL[effort.defaultLevel] ?? effort.defaultLevel})`;
+  return "보통";
+}
 /** 노력 단계를 지원하지 않는 백엔드에서도 네 단계 버튼을 회색으로 그리기 위한 자리표(레이블만 쓰고, 실제 값·순서는 항상 서버가 내려준 picker.effort.levels를 우선한다) */
 const EFFORT_PLACEHOLDER: Array<{ id: string; label: string; hint: string }> = [
   { id: "low", label: "낮음", hint: "빠르고 싸게" },
@@ -1064,7 +1077,7 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const current = picker.options.find((option) => option.id === (picker.current ?? ""));
-  const currentEffortLabel = picker.effort.supported ? (EFFORT_LABEL[picker.effort.current ?? "medium"] ?? "보통") : undefined;
+  const currentEffortLabel = effortDisplayLabel(picker.effort);
   const label = [current?.label ?? "기본", currentEffortLabel].filter(Boolean).join(" · ");
   const title = disabledReason ?? [current?.hint, formatPrice(current?.price), current?.resolvedId && `실제 모델: ${current.resolvedId}`, picker.note].filter(Boolean).join(" · ");
 
@@ -1253,28 +1266,36 @@ function ModelOptionRow({ option, selected, onSelect }: { option: ModelPickerOpt
 /** 노력 단계 네 칸 버튼(segmented control). 지원하지 않는 백엔드는 자리표 네 칸을 회색으로 두고 이유를 툴팁에 남긴다 */
 function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChange: (id: string) => void }) {
   const levels = effort.levels.length > 0 ? effort.levels : EFFORT_PLACEHOLDER;
-  const current = effort.current ?? "medium";
+  // 아직 고르지 않았으면(effort.current 없음) 백엔드 실제 기본값(defaultLevel)을 선택된 것처럼 보여준다.
+  // defaultLevel도 모르면(codex 등) 예전처럼 "보통"을 자리표로 쓴다
+  const current = effort.current ?? effort.defaultLevel ?? "medium";
   const disabledTitle = effort.supported ? undefined : (effort.reason ?? "이 백엔드는 노력 단계를 지원하지 않습니다");
   return (
     <div className="mt-2 border-t border-line pt-2">
       <p className="px-2 pb-1 text-xs font-medium text-muted">노력</p>
       <div role="radiogroup" aria-label="노력 단계" title={disabledTitle} className="flex gap-1 px-2">
-        {levels.map((level) => (
-          <button
-            key={level.id}
-            type="button"
-            role="radio"
-            aria-checked={effort.supported && current === level.id}
-            disabled={!effort.supported}
-            title={effort.supported ? level.hint : disabledTitle}
-            onClick={() => onChange(level.id)}
-            className={`flex-1 rounded-control border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
-              effort.supported && current === level.id ? "border-ink bg-ink text-panel" : "border-line bg-panel text-ink hover:bg-panel/70"
-            }`}
-          >
-            {level.label}
-          </button>
-        ))}
+        {levels.map((level) => {
+          // 지금 고른 게 없어도 이 단계가 백엔드의 실제 기본값이면 늘 "(기본)"을 붙여 둔다 —
+          // 다른 단계를 직접 골랐을 때도 어느 게 기본이었는지 알 수 있게
+          const isDefault = effort.defaultLevel === level.id;
+          return (
+            <button
+              key={level.id}
+              type="button"
+              role="radio"
+              aria-checked={effort.supported && current === level.id}
+              disabled={!effort.supported}
+              title={effort.supported ? level.hint : disabledTitle}
+              onClick={() => onChange(level.id)}
+              className={`flex-1 rounded-control border px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
+                effort.supported && current === level.id ? "border-ink bg-ink text-panel" : "border-line bg-panel text-ink hover:bg-panel/70"
+              }`}
+            >
+              {level.label}
+              {isDefault && <span className="ml-1 text-[10px] opacity-70">(기본)</span>}
+            </button>
+          );
+        })}
       </div>
       {effort.supported ? (
         <p className="px-2 pt-1 text-xs text-muted">{levels.find((level) => level.id === current)?.hint}</p>

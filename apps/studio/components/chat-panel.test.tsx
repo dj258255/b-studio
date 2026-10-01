@@ -178,6 +178,30 @@ describe("ModelPicker(대화 입력창의 모델 선택)", () => {
     expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>높음/);
   });
 
+  it("아직 노력 단계를 고르지 않았으면(effort.current 없음) '보통'을 지어내지 않고 실제 기본값을 '기본(⟨라벨⟩)'으로 보여준다", () => {
+    // claude-code는 세션이 고르지 않아도 러너가 실제로 '높음'을 쓴다(DEFAULT_CLAUDE_CODE_EFFORT) — 버튼 요약과
+    // 노력 단계 칸 둘 다 이 기본값을 보여줘야, 실행 중 표시("노력: 높음")와 어긋나지 않는다
+    const unset: ModelPickerView = { ...claudeCode, effort: { supported: true, defaultLevel: "high", levels: claudeCode.effort.levels } };
+
+    const buttonHtml = renderToStaticMarkup(<ModelPicker picker={unset} disabled={false} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+    expect(buttonHtml).toContain("기본(높음)");
+    expect(buttonHtml).not.toContain("Sonnet · 보통");
+
+    const dialogHtml = renderToStaticMarkup(<ModelPickerDialog picker={unset} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+    // 기본값(높음) 칸이 선택된 것처럼 보이고, 기본이라는 표시(기본)가 붙는다
+    expect(dialogHtml).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>높음<span[^>]*>\(기본\)<\/span>/);
+  });
+
+  it("다른 단계를 직접 골랐어도(effort.current) 기본값이었던 칸에는 '(기본)' 표시가 그대로 남는다", () => {
+    const chosenLow: ModelPickerView = { ...claudeCode, effort: { supported: true, current: "low", defaultLevel: "high", levels: claudeCode.effort.levels } };
+
+    const html = renderToStaticMarkup(<ModelPickerDialog picker={chosenLow} onChangeModel={() => undefined} onChangeEffort={() => undefined} />);
+
+    // 낮음이 선택(aria-checked=true)되면서도, 높음 칸에는 여전히 (기본) 표시가 있다
+    expect(html).toMatch(/role="radio"[^>]*aria-checked="true"[^>]*>낮음/);
+    expect(html).toMatch(/role="radio"[^>]*aria-checked="false"[^>]*>높음<span[^>]*>\(기본\)<\/span>/);
+  });
+
   it("노력 단계를 지원하지 않는 백엔드는 네 칸을 disabled로 그리고 이유를 툴팁에 남긴다", () => {
     const demo: ModelPickerView = {
       backend: "demo",

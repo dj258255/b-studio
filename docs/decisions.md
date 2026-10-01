@@ -103,6 +103,9 @@
 - [ADR-086 기본 egress에 GitHub 릴리스 호스트를 연다(Gradle 배포판)](#adr-086-기본-egress에-github-릴리스-호스트를-연다gradle-배포판)
 - [ADR-087 개발 화면 탭을 일곱 개로 묶고 올리기 전 점검을 저장소 탭으로 옮긴다](#adr-087-개발-화면-탭을-일곱-개로-묶고-올리기-전-점검을-저장소-탭으로-옮긴다)
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
+- [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
+- [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+- [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
 
 ---
 
@@ -3615,6 +3618,132 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 진짜 멀티 모듈 Gradle(루트에만 래퍼·`settings.gradle`)은 자동으로 고치지 않았다 — 확인 메모로 사람이 `studio.yaml`을 손보게 한다. 테스트 탭의 실행 계획을 서브프로젝트 인식으로 다시 설계하는 것은 더 큰 작업이라 이번 범위에서 뺐다.
 - pnpm/npm 워크스페이스의 루트 `node_modules`는 볼륨으로 캐시하지 않는다 — 세션마다(또는 컨테이너 재생성마다) 루트 설치를 다시 하므로, pnpm 콘텐츠 스토어(`/cache/pnpm`)는 캐시돼도 링크 단계는 매번 다시 돈다. 올바르게 동작하지만 예전(서비스 폴더 자체가 루트인 경우)보다 기동이 조금 느릴 수 있다.
 - 이 변경은 실제 사용 중 발견한 버그 보고로 시작했고, 이 작업 세션에서는 새 GitHub 이슈를 만들 수 없는 정책이라 "관련:" 이슈 번호를 달지 못했다 — PR 본문에 같은 맥락을 남겨 대신한다.
+
+---
+
+## ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다
+
+상태: 채택
+관련: 없음(도그푸딩 중 발견)
+
+### 맥락
+- claude-code 백엔드의 모델 선택(`CLAUDE_CODE_ALIASES`)은 별칭(opus·sonnet·haiku·fable)이 실제로 풀리는 모델 id·공식 단가를 한 번의 실험(E8, 2026-09-30)에서 관측해 하드코딩한 표였다. dc803b9에서 Fable 5.1을 추가하고 이름에 버전을 붙였는데, 이런 값(별칭이 무엇으로 풀리는지, 새 모델이 생겼는지, 버전이 올라갔는지)은 로그인한 계정·Claude Code CLI 버전이 바뀔 때마다 사람이 다시 확인하고 코드를 고쳐야 갱신되는 구조였다.
+- Claude Agent SDK의 `query(...).supportedModels()`가 바로 이 정보(관측이 아니라 CLI 자신이 보고하는 값)를 `ModelInfo[]`로 준다는 것을 2026-10-01(Claude Agent SDK 0.3.267, Claude Code 2.1.285)에 확인했다: `value`(고를 값)·`resolvedModel`(별칭이 실제로 풀리는 id)·`displayName`·`description`·`supportsEffort`/`supportedEffortLevels`(모델마다 다르다 — 이번에 처음 확인한 사실: Haiku는 노력 단계를 지원하지 않는다). 하드코딩 표 대신 이 목록을 쓰면 별칭이 바뀌거나 새 모델(예: 다음 세대)이 나와도 스튜디오 코드를 고치지 않고 그대로 반영된다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 하드코딩 표를 계속 손으로 갱신한다 | 매번 실험(E8 같은)으로 관측해야 하고, 갱신이 늦으면 화면이 실제와 어긋난다(이미 한 번 벌어진 일) |
+| B. Anthropic 공개 모델 목록 API(`client.models.list()`, 일반 Messages API)를 쓴다 | claude-code 백엔드는 API 키가 아니라 로그인한 Claude Code 구독으로 돈다 — 어떤 별칭이 그 계정·CLI 버전에서 실제로 고를 수 있는지는 Messages API가 아니라 Claude Code 자신만 안다 |
+| **C. Claude Agent SDK의 `supportedModels()`를 그대로 쓴다** | 채택. 세션이 실제로 쓰는 것과 같은 SDK·같은 로그인 경로로 물어보므로 별칭 해석이 어긋날 일이 없다. 다만 CLI 프로세스를 하나 더 띄워야 해 비용·지연이 있다(아래 완화) |
+
+### 결정
+- `packages/agent/src/claude-code-runner.ts`에 `fetchClaudeCodeModels()`를 추가한다. `preflightClaudeCode`와 같은 모양으로(아무것도 내보내지 않는 프롬프트로 `query()`를 열고, 필요한 정보만 받은 뒤 바로 닫는다) `supportedModels()`를 부르고, 15초 안에 응답하지 않으면 실패로 본다.
+- `apps/studio/lib/server/claude-code-models.ts`가 이 호출을 1시간 캐시하고(`loadClaudeCodeModels`), 캐시가 비어 있는 동안 동시에 들어온 요청은 진행 중인 호출 하나를 함께 기다린다(in-flight 중복 제거) — 화면을 여러 번 열어도 Claude Code 프로세스를 여러 번 띄우지 않는다.
+- `apps/studio/lib/server/model-picker.ts`가 `ModelInfo`를 `ModelPickerOption`으로 옮긴다: `id`는 SDK의 `value`를 그대로 쓰고(SDK의 "기본" 행은 `value === ''`라 우리 기존 "기본" 옵션과 그대로 맞아떨어진다), `label`은 설명의 첫 세그먼트에서 버전 이름을 뽑고("Opus 5 with 1M context" → "Opus 5 · 1M"), 한국어 안내(hint·badges)는 `resolvedModel` 접두어로 가른 계열(opus·sonnet·haiku·fable)에 예전부터 쓰던 문구를 그대로 붙인다(계열을 모르면 SDK 설명을 그대로 보여준다). 어떤 실패든(CLI 없음·로그인 안 됨·타임아웃) `CLAUDE_CODE_ALIASES`(예전 하드코딩 표)로 되돌아가고 "모델 목록을 불러오지 못해 알려진 목록을 보여줍니다"를 note로 남긴다.
+- **단가는 지어내지 않는다.** SDK는 단가를 주지 않으므로, E8이 실측한 것만 담은 작은 표(`claude-opus-5`→5/25, `claude-sonnet-5`→2/10, `claude-haiku-4-5`→1/5, 백만 토큰당 USD)를 `resolvedModel`에서 `[1m]` 접미사와 날짜 접미사(`-YYYYMMDD`)를 지운 뒤 정확히 일치할 때만 붙인다. Fable처럼 확인하지 못한 모델은 이 표에 없어 단가를 보여주지 않는다 — 이 표가 새 세대(예: Opus 6)를 자동으로 알아내지 못한다는 한계는 그대로 남는다(가격이 바뀌면 사람이 확인해서 고쳐야 한다).
+- **노력 단계는 모델마다 판단한다.** `ModelInfo.supportedEffortLevels`가 없는 모델(Haiku)은 `supportsEffort: false`로 옮기고, `effortPickerFor`가 고른 모델을 찾아 노력 단계 선택 자체를 "이 모델은 노력 단계를 지원하지 않습니다"로 막는다(전에는 claude-code 백엔드 전체가 항상 지원한다고 봤다).
+- **예전에 저장된 세션 값과의 호환.** SDK가 돌려주는 실제 `value`는 CLI 버전에 따라 형태가 바뀔 수 있다(관측: `opus` 별칭이 `opus[1m]`로, `fable`이 `claude-fable-5-1[1m]`로 나타났다 — `sonnet`·`haiku`는 그대로였다). 예전에 저장한 세션의 `modelId`(구버전 화면이 쓰던 `opus`·`sonnet`·`haiku`·`fable`)는 값으로 먼저 찾고, 없으면 `resolvedModel` 접두어로 같은 계열의 옵션을 찾아(`findClaudeCodeOption`) 그 옵션의 실제 id로 바꿔 돌려준다 — 화면은 `option.id === current`로 체크 표시를 매기므로, 이 정규화가 없으면 예전 세션이 고른 모델의 체크 표시가 사라져 보인다.
+
+### 감수한 트레이드오프
+- 모델 목록을 물어보는 데 Claude Code 프로세스를 하나 더 띄운다(관측: 수 초). 1시간 캐시·in-flight 중복 제거로 평소에는 거의 발생하지 않지만, 캐시가 갓 비워진 직후 여러 사용자가 동시에 화면을 열면 그 한 번의 호출을 함께 기다린다.
+- 단가 표는 여전히 사람이 관리한다(SDK가 주지 않는 정보라 지어낼 수 없다). 새 세대 모델이 나오면 단가가 없는 채로(가격 안내 없이) 옵션에 나타난다 — 잘못된 단가를 보여주는 것보다 안전하다고 판단했다.
+- `resolvedModel`의 정확한 형태(접미사 포함 여부)가 CLI 버전마다 달라질 수 있어, 계열 판정(`claudeFamilyOfResolvedId`)과 단가 정규화(`normalizeResolvedId`)는 접두어 매칭·정규식으로 느슨하게 짰다 — 언젠가 접두어 자체가 바뀌면(예: `claude-opus-6`) 다시 계열 표를 넓혀야 한다.
+
+---
+
+## ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다
+
+상태: 채택
+관련: 이 작업 세션에서는 새 GitHub 이슈를 만들 수 없는 정책이라 이슈 번호를 달지 못했다 — PR 본문에 맥락을 남긴다
+
+### 맥락
+- ADR-079가 만든 "명세 → 요구사항 → 검증 추적"은 요구사항을 `{id, title, kind, acceptance, priority}`로만 나눈다. 인수 조건은 자연어 문장이라 "테스트 가능한가"를 사람이 다시 판단해야 하고, 비기능 요구사항("빠르게 응답한다")은 측정 기준이 없어 검증 자체가 불가능하며, 요구사항 id는 영구적이라고 문서에 적어 놓고도 재추출 시 짝짓는 로직이 없어 실제로는 매번 새 모델 호출이 매기는 순번에 의존했다(모델이 우연히 같은 순서로 나눠 주지 않으면 id가 흔들리고, 그 순간 evidence·status가 전부 새 id 기준으로 리셋된다).
+- 업계 요구사항 기법을 찾아보면 이 틈을 메우는 재료가 이미 있다: EARS(Easy Approach to Requirements Syntax, alistairmavin.com/ears)는 "…해야 한다"로 끝나는 단수 문장을 다섯 패턴(ubiquitous/event/state/unwanted/optional)으로 강제해 복합 요구사항이 끼어들 틈을 없앤다. Gherkin의 Given-When-Then은 인수 조건을 실행 가능한 시나리오로 못 박는다(AWS Kiro의 `requirements.md`도 이 조합을 쓴다). GitHub Spec Kit의 `[NEEDS CLARIFICATION]` 표시는 모호함을 요구사항 문장에 남기지 않고 질문으로 분리한다. QVscribe류 요구사항 스멜 검사는 "빠르게", "적절히" 같은 약한 표현을 결정론적으로 잡아낸다. Doorstop·StrictDoc·sphinx-needs 같은 요구사항 관리 도구는 id를 영구 자산으로 삼고, 내용의 리비전 지문(해시)이 바뀌면 그 id를 참조하는 링크를 "suspect"(의심, 재확인 필요)로 낮춘다.
+- 실제 사용(dogfooding) 중 두 가지 위험한 틈도 함께 드러났다: (1) "모호한 점 추천 값으로 채우기"가 명세가 이미 답을 정한 것(응답 필드 모양, 프로젝트가 이미 쓰는 DB 엔진)과 충돌하는 "업계 관례" 답을 추천했다(예: 명세가 `content` 필드로 응답하라고 예시까지 보여줬는데 `excerpt`를 추천, Postgres 프로젝트에 MySQL 문법을 추천). (2) 과제성 명세의 "제출 방법"(private 저장소 생성 → APRCORPORATION을 collaborator로 추가 → PR 병합 → 메일로 제출)이 추출 모델에 의해 그대로 필수(must) 요구사항 R1로 저장됐다 — 이 문서를 읽고 작업하는 에이전트가 실제로 GitHub 저장소 권한을 바꾸려 시도할 수 있는 위험한 경로다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. EARS·시나리오·NFR을 스키마에 필수 필드로 추가한다 | 이미 저장된 `docs/requirements.md`(ADR-079 이후 문서 전부)가 파싱에 실패한다 — "옛 문서도 그대로 읽는다"는 이 모듈의 원칙을 깬다 |
+| B. 재추출마다 id를 늘 새로 매긴다(지금 방식 유지), 사람이 손으로 옛 id와 맞춰 고친다 | 재추출을 쓸 때마다 evidence·status가 리셋되는 걸 사람이 매번 감수해야 한다 — "재추출해도 같은 요구사항은 같은 id를 유지한다"던 ADR-082의 약속을 프롬프트 지시로만 남겨 두고 실제로 보장하지 못한다 |
+| **C. 모든 새 필드(rev·ears·scenarios·nfr·trace·hash)를 선택(optional)으로 스키마에 더하고, 사람이 읽는 몸통은 값이 있을 때만 줄을 더 쓰고, hash·개정은 내용이 실제로 바뀌었을 때만 계산해 올린다** | 채택. 옛 문서는 그 필드들이 애초에 없어 파싱·직렬화가 똑같이 동작한다. 새 필드는 저장할 때마다 새로 계산되므로 사람이 관리할 부담이 없다 |
+
+### 결정
+1. **스키마 확장**(`packages/agent/src/requirements.ts`): `Requirement`에 `rev?`(개정, 1부터), `ears?: {pattern, statement}`(EARS 다섯 패턴 중 하나, "…해야 한다" 단수 문장), `scenarios?: [{id: "R4.1", given, when, then}]`(소속 요구사항 id로 시작해야 한다는 걸 zod `refine`으로 강제), `nfr?: {metric, threshold, condition, method}`(kind가 nonfunctional이면 있어야 lintRequirement가 "Ready"로 본다 — 스키마 자체는 옛 문서 호환을 위해 선택), `trace?: {issue, dependsOn, supersedes}`(issue·rev·hash는 저장소 이슈 발행을 맡은 별도 모듈 `requirement-issues.ts`가 그대로 읽으므로 이름을 그대로 유지한다), `hash?`(title+ears+scenarios+nfr의 안정적 해시), `revisedAt?`(마지막 개정 시각). `acceptance`는 그대로 둔다(시나리오가 있으면 화면이 그로부터 표시를 파생할 수 있지만, 호환을 위해 여전히 독립적으로 저장한다).
+2. **경계 안전 정규식**: 모든 증거 매칭이 `\bR\d+(?:\.\d+)?\b`로 토큰을 뽑는다(`findMentionedIds`) — "R1"이 "R10"의 일부로 걸리지 않고, 시나리오 id(R4.1)도 통째로 한 토큰이다. `mentionsRequirementId(text, "R4")`는 "R4" 자체뿐 아니라 "R4.1" 같은 하위 시나리오 언급도 상위 요구사항을 가리킨 것으로 본다(시나리오는 요구사항의 일부라서). 커밋 메시지·PR 본문의 `Implements: R4` / `Implements: R4.1@rev2` 트레일러(`extractImplementsTrailers`)는 있으면 자유 언급보다 우선한다(`findCheckpointMentions`).
+3. **리비전·재확인 필요**(suspect 링크): `computeRequirementHash`가 title+ears+scenarios+nfr만 보고 해시를 매긴다(acceptance·priority·trace는 실질 검증 내용이 아니라고 봐서 뺐다). 저장(`applySessionRequirements`)마다 `carryForwardRequirementRevision`으로 같은 id의 이전 rev·hash·revisedAt을 먼저 물려받고(클라이언트가 안 보내도), `reviseRequirementIfChanged`가 해시가 달라졌으면 개정을 올리고 새 시각을 적는다. 새 상태 `재확인 필요`(검증됨보다 낮은 확신, 🟡)는 (a) 지금 내용이 기록된 해시와 다르면(아직 저장 전) 즉시, (b) 저장은 됐지만 그 개정 시각(`revisedAt`) 뒤에 생긴 체크포인트·게이트 확인이 하나도 없으면 매겨진다 — `computeRequirementStatus`에 선택 인자로 요구사항 자체를 더 주면 이 판정이 켜지고, 안 주면(기존 호출) 예전 규칙 그대로다(하위 호환).
+4. **재추출 병합**: 모델은 재추출 때마다 여전히 R1..Rn을 새로 매겨 오지만(id 자체를 신뢰하지 않는다), `mergeReextractedRequirements`가 제목+EARS 문장의 문자 2-그램 자카드 유사도(한국어 교착어 특성상 공백 토큰화보다 안정적이다) + kind 일치로 기존 저장분과 그리디로 1:1 짝짓고 기존 id를 그대로 물려준다. 짝을 못 찾은 새 항목은 기존 최대 id 번호+1부터 매겨(id를 다시 쓰지 않는다), 짝을 못 찾은 기존 항목은 목록에서 지우지 않고 그대로 남긴 채 `removed`로 표시한다(사람이 "빼기"로 명시적으로 지우기 전까지는 id가 살아 있다). 같은 내용을 두 번 병합하면 결과가 완전히 같다(모든 항목이 `unchanged`, id 변화 0). `previewSessionRequirementsExtraction`은 `docs/requirements.md`가 이미 있으면 이 병합을 거쳐 `diff`(added/changed/unchanged/removed 목록)를 미리보기에 함께 돌려준다.
+5. **요구사항 스멜 린트**(`lintRequirement`): 한국어·영어 약한 표현 목록(빠르게/적절히/사용자 친화적/등/기타/가능하면 …, fast/user-friendly/etc./appropriate/as needed/TBD …), 시나리오 없음, `nonfunctional`인데 NFR 없음, 한 EARS 문장에 "해야 한다"가 여럿(요구사항이 사실 둘 이상 섞였다는 신호) 은 반드시 고쳐야 할 경고(mustFix)로, EARS 형태가 아닌 문장은 권고로 표시한다. 문서 전체의 "Ready" 배지(`requirementsReadyBadge`)는 필수(must) 요구사항이 모두 이 흠 없이 통과할 때만 켜진다.
+6. **추적 매트릭스**(`buildTraceabilityMatrix`/`buildMatrixCsv`): 요구사항·시나리오마다 한 행(개정·우선순위·이슈·커밋·테스트·게이트 확인·상태)을 만들고, 역방향으로 "주인 없는 테스트"(`scanTestFilesForOrphans`, 어느 id도 언급하지 않는 테스트)와 "테스트 없는 필수 요구사항"을 모은다. "요구사항" 탭에 "추적 매트릭스" 하위 화면(`GET /api/sessions/[id]/requirements/matrix`, `?format=csv`로 CSV 내려받기)을 더했다.
+7. **추출 프롬프트**가 EARS 문장+Given-When-Then 시나리오(참조 파일 요약의 실제 값 사용)+NFR(수치 임계값 필수)+약한 표현 금지+모호하면 요구사항 대신 `questions`에 `[NEEDS CLARIFICATION]`을 올리라고 지시한다. "이 요구사항 작업" 프리필은 테스트 이름에 시나리오 id(있으면)·요구사항 id를 넣으라는 안내에 더해 커밋·PR에 `Implements: R4@rev1` 트레일러를 남기라고 안내한다.
+8. **"모호한 점 추천 값"의 스펙 우선 원칙**(dogfooding 발견 #1): `Recommendation`에 `basis: 'spec' | 'practice'`·`specQuote?`를 더했다. 프롬프트가 "명세(또는 참조 파일·프로젝트 스택)가 이미 답을 정했으면 그 값을 그대로 따르고 근거 문장을 인용하라, 업계 관례는 명세가 열어 둔 것에만 쓰라"고 못박고, `verifySpecQuote`가 공백을 정규화해 `specQuote`가 실제로 스펙 원문의 부분 문자열인지 서버에서 검증한다 — 아니면 `basis`를 `practice`로 강등하고 인용을 지운다(지어낸 인용을 막는다). `buildRecommendationUserPrompt`에 세션의 managed 서비스 템플릿·데이터베이스 엔진 한 줄 요약(`[프로젝트 스택]`)을 붙여, 이미 고른 프레임워크·DB와 어긋나는 추천(Postgres 프로젝트에 MySQL 등)을 막는다. 화면은 `basis: 'spec'`에 "명세에 있음" 배지(웹/모델 출처 표시와는 다른 배지)와 인용문을 보여 준다.
+9. **"사람이 할 일" 가드**(dogfooding 발견 #2, 안전): 추출 응답에 `manualSteps`(코드·문서 밖에서 사람이 손으로 할 절차)를 더하고, 프롬프트가 저장소 권한·협업자·공개 범위 변경, 이메일·메시지 제출 같은 항목을 요구사항 대신 여기 넣으라고 지시한다. 모델이 그래도 잘못 분류할 수 있으므로 `isManualStepText`/`partitionManualSteps`가 결정론적 정규식(collaborator/협업자/초대/invite/visibility/공개 범위/권한/permission/branch protection/webhook/deploy key/secret 설정/메일로 제출/email 제출 등)으로 추출 응답과 저장(apply) 응답 둘 다에서 한 번 더 걸러 `docs/requirements.md`의 별도 "## 사람이 할 일 (에이전트 금지)" 절로 옮긴다 — 이 절은 `parseRequirementsMarkdown`이 요구사항으로 취급하지 않고, `project-guide.ts`가 매 실행 AGENTS.md 절 끝에 "에이전트는 이 항목을 절대 하지 않는다"는 문장과 함께 이어 붙인다(`summarizeManualStepsForGuide`). 화면도 "사람이 할 일 (에이전트 금지)"를 읽기 전용으로 분명히 표시한다.
+
+### 검증 결과
+- `packages/agent/src/requirements.test.ts`에 경계 정규식(R1 vs R10, R4 vs R4.1)·해시/개정 상승과 재확인 필요(드리프트 즉시·개정 후 미확인·신선한 증거로 해제)·`carryForwardRequirementRevision`·재추출 병합(같은 입력 두 번 → id 변화 0, 유사도로 짝짓기, id 재사용 안 함, removed 보존)·약한 표현 린트(한/영)·NFR 필수 필드·마크다운 왕복(새 필드 있음/없음 둘 다, 사람이 몸통을 고쳐도 hash는 JSON 블록 값을 지킨다)·추적 매트릭스(정방향 행·역방향 목록)·CSV·`isManualStepText`/`partitionManualSteps`(과제 예시 문장 그대로)·추천 스펙 우선(`specQuote` 검증·강등, 스택 요약)까지 130개 넘는 사례를 새로 더했다.
+- `packages/agent/src/test-discovery.test.ts`(테스트 탭의 `extractRequirementIds` 정규식도 시나리오 id를 포함하도록 함께 넓혔다)·`project-guide.test.ts`(요구사항+"사람이 할 일" 절이 함께 AGENTS.md 절에 붙는지)는 회귀 없이 그대로 통과했다.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 errors), `pnpm test` — 이번에 건드리지 않은 사전 존재 플레이키(`packages/sandbox/src/docker/format.test.ts`의 Docker 의존 타임아웃) 하나만 남고 나머지는 모두 통과(따로 돌리면 그 파일도 통과한다).
+- 확인하지 못한 범위: 실제 모델 호출로 EARS·시나리오·NFR을 포함한 추출 응답을 받아 보지는 못했다(이번 세션 정책상 모델 호출 금지) — 프롬프트·zod 스키마·결정론적 가드(`partitionManualSteps`)만 검증했다. 재추출 병합의 유사도 문턱(`MERGE_MATCH_THRESHOLD = 0.35`)은 손으로 만든 예시로 튜닝했고, 실제 추출 모델이 내는 제목·문장 분포에서 최적인지는 실 사용으로 다시 봐야 한다.
+
+### 감수한 트레이드오프
+- 사람이 읽는 몸통(`docs/requirements.md`)에서 EARS·시나리오·NFR·추적 줄을 손으로 고치면 그 값을 우선하지만, `hash`·`revisedAt`은 몸통에 전혀 쓰지 않고 끝의 JSON 주석 블록에서만 읽는다 — 그 블록을 사람이 통째로 지우면 개정 이력이 끊기고 다음 저장에서 "처음 저장"으로 리셋된다(기존 JSON 블록 전체 의존과 같은 한계).
+- 재추출 병합에서 명세에서 완전히 사라진 요구사항은 자동으로 지우지 않고 `removed`로 표시만 한다 — id를 다시 쓰지 않으려는 안전판이지만, 사용자가 화면에서 직접 "빼기"를 누르지 않으면 문서에 계속 남는다(정말 필요 없는 항목은 사람이 한 번 더 손대야 한다).
+- 약한 표현 목록·"사람이 할 일" 정규식은 고정된 한국어·영어 어휘 목록이다 — 목록에 없는 새로운 약한 표현이나 새로운 종류의 권한 변경 절차(이번에 다룬 것 밖의 것)는 걸러지지 않는다.
+- `verifySpecQuote`는 공백만 정규화한 부분 문자열 비교라, 모델이 스펙 문장을 의미는 같지만 토씨를 바꿔 인용하면(예: 어순만 바꾼 요약) "지어낸 인용"으로 오판해 `practice`로 강등할 수 있다 — 안전한 쪽으로 치우친 보수적 검증이다.
+
+---
+
+## ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다
+
+상태: 채택
+관련: -
+
+### 맥락
+- ADR-079가 `docs/requirements.md`(요구사항 + 증거 기반 상태)를 만들었지만, 그 상태는 세션 화면 안에서만 보인다. 여러 사람이 같이 보는 곳(팀 채널에 붙이는 이슈 링크, 이슈 트래커의 검색·필터·마일스톤)에서는 요구사항이 전혀 보이지 않는다. ADR-072(이슈로 바로 작업)·ADR-081(이슈·PR 상세)이 이미 저장소 이슈를 읽는 경로를 만들어 뒀으니, 이번에는 반대 방향(파일 → 이슈)을 잇는다.
+- task-plans.ts의 `publishPlanIssues`(작업 계획을 추적 이슈 + 하위 이슈로 올리는 기존 기능)가 좋은 선례다: 하위 이슈를 먼저 만들고, GitHub이면 `sub_issues` API로 연결하고, 그 밖의 호스트는 추적 이슈 본문에 체크리스트로 대신한다. 이번 기능은 "작업 계획" 대신 "요구사항"을 그 패턴에 태운다.
+- 관건은 **한 방향**을 지키는 것이다: `docs/requirements.md`가 언제나 원본이고, 이슈는 그 내용을 보여 주는 거울이어야 한다. 그런데 GitHub 이슈는 누구나 웹에서 바로 고칠 수 있어, "파일에서 편 값"과 "이슈에 지금 적힌 값"이 어긋날 수 있다 — 조용히 한쪽으로 덮어쓰면 사람이 이슈에서 고친 내용을 잃는다. 그래서 발행은 dry-run 계획을 먼저 세우고, 어긋남(충돌)을 감지하면 사람에게 가져오기·덮어쓰기·무시를 고르게 한다.
+- 다른 에이전트가 같은 시점에 `requirements.ts`의 `Requirement`에 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace` 필드를 추가하는 중이었다(ADR 조율 중, 아직 main 미병합). 이 기능은 그 필드들이 있으면 쓰고 없어도 동작해야 했다.
+- GitHub 하위 이슈 API(Sub-issues REST API, 2024년 일반 공개)는 GitHub에만 있다. Gitea·GitLab은 그런 API가 없어 ADR-072와 같은 경계로 GitHub·Gitea만 지원하고(GitLab은 대상 밖), 하위 이슈 연결은 GitHub에서만 한다.
+
+### 결정
+1. **순수 계산은 `packages/agent/src/requirement-issues.ts`에 모은다**(파일 IO·네트워크 없음): 관리형 영역(`<!-- b-studio:req id=R4 rev=2 hash=… --> … <!-- /b-studio:req -->`, EARS·시나리오·NFR·인수 조건을 담는다) 빌드·파싱, 라벨 집합(`b-studio:req`·`kind:*`·`priority:*`·`status:*`), 추적 이슈·하위 이슈 본문, 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists), 고정 상태 댓글, PR 본문 조립(`Closes #n`·`Implements: Rn@revN`), 이슈 폼 파싱, API 경로 화이트리스트. `Requirement`의 선택 필드(`rev`·`ears`·`scenarios`·`nfr`·`trace`)는 전부 optional인 별도 구조 타입(`RequirementForIssues`)으로 방어적으로 읽는다 — 다른 에이전트의 작업이 병합되기 전에도, 병합된 뒤에도 그대로 호환된다.
+2. **충돌 판정은 "우리가 마지막으로 쓴 해시"를 기준으로 삼는다.** 이슈 본문을 사람이 GitHub에서 직접 고쳐도 관리형 영역 헤더의 `hash=` 속성은 안 건드릴 수 있으므로, 그 속성을 믿지 않고 본문 내용을 다시 해시해 우리가 저장해 둔 `published.hash`와 비교한다. 다르면(원격이 바뀌었다) conflict, 로컬 해시가 그것과 다르면(내용이 바뀌었다) update(열려 있으면)/reverify(닫혀 있으면 다시 열고 재확인 필요로 표시), 같으면 unchanged(닫혀 있는데 검증 안 됨이면 closed_but_requirement_exists로 따로 알린다).
+3. **발행 기록은 `docs/requirements.issues.json`(사이드카 파일)에 둔다**(`docs/requirements.md` 자체는 건드리지 않는다). 요구사항 id마다 `{issue, rev, publishedHash, publishedAt}`을 담고, 추적 이슈 번호도 함께 둔다. `docs/requirements.md`의 저장 형식은 다른 에이전트가 동시에 고치고 있어 직접 필드를 더하면 병합 충돌·형식 드리프트 위험이 컸다 — 완전히 분리된 파일로 옆에 두면 그 위험이 없어지고, 재시작해도(세션 파일이라 커밋된다) 발행 상태를 잃지 않는다.
+4. **발행 orchestrator는 `apps/studio/lib/server/requirement-issues.ts`에 둔다**: `packages/agent`의 이슈 API(`createIssue`·`addSubIssue`·`updateIssue`·`listIssueComments`·`updateComment`·`ensureLabels`)를 부르고, `docs/requirements.issues.json`을 읽고 쓴다. **`sessions.ts`를 import하지 않는다**(원격·토큰·요구사항·상태 같은 순수 데이터만 받는다) — `sessions.ts`가 이 모듈을 부르는 한쪽 방향 의존만 있어 task-plans.ts와 sessions.ts 사이의 기존 관계와 같은 모양이다.
+5. **must·should만 하위 이슈, could·docs는 추적 이슈 체크리스트.** 추적 이슈 제목은 "요구사항: <프로젝트>", 표에 id·제목·종류·우선순위·상태·하위 이슈 링크를 담는다.
+6. **상태 반영은 요구사항마다 고정 댓글 하나만 계속 편집한다**(새 댓글을 쌓지 않는다). 표(시나리오·테스트·결과·커밋·게이트)를 담고, `status:*` 라벨도 같이 바꾼다. **검증됨 + 이 세션의 PR이 실제로 병합됐을 때만**(`PullDetail.merged`, GitHub·Gitea PR 상세에 새로 더한 필드) 하위 이슈를 닫는다 — `state: closed`만으로는 병합 없이 닫힌 PR과 구분이 안 되므로, `merged` 필드를 새로 읽어야 했다.
+7. **PR 본문·AI 리뷰에 요구사항을 잇는다.** 세션 커밋 제목의 "[R4]" 언급을 모아(`extractRequirementMentions`) `Closes #n`(검증됨 + 발행된 이슈만)·`Implements: Rn`(또는 `Rn@revN`)을 PR 본문 끝에 붙이고(`buildRequirementsAddendum`, `Closes #n`은 기본 브랜치로 여는 PR에서만 동작한다는 안내를 함께 남긴다), AI 리뷰 라운드의 사용자 프롬프트에도 구현한 요구사항의 제목·시나리오 압축 목록을 붙인다(`buildReviewRequirementsContext`). 올리기(export) 미리보기·생성 API가 사람이 이슈 번호를 입력하지 않았을 때 이 세션이 구현한(발행된) 요구사항의 이슈 번호를 통합 계획 이슈와 합쳐 기본값으로 쓴다 — 기존 텍스트 입력 칸에 자동으로 채워지는 방식이라 새 체크박스 UI 없이도 "기본 선택"이 된다. "이 요구사항 작업"·"전체 계획 세우기" 프리필도 발행된 이슈 번호를 `[R7] 제목 (#12)`로 덧붙인다.
+8. **UI**: "명세" 탭에 "이슈로 발행" 버튼 → dry-run 미리보기(행동별 개수 + 목록, 충돌마다 가져오기·덮어쓰기·무시 버튼) → 확인 후 발행. "다음 단계" 박스는 원격이 GitHub이면 "이슈로 발행"을 "전체 계획 세우기"보다 앞세우고, 아직 발행하지 않은 채 "전체 계획 세우기"를 누르면 한 번만("아직 이슈로 발행하지 않았습니다 — 먼저 발행할까요?") 물어보고 답하면 그 세션 동안 다시 묻지 않는다. 요구사항 카드에 발행된 이슈 번호 칩을 달고, 저장소 탭 이슈 목록은 `b-studio:req` 라벨 + `[Rn]` 제목이면 R-id 칩을 보여준다.
+9. **안전장치**: 이 기능이 부르는 API 경로는 이슈·하위 이슈·댓글·라벨만 화이트리스트로 못 박는다(`ALLOWED_REQUIREMENT_ENDPOINTS`, `assertAllowedRequirementEndpoint`). 협업자·권한·저장소 설정·웹훅·브랜치 보호 엔드포인트는 이 목록에 없고, repository.ts의 새 함수(`updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`)는 모두 실제 호출 전에 이 확인을 거친다. 라벨 생성만 예외로 허용한다(디자인에서 명시한 유일한 "설정 비슷한" 쓰기) — 그 밖의 저장소 설정은 절대 건드리지 않는다. 개인 PC 모드는 저장소 화면과 같은 `gh auth token` 폴백을 쓴다(`createIssue`·`addSubIssue`에 `token` 오버라이드를 새로 더했다 — 예전에는 환경 변수만 읽었다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 발행 기록(이슈 번호·해시)을 `docs/requirements.md`의 JSON 블록에 같이 넣는다 | 그 파일 형식을 다른 에이전트가 동시에 고치고 있어 병합 충돌·형식 드리프트 위험이 크다. 완전히 분리된 사이드카 파일(`docs/requirements.issues.json`)로 뒀다(채택) |
+| B. 충돌 판정을 관리형 영역 헤더의 `hash=` 속성만 보고 한다 | 사람이 GitHub에서 눈에 보이는 본문만 고치고 헤더 속성은 그대로 두면 충돌을 놓친다. 헤더를 신뢰하지 않고 본문 내용을 다시 해시해 우리가 저장한 값과 비교한다(채택) |
+| C. orchestrator가 `sessions.ts`의 세션 객체를 직접 받는다(편하게 `session.project.root` 등을 바로 쓴다) | `sessions.ts` → orchestrator → (다시) `sessions.ts` 순환이 생기거나, 세션 타입에 orchestrator가 얽매인다. 원격·토큰·프로젝트 루트 같은 순수 데이터만 받게 해 `sessions.ts`가 한쪽으로만 의존하게 했다(채택, task-plans.ts와 같은 방향) |
+| D. "검증됨"이면(PR 병합 여부와 무관하게) 하위 이슈를 바로 닫는다 | 검증됨은 세션 안의 증거일 뿐, 그 변경이 실제로 main에 들어갔다는 보장이 아니다(PR이 아직 열려 있거나 병합 없이 닫혔을 수 있다). `PullDetail.merged`를 새로 읽어 "검증됨 + 실제 병합" 둘 다 확인했을 때만 닫는다(채택) |
+| E. 이슈 번호 선택을 위해 저장소 탭처럼 체크박스 목록 UI를 새로 만든다 | 올리기 화면은 이미 쉼표 구분 텍스트 입력 한 칸으로 이슈 번호를 받고, 서버가 기본값을 미리 채워 준다(첫 미리보기 호출에서). 그 기존 통로에 발행된 요구사항 이슈 번호를 기본값으로 더 섞어 주는 쪽이 새 UI보다 작고 일관됐다(채택) |
+
+### 검증 결과
+- `packages/agent/src/requirement-issues.test.ts`(신규, 30건): 관리형 영역 왕복, 라벨 집합, 추적 이슈 본문(표 + 체크리스트), 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists, 멱등성), 고정 상태 댓글, PR 본문 조립(Closes/Implements), 이슈 가져오기(관리형 영역·이슈 폼·평문 세 경로), API 경로 화이트리스트(허용·거부 양쪽).
+- `packages/agent/src/repository.test.ts`(보강): `updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`·`ensureLabels` 신규 함수를 페이크 fetch로 확인했다.
+- `apps/studio/lib/server/requirement-issues.test.ts`(신규, 12건): 임시 폴더 + 페이크 `@b-studio/agent` 함수로 발행 계획·발행 실행(하위 이슈 연결 실패해도 계속 진행)·충돌 세 갈래(가져오기·덮어쓰기·무시)·상태 동기화(고정 댓글 편집, PR 병합 시에만 닫기)를 확인했다.
+- `apps/studio/lib/server/sessions.test.ts`(보강): 프리필에 발행된 이슈 번호를 붙이는 `annotateWithIssue`·`annotateAllMustHavesPrefill`.
+- `apps/studio/app/api/sessions/[id]/requirements/{publish,publish/preview,publish/conflict,publish/sync,import-issue}/route.test.ts`(신규), `apps/studio/app/api/sessions/[id]/export/{,preview/}route.test.ts`(신규): 라우트 위임과, 입력이 없을 때 통합 계획 이슈 + 발행된 요구사항 이슈를 합쳐 기본값으로 쓰는 것을 확인했다.
+- `packages/agent/src/pr-review.test.ts`·`apps/studio/lib/server/review-round.test.ts`(보강): `requirementsContext`가 리뷰어 프롬프트에 그대로 실리는 것을 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`·`repository-panel.test.tsx`(보강): "다음 단계" 순서(GitHub이면 이슈로 발행이 먼저), 확인 게이트 순수 로직(`shouldConfirmBeforePlanAll`), R-id 칩 렌더링을 확인했다(이 저장소의 컴포넌트 테스트 관례대로 `renderToStaticMarkup`만 쓴다 — 상호작용 테스트 도구가 없어 클릭 흐름 자체는 그 안에 든 순수 로직으로 나눠 검증했다).
+- `pnpm -r typecheck`(6개 패키지) 통과, `pnpm --filter @b-studio/studio lint` 0 errors(기존 경고 7개는 이 변경과 무관), 전체 `vitest run`은 이 변경분 기준으로 새로 실패한 테스트가 없다(기존에도 알려진 부하 플레이키 — Docker 스크립트·체크포인트 git clone·아티팩트 정리 테스트가 전체 스위트를 한 번에 돌릴 때만 가끔 5초 타임아웃에 걸린다 — 단독 실행하면 통과한다).
+- 실제 GitHub·Gitea API 호출은 하지 않았다(이번 라운드 조건: 네트워크 금지). 모든 네트워크 경로는 페이크 `fetch`/모킹한 `@b-studio/agent` 함수로만 검증했다.
+
+### 감수한 트레이드오프
+- **발행 기록이 두 파일(`docs/requirements.md` + `docs/requirements.issues.json`)로 나뉜다.** 사람이 `docs/requirements.md`만 보고 "이 요구사항이 몇 번 이슈인지" 바로 알 수 없다(화면의 이슈 칩으로 봐야 한다). `docs/requirements.md`의 소유권 충돌을 피하려 감수했다 — 그 파일의 필드가 안정된 뒤 통합할 수 있는 여지는 남겨 뒀다(사이드카 파일의 필드 이름을 그대로 옮기면 된다).
+- **GitLab은 지원하지 않는다**(GitHub·Gitea만). GitLab은 하위 이슈 개념이 다르고(epic·related issue), 라벨·이슈 API 모양도 달라 이번 범위에 넣지 않았다.
+- **이슈 목록 조회(`listIssues`)가 첫 페이지(최대 50개)만 본다** — ADR-079의 트레이드오프와 같다. 요구사항이 50개를 훌쩍 넘고 옛 이슈가 뒤로 밀리면 `trace.issue`(사이드카 파일) 없이는 id 마커로 못 찾을 수 있다.
+- **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
+- **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
+- **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
 
 ---
 

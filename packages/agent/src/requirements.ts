@@ -13,6 +13,7 @@
  * 이 파일의 함수는 모두 순수 함수다(파일 IO·네트워크 없음) — studio의 sessions.ts가 파일 읽기/쓰기·세션 상태 조회를 맡고,
  * 여기 함수들은 입력을 받아 값을 돌려주기만 한다(테스트하기 쉽게, 그리고 studio 밖에서도 재사용할 수 있게).
  */
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentUsage } from './loop';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
@@ -33,16 +34,79 @@ export const MAX_ASSUMPTIONS = 10;
 /** "범위 밖" 노트로 뺄 수 있는 항목 수 상한(요구사항으로 만들지 않는 부정형 문장) */
 export const MAX_OUT_OF_SCOPE = 20;
 
+/** 요구사항 id는 영구적이다 — 절대 다시 매기거나 재사용하지 않는다(ADR-090). 시나리오 id(R4.1)는 SCENARIO_ID를 따로 쓴다 */
 const REQUIREMENT_ID = /^R[1-9][0-9]*$/;
+const SCENARIO_ID = /^R[1-9][0-9]*\.[1-9][0-9]*$/;
 
-export const RequirementSchema = z.object({
-  id: z.string().regex(REQUIREMENT_ID, 'R1, R2… 형태의 id여야 합니다'),
-  title: z.string().min(1).max(200),
-  kind: z.enum(REQUIREMENT_KINDS),
-  /** 테스트 가능한 인수 조건. "~하면 ~한다" 같은 확인 가능한 문장이어야 한다(제목을 되풀이하는 문장은 안 된다) */
-  acceptance: z.array(z.string().min(1).max(500)).min(1).max(20),
-  priority: z.enum(REQUIREMENT_PRIORITIES),
+/**
+ * 증거·트레일러에서 요구사항/시나리오 id를 토큰 하나로 뽑는다. "R1"이 "R10"의 일부로 걸리지 않게 항상 단어 경계로 감싼다
+ * (alistairmavin.com/ears의 패턴 이름과 무관하게, Doorstop/sphinx-needs류 도구의 "id는 독립 토큰" 관례를 그대로 따른다).
+ */
+export const REQUIREMENT_MENTION_PATTERN = /\bR\d+(?:\.\d+)?\b/g;
+
+export const EARS_PATTERNS = ['ubiquitous', 'event', 'state', 'unwanted', 'optional'] as const;
+export type EarsPattern = (typeof EARS_PATTERNS)[number];
+
+/** EARS(Easy Approach to Requirements Syntax, alistairmavin.com/ears) 한 문장. "…해야 한다"로 끝나는 단수 서술 하나만 담는다 */
+export const EarsSchema = z.object({
+  pattern: z.enum(EARS_PATTERNS),
+  statement: z.string().min(1).max(500),
 });
+export type Ears = z.infer<typeof EarsSchema>;
+
+/** Gherkin 스타일 Given-When-Then 시나리오 하나. id는 소속 요구사항 id로 시작한다(R4의 시나리오는 R4.1, R4.2…) */
+export const ScenarioSchema = z.object({
+  id: z.string().regex(SCENARIO_ID, 'R4.1 형태의 시나리오 id여야 합니다'),
+  given: z.string().min(1).max(500),
+  when: z.string().min(1).max(500),
+  then: z.string().min(1).max(500),
+});
+export type Scenario = z.infer<typeof ScenarioSchema>;
+
+/** 비기능 요구사항(kind: nonfunctional)의 측정 가능한 기준. QVscribe류 요구사항 스멜 검사가 요구하는 "수치화된 임계값"을 강제한다 */
+export const NfrSchema = z.object({
+  metric: z.string().min(1).max(200),
+  threshold: z.string().min(1).max(200),
+  condition: z.string().min(1).max(300),
+  method: z.string().min(1).max(300),
+});
+export type Nfr = z.infer<typeof NfrSchema>;
+
+/**
+ * 추적 정보. `issue`·`rev`·`hash`는 저장소 이슈 발행을 맡은 다른 모듈(requirement-issues.ts)이 그대로 읽으므로
+ * 이름을 바꾸지 않는다. `supersedes`는 재추출로 요구사항이 쪼개질 때 새 항목이 옛 항목을 가리키는 자리다.
+ */
+export const TraceSchema = z.object({
+  issue: z.number().int().positive().optional(),
+  dependsOn: z.array(z.string().regex(REQUIREMENT_ID)).max(20).optional(),
+  supersedes: z.string().regex(REQUIREMENT_ID).optional(),
+});
+export type Trace = z.infer<typeof TraceSchema>;
+
+export const RequirementSchema = z
+  .object({
+    id: z.string().regex(REQUIREMENT_ID, 'R1, R2… 형태의 id여야 합니다'),
+    title: z.string().min(1).max(200),
+    kind: z.enum(REQUIREMENT_KINDS),
+    /** 테스트 가능한 인수 조건. "~하면 ~한다" 같은 확인 가능한 문장이어야 한다(제목을 되풀이하는 문장은 안 된다) */
+    acceptance: z.array(z.string().min(1).max(500)).min(1).max(20),
+    priority: z.enum(REQUIREMENT_PRIORITIES),
+    /** 개정 번호. 1부터 시작하고, 내용(ears+scenarios+nfr+title)의 해시가 바뀌면 오른다 */
+    rev: z.number().int().min(1).optional(),
+    ears: EarsSchema.optional(),
+    /** 최대 20개 — 한 요구사항이 이보다 많은 시나리오를 필요로 하면 요구사항을 쪼개야 한다는 신호로 본다 */
+    scenarios: z.array(ScenarioSchema).max(20).optional(),
+    /** kind가 nonfunctional이면 있어야 lintRequirement가 "Ready"로 본다 — 옛 문서와 호환하려고 스키마에서는 선택이다 */
+    nfr: NfrSchema.optional(),
+    trace: TraceSchema.optional(),
+    /** ears+scenarios+nfr+title의 안정적 해시(computeRequirementHash). 저장할 때마다 다시 계산해 이전 값과 다르면 개정이 오른다 */
+    hash: z.string().optional(),
+    /** 마지막으로 개정이 오른 시각(ISO 8601). 그 뒤에 생긴 증거만 "재확인됨"으로 인정한다(computeRequirementStatus) */
+    revisedAt: z.string().optional(),
+  })
+  .refine((value) => (value.scenarios ?? []).every((scenario) => scenario.id.startsWith(`${value.id}.`)), {
+    message: '시나리오 id는 소속 요구사항 id로 시작해야 합니다(예: R4의 시나리오는 R4.1)',
+  });
 export type Requirement = z.infer<typeof RequirementSchema>;
 
 /** "## 가정" 절의 항목 하나. 데이터 규모·동시성/트래픽(명세가 실마리를 줄 때만)·페이지네이션/인덱스 같은 성능 관련 제약 — 서버 사양은 다루지 않는다 */
@@ -51,12 +115,71 @@ export const AssumptionSchema = z.string().min(1).max(300);
 /** 요구사항으로 만들지 않고 "범위 밖" 노트로 빼는 부정형 문장(예: "결제 연동은 포함하지 않는다") */
 export const OutOfScopeItemSchema = z.string().min(1).max(300);
 
+/** "## 사람이 할 일" 절에 담을 수 있는 항목 수 상한 */
+export const MAX_MANUAL_STEPS = 20;
+export const ManualStepItemSchema = z.string().min(1).max(300);
+
+/**
+ * 명세가 요구사항처럼 적어도 실제로는 코드·문서 밖에서 사람이 손으로 해야 하는 절차(저장소 권한·협업자·공개 범위
+ * 변경, 이메일·메시지로 제출, 계정 생성 등)를 결정론적으로 거른다(ADR-090). 모델이 프롬프트 규칙을 놓쳐도
+ * 에이전트가 GitHub 저장소 권한을 바꾸는 작업을 "요구사항"으로 착각해 시도하지 않도록 이 가드가 항상 한 번 더 본다.
+ *
+ * 아래는 그 자체로 "사람이 할 일"인 표현이다. 앱 기능 이름으로 거의 쓰이지 않는다(GitHub 용어 collaborator, 제출 절차).
+ */
+const MANUAL_STEP_STANDALONE: readonly RegExp[] = [
+  /\bcollaborators?\b/i,
+  /branch\s*protection/i,
+  /deploy\s*key/i,
+  /메일(?:로)?\s*제출|이메일(?:로)?\s*제출|email\s*(?:로)?\s*제출/i,
+  /제출\s*(?:방법|절차)/i,
+];
+/**
+ * 앱 기능으로도 흔한 표현(결제 webhook, 사용자 권한 변경, 팀원 초대, 게시글 공개 범위 등). 저장소·계정 맥락과
+ * 함께 나올 때만 "사람이 할 일"로 본다 — 맥락 없이 걸면 정상 요구사항이 에이전트 작업 목록에서 빠진다
+ */
+const MANUAL_STEP_IN_REPO_CONTEXT: readonly RegExp[] = [
+  /협업자|공동\s*작업자/,
+  /\binvite(?:s|d)?\b|초대/i,
+  /\bvisibility\b|공개\s*범위|\bprivate\b|\bpublic\b|비공개|공개로/i,
+  /권한|\bpermission/i,
+  /\bwebhook\b|웹훅/i,
+  /\bsecrets?\b|시크릿/i,
+];
+const REPO_CONTEXT = /저장소|레포|\brepo(?:sitory)?\b|github|깃허브|gitlab|organization|조직\s*설정|계정\s*설정/i;
+
+/** 텍스트가 "사람이 할 일"(에이전트가 절대 하면 안 되는 절차)로 보이는지 */
+export function isManualStepText(text: string): boolean {
+  if (MANUAL_STEP_STANDALONE.some((pattern) => pattern.test(text))) return true;
+  return REPO_CONTEXT.test(text) && MANUAL_STEP_IN_REPO_CONTEXT.some((pattern) => pattern.test(text));
+}
+
+/**
+ * 요구사항 목록에서 "사람이 할 일"로 보이는 항목을 걷어내 manualSteps로 옮긴다. 모델이 직접 낸 manualSteps에
+ * 이어 붙이므로, 모델이 이미 올바르게 분류했어도(중복 없이) 결정론적 가드가 한 번 더 확인하는 이중 안전망이 된다.
+ */
+export function partitionManualSteps(requirements: readonly Requirement[], manualSteps: readonly string[] = []): { requirements: Requirement[]; manualSteps: string[] } {
+  const kept: Requirement[] = [];
+  const moved: string[] = [...manualSteps];
+  for (const requirement of requirements) {
+    const text = [requirement.title, ...requirement.acceptance].join(' ');
+    if (isManualStepText(text)) {
+      const detail = requirement.acceptance.length > 0 ? `${requirement.title} — ${requirement.acceptance.join('; ')}` : requirement.title;
+      moved.push(detail);
+    } else {
+      kept.push(requirement);
+    }
+  }
+  return { requirements: kept, manualSteps: moved };
+}
+
 export const ExtractionReplySchema = z
   .object({
     requirements: z.array(RequirementSchema).min(1).max(MAX_REQUIREMENTS),
     questions: z.array(z.string().min(1).max(300)).max(MAX_CLARIFYING_QUESTIONS),
     outOfScope: z.array(OutOfScopeItemSchema).max(MAX_OUT_OF_SCOPE).default([]),
     assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).default([]),
+    /** 코드·문서 밖에서 사람이 손으로 할 절차(저장소 권한·협업자 추가, 이메일 제출 등) — 에이전트는 절대 하지 않는다 */
+    manualSteps: z.array(ManualStepItemSchema).max(MAX_MANUAL_STEPS).default([]),
   })
   .refine((value) => new Set(value.requirements.map((requirement) => requirement.id)).size === value.requirements.length, {
     message: '요구사항 id가 중복됩니다',
@@ -75,20 +198,25 @@ export class RequirementsError extends Error {
 
 /** 추출 모델에게 주는 고정 시스템 프롬프트. pr-review.ts와 같은 문체(영어 지시, JSON만 받는다) */
 export function buildExtractionSystemPrompt(): string {
-  return `You turn a full-stack product spec into a requirements list with concrete, testable acceptance criteria, in the style of GitHub Spec Kit's /specify step.
+  return `You turn a full-stack product spec into a requirements list with concrete, testable acceptance criteria, EARS-style statements, and Given-When-Then scenarios, in the style of GitHub Spec Kit's /specify step and the EARS notation (alistairmavin.com/ears).
 You see ONLY the spec text below (it may include a "[참조 파일 요약]" section — compact summaries of files the spec references, such as seed data — and a previous round's answered questions appended at the end) — you have no tools to read the actual project code.
 Reply with ONLY a JSON object, no prose before or after:
-{"requirements":[{"id":"R1","title":"short title","kind":"api"|"ui"|"data"|"nonfunctional"|"docs","acceptance":["testable criterion", "..."],"priority":"must"|"should"|"could"}],"questions":["short clarifying question", "..."],"outOfScope":["explicitly excluded item", "..."],"assumptions":["short assumption", "..."]}
+{"requirements":[{"id":"R1","title":"short title","kind":"api"|"ui"|"data"|"nonfunctional"|"docs","acceptance":["testable criterion", "..."],"priority":"must"|"should"|"could","ears":{"pattern":"ubiquitous"|"event"|"state"|"unwanted"|"optional","statement":"단수 EARS 문장"},"scenarios":[{"id":"R1.1","given":"...","when":"...","then":"..."}],"nfr":{"metric":"...","threshold":"...","condition":"...","method":"..."}}],"questions":["short clarifying question", "..."],"outOfScope":["explicitly excluded item", "..."],"assumptions":["short assumption", "..."],"manualSteps":["procedure a human must do outside the code, verbatim from the spec", "..."]}
 Rules:
+- manualSteps: put here any step that changes repository/account permissions or settings, NOT code or docs — adding a collaborator, changing repo visibility(private/public), inviting someone, setting branch protection/webhooks/deploy keys/secrets, creating accounts, or submitting/notifying by email or message. These are things a HUMAN does outside this tool, never the coding agent — do NOT turn them into a requirement (even as "could"/optional), no matter how the spec phrases them (e.g. "제출 방법: … collaborator로 추가 … 메일로 제출"). At most ${MAX_MANUAL_STEPS} items, short and verbatim-ish from the spec.
 - id: "R1","R2",... in the order requirements appear in the spec. No gaps, no repeats. Keep the SAME id for the SAME requirement across re-extractions when its meaning hasn't materially changed — saved status and evidence are keyed by id, so churn here throws that away.
 - title: one short line. Group closely related sub-items under one requirement (e.g. all CRUD endpoints of one resource, or one screen's loading/empty/error/success states) instead of splitting them one-by-one.
 - acceptance: 1 or more concrete, testable statements a reviewer could check off without guessing — use the actual inputs/outputs the spec gives (request/response fields, status codes), and for UI list every state the spec implies (loading/empty/error, not just the happy path). Never just restate the title.
+- ears: exactly ONE EARS-notation sentence per requirement, ending in "…해야 한다" — and only ONE such clause (never two "해야 한다" joined with "그리고"/","). Pick the pattern that matches: ubiquitous("시스템은 항상 …해야 한다"), event("…하면 시스템은 …해야 한다"), state("…인 동안 시스템은 …해야 한다"), unwanted("…라면 시스템은 …해야 한다" — 이상 상태·오류 처리), optional("…하는 경우 시스템은 …해야 한다" — 있으면 좋은 기능). Never restate the title; use the concrete trigger/condition from the spec.
+- scenarios: 1 or more Given-When-Then scenarios, id "{requirement id}.1", "{requirement id}.2", … Use CONCRETE values (실제 필드명·상태 코드·seed 데이터 수치 — "[참조 파일 요약]"이 있으면 그 값을 쓴다), never placeholders like "적절한 값".
+- nfr: REQUIRED when kind is "nonfunctional" — metric(측정 지표)·threshold(수치 임계값)·condition(측정 조건 — 동시 사용자 수·부하 등)·method(측정 방법)를 모두 구체적으로 채운다(예: {"metric":"응답 시간","threshold":"300ms 이하","condition":"p95, 동시 요청 50건","method":"k6 부하 테스트"}). Omit "nfr" for other kinds.
+- Never use vague/weak words anywhere (in title/acceptance/ears/scenarios/nfr) — 빠르게, 적절히, 사용자 친화적, 등, 기타, 가능하면, 적당히, fast, user-friendly, etc., appropriate, as needed, TBD, quickly 같은 말 대신 항상 구체적인 수치·조건을 쓴다. 정말 정할 수 없으면 그 항목을 "questions"에 "[NEEDS CLARIFICATION] …" 형태로 올려라(요구사항 문장에 모호한 말을 남기지 마라).
 - kind: api(서버 엔드포인트·비즈니스 로직), ui(화면·컴포넌트), data(스키마·마이그레이션), nonfunctional(성능·보안·가용성 등 비기능 요구), docs(문서화). Pick the closest one.
-- priority: must(없으면 제출이 안 됨), should(있어야 완성도 있음), could(있으면 좋음, 보너스). Default to "must" unless the spec explicitly marks an item optional/bonus/nice-to-have.
+- priority: must(빠지면 완성으로 보지 않는다), should(있어야 완성도 있다), could(있으면 좋다, 보너스). Default to "must" unless the spec explicitly marks an item optional/bonus/nice-to-have.
 - Never turn a negative statement ("X is not included", "X 미포함", "X는 하지 않는다") into its own requirement — put it in "outOfScope" instead (a short note, not an acceptance criterion). At most ${MAX_OUT_OF_SCOPE} items.
-- questions: at most ${MAX_CLARIFYING_QUESTIONS} short clarifying questions about real ambiguities that would change requirements or acceptance criteria (Spec Kit's /clarify style — do not ask about things the spec already answers). If nothing is ambiguous, reply with an empty array.
+- questions: at most ${MAX_CLARIFYING_QUESTIONS} short clarifying questions about real ambiguities that would change requirements or acceptance criteria (Spec Kit's /clarify and [NEEDS CLARIFICATION] style — do not ask about things the spec already answers). If nothing is ambiguous, reply with an empty array.
 - assumptions: at most ${MAX_ASSUMPTIONS} short, concrete assumptions this extraction relied on — data volume (derive it from any "[참조 파일 요약]" you were given, e.g. "seed 데이터 기준 게시글 42건"), expected concurrency/traffic ONLY if the spec itself hints at it, and performance-relevant constraints the spec implies (pagination, indexing). Never assume or ask about server hardware specs. Leave empty if nothing applies.
-- Write title/acceptance/questions/outOfScope/assumptions text in Korean. Keep id/kind/priority values in English exactly as listed above.`;
+- Write title/acceptance/ears/scenarios/nfr/questions/outOfScope/assumptions/manualSteps text in Korean. Keep id/kind/priority/pattern values in English exactly as listed above.`;
 }
 
 /**
@@ -112,7 +240,9 @@ export function parseExtractionReply(text: string): ExtractionReply {
   if (!parsed.success) {
     throw new RequirementsError(`추출 응답 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   }
-  return parsed.data;
+  // 모델이 저장소 권한 변경·이메일 제출 같은 "사람이 할 일"을 요구사항으로 잘못 분류했어도 결정론적 가드가 한 번 더 걷어낸다
+  const { requirements, manualSteps } = partitionManualSteps(parsed.data.requirements, parsed.data.manualSteps);
+  return { ...parsed.data, requirements, manualSteps };
 }
 
 /**
@@ -377,6 +507,10 @@ export const RecommendationSchema = z.object({
   answer: z.string().min(1).max(500),
   rationale: z.string().min(1).max(300),
   sources: z.array(RecommendationSourceSchema).max(2).default([]),
+  /** 'spec'이면 명세(또는 참조 파일)가 이미 답을 정해 준 경우, 'practice'면 명세가 열어 둔 부분이라 업계 관례로 채운 경우 */
+  basis: z.enum(['spec', 'practice']).catch('practice'),
+  /** basis가 'spec'일 때만 있다 — 명세 원문에서 그대로 가져온 근거 문장(서버가 specText에 실제로 있는지 검증한다) */
+  specQuote: z.string().min(1).max(500).optional(),
 });
 export type Recommendation = z.infer<typeof RecommendationSchema>;
 
@@ -391,23 +525,56 @@ export function labelRecommendationSource(webSearchAvailable: boolean): 'web' | 
 }
 
 export function buildRecommendationSystemPrompt(webSearchAvailable: boolean): string {
-  return `You recommend concrete answers to open questions about a product spec, grounded in widely used industry practice${webSearchAvailable ? ' — you have WebSearch/WebFetch, use them to find real, current sources' : ' — you have no tools, answer from what you already know'}.
+  return `You recommend concrete answers to open questions about a product spec.
+${webSearchAvailable ? 'You have WebSearch/WebFetch — use them to find real, current sources for questions the spec leaves open.' : 'You have no tools — answer from what you already know for questions the spec leaves open.'}
 Reply with ONLY a JSON object, no prose before or after:
-{"recommendations":[{"question":"<one of the given questions, verbatim>","answer":"recommended value/decision","rationale":"one-line reason","sources":[{"url":"https://...","title":"optional short title"}]}]}
+{"recommendations":[{"question":"<one of the given questions, verbatim>","answer":"recommended value/decision","rationale":"one-line reason","basis":"spec"|"practice","specQuote":"verbatim sentence from the spec — only when basis is spec","sources":[{"url":"https://...","title":"optional short title"}]}]}
 Rules:
 - Cover every question given, in the same order, "question" matching the input verbatim.
+- SPEC FIRST: if the spec text (or a "[참조 파일 요약]"/"[프로젝트 스택]" section given below) already answers, constrains, or implies the answer, your "answer" MUST follow it exactly — NEVER recommend anything that contradicts a rule the spec states (a field/response shape it shows verbatim, a data format, a database engine or framework already in "[프로젝트 스택]"). Set "basis":"spec" and "specQuote" to the exact sentence (a verbatim substring you can point to) that governs it.
+- Only use "basis":"practice" (industry-practice default, no specQuote) for what the spec genuinely leaves open.
+- If "[프로젝트 스택]" names a database/framework/language, your recommendation must match it (e.g. never suggest MySQL-only syntax when the stack says PostgreSQL, never suggest a different field name than one the spec's example already shows).
 - answer: a concrete, usable default a competent engineer would pick absent more context (not "it depends").
 - rationale: one short line, in Korean.
-- sources: ${webSearchAvailable ? 'up to 2 real links you found via web search just now (prefer official docs/specs over blog posts)' : 'leave empty — without a tool call you cannot verify a link, so do not invent one'}.
-- Write answer/rationale in Korean. Keep JSON keys in English exactly as listed above.`;
+- sources: ${webSearchAvailable ? 'up to 2 real links you found via web search just now (prefer official docs/specs over blog posts) — only for "basis":"practice" items, since "basis":"spec" already has its source (specQuote)' : 'leave empty — without a tool call you cannot verify a link, so do not invent one'}.
+- Write answer/rationale in Korean. Keep JSON keys and basis values in English exactly as listed above.`;
 }
 
-export function buildRecommendationUserPrompt(questions: readonly string[], specText: string): string {
+export function buildRecommendationUserPrompt(questions: readonly string[], specText: string, stackSummary?: string): string {
   const list = questions.map((question, index) => `${index + 1}. ${question}`).join('\n');
-  return `Product spec:\n\n${specText.trim()}\n\nOpen questions:\n${list}`;
+  const stackLine = stackSummary?.trim() ? `\n\n[프로젝트 스택]\n${stackSummary.trim()}` : '';
+  return `Product spec:\n\n${specText.trim()}${stackLine}\n\nOpen questions:\n${list}`;
 }
 
-export function parseRecommendationReply(text: string): RecommendationReply {
+function normalizeForQuoteMatch(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** specQuote가 실제로 specText 안에 있는 문장인지(공백 정규화 후 부분 문자열로) 확인한다 — 지어낸 인용을 막는다 */
+export function verifySpecQuote(specQuote: string, specText: string): boolean {
+  const normalizedQuote = normalizeForQuoteMatch(specQuote);
+  if (!normalizedQuote) return false;
+  return normalizeForQuoteMatch(specText).includes(normalizedQuote);
+}
+
+/**
+ * basis가 'spec'인데 specQuote가 없거나 specText에 실제로 없으면(모델이 지어낸 인용) 'practice'로 강등하고
+ * specQuote를 지운다 — "명세에 있음" 배지는 검증된 인용에만 붙어야 한다.
+ */
+function enforceSpecQuoteEvidence(recommendations: readonly Recommendation[], specText: string): Recommendation[] {
+  return recommendations.map((recommendation) => {
+    if (recommendation.basis !== 'spec') return recommendation;
+    if (recommendation.specQuote && verifySpecQuote(recommendation.specQuote, specText)) return recommendation;
+    const { specQuote: _drop, ...rest } = recommendation;
+    return { ...rest, basis: 'practice' as const };
+  });
+}
+
+/**
+ * 추천 응답을 파싱한다. specText를 주면(운영 경로는 항상 준다) "명세에 있음" 인용을 검증해 지어낸 인용을 걸러낸다
+ * (enforceSpecQuoteEvidence) — specText를 생략하면(과거 호출 호환) 검증 없이 파싱만 한다.
+ */
+export function parseRecommendationReply(text: string, specText?: string): RecommendationReply {
   let raw: unknown;
   try {
     raw = parsePlannerReply(text);
@@ -418,7 +585,8 @@ export function parseRecommendationReply(text: string): RecommendationReply {
   if (!parsed.success) {
     throw new RequirementsError(`추천 응답 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   }
-  return parsed.data;
+  if (specText === undefined) return parsed.data;
+  return { recommendations: enforceSpecQuoteEvidence(parsed.data.recommendations, specText) };
 }
 
 /** 추천 모델을 도구 없이(또는 claude-code 한정 웹 도구만 열고) 한 번 불러 질문마다 추천 답·근거·출처를 받는다 */
@@ -428,13 +596,14 @@ export async function requestQuestionRecommendations(
   specText: string,
   webSearchAvailable: boolean,
   signal?: AbortSignal,
+  stackSummary?: string,
 ): Promise<RecommendationReply & { usage: AgentUsage; durationMs: number }> {
   const started = performance.now();
-  const answer = await ask({ system: buildRecommendationSystemPrompt(webSearchAvailable), user: buildRecommendationUserPrompt(questions, specText) }, signal);
+  const answer = await ask({ system: buildRecommendationSystemPrompt(webSearchAvailable), user: buildRecommendationUserPrompt(questions, specText, stackSummary) }, signal);
   const durationMs = Math.round(performance.now() - started);
   const { text, usage } = answer;
   try {
-    return { ...parseRecommendationReply(text), usage, durationMs };
+    return { ...parseRecommendationReply(text, specText), usage, durationMs };
   } catch (error) {
     if (error instanceof RequirementsError) {
       error.usage = usage;
@@ -451,8 +620,12 @@ export async function requestQuestionRecommendations(
 /** 세션 작업 복사본에 쓰는 자리. 체크포인트 diff·PR·다음 세션에 그대로 남는다(=제출물의 일부) */
 export const REQUIREMENTS_FILE = 'docs/requirements.md';
 
-export type RequirementStatus = '미착수' | '작업 중' | '검증됨' | '실패';
-export const REQUIREMENT_STATUSES: readonly RequirementStatus[] = ['미착수', '작업 중', '검증됨', '실패'];
+/**
+ * "재확인 필요"는 검증됨보다 낮은 확신으로 다룬다(requirementConfidence) — 내용이 바뀐 뒤 아직 새 증거로
+ * 다시 확인되지 않은 상태다(Doorstop/sphinx-needs류 도구의 "suspect" 링크와 같은 개념).
+ */
+export type RequirementStatus = '미착수' | '작업 중' | '검증됨' | '재확인 필요' | '실패';
+export const REQUIREMENT_STATUSES: readonly RequirementStatus[] = ['미착수', '작업 중', '검증됨', '재확인 필요', '실패'];
 
 const JSON_BLOCK = /<!--\s*b-studio-requirements\s*([\s\S]*?)-->/;
 
@@ -460,12 +633,41 @@ function requirementHeading(requirement: Requirement): string {
   return `## ${requirement.id}. ${requirement.title}`;
 }
 
-const KIND_PRIORITY_LINE = /^-\s*종류:\s*(\S+)\s*·\s*우선순위:\s*(\S+)\s*$/;
+const KIND_PRIORITY_LINE = /^-\s*종류:\s*(\S+)\s*·\s*우선순위:\s*(\S+)(?:\s*·\s*개정:\s*(\d+))?\s*$/;
+const EARS_LINE = /^-\s*EARS\((ubiquitous|event|state|unwanted|optional)\):\s*(.+?)\s*$/;
+const SCENARIOS_HEADER = /^-\s*시나리오:\s*$/;
+const SCENARIO_ITEM = /^\s+-\s+(R[1-9][0-9]*\.[1-9][0-9]*):\s*\(Given\)\s*(.+?)\s*\(When\)\s*(.+?)\s*\(Then\)\s*(.+?)\s*$/;
 const ACCEPTANCE_HEADER = /^-\s*인수\s*조건:\s*$/;
 const ACCEPTANCE_ITEM = /^\s+-\s+(.+?)\s*$/;
+const NFR_LINE = /^-\s*NFR:\s*지표\s+(.+?)\s*·\s*임계값\s+(.+?)\s*·\s*조건\s+(.+?)\s*·\s*측정\s+(.+?)\s*$/;
+const TRACE_LINE = /^-\s*추적:\s*(.+?)\s*$/;
 const REQUIREMENT_HEADING = /^##\s+(R[1-9][0-9]*)\.\s*(.+?)\s*$/;
 const ASSUMPTIONS_HEADING = /^##\s*가정\s*$/;
 const ASSUMPTION_ITEM = /^-\s+(.+?)\s*$/;
+/**
+ * "사람이 할 일" 절 헤딩. 괄호 안의 문구("에이전트 금지" 등)는 자유다 — 헤딩 첫 낱말만 확인한다.
+ * 한글 글자는 JS 정규식의 \w(아스키 전용)에 들지 않아 \b가 한글-한글 경계에서는 전혀 서지 않으므로(둘 다
+ * "단어 아님"이라 경계가 생기지 않는다) 끝에 \b를 붙이지 않는다 — "일" 뒤에 공백이 오든 괄호가 오든 그대로 맞는다.
+ */
+const MANUAL_STEPS_HEADING = /^##\s*사람이\s*할\s*일/;
+
+/** "- 추적: 이슈 #12 · 의존 R2, R3 · 대체 R1" 같은 줄의 본문(맨 앞 "- 추적: " 제거분)을 Trace로 되돌린다. 알아볼 조각이 없으면 undefined */
+function parseTraceLine(content: string): Trace | undefined {
+  const trace: Trace = {};
+  const issueMatch = /이슈\s*#(\d+)/.exec(content);
+  if (issueMatch) trace.issue = Number(issueMatch[1]);
+  const dependsMatch = /의존\s+([R0-9.,\s]+?)(?=\s*·|$)/.exec(content);
+  if (dependsMatch) {
+    const ids = dependsMatch[1]!
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (ids.length > 0) trace.dependsOn = ids;
+  }
+  const supersedesMatch = /대체\s+(R[1-9][0-9]*)/.exec(content);
+  if (supersedesMatch) trace.supersedes = supersedesMatch[1];
+  return Object.keys(trace).length > 0 ? trace : undefined;
+}
 
 /** "## 가정" 절 바로 아래의 글머리 기호 줄만 모은다. 다음 "##" 헤딩을 만나면 멈춘다(사람이 절을 통째로 지웠으면 빈 배열) */
 function extractAssumptionsSection(lines: readonly string[]): string[] {
@@ -488,49 +690,163 @@ function extractAssumptionsSection(lines: readonly string[]): string[] {
 }
 
 /**
- * 요구사항 목록을 사람이 읽는 마크다운으로 바꾼다: 요구사항마다 헤딩·종류/우선순위·인수 조건·상태 줄을 두고,
- * assumptions가 있으면 "## 가정" 절을 이어 붙이고, 끝에 안정적으로 다시 읽을 수 있는 HTML 주석 JSON 블록
- * (requirements·assumptions)을 붙인다. statusById에 없는 요구사항은 "미착수"로 쓴다(상태는 저장 시점의 스냅샷일
- * 뿐이고, 다시 읽을 때는 증거로 새로 계산한다).
+ * "## 사람이 할 일" 절 바로 아래의 글머리 기호 줄만 모은다(같은 모양, extractAssumptionsSection과 동형).
+ * 이 절은 요구사항이 아니다 — parseRequirementsMarkdown의 본문 요구사항 파싱과는 완전히 별개로 읽는다.
+ */
+function extractManualStepsSection(lines: readonly string[]): string[] {
+  const steps: string[] = [];
+  let collecting = false;
+  for (const line of lines) {
+    if (MANUAL_STEPS_HEADING.test(line)) {
+      collecting = true;
+      continue;
+    }
+    if (!collecting) continue;
+    if (/^##\s+/.test(line)) {
+      collecting = false;
+      continue;
+    }
+    const item = ASSUMPTION_ITEM.exec(line);
+    if (item) steps.push(item[1]!);
+  }
+  return steps;
+}
+
+/** 요구사항 하나의 몸통 줄(헤딩·상태 줄 제외)을 만든다. rev·ears·scenarios·nfr·trace는 있을 때만 줄을 더한다(옛 문서와 같은 모양을 유지한다) */
+function requirementBodyLines(requirement: Requirement): string {
+  const acceptance = requirement.acceptance.map((item) => `  - ${item}`).join('\n');
+  const revPart = requirement.rev !== undefined ? ` · 개정: ${requirement.rev}` : '';
+  const lines = [`- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}${revPart}`];
+  if (requirement.ears) lines.push(`- EARS(${requirement.ears.pattern}): ${requirement.ears.statement}`);
+  if (requirement.scenarios && requirement.scenarios.length > 0) {
+    lines.push('- 시나리오:');
+    for (const scenario of requirement.scenarios) {
+      lines.push(`  - ${scenario.id}: (Given) ${scenario.given} (When) ${scenario.when} (Then) ${scenario.then}`);
+    }
+  }
+  lines.push(`- 인수 조건:\n${acceptance}`);
+  if (requirement.nfr) {
+    lines.push(`- NFR: 지표 ${requirement.nfr.metric} · 임계값 ${requirement.nfr.threshold} · 조건 ${requirement.nfr.condition} · 측정 ${requirement.nfr.method}`);
+  }
+  if (requirement.trace) {
+    const bits: string[] = [];
+    if (requirement.trace.issue !== undefined) bits.push(`이슈 #${requirement.trace.issue}`);
+    if (requirement.trace.dependsOn && requirement.trace.dependsOn.length > 0) bits.push(`의존 ${requirement.trace.dependsOn.join(', ')}`);
+    if (requirement.trace.supersedes) bits.push(`대체 ${requirement.trace.supersedes}`);
+    if (bits.length > 0) lines.push(`- 추적: ${bits.join(' · ')}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 요구사항 목록을 사람이 읽는 마크다운으로 바꾼다: 요구사항마다 헤딩·종류/우선순위/개정·(있으면) EARS·시나리오·인수
+ * 조건·(있으면) NFR·추적·상태 줄을 두고, assumptions가 있으면 "## 가정" 절을, manualSteps가 있으면 "## 사람이 할 일
+ * (에이전트 금지)" 절(저장소 권한·협업자 추가, 이메일 제출 같은 절차 — 요구사항이 아니다)을 이어 붙이고, 끝에 안정적으로
+ * 다시 읽을 수 있는 HTML 주석 JSON 블록(requirements·assumptions·manualSteps, hash·revisedAt까지 포함한 전체 필드)을 붙인다.
+ * statusById에 없는 요구사항은 "미착수"로 쓴다(상태는 저장 시점의 스냅샷일 뿐이고, 다시 읽을 때는 증거로 새로 계산한다).
  */
 export function serializeRequirementsMarkdown(
   requirements: readonly Requirement[],
   statusById: Readonly<Record<string, RequirementStatus>> = {},
   assumptions: readonly string[] = [],
+  manualSteps: readonly string[] = [],
 ): string {
   const blocks = requirements.map((requirement) => {
-    const acceptance = requirement.acceptance.map((item) => `  - ${item}`).join('\n');
     const status = statusById[requirement.id] ?? '미착수';
-    return `${requirementHeading(requirement)}\n- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}\n- 인수 조건:\n${acceptance}\n- 상태: ${status}`;
+    return `${requirementHeading(requirement)}\n${requirementBodyLines(requirement)}\n- 상태: ${status}`;
   });
   const assumptionsBlock = assumptions.length > 0 ? `\n\n## 가정\n${assumptions.map((item) => `- ${item}`).join('\n')}` : '';
+  const manualStepsBlock =
+    manualSteps.length > 0 ? `\n\n## 사람이 할 일 (에이전트 금지)\n${manualSteps.map((item) => `- ${item}`).join('\n')}` : '';
   const json = JSON.stringify(
     {
-      requirements: requirements.map(({ id, title, kind, priority, acceptance }) => ({ id, title, kind, priority, acceptance })),
+      requirements: requirements.map(({ id, title, kind, priority, acceptance, rev, ears, scenarios, nfr, trace, hash, revisedAt }) => ({
+        id,
+        title,
+        kind,
+        priority,
+        acceptance,
+        ...(rev !== undefined ? { rev } : {}),
+        ...(ears ? { ears } : {}),
+        ...(scenarios ? { scenarios } : {}),
+        ...(nfr ? { nfr } : {}),
+        ...(trace ? { trace } : {}),
+        ...(hash !== undefined ? { hash } : {}),
+        ...(revisedAt !== undefined ? { revisedAt } : {}),
+      })),
       assumptions,
+      manualSteps,
     },
     null,
     2,
   );
-  return `# 요구사항\n\n${blocks.join('\n\n')}${assumptionsBlock}\n\n<!-- b-studio-requirements\n${json}\n-->\n`;
+  return `# 요구사항\n\n${blocks.join('\n\n')}${assumptionsBlock}${manualStepsBlock}\n\n<!-- b-studio-requirements\n${json}\n-->\n`;
 }
 
 const LEGACY_JSON_BLOCK = z.array(RequirementSchema);
-const JSON_BLOCK_SHAPE = z.object({ requirements: z.array(RequirementSchema), assumptions: z.array(AssumptionSchema).optional() });
+const JSON_BLOCK_SHAPE = z.object({
+  requirements: z.array(RequirementSchema),
+  assumptions: z.array(AssumptionSchema).optional(),
+  manualSteps: z.array(ManualStepItemSchema).optional(),
+});
 
 /**
- * docs/requirements.md를 다시 읽는다. 사람이 헤딩·제목·인수 조건을 손으로 고쳐도(구조 표지 — "## R1.", "종류: … · 우선순위: …",
- * "인수 조건:" — 는 그대로 둔 채) 그 값을 그대로 반영한다(사람 편집을 우선한다). "## 가정" 절도 같은 자리에서 읽되,
- * 절이 통째로 지워졌으면 가정 없음으로 본다. 구조가 깨져 요구사항을 하나도 못 읽으면 끝의 JSON 블록(마지막으로 저장한 값,
- * 새 형식 {requirements, assumptions}·이 기능 전에 저장된 옛 형식 배열 둘 다 읽는다)으로 되돌아간다. 둘 다 실패하면
- * 빈 배열을 돌려준다 — 호출하는 쪽이 "명세를 다시 뽑아 주세요"로 안내한다.
+ * 몸통에서 읽지 못하는(또는 몸통에 아예 줄이 없는 옛 문서의) 기술 메타데이터 — hash·revisedAt은 몸통에 절대 쓰지 않으므로
+ * 항상 JSON 블록에서만 채운다. rev·ears·scenarios·nfr·trace는 몸통 값을 우선하고(사람이 손으로 고쳤을 수 있다),
+ * 몸통에 그 줄이 아예 없을 때만 JSON 블록 값으로 메운다.
  */
-export function parseRequirementsMarkdown(raw: string): { requirements: Requirement[]; assumptions: string[] } {
+function mergeExtendedFieldsFromJsonBlock(requirements: readonly Requirement[], raw: string): Requirement[] {
+  const jsonMatch = JSON_BLOCK.exec(raw);
+  if (!jsonMatch) return [...requirements];
+  let byId = new Map<string, Requirement>();
+  try {
+    const shaped = JSON_BLOCK_SHAPE.safeParse(JSON.parse(jsonMatch[1]!));
+    if (shaped.success) byId = new Map(shaped.data.requirements.map((requirement) => [requirement.id, requirement]));
+  } catch {
+    return [...requirements];
+  }
+  return requirements.map((requirement) => {
+    const stored = byId.get(requirement.id);
+    if (!stored) return requirement;
+    return {
+      ...requirement,
+      rev: requirement.rev ?? stored.rev,
+      ears: requirement.ears ?? stored.ears,
+      scenarios: requirement.scenarios ?? stored.scenarios,
+      nfr: requirement.nfr ?? stored.nfr,
+      trace: requirement.trace ?? stored.trace,
+      hash: stored.hash,
+      revisedAt: stored.revisedAt,
+    };
+  });
+}
+
+/**
+ * docs/requirements.md를 다시 읽는다. 사람이 헤딩·제목·인수 조건·EARS·시나리오·NFR·추적을 손으로 고쳐도(구조 표지 —
+ * "## R1.", "종류: … · 우선순위: …", "인수 조건:" 등 — 는 그대로 둔 채) 그 값을 그대로 반영한다(사람 편집을 우선한다).
+ * hash·revisedAt은 몸통에 없는 값이라 항상 끝의 JSON 블록에서 채운다(mergeExtendedFieldsFromJsonBlock). "## 가정" 절도
+ * 같은 자리에서 읽되, 절이 통째로 지워졌으면 가정 없음으로 본다. 구조가 깨져 요구사항을 하나도 못 읽으면 끝의 JSON 블록
+ * (마지막으로 저장한 값, 새 형식 {requirements, assumptions}·이 기능 전에 저장된 옛 형식 배열 둘 다 읽는다)으로 되돌아간다.
+ * 둘 다 실패하면 빈 배열을 돌려준다 — 호출하는 쪽이 "명세를 다시 뽑아 주세요"로 안내한다.
+ */
+export function parseRequirementsMarkdown(raw: string): { requirements: Requirement[]; assumptions: string[]; manualSteps: string[] } {
   const withoutJsonBlock = raw.replace(JSON_BLOCK, '');
   const lines = withoutJsonBlock.split(/\r?\n/);
-  const drafts: Array<{ id: string; title: string; kind?: string; priority?: string; acceptance: string[] }> = [];
+  const drafts: Array<{
+    id: string;
+    title: string;
+    kind?: string;
+    priority?: string;
+    acceptance: string[];
+    rev?: number;
+    ears?: Ears;
+    scenarios?: Scenario[];
+    nfr?: Nfr;
+    trace?: Trace;
+  }> = [];
   let current: (typeof drafts)[number] | undefined;
   let collectingAcceptance = false;
+  let collectingScenarios = false;
 
   for (const line of lines) {
     const heading = REQUIREMENT_HEADING.exec(line);
@@ -538,16 +854,45 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
       if (current) drafts.push(current);
       current = { id: heading[1]!, title: heading[2]!, acceptance: [] };
       collectingAcceptance = false;
+      collectingScenarios = false;
       continue;
     }
     if (!current) continue;
+
     const kindLine = KIND_PRIORITY_LINE.exec(line);
     if (kindLine) {
       current.kind = kindLine[1];
       current.priority = kindLine[2];
+      if (kindLine[3]) current.rev = Number(kindLine[3]);
+      collectingAcceptance = false;
+      collectingScenarios = false;
+      continue;
+    }
+
+    const earsLine = EARS_LINE.exec(line);
+    if (earsLine) {
+      current.ears = { pattern: earsLine[1] as EarsPattern, statement: earsLine[2]! };
+      collectingAcceptance = false;
+      collectingScenarios = false;
+      continue;
+    }
+
+    if (SCENARIOS_HEADER.test(line)) {
+      collectingScenarios = true;
       collectingAcceptance = false;
       continue;
     }
+    if (collectingScenarios) {
+      const item = SCENARIO_ITEM.exec(line);
+      if (item) {
+        current.scenarios ??= [];
+        current.scenarios.push({ id: item[1]!, given: item[2]!, when: item[3]!, then: item[4]! });
+        continue;
+      }
+      collectingScenarios = false;
+      // 시나리오 절 바로 다음 줄(보통 "인수 조건:")도 이어서 검사해야 하므로 여기서 멈추지 않고 아래로 흐른다
+    }
+
     if (ACCEPTANCE_HEADER.test(line)) {
       collectingAcceptance = true;
       continue;
@@ -559,16 +904,30 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
         continue;
       }
       collectingAcceptance = false;
+      // 인수 조건 절 바로 다음 줄(NFR·추적)도 이어서 검사해야 하므로 여기서 멈추지 않고 아래로 흐른다
+    }
+
+    const nfrLine = NFR_LINE.exec(line);
+    if (nfrLine) {
+      current.nfr = { metric: nfrLine[1]!, threshold: nfrLine[2]!, condition: nfrLine[3]!, method: nfrLine[4]! };
+      continue;
+    }
+
+    const traceLine = TRACE_LINE.exec(line);
+    if (traceLine) {
+      const trace = parseTraceLine(traceLine[1]!);
+      if (trace) current.trace = trace;
     }
   }
   if (current) drafts.push(current);
 
   const parsedFromMarkdown = drafts.map((draft) => RequirementSchema.safeParse(draft));
   if (drafts.length > 0 && parsedFromMarkdown.every((result) => result.success)) {
-    return {
-      requirements: parsedFromMarkdown.map((result) => (result as z.ZodSafeParseSuccess<Requirement>).data),
-      assumptions: extractAssumptionsSection(lines),
-    };
+    const requirements = mergeExtendedFieldsFromJsonBlock(
+      parsedFromMarkdown.map((result) => (result as z.ZodSafeParseSuccess<Requirement>).data),
+      raw,
+    );
+    return { requirements, assumptions: extractAssumptionsSection(lines), manualSteps: extractManualStepsSection(lines) };
   }
 
   const jsonMatch = JSON_BLOCK.exec(raw);
@@ -576,14 +935,14 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
     try {
       const json = JSON.parse(jsonMatch[1]!);
       const shaped = JSON_BLOCK_SHAPE.safeParse(json);
-      if (shaped.success) return { requirements: shaped.data.requirements, assumptions: shaped.data.assumptions ?? [] };
+      if (shaped.success) return { requirements: shaped.data.requirements, assumptions: shaped.data.assumptions ?? [], manualSteps: shaped.data.manualSteps ?? [] };
       const legacy = LEGACY_JSON_BLOCK.safeParse(json);
-      if (legacy.success) return { requirements: legacy.data, assumptions: [] };
+      if (legacy.success) return { requirements: legacy.data, assumptions: [], manualSteps: [] };
     } catch {
       // 주석 블록도 사람이 손으로 깨뜨렸을 수 있다 — 아래에서 빈 배열로 마무리한다
     }
   }
-  return { requirements: [], assumptions: [] };
+  return { requirements: [], assumptions: [], manualSteps: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -593,8 +952,10 @@ export function parseRequirementsMarkdown(raw: string): { requirements: Requirem
 export interface CheckpointRef {
   sha: string;
   shortSha: string;
-  /** 커밋 메시지 전체(제목+본문). "요청: [R3] …" 형태로 id가 들어간다 */
+  /** 커밋 메시지 전체(제목+본문). "요청: [R3] …" 형태로 id가 들어가거나, "Implements: R3@rev2" 트레일러가 들어간다 */
   message: string;
+  /** 커밋 시각(ISO 8601, git `%cI`). 있으면 "개정 후 새 증거인지"(재확인 필요 해제) 판정에 쓴다 */
+  createdAt?: string;
 }
 
 export interface TestMatch {
@@ -613,13 +974,44 @@ export interface RequirementEvidence {
   gateChecks: GateCheckResult[];
 }
 
-/** id가 텍스트 안에서 "R3"나 "[R3]"처럼 독립된 토큰으로 나타나는지(예: "R31"의 일부로 우연히 걸리지 않게) */
-export function mentionsRequirementId(text: string, id: string): boolean {
-  const pattern = new RegExp(`(^|[^A-Za-z0-9_])${id}([^A-Za-z0-9_]|$)`);
-  return pattern.test(text);
+/** 텍스트에서 `\bR\d+(\.\d+)?\b` 토큰(요구사항 id·시나리오 id)을 모두 뽑는다. "R1"이 "R10"의 일부로 걸리지 않는다 */
+export function findMentionedIds(text: string): string[] {
+  return [...text.matchAll(REQUIREMENT_MENTION_PATTERN)].map((match) => match[0]);
 }
 
+/**
+ * id가 텍스트 안에서 독립된 토큰으로 나타나는지("R31"의 일부로 걸리지 않는다). id가 요구사항 id(R3)면 그 요구사항의
+ * 시나리오 언급(R3.1)도 포함한다 — 시나리오는 소속 요구사항의 일부이므로 시나리오를 가리키면 상위 요구사항도 가리킨 것이다.
+ */
+export function mentionsRequirementId(text: string, id: string): boolean {
+  return findMentionedIds(text).some((mention) => mention === id || mention.startsWith(`${id}.`));
+}
+
+/** 커밋 메시지·PR 본문의 "Implements: R4" / "Implements: R4.1@rev2" 트레일러를 찾는다(자유 언급보다 우선하는 명시적 증거) */
+export interface ImplementsTrailer {
+  id: string;
+  rev?: number;
+}
+const IMPLEMENTS_TRAILER_PATTERN = /\bImplements:\s*(R\d+(?:\.\d+)?)(?:@rev(\d+))?/gi;
+export function extractImplementsTrailers(text: string): ImplementsTrailer[] {
+  const results: ImplementsTrailer[] = [];
+  for (const match of text.matchAll(IMPLEMENTS_TRAILER_PATTERN)) {
+    results.push({ id: match[1]!.toUpperCase(), ...(match[2] ? { rev: Number(match[2]) } : {}) });
+  }
+  return results;
+}
+
+function implementsTrailerMentions(text: string, id: string): boolean {
+  return extractImplementsTrailers(text).some((trailer) => trailer.id === id || trailer.id.startsWith(`${id}.`));
+}
+
+/**
+ * id를 가리키는 체크포인트를 찾는다. 명시적 "Implements:" 트레일러가 있는 체크포인트가 하나라도 있으면 그것만 증거로
+ * 삼고(사람이 의도적으로 남긴 기록이 더 믿을 만하다), 없으면 자유 언급(커밋 제목·본문에 id가 나타나는 것)으로 대신한다.
+ */
 export function findCheckpointMentions(checkpoints: readonly CheckpointRef[], id: string): CheckpointRef[] {
+  const viaTrailer = checkpoints.filter((checkpoint) => implementsTrailerMentions(checkpoint.message, id));
+  if (viaTrailer.length > 0) return viaTrailer;
   return checkpoints.filter((checkpoint) => mentionsRequirementId(checkpoint.message, id));
 }
 
@@ -646,6 +1038,25 @@ export function isLikelyTestFile(filePath: string): boolean {
   return TEST_FILE_PATTERN.test(filePath);
 }
 
+const TEST_CALL_PATTERN = /\b(?:it|test)(?:\.\w+)?\s*\(\s*(['"`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
+const TEST_DISPLAY_NAME_PATTERN = /@DisplayName\s*\(\s*"((?:\\.|[^"])*)"/g;
+
+/** 파일 하나에서 it/test 호출 문자열과 @DisplayName 문자열을 모두 뽑는다(중복 없이). 요구사항 id·시나리오 id 스캔이 공유하는 1차 추출 */
+function collectDeclaredTestNames(file: ScannedFile): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  const add = (name: string) => {
+    const trimmed = name.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      names.push(trimmed);
+    }
+  };
+  for (const match of file.content.matchAll(TEST_CALL_PATTERN)) add(match[2]!);
+  for (const match of file.content.matchAll(TEST_DISPLAY_NAME_PATTERN)) add(match[1]!);
+  return names;
+}
+
 /**
  * 작업 복사본의 테스트 파일에서 id를 언급하는 테스트 이름을 찾는다.
  * Jest/Vitest/Playwright의 it('R3 …')·test('R3 …')와 JUnit의 @DisplayName("R3 …")·메서드 이름(testR3Login 등)을 본다.
@@ -656,21 +1067,14 @@ export function scanTestFilesForRequirementId(files: readonly ScannedFile[], id:
     if (!isLikelyTestFile(file.path)) continue;
     const seen = new Set<string>();
     const add = (name: string) => {
-      const trimmed = name.trim();
-      if (trimmed && !seen.has(trimmed)) {
-        seen.add(trimmed);
-        matches.push({ file: file.path, name: trimmed });
+      if (!seen.has(name)) {
+        seen.add(name);
+        matches.push({ file: file.path, name });
       }
     };
 
-    const callPattern = /\b(?:it|test)(?:\.\w+)?\s*\(\s*(['"`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
-    for (const match of file.content.matchAll(callPattern)) {
-      if (mentionsRequirementId(match[2]!, id)) add(match[2]!);
-    }
-
-    const displayNamePattern = /@DisplayName\s*\(\s*"((?:\\.|[^"])*)"/g;
-    for (const match of file.content.matchAll(displayNamePattern)) {
-      if (mentionsRequirementId(match[1]!, id)) add(match[1]!);
+    for (const name of collectDeclaredTestNames(file)) {
+      if (mentionsRequirementId(name, id)) add(name);
     }
 
     const methodPattern = /\b(?:void|public|private|protected)\s+[\w<>[\],\s]*?\b(\w*[Rr]\d+\w*)\s*\(/g;
@@ -681,12 +1085,96 @@ export function scanTestFilesForRequirementId(files: readonly ScannedFile[], id:
   return matches;
 }
 
+/** 작업 복사본의 테스트 파일에서 시나리오 id(R4.1 등)를 정확히 언급하는 테스트 이름을 찾는다(추적 매트릭스의 시나리오 행이 쓴다) */
+export function scanTestFilesForScenarioId(files: readonly ScannedFile[], scenarioId: string): TestMatch[] {
+  const matches: TestMatch[] = [];
+  for (const file of files) {
+    if (!isLikelyTestFile(file.path)) continue;
+    for (const name of collectDeclaredTestNames(file)) {
+      if (findMentionedIds(name).includes(scenarioId)) matches.push({ file: file.path, name });
+    }
+  }
+  return matches;
+}
+
+/** 어떤 요구사항·시나리오 id도 언급하지 않은 테스트("주인 없는 테스트")를 찾는다. 추적 매트릭스의 역방향 목록이 쓴다 */
+export function scanTestFilesForOrphans(files: readonly ScannedFile[]): TestMatch[] {
+  const matches: TestMatch[] = [];
+  for (const file of files) {
+    if (!isLikelyTestFile(file.path)) continue;
+    for (const name of collectDeclaredTestNames(file)) {
+      if (findMentionedIds(name).length === 0) matches.push({ file: file.path, name });
+    }
+  }
+  return matches;
+}
+
 /**
- * 상태 규칙(ADR-079): 미착수 → 작업 중(체크포인트가 참조하거나 테스트가 있다) → 검증됨(id가 붙은 게이트 확인이
- * 최근 체크포인트에서 통과) / 실패(id가 붙은 게이트 확인 중 하나라도 실패). 게이트 확인 증거가 있으면 그것이 우선한다 —
- * 체크포인트만 참조하고 실제로 통과했는지 모르는 상태(작업 중)보다 실제 결과(검증됨/실패)를 더 믿을 수 있는 증거로 본다.
+ * 요구사항의 안정적 내용 해시(ADR-090). title·ears·scenarios·nfr만 본다 — 이 넷이 "무엇을 어떻게 검증하는가"를
+ * 정하는 실질 내용이고, acceptance·priority·trace·id는 해시에 넣지 않는다(우선순위를 바꿨다고 재확인이 필요한 건
+ * 아니고, acceptance는 scenarios가 있으면 그로부터 파생되는 표시용 값이라 이중으로 세지 않는다).
  */
-export function computeRequirementStatus(evidence: RequirementEvidence): RequirementStatus {
+export function computeRequirementHash(requirement: Pick<Requirement, 'title' | 'ears' | 'scenarios' | 'nfr'>): string {
+  const stable = JSON.stringify({
+    title: requirement.title,
+    ears: requirement.ears ?? null,
+    scenarios: requirement.scenarios ?? null,
+    nfr: requirement.nfr ?? null,
+  });
+  return createHash('sha256').update(stable).digest('hex').slice(0, 16);
+}
+
+/**
+ * 지금 내용의 해시가 기록된(저장된) 해시와 다른지("의심" 판정, Doorstop/sphinx-needs류 도구의 suspect 링크와 같은 개념).
+ * 기록된 해시가 아예 없으면(이 기능 이전 문서를 막 읽어 들인 시점) 비교할 기준이 없으므로 드리프트 아님으로 본다.
+ */
+export function requirementContentDrifted(requirement: Requirement): boolean {
+  if (!requirement.hash) return false;
+  return computeRequirementHash(requirement) !== requirement.hash;
+}
+
+/**
+ * 저장(apply) 시점에 부른다: 내용이 드리프트됐으면 개정을 올리고 새 해시·시각을 적는다. 기록된 해시가 없으면
+ * (처음 저장하거나 이 기능 이전 문서) 개정 1로 채우기만 하고 "바뀌었다"고 보지 않는다 — 비교할 이전 값이 없기 때문이다.
+ */
+export function reviseRequirementIfChanged(requirement: Requirement, now: string = new Date().toISOString()): Requirement {
+  const hash = computeRequirementHash(requirement);
+  if (requirement.hash === undefined) return { ...requirement, rev: requirement.rev ?? 1, hash, revisedAt: requirement.revisedAt ?? now };
+  if (requirement.hash === hash) return requirement;
+  return { ...requirement, rev: (requirement.rev ?? 1) + 1, hash, revisedAt: now };
+}
+
+/**
+ * 다음 요구사항이 이전 요구사항과 id로 이어진다면(사람이 직접 고친 경우 등, 재추출 병합과 달리 id는 그대로다)
+ * 이전의 개정 관련 필드(rev·hash·revisedAt)를 먼저 물려받는다 — 클라이언트가 그 필드를 안 보내도(대개 그렇다)
+ * 서버가 신뢰할 수 있는 기준점을 잃지 않는다. 다음 쪽이 이미 값을 갖고 있으면(재추출 병합 등) 그 값을 존중한다.
+ */
+export function carryForwardRequirementRevision(next: Requirement, previous: Requirement | undefined): Requirement {
+  if (!previous) return next;
+  return {
+    ...next,
+    rev: next.rev ?? previous.rev,
+    hash: next.hash ?? previous.hash,
+    revisedAt: next.revisedAt ?? previous.revisedAt,
+  };
+}
+
+/**
+ * 상태 규칙(ADR-079, 재확인 필요는 ADR-090): 내용이 지금 드리프트돼 있으면(아직 저장 전) 곧바로 재확인 필요.
+ * 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴 체크포인트·게이트 확인이 하나라도
+ * 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다 — 없으면 재확인 필요에 머문다. 평소 규칙: 미착수 → 작업
+ * 중(체크포인트가 참조하거나 테스트가 있다) → 검증됨(id가 붙은 게이트 확인이 모두 통과) / 실패(하나라도 실패).
+ * 게이트 확인 증거가 있으면 그것이 우선한다 — 체크포인트만 참조하고 실제로 통과했는지 모르는 상태(작업 중)보다
+ * 실제 결과(검증됨/실패)를 더 믿을 수 있는 증거로 본다.
+ */
+export function computeRequirementStatus(evidence: RequirementEvidence, requirement?: Requirement): RequirementStatus {
+  if (requirement && requirementContentDrifted(requirement)) return '재확인 필요';
+  if (requirement?.revisedAt) {
+    const revisedAt = requirement.revisedAt;
+    const freshCheckpoint = evidence.checkpoints.some((checkpoint) => checkpoint.createdAt !== undefined && checkpoint.createdAt > revisedAt);
+    const hasFreshEvidence = freshCheckpoint || evidence.gateChecks.length > 0;
+    if (!hasFreshEvidence) return '재확인 필요';
+  }
   if (evidence.gateChecks.length > 0) {
     return evidence.gateChecks.every((check) => check.ok) ? '검증됨' : '실패';
   }
@@ -694,10 +1182,10 @@ export function computeRequirementStatus(evidence: RequirementEvidence): Require
   return '미착수';
 }
 
-/** Devin 스타일 확신 표시. 검증됨=🟢, 작업 중=🟡, 그 밖(미착수·실패)=🔴 — 실패는 증거가 오히려 반대라 붉은 점이 맞다 */
+/** Devin 스타일 확신 표시. 검증됨=🟢, 작업 중·재확인 필요=🟡(둘 다 "더 봐야 한다"), 그 밖(미착수·실패)=🔴 */
 export function requirementConfidence(status: RequirementStatus): '🟢' | '🟡' | '🔴' {
   if (status === '검증됨') return '🟢';
-  if (status === '작업 중') return '🟡';
+  if (status === '작업 중' || status === '재확인 필요') return '🟡';
   return '🔴';
 }
 
@@ -710,6 +1198,10 @@ export interface RequirementCoverage {
   text: string;
   /** must인데 검증되지 않은 게 있을 때만 있다. 화면이 강조 표시에 쓴다 */
   mustGapText?: string;
+  /** 상태가 "재확인 필요"인 요구사항 수(개정 후 아직 새 증거가 없는 것) */
+  needsRecheck: number;
+  /** needsRecheck가 있을 때만 있다. 화면이 강조 표시에 쓴다 */
+  needsRecheckText?: string;
 }
 
 export function summarizeCoverage(requirements: readonly Requirement[], statusById: Readonly<Record<string, RequirementStatus>>): RequirementCoverage {
@@ -719,6 +1211,7 @@ export function summarizeCoverage(requirements: readonly Requirement[], statusBy
   const mustTotal = mustRequirements.length;
   const mustVerified = mustRequirements.filter((requirement) => statusById[requirement.id] === '검증됨').length;
   const mustGap = mustTotal - mustVerified;
+  const needsRecheck = requirements.filter((requirement) => statusById[requirement.id] === '재확인 필요').length;
   return {
     total,
     verified,
@@ -726,6 +1219,8 @@ export function summarizeCoverage(requirements: readonly Requirement[], statusBy
     mustVerified,
     text: `${total}개 중 ${verified}개 검증됨`,
     ...(mustGap > 0 ? { mustGapText: `필수(must) 요구사항 ${mustGap}개 미검증` } : {}),
+    needsRecheck,
+    ...(needsRecheck > 0 ? { needsRecheckText: `${needsRecheck}개 재확인 필요` } : {}),
   };
 }
 
@@ -760,19 +1255,425 @@ export function summarizeRequirementsForGuide(requirements: readonly Requirement
   return `${header}\n${lines.join('\n')}`;
 }
 
+/** project-guide.ts가 "사람이 할 일" 안내에 쓰는 글자 수 상한 */
+export const MANUAL_STEPS_GUIDE_MAX_CHARS = 800;
+
+/**
+ * "## 사람이 할 일" 목록을 모델이 매 실행마다 참고할 금지 안내로 줄인다. 이 목록은 요구사항이 아니므로
+ * summarizeRequirementsForGuide와 별개로 만든다 — 에이전트가 저장소 권한·협업자·공개 범위를 바꾸거나 이메일로
+ * 제출하는 절차를 요구사항으로 착각해 시도하지 않도록, 매 실행마다 "절대 하지 마라"는 문장으로 못박는다.
+ */
+export function summarizeManualStepsForGuide(manualSteps: readonly string[], maxChars: number = MANUAL_STEPS_GUIDE_MAX_CHARS): string {
+  if (manualSteps.length === 0) return '';
+  const header = '[사람이 할 일 — 에이전트는 이 항목을 절대 하지 않는다(저장소 권한·협업자·공개 범위 변경, 이메일 제출 등)]';
+  const lines: string[] = [];
+  let used = header.length;
+  for (let index = 0; index < manualSteps.length; index++) {
+    const line = `- ${manualSteps[index]}`;
+    if (used + 1 + line.length > maxChars) {
+      const omitted = `…외 ${manualSteps.length - index}개 생략`;
+      if (used + 1 + omitted.length <= maxChars) lines.push(omitted);
+      break;
+    }
+    lines.push(line);
+    used += 1 + line.length;
+  }
+  return `${header}\n${lines.join('\n')}`;
+}
+
 // ---------------------------------------------------------------------------
 // 대화 입력창 채우기(chat-draft-context.tsx가 채우고, 절대 자동으로 보내지 않는다)
 // ---------------------------------------------------------------------------
 
+/** 시나리오가 있으면 "테스트 이름에 R4.1, R4.2를 넣어", 없으면 "테스트 이름에 R4를" — 요구사항·시나리오 추적이 둘 다 되게 안내한다 */
+function testNamingGuidance(requirement: Requirement): string {
+  const scenarioIds = (requirement.scenarios ?? []).map((scenario) => scenario.id);
+  const ids = scenarioIds.length > 0 ? scenarioIds.join(', ') : requirement.id;
+  return `테스트 이름에 ${ids}을(를) 넣어 시나리오·인수 조건을 검증하는 테스트를 함께 작성해 주세요.`;
+}
+
+/** 커밋·PR 본문에 남길 트레일러 안내. 자유 언급보다 우선하는 증거이므로 항상 안내한다(findCheckpointMentions) */
+function implementsTrailerGuidance(requirement: Requirement): string {
+  return `커밋·PR 본문에 "Implements: ${requirement.id}@rev${requirement.rev ?? 1}"을 남겨 주세요.`;
+}
+
 /** "이 요구사항 작업" 버튼이 채우는 글 */
 export function buildRequirementWorkPrefill(requirement: Requirement): string {
   const acceptance = requirement.acceptance.map((item) => `- ${item}`).join('\n');
-  return `[${requirement.id}] ${requirement.title}\n\n인수 조건:\n${acceptance}\n\n테스트 이름에 ${requirement.id}을(를) 넣어 인수 조건을 검증하는 테스트를 함께 작성해 주세요.`;
+  const earsLine = requirement.ears ? `\n\nEARS: ${requirement.ears.statement}` : '';
+  return `[${requirement.id}] ${requirement.title}${earsLine}\n\n인수 조건:\n${acceptance}\n\n${testNamingGuidance(requirement)} ${implementsTrailerGuidance(requirement)}`;
 }
 
 /** "전체 계획 세우기" 버튼이 채우는 글. must 요구사항을 순서대로 나열한다(레인을 나눌지는 에이전트가 스스로 정한다) */
 export function buildAllMustHavesPrefill(requirements: readonly Requirement[]): string {
   const mustHaves = requirements.filter((requirement) => requirement.priority === 'must');
   const list = mustHaves.map((requirement) => `- [${requirement.id}] ${requirement.title}`).join('\n');
-  return `다음 필수(must) 요구사항을 모두 구현해 주세요. 서로 독립적인 부분이 있으면 레인을 나눠 계획을 세워도 됩니다. 요구사항마다 테스트 이름에 해당 id(R1 등)를 넣어 인수 조건을 검증하는 테스트를 함께 작성해 주세요.\n\n${list}`;
+  return `다음 필수(must) 요구사항을 모두 구현해 주세요. 서로 독립적인 부분이 있으면 레인을 나눠 계획을 세워도 됩니다. 요구사항마다 테스트 이름에 해당 id(시나리오가 있으면 R1.1처럼 시나리오 id, 없으면 R1)를 넣어 검증하는 테스트를 함께 작성하고, 커밋·PR 본문에 "Implements: R1@rev1" 같은 트레일러를 남겨 주세요.\n\n${list}`;
+}
+
+// ---------------------------------------------------------------------------
+// 요구사항 스멜 린트(ADR-090): QVscribe류 도구가 잡는 "약한 표현"과 구조적 흠을 결정론적으로 찾는다.
+// 모델 호출 없이 문자열만 본다 — 추출 모델이 프롬프트 규칙을 놓쳐도 화면에서 바로 잡아낼 안전망이다.
+// ---------------------------------------------------------------------------
+
+/** 한국어 약한 표현(QVscribe의 "weak words" 개념을 국문 관용구로 옮겼다) */
+export const WEAK_WORDS_KO: readonly string[] = ['빠르게', '적절히', '적당히', '사용자 친화적', '가능하면', '기타', '신속히', '효율적으로', '즉시', '충분히'];
+/** 영어 약한 표현 */
+export const WEAK_WORDS_EN: readonly string[] = ['fast', 'user-friendly', 'appropriate', 'as needed', 'tbd', 'quickly', 'efficient', 'asap', 'soon', 'etc'];
+/** "등"은 한 글자라 단어 경계 정규식으로 오탐이 많다(등록·등급 등) — 조사가 바로 붙는 "…등" 꼴만 따로 본다 */
+const WEAK_WORD_ETC_KO = /[가-힣0-9]\s*등(?:[,.\s]|$)/;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export interface RequirementLintWarning {
+  /** 기계가 구분하는 코드(테스트·화면이 분기에 쓴다) */
+  code: 'weak-word' | 'no-scenario' | 'nfr-missing' | 'multiple-must-statements' | 'not-ears-shaped';
+  /** 사람이 읽는 한 줄 설명 */
+  message: string;
+  /** true면 requirementIsReady를 막는다(반드시 고쳐야 할 흠), false면 권고만 한다 */
+  mustFix: boolean;
+}
+
+/** 요구사항 하나에 들어있는 모든 텍스트(제목·EARS·시나리오·인수 조건)를 한 덩어리로 모은다 */
+function collectRequirementText(requirement: Requirement): string {
+  const scenarioText = (requirement.scenarios ?? []).flatMap((scenario) => [scenario.given, scenario.when, scenario.then]);
+  return [requirement.title, requirement.ears?.statement, ...requirement.acceptance, ...scenarioText].filter(Boolean).join(' ');
+}
+
+/**
+ * 요구사항 하나를 결정론적으로 점검한다: 약한 표현(한국어·영어), 시나리오 없음, nonfunctional인데 NFR 없음,
+ * 한 EARS 문장에 "해야 한다"가 여럿(요구사항이 사실 여러 개), EARS 문장이 "…해야 한다" 형태가 아님(권고만).
+ */
+export function lintRequirement(requirement: Requirement): RequirementLintWarning[] {
+  const warnings: RequirementLintWarning[] = [];
+  const text = collectRequirementText(requirement);
+  const lowerText = text.toLowerCase();
+
+  for (const word of WEAK_WORDS_KO) {
+    const pattern = new RegExp(`(^|[^가-힣A-Za-z0-9])${escapeRegExp(word)}($|[^가-힣A-Za-z0-9])`);
+    if (pattern.test(text)) warnings.push({ code: 'weak-word', message: `약한 표현 "${word}"이(가) 있습니다 — 수치·구체적 조건으로 바꿔 주세요`, mustFix: true });
+  }
+  if (WEAK_WORD_ETC_KO.test(text)) warnings.push({ code: 'weak-word', message: '약한 표현 "등"이(가) 있습니다 — 목록을 모두 적어 주세요', mustFix: true });
+  for (const word of WEAK_WORDS_EN) {
+    const pattern = new RegExp(`(^|[^a-z0-9-])${escapeRegExp(word)}($|[^a-z0-9-])`);
+    if (pattern.test(lowerText)) warnings.push({ code: 'weak-word', message: `약한 표현 "${word}"이(가) 있습니다 — 수치·구체적 조건으로 바꿔 주세요`, mustFix: true });
+  }
+
+  if (!requirement.scenarios || requirement.scenarios.length === 0) {
+    warnings.push({ code: 'no-scenario', message: '시나리오(Given-When-Then)가 없습니다', mustFix: true });
+  }
+
+  if (requirement.kind === 'nonfunctional' && !requirement.nfr) {
+    warnings.push({ code: 'nfr-missing', message: '비기능 요구사항인데 측정 가능한 지표·임계값(NFR)이 없습니다', mustFix: true });
+  }
+
+  if (requirement.ears) {
+    const mustCount = (requirement.ears.statement.match(/해야\s*한다/g) ?? []).length;
+    if (mustCount > 1) {
+      warnings.push({ code: 'multiple-must-statements', message: '한 EARS 문장에 "해야 한다"가 여러 번 있습니다 — 요구사항 하나에 한 문장만 쓰세요(요구사항을 쪼개야 할 수 있습니다)', mustFix: true });
+    } else if (mustCount === 0) {
+      warnings.push({ code: 'not-ears-shaped', message: 'EARS 문장이 "…해야 한다" 형태가 아닙니다', mustFix: false });
+    }
+  }
+
+  return warnings;
+}
+
+/** must-fix 경고가 하나도 없으면 Ready. 권고성 경고(mustFix: false)는 Ready를 막지 않는다 */
+export function requirementIsReady(requirement: Requirement): boolean {
+  return lintRequirement(requirement).every((warning) => !warning.mustFix);
+}
+
+/** 문서 전체의 "Ready" 배지: 필수(must) 요구사항이 모두 Ready일 때만 켠다(선택·권장 요구사항의 흠은 배지를 막지 않는다) */
+export function requirementsReadyBadge(requirements: readonly Requirement[]): boolean {
+  const mustHaves = requirements.filter((requirement) => requirement.priority === 'must');
+  return mustHaves.length > 0 && mustHaves.every((requirement) => requirementIsReady(requirement));
+}
+
+// ---------------------------------------------------------------------------
+// 재추출 병합(ADR-090): 모델이 다시 뽑은 요구사항(id는 항상 R1..Rn부터 새로 매겨져 온다)을 제목·EARS 문장·종류
+// 유사도로 기존 저장된 요구사항과 짝지어 id를 지킨다. 같은 입력을 두 번 돌리면 id가 하나도 바뀌지 않아야 한다.
+// ---------------------------------------------------------------------------
+
+/** 문자열을 소문자·공백 정규화한 뒤 2-그램(문자 바이그램) 집합으로 바꾼다. 한국어(교착어라 단어 경계가 약하다)에도 잘 먹힌다 */
+function charBigrams(text: string): Set<string> {
+  const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (normalized.length < 2) return new Set(normalized ? [normalized] : []);
+  const grams = new Set<string>();
+  for (let index = 0; index < normalized.length - 1; index++) grams.add(normalized.slice(index, index + 2));
+  return grams;
+}
+
+/** 두 문자열의 유사도(자카드 계수, 0~1)를 2-그램 집합으로 어림한다 */
+export function textSimilarity(a: string, b: string): number {
+  const setA = charBigrams(a);
+  const setB = charBigrams(b);
+  if (setA.size === 0 && setB.size === 0) return 1;
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let intersection = 0;
+  for (const gram of setA) if (setB.has(gram)) intersection++;
+  const union = setA.size + setB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function requirementSimilarityText(requirement: Requirement): string {
+  return `${requirement.title} ${requirement.ears?.statement ?? requirement.acceptance.join(' ')}`;
+}
+
+/** 요구사항 둘의 유사도(0~1). 같은 kind면 가산점을 준다(제목이 비슷해도 api/ui처럼 종류가 다르면 다른 요구사항일 확률이 높다) */
+export function requirementSimilarity(a: Requirement, b: Requirement): number {
+  const textScore = textSimilarity(requirementSimilarityText(a), requirementSimilarityText(b));
+  const kindBonus = a.kind === b.kind ? 0.15 : 0;
+  return Math.min(1, textScore * 0.85 + kindBonus);
+}
+
+/** 이 유사도 이상이면 "같은 요구사항"으로 짝짓는다(재추출 병합) */
+export const MERGE_MATCH_THRESHOLD = 0.35;
+/** 이 유사도 이상이면(하지만 주 짝짓기 문턱보다는 낮으면) "분할 힌트"로 본다(trace.supersedes를 자동으로 채운다) */
+export const MERGE_SPLIT_HINT_THRESHOLD = 0.15;
+
+export type RequirementDiffStatus = 'added' | 'changed' | 'unchanged' | 'removed';
+
+export interface RequirementDiffEntry {
+  status: RequirementDiffStatus;
+  id: string;
+  /** added/changed/unchanged일 때의 최종 값(병합 결과 merged에 실제로 들어가는 값과 같다) */
+  requirement: Requirement;
+  /** changed/removed일 때만 있다 — 이전에 저장돼 있던 값 */
+  previous?: Requirement;
+}
+
+export interface RequirementMergeResult {
+  /** 저장할 최종 목록. id 오름차순으로 정렬돼 있다 */
+  merged: Requirement[];
+  /** 화면이 "추가/변경(개정 상승)/삭제→대체" 미리보기로 보여줄 목록(merged와 같은 순서가 아니다 — added→changed→unchanged→removed 순) */
+  diff: RequirementDiffEntry[];
+}
+
+function requirementIdNumber(id: string): number {
+  return Number(id.slice(1));
+}
+
+/**
+ * 재추출로 새로 받은 요구사항(incoming, 모델이 늘 R1..Rn으로 새로 매겨 준다)을 기존 저장분(existing)과
+ * 제목/EARS 문장 유사도 + kind로 짝짓고, 짝지어진 것은 existing의 id를 그대로 물려받는다(개정은
+ * reviseRequirementIfChanged가 매긴다). 짝을 못 찾은 incoming은 새 id(기존 최대 번호+1부터, 절대 재사용하지
+ * 않는다)로 추가되고, 짝을 못 찾은 existing은 목록에 그대로 남되(id를 지우지 않는다) "removed"로 표시된다 —
+ * "추가된" 항목 중 방금 제거된 항목과 어느 정도 비슷한 것이 있으면(분할 힌트 문턱) 쪼개졌다고 보고
+ * trace.supersedes를 자동으로 채운다. 같은 입력을 두 번 주면 모든 짝이 유사도 1로 잡혀 id가 하나도 바뀌지 않는다.
+ */
+export function mergeReextractedRequirements(incoming: readonly Requirement[], existing: readonly Requirement[]): RequirementMergeResult {
+  const now = new Date().toISOString();
+  const pairs: Array<{ incomingIndex: number; existingIndex: number; score: number }> = [];
+  incoming.forEach((candidate, incomingIndex) => {
+    existing.forEach((stored, existingIndex) => {
+      const score = requirementSimilarity(candidate, stored);
+      if (score >= MERGE_MATCH_THRESHOLD) pairs.push({ incomingIndex, existingIndex, score });
+    });
+  });
+  pairs.sort((a, b) => b.score - a.score);
+
+  const matchedIncoming = new Map<number, number>();
+  const usedExisting = new Set<number>();
+  for (const pair of pairs) {
+    if (matchedIncoming.has(pair.incomingIndex) || usedExisting.has(pair.existingIndex)) continue;
+    matchedIncoming.set(pair.incomingIndex, pair.existingIndex);
+    usedExisting.add(pair.existingIndex);
+  }
+
+  let nextIdNumber = 1 + existing.reduce((max, requirement) => Math.max(max, requirementIdNumber(requirement.id)), 0);
+  const added: RequirementDiffEntry[] = [];
+  const changed: RequirementDiffEntry[] = [];
+  const unchanged: RequirementDiffEntry[] = [];
+  const merged: Requirement[] = [];
+
+  incoming.forEach((candidate, incomingIndex) => {
+    const existingIndex = matchedIncoming.get(incomingIndex);
+    if (existingIndex === undefined) {
+      const withId: Requirement = { ...candidate, id: `R${nextIdNumber++}` };
+      const revised = reviseRequirementIfChanged(withId, now);
+      merged.push(revised);
+      added.push({ status: 'added', id: revised.id, requirement: revised });
+      return;
+    }
+    const prior = existing[existingIndex]!;
+    const withId = carryForwardRequirementRevision({ ...candidate, id: prior.id }, prior);
+    const revised = reviseRequirementIfChanged(withId, now);
+    merged.push(revised);
+    if (revised.hash === prior.hash) {
+      unchanged.push({ status: 'unchanged', id: revised.id, requirement: revised });
+    } else {
+      changed.push({ status: 'changed', id: revised.id, requirement: revised, previous: prior });
+    }
+  });
+
+  const removed: RequirementDiffEntry[] = [];
+  existing.forEach((stored, existingIndex) => {
+    if (usedExisting.has(existingIndex)) return;
+    merged.push(stored);
+    removed.push({ status: 'removed', id: stored.id, requirement: stored, previous: stored });
+  });
+
+  // 분할 힌트: 방금 추가된 항목이 방금 제거된 항목과 어느 정도 닮았고(주 문턱에는 못 미쳤지만) 같은 kind면, 그 제거된
+  // 항목이 쪼개져 이 항목이 됐다고 보고 trace.supersedes를 채운다(한 제거 항목이 여러 추가 항목으로 쪼개질 수 있다)
+  for (const entry of added) {
+    let best: { id: string; score: number } | undefined;
+    for (const removedEntry of removed) {
+      if (removedEntry.requirement.kind !== entry.requirement.kind) continue;
+      const score = requirementSimilarity(entry.requirement, removedEntry.requirement);
+      if (score >= MERGE_SPLIT_HINT_THRESHOLD && (!best || score > best.score)) best = { id: removedEntry.id, score };
+    }
+    if (best) {
+      const withSupersedes: Requirement = { ...entry.requirement, trace: { ...entry.requirement.trace, supersedes: best.id } };
+      entry.requirement = withSupersedes;
+      const index = merged.findIndex((requirement) => requirement.id === entry.id);
+      if (index !== -1) merged[index] = withSupersedes;
+    }
+  }
+
+  merged.sort((a, b) => requirementIdNumber(a.id) - requirementIdNumber(b.id));
+  return { merged, diff: [...added, ...changed, ...unchanged, ...removed] };
+}
+
+// ---------------------------------------------------------------------------
+// 추적 매트릭스(ADR-090): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·상태를 한 줄로 모으고,
+// 역방향 목록(주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 만든다. "요구사항" 탭의 추적 매트릭스 하위 화면이 쓴다.
+// ---------------------------------------------------------------------------
+
+export interface MatrixRow {
+  kind: 'requirement' | 'scenario';
+  id: string;
+  /** kind가 scenario일 때만 있다(소속 요구사항 id) */
+  parentId?: string;
+  title: string;
+  rev: number;
+  priority: RequirementPriority;
+  issue?: number;
+  checkpoints: CheckpointRef[];
+  tests: TestMatch[];
+  gateChecks: GateCheckResult[];
+  status: RequirementStatus;
+}
+
+export interface TraceabilityMatrix {
+  rows: MatrixRow[];
+  /** 어느 요구사항·시나리오 id도 언급하지 않은 테스트("주인 없는 테스트") */
+  orphanTests: TestMatch[];
+  /** 테스트가 하나도 없는 필수(must) 요구사항(시나리오 테스트도 없을 때만) */
+  mustHavesWithoutTests: Requirement[];
+}
+
+export interface BuildTraceabilityMatrixInput {
+  requirements: readonly Requirement[];
+  checkpoints: readonly CheckpointRef[];
+  testFiles: readonly ScannedFile[];
+  gateChecks: readonly GateCheckResult[];
+}
+
+/** 요구사항 하나(또는 시나리오 하나)의 행을 만든다. 공통 로직을 요구사항 행·시나리오 행이 함께 쓴다 */
+function buildMatrixRow(params: {
+  kind: 'requirement' | 'scenario';
+  id: string;
+  parentId?: string;
+  title: string;
+  rev: number;
+  priority: RequirementPriority;
+  issue?: number;
+  checkpoints: readonly CheckpointRef[];
+  tests: TestMatch[];
+  gateChecks: readonly GateCheckResult[];
+  requirementForStatus: Requirement;
+}): MatrixRow {
+  const evidence: RequirementEvidence = {
+    checkpoints: findCheckpointMentions(params.checkpoints, params.id),
+    tests: params.tests,
+    gateChecks: findGateCheckMentions(params.gateChecks, params.id),
+  };
+  return {
+    kind: params.kind,
+    id: params.id,
+    ...(params.parentId ? { parentId: params.parentId } : {}),
+    title: params.title,
+    rev: params.rev,
+    priority: params.priority,
+    ...(params.issue !== undefined ? { issue: params.issue } : {}),
+    checkpoints: evidence.checkpoints,
+    tests: evidence.tests,
+    gateChecks: evidence.gateChecks,
+    status: computeRequirementStatus(evidence, params.requirementForStatus),
+  };
+}
+
+/** 요구사항·시나리오마다 추적 행을 만들고, 주인 없는 테스트·테스트 없는 필수 요구사항을 모은다 */
+export function buildTraceabilityMatrix(input: BuildTraceabilityMatrixInput): TraceabilityMatrix {
+  const rows: MatrixRow[] = [];
+  const mustHavesWithoutTests: Requirement[] = [];
+
+  for (const requirement of input.requirements) {
+    const ownTests = scanTestFilesForRequirementId(input.testFiles, requirement.id);
+    rows.push(
+      buildMatrixRow({
+        kind: 'requirement',
+        id: requirement.id,
+        title: requirement.title,
+        rev: requirement.rev ?? 1,
+        priority: requirement.priority,
+        issue: requirement.trace?.issue,
+        checkpoints: input.checkpoints,
+        tests: ownTests,
+        gateChecks: input.gateChecks,
+        requirementForStatus: requirement,
+      }),
+    );
+
+    let scenarioTestCount = 0;
+    for (const scenario of requirement.scenarios ?? []) {
+      const scenarioTests = scanTestFilesForScenarioId(input.testFiles, scenario.id);
+      scenarioTestCount += scenarioTests.length;
+      rows.push(
+        buildMatrixRow({
+          kind: 'scenario',
+          id: scenario.id,
+          parentId: requirement.id,
+          title: `(Given) ${scenario.given} (When) ${scenario.when} (Then) ${scenario.then}`,
+          rev: requirement.rev ?? 1,
+          priority: requirement.priority,
+          issue: requirement.trace?.issue,
+          checkpoints: input.checkpoints,
+          tests: scenarioTests,
+          gateChecks: input.gateChecks,
+          requirementForStatus: requirement,
+        }),
+      );
+    }
+
+    if (requirement.priority === 'must' && ownTests.length === 0 && scenarioTestCount === 0) mustHavesWithoutTests.push(requirement);
+  }
+
+  return { rows, orphanTests: scanTestFilesForOrphans(input.testFiles), mustHavesWithoutTests };
+}
+
+function csvCell(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** 추적 매트릭스를 CSV(쉼표 구분, CRLF 줄바꿈)로 만든다. "CSV로 내보내기" 버튼이 그대로 내려받게 한다 */
+export function buildMatrixCsv(matrix: TraceabilityMatrix): string {
+  const header = ['종류', 'id', '상위 id', '제목', '개정', '우선순위', '이슈', '커밋', '테스트', '게이트', '상태'];
+  const rows = matrix.rows.map((row) => [
+    row.kind === 'requirement' ? '요구사항' : '시나리오',
+    row.id,
+    row.parentId ?? '',
+    row.title,
+    String(row.rev),
+    row.priority,
+    row.issue !== undefined ? `#${row.issue}` : '',
+    row.checkpoints.map((checkpoint) => checkpoint.shortSha).join(' '),
+    row.tests.map((test) => test.name).join(' | '),
+    row.gateChecks.map((check) => `${check.name}:${check.ok ? '통과' : '실패'}`).join(' | '),
+    row.status,
+  ]);
+  return [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n');
 }
