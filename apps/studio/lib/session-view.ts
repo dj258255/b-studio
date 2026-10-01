@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, Effort, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
 import type { BootNetwork } from '@b-studio/sandbox';
 import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
@@ -77,13 +77,26 @@ export type ChatItem =
       patch: string;
       restarted: ServiceCheck[];
       databases: DatabaseState[];
+      /** 버린 변경을 되살릴 수 있게 남긴 백업(ADR-0XX) */
+      backup?: DiscardBackup;
     }
   | {
       kind: 'restore';
       checkpoint: Checkpoint;
-      result?: { ok: true; files: string[]; restarted: ServiceCheck[]; databases: DatabaseState[] } | { ok: false; error: string };
+      result?:
+        | { ok: true; files: string[]; restarted: ServiceCheck[]; databases: DatabaseState[]; backup?: DiscardBackup }
+        | { ok: false; error: string };
     }
-  | { kind: 'resumed'; checkpoint: Checkpoint; discarded: string[]; databases: DatabaseState[]; restarted: ServiceCheck[] }
+  | {
+      kind: 'resumed';
+      checkpoint: Checkpoint;
+      discarded: string[];
+      databases: DatabaseState[];
+      restarted: ServiceCheck[];
+      backup?: DiscardBackup;
+    }
+  /** discard·revert·restore가 남긴 백업을 작업 복사본에 되살린 결과(ADR-0XX) */
+  | { kind: 'backupRestored'; backupId: string; result: { ok: true; files: string[]; restarted: ServiceCheck[] } | { ok: false; error: string } }
   | {
       kind: 'remoteSync';
       result?:
@@ -103,6 +116,7 @@ export type ChatItem =
             files?: string[];
             report?: VerificationReport;
             restarted?: ServiceCheck[];
+            backup?: DiscardBackup;
           };
     }
   | {
@@ -139,6 +153,7 @@ export type ChatItem =
             files?: string[];
             report?: VerificationReport;
             restarted?: ServiceCheck[];
+            backup?: DiscardBackup;
           };
     };
 
@@ -303,6 +318,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             patch: event.patch,
             restarted: event.restarted,
             databases: event.databases,
+            backup: event.backup,
           },
         ],
       };
@@ -323,6 +339,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           files: event.files,
           restarted: event.restarted,
           databases: event.databases,
+          backup: event.backup,
         }),
         // 파일이 바뀌었으므로 미리보기와 계약을 다시 불러오게 한다
         completedRuns: view.completedRuns + 1,
@@ -339,11 +356,28 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ...view,
         chat: [
           ...view.chat,
-          { kind: 'resumed', checkpoint: event.checkpoint, discarded: event.discarded, databases: event.databases, restarted: event.restarted },
+          {
+            kind: 'resumed',
+            checkpoint: event.checkpoint,
+            discarded: event.discarded,
+            databases: event.databases,
+            restarted: event.restarted,
+            backup: event.backup,
+          },
         ],
         // 새 샌드박스의 주소로 미리보기와 계약을 다시 불러오게 한다
         completedRuns: view.completedRuns + 1,
       };
+
+    case 'backup_restored':
+      return {
+        ...view,
+        chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: true, files: event.files, restarted: event.restarted } }],
+        completedRuns: view.completedRuns + 1,
+      };
+
+    case 'backup_restore_failed':
+      return { ...view, chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: false, error: event.error } }] };
 
     case 'remote_sync_started':
       return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'remoteSync' }] };
@@ -374,6 +408,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           files: event.files,
           report: event.report,
           restarted: event.restarted,
+          backup: event.backup,
         }),
         // 가져온 변경을 반영했다가 되돌렸으면 서비스가 다시 떴다
         completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
@@ -401,6 +436,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           files: event.files,
           report: event.report,
           restarted: event.restarted,
+          backup: event.backup,
         }),
         // 병합한 변경을 반영했다가 되돌렸으면 서비스가 다시 떴다
         completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,

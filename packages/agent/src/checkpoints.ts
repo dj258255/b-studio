@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
@@ -78,6 +78,20 @@ export interface PendingChange {
   change: 'added' | 'modified' | 'deleted';
 }
 
+/**
+ * discard()·restore()가 체크포인트에 없던 변경을 버리기 직전에 남긴 백업(ADR-0XX, "절대 조용히 지우지 않는다").
+ * 작업 복사본에 git apply로 그대로 되살릴 수 있는 패치 하나로 저장한다(추가·수정·삭제·바이너리 파일 모두 포함,
+ * untracked 파일도 git add -A로 인덱스에 올린 뒤 떠서 새 파일 diff로 들어가므로 따로 보관할 필요가 없다).
+ */
+export interface DiscardBackup {
+  /** 백업 폴더 이름(타임스탬프 기반). restoreBackup()에 그대로 넘긴다 */
+  id: string;
+  /** 백업에 담긴 파일(프로젝트 기준 경로) */
+  files: string[];
+  /** ISO 8601 */
+  createdAt: string;
+}
+
 /** 원격 세션 브랜치에만 있던 커밋 (리뷰어가 올린 커밋 등) */
 export interface RemoteCommit {
   sha: string;
@@ -147,6 +161,8 @@ export class RemoteConflictError extends CheckpointError {
 }
 
 const SHA = /^[0-9a-f]{7,40}$/;
+/** backupId()가 만드는 형식만 받는다(경로 조작 방어 — id는 API 요청에서 그대로 넘어온다) */
+const BACKUP_ID = /^[0-9A-Za-z-]{10,64}$/;
 /** 가져오기 전에 원격 세션 브랜치를 받아 두는 곳. origin/*는 원본 폴더의 브랜치를 가리킬 수 있어 쓰지 않는다 */
 const REMOTE_REF = 'refs/b-studio/remote';
 /** 기준 브랜치(main 등)를 받아 두는 곳 (ADR-076) */
@@ -160,6 +176,12 @@ const PUSH_TIMEOUT_MS = 120_000;
 const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-studio.local' };
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
 const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts', '*.b-studio-relay-*'];
+/** discard()·restore() 백업을 이 안에 둔다(ADR-0XX). 작업 복사본이 아니라 체크포인트 저장소 쪽이라 커밋·게이트에 걸리지 않는다 */
+const BACKUP_DIRNAME = 'b-studio/discarded';
+/** 백업은 이 개수를 넘으면 오래된 것부터 지운다. 방금 만든 백업은 이 한도를 넘어도 지우지 않는다 */
+const BACKUP_KEEP_MAX = 10;
+/** 백업 전체 용량이 이 값을 넘으면 오래된 것부터 지운다(방금 만든 백업은 예외) */
+const BACKUP_KEEP_BYTES = 200 * 1024 * 1024;
 
 /**
  * 세션 작업 복사본의 Git 기록으로 체크포인트를 관리한다.
@@ -428,17 +450,23 @@ export class CheckpointStore {
     return leaks;
   }
 
-  /** 마지막 체크포인트 이후의 변경을 버린다. 무엇을 버렸는지 볼 수 있게 patch를 함께 돌려준다 */
-  async discard(): Promise<{ files: string[]; patch: string }> {
+  /**
+   * 마지막 체크포인트 이후의 변경을 버린다. 무엇을 버렸는지 볼 수 있게 patch를 함께 돌려주고, 되살릴 수 있게
+   * 백업도 남긴다(ADR-0XX) — 버리기 전에 조용히 사라지는 변경이 없게 한다. 문서 경로를 먼저 지키는 일은
+   * 이 메서드의 책임이 아니다(어떤 경로가 "문서"인지는 studio 쪽 정책이다) — 부르는 쪽이 discard() 전에
+   * 문서만 먼저 체크포인트로 남겨야 한다.
+   */
+  async discard(): Promise<{ files: string[]; patch: string; backup?: DiscardBackup }> {
     const files = await this.pendingFiles();
     if (files.length === 0) return { files, patch: '' };
 
     const scope = await this.#scope();
     await this.#git(['add', '-A', ...scope]);
     const patch = await this.#git(['diff', '--cached', '--no-color', ...(await this.#relative()), 'HEAD']);
+    const backup = await this.#backupCachedIndex(files);
     await this.#git(['reset', '-q', '--hard', 'HEAD']);
     await this.#git(['clean', '-q', '-fd', ...scope]);
-    return { files, patch: capText(patch, MAX_PATCH_CHARS) };
+    return { files, patch: capText(patch, MAX_PATCH_CHARS), backup };
   }
 
   /**
@@ -467,20 +495,116 @@ export class CheckpointStore {
   }
 
   /**
-   * 이 세션 기록에 있는 체크포인트로 되돌린다. 그 뒤의 체크포인트와 아직 남기지 않은 변경은 사라진다.
+   * 이 세션 기록에 있는 체크포인트로 되돌린다. 그 뒤의 체크포인트는 기록(reflog)에 남아 되찾을 길이 있지만,
+   * 아직 체크포인트로 남기지 않은 변경(pending)은 이대로면 영영 사라지므로 버리기 전에 백업한다(ADR-0XX).
    * 돌려주는 파일 목록으로 어떤 서비스를 재시작할지 정한다.
    */
-  async restore(sha: string): Promise<{ checkpoint: Checkpoint; files: string[] }> {
+  async restore(sha: string): Promise<{ checkpoint: Checkpoint; files: string[]; backup?: DiscardBackup }> {
     const commit = await this.#resolve(sha);
     const inSession = (await this.#isAncestor(await this.#startSha(), commit)) && (await this.#isAncestor(commit, 'HEAD'));
     if (!inSession) throw new CheckpointError('현재 세션 기록에 없는 체크포인트입니다');
 
+    const scope = await this.#scope();
     const pending = await this.pendingFiles();
     const committed = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), commit, 'HEAD'])).split('\0').filter(Boolean);
+    await this.#git(['add', '-A', ...scope]);
+    const backup = await this.#backupCachedIndex(pending);
     await this.#git(['reset', '-q', '--hard', commit]);
-    await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
+    await this.#git(['clean', '-q', '-fd', ...scope]);
 
-    return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort() };
+    return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort(), backup };
+  }
+
+  /**
+   * 되살리기 백업 하나를 작업 복사본에 그대로 되돌린다. 그 사이에 같은 파일이 다시 바뀌어 패치가 깨끗하게
+   * 들어가지 않으면(git apply --check 실패) 거부한다 — 일부만 들어가 상태를 더 헷갈리게 만들지 않는다.
+   */
+  async restoreBackup(id: string): Promise<{ files: string[] }> {
+    if (!BACKUP_ID.test(id)) throw new CheckpointError('백업 id 형식이 올바르지 않습니다');
+    const dir = this.#backupDir(id);
+    const patchFile = path.join(dir, 'changes.patch');
+    const meta = await readFile(path.join(dir, 'meta.json'), 'utf8').then(
+      (text) => JSON.parse(text) as { files: string[] },
+      () => {
+        throw new CheckpointError('백업을 찾을 수 없습니다. 이미 지워졌을 수 있습니다');
+      },
+    );
+    const patch = await readFile(patchFile, 'utf8').catch(() => '');
+    if (!patch.trim()) return { files: [] };
+
+    try {
+      await this.#git(['apply', '--check', patchFile]);
+    } catch (error) {
+      throw new CheckpointError(
+        `그 사이 바뀐 파일과 충돌해 되살리지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await this.#git(['apply', patchFile]);
+    return { files: meta.files };
+  }
+
+  /** 지금까지 남은 되살리기 백업. 최신순 */
+  async discardedBackups(): Promise<DiscardBackup[]> {
+    const root = this.#backupRoot();
+    const ids = await readdir(root).catch(() => [] as string[]);
+    const backups = await Promise.all(
+      ids.map((id) =>
+        readFile(path.join(root, id, 'meta.json'), 'utf8').then(
+          (text) => JSON.parse(text) as DiscardBackup,
+          () => undefined,
+        ),
+      ),
+    );
+    return backups.filter((backup): backup is DiscardBackup => backup !== undefined).sort((a, b) => b.id.localeCompare(a.id));
+  }
+
+  /**
+   * git add -A로 이미 올린 인덱스 전체(HEAD 대비)를 되살릴 수 있는 패치로 저장한다. 버릴 파일이 없으면(files가
+   * 비어 있으면) 아무것도 쓰지 않는다. #git 호출에 -C root가 이미 들어가 있어 패치의 경로는 저장소 루트 기준이고,
+   * 되살릴 때(restoreBackup)도 같은 기준으로 적용한다 — 모노레포 하위 폴더 세션이어도 add -A가 이미 scope로
+   * 좁혔으므로 patch는 scope 안의 변경만 담는다.
+   */
+  async #backupCachedIndex(files: readonly string[]): Promise<DiscardBackup | undefined> {
+    if (files.length === 0) return undefined;
+    // --binary로 바이너리 파일도 되살릴 수 있게 하고, 백업은 화면에 보여줄 것이 아니라 캡 없이 전체를 남긴다
+    const patch = await this.#git(['diff', '--cached', '--no-color', '--binary', 'HEAD']);
+    if (!patch.trim()) return undefined;
+
+    const id = backupId();
+    const dir = this.#backupDir(id);
+    await mkdir(dir, { recursive: true });
+    const createdAt = new Date().toISOString();
+    const backup: DiscardBackup = { id, files: [...files], createdAt };
+    await writeFile(path.join(dir, 'changes.patch'), patch, 'utf8');
+    await writeFile(path.join(dir, 'meta.json'), JSON.stringify(backup), 'utf8');
+    await this.#pruneBackups(id);
+    return backup;
+  }
+
+  #backupRoot(): string {
+    return path.join(this.gitDir, BACKUP_DIRNAME);
+  }
+
+  #backupDir(id: string): string {
+    return path.join(this.#backupRoot(), id);
+  }
+
+  /** 개수(BACKUP_KEEP_MAX)·용량(BACKUP_KEEP_BYTES) 한도를 넘으면 오래된 백업부터 지운다. 방금 만든 백업(keepId)은 지우지 않는다 */
+  async #pruneBackups(keepId: string): Promise<void> {
+    const root = this.#backupRoot();
+    const ids = (await readdir(root).catch(() => [] as string[])).sort(); // 타임스탬프 기반 id라 오름차순 = 오래된 것부터
+    const sized = await Promise.all(
+      ids.map(async (id) => ({ id, bytes: await stat(path.join(root, id, 'changes.patch')).then((info) => info.size, () => 0) })),
+    );
+    let total = sized.reduce((sum, entry) => sum + entry.bytes, 0);
+    let count = sized.length;
+    for (const entry of sized) {
+      if (entry.id === keepId) continue;
+      if (count <= BACKUP_KEEP_MAX && total <= BACKUP_KEEP_BYTES) break;
+      await rm(path.join(root, entry.id), { recursive: true, force: true });
+      total -= entry.bytes;
+      count -= 1;
+    }
   }
 
   /**
@@ -964,6 +1088,13 @@ async function resolveReal(target: string): Promise<string> {
 function withObjectParticle(word: string): string {
   const last = word.trim().slice(-1).toLowerCase();
   return /[aeiou]/.test(last) ? `${word}를` : `${word}을`;
+}
+
+/** 타임스탬프 + 단조 증가 번호. 같은 밀리초에 여러 백업이 생겨도(테스트 등) 사전순 정렬이 생성 순서와 같다 */
+let backupSequence = 0;
+function backupId(): string {
+  backupSequence += 1;
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${backupSequence.toString(36).padStart(4, '0')}`;
 }
 
 function oneLine(message: string): string {

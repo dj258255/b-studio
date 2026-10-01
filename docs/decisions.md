@@ -4020,6 +4020,41 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-0XX 체크포인트로 되돌리기 전에 작업 복사본의 커밋하지 않은 변경을 지키고 백업한다
+
+상태: 채택
+
+### 맥락
+- 도그푸딩 중 데이터 손실 사고를 발견했다: 스튜디오 서버가 재시작된 뒤 중지된 세션에서 "이어서 작업"을 누르자 새 샌드박스가 마지막 체크포인트에서 다시 떴고, 대화에 "체크포인트에 없던 변경 2개는 버렸습니다: docs/requirements.issues.json, docs/requirements.md"라는 안내만 남긴 채 사용자가 저장한 요구사항이 사라졌다. 문서 체크포인트 커밋이 그보다 앞서 실패해 아직 커밋되지 않은 채 작업 복사본에만 남아 있었는데, `resumeSession`의 "끝내지 못한 요청이 남긴 변경은 버린다" 경로(`CheckpointStore.discard()` → `git add -A` → `git reset --hard HEAD` → `git clean -fd`)가 그 사실을 모르고 통째로 지웠다. 중지해 둔 다른 세션의 `docs/`도 같은 경로로 이어서 작업했을 때 같은 이유로 사라졌다.
+- `packages/agent/src/checkpoints.ts`를 훑어보니 작업 복사본을 되돌리는 경로가 넷 더 있었다: `restore(sha)`(체크포인트 목록에서 과거로 되돌리기, `restoreCheckpoint`가 호출), `integrateRemote`/`integrateBase`가 병합·체리픽 충돌 시 되돌리는 두 곳. 모두 `reset --hard` + `clean -fd`로 작업 복사본을 되돌리되, 그 순간 pending(아직 체크포인트로 남기지 않은) 파일이 있으면 버려지는 구조였다.
+- b-studio의 원칙은 "사용자 작업을 조용히 지우지 않는다"다. 검증 게이트를 통과하지 못한 변경을 버리는 것 자체는 의도한 동작이지만(게이트를 거치지 않은 변경을 남기면 다음 요청이 깨진 코드를 전제로 한다), **버린다는 사실과 그 내용을 되살릴 길**이 없었다는 것이 사고다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. `git stash push -u`로 버리기 전에 치워 둔다 | 저장소 하나에 스택 하나뿐이라(이 세션의 체크포인트 저장소가 동시에 다른 작업에 쓰일 일은 거의 없지만), 다음 stash 작업이 꺼내거나 지우면 고스란히 사라진다. 이름으로 찾아도 pop 경쟁은 그대로 남는다 |
+| B. 모든 pending 변경을 매번 체크포인트로 커밋해 버린다(검증 게이트 없이) | "검증을 통과하지 못한 변경은 버린다"는 기존 동작 자체를 바꾸는 것이라 범위가 크다. 깨진 코드가 체크포인트 기록에 섞여 다음 되돌리기·배포 판정을 어지럽힌다 |
+| **C. 문서 경로는 먼저 체크포인트로 지키고(docs 체크포인트, ADR-096 재사용), 남은 변경은 버리기 직전에 패치 파일로 백업해 둔 뒤 되살리기 버튼을 둔다** | 채택. 기존 "검증 통과 전 변경은 버린다" 동작은 그대로 두면서(체크포인트 기록이 더러워지지 않는다), 사용자가 실제로 손으로 쓴 것(문서)은 손실 자체를 없애고, 나머지도 "버렸다"가 아니라 "백업했다 · 되살리기"로 바꾼다 |
+
+### 결정
+1. **문서는 먼저 지킨다.** `discard()`로 되돌리는 경로(`resumeSession`의 샌드박스 재구성, 실패한 요청을 되돌리는 `revertRun`)는 되돌리기 직전에 `docs/**` 등 문서 경로(`isDocPath`)만 `CheckpointStore.commitPaths()`로 먼저 체크포인트로 남긴다(`apps/studio/lib/server/sessions.ts`의 `protectPendingDocsBeforeDiscard`/`discardWorkingCopy`). `discard()`는 HEAD로(그 이상 뒤로 가지 않고) 되돌리므로, 미리 커밋한 문서는 되돌린 뒤에도 그대로 남는다. 반대로 `restore(sha)`로 더 이전 체크포인트로 되돌리는 경로(`restoreCheckpoint`, 원격·기준 브랜치 가져오기 실패 시 되돌리기)는 문서를 미리 커밋해도 그 커밋 자체가 되돌리는 대상보다 뒤에 있어 함께 사라지므로(오히려 백업에서도 빠져 더 나쁘다) 손대지 않는다 — 이 경로는 2번만으로 지킨다.
+2. **남은 변경은 버리기 직전에 백업한다.** `CheckpointStore.discard()`·`restore()` 모두, `git add -A`로 인덱스에 올린 뒤 `git reset --hard`하기 **직전**에 `git diff --cached --binary HEAD`로 전체 패치(추가·수정·삭제·바이너리, untracked 파일도 새 파일 diff로 포함되므로 따로 보관할 필요가 없다)를 `<gitDir>/b-studio/discarded/<타임스탬프>/changes.patch`(+메타 `meta.json`)에 쓴다. `restore(sha)`는 아직 체크포인트로 남기지 않은 pending 변경만 백업한다 — 그 사이의 체크포인트(이미 커밋됨)는 reflog로 되찾을 길이 있어 범위에서 뺐다(병합·체리픽 충돌을 되돌리는 두 곳은 시작 전에 pending이 없음을 이미 확인하므로 백업 대상이 없다 — 되돌리는 내용도 사용자가 쓴 게 아니라 막 가져온 원격·기준 브랜치 커밋이라 다시 가져오면 된다).
+3. **되살리기.** `CheckpointStore.restoreBackup(id)`가 `git apply --check`로 충돌 여부를 먼저 보고(그 사이 같은 파일이 또 바뀌었으면 거부, 일부만 들어가 상태를 더 헷갈리게 만들지 않는다), 통과하면 그대로 적용해 pending으로 되돌린다. `discarded`/`reverted`/`restored`/`remote_sync_failed`/`base_sync_failed` 이벤트가 `backup: { id, files, createdAt }`을 실어 보내고, 대화 안내도 "버렸습니다" 대신 "백업했습니다 · 되살리기 id: …"로 바뀐다. `POST /api/sessions/[id]/discarded/[backupId]/restore`(`restoreDiscardedBackup`)가 되살리기를 실행하고 결과를 `backup_restored`/`backup_restore_failed` 이벤트로 알린다. 화면은 대화의 해당 줄(이어서 작업·되돌림·체크포인트 되돌리기·원격·기준 브랜치 되돌리기 실패 카드)에 "되살리기" 버튼을 둔다.
+4. **백업은 한도를 둔다.** 최근 10개 또는 전체 200MB를 넘으면 오래된 것부터 지운다(`CheckpointStore`의 `#pruneBackups`). 방금 만든 백업은 한도를 넘겨도 지우지 않는다 — 스크린샷 산출물(`apps/studio/lib/server/artifacts.ts`)이 이미 같은 자리(`<gitDir>/b-studio/*`)에 같은 규칙("마지막 하나는 남긴다")을 쓰고 있어 그 관례를 따랐다.
+5. **감사한 나머지 경로.** `packages/agent/src/checkpoints.ts`의 `clone()`이 쓰는 `checkout`은 막 복제한 새 작업 복사본(지울 사용자 데이터가 없음)이고, `integrateRemote`/`integrateBase`의 병합·체리픽 충돌 되돌리기는 시작 전에 pending이 없음을 이미 확인하는 구조라 손대지 않았다. `packages/agent/src/{commandcode,codex,opencode}-runner.ts`의 `rm(home/workdir, …)`은 각 CLI의 인증 홈·스크래치 작업 폴더(프로젝트 작업 복사본과 무관)를 지우는 것이고, `apps/studio/lib/server/sessions.ts`의 `deleteSession`(폴더 전체 삭제)은 "이 세션을 통째로 지운다"는 별개의 명시적 사용자 행동이라 범위에서 뺐다. 모델(에이전트)이 직접 `git reset --hard`·`git clean`을 실행하는 것은 애초에 `packages/agent/src/policy.ts`의 `DEFAULT_DENIED_COMMANDS`가 막고 있어, 이 사고는 전부 b-studio 자신의 오케스트레이션 코드 안에 있었다.
+
+### 검증 결과
+- `packages/agent/src/checkpoints.test.ts`(보강): `discard()`·`restore()`가 버리기 전에 백업을 남기고 `restoreBackup()`으로 그대로 되살리는 것, 버릴 변경이 없으면 백업을 만들지 않는 것, 그 사이 같은 파일이 또 바뀌면 되살리기를 거부하고 아무것도 바꾸지 않는 것, 존재하지 않거나 형식이 틀린 백업 id를 거부하는 것, 백업이 최근 10개까지만 남고 오래된 것부터 지워지되 방금 만든 백업은 한도를 넘겨도 남는 것을 실제 git 임시 저장소로 확인했다.
+- `apps/studio/lib/server/sessions-protect-discard.test.ts`(신규): `resumeSession`을 실제로 끝까지 돌려, 끝내지 못한 요청이 남긴 문서(체크포인트 커밋이 실패해 아직 커밋되지 않은 상태를 흉내 냄)는 사라지지 않고 체크포인트로 남는 것, 문서가 아닌 변경(검증을 통과하지 못한 코드)은 작업 복사본에서는 버려지되 백업이 남아 `restoreDiscardedBackup`으로 그대로 되살릴 수 있는 것, `resumed` 이벤트가 `discarded`·`backup`을 실어 보내는 것, 버릴 변경이 없으면 백업·안내 없이 조용히 이어서 작업하는 것을 실제 git 저장소(가짜 샌드박스)로 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 통과.
+
+### 감수한 트레이드오프
+- **`restore(sha)`로 더 이전 체크포인트로 되돌리는 경로는 문서도 백업 대상일 뿐 미리 커밋해 지키지 않는다.** 사용자가 명시적으로 "이 체크포인트로 되돌리기"를 눌렀다는 것 자체가 그 뒤의 모든 것(문서 포함)을 버리겠다는 의사 표시이기 때문이다 — 다만 그 순간의 pending 변경(아직 체크포인트가 되지 않은 것)은 백업·되살리기로 여전히 지킨다.
+- **백업은 패치 하나로만 남긴다(폴더 통째 복사가 아니다).** `git apply`로 그대로 되살릴 수 있고 바이너리도 `--binary`로 담기지만, 파일 권한(실행 비트 등)처럼 diff가 표현하지 못하는 아주 드문 속성은 되살리지 못할 수 있다.
+- **백업은 저장소당(세션당) 최근 10개·200MB로만 남긴다.** 같은 세션에서 "이어서 작업"이나 "되돌리기"를 아주 여러 번 반복하면 오래된 백업은 지워진다 — 사고를 막는 안전망이 목적이라 영구 보관까지는 하지 않았다.
+
+---
+
 ## 출처
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)

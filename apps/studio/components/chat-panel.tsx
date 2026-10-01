@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { DatabaseState, ServiceCheck } from "@b-studio/agent";
+import type { DatabaseState, DiscardBackup, ServiceCheck } from "@b-studio/agent";
 import { answerRequest } from "@/lib/question-answer";
 import { artifactUrl } from "@/lib/artifact-url";
 import { chatMethodAvailability, type ChatCapabilities, type ChatMethod } from "@/lib/chat-methods";
@@ -756,6 +756,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
               </div>
             </details>
           )}
+          {item.backup && <BackupRestoreButton sessionId={sessionId} backup={item.backup} canManage={canManage} />}
         </div>
       );
 
@@ -768,11 +769,14 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
         );
       }
       return item.result.ok ? (
-        <p className="text-sm text-pass">
-          체크포인트 <span className="font-mono">{item.checkpoint.shortSha}</span>로 되돌렸습니다. 파일 {item.result.files.length}개 복원,{" "}
-          {databaseSummary(item.result.databases) && `${databaseSummary(item.result.databases)}, `}
-          {restartSummary(item.result.restarted)}
-        </p>
+        <div>
+          <p className="text-sm text-pass">
+            체크포인트 <span className="font-mono">{item.checkpoint.shortSha}</span>로 되돌렸습니다. 파일 {item.result.files.length}개 복원,{" "}
+            {databaseSummary(item.result.databases) && `${databaseSummary(item.result.databases)}, `}
+            {restartSummary(item.result.restarted)}
+          </p>
+          {item.result.backup && <BackupRestoreButton sessionId={sessionId} backup={item.result.backup} canManage={canManage} />}
+        </div>
       ) : (
         <p className="text-sm text-fail">되돌리지 못했습니다: {item.result.error}</p>
       );
@@ -869,6 +873,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
               <p className="font-medium text-fail">원격 변경을 가져오지 못했습니다: {result.error}</p>
               {result.conflicts && <p className="mt-0.5 text-muted">PR이나 원격 브랜치에서 충돌을 해결한 뒤 다시 가져오세요.</p>}
               {result.restarted && <p className="mt-0.5 text-muted">{restartSummary(result.restarted)}</p>}
+              {result.backup && <BackupRestoreButton sessionId={sessionId} backup={result.backup} canManage={canManage} />}
               {commitList}
             </div>
           )}
@@ -906,6 +911,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
                 </button>
               )}
               {result.restarted && <p className="mt-0.5 text-muted">{restartSummary(result.restarted)}</p>}
+              {result.backup && <BackupRestoreButton sessionId={sessionId} backup={result.backup} canManage={canManage} />}
             </div>
           )}
           {result.report && <GateTrack files={result.files ?? []} report={result.report} />}
@@ -921,7 +927,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
           </p>
           {item.discarded.length > 0 && (
             <p className="mt-0.5 text-muted">
-              체크포인트에 없던 변경 {item.discarded.length}개를 버렸습니다:{" "}
+              체크포인트에 없던 변경 {item.discarded.length}개를 {item.backup ? "백업했습니다" : "버렸습니다"}:{" "}
               <span className="break-all font-mono text-xs">
                 {item.discarded.slice(0, 5).join(", ")}
                 {item.discarded.length > 5 && " 외"}
@@ -930,7 +936,19 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
           )}
           {databaseSummary(item.databases) && <p className="mt-0.5 text-muted">{databaseSummary(item.databases)}</p>}
           {item.restarted.length > 0 && <p className="mt-0.5 text-muted">{restartSummary(item.restarted)}</p>}
+          {item.backup && <BackupRestoreButton sessionId={sessionId} backup={item.backup} canManage={canManage} />}
         </div>
+      );
+
+    case "backupRestored":
+      if (!item.result) return null;
+      return item.result.ok ? (
+        <p className="text-sm text-pass">
+          백업을 되살렸습니다. 파일 {item.result.files.length}개: <span className="break-all font-mono text-xs">{item.result.files.slice(0, 5).join(", ")}</span>
+          {item.result.restarted.length > 0 && <> · {restartSummary(item.result.restarted)}</>}
+        </p>
+      ) : (
+        <p className="text-sm text-fail">백업을 되살리지 못했습니다: {item.result.error}</p>
       );
 
     case "outcome": {
@@ -993,6 +1011,42 @@ function AssistantReply({ text, sessionId, canManage }: { text: string; sessionI
           onCancel={() => setSavingDoc(false)}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * 체크포인트로 되돌리며 버린 변경(ADR-0XX)의 백업을 작업 복사본에 되살리는 버튼.
+ * 되살리기는 세션 이벤트("backupRestored" 대화 줄)로 결과를 알리므로 여기서는 요청만 보내고 끝낸다.
+ */
+function BackupRestoreButton({ sessionId, backup, canManage }: { sessionId: string; backup: DiscardBackup; canManage: boolean }) {
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [error, setError] = useState<string>();
+  if (!canManage) return null;
+
+  async function restore() {
+    setState("sending");
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/discarded/${backup.id}/restore`, { method: "POST" });
+    if (response.ok) {
+      setState("sent");
+    } else {
+      setState("error");
+      setError((await response.json().catch(() => ({})))?.error ?? "되살리지 못했습니다");
+    }
+  }
+
+  return (
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={() => void restore()}
+        disabled={state === "sending" || state === "sent"}
+        className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-50"
+      >
+        {state === "sent" ? "되살리기 요청을 보냈습니다" : state === "sending" ? "되살리는 중…" : "되살리기"}
+      </button>
+      {error && <p className="mt-0.5 text-xs text-fail">{error}</p>}
     </div>
   );
 }
