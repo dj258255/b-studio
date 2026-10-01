@@ -15,6 +15,7 @@
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { summarizeJsonContent, summarizeLargeJsonFile } from './json-summary';
 import type { AgentUsage } from './loop';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
 import { Workspace, WorkspaceError } from './workspace';
@@ -511,20 +512,9 @@ function firstLinesPreview(content: string, maxLines = 5, maxChars = 300): strin
   return joined.length > maxChars ? `${joined.slice(0, maxChars)}…` : joined;
 }
 
-/** JSON 파일의 최상위 모양을 요약한다: 배열이면 길이, 객체면 키마다(배열 값이면 길이와 함께) 나열한다. JSON이 아니면 앞 몇 줄로 대신한다 */
+/** JSON 파일의 최상위 모양을 요약한다(실제 요약은 json-summary.ts가 한다). JSON이 아니면 앞 몇 줄로 대신한다 */
 export function summarizeJsonPreview(content: string): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return firstLinesPreview(content);
-  }
-  if (Array.isArray(parsed)) return `배열, ${parsed.length.toLocaleString('ko-KR')}개 항목`;
-  if (parsed && typeof parsed === 'object') {
-    const entries = Object.entries(parsed as Record<string, unknown>).map(([key, value]) => (Array.isArray(value) ? `${key} ${value.length.toLocaleString('ko-KR')}개` : key));
-    return entries.length > 0 ? entries.join(', ') : '(빈 객체)';
-  }
-  return firstLinesPreview(content);
+  return summarizeJsonContent(content) ?? firstLinesPreview(content);
 }
 
 /** 존재하는 참조 파일 하나의 미리보기를 만든다(내용·크기는 호출하는 쪽이 읽어서 준다 — 이 함수는 파일 IO를 하지 않는다) */
@@ -560,7 +550,10 @@ export async function resolveReferencedFiles(root: string, specText: string): Pr
     } catch (error) {
       const tooBig = error instanceof WorkspaceError ? REFERENCE_FILE_TOO_BIG.exec(error.message) : null;
       if (tooBig) {
-        files.push({ path, exists: true, sizeBytes: Number(tooBig[1]), preview: '(파일이 커서 미리보기를 만들지 못했습니다)' });
+        const sizeBytes = Number(tooBig[1]);
+        // 256KB 상한에 걸려도 JSON이면 구조만(최상위 키·배열 길이·첫 항목 필드) 요약해 보려 한다(json-summary.ts)
+        const summary = await summarizeLargeJsonFile(root, path, sizeBytes);
+        files.push({ path, exists: true, sizeBytes, preview: summary ?? '(파일이 커서 미리보기를 만들지 못했습니다)' });
         continue;
       }
       files.push(missingReferencedFile(path));
