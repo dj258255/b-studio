@@ -53,7 +53,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     if (target.subTab) setCodeSubTab(target.subTab);
   }
 
-  // 대화의 "요구사항에 반영"이 부르면 "요구사항" 탭(명세 하위 탭)으로 전환한다(ADR-0XX, 코드 열기와 같은 규칙)
+  // 대화의 "요구사항에 반영"이 부르면 "요구사항" 탭(명세 하위 탭)으로 전환한다(ADR-094, 코드 열기와 같은 규칙)
   const requirementsImport = useRequirementsImport();
   const [appliedRequirementsImportTarget, setAppliedRequirementsImportTarget] = useState(requirementsImport.target);
   if (requirementsImport.target && requirementsImport.target !== appliedRequirementsImportTarget) {

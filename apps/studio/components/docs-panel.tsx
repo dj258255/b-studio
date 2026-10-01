@@ -33,7 +33,7 @@ async function readJson<T>(response: Response): Promise<T & { error?: string }> 
 }
 
 /**
- * "문서" 탭(ADR-0XX). 세션 작업 복사본의 docs/**\/*.md·README.md·CHANGELOG.md·CONTRIBUTING.md를 트리로 보여 주고,
+ * "문서" 탭(ADR-094). 세션 작업 복사본의 docs/**\/*.md·README.md·CHANGELOG.md·CONTRIBUTING.md를 트리로 보여 주고,
  * 미리보기·그 자리 편집(저장 즉시 작업 복사본에 반영 — 다음 체크포인트·PR에 그대로 실린다)을 지원한다.
  * "새 문서"는 템플릿으로 설계 문서·ADR을 만들거나 트러블슈팅·로드맵 항목을 이어 붙이고, "색인 갱신"은
  * docs/README.md의 관리 구간만 문서들의 첫 H1·첫 문단으로 다시 만든다(그 밖의 손으로 쓴 글은 그대로 둔다).

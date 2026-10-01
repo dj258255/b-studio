@@ -34,7 +34,7 @@ describe("ImportFlow 용어", () => {
   });
 });
 
-describe("ImportFlow initialSpecText(대화 '요구사항에 반영', ADR-0XX)", () => {
+describe("ImportFlow initialSpecText(대화 '요구사항에 반영', ADR-094)", () => {
   it("붙여넣기 칸을 그 글로 채운 채 그려(마운트 때부터 한 번 추출하는 중으로 시작한다)", () => {
     const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} initialSpecText="[R4] 주문 목록 필터\n\n질문: 상태 값은?" />);
 

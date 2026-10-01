@@ -55,7 +55,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   useEffect(() => {
     draft.register((value, mode) => {
       setText(value);
-      // "대화에서 묻기"(요구사항 카드, ADR-0XX)는 읽기만·조사를 함께 켜 달라고 부탁할 수 있다
+      // "대화에서 묻기"(요구사항 카드, ADR-094)는 읽기만·조사를 함께 켜 달라고 부탁할 수 있다
       if (mode?.readOnly) setReadOnly(true);
       if (mode?.research !== undefined) setResearch(mode.research);
       textareaRef.current?.focus();
@@ -77,7 +77,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
    */
   const [lightVerify, setLightVerify] = useLightVerify(snapshot.id);
   /**
-   * "조사"는 읽기만이 켜졌을 때만 보인다(ADR-0XX). 켜면 질문에 웹에서 찾아 답하라는 안내가 붙고,
+   * "조사"는 읽기만이 켜졌을 때만 보인다(ADR-094). 켜면 질문에 웹에서 찾아 답하라는 안내가 붙고,
    * 이 세션 백엔드가 claude-code면 이번 턴 WebSearch·WebFetch를 실제로 연다(그 밖의 백엔드는 모델 지식만으로 답한다)
    */
   const [research, setResearch] = useResearch(snapshot.id);
@@ -466,7 +466,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
                     가볍게 확인
                   </button>
                 )}
-                {/* "조사"는 읽기만이 켜졌을 때만 보인다 — 질문에 웹에서 찾아 답하라는 안내가 붙는다(ADR-0XX) */}
+                {/* "조사"는 읽기만이 켜졌을 때만 보인다 — 질문에 웹에서 찾아 답하라는 안내가 붙는다(ADR-094) */}
                 {readOnly && (
                   <button
                     type="button"
@@ -923,7 +923,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
 }
 
 /**
- * 에이전트 답변 메시지(ADR-0XX). 답 아래 작은 글씨 메뉴로 복사·문서로 저장·요구사항에 반영을 둔다.
+ * 에이전트 답변 메시지(ADR-094). 답 아래 작은 글씨 메뉴로 복사·문서로 저장·요구사항에 반영을 둔다.
  * 복사는 항상 보이고(읽기 권한만 있어도 쓸 수 있다), 문서로 저장·요구사항에 반영은 쓰기 권한(canManage)이 있을 때만 보인다
  * — 둘 다 세션 작업 복사본에 파일을 더하거나(문서) 요구사항 패치 미리보기를 여는(요구사항) 쓰기 성격의 동작이기 때문이다.
  */

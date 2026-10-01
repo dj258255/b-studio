@@ -38,7 +38,7 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
     () => ({ target: codeOpenTarget, open: (target) => setCodeOpenTarget(target), clear: () => setCodeOpenTarget(undefined) }),
     [codeOpenTarget],
   );
-  // 대화의 "요구사항에 반영"이 "요구사항" 탭을 열고 진단 diff를 보여 준다(ADR-0XX, 코드 탭 열기와 같은 자리)
+  // 대화의 "요구사항에 반영"이 "요구사항" 탭을 열고 진단 diff를 보여 준다(ADR-094, 코드 탭 열기와 같은 자리)
   const [requirementsImportTarget, setRequirementsImportTarget] = useState<RequirementsImportTarget>();
   const requirementsImport = useMemo<RequirementsImport>(
     () => ({

@@ -2,7 +2,7 @@
 
 import { createContext, useContext } from "react";
 
-/** fill이 함께 켤 수 있는 모드. "대화에서 묻기"(요구사항 카드)가 읽기만·조사를 함께 켠다(ADR-0XX) */
+/** fill이 함께 켤 수 있는 모드. "대화에서 묻기"(요구사항 카드)가 읽기만·조사를 함께 켠다(ADR-094) */
 export interface ChatDraftMode {
   readOnly?: boolean;
   research?: boolean;

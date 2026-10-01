@@ -772,7 +772,7 @@ export function sendMessage(
     allowBreaking: boolean;
     by?: string;
     intent?: Intent;
-    /** "조사" 모드(ADR-0XX). intent가 ask일 때만 뜻이 있다 — claude-code 백엔드만 이번 턴 WebSearch·WebFetch를 실제로 연다 */
+    /** "조사" 모드(ADR-094). intent가 ask일 때만 뜻이 있다 — claude-code 백엔드만 이번 턴 WebSearch·WebFetch를 실제로 연다 */
     research?: boolean;
     /** 서버 안에서만 쓴다(작업 분해). 이 경로 밖의 파일 쓰기를 실행기가 막는다. HTTP로는 받지 않는다 */
     writableScope?: readonly string[];
@@ -2000,7 +2000,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     sandbox: session.sandbox,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
-    // "조사" 모드(ADR-0XX): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다
+    // "조사" 모드(ADR-094): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다
     research: plan.research === true,
     // 가볍게 확인(light)이면 게이트가 재시작·준비·계약만 돈다. 생략(full)이면 지금과 같다
     verify: plan.verify,
@@ -3561,7 +3561,7 @@ export async function getSessionRequirementsMatrixCsv(id: string): Promise<strin
 }
 
 // ---------------------------------------------------------------------------
-// "문서" 탭(ADR-0XX): 세션 작업 복사본의 docs/**/*.md·README.md·CHANGELOG.md·CONTRIBUTING.md를 보여 주고,
+// "문서" 탭(ADR-094): 세션 작업 복사본의 docs/**/*.md·README.md·CHANGELOG.md·CONTRIBUTING.md를 보여 주고,
 // 그 자리에서 고쳐 쓰거나(저장 즉시 작업 복사본에 반영 — 다음 체크포인트·PR에 그대로 실린다) 템플릿으로 새 문서를
 // 만든다. "색인 갱신"은 docs/README.md의 관리 구간(DOCS_INDEX_START~END)만 다시 만들고, 그 밖의 손으로 쓴 글은
 // 그대로 둔다(packages/agent/src/docs.ts가 템플릿·색인을 만드는 순수 함수를 맡고, 여기는 파일 IO만 한다).

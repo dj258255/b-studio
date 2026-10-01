@@ -138,7 +138,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
   const [importing, setImporting] = useState(false);
   const [panelView, setPanelView] = useState<PanelView>("list");
   const [revision, setRevision] = useState(0);
-  // 대화의 "요구사항에 반영"(ADR-0XX)이 채운 글. 있으면 "명세 다시 가져오기" 화면을 열고 바로 한 번 추출해
+  // 대화의 "요구사항에 반영"(ADR-094)이 채운 글. 있으면 "명세 다시 가져오기" 화면을 열고 바로 한 번 추출해
   // 병합 diff를 보여 준다 — 한 번 반영했으면 지워서, 탭을 오가도 같은 글로 또 열리지 않게 한다.
   // 코드 탭 열기(preview-panel.tsx의 codeOpen)와 같은 규칙으로, 렌더 중에 비교해 반영한다(useEffect 안에서
   // setState를 곧바로 부르지 않는다 — 리액트 컴파일러 린트가 막는 패턴이다)
@@ -571,7 +571,7 @@ export function ImportFlow({
   sessionId: string;
   onApplied: (snapshot: RequirementsSnapshot) => void;
   onCancel?: () => void;
-  /** "요구사항에 반영"(대화 메시지 → 요구사항 패치, ADR-0XX)이 채운다 — 붙여넣기 칸을 채우고 바로 한 번 추출한다 */
+  /** "요구사항에 반영"(대화 메시지 → 요구사항 패치, ADR-094)이 채운다 — 붙여넣기 칸을 채우고 바로 한 번 추출한다 */
   initialSpecText?: string;
 }) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
