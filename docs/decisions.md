@@ -125,6 +125,8 @@
 - [ADR-108 로컬 폴더 모드 도그푸딩: 서버를 띄우기 전 의존성을 설치하고, 뜬 뒤 코드가 바뀌면 화면에 알린다](#adr-108-로컬-폴더-모드-도그푸딩-서버를-띄우기-전-의존성을-설치하고-뜬-뒤-코드가-바뀌면-화면에-알린다)
 - [ADR-109 재연결은 기록 재생이 아니라 지금 스냅샷이 이기게 하고, 서비스가 뜨는 중에도 사이드카의 마지막 테스트 결과를 보여준다](#adr-109-재연결은-기록-재생이-아니라-지금-스냅샷이-이기게-하고-서비스가-뜨는-중에도-사이드카의-마지막-테스트-결과를-보여준다)
 - [ADR-110 작업 분해 통합 세션의 PR 초안 품질을 고친다: 기본 연결 이슈·토큰·문서 체크포인트·제목·미리보기 유지](#adr-110-작업-분해-통합-세션의-pr-초안-품질을-고친다-기본-연결-이슈토큰문서-체크포인트제목미리보기-유지)
+- [ADR-111 AI 리뷰를 한국어로 고정하고, 고침 커밋 제목을 지적 요약으로 바꾸고, 사람이 지적을 직접 닫을 수 있게 한다](#adr-111-ai-리뷰를-한국어로-고정하고-고침-커밋-제목을-지적-요약으로-바꾸고-사람이-지적을-직접-닫을-수-있게-한다)
+- [ADR-112 도그푸딩에서 드러난 두 가지 마찰을 고친다: 원격 main 받아오기의 참조 잠금 경합과 생성 파일에 새는 내부 ADR 번호](#adr-112-도그푸딩에서-드러난-두-가지-마찰을-고친다-원격-main-받아오기의-참조-잠금-경합과-생성-파일에-새는-내부-adr-번호)
 
 ---
 
@@ -4543,6 +4545,78 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **추적 이슈는 모든 요구사항이 검증됐을 때만 자동으로 닫는다.** 하위 이슈 일부만 검증된 상태로 PR을 올리면(흔한 중간 상태) 추적 이슈는 계속 `관련:`으로만 남는다 — 사람이 나머지를 검증한 뒤 다시 올려야 추적 이슈도 자동으로 닫힌다.
 - **이슈 확인 요약(5개 초과)은 열려 있는 이슈의 제목을 더 이상 보여주지 않는다.** 올리기 전 점검에서 "무엇에 연결되는지"를 하나씩 확인하려면 본문 미리보기(`Implements:` 줄)를 펼쳐야 한다 — 점검 줄 하나가 수십 개 이슈 제목으로 넘치는 것보다 낫다고 판단했다.
 - **PR 제목의 요구사항 요약은 범위(`R2~R23`)만 보여주고 중간에 빠진 번호(R3·R4 등 존재하지 않는 id)를 가려내지 않는다.** 범위 표기가 "20개 전부가 R2부터 R23까지 빠짐없이"라는 뜻은 아니다 — 정확한 목록은 본문의 `Implements:` 줄에 있다.
+
+---
+
+## ADR-111 AI 리뷰를 한국어로 고정하고, 고침 커밋 제목을 지적 요약으로 바꾸고, 사람이 지적을 직접 닫을 수 있게 한다
+
+상태: 채택
+관련: ADR-074, ADR-080, ADR-092
+
+### 맥락
+- 실제 Spring+Next.js PR(dj258255/test#21)로 AI 리뷰(`review-round.ts`, ADR-074)를 도그푸딩하며 세 가지 문제가 드러났다.
+- **라운드마다 지적 언어가 섞였다.** 1라운드(claude-code 백엔드)는 지적 제목·설명을 한국어로 썼는데, 2라운드(같은 세션, 고침 뒤 다시 부른 리뷰어)는 영어로 썼다. `buildPrReviewSystemPrompt`(packages/agent/src/pr-review.ts)에는 "findings를 어떤 언어로 쓰라"는 지시가 아예 없었다 — 본문 에이전트의 시스템 프롬프트(`buildSystemPrompt`)는 `AGENT_LANGUAGE_INSTRUCTION`("사용자에게 보이는 설명·요약·질문은 한국어로 쓴다")으로 한국어를 못박는데, 리뷰어 프롬프트만 이 규칙을 빠뜨렸다.
+- **고침 체크포인트 제목이 의미가 없었다.** 리뷰 라운드가 차단·주요 지적을 찾으면 `buildPrReviewFixRequest`가 만든 요청 글을 `sendMessage`의 정상 경로로 보낸다(검증 게이트·체크포인트를 그대로 거치게 하려고). 이 요청 글의 첫 문장은 모든 라운드가 공유하는 공통 문구("이 PR을 리뷰해 다음 차단·주요 지적을 찾았습니다")인데, `generateCommitSubject`(ADR-080, #355의 커밋 제목 요약)는 "요청 글 첫 문장이 분명하면 그것을 쓴다"는 평소 규칙을 그대로 적용해 `fix: [b-studio AI 리뷰] 이 PR을 리뷰해 다음 차단·주요 지적을 찾았습니다`처럼 라운드 번호만 다를 뿐 매번 똑같은, 아무 정보도 없는 커밋 제목을 만들었다.
+- **리뷰어가 diff 밖 증거를 몰라 같은 거짓 지적을 되풀이했다.** 리뷰어는 "identity 시퀀스가 시드의 명시적 id 삽입 뒤 진전하지 않아 다음 insert가 PK 충돌한다"는 지적을 1·2라운드 모두에서 반복했는데, 실제로는 diff 밖의 `SeedLoader`가 이미 `ALTER TABLE ... RESTART WITH`로 시퀀스를 복원하고 있었고, 실제로 띄운 PostgreSQL 샌드박스도 새 글에 id 43·44를 정상적으로 배정했다 — 거짓 지적이었다. 리뷰어는 diff만 보고 나머지 저장소를 전혀 읽지 못하므로(`buildPrReviewSystemPrompt`가 "diff 밖은 추측하지 말라"고까지 명시한다) 이 오탐을 스스로 바로잡을 길이 없었고, 세션은 "차단(blocked_capped)" 상태로 멈춰 사람이 끼어들 수단도 없었다(지적을 닫는 화면이 없어, 다시 돌려도 같은 지적이 또 나올 뿐이었다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 리뷰어 프롬프트에 한국어 지시만 번역해 새로 쓴다 | 본문 에이전트의 `AGENT_LANGUAGE_INSTRUCTION`과 문구가 달라지면 나중에 둘 중 하나만 고치는 드리프트가 생긴다 — 같은 상수를 그대로 재사용하는 편이 "한곳만 고치면 된다"는 ADR-080의 교훈과도 맞는다 |
+| B. 고침 커밋 제목은 에이전트 요약(`agentSummary`)만 쓰게 한다 | 고침 요청을 처리한 에이전트가 "고쳤습니다"처럼 똑같이 뭉뚱그려 답하면 그대로 다시 의미 없는 제목이 된다 — 지적 제목(리뷰어가 이미 구체적으로 적어 둔 값)이 가장 믿을 수 있는 재료다 |
+| C. 리뷰어에게 셸·파일 읽기 도구를 통째로 열어 저장소를 스스로 탐색하게 한다 | `requestPrReview`는 계획 호출(`task-plan.ts`)과 같은 "도구 없이 한 번 묻는" 경로(`ModelAsk`)를 그대로 쓴다 — claude-code·api 두 백엔드 모두 이 틀을 깨면 리뷰 호출 하나가 긴 도구 루프가 되어 라운드당 비용·시간이 크게 늘고, 모델이 무엇을 읽을지도 예측할 수 없어진다 |
+| **D. 지적 언어는 같은 `AGENT_LANGUAGE_INSTRUCTION` 상수를 리뷰어 프롬프트에도 그대로 넣는다. 고침 커밋 제목은 고침 요청 글에 지적 제목을 표시(`**제목**`)로 심어 뒀다가 `generateCommitSubject`가 그 표시로 알아보고 지적 제목들로 제목을 만든다. diff 밖 증거는 diff가 가리키는 이름(import·클래스)을 정규식으로 뽑아 그 이름의 파일을 작업 복사본에서 찾아 짧게 읽어 프롬프트에 덧붙이고, 사람이 화면에서 지적을 "오탐으로 닫기"(이유 필수)로 직접 해소할 수 있게 한다** | 도구 없이 한 번 묻는 경로를 그대로 지키면서도 가장 흔한 바깥 의존성(같은 PR이 참조하는 다른 클래스)은 짧은 발췌로 보강할 수 있다. 이름 매칭은 휴리스틱이라(파일명이 식별자와 정확히 일치해야 찾는다) 모든 경우를 잡지는 못한다 — 아래에서 감수한다 |
+
+### 결정
+1. **리뷰어 시스템 프롬프트(`buildPrReviewSystemPrompt`)가 `prompts.ts`의 `AGENT_LANGUAGE_INSTRUCTION`을 그대로 가져와 "title·detail·suggestion은 한국어로 쓰라"고 명시한다.** 리뷰어 백엔드·모델 계열(claude-code CLI든 api 레지스트리의 어느 모델이든)과 무관하게 매 라운드 같은 문구가 들어가므로, 1라운드와 2라운드가 서로 다른 언어로 답할 수 없다.
+2. **`buildPrReviewFixRequest`가 각 지적 제목을 `**제목**`(마크다운 굵게)으로 감싸 표시하고, 요청 글 전체는 고정 표시(`PR_REVIEW_FIX_MARKER = '[b-studio AI 리뷰]'`)로 시작한다.** 새 `extractPrReviewFixTitles(request)`는 이 표시로 시작하는 요청 글에서만 굵게 감싼 제목들을 순서대로 뽑고, 아니면(보통의 사용자 요청) `undefined`를 돌려준다. `generateCommitSubject`(commit-message.ts)는 이 함수가 제목을 돌려주면 "리뷰 지적 N건 반영 — 제목1, 제목2" 형식으로 제목을 만들고(기존 72자·"타입: 요약" 규칙은 그대로 따른다), 아니면 지금까지의 규칙(요청 글 첫 문장 → 에이전트 요약 → 바뀐 파일)을 그대로 쓴다. 고침 요청은 항상 차단·주요 지적이 있어야만 보내므로(`nextPrReviewStep`의 `fix` 분기) 제목 목록이 비어 있을 일은 없다.
+3. **diff 밖 참고 파일은 diff가 가리키는 이름을 정규식으로만 뽑는다(순수 함수), 실제 파일 읽기는 세션이 있는 바깥(sessions.ts)에서 한다.** 새 `extractDiffReferencedNames(diff)`(pr-review.ts)는 추가된 줄에서 상대 경로 import(JS/TS)의 마지막 이름, Java/Kotlin·Python import문이 가리키는 마지막 이름, 파스칼 케이스 식별자(전부 대문자인 흔한 약어는 제외)를 모은다. `reviewExternalContext`(sessions.ts)는 이 이름마다 작업 복사본(`walkFiles`)에서 파일명이 정확히 일치하는, diff에는 없는 파일을 찾아 `Workspace`로 앞 60줄만 읽는다(최대 5개 파일·8,000자, `buildPrReviewExternalContext`가 상한을 넘으면 앞에서부터만 담는다) — 찾지 못하거나 못 읽으면 조용히 건너뛴다. 리뷰어 시스템 프롬프트는 이 섹션이 있으면 "diff 밖 코드가 이미 처리하는 것을 모르고 지적하지 말라"고 안내한다.
+4. **화면(`ReviewCard`)이 지적마다 "오탐으로 닫기"(이유 필수)·"다음 요청으로 고치기"(대화 입력창을 그 지적으로 채운다, `useChatDraft`)를 보여준다.** "오탐으로 닫기"는 `POST /api/sessions/[id]/review/resolve`(`resolveReviewFinding`)를 불러 그 라운드의 `humanResolutions`(findings 인덱스 → `{reason, by, at}`)에 결정을 남긴다. 그 라운드의 막는 지적(차단·주요, `isBlockingFinding`과 같은 기준)이 전부 닫히면 라운드 상태를 `resolved_by_human`으로, 리뷰 상태가 `capped`·`stopped`였으면 `resolved`로 바꿔 "사람이 확인함"으로 분명히 보여준다(설계 파이프라인의 `reviewInputFromState`도 `resolved`를 `passed`와 같이 센다). 그 라운드가 PR에 댓글을 남겼으면(`commentUrl`) 같은 댓글 API(`postComment`)로 이유를 답글처럼 남기고, 실패해도(라운드 댓글과 같은 규칙) 결정 자체는 막지 않는다.
+5. **"다시 돌리기"로 새 리뷰를 시작하면, 그 직전 리뷰에서 사람이 오탐으로 닫은 지적을 모아(`collectHumanResolvedFindings`, review-round.ts) 다음 라운드의 리뷰어 문맥에 "이미 사람이 확인한 지적 — 새 근거 없이 되풀이하지 마세요" 섹션으로 넘긴다**(`buildPrReviewResolvedContext`). 리뷰 상태는 새 리뷰 시작과 함께 `rounds: []`로 초기화되므로, 이 문맥은 runReviewRound가 초기화하기 직전에 미리 계산해 클로저로 들고 있는다.
+
+### 검증 결과
+- `packages/agent/src/pr-review.test.ts`(보강): `buildPrReviewSystemPrompt`가 `AGENT_LANGUAGE_INSTRUCTION`을 담는 것, `extractDiffReferencedNames`가 추가된 줄의 상대 경로 import·Java import·파스칼 케이스 식별자(약어 제외)를 뽑고 지운 줄은 보지 않는 것, `diffFilePaths`가 diff의 파일만 모으는 것, `buildPrReviewExternalContext`가 상한을 넘으면 앞에서부터만 담는 것, `buildPrReviewResolvedContext`·`buildReviewResolutionComment`가 위치·제목·이유를 담는 것, `extractPrReviewFixTitles`가 표시 없는 보통 요청은 `undefined`를, AI 리뷰 고침 요청은 굵게 감싼 제목을 순서대로 뽑는 것, `buildPrReviewUserPrompt`가 externalContext·resolvedContext를 그대로 싣는 것을 확인했다.
+- `packages/agent/src/commit-message.test.ts`(보강): `generateCommitSubject`가 AI 리뷰 고침 요청이면 공통 문구 대신 "리뷰 지적 N건 반영 — 제목…" 형식으로 제목을 만드는 것을 확인했다.
+- `apps/studio/lib/server/review-round.test.ts`(보강): `externalContext`·`resolvedContext`가 리뷰어 호출의 사용자 메시지에 실리는 것, `collectHumanResolvedFindings`가 라운드별 `humanResolutions`을 findings 인덱스로 찾아 이유와 함께 모으는 것을 확인했다.
+- `apps/studio/lib/server/sessions-review.test.ts`(보강): 실제 git 저장소(가짜 샌드박스·가짜 PR API)로 고침 체크포인트 제목이 "리뷰 지적 N건 반영 — …" 형식인 것, 라운드 상한(blocked_capped)에 걸린 지적을 `resolveReviewFinding`으로 오탐 닫으면 라운드가 `resolved_by_human`으로, 리뷰 상태가 `resolved`로 바뀌고 PR에 답글 댓글을 남기는 것, 지적을 찾지 못하거나 이유가 비면 거부하는 것을 확인했다.
+- `apps/studio/app/api/sessions/[id]/review/resolve/route.test.ts`(신규): 권한 확인·입력 검증·오류 전달을 확인했다.
+- `apps/studio/components/review-card.test.tsx`(신규): "사람이 확인함" 라벨이 리뷰·라운드 양쪽에 보이는 것, "다음 요청으로 고치기" 글 생성을 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **diff 밖 참고 파일은 이름이 파일명과 정확히 일치해야 찾는다.** 식별자와 파일명이 다르면(예: 클래스 `SeedLoader`가 `seed/Loader.java`처럼 다른 이름의 파일에 있으면) 찾지 못한다 — 셸·검색 도구를 리뷰어에게 통째로 여는 것보다 비용·예측 가능성이 낫다고 봤다(검토한 선택지 C).
+- **"다음 요청으로 고치기"는 지적 하나만 채운다, 여러 개를 한 번에 묶지 못한다.** 차단·주요 지적이 여러 개면 하나씩 눌러야 한다 — 전체를 자동으로 고치려면 기존 "AI 리뷰 돌리기"(모든 차단·주요 지적을 한 번에 요청하는 `buildPrReviewFixRequest`)를 쓰면 된다.
+- **오탐으로 닫은 지적은 다음 라운드 리뷰어에게 "되풀이하지 말라"고 안내만 할 뿐, 강제로 막지는 않는다.** 리뷰어가 새 근거를 들어 같은 자리를 다시 지적하면(드물지만 코드가 그 사이 또 바뀌었을 수 있다) 그 지적은 새 라운드의 새 지적으로 다시 나온다 — 사람이 다시 판단해야 한다.
+
+---
+
+## ADR-112 도그푸딩에서 드러난 두 가지 마찰을 고친다: 원격 main 받아오기의 참조 잠금 경합과 생성 파일에 새는 내부 ADR 번호
+
+상태: 채택
+관련: ADR-067, ADR-073, ADR-101
+
+### 맥락
+- 도그푸딩에서 드러난 두 가지 불편함이다.
+- **"원격 main 받아오기"(ADR-101)가 동시에 두 번 들어오면 실패하고, 실패 문구가 실제 상황과 어긋난다.** 화면이 요청을 두 번 보내거나(리액트 effect가 두 번 돌거나 다른 탭에서 같은 프로젝트를 열어 둔 경우) `fetchOriginMain`이 같은 폴더에 `git fetch origin main`을 거의 동시에 두 번 돌리면, 둘 다 `refs/remotes/origin/main`을 옮기려다 `cannot lock ref 'refs/remotes/origin/main': is at ... but expected ...`로 하나가 깨졌다. 사람이 다시 누르면 그사이 다른 호출이 이미 받아왔으므로 "main 브랜치가 이미 최신입니다. 받아올 커밋이 없습니다"만 보여 — 실제로는 성공했는데도 성공을 본 적이 없다.
+- **생성 파일에 내부 문서 번호가 새어 사용자 프로젝트에 들어간다.** 폴더 열기(ADR-067)가 만드는 studio.yaml·compose.b-studio.yaml·`<서비스>/Dockerfile.b-studio`의 주석 중 여섯 줄(project-detect.ts)이 "ADR-067"·"ADR-073" 같은 b-studio 저장소 안에서만 뜻이 있는 문서 번호를 그대로 적어 뒀다 — 예: `# studio.yaml에 없는 부가 서비스: 샌드박스와 함께 뜨고 함께 사라진다 (기존 compose에서 가져오거나 새로 제안했습니다, ADR-073)`. 화면 문구에 ADR 번호가 새지 않는 것은 이미 `no-adr-in-ui.test.ts`로 지키고 있었지만, 그 테스트는 `components`·`app`만 보고 생성 파일 쪽은 보지 않았다.
+
+### 결정
+1. **폴더 경로별 뮤텍스로 같은 폴더를 겨냥한 fetch를 한 번에 하나씩만 돌린다.** `project-source-sync.ts`에 `withRepoLock`(경로의 실제 경로를 키로 쓰는 `Map<string, Promise<void>>`)을 더해, `fetchOriginMain`의 fetch~merge 구간(더티 검사부터 fast-forward까지)을 이 락으로 감싼다. studio 서버에서 프로젝트 원본 폴더에 `git fetch`를 직접 돌리는 경로는 이 함수 하나뿐임을 확인했다(`grep`으로 `apps/studio/lib/server`·`apps/studio/app` 전체를 훑었다) — 그래서 이 한 곳만 감싸는 것으로 충분하다.
+2. **"cannot lock ref"로 실패하면 잠깐 기다렸다 한 번만 더 시도한다.** 뮤텍스는 studio 서버 안의 동시 호출만 줄 세운다 — 사람의 터미널에서 직접 돌리는 `git fetch` 같은 바깥 프로세스와는 여전히 부딪힐 수 있다. `fetchWithRetry`가 그 한 가지 오류 패턴(`cannot lock ref`)에서만 150ms 기다린 뒤 한 번 더 시도하고, 그래도 안 되면 포기한다.
+3. **락을 기다리는 동안 다른 호출이 먼저 받아왔으면 "이미 최신"이 아니라 성공으로 본다.** `fetchOriginMain`은 락을 서기 전의 HEAD(`headBefore`)를 기억해 두고, 모든 처리가 끝난 뒤 지금 HEAD와 비교한다 — 둘이 다르면(내가 직접 받아왔든, 줄을 서는 사이 다른 호출이 먼저 받아 놓았든) `status: 'fast-forwarded'`와 `headBefore..지금`의 전체 커밋 목록을 돌려준다. 같으면만 `up-to-date`다. 결과에 받아오기 전후 짧은 SHA(`previousShortSha`·`shortSha`)를 더해, 화면이 "main을 `<old>`→`<new>`로 받아왔습니다"로 보여준다.
+4. **알려진 git 실패는 짧은 한국어 한 줄로 보여주고, 원문은 접어 둔다.** `StudioError`에 `details`(선택)를 더하고 `errorResponse`가 함께 돌려준다. `describeGitFailure`가 "cannot lock ref"·네트워크·인증·브랜치 없음 같은 흔한 실패를 짧은 한국어 문장으로 매핑하고, 원래 git 오류 전체는 `details`로 들고 다닌다. "원격 main 받아오기" 모달은 실패 문구 아래 "자세히" `<details>` 토글(기존 `deploy-panel.tsx`의 릴리스 오류 토글과 같은 모양)을 펼쳤을 때만 원문을 보여준다.
+5. **생성 파일의 주석에서 ADR 번호를 뗀다, 설명 글은 그대로 둔다.** `project-detect.ts`의 Dockerfile·studio.yaml·compose.b-studio.yaml 템플릿 주석 여섯 곳에서 "(ADR-067)"·", ADR-073)" 같은 괄호 표기만 지웠다(예: "b-studio가 만든 개발용 이미지(ADR-067). 소스는 ..." → "b-studio가 만든 개발용 이미지. 소스는 ..."). b-studio 소스 코드 자체의 JSDoc 주석(이 파일 맨 위, `compose-import.ts`·`service-selection.ts` 등)은 생성 파일에 들어가지 않으므로 그대로 뒀다 — ADR 번호가 뜻있는 것은 b-studio 저장소 안이고, 사용자 프로젝트로 나가는 파일에서는 뜻 없는 내부 표기일 뿐이다.
+6. **생성 파일에 ADR 번호가 없는지도 테스트로 지킨다.** `no-adr-in-ui.test.ts`가 화면 문구만 보던 것과 별도로, `project-detect.test.ts`에 `generateFiles`가 만든 모든 파일(부가 서비스가 있는 경우 포함)에 `/ADR-\d+/`가 없는지 보는 테스트를 더했다.
+
+### 검증 결과
+- `apps/studio/lib/server/project-source-sync.test.ts`: 기존 열세 가지에 더해, 같은 폴더를 `Promise.all`로 동시에 두 번 받아와도 둘 다 참조 잠금 오류 없이 끝나고 둘 다 "이미 최신"이 아니라 같은 커밋을 성공으로 보여주는 것, `origin/main.lock` 파일을 만들어 흉내 낸 "cannot lock ref" 뒤 150ms 안에 잠금이 없어지면 재시도로 받아오는 것, fast-forward 결과에 받아오기 전후 짧은 SHA가 실제 커밋과 맞는 것을 실제 로컬 bare 원격으로 확인했다.
+- `apps/studio/lib/server/project-detect.test.ts`: `generateFiles`가 Next.js·Spring Boot·FastAPI 서비스와 부가 서비스(postgres)가 함께 있는 프로젝트에서 만든 studio.yaml·compose.b-studio.yaml·Dockerfile.b-studio 어디에도 `ADR-\d+`가 없는 것을, 부가 서비스 주석(ADR-073이 있던 자리)이 실제로 생성되는 것까지 함께 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **뮤텍스는 studio 프로세스 하나 안에서만 줄을 세운다.** studio 서버를 여러 프로세스로 띄우거나(지금 구조에서는 안 그런다) 사람이 터미널에서 같은 폴더에 직접 `git fetch`를 돌리면 여전히 부딪힐 수 있다 — 그래서 재시도(결정 2)를 별도로 둔 것이지, 뮤텍스만으로 경합을 완전히 없앤다고 보지 않는다.
+- **재시도는 "cannot lock ref" 한 가지 패턴에만 쓴다.** 다른 일시적 실패(네트워크 끊김 등)는 한 번 더 시도하지 않고 바로 실패를 보여준다 — 참조 잠금은 보통 수백 ms 안에 풀리는 반면, 다른 실패는 다시 시도해도 대개 같은 이유로 또 실패해 사람이 "다시 시도" 버튼을 직접 누르는 쪽이 낫다고 봤다.
+- **"미리보기 앱 탭의 경로 입력칸이 클라이언트 쪽 이동(pushState)을 따라가지 않는 문제"는 조사했지만 고치지 않았다.** 화면 미리보기는 기본적으로 샌드박스 서비스 주소를 iframe에 직접 연결한다(`service.url`, 127.0.0.1의 다른 포트) — studio 자신의 출처(127.0.0.1:3000)와 다른 출처라 `iframe.contentWindow.location`을 읽을 수 없다. 켤 수 있는 "원격 미리보기 게이트웨이"(ADR 미지정, `preview-gateway.ts`)조차 studio와 같은 출처가 아니라 자신만의 호스트·포트를 쓰므로 같은 문제가 남는다. 두 선택지(같은 출처로 바꿔 직접 읽기, 또는 프록시가 지나가는 HTML에 작은 스크립트를 심어 postMessage로 알리기) 모두 지금 없는 "스튜디오 자신의 출처에서 앱 전체(정적 자원·API·HMR 웹소켓 포함)를 중계하는 범용 프록시"를 새로 만들어야 하는데, 기존 프록시(`services/[service]/request`)는 API 탐색기용 단발 요청-응답 중계일 뿐이고 원격 미리보기 게이트웨이는 선택 기능이라 기본 경로를 고치지 못한다. 샌드박스를 실제로 띄워 보며 HMR·실시간 반영이 깨지지 않는지 확인해야 하는 큰 변경이라 이번 수정 범위에서는 조사만 남기고 건드리지 않았다.
 
 ---
 

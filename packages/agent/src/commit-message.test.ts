@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyCommit, generateCommitSubject, toCommitMood } from './commit-message';
 import type { PendingChange } from './checkpoints';
+import { buildPrReviewFixRequest, type PrReviewFinding } from './pr-review';
 
 function change(file: string, kind: PendingChange['change'] = 'modified'): PendingChange {
   return { file, change: kind };
@@ -85,6 +86,17 @@ describe('generateCommitSubject', () => {
     const request = '대시보드 로딩 버그를 고쳐 주세요. 재현 방법은 콘솔을 열고 새로고침하면 됩니다.';
     const subject = generateCommitSubject(request, [change('web/app/dashboard/page.tsx')]);
     expect(subject).not.toMatch(/해\s*주세요/);
+  });
+
+  it('AI 리뷰 고침 요청(buildPrReviewFixRequest)이면 요청 글의 공통 문구 대신 지적 제목들로 제목을 만든다(과제 66 버그 리포트)', () => {
+    const findings: PrReviewFinding[] = [
+      { severity: 'blocker', file: 'api/SeedRunner.java', title: '시드 id 시퀀스 검증', detail: '설명' },
+      { severity: 'major', file: 'api/src/test', title: '마이그레이션 테스트', detail: '설명' },
+    ];
+    const request = buildPrReviewFixRequest(findings);
+    const subject = generateCommitSubject(request, [change('api/SeedRunner.java')], '고쳤습니다.');
+    expect(subject).toBe('fix: 리뷰 지적 2건 반영 — 시드 id 시퀀스 검증, 마이그레이션 테스트');
+    expect(subject).not.toContain('이 PR을 리뷰해');
   });
 });
 

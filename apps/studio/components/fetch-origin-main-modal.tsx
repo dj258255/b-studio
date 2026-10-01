@@ -14,6 +14,8 @@ interface FetchOriginMainResult {
   branch: string;
   status: "up-to-date" | "fast-forwarded";
   commits: RemoteMainCommit[];
+  previousShortSha: string;
+  shortSha: string;
 }
 
 /**
@@ -23,6 +25,8 @@ interface FetchOriginMainResult {
 export function FetchOriginMainModal({ projectId, onClose }: { projectId: string; onClose: () => void }) {
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string>();
+  // 원인이 된 git 오류 원문. 화면에는 접어 두고 "자세히" 토글을 펼쳤을 때만 보여준다
+  const [errorDetail, setErrorDetail] = useState<string>();
   const [result, setResult] = useState<FetchOriginMainResult>();
   // 다시 시도를 누르면 바뀌어 아래 effect를 다시 돈다
   const [attempt, setAttempt] = useState(0);
@@ -31,10 +35,11 @@ export function FetchOriginMainModal({ projectId, onClose }: { projectId: string
     let cancelled = false;
     fetch(`/api/projects/${encodeURIComponent(projectId)}/fetch-main`, { method: "POST" })
       .then(async (response) => {
-        const body = (await response.json().catch(() => ({}))) as FetchOriginMainResult & { error?: string };
+        const body = (await response.json().catch(() => ({}))) as FetchOriginMainResult & { error?: string; details?: string };
         if (cancelled) return;
         if (!response.ok) {
           setError(body.error ?? describeFailedResponse(response, "원격을 받아오지 못했습니다"));
+          setErrorDetail(body.details);
           return;
         }
         setResult(body);
@@ -66,12 +71,21 @@ export function FetchOriginMainModal({ projectId, onClose }: { projectId: string
               <p role="alert" className="text-fail">
                 {error}
               </p>
+              {errorDetail && (
+                <details className="mt-1 text-xs">
+                  <summary className="cursor-pointer text-muted">자세히</summary>
+                  <pre className="mt-1 max-h-48 overflow-auto rounded-md border border-line bg-ground px-3 py-2 font-mono leading-5 whitespace-pre-wrap break-all">
+                    {errorDetail}
+                  </pre>
+                </details>
+              )}
               <button
                 type="button"
                 onClick={() => {
                   // 다음 effect 실행 전에 바로 "받아오는 중"으로 보이게 한다(effect 안에서 동기로 setState하지 않는다)
                   setBusy(true);
                   setError(undefined);
+                  setErrorDetail(undefined);
                   setAttempt((value) => value + 1);
                 }}
                 className="glass-soft mt-3 rounded-control px-3 py-1.5 text-sm font-medium hover:bg-panel"
@@ -84,7 +98,7 @@ export function FetchOriginMainModal({ projectId, onClose }: { projectId: string
           ) : result ? (
             <>
               <p>
-                {result.branch} 브랜치를 원격에서 {result.commits.length}개 커밋 받아왔습니다.
+                {result.branch}을(를) {result.previousShortSha}→{result.shortSha}로 받아왔습니다({result.commits.length}개 커밋).
               </p>
               <ul className="mt-2 space-y-1 font-mono text-xs leading-5 text-muted">
                 {result.commits.map((commit) => (

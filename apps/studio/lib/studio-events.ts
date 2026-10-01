@@ -138,9 +138,18 @@ export interface SessionSnapshot {
 
 /**
  * PR 자동 리뷰 라운드 한 번. running: 리뷰어를 부르는 중. blocked_continue: 차단·중요 지적이 있고 라운드가 남아 고치는 중.
- * fix_failed: 고침 요청이 검증 게이트를 통과하지 못해 멈췄다. 댓글 올리기 실패는 라운드를 막지 않고 commentError에만 남는다
+ * fix_failed: 고침 요청이 검증 게이트를 통과하지 못해 멈췄다. resolved_by_human: 라운드 상한(blocked_capped)에 걸렸지만
+ * 사람이 막는 지적을 모두 오탐으로 닫아 더는 막지 않는다(resolveReviewFinding, 과제 67-b). 댓글 올리기 실패는 라운드를
+ * 막지 않고 commentError에만 남는다
  */
-export type ReviewRoundStatus = 'running' | 'passed' | 'blocked_continue' | 'blocked_capped' | 'fixing' | 'fix_failed' | 'error';
+export type ReviewRoundStatus = 'running' | 'passed' | 'blocked_continue' | 'blocked_capped' | 'resolved_by_human' | 'fixing' | 'fix_failed' | 'error';
+
+/** 사람이 지적 하나를 오탐으로 닫으며 남긴 결정(resolveReviewFinding, 과제 67-b). findings 배열의 인덱스로 키를 삼는다 */
+export interface ReviewFindingResolution {
+  reason: string;
+  by?: string;
+  at: string;
+}
 
 export interface ReviewRoundView {
   round: number;
@@ -155,11 +164,13 @@ export interface ReviewRoundView {
   error?: string;
   startedAt: string;
   finishedAt?: string;
+  /** 사람이 오탐으로 닫은 지적들. findings 배열 인덱스 → 결정(과제 67-b) */
+  humanResolutions?: Record<number, ReviewFindingResolution>;
 }
 
-/** state: running(진행 중) · passed(리뷰 통과) · capped(라운드 상한) · stopped(멈춤, 오류·고침 실패) */
+/** state: running(진행 중) · passed(리뷰 통과) · capped(라운드 상한) · resolved(라운드 상한에 걸렸지만 사람이 확인해 더는 막지 않음) · stopped(멈춤, 오류·고침 실패) */
 export interface ReviewStateView {
-  state: 'running' | 'passed' | 'capped' | 'stopped';
+  state: 'running' | 'passed' | 'capped' | 'resolved' | 'stopped';
   maxRounds: number;
   rounds: ReviewRoundView[];
   /** 사람이 명시적으로 고른 리뷰어 모델(api 레지스트리 id). 없으면 이 세션의 평소 백엔드·모델로 리뷰했다 */
