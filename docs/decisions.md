@@ -122,6 +122,7 @@
 - [ADR-105 테스트 탭 실행 결과를 세션 상태 폴더에 남겨 서버 재시작에도 잃지 않는다](#adr-105-테스트-탭-실행-결과를-세션-상태-폴더에-남겨-서버-재시작에도-잃지-않는다)
 - [ADR-106 요구사항 탭 도그푸딩에서 드러난 여섯 가지 마찰을 고친다](#adr-106-요구사항-탭-도그푸딩에서-드러난-여섯-가지-마찰을-고친다)
 - [ADR-107 PR 생성도 이슈 발행과 같은 토큰을 찾고, "올리기 전 점검"에서도 바로 올릴 수 있게 한다](#adr-107-pr-생성도-이슈-발행과-같은-토큰을-찾고-올리기-전-점검에서도-바로-올릴-수-있게-한다)
+- [ADR-108 재연결은 기록 재생이 아니라 지금 스냅샷이 이기게 하고, 서비스가 뜨는 중에도 사이드카의 마지막 테스트 결과를 보여준다](#adr-108-재연결은-기록-재생이-아니라-지금-스냅샷이-이기게-하고-서비스가-뜨는-중에도-사이드카의-마지막-테스트-결과를-보여준다)
 
 ---
 
@@ -4431,6 +4432,42 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **`RepositoryUploadActions`가 `display: contents`로 자기 상자를 없애, 어디에 끼우든 부모의 flex 레이아웃을 그대로 따른다.** 버튼 줄은 문제없지만 오류 문구·PR 미리보기 패널도 같은 부모의 flex 항목이 되어, 아주 좁은 화면에서는 줄바꿈 위치가 조금 달라질 수 있다 — 두 화면(RepositoryBar·SubmissionPanel)의 레이아웃이 서로 달라 컴포넌트에 고정 상자를 주면 한쪽이 깨진다.
 - **토큰 캐시(5초)는 호스트별로 하나뿐이다(프로세스 전역).** 같은 프로세스에서 서로 다른 GitHub 계정의 토큰을 섞어 쓰는 멀티 테넌트 서버라면 캐시가 다른 세션의 토큰을 잠깐 돌려줄 수 있다 — 지금은 개인 PC 모드(`localFolderAllowed`)에서만 gh CLI 대체가 켜지고, 그 모드는 한 사람만 쓴다고 전제해 문제가 되지 않는다.
 - **PR 본문의 "올리기 전 점검" 요약은 `submissionReport`를 다시 부른다(캐시하지 않는다).** PR을 만들 때마다 점검표를 다시 계산하므로 아주 큰 프로젝트에서는 그만큼 느려질 수 있다 — 미리보기·실제 생성이 같은 조립 지점(`pullRequestDraft`)을 쓰게 하는 것이 "본문이 어긋나지 않는다"는 이득보다 크다고 보았다.
+
+---
+
+## ADR-108 재연결은 기록 재생이 아니라 지금 스냅샷이 이기게 하고, 서비스가 뜨는 중에도 사이드카의 마지막 테스트 결과를 보여준다
+
+상태: 채택
+관련: ADR-084, ADR-105, ADR-107
+
+### 맥락
+- 과제로 b-studio를 도그푸딩하며 드러난 두 가지 버그를 하나로 묶는다(ADR-102와 같은 이유) — 둘 다 "화면을 다시 열면(재연결·재시작) 이미 맞는 값이 있는데도 잠깐 틀리게 보인다"는 같은 모양의 문제다.
+- **재연결하면 서버가 다시 계산한 저장소 상태가 화면에 반영되지 않는다.** `subscribe`(sessions.ts)의 `replay`는 `{type:'snapshot', snapshot}`을 먼저 보낸 뒤 `target.history`를 그대로 재생한다. 그런데 `exported`·`remote_synced`·`base_synced`·`review_round` 같은 기록 이벤트는 "그 순간" 서버가 계산한 `repository`(`canCreatePullRequest`·`pushedSha`·`pullRequestUrl` 등)·`checkpoints`·`review`를 통째로 담고 있고, `reduceSession`(session-view.ts)은 이 값으로 스냅샷을 그대로 덮어쓴다. 주석은 "기록을 다시 재생해도 결과가 같다"고 적어 뒀지만, `describeRepository`(sessions.ts)는 `canCreatePullRequest`를 매번 다시 계산하는 함수라 — 특히 멈춘 세션을 이어서 작업할 때(`resumeSession`)는 이 함수를 다시 불러 지금 스냅샷은 바로 고치면서도 기록에는 새 이벤트를 남기지 않는다 — 서버가 그사이(예: gh CLI 토큰을 새로 찾아) 다르게 계산하면, 재연결한 화면은 지금 스냅샷이 아니라 기록이 마지막으로 남긴 옛 값으로 끝난다.
+- **서비스가 뜨는 중이면 "테스트" 탭과 요구사항 증거가 몇 분 동안 비어 보인다.** `buildTestServiceView`(sessions.ts, ~5150줄)는 서비스가 `ready`가 아니면 곧바로 "서비스가 꺼져 있습니다"와 빈 행을 돌려준다. ADR-105로 테스트 실행 결과를 사이드카(`.git/b-studio/test-results.json`)에 남겨 서버가 다시 떠도 복원하게 됐지만, 그 복원값은 `ready`일 때만 행으로 바뀌었다 — 서버를 재시작하면(또는 세션을 이어서 작업하면) 샌드박스가 뜨는 몇 분 동안(특히 Gradle) 요구사항 평가(`buildRequirementTestRunEvidence`)가 쓸 행이 하나도 없어, 이미 검증된 요구사항 15개가 잠깐 "재확인 필요"로 되돌아갔다.
+
+### 검토한 선택지
+| 항목 | 방식 | 결정 이유 |
+|---|---|---|
+| 1 | A. `replay`가 기록에서 `exported`·`remote_synced`·`base_synced`·`review_round`를 아예 빼고 보낸다 | 대화 줄(`chat`)은 이 이벤트가 만드는 "올렸습니다" 같은 안내를 그대로 보여줘야 한다 — 기록에서 빼면 그 안내 줄도 사라진다 |
+|   | **B. 기록과 로그를 다 보낸 뒤, 재생을 시작할 때 기억해 둔 지금 스냅샷 값으로 `repository`·`checkpoints`·`review`만 다시 맞추는 이벤트(`snapshot_sync`)를 하나 더 보낸다 — 대화는 건드리지 않는다** | 적용 — 채팅 기록은 그대로 두고 "서버가 다시 계산하는 필드"만 마지막에 한 번 더 맞춘다 |
+| 2 | A. 서비스가 `ready`가 아니면 지금처럼 비워 둔다 | 재시작 직후 몇 분을 못 참아 이미 검증된 요구사항이 "재확인 필요"로 되돌아가는 문제를 그대로 둔다 |
+|   | **B. 서비스가 `ready`가 아니어도 사이드카에 저장된 실행이 있으면, 소스 파일을 다시 발견하지 않고 그 보고서의 케이스를 그대로 행으로 삼는다(발견 단계와 같은 방식으로 이름에서 요구사항 id를 뽑는다). 실행 버튼은 여전히 막는다** | 적용 — 서비스가 떠야만 할 수 있는 것(테스트를 다시 돌리는 것)과, 이미 가진 정보(사이드카)만으로 보여줄 수 있는 것(행·요구사항 증거)을 나눈다 |
+
+### 결정
+1. **`replay`(sessions.ts)가 재생을 시작하기 전에 지금 스냅샷의 `repository`·`checkpoints`·`review`를 기억해 뒀다가, 기록과 로그를 다 보낸 끝에 `{type:'snapshot_sync', repository, checkpoints, review}`를 한 번 더 보낸다.** `reduceSession`(session-view.ts)의 새 `case 'snapshot_sync'`는 `patchSnapshot`으로 이 세 필드만 지금 값으로 맞추고 `chat`은 그대로 둔다 — `snapshot`처럼 화면을 통째로 초기화하지 않는다. `exported`·`review_round`의 "기록을 다시 재생해도 결과가 같다"던 주석을 "그 순간 값일 뿐이고, 재생이 끝난 지금 값과 같다는 보장은 없다 — `snapshot_sync`가 마지막에 맞춘다"로 고쳤다.
+2. **`buildTestServiceView`(sessions.ts)는 서비스가 `ready`가 아니어도, `ensureTestResultsLoaded` 뒤 사이드카에 그 서비스의 마지막 실행이 있으면 빈 행 대신 그 실행으로 행을 만든다.** 새 `storedCaseToRow`가 저장된 `ParsedTestCase`(실행 보고서의 케이스 하나)를 행으로 바꾼다 — 소스 파일을 다시 읽어 발견한 행(`file`·`line`·`suitePath`)과 붙이지 않고, 보고서의 케이스 이름에서 발견 단계(test-discovery.ts)와 같은 함수(`extractRequirementIds`)로 요구사항 id를 뽑는다. `lastRunSha`는 그대로 들고 있으므로 ADR-105의 SHA 규칙(지금 체크포인트와 같고 커밋하지 않은 변경이 없어야 증거로 친다)이 그대로 적용된다. `supported: false`로 실행 버튼은 계속 막고(테스트를 다시 도는 것은 서비스가 떠야만 할 수 있다), 새 `notice` 필드(`error`와 달리 화면이 경고색으로 그리지 않는다)에 "서비스가 꺼져 있어 마지막 실행 결과만 보여 줍니다"를 담는다. 마지막 실행 자체가 실패했으면(컴파일 오류 등) `notice` 대신 그 이유를 `error`로 먼저 보여준다.
+3. **`tests-panel.tsx`가 `notice`를 `error`와 다른 톤(`text-muted`)으로 그린다.** 실행 버튼(`disabled={!service.supported}`)은 기존 로직을 그대로 재사용해 손대지 않았다 — `supported: false` 하나로 서비스 실행·파일 실행·테스트 하나 실행 버튼이 전부 막힌다.
+
+### 검증 결과
+- `apps/studio/lib/session-view.test.ts`: `snapshot_sync`가 `repository`·`checkpoints`·`review`만 지금 값으로 맞추고 대화는 그대로 두는 것, `exported`가 담은 옛 `canCreatePullRequest`가 아니라 재생 끝의 `snapshot_sync`가 맞춘 지금 값으로 화면이 끝나는 것을 확인했다.
+- `apps/studio/lib/server/sessions-replay-sync.test.ts`(새 파일): 실제 git 저장소·세션으로 올릴 때는 `canCreatePullRequest:false`로 기록되지만, 이어서 작업하며(`resumeSession`) 다시 계산하면(테스트에서는 그 계산 함수를 통제해 "서버가 그사이 gh 토큰을 새로 찾았다"를 흉내 낸다) 지금 스냅샷은 `true`로 바뀌는 것, 기록에는 옛 `exported` 이벤트(`false`)가 그대로 남는 것, 재연결(`subscribe`)이 `snapshot → 기록(옛 값) → snapshot_sync(지금 값)` 순서로 보내는 것, 화면 reducer로 전부 접으면 최종 값이 `true`인 것을 확인했다. 고치기 전 코드로 되돌려 이 테스트가 실패하는 것(`exported`에서 끝나 `false`로 남는 것)도 확인했다.
+- `apps/studio/lib/server/sessions-test-results-offline.test.ts`(새 파일): 서비스를 `ready`로 올리지 않은 채(가짜 샌드박스의 `start()`를 묶어 재시작 직후 "기동 중" 구간을 흉내 낸다) "테스트" 탭을 열면, 사이드카의 마지막 실행(요구사항 id `R7`이 붙은 케이스 포함)이 행으로 보이고 `supported: false`·`notice` 있음·`error` 없음인 것, `buildRequirementTestRunEvidence`가 이 행으로 `R7`의 증거(통과 1)를 세는 것, 서비스가 `ready`가 되면 평소대로(발견 단계를 거친 행, `supported: true`)로 돌아오는 것을 확인했다. 고치기 전 코드로 되돌려 이 테스트가 "서비스가 꺼져 있습니다"로 실패하는 것도 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **`snapshot_sync`는 `repository`·`checkpoints`·`review` 세 필드만 다시 맞춘다.** 다른 필드(`status`·`services` 등)는 항상 같은 함수(`setStatus` 등)가 상태를 바꾸는 동시에 이벤트를 내보내 기록과 지금 값이 어긋날 일이 없다고 보고 뺐다 — 앞으로 "그 순간 값을 통째로 담는" 새 필드·이벤트가 생기면 이 목록에 같이 넣어야 한다.
+- **서비스가 꺼져 있을 때 되살린 행은 `file`·`line`·`suitePath`가 비어 있다(보고서에 없는 정보다).** "코드 보기" 버튼을 눌러도 파일 맨 위로만 간다 — 서비스가 뜨면(소스 파일을 다시 읽으면) 평소대로 정확한 줄로 돌아온다.
+- **PR 생성 토큰처럼 "그 순간" 계산이 실제로 달라지는 경우만 눈에 띄게 재현된다.** 테스트는 그 계산 함수를 통제해 흉내 냈지만, 실제 운영에서는 gh CLI 토큰을 새로 찾는 것처럼 드물게만 값이 달라진다 — 그래도 한 번 어긋나면 사람이 "버튼이 없어졌다"고 오해하기 쉬워 고칠 가치가 있다고 판단했다.
 
 ---
 

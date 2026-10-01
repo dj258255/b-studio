@@ -477,7 +477,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return patchSnapshot(view, { testsRevision: event.revision, testsRunning: event.running });
 
     case 'exported':
-      // 원격 상태는 통째로 바꾸므로 기록을 다시 재생해도 결과가 같다
+      // 원격 상태(repository)는 통째로 바꾼다. 다만 그 순간 서버가 계산한 값(canCreatePullRequest 등)이라
+      // 기록을 재생하면 지금 값보다 오래된 값일 수 있다 — snapshot_sync가 재생 끝에서 다시 맞춘다
       return {
         ...patchSnapshot(view, { repository: event.repository }),
         chat: [
@@ -496,8 +497,13 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       };
 
     case 'review_round':
-      // 리뷰 상태는 통째로 바꾸므로(exported와 같은 규칙) 기록을 다시 재생해도 결과가 같다
+      // 리뷰 상태는 통째로 바꾼다(exported와 같은 규칙). 역시 그 순간 값이라 snapshot_sync가 재생 끝에서 다시 맞춘다
       return patchSnapshot(view, { review: event.review });
+
+    case 'snapshot_sync':
+      // 재연결 시 replay 맨 끝에서 온다. exported·remote_synced·base_synced·review_round 같은 기록 이벤트가
+      // 그 순간 값으로 덮어쓴 repository·checkpoints·review를 지금 스냅샷 값으로 되돌린다(채팅은 건드리지 않는다)
+      return patchSnapshot(view, { repository: event.repository, checkpoints: event.checkpoints, review: event.review });
   }
 }
 
