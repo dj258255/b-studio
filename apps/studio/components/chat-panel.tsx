@@ -189,6 +189,11 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const canSend = awake && !snapshot.running && !sending && !budgetReached && !personalReached && access.canManage;
   // 실행 중에는 새 요청 대신 진행 중 지시를 보낸다. 데모(스크립트)는 반영할 모델 호출이 없어 제외한다
   const canSteer = snapshot.status === "ready" && snapshot.running && snapshot.mode !== "demo" && !sending && !budgetReached && !personalReached && access.canManage;
+  /**
+   * 샌드박스가 뜨는 중(starting)이라 보내기만 막힌 상태를 버튼 옆에 짧게 알린다. 한도 도달 등 다른 이유는 위쪽 안내(hintFor)가 이미 설명하므로 겹치지 않는다.
+   * 입력창 자체는 이 상태와 무관하게 항상 입력할 수 있어야 한다(아래 textarea는 절대 disabled로 두지 않는다) — 부팅 중에 적은 글이 조용히 사라지는 문제를 막는다
+   */
+  const bootingSendHint = !runId && snapshot.status === "starting" ? "샌드박스가 준비되면 보낼 수 있습니다" : undefined;
 
   const planRequest = snapshot.mode === "demo" ? snapshot.nextDemoRequest : BUILD_FROM_PLAN;
   /** 에이전트가 되물은 질문. 답을 보내면 지워진다 */
@@ -518,6 +523,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
             <label htmlFor="request" className="sr-only">
               {intent === "ask" ? "질문" : "요청"}
             </label>
+            {/* 샌드박스가 뜨는 중이거나 중지됐어도 입력창은 막지 않는다 — 보내기 버튼만 막고, 적은 글은 그대로 남겨 다시 쓸 수 있게 한다 */}
             <textarea
               id="request"
               ref={textareaRef}
@@ -549,23 +555,26 @@ export function ChatPanel({ view }: { view: SessionView }) {
               ) : (
                 <span />
               )}
-              <div className="ml-auto flex shrink-0 items-center gap-2">
-                {picker && (
-                  <ModelPicker
-                    picker={picker}
-                    disabled={!access.canManage || snapshot.running || changingModel}
-                    disabledReason={snapshot.running ? "요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" : undefined}
-                    onChangeModel={(value) => void changeModel(value)}
-                    onChangeEffort={(value) => void changeEffort(value)}
-                  />
-                )}
-                <button
-                  type="submit"
-                  disabled={!text.trim() || (runId ? !canSteer : !canSend)}
-                  className="whitespace-nowrap rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
-                >
-                  {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
-                </button>
+              <div className="ml-auto flex shrink-0 flex-col items-end gap-1">
+                <div className="flex items-center gap-2">
+                  {picker && (
+                    <ModelPicker
+                      picker={picker}
+                      disabled={!access.canManage || snapshot.running || changingModel}
+                      disabledReason={snapshot.running ? "요청을 처리하는 동안에는 모델을 바꿀 수 없습니다" : undefined}
+                      onChangeModel={(value) => void changeModel(value)}
+                      onChangeEffort={(value) => void changeEffort(value)}
+                    />
+                  )}
+                  <button
+                    type="submit"
+                    disabled={!text.trim() || (runId ? !canSteer : !canSend)}
+                    className="whitespace-nowrap rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+                  >
+                    {runId ? "진행 중 지시" : intent === "ask" ? "질문하기" : "요청 보내기"}
+                  </button>
+                </div>
+                {bootingSendHint && <p className="text-xs text-muted">{bootingSendHint}</p>}
               </div>
             </div>
           </>
