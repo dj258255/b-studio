@@ -107,6 +107,7 @@
 - [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
 - [ADR-091 CLI 백엔드 자동 모델 선택](#adr-091-cli-백엔드-자동-모델-선택)
 - [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
+- [ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다](#adr-093-구독-cli-계정-연결-터미널-없이-로그인-상태를-보고-시작한다)
 
 ---
 
@@ -3793,6 +3794,55 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
 - **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
 - **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
+
+---
+
+## ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다
+
+상태: 채택
+관련: ADR-019(로컬 로그인 계정으로 실행)
+
+### 맥락
+- ADR-019 이후 b-studio는 네 가지 구독 CLI(claude-code·codex·commandcode·opencode)를 "이미 로그인된 것"으로 전제하고 돌린다. 로그인이 안 돼 있으면 각 `preflight*`(packages/agent/src/*-runner.ts)가 "터미널에서 `cmd login`으로 로그인하세요" 같은 문장만 돌려주고, 사용자는 실제로 터미널을 열어 명령을 쳐야 한다 — b-studio가 터미널 작업대를 표방하면서도 이 한 가지는 화면 밖으로 밀어낸 셈이다.
+- 네 CLI가 로그인 명령을 어떻게 제공하는지 실행하지 않고(지시에 따라 실제 로그인을 시작하거나 끝내지 않았고, 자격 증명 파일도 읽지 않았다) `--help`만으로 조사했다(2026-10-01, 이 PC에 설치된 버전 기준):
+
+| CLI | 로그인 서브커맨드 | 선택 메뉴를 건너뛰는 플래그 | 상태 확인 | 비고 |
+|---|---|---|---|---|
+| `claude`(Claude Code) | `claude auth login` | `--claudeai`(기본값, Claude 구독) / `--console`(API 키 과금) / `--sso` | `claude auth status --json` | commander 서브커맨드. 알려진 동작(OAuth, 브라우저+로컬 콜백)대로라면 TTY 키 입력 없이 URL을 찍고 기다리는 꼴일 것으로 본다 — 이 추정은 실제로 실행해 확인하지 못했다 |
+| `codex` | `codex login` | **`--device-auth`**(기기 인증 코드 발급) | `codex login status`(이미 `preflightCodex`가 쓴다) | `--device-auth`는 설계 자체가 TTY 없는 환경을 위한 흐름이라, 네 CLI 중 가장 확신을 갖고 스폰할 수 있다 |
+| `cmd`(Command Code) | `cmd login [provider]` | provider 인자를 생략하면 "Command Code 계정"으로 로그인(=BYOK 제공자 로그인과 분리) | `cmd status --json`(이미 `preflightCommandCode`가 쓴다) | `claude auth login`과 같은 commander 서브커맨드 모양이라 같은 OAuth 루프백 흐름으로 추정 |
+| `opencode` | `opencode auth login [provider]` | `-p/--provider`, `-m/--method`로 선택 메뉴를 건너뛸 수 있다 | `opencode --version`(`preflightOpenCode`는 로그인이 아니라 설치 여부만 본다) | opencode 전체(`opencode --help`의 기본 동작이 "opencode tui")가 ink 기반 대화형 CLI다. `-p/-m`으로 제공자·방식 선택은 건너뛰어도 그다음 단계(OAuth든 API 키 붙여넣기든)가 TTY 상호작용을 전제하는지 확인하지 못했다 |
+
+- 위 표에서 claude-code·codex·commandcode 세 곳은 "URL(또는 기기 코드)을 표준출력에 찍고 콜백·폴링으로 끝까지 간다"는 공통된 설계로 보이지만, **실제로 로그인을 실행해 그 출력 문구를 본 적은 없다.** opencode는 반대로 "대화형 CLI 전체의 서브커맨드"라는 더 분명한 근거(메인 `--help`가 자신을 TUI라고 설명한다)로 TTY 필요로 판단했다.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| A. 네 CLI 모두 화면에서 자동으로 로그인을 띄운다 | 실행해 보지 못한 claude-code·cmd의 표준출력 형식을 짐작으로 자동화하는 데다, opencode는 ink 기반 TUI라는 근거가 있는데도 억지로 흉내 내면 화면이 멈춘 것처럼 보이는 조용한 실패를 만든다 |
+| B. 네 CLI 모두 "터미널에서 실행하세요" 안내만 보여준다(지금 상태에 복사 버튼만 추가) | 가장 안전하지만, `--device-auth`처럼 명백히 헤드리스용으로 설계된 codex의 기능을 쓰지 않는다 — 조사한 보람이 없다 |
+| **C. 설계 근거가 분명한 CLI(claude-code·codex·commandcode)는 자식 프로세스로 띄우고 표준출력에서 URL·코드를 정규식으로 뽑아 보여준다. TUI 근거가 있는 opencode만 명령+복사 버튼으로 남긴다** | 채택. CLI별로 다른 확신 수준을 솔직하게 반영한다. 정규식이 실제 CLI 출력과 어긋나도(실행해 보지 못했으므로 그럴 수 있다) 로그인 자체(각 CLI 프로세스)는 그대로 흐르고, 사람이 로그 tail을 보고 URL을 직접 복사할 수 있어 "자동 추출 실패"가 "로그인 실패"로 이어지지 않는다 |
+
+### 결정
+- **상태 확인은 `preflight*`를 그대로 재사용한다**(`apps/studio/lib/server/cli-accounts.ts`의 `checkAccountStatus`). 자격 증명 파일은 어디서도 읽지 않는다 — claude-code만 preflight가 이미 알고 있는 계정 종류(`describeAccount`, 예: "max 구독")를 보여주고, 나머지 세 CLI는 "연결됨/로그인 필요"만 보여준다(지어내지 않는다). preflight 실패 이유 문자열에서 `ENOENT`·`command not found` 류를 정규식으로 가려 "설치 안 됨"과 "로그인만 안 됨"을 구분한다(완벽하지 않다 — preflight가 두 경우를 구조화된 값 대신 문장으로만 돌려주기 때문이다).
+- **로그인 시작은 공식 명령을 자식 프로세스로 스폰한다.** `claude auth login --claudeai` · `codex login --device-auth` · `cmd login`을 `startLogin()`이 띄우고, stdout·stderr을 줄 단위로 모아(`pushLine`) 최근 200줄만 들고 있는다. 각 줄에서 `extractLoginHint()`(URL 정규식 `https?://…` + 기기 코드 정규식 `[A-Z0-9]{4}-[A-Z0-9]{4}` 또는 `[A-Z0-9]{4,10}`, URL 안에 들어있는 글자는 코드로 집지 않는다)가 URL·코드 후보를 뽑는다. 화면은 URL을 "브라우저에서 열기" 버튼으로, 코드를 복사 버튼으로 보여주고 로그 전체를 tail로 띄운다.
+- **opencode는 흉내 내지 않는다.** `loginCommandFor('opencode').spawnable === false`이고, 화면은 정확한 명령(`opencode auth login`)과 복사 버튼, "터미널에서 실행한 뒤 다시 확인해 주세요" 안내만 보여준다. `POST /api/accounts/opencode/login`도 프로세스를 띄우지 않고 `{ spawnable: false, command, note }`만 돌려준다.
+- **백엔드당 로그인은 하나만 돈다.** `startLogin`이 모듈 수준 `Map<백엔드, 세션>`을 들고 있다가, 이미 `running`이면 새로 띄우지 않고 같은 진행 상황을 돌려준다.
+- **자동으로 끊는다.** 사람이 창을 닫고 잊어도 자식 프로세스가 영영 떠 있지 않도록 10분(`LOGIN_TIMEOUT_MS`) 뒤 자동으로 `cancelLogin(..., 'timeout')`이 프로세스를 죽인다. 사람이 직접 취소(`DELETE`)할 수도 있다.
+- **끝나면 한 번만 다시 확인한다.** `GET /api/accounts/[backend]/login`은 프로세스가 `running`이 아니고 아직 재확인하지 않았으면(`progress.status`가 비어 있으면) `checkAccountStatus`를 한 번 불러 채운다(`attachStatus`) — 폴링마다 CLI를 다시 띄우지 않는다.
+- **개인 PC 모드 + 로그인한 사용자만 연다.** 네 라우트(`GET /api/accounts`, `POST·GET·DELETE /api/accounts/[backend]/login`, `POST /api/accounts/[backend]/refresh`) 모두 `requireUser` 다음에 `localFolderAllowed()`(폴더 열기, ADR-067과 같은 게이트)를 확인한다 — 인증을 끈 개인 PC 모드(`B_STUDIO_AUTH=none`)에서는 `requireUser`가 항상 같은 로컬 사용자를 돌려주므로, 사실상 "이 서버의 CLI를 직접 다루는 사람이 바로 이 PC를 쓰는 사람"이라는 전제가 두 조건에 함께 걸려 있다. `backend` 경로 값은 허용 목록(`isCliAccountBackend`, 네 값만)으로만 받는다.
+- **화면.** `/accounts`(헤더의 프로젝트 메뉴에서 "폴더 열기…"와 같은 조건으로 "계정 연결" 항목이 연다)에 CLI별 카드를 두고, 상태(연결됨/로그인 필요/설치 안 됨)·계정 종류·로그인 버튼·진행(URL·코드·로그 tail·취소)을 보여준다. 이미 "로그인돼 있지 않습니다" 같은 문구가 나오던 대화 입력창의 모델 선택 팝오버에도 그 이유가 로그인 관련이면(`needsAccountConnect`, `disabledReason`에 "로그인" 포함 여부로 판단) "계정 연결로 가기" 링크를 더했다. 보안 문구("비밀번호와 토큰은 b-studio가 보지 않습니다. 각 CLI가 직접 저장합니다")를 화면에 고정으로 둔다.
+
+### 검증 결과
+- `apps/studio/lib/server/cli-accounts.test.ts`: `extractLoginHint`를 합성(synthetic, 실제로 관측하지 않은) 픽스처로 검증(URL+코드 동시, URL만, 코드만, 둘 다 없음, URL 쿼리 안 코드처럼 보이는 값은 코드로 집지 않음), `checkAccountStatus`의 네 백엔드 분기(연결/로그인 필요/설치 안 됨), 상태 기계(시작→running, 중복 시작 방지, 정상 종료, 취소, 타임아웃, spawn 오류, 로그 200줄 상한, opencode 시작 거부)를 가짜 `spawn`(진짜 프로세스를 띄우지 않는다)으로 검증했다.
+- `apps/studio/app/api/accounts/**/route.test.ts`: 개인 PC 모드 게이트(403)·인증(401)·허용 목록 밖 백엔드(400)·spawnable 분기(opencode는 명령만 돌려주고 프로세스를 띄우지 않는다)·진행 조회가 끝난 뒤 한 번만 재확인하는지를 검증했다.
+- `apps/studio/components/accounts-panel.test.tsx`·`chat-panel.test.tsx`: 정적 렌더(`renderToStaticMarkup`, 이 저장소 컴포넌트 테스트의 기존 관례)로 상태별 카드 표시와 "계정 연결로 가기" 안내 유무를 검증했다.
+- 확인하지 못한 범위: 네 CLI의 실제 로그인 표준출력 형식(지시에 따라 로그인을 실제로 실행하지 않았다). `extractLoginHint`의 정규식이 실제 CLI 출력과 어긋나면 URL·코드 자동 추출만 못 하고, 로그 tail에는 그대로 찍히므로 사람이 직접 복사할 수 있다 — 다음에 실제 CLI로 한 번 실행해 정규식을 다듬어야 한다.
+
+### 감수한 트레이드오프
+- claude-code·commandcode의 "스폰 가능" 판단은 실제 실행 확인 없이 명령 설계(OAuth 루프백으로 보이는 서브커맨드 구조)만 근거로 삼았다 — 실제로 TTY가 필요하면(예: 추가 확인 프롬프트) 자식 프로세스가 입력을 받지 못해 타임아웃(10분)까지 멈춘 것처럼 보일 수 있다. "취소" 버튼이 있어 사람이 그 전에 끊을 수 있다는 것으로 위험을 줄였다.
+- URL·코드 추출 정규식은 일반적인 OAuth 기기 인증 흐름(GitHub CLI 등 공개 사례)의 생김새를 본뜬 것이지, 이 네 CLI의 실제 출력에서 확인한 값이 아니다.
+- "설치 안 됨" 판정은 preflight의 사람이 읽는 오류 문장에서 `ENOENT` 등을 정규식으로 찾는 방식이라, CLI가 다른 문구로 "없음"을 알리면(예: 셸마다 다른 "command not found" 번역) 로그인 필요로 잘못 분류될 수 있다.
+- opencode는 이번에 로그인 자동화를 포기했다 — 다음에 실제로 `opencode auth login`을 실행해 어느 단계까지 비대화형으로 되는지 확인하면 범위를 넓힐 수 있다.
 
 ---
 
