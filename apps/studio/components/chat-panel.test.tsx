@@ -4,6 +4,7 @@ import { createView, reduceSession, type SessionView } from "@/lib/session-view"
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
 import { ChatPanel, ModelPicker, ModelPickerDialog, popoverPositionFor } from "./chat-panel";
+import { SessionAccessProvider } from "./session-access";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -255,5 +256,34 @@ describe("popoverPositionFor(모델 선택 팝오버를 여는 자리)", () => {
 
   it("왼쪽 가장자리 밖으로도 나가지 않는다", () => {
     expect(popoverPositionFor({ top: 20, bottom: 44, left: -30 }, viewport)).toEqual({ top: 52, left: 8 });
+  });
+});
+
+describe("ChatPanel 답변 메시지 동작(복사·문서로 저장·요구사항에 반영)", () => {
+  const replied: StudioEvent[] = [
+    { type: "run_started", runId: "r1", request: "이 함수는 어떻게 동작해?" },
+    { type: "agent", runId: "r1", event: { type: "text", text: "이렇게 동작합니다." } },
+    { type: "run_finished", runId: "r1", status: "done", summary: "답했습니다", turns: 1 },
+  ];
+
+  it("쓰기 권한이 있으면 복사·문서로 저장·요구사항에 반영 세 동작을 모두 보여 준다", () => {
+    const html = render(view(replied));
+
+    expect(html).toContain("이렇게 동작합니다.");
+    expect(html).toContain(">복사</button>");
+    expect(html).toContain(">문서로 저장</button>");
+    expect(html).toContain(">요구사항에 반영</button>");
+  });
+
+  it("쓰기 권한이 없으면(뷰어) 복사만 보이고 문서로 저장·요구사항에 반영은 숨긴다", () => {
+    const html = renderToStaticMarkup(
+      <SessionAccessProvider value={{ canManage: false, canLogout: false }}>
+        <ChatPanel view={view(replied)} />
+      </SessionAccessProvider>,
+    );
+
+    expect(html).toContain(">복사</button>");
+    expect(html).not.toContain(">문서로 저장</button>");
+    expect(html).not.toContain(">요구사항에 반영</button>");
   });
 });

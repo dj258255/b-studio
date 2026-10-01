@@ -14,13 +14,16 @@ import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionVie
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { useChatDraft } from "./chat-draft-context";
 import { DiffView } from "./diff-view";
+import { NewDocDialog } from "./docs-panel";
 import { GateTrack } from "./gate-track";
 import { HandoffCard } from "./handoff-card";
 import { Markdown } from "./markdown";
+import { useRequirementsImport } from "./requirements-import-context";
 import { formatElementSelections, useElementSelections } from "./selection-context";
 import { useSessionAccess, type SessionAccess } from "./session-access";
 import { useLightVerify } from "./use-light-verify";
 import { useReadOnly } from "./use-read-only";
+import { useResearch } from "./use-research";
 
 type Intent = "build" | "ask";
 
@@ -50,11 +53,15 @@ export function ChatPanel({ view }: { view: SessionView }) {
   // 저장소 탭의 "이 이슈로 작업"이 입력창을 채울 수 있도록 채우기 함수를 등록한다(사람이 보고 고친 뒤 직접 보낸다)
   const draft = useChatDraft();
   useEffect(() => {
-    draft.register((value) => {
+    draft.register((value, mode) => {
       setText(value);
+      // "대화에서 묻기"(요구사항 카드, ADR-0XX)는 읽기만·조사를 함께 켜 달라고 부탁할 수 있다
+      if (mode?.readOnly) setReadOnly(true);
+      if (mode?.research !== undefined) setResearch(mode.research);
       textareaRef.current?.focus();
     });
     return () => draft.register(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
@@ -69,7 +76,13 @@ export function ChatPanel({ view }: { view: SessionView }) {
    * 테스트·화면 확인·리뷰는 건너뛴다(세션마다 기억하되, 읽기만 중에도 값은 남긴다)
    */
   const [lightVerify, setLightVerify] = useLightVerify(snapshot.id);
+  /**
+   * "조사"는 읽기만이 켜졌을 때만 보인다(ADR-0XX). 켜면 질문에 웹에서 찾아 답하라는 안내가 붙고,
+   * 이 세션 백엔드가 claude-code면 이번 턴 WebSearch·WebFetch를 실제로 연다(그 밖의 백엔드는 모델 지식만으로 답한다)
+   */
+  const [research, setResearch] = useResearch(snapshot.id);
   const intent: Intent = intentFor(readOnly);
+  const researchWebAvailable = capabilities?.mode === "claude-code";
   /** 파일을 바꾼 실행. 결과 줄에서 "답만 했습니다"와 "완료"를 가른다 */
   const changedRuns = runsWithChanges(chat);
   /** 내 사용량은 세션을 보는 모든 사람에게 방송되지 않으므로 따로 받아 온다 */
@@ -181,7 +194,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, lightVerify })),
+      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, lightVerify, research })),
     });
     if (response.ok) {
       setText("");
@@ -289,7 +302,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
         {chat.map((item, index) => (
           <li key={index}>
-            <ChatEntry item={item} changedRuns={changedRuns} />
+            <ChatEntry item={item} changedRuns={changedRuns} sessionId={snapshot.id} canManage={access.canManage} />
             {index === chat.length - 1 && item.kind === "outcome" && item.intent === "ask" && item.status === "done" && access.canManage && (
               <button
                 type="button"
@@ -453,9 +466,32 @@ export function ChatPanel({ view }: { view: SessionView }) {
                     가볍게 확인
                   </button>
                 )}
+                {/* "조사"는 읽기만이 켜졌을 때만 보인다 — 질문에 웹에서 찾아 답하라는 안내가 붙는다(ADR-0XX) */}
+                {readOnly && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={research}
+                    onClick={() => setResearch(!research)}
+                    title={
+                      researchWebAvailable
+                        ? "켜면 이번 질문에서 웹을 검색해 출처를 링크로 답합니다"
+                        : "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"
+                    }
+                    className={`rounded-control px-3 py-1 text-sm font-medium transition-colors ${
+                      research ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                    }`}
+                  >
+                    조사
+                  </button>
+                )}
                 <p className="text-xs text-muted">
                   {readOnly
-                    ? "파일은 바꾸지 않고 답과 계획만 받습니다"
+                    ? research
+                      ? researchWebAvailable
+                        ? "웹을 검색해 출처를 링크로 답합니다"
+                        : "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"
+                      : "파일은 바꾸지 않고 답과 계획만 받습니다"
                     : lightVerify
                       ? "테스트·화면 확인·리뷰를 건너뜁니다. 배포하려면 전체 검증이 필요합니다"
                       : "질문이면 답만 하고, 바꾸면 검증 게이트를 통과한 변경만 남습니다"}
@@ -523,7 +559,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
   );
 }
 
-function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: ReadonlySet<string> }) {
+function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem; changedRuns: ReadonlySet<string>; sessionId: string; canManage: boolean }) {
   // baseSync(main 따라잡기, ADR-076)의 "대화 입력창에 채우기"가 쓴다. 조건 없이 맨 위에서 불러 훅 순서를 지킨다
   const draft = useChatDraft();
   switch (item.kind) {
@@ -635,7 +671,7 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
       );
 
     case "reply":
-      return <Markdown text={item.text} />;
+      return <AssistantReply text={item.text} sessionId={sessionId} canManage={canManage} />;
 
     case "tools": {
       const failed = item.calls.filter((call) => call.ok === false).length;
@@ -884,6 +920,56 @@ function ChatEntry({ item, changedRuns }: { item: ChatItem; changedRuns: Readonl
       );
     }
   }
+}
+
+/**
+ * 에이전트 답변 메시지(ADR-0XX). 답 아래 작은 글씨 메뉴로 복사·문서로 저장·요구사항에 반영을 둔다.
+ * 복사는 항상 보이고(읽기 권한만 있어도 쓸 수 있다), 문서로 저장·요구사항에 반영은 쓰기 권한(canManage)이 있을 때만 보인다
+ * — 둘 다 세션 작업 복사본에 파일을 더하거나(문서) 요구사항 패치 미리보기를 여는(요구사항) 쓰기 성격의 동작이기 때문이다.
+ */
+function AssistantReply({ text, sessionId, canManage }: { text: string; sessionId: string; canManage: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const [savingDoc, setSavingDoc] = useState(false);
+  const requirementsImport = useRequirementsImport();
+
+  async function copy() {
+    try {
+      await navigator.clipboard?.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // 클립보드 접근이 막힌 환경에서도 화면은 그대로 쓸 수 있어야 한다
+    }
+  }
+
+  return (
+    <div>
+      <Markdown text={text} />
+      <div className="mt-1.5 flex flex-wrap gap-2 text-xs text-muted">
+        <button type="button" onClick={() => void copy()} className="font-medium hover:text-ink">
+          {copied ? "복사됨" : "복사"}
+        </button>
+        {canManage && (
+          <button type="button" onClick={() => setSavingDoc(true)} className="font-medium hover:text-ink">
+            문서로 저장
+          </button>
+        )}
+        {canManage && (
+          <button type="button" onClick={() => requirementsImport.open({ specText: text })} className="font-medium hover:text-ink">
+            요구사항에 반영
+          </button>
+        )}
+      </div>
+      {savingDoc && (
+        <NewDocDialog
+          sessionId={sessionId}
+          initialBody={text}
+          onCreated={() => setSavingDoc(false)}
+          onCancel={() => setSavingDoc(false)}
+        />
+      )}
+    </div>
+  );
 }
 
 /**

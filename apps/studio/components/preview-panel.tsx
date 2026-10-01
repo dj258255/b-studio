@@ -9,12 +9,14 @@ import { useCodeOpen } from "./code-open-context";
 import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
 import { DesignPanel } from "./design-panel";
+import { DocsPanel } from "./docs-panel";
 import { HistoryPanel } from "./history-panel";
 import { useLiveFrames } from "./live-frames";
 import { LogPanel } from "./log-panel";
 import { QaView } from "./qa-view";
 import { RemoteBrowserView } from "./remote-browser";
 import { RepositoryPanel } from "./repository-panel";
+import { useRequirementsImport } from "./requirements-import-context";
 import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
@@ -49,6 +51,15 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     const target = mapLegacyTab("code");
     setActiveId(target.group);
     if (target.subTab) setCodeSubTab(target.subTab);
+  }
+
+  // 대화의 "요구사항에 반영"이 부르면 "요구사항" 탭(명세 하위 탭)으로 전환한다(ADR-0XX, 코드 열기와 같은 규칙)
+  const requirementsImport = useRequirementsImport();
+  const [appliedRequirementsImportTarget, setAppliedRequirementsImportTarget] = useState(requirementsImport.target);
+  if (requirementsImport.target && requirementsImport.target !== appliedRequirementsImportTarget) {
+    setAppliedRequirementsImportTarget(requirementsImport.target);
+    setActiveId("requirements");
+    setRequirementsSubTab("spec");
   }
 
   return (
@@ -93,6 +104,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <GroupPanel label="저장소" options={REPOSITORY_SUB_TABS} active={repositorySubTab} onChange={setRepositorySubTab}>
             {repositorySubTab === "presubmit" ? <SubmissionPanel view={view} /> : <RepositoryPanel view={view} />}
           </GroupPanel>
+        ) : active.kind === "docs" ? (
+          <DocsPanel view={view} />
         ) : active.kind === "tokens" ? (
           <TokenView view={view} />
         ) : active.kind === "external" ? (

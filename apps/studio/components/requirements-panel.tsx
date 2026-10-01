@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { buildRequirementAskPrefill, requirementToMarkdown } from "@/lib/requirement-chat-prefill";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
+import { useRequirementsImport } from "./requirements-import-context";
 import { useSessionAccess } from "./session-access";
 
 type RequirementKind = "api" | "ui" | "data" | "nonfunctional" | "docs";
@@ -136,6 +138,20 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
   const [importing, setImporting] = useState(false);
   const [panelView, setPanelView] = useState<PanelView>("list");
   const [revision, setRevision] = useState(0);
+  // 대화의 "요구사항에 반영"(ADR-0XX)이 채운 글. 있으면 "명세 다시 가져오기" 화면을 열고 바로 한 번 추출해
+  // 병합 diff를 보여 준다 — 한 번 반영했으면 지워서, 탭을 오가도 같은 글로 또 열리지 않게 한다.
+  // 코드 탭 열기(preview-panel.tsx의 codeOpen)와 같은 규칙으로, 렌더 중에 비교해 반영한다(useEffect 안에서
+  // setState를 곧바로 부르지 않는다 — 리액트 컴파일러 린트가 막는 패턴이다)
+  const requirementsImport = useRequirementsImport();
+  const [importSpecText, setImportSpecText] = useState<string>();
+  const [appliedImportTarget, setAppliedImportTarget] = useState(requirementsImport.target);
+  if (requirementsImport.target && requirementsImport.target !== appliedImportTarget) {
+    setAppliedImportTarget(requirementsImport.target);
+    setImportSpecText(requirementsImport.target.specText);
+    setImporting(true);
+    setPanelView("list");
+    requirementsImport.clear();
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -187,7 +203,11 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
         {snapshot?.data?.exists && access.canManage && (
           <button
             type="button"
-            onClick={() => setImporting((value) => !value)}
+            onClick={() => {
+              // 사람이 직접 연 가져오기는 "요구사항에 반영"이 채웠던 글을 더는 쓰지 않는다(빈 붙여넣기 칸부터 시작)
+              setImportSpecText(undefined);
+              setImporting((value) => !value);
+            }}
             className={`${panelView === "matrix" ? "" : "ml-auto"} shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink`}
           >
             {importing ? "목록으로" : "명세 다시 가져오기"}
@@ -200,7 +220,12 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
         ) : snapshot.error ? (
           <p className="text-sm text-fail">{snapshot.error}</p>
         ) : importing ? (
-          <ImportFlow sessionId={sessionId} onApplied={onApplied} onCancel={snapshot.data?.exists ? () => setImporting(false) : undefined} />
+          <ImportFlow
+            sessionId={sessionId}
+            onApplied={onApplied}
+            onCancel={snapshot.data?.exists ? () => setImporting(false) : undefined}
+            initialSpecText={importSpecText}
+          />
         ) : panelView === "matrix" ? (
           <MatrixView sessionId={sessionId} />
         ) : (
@@ -425,7 +450,19 @@ function MatrixView({ sessionId }: { sessionId: string }) {
 
 function RequirementCard({ requirement, canManage, onWork }: { requirement: RequirementView; canManage: boolean; onWork: () => void }) {
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const draft = useChatDraft();
   const evidenceCount = requirement.evidence.checkpoints.length + requirement.evidence.tests.length + requirement.evidence.gateChecks.length;
+
+  async function copy() {
+    try {
+      await navigator.clipboard?.writeText(requirementToMarkdown(requirement));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // 클립보드 접근이 막힌 환경(권한 거부 등)에서도 화면은 그대로 쓸 수 있어야 한다
+    }
+  }
   return (
     <li className="rounded-control border border-line bg-panel p-3">
       <div className="flex flex-wrap items-start gap-2">
@@ -442,11 +479,26 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
             <span className={`font-medium ${STATUS_TONE[requirement.status]}`}>{requirement.status}</span>
           </p>
         </div>
-        {canManage && (
-          <button type="button" onClick={onWork} className="shrink-0 rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
-            이 요구사항 작업
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+          <button type="button" onClick={() => void copy()} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+            {copied ? "복사됨" : "복사"}
           </button>
-        )}
+          {canManage && (
+            <button
+              type="button"
+              onClick={() => draft.fill(buildRequirementAskPrefill(requirement), { readOnly: true })}
+              title="대화창을 읽기만 모드로 열고 이 요구사항을 맥락으로 채웁니다"
+              className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink"
+            >
+              대화에서 묻기
+            </button>
+          )}
+          {canManage && (
+            <button type="button" onClick={onWork} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
+              이 요구사항 작업
+            </button>
+          )}
+        </div>
       </div>
       <ul className="mt-2 list-inside list-disc space-y-0.5 text-sm text-muted">
         {requirement.acceptance.map((item, index) => (
@@ -510,9 +562,20 @@ type SourceTab = "paste" | "file" | "issue";
 const MAX_SPEC_FILE_BYTES = 512 * 1024;
 
 /** ImportFlow는 테스트(용어 검사·렌더)에서도 직접 쓸 수 있게 내보낸다 */
-export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: string; onApplied: (snapshot: RequirementsSnapshot) => void; onCancel?: () => void }) {
+export function ImportFlow({
+  sessionId,
+  onApplied,
+  onCancel,
+  initialSpecText,
+}: {
+  sessionId: string;
+  onApplied: (snapshot: RequirementsSnapshot) => void;
+  onCancel?: () => void;
+  /** "요구사항에 반영"(대화 메시지 → 요구사항 패치, ADR-0XX)이 채운다 — 붙여넣기 칸을 채우고 바로 한 번 추출한다 */
+  initialSpecText?: string;
+}) {
   const [sourceTab, setSourceTab] = useState<SourceTab>("paste");
-  const [specText, setSpecText] = useState("");
+  const [specText, setSpecText] = useState(initialSpecText ?? "");
   /** 파일 선택 창으로 고른 파일의 이름과 내용. 내용은 브라우저에서 바로 읽어 붙여넣기처럼 보낸다 */
   const [pickedFile, setPickedFile] = useState<{ name: string; text: string }>();
   const [fileError, setFileError] = useState<string>();
@@ -525,8 +588,43 @@ export function ImportFlow({ sessionId, onApplied, onCancel }: { sessionId: stri
   const [recommendations, setRecommendations] = useState<Record<number, RecommendationView>>({});
   const [recommendationSource, setRecommendationSource] = useState<"web" | "model">();
   const [recommending, setRecommending] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // initialSpecText가 있으면(요구사항에 반영) 마운트 때부터 뽑는 중으로 시작한다 — effect 안에서 setState를
+  // 곧바로 부르지 않고 초기값으로 미리 반영해 두는 식이다(리액트 컴파일러 린트가 막는 패턴을 피한다)
+  const [busy, setBusy] = useState(() => Boolean(initialSpecText));
   const [error, setError] = useState<string>();
+
+  // "요구사항에 반영"이 initialSpecText를 주면 붙여넣기 칸을 채운 뒤 바로 한 번 추출해 병합 diff를 보여 준다.
+  // state(specText)를 거치지 않고 바로 이 값으로 요청해야 "방금 setSpecText한 값"을 또 기다리는 경합이 없다
+  useEffect(() => {
+    if (!initialSpecText) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/requirements/extract`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ specText: initialSpecText }),
+    })
+      .then(async (response) => ({ response, data: await readJson<ExtractionPreview>(response) }))
+      .then(({ response, data }) => {
+        if (cancelled) return;
+        if (!response.ok) {
+          setError(data.error ?? "요구사항을 뽑지 못했습니다");
+          return;
+        }
+        setPreview(data);
+        setDrafts(data.requirements);
+        setAssumptions(data.assumptions);
+        setManualSteps(data.manualSteps);
+      })
+      .catch(() => {
+        if (!cancelled) setError("요구사항을 뽑지 못했습니다");
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, initialSpecText]);
 
   function sourceBody(withAnswers: boolean) {
     const body: Record<string, unknown> = {};

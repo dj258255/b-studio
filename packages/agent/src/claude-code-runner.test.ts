@@ -134,6 +134,40 @@ describe('runClaudeCodeAgent', () => {
     expect(sandbox.restarts).toEqual([]);
   });
 
+  it('조사 모드(질문+research)는 b-studio 도구에 더해 WebSearch·WebFetch를 열고, 요청 앞에 조사 안내를 붙인다', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '찾은 내용입니다.' }]] });
+    const sandbox = fakeSandbox(project, []);
+
+    const result = await runClaudeCodeAgent({
+      request: '최신 결제 PG 수수료 비교',
+      intent: 'ask',
+      research: true,
+      project,
+      sandbox,
+      sdk,
+      fetcher: async () => contract,
+    });
+
+    expect(result).toMatchObject({ status: 'done' });
+    expect(state.prompts[0]).toContain('[조사 모드]');
+    expect(state.prompts[0]).toContain('WebSearch/WebFetch');
+    expect(state.options?.tools).toEqual(['WebSearch', 'WebFetch']);
+    expect(state.options?.allowedTools).toContain('WebSearch');
+    expect(state.options?.allowedTools).toContain('WebFetch');
+    expect(state.options?.allowedTools?.some((name) => name.startsWith('mcp__b-studio__'))).toBe(true);
+  });
+
+  it('질문 모드라도 조사(research)를 켜지 않으면 WebSearch·WebFetch를 열지 않는다(지금과 같다)', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '답입니다.' }]] });
+    const sandbox = fakeSandbox(project, []);
+
+    await runClaudeCodeAgent({ request: '이 함수는 뭐해?', intent: 'ask', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(state.options?.tools).toEqual([]);
+    expect(state.options?.allowedTools).not.toContain('WebSearch');
+    expect(state.prompts[0]).not.toContain('[조사 모드]');
+  });
+
   it('기본 도구와 사용자 설정을 끄고 b-studio 도구만 허용한다. 게이트가 실패하면 같은 대화에 결과를 넣는다', async () => {
     const { sdk, state } = fakeClaudeCode({
       turns: [

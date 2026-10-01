@@ -33,3 +33,18 @@ describe("ImportFlow 용어", () => {
     expect(html).toContain("만들 것을 적어 주세요");
   });
 });
+
+describe("ImportFlow initialSpecText(대화 '요구사항에 반영', ADR-0XX)", () => {
+  it("붙여넣기 칸을 그 글로 채운 채 그려(마운트 때부터 한 번 추출하는 중으로 시작한다)", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} initialSpecText="[R4] 주문 목록 필터\n\n질문: 상태 값은?" />);
+
+    expect(html).toContain("[R4] 주문 목록 필터");
+    expect(html).toContain("질문: 상태 값은?");
+  });
+
+  it("initialSpecText가 없으면(사람이 직접 연 가져오기) 평소처럼 빈 칸으로 그린다", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onApplied={() => {}} />);
+
+    expect(html).toContain("만들 것을 적어 주세요");
+  });
+});

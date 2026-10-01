@@ -443,6 +443,29 @@ export {
   type TraceabilityMatrix,
 } from './requirements';
 export { loadProjectGuide, type ProjectGuide } from './project-guide';
+export {
+  adrFilePath,
+  appendRoadmapTradeoffEntry,
+  appendTroubleshootingEntry,
+  buildAdrTemplate,
+  buildDesignDocTemplate,
+  buildDocSummary,
+  buildRoadmapTradeoffEntry,
+  buildTroubleshootingEntry,
+  designDocFilePath,
+  DOCS_INDEX_END,
+  DOCS_INDEX_START,
+  DOCS_README_PATH,
+  extractDocSummary,
+  nextAdrNumber,
+  nextDesignDocNumber,
+  regenerateDocsReadme,
+  ROADMAP_TRADEOFFS_PATH,
+  slugifyTitle,
+  TROUBLESHOOTING_LOG_PATH,
+  type DocSummary,
+  type DocTemplateKind,
+} from './docs';
 export { projectGuideSection } from './prompts';
 export {
   discoverJsFile,
