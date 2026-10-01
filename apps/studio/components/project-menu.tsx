@@ -8,7 +8,9 @@ import { desktopBridge } from "@/lib/desktop-bridge";
 import { describeFailedResponse } from "@/lib/fetch-error";
 import { collapseEmptySessions, recentSessionsFor, relativeTime, selectableProjects, shortSessionId } from "@/lib/project-menu";
 import type { ProjectSummary, SessionSummary } from "@/lib/studio-events";
+import { FetchOriginMainModal } from "./fetch-origin-main-modal";
 import { OpenFolderModal } from "./open-folder-modal";
+import { RegenerateFilesModal } from "./regenerate-files-modal";
 
 const RECENT_LIMIT = 5;
 
@@ -26,6 +28,9 @@ export function ProjectMenu({ projectId, projectName }: { projectId: string; pro
   const [folderOpen, setFolderOpen] = useState(false);
   /** 데스크톱 폴더 선택 창에서 고른 경로. 있으면 확인 창(찾은 서비스·만들 파일)만 띄운다 */
   const [pickedFolder, setPickedFolder] = useState<string>();
+  /** 폴더 프로젝트 전용 동작(ADR-101): 생성 파일 다시 만들기·원격 main 받아오기 */
+  const [regenerateOpen, setRegenerateOpen] = useState(false);
+  const [fetchMainOpen, setFetchMainOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   return (
@@ -61,10 +66,20 @@ export function ProjectMenu({ projectId, projectName }: { projectId: string; pro
                 if (path) setPickedFolder(path);
               });
           }}
+          onRegenerate={() => {
+            setOpen(false);
+            setRegenerateOpen(true);
+          }}
+          onFetchMain={() => {
+            setOpen(false);
+            setFetchMainOpen(true);
+          }}
         />
       )}
       {folderOpen && <OpenFolderModal onClose={() => setFolderOpen(false)} />}
       {pickedFolder && <OpenFolderModal initialPath={pickedFolder} onClose={() => setPickedFolder(undefined)} />}
+      {regenerateOpen && <RegenerateFilesModal projectId={projectId} onClose={() => setRegenerateOpen(false)} />}
+      {fetchMainOpen && <FetchOriginMainModal projectId={projectId} onClose={() => setFetchMainOpen(false)} />}
     </>
   );
 }
@@ -74,11 +89,17 @@ function ProjectMenuPopover({
   projectId,
   onClose,
   onOpenFolder,
+  onRegenerate,
+  onFetchMain,
 }: {
   anchor: RefObject<HTMLButtonElement | null>;
   projectId: string;
   onClose: () => void;
   onOpenFolder: () => void;
+  /** 생성 파일 다시 만들기(ADR-101). 폴더 프로젝트에서만 보인다 */
+  onRegenerate: () => void;
+  /** 원격 main 받아오기(ADR-101). 폴더 프로젝트에서만 보인다 */
+  onFetchMain: () => void;
 }) {
   const router = useRouter();
   // 여는 자리는 눌린 버튼 바로 아래. body로 포털하므로 화면 좌표(fixed)로 잡는다. 버튼은 이미 그려져 있어(눌러야 여니까)
@@ -144,6 +165,8 @@ function ProjectMenuPopover({
   const usable = projects && selectableProjects(projects, projectId);
   // 한 번도 요청을 보내지 않은 세션은 여러 개 있어도 서로 구별되지 않으니(모두 같은 문구) 가장 최근 것 하나만 남긴다
   const recent = sessions && collapseEmptySessions(recentSessionsFor(sessions, projectId, RECENT_LIMIT));
+  // 폴더 열기(ADR-067)로 등록한 프로젝트만 "생성 파일 다시 만들기"·"원격 main 받아오기"를 보여준다(ADR-101)
+  const isFolderProject = Boolean(projects?.find((project) => project.id === projectId)?.folder);
 
   return createPortal(
     <div className="fixed inset-0 z-40">
@@ -187,6 +210,16 @@ function ProjectMenuPopover({
             <button type="button" role="menuitem" onClick={onOpenFolder} className="rounded-control px-2 py-1.5 text-left hover:bg-panel">
               폴더 열기…
             </button>
+          )}
+          {capabilities?.openFolder && isFolderProject && (
+            <>
+              <button type="button" role="menuitem" onClick={onRegenerate} className="rounded-control px-2 py-1.5 text-left hover:bg-panel">
+                생성 파일 다시 만들기…
+              </button>
+              <button type="button" role="menuitem" onClick={onFetchMain} className="rounded-control px-2 py-1.5 text-left hover:bg-panel">
+                원격 main 받아오기…
+              </button>
+            </>
           )}
           <button
             type="button"
