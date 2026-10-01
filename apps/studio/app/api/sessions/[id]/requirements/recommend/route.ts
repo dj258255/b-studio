@@ -20,7 +20,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     await authorizeSession(id, user);
     const parsed = bodySchema.safeParse(await request.json().catch(() => undefined));
     if (!parsed.success) throw new StudioError(400, 'questions(1~5개)와, 선택적으로 specText가 필요합니다');
-    return Response.json(await recommendSessionRequirementQuestions(id, parsed.data));
+    return Response.json(await recommendSessionRequirementQuestions(id, parsed.data, { signal: request.signal }));
   } catch (error) {
     return errorResponse(error);
   }
