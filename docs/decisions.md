@@ -121,6 +121,7 @@
 - [ADR-104 첫 화면의 세션 되살리기는 "이어서 열기"를 눌러야 켜고, 참조 JSON이 너무 크면 구조만 요약한다](#adr-104-첫-화면의-세션-되살리기는-이어서-열기를-눌러야-켜고-참조-json이-너무-크면-구조만-요약한다)
 - [ADR-105 테스트 탭 실행 결과를 세션 상태 폴더에 남겨 서버 재시작에도 잃지 않는다](#adr-105-테스트-탭-실행-결과를-세션-상태-폴더에-남겨-서버-재시작에도-잃지-않는다)
 - [ADR-106 요구사항 탭 도그푸딩에서 드러난 여섯 가지 마찰을 고친다](#adr-106-요구사항-탭-도그푸딩에서-드러난-여섯-가지-마찰을-고친다)
+- [ADR-107 PR 생성도 이슈 발행과 같은 토큰을 찾고, "올리기 전 점검"에서도 바로 올릴 수 있게 한다](#adr-107-pr-생성도-이슈-발행과-같은-토큰을-찾고-올리기-전-점검에서도-바로-올릴-수-있게-한다)
 
 ---
 
@@ -4389,6 +4390,47 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **"기존 목록 버리고 바꾸기"는 발행된 이슈 연결(trace.issue)도 끊는다.** 다시 저장한 뒤 "이슈로 발행"을 누르면 예전 이슈를 찾지 못해(관리형 영역의 id로도 못 찾는다 — id 자체가 바뀌었다) 새 하위 이슈를 또 만든다 — 예전 이슈는 사람이 손으로 닫아야 한다. "완전히 다시 시작"이 이 기능의 목적이라 의도된 트레이드오프다.
 - **이슈 rev= 통일은 예전에 발행된 이슈의 숫자를 "점프"시킨다.** 예전 방식(발행 횟수)으로 이미 rev=2까지 찍힌 이슈를 다음에 다시 발행하면 파일의 지금 개정(예: 7)으로 곧바로 올라간다 — 과거 발행 이력을 돌아보면 "어, 갑자기 숫자가 많이 뛰었네"로 보일 수 있지만, 그 뒤로는 항상 파일과 일치한다.
 - **작업 복사본 .md 선택은 `.md` 확장자만 본다.** 코드 탭의 파일 목록 API는 그대로 재사용하지만, 서버 쪽 `query` 매개변수는 부분 문자열 매칭이라 `.mdx` 같은 확장자도 넘어올 수 있어 클라이언트에서 `.md`로 끝나는 것만 한 번 더 거른다 — ASSIGNMENT.txt처럼 확장자가 다른 명세 파일은 여전히 OS 파일 창을 써야 한다.
+
+---
+
+## ADR-107 PR 생성도 이슈 발행과 같은 토큰을 찾고, "올리기 전 점검"에서도 바로 올릴 수 있게 한다
+
+상태: 채택
+관련: ADR-074, ADR-080, ADR-087, ADR-092, ADR-098
+
+### 맥락
+- 과제로 b-studio를 도그푸딩하며 쌓인 두 가지 마찰을 하나로 묶는다(ADR-102와 같은 이유) — 둘 다 "저장소에 올린다"는 한 기능의 서로 다른 구석이다.
+- **`gh` CLI로 로그인한 개인 PC에서도 PR을 못 만든다고 나온다.** 요구사항 이슈 발행(`requirementIssuesContext`, sessions.ts)은 `resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() })`로 환경 변수가 없으면 `gh auth token`까지 본다. 그런데 저장소 화면이 "올리고 PR 만들기"를 보일지 정하는 `canCreatePullRequest`와 실제 PR을 만드는 `createPullRequest`(packages/agent/src/repository.ts)는 둘 다 환경 변수(`B_STUDIO_GITHUB_TOKEN` 등)만 봤다 — 같은 사람이 이슈는 발행할 수 있는데 저장소 바에는 "PR 작성 페이지"(사람이 직접 만드는 링크)만 보였다.
+- **"올리기 전 점검" 탭에서 점검표만 보고 올리려면 다른 탭으로 옮겨야 한다.** `SubmissionPanel`(저장소 탭 > 올리기 전 점검)은 점검표(몇/몇 통과)만 보여주고, 실제 "브랜치 올리기"·"올리고 PR 만들기" 버튼은 `RepositoryBar`(코드 탭 > 변경 기록)에만 있었다. PR 본문에도 이 점검표가 전혀 실리지 않아, 리뷰어가 PR만 보고는 올리기 전에 무엇을 확인했는지 알 수 없었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 저장소 화면이 직접 `gh auth token`을 부른다 | `localFolderAllowed()`(개인 PC 모드인지) 확인 없이 아무 서버에서나 가져오면, 여러 사람이 쓰는 서버에서 운영자 계정의 CLI 토큰이 새어 나간다 — 반드시 이슈 발행과 같은 경계(sessions.ts의 `localFolderAllowed`)를 거쳐야 한다 |
+| B. SubmissionPanel이 RepositoryBar를 통째로 끼워 넣는다 | RepositoryBar는 원격 변경 가져오기·기준 브랜치 따라잡기·리뷰 카드까지 담아 "올리기 전 점검" 아래에 두면 점검과 상관없는 버튼까지 늘어난다 |
+| **C. `canCreatePullRequest`·`createPullRequest`에 `token` 옵션을 더해 이슈 발행과 같은 `resolveRepositoryToken` 결과를 넘기고(짧게 캐시해 같은 요청 흐름에서 gh CLI를 거듭 부르지 않는다), RepositoryBar의 올리기·만들기 버튼만 `RepositoryUploadActions`로 빼서 SubmissionPanel도 같은 컴포넌트를 쓴다. PR 본문은 한 곳(`pullRequestDraft`)에서 "올리기 전 점검" 요약과 추적 이슈 참조를 덧붙인다** | 공유 컴포넌트가 RepositoryBar의 버튼 줄 안에도, SubmissionPanel의 점검표 아래에도 자연스럽게 끼어야 해 레이아웃 상자를 두지 않는 `display: contents`를 썼다 — 아래에서 감수한다 |
+
+### 결정
+1. **`packages/agent/src/repository.ts`의 `canCreatePullRequest(remote, env, token?)`·`createPullRequest(remote, input, { env, fetch, token })`가 `token`을 받으면 환경 변수보다 앞세운다.** `createIssue`·`listIssues`가 이미 쓰는 것과 같은 모양(옵션 가방에 `token`)이다.
+2. **`apps/studio/lib/server/repo-token.ts`에 `localFolderAllowed`를 모은다(원래 sessions.ts에 있었다).** sessions.ts가 projects.ts의 `findProject`를 가져오므로, projects.ts가 sessions.ts를 거꾸로 가져오면 순환 의존이 생긴다 — repository-panel.ts가 이미 이 모듈에 `resolveRepositoryToken`을 둔 것과 같은 이유로 옮겼다. sessions.ts는 그 이름을 다시 내보내 기존 가져오기(`@/lib/server/sessions`)를 그대로 둔다. 같은 파일에 `cachedRepositoryToken`(TTL 5초)을 더해 저장소 올리기 미리보기 → 실제 생성처럼 한 요청 흐름에서 같은 호스트의 토큰을 거듭 물을 때 `gh auth token` 하위 프로세스를 한 번만 띄운다.
+3. **sessions.ts의 `describeRepository`(저장소 화면이 쓰는 `RepositoryView`)·`previewExport`·`exportSession`의 PR 생성, projects.ts의 `canPublishIssues`, task-plans.ts의 `publishPlanIssues`가 모두 `cachedRepositoryToken`으로 구한 토큰을 `canCreatePullRequest`·`createPullRequest`·`createIssue`·`addSubIssue`에 넘긴다.** `localFolderAllowed()`가 거짓이면(여러 사람이 쓰는 서버) 환경 변수만 본다 — 이슈 발행과 똑같은 경계다.
+4. **`RepositoryBar`의 "브랜치 올리기"·"올리고 PR 만들기" 버튼과 미리보기(`ExportPreview`)를 새 컴포넌트 `RepositoryUploadActions`로 뺀다.** 자기 상자를 두지 않도록(`display: contents`) 만들어 RepositoryBar의 버튼 줄에도, `SubmissionPanel`(올리기 전 점검)의 점검표 아래에도 그대로 끼운다 — 로직을 두 곳에 나눠 두지 않는다.
+5. **PR 본문에 "올리기 전 점검" 요약과 요구사항 추적 이슈 참조를 덧붙인다.** `pullRequestDraft`(미리보기·실제 생성이 함께 쓰는 단일 조립 지점)가 기존 `buildRequirementsAddendum`(검증된 요구사항의 `Closes #n`) 뒤에, 발행된 추적 이슈가 있으면 `관련: #<추적 이슈 번호>` 한 줄을, 그다음 새 `buildChecklistAddendum`이 `submissionReport`(SubmissionPanel과 같은 함수)의 결과로 "## 올리기 전 점검 N/M 통과"와 항목별 한 줄 이유를 붙인다. 점검표를 다시 계산하는 새 빌더를 만들지 않고 화면이 쓰는 함수를 그대로 재사용한다.
+
+### 검증 결과
+- `packages/agent/src/repository.test.ts`: `canCreatePullRequest`·`createPullRequest`가 `token`을 주면 환경 변수 없이도 통과하는 것을 확인했다.
+- `apps/studio/lib/server/repo-token.test.ts`(새 파일): `localFolderAllowed`가 `B_STUDIO_AUTH`를 따르고, `cachedRepositoryToken`이 TTL 안에서는 다시 묻지 않고 지나면 다시 물으며, 환경 변수가 있으면 gh CLI를 부르지 않고, gitea는 gh CLI 대체가 없는 것을 확인했다.
+- `apps/studio/lib/server/projects.test.ts`(새 파일): `canPublishIssues`가 환경 변수 토큰과 gh CLI 대체 토큰 모두로 true가 되고, 원격이 아니면 토큰을 찾지도 않는 것을 확인했다.
+- `apps/studio/lib/server/requirement-issues.test.ts`: 새 `publishedTrackingIssue`가 발행 전엔 undefined, 발행 뒤엔 사이드카의 추적 이슈를 돌려주는 것을 확인했다.
+- `apps/studio/lib/server/task-plans.test.ts`: 기존 "원격 저장소가 아니거나 토큰이 없거나" 테스트가 그대로 통과한다(토큰 캐시가 테스트 사이로 새지 않게 `beforeEach`에서 비웠다).
+- `apps/studio/lib/server/sessions.test.ts`: 새 `buildChecklistAddendum`이 통과 수와 항목별 한 줄 이유를 적고, 항목이 없어도 머리글만 남기는 것을 확인했다.
+- `apps/studio/components/repository-upload-actions.test.tsx`(새 파일): 저장소가 없으면 아무것도 그리지 않고, `canCreatePullRequest`가 true/false·PR이 이미 있음·GitLab(MR 문구)에 따라 버튼이 달리 보이는 것을 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`. `apps/studio`(182개 파일·1501개 테스트)·`packages/agent`(51개 파일·1000개 테스트) vitest 스위트 전부 통과.
+
+### 감수한 트레이드오프
+- **`RepositoryUploadActions`가 `display: contents`로 자기 상자를 없애, 어디에 끼우든 부모의 flex 레이아웃을 그대로 따른다.** 버튼 줄은 문제없지만 오류 문구·PR 미리보기 패널도 같은 부모의 flex 항목이 되어, 아주 좁은 화면에서는 줄바꿈 위치가 조금 달라질 수 있다 — 두 화면(RepositoryBar·SubmissionPanel)의 레이아웃이 서로 달라 컴포넌트에 고정 상자를 주면 한쪽이 깨진다.
+- **토큰 캐시(5초)는 호스트별로 하나뿐이다(프로세스 전역).** 같은 프로세스에서 서로 다른 GitHub 계정의 토큰을 섞어 쓰는 멀티 테넌트 서버라면 캐시가 다른 세션의 토큰을 잠깐 돌려줄 수 있다 — 지금은 개인 PC 모드(`localFolderAllowed`)에서만 gh CLI 대체가 켜지고, 그 모드는 한 사람만 쓴다고 전제해 문제가 되지 않는다.
+- **PR 본문의 "올리기 전 점검" 요약은 `submissionReport`를 다시 부른다(캐시하지 않는다).** PR을 만들 때마다 점검표를 다시 계산하므로 아주 큰 프로젝트에서는 그만큼 느려질 수 있다 — 미리보기·실제 생성이 같은 조립 지점(`pullRequestDraft`)을 쓰게 하는 것이 "본문이 어긋나지 않는다"는 이득보다 크다고 보았다.
 
 ---
 

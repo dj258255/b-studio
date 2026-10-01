@@ -126,6 +126,13 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   };
 });
 
+// localFolderAllowed()가 실제 gh CLI를 부르지 않도록 꺼 둔다(gh CLI 대체는 repository-panel.test.ts가 따로 검증한다).
+// 이슈 올리기 테스트는 모두 환경 변수(B_STUDIO_GITHUB_TOKEN)만으로 토큰 유무를 가린다
+vi.mock('./repo-token', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./repo-token')>();
+  return { ...actual, localFolderAllowed: () => false };
+});
+
 vi.mock('./model-registry', () => ({
   listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
   modelById: (id: string) => ({ id }),
@@ -269,6 +276,7 @@ vi.mock('./sessions', () => ({
 }));
 
 import { StudioError } from './errors';
+import { clearRepositoryTokenCache } from './repo-token';
 import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
@@ -284,6 +292,8 @@ const saved = {
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `[id:${id}] ${id} 작업`, paths, dependsOn });
 
 beforeEach(() => {
+  // cachedRepositoryToken의 캐시(ADR-107)가 앞 테스트의 B_STUDIO_GITHUB_TOKEN을 다음 테스트로 새게 하지 않는다
+  clearRepositoryTokenCache();
   fake.root = mkdtempSync(path.join(directory, 'work-'));
   fake.counter = 0;
   fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { BaseStatus } from "@b-studio/agent";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
-import { ExportPreview } from "./export-preview";
+import { RepositoryUploadActions } from "./repository-upload-actions";
 import { ReviewCard } from "./review-card";
 import { useSessionAccess } from "./session-access";
 
@@ -12,9 +12,8 @@ import { useSessionAccess } from "./session-access";
 export function RepositoryBar({ view }: { view: SessionView }) {
   const { snapshot } = view;
   const repository = snapshot.repository;
-  const [busy, setBusy] = useState<"push" | "sync" | "catchup">();
+  const [busy, setBusy] = useState<"sync" | "catchup">();
   const [resolving, setResolving] = useState(false);
-  const [previewing, setPreviewing] = useState(false);
   const [error, setError] = useState<string>();
   const [base, setBase] = useState<BaseStatus>();
   const access = useSessionAccess();
@@ -67,26 +66,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
         : "되돌리기 뒤 원격 브랜치와 기록이 다릅니다. 다시 올리면 원격 브랜치를 지금 기록으로 맞춥니다.";
 
   const idle = !snapshot.running && !busy && access.canManage;
-  const canPush = idle && sessionCheckpoints > 0 && !upToDate;
-  const showCreate = repository.canCreatePullRequest && !repository.pullRequestUrl;
   const showCompare = !repository.canCreatePullRequest && !repository.pullRequestUrl && repository.compareUrl && repository.pushedSha;
-
-  async function upload() {
-    setBusy("push");
-    setError(undefined);
-    try {
-      const response = await fetch(`/api/sessions/${snapshot.id}/export`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pullRequest: false }),
-      });
-      if (!response.ok) setError((await response.json()).error ?? "올리지 못했습니다");
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(undefined);
-    }
-  }
 
   /** 요청만 보내고, 가져오기와 검증 결과는 대화에 이벤트로 온다 */
   async function pullRemote() {
@@ -186,24 +166,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
           >
             {busy === "sync" ? "요청하는 중" : "원격 변경 가져오기"}
           </button>
-          <button
-            type="button"
-            onClick={() => void upload()}
-            disabled={!canPush}
-            className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
-          >
-            {busy === "push" ? "올리는 중" : "브랜치 올리기"}
-          </button>
-          {showCreate && (
-            <button
-              type="button"
-              onClick={() => setPreviewing(true)}
-              disabled={!idle || sessionCheckpoints === 0}
-              className="rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
-            >
-              {`올리고 ${label} 만들기`}
-            </button>
-          )}
+          <RepositoryUploadActions view={view} />
         </div>
       </div>
 
@@ -238,7 +201,6 @@ export function RepositoryBar({ view }: { view: SessionView }) {
         <p className="mt-1 text-sm text-wait">원본 폴더에서 커밋하지 않은 변경 {repository.sourceDirtyFiles}개는 이 세션에 들어 있지 않습니다.</p>
       )}
       {error && <p className="mt-1 text-sm text-fail">{error}</p>}
-      {previewing && showCreate && <ExportPreview sessionId={snapshot.id} label={label} onClose={() => setPreviewing(false)} />}
       <ReviewCard sessionId={snapshot.id} review={snapshot.review} canManage={access.canManage} hasPullRequest={Boolean(repository.pullRequestUrl)} />
     </div>
   );

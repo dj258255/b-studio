@@ -308,20 +308,25 @@ export function compareUrl(remote: RemoteLocation, base: string, branch: string)
   }
 }
 
-export function canCreatePullRequest(remote: RemoteLocation, env: Env = process.env): boolean {
-  return remote.kind !== 'other' && remote.kind !== 'local' && Boolean(env[TOKEN_ENV[remote.kind]]);
+/**
+ * `token`을 주면(개인 PC 모드의 gh CLI 토큰 등, 이슈 발행·목록 조회와 같은 경계) 환경 변수보다 그것을 앞세운다.
+ * 주지 않으면 환경 변수만 본다(사내 서버 등 gh CLI를 쓰지 않는 경계에서는 호출하는 쪽이 token을 생략한다)
+ */
+export function canCreatePullRequest(remote: RemoteLocation, env: Env = process.env, token?: string): boolean {
+  return remote.kind !== 'other' && remote.kind !== 'local' && Boolean(token ?? env[TOKEN_ENV[remote.kind]]);
 }
 
 /** 이미 같은 브랜치로 열린 PR이 있으면 새로 만들지 않고 그 주소를 돌려준다 */
 export async function createPullRequest(
   remote: RemoteLocation,
   input: PullRequestInput,
-  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+  { env = process.env, fetch: fetchFn = fetch, token: tokenOverride }: { env?: Env; fetch?: Fetch; token?: string } = {},
 ): Promise<PullRequestResult> {
   if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
     throw new PullRequestError('PR을 만들 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
   }
-  const token = env[TOKEN_ENV[remote.kind]];
+  // 개인 PC 모드의 gh CLI 토큰 폴백을 쓸 수 있게(저장소 화면·이슈 발행기와 같은 경계), 넘겨받은 토큰을 env보다 앞세운다
+  const token = tokenOverride ?? env[TOKEN_ENV[remote.kind]];
   if (!token) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 PR을 만들 수 없습니다`);
 
   const body = capBody(input.body);
