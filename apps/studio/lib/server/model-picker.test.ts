@@ -72,8 +72,11 @@ describe('listSelectableModels', () => {
       const picker = await listSelectableModels('claude-code', 'sonnet');
 
       expect(picker.note).toBeUndefined();
-      expect(picker.options.map((option) => option.id)).toEqual(['', 'opus[1m]', 'claude-fable-5-1[1m]', 'sonnet', 'haiku']);
-      expect(picker.options.map((option) => option.label)).toEqual(['기본 (Opus 5 · 1M)', 'Opus 5 · 1M', 'Fable 5.1', 'Sonnet 5', 'Haiku 4.5']);
+      expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'opus[1m]', 'claude-fable-5-1[1m]', 'sonnet', 'haiku']);
+      expect(picker.options.map((option) => option.label)).toEqual(['기본 (Opus 5 · 1M)', '자동', 'Opus 5 · 1M', 'Fable 5.1', 'Sonnet 5', 'Haiku 4.5']);
+      // 자동(ADR-091)은 기본 행 바로 뒤에 붙는다
+      const auto = picker.options.find((option) => option.id === 'auto')!;
+      expect(auto.hint).toContain('검증에 실패하면 한 단계 올립니다');
 
       const def = picker.options.find((option) => option.id === '')!;
       expect(def.hint).toContain('Opus 5 · 1M');
@@ -111,7 +114,7 @@ describe('listSelectableModels', () => {
 
       const picker = await listSelectableModels('claude-code', 'sonnet');
 
-      expect(picker.options.map((option) => option.id)).toEqual(['', 'fable', 'opus', 'sonnet', 'haiku']);
+      expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'fable', 'opus', 'sonnet', 'haiku']);
       expect(picker.note).toContain('모델 목록을 불러오지 못해');
       expect(picker.note).toContain('60초 안에 응답하지 않았습니다');
     });
@@ -230,6 +233,10 @@ describe('isSelectableModel', () => {
   it('목록에 있는 값만 허용한다(불러오지 못해 알려진 표로 되돌아간 상태 기준)', async () => {
     expect(await isSelectableModel('claude-code', 'opus')).toEqual({ ok: true });
     expect(await isSelectableModel('claude-code', 'gpt-5')).toEqual({ ok: false });
+  });
+
+  it('자동(auto)도 고를 수 있다', async () => {
+    expect(await isSelectableModel('claude-code', 'auto')).toEqual({ ok: true });
   });
 });
 

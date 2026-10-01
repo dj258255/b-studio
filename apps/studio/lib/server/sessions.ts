@@ -17,7 +17,9 @@ import {
   buildMissingReferenceQuestion,
   buildPullRequest,
   buildReferencedFilesContext,
+  buildRequirementsAddendum,
   buildRequirementWorkPrefill,
+  buildReviewRequirementsContext,
   buildTestRunPlan,
   buildTraceabilityMatrix,
   canCreatePullRequest,
@@ -34,9 +36,12 @@ import {
   describeDatabaseState,
   detectRunner,
   discoverTestsInFile,
+  draftRequirementFromIssue,
   estimateCost,
+  extractRequirementMentions,
   extractRequirementsHeuristically,
   fetchIssue,
+  fetchPullRequestDetail,
   findCheckpointMentions,
   findGateCheckMentions,
   flattenDiscoveredFile,
@@ -91,6 +96,13 @@ import {
   runOpenCodeAgent,
   ScriptedModelClient,
   type ScriptedTurn,
+  CLI_TIERS,
+  higherCliTier,
+  nextCliTier,
+  routeCliTier,
+  tierLabel,
+  type CliRouteDecision,
+  type CliTier,
   verifyChanges,
   workflowStages,
   Workspace,
@@ -102,6 +114,7 @@ import {
   type BrowserFrame,
   type CheckpointRef,
   type Checkpoint,
+  type ConflictResolution,
   type DatabaseState,
   type DemoScenario,
   type DesignFrameInfo,
@@ -110,6 +123,7 @@ import {
   type EscalationPolicy,
   type GateCheckResult,
   type GitAuthor,
+  type ImplementedRequirementRef,
   type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
@@ -119,6 +133,8 @@ import {
   type RequirementCoverage,
   type RequirementDiffEntry,
   type RequirementEvidence,
+  type RequirementIssueDraft,
+  type RequirementScenario,
   type RequirementStatus,
   type RepositoryInfo,
   type RoutingDecision,
@@ -201,6 +217,19 @@ import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from '
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
+import {
+  planRequirementIssuePublish,
+  publishedIssueNumbers,
+  publishRequirementIssues,
+  resolveRequirementConflict,
+  syncRequirementIssueStatus,
+  type ConflictResolutionResult,
+  type RequirementIssuesContext,
+  type RequirementPlanResult,
+  type RequirementPublishResult,
+  type RequirementSyncEvidence,
+  type RequirementSyncResult,
+} from './requirement-issues';
 import { isSelectableEffort, isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
 import { rememberProjectEffortDefault, rememberProjectModelDefault } from './model-defaults';
 import { describe, StudioError } from './errors';
@@ -284,6 +313,8 @@ interface Session {
     sessionId?: string;
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
+    /** claude-code 자동 모델 선택(ADR-091)의 stickiness: 이 세션에서 이미 성공적으로 쓴 가장 높은 단계 */
+    autoTier?: CliTier;
   };
   /**
    * 로컬 ChatGPT Agent(Codex) 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해(설치된 SDK에 fork가 없다)
@@ -1040,7 +1071,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       listeners: live?.listeners ?? entry!.listeners,
       conversation: data.conversation as Conversation,
       demoIndex: data.demoIndex,
-      claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes] },
+      claudeCode: { sessionId: data.claudeCode.sessionId, notes: [...data.claudeCode.notes], autoTier: data.claudeCode.autoTier },
       // 이 필드가 생기기 전에 저장한 기록에는 없다
       codex: { notes: [...(data.codex?.notes ?? [])], recent: [...(data.codex?.recent ?? [])] },
       commandCode: { sessionId: data.commandCode?.sessionId, notes: [...(data.commandCode?.notes ?? [])] },
@@ -1549,6 +1580,8 @@ type RunPlan = (
       escalation?: EscalationPolicy;
       /** 계획-실행 분리(ADR-075)로 정한 실행 모델. session.snapshot.modelId(레인이 고른 모델)보다는 아래고, B_STUDIO_CLAUDE_CODE_MODEL보다는 위다 */
       executeModel?: string;
+      /** claude-code 자동 모델 선택(ADR-091). 세션에서 고른 모델이 'auto'일 때만 있다. tier가 실제로 넘길 모델 이름이다 */
+      autoRoute?: CliRouteDecision;
     }
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
@@ -1584,6 +1617,15 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   }
   if (kind === 'claude-code') {
     const chosenModel = cliModelOverride(session.snapshot.modelId);
+    // 자동 모델 선택(ADR-091). 대화에서 고르거나(session.snapshot.modelId === 'auto') 서버 기본값(B_STUDIO_CLAUDE_CODE_MODEL=auto)으로 켤 수 있다
+    // — 벤치(apps/studio/bench)가 세션마다 고르는 대신 서버 기본값으로 시작 모델을 넘기므로, 두 경로가 같은 규칙을 따라야 한다.
+    // 질문(intent === 'ask')도 읽기만 하는 요청으로 그대로 분류에 넘긴다(routeCliTier가 haiku로 고른다)
+    const effectiveModel = chosenModel ?? split.execute ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined);
+    if (effectiveModel === 'auto') {
+      const autoRoute = routeCliTier({ prompt: request, intent, stickyTier: session.claudeCode.autoTier });
+      const escalation = claudeCodeAutoEscalation(autoRoute.tier);
+      return { kind: 'claude-code', allowBreaking, intent, autoRoute, ...(escalation ? { escalation } : {}) };
+    }
     const escalation = claudeCodeEscalation(split.plan, process.env, chosenModel);
     return { kind: 'claude-code', allowBreaking, intent, ...(split.execute ? { executeModel: split.execute } : {}), ...(escalation ? { escalation } : {}) };
   }
@@ -1709,6 +1751,29 @@ export function claudeCodeEscalation(
   // 사람이 대화에서 이미 이 모델(별칭)을 실행 모델로 골랐으면, 올려도 같은 모델이라 승격은 아무 효과가 없다(no-op)
   if (skipIfSameAs && to === skipIfSameAs) return undefined;
   return { ...escalationRules(), to };
+}
+
+/**
+ * claude-code 자동 모델 선택(ADR-091)의 승격 대상. 계획 모델이나 환경 변수가 아니라 고른 단계의 바로 위 단계로 올린다
+ * (haiku→sonnet, sonnet→opus). 이미 opus(최고 단계)면 더 올릴 곳이 없어 승격하지 않는다(fable은 자동 후보가 아니다).
+ * 두 승격 러너와 같은 임계치(escalationRules)를 쓴다 — 서명이 반복되는 규칙은 단계 선택 방식과 무관하다.
+ */
+export function claudeCodeAutoEscalation(tier: CliTier): EscalationPolicy | undefined {
+  const to = nextCliTier(tier);
+  if (!to) return undefined;
+  return { ...escalationRules(), to };
+}
+
+/**
+ * 자동 모델 선택(ADR-091)의 stickiness 갱신. 요청이 끝난 뒤 한 번 부른다.
+ * 질문(ask)이거나 검증 게이트를 통과하지 못했으면(done이 아니면) 아무것도 기억하지 않고 지금 값을 그대로 돌려준다
+ * (ADR-047과 같은 원칙 — 질문 완료·실패한 시도는 구현 품질의 증거가 아니다).
+ * 승격이 일어났으면(게이트가 반복 실패해 한 단계 올렸으면) 그 올라간 단계를 기억한다.
+ */
+export function nextAutoTier(current: CliTier | undefined, autoRoute: CliRouteDecision, outcome: { intent: Intent; status: 'done' | 'failed' | 'awaiting_input'; escalated: boolean }): CliTier | undefined {
+  if (outcome.intent !== 'build' || outcome.status !== 'done') return current;
+  const usedTier = outcome.escalated ? (nextCliTier(autoRoute.tier) ?? autoRoute.tier) : autoRoute.tier;
+  return higherCliTier(current, usedTier);
 }
 
 /**
@@ -1854,6 +1919,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 단계를 돌렸다면 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         void collectGateTestReports(session).catch(() => {});
+        // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
+        void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
         await revertRun(session, run.id);
       }
@@ -2041,14 +2108,27 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const preflight = await preflightClaudeCode({ cwd: session.project.root });
     if (!preflight.ok) return { preflightError: preflight.reason };
 
+    // 자동 모델 선택(ADR-091). 대화에 한 줄 안내를 남긴다(같은 'route' 이벤트를 api 라우터(ADR-047)와 공유한다 — auto:true만 다르다)
+    if (plan.autoRoute) {
+      shared.onEvent({
+        type: 'route',
+        selectedId: plan.autoRoute.tier,
+        reason: plan.autoRoute.reason,
+        complexity: plan.autoRoute.complexity,
+        risk: plan.autoRoute.risk,
+        candidates: CLI_TIERS.map((tier) => ({ id: tier, label: tierLabel(tier), eligible: tier === plan.autoRoute!.tier, score: 0 })),
+        auto: true,
+      });
+    }
+
     const { claudeCode } = session;
     const result = await runClaudeCodeAgent({
       ...shared,
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
-      // 세션(레인)에서 고른 모델 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
-      model: cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined),
+      // 세션(레인)에서 고른 모델 → 자동 선택이 고른 단계 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
+      model: plan.autoRoute ? plan.autoRoute.tier : (cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined)),
       // 세션에서 고른 노력 단계. 없으면 러너 기본값('high')을 그대로 쓴다
       ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
       // 실행 중 지시 큐. 없으면(레인·플릿) 지시를 받지 않는다
@@ -2060,6 +2140,15 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
     claudeCode.notes = [];
     if (result.sessionId) claudeCode.sessionId = result.sessionId;
+    // 자동 모델 선택의 stickiness(ADR-091). 다음 요청도 이번에 실제로 쓴 단계부터 시작해 모델을 다시 낮췄다
+    // 올리는 캐시 재생성을 피한다(E8/E9). status가 'awaiting_input'(되묻고 멈춤)이면 아직 끝나지 않아 기억하지 않는다
+    if (plan.autoRoute && (result.status === 'done' || result.status === 'failed')) {
+      claudeCode.autoTier = nextAutoTier(claudeCode.autoTier, plan.autoRoute, {
+        intent: plan.intent,
+        status: result.status,
+        escalated: Boolean(result.metrics?.escalatedAt),
+      });
+    }
     return result;
   }
 
@@ -2488,15 +2577,19 @@ export function buildExportChecks({
 /** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
 async function pullRequestDraft(session: Session, issues: readonly number[]): Promise<PullRequestDraft & { info: RepositoryInfo }> {
   const info = (await session.checkpoints.repository())!;
+  const commits = await session.checkpoints.sessionCommits();
   const draft = buildPullRequest({
     projectName: session.project.spec.name,
     base: info.base,
     branch: info.branch,
-    commits: await session.checkpoints.sessionCommits(),
+    commits,
     issues,
     requiredStages: workflowStages(session.project),
   });
-  return { info, ...draft };
+  // 커밋 제목이 "[R4]"로 언급한 요구사항이 있으면 Closes(검증됨+발행된 이슈만)·Implements 줄을 덧붙인다(ADR-092)
+  const refs = await implementedRequirementRefs(session, commits.map((commit) => commit.subject));
+  const addendum = buildRequirementsAddendum(refs);
+  return { info, ...draft, body: addendum ? `${draft.body}${addendum}` : draft.body };
 }
 
 /**
@@ -2714,10 +2807,13 @@ export async function runReviewRound(id: string, { restart = false }: { restart?
 
   const cfg = session.project.spec.review;
   const requests = await sessionRequestTexts(session);
+  // 요구사항 문맥은 한 번만 계산해 클로저로 넘긴다(리뷰 라운드마다 다시 계산할 필요가 없다 — 같은 세션 안에서 바뀌지 않는다)
+  const requirementsContext = await reviewRequirementsContext(session, requests);
   const deps: ReviewRoundDeps = {
     ask: reviewAsk(session),
     diff: () => session.checkpoints.sessionDiff(),
     requests: () => requests,
+    requirementsContext: () => requirementsContext,
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -3163,8 +3259,10 @@ export interface RequirementView extends Requirement {
   status: RequirementStatus;
   confidence: '🟢' | '🟡' | '🔴';
   evidence: RequirementEvidence;
-  /** "이 요구사항 작업" 버튼이 채운다(서버가 만든 글을 그대로 쓴다 — 화면은 조립하지 않는다) */
+  /** "이 요구사항 작업" 버튼이 채운다(서버가 만든 글을 그대로 쓴다 — 화면은 조립하지 않는다). 발행된 이슈가 있으면 번호를 함께 안내한다(ADR-092) */
   workPrefill: string;
+  /** 이슈로 발행했을 때 생긴 하위 이슈 번호. 발행하지 않았으면 없다 */
+  issue?: number;
 }
 
 export interface RequirementsSnapshot {
@@ -3440,15 +3538,36 @@ export async function recommendSessionRequirementQuestions(id: string, input: Re
   return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
 }
 
-/** 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다. 내용이 드리프트됐거나(hash 불일치) 개정 후 새 증거가 없으면 "재확인 필요"로 매긴다 */
-function evaluateRequirement(requirement: Requirement, checkpoints: readonly CheckpointRef[], testFiles: readonly ScannedFile[], gateChecks: readonly GateCheckResult[]): RequirementView {
+/**
+ * 요구사항 하나의 증거를 모아 상태·확신·대화창 채우기 글까지 합친다. 내용이 드리프트됐거나(hash 불일치) 개정 후 새 증거가 없으면
+ * "재확인 필요"로 매긴다. 발행된 이슈 번호가 있으면(ADR-092) 프리필에 안내를 덧붙이고 issue 필드를 채운다
+ */
+function evaluateRequirement(
+  requirement: Requirement,
+  checkpoints: readonly CheckpointRef[],
+  testFiles: readonly ScannedFile[],
+  gateChecks: readonly GateCheckResult[],
+  issueNumber?: number,
+): RequirementView {
   const evidence: RequirementEvidence = {
     checkpoints: findCheckpointMentions(checkpoints, requirement.id),
     tests: scanTestFilesForRequirementId(testFiles, requirement.id),
     gateChecks: findGateCheckMentions(gateChecks, requirement.id),
   };
   const status = computeRequirementStatus(evidence, requirement);
-  return { ...requirement, status, confidence: requirementConfidence(status), evidence, workPrefill: buildRequirementWorkPrefill(requirement) };
+  const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
+  return { ...requirement, status, confidence: requirementConfidence(status), evidence, workPrefill, ...(issueNumber !== undefined ? { issue: issueNumber } : {}) };
+}
+
+/**
+ * 프리필 글의 "[R4] 제목" 첫머리에 발행된 이슈 번호를 "(#12)"로 붙인다("이 요구사항 작업"·"전체 계획 세우기" 프리필,
+ * ADR-092) — 세션이 이 텍스트로 커밋을 남기면 PR 본문의 `Closes #12`로 이어진다. requirements.ts의 공용 프리필
+ * 함수는 건드리지 않고(다른 에이전트가 동시에 그 파일을 고치는 중이라 충돌을 줄인다) 결과 문자열만 studio 쪽에서 덧붙인다.
+ */
+export function annotateWithIssue(prefill: string, requirement: Pick<Requirement, 'id' | 'title'>, issueNumber: number | undefined): string {
+  if (issueNumber === undefined) return prefill;
+  const bullet = `[${requirement.id}] ${requirement.title}`;
+  return prefill.replace(bullet, `${bullet} (#${issueNumber})`);
 }
 
 /** 세션의 체크포인트를 requirements.ts의 CheckpointRef 모양(createdAt 포함)으로 옮긴다. 증거 신선도(재확인 필요 해제) 판정에 쓴다 */
@@ -3467,18 +3586,31 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
   const checkpoints = sessionCheckpointRefs(session);
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
   const gateChecks: GateCheckResult[] = (session.lastGateChecks ?? []).map((check) => ({ name: check.name, ok: check.ok }));
+  // 사이드카 파일만 읽는다(원격·토큰 없이도 동작한다) — 발행한 적이 없으면 빈 채로 빠르게 끝난다
+  const issueNumbers = await publishedIssueNumbers(session.project.root, requirements.map((requirement) => requirement.id)).catch(() => ({}) as Record<string, number>);
 
-  const views = requirements.map((requirement) => evaluateRequirement(requirement, checkpoints, testFiles, gateChecks));
+  const views = requirements.map((requirement) => evaluateRequirement(requirement, checkpoints, testFiles, gateChecks, issueNumbers[requirement.id]));
   const statusById = Object.fromEntries(views.map((view) => [view.id, view.status]));
   const mustHaves = requirements.filter((requirement) => requirement.priority === 'must');
   return {
     exists: true,
     requirements: views,
     coverage: summarizeCoverage(requirements, statusById),
-    ...(mustHaves.length > 0 ? { allMustHavesPrefill: buildAllMustHavesPrefill(requirements) } : {}),
+    ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
     manualSteps,
   };
+}
+
+/** buildAllMustHavesPrefill의 "- [R4] 제목" 줄마다 발행된 이슈 번호가 있으면 "(#12)"를 붙인다(annotateWithIssue와 같은 이유) */
+export function annotateAllMustHavesPrefill(prefill: string, requirements: readonly Requirement[], issueNumbers: Readonly<Record<string, number>>): string {
+  let text = prefill;
+  for (const requirement of requirements) {
+    const issue = issueNumbers[requirement.id];
+    if (issue === undefined) continue;
+    text = annotateWithIssue(text, requirement, issue);
+  }
+  return text;
 }
 
 const ApplyRequirementSchema = RequirementSchema;
@@ -3535,6 +3667,165 @@ export async function getSessionRequirementsMatrix(id: string): Promise<Traceabi
 /** 추적 매트릭스를 CSV로 내려받는다("CSV로 내보내기" 버튼) */
 export async function getSessionRequirementsMatrixCsv(id: string): Promise<string> {
   return buildMatrixCsv(await getSessionRequirementsMatrix(id));
+}
+
+// ---------------------------------------------------------------------------
+// 요구사항 → GitHub 이슈 발행·동기화(ADR-092). 순수 계산은 requirement-issues.ts(agent 패키지)가,
+// 원격 읽기/쓰기·발행 기록은 apps/studio/lib/server/requirement-issues.ts(orchestrator)가 맡는다.
+// 이 절은 세션 상태(작업 복사본·원격·토큰)를 그 orchestrator가 받는 모양으로 조립하기만 한다.
+// ---------------------------------------------------------------------------
+
+/** 발행·동기화에 쓸 원격·토큰을 찾는다. 원격이 없거나 지원하지 않는 호스트거나 토큰이 없으면 undefined(조용히 건너뛴다) */
+async function requirementIssuesContext(session: Session): Promise<RequirementIssuesContext | undefined> {
+  const info = await session.checkpoints.repository();
+  if (!info) return undefined;
+  const remote = parseRemote(info.remoteUrl);
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') return undefined;
+  const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
+  if (!token) return undefined;
+  return { root: session.project.root, remote, token, projectName: session.project.spec.name };
+}
+
+function requireRequirementIssuesContext(context: RequirementIssuesContext | undefined): RequirementIssuesContext {
+  if (!context) throw new StudioError(409, '원격 저장소가 없거나, 지원하지 않는 호스트이거나(GitHub·Gitea만 지원합니다), 토큰이 없어 이슈로 발행할 수 없습니다');
+  return context;
+}
+
+async function requirementsForIssues(id: string): Promise<{ requirements: Requirement[]; statusById: Record<string, RequirementStatus> }> {
+  const snapshot = await getSessionRequirements(id);
+  if (!snapshot.exists || snapshot.requirements.length === 0) throw new StudioError(400, '저장된 요구사항이 없습니다. 먼저 "명세" 탭에서 요구사항을 저장하세요');
+  const requirements = snapshot.requirements.map(({ id: requirementId, title, kind, priority, acceptance }) => ({ id: requirementId, title, kind, priority, acceptance }) as Requirement);
+  const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
+  return { requirements, statusById };
+}
+
+/** "이슈로 발행" 미리보기(dry-run). 원격 이슈를 읽기만 하고 아무것도 쓰지 않는다 */
+export async function previewRequirementIssuePublish(id: string): Promise<RequirementPlanResult> {
+  const session = requireSession(id);
+  const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
+  const { requirements, statusById } = await requirementsForIssues(id);
+  return planRequirementIssuePublish(ctx, requirements, statusById);
+}
+
+/** 미리보기를 확인한 뒤 실제로 발행한다(하위 이슈·추적 이슈를 만들거나 갱신한다) */
+export async function publishSessionRequirementIssues(id: string): Promise<RequirementPublishResult> {
+  const session = requireSession(id);
+  const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
+  const { requirements, statusById } = await requirementsForIssues(id);
+  return publishRequirementIssues(ctx, requirements, statusById);
+}
+
+/** 발행된 요구사항 하나의 충돌(이슈가 GitHub에서 직접 수정됨)을 가져오기·덮어쓰기·무시 중 하나로 푼다 */
+export async function resolveSessionRequirementConflict(id: string, requirementId: string, resolution: ConflictResolution): Promise<ConflictResolutionResult> {
+  const session = requireSession(id);
+  const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
+  const { requirements, statusById } = await requirementsForIssues(id);
+  const requirement = requirements.find((candidate) => candidate.id === requirementId);
+  if (!requirement) throw new StudioError(404, `요구사항 ${requirementId}을 찾지 못했습니다`);
+  return resolveRequirementConflict(ctx, requirement, statusById[requirementId] ?? '미착수', resolution);
+}
+
+/**
+ * 발행된 하위 이슈마다 상태(고정 댓글·라벨)를 반영한다. 세션의 PR이 이미 병합됐으면(검증됨인 요구사항만) 이슈도 닫는다.
+ * 원격·토큰이 없거나 발행된 요구사항이 없으면 조용히 건너뛴다(호출하는 쪽이 매 체크포인트마다 fire-and-forget으로 부른다).
+ */
+export async function syncSessionRequirementIssueStatus(id: string): Promise<RequirementSyncResult> {
+  const session = requireSession(id);
+  const ctx = await requirementIssuesContext(session);
+  if (!ctx) return { updated: [], errors: [] };
+  const snapshot = await getSessionRequirements(id);
+  if (!snapshot.exists || snapshot.requirements.length === 0) return { updated: [], errors: [] };
+
+  const info = await session.checkpoints.repository();
+  const prNumber = info?.pullRequestUrl ? parsePullRequestNumber(info.pullRequestUrl) : undefined;
+  const prMerged =
+    prNumber !== undefined
+      ? await fetchPullRequestDetail(ctx.remote, prNumber, { token: ctx.token })
+          .then((pull) => pull.merged === true)
+          .catch(() => false)
+      : false;
+
+  const evidences: RequirementSyncEvidence[] = snapshot.requirements.map((requirement) => ({
+    id: requirement.id,
+    kind: requirement.kind,
+    priority: requirement.priority,
+    status: requirement.status,
+    checkpoints: requirement.evidence.checkpoints,
+    tests: requirement.evidence.tests,
+    gateChecks: requirement.evidence.gateChecks,
+  }));
+  return syncRequirementIssueStatus(ctx, evidences, { prMerged });
+}
+
+/**
+ * 요청 문구(커밋 제목 등)가 "[R4]" 형태로 언급한 요구사항들의 참조(id·rev·발행된 이슈 번호·상태)를 모은다.
+ * PR 본문의 `Closes #n`·`Implements: Rn`(exportSession)과 AI 리뷰 문맥(runReviewRound)이 함께 쓴다.
+ * 실패해도(원격 없음, 요구사항 파일 없음 등) 빈 배열 — 이 기능이 꺼져 있어도 PR·리뷰 흐름은 그대로 동작해야 한다.
+ */
+async function implementedRequirementRefs(session: Session, requestTexts: readonly string[]): Promise<ImplementedRequirementRef[]> {
+  const mentioned = extractRequirementMentions(requestTexts);
+  if (mentioned.length === 0) return [];
+  try {
+    const snapshot = await getSessionRequirements(session.snapshot.id);
+    if (!snapshot.exists) return [];
+    const byId = new Map(snapshot.requirements.map((requirement) => [requirement.id, requirement]));
+    return mentioned.flatMap((id): ImplementedRequirementRef[] => {
+      const requirement = byId.get(id);
+      if (!requirement) return [];
+      const rev = (requirement as Requirement & { rev?: number }).rev;
+      return [{ id, ...(rev !== undefined ? { rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** implementedRequirementRefs의 결과를 AI 리뷰 프롬프트에 붙일 압축 문맥(제목·시나리오)으로 바꾼다. 리뷰가 요구사항을 몰라도 그만이라 실패는 삼킨다 */
+async function reviewRequirementsContext(session: Session, requestTexts: readonly string[]): Promise<string> {
+  try {
+    const refs = await implementedRequirementRefs(session, requestTexts);
+    if (refs.length === 0) return '';
+    const snapshot = await getSessionRequirements(session.snapshot.id);
+    const byId = new Map(snapshot.requirements.map((requirement) => [requirement.id, requirement]));
+    const entries = refs.flatMap((ref) => {
+      const requirement = byId.get(ref.id);
+      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: (requirement as Requirement & { scenarios?: RequirementScenario[] }).scenarios }] : [];
+    });
+    return buildReviewRequirementsContext(entries);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 이 세션이 구현한(커밋 제목이 "[R4]"로 언급한) 요구사항 중 이슈로 발행된 것들의 번호(중복 없이).
+ * 올리기(export) 미리보기·생성 라우트가 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-092) —
+ * 그래야 PR 본문에 그 요구사항들의 `Closes #n`이 자동으로 실린다. 실패해도(원격 없음 등) 빈 배열.
+ */
+export async function sessionRequirementIssueNumbers(id: string): Promise<number[]> {
+  const session = requireSession(id);
+  try {
+    const requests = await sessionRequestTexts(session);
+    const refs = await implementedRequirementRefs(session, requests);
+    return [...new Set(refs.flatMap((ref) => (ref.issue !== undefined ? [ref.issue] : [])))];
+  } catch {
+    return [];
+  }
+}
+
+/** 저장소 이슈 하나(제목+본문)를 요구사항 초안으로 가져온다("이슈에서 가져오기" — docs/requirements.md에는 쓰지 않는다, 화면이 "적용"으로 반영한다) */
+export async function importRequirementDraftFromIssue(id: string, issueNumber: number): Promise<RequirementIssueDraft> {
+  const session = requireSession(id);
+  const info = await session.checkpoints.repository();
+  if (!info) throw new StudioError(409, '이 프로젝트는 원격 저장소가 없어 이슈를 가져올 수 없습니다');
+  const remote = parseRemote(info.remoteUrl);
+  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new StudioError(400, `${remote.display}는 이슈 가져오기를 지원하지 않습니다(GitHub·Gitea만 지원합니다)`);
+  const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
+  if (!token) throw new StudioError(400, '이슈를 가져올 토큰이 없습니다');
+  const issues = await listIssues(remote, { state: 'all', token });
+  const issue = issues.find((candidate) => candidate.number === issueNumber);
+  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
+  return draftRequirementFromIssue(issue.title, issue.body ?? '');
 }
 
 // ---------------------------------------------------------------------------

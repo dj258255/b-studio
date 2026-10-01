@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createView, reduceSession, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
-import { ChatPanel, ModelPicker, ModelPickerDialog, needsAccountConnect, popoverPositionFor } from "./chat-panel";
+import { ChatPanel, handoffModelInput, ModelPicker, ModelPickerDialog, needsAccountConnect, popoverPositionFor } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -124,6 +124,37 @@ describe("ChatPanel 결과 표시", () => {
 
     // 만들기 경로에서 답만 한 실행에는 붙지 않는다(파일을 바꾸지 않아도 읽기만 실행이 아니다)
     expect(render(view(asked))).not.toContain("이대로 만들기");
+  });
+
+  it("claude-code 자동 모델 선택(ADR-091)은 점수표 대신 한 줄 안내로 보여준다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "버튼 문구를 바꿔줘" },
+        {
+          type: "agent",
+          runId: "r1",
+          event: {
+            type: "route",
+            selectedId: "sonnet",
+            reason: "단순한 만들기 요청이라 Sonnet 5을 선택합니다",
+            complexity: "simple",
+            risk: "normal",
+            candidates: [
+              { id: "haiku", label: "Haiku", eligible: false, score: 0 },
+              { id: "sonnet", label: "Sonnet 5", eligible: true, score: 0 },
+              { id: "opus", label: "Opus", eligible: false, score: 0 },
+            ],
+            auto: true,
+          },
+        },
+      ]),
+    );
+
+    expect(html).toContain("자동 선택");
+    expect(html).toContain("Sonnet 5");
+    expect(html).toContain("단순한 만들기 요청이라 Sonnet 5을 선택합니다");
+    // api 라우터(ADR-047)의 점수표 접기 블록은 쓰지 않는다
+    expect(html).not.toContain("<details");
   });
 });
 
@@ -276,5 +307,31 @@ describe("popoverPositionFor(모델 선택 팝오버를 여는 자리)", () => {
 
   it("왼쪽 가장자리 밖으로도 나가지 않는다", () => {
     expect(popoverPositionFor({ top: 20, bottom: 44, left: -30 }, viewport)).toEqual({ top: 52, left: 8 });
+  });
+});
+
+describe("handoffModelInput(나눠서 병렬이 이어받을 세션 모델)", () => {
+  const claudeCode: ModelPickerView = {
+    backend: "claude-code",
+    current: "sonnet",
+    options: [{ id: "", label: "기본" }, { id: "sonnet", label: "Sonnet 5" }],
+    effort: { supported: true, current: "medium", levels: [{ id: "medium", label: "보통", hint: "균형" }] },
+  };
+
+  it("고른 모델·노력 단계를 그대로 돌려준다(사용자가 대화에서 Sonnet·보통을 골랐을 때)", () => {
+    expect(handoffModelInput(claudeCode)).toEqual({ sessionModelId: "sonnet", sessionEffort: "medium" });
+  });
+
+  it("모델을 아직 안 골랐으면(current 없음) 빈 문자열을 넘긴다 — '기본'도 명시적인 값이다", () => {
+    expect(handoffModelInput({ ...claudeCode, current: undefined }).sessionModelId).toBe("");
+  });
+
+  it("이 백엔드가 노력 단계를 지원하지 않으면 sessionEffort를 넣지 않는다", () => {
+    const noEffort: ModelPickerView = { ...claudeCode, effort: { supported: false, levels: [] } };
+    expect(handoffModelInput(noEffort)).toEqual({ sessionModelId: "sonnet" });
+  });
+
+  it("아직 모델 선택을 못 받았으면(picker 없음) 아무것도 넘기지 않아 서버 기본을 쓴다", () => {
+    expect(handoffModelInput(undefined)).toEqual({});
   });
 });

@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { ProjectGuide } from './project-guide';
-import { buildSystemPrompt, projectGuideSection } from './prompts';
+import { AGENT_LANGUAGE_INSTRUCTION, buildSystemPrompt, projectGuideSection } from './prompts';
 
 const project = {
   spec: { name: 'orders' },
@@ -54,6 +54,21 @@ describe('buildSystemPrompt 자가 확인 범위', () => {
     expect(prompt).not.toContain('(build, tests, package scripts)');
     // 게이트 설명(재시작·준비·계약)은 두 범위가 같다
     expect(prompt).toContain('compares its API contract with the session start');
+  });
+});
+
+describe('buildSystemPrompt 응답 언어', () => {
+  it('사용자에게 보이는 설명·요약·질문은 한국어로 쓰라고 이르되, 코드·명령·식별자는 원문 그대로 두라고 못박는다', () => {
+    const prompt = buildSystemPrompt(project);
+
+    expect(prompt).toContain(AGENT_LANGUAGE_INSTRUCTION);
+    expect(AGENT_LANGUAGE_INSTRUCTION).toContain('한국어');
+    expect(AGENT_LANGUAGE_INSTRUCTION).toContain('코드');
+  });
+
+  it('도구 이름 매핑·자가 확인 범위와 무관하게 다섯 백엔드가 공유하는 이 함수에는 항상 들어간다', () => {
+    expect(buildSystemPrompt(project, { toolName: (name) => `mcp__b__${name}` })).toContain(AGENT_LANGUAGE_INSTRUCTION);
+    expect(buildSystemPrompt(project, { selfCheck: 'lean' })).toContain(AGENT_LANGUAGE_INSTRUCTION);
   });
 });
 

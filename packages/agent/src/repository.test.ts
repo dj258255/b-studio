@@ -5,11 +5,15 @@ import {
   canCreatePullRequest,
   compareUrl,
   createIssue,
+  createLabel,
   createPullRequest,
+  ensureLabels,
   fetchIssue,
   fetchIssueDetail,
   fetchPullRequestDetail,
+  listIssueComments,
   listIssues,
+  listLabels,
   listPullRequests,
   parseClosingReferences,
   parsePullRequestNumber,
@@ -18,6 +22,8 @@ import {
   postComment,
   PullRequestError,
   RepositoryRateLimitError,
+  updateComment,
+  updateIssue,
 } from './repository';
 
 describe('parseRemote', () => {
@@ -813,5 +819,52 @@ describe('fetchPullRequestDetail', () => {
     await expect(fetchPullRequestDetail(parseRemote('git@github.com:acme/orders.git', {}), 1, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
     await expect(fetchPullRequestDetail(parseRemote('/Users/dev/orders', {}), 1, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
     expect(none.calls).toHaveLength(0);
+  });
+});
+
+const github = parseRemote('git@github.com:acme/orders.git', {});
+
+describe('updateIssue', () => {
+  it('본문·라벨·상태를 PATCH로 고친다', async () => {
+    const { fn, calls } = fakeFetch([{ status: 200, body: {} }]);
+    await updateIssue(github, 42, { body: '새 본문', labels: ['b-studio:req'], state: 'closed' }, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+    expect(calls[0]).toMatchObject({
+      url: 'https://api.github.com/repos/acme/orders/issues/42',
+      method: 'PATCH',
+      body: { body: '새 본문', labels: ['b-studio:req'], state: 'closed' },
+    });
+  });
+
+  it('거절되면 PullRequestError를 던진다', async () => {
+    const { fn } = fakeFetch([{ status: 404, body: { message: 'Not Found' } }]);
+    await expect(updateIssue(github, 42, { body: 'x' }, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn })).rejects.toThrow(PullRequestError);
+  });
+});
+
+describe('listIssueComments · updateComment', () => {
+  it('댓글 목록을 읽고 하나를 고친다', async () => {
+    const list = fakeFetch([{ status: 200, body: [{ id: 1, body: '첫 댓글', html_url: 'https://github.com/acme/orders/issues/1#issuecomment-1' }] }]);
+    const comments = await listIssueComments(github, 1, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: list.fn });
+    expect(comments).toEqual([{ id: 1, body: '첫 댓글', url: 'https://github.com/acme/orders/issues/1#issuecomment-1' }]);
+    expect(list.calls[0]!.url).toBe('https://api.github.com/repos/acme/orders/issues/1/comments?per_page=100');
+
+    const update = fakeFetch([{ status: 200, body: {} }]);
+    await updateComment(github, 1, '갱신된 상태', { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: update.fn });
+    expect(update.calls[0]).toMatchObject({ url: 'https://api.github.com/repos/acme/orders/issues/comments/1', method: 'PATCH', body: { body: '갱신된 상태' } });
+  });
+});
+
+describe('listLabels · createLabel · ensureLabels', () => {
+  it('없는 라벨만 만든다', async () => {
+    const { fn, calls } = fakeFetch([{ status: 200, body: [{ name: 'bug' }, { name: 'b-studio:req' }] }, { status: 201, body: { name: 'kind:api' } }]);
+    await ensureLabels(github, ['b-studio:req', 'kind:api'], { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ url: 'https://api.github.com/repos/acme/orders/labels?per_page=100', method: 'GET' });
+    expect(calls[1]).toMatchObject({ url: 'https://api.github.com/repos/acme/orders/labels', method: 'POST', body: { name: 'kind:api' } });
+  });
+
+  it('이미 있는 라벨(422)은 조용히 넘어간다', async () => {
+    const { fn } = fakeFetch([{ status: 422, body: { message: 'already_exists' } }]);
+    await expect(createLabel(github, 'b-studio:req', { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn })).resolves.toBeUndefined();
   });
 });

@@ -105,6 +105,8 @@
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
 - [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
 - [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+- [ADR-091 CLI 백엔드 자동 모델 선택](#adr-091-cli-백엔드-자동-모델-선택)
+- [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
 - [ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다](#adr-093-구독-cli-계정-연결-터미널-없이-로그인-상태를-보고-시작한다)
 
 ---
@@ -3691,6 +3693,107 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 재추출 병합에서 명세에서 완전히 사라진 요구사항은 자동으로 지우지 않고 `removed`로 표시만 한다 — id를 다시 쓰지 않으려는 안전판이지만, 사용자가 화면에서 직접 "빼기"를 누르지 않으면 문서에 계속 남는다(정말 필요 없는 항목은 사람이 한 번 더 손대야 한다).
 - 약한 표현 목록·"사람이 할 일" 정규식은 고정된 한국어·영어 어휘 목록이다 — 목록에 없는 새로운 약한 표현이나 새로운 종류의 권한 변경 절차(이번에 다룬 것 밖의 것)는 걸러지지 않는다.
 - `verifySpecQuote`는 공백만 정규화한 부분 문자열 비교라, 모델이 스펙 문장을 의미는 같지만 토씨를 바꿔 인용하면(예: 어순만 바꾼 요약) "지어낸 인용"으로 오판해 `practice`로 강등할 수 있다 — 안전한 쪽으로 치우친 보수적 검증이다.
+
+---
+
+## ADR-091 CLI 백엔드 자동 모델 선택
+
+상태: 채택(1단계, 같은 세션 안에서만)
+관련: ADR-047, ADR-075, [E8](experiments/2026-09-30-e8-plan-execute-split.md), [E9](experiments/2026-10-01-e9-narrow-plan.md), [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)
+
+### 맥락
+- ADR-047의 멀티 모델 라우터는 `api` 백엔드(사용자가 입력한 제공자 API 키)에만 있다. 사용자는 API 예산이 없어 구독 CLI(`claude-code` 백엔드, 로컬 Claude Agent SDK 로그인)로만 돌리는데, 이 경로는 여전히 사람이 대화 입력창에서 opus·sonnet·haiku 중 하나를 매번 손으로 고정해야 한다(model-picker.ts).
+- ADR-047의 라우터는 그대로 옮길 수 없다: 그 라우터는 가격·컨텍스트·실측 통계를 가진 후보 여러 개의 점수를 매기지만, 구독 CLI에는 그런 후보 목록이 없다 — 로그인한 계정의 별칭(이름) 중 하나를 고를 뿐이고 실제 단가도 대화에서 추정한 값이지 API 청구서가 아니다.
+- E8(2026-09-30)과 E9(2026-10-01)은 세션 안에서 모델을 바꾸는 비용을 쟀다. 계획 모델(Opus)과 실행 모델(Haiku)을 매 요청 오가게 한 E8-split은 단일 모델(Sonnet, E8-sonnet) 대비 성공 1건당 비용이 538% 많았다(모델을 바꿀 때마다 프롬프트 캐시가 새로 만들어져 토큰이 약 4배로 늘었다). 계획 프롬프트를 좁힌 E9-split도 여전히 계획 호출 고정비 때문에 Sonnet 단독보다 27% 비쌌다. 두 실험 모두 결론은 같다 — **작은 과제에서는 Sonnet 단독이 가장 싸고 성공률도 같다.** Haiku 단독은 성공 1건당 비용은 Sonnet과 비슷했지만 성공률이 떨어졌다(9건 중 7건 — 로딩에서 멈춘 화면을 인수 확인에서 놓쳤다).
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| ADR-047의 점수 라우터를 claude-code에도 그대로 적용 | 구독 CLI에는 점수를 매길 후보(가격표·실측 컨텍스트)가 없다. 있는 건 이름 세 개뿐이다 |
+| 매 요청 복잡도로 다시 계산(세션 상태 없음) | E8/E9가 쟀듯 모델을 자주 바꾸면 프롬프트 캐시가 깨져 비용이 뛴다. 세션 중간에 sonnet→opus→sonnet으로 오가면 매번 캐시를 다시 만든다 |
+| **세 단계(haiku<sonnet<opus) 규칙표 + 세션 안 stickiness(한 번 성공한 단계는 내리지 않음) + 실패 시 한 단계 승격** | 규칙이 도메인 의미를 완전히 이해하지 못하고, 단가는 대화에서 관측한 값(E8)이지 청구서가 아니다 |
+
+### 결정
+- `packages/agent/src/cli-router.ts`의 `routeCliTier`가 순수 함수로 세 단계(`haiku < sonnet < opus`, `CLI_TIERS`) 중 하나를 고른다. fable은 단가를 몰라 자동 후보에 넣지 않는다(사용자가 대화에서 직접 고를 때만).
+  - 읽기만 하는 질문(intent === `ask`)은 항상 haiku. 질문 완료는 구현 품질의 증거가 아니라는 ADR-047과 같은 원칙으로, stickiness도 적용하지 않는다(세션이 opus로 성공했어도 다음 질문은 haiku로 내려간다 — 질문은 캐시 재사용보다 비용을 우선한다).
+  - 만들기 요청은 단순·보통이면 sonnet, ADR-047의 `classifyComplexity`(길이·줄바꿈·설계 키워드)가 complex거나 `classifyRisk`(인증·결제·정산·마이그레이션·삭제·운영 배포 등)가 high면 opus. E9에서 Haiku 단독의 성공률이 떨어졌으므로 만들기 요청에는 haiku를 후보로 두지 않는다.
+  - **stickiness**: 세션 안에서 이미 성공적으로 쓴 가장 높은 단계(`session.claudeCode.autoTier`)가 이번에 계산한 단계보다 높으면 내리지 않는다 — 읽기 전용 질문이 아닌 한 모델을 바꿔 캐시를 다시 만들지 않는다. 위험도가 올라가 더 높은 단계가 필요하면 그대로 올라간다(하강만 막는다, 상승은 막지 않는다).
+- 복잡도·위험도 분류는 새로 만들지 않고 ADR-047의 `classifyComplexity`(그대로 재사용)·새로 뺀 `classifyRisk`(HIGH_RISK 정규식을 함수로 분리, `model-router.ts`)를 그대로 쓴다 — "복잡하다/위험하다"의 뜻을 두 라우터가 따로 정의하지 않는다.
+- `model-picker.ts`의 claude-code 옵션 목록에 `auto`("자동", 힌트 "요청마다 알맞은 모델을 고르고, 검증에 실패하면 한 단계 올립니다")를 더한다. 기존 별칭 배열(`CLAUDE_CODE_ALIASES`)과 별도 헬퍼 함수(`claudeCodeAutoOption`)로 둬, 같은 시기에 진행 중인 SDK `supportedModels` 기반 재작성(`feature/model-list-from-sdk`)과의 병합을 한 줄 추가로 끝나게 했다.
+- 세션에서 `auto`를 고르거나(`session.snapshot.modelId`) 서버 기본값이 `auto`면(`B_STUDIO_CLAUDE_CODE_MODEL=auto`, 벤치가 이 경로로 시작 모델을 넘긴다) `sessions.ts`의 `planRun`이 `routeCliTier`를 불러 실제 모델 이름(haiku·sonnet·opus)으로 바꿔 러너에 넘긴다 — Claude Code CLI에는 `auto`라는 모델이 없으므로 이 치환이 반드시 실행 전에 끝나야 한다.
+- **승격은 기존 메커니즘을 그대로 쓴다**(`escalation.ts`의 게이트 실패 서명 규칙). 승격 대상만 다르다 — 계획 모델이나 환경 변수가 아니라 고른 단계의 바로 위 단계(`nextCliTier`)로 한 단계만 올린다. 이미 opus(최고 단계)면 승격하지 않는다.
+- 대화 이벤트는 api 라우터(ADR-047)와 같은 `route` 이벤트를 재사용한다(`auto: true` 필드만 다르다). 화면은 api의 점수표 `<details>` 대신 한 줄 안내("자동 선택: Sonnet 5 — 이유")를 보여준다 — CLI 자동 선택에는 비교할 점수·실측 비용이 없어 점수표가 의미가 없기 때문이다.
+- 요청이 끝나면(`nextAutoTier`) 검증 게이트를 통과한(`done`) 만들기 요청만 stickiness를 갱신한다. 승격이 일어났으면 승격된 단계를 기억한다(다음 요청도 그 단계부터 시작해 다시 낮췄다 올리는 캐시 재생성을 피한다). 질문이거나 실패한 시도는 기억하지 않는다.
+- 토큰·비용 관측은 새로 만들지 않는다. `claude-code-runner.ts`는 이미 SDK가 돌려준 실제 모델 이름(`message.model`, 별칭이 아니라 `claude-sonnet-5` 같은 실제 id)으로 `session` 이벤트와 `usageByModel`을 기록한다 — 자동 선택이 고른 별칭을 그대로 `model` 옵션에 넘기기만 하면 기존 토큰 탭·단가표가 그대로 맞물린다.
+
+### 검증 결과
+- `packages/agent/src/cli-router.test.ts`(9개): 질문→haiku, 단순 만들기→sonnet, 복잡·위험 만들기→opus, 만들기 요청에 haiku 미사용, stickiness(하강 안 함·질문엔 미적용·상승은 허용), `nextCliTier`·`higherCliTier` 경계값.
+- `apps/studio/lib/server/sessions.test.ts`: `claudeCodeAutoEscalation`(haiku→sonnet, sonnet→opus, opus는 승격 없음), `nextAutoTier`(done만 기억, 승격 시 올라간 단계 기억, 더 높은 값은 내리지 않음, ask·실패는 무시).
+- `apps/studio/lib/server/model-picker.test.ts`: claude-code 옵션 목록에 `자동`이 포함되고(힌트 문구까지), `isSelectableModel('claude-code', 'auto')`가 통과한다.
+- `apps/studio/bench/coordination/backends.test.ts`: `resolveBackend`가 `--model auto`를 그대로 받는다(E10 벤치 배선).
+- `pnpm typecheck`(모든 워크스페이스 Done), 위 네 테스트 파일과 회귀로 돌린 `model-router.test.ts`·`escalation.test.ts` 전체 통과.
+- 실제 Claude Code CLI 호출로 자동 선택이 도는 것은 확인하지 못했다(사용자가 API 예산이 없어 구독 CLI 실 실행은 비용/사용량을 쓴다 — [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)에 실행 방법만 적어 두고 아직 실행하지 않았다). `pnpm bench:coordination --dry`로 인자 해석·하네스 배선만 확인했다.
+
+### 감수한 트레이드오프
+- 복잡도·위험도 분류가 ADR-047과 같은 한계를 물려받는다(키워드·길이 기반, 도메인 의미를 완전히 이해하지 못함).
+- stickiness는 세션(=하나의 Claude Code 대화) 단위로만 본다. 서버가 재시작되면 `session.claudeCode.autoTier`는 세션 파일에 저장된 값을 그대로 복원하지만, 세션 자체가 끝나면(새 세션) 다시 처음(요청마다 새로 계산)부터 시작한다 — 사용자 전체의 습관을 배우지 않는다.
+- 단가 비교(E8/E9가 쓴 "API 환산 비용")는 대화 관측값이지 실제 구독 청구서가 아니다. 자동 선택이 실제로 돈을 아끼는지는 이 ADR이 아니라 E10(계획만, 아직 실행하지 않음)이 잴 것이다.
+- Phase 2(다른 CLI 백엔드 사이의 자동 전환 — 예: Claude Code 구독 한도에 걸리면 Codex나 Command Code로 넘어가기)는 이번 범위 밖이다. 지금 자동 선택은 한 세션의 한 백엔드 안에서만 단계를 고른다.
+- S2(`--contracts model`)의 계약 호출과 `--lane-backend`(레인별 백엔드·모델)에는 아직 `auto`를 연결하지 않았다 — 두 경로 모두 `claudeCodeAsk`를 직접 부르고 세션의 `planRun`을 거치지 않기 때문이다. 단일 세션 요청(S0/S1)에서만 동작한다.
+
+---
+
+## ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다
+
+상태: 채택
+관련: -
+
+### 맥락
+- ADR-079가 `docs/requirements.md`(요구사항 + 증거 기반 상태)를 만들었지만, 그 상태는 세션 화면 안에서만 보인다. 여러 사람이 같이 보는 곳(팀 채널에 붙이는 이슈 링크, 이슈 트래커의 검색·필터·마일스톤)에서는 요구사항이 전혀 보이지 않는다. ADR-072(이슈로 바로 작업)·ADR-081(이슈·PR 상세)이 이미 저장소 이슈를 읽는 경로를 만들어 뒀으니, 이번에는 반대 방향(파일 → 이슈)을 잇는다.
+- task-plans.ts의 `publishPlanIssues`(작업 계획을 추적 이슈 + 하위 이슈로 올리는 기존 기능)가 좋은 선례다: 하위 이슈를 먼저 만들고, GitHub이면 `sub_issues` API로 연결하고, 그 밖의 호스트는 추적 이슈 본문에 체크리스트로 대신한다. 이번 기능은 "작업 계획" 대신 "요구사항"을 그 패턴에 태운다.
+- 관건은 **한 방향**을 지키는 것이다: `docs/requirements.md`가 언제나 원본이고, 이슈는 그 내용을 보여 주는 거울이어야 한다. 그런데 GitHub 이슈는 누구나 웹에서 바로 고칠 수 있어, "파일에서 편 값"과 "이슈에 지금 적힌 값"이 어긋날 수 있다 — 조용히 한쪽으로 덮어쓰면 사람이 이슈에서 고친 내용을 잃는다. 그래서 발행은 dry-run 계획을 먼저 세우고, 어긋남(충돌)을 감지하면 사람에게 가져오기·덮어쓰기·무시를 고르게 한다.
+- 다른 에이전트가 같은 시점에 `requirements.ts`의 `Requirement`에 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace` 필드를 추가하는 중이었다(ADR 조율 중, 아직 main 미병합). 이 기능은 그 필드들이 있으면 쓰고 없어도 동작해야 했다.
+- GitHub 하위 이슈 API(Sub-issues REST API, 2024년 일반 공개)는 GitHub에만 있다. Gitea·GitLab은 그런 API가 없어 ADR-072와 같은 경계로 GitHub·Gitea만 지원하고(GitLab은 대상 밖), 하위 이슈 연결은 GitHub에서만 한다.
+
+### 결정
+1. **순수 계산은 `packages/agent/src/requirement-issues.ts`에 모은다**(파일 IO·네트워크 없음): 관리형 영역(`<!-- b-studio:req id=R4 rev=2 hash=… --> … <!-- /b-studio:req -->`, EARS·시나리오·NFR·인수 조건을 담는다) 빌드·파싱, 라벨 집합(`b-studio:req`·`kind:*`·`priority:*`·`status:*`), 추적 이슈·하위 이슈 본문, 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists), 고정 상태 댓글, PR 본문 조립(`Closes #n`·`Implements: Rn@revN`), 이슈 폼 파싱, API 경로 화이트리스트. `Requirement`의 선택 필드(`rev`·`ears`·`scenarios`·`nfr`·`trace`)는 전부 optional인 별도 구조 타입(`RequirementForIssues`)으로 방어적으로 읽는다 — 다른 에이전트의 작업이 병합되기 전에도, 병합된 뒤에도 그대로 호환된다.
+2. **충돌 판정은 "우리가 마지막으로 쓴 해시"를 기준으로 삼는다.** 이슈 본문을 사람이 GitHub에서 직접 고쳐도 관리형 영역 헤더의 `hash=` 속성은 안 건드릴 수 있으므로, 그 속성을 믿지 않고 본문 내용을 다시 해시해 우리가 저장해 둔 `published.hash`와 비교한다. 다르면(원격이 바뀌었다) conflict, 로컬 해시가 그것과 다르면(내용이 바뀌었다) update(열려 있으면)/reverify(닫혀 있으면 다시 열고 재확인 필요로 표시), 같으면 unchanged(닫혀 있는데 검증 안 됨이면 closed_but_requirement_exists로 따로 알린다).
+3. **발행 기록은 `docs/requirements.issues.json`(사이드카 파일)에 둔다**(`docs/requirements.md` 자체는 건드리지 않는다). 요구사항 id마다 `{issue, rev, publishedHash, publishedAt}`을 담고, 추적 이슈 번호도 함께 둔다. `docs/requirements.md`의 저장 형식은 다른 에이전트가 동시에 고치고 있어 직접 필드를 더하면 병합 충돌·형식 드리프트 위험이 컸다 — 완전히 분리된 파일로 옆에 두면 그 위험이 없어지고, 재시작해도(세션 파일이라 커밋된다) 발행 상태를 잃지 않는다.
+4. **발행 orchestrator는 `apps/studio/lib/server/requirement-issues.ts`에 둔다**: `packages/agent`의 이슈 API(`createIssue`·`addSubIssue`·`updateIssue`·`listIssueComments`·`updateComment`·`ensureLabels`)를 부르고, `docs/requirements.issues.json`을 읽고 쓴다. **`sessions.ts`를 import하지 않는다**(원격·토큰·요구사항·상태 같은 순수 데이터만 받는다) — `sessions.ts`가 이 모듈을 부르는 한쪽 방향 의존만 있어 task-plans.ts와 sessions.ts 사이의 기존 관계와 같은 모양이다.
+5. **must·should만 하위 이슈, could·docs는 추적 이슈 체크리스트.** 추적 이슈 제목은 "요구사항: <프로젝트>", 표에 id·제목·종류·우선순위·상태·하위 이슈 링크를 담는다.
+6. **상태 반영은 요구사항마다 고정 댓글 하나만 계속 편집한다**(새 댓글을 쌓지 않는다). 표(시나리오·테스트·결과·커밋·게이트)를 담고, `status:*` 라벨도 같이 바꾼다. **검증됨 + 이 세션의 PR이 실제로 병합됐을 때만**(`PullDetail.merged`, GitHub·Gitea PR 상세에 새로 더한 필드) 하위 이슈를 닫는다 — `state: closed`만으로는 병합 없이 닫힌 PR과 구분이 안 되므로, `merged` 필드를 새로 읽어야 했다.
+7. **PR 본문·AI 리뷰에 요구사항을 잇는다.** 세션 커밋 제목의 "[R4]" 언급을 모아(`extractRequirementMentions`) `Closes #n`(검증됨 + 발행된 이슈만)·`Implements: Rn`(또는 `Rn@revN`)을 PR 본문 끝에 붙이고(`buildRequirementsAddendum`, `Closes #n`은 기본 브랜치로 여는 PR에서만 동작한다는 안내를 함께 남긴다), AI 리뷰 라운드의 사용자 프롬프트에도 구현한 요구사항의 제목·시나리오 압축 목록을 붙인다(`buildReviewRequirementsContext`). 올리기(export) 미리보기·생성 API가 사람이 이슈 번호를 입력하지 않았을 때 이 세션이 구현한(발행된) 요구사항의 이슈 번호를 통합 계획 이슈와 합쳐 기본값으로 쓴다 — 기존 텍스트 입력 칸에 자동으로 채워지는 방식이라 새 체크박스 UI 없이도 "기본 선택"이 된다. "이 요구사항 작업"·"전체 계획 세우기" 프리필도 발행된 이슈 번호를 `[R7] 제목 (#12)`로 덧붙인다.
+8. **UI**: "명세" 탭에 "이슈로 발행" 버튼 → dry-run 미리보기(행동별 개수 + 목록, 충돌마다 가져오기·덮어쓰기·무시 버튼) → 확인 후 발행. "다음 단계" 박스는 원격이 GitHub이면 "이슈로 발행"을 "전체 계획 세우기"보다 앞세우고, 아직 발행하지 않은 채 "전체 계획 세우기"를 누르면 한 번만("아직 이슈로 발행하지 않았습니다 — 먼저 발행할까요?") 물어보고 답하면 그 세션 동안 다시 묻지 않는다. 요구사항 카드에 발행된 이슈 번호 칩을 달고, 저장소 탭 이슈 목록은 `b-studio:req` 라벨 + `[Rn]` 제목이면 R-id 칩을 보여준다.
+9. **안전장치**: 이 기능이 부르는 API 경로는 이슈·하위 이슈·댓글·라벨만 화이트리스트로 못 박는다(`ALLOWED_REQUIREMENT_ENDPOINTS`, `assertAllowedRequirementEndpoint`). 협업자·권한·저장소 설정·웹훅·브랜치 보호 엔드포인트는 이 목록에 없고, repository.ts의 새 함수(`updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`)는 모두 실제 호출 전에 이 확인을 거친다. 라벨 생성만 예외로 허용한다(디자인에서 명시한 유일한 "설정 비슷한" 쓰기) — 그 밖의 저장소 설정은 절대 건드리지 않는다. 개인 PC 모드는 저장소 화면과 같은 `gh auth token` 폴백을 쓴다(`createIssue`·`addSubIssue`에 `token` 오버라이드를 새로 더했다 — 예전에는 환경 변수만 읽었다).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 발행 기록(이슈 번호·해시)을 `docs/requirements.md`의 JSON 블록에 같이 넣는다 | 그 파일 형식을 다른 에이전트가 동시에 고치고 있어 병합 충돌·형식 드리프트 위험이 크다. 완전히 분리된 사이드카 파일(`docs/requirements.issues.json`)로 뒀다(채택) |
+| B. 충돌 판정을 관리형 영역 헤더의 `hash=` 속성만 보고 한다 | 사람이 GitHub에서 눈에 보이는 본문만 고치고 헤더 속성은 그대로 두면 충돌을 놓친다. 헤더를 신뢰하지 않고 본문 내용을 다시 해시해 우리가 저장한 값과 비교한다(채택) |
+| C. orchestrator가 `sessions.ts`의 세션 객체를 직접 받는다(편하게 `session.project.root` 등을 바로 쓴다) | `sessions.ts` → orchestrator → (다시) `sessions.ts` 순환이 생기거나, 세션 타입에 orchestrator가 얽매인다. 원격·토큰·프로젝트 루트 같은 순수 데이터만 받게 해 `sessions.ts`가 한쪽으로만 의존하게 했다(채택, task-plans.ts와 같은 방향) |
+| D. "검증됨"이면(PR 병합 여부와 무관하게) 하위 이슈를 바로 닫는다 | 검증됨은 세션 안의 증거일 뿐, 그 변경이 실제로 main에 들어갔다는 보장이 아니다(PR이 아직 열려 있거나 병합 없이 닫혔을 수 있다). `PullDetail.merged`를 새로 읽어 "검증됨 + 실제 병합" 둘 다 확인했을 때만 닫는다(채택) |
+| E. 이슈 번호 선택을 위해 저장소 탭처럼 체크박스 목록 UI를 새로 만든다 | 올리기 화면은 이미 쉼표 구분 텍스트 입력 한 칸으로 이슈 번호를 받고, 서버가 기본값을 미리 채워 준다(첫 미리보기 호출에서). 그 기존 통로에 발행된 요구사항 이슈 번호를 기본값으로 더 섞어 주는 쪽이 새 UI보다 작고 일관됐다(채택) |
+
+### 검증 결과
+- `packages/agent/src/requirement-issues.test.ts`(신규, 30건): 관리형 영역 왕복, 라벨 집합, 추적 이슈 본문(표 + 체크리스트), 발행 계획(create/update/unchanged/conflict/reverify/closed_but_requirement_exists, 멱등성), 고정 상태 댓글, PR 본문 조립(Closes/Implements), 이슈 가져오기(관리형 영역·이슈 폼·평문 세 경로), API 경로 화이트리스트(허용·거부 양쪽).
+- `packages/agent/src/repository.test.ts`(보강): `updateIssue`·`listIssueComments`·`updateComment`·`listLabels`·`createLabel`·`ensureLabels` 신규 함수를 페이크 fetch로 확인했다.
+- `apps/studio/lib/server/requirement-issues.test.ts`(신규, 12건): 임시 폴더 + 페이크 `@b-studio/agent` 함수로 발행 계획·발행 실행(하위 이슈 연결 실패해도 계속 진행)·충돌 세 갈래(가져오기·덮어쓰기·무시)·상태 동기화(고정 댓글 편집, PR 병합 시에만 닫기)를 확인했다.
+- `apps/studio/lib/server/sessions.test.ts`(보강): 프리필에 발행된 이슈 번호를 붙이는 `annotateWithIssue`·`annotateAllMustHavesPrefill`.
+- `apps/studio/app/api/sessions/[id]/requirements/{publish,publish/preview,publish/conflict,publish/sync,import-issue}/route.test.ts`(신규), `apps/studio/app/api/sessions/[id]/export/{,preview/}route.test.ts`(신규): 라우트 위임과, 입력이 없을 때 통합 계획 이슈 + 발행된 요구사항 이슈를 합쳐 기본값으로 쓰는 것을 확인했다.
+- `packages/agent/src/pr-review.test.ts`·`apps/studio/lib/server/review-round.test.ts`(보강): `requirementsContext`가 리뷰어 프롬프트에 그대로 실리는 것을 확인했다.
+- `apps/studio/components/requirements-panel.test.tsx`·`repository-panel.test.tsx`(보강): "다음 단계" 순서(GitHub이면 이슈로 발행이 먼저), 확인 게이트 순수 로직(`shouldConfirmBeforePlanAll`), R-id 칩 렌더링을 확인했다(이 저장소의 컴포넌트 테스트 관례대로 `renderToStaticMarkup`만 쓴다 — 상호작용 테스트 도구가 없어 클릭 흐름 자체는 그 안에 든 순수 로직으로 나눠 검증했다).
+- `pnpm -r typecheck`(6개 패키지) 통과, `pnpm --filter @b-studio/studio lint` 0 errors(기존 경고 7개는 이 변경과 무관), 전체 `vitest run`은 이 변경분 기준으로 새로 실패한 테스트가 없다(기존에도 알려진 부하 플레이키 — Docker 스크립트·체크포인트 git clone·아티팩트 정리 테스트가 전체 스위트를 한 번에 돌릴 때만 가끔 5초 타임아웃에 걸린다 — 단독 실행하면 통과한다).
+- 실제 GitHub·Gitea API 호출은 하지 않았다(이번 라운드 조건: 네트워크 금지). 모든 네트워크 경로는 페이크 `fetch`/모킹한 `@b-studio/agent` 함수로만 검증했다.
+
+### 감수한 트레이드오프
+- **발행 기록이 두 파일(`docs/requirements.md` + `docs/requirements.issues.json`)로 나뉜다.** 사람이 `docs/requirements.md`만 보고 "이 요구사항이 몇 번 이슈인지" 바로 알 수 없다(화면의 이슈 칩으로 봐야 한다). `docs/requirements.md`의 소유권 충돌을 피하려 감수했다 — 그 파일의 필드가 안정된 뒤 통합할 수 있는 여지는 남겨 뒀다(사이드카 파일의 필드 이름을 그대로 옮기면 된다).
+- **GitLab은 지원하지 않는다**(GitHub·Gitea만). GitLab은 하위 이슈 개념이 다르고(epic·related issue), 라벨·이슈 API 모양도 달라 이번 범위에 넣지 않았다.
+- **이슈 목록 조회(`listIssues`)가 첫 페이지(최대 50개)만 본다** — ADR-079의 트레이드오프와 같다. 요구사항이 50개를 훌쩍 넘고 옛 이슈가 뒤로 밀리면 `trace.issue`(사이드카 파일) 없이는 id 마커로 못 찾을 수 있다.
+- **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
+- **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
+- **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
 
 ---
 

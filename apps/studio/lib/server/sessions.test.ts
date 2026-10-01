@@ -3,12 +3,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
 import {
   allowedBackends,
+  annotateAllMustHavesPrefill,
+  annotateWithIssue,
   apiEscalation,
   assertBackendReady,
   assertResumableBackend,
   buildExportChecks,
+  claudeCodeAutoEscalation,
   claudeCodeEscalation,
   cliModelOverride,
+  nextAutoTier,
   parseIssueInput,
   parseIssueList,
   planBriefBackend,
@@ -48,6 +52,35 @@ describe('parseIssueList', () => {
     for (const bad of [{ issues: [0] }, { issues: [1.5] }, { issues: ['57'] }, { issue: 0 }]) {
       expect(() => parseIssueList(bad)).toThrow(StudioError);
     }
+  });
+});
+
+describe('annotateWithIssue · annotateAllMustHavesPrefill(ADR-092)', () => {
+  const requirement = { id: 'R7', title: '로그인 API' };
+
+  it('발행된 이슈 번호가 있으면 "[R7] 제목" 뒤에 "(#12)"를 붙인다', () => {
+    const prefill = '[R7] 로그인 API\n\n인수 조건:\n- a';
+    expect(annotateWithIssue(prefill, requirement, 12)).toBe('[R7] 로그인 API (#12)\n\n인수 조건:\n- a');
+  });
+
+  it('이슈 번호가 없으면 그대로 둔다', () => {
+    const prefill = '[R7] 로그인 API\n\n인수 조건:\n- a';
+    expect(annotateWithIssue(prefill, requirement, undefined)).toBe(prefill);
+  });
+
+  it('allMustHavesPrefill의 목록 줄마다 발행된 요구사항만 이슈 번호를 붙인다', () => {
+    const base = '다음 필수(must) 요구사항을 모두 구현해 주세요.\n\n- [R7] 로그인 API\n- [R8] 목록 API';
+    const annotated = annotateAllMustHavesPrefill(
+      base,
+      [
+        { id: 'R7', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['a'] },
+        { id: 'R8', title: '목록 API', kind: 'api', priority: 'must', acceptance: ['a'] },
+      ],
+      { R7: 12 },
+    );
+    expect(annotated).toContain('- [R7] 로그인 API (#12)');
+    expect(annotated).toContain('- [R8] 목록 API');
+    expect(annotated).not.toContain('R8] 목록 API (#');
   });
 });
 
@@ -274,6 +307,38 @@ describe('모델 승격의 기본 대상(ADR-075: 계획 모델로 올린다)', 
     const env = { B_STUDIO_ESCALATE_MODEL_ID: 'anthropic-default' };
     expect(apiEscalation('other-plan-id', env, 'anthropic-default')).toBeUndefined();
     expect(apiEscalation('other-plan-id', env, 'other-model')?.to).toBe('Claude 기본 모델');
+  });
+});
+
+describe('claude-code 자동 모델 선택(ADR-091)', () => {
+  it('승격은 고른 단계의 바로 위 단계다(haiku→sonnet, sonnet→opus)', () => {
+    expect(claudeCodeAutoEscalation('haiku')?.to).toBe('sonnet');
+    expect(claudeCodeAutoEscalation('sonnet')?.to).toBe('opus');
+  });
+
+  it('이미 opus(최고 단계)면 더 올릴 곳이 없어 승격하지 않는다', () => {
+    expect(claudeCodeAutoEscalation('opus')).toBeUndefined();
+  });
+
+  it('stickiness: 검증을 통과한(done) 만들기 요청만 기억하고, 승격 없이 끝났으면 고른 단계를 그대로 기억한다', () => {
+    const route = { tier: 'sonnet', reason: 'x', complexity: 'simple', risk: 'normal', stuckTo: false } as const;
+    expect(nextAutoTier(undefined, route, { intent: 'build', status: 'done', escalated: false })).toBe('sonnet');
+  });
+
+  it('stickiness: 승격이 일어났으면(게이트 반복 실패) 올라간 단계를 기억한다', () => {
+    const route = { tier: 'sonnet', reason: 'x', complexity: 'simple', risk: 'normal', stuckTo: false } as const;
+    expect(nextAutoTier(undefined, route, { intent: 'build', status: 'done', escalated: true })).toBe('opus');
+  });
+
+  it('stickiness: 이미 더 높은 단계를 기억하고 있으면 내리지 않는다', () => {
+    const route = { tier: 'sonnet', reason: 'x', complexity: 'simple', risk: 'normal', stuckTo: false } as const;
+    expect(nextAutoTier('opus', route, { intent: 'build', status: 'done', escalated: false })).toBe('opus');
+  });
+
+  it('stickiness: 질문(ask)이나 실패한 시도는 기억하지 않는다(구현 품질의 증거가 아니다)', () => {
+    const route = { tier: 'opus', reason: 'x', complexity: 'complex', risk: 'high', stuckTo: false } as const;
+    expect(nextAutoTier('haiku', route, { intent: 'ask', status: 'done', escalated: false })).toBe('haiku');
+    expect(nextAutoTier('haiku', route, { intent: 'build', status: 'failed', escalated: false })).toBe('haiku');
   });
 });
 
