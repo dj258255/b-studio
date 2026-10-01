@@ -65,6 +65,13 @@ describe('compareUrl · canCreatePullRequest', () => {
     expect(canCreatePullRequest(github, { B_STUDIO_GITLAB_TOKEN: 't' })).toBe(false);
     expect(canCreatePullRequest(github, { B_STUDIO_GITHUB_TOKEN: 't' })).toBe(true);
   });
+
+  it('토큰을 따로 주면(개인 PC 모드의 gh CLI 대체 등) 환경 변수가 없어도 PR을 만들 수 있다(57번 버그)', () => {
+    const github = parseRemote('git@github.com:acme/orders.git', {});
+    expect(canCreatePullRequest(github, {}, 'gh-cli-token')).toBe(true);
+    // 환경 변수가 있어도 따로 준 토큰이 있으면 그것으로 판단한다
+    expect(canCreatePullRequest(github, {}, undefined)).toBe(false);
+  });
 });
 
 function fakeFetch(responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }>) {
@@ -147,6 +154,14 @@ describe('createPullRequest', () => {
     await expect(createPullRequest(parseRemote('git@github.com:acme/orders.git', {}), input, { env: {}, fetch: fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
     await expect(createPullRequest(parseRemote('/Users/dev/orders', {}), input, { env: {}, fetch: fn })).rejects.toThrow(PullRequestError);
     expect(calls).toHaveLength(0);
+  });
+
+  it('환경 변수가 없어도 따로 준 토큰(개인 PC 모드의 gh CLI 대체 등)으로 PR을 만든다(57번 버그)', async () => {
+    const { fn, calls } = fakeFetch([{ status: 201, body: { html_url: 'https://github.com/acme/orders/pull/12', number: 12 } }]);
+    const result = await createPullRequest(parseRemote('git@github.com:acme/orders.git', {}), input, { env: {}, fetch: fn, token: 'gh-cli-token' });
+
+    expect(result).toMatchObject({ number: 12, created: true });
+    expect(calls[0]).toMatchObject({ headers: { authorization: 'Bearer gh-cli-token' } });
   });
 });
 

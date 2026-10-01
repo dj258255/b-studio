@@ -8,6 +8,7 @@ import {
   apiEscalation,
   assertBackendReady,
   assertResumableBackend,
+  buildChecklistAddendum,
   buildChecklistTestEvidence,
   buildExportChecks,
   buildRequirementTestRunEvidence,
@@ -160,6 +161,27 @@ describe('buildExportChecks', () => {
 
     expect(checks.find((check) => check.id === 'issue_linked')).toMatchObject({ ok: false });
     expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: 'unknown' });
+  });
+});
+
+describe('buildChecklistAddendum(PR 본문에 올리기 전 점검 요약을 덧붙인다, 56번 버그)', () => {
+  it('통과 수와 항목별 한 줄 이유를 적는다', () => {
+    const addendum = buildChecklistAddendum({
+      score: { passed: 8, total: 9 },
+      items: [
+        { id: 'tests', title: '테스트', status: 'pass', reason: '모두 통과했습니다' },
+        { id: 'worktree', title: '작업 트리·원격', status: 'fail', reason: '아직 원격 브랜치에 올리지 않았습니다' },
+      ],
+    });
+
+    expect(addendum).toContain('## 올리기 전 점검 8/9 통과');
+    expect(addendum).toContain('- ✓ 테스트: 모두 통과했습니다');
+    expect(addendum).toContain('- ✗ 작업 트리·원격: 아직 원격 브랜치에 올리지 않았습니다');
+  });
+
+  it('항목이 없어도(score 0/0) 머리글만 남긴다', () => {
+    const addendum = buildChecklistAddendum({ score: { passed: 0, total: 0 }, items: [] });
+    expect(addendum).toContain('## 올리기 전 점검 0/0 통과');
   });
 });
 

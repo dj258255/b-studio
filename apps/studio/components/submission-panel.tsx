@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
+import { RepositoryUploadActions } from "./repository-upload-actions";
 
 type ChecklistStatus = "pass" | "warn" | "fail" | "skip";
 
@@ -35,10 +36,11 @@ const STATUS_TEXT: Record<ChecklistStatus, string> = { pass: "text-pass", warn: 
  * (RepositoryPanel과 같은 방식. effect 안에서 "불러오는 중"으로 되돌리는 setState를 하지 않아도 된다)
  */
 export function SubmissionPanel({ view }: { view: SessionView }) {
-  return <SubmissionList key={`${view.snapshot.id}:${view.completedRuns}`} sessionId={view.snapshot.id} />;
+  return <SubmissionList key={`${view.snapshot.id}:${view.completedRuns}`} view={view} />;
 }
 
-function SubmissionList({ sessionId }: { sessionId: string }) {
+function SubmissionList({ view }: { view: SessionView }) {
+  const sessionId = view.snapshot.id;
   const [loaded, setLoaded] = useState<{ report?: SubmissionReportData; error?: string }>();
   const draft = useChatDraft();
 
@@ -114,6 +116,12 @@ function SubmissionList({ sessionId }: { sessionId: string }) {
           </li>
         ))}
       </ul>
+      {view.snapshot.repository && (
+        <div className="mt-4 border-t border-line pt-3">
+          <p className="mb-2 text-xs text-muted">점검표를 확인했으면 바로 올릴 수 있습니다. PR 본문에 이 점검표 요약이 함께 실립니다.</p>
+          <RepositoryUploadActions view={view} />
+        </div>
+      )}
     </div>
   );
 }
