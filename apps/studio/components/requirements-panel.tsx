@@ -992,7 +992,16 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
 }
 
 /** "재추출 병합" 미리보기(ADR-090): 이미 저장된 문서가 있을 때만 있다. 개수만 요약해 보여 준다(자세한 내용은 아래 편집 목록에서 본다) */
-export function DiffSummary({ diff, onDropRemoved }: { diff: RequirementDiffEntry[]; onDropRemoved?: (ids: string[]) => void }) {
+export function DiffSummary({
+  diff,
+  onDropRemoved,
+  onMatch,
+}: {
+  diff: RequirementDiffEntry[];
+  onDropRemoved?: (ids: string[]) => void;
+  /** 자동 병합이 놓친 짝을 사람이 잇는다: 새로 생긴 항목(addedId)이 사라진 기존 항목(removedId)과 같은 요구사항이다 */
+  onMatch?: (addedId: string, removedId: string) => void;
+}) {
   const counts = (["added", "changed", "unchanged", "removed"] as const).map((status) => ({
     status,
     count: diff.filter((entry) => entry.status === status).length,
@@ -1019,8 +1028,76 @@ export function DiffSummary({ diff, onDropRemoved }: { diff: RequirementDiffEntr
           사라진 {removedIds.length}개도 목록에서 빼기
         </button>
       )}
+      {onMatch && removedIds.length > 0 && diff.some((entry) => entry.status === "added") && (
+        <div className="mt-1 flex w-full flex-col gap-1.5 border-t border-line pt-2">
+          <p className="text-xs text-muted">
+            제목이 달라 자동으로 잇지 못한 짝이 있으면 골라 주세요. 고른 기존 id를 이어받아 이미 발행한 이슈와 연결이 유지됩니다.
+          </p>
+          {diff
+            .filter((entry) => entry.status === "added")
+            .map((entry) => (
+              <label key={entry.id} className="flex flex-wrap items-center gap-2 text-xs text-ink">
+                <span className="font-mono text-muted">{entry.id}</span>
+                <span className="min-w-0 flex-1 truncate">{entry.requirement.title}</span>
+                <select
+                  aria-label={`${entry.id}와 같은 기존 요구사항`}
+                  defaultValue=""
+                  onChange={(event) => event.target.value && onMatch(entry.id, event.target.value)}
+                  className="rounded-control border border-line bg-panel px-1.5 py-0.5"
+                >
+                  <option value="">새 요구사항</option>
+                  {diff
+                    .filter((removed) => removed.status === "removed")
+                    .map((removed) => (
+                      <option key={removed.id} value={removed.id}>
+                        기존 {removed.id}와 같음 — {(removed.previous ?? removed.requirement).title}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            ))}
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * 사람이 고른 짝을 반영한다: 새 항목의 id(와 시나리오 id 앞부분)를 기존 id로 바꾸고, 목록에 남아 있던 기존 항목은 뺀다.
+ * 차이 목록에서는 사라짐 항목을 지우고 새 항목을 "변경(개정 상승)"으로 바꾼다. 순수 함수라 테스트에서 바로 쓴다
+ */
+export function applyManualMatch(
+  drafts: RequirementDraft[],
+  diff: RequirementDiffEntry[],
+  addedId: string,
+  removedId: string,
+): { drafts: RequirementDraft[]; diff: RequirementDiffEntry[] } {
+  const previous = diff.find((entry) => entry.id === removedId && entry.status === "removed");
+  const renamed = drafts
+    .filter((item) => item.id !== removedId)
+    .map((item) =>
+      item.id === addedId
+        ? {
+            ...item,
+            id: removedId,
+            ...(item.scenarios ? { scenarios: item.scenarios.map((scenario) => ({ ...scenario, id: scenario.id.replace(new RegExp(`^${addedId}\\.`), `${removedId}.`) })) } : {}),
+          }
+        : item,
+    );
+  const nextDiff = diff
+    .filter((entry) => !(entry.id === removedId && entry.status === "removed"))
+    .map((entry) =>
+      entry.id === addedId && entry.status === "added"
+        ? {
+            ...entry,
+            status: "changed" as const,
+            id: removedId,
+            requirement: renamed.find((item) => item.id === removedId) ?? entry.requirement,
+            ...(previous ? { previous: previous.previous ?? previous.requirement } : {}),
+          }
+        : entry,
+    );
+  return { drafts: renamed, diff: nextDiff };
 }
 
 type SourceTab = "paste" | "file" | "issue";
@@ -1536,6 +1613,12 @@ export function ExtractionResultView({
               return next;
             });
             setDiffEntries((current) => current?.filter((entry) => !drop.has(entry.id)));
+          }}
+          onMatch={(addedId, removedId) => {
+            const result = applyManualMatch(drafts, diffEntries, addedId, removedId);
+            setDrafts(result.drafts);
+            setDiffEntries(result.diff);
+            scheduleAutosave({ requirements: result.drafts });
           }}
         />
       )}
