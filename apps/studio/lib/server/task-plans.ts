@@ -59,6 +59,7 @@ import {
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
+import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
 import { commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 
 /**
@@ -394,12 +395,15 @@ async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
   if (plan.issues?.tracking || Object.keys(plan.issues?.tasks ?? {}).length > 0) return;
 
   let remote: RemoteLocation;
+  let token: string | undefined;
   try {
     const project = await findProject(plan.projectId);
     const source = project && (await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true }));
     const candidate = source?.originUrl ? parseRemote(source.originUrl) : undefined;
+    // 세션의 이슈 발행·PR 생성과 같은 토큰 찾기를 쓴다(ADR-105) — gh CLI 로그인만으로도 작업을 이슈로 올릴 수 있어야 한다
+    token = candidate && (candidate.kind === 'github' || candidate.kind === 'gitea') ? await cachedRepositoryToken(candidate.kind, { allowGhCli: localFolderAllowed() }) : undefined;
     // 원격을 확인하지 못하거나 올릴 수 없는 호스트·토큰이면 계획만 실행하고 이슈는 만들지 않는다
-    if (!candidate || !canCreatePullRequest(candidate)) return;
+    if (!candidate || !canCreatePullRequest(candidate, process.env, token)) return;
     remote = candidate;
   } catch {
     return;
@@ -411,17 +415,17 @@ async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
     // 하위 이슈를 먼저 만들어, GitHub가 아니어도 추적 이슈 본문에 체크리스트를 넣을 수 있게 한다
     for (const lane of plan.lanes) {
       for (const task of lane.tasks) {
-        const created = await createIssue(remote, { title: task.title, body: taskIssueBody(plan, lane, task) });
+        const created = await createIssue(remote, { title: task.title, body: taskIssueBody(plan, lane, task) }, { token });
         issues.tasks[task.id] = { number: created.number, url: created.url };
         persist(plan);
       }
     }
-    const tracking = await createIssue(remote, { title: trackingTitle(plan), body: trackingIssueBody(plan, remote) });
+    const tracking = await createIssue(remote, { title: trackingTitle(plan), body: trackingIssueBody(plan, remote) }, { token });
     issues.tracking = { number: tracking.number, url: tracking.url };
     persist(plan);
 
     if (remote.kind === 'github') {
-      for (const ref of Object.values(issues.tasks)) await addSubIssue(remote, tracking.number, ref.number);
+      for (const ref of Object.values(issues.tasks)) await addSubIssue(remote, tracking.number, ref.number, { token });
     }
   } catch (error) {
     // 실패해도 계획 실행·상태 전이는 그대로 두고 이유만 남긴다

@@ -383,6 +383,12 @@ export async function publishedIssueNumbers(root: string, ids: readonly string[]
   return result;
 }
 
+/** 이 프로젝트가 발행한 요구사항 추적 이슈(사이드카의 tracking 필드). 없으면(아직 발행하지 않았으면) undefined */
+export async function publishedTrackingIssue(root: string): Promise<{ issue: number; url: string } | undefined> {
+  const store = await loadStore(root);
+  return store.tracking;
+}
+
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

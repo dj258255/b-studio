@@ -32,6 +32,7 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
 import { parseRemote, type Requirement } from '@b-studio/agent';
 import {
   planRequirementIssuePublish,
+  publishedTrackingIssue,
   publishRequirementIssues,
   resolveRequirementConflict,
   syncRequirementIssueStatus,
@@ -136,6 +137,19 @@ describe('publishRequirementIssues', () => {
     expect(spies.createIssue).toHaveBeenCalledTimes(1);
     expect(spies.createIssue.mock.calls[0]![1]).toMatchObject({ title: '요구사항: orders' });
     expect(result.tracking).toEqual({ issue: 5, url: 'y' });
+  });
+});
+
+describe('publishedTrackingIssue(56번 버그: PR 본문에서 추적 이슈를 가리킨다)', () => {
+  it('발행하지 않았으면 undefined다', async () => {
+    expect(await publishedTrackingIssue(root)).toBeUndefined();
+  });
+
+  it('발행한 뒤에는 사이드카에 남긴 추적 이슈를 돌려준다', async () => {
+    spies.createIssue.mockResolvedValueOnce({ number: 201, url: 'https://github.com/acme/orders/issues/201' }).mockResolvedValueOnce({ number: 1, url: 'https://github.com/acme/orders/issues/1' });
+    await publishRequirementIssues(ctx, [req()], { R1: '작업 중' });
+
+    expect(await publishedTrackingIssue(root)).toEqual({ issue: 1, url: 'https://github.com/acme/orders/issues/1' });
   });
 });
 
