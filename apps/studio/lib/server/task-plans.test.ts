@@ -438,6 +438,22 @@ describe('작업 분해 실행', () => {
     expect(fake.docsCommitted.map((entry) => entry.sessionId)).toEqual(['origin-1']);
   });
 
+  it('설계 파이프라인(ADR-0XX): 요청이 언급한 요구사항을 다루는 설계가 승인되지 않았으면 레인을 만들기 전에 409로 막는다', async () => {
+    const workDir = path.join(fake.root, 'origin-2');
+    mkdirSync(path.join(workDir, 'docs/design'), { recursive: true });
+    writeFileSync(
+      path.join(workDir, 'docs/design/01-메모.meta.json'),
+      JSON.stringify({ path: 'docs/design/01-메모.md', number: 1, title: '메모', requirementIds: ['R4'], bundles: [], status: 'draft', createdAt: '', createdBy: 'kim' }),
+    );
+    fake.sessions.set('origin-2', { id: 'origin-2', projectId: 'orders', owner: 'kim', status: 'ready', workDir, checkpoints: [] });
+
+    await expect(createTaskPlan({ projectId: 'orders', request: '[R4] 메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'origin-2' })).rejects.toThrow(
+      '설계 승인 전에는 구현을 시작할 수 없습니다',
+    );
+    // 레인·통합 세션을 하나도 만들지 않는다(승인 전에는 아예 시작하지 않는다)
+    expect(fake.sessionOptions).toEqual([]);
+  });
+
   it('세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은 지금처럼 프로젝트 원본에서 시작한다', async () => {
     fake.plan = { tasks: [task('a', ['web/a'])] };
     fake.writes = { a: { 'web/a/one.md': 'one' } };

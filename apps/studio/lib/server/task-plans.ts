@@ -33,6 +33,7 @@ import {
   type VerifyMode,
 } from '@b-studio/agent';
 import { claudeCodeAsk } from './claude-code-ask';
+import { assertDesignApprovedForRequest } from './design-pipeline';
 import type { Checkpoint } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
@@ -249,6 +250,9 @@ export async function createTaskPlan(input: {
     await commitPendingWorkingCopyDocs(input.sourceSessionId, '문서: 작업을 나누기 전 남은 문서 변경을 정리한다').catch((error: unknown) => {
       console.error(`[b-studio] 세션 ${input.sourceSessionId}의 문서 체크포인트를 남기지 못했습니다`, error);
     });
+    // 설계 파이프라인(ADR-0XX): 레인으로 나누는 것도 구현의 한 형태다. 요청이 언급한 요구사항을 다루는 설계가
+    // 있는데 아직 승인되지 않았으면 레인을 만들기 전에 막는다(옵트인 — 그 요구사항을 다루는 설계가 없으면 통과)
+    await assertDesignApprovedForRequest(input.sourceSessionId, input.request);
   }
   // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
   // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
