@@ -1381,7 +1381,7 @@ function realignScenarioIds(requirement: RequirementDraft): RequirementDraft {
  * 저장된 목록을 그대로 물려받는 문제를 푼다. "명세에서 사라짐"(removed, 기존 문서에만 있던 항목) 항목은 버리고
  * 나머지(이번 추출이 실제로 낸 결과)만 남겨, id를 R1부터 다시 매긴다 — 기존 id·개정·추적(이슈 연결)·사람 확인은
  * 전부 끊긴다(의도된 동작이다, 확인 문구가 미리 알린다). 순수 함수라 테스트에서 바로 쓴다. docs/requirements.md의
- * 이전 내용은 이 함수가 아니라 "저장" 버튼을 눌렀을 때의 기존 문서 체크포인트 커밋이 git 히스토리에 남긴다(ADR-0XX).
+ * 이전 내용은 이 함수가 아니라 "저장" 버튼을 눌렀을 때의 기존 문서 체크포인트 커밋이 git 히스토리에 남긴다(ADR-106).
  */
 export function replaceWithExtractionResult(drafts: readonly RequirementDraft[], diff: readonly RequirementDiffEntry[]): RequirementDraft[] {
   const removedIds = new Set(diff.filter((entry) => entry.status === "removed").map((entry) => entry.id));
