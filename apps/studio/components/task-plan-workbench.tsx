@@ -3,11 +3,23 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ModelProfile } from '@b-studio/agent';
+import type { EffortPickerView, ModelPickerView } from '@/lib/server/model-picker';
 import type { ProjectSummary, SessionMode } from '@/lib/studio-events';
 import type { TaskPlanMetrics } from '@/lib/task-plan-metrics';
-import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
+import { planModelAlias, type TaskPlanStatus, type TaskPlanStepStatus, type TaskPlanStrategy, type TaskPlanView } from '@/lib/task-plan-types';
 import { describeTokens, hasTokens } from '@/lib/usage';
+import { EFFORT_LABEL, ModelPicker } from './chat-panel';
 import { PlanGraphView } from './plan-graph';
+
+/** claude-code 별칭 → 화면 표기(레인 카드). model-picker.ts의 CLAUDE_CODE_ALIASES 라벨과 같은 값이다 */
+const CLAUDE_CODE_ALIAS_LABEL: Record<string, string> = { fable: 'Fable 5.1', opus: 'Opus 5', sonnet: 'Sonnet 5', haiku: 'Haiku 4.5' };
+
+/** 레인 카드에 보여줄 모델 표시("Sonnet 5 · 보통"). 계획이 쓴 modelId·effort를 사람이 읽는 이름으로 바꾼다 */
+function planModelLabel(plan: TaskPlanView, models: ModelOption[]): string {
+  const alias = planModelAlias(plan.modelId);
+  const label = alias === '' ? '서버 기본' : (CLAUDE_CODE_ALIAS_LABEL[alias] ?? models.find((model) => model.id === alias)?.label ?? alias);
+  return plan.effort ? `${label} · ${EFFORT_LABEL[plan.effort] ?? plan.effort}` : label;
+}
 
 const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
   S2: 'S2 계약 먼저',
@@ -67,6 +79,7 @@ export function TaskPlanWorkbench({
   initialSelectedId,
   planner,
   limits,
+  modelPicker,
 }: {
   projects: ProjectSummary[];
   models: ModelOption[];
@@ -75,12 +88,12 @@ export function TaskPlanWorkbench({
   initialSelectedId?: string;
   planner: PlannerCapability;
   limits: PlanLimitView;
+  /** "새 작업 분해" 폼의 모델·노력 선택(대화 입력창과 같은 ModelPicker를 쓴다). 서버가 이 백엔드에서 고를 수 있는 값으로 만든다.
+   * 방금 이 화면으로 넘어온 계획(나눠서 병렬 제안 수락)이 있으면 그 계획이 이어받은 세션 값이 기본으로 들어 있다 */
+  modelPicker: ModelPickerView;
 }) {
-  // 로컬 Claude Code 구독 모드는 모델 레지스트리가 아니라 그 CLI가 모델을 정한다(모델 선택 칸을 쓰지 않는다)
-  const localCli = planner.enabled && planner.mode === 'claude-code';
-  const readyModels = models.filter((model) => model.configured && model.enabled !== false && model.capabilities.includes('tools'));
   const [projectId, setProjectId] = useState(projects.find((project) => !project.error)?.id ?? '');
-  const [modelId, setModelId] = useState(readyModels[0]?.id ?? '');
+  const [picker, setPicker] = useState<ModelPickerView>(modelPicker);
   const [request, setRequest] = useState('');
   const [plans, setPlans] = useState(initialPlans);
   const [selectedId, setSelectedId] = useState(initialPlans.some((plan) => plan.id === initialSelectedId) ? initialSelectedId : initialPlans[0]?.id);
@@ -90,6 +103,13 @@ export function TaskPlanWorkbench({
   const selected = plans.find((plan) => plan.id === selectedId);
   // 승인 대기·중단됨·거부됨은 사람이 움직이기 전까지 바뀌지 않으므로 폴링하지 않는다
   const active = selected !== undefined && !['done', 'failed', 'rejected', 'awaiting_approval', 'interrupted'].includes(selected.status);
+  // API 모드는 실제로 고른 모델이 있어야 계획을 만들 수 있다("자동(라우터)"로는 계획을 부를 수 없다). 로컬 CLI 모드는 "기본"도 된다
+  const modelRequired = planner.mode === 'api';
+
+  // 이 화면은 핸드오프 링크(`/task-plans?id=`)로 열릴 때가 많다. 스크롤이 아래로 내려온 채 열려 머리글이 잘리지 않도록 맨 위로 되돌린다
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
 
   useEffect(() => {
     if (!selectedId || !active) return;
@@ -113,8 +133,12 @@ export function TaskPlanWorkbench({
       const response = await fetch('/api/task-plans', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        // 로컬 CLI 모드는 모델을 보내지 않는다(그 CLI가 정한다)
-        body: JSON.stringify({ projectId, request, ...(localCli ? {} : { modelId }) }),
+        body: JSON.stringify({
+          projectId,
+          request,
+          modelId: picker.current ?? '',
+          ...(picker.effort.supported && picker.effort.current ? { effort: picker.effort.current } : {}),
+        }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
@@ -183,21 +207,19 @@ export function TaskPlanWorkbench({
             {projects.filter((project) => !project.error).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
 
-          {localCli ? (
-            <>
-              <p className="mt-4 text-sm font-medium">모델</p>
-              <p className="mt-1 rounded-control border border-line bg-panel px-3 py-2 text-sm leading-6 text-muted">
-                이 PC에 로그인한 Claude Code 구독으로 계획을 받습니다. 모델은 <span className="font-mono">B_STUDIO_CLAUDE_CODE_MODEL</span> 또는 계정 기본값입니다.
-              </p>
-            </>
-          ) : (
-            <>
-              <label className="mt-4 block text-sm font-medium" htmlFor="plan-model">모델</label>
-              <select id="plan-model" value={modelId} onChange={(event) => setModelId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
-                {readyModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-              </select>
-              {readyModels.length === 0 && <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>}
-            </>
+          <p className="mt-4 text-sm font-medium">모델</p>
+          <div className="mt-1">
+            <ModelPicker
+              picker={picker}
+              disabled={!planner.enabled}
+              onChangeModel={(value) => setPicker((current) => ({ ...current, current: value }))}
+              onChangeEffort={(value) =>
+                setPicker((current) => ({ ...current, effort: { ...current.effort, current: (value || undefined) as EffortPickerView['current'] } }))
+              }
+            />
+          </div>
+          {modelRequired && picker.options.every((option) => option.id === '') && (
+            <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>
           )}
           {!planner.enabled && <p className="mt-1 text-xs text-wait">{planner.reason ?? '이 모드에서는 모델에게 계획을 받을 수 없습니다'}</p>}
 
@@ -212,7 +234,7 @@ export function TaskPlanWorkbench({
           />
           <button
             type="button"
-            disabled={!planner.enabled || !projectId || (!localCli && !modelId) || !request.trim() || creating}
+            disabled={!planner.enabled || !projectId || (modelRequired && !picker.current) || !request.trim() || creating}
             onClick={() => void create()}
             className="mt-4 w-full rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >
@@ -250,6 +272,7 @@ export function TaskPlanWorkbench({
         ) : (
           <PlanResult
             plan={selected}
+            models={models}
             canPublish={projects.find((project) => project.id === selected.projectId)?.canPublishIssues === true}
             deciding={deciding}
             onDecide={(approve, reason, publishIssues) => void decide(approve, reason, publishIssues)}
@@ -283,12 +306,15 @@ export function PlanTokenTotals({ metrics }: { metrics?: TaskPlanMetrics }) {
 
 function PlanResult({
   plan,
+  models,
   canPublish,
   deciding,
   onDecide,
   onResume,
 }: {
   plan: TaskPlanView;
+  /** 레인 카드의 모델 표시에 쓴다(API 모드 레지스트리 id → 라벨) */
+  models: ModelOption[];
   /** 원격 저장소 + 토큰이 있어 "이슈로 올리기"를 고를 수 있는가 */
   canPublish: boolean;
   deciding: boolean;
@@ -498,7 +524,9 @@ function PlanResult({
                   <div className="min-w-0">
                     <p className="text-lg font-semibold">{lane.id}</p>
                     <p className="mt-0.5 break-all font-mono text-xs text-muted">쓰기 범위: {lane.paths.join(', ')}</p>
-                    <p className="mt-0.5 text-xs text-muted">백엔드: {lane.backend ?? '서버 기본'}{lane.model ? ` (${lane.model})` : ''}</p>
+                    <p className="mt-0.5 text-xs text-muted">
+                      {lane.backend ? `백엔드: ${lane.backend}${lane.model ? ` (${lane.model})` : ''}` : `모델: ${planModelLabel(plan, models)}`}
+                    </p>
                   </div>
                   <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[lane.status]}`}>{STEP_STATUS[lane.status]}</span>
                 </div>

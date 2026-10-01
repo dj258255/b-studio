@@ -332,7 +332,7 @@ export {
 } from './workflow';
 export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
-export { buildAskRequest, buildSystemPrompt } from './prompts';
+export { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
 export {
   aggregateModelStats,
