@@ -248,6 +248,33 @@ describe('buildPullRequest', () => {
     expect(title).toBe('[b-studio] feat: 요구사항 3개 구현과 검증 (R2~R23)');
   });
 
+  it('요구사항이 하나이고 커밋도 하나면 "N개 구현과 검증"으로 뭉뚱그리지 않고 그 커밋 제목을 그대로 요약한다(ADR-115)', () => {
+    const { title } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requirementIds: ['R17'],
+      commits: [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: feat: [R17] 상세 화면 댓글 입력칸에 남은 글자 수를 보여 준다', body: '', files: ['web/comment-form.tsx'] }],
+    });
+
+    expect(title).toBe('[b-studio] feat: [R17] 상세 화면 댓글 입력칸에 남은 글자 수를 보여 준다');
+  });
+
+  it('요구사항이 하나여도 커밋이 여러 개면(병합 커밋 등) 수·범위 요약으로 되돌아간다', () => {
+    const { title } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requirementIds: ['R17'],
+      commits: [
+        { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: [R17] 댓글 입력칸', body: '', files: ['web/a.tsx'] },
+        { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', subject: '요청: 문서 정리', body: '', files: ['docs/requirements.md'] },
+      ],
+    });
+
+    expect(title).toBe('[b-studio] feat: 요구사항 1개 구현과 검증 (R17)');
+  });
+
   it('제목은 접두어를 포함해 72자 안팎을 넘지 않는다', () => {
     const { title } = buildPullRequest({
       projectName: 'orders',

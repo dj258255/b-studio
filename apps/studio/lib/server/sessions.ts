@@ -46,10 +46,12 @@ import {
   draftRequirementFromIssue,
   estimateCost,
   extractDiffReferencedNames,
+  extractImplementsTrailers,
   extractTrackingSubIssueNumbers,
   extractRequirementIds,
   extractRequirementMentions,
   extractRequirementsHeuristically,
+  findMentionedIds,
   fetchIssue,
   fetchPullRequestDetail,
   findCheckpointMentions,
@@ -200,6 +202,7 @@ import {
   type Runner,
   type ScannedFile,
   type ServiceCheck,
+  type SessionCommit,
   type VerificationReport,
   type SelfCheckMode,
   type TestFramework,
@@ -2973,13 +2976,16 @@ export function buildChecklistAddendum(report: SubmissionReport): string {
 }
 
 /** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
-async function pullRequestDraft(session: Session, issues: readonly number[]): Promise<PullRequestDraft & { info: RepositoryInfo }> {
+async function pullRequestDraft(
+  session: Session,
+  issues: readonly number[],
+  planRequirementIds: readonly string[] = [],
+): Promise<PullRequestDraft & { info: RepositoryInfo }> {
   const info = (await session.checkpoints.repository())!;
   const commits = await session.checkpoints.sessionCommits();
-  // 지금 세션 HEAD에서 검증됨 + 이슈로 발행된 요구사항(ADR-092 개정, 버그 리포트: 레인을 하나로 합친 통합
-  // 세션은 커밋 제목 하나에 모든 요구사항 "[Rn]"이 남지 않아, 그 언급만 보면 일부만 잡혔다) — 제목·Closes·
+  // 지금 세션 HEAD에서 검증됨이고 이번 세션 범위 안인 요구사항(ADR-115, ADR-092 개정) — 제목·Closes·
   // Implements가 모두 이 기준을 쓴다
-  const { refs, allVerified } = await verifiedRequirementSummary(session);
+  const { refs, closedIssues, closesTracking } = await verifiedRequirementSummary(session, commits, info, planRequirementIds);
   const draft = buildPullRequest({
     projectName: session.project.spec.name,
     base: info.base,
@@ -2992,16 +2998,21 @@ async function pullRequestDraft(session: Session, issues: readonly number[]): Pr
   // Closes는 위 draft.body 맨 위(issues 인자)가 이미 책임지므로, 여기서는 Implements: Rn@revN만 덧붙인다 —
   // 같은 이슈 번호를 두 번 Closes로 적지 않는다(버그 리포트: Closes #20이 본문에 두 번 나왔다)
   const requirementsAddendum = buildRequirementsAddendum(refs, { includeCloses: false });
-  // 요구사항을 이슈로 발행했으면(ADR-092) 추적 이슈도 가리킨다. 요구사항이 전부 검증됐으면 추적 이슈도 함께
-  // 닫고(Closes), 아직 남았으면 "관련:" 한 줄로 PR에서 추적 이슈로 돌아갈 수 있게 한다(이미 위 Closes
-  // 목록에 들어 있으면 — 사람이 직접 추적 이슈를 골랐으면 — 다시 적지 않는다)
+  // 검증됐지만 이슈가 이미 닫혀 있는 요구사항(이전 세션의 PR이 머지되며 자동으로 닫힌 이슈 등)은 Closes로
+  // 다시 올리지 않고 "관련:"으로만 가리킨다(버그 리포트: 머지돼 닫힌 이슈 19개가 그대로 Closes로 다시 올라왔다)
+  // — 이미 위 issues 인자에 들어 있으면(사람이 직접 골랐으면) 다시 적지 않는다
+  const relatedClosed = [...new Set(closedIssues)].filter((issue) => !issues.includes(issue));
+  const relatedAddendum = relatedClosed.length > 0 ? `\n\n${relatedClosed.map((issue) => `관련: #${issue}`).join('\n')}` : '';
+  // 요구사항을 이슈로 발행했으면(ADR-092) 추적 이슈도 가리킨다. 이 PR이 연결하는 이슈들이 추적 이슈의 남은
+  // 마지막 열린 하위 이슈면 추적 이슈도 함께 닫고(Closes), 아니면 "관련:" 한 줄로 PR에서 추적 이슈로 돌아갈 수
+  // 있게 한다(이미 위 Closes 목록에 들어 있으면 — 사람이 직접 추적 이슈를 골랐으면 — 다시 적지 않는다)
   const tracking = await publishedTrackingIssue(session.project.root).catch(() => undefined);
-  const trackingAddendum = tracking && !issues.includes(tracking.issue) ? (allVerified ? `\n\nCloses #${tracking.issue}` : `\n\n관련: #${tracking.issue}`) : '';
+  const trackingAddendum = tracking && !issues.includes(tracking.issue) ? (closesTracking ? `\n\nCloses #${tracking.issue}` : `\n\n관련: #${tracking.issue}`) : '';
   // 올리기 전 점검표 요약(ADR-107, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다)
   const checklistAddendum = await submissionReport(session.snapshot.id)
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
-  return { info, ...draft, body: `${draft.body}${requirementsAddendum}${trackingAddendum}${checklistAddendum}` };
+  return { info, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingAddendum}${checklistAddendum}` };
 }
 
 /**
@@ -3037,11 +3048,14 @@ async function lookupIssues(remote: RemoteLocation, issues: readonly number[], t
  * 올리기 전 미리보기. 제목·본문과 확인 목록(이슈 연결·원격 이슈 상태·누락 단계·체크포인트 밖 변경)을 돌려준다.
  * 누락을 보여 주기만 하고 막지는 않는다. 실제 생성은 exportSession이 같은 함수로 본문을 다시 만들어 한다
  */
-export async function previewExport(id: string, { issues = [] }: { issues?: readonly number[] } = {}): Promise<ExportPreview> {
+export async function previewExport(
+  id: string,
+  { issues = [], planRequirementIds = [] }: { issues?: readonly number[]; planRequirementIds?: readonly string[] } = {},
+): Promise<ExportPreview> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
 
-  const { info, title, body, missing } = await pullRequestDraft(session, issues);
+  const { info, title, body, missing } = await pullRequestDraft(session, issues, planRequirementIds);
   const remote = parseRemote(info.remoteUrl);
   // PR 생성(exportSession)과 같은 토큰을 먼저 찾아 이슈 확인에도 그대로 쓴다(ADR-107) — 이슈 조회만 토큰 없이
   // 돌다 실패하고 PR 생성은 되던 어긋남을 막는다
@@ -3112,7 +3126,18 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
 /** 체크포인트를 세션 브랜치로 올리고, 원하면 PR을 만든다. 몇 초면 끝나므로 결과를 바로 돌려준다 */
 export async function exportSession(
   id: string,
-  { pullRequest, issues = [], review }: { pullRequest: boolean; issues?: readonly number[]; /** 생략하면 studio.yaml의 review.auto를 따른다(화면 체크박스가 명시하면 그 값) */ review?: boolean },
+  {
+    pullRequest,
+    issues = [],
+    review,
+    planRequirementIds = [],
+  }: {
+    pullRequest: boolean;
+    issues?: readonly number[];
+    /** 생략하면 studio.yaml의 review.auto를 따른다(화면 체크박스가 명시하면 그 값) */
+    review?: boolean;
+    planRequirementIds?: readonly string[];
+  },
 ): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
@@ -3134,7 +3159,7 @@ export async function exportSession(
     let pullRequestError: string | undefined;
     if (pullRequest && !info.pullRequestUrl) {
       try {
-        const { title, body } = await pullRequestDraft(session, issues);
+        const { title, body } = await pullRequestDraft(session, issues, planRequirementIds);
         const remote = parseRemote(info.remoteUrl);
         // 미리보기(canCreate)가 "만들 수 있다"고 본 것과 같은 토큰으로 실제로 만든다(ADR-107)
         const token = await repositoryPullRequestToken(remote);
@@ -5064,51 +5089,134 @@ async function reviewRequirementsContext(session: Session, requestTexts: readonl
   }
 }
 
-/** verifiedRequirementSummary가 돌려주는 값 */
-interface VerifiedRequirementSummary {
-  /** 지금 HEAD에서 "검증됨"이고 이슈로 발행된 요구사항들의 참조(id·rev·이슈 번호·상태) */
-  refs: ImplementedRequirementRef[];
-  /** 요구사항이 하나 이상 있고 전부 검증됨이면 true — 추적 이슈를 Closes로 자동으로 닫을지 결정하는 데 쓴다 */
-  allVerified: boolean;
+/**
+ * "[R4]" 모양의 id를 "R4"(소속 요구사항)로 되접는다 — 시나리오 언급(R4.1)도 상위 요구사항을 가리킨 것으로 본다.
+ */
+function baseRequirementId(id: string): string {
+  return id.split('.')[0]!.toUpperCase();
 }
 
 /**
- * 지금 세션 HEAD의 요구사항 상태(getSessionRequirements — computeRequirementStatus가 체크포인트·테스트·게이트·
- * 문서 증거로 다시 매긴 값)에서 "검증됨 + 이슈로 발행됨"인 것만 추린다. 커밋 제목이 "[R4]"로 언급했는지는
- * 보지 않는다 — 레인을 하나로 합친 통합 세션(병합 커밋 하나)은 커밋 제목에 모든 요구사항이 남지 않기
- * 때문이다(버그 리포트: 통합 세션의 PR이 R20만 Implements·Closes로 실었다).
- * PR 본문의 기본 연결 이슈(sessionRequirementIssueNumbers)·`Closes #n`·`Implements: Rn`(exportSession)이
- * 모두 이 함수를 쓴다. 실패해도(원격 없음, 요구사항 파일 없음 등) 빈 결과 — 이 기능이 꺼져 있어도 PR 흐름은
- * 그대로 동작해야 한다.
+ * 이 세션 커밋(세션 시작 체크포인트 이후, sessionCommits가 이미 `start..HEAD`로 좁혀 둔 범위)이 실제로 건드린
+ * 요구사항 id들. 커밋 제목·본문의 "[R4]" 언급·"Implements: R4" 트레일러를 먼저 보고, 그걸로 못 찾은 요구사항도
+ * 이 세션에서 바뀐 테스트 파일에 그 id를 가리키는 테스트가 있으면 후보로 더한다(버그 리포트: PR #21이 머지돼
+ * R2~R20 이슈가 전부 닫힌 뒤 새로 시작한 후속 세션이 R17 하나만 커밋했는데, 요구사항 상태는 main에 남은
+ * 이전 커밋 기록을 그대로 봐 19개 모두 "검증됨"으로 남아 있었다 — 이 함수가 "이번 세션이 실제로 쓴 커밋"으로
+ * 범위를 좁힌다).
  */
-async function verifiedRequirementSummary(session: Session): Promise<VerifiedRequirementSummary> {
+async function sessionTouchedRequirementIds(session: Session, commits: readonly SessionCommit[]): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const commit of commits) {
+    const text = `${commit.subject}\n${commit.body}`;
+    for (const mention of findMentionedIds(text)) ids.add(baseRequirementId(mention));
+    for (const trailer of extractImplementsTrailers(text)) ids.add(baseRequirementId(trailer.id));
+  }
+
+  const changedTestFiles = [...new Set(commits.flatMap((commit) => commit.files))].filter(isLikelyTestFile);
+  if (changedTestFiles.length === 0) return ids;
   try {
     const snapshot = await getSessionRequirements(session.snapshot.id);
-    if (!snapshot.exists || snapshot.requirements.length === 0) return { refs: [], allVerified: false };
-    const refs = snapshot.requirements
-      .filter((requirement) => requirement.status === '검증됨' && requirement.issue !== undefined)
+    if (!snapshot.exists) return ids;
+    const changedSet = new Set(changedTestFiles);
+    const testFiles = (await scanWorkingCopyTestFiles(session.project.root)).filter((file) => changedSet.has(file.path));
+    for (const requirement of snapshot.requirements) {
+      if (!ids.has(requirement.id) && scanTestFilesForRequirementId(testFiles, requirement.id).length > 0) ids.add(requirement.id);
+    }
+  } catch {
+    // 작업 복사본을 못 읽어도(세션이 사라졌거나 권한 문제) 커밋 제목·트레일러로 찾은 후보는 그대로 쓴다
+  }
+  return ids;
+}
+
+/** verifiedRequirementSummary가 돌려주는 값 */
+interface VerifiedRequirementSummary {
+  /** 지금 HEAD에서 "검증됨"이고 이번 세션 범위 안에 든 요구사항들의 참조(id·rev·이슈 번호·상태). 이슈가 없어도
+   * 들어간다 — `Implements:` 절은 이슈 발행 여부와 무관하게 구현한 요구사항 전부를 적는다 */
+  refs: ImplementedRequirementRef[];
+  /** refs 중 이슈가 열려 있어(또는 확인하지 못해 모르는 채로) 기본으로 연결할 이슈 번호 */
+  openIssues: number[];
+  /** refs 중 이슈가 이미 닫혀 있는 것(머지로 자동으로 닫힌 이전 이슈 등) — 본문에서 `Closes`가 아니라 `관련:`으로만 가리킨다 */
+  closedIssues: number[];
+  /** 이 PR이 연결하는 이슈들이 "추적 이슈의 남은 마지막 열린 하위 이슈"인지 — 맞으면 추적 이슈도 Closes로 함께 닫는다 */
+  closesTracking: boolean;
+}
+
+const EMPTY_VERIFIED_REQUIREMENT_SUMMARY: VerifiedRequirementSummary = { refs: [], openIssues: [], closedIssues: [], closesTracking: false };
+
+/**
+ * 지금 세션 HEAD의 요구사항 상태(getSessionRequirements — computeRequirementStatus가 체크포인트·테스트·게이트·
+ * 문서 증거로 다시 매긴 값)에서 "검증됨 + 이번 세션 범위 안"인 것만 추린다.
+ *
+ * 범위는 두 가지 중 하나다: `planRequirementIds`(작업 분해 계획의 레인·요청 글이 언급한 요구사항 id, task-plans.ts의
+ * planRequirementIds — 통합 세션 신호)가 하나라도 있으면 "검증됨 + 이슈 발행" 전부를 후보로 본다(ADR-110 원래
+ * 규칙 — 레인을 하나로 합친 병합 커밋 하나로는 모든 요구사항이 제목에 안 남기 때문이다). 아니면 이 세션 커밋이
+ * 실제로 언급·테스트한 요구사항(sessionTouchedRequirementIds)으로만 좁힌다(버그 리포트: PR #21 머지 뒤 시작한
+ * 후속 세션이 R17 하나만 커밋했는데 이전에 머지돼 닫힌 R2~R20 이슈까지 그대로 다시 내세웠다).
+ *
+ * 이슈 번호가 있는 후보는 열림·닫힘을 확인해(ADR-107의 토큰) 열려 있거나 확인하지 못한 것만 기본으로 연결하고,
+ * 이미 닫힌 것은 `관련:`으로만 가리킨다. PR 본문의 기본 연결 이슈(sessionRequirementIssueNumbers)·`Closes #n`·
+ * `Implements: Rn`(pullRequestDraft)이 모두 이 함수를 쓴다. 실패해도(원격 없음, 요구사항 파일 없음 등) 빈 결과 —
+ * 이 기능이 꺼져 있어도 PR 흐름은 그대로 동작해야 한다.
+ */
+async function verifiedRequirementSummary(
+  session: Session,
+  commits: readonly SessionCommit[],
+  info: RepositoryInfo,
+  planRequirementIds: readonly string[],
+): Promise<VerifiedRequirementSummary> {
+  try {
+    const snapshot = await getSessionRequirements(session.snapshot.id);
+    if (!snapshot.exists || snapshot.requirements.length === 0) return EMPTY_VERIFIED_REQUIREMENT_SUMMARY;
+
+    const scopeAll = planRequirementIds.length > 0;
+    const touched = scopeAll ? undefined : await sessionTouchedRequirementIds(session, commits);
+    const inScope = (id: string): boolean => scopeAll || touched!.has(id);
+
+    const refs: ImplementedRequirementRef[] = snapshot.requirements
+      .filter((requirement) => requirement.status === '검증됨' && inScope(requirement.id))
       .map((requirement) => ({
         id: requirement.id,
         ...(requirement.rev !== undefined ? { rev: requirement.rev } : {}),
-        issue: requirement.issue,
+        ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}),
         status: requirement.status,
       }));
-    const allVerified = snapshot.requirements.every((requirement) => requirement.status === '검증됨');
-    return { refs, allVerified };
+
+    const withIssue = refs.filter((ref): ref is ImplementedRequirementRef & { issue: number } => ref.issue !== undefined);
+    const remote = parseRemote(info.remoteUrl);
+    const lookups = withIssue.length > 0 ? await lookupIssues(remote, withIssue.map((ref) => ref.issue), await repositoryPullRequestToken(remote)) : [];
+    const stateByIssue = new Map(lookups.map((entry) => [entry.issue, entry.lookup]));
+    const openIssues: number[] = [];
+    const closedIssues: number[] = [];
+    for (const ref of withIssue) {
+      // 확인하지 못했으면(토큰 없음 등) 모르는 채로 열려 있다고 보고 그대로 연결한다 — 올리기 전 점검표가
+      // 따로 "확인할 수 없습니다"로 보여준다
+      const lookup = stateByIssue.get(ref.issue);
+      (lookup?.ok && lookup.state === 'closed' ? closedIssues : openIssues).push(ref.issue);
+    }
+
+    // 추적 이슈: 이 PR이 연결하는 이슈들이 "남은 마지막 열린 하위 이슈"면 함께 닫는다. 범위를 좁히지 않은(scopeAll)
+    // 통합 세션이고 요구사항이 전부 검증됐으며, 그중 이미 닫혀 있던 이슈(이 PR이 닫는 게 아닌 것)가 없을 때만
+    // 그렇다고 본다(ADR-110의 "전부 검증됨" 규칙을 이슈의 실제 열림 상태로 다시 평가한다)
+    const closesTracking = scopeAll && snapshot.requirements.every((requirement) => requirement.status === '검증됨') && closedIssues.length === 0;
+
+    return { refs, openIssues, closedIssues, closesTracking };
   } catch {
-    return { refs: [], allVerified: false };
+    return EMPTY_VERIFIED_REQUIREMENT_SUMMARY;
   }
 }
 
 /**
- * 이 세션 HEAD에서 검증됨이고 이슈로 발행된 요구사항들의 번호(중복 없이). 올리기(export) 미리보기·생성 라우트가
- * 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-092) — 그래야 PR 본문에 그 요구사항들의
- * `Closes #n`이 자동으로 실린다. 실패해도(원격 없음 등) 빈 배열.
+ * 이 세션 HEAD에서 검증됨이고(이번 세션 범위 안이고) 이슈가 열려 있는 요구사항들의 이슈 번호(중복 없이). 올리기
+ * (export) 미리보기·생성 라우트가 사람이 이슈 번호를 입력하지 않았을 때 기본값으로 쓴다(ADR-092) — 그래야 PR
+ * 본문에 그 요구사항들의 `Closes #n`이 자동으로 실린다. 실패해도(원격 없음 등) 빈 배열.
  */
-export async function sessionRequirementIssueNumbers(id: string): Promise<number[]> {
+export async function sessionRequirementIssueNumbers(id: string, planRequirementIds: readonly string[] = []): Promise<number[]> {
   const session = requireSession(id);
-  const { refs } = await verifiedRequirementSummary(session);
-  return [...new Set(refs.flatMap((ref) => (ref.issue !== undefined ? [ref.issue] : [])))];
+  const info = await session.checkpoints.repository();
+  if (!info) return [];
+  const commits = await session.checkpoints.sessionCommits();
+  const { openIssues } = await verifiedRequirementSummary(session, commits, info, planRequirementIds);
+  return [...new Set(openIssues)];
 }
 
 /** 저장소 이슈 하나(제목+본문)를 요구사항 초안으로 가져온다("이슈에서 가져오기" — docs/requirements.md에는 쓰지 않는다, 화면이 "적용"으로 반영한다) */

@@ -277,7 +277,7 @@ vi.mock('./sessions', () => ({
 
 import { StudioError } from './errors';
 import { clearRepositoryTokenCache } from './repo-token';
-import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
+import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, planRequirementIds, rejectTaskPlan } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
 const saved = {
@@ -395,6 +395,34 @@ function statusOf(action: () => unknown): number {
 }
 
 describe('작업 분해 실행', () => {
+  // 이 둘은 반드시 이 describe의 첫 두 테스트여야 한다 — 가짜 세션 id("session-N")는 테스트마다 1부터 다시 세고
+  // (fake.counter), plans 기록은 파일 전체 테스트가 도는 동안 지워지지 않아(ADR-115이 쓰는 plans 조회가 사람이
+  // 이슈 수를 묻는 integrationIssues와 같은 방식이다) 뒤에서 도는 2레인 테스트와 같은 session-3을 또 쓰면
+  // planRequirementIds가 먼저 쌓인(더 오래된) 계획을 잘못 찾는다.
+  it('통합 세션 id로 그 계획의 레인 작업·요청 글이 언급한 요구사항 id를 모은다(ADR-115, 중복 없이)', async () => {
+    fake.plan = {
+      tasks: [
+        { id: 'a', title: '[R2] 로그인 화면', request: '[id:a] [R2] 로그인 화면을 만들어줘', paths: ['web/a'], dependsOn: [] },
+        { id: 'b', title: '[R5] 주문 목록', request: '[id:b] [R5] 주문 목록 화면을 만들어줘(R2 로그인 뒤에만 보인다)', paths: ['web/b'], dependsOn: [] },
+      ],
+    };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    const plan = await run({ projectId: 'orders', request: '요구사항 2개 병렬 구현', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(planRequirementIds(plan.integration!.sessionId!)).toEqual(['R2', 'R5']);
+  });
+
+  it('통합 세션이 아니거나(계획을 못 찾음) 레인·요청 글에 요구사항 언급이 없으면 빈 배열이다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const plan = await run({ projectId: 'orders', request: '요구사항 언급 없는 요청', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(planRequirementIds(plan.integration!.sessionId!)).toEqual([]);
+    expect(planRequirementIds('no-such-session')).toEqual([]);
+  });
+
   it('이어진 작업은 한 세션에서 쓰기 범위를 걸어 차례로, 독립 레인은 다른 세션에서 돌리고 결과를 새 세션에 다시 적용한다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
     fake.writes = { a1: { 'web/a/one.md': 'one' }, a2: { 'web/a/two.md': 'two' }, b: { 'web/b/one.md': 'b' } };
@@ -709,6 +737,7 @@ describe('작업 분해 실행', () => {
     expect(plan.metrics!.bootRxBytesTotal).toBe(3_000);
     expect(typeof plan.metrics!.endToEndMs).toBe('number');
   });
+
 });
 
 describe('고정 계획(presetPlan)', () => {

@@ -9,6 +9,7 @@ import {
   canCreatePullRequest,
   CheckpointStore,
   createIssue,
+  extractRequirementMentions,
   failureNotesFromEvents,
   isInScope,
   parseRemote,
@@ -380,6 +381,21 @@ export function integrationIssues(sessionId: string): number[] {
   const issuesByTask = plan.issues.tasks;
   const numbers = plan.lanes.flatMap((lane) => lane.tasks.map((task) => issuesByTask[task.id]?.number));
   return [...new Set(numbers.filter((number): number is number => number !== undefined))];
+}
+
+/**
+ * 통합 세션 id로 그 계획의 요청 글·레인 작업들이 언급한 요구사항 id("[R4]" 모양)를 모은다(ADR-115). 레인은
+ * 요구사항 id를 구조화된 필드로 갖지 않으므로(계획은 작업·쓰기 범위만 안다), 계획 요청 글과 작업 제목·요청
+ * 글에서 찾는다. 하나라도 있으면 "이 세션은 요구사항을 다루는 작업 분해 계획의 통합 세션"이라는 신호로 쓰여,
+ * sessions.ts의 PR 초안이 레인을 하나로 합친 병합 커밋 하나만으로는 못 찾는 요구사항까지(ADR-110 폴백) 기본으로
+ * 연결한다. 계획을 찾지 못하거나(통합 세션이 아니다) 언급이 없으면 빈 배열 — 그러면 세션 커밋만으로 범위를 좁힌다.
+ */
+export function planRequirementIds(sessionId: string): string[] {
+  ensureLoaded();
+  const plan = [...plans.values()].find((candidate) => candidate.integration?.sessionId === sessionId);
+  if (!plan) return [];
+  const texts = [plan.request, ...plan.lanes.flatMap((lane) => lane.tasks.flatMap((task) => [task.title, task.request]))];
+  return extractRequirementMentions(texts);
 }
 
 const TRACKING_TITLE_LIMIT = 60;
