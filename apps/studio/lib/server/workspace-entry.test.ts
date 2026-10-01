@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionSummary } from '../studio-events';
-import { pickWorkspace } from './workspace-entry';
+import { pickWorkspace, workspaceChoiceFor } from './workspace-entry';
 
 function summary(overrides: Partial<SessionSummary> & Pick<SessionSummary, 'id'>): SessionSummary {
   return {
@@ -70,5 +70,28 @@ describe('pickWorkspace', () => {
 
     expect(pickWorkspace({ ...base, projectId: 'orders', sessions }).workspace).toBe('local');
     expect(pickWorkspace({ ...base, projectId: 'orders', sessions, localAllowed: false }).workspace).toBe('copy');
+  });
+});
+
+describe('workspaceChoiceFor', () => {
+  it('켜져 있거나 켜는 중이면 바로 연다(live)', () => {
+    expect(workspaceChoiceFor({ session: summary({ id: 's1', status: 'ready' }), projectId: 'orders', workspace: 'copy' })).toEqual({ kind: 'live', id: 's1' });
+    expect(workspaceChoiceFor({ session: summary({ id: 's1', status: 'starting' }), projectId: 'orders', workspace: 'copy' })).toEqual({ kind: 'live', id: 's1' });
+  });
+
+  it('지연 기동(idle)·중지(stopped) 세션은 곧바로 켜지 않고 이어서 열기 선택을 돌려준다(resumable)', () => {
+    expect(workspaceChoiceFor({ session: summary({ id: 's1', projectId: 'orders', projectName: '주문', status: 'idle', updatedAt: '2026-01-01T00:00:00.000Z' }), projectId: 'orders', workspace: 'copy' })).toEqual({
+      kind: 'resumable',
+      sessionId: 's1',
+      projectId: 'orders',
+      projectName: '주문',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(workspaceChoiceFor({ session: summary({ id: 's2', status: 'stopped' }), projectId: 'orders', workspace: 'copy' }).kind).toBe('resumable');
+  });
+
+  it('고를 세션이 없으면(새 프로젝트) 바로 만들 수밖에 없다(start)', () => {
+    expect(workspaceChoiceFor({ projectId: 'orders', workspace: 'copy' })).toEqual({ kind: 'start', projectId: 'orders' });
+    expect(workspaceChoiceFor({ workspace: 'copy' })).toEqual({ kind: 'start' });
   });
 });
