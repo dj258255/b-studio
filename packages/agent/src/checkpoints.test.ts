@@ -639,6 +639,64 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await expect(store.restore(firstCommit)).rejects.toThrow('세션 기록에 없는');
   });
 
+  it('commitPaths는 지정한 경로만 커밋하고, 범위 밖 변경은 그대로 남기고, 범위 안에 변경이 없으면 건너뛴다(ADR-096)', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    // 범위 안에 변경이 없으면 undefined(건너뛴다)
+    expect(await store.commitPaths(['docs/requirements.md'], '문서: 요구사항')).toBeUndefined();
+
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.md'), '# 요구사항\n');
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+
+    const checkpoint = (await store.commitPaths(['docs/requirements.md'], '문서: 요구사항을 정리한다', undefined, {
+      trailers: [formatVerifyTrailer('docs')],
+    }))!;
+
+    expect(checkpoint.files).toEqual(['docs/requirements.md']);
+    expect(checkpoint.verify).toBe('docs');
+    expect(checkpoint.passedStages).toBeUndefined();
+    // 범위 밖(api/src/Order.java)의 변경은 커밋되지 않고 그대로 남는다
+    expect(await store.pendingFiles()).toEqual(['api/src/Order.java']);
+  });
+
+  it('commitPaths도 시크릿 값이 든 파일은 커밋하지 않는다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.issues.json'), '{"token":"sk_live_1234567890"}\n');
+    const findSecrets = (text: string) => (text.includes('sk_live_1234567890') ? ['TOKEN'] : []);
+
+    await expect(store.commitPaths(['docs/requirements.issues.json'], '문서: 이슈 발행 기록', undefined, { findSecrets })).rejects.toThrow(
+      'docs/requirements.issues.json (TOKEN)',
+    );
+    expect(await store.pendingFiles()).toEqual(['docs/requirements.issues.json']);
+  });
+
+  it('다른 세션의 작업 복사본과 체크포인트 sha로 레인·통합 세션을 시작할 수 있다(ADR-096): 기준 브랜치는 그 세션이 기록해 둔 값을 물려받는다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const origin = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.md'), '# 요구사항\n');
+    const docsCheckpoint = (await origin.store.commitPaths(['docs/requirements.md'], '문서: 요구사항을 정리한다'))!;
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+    await origin.store.commit('요청: 메모 추가');
+
+    // 세션이 origin 브랜치(b-studio/orders-s1)를 체크아웃한 채로도, 문서 체크포인트 시점에서 레인을 새로 시작할 수 있다
+    const laneWorkDir = path.join(workDir, '..', 'lane-1');
+    const { store: lane, source: info } = await CheckpointStore.clone(workDir, laneWorkDir, { branch: 'b-studio/orders-lane1', ref: docsCheckpoint.sha });
+
+    // 메타의 기준 브랜치는 origin 세션 브랜치가 아니라 origin이 물려받은 실제 기준 브랜치(main)다
+    expect(info.base).toBe('main');
+    expect(info.originUrl).toBe(remote);
+    expect((await lane.repository())?.base).toBe('main');
+    expect((await lane.repository())?.branch).toBe('b-studio/orders-lane1');
+    // 내용은 문서 체크포인트 시점(메모 추가 전)이다
+    expect(await readFile(path.join(laneWorkDir, 'docs/requirements.md'), 'utf8')).toBe('# 요구사항\n');
+    expect(await readFile(path.join(laneWorkDir, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
+  });
+
   it('git 오류 메시지에서 주소의 자격 증명을 지운다', () => {
     expect(redactCredentials("fatal: unable to access 'https://bot:ghp_secret@github.com/acme/orders.git/': 403")).toBe(
       "fatal: unable to access 'https://***@github.com/acme/orders.git/': 403",

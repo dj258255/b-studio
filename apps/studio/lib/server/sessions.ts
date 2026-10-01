@@ -237,6 +237,7 @@ import {
   planRequirementIssuePublish,
   publishedIssueNumbers,
   publishRequirementIssues,
+  REQUIREMENT_ISSUES_FILE,
   resolveRequirementConflict,
   syncRequirementIssueStatus,
   type ConflictResolutionResult,
@@ -518,7 +519,18 @@ export async function createSession(
   projectId: string,
   owner: string,
   workspace: WorkspaceKind = 'copy',
-  options: { modelId?: string; effort?: string; backend?: string; boot?: BootMode; extraPageChecks?: readonly WorkflowPageCheck[] } = {},
+  options: {
+    modelId?: string;
+    effort?: string;
+    backend?: string;
+    boot?: BootMode;
+    extraPageChecks?: readonly WorkflowPageCheck[];
+    /**
+     * 서버 안에서만 넘긴다(작업 분해 레인·통합, ADR-096). 이 세션의 최신 체크포인트에서 작업 복사본을 시작한다
+     * (원본 세션이 로컬 폴더이거나 git 저장소가 아니면 조용히 무시하고 지금처럼 프로젝트 원본에서 시작한다)
+     */
+    seedFromSessionId?: string;
+  } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
   // 요청이 백엔드를 고르면 허용 목록에서만 받는다. 없으면 서버 모드라 지금과 같다
@@ -534,10 +546,51 @@ export async function createSession(
   try {
     // 기본은 eager(지금과 같다). 사람이 만든 일반 세션의 라우트만 on-demand를 넘긴다
     const boot = options.boot ?? 'eager';
-    return await startSession({ projectId, owner, workspace, source, mode, backend, boot, tokenLimit, preview, modelId: options.modelId, effort: options.effort, extraPageChecks: options.extraPageChecks });
+    const seed = options.seedFromSessionId ? await resolveSessionSeed(options.seedFromSessionId) : undefined;
+    return await startSession({
+      projectId,
+      owner,
+      workspace,
+      source,
+      mode,
+      backend,
+      boot,
+      tokenLimit,
+      preview,
+      modelId: options.modelId,
+      effort: options.effort,
+      extraPageChecks: options.extraPageChecks,
+      seed,
+    });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
     release?.();
+  }
+}
+
+/**
+ * 작업 분해(레인·통합)가 세션에서 시작할 때(ADR-096) 그 세션의 작업 복사본 경로와 최신 체크포인트 sha를 찾는다.
+ * 로컬 폴더 세션은 체크포인트가 사용자 폴더 밖 별도 git(gitDir)에 있어 평범한 clone 원본으로 쓸 수 없고,
+ * 원본이 git 저장소가 아닌 세션은 기준 브랜치·원격 메타가 없어 복제해도 의미가 없다 — 두 경우 모두 undefined를 돌려줘
+ * 부르는 쪽이 지금처럼 프로젝트 원본에서 새로 시작하게 한다(세션이 이미 사라졌어도 마찬가지로 안전하게 건너뛴다).
+ */
+async function resolveSessionSeed(sessionId: string): Promise<{ workDir: string; sha: string } | undefined> {
+  try {
+    const session = requireSession(sessionId);
+    if (session.snapshot.workspace === 'local') return undefined;
+    const info = await session.checkpoints.repository();
+    if (!info) return undefined;
+    // 분해 시점에 아직 체크포인트로 남기지 않은 문서(요구사항 저장 등)가 있으면 레인·통합이 시작하기 전에 먼저
+    // 남긴다 — 그래야 요구사항·이슈 번호·발행 기록이 레인·통합 세션에도 실린다. createTaskPlan이 이미 한 번
+    // 남기지만(ADR-096), 다른 경로로 seedFromSessionId를 넘길 수도 있어 여기서도 한 번 더 안전망을 둔다
+    // (이미 커밋했으면 pendingFiles가 비어 있어 아무것도 하지 않는다)
+    await commitPendingWorkingCopyDocs(sessionId, 'docs: 나눠서 병렬로 하기 전에 문서를 정리한다').catch((error: unknown) => {
+      console.error(`[b-studio] 세션 ${sessionId}의 분해 전 문서 체크포인트를 남기지 못했습니다`, error);
+    });
+    const sha = session.snapshot.checkpoints[0]?.sha;
+    return sha ? { workDir: session.snapshot.workDir, sha } : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -554,6 +607,7 @@ async function startSession({
   modelId,
   effort,
   extraPageChecks,
+  seed,
 }: {
   projectId: string;
   owner: string;
@@ -571,6 +625,8 @@ async function startSession({
   effort?: string;
   /** 이 세션에만 덧붙일 pageChecks(작업 분해 통합 게이트). HTTP 라우트는 넘기지 않는다 */
   extraPageChecks?: readonly WorkflowPageCheck[];
+  /** 작업 분해 레인·통합이 다른 세션의 체크포인트에서 시작할 때(ADR-096). resolveSessionSeed가 만든다 */
+  seed?: { workDir: string; sha: string };
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
@@ -598,7 +654,15 @@ async function startSession({
     await mkdir(path.dirname(workDir), { recursive: true });
     // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
     const allowSubfolder = source.spec.repository?.monorepo === true;
-    if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
+    if (seed) {
+      // 작업 분해 레인·통합(ADR-096): 프로젝트 원본이 아니라 그 세션의 작업 복사본에서, 그 세션의 최신 체크포인트
+      // sha로 시작한다. 기준 브랜치·원격은 그 세션이 이미 기록해 둔 값을 그대로 물려받는다(inspectSource가 읽는다)
+      const cloned = await CheckpointStore.clone(seed.workDir, workDir, { branch: sessionBranchName(projectId, id), author, allowSubfolder, ref: seed.sha });
+      checkpoints = cloned.store;
+      firstCheckpoint = cloned.start;
+      sourceDirtyFiles = cloned.source.dirtyFiles;
+      await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
+    } else if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
       // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
       const cloned = await CheckpointStore.clone(source.root, workDir, { branch: sessionBranchName(projectId, id), author, allowSubfolder });
       checkpoints = cloned.store;
@@ -2384,6 +2448,66 @@ async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text
   return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', { findSecrets });
 }
 
+// ---------------------------------------------------------------------------
+// 문서 체크포인트(ADR-096): 요구사항 저장·이슈 발행 사이드카처럼 docs/** 안의 변경만 검증 게이트 없이 체크포인트로
+// 남긴다. 문서는 서비스를 재시작하거나 빌드를 깨뜨리지 않으므로 전체 검증(run·test·review…)을 거칠 이유가 없다.
+// 그대로 두면 "나눠서 병렬로 하기"가 project 원본에서 레인을 시작해 저장한 요구사항·이슈 번호·발행 기록이 사라지는
+// 문제가 있어(docs/가 세션 작업 복사본에 커밋되지 않은 채로 남는다), 저장 직후 여기서 체크포인트로 남긴다.
+// ---------------------------------------------------------------------------
+
+/** docs/** 전부(마크다운·JSON 사이드카 모두), 저장소 루트의 *.md, .github/pull_request_template.md만 문서 경로로 인정한다 */
+const DOC_PATH = /^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$/;
+
+export function isDocPath(file: string): boolean {
+  return DOC_PATH.test(file);
+}
+
+/**
+ * 문서만 바뀐 변경(요구사항 저장, 이슈 발행·충돌 해결 사이드카 등)을 검증 게이트 없이 체크포인트로 남긴다.
+ * paths 중 문서 경로(docs/**, 루트 *.md, .github/pull_request_template.md)가 아닌 것이 하나라도 있으면 아무것도
+ * 커밋하지 않고 거부한다(호출하는 쪽의 실수로 코드 변경까지 게이트 없이 커밋되는 구멍을 막는다).
+ * paths로 좁혀 커밋하므로(CheckpointStore.commitPaths) 작업 복사본에 다른 변경이 함께 있어도 그 변경은 건드리지
+ * 않고 그대로 pending으로 남는다. 범위 안에 바뀐 파일이 없으면 조용히 건너뛴다(undefined).
+ * Workflow-Verify 트레일러에 'docs'를 남겨 이 체크포인트가 게이트 통과 증거로 쓰이지 않게 한다(requirements.ts의
+ * computeRequirementStatus는 애초에 체크포인트만으로 "검증됨"을 매기지 않지만, 배포 조건·체크포인트 화면이 이
+ * 표시로 "문서" 체크포인트를 가볍게 확인·직접 수정과 같은 방식으로 구분해 보여 준다).
+ * 다른 화면(문서 탭 등)도 Workspace로 docs/를 쓴 뒤 그대로 재사용할 수 있게 공개한다.
+ */
+export async function commitWorkingCopyDocs(sessionId: string, paths: readonly string[], message: string): Promise<Checkpoint | undefined> {
+  const session = requireSession(sessionId);
+  const bad = paths.filter((file) => !isDocPath(file));
+  if (bad.length > 0) throw new StudioError(400, `문서 경로가 아니어서 문서 체크포인트로 남기지 않았습니다: ${bad.join(', ')}`);
+  if (paths.length === 0) return undefined;
+  const checkpoint = await session.checkpoints.commitPaths(paths, message, undefined, {
+    findSecrets: (text) => session.sandbox.findSecrets(text),
+    trailers: [formatVerifyTrailer('docs')],
+  });
+  if (!checkpoint) return undefined;
+  session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  emit(session, { type: 'docs_checkpoint', checkpoint });
+  return checkpoint;
+}
+
+/**
+ * 지금 바뀐 파일 중 문서 경로만 골라 문서 체크포인트로 남긴다. 어떤 문서 파일이 바뀌었는지 미리 모르는 곳(작업
+ * 분해가 레인을 시작하기 전 안전망 등)에서 쓴다 — 문서가 아닌 변경은 손대지 않고 그대로 둔다. 바뀐 문서 파일이
+ * 없으면 조용히 건너뛴다(undefined).
+ */
+export async function commitPendingWorkingCopyDocs(sessionId: string, message: string): Promise<Checkpoint | undefined> {
+  const session = requireSession(sessionId);
+  const pending = (await session.checkpoints.pendingFiles()).filter(isDocPath);
+  return commitWorkingCopyDocs(sessionId, pending, message);
+}
+
+/** "docs: 요구사항을 정리한다 (R2~R20)"처럼 커밋 메시지에 붙일 범위. 숫자 id가 하나도 없으면 빈 문자열 */
+function requirementRangeLabel(ids: readonly string[]): string {
+  const numbers = ids.map((id) => /^R(\d+)/.exec(id)?.[1]).filter((value): value is string => value !== undefined).map(Number);
+  if (numbers.length === 0) return '';
+  const min = Math.min(...numbers);
+  const max = Math.max(...numbers);
+  return min === max ? ` (R${min})` : ` (R${min}~R${max})`;
+}
+
 /** b-studio 세션이 만드는 브랜치 이름. 저장소 화면이 PR 목록에서 b-studio가 만든 브랜치를 찾을 때도 같은 규칙을 쓴다 */
 export function sessionBranchName(projectId: string, sessionId: string): string {
   return `b-studio/${projectId}-${sessionId}`;
@@ -3671,6 +3795,14 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
 
   const markdown = serializeRequirementsMarkdown(revisedRequirements, statusById, parsed.data.assumptions, guardedManualSteps);
   await new Workspace(session.project.root).write(REQUIREMENTS_FILE, markdown);
+  // 작업 복사본에만 쓰고 끝나면 "나눠서 병렬로 하기"가 프로젝트 원본에서 레인을 시작할 때 이 저장이 통째로 사라진다
+  // (docs/가 git status에 커밋 안 된 채로 남는다). 검증 게이트 없이 바로 체크포인트로 남겨 다음 체크포인트·분해·PR에
+  // 그대로 실리게 한다. 실패해도(시크릿 오탐 등) 저장 자체는 이미 끝났으므로 화면에는 알리지 않고 로그만 남긴다
+  await commitWorkingCopyDocs(id, [REQUIREMENTS_FILE], `docs: 요구사항을 정리한다${requirementRangeLabel(revisedRequirements.map((requirement) => requirement.id))}`).catch(
+    (error: unknown) => {
+      console.error(`[b-studio] 세션 ${id}의 요구사항 문서 체크포인트를 남기지 못했습니다`, error);
+    },
+  );
   return getSessionRequirements(id);
 }
 
@@ -3720,8 +3852,11 @@ async function listDocsDirFiles(workspace: Workspace): Promise<string[]> {
   }
 }
 
-/** 문서 경로가 이 탭이 다루는 범위 안인지(docs/**\/*.md 또는 루트의 세 파일). 그 밖은 코드 탭이 다룬다 */
-function isDocPath(file: string): boolean {
+/**
+ * 문서 경로가 이 탭이 다루는 범위 안인지(docs/**\/*.md 또는 루트의 세 파일). 그 밖은 코드 탭이 다룬다.
+ * 문서 체크포인트의 isDocPath(사이드카 JSON 등 docs/** 전부)보다 좁다
+ */
+function isDocsTabPath(file: string): boolean {
   if (ROOT_DOC_NAMES.includes(file)) return true;
   return /^docs\/.+\.md$/.test(file);
 }
@@ -3746,7 +3881,7 @@ export async function listSessionDocs(id: string): Promise<DocsTree> {
 /** 문서 하나의 내용. 경로는 이 탭이 다루는 범위(docs/**\/*.md·루트 세 파일) 안이어야 한다 */
 export async function readSessionDoc(id: string, file: string): Promise<{ path: string; content: string }> {
   const session = requireSession(id);
-  if (!isDocPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
+  if (!isDocsTabPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
   const content = await new Workspace(session.project.root).read(file).catch(() => {
     throw new StudioError(404, '문서를 찾을 수 없습니다');
   });
@@ -3757,9 +3892,20 @@ export async function readSessionDoc(id: string, file: string): Promise<{ path: 
 export async function writeSessionDoc(id: string, file: string, content: string): Promise<{ path: string; content: string }> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
-  if (!isDocPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
+  if (!isDocsTabPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
   await new Workspace(session.project.root).write(file, content);
+  await commitDocTabChange(id, file, `docs: ${file} 내용을 고친다`);
   return { path: file, content };
+}
+
+/**
+ * 문서 탭의 저장·새 문서·색인 갱신을 곧바로 문서 체크포인트로 남긴다(ADR-096). 커밋하지 않으면 작업 분해 레인이
+ * 이 문서를 물려받지 못하고 PR에도 늦게 실린다. 실패해도(비밀 값 감지 등) 저장 자체는 되돌리지 않고 알림만 남긴다
+ */
+async function commitDocTabChange(id: string, file: string, message: string): Promise<void> {
+  await commitWorkingCopyDocs(id, [file], message).catch((error: unknown) => {
+    console.error(`[docs] ${file} 문서 체크포인트를 남기지 못했습니다: ${describe(error)}`);
+  });
 }
 
 export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap';
@@ -3773,6 +3919,12 @@ export interface NewDocInput {
 
 /** "새 문서" 버튼: 템플릿으로 다음 번호의 설계 문서·ADR을 만들거나, 트러블슈팅·로드맵 항목을 이어 붙인다 */
 export async function createSessionDoc(id: string, input: NewDocInput): Promise<{ path: string; content: string }> {
+  const created = await createSessionDocFile(id, input);
+  await commitDocTabChange(id, created.path, `docs: ${input.title.trim()} 문서를 더한다`);
+  return created;
+}
+
+async function createSessionDocFile(id: string, input: NewDocInput): Promise<{ path: string; content: string }> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 만들 수 있습니다');
   const title = input.title.trim();
@@ -3810,6 +3962,12 @@ export async function createSessionDoc(id: string, input: NewDocInput): Promise<
 
 /** "색인 갱신": docs/README.md의 관리 구간만 다시 만든다(문서마다 첫 H1·첫 문단을 읽어 표를 채운다) */
 export async function regenerateSessionDocsIndex(id: string): Promise<{ path: string; content: string }> {
+  const regenerated = await regenerateSessionDocsIndexFile(id);
+  await commitDocTabChange(id, regenerated.path, 'docs: 문서 색인을 갱신한다');
+  return regenerated;
+}
+
+async function regenerateSessionDocsIndexFile(id: string): Promise<{ path: string; content: string }> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 갱신할 수 있습니다');
   const workspace = new Workspace(session.project.root);
@@ -3862,12 +4020,22 @@ export async function previewRequirementIssuePublish(id: string): Promise<Requir
   return planRequirementIssuePublish(ctx, requirements, statusById);
 }
 
+/** publishSessionRequirementIssues·resolveSessionRequirementConflict가 사이드카(docs/requirements.issues.json)를 쓴 뒤 공통으로 부른다 */
+async function commitRequirementIssuesSidecar(id: string, message: string): Promise<void> {
+  await commitWorkingCopyDocs(id, [REQUIREMENT_ISSUES_FILE], message).catch((error: unknown) => {
+    console.error(`[b-studio] 세션 ${id}의 이슈 발행 기록 문서 체크포인트를 남기지 못했습니다`, error);
+  });
+}
+
 /** 미리보기를 확인한 뒤 실제로 발행한다(하위 이슈·추적 이슈를 만들거나 갱신한다) */
 export async function publishSessionRequirementIssues(id: string): Promise<RequirementPublishResult> {
   const session = requireSession(id);
   const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
   const { requirements, statusById } = await requirementsForIssues(id);
-  return publishRequirementIssues(ctx, requirements, statusById);
+  const result = await publishRequirementIssues(ctx, requirements, statusById);
+  // 발행 기록(이슈 번호·발행 해시)도 작업 복사본에만 남으면 레인·통합 세션이 이어받지 못한다. 요구사항 저장과 같은 이유로 바로 체크포인트로 남긴다
+  await commitRequirementIssuesSidecar(id, 'docs: 요구사항을 이슈로 발행한 기록을 남긴다');
+  return result;
 }
 
 /** 발행된 요구사항 하나의 충돌(이슈가 GitHub에서 직접 수정됨)을 가져오기·덮어쓰기·무시 중 하나로 푼다 */
@@ -3877,7 +4045,12 @@ export async function resolveSessionRequirementConflict(id: string, requirementI
   const { requirements, statusById } = await requirementsForIssues(id);
   const requirement = requirements.find((candidate) => candidate.id === requirementId);
   if (!requirement) throw new StudioError(404, `요구사항 ${requirementId}을 찾지 못했습니다`);
-  return resolveRequirementConflict(ctx, requirement, statusById[requirementId] ?? '미착수', resolution);
+  const result = await resolveRequirementConflict(ctx, requirement, statusById[requirementId] ?? '미착수', resolution);
+  // overwrite·ignore만 사이드카를 고친다(import는 초안만 돌려주고 쓰지 않는다, requirement-issues.ts 참고)
+  if (result.action === 'overwrite' || result.action === 'ignore') {
+    await commitRequirementIssuesSidecar(id, `docs: ${requirementId} 이슈 충돌을 ${result.action === 'overwrite' ? '덮어써' : '무시해'} 해결한다`);
+  }
+  return result;
 }
 
 /**

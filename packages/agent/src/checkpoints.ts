@@ -17,8 +17,8 @@ export interface Checkpoint {
   files: string[];
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 체크포인트다 */
   passedStages?: WorkflowStage[];
-  /** 가볍게 확인(light) 실행으로 만든 체크포인트면 'light'. 전체 검증이면 없다 */
-  verify?: 'light';
+  /** 가볍게 확인(light) 실행이면 'light', 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'. 전체 검증이면 없다 */
+  verify?: 'light' | 'docs';
 }
 
 export interface GitAuthor {
@@ -204,7 +204,11 @@ export class CheckpointStore {
     const hasCommit = await inRepo(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).then(() => true, () => false);
     if (!hasCommit) return undefined;
 
-    const base = await inRepo(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim(), () => '');
+    // source가 다른 b-studio 세션의 작업 복사본이면(작업 분해가 세션의 체크포인트에서 레인·통합을 시작할 때, ADR-096)
+    // 지금 체크아웃된 브랜치는 그 세션 브랜치이지 기준 브랜치가 아니다. 그 세션이 클론될 때 기록해 둔 기준 브랜치
+    // 메타(b-studio.base)가 있으면 그것을 쓰고, 없으면(보통의 프로젝트 원본) 지금처럼 체크아웃된 브랜치를 쓴다
+    const sessionBase = await inRepo(['config', '--get', 'b-studio.base']).then((out) => out.trim() || undefined, () => undefined);
+    const base = sessionBase ?? (await inRepo(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim(), () => ''));
     if (!base) throw new CheckpointError('원본 저장소가 브랜치가 아닌 커밋(detached HEAD)을 가리키고 있어 세션 브랜치를 만들 수 없습니다');
     const originUrl = await inRepo(['remote', 'get-url', 'origin']).then((out) => out.trim() || undefined, () => undefined);
     // 모노레포에서 다른 폴더의 변경은 이 프로젝트와 관계없으므로 프로젝트 폴더의 변경만 센다
@@ -219,7 +223,21 @@ export class CheckpointStore {
   static async clone(
     source: string,
     root: string,
-    { branch, allowSubfolder = false, ...options }: CheckpointStoreOptions & { branch: string; allowSubfolder?: boolean },
+    {
+      branch,
+      allowSubfolder = false,
+      ref,
+      ...options
+    }: CheckpointStoreOptions & {
+      branch: string;
+      allowSubfolder?: boolean;
+      /**
+       * 세션 브랜치를 시작할 커밋. 생략하면 지금처럼 원본의 기준 브랜치(info.base) 끝에서 시작한다.
+       * 작업 분해(레인·통합)가 다른 세션의 체크포인트에서 시작할 때(ADR-096) source에 그 세션의 작업 복사본을 주고
+       * 여기에 그 세션의 최신 체크포인트 sha를 준다 — info.base는 그대로 메타(PR 대상)로 쓰고, 내용만 그 sha에서 가져온다
+       */
+      ref?: string;
+    },
   ): Promise<{ store: CheckpointStore; start: Checkpoint; source: SourceRepository; projectRoot: string }> {
     const gitBin = options.gitBin ?? 'git';
     const info = await CheckpointStore.inspectSource(source, { gitBin, allowSubfolder });
@@ -235,12 +253,18 @@ export class CheckpointStore {
     // 모노레포 하위 폴더도 저장소 전체를 복제한다. compose 빌드가 공용 패키지처럼 프로젝트 밖 폴더를 쓸 수 있기 때문이다
     const toplevel = (await runGit(gitBin, ['-C', await resolveReal(source), 'rev-parse', '--show-toplevel'])).trim();
     await mkdir(path.dirname(path.resolve(root)), { recursive: true });
-    await runGit(gitBin, ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(toplevel), path.resolve(root)], {
-      timeout: CLONE_TIMEOUT_MS,
-    });
+    // ref가 있으면(다른 세션에서 시작) 그 커밋이 기준 브랜치에는 없을 수 있어 --branch로 고정하지 않고 복제한 뒤 따로 체크아웃한다
+    await runGit(
+      gitBin,
+      ref
+        ? ['clone', '--quiet', '--', await resolveReal(toplevel), path.resolve(root)]
+        : ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(toplevel), path.resolve(root)],
+      { timeout: CLONE_TIMEOUT_MS },
+    );
 
     const store = new CheckpointStore(root, options);
     if (info.originUrl) await store.#git(['remote', 'set-url', 'origin', info.originUrl]);
+    if (ref) await store.#git(['checkout', '-q', ref]);
     await store.#git(['checkout', '-q', '-b', branch]);
     await store.#configure();
     const start = (await store.#git(['rev-parse', 'HEAD'])).trim();
@@ -355,6 +379,37 @@ export class CheckpointStore {
       'commit', '-q', '--cleanup=whitespace', ...(allowEmpty ? ['--allow-empty'] : []),
       '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
       ...(trailers.length > 0 ? ['-m', trailers.map(oneLine).join('\n')] : []),
+    ]);
+    return this.#checkpoint('HEAD');
+  }
+
+  /**
+   * 지정한 경로만 범위로 체크포인트를 남긴다. 그 밖에 바뀐 파일이 있어도 손대지 않고 그대로 둔다(ADR-096).
+   * 요구사항 저장처럼 문서만 바꾼 변경을, 함께 진행 중일 수 있는 코드 변경과 섞지 않고 따로 커밋할 때 쓴다.
+   * 범위 안에 바뀐 파일이 없으면 커밋하지 않는다(undefined) — 저장했지만 내용이 같았던 경우를 조용히 건너뛴다.
+   */
+  async commitPaths(
+    paths: readonly string[],
+    message: string,
+    body?: string,
+    { findSecrets, trailers = [] }: { findSecrets?: (text: string) => string[]; trailers?: readonly string[] } = {},
+  ): Promise<Checkpoint | undefined> {
+    if (paths.length === 0) return undefined;
+    const subdir = await this.#subdir();
+    const scoped = paths.map((file) => (subdir ? `${subdir}/${file}` : file));
+    const changed = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...scoped])).split('\0').filter(Boolean);
+    if (changed.length === 0) return undefined;
+    if (findSecrets) {
+      const leaks = await this.#secretLeaks(paths, `${message}\n${body ?? ''}`, findSecrets);
+      if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
+    }
+    await this.#git(['add', '-A', '--', ...scoped]);
+    const text = body?.trim();
+    await this.#git([
+      'commit', '-q', '--cleanup=whitespace',
+      '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
+      ...(trailers.length > 0 ? ['-m', trailers.map(oneLine).join('\n')] : []),
+      '--', ...scoped,
     ]);
     return this.#checkpoint('HEAD');
   }

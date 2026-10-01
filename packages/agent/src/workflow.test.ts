@@ -97,6 +97,11 @@ describe('project workflow', () => {
     expect(parseVerifyTrailerValues(['light', 'full'])).toBeUndefined();
     expect(parseVerifyTrailerValues(['full'])).toBeUndefined();
     expect(parseVerifyTrailerValues([''])).toBeUndefined();
+    // 문서만 바꿔 검증 게이트를 거치지 않은 체크포인트(ADR-096)도 같은 트레일러로 표시한다
+    expect(formatVerifyTrailer('docs')).toBe(`${WORKFLOW_VERIFY_TRAILER}: docs`);
+    expect(parseVerifyTrailerValues(['docs'])).toBe('docs');
+    expect(parseVerifyTrailerValues(['light', 'docs'])).toBe('docs');
+    expect(parseVerifyTrailerValues(['DOCS'])).toBe('docs');
     // 가볍게 확인한 체크포인트(run·contract_check만 통과)는 releaseRequires가 채워지지 않아 배포가 막힌다
     const strict = projectWith({ releaseRequires: ['contract_check', 'test', 'review', 'checkpoint'] });
     expect(releaseBlockers(strict, ['run', 'contract_check'])).toEqual(['test', 'review']);
