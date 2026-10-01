@@ -485,6 +485,26 @@ describe('resolveReferencedFiles', () => {
   it('명세에 참조 파일이 없으면 빈 배열', async () => {
     expect(await resolveReferencedFiles(root, '로그인 API를 만드세요')).toEqual([]);
   });
+
+  it('256KB를 넘는 JSON(예: seed/seed.json)은 포기하지 않고 구조만 요약한다', async () => {
+    await mkdir(path.join(root, 'seed'), { recursive: true });
+    const records = Array.from({ length: 9000 }, (_, index) => ({ id: index, title: `상품 ${index}` }));
+    const content = JSON.stringify(records);
+    expect(Buffer.byteLength(content, 'utf8')).toBeGreaterThan(256 * 1024);
+    await writeFile(path.join(root, 'seed', 'seed.json'), content);
+
+    const files = await resolveReferencedFiles(root, '시드 데이터는 seed/seed.json에 있습니다');
+
+    expect(files).toEqual([
+      { path: 'seed/seed.json', exists: true, sizeBytes: expect.any(Number), preview: '배열, 9,000개 항목 · 첫 항목 필드: id: number, title: string' },
+    ]);
+  });
+
+  it('256KB를 넘는 JSON이 아닌 파일(예: 큰 로그)은 여전히 크기만 보고한다', async () => {
+    await writeFile(path.join(root, 'dump.sql'), 'x'.repeat(300 * 1024));
+    const files = await resolveReferencedFiles(root, '데이터는 dump.sql에 있습니다');
+    expect(files).toEqual([{ path: 'dump.sql', exists: true, sizeBytes: expect.any(Number), preview: '(파일이 커서 미리보기를 만들지 못했습니다)' }]);
+  });
 });
 
 describe('labelRecommendationSource', () => {
