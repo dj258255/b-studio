@@ -277,6 +277,11 @@ export function repairExtractionReply(raw: unknown): unknown {
       for (const key of ['ears', 'scenarios', 'nfr', 'trace', 'rev', 'hash', 'revisedAt']) {
         if (candidate[key] === null) delete candidate[key];
       }
+      // 문자열 안에 JSON 예시({"items": …})가 이스케이프 없이 들어가면 jsonrepair가 그 부분을 배열 원소(객체)로 떼어 낸다.
+      // 인수 조건 목록에 문자열이 아닌 원소가 섞이면, 떨어진 조각을 원래 문장 하나로 다시 붙인다
+      if (Array.isArray(candidate.acceptance) && candidate.acceptance.some((item) => typeof item !== 'string')) {
+        candidate.acceptance = [candidate.acceptance.map((item) => (typeof item === 'string' ? item : JSON.stringify(item))).join(' ')];
+      }
       if (Array.isArray(candidate.scenarios)) {
         if (candidate.scenarios.length > 20) candidate.scenarios = candidate.scenarios.slice(0, 20);
         const scenarios = candidate.scenarios as unknown[];
@@ -318,18 +323,45 @@ export async function requestRequirementsExtraction(
   referencedFilesContext?: string,
 ): Promise<ExtractionReply & { usage: AgentUsage; durationMs: number }> {
   const started = performance.now();
-  const answer = await ask({ system: buildExtractionSystemPrompt(), user: buildExtractionUserPrompt(specText, referencedFilesContext) }, signal);
-  const durationMs = Math.round(performance.now() - started);
-  const { text, usage } = answer;
+  const system = buildExtractionSystemPrompt();
+  const user = buildExtractionUserPrompt(specText, referencedFilesContext);
+  const first = await ask({ system, user }, signal);
   try {
-    return { ...parseExtractionReply(text), usage, durationMs };
-  } catch (error) {
-    if (error instanceof RequirementsError) {
-      error.usage = usage;
-      error.durationMs = durationMs;
+    return { ...parseExtractionReply(first.text), usage: first.usage, durationMs: Math.round(performance.now() - started) };
+  } catch (firstError) {
+    if (!(firstError instanceof RequirementsError) || signal?.aborted) throw firstError;
+    // 몇 분 걸린 답을 형식 하나로 버리지 않도록, 어디가 틀렸는지 알려 주고 딱 한 번 다시 묻는다(그래도 틀리면 오류)
+    const retry = await ask({ system, user: `${user}\n\n${buildExtractionRetryNote(firstError.message)}` }, signal);
+    const usage = addUsage(first.usage, retry.usage);
+    const durationMs = Math.round(performance.now() - started);
+    try {
+      return { ...parseExtractionReply(retry.text), usage, durationMs };
+    } catch (error) {
+      if (error instanceof RequirementsError) {
+        error.usage = usage;
+        error.durationMs = durationMs;
+      }
+      throw error;
     }
-    throw error;
   }
+}
+
+/** 두 번 부른 호출의 사용량을 합친다(다시 물은 비용도 기록에 남긴다) */
+function addUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
+    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+  };
+}
+
+/** 다시 물을 때 덧붙이는 안내. 첫 답이 왜 거절됐는지와, 깨지기 쉬운 지점(문자열 안 큰따옴표)을 짚는다 */
+export function buildExtractionRetryNote(reason: string): string {
+  return [
+    `[이전 답을 쓸 수 없었습니다] ${reason.slice(0, 600)}`,
+    '같은 형식의 JSON 객체 하나만 다시 출력하세요. 문자열 안의 큰따옴표는 반드시 \\" 로 이스케이프하거나 작은따옴표·백틱으로 바꾸고, 해당 사항이 없는 선택 항목(ears·scenarios·nfr)은 null 대신 아예 빼세요.',
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
