@@ -88,6 +88,34 @@ class GreetingTest {
     const file = discoverJunitFile('GreetingTest.kt', content);
     expect(file.suites[0]!.tests.map((test) => test.name)).toEqual(['returnsHello']);
   });
+
+  it('@DisplayName 문자열을 이어 붙이거나 여러 줄에 걸쳐 써도 표시 이름 전체를 읽는다', () => {
+    const content = `
+class SchemaTest {
+    @Test
+    @DisplayName("R20.2: 새 게시글 id는 시드 id와 충돌하지 않는다 "
+            + "(시퀀스가 보정되지 않으면 {PK} 위반으로 500이 난다)")
+    void newPostId() throws Exception {
+        assertThat(1).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("R4: 같은 " + "줄에서 이어 붙인다")
+    void sameLine() {
+    }
+
+    @Test
+    void afterwards() {
+    }
+}
+`;
+    const tests = discoverJunitFile('SchemaTest.java', content).suites[0]!.tests;
+    expect(tests.map((test) => [test.name, test.displayName, test.requirementIds])).toEqual([
+      ['newPostId', 'R20.2: 새 게시글 id는 시드 id와 충돌하지 않는다 (시퀀스가 보정되지 않으면 {PK} 위반으로 500이 난다)', ['R20.2']],
+      ['sameLine', 'R4: 같은 줄에서 이어 붙인다', ['R4']],
+      ['afterwards', 'afterwards', []],
+    ]);
+  });
 });
 
 describe('discoverJsFile', () => {
