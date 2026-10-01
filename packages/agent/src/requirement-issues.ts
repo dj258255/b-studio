@@ -10,29 +10,26 @@
  * `packages/agent/src/repository.ts`의 이슈 API 호출과 세션 작업 복사본 읽기/쓰기를 맡고, 여기 함수들은
  * 입력(요구사항·원격 이슈 스냅샷)을 받아 "무엇을 할지"(발행 계획)와 "본문에 무엇을 쓸지"만 계산한다.
  *
- * 다른 에이전트가 `requirements.ts`의 `Requirement`에 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace` 필드를
- * 동시에 추가하는 중이다(아직 main 병합 전). 이 모듈은 그 필드들을 전부 optional로 선언한 별도 구조 타입
- * (`RequirementForIssues`)으로 방어적으로 읽는다 — 병합되면 `Requirement`가 이 타입의 부분집합이 되므로
- * 구조적 타이핑으로 그대로 호환된다.
+ * `requirements.ts`의 `Requirement`가 이미 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace` 필드를 갖고 있다(ADR-090).
+ * 이 모듈은 그 타입을 그대로 쓰지 않고 구조적으로 호환되는 별도 타입(`RequirementForIssues`)을 선언해 두는데,
+ * 이유는 결합을 낮추기 위해서다(이슈 발행은 요구사항 추적과 독립적으로 테스트·재사용하고 싶다) — 필드 이름·모양은
+ * `Requirement`와 반드시 같아야 한다(예전에 `ears`를 string, `nfr`을 string[]로 잘못 선언해 두었던 적이 있다 —
+ * `Requirement`는 `ears: {pattern, statement}`, `nfr: {metric, threshold, condition, method}`다. 모양이 어긋나면
+ * 이슈 본문에 EARS·시나리오·NFR이 전부 빠진 채로 발행된다, 버그 리포트 참고).
  */
 import { createHash } from 'node:crypto';
-import type { RequirementStatus } from './requirements';
+import type { Ears, Nfr, RequirementKind, RequirementPriority, RequirementStatus, Scenario } from './requirements';
 
 // ---------------------------------------------------------------------------
-// 타입: 다른 에이전트가 추가 중인 선택 필드를 방어적으로 읽는 구조 타입
+// 타입: `Requirement`(requirements.ts)와 같은 모양이되, 결합을 낮추려고 구조적으로만 호환시킨다
 // ---------------------------------------------------------------------------
 
-export interface RequirementScenario {
-  given: string;
-  when: string;
-  then: string;
-}
-
-/** 요구사항 ↔ 이슈·다른 요구사항의 관계. 다른 에이전트가 requirements.ts에 추가 중인 필드와 이름을 맞췄다 */
+/** 요구사항 ↔ 이슈·다른 요구사항의 관계. requirements.ts의 Trace와 이름을 맞췄다 */
 export interface RequirementTrace {
   issue?: number;
   dependsOn?: readonly string[];
-  supersedes?: readonly string[];
+  /** 옛 항목을 가리키는 요구사항 id 하나(재추출로 쪼개질 때). requirements.ts의 Trace와 모양을 맞춘다(배열이 아니다) */
+  supersedes?: string;
 }
 
 /** 마지막으로 이 요구사항을 이슈로 발행했을 때의 기록. requirements.ts의 JSON 블록에 관대하게 얹는 필드다 */
@@ -45,8 +42,8 @@ export interface RequirementPublishedRecord {
 }
 
 /**
- * 이 모듈이 다루는 요구사항의 최소 모양. `Requirement`(requirements.ts)에 병합 예정인 선택 필드를 전부 담되,
- * 이 모듈은 그 필드들이 아직 없어도(undefined) 안전하게 동작한다(EARS·시나리오·NFR이 없으면 "(없음)"으로 쓴다).
+ * 이 모듈이 다루는 요구사항의 최소 모양. `Requirement`(requirements.ts)와 필드 이름·모양을 반드시 맞춘다.
+ * 이 모듈은 그 필드들이 없어도(undefined) 안전하게 동작한다(EARS·시나리오·NFR이 없으면 그 절을 아예 쓰지 않는다).
  */
 export interface RequirementForIssues {
   id: string;
@@ -56,9 +53,9 @@ export interface RequirementForIssues {
   acceptance: readonly string[];
   rev?: number;
   hash?: string;
-  ears?: string;
-  scenarios?: readonly RequirementScenario[];
-  nfr?: readonly string[];
+  ears?: Ears;
+  scenarios?: readonly Scenario[];
+  nfr?: Nfr;
   trace?: RequirementTrace;
   published?: RequirementPublishedRecord;
 }
@@ -81,33 +78,42 @@ export const REQUIREMENT_LABEL = 'b-studio:req';
 const MANAGED_REGION_HEADER = /<!--\s*b-studio:req\s+id=(\S+)\s+rev=(\d+)\s+hash=(\S+?)\s*-->/;
 const MANAGED_REGION_FOOTER = /<!--\s*\/b-studio:req\s*-->/;
 
-/** 요구사항을 이슈 본문에 쓸 관리형 영역의 "내용" 부분(헤더·꼬리 마커 없이). EARS·시나리오·NFR·인수 조건·원본 안내를 담는다 */
+/**
+ * 요구사항을 이슈 본문에 쓸 관리형 영역의 "내용" 부분(헤더·꼬리 마커 없이). EARS·시나리오·NFR·인수 조건·원본 안내를 담는다.
+ * EARS·시나리오·NFR 절은 실제로 값이 있을 때만 쓴다(없으면 절 자체를 뺀다 — "(정의되지 않음)"·"(없음)" 같은 자리표시자를
+ * 남기면 docs/requirements.md에 분명히 있는 내용도 이슈만 보고는 빠진 것처럼 보인다, 버그 리포트 참고). 한 줄
+ * 표기(`- EARS(pattern): …`, `- NFR: 지표 … · …`)는 docs/requirements.md의 몸통 줄과 같은 모양으로 맞춰
+ * draftManagedRequirement가 모델 호출 없이 그대로 되읽을 수 있게 한다.
+ */
 export function buildRegionContent(requirement: RequirementForIssues): string {
-  const ears = requirement.ears?.trim() || '(정의되지 않음)';
-  const scenarios =
-    requirement.scenarios && requirement.scenarios.length > 0
-      ? ['| Given | When | Then |', '| --- | --- | --- |', ...requirement.scenarios.map((s) => `| ${s.given} | ${s.when} | ${s.then} |`)].join('\n')
-      : '(없음)';
-  const nfr = requirement.nfr && requirement.nfr.length > 0 ? requirement.nfr.map((item) => `- ${item}`).join('\n') : '(없음)';
   const acceptance = requirement.acceptance.map((item) => `- ${item}`).join('\n');
-  return [
-    `- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}`,
-    '',
-    '### EARS',
-    ears,
-    '',
-    '### 시나리오',
-    scenarios,
-    '',
-    '### 비기능 요구사항',
-    nfr,
-    '',
-    '### 인수 조건',
-    acceptance,
+  const sections: string[] = [`- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}`];
+  if (requirement.ears) {
+    sections.push('', '### EARS', `- EARS(${requirement.ears.pattern}): ${requirement.ears.statement}`);
+  }
+  if (requirement.scenarios && requirement.scenarios.length > 0) {
+    sections.push(
+      '',
+      '### 시나리오',
+      '| id | Given | When | Then |',
+      '| --- | --- | --- | --- |',
+      ...requirement.scenarios.map((s) => `| ${s.id} | ${s.given} | ${s.when} | ${s.then} |`),
+    );
+  }
+  if (requirement.nfr) {
+    sections.push(
+      '',
+      '### 비기능 요구사항',
+      `- NFR: 지표 ${requirement.nfr.metric} · 임계값 ${requirement.nfr.threshold} · 조건 ${requirement.nfr.condition} · 측정 ${requirement.nfr.method}`,
+    );
+  }
+  sections.push('', '### 인수 조건', acceptance);
+  sections.push(
     '',
     '---',
     `이 내용은 \`docs/requirements.md\`(${requirement.id})에서 자동으로 만들어졌습니다. **파일이 원본입니다** — 이 본문을 직접 고치지 말고 파일을 고친 뒤 다시 발행하세요. 발행 도구가 내용이 달라진 것을 감지하면 덮어쓰지 않고 충돌로 표시합니다.`,
-  ].join('\n');
+  );
+  return sections.join('\n');
 }
 
 /** buildRegionContent가 만드는 내용만으로 계산한 해시. 이 값이 발행 계획(create/update/conflict)의 판단 기준이다 */
@@ -321,23 +327,31 @@ export function planRequirementPublish(inputs: readonly RequirementPlanInput[], 
 
 export interface RequirementPlanSummary {
   total: number;
+  /** 하위 이슈를 실제로 새로 만드는 항목 수(체크리스트 전용은 빼고 센다 — could·docs는 하위 이슈를 만들지 않는다) */
   create: number;
   update: number;
   unchanged: number;
   conflict: number;
   reverify: number;
   closedButRequirementExists: number;
+  /**
+   * could 우선순위·docs 종류라 하위 이슈 없이 추적 이슈 체크리스트로만 남는 항목 수. 이 항목은 원격에 짝지을
+   * 하위 이슈가 애초에 없어 매번 action이 'create'로 계산되지만(findExistingRemoteIssue가 찾을 대상이 없다),
+   * 실제로는 아무것도 새로 만들지 않으므로 `create`에 넣지 않고 따로 센다(버그 리포트 — "새로 만들기"로 잘못 보였다)
+   */
+  checklistOnly: number;
 }
 
 export function summarizeRequirementPlan(entries: readonly RequirementPlanEntry[]): RequirementPlanSummary {
   return {
     total: entries.length,
-    create: entries.filter((entry) => entry.action === 'create').length,
+    create: entries.filter((entry) => entry.action === 'create' && !entry.checklistOnly).length,
     update: entries.filter((entry) => entry.action === 'update').length,
     unchanged: entries.filter((entry) => entry.action === 'unchanged').length,
     conflict: entries.filter((entry) => entry.action === 'conflict').length,
     reverify: entries.filter((entry) => entry.action === 'reverify').length,
     closedButRequirementExists: entries.filter((entry) => entry.action === 'closed_but_requirement_exists').length,
+    checklistOnly: entries.filter((entry) => entry.checklistOnly).length,
   };
 }
 
@@ -562,6 +576,87 @@ export function draftRequirementFromIssue(title: string, body: string): Requirem
     .map((line) => /^\s*[-*]\s+(.+)$/.exec(line)?.[1]?.trim())
     .filter((line): line is string => Boolean(line));
   return { title, kind: 'api', priority: 'must', acceptance: bullets.length > 0 ? bullets : [body.trim().slice(0, 500) || title], guessed: true };
+}
+
+// ---------------------------------------------------------------------------
+// 저장소 이슈에서 그대로 가져오기(ADR-092 보강): b-studio가 발행한 관리형 영역은 모델을 부르지 않고 그대로 되읽는다
+// ---------------------------------------------------------------------------
+
+/**
+ * 관리형 영역에서 되읽은 완전한 요구사항 초안. `draftRequirementFromIssue`(평문·이슈 폼까지 받아주는 느슨한 초안)와
+ * 달리 이 함수는 관리형 영역이 있을 때만 값을 돌려주고(없으면 undefined — 호출하는 쪽이 모델 추출로 넘어간다),
+ * id·rev·EARS·시나리오·NFR까지 전부 되읽어 docs/requirements.md에 그대로 저장할 수 있는 모양으로 만든다.
+ */
+export interface ManagedRequirementDraft {
+  id: string;
+  rev: number;
+  title: string;
+  kind: string;
+  priority: string;
+  acceptance: string[];
+  ears?: Ears;
+  scenarios?: Scenario[];
+  nfr?: Nfr;
+}
+
+const REGION_EARS = /^-\s*EARS\((ubiquitous|event|state|unwanted|optional)\):\s*(.+?)\s*$/m;
+const REGION_NFR = /^-\s*NFR:\s*지표\s+(.+?)\s*·\s*임계값\s+(.+?)\s*·\s*조건\s+(.+?)\s*·\s*측정\s+(.+?)\s*$/m;
+const REGION_SCENARIO_ROW = /^\|\s*(R[1-9][0-9]*\.[1-9][0-9]*)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*$/gm;
+
+/**
+ * 이슈 하나(제목+본문)가 b-studio의 관리형 영역을 담고 있으면 모델 호출 없이 완전한 요구사항으로 되읽는다.
+ * 관리형 영역이 없으면(사람이 손으로 만든 이슈 등) undefined — 호출하는 쪽이 기존 모델 추출로 넘어간다.
+ */
+export function draftManagedRequirement(title: string, body: string): ManagedRequirementDraft | undefined {
+  const managed = parseManagedRegion(body);
+  if (!managed) return undefined;
+  const kindPriority = REGION_KIND_PRIORITY.exec(managed.content);
+  const acceptance = acceptanceLines(REGION_ACCEPTANCE.exec(managed.content)?.[1], bareTitle(title));
+  const earsMatch = REGION_EARS.exec(managed.content);
+  const nfrMatch = REGION_NFR.exec(managed.content);
+  const scenarios = [...managed.content.matchAll(REGION_SCENARIO_ROW)].map((row) => ({ id: row[1]!, given: row[2]!, when: row[3]!, then: row[4]! }));
+  return {
+    id: managed.id,
+    rev: managed.rev,
+    title: bareTitle(title),
+    kind: kindPriority?.[1] ?? 'api',
+    priority: kindPriority?.[2] ?? 'must',
+    acceptance,
+    ...(earsMatch ? { ears: { pattern: earsMatch[1] as Ears['pattern'], statement: earsMatch[2]! } } : {}),
+    ...(scenarios.length > 0 ? { scenarios } : {}),
+    ...(nfrMatch ? { nfr: { metric: nfrMatch[1]!, threshold: nfrMatch[2]!, condition: nfrMatch[3]!, method: nfrMatch[4]! } } : {}),
+  };
+}
+
+const TRACKING_ROW_ISSUE_LINK = /^\|\s*R[1-9][0-9]*\s*\|.*\|\s*#(\d+)\s*\|\s*$/gm;
+
+/**
+ * 추적 이슈 본문(표: id·제목·종류·우선순위·상태·하위 이슈, `buildTrackingIssueBody` 참고)에서 하위 이슈 번호를
+ * 순서대로, 중복 없이 뽑는다. GitHub의 sub_issues API 대신 이 표의 `#N` 링크를 쓰면 GitHub·Gitea 둘 다에서
+ * 똑같이 동작한다(Gitea는 하위 이슈 API가 없다).
+ */
+export function extractTrackingSubIssueNumbers(body: string): number[] {
+  const numbers: number[] = [];
+  for (const match of body.matchAll(TRACKING_ROW_ISSUE_LINK)) {
+    const n = Number(match[1]);
+    if (!numbers.includes(n)) numbers.push(n);
+  }
+  return numbers;
+}
+
+/** `draftManagedRequirement`가 돌려준 초안을 docs/requirements.md에 저장할 수 있는 `RequirementForIssues`(=Requirement 호환) 모양으로 바꾼다 */
+export function managedRequirementToRequirement(draft: ManagedRequirementDraft): RequirementForIssues & { id: string; rev: number; kind: RequirementKind; priority: RequirementPriority } {
+  return {
+    id: draft.id,
+    rev: draft.rev,
+    title: draft.title,
+    kind: draft.kind as RequirementKind,
+    priority: draft.priority as RequirementPriority,
+    acceptance: draft.acceptance,
+    ...(draft.ears ? { ears: draft.ears } : {}),
+    ...(draft.scenarios ? { scenarios: draft.scenarios } : {}),
+    ...(draft.nfr ? { nfr: draft.nfr } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

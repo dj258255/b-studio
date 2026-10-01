@@ -10,10 +10,9 @@
  * 프로젝트 루트)와 순수 데이터(요구사항·상태)만 받는다 — `sessions.ts`가 이 모듈을 부르는 쪽(task-plans.ts가
  * sessions.ts를 부르는 것과 같은 방향)이라, 반대 방향으로 순환 참조가 생기지 않는다.
  *
- * **`docs/requirements.md`를 고치지 않는다.** 그 파일의 저장 형식은 다른 에이전트가 동시에 `rev`·`hash`·`ears`·
- * `scenarios`·`nfr`·`trace` 필드를 추가하는 중이라(ADR 조율 중), 이 모듈은 발행 기록을 별도 파일
- * `docs/requirements.issues.json`에 남긴다. `Requirement`에 그 필드들이 이미 있으면 읽어서 쓰고(방어적으로),
- * 없으면 사이드카 파일의 값(이슈 번호·rev·발행 해시)만으로 충분히 동작한다.
+ * **`docs/requirements.md`를 고치지 않는다.** `Requirement`는 이미 `rev`·`hash`·`ears`·`scenarios`·`nfr`·`trace`
+ * 필드를 갖고 있다(ADR-090). 이 모듈은 발행 기록(이슈 번호·rev·발행 해시)만 별도 파일 `docs/requirements.issues.json`에
+ * 남기고, 그 밖의 내용(EARS·시나리오·NFR 포함)은 호출하는 쪽이 넘긴 `Requirement`를 그대로 읽는다.
  */
 import {
   addSubIssue,
@@ -90,20 +89,19 @@ async function saveStore(root: string, store: StoredFile): Promise<void> {
   await new Workspace(root).write(REQUIREMENT_ISSUES_FILE, `${JSON.stringify(store, null, 2)}\n`);
 }
 
-/** `Requirement`가 다른 에이전트의 선택 필드(rev·ears·scenarios·nfr·trace)를 이미 가지고 있으면 읽고, 없으면 undefined로 둔다 */
+/** `Requirement`를 이슈 발행기가 읽는 모양(`RequirementForIssues`)으로 옮긴다. 발행 기록(사이드카)이 있으면 rev·trace.issue는 그 값을 우선한다 */
 function toRequirementForIssues(requirement: Requirement, record: StoredRecord | undefined): RequirementForIssues {
-  const extended = requirement as Requirement & Partial<Pick<RequirementForIssues, 'rev' | 'ears' | 'scenarios' | 'nfr' | 'trace'>>;
   return {
     id: requirement.id,
     title: requirement.title,
     kind: requirement.kind,
     priority: requirement.priority,
     acceptance: requirement.acceptance,
-    rev: record?.rev ?? extended.rev,
-    ears: extended.ears,
-    scenarios: extended.scenarios,
-    nfr: extended.nfr,
-    trace: record ? { issue: record.issue, dependsOn: extended.trace?.dependsOn, supersedes: extended.trace?.supersedes } : extended.trace,
+    rev: record?.rev ?? requirement.rev,
+    ears: requirement.ears,
+    scenarios: requirement.scenarios,
+    nfr: requirement.nfr,
+    trace: record ? { issue: record.issue, dependsOn: requirement.trace?.dependsOn, supersedes: requirement.trace?.supersedes } : requirement.trace,
     published: record ? { issue: record.issue, hash: record.publishedHash, at: record.publishedAt } : undefined,
   };
 }

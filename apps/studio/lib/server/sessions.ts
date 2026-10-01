@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -37,8 +37,10 @@ import {
   describeDatabaseState,
   detectRunner,
   discoverTestsInFile,
+  draftManagedRequirement,
   draftRequirementFromIssue,
   estimateCost,
+  extractTrackingSubIssueNumbers,
   extractRequirementMentions,
   extractRequirementsHeuristically,
   fetchIssue,
@@ -52,6 +54,7 @@ import {
   isLikelyTestFile,
   labelRecommendationSource,
   listIssues,
+  managedRequirementToRequirement,
   ManualStepItemSchema,
   MAX_ASSUMPTIONS,
   MAX_CLARIFYING_QUESTIONS,
@@ -68,6 +71,7 @@ import {
   planAskFromClient,
   postComment,
   REFERENCED_FILES_CONTEXT_MAX_CHARS,
+  REQUIREMENT_LABEL,
   requestPlanBrief,
   requestQuestionRecommendations,
   requestRequirementsExtraction,
@@ -155,17 +159,18 @@ import {
   type GateCheckResult,
   type GitAuthor,
   type ImplementedRequirementRef,
+  type IssueSummary,
   type ModelAsk,
   type ModelClient,
   type PullRequestDraft,
   type ReferencedFile,
   type Recommendation,
+  type RemoteLocation,
   type Requirement,
   type RequirementCoverage,
   type RequirementDiffEntry,
   type RequirementEvidence,
   type RequirementIssueDraft,
-  type RequirementScenario,
   type RequirementStatus,
   type RepositoryInfo,
   type RoutingDecision,
@@ -3438,6 +3443,12 @@ export interface RequirementsSnapshot {
   assumptions: string[];
   /** "## 사람이 할 일" 절(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 에이전트가 절대 하지 않는다 */
   manualSteps: string[];
+  /**
+   * 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(버그 리포트 A). 화면이 "저장 안 한 추출
+   * 결과가 있습니다 · 이어서 보기 / 버리기" 배너로 보여 준다 — 페이지를 새로고침하거나 "뽑는 중"에 개발 서버가
+   * 재시작돼도 끝까지 마친 추출 결과를 잃지 않는다.
+   */
+  draft?: PersistedRequirementsExtractionDraft;
 }
 
 const TEST_SCAN_IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', 'out', '.gradle', '.venv', '__pycache__', 'coverage', 'design']);
@@ -3505,8 +3516,9 @@ function requirementsRecommendationAsk(session: Session): { ask: ModelAsk; webSe
   return undefined;
 }
 
-/** 저장소 이슈 본문을 가져온다. repository-panel.ts와 같은 자료원(listIssues)을 쓰지만, 그 모듈은 sessions.ts를 가져오므로 순환을 피해 직접 부른다 */
-async function fetchIssueBodyForSession(session: Session, issueNumber: number): Promise<string> {
+/** 이 세션의 원격 저장소에서 이슈 목록을 읽을 수 있게 준비한다(원격·토큰 확인까지). repository-panel.ts와 같은 자료원(listIssues)을
+ * 쓰지만, 그 모듈은 sessions.ts를 가져오므로 순환을 피해 직접 부른다. 원격이 없거나 지원하지 않거나 토큰이 없으면 던진다 */
+async function remoteIssuesForSession(session: Session): Promise<{ remote: RemoteLocation; token: string; issues: IssueSummary[] }> {
   const info = await session.checkpoints.repository();
   if (!info) throw new StudioError(409, '이 프로젝트는 원격 저장소가 없어 이슈를 가져올 수 없습니다');
   const remote = parseRemote(info.remoteUrl);
@@ -3516,10 +3528,51 @@ async function fetchIssueBodyForSession(session: Session, issueNumber: number): 
   const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
   if (!token) throw new StudioError(400, '이슈를 가져올 토큰이 없습니다');
   const issues = await listIssues(remote, { state: 'all', token });
+  return { remote, token, issues };
+}
+
+/** 저장소 이슈 본문을 가져온다("요구사항 뽑기"가 이슈를 명세 글로 쓸 때) */
+async function fetchIssueBodyForSession(session: Session, issueNumber: number): Promise<string> {
+  const { issues } = await remoteIssuesForSession(session);
   const issue = issues.find((candidate) => candidate.number === issueNumber);
   if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
   const body = issue.body?.trim();
   return body ? `${issue.title}\n\n${body}` : issue.title;
+}
+
+/**
+ * "저장소 이슈"로 요구사항을 뽑을 때, 그 이슈(또는 추적 이슈의 하위 이슈)가 b-studio 관리형 영역을 담고 있으면
+ * 모델을 부르지 않고 결정론적으로 요구사항을 되읽는다(ADR-097, dogfooding 발견 C — 추적 이슈의 표를 모델에
+ * 그대로 넘기면 모델이 인수 조건을 지어냈다). 관리형 영역이 전혀 없으면 undefined를 돌려줘 호출하는 쪽이
+ * 평소대로 모델 추출(또는 결정론적 대체 파서)로 넘어가게 한다.
+ */
+async function tryImportManagedRequirements(session: Session, issueNumber: number): Promise<Requirement[] | undefined> {
+  const { issues } = await remoteIssuesForSession(session);
+  const issue = issues.find((candidate) => candidate.number === issueNumber);
+  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
+  const body = issue.body ?? '';
+
+  const toRequirement = (draft: ReturnType<typeof draftManagedRequirement>): Requirement | undefined => {
+    if (!draft) return undefined;
+    const parsed = RequirementSchema.safeParse(managedRequirementToRequirement(draft));
+    return parsed.success ? parsed.data : undefined;
+  };
+
+  // 1) 이슈 자신이 관리형 하위 이슈다
+  const own = toRequirement(draftManagedRequirement(issue.title, body));
+  if (own) return [own];
+
+  // 2) 추적 이슈다(b-studio:req 라벨 + 하위 이슈 번호 표) — 하위 이슈를 따라가 하나씩 되읽는다
+  if (!issue.labels.includes(REQUIREMENT_LABEL)) return undefined;
+  const subNumbers = extractTrackingSubIssueNumbers(body);
+  if (subNumbers.length === 0) return undefined;
+  const byNumber = new Map(issues.map((candidate) => [candidate.number, candidate]));
+  const requirements = subNumbers
+    .map((number) => byNumber.get(number))
+    .filter((candidate): candidate is IssueSummary => candidate !== undefined)
+    .map((candidate) => toRequirement(draftManagedRequirement(candidate.title, candidate.body ?? '')))
+    .filter((requirement): requirement is Requirement => requirement !== undefined);
+  return requirements.length > 0 ? requirements : undefined;
 }
 
 /** managed 서비스 템플릿·데이터베이스 엔진을 한 줄로 요약한다("추천 값으로 채우기"가 스택에 맞는 답을 내도록 프롬프트에 붙인다) */
@@ -3565,9 +3618,13 @@ async function resolveSpecText(session: Session, input: RequirementsExtractionIn
 export interface RequirementsExtractionPreview {
   requirements: Requirement[];
   questions: string[];
-  /** 추출 모델을 불러 얻었는지(model), 도구 없는 단발 호출을 지원하지 않는 백엔드거나 모델 호출이 실패해 결정론적 파서로 대신했는지(fallback) */
-  source: 'model' | 'fallback';
-  /** source가 fallback일 때만 있다. 화면이 그대로 보여 준다 */
+  /**
+   * 추출 모델을 불러 얻었는지(model), 도구 없는 단발 호출을 지원하지 않는 백엔드거나 모델 호출이 실패해 결정론적
+   * 파서로 대신했는지(fallback), b-studio가 이미 발행한 이슈(관리형 영역)를 모델 호출 없이 그대로 되읽었는지(managed —
+   * 저장소 이슈 가져오기가 추적 이슈의 표까지 모델에 넘기면 모델이 인수 조건을 지어냈다, 버그 리포트 참고)
+   */
+  source: 'model' | 'fallback' | 'managed';
+  /** source가 fallback·managed일 때만 있다. 화면이 그대로 보여 준다 */
   reason?: string;
   /** 명세가 경로처럼 언급한 파일(seed/seed.json 등)이 작업 복사본에 있는지·크기·미리보기 */
   referencedFiles: ReferencedFile[];
@@ -3610,16 +3667,92 @@ async function mergeWithSavedRequirements(session: Session, extracted: readonly 
   return { requirements: merged, diff };
 }
 
+/** "요구사항 뽑기"(모델 추출)의 제한 시간. EARS·시나리오까지 뽑는 호출이라 3~6분씩 걸려, 10분을 넘으면 멈추고 분명한 오류로 알린다 */
+const REQUIREMENTS_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
+/** "추천 값으로 채우기"의 제한 시간. 추출보다 짧게 끝나야 정상이라 3분으로 둔다 */
+const REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS = 3 * 60_000;
+
+const REQUIREMENTS_DRAFT_FILE = path.join('.git', 'b-studio', 'requirements-draft.json');
+
+/** 저장 안 한(아직 apply하지 않은) 추출 결과를 세션 상태 폴더에 남긴 모양. `.git/` 아래라 커밋에도, 에이전트 도구에도 걸리지 않는다 */
+export interface PersistedRequirementsExtractionDraft extends RequirementsExtractionPreview {
+  savedAt: string;
+}
+
+function requirementsDraftFile(session: Session): string {
+  return path.join(stateDirOf(session.snapshot), REQUIREMENTS_DRAFT_FILE);
+}
+
+/**
+ * 추출 미리보기를 세션 상태 폴더에 남긴다(사이드카 — docs/ 밖이라 git 작업 복사본에도, 커밋에도 안 들어간다).
+ * "요구사항 뽑기"가 3~6분 걸리는 동안 개발 서버가 재시작되면 화면은 "뽑는 중"에 멈춰 있어도 서버 쪽 작업은
+ * 통째로 사라진다(버그 리포트 A) — 적어도 끝까지 마친 추출 결과는 다시 열었을 때 보이도록 남긴다.
+ */
+async function saveRequirementExtractionDraft(session: Session, preview: RequirementsExtractionPreview): Promise<void> {
+  const file = requirementsDraftFile(session);
+  await mkdir(path.dirname(file), { recursive: true });
+  const draft: PersistedRequirementsExtractionDraft = { ...preview, savedAt: new Date().toISOString() };
+  await writeFile(file, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600 });
+}
+
+/** 저장 안 한 추출 결과가 있으면 돌려준다("이어서 보기"). 없으면 undefined — 화면은 이때 안내 배너를 띄우지 않는다 */
+export async function getSessionRequirementExtractionDraft(id: string): Promise<PersistedRequirementsExtractionDraft | undefined> {
+  const session = requireSession(id);
+  try {
+    return JSON.parse(await readFile(requirementsDraftFile(session), 'utf8')) as PersistedRequirementsExtractionDraft;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 저장 안 한 추출 결과를 지운다("버리기", 또는 apply가 성공해 더 들고 있을 필요가 없을 때) */
+export async function discardSessionRequirementExtractionDraft(id: string): Promise<void> {
+  const session = requireSession(id);
+  await rm(requirementsDraftFile(session), { force: true });
+}
+
+/** previewSessionRequirementsExtraction의 모든 반환 경로가 거친다: 완료된 결과를 드래프트로 남기고 그대로 돌려준다 */
+async function finishExtractionPreview(session: Session, preview: RequirementsExtractionPreview): Promise<RequirementsExtractionPreview> {
+  await saveRequirementExtractionDraft(session, preview).catch((error: unknown) => {
+    console.error(`[b-studio] 세션 ${session.snapshot.id}의 요구사항 추출 임시 결과를 남기지 못했습니다`, error);
+  });
+  return preview;
+}
+
 /**
  * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
- * 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출 모델 문맥에 붙이고
- * (데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
- * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다.
+ * "저장소 이슈"로 가져올 때는 그 이슈(또는 추적 이슈의 하위 이슈)가 b-studio 관리형 영역을 담고 있으면 모델을
+ * 부르지 않고 그대로 되읽는다(ADR-097, 버그 리포트 C — 추적 이슈의 표를 모델에 그대로 넘기면 인수 조건을 지어냈다).
+ * 그 밖에는: 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출
+ * 모델 문맥에 붙이고(데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
+ * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다
+ * (단, 호출하는 쪽이 취소했거나 제한 시간(10분)을 넘겼으면 대체 파서로 넘기지 않고 분명한 오류를 던진다 — 버그 리포트 A).
  * 어느 경로든 "사람이 할 일"(저장소 권한·협업자 추가, 이메일 제출 등)로 보이는 항목은 결정론적 가드로 한 번 더 걸러내고,
  * 이미 저장된 문서가 있으면 제목·EARS 유사도로 병합해 기존 id를 지킨다(재추출해도 같은 요구사항이 같은 id를 유지한다).
  */
-export async function previewSessionRequirementsExtraction(id: string, input: RequirementsExtractionInput): Promise<RequirementsExtractionPreview> {
+export async function previewSessionRequirementsExtraction(
+  id: string,
+  input: RequirementsExtractionInput,
+  options: { signal?: AbortSignal } = {},
+): Promise<RequirementsExtractionPreview> {
   const session = requireSession(id);
+
+  if (input.issueNumber !== undefined) {
+    const managed = await tryImportManagedRequirements(session, input.issueNumber).catch(() => undefined);
+    if (managed) {
+      return finishExtractionPreview(session, {
+        requirements: managed,
+        questions: [],
+        source: 'managed',
+        reason: `b-studio가 발행한 이슈에서 그대로 가져왔습니다 (${managed.length}개)`,
+        referencedFiles: [],
+        outOfScope: [],
+        assumptions: [],
+        manualSteps: [],
+      });
+    }
+  }
+
   const specText = await resolveSpecText(session, input);
   const referencedFiles = await resolveReferencedFiles(session.project.root, specText);
   const referencedFilesContext = buildReferencedFilesContext(referencedFiles, REFERENCED_FILES_CONTEXT_MAX_CHARS);
@@ -3628,7 +3761,7 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
   if (!ask) {
     const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
     const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
-    return {
+    return finishExtractionPreview(session, {
       requirements,
       questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
@@ -3638,12 +3771,14 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
       assumptions: [],
       manualSteps,
       ...(diff ? { diff } : {}),
-    };
+    });
   }
+  const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_EXTRACTION_TIMEOUT_MS);
+  const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
   try {
-    const result = await requestRequirementsExtraction(ask, specText, session.stop.signal, referencedFilesContext);
+    const result = await requestRequirementsExtraction(ask, specText, signal, referencedFilesContext);
     const { requirements, diff } = await mergeWithSavedRequirements(session, result.requirements);
-    return {
+    return finishExtractionPreview(session, {
       requirements,
       questions: mergeQuestionsWithMissingReferences(result.questions, referencedFiles),
       source: 'model',
@@ -3652,11 +3787,16 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
       assumptions: result.assumptions,
       manualSteps: result.manualSteps,
       ...(diff ? { diff } : {}),
-    };
+    });
   } catch (error) {
+    if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
+    if (timeoutSignal.aborted) {
+      throw new StudioError(408, `요구사항 추출이 제한 시간(${Math.round(REQUIREMENTS_EXTRACTION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 명세를 줄이거나 다시 시도해 주세요`);
+    }
+    if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 요구사항 추출을 이어갈 수 없습니다');
     const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
     const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
-    return {
+    return finishExtractionPreview(session, {
       requirements,
       questions: mergeQuestionsWithMissingReferences([], referencedFiles),
       source: 'fallback',
@@ -3666,7 +3806,7 @@ export async function previewSessionRequirementsExtraction(id: string, input: Re
       assumptions: [],
       manualSteps,
       ...(diff ? { diff } : {}),
-    };
+    });
   }
 }
 
@@ -3689,15 +3829,30 @@ export interface RequirementRecommendations {
  * requestQuestionRecommendations가 서버에서 인용문이 실제로 스펙에 있는지 검증한다), 프로젝트 스택(서비스 템플릿·DB
  * 엔진)을 함께 알려줘 스택과 어긋나는 추천(예: Postgres 프로젝트에 MySQL 제안)을 막는다.
  */
-export async function recommendSessionRequirementQuestions(id: string, input: RequirementRecommendationsInput): Promise<RequirementRecommendations> {
+export async function recommendSessionRequirementQuestions(
+  id: string,
+  input: RequirementRecommendationsInput,
+  options: { signal?: AbortSignal } = {},
+): Promise<RequirementRecommendations> {
   const session = requireSession(id);
   if (input.questions.length === 0) throw new StudioError(400, '추천을 받을 질문이 없습니다');
   const resolved = requirementsRecommendationAsk(session);
   if (!resolved) throw new StudioError(400, `이 세션 백엔드(${sessionBackend(session.snapshot)})는 추천 답 호출을 지원하지 않습니다`);
   const specText = input.specText?.trim() ?? '';
   const stackSummary = buildProjectStackSummary(session.project);
-  const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, session.stop.signal, stackSummary);
-  return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
+  const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS);
+  const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
+  try {
+    const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, signal, stackSummary);
+    return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
+  } catch (error) {
+    if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
+    if (timeoutSignal.aborted) {
+      throw new StudioError(408, `추천 값 찾기가 제한 시간(${Math.round(REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 다시 시도해 주세요`);
+    }
+    if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 추천 값 찾기를 이어갈 수 없습니다');
+    throw error;
+  }
 }
 
 /**
@@ -3740,10 +3895,11 @@ function sessionCheckpointRefs(session: Session): CheckpointRef[] {
 /** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
 export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
+  const draft = await getSessionRequirementExtractionDraft(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
-  if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [] };
+  if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [], ...(draft ? { draft } : {}) };
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
-  if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps };
+  if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps, ...(draft ? { draft } : {}) };
 
   const checkpoints = sessionCheckpointRefs(session);
   const testFiles = await scanWorkingCopyTestFiles(session.project.root);
@@ -3761,6 +3917,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
     manualSteps,
+    ...(draft ? { draft } : {}),
   };
 }
 
@@ -3832,6 +3989,8 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
       console.error(`[b-studio] 세션 ${id}의 요구사항 문서 체크포인트를 남기지 못했습니다`, error);
     },
   );
+  // 저장이 끝났으니 "저장 안 한 추출 결과" 배너가 더는 필요 없다(실패해도 다음에 또 지우면 되니 조용히 넘어간다)
+  await discardSessionRequirementExtractionDraft(id).catch(() => {});
   return getSessionRequirements(id);
 }
 
@@ -4131,10 +4290,17 @@ function requireRequirementIssuesContext(context: RequirementIssuesContext | und
   return context;
 }
 
+/**
+ * 발행에 쓸 요구사항 전체(ears·scenarios·nfr·rev·hash·trace까지)와 상태를 모은다. 전에는 snapshot.requirements의
+ * id·title·kind·priority·acceptance만 추려 써서(평가용 view 모양) EARS·시나리오·NFR이 몸통에 전혀 안 실렸다
+ * (B 버그 — 이슈 본문이 항상 "(정의되지 않음)"/"(없음)"으로 찍혔다). 같은 docs/requirements.md를 다시 읽어
+ * (readSavedRequirements) 전체 필드를 들고, 상태만 snapshot의 평가 결과에서 가져온다.
+ */
 async function requirementsForIssues(id: string): Promise<{ requirements: Requirement[]; statusById: Record<string, RequirementStatus> }> {
+  const session = requireSession(id);
   const snapshot = await getSessionRequirements(id);
   if (!snapshot.exists || snapshot.requirements.length === 0) throw new StudioError(400, '저장된 요구사항이 없습니다. 먼저 "명세" 탭에서 요구사항을 저장하세요');
-  const requirements = snapshot.requirements.map(({ id: requirementId, title, kind, priority, acceptance }) => ({ id: requirementId, title, kind, priority, acceptance }) as Requirement);
+  const requirements = await readSavedRequirements(session);
   const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
   return { requirements, statusById };
 }
@@ -4227,8 +4393,9 @@ async function implementedRequirementRefs(session: Session, requestTexts: readon
     return mentioned.flatMap((id): ImplementedRequirementRef[] => {
       const requirement = byId.get(id);
       if (!requirement) return [];
-      const rev = (requirement as Requirement & { rev?: number }).rev;
-      return [{ id, ...(rev !== undefined ? { rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status }];
+      return [
+        { id, ...(requirement.rev !== undefined ? { rev: requirement.rev } : {}), ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}), status: requirement.status },
+      ];
     });
   } catch {
     return [];
@@ -4244,7 +4411,7 @@ async function reviewRequirementsContext(session: Session, requestTexts: readonl
     const byId = new Map(snapshot.requirements.map((requirement) => [requirement.id, requirement]));
     const entries = refs.flatMap((ref) => {
       const requirement = byId.get(ref.id);
-      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: (requirement as Requirement & { scenarios?: RequirementScenario[] }).scenarios }] : [];
+      return requirement ? [{ id: requirement.id, title: requirement.title, scenarios: requirement.scenarios }] : [];
     });
     return buildReviewRequirementsContext(entries);
   } catch {

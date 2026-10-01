@@ -1156,10 +1156,12 @@ export function requirementContentDrifted(requirement: Requirement): boolean {
 /**
  * 저장(apply) 시점에 부른다: 내용이 드리프트됐으면 개정을 올리고 새 해시·시각을 적는다. 기록된 해시가 없으면
  * (처음 저장하거나 이 기능 이전 문서) 개정 1로 채우기만 하고 "바뀌었다"고 보지 않는다 — 비교할 이전 값이 없기 때문이다.
+ * 이때 revisedAt도 손대지 않는다(건드리면 방금 저장한 요구사항이 전부 "재확인 필요"로 보인다 — 비교 기준이 없는
+ * 첫 저장은 바뀐 게 아니라 그냥 "지금 상태를 처음 기록"하는 것이기 때문이다. computeRequirementStatus 참고).
  */
 export function reviseRequirementIfChanged(requirement: Requirement, now: string = new Date().toISOString()): Requirement {
   const hash = computeRequirementHash(requirement);
-  if (requirement.hash === undefined) return { ...requirement, rev: requirement.rev ?? 1, hash, revisedAt: requirement.revisedAt ?? now };
+  if (requirement.hash === undefined) return { ...requirement, rev: requirement.rev ?? 1, hash };
   if (requirement.hash === hash) return requirement;
   return { ...requirement, rev: (requirement.rev ?? 1) + 1, hash, revisedAt: now };
 }
