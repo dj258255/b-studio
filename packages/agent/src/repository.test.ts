@@ -217,7 +217,7 @@ describe('postComment', () => {
 });
 
 describe('buildPullRequest', () => {
-  it('세션 커밋만으로 제목과 요청별 검증 결과를 만든다', () => {
+  it('세션 커밋만으로 제목과 요청별 검증 결과를 만든다(제목은 가장 많이 바뀐 커밋을 요약한다)', () => {
     const { title, body } = buildPullRequest({
       projectName: 'orders',
       base: 'main',
@@ -228,11 +228,44 @@ describe('buildPullRequest', () => {
       ],
     });
 
-    expect(title).toBe('[b-studio] 주문 목록 API와 화면을 만들어줘 외 1건');
+    // 두 번째 커밋이 파일을 더 많이 바꿔(2개 > 1개) 제목의 기본값이 된다
+    expect(title).toBe('[b-studio] 주문에 배송 메모 필드 추가해줘');
     expect(body).toContain('- 기준 브랜치: `main`');
     expect(body).toContain('### 1. 주문 목록 API와 화면을 만들어줘');
     expect(body).toContain('~~~text\n검증 통과\n- api: 재시작 후 준비 완료\n~~~');
     expect(body).toContain('### 2. 주문에 배송 메모 필드 추가해줘\n\n커밋 `bbbbbbb`, 파일 2개: `api/V2.sql`, `web/app/orders/page.tsx`');
+  });
+
+  it('요구사항 id가 걸려 있으면 제목을 요구사항 수·범위로 요약한다', () => {
+    const { title } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requirementIds: ['R2', 'R5', 'R23'],
+      commits: [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 작업 분해 통합: 다음 필수(must) 요구사항을 모두 구현', body: '', files: Array.from({ length: 30 }, (_, i) => `api/f${i}.java`) }],
+    });
+
+    expect(title).toBe('[b-studio] feat: 요구사항 3개 구현과 검증 (R2~R23)');
+  });
+
+  it('제목은 접두어를 포함해 72자 안팎을 넘지 않는다', () => {
+    const { title } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      commits: [
+        {
+          sha: 'a'.repeat(40),
+          shortSha: 'aaaaaaa',
+          subject: '요청: 아주 길게 설명하는 요청 글이어서 제목에 그대로 쓰면 72자를 훌쩍 넘기는 경우를 테스트하기 위한 글입니다',
+          body: '',
+          files: ['api/Order.java'],
+        },
+      ],
+    });
+
+    expect(title.length).toBeLessThanOrEqual(72);
+    expect(title.startsWith('[b-studio] ')).toBe(true);
   });
 
   it('이슈 번호가 있으면 본문 첫 줄에 Closes #N을 넣는다', () => {
@@ -247,7 +280,7 @@ describe('buildPullRequest', () => {
     expect(body.startsWith('Closes #57\n')).toBe(true);
   });
 
-  it('여러 이슈를 받으면(단수 issue와 합쳐) 본문 첫 줄들에 Closes #N을 하나씩 넣는다', () => {
+  it('여러 이슈를 받으면(단수 issue와 합쳐) 본문 첫 줄들에 Closes #N을 하나씩 넣고 중복되지 않게 한 블록으로만 쓴다', () => {
     const { body } = buildPullRequest({
       projectName: 'orders',
       base: 'main',
@@ -259,6 +292,9 @@ describe('buildPullRequest', () => {
 
     // 단수와 배열을 합치고 중복은 한 번만 남긴다
     expect(body.startsWith('Closes #57\nCloses #58\n')).toBe(true);
+    // Closes 블록은 본문에 한 번만 나온다(버그 리포트: 같은 이슈가 위아래 두 번 나왔다)
+    expect(body.match(/Closes #57/g)).toHaveLength(1);
+    expect(body.match(/Closes #58/g)).toHaveLength(1);
   });
 
   it('필수 단계를 통과한 커밋과 기록 없는 단계를 구분해 검증·돌리지 않은 검증 절에 남긴다', () => {
@@ -307,6 +343,39 @@ describe('buildPullRequest', () => {
     expect(missing).toEqual([]);
     expect(body).toContain('## 돌리지 않은 검증\n\n모든 커밋이 필수 단계를 통과했습니다');
   });
+
+  it('문서 체크포인트(Workflow-Verify: docs)는 필수 단계 누락으로 세지 않고 "문서 체크포인트"로 보여준다', () => {
+    const { body, missing } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requiredStages: ['run', 'contract_check', 'review'],
+      commits: [
+        { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 주문 API', body: '', files: ['api/Order.java'], passedStages: ['run', 'contract_check', 'review'] },
+        { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', subject: 'docs: 요구사항을 정리한다', body: '', files: ['docs/requirements.md'], verify: 'docs' },
+      ],
+    });
+
+    // 문서 체크포인트는 "필수 단계 기록이 없는 커밋"으로 세지 않는다 — stages_passed 점검이 이 배열로 판단한다
+    expect(missing).toEqual([]);
+    expect(body).toContain('- `bbbbbbb` docs: 요구사항을 정리한다 — 문서 체크포인트(게이트 대상 아님)');
+    expect(body).toContain('## 돌리지 않은 검증\n\n- `bbbbbbb` docs: 요구사항을 정리한다 — 문서만 바뀜(게이트 대상 아님)');
+  });
+
+  it('Workflow-Verify: docs여도 문서가 아닌 파일이 섞여 있으면 예외로 치지 않는다(트레일러를 그대로 믿지 않는다)', () => {
+    const { body, missing } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requiredStages: ['run', 'contract_check'],
+      commits: [
+        { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 뒤섞인 커밋', body: '', files: ['docs/requirements.md', 'api/Order.java'], verify: 'docs' },
+      ],
+    });
+
+    expect(missing).toEqual([{ shortSha: 'aaaaaaa', subject: '뒤섞인 커밋', stages: ['run', 'contract_check'] }]);
+    expect(body).toContain('- `aaaaaaa` 뒤섞인 커밋 — 통과: 기록 없음');
+  });
 });
 
 describe('fetchIssue', () => {
@@ -348,6 +417,13 @@ describe('fetchIssue', () => {
     await expect(fetchIssue(parseRemote('git@github.com:acme/orders.git', {}), 57, { env: {}, fetch: none.fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
     await expect(fetchIssue(parseRemote('/Users/dev/orders', {}), 57, { env: {}, fetch: none.fn })).rejects.toThrow(PullRequestError);
     expect(none.calls).toHaveLength(0);
+  });
+
+  it('주입한 토큰이 있으면 환경 변수가 비어도 그것을 쓴다(studio의 gh CLI 폴백 토큰, 버그 리포트)', async () => {
+    const call = fakeFetch([{ status: 200, body: { state: 'open', title: '주입 토큰', html_url: 'https://github.com/acme/orders/issues/9' } }]);
+    const result = await fetchIssue(parseRemote('git@github.com:acme/orders.git', {}), 9, { env: {}, fetch: call.fn, token: 'injected' });
+    expect(result).toEqual({ state: 'open', title: '주입 토큰', url: 'https://github.com/acme/orders/issues/9' });
+    expect(call.calls[0]).toMatchObject({ headers: { authorization: 'Bearer injected' } });
   });
 });
 

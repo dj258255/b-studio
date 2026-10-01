@@ -292,6 +292,19 @@ describe('PR 본문 조립', () => {
     expect(buildRequirementsAddendum([])).toBe('');
   });
 
+  it('includeCloses: false면 Implements 줄만 돌려준다(Closes는 다른 곳에서 이미 적었을 때 중복을 막는다)', () => {
+    const addendum = buildRequirementsAddendum(
+      [
+        { id: 'R1', rev: 2, issue: 10, status: '검증됨' },
+        { id: 'R2', issue: 11, status: '검증됨' },
+      ],
+      { includeCloses: false },
+    );
+    expect(addendum).not.toContain('Closes');
+    expect(addendum).toContain('Implements: R1@rev2');
+    expect(addendum).toContain('Implements: R2');
+  });
+
   it('implementsTrailer는 rev가 있으면 @revN을 붙인다', () => {
     expect(implementsTrailer({ id: 'R4', rev: 3 })).toBe('Implements: R4@rev3');
     expect(implementsTrailer({ id: 'R4' })).toBe('Implements: R4');

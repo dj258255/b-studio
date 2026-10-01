@@ -134,10 +134,36 @@ describe('buildExportChecks', () => {
     });
 
     expect(checks.find((check) => check.id === 'issue_linked')?.detail).toBe('#57, #58 이슈를 PR에 연결합니다');
-    // 하나라도 닫혀 있으면 false
+    // 하나라도 닫혀 있으면 false. 닫힌 이슈만 짚어 보여주고(열려 있는 이슈까지 나열하지 않는다), 문제를 묻지 않는다
     expect(checks.find((check) => check.id === 'issue_open')?.ok).toBe(false);
-    expect(checks.find((check) => check.id === 'issue_open')?.detail).toContain('#57 미리보기 (열림)');
-    expect(checks.find((check) => check.id === 'issue_open')?.detail).toContain('#58 작업 분해 (닫힘)');
+    expect(checks.find((check) => check.id === 'issue_open')?.detail).toBe('닫힘: #58 작업 분해');
+  });
+
+  it('많은 이슈가 모두 열려 있으면 하나씩 늘어놓지 않고 개수로 요약한다', () => {
+    const issues = Array.from({ length: 19 }, (_, index) => index + 1);
+    const checks = buildExportChecks({
+      issues,
+      issueLookups: issues.map((issue) => ({ issue, lookup: { ok: true, state: 'open', title: `요구사항 ${issue}` } })),
+      missing: [],
+      uncheckpointed: 0,
+      running: false,
+    });
+
+    expect(checks.find((check) => check.id === 'issue_linked')?.detail).toBe(`이슈 19개를 PR에 연결합니다: ${issues.map((n) => `#${n}`).join(', ')}`);
+    expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: true, detail: '연결한 이슈 19개 모두 열려 있습니다' });
+  });
+
+  it('많은 이슈 중 일부가 닫혀 있으면 닫힌 이슈만 짚어 보여준다', () => {
+    const issues = Array.from({ length: 19 }, (_, index) => index + 1);
+    const checks = buildExportChecks({
+      issues,
+      issueLookups: issues.map((issue) => ({ issue, lookup: { ok: true, state: issue === 7 ? 'closed' : 'open', title: `요구사항 ${issue}` } })),
+      missing: [],
+      uncheckpointed: 0,
+      running: false,
+    });
+
+    expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: false, detail: '닫힘: #7 요구사항 7' });
   });
 
   it('원격 이슈 조회에 실패하면 unknown과 이유로 두고 막지 않는다', () => {

@@ -1,7 +1,8 @@
 import type { WorkflowStage } from '@b-studio/spec';
 import type { SessionCommit } from './checkpoints';
+import { summarize } from './commit-message';
 import { assertAllowedRequirementEndpoint } from './requirement-issues';
-import { VERIFICATION_STAGES } from './workflow';
+import { isDocCheckpointPath, VERIFICATION_STAGES } from './workflow';
 
 export type GitHostKind = 'github' | 'gitlab' | 'gitea' | 'other' | 'local';
 
@@ -425,18 +426,19 @@ async function createMergeRequest(
 export async function fetchIssue(
   remote: RemoteLocation,
   issue: number,
-  { env = process.env, fetch: fetchFn = fetch }: { env?: Env; fetch?: Fetch } = {},
+  { env = process.env, fetch: fetchFn = fetch, token }: { env?: Env; fetch?: Fetch; token?: string } = {},
 ): Promise<IssueLookup> {
   if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
     throw new PullRequestError('이슈를 조회할 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
   }
-  const token = env[TOKEN_ENV[remote.kind]];
-  if (!token) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈를 확인할 수 없습니다`);
+  // 주입한 토큰(세션이 이미 찾아 둔 gh CLI 폴백 등)을 먼저 쓰고, 없으면 환경 변수를 본다(postComment·listIssues와 같은 규칙)
+  const auth = token ?? env[TOKEN_ENV[remote.kind]];
+  if (!auth) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 이슈를 확인할 수 없습니다`);
 
   if (remote.kind === 'gitlab') {
     const api = env.B_STUDIO_GITLAB_API_URL ?? `${originOf(remote)}/api/v4`;
     const response = await fetchFn(`${api}/projects/${encodeURIComponent(remote.path)}/issues/${issue}`, {
-      headers: { 'private-token': token },
+      headers: { 'private-token': auth },
       signal: AbortSignal.timeout(API_TIMEOUT_MS),
     });
     if (!response.ok) throw new PullRequestError(`GitLab 이슈 조회가 실패했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
@@ -455,7 +457,7 @@ export async function fetchIssue(
   const response = await fetchFn(`${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${issue}`, {
     headers: {
       accept: github ? 'application/vnd.github+json' : 'application/json',
-      authorization: github ? `Bearer ${token}` : `token ${token}`,
+      authorization: github ? `Bearer ${auth}` : `token ${auth}`,
       ...(github ? { 'x-github-api-version': '2022-11-28' } : {}),
     },
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
@@ -1178,6 +1180,45 @@ export interface PullRequestDraft {
   missing: Array<{ shortSha: string; subject: string; stages: WorkflowStage[] }>;
 }
 
+const PR_TITLE_PREFIX = '[b-studio] ';
+/** PR 제목의 대략적인 상한(접두어 포함). "~72자 안팎"이라 토큰 하나 넘는 것은 눈감아 준다(ADR-110) */
+const PR_TITLE_MAX = 72;
+
+/** "R2~R23"처럼 요구사항 id들의 수 범위. 숫자 id가 하나도 없으면 undefined */
+function requirementIdRange(ids: readonly string[]): string | undefined {
+  const numbers = ids
+    .map((id) => /^R(\d+)/.exec(id)?.[1])
+    .filter((value): value is string => value !== undefined)
+    .map(Number);
+  if (numbers.length === 0) return undefined;
+  const min = Math.min(...numbers);
+  const max = Math.max(...numbers);
+  return min === max ? `R${min}` : `R${min}~R${max}`;
+}
+
+/** 줄 수(없으면 파일 수) 기준으로 가장 큰 커밋. 요구사항이 안 걸려 있을 때 PR 제목의 기본값으로 쓴다 */
+function mostSignificantCommit(commits: readonly SessionCommit[]): SessionCommit {
+  const weight = (commit: SessionCommit): number => (commit.stat ? commit.stat.insertions + commit.stat.deletions : 0) || commit.files.length;
+  return commits.reduce((best, commit) => (weight(commit) > weight(best) ? commit : best));
+}
+
+/**
+ * PR 제목(ADR-110, 버그 리포트: 통합 세션의 PR 제목이 첫 커밋 제목 전체를 그대로 이어 붙이고 120자에서 단어
+ * 중간을 잘랐다). 요구사항이 걸려 있으면(검증됨 + 발행된 이슈가 있는 요구사항, sessions.ts가 넘겨준다) 그
+ * 수·범위로 요약하고, 아니면 가장 많이 바뀐 커밋 제목을 요약한다(commit-message.ts의 summarize 재사용 —
+ * 체크포인트 제목을 만들 때와 같은 단어 경계 규칙을 PR 제목에도 그대로 쓴다).
+ */
+function buildPullRequestTitle(projectName: string, commits: readonly SessionCommit[], requirementIds: readonly string[]): string {
+  const budget = PR_TITLE_MAX - PR_TITLE_PREFIX.length;
+  if (requirementIds.length > 0) {
+    const range = requirementIdRange(requirementIds);
+    const summary = `feat: 요구사항 ${requirementIds.length}개 구현과 검증${range ? ` (${range})` : ''}`;
+    return `${PR_TITLE_PREFIX}${summarize(summary, budget)}`;
+  }
+  const candidate = commits.length > 0 ? requestName(mostSignificantCommit(commits)) : `${projectName} 세션 변경`;
+  return `${PR_TITLE_PREFIX}${summarize(candidate, budget)}`;
+}
+
 /**
  * 세션 커밋만으로 PR 제목과 본문을 만든다. 체크포인트 커밋 본문에 검증 결과가 들어 있어
  * 스튜디오 서버의 메모리 상태 없이도 같은 PR을 다시 만들 수 있다.
@@ -1189,6 +1230,7 @@ export function buildPullRequest({
   commits,
   issue,
   issues,
+  requirementIds = [],
   requiredStages = [],
 }: {
   projectName: string;
@@ -1199,21 +1241,30 @@ export function buildPullRequest({
   issue?: number;
   /** 연결할 이슈 번호들. 있으면 본문 첫 줄들에 `Closes #N`을 하나씩 넣는다 */
   issues?: readonly number[];
+  /** 지금 검증됨 + 발행된 이슈가 있는 요구사항 id들("R4" 모양). 있으면 제목을 요구사항 수·범위로 요약한다(ADR-110) */
+  requirementIds?: readonly string[];
   /** 이 프로젝트의 필수 워크플로 단계. 통과 기록이 없는 검증 단계를 "돌리지 않은 검증"에 모은다 */
   requiredStages?: readonly WorkflowStage[];
 }): PullRequestDraft {
   const requests = commits.map(requestName);
-  const first = requests[0] ?? `${projectName} 세션 변경`;
-  const title = `[b-studio] ${first}${requests.length > 1 ? ` 외 ${requests.length - 1}건` : ''}`.slice(0, 120);
+  const title = buildPullRequestTitle(projectName, commits, requirementIds);
+
+  // 문서 체크포인트(Workflow-Verify: docs, commitWorkingCopyDocs·commitDocTabChange가 남긴다)는 애초에 검증
+  // 게이트를 거치지 않게 만든 체크포인트다(ADR-096) — "필수 단계 기록이 없다"가 아니라 "문서만 바뀜(게이트
+  // 대상 아님)"으로 따로 보여준다. 트레일러만 믿지 않고 실제로 문서 경로만 바꿨는지 다시 확인해, 트레일러가
+  // 잘못 붙은(코드까지 섞인) 커밋이 게이트 없이 빠져나가지 못하게 막는다(버그 리포트)
+  const isDocsExempt = (commit: SessionCommit): boolean => commit.verify === 'docs' && commit.files.length > 0 && commit.files.every(isDocCheckpointPath);
 
   // 통과 기록은 검증 단계만 남으므로, plan·implement·checkpoint는 없는 것이 정상이다
   const stages = requiredStages.filter((stage) => VERIFICATION_STAGES.includes(stage));
   const missing = commits
     .map((commit, index) => {
+      if (isDocsExempt(commit)) return undefined;
       const passed = new Set(commit.passedStages ?? []);
-      return { shortSha: commit.shortSha, subject: requests[index]!, stages: stages.filter((stage) => !passed.has(stage)) };
+      const unmetStages = stages.filter((stage) => !passed.has(stage));
+      return unmetStages.length > 0 ? { shortSha: commit.shortSha, subject: requests[index]!, stages: unmetStages } : undefined;
     })
-    .filter((entry) => entry.stages.length > 0);
+    .filter((entry): entry is { shortSha: string; subject: string; stages: WorkflowStage[] } => entry !== undefined);
 
   const sections = commits.map((commit, index) => {
     const shown = commit.files.slice(0, 10).map((file) => `\`${file}\``);
@@ -1226,14 +1277,21 @@ export function buildPullRequest({
   });
 
   const verification = commits.map((commit, index) => {
+    if (isDocsExempt(commit)) return `- \`${commit.shortSha}\` ${requests[index]} — 문서 체크포인트(게이트 대상 아님)`;
     const passed = commit.passedStages ?? [];
     return `- \`${commit.shortSha}\` ${requests[index]} — 통과: ${passed.length > 0 ? passed.join(', ') : '기록 없음'}`;
   });
-  const unverified = missing.length > 0 ? missing.map((entry) => `- \`${entry.shortSha}\` ${entry.subject} — 기록 없음: ${entry.stages.join(', ')}`) : ['모든 커밋이 필수 단계를 통과했습니다'];
+  const docsNotes = commits
+    .map((commit, index) => (isDocsExempt(commit) ? `- \`${commit.shortSha}\` ${requests[index]} — 문서만 바뀜(게이트 대상 아님)` : undefined))
+    .filter((line): line is string => line !== undefined);
+  const missingNotes = missing.map((entry) => `- \`${entry.shortSha}\` ${entry.subject} — 기록 없음: ${entry.stages.join(', ')}`);
+  const unverified = [...docsNotes, ...missingNotes].length > 0 ? [...docsNotes, ...missingNotes] : ['모든 커밋이 필수 단계를 통과했습니다'];
 
+  // Closes는 여기 한 곳에서만 쓴다 — sessions.ts의 요구사항 Implements 절은 같은 이슈 번호를 다시 Closes로
+  // 적지 않는다(버그 리포트: 검증된 요구사항의 이슈가 위아래 두 번 Closes로 나왔다)
   const linked = [...new Set([...(issue === undefined ? [] : [issue]), ...(issues ?? [])])];
   const body = [
-    ...(linked.length === 0 ? [] : [...linked.map((number) => `Closes #${number}`), '']),
+    ...(linked.length === 0 ? [] : [...linked.map((number) => `Closes #${number}`), '(`Closes #n`은 이 PR이 기본 브랜치로 열릴 때만 이슈를 자동으로 닫습니다.)', '']),
     `\`${projectName}\` 프로젝트의 b-studio 세션에서 처리한 요청 ${commits.length}건입니다.`,
     '요청마다 스튜디오가 바뀐 서비스를 재시작하고 준비 상태와 API 계약을 확인했고, **검증 게이트를 통과한 변경만** 커밋했습니다.',
     '',
