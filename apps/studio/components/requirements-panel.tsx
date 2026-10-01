@@ -922,11 +922,14 @@ function RequirementCard({ requirement, canManage, onWork }: { requirement: Requ
 }
 
 /** "재추출 병합" 미리보기(ADR-090): 이미 저장된 문서가 있을 때만 있다. 개수만 요약해 보여 준다(자세한 내용은 아래 편집 목록에서 본다) */
-function DiffSummary({ diff }: { diff: RequirementDiffEntry[] }) {
+export function DiffSummary({ diff, onDropRemoved }: { diff: RequirementDiffEntry[]; onDropRemoved?: (ids: string[]) => void }) {
   const counts = (["added", "changed", "unchanged", "removed"] as const).map((status) => ({
     status,
     count: diff.filter((entry) => entry.status === status).length,
   }));
+  // 명세에서 사라진 요구사항은 기본으로 지키지만(지운 것이 아니라 이번 명세가 다루지 않을 수 있다), 이전에 잘못
+  // 저장한 목록을 통째로 바꿀 때는 한 번에 뺄 수 있어야 한다 — 하나씩 "빼기"를 누르게 하지 않는다
+  const removedIds = diff.filter((entry) => entry.status === "removed").map((entry) => entry.id);
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-control bg-ground px-3 py-2 text-sm">
       <span className="font-medium text-ink">기존 문서와 병합(제목·EARS 유사도로 id를 지켰습니다)</span>
@@ -937,6 +940,15 @@ function DiffSummary({ diff }: { diff: RequirementDiffEntry[] }) {
             {DIFF_LABEL[status]} {count}개
           </span>
         ))}
+      {onDropRemoved && removedIds.length > 0 && (
+        <button
+          type="button"
+          onClick={() => onDropRemoved(removedIds)}
+          className="rounded-control border border-line px-2 py-0.5 text-xs text-ink hover:bg-panel"
+        >
+          사라진 {removedIds.length}개도 목록에서 빼기
+        </button>
+      )}
     </div>
   );
 }
@@ -1294,7 +1306,16 @@ export function ImportFlow({
                 : `결정론적 방식으로 나눴습니다${preview.reason ? `: ${preview.reason}` : ""}`}
           </p>
 
-          {preview.diff && <DiffSummary diff={preview.diff} />}
+          {preview.diff && (
+            <DiffSummary
+              diff={preview.diff}
+              onDropRemoved={(ids) => {
+                const drop = new Set(ids);
+                setDrafts((current) => current.filter((draft) => !drop.has(draft.id)));
+                setPreview((current) => (current ? { ...current, diff: current.diff?.filter((entry) => !drop.has(entry.id)) } : current));
+              }}
+            />
+          )}
 
           {preview.manualSteps.length > 0 && <ManualStepsNotice items={preview.manualSteps} />}
 

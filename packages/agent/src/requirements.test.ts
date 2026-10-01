@@ -87,9 +87,9 @@ describe('parseExtractionReply', () => {
     expect(() => parseExtractionReply(text)).toThrow(RequirementsError);
   });
 
-  it('질문이 5개를 넘으면 RequirementsError', () => {
+  it('질문이 5개를 넘으면 오류 대신 앞의 5개만 받는다(긴 추출 답을 형식 하나로 버리지 않는다)', () => {
     const text = JSON.stringify({ requirements: [sample], questions: ['a', 'b', 'c', 'd', 'e', 'f'] });
-    expect(() => parseExtractionReply(text)).toThrow(RequirementsError);
+    expect(parseExtractionReply(text).questions).toEqual(['a', 'b', 'c', 'd', 'e']);
   });
 
   it('JSON이 아니면 RequirementsError', () => {
@@ -1002,5 +1002,31 @@ describe('alignScenarioIds — 요구사항 id가 바뀌면 시나리오 id도 �
     const result = mergeReextractedRequirements(incoming, existing);
     const merged = result.merged.find((requirement) => requirement.id === 'R7')!;
     expect(merged.scenarios!.map((item) => item.id)).toEqual(['R7.1']);
+  });
+});
+
+describe('parseExtractionReply — 사소한 형식 어긋남은 고쳐서 받는다(긴 추출 답 전체를 버리지 않는다)', () => {
+  const requirement = (id: string, scenarioIds: string[]) => ({
+    id,
+    title: '게시글 목록',
+    kind: 'api',
+    priority: 'must',
+    acceptance: ['200을 반환한다'],
+    scenarios: scenarioIds.map((scenarioId) => ({ id: scenarioId, given: 'g', when: 'w', then: 't' })),
+  });
+
+  it('시나리오 id가 요구사항 id와 어긋나도 앞부분을 맞춰 받는다', () => {
+    const reply = parseExtractionReply(JSON.stringify({ requirements: [requirement('R7', ['R6.1', 'R6.2'])], questions: [] }));
+    expect(reply.requirements[0]!.scenarios!.map((scenario) => scenario.id)).toEqual(['R7.1', 'R7.2']);
+  });
+
+  it('질문이 상한보다 많으면 앞에서부터 상한만큼만 받는다', () => {
+    const questions = Array.from({ length: 8 }, (_, index) => `질문 ${index + 1}`);
+    const reply = parseExtractionReply(JSON.stringify({ requirements: [requirement('R1', ['R1.1'])], questions }));
+    expect(reply.questions).toHaveLength(5);
+  });
+
+  it('고칠 수 없는 형식(요구사항이 없음)은 여전히 거부한다', () => {
+    expect(() => parseExtractionReply(JSON.stringify({ requirements: [], questions: [] }))).toThrow();
   });
 });

@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
   adrFilePath,
+  appendExperimentEntry,
   appendRoadmapTradeoffEntry,
   appendTroubleshootingEntry,
+  appendVerificationEntry,
   buildAdrTemplate,
   buildDesignDocTemplate,
   buildDocSummary,
+  buildExperimentEntry,
+  buildRoadmapTemplate,
   buildRoadmapTradeoffEntry,
   buildTroubleshootingEntry,
+  buildVerificationEntry,
   designDocFilePath,
   DOCS_INDEX_END,
   DOCS_INDEX_START,
@@ -15,6 +20,9 @@ import {
   nextAdrNumber,
   nextDesignDocNumber,
   regenerateDocsReadme,
+  regenerateRoadmapStatus,
+  ROADMAP_STATUS_END,
+  ROADMAP_STATUS_START,
   slugifyTitle,
 } from './docs';
 
@@ -62,22 +70,33 @@ describe('designDocFilePath / adrFilePath', () => {
 });
 
 describe('템플릿', () => {
-  it('설계 문서 템플릿은 번호 매긴 H1과 맥락/결정/검토한 선택지/감수한 트레이드오프 절을 담는다', () => {
+  it('설계 문서 템플릿은 번호 매긴 H1과 문제/가설/선택지/판단 기준/결정/포기한 것/검증/예상과 실제 절을 담는다', () => {
     const doc = buildDesignDocTemplate(2, '결제 도메인 핵심 개념');
     expect(doc).toContain('# 02. 결제 도메인 핵심 개념');
-    expect(doc).toContain('## 맥락');
+    expect(doc).toContain('## 문제');
+    expect(doc).toContain('## 왜 문제라고 판단했나');
+    expect(doc).toContain('## 가설');
+    expect(doc).toContain('## 선택지');
+    expect(doc).toContain('얻는 것 | 잃는 것');
+    expect(doc).toContain('## 판단 기준');
     expect(doc).toContain('## 결정');
-    expect(doc).toContain('## 검토한 선택지');
-    expect(doc).toContain('## 감수한 트레이드오프');
+    expect(doc).toContain('## 포기한 것');
+    expect(doc).toContain('## 검증');
+    expect(doc).toContain('## 예상과 실제');
+    expect(doc.indexOf('## 문제')).toBeLessThan(doc.indexOf('## 가설'));
+    expect(doc.indexOf('## 결정')).toBeLessThan(doc.indexOf('## 예상과 실제'));
   });
 
-  it('ADR 템플릿은 상태·날짜·관련 머리말 불릿을 먼저 둔다', () => {
+  it('ADR 템플릿은 상태·날짜·관련 머리말 불릿을 먼저 두고, 설계 문서와 같은 절을 담는다', () => {
     const adr = buildAdrTemplate(1, '아키텍처 결정', { date: new Date('2026-09-15T00:00:00Z'), related: ['[README](../README.md)'] });
     expect(adr).toContain('# ADR-001. 아키텍처 결정');
     expect(adr).toContain('- 상태: 제안 (Proposed)');
     expect(adr).toContain('- 날짜: 2026-09-15');
     expect(adr).toContain('- 관련: [README](../README.md)');
-    expect(adr.indexOf('- 상태:')).toBeLessThan(adr.indexOf('## 맥락'));
+    expect(adr).toContain('## 문제');
+    expect(adr).toContain('## 포기한 것');
+    expect(adr).toContain('## 예상과 실제');
+    expect(adr.indexOf('- 상태:')).toBeLessThan(adr.indexOf('## 문제'));
   });
 
   it('트러블슈팅 항목은 증상·원인·해결 세 줄을 담고, 비어 있으면 안내 문구로 채운다', () => {
@@ -111,6 +130,89 @@ describe('템플릿', () => {
     const created = appendRoadmapTradeoffEntry(undefined, entry);
     expect(created).toContain('# 트레이드오프 후보 로드맵');
     expect(created).toContain('### 캐시 압축 켜기');
+  });
+
+  it('검증 기록 항목은 가설·조건·관측값·예상과 다른 점·배제한 원인·다음 확인 여섯 칸을 담는다', () => {
+    const entry = buildVerificationEntry('캐시 적중률 측정', {
+      hypothesis: '공유 캐시를 켜면 기동 시간이 줄어든다',
+      condition: '같은 프로젝트를 캐시 있음/없음으로 각 3회',
+      observation: '캐시 있음 22.6초, 캐시 없음 58.8초',
+      deviation: '없음',
+      excludedCauses: '네트워크 변동(같은 네트워크에서 반복해 배제)',
+      nextCheck: '다른 프로젝트에서도 같은 비율이 나오는지',
+    });
+    expect(entry).toContain('### 캐시 적중률 측정');
+    expect(entry).toContain('- 가설: 공유 캐시를 켜면 기동 시간이 줄어든다');
+    expect(entry).toContain('- 조건: 같은 프로젝트를 캐시 있음/없음으로 각 3회');
+    expect(entry).toContain('- 관측값: 캐시 있음 22.6초, 캐시 없음 58.8초');
+    expect(entry).toContain('- 예상과 다른 점: 없음');
+    expect(entry).toContain('- 배제한 원인: 네트워크 변동(같은 네트워크에서 반복해 배제)');
+    expect(entry).toContain('- 다음 확인: 다른 프로젝트에서도 같은 비율이 나오는지');
+
+    const empty = buildVerificationEntry('빈 항목');
+    expect(empty).toContain('(반증 가능한 한 문장을 적습니다)');
+
+    const created = appendVerificationEntry(undefined, entry);
+    expect(created).toContain('# 검증 기록');
+    expect(created).toContain('### 캐시 적중률 측정');
+  });
+
+  it('실험 기록 항목은 가설·방법·결과·결론 네 칸을 담고, 이어 붙이기는 같은 규칙을 따른다', () => {
+    const entry = buildExperimentEntry('모델 라우팅 비교', {
+      hypothesis: 'Haiku 시작이 토큰을 줄인다',
+      method: 'E3 과제 27회, S0 전략',
+      result: '성공 1건당 437,427 토큰(그냥 Claude Code 217,711 대비 2배)',
+      conclusion: '이 저장소·이 과제에서만 확인했다',
+    });
+    expect(entry).toContain('### 모델 라우팅 비교');
+    expect(entry).toContain('- 가설: Haiku 시작이 토큰을 줄인다');
+    expect(entry).toContain('- 방법: E3 과제 27회, S0 전략');
+    expect(entry).toContain('- 결과: 성공 1건당 437,427 토큰(그냥 Claude Code 217,711 대비 2배)');
+    expect(entry).toContain('- 결론: 이 저장소·이 과제에서만 확인했다');
+    const created = appendExperimentEntry(undefined, entry);
+    expect(created).toContain('# 실험 기록');
+    expect(created).toContain('### 모델 라우팅 비교');
+  });
+});
+
+describe('ROADMAP.md', () => {
+  it('템플릿은 단계(POC/MVP/Beta/v1)·마일스톤·현재 위치·진행 현황 관리 구간을 담는다', () => {
+    const roadmap = buildRoadmapTemplate();
+    expect(roadmap).toContain('- [ ] POC');
+    expect(roadmap).toContain('- [ ] MVP');
+    expect(roadmap).toContain('- [ ] Beta');
+    expect(roadmap).toContain('- [ ] v1');
+    expect(roadmap).toContain('## 마일스톤');
+    expect(roadmap).toContain('## 현재 위치');
+    expect(roadmap).toContain(ROADMAP_STATUS_START);
+    expect(roadmap).toContain(ROADMAP_STATUS_END);
+  });
+
+  it('regenerateRoadmapStatus는 파일이 없으면 템플릿을 만들고 진행 현황 구간을 요구사항 집계로 채운다', () => {
+    const summary = { byStatus: { 미착수: 2, 검증됨: 3 }, must: { total: 4, done: 3 }, should: { total: 1, done: 0 } };
+    const roadmap = regenerateRoadmapStatus(undefined, summary);
+    expect(roadmap).toContain('- [ ] POC');
+    expect(roadmap).toContain('| 미착수 | 2 |');
+    expect(roadmap).toContain('| 검증됨 | 3 |');
+    expect(roadmap).toContain('필수(must) 진행: 3/4 · 권장(should) 진행: 0/1');
+  });
+
+  it('관리 구간 밖의 손으로 쓴 글(단계·마일스톤·현재 위치)은 그대로 두고, 구간 안만 다시 만든다', () => {
+    const existing = `# 로드맵\n\n## 단계\n\n- [x] POC\n- [ ] MVP\n\n## 마일스톤\n\n베타: 11월\n\n## 현재 위치\n\nMVP 작업 중\n\n## 진행 현황\n\n${ROADMAP_STATUS_START}\n옛 집계\n${ROADMAP_STATUS_END}\n`;
+    const next = regenerateRoadmapStatus(existing, { byStatus: { 검증됨: 1 }, must: { total: 1, done: 1 }, should: { total: 0, done: 0 } });
+    expect(next).toContain('- [x] POC');
+    expect(next).toContain('베타: 11월');
+    expect(next).toContain('MVP 작업 중');
+    expect(next).not.toContain('옛 집계');
+    expect(next).toContain('| 검증됨 | 1 |');
+  });
+
+  it('관리 구간 표지가 아직 없으면 글 끝에 "## 진행 현황" 절을 새로 덧붙인다', () => {
+    const existing = '# 로드맵\n\n사람이 손으로 쓴 전체 안내\n';
+    const next = regenerateRoadmapStatus(existing, { byStatus: {}, must: { total: 0, done: 0 }, should: { total: 0, done: 0 } });
+    expect(next).toContain('사람이 손으로 쓴 전체 안내');
+    expect(next).toContain('## 진행 현황');
+    expect(next).toContain('아직 저장된 요구사항이 없습니다');
   });
 });
 
