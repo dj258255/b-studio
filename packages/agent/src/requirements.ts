@@ -1519,11 +1519,33 @@ function requirementSimilarityText(requirement: Requirement): string {
   return `${requirement.title} ${requirement.ears?.statement ?? requirement.acceptance.join(' ')}`;
 }
 
-/** 요구사항 둘의 유사도(0~1). 같은 kind면 가산점을 준다(제목이 비슷해도 api/ui처럼 종류가 다르면 다른 요구사항일 확률이 높다) */
+/** 제목 비교용 정규화: 백틱·문장부호·공백 차이로 같은 제목이 달라 보이지 않게 한다 */
+function normalizeTitle(title: string): string {
+  return title.toLowerCase().replace(/[`'"“”‘’()[\]{}·,.:;!?—–\-+/]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** 제목에 든 API 시그니처(메서드 + 경로). 예: "GET /api/posts/{postId} — 상세" → "GET /api/posts/{postId}" */
+export function apiSignature(title: string): string | undefined {
+  const match = /\b(GET|POST|PUT|PATCH|DELETE)\s+(\/[^\s—–,(]+)/i.exec(title);
+  return match ? `${match[1]!.toUpperCase()} ${match[2]!.replace(/\/+$/, '')}` : undefined;
+}
+
+/**
+ * 요구사항 둘의 유사도(0~1). 같은 kind면 가산점을 준다(제목이 비슷해도 api/ui처럼 종류가 다르면 다른 요구사항일 확률이 높다).
+ * 제목끼리의 유사도와 "제목+EARS(없으면 인수 조건)" 전체의 유사도 중 큰 값을 쓴다 — 한쪽에만 EARS가 있으면 긴 본문끼리
+ * 비교돼 같은 요구사항도 점수가 낮게 나왔다(재추출이 기존 18개 중 6개만 짝지은 실사용 사례). 같은 API 시그니처
+ * (메서드+경로)를 가진 두 요구사항은 같은 것으로 본다
+ */
 export function requirementSimilarity(a: Requirement, b: Requirement): number {
+  const signatureA = apiSignature(a.title);
+  const signatureB = apiSignature(b.title);
+  if (signatureA && signatureA === signatureB) return 1;
+  // 둘 다 API 시그니처가 있는데 다르면(GET /api/posts ↔ GET /api/posts/{postId}) 제목이 비슷해도 다른 요구사항이다
+  if (signatureA && signatureB) return 0;
+  const titleScore = textSimilarity(normalizeTitle(a.title), normalizeTitle(b.title));
   const textScore = textSimilarity(requirementSimilarityText(a), requirementSimilarityText(b));
   const kindBonus = a.kind === b.kind ? 0.15 : 0;
-  return Math.min(1, textScore * 0.85 + kindBonus);
+  return Math.min(1, Math.max(titleScore, textScore) * 0.85 + kindBonus);
 }
 
 /** 이 유사도 이상이면 "같은 요구사항"으로 짝짓는다(재추출 병합) */
