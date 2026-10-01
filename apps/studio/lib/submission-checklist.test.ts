@@ -13,8 +13,10 @@ import {
   checkSeedData,
   checkTests,
   checkWorkingTree,
+  matchAcceptanceAgainstDocs,
   scoreOf,
   type ChecklistCommit,
+  type ChecklistRequirement,
   type ChecklistService,
 } from './submission-checklist';
 
@@ -354,6 +356,76 @@ describe('checkRequirements — 명세 탭 상태', () => {
     ]);
     expect(should.status).toBe('warn');
     expect((await checkRequirements(root, [{ id: 'R1', title: '목록 API', priority: 'must', status: '검증됨' }])).status).toBe('pass');
+  });
+
+  it('verifiedBy를 보면 사람 확인·문서 확인 몇 개가 끼어 있는지 메시지에 적는다(ADR-103)', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-req-'));
+    const live: ChecklistRequirement[] = [
+      { id: 'R1', title: '목록 API', priority: 'must', status: '검증됨', verifiedBy: 'test' },
+      { id: 'R2', title: 'README 설명', priority: 'must', status: '검증됨', verifiedBy: 'docs' },
+      { id: 'R3', title: '디자인 비교', priority: 'should', status: '검증됨', verifiedBy: 'manual' },
+    ];
+    const item = await checkRequirements(root, live);
+    expect(item.status).toBe('pass');
+    expect(item.reason).toContain('문서 확인 1개');
+    expect(item.reason).toContain('사람 확인 1개');
+  });
+
+  it('모두 테스트/게이트로 검증됐으면(verifiedBy가 전부 test) 괄호를 붙이지 않는다(기존 문구 그대로)', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-req-'));
+    const live: ChecklistRequirement[] = [{ id: 'R1', title: '목록 API', priority: 'must', status: '검증됨', verifiedBy: 'test' }];
+    const item = await checkRequirements(root, live);
+    expect(item.reason).toBe('요구사항 1개가 모두 검증됐습니다.');
+  });
+});
+
+describe('matchAcceptanceAgainstDocs — kind: docs 요구사항의 문서 증거(ADR-103)', () => {
+  const README = [
+    '# b-studio',
+    '',
+    '## 개요',
+    '팀 과제 관리 앱입니다.',
+    '',
+    '## 실행 방법',
+    'docker compose up',
+    '',
+    '## 설계 결정',
+    '백엔드는 Spring Boot, 프런트엔드는 Next.js로 기술 선택을 했습니다. 상태 설계는 Redux 대신 서버 상태만 쓰는 방식을 골랐습니다. 구조는 레이어드 아키텍처를 따릅니다.',
+    '',
+    '## 데이터',
+    '게시글 데이터 적재는 seed 스크립트로 합니다.',
+  ].join('\n');
+
+  it('인수 조건이 전부 README 제목·문단에서 찾아지면 satisfied', () => {
+    const acceptance = ['README에 기술 선택을 설명한다', 'README에 상태 설계를 설명한다', 'README에 구조를 설명한다', 'README에 데이터 적재를 설명한다'];
+    const result = matchAcceptanceAgainstDocs(acceptance, [{ path: 'README.md', content: README }]);
+    expect(result.satisfied).toBe(true);
+    expect(result.missing).toEqual([]);
+    expect(result.matched).toHaveLength(4);
+    expect(result.sourceSummary).toContain('README.md');
+  });
+
+  it('일부만 찾아지면 satisfied가 아니고, 못 찾은 조건을 그대로 돌려준다', () => {
+    const acceptance = ['README에 기술 선택을 설명한다', 'README에 배포 파이프라인을 설명한다'];
+    const result = matchAcceptanceAgainstDocs(acceptance, [{ path: 'README.md', content: README }]);
+    expect(result.satisfied).toBe(false);
+    expect(result.matched).toEqual(['README에 기술 선택을 설명한다']);
+    expect(result.missing).toEqual(['README에 배포 파이프라인을 설명한다']);
+  });
+
+  it('문서가 하나도 없으면(빈 배열) 전부 못 찾는다', () => {
+    const result = matchAcceptanceAgainstDocs(['README에 기술 선택을 설명한다'], []);
+    expect(result.satisfied).toBe(false);
+    expect(result.missing).toHaveLength(1);
+  });
+
+  it('docs/architecture.md 같은 다른 문서에서도 찾는다', () => {
+    const result = matchAcceptanceAgainstDocs(
+      ['아키텍처 문서에 구조를 설명한다'],
+      [{ path: 'docs/architecture.md', content: '## 구조\n레이어드 아키텍처를 씁니다.' }],
+    );
+    expect(result.satisfied).toBe(true);
+    expect(result.sourceSummary).toContain('docs/architecture.md');
   });
 });
 
