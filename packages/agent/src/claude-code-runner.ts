@@ -110,10 +110,13 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     sdk = DEFAULT_SDK,
     interactive = false,
     intent = 'build',
+    research = false,
     steering,
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
+  // "조사" 모드는 질문(ask)일 때만 뜻이 있다 — 만들기 요청에 섞여 와도(화면이 막지만 안전망으로) 조용히 무시한다
+  const researching = ask && research;
 
   const workspace = new Workspace(project.root);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
@@ -198,7 +201,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let lastFeedback: string | undefined;
   let modelForQuery = model;
   let resumeForQuery = resume;
-  let pendingPrompt = ask ? buildAskRequest(request, { toolName }) : request;
+  let pendingPrompt = ask ? buildAskRequest(request, { toolName, ...(researching ? { research: { webToolsAvailable: true } } : {}) }) : request;
   // 승격으로 다음 query를 열어야 하면 true. 게이트 재시도는 같은 대화에 이어 넣는다
   let reopen = false;
 
@@ -264,10 +267,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       options: {
         cwd: project.root,
         systemPrompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide),
-        // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
-        tools: [],
+        // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다.
+        // "조사" 모드(researching)만 예외로 내장 WebSearch·WebFetch를 더 연다 — 파일·명령 도구는 절대 열지 않는다
+        // (읽기 전용은 여전히 ToolContext.readOnly=ask가 b-studio 도구 쪽에서 막는다)
+        tools: researching ? ['WebSearch', 'WebFetch'] : [],
         mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
-        allowedTools: specs.map((spec) => toolName(spec.name)),
+        allowedTools: researching ? [...specs.map((spec) => toolName(spec.name)), 'WebSearch', 'WebFetch'] : specs.map((spec) => toolName(spec.name)),
         permissionMode: 'dontAsk',
         strictMcpConfig: true,
         // 사용자 전역·프로젝트 설정(훅, 플러그인, CLAUDE.md)이 에이전트 동작을 바꾸지 않게 한다

@@ -231,6 +231,7 @@ export {
   subIssueTitle,
   summarizeRequirementPlan,
   trackingIssueTitle,
+  findTrackingIssue,
   type ConflictResolution,
   type ImplementedRequirementRef,
   type ParsedManagedRegion,
@@ -332,11 +333,12 @@ export {
 } from './workflow';
 export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
-export { buildAskRequest, buildSystemPrompt } from './prompts';
+export { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
 export {
   aggregateModelStats,
   classifyComplexity,
+  classifyRisk,
   estimateCost,
   estimateTokens,
   routeModel,
@@ -353,6 +355,7 @@ export {
   type RoutingDecision,
 } from './model-router';
 export { createProviderClient, GoogleModelClient, OpenAICompatibleModelClient } from './provider-clients';
+export { CLI_TIERS, higherCliTier, nextCliTier, routeCliTier, tierLabel, type CliRouteDecision, type CliRouteRequest, type CliTier } from './cli-router';
 export {
   appendPlanToRequest,
   buildPlanBriefSystem,
@@ -495,6 +498,29 @@ export {
   type TraceabilityMatrix,
 } from './requirements';
 export { loadProjectGuide, type ProjectGuide } from './project-guide';
+export {
+  adrFilePath,
+  appendRoadmapTradeoffEntry,
+  appendTroubleshootingEntry,
+  buildAdrTemplate,
+  buildDesignDocTemplate,
+  buildDocSummary,
+  buildRoadmapTradeoffEntry,
+  buildTroubleshootingEntry,
+  designDocFilePath,
+  DOCS_INDEX_END,
+  DOCS_INDEX_START,
+  DOCS_README_PATH,
+  extractDocSummary,
+  nextAdrNumber,
+  nextDesignDocNumber,
+  regenerateDocsReadme,
+  ROADMAP_TRADEOFFS_PATH,
+  slugifyTitle,
+  TROUBLESHOOTING_LOG_PATH,
+  type DocSummary,
+  type DocTemplateKind,
+} from './docs';
 export { projectGuideSection } from './prompts';
 export {
   discoverJsFile,

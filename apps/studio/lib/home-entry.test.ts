@@ -133,3 +133,61 @@ describe('구독 CLI 모드에서는 모델을 고르지 않고 서버 기본을
     expect(bodies[1]!.body).not.toHaveProperty('modelId');
   });
 });
+
+describe('나눠서 병렬은 대화에서 이어받은 세션 모델·노력 단계를 계획 만들기에 그대로 싣는다', () => {
+  const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  it('로컬 CLI 모드: 세션이 고른 별칭·노력 단계를 modelId·effort로 보낸다', async () => {
+    const bodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetcher = async (url: string, init?: RequestInit) => {
+      bodies.push({ url, body: JSON.parse(String(init?.body)) });
+      return ok({ id: 'p1' });
+    };
+
+    const result = await submitEntry(fetcher, {
+      ...base,
+      method: 'split',
+      mode: 'claude-code',
+      planModelId: '',
+      sessionModelId: 'sonnet',
+      sessionEffort: 'medium',
+    });
+
+    expect(result).toEqual({ ok: true, href: '/task-plans?id=p1' });
+    expect(bodies[0]!.body).toEqual({ projectId: 'orders', request: base.text, modelId: 'sonnet', effort: 'medium' });
+  });
+
+  it('로컬 CLI 모드: 세션이 "기본"이었으면(빈 문자열) modelId를 빈 문자열로 그대로 보낸다(안 보내는 것과 다르다)', async () => {
+    const bodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetcher = async (url: string, init?: RequestInit) => {
+      bodies.push({ url, body: JSON.parse(String(init?.body)) });
+      return ok({ id: 'p2' });
+    };
+
+    await submitEntry(fetcher, { ...base, method: 'split', mode: 'claude-code', planModelId: '', sessionModelId: '' });
+
+    expect(bodies[0]!.body).toMatchObject({ modelId: '' });
+  });
+
+  it('API 모드: 세션 모델이 있으면 새로 시작 화면 없이도 그 모델로 계획을 만든다(planModelId 없이도 된다)', async () => {
+    const bodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetcher = async (url: string, init?: RequestInit) => {
+      bodies.push({ url, body: JSON.parse(String(init?.body)) });
+      return ok({ id: 'p3' });
+    };
+
+    const result = await submitEntry(fetcher, { ...base, method: 'split', mode: 'api', planModelId: '', sessionModelId: 'claude-sonnet-5', sessionEffort: 'high' });
+
+    expect(result).toEqual({ ok: true, href: '/task-plans?id=p3' });
+    expect(bodies[0]!.body).toEqual({ projectId: 'orders', request: base.text, modelId: 'claude-sonnet-5', effort: 'high' });
+  });
+
+  it('API 모드: 세션 모델도 없으면(자동 라우터) 예전처럼 모델을 고를 수 없다는 이유를 돌려주고 서버를 부르지 않는다', async () => {
+    const { fetchImpl, calls } = fakeFetch([]);
+
+    const result = await submitEntry(fetchImpl, { ...base, method: 'split', mode: 'api', planModelId: '', sessionModelId: '' });
+
+    expect(result).toEqual({ ok: false, error: '계획에 쓸 모델을 고를 수 없습니다' });
+    expect(calls).toEqual([]);
+  });
+});

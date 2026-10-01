@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { ProjectGuide } from './project-guide';
-import { buildSystemPrompt, projectGuideSection } from './prompts';
+import { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 
 const project = {
   spec: { name: 'orders' },
@@ -57,6 +57,21 @@ describe('buildSystemPrompt 자가 확인 범위', () => {
   });
 });
 
+describe('buildSystemPrompt 응답 언어', () => {
+  it('사용자에게 보이는 설명·요약·질문은 한국어로 쓰라고 이르되, 코드·명령·식별자는 원문 그대로 두라고 못박는다', () => {
+    const prompt = buildSystemPrompt(project);
+
+    expect(prompt).toContain(AGENT_LANGUAGE_INSTRUCTION);
+    expect(AGENT_LANGUAGE_INSTRUCTION).toContain('한국어');
+    expect(AGENT_LANGUAGE_INSTRUCTION).toContain('코드');
+  });
+
+  it('도구 이름 매핑·자가 확인 범위와 무관하게 다섯 백엔드가 공유하는 이 함수에는 항상 들어간다', () => {
+    expect(buildSystemPrompt(project, { toolName: (name) => `mcp__b__${name}` })).toContain(AGENT_LANGUAGE_INSTRUCTION);
+    expect(buildSystemPrompt(project, { selfCheck: 'lean' })).toContain(AGENT_LANGUAGE_INSTRUCTION);
+  });
+});
+
 describe('buildSystemPrompt 방식 제안', () => {
   it('드물게, 뚜렷이 나뉘거나 비교를 원할 때만 propose_mode를 쓰고 보통은 직접 하라고 이른다', () => {
     const prompt = buildSystemPrompt(project);
@@ -85,5 +100,27 @@ describe('projectGuideSection', () => {
   it('CLAUDE.md로 대체해 읽었으면 그 이름을 그대로 절 제목에 쓴다', () => {
     const guide: ProjectGuide = { file: 'CLAUDE.md', text: '메모', charsUsed: 2 };
     expect(projectGuideSection(guide)).toContain('CLAUDE.md');
+  });
+});
+
+describe('buildAskRequest 조사(research) 안내', () => {
+  it('research를 생략하면(지금과 같다) 조사 안내를 붙이지 않는다', () => {
+    const prompt = buildAskRequest('이 함수는 뭐해?');
+    expect(prompt).not.toContain('[조사 모드]');
+    expect(prompt).toContain('이 함수는 뭐해?');
+  });
+
+  it('webToolsAvailable: true면 웹 도구로 출처를 찾아 링크로 남기라고 이른다(claude-code 러너만 실제로 연다)', () => {
+    const prompt = buildAskRequest('최신 결제 PG 수수료 비교', { research: { webToolsAvailable: true } });
+    expect(prompt).toContain('[조사 모드]');
+    expect(prompt).toContain('WebSearch/WebFetch');
+    expect(prompt).toContain('cite every source');
+  });
+
+  it('webToolsAvailable: false면 웹 검색을 지원하지 않는다는 사실과 모델 지식만으로 답하라는 지시를 함께 붙인다', () => {
+    const prompt = buildAskRequest('최신 결제 PG 수수료 비교', { research: { webToolsAvailable: false } });
+    expect(prompt).toContain('[조사 모드]');
+    expect(prompt).toContain('이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다');
+    expect(prompt).toContain('do not invent sources');
   });
 });

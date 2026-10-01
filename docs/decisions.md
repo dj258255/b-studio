@@ -105,7 +105,12 @@
 - [ADR-088 폴더 열기가 만드는 compose는 서비스 폴더 대신 프로젝트 루트 전체를 마운트한다](#adr-088-폴더-열기가-만드는-compose는-서비스-폴더-대신-프로젝트-루트-전체를-마운트한다)
 - [ADR-089 로컬 Claude Agent의 모델 목록을 하드코딩 표 대신 Claude Agent SDK가 보고하는 값으로 만든다](#adr-089-로컬-claude-agent의-모델-목록을-하드코딩-표-대신-claude-agent-sdk가-보고하는-값으로-만든다)
 - [ADR-090 요구사항을 EARS·시나리오로 정밀하게 쓰고 id·개정·추적 매트릭스를 관리한다](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+- [ADR-091 CLI 백엔드 자동 모델 선택](#adr-091-cli-백엔드-자동-모델-선택)
 - [ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다](#adr-092-요구사항을-github-이슈로-발행하고-상태를-한-방향으로-맞춘다)
+- [ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다](#adr-093-구독-cli-계정-연결-터미널-없이-로그인-상태를-보고-시작한다)
+- [ADR-094 조사(research) 채팅 모드와 "문서" 탭으로 연구 → 문서화 → 요구사항을 한 세션 안에서 잇는다](#adr-094-조사research-채팅-모드와-문서-탭으로-연구--문서화--요구사항을-한-세션-안에서-잇는다)
+- [ADR-095 폴더 열기가 프론트엔드의 백엔드 주소를 자동으로 연결하고, 검증 게이트가 그 연결이 실패하면 잡는다](#adr-095-폴더-열기가-프론트엔드의-백엔드-주소를-자동으로-연결하고-검증-게이트가-그-연결이-실패하면-잡는다)
+- [ADR-096 문서 저장은 검증 게이트 없이 바로 체크포인트로 남기고, 작업 분해는 프로젝트 원본이 아니라 세션의 체크포인트에서 시작한다](#adr-096-문서-저장은-검증-게이트-없이-바로-체크포인트로-남기고-작업-분해는-프로젝트-원본이-아니라-세션의-체크포인트에서-시작한다)
 
 ---
 
@@ -3694,6 +3699,54 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
+## ADR-091 CLI 백엔드 자동 모델 선택
+
+상태: 채택(1단계, 같은 세션 안에서만)
+관련: ADR-047, ADR-075, [E8](experiments/2026-09-30-e8-plan-execute-split.md), [E9](experiments/2026-10-01-e9-narrow-plan.md), [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)
+
+### 맥락
+- ADR-047의 멀티 모델 라우터는 `api` 백엔드(사용자가 입력한 제공자 API 키)에만 있다. 사용자는 API 예산이 없어 구독 CLI(`claude-code` 백엔드, 로컬 Claude Agent SDK 로그인)로만 돌리는데, 이 경로는 여전히 사람이 대화 입력창에서 opus·sonnet·haiku 중 하나를 매번 손으로 고정해야 한다(model-picker.ts).
+- ADR-047의 라우터는 그대로 옮길 수 없다: 그 라우터는 가격·컨텍스트·실측 통계를 가진 후보 여러 개의 점수를 매기지만, 구독 CLI에는 그런 후보 목록이 없다 — 로그인한 계정의 별칭(이름) 중 하나를 고를 뿐이고 실제 단가도 대화에서 추정한 값이지 API 청구서가 아니다.
+- E8(2026-09-30)과 E9(2026-10-01)은 세션 안에서 모델을 바꾸는 비용을 쟀다. 계획 모델(Opus)과 실행 모델(Haiku)을 매 요청 오가게 한 E8-split은 단일 모델(Sonnet, E8-sonnet) 대비 성공 1건당 비용이 538% 많았다(모델을 바꿀 때마다 프롬프트 캐시가 새로 만들어져 토큰이 약 4배로 늘었다). 계획 프롬프트를 좁힌 E9-split도 여전히 계획 호출 고정비 때문에 Sonnet 단독보다 27% 비쌌다. 두 실험 모두 결론은 같다 — **작은 과제에서는 Sonnet 단독이 가장 싸고 성공률도 같다.** Haiku 단독은 성공 1건당 비용은 Sonnet과 비슷했지만 성공률이 떨어졌다(9건 중 7건 — 로딩에서 멈춘 화면을 인수 확인에서 놓쳤다).
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| ADR-047의 점수 라우터를 claude-code에도 그대로 적용 | 구독 CLI에는 점수를 매길 후보(가격표·실측 컨텍스트)가 없다. 있는 건 이름 세 개뿐이다 |
+| 매 요청 복잡도로 다시 계산(세션 상태 없음) | E8/E9가 쟀듯 모델을 자주 바꾸면 프롬프트 캐시가 깨져 비용이 뛴다. 세션 중간에 sonnet→opus→sonnet으로 오가면 매번 캐시를 다시 만든다 |
+| **세 단계(haiku<sonnet<opus) 규칙표 + 세션 안 stickiness(한 번 성공한 단계는 내리지 않음) + 실패 시 한 단계 승격** | 규칙이 도메인 의미를 완전히 이해하지 못하고, 단가는 대화에서 관측한 값(E8)이지 청구서가 아니다 |
+
+### 결정
+- `packages/agent/src/cli-router.ts`의 `routeCliTier`가 순수 함수로 세 단계(`haiku < sonnet < opus`, `CLI_TIERS`) 중 하나를 고른다. fable은 단가를 몰라 자동 후보에 넣지 않는다(사용자가 대화에서 직접 고를 때만).
+  - 읽기만 하는 질문(intent === `ask`)은 항상 haiku. 질문 완료는 구현 품질의 증거가 아니라는 ADR-047과 같은 원칙으로, stickiness도 적용하지 않는다(세션이 opus로 성공했어도 다음 질문은 haiku로 내려간다 — 질문은 캐시 재사용보다 비용을 우선한다).
+  - 만들기 요청은 단순·보통이면 sonnet, ADR-047의 `classifyComplexity`(길이·줄바꿈·설계 키워드)가 complex거나 `classifyRisk`(인증·결제·정산·마이그레이션·삭제·운영 배포 등)가 high면 opus. E9에서 Haiku 단독의 성공률이 떨어졌으므로 만들기 요청에는 haiku를 후보로 두지 않는다.
+  - **stickiness**: 세션 안에서 이미 성공적으로 쓴 가장 높은 단계(`session.claudeCode.autoTier`)가 이번에 계산한 단계보다 높으면 내리지 않는다 — 읽기 전용 질문이 아닌 한 모델을 바꿔 캐시를 다시 만들지 않는다. 위험도가 올라가 더 높은 단계가 필요하면 그대로 올라간다(하강만 막는다, 상승은 막지 않는다).
+- 복잡도·위험도 분류는 새로 만들지 않고 ADR-047의 `classifyComplexity`(그대로 재사용)·새로 뺀 `classifyRisk`(HIGH_RISK 정규식을 함수로 분리, `model-router.ts`)를 그대로 쓴다 — "복잡하다/위험하다"의 뜻을 두 라우터가 따로 정의하지 않는다.
+- `model-picker.ts`의 claude-code 옵션 목록에 `auto`("자동", 힌트 "요청마다 알맞은 모델을 고르고, 검증에 실패하면 한 단계 올립니다")를 더한다. 기존 별칭 배열(`CLAUDE_CODE_ALIASES`)과 별도 헬퍼 함수(`claudeCodeAutoOption`)로 둬, 같은 시기에 진행 중인 SDK `supportedModels` 기반 재작성(`feature/model-list-from-sdk`)과의 병합을 한 줄 추가로 끝나게 했다.
+- 세션에서 `auto`를 고르거나(`session.snapshot.modelId`) 서버 기본값이 `auto`면(`B_STUDIO_CLAUDE_CODE_MODEL=auto`, 벤치가 이 경로로 시작 모델을 넘긴다) `sessions.ts`의 `planRun`이 `routeCliTier`를 불러 실제 모델 이름(haiku·sonnet·opus)으로 바꿔 러너에 넘긴다 — Claude Code CLI에는 `auto`라는 모델이 없으므로 이 치환이 반드시 실행 전에 끝나야 한다.
+- **승격은 기존 메커니즘을 그대로 쓴다**(`escalation.ts`의 게이트 실패 서명 규칙). 승격 대상만 다르다 — 계획 모델이나 환경 변수가 아니라 고른 단계의 바로 위 단계(`nextCliTier`)로 한 단계만 올린다. 이미 opus(최고 단계)면 승격하지 않는다.
+- 대화 이벤트는 api 라우터(ADR-047)와 같은 `route` 이벤트를 재사용한다(`auto: true` 필드만 다르다). 화면은 api의 점수표 `<details>` 대신 한 줄 안내("자동 선택: Sonnet 5 — 이유")를 보여준다 — CLI 자동 선택에는 비교할 점수·실측 비용이 없어 점수표가 의미가 없기 때문이다.
+- 요청이 끝나면(`nextAutoTier`) 검증 게이트를 통과한(`done`) 만들기 요청만 stickiness를 갱신한다. 승격이 일어났으면 승격된 단계를 기억한다(다음 요청도 그 단계부터 시작해 다시 낮췄다 올리는 캐시 재생성을 피한다). 질문이거나 실패한 시도는 기억하지 않는다.
+- 토큰·비용 관측은 새로 만들지 않는다. `claude-code-runner.ts`는 이미 SDK가 돌려준 실제 모델 이름(`message.model`, 별칭이 아니라 `claude-sonnet-5` 같은 실제 id)으로 `session` 이벤트와 `usageByModel`을 기록한다 — 자동 선택이 고른 별칭을 그대로 `model` 옵션에 넘기기만 하면 기존 토큰 탭·단가표가 그대로 맞물린다.
+
+### 검증 결과
+- `packages/agent/src/cli-router.test.ts`(9개): 질문→haiku, 단순 만들기→sonnet, 복잡·위험 만들기→opus, 만들기 요청에 haiku 미사용, stickiness(하강 안 함·질문엔 미적용·상승은 허용), `nextCliTier`·`higherCliTier` 경계값.
+- `apps/studio/lib/server/sessions.test.ts`: `claudeCodeAutoEscalation`(haiku→sonnet, sonnet→opus, opus는 승격 없음), `nextAutoTier`(done만 기억, 승격 시 올라간 단계 기억, 더 높은 값은 내리지 않음, ask·실패는 무시).
+- `apps/studio/lib/server/model-picker.test.ts`: claude-code 옵션 목록에 `자동`이 포함되고(힌트 문구까지), `isSelectableModel('claude-code', 'auto')`가 통과한다.
+- `apps/studio/bench/coordination/backends.test.ts`: `resolveBackend`가 `--model auto`를 그대로 받는다(E10 벤치 배선).
+- `pnpm typecheck`(모든 워크스페이스 Done), 위 네 테스트 파일과 회귀로 돌린 `model-router.test.ts`·`escalation.test.ts` 전체 통과.
+- 실제 Claude Code CLI 호출로 자동 선택이 도는 것은 확인하지 못했다(사용자가 API 예산이 없어 구독 CLI 실 실행은 비용/사용량을 쓴다 — [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)에 실행 방법만 적어 두고 아직 실행하지 않았다). `pnpm bench:coordination --dry`로 인자 해석·하네스 배선만 확인했다.
+
+### 감수한 트레이드오프
+- 복잡도·위험도 분류가 ADR-047과 같은 한계를 물려받는다(키워드·길이 기반, 도메인 의미를 완전히 이해하지 못함).
+- stickiness는 세션(=하나의 Claude Code 대화) 단위로만 본다. 서버가 재시작되면 `session.claudeCode.autoTier`는 세션 파일에 저장된 값을 그대로 복원하지만, 세션 자체가 끝나면(새 세션) 다시 처음(요청마다 새로 계산)부터 시작한다 — 사용자 전체의 습관을 배우지 않는다.
+- 단가 비교(E8/E9가 쓴 "API 환산 비용")는 대화 관측값이지 실제 구독 청구서가 아니다. 자동 선택이 실제로 돈을 아끼는지는 이 ADR이 아니라 E10(계획만, 아직 실행하지 않음)이 잴 것이다.
+- Phase 2(다른 CLI 백엔드 사이의 자동 전환 — 예: Claude Code 구독 한도에 걸리면 Codex나 Command Code로 넘어가기)는 이번 범위 밖이다. 지금 자동 선택은 한 세션의 한 백엔드 안에서만 단계를 고른다.
+- S2(`--contracts model`)의 계약 호출과 `--lane-backend`(레인별 백엔드·모델)에는 아직 `auto`를 연결하지 않았다 — 두 경로 모두 `claudeCodeAsk`를 직접 부르고 세션의 `planRun`을 거치지 않기 때문이다. 단일 세션 요청(S0/S1)에서만 동작한다.
+
+---
+
 ## ADR-092 요구사항을 GitHub 이슈로 발행하고 상태를 한 방향으로 맞춘다
 
 상태: 채택
@@ -3744,6 +3797,145 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **"검증됨 + PR 병합" 확인은 이 세션에 연결된 PR 하나만 본다.** 한 요구사항을 여러 세션·여러 PR에 걸쳐 나눠 구현했으면(레인마다 다른 PR 등) 이 휴리스틱이 놓칠 수 있다 — 작업 계획(task-plans.ts)의 통합 세션처럼 한 PR로 모이는 경우를 기본으로 가정했다.
 - **"전체 계획 세우기" 전 발행 확인은 세션(컴포넌트 상태) 동안만 한 번**이다. 화면을 새로고침하면 다시 물어본다(서버에 "이미 물어봤다"를 저장하지 않는다) — 매번 새로고침해서 우회하는 사람을 막지는 못하지만, 이 확인은 안내이지 차단이 아니므로 감수했다.
 - **PR 자동 리뷰·상태 동기화는 요구사항 문맥 계산이 실패해도 조용히 빈 문자열/빈 배열로 넘어간다.** 요구사항 기능이 꺼져 있거나 원격이 없어도 기존 PR·리뷰 흐름이 그대로 동작해야 하기 때문이다 — 반대로, 계산이 은근히 실패해도(예: 사이드카 파일 손상) 사람이 눈치채기 어렵다는 뜻이기도 하다.
+
+---
+
+## ADR-093 구독 CLI 계정 연결: 터미널 없이 로그인 상태를 보고 시작한다
+
+상태: 채택
+관련: ADR-019(로컬 로그인 계정으로 실행)
+
+### 맥락
+- ADR-019 이후 b-studio는 네 가지 구독 CLI(claude-code·codex·commandcode·opencode)를 "이미 로그인된 것"으로 전제하고 돌린다. 로그인이 안 돼 있으면 각 `preflight*`(packages/agent/src/*-runner.ts)가 "터미널에서 `cmd login`으로 로그인하세요" 같은 문장만 돌려주고, 사용자는 실제로 터미널을 열어 명령을 쳐야 한다 — b-studio가 터미널 작업대를 표방하면서도 이 한 가지는 화면 밖으로 밀어낸 셈이다.
+- 네 CLI가 로그인 명령을 어떻게 제공하는지 실행하지 않고(지시에 따라 실제 로그인을 시작하거나 끝내지 않았고, 자격 증명 파일도 읽지 않았다) `--help`만으로 조사했다(2026-10-01, 이 PC에 설치된 버전 기준):
+
+| CLI | 로그인 서브커맨드 | 선택 메뉴를 건너뛰는 플래그 | 상태 확인 | 비고 |
+|---|---|---|---|---|
+| `claude`(Claude Code) | `claude auth login` | `--claudeai`(기본값, Claude 구독) / `--console`(API 키 과금) / `--sso` | `claude auth status --json` | commander 서브커맨드. 알려진 동작(OAuth, 브라우저+로컬 콜백)대로라면 TTY 키 입력 없이 URL을 찍고 기다리는 꼴일 것으로 본다 — 이 추정은 실제로 실행해 확인하지 못했다 |
+| `codex` | `codex login` | **`--device-auth`**(기기 인증 코드 발급) | `codex login status`(이미 `preflightCodex`가 쓴다) | `--device-auth`는 설계 자체가 TTY 없는 환경을 위한 흐름이라, 네 CLI 중 가장 확신을 갖고 스폰할 수 있다 |
+| `cmd`(Command Code) | `cmd login [provider]` | provider 인자를 생략하면 "Command Code 계정"으로 로그인(=BYOK 제공자 로그인과 분리) | `cmd status --json`(이미 `preflightCommandCode`가 쓴다) | `claude auth login`과 같은 commander 서브커맨드 모양이라 같은 OAuth 루프백 흐름으로 추정 |
+| `opencode` | `opencode auth login [provider]` | `-p/--provider`, `-m/--method`로 선택 메뉴를 건너뛸 수 있다 | `opencode --version`(`preflightOpenCode`는 로그인이 아니라 설치 여부만 본다) | opencode 전체(`opencode --help`의 기본 동작이 "opencode tui")가 ink 기반 대화형 CLI다. `-p/-m`으로 제공자·방식 선택은 건너뛰어도 그다음 단계(OAuth든 API 키 붙여넣기든)가 TTY 상호작용을 전제하는지 확인하지 못했다 |
+
+- 위 표에서 claude-code·codex·commandcode 세 곳은 "URL(또는 기기 코드)을 표준출력에 찍고 콜백·폴링으로 끝까지 간다"는 공통된 설계로 보이지만, **실제로 로그인을 실행해 그 출력 문구를 본 적은 없다.** opencode는 반대로 "대화형 CLI 전체의 서브커맨드"라는 더 분명한 근거(메인 `--help`가 자신을 TUI라고 설명한다)로 TTY 필요로 판단했다.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| A. 네 CLI 모두 화면에서 자동으로 로그인을 띄운다 | 실행해 보지 못한 claude-code·cmd의 표준출력 형식을 짐작으로 자동화하는 데다, opencode는 ink 기반 TUI라는 근거가 있는데도 억지로 흉내 내면 화면이 멈춘 것처럼 보이는 조용한 실패를 만든다 |
+| B. 네 CLI 모두 "터미널에서 실행하세요" 안내만 보여준다(지금 상태에 복사 버튼만 추가) | 가장 안전하지만, `--device-auth`처럼 명백히 헤드리스용으로 설계된 codex의 기능을 쓰지 않는다 — 조사한 보람이 없다 |
+| **C. 설계 근거가 분명한 CLI(claude-code·codex·commandcode)는 자식 프로세스로 띄우고 표준출력에서 URL·코드를 정규식으로 뽑아 보여준다. TUI 근거가 있는 opencode만 명령+복사 버튼으로 남긴다** | 채택. CLI별로 다른 확신 수준을 솔직하게 반영한다. 정규식이 실제 CLI 출력과 어긋나도(실행해 보지 못했으므로 그럴 수 있다) 로그인 자체(각 CLI 프로세스)는 그대로 흐르고, 사람이 로그 tail을 보고 URL을 직접 복사할 수 있어 "자동 추출 실패"가 "로그인 실패"로 이어지지 않는다 |
+
+### 결정
+- **상태 확인은 `preflight*`를 그대로 재사용한다**(`apps/studio/lib/server/cli-accounts.ts`의 `checkAccountStatus`). 자격 증명 파일은 어디서도 읽지 않는다 — claude-code만 preflight가 이미 알고 있는 계정 종류(`describeAccount`, 예: "max 구독")를 보여주고, 나머지 세 CLI는 "연결됨/로그인 필요"만 보여준다(지어내지 않는다). preflight 실패 이유 문자열에서 `ENOENT`·`command not found` 류를 정규식으로 가려 "설치 안 됨"과 "로그인만 안 됨"을 구분한다(완벽하지 않다 — preflight가 두 경우를 구조화된 값 대신 문장으로만 돌려주기 때문이다).
+- **로그인 시작은 공식 명령을 자식 프로세스로 스폰한다.** `claude auth login --claudeai` · `codex login --device-auth` · `cmd login`을 `startLogin()`이 띄우고, stdout·stderr을 줄 단위로 모아(`pushLine`) 최근 200줄만 들고 있는다. 각 줄에서 `extractLoginHint()`(URL 정규식 `https?://…` + 기기 코드 정규식 `[A-Z0-9]{4}-[A-Z0-9]{4}` 또는 `[A-Z0-9]{4,10}`, URL 안에 들어있는 글자는 코드로 집지 않는다)가 URL·코드 후보를 뽑는다. 화면은 URL을 "브라우저에서 열기" 버튼으로, 코드를 복사 버튼으로 보여주고 로그 전체를 tail로 띄운다.
+- **opencode는 흉내 내지 않는다.** `loginCommandFor('opencode').spawnable === false`이고, 화면은 정확한 명령(`opencode auth login`)과 복사 버튼, "터미널에서 실행한 뒤 다시 확인해 주세요" 안내만 보여준다. `POST /api/accounts/opencode/login`도 프로세스를 띄우지 않고 `{ spawnable: false, command, note }`만 돌려준다.
+- **백엔드당 로그인은 하나만 돈다.** `startLogin`이 모듈 수준 `Map<백엔드, 세션>`을 들고 있다가, 이미 `running`이면 새로 띄우지 않고 같은 진행 상황을 돌려준다.
+- **자동으로 끊는다.** 사람이 창을 닫고 잊어도 자식 프로세스가 영영 떠 있지 않도록 10분(`LOGIN_TIMEOUT_MS`) 뒤 자동으로 `cancelLogin(..., 'timeout')`이 프로세스를 죽인다. 사람이 직접 취소(`DELETE`)할 수도 있다.
+- **끝나면 한 번만 다시 확인한다.** `GET /api/accounts/[backend]/login`은 프로세스가 `running`이 아니고 아직 재확인하지 않았으면(`progress.status`가 비어 있으면) `checkAccountStatus`를 한 번 불러 채운다(`attachStatus`) — 폴링마다 CLI를 다시 띄우지 않는다.
+- **개인 PC 모드 + 로그인한 사용자만 연다.** 네 라우트(`GET /api/accounts`, `POST·GET·DELETE /api/accounts/[backend]/login`, `POST /api/accounts/[backend]/refresh`) 모두 `requireUser` 다음에 `localFolderAllowed()`(폴더 열기, ADR-067과 같은 게이트)를 확인한다 — 인증을 끈 개인 PC 모드(`B_STUDIO_AUTH=none`)에서는 `requireUser`가 항상 같은 로컬 사용자를 돌려주므로, 사실상 "이 서버의 CLI를 직접 다루는 사람이 바로 이 PC를 쓰는 사람"이라는 전제가 두 조건에 함께 걸려 있다. `backend` 경로 값은 허용 목록(`isCliAccountBackend`, 네 값만)으로만 받는다.
+- **화면.** `/accounts`(헤더의 프로젝트 메뉴에서 "폴더 열기…"와 같은 조건으로 "계정 연결" 항목이 연다)에 CLI별 카드를 두고, 상태(연결됨/로그인 필요/설치 안 됨)·계정 종류·로그인 버튼·진행(URL·코드·로그 tail·취소)을 보여준다. 이미 "로그인돼 있지 않습니다" 같은 문구가 나오던 대화 입력창의 모델 선택 팝오버에도 그 이유가 로그인 관련이면(`needsAccountConnect`, `disabledReason`에 "로그인" 포함 여부로 판단) "계정 연결로 가기" 링크를 더했다. 보안 문구("비밀번호와 토큰은 b-studio가 보지 않습니다. 각 CLI가 직접 저장합니다")를 화면에 고정으로 둔다.
+
+### 검증 결과
+- `apps/studio/lib/server/cli-accounts.test.ts`: `extractLoginHint`를 합성(synthetic, 실제로 관측하지 않은) 픽스처로 검증(URL+코드 동시, URL만, 코드만, 둘 다 없음, URL 쿼리 안 코드처럼 보이는 값은 코드로 집지 않음), `checkAccountStatus`의 네 백엔드 분기(연결/로그인 필요/설치 안 됨), 상태 기계(시작→running, 중복 시작 방지, 정상 종료, 취소, 타임아웃, spawn 오류, 로그 200줄 상한, opencode 시작 거부)를 가짜 `spawn`(진짜 프로세스를 띄우지 않는다)으로 검증했다.
+- `apps/studio/app/api/accounts/**/route.test.ts`: 개인 PC 모드 게이트(403)·인증(401)·허용 목록 밖 백엔드(400)·spawnable 분기(opencode는 명령만 돌려주고 프로세스를 띄우지 않는다)·진행 조회가 끝난 뒤 한 번만 재확인하는지를 검증했다.
+- `apps/studio/components/accounts-panel.test.tsx`·`chat-panel.test.tsx`: 정적 렌더(`renderToStaticMarkup`, 이 저장소 컴포넌트 테스트의 기존 관례)로 상태별 카드 표시와 "계정 연결로 가기" 안내 유무를 검증했다.
+- 확인하지 못한 범위: 네 CLI의 실제 로그인 표준출력 형식(지시에 따라 로그인을 실제로 실행하지 않았다). `extractLoginHint`의 정규식이 실제 CLI 출력과 어긋나면 URL·코드 자동 추출만 못 하고, 로그 tail에는 그대로 찍히므로 사람이 직접 복사할 수 있다 — 다음에 실제 CLI로 한 번 실행해 정규식을 다듬어야 한다.
+
+### 감수한 트레이드오프
+- claude-code·commandcode의 "스폰 가능" 판단은 실제 실행 확인 없이 명령 설계(OAuth 루프백으로 보이는 서브커맨드 구조)만 근거로 삼았다 — 실제로 TTY가 필요하면(예: 추가 확인 프롬프트) 자식 프로세스가 입력을 받지 못해 타임아웃(10분)까지 멈춘 것처럼 보일 수 있다. "취소" 버튼이 있어 사람이 그 전에 끊을 수 있다는 것으로 위험을 줄였다.
+- URL·코드 추출 정규식은 일반적인 OAuth 기기 인증 흐름(GitHub CLI 등 공개 사례)의 생김새를 본뜬 것이지, 이 네 CLI의 실제 출력에서 확인한 값이 아니다.
+- "설치 안 됨" 판정은 preflight의 사람이 읽는 오류 문장에서 `ENOENT` 등을 정규식으로 찾는 방식이라, CLI가 다른 문구로 "없음"을 알리면(예: 셸마다 다른 "command not found" 번역) 로그인 필요로 잘못 분류될 수 있다.
+- opencode는 이번에 로그인 자동화를 포기했다 — 다음에 실제로 `opencode auth login`을 실행해 어느 단계까지 비대화형으로 되는지 확인하면 범위를 넓힐 수 있다.
+
+---
+
+## ADR-094 조사(research) 채팅 모드와 "문서" 탭으로 연구 → 문서화 → 요구사항을 한 세션 안에서 잇는다
+
+상태: 채택
+관련: [ADR-042 질문 모드](#adr-042-질문-모드-같은-대화와-도구-목록을-쓰고-바꾸는-도구는-실행기에서-막음), [ADR-079 명세 → 요구사항 → 검증 추적](#adr-079), [ADR-090 요구사항 EARS·시나리오·추적 매트릭스](#adr-090-요구사항을-ears시나리오로-정밀하게-쓰고-id개정추적-매트릭스를-관리한다)
+
+### 맥락
+- 지금까지 스튜디오 밖에서 하던 작업 흐름이 있다: 채팅으로 웹을 찾아보며 논쟁하듯 결론을 다듬고(조사), 그 결론을 저장소 문서로 정리하고(문서화), 문서를 요구사항에 반영하고(적용), 요구사항 하나를 두고 다시 채팅으로 묻는(피드백) 순환이다. 지금 스튜디오는 이 네 동작 중 "질문"(ADR-042)과 "요구사항 ↔ 작업"(ADR-079/090의 workPrefill) 절반만 지원했다 — 조사에 웹 도구가 없고, 문서는 코드 탭에서 읽기만 가능했고(쓰기 경로가 없다), 채팅 답을 요구사항에 반영하려면 사람이 손으로 옮겨 적어야 했다.
+- 범수 님의 BE-commerce 저장소가 이미 이 순환을 반영한 문서 구조를 쓰고 있다: `docs/README.md`의 "처음 읽는 순서"·역할별 표, 번호 매긴 설계 문서(`docs/NN-제목.md`), ADR 한 편당 한 파일(`docs/adr/ADR-NNN-slug.md`), `TROUBLESHOOTING-LOG.md`·`ROADMAP-TRADEOFFS.md`로 "지금 뭐가 열려 있는지"·"트레이드오프 후보"를 분리해 쌓는다. 이 구조를 스튜디오 세션의 작업 복사본 안에서도 만들고 고칠 수 있어야 "조사 → 문서화"가 실제로 이어진다.
+- claude-code 백엔드는 이미 WebSearch/WebFetch를 쓰는 선례가 있다(`claude-code-ask.ts`의 `webTools`, 요구사항 "모호한 점 추천"에서만 연다). 이 선례를 일반 대화의 질문 경로로 넓히되, 그 밖의 백엔드(모델 API 직접 호출, codex, commandcode, opencode)는 웹 도구가 전혀 없으므로 "모델 지식으로만 답한다"는 사실을 숨기지 않아야 한다.
+
+### 검토한 선택지
+
+| 방식 | 문제 |
+|---|---|
+| "문서" 탭을 "코드" 탭의 세 번째 하위 탭으로 넣는다 | 문서 쓰기는 "코드 읽기"의 부속 기능이 아니라 조사 결과를 저장소에 남기는 별도 작업 흐름이라, 코드 탭 안에 묻으면 눈에 띄지 않는다 |
+| 조사 모드를 완전히 새 `intent` 값(`'research'`)으로 만든다 | 실행기의 읽기 전용 판정(`ToolContext.readOnly`)·게이트 생략·여러 러너의 `ask` 분기 전부를 다시 나눠야 한다 — `ask`가 이미 "읽기 전용"의 전부를 뜻하는데 값만 하나 더 늘리면 중복 분기가 생긴다 |
+| **"문서"를 독립된 위 탭으로 두고, 조사는 `intent: 'ask'`에 올라타는 보조 플래그(`research`)로 둔다 — 읽기 전용 여부는 그대로 `ask`가 정하고, `research`는 그 위에서 "웹에서 찾아 답하라"는 지시(및 claude-code만 실제 웹 도구)를 더할 뿐이다** | 채택. 실행기·게이트 분기를 하나도 늘리지 않고, `buildAskRequest`(모든 백엔드가 공유하는 질문 모드 프롬프트 함수) 한 곳만 확장하면 다섯 백엔드(claude-code·codex·commandcode·opencode·직접 만든 루프) 모두에 안내가 퍼진다 |
+
+### 결정
+
+1. **"문서" 탭**(`apps/studio/lib/tab-model.ts`): `buildTopTabs`가 만드는 고정 탭을 코드·요구사항·실행·저장소·**문서**·토큰 여섯 자리로 늘렸다(`{ kind: 'docs', id: 'docs', label: '문서' }`). 하위 탭은 두지 않는다 — 트리에서 문서를 고르면 미리보기·편집이 같은 화면 안에서 바로 바뀌어 "코드"의 파일/변경 기록처럼 번갈아 보여줄 하위 화면이 필요 없다.
+2. **순수 함수로 템플릿·색인을 만든다**(`packages/agent/src/docs.ts`): `nextDesignDocNumber`/`nextAdrNumber`(기존 `docs/NN-*.md`·`docs/adr/ADR-NNN-*.md`에서 다음 번호 계산), `buildDesignDocTemplate`/`buildAdrTemplate`(BE-commerce 꼴 — ADR은 상태·날짜·관련 머리말 불릿 먼저), `appendTroubleshootingEntry`/`appendRoadmapTradeoffEntry`(파일이 없으면 제목부터 만들고, 있으면 끝에 이어 붙인다), `extractDocSummary`(첫 H1+첫 문단을 뽑는다, 표·목록·주석으로 시작하는 문단은 요약으로 보지 않는다), `regenerateDocsReadme`(`<!-- b-studio:docs-index -->`~`<!-- /b-studio:docs-index -->` 관리 구간만 다시 만들고 그 밖의 손으로 쓴 글은 그대로 둔다. 표지가 아직 없으면 글 끝에 새로 붙인다). 이 모듈은 파일 IO를 하지 않는다 — studio의 `sessions.ts`가 `Workspace`로 읽고 쓴다.
+3. **쓰기는 기존 경로를 그대로 쓴다**: `writeSessionDoc`/`createSessionDoc`/`regenerateSessionDocsIndex`(`apps/studio/lib/server/sessions.ts`)는 `applySessionRequirements`와 똑같이 `new Workspace(session.project.root).write(path, content)`로 세션 작업 복사본에 바로 쓴다 — 다음 체크포인트·PR에 그대로 실린다. 문서 범위는 `docs/**/*.md`·루트의 `README.md`·`CHANGELOG.md`·`CONTRIBUTING.md`로만 제한한다(`isDocPath`).
+4. **조사(research) 채팅 모드**: `ChatIntent`/`Intent`는 그대로 `'build'|'ask'` 두 값을 유지하고, `research?: boolean`을 `ask`에만 뜻이 있는 보조 플래그로 더했다(`chat-request.ts`→`messages` 라우트→`sendMessage`→`RunPlan.research`→`shared.research`로 다섯 러너 호출에 전부 흘러간다, 모든 러너가 `shared`를 스프레드하므로 타입 한 곳만 늘리면 된다). `prompts.ts`의 `buildAskRequest`(다섯 백엔드가 공유하는 질문 모드 프롬프트 함수)에 `research` 옵션을 더해, `webToolsAvailable: true`(claude-code만)면 "WebSearch/WebFetch로 찾아 출처를 링크로 남기라"고, `false`(그 밖의 백엔드)면 "이 백엔드는 웹 검색을 지원하지 않아 모델 지식으로 답합니다"라고 모델에게도, 화면에도 똑같이 알린다. claude-code 러너(`claude-code-runner.ts`)만 `researching`(= `ask && research`)일 때 SDK의 `tools`/`allowedTools`에 `WebSearch`·`WebFetch`를 추가로 연다(파일·명령 도구는 절대 열지 않는다 — b-studio 전용 MCP 도구 목록은 그대로다). 화면은 "읽기만"이 켜졌을 때만 "조사" 스위치를 보여준다("가볍게 확인"과 같은 자리 규칙).
+5. **채팅 메시지 동작**: 답변 메시지(`reply`) 아래에 작은 글씨 메뉴(복사·문서로 저장·요구사항에 반영)를 둔다. 복사는 클립보드에 마크다운을 그대로 담고(쓰기 권한 없이도 쓸 수 있다), 문서로 저장은 `NewDocDialog`(문서 탭과 공유하는 작은 다이얼로그)를 메시지 내용을 본문으로 열어 템플릿 종류·제목만 고르면 되게 하고, 요구사항에 반영은 새 `RequirementsImportContext`(코드 탭 열기 `CodeOpenContext`와 같은 자리)로 "요구사항" 탭을 열고 메시지 글을 기존 `/requirements/extract` 미리보기 엔드포인트에 명세로 흘려보낸다 — 이미 있는 재추출 병합(`mergeReextractedRequirements`)이 그대로 추가/변경/그대로/삭제 diff를 만들어 주므로 새 추출 로직을 만들지 않았다.
+6. **요구사항 → 채팅**: 요구사항 카드에 "대화에서 묻기"(읽기만 모드를 켜고 id·제목·EARS·인수 조건·시나리오를 맥락으로 채운 뒤 질문 쓸 자리를 남긴다, `buildRequirementAskPrefill`)와 "복사"(같은 내용을 마크다운으로, `requirementToMarkdown`)를 더했다. 기존 `ChatDraft.fill`을 확장해(`fill(text, { readOnly?, research? })`) "대화에서 묻기"가 읽기만 스위치까지 함께 켤 수 있게 했다 — 기존 "이 요구사항 작업" 프리필 메커니즘을 그대로 재사용한다.
+
+### 검증 결과
+- `packages/agent/src/docs.test.ts`: 슬러그화·다음 번호 계산(두 자리 안/밖 모두)·네 템플릿·`extractDocSummary`(표·목록·주석 시작 문단 제외)·`regenerateDocsReadme`(README 없음/관리 구간 있음/표지 없음/문서 없음/정렬 순서)까지 25개 사례.
+- `packages/agent/src/prompts.test.ts`: `buildAskRequest`가 `research` 생략/웹 도구 있음/없음 세 경우에 올바른 안내를 붙이는지.
+- `packages/agent/src/claude-code-runner.test.ts`: 조사 모드가 `tools`/`allowedTools`에 `WebSearch`·`WebFetch`를 더하고 b-studio 도구는 그대로 두는지, 조사를 끄면(질문 모드라도) 웹 도구를 열지 않는지.
+- `apps/studio/lib/chat-request.test.ts`: `research`가 질문 경로에만 실리고 만들기 경로에는 실리지 않는지.
+- `apps/studio/lib/tab-model.test.ts`: `buildTopTabs`가 문서 탭을 포함한 여섯 고정 탭을 만드는지.
+- `apps/studio/lib/requirement-chat-prefill.test.ts`: 대화 프리필·복사 마크다운이 EARS·시나리오 있음/없음 모두에서 올바른지.
+- `apps/studio/app/api/sessions/[id]/docs/**/*.test.ts`: 목록·내용 읽기/쓰기·새 문서·색인 갱신 네 라우트가 서버 함수를 올바른 인자로 부르고, 거부 사유를 그대로 전하는지(기존 요구사항 라우트 테스트와 같은 모킹 방식).
+- `apps/studio/components/chat-panel.test.tsx`/`requirements-panel.test.tsx`: 답변 메시지 동작이 쓰기 권한에 따라 보이고 숨는지, `ImportFlow`가 `initialSpecText`로 붙여넣기 칸을 채운 채 그려지는지.
+- `pnpm typecheck`(6 Done), `pnpm --filter @b-studio/studio lint`(0 errors), `pnpm vitest run --exclude '.claude/**'` — 이번에 건드리지 않은 사전 존재 플레이키(`packages/sandbox/src/docker/format.test.ts`, `packages/agent/src/checkpoints.test.ts`의 원격 Git 타임아웃) 세 건만 남고 나머지(2324개) 모두 통과.
+- 확인하지 못한 범위: 실제 Claude Code 세션으로 조사 모드가 진짜 웹 검색을 수행해 보지는 못했다(이번 세션 정책상 모델 호출 금지) — 프롬프트·SDK 옵션(가짜 SDK로 캡처)만 검증했다. "문서" 탭의 트리·미리보기·편집도 렌더 문자열 검사(`renderToStaticMarkup`)와 라우트 모킹 테스트까지만 했고, 실제 Docker 샌드박스에서 문서를 고쳐 체크포인트·PR까지 흘러가는지는 보지 못했다.
+
+### 감수한 트레이드오프
+- `docs/README.md` 색인 표는 "문서 | 확인할 내용" 한 종류뿐이다 — BE-commerce처럼 "핵심 설계 문서"·"성능과 복원력"·"운영 자동화와 평가"로 역할을 나눠 묶는 것은 사람의 편집 판단이 필요해서 자동 생성 범위 밖에 뒀다(첫 H1·첫 문단만으로는 "이 문서가 어느 범주인가"를 알 수 없다). 번호 매긴 설계 문서 → ADR → 트러블슈팅/로드맵 → 그 밖, 네 구간으로만 정렬한다.
+- "조사" 모드는 claude-code 백엔드에서만 실제로 웹을 검색한다 — 그 밖의 백엔드(특히 api 모드, 직접 만든 루프)는 Anthropic Messages API에 웹 검색 도구를 연결하는 별도 작업이 필요해 이번 범위에 넣지 않았고, 대신 "모델 지식으로만 답한다"는 사실을 프롬프트와 화면 양쪽에 분명히 알리는 것으로 좁혔다.
+- "요구사항에 반영"은 전용 "패치" 추출 로직을 새로 만드는 대신 기존 "명세 다시 가져오기"(`/requirements/extract`+재추출 병합)를 그대로 태웠다 — 채팅 메시지 한 조각을 "명세 전체"처럼 모델에 넘기므로, 메시지가 요구사항 여러 개를 담고 있지 않고 한두 문단짜리 결론이면 추출 모델이 쪼개는 기준이 거칠 수 있다(기존 추출 프롬프트의 한계를 그대로 물려받는다).
+- 문서 편집은 충돌 해결이 없다 — 같은 문서를 두 사람이 동시에 편집 모드로 열어 저장하면 나중에 저장한 쪽이 이긴다(코드 탭도 사람이 직접 편집하는 경로가 없어 지금까지 이 문제가 없었다. ADR-041의 "내 폴더에서 바로 작업"의 사람 수정 보호(`Workspace`의 `#assertNotStale`)는 "에이전트가 읽은 뒤 바뀜"만 잡고, 화면 두 개가 동시에 쓰는 경우는 잡지 않는다).
+
+---
+
+## ADR-095 폴더 열기가 프론트엔드의 백엔드 주소를 자동으로 연결하고, 검증 게이트가 그 연결이 실패하면 잡는다
+
+상태: 채택
+
+### 맥락
+- b-studio로 과제(apr, `~/.cache/b-studio/sessions/apr-0e6e4f04`)를 도그푸딩하다가 실제로 겪은 버그다. 폴더 열기(ADR-067)로 들여온 Next.js `frontend/` + Spring Boot `backend/` + postgres `db` 프로젝트를 세션으로 띄우면, 세션 미리보기의 글 목록 화면이 "게시글을 불러오지 못했습니다"로 멈췄다. 원인은 `frontend/lib/api.ts`가 `process.env.NEXT_PUBLIC_API_BASE_URL || process.env.API_BASE_URL || "http://localhost:8080"`로 백엔드 주소를 읽는데, b-studio가 만든 `compose.b-studio.yaml`에는 프론트엔드에 그 환경 변수를 전혀 넣어 주지 않아 하드코딩된 `http://localhost:8080`으로 떨어졌기 때문이다. 샌드박스 안에서 백엔드는 edge 프록시가 무작위로 고른 호스트 포트(예: 세션 미리보기가 `http://127.0.0.1:32869`로 뜨는데, 백엔드는 또 다른 임의 포트)에 떠 있어 `localhost:8080`과는 전혀 다른 주소다.
+- 원본 프로젝트의 `docker-compose.yml`은 이 문제를 이미 알고 있었다 — 프론트엔드에 `NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}/api}`를, 백엔드에 `APP_CORS_ALLOWED_ORIGIN_PATTERNS: "${CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"`를 선언해 둔 compose면 호스트에서 직접 `docker compose up`할 때는 포트를 고정해 맞춰 주면 그만이었다. project-detect.ts(ADR-067)는 postgres 같은 부가 서비스 참조는 가져오면서도(ADR-073) 이 프론트엔드→백엔드 주소 참조는 보지 않았다.
+- 검증 게이트(ADR-050·ADR-078)는 이 버그를 잡지 못했다. 폴더 열기가 만드는 `studio.yaml`에는 애초에 `workflow.pageChecks`가 없어(`specYaml()`이 `workflow:` 절을 전혀 만들지 않았다) 화면 확인 자체가 돌지 않았다 — ADR-078의 "로딩에서 멈춘 화면" 판정조차 실행될 기회가 없었다.
+- 더 근본적인 문제는 샌드박스의 호스트 포트가 **`docker compose up` 뒤에야** 정해진다는 것이다(`packages/sandbox/src/docker/format.ts`의 edge는 `127.0.0.1::<edge 포트>`로 호스트 포트를 비워 docker가 고르게 한다, `compose-provider.ts`의 `endpoint()`가 `up` 뒤 `docker compose port`로 읽는다). 환경 변수는 컨테이너가 뜨기 **전에** 정해져야 하므로, 값을 채우려면 포트를 미리 알아야 하는 순환이 있었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 모든 managed 서비스의 호스트 포트를 항상 미리 정한다(자동 배정을 없앤다) | 참조가 없는 대부분의 프로젝트에도 불필요한 포트 선점·경합 구간을 늘린다. 참조가 있는 서비스만(보통 백엔드 하나) 미리 정한다(채택) |
+| B. 두 단계 기동(참조되는 서비스를 먼저 띄운 뒤 포트를 읽어 참조하는 서비스의 환경을 다시 써서 띄운다) | 컨테이너를 두 번 기동해야 하고(재시작 비용), 이미 떠 있는 edge·네트워크 설정을 다시 써야 해 구조가 복잡해진다. 포트 사전 할당(A의 범위를 좁힌 것)이 기존 구조(override 파일 하나를 `up` 전에 완성해 넘긴다)에 자연스럽게 들어간다(채택) |
+| C. 자리 표시자를 docker compose 자신의 `${VAR:-default}` 문법으로 적고 `.env`나 프로세스 환경으로 채운다 | compose가 그 자리를 스스로 치환해 버려 우리가 끼어들 틈이 없고, 가짜 기본값이 섞이면(`:-`) 틀린 주소로 조용히 기동할 위험이 있다. compose가 모르는 문법(`${b-studio:services.<이름>.publicUrl}`, 콜론·점·하이픈이 섞여 compose의 변수 이름 규칙에 맞지 않는다)으로 적어 컴포즈가 건드리지 못하게 하고 우리가 직접 치환한다(채택) |
+| D. 검증 게이트가 모든 폴더 열기 프로젝트에 헤드리스 브라우저 화면 확인을 기본으로 켠다 | ADR-078이 이미 검토하고 기각한 더 큰 기본값 변경이다(`autoPageChecks`는 여전히 opt-in). 이번에는 "프론트엔드→백엔드 주소를 자동으로 연결했을 때"에만 그 한 화면(`/`)의 확인을 만든다 — 새 기본값이 아니라 우리가 새로 만든 연결 자체의 안전장치다(채택) |
+
+### 결정
+1. **런타임 공개 URL 주입** (`packages/spec/src/public-url.ts`, `packages/sandbox/src/docker/{free-port,format,compose-provider}.ts`): compose의 environment 값에 자리 표시자 `${b-studio:services.<서비스>.publicUrl}`을 적어 두면(접미사 포함, 예: `${b-studio:services.backend.publicUrl}/api`), `LoadedProject.publicUrlRefs`로 모아 둔다(`findPublicUrlRefs`, `loadProject`가 가리키는 서비스가 managed인지도 검증한다). `LocalDockerProvider.create()`가 참조당 호스트 포트 하나를 `findFreeHostPort()`(포트 0으로 소켓을 열어 OS가 고른 빈 포트를 받고 바로 닫는, 흔히 쓰는 "find free port" 패턴 — 닫은 뒤 `compose up`이 집기 전까지 다른 프로세스가 먼저 쓸 수 있는 좁은 경합이 있다는 한계는 그대로 남는다)로 미리 정해 `buildOverride()`에 넘기면, edge는 그 서비스만 `127.0.0.1::<edge 포트>`(자동 배정) 대신 `127.0.0.1:<미리 정한 포트>:<edge 포트>`로 공개하고, 참조한 서비스의 environment를 `http://127.0.0.1:<미리 정한 포트>`로 채운 override를 함께 쓴다. `127.0.0.1`로 통일한다 — 세션 미리보기 오리진과 같고, 쿠키는 포트가 아니라 호스트 단위라 `x-user-id` 같은 쿠키도 그대로 동작한다. 참조가 없는 대부분의 프로젝트는 예전처럼 포트가 전부 자동 배정된다(하위 호환).
+2. **폴더 열기 탐지** (`apps/studio/lib/server/project-detect.ts`, `packages/spec/src/compose-import.ts`): `wireFrontendBackendUrl`이 프론트엔드(nextjs·vite) 서비스 하나와 그 밖의 앱 서비스(보통 backend) 하나를 찾아, 원본 compose(있으면, `originalComposeServiceFor`가 `build.context`로 폴더와 compose 서비스 이름을 연결한다 — 폴더 이름과 compose 서비스 이름이 달라도 찾는다)의 environment에서 `NEXT_PUBLIC_*`·`VITE_*`·`REACT_APP_*` 중 API·BACKEND·SERVER·BASE_URL이 섞인 이름(`FRONTEND_BACKEND_ENV_NAME`)을 찾는다. 없으면 프론트엔드 코드의 흔한 자리(`lib/api.ts` 등, `detectBackendUrlEnvFromCode`)에서 `process.env.<이름>` 접근과 같은 줄의 문자열 폴백을 본다. 찾으면 그 환경 변수를 자리 표시자(+ 원래 값에 있던 포트 뒤 경로 접미사, `suffixFromUrlValue`)로 채우고 `depends_on`에 더하며, 백엔드가 CORS 허용 출처를 환경 변수로 받고 있었으면(이름에 `CORS`가 들어간 모든 키, `corsEnvironmentFrom`) 원본 compose 값 그대로 가져온다. 미리보기(`folder-proposal-view.tsx`)에 보이는 "확인:" 메모로 "frontend가 backend 주소를 NEXT_PUBLIC_API_BASE_URL로 받습니다 — 샌드박스 주소로 자동 연결합니다"를 남긴다(코드에서 추정했을 때는 그 사실도 덧붙인다). 이미 연 프로젝트는 기존 규칙대로 생성 파일을 그대로 둔다 — 다시 만들려면 `studio.yaml`·`compose.b-studio.yaml`·각 서비스 폴더의 `Dockerfile.b-studio`를 지우고 폴더를 다시 열면 된다(이 안내를 생성한 `studio.yaml`의 주석과 미리보기 메모에도 남겼다).
+3. **검증 게이트 기본 확인** (`packages/spec/src/schema.ts`의 `WorkflowPageCheckSchema.fallbackProbe`, `packages/agent/src/gate.ts`): 2번이 연결을 만들었으면 `specYaml()`이 `workflow.pageChecks`에 프론트엔드 `/`의 `mode: browser` 확인 하나를 자동으로 만든다. ADR-050의 browser 모드는 이미 실패한 요청(연결 거부·4xx·5xx)이 있으면 실패시키므로(`result.failedRequests`), 이 확인 하나로 "화면은 뜨는데 API 호출이 깨진" 이번 버그 유형을 그대로 잡는다 — 새 판정 로직을 만들 필요가 없었다. 헤드리스 브라우저를 아예 못 띄우는 샌드박스에서는(ADR-050은 원래 그 자리에서 실패시킨다) `fallbackProbe: { service, path }`가 있으면 그 자리로 평범한 HTTP 요청을 한 번 보내 — 응답을 받으면(상태 코드와 무관하게) 주소가 살아 있다는 뜻이라 통과시키고 "화면 단위 문제는 확인하지 못했다"는 참고 문구를 남기며, 연결 자체가 안 되면 실패시킨다. 사람이 직접 적은 `pageChecks`는 `fallbackProbe`가 없으면 ADR-050의 결정(브라우저를 못 띄우면 실패)을 그대로 따른다 — 이번 결정은 우리가 자동으로 추가한 확인에만 적용된다.
+
+### 검증 결과
+- `packages/spec/src/public-url.test.ts`(신규): 자리 표시자 생성·치환(접미사 있음/없음, 값 하나에 여러 자리 표시자), docker compose 자신의 `${VAR:-default}` 문법과 안 겹치는지, `findPublicUrlRefs`가 맵·목록 문법 environment 모두에서 찾는지 확인했다.
+- `packages/spec/src/compose-import.test.ts`(보강): `FRONTEND_BACKEND_ENV_NAME`(NEXT_PUBLIC_*·VITE_*·REACT_APP_* 중 API/BACKEND/SERVER/BASE_URL이 섞인 것만), `suffixFromUrlValue`(중첩 치환이 섞인 실제 값에서도 포트 뒤 경로만), `detectBackendUrlEnvFromEnvironment`·`detectBackendUrlEnvFromCode`(실제 apr `frontend/lib/api.ts`를 재현한 폴백 체인), `originalComposeServiceFor`(폴더 이름과 compose 서비스 이름이 달라도 `build.context`로 찾고, 못 찾으면 이름으로 물러난다), `corsEnvironmentFrom`을 확인했다.
+- `packages/spec/src/spec.test.ts`(보강): `publicUrlRefs`가 compose에서 파싱돼 `LoadedProject`에 실리는지, 가리키는 서비스가 managed가 아니면 거부하는지, `fallbackProbe`가 `mode: browser` 전용이고 가리키는 서비스도 managed여야 하는지 확인했다.
+- `packages/sandbox/src/docker/free-port.test.ts`(신규): 127.0.0.1에서 실제로 바인드할 수 있는 포트를 돌려주는지, 거듭 불러도 서로 다른 포트인지 확인했다. `format.test.ts`(보강): `hostPorts`를 주면 edge가 그 포트를 그대로 공개하고 참조한 서비스의 environment를 실제 주소로 채우는지, 안 주면(대부분의 프로젝트) 예전과 똑같이 자동 배정되는지, `publicUrlRefs`가 없는(이전) 프로젝트 픽스처도 그대로 받아들이는지(하위 호환) 확인했다. `compose-provider.test.ts`(신규): `preallocatePublicUrlPorts`가 참조당 포트 하나씩만 만들고, 참조가 없으면 빈 객체를 돌려주는지 확인했다.
+- `packages/agent/src/gate.test.ts`(보강): `fallbackProbe`가 있으면 `BrowserUnavailableError`를 잡아 그 서비스·경로로 HTTP 확인을 대신하고(응답을 받으면 통과 + 참고 문구, 연결 자체가 안 되면 실패), `fallbackProbe`가 없는 기존 확인은 ADR-050대로 그대로 실패하는지(회귀 없음) 확인했다.
+- `apps/studio/lib/server/project-detect.test.ts`(보강): 실제 apr 프로젝트의 `docker-compose.yml`을 본뜬 조각으로 원본 compose의 환경 변수 선언에서 찾아 자리 표시자로 바꾸고 CORS를 가져오는지, 원본 compose가 없을 때 `frontend/lib/api.ts`를 본뜬 코드에서 추정하고 그 사실을 메모에 남기는지, 생성한 `studio.yaml`·`compose.b-studio.yaml`이 실제로 `loadProject()`를 통과하는지(publicUrlRefs 검증 포함), 프론트엔드만 있고 연결할 다른 앱 서비스가 없으면 아무 것도 만들지 않는지 확인했다.
+- `pnpm typecheck`(6개 패키지 Done), `pnpm --filter @b-studio/studio lint`(0 오류, 기존 경고 7개는 이번 변경과 무관), 저장소 루트에서 `pnpm exec vitest run --exclude '.claude/**'`(2,328개 중 2,327개 통과) — 유일한 실패(`packages/sandbox/src/docker/format.test.ts`의 "Kubernetes 파드처럼 절대 경로를 넘기면…")는 이번 변경 전 커밋에서도 똑같이 타임아웃하는 사전 존재 플레이키임을 직접 확인했다(`docs/troubleshooting.md`에 이미 남아 있는 것과 같은 종류, 기기 부하로 5초 제한에 걸린다).
+- 실제 Docker 샌드박스로 apr 프로젝트를 다시 열어 재현·검증하지는 못했다(이번 라운드는 Docker를 띄우지 않고 단위 테스트로만 확인했다) — 아래 트레이드오프와 재현 절차에 남긴다.
+
+### 감수한 트레이드오프
+- **실제 재현 미검증**: apr 프로젝트로 실제 Docker 샌드박스를 다시 띄워 화면이 실제로 뜨는지, 게이트가 실제로 이 버그를 잡는지는 이번 라운드에서 확인하지 못했다. 재현하려면: `~/.cache/b-studio/sessions/apr-0e6e4f04`의 `studio.yaml`·`compose.b-studio.yaml`·`backend/Dockerfile.b-studio`·`frontend/Dockerfile.b-studio`를 지우고 b-studio로 그 폴더를 다시 열면(ADR-067) 이번 변경이 적용된 새 생성 파일이 나온다 — 거기서 세션을 띄워 미리보기 글 목록이 뜨는지, 검증 게이트의 `browser_check`가 통과하는지 보면 된다.
+- **Kubernetes 제공자는 아직 포트 사전 할당을 하지 않는다**: `packages/sandbox/src/kubernetes/`는 이번 변경에 넣지 않았다. `LoadedProject.publicUrlRefs`는 제공자와 무관하게 채워지지만(로더 단계), 자리 표시자를 실제 주소로 바꾸는 쪽은 `docker/format.ts`·`docker/compose-provider.ts`에만 있다 — Kubernetes로 띄운 폴더 열기 프로젝트는 당분간 이 연결의 혜택을 받지 못한다.
+- **프론트엔드·백엔드 후보가 둘 이상이면 처음 찾은 한 쌍만 연결한다**: 앱 서비스가 셋 이상이면(프론트엔드 둘, 백엔드 둘 등) 나머지는 보지 않는다 — 사람이 `studio.yaml`에 직접 `${b-studio:services.<이름>.publicUrl}`을 적으면 똑같이 동작한다(이 자리 표시자 자체는 공개 API다).
+- **코드에서 추정한 백엔드 주소 참조는 정확하지 않을 수 있다**: `detectBackendUrlEnvFromCode`는 같은 줄에 적힌 폴백만 본다(여러 줄에 걸친 폴백 체인은 놓친다) — 놓치면 자동 연결을 안 하고 넘어갈 뿐 틀린 연결을 만들지는 않는다(보수적인 쪽으로 기울였다).
+- **`fallbackProbe`의 HTTP 확인은 상태 코드를 가리지 않는다**: 404·500이 와도 "연결은 됐다"고 보아 통과시킨다 — 주소가 살아 있는지만 보려는 의도적인 선택이라, 화면 자체가 깨졌는지는 헤드리스 브라우저가 있는 환경에서만 확실히 잡는다.
+- **포트 사전 할당의 좁은 경합 구간**: `findFreeHostPort()`가 돌려준 포트를 `docker compose up`이 실제로 집기 전까지(보통 수백 ms 안쪽) 다른 프로세스가 그 포트를 먼저 쓸 수 있다 — 흔히 쓰는 "find free port" 패턴과 같은 한계이고, 실패하면 `compose up`이 포트 충돌로 바로 실패해(조용히 틀린 주소가 되는 것이 아니라) 다시 시도하면 된다.
 
 ---
 

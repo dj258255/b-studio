@@ -4,7 +4,7 @@ import { PNG } from 'pngjs';
 import type { ExecResult } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
+import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
 import { signatureFromCheck, signatureKey } from './coordination/signature';
@@ -272,6 +272,60 @@ describe('VerificationGate 워크플로 단계', () => {
     const outcome = await failing.check();
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('헤드리스 브라우저를 실행할 수 없습니다');
     expect(failing.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('fallbackProbe가 있으면 헤드리스 브라우저를 못 띄워도 그 자리로 HTTP 확인을 대신하고, 응답을 받으면 통과시킨다(fix/frontend-backend-url)', async () => {
+    const target = withWorkflow({
+      pageChecks: [
+        {
+          service: 'api',
+          path: '/',
+          mode: 'browser',
+          expectStatus: 200,
+          allowConsoleErrors: false,
+          noHorizontalScroll: false,
+          fallbackProbe: { service: 'api', path: '/actuator/health' },
+        },
+      ],
+    });
+    const probed: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      browser: async () => {
+        throw new BrowserUnavailableError('executable not found');
+      },
+      page: async (url) => {
+        probed.push(url);
+        return { status: 503, text: '' };
+      },
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(probed).toEqual(['http://127.0.0.1:1/actuator/health']);
+    const check = gate.checks.find((entry) => entry.stage === 'browser_check')!;
+    expect(check.ok).toBe(true);
+    expect(check.detail).toContain('헤드리스 브라우저를 쓸 수 없어');
+    expect(check.detail).toContain('응답 503');
+  });
+
+  it('fallbackProbe도 연결하지 못하면(연결 거부 등) 화면 확인을 실패시킨다(fix/frontend-backend-url)', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false, fallbackProbe: { service: 'api', path: '/actuator/health' } }],
+    });
+    const { gate, workspace } = await setup(target, {
+      browser: async () => {
+        throw new BrowserUnavailableError('executable not found');
+      },
+      page: async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:1');
+      },
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('연결하지 못했습니다');
+    expect(gate.passedStages.has('browser_check')).toBe(false);
   });
 
   it('도구 게이트를 거치지 않고 바뀐 보호 경로도 리뷰 단계에서 막는다', async () => {

@@ -65,7 +65,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { applySessionRequirements, commitPendingWorkingCopyDocs, commitWorkingCopyDocs, createSession, getSnapshot, isDocPath, stopSession } from './sessions';
+import { applySessionRequirements, commitPendingWorkingCopyDocs, commitWorkingCopyDocs, createSession, createSessionDoc, getSnapshot, isDocPath, stopSession, writeSessionDoc } from './sessions';
 
 let root: string;
 const saved = {
@@ -263,6 +263,19 @@ describe('문서 체크포인트(ADR-096)', () => {
 
     const checkpoints = getSnapshot(id)!.checkpoints;
     expect(checkpoints[0]!.message).toBe('docs: 요구사항을 정리한다 (R1~R20)');
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('문서 탭에서 고치거나 새 문서를 만들면 바로 문서 체크포인트로 남긴다(레인·PR이 물려받는다)', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+
+    await writeSessionDoc(id, 'README.md', '# 프로젝트\n\n실행 방법을 적는다.\n');
+    expect(getSnapshot(id)!.checkpoints[0]).toMatchObject({ message: 'docs: README.md 내용을 고친다', verify: 'docs', files: ['README.md'] });
+
+    const created = await createSessionDoc(id, { kind: 'adr', title: '결제 재시도 경계' });
+    expect(getSnapshot(id)!.checkpoints[0]).toMatchObject({ message: 'docs: 결제 재시도 경계 문서를 더한다', verify: 'docs', files: [created.path] });
     await stopSession(id).catch(() => {});
   }, 20_000);
 });

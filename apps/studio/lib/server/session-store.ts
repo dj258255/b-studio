@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { Checkpoint } from '@b-studio/agent';
+import type { Checkpoint, CliTier } from '@b-studio/agent';
 import type { SessionSnapshot, StudioEvent } from '../studio-events';
 
 /** 세션 상태 폴더 안의 저장 위치. .git 아래라 에이전트 도구가 접근하지 못하고 커밋에도 들어가지 않는다 */
@@ -20,7 +20,12 @@ export interface PersistedSession {
   /** api 모드의 모델 대화 */
   conversation: unknown[];
   demoIndex: number;
-  claudeCode: { sessionId?: string; notes: string[] };
+  claudeCode: {
+    sessionId?: string;
+    notes: string[];
+    /** claude-code 자동 모델 선택(ADR-091)의 stickiness: 이 세션에서 이미 성공적으로 쓴 가장 높은 단계. 이 필드가 생기기 전 기록에는 없다 */
+    autoTier?: CliTier;
+  };
   /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml을 스튜디오가 고치지 않고 여기에 둔다 */
   design?: { fileUrl: string; fileKey: string };
   /** codex 모드의 짧은 이전 맥락. 러너가 대화를 이어받지 못해 요약만 넘긴다. 이 필드가 생기기 전 기록에는 없다 */

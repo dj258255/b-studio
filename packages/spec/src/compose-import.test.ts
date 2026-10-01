@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
+  corsEnvironmentFrom,
   databaseCredentialsFor,
   databaseSpecFor,
+  detectBackendUrlEnvFromCode,
+  detectBackendUrlEnvFromEnvironment,
   detectEnvReferences,
   engineOfImage,
+  environmentFromComposeText,
+  FRONTEND_BACKEND_ENV_NAME,
   importSupportingServices,
   isProdComposeFile,
   needsDevDefaultCredentials,
+  originalComposeServiceFor,
   proposePostgresService,
+  suffixFromUrlValue,
   suggestsPostgresNeed,
   wireAppEnvironment,
   withDefaultHealthcheck,
@@ -488,5 +495,101 @@ describe('databaseSpecFor', () => {
     expect(databaseSpecFor({ engine: 'mysql', environment: { MYSQL_DATABASE: 'app', MYSQL_USER: 'app' } })).toBeUndefined();
     expect(databaseSpecFor({ engine: 'postgres', environment: { POSTGRES_DB: 'app' } })).toBeUndefined();
     expect(databaseSpecFor({ engine: 'postgres', environment: { POSTGRES_DB: '1bad-name', POSTGRES_USER: 'app' } })).toBeUndefined();
+  });
+});
+
+// 실제 저장소(~/.cache/b-studio/sessions/apr-0e6e4f04, 읽기 전용으로 확인)를 본뜬 조각. 프론트가 백엔드 주소를 받던 그대로다
+const APR_COMPOSE = `
+services:
+  backend:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    environment:
+      APP_CORS_ALLOWED_ORIGIN_PATTERNS: "\${CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}"
+      SERVER_PORT: \${BACKEND_CONTAINER_PORT:-8080}
+  frontend:
+    build: { context: ./frontend, dockerfile: Dockerfile }
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: \${NEXT_PUBLIC_API_BASE_URL:-http://localhost:\${BACKEND_PORT:-8080}/api}
+      PORT: \${FRONTEND_CONTAINER_PORT:-3000}
+`;
+
+describe('FRONTEND_BACKEND_ENV_NAME·suffixFromUrlValue(fix/frontend-backend-url)', () => {
+  it('NEXT_PUBLIC_*·VITE_*·REACT_APP_* 중 API·BACKEND·SERVER·BASE_URL이 섞인 이름만 맞는다', () => {
+    expect(FRONTEND_BACKEND_ENV_NAME.test('NEXT_PUBLIC_API_BASE_URL')).toBe(true);
+    expect(FRONTEND_BACKEND_ENV_NAME.test('VITE_BACKEND_URL')).toBe(true);
+    expect(FRONTEND_BACKEND_ENV_NAME.test('REACT_APP_SERVER_HOST')).toBe(true);
+    // API·BACKEND·SERVER·BASE_URL이 없으면(공개 환경 변수일 뿐) 맞지 않는다
+    expect(FRONTEND_BACKEND_ENV_NAME.test('NEXT_PUBLIC_SITE_NAME')).toBe(false);
+    expect(FRONTEND_BACKEND_ENV_NAME.test('PORT')).toBe(false);
+  });
+
+  it('중첩 치환이 섞인 값에서도 포트 뒤 경로만 뽑는다', () => {
+    expect(suffixFromUrlValue('${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}/api}')).toBe('/api');
+    expect(suffixFromUrlValue('http://localhost:8080')).toBe('');
+    expect(suffixFromUrlValue('http://backend:8080/api/v1')).toBe('/api/v1');
+  });
+});
+
+describe('detectBackendUrlEnvFromEnvironment·detectBackendUrlEnvFromCode', () => {
+  it('compose의 environment에서 이름이 맞는 첫 키를 찾고 접미사를 함께 돌려준다', () => {
+    expect(detectBackendUrlEnvFromEnvironment({ PORT: '3000', NEXT_PUBLIC_API_BASE_URL: 'http://localhost:${BACKEND_PORT:-8080}/api' })).toEqual({
+      envKey: 'NEXT_PUBLIC_API_BASE_URL',
+      suffix: '/api',
+    });
+    expect(detectBackendUrlEnvFromEnvironment({ PORT: '3000' })).toBeUndefined();
+  });
+
+  it('소스 코드의 process.env 접근과 같은 줄의 문자열 폴백을 찾는다(실제 apr 프로젝트 frontend/lib/api.ts 재현)', () => {
+    const code = `
+const DEFAULT_BASE_URL = "http://localhost:8080";
+export function apiBaseUrl(): string {
+  const raw =
+    process.env.NEXT_PUBLIC_API_BASE_URL ||
+    process.env.API_BASE_URL ||
+    DEFAULT_BASE_URL;
+  return raw;
+}
+`;
+    expect(detectBackendUrlEnvFromCode(code)).toEqual({ envKey: 'NEXT_PUBLIC_API_BASE_URL', suffix: '' });
+  });
+
+  it('process.env 접근이 없거나 이름이 맞지 않으면 undefined다', () => {
+    expect(detectBackendUrlEnvFromCode('export const siteName = process.env.NEXT_PUBLIC_SITE_NAME;')).toBeUndefined();
+    expect(detectBackendUrlEnvFromCode('const x = 1;')).toBeUndefined();
+  });
+});
+
+describe('environmentFromComposeText·originalComposeServiceFor', () => {
+  it('서비스 이름으로 environment를 꺼낸다', () => {
+    expect(environmentFromComposeText(APR_COMPOSE, 'frontend')).toEqual({
+      NEXT_PUBLIC_API_BASE_URL: '${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}/api}',
+      PORT: '${FRONTEND_CONTAINER_PORT:-3000}',
+    });
+    expect(environmentFromComposeText(APR_COMPOSE, 'missing')).toBeUndefined();
+  });
+
+  it('build.context로 서비스 폴더와 compose 서비스를 연결한다(폴더 이름과 이름이 같을 때도, 달라도)', () => {
+    expect(originalComposeServiceFor(APR_COMPOSE, 'frontend', 'frontend')?.name).toBe('frontend');
+    // project-detect가 지은 이름(web)이 원본 compose 이름(frontend)과 달라도 build.context로 찾는다
+    expect(originalComposeServiceFor(APR_COMPOSE, 'frontend', 'web')?.name).toBe('frontend');
+    expect(originalComposeServiceFor(APR_COMPOSE, 'missing-folder', 'missing-folder')).toBeUndefined();
+  });
+
+  it('build.context로 못 찾으면 같은 이름의 서비스로 물러난다', () => {
+    const compose = 'services:\n  api: { image: my/api:latest, environment: { PORT: "8080" } }\n';
+    expect(originalComposeServiceFor(compose, 'api', 'api')).toEqual({ name: 'api', environment: { PORT: '8080' } });
+  });
+});
+
+describe('corsEnvironmentFrom', () => {
+  it('키에 CORS가 섞인 항목만(대소문자 가리지 않고) 그대로 가져온다', () => {
+    const backendEnv = environmentFromComposeText(APR_COMPOSE, 'backend')!;
+    expect(corsEnvironmentFrom(backendEnv)).toEqual({
+      APP_CORS_ALLOWED_ORIGIN_PATTERNS: '${CORS_ALLOWED_ORIGINS:-http://localhost:*,http://127.0.0.1:*}',
+    });
+  });
+
+  it('CORS 관련 키가 없으면 빈 객체다', () => {
+    expect(corsEnvironmentFrom({ PORT: '8080' })).toEqual({});
   });
 });

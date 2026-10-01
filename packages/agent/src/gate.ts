@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import { SAFE_SEGMENT, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
-import { runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
+import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromChangedFiles } from './next-routes';
 import { servicesForFiles } from './services';
@@ -432,6 +432,10 @@ export class VerificationGate {
           ...(onBrowserFrame ? { onFrame: (frame: BrowserFrame) => onBrowserFrame({ check: name, frame }) } : {}),
         });
       } catch (error) {
+        // 헤드리스 브라우저를 못 띄우면(ADR-050은 원래 그대로 실패시킨다) fallbackProbe가 있는 확인만 대신 HTTP로 확인한다
+        if (error instanceof BrowserUnavailableError && page.fallbackProbe) {
+          return this.#checkFallbackProbe(page.fallbackProbe, name, signal, fail, error);
+        }
         // 실패한 단계의 스크린샷도 결과에 남긴다
         if (error instanceof StepFailedError) this.#pageSteps.set(name, await this.#saveSteps(name, error.steps));
         throw error;
@@ -506,6 +510,34 @@ export class VerificationGate {
     if (missingAll.length > 0) throw fail(missingAllText(missingAll));
     // ④ api에서 꺼낸 값이 응답 본문(http) 글자에 있는지
     if (api && !containsApiValue(text, api.value)) throw fail(missingApiValue(api, page.path));
+  }
+
+  /**
+   * 헤드리스 브라우저를 못 띄울 때(fix/frontend-backend-url) fallbackProbe가 가리키는 서비스·경로로 평범한 HTTP 요청을
+   * 한 번 보낸다. 응답을 받으면(상태 코드와 무관하게) 그 주소가 살아 있다는 뜻이라 화면 확인을 통과시키되, 콘솔
+   * 오류·실패한 요청 같은 화면 단위 문제는 보지 못했다는 참고 문구를 남긴다. 연결 자체가 안 되면(연결 거부 등) 실패로 본다
+   */
+  async #checkFallbackProbe(
+    probe: { service: string; path: string },
+    name: string,
+    signal: AbortSignal,
+    fail: (message: string) => Error,
+    browserError: BrowserUnavailableError,
+  ): Promise<void> {
+    const { sandbox, pageFetcher = fetchPage } = this.#options;
+    const endpoint = await sandbox.endpoint(probe.service);
+    const url = new URL(probe.path, endpoint.url);
+    try {
+      const { status } = await pageFetcher(url.href, signal);
+      this.#addWarning(
+        name,
+        `[참고] 헤드리스 브라우저를 쓸 수 없어(${browserError.message}) 화면 확인 대신 ${probe.service}${probe.path}로 HTTP 확인만 했습니다(응답 ${status}). 콘솔 오류·실패한 요청·화면에 보이는 오류 문구는 확인하지 못했습니다`,
+      );
+    } catch (error) {
+      throw fail(
+        `헤드리스 브라우저를 쓸 수 없어 ${probe.service}${probe.path}로 대신 확인했는데 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

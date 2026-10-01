@@ -15,7 +15,7 @@
  * 실제 모델 호출·Docker 없이 테스트할 수 있게 SDK를 주입받는다(plain-baseline과 같은 방식).
  */
 import { query, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { ClaudeCodeUsageTracker, describeResultFailure, type AgentUsage, type ModelAsk } from '@b-studio/agent';
+import { ClaudeCodeUsageTracker, describeResultFailure, type AgentUsage, type Effort, type ModelAsk } from '@b-studio/agent';
 
 /** 실제 SDK와 가짜를 바꿔 끼우는 지점 */
 export interface ClaudeCodeAskSdk {
@@ -33,6 +33,8 @@ export interface ClaudeCodeAskOptions {
   cwd: string;
   /** `--model` 값. 없으면 로그인 계정의 기본 모델을 쓴다 */
   model?: string;
+  /** 노력(추론 강도) 단계. 없으면 SDK 기본값을 쓴다(세션·계획이 이어받은 값을 그대로 넘긴다) */
+  effort?: Effort;
   /**
    * 이 호출 한 번만 WebSearch·WebFetch를 연다(요구사항 "모호한 점"에 업계 관례 추천 답을 물을 때만 켠다).
    * 파일·명령 도구는 절대 열지 않는다 — 웹 검색 한 바퀴(검색 → 결과 읽기 → 답 정리)가 들어갈 수 있게 maxTurns만 늘린다.
@@ -74,6 +76,7 @@ export function claudeCodeAsk(options: ClaudeCodeAskOptions): ModelAsk {
           persistSession: false,
           maxTurns: webTools ? WEB_TOOLS_MAX_TURNS : DEFAULT_MAX_TURNS,
           ...(options.model ? { model: options.model } : {}),
+          ...(options.effort ? { effort: options.effort } : {}),
           abortController: abort,
         },
       });

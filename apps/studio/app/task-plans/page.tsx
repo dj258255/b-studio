@@ -2,8 +2,10 @@ import Link from 'next/link';
 import { TaskPlanWorkbench } from '@/components/task-plan-workbench';
 import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
+import { listSelectableModels } from '@/lib/server/model-picker';
 import { listModelOptions } from '@/lib/server/model-registry';
 import { canPublishIssues, listProjects } from '@/lib/server/projects';
+import { planModelAlias } from '@/lib/task-plan-types';
 import { listTaskPlans, PLAN_LIMITS } from '@/lib/server/task-plans';
 
 export default async function TaskPlansPage(props: { searchParams: Promise<{ id?: string | string[] }> }) {
@@ -24,6 +26,10 @@ export default async function TaskPlansPage(props: { searchParams: Promise<{ id?
     enabled: capabilities.split.enabled,
     ...(capabilities.split.reason ? { reason: capabilities.split.reason } : {}),
   };
+  // "새 작업 분해" 폼의 모델·노력 단계 기본값. 방금 이 화면으로 넘어온 계획(?id=, 나눠서 병렬 제안 수락)이 있으면
+  // 그 계획이 이어받은 세션 값을 그대로 보여 준다 — 폼에서 다시 계획을 만들 때도 같은 모델·노력으로 시작한다
+  const selected = initial.find((plan) => plan.id === selectedId) ?? initial[0];
+  const modelPicker = await listSelectableModels(capabilities.mode, selected ? planModelAlias(selected.modelId) : undefined, selected?.effort);
 
   return (
     <main className="mx-auto max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">
@@ -36,7 +42,15 @@ export default async function TaskPlansPage(props: { searchParams: Promise<{ id?
           작업 목록
         </Link>
       </header>
-      <TaskPlanWorkbench projects={publishable} models={models} initialPlans={initial} initialSelectedId={selectedId} planner={planner} limits={PLAN_LIMITS} />
+      <TaskPlanWorkbench
+        projects={publishable}
+        models={models}
+        initialPlans={initial}
+        initialSelectedId={selectedId}
+        planner={planner}
+        limits={PLAN_LIMITS}
+        modelPicker={modelPicker}
+      />
     </main>
   );
 }

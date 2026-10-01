@@ -552,3 +552,123 @@ export function databaseSpecFor(service: { engine: InfraEngine; environment: Rec
   if (database && user && SQL_IDENTIFIER.test(database) && SQL_IDENTIFIER.test(user)) return { database, user };
   return undefined;
 }
+
+/**
+ * 프론트엔드가 백엔드 주소를 받는 환경 변수 이름 모양(fix/frontend-backend-url). Next.js(NEXT_PUBLIC_*)·Vite(VITE_*)·
+ * Create React App(REACT_APP_*)처럼 브라우저 번들에 그대로 박히는 접두사 중에, 이름에 API·BACKEND·SERVER·BASE_URL이
+ * 섞인 것만 본다(그 밖의 공개 환경 변수까지 백엔드 주소로 보면 오탐이 늘어난다)
+ */
+export const FRONTEND_BACKEND_ENV_NAME = /^(NEXT_PUBLIC|VITE|REACT_APP)_\w*(API|BACKEND|SERVER|BASE_URL)\w*$/i;
+
+/** 프론트엔드가 백엔드 주소를 받는 참조 하나: 어느 환경 변수 이름으로 받고, 주소 뒤에 어떤 경로 접미사(`/api` 등)가 붙어 있는지 */
+export interface BackendUrlReference {
+  envKey: string;
+  /** 값에서 포트 뒤에 붙어 있던 경로. 없으면 빈 문자열 */
+  suffix: string;
+}
+
+/**
+ * compose의 `${VAR:-default}` 같은 중첩 치환이 섞인 값에서도, 포트 숫자 뒤에 남은 경로만 뽑는다.
+ * 예: `http://localhost:${BACKEND_PORT:-8080}/api}`(바깥 `${...}`의 닫는 중괄호까지 원문 그대로 들어온 조각)에서
+ * `/api`만, `http://localhost:8080`에서는 빈 문자열을 돌려준다. 값에 포트 숫자가 여러 번 나오면 마지막 것 기준이다
+ */
+export function suffixFromUrlValue(value: string): string {
+  const PORT_THEN_PATH = /\d+\}*(\/[^}$"'\s]*)/g;
+  let suffix = '';
+  for (const match of value.matchAll(PORT_THEN_PATH)) suffix = match[1] ?? suffix;
+  return suffix;
+}
+
+/** environment 맵에서 FRONTEND_BACKEND_ENV_NAME에 맞는 첫 키를 찾는다. 선언 순서(Object.entries)를 그대로 따른다 */
+export function detectBackendUrlEnvFromEnvironment(environment: Record<string, string>): BackendUrlReference | undefined {
+  for (const [key, value] of Object.entries(environment)) {
+    if (FRONTEND_BACKEND_ENV_NAME.test(key)) return { envKey: key, suffix: suffixFromUrlValue(value) };
+  }
+  return undefined;
+}
+
+/** `process.env.NEXT_PUBLIC_API_BASE_URL` 같은 접근 뒤에, 같은 줄에 적힌 문자열 리터럴(폴백 주소)이 있으면 함께 찾는다 */
+const ENV_ACCESS = /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/;
+const STRING_LITERAL = /["'`](https?:\/\/[^"'`]+)["'`]/;
+
+/**
+ * 소스 코드(예: frontend/lib/api.ts)에서 `process.env.NEXT_PUBLIC_API_BASE_URL || ... || "http://localhost:8080"`처럼
+ * 백엔드 주소를 읽는 자리를 찾는다. 줄 단위로 본다(폴백 체인은 보통 한 문·한 줄에 있다). 여러 줄에 걸쳐 있으면 놓칠 수 있다(추정이라 괜찮다 —
+ * compose에 선언돼 있으면 그쪽을 먼저 본다, project-detect.ts 참고)
+ */
+export function detectBackendUrlEnvFromCode(sourceText: string): BackendUrlReference | undefined {
+  for (const line of sourceText.split('\n')) {
+    const access = ENV_ACCESS.exec(line);
+    if (!access || !FRONTEND_BACKEND_ENV_NAME.test(access[1]!)) continue;
+    const literal = STRING_LITERAL.exec(line);
+    return { envKey: access[1]!, suffix: literal ? suffixFromUrlValue(literal[1]!) : '' };
+  }
+  return undefined;
+}
+
+/** compose 텍스트 하나에서 특정 서비스의 environment만 꺼낸다(목록·맵 문법 모두). 서비스가 없거나 environment가 없으면 undefined */
+export function environmentFromComposeText(composeText: string, serviceName: string): Record<string, string> | undefined {
+  let doc: unknown;
+  try {
+    doc = parse(composeText);
+  } catch {
+    return undefined;
+  }
+  const services = (doc as { services?: unknown } | null)?.services;
+  if (!services || typeof services !== 'object') return undefined;
+  const service = (services as Record<string, unknown>)[serviceName] as { environment?: unknown } | undefined;
+  if (!service || typeof service !== 'object') return undefined;
+  const environment = normalizeEnvironment(service.environment);
+  return Object.keys(environment).length > 0 ? environment : undefined;
+}
+
+/** `./frontend`·`frontend`·`frontend/`를 모두 같은 상대 경로로 본다. 없거나 '.'이면 프로젝트 루트 */
+function normalizeContext(context: string | undefined): string {
+  return (context ?? '.').replace(/^\.\//, '').replace(/\/+$/, '') || '.';
+}
+
+/** build 항목(문자열 "./frontend" 또는 { context: "./frontend", ... })에서 context만 꺼낸다 */
+function buildContext(build: unknown): string | undefined {
+  if (typeof build === 'string') return build;
+  if (build && typeof build === 'object' && typeof (build as { context?: unknown }).context === 'string') return (build as { context: string }).context;
+  return undefined;
+}
+
+/**
+ * project-detect가 찾은 서비스 폴더(프로젝트 루트 기준 상대 경로, 루트 자신은 '.')가 원본 compose의 어느 서비스인지 찾는다.
+ * 폴더 이름과 compose 서비스 이름이 다를 수 있어(예: 폴더는 frontend인데 compose 서비스 이름은 web) 먼저 build.context로
+ * 연결하고, 못 찾으면 같은 이름의 서비스를 그대로 본다(흔한 경우: 폴더 이름과 compose 서비스 이름이 같다)
+ */
+export function originalComposeServiceFor(
+  composeText: string,
+  servicePath: string,
+  serviceName: string,
+): { name: string; environment: Record<string, string> } | undefined {
+  let doc: unknown;
+  try {
+    doc = parse(composeText);
+  } catch {
+    return undefined;
+  }
+  const services = (doc as { services?: unknown } | null)?.services;
+  if (!services || typeof services !== 'object') return undefined;
+  const entries = services as Record<string, unknown>;
+
+  const normalizedPath = normalizeContext(servicePath);
+  for (const [name, raw] of Object.entries(entries)) {
+    const def = raw as { build?: unknown } | null;
+    if (!def || typeof def !== 'object') continue;
+    if (normalizeContext(buildContext(def.build)) === normalizedPath) return { name, environment: environmentFromComposeText(composeText, name) ?? {} };
+  }
+  const byName = entries[serviceName];
+  if (byName && typeof byName === 'object') return { name: serviceName, environment: environmentFromComposeText(composeText, serviceName) ?? {} };
+  return undefined;
+}
+
+/** 환경 변수 이름에 CORS가 섞여 있으면(대소문자 가리지 않음) 백엔드가 허용하는 출처 설정으로 본다 */
+const CORS_ENV_NAME = /CORS/i;
+
+/** environment에서 CORS 관련 키만 추려, 원래 compose의 백엔드 서비스가 적어 둔 값 그대로 돌려준다(지어내지 않는다) */
+export function corsEnvironmentFrom(environment: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(environment).filter(([key]) => CORS_ENV_NAME.test(key)));
+}

@@ -25,6 +25,7 @@ import {
   draftRequirementFromIssue,
   ensureLabels,
   findPinnedStatusComment,
+  findTrackingIssue,
   listIssueComments,
   listIssues,
   parseManagedRegion,
@@ -112,16 +113,36 @@ function isChecklistOnly(requirement: Pick<Requirement, 'kind' | 'priority'>): b
 }
 
 /** b-studio:req 라벨이 붙었거나 제목이 "[Rn] …" 형태인 이슈만 골라 관리형 영역 스냅샷으로 바꾼다(전체 이슈가 아니라 이 프로젝트가 만든 것만) */
-async function fetchRemoteRequirementIssues(ctx: RequirementIssuesContext): Promise<RemoteIssueSnapshot[]> {
+async function fetchRemoteRequirementIssues(
+  ctx: RequirementIssuesContext,
+): Promise<{ snapshots: RemoteIssueSnapshot[]; tracking?: { issue: number; url?: string } }> {
   const issues = await listIssues(ctx.remote, { state: 'all', token: ctx.token });
-  return issues
+  const snapshots = issues
     .filter((issue) => issue.labels.includes(REQUIREMENT_LABEL) || requirementIdFromIssueTitle(issue.title) !== undefined)
     .map((issue) => ({ number: issue.number, state: issue.state, body: issue.body ?? '' }));
+  return { snapshots, tracking: findTrackingIssue(issues, ctx.projectName) };
+}
+
+/** 미리보기에 보여줄 저장소 이름(호스트/경로). 자격 증명은 RemoteLocation.display에서 이미 빠져 있다 */
+function repositoryLabel(remote: RemoteLocation): string {
+  return remote.host && remote.path ? `${remote.host}/${remote.path}` : remote.display;
+}
+
+/** 발행 기록에 추적 이슈가 없으면 저장소에서 찾은 것을 쓴다(다른 세션에서 이미 발행한 경우) */
+function resolveTracking(
+  store: { tracking?: { issue: number; url: string } },
+  found: { issue: number; url?: string } | undefined,
+): { issue: number; url?: string } | undefined {
+  return store.tracking ?? found;
 }
 
 export interface RequirementPlanResult {
   plan: RequirementPlanEntry[];
   summary: RequirementPlanSummary;
+  /** 이슈를 쓸 저장소(화면 표시용, 예: github.com/dj258255/test). 외부에 쓰는 동작이라 미리보기에 꼭 보여준다 */
+  repository: string;
+  /** 추적 이슈를 새로 만드는지, 이미 있는 것을 갱신하는지 */
+  tracking: { action: 'create' } | { action: 'update'; issue: number };
 }
 
 /** 발행 전 미리보기(dry-run). 네트워크로 원격 이슈를 읽기만 하고 아무것도 쓰지 않는다 */
@@ -131,16 +152,23 @@ export async function planRequirementIssuePublish(
   statusById: Readonly<Record<string, RequirementStatus>>,
 ): Promise<RequirementPlanResult> {
   const store = await loadStore(ctx.root);
-  const remoteIssues = await fetchRemoteRequirementIssues(ctx);
+  const remote = await fetchRemoteRequirementIssues(ctx);
   const inputs = requirements.map((requirement) => ({
     requirement: toRequirementForIssues(requirement, store.byId[requirement.id]),
     status: statusById[requirement.id] ?? '미착수',
   }));
-  const plan = planRequirementPublish(inputs, remoteIssues);
-  return { plan, summary: summarizeRequirementPlan(plan) };
+  const plan = planRequirementPublish(inputs, remote.snapshots);
+  const tracking = resolveTracking(store, remote.tracking);
+  return {
+    plan,
+    summary: summarizeRequirementPlan(plan),
+    repository: repositoryLabel(ctx.remote),
+    tracking: tracking ? { action: 'update', issue: tracking.issue } : { action: 'create' },
+  };
 }
 
-export interface RequirementPublishResult extends RequirementPlanResult {
+/** 발행 결과. 미리보기의 계획·요약은 그대로 담고, 추적 이슈는 "무엇을 할지" 대신 실제로 쓴 이슈 번호·주소를 돌려준다 */
+export interface RequirementPublishResult extends Omit<RequirementPlanResult, 'tracking' | 'repository'> {
   tracking?: { issue: number; url: string };
   /** 하위 이슈·추적 이슈 중 일부가 실패해도 나머지는 계속 진행한다. 실패한 요구사항 id와 이유 */
   errors: Array<{ id: string; message: string }>;
@@ -157,7 +185,10 @@ export async function publishRequirementIssues(
   statusById: Readonly<Record<string, RequirementStatus>>,
 ): Promise<RequirementPublishResult> {
   const store = await loadStore(ctx.root);
-  const remoteIssues = await fetchRemoteRequirementIssues(ctx);
+  const remote = await fetchRemoteRequirementIssues(ctx);
+  const remoteIssues = remote.snapshots;
+  // 다른 세션에서 이미 만든 추적 이슈가 있으면 그것을 이어 쓴다(새로 만들지 않는다)
+  if (!store.tracking && remote.tracking) store.tracking = { issue: remote.tracking.issue, url: remote.tracking.url ?? '' };
   const byId = new Map(requirements.map((requirement) => [requirement.id, requirement]));
   const inputs = requirements.map((requirement) => ({
     requirement: toRequirementForIssues(requirement, store.byId[requirement.id]),
@@ -251,7 +282,7 @@ export async function resolveRequirementConflict(
   const record = store.byId[requirement.id];
   if (!record) throw new StudioError(404, `${requirement.id}은 아직 이슈로 발행되지 않아 충돌을 풀 것이 없습니다`);
 
-  const remoteIssues = await fetchRemoteRequirementIssues(ctx);
+  const remoteIssues = (await fetchRemoteRequirementIssues(ctx)).snapshots;
   const issue = remoteIssues.find((candidate) => candidate.number === record.issue);
   if (!issue) throw new StudioError(404, `이슈 #${record.issue}를 찾지 못했습니다`);
   const region = parseManagedRegion(issue.body);

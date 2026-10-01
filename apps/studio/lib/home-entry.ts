@@ -19,8 +19,14 @@ export interface EntryInput {
   model?: string;
   /** 여러 명 비교에 쓸 모델 id들(2~4) */
   fleetModelIds: string[];
-  /** 나눠서 병렬의 계획 모델 id */
+  /** 나눠서 병렬의 계획 모델 id. API 모드에서 사람이 새로 시작 화면 없이 직접 고를 방법이 없어져(ADR-070) 지금은 항상 빈 문자열이다 */
   planModelId: string;
+  /**
+   * 세션에서 이어받을 모델·노력 단계(대화의 제안 카드를 눌러 나눠서 병렬로 넘길 때만 있다, ADR-068).
+   * API 모드면 모델 레지스트리 id(비어 있으면 계획을 만들 수 없다), 로컬 CLI 모드면 그 CLI의 별칭(빈 문자열 = 계정 기본)이다
+   */
+  sessionModelId?: string;
+  sessionEffort?: string;
   /**
    * 서버 모드(capabilities.mode). api일 때만 화면이 모델 레지스트리에서 후보·계획 모델을 고른다.
    * 구독 CLI 모드에는 레지스트리 모델이 없으므로 비워 보내 서버 기본(Fleet 기본 후보, 로컬 CLI 계획)을 쓴다
@@ -81,11 +87,16 @@ export async function submitEntry(fetcher: FetchLike, input: EntryInput): Promis
     return created.ok ? { ok: true, href: detailHref('/fleets', created.body) } : created;
   }
 
-  if (apiMode && !input.planModelId) return { ok: false, error: '계획에 쓸 모델을 고를 수 없습니다' };
+  // 세션에서 이어받은 모델(sessionModelId)이 있으면 그것으로 만든다(API 모드든 로컬 CLI 모드든) —
+  // 세션에서 제안을 수락해 넘긴 계획이 세션과 다른(서버 기본) 모델·노력 단계로 도는 문제를 막는다.
+  // 없으면(세션 없이 이 화면에서 바로 만들 때) 예전처럼 API 모드에서만 planModelId를 요구한다
+  const modelId = input.sessionModelId ?? (apiMode ? input.planModelId : undefined);
+  if (apiMode && !modelId) return { ok: false, error: '계획에 쓸 모델을 고를 수 없습니다' };
   const created = await post(fetcher, '/api/task-plans', {
     projectId: input.projectId,
     request: input.text,
-    ...(apiMode ? { modelId: input.planModelId } : {}),
+    ...(modelId !== undefined ? { modelId } : {}),
+    ...(input.sessionEffort ? { effort: input.sessionEffort } : {}),
     ...(input.sourceSessionId ? { sourceSessionId: input.sourceSessionId } : {}),
   });
   return created.ok ? { ok: true, href: detailHref('/task-plans', created.body) } : created;

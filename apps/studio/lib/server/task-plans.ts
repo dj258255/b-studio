@@ -22,6 +22,7 @@ import {
   type PlanLimits,
   type AgentUsage,
   type BoardAccess,
+  type Effort,
   type Note,
   type PlanAsk,
   type RemoteLocation,
@@ -38,19 +39,20 @@ import { Redactor, resolveSecrets } from '@b-studio/sandbox';
 import type { WorkflowPageCheck } from '@b-studio/spec';
 import type { StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
-import type {
-  TaskPlanBoardView,
-  TaskPlanCheckpointView,
-  TaskPlanContractsView,
-  TaskPlanIntegrationView,
-  TaskPlanIssueRef,
-  TaskPlanIssuesView,
-  TaskPlanLaneView,
-  TaskPlanNoteView,
-  TaskPlanStepStatus,
-  TaskPlanStrategy,
-  TaskPlanTaskView,
-  TaskPlanView,
+import {
+  planModelAlias,
+  type TaskPlanBoardView,
+  type TaskPlanCheckpointView,
+  type TaskPlanContractsView,
+  type TaskPlanIntegrationView,
+  type TaskPlanIssueRef,
+  type TaskPlanIssuesView,
+  type TaskPlanLaneView,
+  type TaskPlanNoteView,
+  type TaskPlanStepStatus,
+  type TaskPlanStrategy,
+  type TaskPlanTaskView,
+  type TaskPlanView,
 } from '@/lib/task-plan-types';
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
@@ -141,23 +143,35 @@ function claudeCodePlanModelId(): string {
   return `${LOCAL_CLI_MODEL_PREFIX}${claudeCodePlanModel() ?? 'default'}`;
 }
 
+/** 이 백엔드에서 실제로 고를 수 있는 노력 단계 네 가지만 받는다. 그 밖의 값(빈 문자열 포함)은 조용히 버린다 */
+function asEffort(value: string | undefined): Effort | undefined {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'max' ? value : undefined;
+}
+
 /**
  * 계획·계약을 부르는 방법. 기록된 모델 id가 `local-cli:`면 그 CLI로 **도구 없이 한 번** 부르고,
  * 아니면 모델 레지스트리 클라이언트로 부른다. 다시 시작한 계획(resume)도 같은 규칙을 탄다.
+ * 세션에서 이어받은 노력(추론 강도) 단계가 있으면(plan.effort) 두 경로 모두 그대로 실어 보낸다.
  */
 function plannerAskFor(plan: TaskPlanView, project: LoadedProject): PlanAsk {
   if (plan.modelId.startsWith(LOCAL_CLI_MODEL_PREFIX)) {
     const model = plan.modelId.slice(LOCAL_CLI_MODEL_PREFIX.length);
-    return claudeCodeAsk({ cwd: project.root, ...(model && model !== 'default' ? { model } : {}) });
+    return claudeCodeAsk({ cwd: project.root, ...(model && model !== 'default' ? { model } : {}), ...(plan.effort ? { effort: plan.effort } : {}) });
   }
-  return planAskFromClient(clientForModel(modelById(plan.modelId)));
+  return planAskFromClient(clientForModel(modelById(plan.modelId), plan.effort));
 }
 
 export async function createTaskPlan(input: {
   projectId: string;
   request: string;
-  /** API 모드의 모델 레지스트리 id. 로컬 Claude Code 모드에서는 쓰지 않는다(모델은 그 CLI가 정한다) */
+  /**
+   * API 모드는 모델 레지스트리 id. 로컬 Claude Code 모드는 보통 쓰지 않지만(모델은 그 CLI가 정한다),
+   * 세션에서 이어받은 값(별칭 `sonnet`·`opus`·`haiku`·`fable`, 빈 문자열 = 계정 기본)을 명시적으로 넘길 수 있다
+   * (나눠서 병렬 제안 수락 경로, ADR-068). 넘기면 그 값을 그대로 기록·레인·통합 세션에 쓴다
+   */
   modelId?: string;
+  /** 세션에서 이어받은 노력(추론 강도) 단계. 이 백엔드·모델이 지원하지 않으면 조용히 무시한다 */
+  effort?: string;
   owner: string;
   /**
    * 서버 안에서만 넘긴다(벤치마크·테스트). HTTP 라우트는 이 필드를 넘기지 않는다.
@@ -205,9 +219,10 @@ export async function createTaskPlan(input: {
   let modelId = input.modelId?.trim() ?? '';
   if (preset === undefined) {
     if (mode === 'claude-code') {
-      // API 키가 아니라 이 PC의 Claude Code 로그인으로 부른다. 모델은 B_STUDIO_CLAUDE_CODE_MODEL 또는 계정 기본이라
-      // 모델 레지스트리를 확인하지 않고, 기록에는 그 CLI 모델 이름(local-cli:…)을 남긴다
-      modelId = claudeCodePlanModelId();
+      // 세션에서 이어받은 명시적 모델이 있으면(빈 문자열 = 이어받은 세션도 "기본"을 썼다는 뜻) 그 별칭을 그대로 쓴다.
+      // 아예 넘기지 않았으면(세션 없이 이 화면에서 바로 만든 계획) 예전처럼 서버 환경 변수·계정 기본으로 돌아간다.
+      // 모델 레지스트리는 확인하지 않고, 기록에는 그 CLI 모델 이름(local-cli:…)을 남긴다
+      modelId = input.modelId !== undefined ? `${LOCAL_CLI_MODEL_PREFIX}${modelId || 'default'}` : claudeCodePlanModelId();
     } else {
       const model = listModelOptions().find((candidate) => candidate.id === modelId && candidate.enabled !== false);
       if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${modelId}`);
@@ -238,6 +253,8 @@ export async function createTaskPlan(input: {
   // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
   // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
   const redactor = input.coordination?.strategy === 'S3' ? new Redactor(await resolveSecrets(project)) : undefined;
+  // 모르는 값은 조용히 버린다(이어받은 세션이 노력 단계를 지원하지 않는 백엔드였을 수도 있다) — 잘못된 값으로 계획 만들기를 막지 않는다
+  const effort = asEffort(input.effort);
 
   ensureLoaded();
   const plan: TaskPlanView = {
@@ -246,6 +263,7 @@ export async function createTaskPlan(input: {
     projectId: input.projectId,
     request,
     modelId,
+    ...(effort ? { effort } : {}),
     status: 'planning',
     createdAt: new Date().toISOString(),
     lanes: [],
@@ -692,7 +710,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const extraPageChecks = integrationPageChecks.get(plan.id);
     // Command Code 모드는 모델을 세션에 고정하지 않으므로 sessionModelOption이 빈 객체를 돌려준다(빈 모델 id를 넘기지 않는다)
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', {
-      ...sessionModelOption(plan.modelId),
+      ...sessionModelOption(plan.modelId, plan.effort),
       ...(extraPageChecks ? { extraPageChecks } : {}),
       ...seedFromSessionOption(plan),
     });
@@ -761,26 +779,32 @@ async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
 
 /**
  * commandcode·opencode 모드는 세션 모델을 고른 모델(`B_STUDIO_CMD_MODEL`·`B_STUDIO_OPENCODE_MODEL`)이나 세션 선택에서 정한다.
- * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 CLI `-m`으로 나가므로 넘기지 않는다
+ * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 CLI `-m`으로 나가므로 넘기지 않는다.
+ *
+ * 로컬 Claude Code 계획의 기록용 id(`local-cli:sonnet`)는 그 자체로는 실제 모델 이름이 아니다 — 접두어가 붙은 채로
+ * 세션에 넘기면 sessions.ts의 cliModelOverride가 "계획 기록용 id"로 보고 걸러내 서버 기본으로 떨어진다(레인·통합 세션이
+ * 계획과 다른 모델로 도는 버그였다). planModelAlias로 접두어를 뗀 실제 별칭(sonnet 등)만 세션에 넘긴다.
  */
-function sessionModelOption(modelId: string): { modelId?: string } {
+function sessionModelOption(modelId: string, effort?: Effort): { modelId?: string; effort?: Effort } {
   const mode = process.env.B_STUDIO_MODE?.trim();
-  return mode === 'commandcode' || mode === 'opencode' ? {} : { modelId };
+  if (mode === 'commandcode' || mode === 'opencode') return {};
+  const resolved = planModelAlias(modelId);
+  return { ...(resolved ? { modelId: resolved } : {}), ...(effort ? { effort } : {}) };
 }
 
 /**
  * 레인 세션을 만들 때의 옵션. 레인 작업이 backend·model을 실었으면 그것으로 세션을 만든다(레인마다 다른 백엔드).
- * 없으면 기존처럼 계획의 modelId와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
+ * 없으면 기존처럼 계획의 modelId·effort와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
  */
-function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; backend?: string } {
+function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string } {
   const head = lane.tasks[0];
   const backend = head?.backend;
-  if (!backend) return sessionModelOption(plan.modelId);
+  if (!backend) return sessionModelOption(plan.modelId, plan.effort);
   // api는 모델 레지스트리 id를, commandcode·opencode는 그 CLI의 모델 id를 세션에 넘긴다. claude-code·codex도 고른 모델을 세션에 실어
   // 러너가 그 값을 쓰게 한다(없으면 환경 변수 = 계획 기본)
   if (backend === 'commandcode' || backend === 'opencode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
-  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId };
-  return { backend, ...(head.model ? { modelId: head.model } : {}) };
+  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId, ...(plan.effort ? { effort: plan.effort } : {}) };
+  return { backend, ...(head.model ? { modelId: head.model } : {}), ...(plan.effort ? { effort: plan.effort } : {}) };
 }
 
 /**
