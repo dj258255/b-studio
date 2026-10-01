@@ -292,7 +292,7 @@ const saved = {
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `[id:${id}] ${id} 작업`, paths, dependsOn });
 
 beforeEach(() => {
-  // cachedRepositoryToken의 캐시(ADR-105)가 앞 테스트의 B_STUDIO_GITHUB_TOKEN을 다음 테스트로 새게 하지 않는다
+  // cachedRepositoryToken의 캐시(ADR-107)가 앞 테스트의 B_STUDIO_GITHUB_TOKEN을 다음 테스트로 새게 하지 않는다
   clearRepositoryTokenCache();
   fake.root = mkdtempSync(path.join(directory, 'work-'));
   fake.counter = 0;

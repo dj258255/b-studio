@@ -400,7 +400,7 @@ async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
     const project = await findProject(plan.projectId);
     const source = project && (await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true }));
     const candidate = source?.originUrl ? parseRemote(source.originUrl) : undefined;
-    // 세션의 이슈 발행·PR 생성과 같은 토큰 찾기를 쓴다(ADR-105) — gh CLI 로그인만으로도 작업을 이슈로 올릴 수 있어야 한다
+    // 세션의 이슈 발행·PR 생성과 같은 토큰 찾기를 쓴다(ADR-107) — gh CLI 로그인만으로도 작업을 이슈로 올릴 수 있어야 한다
     token = candidate && (candidate.kind === 'github' || candidate.kind === 'gitea') ? await cachedRepositoryToken(candidate.kind, { allowGhCli: localFolderAllowed() }) : undefined;
     // 원격을 확인하지 못하거나 올릴 수 없는 호스트·토큰이면 계획만 실행하고 이슈는 만들지 않는다
     if (!candidate || !canCreatePullRequest(candidate, process.env, token)) return;

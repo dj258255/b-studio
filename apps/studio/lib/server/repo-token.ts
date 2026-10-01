@@ -29,12 +29,16 @@ export function localFolderAllowed(): boolean {
   }
 }
 
-/** `gh auth token`을 부른다. 실행 파일이 없거나 로그인하지 않았으면 undefined(오류로 던지지 않는다) */
-export async function ghCliToken(
-  run: (cmd: string, args: string[]) => Promise<{ stdout: string }> = (cmd, args) => execFileAsync(cmd, args, { timeout: 5_000 }),
-): Promise<string | undefined> {
+/**
+ * `gh auth token`을 부른다. 실행 파일이 없거나 로그인하지 않았으면 undefined(오류로 던지지 않는다).
+ * 테스트 실행(vitest가 VITEST를 켠다) 중에는 실행기를 주입하지 않은 호출에 실제 토큰을 주지 않는다 — 개발자 PC에 gh가
+ * 로그인돼 있으면 이슈·PR 생성 테스트가 진짜 GitHub에 쓰기 요청을 보낼 수 있기 때문이다
+ */
+export async function ghCliToken(run?: (cmd: string, args: string[]) => Promise<{ stdout: string }>): Promise<string | undefined> {
+  if (!run && process.env.VITEST) return undefined;
+  const exec = run ?? ((cmd: string, args: string[]) => execFileAsync(cmd, args, { timeout: 5_000 }));
   try {
-    const { stdout } = await run('gh', ['auth', 'token']);
+    const { stdout } = await exec('gh', ['auth', 'token']);
     const token = stdout.trim();
     return token || undefined;
   } catch {
@@ -67,7 +71,7 @@ const tokenCache = new Map<'github' | 'gitea', { at: number; token: string | und
 /**
  * resolveRepositoryToken의 캐시된 버전. 저장소 올리기 미리보기 → 실제 생성처럼 한 요청 흐름에서 같은 호스트의
  * 토큰을 거듭 물으면, 환경 변수가 없는 개인 PC 모드마다 매번 `gh auth token` 하위 프로세스를 띄우게 된다
- * (ADR-105: PR 생성 경로가 이슈 발행 경로와 토큰을 다르게 구해 "PR 작성 페이지" 링크만 보이던 문제의 재발 방지).
+ * (ADR-107: PR 생성 경로가 이슈 발행 경로와 토큰을 다르게 구해 "PR 작성 페이지" 링크만 보이던 문제의 재발 방지).
  * `env`·`ghToken`·`now`를 주입할 수 있어 테스트에서 하위 프로세스를 실행하지 않고 캐시 만료도 흉내 낼 수 있다
  */
 export async function cachedRepositoryToken(

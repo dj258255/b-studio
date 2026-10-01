@@ -5,7 +5,7 @@ import { loadProject, SpecError, type LoadedProject } from '@b-studio/spec';
 import type { ProjectSummary } from '@/lib/studio-events';
 import { readRegistry } from './project-registry';
 // sessions.ts가 findProject를 이 파일에서 가져오므로, 순환을 피해 localFolderAllowed·토큰 찾기는 sessions.ts가 아니라
-// repo-token.ts에서 바로 가져온다(ADR-105)
+// repo-token.ts에서 바로 가져온다(ADR-107)
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
 
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]*$/;
@@ -80,7 +80,7 @@ export async function canPublishIssues(projectId: string): Promise<boolean> {
     const source = await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true });
     if (!source?.originUrl) return false;
     const remote = parseRemote(source.originUrl);
-    // 실제 이슈 발행·PR 생성과 같은 토큰 찾기를 쓴다(ADR-105) — gh CLI 로그인만으로도 버튼이 보여야 한다
+    // 실제 이슈 발행·PR 생성과 같은 토큰 찾기를 쓴다(ADR-107) — gh CLI 로그인만으로도 버튼이 보여야 한다
     const token = remote.kind === 'github' || remote.kind === 'gitea' ? await cachedRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() }) : undefined;
     return canCreatePullRequest(remote, process.env, token);
   } catch {

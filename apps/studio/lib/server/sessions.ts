@@ -2663,7 +2663,7 @@ export function sessionIdFromBranch(projectId: string, branch: string): string |
   return branch.startsWith(prefix) ? branch.slice(prefix.length) : undefined;
 }
 
-// localFolderAllowed는 repo-token.ts에 있다(이 파일과 projects.ts가 서로를 가져오지 않도록, ADR-105).
+// localFolderAllowed는 repo-token.ts에 있다(이 파일과 projects.ts가 서로를 가져오지 않도록, ADR-107).
 // 이 파일 밖의 기존 가져오기(@/lib/server/sessions)가 계속 되도록 다시 내보낸다
 export { localFolderAllowed };
 
@@ -2897,7 +2897,7 @@ const CHECKLIST_STATUS_ICON: Record<ChecklistStatus, string> = { pass: '✓', wa
 
 /**
  * PR 본문에 "올리기 전 점검"(저장소 탭의 SubmissionPanel과 같은 점검표, submissionReport) 요약을 덧붙인다.
- * 점검을 다시 계산하지 않고 그 결과(통과 수·항목별 한 줄 이유)만 옮긴다(ADR-105) — 저장소 탭 어디에서 PR을 만들든
+ * 점검을 다시 계산하지 않고 그 결과(통과 수·항목별 한 줄 이유)만 옮긴다(ADR-107) — 저장소 탭 어디에서 PR을 만들든
  * 본문이 같아야 한다(pullRequestDraft가 미리보기·실제 생성에 함께 쓰는 것과 같은 이유)
  */
 export function buildChecklistAddendum(report: SubmissionReport): string {
@@ -2924,7 +2924,7 @@ async function pullRequestDraft(session: Session, issues: readonly number[]): Pr
   // 아직 검증되지 않은 요구사항이 있어도 PR에서 추적 이슈로 돌아갈 수 있게 "관련:" 한 줄을 더한다
   const tracking = await publishedTrackingIssue(session.project.root).catch(() => undefined);
   const trackingAddendum = tracking && !refs.some((ref) => ref.issue === tracking.issue) ? `\n\n관련: #${tracking.issue}` : '';
-  // 올리기 전 점검표 요약(ADR-105, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다)
+  // 올리기 전 점검표 요약(ADR-107, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다)
   const checklistAddendum = await submissionReport(session.snapshot.id)
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
@@ -3042,7 +3042,7 @@ export async function exportSession(
       try {
         const { title, body } = await pullRequestDraft(session, issues);
         const remote = parseRemote(info.remoteUrl);
-        // 미리보기(canCreate)가 "만들 수 있다"고 본 것과 같은 토큰으로 실제로 만든다(ADR-105)
+        // 미리보기(canCreate)가 "만들 수 있다"고 본 것과 같은 토큰으로 실제로 만든다(ADR-107)
         const token = await repositoryPullRequestToken(remote);
         const result = await createPullRequest(remote, { title, body, base: info.base, branch: info.branch }, { token });
         await session.checkpoints.recordPullRequest(result.url);
@@ -3542,7 +3542,7 @@ async function describeRepository(store: CheckpointStore, sourceDirtyFiles: numb
   const info = await store.repository();
   if (!info) return undefined;
   const remote = parseRemote(info.remoteUrl);
-  // 이슈 발행(requirementIssuesContext)과 같은 토큰 찾기를 쓴다(ADR-105) — gh CLI 로그인만으로도 "올리고 PR 만들기"가 보여야 한다
+  // 이슈 발행(requirementIssuesContext)과 같은 토큰 찾기를 쓴다(ADR-107) — gh CLI 로그인만으로도 "올리고 PR 만들기"가 보여야 한다
   const token = await repositoryPullRequestToken(remote);
   return {
     remote: remote.display,

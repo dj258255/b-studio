@@ -7,7 +7,7 @@ import { useSessionAccess } from "./session-access";
 
 /**
  * 세션 브랜치를 올리는 버튼("브랜치 올리기")과, 올릴 수 있으면 PR(MR) 만들기 버튼·미리보기.
- * RepositoryBar(코드 탭 > 변경 기록)와 SubmissionPanel(저장소 탭 > 올리기 전 점검)이 같은 버튼을 보여 준다(ADR-105) —
+ * RepositoryBar(코드 탭 > 변경 기록)와 SubmissionPanel(저장소 탭 > 올리기 전 점검)이 같은 버튼을 보여 준다(ADR-107) —
  * 로직을 두 곳에 나눠 두지 않으려고 여기 하나로 뺐다. 저장소가 없는 세션은 올릴 곳이 없어 아무것도 그리지 않는다
  */
 export function RepositoryUploadActions({ view }: { view: SessionView }) {

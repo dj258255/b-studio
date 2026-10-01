@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cachedRepositoryToken, clearRepositoryTokenCache, localFolderAllowed } from './repo-token';
+import { cachedRepositoryToken, ghCliToken, clearRepositoryTokenCache, localFolderAllowed } from './repo-token';
 
 describe('localFolderAllowed', () => {
   const savedAuth = process.env.B_STUDIO_AUTH;
@@ -18,7 +18,7 @@ describe('localFolderAllowed', () => {
   });
 });
 
-describe('cachedRepositoryToken(ADR-105: 저장소 올리기 미리보기 → 실제 생성이 gh CLI를 거듭 부르지 않는다)', () => {
+describe('cachedRepositoryToken(ADR-107: 저장소 올리기 미리보기 → 실제 생성이 gh CLI를 거듭 부르지 않는다)', () => {
   beforeEach(() => clearRepositoryTokenCache());
 
   it('TTL 안에서는 다시 묻지 않고 캐시된 값을 돌려준다', async () => {
@@ -57,5 +57,12 @@ describe('cachedRepositoryToken(ADR-105: 저장소 올리기 미리보기 → �
 
     expect(token).toBeUndefined();
     expect(ghToken).not.toHaveBeenCalled();
+  });
+});
+
+describe('ghCliToken — 테스트 중 실제 gh 차단', () => {
+  it('실행기를 주입하지 않으면 테스트 실행 중에는 실제 gh를 부르지 않는다', async () => {
+    expect(process.env.VITEST).toBeTruthy();
+    await expect(ghCliToken()).resolves.toBeUndefined();
   });
 });

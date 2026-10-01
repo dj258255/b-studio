@@ -27,7 +27,7 @@ const repository = (overrides: Partial<RepositoryView> = {}): RepositoryView => 
 });
 
 /**
- * RepositoryBar(코드 탭)와 SubmissionPanel(저장소 탭의 올리기 전 점검)이 함께 쓰는 공유 컴포넌트(ADR-105, 56번 버그).
+ * RepositoryBar(코드 탭)와 SubmissionPanel(저장소 탭의 올리기 전 점검)이 함께 쓰는 공유 컴포넌트(ADR-107, 56번 버그).
  * 어느 탭에 끼워도 같은 버튼·판단을 보여야 한다
  */
 describe("RepositoryUploadActions", () => {
