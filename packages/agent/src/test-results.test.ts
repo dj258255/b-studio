@@ -213,8 +213,31 @@ describe('prefill builders', () => {
   });
 
   it('buildAddTestPrefill은 요구사항 id를 이름에 넣으라고 안내한다', () => {
-    const text = buildAddTestPrefill('R5', '결제 취소 시 환불');
+    const text = buildAddTestPrefill({ id: 'R5', title: '결제 취소 시 환불', acceptance: ['환불 금액이 주문 금액과 같다'] });
     expect(text).toContain('[R5] 결제 취소 시 환불');
     expect(text).toContain('R5');
+    expect(text).toContain('인수 조건:');
+    expect(text).toContain('- 환불 금액이 주문 금액과 같다');
+  });
+
+  it('buildAddTestPrefill은 EARS 문장·시나리오까지 넣는다(버그 리포트 54 — id·제목만으로는 뭘 테스트해야 하는지 알 수 없었다)', () => {
+    const text = buildAddTestPrefill({
+      id: 'R7',
+      title: '주문 취소',
+      acceptance: ['취소하면 상태가 CANCELLED가 된다'],
+      ears: { pattern: 'event', statement: '사용자가 취소를 요청하면 시스템은 주문 상태를 CANCELLED로 바꿔야 한다' },
+      scenarios: [{ id: 'R7.1', given: '결제된 주문', when: '취소를 요청하면', then: '상태가 CANCELLED가 된다' }],
+    });
+    expect(text).toContain('EARS: 사용자가 취소를 요청하면 시스템은 주문 상태를 CANCELLED로 바꿔야 한다');
+    expect(text).toContain('인수 조건:');
+    expect(text).toContain('- 취소하면 상태가 CANCELLED가 된다');
+    expect(text).toContain('시나리오:');
+    expect(text).toContain('- R7.1: (Given) 결제된 주문 (When) 취소를 요청하면 (Then) 상태가 CANCELLED가 된다');
+  });
+
+  it('EARS·시나리오가 없으면(옛 문서) 그 절은 그냥 빠진다', () => {
+    const text = buildAddTestPrefill({ id: 'R2', title: '로그인', acceptance: ['토큰을 돌려준다'] });
+    expect(text).not.toContain('EARS:');
+    expect(text).not.toContain('시나리오:');
   });
 });
