@@ -499,6 +499,7 @@ export {
   type Scenario,
   type ScannedFile,
   type TestMatch,
+  type TestRunEvidence,
   type Trace,
   type TraceabilityMatrix,
 } from './requirements';

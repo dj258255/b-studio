@@ -23,6 +23,7 @@ import {
   type AgentUsage,
   type BoardAccess,
   type Effort,
+  type ModelClientInfo,
   type Note,
   type PlanAsk,
   type RemoteLocation,
@@ -747,6 +748,9 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, {
       by: plan.owner,
       scriptedTurns: turns,
+      // 모델을 부르지 않고 레인 결과를 합칠 뿐이라, 채팅의 "backend" 카드가 ScriptedModelClient의 기본값
+      // ("데모 스크립트에서 scripted 모델로 실행합니다")으로 보이지 않고 실제 쓰임을 보여주게 덮어쓴다(버그 리포트)
+      scriptedInfo: { backend: '레인 결과 합치기', model: '모델 호출 없음' },
       writableScope,
       ...(plan.verify ? { verify: plan.verify } : {}),
     });
@@ -929,7 +933,14 @@ function waitForReady(sessionId: string): Promise<void> {
 async function runAndWait(
   sessionId: string,
   request: string,
-  options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[]; board?: BoardAccess; verify?: VerifyMode },
+  options: {
+    by: string;
+    writableScope?: readonly string[];
+    scriptedTurns?: ScriptedTurn[];
+    scriptedInfo?: Partial<ModelClientInfo>;
+    board?: BoardAccess;
+    verify?: VerifyMode;
+  },
 ): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number }> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;

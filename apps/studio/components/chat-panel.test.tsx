@@ -157,6 +157,33 @@ describe("ChatPanel 결과 표시", () => {
     // api 라우터(ADR-047)의 점수표 접기 블록은 쓰지 않는다
     expect(html).not.toContain("<details");
   });
+
+  it("작업 분해의 레인 결과 통합(모델을 부르지 않는 ScriptedModelClient)은 \"레인 결과 합치기 (모델 호출 없음)\"으로 보여준다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "작업 분해 통합: 필터를 추가해 줘" },
+        { type: "agent", runId: "r1", event: { type: "session", backend: "레인 결과 합치기", model: "모델 호출 없음" } },
+      ]),
+    );
+
+    expect(html).toContain("레인 결과 합치기 (모델 호출 없음)");
+    // 데모 스크립트와 혼동되는 실제와 다른 문구("데모 스크립트에서 scripted 모델로 실행합니다")는 보이지 않는다
+    expect(html).not.toContain("데모 스크립트");
+    expect(html).not.toContain("scripted 모델로 실행합니다");
+  });
+
+  it("실제 모델 호출은 지금처럼 \"{backend}에서 {model} 모델로 실행합니다\" 문장을 쓴다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "필터를 추가해 줘" },
+        { type: "agent", runId: "r1", event: { type: "session", backend: "claude-code", model: "claude-sonnet-5" } },
+      ]),
+    );
+
+    expect(html).toContain("claude-code에서");
+    expect(html).toContain("claude-sonnet-5");
+    expect(html).toContain("모델로 실행합니다");
+  });
 });
 
 describe("ModelPicker(대화 입력창의 모델 선택)", () => {

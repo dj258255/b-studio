@@ -666,6 +666,12 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
     }
 
     case "backend":
+      // 작업 분해의 레인 결과 통합(task-plans.ts)은 모델을 부르지 않고 미리 만든 턴만 돌린다(ScriptedModelClient에
+      // 그 쓰임새를 담아 보낸다) — "데모 스크립트에서 scripted 모델로 실행합니다"처럼 실제와 다른 문구 대신
+      // 있는 그대로 보여준다. 그 밖(실제 모델 호출)은 기존 "{backend}에서 {model} 모델로 실행합니다" 문장 그대로다
+      if (item.backend === "레인 결과 합치기") {
+        return <p className="text-sm text-muted">레인 결과 합치기 (모델 호출 없음)</p>;
+      }
       return (
         <p className="text-sm text-muted">
           {item.backend}에서 <span className="font-mono text-ink">{item.model}</span> 모델로 실행합니다

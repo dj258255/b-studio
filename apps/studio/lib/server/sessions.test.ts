@@ -8,7 +8,9 @@ import {
   apiEscalation,
   assertBackendReady,
   assertResumableBackend,
+  buildChecklistTestEvidence,
   buildExportChecks,
+  buildRequirementTestRunEvidence,
   claudeCodeAutoEscalation,
   claudeCodeEscalation,
   cliModelOverride,
@@ -21,7 +23,20 @@ import {
   resolveSessionBackend,
   selfCheckMode,
   sessionBackend,
+  type TestServiceView,
 } from './sessions';
+
+function testService(overrides: Partial<TestServiceView> = {}): TestServiceView {
+  return {
+    service: 'api',
+    template: 'spring-boot',
+    running: false,
+    supported: true,
+    counts: { pass: 0, fail: 0, skip: 0, notRun: 0 },
+    rows: [],
+    ...overrides,
+  };
+}
 
 describe('parseIssueInput', () => {
   it('생략은 undefined, 1~10,000,000 정수만 받고 나머지는 400으로 거부한다', () => {
@@ -376,5 +391,82 @@ describe('planBriefBackend', () => {
     expect(planBriefBackend('demo')).toBeUndefined();
     expect(planBriefBackend('codex')).toBeUndefined();
     expect(planBriefBackend('opencode')).toBeUndefined();
+  });
+});
+
+function testRow(overrides: Partial<TestServiceView['rows'][number]> = {}): TestServiceView['rows'][number] {
+  return {
+    file: 'OrderTest.java',
+    framework: 'junit' as TestServiceView['rows'][number]['framework'],
+    suitePath: [],
+    name: 'ok',
+    displayName: 'ok',
+    line: 1,
+    skipped: false,
+    requirementIds: [],
+    status: 'pass',
+    ...overrides,
+  };
+}
+
+describe('buildChecklistTestEvidence(테스트 탭 실행을 "올리기 전 점검" 증거로, 버그 리포트)', () => {
+  const head = 'abc123';
+
+  it('HEAD와 같은 체크포인트에서 돈 실행이고 커밋하지 않은 변경이 없으면 matchesHead가 참이다', () => {
+    const services = [testService({ service: 'api', lastRunSha: head, lastRunAt: '2026-01-01T09:17:00.000Z', counts: { pass: 31, fail: 0, skip: 0, notRun: 0 } })];
+    const evidence = buildChecklistTestEvidence(services, head, 0);
+    expect(evidence).toEqual([{ service: 'api', matchesHead: true, counts: { pass: 31, fail: 0, skip: 0, notRun: 0 }, at: '2026-01-01T09:17:00.000Z' }]);
+  });
+
+  it('체크포인트 SHA가 다르면 matchesHead가 거짓이다', () => {
+    const services = [testService({ service: 'api', lastRunSha: 'def456', counts: { pass: 31, fail: 0, skip: 0, notRun: 0 } })];
+    expect(buildChecklistTestEvidence(services, head, 0)[0]!.matchesHead).toBe(false);
+  });
+
+  it('체크포인트는 같아도 커밋하지 않은 변경이 있으면 matchesHead가 거짓이다(그 사이 코드가 바뀌었을 수 있다)', () => {
+    const services = [testService({ service: 'api', lastRunSha: head })];
+    expect(buildChecklistTestEvidence(services, head, 1)[0]!.matchesHead).toBe(false);
+  });
+
+  it('실행한 적이 없으면(lastRunSha 없음) matchesHead가 거짓이다', () => {
+    const services = [testService({ service: 'api' })];
+    expect(buildChecklistTestEvidence(services, head, 0)[0]!.matchesHead).toBe(false);
+  });
+});
+
+describe('buildRequirementTestRunEvidence(요구사항별 테스트 탭 증거, 버그 리포트)', () => {
+  const head = { sha: 'abc123', shortSha: 'abc123' };
+
+  it('HEAD에서 돈 실행 중 이 요구사항 id가 붙어 통과한 행을 센다', () => {
+    const services = [
+      testService({
+        service: 'api',
+        lastRunSha: head.sha,
+        lastRunAt: '2026-01-01T09:17:00.000Z',
+        rows: [testRow({ requirementIds: ['R1'], status: 'pass' }), testRow({ requirementIds: ['R2'], status: 'pass' })],
+      }),
+    ];
+    const evidence = buildRequirementTestRunEvidence(services, 'R1', head, 0);
+    expect(evidence).toEqual({ at: '2026-01-01T09:17:00.000Z', sha: head.sha, shortSha: head.shortSha, passed: 1, failed: 0 });
+  });
+
+  it('실패한 행이 있으면 failed로 센다', () => {
+    const services = [testService({ lastRunSha: head.sha, lastRunAt: '2026-01-01T00:00:00.000Z', rows: [testRow({ requirementIds: ['R1'], status: 'fail' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', head, 0)).toMatchObject({ passed: 0, failed: 1 });
+  });
+
+  it('이 요구사항을 언급하는 행이 하나도 없으면 undefined를 돌려준다', () => {
+    const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R2'], status: 'pass' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', head, 0)).toBeUndefined();
+  });
+
+  it('HEAD와 체크포인트가 다른 서비스의 결과는 세지 않는다', () => {
+    const services = [testService({ lastRunSha: 'other-sha', rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', head, 0)).toBeUndefined();
+  });
+
+  it('체크포인트가 없는 세션(head undefined)이면 undefined를 돌려준다', () => {
+    const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', undefined, 0)).toBeUndefined();
   });
 });

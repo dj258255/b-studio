@@ -105,6 +105,56 @@ describe('checkTests (스프링+넥스트 레이아웃)', () => {
   });
 });
 
+describe('checkTests — 테스트 탭 실행 증거(게이트가 test 단계를 통과한 기록이 없을 때, 버그 리포트)', () => {
+  beforeEach(async () => {
+    await write('api/src/test/java/OrderTest.java', 'class OrderTest {}\n');
+    await write('web/app/orders/page.test.tsx', 'test("ok", () => {});\n');
+  });
+
+  it('백엔드·프런트엔드 모두 지금 체크포인트에서 실행했고 실패·미실행이 없으면 통과한다', async () => {
+    const item = await checkTests(root, [API, WEB], ['run', 'review'], [
+      { service: 'api', matchesHead: true, counts: { pass: 31, fail: 0, skip: 0, notRun: 0 } },
+      { service: 'web', matchesHead: true, counts: { pass: 29, fail: 0, skip: 0, notRun: 0 } },
+    ]);
+    expect(item.status).toBe('pass');
+    expect(item.reason).toContain('60개');
+  });
+
+  it('한 서비스가 지금 체크포인트에서 돈 실행이 아니면(체크포인트 불일치) 그 서비스를 콕 집어 경고한다', async () => {
+    const item = await checkTests(root, [API, WEB], ['run', 'review'], [
+      { service: 'api', matchesHead: true, counts: { pass: 31, fail: 0, skip: 0, notRun: 0 } },
+      { service: 'web', matchesHead: false, counts: { pass: 20, fail: 0, skip: 0, notRun: 0 } },
+    ]);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('web');
+    expect(item.reason).not.toContain('api 서비스는');
+  });
+
+  it('실패한 테스트가 있으면 실패로 매기고 몇 개 실패했는지 말한다', async () => {
+    const item = await checkTests(root, [API, WEB], ['run', 'review'], [
+      { service: 'api', matchesHead: true, counts: { pass: 29, fail: 2, skip: 0, notRun: 0 } },
+      { service: 'web', matchesHead: true, counts: { pass: 29, fail: 0, skip: 0, notRun: 0 } },
+    ]);
+    expect(item.status).toBe('fail');
+    expect(item.reason).toContain('api(실패 2개)');
+  });
+
+  it('실행 뒤에 테스트가 추가돼 미실행으로 남았으면 경고한다', async () => {
+    const item = await checkTests(root, [API, WEB], ['run', 'review'], [
+      { service: 'api', matchesHead: true, counts: { pass: 31, fail: 0, skip: 0, notRun: 1 } },
+      { service: 'web', matchesHead: true, counts: { pass: 29, fail: 0, skip: 0, notRun: 0 } },
+    ]);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('미실행 1개');
+  });
+
+  it('증거를 아예 넘기지 않으면(옛 호출) 기존 문구 그대로다', async () => {
+    const item = await checkTests(root, [API, WEB], ['run', 'review']);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('test 단계');
+  });
+});
+
 describe('checkRunInstructions', () => {
   it('README가 없으면 실패한다', async () => {
     const item = await checkRunInstructions(root, [WEB, API]);
