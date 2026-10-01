@@ -2,7 +2,24 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createView } from "@/lib/session-view";
 import type { SessionSnapshot } from "@/lib/studio-events";
-import { applyManualMatch, DiffSummary, ExtractionResultView, formatDraftTimestamp, formatElapsed, hasUnsavedDraftEdits, ImportFlow, RequirementPublishFlow, requirementsDraftStatusLine, RequirementsList, RequirementsPanel, shouldConfirmBeforePlanAll } from "./requirements-panel";
+import {
+  applyManualMatch,
+  DiffSummary,
+  ExtractionResultView,
+  filterSpecCandidateFiles,
+  formatDraftTimestamp,
+  formatElapsed,
+  hasUnsavedDraftEdits,
+  ImportFlow,
+  removeDraftAt,
+  replaceWithExtractionResult,
+  RequirementPublishFlow,
+  requirementsDraftStatusLine,
+  RequirementsList,
+  RequirementsPanel,
+  restoreDraftAt,
+  shouldConfirmBeforePlanAll,
+} from "./requirements-panel";
 
 const baseSnapshot: SessionSnapshot = {
   id: "s1",
@@ -31,6 +48,29 @@ describe("ImportFlow 용어", () => {
 
     expect(html).not.toContain("과제");
     expect(html).toContain("만들 것을 적어 주세요");
+  });
+
+  it("'파일에서' 탭이 있다(작업 복사본 선택은 그 탭을 열어야 보인다)", () => {
+    const html = renderToStaticMarkup(<ImportFlow sessionId="s1" onExtracted={() => {}} />);
+    expect(html).toContain("파일에서");
+  });
+});
+
+describe("filterSpecCandidateFiles(버그 리포트 7 — 작업 복사본의 .md 파일에서 명세 고르기)", () => {
+  it(".md가 아닌 파일은 뺀다", () => {
+    expect(filterSpecCandidateFiles(["ASSIGNMENT.md", "src/index.ts", "docs/spec.md", "README.mdx"])).toEqual(["ASSIGNMENT.md", "docs/spec.md"]);
+  });
+
+  it("docs/requirements.md 자신은 뺀다(명세가 아니라 저장 결과다)", () => {
+    expect(filterSpecCandidateFiles(["docs/requirements.md", "ASSIGNMENT.md"])).toEqual(["ASSIGNMENT.md"]);
+  });
+
+  it("CHANGELOG류는 뺀다(대소문자·경로 무관)", () => {
+    expect(filterSpecCandidateFiles(["CHANGELOG.md", "changelog.md", "packages/agent/CHANGELOG.md", "docs/spec.md"])).toEqual(["docs/spec.md"]);
+  });
+
+  it("나머지는 그대로 남긴다", () => {
+    expect(filterSpecCandidateFiles(["ASSIGNMENT.md", "docs/api.md"])).toEqual(["ASSIGNMENT.md", "docs/api.md"]);
   });
 });
 
@@ -217,6 +257,50 @@ describe("ExtractionResultView(ADR-097 개정 — 배너 없이 항상 보여주
 
     expect(html).not.toContain("스펙을 고치고 다시 뽑기");
   });
+
+  it("'빼기'는 우선순위 선택과 구분선으로 떼어 맨 끝에 보인다(버그 리포트 14)", () => {
+    const html = renderToStaticMarkup(<ExtractionResultView sessionId="s1" draft={baseDraft} onApplied={() => {}} onDiscarded={() => {}} onRefresh={() => {}} />);
+
+    expect(html).toContain("빼기");
+    // 우선순위 select 바로 뒤에 구분선(border-l)과 ml-auto로 떨어뜨린 버튼이어야 한다
+    expect(html).toMatch(/<select[^>]*>[\s\S]*?<\/select>\s*<button[^>]*class="[^"]*ml-auto[^"]*border-l[^"]*"[^>]*>\s*빼기/);
+  });
+
+  it("아직 아무것도 빼지 않았으면 '되돌리기' 안내가 없다", () => {
+    const html = renderToStaticMarkup(<ExtractionResultView sessionId="s1" draft={baseDraft} onApplied={() => {}} onDiscarded={() => {}} onRefresh={() => {}} />);
+
+    expect(html).not.toContain("되돌리기");
+  });
+});
+
+describe("removeDraftAt / restoreDraftAt(버그 리포트 14 — '빼기'를 저장 전까지 되돌리기)", () => {
+  const drafts = [
+    { id: "R1", title: "로그인 API", kind: "api" as const, priority: "must" as const, acceptance: ["a"] },
+    { id: "R2", title: "주문 목록", kind: "api" as const, priority: "should" as const, acceptance: ["b"] },
+    { id: "R3", title: "README", kind: "docs" as const, priority: "could" as const, acceptance: ["c"] },
+  ];
+
+  it("뺀 항목과 원래 자리(index)를 함께 돌려주고, 나머지만 남긴다", () => {
+    const result = removeDraftAt(drafts, 1);
+    expect(result?.removed.id).toBe("R2");
+    expect(result?.next.map((item) => item.id)).toEqual(["R1", "R3"]);
+  });
+
+  it("없는 자리를 빼려 하면 undefined", () => {
+    expect(removeDraftAt(drafts, 9)).toBeUndefined();
+  });
+
+  it("되돌리면 원래 자리에 그대로 다시 들어간다", () => {
+    const result = removeDraftAt(drafts, 1)!;
+    const restored = restoreDraftAt(result.next, result.removed, 1);
+    expect(restored.map((item) => item.id)).toEqual(["R1", "R2", "R3"]);
+  });
+
+  it("그 사이 목록이 더 짧아졌으면(다른 항목도 뺐으면) 끝자리를 넘지 않고 끝에 넣는다", () => {
+    const afterRemovingTwo = drafts.filter((item) => item.id !== "R1" && item.id !== "R3"); // ["R2"]만 남음
+    const restored = restoreDraftAt(afterRemovingTwo, drafts[0]!, 0); // R1을 원래 자리(0)로
+    expect(restored.map((item) => item.id)).toEqual(["R1", "R2"]);
+  });
 });
 
 const snapshot = {
@@ -310,6 +394,70 @@ describe("DiffSummary(재추출 병합 요약)", () => {
   it("사라진 항목이 없으면 버튼이 없다", () => {
     const html = renderToStaticMarkup(<DiffSummary diff={[entry("unchanged", "R1")]} onDropRemoved={() => {}} />);
     expect(html).not.toContain("목록에서 빼기");
+  });
+
+  it("onReplace를 주면 '버리고 바꾸기' 버튼이 있고, 누르기 전에는 확인 문구가 없다(버그 리포트 43)", () => {
+    const html = renderToStaticMarkup(<DiffSummary diff={[entry("added", "R1"), entry("removed", "R3")]} onReplace={() => {}} />);
+    expect(html).toContain("기존 목록 버리고 이 결과로 바꾸기");
+    expect(html).not.toContain("id가 R1부터 다시 매겨지고");
+  });
+
+  it("onReplace가 없으면 버튼이 없다", () => {
+    const html = renderToStaticMarkup(<DiffSummary diff={[entry("added", "R1"), entry("removed", "R3")]} />);
+    expect(html).not.toContain("기존 목록 버리고 이 결과로 바꾸기");
+  });
+});
+
+describe("replaceWithExtractionResult(버그 리포트 43 — 기존 목록 버리고 이 결과로 바꾸기)", () => {
+  const draft = (id: string, overrides: Record<string, unknown> = {}) => ({
+    id,
+    title: id,
+    kind: "api" as const,
+    priority: "must" as const,
+    acceptance: ["a"],
+    ...overrides,
+  });
+
+  it("removed 항목은 버리고, 나머지는 R1부터 다시 id를 매긴다", () => {
+    const drafts = [draft("R1"), draft("R4"), draft("R21")];
+    const diff = [
+      { status: "unchanged" as const, id: "R1", requirement: drafts[0]! },
+      { status: "removed" as const, id: "R4", requirement: drafts[1]!, previous: drafts[1]! },
+      { status: "added" as const, id: "R21", requirement: drafts[2]! },
+    ];
+    const result = replaceWithExtractionResult(drafts, diff);
+    expect(result.map((item) => item.id)).toEqual(["R1", "R2"]);
+    expect(result.map((item) => item.title)).toEqual(["R1", "R21"]); // 내용(title)은 그대로, id만 바뀐다
+  });
+
+  it("rev·hash·revisedAt·trace·사람 확인을 모두 버려 새 요구사항처럼 만든다", () => {
+    const drafts = [
+      draft("R1", {
+        rev: 3,
+        hash: "abc",
+        revisedAt: "2026-01-01T00:00:00.000Z",
+        trace: { issue: 10 },
+        manualVerification: { by: "범수", at: "2026-01-01", sha: "abcd1234", note: "확인함" },
+      }),
+    ];
+    const diff = [{ status: "unchanged" as const, id: "R1", requirement: drafts[0]! }];
+    const [result] = replaceWithExtractionResult(drafts, diff);
+    expect(result!.rev).toBeUndefined();
+    expect(result!.hash).toBeUndefined();
+    expect(result!.revisedAt).toBeUndefined();
+    expect(result!.trace).toBeUndefined();
+    expect(result!.manualVerification).toBeUndefined();
+  });
+
+  it("시나리오 id 앞부분도 새 id에 맞춰 다시 붙인다", () => {
+    const drafts = [draft("R1"), draft("R21", { scenarios: [{ id: "R21.1", given: "g", when: "w", then: "t" }] })];
+    const diff = [
+      { status: "unchanged" as const, id: "R1", requirement: drafts[0]! },
+      { status: "added" as const, id: "R21", requirement: drafts[1]! },
+    ];
+    const result = replaceWithExtractionResult(drafts, diff);
+    expect(result[1]!.id).toBe("R2");
+    expect(result[1]!.scenarios!.map((scenario) => scenario.id)).toEqual(["R2.1"]);
   });
 });
 

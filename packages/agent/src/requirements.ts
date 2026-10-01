@@ -1327,6 +1327,21 @@ export function carryForwardRequirementRevision(next: Requirement, previous: Req
 }
 
 /**
+ * 이 id로 docs/requirements.md에 저장된 적이 한 번도 없으면(previouslySaved가 없다), 들어온 요구사항이 들고
+ * 있는 rev·hash·revisedAt은 "이 파일의 이전 상태"가 아니다 — 다른 세션에서 이어받은 추출 결과 사이드카(통합
+ * 세션이 레인 세션의 draft를 물려받는 경우 등)나 재추출 미리보기가 붙여 둔 값일 수 있다. 그걸 진짜 이전 저장값으로
+ * 오인해 carryForwardRequirementRevision·reviseRequirementIfChanged에 넘기면, 파일 입장에서는 분명 첫 저장(개정
+ * 1이어야 한다)인데도 개정이 오르고 revisedAt이 찍혀 그 전에 쌓인 체크포인트·테스트 증거가 전부 "재확인 필요"로
+ * 둔갑한다("첫 저장은 개정이 아니다", 버그 리포트). 저장된 적이 있으면(previouslySaved 있음) 손대지 않는다 — 그
+ * 경우의 rev·hash·revisedAt 판단은 carryForwardRequirementRevision·reviseRequirementIfChanged가 그대로 맡는다.
+ */
+export function discardRevisionIfNeverSaved(requirement: Requirement, previouslySaved: Requirement | undefined): Requirement {
+  if (previouslySaved) return requirement;
+  const { rev: _rev, hash: _hash, revisedAt: _revisedAt, ...rest } = requirement;
+  return rest;
+}
+
+/**
  * 상태 규칙(ADR-079, 재확인 필요는 ADR-090, 문서 확인·사람 확인은 ADR-103): 내용이 지금 드리프트돼 있으면(아직
  * 저장 전) 곧바로 재확인 필요. 드리프트는 없지만(저장돼 반영됨) 최근에 개정이 올랐다면, 그 시각 뒤에 생긴
  * 체크포인트·게이트 확인·테스트 탭 실행·사람 확인이 하나라도 있어야 "재확인됨"으로 보고 평소 규칙으로 넘어간다

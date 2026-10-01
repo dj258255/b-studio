@@ -17,6 +17,7 @@ import {
   carryForwardRequirementRevision,
   computeRequirementHash,
   computeRequirementStatus,
+  discardRevisionIfNeverSaved,
   extractImplementsTrailers,
   extractPathReferences,
   extractRequirementsHeuristically,
@@ -675,6 +676,32 @@ describe('carryForwardRequirementRevision', () => {
 
   it('이전 값이 없으면(새 요구사항) 그대로 돌려준다', () => {
     expect(carryForwardRequirementRevision(withEars, undefined)).toEqual(withEars);
+  });
+});
+
+describe('discardRevisionIfNeverSaved — 첫 저장은 개정이 아니다(버그 리포트 33)', () => {
+  it('저장된 적이 없는데(previouslySaved 없음) rev·hash·revisedAt을 들고 있으면(다른 세션에서 이어받은 추출 결과 등) 모두 버린다', () => {
+    const inherited: Requirement = { ...withEars, rev: 5, hash: '다른-세션-해시', revisedAt: '2026-01-01T00:00:00.000Z' };
+    const result = discardRevisionIfNeverSaved(inherited, undefined);
+    expect(result.rev).toBeUndefined();
+    expect(result.hash).toBeUndefined();
+    expect(result.revisedAt).toBeUndefined();
+    // 나머지 필드는 그대로다
+    expect(result.title).toBe(withEars.title);
+  });
+
+  it('저장된 적이 있으면(previouslySaved 있음) 손대지 않는다', () => {
+    const previouslySaved = reviseRequirementIfChanged(withEars, '2026-01-01T00:00:00.000Z');
+    const incoming: Requirement = { ...withEars, title: '로그인 API(이메일)', rev: 9, hash: 'own-hash' };
+    expect(discardRevisionIfNeverSaved(incoming, previouslySaved)).toEqual(incoming);
+  });
+
+  it('이 함수가 앞단에 있으면, 저장된 적 없는 요구사항에 섞여 들어온 낡은 hash가 더는 개정을 올리지 않는다(실제 저장 파이프라인과 같은 순서)', () => {
+    const inherited: Requirement = { ...withEars, rev: 3, hash: '다른-세션-해시', revisedAt: '2020-01-01T00:00:00.000Z' };
+    const saved = reviseRequirementIfChanged(carryForwardRequirementRevision(discardRevisionIfNeverSaved(inherited, undefined), undefined), '2026-02-01T00:00:00.000Z');
+    expect(saved.rev).toBe(1);
+    expect(saved.revisedAt).toBeUndefined();
+    expect(saved.hash).toBe(computeRequirementHash(withEars));
   });
 });
 

@@ -411,6 +411,7 @@ export {
   carryForwardRequirementRevision,
   computeRequirementHash,
   computeRequirementStatus,
+  discardRevisionIfNeverSaved,
   EarsSchema,
   extractImplementsTrailers,
   extractPathReferences,
