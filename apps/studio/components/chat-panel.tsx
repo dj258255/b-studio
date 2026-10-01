@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -29,6 +30,19 @@ type Intent = "build" | "ask";
 
 /** 질문의 답을 받아 만들기로 넘어갈 때 보내는 요청. 대화를 이어받으므로 앞의 계획을 가리키기만 한다 */
 const BUILD_FROM_PLAN = "앞에서 정리한 계획대로 만들어줘";
+
+/**
+ * 나눠서 병렬 제안을 수락할 때 이 대화의 모델 선택을 계획에 넘길 값으로 만든다.
+ * 아직 모델 선택을 못 받았으면(picker 없음, 예를 들어 데모 세션) 아무것도 넘기지 않아 서버 기본을 그대로 쓴다.
+ * 노력 단계는 이 백엔드·모델이 지원할 때만 넣는다(지원하지 않는데 값을 넣으면 서버가 조용히 버린다 — 넣지 않는 편이 뜻이 분명하다)
+ */
+export function handoffModelInput(picker: ModelPickerView | undefined): { sessionModelId?: string; sessionEffort?: string } {
+  if (!picker) return {};
+  return {
+    sessionModelId: picker.current ?? "",
+    ...(picker.effort.supported && picker.effort.current ? { sessionEffort: picker.effort.current } : {}),
+  };
+}
 
 export function ChatPanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
@@ -205,7 +219,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
 
   /**
    * 에이전트의 제안(ADR-068)을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘긴다. 홈과 같은 경로(submitEntry)로 만들고,
-   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069). 모델은 서버 기본(구독 CLI 모드)을 쓴다
+   * 넘긴 사실을 세션에 남긴다. 화면은 옮기지 않고, 대화에 남은 넘김 줄이 진행 카드가 된다(ADR-069).
+   * 나눠서 병렬은 이 대화의 모델 선택(picker)을 그대로 이어받는다 — 레인·통합 세션이 계획과 다른(서버 기본) 모델로 돌던 문제를 막는다
    */
   async function handOff(proposal: { mode: Exclude<ChatMethod, "single">; request: string }, questionRunId: string) {
     setSending(true);
@@ -217,6 +232,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
       workspace: "copy",
       fleetModelIds: [],
       planModelId: "",
+      ...(proposal.mode === "split" ? handoffModelInput(picker) : {}),
       ...(capabilities ? { mode: capabilities.mode } : {}),
     });
     if (!result.ok) {
@@ -621,6 +637,13 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
 
     case "route": {
       const selected = item.candidates.find((candidate) => candidate.id === item.selectedId);
+      if (item.auto) {
+        return (
+          <p className="text-sm text-muted">
+            자동 선택: <span className="font-medium text-ink">{selected?.label ?? item.selectedId}</span> — {item.reason}
+          </p>
+        );
+      }
       return (
         <details className="rounded-md border border-line bg-panel/60 px-3 py-2 text-sm">
           <summary className="cursor-pointer text-muted hover:text-ink">
@@ -1102,8 +1125,8 @@ function QuestionCard({
   );
 }
 
-/** 노력 단계 id → 화면 표기(대화 기록·run 헤더에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
-const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
+/** 노력 단계 id → 화면 표기(대화 기록·run 헤더·작업 분해 레인 카드에서 쓴다). model-picker.ts의 EFFORT_LEVELS와 같은 값을 쓴다 */
+export const EFFORT_LABEL: Record<string, string> = { low: "낮음", medium: "보통", high: "높음", max: "최대" };
 
 /**
  * 모델·노력 버튼에 쓸 한 줄 노력 표기. 아직 아무것도 고르지 않았으면(effort.current 없음) "보통"을 지어내지 않고
@@ -1280,6 +1303,14 @@ export function ModelPickerDialog({
         />
       )}
       {picker.note && <p className="px-2 pb-1 text-xs text-muted">{picker.note}</p>}
+      {needsAccountConnect(picker.options) && (
+        <p className="mb-1 rounded-control bg-panel px-2 py-1.5 text-xs text-muted">
+          로그인이 안 돼 못 쓰는 모델이 있습니다.{" "}
+          <Link href="/accounts" className="font-medium text-ink underline">
+            계정 연결로 가기
+          </Link>
+        </p>
+      )}
       {groups.map((group) => (
         <div key={group.title ?? "__all"}>
           {group.title && <p className="px-2 pb-1 pt-1.5 text-xs font-medium text-muted">{group.title}</p>}
@@ -1376,6 +1407,11 @@ function EffortControl({ effort, onChange }: { effort: EffortPickerView; onChang
       {effort.note && <p className="px-2 pt-1 text-xs text-muted">{effort.note}</p>}
     </div>
   );
+}
+
+/** 로그인이 안 돼 고를 수 없는 모델이 있으면 "계정 연결로 가기" 안내를 보여준다(ADR-093) */
+export function needsAccountConnect(options: ModelPickerOption[]): boolean {
+  return options.some((option) => option.disabled && /로그인/.test(option.disabledReason ?? ""));
 }
 
 /** api 백엔드는 공급자가 둘 이상이면 공급자별로 묶는다. 그 밖(claude-code·codex·commandcode·opencode)은 한 백엔드의 목록이라 묶지 않는다 */

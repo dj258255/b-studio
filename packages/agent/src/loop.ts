@@ -163,6 +163,8 @@ export type AgentEvent =
       complexity: 'simple' | 'normal' | 'complex';
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+      /** claude-code 'auto' 선택(ADR-091)이 낸 결정이면 true. api 라우터(ADR-047)의 점수 비교와 화면 표현이 다르다(한 줄 안내) */
+      auto?: boolean;
     }
   | { type: 'turn'; turn: number }
   /** 이번 실행에서 지금까지 쓴 토큰 누적값. 직접 만든 루프는 모델 응답마다, 로컬 Claude Code는 턴을 끝낼 때마다 온다 */

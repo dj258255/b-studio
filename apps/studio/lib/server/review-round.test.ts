@@ -40,6 +40,14 @@ describe('runReviewRounds', () => {
     expect(requestFix).not.toHaveBeenCalled();
   });
 
+  it('requirementsContext를 주면 리뷰어 호출의 사용자 메시지에 그대로 실린다(ADR-092)', async () => {
+    const ask = askReturning('{"findings":[]}');
+    const deps = baseDeps({ ask, requirementsContext: () => '[이 PR이 구현하는 요구사항]\n- R1. 로그인' });
+    await collect(deps, 1);
+    const [firstCall] = ask.mock.calls as unknown as Array<[{ user: string }]>;
+    expect(firstCall![0].user).toContain('- R1. 로그인');
+  });
+
   it('차단 지적을 고친 뒤 다음 라운드에서 통과하면 라운드 2개가 남고(오래된 순) fixCheckpoint를 담는다', async () => {
     const ask = askReturning('{"findings":[{"severity":"blocker","file":"a.ts","title":"버그","detail":"설명"}]}', '{"findings":[]}');
     const requestFix = vi.fn(async (): Promise<ReviewFixResult> => ({ ok: true, checkpoint: { sha: 'b'.repeat(40), shortSha: 'bbbbbbb' } }));

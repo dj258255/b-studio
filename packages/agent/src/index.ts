@@ -157,11 +157,15 @@ export {
   canCreatePullRequest,
   compareUrl,
   createIssue,
+  createLabel,
   createPullRequest,
+  ensureLabels,
   fetchIssue,
   fetchIssueDetail,
   fetchPullRequestDetail,
+  listIssueComments,
   listIssues,
+  listLabels,
   listPullRequests,
   parseClosingReferences,
   parsePullRequestNumber,
@@ -170,11 +174,14 @@ export {
   postComment,
   PullRequestError,
   RepositoryRateLimitError,
+  updateComment,
+  updateIssue,
   type CheckRun,
   type CheckStatus,
   type GitHostKind,
   type IndividualReviewState,
   type IssueComment,
+  type IssueCommentRef,
   type IssueDetail,
   type IssueInput,
   type IssueLookup,
@@ -195,6 +202,52 @@ export {
   type TaskListItem,
   type TaskListProgress,
 } from './repository';
+export {
+  ALLOWED_REQUIREMENT_ENDPOINTS,
+  assertAllowedRequirementEndpoint,
+  buildManagedRegion,
+  buildRegionContent,
+  buildRequirementIssueFormYaml,
+  buildRequirementsAddendum,
+  buildReviewRequirementsContext,
+  buildStatusComment,
+  buildSubIssueBody,
+  buildTrackingIssueBody,
+  contentHash,
+  draftRequirementFromIssue,
+  extractRequirementMentions,
+  findExistingRemoteIssue,
+  findPinnedStatusComment,
+  implementsTrailer,
+  isStatusComment,
+  parseManagedRegion,
+  parseRequirementIssueForm,
+  planRequirementPublish,
+  REQUIREMENT_LABEL,
+  requirementContentHash,
+  requirementIdFromIssueTitle,
+  requirementLabelSet,
+  RequirementEndpointError,
+  subIssueTitle,
+  summarizeRequirementPlan,
+  trackingIssueTitle,
+  findTrackingIssue,
+  type ConflictResolution,
+  type ImplementedRequirementRef,
+  type ParsedManagedRegion,
+  type RemoteIssueSnapshot,
+  type RequirementEvidenceRow,
+  type RequirementForIssues,
+  type RequirementIssueDraft,
+  type RequirementPlanAction,
+  type RequirementPlanEntry,
+  type RequirementPlanInput,
+  type RequirementPlanSummary,
+  type RequirementPublishedRecord,
+  type RequirementScenario,
+  type RequirementTrace,
+  type TrackingRow,
+} from './requirement-issues';
 export { buildTools, executeTool, PROPOSAL_OPTIONS, type AskUserQuestion, type BoardAccess, type ModeProposal, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {
   Board,
@@ -280,11 +333,12 @@ export {
 } from './workflow';
 export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
-export { buildAskRequest, buildSystemPrompt } from './prompts';
+export { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt } from './prompts';
 export { Workspace, WorkspaceError } from './workspace';
 export {
   aggregateModelStats,
   classifyComplexity,
+  classifyRisk,
   estimateCost,
   estimateTokens,
   routeModel,
@@ -301,6 +355,7 @@ export {
   type RoutingDecision,
 } from './model-router';
 export { createProviderClient, GoogleModelClient, OpenAICompatibleModelClient } from './provider-clients';
+export { CLI_TIERS, higherCliTier, nextCliTier, routeCliTier, tierLabel, type CliRouteDecision, type CliRouteRequest, type CliTier } from './cli-router';
 export {
   appendPlanToRequest,
   buildPlanBriefSystem,
