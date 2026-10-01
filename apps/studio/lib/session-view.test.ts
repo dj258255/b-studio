@@ -1,7 +1,7 @@
 import type { VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
 import { activeRun, createView, latestWrite, LOG_LIMIT, outcomeText, reduceSession, runHasChanges, runsWithChanges, type ChatItem, type SessionView } from './session-view';
-import type { SessionSnapshot, StudioEvent } from './studio-events';
+import type { ReviewStateView, SessionSnapshot, StudioEvent } from './studio-events';
 
 const snapshot: SessionSnapshot = {
   id: 's1',
@@ -527,6 +527,53 @@ describe('reduceSession', () => {
       },
     ]);
   });
+
+  it('snapshot_sync는 repository·checkpoints·review를 지금 값으로 맞추고 대화는 건드리지 않는다', () => {
+    const checkpoint = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '체크포인트', createdAt: '', files: [] };
+    const review: ReviewStateView = { state: 'passed', maxRounds: 2, rounds: [] };
+    const repository = {
+      remote: 'github.com/acme/orders',
+      kind: 'github',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      sourceDirtyFiles: 0,
+      canCreatePullRequest: true,
+    } as const;
+
+    const withChat = fold([
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      { type: 'snapshot_sync', repository, checkpoints: [checkpoint], review },
+    ]);
+
+    expect(withChat.snapshot).toMatchObject({ repository, checkpoints: [checkpoint], review });
+    // 대화 기록은 그대로다(snapshot처럼 화면을 통째로 초기화하지 않는다)
+    expect(withChat.chat).toEqual([{ kind: 'request', runId: 'r1', text: '요청', by: undefined, intent: undefined }]);
+  });
+
+  it(
+    '59번 버그: 재연결하면 기록(exported)이 담은 옛 canCreatePullRequest가 아니라 ' + 'snapshot_sync가 재생 끝에서 맞춘 지금 값으로 끝난다',
+    () => {
+      // 올릴 당시엔 gh 토큰을 못 찾아 canCreatePullRequest:false로 기록됐다
+      const stale = {
+        remote: 'github.com/acme/orders',
+        kind: 'github',
+        base: 'main',
+        branch: 'b-studio/orders-s1',
+        sourceDirtyFiles: 0,
+        canCreatePullRequest: false,
+      } as const;
+      const exported: StudioEvent = { type: 'exported', repository: stale, sha: 'c'.repeat(40), commits: 1, forced: false };
+      // 서버가 그사이(예: 서버 재시작으로 gh 토큰을 새로 찾아) 다시 계산하면 지금은 true다
+      const fresh = { ...stale, canCreatePullRequest: true };
+
+      // replay(): snapshot(지금 값) → 기록 재생(exported가 옛 값으로 덮어씀) → snapshot_sync(지금 값으로 다시 맞춤)
+      const view = fold([{ type: 'snapshot', snapshot: { ...snapshot, repository: fresh } }, exported, { type: 'snapshot_sync', repository: fresh, checkpoints: [], review: undefined }]);
+
+      expect(view.snapshot.repository).toEqual(fresh);
+      // exported가 대화에 남긴 줄은 그대로 보존된다 — snapshot_sync는 채팅을 지우지 않는다
+      expect(view.chat).toEqual([{ kind: 'exported', branch: 'b-studio/orders-s1', hostKind: 'github', commits: 1, forced: false, pullRequest: undefined, pullRequestError: undefined }]);
+    },
+  );
 
   it('파일 변경 알림은 대화에 남기지 않고 코드 화면이 다시 불러올 기준 번호만 바꾼다', () => {
     const view = fold([

@@ -474,8 +474,18 @@ export type StudioEvent =
       previous?: string;
     }
   | { type: 'deploy_failed'; action: DeployAction; target: string; error: string; detail?: string }
-  /** PR 자동 리뷰(ADR-074) 상태가 바뀔 때마다 통째로 온다. 다시 재생해도 결과가 같도록 review 전체를 담는다(exported와 같은 규칙) */
-  | { type: 'review_round'; review: ReviewStateView };
+  /**
+   * PR 자동 리뷰(ADR-074) 상태가 바뀔 때마다 통째로 온다. review 전체를 담아 기록을 다시 재생해도 중간 라운드를 놓치지 않는다.
+   * 다만 각 이벤트는 그 순간 값을 담고 있을 뿐이라 재생이 끝난 지금 값과 같다는 보장은 없다 — snapshot_sync가 마지막에 맞춘다
+   */
+  | { type: 'review_round'; review: ReviewStateView }
+  /**
+   * 구독을 새로 열 때 replay 맨 끝에서만 보낸다(기록에 쌓지 않는다).
+   * exported·remote_synced·base_synced·review_round 같은 기록 이벤트는 그 순간 서버가 계산한 값(예: canCreatePullRequest)을
+   * 그대로 담고 있어, 재생하면 지금 스냅샷보다 오래된 값으로 되돌아갈 수 있다(예: 서버가 올라오며 gh 토큰을 새로 찾은 경우).
+   * 기록을 다 재생한 뒤 지금 스냅샷의 값으로 다시 한번 맞춰 "마지막 기록 이벤트가 이김" 문제를 없앤다
+   */
+  | { type: 'snapshot_sync'; repository?: RepositoryView; checkpoints: Checkpoint[]; review?: ReviewStateView };
 
 export type ExportResult = Omit<Extract<StudioEvent, { type: 'exported' }>, 'type'>;
 

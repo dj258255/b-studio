@@ -42,6 +42,7 @@ import {
   draftRequirementFromIssue,
   estimateCost,
   extractTrackingSubIssueNumbers,
+  extractRequirementIds,
   extractRequirementMentions,
   extractRequirementsHeuristically,
   fetchIssue,
@@ -183,6 +184,7 @@ import {
   type RepositoryInfo,
   type RoutingDecision,
   type RunMetrics,
+  type ParsedTestCase,
   type ParsedTestRun,
   type RemoteSyncResult,
   type Runner,
@@ -884,9 +886,16 @@ export function subscribe(id: string, listener: Listener): () => void {
 }
 
 function replay(target: Session | ArchivedSession, listener: Listener): void {
+  // exported·remote_synced·base_synced·review_round 같은 기록 이벤트는 그 순간 서버가 계산한 값
+  // (예: canCreatePullRequest — gh CLI 토큰을 찾았는지)을 그대로 담고 있다. 기록을 재생하면 reduceSession이
+  // 그 옛 값으로 다시 덮어써, 서버가 그사이 다시 계산해 지금 스냅샷엔 맞게 들어 있는 값을 화면이 놓칠 수 있다.
+  // snapshot부터 보낸 뒤 그 값을 기억해 뒀다가, 기록과 로그를 다 보낸 끝에 다시 한번 맞춰 "마지막 기록 이벤트가
+  // 이기는" 문제를 없앤다. 체크포인트 수와 리뷰 라운드도 같은 식으로 통째로 덮어써지므로 함께 맞춘다
+  const { repository, checkpoints, review } = target.snapshot;
   listener({ type: 'snapshot', snapshot: target.snapshot });
   for (const event of target.history) listener(event);
   if ('logs' in target) for (const event of target.logs) listener(event);
+  listener({ type: 'snapshot_sync', repository, checkpoints, review });
 }
 
 /**
@@ -4958,7 +4967,10 @@ export interface TestServiceView {
   template: string;
   /** 지금 이 서비스에서 테스트가 도는 중인지 */
   running: boolean;
-  /** 테스트 실행기를 알아냈는지(false면 실행 버튼을 숨기고 이유를 error에 남긴다) */
+  /**
+   * 지금 테스트를 돌릴 수 있는지(false면 실행 버튼을 숨기고 이유를 error에 남긴다). 테스트 실행기를 못
+   * 알아냈을 때뿐 아니라, 서비스가 꺼져 있어 사이드카의 마지막 실행 결과만 보여 주는 동안도 false다(58번 버그)
+   */
   supported: boolean;
   /** 사람이 읽는 실행기 이름(예: "Gradle (JUnit)") */
   runner?: string;
@@ -4972,6 +4984,11 @@ export interface TestServiceView {
    */
   lastRunSha?: string;
   error?: string;
+  /**
+   * 뭔가 잘못됐다는 뜻은 아니지만 알아 둘 만한 안내(예: 서비스가 아직 뜨는 중이라 마지막 실행 결과만 보여 줌).
+   * error와 달리 화면이 경고색으로 그리지 않는다(58번 버그)
+   */
+  notice?: string;
   rows: TestRowView[];
 }
 
@@ -5107,12 +5124,71 @@ function toTestRowView(row: ServiceTestRow): TestRowView {
   };
 }
 
+/** stored.runner(gradle·maven·vitest·jest·pytest)를 화면 행의 framework로 옮긴다. 화면은 이 값을 그리지 않아(타입에만 있다) 몰라도 안전하다 */
+function runnerFramework(runner: Runner | undefined): TestFramework {
+  switch (runner) {
+    case 'vitest':
+      return 'vitest';
+    case 'jest':
+      return 'jest';
+    case 'pytest':
+      return 'pytest';
+    case 'gradle':
+    case 'maven':
+    default:
+      return 'junit';
+  }
+}
+
+/**
+ * 서비스가 꺼져 있어도(재시작 직후 샌드박스가 뜨는 중 등) 사이드카(test-results.json)에 남은 마지막 실행
+ * 보고서만으로 행을 만든다(58번 버그). 소스 파일을 다시 읽어 발견한 행(discoverServiceTestRows)과 붙이지
+ * 않고, 보고서가 담은 케이스를 그대로 한 행씩 삼는다 — file·line·suitePath는 보고서에 없어 비워 두지만,
+ * 요구사항 id는 발견 단계(test-discovery.ts)와 같은 방식(extractRequirementIds)으로 케이스 이름에서 뽑아,
+ * 서비스가 떠야만 나오던 요구사항 증거가 재시작 직후에도 끊기지 않게 한다
+ */
+function storedCaseToRow(testCase: ParsedTestCase, framework: TestFramework): ServiceTestRow {
+  return {
+    file: testCase.classOrFile,
+    framework,
+    suitePath: [],
+    suiteSkipped: false,
+    name: testCase.name,
+    displayName: testCase.name,
+    line: 0,
+    skipped: testCase.result.status === 'skip',
+    requirementIds: extractRequirementIds(testCase.name),
+    result: testCase.result,
+  };
+}
+
 async function buildTestServiceView(session: Session, serviceName: string): Promise<TestServiceView> {
   const entry = session.project.managed.find(([name]) => name === serviceName);
   const template = entry?.[1].template ?? '';
   const running = session.testControllers?.has(serviceName) ?? false;
   const serviceState = session.snapshot.services.find((candidate) => candidate.name === serviceName);
   if (!entry || serviceState?.state !== 'ready') {
+    // 서비스는 꺼져 있지만 사이드카에 이 서비스의 마지막 실행 결과가 남아 있으면, 빈 행으로 되돌리지 않고
+    // 그 결과를 그대로 보여준다 — 그래야 서버 재시작 직후(샌드박스가 뜨는 몇 분 동안) 이미 검증된 요구사항이
+    // "재확인 필요"로 잠깐 되돌아가지 않는다. 테스트를 다시 도는 것은 여전히 서비스가 떠야만 할 수 있다(supported: false)
+    await ensureTestResultsLoaded(session);
+    const stored = entry && session.testResults?.get(serviceName);
+    if (stored) {
+      const rows = stored.run.cases.map((testCase) => storedCaseToRow(testCase, runnerFramework(stored.runner)));
+      return {
+        service: serviceName,
+        template,
+        running: false,
+        supported: false,
+        counts: countByStatus(rows),
+        lastRunAt: stored.at,
+        lastRunSource: stored.source,
+        ...(stored.sha !== undefined ? { lastRunSha: stored.sha } : {}),
+        // 마지막 실행 자체가 실패했으면(컴파일 오류 등) 그 이유를 먼저 보여준다 — "꺼져 있다"는 안내보다 더 급하다
+        ...(stored.error ? { error: stored.error } : { notice: '서비스가 꺼져 있어 마지막 실행 결과만 보여 줍니다' }),
+        rows: rows.map(toTestRowView),
+      };
+    }
     return {
       service: serviceName,
       template,

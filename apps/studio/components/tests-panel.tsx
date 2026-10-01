@@ -34,6 +34,8 @@ interface TestServiceView {
   lastRunAt?: string;
   lastRunSource?: "run" | "gate";
   error?: string;
+  /** 문제는 아니지만 알아 둘 만한 안내(예: 서비스가 꺼져 있어 마지막 실행 결과만 보여줌). error와 달리 경고색으로 그리지 않는다 */
+  notice?: string;
   rows: TestRowView[];
 }
 
@@ -286,6 +288,7 @@ function ServiceSection({
         </div>
       </div>
       {service.error && <p className="border-b border-line px-3 py-2 text-xs text-fail">{service.error}</p>}
+      {service.notice && <p className="border-b border-line px-3 py-2 text-xs text-muted">{service.notice}</p>}
       {running && <p role="status" className="border-b border-line px-3 py-2 text-xs text-wait motion-safe:animate-pulse">테스트를 돌리는 중입니다</p>}
       <div className="p-2">
         {byFile.length === 0 ? (
