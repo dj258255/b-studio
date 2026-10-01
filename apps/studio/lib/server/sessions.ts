@@ -92,6 +92,7 @@ import {
   preflightOpenCode,
   releaseBlockers,
   RemoteConflictError,
+  reviewIndependence,
   scopedExecutionPolicy,
   restartServicesFor,
   runAgent,
@@ -240,6 +241,7 @@ import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
 import { claudeCodeAsk } from './claude-code-ask';
 import { compareExample, designPathFor, writeDesignPng } from './design-files';
+import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
@@ -2997,7 +2999,16 @@ async function sessionRequestTexts(session: Session): Promise<string[]> {
  * (계획 호출과 같은 제약, task-plans.ts의 PLANNER_MODES) 그 밖의 백엔드에서는 undefined를 돌려준다 —
  * review-round.ts의 runReviewRounds가 이를 보고 라운드를 시작하기 전에 바로 멈춘다(stopped)
  */
-function reviewAsk(session: Session): ModelAsk | undefined {
+function reviewAsk(session: Session, reviewerModelId?: string): ModelAsk | undefined {
+  // 설계 파이프라인(ADR-100): 사람이 리뷰어 모델을 명시적으로 고르면(구현과 다른 계열을 고르는 용도) 세션 백엔드와 무관하게
+  // 모델 레지스트리(api 호출 경로)로 그 모델을 부른다. api는 공급자가 여러 개라 레지스트리만으로도 다른 계열 리뷰어를 둘 수 있다
+  if (reviewerModelId) {
+    try {
+      return planAskFromClient(clientForModel(modelById(reviewerModelId)));
+    } catch (error) {
+      console.error(`[b-studio] 리뷰어 모델 ${reviewerModelId}을 쓸 수 없어 세션의 평소 리뷰 경로로 돌아갑니다`, describe(error));
+    }
+  }
   const backend = sessionBackend(session.snapshot);
   if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
   if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('AI 리뷰', 'build', session.snapshot.modelId).selected));
@@ -3048,7 +3059,7 @@ async function reviewRequestFix(session: Session, request: string): Promise<Revi
  * 함수로 이어 준다. 한 번 부르면 1라운드부터 상한까지(또는 통과·오류까지) 안에서 이어간다. 절대 병합하지 않고, 강제 푸시도 하지 않는다.
  * 리뷰어 호출 토큰은 token-report.ts의 reviewTokenReports가 스냅샷의 review.rounds[].tokens를 그대로 읽어 "review"로 표시한다.
  */
-export async function runReviewRound(id: string, { restart = false }: { restart?: boolean } = {}): Promise<void> {
+export async function runReviewRound(id: string, { restart = false, reviewerModelId }: { restart?: boolean; reviewerModelId?: string } = {}): Promise<void> {
   const session = requireSession(id);
   const info = await session.checkpoints.repository();
   if (!info?.pullRequestUrl) throw new StudioError(409, 'PR을 먼저 만들어야 AI 리뷰를 돌릴 수 있습니다');
@@ -3066,7 +3077,7 @@ export async function runReviewRound(id: string, { restart = false }: { restart?
   // 요구사항 문맥은 한 번만 계산해 클로저로 넘긴다(리뷰 라운드마다 다시 계산할 필요가 없다 — 같은 세션 안에서 바뀌지 않는다)
   const requirementsContext = await reviewRequirementsContext(session, requests);
   const deps: ReviewRoundDeps = {
-    ask: reviewAsk(session),
+    ask: reviewAsk(session, reviewerModelId),
     diff: () => session.checkpoints.sessionDiff(),
     requests: () => requests,
     requirementsContext: () => requirementsContext,
@@ -3078,13 +3089,19 @@ export async function runReviewRound(id: string, { restart = false }: { restart?
       if (repository) session.snapshot.repository = repository;
     },
   };
+  // 설계 파이프라인(ADR-100): 구현 모델 계열과 리뷰어 계열이 같으면 "같은 계열 검토(독립성 낮음)"로 남긴다 — 통과해도
+  // 파이프라인의 "성공" 판정에는 세지 않는다(reviewIndependence). 리뷰어를 따로 고르지 않으면 이 세션의 평소 경로를
+  // 그대로 쓰므로(reviewAsk) 구현과 같은 계열이다
+  const implementerFamily = modelFamily(sessionBackend(session.snapshot), session.snapshot.modelId);
+  const reviewerFamily = reviewerModelId ? modelFamily('api', reviewerModelId) : implementerFamily;
+  const independence = reviewIndependence(implementerFamily, reviewerFamily);
 
-  session.snapshot.review = { state: 'running', maxRounds: cfg.maxRounds, rounds: [] };
+  session.snapshot.review = { state: 'running', maxRounds: cfg.maxRounds, rounds: [], ...(reviewerModelId ? { reviewerModelId } : {}), independence };
   void runReviewRounds(deps, cfg.maxRounds, (state) => {
-    session.snapshot.review = state;
-    emit(session, { type: 'review_round', review: state });
+    session.snapshot.review = { ...state, ...(reviewerModelId ? { reviewerModelId } : {}), independence };
+    emit(session, { type: 'review_round', review: session.snapshot.review });
   }).catch((error: unknown) => {
-    session.snapshot.review = { state: 'stopped', maxRounds: cfg.maxRounds, rounds: session.snapshot.review?.rounds ?? [] };
+    session.snapshot.review = { state: 'stopped', maxRounds: cfg.maxRounds, rounds: session.snapshot.review?.rounds ?? [], ...(reviewerModelId ? { reviewerModelId } : {}), independence };
     emit(session, { type: 'review_round', review: session.snapshot.review });
     console.error('[b-studio] AI 리뷰 라운드가 예기치 않게 실패했습니다', describe(error));
   });

@@ -162,6 +162,13 @@ export interface ReviewStateView {
   state: 'running' | 'passed' | 'capped' | 'stopped';
   maxRounds: number;
   rounds: ReviewRoundView[];
+  /** 사람이 명시적으로 고른 리뷰어 모델(api 레지스트리 id). 없으면 이 세션의 평소 백엔드·모델로 리뷰했다 */
+  reviewerModelId?: string;
+  /**
+   * 설계 파이프라인(ADR-100): 이 리뷰의 모델 계열이 구현 모델 계열과 다른지. same-family면 "같은 계열
+   * 검토(독립성 낮음)"로 보여 주고 파이프라인의 "성공" 판정에 세지 않는다. 계열을 모르면 unknown
+   */
+  independence?: 'independent' | 'same-family' | 'unknown';
 }
 
 export type DeployAction = 'deploy' | 'rollback';

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { buildRequirementAskPrefill, requirementToMarkdown } from "@/lib/requirement-chat-prefill";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
+import { DesignPipelinePanel } from "./design-pipeline-panel";
 import { useRequirementsImport } from "./requirements-import-context";
 import { useSessionAccess } from "./session-access";
 
@@ -186,8 +187,12 @@ export function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
 }
 
-/** 개발 화면의 "명세" 탭(ADR-079). 과제 명세를 요구사항으로 나누고, 요구사항마다 무엇이 됐다는 증거를 추적한다 */
-type PanelView = "list" | "matrix";
+/**
+ * 개발 화면의 "명세" 탭(ADR-079). 과제 명세를 요구사항으로 나누고, 요구사항마다 무엇이 됐다는 증거를 추적한다.
+ * "파이프라인"(ADR-100)은 설계 먼저·구현은 따로 하는 요구사항의 진행을 보여 준다 — 요구사항 탭이 이미 요구사항
+ * id·추적 매트릭스를 다루고 있어 설계·작업 묶음·구현·검토·검증까지 한곳에서 이어 보기 좋다(새 최상위 탭을 만들지 않았다).
+ */
+type PanelView = "list" | "matrix" | "pipeline";
 
 export function RequirementsPanel({ view }: { view: SessionView }) {
   const sessionId = view.snapshot.id;
@@ -244,6 +249,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
               [
                 { id: "list", label: "목록" },
                 { id: "matrix", label: "추적 매트릭스" },
+                { id: "pipeline", label: "파이프라인" },
               ] as const
             ).map((tab) => (
               <button
@@ -267,7 +273,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
               setImportSpecText(undefined);
               setImporting((value) => !value);
             }}
-            className={`${panelView === "matrix" ? "" : "ml-auto"} shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink`}
+            className={`${panelView === "matrix" || panelView === "pipeline" ? "" : "ml-auto"} shrink-0 rounded-control border border-line px-3 py-1 text-sm font-medium hover:border-ink`}
           >
             {importing ? "목록으로" : "명세 다시 가져오기"}
           </button>
@@ -288,6 +294,8 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
           />
         ) : panelView === "matrix" ? (
           <MatrixView sessionId={sessionId} />
+        ) : panelView === "pipeline" ? (
+          <DesignPipelinePanel sessionId={sessionId} />
         ) : (
           <RequirementsList
             sessionId={sessionId}
