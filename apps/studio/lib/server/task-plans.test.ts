@@ -105,6 +105,8 @@ const fake = vi.hoisted(() => ({
     metrics: { modelCalls: 2, maxContextTokens: 9, modelMs: 5, toolMs: 6, gateMs: 7 },
     durationMs: 11,
   },
+  /** 이 서버에서 고를 수 있는 백엔드(setLaneBackend·selectableLaneBackends가 읽는다). 허용 목록을 좁히는 테스트만 바꾼다 */
+  allowedBackends: new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']),
 }));
 
 // 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다
@@ -171,6 +173,7 @@ vi.mock('./projects', () => ({
 }));
 
 vi.mock('./sessions', () => ({
+  allowedBackends: () => fake.allowedBackends,
   commitPendingWorkingCopyDocs: async (sessionId: string, message: string) => {
     fake.docsCommitted.push({ sessionId, message });
     return undefined;
@@ -277,7 +280,7 @@ vi.mock('./sessions', () => ({
 
 import { StudioError } from './errors';
 import { clearRepositoryTokenCache } from './repo-token';
-import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, planRequirementIds, rejectTaskPlan } from './task-plans';
+import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, planRequirementIds, rejectTaskPlan, selectableLaneBackends, setLaneBackend } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
 const saved = {
@@ -322,6 +325,7 @@ beforeEach(() => {
   fake.issueInputs = [];
   fake.subIssues = [];
   fake.failIssue = false;
+  fake.allowedBackends = new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']);
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
   // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
@@ -1705,5 +1709,118 @@ describe('deleteTaskPlan', () => {
 
   it('없는 계획은 404로 알린다', async () => {
     await expect(deleteTaskPlan('nope', 'kim')).rejects.toThrow(/찾을 수 없습니다/);
+  });
+});
+
+describe('레인 백엔드 고르기 (이슈 #398)', () => {
+  it('승인 대기 중에 레인마다 다른 백엔드·모델·노력을 고르면 그 레인 세션만 그 백엔드로 뜨고 통합은 그대로 간다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '레인별 백엔드', modelId: 'model-a', owner: 'kim' });
+    const waiting = await awaiting(created.id);
+    expect(waiting.status).toBe('awaiting_approval');
+    expect(waiting.lanes.map((lane) => lane.id)).toEqual(['lane-1', 'lane-2']);
+    // 모델이 만든 계획은 승인 전까지 레인에 backend가 없다(세션과 같음 — 상속, 지금까지의 동작)
+    expect(waiting.lanes.every((lane) => lane.backend === undefined)).toBe(true);
+
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet', effort: 'high' });
+    setLaneBackend(created.id, 'kim', 'lane-2', { backend: 'commandcode' });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    // 레인 뷰에 고른 backend·model·effort가 남는다(화면·토큰 보고서가 이 값을 그대로 보여준다)
+    expect(plan.lanes.map((lane) => [lane.id, lane.backend, lane.model, lane.effort])).toEqual([
+      ['lane-1', 'claude-code', 'sonnet', 'high'],
+      ['lane-2', 'commandcode', undefined, undefined],
+    ]);
+    // 레인 세션은 그 레인의 backend·model·effort로 떴다
+    const laneA = fake.sessionOptions.find((options) => options.backend === 'claude-code');
+    expect(laneA?.modelId).toBe('sonnet');
+    expect(laneA?.effort).toBe('high');
+    expect(fake.sessionOptions.find((options) => options.backend === 'commandcode')).toBeDefined();
+    // 통합 세션은 계획 기본(서버 모드)이라 backend가 없다 — 레인 2개 + 통합 1개, 통합이 마지막
+    expect(fake.sessionOptions).toHaveLength(3);
+    expect(fake.sessionOptions[2]!.backend).toBeUndefined();
+  });
+
+  it('승인 대기가 아니면(이미 승인됐으면) 레인 백엔드를 바꿀 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    approveTaskPlan(created.id, 'kim');
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code' }))).toBe(409);
+    await finished(created.id);
+  });
+
+  it('모르는 레인 id면 404', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-9', { backend: 'claude-code' }))).toBe(404);
+  });
+
+  it('모르는 백엔드 문자열이면 400', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'openai' }))).toBe(400);
+  });
+
+  it('이 서버가 허용하지 않는 백엔드면 400을 한국어 이유와 함께 던진다', async () => {
+    fake.allowedBackends = new Set(['api']);
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'codex' })).toThrow('이 서버에서 쓸 수 없는 백엔드입니다: codex');
+  });
+
+  it('모델 이름이 너무 길면 400', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'x'.repeat(121) }))).toBe(400);
+  });
+
+  it('모르는 노력 단계는 조용히 버린다(세션 이어받기의 asEffort와 같은 규칙)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    const plan = setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', effort: 'ultra' });
+    expect(plan.lanes[0]!.effort).toBeUndefined();
+  });
+
+  it('backend를 비우면(세션과 같음) 레인·작업의 backend·model·effort를 모두 지운다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet', effort: 'high' });
+    const reverted = setLaneBackend(created.id, 'kim', 'lane-1', { backend: '' });
+
+    expect(reverted.lanes[0]).toMatchObject({ backend: undefined, model: undefined, effort: undefined });
+    expect(reverted.lanes[0]!.tasks.every((item) => item.backend === undefined && item.model === undefined)).toBe(true);
+  });
+
+  it('내 계획이 아니면 레인 백엔드를 바꿀 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'mallory', 'lane-1', { backend: 'claude-code' }))).toBe(403);
+  });
+
+  it('selectableLaneBackends는 이 서버가 허용하는 백엔드에서 데모를 뺀 목록을 돌려준다', () => {
+    fake.allowedBackends = new Set(['api', 'claude-code', 'demo']);
+    expect(selectableLaneBackends().sort()).toEqual(['api', 'claude-code']);
   });
 });
