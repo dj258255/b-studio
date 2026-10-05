@@ -40,6 +40,21 @@ export interface TaskPlanBoardView {
   stats: BoardStats;
 }
 
+/**
+ * 계획 밖 에이전트(다른 Claude Code 세션, herdr, Codex CLI 등)에 내준 게시판 토큰 하나의 요약.
+ * 비밀값(토큰 문자열)은 없다 — 발급 응답에서 한 번만 보여주고 화면·기록에는 이 요약만 남는다.
+ */
+export interface TaskPlanBoardTokenView {
+  id: string;
+  /** 토큰이 쓰는 고정 레인 이름(신원) */
+  lane: string;
+  /** 계층 구조(hierarchical) topology에서 묶을 그룹. 없으면 어느 그룹에도 속하지 않는다 */
+  group?: string;
+  createdAt: string;
+  /** 거뒀으면 그 시각. 없으면 아직 쓸 수 있다 */
+  revokedAt?: string;
+}
+
 /** S4에서 통합 게이트가 실패한 뒤 한 번 시도한 모델 수리 */
 export interface TaskPlanRepairView {
   attempted: boolean;
@@ -192,6 +207,8 @@ export interface TaskPlanView {
   sourceSessionId?: string;
   /** 조율 게시판 상태(메모 목록과 통계). 조율을 켠 계획에만 있다 */
   board?: TaskPlanBoardView;
+  /** 이 계획의 게시판에 내준 외부 에이전트 토큰 요약(비밀값 제외). 토큰이 하나도 없으면 없다 */
+  externalAgents?: TaskPlanBoardTokenView[];
   lanes: TaskPlanLaneView[];
   integration?: TaskPlanIntegrationView;
   /** 승인 때 "이슈로 올리기"를 골랐을 때 만든 추적 이슈·하위 이슈 */

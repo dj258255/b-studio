@@ -118,8 +118,9 @@ function hostnameOf(host: string | undefined): string {
 /**
  * bearer 토큰을 값의 위치에 따라 시간이 달라지지 않게 비교한다.
  * 길이가 다르면 timingSafeEqual이 예외를 던지므로 먼저 거부한다(토큰 길이는 비밀이 아니다).
+ * 게시판 MCP 라우트(board-mcp-server.ts를 부르는 쪽)도 같은 비교가 필요해 밖으로 연다.
  */
-function tokenMatches(authorization: string | undefined, token: string): boolean {
+export function tokenMatches(authorization: string | undefined, token: string): boolean {
   const prefix = 'Bearer ';
   if (!authorization?.startsWith(prefix)) return false;
   const provided = Buffer.from(authorization.slice(prefix.length), 'utf8');

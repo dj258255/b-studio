@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -17,10 +17,12 @@ import {
   planLanes,
   planLimitsFromEnv,
   PlanBackendSchema,
+  externalBoardAccess,
   requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
   TaskPlanError,
+  tokenMatches,
   type PlanLimits,
   type AgentUsage,
   type BoardAccess,
@@ -46,6 +48,7 @@ import type { SessionMode, StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
 import {
   planModelAlias,
+  type TaskPlanBoardTokenView,
   type TaskPlanBoardView,
   type TaskPlanCheckpointView,
   type TaskPlanContractsView,
@@ -54,6 +57,7 @@ import {
   type TaskPlanIssuesView,
   type TaskPlanLaneView,
   type TaskPlanNoteView,
+  type TaskPlanStatus,
   type TaskPlanStepStatus,
   type TaskPlanStrategy,
   type TaskPlanTaskView,
@@ -84,19 +88,39 @@ const MAX_INTEGRATION_FILE_BYTES = 256 * 1024;
  * 계획·게시판·가림기 상태. 개발 서버에서 페이지와 API 라우트가 이 모듈을 따로 불러오거나 HMR로 다시 읽어도 같은 상태를 보도록
  * 전역에 둔다(sessions.ts와 같은 이유). 따로 두면 페이지 쪽이 디스크에서 다시 읽어 진행 중인 계획을 "재시작으로 멈춤"(중단됨)으로 잘못 보였다
  */
+/** 계획 밖 에이전트에 내준 게시판 토큰 하나(서버 메모리에만 둔다. 미리보기 토큰과 같은 규칙 — 평문, 재시작하면 사라진다) */
+interface BoardIdentityToken {
+  id: string;
+  token: string;
+  lane: string;
+  group?: string;
+  createdAt: string;
+  revokedAt?: string;
+}
+
 interface TaskPlanStore {
   plans: Map<string, TaskPlanView>;
   boards: Map<string, Board>;
+  /** 계획 id → 그 게시판에 내준 외부 토큰들. boards와 같은 이유로 서버 메모리에만 있다 */
+  boardTokens: Map<string, BoardIdentityToken[]>;
   redactors: Map<string, Redactor>;
   integrationPageChecks: Map<string, readonly WorkflowPageCheck[]>;
   loaded: boolean;
 }
 const globalPlans = globalThis as typeof globalThis & { __bStudioTaskPlans?: TaskPlanStore };
-const planStore: TaskPlanStore = (globalPlans.__bStudioTaskPlans ??= { plans: new Map(), boards: new Map(), redactors: new Map(), integrationPageChecks: new Map(), loaded: false });
+const planStore: TaskPlanStore = (globalPlans.__bStudioTaskPlans ??= {
+  plans: new Map(),
+  boards: new Map(),
+  boardTokens: new Map(),
+  redactors: new Map(),
+  integrationPageChecks: new Map(),
+  loaded: false,
+});
 
 const plans = planStore.plans;
 /** 계획별 조율 게시판. 서버 메모리에만 있고, 재시작하면 사라진다(그때는 조율 없이 이어서 한다) */
 const boards = planStore.boards;
+const boardTokens = planStore.boardTokens;
 /**
  * S3에서 모델이 게시판에 쓴 본문·refs를 게시 전에 가리는 가림기. 조율 모듈(coordination/)이 아니라
  * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
@@ -338,6 +362,104 @@ function noteView(note: Note): TaskPlanNoteView {
   };
 }
 
+/** 토큰이 내줄 레인 이름. 영문·숫자로 시작하고 ASCII만 받는다 — 화면·MCP 설정 문구에 그대로 들어간다 */
+const EXTERNAL_LANE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** 끝난 계획에는 토큰을 새로 내주지 않는다. interrupted(재시작으로 멈춤)는 다시 이어질 수 있어 뺀다 */
+const BOARD_TOKEN_BLOCKED_STATUSES = new Set<TaskPlanStatus>(['done', 'failed', 'rejected']);
+
+function tokenSummary(entry: BoardIdentityToken): TaskPlanBoardTokenView {
+  return { id: entry.id, lane: entry.lane, ...(entry.group !== undefined ? { group: entry.group } : {}), createdAt: entry.createdAt, ...(entry.revokedAt ? { revokedAt: entry.revokedAt } : {}) };
+}
+
+export interface BoardTokenMint {
+  tokenId: string;
+  /** 평문 토큰. 이 호출의 응답에서만 나온다 — 그 뒤로는 서버도 다시 보여주지 않는다 */
+  token: string;
+  lane: string;
+  group?: string;
+  plan: TaskPlanView;
+}
+
+/**
+ * 이 계획의 게시판에 외부 에이전트(다른 Claude Code 세션·herdr·Codex CLI 등) 하나를 위한 토큰을 내준다.
+ * 소유자만 부를 수 있다. 레인 이름은 이미 쓰는 실제 레인·허브 이름과 겹칠 수 없다 — 겹치면 같은 lane으로
+ * Board에 섞여 쓰기 한도·topology 그룹 판단이 꼬인다.
+ */
+export function mintBoardToken(id: string, owner: string, input: { lane: string; group?: string }): BoardTokenMint {
+  const plan = findPlan(id, owner);
+  if (BOARD_TOKEN_BLOCKED_STATUSES.has(plan.status)) throw new StudioError(409, '끝난 계획에는 외부 에이전트를 새로 연결할 수 없습니다');
+  const board = boards.get(id);
+  if (!board) throw new StudioError(409, '이 계획에는 조율 게시판이 없습니다');
+  const lane = input.lane.trim();
+  if (!EXTERNAL_LANE_NAME.test(lane)) throw new StudioError(400, '레인 이름은 영문·숫자로 시작하는 64자 이내 ASCII(._- 허용)여야 합니다');
+  if (lane === 'plan' || lane === 'hub' || plan.lanes.some((existing) => existing.id === lane)) {
+    throw new StudioError(409, `"${lane}"은(는) 이미 이 계획이 쓰는 이름입니다. 다른 이름을 쓰세요`);
+  }
+  const group = input.group?.trim() || undefined;
+  const list = boardTokens.get(id) ?? [];
+  if (list.some((entry) => !entry.revokedAt && entry.lane === lane)) throw new StudioError(409, `"${lane}" 이름으로 이미 쓸 수 있는 토큰이 있습니다. 먼저 거두세요`);
+  const entry: BoardIdentityToken = { id: randomUUID().slice(0, 8), token: randomBytes(24).toString('hex'), lane, ...(group ? { group } : {}), createdAt: new Date().toISOString() };
+  list.push(entry);
+  boardTokens.set(id, list);
+  plan.externalAgents = [...(plan.externalAgents ?? []), tokenSummary(entry)];
+  persist(plan);
+  return { tokenId: entry.id, token: entry.token, lane: entry.lane, ...(entry.group !== undefined ? { group: entry.group } : {}), plan: clone(plan) };
+}
+
+/** 토큰 하나를 거둔다(소유자만). 거둔 토큰은 바로 그 순간부터 MCP 요청이 전부 401이 된다 */
+export function revokeBoardToken(id: string, owner: string, tokenId: string): TaskPlanView {
+  const plan = findPlan(id, owner);
+  const entry = (boardTokens.get(id) ?? []).find((candidate) => candidate.id === tokenId);
+  if (!entry) throw new StudioError(404, '토큰을 찾을 수 없습니다');
+  entry.revokedAt ??= new Date().toISOString();
+  plan.externalAgents = (plan.externalAgents ?? []).map((item) => (item.id === tokenId ? tokenSummary(entry) : item));
+  persist(plan);
+  return clone(plan);
+}
+
+/**
+ * 계획이 끝나면(done·failed·rejected) 함께 부른다. 토큰은 저장하지 않으므로 메모리의 revokedAt만 찍으면
+ * 그 뒤로는 resolveBoardToken이 전부 거부한다 — 디스크에 남는 건 요약(plan.externalAgents)뿐이다.
+ */
+function revokeAllBoardTokens(id: string): void {
+  const list = boardTokens.get(id);
+  if (!list || list.length === 0) return;
+  const now = new Date().toISOString();
+  for (const entry of list) entry.revokedAt ??= now;
+  const plan = plans.get(id);
+  if (plan?.externalAgents) plan.externalAgents = plan.externalAgents.map((item) => (item.revokedAt ? item : { ...item, revokedAt: now }));
+}
+
+/**
+ * 게시판 MCP 라우트가 Authorization 헤더만으로 신원을 찾는다(로그인 쿠키가 아니다 — 토큰 자체가 그 신원의
+ * 증명이다). 계획마다 토큰 수가 적어(보통 한 자리) 모두 훑어 시간이 달라지지 않게 비교해도 괜찮다.
+ */
+export function resolveBoardToken(id: string, authorization: string | null): { access: BoardAccess } | undefined {
+  const board = boards.get(id);
+  if (!board) return undefined;
+  const list = boardTokens.get(id) ?? [];
+  const match = list.find((entry) => !entry.revokedAt && tokenMatches(authorization ?? undefined, entry.token));
+  if (!match) return undefined;
+  const redactor = redactors.get(id);
+  const redact = (text: string) => (redactor ? redactor.redact(text) : text);
+  const base = externalBoardAccess(board, { lane: match.lane, ...(match.group !== undefined ? { group: match.group } : {}) }, redact);
+  return {
+    access: {
+      ...base,
+      // 읽기도 통계·화면에 남도록 스냅샷을 갱신한다(laneBoard의 read와 같은 이유, 이슈 #393 참고)
+      read: (options) => {
+        const result = base.read(options);
+        const plan = plans.get(id);
+        if (plan) {
+          syncBoard(plan, board);
+          persist(plan);
+        }
+        return result;
+      },
+    },
+  };
+}
+
 export function listTaskPlans(owner: string): TaskPlanView[] {
   ensureLoaded();
   return [...plans.values()]
@@ -564,6 +686,7 @@ export function rejectTaskPlan(id: string, owner: string, reason?: string): Task
   plan.status = 'rejected';
   plan.rejectedReason = reason?.trim() || undefined;
   plan.finishedAt = new Date().toISOString();
+  revokeAllBoardTokens(id);
   persist(plan);
   return clone(plan);
 }
@@ -581,6 +704,7 @@ export async function deleteTaskPlan(id: string, owner: string): Promise<void> {
   }
   plans.delete(id);
   boards.delete(id);
+  boardTokens.delete(id);
   redactors.delete(id);
   integrationPageChecks.delete(id);
   removePlanFile(id);
@@ -860,6 +984,8 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     integration.finishedAt = new Date().toISOString();
     // 통합 전에 실패했어도 레인 세션의 자원은 돌려준다. 기록과 체크포인트는 남아 다시 열 수 있다
     await stopLaneSessions(plan);
+    // 끝났으면(성공 'done'·실패 둘 다) 외부 토큰을 거둔다. 실패는 fail()도 거두므로 두 번째 호출은 아무 일도 하지 않는다
+    revokeAllBoardTokens(plan.id);
     // finally에서 넣은 finishedAt이 파일에 남도록 마지막으로 저장한다
     persist(plan);
   }
@@ -1099,6 +1225,7 @@ function fail(plan: TaskPlanView, error: string): void {
     if (lane.status === 'queued') lane.status = 'skipped';
     for (const task of lane.tasks) if (task.status === 'queued') task.status = 'skipped';
   }
+  revokeAllBoardTokens(plan.id);
   recordMetrics(plan);
   persist(plan);
 }
