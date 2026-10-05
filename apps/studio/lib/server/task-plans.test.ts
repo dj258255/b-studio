@@ -280,7 +280,19 @@ vi.mock('./sessions', () => ({
 
 import { StudioError } from './errors';
 import { clearRepositoryTokenCache } from './repo-token';
-import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, planRequirementIds, rejectTaskPlan, selectableLaneBackends, setLaneBackend } from './task-plans';
+import {
+  approveTaskPlan,
+  createTaskPlan,
+  deleteTaskPlan,
+  getTaskPlan,
+  mintBoardToken,
+  planRequirementIds,
+  rejectTaskPlan,
+  resolveBoardToken,
+  revokeBoardToken,
+  selectableLaneBackends,
+  setLaneBackend,
+} from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
 const saved = {
@@ -1822,5 +1834,162 @@ describe('레인 백엔드 고르기 (이슈 #398)', () => {
   it('selectableLaneBackends는 이 서버가 허용하는 백엔드에서 데모를 뺀 목록을 돌려준다', () => {
     fake.allowedBackends = new Set(['api', 'claude-code', 'demo']);
     expect(selectableLaneBackends().sort()).toEqual(['api', 'claude-code']);
+  });
+});
+
+describe('게시판 외부 에이전트 토큰', () => {
+  it('조율 게시판이 없으면 토큰을 만들 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: 'guest-codex' }))).toBe(409);
+  });
+
+  it('소유자가 아니면 403, 없는 계획은 404다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+
+    expect(statusOf(() => mintBoardToken(created.id, 'mallory', { lane: 'guest-codex' }))).toBe(403);
+    expect(statusOf(() => mintBoardToken('nope', 'kim', { lane: 'guest-codex' }))).toBe(404);
+  });
+
+  it('레인 이름을 검증하고, 이미 쓰는 이름(실제 레인·중복 토큰)과 겹치면 거부한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: '' }))).toBe(400);
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: '한글레인' }))).toBe(400);
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: 'lane-1' }))).toBe(409); // 실제 레인 id와 겹친다
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: 'plan' }))).toBe(409); // 허브 이름
+
+    mintBoardToken(created.id, 'kim', { lane: 'guest-codex' });
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: 'guest-codex' }))).toBe(409);
+  });
+
+  it('토큰을 내주면 비밀값은 그 응답에만 있고, 계획에는 요약만 남는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+
+    const minted = mintBoardToken(created.id, 'kim', { lane: 'guest-codex', group: 'web/a' });
+
+    expect(minted.token).toMatch(/^[0-9a-f]{48}$/);
+    expect(minted.plan.externalAgents).toEqual([{ id: minted.tokenId, lane: 'guest-codex', group: 'web/a', createdAt: expect.any(String) }]);
+    // 디스크에 남긴 기록에도 비밀값은 없다
+    const saved = JSON.parse(readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${created.id}.json`), 'utf8')) as TaskPlanView;
+    expect(JSON.stringify(saved)).not.toContain(minted.token);
+  });
+
+  it('토큰으로 resolveBoardToken이 접근을 찾고, MCP 도구 핸들러로 쓰고 읽는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+    const minted = mintBoardToken(created.id, 'kim', { lane: 'guest-codex' });
+
+    // 틀린 토큰·토큰 없음은 찾지 못한다
+    expect(resolveBoardToken(created.id, 'Bearer 다른토큰')).toBeUndefined();
+    expect(resolveBoardToken(created.id, null)).toBeUndefined();
+
+    const resolved = resolveBoardToken(created.id, `Bearer ${minted.token}`);
+    expect(resolved?.access.lane).toBe('guest-codex');
+
+    const { runBoardMcpTool } = await import('@b-studio/agent');
+    const posted = await runBoardMcpTool('post_note', { kind: 'fact', body: '외부 에이전트가 남긴 메모', refs: [] }, resolved!.access);
+    expect(posted.ok).toBe(true);
+
+    // 실패 메모는 외부 에이전트도 쓸 수 없다(레인과 같은 규칙)
+    const failed = await runBoardMcpTool('post_note', { kind: 'failure', body: '가짜 실패', refs: [] }, resolved!.access);
+    expect(failed.ok).toBe(false);
+
+    const read = await runBoardMcpTool('read_notes', { kinds: [] }, resolved!.access);
+    expect(read.content).toContain('외부 에이전트가 남긴 메모');
+
+    const plan = getTaskPlan(created.id, 'kim');
+    expect(plan.board?.notes.some((note) => note.body === '외부 에이전트가 남긴 메모' && note.lane === 'guest-codex')).toBe(true);
+  });
+
+  it('star topology에서는 외부 토큰도 다른 신원의 모델 메모를 읽지 못한다(레인끼리도 직접 보지 않는 규칙 그대로)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: 'star 외부 토큰',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'star' },
+    });
+    await awaiting(created.id);
+
+    const { runBoardMcpTool } = await import('@b-studio/agent');
+    // Board는 레인이든 외부 토큰이든 같은 "lane" 문자열로 다룬다 — 다른 신원 하나를 "다른 레인"으로 세워 본다
+    const otherMinted = mintBoardToken(created.id, 'kim', { lane: 'guest-other' });
+    const readerMinted = mintBoardToken(created.id, 'kim', { lane: 'guest-reader' });
+    const otherAccess = resolveBoardToken(created.id, `Bearer ${otherMinted.token}`)!.access;
+    const readerAccess = resolveBoardToken(created.id, `Bearer ${readerMinted.token}`)!.access;
+
+    await runBoardMcpTool('post_note', { kind: 'contract', body: '다른 신원의 계약', refs: ['api'] }, otherAccess);
+    await runBoardMcpTool('post_note', { kind: 'fact', body: '내 메모', refs: [] }, readerAccess);
+
+    const read = await runBoardMcpTool('read_notes', { kinds: [] }, readerAccess);
+
+    expect(read.content).not.toContain('다른 신원의 계약');
+    expect(read.content).toContain('내 메모');
+  });
+
+  it('토큰을 거두면 그 뒤로 resolveBoardToken이 찾지 못한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+    const minted = mintBoardToken(created.id, 'kim', { lane: 'guest-codex' });
+    expect(resolveBoardToken(created.id, `Bearer ${minted.token}`)).toBeDefined();
+
+    const revoked = revokeBoardToken(created.id, 'kim', minted.tokenId);
+
+    expect(revoked.externalAgents?.[0]).toMatchObject({ id: minted.tokenId, revokedAt: expect.any(String) });
+    expect(resolveBoardToken(created.id, `Bearer ${minted.token}`)).toBeUndefined();
+    expect(statusOf(() => revokeBoardToken(created.id, 'kim', 'no-such-id'))).toBe(404);
+  });
+
+  it('계획이 끝나면(done) 토큰을 자동으로 거둔다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+    const minted = mintBoardToken(created.id, 'kim', { lane: 'guest-codex' });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    expect(resolveBoardToken(created.id, `Bearer ${minted.token}`)).toBeUndefined();
+    expect(plan.externalAgents?.[0]?.revokedAt).toBeDefined();
+    expect(statusOf(() => mintBoardToken(created.id, 'kim', { lane: 'guest-codex-2' }))).toBe(409);
+  });
+
+  it('계획을 거부하면(rejected) 토큰을 자동으로 거둔다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+    const minted = mintBoardToken(created.id, 'kim', { lane: 'guest-codex' });
+
+    rejectTaskPlan(created.id, 'kim', '필요 없어짐');
+
+    expect(resolveBoardToken(created.id, `Bearer ${minted.token}`)).toBeUndefined();
+  });
+
+  it('계획이 실패하면(failed) 토큰을 자동으로 거둔다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: 'fail' };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+    await awaiting(created.id);
+    const minted = mintBoardToken(created.id, 'kim', { lane: 'guest-codex' });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('failed');
+    expect(resolveBoardToken(created.id, `Bearer ${minted.token}`)).toBeUndefined();
   });
 });

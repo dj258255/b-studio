@@ -56,6 +56,12 @@ const SESSION_ID = /^[0-9a-f]{32}$/;
  * 데스크톱 셸이 스테일한 라우트 표를 가려내려고 부른다 — 인증을 켠 서버에서 401이 나면 멀쩡한 서버를 스테일로 보고 재시작하게 된다
  */
 const PUBLIC_PATHS = new Set(['/login', '/api/auth/login', '/api/auth/logout', '/api/health', '/api/health/routes']);
+/**
+ * 작업 계획 게시판의 MCP 경로(외부 에이전트 연결, task-plans.ts의 resolveBoardToken)는 로그인 쿠키가 아니라
+ * 그 요청 자체의 Authorization 헤더(계획마다 내준 토큰)로 인증한다. 여기서 막으면 B_STUDIO_AUTH=token·proxy에서
+ * 로그인 세션이 없는 외부 CLI가 전부 401을 받으므로, 이 경로만 통과시키고 인증은 라우트 안에서 한 번 더 한다
+ */
+const BOARD_MCP_PATH = /^\/api\/task-plans\/[^/]+\/board\/mcp$/;
 
 /** 환경 변수. 테스트가 process.env 대신 필요한 값만 넘길 수 있게 좁힌 형태 */
 export type Env = Record<string, string | undefined>;
@@ -335,7 +341,7 @@ export function decideRequest(
   if (api && request.method !== 'GET' && request.method !== 'HEAD' && !isSameOrigin(request.headers)) {
     return { kind: 'reject', status: 403, message: '다른 출처에서 보낸 요청은 받지 않습니다' };
   }
-  if (PUBLIC_PATHS.has(request.pathname)) return { kind: 'pass' };
+  if (PUBLIC_PATHS.has(request.pathname) || BOARD_MCP_PATH.test(request.pathname)) return { kind: 'pass' };
 
   let revocations = NO_REVOCATIONS;
   if (config.mode === 'token') {

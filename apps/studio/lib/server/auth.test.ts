@@ -183,6 +183,14 @@ describe('decideRequest', () => {
     expect(decideRequest(request('/api/sessions', { method: 'POST', headers: { origin: 'http://studio.internal:3000' } }), {}, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
   });
 
+  it('게시판 MCP 경로는 로그인 쿠키 없이도 통과시킨다 — 그 라우트 안에서 토큰으로 따로 인증한다(외부 에이전트 연결)', () => {
+    expect(decideRequest(request('/api/task-plans/plan-1/board/mcp'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
+    expect(decideRequest(request('/api/task-plans/plan-1/board/mcp', { method: 'POST' }), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
+    expect(decideRequest(request('/api/task-plans/plan-1/board/mcp', { method: 'DELETE' }), PROXY_ENV, NOW)).toEqual({ kind: 'pass' });
+    // 토큰을 내주는 라우트(mint·revoke)는 그대로 로그인이 있어야 한다 — 공개는 /board/mcp 하나뿐이다
+    expect(decideRequest(request('/api/task-plans/plan-1/board/tokens', { method: 'POST' }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
+  });
+
   it('proxy 모드는 로그인 화면 대신 SSO를 거치라고 알리고, 설정이 틀리면 500으로 막는다', () => {
     expect(decideRequest(request('/'), PROXY_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
     expect(decideRequest(request('/', { headers: { 'x-forwarded-email': 'alice@corp.example', [PROXY_SECRET_HEADER]: PROXY_SECRET } }), PROXY_ENV, NOW)).toEqual({

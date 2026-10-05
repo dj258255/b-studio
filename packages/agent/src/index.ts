@@ -72,7 +72,9 @@ export {
   type GeminiRunOptions,
   type GeminiRunResult,
 } from './gemini-cli-runner';
-export { startToolServer, type ToolServer, type ToolServerOptions } from './mcp-http-server';
+export { startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
+export { boardMcpToolSpecs, externalBoardAccess, runBoardMcpTool, type BoardMcpToolSpec } from './board-mcp';
+export { handleBoardMcpRequest } from './board-mcp-server';
 export { fetchPage, VerificationGate, type GateOutcome, type PageFetcher, type ServiceRequest, type VerifyMode } from './gate';
 export {
   BrowserUnavailableError,

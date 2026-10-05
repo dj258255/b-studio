@@ -133,6 +133,7 @@
 - [ADR-116 S3 게시판의 읽기 타이밍 경쟁은 배리어가 아니라 재시도 안내로 고친다](#adr-116-s3-게시판의-읽기-타이밍-경쟁은-배리어가-아니라-재시도-안내로-고친다)
 - [ADR-117 작업 분해 레인마다 다른 백엔드·모델을 고르게 한다](#adr-117-작업-분해-레인마다-다른-백엔드모델을-고르게-한다)
 - [ADR-118 Gemini CLI 백엔드: 헤드리스 JSON 호출 + 도구 블록리스트, 세션 이어받기는 최선 추정](#adr-118-gemini-cli-백엔드-헤드리스-json-호출--도구-블록리스트-세션-이어받기는-최선-추정)
+- [ADR-119 게시판을 MCP로 열어 계획 밖 에이전트도 참여하게 한다](#adr-119-게시판을-mcp로-열어-계획-밖-에이전트도-참여하게-한다)
 
 ---
 
@@ -4851,6 +4852,44 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **노력(추론 강도) 단계를 지원하지 않는다.** 다른 백엔드처럼 "확인은 못 했지만 일단 전달"하지 않고 아예 보내지 않는다 — CLI가 받지 않는 플래그를 보내 조용히 무시되는 것보다, 지원하지 않는다고 명확히 아는 쪽을 골랐다.
 - **구글의 2026-06-18 레거시 CLI 전환 공지를 반영하지 못한 채 구현했다.** 개인 무료 계정으로는 이 러너가 아예 작동하지 않을 수 있다. 조직 라이선스가 없으면 Antigravity CLI로 틀을 바꾸는 후속 작업이 필요할 수 있다 — 이번 작업 범위 밖으로 남긴다.
 - **실계정 호출을 한 번도 하지 않았다.** 헤드리스 JSON 스키마·오류 메시지 문구·인증 실패 종료 코드 모두 공식 문서·GitHub 이슈의 보고를 근거로 한 최선 추정이다. 사람이 로그인해 실행해 보기 전까지 "구현 상태" 표에 "실계정 확인 전"으로 남긴다.
+
+---
+
+## ADR-119 게시판을 MCP로 열어 계획 밖 에이전트도 참여하게 한다
+
+### 맥락
+- 조율 게시판(`coordination/board.ts`)은 지금까지 "같은 계획의 레인끼리만" 쓰는 장치였다. `post_note`·`read_notes`는 실행기(`task-plans.ts`의 `laneBoard()`)가 레인 신원(lane, task)을 고정해 `BoardAccess`로 감싼 뒤에만 모델에 노출됐고, 그 모델은 늘 이 계획이 띄운 레인 세션 안에서만 돈다.
+- 이슈 #396(S3 게시판이 계약 게시 전에 읽어 빈 결과를 받던 버그, ADR-116)과 #398/#401(작업 분해 레인마다 다른 백엔드·모델, ADR-117)은 "여러 에이전트를 한 기계처럼" 쓰는 방향을 계속 밀었다 — 그런데 그 "여러 에이전트"는 전부 이 계획이 만든 레인 세션뿐이었다. 사용자가 따로 쓰는 또 다른 Claude Code 세션, herdr(사용자의 다중 에이전트 조율 도구), Codex CLI처럼 계획 **밖에서** 돌아가는 에이전트는 이 게시판을 전혀 보지 못했다.
+- b-studio는 이미 MCP 서버를 하나 운영한다 — `opencode-runner.ts`·`codex-runner.ts`가 `B_STUDIO_MCP_TOKEN`으로 보호한 로컬 streamable HTTP MCP 서버(`mcp-http-server.ts`의 `startToolServer`)를 띄워 그 CLI들이 b-studio 도구(`read_file` 등)를 MCP 도구로 부르게 한다. 다만 이 서버는 루프백(127.0.0.1)에만 열리는, 실행 하나짜리 로컬 프로세스 전용이다 — 외부 PC·다른 세션이 네트워크로 닿을 수 있는 표면이 아니다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 새 프로토콜(전용 REST)을 만들어 외부 에이전트가 직접 호출하게 한다 | Claude Code·Codex·herdr 모두 이미 MCP 클라이언트를 내장한다. REST를 새로 만들면 셋 다 설정 방법이 다르거나 아예 지원하지 않고, b-studio가 각 CLI의 도구 등록 규약까지 따로 맞춰야 한다 |
+| B. A2A(Agent2Agent) 메시지 모양을 지금 채택한다 | A2A는 "작업(Task)"을 주고받는 모양이라 레인 사이 계약·사실·실패 서명처럼 가벼운 pull 메모에는 무겁다. 무엇보다 Claude Code·Codex·herdr이 오늘 A2A 클라이언트를 내장하지 않는다 — 지금 채택해도 쓸 사람이 없다 |
+| **C. 기존 MCP 서버 메커니즘(McpServer, 요청마다 새로 만드는 상태 없는 트랜스포트, bearer 토큰)을 재사용하고 전송 계층만 Web Standard로 바꾼다(채택)** | 외부에서 네트워크로 닿아야 하므로 `mcp-http-server.ts`의 `node:http` 서버(루프백 전용 설계)를 그대로 쓸 수는 없다 — 전송만 다시 짜야 한다 |
+
+### 결정
+1. **MCP를 택한다.** Claude Code·Codex CLI·herdr 모두 MCP 클라이언트를 이미 갖고 있어 오늘 바로 쓸 수 있다. A2A의 메시지 모양(Task·Message·Part)은 눈여겨볼 가치가 있지만, 쓸 수 있는 클라이언트가 없는 지금 채택하면 서류로만 남는다 — A2A 어댑터는 그 메시지 모양을 실제로 받아들이는 클라이언트가 생기면 다시 본다(지금은 미룬 일로 남긴다).
+2. **MCP 서버 "메커니즘"은 재사용하고 "전송"만 새로 짠다.** `packages/agent/src/board-mcp.ts`가 `tools.ts`의 `post_note`·`read_notes`와 같은 이름·입력 모양의 도구 명세·실행 로직을(`BoardAccess`만 받는 순수 함수로) 담고, `board-mcp-server.ts`가 `@modelcontextprotocol/sdk`의 `McpServer`에 그 도구를 등록해 요청마다 새로(상태 없이) 만든다 — `mcp-http-server.ts`와 같은 "세션을 이어받지 않는다" 전제다. 다만 전송은 `StreamableHTTPServerTransport`(Node http 전용) 대신 `WebStandardStreamableHTTPServerTransport`(Request/Response)를 쓴다 — Next.js 라우트 핸들러가 Node 소켓이 아니라 Web Standard Request/Response만 주고받기 때문이다. 그래서 `app/api/task-plans/[id]/board/mcp/route.ts`는 `handleBoardMcpRequest(request, access)`를 그대로 돌려주는 한 줄짜리 다리에 가깝다.
+3. **신원은 토큰이 고정하고, 레인과 똑같은 규칙을 그대로 강제한다.** `externalBoardAccess(board, {lane, group})`는 `tools.ts`의 `laneBoard()`가 레인에 주는 `BoardAccess`와 같은 모양이다 — `by: 'model'`로 고정해 두므로 `Board.post`의 기존 규칙("실패 메모는 `by: 'platform'`만")이 코드를 한 줄도 바꾸지 않고도 외부 에이전트의 실패 메모 작성을 막는다. topology 읽기 범위(star·hierarchical·mesh)도 `canRead`가 `lane` 문자열만 보고 판단하므로, 그 문자열이 실제 레인이든 외부 토큰이든 똑같이 강제된다 — 새 예외를 추가하지 않았다.
+4. **토큰은 계획당·신원당 하나, 평문을 서버 메모리에만 둔다(미리보기 토큰 `previewToken`과 같은 패턴).** `POST /api/task-plans/[id]/board/tokens`(소유자만)가 `randomBytes(24)` 토큰을 만들어 `boardTokens: Map<planId, BoardIdentityToken[]>`에 담고, 계획 기록(디스크에 남는 `persist(plan)`)에는 `externalAgents` 요약(레인 이름·만든 시각·거둔 시각)만 남긴다 — 토큰 평문은 그 발급 응답에만 있다. `DELETE /api/task-plans/[id]/board/tokens/[tokenId]`로 손으로 거두거나, 계획이 끝나면(done·failed·rejected, `revokeAllBoardTokens`) 자동으로 거둔다. 계획이 서버 재시작으로 사라지면 토큰도 같이 사라진다 — 게시판 자체가 저장하지 않는 것과 같은 전제다.
+5. **`/api/task-plans/[id]/board/mcp`는 로그인 게이트 밖에 둔다.** `auth.ts`의 `decideRequest`는 이 동적 경로(`BOARD_MCP_PATH` 정규식)만 통과시키고, 인증은 라우트 안에서 `resolveBoardToken`이 Authorization 헤더로 한 번 더 한다 — `B_STUDIO_AUTH=token`·`proxy`에서 로그인 세션이 없는 외부 CLI가 이 경로만으로는 막히지 않게 하려는 것이다. 토큰을 내주고 거두는 라우트(`/board/tokens`)는 그대로 로그인(소유자) 확인을 받는다.
+
+### 검증 결과
+- `packages/agent/src/board-mcp.test.ts`(신규): `boardMcpToolSpecs`가 `modelWrites`에 따라 `post_note`를 빼는 것, 외부 에이전트가 failure kind를 못 쓰는 것(스키마가 막고, 스키마를 우회해도 Board가 한 번 더 막는 것), 읽기 상한 안내, star·mesh topology에서 `externalBoardAccess`의 읽기 범위, 가림 함수 적용을 확인했다.
+- `packages/agent/src/board-mcp-server.test.ts`(신규): 실제 `@modelcontextprotocol/sdk` `Client` + `StreamableHTTPClientTransport`로 initialize→tools/list→tools/call 전체를 루프백 Node http 다리(`mcp-http-server.test.ts`와 같은 방식, :3000은 쓰지 않는다)로 확인해, 모델이 신원을 바꿀 수 없는 것과 `modelWrites`가 꺼지면 도구 목록에서 `post_note`가 빠지는 것을 확인했다.
+- `apps/studio/lib/server/task-plans.test.ts`("게시판 외부 에이전트 토큰" 10건 보강): 게시판 없는 계획은 토큰을 못 만드는 것(409), 소유자 아님(403)·없는 계획(404), 레인 이름 검증과 실제 레인·중복 토큰 이름 충돌(409), 토큰 평문이 응답에만 있고 디스크 기록·요약에는 없는 것, `resolveBoardToken`으로 찾은 접근으로 `runBoardMcpTool`이 쓰고 읽는 것과 외부 에이전트가 실패 메모를 못 쓰는 것, star topology에서 외부 토큰도 다른 신원의 모델 메모를 못 읽는 것, 토큰을 거두면 그 뒤 `resolveBoardToken`이 못 찾는 것, 계획이 done·rejected·failed로 끝나면 토큰이 자동으로 거둬지는 것을 확인했다.
+- `apps/studio/app/api/task-plans/[id]/board/tokens/route.test.ts`·`.../tokens/[tokenId]/route.test.ts`·`.../mcp/route.test.ts`(신규, 10건): mint·revoke 라우트가 입력 검증(400)과 서버 오류(403·404)를 그대로 전하는 것, MCP 라우트가 `resolveBoardToken`이 찾지 못하면 로그인 없이도 401을 돌려주는 것과 토큰이 맞으면 실제 MCP 서버 응답(`serverInfo.name`)을 돌려주는 것을 확인했다.
+- `apps/studio/lib/server/auth.test.ts`(보강): `/api/task-plans/[id]/board/mcp`가 token·proxy 모드 모두에서 메서드와 상관없이 통과하고, 같은 계획의 `/board/tokens`는 그대로 401인 것을 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`. 바뀐 패키지(`packages/agent`·`apps/studio`)의 전체 테스트가 통과했다.
+- 확인하지 못한 범위: 실제 Claude Code 세션·herdr·Codex CLI를 이 MCP 엔드포인트에 실제로 붙여 보지는 않았다(토큰을 발급해 받은 MCP 설정 JSON을 그 CLI 설정에 붙여넣는 수동 확인은 이번 작업 범위 밖이다) — SDK의 `StreamableHTTPClientTransport`로 프로토콜 준수만 확인했다.
+
+### 감수한 트레이드오프
+- **토큰은 서버 프로세스 메모리에만 있다.** 서버가 재시작되면 토큰도, 게시판 자체도 사라진다 — 게시판이 애초에 저장하지 않는 장치였으므로 같은 제약을 물려받았을 뿐 이 기능이 새로 만든 약점은 아니다.
+- **레인 이름이 평평한 네임스페이스 하나를 공유한다.** 외부 토큰의 레인 이름이 실제 레인 id(`lane-1` 등)나 허브 이름(`plan`)과 겹치면 Board가 둘을 구분하지 못하므로(쓰기 한도·topology 그룹이 섞인다), 겹치는 이름은 발급 시점에 막는다 — 다만 사람이 외부 에이전트 이름을 신중히 골라야 한다는 수고는 남는다.
+- **owner/admin 구분 없이 owner만 토큰을 만들고 거둔다.** `task-plans.ts`의 다른 변경 함수들과 같은 규칙(`findPlan`의 엄격한 owner 일치)을 그대로 따른 것이라, 이 기능만 새로 느슨해지거나 빡빡해지지 않았다. 여러 사람이 같은 계획을 관리하는 조직 배포(`B_STUDIO_AUTH=proxy`, admins)에서는 관리자도 소유자가 아니면 토큰을 다루지 못한다 — 필요해지면 `canManage`(`auth.ts`)로 넓히는 건 다음 작업이다.
+- **A2A 어댑터는 만들지 않았다.** 메시지 모양을 지금 따라가 봐야 쓸 클라이언트가 없어 검증할 길이 없다 — 실제로 A2A를 말하는 에이전트가 생기면 `board-mcp.ts`의 `BoardAccess` 계층 위에 어댑터 하나를 더 얹으면 된다(게시판 자체·토큰 체계는 손대지 않아도 된다).
 
 ---
 
