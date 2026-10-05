@@ -1715,14 +1715,16 @@ export async function externalRequest(id: string, name: string, input: { method:
 
 /**
  * 샌드박스를 켠다. 동시에 여러 번 불려도 한 번만 켜도록 bootPromise를 공유한다.
- * 이미 켜져 있으면 그냥 돌아오고, 실패·중지 상태면 이유와 함께 거부한다.
+ * 이미 켜져 있으면 그냥 돌아오고, 중지 상태면 이유와 함께 거부한다.
+ * 실패(failed) 상태는 여기서 끝내지 않는다 — Docker 데몬이 잠깐 죽어 있다가 돌아온 경우(콜리마 재시작 등)
+ * 실패를 캐시해 버리면 데몬이 살아난 뒤에도 영원히 같은 옛 오류만 돌려주게 된다. 실패 뒤 다음 시도는
+ * 항상 새 bootPromise로 compose build/up을 실제로 다시 밟아 지금 데몬 상태를 묻는다(스튜디오 서버 재시작 없이도)
  * 지연 기동 세션의 첫 필요(샌드박스 도구·첫 파일 변경·게이트·"지금 켜기")가 모두 이 한 곳을 지난다
  */
 async function ensureBooted(session: Session): Promise<void> {
   if (session.snapshot.status === 'ready') return;
-  if (session.snapshot.status === 'failed') throw new StudioError(409, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
   if (session.snapshot.status === 'stopped') throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
-  if (!session.bootPromise) {
+  if (!session.bootPromise || session.snapshot.status === 'failed') {
     // 처음 켤 때는 의존성 설치 때문에 몇 분 걸릴 수 있다. 켜는 동안 도구 호출·게이트는 이 promise를 기다린다
     emit(session, { type: 'notice', text: '샌드박스를 켜는 중입니다 (처음이면 1분 안팎)', at: new Date().toISOString() });
     session.bootPromise = startBoot(session);
