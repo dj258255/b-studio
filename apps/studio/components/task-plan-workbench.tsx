@@ -136,6 +136,135 @@ const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
   S5: 'S5 실패 서명만',
 };
 
+/**
+ * 외부 에이전트(다른 Claude Code 세션·herdr·Codex CLI 등) 연결. 이 계획의 게시판에 쓸 고정 레인 이름으로
+ * MCP 토큰을 내주고, 복사해 쓸 설정을 보여준다. 토큰 평문은 낸 직후 이 화면에만 있다 — plan.externalAgents
+ * (서버가 돌려주는 계획 기록)에는 요약만 남으므로, 다시 불러오면 평문은 더 이상 어디에도 없다.
+ * 이 화면에 뜨는 계획은 이미 이 사용자가 만든 것만 걸러져 있어(listTaskPlans) 따로 소유자 확인을 하지 않는다.
+ */
+function ExternalAgentsSection({ plan, onUpdate }: { plan: TaskPlanView; onUpdate: (plan: TaskPlanView) => void }) {
+  const [lane, setLane] = useState('');
+  const [group, setGroup] = useState('');
+  const [minting, setMinting] = useState(false);
+  const [error, setError] = useState<string>();
+  const [minted, setMinted] = useState<{ tokenId: string; token: string; lane: string; mcp: { url: string } }>();
+  const [revealed, setRevealed] = useState(false);
+  const [revokingId, setRevokingId] = useState<string>();
+
+  async function mint() {
+    const trimmedLane = lane.trim();
+    if (!trimmedLane) return;
+    setMinting(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/task-plans/${encodeURIComponent(plan.id)}/board/tokens`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ lane: trimmedLane, ...(group.trim() ? { group: group.trim() } : {}) }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : '토큰을 만들지 못했습니다');
+      onUpdate(result.plan as TaskPlanView);
+      setMinted({ tokenId: result.tokenId, token: result.token, lane: result.lane, mcp: result.mcp });
+      setRevealed(false);
+      setLane('');
+      setGroup('');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  async function revoke(tokenId: string) {
+    setRevokingId(tokenId);
+    try {
+      const response = await fetch(`/api/task-plans/${encodeURIComponent(plan.id)}/board/tokens/${encodeURIComponent(tokenId)}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (response.ok) onUpdate(result as TaskPlanView);
+      if (minted?.tokenId === tokenId) setMinted(undefined);
+    } finally {
+      setRevokingId(undefined);
+    }
+  }
+
+  const agents = plan.externalAgents ?? [];
+  const maskedToken = minted ? '•'.repeat(16) : '';
+  const config = minted
+    ? JSON.stringify({ mcpServers: { 'b-studio-board': { type: 'http', url: minted.mcp.url, headers: { Authorization: `Bearer ${revealed ? minted.token : maskedToken}` } } } }, null, 2)
+    : '';
+
+  return (
+    <div className="mt-4 border-t border-line pt-4">
+      <h3 className="text-sm font-semibold">외부 에이전트 연결</h3>
+      <p className="mt-1 text-xs text-muted">다른 Claude Code 세션·herdr·Codex CLI 등을 이 게시판에 고정 이름(레인)으로 붙입니다. 실패 메모는 여기서도 쓸 수 없습니다.</p>
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <label className="flex flex-col text-xs text-muted">
+          레인 이름
+          <input
+            value={lane}
+            onChange={(event) => setLane(event.target.value)}
+            placeholder="guest-codex"
+            className="mt-1 rounded-control border border-line bg-panel px-2 py-1.5 text-sm text-ink placeholder:text-muted"
+          />
+        </label>
+        <label className="flex flex-col text-xs text-muted">
+          그룹(선택)
+          <input
+            value={group}
+            onChange={(event) => setGroup(event.target.value)}
+            placeholder="web/a"
+            className="mt-1 rounded-control border border-line bg-panel px-2 py-1.5 text-sm text-ink placeholder:text-muted"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={minting || !lane.trim()}
+          onClick={() => void mint()}
+          className="rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+        >
+          토큰 만들기
+        </button>
+      </div>
+      {error && <p className="mt-2 text-xs text-fail">{error}</p>}
+
+      {minted && (
+        <div className="mt-3 rounded-md border border-line bg-panel p-3">
+          <p className="text-xs font-medium">&quot;{minted.lane}&quot; 토큰 — 지금만 보여줍니다. 복사해 바로 붙여 넣으세요</p>
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded bg-ground p-2 font-mono text-xs leading-5">{config}</pre>
+          <div className="mt-2 flex gap-2">
+            <button type="button" onClick={() => setRevealed((value) => !value)} className="rounded-control border border-line px-2 py-1 text-xs hover:border-ink">
+              {revealed ? '가리기' : '보기'}
+            </button>
+            <button type="button" onClick={() => void navigator.clipboard?.writeText(config).catch(() => {})} className="rounded-control border border-line px-2 py-1 text-xs hover:border-ink">
+              복사
+            </button>
+          </div>
+        </div>
+      )}
+
+      {agents.length > 0 && (
+        <ul className="mt-3 space-y-1.5 text-xs">
+          {agents.map((agent) => (
+            <li key={agent.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line px-2 py-1.5">
+              <span>
+                <span className="font-mono">{agent.lane}</span>
+                {agent.group ? ` · ${agent.group}` : ''} · {agent.revokedAt ? '거둠' : '쓰는 중'}
+              </span>
+              {!agent.revokedAt && (
+                <button type="button" disabled={revokingId === agent.id} onClick={() => void revoke(agent.id)} className="font-medium text-fail hover:underline disabled:opacity-50">
+                  거두기
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 type ModelOption = ModelProfile & { configured: boolean };
 
 const PLAN_STATUS: Record<TaskPlanStatus, string> = {
@@ -593,6 +722,7 @@ function PlanResult({
           ) : (
             <p className="mt-2 text-sm text-muted">{showContracts ? '레인 사이 계약 말고는 아직 게시된 메모가 없습니다.' : '아직 게시된 메모가 없습니다.'}</p>
           )}
+          {plan.board && <ExternalAgentsSection plan={plan} onUpdate={onUpdate} />}
         </section>
       )}
 
