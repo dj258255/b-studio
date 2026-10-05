@@ -55,9 +55,14 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'opencode', model: ' opencode/space-bunny-free ' })).toEqual({ backend: 'opencode', model: 'opencode/space-bunny-free' });
   });
 
-  it('--model은 claude-code, codex, commandcode 또는 opencode에서만 쓸 수 있다', () => {
+  it('gemini는 --model이 필수다(기본 모델을 추측하지 않는다)', () => {
+    expect(() => resolveBackend({ dry: false, backend: 'gemini' })).toThrow(/--model이 필요합니다/);
+    expect(resolveBackend({ dry: false, backend: 'gemini', model: ' gemini-2.5-pro ' })).toEqual({ backend: 'gemini', model: 'gemini-2.5-pro' });
+  });
+
+  it('--model은 claude-code, codex, commandcode, opencode 또는 gemini에서만 쓸 수 있다', () => {
     expect(resolveBackend({ dry: false, backend: 'openai' })).toEqual({ backend: 'openai' });
-    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code, codex, commandcode 또는 opencode에서만/);
+    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code, codex, commandcode, opencode 또는 gemini에서만/);
   });
 });
 
@@ -67,13 +72,15 @@ describe('planModelId', () => {
     expect(planModelId('codex', 'gpt-5-codex', 'bench-coordination')).toBe('local-cli-chatgpt:gpt-5-codex');
     expect(planModelId('commandcode', 'poolside/laguna-s-2.1-free', 'bench-coordination')).toBe('local-cli-commandcode:poolside/laguna-s-2.1-free');
     expect(planModelId('opencode', 'opencode/mimo-v2.6-flash-free', 'bench-coordination')).toBe('local-cli-opencode:opencode/mimo-v2.6-flash-free');
+    expect(planModelId('gemini', 'gemini-2.5-pro', 'bench-coordination')).toBe('local-cli-gemini:gemini-2.5-pro');
     expect(planModelId('openai', 'dry', 'bench-coordination')).toBe('bench-coordination');
   });
 
-  it('codex·commandcode·opencode에 모델이 없으면 default로 적는다', () => {
+  it('codex·commandcode·opencode·gemini에 모델이 없으면 default로 적는다', () => {
     expect(planModelId('codex', '', 'bench-coordination')).toBe('local-cli-chatgpt:default');
     expect(planModelId('commandcode', '', 'bench-coordination')).toBe('local-cli-commandcode:default');
     expect(planModelId('opencode', '', 'bench-coordination')).toBe('local-cli-opencode:default');
+    expect(planModelId('gemini', '', 'bench-coordination')).toBe('local-cli-gemini:default');
   });
 });
 
@@ -251,10 +258,11 @@ describe('레인 백엔드(--lane-backend)', () => {
     expect(parseLaneBackend('api=claude-code:sonnet')).toEqual({ group: 'api', backend: 'claude-code', model: 'sonnet' });
     expect(parseLaneBackend('web=commandcode')).toEqual({ group: 'web', backend: 'commandcode' });
     expect(parseLaneBackend('web=opencode:opencode/mimo-v2.6-flash-free')).toEqual({ group: 'web', backend: 'opencode', model: 'opencode/mimo-v2.6-flash-free' });
+    expect(parseLaneBackend('web=gemini:gemini-2.5-pro')).toEqual({ group: 'web', backend: 'gemini', model: 'gemini-2.5-pro' });
     expect(parseLaneBackend(' api = openai ')).toEqual({ group: 'api', backend: 'openai' });
     expect(() => parseLaneBackend('api')).toThrow(/형식/);
     expect(() => parseLaneBackend('db=codex')).toThrow(/모르는 레인 그룹/);
-    expect(() => parseLaneBackend('api=gemini')).toThrow(/알 수 없는 레인 백엔드/);
+    expect(() => parseLaneBackend('api=anthropic')).toThrow(/알 수 없는 레인 백엔드/);
   });
 
   it('반복해 준 레인 백엔드를 모으고, 같은 그룹이 두 번이면 거부한다', () => {

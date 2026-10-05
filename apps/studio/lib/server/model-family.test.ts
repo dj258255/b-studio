@@ -16,6 +16,10 @@ describe('modelFamily', () => {
     expect(modelFamily('opencode')).toBe('opencode');
   });
 
+  it('gemini 백엔드는 api 백엔드의 google 모델과 같은 계열이다(둘 다 구글 Gemini 모델)', () => {
+    expect(modelFamily('gemini')).toBe('google');
+  });
+
   it('api 백엔드는 모델 레지스트리의 provider로 계열을 가린다', () => {
     mocks.modelById.mockReturnValue({ provider: 'anthropic' });
     expect(modelFamily('api', 'anthropic-default')).toBe('claude');

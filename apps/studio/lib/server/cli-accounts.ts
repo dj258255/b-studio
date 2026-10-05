@@ -16,10 +16,10 @@
  * 로그인 자체(각 CLI 프로세스)는 그대로 진행된다 — 사람이 로그를 보고 "브라우저에서 열기" 전에 직접 복사할 수 있다).
  */
 import { spawn as nodeSpawn } from 'node:child_process';
-import { describeAccount, preflightClaudeCode, preflightCodex, preflightCommandCode, preflightOpenCode } from '@b-studio/agent';
+import { describeAccount, preflightClaudeCode, preflightCodex, preflightCommandCode, preflightGemini, preflightOpenCode } from '@b-studio/agent';
 
 /** 계정 연결 화면이 다루는 백엔드. api·demo는 로그인 CLI가 없어 뺀다 */
-export const CLI_ACCOUNT_BACKENDS = ['claude-code', 'codex', 'commandcode', 'opencode'] as const;
+export const CLI_ACCOUNT_BACKENDS = ['claude-code', 'codex', 'commandcode', 'opencode', 'gemini'] as const;
 export type CliAccountBackend = (typeof CLI_ACCOUNT_BACKENDS)[number];
 
 /**
@@ -32,6 +32,7 @@ const BACKEND_LABEL: Record<CliAccountBackend, string> = {
   codex: '로컬 ChatGPT Agent',
   commandcode: '로컬 Command Code Agent',
   opencode: '로컬 OpenCode Agent',
+  gemini: '로컬 Gemini Agent',
 };
 
 export function isCliAccountBackend(value: unknown): value is CliAccountBackend {
@@ -75,6 +76,17 @@ const LOGIN_COMMANDS: Record<CliAccountBackend, LoginCommandSpec> = {
     spawnable: false,
     note: 'opencode는 제공자·인증 방식을 고르는 대화형 CLI라 b-studio가 대신 실행할 수 없습니다. 터미널에서 실행한 뒤 다시 확인해 주세요.',
   },
+  /**
+   * 0단계 조사(gemini-cli-runner.ts 머리말 참고): Gemini CLI는 codex·cmd처럼 메뉴를 건너뛰는 헤드리스 로그인 플래그를
+   * 공식 문서에서 찾지 못했다(처음 실행하면 인증 방식을 고르는 화면이 뜬다). opencode와 같은 이유로 자동으로 띄우지 않는다.
+   * 2026-06-18부터 개인 무료 계정은 레거시 CLI 지원이 끊겼을 수 있어(구글 공지), 로그인 전에 조직 라이선스 여부부터 확인해야 한다.
+   */
+  gemini: {
+    command: 'gemini',
+    args: [],
+    spawnable: false,
+    note: 'Gemini CLI는 인증 방식을 고르는 화면으로 시작해 b-studio가 대신 실행할 수 없습니다. 터미널에서 실행한 뒤 다시 확인해 주세요. (2026-06-18부터 개인 무료 Google 계정은 레거시 CLI를 못 쓸 수 있습니다 — 조직의 Gemini Code Assist 라이선스가 있는지 먼저 확인하세요.)',
+  },
 };
 
 export function loginCommandFor(backend: CliAccountBackend): LoginCommandSpec {
@@ -97,6 +109,7 @@ export interface AccountPreflights {
   codex?: typeof preflightCodex;
   commandCode?: typeof preflightCommandCode;
   openCode?: typeof preflightOpenCode;
+  gemini?: typeof preflightGemini;
 }
 
 /** 백엔드 하나의 지금 상태. 토큰·자격 증명 파일은 읽지 않고 preflight 결과만 옮긴다 */
@@ -117,7 +130,12 @@ export async function checkAccountStatus(backend: CliAccountBackend, preflights:
     if (result.ok) return { backend, label, connected: true, installed: true };
     return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
   }
-  const result = await (preflights.openCode ?? preflightOpenCode)();
+  if (backend === 'opencode') {
+    const result = await (preflights.openCode ?? preflightOpenCode)();
+    if (result.ok) return { backend, label, connected: true, installed: true };
+    return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
+  }
+  const result = await (preflights.gemini ?? preflightGemini)();
   if (result.ok) return { backend, label, connected: true, installed: true };
   return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
 }
