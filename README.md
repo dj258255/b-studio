@@ -228,6 +228,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 - [로드맵](ROADMAP.md)
 - [변경 기록](CHANGELOG.md)
 - [구현 상태와 일정](docs/status.md)
+- [공구함 — AI에게 코딩을 맡기려고 만든 장치들](docs/toolkit.md)
 - [실험 기록](docs/experiments/README.md)
 - [시작하기](docs/getting-started.md)
 - [`studio.yaml` 설정](docs/configuration.md)
