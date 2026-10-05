@@ -84,7 +84,7 @@ export interface ToolBuildOptions {
  */
 export interface BoardAccess {
   post(input: { kind: NoteKind; body: string; refs?: string[] }): { ok: true; note: Note } | { ok: false; reason: string };
-  read(options: { kinds?: readonly NoteKind[] }): { notes: Note[]; truncated: boolean; reason?: string };
+  read(options: { kinds?: readonly NoteKind[] }): { notes: Note[]; truncated: boolean; reason?: string; notice?: string };
   lane: string;
   task?: string;
   /** false면 모델은 읽기만 한다(기본 true). buildTools가 post_note를 목록에서 뺀다 */
@@ -513,9 +513,12 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       const board = context.board;
       if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
       const kinds = asNoteKinds(optionalStringArray(args, 'kinds'));
-      const { notes, truncated, reason } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
+      const { notes, truncated, reason, notice } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
       const lines = notes.map(formatNote);
       if (truncated) lines.push(`[... ${reason ?? '읽기 상한으로 일부만 돌려줬습니다'} ...]`);
+      // 엮인 레인이 아직 계약을 게시하지 않았을 때 실행기(task-plans.ts)가 덧붙인 안내(이슈 #393).
+      // 결과가 비어 있어도 안내만으로 (no notes) 대신 이유를 보여준다
+      if (notice) lines.push(notice);
       return success(lines.length > 0 ? lines.join('\n') : '(no notes)');
     }
     default:

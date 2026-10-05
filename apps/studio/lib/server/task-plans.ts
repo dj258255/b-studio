@@ -861,7 +861,9 @@ function coordinationGuidance(strategy: TaskPlanStrategy | undefined): string | 
     case 'S2':
       return '[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요';
     case 'S3':
-      return '[조율] 다른 레인과 맞물리는 인터페이스를 정하면 post_note(contract)로 남기고, 시작 전과 끝내기 전에 read_notes로 확인하세요';
+      // 레인이 시작 직후 read_notes부터 부르면 상대 레인이 계약을 내기 전이라 빈 결과를 받는다(E11, 이슈 #393).
+      // 게시가 먼저여야 상대가 읽을 때 빈손이 되지 않는다 — 읽기보다 게시를 앞세우도록 순서를 명시한다
+      return '[조율] 다른 레인과 맞물리는 인터페이스가 있으면 read_notes보다 먼저 post_note(contract)로 게시하세요. 그다음 시작 전과 끝내기 전에 read_notes로 다른 레인의 계약을 확인하고, 아직 게시 전이라는 안내가 오면 잠시 뒤 다시 read_notes를 부르세요';
     case 'S5':
       return '[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요';
     default:
@@ -897,7 +899,8 @@ function laneBoard(plan: TaskPlanView, lane: TaskPlanLaneView, taskId: string): 
       const result = board.read({ lane: lane.id, group: laneGroup(lane) }, options);
       // 읽기 통계도 화면·지표에 남도록 스냅샷을 갱신한다(저장은 다음 상태 전이가 한다)
       syncBoard(plan, board);
-      return result;
+      const notice = contractNotice(plan, lane, board);
+      return notice ? { ...result, notice } : result;
     },
   };
 }
@@ -905,6 +908,25 @@ function laneBoard(plan: TaskPlanView, lane: TaskPlanLaneView, taskId: string): 
 /** 계층 구조에서 같은 그룹으로 묶는 기준: 레인의 첫 쓰기 범위. 병렬 레인의 범위는 겹치지 않으므로 서로 다른 그룹이 된다 */
 function laneGroup(lane: TaskPlanLaneView): string | undefined {
   return lane.paths[0];
+}
+
+/**
+ * S3에서 다른 레인이 아직 계약을 게시하지 않았으면 그 사실을 안내로 덧붙인다(E11, 이슈 #393, ADR-0XX).
+ * 하드 배리어가 아니라 안내다 — 레인 실행을 막지 않고, 다시 읽을지는 모델이 정한다. 레인이 또 read_notes를
+ * 부르면 그때 게시판 상태를 다시 보므로 이 함수는 상태를 따로 들고 있지 않다(매번 다시 계산한다).
+ *
+ * topology와는 무관하게 계획의 전체 레인 집합으로 판단한다 — star에서 상대 메모를 못 읽는 레인도
+ * "상대가 아직 게시 전"이라는 사실 자체는 알아야 한다(쳐낼 메모가 없는 것과 아직 없는 것은 다르다).
+ *
+ * S2는 플랫폼이 레인을 돌리기 전에 계약을 미리 게시하므로(attachCoordination이 동기로 끝난다) 이 경쟁이
+ * 생기지 않는다. S4·S5는 레인이 계약을 쓰지 않는다. 그래서 S3에서만 본다.
+ */
+function contractNotice(plan: TaskPlanView, lane: TaskPlanLaneView, board: Board): string | undefined {
+  if (plan.coordination?.strategy !== 'S3') return undefined;
+  const posted = board.contractAuthors();
+  const waiting = plan.lanes.filter((other) => other.id !== lane.id && !posted.has(other.id)).map((other) => other.id);
+  if (waiting.length === 0) return undefined;
+  return `[조율] ${waiting.join(', ')}가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요`;
 }
 
 /** S5: 레인 세션 기록에서 검증 실패 서명을 뽑아 플랫폼 이름으로 게시한다 */

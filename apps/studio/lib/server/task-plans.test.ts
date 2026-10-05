@@ -1069,6 +1069,101 @@ describe('레인 조율 전략', () => {
     expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S3', topology: 'star' });
   });
 
+  it('S3 요청 안내는 게시를 읽기보다 먼저 하도록 말한다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: 'S3 안내 순서', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+
+    expect(plan.status).toBe('done');
+    const laneSend = fake.sends.find((send) => send.options.board)!;
+    expect(laneSend.request).toContain('read_notes보다 먼저 post_note(contract)로 게시하세요');
+  });
+
+  it('S3에서 엮인 레인이 아직 계약을 안 내면 read_notes에 안내를 붙이고, 내면 사라진다(이슈 #393, E11)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S3 읽기 타이밍',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'mesh' },
+    });
+    expect(plan.status).toBe('done');
+
+    // 레인에 실제로 넘긴 게시판 래퍼로 각 레인의 read_notes를 흉내 낸다(시크릿 가림 테스트와 같은 방식)
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    const lane1 = laneSends.find((send) => send.options.board!.lane === 'lane-1')!.options.board!;
+    const lane2 = laneSends.find((send) => send.options.board!.lane === 'lane-2')!.options.board!;
+
+    // lane-2가 아직 아무 계약도 안 냈으면 lane-1의 읽기에 안내가 붙는다
+    const before = lane1.read({});
+    expect(before.notice).toBe('[조율] lane-2가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요');
+
+    // lane-2가 계약을 내면 그다음 읽기부터는 안내가 사라진다
+    const posted = lane2.post({ kind: 'contract', body: 'GET /orders → 200 JSON', refs: ['api/OrdersController.java'] });
+    expect(posted.ok).toBe(true);
+    const after = lane1.read({});
+    expect(after.notice).toBeUndefined();
+    expect(after.notes.map((note) => note.body)).toContain('GET /orders → 200 JSON');
+  });
+
+  it('S3 star topology에서도 안내 로직은 topology와 무관하게 동작한다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S3 star 안내',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'star' },
+    });
+    expect(plan.status).toBe('done');
+
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    const lane1 = laneSends.find((send) => send.options.board!.lane === 'lane-1')!.options.board!;
+    const lane2 = laneSends.find((send) => send.options.board!.lane === 'lane-2')!.options.board!;
+
+    // lane-2가 계약을 내도 star에서는 lane-1이 그 메모를 직접 읽지 못한다(topology가 가린다)
+    lane2.post({ kind: 'contract', body: 'GET /orders', refs: ['api/Orders.java'] });
+    const after = lane1.read({});
+    expect(after.notes).toHaveLength(0);
+    // 그래도 "게시했다"는 사실은 안내 로직이 topology와 무관하게 보므로 안내는 사라진다
+    expect(after.notice).toBeUndefined();
+  });
+
+  it('S2는 레인이 돌기 전에 계약을 미리 게시하므로 안내가 붙지 않는다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    const contract = { body: 'GET /api/orders → 200 JSON', refs: ['api'] };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S2 안내 없음',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S2', contracts: [contract] },
+    });
+    expect(plan.status).toBe('done');
+
+    const laneSend = fake.sends.find((send) => send.options.board)!.options.board!;
+    expect(laneSend.read({}).notice).toBeUndefined();
+  });
+
+  it('S5는 레인이 계약을 쓰지 않으므로 안내가 붙지 않는다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: 'S5 안내 없음', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S5' } });
+
+    expect(plan.status).toBe('done');
+    const laneSend = fake.sends.find((send) => send.options.board)!.options.board!;
+    expect(laneSend.read({}).notice).toBeUndefined();
+  });
+
   it('S5는 작업이 끝날 때마다 검증 실패 서명을 플랫폼이 게시하고 모델 쓰기를 끈다', async () => {
     fake.plan = { tasks: [task('a', ['web/a'])] };
     fake.writes = { a: 'fail' };

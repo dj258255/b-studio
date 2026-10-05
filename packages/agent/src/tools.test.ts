@@ -372,6 +372,22 @@ describe('조율 도구', () => {
     expect(facts.content).not.toContain('OrderResponse.memo');
   });
 
+  it('게시판이 notice를 돌려주면(엮인 레인 미게시 안내, 이슈 #393) read_notes 결과에 그대로 붙인다', async () => {
+    const notice = '[조율] lane-2가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요';
+    const ctx: ToolContext = {
+      ...context,
+      board: {
+        lane: 'lane-1',
+        post: () => ({ ok: false, reason: 'unused' }),
+        read: () => ({ notes: [], truncated: false, notice }),
+      },
+    };
+    const outcome = await executeTool('read_notes', { kinds: [] }, ctx);
+    expect(outcome.ok).toBe(true);
+    // notes가 없어도 "(no notes)"가 아니라 안내 문구가 그대로 보인다
+    expect(outcome.content).toBe(notice);
+  });
+
   it('계약 메모에 refs가 없으면 게시판이 거부한 이유를 그대로 돌려준다', async () => {
     const outcome = await executeTool('post_note', { kind: 'contract', body: 'x', refs: [] }, boardContext());
     expect(outcome).toEqual({ ok: false, content: '계약 메모는 refs가 하나 이상 필요합니다' });
