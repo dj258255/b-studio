@@ -134,6 +134,7 @@
 - [ADR-117 작업 분해 레인마다 다른 백엔드·모델을 고르게 한다](#adr-117-작업-분해-레인마다-다른-백엔드모델을-고르게-한다)
 - [ADR-118 Gemini CLI 백엔드: 헤드리스 JSON 호출 + 도구 블록리스트, 세션 이어받기는 최선 추정](#adr-118-gemini-cli-백엔드-헤드리스-json-호출--도구-블록리스트-세션-이어받기는-최선-추정)
 - [ADR-119 게시판을 MCP로 열어 계획 밖 에이전트도 참여하게 한다](#adr-119-게시판을-mcp로-열어-계획-밖-에이전트도-참여하게-한다)
+- [ADR-120 OpenCode 백엔드 되살리기: 멈춰 있던 브랜치가 이미 main에 들어가 있던 것을 확인하고 문서를 맞춘다](#adr-120-opencode-백엔드-되살리기-멈춰-있던-브랜치가-이미-main에-들어가-있던-것을-확인하고-문서를-맞춘다)
 
 ---
 
@@ -4890,6 +4891,42 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **레인 이름이 평평한 네임스페이스 하나를 공유한다.** 외부 토큰의 레인 이름이 실제 레인 id(`lane-1` 등)나 허브 이름(`plan`)과 겹치면 Board가 둘을 구분하지 못하므로(쓰기 한도·topology 그룹이 섞인다), 겹치는 이름은 발급 시점에 막는다 — 다만 사람이 외부 에이전트 이름을 신중히 골라야 한다는 수고는 남는다.
 - **owner/admin 구분 없이 owner만 토큰을 만들고 거둔다.** `task-plans.ts`의 다른 변경 함수들과 같은 규칙(`findPlan`의 엄격한 owner 일치)을 그대로 따른 것이라, 이 기능만 새로 느슨해지거나 빡빡해지지 않았다. 여러 사람이 같은 계획을 관리하는 조직 배포(`B_STUDIO_AUTH=proxy`, admins)에서는 관리자도 소유자가 아니면 토큰을 다루지 못한다 — 필요해지면 `canManage`(`auth.ts`)로 넓히는 건 다음 작업이다.
 - **A2A 어댑터는 만들지 않았다.** 메시지 모양을 지금 따라가 봐야 쓸 클라이언트가 없어 검증할 길이 없다 — 실제로 A2A를 말하는 에이전트가 생기면 `board-mcp.ts`의 `BoardAccess` 계층 위에 어댑터 하나를 더 얹으면 된다(게시판 자체·토큰 체계는 손대지 않아도 된다).
+
+---
+
+## ADR-120 OpenCode 백엔드 되살리기: 멈춰 있던 브랜치가 이미 main에 들어가 있던 것을 확인하고 문서를 맞춘다
+
+상태: 채택
+관련: ADR-093(계정 연결 화면), ADR-117(레인마다 다른 백엔드), ADR-118(Gemini CLI 백엔드), PR #83
+
+### 맥락
+- 지시: "로그인한 제공자가 없어 몇 주 전에 멈춘" 브랜치 `feature/opencode-backend`(커밋 26개)를 오늘 main에 되살리고, Codex·Gemini가 받은 것과 같은 "실계정 확인 전" 취급을 OpenCode에도 주라는 요청을 받았다.
+- `feat/opencode-revive`를 그 브랜치에서 가지 쳐 `origin/main`을 병합하니 `packages/agent/src/opencode-runner.ts`를 비롯한 22개 경로가 충돌했다(`opencode-runner.ts`·`opencode-runner.test.ts`는 add/add).
+- 충돌을 손으로 풀기 전에 두 가지를 맞춰 봤다: 브랜치 끝 커밋(`9342a86`, 2026-09-29 19:08:54)과 main에서 OpenCode를 처음 들인 커밋(`39d1cb2`, "OpenCode를 b-studio 도구만 쓰게 제한해 돌리고…(#83)", 2026-09-29 19:15:29)의 시각이 7분 차이다. 이 저장소는 "브랜치 → PR → 스쿼시 병합" 규칙을 쓰므로, `feature/opencode-backend`는 실제로 PR #83의 원본 브랜치였고 그날 바로 main에 스쿼시 병합됐다고 봐야 한다. 로컬 브랜치 참조만 지워지지 않고 남아 있었던 것이다.
+- main은 #83 이후로도 OpenCode 관련 파일을 계속 건드려 왔다: #167(샌드박스 지연 기동)·#178(가벼운 확인 모드)·#194(자가 확인 lean 모드)·#240(AGENTS.md 프로젝트 가이드 주입)·#293(모델 선택 팝오버·노력 단계)·#317(문서 탭). `packages/agent/src/opencode-runner.ts`를 직접 diff해 확인한 결과, 브랜치판(706줄)은 main 현재판(739줄)의 부분집합이었다 — `effort`/`--variant`, 프로젝트 가이드 주입, 지연 기동(`ensureSandbox`), 가벼운 확인(`verify: 'light'`), 자가 확인(`selfCheck`), 조사(`research`) 모드가 모두 main에만 있고 브랜치에는 없었다. `model-picker.ts`·`model-family.ts`·`cli-accounts.ts`·`fleets.ts`·`apps/studio/bench/coordination/backends.ts`·`packages/agent/src/task-plan.ts`도 이미 OpenCode를 다른 CLI 백엔드와 같은 자리에서 완전히 등록하고 있었다. 브랜치가 머지베이스 대비 건드린 38개 파일 전부가 OpenCode 범위였고, main에 없는 고유 기능은 하나도 찾지 못했다.
+- 반면 `docs/status.md`는 "OpenCode는 로그인한 제공자가 없어 병합 전"이라고 적혀 있었다 — 코드는 몇 주째 main에 들어가 동작 가능한 상태인데 문서만 "병합 전"으로 멈춰 있는 모순이었다. Codex·Gemini 행은 이미 "실계정 확인 전" 어투로 통일돼 있었다.
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| 충돌마다 브랜치(ours) 쪽을 살려 main 구조 위에 다시 얹는다 | "브랜치를 되살렸다"는 지시를 글자 그대로 따르는 모양이 된다 | 이미 main에 들어간 더 발전한 동작(노력 단계·지연 기동·가벼운 확인·AGENTS.md 주입·자가 확인 lean)을 몇 주 전 코드로 되돌리는 순수 퇴행이다. 실제로 더 얻는 기능이 없다 |
+| **충돌마다 origin/main(theirs)을 그대로 채택하고, 문서(`docs/status.md`)만 Codex·Gemini와 같은 어투로 맞춘다(채택)** | 이미 검증되고 계속 진화해 온 구조를 지키면서, 과제가 요구한 "실계정 확인 전" 문서 취급을 정확히 반영한다. 되살릴 고유 로직이 실제로는 없었다는 조사 결과를 투명하게 남긴다 | "극적으로 되살렸다"는 서사는 없다 — 결과는 "이미 되살아나 있었다(사실은 한 번도 죽지 않았다)"는 확인이다 |
+
+### 결정
+1. 22개 충돌 경로(`sessions.ts`·`opencode-runner.ts`/`opencode-runner.test.ts`·`session-store.ts`·`task-plans.ts`·`bench/coordination/backends.ts` 등) 전부 `origin/main` 버전을 그대로 채택했다(`git checkout --theirs`) — 브랜치 쪽 변경은 한 줄도 재적용하지 않았다. `start-session-button.tsx`는 main이 #168(화면 구조 전면 개편)에서 이미 지운 것을 그대로 받아들여 삭제했다.
+2. 병합 작업 도중 `origin/main`이 게시판 MCP(#404, ADR-119)로 다시 앞서가, 두 번째 `git merge origin/main`을 했다 — 이번에는 OpenCode와 겹치는 파일이 없어 충돌 없이 자동 병합됐다.
+3. `docs/status.md`의 OpenCode 설명을 "로그인한 제공자가 없어 병합 전"에서 "실계정 확인 전 — 로그인한 제공자 필요(헤드리스 JSON 출력·도구 경계만 주입 프로세스 테스트로 확인)"으로 고쳤다. 코드는 이미 병합되어 동작 가능한 상태이고, 남은 일은 실계정 검증뿐이라는 사실을 정확히 반영한다.
+4. 로컬 브랜치 `feature/opencode-backend`와 그 작업 디렉터리는 지시대로 손대지 않고 그대로 남겨 둔다 — 이미 #83으로 흡수된 뒤 자연히 쓸모가 없어진 참조라는 사실만 이 ADR에 남겨, 다음에 지워도 안전하다는 근거로 삼는다.
+
+### 검증 결과
+- `pnpm -r typecheck`: `apps/desktop`·`packages/spec`·`packages/sandbox`·`packages/agent`·`apps/cli`·`apps/studio` 6개 패키지 모두 `Done`(`grep -c "typecheck: Done"` = 6).
+- OpenCode·백엔드 관련 테스트만 따로: `packages/agent/src/opencode-runner.test.ts`·`packages/agent/src/task-plan.test.ts`·`apps/studio/lib/server/sessions.test.ts`·`apps/studio/lib/server/session-store.test.ts`·`apps/studio/bench/coordination/backends.test.ts`·`apps/studio/app/api/sessions/route.test.ts` — 6개 파일 147개 테스트 전부 통과.
+- 전체 `npx vitest run`: 293개 파일 3,084개 테스트 중 3,083개 통과, 1개 실패(`packages/sandbox/src/docker/format.test.ts`의 "Kubernetes 파드처럼 절대 경로를 넘기면…", 5000ms 타임아웃). 이 파일은 #319 이후 아무 커밋도 건드리지 않았고 실제 하위 프로세스로 재귀 경로를 확인하는 테스트라, 이번 병합이 아니라 이 작업 환경의 디스크·프로세스 속도 문제로 보인다 — 이번 작업 범위 밖으로 남긴다.
+
+### 감수한 트레이드오프
+- **새 로직을 만들지 않았다.** "되살리기" 지시의 실제 결과는 "이미 main에 들어가 있는 것을 확인하고 문서 불일치를 고친 것"이었다. 다음에 같은 이름의 브랜치나 비슷한 지시를 받는 사람이 다시 같은 조사를 반복하지 않도록 이 ADR에 조사 과정 전체를 남긴다.
+- **OpenCode 실행을 실계정으로 단 한 번도 하지 않았다.** 모델 해석(`opencode models`)·무료 Zen 모델 거절·`--variant` 실제 수용 여부(모델·제공자마다 다를 수 있음, `model-picker.ts` 주석 근거)·세션 `--fork` 이어받기가 문서·CLI 도움말 근거의 최선 추정이라는, main이 #83부터 이미 안고 있던 한계를 그대로 물려받는다. 사람이 로그인한 제공자로 한 번 실행해 모델 해석·도구 왕복을 확인하기 전까지 "구현 상태" 표에는 "실계정 확인 전"으로 남긴다.
+- **`packages/sandbox`의 기존 타임아웃 실패를 고치지 않았다.** OpenCode 범위 밖이고 이번 병합이 건드린 파일도 아니라, 원인 조사는 별도 작업으로 남긴다.
 
 ---
 

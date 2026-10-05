@@ -35,6 +35,7 @@
 - 작업 분해(나눠서 병렬로 하기) 화면의 레인 카드마다 백엔드·모델·노력 단계를 따로 고를 수 있습니다(기본 "세션과 같음" — 계획의 백엔드·모델을 그대로 상속, 지금까지의 동작). 승인 대기 중에만 고를 수 있고 대화 입력창과 같은 모델 선택 팝오버를 재사용하며, 이 서버가 허용하지 않는 백엔드는 고를 수 없습니다. 레인마다 실제로 그 백엔드로 세션이 뜨고, 혼합한 레인의 결과도 기존과 같은 통합 게이트로 다시 검증합니다(`GET /api/task-plans/lane-backends`, `POST /api/task-plans/[id]/lanes/[laneId]/backend`, ADR-117).
 - 구독 CLI 백엔드에 Gemini CLI를 더했습니다(세션·레인·벤치 `--backend gemini`). 헤드리스 `-p --output-format json` 호출로 b-studio MCP 도구와 연결하고, 내장 도구는 `tools.core` allowlist의 알려진 버그 때문에 `excludeTools` 블록리스트로 막습니다(opencode·commandcode의 깨끗한 allowlist보다 약한 경계입니다). 모델은 항상 `-m`으로 직접 입력해야 하고(기본값을 추측하지 않습니다), 노력(추론 강도) 단계는 CLI 플래그를 확인하지 못해 지원하지 않습니다. "계정 연결" 화면에도 더했지만, 인증 방식을 고르는 화면으로 시작해 자동으로 띄우지 못해 명령 복사 안내만 보여줍니다. 실계정 로그인·실행 확인 전입니다.
 - 조율 게시판을 켠 작업 분해 계획에 외부 에이전트(다른 Claude Code 세션·herdr·Codex CLI 등)를 MCP로 연결할 수 있습니다. 작업 분해 화면의 "조율 게시판" 절에서 "외부 에이전트 연결"로 고정 레인 이름(과 선택적 그룹)을 가진 토큰을 만들면 복사해 쓸 MCP 설정(주소·Authorization 헤더)을 보여주고, 그 토큰으로는 `post_note`·`read_notes` 도구만 열립니다 — 레인과 똑같이 실패 메모는 못 쓰고 topology 읽기 범위를 그대로 따릅니다. 토큰은 손으로 거두거나 계획이 끝나면 자동으로 거둬집니다(`POST /api/task-plans/[id]/board/tokens`, `DELETE /api/task-plans/[id]/board/tokens/[tokenId]`, ADR-119).
+- 멈춰 있던 OpenCode 백엔드 브랜치를 오늘 main에 다시 얹었습니다. 조사 결과 그 브랜치는 이미 PR #83으로 main에 들어가 그 뒤로도 계속 발전해 온 상태였고, 구현 상태 표만 낡은 문구로 남아 있었습니다 — `docs/status.md`의 OpenCode 설명을 Codex·Gemini와 같은 "실계정 확인 전" 어투로 맞췄습니다(ADR-120).
 
 ### 변경
 
