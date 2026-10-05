@@ -287,22 +287,40 @@ describe('startEdge', () => {
     return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as net.AddressInfo).port)));
   }
 
+  /**
+   * startEdge가 만든 서버가 실제로 바인딩을 마칠 때까지 기다려 포트를 돌려준다.
+   * 예전에는 listen 포트를 30000~49999 사이에서 무작위로 골라 미리 정해 두고 고정 50ms만 기다렸는데,
+   * 병렬로 도는 다른 테스트 파일이 같은 번호를 고르면 EADDRINUSE가 나고, startEdge 안의 서버에는
+   * error 리스너가 없어 처리되지 않은 에러로 번져 스위트 전체가 실패했다(#405).
+   * listen(0, ...)으로 OS가 고르게 하고 'listening'/'error'를 직접 구독하면 충돌 자체가 생기지 않고,
+   * 그래도 에러가 나면 테스트 실패로 드러난다
+   */
+  function ready(server: net.Server): Promise<number> {
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.once('listening', () => {
+        server.off('error', reject);
+        resolve((server.address() as net.AddressInfo).port);
+      });
+    });
+  }
+
   it('공개 포트로 들어온 연결을 서비스로 넘긴다', async () => {
     const service = http.createServer((_, response) => response.end('hello from web'));
     servers.push(service);
     const servicePort = await listen(service);
-    const listenPort = 30_000 + Math.floor(Math.random() * 20_000);
-    servers.push(...startEdge({ forwards: [{ listen: listenPort, host: '127.0.0.1', port: servicePort }], rules: [], proxyPort: listenPort + 1 }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const [forward, proxy] = startEdge({ forwards: [{ listen: 0, host: '127.0.0.1', port: servicePort }], rules: [], proxyPort: 0 });
+    servers.push(forward!, proxy!);
+    const [listenPort] = await Promise.all([ready(forward!), ready(proxy!)]);
 
     const body = await fetch(`http://127.0.0.1:${listenPort}/`).then((response) => response.text());
     expect(body).toBe('hello from web');
   });
 
   it('허용 목록에 없는 CONNECT와 사설 주소로 풀리는 이름은 403으로 막는다', async () => {
-    const proxyPort = 30_000 + Math.floor(Math.random() * 20_000);
-    servers.push(...startEdge({ forwards: [], rules: ['localhost'], proxyPort }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const [proxy] = startEdge({ forwards: [], rules: ['localhost'], proxyPort: 0 });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
 
     const connect = (target: string) =>
       new Promise<string>((resolve) => {
@@ -319,9 +337,9 @@ describe('startEdge', () => {
   });
 
   it('경로·메서드 규칙만 있는 호스트는 CONNECT 터널로 열지 않는다', async () => {
-    const proxyPort = 30_000 + Math.floor(Math.random() * 20_000);
-    servers.push(...startEdge({ forwards: [], rules: [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/*'] }], proxyPort }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const [proxy] = startEdge({ forwards: [], rules: [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/*'] }], proxyPort: 0 });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
 
     const status = await new Promise<string>((resolve) => {
       const socket = net.connect(proxyPort, '127.0.0.1', () => socket.write('CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n'));
