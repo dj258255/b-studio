@@ -24,6 +24,9 @@
  *  - opencode: 실제 CLI(`opencode run --help`)가 `--variant <level>`을 받는다("model variant (provider-specific
  *    reasoning effort, e.g., high, max, minimal)") — 제공자·모델마다 실제로 받아들이는 값이 다를 수 있어 note로 알린다.
  *    같은 이유로 `defaultLevel`이 없다.
+ *  - gemini: 공식 문서에서 노력(thinking budget) 단계를 고르는 CLI 플래그를 찾지 못했다(0단계 조사, gemini-cli-runner.ts
+ *    머리말 참고). 그래서 노력 단계를 지원하지 않는다고 그대로 알린다 — 다른 백엔드처럼 "확인은 못 했지만 일단 전달"
+ *    하지 않는다(전달해도 CLI가 받는지 모르는 값을 보내지 않는다).
  *  - api: Anthropic 클라이언트(anthropic-client.ts)만 `output_config.effort`로 실제로 보낸다. OpenAI 호환·Google
  *    클라이언트(provider-clients.ts)는 이 옵션을 보내는 자리가 없어 지원하지 않는다고 그대로 알린다.
  *  - demo: 모델을 부르지 않으므로 지원하지 않는다.
@@ -343,6 +346,16 @@ export async function listSelectableModels(backend: SessionMode, current?: strin
       effort: await effortPickerFor(backend, current, currentEffort),
     };
   }
+  if (backend === 'gemini') {
+    // Gemini CLI가 모델 목록을 돌려주는 명령을 확인하지 못해(0단계 조사), 미리 아는 목록이 없다. 직접 모델 id를 입력받는다
+    return {
+      backend,
+      current,
+      options: [{ id: '', label: DEFAULT_LABEL, hint: 'Gemini CLI 로그인 계정의 기본 모델을 그대로 씁니다' }],
+      note: 'Gemini CLI는 스튜디오가 미리 아는 모델 목록이 없어 기본만 고를 수 있습니다. 서버 환경 변수(B_STUDIO_GEMINI_MODEL)로 다른 모델을 고정할 수 있습니다(예: gemini-2.5-pro)',
+      effort: await effortPickerFor(backend, current, currentEffort),
+    };
+  }
   // api
   const models = listModelOptions().filter((model) => model.configured && model.enabled !== false);
   return {
@@ -425,6 +438,10 @@ export async function effortPickerFor(
       levels: EFFORT_LEVELS,
       note: '모델·제공자마다 실제로 받아들이는 값이 다를 수 있습니다(OpenCode의 --variant)',
     };
+  }
+  if (backend === 'gemini') {
+    // CLI가 노력(thinking budget) 단계를 고르는 플래그를 확인하지 못했다(gemini-cli-runner.ts 머리말 참고)
+    return { supported: false, current: currentLevel, levels: [], reason: 'Gemini CLI가 지원하는 노력 단계 플래그를 확인하지 못했습니다' };
   }
   if (backend === 'api') {
     if (!modelId) {

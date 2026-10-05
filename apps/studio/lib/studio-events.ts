@@ -8,8 +8,8 @@ import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
  * starting: 켜는 중. ready: 켜짐. failed: 켜지 못함. stopped: 중지했다(이어서 작업하면 다시 켠다)
  */
 export type SessionStatus = 'idle' | 'starting' | 'ready' | 'failed' | 'stopped';
-/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, commandcode: 이 PC에 로그인한 Command Code, opencode: 이 PC에 설치된 OpenCode CLI, demo: 준비된 스크립트 */
-export type SessionMode = 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'demo';
+/** api: 모델 API 키, claude-code: 이 PC에 로그인한 Claude Code, codex: 이 PC에 로그인한 Codex CLI, commandcode: 이 PC에 로그인한 Command Code, opencode: 이 PC에 설치된 OpenCode CLI, gemini: 이 PC에 로그인한 Gemini CLI, demo: 준비된 스크립트 */
+export type SessionMode = 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'gemini' | 'demo';
 /** copy: 세션마다 만든 작업 복사본에서 작업한다. local: 사용자의 프로젝트 폴더에서 바로 작업한다 */
 export type WorkspaceKind = 'copy' | 'local';
 /**
@@ -85,7 +85,7 @@ export interface SessionSnapshot {
   backend?: SessionMode;
   /**
    * 이 세션에 고정한 모델. 대화 입력창의 모델 선택(#271 다음 요청)으로 바꾼다.
-   * api는 모델 레지스트리 id, claude-code·codex는 CLI에 넘기는 모델 이름(별칭), commandcode·opencode는 그 CLI의 모델 id다.
+   * api는 모델 레지스트리 id, claude-code·codex는 CLI에 넘기는 모델 이름(별칭), commandcode·opencode·gemini는 그 CLI의 모델 id다.
    * 없으면 api는 요청마다 라우터가 고르고, 나머지는 계정 기본 모델을 쓴다
    */
   modelId?: string;

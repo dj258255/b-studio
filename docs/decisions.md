@@ -132,6 +132,7 @@
 - [ADR-115 PR 초안의 기본 연결 이슈·제목 범위를 이 세션이 실제로 건드린 요구사항으로 좁힌다(ADR-110 일부 개정)](#adr-115-pr-초안의-기본-연결-이슈제목-범위를-이-세션이-실제로-건드린-요구사항으로-좁힌다adr-110-일부-개정)
 - [ADR-116 S3 게시판의 읽기 타이밍 경쟁은 배리어가 아니라 재시도 안내로 고친다](#adr-116-s3-게시판의-읽기-타이밍-경쟁은-배리어가-아니라-재시도-안내로-고친다)
 - [ADR-117 작업 분해 레인마다 다른 백엔드·모델을 고르게 한다](#adr-117-작업-분해-레인마다-다른-백엔드모델을-고르게-한다)
+- [ADR-118 Gemini CLI 백엔드: 헤드리스 JSON 호출 + 도구 블록리스트, 세션 이어받기는 최선 추정](#adr-118-gemini-cli-백엔드-헤드리스-json-호출--도구-블록리스트-세션-이어받기는-최선-추정)
 
 ---
 
@@ -4805,6 +4806,51 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **사람이 레인마다 고르는 수고가 그대로 남는다.** B안(모델이 제안)을 포기했으므로, "어떤 레인에 어떤 백엔드가 적합한가"는 여전히 사람의 판단이다. 기본값(세션과 같음)이 있어 선택이 필요 없는 경우에는 비용이 없다.
 - **모델이 만든 계획의 레인 수·쓰기 범위가 정해진 뒤에만 백엔드를 고를 수 있다.** "이 작업은 Codex가 잘할 것 같다"처럼 계획을 짜기 전부터 레인-백엔드를 미리 정해 둘 수는 없다(벤치의 `--lane-backend`는 레인 그룹이 `api`/`web`으로 고정돼 있어 가능하지만, 제품의 레인은 모델이 쓰기 범위로 나눈 뒤에야 `lane-1`·`lane-2`로 정해진다).
 - **레인 모델 목록 조회(`GET /api/task-plans/lane-backends`)가 `claude-code` 백엔드를 고를 때마다 그 CLI에 모델 목록을 물어본다(1시간 캐시, `claude-code-models.ts`의 기존 캐시를 그대로 쓴다).** 레인마다 반복해 고르면 캐시가 없던 첫 호출에서 약간의 지연이 있을 수 있다 — 기존 대화 입력창의 모델 선택과 같은 비용이라 새로 생기는 문제는 아니다.
+
+---
+
+## ADR-118 Gemini CLI 백엔드: 헤드리스 JSON 호출 + 도구 블록리스트, 세션 이어받기는 최선 추정
+
+상태: 채택
+관련: ADR-093(계정 연결 화면), ADR-089~091(구독 CLI 러너 패턴), 이슈 #397
+
+### 맥락
+- 이슈 #397은 다른 구독 CLI 러너(Claude Code·Codex·Command Code·OpenCode)와 같은 공통 도구 계약으로 Google Gemini CLI(`@google/gemini-cli`, 이하 `gemini`)를 세션·레인·벤치에서 돌리는 백엔드를 요청했다. 무료 쿼터가 커서 실험 비용 면에서 이득이 있다고 봤다.
+- 실제 호출 없이(API 예산이 없다 — `no-api-budget-use-subscriptions`) 공식 문서·GitHub 이슈로 0단계 조사만 했다. 확인한 사실과 확인하지 못한 사실을 가른다.
+- **헤드리스 실행(확인됨).** `gemini -p "<prompt>" --output-format json`이 한 번에 JSON 문서 하나(`response`·`stats.models[].tokens`(prompt/candidates/cached/thoughts/tool)·`error{type,message,code}`)를 표준출력에 낸다(Gemini CLI 공식 문서 [headless.html](https://google-gemini.github.io/gemini-cli/docs/cli/headless.html)). NDJSON으로 턴마다 이벤트를 받는 `--output-format stream-json`(`init`에 session_id가 실린다는 보고)도 있지만 비공식 2차 출처([stream-json cheatsheet](https://littlebearapps.com/help/untether/gemini-stream-json-cheatsheet/), [PR #10883](https://github.com/google-gemini/gemini-cli/pull/10883))뿐이라 쓰지 않았다.
+- **도구 경계(알려진 버그, 확인됨).** 내장 도구를 모두 거부하고 b-studio MCP 도구만 허용(allowlist)하는 다른 러너의 패턴을 그대로 쓸 수 없다 — `tools.core` allowlist에 알려진 버그가 있어(어떤 값을 넣든 빈 배열 포함, MCP 도구까지 함께 숨는다, [issue #28361](https://github.com/google-gemini/gemini-cli/issues/28361)) 블록리스트(`excludeTools`)만 안전하게 쓸 수 있다. MCP 서버는 `trust: true`로 등록해 도구 호출 확인을 생략한다.
+- **세션 이어받기(불확실).** `~/.gemini/tmp/<project_hash>/chats/`에 cwd 해시로 세션을 저장하고 `--resume <uuid>`가 있다고 공식 문서([session-management.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/session-management.md))에 적혀 있지만, 헤드리스 `-p --output-format json` 응답에 세션 id가 실제로 실리는지는(그 필드가 `stream-json`의 `init` 이벤트에만 확인됐다) 확인하지 못했다.
+- **노력(thinking budget) 단계(확인 못 함).** Gemini API 자체의 `thinkingConfig.thinkingBudget`을 CLI가 노출하는 플래그를 문서에서 찾지 못했다.
+- **ACP(Agent Client Protocol) 모드.** `gemini --acp`로 JSON-RPC 2.0/stdio 기반 제어가 가능하고 Zed 에디터 통합에 쓰인다([ACP Mode](https://geminicli.com/docs/cli/acp-mode.md), [Zed 발표](https://zed.dev/blog/bring-your-own-agent-to-zed)). 다만 ACP는 클라이언트가 파일 I/O를 가로채는 "proxied file system" 구조라 b-studio의 MCP 기반 도구 계약과 결이 다르고 구현 난도가 훨씬 높다.
+- **중요(사람이 확인할 일, 2026-10-05 기준 이미 지난 공지).** 구글이 2026-05-19(Google I/O 2026)에 레거시 `gemini` CLI가 2026-06-18부로 Google AI Pro/Ultra·무료 개인 Gemini Code Assist 사용자에 대한 요청 처리를 끊고 후속 도구 Antigravity CLI로 옮기라고 공지했다([공식 블로그](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). 조직이 산 Gemini Code Assist Standard/Enterprise 라이선스 사용자만 레거시 CLI를 계속 쓸 수 있다. GitHub 저장소 README는 이 공지를 아직 반영하지 않았다.
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| **헤드리스 `-p --output-format json` + MCP 서버 + excludeTools 블록리스트(채택)** | opencode·commandcode 러너와 같은 "하위 프로세스 + MCP 도구 서버" 구조를 그대로 재사용할 수 있다. 공식 문서로 확인된 가장 단순하고 안정적인 인터페이스다 | 도구 경계가 블록리스트뿐이라(`tools.core` 버그) 새 내장 도구가 CLI에 추가되면 이 목록이 따라가지 못해 b-studio 도구 밖에서 실제로 파일이 바뀔 수 있다. 세션 이어받기가 실제로 되는지 확인하지 못했다 |
+| `--output-format stream-json` + ACP처럼 구조적 스트림 파싱 | 턴 중간의 도구 호출·거부를 실시간으로 감사(audit)할 수 있어 다른 러너의 `policy` 이벤트 수준에 맞출 수 있다 | 스키마 자체가 비공식 2차 출처(서드파티 cheatsheet·미병합 PR)뿐이라 공식 계약이 아니다. 실계정 확인 전에 이 스키마에 기대 파싱 로직을 짜면 "확인했다"고 말할 수 없는 동작을 사실처럼 코드에 박게 된다 |
+| ACP(`gemini --acp`) 모드 | 세션 재개(`loadSession`)·도구 제어가 프로토콜 수준에서 더 정교하다 | 파일 I/O를 클라이언트가 가로채는 구조라 b-studio의 "모델은 MCP 도구만 쓴다" 경계와 설계가 달라 기존 러너 패턴을 재사용할 수 없다(이슈가 요구한 "기존 패턴 재사용"에 어긋난다). 구현 난도가 가장 높다 |
+
+### 결정
+1. `packages/agent/src/gemini-cli-runner.ts`에 `runGeminiAgent`를 opencode·commandcode 러너와 같은 모양(하위 프로세스 주입점 `GeminiProcess`, MCP 도구 서버, `VerificationGate`로 완료 판정)으로 만들되, NDJSON 줄 단위 스트리밍이 아니라 **한 번에 문서 하나**(`--output-format json`)를 받는다.
+2. 도구 경계는 작업 폴더의 `.gemini/settings.json`에 b-studio MCP 서버(`httpUrl`+`trust: true`)와 알려진 내장 도구 전체를 `excludeTools`로 등록하는 **블록리스트**로 막는다. `tools.core` allowlist는 쓰지 않는다(버그로 MCP 도구까지 숨긴다). 이 경계는 opencode·commandcode의 allowlist보다 약하다는 것을 그대로 한계로 남긴다.
+3. 모델은 항상 `-m`으로 직접 받고 기본값을 추측하지 않는다(opencode와 같은 원칙 — Gemini 모델 이름이 2.5→3.x로 자주 바뀐다). 노력 단계는 CLI 플래그를 확인하지 못해 지원하지 않고, 받으면 조용히 버리지 않고 경고 이벤트로 알린다. 모델 승격도 지원하지 않는다(codex·commandcode·opencode와 같은 규칙).
+4. 세션 id는 응답 JSON에 `session_id`/`sessionId` 필드가 있으면 받아 다음 턴에 `--resume <id>`로 넘기고(opencode의 `stateDir` 패턴 — HOME·cwd를 세션마다 고정해 실행 사이에도 이어받을 조건을 만든다), 없으면 조용히 새 대화로 진행한다. 실패시키지 않되, 다음 턴이 이전 턴의 맥락을 잃을 수 있다는 것을 한계로 남긴다.
+5. HOME을 임시/고정 폴더로 격리해 사용자 전역 설정(`~/.gemini`)이 모델에 실리지 않게 하고, 로그인 파일(`oauth_creds.json`)만 심볼릭 링크로 빌려온다(다른 러너와 같은 패턴).
+6. 벤치(`apps/studio/bench/coordination/backends.ts`의 `--backend gemini`)·세션 백엔드(`SessionMode`)·Agent Fleet·모델 계열(`modelFamily` — google 공급자의 api 모델과 같은 계열로 본다, "검토는 다른 계열이" 원칙을 지킨다)·계정 연결 화면(`cli-accounts.ts`)에 모두 연결한다. 계정 연결 화면은 opencode와 같은 이유(헤드리스 로그인 플래그를 확인하지 못했다)로 자동 로그인을 띄우지 않고 명령 복사 안내만 보여준다.
+7. 실계정 로그인·실행은 사람이 할 일로 남긴다(사람이 `gemini`로 로그인하고, 특히 **조직의 Gemini Code Assist 라이선스 여부**를 먼저 확인해야 한다 — 없으면 2026-06-18 이후 개인 무료 계정으로는 레거시 CLI가 아예 안 될 수 있다).
+
+### 검증 결과
+- `packages/agent/src/gemini-cli-runner.test.ts`: 주입한 가짜 프로세스로 도구 호출 왕복(MCP 서버 → `executeTool` → 작업 공간 변경), `.gemini/settings.json`의 `mcpServers.httpUrl`·`trust: true`·`excludeTools` 블록리스트, 모델 필수(기본값 추측 안 함), `session_id`가 있을 때만 `--resume`으로 이어받고 없으면 새 대화로 진행하는 것, `stateDir`로 실행 사이 HOME·cwd 고정, 모델 승격·노력 단계 경고 이벤트, 사용 한도·인증 실패·취소 분류, JSON이 아닌 응답은 원문을 그대로 보여주고 지어내지 않는 것, 모델별 토큰 합산(`prompt`→input, `candidates+thoughts`→output, `cached`→cacheRead)을 확인했다. 실제 `gemini` 바이너리나 네트워크는 전혀 부르지 않는다.
+- `apps/studio/lib/server/gemini-models.test.ts`·`cli-accounts.test.ts`(보강)·`sessions.test.ts`·`session-store.test.ts`·`model-family.test.ts`·`model-picker.test.ts`·`bench/coordination/backends.test.ts`·`task-plan.test.ts`(보강): 백엔드 목록·세션 상태 폴더·모델 계열·모델 선택 팝오버·벤치 `--backend gemini`·레인 계획 스키마에 `gemini`가 다른 CLI 백엔드와 같은 자리에서 동작하는 것을 확인했다.
+- `pnpm -r typecheck`(6개 패키지) 전부 `Done`.
+
+### 감수한 트레이드오프
+- **도구 경계가 allowlist가 아니라 블록리스트다.** `tools.core` 버그 때문에 어쩔 수 없이 고른 차선책이다. Gemini CLI가 내장 도구를 추가하면 이 블록리스트가 따라가지 못해 b-studio 도구 밖에서 실제로 작업 공간이 바뀔 수 있다 — 실계정으로 `gemini mcp list`·실제 도구 호출 캡처를 떠 블록리스트를 재검증해야 한다(opencode가 0단계에서 실행 캡처로 권한 규칙을 확인한 것과 같은 작업이 남아 있다).
+- **세션 이어받기가 실제로 되는지 확인하지 못했다.** 응답 JSON에 세션 id가 실리는지가 비공식 출처(stream-json)에서만 확인됐다. 실계정으로 확인해 안 되는 것으로 밝혀지면, 턴마다 완전히 새 대화로 시작한다는 뜻이라 게이트 재시도의 피드백이 이전 턴 맥락 없이 전달된다 — 품질 저하 가능성을 그대로 안고 간다.
+- **노력(추론 강도) 단계를 지원하지 않는다.** 다른 백엔드처럼 "확인은 못 했지만 일단 전달"하지 않고 아예 보내지 않는다 — CLI가 받지 않는 플래그를 보내 조용히 무시되는 것보다, 지원하지 않는다고 명확히 아는 쪽을 골랐다.
+- **구글의 2026-06-18 레거시 CLI 전환 공지를 반영하지 못한 채 구현했다.** 개인 무료 계정으로는 이 러너가 아예 작동하지 않을 수 있다. 조직 라이선스가 없으면 Antigravity CLI로 틀을 바꾸는 후속 작업이 필요할 수 있다 — 이번 작업 범위 밖으로 남긴다.
+- **실계정 호출을 한 번도 하지 않았다.** 헤드리스 JSON 스키마·오류 메시지 문구·인증 실패 종료 코드 모두 공식 문서·GitHub 이슈의 보고를 근거로 한 최선 추정이다. 사람이 로그인해 실행해 보기 전까지 "구현 상태" 표에 "실계정 확인 전"으로 남긴다.
 
 ---
 

@@ -2,27 +2,27 @@
  * 벤치마크 실행 방식(백엔드)과 사용 한도 정책.
  *
  * 모델 경로를 조용한 기본값으로 고르지 않는다. `--dry`는 항상 openai 가짜 상류를 쓰고,
- * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex·commandcode·opencode=본인 PC CLI, openai=유료 API).
+ * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex·commandcode·opencode·gemini=본인 PC CLI, openai=유료 API).
  */
 
 import type { SelfCheckMode } from '@b-studio/agent';
 import type { Strategy } from './tasks';
 
-export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'openai';
+export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'gemini' | 'openai';
 export type RateLimitPolicy = 'stop' | 'wait';
 /** 검증 범위(--verify). 기본 full은 지금과 같고, light는 레인·통합 게이트가 재시작·준비·계약만 확인한다 */
 export type BenchVerify = 'full' | 'light';
 
 export interface BackendChoice {
   backend: Backend;
-  /** claude-code·codex·commandcode·opencode에서 고정할 모델 이름. openai면 없다(상류 모델은 BENCH_UPSTREAM_MODEL로 받는다) */
+  /** claude-code·codex·commandcode·opencode·gemini에서 고정할 모델 이름. openai면 없다(상류 모델은 BENCH_UPSTREAM_MODEL로 받는다) */
   model?: string;
 }
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'sonnet';
 
 export function isBackend(value: string): value is Backend {
-  return value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'openai';
+  return value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'gemini' || value === 'openai';
 }
 
 export function resolveBackend(input: { dry: boolean; backend?: string; model?: string }): BackendChoice {
@@ -31,10 +31,10 @@ export function resolveBackend(input: { dry: boolean; backend?: string; model?: 
     if (input.model !== undefined) throw new Error('--dry는 --model과 함께 쓸 수 없습니다');
     return { backend: 'openai' };
   }
-  if (input.backend === undefined) throw new Error('--backend가 필요합니다: claude-code, codex, commandcode, opencode 또는 openai (모델 경로를 조용히 고르지 않습니다)');
-  if (!isBackend(input.backend)) throw new Error(`알 수 없는 백엔드입니다: ${input.backend} (claude-code, codex, commandcode, opencode 또는 openai)`);
+  if (input.backend === undefined) throw new Error('--backend가 필요합니다: claude-code, codex, commandcode, opencode, gemini 또는 openai (모델 경로를 조용히 고르지 않습니다)');
+  if (!isBackend(input.backend)) throw new Error(`알 수 없는 백엔드입니다: ${input.backend} (claude-code, codex, commandcode, opencode, gemini 또는 openai)`);
   if (input.backend === 'openai') {
-    if (input.model !== undefined) throw new Error('--model은 --backend claude-code, codex, commandcode 또는 opencode에서만 쓸 수 있습니다');
+    if (input.model !== undefined) throw new Error('--model은 --backend claude-code, codex, commandcode, opencode 또는 gemini에서만 쓸 수 있습니다');
     return { backend: 'openai' };
   }
   const model = input.model?.trim();
@@ -46,6 +46,11 @@ export function resolveBackend(input: { dry: boolean; backend?: string; model?: 
   if (input.backend === 'opencode') {
     if (!model) throw new Error('--backend opencode에는 --model이 필요합니다 (기본 모델을 추측하지 않습니다. `opencode models`로 로그인한 제공자의 모델을 고르세요)');
     return { backend: 'opencode', model };
+  }
+  // gemini도 모델을 추측하지 않는다. 모델 이름이 자주 바뀌는 CLI라 다른 러너보다도 더 기본값을 두지 않는다
+  if (input.backend === 'gemini') {
+    if (!model) throw new Error('--backend gemini에는 --model이 필요합니다 (기본 모델을 추측하지 않습니다. 예: gemini-2.5-pro)');
+    return { backend: 'gemini', model };
   }
   return { backend: 'claude-code', model: model || DEFAULT_CLAUDE_CODE_MODEL };
 }
@@ -59,6 +64,7 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
   if (backend === 'codex') return `local-cli-chatgpt:${requestedModel || 'default'}`;
   if (backend === 'commandcode') return `local-cli-commandcode:${requestedModel || 'default'}`;
   if (backend === 'opencode') return `local-cli-opencode:${requestedModel || 'default'}`;
+  if (backend === 'gemini') return `local-cli-gemini:${requestedModel || 'default'}`;
   return upstreamModelId;
 }
 
@@ -199,7 +205,7 @@ export function parseLaneBackend(value: string): LaneBackendChoice {
   const colon = rest.indexOf(':');
   const backend = (colon < 0 ? rest : rest.slice(0, colon)).trim();
   const model = colon < 0 ? undefined : rest.slice(colon + 1).trim() || undefined;
-  if (!isBackend(backend)) throw new Error(`알 수 없는 레인 백엔드입니다: ${backend} (claude-code, codex, commandcode, opencode 또는 openai)`);
+  if (!isBackend(backend)) throw new Error(`알 수 없는 레인 백엔드입니다: ${backend} (claude-code, codex, commandcode, opencode, gemini 또는 openai)`);
   return { group: group as BenchLaneGroup, backend, ...(model ? { model } : {}) };
 }
 
@@ -215,7 +221,7 @@ export function parseLaneBackends(values: readonly string[] | undefined): Map<Be
 }
 
 /** 벤치 백엔드 → 세션 백엔드. openai는 api 세션이다 */
-export function sessionBackendOf(backend: Backend): 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' {
+export function sessionBackendOf(backend: Backend): 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'gemini' {
   return backend === 'openai' ? 'api' : backend;
 }
 

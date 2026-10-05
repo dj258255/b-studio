@@ -17,7 +17,7 @@ const MAX_REQUEST = 20_000;
  * 데모는 준비된 대본을 도는 것이라 비교할 후보가 아니다. 나머지 백엔드는 멤버 세션을 그 백엔드로 만들면 된다.
  * capabilities가 같은 목록을 화면에 알린다 — 두 곳이 갈라지지 않게 여기 한 곳에 둔다
  */
-export const FLEET_MODES = ['api', 'claude-code', 'codex', 'commandcode', 'opencode'] as const;
+export const FLEET_MODES = ['api', 'claude-code', 'codex', 'commandcode', 'opencode', 'gemini'] as const;
 
 /**
  * 후보를 주지 않았을 때의 기본 후보(홈 화면이 쓴다).
