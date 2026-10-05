@@ -104,6 +104,7 @@ import {
   preflightCodex,
   preflightCommandCode,
   preflightOpenCode,
+  preflightGemini,
   releaseBlockers,
   RemoteConflictError,
   reviewIndependence,
@@ -114,6 +115,7 @@ import {
   runCodexAgent,
   runCommandCodeAgent,
   runOpenCodeAgent,
+  runGeminiAgent,
   ScriptedModelClient,
   type ScriptedTurn,
   CLI_TIERS,
@@ -281,6 +283,7 @@ import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServic
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
 import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
+import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
@@ -316,6 +319,7 @@ import {
   archivedSnapshot,
   closeUnfinished,
   commandCodeStateDirOf,
+  geminiStateDirOf,
   isProcessAlive,
   openCodeStateDirOf,
   readSessions,
@@ -414,6 +418,15 @@ interface Session {
    * 이어받기는 세션을 갈라(fork) 하므로 여기에는 이어받을 세션 id와 알림만 둔다
    */
   openCode: {
+    sessionId?: string;
+    /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
+    notes: string[];
+  };
+  /**
+   * 로컬 Gemini Agent 모드의 대화. 세션 id가 실제로 응답에 실리는지는 확인하지 못했다(gemini-cli-runner.ts 머리말 참고) —
+   * 실리면 받아서 이어받고, 아니면 매번 새 대화로 시작한다
+   */
+  gemini: {
     sessionId?: string;
     /** 체크포인트 복원처럼 대화 밖에서 바뀐 사실. 다음 요청 앞에 붙여 알린다 */
     notes: string[];
@@ -796,6 +809,7 @@ async function startSession({
     codex: { notes: [], recent: [] },
     commandCode: { notes: [] },
     openCode: { notes: [] },
+    gemini: { notes: [] },
     sourceDirtyFiles,
     lazy,
     serviceSelection,
@@ -830,6 +844,7 @@ type NewSession = Pick<
   | 'codex'
   | 'commandCode'
   | 'openCode'
+  | 'gemini'
   | 'sourceDirtyFiles'
   | 'lazy'
   | 'serviceSelection'
@@ -1255,6 +1270,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       commandCode: { sessionId: data.commandCode?.sessionId, notes: [...(data.commandCode?.notes ?? [])] },
       // 이 필드가 생기기 전에 저장한 기록에는 없다
       openCode: { sessionId: data.openCode?.sessionId, notes: [...(data.openCode?.notes ?? [])] },
+      // 이 필드가 생기기 전에 저장한 기록에는 없다
+      gemini: { sessionId: data.gemini?.sessionId, notes: [...(data.gemini?.notes ?? [])] },
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 이어서 작업하기는 샌드박스를 바로 켠다(지연 기동이 아니다)
       lazy: false,
@@ -1813,6 +1830,7 @@ type RunPlan = (
   | { kind: 'codex'; allowBreaking: boolean; intent: Intent }
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
+  | { kind: 'gemini'; allowBreaking: boolean; intent: Intent }
 ) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean; verify?: VerifyMode; research?: boolean };
 
 /**
@@ -1825,6 +1843,7 @@ export function planKindForBackend(backend: SessionMode): RunPlan['kind'] | unde
   if (backend === 'codex') return 'codex';
   if (backend === 'commandcode') return 'commandcode';
   if (backend === 'opencode') return 'opencode';
+  if (backend === 'gemini') return 'gemini';
   return undefined;
 }
 
@@ -1859,6 +1878,7 @@ function planRun(session: Session, request: string, allowBreaking: boolean, inte
   if (kind === 'codex') return { kind: 'codex', allowBreaking, intent };
   if (kind === 'commandcode') return { kind: 'commandcode', allowBreaking, intent };
   if (kind === 'opencode') return { kind: 'opencode', allowBreaking, intent };
+  if (kind === 'gemini') return { kind: 'gemini', allowBreaking, intent };
 
   // 데모 모드는 스크립트이므로 준비된 요청과 질문만 순서대로 실행한다. 다른 요청을 받은 척하지 않는다
   const scenario = demoScenarios(session.project)[session.demoIndex];
@@ -2460,6 +2480,31 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     return result;
   }
 
+  if (plan.kind === 'gemini') {
+    const preflight = await preflightGemini();
+    if (!preflight.ok) return { preflightError: preflight.reason };
+
+    // Gemini CLI도 세션 id가 실리면(확인 못 함, gemini-cli-runner.ts 머리말 참고) 이어받으므로 opencode·commandcode처럼
+    // 요약 블록을 붙이지 않는다. 이 러너는 아직 main이 새로 넣은 interactive·board·steering을 받지 않는다(다른 CLI 러너와 같다).
+    const { gemini } = session;
+    const result = await runGeminiAgent({
+      ...shared,
+      ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
+      request: [...gemini.notes, request].join('\n\n'),
+      resume: gemini.sessionId,
+      // Gemini CLI는 세션을 cwd 해시로 HOME 아래에 저장한다고 문서에 적혀 있다. 둘을 세션마다 고정해 다음 요청이 이어받게 한다
+      stateDir: geminiStateDirOf(session.snapshot),
+      // 세션에서 고른 모델 → B_STUDIO_GEMINI_MODEL → 없음(러너가 "모델을 골라야 합니다" 오류를 낸다)
+      model: resolveGeminiModel(session.snapshot.modelId, process.env.B_STUDIO_GEMINI_MODEL),
+      // 세션에서 고른 노력 단계가 있어도 그대로 넘긴다 — 지원 여부 판단은 러너가 한다(경고 이벤트로 알린다)
+      ...(session.snapshot.effort ? { effort: session.snapshot.effort } : {}),
+    });
+    // 예외로 끝나면 여기까지 오지 않으므로 이전 세션과 알림이 그대로 남아 다음 요청이 이어받는다
+    gemini.notes = [];
+    if (result.sessionId) gemini.sessionId = result.sessionId;
+    return result;
+  }
+
   if (plan.route) {
     shared.onEvent({
       type: 'route',
@@ -2759,6 +2804,7 @@ function noteForModel(session: Session, text: string): void {
   else if (backend === 'codex') session.codex.notes.push(text);
   else if (backend === 'commandcode') session.commandCode.notes.push(text);
   else if (backend === 'opencode') session.openCode.notes.push(text);
+  else if (backend === 'gemini') session.gemini.notes.push(text);
   else session.conversation.push({ role: 'user', content: text });
   session.settledConversation = session.conversation.length;
 }
@@ -5940,6 +5986,7 @@ function toPersisted(session: Session): PersistedSession {
     codex: session.codex,
     commandCode: session.commandCode,
     openCode: session.openCode,
+    gemini: session.gemini,
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
@@ -6086,12 +6133,12 @@ function demoScenarios(project: LoadedProject): readonly DemoScenario[] {
 export function sessionMode(env: Record<string, string | undefined> = process.env): SessionMode {
   const value = env.B_STUDIO_MODE?.trim();
   if (!value || value === 'api') return 'api';
-  if (value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'demo') return value;
-  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, codex, commandcode, opencode, demo 중 하나여야 합니다 (지금 값: ${value})`);
+  if (value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'gemini' || value === 'demo') return value;
+  throw new StudioError(500, `B_STUDIO_MODE는 api, claude-code, codex, commandcode, opencode, gemini, demo 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
 /** 세션 백엔드로 고를 수 있는 값(demo 제외). 서버 모드는 기본값이고 B_STUDIO_BACKENDS가 허용 목록을 넓힌다 */
-export const SESSION_BACKENDS = ['api', 'claude-code', 'codex', 'commandcode', 'opencode'] as const;
+export const SESSION_BACKENDS = ['api', 'claude-code', 'codex', 'commandcode', 'opencode', 'gemini'] as const;
 
 /**
  * 이 서버에서 쓸 수 있는 백엔드. 서버 모드는 언제나 포함하고(계획 기본·통합 세션) B_STUDIO_BACKENDS가 더한다.
@@ -6123,7 +6170,7 @@ export function allowedBackends(serverMode: SessionMode = sessionMode(), env: Re
     const value = raw.trim();
     if (!value) continue;
     if (!(SESSION_BACKENDS as readonly string[]).includes(value)) {
-      throw new StudioError(500, `B_STUDIO_BACKENDS에 알 수 없는 백엔드가 있습니다: ${value} (api, claude-code, codex, commandcode, opencode)`);
+      throw new StudioError(500, `B_STUDIO_BACKENDS에 알 수 없는 백엔드가 있습니다: ${value} (api, claude-code, codex, commandcode, opencode, gemini)`);
     }
     allowed.add(value as SessionMode);
   }
@@ -6169,6 +6216,7 @@ export interface BackendPreflights {
   codex?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   commandCode?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   openCode?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  gemini?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
 
 /**
@@ -6194,6 +6242,11 @@ export async function assertBackendReady(backend: SessionMode, cwd: string, pref
   if (backend === 'opencode') {
     const result = await (preflights.openCode ?? preflightOpenCode)();
     if (!result.ok) throw new StudioError(409, `로컬 OpenCode를 쓸 수 없습니다: ${result.reason}`);
+    return;
+  }
+  if (backend === 'gemini') {
+    const result = await (preflights.gemini ?? preflightGemini)();
+    if (!result.ok) throw new StudioError(409, `로컬 Gemini를 쓸 수 없습니다: ${result.reason}`);
   }
 }
 

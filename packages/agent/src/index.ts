@@ -62,6 +62,16 @@ export {
   type OpenCodeRunOptions,
   type OpenCodeRunResult,
 } from './opencode-runner';
+export {
+  GEMINI_MODEL_REQUIRED,
+  geminiSettingsJson,
+  preflightGemini,
+  runGeminiAgent,
+  type GeminiProcess,
+  type GeminiProcessResult,
+  type GeminiRunOptions,
+  type GeminiRunResult,
+} from './gemini-cli-runner';
 export { startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { boardMcpToolSpecs, externalBoardAccess, runBoardMcpTool, type BoardMcpToolSpec } from './board-mcp';
 export { handleBoardMcpRequest } from './board-mcp-server';

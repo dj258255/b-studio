@@ -24,11 +24,12 @@ beforeEach(() => {
 });
 
 describe('isCliAccountBackend', () => {
-  it('네 백엔드만 참이다', () => {
+  it('다섯 백엔드만 참이다', () => {
     expect(isCliAccountBackend('claude-code')).toBe(true);
     expect(isCliAccountBackend('codex')).toBe(true);
     expect(isCliAccountBackend('commandcode')).toBe(true);
     expect(isCliAccountBackend('opencode')).toBe(true);
+    expect(isCliAccountBackend('gemini')).toBe(true);
     expect(isCliAccountBackend('api')).toBe(false);
     expect(isCliAccountBackend('demo')).toBe(false);
     expect(isCliAccountBackend(123)).toBe(false);
@@ -54,6 +55,13 @@ describe('loginCommandFor / loginCommandText', () => {
     expect(spec.spawnable).toBe(false);
     expect(spec.note).toBeTruthy();
     expect(loginCommandText('opencode')).toBe('opencode auth login');
+  });
+
+  it('gemini는 헤드리스 로그인 플래그를 확인하지 못해 자동으로 띄우지 않는다', () => {
+    const spec = loginCommandFor('gemini');
+    expect(spec.spawnable).toBe(false);
+    expect(spec.note).toBeTruthy();
+    expect(loginCommandText('gemini')).toBe('gemini');
   });
 });
 
@@ -127,17 +135,31 @@ describe('checkAccountStatus', () => {
     expect(status.connected).toBe(false);
     expect(status.installed).toBe(false);
   });
+
+  it('gemini: 연결되면 계정 종류 없이 연결됨만 돌려준다(토큰 파일을 읽지 않으므로 지어내지 않는다)', async () => {
+    const status = await checkAccountStatus('gemini', { gemini: async () => ({ ok: true }) });
+    expect(status).toEqual({ backend: 'gemini', label: '로컬 Gemini Agent', connected: true, installed: true });
+  });
+
+  it('gemini: CLI를 못 찾으면(ENOENT) 설치 안 됨으로 본다', async () => {
+    const status = await checkAccountStatus('gemini', {
+      gemini: async () => ({ ok: false, reason: 'Gemini CLI를 찾지 못했습니다. 터미널에서 "gemini"가 실행되는지, 로그인돼 있는지 확인하세요. (command not found: gemini)' }),
+    });
+    expect(status.connected).toBe(false);
+    expect(status.installed).toBe(false);
+  });
 });
 
 describe('listAccountStatuses', () => {
-  it('네 백엔드를 모두 확인한다', async () => {
+  it('다섯 백엔드를 모두 확인한다', async () => {
     const statuses = await listAccountStatuses({
       claudeCode: async () => ({ ok: true, account: {} }),
       codex: async () => ({ ok: true }),
       commandCode: async () => ({ ok: false, reason: '로그인 필요' }),
       openCode: async () => ({ ok: false, reason: '로그인 필요' }),
+      gemini: async () => ({ ok: false, reason: '로그인 필요' }),
     });
-    expect(statuses.map((status) => status.backend)).toEqual(['claude-code', 'codex', 'commandcode', 'opencode']);
+    expect(statuses.map((status) => status.backend)).toEqual(['claude-code', 'codex', 'commandcode', 'opencode', 'gemini']);
     expect(statuses.filter((status) => status.connected)).toHaveLength(2);
   });
 });

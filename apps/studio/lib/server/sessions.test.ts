@@ -227,7 +227,7 @@ describe('세션 백엔드', () => {
     expect(resolveSessionBackend(undefined, withList)).toBe('api');
     expect(() => resolveSessionBackend('codex', withList)).toThrow(/쓸 수 없는 백엔드/);
     // 목록에 모르는 값이 있으면 서버 설정 오류로 거부한다
-    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'gemini' })).toThrow(/B_STUDIO_BACKENDS/);
+    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'anthropic' })).toThrow(/B_STUDIO_BACKENDS/);
   });
 
   it('demo 서버에서는 백엔드를 고를 수 없다', () => {

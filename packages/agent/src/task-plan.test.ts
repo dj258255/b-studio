@@ -66,7 +66,7 @@ describe('작업 계획', () => {
       planLanes({ tasks: [withBackend('a', ['api'], [], 'claude-code', 'sonnet'), withBackend('b', ['api/sub'], ['a'], 'claude-code', 'opus')] }),
     ).toThrow(/model이 같아야/);
     // 모르는 backend는 스키마가 거부한다
-    expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'gemini')] })).toThrow(/형식이 올바르지 않습니다/);
+    expect(() => planLanes({ tasks: [withBackend('a', ['api'], [], 'anthropic')] })).toThrow(/형식이 올바르지 않습니다/);
   });
 
   it('모델 응답의 코드 펜스·설명을 걷어내고 JSON을 읽는다', () => {

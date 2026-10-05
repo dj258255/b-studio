@@ -9,6 +9,7 @@ export const SESSION_BACKEND_LABEL: Record<SessionMode, string> = {
   codex: "로컬 ChatGPT Agent",
   commandcode: "로컬 Command Code Agent",
   opencode: "로컬 OpenCode Agent",
+  gemini: "로컬 Gemini Agent",
   demo: "데모 모드",
 };
 
