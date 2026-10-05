@@ -1,9 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildOverride,
   composeUpArgs,
@@ -215,12 +214,27 @@ describe('parseSyncOutput', () => {
 });
 
 describe('SYNC_SCRIPT', () => {
-  /** 파일 공유 캐시가 옛 목록을 돌려주는 상황을 흉내 내는 ls와, 내용 길이로 해시를 대신하는 sha256sum */
+  // runSync가 mkdtemp로 만드는 임시 폴더를 테스트마다 치운다. 안 치우면 임시 폴더에 계속 쌓이고,
+  // 그 조상 폴더를 ls로 훑는 '절대 경로' 테스트(아래)가 돌릴 때마다 조금씩 느려진다
+  const createdRoots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(createdRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  /**
+   * 파일 공유 캐시가 옛 목록을 돌려주는 상황을 흉내 내는 ls와, 내용 길이로 해시를 대신하는 sha256sum.
+   * os.tmpdir()이 아니라 '/tmp'에 직접 만든다: macOS에서 os.tmpdir()은 세션마다 쓰는
+   * /var/folders/.../T인데, 그 안에는 온갖 프로세스가 남긴 항목이 쌓여(이 기기에서 13만 개 넘게
+   * 확인됨) 그 폴더 하나를 ls하는 데만 15초 넘게 걸린다. '절대 경로로 루트까지 올라가며 확인'하는
+   * 테스트는 조상 폴더를 전부 ls하므로 이 폴더를 반드시 지나가며 그대로 느려졌다(5s 타임아웃 초과).
+   * /tmp는 같은 역할을 하면서도 보통 수백 개 수준이라 같은 검사를 수십 ms 안에 끝낸다
+   */
   async function runSync(
     files: string[] | ((project: string) => string[]),
     { stale, ghost, root: syncRoot }: { stale?: { dir: string; name: string }; ghost?: { dir: string; name: string }; root?: string } = {},
   ): Promise<Map<string, string>> {
-    const root = await mkdtemp(path.join(tmpdir(), 'sync-script-'));
+    const root = await mkdtemp(path.join('/tmp', 'sync-script-'));
+    createdRoots.push(root);
     const bin = path.join(root, 'bin');
     const project = path.join(root, 'project');
     await mkdir(path.join(project, 'api/src/orders'), { recursive: true });
@@ -271,17 +285,26 @@ describe('SYNC_SCRIPT', () => {
     expect(settled.get('api/src/removed')).toBe('MISSING');
   });
 
-  it('Kubernetes 파드처럼 절대 경로를 넘기면 루트까지 올라가며 확인한다', async () => {
-    let file = '';
-    const seen = await runSync(
-      (project) => {
-        file = path.join(project, 'api/src/orders/Order.java');
-        return [file];
-      },
-      { root: '/' },
-    );
-    expect([...seen]).toEqual([[file, 'len6']]);
-  });
+  it(
+    'Kubernetes 파드처럼 절대 경로를 넘기면 루트까지 올라가며 확인한다',
+    async () => {
+      let file = '';
+      const seen = await runSync(
+        (project) => {
+          file = path.join(project, 'api/src/orders/Order.java');
+          return [file];
+        },
+        { root: '/' },
+      );
+      expect([...seen]).toEqual([[file, 'len6']]);
+    },
+    // SYNC_ROOT=/ 로 절대 경로의 조상 폴더를 실제로 파일시스템 루트까지 올라가며 ls한다(진짜 느렸던
+    // 원인은 runSync가 /tmp 대신 os.tmpdir()을 썼던 것이었고 그건 위에서 고쳤다). 그래도 여러 단계를
+    // 실제 하위 프로세스(sh, ls, sha256sum)로 걷는 테스트라 부하가 큰 전체 스위트 실행에서는 여유가
+    // 필요하다. 가짜 ls로 흉내 내면 '정말 루트까지 올라가는지'를 검증하지 못하므로 이 테스트만 기본
+    // 5s보다 넉넉한 제한을 둔다
+    10_000,
+  );
 });
 
 describe('parseLogLine', () => {
