@@ -20,6 +20,7 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 - [기여 가이드](../CONTRIBUTING.md) — 개발 명령, 변경 원칙, PR 체크리스트
 - [로드맵](../ROADMAP.md) — 현재 단계, 완료 조건, 예상과 실제
 - [변경 기록](../CHANGELOG.md) — 날짜별로 정리한 사용자 변경
+- [구현 상태와 일정](status.md) — 영역별 구현 상태와 만든 순서, 작업 방식
 - [실험 기록](experiments/README.md) — 결정 전에 측정한 결과
 - [문서 양식](templates/adr.md) — ADR과 [실험 보고서](templates/experiment-report.md) 작성 틀
 - [검토 문서](research/2026-09-25-knowledge-sharing-and-model-handoff.md) — 결정 전 아이디어 검토(에이전트 간 지식 공유, 작업 중 모델 교체)
