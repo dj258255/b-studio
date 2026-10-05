@@ -135,6 +135,7 @@
 - [ADR-118 Gemini CLI 백엔드: 헤드리스 JSON 호출 + 도구 블록리스트, 세션 이어받기는 최선 추정](#adr-118-gemini-cli-백엔드-헤드리스-json-호출--도구-블록리스트-세션-이어받기는-최선-추정)
 - [ADR-119 게시판을 MCP로 열어 계획 밖 에이전트도 참여하게 한다](#adr-119-게시판을-mcp로-열어-계획-밖-에이전트도-참여하게-한다)
 - [ADR-120 OpenCode 백엔드 되살리기: 멈춰 있던 브랜치가 이미 main에 들어가 있던 것을 확인하고 문서를 맞춘다](#adr-120-opencode-백엔드-되살리기-멈춰-있던-브랜치가-이미-main에-들어가-있던-것을-확인하고-문서를-맞춘다)
+- [ADR-121 미리 고를 호스트 포트는 40000~59999 대역에서 먼저 찾고, 그래도 충돌하면 전부 다시 뽑아 재시도한다](#adr-121-미리-고를-호스트-포트는-4000059999-대역에서-먼저-찾고-그래도-충돌하면-전부-다시-뽑아-재시도한다)
 
 ---
 
@@ -4930,7 +4931,36 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 
 ---
 
-## 출처
+## ADR-121 미리 고를 호스트 포트는 40000~59999 대역에서 먼저 찾고, 그래도 충돌하면 전부 다시 뽑아 재시도한다
+
+상태: 채택
+관련: fix/frontend-backend-url(런타임 공개 URL 주입, `preallocatePublicUrlPorts`), 트러블슈팅 #52
+
+### 맥락
+- 도그푸딩 중 실제 세션 기동이 `docker compose up`의 "failed to bind port 127.0.0.1:327xx: bind: address already in use"로 반복 실패했다(트러블슈팅 #52).
+- 원인: `findFreeHostPort()`(`packages/sandbox/src/docker/free-port.ts`)가 macOS 호스트에서 `listen(0)`으로 빈 포트를 찾지만, 실제 바인드는 colima VM 안에서 일어난다. 이 VM은 dbtower·pay·edumeet 등 다른 프로젝트와 공유하고, 그 컨테이너들이 32768~32799 대역에 이미 포트를 공개해 두고 있었다 — 호스트 쪽 확인은 이 VM 안쪽 점유를 볼 방법이 없다.
+- 근본적으로 호스트에서 하는 "포트가 비었는지" 확인은 바인드가 다른 네트워크 네임스페이스(이 경우 VM)에서 일어나는 한 신뢰할 수 없다. 대역을 옮기는 것만으로는 충돌을 없앨 수 없고 확률을 낮출 뿐이라, 실패했을 때 실제로 다시 묻고 재시도하는 경로가 반드시 있어야 한다.
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| colima VM 안에서 직접 포트 점유를 확인한다(`colima ssh -- ss -ltn` 등) | 호스트 확인의 근본 한계를 없앤다 | colima 전용 가정이 코드에 들어간다(Docker Desktop·원격 Docker 호스트에서는 돌지 않는다). VM 안에서 명령을 실행하는 왕복 비용과 colima 버전별 호환성 문제가 생긴다 |
+| 포트를 아예 미리 고르지 않고 `docker compose up` 뒤에만 포트를 읽는다 | 호스트·VM 불일치 자체가 사라진다 | fix/frontend-backend-url이 존재하는 이유(다른 서비스가 참조할 공개 URL을 `up` **전에** 환경 변수로 넣어야 함)를 다시 깨는 더 큰 되돌리기라, 범위 밖이다 |
+| **(채택) 대역을 옮겨 충돌 확률을 낮추고(40000~59999), 그래도 충돌하면 영향받은 포트 세트를 전부 다시 뽑아 `compose down` 후 재시도한다(최대 3회)** | colima·Docker Desktop·원격 Docker 어디서나 똑같이 동작하는 범용 완화책이면서, 실패했을 때 실제로 재시도하는 근본적인 방어선도 갖춘다 | 충돌을 이론적으로 완전히 없애지는 못한다(여전히 확률 게임이다) — 그래서 재시도가 필수고, 3회를 넘기면 사람에게 알린다 |
+
+### 결정
+1. `findFreeHostPort()`가 먼저 40000~59999 대역에서 무작위 포트를 최대 10번 직접 바인드해 보고(`BindTester`로 테스트가 가짜 바인드 확인을 주입할 수 있다), 다 막혀 있으면 예전처럼 `listen(0)`으로 돌아간다. 함수 시그니처는 그대로 유지해 기존 호출부(`preallocatePublicUrlPorts`)는 바꾸지 않았다.
+2. `compose-provider.ts`에 `isPortBindConflict()`로 "failed to bind port … address already in use" / "Error starting userland proxy" / "port is already allocated" 패턴을 알아보고, `LocalDockerSandbox.start()`의 `compose up`을 `#composeUpWithPortRetry()`로 감쌌다: 충돌이면 `preallocatePublicUrlPorts`로 이 샌드박스가 미리 고른 포트를 **전부** 다시 뽑아 override 파일을 다시 쓰고, `compose down --volumes --remove-orphans`로 일부만 뜬 스택을 치운 뒤 재시도한다. 최초 시도를 포함해 최대 3회, 그래도 안 되면 원래 Docker 오류 뒤에 "포트 충돌이 반복돼 3회 재시도 후 포기했습니다"를 덧붙여 던진다. 포트와 무관한 실패는 패턴에 안 걸려 즉시 던지고 재시도하지 않는다.
+3. 충돌난 포트 하나만 바꾸지 않고 세트 전체를 다시 뽑는 이유: 같은 대역에서 함께 고른 다른 포트도 VM 안에서 막혀 있을 수 있어서다. 개별 포트만 바꾸면 "방금 실패한 포트는 피했지만 다른 포트가 또 충돌"하는 사례를 따로 다뤄야 해 로직이 복잡해진다.
+
+### 검증 결과
+- `packages/sandbox/src/docker/free-port.test.ts`: 주입한 바인드 확인 함수로 대역 우선 시도·막혔을 때 재시도·대역 전체 실패 시 `listen(0)` 복귀를 확인한다.
+- `packages/sandbox/src/docker/port-conflict-retry.test.ts`: 가짜 `docker` 실행 파일로 `up`이 바인드 충돌로 두 번 실패하고 세 번째에 성공하는 경로(재시도 사이 `down` 실행, override에 쓰인 포트가 재시도마다 달라짐), 3회 모두 실패했을 때의 포기 문구, 포트와 무관한 실패는 재시도하지 않는 경로를 모두 가짜 실행 파일로 확인한다(실제 docker·colima는 쓰지 않는다).
+- `pnpm typecheck`: 6개 패키지 모두 `Done`.
+
+### 감수한 트레이드오프
+- **대역을 옮겨도 충돌이 이론적으로 0이 되지는 않는다.** 40000~59999도 결국 유한한 대역이라, 다른 프로젝트가 그 대역까지 쓰기 시작하면 다시 충돌할 수 있다. 그래서 1번 완화책만으로 끝내지 않고 2번 재시도를 반드시 함께 넣었다 — 재시도가 실제 방어선이고, 대역 이동은 재시도 횟수를 줄여 주는 보조 수단일 뿐이다.
+- **colima VM 안을 직접 들여다보지 않는다.** 더 정확한 확인(VM 안에서 직접 점유 조회)은 colima 전용 가정을 코드에 박는 대가가 더 크다고 판단해 포기했다. 재시도로 충분히 커버되는 빈도라고 보고, VM 안을 직접 보는 방식은 이 문제가 재시도로도 못 버틸 만큼 잦아지면 다시 검토한다.
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
 - StackBlitz, [WebContainers Commercial Usage](https://webcontainers.io/enterprise)
