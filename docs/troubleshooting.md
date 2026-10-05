@@ -8,7 +8,7 @@
 
 | 영역 | 관련 항목 |
 |---|---|
-| 기동·종료·준비 판정 | 1–4, 14, 23, 36–37 |
+| 기동·종료·준비 판정 | 1–4, 14, 23, 36–37, 51 |
 | 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29, 41, 50 |
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
 | 네트워크·시크릿·격리 | 15, 17–21, 40 |
@@ -67,6 +67,7 @@
 - [48. OpenCode 무료(Zen) 모델로 세션을 시작하면 403으로 끝나고 진행이 멈춤](#48-opencode-무료zen-모델로-세션을-시작하면-403으로-끝나고-진행이-멈춤)
 - [49. OpenCode 러너가 다음 실행에서 세션을 이어받지 못함 (상태 폴더 문제)](#49-opencode-러너가-다음-실행에서-세션을-이어받지-못함-상태-폴더-문제)
 - [50. 스튜디오 서버를 다시 시작한 뒤 "이어서 작업"이 저장한 요구사항을 안내 없이 지움](#50-스튜디오-서버를-다시-시작한-뒤-이어서-작업이-저장한-요구사항을-안내-없이-지움)
+- [51. 콜리마가 죽었다 살아난 뒤에도 샌드박스 기동이 옛 "Docker 데몬에 연결할 수 없음" 오류로 계속 실패함](#51-콜리마가-죽었다-살아난-뒤에도-샌드박스-기동이-옛-docker-데몬에-연결할-수-없음-오류로-계속-실패함)
 
 ---
 
@@ -1782,3 +1783,40 @@ Error from provider (Console): OpenCode's free tier can only be used from within
 - `packages/agent/src/checkpoints.test.ts`가 `discard()`·`restore()`의 백업·되살리기·충돌 거부·보관 한도(최근 10개·200MB, 방금 만든 백업은 지우지 않음)를 실제 git 임시 저장소로 확인한다. 이 테스트는 수정 전에는(백업 필드 자체가 없어) 작성할 수 없었고, 수정 뒤에는 통과한다.
 - `apps/studio/lib/server/sessions-protect-discard.test.ts`가 이 사고를 그대로 재현해(문서 체크포인트가 실패해 pending으로 남은 상태를 흉내 냄) `resumeSession`을 끝까지 돌리고, 문서는 사라지지 않고 체크포인트로 남는 것·문서가 아닌 변경은 백업되어 되살릴 수 있는 것을 확인한다. 이 테스트는 수정 전 코드로 돌리면(문서가 pending인 채로 그냥 사라짐) 실패하고, 수정 뒤에는 통과한다.
 - 교훈: "검증을 통과하지 못한 변경은 버린다"는 의도된 동작과 "사용자가 쓴 것을 조용히 지운다"는 사고는 겉보기에 같은 코드 경로(`reset --hard`)를 쓴다는 점에서 구분하기 어렵다 — 되돌리기 자체는 그대로 두고, 되돌리기 **직전**에 지키기(문서)·백업하기(나머지)를 끼워 넣는 것이 범위가 가장 작았다.
+
+## 51. 콜리마가 죽었다 살아난 뒤에도 샌드박스 기동이 옛 "Docker 데몬에 연결할 수 없음" 오류로 계속 실패함
+
+**구분:** 도그푸딩 중 발견(2026-10-05, 하루에 두 번 겪음) → 코드로 원인 추적 → 재현 → 수정
+
+### 현상
+콜리마(colima) Docker 데몬이 잠깐 죽었다가 다시 살아난 뒤, 떠 있던 스튜디오 서버에서 `POST /api/sessions/[id]/boot`를 부르면 그 세션은 예전 오류 그대로 즉시 실패했다.
+
+```
+샌드박스를 켜지 못했습니다: docker compose build 실패 … Cannot connect to the Docker daemon at unix:///…/docker.sock
+```
+
+새 셸에서 `docker ps`는 바로 성공해 데몬은 이미 정상이었다. 오류가 돌아오는 속도도 `docker compose build`를 처음부터 다시 돌릴 때보다 훨씬 빨라, 실제로는 compose를 다시 부르지 않는 것으로 보였다. 스튜디오 앱 자체를 재시작해야만 그 세션(또는 같은 프로젝트의 새 세션)이 다시 켜졌다.
+
+### 가설
+1. (틀림) `packages/sandbox`의 Docker SDK 클라이언트가 죽은 연결을 들고 있다 → 이 저장소는 SDK 클라이언트 없이 `docker`/`docker compose`를 매번 새 자식 프로세스로 실행한다(`packages/sandbox/src/docker/compose-provider.ts`). 자식 프로세스는 현재 소켓을 그대로 보므로 여기는 캐시가 없다.
+2. (틀림) `LocalDockerSandbox`가 compose 설정을 메모이즈해 둔 게 원인이다 → `#composeConfig`(`packages/sandbox/src/docker/compose-provider.ts:192,413-418`)는 `relayChanges`가 쓰는 캐시지만 실패하면 바로 `undefined`로 되돌려 다음 호출에서 다시 읽는다. boot 경로와 무관하고 캐시도 제대로 비워진다.
+3. (맞음) **세션 객체 자체**가 "실패"라는 상태를 영구히 들고 있다 — `apps/studio/lib/server/sessions.ts`의 `ensureBooted`가 `session.snapshot.status === 'failed'`면 다시 시도하지 않고 저장해 둔 옛 오류 문구를 그대로 다시 던졌다.
+
+### 원인
+`apps/studio/lib/server/sessions.ts:1721-1733`(수정 전)의 `ensureBooted`:
+
+```ts
+async function ensureBooted(session: Session): Promise<void> {
+  if (session.snapshot.status === 'ready') return;
+  if (session.snapshot.status === 'failed') throw new StudioError(409, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
+  ...
+```
+
+`boot()`가 실패하면 `setStatus(session, 'failed', describe(error))`로 세션의 `status`·`error`가 영구히 박힌다(`sessions.ts:1802`). 세션은 메모리에 계속 살아 있는 객체(`store.sessions`)라, 그다음 어떤 `bootSession`/`startBooting` 호출이든 데몬 상태를 다시 묻지 않고 **이 if문에서 즉시** 저장해 둔 옛 오류를 돌려줬다 — "너무 빨리 실패해서 새로 빌드를 시도한 것 같지 않다"는 관찰과 정확히 맞아떨어진다. 데몬이 실제로 복구됐는지는 전혀 다시 확인하지 않았다. 세션을 지우거나(= `stopSession`을 거쳐 새 세션을 만듦) 서버를 재시작해 `store.sessions`를 통째로 새로 만들어야만 이 캐시가 지워졌다.
+
+### 수정
+`ensureBooted`에서 `failed` 상태에 대한 조기 거부를 지웠다. 이제 `status === 'failed'`도 `!session.bootPromise`와 같은 취급을 받아 새 `bootPromise`로 `startBoot(session)`(=`session.sandbox.start()` → 실제 `docker compose build/up`)을 다시 밟는다. 데몬이 아직 죽어 있으면 당연히 다시 실패하지만(캐시가 아니라 **지금** 묻고 받은 결과), 데몬이 돌아와 있으면 그대로 성공한다. `stopped` 상태(샌드박스를 이미 정리함)는 여전히 "이어서 작업"으로 안내해 거부한다 — 그 경우는 재시도가 아니라 새 샌드박스가 필요하다.
+
+### 재발 방지와 확인
+- `apps/studio/lib/server/sessions-lazy.test.ts`의 "켜기 실패는 세션을 failed로 두지만, 다시 켜면 캐시된 이유를 돌려주지 않고 실제로 다시 시도한다" 테스트가 가짜 샌드박스로 재현한다: 첫 `bootSession`은 주입한 오류로 실패하고(`fake.startCalls === 1`), 데몬이 돌아온 상황을 흉내 내 오류를 지운 뒤 두 번째 `bootSession`을 부르면 `start`가 실제로 다시 호출되고(`fake.startCalls === 2`) `ready`로 성공한다. 서버·세션 모듈을 다시 만들지 않고 같은 프로세스 안에서 확인한다. 이 테스트는 수정 전 코드로 돌리면 두 번째 `bootSession`이 캐시된 옛 오류로 즉시 실패해 떨어지고, 수정 뒤에는 통과한다.
+- 교훈: 인메모리 세션 객체의 `status`/`error` 필드는 "마지막으로 있었던 상태"가 아니라 "지금도 유효한 상태"로 취급하기 쉽다. 실패를 `boot()` 바깥에서 재시도 가능한 상태로 되돌리는 경로가 하나도 없으면(여기서는 `ensureBooted`의 조기 거부), 외부 요인(데몬 재시작)으로 상황이 바뀌어도 세션은 절대 그 사실을 다시 확인하지 않는다.

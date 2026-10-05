@@ -141,15 +141,23 @@ describe('샌드박스 지연 기동', () => {
     await stopSession(created).catch(() => {});
   });
 
-  it('켜기 실패는 세션을 failed로 두고, 다시 켜려 하면 이유와 함께 거부한다', async () => {
+  it('켜기 실패는 세션을 failed로 두지만, 다시 켜면 캐시된 이유를 돌려주지 않고 실제로 다시 시도한다', async () => {
     fake.startError = '이미지 빌드 실패';
     const created = (await createSession('lazyproj', 'kim', 'copy', { boot: 'on-demand' })).id;
 
     await expect(bootSession(created)).rejects.toThrow(/이미지 빌드 실패/);
     expect(getSnapshot(created)?.status).toBe('failed');
-    // 이미 실패한 세션은 다시 시도하지 않고 이유를 그대로 알린다
-    await expect(bootSession(created)).rejects.toThrow(/이미지 빌드 실패/);
     expect(fake.startCalls).toBe(1);
+
+    // 콜리마 등 Docker 데몬이 죽어 있다가 돌아온 상황을 흉내 낸다. 데몬은 이미 살아 있는데
+    // 세션이 옛 실패를 캐시해 뒀다면 start를 다시 부르지 않고 같은 옛 오류만 즉시 돌려줄 것이다
+    fake.startError = undefined;
+    const second = await bootSession(created);
+
+    expect(second.status).toBe('ready');
+    // start가 실제로 다시 불렸어야 한다(캐시된 실패를 그냥 돌려준 게 아니다)
+    expect(fake.startCalls).toBe(2);
+    expect(getSnapshot(created)?.status).toBe('ready');
     await stopSession(created).catch(() => {});
   });
 
