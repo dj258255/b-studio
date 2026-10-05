@@ -79,6 +79,18 @@ async function removeSandboxImages(dockerBin: string, sandboxId: string): Promis
 /** Docker VM 디스크가 가득 찼을 때 원인과 다음 행동을 알려 주는 문구 */
 export const DOCKER_OUT_OF_SPACE = "Docker 디스크가 가득 찼습니다. 'studio sandbox prune --dry-run' 으로 남은 샌드박스 자원을 확인하고 정리하거나 Docker VM 디스크를 늘리세요.";
 
+/** 호스트에서 미리 고른 포트를 colima VM 안의 다른 컨테이너가 이미 쓰고 있을 때 compose up이 남기는 stderr 패턴들 */
+const PORT_BIND_CONFLICT = /failed to bind port .*address already in use|error starting userland proxy|address already in use|port is already allocated/i;
+
+/** compose up 실패가 호스트↔VM 포트 가시성 차이로 인한 바인드 충돌인지 본다(findFreeHostPort가 미리 고른 포트를
+ *  VM 안의 다른 컨테이너가 이미 쓰고 있는 경우) — 다른 실패(디스크 부족, 이미지 빌드 실패 등)는 재시도하지 않는다 */
+export function isPortBindConflict(stderr: string): boolean {
+  return PORT_BIND_CONFLICT.test(stderr);
+}
+
+/** compose up 포트 충돌 재시도 한도(최초 시도 포함) */
+const PORT_RETRY_ATTEMPTS = 3;
+
 /**
  * docker 명령이 디스크 부족으로 실패했는지 보고, 그렇다면 안내 문구를 덧붙인다.
  * 그 밖의 오류는 원문을 그대로 돌려준다. 오류를 삼키지 않도록 항상 원래 메시지를 포함한다
@@ -189,6 +201,7 @@ class LocalDockerSandbox implements Sandbox {
   readonly #secrets: Record<string, string>;
   readonly #redactor: Redactor;
   readonly #edgeScript: string;
+  readonly #runtime: string | undefined;
   #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
 
   constructor(
@@ -207,6 +220,7 @@ class LocalDockerSandbox implements Sandbox {
     this.#overridePath = overridePath;
     this.#dockerBin = options.dockerBin ?? 'docker';
     this.#readiness = options.readiness ?? {};
+    this.#runtime = options.runtime;
     this.#secrets = secrets;
     this.#redactor = new Redactor(secrets);
   }
@@ -233,7 +247,7 @@ class LocalDockerSandbox implements Sandbox {
       buildArgs ? this.#composeOrThrow(buildArgs, options.signal) : Promise.resolve(),
     ]);
 
-    await this.#composeOrThrow(['up', '--detach', '--remove-orphans', ...composeUpArgs(options.services, EDGE_SERVICE)], options.signal);
+    await this.#composeUpWithPortRetry(composeUpArgs(options.services, EDGE_SERVICE), options.signal);
 
     // 한 서비스가 준비에 실패하면 나머지 서비스의 준비 확인도 멈춘다. 그러지 않으면 실패를 돌려준 뒤에도
     // 다른 서비스가 제한 시간(수 분)까지 확인을 계속하며 프로세스와 샌드박스 정리를 붙잡는다
@@ -673,6 +687,46 @@ class LocalDockerSandbox implements Sandbox {
       throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)));
     }
     return result;
+  }
+
+  /**
+   * compose up을 돌리되, 호스트↔VM 포트 가시성 차이로 인한 바인드 충돌(PORT_BIND_CONFLICT)이면 재시도한다.
+   * findFreeHostPort는 macOS 호스트에서 포트가 비었는지 확인하지만, 실제 바인드는 colima VM 안에서 일어나므로
+   * VM 안의 다른 컨테이너가 이미 그 포트를 쓰고 있으면 호스트 확인을 통과했어도 compose up이 실패한다.
+   * 충돌난 포트 하나만 바꾸지 않는다 — 같은 대역에서 함께 고른 다른 미리 정한 포트도 막혀 있을 수 있어서,
+   * 이 샌드박스가 미리 고른 포트를 전부 다시 뽑고 override를 다시 쓴다. 재시도 전에는 일부만 뜬 스택을 내려
+   * 다음 up이 깨끗한 상태에서 시작하게 한다. 포트 충돌이 아닌 실패(디스크 부족, 빌드 실패 등)는 바로 던진다
+   */
+  async #composeUpWithPortRetry(upArgs: string[], signal?: AbortSignal): Promise<void> {
+    for (let attempt = 1; attempt <= PORT_RETRY_ATTEMPTS; attempt++) {
+      try {
+        await this.#composeOrThrow(['up', '--detach', '--remove-orphans', ...upArgs], signal);
+        return;
+      } catch (error) {
+        const detail = error instanceof SandboxError ? (error.detail ?? '') : '';
+        const isLastAttempt = attempt === PORT_RETRY_ATTEMPTS;
+        if (!isPortBindConflict(detail)) throw error;
+        if (isLastAttempt) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new SandboxError(`${message}\n포트 충돌이 반복돼 ${PORT_RETRY_ATTEMPTS}회 재시도 후 포기했습니다`);
+        }
+        await this.#regeneratePorts();
+        // 일부만 뜬 컨테이너를 정리한다. down이 실패해도(예: 이미 아무것도 안 떠 있음) 다음 up은 --remove-orphans로 이어간다
+        await this.#compose(['down', '--volumes', '--remove-orphans'], signal);
+      }
+    }
+  }
+
+  /**
+   * 미리 고른 호스트 포트를 전부 다시 뽑아 override 파일을 다시 쓴다. preallocatePublicUrlPorts가 대상 서비스
+   * 집합을 project에서 다시 읽어 매번 새 포트를 배정하므로, 충돌난 포트 하나만이 아니라 세트 전체가 바뀐다
+   */
+  async #regeneratePorts(): Promise<void> {
+    const hostPorts = await preallocatePublicUrlPorts(this.project);
+    await writeFile(
+      this.#overridePath,
+      stringify(buildOverride(this.project, this.id, { edgeScript: this.#edgeScript, runtime: this.#runtime, hostPorts })),
+    );
   }
 
   /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다 */
