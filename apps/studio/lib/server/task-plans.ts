@@ -16,6 +16,7 @@ import {
   planAskFromClient,
   planLanes,
   planLimitsFromEnv,
+  PlanBackendSchema,
   requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
@@ -27,6 +28,7 @@ import {
   type ModelClientInfo,
   type Note,
   type PlanAsk,
+  type PlanBackend,
   type RemoteLocation,
   type RunMetrics,
   type ScriptedTurn,
@@ -40,7 +42,7 @@ import type { Checkpoint } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
 import type { WorkflowPageCheck } from '@b-studio/spec';
-import type { StudioEvent } from '@/lib/studio-events';
+import type { SessionMode, StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
 import {
   planModelAlias,
@@ -61,7 +63,7 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { allowedBackends, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
@@ -493,6 +495,68 @@ function taskIssueBody(plan: TaskPlanView, lane: TaskPlanLaneView, task: TaskPla
   ].join('\n');
 }
 
+/**
+ * 레인 백엔드로 고를 수 있는 값(화면 드롭다운이 이 목록을 보여 준다). demo는 뺀다(데모는 섞지 않는다) —
+ * 세션을 만들 때 쓰는 allowedBackends()(sessions.ts, B_STUDIO_MODE·B_STUDIO_BACKENDS)와 같은 규칙이다.
+ */
+export function selectableLaneBackends(): PlanBackend[] {
+  return [...allowedBackends()].filter((backend): backend is PlanBackend => backend !== 'demo');
+}
+
+/**
+ * 레인마다 다른 백엔드·모델을 고른다(이슈 #398). 작업 분해 화면에서 레인 카드의 선택기가 이 함수를 부른다.
+ * 승인 대기 중에만 바꿀 수 있다 — 레인 세션을 만들기 전에 결정이 끝나야 하기 때문이다(레인 세션을 만든 뒤에는
+ * 그 세션이 이미 그 백엔드로 떠 있어 바꿀 수 없다).
+ *
+ * backend를 비우면(undefined·빈 문자열) "세션과 같음"(상속, 지금까지의 동작 그대로)으로 되돌린다.
+ * backend를 주면 이 서버가 허용하는 백엔드인지 확인한다(allowedBackends, sessions.ts의 세션 백엔드 확인과 같은 규칙 —
+ * 모르는 백엔드나 이 서버가 끈 백엔드를 레인에 몰래 흘려보내지 않는다).
+ *
+ * 레인의 모든 작업에 같은 backend·model을 싣는다 — planLanes가 "같은 레인의 작업은 backend·model이 같아야 한다"고
+ * 요구하는 것과 같은 규칙이다(한 레인은 한 세션에서 돈다).
+ */
+export function setLaneBackend(planId: string, owner: string, laneId: string, input: { backend?: string; model?: string; effort?: string }): TaskPlanView {
+  const plan = findPlan(planId, owner);
+  if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인 대기 중인 계획만 레인 백엔드를 바꿀 수 있습니다');
+  const lane = plan.lanes.find((candidate) => candidate.id === laneId);
+  if (!lane) throw new StudioError(404, '레인을 찾을 수 없습니다');
+
+  const backend = input.backend?.trim();
+  if (!backend) {
+    // 세션과 같음으로 되돌린다 — 레인·작업에서 backend·model·effort를 모두 지운다(지금까지의 상속 동작과 같다)
+    lane.backend = undefined;
+    lane.model = undefined;
+    lane.effort = undefined;
+    for (const task of lane.tasks) {
+      task.backend = undefined;
+      task.model = undefined;
+    }
+    persist(plan);
+    return clone(plan);
+  }
+  if (!PlanBackendSchema.safeParse(backend).success) {
+    throw new StudioError(400, `알 수 없는 백엔드입니다: ${backend} (api, claude-code, codex, commandcode 또는 opencode)`);
+  }
+  const allowed = allowedBackends();
+  if (!allowed.has(backend as SessionMode)) {
+    const list = selectableLaneBackends();
+    throw new StudioError(400, `이 서버에서 쓸 수 없는 백엔드입니다: ${backend} (쓸 수 있는 백엔드: ${list.length > 0 ? list.join(', ') : '없음'})`);
+  }
+  const model = input.model?.trim() || undefined;
+  if (model && model.length > 120) throw new StudioError(400, '모델 이름은 120자까지 입력할 수 있습니다');
+  const effort = asEffort(input.effort);
+
+  lane.backend = backend as PlanBackend;
+  lane.model = model;
+  lane.effort = effort;
+  for (const task of lane.tasks) {
+    task.backend = backend as PlanBackend;
+    task.model = model;
+  }
+  persist(plan);
+  return clone(plan);
+}
+
 /** 사람이 계획을 거부하면 세션을 만들지 않고 멈춘다 */
 export function rejectTaskPlan(id: string, owner: string, reason?: string): TaskPlanView {
   const plan = findPlan(id, owner);
@@ -828,11 +892,13 @@ function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelI
   const head = lane.tasks[0];
   const backend = head?.backend;
   if (!backend) return sessionModelOption(plan.modelId, plan.effort);
+  // 레인이 고른 노력 단계가 있으면 그 값을, 없으면 계획 기본(plan.effort)을 쓴다(지금까지의 동작과 같다, #398)
+  const effort = lane.effort ?? plan.effort;
   // api는 모델 레지스트리 id를, commandcode·opencode는 그 CLI의 모델 id를 세션에 넘긴다. claude-code·codex도 고른 모델을 세션에 실어
   // 러너가 그 값을 쓰게 한다(없으면 환경 변수 = 계획 기본)
   if (backend === 'commandcode' || backend === 'opencode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
-  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId, ...(plan.effort ? { effort: plan.effort } : {}) };
-  return { backend, ...(head.model ? { modelId: head.model } : {}), ...(plan.effort ? { effort: plan.effort } : {}) };
+  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId, ...(effort ? { effort } : {}) };
+  return { backend, ...(head.model ? { modelId: head.model } : {}), ...(effort ? { effort } : {}) };
 }
 
 /**
