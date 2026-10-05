@@ -6,6 +6,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import {
   buildOverride,
+  composeUpArgs,
   DEFAULT_EGRESS_ALLOW,
   EDGE_SERVICE,
   edgePortFor,
@@ -126,6 +127,35 @@ describe('buildOverride 시크릿', () => {
 
     expect(services.api!.environment).toMatchObject({ PAYMENT_API_KEY: null, HTTPS_PROXY: 'http://b-studio-edge:3128' });
     expect(services.web!.environment).not.toHaveProperty('PAYMENT_API_KEY');
+  });
+});
+
+describe('buildOverride 런타임 공개 URL 주입(fix/frontend-backend-url)', () => {
+  const withRef = {
+    ...ORDERS,
+    publicUrlRefs: [{ service: 'web', envKey: 'NEXT_PUBLIC_API_BASE_URL', template: '${b-studio:services.api.publicUrl}/api', targetService: 'api' }],
+  } as unknown as LoadedProject;
+
+  it('hostPorts에 미리 정한 포트가 있으면 그 포트를 그대로 edge에 공개하고, 참조한 서비스의 environment를 실제 주소로 채운다', () => {
+    const { services } = buildOverride(withRef, 's1', { hostPorts: { api: 54_321 } });
+    expect(services[EDGE_SERVICE]!.ports).toEqual(['127.0.0.1::20000', '127.0.0.1:54321:20001']);
+    expect((services.web!.environment as Record<string, string>).NEXT_PUBLIC_API_BASE_URL).toBe('http://127.0.0.1:54321/api');
+  });
+
+  it('hostPorts를 안 주면 자동 배정 그대로 두고, 참조한 서비스의 environment도 바꾸지 않는다', () => {
+    const { services } = buildOverride(withRef, 's1');
+    expect(services[EDGE_SERVICE]!.ports).toEqual(['127.0.0.1::20000', '127.0.0.1::20001']);
+    expect(services.web!.environment).not.toHaveProperty('NEXT_PUBLIC_API_BASE_URL');
+  });
+
+  it('publicUrlRefs가 없는 프로젝트는 예전과 똑같이 동작한다(하위 호환)', () => {
+    const { services } = buildOverride(ORDERS, 's1', { hostPorts: { api: 1 } });
+    // ORDERS에는 참조가 없으니 hostPorts를 줘도 web의 environment는 그대로다
+    expect(services.web!.environment).not.toHaveProperty('NEXT_PUBLIC_API_BASE_URL');
+  });
+
+  it('publicUrlRefs가 아예 undefined인 프로젝트 객체도 받아들인다(이전 테스트 픽스처와 호환)', () => {
+    expect(() => buildOverride(ORDERS, 's1')).not.toThrow();
   });
 });
 
@@ -280,5 +310,23 @@ describe('parseLogLine', () => {
   it('내용이 없는 줄은 건너뛴다', () => {
     expect(parseLogLine('')).toBeUndefined();
     expect(parseLogLine('\u001b[K')).toBeUndefined();
+  });
+});
+
+describe('composeUpArgs', () => {
+  it('서비스 선택이 없으면 빈 배열을 돌려줘 compose 파일의 모든 서비스를 띄운다(옛 동작)', () => {
+    expect(composeUpArgs(undefined, EDGE_SERVICE)).toEqual([]);
+  });
+
+  it('서비스 선택이 있으면 --no-deps와 함께 고른 서비스 + edge를 이름 순으로 적는다', () => {
+    expect(composeUpArgs(['web', 'db'], EDGE_SERVICE)).toEqual(['--no-deps', EDGE_SERVICE, 'db', 'web']);
+  });
+
+  it('edge가 이미 선택에 있어도 두 번 적지 않는다', () => {
+    expect(composeUpArgs(['web', EDGE_SERVICE], EDGE_SERVICE)).toEqual(['--no-deps', EDGE_SERVICE, 'web']);
+  });
+
+  it('빈 선택도 --no-deps와 edge만 적어 아무 managed 서비스도 띄우지 않는다', () => {
+    expect(composeUpArgs([], EDGE_SERVICE)).toEqual(['--no-deps', EDGE_SERVICE]);
   });
 });

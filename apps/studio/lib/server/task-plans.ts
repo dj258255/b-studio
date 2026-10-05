@@ -1,57 +1,69 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
   addSubIssue,
   Board,
-  contractAskFromClient,
   canCreatePullRequest,
   CheckpointStore,
   createIssue,
+  extractRequirementMentions,
   failureNotesFromEvents,
   isInScope,
-  MAX_PLAN_LANES,
   parseRemote,
+  planAskFromClient,
   planLanes,
+  planLimitsFromEnv,
+  PlanBackendSchema,
   requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
   TaskPlanError,
+  type PlanLimits,
   type AgentUsage,
   type BoardAccess,
+  type Effort,
+  type ModelClientInfo,
   type Note,
+  type PlanAsk,
+  type PlanBackend,
   type RemoteLocation,
   type RunMetrics,
   type ScriptedTurn,
   type TaskLane,
   type Topology,
+  type VerifyMode,
 } from '@b-studio/agent';
+import { claudeCodeAsk } from './claude-code-ask';
+import { assertDesignApprovedForRequest } from './design-pipeline';
 import type { Checkpoint } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 import { Redactor, resolveSecrets } from '@b-studio/sandbox';
 import type { WorkflowPageCheck } from '@b-studio/spec';
-import type { StudioEvent } from '@/lib/studio-events';
+import type { SessionMode, StudioEvent } from '@/lib/studio-events';
 import { summarizeTaskPlan } from '@/lib/task-plan-metrics';
-import type {
-  TaskPlanBoardView,
-  TaskPlanCheckpointView,
-  TaskPlanContractsView,
-  TaskPlanIntegrationView,
-  TaskPlanIssueRef,
-  TaskPlanIssuesView,
-  TaskPlanLaneView,
-  TaskPlanNoteView,
-  TaskPlanStepStatus,
-  TaskPlanStrategy,
-  TaskPlanTaskView,
-  TaskPlanView,
+import {
+  planModelAlias,
+  type TaskPlanBoardView,
+  type TaskPlanCheckpointView,
+  type TaskPlanContractsView,
+  type TaskPlanIntegrationView,
+  type TaskPlanIssueRef,
+  type TaskPlanIssuesView,
+  type TaskPlanLaneView,
+  type TaskPlanNoteView,
+  type TaskPlanStepStatus,
+  type TaskPlanStrategy,
+  type TaskPlanTaskView,
+  type TaskPlanView,
 } from '@/lib/task-plan-types';
 import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
-import { createSession, getSnapshot, sendMessage, stopSession, subscribe } from './sessions';
+import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
+import { allowedBackends, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
@@ -68,20 +80,33 @@ const RUN_TIMEOUT_MS = 30 * 60_000;
 /** 통합 세션에 다시 쓸 파일 하나의 상한. 생성물이나 바이너리가 레인 결과에 섞였을 때 통합을 멈춘다 */
 const MAX_INTEGRATION_FILE_BYTES = 256 * 1024;
 
-const plans = new Map<string, TaskPlanView>();
+/**
+ * 계획·게시판·가림기 상태. 개발 서버에서 페이지와 API 라우트가 이 모듈을 따로 불러오거나 HMR로 다시 읽어도 같은 상태를 보도록
+ * 전역에 둔다(sessions.ts와 같은 이유). 따로 두면 페이지 쪽이 디스크에서 다시 읽어 진행 중인 계획을 "재시작으로 멈춤"(중단됨)으로 잘못 보였다
+ */
+interface TaskPlanStore {
+  plans: Map<string, TaskPlanView>;
+  boards: Map<string, Board>;
+  redactors: Map<string, Redactor>;
+  integrationPageChecks: Map<string, readonly WorkflowPageCheck[]>;
+  loaded: boolean;
+}
+const globalPlans = globalThis as typeof globalThis & { __bStudioTaskPlans?: TaskPlanStore };
+const planStore: TaskPlanStore = (globalPlans.__bStudioTaskPlans ??= { plans: new Map(), boards: new Map(), redactors: new Map(), integrationPageChecks: new Map(), loaded: false });
+
+const plans = planStore.plans;
 /** 계획별 조율 게시판. 서버 메모리에만 있고, 재시작하면 사라진다(그때는 조율 없이 이어서 한다) */
-const boards = new Map<string, Board>();
+const boards = planStore.boards;
 /**
  * S3에서 모델이 게시판에 쓴 본문·refs를 게시 전에 가리는 가림기. 조율 모듈(coordination/)이 아니라
  * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
  */
-const redactors = new Map<string, Redactor>();
+const redactors = planStore.redactors;
 /**
  * 계획별 통합 게이트 전용 pageChecks(S 서버 안에서만 넘긴다). 레인 게이트는 그대로 두고 통합 세션에만 덧붙인다.
  * 게시판처럼 서버 메모리에만 있고 재시작하면 사라진다(그때는 통합을 다시 시도해도 확인 없이 돈다)
  */
-const integrationPageChecks = new Map<string, readonly WorkflowPageCheck[]>();
-let loaded = false;
+const integrationPageChecks = planStore.integrationPageChecks;
 
 /**
  * 조율 전략 S2~S5. presetPlan과 같은 규칙으로 서버 안에서만 넘긴다(HTTP 라우트는 받지 않는다).
@@ -99,10 +124,60 @@ export interface CoordinationInput {
   contracts?: Array<{ body: string; refs: string[] }>;
 }
 
+/**
+ * 이 서버의 계획 상한. 시작할 때 설정에서 한 번 읽는다(B_STUDIO_MAX_LANES·B_STUDIO_MAX_PLAN_TASKS).
+ * 잘못된 값은 기본값(3·6)으로 돌리고 경고를 남긴다 — 화면도 이 값을 보여 준다.
+ */
+export const PLAN_LIMITS: PlanLimits = planLimitsFromEnv();
+
+/**
+ * 모델에게 계획을 받을 수 있는 모드. 유료 API(api)와 이 PC에 로그인한 Claude Code 구독(claude-code)뿐이다.
+ * codex·commandcode·opencode·demo는 아직 계획 호출 경로가 없다(고정 계획만 쓴다) — 나중 작업이다.
+ */
+export const PLANNER_MODES = ['api', 'claude-code'] as const;
+
+/** 로컬 Claude Code 계획 호출에 쓸 모델. 없으면 로그인 계정의 기본 모델을 쓴다 */
+function claudeCodePlanModel(): string | undefined {
+  return process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined;
+}
+
+/** 로컬 CLI로 만든 계획의 기록용 모델 id 접두어. 벤치의 `local-cli:` 규칙과 같다 */
+const LOCAL_CLI_MODEL_PREFIX = 'local-cli:';
+
+/** 이 계획을 만든 모델의 기록용 id. 모델 레지스트리 id가 아니라 이 PC의 CLI 모델 이름이다 */
+function claudeCodePlanModelId(): string {
+  return `${LOCAL_CLI_MODEL_PREFIX}${claudeCodePlanModel() ?? 'default'}`;
+}
+
+/** 이 백엔드에서 실제로 고를 수 있는 노력 단계 네 가지만 받는다. 그 밖의 값(빈 문자열 포함)은 조용히 버린다 */
+function asEffort(value: string | undefined): Effort | undefined {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'max' ? value : undefined;
+}
+
+/**
+ * 계획·계약을 부르는 방법. 기록된 모델 id가 `local-cli:`면 그 CLI로 **도구 없이 한 번** 부르고,
+ * 아니면 모델 레지스트리 클라이언트로 부른다. 다시 시작한 계획(resume)도 같은 규칙을 탄다.
+ * 세션에서 이어받은 노력(추론 강도) 단계가 있으면(plan.effort) 두 경로 모두 그대로 실어 보낸다.
+ */
+function plannerAskFor(plan: TaskPlanView, project: LoadedProject): PlanAsk {
+  if (plan.modelId.startsWith(LOCAL_CLI_MODEL_PREFIX)) {
+    const model = plan.modelId.slice(LOCAL_CLI_MODEL_PREFIX.length);
+    return claudeCodeAsk({ cwd: project.root, ...(model && model !== 'default' ? { model } : {}), ...(plan.effort ? { effort: plan.effort } : {}) });
+  }
+  return planAskFromClient(clientForModel(modelById(plan.modelId), plan.effort));
+}
+
 export async function createTaskPlan(input: {
   projectId: string;
   request: string;
-  modelId: string;
+  /**
+   * API 모드는 모델 레지스트리 id. 로컬 Claude Code 모드는 보통 쓰지 않지만(모델은 그 CLI가 정한다),
+   * 세션에서 이어받은 값(별칭 `sonnet`·`opus`·`haiku`·`fable`, 빈 문자열 = 계정 기본)을 명시적으로 넘길 수 있다
+   * (나눠서 병렬 제안 수락 경로, ADR-068). 넘기면 그 값을 그대로 기록·레인·통합 세션에 쓴다
+   */
+  modelId?: string;
+  /** 세션에서 이어받은 노력(추론 강도) 단계. 이 백엔드·모델이 지원하지 않으면 조용히 무시한다 */
+  effort?: string;
   owner: string;
   /**
    * 서버 안에서만 넘긴다(벤치마크·테스트). HTTP 라우트는 이 필드를 넘기지 않는다.
@@ -117,11 +192,28 @@ export async function createTaskPlan(input: {
    * presetPlan·coordination과 같은 규칙이다. 레인 게이트는 그대로 두고 통합 세션에만 더한다
    */
   integrationChecks?: { pageChecks?: WorkflowPageCheck[] };
+  /**
+   * 서버 안에서만 넘긴다(벤치마크·테스트). 'light'면 레인 실행과 통합 실행(S4 수리 포함)에 가볍게 확인을 넘긴다.
+   * HTTP 라우트는 이 필드를 넘기지 않는다(presetPlan·coordination과 같은 규칙). 없으면 full
+   */
+  verify?: VerifyMode;
+  /**
+   * 세션의 "나눠서 병렬로 하기"(ADR-068)로 이 계획을 만들 때, 그 세션 id. presetPlan 등과 달리 HTTP 라우트도
+   * 받는다(대화의 넘기기 화면이 보낸다) — 같은 프로젝트·소유자의 세션인지 여기서 확인한다. 있으면 레인·통합
+   * 세션이 프로젝트 원본이 아니라 이 세션의 최신 체크포인트에서 시작한다(ADR-096).
+   */
+  sourceSessionId?: string;
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
   if (preset === undefined) {
-    if (mode !== 'api') throw new StudioError(409, '작업 분해는 B_STUDIO_MODE=api에서만 사용할 수 있습니다');
+    // 모델이 만드는 계획은 모델을 부를 수 있는 모드에서만 만든다(유료 API 또는 이 PC에 로그인한 Claude Code 구독)
+    if (!(PLANNER_MODES as readonly string[]).includes(mode)) {
+      throw new StudioError(
+        409,
+        `모델이 만드는 작업 계획은 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}에서만 만들 수 있습니다 (지금 모드: ${mode}). 이 모드에서는 고정 계획만 쓸 수 있습니다`,
+      );
+    }
   } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode' && mode !== 'opencode') {
     // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode·opencode 모드에서도 쓴다. demo는 지금처럼 거부한다
     throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex, commandcode 또는 opencode에서만 사용할 수 있습니다');
@@ -130,24 +222,48 @@ export async function createTaskPlan(input: {
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
 
-  let modelId = input.modelId;
+  let modelId = input.modelId?.trim() ?? '';
   if (preset === undefined) {
-    const model = listModelOptions().find((candidate) => candidate.id === input.modelId && candidate.enabled !== false);
-    if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${input.modelId}`);
-    if (!model.configured) throw new StudioError(400, `${model.label}의 API 키 환경 변수가 설정되지 않았습니다`);
-    if (!model.capabilities.includes('tools')) throw new StudioError(400, `${model.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
-    modelId = model.id;
-  } else {
+    if (mode === 'claude-code') {
+      // 세션에서 이어받은 명시적 모델이 있으면(빈 문자열 = 이어받은 세션도 "기본"을 썼다는 뜻) 그 별칭을 그대로 쓴다.
+      // 아예 넘기지 않았으면(세션 없이 이 화면에서 바로 만든 계획) 예전처럼 서버 환경 변수·계정 기본으로 돌아간다.
+      // 모델 레지스트리는 확인하지 않고, 기록에는 그 CLI 모델 이름(local-cli:…)을 남긴다
+      modelId = input.modelId !== undefined ? `${LOCAL_CLI_MODEL_PREFIX}${modelId || 'default'}` : claudeCodePlanModelId();
+    } else {
+      const model = listModelOptions().find((candidate) => candidate.id === modelId && candidate.enabled !== false);
+      if (!model) throw new StudioError(400, `등록되지 않은 모델입니다: ${modelId}`);
+      if (!model.configured) throw new StudioError(400, `${model.label}의 API 키 환경 변수가 설정되지 않았습니다`);
+      if (!model.capabilities.includes('tools')) throw new StudioError(400, `${model.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
+      modelId = model.id;
+    }
+  } else if (!modelId) {
     // 고정 계획에는 모델 호출이 없다. modelId는 기록용이라 비어 있으면 안 된다
-    if (!modelId.trim()) throw new StudioError(400, 'modelId가 필요합니다');
-    modelId = modelId.trim();
+    throw new StudioError(400, 'modelId가 필요합니다');
   }
 
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
+  // 같은 프로젝트·소유자의 세션에서 넘긴 것인지 확인한다 — 다른 사람·다른 프로젝트의 세션에서 시작하지 못하게 막는다
+  if (input.sourceSessionId !== undefined) {
+    const source = getSnapshot(input.sourceSessionId);
+    if (!source || source.projectId !== input.projectId || source.owner !== input.owner) {
+      throw new StudioError(404, '넘긴 세션을 찾을 수 없습니다');
+    }
+    // 레인·통합이 이 세션의 최신 체크포인트에서 시작한다(ADR-096) — 그 시점에 아직 커밋하지 않은 문서 변경(저장
+    // 실패 등으로 작업 복사본에만 남은 docs/)이 있으면 레인을 시작하기 전에 먼저 체크포인트로 남겨 이어받게 한다.
+    // 실패해도(시크릿 오탐 등) 계획은 그대로 진행한다 — 안전망이지 필수 경로가 아니다
+    await commitPendingWorkingCopyDocs(input.sourceSessionId, '문서: 작업을 나누기 전 남은 문서 변경을 정리한다').catch((error: unknown) => {
+      console.error(`[b-studio] 세션 ${input.sourceSessionId}의 문서 체크포인트를 남기지 못했습니다`, error);
+    });
+    // 설계 파이프라인(ADR-100): 레인으로 나누는 것도 구현의 한 형태다. 요청이 언급한 요구사항을 다루는 설계가
+    // 있는데 아직 승인되지 않았으면 레인을 만들기 전에 막는다(옵트인 — 그 요구사항을 다루는 설계가 없으면 통과)
+    await assertDesignApprovedForRequest(input.sourceSessionId, input.request);
+  }
   // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
   // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
   const redactor = input.coordination?.strategy === 'S3' ? new Redactor(await resolveSecrets(project)) : undefined;
+  // 모르는 값은 조용히 버린다(이어받은 세션이 노력 단계를 지원하지 않는 백엔드였을 수도 있다) — 잘못된 값으로 계획 만들기를 막지 않는다
+  const effort = asEffort(input.effort);
 
   ensureLoaded();
   const plan: TaskPlanView = {
@@ -156,10 +272,14 @@ export async function createTaskPlan(input: {
     projectId: input.projectId,
     request,
     modelId,
+    ...(effort ? { effort } : {}),
     status: 'planning',
     createdAt: new Date().toISOString(),
     lanes: [],
     ...(preset === undefined ? {} : { preset: true as const }),
+    // 가볍게 확인은 레인·통합 실행에 그대로 넘긴다. 없으면(full) 지금과 한 글자도 다르지 않다
+    ...(input.verify === 'light' ? { verify: 'light' as const } : {}),
+    ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
   };
   plans.set(plan.id, plan);
   attachCoordination(plan, input.coordination, redactor);
@@ -265,6 +385,21 @@ export function integrationIssues(sessionId: string): number[] {
   return [...new Set(numbers.filter((number): number is number => number !== undefined))];
 }
 
+/**
+ * 통합 세션 id로 그 계획의 요청 글·레인 작업들이 언급한 요구사항 id("[R4]" 모양)를 모은다(ADR-115). 레인은
+ * 요구사항 id를 구조화된 필드로 갖지 않으므로(계획은 작업·쓰기 범위만 안다), 계획 요청 글과 작업 제목·요청
+ * 글에서 찾는다. 하나라도 있으면 "이 세션은 요구사항을 다루는 작업 분해 계획의 통합 세션"이라는 신호로 쓰여,
+ * sessions.ts의 PR 초안이 레인을 하나로 합친 병합 커밋 하나만으로는 못 찾는 요구사항까지(ADR-110 폴백) 기본으로
+ * 연결한다. 계획을 찾지 못하거나(통합 세션이 아니다) 언급이 없으면 빈 배열 — 그러면 세션 커밋만으로 범위를 좁힌다.
+ */
+export function planRequirementIds(sessionId: string): string[] {
+  ensureLoaded();
+  const plan = [...plans.values()].find((candidate) => candidate.integration?.sessionId === sessionId);
+  if (!plan) return [];
+  const texts = [plan.request, ...plan.lanes.flatMap((lane) => lane.tasks.flatMap((task) => [task.title, task.request]))];
+  return extractRequirementMentions(texts);
+}
+
 const TRACKING_TITLE_LIMIT = 60;
 const TRACKING_REQUEST_LIMIT = 4_000;
 
@@ -278,12 +413,15 @@ async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
   if (plan.issues?.tracking || Object.keys(plan.issues?.tasks ?? {}).length > 0) return;
 
   let remote: RemoteLocation;
+  let token: string | undefined;
   try {
     const project = await findProject(plan.projectId);
     const source = project && (await CheckpointStore.inspectSource(project.root, { allowSubfolder: project.spec.repository?.monorepo === true }));
     const candidate = source?.originUrl ? parseRemote(source.originUrl) : undefined;
+    // 세션의 이슈 발행·PR 생성과 같은 토큰 찾기를 쓴다(ADR-107) — gh CLI 로그인만으로도 작업을 이슈로 올릴 수 있어야 한다
+    token = candidate && (candidate.kind === 'github' || candidate.kind === 'gitea') ? await cachedRepositoryToken(candidate.kind, { allowGhCli: localFolderAllowed() }) : undefined;
     // 원격을 확인하지 못하거나 올릴 수 없는 호스트·토큰이면 계획만 실행하고 이슈는 만들지 않는다
-    if (!candidate || !canCreatePullRequest(candidate)) return;
+    if (!candidate || !canCreatePullRequest(candidate, process.env, token)) return;
     remote = candidate;
   } catch {
     return;
@@ -295,17 +433,17 @@ async function publishPlanIssues(plan: TaskPlanView): Promise<void> {
     // 하위 이슈를 먼저 만들어, GitHub가 아니어도 추적 이슈 본문에 체크리스트를 넣을 수 있게 한다
     for (const lane of plan.lanes) {
       for (const task of lane.tasks) {
-        const created = await createIssue(remote, { title: task.title, body: taskIssueBody(plan, lane, task) });
+        const created = await createIssue(remote, { title: task.title, body: taskIssueBody(plan, lane, task) }, { token });
         issues.tasks[task.id] = { number: created.number, url: created.url };
         persist(plan);
       }
     }
-    const tracking = await createIssue(remote, { title: trackingTitle(plan), body: trackingIssueBody(plan, remote) });
+    const tracking = await createIssue(remote, { title: trackingTitle(plan), body: trackingIssueBody(plan, remote) }, { token });
     issues.tracking = { number: tracking.number, url: tracking.url };
     persist(plan);
 
     if (remote.kind === 'github') {
-      for (const ref of Object.values(issues.tasks)) await addSubIssue(remote, tracking.number, ref.number);
+      for (const ref of Object.values(issues.tasks)) await addSubIssue(remote, tracking.number, ref.number, { token });
     }
   } catch (error) {
     // 실패해도 계획 실행·상태 전이는 그대로 두고 이유만 남긴다
@@ -357,6 +495,68 @@ function taskIssueBody(plan: TaskPlanView, lane: TaskPlanLaneView, task: TaskPla
   ].join('\n');
 }
 
+/**
+ * 레인 백엔드로 고를 수 있는 값(화면 드롭다운이 이 목록을 보여 준다). demo는 뺀다(데모는 섞지 않는다) —
+ * 세션을 만들 때 쓰는 allowedBackends()(sessions.ts, B_STUDIO_MODE·B_STUDIO_BACKENDS)와 같은 규칙이다.
+ */
+export function selectableLaneBackends(): PlanBackend[] {
+  return [...allowedBackends()].filter((backend): backend is PlanBackend => backend !== 'demo');
+}
+
+/**
+ * 레인마다 다른 백엔드·모델을 고른다(이슈 #398). 작업 분해 화면에서 레인 카드의 선택기가 이 함수를 부른다.
+ * 승인 대기 중에만 바꿀 수 있다 — 레인 세션을 만들기 전에 결정이 끝나야 하기 때문이다(레인 세션을 만든 뒤에는
+ * 그 세션이 이미 그 백엔드로 떠 있어 바꿀 수 없다).
+ *
+ * backend를 비우면(undefined·빈 문자열) "세션과 같음"(상속, 지금까지의 동작 그대로)으로 되돌린다.
+ * backend를 주면 이 서버가 허용하는 백엔드인지 확인한다(allowedBackends, sessions.ts의 세션 백엔드 확인과 같은 규칙 —
+ * 모르는 백엔드나 이 서버가 끈 백엔드를 레인에 몰래 흘려보내지 않는다).
+ *
+ * 레인의 모든 작업에 같은 backend·model을 싣는다 — planLanes가 "같은 레인의 작업은 backend·model이 같아야 한다"고
+ * 요구하는 것과 같은 규칙이다(한 레인은 한 세션에서 돈다).
+ */
+export function setLaneBackend(planId: string, owner: string, laneId: string, input: { backend?: string; model?: string; effort?: string }): TaskPlanView {
+  const plan = findPlan(planId, owner);
+  if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인 대기 중인 계획만 레인 백엔드를 바꿀 수 있습니다');
+  const lane = plan.lanes.find((candidate) => candidate.id === laneId);
+  if (!lane) throw new StudioError(404, '레인을 찾을 수 없습니다');
+
+  const backend = input.backend?.trim();
+  if (!backend) {
+    // 세션과 같음으로 되돌린다 — 레인·작업에서 backend·model·effort를 모두 지운다(지금까지의 상속 동작과 같다)
+    lane.backend = undefined;
+    lane.model = undefined;
+    lane.effort = undefined;
+    for (const task of lane.tasks) {
+      task.backend = undefined;
+      task.model = undefined;
+    }
+    persist(plan);
+    return clone(plan);
+  }
+  if (!PlanBackendSchema.safeParse(backend).success) {
+    throw new StudioError(400, `알 수 없는 백엔드입니다: ${backend} (api, claude-code, codex, commandcode 또는 opencode)`);
+  }
+  const allowed = allowedBackends();
+  if (!allowed.has(backend as SessionMode)) {
+    const list = selectableLaneBackends();
+    throw new StudioError(400, `이 서버에서 쓸 수 없는 백엔드입니다: ${backend} (쓸 수 있는 백엔드: ${list.length > 0 ? list.join(', ') : '없음'})`);
+  }
+  const model = input.model?.trim() || undefined;
+  if (model && model.length > 120) throw new StudioError(400, '모델 이름은 120자까지 입력할 수 있습니다');
+  const effort = asEffort(input.effort);
+
+  lane.backend = backend as PlanBackend;
+  lane.model = model;
+  lane.effort = effort;
+  for (const task of lane.tasks) {
+    task.backend = backend as PlanBackend;
+    task.model = model;
+  }
+  persist(plan);
+  return clone(plan);
+}
+
 /** 사람이 계획을 거부하면 세션을 만들지 않고 멈춘다 */
 export function rejectTaskPlan(id: string, owner: string, reason?: string): TaskPlanView {
   const plan = findPlan(id, owner);
@@ -366,6 +566,34 @@ export function rejectTaskPlan(id: string, owner: string, reason?: string): Task
   plan.finishedAt = new Date().toISOString();
   persist(plan);
   return clone(plan);
+}
+
+/**
+ * 작업 계획 기록을 지운다. 레인을 실행 중이거나(running) 통합 중(integrating)이거나 계획을 짜는 중(planning)이면
+ * 지우지 않는다 — 아직 세션·게시판이 살아 움직이는 중이라 지울 수 없다(승인 대기·끝남·실패·거부·재시작으로 멈춤은 지울 수 있다).
+ * 지울 때는 이 계획을 통째로 지우겠다는 의사가 이미 분명하므로, 레인 세션과 통합 세션의 기록도 함께 지운다
+ * (세션이 아직 켜져 있으면 먼저 멈춘 뒤 지운다).
+ */
+export async function deleteTaskPlan(id: string, owner: string): Promise<void> {
+  const plan = findPlan(id, owner);
+  if (plan.status === 'running' || plan.status === 'integrating' || plan.status === 'planning') {
+    throw new StudioError(409, '진행 중인 작업 계획은 지울 수 없습니다. 끝나거나 멈춘 뒤 지우세요');
+  }
+  plans.delete(id);
+  boards.delete(id);
+  redactors.delete(id);
+  integrationPageChecks.delete(id);
+  removePlanFile(id);
+  const sessionIds = [...plan.lanes.map((lane) => lane.sessionId), plan.integration?.sessionId].filter((value): value is string => Boolean(value));
+  await Promise.all(sessionIds.map((sessionId) => stopAndDeleteSession(sessionId)));
+}
+
+function removePlanFile(id: string): void {
+  try {
+    unlinkSync(path.join(root(), `${id}.json`));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`[b-studio] 작업 계획 ${id} 파일을 지우지 못했습니다`, error);
+  }
 }
 
 /**
@@ -387,12 +615,12 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
   let lanes: TaskLane[];
   try {
     if (preset === undefined) {
-      const planned = await requestTaskPlan(clientForModel(modelById(plan.modelId)), project, plan.request);
+      const planned = await requestTaskPlan(plannerAskFor(plan, project), project, plan.request, undefined, PLAN_LIMITS);
       plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
       lanes = planned.lanes;
     } else {
       // 고정 계획은 모델을 부르지 않는다. plan.planning은 남기지 않는다(모델 호출이 없었다)
-      lanes = planLanes(preset);
+      lanes = planLanes(preset, PLAN_LIMITS);
     }
   } catch (error) {
     // 계획 검증이 실패해도 모델 호출에 쓴 토큰과 시간은 남긴다. 아래 fail()이 지표를 계산한다
@@ -438,7 +666,8 @@ function contractsSetting(): boolean {
  */
 async function askLaneContracts(plan: TaskPlanView, project: LoadedProject, lanes: readonly TaskLane[]): Promise<void> {
   try {
-    const asked = await requestLaneContracts(contractAskFromClient(clientForModel(modelById(plan.modelId))), project, plan.request, lanes);
+    // 계약도 계획과 **같은 호출**로 받는다(API나 이 PC의 Claude Code). 모드를 섞지 않는다
+    const asked = await requestLaneContracts(plannerAskFor(plan, project), project, plan.request, lanes);
     const redactor = new Redactor(await resolveSecrets(project));
     const contracts = asked.contracts.map((contract) => ({ body: redactor.redact(contract.body), refs: contract.refs.map((ref) => redactor.redact(ref)) }));
     attachCoordination(plan, { strategy: 'S2', contracts }, redactor);
@@ -466,7 +695,7 @@ async function runApprovedPlan(plan: TaskPlanView): Promise<void> {
   // 레인끼리는 의존 관계가 없으므로 작업 그래프로 동시에 돌린다. 한 레인이 실패해도 다른 레인은 끝까지 돌려 결과를 남긴다
   const results = await runTaskGraph(
     plan.lanes.map((lane) => ({ id: lane.id, run: () => runLane(plan, lane) })),
-    { concurrency: MAX_PLAN_LANES },
+    { concurrency: PLAN_LIMITS.maxLanes },
   );
   const failed = results.filter((result) => result.status !== 'succeeded');
   if (failed.length > 0) return fail(plan, `레인이 게이트를 통과하지 못해 통합하지 않습니다: ${failed.map((result) => `${result.id} (${result.error})`).join(', ')}`);
@@ -480,7 +709,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
   persist(plan);
   const bootStarted = performance.now();
   try {
-    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', laneSessionOption(plan, lane));
+    const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { ...laneSessionOption(plan, lane), ...seedFromSessionOption(plan) });
     lane.sessionId = snapshot.id;
     persist(plan);
     await waitForReady(snapshot.id);
@@ -493,7 +722,12 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       task.status = 'running';
       persist(plan);
       const board = laneBoard(plan, lane, task.id);
-      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), { by: plan.owner, writableScope: task.paths, ...(board ? { board } : {}) });
+      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
+        by: plan.owner,
+        writableScope: task.paths,
+        ...(board ? { board } : {}),
+        ...(plan.verify ? { verify: plan.verify } : {}),
+      });
       // S5: 성공·실패와 무관하게 그 실행의 검증 실패 서명을 플랫폼이 게시해 다른 레인이 읽게 한다
       if (plan.coordination?.strategy === 'S5') postFailures(plan, lane, snapshot.id);
       task.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
@@ -565,8 +799,9 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const extraPageChecks = integrationPageChecks.get(plan.id);
     // Command Code 모드는 모델을 세션에 고정하지 않으므로 sessionModelOption이 빈 객체를 돌려준다(빈 모델 id를 넘기지 않는다)
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', {
-      ...sessionModelOption(plan.modelId),
+      ...sessionModelOption(plan.modelId, plan.effort),
       ...(extraPageChecks ? { extraPageChecks } : {}),
+      ...seedFromSessionOption(plan),
     });
     Object.assign(integration, { sessionId: snapshot.id });
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
@@ -594,13 +829,21 @@ async function integrate(plan: TaskPlanView): Promise<void> {
       { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
     ];
     const writableScope = [...new Set(plan.lanes.flatMap((lane) => lane.paths))];
-    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, { by: plan.owner, scriptedTurns: turns, writableScope });
+    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, {
+      by: plan.owner,
+      scriptedTurns: turns,
+      // 모델을 부르지 않고 레인 결과를 합칠 뿐이라, 채팅의 "backend" 카드가 ScriptedModelClient의 기본값
+      // ("데모 스크립트에서 scripted 모델로 실행합니다")으로 보이지 않고 실제 쓰임을 보여주게 덮어쓴다(버그 리포트)
+      scriptedInfo: { backend: '레인 결과 합치기', model: '모델 호출 없음' },
+      writableScope,
+      ...(plan.verify ? { verify: plan.verify } : {}),
+    });
     integration.run = runView(outcome);
     let settled = outcome;
     // S4: 통합 게이트가 실패하면 한 번만 통합 세션에 모델 수리를 요청한다(공유 없이 실패 뒤에만 비용을 내는 대조군).
     // scriptedTurns 없이 보내므로 세션의 기본 모델 경로(API 모드는 계획의 모델, 로컬 CLI는 그 러너)로 실제 호출된다
     if (outcome.status !== 'done' && plan.coordination?.strategy === 'S4') {
-      const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope });
+      const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope, ...(plan.verify ? { verify: plan.verify } : {}) });
       integration.repair = { attempted: true, status: repair.status, run: runView(repair) };
       settled = repair;
     }
@@ -628,26 +871,43 @@ async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
 
 /**
  * commandcode·opencode 모드는 세션 모델을 고른 모델(`B_STUDIO_CMD_MODEL`·`B_STUDIO_OPENCODE_MODEL`)이나 세션 선택에서 정한다.
- * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 CLI `-m`으로 나가므로 넘기지 않는다
+ * 계획의 `modelId`(`local-cli-commandcode:...` 같은 기록용 id)를 세션 모델로 넘기면 그 값이 CLI `-m`으로 나가므로 넘기지 않는다.
+ *
+ * 로컬 Claude Code 계획의 기록용 id(`local-cli:sonnet`)는 그 자체로는 실제 모델 이름이 아니다 — 접두어가 붙은 채로
+ * 세션에 넘기면 sessions.ts의 cliModelOverride가 "계획 기록용 id"로 보고 걸러내 서버 기본으로 떨어진다(레인·통합 세션이
+ * 계획과 다른 모델로 도는 버그였다). planModelAlias로 접두어를 뗀 실제 별칭(sonnet 등)만 세션에 넘긴다.
  */
-function sessionModelOption(modelId: string): { modelId?: string } {
+function sessionModelOption(modelId: string, effort?: Effort): { modelId?: string; effort?: Effort } {
   const mode = process.env.B_STUDIO_MODE?.trim();
-  return mode === 'commandcode' || mode === 'opencode' ? {} : { modelId };
+  if (mode === 'commandcode' || mode === 'opencode') return {};
+  const resolved = planModelAlias(modelId);
+  return { ...(resolved ? { modelId: resolved } : {}), ...(effort ? { effort } : {}) };
 }
 
 /**
  * 레인 세션을 만들 때의 옵션. 레인 작업이 backend·model을 실었으면 그것으로 세션을 만든다(레인마다 다른 백엔드).
- * 없으면 기존처럼 계획의 modelId와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
+ * 없으면 기존처럼 계획의 modelId·effort와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
  */
-function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; backend?: string } {
+function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string } {
   const head = lane.tasks[0];
   const backend = head?.backend;
-  if (!backend) return sessionModelOption(plan.modelId);
+  if (!backend) return sessionModelOption(plan.modelId, plan.effort);
+  // 레인이 고른 노력 단계가 있으면 그 값을, 없으면 계획 기본(plan.effort)을 쓴다(지금까지의 동작과 같다, #398)
+  const effort = lane.effort ?? plan.effort;
   // api는 모델 레지스트리 id를, commandcode·opencode는 그 CLI의 모델 id를 세션에 넘긴다. claude-code·codex도 고른 모델을 세션에 실어
   // 러너가 그 값을 쓰게 한다(없으면 환경 변수 = 계획 기본)
   if (backend === 'commandcode' || backend === 'opencode') return { backend, ...(head.model ? { modelId: head.model } : {}) };
-  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId };
-  return { backend, ...(head.model ? { modelId: head.model } : {}) };
+  if (backend === 'api') return { backend, modelId: head.model ?? plan.modelId, ...(effort ? { effort } : {}) };
+  return { backend, ...(head.model ? { modelId: head.model } : {}), ...(effort ? { effort } : {}) };
+}
+
+/**
+ * 계획이 세션의 "나눠서 병렬로 하기"로 만들어졌으면(sourceSessionId) 레인·통합 세션이 프로젝트 원본이 아니라
+ * 그 세션의 최신 체크포인트에서 시작하게 한다(ADR-096). 세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은
+ * sourceSessionId가 없어 빈 객체를 돌려주고, createSession은 지금처럼 프로젝트 원본에서 시작한다.
+ */
+function seedFromSessionOption(plan: TaskPlanView): { seedFromSessionId?: string } {
+  return plan.sourceSessionId ? { seedFromSessionId: plan.sourceSessionId } : {};
 }
 
 function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number): string {
@@ -667,7 +927,9 @@ function coordinationGuidance(strategy: TaskPlanStrategy | undefined): string | 
     case 'S2':
       return '[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요';
     case 'S3':
-      return '[조율] 다른 레인과 맞물리는 인터페이스를 정하면 post_note(contract)로 남기고, 시작 전과 끝내기 전에 read_notes로 확인하세요';
+      // 레인이 시작 직후 read_notes부터 부르면 상대 레인이 계약을 내기 전이라 빈 결과를 받는다(E11, 이슈 #393).
+      // 게시가 먼저여야 상대가 읽을 때 빈손이 되지 않는다 — 읽기보다 게시를 앞세우도록 순서를 명시한다
+      return '[조율] 다른 레인과 맞물리는 인터페이스가 있으면 read_notes보다 먼저 post_note(contract)로 게시하세요. 그다음 시작 전과 끝내기 전에 read_notes로 다른 레인의 계약을 확인하고, 아직 게시 전이라는 안내가 오면 잠시 뒤 다시 read_notes를 부르세요';
     case 'S5':
       return '[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요';
     default:
@@ -703,7 +965,8 @@ function laneBoard(plan: TaskPlanView, lane: TaskPlanLaneView, taskId: string): 
       const result = board.read({ lane: lane.id, group: laneGroup(lane) }, options);
       // 읽기 통계도 화면·지표에 남도록 스냅샷을 갱신한다(저장은 다음 상태 전이가 한다)
       syncBoard(plan, board);
-      return result;
+      const notice = contractNotice(plan, lane, board);
+      return notice ? { ...result, notice } : result;
     },
   };
 }
@@ -711,6 +974,25 @@ function laneBoard(plan: TaskPlanView, lane: TaskPlanLaneView, taskId: string): 
 /** 계층 구조에서 같은 그룹으로 묶는 기준: 레인의 첫 쓰기 범위. 병렬 레인의 범위는 겹치지 않으므로 서로 다른 그룹이 된다 */
 function laneGroup(lane: TaskPlanLaneView): string | undefined {
   return lane.paths[0];
+}
+
+/**
+ * S3에서 다른 레인이 아직 계약을 게시하지 않았으면 그 사실을 안내로 덧붙인다(E11, 이슈 #393, ADR-0XX).
+ * 하드 배리어가 아니라 안내다 — 레인 실행을 막지 않고, 다시 읽을지는 모델이 정한다. 레인이 또 read_notes를
+ * 부르면 그때 게시판 상태를 다시 보므로 이 함수는 상태를 따로 들고 있지 않다(매번 다시 계산한다).
+ *
+ * topology와는 무관하게 계획의 전체 레인 집합으로 판단한다 — star에서 상대 메모를 못 읽는 레인도
+ * "상대가 아직 게시 전"이라는 사실 자체는 알아야 한다(쳐낼 메모가 없는 것과 아직 없는 것은 다르다).
+ *
+ * S2는 플랫폼이 레인을 돌리기 전에 계약을 미리 게시하므로(attachCoordination이 동기로 끝난다) 이 경쟁이
+ * 생기지 않는다. S4·S5는 레인이 계약을 쓰지 않는다. 그래서 S3에서만 본다.
+ */
+function contractNotice(plan: TaskPlanView, lane: TaskPlanLaneView, board: Board): string | undefined {
+  if (plan.coordination?.strategy !== 'S3') return undefined;
+  const posted = board.contractAuthors();
+  const waiting = plan.lanes.filter((other) => other.id !== lane.id && !posted.has(other.id)).map((other) => other.id);
+  if (waiting.length === 0) return undefined;
+  return `[조율] ${waiting.join(', ')}가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요`;
 }
 
 /** S5: 레인 세션 기록에서 검증 실패 서명을 뽑아 플랫폼 이름으로 게시한다 */
@@ -759,7 +1041,14 @@ function waitForReady(sessionId: string): Promise<void> {
 async function runAndWait(
   sessionId: string,
   request: string,
-  options: { by: string; writableScope?: readonly string[]; scriptedTurns?: ScriptedTurn[]; board?: BoardAccess },
+  options: {
+    by: string;
+    writableScope?: readonly string[];
+    scriptedTurns?: ScriptedTurn[];
+    scriptedInfo?: Partial<ModelClientInfo>;
+    board?: BoardAccess;
+    verify?: VerifyMode;
+  },
 ): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number }> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;
@@ -829,8 +1118,8 @@ function hasResultRecord(lane: TaskPlanLaneView): boolean {
 }
 
 function ensureLoaded(): void {
-  if (loaded) return;
-  loaded = true;
+  if (planStore.loaded) return;
+  planStore.loaded = true;
   try {
     for (const name of readdirSync(/* turbopackIgnore: true */ root())) {
       if (!name.endsWith('.json')) continue;

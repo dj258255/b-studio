@@ -1,9 +1,9 @@
 import { execFile, spawn } from 'node:child_process';
-import { appendFile, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
-import { parseWorkflowTrailerValues, WORKFLOW_TRAILER } from './workflow';
+import { parseVerifyTrailerValues, parseWorkflowTrailerValues, WORKFLOW_TRAILER, WORKFLOW_VERIFY_TRAILER } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +17,8 @@ export interface Checkpoint {
   files: string[];
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 체크포인트다 */
   passedStages?: WorkflowStage[];
+  /** 가볍게 확인(light) 실행이면 'light', 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'. 전체 검증이면 없다 */
+  verify?: 'light' | 'docs';
 }
 
 export interface GitAuthor {
@@ -56,8 +58,13 @@ export interface SessionCommit {
   subject: string;
   body: string;
   files: string[];
+  /** 바뀐 줄 수(추가·삭제). 제출 준비 점검(ADR-080)이 한 커밋이 전체 변경을 독차지하는지 볼 때 쓴다. sessionCommits()가 항상 채운다 */
+  stat?: { insertions: number; deletions: number };
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 커밋이다 */
   passedStages?: WorkflowStage[];
+  /** 커밋 본문의 Workflow-Verify 트레일러. 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'.
+   * PR 본문(buildPullRequest)이 이 값으로 "필수 단계 기록이 없다"가 아니라 "문서 체크포인트"로 보여준다 */
+  verify?: 'light' | 'docs';
 }
 
 export interface PushResult {
@@ -74,12 +81,38 @@ export interface PendingChange {
   change: 'added' | 'modified' | 'deleted';
 }
 
+/**
+ * discard()·restore()가 체크포인트에 없던 변경을 버리기 직전에 남긴 백업(ADR-099, "절대 조용히 지우지 않는다").
+ * 작업 복사본에 git apply로 그대로 되살릴 수 있는 패치 하나로 저장한다(추가·수정·삭제·바이너리 파일 모두 포함,
+ * untracked 파일도 git add -A로 인덱스에 올린 뒤 떠서 새 파일 diff로 들어가므로 따로 보관할 필요가 없다).
+ */
+export interface DiscardBackup {
+  /** 백업 폴더 이름(타임스탬프 기반). restoreBackup()에 그대로 넘긴다 */
+  id: string;
+  /** 백업에 담긴 파일(프로젝트 기준 경로) */
+  files: string[];
+  /** ISO 8601 */
+  createdAt: string;
+}
+
 /** 원격 세션 브랜치에만 있던 커밋 (리뷰어가 올린 커밋 등) */
 export interface RemoteCommit {
   sha: string;
   shortSha: string;
   subject: string;
   author: string;
+}
+
+/** 기준 브랜치(세션이 갈라져 나온 브랜치, 보통 main)가 이 세션보다 얼마나 앞서 있는지(ADR-076) */
+export interface BaseStatus {
+  /** 세션이 갈라져 나온 기준 브랜치 이름 */
+  base: string;
+  /** 기준 브랜치에는 있지만 이 세션에는 없는 커밋 수. 0이면 따라잡을 것이 없다 */
+  behind: number;
+  /** 이 세션이 기준 브랜치와 갈라진 뒤 만든 커밋 수 */
+  aheadCommits?: number;
+  /** 기준 브랜치를 마지막으로 가져온(fetch) 시각(ISO). 화면이 자주 물어도 이 값이 오래되지 않았으면 새로 가져오지 않는다 */
+  lastFetchedAt: string;
 }
 
 export interface RemoteSyncResult {
@@ -131,8 +164,14 @@ export class RemoteConflictError extends CheckpointError {
 }
 
 const SHA = /^[0-9a-f]{7,40}$/;
+/** backupId()가 만드는 형식만 받는다(경로 조작 방어 — id는 API 요청에서 그대로 넘어온다) */
+const BACKUP_ID = /^[0-9A-Za-z-]{10,64}$/;
 /** 가져오기 전에 원격 세션 브랜치를 받아 두는 곳. origin/*는 원본 폴더의 브랜치를 가리킬 수 있어 쓰지 않는다 */
 const REMOTE_REF = 'refs/b-studio/remote';
+/** 기준 브랜치(main 등)를 받아 두는 곳 (ADR-076) */
+const BASE_REF = 'refs/b-studio/base';
+/** 기준 브랜치 확인(baseStatus)을 이 시간 안에 다시 부르면 새로 가져오지 않는다. 화면이 자주 물어도 origin에 부담을 주지 않는다 */
+const BASE_FETCH_THROTTLE_MS = 60_000;
 const MAX_PATCH_CHARS = 200_000;
 const MAX_BODY_CHARS = 8_000;
 const CLONE_TIMEOUT_MS = 300_000;
@@ -140,6 +179,12 @@ const PUSH_TIMEOUT_MS = 120_000;
 const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-studio.local' };
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
 const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts', '*.b-studio-relay-*'];
+/** discard()·restore() 백업을 이 안에 둔다(ADR-099). 작업 복사본이 아니라 체크포인트 저장소 쪽이라 커밋·게이트에 걸리지 않는다 */
+const BACKUP_DIRNAME = 'b-studio/discarded';
+/** 백업은 이 개수를 넘으면 오래된 것부터 지운다. 방금 만든 백업은 이 한도를 넘어도 지우지 않는다 */
+const BACKUP_KEEP_MAX = 10;
+/** 백업 전체 용량이 이 값을 넘으면 오래된 것부터 지운다(방금 만든 백업은 예외) */
+const BACKUP_KEEP_BYTES = 200 * 1024 * 1024;
 
 /**
  * 세션 작업 복사본의 Git 기록으로 체크포인트를 관리한다.
@@ -184,7 +229,11 @@ export class CheckpointStore {
     const hasCommit = await inRepo(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).then(() => true, () => false);
     if (!hasCommit) return undefined;
 
-    const base = await inRepo(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim(), () => '');
+    // source가 다른 b-studio 세션의 작업 복사본이면(작업 분해가 세션의 체크포인트에서 레인·통합을 시작할 때, ADR-096)
+    // 지금 체크아웃된 브랜치는 그 세션 브랜치이지 기준 브랜치가 아니다. 그 세션이 클론될 때 기록해 둔 기준 브랜치
+    // 메타(b-studio.base)가 있으면 그것을 쓰고, 없으면(보통의 프로젝트 원본) 지금처럼 체크아웃된 브랜치를 쓴다
+    const sessionBase = await inRepo(['config', '--get', 'b-studio.base']).then((out) => out.trim() || undefined, () => undefined);
+    const base = sessionBase ?? (await inRepo(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim(), () => ''));
     if (!base) throw new CheckpointError('원본 저장소가 브랜치가 아닌 커밋(detached HEAD)을 가리키고 있어 세션 브랜치를 만들 수 없습니다');
     const originUrl = await inRepo(['remote', 'get-url', 'origin']).then((out) => out.trim() || undefined, () => undefined);
     // 모노레포에서 다른 폴더의 변경은 이 프로젝트와 관계없으므로 프로젝트 폴더의 변경만 센다
@@ -199,7 +248,21 @@ export class CheckpointStore {
   static async clone(
     source: string,
     root: string,
-    { branch, allowSubfolder = false, ...options }: CheckpointStoreOptions & { branch: string; allowSubfolder?: boolean },
+    {
+      branch,
+      allowSubfolder = false,
+      ref,
+      ...options
+    }: CheckpointStoreOptions & {
+      branch: string;
+      allowSubfolder?: boolean;
+      /**
+       * 세션 브랜치를 시작할 커밋. 생략하면 지금처럼 원본의 기준 브랜치(info.base) 끝에서 시작한다.
+       * 작업 분해(레인·통합)가 다른 세션의 체크포인트에서 시작할 때(ADR-096) source에 그 세션의 작업 복사본을 주고
+       * 여기에 그 세션의 최신 체크포인트 sha를 준다 — info.base는 그대로 메타(PR 대상)로 쓰고, 내용만 그 sha에서 가져온다
+       */
+      ref?: string;
+    },
   ): Promise<{ store: CheckpointStore; start: Checkpoint; source: SourceRepository; projectRoot: string }> {
     const gitBin = options.gitBin ?? 'git';
     const info = await CheckpointStore.inspectSource(source, { gitBin, allowSubfolder });
@@ -215,12 +278,18 @@ export class CheckpointStore {
     // 모노레포 하위 폴더도 저장소 전체를 복제한다. compose 빌드가 공용 패키지처럼 프로젝트 밖 폴더를 쓸 수 있기 때문이다
     const toplevel = (await runGit(gitBin, ['-C', await resolveReal(source), 'rev-parse', '--show-toplevel'])).trim();
     await mkdir(path.dirname(path.resolve(root)), { recursive: true });
-    await runGit(gitBin, ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(toplevel), path.resolve(root)], {
-      timeout: CLONE_TIMEOUT_MS,
-    });
+    // ref가 있으면(다른 세션에서 시작) 그 커밋이 기준 브랜치에는 없을 수 있어 --branch로 고정하지 않고 복제한 뒤 따로 체크아웃한다
+    await runGit(
+      gitBin,
+      ref
+        ? ['clone', '--quiet', '--', await resolveReal(toplevel), path.resolve(root)]
+        : ['clone', '--quiet', '--branch', info.base, '--', await resolveReal(toplevel), path.resolve(root)],
+      { timeout: CLONE_TIMEOUT_MS },
+    );
 
     const store = new CheckpointStore(root, options);
     if (info.originUrl) await store.#git(['remote', 'set-url', 'origin', info.originUrl]);
+    if (ref) await store.#git(['checkout', '-q', ref]);
     await store.#git(['checkout', '-q', '-b', branch]);
     await store.#configure();
     const start = (await store.#git(['rev-parse', 'HEAD'])).trim();
@@ -339,6 +408,37 @@ export class CheckpointStore {
     return this.#checkpoint('HEAD');
   }
 
+  /**
+   * 지정한 경로만 범위로 체크포인트를 남긴다. 그 밖에 바뀐 파일이 있어도 손대지 않고 그대로 둔다(ADR-096).
+   * 요구사항 저장처럼 문서만 바꾼 변경을, 함께 진행 중일 수 있는 코드 변경과 섞지 않고 따로 커밋할 때 쓴다.
+   * 범위 안에 바뀐 파일이 없으면 커밋하지 않는다(undefined) — 저장했지만 내용이 같았던 경우를 조용히 건너뛴다.
+   */
+  async commitPaths(
+    paths: readonly string[],
+    message: string,
+    body?: string,
+    { findSecrets, trailers = [] }: { findSecrets?: (text: string) => string[]; trailers?: readonly string[] } = {},
+  ): Promise<Checkpoint | undefined> {
+    if (paths.length === 0) return undefined;
+    const subdir = await this.#subdir();
+    const scoped = paths.map((file) => (subdir ? `${subdir}/${file}` : file));
+    const changed = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...scoped])).split('\0').filter(Boolean);
+    if (changed.length === 0) return undefined;
+    if (findSecrets) {
+      const leaks = await this.#secretLeaks(paths, `${message}\n${body ?? ''}`, findSecrets);
+      if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
+    }
+    await this.#git(['add', '-A', '--', ...scoped]);
+    const text = body?.trim();
+    await this.#git([
+      'commit', '-q', '--cleanup=whitespace',
+      '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
+      ...(trailers.length > 0 ? ['-m', trailers.map(oneLine).join('\n')] : []),
+      '--', ...scoped,
+    ]);
+    return this.#checkpoint('HEAD');
+  }
+
   /** "파일 (시크릿 이름)" 목록. 값은 담지 않는다 */
   async #secretLeaks(files: readonly string[], text: string, findSecrets: (text: string) => string[]): Promise<string[]> {
     const leaks: string[] = [];
@@ -353,17 +453,23 @@ export class CheckpointStore {
     return leaks;
   }
 
-  /** 마지막 체크포인트 이후의 변경을 버린다. 무엇을 버렸는지 볼 수 있게 patch를 함께 돌려준다 */
-  async discard(): Promise<{ files: string[]; patch: string }> {
+  /**
+   * 마지막 체크포인트 이후의 변경을 버린다. 무엇을 버렸는지 볼 수 있게 patch를 함께 돌려주고, 되살릴 수 있게
+   * 백업도 남긴다(ADR-099) — 버리기 전에 조용히 사라지는 변경이 없게 한다. 문서 경로를 먼저 지키는 일은
+   * 이 메서드의 책임이 아니다(어떤 경로가 "문서"인지는 studio 쪽 정책이다) — 부르는 쪽이 discard() 전에
+   * 문서만 먼저 체크포인트로 남겨야 한다.
+   */
+  async discard(): Promise<{ files: string[]; patch: string; backup?: DiscardBackup }> {
     const files = await this.pendingFiles();
     if (files.length === 0) return { files, patch: '' };
 
     const scope = await this.#scope();
     await this.#git(['add', '-A', ...scope]);
     const patch = await this.#git(['diff', '--cached', '--no-color', ...(await this.#relative()), 'HEAD']);
+    const backup = await this.#backupCachedIndex(files);
     await this.#git(['reset', '-q', '--hard', 'HEAD']);
     await this.#git(['clean', '-q', '-fd', ...scope]);
-    return { files, patch: capText(patch, MAX_PATCH_CHARS) };
+    return { files, patch: capText(patch, MAX_PATCH_CHARS), backup };
   }
 
   /**
@@ -392,20 +498,116 @@ export class CheckpointStore {
   }
 
   /**
-   * 이 세션 기록에 있는 체크포인트로 되돌린다. 그 뒤의 체크포인트와 아직 남기지 않은 변경은 사라진다.
+   * 이 세션 기록에 있는 체크포인트로 되돌린다. 그 뒤의 체크포인트는 기록(reflog)에 남아 되찾을 길이 있지만,
+   * 아직 체크포인트로 남기지 않은 변경(pending)은 이대로면 영영 사라지므로 버리기 전에 백업한다(ADR-099).
    * 돌려주는 파일 목록으로 어떤 서비스를 재시작할지 정한다.
    */
-  async restore(sha: string): Promise<{ checkpoint: Checkpoint; files: string[] }> {
+  async restore(sha: string): Promise<{ checkpoint: Checkpoint; files: string[]; backup?: DiscardBackup }> {
     const commit = await this.#resolve(sha);
     const inSession = (await this.#isAncestor(await this.#startSha(), commit)) && (await this.#isAncestor(commit, 'HEAD'));
     if (!inSession) throw new CheckpointError('현재 세션 기록에 없는 체크포인트입니다');
 
+    const scope = await this.#scope();
     const pending = await this.pendingFiles();
     const committed = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), commit, 'HEAD'])).split('\0').filter(Boolean);
+    await this.#git(['add', '-A', ...scope]);
+    const backup = await this.#backupCachedIndex(pending);
     await this.#git(['reset', '-q', '--hard', commit]);
-    await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
+    await this.#git(['clean', '-q', '-fd', ...scope]);
 
-    return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort() };
+    return { checkpoint: await this.#checkpoint(commit), files: [...new Set([...pending, ...committed])].sort(), backup };
+  }
+
+  /**
+   * 되살리기 백업 하나를 작업 복사본에 그대로 되돌린다. 그 사이에 같은 파일이 다시 바뀌어 패치가 깨끗하게
+   * 들어가지 않으면(git apply --check 실패) 거부한다 — 일부만 들어가 상태를 더 헷갈리게 만들지 않는다.
+   */
+  async restoreBackup(id: string): Promise<{ files: string[] }> {
+    if (!BACKUP_ID.test(id)) throw new CheckpointError('백업 id 형식이 올바르지 않습니다');
+    const dir = this.#backupDir(id);
+    const patchFile = path.join(dir, 'changes.patch');
+    const meta = await readFile(path.join(dir, 'meta.json'), 'utf8').then(
+      (text) => JSON.parse(text) as { files: string[] },
+      () => {
+        throw new CheckpointError('백업을 찾을 수 없습니다. 이미 지워졌을 수 있습니다');
+      },
+    );
+    const patch = await readFile(patchFile, 'utf8').catch(() => '');
+    if (!patch.trim()) return { files: [] };
+
+    try {
+      await this.#git(['apply', '--check', patchFile]);
+    } catch (error) {
+      throw new CheckpointError(
+        `그 사이 바뀐 파일과 충돌해 되살리지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    await this.#git(['apply', patchFile]);
+    return { files: meta.files };
+  }
+
+  /** 지금까지 남은 되살리기 백업. 최신순 */
+  async discardedBackups(): Promise<DiscardBackup[]> {
+    const root = this.#backupRoot();
+    const ids = await readdir(root).catch(() => [] as string[]);
+    const backups = await Promise.all(
+      ids.map((id) =>
+        readFile(path.join(root, id, 'meta.json'), 'utf8').then(
+          (text) => JSON.parse(text) as DiscardBackup,
+          () => undefined,
+        ),
+      ),
+    );
+    return backups.filter((backup): backup is DiscardBackup => backup !== undefined).sort((a, b) => b.id.localeCompare(a.id));
+  }
+
+  /**
+   * git add -A로 이미 올린 인덱스 전체(HEAD 대비)를 되살릴 수 있는 패치로 저장한다. 버릴 파일이 없으면(files가
+   * 비어 있으면) 아무것도 쓰지 않는다. #git 호출에 -C root가 이미 들어가 있어 패치의 경로는 저장소 루트 기준이고,
+   * 되살릴 때(restoreBackup)도 같은 기준으로 적용한다 — 모노레포 하위 폴더 세션이어도 add -A가 이미 scope로
+   * 좁혔으므로 patch는 scope 안의 변경만 담는다.
+   */
+  async #backupCachedIndex(files: readonly string[]): Promise<DiscardBackup | undefined> {
+    if (files.length === 0) return undefined;
+    // --binary로 바이너리 파일도 되살릴 수 있게 하고, 백업은 화면에 보여줄 것이 아니라 캡 없이 전체를 남긴다
+    const patch = await this.#git(['diff', '--cached', '--no-color', '--binary', 'HEAD']);
+    if (!patch.trim()) return undefined;
+
+    const id = backupId();
+    const dir = this.#backupDir(id);
+    await mkdir(dir, { recursive: true });
+    const createdAt = new Date().toISOString();
+    const backup: DiscardBackup = { id, files: [...files], createdAt };
+    await writeFile(path.join(dir, 'changes.patch'), patch, 'utf8');
+    await writeFile(path.join(dir, 'meta.json'), JSON.stringify(backup), 'utf8');
+    await this.#pruneBackups(id);
+    return backup;
+  }
+
+  #backupRoot(): string {
+    return path.join(this.gitDir, BACKUP_DIRNAME);
+  }
+
+  #backupDir(id: string): string {
+    return path.join(this.#backupRoot(), id);
+  }
+
+  /** 개수(BACKUP_KEEP_MAX)·용량(BACKUP_KEEP_BYTES) 한도를 넘으면 오래된 백업부터 지운다. 방금 만든 백업(keepId)은 지우지 않는다 */
+  async #pruneBackups(keepId: string): Promise<void> {
+    const root = this.#backupRoot();
+    const ids = (await readdir(root).catch(() => [] as string[])).sort(); // 타임스탬프 기반 id라 오름차순 = 오래된 것부터
+    const sized = await Promise.all(
+      ids.map(async (id) => ({ id, bytes: await stat(path.join(root, id, 'changes.patch')).then((info) => info.size, () => 0) })),
+    );
+    let total = sized.reduce((sum, entry) => sum + entry.bytes, 0);
+    let count = sized.length;
+    for (const entry of sized) {
+      if (entry.id === keepId) continue;
+      if (count <= BACKUP_KEEP_MAX && total <= BACKUP_KEEP_BYTES) break;
+      await rm(path.join(root, entry.id), { recursive: true, force: true });
+      total -= entry.bytes;
+      count -= 1;
+    }
   }
 
   /**
@@ -444,6 +646,15 @@ export class CheckpointStore {
     return path.join(dest, await this.#subdir());
   }
 
+  /**
+   * 세션 시작(첫 체크포인트) 이후 지금 HEAD까지의 전체 변경. PR의 base...head diff와 같다(시작 커밋이 세션 브랜치가
+   * 갈라진 지점이라서다). AI 리뷰가 보는 diff가 이 함수로 만든다. 크기 제한은 부르는 쪽(pr-review.ts의 truncateDiff)이 한다
+   */
+  async sessionDiff(): Promise<string> {
+    const start = await this.#startSha();
+    return this.#git(['diff', '--no-color', ...(await this.#relative()), start, 'HEAD']);
+  }
+
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
   async repository(): Promise<RepositoryInfo | undefined> {
     const [base, branch] = await Promise.all([this.#getMeta('base'), this.#getMeta('branch')]);
@@ -469,7 +680,7 @@ export class CheckpointStore {
     const records = (
       await this.#git([
         'log', '--first-parent', '--reverse',
-        '--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=Workflow-Passed,valueonly,separator=%x1f)%x1e',
+        `--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x1e`,
         `${start}..HEAD`,
       ])
     )
@@ -478,13 +689,43 @@ export class CheckpointStore {
       .filter(Boolean);
     return Promise.all(
       records.map(async (record) => {
-        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = ''] = record.split('\0');
-        // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
-        const passedStages =
-          authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
-        return { sha, shortSha, subject, body: body.trim(), files: await this.#changedFiles(sha), ...(passedStages ? { passedStages } : {}) };
+        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = '', verifyTrailers = ''] = record.split('\0');
+        // 통과 기록·문서 체크포인트 표시는 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
+        const ours = authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase();
+        const passedStages = ours ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+        const verify = ours ? parseVerifyTrailerValues(verifyTrailers.split('\x1f')) : undefined;
+        return {
+          sha,
+          shortSha,
+          subject,
+          body: body.trim(),
+          files: await this.#changedFiles(sha),
+          stat: await this.#commitStat(sha),
+          ...(passedStages ? { passedStages } : {}),
+          ...(verify ? { verify } : {}),
+        };
       }),
     );
+  }
+
+  /** 커밋 하나가 바꾼 줄 수(추가·삭제). 제출 준비 점검(ADR-080)이 한 커밋이 전체 변경을 독차지하는지 볼 때 쓴다 */
+  async #commitStat(sha: string): Promise<{ insertions: number; deletions: number }> {
+    const parent = await this.#firstParent(sha);
+    const relative = await this.#relative();
+    const output = parent
+      ? await this.#git(['diff', '--numstat', ...relative, parent, sha])
+      : await this.#git(['diff-tree', '--no-commit-id', '--numstat', '-r', '--root', ...relative, sha]);
+    let insertions = 0;
+    let deletions = 0;
+    for (const line of output.split('\n')) {
+      const [added, removed] = line.split('\t');
+      // 이진 파일은 "-\t-\t경로"로 나와 줄 수를 셀 수 없으니 건너뛴다
+      if (added && removed && added !== '-' && removed !== '-') {
+        insertions += Number(added) || 0;
+        deletions += Number(removed) || 0;
+      }
+    }
+    return { insertions, deletions };
   }
 
   /**
@@ -591,6 +832,82 @@ export class CheckpointStore {
     await this.#setMeta('remote', result.remoteSha);
   }
 
+  /**
+   * 기준 브랜치(main 따라잡기, ADR-076)가 이 세션보다 얼마나 앞서 있는지 가볍게 확인한다.
+   * 화면이 자주(예: 60초마다) 물어도 origin에 부담을 주지 않도록, 마지막으로 가져온 지 BASE_FETCH_THROTTLE_MS 안이면
+   * 새로 가져오지 않고 이미 받아 둔 상태로 다시 센다. force면 그 시간과 상관없이 새로 가져온다
+   */
+  async baseStatus({ force = false }: { force?: boolean } = {}): Promise<BaseStatus> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원본 저장소와 연결되지 않은 세션입니다');
+
+    const lastFetchedAt = await this.#getMeta('baseFetchedAt');
+    const stale = force || !lastFetchedAt || Date.now() - Date.parse(lastFetchedAt) >= BASE_FETCH_THROTTLE_MS;
+    if (stale) await this.#fetchBase(info.base);
+    const fetchedAt = (await this.#getMeta('baseFetchedAt')) ?? new Date().toISOString();
+
+    const baseSha = await this.#git(['rev-parse', '--verify', '--quiet', BASE_REF]).then(
+      (out) => out.trim(),
+      () => undefined,
+    );
+    if (!baseSha) return { base: info.base, behind: 0, lastFetchedAt: fetchedAt };
+
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    const behind = Number((await this.#git(['rev-list', '--count', `${head}..${baseSha}`])).trim());
+    const aheadCommits = Number((await this.#git(['rev-list', '--count', `${baseSha}..${head}`])).trim());
+    return { base: info.base, behind, aheadCommits, lastFetchedAt: fetchedAt };
+  }
+
+  async #fetchBase(base: string): Promise<void> {
+    await this.#git(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${base}:${BASE_REF}`], { timeout: PUSH_TIMEOUT_MS });
+    await this.#setMeta('baseFetchedAt', new Date().toISOString());
+  }
+
+  /**
+   * 세션 브랜치가 갈라져 나온 기준 브랜치(main 등, ADR-076)를 병합으로 따라잡는다.
+   * integrateRemote와 같은 이유로 리베이스 대신 병합 커밋을 쓴다: 체크포인트마다 DB 덤프를 커밋 ID로 저장하므로
+   * 기존 체크포인트의 ID를 바꾸는 리베이스를 쓸 수 없다. 강제 푸시도 하지 않는다(세션 브랜치를 올릴 때는 그대로 push()를 쓴다).
+   * 충돌하면 작업 복사본을 병합을 시작하기 전 그대로 두고 충돌한 파일을 알린다(RemoteConflictError).
+   * 가져온 결과는 검증을 통과한 뒤에만 받아들여야 한다(runBaseCatchUp이 검증 게이트와 체크포인트/데이터베이스 스냅샷을
+   * integrateRemote·runRemoteSync와 같은 방식으로 잇는다)
+   */
+  async integrateBase(): Promise<RemoteSyncResult> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원본 저장소와 연결되지 않은 세션입니다');
+    if ((await this.pendingFiles()).length > 0) {
+      throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 기준 브랜치를 따라잡을 수 없습니다');
+    }
+
+    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
+    await this.#fetchBase(info.base);
+    const baseSha = (await this.#git(['rev-parse', BASE_REF])).trim();
+
+    if (await this.#isAncestor(baseSha, head)) return { status: 'up-to-date', commits: [], files: [], previous: head };
+
+    const mergeBase = (await this.#git(['merge-base', head, baseSha])).trim();
+    const commits = await this.#remoteCommits(mergeBase, baseSha);
+
+    try {
+      await this.#git(['merge', '--no-ff', '--no-commit', baseSha]);
+    } catch (error) {
+      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U', ...(await this.#relative())])).split('\0').filter(Boolean).sort();
+      await this.#git(['merge', '--abort']).catch(() => {});
+      await this.#git(['reset', '-q', '--hard', head]);
+      await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
+      if (conflicts.length > 0) throw new RemoteConflictError(conflicts);
+      throw error;
+    }
+
+    const body = commits.map((commit) => `- ${commit.shortSha} ${commit.subject} (${commit.author})`).join('\n');
+    await this.#git([
+      'commit', '-q', '--allow-empty', '--cleanup=whitespace',
+      '-m', `${withObjectParticle(info.base)} 따라잡는다 (${commits.length}커밋)`, ...(body ? ['-m', capText(body, MAX_BODY_CHARS)] : []),
+    ]);
+    // 프로젝트 밖 변경도 함께 들어올 수 있지만(모노레포), 게이트가 확인할 파일은 프로젝트 폴더 안의 것뿐이다
+    const files = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), head, 'HEAD'])).split('\0').filter(Boolean).sort();
+    return { status: 'merged', remoteSha: baseSha, commits, files, checkpoint: await this.#checkpoint('HEAD'), previous: head };
+  }
+
   async #remoteCommits(from: string, remote: string): Promise<RemoteCommit[]> {
     return (await this.#git(['log', '--reverse', '--format=%H%x00%h%x00%s%x00%an%x1e', `${from}..${remote}`]))
       .split('\x1e')
@@ -617,21 +934,34 @@ export class CheckpointStore {
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
     // 트레일러는 git이 마지막 문단에서만 읽는다. 본문(에이전트 요약)에 같은 모양의 줄이 있어도 통과 기록이 되지 않는다
-    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = ''] = (
-      await this.#git(['show', '-s', `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)`, ref])
+    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = '', verifyTrailers = ''] = (
+      await this.#git([
+        'show', '-s',
+        `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)`,
+        ref,
+      ])
     )
       .trim()
       .split('\0');
     // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다. 원격에 쓸 수 있는 사람이 커밋 메시지에 트레일러를 적어 가져온 체크포인트를 배포 조건 통과처럼 보이게 하지 못하게 한다
-    const passedStages =
-      authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase() ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+    const ours = authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase();
+    const passedStages = ours ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
+    const verify = ours ? parseVerifyTrailerValues(verifyTrailers.split('\x1f')) : undefined;
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');
       const files = await this.#fromRoot((await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean));
       return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
     }
-    return { sha, shortSha, message: subject, createdAt, files: await this.#changedFiles(sha), ...(passedStages ? { passedStages } : {}) };
+    return {
+      sha,
+      shortSha,
+      message: subject,
+      createdAt,
+      files: await this.#changedFiles(sha),
+      ...(passedStages ? { passedStages } : {}),
+      ...(verify ? { verify } : {}),
+    };
   }
 
   /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */
@@ -757,6 +1087,19 @@ export function redactCredentials(text: string): string {
 
 async function resolveReal(target: string): Promise<string> {
   return realpath(target).catch(() => path.resolve(target));
+}
+
+/** 한글 조사 '을/를'을 고른다. 브랜치 이름은 대개 영문이라 마지막 글자의 발음(모음이면 '를')으로 대략 고른다 */
+function withObjectParticle(word: string): string {
+  const last = word.trim().slice(-1).toLowerCase();
+  return /[aeiou]/.test(last) ? `${word}를` : `${word}을`;
+}
+
+/** 타임스탬프 + 단조 증가 번호. 같은 밀리초에 여러 백업이 생겨도(테스트 등) 사전순 정렬이 생성 순서와 같다 */
+let backupSequence = 0;
+function backupId(): string {
+  backupSequence += 1;
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${backupSequence.toString(36).padStart(4, '0')}`;
 }
 
 function oneLine(message: string): string {

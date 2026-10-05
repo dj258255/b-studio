@@ -24,6 +24,8 @@ import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { runAcceptance, type AcceptanceResult } from './acceptance';
+import { concurrencyLabel, parseArgs, parseTopology, resolveConcurrency, selectStrategies } from './args';
+import { runConcurrent } from './concurrent-run';
 import {
   assertContractsBackend,
   assertContractsStrategy,
@@ -35,24 +37,30 @@ import {
   resolveContextClearing,
   resolveContractsSource,
   resolveEscalation,
+  resolvePlanExecute,
   resolveRateLimitPolicy,
+  resolveSelfCheck,
+  resolveVerify,
   sessionBackendOf,
+  verifyNotice,
   type Backend,
   type BenchLaneGroup,
+  type BenchVerify,
   type ContractsSource,
 } from './backends';
 import { classify } from './classify';
 import { claudeCodeContractAsk } from './contracts';
 import { startDryProvider } from './dry-provider';
+import { evaluateMemoryGuard, memoryGuardMessage, parseDockerMemTotalMb, perRunMemoryMb, sumDockerStatsMb } from './memory-guard';
 import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
 import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
-import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGIES, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
+import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
-import { contractAskFromClient, planLanes, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
-import { signatureKey, traceFromEvents, type LaneTrace } from './trace';
-import type { AgentUsage, Topology } from '@b-studio/agent';
+import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
+import { planBriefsFromEvents, signatureKey, traceFromEvents, type LaneTrace, type PlanBriefRecord } from './trace';
+import type { AgentUsage, SelfCheckMode, Topology } from '@b-studio/agent';
 import { costForUsageByModel, parsePriceTable, type TokenPrices } from '../../lib/token-types';
 import type { SessionSnapshot, StudioEvent } from '../../lib/studio-events';
 import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
@@ -61,7 +69,20 @@ import type { TaskPlanView } from '../../lib/task-plan-types';
 type TaskPlansModule = typeof import('../../lib/server/task-plans');
 type SessionsModule = typeof import('../../lib/server/sessions');
 
-const PROJECT_ID = 'bench-orders';
+/**
+ * 벤치 프로젝트 이름. 동시 실행(--concurrency)일 때는 부모가 자식마다 B_STUDIO_BENCH_PROJECT_ID로
+ * 고유한 이름을 준다(예: bench-orders-3) — 샌드박스 id·compose 프로젝트 이름(studio-<이름>-<hex>)이 겹치지 않게 한다.
+ * 값은 샌드박스 id 정규식(SANDBOX_ID)과 같은 글자만 허용한다: 소문자로 시작하고 소문자·숫자·하이픈만.
+ */
+const PROJECT_ID = resolveProjectId(process.env.B_STUDIO_BENCH_PROJECT_ID);
+
+function resolveProjectId(value: string | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return 'bench-orders';
+  if (!/^[a-z][a-z0-9-]*$/.test(trimmed)) throw new Error(`B_STUDIO_BENCH_PROJECT_ID는 소문자로 시작하고 소문자·숫자·하이픈만 쓸 수 있습니다 (지금 값: ${trimmed})`);
+  return trimmed;
+}
+
 /** openai 백엔드가 모델 레지스트리에 등록하는 id */
 const MODEL_ID = 'bench-coordination';
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
@@ -71,93 +92,8 @@ const BOOT_TIMEOUT_MS = 20 * 60_000;
 const POLL_MS = 2_000;
 /** 생성물 폴더. 프로젝트 복사본을 만들 때 뺀다 */
 const GENERATED_FILES = /[/\\](node_modules|\.next|build|\.gradle)([/\\]|$)/;
-
-interface Args {
-  dry: boolean;
-  force: boolean;
-  taskIds?: string[];
-  strategies?: Strategy[];
-  repeats?: number;
-  out?: string;
-  backend?: string;
-  model?: string;
-  freeOnly?: boolean;
-  onRateLimit?: string;
-  rateLimitWaitMinutes?: number;
-  /** 컨텍스트 비우기(on|off). 기본 off */
-  contextClearing?: string;
-  topology?: string;
-  /** 통합 게이트에 api 값 확인을 덧붙일지. 기본 꺼짐 */
-  integrationChecks?: boolean;
-  /** 레인 사이 계약의 출처(human|model). 기본 human. model은 S2에서만 */
-  contracts?: string;
-  escalateTo?: string;
-  escalateAfter?: number;
-  /** `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` 반복. 레인마다 백엔드를 고른다 */
-  laneBackends?: string[];
-  /** 모델 이름 일부 → 단가 표 JSON 파일. 모델별 API 환산 비용을 계산한다 */
-  prices?: string;
-}
-
-/** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
-function parseTopology(value: string | undefined): Topology {
-  if (value === undefined) return 'mesh';
-  if (value === 'star' || value === 'hierarchical' || value === 'mesh') return value;
-  throw new Error(`전략 topology는 star, hierarchical, mesh 중 하나여야 합니다 (지금 값: ${value})`);
-}
-
-function parseArgs(argv: string[]): Args {
-  const args: Args = { dry: false, force: false };
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]!;
-    if (arg === '--dry') args.dry = true;
-    else if (arg === '--force') args.force = true;
-    else if (arg === '--integration-checks') args.integrationChecks = true;
-    else if (arg === '--tasks') args.taskIds = split(next(argv, index++, '--tasks'));
-    else if (arg === '--strategies') args.strategies = split(next(argv, index++, '--strategies')) as Strategy[];
-    else if (arg === '--repeats') args.repeats = Number(next(argv, index++, '--repeats'));
-    else if (arg === '--out') args.out = next(argv, index++, '--out');
-    else if (arg === '--backend') args.backend = next(argv, index++, '--backend');
-    else if (arg === '--model') args.model = next(argv, index++, '--model');
-    else if (arg === '--free-only') args.freeOnly = true;
-    else if (arg === '--on-rate-limit') args.onRateLimit = next(argv, index++, '--on-rate-limit');
-    else if (arg === '--rate-limit-wait-minutes') args.rateLimitWaitMinutes = Number(next(argv, index++, '--rate-limit-wait-minutes'));
-    else if (arg === '--topology') args.topology = next(argv, index++, '--topology');
-    else if (arg === '--contracts') args.contracts = next(argv, index++, '--contracts');
-    else if (arg === '--context-clearing') args.contextClearing = next(argv, index++, '--context-clearing');
-    else if (arg === '--escalate-to') args.escalateTo = next(argv, index++, '--escalate-to');
-    else if (arg === '--escalate-after') args.escalateAfter = Number(next(argv, index++, '--escalate-after'));
-    else if (arg === '--lane-backend') (args.laneBackends ??= []).push(next(argv, index++, '--lane-backend'));
-    else if (arg === '--prices') args.prices = next(argv, index++, '--prices');
-    else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
-    else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
-    else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
-    else if (arg.startsWith('--out=')) args.out = arg.slice('--out='.length);
-    else if (arg.startsWith('--backend=')) args.backend = arg.slice('--backend='.length);
-    else if (arg.startsWith('--model=')) args.model = arg.slice('--model='.length);
-    else if (arg.startsWith('--on-rate-limit=')) args.onRateLimit = arg.slice('--on-rate-limit='.length);
-    else if (arg.startsWith('--rate-limit-wait-minutes=')) args.rateLimitWaitMinutes = Number(arg.slice('--rate-limit-wait-minutes='.length));
-    else if (arg.startsWith('--topology=')) args.topology = arg.slice('--topology='.length);
-    else if (arg.startsWith('--contracts=')) args.contracts = arg.slice('--contracts='.length);
-    else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
-    else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);
-    else if (arg.startsWith('--escalate-after=')) args.escalateAfter = Number(arg.slice('--escalate-after='.length));
-    else if (arg.startsWith('--lane-backend=')) (args.laneBackends ??= []).push(arg.slice('--lane-backend='.length));
-    else if (arg.startsWith('--prices=')) args.prices = arg.slice('--prices='.length);
-    else throw new Error(`알 수 없는 인자입니다: ${arg}`);
-  }
-  return args;
-}
-
-function next(argv: string[], index: number, flag: string): string {
-  const value = argv[index + 1];
-  if (!value) throw new Error(`${flag} 뒤에 값이 필요합니다`);
-  return value;
-}
-
-function split(value: string): string[] {
-  return value.split(',').map((item) => item.trim()).filter(Boolean);
-}
+/** 벤치 프로젝트 원본. 복사본을 만들기 전에도(동시 실행의 메모리 확인 등) 여기서 바로 읽을 수 있다 */
+const EXAMPLES_DIR = path.resolve(import.meta.dirname, '../../../../examples/orders');
 
 function selectTasks(taskIds: string[] | undefined, dry: boolean): BenchTask[] {
   const ids = dry ? ['orders-list'] : taskIds;
@@ -167,14 +103,6 @@ function selectTasks(taskIds: string[] | undefined, dry: boolean): BenchTask[] {
     if (!task) throw new Error(`알 수 없는 과제입니다: ${id} (가능: ${BENCH_TASKS.map((candidate) => candidate.id).join(', ')})`);
     return task;
   });
-}
-
-function selectStrategies(strategies: Strategy[] | undefined, dry: boolean): Strategy[] {
-  // --dry의 가짜 제공자는 S2~S5의 조율과 P0(로컬 Claude Code)을 모른다. 기준선 S0·S1만 돈다
-  const values: Strategy[] | undefined = dry ? ['S0', 'S1'] : strategies;
-  if (!values || values.length === 0) return ['S0', 'S1'];
-  for (const value of values) if (!STRATEGIES.includes(value)) throw new Error(`전략은 ${STRATEGIES.join(', ')} 중 하나여야 합니다: ${value}`);
-  return [...new Set(values)];
 }
 
 /** 사전 확인(원칙 5). 다른 프로젝트 컨테이너가 있으면 --force 없이는 종료 코드 2로 멈춘다 */
@@ -194,6 +122,31 @@ function preflight(force: boolean): string {
 
   const info = spawnSync('docker', ['info', '--format', '{{.MemTotal}}'], { encoding: 'utf8' });
   return info.status === 0 ? info.stdout.trim() || '알 수 없음' : '알 수 없음';
+}
+
+/**
+ * 동시 실행(--concurrency N) 전 메모리 확인(원칙 5의 확장). 필요한 메모리 = N × 샌드박스 한 벌(examples/orders/studio.yaml의
+ * resources + edge 오버헤드) + 여유분. Docker VM 전체 메모리에서 이미 도는 컨테이너가 쓰는 만큼(docker stats)을 뺀 값과 비교한다.
+ * 부족하면 preflight와 같은 방식으로 --force 없이는 종료 코드 2로 멈춘다. docker 명령을 못 쓰면 확인을 건너뛰고 경고만 남긴다
+ * (Docker 자체가 없으면 이미 preflight에서 멈췄을 것이므로, 여기서 실패하는 경우는 --format을 못 알아듣는 낯선 Docker 정도다)
+ */
+async function memoryGuard(examplesDir: string, force: boolean, concurrency: number): Promise<void> {
+  const info = spawnSync('docker', ['info', '--format', '{{.MemTotal}}'], { encoding: 'utf8' });
+  if (info.error || info.status !== 0) {
+    console.warn(`경고: Docker 전체 메모리를 확인하지 못해 동시 실행 메모리 확인을 건너뜁니다 (${info.error?.message ?? info.stderr?.trim() ?? `종료 코드 ${info.status}`}).`);
+    return;
+  }
+  const stats = spawnSync('docker', ['stats', '--no-stream', '--format', '{{.MemUsage}}'], { encoding: 'utf8' });
+  const usedMb = !stats.error && stats.status === 0 ? sumDockerStatsMb(stats.stdout) : 0;
+  const totalMb = parseDockerMemTotalMb(info.stdout);
+  const project = await loadProject(examplesDir);
+  const perRunMb = perRunMemoryMb(project.resources ?? {});
+  const result = evaluateMemoryGuard({ concurrency, perRunMb, totalMb, usedMb });
+  if (!result.ok && !force) {
+    console.error(memoryGuardMessage(result, concurrency));
+    process.exit(2);
+  }
+  if (!result.ok) console.warn(`경고: --force로 진행합니다.\n${memoryGuardMessage(result, concurrency)}`);
 }
 
 function gitCommit(): string {
@@ -302,14 +255,29 @@ interface RunContext {
   laneBackends: LaneBackends;
   /** 통합 게이트에 api 값 확인을 덧붙이는지. 행마다 기록한다 */
   integrationChecks: boolean;
+  /** 검증 범위(--verify). 'light'면 레인·통합 실행에 가볍게 확인을 넘긴다. 기본 full */
+  verify: BenchVerify;
+  /** 자가 확인 범위(--self-check). lean이면 B_STUDIO_SELF_CHECK=lean으로 모든 b-studio 세션에 적용한다. P0는 영향 없음 */
+  selfCheck: SelfCheckMode;
   /** 레인 사이 계약의 출처(--contracts). S2에서만 뜻이 있다 */
   contractsSource: ContractsSource;
   /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
   escalateTo?: string;
   /** --escalate-after */
   escalateAfter: number;
+  /** --escalate-after-failures. 없으면 서명 규칙만 쓴다 */
+  escalateAfterFailures?: number;
+  /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수 */
+  escalateRetryBudget: number;
+  /** --plan-model(ADR-075). 없으면 계획 호출 없이 지금과 같이 실행만 한다 */
+  planModel?: string;
+  /** --execute-model(ADR-075). 없으면 --model을 그대로 실행에도 쓴다 */
+  executeModel?: string;
   /** --prices 단가 표(모델 이름 일부 → 단가). 없으면 모델별 API 환산 비용을 계산하지 않는다 */
   prices?: Record<string, TokenPrices>;
+  /** --concurrency N. 자식 프로세스면 부모의 N(--child-concurrency), 아니면 이 프로세스 자신의 값(직렬이면 1).
+   * 동시 실행일 때의 시간 지표는 직렬 실행과 비교할 수 없어 행마다 남겨 둔다 */
+  concurrency: number;
 
   /** 벤치가 만든 프로젝트 복사본. P0는 이 폴더에서 Claude Code를 돌린다 */
   projectDir: string;
@@ -357,6 +325,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       ...(coordination ? { coordination } : {}),
       // 통합 게이트 전용 확인도 서버 안에서만 넘긴다(--integration-checks)
       ...(integrationChecks ? { integrationChecks } : {}),
+      // 가볍게 확인(--verify light)도 서버 안에서만 넘긴다. 레인·통합 실행이 이 값을 쓴다
+      ...(context.verify === 'light' ? { verify: context.verify } : {}),
     });
     planId = created.id;
     plan = await waitForPlan(taskPlans, created.id, localUser, ['awaiting_approval', 'failed'], APPROVAL_TIMEOUT_MS, '계획이 승인 대기에 이르지 않았습니다', activeSessions);
@@ -389,7 +359,9 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   const observedModels = readObservedModels(sessions, sessionIds);
   const sessionEvents = readSessionEvents(sessions, sessionIds);
   // 승격은 세션 기록의 model_escalated 이벤트로 확인한다. 설정하지 않았으면 escalated=false
-  const escalation = readEscalation(sessionEvents, context.escalateTo, context.escalateAfter);
+  const escalation = readEscalation(sessionEvents, escalationRecord(context));
+  // 계획-실행 분리(ADR-075)의 계획 원문을 세션을 내리기 전에 남긴다. E8은 벤치가 세션 폴더를 지워 계획 텍스트를 보지 못했다
+  const planBriefs: PlanBriefRecord[] = [...sessionEvents.entries()].flatMap(([id, events]) => planBriefsFromEvents(id, events));
   // trace 계산이 실패해도 실행 결과(성공·분류)는 바뀌지 않게, 그 세션의 trace만 생략하고 경고를 남긴다
   const traces: LaneTrace[] = [];
   for (const id of laneSessionIds) {
@@ -482,7 +454,10 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     taskId: task.id,
     coupled: task.coupled,
     strategy,
+    concurrency: context.concurrency,
     integrationChecks: context.integrationChecks,
+    verify: context.verify,
+    selfCheck: context.selfCheck,
     model: context.requestedModel,
     observedModels,
     startedAt,
@@ -520,6 +495,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     failures,
     contextCleared,
     escalation,
+    ...(context.planModel || context.executeModel ? { planExecute: { ...(context.planModel ? { plan: context.planModel } : {}), ...(context.executeModel ? { execute: context.executeModel } : {}) } } : {}),
+    ...(planBriefs.length > 0 ? { planBriefs } : {}),
     metrics,
     coordination: plan.metrics?.coordination,
     contracts,
@@ -541,7 +518,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
  * 실패(형식 오류·사용 한도·연결 실패)는 삼키지 않는다: 계약 없이 돌리면 그 행은 S1을 S2라고 적는 것이 된다.
  */
 async function askModelContracts(context: RunContext, task: BenchTask, planJson: PlannedPlan, name: string): Promise<LaneContractsResult> {
-  const lanes = planLanes(planJson);
+  // 계획 상한도 제품과 같은 설정을 본다(B_STUDIO_MAX_LANES). 레인을 늘리는 실험에서 벤치가 먼저 막지 않게
+  const lanes = planLanes(planJson, planLimitsFromEnv());
   const project = await loadProject(context.projectDir);
   const asked = await requestLaneContracts(await contractAskFor(context), project, task.request, lanes);
   await context.saveContracts(name, {
@@ -653,7 +631,10 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     taskId: task.id,
     coupled: task.coupled,
     strategy: 'P0',
+    concurrency: context.concurrency,
     integrationChecks: context.integrationChecks,
+    verify: context.verify,
+    // P0는 b-studio 프롬프트·도구를 쓰지 않아 자가 확인 범위와 무관하다. 필드를 남기지 않는다
     model: context.requestedModel,
     observedModels: baseline ? Object.keys(baseline.usageByModel).sort() : [],
     startedAt,
@@ -661,12 +642,13 @@ async function runPlainOnce(context: RunContext, task: BenchTask, order: number,
     planStatus: plan.status,
     lanes: [],
     traces: [],
+    ...(baseline ? { plainTurns: baseline.turnLog } : {}),
     explore: { filesReadTotal: 0, filesReadUnionAcrossLanes: 0, readCallsTotal: 0 },
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     // P0는 b-studio 러너를 쓰지 않으므로 오래된 도구 결과 비우기와 무관하다
     contextCleared: { count: 0, chars: 0 },
     // P0는 b-studio 게이트가 없어 승격 판정이 일어나지 않는다. 설정값만 남기고 승격은 없음으로 적는다
-    escalation: { after: context.escalateAfter, escalated: false },
+    escalation: escalationRecord(context),
     metrics,
     acceptance,
     success,
@@ -737,16 +719,26 @@ function readObservedModels(sessions: SessionsModule, sessionIds: string[]): str
   return [...models];
 }
 
+/** 승격 설정(컨텍스트)을 행에 적을 모양으로. 실제 승격 여부는 readEscalation이 세션 기록에서 채운다 */
+function escalationRecord(context: RunContext): BenchEscalation {
+  return {
+    ...(context.escalateTo ? { to: context.escalateTo } : {}),
+    after: context.escalateAfter,
+    ...(context.escalateAfterFailures === undefined ? {} : { afterFailures: context.escalateAfterFailures }),
+    retryBudget: context.escalateRetryBudget,
+    escalated: false,
+  };
+}
+
 /** 세션 기록에서 승격 이벤트를 찾는다. 승격은 한 실행에 한 번이므로 첫 이벤트만 본다 */
-function readEscalation(eventsBySession: Map<string, StudioEvent[]>, to: string | undefined, after: number): BenchEscalation {
-  const result: BenchEscalation = { ...(to ? { to } : {}), after, escalated: false };
-  if (!to) return result;
+function readEscalation(eventsBySession: Map<string, StudioEvent[]>, base: BenchEscalation): BenchEscalation {
+  if (!base.to) return base;
   for (const events of eventsBySession.values()) {
     for (const event of events) {
-      if (event.type === 'agent' && event.event.type === 'model_escalated') return { ...result, escalated: true, attempt: event.event.attempt };
+      if (event.type === 'agent' && event.event.type === 'model_escalated') return { ...base, escalated: true, attempt: event.event.attempt };
     }
   }
-  return result;
+  return base;
 }
 
 /** 세션 기록을 통째로 다시 받아 온다. 읽기 실패는 빈 결과로 두고 실행을 막지 않는다 */
@@ -851,6 +843,11 @@ async function main(): Promise<void> {
   const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
   // 오래된 도구 결과 비우기. 기본은 끔이고, API 루프(openai)에서만 뜻이 있다 — 로컬 CLI는 각자 자체 압축을 한다
   const contextClearing = resolveContextClearing(args.contextClearing);
+  // 검증 범위(--verify). 기본 full(지금과 같다). light면 레인·통합 실행이 가볍게 확인한다
+  const verify = resolveVerify(args.verify);
+  // 자가 확인 범위(--self-check). 스튜디오 서버 코드가 같은 프로세스에서 돌므로 환경 변수로 모든 세션에 적용한다
+  const selfCheck = resolveSelfCheck(args.selfCheck);
+  process.env.B_STUDIO_SELF_CHECK = selfCheck;
   if (contextClearing && backend !== 'openai') throw new Error('--context-clearing은 --backend openai(API 루프)에서만 쓸 수 있습니다. 로컬 CLI 러너는 대화를 직접 다루지 않습니다');
   // 레인 백엔드(--lane-backend)도 시작 전에 확정한다. 모르는 레인 그룹·백엔드는 여기서 오류를 낸다
   const laneBackendChoices = parseLaneBackends(args.laneBackends);
@@ -863,6 +860,15 @@ async function main(): Promise<void> {
     laneBackends: [...laneBackendChoices.values()].map((lane) => lane.backend),
     escalateTo: args.escalateTo,
     escalateAfter: args.escalateAfter,
+    escalateAfterFailures: args.escalateAfterFailures,
+    escalateRetryBudget: args.escalateRetryBudget,
+  });
+  // 계획-실행 분리(ADR-075)도 시작 전에 확정한다. claude-code 백엔드(계획 기본 또는 레인)가 하나도 없으면 여기서 오류를 낸다
+  const planExecute = resolvePlanExecute({
+    backend,
+    laneBackends: [...laneBackendChoices.values()].map((lane) => lane.backend),
+    planModel: args.planModel,
+    executeModel: args.executeModel,
   });
   // 단가 표도 시작 전에 읽는다. 값은 파일로만 받고 코드에 적지 않는다(잘못된 파일이면 Docker를 건드리기 전에 멈춘다)
   const prices = args.prices ? await loadPriceTable(args.prices) : undefined;
@@ -874,6 +880,9 @@ async function main(): Promise<void> {
   const topology = parseTopology(args.topology);
   // P0는 로컬 Claude Code 전용이다. Docker·모델을 건드리기 전에 백엔드를 확인한다
   assertPlainBaselineBackend(backend, strategies);
+  // P0는 b-studio 게이트를 쓰지 않아 verify가 적용되지 않는다. light와 함께 주면 무시하고 한 줄 알린다
+  const verifyWarning = verifyNotice(verify, strategies);
+  if (verifyWarning) console.warn(verifyWarning);
   // 계약 출처도 시작 전에 확정한다. model 계약을 계약을 쓰지 않는 전략과 함께 돌리면 무엇을 잰 것인지 알 수 없다
   const contractsSource = resolveContractsSource(args.contracts);
   assertContractsStrategy(contractsSource, strategies);
@@ -892,6 +901,44 @@ async function main(): Promise<void> {
 
   // 2. 백엔드별 준비
   const requestedModel = backend === 'claude-code' ? choice.model! : backend === 'codex' || backend === 'commandcode' || backend === 'opencode' ? choice.model ?? 'default' : dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_MODEL');
+
+  const concurrency = resolveConcurrency(args.concurrency);
+  if (concurrency > 1) {
+    // 동시 실행(--concurrency N). 이 프로세스는 실행을 직접 돌리지 않는다 — 스스로(run.ts)를 자식 프로세스로 최대 N개까지
+    // 띄우고 결과를 모은다(concurrent-run.ts). 자식마다 process.env·workRoot·프록시 포트·샌드박스 프로젝트 이름이 따로다
+    await memoryGuard(EXAMPLES_DIR, args.force, concurrency);
+    const outRoot = args.out ? path.resolve(args.out) : path.join(homedir(), '.cache/b-studio/bench/coordination', timestamp());
+    // openai 백엔드의 상류 키. 자식 결과는 이미 각자 가려서 쓰지만, 자식이 죽어 부모가 만드는 대체 행(synthesizeCrashRow)에도 같은 규칙을 적용한다
+    const mergeSecrets = backend === 'openai' ? [dry ? 'dry' : requiredEnv('BENCH_UPSTREAM_API_KEY')].filter((value) => value.length >= 8) : [];
+    await runConcurrent({
+      args,
+      concurrency,
+      backend,
+      requestedModel,
+      tasks,
+      strategies,
+      repeats,
+      outRoot,
+      dockerMemTotal,
+      commitAtStart: gitCommit(),
+      contextClearing,
+      contractsSource,
+      verify,
+      planExecute,
+      escalation,
+      topology,
+      laneBackends,
+      rateLimit,
+      integrationChecks: args.integrationChecks ?? false,
+      selfCheck,
+      secrets: mergeSecrets,
+    });
+    return;
+  }
+
+  // 이 프로세스가 행·meta.json·summary.md에 남길 동시성 값. 자식 프로세스면 부모가 준 표시값(--child-concurrency),
+  // 아니면 이 프로세스 자신의 --concurrency(직렬이면 1, 지금과 같다)
+  const concurrencyForRecord = concurrencyLabel(args);
   const priceInput = price('BENCH_PRICE_INPUT_PER_M');
   const priceOutput = price('BENCH_PRICE_OUTPUT_PER_M');
 
@@ -935,7 +982,7 @@ async function main(): Promise<void> {
     // 3. 임시 루트에 프로젝트 복사와 환경 변수 준비 (e2e와 같은 방식)
     const projectsDir = path.join(workRoot, 'projects');
     const projectDir = path.join(projectsDir, PROJECT_ID);
-    const examplesDir = path.resolve(import.meta.dirname, '../../../../examples/orders');
+    const examplesDir = EXAMPLES_DIR;
     // P0는 실행마다 이 복사본을 처음 상태로 되돌려 Claude Code가 과제를 직접 고치게 한다
     const resetProject = async (): Promise<void> => {
       await rm(projectDir, { recursive: true, force: true });
@@ -986,8 +1033,21 @@ async function main(): Promise<void> {
     } else if (backend === 'claude-code') {
       // claude-code는 모델 레지스트리를 쓰지 않는다. 세션 생성도 고정 계획도 레지스트리를 요구하지 않는다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'claude-code', B_STUDIO_CLAUDE_CODE_MODEL: requestedModel });
-      // 시작 모델은 --model, 승격 대상은 --escalate-to. 세션·레인·통합이 모두 이 설정을 쓴다
-      if (escalation.to) Object.assign(benchEnv, { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: escalation.to, B_STUDIO_ESCALATE_AFTER: String(escalation.after) });
+      // 시작 모델은 --model, 승격 대상은 --escalate-to. 세션·레인·통합이 모두 이 설정을 쓴다.
+      // 승격 규칙(실패 N번·재시도 예산)도 함께 넘겨 스튜디오가 읽게 한다
+      if (escalation.to) {
+        Object.assign(benchEnv, {
+          B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: escalation.to,
+          B_STUDIO_ESCALATE_AFTER: String(escalation.after),
+          B_STUDIO_ESCALATE_RETRY_BUDGET: String(escalation.retryBudget),
+        });
+        if (escalation.afterFailures !== undefined) benchEnv.B_STUDIO_ESCALATE_AFTER_FAILURES = String(escalation.afterFailures);
+      }
+      // 계획-실행 분리(ADR-075): --plan-model·--execute-model → B_STUDIO_PLAN_MODEL·B_STUDIO_EXECUTE_MODEL.
+      // studio.yaml의 models가 아니라 서버 프로세스 환경 변수로 넘긴다(벤치 프로젝트는 이 절을 쓰지 않는다)
+      if (planExecute.plan) benchEnv.B_STUDIO_PLAN_MODEL = planExecute.plan;
+      if (planExecute.execute) benchEnv.B_STUDIO_EXECUTE_MODEL = planExecute.execute;
+      if (planExecute.plan && args.planAlways) benchEnv.B_STUDIO_PLAN_BRIEF = 'always';
     } else if (backend === 'codex') {
       // codex도 모델 레지스트리를 쓰지 않는다. 모델을 주지 않으면 로그인 계정의 기본 모델을 쓴다
       Object.assign(benchEnv, { B_STUDIO_MODE: 'codex' });
@@ -1038,10 +1098,17 @@ async function main(): Promise<void> {
       topology,
       laneBackends,
       integrationChecks: args.integrationChecks ?? false,
+      verify,
+      selfCheck,
       contractsSource,
       ...(escalation.to ? { escalateTo: escalation.to } : {}),
       escalateAfter: escalation.after,
+      ...(escalation.afterFailures === undefined ? {} : { escalateAfterFailures: escalation.afterFailures }),
+      escalateRetryBudget: escalation.retryBudget,
+      ...(planExecute.plan ? { planModel: planExecute.plan } : {}),
+      ...(planExecute.execute ? { executeModel: planExecute.execute } : {}),
       ...(prices ? { prices } : {}),
+      concurrency: concurrencyForRecord,
 
       projectDir,
       resetProject,
@@ -1049,7 +1116,9 @@ async function main(): Promise<void> {
     };
 
     // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
-    let order = 0;
+    // --order-start·--repeat-index는 내부용이다(동시 실행 부모가 자식 하나에 단위 하나를 맡길 때만 준다).
+    // 그 밖에는 항상 생략되어 지금과 같이 order=0에서 시작해 1..repeats를 모두 돈다
+    let order = args.orderStart ?? 0;
     const record = async (task: BenchTask, strategy: Strategy, repeat: number, retryOf?: number): Promise<BenchRow> => {
       order += 1;
       console.log(`[${order}] 반복 ${repeat}/${repeats} · ${task.id} · ${strategy} (${STRATEGY_LABELS[strategy]})${retryOf === undefined ? '' : ` (재시도 of ${retryOf})`}`);
@@ -1061,7 +1130,10 @@ async function main(): Promise<void> {
       return stored;
     };
 
-    for (let repeat = 1; repeat <= repeats && !abortReason; repeat += 1) {
+    // --repeat-index가 있으면(자식 프로세스) 그 반복 번호 하나만 돈다. 없으면 지금과 같이 1..repeats를 모두 돈다
+    const repeatStart = args.repeatIndex ?? 1;
+    const repeatEnd = args.repeatIndex ?? repeats;
+    for (let repeat = repeatStart; repeat <= repeatEnd && !abortReason; repeat += 1) {
       const ordered = repeat % 2 === 1 ? strategies : [...strategies].reverse();
       for (const task of tasks) {
         for (const strategy of ordered) {
@@ -1095,7 +1167,10 @@ async function main(): Promise<void> {
 
   const finishedAt = new Date().toISOString();
   const observedModels = [...new Set(rows.flatMap((row) => row.observedModels))];
-  await writeFile(path.join(outRoot, 'summary.md'), redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource }), secrets));
+  await writeFile(
+    path.join(outRoot, 'summary.md'),
+    redact(summarize(rows, { backend, requestedModel, contextClearing, contracts: contractsSource, verify, planModel: planExecute.plan, executeModel: planExecute.execute, concurrency: concurrencyForRecord }), secrets),
+  );
   await writeFile(
     path.join(outRoot, 'meta.json'),
     redact(
@@ -1119,6 +1194,10 @@ async function main(): Promise<void> {
           contracts: contractsSource,
           escalateTo: escalation.to,
           escalateAfter: escalation.after,
+          escalateAfterFailures: escalation.afterFailures,
+          escalateRetryBudget: escalation.retryBudget,
+          planModel: planExecute.plan,
+          executeModel: planExecute.execute,
           pricesPath: args.prices,
           repeats,
           runs: rows.length,
@@ -1126,6 +1205,9 @@ async function main(): Promise<void> {
           rateLimitWaitMinutes: rateLimit.waitMinutes,
           contextClearing,
           integrationChecks: args.integrationChecks ?? false,
+          verify,
+          selfCheck,
+          concurrency: concurrencyForRecord,
           abortReason,
         },
         null,

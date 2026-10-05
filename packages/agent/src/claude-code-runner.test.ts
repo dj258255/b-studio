@@ -1,9 +1,12 @@
-import type { AccountInfo, McpServerConfig, Options, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import type { AccountInfo, McpServerConfig, ModelInfo, Options, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
   describeAccount,
+  fetchClaudeCodeModels,
   preflightClaudeCode,
   runClaudeCodeAgent,
   zodShape,
@@ -34,13 +37,15 @@ interface FakeOptions {
   account?: AccountInfo;
   /** 사용자 메시지(게이트 재시도 포함)마다 돌려줄 modelUsage. 없으면 기본 계산을 쓴다 */
   modelUsages?: Array<Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }>>;
+  /** supportedModels()가 돌려줄 목록(fetchClaudeCodeModels 테스트용) */
+  models?: ModelInfo[];
 }
 
 /**
  * Claude Code 프로세스를 흉내 내는 가짜 SDK.
  * 사용자 메시지를 받을 때마다 준비된 단계를 실행하고, 도구 단계는 러너가 등록한 MCP 도구 핸들러를 실제로 부른다.
  */
-function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [] }: FakeOptions = {}) {
+function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [], models = [] }: FakeOptions = {}) {
   const state = { prompts: [] as string[], options: undefined as Options | undefined, closed: false };
   let tools: Array<SdkMcpToolDefinition<any>> = [];
 
@@ -91,6 +96,7 @@ function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [
 
       const query: ClaudeCodeQuery = Object.assign(run(), {
         accountInfo: async () => account,
+        supportedModels: async () => models,
         interrupt: async () => {},
         close: () => {
           state.closed = true;
@@ -126,6 +132,40 @@ describe('runClaudeCodeAgent', () => {
     expect(events.find((event) => event.type === 'tool_result')).toMatchObject({ ok: false });
     expect(events.some((event) => event.type === 'verify_start')).toBe(false);
     expect(sandbox.restarts).toEqual([]);
+  });
+
+  it('조사 모드(질문+research)는 b-studio 도구에 더해 WebSearch·WebFetch를 열고, 요청 앞에 조사 안내를 붙인다', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '찾은 내용입니다.' }]] });
+    const sandbox = fakeSandbox(project, []);
+
+    const result = await runClaudeCodeAgent({
+      request: '최신 결제 PG 수수료 비교',
+      intent: 'ask',
+      research: true,
+      project,
+      sandbox,
+      sdk,
+      fetcher: async () => contract,
+    });
+
+    expect(result).toMatchObject({ status: 'done' });
+    expect(state.prompts[0]).toContain('[조사 모드]');
+    expect(state.prompts[0]).toContain('WebSearch/WebFetch');
+    expect(state.options?.tools).toEqual(['WebSearch', 'WebFetch']);
+    expect(state.options?.allowedTools).toContain('WebSearch');
+    expect(state.options?.allowedTools).toContain('WebFetch');
+    expect(state.options?.allowedTools?.some((name) => name.startsWith('mcp__b-studio__'))).toBe(true);
+  });
+
+  it('질문 모드라도 조사(research)를 켜지 않으면 WebSearch·WebFetch를 열지 않는다(지금과 같다)', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '답입니다.' }]] });
+    const sandbox = fakeSandbox(project, []);
+
+    await runClaudeCodeAgent({ request: '이 함수는 뭐해?', intent: 'ask', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(state.options?.tools).toEqual([]);
+    expect(state.options?.allowedTools).not.toContain('WebSearch');
+    expect(state.prompts[0]).not.toContain('[조사 모드]');
   });
 
   it('기본 도구와 사용자 설정을 끄고 b-studio 도구만 허용한다. 게이트가 실패하면 같은 대화에 결과를 넣는다', async () => {
@@ -167,7 +207,9 @@ describe('runClaudeCodeAgent', () => {
     expect(state.prompts).toHaveLength(2);
     expect(state.prompts[1]).toContain('[b-studio 검증 게이트]');
     expect(state.prompts[1]).toContain('cannot find symbol');
-    expect(events[0]).toEqual({ type: 'session', backend: '로컬 Claude Agent (CLI 9.9.9)', model: 'test-model', auth: 'Claude Max 구독' });
+    // effort를 넘기지 않으면 기본값 'high'가 그대로 query 옵션과 세션 알림에 실린다
+    expect(state.options?.effort).toBe('high');
+    expect(events[0]).toEqual({ type: 'session', backend: '로컬 Claude Agent (CLI 9.9.9)', model: 'test-model', auth: 'Claude Max 구독', effort: 'high' });
     expect(events.filter((e) => e.type === 'tool_result').map((e) => e.type === 'tool_result' && e.ok)).toEqual([true, true]);
   });
 
@@ -323,6 +365,45 @@ describe('preflightClaudeCode', () => {
   });
 });
 
+describe('fetchClaudeCodeModels', () => {
+  const MODELS: ModelInfo[] = [
+    { value: '', resolvedModel: 'claude-opus-5[1m]', displayName: 'Default (recommended)', description: 'Opus 5 with 1M context · Best for everyday, complex tasks', supportedEffortLevels: ['low', 'medium', 'high', 'max'] },
+    { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks', supportedEffortLevels: ['low', 'medium', 'high', 'max'] },
+    { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
+  ];
+
+  it('로그인한 계정의 supportedModels()를 그대로 돌려주고, 프롬프트를 보내지 않고 바로 닫는다', async () => {
+    const { sdk, state } = fakeClaudeCode({ models: MODELS });
+
+    const models = await fetchClaudeCodeModels({ sdk, cwd: '/tmp/project' });
+
+    expect(models).toEqual(MODELS);
+    expect(state.prompts).toEqual([]);
+    expect(state.options).toMatchObject({ cwd: '/tmp/project', tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false });
+    expect(state.closed).toBe(true);
+  });
+
+  it('제한 시간 안에 응답하지 않으면 실패하고, 그래도 연결을 정리한다', async () => {
+    let closed = false;
+    const sdk: ClaudeCodeSdk = {
+      createSdkMcpServer: () => ({ type: 'sdk', name: 'b-studio', instance: {} }) as unknown as McpServerConfig,
+      query: () =>
+        ({
+          [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+          accountInfo: () => new Promise(() => {}),
+          supportedModels: () => new Promise(() => {}), // 응답하지 않는 CLI를 흉내 낸다
+          interrupt: async () => {},
+          close: () => {
+            closed = true;
+          },
+        }) as unknown as ClaudeCodeQuery,
+    };
+
+    await expect(fetchClaudeCodeModels({ sdk, timeoutMs: 5 })).rejects.toThrow('초 안에 응답하지 않았습니다');
+    expect(closed).toBe(true);
+  });
+});
+
 describe('zodShape', () => {
   it('buildTools의 입력 스키마를 그대로 검사한다', () => {
     const tools = Object.fromEntries(buildTools(project).map((tool) => [tool.name, z.object(zodShape(tool.input_schema))]));
@@ -398,6 +479,39 @@ describe('zodShape', () => {
     expect(escalated).toHaveLength(1);
     expect(escalated[0]).toMatchObject({ from: 'haiku', to: 'sonnet', attempt: 2, sameSignatureTimes: 2 });
     expect(result.metrics?.escalatedAt).toBe(2);
+  });
+
+  it('서명이 반복되지 않아도 afterFailures번 실패하면 승격하고, 승격 예산만큼 더 시도한다', async () => {
+    // 파일 내용을 매번 다르게 써서 편집 충돌 없이 턴을 끝낸다
+    const write = (n: number) => [
+      { tool: 'write_file', input: { path: 'api/src/Order.java', content: `class Order { String customerName; /* ${n} */ }\n` } },
+      { text: `${n}` },
+    ];
+    const { sdk, state } = fakeClaudeCode({ turns: [write(1), write(2), write(3), [{ text: '승격 뒤 고쳤습니다.' }]] });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      // 기본 상한(3)을 넘긴 지점에서 승격하므로, 예산이 없으면 이어 가지 못한다
+      sandbox: fakeSandbox(project, [false, false, false, true]),
+      sdk,
+      model: 'haiku',
+      // 서명 규칙은 사실상 끄고 실패 횟수 규칙만 본다
+      escalation: { to: 'sonnet', sameSignatureTimes: 99, afterFailures: 3, retryBudget: 2 },
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(result).toMatchObject({ status: 'done', verifyAttempts: 3 });
+    expect(result.metrics?.escalatedAt).toBe(3);
+    // 승격 뒤 query는 같은 세션을 이어받고 모델만 바뀐다(네 번째 시도가 승격 모델로 돌았다)
+    expect(state.options).toMatchObject({ model: 'sonnet', resume: 'new-session', forkSession: true });
+    const escalated = events.filter((event): event is Extract<AgentEvent, { type: 'model_escalated' }> => event.type === 'model_escalated');
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0]).toMatchObject({ from: 'haiku', to: 'sonnet', attempt: 3 });
+    // 상한이 소진된 뒤의 승격이라 마지막 실패 안내를 다시 보낸다
+    expect(state.prompts.at(-1)).toContain('직전 검증 결과를 다시 보냅니다');
   });
 
   it('escalation을 주지 않으면 게이트가 반복 실패해도 query를 다시 열지 않는다', async () => {
@@ -557,5 +671,101 @@ describe('zodShape', () => {
 
     expect(result.status).toBe('done');
     expect(events.some((event) => event.type === 'steer_applied')).toBe(false);
+  });
+});
+
+describe('claude-code 러너의 샌드박스 지연 기동(ensureSandbox)', () => {
+  it('읽기 도구만 쓰는 요청은 샌드박스를 켜지 않고 게이트도 만들지 않는다(계약 기준을 잡지 않는다)', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ tool: 'read_file', input: { path: 'api/src/Order.java' } }, { text: '읽었습니다.' }]] });
+    let boots = 0;
+    let fetches = 0;
+
+    const result = await runClaudeCodeAgent({
+      request: '읽고 설명해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => {
+        fetches += 1;
+        return contract;
+      },
+      ensureSandbox: async () => void (boots += 1),
+    });
+
+    expect(result).toMatchObject({ status: 'done', summary: '읽었습니다.', changedFiles: [] });
+    expect(boots).toBe(0);
+    // 게이트를 만들지 않았으므로 계약 기준도 잡지 않는다
+    expect(fetches).toBe(0);
+    expect(result.report).toBeUndefined();
+  });
+
+  it('쓰기 도구 첫 호출 때 한 번 켜고, 계약 기준을 그때 잡은 뒤 결과에서 게이트가 돈다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }, { text: '추가했습니다.' }]] });
+    let boots = 0;
+    let fetches = 0;
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '새 클래스 추가',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      sdk,
+      fetcher: async () => {
+        fetches += 1;
+        return contract;
+      },
+      ensureSandbox: async () => void (boots += 1),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(boots).toBe(1);
+    // 게이트를 만들며 계약 기준을 잡았다(샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서).
+    // 기준(1회) + 변경 뒤 계약 확인(1회)이라 2회 이상이다(읽기만 하는 지연 기동은 0회)
+    expect(fetches).toBeGreaterThan(0);
+    expect(result).toMatchObject({ status: 'done' });
+    expect(result.changedFiles).toContain('api/src/New.java');
+    expect(events.some((event) => event.type === 'verify_start')).toBe(true);
+  });
+
+  it('eager(ensureSandbox 없음)는 지금처럼 시작할 때 게이트를 만든다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ tool: 'read_file', input: { path: 'api/src/Order.java' } }, { text: '읽었습니다.' }]] });
+    let fetches = 0;
+
+    const result = await runClaudeCodeAgent({
+      request: '읽어줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => {
+        fetches += 1;
+        return contract;
+      },
+    });
+
+    expect(result.status).toBe('done');
+    // 시작할 때 게이트를 만들어 계약 기준을 잡았다(지연 기동이 아니다)
+    expect(fetches).toBe(1);
+  });
+});
+
+describe('runClaudeCodeAgent 프로젝트 지침 주입(ADR-077)', () => {
+  it('project.root의 AGENTS.md를 systemPrompt 옵션에 명확히 구분된 절로 넣고, metrics.guideChars에 글자 수를 남긴다', async () => {
+    await writeFile(path.join(project.root, 'AGENTS.md'), '## 스크립트\n- pnpm test 대신 scripts/web-test.sh를 실행\n');
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '읽었습니다.' }]] });
+
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(state.options?.systemPrompt).toContain('[b-studio project guide: AGENTS.md]');
+    expect(state.options?.systemPrompt).toContain('scripts/web-test.sh');
+    expect(result.metrics!.guideChars).toBe('## 스크립트\n- pnpm test 대신 scripts/web-test.sh를 실행\n'.length);
+  });
+
+  it('AGENTS.md가 없으면 systemPrompt에 절을 더하지 않는다', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '읽었습니다.' }]] });
+
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+
+    expect(state.options?.systemPrompt).not.toContain('[b-studio project guide');
+    expect(result.metrics!.guideChars).toBeUndefined();
   });
 });

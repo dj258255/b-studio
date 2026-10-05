@@ -1,8 +1,20 @@
-import type { ServiceState, SessionStatus } from "@/lib/studio-events";
+import type { ServiceState, SessionMode, SessionStatus } from "@/lib/studio-events";
 
 export type Tone = "pass" | "fail" | "wait" | "idle";
 
+/** 세션·Fleet 멤버가 도는 백엔드의 사람이 읽는 이름. 세션 헤더와 Fleet 카드가 함께 쓴다 */
+export const SESSION_BACKEND_LABEL: Record<SessionMode, string> = {
+  api: "Claude API",
+  "claude-code": "로컬 Claude Agent",
+  codex: "로컬 ChatGPT Agent",
+  commandcode: "로컬 Command Code Agent",
+  opencode: "로컬 OpenCode Agent",
+  gemini: "로컬 Gemini Agent",
+  demo: "데모 모드",
+};
+
 export const SESSION_STATUS_LABEL: Record<SessionStatus, string> = {
+  idle: "대기(샌드박스 꺼짐)",
   starting: "샌드박스 준비 중",
   ready: "준비됨",
   failed: "시작 실패",
@@ -15,12 +27,13 @@ export const SERVICE_STATE_LABEL: Record<ServiceState, string> = {
   ready: "준비됨",
   failed: "실패",
   stopped: "중지됨",
+  off: "꺼 둠",
 };
 
 export function toneOfService(state: ServiceState): Tone {
   if (state === "ready") return "pass";
   if (state === "failed") return "fail";
-  if (state === "stopped") return "idle";
+  if (state === "stopped" || state === "off") return "idle";
   return "wait";
 }
 

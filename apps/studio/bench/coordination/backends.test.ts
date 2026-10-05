@@ -11,8 +11,12 @@ import {
   resolveContextClearing,
   resolveContractsSource,
   resolveEscalation,
+  resolvePlanExecute,
   resolveRateLimitPolicy,
+  resolveSelfCheck,
+  resolveVerify,
   sessionBackendOf,
+  verifyNotice,
 } from './backends';
 
 describe('resolveBackend', () => {
@@ -32,6 +36,10 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'claude-code', model: ' opus ' })).toEqual({ backend: 'claude-code', model: 'opus' });
   });
 
+  it('claude-code는 자동 모델 선택(--model auto, ADR-091 E10)도 그대로 받는다', () => {
+    expect(resolveBackend({ dry: false, backend: 'claude-code', model: 'auto' })).toEqual({ backend: 'claude-code', model: 'auto' });
+  });
+
   it('codex는 모델을 고정할 수도, 계정 기본 모델을 쓰게 둘 수도 있다', () => {
     expect(resolveBackend({ dry: false, backend: 'codex' })).toEqual({ backend: 'codex' });
     expect(resolveBackend({ dry: false, backend: 'codex', model: ' gpt-5-codex ' })).toEqual({ backend: 'codex', model: 'gpt-5-codex' });
@@ -47,9 +55,14 @@ describe('resolveBackend', () => {
     expect(resolveBackend({ dry: false, backend: 'opencode', model: ' opencode/space-bunny-free ' })).toEqual({ backend: 'opencode', model: 'opencode/space-bunny-free' });
   });
 
-  it('--model은 claude-code, codex, commandcode 또는 opencode에서만 쓸 수 있다', () => {
+  it('gemini는 --model이 필수다(기본 모델을 추측하지 않는다)', () => {
+    expect(() => resolveBackend({ dry: false, backend: 'gemini' })).toThrow(/--model이 필요합니다/);
+    expect(resolveBackend({ dry: false, backend: 'gemini', model: ' gemini-2.5-pro ' })).toEqual({ backend: 'gemini', model: 'gemini-2.5-pro' });
+  });
+
+  it('--model은 claude-code, codex, commandcode, opencode 또는 gemini에서만 쓸 수 있다', () => {
     expect(resolveBackend({ dry: false, backend: 'openai' })).toEqual({ backend: 'openai' });
-    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code, codex, commandcode 또는 opencode에서만/);
+    expect(() => resolveBackend({ dry: false, backend: 'openai', model: 'sonnet' })).toThrow(/claude-code, codex, commandcode, opencode 또는 gemini에서만/);
   });
 });
 
@@ -59,13 +72,15 @@ describe('planModelId', () => {
     expect(planModelId('codex', 'gpt-5-codex', 'bench-coordination')).toBe('local-cli-chatgpt:gpt-5-codex');
     expect(planModelId('commandcode', 'poolside/laguna-s-2.1-free', 'bench-coordination')).toBe('local-cli-commandcode:poolside/laguna-s-2.1-free');
     expect(planModelId('opencode', 'opencode/mimo-v2.6-flash-free', 'bench-coordination')).toBe('local-cli-opencode:opencode/mimo-v2.6-flash-free');
+    expect(planModelId('gemini', 'gemini-2.5-pro', 'bench-coordination')).toBe('local-cli-gemini:gemini-2.5-pro');
     expect(planModelId('openai', 'dry', 'bench-coordination')).toBe('bench-coordination');
   });
 
-  it('codex·commandcode·opencode에 모델이 없으면 default로 적는다', () => {
+  it('codex·commandcode·opencode·gemini에 모델이 없으면 default로 적는다', () => {
     expect(planModelId('codex', '', 'bench-coordination')).toBe('local-cli-chatgpt:default');
     expect(planModelId('commandcode', '', 'bench-coordination')).toBe('local-cli-commandcode:default');
     expect(planModelId('opencode', '', 'bench-coordination')).toBe('local-cli-opencode:default');
+    expect(planModelId('gemini', '', 'bench-coordination')).toBe('local-cli-gemini:default');
   });
 });
 
@@ -79,6 +94,37 @@ describe('resolveContextClearing', () => {
 
   it('모르는 값은 거부한다', () => {
     expect(() => resolveContextClearing('yes')).toThrow(/on 또는 off/);
+  });
+});
+
+describe('자가 확인 범위(--self-check)', () => {
+  it('기본은 full이고, lean만 받는다. 모르는 값은 거부한다', () => {
+    expect(resolveSelfCheck(undefined)).toBe('full');
+    expect(resolveSelfCheck('full')).toBe('full');
+    expect(resolveSelfCheck(' LEAN ')).toBe('lean');
+    expect(() => resolveSelfCheck('light')).toThrow(/full 또는 lean/);
+  });
+});
+
+describe('검증 범위(--verify)', () => {
+  it('기본은 full이고, light만 가볍게 확인으로 받는다', () => {
+    expect(resolveVerify(undefined)).toBe('full');
+    expect(resolveVerify('full')).toBe('full');
+    expect(resolveVerify('light')).toBe('light');
+    expect(resolveVerify(' LIGHT ')).toBe('light');
+  });
+
+  it('모르는 값은 조용히 full로 떨어뜨리지 않고 거부한다', () => {
+    expect(() => resolveVerify('none')).toThrow(/full 또는 light/);
+    expect(() => resolveVerify('true')).toThrow(/full 또는 light/);
+  });
+
+  it('P0는 게이트가 없어 light가 적용되지 않는다. light와 함께 주면 무시하고 경고를 돌려준다', () => {
+    expect(verifyNotice('light', ['P0'])).toMatch(/P0.*적용되지 않습니다/);
+    expect(verifyNotice('light', ['S0', 'P0'])).toBeDefined();
+    // full이거나 P0가 없으면 경고가 없다
+    expect(verifyNotice('full', ['P0'])).toBeUndefined();
+    expect(verifyNotice('light', ['S0', 'S1'])).toBeUndefined();
   });
 });
 
@@ -99,13 +145,30 @@ describe('resolveRateLimitPolicy', () => {
 
 describe('resolveEscalation', () => {
   it('--escalate-to를 주지 않으면 기본 임계치만 두고 승격하지 않는다', () => {
-    expect(resolveEscalation({ backend: 'claude-code' })).toEqual({ after: 2 });
-    expect(resolveEscalation({ backend: 'claude-code', escalateAfter: 3 })).toEqual({ after: 3 });
+    expect(resolveEscalation({ backend: 'claude-code' })).toEqual({ after: 2, retryBudget: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateAfter: 3 })).toEqual({ after: 3, retryBudget: 2 });
+    // 대상 없이 규칙만 주면 기억만 한다(승격 없음)
+    expect(resolveEscalation({ backend: 'claude-code', escalateAfterFailures: 3, escalateRetryBudget: 4 })).toEqual({
+      after: 2,
+      afterFailures: 3,
+      retryBudget: 4,
+    });
   });
 
   it('claude-code 백엔드에서만 --escalate-to를 받는다', () => {
-    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
-    expect(resolveEscalation({ backend: 'claude-code', escalateTo: ' sonnet ', escalateAfter: 4 })).toEqual({ to: 'sonnet', after: 4 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2, retryBudget: 2 });
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: ' sonnet ', escalateAfter: 4 })).toEqual({ to: 'sonnet', after: 4, retryBudget: 2 });
+  });
+
+  it('실패 N번 규칙과 승격 뒤 재시도 예산을 함께 넘긴다', () => {
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfterFailures: 3, escalateRetryBudget: 4 })).toEqual({
+      to: 'sonnet',
+      after: 2,
+      afterFailures: 3,
+      retryBudget: 4,
+    });
+    // 예산 0은 "새 예산 없음"이다(승격해도 남은 횟수만 쓴다)
+    expect(resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateRetryBudget: 0 })).toEqual({ to: 'sonnet', after: 2, retryBudget: 0 });
   });
 
   it('승격을 지원하지 않는 백엔드에 --escalate-to를 주면 시작 전에 오류를 낸다', () => {
@@ -116,9 +179,38 @@ describe('resolveEscalation', () => {
     expect(() => resolveEscalation({ backend: 'opencode', escalateTo: 'opencode/mimo-v2.6-flash-free' })).toThrow(/--escalate-to는 claude-code/);
   });
 
-  it('--escalate-after는 1 이상의 정수여야 한다', () => {
+  it('승격 인자는 1 이상의 정수여야 한다(재시도 예산은 0도 받는다)', () => {
     expect(() => resolveEscalation({ backend: 'claude-code', escalateAfter: 0 })).toThrow(/--escalate-after는 1 이상의 정수/);
     expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfter: 1.5 })).toThrow(/--escalate-after는 1 이상의 정수/);
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateAfterFailures: 0 })).toThrow(/--escalate-after-failures는 1 이상의 정수/);
+    expect(() => resolveEscalation({ backend: 'claude-code', escalateTo: 'sonnet', escalateRetryBudget: -1 })).toThrow(/--escalate-retry-budget는 0 이상의 정수/);
+  });
+});
+
+describe('resolvePlanExecute(계획-실행 분리, ADR-075)', () => {
+  it('둘 다 주지 않으면(기본, --dry 포함) 빈 설정이라 백엔드를 가리지 않는다', () => {
+    expect(resolvePlanExecute({ backend: 'claude-code' })).toEqual({});
+    // --dry는 항상 openai 백엔드다. 아무 값도 주지 않으면 그대로 통과한다(지금 동작과 같다)
+    expect(resolvePlanExecute({ backend: 'openai' })).toEqual({});
+  });
+
+  it('claude-code 백엔드에서 --plan-model·--execute-model을 받고, 앞뒤 공백을 지운다', () => {
+    expect(resolvePlanExecute({ backend: 'claude-code', planModel: 'opus', executeModel: 'haiku' })).toEqual({ plan: 'opus', execute: 'haiku' });
+    expect(resolvePlanExecute({ backend: 'claude-code', planModel: ' opus ' })).toEqual({ plan: 'opus' });
+    // 실행 모델 없이 계획 모델만 줄 수도 있다(실행은 --model을 그대로 쓴다)
+    expect(resolvePlanExecute({ backend: 'claude-code', planModel: 'opus' })).toEqual({ plan: 'opus' });
+  });
+
+  it('계획 호출 경로가 없는 백엔드에 주면 시작 전에 오류를 낸다(--dry와 함께 주는 것도 여기서 걸린다)', () => {
+    expect(() => resolvePlanExecute({ backend: 'openai', planModel: 'opus' })).toThrow(/--plan-model·--execute-model은 claude-code/);
+    expect(() => resolvePlanExecute({ backend: 'codex', executeModel: 'haiku' })).toThrow(/claude-code 백엔드에서만/);
+    expect(() => resolvePlanExecute({ backend: 'commandcode', planModel: 'opus' })).toThrow(/claude-code 백엔드에서만/);
+    expect(() => resolvePlanExecute({ backend: 'opencode', planModel: 'opus' })).toThrow(/claude-code 백엔드에서만/);
+  });
+
+  it('claude-code 레인이 하나라도 있으면 계획 기본 백엔드가 openai여도 허용한다', () => {
+    expect(resolvePlanExecute({ backend: 'openai', laneBackends: ['claude-code'], planModel: 'opus' })).toEqual({ plan: 'opus' });
+    expect(() => resolvePlanExecute({ backend: 'openai', laneBackends: ['codex'], planModel: 'opus' })).toThrow(/claude-code/);
   });
 });
 
@@ -166,10 +258,11 @@ describe('레인 백엔드(--lane-backend)', () => {
     expect(parseLaneBackend('api=claude-code:sonnet')).toEqual({ group: 'api', backend: 'claude-code', model: 'sonnet' });
     expect(parseLaneBackend('web=commandcode')).toEqual({ group: 'web', backend: 'commandcode' });
     expect(parseLaneBackend('web=opencode:opencode/mimo-v2.6-flash-free')).toEqual({ group: 'web', backend: 'opencode', model: 'opencode/mimo-v2.6-flash-free' });
+    expect(parseLaneBackend('web=gemini:gemini-2.5-pro')).toEqual({ group: 'web', backend: 'gemini', model: 'gemini-2.5-pro' });
     expect(parseLaneBackend(' api = openai ')).toEqual({ group: 'api', backend: 'openai' });
     expect(() => parseLaneBackend('api')).toThrow(/형식/);
     expect(() => parseLaneBackend('db=codex')).toThrow(/모르는 레인 그룹/);
-    expect(() => parseLaneBackend('api=gemini')).toThrow(/알 수 없는 레인 백엔드/);
+    expect(() => parseLaneBackend('api=anthropic')).toThrow(/알 수 없는 레인 백엔드/);
   });
 
   it('반복해 준 레인 백엔드를 모으고, 같은 그룹이 두 번이면 거부한다', () => {
@@ -193,7 +286,7 @@ describe('레인 백엔드(--lane-backend)', () => {
   });
 
   it('claude-code 레인이 하나라도 있으면 --escalate-to를 허용한다', () => {
-    expect(resolveEscalation({ backend: 'openai', laneBackends: ['claude-code'], escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2 });
+    expect(resolveEscalation({ backend: 'openai', laneBackends: ['claude-code'], escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2, retryBudget: 2 });
     expect(() => resolveEscalation({ backend: 'openai', laneBackends: ['codex'], escalateTo: 'sonnet' })).toThrow(/claude-code/);
   });
 });

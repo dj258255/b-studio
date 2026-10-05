@@ -246,6 +246,26 @@ workflow:
 - 테스트·동시 요청 확인 이름은 중복될 수 없습니다.
 - `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
 
+### 가볍게 확인 (요청 옵션 `verify`)
+
+대화 입력창의 **"가볍게 확인"** 스위치는 요청마다 `verify: light`를 보냅니다(기본 `full`). `full`은 지금과 한 글자도 다르지 않고, `light`는 게이트가 **서비스 재시작·준비 판정·계약 비교(`run`·`contract_check`)만** 실행하고 `test`·`browser_check`·`concurrency_check`·`review`는 건너뜁니다. `workflow.required` 대조는 건너뛴 단계를 "건너뜀"으로만 기록하고 실패로 보지 않습니다.
+
+- **체크포인트 표기**: `full`은 통과한 단계를 `Workflow-Passed` 트레일러로 남깁니다. `light`는 실제로 통과한 단계만 적고 `Workflow-Verify: light`를 더합니다. 다시 켜서 읽어도 같은 값입니다.
+- **배포는 자연히 막힙니다**: `releaseRequires`는 건너뛴 단계를 채우지 못하므로, `light` 체크포인트는 `test`·`review` 같은 조건이 있으면 배포가 거부됩니다. 배포 화면은 "가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다"라고 안내합니다. 전체 검증(`full`)을 한 번 더 통과해 새 체크포인트를 만들면 배포할 수 있습니다.
+- **쓰이는 곳**: 사람이 보낸 단일 세션 요청과 벤치(`--verify light`, [#182](https://github.com/dj258255/b-studio/pull/182))에서 쓰입니다. 작업 분해 레인·Fleet·CLI 경로는 `full` 그대로입니다.
+- **효과는 시간이지 토큰이 아닙니다**: E5([보고서](experiments/2026-09-29-e5-light-verify.md))에서 종단 시간은 15%, 게이트 시간은 53% 줄었지만 토큰은 줄지 않았습니다. 건너뛰는 단계는 b-studio 코드가 실행하고 모델을 부르지 않기 때문입니다. 작은 과제 3개 × 3회에서 잰 결과이며, 큰 변경이나 계약이 얽힌 작업에서는 `full`로 확인하세요.
+
+### 자가 확인 범위 (`B_STUDIO_SELF_CHECK`)
+
+기본은 `lean`입니다(ADR-064). 에이전트가 게이트가 어차피 하는 확인을 되풀이하지 않게 합니다. `B_STUDIO_SELF_CHECK=full`이면 이전 동작(한 글자도 다르지 않음)입니다. 모르는 값은 조용히 떨어뜨리지 않고 설정 오류로 알립니다.
+
+- **프롬프트**: `run_in_service`는 필요한 명령만 돌리고 전체 빌드·테스트를 확인용으로 돌리지 말라고, `restart_service`·`http_request`는 무엇을 쓸지 정하려고 동작을 볼 때만 쓰고 끝난 변경을 확인하는 데 쓰지 말라고 안내합니다. 턴을 끝내면 게이트가 재시작·준비·계약과 워크플로의 확인을 돌려 실패를 돌려준다는 설명은 같습니다.
+- **명령 출력**: 성공한(종료 코드 0) `run_in_service` 출력은 800자(`LEAN_SUCCESS_OUTPUT_BUDGET`)만 돌려줍니다. 실패한 명령은 원인을 봐야 하므로 기본 예산(6,000자) 그대로입니다.
+- **왜**: E6([보고서](experiments/2026-09-30-e6-token-breakdown.md))에서 b-studio의 모델 호출은 그냥 Claude Code의 3.4배였고, 문맥 합의 61%가 도구 결과를 다시 읽은 양, 그중 `run_in_service`가 32.7%였습니다. 고정 문맥(시스템 프롬프트·도구 설명)은 오히려 b-studio가 작았습니다.
+- **쓰이는 곳**: 모든 러너(API 루프, Claude Code, Codex, Command Code, OpenCode)와 모든 세션(일반·레인·통합·Fleet). 벤치는 앞선 실험과 비교하려고 기본이 `full`이고, `--self-check lean`으로 켭니다.
+- **효과**: E7([보고서](experiments/2026-09-30-e7-lean-self-check.md))에서 성공 9/9 대 9/9, 게이트 실패 0건 대 0건, 성공 1건당 토큰 −41.4%(짝지은 비교 p = 0.164), `run_in_service` 재읽기 −77%였습니다.
+- **한계**: 레인 게이트 시간은 +64%(에이전트가 하지 않은 재시작을 게이트가 맡음). 작은 과제 3개 × 9회에서 잰 결과이고, 과제가 커지면 게이트 재시도가 늘 수 있습니다. 그때는 `full`로 되돌리세요.
+
 ### 바뀐 페이지 자동 확인 (`autoPageChecks`)
 
 E1~E4 내내 반복된 원인 하나: 게이트의 화면 확인은 `pageChecks`에 적어 둔 페이지만 열어서, **이번 실행이 새로 만든 페이지가 500을 내도 게이트는 통과**했습니다(E2의 order-summary). `autoPageChecks`를 켜면 게이트가 이번 실행에서 바뀐 파일에서 Next.js 페이지를 찾아 스스로 열어 봅니다.
@@ -380,6 +400,34 @@ design:
 - 스튜디오는 `studio.yaml`을 고치지 않습니다. 화면의 "디자인" 패널에서 **세션 단위로** URL을 저장할 수 있고(세션 설정이 `studio.yaml`보다 우선), 팀과 공유하려면 패널이 보여 주는 줄을 사람이 커밋합니다.
 - `.fig` 파일은 Figma에 한 번 Import해야 파일 키가 생깁니다.
 - 토큰 발급 방법과 운영 주의는 [운영 문서](operations.md)의 "Figma 연동"을 보세요.
+
+## 계획-실행 분리 (ADR-075)
+
+```yaml
+models:
+  plan: opus
+  execute: sonnet
+```
+
+| 필드 | 설명 |
+|---|---|
+| `models.plan` | 계획을 쓰는 모델. claude-code 백엔드는 Claude Code에 넘기는 모델 이름(예: `opus`), api 백엔드는 모델 레지스트리 id입니다 |
+| `models.execute` | 실행을 맡는 모델(뜻은 `plan`과 같은 규칙). 생략하면 세션이 원래 쓰던 모델을 그대로 씁니다 |
+
+절 자체를 생략하거나 두 필드를 모두 비우면 환경 변수(`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 보고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 합니다. 이 절이 있으면 환경 변수보다 우선합니다. 자세한 동작은 [운영 문서](operations.md)의 "계획-실행 분리"를 보세요.
+
+## 체크포인트 커밋 제목 (ADR-080)
+
+```yaml
+checkpoints:
+  conventionalCommits: false
+```
+
+| 필드 | 설명 |
+|---|---|
+| `checkpoints.conventionalCommits` | 기본 `true`. 체크포인트 커밋 제목을 요청 글과 바뀐 파일에서 conventional commit 형식(`feat`/`fix`/`test`/`docs`/`refactor`/`chore` 접두어 + 72자 이내 한국어 요약)으로 만듭니다. `false`로 끄면 예전처럼 `요청: <요청 글>` 형식을 그대로 씁니다 |
+
+사내 저장소가 이미 다른 커밋 메시지 규칙을 강제한다면 꺼서 기존 형식을 유지할 수 있습니다. "제출 준비" 탭(개발 화면)이 이 제목 규칙을 포함해 커밋 기록·요구사항·테스트·README·시드·비밀 값을 점검합니다.
 
 ## 모노레포
 

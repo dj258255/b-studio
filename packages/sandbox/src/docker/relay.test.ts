@@ -53,6 +53,24 @@ describe('planRelay', () => {
     const onlyApi = bindMounts({ api: { volumes: [{ type: 'bind', source: '/Users/dev/orders/api', target: '/app' }] } }, new Set(['api']));
     expect(planRelay(root, [{ file: 'web/app/x.tsx', kind: 'file' }], onlyApi).size).toBe(0);
   });
+
+  it('ADR-088: 모든 서비스가 프로젝트 루트를 통째로 마운트해도 servicePaths(subroot)로 실제 작업 폴더에만 알린다', () => {
+    const rootMounts = bindMounts(
+      {
+        web: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] },
+        api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] },
+      },
+      new Set(['web', 'api']),
+      { web: 'web', api: 'api' },
+    );
+
+    const plan = planRelay(root, [{ file: 'api/src/New.java', kind: 'file' }], rootMounts);
+
+    // source 길이로는 web·api를 가릴 수 없다(둘 다 루트) — subroot(작업 폴더)로 좁혀 api에만 알려야 한다
+    expect(Object.fromEntries(plan)).toEqual({
+      api: [{ action: 'nudge', containerPath: '/workspace/api/src', files: ['api/src/New.java'] }],
+    });
+  });
 });
 
 describe('RELAY_SCRIPT', () => {

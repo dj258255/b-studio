@@ -173,6 +173,32 @@ describe('runCommandCodeAgent', () => {
     expect(await readFile(path.join(originalHome, '.commandcode', 'auth.json'), 'utf8')).toBe('{"token":"secret"}\n');
   });
 
+  it('effort를 넘기면 --effort 인자로 전달하고 세션 알림에도 남긴다', async () => {
+    const { process, state } = fakeCommandCode([success('session-1', '완료', OK_USAGE)]);
+    const events: AgentEvent[] = [];
+
+    await runCommandCodeAgent({
+      request: '요청',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      process,
+      effort: 'max',
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(state.calls[0]!.args).toEqual(expect.arrayContaining(['--effort', 'max']));
+    expect(events.find((event) => event.type === 'session')).toMatchObject({ backend: '로컬 Command Code Agent', effort: 'max' });
+  });
+
+  it('effort를 넘기지 않으면 --effort 인자를 붙이지 않는다', async () => {
+    const { process, state } = fakeCommandCode([success('session-1', '완료', OK_USAGE)]);
+
+    await runCommandCodeAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), process, fetcher: async () => contract });
+
+    expect(state.calls[0]!.args).not.toContain('--effort');
+  });
+
   it('게이트가 실패하면 같은 세션을 갈라 이어받아 다시 돌리고(새 sessionId), 통과하면 끝난다', async () => {
     const { process, state } = fakeCommandCode(
       [

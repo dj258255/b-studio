@@ -179,6 +179,32 @@ describe('runCodexAgent', () => {
     expect(events.flatMap((event) => (event.type === 'tool_result' ? [event.ok] : []))).toEqual([true]);
   });
 
+  it('effort를 넘기면 Codex 설정의 modelReasoningEffort로 전달하고 세션 알림에도 남긴다', async () => {
+    const { sdk, state } = fakeCodex([{ steps: [{ text: '완료' }], usage: usage(10) }]);
+    const events: AgentEvent[] = [];
+
+    await runCodexAgent({
+      request: '요청',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      sdk,
+      effort: 'low',
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(state.options[0]).toMatchObject({ modelReasoningEffort: 'low' });
+    expect(events.find((event) => event.type === 'session')).toMatchObject({ backend: '로컬 ChatGPT Agent', effort: 'low' });
+  });
+
+  it('effort를 넘기지 않으면 Codex 설정에 modelReasoningEffort를 넣지 않는다(계정 기본값을 그대로 쓴다)', async () => {
+    const { sdk, state } = fakeCodex([{ steps: [{ text: '완료' }], usage: usage(10) }]);
+
+    await runCodexAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), sdk, fetcher: async () => contract });
+
+    expect(state.options[0]).not.toHaveProperty('modelReasoningEffort');
+  });
+
   it('조율 게시판을 켜면 post_note가 MCP 서버를 거쳐 레인 신원으로 게시된다', async () => {
     const board = new Board({ topology: 'mesh' });
     const { sdk } = fakeCodex([

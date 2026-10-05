@@ -1,6 +1,6 @@
 import { AUTO_PAGE_MAX } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { routesFromChangedFiles } from './next-routes';
+import { isIdLikeSegment, routesFromChangedFiles } from './next-routes';
 
 describe('routesFromChangedFiles', () => {
   it('서비스 폴더 안의 바뀐 page 파일에서 경로를 만든다', () => {
@@ -136,5 +136,45 @@ describe('routesFromChangedFiles', () => {
 
   it('서비스 경로가 "."이면 프로젝트 전체를 본다', () => {
     expect(routesFromChangedFiles(['app/page.tsx'], '.').routes).toEqual([{ path: '/', file: 'app/page.tsx' }]);
+  });
+
+  describe('동적 경로 fallback (ADR-078)', () => {
+    it('id처럼 보이는 세그먼트는 fallbackValue로 채우고 usedFallbackParams에 이름을 남긴다', () => {
+      const result = routesFromChangedFiles(['web/app/orders/[id]/page.tsx'], 'web', {}, 5, '1');
+      expect(result.skipped).toEqual([]);
+      expect(result.routes).toEqual([{ path: '/orders/1', file: 'web/app/orders/[id]/page.tsx', usedFallbackParams: ['id'] }]);
+    });
+
+    it('sampleParams에 이미 값이 있으면 fallbackValue를 쓰지 않고, usedFallbackParams도 남기지 않는다', () => {
+      const result = routesFromChangedFiles(['web/app/orders/[id]/page.tsx'], 'web', { id: '7' }, 5, '1');
+      expect(result.routes).toEqual([{ path: '/orders/7', file: 'web/app/orders/[id]/page.tsx' }]);
+    });
+
+    it('id로 보이지 않는 이름(slug)은 fallbackValue가 있어도 건너뛴다', () => {
+      const result = routesFromChangedFiles(['web/app/tag/[slug]/page.tsx'], 'web', {}, 5, '1');
+      expect(result.routes).toEqual([]);
+      expect(result.skipped).toEqual([{ file: 'web/app/tag/[slug]/page.tsx', reason: "동적 세그먼트 'slug'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요" }]);
+    });
+
+    it('fallbackValue를 주지 않으면(기본값) 예전처럼 값이 없는 세그먼트를 건너뛴다', () => {
+      const result = routesFromChangedFiles(['web/app/orders/[id]/page.tsx'], 'web');
+      expect(result.routes).toEqual([]);
+      expect(result.skipped[0]!.reason).toContain("'id'의 값이 없습니다");
+    });
+
+    it('한 라우트에 id류 세그먼트가 여럿이면 모두 fallback으로 채우고 이름을 모두 남긴다', () => {
+      const result = routesFromChangedFiles(['web/app/u/[userId]/posts/[postId]/page.tsx'], 'web', {}, 5, '1');
+      expect(result.routes).toEqual([{ path: '/u/1/posts/1', file: 'web/app/u/[userId]/posts/[postId]/page.tsx', usedFallbackParams: ['userId', 'postId'] }]);
+    });
+  });
+
+  describe('isIdLikeSegment', () => {
+    it('id 자신과 camelCase·snake_case·kebab-case의 id 접미사를 id로 본다', () => {
+      for (const name of ['id', 'ID', 'orderId', 'userId', 'order_id', 'order-id']) expect(isIdLikeSegment(name)).toBe(true);
+    });
+
+    it('우연히 id로 끝나는 낱말이나 관계없는 이름은 id로 보지 않는다', () => {
+      for (const name of ['grid', 'slug', 'category', 'locale', 'valid']) expect(isIdLikeSegment(name)).toBe(false);
+    });
   });
 });

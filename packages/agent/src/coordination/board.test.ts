@@ -233,3 +233,35 @@ describe('Board stats·onChange·snapshot', () => {
     expect(b.snapshot()[0]).toMatchObject({ refs: ['a.ts'], author: { lane: 'web' } });
   });
 });
+
+describe('Board.contractAuthors (이슈 #393: 읽기 타이밍 안내)', () => {
+  it('아무도 게시하지 않았으면 빈 집합이다', () => {
+    const b = board();
+    expect(b.contractAuthors()).toEqual(new Set());
+  });
+
+  it('contract를 낸 레인만 모은다 — fact·failure는 세지 않는다', () => {
+    const b = board();
+    b.post({ kind: 'fact', body: 'fact' }, asModel('web'));
+    b.post({ kind: 'failure', body: 'nope' }, { lane: 'verifier', by: 'platform' });
+    expect(b.contractAuthors()).toEqual(new Set());
+    b.post({ kind: 'contract', body: 'c', refs: ['a.ts'] }, asModel('web'));
+    expect(b.contractAuthors()).toEqual(new Set(['web']));
+  });
+
+  it('여러 레인·중복 게시를 모두 하나씩만 모은다', () => {
+    const b = board();
+    b.post({ kind: 'contract', body: 'c1', refs: ['a.ts'] }, asModel('web'));
+    b.post({ kind: 'contract', body: 'c2', refs: ['b.ts'] }, asModel('web')); // 같은 레인, 다른 메모
+    b.post({ kind: 'contract', body: 'c3', refs: ['c.ts'] }, asModel('api'));
+    expect(b.contractAuthors()).toEqual(new Set(['web', 'api']));
+  });
+
+  it('topology와 무관하게 전체 메모를 본다(star에서도 그대로)', () => {
+    const b = new Board({ topology: 'star' });
+    b.post({ kind: 'contract', body: 'c', refs: ['a.ts'] }, asModel('api'));
+    // web은 star에서 api의 메모를 read()로 보지 못하지만, contractAuthors는 게시 여부 자체를 본다
+    expect(b.read({ lane: 'web' }).notes).toHaveLength(0);
+    expect(b.contractAuthors()).toEqual(new Set(['api']));
+  });
+});

@@ -12,6 +12,10 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string>();
   const [showBody, setShowBody] = useState(false);
+  const [lintFindings, setLintFindings] = useState<Array<{ line: number; message: string }>>([]);
+  // 미리보기가 studio.yaml의 기본값을 주면 그 값으로 맞춘다(사람이 건드리면 그 뒤로는 사람 선택을 따른다)
+  const [review, setReview] = useState<boolean>();
+  const reviewTouched = useRef(false);
   // 첫 미리보기만 이슈 입력을 비워 보내, 서버가 채운 기본 이슈(통합 세션의 하위 이슈)를 받는다. 그 뒤로는 입력값을 그대로 보낸다
   const requestedDefaults = useRef(false);
   const parsed = useMemo(() => parseIssues(issue), [issue]);
@@ -42,6 +46,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
             const defaults: number[] = Array.isArray(data.issues) ? data.issues : [];
             if (defaults.length > 0) setIssue(defaults.join(", "));
           }
+          if (!reviewTouched.current) setReview(Boolean((data as ExportPreviewData).review?.auto));
         } catch (reason) {
           if (!cancelled) setError(String(reason));
         } finally {
@@ -55,6 +60,29 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
     };
   }, [parsed, sessionId]);
 
+  // PR 본문에 "모호한 표현"(수치 없는 성능 주장, 약한 표현, 헷갈리는 용어)이 있으면 막지 않고 알려만 준다(ADR-098).
+  // 미리보기를 아직 불러오지 못했을 때만(초기 상태) body가 없고, 그때 lintFindings는 이미 빈 배열이라 따로 비우지 않는다
+  useEffect(() => {
+    const body = preview?.body;
+    if (!body) return;
+    let cancelled = false;
+    void fetch(`/api/sessions/${sessionId}/docs/lint`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: body }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!cancelled) setLintFindings(Array.isArray(data?.findings) ? data.findings : []);
+      })
+      .catch(() => {
+        // 린트 실패는 PR 만들기를 막지 않는다 — 조용히 넘어간다
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preview?.body, sessionId]);
+
   /** 브랜치 올리기와 PR 만들기를 한 번에 한다. 누락이 있어도 막지 않는다 */
   async function create() {
     setCreating(true);
@@ -63,7 +91,7 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
       const response = await fetch(`/api/sessions/${sessionId}/export`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pullRequest: true, issues: parsed.ok ? parsed.issues : [] }),
+        body: JSON.stringify({ pullRequest: true, issues: parsed.ok ? parsed.issues : [], review }),
       });
       const data = await response.json();
       if (!response.ok) setError(data.error ?? `${label}을 만들지 못했습니다`);
@@ -98,6 +126,22 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
         <p className="mt-1 text-xs text-muted">넣으면 PR 본문 첫 줄들에 Closes #N을 넣어 이슈를 함께 닫습니다.</p>
       </div>
 
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          id="export-review"
+          type="checkbox"
+          checked={review ?? preview?.review.auto ?? true}
+          onChange={(event) => {
+            reviewTouched.current = true;
+            setReview(event.target.checked);
+          }}
+          className="rounded-control border border-line"
+        />
+        <label htmlFor="export-review" className="text-sm">
+          {label}을 만든 뒤 AI 리뷰를 최대 {preview?.review.maxRounds ?? 2}번 돌리기
+        </label>
+      </div>
+
       {!parsed.ok && <p className="mt-3 text-sm text-fail">이슈 번호는 쉼표로 구분한 1 이상 10,000,000 이하의 정수여야 합니다</p>}
 
       {parsed.ok && loading && (
@@ -121,6 +165,19 @@ export function ExportPreview({ sessionId, label, onClose }: { sessionId: string
               </li>
             ))}
           </ul>
+
+          {lintFindings.length > 0 && (
+            <div className="mt-3 rounded-control border border-line bg-panel px-3 py-2" aria-label="모호한 표현">
+              <p className="text-xs font-medium text-wait">모호한 표현 {lintFindings.length}개(올리기를 막지는 않습니다)</p>
+              <ul className="mt-1 max-h-24 space-y-0.5 overflow-y-auto text-xs text-muted">
+                {lintFindings.map((finding, index) => (
+                  <li key={index}>
+                    {finding.line}번째 줄: {finding.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           <div className="mt-3">
             <button

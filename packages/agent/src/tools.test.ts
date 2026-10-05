@@ -5,7 +5,7 @@ import type { Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Board } from './coordination';
-import { buildTools, executeTool, type ToolContext } from './tools';
+import { buildTools, executeTool, LOCAL_TOOLS, SANDBOX_TOOLS, type BoardAccess, type ToolContext } from './tools';
 import { Workspace } from './workspace';
 
 const project = {
@@ -156,6 +156,46 @@ describe('되묻기 도구(ask_user)', () => {
   });
 });
 
+describe('방식 제안 도구(propose_mode)', () => {
+  it('interactive일 때만 목록에 넣는다(ask_user와 같다)', () => {
+    expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('propose_mode');
+    expect(buildTools(project, { interactive: true }).map((candidate) => candidate.name)).toContain('propose_mode');
+  });
+
+  it('제안을 질문으로 넘긴다. 첫 선택지는 넘기기, 둘째는 한 명으로 계속이다', async () => {
+    const asked: unknown[] = [];
+    const askContext: ToolContext = { ...context, onQuestion: (question) => asked.push(question) };
+
+    const outcome = await executeTool('propose_mode', { mode: 'split', reason: 'API와 화면이 계약만 공유해 동시에 만들 수 있습니다', request: '주문 API와 화면을 만들어줘' }, askContext);
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.content).toContain('End this run');
+    expect(asked).toEqual([
+      {
+        question: 'API와 화면이 계약만 공유해 동시에 만들 수 있습니다',
+        options: ['나눠서 병렬로 하기', '한 명으로 계속'],
+        allowOther: false,
+        proposal: { mode: 'split', request: '주문 API와 화면을 만들어줘' },
+      },
+    ]);
+  });
+
+  it('방식·이유·요청을 검증하고, onQuestion이 없는 실행은 거부한다', async () => {
+    let asked = 0;
+    const askContext: ToolContext = { ...context, onQuestion: () => (asked += 1) };
+    const invalid = [
+      { mode: 'solo', reason: 'r', request: 'q' },
+      { mode: 'fleet', reason: '', request: 'q' },
+      { mode: 'fleet', reason: 'r'.repeat(301), request: 'q' },
+      { mode: 'fleet', reason: 'r', request: '' },
+      { mode: 'fleet', reason: 'r', request: 'q'.repeat(2_001) },
+    ];
+    for (const input of invalid) expect((await executeTool('propose_mode', input, askContext)).ok).toBe(false);
+    expect(asked).toBe(0);
+    expect((await executeTool('propose_mode', { mode: 'fleet', reason: 'r', request: 'q' }, context)).ok).toBe(false);
+  });
+});
+
 describe('실행 정책', () => {
   it('샌드박스 실행 전에 위험 명령을 차단하고 실행하지 않는다', async () => {
     let called = false;
@@ -210,6 +250,27 @@ describe('도구 결과 예산', () => {
     expect(outcome.content.length).toBeLessThan(6_100);
     expect(outcome.rawChars).toBeGreaterThan(6_000);
     expect(outcome.content).toContain('grep·tail로 좁혀 다시 실행');
+  });
+
+  it('lean이면 성공한 명령 출력은 짧게, 실패한 명령은 기본 예산 그대로 돌려준다', async () => {
+    const log = `${'a'.repeat(10_000)}\nBUILD SUCCESSFUL`;
+    const run = (exitCode: number, selfCheck?: 'full' | 'lean') => {
+      const sandbox = { ...context.sandbox, exec: async () => ({ exitCode, stdout: log, stderr: '' }) } as unknown as Sandbox;
+      return executeTool('run_in_service', { service: 'api', command: ['./gradlew', 'build'] }, { ...context, sandbox, ...(selfCheck ? { selfCheck } : {}) });
+    };
+
+    const leanSuccess = await run(0, 'lean');
+    expect(leanSuccess.ok).toBe(true);
+    // 끝부분(성공 문구)은 남고, 800자 예산에 생략 안내 한 줄만 더해진다
+    expect(leanSuccess.content).toContain('BUILD SUCCESSFUL');
+    expect(leanSuccess.content.length).toBeLessThan(900);
+    expect(leanSuccess.rawChars).toBeGreaterThan(10_000);
+
+    const leanFailure = await run(1, 'lean');
+    expect(leanFailure.content.length).toBeGreaterThan(5_900);
+
+    const fullSuccess = await run(0);
+    expect(fullSuccess.content.length).toBeGreaterThan(5_900);
   });
 
   it('HTML 응답은 태그를 벗긴 보이는 글자만 남긴다', async () => {
@@ -311,6 +372,22 @@ describe('조율 도구', () => {
     expect(facts.content).not.toContain('OrderResponse.memo');
   });
 
+  it('게시판이 notice를 돌려주면(엮인 레인 미게시 안내, 이슈 #393) read_notes 결과에 그대로 붙인다', async () => {
+    const notice = '[조율] lane-2가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요';
+    const ctx: ToolContext = {
+      ...context,
+      board: {
+        lane: 'lane-1',
+        post: () => ({ ok: false, reason: 'unused' }),
+        read: () => ({ notes: [], truncated: false, notice }),
+      },
+    };
+    const outcome = await executeTool('read_notes', { kinds: [] }, ctx);
+    expect(outcome.ok).toBe(true);
+    // notes가 없어도 "(no notes)"가 아니라 안내 문구가 그대로 보인다
+    expect(outcome.content).toBe(notice);
+  });
+
   it('계약 메모에 refs가 없으면 게시판이 거부한 이유를 그대로 돌려준다', async () => {
     const outcome = await executeTool('post_note', { kind: 'contract', body: 'x', refs: [] }, boardContext());
     expect(outcome).toEqual({ ok: false, content: '계약 메모는 refs가 하나 이상 필요합니다' });
@@ -330,5 +407,37 @@ describe('조율 도구', () => {
 
     const read = await executeTool('read_notes', { kinds: [] }, readOnly);
     expect(read.ok).toBe(true);
+  });
+});
+
+describe('도구 분류 (샌드박스 필요 여부)', () => {
+  it('모든 도구가 SANDBOX_TOOLS나 LOCAL_TOOLS 중 하나에 들어 있다 (새 도구를 빠뜨리지 않게)', () => {
+    // 모든 조건부 도구(외부 API·계약·게시판·디자인·되묻기)를 켠 프로젝트로 도구 목록을 만든다
+    const full = {
+      ...project,
+      managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }]],
+      external: [['users', { source: 'external', baseUrl: 'https://users.example.com', policy: { mask: [], maskPatterns: [] } }]],
+    } as unknown as LoadedProject;
+    const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, design: true, interactive: true }).map((candidate) => candidate.name);
+
+    for (const name of names) {
+      expect(SANDBOX_TOOLS.has(name) || LOCAL_TOOLS.has(name), `분류가 없는 도구: ${name}`).toBe(true);
+    }
+    // 두 분류는 겹치지 않는다
+    for (const name of SANDBOX_TOOLS) expect(LOCAL_TOOLS.has(name), name).toBe(false);
+    // 분류표에만 있고 실제 도구 목록에 없는 이름도 없어야 한다(이름이 바뀌면 분류표도 고쳐야 한다)
+    for (const name of [...SANDBOX_TOOLS, ...LOCAL_TOOLS]) expect(names, name).toContain(name);
+  });
+
+  it('샌드박스가 필요한 도구만 ensureSandbox를 부른다', async () => {
+    let boots = 0;
+    const ctx: ToolContext = { ...context, ensureSandbox: async () => void (boots += 1) };
+
+    // 작업 공간 도구는 샌드박스를 켜지 않는다
+    await executeTool('read_file', { path: 'missing.txt' }, ctx);
+    expect(boots).toBe(0);
+    // 샌드박스 도구는 실행 전에 부른다(세션 쪽에서 동시 호출에도 한 번만 켜도록 dedup한다)
+    await executeTool('service_stats', {}, ctx);
+    expect(boots).toBe(1);
   });
 });

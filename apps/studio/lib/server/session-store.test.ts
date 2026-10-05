@@ -9,6 +9,7 @@ import {
   archivedSnapshot,
   closeUnfinished,
   commandCodeStateDirOf,
+  geminiStateDirOf,
   isProcessAlive,
   openCodeStateDirOf,
   PERSISTED_HISTORY_LIMIT,
@@ -131,9 +132,11 @@ describe('세션 저장', () => {
     expect(commandCodeStateDirOf(data.snapshot)).toBe(path.join(stateDir, '.git', 'b-studio', 'commandcode'));
     // 작업 복사본 세션은 작업 폴더가 곧 상태 폴더다(stateDir이 없다)
     expect(commandCodeStateDirOf(snapshot(folder))).toBe(path.join(folder, '.git', 'b-studio', 'commandcode'));
-    // OpenCode도 같은 규칙의 자기 폴더를 쓴다(러너마다 이름만 다르다)
+    // OpenCode·Gemini도 같은 규칙의 자기 폴더를 쓴다(러너마다 이름만 다르다)
     expect(openCodeStateDirOf(data.snapshot)).toBe(path.join(stateDir, '.git', 'b-studio', 'opencode'));
     expect(openCodeStateDirOf(snapshot(folder))).toBe(path.join(folder, '.git', 'b-studio', 'opencode'));
+    expect(geminiStateDirOf(data.snapshot)).toBe(path.join(stateDir, '.git', 'b-studio', 'gemini'));
+    expect(geminiStateDirOf(snapshot(folder))).toBe(path.join(folder, '.git', 'b-studio', 'gemini'));
     expect(await readSessions(root)).toEqual([data]);
     expect(await readdir(folder)).toEqual([]);
   });

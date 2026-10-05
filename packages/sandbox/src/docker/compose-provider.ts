@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
-import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
+import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { withRemovedDirectories } from '../sync-paths';
@@ -35,8 +35,10 @@ import type {
   SyncResult,
 } from '../types';
 import { runCommandFromFile, runCommandToFile } from '../stream-exec';
+import { findFreeHostPort } from './free-port';
 import {
   buildOverride,
+  composeUpArgs,
   EDGE_SERVICE,
   edgePortFor,
   parseContainerState,
@@ -170,7 +172,8 @@ export class LocalDockerProvider implements SandboxProvider {
     const workDir = await mkdtemp(path.join(tmpdir(), 'b-studio-'));
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
-    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime })));
+    const hostPorts = await preallocatePublicUrlPorts(project);
+    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts })));
     return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript);
   }
 }
@@ -209,20 +212,28 @@ class LocalDockerSandbox implements Sandbox {
   }
 
   async start(options: StartOptions = {}): Promise<ServiceEndpoint[]> {
-    for (const [name] of this.project.managed) options.onStatus?.({ service: name, phase: 'starting' });
+    // 서비스 선택(ADR-083): services를 주면 그 서비스만 띄우고, 나머지 managed 서비스는 'off'로 알린다(실패가 아니다).
+    // 주지 않으면 옛 동작대로 모든 서비스를 띄운다(다른 제공자 호출부·고정 픽스처와 호환)
+    const selected = options.services ? new Set(options.services) : undefined;
+    const isSelected = (name: string) => !selected || selected.has(name);
+    const startingManaged = this.project.managed.filter(([name]) => isSelected(name));
+    for (const [name] of this.project.managed) options.onStatus?.(isSelected(name) ? { service: name, phase: 'starting' } : { service: name, phase: 'off' });
     await this.#ensureSharedVolumes();
 
     // B_STUDIO_SANDBOX_BUILD_NO_CACHE=1이면 이 샌드박스 프로젝트의 이미지만 레이어 캐시 없이 빌드하고,
     // 스냅샷 볼륨도 쓰지 않는다(다른 프로젝트의 빌드 캐시는 건드리지 않는다). 스냅샷 볼륨을 지우지는 않는다.
     const noCache = sandboxBuildNoCache();
-    // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다
-    const plans = await this.#planSnapshots();
+    // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다. 꺼 둔 서비스는 스냅샷도 건드리지 않는다
+    const plans = (await this.#planSnapshots()).filter((plan) => isSelected(plan.service));
+    // 선택이 있는데 띄울 게 없으면(전부 꺼 둠) build를 부르지 않는다 — 인자 없는 build는 "전부 빌드"라는 뜻이라서다
+    const buildBase = noCache ? ['build', '--no-cache'] : ['build'];
+    const buildArgs = !selected ? buildBase : selected.size === 0 ? undefined : [...buildBase, ...selected];
     const [seeded] = await Promise.all([
       noCache ? Promise.resolve(plans.map(() => false)) : Promise.all(plans.map((plan) => this.#seedSnapshot(plan, options))),
-      this.#composeOrThrow(noCache ? ['build', '--no-cache'] : ['build'], options.signal),
+      buildArgs ? this.#composeOrThrow(buildArgs, options.signal) : Promise.resolve(),
     ]);
 
-    await this.#composeOrThrow(['up', '--detach', '--remove-orphans'], options.signal);
+    await this.#composeOrThrow(['up', '--detach', '--remove-orphans', ...composeUpArgs(options.services, EDGE_SERVICE)], options.signal);
 
     // 한 서비스가 준비에 실패하면 나머지 서비스의 준비 확인도 멈춘다. 그러지 않으면 실패를 돌려준 뒤에도
     // 다른 서비스가 제한 시간(수 분)까지 확인을 계속하며 프로세스와 샌드박스 정리를 붙잡는다
@@ -239,7 +250,7 @@ class LocalDockerSandbox implements Sandbox {
           )
       : undefined;
     const endpoints = await Promise.all(
-      this.project.managed.map(([name]) =>
+      startingManaged.map(([name]) =>
         this.#awaitReady(name, { ...options, signal, onStatus }).catch((error: unknown) => {
           failedFirst ??= name;
           giveUp.abort(error);
@@ -254,6 +265,16 @@ class LocalDockerSandbox implements Sandbox {
     // 설치 단계만 끝나고 에이전트가 아직 도구를 쓰지 않은 시점의 볼륨을 다음 기동용으로 남긴다
     await Promise.all(plans.filter((_, index) => !seeded[index]).map((plan) => this.#captureSnapshot(plan, options)));
     return endpoints;
+  }
+
+  /**
+   * 서비스 하나를 켜거나 끈다(ADR-083). 켤 때는 이미지를 다시 빌드해 최신 코드로 컨테이너를 만들고,
+   * 다른 서비스는 따라 띄우지 않는다(--no-deps). 끌 때는 컨테이너를 멈추기만 한다(볼륨은 남는다, restart()의 force-recreate와 다르다).
+   * 준비 판정은 하지 않는다 — 호출자가 managed 서비스를 켰다면 restart()나 endpoint()로 상태를 반영한다
+   */
+  async setServiceRunning(name: string, running: boolean, { signal }: { signal?: AbortSignal } = {}): Promise<void> {
+    if (!this.project.composeServices.includes(name)) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 compose 서비스가 아닙니다 (${this.id})`);
+    await this.#composeOrThrow(running ? ['up', '--detach', '--build', '--no-deps', name] : ['stop', name], signal);
   }
 
   /**
@@ -330,7 +351,8 @@ class LocalDockerSandbox implements Sandbox {
     // docker stats는 CPU 사용률을 재느라 1초 남짓 걸리므로 실행 중인 컨테이너만 묻는다
     const running = rows.filter((row) => row.state === 'running').map((row) => row.name);
     const stats = running.length > 0 ? await this.#docker(['stats', '--no-stream', '--format', '{{json .}}', ...running]) : undefined;
-    return mergeUsage(rows, stats?.exitCode === 0 ? parseStatsOutput(stats.stdout) : []);
+    const managedNames = new Set(this.project.managed.map(([name]) => name));
+    return mergeUsage(rows, stats?.exitCode === 0 ? parseStatsOutput(stats.stdout) : [], managedNames);
   }
 
   async *logs({ services = [], tail = 200, follow = true, signal }: LogOptions = {}): AsyncIterable<LogLine> {
@@ -398,8 +420,11 @@ class LocalDockerSandbox implements Sandbox {
     });
 
     const managed = new Set(this.project.managed.map(([name]) => name));
+    // ADR-088: managed 서비스가 전부 프로젝트 루트를 통째로 마운트하므로, 서비스 폴더(subroot)로 한 번 더 좁혀야
+    // 같은 루트를 마운트한 다른 서비스로 잘못 알리지 않는다
+    const servicePaths = Object.fromEntries(this.project.managed.map(([name, spec]) => [name, spec.path]));
     const relayed: RelayedPath[] = [];
-    for (const [service, targets] of planRelay(this.project.root, changes, bindMounts(config.services, managed))) {
+    for (const [service, targets] of planRelay(this.project.root, changes, bindMounts(config.services, managed, servicePaths))) {
       const args = targets.map((target) => `${target.action === 'move' ? 'm' : 'n'}:${target.containerPath}`);
       const result = await this.#compose(['exec', '-T', service, 'sh', '-c', RELAY_SCRIPT, 'sh', ...args], signal);
       // 컨테이너가 재시작 중이면 알리지 못한 경로가 생긴다. 다시 뜬 서비스는 파일을 처음부터 읽으므로 알린 경로만 돌려준다
@@ -455,7 +480,23 @@ class LocalDockerSandbox implements Sandbox {
           onProbe: (probe) => onStatus?.({ service: name, phase: 'probing', probe }),
         });
       } catch (error) {
-        onStatus?.({ service: name, phase: 'failed', reason: error instanceof Error ? error.message : String(error) });
+        let reason = error instanceof Error ? error.message : String(error);
+        // 컨테이너가 죽었으면 앱 로그의 마지막 오류 줄을 이유에 붙인다. 로그를 못 읽어도 원래 이유는 그대로 둔다
+        const crashed = error instanceof ReadinessError && ['exited', 'dead'].includes(error.history.at(-1)?.containerState ?? '');
+        if (crashed) {
+          const lines: string[] = [];
+          try {
+            for await (const line of this.logs({ services: [name], tail: 60, follow: false })) lines.push(line.text);
+          } catch {
+            // 로그를 못 읽어도 실패 이유는 남긴다
+          }
+          const excerpt = crashLogExcerpt(lines);
+          if (excerpt.length > 0) {
+            reason = `${reason}\n앱 로그 마지막 줄:\n${excerpt.join('\n')}`;
+            if (error instanceof Error) error.message = reason;
+          }
+        }
+        onStatus?.({ service: name, phase: 'failed', reason });
         throw error;
       }
     }
@@ -638,6 +679,18 @@ class LocalDockerSandbox implements Sandbox {
   #environment(): NodeJS.ProcessEnv {
     return { ...process.env, ...this.#secrets };
   }
+}
+
+/**
+ * 런타임 공개 URL 주입(fix/frontend-backend-url): project.publicUrlRefs가 가리키는 서비스(보통 백엔드)마다
+ * 호스트 포트를 하나씩 미리 정한다(`docker compose up` 전에 알아야 환경 변수에 실제 주소를 넣을 수 있다).
+ * 참조가 없으면(대부분의 프로젝트) 빈 객체를 돌려줘 포트 자동 배정이라는 기존 동작을 그대로 둔다
+ */
+export async function preallocatePublicUrlPorts(project: LoadedProject): Promise<Record<string, number>> {
+  const targets = [...new Set((project.publicUrlRefs ?? []).map((ref) => ref.targetService))];
+  if (targets.length === 0) return {};
+  const ports = await Promise.all(targets.map(() => findFreeHostPort()));
+  return Object.fromEntries(targets.map((name, index) => [name, ports[index]!]));
 }
 
 /** 스튜디오 서버·CLI 환경 변수 B_STUDIO_CONTAINER_RUNTIME. 격리 수준은 프로젝트가 아니라 운영자가 정한다 */

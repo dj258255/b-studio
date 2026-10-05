@@ -1,7 +1,7 @@
 import type { VerificationReport } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
-import { activeRun, createView, latestWrite, LOG_LIMIT, reduceSession, type SessionView } from './session-view';
-import type { SessionSnapshot, StudioEvent } from './studio-events';
+import { activeRun, createView, latestWrite, LOG_LIMIT, outcomeText, reduceSession, runHasChanges, runsWithChanges, type ChatItem, type SessionView } from './session-view';
+import type { ReviewStateView, SessionSnapshot, StudioEvent } from './studio-events';
 
 const snapshot: SessionSnapshot = {
   id: 's1',
@@ -18,7 +18,7 @@ const snapshot: SessionSnapshot = {
   ],
 };
 
-const report = { ok: true, sync: { elapsedMs: 700 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [] } satisfies VerificationReport;
+const report = { ok: true, sync: { elapsedMs: 700 }, restarted: [], contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [] } satisfies VerificationReport;
 
 function fold(events: StudioEvent[], start: SessionView = createView(snapshot)): SessionView {
   return events.reduce(reduceSession, start);
@@ -58,6 +58,39 @@ describe('reduceSession', () => {
     expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'fast', complexity: 'simple' });
   });
 
+  it('claude-code 자동 모델 선택(ADR-091)은 같은 route 이벤트에 auto:true로 남는다', () => {
+    const initial = createView(snapshot);
+    const view = reduceSession(initial, {
+      type: 'agent',
+      runId: 'r1',
+      event: {
+        type: 'route',
+        selectedId: 'sonnet',
+        reason: '단순한 만들기 요청이라 Sonnet 5을 선택합니다',
+        complexity: 'simple',
+        risk: 'normal',
+        candidates: [
+          { id: 'haiku', label: 'Haiku', eligible: false, score: 0 },
+          { id: 'sonnet', label: 'Sonnet 5', eligible: true, score: 0 },
+          { id: 'opus', label: 'Opus', eligible: false, score: 0 },
+        ],
+        auto: true,
+      },
+    });
+
+    expect(view.chat[0]).toMatchObject({ kind: 'route', selectedId: 'sonnet', auto: true });
+  });
+
+  it('계획-실행 분리(ADR-075)의 계획을 "계획(모델명)" 접기 블록으로 대화에 남긴다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '주문 목록 화면을 만들어줘' },
+      { type: 'plan_brief', runId: 'r1', model: 'opus', text: '1. web/orders 목록 화면을 만든다', usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 1200 },
+    ]);
+
+    expect(view.chat.map((item) => item.kind)).toEqual(['request', 'planBrief']);
+    expect(view.chat[1]).toMatchObject({ kind: 'planBrief', runId: 'r1', model: 'opus', text: '1. web/orders 목록 화면을 만든다' });
+  });
+
   it('되묻기 질문을 스냅샷에 남기고, 다음 요청을 보내면 지운다', () => {
     const asked = fold([
       { type: 'question', runId: 'r1', question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true },
@@ -68,6 +101,23 @@ describe('reduceSession', () => {
 
     const answered = reduceSession(asked, { type: 'run_started', runId: 'r2', request: '[질문] 어떤 형태로 만들까요?\n[답] 표' });
     expect(answered.snapshot.pendingQuestion).toBeUndefined();
+  });
+
+  it('제안이 붙은 질문을 남기고, 넘기면 카드를 치우고 넘긴 곳을 대화에 남긴다', () => {
+    const proposal = { mode: 'split' as const, request: '주문 API와 화면' };
+    const asked = fold([
+      { type: 'question', runId: 'r1', question: '나눠서 할까요?', options: ['나눠서 병렬로 하기', '한 명으로 계속'], allowOther: false, proposal },
+      { type: 'run_finished', runId: 'r1', status: 'awaiting_input', summary: '나눠서 할까요?' },
+    ]);
+    expect(asked.snapshot.pendingQuestion).toMatchObject({ runId: 'r1', proposal });
+
+    const handed = reduceSession(asked, { type: 'question_dismissed', runId: 'r1', to: 'split', href: '/task-plans?id=p1' });
+    expect(handed.snapshot.pendingQuestion).toBeUndefined();
+    expect(handed.chat.at(-1)).toEqual({ kind: 'handoff', runId: 'r1', to: 'split', href: '/task-plans?id=p1' });
+
+    // 다른 질문의 늦은 치우기는 지금 질문을 지우지 않는다
+    const stale = reduceSession(asked, { type: 'question_dismissed', runId: 'old', to: 'split', href: '/task-plans?id=p0' });
+    expect(stale.snapshot.pendingQuestion).toMatchObject({ runId: 'r1' });
   });
 
   it('끝나거나 실패한 실행이 남긴 질문은 남기지 않는다', () => {
@@ -194,6 +244,20 @@ describe('reduceSession', () => {
       model: 'claude-opus-5',
       auth: 'Claude Max 구독',
     });
+  });
+
+  it('실행 환경 알림에 노력 단계가 실려 있으면 함께 남긴다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '주문 수 API 추가' },
+      { type: 'agent', runId: 'r1', event: { type: 'session', backend: 'Anthropic API', model: 'claude-sonnet-5', effort: 'max' } },
+    ]);
+    expect(view.chat.at(-1)).toMatchObject({ kind: 'backend', model: 'claude-sonnet-5', effort: 'max' });
+  });
+
+  it('model 이벤트는 모델과 노력 단계를 함께 스냅샷에 반영한다', () => {
+    const view = fold([{ type: 'model', modelId: 'opus', effort: 'low' }]);
+    expect(view.snapshot.modelId).toBe('opus');
+    expect(view.snapshot.effort).toBe('low');
   });
 
   it('검증 게이트는 확인 중으로 나타났다가 결과로 채워진다', () => {
@@ -464,6 +528,53 @@ describe('reduceSession', () => {
     ]);
   });
 
+  it('snapshot_sync는 repository·checkpoints·review를 지금 값으로 맞추고 대화는 건드리지 않는다', () => {
+    const checkpoint = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', message: '체크포인트', createdAt: '', files: [] };
+    const review: ReviewStateView = { state: 'passed', maxRounds: 2, rounds: [] };
+    const repository = {
+      remote: 'github.com/acme/orders',
+      kind: 'github',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      sourceDirtyFiles: 0,
+      canCreatePullRequest: true,
+    } as const;
+
+    const withChat = fold([
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      { type: 'snapshot_sync', repository, checkpoints: [checkpoint], review },
+    ]);
+
+    expect(withChat.snapshot).toMatchObject({ repository, checkpoints: [checkpoint], review });
+    // 대화 기록은 그대로다(snapshot처럼 화면을 통째로 초기화하지 않는다)
+    expect(withChat.chat).toEqual([{ kind: 'request', runId: 'r1', text: '요청', by: undefined, intent: undefined }]);
+  });
+
+  it(
+    '59번 버그: 재연결하면 기록(exported)이 담은 옛 canCreatePullRequest가 아니라 ' + 'snapshot_sync가 재생 끝에서 맞춘 지금 값으로 끝난다',
+    () => {
+      // 올릴 당시엔 gh 토큰을 못 찾아 canCreatePullRequest:false로 기록됐다
+      const stale = {
+        remote: 'github.com/acme/orders',
+        kind: 'github',
+        base: 'main',
+        branch: 'b-studio/orders-s1',
+        sourceDirtyFiles: 0,
+        canCreatePullRequest: false,
+      } as const;
+      const exported: StudioEvent = { type: 'exported', repository: stale, sha: 'c'.repeat(40), commits: 1, forced: false };
+      // 서버가 그사이(예: 서버 재시작으로 gh 토큰을 새로 찾아) 다시 계산하면 지금은 true다
+      const fresh = { ...stale, canCreatePullRequest: true };
+
+      // replay(): snapshot(지금 값) → 기록 재생(exported가 옛 값으로 덮어씀) → snapshot_sync(지금 값으로 다시 맞춤)
+      const view = fold([{ type: 'snapshot', snapshot: { ...snapshot, repository: fresh } }, exported, { type: 'snapshot_sync', repository: fresh, checkpoints: [], review: undefined }]);
+
+      expect(view.snapshot.repository).toEqual(fresh);
+      // exported가 대화에 남긴 줄은 그대로 보존된다 — snapshot_sync는 채팅을 지우지 않는다
+      expect(view.chat).toEqual([{ kind: 'exported', branch: 'b-studio/orders-s1', hostKind: 'github', commits: 1, forced: false, pullRequest: undefined, pullRequestError: undefined }]);
+    },
+  );
+
   it('파일 변경 알림은 대화에 남기지 않고 코드 화면이 다시 불러올 기준 번호만 바꾼다', () => {
     const view = fold([
       { type: 'files_changed', revision: 1 },
@@ -498,5 +609,44 @@ describe('reduceSession', () => {
       { kind: 'steer', runId: 'r1', text: '지시1', status: 'applied' },
       { kind: 'steer', runId: 'r1', text: '지시2', status: 'dropped' },
     ]);
+  });
+});
+
+describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
+  const outcome = (over: Partial<Extract<ChatItem, { kind: 'outcome' }>> = {}): Extract<ChatItem, { kind: 'outcome' }> => ({
+    kind: 'outcome',
+    runId: 'r1',
+    status: 'done',
+    summary: '이 함수는 …',
+    turns: 1,
+    ...over,
+  });
+
+  it('게이트를 돌았거나 체크포인트가 남은 실행만 파일을 바꾼 실행으로 본다', () => {
+    const changed = fold([
+      { type: 'run_started', runId: 'r1', request: '고쳐줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'verify_start', files: ['web/app/page.tsx'] } },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '고쳤습니다', turns: 2 },
+    ]);
+    expect(runHasChanges(changed.chat, 'r1')).toBe(true);
+    expect([...runsWithChanges(changed.chat)]).toEqual(['r1']);
+
+    // 바뀐 파일이 없으면 게이트가 검증 없이 통과하므로 게이트 줄도 체크포인트도 없다
+    const answered = fold([
+      { type: 'run_started', runId: 'r2', request: '이 함수는 어떻게 동작해?' },
+      { type: 'run_finished', runId: 'r2', status: 'done', summary: '이렇게 동작합니다', turns: 1 },
+    ]);
+    expect(runHasChanges(answered.chat, 'r2')).toBe(false);
+    expect(runsWithChanges(answered.chat).size).toBe(0);
+  });
+
+  it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {
+    expect(outcomeText(outcome(), true)).toBe('완료, 1턴');
+    expect(outcomeText(outcome({ turns: 3 }), false)).toBe('답만 했습니다(바꾼 파일 없음), 3턴');
+    // 답을 기다리거나 취소·실패한 실행의 문구는 그대로다
+    expect(outcomeText(outcome({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?' }), false)).toBe('답을 기다립니다');
+    expect(outcomeText(outcome({ status: 'cancelled', summary: '요청을 취소했습니다' }), true)).toBe('요청을 취소했습니다');
+    expect(outcomeText(outcome({ status: 'failed', summary: '게이트 실패' }), true)).toBe('완료하지 못함: 게이트 실패');
+    expect(outcomeText(outcome({ status: 'error', summary: '연결 끊김' }), true)).toBe('오류: 연결 끊김');
   });
 });

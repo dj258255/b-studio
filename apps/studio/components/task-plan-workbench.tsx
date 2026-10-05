@@ -2,12 +2,132 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import type { ModelProfile } from '@b-studio/agent';
-import type { ProjectSummary } from '@/lib/studio-events';
+import type { ModelProfile, PlanBackend } from '@b-studio/agent';
+import type { EffortPickerView, ModelPickerView } from '@/lib/server/model-picker';
+import type { ProjectSummary, SessionMode } from '@/lib/studio-events';
 import type { TaskPlanMetrics } from '@/lib/task-plan-metrics';
-import type { TaskPlanStatus, TaskPlanStepStatus, TaskPlanStrategy, TaskPlanView } from '@/lib/task-plan-types';
+import { planModelAlias, type TaskPlanLaneView, type TaskPlanStatus, type TaskPlanStepStatus, type TaskPlanStrategy, type TaskPlanView } from '@/lib/task-plan-types';
 import { describeTokens, hasTokens } from '@/lib/usage';
+import { EFFORT_LABEL, ModelPicker } from './chat-panel';
 import { PlanGraphView } from './plan-graph';
+import { SESSION_BACKEND_LABEL } from './status';
+
+/** claude-code 별칭 → 화면 표기(레인 카드). model-picker.ts의 CLAUDE_CODE_ALIASES 라벨과 같은 값이다 */
+const CLAUDE_CODE_ALIAS_LABEL: Record<string, string> = { fable: 'Fable 5.1', opus: 'Opus 5', sonnet: 'Sonnet 5', haiku: 'Haiku 4.5' };
+
+/** 레인 카드에 보여줄 모델 표시("Sonnet 5 · 보통"). 계획이 쓴 modelId·effort를 사람이 읽는 이름으로 바꾼다 */
+function planModelLabel(plan: TaskPlanView, models: ModelOption[]): string {
+  const alias = planModelAlias(plan.modelId);
+  const label = alias === '' ? '서버 기본' : (CLAUDE_CODE_ALIAS_LABEL[alias] ?? models.find((model) => model.id === alias)?.label ?? alias);
+  return plan.effort ? `${label} · ${EFFORT_LABEL[plan.effort] ?? plan.effort}` : label;
+}
+
+/**
+ * 레인 카드 머리글의 백엔드·모델 표시(이슈 #398). 레인이 백엔드를 따로 골랐으면 그 백엔드 이름("로컬 Claude
+ * Agent")과 모델·노력 단계를, 아니면 "세션과 같음"과 계획 기본 모델 표시를 보여 준다.
+ */
+export function laneBackendLabel(plan: TaskPlanView, lane: TaskPlanLaneView, models: ModelOption[]): string {
+  if (!lane.backend) return `세션과 같음 · ${planModelLabel(plan, models)}`;
+  const backendLabel = SESSION_BACKEND_LABEL[lane.backend] ?? lane.backend;
+  const modelLabel = lane.model ? (CLAUDE_CODE_ALIAS_LABEL[lane.model] ?? models.find((model) => model.id === lane.model)?.label ?? lane.model) : '기본';
+  const effortLabel = lane.effort ? ` · ${EFFORT_LABEL[lane.effort] ?? lane.effort}` : '';
+  return `${backendLabel} · ${modelLabel}${effortLabel}`;
+}
+
+/**
+ * 레인 백엔드·모델 선택기(이슈 #398). 승인 대기 중에만 보인다. "세션과 같음"이 기본이고, 백엔드를 고르면
+ * 대화 입력창과 같은 ModelPicker를 그 백엔드 기준으로 보여 준다. 바뀐 값은 고를 때마다 바로 서버에 저장된다.
+ */
+export function LaneBackendControl({
+  plan,
+  lane,
+  laneBackends,
+  onUpdate,
+}: {
+  plan: TaskPlanView;
+  lane: TaskPlanLaneView;
+  laneBackends: PlanBackend[];
+  onUpdate: (plan: TaskPlanView) => void;
+}) {
+  const [picker, setPicker] = useState<ModelPickerView>();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    // "세션과 같음"이면 부를 목록이 없다 — 아래 JSX가 lane.backend로 picker 절을 통째로 숨기므로 지난 값을 지울 필요가 없다
+    if (!lane.backend) return;
+    let cancelled = false;
+    const params = new URLSearchParams({ backend: lane.backend });
+    if (lane.model) params.set('current', lane.model);
+    if (lane.effort) params.set('effort', lane.effort);
+    fetch(`/api/task-plans/lane-backends?${params.toString()}`, { cache: 'no-store' })
+      .then(async (response) => (response.ok ? ((await response.json()) as { picker?: ModelPickerView }) : undefined))
+      .then((result) => {
+        if (!cancelled) setPicker(result?.picker);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // 백엔드가 바뀔 때만 다시 불러온다. 모델·노력만 바뀐 뒤에는 save()가 서버가 돌려준 picker를 바로 쓴다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lane.id, lane.backend]);
+
+  async function save(next: { backend?: string; model?: string; effort?: string }) {
+    setSaving(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`/api/task-plans/${encodeURIComponent(plan.id)}/lanes/${encodeURIComponent(lane.id)}/backend`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '레인 백엔드를 바꾸지 못했습니다');
+      onUpdate(result.plan as TaskPlanView);
+      setPicker(result.picker as ModelPickerView | undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <label className="block text-xs font-medium text-muted" htmlFor={`lane-backend-${lane.id}`}>레인 백엔드</label>
+      <select
+        id={`lane-backend-${lane.id}`}
+        value={lane.backend ?? ''}
+        disabled={saving}
+        onChange={(event) => void save({ backend: event.target.value })}
+        className="mt-1 w-full rounded-control border border-line bg-panel px-2 py-1.5 text-xs disabled:opacity-50"
+      >
+        <option value="">세션과 같음</option>
+        {laneBackends.map((backend) => (
+          <option key={backend} value={backend}>
+            {SESSION_BACKEND_LABEL[backend]}
+          </option>
+        ))}
+      </select>
+      {lane.backend && (
+        <div className="mt-1.5">
+          {picker ? (
+            <ModelPicker
+              picker={picker}
+              disabled={saving}
+              onChangeModel={(value) => void save({ backend: lane.backend, model: value, ...(lane.effort ? { effort: lane.effort } : {}) })}
+              onChangeEffort={(value) => void save({ backend: lane.backend, ...(lane.model ? { model: lane.model } : {}), effort: value })}
+            />
+          ) : (
+            <p className="text-xs text-muted">모델 목록을 불러오는 중…</p>
+          )}
+        </div>
+      )}
+      {error && <p className="mt-1 text-xs text-fail">{error}</p>}
+    </div>
+  );
+}
 
 const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
   S2: 'S2 계약 먼저',
@@ -47,19 +167,60 @@ const STEP_COLOR: Record<TaskPlanStepStatus, string> = {
   skipped: 'text-muted',
 };
 
-export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects: ProjectSummary[]; models: ModelOption[]; initialPlans: TaskPlanView[] }) {
-  const readyModels = models.filter((model) => model.configured && model.enabled !== false && model.capabilities.includes('tools'));
+/** 이 서버에서 계획을 어떻게 받는지(서버 capabilities에서 온다). enabled=false면 이 화면은 고정 계획만 보여 준다 */
+export interface PlannerCapability {
+  mode: SessionMode;
+  enabled: boolean;
+  reason?: string;
+}
+
+/** 이 서버의 계획 상한(설정에서 온다). 화면이 몇 개까지 계획하는지 그대로 보여 준다 */
+export interface PlanLimitView {
+  maxLanes: number;
+  maxTasks: number;
+}
+
+export function TaskPlanWorkbench({
+  projects,
+  models,
+  initialPlans,
+  initialSelectedId,
+  planner,
+  limits,
+  modelPicker,
+  laneBackends,
+}: {
+  projects: ProjectSummary[];
+  models: ModelOption[];
+  initialPlans: TaskPlanView[];
+  /** 먼저 열 계획(`?id=`). 목록에 없으면 가장 최근 것 */
+  initialSelectedId?: string;
+  planner: PlannerCapability;
+  limits: PlanLimitView;
+  /** "새 작업 분해" 폼의 모델·노력 선택(대화 입력창과 같은 ModelPicker를 쓴다). 서버가 이 백엔드에서 고를 수 있는 값으로 만든다.
+   * 방금 이 화면으로 넘어온 계획(나눠서 병렬 제안 수락)이 있으면 그 계획이 이어받은 세션 값이 기본으로 들어 있다 */
+  modelPicker: ModelPickerView;
+  /** 이 서버에서 레인마다 고를 수 있는 백엔드(이슈 #398, "세션과 같음"은 화면이 따로 그린다) */
+  laneBackends: PlanBackend[];
+}) {
   const [projectId, setProjectId] = useState(projects.find((project) => !project.error)?.id ?? '');
-  const [modelId, setModelId] = useState(readyModels[0]?.id ?? '');
+  const [picker, setPicker] = useState<ModelPickerView>(modelPicker);
   const [request, setRequest] = useState('');
   const [plans, setPlans] = useState(initialPlans);
-  const [selectedId, setSelectedId] = useState(initialPlans[0]?.id);
+  const [selectedId, setSelectedId] = useState(initialPlans.some((plan) => plan.id === initialSelectedId) ? initialSelectedId : initialPlans[0]?.id);
   const [creating, setCreating] = useState(false);
   const [deciding, setDeciding] = useState(false);
   const [error, setError] = useState<string>();
   const selected = plans.find((plan) => plan.id === selectedId);
   // 승인 대기·중단됨·거부됨은 사람이 움직이기 전까지 바뀌지 않으므로 폴링하지 않는다
   const active = selected !== undefined && !['done', 'failed', 'rejected', 'awaiting_approval', 'interrupted'].includes(selected.status);
+  // API 모드는 실제로 고른 모델이 있어야 계획을 만들 수 있다("자동(라우터)"로는 계획을 부를 수 없다). 로컬 CLI 모드는 "기본"도 된다
+  const modelRequired = planner.mode === 'api';
+
+  // 이 화면은 핸드오프 링크(`/task-plans?id=`)로 열릴 때가 많다. 스크롤이 아래로 내려온 채 열려 머리글이 잘리지 않도록 맨 위로 되돌린다
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
 
   useEffect(() => {
     if (!selectedId || !active) return;
@@ -83,7 +244,12 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
       const response = await fetch('/api/task-plans', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ projectId, request, modelId }),
+        body: JSON.stringify({
+          projectId,
+          request,
+          modelId: picker.current ?? '',
+          ...(picker.effort.supported && picker.effort.current ? { effort: picker.effort.current } : {}),
+        }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result && typeof result.error === 'string' ? result.error : '요청을 처리하지 못했습니다');
@@ -118,6 +284,11 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
     }
   }
 
+  /** 레인 백엔드 선택기가 계획을 바꾼 뒤(승인 전) 목록·선택 상태에 그대로 반영한다. decide·resume과 같은 모양이다 */
+  function updatePlan(plan: TaskPlanView) {
+    setPlans((current) => [plan, ...current.filter((entry) => entry.id !== plan.id)]);
+  }
+
   async function resume() {
     if (!selectedId) return;
     setDeciding(true);
@@ -143,17 +314,30 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
           <p className="mt-1 text-sm leading-6 text-muted">
             모델이 작업·쓰기 범위·의존 관계를 제안하고 스튜디오가 검증합니다. 이어진 작업은 한 세션에서 차례로, 독립 작업은 다른 세션에서 동시에 돌린 뒤 결과를 새 세션에서 합쳐 다시 검증합니다.
           </p>
+          <p className="mt-1 text-xs text-muted">
+            이 서버는 작업 {limits.maxTasks}개·레인 {limits.maxLanes}개까지 계획합니다(독립 레인은 최대 {limits.maxLanes}개가 동시에 돕니다).
+          </p>
 
           <label className="mt-5 block text-sm font-medium" htmlFor="plan-project">프로젝트</label>
           <select id="plan-project" value={projectId} onChange={(event) => setProjectId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
             {projects.filter((project) => !project.error).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
 
-          <label className="mt-4 block text-sm font-medium" htmlFor="plan-model">모델</label>
-          <select id="plan-model" value={modelId} onChange={(event) => setModelId(event.target.value)} className="mt-1 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm">
-            {readyModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-          </select>
-          {readyModels.length === 0 && <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>}
+          <p className="mt-4 text-sm font-medium">모델</p>
+          <div className="mt-1">
+            <ModelPicker
+              picker={picker}
+              disabled={!planner.enabled}
+              onChangeModel={(value) => setPicker((current) => ({ ...current, current: value }))}
+              onChangeEffort={(value) =>
+                setPicker((current) => ({ ...current, effort: { ...current.effort, current: (value || undefined) as EffortPickerView['current'] } }))
+              }
+            />
+          </div>
+          {modelRequired && picker.options.every((option) => option.id === '') && (
+            <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>
+          )}
+          {!planner.enabled && <p className="mt-1 text-xs text-wait">{planner.reason ?? '이 모드에서는 모델에게 계획을 받을 수 없습니다'}</p>}
 
           <label className="mt-4 block text-sm font-medium" htmlFor="plan-request">요청</label>
           <textarea
@@ -166,7 +350,7 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
           />
           <button
             type="button"
-            disabled={!projectId || !modelId || !request.trim() || creating}
+            disabled={!planner.enabled || !projectId || (modelRequired && !picker.current) || !request.trim() || creating}
             onClick={() => void create()}
             className="mt-4 w-full rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >
@@ -204,10 +388,13 @@ export function TaskPlanWorkbench({ projects, models, initialPlans }: { projects
         ) : (
           <PlanResult
             plan={selected}
+            models={models}
             canPublish={projects.find((project) => project.id === selected.projectId)?.canPublishIssues === true}
             deciding={deciding}
             onDecide={(approve, reason, publishIssues) => void decide(approve, reason, publishIssues)}
             onResume={() => void resume()}
+            laneBackends={laneBackends}
+            onUpdate={updatePlan}
           />
         )}
       </section>
@@ -237,17 +424,26 @@ export function PlanTokenTotals({ metrics }: { metrics?: TaskPlanMetrics }) {
 
 function PlanResult({
   plan,
+  models,
   canPublish,
   deciding,
   onDecide,
   onResume,
+  laneBackends,
+  onUpdate,
 }: {
   plan: TaskPlanView;
+  /** 레인 카드의 모델 표시에 쓴다(API 모드 레지스트리 id → 라벨) */
+  models: ModelOption[];
   /** 원격 저장소 + 토큰이 있어 "이슈로 올리기"를 고를 수 있는가 */
   canPublish: boolean;
   deciding: boolean;
   onDecide: (approve: boolean, reason?: string, publishIssues?: boolean) => void;
   onResume: () => void;
+  /** 이 서버에서 레인마다 고를 수 있는 백엔드(이슈 #398) */
+  laneBackends: PlanBackend[];
+  /** 레인 백엔드 선택기가 계획을 바꾼 뒤(승인 전) 화면 상태를 갱신한다 */
+  onUpdate: (plan: TaskPlanView) => void;
 }) {
   const [reason, setReason] = useState('');
   const [publishIssues, setPublishIssues] = useState(true);
@@ -452,10 +648,13 @@ function PlanResult({
                   <div className="min-w-0">
                     <p className="text-lg font-semibold">{lane.id}</p>
                     <p className="mt-0.5 break-all font-mono text-xs text-muted">쓰기 범위: {lane.paths.join(', ')}</p>
-                    <p className="mt-0.5 text-xs text-muted">백엔드: {lane.backend ?? '서버 기본'}{lane.model ? ` (${lane.model})` : ''}</p>
+                    <p className="mt-0.5 text-xs text-muted">{laneBackendLabel(plan, lane, models)}</p>
                   </div>
                   <span className={`shrink-0 text-sm font-medium ${STEP_COLOR[lane.status]}`}>{STEP_STATUS[lane.status]}</span>
                 </div>
+                {plan.status === 'awaiting_approval' && (
+                  <LaneBackendControl plan={plan} lane={lane} laneBackends={laneBackends} onUpdate={onUpdate} />
+                )}
                 <ol className="mt-4 space-y-2">
                   {lane.tasks.map((task, index) => (
                     <li key={task.id} className="rounded-md border border-line bg-panel p-3 text-sm">

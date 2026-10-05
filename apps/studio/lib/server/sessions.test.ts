@@ -1,16 +1,43 @@
-import { describe, expect, it } from 'vitest';
+import type { LoadedProject } from '@b-studio/spec';
+import { afterEach, describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
 import {
   allowedBackends,
+  annotateAllMustHavesPrefill,
+  annotateWithIssue,
+  apiEscalation,
   assertBackendReady,
   assertResumableBackend,
+  buildChecklistAddendum,
+  buildChecklistTestEvidence,
   buildExportChecks,
+  buildRequirementTestRunEvidence,
+  claudeCodeAutoEscalation,
+  claudeCodeEscalation,
+  cliModelOverride,
+  nextAutoTier,
   parseIssueInput,
   parseIssueList,
+  planBriefBackend,
+  planExecuteConfig,
   planKindForBackend,
   resolveSessionBackend,
+  selfCheckMode,
   sessionBackend,
+  type TestServiceView,
 } from './sessions';
+
+function testService(overrides: Partial<TestServiceView> = {}): TestServiceView {
+  return {
+    service: 'api',
+    template: 'spring-boot',
+    running: false,
+    supported: true,
+    counts: { pass: 0, fail: 0, skip: 0, notRun: 0 },
+    rows: [],
+    ...overrides,
+  };
+}
 
 describe('parseIssueInput', () => {
   it('생략은 undefined, 1~10,000,000 정수만 받고 나머지는 400으로 거부한다', () => {
@@ -41,6 +68,35 @@ describe('parseIssueList', () => {
     for (const bad of [{ issues: [0] }, { issues: [1.5] }, { issues: ['57'] }, { issue: 0 }]) {
       expect(() => parseIssueList(bad)).toThrow(StudioError);
     }
+  });
+});
+
+describe('annotateWithIssue · annotateAllMustHavesPrefill(ADR-092)', () => {
+  const requirement = { id: 'R7', title: '로그인 API' };
+
+  it('발행된 이슈 번호가 있으면 "[R7] 제목" 뒤에 "(#12)"를 붙인다', () => {
+    const prefill = '[R7] 로그인 API\n\n인수 조건:\n- a';
+    expect(annotateWithIssue(prefill, requirement, 12)).toBe('[R7] 로그인 API (#12)\n\n인수 조건:\n- a');
+  });
+
+  it('이슈 번호가 없으면 그대로 둔다', () => {
+    const prefill = '[R7] 로그인 API\n\n인수 조건:\n- a';
+    expect(annotateWithIssue(prefill, requirement, undefined)).toBe(prefill);
+  });
+
+  it('allMustHavesPrefill의 목록 줄마다 발행된 요구사항만 이슈 번호를 붙인다', () => {
+    const base = '다음 필수(must) 요구사항을 모두 구현해 주세요.\n\n- [R7] 로그인 API\n- [R8] 목록 API';
+    const annotated = annotateAllMustHavesPrefill(
+      base,
+      [
+        { id: 'R7', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['a'] },
+        { id: 'R8', title: '목록 API', kind: 'api', priority: 'must', acceptance: ['a'] },
+      ],
+      { R7: 12 },
+    );
+    expect(annotated).toContain('- [R7] 로그인 API (#12)');
+    expect(annotated).toContain('- [R8] 목록 API');
+    expect(annotated).not.toContain('R8] 목록 API (#');
   });
 });
 
@@ -78,10 +134,36 @@ describe('buildExportChecks', () => {
     });
 
     expect(checks.find((check) => check.id === 'issue_linked')?.detail).toBe('#57, #58 이슈를 PR에 연결합니다');
-    // 하나라도 닫혀 있으면 false
+    // 하나라도 닫혀 있으면 false. 닫힌 이슈만 짚어 보여주고(열려 있는 이슈까지 나열하지 않는다), 문제를 묻지 않는다
     expect(checks.find((check) => check.id === 'issue_open')?.ok).toBe(false);
-    expect(checks.find((check) => check.id === 'issue_open')?.detail).toContain('#57 미리보기 (열림)');
-    expect(checks.find((check) => check.id === 'issue_open')?.detail).toContain('#58 작업 분해 (닫힘)');
+    expect(checks.find((check) => check.id === 'issue_open')?.detail).toBe('닫힘: #58 작업 분해');
+  });
+
+  it('많은 이슈가 모두 열려 있으면 하나씩 늘어놓지 않고 개수로 요약한다', () => {
+    const issues = Array.from({ length: 19 }, (_, index) => index + 1);
+    const checks = buildExportChecks({
+      issues,
+      issueLookups: issues.map((issue) => ({ issue, lookup: { ok: true, state: 'open', title: `요구사항 ${issue}` } })),
+      missing: [],
+      uncheckpointed: 0,
+      running: false,
+    });
+
+    expect(checks.find((check) => check.id === 'issue_linked')?.detail).toBe(`이슈 19개를 PR에 연결합니다: ${issues.map((n) => `#${n}`).join(', ')}`);
+    expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: true, detail: '연결한 이슈 19개 모두 열려 있습니다' });
+  });
+
+  it('많은 이슈 중 일부가 닫혀 있으면 닫힌 이슈만 짚어 보여준다', () => {
+    const issues = Array.from({ length: 19 }, (_, index) => index + 1);
+    const checks = buildExportChecks({
+      issues,
+      issueLookups: issues.map((issue) => ({ issue, lookup: { ok: true, state: issue === 7 ? 'closed' : 'open', title: `요구사항 ${issue}` } })),
+      missing: [],
+      uncheckpointed: 0,
+      running: false,
+    });
+
+    expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: false, detail: '닫힘: #7 요구사항 7' });
   });
 
   it('원격 이슈 조회에 실패하면 unknown과 이유로 두고 막지 않는다', () => {
@@ -108,6 +190,27 @@ describe('buildExportChecks', () => {
   });
 });
 
+describe('buildChecklistAddendum(PR 본문에 올리기 전 점검 요약을 덧붙인다, 56번 버그)', () => {
+  it('통과 수와 항목별 한 줄 이유를 적는다', () => {
+    const addendum = buildChecklistAddendum({
+      score: { passed: 8, total: 9 },
+      items: [
+        { id: 'tests', title: '테스트', status: 'pass', reason: '모두 통과했습니다' },
+        { id: 'worktree', title: '작업 트리·원격', status: 'fail', reason: '아직 원격 브랜치에 올리지 않았습니다' },
+      ],
+    });
+
+    expect(addendum).toContain('## 올리기 전 점검 8/9 통과');
+    expect(addendum).toContain('- ✓ 테스트: 모두 통과했습니다');
+    expect(addendum).toContain('- ✗ 작업 트리·원격: 아직 원격 브랜치에 올리지 않았습니다');
+  });
+
+  it('항목이 없어도(score 0/0) 머리글만 남긴다', () => {
+    const addendum = buildChecklistAddendum({ score: { passed: 0, total: 0 }, items: [] });
+    expect(addendum).toContain('## 올리기 전 점검 0/0 통과');
+  });
+});
+
 describe('세션 백엔드', () => {
   it('서버 모드는 기본값이고, B_STUDIO_BACKENDS가 허용 목록을 넓힌다. 목록 밖은 400으로 거부한다', () => {
     const env = { B_STUDIO_MODE: 'api' };
@@ -124,7 +227,7 @@ describe('세션 백엔드', () => {
     expect(resolveSessionBackend(undefined, withList)).toBe('api');
     expect(() => resolveSessionBackend('codex', withList)).toThrow(/쓸 수 없는 백엔드/);
     // 목록에 모르는 값이 있으면 서버 설정 오류로 거부한다
-    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'gemini' })).toThrow(/B_STUDIO_BACKENDS/);
+    expect(() => allowedBackends('api', { B_STUDIO_MODE: 'api', B_STUDIO_BACKENDS: 'anthropic' })).toThrow(/B_STUDIO_BACKENDS/);
   });
 
   it('demo 서버에서는 백엔드를 고를 수 없다', () => {
@@ -200,5 +303,218 @@ describe('세션 백엔드 확정은 두 번 불러도 같다', () => {
       const env = { B_STUDIO_MODE: mode };
       expect(resolveSessionBackend(resolveSessionBackend(undefined, env), env)).toBe(mode);
     }
+  });
+});
+
+describe('계획-실행 분리(ADR-075) 설정', () => {
+  const fakeProject = (models?: { plan?: string; execute?: string }): LoadedProject => ({ spec: { name: 'orders', models } }) as unknown as LoadedProject;
+
+  it('studio.yaml의 models가 같은 이름의 환경 변수보다 우선한다', () => {
+    const env = { B_STUDIO_PLAN_MODEL: 'env-plan', B_STUDIO_EXECUTE_MODEL: 'env-execute' };
+    expect(planExecuteConfig(fakeProject({ plan: 'yaml-plan', execute: 'yaml-execute' }), env)).toEqual({ plan: 'yaml-plan', execute: 'yaml-execute' });
+  });
+
+  it('studio.yaml에 없으면 환경 변수를 쓴다', () => {
+    const env = { B_STUDIO_PLAN_MODEL: 'env-plan', B_STUDIO_EXECUTE_MODEL: 'env-execute' };
+    expect(planExecuteConfig(fakeProject(), env)).toEqual({ plan: 'env-plan', execute: 'env-execute' });
+    expect(planExecuteConfig(fakeProject(), { ...env, B_STUDIO_PLAN_BRIEF: 'always' })).toEqual({ plan: 'env-plan', execute: 'env-execute', always: true });
+    expect(() => planExecuteConfig(fakeProject(), { ...env, B_STUDIO_PLAN_BRIEF: 'sometimes' })).toThrow(/auto 또는 always/);
+  });
+
+  it('둘 다 없으면 빈 객체를 돌려준다(계획 호출을 하지 않는, 지금과 같은 동작)', () => {
+    expect(planExecuteConfig(fakeProject(), {})).toEqual({});
+  });
+});
+
+describe('모델 승격의 기본 대상(ADR-075: 계획 모델로 올린다)', () => {
+  afterEach(() => {
+    delete process.env.B_STUDIO_MODEL_REGISTRY;
+  });
+
+  it('로컬 Claude 모드: 명시적 승격 대상(B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL)이 있으면 그것을 쓴다', () => {
+    const env = { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: 'opus' };
+    expect(claudeCodeEscalation('sonnet', env)?.to).toBe('opus');
+  });
+
+  it('로컬 Claude 모드: 명시적 승격 대상이 없으면 계획 모델로 올린다', () => {
+    expect(claudeCodeEscalation('opus', {})?.to).toBe('opus');
+  });
+
+  it('로컬 Claude 모드: 계획 모델도 없으면 승격하지 않는다(지금과 같은 동작)', () => {
+    expect(claudeCodeEscalation(undefined, {})).toBeUndefined();
+  });
+
+  it('API 모드: 명시적 승격 대상(B_STUDIO_ESCALATE_MODEL_ID)이 있으면 그것을 쓴다', () => {
+    const env = { B_STUDIO_ESCALATE_MODEL_ID: 'anthropic-default' };
+    expect(apiEscalation('other-plan-id', env)?.to).toBe('Claude 기본 모델');
+  });
+
+  it('API 모드: 명시적 승격 대상이 없으면 계획 모델 id로 올린다', () => {
+    expect(apiEscalation('anthropic-default', {})?.to).toBe('Claude 기본 모델');
+  });
+
+  it('API 모드: 계획 모델도 없으면 승격하지 않는다(지금과 같은 동작)', () => {
+    expect(apiEscalation(undefined, {})).toBeUndefined();
+  });
+
+  it('로컬 Claude 모드: 사람이 대화에서 이미 승격 대상과 같은 모델을 실행 모델로 골랐으면 승격하지 않는다(no-op)', () => {
+    const env = { B_STUDIO_CLAUDE_CODE_ESCALATE_MODEL: 'opus' };
+    expect(claudeCodeEscalation('sonnet', env, 'opus')).toBeUndefined();
+    // 다른 모델을 골랐으면 그대로 승격한다
+    expect(claudeCodeEscalation('sonnet', env, 'haiku')?.to).toBe('opus');
+    // 아무것도 고르지 않았으면(undefined) 지금과 같이 승격한다
+    expect(claudeCodeEscalation('sonnet', env, undefined)?.to).toBe('opus');
+  });
+
+  it('API 모드: 사람이 대화에서 이미 승격 대상과 같은 모델을 실행 모델로 골랐으면 승격하지 않는다(no-op)', () => {
+    const env = { B_STUDIO_ESCALATE_MODEL_ID: 'anthropic-default' };
+    expect(apiEscalation('other-plan-id', env, 'anthropic-default')).toBeUndefined();
+    expect(apiEscalation('other-plan-id', env, 'other-model')?.to).toBe('Claude 기본 모델');
+  });
+});
+
+describe('claude-code 자동 모델 선택(ADR-091)', () => {
+  it('승격은 고른 단계의 바로 위 단계다(haiku→sonnet, sonnet→opus)', () => {
+    expect(claudeCodeAutoEscalation('haiku')?.to).toBe('sonnet');
+    expect(claudeCodeAutoEscalation('sonnet')?.to).toBe('opus');
+  });
+
+  it('이미 opus(최고 단계)면 더 올릴 곳이 없어 승격하지 않는다', () => {
+    expect(claudeCodeAutoEscalation('opus')).toBeUndefined();
+  });
+
+  it('stickiness: 검증을 통과한(done) 만들기 요청만 기억하고, 승격 없이 끝났으면 고른 단계를 그대로 기억한다', () => {
+    const route = { tier: 'sonnet', reason: 'x', complexity: 'simple', risk: 'normal', stuckTo: false } as const;
+    expect(nextAutoTier(undefined, route, { intent: 'build', status: 'done', escalated: false })).toBe('sonnet');
+  });
+
+  it('stickiness: 승격이 일어났으면(게이트 반복 실패) 올라간 단계를 기억한다', () => {
+    const route = { tier: 'sonnet', reason: 'x', complexity: 'simple', risk: 'normal', stuckTo: false } as const;
+    expect(nextAutoTier(undefined, route, { intent: 'build', status: 'done', escalated: true })).toBe('opus');
+  });
+
+  it('stickiness: 이미 더 높은 단계를 기억하고 있으면 내리지 않는다', () => {
+    const route = { tier: 'sonnet', reason: 'x', complexity: 'simple', risk: 'normal', stuckTo: false } as const;
+    expect(nextAutoTier('opus', route, { intent: 'build', status: 'done', escalated: false })).toBe('opus');
+  });
+
+  it('stickiness: 질문(ask)이나 실패한 시도는 기억하지 않는다(구현 품질의 증거가 아니다)', () => {
+    const route = { tier: 'opus', reason: 'x', complexity: 'complex', risk: 'high', stuckTo: false } as const;
+    expect(nextAutoTier('haiku', route, { intent: 'ask', status: 'done', escalated: false })).toBe('haiku');
+    expect(nextAutoTier('haiku', route, { intent: 'build', status: 'failed', escalated: false })).toBe('haiku');
+  });
+});
+
+describe('cliModelOverride(CLI 러너에 넘길 모델)', () => {
+  it('대화에서 고른 모델(별칭·id)을 그대로 넘긴다', () => {
+    expect(cliModelOverride('opus')).toBe('opus');
+    expect(cliModelOverride(' sonnet ')).toBe('sonnet');
+  });
+
+  it('고르지 않았거나(undefined) 작업 분해 레인의 기록용 id(local-cli:...)는 넘기지 않는다(환경 변수로 떨어진다)', () => {
+    expect(cliModelOverride(undefined)).toBeUndefined();
+    expect(cliModelOverride('')).toBeUndefined();
+    expect(cliModelOverride('local-cli:claude-code:sonnet')).toBeUndefined();
+  });
+});
+
+describe('자가 확인 범위(B_STUDIO_SELF_CHECK)', () => {
+  it('설정하지 않으면 lean(ADR-064), full을 주면 이전 동작이다', () => {
+    expect(selfCheckMode({})).toBe('lean');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: '' })).toBe('lean');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: ' lean ' })).toBe('lean');
+    expect(selfCheckMode({ B_STUDIO_SELF_CHECK: 'full' })).toBe('full');
+  });
+
+  it('모르는 값은 조용히 full로 떨어뜨리지 않고 설정 오류로 알린다', () => {
+    expect(() => selfCheckMode({ B_STUDIO_SELF_CHECK: 'LEAN' })).toThrow(StudioError);
+    expect(() => selfCheckMode({ B_STUDIO_SELF_CHECK: 'on' })).toThrow(/full 또는 lean/);
+  });
+});
+
+describe('planBriefBackend', () => {
+  it('계획 호출은 api·claude-code 세션에서만 하고, 데모(대본)·다른 백엔드는 건너뛴다', () => {
+    expect(planBriefBackend('api')).toBe('api');
+    expect(planBriefBackend('claude-code')).toBe('claude-code');
+    expect(planBriefBackend('demo')).toBeUndefined();
+    expect(planBriefBackend('codex')).toBeUndefined();
+    expect(planBriefBackend('opencode')).toBeUndefined();
+  });
+});
+
+function testRow(overrides: Partial<TestServiceView['rows'][number]> = {}): TestServiceView['rows'][number] {
+  return {
+    file: 'OrderTest.java',
+    framework: 'junit' as TestServiceView['rows'][number]['framework'],
+    suitePath: [],
+    name: 'ok',
+    displayName: 'ok',
+    line: 1,
+    skipped: false,
+    requirementIds: [],
+    status: 'pass',
+    ...overrides,
+  };
+}
+
+describe('buildChecklistTestEvidence(테스트 탭 실행을 "올리기 전 점검" 증거로, 버그 리포트)', () => {
+  const head = 'abc123';
+
+  it('HEAD와 같은 체크포인트에서 돈 실행이고 커밋하지 않은 변경이 없으면 matchesHead가 참이다', () => {
+    const services = [testService({ service: 'api', lastRunSha: head, lastRunAt: '2026-01-01T09:17:00.000Z', counts: { pass: 31, fail: 0, skip: 0, notRun: 0 } })];
+    const evidence = buildChecklistTestEvidence(services, head, 0);
+    expect(evidence).toEqual([{ service: 'api', matchesHead: true, counts: { pass: 31, fail: 0, skip: 0, notRun: 0 }, at: '2026-01-01T09:17:00.000Z' }]);
+  });
+
+  it('체크포인트 SHA가 다르면 matchesHead가 거짓이다', () => {
+    const services = [testService({ service: 'api', lastRunSha: 'def456', counts: { pass: 31, fail: 0, skip: 0, notRun: 0 } })];
+    expect(buildChecklistTestEvidence(services, head, 0)[0]!.matchesHead).toBe(false);
+  });
+
+  it('체크포인트는 같아도 커밋하지 않은 변경이 있으면 matchesHead가 거짓이다(그 사이 코드가 바뀌었을 수 있다)', () => {
+    const services = [testService({ service: 'api', lastRunSha: head })];
+    expect(buildChecklistTestEvidence(services, head, 1)[0]!.matchesHead).toBe(false);
+  });
+
+  it('실행한 적이 없으면(lastRunSha 없음) matchesHead가 거짓이다', () => {
+    const services = [testService({ service: 'api' })];
+    expect(buildChecklistTestEvidence(services, head, 0)[0]!.matchesHead).toBe(false);
+  });
+});
+
+describe('buildRequirementTestRunEvidence(요구사항별 테스트 탭 증거, 버그 리포트)', () => {
+  const head = { sha: 'abc123', shortSha: 'abc123' };
+
+  it('HEAD에서 돈 실행 중 이 요구사항 id가 붙어 통과한 행을 센다', () => {
+    const services = [
+      testService({
+        service: 'api',
+        lastRunSha: head.sha,
+        lastRunAt: '2026-01-01T09:17:00.000Z',
+        rows: [testRow({ requirementIds: ['R1'], status: 'pass' }), testRow({ requirementIds: ['R2'], status: 'pass' })],
+      }),
+    ];
+    const evidence = buildRequirementTestRunEvidence(services, 'R1', head, 0);
+    expect(evidence).toEqual({ at: '2026-01-01T09:17:00.000Z', sha: head.sha, shortSha: head.shortSha, passed: 1, failed: 0 });
+  });
+
+  it('실패한 행이 있으면 failed로 센다', () => {
+    const services = [testService({ lastRunSha: head.sha, lastRunAt: '2026-01-01T00:00:00.000Z', rows: [testRow({ requirementIds: ['R1'], status: 'fail' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', head, 0)).toMatchObject({ passed: 0, failed: 1 });
+  });
+
+  it('이 요구사항을 언급하는 행이 하나도 없으면 undefined를 돌려준다', () => {
+    const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R2'], status: 'pass' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', head, 0)).toBeUndefined();
+  });
+
+  it('HEAD와 체크포인트가 다른 서비스의 결과는 세지 않는다', () => {
+    const services = [testService({ lastRunSha: 'other-sha', rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', head, 0)).toBeUndefined();
+  });
+
+  it('체크포인트가 없는 세션(head undefined)이면 undefined를 돌려준다', () => {
+    const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
+    expect(buildRequirementTestRunEvidence(services, 'R1', undefined, 0)).toBeUndefined();
   });
 });

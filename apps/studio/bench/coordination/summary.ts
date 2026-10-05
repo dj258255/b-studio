@@ -6,9 +6,12 @@
 import type { TaskPlanCoordinationMetrics, TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanRunMetricsView } from '../../lib/task-plan-types';
 import type { AcceptanceResult } from './acceptance';
+import type { SelfCheckMode } from '@b-studio/agent';
+import type { BenchVerify } from './backends';
 import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
-import type { LaneTrace } from './trace';
+import type { LaneTrace, PlanBriefRecord } from './trace';
+import type { TurnRecord } from './turns';
 
 export interface BenchLaneRow {
   id: string;
@@ -40,6 +43,10 @@ export interface BenchEscalation {
   to?: string;
   /** --escalate-after */
   after: number;
+  /** --escalate-after-failures. 서명과 무관하게 실패 N번이면 올리는 규칙(설정하지 않으면 없다) */
+  afterFailures?: number;
+  /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수(기본 2) */
+  retryBudget: number;
   /** 이 실행에서 한 번이라도 승격이 일어났는지 */
   escalated: boolean;
   /** 승격이 일어난 뒤의 게이트 시도(실패) 횟수 */
@@ -71,6 +78,8 @@ export interface BenchRow {
   taskId: string;
   coupled: boolean;
   strategy: Strategy;
+  /** --concurrency N. 이 필드가 생기기 전 결과에는 없다(직렬 실행 1과 같다). 동시 실행의 시간 지표는 직렬 실행과 비교할 수 없다 */
+  concurrency?: number;
   model: string;
   /** 세션 이벤트에서 읽은 실제 모델 이름 (중복 제거) */
   observedModels: string[];
@@ -85,6 +94,8 @@ export interface BenchRow {
   traces: LaneTrace[];
   /** 통합 세션의 흔적. 탐색 합계에서는 뺀다 */
   integrationTrace?: LaneTrace;
+  /** P0(그냥 Claude Code)의 모델 호출별 기록. b-studio 전략은 traces[].turns에 있다 */
+  plainTurns?: TurnRecord[];
   /** 레인 합계만 센 탐색량 */
   explore: { filesReadTotal: number; filesReadUnionAcrossLanes: number; readCallsTotal: number };
   /** 검증기가 낸 실패 서명 합계 */
@@ -93,8 +104,16 @@ export interface BenchRow {
   contextCleared: { count: number; chars: number };
   /** 통합 게이트에 api 값 확인을 덧붙였는지(--integration-checks). 기본 꺼짐이면 false */
   integrationChecks: boolean;
+  /** 검증 범위(--verify). full은 지금과 같고, light는 레인·통합 게이트가 재시작·준비·계약만 확인한다 */
+  verify: BenchVerify;
+  /** 자가 확인 범위(--self-check). 이 필드가 생기기 전 결과에는 없다(full과 같다) */
+  selfCheck?: SelfCheckMode;
   /** 모델 승격 설정과 이 실행의 승격 결과 */
   escalation: BenchEscalation;
+  /** 계획-실행 분리(ADR-075, --plan-model·--execute-model) 설정. 둘 다 없으면 이 실행은 계획 호출을 하지 않았다 */
+  planExecute?: { plan?: string; execute?: string };
+  /** 이 실행에서 세션이 남긴 계획 원문(모델·글·사용량·시간). 계획 호출이 없거나 실패했으면 없다(E8은 이 값이 없어 도구 호출 수로만 추론했다) */
+  planBriefs?: PlanBriefRecord[];
   metrics?: TaskPlanMetrics;
   /** S2에서 쓴 계약의 출처와 수(모델 계약이면 호출 usage). 계약을 쓰지 않는 전략이면 없다 */
   contracts?: BenchContractsRow;
@@ -121,6 +140,14 @@ export interface SummaryMeta {
   contextClearing?: boolean;
   /** 레인 사이 계약(S2)의 출처. 기본 human */
   contracts?: 'human' | 'model';
+  /** 검증 범위(--verify). 기본 full */
+  verify?: BenchVerify;
+  /** 계획-실행 분리(ADR-075, --plan-model). 없으면 계획 호출 없이 지금과 같이 실행만 한다 */
+  planModel?: string;
+  /** 계획-실행 분리의 실행 모델(--execute-model). 없으면 requestedModel을 그대로 실행에도 쓴다 */
+  executeModel?: string;
+  /** --concurrency N. 1(기본, 직렬)보다 크면 이 실행의 시간 지표는 직렬 실행과 비교할 수 없다 */
+  concurrency?: number;
 }
 
 const CATEGORIES: FailureCategory[] = ['none', 'plan_rejected', 'scope_violation', 'lane_gate', 'integration_gate', 'acceptance', 'rate_limited', 'provider_gate', 'environment', 'timeout', 'unknown'];
@@ -218,10 +245,13 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     failureTable.push(`| ${strategy} | ${CATEGORIES.map((category) => of.filter((row) => row.category === category).length).join(' | ')} |`);
   }
 
+  const planBriefLine = planBriefSummaryLine(rows);
+
   return [
     '# 협업 벤치마크 요약',
     '',
-    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}`,
+    `백엔드 ${meta.backend} · 요청한 모델 ${meta.requestedModel} · 관측한 모델 ${observed.length > 0 ? observed.join(', ') : '없음'} · 실행 ${rows.length}회 · 검증 ${meta.verify === 'light' ? 'light(가볍게)' : 'full'} · 컨텍스트 비우기 ${meta.contextClearing ? 'on' : 'off'} · 계약 ${meta.contracts ?? 'human'}${meta.planModel ? ` · 계획-실행 분리: 계획 ${meta.planModel} → 실행 ${meta.executeModel ?? meta.requestedModel}` : ''}${meta.concurrency && meta.concurrency > 1 ? ` · 동시 실행 ${meta.concurrency}(시간 지표는 직렬 실행과 비교할 수 없음)` : ''}`,
+    ...(planBriefLine ? ['', planBriefLine] : []),
     '',
     '## 과제 × 전략',
     '',
@@ -310,6 +340,17 @@ function bytes(value: number | undefined): string {
   if (value === undefined) return '—';
   if (value >= 1_024 ** 2) return `${(value / 1_024 ** 2).toFixed(1)}MiB`;
   return `${Math.round(value / 1_024)}KiB`;
+}
+
+/**
+ * 계획 호출 건수와 계획 글 평균 길이(글자 수)를 한 줄로. 계획 호출이 하나도 없으면(계획-실행 분리를 안 쓴 실행) undefined다.
+ * E8은 벤치가 세션 폴더를 지워 계획 원문을 남기지 못했다 — 이 줄이 "계획이 요청보다 큰 설계를 적었는가"를 다시 잴 때 근거가 된다.
+ */
+function planBriefSummaryLine(rows: BenchRow[]): string | undefined {
+  const briefs: PlanBriefRecord[] = rows.flatMap((row) => row.planBriefs ?? []);
+  if (briefs.length === 0) return undefined;
+  const avgChars = briefs.reduce((sum, brief) => sum + brief.text.length, 0) / briefs.length;
+  return `계획 호출 ${briefs.length}건, 계획 글 평균 길이 ${Math.round(avgChars).toLocaleString('ko-KR')}자.`;
 }
 
 /** S4 수리 칸: 수리를 요청한 실행 수 / 그중 수리 실행이 done으로 끝난 수. 수리가 없는 전략은 0/0 */

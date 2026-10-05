@@ -23,7 +23,7 @@ function metrics(over: Partial<TaskPlanMetrics> = {}): TaskPlanMetrics {
 
 function row(over: Partial<BenchRow>): BenchRow {
   return {
-    escalation: { after: 2, escalated: false },
+    escalation: { after: 2, retryBudget: 2, escalated: false },
     order: 0,
     repeat: 1,
     taskId: 'orders-list',
@@ -40,6 +40,7 @@ function row(over: Partial<BenchRow>): BenchRow {
     failures: { signaturesTotal: 0, distinctSignatures: 0, repeatedFailures: 0 },
     contextCleared: { count: 0, chars: 0 },
     integrationChecks: false,
+    verify: 'full',
     success: true,
     category: 'none',
     detail: '',
@@ -206,6 +207,41 @@ describe('summarize', () => {
     expect(summarize([row({})], meta)).toContain('관측한 모델 없음 · 실행 1회');
   });
 
+  it('맨 위에 검증 범위(--verify)를 적는다. 기본은 full', () => {
+    expect(summarize([row({})], meta)).toContain('검증 full');
+    expect(summarize([row({ verify: 'light' })], { ...meta, verify: 'light' })).toContain('검증 light(가볍게)');
+  });
+
+  it('계획-실행 분리(ADR-075)를 설정했으면 맨 위 줄에 계획·실행 모델을 적고, 설정하지 않으면 아무것도 더하지 않는다', () => {
+    expect(summarize([row({})], meta)).not.toContain('계획-실행 분리');
+    expect(summarize([row({})], { ...meta, planModel: 'opus' })).toContain('계획-실행 분리: 계획 opus → 실행 test-model');
+    expect(summarize([row({})], { ...meta, planModel: 'opus', executeModel: 'haiku' })).toContain('계획-실행 분리: 계획 opus → 실행 haiku');
+  });
+
+  it('계획 호출이 남긴 계획 원문이 있으면 건수·평균 길이 줄을 더하고, 없으면 더하지 않는다', () => {
+    expect(summarize([row({})], meta)).not.toContain('계획 호출');
+
+    const withBriefs = summarize(
+      [
+        row({
+          planExecute: { plan: 'opus', execute: 'haiku' },
+          planBriefs: [
+            { sessionId: 's1', runId: 'run-1', model: 'opus', text: 'a'.repeat(100), usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 10 },
+          ],
+        }),
+        row({
+          planExecute: { plan: 'opus', execute: 'haiku' },
+          planBriefs: [
+            { sessionId: 's2', runId: 'run-2', model: 'opus', text: 'b'.repeat(200), usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 20 },
+          ],
+        }),
+      ],
+      { ...meta, planModel: 'opus', executeModel: 'haiku' },
+    );
+    // 평균 길이 = (100 + 200) / 2 = 150
+    expect(withBriefs).toContain('계획 호출 2건, 계획 글 평균 길이 150자.');
+  });
+
   it('claude-code 백엔드면 modelMs 한계 줄을 더한다', () => {
     const local = summarize([row({})], { backend: 'claude-code', requestedModel: 'sonnet' });
     expect(local).toContain('로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다.');
@@ -244,8 +280,8 @@ describe('summarize', () => {
   it('승격 건수 열에 escalated 실행 수를 센다', () => {
     const markdown = summarize(
       [
-        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: true, attempt: 2 } }),
-        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, escalated: false } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, retryBudget: 2, escalated: true, attempt: 2 } }),
+        row({ taskId: 'orders-list', strategy: 'S0', escalation: { to: 'sonnet', after: 2, retryBudget: 2, escalated: false } }),
         row({ taskId: 'orders-list', strategy: 'S0' }),
       ],
       meta,

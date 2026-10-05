@@ -14,13 +14,18 @@ export interface ScriptedTurn {
  * 모델의 코드 작성 능력을 검증하는 도구가 아니다.
  */
 export class ScriptedModelClient implements ModelClient {
-  readonly info: ModelClientInfo = { provider: 'scripted', backend: '데모 스크립트', model: 'scripted' };
+  readonly info: ModelClientInfo;
   readonly requests: AgentRequest[] = [];
   readonly #turns: ScriptedTurn[];
   #ids = 0;
 
-  constructor(turns: readonly ScriptedTurn[]) {
+  /**
+   * info를 넘기면 기본 표시("데모 스크립트"·"scripted")를 덮어쓴다 — 벤치·데모 시나리오가 아니라 다른 목적으로
+   * 모델 없이 미리 만든 턴을 돌릴 때(예: 작업 분해의 레인 결과 통합, task-plans.ts) 채팅에 실제 쓰임새를 보여 준다.
+   */
+  constructor(turns: readonly ScriptedTurn[], info?: Partial<ModelClientInfo>) {
     this.#turns = [...turns];
+    this.info = { provider: 'scripted', backend: '데모 스크립트', model: 'scripted', ...info };
   }
 
   get remainingTurns(): number {

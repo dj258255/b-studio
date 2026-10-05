@@ -2,10 +2,11 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import type { ModelProfile, RoutingDecision } from '@b-studio/agent';
-import type { FleetMemberStatus, FleetView } from '@/lib/fleet-types';
+import type { AgentUsage, ModelProfile, RoutingDecision } from '@b-studio/agent';
+import type { FleetMemberStatus, FleetMemberView, FleetView } from '@/lib/fleet-types';
 import type { ProjectSummary } from '@/lib/studio-events';
 import { formatTokenCount, totalTokens } from '@/lib/usage';
+import { SESSION_BACKEND_LABEL } from './status';
 
 type ModelOption = ModelProfile & { configured: boolean };
 
@@ -29,14 +30,25 @@ const STATUS_COLOR: Record<FleetMemberStatus, string> = {
   awaiting_input: 'text-wait',
 };
 
+/** 이 서버에서 여러 후보 비교(Fleet)를 쓸 수 있는지. 서버 capabilities에서 온다 */
+export interface FleetCapability {
+  enabled: boolean;
+  reason?: string;
+}
+
 export function FleetWorkbench({
   projects,
   models,
   initialFleets,
+  initialSelectedId,
+  fleet: capability,
 }: {
   projects: ProjectSummary[];
   models: ModelOption[];
   initialFleets: FleetView[];
+  /** 먼저 열 비교(`?id=`). 목록에 없으면 가장 최근 것 */
+  initialSelectedId?: string;
+  fleet: FleetCapability;
 }) {
   const readyModels = models.filter((model) => model.configured && model.enabled !== false && model.capabilities.includes('tools'));
   const [projectId, setProjectId] = useState(projects.find((project) => !project.error)?.id ?? '');
@@ -45,7 +57,7 @@ export function FleetWorkbench({
   const [allowBreaking, setAllowBreaking] = useState(false);
   const [decision, setDecision] = useState<RoutingDecision>();
   const [fleets, setFleets] = useState(initialFleets);
-  const [selectedFleetId, setSelectedFleetId] = useState(initialFleets[0]?.id);
+  const [selectedFleetId, setSelectedFleetId] = useState(initialFleets.some((fleet) => fleet.id === initialSelectedId) ? initialSelectedId : initialFleets[0]?.id);
   const [loading, setLoading] = useState<'route' | 'fleet' | 'winner'>();
   const [error, setError] = useState<string>();
   const selectedFleet = fleets.find((fleet) => fleet.id === selectedFleetId);
@@ -142,7 +154,11 @@ export function FleetWorkbench({
       <aside className="space-y-4 xl:sticky xl:top-5">
         <section className="glass rounded-panel p-5">
           <h2 className="text-lg font-semibold">새 병렬 작업</h2>
-          <p className="mt-1 text-sm leading-6 text-muted">모델마다 독립된 세션 브랜치와 샌드박스를 만듭니다. 실행 버튼을 누르면 선택한 모델 수만큼 비용이 발생합니다.</p>
+          <p className="mt-1 text-sm leading-6 text-muted">후보마다 독립된 세션 브랜치와 샌드박스를 만듭니다. 실행 버튼을 누르면 선택한 후보 수만큼 비용이 발생합니다.</p>
+          <p className="mt-2 text-sm leading-6 text-wait">
+            멤버 수만큼 샌드박스가 동시에 뜹니다 — Docker 메모리·디스크를 멤버 수만큼 씁니다. 한 번에 띄울 수 있는 수를 멤버 수 이하로 두세요.
+          </p>
+          {!capability.enabled && <p className="mt-2 text-sm leading-6 text-fail">{capability.reason ?? '이 모드에서는 여러 후보 비교를 쓸 수 없습니다'}</p>}
 
           <label className="mt-5 block text-sm font-medium" htmlFor="fleet-project">프로젝트</label>
           <select
@@ -218,7 +234,7 @@ export function FleetWorkbench({
           </label>
           <button
             type="button"
-            disabled={!projectId || !request.trim() || selectedModels.length < 2 || loading !== undefined}
+            disabled={!capability.enabled || !projectId || !request.trim() || selectedModels.length < 2 || loading !== undefined}
             onClick={() => void create()}
             className="mt-4 w-full rounded-control bg-ink px-4 py-2.5 text-sm font-semibold text-panel hover:bg-ink/85 disabled:opacity-50"
           >
@@ -283,7 +299,11 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="truncate text-lg font-semibold">{member.label}</p>
-                  <p className="truncate font-mono text-xs text-muted">{member.provider} · {member.modelId}</p>
+                  <p className="mt-0.5 truncate text-xs text-muted">
+                    <span className="font-medium text-ink">{SESSION_BACKEND_LABEL[member.backend]}</span>
+                    {' · '}
+                    <span className="font-mono">{member.modelId ?? '서버·계정 기본 모델'}</span>
+                  </p>
                 </div>
                 <span className={`shrink-0 text-sm font-medium ${STATUS_COLOR[member.status]}`}>{winner ? '선택됨' : STATUS[member.status]}</span>
               </div>
@@ -293,6 +313,8 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
                 <Metric label="토큰" value={member.usage ? formatTokenCount(totalTokens(member.usage)) : '—'} />
                 <Metric label="비용" value={member.costUsd === undefined ? '—' : `$${member.costUsd.toFixed(4)}`} />
               </dl>
+
+              <MemberModelUsage member={member} />
 
               <div className="mt-4 min-h-36 rounded-md border border-line bg-panel p-3">
                 {member.summary ? <p className="text-sm leading-6 whitespace-pre-wrap">{member.summary}</p> : <p className="text-sm text-muted motion-safe:animate-pulse">{member.status === 'booting' ? '독립 샌드박스를 준비하고 있습니다.' : '에이전트가 도구를 사용하고 검증 게이트를 통과하는 중입니다.'}</p>}
@@ -319,6 +341,50 @@ function FleetResult({ fleet, choosing, onChoose }: { fleet: FleetView; choosing
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-line bg-panel px-2 py-2"><dt className="text-muted">{label}</dt><dd className="mt-0.5 font-mono font-medium text-ink">{value}</dd></div>;
+}
+
+/**
+ * 이 멤버가 모델을 바꿔 가며 돌았을 때(승격)의 모델별 사용량. 토큰 탭과 같은 표기를 쓴다 —
+ * 모델이 하나면 한 줄, 여럿이면 좁은 화면에서도 넘치지 않게 표를 쓴다. 없으면 아무것도 그리지 않는다.
+ */
+function MemberModelUsage({ member }: { member: FleetMemberView }) {
+  const models = Object.entries(member.usageByModel ?? {}) as Array<[string, AgentUsage]>;
+  if (models.length === 0) return null;
+  if (models.length === 1) {
+    const [model, usage] = models[0]!;
+    return (
+      <p className="mt-3 text-xs text-muted">
+        <span className="font-mono text-ink">{model}</span> · 입력 {formatTokenCount(usage.inputTokens)} · 캐시 읽기 {formatTokenCount(usage.cacheReadTokens)} · 캐시 쓰기{' '}
+        {formatTokenCount(usage.cacheWriteTokens)} · 출력 {formatTokenCount(usage.outputTokens)}
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full min-w-[20rem] text-left text-xs">
+        <thead className="border-b border-line text-muted">
+          <tr>
+            <th scope="col" className="py-1.5 pr-2 font-medium">모델</th>
+            <th scope="col" className="py-1.5 pr-2 text-right font-medium">입력</th>
+            <th scope="col" className="py-1.5 pr-2 text-right font-medium">캐시 읽기</th>
+            <th scope="col" className="py-1.5 pr-2 text-right font-medium">캐시 쓰기</th>
+            <th scope="col" className="py-1.5 text-right font-medium">출력</th>
+          </tr>
+        </thead>
+        <tbody>
+          {models.map(([model, usage]) => (
+            <tr key={model} className="border-b border-line/60">
+              <th scope="row" className="py-1.5 pr-2 font-mono font-medium break-all">{model}</th>
+              <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.inputTokens)}</td>
+              <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.cacheReadTokens)}</td>
+              <td className="py-1.5 pr-2 text-right font-mono">{formatTokenCount(usage.cacheWriteTokens)}</td>
+              <td className="py-1.5 text-right font-mono">{formatTokenCount(usage.outputTokens)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function complexityLabel(value: RoutingDecision['complexity']): string {

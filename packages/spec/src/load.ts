@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
+import { findPublicUrlRefs, type PublicUrlRef } from './public-url';
 import {
   STUDIO_CALLER,
   StudioSpecSchema,
@@ -40,6 +41,14 @@ export interface LoadedProject {
   resources: Record<string, ResourceLimit>;
   /** compose 파일의 모든 서비스 이름 (부가 서비스 포함) */
   composeServices: string[];
+  /** compose 서비스 이름 → 그 서비스가 depends_on으로 기다리는 compose 서비스 이름(부가 서비스끼리의 기댐도 포함). 서비스 선택의 기본값(관리형 + 기댐 닫힘, ADR-083)을 계산할 때 쓴다 */
+  dependsOn: Record<string, string[]>;
+  /**
+   * 이 세션에서 꺼 둔(띄우지 않는) compose 서비스 이름(ADR-083). loadProject()는 채우지 않는다(항상 undefined) —
+   * 서비스 선택을 다루는 쪽(studio 서버)이 프로젝트를 불러온 뒤 세션마다 붙인다. 검증 게이트는 여기 있는 서비스를
+   * 재시작·확인하지 않고 건너뛴 것으로 기록한다
+   */
+  offServices?: ReadonlySet<string>;
   /** 기본 패키지 저장소 외에 외부 접속을 허용할 호스트나 평문 HTTP 경로·메서드 규칙 */
   egress: EgressRule[];
   /** 시크릿 이름(컨테이너 환경 변수 이름) → 받을 서비스. 값은 들어 있지 않다 */
@@ -48,6 +57,12 @@ export interface LoadedProject {
   external: Array<[name: string, service: ExternalServiceSpec]>;
   /** managed 서비스 이름 → 운영 배포 설정. 적지 않은 서비스도 기본값(Dockerfile)으로 채운다 */
   deploy: Record<string, DeployServiceSpec>;
+  /**
+   * 런타임 공개 URL 주입(fix/frontend-backend-url). compose의 environment 값에 `${b-studio:services.<서비스>.publicUrl}`
+   * 자리 표시자가 있으면 여기 담는다. 샌드박스 제공자가 띄우기 직전에 targetService의 호스트 포트를 먼저 정해(pre-allocate)
+   * 이 자리를 실제 주소로 채운다(packages/sandbox/src/docker/compose-provider.ts)
+   */
+  publicUrlRefs: PublicUrlRef[];
 }
 
 export function parseSpec(source: string): StudioSpec {
@@ -145,10 +160,22 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     if (check.expectFromApi && !managedNames.has(check.expectFromApi.service)) {
       issues.push(`workflow.pageChecks.${index}.expectFromApi.service: '${check.expectFromApi.service}'은(는) source: managed 서비스가 아닙니다`);
     }
+    // fallbackProbe(fix/frontend-backend-url)도 같은 규칙: 헤드리스 브라우저가 없을 때 대신 부를 서비스라 관리형이어야 한다
+    if (check.fallbackProbe && !managedNames.has(check.fallbackProbe.service)) {
+      issues.push(`workflow.pageChecks.${index}.fallbackProbe.service: '${check.fallbackProbe.service}'은(는) source: managed 서비스가 아닙니다`);
+    }
   });
   spec.workflow?.concurrencyChecks?.forEach((check, index) => {
     if (!managedNames.has(check.service)) issues.push(`workflow.concurrencyChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
   });
+
+  // 런타임 공개 URL 자리 표시자(fix/frontend-backend-url)가 가리키는 서비스도 샌드박스가 포트를 공개하는 관리형 서비스여야 한다
+  const publicUrlRefs = findPublicUrlRefs(compose.data.services);
+  for (const ref of publicUrlRefs) {
+    if (!managedNames.has(ref.targetService)) {
+      issues.push(`${ref.service}.environment.${ref.envKey}: \${b-studio:services.${ref.targetService}.publicUrl}이 가리키는 '${ref.targetService}'이(가) source: managed 서비스가 아닙니다`);
+    }
+  }
 
   // 자동 페이지 확인은 Next.js 앱 라우터(app/**/page.*)에서 열어 볼 경로를 찾는다. 관리형이면서 템플릿이 nextjs인 서비스에만 쓸 수 있다
   const autoPages = spec.workflow?.autoPageChecks;
@@ -188,6 +215,9 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     .filter(([, volume]) => volume?.external === true)
     .map(([key, volume]) => volume?.name ?? key);
 
+  const dependsOnGraph: LoadedProject['dependsOn'] = {};
+  for (const name of composeServices) dependsOnGraph[name] = dependsOnNames(compose.data.services[name]).filter((dependency) => composeServices.has(dependency));
+
   return {
     root,
     spec,
@@ -197,18 +227,26 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
     databases,
     resources: spec.resources ?? {},
     composeServices: [...composeServices],
+    dependsOn: dependsOnGraph,
     egress: spec.network?.egress ?? [],
     secrets: Object.entries(spec.secrets ?? {}),
     external,
     deploy: Object.fromEntries(managed.map(([name]) => [name, spec.deploy?.services[name] ?? { dockerfile: 'Dockerfile' }])),
+    publicUrlRefs,
   };
 }
 
 /** compose depends_on은 목록(["db"])이나 맵({ db: { condition } })으로 쓴다 */
 function dependsOn(service: unknown, target: string): boolean {
+  return dependsOnNames(service).includes(target);
+}
+
+/** compose 서비스 하나의 depends_on 대상 이름 목록 */
+function dependsOnNames(service: unknown): string[] {
   const dependencies = (service as { depends_on?: unknown } | null)?.depends_on;
-  if (Array.isArray(dependencies)) return dependencies.includes(target);
-  return typeof dependencies === 'object' && dependencies !== null && target in dependencies;
+  if (Array.isArray(dependencies)) return dependencies.filter((entry): entry is string => typeof entry === 'string');
+  if (dependencies && typeof dependencies === 'object') return Object.keys(dependencies);
+  return [];
 }
 
 /** compose 서비스의 volumes 항목(짧은 문법 "이름:경로", 긴 문법 { source })에 볼륨이 있는지 */

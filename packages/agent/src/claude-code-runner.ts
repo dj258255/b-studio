@@ -4,6 +4,7 @@ import {
   tool,
   type AccountInfo,
   type McpServerConfig,
+  type ModelInfo,
   type Options,
   type SDKMessage,
   type SDKResultMessage,
@@ -12,12 +13,13 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
-import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
+import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { loadProjectGuide } from './project-guide';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -25,6 +27,12 @@ import { Workspace } from './workspace';
 const SERVER = 'b-studio';
 /** 화면 표기. Agent SDK 브랜딩 가이드는 제품 안에서 "Claude Code"라는 이름을 쓰지 않도록 한다 */
 const BACKEND = '로컬 Claude Agent';
+/**
+ * 세션이 노력 단계를 고르지 않았을 때 실제로 쓰이는 기본값. runClaudeCodeAgent의 기본 인자와 이 상수가 어긋나면
+ * 실행 중 표시(노력: 높음)와 아직 아무것도 고르지 않은 화면(모델 선택 팝오버)이 서로 다른 값을 보여주게 된다 —
+ * 리터럴을 두 곳에 따로 적지 않고 이 상수 하나로 맞춘다(apps/studio/lib/server/model-picker.ts가 그대로 쓴다).
+ */
+export const DEFAULT_CLAUDE_CODE_EFFORT: Effort = 'high';
 /** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
 const STEERING_POLL_MS = 300;
 
@@ -36,6 +44,8 @@ export interface ClaudeCodeSdk {
 
 export interface ClaudeCodeQuery extends AsyncIterable<SDKMessage> {
   accountInfo(): Promise<AccountInfo>;
+  /** 로그인한 계정이 실제로 쓸 수 있는 모델 목록(별칭이 풀리는 id·설명·노력 단계 지원 여부 포함) */
+  supportedModels(): Promise<ModelInfo[]>;
   interrupt(): Promise<unknown>;
   close(): void;
 }
@@ -95,23 +105,34 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onBrowserFrame,
     resume,
     model,
-    effort = 'high',
+    effort = DEFAULT_CLAUDE_CODE_EFFORT,
     account,
     sdk = DEFAULT_SDK,
     interactive = false,
     intent = 'build',
+    research = false,
     steering,
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
+  // "조사" 모드는 질문(ask)일 때만 뜻이 있다 — 만들기 요청에 섞여 와도(화면이 막지만 안전망으로) 조용히 무시한다
+  const researching = ask && research;
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다.
+  // 계약 기준은 샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서 잡아야 하기 때문이다(API 경로와 같은 규칙)
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(세션 작업 복사본)의 AGENTS.md를 실행마다 새로 읽는다(ADR-077). 승격으로 runQuery를 다시 열어도
+  // 같은 실행 안이므로 다시 읽지 않고 이 값을 그대로 재사용한다(아래 클로저가 캡처한다)
+  const guide = await loadProjectGuide(project);
   const context: ToolContext = {
     project,
+    selfCheck: options.selfCheck,
     workspace,
     sandbox,
     fetcher,
@@ -131,6 +152,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
     // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
     toolResults: createToolResultCache(),
+    // 지연 기동 세션이면 샌드박스 도구를 실행하기 직전에 켠다(핸들러가 게이트 생성까지 함께 한다).
+    // 세션의 ensureBooted가 동시 호출을 하나로 합치므로 중복 호출은 무해하다
+    ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
   const specs = buildTools(project, {
     ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}),
@@ -143,13 +167,18 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const serial = serialQueue();
   // 실행 지표. modelMs는 모델 응답 대기가 SDK 안에서 일어나 이 러너가 관찰하지 못하므로 0으로 둔다.
   // 0은 "재지 않음"이고, 전체 시간에서 도구·게이트 시간을 뺀 추측값을 넣지 않는다
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
   const definitions = specs.map((spec) =>
     tool(spec.name, spec.description ?? '', zodShape(spec.input_schema), (args) =>
       serial(async () => {
         // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
         signal?.throwIfAborted();
         onEvent({ type: 'tool_call', name: spec.name, input: args });
+        // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+        if (options.ensureSandbox && (SANDBOX_TOOLS.has(spec.name) || WRITE_TOOLS.has(spec.name))) {
+          await options.ensureSandbox();
+          gate = await gateFor();
+        }
         const toolStarted = performance.now();
         const outcome = await executeTool(spec.name, args, context);
         metrics.toolMs += Math.round(performance.now() - toolStarted);
@@ -168,9 +197,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const escalation = options.escalation;
   const escalationHistory: string[] = [];
   let escalated = false;
+  /** 마지막으로 모델에게 보낸 게이트 실패 안내. 상한이 소진된 뒤 승격하면 같은 안내를 다시 보낸다 */
+  let lastFeedback: string | undefined;
   let modelForQuery = model;
   let resumeForQuery = resume;
-  let pendingPrompt = ask ? buildAskRequest(request, { toolName }) : request;
+  let pendingPrompt = ask ? buildAskRequest(request, { toolName, ...(researching ? { research: { webToolsAvailable: true } } : {}) }) : request;
   // 승격으로 다음 query를 열어야 하면 true. 게이트 재시도는 같은 대화에 이어 넣는다
   let reopen = false;
 
@@ -208,6 +239,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
+      ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns: messageIds.size,
       usage,
@@ -233,11 +266,13 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       prompt: input,
       options: {
         cwd: project.root,
-        systemPrompt: buildSystemPrompt(project, { toolName }) + workflowContext(project),
-        // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
-        tools: [],
+        systemPrompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide),
+        // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다.
+        // "조사" 모드(researching)만 예외로 내장 WebSearch·WebFetch를 더 연다 — 파일·명령 도구는 절대 열지 않는다
+        // (읽기 전용은 여전히 ToolContext.readOnly=ask가 b-studio 도구 쪽에서 막는다)
+        tools: researching ? ['WebSearch', 'WebFetch'] : [],
         mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
-        allowedTools: specs.map((spec) => toolName(spec.name)),
+        allowedTools: researching ? [...specs.map((spec) => toolName(spec.name)), 'WebSearch', 'WebFetch'] : specs.map((spec) => toolName(spec.name)),
         permissionMode: 'dontAsk',
         strictMcpConfig: true,
         // 사용자 전역·프로젝트 설정(훅, 플러그인, CLAUDE.md)이 에이전트 동작을 바꾸지 않게 한다
@@ -283,6 +318,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 backend: `${BACKEND} (CLI ${message.claude_code_version})`,
                 model: message.model,
                 auth: account ? describeAccount(account) : undefined,
+                effort,
               });
             }
             break;
@@ -348,50 +384,69 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
             if (asked) {
               await conversation.interrupt().catch(() => {});
-              if (gate && workspace.changedFiles().length > 0) {
+              const openGate = gate;
+              if (openGate && workspace.changedFiles().length > 0) {
                 const gateStarted = performance.now();
-                await gate.check();
+                await openGate.check();
                 metrics.gateMs += Math.round(performance.now() - gateStarted);
               }
               finish('awaiting_input', asked.question, asked);
               break;
             }
-            // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
-            if (!gate) {
+            // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트.
+            // 지연 기동 세션이 아무것도 바꾸지 않았으면 게이트가 없다 → 샌드박스 없이 끝난다
+            const activeGate = gate;
+            if (!activeGate) {
               finish('done', lastText);
               break;
             }
             const gateStarted = performance.now();
-            const outcome = await gate.check();
+            const outcome = await activeGate.check();
             metrics.gateMs += Math.round(performance.now() - gateStarted);
             if (outcome.kind === 'pass') {
-              if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+              if (activeGate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
               finish('done', lastText);
             }
-            else if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
             else {
-              lastText = '';
+              if (outcome.kind === 'retry') lastText = '';
+              // 승격: 같은 서명이 반복되거나, 설정이 있으면 실패 N번이 계기가 된다. 한 실행에 한 번만 올린다
               if (escalation && !escalated) {
-                const key = signatureSetKey(gate.report, gate.checks);
+                const key = signatureSetKey(activeGate.report, activeGate.checks);
                 escalationHistory.push(key);
-                const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
-                if (shouldEscalate(escalationHistory, times)) {
-                  escalated = true;
-                  metrics.escalatedAt = gate.attempts;
-                  // 닫히는 입력 큐로 지시가 들어가 사라지지 않게, close보다 먼저 이 query의 지시 연결을 끊는다.
-                  // 그 뒤 들어온 지시는 큐에 남아 새 query가 연결할 때 flush로 가져간다
-                  detachSteeringOnce();
-                  onEvent({ type: 'model_escalated', from: modelForQuery ?? '기본 모델', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
-                  modelForQuery = escalation.to;
-                  resumeForQuery = sessionId;
-                  pendingPrompt = outcome.feedback;
-                  conversation.close();
-                  reopen = true;
-                  // 같은 대화를 이어받아 모델만 바꾸려면 새 query를 열어야 한다. 이 query는 여기서 닫는다
-                  break messages;
+                if (shouldPromote(escalation, escalationHistory)) {
+                  // 올라간 모델에게 게이트 재시도를 새로 준다(기존 남은 횟수 대신)
+                  const extended = activeGate.grantRetryBudget(retryBudgetFor(escalation));
+                  // 상한이 이미 소진됐는데 예산도 못 받았으면 올려도 시도할 기회가 없다 — 아래에서 실패로 끝난다
+                  if (outcome.kind === 'retry' || extended) {
+                    escalated = true;
+                    metrics.escalatedAt = activeGate.attempts;
+                    // 닫히는 입력 큐로 지시가 들어가 사라지지 않게, close보다 먼저 이 query의 지시 연결을 끊는다.
+                    // 그 뒤 들어온 지시는 큐에 남아 새 query가 연결할 때 flush로 가져간다
+                    detachSteeringOnce();
+                    onEvent({
+                      type: 'model_escalated',
+                      from: modelForQuery ?? '기본 모델',
+                      to: escalation.to,
+                      attempt: activeGate.attempts,
+                      signature: key,
+                      sameSignatureTimes: escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES,
+                    });
+                    modelForQuery = escalation.to;
+                    resumeForQuery = sessionId;
+                    // 상한을 새로 받은 경우에는 마지막 실패 안내를 다시 보낸다(올라간 모델이 무엇을 고칠지 알게)
+                    pendingPrompt = outcome.kind === 'exhausted' ? escalationPrompt(outcome.summary, lastFeedback) : outcome.feedback;
+                    conversation.close();
+                    reopen = true;
+                    // 같은 대화를 이어받아 모델만 바꾸려면 새 query를 열어야 한다. 이 query는 여기서 닫는다
+                    break messages;
+                  }
                 }
               }
-              input.push(outcome.feedback);
+              if (outcome.kind === 'exhausted') finish('failed', outcome.summary);
+              else {
+                lastFeedback = outcome.feedback;
+                input.push(outcome.feedback);
+              }
             }
             break;
           }
@@ -491,6 +546,36 @@ export async function preflightClaudeCode(
   } finally {
     clearTimeout(timer);
     input.close();
+    conversation.close();
+  }
+}
+
+/**
+ * 로그인한 계정의 Claude Code가 실제로 보고하는 모델 목록. 프롬프트를 보내지 않으므로 사용량을 쓰지 않는다
+ * (preflightClaudeCode와 같은 모양: 아무것도 내보내지 않는 프롬프트로 query를 열고 필요한 정보만 받은 뒤 바로 닫는다).
+ * 별칭(opus·sonnet·haiku·fable)이 실제로 풀리는 모델 id·공식 설명·노력 단계 지원 여부가 로그인 계정·CLI 버전에 따라 바뀌므로
+ * 스튜디오가 미리 표를 외우는 대신 이 목록을 그대로 쓴다(apps/studio/lib/server/claude-code-models.ts가 캐시·대체 표를 맡는다).
+ */
+export async function fetchClaudeCodeModels(
+  { sdk = DEFAULT_SDK, cwd = process.cwd(), timeoutMs = 15_000 }: { sdk?: ClaudeCodeSdk; cwd?: string; timeoutMs?: number } = {},
+): Promise<ModelInfo[]> {
+  const input = new InputQueue();
+  const conversation = sdk.query({
+    prompt: input,
+    options: { cwd, tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false },
+  });
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      conversation.supportedModels(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${timeoutMs / 1000}초 안에 응답하지 않았습니다`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    input.close();
+    await conversation.interrupt().catch(() => {});
     conversation.close();
   }
 }

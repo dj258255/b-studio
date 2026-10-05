@@ -71,7 +71,7 @@ describe('attention 판정', () => {
     const awaiting = plan({ status: 'awaiting_approval', id: 'p1', request: '주문에 필터 추가', planning: { usage: { inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, durationMs: 10 } });
     const { items, totals } = overview({ plans: [awaiting] });
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: 'lane', id: 'plan:p1', href: '/task-plans', attention: 'approval', title: '주문에 필터 추가' });
+    expect(items[0]).toMatchObject({ kind: 'lane', id: 'plan:p1', href: '/task-plans?id=p1', group: { kind: 'plan', id: 'p1', href: '/task-plans?id=p1' }, attention: 'approval', title: '주문에 필터 추가' });
     expect(items[0]!.tokens).toEqual({ inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 });
     expect(totals).toMatchObject({ total: 1, attention: 1, working: 0 });
   });
@@ -136,7 +136,9 @@ describe('목록·합계·정렬', () => {
   });
 
   it('플릿 구성원은 fleet 종류로 올린다', () => {
-    const fleet = fleetView({ members: [{ sessionId: 's1', modelId: 'm', label: 'M', provider: 'openai', status: 'running', usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }] });
+    const fleet = fleetView({
+      members: [{ sessionId: 's1', backend: 'api', modelId: 'm', label: 'M', provider: 'openai', status: 'running', usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }],
+    });
     const { items } = overview({ sessions: [source({ snapshot: snapshot({ id: 's1', running: true }) })], fleets: [fleet] });
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: 'fleet', id: 's1', projectName: 'orders', title: '같은 요청' });

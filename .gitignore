@@ -1,6 +1,8 @@
 node_modules/
 .pnpm-store/
 dist/
+# 데스크톱 앱 패키징 결과(.app)와 로컬 설치본
+dist-app/
 coverage/
 *.tsbuildinfo
 
@@ -10,6 +12,9 @@ next-env.d.ts
 .gradle/
 build/
 !gradle/wrapper/gradle-wrapper.jar
+# 데스크톱 앱 아이콘 원본(icon.svg)과 생성물(.icns·.png)은 저장소에 둔다.
+# 빌드하는 CI에는 macOS 아이콘 도구가 없어서 electron-builder가 쓸 파일이 필요하다
+!apps/desktop/build/
 __pycache__/
 .venv/
 .pytest_cache/
@@ -22,3 +27,6 @@ __pycache__/
 .vscode/
 .playwright-mcp/
 .serena/
+
+# 에이전트 작업 트리(도구가 만드는 임시 폴더). 저장소에 넣지 않는다
+.claude/worktrees/

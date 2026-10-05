@@ -1,9 +1,11 @@
 "use client";
 
 import { memo, useEffect, useMemo, useState } from "react";
+import { ancestorsOf, buildFileTree, type FileTreeNode } from "@/lib/file-tree";
 import { languageFor, type HighlightedLine } from "@/lib/highlight";
 import { latestWrite, type SessionView } from "@/lib/session-view";
 import type { CodeFile, CodeSearch, CodeTree } from "@/lib/studio-events";
+import { useCodeOpen } from "./code-open-context";
 import { CodeTokens, useHighlightedCode } from "./code-tokens";
 import { DiffView } from "./diff-view";
 
@@ -24,6 +26,8 @@ type SearchMode = "path" | "content";
 export function CodePanel({ view }: { view: SessionView }) {
   const { snapshot, chat } = view;
   const write = useMemo(() => latestWrite(chat), [chat]);
+  const codeOpen = useCodeOpen();
+  const [highlightLine, setHighlightLine] = useState<number>();
   const [tree, setTree] = useState<CodeTree>();
   const [files, setFiles] = useState<string[]>([]);
   // 결과를 요청 조건과 함께 두어, 조건이 바뀌면 효과에서 상태를 되돌리지 않고도 헌 결과를 쓰지 않는다
@@ -37,6 +41,8 @@ export function CodePanel({ view }: { view: SessionView }) {
   const [follow, setFollow] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string>();
+  // 접고 펼친 폴더 경로. 사용자가 고른 상태를 기억하고, 활성 파일·찾기 결과의 조상 폴더만 자동으로 더한다
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
 
   // 쓰기, 요청 완료, 체크포인트·되돌리기·가져오기, 서비스 안에서 명령이 바꾼 파일이 있을 때마다 목록을 새로 받는다
   const revision = `${write.count}|${view.completedRuns}|${snapshot.checkpoints[0]?.sha ?? ""}|${snapshot.status}|${snapshot.fileRevision ?? 0}`;
@@ -103,11 +109,59 @@ export function CodePanel({ view }: { view: SessionView }) {
 
   const changes = tree?.changes ?? [];
   const changeOf = (path: string) => changes.find((change) => change.file === path)?.change;
-  const open = (path: string) => {
+  const open = (path: string, line?: number) => {
     setFollow(false);
     setSelected(path);
     setShowDiff(false);
+    setHighlightLine(line);
   };
+
+  // "테스트" 탭의 file:line 링크(codeOpen.open())가 여기로도 전해진다 — 코드 탭이 마운트돼 있지 않았어도, 전환된 뒤 반영한다.
+  // useEffect 안에서 자기 상태를 바로 바꾸지 않도록, 위 appliedReveal과 같은 방식으로 렌더 중 비교해 반영하고,
+  // 신호를 끊는 것(codeOpen.clear, 이 컴포넌트의 상태가 아니다)만 효과로 한다
+  const [appliedCodeOpenTarget, setAppliedCodeOpenTarget] = useState(codeOpen.target);
+  if (codeOpen.target && codeOpen.target !== appliedCodeOpenTarget) {
+    setAppliedCodeOpenTarget(codeOpen.target);
+    open(codeOpen.target.path, codeOpen.target.line);
+  }
+  useEffect(() => {
+    if (appliedCodeOpenTarget) codeOpen.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- codeOpen.clear()로 반영한 신호만 끊는다(codeOpen 자체는 매 렌더 새 참조)
+  }, [appliedCodeOpenTarget]);
+  const treeNodes = useMemo(() => buildFileTree(files), [files]);
+  const toggleFolder = (path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  // 활성 파일의 조상 폴더는 늘 펼친다. 경로 찾기로 좁힌 동안에는 찾은 파일들의 조상 폴더도 함께 펼쳐, 결과가 접힌 채 숨지 않게 한다.
+  // 렌더 중에 이전 값과 비교해 상태를 맞추는 방식으로 두어, 효과 안에서 곧바로 setState하지 않는다
+  const autoReveal = useMemo(() => {
+    const reveal = mode === "path" && needle ? (active ? [active, ...files] : files) : active ? [active] : [];
+    const ancestors = new Set<string>();
+    for (const path of reveal) for (const ancestor of ancestorsOf(path)) ancestors.add(ancestor);
+    return ancestors;
+  }, [active, needle, mode, files]);
+  const [appliedReveal, setAppliedReveal] = useState<ReadonlySet<string>>();
+  if (appliedReveal !== autoReveal) {
+    setAppliedReveal(autoReveal);
+    if (autoReveal.size > 0) {
+      setExpanded((prev) => {
+        let changed = false;
+        const next = new Set(prev);
+        for (const path of autoReveal)
+          if (!next.has(path)) {
+            next.add(path);
+            changed = true;
+          }
+        return changed ? next : prev;
+      });
+    }
+  }
 
   async function loadMore() {
     if (!tree) return;
@@ -217,22 +271,21 @@ export function CodePanel({ view }: { view: SessionView }) {
             {search?.truncated && <p className="px-2 py-1 text-xs text-muted">결과가 많아 일부만 보여 줍니다. 더 좁혀서 찾아 보세요.</p>}
           </div>
         ) : (
-          <ul className="px-2 py-1 pb-3">
-            {needle && files.length === 0 && <li className="px-2 py-1 text-xs text-muted">&apos;{needle}&apos;와 맞는 파일이 없습니다.</li>}
-            {files.map((path) => (
-              <li key={path}>
-                <FileButton path={path} active={active === path} onOpen={open} badge={changeOf(path)} fresh={false} />
-              </li>
-            ))}
+          <div className="px-2 py-1 pb-3">
+            {needle && files.length === 0 && <p className="px-2 py-1 text-xs text-muted">&apos;{needle}&apos;와 맞는 파일이 없습니다.</p>}
+            <FileTreeList nodes={treeNodes} depth={0} expanded={expanded} onToggle={toggleFolder} active={active} onOpen={open} changeOf={changeOf} />
             {tree && files.length < tree.total && (
-              <li className="px-2 py-1">
-                <button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="w-full rounded-control border border-line px-2 py-1 text-xs hover:border-ink disabled:opacity-60">
-                  {loadingMore ? "불러오는 중" : `더 보기 (${(tree.total - files.length).toLocaleString()}개 남음)`}
-                </button>
-              </li>
+              <button
+                type="button"
+                onClick={() => void loadMore()}
+                disabled={loadingMore}
+                className="mt-1 w-full rounded-control border border-line px-2 py-1 text-xs hover:border-ink disabled:opacity-60"
+              >
+                {loadingMore ? "불러오는 중" : `더 보기 (${(tree.total - files.length).toLocaleString()}개 남음)`}
+              </button>
             )}
-            {tree?.truncated && <li className="px-2 py-1 text-xs text-muted">파일이 아주 많아 일부만 셌습니다.</li>}
-          </ul>
+            {tree?.truncated && <p className="px-2 py-1 text-xs text-muted">파일이 아주 많아 일부만 셌습니다.</p>}
+          </div>
         )}
       </aside>
 
@@ -283,7 +336,7 @@ export function CodePanel({ view }: { view: SessionView }) {
                   {file.patch && <DiffView patch={file.patch} />}
                 </div>
               ) : (
-                <CodeLines path={file.path} content={file.content} />
+                <CodeLines path={file.path} content={file.content} highlightLine={highlightLine} />
               )}
             </div>
           </>
@@ -326,27 +379,121 @@ function FileButton({
   );
 }
 
-/** 줄 번호와 함께 보여 준다. 아직 강조하지 않은 줄과 강조하지 않는 파일은 평문으로 두고, 긴 줄은 가로로 스크롤한다 */
-function CodeLines({ path, content }: { path: string; content: string }) {
+/** 깊이만큼 들여써 폴더는 접고 펼 수 있게, 파일은 눌러서 열게 그린다. 접힌 폴더 안은 그리지 않아 파일이 많아도 가볍다 */
+export function FileTreeList({
+  nodes,
+  depth,
+  expanded,
+  onToggle,
+  active,
+  onOpen,
+  changeOf,
+}: {
+  nodes: FileTreeNode[];
+  depth: number;
+  expanded: ReadonlySet<string>;
+  onToggle: (path: string) => void;
+  active?: string;
+  onOpen: (path: string) => void;
+  changeOf: (path: string) => "added" | "modified" | "deleted" | undefined;
+}) {
+  return (
+    <ul>
+      {nodes.map((node) =>
+        node.type === "folder" ? (
+          <li key={node.path}>
+            <button
+              type="button"
+              onClick={() => onToggle(node.path)}
+              aria-expanded={expanded.has(node.path)}
+              style={{ paddingLeft: depth * 14 + 8 }}
+              className="flex w-full items-center gap-1.5 rounded py-1 pr-2 text-left font-mono text-xs hover:bg-ground"
+            >
+              <ChevronIcon open={expanded.has(node.path)} />
+              <FolderIcon />
+              <span className="min-w-0 flex-1 truncate">{node.name}</span>
+            </button>
+            {expanded.has(node.path) && (
+              <FileTreeList nodes={node.children} depth={depth + 1} expanded={expanded} onToggle={onToggle} active={active} onOpen={onOpen} changeOf={changeOf} />
+            )}
+          </li>
+        ) : (
+          <li key={node.path}>
+            <button
+              type="button"
+              onClick={() => onOpen(node.path)}
+              aria-current={active === node.path}
+              title={node.path}
+              style={{ paddingLeft: depth * 14 + 28 }}
+              className={`flex w-full items-center gap-1.5 rounded py-1 pr-2 text-left font-mono text-xs ${active === node.path ? "bg-ground" : "hover:bg-ground"}`}
+            >
+              <FileIcon />
+              <span className="min-w-0 flex-1 truncate">{node.name}</span>
+              {changeOf(node.path) && <span className={`shrink-0 ${CHANGE_TONE[changeOf(node.path)!]}`}>{CHANGE_LABEL[changeOf(node.path)!]}</span>}
+            </button>
+          </li>
+        ),
+      )}
+    </ul>
+  );
+}
+
+/** 접힘·펼침을 나타내는 삼각형. 펼치면 90도 돌아 아래를 본다 */
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className={`size-3 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}>
+      <path d="M5 3l6 5-6 5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className="size-3.5 shrink-0 text-muted">
+      <path d="M1.5 3.5a1 1 0 0 1 1-1h3.4l1.2 1.4h5.4a1 1 0 0 1 1 1v7.1a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-8.5Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className="size-3.5 shrink-0 text-muted">
+      <path d="M4 1.5h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" strokeWidth="1.1" />
+      <path d="M9 1.5V4a1 1 0 0 0 1 1h2.5" fill="none" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  );
+}
+
+/**
+ * 줄 번호와 함께 보여 준다. 아직 강조하지 않은 줄과 강조하지 않는 파일은 평문으로 두고, 긴 줄은 가로로 스크롤한다.
+ * highlightLine이 있으면("테스트" 탭의 file:line 링크) 그 줄로 스크롤하고 배경을 잠깐 강조한다
+ */
+function CodeLines({ path, content, highlightLine }: { path: string; content: string; highlightLine?: number }) {
   const highlighted = useHighlightedCode(content, languageFor(path));
   const lines = useMemo(() => {
     const split = content.split("\n");
     if (split.at(-1) === "") split.pop();
     return split;
   }, [content]);
+
+  useEffect(() => {
+    if (!highlightLine) return;
+    document.getElementById(`code-line-${highlightLine}`)?.scrollIntoView({ block: "center" });
+  }, [path, highlightLine]);
+
   return (
     <pre className="min-w-max py-2 font-mono text-xs leading-5">
       {lines.map((line, index) => (
-        <CodeLine key={index} number={index + 1} text={line} tokens={highlighted?.[index]} />
+        <CodeLine key={index} number={index + 1} text={line} tokens={highlighted?.[index]} highlighted={index + 1 === highlightLine} />
       ))}
     </pre>
   );
 }
 
 /** 조각을 강조할 때마다 목록 전체가 다시 그려지므로, 이미 그린 줄은 건너뛴다 */
-const CodeLine = memo(function CodeLine({ number, text, tokens }: { number: number; text: string; tokens?: HighlightedLine }) {
+const CodeLine = memo(function CodeLine({ number, text, tokens, highlighted }: { number: number; text: string; tokens?: HighlightedLine; highlighted?: boolean }) {
   return (
-    <div className="flex">
+    <div id={`code-line-${number}`} className={`flex ${highlighted ? "bg-wait/20" : ""}`}>
       <span aria-hidden className="w-12 shrink-0 pr-3 text-right text-muted select-none">
         {number}
       </span>

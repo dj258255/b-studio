@@ -1,0 +1,17 @@
+{
+  // 실행용 빌드. Electron의 main·preload는 CommonJS로 돈다(preload는 샌드박스라 ESM을 못 쓴다).
+  // typecheck용 tsconfig.json은 base 그대로(noEmit·bundler) 두고, 여기서만 emit 설정을 연다
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "Node16",
+    "moduleResolution": "node16",
+    "verbatimModuleSyntax": false,
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true
+  },
+  "include": ["src"],
+  // 테스트는 실행 파일이 아니다
+  "exclude": ["src/**/*.test.ts"]
+}

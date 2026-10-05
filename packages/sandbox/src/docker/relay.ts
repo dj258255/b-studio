@@ -41,6 +41,12 @@ export interface BindMount {
   source: string;
   /** 컨테이너 안 절대 경로 */
   target: string;
+  /**
+   * 이 서비스가 실제로 일하는 하위 폴더(호스트 절대 경로, servicePaths로 알려줬을 때만).
+   * ADR-088 이후로는 여러 서비스가 같은 프로젝트 루트를 통째로 마운트해 source가 같아지므로,
+   * source 길이만으로는 더 좁게 겹치는 서비스를 가릴 수 없다 — 이 값으로 한 번 더 좁힌다
+   */
+  subroot?: string;
 }
 
 export interface RelayTarget {
@@ -51,15 +57,30 @@ export interface RelayTarget {
   files: string[];
 }
 
-/** `docker compose config --format json` 결과에서 바인드 마운트만 모은다 */
+/**
+ * `docker compose config --format json` 결과에서 바인드 마운트만 모은다.
+ * `servicePaths`(서비스 이름 → 프로젝트 루트 기준 상대 경로)를 주면, ADR-088처럼 여러 서비스가 같은 루트를
+ * 통째로 마운트해도 각 서비스의 subroot(실제 작업 폴더)를 함께 계산해 둔다
+ */
 export function bindMounts(
   services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }>,
   managed: ReadonlySet<string>,
+  servicePaths: Readonly<Record<string, string>> = {},
 ): BindMount[] {
   return Object.entries(services).flatMap(([service, spec]) =>
     (spec.volumes ?? [])
       .filter((volume) => volume.type === 'bind' && volume.source)
-      .map((volume) => ({ service, managed: managed.has(service), source: path.resolve(volume.source!), target: volume.target })),
+      .map((volume) => {
+        const source = path.resolve(volume.source!);
+        const servicePath = servicePaths[service];
+        return {
+          service,
+          managed: managed.has(service),
+          source,
+          target: volume.target,
+          ...(servicePath !== undefined ? { subroot: servicePath === '.' ? source : path.resolve(source, servicePath) } : {}),
+        };
+      }),
   );
 }
 
@@ -93,7 +114,7 @@ export function planRelay(projectRoot: string, changes: readonly FileChange[], m
     const target = action === 'move' ? entry.absolute : path.dirname(entry.absolute);
     const mount = mounts
       .filter((candidate) => isInside(candidate.source, target))
-      .sort((a, b) => Number(b.managed) - Number(a.managed) || b.source.length - a.source.length)[0];
+      .sort((a, b) => Number(b.managed) - Number(a.managed) || subrootScore(b, target) - subrootScore(a, target) || b.source.length - a.source.length)[0];
     if (!mount) continue;
 
     const containerPath = path.posix.join(mount.target, path.relative(mount.source, target).split(path.sep).join('/'));
@@ -104,6 +125,11 @@ export function planRelay(projectRoot: string, changes: readonly FileChange[], m
     plan.set(mount.service, targets);
   }
   return plan;
+}
+
+/** subroot가 target을 실제로 감싸면 그 길이를(더 좁을수록 큰 점수), 아니면(subroot가 없거나 target 밖이면) -1을 돌려준다 */
+function subrootScore(mount: BindMount, target: string): number {
+  return mount.subroot && isInside(mount.subroot, target) ? mount.subroot.length : -1;
 }
 
 function isInside(parent: string, target: string): boolean {

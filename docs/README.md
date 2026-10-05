@@ -20,9 +20,12 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 - [기여 가이드](../CONTRIBUTING.md) — 개발 명령, 변경 원칙, PR 체크리스트
 - [로드맵](../ROADMAP.md) — 현재 단계, 완료 조건, 예상과 실제
 - [변경 기록](../CHANGELOG.md) — 날짜별로 정리한 사용자 변경
+- [구현 상태와 일정](status.md) — 영역별 구현 상태와 만든 순서, 작업 방식
+- [공구함](toolkit.md) — 신뢰 장치별 역할·코드 위치·뒷받침하는 측정
 - [실험 기록](experiments/README.md) — 결정 전에 측정한 결과
 - [문서 양식](templates/adr.md) — ADR과 [실험 보고서](templates/experiment-report.md) 작성 틀
 - [검토 문서](research/2026-09-25-knowledge-sharing-and-model-handoff.md) — 결정 전 아이디어 검토(에이전트 간 지식 공유, 작업 중 모델 교체)
+- [토큰 줄이기 조사](research/2026-09-30-token-reduction-sources.md) — 빅테크 기술 블로그·오픈소스 에이전트 코드가 호출마다 다시 읽히는 문맥을 줄이는 방법, b-studio에 적용할 후보
 - [설계 결정 기록](decisions.md) — ADR-001부터 이어지는 선택과 트레이드오프
 - [검증 기록과 한계](verification.md) — 자동 검사, 실제 환경 검증, 확인하지 못한 범위
 

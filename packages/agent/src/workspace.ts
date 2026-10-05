@@ -5,6 +5,15 @@ import path from 'node:path';
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
 const DENIED_SEGMENTS = new Set(['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__']);
 const DENIED_FILES = [/^\.env(\..*)?$/];
+/**
+ * .env 계열이지만 비밀 값이 아니라 형식만 보여 주는 예시 파일. 막으면 에이전트가 ".env.example을 만들어 달라"는
+ * 요청을 처리하지 못했다(실사용). 실제 값이 든 .env·.env.local·.env.production 등은 그대로 막는다
+ */
+const ENV_TEMPLATE_FILE = /^\.env(\.[\w-]+)*\.(example|sample|template|dist)$/;
+
+function isDeniedFileName(segment: string): boolean {
+  return DENIED_FILES.some((pattern) => pattern.test(segment)) && !ENV_TEMPLATE_FILE.test(segment);
+}
 
 const MAX_READ_BYTES = 256 * 1024;
 const MAX_LIST_ENTRIES = 500;
@@ -218,16 +227,16 @@ export class Workspace {
   }
 }
 
-/** 경로의 어느 구간이든 .env·.env.* 이면 비밀 파일로 본다. Pi 확장도 같은 규칙으로 읽기를 막는다 */
+/** 경로의 어느 구간이든 .env·.env.* 이면 비밀 파일로 본다(.env.example 같은 예시 파일은 뺀다). Pi 확장도 같은 규칙으로 읽기를 막는다 */
 export function isSecretFile(file: string): boolean {
   return file
     .replaceAll('\\', '/')
     .split('/')
-    .some((segment) => DENIED_FILES.some((pattern) => pattern.test(segment)));
+    .some((segment) => isDeniedFileName(segment));
 }
 
 function isDenied(segment: string): boolean {
-  return DENIED_SEGMENTS.has(segment) || DENIED_FILES.some((pattern) => pattern.test(segment));
+  return DENIED_SEGMENTS.has(segment) || isDeniedFileName(segment);
 }
 
 function isInside(root: string, target: string): boolean {

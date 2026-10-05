@@ -581,6 +581,86 @@ describe('runAgent', () => {
     expect(result.metrics?.escalatedAt).toBeUndefined();
   });
 
+  it('서명이 반복되지 않아도 afterFailures번 실패하면 승격하고, 승격 뒤 예산만큼 더 시도한다', async () => {
+    const edit = { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] };
+    // 서명 규칙은 사실상 끄고(sameSignatureTimes 99) 실패 횟수 규칙만 본다.
+    // 기본 상한(3)을 다 쓴 지점에서 승격하므로, 예산이 없으면 이어 가지 못한다
+    const base = new ScriptedModelClient([edit, { text: '1' }, edit, { text: '2' }, edit, { text: '3' }]);
+    const big = new ScriptedModelClient([{ text: '승격 뒤 고쳤습니다.' }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, [false, false, false, true]),
+      client: base,
+      escalation: { to: 'sonnet', sameSignatureTimes: 99, afterFailures: 3, retryBudget: 2, client: big },
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result.status).toBe('done');
+    // 승격은 세 번째 실패(게이트 상한을 이미 넘긴 지점)에서 일어나고, 예산 2로 네 번째 시도가 가능해진다.
+    // verifyAttempts는 실패 횟수라 3이다(통과한 시도는 세지 않는다). 그 네 번째 시도를 승격 클라이언트가 맡았다
+    expect(result.metrics?.escalatedAt).toBe(3);
+    expect(result.verifyAttempts).toBe(3);
+    expect(big.requests).toHaveLength(1);
+    const escalated = events.filter((event): event is Extract<AgentEvent, { type: 'model_escalated' }> => event.type === 'model_escalated');
+    expect(escalated).toHaveLength(1);
+    expect(escalated[0]).toMatchObject({ to: 'sonnet', attempt: 3 });
+    // 승격이 준 안내에는 상한 소진 요약과 마지막 실패 보고가 함께 들어간다
+    expect(String(big.requests[0]!.messages.at(-1)!.content)).toContain('직전 검증 결과를 다시 보냅니다');
+  });
+
+  it('승격 뒤 예산을 다 쓰면 exhausted로 끝난다', async () => {
+    const edit = { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] };
+    const base = new ScriptedModelClient([edit, { text: '1' }, edit, { text: '2' }]);
+    // 승격 뒤 두 번 더 시도하고(예산 2) 그래도 실패하면 끝난다
+    const big = new ScriptedModelClient([{ text: '3' }, { text: '4' }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, Array.from({ length: 8 }, () => false)),
+      client: base,
+      escalation: { to: 'sonnet', sameSignatureTimes: 2, retryBudget: 2, client: big },
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    // 2번째 실패에서 승격 → 상한이 2 + 2 = 4가 되고, 네 번째 실패에서 끝난다
+    expect(result.status).toBe('failed');
+    expect(result.verifyAttempts).toBe(4);
+    expect(big.requests).toHaveLength(2);
+    expect(events.filter((event) => event.type === 'model_escalated')).toHaveLength(1);
+  });
+
+  it('예산이 0이면 상한을 넘긴 뒤 승격하지 못하고 지금처럼 실패한다', async () => {
+    const edit = { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] };
+    const base = new ScriptedModelClient([edit, { text: '1' }, edit, { text: '2' }, edit, { text: '3' }]);
+    const big = new ScriptedModelClient([{ text: '4' }]);
+    const events: AgentEvent[] = [];
+
+    const result = await runAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, Array.from({ length: 8 }, () => false)),
+      client: base,
+      // afterFailures가 상한(기본 3)보다 큰 지점에서 걸리고 예산이 없으면, 올려도 시도할 기회가 없다
+      escalation: { to: 'sonnet', sameSignatureTimes: 99, afterFailures: 3, retryBudget: 0, client: big },
+      fetcher: async () => contract,
+      onEvent: collect(events),
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.verifyAttempts).toBe(3);
+    expect(big.requests).toHaveLength(0);
+    // 이어 갈 수 없으면 승격으로 세지 않는다
+    expect(events.some((event) => event.type === 'model_escalated')).toBe(false);
+    expect(result.metrics?.escalatedAt).toBeUndefined();
+  });
+
   it('승격으로 클라이언트가 바뀌면 모델별 사용량을 나누어 남긴다', async () => {
     const baseScripted = new ScriptedModelClient([
       { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }] },
@@ -749,5 +829,27 @@ describe('runAgent', () => {
         else process.env.B_STUDIO_CONTEXT_CLEARING = previous;
       }
     });
+  });
+});
+
+describe('runAgent 프로젝트 지침 주입(ADR-077)', () => {
+  it('AGENTS.md가 있으면 시스템 프롬프트에 명확히 구분된 절로 넣고, 그 글자 수를 metrics.guideChars에 남긴다', async () => {
+    await writeFile(path.join(project.root, 'AGENTS.md'), '- pnpm test 대신 scripts/web-test.sh를 실행\n');
+    const client = new ScriptedModelClient([{ text: '설명했습니다.' }]);
+
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+
+    expect(client.requests[0]!.system).toContain('[b-studio project guide: AGENTS.md]');
+    expect(client.requests[0]!.system).toContain('scripts/web-test.sh');
+    expect(result.metrics!.guideChars).toBe('- pnpm test 대신 scripts/web-test.sh를 실행\n'.length);
+  });
+
+  it('AGENTS.md가 없으면 아무 절도 더하지 않고 metrics.guideChars도 없다', async () => {
+    const client = new ScriptedModelClient([{ text: '설명했습니다.' }]);
+
+    const result = await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client, fetcher: async () => contract });
+
+    expect(client.requests[0]!.system).not.toContain('[b-studio project guide');
+    expect(result.metrics!.guideChars).toBeUndefined();
   });
 });

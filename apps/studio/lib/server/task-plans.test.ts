@@ -8,7 +8,15 @@ import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
-type Session = { id: string; status: 'ready'; workDir: string; checkpoints: Checkpoint[]; bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }> };
+type Session = {
+  id: string;
+  projectId: string;
+  owner: string;
+  status: 'ready';
+  workDir: string;
+  checkpoints: Checkpoint[];
+  bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }>;
+};
 type SendOptions = {
   allowBreaking: boolean;
   by?: string;
@@ -16,6 +24,7 @@ type SendOptions = {
   steering?: boolean;
   scriptedTurns?: Array<{ toolCalls?: Array<{ name: string; input: { path: string; content?: string } }> }>;
   board?: BoardAccess;
+  verify?: 'light';
 };
 
 /** 검증기가 낸 실패 서명 하나를 담은 이벤트(레인 실패 때 기록에 남긴다). S5가 이걸 읽어 게시한다 */
@@ -26,7 +35,7 @@ function failureEvent(runId: string): StudioEvent {
     event: {
       type: 'verify_result',
       text: '',
-      report: { ok: false, sync: { elapsedMs: 1 }, restarted: [{ service: 'web', ready: false, error: 'cannot find symbol at line 42' }], contracts: [], unverifiedFiles: [], secretLeaks: [] },
+      report: { ok: false, sync: { elapsedMs: 1 }, restarted: [{ service: 'web', ready: false, error: 'cannot find symbol at line 42' }], contracts: [], unverifiedFiles: [], secretLeaks: [], skippedOff: [] },
     },
   } as StudioEvent;
 }
@@ -44,7 +53,9 @@ const fake = vi.hoisted(() => ({
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
   /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지, 레인에만 backend가 붙는지 확인한다 */
-  sessionOptions: [] as Array<{ modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] }>,
+  sessionOptions: [] as Array<{ modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string }>,
+  /** commitPendingWorkingCopyDocs를 부른 세션 id와 메시지(순서대로). sourceSessionId가 있는 계획만 부른다 */
+  docsCommitted: [] as Array<{ sessionId: string; message: string }>,
   /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
   bootNetwork: [] as Array<{ service: string; rxBytes: number; txBytes: number }>,
   listeners: new Map<string, Set<(event: StudioEvent) => void>>(),
@@ -58,6 +69,8 @@ const fake = vi.hoisted(() => ({
   sourceFiles: {} as Record<string, string>,
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   stopped: [] as string[],
+  /** stopAndDeleteSession을 부른 세션 id들(순서 그대로, 계획·플릿을 지울 때 구성원 세션도 지우는지 확인한다) */
+  stopAndDeleted: [] as string[],
   stopOrder: { integrationCreatedAfterStops: false },
   /** 원본 저장소의 상태. originUrl이 없으면 원격 저장소가 아니다 */
   source: { base: 'main', originUrl: 'git@github.com:acme/orders.git', dirtyFiles: 0, subdir: '' } as { base: string; originUrl?: string; dirtyFiles: number; subdir: string } | undefined,
@@ -73,6 +86,12 @@ const fake = vi.hoisted(() => ({
   modelCalls: 0,
   /** 그중 레인 사이 계약 호출 횟수(B_STUDIO_PLAN_CONTRACTS) */
   contractCalls: 0,
+  /** 로컬 Claude Code 호출(계획·계약 공용)이 만든 ask의 옵션과, 실제로 불린 횟수 */
+  claudeCodeAsks: [] as Array<{ cwd: string; model?: string; effort?: string }>,
+  claudeCodeCalls: 0,
+  /** 로컬 CLI가 돌려주는 usage. 어댑터를 거치지 않고 ask가 직접 주므로 이미 세션 지표 모양(camelCase)이다 */
+  claudeCodePlanUsage: { inputTokens: 21, outputTokens: 7, cacheReadTokens: 3, cacheWriteTokens: 0 },
+  claudeCodeContractUsage: { inputTokens: 40, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
   /** 계약 호출이 돌려주는 텍스트와 usage */
   contractText: '{"contracts":[{"body":"GET /api/orders → 200 JSON 배열","refs":["api"]}]}',
   contractUsage: { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
@@ -86,6 +105,8 @@ const fake = vi.hoisted(() => ({
     metrics: { modelCalls: 2, maxContextTokens: 9, modelMs: 5, toolMs: 6, gateMs: 7 },
     durationMs: 11,
   },
+  /** 이 서버에서 고를 수 있는 백엔드(setLaneBackend·selectableLaneBackends가 읽는다). 허용 목록을 좁히는 테스트만 바꾼다 */
+  allowedBackends: new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']),
 }));
 
 // 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다
@@ -107,6 +128,13 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   };
 });
 
+// localFolderAllowed()가 실제 gh CLI를 부르지 않도록 꺼 둔다(gh CLI 대체는 repository-panel.test.ts가 따로 검증한다).
+// 이슈 올리기 테스트는 모두 환경 변수(B_STUDIO_GITHUB_TOKEN)만으로 토큰 유무를 가린다
+vi.mock('./repo-token', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./repo-token')>();
+  return { ...actual, localFolderAllowed: () => false };
+});
+
 vi.mock('./model-registry', () => ({
   listModelOptions: () => [{ id: 'model-a', label: 'Model A', enabled: true, configured: true, capabilities: ['tools'] }],
   modelById: (id: string) => ({ id }),
@@ -124,12 +152,38 @@ vi.mock('./model-registry', () => ({
   }),
 }));
 
+// 로컬 Claude Code 구독으로 계획·계약을 받는 경로. 실제 SDK·모델 호출 없이 옵션과 호출 수만 본다
+vi.mock('./claude-code-ask', () => ({
+  claudeCodeAsk: (options: { cwd: string; model?: string; effort?: string }) => {
+    fake.claudeCodeAsks.push(options);
+    return async (request: { system: string; user: string }) => {
+      // 계약과 계획은 시스템 프롬프트로 갈린다(제품·벤치가 같은 문구를 쓴다)
+      if (request.system.startsWith('You write the interface contracts')) {
+        fake.contractCalls += 1;
+        return { text: fake.contractText, usage: fake.claudeCodeContractUsage };
+      }
+      fake.claudeCodeCalls += 1;
+      return { text: JSON.stringify(fake.plan), usage: fake.claudeCodePlanUsage };
+    };
+  },
+}));
+
 vi.mock('./projects', () => ({
   findProject: async () => fake.project,
 }));
 
 vi.mock('./sessions', () => ({
-  createSession: async (_projectId: string, _owner: string, _workspace: string, options: { modelId?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[] } = {}) => {
+  allowedBackends: () => fake.allowedBackends,
+  commitPendingWorkingCopyDocs: async (sessionId: string, message: string) => {
+    fake.docsCommitted.push({ sessionId, message });
+    return undefined;
+  },
+  createSession: async (
+    projectId: string,
+    owner: string,
+    _workspace: string,
+    options: { modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string } = {},
+  ) => {
     fake.sessionOptions.push(options);
     const id = `session-${++fake.counter}`;
     // 두 레인 세션이 모두 멈춘 뒤에 만들어진 세션이면 통합 세션이다
@@ -141,12 +195,24 @@ vi.mock('./sessions', () => ({
       mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
       writeFileSync(path.join(workDir, file), content);
     }
-    fake.sessions.set(id, { id, status: 'ready', workDir, bootNetwork: fake.bootNetwork, checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }] });
+    fake.sessions.set(id, {
+      id,
+      projectId,
+      owner,
+      status: 'ready',
+      workDir,
+      bootNetwork: fake.bootNetwork,
+      checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }],
+    });
     return { id };
   },
   getSnapshot: (id: string) => fake.sessions.get(id),
   stopSession: async (id: string) => {
     fake.stopped.push(id);
+  },
+  stopAndDeleteSession: async (id: string) => {
+    fake.stopAndDeleted.push(id);
+    fake.sessions.delete(id);
   },
   subscribe: (id: string, listener: (event: StudioEvent) => void) => {
     // 실제 세션과 같이 지금까지의 기록을 먼저 보낸다(레인 조율이 실패 서명을 읽는 경로)
@@ -213,7 +279,8 @@ vi.mock('./sessions', () => ({
 }));
 
 import { StudioError } from './errors';
-import { approveTaskPlan, createTaskPlan, getTaskPlan, rejectTaskPlan } from './task-plans';
+import { clearRepositoryTokenCache } from './repo-token';
+import { approveTaskPlan, createTaskPlan, deleteTaskPlan, getTaskPlan, planRequirementIds, rejectTaskPlan, selectableLaneBackends, setLaneBackend } from './task-plans';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-task-plans-'));
 const saved = {
@@ -228,11 +295,14 @@ const saved = {
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `[id:${id}] ${id} 작업`, paths, dependsOn });
 
 beforeEach(() => {
+  // cachedRepositoryToken의 캐시(ADR-107)가 앞 테스트의 B_STUDIO_GITHUB_TOKEN을 다음 테스트로 새게 하지 않는다
+  clearRepositoryTokenCache();
   fake.root = mkdtempSync(path.join(directory, 'work-'));
   fake.counter = 0;
   fake.project = { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] };
   fake.sessions.clear();
   fake.sessionOptions = [];
+  fake.docsCommitted = [];
   fake.bootNetwork = [];
   fake.listeners.clear();
   fake.history.clear();
@@ -240,9 +310,12 @@ beforeEach(() => {
   fake.sourceFiles = {};
   fake.sends = [];
   fake.stopped = [];
+  fake.stopAndDeleted = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
   fake.modelCalls = 0;
   fake.contractCalls = 0;
+  fake.claudeCodeAsks = [];
+  fake.claudeCodeCalls = 0;
   fake.contractText = '{"contracts":[{"body":"GET /api/orders → 200 JSON 배열","refs":["api"]}]}';
   fake.contractUsage = { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   fake.integration = 'done';
@@ -252,6 +325,7 @@ beforeEach(() => {
   fake.issueInputs = [];
   fake.subIssues = [];
   fake.failIssue = false;
+  fake.allowedBackends = new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']);
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
   // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
@@ -325,6 +399,34 @@ function statusOf(action: () => unknown): number {
 }
 
 describe('작업 분해 실행', () => {
+  // 이 둘은 반드시 이 describe의 첫 두 테스트여야 한다 — 가짜 세션 id("session-N")는 테스트마다 1부터 다시 세고
+  // (fake.counter), plans 기록은 파일 전체 테스트가 도는 동안 지워지지 않아(ADR-115이 쓰는 plans 조회가 사람이
+  // 이슈 수를 묻는 integrationIssues와 같은 방식이다) 뒤에서 도는 2레인 테스트와 같은 session-3을 또 쓰면
+  // planRequirementIds가 먼저 쌓인(더 오래된) 계획을 잘못 찾는다.
+  it('통합 세션 id로 그 계획의 레인 작업·요청 글이 언급한 요구사항 id를 모은다(ADR-115, 중복 없이)', async () => {
+    fake.plan = {
+      tasks: [
+        { id: 'a', title: '[R2] 로그인 화면', request: '[id:a] [R2] 로그인 화면을 만들어줘', paths: ['web/a'], dependsOn: [] },
+        { id: 'b', title: '[R5] 주문 목록', request: '[id:b] [R5] 주문 목록 화면을 만들어줘(R2 로그인 뒤에만 보인다)', paths: ['web/b'], dependsOn: [] },
+      ],
+    };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    const plan = await run({ projectId: 'orders', request: '요구사항 2개 병렬 구현', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(planRequirementIds(plan.integration!.sessionId!)).toEqual(['R2', 'R5']);
+  });
+
+  it('통합 세션이 아니거나(계획을 못 찾음) 레인·요청 글에 요구사항 언급이 없으면 빈 배열이다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const plan = await run({ projectId: 'orders', request: '요구사항 언급 없는 요청', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(planRequirementIds(plan.integration!.sessionId!)).toEqual([]);
+    expect(planRequirementIds('no-such-session')).toEqual([]);
+  });
+
   it('이어진 작업은 한 세션에서 쓰기 범위를 걸어 차례로, 독립 레인은 다른 세션에서 돌리고 결과를 새 세션에 다시 적용한다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
     fake.writes = { a1: { 'web/a/one.md': 'one' }, a2: { 'web/a/two.md': 'two' }, b: { 'web/b/one.md': 'b' } };
@@ -353,6 +455,70 @@ describe('작업 분해 실행', () => {
     // 레인 세션은 통합 샌드박스를 띄우기 전에 내려 동시에 뜨는 샌드박스를 레인 수로 제한하고, 통합 세션은 검토용으로 남긴다
     expect([...new Set(fake.stopped)].sort()).toEqual([laneA.sessionId, laneB.sessionId].sort());
     expect(fake.stopOrder.integrationCreatedAfterStops).toBe(true);
+  });
+
+  it('세션에서 "나눠서 병렬로 하기"로 만든 계획은 레인·통합이 그 세션의 최신 체크포인트에서 시작한다(ADR-096)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    // 이미 떠 있는 원본 세션(같은 프로젝트·소유자)을 createSession 없이 직접 등록한다
+    fake.sessions.set('origin-1', {
+      id: 'origin-1',
+      projectId: 'orders',
+      owner: 'kim',
+      status: 'ready',
+      workDir: path.join(fake.root, 'origin-1'),
+      checkpoints: [{ sha: 'origin-sha', shortSha: 'origin', message: 'docs: 요구사항을 정리한다', createdAt: '', files: ['docs/requirements.md'] }],
+    });
+
+    const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'origin-1' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.sourceSessionId).toBe('origin-1');
+    // 레인 둘과 통합 하나, 모두 origin-1에서 시작한다
+    expect(fake.sessionOptions.filter((options) => options.seedFromSessionId === 'origin-1')).toHaveLength(3);
+    // 레인을 시작하기 전에 원본 세션에 남아 있을 수 있는 문서 변경을 먼저 체크포인트로 남긴다
+    expect(fake.docsCommitted.map((entry) => entry.sessionId)).toEqual(['origin-1']);
+  });
+
+  it('설계 파이프라인(ADR-100): 요청이 언급한 요구사항을 다루는 설계가 승인되지 않았으면 레인을 만들기 전에 409로 막는다', async () => {
+    const workDir = path.join(fake.root, 'origin-2');
+    mkdirSync(path.join(workDir, 'docs/design'), { recursive: true });
+    writeFileSync(
+      path.join(workDir, 'docs/design/01-메모.meta.json'),
+      JSON.stringify({ path: 'docs/design/01-메모.md', number: 1, title: '메모', requirementIds: ['R4'], bundles: [], status: 'draft', createdAt: '', createdBy: 'kim' }),
+    );
+    fake.sessions.set('origin-2', { id: 'origin-2', projectId: 'orders', owner: 'kim', status: 'ready', workDir, checkpoints: [] });
+
+    await expect(createTaskPlan({ projectId: 'orders', request: '[R4] 메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'origin-2' })).rejects.toThrow(
+      '설계 승인 전에는 구현을 시작할 수 없습니다',
+    );
+    // 레인·통합 세션을 하나도 만들지 않는다(승인 전에는 아예 시작하지 않는다)
+    expect(fake.sessionOptions).toEqual([]);
+  });
+
+  it('세션에서 시작하지 않은 계획(화면의 "계획 만들기" 탭)은 지금처럼 프로젝트 원본에서 시작한다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(plan.sourceSessionId).toBeUndefined();
+    expect(fake.sessionOptions.every((options) => options.seedFromSessionId === undefined)).toBe(true);
+    expect(fake.docsCommitted).toEqual([]);
+  });
+
+  it('다른 프로젝트·다른 소유자의 세션을 넘기면 404로 거부하고 레인을 시작하지 않는다', async () => {
+    fake.sessions.set('other-project', { id: 'other-project', projectId: 'web-only', owner: 'kim', status: 'ready', workDir: fake.root, checkpoints: [] });
+    await expect(createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'other-project' })).rejects.toThrow(
+      '넘긴 세션을 찾을 수 없습니다',
+    );
+
+    fake.sessions.set('other-owner', { id: 'other-owner', projectId: 'orders', owner: 'lee', status: 'ready', workDir: fake.root, checkpoints: [] });
+    await expect(createTaskPlan({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim', sourceSessionId: 'other-owner' })).rejects.toThrow(
+      '넘긴 세션을 찾을 수 없습니다',
+    );
+    expect(fake.sessions.size).toBe(2);
   });
 
   it('병렬 레인의 쓰기 범위가 겹치는 계획은 세션을 만들기 전에 실패시킨다', async () => {
@@ -481,6 +647,42 @@ describe('작업 분해 실행', () => {
     expect(fake.sessionOptions[2]!.extraPageChecks).toEqual(pageChecks);
   });
 
+  // verify light는 레인·통합 실행에 그대로 넘긴다. S4 수리도 같은 verify로 돈다
+  it('verify light면 레인·통합·S4 수리 실행에 가볍게 확인을 넘긴다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    fake.integration = 'failed';
+
+    const plan = await run({
+      projectId: 'orders',
+      request: '가볍게 확인',
+      modelId: 'model-a',
+      owner: 'kim',
+      verify: 'light',
+      coordination: { strategy: 'S4' },
+    });
+
+    expect(plan.status).toBe('done');
+    // 계획이 기억해 레인·통합 실행이 같은 값을 쓴다
+    expect(plan.verify).toBe('light');
+    const laneSends = fake.sends.filter((send) => !send.options.scriptedTurns && !isRepair(send.request));
+    expect(laneSends.length).toBeGreaterThan(0);
+    expect(laneSends.every((send) => send.options.verify === 'light')).toBe(true);
+    // 통합 실행과 S4 수리도 같은 값을 받는다
+    expect(fake.sends.find((send) => send.options.scriptedTurns)!.options.verify).toBe('light');
+    expect(fake.sends.find((send) => isRepair(send.request))!.options.verify).toBe('light');
+  });
+
+  it('기본(full)은 verify를 넘기지 않는다(지금과 같다)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '전체 검증', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.verify).toBeUndefined();
+    expect(fake.sends.every((send) => send.options.verify === undefined)).toBe(true);
+  });
+
   it('고정 계획의 레인 backend·model로 레인 세션을 만들고, 레인 뷰에 남긴다', async () => {
     const lane = (id: string, paths: string[], backend: string, model?: string) => ({ ...task(id, paths), backend, ...(model ? { model } : {}) });
     fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' }, c: { 'web/c/one.md': 'c' } };
@@ -539,6 +741,7 @@ describe('작업 분해 실행', () => {
     expect(plan.metrics!.bootRxBytesTotal).toBe(3_000);
     expect(typeof plan.metrics!.endToEndMs).toBe('number');
   });
+
 });
 
 describe('고정 계획(presetPlan)', () => {
@@ -582,10 +785,15 @@ describe('고정 계획(presetPlan)', () => {
     expect(fake.modelCalls).toBe(0);
   });
 
-  it('presetPlan이 없으면 claude-code 모드에서 거부한다', async () => {
-    process.env.B_STUDIO_MODE = 'claude-code';
-    await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow('B_STUDIO_MODE=api');
-    expect(fake.modelCalls).toBe(0);
+  it('presetPlan이 없으면 계획 호출 경로가 없는 모드(codex·commandcode·opencode·demo)에서 거부한다', async () => {
+    for (const mode of ['codex', 'commandcode', 'opencode', 'demo']) {
+      process.env.B_STUDIO_MODE = mode;
+
+      // claude-code는 이제 허용된다(로컬 구독으로 계획을 받는다). 그 밖의 모드는 이유와 함께 거부한다
+      await expect(createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' })).rejects.toThrow(`(지금 모드: ${mode})`);
+      expect(fake.modelCalls).toBe(0);
+      expect(fake.claudeCodeCalls).toBe(0);
+    }
   });
 
   it('presetPlan이 있어도 demo 모드에서는 거부한다', async () => {
@@ -865,6 +1073,101 @@ describe('레인 조율 전략', () => {
     expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S3', topology: 'star' });
   });
 
+  it('S3 요청 안내는 게시를 읽기보다 먼저 하도록 말한다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: 'S3 안내 순서', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
+
+    expect(plan.status).toBe('done');
+    const laneSend = fake.sends.find((send) => send.options.board)!;
+    expect(laneSend.request).toContain('read_notes보다 먼저 post_note(contract)로 게시하세요');
+  });
+
+  it('S3에서 엮인 레인이 아직 계약을 안 내면 read_notes에 안내를 붙이고, 내면 사라진다(이슈 #393, E11)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S3 읽기 타이밍',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'mesh' },
+    });
+    expect(plan.status).toBe('done');
+
+    // 레인에 실제로 넘긴 게시판 래퍼로 각 레인의 read_notes를 흉내 낸다(시크릿 가림 테스트와 같은 방식)
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    const lane1 = laneSends.find((send) => send.options.board!.lane === 'lane-1')!.options.board!;
+    const lane2 = laneSends.find((send) => send.options.board!.lane === 'lane-2')!.options.board!;
+
+    // lane-2가 아직 아무 계약도 안 냈으면 lane-1의 읽기에 안내가 붙는다
+    const before = lane1.read({});
+    expect(before.notice).toBe('[조율] lane-2가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요');
+
+    // lane-2가 계약을 내면 그다음 읽기부터는 안내가 사라진다
+    const posted = lane2.post({ kind: 'contract', body: 'GET /orders → 200 JSON', refs: ['api/OrdersController.java'] });
+    expect(posted.ok).toBe(true);
+    const after = lane1.read({});
+    expect(after.notice).toBeUndefined();
+    expect(after.notes.map((note) => note.body)).toContain('GET /orders → 200 JSON');
+  });
+
+  it('S3 star topology에서도 안내 로직은 topology와 무관하게 동작한다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S3 star 안내',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S3', topology: 'star' },
+    });
+    expect(plan.status).toBe('done');
+
+    const laneSends = fake.sends.filter((send) => send.options.board);
+    const lane1 = laneSends.find((send) => send.options.board!.lane === 'lane-1')!.options.board!;
+    const lane2 = laneSends.find((send) => send.options.board!.lane === 'lane-2')!.options.board!;
+
+    // lane-2가 계약을 내도 star에서는 lane-1이 그 메모를 직접 읽지 못한다(topology가 가린다)
+    lane2.post({ kind: 'contract', body: 'GET /orders', refs: ['api/Orders.java'] });
+    const after = lane1.read({});
+    expect(after.notes).toHaveLength(0);
+    // 그래도 "게시했다"는 사실은 안내 로직이 topology와 무관하게 보므로 안내는 사라진다
+    expect(after.notice).toBeUndefined();
+  });
+
+  it('S2는 레인이 돌기 전에 계약을 미리 게시하므로 안내가 붙지 않는다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    const contract = { body: 'GET /api/orders → 200 JSON', refs: ['api'] };
+
+    const plan = await run({
+      projectId: 'orders',
+      request: 'S2 안내 없음',
+      modelId: 'model-a',
+      owner: 'kim',
+      coordination: { strategy: 'S2', contracts: [contract] },
+    });
+    expect(plan.status).toBe('done');
+
+    const laneSend = fake.sends.find((send) => send.options.board)!.options.board!;
+    expect(laneSend.read({}).notice).toBeUndefined();
+  });
+
+  it('S5는 레인이 계약을 쓰지 않으므로 안내가 붙지 않는다(이슈 #393)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: 'S5 안내 없음', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S5' } });
+
+    expect(plan.status).toBe('done');
+    const laneSend = fake.sends.find((send) => send.options.board)!.options.board!;
+    expect(laneSend.read({}).notice).toBeUndefined();
+  });
+
   it('S5는 작업이 끝날 때마다 검증 실패 서명을 플랫폼이 게시하고 모델 쓰기를 끈다', async () => {
     fake.plan = { tasks: [task('a', ['web/a'])] };
     fake.writes = { a: 'fail' };
@@ -1120,6 +1423,8 @@ function laneView(
 /** 모듈 내부 캐시를 비우고 다시 읽어, 서버가 다시 시작된 것과 같은 상태를 만든다 */
 async function restart(): Promise<typeof import('./task-plans')> {
   vi.resetModules();
+  // 계획 상태는 전역에 있다(개발 서버의 페이지·API가 같은 상태를 보게). 재시작을 흉내 내려면 전역 상태도 비운다
+  delete (globalThis as { __bStudioTaskPlans?: unknown }).__bStudioTaskPlans;
   return import('./task-plans');
 }
 
@@ -1252,5 +1557,270 @@ describe('승인 뒤 이슈로 올리기', () => {
     const plan = read('plan-issues-done', 'kim');
     expect(plan.issues?.tracking?.number).toBe(9);
     expect(plan.issues?.tasks.a?.number).toBe(8);
+  });
+});
+
+describe('로컬 Claude Code로 계획 받기', () => {
+  const optionKeys = ['B_STUDIO_MODE', 'B_STUDIO_CLAUDE_CODE_MODEL'] as const;
+  const before = Object.fromEntries(optionKeys.map((key) => [key, process.env[key]]));
+
+  afterAll(() => {
+    for (const key of optionKeys) {
+      const value = before[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('API 키 없이 계획을 받고, 기록에는 그 CLI 모델 id를 남긴다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    process.env.B_STUDIO_CLAUDE_CODE_MODEL = ' sonnet ';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '두 화면 추가', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    // 모델 레지스트리(유료 API 키)는 부르지 않는다 — 로컬 Claude Code 구독으로만 부른다
+    expect(fake.modelCalls).toBe(0);
+    expect(fake.claudeCodeCalls).toBe(1);
+    // 이어서 하는 계획(resume)도 같은 규칙을 타도록 기록에 CLI 모델 id가 남는다(앞뒤 공백은 떼고)
+    expect(plan.modelId).toBe('local-cli:sonnet');
+    expect(fake.claudeCodeAsks[0]).toMatchObject({ model: 'sonnet' });
+    // 계획 호출 토큰은 기존 계획 지표에 그대로 들어간다
+    expect(plan.planning?.usage).toEqual({ inputTokens: 21, outputTokens: 7, cacheReadTokens: 3, cacheWriteTokens: 0 });
+  });
+
+  it('모델을 정하지 않았으면 계정 기본 모델로 부르고 기록은 local-cli:default다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    delete process.env.B_STUDIO_CLAUDE_CODE_MODEL;
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '한 화면', owner: 'kim' });
+
+    expect(plan.modelId).toBe('local-cli:default');
+    expect(fake.claudeCodeAsks[0]?.model).toBeUndefined();
+  });
+
+  it('세션에서 이어받은 모델·노력 단계를 계획 호출과 레인·통합 세션에 그대로 넘긴다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    // 서버 기본 환경 변수는 다른 모델을 가리키지만, 넘긴 modelId가 이긴다(세션에서 이어받은 값이 우선이어야 한다)
+    process.env.B_STUDIO_CLAUDE_CODE_MODEL = 'haiku';
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '세션 모델 이어받기', owner: 'kim', modelId: 'sonnet', effort: 'medium' });
+
+    expect(plan.status).toBe('done');
+    // 기록에는 접두어가 붙지만(local-cli:sonnet), 계획 호출에는 별칭과 노력 단계를 그대로 넘긴다
+    expect(plan.modelId).toBe('local-cli:sonnet');
+    expect(plan.effort).toBe('medium');
+    expect(fake.claudeCodeAsks[0]).toMatchObject({ model: 'sonnet', effort: 'medium' });
+    // 레인·통합 세션에는 기록용 접두어(local-cli:)를 뗀 실제 별칭만 넘긴다 — 접두어가 그대로 가면 세션이 서버 기본으로 떨어진다(버그였다)
+    expect(fake.sessionOptions.length).toBeGreaterThan(0);
+    for (const options of fake.sessionOptions) {
+      expect(options.modelId).toBe('sonnet');
+      expect(options.effort).toBe('medium');
+    }
+  });
+
+  it('세션에서 "기본"을 이어받으면(빈 문자열) 레인·통합 세션에 모델을 강제하지 않는다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    delete process.env.B_STUDIO_CLAUDE_CODE_MODEL;
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+
+    const plan = await run({ projectId: 'orders', request: '기본 이어받기', owner: 'kim', modelId: '' });
+
+    expect(plan.modelId).toBe('local-cli:default');
+    for (const options of fake.sessionOptions) expect(options.modelId).toBeUndefined();
+  });
+
+  it('계약도 같은 호출로 받는다(B_STUDIO_PLAN_CONTRACTS=on)', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    try {
+      const plan = await run({ projectId: 'orders', request: '두 화면', owner: 'kim' });
+
+      // 계획 한 번 + 계약 한 번, 둘 다 같은 공용 함수(같은 ask 옵션)를 쓴다
+      expect(fake.claudeCodeCalls).toBe(1);
+      expect(fake.contractCalls).toBe(1);
+      expect(plan.contracts).toMatchObject({ source: 'model', count: 1 });
+      expect(plan.contracts?.usage).toEqual(fake.claudeCodeContractUsage);
+    } finally {
+      delete process.env.B_STUDIO_PLAN_CONTRACTS;
+    }
+  });
+
+});
+
+describe('deleteTaskPlan', () => {
+  it('실행·통합·계획 짜는 중이면 지우지 않는다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: 'fail', b: { 'web/b/one.md': 'b' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    const waiting = await awaiting(created.id);
+    expect(waiting.status).toBe('awaiting_approval');
+    approveTaskPlan(created.id, 'kim');
+    // 승인 직후에는 레인이 running 상태다(레인 하나가 실패로 끝나기 전)
+    await expect(deleteTaskPlan(created.id, 'kim')).rejects.toThrow(/진행 중인 작업 계획/);
+    await finished(created.id);
+  });
+
+  it('승인 대기 계획은 세션이 아직 없어 지우면 기록만 사라진다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    await deleteTaskPlan(created.id, 'kim');
+
+    expect(fake.stopAndDeleted).toEqual([]);
+    expect(() => getTaskPlan(created.id, 'kim')).toThrow('찾을 수 없습니다');
+    expect(() => readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${created.id}.json`), 'utf8')).toThrow();
+  });
+
+  it('내 계획이 아니면 지울 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    await expect(deleteTaskPlan(created.id, 'mallory')).rejects.toThrow(/볼 수 없습니다/);
+  });
+
+  it('끝난 계획을 지우면 레인·통합 세션 기록도 함께 지운다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const plan = await run({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    expect(plan.status).toBe('done');
+    const laneSessionIds = plan.lanes.map((lane) => lane.sessionId!);
+    const integrationId = plan.integration!.sessionId!;
+
+    await deleteTaskPlan(plan.id, 'kim');
+
+    expect(fake.stopAndDeleted.sort()).toEqual([...laneSessionIds, integrationId].sort());
+    expect(() => getTaskPlan(plan.id, 'kim')).toThrow('찾을 수 없습니다');
+    expect(() => readFileSync(path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`), 'utf8')).toThrow();
+  });
+
+  it('없는 계획은 404로 알린다', async () => {
+    await expect(deleteTaskPlan('nope', 'kim')).rejects.toThrow(/찾을 수 없습니다/);
+  });
+});
+
+describe('레인 백엔드 고르기 (이슈 #398)', () => {
+  it('승인 대기 중에 레인마다 다른 백엔드·모델·노력을 고르면 그 레인 세션만 그 백엔드로 뜨고 통합은 그대로 간다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '레인별 백엔드', modelId: 'model-a', owner: 'kim' });
+    const waiting = await awaiting(created.id);
+    expect(waiting.status).toBe('awaiting_approval');
+    expect(waiting.lanes.map((lane) => lane.id)).toEqual(['lane-1', 'lane-2']);
+    // 모델이 만든 계획은 승인 전까지 레인에 backend가 없다(세션과 같음 — 상속, 지금까지의 동작)
+    expect(waiting.lanes.every((lane) => lane.backend === undefined)).toBe(true);
+
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet', effort: 'high' });
+    setLaneBackend(created.id, 'kim', 'lane-2', { backend: 'commandcode' });
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    // 레인 뷰에 고른 backend·model·effort가 남는다(화면·토큰 보고서가 이 값을 그대로 보여준다)
+    expect(plan.lanes.map((lane) => [lane.id, lane.backend, lane.model, lane.effort])).toEqual([
+      ['lane-1', 'claude-code', 'sonnet', 'high'],
+      ['lane-2', 'commandcode', undefined, undefined],
+    ]);
+    // 레인 세션은 그 레인의 backend·model·effort로 떴다
+    const laneA = fake.sessionOptions.find((options) => options.backend === 'claude-code');
+    expect(laneA?.modelId).toBe('sonnet');
+    expect(laneA?.effort).toBe('high');
+    expect(fake.sessionOptions.find((options) => options.backend === 'commandcode')).toBeDefined();
+    // 통합 세션은 계획 기본(서버 모드)이라 backend가 없다 — 레인 2개 + 통합 1개, 통합이 마지막
+    expect(fake.sessionOptions).toHaveLength(3);
+    expect(fake.sessionOptions[2]!.backend).toBeUndefined();
+  });
+
+  it('승인 대기가 아니면(이미 승인됐으면) 레인 백엔드를 바꿀 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    approveTaskPlan(created.id, 'kim');
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code' }))).toBe(409);
+    await finished(created.id);
+  });
+
+  it('모르는 레인 id면 404', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-9', { backend: 'claude-code' }))).toBe(404);
+  });
+
+  it('모르는 백엔드 문자열이면 400', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'openai' }))).toBe(400);
+  });
+
+  it('이 서버가 허용하지 않는 백엔드면 400을 한국어 이유와 함께 던진다', async () => {
+    fake.allowedBackends = new Set(['api']);
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'codex' })).toThrow('이 서버에서 쓸 수 없는 백엔드입니다: codex');
+  });
+
+  it('모델 이름이 너무 길면 400', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'x'.repeat(121) }))).toBe(400);
+  });
+
+  it('모르는 노력 단계는 조용히 버린다(세션 이어받기의 asEffort와 같은 규칙)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    const plan = setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', effort: 'ultra' });
+    expect(plan.lanes[0]!.effort).toBeUndefined();
+  });
+
+  it('backend를 비우면(세션과 같음) 레인·작업의 backend·model·effort를 모두 지운다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet', effort: 'high' });
+    const reverted = setLaneBackend(created.id, 'kim', 'lane-1', { backend: '' });
+
+    expect(reverted.lanes[0]).toMatchObject({ backend: undefined, model: undefined, effort: undefined });
+    expect(reverted.lanes[0]!.tasks.every((item) => item.backend === undefined && item.model === undefined)).toBe(true);
+  });
+
+  it('내 계획이 아니면 레인 백엔드를 바꿀 수 없다', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(statusOf(() => setLaneBackend(created.id, 'mallory', 'lane-1', { backend: 'claude-code' }))).toBe(403);
+  });
+
+  it('selectableLaneBackends는 이 서버가 허용하는 백엔드에서 데모를 뺀 목록을 돌려준다', () => {
+    fake.allowedBackends = new Set(['api', 'claude-code', 'demo']);
+    expect(selectableLaneBackends().sort()).toEqual(['api', 'claude-code']);
   });
 });

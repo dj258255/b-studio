@@ -8,11 +8,12 @@
  * 토큰을 글자 수에서 추정하지 않는다. 언어·토크나이저마다 달라 틀린 숫자를 만들기 때문이다. 그래서 경고 규칙도 글자 수로만 판단한다.
  */
 import { isRepeatNote, type AgentEvent, type AgentUsage } from '@b-studio/agent';
-import type { StudioEvent } from '../studio-events';
-import { costForUsageByModel, estimateCostUsd, matchTokenPrices, parsePriceTable, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
+import { analyzeContextGrowth } from '../context-growth';
+import type { ReviewStateView, StudioEvent } from '../studio-events';
+import { costForUsageByModel, estimateCostUsd, matchTokenPrices, parsePriceTable, type TokenBigResult, type TokenPrices, type TokenReport, type TokenTrimmed, type TokenTurn, type TokenToolTotal, type TokenWarning } from '../token-types';
 
 export { estimateCostUsd } from '../token-types';
-export type { TokenBigResult, TokenPrices, TokenReport, TokenToolTotal, TokenTurn, TokenWarning, TokenWarningKind } from '../token-types';
+export type { TokenBigResult, TokenPrices, TokenReport, TokenToolTotal, TokenTrimmed, TokenTurn, TokenWarning, TokenWarningKind } from '../token-types';
 
 /** 한 결과가 이 글자를 넘으면 경고한다. 명령 출력 예산(6,000)보다 큰 결과를 낭비로 본다 */
 export const BIG_RESULT_CHARS = 6_000;
@@ -42,6 +43,8 @@ interface DraftRun {
   turns: Array<{ turn: number; contextTokens: number; output: number; cacheRead: number }>;
   /** 턴별로 비운 도구 결과(횟수·글자). 비우기는 그 턴의 모델 호출 전에 일어나 turn_usage보다 먼저 온다 */
   clearedByTurn: Map<number, { count: number; chars: number }>;
+  /** 이 실행의 agent 이벤트를 그대로 모아 둔다(context-growth.ts가 턴별 증가 원인을 다시 계산할 때 쓴다) */
+  rawEvents: StudioEvent[];
   pending: PendingCall[];
   results: RecordedResult[];
   usage: AgentUsage;
@@ -49,6 +52,8 @@ interface DraftRun {
   usageByModel?: Record<string, AgentUsage>;
   /** model_escalated 이벤트. 한 실행에 한 번만 온다 */
   escalation?: { from: string; to: string; attempt: number };
+  /** run_finished.metrics.guideChars. 프로젝트 지침(AGENTS.md, ADR-077)을 읽어 시스템 프롬프트에 더했을 때만 있다 */
+  guideChars?: number;
 }
 
 /** 보고서에 적용할 단가. 모델별 표가 있으면 단일 단가보다 우선한다 */
@@ -72,12 +77,13 @@ export function buildTokenReports(events: readonly StudioEvent[], pricing: Token
 
   for (const event of events) {
     if (event.type === 'run_started') {
-      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), pending: [], results: [], usage: emptyUsage() };
+      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), rawEvents: [], pending: [], results: [], usage: emptyUsage() };
       runs.push(current);
       continue;
     }
     if (!current) continue;
     if (event.type === 'agent') {
+      current.rawEvents.push(event);
       applyAgentEvent(current, event.event);
       continue;
     }
@@ -94,6 +100,7 @@ export function buildTokenReports(events: readonly StudioEvent[], pricing: Token
         const used = Object.entries(event.metrics.usageByModel).filter(([, usage]) => usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens > 0);
         if (used.length > 0) current.usageByModel = Object.fromEntries(used);
       }
+      if (event.metrics?.guideChars !== undefined) current.guideChars = event.metrics.guideChars;
       current = undefined;
     }
   }
@@ -187,10 +194,13 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
     ...(cost.modelCosts ? { modelCosts: cost.modelCosts } : {}),
     cacheHitRatio: cacheHitRatio(run.usage),
     cleared: clearedTotals(run.clearedByTurn),
+    trimmed: trimmedTotals(run),
     priceSource: cost.priceSource,
     ...(cost.estimatedCostUsd !== undefined ? { estimatedCostUsd: cost.estimatedCostUsd } : {}),
     ...(cost.priceNote ? { priceNote: cost.priceNote } : {}),
     ...(run.escalation ? { escalation: run.escalation } : {}),
+    ...(run.guideChars !== undefined ? { guideChars: run.guideChars } : {}),
+    contextGrowth: analyzeContextGrowth(run.rawEvents),
   };
 }
 
@@ -261,6 +271,28 @@ function clearedTotals(byTurn: Map<number, { count: number; chars: number }>): {
     chars += entry.chars;
   }
   return { count, chars };
+}
+
+/**
+ * 도구 결과 예산이 잘라낸 양(측정)과, 자르지 않았다면 그 결과가 남은 모델 호출마다 다시 읽혔을 양(추정).
+ * 추정식: Σ ((rawChars - chars) / 4) × (그 결과 뒤의 모델 호출 수 + 1). 글자→토큰은 4로 나눈 근사이고,
+ * "+1"은 그 결과를 처음 실어 보낸 호출이다. 프로젝트 보고서가 이 값을 실행별로 더한다.
+ */
+function trimmedTotals(run: DraftRun): TokenTrimmed {
+  const calls = run.turns.length;
+  let chars = 0;
+  let repeated = 0;
+  let estimated = 0;
+  for (const result of run.results) {
+    if (result.repeated) repeated += 1;
+    const cut = Math.max(0, result.rawChars - result.chars);
+    if (cut === 0) continue;
+    chars += cut;
+    // 턴을 모르는 결과(턴 사용량을 남기지 않는 러너)는 실행 전체 호출 수로 센다
+    const after = result.turn === undefined ? calls : run.turns.filter((turn) => turn.turn > result.turn!).length;
+    estimated += (cut / 4) * (after + 1);
+  }
+  return { chars, repeated, estimatedTokens: Math.round(estimated) };
 }
 
 function cacheHitRatio(usage: AgentUsage): number {
@@ -344,4 +376,36 @@ export function tokenPricing(env: Record<string, string | undefined>): TokenPric
     return { ...base, error: `단가 표를 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
+
+/**
+ * PR 자동 리뷰 라운드(ADR-074)의 리뷰어 호출 토큰을 실행별 보고서와 같은 모양으로 만든다.
+ * 리뷰어 호출은 도구 없는 한 번의 질문이라 세션 기록에 run_started/run_finished 이벤트를 남기지 않으므로,
+ * 이벤트가 아니라 스냅샷의 review.rounds에 남긴 토큰을 그대로 읽는다. 턴별 분석은 없어(한 번만 묻는다) turns·toolTotals는 비워 둔다.
+ * 토큰 탭·프로젝트 보고서가 `buildTokenReports`의 결과에 이 목록을 이어 붙여 "review"로 표시한다
+ */
+export function reviewTokenReports(review: ReviewStateView | undefined, pricing: TokenPricing = {}): TokenReport[] {
+  if (!review) return [];
+  return review.rounds
+    .filter((round): round is typeof round & { tokens: AgentUsage } => round.tokens !== undefined)
+    .map((round) => {
+      const estimatedCostUsd = pricing.single ? estimateCostUsd(round.tokens, pricing.single) : undefined;
+      return {
+        runId: `review-${round.round}`,
+        request: `[AI 리뷰] ${round.round}라운드 검토`,
+        turns: [],
+        toolTotals: [],
+        biggest: [],
+        warnings: [],
+        totals: round.tokens,
+        cacheHitRatio: cacheHitRatio(round.tokens),
+        cleared: { count: 0, chars: 0 },
+        trimmed: { chars: 0, repeated: 0, estimatedTokens: 0 },
+        priceSource: pricing.single ? ('single' as const) : ('none' as const),
+        ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+        kind: 'review' as const,
+      };
+    })
+    .reverse();
+}
+
 

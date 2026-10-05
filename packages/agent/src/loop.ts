@@ -1,14 +1,16 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { Sandbox, StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
+import type { Effort } from './anthropic-client';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
-import { VerificationGate, type GateOptions, type PageFetcher } from './gate';
-import { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
+import { VerificationGate, type GateOptions, type PageFetcher, type VerifyMode } from './gate';
+import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
+import { loadProjectGuide } from './project-guide';
+import { createToolResultCache, type SelfCheckMode } from './tool-output';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
@@ -31,6 +33,8 @@ export interface ModelClientInfo {
   backend: string;
   model: string;
   auth?: string;
+  /** 이 호출에 실제로 적용한 노력 단계. 클라이언트가 노력 단계를 지원하지 않으면(openai·google 호환 클라이언트) 없다 */
+  effort?: Effort;
 }
 
 export type ModelPreflight = { ok: true } | { ok: false; reason: string };
@@ -121,6 +125,8 @@ export interface RunMetrics {
    * 모델을 구분할 수 없는 러너는 채우지 않는다
    */
   usageByModel?: Record<string, AgentUsage>;
+  /** 프로젝트 지침(AGENTS.md, ADR-077)이 시스템 프롬프트에 더한 글자 수. 파일이 없거나 꺼져 있으면 없다(고정 문맥 비용을 눈에 보이게 한다) */
+  guideChars?: number;
 }
 
 export interface AgentResult {
@@ -136,6 +142,10 @@ export interface AgentResult {
   checks?: WorkflowCheck[];
   /** 마지막 검증에서 통과한 워크플로 검증 단계 */
   passedStages?: import('@b-studio/spec').WorkflowStage[];
+  /** 'light'(가볍게 확인)면 테스트·화면 확인·동시 요청·리뷰를 건너뛰었다. full이면 없다 */
+  verify?: VerifyMode;
+  /** light에서 건너뛴 검증 단계(workflow.required 대조에서 실패로 보지 않음) */
+  skippedStages?: import('@b-studio/spec').WorkflowStage[];
   verifyAttempts: number;
   turns: number;
   usage: AgentUsage;
@@ -145,7 +155,7 @@ export interface AgentResult {
 
 export type AgentEvent =
   /** 실제로 요청을 처리하는 실행 환경. 로컬 Claude Code처럼 모델과 인증을 밖에서 정할 때 알린다 */
-  | { type: 'session'; backend: string; model: string; auth?: string }
+  | { type: 'session'; backend: string; model: string; auth?: string; effort?: Effort }
   | {
       type: 'route';
       selectedId: string;
@@ -153,6 +163,8 @@ export type AgentEvent =
       complexity: 'simple' | 'normal' | 'complex';
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+      /** claude-code 'auto' 선택(ADR-091)이 낸 결정이면 true. api 라우터(ADR-047)의 점수 비교와 화면 표현이 다르다(한 줄 안내) */
+      auto?: boolean;
     }
   | { type: 'turn'; turn: number }
   /** 이번 실행에서 지금까지 쓴 토큰 누적값. 직접 만든 루프는 모델 응답마다, 로컬 Claude Code는 턴을 끝낼 때마다 온다 */
@@ -173,7 +185,7 @@ export type AgentEvent =
   | { type: 'tool_result'; name: string; ok: boolean; content: string; chars?: number; rawChars?: number }
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   /** ask_user가 남긴 질문. 실행은 이 턴 뒤에 끝난다 */
-  | { type: 'question'; question: string; options: string[]; allowOther: boolean }
+  | { type: 'question'; question: string; options: string[]; allowOther: boolean; proposal?: import('./tools').ModeProposal }
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
   /** 진행 중 지시를 다음 모델 호출 전에 대화에 넣었다 */
   | { type: 'steer_applied'; count: number }
@@ -215,6 +227,11 @@ export interface RunAgentOptions {
   allowBreaking?: boolean;
   /** ask: 질문 모드. 파일을 바꾸는 도구를 거부하고, 바뀐 파일이 없으므로 검증 게이트를 돌리지 않는다 */
   intent?: 'build' | 'ask';
+  /**
+   * "조사" 모드(intent가 ask일 때만 뜻이 있다). 이 직접 만든 루프(모델은 api 백엔드)는 웹 도구가 없으므로
+   * 요청 앞에 "웹 검색을 지원하지 않아 모델 지식으로 답한다"는 안내만 한 번 더 붙인다(claude-code 러너만 실제로 연다)
+   */
+  research?: boolean;
   maxTurns?: number;
   /** 검증 게이트 실패를 몇 번까지 모델에게 돌려줄지 */
   maxVerifyAttempts?: number;
@@ -245,6 +262,21 @@ export interface RunAgentOptions {
   requestApproval?: ToolContext['requestApproval'];
   /** 레인 조율 게시판. 주면 read_notes·(모델이 쓰는 전략이면) post_note 도구가 목록에 오른다 */
   board?: BoardAccess;
+  /**
+   * 샌드박스를 지금 켠다(지연 기동 세션). 주면 게이트를 실행 시작 때 만들지 않고, 첫 파일 변경·샌드박스 도구 때
+   * 그때 켠 뒤에 만든다 — 계약 기준을 샌드박스가 켜진 뒤, 변경 전에 잡기 위해서다. 없으면 지금처럼 시작할 때 만든다
+   */
+  ensureSandbox?: () => Promise<void>;
+  /**
+   * 검증 범위(기본 full). light(가볍게 확인)면 게이트가 서비스 재시작·준비 판정·계약만 돌리고
+   * 테스트·화면 확인·동시 요청·리뷰는 건너뛴다. 건너뛴 단계는 결과의 skippedStages로 남고 배포 조건이 막는다
+   */
+  verify?: VerifyMode;
+  /**
+   * 자가 확인 범위(기본 full). lean이면 프롬프트가 게이트와 겹치는 확인(전체 빌드·테스트, 끝난 변경의 재시작·HTTP 확인)을
+   * 하지 말라고 안내하고, 성공한 run_in_service 출력을 짧게 돌려준다
+   */
+  selfCheck?: SelfCheckMode;
 }
 
 export function emptyUsage(): AgentUsage {
@@ -288,31 +320,40 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     design,
     interactive = false,
     intent = 'build',
+    research = false,
   } = options;
   const ask = intent === 'ask';
 
-  if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth });
+  if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth, effort: client.info.effort });
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({
-        project,
-        sandbox,
-        workspace,
-        allowBreaking,
-        maxVerifyAttempts,
-        fetcher,
-        pageFetcher,
-        browserRunner,
-        saveArtifact,
-        onBrowserFrame,
-        signal,
-        onServiceStatus,
-        onEvent,
-      });
-  const system = buildSystemPrompt(project) + workflowContext(project);
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다.
+  // 계약 기준은 샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서 잡아야 하기 때문이다
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({
+      project,
+      sandbox,
+      workspace,
+      allowBreaking,
+      maxVerifyAttempts,
+      verify: options.verify,
+      fetcher,
+      pageFetcher,
+      browserRunner,
+      saveArtifact,
+      onBrowserFrame,
+      signal,
+      onServiceStatus,
+      onEvent,
+    }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(세션 작업 복사본)의 AGENTS.md를 매 실행 시작마다 새로 읽는다(ADR-077) — 이전 실행이나
+  // 사람이 방금 고친 내용을 이번 실행부터 반영하기 위해서다. 파일이 없거나 꺼져 있으면 빈 문자열이라 고정 문맥이 늘지 않는다
+  const guide = await loadProjectGuide(project);
+  const system = buildSystemPrompt(project, { selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide);
   const policy = options.policy ?? executionPolicyFor(project);
   const tools = buildTools(project, {
     ...(options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {}),
@@ -321,12 +362,13 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   });
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
-  messages.push({ role: 'user', content: ask ? buildAskRequest(request) : request });
+  messages.push({ role: 'user', content: ask ? buildAskRequest(request, research ? { research: { webToolsAvailable: false } } : {}) : request });
   const usage = emptyUsage();
   const metrics = emptyMetrics();
   // 모델 id별 사용량. 승격으로 클라이언트가 바뀌면 승격 전후가 다른 키로 쌓인다
   const usageByModel: Record<string, AgentUsage> = {};
   metrics.usageByModel = usageByModel;
+  if (guide) metrics.guideChars = guide.charsUsed;
   // 이번 턴에 ask_user가 남긴 질문. 있으면 도구 결과를 넣은 뒤 실행을 끝내고 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
   // 실행 단위 도구 결과 캐시. 한 실행 안에서 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
@@ -340,6 +382,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   const escalationHistory: string[] = [];
   let escalated = false;
   let activeClient = client;
+  /** 마지막으로 모델에게 보낸 게이트 실패 안내. 상한이 소진된 뒤 승격하면 같은 안내를 다시 보낸다 */
+  let lastFeedback: string | undefined;
 
   const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion): AgentResult => {
     const result: AgentResult = {
@@ -350,6 +394,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
+      ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns,
       usage,
@@ -425,11 +471,17 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       const results: BetaToolResultBlockParam[] = [];
       for (const call of toolUses) {
         onEvent({ type: 'tool_call', name: call.name, input: call.input });
+        // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+        if (options.ensureSandbox && (SANDBOX_TOOLS.has(call.name) || WRITE_TOOLS.has(call.name))) {
+          await options.ensureSandbox();
+          gate ??= await gateFor();
+        }
         const toolStarted = performance.now();
         const outcome = await executeTool(call.name, call.input, {
           project,
           workspace,
           sandbox,
+          selfCheck: options.selfCheck,
           fetcher,
           signal,
           onServiceStatus,
@@ -489,18 +541,35 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
       return finish('done', text, turn);
     }
-    if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    // 승격: 게이트 실패가 계기가 된다(같은 서명이 반복되거나, 설정이 있으면 실패 N번). 한 실행에 한 번만 올린다
     if (escalation && !escalated) {
       const key = signatureSetKey(gate.report, gate.checks);
       escalationHistory.push(key);
-      const times = escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
-      if (shouldEscalate(escalationHistory, times)) {
+      if (shouldPromote(escalation, escalationHistory)) {
+        // 올라간 모델에게는 게이트 재시도를 새로 준다(기존 남은 횟수 대신)
+        const extended = gate.grantRetryBudget(retryBudgetFor(escalation));
+        // 상한이 이미 소진됐는데 예산도 못 받았으면 올려도 시도할 기회가 없다 — 지금처럼 실패로 끝낸다
+        if (outcome.kind === 'exhausted' && !extended) return finish('failed', outcome.summary, turn);
         escalated = true;
         metrics.escalatedAt = gate.attempts;
-        onEvent({ type: 'model_escalated', from: client.info?.model ?? '알 수 없음', to: escalation.to, attempt: gate.attempts, signature: key, sameSignatureTimes: times });
+        onEvent({
+          type: 'model_escalated',
+          from: client.info?.model ?? '알 수 없음',
+          to: escalation.to,
+          attempt: gate.attempts,
+          signature: key,
+          sameSignatureTimes: escalation.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES,
+        });
         activeClient = escalation.client;
+        if (outcome.kind === 'exhausted') {
+          // 상한을 새로 받았으면 마지막 실패 안내를 다시 보내고 이어 간다
+          messages.push({ role: 'user', content: escalationPrompt(outcome.summary, lastFeedback) });
+          continue;
+        }
       }
     }
+    if (outcome.kind === 'exhausted') return finish('failed', outcome.summary, turn);
+    lastFeedback = outcome.feedback;
     messages.push({ role: 'user', content: outcome.feedback });
   }
 

@@ -4,13 +4,15 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
+import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
-import { buildTools, executeTool, type ToolContext, type ToolOutcome } from './tools';
+import { loadProjectGuide } from './project-guide';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -108,8 +110,8 @@ export interface CommandCodeRunOptions extends Omit<RunAgentOptions, 'client' | 
   model?: string;
   /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다(codex 러너와 같다) */
   escalation?: EscalationPolicy;
-  /** 모델별 추론 강도. 넘기면 `--effort <level>`로 전달한다 */
-  effort?: string;
+  /** 노력 단계. 넘기면 `--effort <level>`로 전달한다(0단계 근거: `cmd --help`, `low|medium|high|xhigh|max`) */
+  effort?: Effort;
   /**
    * 세션마다 고정된 상태 폴더. 주면 HOME을 `<stateDir>/home`, 작업 폴더(cwd)를 `<stateDir>/work`로 고정한다.
    *
@@ -177,6 +179,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     stateDir,
     process: proc = DEFAULT_PROCESS,
     intent = 'build',
+    research = false,
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
@@ -192,12 +195,18 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   if (options.escalation) onEvent({ type: 'warning', message: '로컬 Command Code Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(project.root)의 AGENTS.md를 읽는다(ADR-077). 이 러너의 자체 workdir과는 다른 폴더다
+  const guide = await loadProjectGuide(project);
   const context: ToolContext = {
     project,
+    selfCheck: options.selfCheck,
     workspace,
     sandbox,
     fetcher,
@@ -209,6 +218,8 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+    // 지연 기동 세션이면 샌드박스 도구를 실행하기 직전에 켠다(핸들러가 게이트 생성까지 한다)
+    ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
   const specs = buildTools(project);
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
@@ -217,7 +228,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent·Codex 러너와 같은 큐를 쓴다
   const serial = serialQueue();
   // 실행 지표. modelMs는 그 이벤트에 시간이 있을 때만 더한다(없으면 0 = "재지 않음")
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   // 작업 폴더(cwd). project.root를 cwd로 주면 모델이 내장 도구로 작업 공간을 직접 바꿀 수 있다.
   // 상태 폴더를 주면 그 아래 고정 경로를 쓴다 — cmd가 세션을 cwd로 찾으므로 다음 실행에서도 같아야 이어받는다
@@ -242,6 +253,8 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
+      ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns: completedTurns,
       usage,
@@ -288,6 +301,11 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
           // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
           signal?.throwIfAborted();
           onEvent({ type: 'tool_call', name, input: args });
+          // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+          if (options.ensureSandbox && (SANDBOX_TOOLS.has(name) || WRITE_TOOLS.has(name))) {
+            await options.ensureSandbox();
+            gate = await gateFor();
+          }
           const toolStarted = performance.now();
           const outcome = await executeTool(name, args, context);
           metrics.toolMs += Math.round(performance.now() - toolStarted);
@@ -310,7 +328,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     await linkAuthFile(home);
 
     // cmd에는 systemPrompt 자리가 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다
-    let pending = `${buildSystemPrompt(project, { toolName })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}${projectGuideSection(guide)}\n\n${ask ? buildAskRequest(request, { toolName, ...(research ? { research: { webToolsAvailable: false } } : {}) }) : request}`;
 
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();
@@ -343,7 +361,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
             // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
             if (!announced) {
               announced = true;
-              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델' });
+              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델', effort });
             }
             break;
           case 'model_request_end': {
@@ -392,16 +410,18 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
       const text = resultLine?.finalText || turnText;
       if (text) lastText = text;
 
-      // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
-      if (!gate) {
+      // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트.
+      // 지연 기동 세션이 아무것도 바꾸지 않았으면 게이트가 없다 → 샌드박스 없이 끝난다
+      const activeGate = gate;
+      if (!activeGate) {
         finish('done', lastText);
         break;
       }
       const gateStarted = performance.now();
-      const outcome = await gate.check();
+      const outcome = await activeGate.check();
       metrics.gateMs += Math.round(performance.now() - gateStarted);
       if (outcome.kind === 'pass') {
-        if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+        if (activeGate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
         finish('done', lastText);
         break;
       }
@@ -434,7 +454,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
 }
 
 /** `cmd -p` 한 번의 인자. `--yolo`·`--tools-all`은 쓰지 않는다: 헤드리스 기본 차단을 그대로 유지해야 b-studio 도구 경계가 선다 */
-function commandArgs(input: { pending: string; sessionId?: string; model?: string; effort?: string; maxTurns: number }): string[] {
+function commandArgs(input: { pending: string; sessionId?: string; model?: string; effort?: Effort; maxTurns: number }): string[] {
   const args = ['-p', input.pending, '--output-format', 'json', '--skip-onboarding', '--no-auto-update', '--no-skills', '--max-turns', String(input.maxTurns)];
   if (input.model) args.push('-m', input.model);
   if (input.effort) args.push('--effort', input.effort);

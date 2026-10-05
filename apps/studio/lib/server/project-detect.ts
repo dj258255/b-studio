@@ -1,0 +1,752 @@
+/**
+ * 아무 폴더나 프로젝트로 열 때(ADR-067), 폴더를 보고 스택을 알아내 b-studio가 돌릴 파일(studio.yaml·개발용 compose·Dockerfile)을 제안한다.
+ *
+ * 알아내는 스택(폴더 바로 아래와 한 단계 아래 폴더):
+ *  - Next.js: package.json의 의존성에 next. 패키지 관리자는 잠금 파일로(pnpm·yarn·npm)
+ *  - Vite(React·Vue·Svelte 등): package.json의 의존성에 vite(Next가 아닐 때)
+ *  - Spring Boot: build.gradle(.kts)에 org.springframework.boot, 또는 pom.xml에 spring-boot
+ *  - FastAPI: requirements.txt·pyproject.toml에 fastapi. 앱 모듈은 `X = FastAPI(`가 있는 파일에서
+ *
+ * ADR-067은 앱만 만들고 DB 같은 부가 서비스는 만들지 않아 첫 기동이 실패할 수 있었다(ADR-073).
+ * 이제 앱 폴더에서 찾은 compose 파일(compose.yaml·docker-compose.yml 등)에서 postgres·redis·kafka 같은 잘 알려진 인프라
+ * 이미지를 쓰는 서비스를 함께 가져오고(`@b-studio/spec`의 순수 함수, apps/studio는 `yaml` 패키지를 직접 물지 않는다),
+ * compose가 없어도 Spring(JPA+postgresql)·FastAPI(psycopg·SQLAlchemy+postgres) 의존성이 있으면 postgres를 새로 제안한다.
+ * 앱 설정(application.properties/yml, .env.example)에서 참조를 찾아 관리형 서비스에 접속 환경 변수도 채운다(추측이라 "확인:" 메모를 남긴다).
+ *
+ * 만드는 파일은 사용자 파일과 이름이 겹치지 않게 `studio.yaml`·`compose.b-studio.yaml`·서비스 폴더의 `Dockerfile.b-studio`다.
+ * 쓰기는 이 모듈이 하지 않는다(제안만). 쓰는 쪽(project-registry)이 git 추적에서 빼 둔다.
+ *
+ * 컨테이너 마운트(ADR-088): 서비스 폴더만 마운트하면(예전 `./commerce:/app`) 실제 저장소의 멀티 모듈 Gradle·pnpm/npm
+ * 워크스페이스·서비스 폴더 밖 공유 설정을 참조하는 빌드가 깨진다(`$rootDir/../docs`처럼). 그래서 모든 관리형 서비스가
+ * 프로젝트 루트 전체를 `/workspace`로 마운트하고(`.:/workspace`), `working_dir`로 자기 서비스 폴더에서 실행한다.
+ * 캐시 볼륨(예: Gradle 프로젝트 캐시·node_modules·build 출력)도 이 서비스 폴더 기준 경로로 옮기고, 의존성 캐시(Gradle
+ * 홈·pnpm 스토어)는 워크스페이스 밖 절대 경로 그대로 둔다.
+ */
+import { readdir, readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import {
+  corsEnvironmentFrom,
+  databaseSpecFor,
+  dependencyClosure,
+  detectBackendUrlEnvFromCode,
+  detectBackendUrlEnvFromEnvironment,
+  detectEnvReferences,
+  importSupportingServices,
+  needsDevDefaultCredentials,
+  originalComposeServiceFor,
+  proposePostgresService,
+  publicUrlPlaceholder,
+  suggestsPostgresNeed,
+  wireAppEnvironment,
+  withDefaultHealthcheck,
+  withDevDefaultCredentials,
+  COMPOSE_FILE_CANDIDATES,
+  isProdComposeFile,
+  type BackendUrlReference,
+  type ImportedInfraService,
+  type InfraService,
+  type WirableInfraService,
+} from '@b-studio/spec';
+
+export type { InfraService } from '@b-studio/spec';
+
+export type DetectedTemplate = 'nextjs' | 'vite' | 'spring-boot' | 'fastapi';
+
+export interface DetectedService {
+  name: string;
+  template: DetectedTemplate;
+  /** 프로젝트 폴더 기준. 폴더 바로 아래면 '.' */
+  path: string;
+  port: number;
+  preview: 'browser' | 'openapi';
+  ready: { path: string; expectStatus?: number };
+  contract?: string;
+  /** Dockerfile 본문 */
+  dockerfile: string;
+  /**
+   * compose 서비스에 더 붙일 볼륨(이름 → 컨테이너 경로). '/'로 시작하면 절대 경로(워크스페이스 밖 의존성 캐시,
+   * 예: Gradle 홈·pnpm 스토어)로 그대로 쓰고, 아니면 이 서비스의 working_dir(`/workspace/<path>`) 기준 상대 경로로 본다
+   * (예: Gradle 프로젝트 캐시·node_modules·build 출력)
+   */
+  volumes: Record<string, string>;
+  /** 부가 서비스(DB 등) 접속 정보로 채운 환경 변수. 추측이라 notes에 "확인:" 메모가 함께 붙는다 */
+  environment: Record<string, string>;
+  /** 이 서비스가 기다릴 부가 서비스 이름(compose depends_on) */
+  dependsOn: string[];
+  /** 사람이 확인해야 할 추측 */
+  notes: string[];
+}
+
+export interface ProjectDetection {
+  folder: string;
+  name: string;
+  /** 이미 studio.yaml이 있으면 그대로 쓴다(아무것도 만들지 않는다) */
+  hasSpec: boolean;
+  services: DetectedService[];
+  /** 기존 compose에서 가져오거나 새로 제안한 부가 서비스(DB·캐시·메시지 큐 등, ADR-073) */
+  infra: InfraService[];
+  /** infra 중 앱 서비스가 실제로 기대는(닫힘) 이름(ADR-083). 폴더 열기 미리보기의 체크박스 기본값이다 — 아무도 기대지 않는 부가 서비스는 기본으로 켜지 않는다 */
+  defaultInfra: string[];
+  warnings: string[];
+  /**
+   * 프론트엔드가 백엔드 주소를 환경 변수로 받도록 자동으로 연결했으면(fix/frontend-backend-url) 남는다.
+   * specYaml이 이 값으로 workflow.pageChecks 기본 확인(화면이 백엔드 호출에 실패하면 게이트가 잡는다)을 만든다
+   */
+  frontendBackendWiring?: { frontendService: string; backendService: string; backendProbePath: string };
+}
+
+export interface GeneratedFile {
+  /** 프로젝트 폴더 기준 */
+  path: string;
+  content: string;
+}
+
+export const SPEC_FILE = 'studio.yaml';
+export const GENERATED_COMPOSE = 'compose.b-studio.yaml';
+export const GENERATED_DOCKERFILE = 'Dockerfile.b-studio';
+
+/** 컨테이너 안에서 프로젝트 루트 전체를 마운트하는 자리(ADR-088). Dockerfile의 기본 WORKDIR이자 compose 바인드 마운트의 대상이다 */
+export const CONTAINER_WORKSPACE_ROOT = '/workspace';
+
+/** 서비스가 실제로 일하는 컨테이너 안 폴더. path가 '.'이면 워크스페이스 루트 자체다 */
+function containerWorkDir(servicePath: string): string {
+  return servicePath === '.' ? CONTAINER_WORKSPACE_ROOT : `${CONTAINER_WORKSPACE_ROOT}/${servicePath}`;
+}
+
+const IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'build', 'dist', 'target', '.gradle', '.venv', 'venv', '__pycache__', '.idea', '.vscode']);
+
+export async function detectProject(folder: string, { ignoreExistingSpec = false }: { ignoreExistingSpec?: boolean } = {}): Promise<ProjectDetection> {
+  const root = path.resolve(folder);
+  const info = await stat(root).catch(() => undefined);
+  if (!info?.isDirectory()) throw new Error(`폴더가 아닙니다: ${root}`);
+  const name = path.basename(root);
+  // ignoreExistingSpec은 "생성 파일 다시 만들기"(ADR-101)가 쓴다: b-studio가 만든 studio.yaml이 이미 있어도
+  // 그 파일이 없다고 치고 폴더를 처음 열 때처럼 다시 훑는다 — 그래야 그사이 생긴 탐지 개선(환경 변수 연결 등)이 반영된다
+  if (!ignoreExistingSpec && (await exists(path.join(root, SPEC_FILE)))) return { folder: root, name, hasSpec: true, services: [], infra: [], defaultInfra: [], warnings: [] };
+
+  const childDirNames = await childDirs(root);
+  const candidates = ['.', ...childDirNames];
+  const found: Array<Omit<DetectedService, 'name'>> = [];
+  for (const relative of candidates) {
+    const service = await detectDir(root, path.join(root, relative), relative);
+    if (service) found.push(service);
+  }
+  // 폴더 바로 아래가 앱이면(단일 앱 저장소) 하위 폴더에서 찾은 것은 그 앱의 일부일 가능성이 커서 버린다
+  const rootApp = found.find((service) => service.path === '.');
+  const services = nameServices(rootApp ? [rootApp] : found);
+  const warnings: string[] = [];
+  if (services.length === 0) {
+    warnings.push('Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다. studio.yaml을 직접 쓰거나 지원하는 스택인지 확인하세요');
+    return { folder: root, name, hasSpec: false, services, infra: [], defaultInfra: [], warnings };
+  }
+
+  const infra = await detectInfra(root, services, childDirNames);
+  await wireServiceEnvironments(root, services, infra);
+  await disableSpringDockerCompose(root, services);
+  const frontendBackendWiring = await wireFrontendBackendUrl(root, services, childDirNames);
+  // 서비스 선택(ADR-083)의 기본값과 같은 규칙: 앱 서비스가 기대는 부가 서비스 + 그 부가 서비스끼리의 기댐 닫힘.
+  // 아무도 기대지 않는 부가 서비스(예: 가져왔지만 안 쓰는 카프카)는 기본으로 체크하지 않는다
+  const defaultInfra = [...dependencyClosure(services.flatMap((service) => service.dependsOn), Object.fromEntries(infra.map((service) => [service.name, service.dependsOn])))];
+  return { folder: root, name, hasSpec: false, services, infra, defaultInfra, warnings, ...(frontendBackendWiring ? { frontendBackendWiring } : {}) };
+}
+
+/**
+ * 부가 서비스를 찾는다: 먼저 폴더의 compose 파일(root, 그다음 한 단계 아래)에서 잘 알려진 인프라 이미지를 가져오고,
+ * 하나도 못 찾았으면 Spring(JPA+postgresql)·FastAPI(psycopg·SQLAlchemy+postgres) 의존성을 보아 postgres 하나를 새로 제안한다(프로젝트당 하나만)
+ */
+async function detectInfra(root: string, services: readonly DetectedService[], childDirNames: readonly string[]): Promise<InfraService[]> {
+  const composeFile = await findComposeFile(root, childDirNames);
+  if (composeFile) {
+    const text = await readText(composeFile.absolute);
+    if (text) return finalizeImportedInfra(root, composeFile.relative, importSupportingServices(text, composeFile.relative).services);
+  }
+  for (const service of services) {
+    if (service.template !== 'spring-boot' && service.template !== 'fastapi') continue;
+    const dependencyText = await appDependencyText(path.join(root, service.path), service.template);
+    if (suggestsPostgresNeed(service.template, dependencyText)) {
+      return [proposePostgresService(service.name, `${service.name}에서 postgres 관련 의존성(${service.template === 'spring-boot' ? 'JPA + postgresql 드라이버' : 'psycopg/SQLAlchemy'})을 찾았는데, 폴더에 부가 서비스를 선언한 compose 파일이 없어 새로 제안합니다`)];
+    }
+  }
+  return [];
+}
+
+/**
+ * 가져온 부가 서비스를 실제로 쓸 수 있게 다듬는다.
+ *  - env_file(예: edumeet의 mysql처럼 .env로만 자격 증명을 받고 environment가 없는 경우)로는 값을 알 수 없어,
+ *    공식 이미지가 비밀번호 없이는 기동을 거부하는 postgres/mysql/mariadb에 개발용 기본값을 채운다. .env 내용은 절대 읽지 않는다 —
+ *    저장소에 있든 없든 세션 폴더 복사본에는 담기지 않으므로 같은 값을 채우되, 메모 문구만 다르게 한다
+ *  - healthcheck가 없으면 기본 healthcheck를 붙인다(있어야 depends_on이 service_healthy를 써서, 앱이 DB가 뜨기 전에 시작해 죽는 경합을 막는다)
+ */
+async function finalizeImportedInfra(root: string, composeRelative: string, services: readonly ImportedInfraService[]): Promise<ImportedInfraService[]> {
+  const composeDir = path.dirname(composeRelative);
+  const result: ImportedInfraService[] = [];
+  for (const service of services) {
+    let next = service;
+    if (needsDevDefaultCredentials(next)) {
+      const envFileExists = next.envFiles.length > 0 && (await anyExists(root, composeDir, next.envFiles));
+      next = withDevDefaultCredentials(next, devDefaultCredentialNote(next.envFiles, envFileExists));
+    }
+    result.push(withDefaultHealthcheck(next));
+  }
+  return result;
+}
+
+function devDefaultCredentialNote(envFiles: readonly string[], envFileExists: boolean): string {
+  if (envFiles.length === 0) return '접속 정보(비밀번호 등)를 compose에서 찾지 못해 개발용 값을 넣었습니다';
+  const files = envFiles.join(', ');
+  // .env가 저장소에 있어도 세션 폴더 복사본에는 담기지 않는다(비밀값이라 절대 읽지 않는다) — 있고 없고에 따라 문구만 다르다
+  return envFileExists
+    ? `원래 compose는 env_file(${files})로 받는데, 샌드박스 복사본에는 .env가 들어가지 않아 개발용 값을 넣었습니다`
+    : `원래 compose는 env_file(${files})로 받는데 저장소에 없어 개발용 값을 넣었습니다`;
+}
+
+async function anyExists(root: string, dir: string, fileNames: readonly string[]): Promise<boolean> {
+  for (const fileName of fileNames) {
+    if (await exists(path.join(root, dir, fileName))) return true;
+  }
+  return false;
+}
+
+/** compose.yaml → docker-compose.yml → ... 우선순위로 root와 한 단계 아래를 본다. 운영용(prod·production)은 개발용이 있으면 건너뛴다 */
+async function findComposeFile(root: string, childDirNames: readonly string[]): Promise<{ absolute: string; relative: string } | undefined> {
+  for (const dir of ['.', ...childDirNames]) {
+    const found = await composeFileInDir(path.join(root, dir), dir);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+async function composeFileInDir(dir: string, relativeDir: string): Promise<{ absolute: string; relative: string } | undefined> {
+  const present: string[] = [];
+  for (const fileName of COMPOSE_FILE_CANDIDATES) {
+    if (await exists(path.join(dir, fileName))) present.push(fileName);
+  }
+  if (present.length === 0) return undefined;
+  const nonProd = present.filter((fileName) => !isProdComposeFile(fileName));
+  const picked = (nonProd.length > 0 ? nonProd : present)[0]!;
+  return { absolute: path.join(dir, picked), relative: relativeDir === '.' ? picked : posixJoin(relativeDir, picked) };
+}
+
+/** Spring은 build.gradle(.kts)·pom.xml, FastAPI는 requirements.txt·pyproject.toml의 원문(의존성 이름을 찾는 용도라 원문 그대로 충분하다) */
+async function appDependencyText(dir: string, template: 'spring-boot' | 'fastapi'): Promise<string> {
+  if (template === 'spring-boot') {
+    return (await readText(path.join(dir, 'build.gradle.kts'))) ?? (await readText(path.join(dir, 'build.gradle'))) ?? (await readText(path.join(dir, 'pom.xml'))) ?? '';
+  }
+  return `${(await readText(path.join(dir, 'requirements.txt'))) ?? ''}\n${(await readText(path.join(dir, 'pyproject.toml'))) ?? ''}`;
+}
+
+/** 각 관리형 서비스의 설정에서 postgres·mysql·redis·kafka 참조를 찾아, 가져오거나 제안한 부가 서비스로 접속 환경 변수를 채운다(있으면 서비스에 바로 붙인다) */
+async function wireServiceEnvironments(root: string, services: DetectedService[], infra: readonly InfraService[]): Promise<void> {
+  if (infra.length === 0) return;
+  // environment·command도 함께 넘긴다 — wireAppEnvironment가 실제 POSTGRES_*/MYSQL_* 값과 Kafka 광고 리스너를 읽어야 한다(지어내지 않는다)
+  const byEngine: WirableInfraService[] = infra.map((service) => ({ name: service.name, engine: service.engine, environment: service.environment, command: service.command, notes: service.notes }));
+  for (const service of services) {
+    const configText = await appConfigText(root, service);
+    const refs = detectEnvReferences(configText);
+    const wiring = wireAppEnvironment(service.template, refs, byEngine);
+    // 접속 정보를 못 채워도(계정을 못 찾음) depends_on과 "확인:" 메모는 남긴다 — 컨테이너 기동 순서는 여전히 의미가 있다
+    if (wiring.dependsOn.length === 0 && Object.keys(wiring.environment).length === 0) continue;
+    service.environment = wiring.environment;
+    service.dependsOn = wiring.dependsOn;
+    // specYaml이 notes를 "# 확인: ..." 형태로 찍으므로 여기서는 접두사 없이 그대로 쌓는다
+    service.notes.push(...wiring.notes);
+  }
+}
+
+/**
+ * Spring Boot의 spring-boot-docker-compose 모듈을 끈다. 이 모듈은 개발 실행 때 앱이 직접 docker compose를 띄우려 하는데,
+ * 샌드박스 안에는 compose 파일이 없어 "No Docker Compose file found"로 앱이 바로 죽는다(pay 복제본으로 실제 확인).
+ * 샌드박스는 부가 서비스를 이미 띄우고 접속 정보까지 넣으므로 이 모듈이 할 일이 없다. start.spring.io의 "Docker Compose Support"가 넣는 흔한 의존성이다
+ */
+async function disableSpringDockerCompose(root: string, services: DetectedService[]): Promise<void> {
+  for (const service of services) {
+    if (service.template !== 'spring-boot') continue;
+    const dependencyText = await appDependencyText(path.join(root, service.path), 'spring-boot');
+    if (!/spring-boot-docker-compose/.test(dependencyText)) continue;
+    service.environment = { ...service.environment, SPRING_DOCKER_COMPOSE_ENABLED: 'false' };
+    service.notes.push('spring-boot-docker-compose가 있어 샌드박스에서는 끕니다(SPRING_DOCKER_COMPOSE_ENABLED=false). 부가 서비스는 b-studio가 띄웁니다');
+  }
+}
+
+/**
+ * 프론트엔드(Next.js·Vite) 코드가 읽는 소스 안의 흔한 자리. lib/api.ts(실제 저장소에서 확인한 자리, docs/decisions.md ADR-095 참고)를
+ * 먼저 보고, 없으면 흔히 쓰는 몇 자리만 본다 — appConfigText와 같은 생각으로, 저장소 전체를 훑지 않고 알려진 자리만 본다
+ */
+const FRONTEND_API_CLIENT_CANDIDATES = [
+  'lib/api.ts', 'lib/api.js', 'lib/api.tsx',
+  'src/lib/api.ts', 'src/lib/api.js',
+  'app/lib/api.ts', 'src/api.ts', 'src/config.ts', 'src/lib/config.ts',
+  '.env.local', '.env',
+];
+
+/**
+ * 프론트엔드 서비스 하나가 백엔드 주소를 어느 환경 변수로 받는지 찾는다(fix/frontend-backend-url).
+ * 1) 원본 compose(이미 있다면)에 그 서비스의 environment로 선언돼 있으면 그 값을 가장 믿는다(사람이 적어 둔 것이다).
+ * 2) 없으면 코드에서 `process.env.NEXT_PUBLIC_API_BASE_URL` 같은 접근을 찾는다(추정이라 notes에 남긴다).
+ */
+async function detectFrontendBackendRef(
+  root: string,
+  service: DetectedService,
+  composeText: string | undefined,
+): Promise<{ ref: BackendUrlReference; fromCompose: boolean } | undefined> {
+  if (composeText) {
+    const original = originalComposeServiceFor(composeText, service.path, service.name);
+    const ref = original && detectBackendUrlEnvFromEnvironment(original.environment);
+    if (ref) return { ref, fromCompose: true };
+  }
+  for (const file of FRONTEND_API_CLIENT_CANDIDATES) {
+    const text = await readText(path.join(root, service.path, file));
+    if (!text) continue;
+    const ref = detectBackendUrlEnvFromCode(text);
+    if (ref) return { ref, fromCompose: false };
+  }
+  return undefined;
+}
+
+/**
+ * 폴더에 프론트엔드와 백엔드가 함께 있으면(풀스택), 프론트엔드가 읽는 백엔드 주소 환경 변수를 찾아 샌드박스 주소로
+ * 자동 연결한다. 실제 호스트 포트는 `docker compose up` 뒤에야 정해지므로(샌드박스가 무작위로 고른다), 값 대신
+ * 자리 표시자(`${b-studio:services.<백엔드>.publicUrl}`)를 적어 두고 packages/sandbox가 띄우기 직전에 채운다.
+ * 백엔드가 CORS 허용 출처를 환경 변수로 받고 있었으면(원본 compose) 그 값도 그대로 가져온다.
+ * 둘 이상의 프론트엔드·백엔드 후보가 있으면 처음 찾은 한 쌍만 연결한다(알려진 한계, ADR-095에 남긴다).
+ */
+async function wireFrontendBackendUrl(
+  root: string,
+  services: DetectedService[],
+  childDirNames: readonly string[],
+): Promise<ProjectDetection['frontendBackendWiring']> {
+  const frontend = services.find((service) => service.template === 'nextjs' || service.template === 'vite');
+  const backend = services.find((service) => service !== frontend && (service.template === 'spring-boot' || service.template === 'fastapi' || service.template === 'nextjs' || service.template === 'vite'));
+  if (!frontend || !backend) return undefined;
+
+  const composeFile = await findComposeFile(root, childDirNames);
+  const composeText = composeFile ? await readText(composeFile.absolute) : undefined;
+
+  const found = await detectFrontendBackendRef(root, frontend, composeText);
+  if (!found) return undefined;
+
+  frontend.environment = { ...frontend.environment, [found.ref.envKey]: `${publicUrlPlaceholder(backend.name)}${found.ref.suffix}` };
+  if (!frontend.dependsOn.includes(backend.name)) frontend.dependsOn = [...frontend.dependsOn, backend.name];
+  frontend.notes.push(
+    `${frontend.name}가 ${backend.name} 주소를 ${found.ref.envKey}로 받습니다 — 샌드박스 주소로 자동 연결합니다` +
+      (found.fromCompose ? '' : ` (원본 compose에 선언돼 있지 않아 코드에서 추정했습니다. 다른 변수를 쓰면 ${found.ref.envKey} 대신 studio.yaml의 값을 고치세요)`),
+  );
+
+  if (composeText) {
+    const originalBackend = originalComposeServiceFor(composeText, backend.path, backend.name);
+    const cors = originalBackend ? corsEnvironmentFrom(originalBackend.environment) : {};
+    if (Object.keys(cors).length > 0) {
+      backend.environment = { ...backend.environment, ...cors };
+      backend.notes.push(`CORS 허용 출처 설정을 원본 compose(${composeFile!.relative})에서 그대로 가져왔습니다: ${Object.keys(cors).join(', ')}`);
+    }
+  }
+
+  return { frontendService: frontend.name, backendService: backend.name, backendProbePath: backend.ready.path };
+}
+
+async function appConfigText(root: string, service: DetectedService): Promise<string> {
+  const dir = path.join(root, service.path);
+  if (service.template === 'spring-boot') {
+    const resources = path.join(dir, 'src/main/resources');
+    const props = (await readText(path.join(resources, 'application.properties'))) ?? '';
+    const yml = (await readText(path.join(resources, 'application.yml'))) ?? (await readText(path.join(resources, 'application.yaml'))) ?? '';
+    return `${props}\n${yml}`;
+  }
+  const envExample = await firstExisting(dir, ['.env.example', '.env.sample', '.env.local.example']);
+  if (service.template === 'fastapi') {
+    return `${(await readText(path.join(dir, 'requirements.txt'))) ?? ''}\n${(await readText(path.join(dir, 'pyproject.toml'))) ?? ''}\n${envExample}`;
+  }
+  return envExample;
+}
+
+async function firstExisting(dir: string, fileNames: readonly string[]): Promise<string> {
+  for (const fileName of fileNames) {
+    const text = await readText(path.join(dir, fileName));
+    if (text) return text;
+  }
+  return '';
+}
+
+/** 서비스 이름: 폴더 바로 아래면 역할(web/api), 하위 폴더면 폴더 이름. compose 이름 규칙에 맞추고 겹치지 않게 한다 */
+function nameServices(found: ReadonlyArray<Omit<DetectedService, 'name'>>): DetectedService[] {
+  const used = new Set<string>();
+  return found.map((service) => {
+    const base = service.path === '.' ? (service.template === 'nextjs' || service.template === 'vite' ? 'web' : 'api') : sanitize(path.basename(service.path));
+    let name = base || 'app';
+    for (let index = 2; used.has(name); index++) name = `${base}-${index}`;
+    used.add(name);
+    return { name, ...service };
+  });
+}
+
+/** studio.yaml의 이름 규칙(소문자로 시작, 소문자·숫자·-)에 맞춘다. 맞출 수 없으면 빈 문자열 */
+export function sanitize(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^[^a-z]+/, '')
+    .replace(/-+$/g, '')
+    .replace(/-{2,}/g, '-');
+}
+
+async function detectDir(root: string, dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+  return (await detectNode(root, dir, relative)) ?? (await detectSpring(root, dir, relative)) ?? (await detectFastApi(dir, relative));
+}
+
+/** Next.js 또는 Vite 앱. Next가 있으면 Next로 본다 */
+async function detectNode(root: string, dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+  const pkg = await readJson(path.join(dir, 'package.json'));
+  if (!pkg) return undefined;
+  const deps = { ...(pkg.dependencies as Record<string, string> | undefined), ...(pkg.devDependencies as Record<string, string> | undefined) };
+  const template: DetectedTemplate | undefined = deps.next ? 'nextjs' : deps.vite ? 'vite' : undefined;
+  if (!template) return undefined;
+  // pnpm/npm/yarn 워크스페이스(ADR-088)의 구성원이면 잠금 파일이 저장소 루트에 있어, 그 루트 매니저·잠금 파일로 설치해야 한다
+  const workspaceManager = relative === '.' ? undefined : await workspaceRootManager(root);
+  const manager = workspaceManager ?? (await packageManager(dir, pkg));
+  const lockless = manager === 'npm' && !(await exists(path.join(workspaceManager ? root : dir, 'package-lock.json')));
+  const install = lockless ? 'npm install' : { pnpm: 'pnpm install --frozen-lockfile', yarn: 'yarn install --frozen-lockfile', npm: 'npm ci' }[manager];
+  const exec = { pnpm: 'pnpm exec', yarn: 'yarn', npm: 'npx' }[manager];
+  const port = template === 'nextjs' ? 3000 : 5173;
+  const dev = template === 'nextjs' ? `${exec} next dev --hostname 0.0.0.0 --port ${port}` : `${exec} vite --host 0.0.0.0 --port ${port} --strictPort`;
+  const notes: string[] = [];
+  if (lockless) notes.push('잠금 파일이 없어 npm install로 설치합니다(버전이 달라질 수 있습니다)');
+  // 워크스페이스 구성원은 루트에서 설치하고(잠금 파일이 거기 있다) 서비스 폴더로 돌아와 개발 서버를 띄운다
+  const command = workspaceManager
+    ? `cd ${CONTAINER_WORKSPACE_ROOT} && ${install} && cd ${containerWorkDir(relative)} && exec ${dev}`
+    : `${install} && exec ${dev}`;
+  if (workspaceManager) notes.push(`pnpm/npm/yarn 워크스페이스로 보여 의존성 설치를 저장소 루트에서 합니다(잠금 파일이 루트에 있습니다)`);
+  return {
+    template,
+    path: relative,
+    port,
+    preview: 'browser',
+    ready: { path: '/' },
+    dockerfile: [
+      '# b-studio가 만든 개발용 이미지. 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
+      'FROM node:22-bookworm-slim',
+      '',
+      'RUN corepack enable',
+      `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
+      'ENV NEXT_TELEMETRY_DISABLED=1 \\',
+      '    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \\',
+      // pnpm은 저장소를 마운트한 소스 폴더(워크스페이스 루트) 안에 만들 수 있다. 사용자 폴더와 체크포인트에 섞이지 않게 컨테이너 볼륨에 둔다
+      '    npm_config_update_notifier=false \\',
+      '    npm_config_store_dir=/cache/pnpm',
+      '',
+      `EXPOSE ${port}`,
+      `CMD ["sh", "-c", "${command}"]`,
+      '',
+    ].join('\n'),
+    volumes: { 'node-modules': 'node_modules', ...(template === 'nextjs' ? { next: '.next' } : {}), ...(manager === 'pnpm' ? { 'pnpm-store': '/cache/pnpm' } : {}) },
+    environment: {},
+    dependsOn: [],
+    notes,
+  };
+}
+
+/** 저장소 루트가 pnpm/npm/yarn 워크스페이스면 그 관리자를 돌려준다. 서비스 자신이 루트일 때는 부르지 않는다(워크스페이스 개념이 없다) */
+async function workspaceRootManager(root: string): Promise<'pnpm' | 'yarn' | 'npm' | undefined> {
+  if (await exists(path.join(root, 'pnpm-workspace.yaml'))) return 'pnpm';
+  const rootPkg = await readJson(path.join(root, 'package.json'));
+  if (!rootPkg || !('workspaces' in rootPkg)) return undefined;
+  return packageManager(root, rootPkg);
+}
+
+async function packageManager(dir: string, pkg: Record<string, unknown>): Promise<'pnpm' | 'yarn' | 'npm'> {
+  const declared = typeof pkg.packageManager === 'string' ? pkg.packageManager.split('@')[0] : undefined;
+  if (declared === 'pnpm' || declared === 'yarn' || declared === 'npm') return declared;
+  if (await exists(path.join(dir, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (await exists(path.join(dir, 'yarn.lock'))) return 'yarn';
+  return 'npm';
+}
+
+async function detectSpring(root: string, dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+  const gradleFile = (await exists(path.join(dir, 'build.gradle.kts'))) ? 'build.gradle.kts' : (await exists(path.join(dir, 'build.gradle'))) ? 'build.gradle' : undefined;
+  const gradle = gradleFile ? await readText(path.join(dir, gradleFile)) : undefined;
+  const pom = await readText(path.join(dir, 'pom.xml'));
+  const isGradle = gradle?.includes('org.springframework.boot') ?? false;
+  const isMaven = !isGradle && (pom?.includes('spring-boot') ?? false);
+  if (!isGradle && !isMaven) return undefined;
+  const build = (isGradle ? gradle : pom) ?? '';
+  const java = javaVersion(build) ?? 21;
+  const port = (await springPort(dir)) ?? 8080;
+  const notes: string[] = [];
+  const actuator = build.includes('spring-boot-starter-actuator');
+  const springdoc = build.includes('springdoc-openapi');
+  const ready = actuator ? { path: '/actuator/health' } : springdoc ? { path: '/v3/api-docs' } : { path: '/', expectStatus: 404 };
+  if (!actuator && !springdoc) notes.push('상태 확인 경로를 몰라 "/"가 404를 돌려주면 준비된 것으로 봅니다. actuator를 넣거나 studio.yaml의 ready를 고치세요');
+  const wrapper = isGradle ? await exists(path.join(dir, 'gradlew')) : await exists(path.join(dir, 'mvnw'));
+  const run = isGradle
+    ? wrapper
+      ? '["./gradlew", "bootRun", "--no-daemon", "--console=plain"]'
+      : '["gradle", "bootRun", "--no-daemon", "--console=plain"]'
+    : wrapper
+      ? '["./mvnw", "-q", "spring-boot:run"]'
+      : '["mvn", "-q", "spring-boot:run"]';
+  const image = wrapper ? `eclipse-temurin:${java}-jdk` : isGradle ? `gradle:jdk${java}` : `maven:3-eclipse-temurin-${java}`;
+  if (!wrapper) notes.push(`${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다`);
+  // 이 폴더에 자기 gradlew·settings.gradle이 없는데 저장소 루트의 settings.gradle(.kts)이 이 폴더를 서브프로젝트로 포함하면
+  // 진짜 멀티 모듈 빌드의 모듈일 가능성이 크다. 지금은 이 폴더를 그대로 작업 폴더로 써서 gradlew/gradle을 돌리는데(ADR-088),
+  // 루트에만 래퍼·settings.gradle이 있는 구조라면 실패할 수 있다 — 그럴 때는 studio.yaml의 path를 저장소 루트로 옮기고
+  // Dockerfile.b-studio·테스트 명령에 `:폴더이름:bootRun`/`:폴더이름:test`처럼 서브프로젝트 경로를 직접 적어야 한다
+  if (isGradle && relative !== '.' && !(await exists(path.join(dir, 'settings.gradle.kts'))) && !(await exists(path.join(dir, 'settings.gradle')))) {
+    if (await isGradleSubproject(root, relative)) {
+      notes.push(
+        '저장소 루트의 settings.gradle(.kts)이 이 폴더를 서브프로젝트로 포함하는 것으로 보입니다. ' +
+          '지금은 이 폴더에서 바로 실행합니다 — 루트에만 Gradle 래퍼·settings.gradle이 있는 진짜 멀티 모듈 빌드라면 ' +
+          '실패할 수 있으니, studio.yaml의 path를 저장소 루트로 옮기고 bootRun·test 명령에 `:' + relative + ':작업`처럼 서브프로젝트 경로를 직접 적으세요',
+      );
+    }
+  }
+  return {
+    template: 'spring-boot',
+    path: relative,
+    port,
+    preview: springdoc ? 'openapi' : 'browser',
+    ready: { ...ready },
+    ...(springdoc ? { contract: '/v3/api-docs' } : {}),
+    dockerfile: [
+      '# b-studio가 만든 개발용 이미지. 소스는 compose에서 마운트하고, 의존성은 첫 기동 때 받는다(프록시 설정은 샌드박스가 넣는다)',
+      `FROM ${image}`,
+      '',
+      `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
+      ...(isGradle ? ['ENV GRADLE_USER_HOME=/gradle-home', ''] : []),
+      `EXPOSE ${port}`,
+      `CMD ${run}`,
+      '',
+    ].join('\n'),
+    volumes: isGradle ? { 'gradle-home': '/gradle-home', 'gradle-project': '.gradle', build: 'build' } : { 'maven-home': '/root/.m2', target: 'target' },
+    environment: {},
+    dependsOn: [],
+    notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
+  };
+}
+
+/** 저장소 루트의 settings.gradle(.kts)이 이 폴더 이름을 서브프로젝트로 포함하는지(`include 'commerce'`, `include(":commerce")` 등) */
+async function isGradleSubproject(root: string, relative: string): Promise<boolean> {
+  const settings = (await readText(path.join(root, 'settings.gradle.kts'))) ?? (await readText(path.join(root, 'settings.gradle')));
+  if (!settings) return false;
+  const escaped = relative.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`['"]:?${escaped}['"]`).test(settings);
+}
+
+function javaVersion(build: string): number | undefined {
+  const match =
+    build.match(/JavaLanguageVersion\.of\((\d+)\)/) ??
+    build.match(/JavaVersion\.VERSION_(\d+)/) ??
+    build.match(/sourceCompatibility\s*=\s*['"]?(\d+)/) ??
+    build.match(/<java\.version>(\d+)<\/java\.version>/);
+  const version = match ? Number(match[1]) : undefined;
+  return version && version >= 8 ? version : undefined;
+}
+
+async function springPort(dir: string): Promise<number | undefined> {
+  const resources = path.join(dir, 'src/main/resources');
+  const properties = await readText(path.join(resources, 'application.properties'));
+  const yaml = (await readText(path.join(resources, 'application.yml'))) ?? (await readText(path.join(resources, 'application.yaml')));
+  const match = properties?.match(/^\s*server\.port\s*=\s*(\d+)/m) ?? yaml?.match(/server:\s*\n\s+port:\s*(\d+)/);
+  return match ? Number(match[1]) : undefined;
+}
+
+async function detectFastApi(dir: string, relative: string): Promise<Omit<DetectedService, 'name'> | undefined> {
+  const requirements = await readText(path.join(dir, 'requirements.txt'));
+  const pyproject = await readText(path.join(dir, 'pyproject.toml'));
+  const hasFastApi = /(^|\n)\s*fastapi\b/i.test(requirements ?? '') || /["']fastapi/i.test(pyproject ?? '') || /(^|\n)\s*fastapi\s*=/i.test(pyproject ?? '');
+  if (!hasFastApi) return undefined;
+  const entry = await fastApiModule(dir);
+  const notes: string[] = [];
+  if (!entry.found) notes.push('FastAPI 앱을 만드는 파일을 찾지 못해 main:app으로 실행합니다. 다르면 Dockerfile.b-studio를 고치세요');
+  const install = requirements ? 'pip install --no-cache-dir -r requirements.txt' : 'pip install --no-cache-dir uv && uv pip install --system -r pyproject.toml';
+  return {
+    template: 'fastapi',
+    path: relative,
+    port: 8000,
+    preview: 'openapi',
+    ready: { path: '/openapi.json' },
+    contract: '/openapi.json',
+    dockerfile: [
+      '# b-studio가 만든 개발용 이미지. 소스는 compose에서 마운트하고 의존성은 컨테이너 안에서 설치한다',
+      'FROM python:3.12-slim',
+      '',
+      `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
+      'ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1',
+      '',
+      'EXPOSE 8000',
+      `CMD ["sh", "-c", "${install} && exec uvicorn ${entry.target} --reload --host 0.0.0.0 --port 8000"]`,
+      '',
+    ].join('\n'),
+    volumes: {},
+    environment: {},
+    dependsOn: [],
+    notes,
+  };
+}
+
+async function fastApiModule(dir: string): Promise<{ target: string; found: boolean }> {
+  for (const file of ['main.py', 'app.py', 'app/main.py', 'src/main.py', 'api/main.py']) {
+    const text = await readText(path.join(dir, file));
+    const match = text?.match(/^(\w+)\s*=\s*FastAPI\(/m);
+    if (match) return { target: `${file.replace(/\.py$/, '').replaceAll('/', '.')}:${match[1]}`, found: true };
+  }
+  return { target: 'main:app', found: false };
+}
+
+/** 제안한 서비스로 만들 파일. 이미 studio.yaml이 있으면 아무것도 만들지 않는다 */
+export function generateFiles(detection: ProjectDetection): GeneratedFile[] {
+  if (detection.hasSpec || detection.services.length === 0) return [];
+  const files: GeneratedFile[] = [
+    { path: SPEC_FILE, content: specYaml(detection) },
+    { path: GENERATED_COMPOSE, content: composeYaml(detection.services, detection.infra) },
+  ];
+  for (const service of detection.services) files.push({ path: posixJoin(service.path, GENERATED_DOCKERFILE), content: service.dockerfile });
+  return files;
+}
+
+function specYaml(detection: ProjectDetection): string {
+  const lines = [
+    '# b-studio가 폴더를 보고 만든 설정. 이 파일과 compose.b-studio.yaml·Dockerfile.b-studio는 git 추적에서 빼 두었습니다.',
+    '# 틀린 추측이 있으면 고쳐도 됩니다. 팀과 나누려면 .git/info/exclude에서 빼고 커밋하세요',
+    'version: 1',
+    `name: ${sanitize(detection.name) || 'project'}`,
+    `compose: ${GENERATED_COMPOSE}`,
+    '',
+    'services:',
+  ];
+  for (const service of detection.services) {
+    lines.push(`  ${service.name}:`, '    source: managed', `    template: ${service.template}`, `    path: ${yamlString(service.path)}`, `    port: ${service.port}`, `    preview: ${service.preview}`);
+    const ready = [`path: ${service.ready.path}`, ...(service.ready.expectStatus ? [`expectStatus: ${service.ready.expectStatus}`] : []), `timeoutSeconds: ${service.template === 'spring-boot' ? 900 : 300}`];
+    lines.push(`    ready: { ${ready.join(', ')} }`);
+    if (service.contract) lines.push(`    contract: { extract: ${service.contract} }`);
+    for (const note of service.notes) lines.push(`    # 확인: ${note}`);
+  }
+  lines.push(...databasesYaml(detection.infra));
+  lines.push(...workflowYaml(detection.frontendBackendWiring));
+  lines.push('');
+  return lines.join('\n');
+}
+
+/**
+ * 프론트엔드→백엔드 주소를 자동 연결했으면(fix/frontend-backend-url), 화면이 떠도 API 호출이 깨지는 것을 검증 게이트가
+ * 잡도록 기본 pageChecks 하나를 만든다. 헤드리스 브라우저를 쓸 수 없는 샌드박스에서는 fallbackProbe가 대신
+ * 백엔드 주소로 HTTP 확인만 한다(packages/agent/src/gate.ts). 다시 만들려면(studio.yaml을 직접 더 고치고 싶으면)
+ * studio.yaml·compose.b-studio.yaml과 각 서비스 폴더의 Dockerfile.b-studio를 지우고 폴더를 다시 열면 된다
+ */
+function workflowYaml(wiring: ProjectDetection['frontendBackendWiring']): string[] {
+  if (!wiring) return [];
+  return [
+    '',
+    '# 프론트엔드가 백엔드 주소를 자동으로 연결해 받습니다(위 서비스의 "확인:" 메모 참고). 화면은 뜨는데 API 호출만 깨지는',
+    '# 경우를 검증 게이트가 잡도록 기본 화면 확인을 하나 만들었습니다. 다시 만들려면 이 파일과 compose.b-studio.yaml·',
+    '# 각 서비스 폴더의 Dockerfile.b-studio를 지우고 폴더를 다시 여세요',
+    'workflow:',
+    '  pageChecks:',
+    `    - { service: ${wiring.frontendService}, path: /, mode: browser, fallbackProbe: { service: ${wiring.backendService}, path: ${yamlString(wiring.backendProbePath)} } }`,
+  ];
+}
+
+/** postgres 부가 서비스 중 databases: 요건(POSTGRES_DB·POSTGRES_USER가 SQL 식별자)에 맞는 것만 체크포인트 스냅샷 대상으로 적는다 */
+function databasesYaml(infra: readonly InfraService[]): string[] {
+  const entries = infra.flatMap((service) => {
+    const spec = databaseSpecFor(service);
+    return spec ? [[service.name, spec] as const] : [];
+  });
+  if (entries.length === 0) return [];
+  const lines = ['', '# 체크포인트마다 상태를 저장해, 파일을 되돌릴 때 스키마와 데이터도 같은 시점으로 되돌린다', 'databases:'];
+  for (const [name, spec] of entries) lines.push(`  ${name}: { engine: postgres, database: ${spec.database}, user: ${spec.user} }`);
+  return lines;
+}
+
+function composeYaml(services: readonly DetectedService[], infra: readonly InfraService[]): string {
+  const lines = ['# b-studio가 만든 개발용 compose. 샌드박스가 이 파일로 서비스를 띄운다', 'services:'];
+  const volumes: string[] = [];
+  for (const service of services) {
+    const context = service.path === '.' ? '.' : `./${service.path}`;
+    const workDir = containerWorkDir(service.path);
+    lines.push(`  ${service.name}:`, `    build: { context: ${context}, dockerfile: ${GENERATED_DOCKERFILE} }`, `    working_dir: ${workDir}`);
+    if (Object.keys(service.environment).length > 0) {
+      lines.push('    environment:');
+      for (const [key, value] of Object.entries(service.environment)) lines.push(`      ${key}: ${yamlString(value)}`);
+    }
+    // 프로젝트 루트 전체를 마운트한다(ADR-088) — 서비스 폴더만 마운트하면 멀티 모듈 빌드·워크스페이스·폴더 밖 공유 설정 참조가 깨진다
+    lines.push('    volumes:', `      - .:${CONTAINER_WORKSPACE_ROOT}`);
+    for (const [volume, target] of Object.entries(service.volumes)) {
+      const name = `${service.name}-${volume}`;
+      const containerPath = target.startsWith('/') ? target : posixJoin(workDir, target);
+      lines.push(`      - ${name}:${containerPath}`);
+      volumes.push(name);
+    }
+    if (service.dependsOn.length > 0) {
+      // 조건 있는 항목과 없는 항목이 섞이면 목록 문법과 맵 문법을 함께 쓸 수 없어(잘못된 YAML) 모두 맵 문법으로 통일한다
+      lines.push('    depends_on:');
+      for (const dep of service.dependsOn) {
+        const depInfra = infra.find((candidate) => candidate.name === dep);
+        lines.push(`      ${dep}: { condition: ${depInfra?.healthcheck ? 'service_healthy' : 'service_started'} }`);
+      }
+    }
+  }
+  if (infra.length > 0) {
+    lines.push('', '  # studio.yaml에 없는 부가 서비스: 샌드박스와 함께 뜨고 함께 사라진다 (기존 compose에서 가져오거나 새로 제안했습니다)');
+    for (const service of infra) {
+      lines.push(`  ${service.name}:`, service.proposed ? `    # 확인: ${service.reason}` : `    # ${service.sourceFile}에서 가져왔습니다`);
+      for (const note of service.notes) lines.push(`    # 확인: ${note}`);
+      lines.push(`    image: ${service.image}`);
+      if (Object.keys(service.environment).length > 0) {
+        lines.push('    environment:');
+        for (const [key, value] of Object.entries(service.environment)) lines.push(`      ${key}: ${yamlString(value)}`);
+      }
+      if (service.command !== undefined) lines.push(`    command: ${JSON.stringify(service.command)}`);
+      if (service.healthcheck) {
+        lines.push('    healthcheck:');
+        for (const [key, value] of Object.entries(service.healthcheck)) lines.push(`      ${key}: ${typeof value === 'string' ? yamlString(value) : JSON.stringify(value)}`);
+      }
+      if (Object.keys(service.volumes).length > 0) {
+        lines.push('    volumes:');
+        for (const [name, target] of Object.entries(service.volumes)) {
+          lines.push(`      - ${name}:${target}`);
+          volumes.push(name);
+        }
+      }
+      if (service.dependsOn.length > 0) lines.push('    depends_on:', ...service.dependsOn.map((dep) => `      - ${dep}`));
+    }
+  }
+  if (volumes.length > 0) lines.push('', 'volumes:', ...volumes.map((volume) => `  ${volume}:`));
+  lines.push('');
+  return lines.join('\n');
+}
+
+function posixJoin(dir: string, file: string): string {
+  return dir === '.' ? file : `${dir.replace(/\/+$/, '')}/${file}`;
+}
+
+function yamlString(value: string): string {
+  return /^[A-Za-z0-9._/-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+async function childDirs(root: string): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !IGNORED_DIRS.has(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+async function exists(file: string): Promise<boolean> {
+  return stat(file).then(
+    () => true,
+    () => false,
+  );
+}
+
+async function readText(file: string): Promise<string | undefined> {
+  return readFile(file, 'utf8').catch(() => undefined);
+}
+
+async function readJson(file: string): Promise<Record<string, unknown> | undefined> {
+  const text = await readText(file);
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}

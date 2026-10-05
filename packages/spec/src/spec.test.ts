@@ -45,10 +45,42 @@ describe('parseSpec', () => {
     expect(() => parseSpec(`${ORDERS_SPEC}deploy:\n  services:\n    web: { dockerfile: ../Dockerfile }\n`)).toThrow(SpecError);
   });
 
-  it('모노레포 하위 폴더 연동은 명시해야 켜진다', () => {
-    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false });
-    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true });
+  it('모노레포 하위 폴더 연동은 명시해야 켜지고, main 따라잡기(autoCatchUp)는 기본으로 켜진다', () => {
+    expect(parseSpec(`${ORDERS_SPEC}repository: {}\n`).repository).toEqual({ monorepo: false, autoCatchUp: true });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: true\n`).repository).toEqual({ monorepo: true, autoCatchUp: true });
+    expect(parseSpec(`${ORDERS_SPEC}repository:\n  autoCatchUp: false\n`).repository).toEqual({ monorepo: false, autoCatchUp: false });
     expect(() => parseSpec(`${ORDERS_SPEC}repository:\n  monorepo: "yes"\n`)).toThrow(SpecError);
+  });
+
+  it('PR 자동 리뷰 설정은 절이 없어도 기본값(켬·2라운드)이 채워지고, 범위를 벗어나면 거부한다', () => {
+    expect(parseSpec(ORDERS_SPEC).review).toEqual({ auto: true, maxRounds: 2 });
+    expect(parseSpec(`${ORDERS_SPEC}review: {}\n`).review).toEqual({ auto: true, maxRounds: 2 });
+    expect(parseSpec(`${ORDERS_SPEC}review:\n  auto: false\n  maxRounds: 1\n`).review).toEqual({ auto: false, maxRounds: 1 });
+    expect(parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 3\n`).review).toEqual({ auto: true, maxRounds: 3 });
+    expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 0\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}review:\n  maxRounds: 4\n`)).toThrow(SpecError);
+  });
+
+  it('프로젝트 지침 설정은 절이 없어도 기본값(켬·AGENTS.md·8,000자)이 채워지고, 값을 바꿀 수 있다', () => {
+    expect(parseSpec(ORDERS_SPEC).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide: {}\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide:\n  file: CLAUDE.md\n  maxChars: 2000\n`).guide).toEqual({ file: 'CLAUDE.md', maxChars: 2_000, enabled: true });
+    expect(parseSpec(`${ORDERS_SPEC}guide:\n  enabled: false\n`).guide).toEqual({ file: 'AGENTS.md', maxChars: 8_000, enabled: false });
+    expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: 0\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}guide:\n  maxChars: -1\n`)).toThrow(SpecError);
+  });
+
+  it('계획-실행 분리 모델 설정은 절이 없으면 undefined이고, 있으면 plan·execute를 그대로 읽는다', () => {
+    expect(parseSpec(ORDERS_SPEC).models).toBeUndefined();
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n  execute: sonnet\n`).models).toEqual({ plan: 'opus', execute: 'sonnet' });
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n`).models).toEqual({ plan: 'opus' });
+    expect(() => parseSpec(`${ORDERS_SPEC}models:\n  plan: ""\n`)).toThrow(SpecError);
+  });
+
+  it('체크포인트 커밋 제목 설정(ADR-080)은 절이 없어도 기본값(conventional commits 켬)이 채워지고, 끌 수 있다', () => {
+    expect(parseSpec(ORDERS_SPEC).checkpoints).toEqual({ conventionalCommits: true });
+    expect(parseSpec(`${ORDERS_SPEC}checkpoints: {}\n`).checkpoints).toEqual({ conventionalCommits: true });
+    expect(parseSpec(`${ORDERS_SPEC}checkpoints:\n  conventionalCommits: false\n`).checkpoints).toEqual({ conventionalCommits: false });
   });
 
   it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
@@ -141,6 +173,50 @@ describe('parseSpec', () => {
     expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, viewport: { width: 390, height: 844 } }\n`)).issues).toEqual([
       'workflow.autoPageChecks.viewport: viewport는 mode: browser에서만 쓸 수 있습니다',
     ]);
+  });
+
+  it('autoPageChecks.dynamicRouteProbe·sampleIdFrom을 읽고, 함께 끄면 거부한다(ADR-078)', () => {
+    // 생략하면 undefined(켠 것과 같다). 굳이 기본값을 채우지 않아 이전 설정과 그대로 호환된다
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web }\n`).workflow?.autoPageChecks?.dynamicRouteProbe).toBeUndefined();
+
+    const off = parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, dynamicRouteProbe: false }\n`).workflow?.autoPageChecks;
+    expect(off?.dynamicRouteProbe).toBe(false);
+
+    const from = parseSpec(
+      `${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, sampleIdFrom: { service: api, path: /api/orders, jsonPath: "$[0].id" } }\n`,
+    ).workflow?.autoPageChecks;
+    expect(from?.sampleIdFrom).toEqual({ service: 'api', path: '/api/orders', jsonPath: '$[0].id' });
+
+    // dynamicRouteProbe를 끄면 sampleIdFrom은 쓰이지 않으므로, 함께 적으면 설정 오류로 거부한다
+    expect(
+      captureError(() =>
+        parseSpec(
+          `${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, dynamicRouteProbe: false, sampleIdFrom: { service: api, path: /api/orders, jsonPath: "$[0].id" } }\n`,
+        ),
+      ).issues,
+    ).toEqual(['workflow.autoPageChecks.sampleIdFrom: sampleIdFrom은 dynamicRouteProbe를 끄면 쓰이지 않습니다']);
+  });
+
+  it('pageChecks.allowLoadingPlaceholder는 browser 전용이다(ADR-078)', () => {
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, allowLoadingPlaceholder: true }\n`)).issues).toEqual([
+      'workflow.pageChecks.0.allowLoadingPlaceholder: allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다',
+    ]);
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, allowLoadingPlaceholder: true }\n`).workflow?.pageChecks?.[0]
+        ?.allowLoadingPlaceholder,
+    ).toBe(true);
+  });
+
+  it('pageChecks.fallbackProbe는 browser 전용이고, 그 자리를 가리키는 서비스는 managed여야 한다(fix/frontend-backend-url)', () => {
+    expect(
+      captureError(() =>
+        parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, fallbackProbe: { service: api, path: /actuator/health } }\n`),
+      ).issues,
+    ).toEqual(['workflow.pageChecks.0.fallbackProbe: fallbackProbe는 mode: browser에서만 쓸 수 있습니다']);
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, fallbackProbe: { service: api, path: /actuator/health } }\n`).workflow
+        ?.pageChecks?.[0]?.fallbackProbe,
+    ).toEqual({ service: 'api', path: '/actuator/health' });
   });
 
   it('browser 모드의 상호작용 단계를 읽고, http 모드나 잘못된 단계를 거부한다', () => {
@@ -501,6 +577,8 @@ databases:
 
     const project = await loadProject(dir);
     expect(project.databases).toEqual([['db', { engine: 'postgres', database: 'app', user: 'app', dependents: ['api', 'worker'] }]]);
+    // 서비스 선택(ADR-083)의 기본값 계산이 쓰는 원본 depends_on 그래프. compose에 없는 이름은 걸러진다
+    expect(project.dependsOn).toEqual({ web: ['api'], api: ['db'], worker: ['db'], db: [] });
   });
 
   it('자원 한도는 compose 서비스에만 걸 수 있고 docker 메모리 표기를 쓴다', async () => {
@@ -544,6 +622,7 @@ workflow:
     - { name: db, service: db, command: [pg_isready] }
   pageChecks:
     - { service: web, path: /, expectFromApi: { service: db, path: /api/orders, jsonPath: "$[0].customerName" } }
+    - { service: api, path: /, mode: browser, fallbackProbe: { service: db, path: /health } }
 `,
     );
     await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
@@ -556,6 +635,7 @@ workflow:
       "workflow.tests.1.service: 'db'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.service: 'web'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.expectFromApi.service: 'db'은(는) source: managed 서비스가 아닙니다",
+      "workflow.pageChecks.1.fallbackProbe.service: 'db'은(는) source: managed 서비스가 아닙니다",
     ]);
   });
 
@@ -591,6 +671,55 @@ workflow:
       (e: unknown) => e as SpecError,
     );
     expect(notManaged.issues).toEqual(["workflow.autoPageChecks.service: 'db'은(는) source: managed 서비스가 아닙니다"]);
+  });
+
+  it('런타임 공개 URL 자리 표시자를 compose의 environment에서 찾아 publicUrlRefs로 모은다(fix/frontend-backend-url)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-publicurl-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      `version: 1
+name: x
+services:
+  frontend: { source: managed, template: nextjs, path: frontend, port: 3000, preview: browser }
+  backend: { source: managed, template: spring-boot, path: backend, port: 8080, preview: openapi }
+`,
+    );
+    await writeFile(
+      path.join(dir, 'compose.yaml'),
+      `services:
+  frontend:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "\${b-studio:services.backend.publicUrl}/api"
+  backend:
+    build: ./backend
+`,
+    );
+
+    const project = await loadProject(dir);
+    expect(project.publicUrlRefs).toEqual([
+      { service: 'frontend', envKey: 'NEXT_PUBLIC_API_BASE_URL', template: '${b-studio:services.backend.publicUrl}/api', targetService: 'backend' },
+    ]);
+  });
+
+  it('공개 URL 자리 표시자가 가리키는 서비스가 managed가 아니면 거부한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-publicurl-'));
+    await writeFile(
+      path.join(dir, 'studio.yaml'),
+      'version: 1\nname: x\nservices:\n  frontend: { source: managed, template: nextjs, path: frontend, port: 3000, preview: browser }\n',
+    );
+    await writeFile(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  frontend: { build: ./frontend, environment: { NEXT_PUBLIC_API_BASE_URL: "${b-studio:services.backend.publicUrl}" } }\n  backend: { image: nginx }\n',
+    );
+
+    const error = await loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+    expect(error.issues).toEqual([
+      "frontend.environment.NEXT_PUBLIC_API_BASE_URL: ${b-studio:services.backend.publicUrl}이 가리키는 'backend'이(가) source: managed 서비스가 아닙니다",
+    ]);
   });
 
   it('시크릿은 환경 변수 이름으로 적고, 받을 서비스는 compose에 있어야 한다', async () => {

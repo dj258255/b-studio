@@ -76,6 +76,16 @@ describe('buildTokenReports', () => {
     expect(report!.cacheHitRatio).toBeCloseTo(30_000 / 33_100, 5);
   });
 
+  it('도구 결과가 잘라낸 글자와 남은 호출마다 다시 읽혔을 양(추정)을 낸다', () => {
+    const [report] = buildTokenReports(sampleEvents());
+
+    // (30,452-6,000) + (12,000-28) = 36,424자, 그중 반복 대체 1회
+    expect(report!.trimmed.chars).toBe(36_424);
+    expect(report!.trimmed.repeated).toBe(1);
+    // (24452/4)×(뒤 1턴+1) + (11972/4)×(뒤 0턴+1) = 12,226 + 2,993
+    expect(report!.trimmed.estimatedTokens).toBe(15_219);
+  });
+
   it('글자 수로 낭비 신호를 찾는다: 큰 결과·같은 결과 반복·node_modules·컨텍스트 급증', () => {
     const [report] = buildTokenReports(sampleEvents());
     const kinds = report!.warnings.map((warning) => warning.kind);
@@ -102,6 +112,16 @@ describe('buildTokenReports', () => {
     expect(unpriced!.estimatedCostUsd).toBeUndefined();
     expect(unpriced!.priceNote).toBe('단가 미설정');
     expect(unpriced!.priceSource).toBe('none');
+  });
+
+  it('턴별 컨텍스트 증가 원인(문맥 급증) 분석을 함께 싣는다', () => {
+    const [report] = buildTokenReports(sampleEvents());
+    expect(report!.contextGrowth).toBeDefined();
+    expect(report!.contextGrowth!.turns).toHaveLength(2);
+    // 턴 2는 31,100 토큰 증가로 급증(4,000 토큰 이상)이고, 원인에 run_in_service 도구 결과가 잡힌다
+    const jump = report!.contextGrowth!.jumps.find((entry) => entry.turn === 2);
+    expect(jump).toBeDefined();
+    expect(jump!.sources.some((source) => source.name === 'run_in_service')).toBe(true);
   });
 
   it('여러 실행은 최신이 먼저 오고, 도구 결과가 없는 실행도 남는다', () => {
@@ -164,6 +184,17 @@ describe('buildTokenReports', () => {
       sonnet: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
     });
     expect(report!.escalation).toEqual({ from: 'haiku', to: 'sonnet', attempt: 2 });
+  });
+
+  it('run_finished.metrics.guideChars(프로젝트 지침, ADR-077)를 보고서에 싣고, 없으면 칸 자체가 없다', () => {
+    const events = modelEvents();
+    const finished = events.find((event) => event.type === 'run_finished') as Extract<StudioEvent, { type: 'run_finished' }>;
+    finished.metrics!.guideChars = 1_234;
+    const [withGuide] = buildTokenReports(events);
+    expect(withGuide!.guideChars).toBe(1_234);
+
+    const [withoutGuide] = buildTokenReports(sampleEvents());
+    expect(withoutGuide!.guideChars).toBeUndefined();
   });
 
   it('토큰을 쓰지 않은 모델(고정 계획의 scripted)은 모델별 표와 비용에서 뺀다', () => {

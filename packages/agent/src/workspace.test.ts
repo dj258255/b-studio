@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Workspace, WorkspaceError } from './workspace';
+import { isSecretFile, Workspace, WorkspaceError } from './workspace';
 
 let root: string;
 let workspace: Workspace;
@@ -116,5 +116,25 @@ describe('Workspace', () => {
     expect(() => workspace.trackExternalChanges(['node_modules/x.js'])).toThrow(WorkspaceError);
     expect(() => workspace.trackExternalChanges([''])).toThrow(WorkspaceError);
     expect(workspace.changedFiles()).toEqual([]);
+  });
+});
+
+describe('Workspace — .env 예시 파일', () => {
+  it('.env.example·.env.sample·.env.local.example은 읽고 쓸 수 있지만 .env·.env.local·.env.production은 여전히 막는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-env-example-'));
+    try {
+      const workspace = new Workspace(root);
+      await workspace.write('.env.example', 'API_BASE_URL=\n');
+      await workspace.write('frontend/.env.sample', 'NEXT_PUBLIC_API_BASE_URL=\n');
+      await workspace.write('.env.local.example', 'X=\n');
+      expect(await readFile(path.join(root, '.env.example'), 'utf8')).toBe('API_BASE_URL=\n');
+      await expect(workspace.write('.env', 'SECRET=1')).rejects.toThrow(WorkspaceError);
+      await expect(workspace.write('.env.local', 'SECRET=1')).rejects.toThrow(WorkspaceError);
+      await expect(workspace.write('.env.production', 'SECRET=1')).rejects.toThrow(WorkspaceError);
+      expect(isSecretFile('.env.example')).toBe(false);
+      expect(isSecretFile('backend/.env')).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

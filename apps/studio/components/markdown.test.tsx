@@ -35,6 +35,13 @@ describe("Markdown", () => {
     expect(html).toContain("[이미지: 화면 캡처]");
   });
 
+  it("이 스튜디오 안의 다른 화면을 가리키는 상대 경로는 새 탭을 열지 않는다(작업 분해 화면 링크가 새 탭에서 열리던 문제)", () => {
+    const html = render("[작업 분해 보기](/task-plans?id=p1)");
+
+    expect(html).toContain('href="/task-plans?id=p1" class="underline underline-offset-2">작업 분해 보기</a>');
+    expect(html).not.toContain("target=\"_blank\"");
+  });
+
   it("각주는 같은 답변 안을 가리키므로 새 탭으로 열지 않고, 각주 묶음 제목은 화면에서 숨긴다", () => {
     const html = render(["본문에 각주[^1]가 있다.", "", "[^1]: 각주 내용"].join("\n"));
 

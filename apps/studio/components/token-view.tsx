@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import type { AgentUsage } from "@b-studio/agent";
 import type { SessionView } from "@/lib/session-view";
-import type { TokenReport, TokenWarningKind } from "@/lib/token-types";
+import type { ContextJump, TokenReport, TokenWarningKind } from "@/lib/token-types";
 import { formatTokenCount } from "@/lib/usage";
+import { RepeatedActionsSection } from "./repeated-actions-section";
 
 const number = (value: number) => value.toLocaleString("ko-KR");
 const percent = (ratio: number) => `${(ratio * 100).toFixed(0)}%`;
@@ -58,38 +59,44 @@ export function TokenView({ view }: { view: SessionView }) {
     };
   }, [sessionId, revision]);
 
-  if (error) return <p role="alert" className="p-6 text-sm text-fail">{error}</p>;
-  if (!reports) return <p role="status" className="p-6 text-sm text-muted">토큰 보고서를 불러오는 중</p>;
-  if (reports.length === 0) {
-    return <p className="p-6 text-sm text-muted">아직 끝난 요청이 없습니다. 요청을 하나 보내면 턴별 컨텍스트와 도구 결과 크기를 여기서 볼 수 있습니다.</p>;
-  }
-
-  const active = reports.find((report) => report.runId === selected) ?? reports[0]!;
+  const active = reports?.find((report) => report.runId === selected) ?? reports?.[0];
 
   return (
     <div className="flex h-full flex-col">
-      <div role="tablist" aria-label="실행" className="flex flex-wrap gap-1 border-b border-line bg-panel px-3 py-2">
-        {reports.map((report) => (
-          <button
-            key={report.runId}
-            role="tab"
-            type="button"
-            aria-selected={report.runId === active.runId}
-            onClick={() => setSelected(report.runId)}
-            className={`min-w-0 max-w-[16rem] rounded-control px-3 py-1 text-left text-sm ${
-              report.runId === active.runId ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
-            }`}
-          >
-            <span className="block truncate">{report.request || "(요청 없음)"}</span>
-            <span className="text-xs text-muted">
-              {report.turns.length}턴 · 입력 {number(report.totals.inputTokens)} · 캐시 {number(report.totals.cacheReadTokens)}
-            </span>
-          </button>
-        ))}
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <RunDetail report={active} />
-      </div>
+      {/* 이 프로젝트의 모든 세션을 훑는 프로젝트 단위 구역이라, 실행별 보고서가 아직 없어도(로딩·오류·빈 상태) 따로 보여 준다 */}
+      <RepeatedActionsSection projectId={view.snapshot.projectId} />
+      {error ? (
+        <p role="alert" className="p-6 text-sm text-fail">{error}</p>
+      ) : !reports ? (
+        <p role="status" className="p-6 text-sm text-muted">토큰 보고서를 불러오는 중</p>
+      ) : reports.length === 0 || !active ? (
+        <p className="p-6 text-sm text-muted">아직 끝난 요청이 없습니다. 요청을 하나 보내면 턴별 컨텍스트와 도구 결과 크기를 여기서 볼 수 있습니다.</p>
+      ) : (
+        <>
+          <div role="tablist" aria-label="실행" className="flex flex-wrap gap-1 border-b border-line bg-panel px-3 py-2">
+            {reports.map((report) => (
+              <button
+                key={report.runId}
+                role="tab"
+                type="button"
+                aria-selected={report.runId === active.runId}
+                onClick={() => setSelected(report.runId)}
+                className={`min-w-0 max-w-[16rem] rounded-control px-3 py-1 text-left text-sm ${
+                  report.runId === active.runId ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
+                }`}
+              >
+                <span className="block truncate">{report.request || "(요청 없음)"}</span>
+                <span className="text-xs text-muted">
+                  {report.turns.length}턴 · 입력 {number(report.totals.inputTokens)} · 캐시 {number(report.totals.cacheReadTokens)}
+                </span>
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-4">
+            <RunDetail report={active} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -108,6 +115,7 @@ export function RunDetail({ report }: { report: TokenReport }) {
           <Stat label="캐시 적중률" value={percent(report.cacheHitRatio)} />
           <Stat label="추정 비용" value={costText(report)} />
           <Stat label="비운 도구 결과" value={report.cleared.count === 0 ? "없음" : `${number(report.cleared.count)}개 · ${number(report.cleared.chars)}자`} />
+          {report.guideChars !== undefined && <Stat label="고정 문맥(AGENTS.md)" value={`${number(report.guideChars)}자`} />}
         </dl>
         <p className="mt-1 text-xs text-muted">캐시 적중률은 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기)입니다. 추정 비용은 단가 환경 변수를 넣었을 때만 계산합니다.</p>
         {report.escalation && (
@@ -131,42 +139,26 @@ export function RunDetail({ report }: { report: TokenReport }) {
           <p className="mt-2 text-sm text-muted">이 실행은 턴 사용량을 남기지 않았습니다(스크립트 실행 등).</p>
         ) : (
           <>
-            <ContextChart turns={report.turns} />
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full min-w-[40rem] text-left text-sm">
-                <thead className="border-b border-line text-muted">
-                  <tr>
-                    <th scope="col" className="py-2 pr-4 font-medium">턴</th>
-                    <th scope="col" className="py-2 pr-4 font-medium">컨텍스트</th>
-                    <th scope="col" className="py-2 pr-4 font-medium">증가</th>
-                    <th scope="col" className="py-2 pr-4 font-medium">출력</th>
-                    <th scope="col" className="py-2 pr-4 font-medium">캐시 읽기</th>
-                    <th scope="col" className="py-2 pr-4 font-medium">비움</th>
-                    <th scope="col" className="py-2 font-medium">가장 큰 도구 결과</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {report.turns.map((turn) => (
-                    <tr key={turn.turn} className="border-b border-line/60 align-top">
-                      <th scope="row" className="py-2 pr-4 font-medium">{turn.turn}</th>
-                      <td className="py-2 pr-4 font-mono text-xs">{number(turn.contextTokens)}</td>
-                      <td className={`py-2 pr-4 font-mono text-xs ${turn.delta > 20_000 ? "text-fail" : ""}`}>+{number(turn.delta)}</td>
-                      <td className="py-2 pr-4 font-mono text-xs">{number(turn.output)}</td>
-                      <td className="py-2 pr-4 font-mono text-xs">{number(turn.cacheRead)}</td>
-                      <td className="py-2 pr-4 text-muted">
-                        {turn.cleared ? `도구 결과 ${number(turn.cleared.count)}개 비움(${number(turn.cleared.chars)}자)` : "-"}
-                      </td>
-                      <td className="py-2 text-muted">
-                        {turn.biggestTool ? `${turn.biggestTool.name} ${turn.biggestTool.input} · ${number(turn.biggestTool.chars)}자` : "-"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <ContextChart turns={report.turns} jumps={report.contextGrowth?.jumps} />
+            <TurnsTable turns={report.turns} jumps={report.contextGrowth?.jumps} />
           </>
         )}
       </section>
+
+      {report.contextGrowth && (
+        <section aria-labelledby="token-context-jumps">
+          <h3 id="token-context-jumps" className="text-sm font-semibold">문맥 급증 {report.contextGrowth.jumps.length}개</h3>
+          {report.contextGrowth.jumps.length === 0 ? (
+            <p className="mt-2 text-sm text-muted">문맥이 급격히 늘어난 턴이 없습니다.</p>
+          ) : (
+            <ul className="mt-2 flex flex-col gap-3 text-sm">
+              {report.contextGrowth.jumps.map((jump) => (
+                <ContextJumpCard key={jump.turn} jump={jump} />
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       <section aria-labelledby="token-tools">
         <h3 id="token-tools" className="text-sm font-semibold">도구별 비중</h3>
@@ -264,22 +256,35 @@ export function RunDetail({ report }: { report: TokenReport }) {
   );
 }
 
-/** 턴별 컨텍스트 크기 막대. 라이브러리 없이 SVG로 그린다(표가 같은 값을 글로도 보여 준다) */
-function ContextChart({ turns }: { turns: TokenReport["turns"] }) {
+/**
+ * 턴별 컨텍스트 크기 막대. 라이브러리 없이 SVG로 그린다(표가 같은 값을 글로도 보여 준다).
+ * 문맥이 급증한 턴은 막대를 빨갛게 칠하고 점을 얹어, 표를 보지 않아도 어디서 뛰었는지 한눈에 보인다(마우스를 올리면 수치를 보여 준다).
+ */
+function ContextChart({ turns, jumps }: { turns: TokenReport["turns"]; jumps?: ContextJump[] }) {
   const height = 96;
   const width = Math.max(240, turns.length * 28);
   const max = Math.max(1, ...turns.map((turn) => Math.abs(turn.contextTokens)));
   const slot = width / turns.length;
   const barWidth = Math.max(4, Math.min(18, slot - 8));
+  const jumpTurns = new Set((jumps ?? []).map((jump) => jump.turn));
   return (
     <div className="mt-2 overflow-x-auto">
-      <svg viewBox={`0 0 ${width} ${height + 20}`} className="h-32 w-full min-w-[240px] text-ink" role="img" aria-label="턴별 컨텍스트 크기 막대 그래프">
+      <svg
+        viewBox={`0 0 ${width} ${height + 20}`}
+        className="h-32 w-full min-w-[240px] text-ink"
+        role="img"
+        aria-label={`턴별 컨텍스트 크기 막대 그래프${jumpTurns.size > 0 ? "(빨간 막대는 문맥이 급증한 턴)" : ""}`}
+      >
         {turns.map((turn, index) => {
           const barHeight = Math.max(2, Math.round((turn.contextTokens / max) * height));
           const x = index * slot + (slot - barWidth) / 2;
+          const isJump = jumpTurns.has(turn.turn);
           return (
-            <g key={turn.turn}>
-              <rect x={x} y={height - barHeight} width={barWidth} height={barHeight} rx={2} fill="currentColor" />
+            <g key={turn.turn} className={isJump ? "text-fail" : undefined}>
+              <rect x={x} y={height - barHeight} width={barWidth} height={barHeight} rx={2} fill="currentColor" opacity={isJump ? 1 : 0.85}>
+                {isJump && <title>{`턴 ${turn.turn}: 컨텍스트 ${number(turn.contextTokens)} (+${number(turn.delta)})`}</title>}
+              </rect>
+              {isJump && <circle cx={x + barWidth / 2} cy={Math.max(0, height - barHeight - 6)} r={3} fill="currentColor" />}
               <text x={x + barWidth / 2} y={height + 14} textAnchor="middle" className="fill-muted text-[10px]">
                 {turn.turn}
               </text>
@@ -288,6 +293,78 @@ function ContextChart({ turns }: { turns: TokenReport["turns"] }) {
         })}
       </svg>
     </div>
+  );
+}
+
+/** 턴별 컨텍스트 표. 문맥 급증 목록에 있는 턴은 증가 칸을 강조해 "급증" 표시를 붙인다 */
+function TurnsTable({ turns, jumps }: { turns: TokenReport["turns"]; jumps?: ContextJump[] }) {
+  const jumpTurns = new Set((jumps ?? []).map((jump) => jump.turn));
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full min-w-[40rem] text-left text-sm">
+        <thead className="border-b border-line text-muted">
+          <tr>
+            <th scope="col" className="py-2 pr-4 font-medium">턴</th>
+            <th scope="col" className="py-2 pr-4 font-medium">컨텍스트</th>
+            <th scope="col" className="py-2 pr-4 font-medium">증가</th>
+            <th scope="col" className="py-2 pr-4 font-medium">출력</th>
+            <th scope="col" className="py-2 pr-4 font-medium">캐시 읽기</th>
+            <th scope="col" className="py-2 pr-4 font-medium">비움</th>
+            <th scope="col" className="py-2 font-medium">가장 큰 도구 결과</th>
+          </tr>
+        </thead>
+        <tbody>
+          {turns.map((turn) => {
+            const isJump = jumpTurns.has(turn.turn);
+            return (
+              <tr key={turn.turn} className="border-b border-line/60 align-top">
+                <th scope="row" className="py-2 pr-4 font-medium">{turn.turn}</th>
+                <td className="py-2 pr-4 font-mono text-xs">{number(turn.contextTokens)}</td>
+                <td className={`py-2 pr-4 font-mono text-xs ${isJump ? "text-fail" : ""}`}>
+                  +{number(turn.delta)}
+                  {isJump && <span className="ml-1">급증</span>}
+                </td>
+                <td className="py-2 pr-4 font-mono text-xs">{number(turn.output)}</td>
+                <td className="py-2 pr-4 font-mono text-xs">{number(turn.cacheRead)}</td>
+                <td className="py-2 pr-4 text-muted">
+                  {turn.cleared ? `도구 결과 ${number(turn.cleared.count)}개 비움(${number(turn.cleared.chars)}자)` : "-"}
+                </td>
+                <td className="py-2 text-muted">
+                  {turn.biggestTool ? `${turn.biggestTool.name} ${turn.biggestTool.input} · ${number(turn.biggestTool.chars)}자` : "-"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** 문맥 급증 카드 하나: 몇 턴에서 얼마나 늘었는지, 무엇이 늘렸는지, 다시 읽힐 것으로 추정되는 비용, 줄이는 방법 */
+function ContextJumpCard({ jump }: { jump: ContextJump }) {
+  return (
+    <li className="rounded-control border border-line p-3">
+      <p className="font-mono text-xs text-fail">
+        턴 {jump.turn} · +{number(jump.delta)} 토큰 ({number(jump.previousContext)} → {number(jump.previousContext + jump.delta)})
+      </p>
+      <p className="mt-1 text-muted">
+        원인:{" "}
+        {jump.sources.length === 0
+          ? "알 수 없음"
+          : jump.sources.map((source) => `${source.kind === "model_output" ? "모델 출력" : source.name} ${number(source.chars)}자(${percent(source.share)})`).join(", ")}
+      </p>
+      <p className="mt-1 text-muted">
+        다시 읽힐 것으로 추정되는 비용: {number(jump.estimatedRereadTokens)} 토큰(남은 {jump.remainingTurns}턴 × {number(jump.delta)})
+      </p>
+      {jump.hints.length > 0 && (
+        <ul className="mt-1 list-disc pl-4 text-xs text-muted">
+          {jump.hints.map((hint) => (
+            <li key={hint}>{hint}</li>
+          ))}
+        </ul>
+      )}
+    </li>
   );
 }
 

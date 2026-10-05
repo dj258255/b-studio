@@ -9,9 +9,10 @@ import type { EscalationPolicy } from './escalation';
 import { VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
-import { buildAskRequest, buildSystemPrompt } from './prompts';
+import { loadProjectGuide } from './project-guide';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, type AskUserQuestion, type ToolContext, type ToolOutcome } from './tools';
+import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { Workspace } from './workspace';
@@ -125,6 +126,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     sdk = DEFAULT_SDK,
     interactive = false,
     intent = 'build',
+    research = false,
     steering,
   } = options;
   signal?.throwIfAborted();
@@ -136,12 +138,18 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   if (options.escalation) onEvent({ type: 'warning', message: '로컬 ChatGPT Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
-  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다
-  const gate = ask
-    ? undefined
-    : await VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent });
+  // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
+  // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다
+  let gate: VerificationGate | undefined;
+  let gatePromise: Promise<VerificationGate> | undefined;
+  const gateFor = (): Promise<VerificationGate> =>
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+  if (!ask && !options.ensureSandbox) gate = await gateFor();
+  // 프로젝트 루트(project.root — 아래 workdir은 Codex 전용 빈 임시 폴더라 여기 쓰지 않는다)의 AGENTS.md를 읽는다(ADR-077)
+  const guide = await loadProjectGuide(project);
   const context: ToolContext = {
     project,
+    selfCheck: options.selfCheck,
     workspace,
     sandbox,
     fetcher,
@@ -160,6 +168,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
     // 실행 단위 도구 결과 캐시. 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
     toolResults: createToolResultCache(),
+    // 지연 기동 세션이면 샌드박스 도구를 실행하기 직전에 켠다(핸들러가 게이트 생성까지 한다)
+    ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
   // 조율 게시판은 Claude Code 러너와 같게, 켠 실행에만 도구를 더한다
   const specs = buildTools(project, {
@@ -172,7 +182,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   const serial = serialQueue();
   // 실행 지표. modelMs는 모델 응답 대기가 SDK 안(하위 프로세스)에서 일어나 이 러너가 관찰하지 못하므로 0으로 둔다.
   // 0은 "재지 않음"이고, 전체 시간에서 도구·게이트 시간을 뺀 추측값을 넣지 않는다
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   // Codex 작업 폴더는 실행마다 만드는 빈 임시 폴더다. project.root를 넘기면 모델이 apply_patch로 작업 공간을 직접 바꿀 수 있다
   const workdir = await mkdtemp(path.join(tmpdir(), WORKDIR_PREFIX));
@@ -195,6 +205,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
       report: gate?.report,
       checks: gate?.checks,
       passedStages: gate ? [...gate.passedStages] : undefined,
+      ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns: completedTurns,
       usage,
@@ -218,6 +230,11 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
           // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
           signal?.throwIfAborted();
           onEvent({ type: 'tool_call', name, input: args });
+          // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+          if (options.ensureSandbox && (SANDBOX_TOOLS.has(name) || WRITE_TOOLS.has(name))) {
+            await options.ensureSandbox();
+            gate = await gateFor();
+          }
           const toolStarted = performance.now();
           const outcome = await executeTool(name, args, context);
           metrics.toolMs += Math.round(performance.now() - toolStarted);
@@ -247,7 +264,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
 
     // Codex SDK에는 systemPrompt 옵션이 없어 프로젝트 규칙·도구 이름을 첫 사용자 메시지 앞에 붙인다.
     // (설정의 developer_instructions로 넘기는 방법도 있으나 내장 도구 안내를 덮어쓸 위험이 있어 쓰지 않았다)
-    let pending = `${buildSystemPrompt(project, { toolName })}${workflowContext(project)}\n\n${ask ? buildAskRequest(request, { toolName }) : request}`;
+    let pending = `${buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck })}${workflowContext(project)}${projectGuideSection(guide)}\n\n${ask ? buildAskRequest(request, { toolName, ...(research ? { research: { webToolsAvailable: false } } : {}) }) : request}`;
     let announced = false;
 
     for (let turn = 1; turn <= maxTurns; turn++) {
@@ -271,7 +288,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
             // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
             if (!announced) {
               announced = true;
-              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델' });
+              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델', effort });
             }
             break;
 
@@ -323,25 +340,28 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
       // Codex는 대화를 이어받지 못하므로 다음 요청은 codex.recent 요약 맥락으로 이어진다(studio가 붙인다).
       // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
       if (asked) {
-        if (gate && workspace.changedFiles().length > 0) {
+        const openGate = gate;
+        if (openGate && workspace.changedFiles().length > 0) {
           const gateStarted = performance.now();
-          await gate.check();
+          await openGate.check();
           metrics.gateMs += Math.round(performance.now() - gateStarted);
         }
         finish('awaiting_input', asked.question, asked);
         break;
       }
 
-      // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트
-      if (!gate) {
+      // 모델이 턴을 끝냈다 → 질문이면 답이 곧 결과이고, 만들기면 검증 게이트.
+      // 지연 기동 세션이 아무것도 바꾸지 않았으면 게이트가 없다 → 샌드박스 없이 끝난다
+      const activeGate = gate;
+      if (!activeGate) {
         finish('done', lastText);
         break;
       }
       const gateStarted = performance.now();
-      const outcome = await gate.check();
+      const outcome = await activeGate.check();
       metrics.gateMs += Math.round(performance.now() - gateStarted);
       if (outcome.kind === 'pass') {
-        if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+        if (activeGate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
         finish('done', lastText);
         break;
       }

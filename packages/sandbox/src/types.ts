@@ -27,7 +27,9 @@ export type ServiceStatusEvent =
   | { service: string; phase: 'starting' }
   | { service: string; phase: 'probing'; probe: ProbeResult }
   | { service: string; phase: 'ready'; endpoint: ServiceEndpoint }
-  | { service: string; phase: 'failed'; reason: string };
+  | { service: string; phase: 'failed'; reason: string }
+  /** 사용자가 서비스 선택(ADR-083)에서 꺼 둬 이번 기동에서 띄우지 않았다. 실패가 아니다 */
+  | { service: string; phase: 'off' };
 
 /** 기동 가속용 스냅샷을 쓰거나 만든 결과. 실패해도 기동은 스냅샷 없이 계속된다 */
 export type SnapshotEvent =
@@ -57,6 +59,13 @@ export interface StartOptions {
    * edge 프록시 컨테이너는 서비스 트래픽이 지나가므로 뺀다(더하면 이중 계산).
    */
   onBootNetwork?: (network: BootNetwork) => void;
+  /**
+   * 띄울 compose 서비스 이름(ADR-083). 주지 않으면 지금처럼 compose 파일의 모든 서비스를 띄운다(옛 동작과 호환).
+   * 주면 이 목록의 서비스만 띄우고(+ 제공자가 항상 필요로 하는 edge 프록시), 목록에 없는 managed 서비스는
+   * 'off' 상태로 알린다. 목록에 없는 서비스를 의존하는 서비스가 있으면 compose가 그 의존 서비스를 몰래
+   * 따라 띄우지 않도록 --no-deps를 함께 쓴다(선택에서 뺀 의존 서비스를 정말로 띄우지 않기 위해서다)
+   */
+  services?: readonly string[];
 }
 
 export interface LogLine {
@@ -88,11 +97,26 @@ export interface SyncResult {
   checks: number;
 }
 
+/**
+ * 컨테이너를 화면에 묶어 보여 줄 갈래. managed는 studio.yaml에 적은 서비스,
+ * supporting은 그 밖의 compose 서비스(DB 등 부가 서비스), platform은 b-studio가 붙이는 edge 프록시다
+ */
+export type ServiceRole = 'managed' | 'supporting' | 'platform';
+
+/** 컨테이너 헬스체크 상태. 헬스체크를 걸지 않은 컨테이너는 없다(undefined) */
+export type ContainerHealth = 'starting' | 'healthy' | 'unhealthy';
+
 /** 샌드박스 컨테이너 하나의 자원 사용량과 상태. 부가 서비스(DB 등)도 포함한다 */
 export interface ServiceUsage {
   /** compose 서비스 이름 */
   service: string;
+  /** 실제 컨테이너 이름(docker) 또는 Pod 이름(kubernetes). 없으면 service와 같다고 본다 */
+  containerName?: string;
+  /** 이 컨테이너가 어느 갈래인지. 옛 제공자나 고정 픽스처와 호환하도록 없을 수도 있다 */
+  role?: ServiceRole;
   state: ContainerState;
+  /** 헬스체크를 건 컨테이너만. 걸지 않았으면 없다 */
+  health?: ContainerHealth;
   /** 실행 중일 때만. 100이 CPU 1개를 다 쓴 것이다 */
   cpuPercent?: number;
   memoryBytes?: number;
@@ -103,6 +127,10 @@ export interface ServiceUsage {
   networkRxBytes?: number;
   /** 컨테이너가 보낸 바이트(수명 누계). docker stats의 NetIO 송신 */
   networkTxBytes?: number;
+  /** 다시 시작된 횟수. 읽을 수 없으면 없다 */
+  restartCount?: number;
+  /** 지금 실행이 시작된 시각(ISO). 화면에서 지금 시각과 차이로 가동 시간을 보여줄 때 쓴다 */
+  startedAt?: string;
   /** 종료된 컨테이너의 종료 코드 */
   exitCode?: number;
   /** 메모리 한도를 넘어 커널이 종료시켰는지 */
@@ -208,6 +236,14 @@ export interface Sandbox {
    * 샌드박스 서비스의 호출과 같은 정책·인증·응답 가림·감사 기록을 거친다. via는 감사 기록에 남길 경로다
    */
   callExternal(name: string, request: ExternalCallRequest, options: { via: string; signal?: AbortSignal }): Promise<ExternalCallResult>;
+  /**
+   * 서비스 하나를 켜거나 끈다(ADR-083, 서비스 선택). managed·supporting 어느 쪽이든 쓸 수 있다.
+   * 켤 때는 이미지를 빌드하고(managed 서비스가 소스를 바꿨을 수 있어서) 컨테이너를 만들어 기동하되,
+   * 다른 서비스를 따라 띄우지 않는다(--no-deps). 끌 때는 컨테이너를 멈추기만 하고 지우지 않는다(볼륨이 남는다).
+   * 준비 판정(ready)은 하지 않는다 — managed 서비스를 켠 뒤 화면에 반영하려면 restart()로 기다린다.
+   * 구현하지 않는 제공자는 undefined로 둔다(호출자가 지원 여부를 안내한다)
+   */
+  setServiceRunning?(service: string, running: boolean, options?: { signal?: AbortSignal }): Promise<void>;
   destroy(): Promise<void>;
 }
 

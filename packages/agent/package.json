@@ -1,6 +1,7 @@
 {
   "name": "@b-studio/agent",
-  "version": "0.0.0",
+  "version": "0.3.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {
@@ -16,6 +17,7 @@
     "@b-studio/spec": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@openai/codex-sdk": "0.157.0",
+    "jsonrepair": "3.15.0",
     "pixelmatch": "7.2.0",
     "playwright-core": "1.63.0",
     "pngjs": "7.0.0",

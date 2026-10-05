@@ -27,6 +27,14 @@ pnpm typecheck
 6. **병합**: squash 병합합니다. PR 제목이 `main`의 커밋 제목이 되므로 무엇이 바뀌는지 알 수 있게 씁니다.
 7. **병합 뒤**: [CHANGELOG.md](CHANGELOG.md)의 "아직 릴리스하지 않음"에 한 줄을 더하고, [ROADMAP.md](ROADMAP.md)의 상태와 실제 시간을 갱신합니다.
 
+## 릴리스
+
+1.0 전에는 [유의적 버전](https://semver.org/lang/ko/)의 부 버전(0.x.0)을 올려 릴리스합니다. 기본 동작이 바뀌면 부 버전, 고치기만 하면 수 버전(0.x.y)을 올립니다.
+
+1. `chore/release-<버전>` 브랜치에서 [CHANGELOG.md](CHANGELOG.md)의 "아직 릴리스하지 않음" 항목을 `## [버전] - 날짜` 아래로 옮기고, 모든 `package.json`의 `version`을 맞춥니다.
+2. PR로 병합하고 `main` CI가 통과한 것을 확인합니다.
+3. 병합 커밋에 `v<버전>` 태그를 달고 `gh release create`로 릴리스를 만듭니다. 노트에는 주요 변경, 기본값이 바뀐 것, 실험으로 확인한 것, 알려진 한계를 적습니다.
+
 ## 이슈와 PR 연결
 
 큰 일은 `tracking` 라벨 추적 이슈를 만들고 작업 단위는 GitHub 하위 이슈(Sub-issues)로 묶습니다. 예를 들어 추적 이슈 [#42](https://github.com/dj258255/b-studio/issues/42) 아래에 [#43](https://github.com/dj258255/b-studio/issues/43)·[#44](https://github.com/dj258255/b-studio/issues/44)·[#45](https://github.com/dj258255/b-studio/issues/45)·[#48](https://github.com/dj258255/b-studio/issues/48)·[#56](https://github.com/dj258255/b-studio/issues/56)·[#57](https://github.com/dj258255/b-studio/issues/57)·[#58](https://github.com/dj258255/b-studio/issues/58)가 있고, [#48](https://github.com/dj258255/b-studio/issues/48) 아래에 [#52](https://github.com/dj258255/b-studio/issues/52)~[#55](https://github.com/dj258255/b-studio/issues/55)가 있습니다.

@@ -72,7 +72,17 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                   aria-current={checkpoint.sha === active.sha}
                   className={`w-full rounded px-2 py-2 text-left ${checkpoint.sha === active.sha ? "bg-ground" : "hover:bg-ground"}`}
                 >
-                  <span className="block text-sm font-medium">{checkpoint.message}</span>
+                  <span className="block text-sm font-medium">
+                    {checkpoint.message}
+                    {/* 가볍게 확인한 체크포인트. 테스트·화면 확인·리뷰를 건너뛰어 배포 조건을 채우지 못한다 */}
+                    {checkpoint.verify === "light" && (
+                      <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">가볍게</span>
+                    )}
+                    {/* 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(요구사항 저장 등). 배포 조건·"검증됨" 판정의 증거로 쓰지 않는다 */}
+                    {checkpoint.verify === "docs" && (
+                      <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">문서</span>
+                    )}
+                  </span>
                   <span className="mt-0.5 block text-xs text-muted">
                     <span className="font-mono">{checkpoint.shortSha}</span>, 파일 {checkpoint.files.length}개{index === 0 && ", 현재"}
                   </span>
@@ -85,10 +95,20 @@ export function HistoryPanel({ view }: { view: SessionView }) {
         <div className="flex min-h-0 flex-col overflow-y-auto p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="font-semibold">{active.message}</h3>
+              <h3 className="font-semibold">
+                {active.message}
+                {active.verify === "light" && (
+                  <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">가볍게</span>
+                )}
+                {active.verify === "docs" && (
+                  <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">문서</span>
+                )}
+              </h3>
               <p className="mt-0.5 text-sm text-muted">
                 <span className="font-mono">{active.shortSha}</span>
                 {active.createdAt && `, ${new Date(active.createdAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`}
+                {active.verify === "light" && ", 가볍게 확인(배포 조건 미충족)"}
+                {active.verify === "docs" && ", 문서만 바꿔 검증 게이트 없이 남긴 체크포인트"}
               </p>
             </div>
 

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError } from './checkpoints';
-import { formatWorkflowTrailer } from './workflow';
+import { formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -92,6 +92,24 @@ describe('CheckpointStore', () => {
     expect(previous!.passedStages).toEqual(['run', 'contract_check', 'test', 'review']);
   });
 
+  it('Workflow-Verify 트레일러가 있으면 가볍게 확인한 체크포인트로 읽고, 다시 읽어도 같은 값이 나온다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const light = await store.commit('요청: 메모 추가', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check'])}\n${formatVerifyTrailer('light')}`);
+    expect(light?.passedStages).toEqual(['run', 'contract_check']);
+    expect(light?.verify).toBe('light');
+
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    const full = await store.commit('요청: 메모 추가 2', `검증 결과\n\n${formatWorkflowTrailer(['run', 'contract_check', 'test'])}`);
+    expect(full?.verify).toBeUndefined();
+
+    const [latest, previous] = await store.list();
+    expect(latest!.verify).toBeUndefined();
+    expect(previous!.verify).toBe('light');
+    expect(previous!.passedStages).toEqual(['run', 'contract_check']);
+  });
+
   it('다른 사람이 만든 커밋의 트레일러는 무시하고, 스튜디오가 만든 체크포인트의 통과 기록은 그대로 읽는다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
@@ -138,6 +156,50 @@ describe('CheckpointStore', () => {
     expect(commits[0]).toMatchObject({ subject: '요청: 메모 추가', passedStages: ['run', 'contract_check', 'review'] });
     expect(commits[1]).toMatchObject({ subject: '직접 수정: 파일 1개' });
     expect(commits[1]!.passedStages).toBeUndefined();
+  });
+
+  it('sessionCommits는 커밋 본문의 Workflow-Verify 트레일러도 함께 읽는다(PR 본문이 문서 체크포인트를 구분한다)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await mkdir(path.join(root, 'docs'), { recursive: true });
+    await write('docs/requirements.md', '# 요구사항\n');
+    await store.commit('docs: 요구사항을 정리한다', undefined, { trailers: [formatVerifyTrailer('docs')] });
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run', 'contract_check', 'review'])] });
+
+    const commits = await store.sessionCommits();
+    expect(commits[0]).toMatchObject({ subject: 'docs: 요구사항을 정리한다', verify: 'docs' });
+    expect(commits[1]!.verify).toBeUndefined();
+  });
+
+  it('sessionCommits는 커밋마다 바뀐 줄 수(추가·삭제)를 담는다(제출 준비 점검, ADR-080)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order {\n  String a;\n  String b;\n}\n');
+    await store.commit('요청: 필드 두 개 추가');
+    await write('api/src/Order.java', 'class Order {\n  String a;\n}\n');
+    await store.commit('요청: 필드 하나 지움');
+
+    const commits = await store.sessionCommits();
+    expect(commits[0]!.stat).toEqual({ insertions: 4, deletions: 1 });
+    expect(commits[1]!.stat).toEqual({ insertions: 0, deletions: 1 });
+  });
+
+  it('sessionDiff는 세션 시작부터 지금까지의 변경을 모두 담는다(PR 자동 리뷰가 보는 범위, ADR-074)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    expect(await store.sessionDiff()).toBe('');
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가');
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    await store.commit('요청: 메모 필드 추가');
+
+    const diff = await store.sessionDiff();
+    expect(diff).toContain('diff --git a/api/src/Order.java b/api/src/Order.java');
+    expect(diff).toContain('+class Order { String memo; String note; }');
+    // 첫 커밋에서 두 번째로 가는 중간 상태(memo만 있는 버전)는 diff에 남지 않는다 — 세션 시작 대비 최종 상태만 본다
+    expect(diff).not.toContain('+class Order { String memo; }\n');
   });
 
   it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {
@@ -232,6 +294,88 @@ describe('CheckpointStore', () => {
     expect(await read('api/src/Order.java')).toBe('class Order {}\n');
     await expect(read('api/src/New.java')).rejects.toThrow();
     expect(await store.pendingFiles()).toEqual([]);
+  });
+
+  it('버리기 전에 백업을 남기고, 되살리기로 그대로 되돌린다(ADR-099, "절대 조용히 지우지 않는다")', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+    await write('api/src/New.java', 'class New {}\n');
+
+    const { files, backup } = await store.discard();
+    expect(files).toEqual(['api/src/New.java', 'api/src/Order.java']);
+    expect(backup).toMatchObject({ files: ['api/src/New.java', 'api/src/Order.java'] });
+    expect(await read('api/src/Order.java')).toBe('class Order {}\n');
+    await expect(read('api/src/New.java')).rejects.toThrow();
+
+    const restored = await store.restoreBackup(backup!.id);
+    expect(restored.files.sort()).toEqual(['api/src/New.java', 'api/src/Order.java']);
+    expect(await read('api/src/Order.java')).toBe('class Order { int broken }\n');
+    expect(await read('api/src/New.java')).toBe('class New {}\n');
+    // 되살려도 체크포인트 기록 자체는 그대로다(되살린 변경은 다시 pending이다)
+    expect(await store.pendingFiles()).toEqual(['api/src/New.java', 'api/src/Order.java']);
+  });
+
+  it('버릴 변경이 없으면 백업을 남기지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    expect(await store.discard()).toEqual({ files: [], patch: '' });
+  });
+
+  it('그 사이에 같은 파일이 다시 바뀌면 백업 되살리기를 거부하고 아무것도 바꾸지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+    const { backup } = await store.discard();
+
+    await write('api/src/Order.java', 'class Order { String other; }\n');
+    await expect(store.restoreBackup(backup!.id)).rejects.toThrow('충돌');
+    // 거부됐으니 그 사이에 쓴 내용은 그대로여야 한다
+    expect(await read('api/src/Order.java')).toBe('class Order { String other; }\n');
+  });
+
+  it('존재하지 않는 백업 id는 되살리기를 거부한다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await expect(store.restoreBackup('2026-01-01T00-00-00-000Z-0001')).rejects.toThrow('찾을 수 없습니다');
+    await expect(store.restoreBackup('; rm -rf /')).rejects.toThrow(CheckpointError);
+  });
+
+  it('이전 체크포인트로 되돌리기 전에도 아직 커밋하지 않은 변경을 백업한다', async () => {
+    const store = new CheckpointStore(root);
+    const start = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모');
+    await write('api/src/Draft.java', 'class Draft {}\n');
+
+    const { backup } = await store.restore(start.sha);
+    expect(backup).toMatchObject({ files: ['api/src/Draft.java'] });
+    await expect(read('api/src/Draft.java')).rejects.toThrow();
+
+    const restored = await store.restoreBackup(backup!.id);
+    expect(restored.files).toEqual(['api/src/Draft.java']);
+    expect(await read('api/src/Draft.java')).toBe('class Draft {}\n');
+  });
+
+  it('백업은 최근 10개까지만 남기고 오래된 것부터 지우며, 방금 만든 백업은 지우지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const ids: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      await write('api/src/Order.java', `class Order { int v${i}; }\n`);
+      const { backup } = await store.discard();
+      ids.push(backup!.id);
+    }
+
+    const remaining = await store.discardedBackups();
+    expect(remaining).toHaveLength(10);
+    const remainingIds = new Set(remaining.map((entry) => entry.id));
+    // 가장 최근 10개(마지막에 만든 것부터)만 남고, 가장 먼저 만든 2개는 지워졌다
+    expect(remainingIds.has(ids[0]!)).toBe(false);
+    expect(remainingIds.has(ids[1]!)).toBe(false);
+    expect(remainingIds.has(ids[ids.length - 1]!)).toBe(true);
+    // 가장 최근 백업은 한도를 넘겨도 지우지 않는다
+    await expect(store.restoreBackup(ids[ids.length - 1]!)).resolves.toMatchObject({ files: ['api/src/Order.java'] });
   });
 
   it('마지막 체크포인트 이후 추가·수정·삭제한 파일과 파일 하나의 변경 내용을 돌려준다', async () => {
@@ -591,9 +735,163 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await expect(store.restore(firstCommit)).rejects.toThrow('세션 기록에 없는');
   });
 
+  it('commitPaths는 지정한 경로만 커밋하고, 범위 밖 변경은 그대로 남기고, 범위 안에 변경이 없으면 건너뛴다(ADR-096)', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    // 범위 안에 변경이 없으면 undefined(건너뛴다)
+    expect(await store.commitPaths(['docs/requirements.md'], '문서: 요구사항')).toBeUndefined();
+
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.md'), '# 요구사항\n');
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+
+    const checkpoint = (await store.commitPaths(['docs/requirements.md'], '문서: 요구사항을 정리한다', undefined, {
+      trailers: [formatVerifyTrailer('docs')],
+    }))!;
+
+    expect(checkpoint.files).toEqual(['docs/requirements.md']);
+    expect(checkpoint.verify).toBe('docs');
+    expect(checkpoint.passedStages).toBeUndefined();
+    // 범위 밖(api/src/Order.java)의 변경은 커밋되지 않고 그대로 남는다
+    expect(await store.pendingFiles()).toEqual(['api/src/Order.java']);
+  });
+
+  it('commitPaths도 시크릿 값이 든 파일은 커밋하지 않는다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.issues.json'), '{"token":"sk_live_1234567890"}\n');
+    const findSecrets = (text: string) => (text.includes('sk_live_1234567890') ? ['TOKEN'] : []);
+
+    await expect(store.commitPaths(['docs/requirements.issues.json'], '문서: 이슈 발행 기록', undefined, { findSecrets })).rejects.toThrow(
+      'docs/requirements.issues.json (TOKEN)',
+    );
+    expect(await store.pendingFiles()).toEqual(['docs/requirements.issues.json']);
+  });
+
+  it('다른 세션의 작업 복사본과 체크포인트 sha로 레인·통합 세션을 시작할 수 있다(ADR-096): 기준 브랜치는 그 세션이 기록해 둔 값을 물려받는다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const origin = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.md'), '# 요구사항\n');
+    const docsCheckpoint = (await origin.store.commitPaths(['docs/requirements.md'], '문서: 요구사항을 정리한다'))!;
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
+    await origin.store.commit('요청: 메모 추가');
+
+    // 세션이 origin 브랜치(b-studio/orders-s1)를 체크아웃한 채로도, 문서 체크포인트 시점에서 레인을 새로 시작할 수 있다
+    const laneWorkDir = path.join(workDir, '..', 'lane-1');
+    const { store: lane, source: info } = await CheckpointStore.clone(workDir, laneWorkDir, { branch: 'b-studio/orders-lane1', ref: docsCheckpoint.sha });
+
+    // 메타의 기준 브랜치는 origin 세션 브랜치가 아니라 origin이 물려받은 실제 기준 브랜치(main)다
+    expect(info.base).toBe('main');
+    expect(info.originUrl).toBe(remote);
+    expect((await lane.repository())?.base).toBe('main');
+    expect((await lane.repository())?.branch).toBe('b-studio/orders-lane1');
+    // 내용은 문서 체크포인트 시점(메모 추가 전)이다
+    expect(await readFile(path.join(laneWorkDir, 'docs/requirements.md'), 'utf8')).toBe('# 요구사항\n');
+    expect(await readFile(path.join(laneWorkDir, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
+  });
+
   it('git 오류 메시지에서 주소의 자격 증명을 지운다', () => {
     expect(redactCredentials("fatal: unable to access 'https://bot:ghp_secret@github.com/acme/orders.git/': 403")).toBe(
       "fatal: unable to access 'https://***@github.com/acme/orders.git/': 403",
     );
+  });
+});
+
+/** 세션이 갈라져 나온 뒤(main) 브랜치에 다른 사람이 커밋을 올린다 */
+async function pushToBase(base: string, remote: string, file: string, content: string, message: string): Promise<string> {
+  const other = await mkdtemp(path.join(base, 'main-writer-'));
+  await execFileAsync('git', ['clone', '-q', '--branch', 'main', remote, other]);
+  await mkdir(path.dirname(path.join(other, file)), { recursive: true });
+  await writeFile(path.join(other, file), content);
+  await git(other, 'add', '-A');
+  await git(other, 'commit', '-q', '-m', message);
+  await git(other, 'push', '-q', 'origin', 'HEAD');
+  return git(other, 'rev-parse', 'HEAD');
+}
+
+describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
+  it('기준 브랜치가 앞서 있으면 behind로 세고, 다시 가져올 때까지는(throttle) 새 커밋을 보지 못한다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    expect(await store.baseStatus()).toMatchObject({ base: 'main', behind: 0 });
+
+    await pushToBase(base, remote, 'CHANGELOG.md', '# changes\n', 'main 변경');
+    // 방금 가져왔으므로(throttle 안) 강제로 다시 가져오지 않으면 새 커밋을 보지 못한다
+    const throttled = await store.baseStatus();
+    expect(throttled).toMatchObject({ base: 'main', behind: 0 });
+
+    const forced = await store.baseStatus({ force: true });
+    expect(forced).toMatchObject({ base: 'main', behind: 1 });
+    expect(Date.parse(forced.lastFetchedAt)).toBeGreaterThanOrEqual(Date.parse(throttled.lastFetchedAt));
+  });
+
+  it('가져올 것이 없으면 병합하지 않고 up-to-date를 돌려준다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const head = await git(workDir, 'rev-parse', 'HEAD');
+
+    expect(await store.integrateBase()).toMatchObject({ status: 'up-to-date', commits: [], files: [] });
+    expect(await git(workDir, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
+  it('main을 병합 커밋으로 따라잡는다: 첫 부모는 이 세션, 두 번째 부모는 main이다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+    await writeFile(order, 'class Order { String mine; }\n');
+    const mine = (await store.commit('요청: 내 변경'))!;
+
+    const theirs = await pushToBase(base, remote, 'CHANGELOG.md', '# changes\n', 'main 변경');
+
+    const result = await store.integrateBase();
+    expect(result).toMatchObject({
+      status: 'merged',
+      remoteSha: theirs,
+      files: ['CHANGELOG.md'],
+      previous: mine.sha,
+      commits: [{ sha: theirs, subject: 'main 변경', author: 'test' }],
+      checkpoint: { message: 'main을 따라잡는다 (1커밋)', files: ['CHANGELOG.md'] },
+    });
+    expect(await readFile(path.join(workDir, 'CHANGELOG.md'), 'utf8')).toBe('# changes\n');
+    // 내 변경은 그대로 남는다
+    expect(await readFile(order, 'utf8')).toBe('class Order { String mine; }\n');
+
+    const parents = (await git(workDir, 'rev-list', '--parents', '-n1', result.checkpoint!.sha)).split(' ');
+    expect(parents[0]).toBe(result.checkpoint!.sha);
+    expect(parents[1]).toBe(mine.sha);
+    expect(parents[2]).toBe(theirs);
+  });
+
+  it('main과 같은 곳을 고쳤으면 아무것도 바꾸지 않고 충돌한 파일을 알린다', async () => {
+    const { base, source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    const order = path.join(workDir, 'api/src/Order.java');
+    await writeFile(order, 'class Order { String mine; }\n');
+    const mine = (await store.commit('요청: 내 변경'))!;
+
+    await pushToBase(base, remote, 'api/src/Order.java', 'class Order { String main; }\n', 'main 변경');
+
+    const error = await store.integrateBase().then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(RemoteConflictError);
+    expect((error as RemoteConflictError).conflicts).toEqual(['api/src/Order.java']);
+    expect(await git(workDir, 'rev-parse', 'HEAD')).toBe(mine.sha);
+    expect(await store.pendingFiles()).toEqual([]);
+    expect(await readFile(order, 'utf8')).toBe('class Order { String mine; }\n');
+    await expect(git(workDir, 'rev-parse', '--verify', '--quiet', 'MERGE_HEAD')).rejects.toThrow();
+  });
+
+  it('체크포인트로 남기지 않은 변경이 있으면 따라잡지 않는다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String pending; }\n');
+
+    await expect(store.integrateBase()).rejects.toThrow('체크포인트로 저장하지 않은 변경');
   });
 });

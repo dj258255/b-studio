@@ -162,6 +162,57 @@
     outline-offset: 2px;
   }
 
+  /*
+   * 접는 목록(details/summary). 브라우저 기본 삼각형(▶) 대신 얇은 꺾쇠를 앞에 두고, 펼치면 아래로 돌린다.
+   * 한 곳에서 정해 대화·게이트·배포 화면의 접는 목록이 모두 같은 모양이 된다
+   */
+  summary {
+    cursor: pointer;
+    list-style: none;
+    border-radius: 0.375rem;
+    transition: color 120ms ease;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary::before {
+    content: "";
+    display: inline-block;
+    width: 0.4rem;
+    height: 0.4rem;
+    margin-right: 0.55rem;
+    vertical-align: 0.15em;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    opacity: 0.55;
+    transform: rotate(-45deg);
+    transition: transform 160ms ease, opacity 160ms ease;
+  }
+  details[open] > summary::before {
+    opacity: 0.85;
+    transform: rotate(45deg) translate(-0.1rem, -0.1rem);
+  }
+  summary:hover::before {
+    opacity: 0.9;
+  }
+
+  /* 지원하는 브라우저(Chromium 131+, Electron 포함)에서는 펼침을 부드럽게 한다. 지원하지 않으면 지금처럼 바로 열린다 */
+  @supports selector(::details-content) {
+    :root {
+      interpolate-size: allow-keywords;
+    }
+    details::details-content {
+      block-size: 0;
+      overflow: clip;
+      transition:
+        block-size 200ms ease,
+        content-visibility 200ms allow-discrete;
+    }
+    details[open]::details-content {
+      block-size: auto;
+    }
+  }
+
   /* 강제 색상 모드는 box-shadow를 지우므로 유리 표면의 경계를 실제 테두리로 그린다 */
   @media (forced-colors: active) {
     .glass,

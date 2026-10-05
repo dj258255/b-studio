@@ -9,11 +9,32 @@
  * coordination/signature.ts로 옮겼다. 여기서는 그 함수를 그대로 쓴다(동작 동일).
  */
 import { normalizeMessage, signatureKey, signaturesFromReport } from '@b-studio/agent';
-import type { FailureSignature } from '@b-studio/agent';
+import type { AgentUsage, FailureSignature } from '@b-studio/agent';
 import type { StudioEvent } from '../../lib/studio-events';
+import { turnsFromEvents, type TurnRecord } from './turns';
 
 export { normalizeMessage, signatureKey };
 export type { FailureSignature };
+
+/** 계획-실행 분리(ADR-075)의 계획 호출 한 건. E8이 계획 원문을 남기지 못해 도구 호출 수로만 추론했던 것을 벤치 결과에 직접 남긴다 */
+export interface PlanBriefRecord {
+  sessionId: string;
+  runId: string;
+  model: string;
+  text: string;
+  usage: AgentUsage;
+  durationMs: number;
+}
+
+/** 세션 이벤트 기록에서 plan_brief 이벤트만 뽑는다(순수 함수, traceFromEvents와 같은 결) */
+export function planBriefsFromEvents(sessionId: string, events: StudioEvent[]): PlanBriefRecord[] {
+  const records: PlanBriefRecord[] = [];
+  for (const event of events) {
+    if (event.type !== 'plan_brief') continue;
+    records.push({ sessionId, runId: event.runId, model: event.model, text: event.text, usage: event.usage, durationMs: event.durationMs });
+  }
+  return records;
+}
 
 export interface LaneTrace {
   sessionId: string;
@@ -27,6 +48,8 @@ export interface LaneTrace {
   failureSignatures: FailureSignature[];
   /** 같은 서명이 두 번째 이상 나온 횟수 합 */
   repeatedFailures: number;
+  /** 모델 호출마다 문맥 크기·출력·부른 도구. 토큰이 어디서 나왔는지 나눌 때 쓴다(turns.ts) */
+  turns: TurnRecord[];
 }
 
 export function traceFromEvents(sessionId: string, events: StudioEvent[]): LaneTrace {
@@ -70,6 +93,7 @@ export function traceFromEvents(sessionId: string, events: StudioEvent[]): LaneT
     dirsListed: [...dirsListed].sort(),
     failureSignatures,
     repeatedFailures,
+    turns: turnsFromEvents(events),
   };
 }
 

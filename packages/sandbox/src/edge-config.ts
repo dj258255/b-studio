@@ -19,6 +19,11 @@ export const DEFAULT_EGRESS_ALLOW = [
   'plugins-artifacts.gradle.org',
   'services.gradle.org',
   'downloads.gradle.org',
+  // Gradle 래퍼의 배포판(services.gradle.org/distributions/…)은 GitHub 릴리스로 넘겨 준다(307 → github.com → 302 → release-assets).
+  // HTTPS는 CONNECT 터널이라 경로로 좁힐 수 없어 호스트로 연다(ADR 참고). npm·Go 의존성도 GitHub에서 받는 일이 많다
+  'github.com',
+  'release-assets.githubusercontent.com',
+  'objects.githubusercontent.com',
   'pypi.org',
   'files.pythonhosted.org',
 ];

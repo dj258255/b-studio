@@ -1,47 +1,68 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionView, ChatItem } from "@/lib/session-view";
+import { previewPathFromHref, readPreviewLocationMessage } from "@/lib/preview-message";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
+import { buildTopTabs, CODE_SUB_TABS, mapLegacyTab, REPOSITORY_SUB_TABS, REQUIREMENTS_SUB_TABS, RUN_SUB_TABS, type SubTabOption } from "@/lib/tab-model";
 import { ApiExplorer } from "./api-explorer";
+import { useCodeOpen } from "./code-open-context";
 import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
 import { DesignPanel } from "./design-panel";
+import { DocsPanel } from "./docs-panel";
 import { HistoryPanel } from "./history-panel";
 import { useLiveFrames } from "./live-frames";
 import { LogPanel } from "./log-panel";
 import { QaView } from "./qa-view";
 import { RemoteBrowserView } from "./remote-browser";
+import { RepositoryPanel } from "./repository-panel";
+import { useRequirementsImport } from "./requirements-import-context";
+import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { StatusPanel } from "./status-panel";
+import { SubmissionPanel } from "./submission-panel";
+import { TestsPanel } from "./tests-panel";
 import { TokenView } from "./token-view";
+import { useSubTab } from "./use-sub-tab";
 
-type Tab = { id: string; label: string; service?: ServiceView; external?: ExternalApiView };
-
-const LOGS_TAB = "logs";
-const HISTORY_TAB = "history";
-const CODE_TAB = "code";
-const RESOURCES_TAB = "resources";
-const DEPLOY_TAB = "deploy";
-const DESIGN_TAB = "design";
-const TOKENS_TAB = "tokens";
-
+/**
+ * 개발 화면의 위 탭(ADR-087). 화면·API는 서비스마다, 나머지는 코드(파일/변경 기록)·요구사항(명세/테스트)·
+ * 실행(로그/리소스/배포)·저장소(이슈·PR/올리기 전 점검)·토큰 다섯 자리로 묶었다(예전엔 열 개가 넘는 낱개 탭이었다).
+ * 탭 목록은 순수 함수(buildTopTabs)로 만들어 렌더링 없이 테스트하고, 묶음마다 마지막으로 본 하위 탭은
+ * localStorage에 기억한다(use-sub-tab.ts).
+ */
 export function PreviewPanel({ view }: { view: SessionView }) {
-  const tabs: Tab[] = [
-    ...view.snapshot.services
-      .filter((service) => service.preview !== "logs")
-      .map((service) => ({ id: service.name, label: `${service.preview === "browser" ? "화면" : "API"} (${service.name})`, service })),
-    ...(view.snapshot.externals ?? []).map((external) => ({ id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
-    { id: DESIGN_TAB, label: "디자인" },
-    { id: CODE_TAB, label: "코드" },
-    { id: HISTORY_TAB, label: "기록" },
-    { id: DEPLOY_TAB, label: "배포" },
-    { id: LOGS_TAB, label: "로그" },
-    { id: RESOURCES_TAB, label: "리소스" },
-    { id: TOKENS_TAB, label: "토큰" },
-  ];
+  const tabs = buildTopTabs(view.snapshot.services, view.snapshot.externals ?? []);
   const [activeId, setActiveId] = useState(tabs[0]!.id);
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0]!;
+
+  const [codeSubTab, setCodeSubTab] = useSubTab("code");
+  const [requirementsSubTab, setRequirementsSubTab] = useSubTab("requirements");
+  const [runSubTab, setRunSubTab] = useSubTab("run");
+  const [repositorySubTab, setRepositorySubTab] = useSubTab("repository");
+
+  // "테스트" 하위 탭의 file:line 링크가 codeOpen.open()을 부르면 "코드" 탭의 "파일" 하위 탭으로 전환한다
+  // (코드 탭 자신은 그 자리에서 파일·줄을 연다). useEffect 안에서 자기 상태를 바로 바꾸지 않도록, 코드 탭의
+  // appliedReveal과 같은 방식으로 렌더 중 비교해 반영한다
+  const codeOpen = useCodeOpen();
+  const [appliedCodeOpenTarget, setAppliedCodeOpenTarget] = useState(codeOpen.target);
+  if (codeOpen.target && codeOpen.target !== appliedCodeOpenTarget) {
+    setAppliedCodeOpenTarget(codeOpen.target);
+    const target = mapLegacyTab("code");
+    setActiveId(target.group);
+    if (target.subTab) setCodeSubTab(target.subTab);
+  }
+
+  // 대화의 "요구사항에 반영"이 부르면 "요구사항" 탭(명세 하위 탭)으로 전환한다(ADR-094, 코드 열기와 같은 규칙)
+  const requirementsImport = useRequirementsImport();
+  const [appliedRequirementsImportTarget, setAppliedRequirementsImportTarget] = useState(requirementsImport.target);
+  if (requirementsImport.target && requirementsImport.target !== appliedRequirementsImportTarget) {
+    setAppliedRequirementsImportTarget(requirementsImport.target);
+    setActiveId("requirements");
+    setRequirementsSubTab("spec");
+  }
 
   return (
     <section className="flex min-h-0 flex-col gap-2" aria-label="미리보기">
@@ -63,25 +84,44 @@ export function PreviewPanel({ view }: { view: SessionView }) {
       </div>
 
       <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden rounded-panel border border-line bg-panel">
-        {active.id === DESIGN_TAB ? (
-          // URL이 바뀌면 다시 마운트해 입력값·프레임 목록을 새 URL에 맞춘다
-          <DesignPanel key={view.snapshot.design?.fileUrl ?? ""} sessionId={view.snapshot.id} design={view.snapshot.design} ready={view.snapshot.status === "ready"} />
-        ) : active.id === CODE_TAB ? (
-          <CodePanel view={view} />
-        ) : active.id === HISTORY_TAB ? (
-          <HistoryPanel view={view} />
-        ) : active.id === DEPLOY_TAB ? (
-          <DeployPanel view={view} />
-        ) : active.id === RESOURCES_TAB ? (
-          <ResourcePanel view={view} />
-        ) : active.id === TOKENS_TAB ? (
+        {active.kind === "group" && active.id === "code" ? (
+          <GroupPanel label="코드" options={CODE_SUB_TABS} active={codeSubTab} onChange={setCodeSubTab}>
+            {codeSubTab === "history" ? <HistoryPanel view={view} /> : <CodePanel view={view} />}
+          </GroupPanel>
+        ) : active.kind === "group" && active.id === "requirements" ? (
+          <GroupPanel label="요구사항" options={REQUIREMENTS_SUB_TABS} active={requirementsSubTab} onChange={setRequirementsSubTab}>
+            {requirementsSubTab === "tests" ? <TestsPanel view={view} /> : <RequirementsPanel view={view} />}
+          </GroupPanel>
+        ) : active.kind === "group" && active.id === "run" ? (
+          <GroupPanel label="실행" options={RUN_SUB_TABS} active={runSubTab} onChange={setRunSubTab}>
+            {runSubTab === "resources" ? (
+              <ResourcePanel view={view} />
+            ) : runSubTab === "deploy" ? (
+              <DeployPanel view={view} />
+            ) : (
+              <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
+            )}
+          </GroupPanel>
+        ) : active.kind === "group" && active.id === "repository" ? (
+          <GroupPanel label="저장소" options={REPOSITORY_SUB_TABS} active={repositorySubTab} onChange={setRepositorySubTab}>
+            {repositorySubTab === "presubmit" ? <SubmissionPanel view={view} /> : <RepositoryPanel view={view} />}
+          </GroupPanel>
+        ) : active.kind === "docs" ? (
+          <DocsPanel view={view} />
+        ) : active.kind === "status" ? (
+          <StatusPanel view={view} />
+        ) : active.kind === "tokens" ? (
           <TokenView view={view} />
-        ) : active.external ? (
+        ) : active.kind === "external" ? (
           <ExternalApiPanel sessionId={view.snapshot.id} external={active.external} ready={view.snapshot.status === "ready"} revision={view.completedRuns} />
-        ) : active.id === LOGS_TAB || !active.service ? (
+        ) : active.kind !== "service" ? (
+          // 도달할 일 없는 안전망(위에서 group·docs·status·tokens·external·service 여섯 kind를 모두 다뤘다)
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
+        ) : view.snapshot.status === "idle" ? (
+          // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다
+          <IdleServicePanel sessionId={view.snapshot.id} service={active.service} />
         ) : !active.service.url ? (
-          <ServicePending service={active.service} />
+          <ServicePending sessionId={view.snapshot.id} service={active.service} />
         ) : (
           // 재시작 중에도 미리보기를 지우지 않아 입력한 경로와 요청이 유지된다. 준비되면 새 주소로 다시 불러온다
           <div className="flex h-full flex-col">
@@ -111,14 +151,59 @@ export function PreviewPanel({ view }: { view: SessionView }) {
   );
 }
 
-/** 미리보기 보기 전환. 앱은 기존 iframe, 원격 브라우저와 QA는 서버가 중계하는 프레임을 그린다 */
-const VIEW_MODES = [
-  { id: "app", label: "앱" },
+/** 코드·요구사항·실행·저장소 탭의 공통 틀: 위에 하위 탭 줄, 아래에 그 하위 탭의 내용 */
+function GroupPanel({
+  label,
+  options,
+  active,
+  onChange,
+  children,
+}: {
+  label: string;
+  options: readonly SubTabOption[];
+  active: string;
+  onChange: (id: string) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
+        <SubTabBar label={`${label} 하위 탭`} options={options} active={active} onChange={onChange} />
+      </div>
+      <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  );
+}
+
+/** 하위 탭 한 줄(role=tablist). 화면 탭의 보기 전환(BrowserServicePanel)도 같은 모양을 쓴다 */
+function SubTabBar({ label, options, active, onChange }: { label: string; options: readonly SubTabOption[]; active: string; onChange: (id: string) => void }) {
+  return (
+    <div className="glass-soft inline-flex shrink-0 rounded-control p-0.5 text-sm" role="tablist" aria-label={label}>
+      {options.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          role="tab"
+          aria-selected={active === option.id}
+          onClick={() => onChange(option.id)}
+          className={`rounded-md px-2.5 py-1 font-medium transition-colors ${active === option.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** "화면" 탭(서비스별)의 하위 탭. 앱은 기존 iframe, 원격 브라우저와 QA는 서버가 중계하는 프레임을, 디자인 비교는 Figma 프레임을 그린다 */
+const SCREEN_SUB_TABS = [
+  { id: "app", label: "앱 미리보기" },
   { id: "remote", label: "원격 브라우저" },
   { id: "qa", label: "QA" },
+  { id: "design", label: "디자인 비교" },
 ] as const;
 
-type ViewMode = (typeof VIEW_MODES)[number]["id"];
+type ScreenSubTab = (typeof SCREEN_SUB_TABS)[number]["id"];
 
 /**
  * 화면 확인 중 QA 보기로 자동 전환하는 설정. 새로 고쳐도 남도록 localStorage에 둔다.
@@ -142,11 +227,12 @@ function subscribeAutoQa(listener: () => void): () => void {
 }
 
 /**
- * 브라우저 서비스의 미리보기. 보기를 여는 동안에만 원격 브라우저를 띄우고, 화면 확인(QA)이 시작되면 자동으로 QA 보기로 넘어간다.
- * 자동 전환은 설정(기본 켬)으로 끌 수 있고, 끄면 사람이 고른 보기를 유지한다
+ * 브라우저 서비스의 "화면" 탭. 하위 탭(앱 미리보기/원격 브라우저/QA/디자인 비교)을 보여 주고, 화면 확인(QA)이
+ * 시작되면 자동으로 QA 보기로 넘어간다. 자동 전환은 설정(기본 켬)으로 끌 수 있고, 끄면 사람이 고른 보기를 유지한다.
+ * 이 서비스를 벗어나면(다른 서비스 탭·다른 상위 탭) 보기는 기억하지 않고 "앱 미리보기"로 되돌아간다(예전과 같다)
  */
 function BrowserServicePanel({ view, service }: { view: SessionView; service: ServiceView }) {
-  const [mode, setMode] = useState<ViewMode>("app");
+  const [mode, setMode] = useState<ScreenSubTab>("app");
   const autoQa = useSyncExternalStore(subscribeAutoQa, readAutoQa, () => true);
   // 화면 확인 프레임이 오면 QA 보기로 넘어간다. 설정을 읽어 그때그때 판단한다
   const { qa, remote, blocked } = useLiveFrames(view.snapshot.id, (frame) => {
@@ -158,19 +244,7 @@ function BrowserServicePanel({ view, service }: { view: SessionView; service: Se
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
-        <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="미리보기 보기">
-          {VIEW_MODES.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              aria-pressed={mode === option.id}
-              onClick={() => setMode(option.id)}
-              className={`rounded-md px-2.5 py-1 font-medium transition-colors ${mode === option.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+        <SubTabBar label="화면 하위 탭" options={SCREEN_SUB_TABS} active={mode} onChange={(id) => setMode(id as ScreenSubTab)} />
         <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
           <input type="checkbox" checked={autoQa} onChange={(event) => writeAutoQa(event.target.checked)} className="accent-ink" />
           화면 확인 중 QA 보기로 자동 전환
@@ -181,8 +255,10 @@ function BrowserServicePanel({ view, service }: { view: SessionView; service: Se
           <AppPreview sessionId={view.snapshot.id} service={service} revision={view.completedRuns} />
         ) : mode === "remote" ? (
           <RemoteBrowserView sessionId={view.snapshot.id} service={service.name} frame={remote} blocked={blocked} />
-        ) : (
+        ) : mode === "qa" ? (
           <QaView key={`${browserCheck?.name ?? ""}:${browserCheck?.steps?.length ?? 0}`} sessionId={view.snapshot.id} frame={qa} check={browserCheck} />
+        ) : (
+          <DesignPanel key={view.snapshot.design?.fileUrl ?? ""} sessionId={view.snapshot.id} design={view.snapshot.design} ready={view.snapshot.status === "ready"} />
         )}
       </div>
     </div>
@@ -193,6 +269,7 @@ function AppPreview({ sessionId, service, revision }: { sessionId: string; servi
   const [path, setPath] = useState("/");
   const [draft, setDraft] = useState("/");
   const [reloads, setReloads] = useState(0);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   // 원격 미리보기 게이트웨이를 켰으면 다른 PC에서도 열리는 주소를 쓴다
   const base = service.previewUrl ?? service.url;
   const load = `${base}|${path}|${reloads}|${revision}`;
@@ -218,7 +295,49 @@ function AppPreview({ sessionId, service, revision }: { sessionId: string; servi
     };
   }, [load, path, service.name, service.previewUrl, sessionId]);
   const current = access?.load === load ? access : undefined;
-  const src = service.previewUrl ? current?.src : new URL(path, base).toString();
+
+  // 게이트웨이를 안 쓰면(기본값) studio가 같은 PC에 띄운 로컬 프록시 주소를 받아 쓴다(ADR-113).
+  // 이 프록시가 지나가는 HTML에 위치 알림 스크립트를 심어 줘서, 앱 안의 클라이언트 쪽 이동(pushState)을
+  // 아래 message 수신으로 따라갈 수 있다. 못 받아 오면 예전처럼 서비스 주소를 직접 연다
+  const [proxy, setProxy] = useState<{ load: string; src: string }>();
+  useEffect(() => {
+    if (service.previewUrl || !service.url) return;
+    let cancelled = false;
+    fetch(`/api/sessions/${sessionId}/services/${service.name}/preview-proxy`, { method: "POST" })
+      .then(async (response) => {
+        const body = (await response.json().catch(() => ({}))) as { url?: string };
+        if (!cancelled && response.ok && body.url) setProxy({ load, src: body.url });
+      })
+      .catch(() => {
+        // 로컬 프록시를 못 받아도 아래 base 그대로 직접 여는 쪽으로 빠진다
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [load, service.name, service.previewUrl, service.url, sessionId]);
+  const currentProxy = proxy?.load === load ? proxy : undefined;
+
+  const src = service.previewUrl ? current?.src : new URL(path, currentProxy?.src ?? base).toString();
+
+  // 샌드박스 앱이 postMessage로 알려온 지금 위치로 주소 입력칸만 갱신한다. path(=iframe의 key)는 바꾸지 않아
+  // iframe을 다시 불러오지 않는다 — "열기"로 직접 이동할 때만 path가 바뀌어 다시 불러온다
+  useEffect(() => {
+    if (!src) return;
+    let expectedOrigin: string | undefined;
+    try {
+      expectedOrigin = new URL(src).origin;
+    } catch {
+      return;
+    }
+    const handle = (event: MessageEvent) => {
+      const href = readPreviewLocationMessage(event, { origin: expectedOrigin, source: iframeRef.current?.contentWindow });
+      if (href === undefined) return;
+      const next = previewPathFromHref(href);
+      if (next !== undefined) setDraft(next);
+    };
+    window.addEventListener("message", handle);
+    return () => window.removeEventListener("message", handle);
+  }, [src]);
 
   return (
     <div className="flex h-full flex-col">
@@ -248,7 +367,7 @@ function AppPreview({ sessionId, service, revision }: { sessionId: string; servi
       </form>
       {/* 요청이 끝날 때마다, 그리고 재시작으로 주소가 바뀌면 새로 불러온다 */}
       {src ? (
-        <iframe key={load} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
+        <iframe ref={iframeRef} key={load} src={src} title={`${service.name} 미리보기`} className="min-h-0 w-full flex-1 bg-white" />
       ) : (
         <p role={current?.error ? "alert" : "status"} className={`px-4 py-3 text-sm ${current?.error ? "text-fail" : "text-muted"}`}>
           {current?.error ?? "미리보기를 여는 중"}
@@ -314,19 +433,82 @@ function RestartBanner({ service }: { service: ServiceView }) {
   );
 }
 
-function ServicePending({ service }: { service: ServiceView }) {
+/**
+ * 지연 기동 세션의 미리보기. 아직 샌드박스를 켜지 않았으므로 빈 화면 대신 켜는 방법을 보여 준다.
+ * "지금 켜기"는 boot API를 부르고, 진행 상태는 SSE 이벤트로 스냅샷에 반영된다
+ */
+function IdleServicePanel({ sessionId, service }: { sessionId: string; service: ServiceView }) {
+  const [booting, setBooting] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function boot() {
+    setBooting(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/boot`, { method: "POST" });
+    if (!response.ok) setError(((await response.json().catch(() => ({}))) as { error?: string }).error ?? "샌드박스를 켜지 못했습니다");
+    setBooting(false);
+  }
+
+  return (
+    <div className="flex h-full flex-col justify-center px-10">
+      <p className="text-lg font-semibold text-muted">대기(샌드박스 꺼짐)</p>
+      <p className="mt-2 max-w-[60ch] text-sm leading-6 text-muted">
+        {service.name}는 아직 켜지 않았습니다. 첫 만들기 요청 때 켭니다. 질문만 하면 켜지 않습니다.
+      </p>
+      <button
+        type="button"
+        onClick={boot}
+        disabled={booting}
+        className="mt-4 self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+      >
+        {booting ? "켜는 중" : "지금 켜기"}
+      </button>
+      {error && <p className="mt-2 text-sm text-fail">{error}</p>}
+    </div>
+  );
+}
+
+function ServicePending({ sessionId, service }: { sessionId: string; service: ServiceView }) {
   const tone = toneOfService(service.state);
+  const [turningOn, setTurningOn] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function turnOn() {
+    setTurningOn(true);
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${sessionId}/services/${service.name}/selection`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ on: true }),
+    });
+    if (!response.ok) setError(((await response.json().catch(() => ({}))) as { error?: string }).error ?? "서비스를 켜지 못했습니다");
+    setTurningOn(false);
+  }
+
   return (
     <div className="flex h-full flex-col justify-center px-10">
       <p className={`text-lg font-semibold ${TONE_TEXT[tone]}`}>
-        {service.name} {SERVICE_STATE_LABEL[service.state]}
+        {service.name} {service.state === "off" ? "꺼 둔 서비스입니다" : SERVICE_STATE_LABEL[service.state]}
       </p>
       {service.detail && <p className="mt-2 max-w-[70ch] font-mono text-sm break-words text-muted">{service.detail}</p>}
       <p className="mt-4 max-w-[60ch] text-sm leading-6 text-muted">
-        {service.state === "stopped"
-          ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
-          : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 로그 탭에서 진행 상황을 볼 수 있습니다."}
+        {service.state === "off"
+          ? "서비스 선택에서 이 서비스를 꺼 뒀습니다. 켜면 이미지를 다시 빌드하고 준비될 때까지 기다립니다."
+          : service.state === "stopped"
+            ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
+            : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 실행 탭의 로그에서 진행 상황을 볼 수 있습니다."}
       </p>
+      {service.state === "off" && (
+        <button
+          type="button"
+          onClick={turnOn}
+          disabled={turningOn}
+          className="mt-4 self-start rounded-control bg-ink px-4 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+        >
+          {turningOn ? "켜는 중" : "켜기"}
+        </button>
+      )}
+      {error && <p className="mt-2 text-sm text-fail">{error}</p>}
     </div>
   );
 }

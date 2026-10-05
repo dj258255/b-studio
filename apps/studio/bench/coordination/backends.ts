@@ -2,24 +2,27 @@
  * 벤치마크 실행 방식(백엔드)과 사용 한도 정책.
  *
  * 모델 경로를 조용한 기본값으로 고르지 않는다. `--dry`는 항상 openai 가짜 상류를 쓰고,
- * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex·commandcode·opencode=본인 PC CLI, openai=유료 API).
+ * `--dry`가 아니면 `--backend`를 반드시 받는다(claude-code·codex·commandcode·opencode·gemini=본인 PC CLI, openai=유료 API).
  */
 
+import type { SelfCheckMode } from '@b-studio/agent';
 import type { Strategy } from './tasks';
 
-export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'openai';
+export type Backend = 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'gemini' | 'openai';
 export type RateLimitPolicy = 'stop' | 'wait';
+/** 검증 범위(--verify). 기본 full은 지금과 같고, light는 레인·통합 게이트가 재시작·준비·계약만 확인한다 */
+export type BenchVerify = 'full' | 'light';
 
 export interface BackendChoice {
   backend: Backend;
-  /** claude-code·codex·commandcode·opencode에서 고정할 모델 이름. openai면 없다(상류 모델은 BENCH_UPSTREAM_MODEL로 받는다) */
+  /** claude-code·codex·commandcode·opencode·gemini에서 고정할 모델 이름. openai면 없다(상류 모델은 BENCH_UPSTREAM_MODEL로 받는다) */
   model?: string;
 }
 
 export const DEFAULT_CLAUDE_CODE_MODEL = 'sonnet';
 
 export function isBackend(value: string): value is Backend {
-  return value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'openai';
+  return value === 'claude-code' || value === 'codex' || value === 'commandcode' || value === 'opencode' || value === 'gemini' || value === 'openai';
 }
 
 export function resolveBackend(input: { dry: boolean; backend?: string; model?: string }): BackendChoice {
@@ -28,10 +31,10 @@ export function resolveBackend(input: { dry: boolean; backend?: string; model?: 
     if (input.model !== undefined) throw new Error('--dry는 --model과 함께 쓸 수 없습니다');
     return { backend: 'openai' };
   }
-  if (input.backend === undefined) throw new Error('--backend가 필요합니다: claude-code, codex, commandcode, opencode 또는 openai (모델 경로를 조용히 고르지 않습니다)');
-  if (!isBackend(input.backend)) throw new Error(`알 수 없는 백엔드입니다: ${input.backend} (claude-code, codex, commandcode, opencode 또는 openai)`);
+  if (input.backend === undefined) throw new Error('--backend가 필요합니다: claude-code, codex, commandcode, opencode, gemini 또는 openai (모델 경로를 조용히 고르지 않습니다)');
+  if (!isBackend(input.backend)) throw new Error(`알 수 없는 백엔드입니다: ${input.backend} (claude-code, codex, commandcode, opencode, gemini 또는 openai)`);
   if (input.backend === 'openai') {
-    if (input.model !== undefined) throw new Error('--model은 --backend claude-code, codex, commandcode 또는 opencode에서만 쓸 수 있습니다');
+    if (input.model !== undefined) throw new Error('--model은 --backend claude-code, codex, commandcode, opencode 또는 gemini에서만 쓸 수 있습니다');
     return { backend: 'openai' };
   }
   const model = input.model?.trim();
@@ -43,6 +46,11 @@ export function resolveBackend(input: { dry: boolean; backend?: string; model?: 
   if (input.backend === 'opencode') {
     if (!model) throw new Error('--backend opencode에는 --model이 필요합니다 (기본 모델을 추측하지 않습니다. `opencode models`로 로그인한 제공자의 모델을 고르세요)');
     return { backend: 'opencode', model };
+  }
+  // gemini도 모델을 추측하지 않는다. 모델 이름이 자주 바뀌는 CLI라 다른 러너보다도 더 기본값을 두지 않는다
+  if (input.backend === 'gemini') {
+    if (!model) throw new Error('--backend gemini에는 --model이 필요합니다 (기본 모델을 추측하지 않습니다. 예: gemini-2.5-pro)');
+    return { backend: 'gemini', model };
   }
   return { backend: 'claude-code', model: model || DEFAULT_CLAUDE_CODE_MODEL };
 }
@@ -56,6 +64,7 @@ export function planModelId(backend: Backend, requestedModel: string, upstreamMo
   if (backend === 'codex') return `local-cli-chatgpt:${requestedModel || 'default'}`;
   if (backend === 'commandcode') return `local-cli-commandcode:${requestedModel || 'default'}`;
   if (backend === 'opencode') return `local-cli-opencode:${requestedModel || 'default'}`;
+  if (backend === 'gemini') return `local-cli-gemini:${requestedModel || 'default'}`;
   return upstreamModelId;
 }
 
@@ -69,12 +78,49 @@ export function resolveContextClearing(value: string | undefined): boolean {
   return trimmed === 'on';
 }
 
+/**
+ * 검증 범위(`--verify`). 기본은 full(지금과 같다). light는 E5(전체 검증 대 가볍게 확인)를 재려고 둔다.
+ * 모르는 값은 조용히 full로 떨어뜨리지 않고 여기서 멈춘다.
+ */
+export function resolveVerify(value: string | undefined): BenchVerify {
+  const trimmed = value?.trim().toLowerCase();
+  if (trimmed === undefined || trimmed === '' || trimmed === 'full') return 'full';
+  if (trimmed === 'light') return 'light';
+  throw new Error(`--verify는 full 또는 light여야 합니다 (지금 값: ${value})`);
+}
+
+/**
+ * 자가 확인 범위(--self-check). 벤치 기본은 full이다 — 스튜디오 기본(lean, ADR-064)과 다르지만 E1~E7과 같은 조건으로 비교하려고 둔다.
+ * 벤치는 이 값을 B_STUDIO_SELF_CHECK에 명시적으로 넣어 모든 세션에 적용한다
+ */
+export function resolveSelfCheck(value: string | undefined): SelfCheckMode {
+  const trimmed = value?.trim().toLowerCase();
+  if (trimmed === undefined || trimmed === '' || trimmed === 'full') return 'full';
+  if (trimmed === 'lean') return 'lean';
+  throw new Error(`--self-check는 full 또는 lean이어야 합니다 (지금 값: ${value})`);
+}
+
+/**
+ * P0(그냥 Claude Code)는 b-studio 검증 게이트를 쓰지 않으므로 verify가 적용되지 않는다.
+ * light를 P0와 함께 주면 무시한다는 경고 한 줄을 돌려준다(에러가 아니다).
+ */
+export function verifyNotice(verify: BenchVerify, strategies: readonly Strategy[]): string | undefined {
+  if (verify === 'light' && strategies.includes('P0')) {
+    return '경고: P0는 b-studio 검증 게이트를 쓰지 않아 --verify light가 적용되지 않습니다(P0 행은 전체 검증과 같습니다).';
+  }
+  return undefined;
+}
+
 /** 벤치가 넘길 승격 설정. claude-code 백엔드에서만 쓴다 */
 export interface EscalationChoice {
   /** --escalate-to. 없으면 승격을 설정하지 않은 실행 */
   to?: string;
   /** --escalate-after. 기본 2 */
   after: number;
+  /** --escalate-after-failures. 없으면 서명 규칙만 쓴다(실패 N번 규칙 없음) */
+  afterFailures?: number;
+  /** --escalate-retry-budget. 승격 뒤 새로 주는 게이트 재시도 횟수(기본 2) */
+  retryBudget: number;
 }
 
 /**
@@ -82,15 +128,56 @@ export interface EscalationChoice {
  * 레인마다 백엔드를 고를 수 있으므로(레인 백엔드) 레인 중 하나라도 claude-code면 허용한다.
  * 모델 경로를 조용히 고르지 않는 원칙과 같게, claude-code가 하나도 없는데 주면 시작 전에 오류를 낸다.
  */
-export function resolveEscalation(input: { backend: Backend; laneBackends?: Iterable<Backend>; escalateTo?: string; escalateAfter?: number }): EscalationChoice {
-  const after = input.escalateAfter ?? 2;
-  if (!Number.isInteger(after) || after < 1) throw new Error(`--escalate-after는 1 이상의 정수여야 합니다 (지금 값: ${input.escalateAfter})`);
-  // --escalate-after만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
+export function resolveEscalation(input: {
+  backend: Backend;
+  laneBackends?: Iterable<Backend>;
+  escalateTo?: string;
+  escalateAfter?: number;
+  escalateAfterFailures?: number;
+  escalateRetryBudget?: number;
+}): EscalationChoice {
+  const after = integer(input.escalateAfter, '--escalate-after', 1) ?? 2;
+  const afterFailures = integer(input.escalateAfterFailures, '--escalate-after-failures', 1);
+  // 0이면 새 예산을 주지 않는다(승격해도 남은 횟수만 쓴다 — 승격 규칙을 넣기 전과 같은 동작)
+  const retryBudget = integer(input.escalateRetryBudget, '--escalate-retry-budget', 0) ?? 2;
+  // --escalate-*만 주고 --escalate-to를 주지 않으면 승격하지 않는다(설정만 기억한다)
   const to = input.escalateTo?.trim();
-  if (!to) return { after };
+  if (!to) return { after, retryBudget, ...(afterFailures === undefined ? {} : { afterFailures }) };
   const backends = new Set<Backend>([input.backend, ...(input.laneBackends ?? [])]);
   if (!backends.has('claude-code')) throw new Error(`--escalate-to는 claude-code 백엔드에서만 쓸 수 있습니다 (지금 백엔드: ${[...backends].join(', ')})`);
-  return { to, after };
+  return { to, after, retryBudget, ...(afterFailures === undefined ? {} : { afterFailures }) };
+}
+
+function integer(value: number | undefined, flag: string, min: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || value < min) throw new Error(`${flag}는 ${min} 이상의 정수여야 합니다 (지금 값: ${value})`);
+  return value;
+}
+
+/** 벤치가 넘길 계획-실행 분리(ADR-075) 설정. claude-code 백엔드에서만 쓴다 */
+export interface PlanExecuteChoice {
+  /** --plan-model. 없으면 계획 호출을 하지 않는다(지금과 같은 동작) */
+  plan?: string;
+  /** --execute-model. 없으면 --model(시작 모델)을 그대로 실행에도 쓴다 */
+  execute?: string;
+}
+
+/**
+ * 계획-실행 분리 인자를 확정한다(ADR-075: "계획은 큰 모델, 실행은 작은 모델").
+ * `--escalate-to`와 같은 원칙 — 계획 호출 경로(도구 없는 한 번의 ModelAsk)가 제품에서 claude-code·api에만 있고,
+ * 벤치는 openai 백엔드에서 실행마다 레지스트리 파일을 새로 만들어(단일 모델) 계획 모델을 위한 두 번째 모델을
+ * 안전하게 끼워 넣을 자리가 없어(레지스트리·프록시를 다시 설계해야 한다) claude-code 백엔드에서만 지원한다.
+ * `--dry`(항상 openai)와 함께 주면 이 함수가 시작 전에 거부해, 모델 경로를 조용히 무시하지 않는다.
+ */
+export function resolvePlanExecute(input: { backend: Backend; laneBackends?: Iterable<Backend>; planModel?: string; executeModel?: string }): PlanExecuteChoice {
+  const plan = input.planModel?.trim();
+  const execute = input.executeModel?.trim();
+  if (!plan && !execute) return {};
+  const backends = new Set<Backend>([input.backend, ...(input.laneBackends ?? [])]);
+  if (!backends.has('claude-code')) {
+    throw new Error(`--plan-model·--execute-model은 claude-code 백엔드에서만 쓸 수 있습니다 (지금 백엔드: ${[...backends].join(', ')})`);
+  }
+  return { ...(plan ? { plan } : {}), ...(execute ? { execute } : {}) };
 }
 
 /** 벤치 레인 그룹(레인의 첫 쓰기 경로). planFor가 만드는 레인은 api·web 둘이다 */
@@ -118,7 +205,7 @@ export function parseLaneBackend(value: string): LaneBackendChoice {
   const colon = rest.indexOf(':');
   const backend = (colon < 0 ? rest : rest.slice(0, colon)).trim();
   const model = colon < 0 ? undefined : rest.slice(colon + 1).trim() || undefined;
-  if (!isBackend(backend)) throw new Error(`알 수 없는 레인 백엔드입니다: ${backend} (claude-code, codex, commandcode, opencode 또는 openai)`);
+  if (!isBackend(backend)) throw new Error(`알 수 없는 레인 백엔드입니다: ${backend} (claude-code, codex, commandcode, opencode, gemini 또는 openai)`);
   return { group: group as BenchLaneGroup, backend, ...(model ? { model } : {}) };
 }
 
@@ -134,7 +221,7 @@ export function parseLaneBackends(values: readonly string[] | undefined): Map<Be
 }
 
 /** 벤치 백엔드 → 세션 백엔드. openai는 api 세션이다 */
-export function sessionBackendOf(backend: Backend): 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' {
+export function sessionBackendOf(backend: Backend): 'api' | 'claude-code' | 'codex' | 'commandcode' | 'opencode' | 'gemini' {
   return backend === 'openai' ? 'api' : backend;
 }
 

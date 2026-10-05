@@ -154,6 +154,15 @@ export class Board {
     return this.notes.map((note) => ({ ...note, refs: [...note.refs], author: { ...note.author } }));
   }
 
+  /**
+   * contract 메모를 낸 적 있는 레인 이름 집합(topology와 무관하게 전체를 본다). 호출자(실행기)가
+   * "엮인 레인이 아직 계약을 게시하지 않았다"를 판단할 때 쓴다(이슈 #393) — 게시판은 레인별 게시 여부만
+   * 알려 주고, 누가 누구와 엮였는지(전체 레인 집합)는 호출자가 안다.
+   */
+  contractAuthors(): ReadonlySet<string> {
+    return new Set(this.notes.filter((note) => note.kind === 'contract').map((note) => note.author.lane));
+  }
+
   stats(): BoardStats {
     return { ...this.counters, byKind: { ...this.counters.byKind } };
   }

@@ -3,22 +3,16 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import type { SessionMode, SessionSnapshot } from "@/lib/studio-events";
+import { supportingContainers } from "@/lib/header-services";
+import type { SessionSnapshot } from "@/lib/studio-events";
 import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
 import { AgentsBadge } from "./agents-badge";
 import { LogoutButton } from "./logout-button";
+import { ProjectMenu } from "./project-menu";
 import { useSessionAccess } from "./session-access";
-import { Dot, SERVICE_STATE_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
-
-const MODE_LABEL: Record<SessionMode, string> = {
-  api: "Claude API",
-  "claude-code": "로컬 Claude Agent",
-  codex: "로컬 ChatGPT Agent",
-  commandcode: "로컬 Command Code Agent",
-  opencode: "로컬 OpenCode Agent",
-  demo: "데모 모드",
-};
+import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { SupportingServicesChip } from "./supporting-services-chip";
 
 /** Docker 런타임 이름(runsc)과 Kubernetes RuntimeClass 이름(gvisor) */
 const GVISOR_RUNTIMES = new Set(["runsc", "gvisor"]);
@@ -54,15 +48,22 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   }
 
   const statusTone = snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
+  // 관리형 서비스(studio.yaml)는 줄로 하나하나 보여주고, 그 밖의 컨테이너(DB 등 부가 서비스·edge 플랫폼, ADR-073)는 칩 하나로 압축한다
+  const managedNames = new Set(snapshot.services.map((service) => service.name));
+  const supporting = supportingContainers(managedNames, snapshot.usage?.services);
 
   return (
     <header className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-panel px-5 py-3">
-      <Link href="/" className="font-semibold tracking-tight hover:underline">
+      {/* 이 화면이 곧 첫 화면(개발 화면)이다(ADR-066). 로고는 그 첫 화면(마지막 프로젝트)으로 간다 */}
+      <Link href="/" className="font-semibold tracking-tight hover:underline" title="첫 화면(마지막 프로젝트의 개발 화면)">
         b-studio
       </Link>
 
       <div className="flex items-baseline gap-2">
-        <h1 className="text-lg font-semibold">{snapshot.projectName}</h1>
+        {/* 프로젝트 이름을 누르면 다른 프로젝트로 바꾸거나 폴더를 열거나 새 대화를 시작하는 메뉴가 열린다(ADR-070) */}
+        <h1 className="text-lg font-semibold">
+          <ProjectMenu projectId={snapshot.projectId} projectName={snapshot.projectName} />
+        </h1>
         <span className={`text-sm ${TONE_TEXT[statusTone]}`}>{SESSION_STATUS_LABEL[snapshot.status]}</span>
       </div>
 
@@ -86,6 +87,9 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             </li>
           );
         })}
+        <li>
+          <SupportingServicesChip sessionId={snapshot.id} services={supporting} />
+        </li>
       </ul>
 
       <div className="ml-auto flex items-center gap-3">
@@ -118,25 +122,20 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           className={`glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium ${(snapshot.backend ?? snapshot.mode) === "demo" ? "text-wait" : "text-muted"}`}
           title="에이전트 실행 방식"
         >
-          {MODE_LABEL[snapshot.backend ?? snapshot.mode]}
+          {SESSION_BACKEND_LABEL[snapshot.backend ?? snapshot.mode]}
         </span>
         <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
           나란히 보기에 추가
         </button>
         {snapshot.status === "stopped" ? (
-          <>
-            <Link href="/" className="text-sm font-medium hover:underline">
-              프로젝트 목록
-            </Link>
-            <button
-              type="button"
-              onClick={resume}
-              disabled={resuming || !access.canManage}
-              className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
-            >
-              {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={resume}
+            disabled={resuming || !access.canManage}
+            className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+          >
+            {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
+          </button>
         ) : (
           <button
             type="button"

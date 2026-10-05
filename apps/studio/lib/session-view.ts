@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
 import type { BootNetwork } from '@b-studio/sandbox';
 import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
 
@@ -26,6 +26,10 @@ export type ChatItem =
   | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
   /** 러너가 무언가를 하지 못했다는 안내(예: 상태 폴더가 없어 이전 대화를 이어받지 못함). 실행은 계속된다 */
   | { kind: 'warning'; runId: string; text: string }
+  /** 플랫폼이 대화에 남기는 한 줄 안내(예: 샌드박스를 켜는 중). 모델 발언이 아니다 */
+  | { kind: 'notice'; text: string }
+  /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. "계획(모델명)" 접기 블록으로 보여준다 */
+  | { kind: 'planBrief'; runId: string; model: string; text: string }
   | {
       kind: 'route';
       runId: string;
@@ -34,8 +38,10 @@ export type ChatItem =
       complexity: 'simple' | 'normal' | 'complex';
       risk: 'normal' | 'high';
       candidates: Array<{ id: string; label: string; eligible: boolean; score: number; estimatedCostUsd?: number }>;
+      /** claude-code 자동 모델 선택(ADR-091)이면 true. 화면이 점수표 대신 한 줄 안내를 보여준다 */
+      auto?: boolean;
     }
-  | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string }
+  | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string; effort?: Effort }
   /** 게이트의 같은 실패 서명이 반복돼 더 비싼 모델로 올렸다 */
   | { kind: 'escalation'; runId: string; from: string; to: string; times: number; attempt: number }
   | { kind: 'stage'; runId: string; stage: string }
@@ -54,8 +60,12 @@ export type ChatItem =
       usage?: AgentUsage;
       /** 질문 모드 요청의 결과 */
       intent?: 'ask';
+      /** 가볍게 확인(light)으로 끝난 요청. 테스트·화면 확인·리뷰를 건너뛰었다 */
+      verify?: 'light';
     }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
+  /** 에이전트의 제안을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘겼다(ADR-068) */
+  | { kind: 'handoff'; runId: string; to: 'split' | 'fleet'; href: string }
   /** 로컬 폴더 세션에서 스튜디오 밖에서 바꾼 파일을 남긴 체크포인트 */
   | { kind: 'localEdits'; checkpoint: Checkpoint; reason: 'request' | 'resume' }
   | {
@@ -67,13 +77,26 @@ export type ChatItem =
       patch: string;
       restarted: ServiceCheck[];
       databases: DatabaseState[];
+      /** 버린 변경을 되살릴 수 있게 남긴 백업(ADR-099) */
+      backup?: DiscardBackup;
     }
   | {
       kind: 'restore';
       checkpoint: Checkpoint;
-      result?: { ok: true; files: string[]; restarted: ServiceCheck[]; databases: DatabaseState[] } | { ok: false; error: string };
+      result?:
+        | { ok: true; files: string[]; restarted: ServiceCheck[]; databases: DatabaseState[]; backup?: DiscardBackup }
+        | { ok: false; error: string };
     }
-  | { kind: 'resumed'; checkpoint: Checkpoint; discarded: string[]; databases: DatabaseState[]; restarted: ServiceCheck[] }
+  | {
+      kind: 'resumed';
+      checkpoint: Checkpoint;
+      discarded: string[];
+      databases: DatabaseState[];
+      restarted: ServiceCheck[];
+      backup?: DiscardBackup;
+    }
+  /** discard·revert·restore가 남긴 백업을 작업 복사본에 되살린 결과(ADR-099) */
+  | { kind: 'backupRestored'; backupId: string; result: { ok: true; files: string[]; restarted: ServiceCheck[] } | { ok: false; error: string } }
   | {
       kind: 'remoteSync';
       result?:
@@ -93,6 +116,7 @@ export type ChatItem =
             files?: string[];
             report?: VerificationReport;
             restarted?: ServiceCheck[];
+            backup?: DiscardBackup;
           };
     }
   | {
@@ -114,12 +138,30 @@ export type ChatItem =
       pullRequestError?: string;
       /** PR에 연결한 이슈 번호들 */
       issues?: number[];
+    }
+  /** main 따라잡기(ADR-076) */
+  | {
+      kind: 'baseSync';
+      result?:
+        | { ok: true; status: 'up-to-date' | 'merged'; commits: number; files: string[]; checkpoint?: Checkpoint; report?: VerificationReport }
+        | {
+            ok: false;
+            error: string;
+            conflicts?: string[];
+            /** "에이전트에게 충돌 해결 맡기기"로 시도했을 때만 있다. 대화 입력창에 미리 채운다 */
+            agentRequest?: string;
+            files?: string[];
+            report?: VerificationReport;
+            restarted?: ServiceCheck[];
+            backup?: DiscardBackup;
+          };
     };
 
 type ToolsItem = Extract<ChatItem, { kind: 'tools' }>;
 type GateItem = Extract<ChatItem, { kind: 'gate' }>;
 type RestoreItem = Extract<ChatItem, { kind: 'restore' }>;
 type RemoteSyncItem = Extract<ChatItem, { kind: 'remoteSync' }>;
+type BaseSyncItem = Extract<ChatItem, { kind: 'baseSync' }>;
 type DeployItem = Extract<ChatItem, { kind: 'deploy' }>;
 
 export interface SessionView {
@@ -152,6 +194,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return createView(event.snapshot);
     case 'status':
       return patchSnapshot(view, { status: event.status, error: event.error });
+    case 'notice':
+      return { ...view, chat: [...view.chat, { kind: 'notice', text: event.text }] };
     case 'service':
       return patchSnapshot(view, {
         services: view.snapshot.services.map((service) =>
@@ -169,10 +213,20 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       });
     case 'design':
       return patchSnapshot(view, { design: event.design });
+    case 'model':
+      return patchSnapshot(view, { modelId: event.modelId, effort: event.effort });
     case 'question':
       // 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답을 보내면(run_started) 지운다.
       // 대화 항목으로는 넣지 않는다 — 답을 보내면 요청 줄에 질문과 답이 함께 남는다
-      return patchSnapshot(view, { pendingQuestion: { runId: event.runId, question: event.question, options: event.options, allowOther: event.allowOther } });
+      return patchSnapshot(view, {
+        pendingQuestion: { runId: event.runId, question: event.question, options: event.options, allowOther: event.allowOther, ...(event.proposal ? { proposal: event.proposal } : {}) },
+      });
+    case 'question_dismissed':
+      // 제안을 받아 다른 방식으로 넘겼다. 같은 질문이면 카드를 치운다(넘긴 곳은 대화 줄로 남긴다)
+      return {
+        ...(view.snapshot.pendingQuestion?.runId === event.runId ? patchSnapshot(view, { pendingQuestion: undefined }) : view),
+        chat: [...view.chat, { kind: 'handoff', runId: event.runId, to: event.to, href: event.href }],
+      };
     case 'boot_network':
       return {
         ...patchSnapshot(view, { bootNetwork: event.network }),
@@ -184,10 +238,15 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return { ...view, logs };
     }
     case 'run_started':
+      // PR 자동 리뷰(ADR-074)의 리뷰어 호출은 세션의 보통 요청이 아니라 토큰 보고서에 잡히려고 같은 이벤트를 빌려 쓴 것뿐이다.
+      // 대화 줄이나 "작업 중" 표시를 만들지 않는다 — 그 진행은 AI 리뷰 카드가 따로 보여준다(runId는 review-로 시작한다)
+      if (event.runId.startsWith('review-')) return view;
       return {
         ...patchSnapshot(view, { running: true, pendingQuestion: undefined }),
         chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
       };
+    case 'plan_brief':
+      return { ...view, chat: [...view.chat, { kind: 'planBrief', runId: event.runId, model: event.model, text: event.text }] };
     case 'agent':
       return { ...view, chat: applyAgentEvent(view.chat, event.runId, event.event) };
     case 'steer_queued':
@@ -200,6 +259,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'run_cancelling':
       return patchSnapshot(view, { cancelling: event.reason ?? 'user' });
     case 'run_finished': {
+      // run_started와 같은 이유로 대화·"작업 중" 상태는 건드리지 않는다. 세션 토큰 합계만 반영한다
+      if (event.runId.startsWith('review-')) return patchSnapshot(view, { tokens: event.sessionTokens ?? view.snapshot.tokens });
       const request = view.chat.find((item) => item.kind === 'request' && item.runId === event.runId);
       const intent = request?.kind === 'request' ? request.intent : undefined;
       return {
@@ -214,7 +275,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         }),
         chat: [
           ...markInterrupted(view.chat, event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,
@@ -238,6 +299,12 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       };
     }
 
+    case 'docs_checkpoint': {
+      // 요청 밖(요구사항 저장 등)에서 남기므로 대화 줄은 더하지 않는다 — 체크포인트 목록(히스토리 패널)에만 반영한다
+      const known = view.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === event.checkpoint.sha);
+      return known ? view : patchSnapshot(view, { checkpoints: [event.checkpoint, ...view.snapshot.checkpoints] });
+    }
+
     case 'reverted':
       return {
         ...view,
@@ -251,6 +318,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             patch: event.patch,
             restarted: event.restarted,
             databases: event.databases,
+            backup: event.backup,
           },
         ],
       };
@@ -271,6 +339,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           files: event.files,
           restarted: event.restarted,
           databases: event.databases,
+          backup: event.backup,
         }),
         // 파일이 바뀌었으므로 미리보기와 계약을 다시 불러오게 한다
         completedRuns: view.completedRuns + 1,
@@ -287,11 +356,28 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         ...view,
         chat: [
           ...view.chat,
-          { kind: 'resumed', checkpoint: event.checkpoint, discarded: event.discarded, databases: event.databases, restarted: event.restarted },
+          {
+            kind: 'resumed',
+            checkpoint: event.checkpoint,
+            discarded: event.discarded,
+            databases: event.databases,
+            restarted: event.restarted,
+            backup: event.backup,
+          },
         ],
         // 새 샌드박스의 주소로 미리보기와 계약을 다시 불러오게 한다
         completedRuns: view.completedRuns + 1,
       };
+
+    case 'backup_restored':
+      return {
+        ...view,
+        chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: true, files: event.files, restarted: event.restarted } }],
+        completedRuns: view.completedRuns + 1,
+      };
+
+    case 'backup_restore_failed':
+      return { ...view, chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: false, error: event.error } }] };
 
     case 'remote_sync_started':
       return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'remoteSync' }] };
@@ -322,8 +408,37 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           files: event.files,
           report: event.report,
           restarted: event.restarted,
+          backup: event.backup,
         }),
         // 가져온 변경을 반영했다가 되돌렸으면 서비스가 다시 떴다
+        completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
+      };
+
+    case 'base_sync_started':
+      return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'baseSync' }] };
+
+    case 'base_synced':
+      return {
+        ...patchSnapshot(view, { running: false, checkpoints: event.checkpoints, repository: event.repository }),
+        chat: settleBaseSync(view.chat, { ok: true, status: event.status, commits: event.commits, files: event.files, checkpoint: event.checkpoint, report: event.report }),
+        // 파일이 바뀌었으면 미리보기와 계약을 다시 불러오게 한다
+        completedRuns: event.status === 'up-to-date' ? view.completedRuns : view.completedRuns + 1,
+      };
+
+    case 'base_sync_failed':
+      return {
+        ...patchSnapshot(view, { running: false, ...(event.checkpoints ? { checkpoints: event.checkpoints } : {}) }),
+        chat: settleBaseSync(view.chat, {
+          ok: false,
+          error: event.error,
+          conflicts: event.conflicts,
+          agentRequest: event.agentRequest,
+          files: event.files,
+          report: event.report,
+          restarted: event.restarted,
+          backup: event.backup,
+        }),
+        // 병합한 변경을 반영했다가 되돌렸으면 서비스가 다시 떴다
         completedRuns: event.restarted ? view.completedRuns + 1 : view.completedRuns,
       };
 
@@ -358,8 +473,12 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'files_changed':
       return patchSnapshot(view, { fileRevision: event.revision });
 
+    case 'tests_changed':
+      return patchSnapshot(view, { testsRevision: event.revision, testsRunning: event.running });
+
     case 'exported':
-      // 원격 상태는 통째로 바꾸므로 기록을 다시 재생해도 결과가 같다
+      // 원격 상태(repository)는 통째로 바꾼다. 다만 그 순간 서버가 계산한 값(canCreatePullRequest 등)이라
+      // 기록을 재생하면 지금 값보다 오래된 값일 수 있다 — snapshot_sync가 재생 끝에서 다시 맞춘다
       return {
         ...patchSnapshot(view, { repository: event.repository }),
         chat: [
@@ -376,6 +495,15 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           },
         ],
       };
+
+    case 'review_round':
+      // 리뷰 상태는 통째로 바꾼다(exported와 같은 규칙). 역시 그 순간 값이라 snapshot_sync가 재생 끝에서 다시 맞춘다
+      return patchSnapshot(view, { review: event.review });
+
+    case 'snapshot_sync':
+      // 재연결 시 replay 맨 끝에서 온다. exported·remote_synced·base_synced·review_round 같은 기록 이벤트가
+      // 그 순간 값으로 덮어쓴 repository·checkpoints·review를 지금 스냅샷 값으로 되돌린다(채팅은 건드리지 않는다)
+      return patchSnapshot(view, { repository: event.repository, checkpoints: event.checkpoints, review: event.review });
   }
 }
 
@@ -414,6 +542,13 @@ function settleRemoteSync(chat: ChatItem[], result: NonNullable<RemoteSyncItem['
   return chat.map((item, i) => (i === index ? { kind: 'remoteSync', result } : item));
 }
 
+function settleBaseSync(chat: ChatItem[], result: NonNullable<BaseSyncItem['result']>): ChatItem[] {
+  const index = chat.findLastIndex((item) => item.kind === 'baseSync' && !item.result);
+  // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
+  if (index === -1) return [...chat, { kind: 'baseSync', result }];
+  return chat.map((item, i) => (i === index ? { kind: 'baseSync', result } : item));
+}
+
 function settleDeploy(chat: ChatItem[], action: DeployAction, result: NonNullable<DeployItem['result']>): ChatItem[] {
   const index = chat.findLastIndex((item) => item.kind === 'deploy' && !item.result);
   // 기록이 잘려 시작 이벤트가 없으면 결과만 붙인다
@@ -444,11 +579,12 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
           complexity: event.complexity,
           risk: event.risk,
           candidates: event.candidates,
+          ...(event.auto ? { auto: true } : {}),
         },
       ];
 
     case 'session':
-      return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth }];
+      return [...chat, { kind: 'backend', runId, backend: event.backend, model: event.model, auth: event.auth, effort: event.effort }];
 
     case 'steer_applied':
       return applySteerApplied(chat, runId, event.count);
@@ -530,6 +666,34 @@ export function activeRun({ snapshot, chat }: Pick<SessionView, 'snapshot' | 'ch
   const request = chat.findLast((item): item is Extract<ChatItem, { kind: 'request' }> => item.kind === 'request');
   if (!request) return undefined;
   return chat.some((item) => item.kind === 'outcome' && item.runId === request.runId) ? undefined : request.runId;
+}
+
+/**
+ * 파일을 바꾼 실행 id들. 서버가 게이트를 돌렸다는 것은 바뀐 파일이 있었다는 뜻이고
+ * (바뀐 파일이 없으면 게이트는 검증 없이 통과합니다), 체크포인트도 게이트를 통과한 변경에만 남습니다.
+ * 입력이 하나로 합쳐진 뒤로는 "질문에 답만 한" 만들기 실행도 있으므로, 결과 줄을 가르는 데 씁니다
+ */
+export function runsWithChanges(chat: readonly ChatItem[]): Set<string> {
+  const runs = new Set<string>();
+  for (const item of chat) {
+    if (item.kind === 'gate' || item.kind === 'checkpoint' || item.kind === 'reverted') runs.add(item.runId);
+  }
+  return runs;
+}
+
+/** 이번 실행이 파일을 바꿨는가 */
+export function runHasChanges(chat: readonly ChatItem[], runId: string): boolean {
+  return runsWithChanges(chat).has(runId);
+}
+
+type OutcomeItem = Extract<ChatItem, { kind: 'outcome' }>;
+
+/** 실행 결과 한 줄. 바꾼 파일이 없으면 "답만 했습니다"로 알린다(대화 화면과 나란히 보기 칸이 같은 문구를 쓴다) */
+export function outcomeText(item: OutcomeItem, hasChanges: boolean): string {
+  if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}, ${item.turns ?? 0}턴`;
+  if (item.status === 'awaiting_input') return '답을 기다립니다';
+  if (item.status === 'cancelled') return item.summary;
+  return `${item.status === 'failed' ? '완료하지 못함' : '오류'}: ${item.summary}`;
 }
 
 export function describeToolCall(name: string, input: unknown): string {

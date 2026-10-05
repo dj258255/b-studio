@@ -370,6 +370,19 @@ export const WorkflowPageCheckSchema = z
     maxLoadMs: z.number().int().positive().optional(),
     /** browser 전용. 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교한다 */
     compare: WorkflowPageCompareSchema.optional(),
+    /**
+     * browser 전용(ADR-078). 기본(생략·false)은 네트워크가 잠잠해진 뒤 렌더링된 글자가 "Loading…"·"로딩 중"·"불러오는 중" 같은
+     * 로딩 문구뿐이거나(스켈레톤이라 글자가 거의 없으면서 콘솔 오류·실패한 요청이 있으면) 실패로 본다.
+     * 의도적으로 로딩 상태를 오래 보여주는 화면(진행률 표시 등)에서만 true로 꺼 둔다
+     */
+    allowLoadingPlaceholder: z.boolean().optional(),
+    /**
+     * browser 전용(fix/frontend-backend-url, ADR-095). 헤드리스 브라우저를 띄울 수 없으면(BrowserUnavailableError)
+     * 화면을 열어 보는 대신 이 서비스·경로로 평범한 HTTP 요청을 한 번 보낸다. 응답을 받으면(상태 코드와 무관하게) 주소가
+     * 살아 있다는 뜻이라 통과시키되 참고 문구를 남기고, 연결 자체가 안 되면 실패로 본다. 없으면(기본) ADR-050대로
+     * 브라우저를 못 띄우면 그대로 실패한다 — 사람이 직접 적은 pageChecks는 이 결정을 그대로 둔다
+     */
+    fallbackProbe: z.object({ service: z.string().regex(NAME), path: SERVICE_PATH }).optional(),
   })
   .superRefine((check, ctx) => {
     if (check.mode === 'browser') return;
@@ -380,13 +393,17 @@ export const WorkflowPageCheckSchema = z
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
     if (check.maxLoadMs !== undefined) ctx.addIssue({ code: 'custom', path: ['maxLoadMs'], message: 'maxLoadMs는 mode: browser에서만 쓸 수 있습니다' });
     if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.allowLoadingPlaceholder !== undefined) {
+      ctx.addIssue({ code: 'custom', path: ['allowLoadingPlaceholder'], message: 'allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다' });
+    }
+    if (check.fallbackProbe) ctx.addIssue({ code: 'custom', path: ['fallbackProbe'], message: 'fallbackProbe는 mode: browser에서만 쓸 수 있습니다' });
   });
 
 /** 자동 페이지 확인이 한 번에 열어 보는 페이지 수. 기본 5, 상한 10 */
 export const AUTO_PAGE_DEFAULT = 5;
 export const AUTO_PAGE_MAX = 10;
-/** 동적 세그먼트에 넣는 값과 세그먼트 이름. 경로 조각으로 안전한 문자만 받는다 */
-const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
+/** 동적 세그먼트에 넣는 값과 세그먼트 이름. 경로 조각으로 안전한 문자만 받는다. 게이트가 api에서 뽑은 id 값을 같은 규칙으로 검증할 때도 쓴다(export) */
+export const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,64}$/;
 const SAMPLE_PARAM_VALUE = z.string().regex(SAFE_SEGMENT, '경로 조각으로 안전한 문자(영문·숫자·_·-)만 쓸 수 있습니다');
 
 /**
@@ -405,6 +422,14 @@ export const AutoPageChecksSchema = z
     sampleParams: z.record(z.string(), SAMPLE_PARAM_VALUE).optional(),
     /** browser 모드에서만. 자동으로 연 페이지를 확인할 창 크기 */
     viewport: ViewportSchema.optional(),
+    /**
+     * ADR-078. `id`·`orderId`처럼 id로 보이는 동적 세그먼트에 sampleParams 값이 없으면
+     * sampleIdFrom이 돌려준 값이나 '1'로 채워 열어 보고, 404·500만 실패로 본다(그 밖 상태는 id가 존재하지 않을 수 있어 넘어간다).
+     * 생략하면 켠 것과 같다. false로 끄면 예전처럼 값이 없는 세그먼트가 있는 라우트를 건너뛴다
+     */
+    dynamicRouteProbe: z.boolean().optional(),
+    /** dynamicRouteProbe가 켜져 있을 때, 이 api를 불러 jsonPath로 꺼낸 첫 값을 기본값('1') 대신 쓴다(목록 api에서 실제 id를 뽑을 때) */
+    sampleIdFrom: WorkflowPageExpectFromApiSchema.optional(),
   })
   .superRefine((config, ctx) => {
     if (config.viewport && config.mode !== 'browser') {
@@ -413,6 +438,9 @@ export const AutoPageChecksSchema = z
     // record의 키는 zod가 잡지 않아(값만 검사한다) 여기서 세그먼트 이름 규칙을 본다. 경로에 들어갈 수 없는 이름은 미리 막는다
     for (const name of Object.keys(config.sampleParams ?? {})) {
       if (!SAFE_SEGMENT.test(name)) ctx.addIssue({ code: 'custom', path: ['sampleParams', name], message: '세그먼트 이름은 영문·숫자·_·-만 쓸 수 있습니다' });
+    }
+    if (config.sampleIdFrom && config.dynamicRouteProbe === false) {
+      ctx.addIssue({ code: 'custom', path: ['sampleIdFrom'], message: 'sampleIdFrom은 dynamicRouteProbe를 끄면 쓰이지 않습니다' });
     }
   });
 
@@ -488,6 +516,55 @@ export const DesignSchema = z
   })
   .optional();
 
+/**
+ * PR 자동 리뷰 라운드(ADR-074) 설정. PR을 만든 뒤 읽기 전용 리뷰어가 diff를 보고 지적하면,
+ * 지적이 심각(blocker·major)할 때만 같은 세션에 고침을 요청하고 다시 리뷰한다. 결과는 항상 사람이 검토한다(자동 병합 없음).
+ * 절 자체를 생략해도(아래 StudioSpecSchema의 `.default({})`) 필드별 기본값(켬·2라운드)이 채워진다
+ */
+export const ReviewSchema = z.object({
+  /** PR을 만들거나 갱신한 뒤 자동으로 리뷰 라운드를 도는지. auto는 화면 체크박스의 기본값으로도 쓴다 */
+  auto: z.boolean().default(true),
+  /** 고치고 다시 리뷰하는 라운드 상한(1~3). 넘으면 사람에게 넘긴다 */
+  maxRounds: z.number().int().min(1).max(3).default(2),
+});
+
+/**
+ * 프로젝트 지침 파일(ADR-077). 매 실행 시작마다 세션 작업 복사본(프로젝트 루트)에서 이 파일을 읽어
+ * 모델에게 넘긴다 — "반복 행동을 스크립트로 굳히기"가 만든 스크립트·요약을 다음 실행이 실제로 찾아 쓰게 하는 통로다.
+ * 절 자체를 생략해도(아래 StudioSpecSchema의 `.default({})`) 필드별 기본값(켬·AGENTS.md·8,000자)이 채워진다
+ */
+export const GuideSchema = z.object({
+  /** 읽을 파일 이름(프로젝트 루트 기준). 없으면 CLAUDE.md를 대신 찾는다(이 필드를 기본값 그대로 뒀을 때만) */
+  file: z.string().default('AGENTS.md'),
+  /** 프롬프트에 넣을 최대 글자 수. 넘으면 앞부분만 자르고 잘렸다는 안내를 덧붙인다 */
+  maxChars: z.number().int().positive().default(8_000),
+  /** 꺼두면 파일이 있어도 읽지 않는다(고정 문맥을 조금도 늘리지 않는다) */
+  enabled: z.boolean().default(true),
+});
+
+/**
+ * 체크포인트 커밋 제목 규칙(ADR-080). 켜면 요청 글과 바뀐 파일에서 conventional commit 형식(타입 접두어 + 한국어 요약)의
+ * 제목을 만든다. 끄면 기존 "요청: ..." 형식을 그대로 쓴다. 절을 생략해도(아래 StudioSpecSchema의 `.default({})`) 켬이 기본값이다
+ */
+export const CheckpointsSchema = z.object({
+  /** 체크포인트 커밋 제목에 conventional commit 규칙을 적용하는지 */
+  conventionalCommits: z.boolean().default(true),
+});
+
+/**
+ * 계획-실행 분리(ADR-075)에서 쓸 모델. 절이 없거나 필드를 생략하면 같은 이름의 환경 변수
+ * (`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 쓰고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 한다.
+ * 값의 뜻은 세션 백엔드에 따라 다르다 — claude-code는 Claude Code에 넘기는 모델 이름(예: `opus`),
+ * api는 모델 레지스트리 id다. 그 밖의 백엔드(codex·commandcode·opencode)는 아직 도구 없는 단발 호출 경로가 없어
+ * (PR 리뷰·작업 계획과 같은 제약) 이 설정이 있어도 계획 호출을 하지 않는다.
+ */
+export const ModelsSchema = z.object({
+  /** 계획을 쓰는 모델(보통 크고 비싼 모델) */
+  plan: z.string().min(1).max(120).optional(),
+  /** 실행을 맡는 모델(보통 작고 싼 모델) */
+  execute: z.string().min(1).max(120).optional(),
+});
+
 export const StudioSpecSchema = z.object({
   version: z.literal(1),
   name: z.string().regex(NAME),
@@ -520,8 +597,21 @@ export const StudioSpecSchema = z.object({
        * 끄면(기본) 저장소 루트가 아닌 폴더는 복사본으로 시작하고 원격 연동이 없다
        */
       monorepo: z.boolean().default(false),
+      /**
+       * main 따라잡기(ADR-076). 기준 브랜치(main 등)가 앞서 있고 깨끗하게 병합할 수 있으면
+       * AI 리뷰 라운드를 돌리거나 올리기 전에 조용히 먼저 따라잡는다. 충돌하면 건드리지 않고 넘어간다(사람이 화면에서 처리)
+       */
+      autoCatchUp: z.boolean().default(true),
     })
     .optional(),
+  /** PR 자동 리뷰 라운드(ADR-074). 절이 없어도 기본값(켬·2라운드)이 채워진다 */
+  review: ReviewSchema.default({ auto: true, maxRounds: 2 }),
+  /** 프로젝트 지침 파일(ADR-077). 절이 없어도 기본값(켬·AGENTS.md·8,000자)이 채워진다 */
+  guide: GuideSchema.default({ file: 'AGENTS.md', maxChars: 8_000, enabled: true }),
+  /** 계획-실행 분리(ADR-075). 절이 없으면 환경 변수만 본다(둘 다 없으면 계획 호출 없음) */
+  models: ModelsSchema.optional(),
+  /** 체크포인트 커밋 제목 규칙(ADR-080). 절이 없어도 기본값(conventional commits 켬)이 채워진다 */
+  checkpoints: CheckpointsSchema.default({ conventionalCommits: true }),
 });
 
 export type HttpProbe = z.infer<typeof HttpProbeSchema>;
@@ -532,6 +622,10 @@ export type SecretSpec = z.infer<typeof SecretSchema>;
 export type DeploySpec = z.infer<typeof DeploySchema>;
 export type DeployServiceSpec = DeploySpec['services'][string];
 export type DesignSpec = z.infer<typeof DesignSchema>;
+export type ReviewSpec = z.infer<typeof ReviewSchema>;
+export type GuideSpec = z.infer<typeof GuideSchema>;
+export type ModelsSpec = z.infer<typeof ModelsSchema>;
+export type CheckpointsSpec = z.infer<typeof CheckpointsSchema>;
 export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;

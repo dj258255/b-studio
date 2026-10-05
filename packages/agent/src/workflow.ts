@@ -91,6 +91,37 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
 }
 
 /**
+ * 가볍게 확인(light)했거나 문서만 바꿔(docs) 검증 게이트를 거치지 않은 체크포인트임을 커밋 본문 끝에 남기는 트레일러.
+ * 배포 화면과 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-096).
+ */
+export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
+
+export function formatVerifyTrailer(mode: 'light' | 'docs'): string {
+  return `${WORKFLOW_VERIFY_TRAILER}: ${mode}`;
+}
+
+/** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'·'docs'가 아니면 undefined(전체 검증 실행) */
+export function parseVerifyTrailerValues(values: readonly string[]): 'light' | 'docs' | undefined {
+  const value = values
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .at(-1);
+  return value === 'light' || value === 'docs' ? value : undefined;
+}
+
+/**
+ * docs/** 전부(마크다운·JSON 사이드카 모두), 저장소 루트의 *.md, .github/pull_request_template.md만 문서 경로로
+ * 인정한다. studio의 commitWorkingCopyDocs(문서 체크포인트를 만들 때)와 buildPullRequest(그 체크포인트가 실제로
+ * 문서만 건드렸는지 PR 본문에서 다시 확인할 때, ADR-110)가 같은 규칙을 공유한다 — 둘이 따로 베껴 두면 한쪽만
+ * 고쳤을 때 "문서 체크포인트"의 뜻이 어긋난다.
+ */
+const DOC_CHECKPOINT_PATH = /^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$/;
+
+export function isDocCheckpointPath(file: string): boolean {
+  return DOC_CHECKPOINT_PATH.test(file);
+}
+
+/**
  * git이 트레일러 블록(본문 마지막 문단)에서 읽은 Workflow-Passed 값. 없으면 undefined로, 스튜디오 밖에서 바꾼 파일이나 이전 버전의 체크포인트다.
  * 본문 전체에서 찾으면 에이전트 요약에 쓴 같은 모양의 줄로 통과 기록을 위조할 수 있어 트레일러 블록 값만 받는다.
  * 여러 개면 마지막 것을 쓴다

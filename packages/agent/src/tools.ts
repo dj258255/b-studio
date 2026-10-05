@@ -9,14 +9,17 @@ import { servicesForFiles } from './services';
 import {
   clipCommandOutput,
   clipText,
+  COMMAND_OUTPUT_BUDGET,
   createToolResultCache,
   dedupeResult,
   HTTP_BODY_BUDGET,
   invalidateReadCache,
   isHtmlContent,
+  LEAN_SUCCESS_OUTPUT_BUDGET,
   LOGS_OUTPUT_LIMIT,
   READ_FILE_BUDGET,
   visibleHtml,
+  type SelfCheckMode,
   type ToolResultCache,
 } from './tool-output';
 import type { ContractFetcher } from './verify';
@@ -38,7 +41,27 @@ export interface AskUserQuestion {
   options: string[];
   /** 직접 입력도 허용하는지 */
   allowOther: boolean;
+  /**
+   * propose_mode가 남긴 제안(ADR-068). 있으면 첫 선택지가 "이 방식으로 넘기기"이고, 화면은 그 요청으로 비교·계획을 만든다.
+   * 두 번째 선택지("한 명으로 계속")는 보통 답처럼 대화를 이어 간다
+   */
+  proposal?: ModeProposal;
 }
+
+/** 에이전트가 제안하는 다른 방식. split=나눠서 병렬, fleet=여러 명 비교 */
+export interface ModeProposal {
+  mode: 'split' | 'fleet';
+  /** 비교·계획에 넘길 요청(사용자 요청을 그대로 또는 다듬어서) */
+  request: string;
+}
+
+/** propose_mode 선택지. 화면이 첫 선택지를 "넘기기" 버튼으로 그린다 */
+export const PROPOSAL_OPTIONS: Record<ModeProposal['mode'], readonly [string, string]> = {
+  split: ['나눠서 병렬로 하기', '한 명으로 계속'],
+  fleet: ['여러 안 비교하기', '한 명으로 계속'],
+};
+/** 넘길 요청 길이 상한 */
+const PROPOSAL_REQUEST_MAX = 2_000;
 
 /** buildTools 옵션. interactive가 아니면(레인·벤치·CLI) 도구 목록이 지금과 같다 */
 export interface ToolBuildOptions {
@@ -61,7 +84,7 @@ export interface ToolBuildOptions {
  */
 export interface BoardAccess {
   post(input: { kind: NoteKind; body: string; refs?: string[] }): { ok: true; note: Note } | { ok: false; reason: string };
-  read(options: { kinds?: readonly NoteKind[] }): { notes: Note[]; truncated: boolean; reason?: string };
+  read(options: { kinds?: readonly NoteKind[] }): { notes: Note[]; truncated: boolean; reason?: string; notice?: string };
   lane: string;
   task?: string;
   /** false면 모델은 읽기만 한다(기본 true). buildTools가 post_note를 목록에서 뺀다 */
@@ -110,12 +133,49 @@ export interface ToolContext {
    * 넘기지 않으면 executeTool이 이 컨텍스트에 하나 만들어 쓴다(러너가 컨텍스트를 실행 내내 재사용할 때).
    */
   toolResults?: ToolResultCache;
+  /**
+   * 샌드박스가 필요한 도구(SANDBOX_TOOLS)를 처음 실행하기 직전에 부른다. 세션을 지연 기동할 때만 넘긴다.
+   * 없으면 이미 켜져 있다고 보고 그냥 실행한다(레인·플릿·벤치·CLI 경로).
+   */
+  ensureSandbox?: () => Promise<void>;
+  /** 자가 확인 범위(기본 full). lean이면 성공한 run_in_service 출력을 LEAN_SUCCESS_OUTPUT_BUDGET으로 줄인다 */
+  selfCheck?: SelfCheckMode;
 }
 
 /** 질문 모드에서 거부하는 도구. 게시판에 쓰는 post_note도 상태를 바꾸므로 포함한다(읽기 read_notes는 허용) */
 const CHANGING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_in_service', 'restart_service', 'post_note']);
 /** 성공하면 읽기 캐시를 비우는 쓰기 도구. 같은 경로를 다시 읽으면 내용이 달라졌을 수 있다 */
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
+export const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
+
+/**
+ * 샌드박스(컨테이너)가 있어야 실행되는 도구. 세션을 지연 기동하는 경우, 이 도구를 처음 부를 때 샌드박스를 켠다
+ * (executeTool의 `ensureSandbox`). 새 도구를 더할 때 분류를 빠뜨리지 않도록 tools.test.ts가 모든 도구가
+ * SANDBOX_TOOLS나 LOCAL_TOOLS 중 하나에 들어 있는지 확인한다.
+ */
+export const SANDBOX_TOOLS: ReadonlySet<string> = new Set([
+  'run_in_service',
+  'restart_service',
+  'service_logs',
+  'service_stats',
+  'http_request',
+  'call_external_api',
+  'get_contract',
+]);
+
+/** 샌드박스 없이 작업 공간·게시판·디자인·되묻기만 다루는 도구. 샌드박스를 켜지 않는다 */
+export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  'list_files',
+  'read_file',
+  'write_file',
+  'edit_file',
+  'delete_file',
+  'post_note',
+  'read_notes',
+  'design_frames',
+  'design_frame',
+  'ask_user',
+  'propose_mode',
+]);
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
 const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.';
@@ -255,6 +315,15 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
           allowOther: { type: 'boolean', description: 'true to also let the user type a free-form answer.' },
         },
       ),
+      tool(
+        'propose_mode',
+        'Offer to hand this request to several agents instead of doing it alone. Use rarely, before making changes: "split" when the work clearly divides into independent parts in different services that can be built at the same time (for example an API and a page that only share a contract); "fleet" when the user asks for alternatives or the right design is genuinely open and comparing two or three independent attempts is worth the extra cost. Most requests should simply be done yourself. Calling this ends the run; the user either accepts (the studio starts the split or comparison) or answers "continue alone" in a follow-up request.',
+        {
+          mode: { type: 'string', enum: ['split', 'fleet'], description: 'split = divide into parallel lanes; fleet = compare independent attempts.' },
+          reason: { type: 'string', description: `One short sentence in the user's language explaining why (max ${ASK_QUESTION_MAX} characters).` },
+          request: { type: 'string', description: `The request to hand over, in the user's language (max ${PROPOSAL_REQUEST_MAX} characters). Usually the user's request as is.` },
+        },
+      ),
     );
   }
   return tools;
@@ -293,6 +362,8 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
       context.onPolicyDecision?.(decision);
     }
     const args = asRecord(input);
+    // 샌드박스가 필요한 도구의 첫 호출이면 여기서 켠다(켜는 동안 기다린다). 없으면 그냥 실행한다
+    if (context.ensureSandbox && SANDBOX_TOOLS.has(name)) await context.ensureSandbox();
     const outcome = await runTool(name, args, context);
     // 같은 도구·같은 입력의 결과가 앞과 완전히 같으면 본문을 참조로 바꾼다(실행 단위). 모든 러너가 이 한 곳을 지나간다
     const cache = (context.toolResults ??= createToolResultCache());
@@ -339,7 +410,9 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       });
       // stdout과 stderr를 합쳐 한 예산으로 자른다. 테스트·빌드 로그의 실패 요약이 뒤에 있어 뒤쪽을 더 남긴다
       const raw = `exit code ${result.exitCode}\n--- stdout\n${result.stdout}\n--- stderr\n${result.stderr}`;
-      return { ok: result.exitCode === 0, content: clipCommandOutput(raw), rawChars: raw.length };
+      // lean이면 성공한 명령은 짧게 돌려준다. 실패는 원인을 봐야 하므로 기본 예산 그대로다
+      const budget = context.selfCheck === 'lean' && result.exitCode === 0 ? LEAN_SUCCESS_OUTPUT_BUDGET : COMMAND_OUTPUT_BUDGET;
+      return { ok: result.exitCode === 0, content: clipCommandOutput(raw, budget), rawChars: raw.length };
     }
     case 'restart_service': {
       const target = serviceName(context, args);
@@ -419,6 +492,17 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       // 이 결과를 받은 모델이 곧바로 멈추도록, 도구가 끝났다는 사실과 멈추라는 지시를 함께 돌려준다
       return success('Question sent to the user. End this run now and wait for their answer; do not call any more tools.');
     }
+    case 'propose_mode': {
+      if (!context.onQuestion) return failure('This run cannot propose another mode.');
+      const mode = string(args, 'mode');
+      if (mode !== 'split' && mode !== 'fleet') return failure('"mode" must be "split" or "fleet"');
+      const reason = string(args, 'reason').trim();
+      if (reason.length === 0 || reason.length > ASK_QUESTION_MAX) return failure(`"reason" must be 1-${ASK_QUESTION_MAX} characters`);
+      const request = string(args, 'request').trim();
+      if (request.length === 0 || request.length > PROPOSAL_REQUEST_MAX) return failure(`"request" must be 1-${PROPOSAL_REQUEST_MAX} characters`);
+      context.onQuestion({ question: reason, options: [...PROPOSAL_OPTIONS[mode]], allowOther: false, proposal: { mode, request } });
+      return success('Proposal sent to the user. End this run now and wait for their choice; do not call any more tools.');
+    }
     case 'post_note': {
       const board = context.board;
       if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
@@ -429,9 +513,12 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       const board = context.board;
       if (!board) return failure('이 실행에는 조율 게시판이 없습니다');
       const kinds = asNoteKinds(optionalStringArray(args, 'kinds'));
-      const { notes, truncated, reason } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
+      const { notes, truncated, reason, notice } = board.read({ kinds: kinds.length > 0 ? kinds : undefined });
       const lines = notes.map(formatNote);
       if (truncated) lines.push(`[... ${reason ?? '읽기 상한으로 일부만 돌려줬습니다'} ...]`);
+      // 엮인 레인이 아직 계약을 게시하지 않았을 때 실행기(task-plans.ts)가 덧붙인 안내(이슈 #393).
+      // 결과가 비어 있어도 안내만으로 (no notes) 대신 이유를 보여준다
+      if (notice) lines.push(notice);
       return success(lines.length > 0 ? lines.join('\n') : '(no notes)');
     }
     default:

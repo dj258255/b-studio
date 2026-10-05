@@ -1,0 +1,7 @@
+order,task,strategy,success,category,tokens,input,output,cache_read,cache_write,model_calls,sessions,first_context_avg,cost_usd,end_to_end_ms
+1,orders-list,P0,True,none,134557,1145,7128,104591,21693,6,1,13479,0.147493,112078
+2,orders-list,S0,True,none,287379,1143,6130,257583,22523,19,2,2284,0.17019,268431
+3,order-detail,P0,True,none,227780,1223,10815,198404,17338,10,1,13548,0.192319,152196
+4,order-detail,S0,True,none,420392,1197,8777,382022,28396,22,2,2306,0.236285,320641
+5,order-summary,P0,True,none,239681,1154,6203,215694,16630,10,1,13486,0.147853,133188
+6,order-summary,S0,True,none,991325,1176,13677,939235,37237,41,2,2278,0.418832,372685

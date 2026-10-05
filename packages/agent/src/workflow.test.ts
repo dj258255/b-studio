@@ -3,12 +3,15 @@ import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
 import {
   DEFAULT_WORKFLOW,
   executionPolicyFor,
+  formatVerifyTrailer,
   missingVerificationStages,
+  parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
   piPolicyEnvironment,
   releaseBlockers,
   formatWorkflowTrailer,
   reviewChanges,
+  WORKFLOW_VERIFY_TRAILER,
   workflowContext,
   workflowStages,
 } from './workflow';
@@ -84,6 +87,24 @@ describe('project workflow', () => {
     expect(parseWorkflowTrailerValues([''])).toBeUndefined();
     // 알 수 없는 단계 이름은 버리고, 여러 값이면 마지막 것을 쓴다
     expect(parseWorkflowTrailerValues(['test, review', 'run, deploy'])).toEqual(['run']);
+  });
+
+  it('가볍게 확인(Workflow-Verify) 표시를 읽고, 없거나 다른 값이면 전체 검증으로 본다', () => {
+    expect(formatVerifyTrailer('light')).toBe(`${WORKFLOW_VERIFY_TRAILER}: light`);
+    expect(parseVerifyTrailerValues(['light'])).toBe('light');
+    // 여러 값이면 마지막 것을 쓴다. 'full'·빈 값·모르는 값은 전체 검증(undefined)이다
+    expect(parseVerifyTrailerValues(['', 'light'])).toBe('light');
+    expect(parseVerifyTrailerValues(['light', 'full'])).toBeUndefined();
+    expect(parseVerifyTrailerValues(['full'])).toBeUndefined();
+    expect(parseVerifyTrailerValues([''])).toBeUndefined();
+    // 문서만 바꿔 검증 게이트를 거치지 않은 체크포인트(ADR-096)도 같은 트레일러로 표시한다
+    expect(formatVerifyTrailer('docs')).toBe(`${WORKFLOW_VERIFY_TRAILER}: docs`);
+    expect(parseVerifyTrailerValues(['docs'])).toBe('docs');
+    expect(parseVerifyTrailerValues(['light', 'docs'])).toBe('docs');
+    expect(parseVerifyTrailerValues(['DOCS'])).toBe('docs');
+    // 가볍게 확인한 체크포인트(run·contract_check만 통과)는 releaseRequires가 채워지지 않아 배포가 막힌다
+    const strict = projectWith({ releaseRequires: ['contract_check', 'test', 'review', 'checkpoint'] });
+    expect(releaseBlockers(strict, ['run', 'contract_check'])).toEqual(['test', 'review']);
   });
 
   it('Pi 확장이 읽을 환경 변수를 같은 studio.yaml에서 만든다', () => {

@@ -1,12 +1,14 @@
 import http, { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type Server, type ServerResponse } from 'node:http';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
+import { pipeMaybeInjected } from './preview-inject';
 
 /**
  * 원격 미리보기 게이트웨이.
  * 샌드박스 서비스 포트는 루프백에만 열려 있어(ADR-009) 다른 PC의 브라우저가 직접 열 수 없다.
  * 스튜디오 서버가 `<서비스>--<세션>--<토큰>.<미리보기 도메인>` 호스트로 받은 요청을 경로 그대로 서비스에 넘긴다.
- * 경로에 접두사를 붙이지 않으므로 `/_next/...` 같은 절대 경로 자원과 HMR 웹소켓이 그대로 동작한다
+ * 경로에 접두사를 붙이지 않으므로 `/_next/...` 같은 절대 경로 자원과 HMR 웹소켓이 그대로 동작한다.
+ * 이 게이트웨이도 studio 자신과는 다른 출처라, HTML 응답에는 preview-inject.ts가 위치 알림 스크립트를 심는다(ADR-113)
  */
 export interface PreviewTarget {
   service: string;
@@ -162,8 +164,7 @@ export function createPreviewGateway({ domain, resolve, access }: { domain: stri
         (upstreamResponse) => {
           const headers = { ...upstreamResponse.headers };
           if (typeof headers.location === 'string') headers.location = rewriteLocation(headers.location, upstream, publicOrigin);
-          response.writeHead(upstreamResponse.statusCode ?? 502, headers);
-          upstreamResponse.pipe(response);
+          pipeMaybeInjected(upstreamResponse, response, headers);
         },
       );
       proxied.on('error', () => {

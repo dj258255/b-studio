@@ -1,132 +1,23 @@
-import Link from "next/link";
-import { AgentsBadge } from "@/components/agents-badge";
-import { LogoutButton } from "@/components/logout-button";
+import { redirect } from "next/navigation";
+import { ResumeSessionChoice } from "@/components/resume-session-choice";
+import { WorkspaceLauncher } from "@/components/workspace-launcher";
 import { pageUser } from "@/lib/server/access";
-import { authConfig } from "@/lib/server/auth";
-import { listProjects, projectPath } from "@/lib/server/projects";
-import { listSessions, localFolderAllowed } from "@/lib/server/sessions";
-import { StartSessionButton } from "@/components/start-session-button";
-import { SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "@/components/status";
-import type { SessionStatus } from "@/lib/studio-events";
+import { findWorkspaceChoice } from "@/lib/server/workspace-entry";
 
-const MODE_NOTE: Record<string, string> = {
-  api: "요청은 Claude API로 처리합니다. 서버에 ANTHROPIC_API_KEY가 있어야 합니다.",
-  "claude-code":
-    "요청은 이 PC의 claude CLI에 로그인한 계정으로 처리합니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 여러 사람이 쓰는 서버에는 api 모드를 씁니다.",
-  codex:
-    "이 PC에 ChatGPT로 로그인한 Codex CLI로 실행합니다. 대화는 이어받지 않고 최근 요청 요약만 넘깁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요. 아직 실제 계정으로 확인하지 못한 모드입니다(#54).",
-  commandcode:
-    "이 PC에 로그인한 Command Code로 실행합니다. 모델을 고를 수 있고 기본은 계정 기본 모델입니다. 무료 모델만 쓰도록 설정할 수도 있습니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요.",
-  opencode:
-    "이 PC에 설치된 OpenCode CLI로 실행합니다. 모델을 고를 수 있고 기본은 무료 모델만 씁니다. API 키가 필요 없는 대신 본인 PC에서만 쓰세요.",
-  demo: "데모 모드로 실행 중입니다. 준비된 요청을 스크립트로 실행하므로 API 키가 필요 없습니다.",
-};
-
-const STATUS_TONE: Record<SessionStatus, Tone> = { starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
-const RECENT_SESSIONS = 20;
-const TIME = new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" });
-
-export default async function HomePage() {
+/**
+ * 앱의 첫 화면. 입력창 대신 마지막 프로젝트의 개발 화면(대화+미리보기)을 바로 연다(ADR-066).
+ * 켜진 개발 세션이 있으면 서버에서 바로 그 화면으로 보낸다(읽기만 하므로 GET에서 해도 된다, ADR-069).
+ * 지연 기동·중지된 세션이 있으면(서버를 막 재시작한 뒤가 보통 이렇다) 곧바로 되살리지 않고 "이어서 열기"
+ * 선택을 보여준다(ADR-104) — 다른 프로젝트로 시작하려는 사람에게 샌드박스를 헛켜지 않는다.
+ * 고를 세션이 없으면(새 프로젝트) 화면이 POST /api/workspace로 요청한다 — 이 페이지를 미리 읽어도 세션이 생기지 않게 한다.
+ * `?project=<id>`면 그 프로젝트의 개발 화면을 연다.
+ */
+export default async function HomePage(props: { searchParams: Promise<{ project?: string | string[] }> }) {
+  const requested = (await props.searchParams).project;
+  const projectId = Array.isArray(requested) ? requested[0] : requested;
   const viewer = await pageUser();
-  const auth = authConfig().mode;
-  const [projects, sessions] = await Promise.all([listProjects(), listSessions()]);
-  const mode = process.env.B_STUDIO_MODE?.trim() || "api";
-  const note = MODE_NOTE[mode] ?? `B_STUDIO_MODE 값 "${mode}"을 알 수 없습니다. api, claude-code, codex, commandcode, opencode, demo 중 하나로 실행하세요.`;
-  const localAllowed = localFolderAllowed();
-
-  return (
-    <main className="mx-auto max-w-3xl px-6 py-16">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-muted">b-studio</p>
-        <div className="flex items-center gap-3 text-sm text-muted">
-          <AgentsBadge />
-          <Link href="/fleets" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
-            Agent Fleet
-          </Link>
-          <Link href="/task-plans" className="glass-soft rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel">
-            작업 분해
-          </Link>
-          {auth !== "none" && (
-            <>
-            <span>{viewer}</span>
-            {auth === "token" && <LogoutButton />}
-            </>
-          )}
-        </div>
-      </div>
-      <h1 className="mt-2 text-3xl font-semibold tracking-tight">프로젝트를 열어 샌드박스를 시작하세요</h1>
-      <p className="mt-3 max-w-[60ch] leading-7 text-muted">
-        {localAllowed
-          ? "프로젝트 복사본이나 내 폴더에서 서비스를 띄웁니다. "
-          : "세션마다 프로젝트 복사본으로 서비스를 띄웁니다. "}
-        에이전트가 작업을 끝내면 스튜디오가 바뀐 서비스를 재시작하고 API 계약을 비교해, 통과한 결과만 완료로 보여줍니다.
-      </p>
-
-      <p className="mt-6 rounded-panel border border-line bg-panel px-4 py-3 text-sm leading-6 text-muted">{note}</p>
-
-      <ul className="glass mt-10 divide-y divide-line overflow-hidden rounded-panel">
-        {projects.length === 0 && (
-          <li className="px-5 py-6 text-muted">열 수 있는 프로젝트가 없습니다. studio.yaml이 있는 폴더를 B_STUDIO_PROJECTS_DIR에 두세요.</li>
-        )}
-        {projects.map((project) => (
-          <li key={project.id} className="flex flex-wrap items-center gap-4 px-5 py-5">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-lg font-semibold">{project.name}</h2>
-              {project.error ? (
-                <p className="mt-1 text-sm text-fail">{project.error}</p>
-              ) : (
-                <p className="mt-1 text-sm text-muted">
-                  {project.services.map((service) => `${service.name} (${service.template})`).join(", ")}
-                </p>
-              )}
-            </div>
-            {!project.error && (
-              <StartSessionButton
-                projectId={project.id}
-                folder={localAllowed ? projectPath(project.id) : undefined}
-                modelsBackend={mode === "commandcode" || mode === "opencode" ? mode : undefined}
-              />
-            )}
-          </li>
-        ))}
-      </ul>
-
-      {sessions.length > 0 && (
-        <section className="mt-14" aria-labelledby="sessions-heading">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 id="sessions-heading" className="text-lg font-semibold">
-              최근 세션
-            </h2>
-            <Link href="/split" className="glass-soft rounded-control px-3.5 py-1.5 text-sm font-medium text-ink hover:bg-panel">
-              나란히 보기
-            </Link>
-          </div>
-          <p className="mt-1 text-sm text-muted">중지된 세션도 작업 복사본과 체크포인트가 남아 있어 열어서 이어서 작업할 수 있습니다.</p>
-          <ul className="glass mt-4 divide-y divide-line overflow-hidden rounded-panel">
-            {sessions.slice(0, RECENT_SESSIONS).map((session) => (
-              <li key={session.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
-                <div className="min-w-0 flex-1">
-                  <p className="flex items-baseline gap-2">
-                    <span className="font-semibold">{session.projectName}</span>
-                    <span className={`text-sm ${TONE_TEXT[STATUS_TONE[session.status]]}`}>{SESSION_STATUS_LABEL[session.status]}</span>
-                  </p>
-                  <p className="mt-1 truncate text-sm text-muted">
-                    {session.lastRequest ? `마지막 요청: ${session.lastRequest}` : "아직 보낸 요청이 없습니다"}
-                  </p>
-                  <p className="mt-0.5 text-xs text-muted">
-                    {session.workspace === "local" && "내 폴더, "}
-                    체크포인트 {session.checkpoints}개, {TIME.format(new Date(session.updatedAt))}
-                    {auth !== "none" && session.owner && `, 만든 사람 ${session.owner}`}
-                  </p>
-                </div>
-                <Link href={`/sessions/${session.id}`} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
-                  열기
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-    </main>
-  );
+  const choice = await findWorkspaceChoice(viewer, projectId ? { projectId } : {});
+  if (choice.kind === "live") redirect(`/sessions/${choice.id}`);
+  if (choice.kind === "resumable") return <ResumeSessionChoice projectId={choice.projectId} projectName={choice.projectName} updatedAt={choice.updatedAt} />;
+  return <WorkspaceLauncher {...(choice.projectId ? { projectId: choice.projectId } : {})} />;
 }
