@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: __COLOR_SCHEME__;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: __PAGE_WIDTH__px;
+        height: __PAGE_HEIGHT__px;
+        background: __BACKGROUND__;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .window {
+        width: __WINDOW_WIDTH__px;
+        border-radius: 12px;
+        overflow: hidden;
+        background: __PANEL_COLOR__;
+        box-shadow: __WINDOW_SHADOW__;
+        border: 1px solid __WINDOW_BORDER__;
+      }
+      .titlebar {
+        height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 14px;
+        background: __TITLEBAR_COLOR__;
+        border-bottom: 1px solid __WINDOW_BORDER__;
+      }
+      .dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+      }
+      .dot.red {
+        background: #ff5f57;
+      }
+      .dot.yellow {
+        background: #febc2e;
+      }
+      .dot.green {
+        background: #28c840;
+      }
+      .shot {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="window">
+      <div class="titlebar">
+        <span class="dot red"></span>
+        <span class="dot yellow"></span>
+        <span class="dot green"></span>
+      </div>
+      <img class="shot" src="__IMAGE_PATH__" />
+    </div>
+  </body>
+</html>
