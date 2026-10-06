@@ -79,6 +79,7 @@
 - [56. 이미 열린 PR에 다시 "올리고 PR 만들기"를 해도 본문·AI 리뷰가 첫 커밋 기준 그대로 멈춰 있음](#56-이미-열린-pr에-다시-올리고-pr-만들기를-해도-본문ai-리뷰가-첫-커밋-기준-그대로-멈춰-있음)
 - [57. 개발 상태 배너가 머리 줄 위에 고정된 채 겹쳐 그려짐](#57-개발-상태-배너가-머리-줄-위에-고정된-채-겹쳐-그려짐)
 - [58. 세션 재개 때 프런트엔드가 ETXTBSY로 가끔 죽어 기동 실패가 됨](#58-세션-재개-때-프런트엔드가-etxtbsy로-가끔-죽어-기동-실패가-됨)
+- [60. 두 단계 아래 서비스가 있는 폴더를 열면 세션 기동이 "Dockerfile.b-studio 없음"으로 실패함](#60-두-단계-아래-서비스가-있는-폴더를-열면-세션-기동이-dockerfileb-studio-없음으로-실패함)
 
 ---
 
@@ -2049,3 +2050,26 @@ b-studio 자신의 오케스트레이션 코드에는 같은 파일에 대한 �
 
 ### 배운 점
 폴더 열기 감지의 가정(래퍼는 서비스 폴더 안에 있다, 앱은 최대 한 단계 아래에 있다)은 b-studio 자신의 모노레포에서는 둘 다 맞았지만, 실제로 도그푸딩에 쓰는 다른 저장소(pay)에서는 둘 다 깨졌다. 감지 로직을 자신의 저장소 구조만으로 검증하면 이런 구조적 차이를 놓치기 쉽다 — 실제로 열어 볼 다른 저장소로 미리보기를 직접 돌려 보는 것이 저렴하고 효과적인 확인 방법이었다.
+
+## 60. 두 단계 아래 서비스가 있는 폴더를 열면 세션 기동이 "Dockerfile.b-studio 없음"으로 실패함
+
+**증상**
+
+- 루트에 Gradle 래퍼, `commerce/`에 Spring Boot, `apps/web/`에 Next.js가 있는 저장소를 폴더 열기로 등록하고 세션을 띄웠다.
+- `docker compose build`가 `failed to read dockerfile: open Dockerfile.b-studio: no such file or directory`로 실패했다.
+
+**측정**
+
+- 원본 폴더에는 생성 Dockerfile 3개가 모두 있었다(`commerce/`, `apps/web/`, `commerce/consumer-app/`).
+- 세션 작업 복사본에는 `commerce/Dockerfile.b-studio`만 있었다.
+
+**원인**
+
+- 작업 복사본은 커밋된 상태만 복제하므로, git 추적에서 뺀 생성 파일은 `overlayGeneratedFiles`가 따로 덧씌운다.
+- 덧씌울 Dockerfile을 찾는 `generatedDockerfiles`는 "바로 아래와 한 단계 아래"만 봤다. 주석에는 "감지 깊이와 같다"고 적혀 있었다.
+- 감지 깊이를 두 단계로 늘린 #445에서 이 함수를 함께 고치지 않아 두 함수의 깊이가 어긋났다.
+
+**수정**
+
+- `generatedDockerfiles`를 두 단계까지 훑게 하고, `node_modules`·`build`·`.next`·`.gradle` 같은 큰 폴더는 건너뛴다.
+- 회귀 테스트(`project-registry-overlay.test.ts`)로 두 단계 아래 Dockerfile이 복사되고, 건너뛸 폴더 안의 같은 이름 파일은 무시되는 것을 고정했다.

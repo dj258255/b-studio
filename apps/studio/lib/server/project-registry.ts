@@ -328,14 +328,21 @@ export async function overlayGeneratedFiles(sourceRoot: string, projectRoot: str
   return copied;
 }
 
-/** 폴더 바로 아래와 한 단계 아래의 Dockerfile.b-studio (project-detect가 서비스를 찾는 깊이와 같다) */
-async function generatedDockerfiles(root: string): Promise<string[]> {
+/** 덧씌울 때 건너뛰는 폴더. 서비스 폴더가 아니고 크기만 큰 곳들이다 */
+const SKIP_DIRS = new Set(['node_modules', 'build', 'dist', 'target', '.next', '.gradle', 'out', 'coverage']);
+
+/**
+ * 폴더 아래 두 단계까지의 Dockerfile.b-studio. project-detect가 서비스를 찾는 깊이(루트, 한 단계, apps/web·commerce/consumer-app 같은
+ * 두 단계)와 같아야 한다. 깊이가 어긋나면 세션 복사본에 하위 서비스의 Dockerfile이 빠져 compose build가 실패한다(트러블슈팅 60)
+ */
+async function generatedDockerfiles(root: string, depth = 2, prefix = ''): Promise<string[]> {
   const found: string[] = [];
-  if (await exists(path.join(root, GENERATED_DOCKERFILE))) found.push(GENERATED_DOCKERFILE);
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  if (await exists(path.join(root, prefix, GENERATED_DOCKERFILE))) found.push(prefix ? `${prefix}/${GENERATED_DOCKERFILE}` : GENERATED_DOCKERFILE);
+  if (depth === 0) return found;
+  const entries = await readdir(path.join(root, prefix), { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-    if (await exists(path.join(root, entry.name, GENERATED_DOCKERFILE))) found.push(`${entry.name}/${GENERATED_DOCKERFILE}`);
+    if (!entry.isDirectory() || entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+    found.push(...(await generatedDockerfiles(root, depth - 1, prefix ? `${prefix}/${entry.name}` : entry.name)));
   }
   return found;
 }
