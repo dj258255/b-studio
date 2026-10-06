@@ -166,6 +166,13 @@ export interface ReviewRoundView {
   finishedAt?: string;
   /** 사람이 오탐으로 닫은 지적들. findings 배열 인덱스 → 결정(과제 67-b) */
   humanResolutions?: Record<number, ReviewFindingResolution>;
+  /**
+   * 이 라운드가 리뷰한 diff의 시작·끝 커밋(전체 sha). 이미 열린 PR에 새 커밋이 쌓여 그 범위만 다시 본
+   * 라운드에만 있다(continueReviewAfterNewCommits) — 처음 PR을 열 때의 리뷰는 base...head 전체라 없다.
+   * 다음에 또 새 커밋이 쌓이면 이 라운드들 중 가장 최근 것의 headSha가 다음 리뷰의 since가 된다
+   */
+  sinceSha?: string;
+  headSha?: string;
 }
 
 /** state: running(진행 중) · passed(리뷰 통과) · capped(라운드 상한) · resolved(라운드 상한에 걸렸지만 사람이 확인해 더는 막지 않음) · stopped(멈춤, 오류·고침 실패) */
@@ -465,9 +472,13 @@ export type StudioEvent =
       commits: number;
       /** 되돌린 기록으로 원격 브랜치를 맞췄는지 */
       forced: boolean;
-      pullRequest?: { url: string; created: boolean };
+      /** updated: true면 새로 만들지 않고 이미 열려 있던 PR의 본문을 지금 상태로 다시 썼다(제목은 그대로 둔다) */
+      pullRequest?: { url: string; created: boolean; updated?: boolean };
       /** 브랜치는 올렸지만 PR을 만들지 못한 이유 */
       pullRequestError?: string;
+      /** 이미 열려 있던 PR의 본문을 다시 쓰다 실패했다는 경고(push·PR 자체는 이미 끝난 것으로 본다). 새로 PR을
+       * 만든 경우(본문을 생성 요청에 함께 보낸다)에는 생기지 않는다 */
+      pullRequestUpdateWarning?: string;
       /** PR에 연결한 이슈 번호들. 연결하지 않았거나 PR을 만들지 않았으면 없다 */
       issues?: number[];
       /** 요구사항 추적 이슈 본문 갱신이 실패했다는 경고(PR 만들기 자체는 막지 않는다). 갱신할 추적 이슈가 없으면(아직

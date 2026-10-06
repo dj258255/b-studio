@@ -292,6 +292,16 @@ function escapeCell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').slice(0, 500);
 }
 
+/**
+ * 이 라운드가 본 커밋 범위(diff의 끝 커밋은 항상 있다 — 다음에 새 커밋이 쌓이면 이 값이 다음 리뷰의 시작점이
+ * 된다). since는 이미 열린 PR에 새 커밋이 쌓여 그 범위만 다시 본 라운드에만 있다 — 세션 시작부터 보는 첫
+ * 리뷰는 전체를 보는 게 당연해 따로 표시하지 않는다
+ */
+export interface PrReviewCommitRange {
+  since?: string;
+  head: string;
+}
+
 /** PR 코멘트 본문(한국어 표 + 숨은 표시). GitHub·Gitea 코멘트 API로 그대로 올린다 */
 export function buildPrReviewComment({
   round,
@@ -299,16 +309,20 @@ export function buildPrReviewComment({
   findings,
   outcome,
   omittedFiles = [],
+  commitRange,
 }: {
   round: number;
   maxRounds: number;
   findings: readonly PrReviewFinding[];
   outcome: PrReviewRoundOutcome;
   omittedFiles?: readonly string[];
+  /** 이 라운드가 본 커밋 범위. since가 있을 때만(새 커밋이 쌓여 그 범위만 다시 본 라운드) 코멘트에 적는다 */
+  commitRange?: PrReviewCommitRange;
 }): string {
   const counts = severityCounts(findings);
   const summary = `차단 ${counts.blocker} · 주요 ${counts.major} · 경미 ${counts.minor} · 사소 ${counts.nit}`;
-  const header = `## 🤖 AI 리뷰 — 라운드 ${round}/${maxRounds}\n\n${summary}`;
+  const rangeNote = commitRange?.since ? `\n\n커밋 범위: \`${commitRange.since.slice(0, 7)}\`..\`${commitRange.head.slice(0, 7)}\`` : '';
+  const header = `## 🤖 AI 리뷰 — 라운드 ${round}/${maxRounds}${rangeNote}\n\n${summary}`;
   const table =
     findings.length === 0
       ? '지적할 내용이 없습니다.'

@@ -149,6 +149,56 @@ describe('runReviewRounds', () => {
     expect(firstCall![0].user).toContain('SeedLoader');
     expect(firstCall![0].user).toContain('시퀀스 미복원');
   });
+
+  describe('resume(이미 열린 PR에 새 커밋이 쌓여 리뷰를 이어 돌 때, 버그 리포트 86)', () => {
+    const passedRound1 = { round: 1, status: 'passed' as const, startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:00:01.000Z', headSha: 'a'.repeat(40) };
+
+    it('이전 라운드 뒤를 이어 라운드 번호를 늘리고, 통과하면 이전 라운드를 그대로 둔 채 새 라운드만 더한다', async () => {
+      const ask = askReturning('{"findings":[]}');
+      const deps = baseDeps({ ask, commitRange: async () => ({ since: 'a'.repeat(40), head: 'b'.repeat(40) }) });
+
+      const updates: ReviewStateView[] = [];
+      await runReviewRounds(deps, 2, (state) => updates.push(state), { rounds: [passedRound1] });
+
+      const last = updates.at(-1)!;
+      expect(last.state).toBe('passed');
+      expect(last.rounds.map((round) => round.round)).toEqual([1, 2]);
+      expect(last.rounds[0]).toBe(passedRound1); // 이전 라운드는 손대지 않는다
+      expect(last.rounds[1]).toMatchObject({ round: 2, status: 'passed', sinceSha: 'a'.repeat(40), headSha: 'b'.repeat(40) });
+    });
+
+    it('이미 라운드 상한에 닿아 있으면 리뷰어를 부르지 않고, 그 사실을 라운드 기록과 PR 코멘트로 남긴다(조용히 건너뛰지 않는다)', async () => {
+      const ask = vi.fn();
+      const postComment = vi.fn(async () => ({ url: 'https://github.com/acme/orders/pull/1#issuecomment-2' }));
+      const deps = baseDeps({ ask, postComment, commitRange: async () => ({ since: 'a'.repeat(40), head: 'b'.repeat(40) }) });
+
+      const updates: ReviewStateView[] = [];
+      // maxRounds가 1인데 이미 라운드 1개가 끝나 있다 — 다음은 2라운드라 상한을 넘는다
+      await runReviewRounds(deps, 1, (state) => updates.push(state), { rounds: [passedRound1] });
+
+      const last = updates.at(-1)!;
+      expect(last.state).toBe('capped');
+      expect(last.rounds).toHaveLength(2);
+      expect(last.rounds[1]).toMatchObject({ round: 2, status: 'blocked_capped', sinceSha: 'a'.repeat(40), headSha: 'b'.repeat(40) });
+      expect(last.rounds[1]!.error).toContain('라운드 상한(1)');
+      expect(ask).not.toHaveBeenCalled();
+      expect(postComment).toHaveBeenCalledTimes(1);
+      expect((postComment.mock.calls[0] as unknown as [string])[0]).toContain('라운드 상한');
+    });
+
+    it('commitRange를 주지 않으면(이 기능 전에 끝난 리뷰) 커밋 범위 없이도 동작한다', async () => {
+      const ask = askReturning('{"findings":[]}');
+      const deps = baseDeps({ ask }); // commitRange 없음
+
+      const updates: ReviewStateView[] = [];
+      await runReviewRounds(deps, 2, (state) => updates.push(state), { rounds: [{ ...passedRound1, headSha: undefined }] });
+
+      const last = updates.at(-1)!;
+      expect(last.state).toBe('passed');
+      expect(last.rounds[1]).toMatchObject({ round: 2, status: 'passed' });
+      expect(last.rounds[1]!.sinceSha).toBeUndefined();
+    });
+  });
 });
 
 describe('collectHumanResolvedFindings', () => {

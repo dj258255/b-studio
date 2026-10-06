@@ -250,6 +250,22 @@ describe('buildPrReviewComment · prReviewMarker', () => {
     const comment = buildPrReviewComment({ round: 1, maxRounds: 2, findings: [], outcome: 'pass', omittedFiles: ['big.ts'] });
     expect(comment).toContain('big.ts');
   });
+
+  it('since가 있는 커밋 범위를 주면 어느 커밋부터 어느 커밋까지 봤는지 적는다(버그 리포트 86)', () => {
+    const comment = buildPrReviewComment({
+      round: 2,
+      maxRounds: 3,
+      findings: [],
+      outcome: 'pass',
+      commitRange: { since: '5d463761234567890abcdef', head: '8682b77abcdef1234567890' },
+    });
+    expect(comment).toContain('커밋 범위: `5d46376`..`8682b77`');
+  });
+
+  it('since 없이 head만 있으면(세션 시작부터 보는 첫 리뷰) 커밋 범위를 적지 않는다', () => {
+    const comment = buildPrReviewComment({ round: 1, maxRounds: 2, findings: [], outcome: 'pass', commitRange: { head: '8682b77abcdef1234567890' } });
+    expect(comment).not.toContain('커밋 범위');
+  });
 });
 
 describe('buildPrReviewFixRequest', () => {

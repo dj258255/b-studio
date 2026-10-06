@@ -71,6 +71,7 @@ import {
   MAX_CLARIFYING_QUESTIONS,
   MAX_MANUAL_STEPS,
   MAX_REQUIREMENTS,
+  mergeManagedPullRequestBody,
   mergeReextractedRequirements,
   ORDERS_DEMO_SCENARIOS,
   parseJestLikeJson,
@@ -95,6 +96,7 @@ import {
   reviseRequirementIfChanged,
   resolveReferencedFiles,
   runnerLabel,
+  updatePullRequestBody,
   scanTestFilesForRequirementId,
   serializeRequirementsMarkdown,
   shouldPlanBrief,
@@ -3036,6 +3038,7 @@ async function pullRequestDraft(
   session: Session,
   issues: readonly number[],
   planRequirementIds: readonly string[] = [],
+  { assumePushed = false }: { assumePushed?: boolean } = {},
 ): Promise<PullRequestDraft & { info: RepositoryInfo }> {
   const info = (await session.checkpoints.repository())!;
   const commits = await session.checkpoints.sessionCommits();
@@ -3069,8 +3072,11 @@ async function pullRequestDraft(
   // `Closes`는 GitHub가 한 줄에 여러 개를 다루는 방식이 `관련:`과 달라 건드리지 않는다
   const relatedIssues = trackingRelated !== undefined ? [...relatedClosed, trackingRelated] : relatedClosed;
   const relatedAddendum = relatedIssues.length > 0 ? `\n\n관련: ${relatedIssues.map((issue) => `#${issue}`).join(', ')}` : '';
-  // 올리기 전 점검표 요약(ADR-107, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다)
-  const checklistAddendum = await submissionReport(session.snapshot.id)
+  // 올리기 전 점검표 요약(ADR-107, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다).
+  // assumePushed(previewExport만 true로 준다, 버그 리포트 84): 미리보기는 아직 올리지 않은 채로 점검을 계산해
+  // "작업 트리·원격"이 경고로 남는데, 실제로 PR을 만들면 그 사이 올라가 그 항목만 통과로 바뀐다 — 미리보기
+  // 본문이 실제로 만든 PR 본문과 같은 점검 결과를 보이도록, 미리보기도 "곧 올릴 것"을 미리 반영해 계산한다
+  const checklistAddendum = await submissionReport(session.snapshot.id, { assumePushed })
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
   return { info, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}` };
@@ -3116,7 +3122,10 @@ export async function previewExport(
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
 
-  const { info, title, body, missing } = await pullRequestDraft(session, issues, planRequirementIds);
+  // assumePushed: true(버그 리포트 84) — 미리보기는 아직 올리지 않았지만, "PR 만들기"를 누르면 먼저 올리고 나서
+  // 이 본문을 다시 계산하므로(exportSession) 작업 트리가 깨끗한 한 점검표의 "작업 트리·원격" 항목은 실제로
+  // 만들어질 본문과 같이 통과로 보여야 미리보기 ≡ 실제 본문이 유지된다
+  const { info, title, body, missing } = await pullRequestDraft(session, issues, planRequirementIds, { assumePushed: true });
   const remote = parseRemote(info.remoteUrl);
   // PR 생성(exportSession)과 같은 토큰을 먼저 찾아 이슈 확인에도 그대로 쓴다(ADR-107) — 이슈 조회만 토큰 없이
   // 돌다 실패하고 PR 생성은 되던 어긋남을 막는다
@@ -3155,7 +3164,7 @@ async function composeHasDatabase(composePath: string): Promise<boolean> {
   return /^\s*image:\s*["']?[^\s"']*\b(postgres|postgis|timescaledb|mysql|mariadb|mongo|mongodb)\b/im.test(text);
 }
 
-export async function submissionReport(id: string): Promise<SubmissionReport> {
+export async function submissionReport(id: string, { assumePushed = false }: { assumePushed?: boolean } = {}): Promise<SubmissionReport> {
   const session = requireSession(id);
   const services: ChecklistService[] = session.project.managed.map(([name, service]) => ({
     name,
@@ -3185,6 +3194,7 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
     // 게이트가 test 단계를 통과한 기록이 없어도, 테스트 탭에서 지금 체크포인트(HEAD)에 직접 돌린 결과가 있으면
     // 증거로 센다(버그 리포트: "전체 실행"으로 백엔드·프런트엔드 모두 통과했는데 "확인 필요"로 남던 문제)
     testEvidence: buildChecklistTestEvidence(testServices, session.snapshot.checkpoints[0]?.sha, pendingFilesCount),
+    assumePushed,
   });
 }
 
@@ -3222,18 +3232,42 @@ export async function exportSession(
     const info = (await session.checkpoints.repository())!;
     let created: ExportResult['pullRequest'];
     let pullRequestError: string | undefined;
+    let pullRequestUpdateWarning: string | undefined;
+    // 이번 export로 PR을 "새로" 연결했는지(브랜드 뉴 생성이거나, 올리기 전엔 몰랐던 원격 PR을 이번에 처음 찾아
+    // 연결한 경우) — 자동 리뷰를 처음부터 시작할지(runReviewRound), 이미 하던 리뷰를 새 커밋만큼만 이어갈지
+    // (continueReviewAfterNewCommits) 가른다. 아래 두 분기가 배타적이라(PR이 이미 있었는지로 나눈다) 상호
+    // 혼동 없이 하나만 참이다
+    let newlyConnectedPullRequest = false;
     if (pullRequest && !info.pullRequestUrl) {
       try {
         const { title, body } = await pullRequestDraft(session, issues, planRequirementIds);
         const remote = parseRemote(info.remoteUrl);
         // 미리보기(canCreate)가 "만들 수 있다"고 본 것과 같은 토큰으로 실제로 만든다(ADR-107)
         const token = await repositoryPullRequestToken(remote);
-        const result = await createPullRequest(remote, { title, body, base: info.base, branch: info.branch }, { token });
+        // 본문을 b-studio 관리 영역 마커로 감싸 만든다(버그 리포트 85) — 다음에 같은 PR에 새 커밋이 올라가도
+        // 이 마커 사이만 다시 쓰고, 사람이 PR 설명에 마커 밖으로 보탠 내용은 건드리지 않는다
+        const result = await createPullRequest(remote, { title, body: mergeManagedPullRequestBody(undefined, body), base: info.base, branch: info.branch }, { token });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
+        newlyConnectedPullRequest = true;
       } catch (error) {
         // 브랜치는 이미 올라갔으므로 실패 이유를 알리고, 작성 페이지 링크로 직접 만들 수 있게 한다
         pullRequestError = describe(error);
+      }
+    } else if (pullRequest && info.pullRequestUrl) {
+      // 이미 열려 있던 PR에 이번 export로 커밋을 더 올렸다 — 본문을 지금 상태(새 커밋·점검표)로 다시 쓴다
+      // (버그 리포트 85: PR을 다시 만들 때 본문이 첫 커밋 그대로였다). 제목은 사람이 GitHub에서 바꿨을 수 있어
+      // 건드리지 않는다. 실패해도 경고만 남기고 push·PR 자체는 이미 끝난 것으로 본다
+      try {
+        const { body } = await pullRequestDraft(session, issues, planRequirementIds);
+        const remote = parseRemote(info.remoteUrl);
+        const token = await repositoryPullRequestToken(remote);
+        const number = parsePullRequestNumber(info.pullRequestUrl);
+        if (number === undefined) throw new Error('PR 주소에서 번호를 읽지 못했습니다');
+        await updatePullRequestBody(remote, number, body, { token });
+        created = { url: info.pullRequestUrl, created: false, updated: true };
+      } catch (error) {
+        pullRequestUpdateWarning = describe(error);
       }
     }
     // PR을 만들라고 했으면(이미 열려 있던 PR에 커밋만 더 올린 경우도 포함) 추적 이슈 본문도 지금 상태로 다시 쓴다.
@@ -3249,14 +3283,19 @@ export async function exportSession(
       forced: pushed.forced,
       pullRequest: created,
       pullRequestError,
+      pullRequestUpdateWarning,
       issues: created && issues.length > 0 ? [...issues] : undefined,
       requirementsTrackingWarning,
     };
     emit(session, { type: 'exported', ...result });
     // 이번에 이 세션이 PR을 새로 연결했고(이미 있던 PR을 이어서 쓰는 export가 아니고) 설정이 켜져 있으면 AI 리뷰를 자동으로 시작한다(ADR-074).
-    // 이미 열려 있던 PR에 새 커밋만 올린 export는 자동으로 다시 돌리지 않는다 — 사람이 화면의 "다시 돌리기"로 부른다
-    if (created && (review ?? session.project.spec.review.auto)) {
+    if (newlyConnectedPullRequest && (review ?? session.project.spec.review.auto)) {
       void runReviewRound(id).catch((error: unknown) => console.error('[b-studio] AI 리뷰 자동 시작 실패', describe(error)));
+    } else if (pullRequest && info.pullRequestUrl && (review ?? session.project.spec.review.auto)) {
+      // 이미 열려 있던 PR에 새 커밋이 쌓였다 — 처음부터 다시 돌리지 않고(사람이 이미 확인한 라운드는 그대로
+      // 두고) 그 뒤 범위만 리뷰 라운드를 이어 돈다(버그 리포트 86). 리뷰를 한 번도 돌린 적 없거나 새 커밋이
+      // 없으면 continueReviewAfterNewCommits 안에서 조용히 아무 일도 하지 않는다(돌 일이 없다)
+      void continueReviewAfterNewCommits(id).catch((error: unknown) => console.error('[b-studio] 새 커밋에 대한 AI 리뷰 이어가기 실패', describe(error)));
     }
     return result;
   } finally {
@@ -3271,6 +3310,13 @@ const REVIEW_FIX_TIMEOUT_MS = 30 * 60_000;
 async function sessionRequestTexts(session: Session): Promise<string[]> {
   const commits = await session.checkpoints.sessionCommits();
   return commits.map((commit) => commit.subject.replace(/^요청:\s*/, ''));
+}
+
+/** 세션 브랜치 지금 HEAD의 커밋 sha. 리뷰 라운드가 이번에 본 diff의 끝 지점을 기록해(ReviewRoundView.headSha)
+ * 다음에 새 커밋이 쌓이면 continueReviewAfterNewCommits가 그 지점부터만 다시 보게 한다 */
+async function sessionHeadSha(session: Session): Promise<string | undefined> {
+  const commits = await session.checkpoints.sessionCommits();
+  return commits[commits.length - 1]?.sha;
 }
 
 /**
@@ -3396,6 +3442,12 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
     requirementsContext: () => requirementsContext,
     externalContext: (diff) => reviewExternalContext(session, diff),
     ...(resolvedContext ? { resolvedContext: () => resolvedContext } : {}),
+    // since 없이 head만 기록한다(세션 시작부터 보는 첫 리뷰라 범위를 코멘트에 적지 않는다) — 이 head가 남아야
+    // 나중에 새 커밋이 쌓였을 때 continueReviewAfterNewCommits가 그 지점부터만 다시 볼 수 있다(버그 리포트 86)
+    commitRange: async () => {
+      const head = await sessionHeadSha(session);
+      return head ? { head } : undefined;
+    },
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -3419,6 +3471,84 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
     session.snapshot.review = { state: 'stopped', maxRounds: cfg.maxRounds, rounds: session.snapshot.review?.rounds ?? [], ...(reviewerModelId ? { reviewerModelId } : {}), independence };
     emit(session, { type: 'review_round', review: session.snapshot.review });
     console.error('[b-studio] AI 리뷰 라운드가 예기치 않게 실패했습니다', describe(error));
+  });
+}
+
+/**
+ * 이미 열려 있던 PR에 이번 export로 새 커밋이 쌓였고 AI 리뷰 자동(auto)이 켜져 있을 때, 마지막으로 리뷰한
+ * 커밋(review.rounds의 가장 최근 라운드의 headSha) 이후의 diff만으로 리뷰를 이어 돈다(버그 리포트 86: PR을
+ * 다시 만들 때 리뷰가 다시 돌지 않아 새 코드 123줄이 리뷰 없이 들어갔다). exportSession이 PR을 "새로" 연결한
+ * 경우(runReviewRound가 처음부터 돈다)와 달리, 여기는 처음부터 다시 돌지 않고 review-round.ts의 runReviewRounds에
+ * resume으로 기존 rounds를 넘겨 라운드 번호를 이어간다 — 라운드 상한(maxRounds)도 이 PR이 지금까지 돈 리뷰
+ * 호출 전체에 걸친 값이라, 이미 상한에 닿아 있으면 runReviewRounds가 새로 리뷰를 부르지 않고 그 사실만 남긴다.
+ *
+ * 다음 중 하나라도 해당하면 아무것도 하지 않는다(모두 "돌 일이 없다"는 뜻이지 실패가 아니다):
+ *  - 리뷰를 한 번도 돌린 적이 없다(review 없음) — 이 PR은 애초에 AI 리뷰를 쓴 적이 없다
+ *  - 지금 리뷰가 도는 중이다 — 겹쳐 돌지 않는다
+ *  - 마지막 라운드가 headSha를 남기지 않았다(이 기능이 생기기 전에 끝난 리뷰) — 범위를 모르니 섣불리 전체를
+ *    다시 보지 않는다(사람이 "다시 돌리기"로 명시적으로 새로 시작할 수 있다)
+ *  - 마지막으로 리뷰한 커밋과 지금 HEAD가 같다 — 새 커밋이 없다
+ */
+export async function continueReviewAfterNewCommits(id: string): Promise<void> {
+  const session = requireSession(id);
+  const review = session.snapshot.review;
+  if (!review || review.state === 'running') return;
+  const info = await session.checkpoints.repository();
+  if (!info?.pullRequestUrl) return;
+
+  const lastRound = review.rounds[review.rounds.length - 1];
+  const sinceSha = lastRound?.headSha;
+  if (!sinceSha) return;
+  const headSha = await sessionHeadSha(session);
+  if (!headSha || sinceSha === headSha) return;
+
+  // main 따라잡기(ADR-076): 리뷰를 이어 돌리기 전에 조용히 먼저 따라잡는다(runReviewRound와 같은 이유)
+  await autoCatchUpBase(session);
+
+  const cfg = session.project.spec.review;
+  const requests = await sessionRequestTexts(session);
+  const requirementsContext = await reviewRequirementsContext(session, requests);
+  const resolvedFindings = collectHumanResolvedFindings(review);
+  const resolvedContext = resolvedFindings.length > 0 ? buildPrReviewResolvedContext(resolvedFindings) : undefined;
+  const deps: ReviewRoundDeps = {
+    ask: reviewAsk(session, review.reviewerModelId),
+    // 세션 시작부터가 아니라 마지막으로 리뷰한 커밋부터 지금 HEAD까지만 본다 — 이미 통과한 변경을 다시 지적하지 않는다.
+    // 라운드 안에서 고침 커밋이 쌓여도 since는 그대로라 다음 라운드는 그 고침까지 포함한 diff를 본다(처음 리뷰가
+    // 매 라운드 base...head 전체를 다시 보는 것과 같은 모양, 기준점만 세션 시작이 아니라 sinceSha다)
+    diff: () => session.checkpoints.diffSince(sinceSha),
+    requests: () => requests,
+    requirementsContext: () => requirementsContext,
+    externalContext: (diff) => reviewExternalContext(session, diff),
+    ...(resolvedContext ? { resolvedContext: () => resolvedContext } : {}),
+    commitRange: async () => {
+      const head = await sessionHeadSha(session);
+      return head ? { since: sinceSha, head } : undefined;
+    },
+    postComment: (body) => reviewPostComment(session, body),
+    requestFix: (text) => reviewRequestFix(session, text),
+    push: async () => {
+      await session.checkpoints.push();
+      const repository = await describeRepository(session.checkpoints, session.sourceDirtyFiles);
+      if (repository) session.snapshot.repository = repository;
+    },
+  };
+  const independence = review.independence ?? 'unknown';
+  const reviewerModelId = review.reviewerModelId;
+
+  session.snapshot.review = { ...review, state: 'running' };
+  emit(session, { type: 'review_round', review: session.snapshot.review });
+  void runReviewRounds(
+    deps,
+    cfg.maxRounds,
+    (state) => {
+      session.snapshot.review = { ...state, ...(reviewerModelId ? { reviewerModelId } : {}), independence };
+      emit(session, { type: 'review_round', review: session.snapshot.review });
+    },
+    { rounds: review.rounds },
+  ).catch((error: unknown) => {
+    session.snapshot.review = { state: 'stopped', maxRounds: cfg.maxRounds, rounds: review.rounds, ...(reviewerModelId ? { reviewerModelId } : {}), independence };
+    emit(session, { type: 'review_round', review: session.snapshot.review });
+    console.error('[b-studio] 새 커밋에 대한 AI 리뷰 이어가기 라운드가 예기치 않게 실패했습니다', describe(error));
   });
 }
 

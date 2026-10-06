@@ -655,6 +655,15 @@ export class CheckpointStore {
     return this.#git(['diff', '--no-color', ...(await this.#relative()), start, 'HEAD']);
   }
 
+  /**
+   * sha부터 지금 HEAD까지의 변경(sessionDiff와 같은 모양, 시작점만 세션 시작이 아니라 주어진 커밋이다).
+   * PR 자동 리뷰(ADR-074)가 이미 열려 있던 PR에 새 커밋이 쌓였을 때, 전체 base...head가 아니라 마지막으로
+   * 리뷰한 커밋 이후의 변경만 다시 보는 데 쓴다 — 같은 지적을 되풀이해 보고하지 않도록 범위를 좁힌다
+   */
+  async diffSince(sha: string): Promise<string> {
+    return this.#git(['diff', '--no-color', ...(await this.#relative()), sha, 'HEAD']);
+  }
+
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
   async repository(): Promise<RepositoryInfo | undefined> {
     const [base, branch] = await Promise.all([this.#getMeta('base'), this.#getMeta('branch')]);

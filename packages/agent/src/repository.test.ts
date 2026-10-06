@@ -15,15 +15,19 @@ import {
   listIssues,
   listLabels,
   listPullRequests,
+  mergeManagedPullRequestBody,
   parseClosingReferences,
   parsePullRequestNumber,
   parseRemote,
   parseTaskList,
   postComment,
+  PR_MANAGED_BODY_BEGIN,
+  PR_MANAGED_BODY_END,
   PullRequestError,
   RepositoryRateLimitError,
   updateComment,
   updateIssue,
+  updatePullRequestBody,
 } from './repository';
 
 describe('parseRemote', () => {
@@ -956,6 +960,69 @@ describe('updateIssue', () => {
   it('거절되면 PullRequestError를 던진다', async () => {
     const { fn } = fakeFetch([{ status: 404, body: { message: 'Not Found' } }]);
     await expect(updateIssue(github, 42, { body: 'x' }, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn })).rejects.toThrow(PullRequestError);
+  });
+});
+
+describe('mergeManagedPullRequestBody', () => {
+  it('마커가 없는 빈 본문은 마커로 감싸 새 영역을 만든다', () => {
+    expect(mergeManagedPullRequestBody(undefined, '새 초안')).toBe(`${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+    expect(mergeManagedPullRequestBody('', '새 초안')).toBe(`${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('마커가 이미 있으면 그 사이만 바꾸고, 마커 밖(위·아래)에 사람이 적은 내용은 그대로 둔다', () => {
+    const existing = `사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n옛 초안\n${PR_MANAGED_BODY_END}\n\n사람이 아래에 적은 메모`;
+    const merged = mergeManagedPullRequestBody(existing, '새 초안');
+    expect(merged).toBe(`사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}\n\n사람이 아래에 적은 메모`);
+  });
+
+  it('마커가 없지만 b-studio가 만든 옛 본문(## 요청·## 검증 절이 있다)이면 통째로 마커로 감싸 바꾼다(버그 리포트 85, PR #22)', () => {
+    const legacy = ['Closes #16', '', '`orders` 프로젝트의 b-studio 세션에서 처리한 요청 1건입니다.', '', '## 요청', '', '### 1. 메모 추가', '', '## 검증', '', '- 통과'].join('\n');
+    const merged = mergeManagedPullRequestBody(legacy, '새 초안');
+    expect(merged).toBe(`${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('마커도 없고 b-studio 본문 같지도 않으면(사람이 통째로 새로 쓴 설명) 지우지 않고 아래에 마커 영역을 덧붙인다', () => {
+    const humanWritten = '이 PR은 결제 재시도 로직을 담당 팀과 상의해 직접 작성했습니다.';
+    const merged = mergeManagedPullRequestBody(humanWritten, '새 초안');
+    expect(merged).toBe(`${humanWritten}\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+});
+
+describe('updatePullRequestBody', () => {
+  it('지금 본문을 먼저 읽어(GET) 관리형 영역만 바꾸고 제목은 건드리지 않는다(GitHub)', async () => {
+    const existing = `사람이 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n옛 초안\n${PR_MANAGED_BODY_END}`;
+    const { fn, calls } = fakeFetch([{ status: 200, body: { body: existing } }, { status: 200, body: {} }]);
+    const result = await updatePullRequestBody(github, 22, '새 초안', { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn });
+
+    expect(calls[0]).toMatchObject({ url: 'https://api.github.com/repos/acme/orders/pulls/22', method: 'GET' });
+    expect(calls[1]).toMatchObject({ url: 'https://api.github.com/repos/acme/orders/pulls/22', method: 'PATCH' });
+    expect((calls[1]!.body as { body: string }).body).toBe(`사람이 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+    expect((calls[1]!.body as { title?: string }).title).toBeUndefined();
+    expect(result.body).toBe(`사람이 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('GitLab은 MR을 GET한 뒤 description만 PUT한다', async () => {
+    const remote = parseRemote('git@gitlab.corp.local:platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' });
+    const { fn, calls } = fakeFetch([
+      { status: 200, body: { description: `${PR_MANAGED_BODY_BEGIN}\n옛 초안\n${PR_MANAGED_BODY_END}` } },
+      { status: 200, body: {} },
+    ]);
+    await updatePullRequestBody(remote, 3, '새 초안', { env: { B_STUDIO_GITLAB_TOKEN: 'glpat' }, fetch: fn });
+
+    expect(calls[0]).toMatchObject({ url: 'https://gitlab.corp.local/api/v4/projects/platform%2Forders/merge_requests/3', method: 'GET' });
+    expect(calls[1]).toMatchObject({ method: 'PUT' });
+    expect((calls[1]!.body as { description: string }).description).toBe(`${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('조회나 수정이 거절되면 PullRequestError를 던진다', async () => {
+    const { fn } = fakeFetch([{ status: 404, body: { message: 'Not Found' } }]);
+    await expect(updatePullRequestBody(github, 22, '새 초안', { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn })).rejects.toThrow(PullRequestError);
+  });
+
+  it('토큰이 없으면 요청하지 않는다', async () => {
+    const { fn, calls } = fakeFetch([]);
+    await expect(updatePullRequestBody(github, 22, '새 초안', { env: {}, fetch: fn })).rejects.toThrow('B_STUDIO_GITHUB_TOKEN');
+    expect(calls).toHaveLength(0);
   });
 });
 

@@ -202,6 +202,24 @@ describe('CheckpointStore', () => {
     expect(diff).not.toContain('+class Order { String memo; }\n');
   });
 
+  it('diffSince는 세션 시작이 아니라 주어진 커밋부터 지금 HEAD까지만 담는다(PR 자동 리뷰가 새 커밋만 다시 볼 때 쓴다, 버그 리포트 86)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const first = await store.commit('요청: 메모 추가');
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    await store.commit('요청: 메모 필드 추가');
+
+    // 세션 시작부터 보면(sessionDiff) 첫 커밋의 전체 추가가 보이지만, 첫 커밋부터만 보면(diffSince) 그 뒤 변경만 보인다
+    const sinceFirst = await store.diffSince(first!.sha);
+    expect(sinceFirst).toContain('+class Order { String memo; String note; }');
+    expect(sinceFirst).not.toContain('diff --git a/api/src/Order.java b/api/src/Order.java\nnew file mode');
+
+    const sinceHead = await store.diffSince((await store.sessionCommits()).at(-1)!.sha);
+    expect(sinceHead).toBe('');
+  });
+
   it('작업 폴더 밖 저장소에 체크포인트를 남기고, 사용자 폴더의 .git과 무시한 파일은 건드리지 않는다', async () => {
     // 사용자가 쓰던 저장소: 커밋 하나, 무시하는 로그 파일, 아직 커밋하지 않은 초안
     await write('.gitignore', '*.log\n');

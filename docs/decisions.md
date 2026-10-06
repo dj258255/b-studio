@@ -139,6 +139,7 @@
 - [ADR-122 "올리기 전 점검"이 실제 사용에서 낸 오탐 두 건을 고친다: 추적 안 되는 생성 파일의 비밀 값, 커밋 하나의 "독차지" 경고](#adr-122-올리기-전-점검이-실제-사용에서-낸-오탐-두-건을-고친다-추적-안-되는-생성-파일의-비밀-값-커밋-하나의-독차지-경고)
 - [ADR-123 요구사항 추적 이슈 표를 PR 만들 때 다시 쓰고, 관련 줄을 하나로 합친다](#adr-123-요구사항-추적-이슈-표를-pr-만들-때-다시-쓰고-관련-줄을-하나로-합친다)
 - [ADR-124 네트워크 상류 장애(DNS 실패)와 정책 거부를 구별하고, 벤치는 environment 연속 실패에서 멈춘다](#adr-124-네트워크-상류-장애dns-실패와-정책-거부를-구별하고-벤치는-environment-연속-실패에서-멈춘다)
+- [ADR-0XX 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-0xx-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
 
 ---
 
@@ -5122,6 +5123,74 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **`--concurrency`(동시 실행) 경로는 다루지 않았다.** 직렬 실행(기본값, 실험 E10이 쓴 경로)만 고쳤고, 동시 실행의 조기 중단은 "연속"의 뜻을 다시 정의해야 하는 별도 설계로 미뤘다.
 
 ---
+
+- 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
+- StackBlitz, [WebContainers Commercial Usage](https://webcontainers.io/enterprise)
+- vercel/next.js, [`next dev --turbo` fails in WASM #70522](https://github.com/vercel/next.js/issues/70522) · stackblitz/webcontainer-core [#2065](https://github.com/stackblitz/webcontainer-core/issues/2065)
+- CodeSandbox, [Sandpack FAQ (Nodebox)](https://sandpack.codesandbox.io/docs/resources/faq)
+- Beam, [How Lovable and Bolt Work](https://www.beam.cloud/blog/agentic-apps)
+- Vercel, [Vercel Sandbox](https://vercel.com/docs/sandbox) · [Pricing and quotas](https://vercel.com/docs/sandbox/pricing)
+- kubernetes-sigs, [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+- Replit, [Development and production databases](https://docs.replit.com/features/data-and-storage/development-and-production)
+- Upstash, [Best Sandbox Providers for AI Agents](https://upstash.com/blog/best-sandbox-providers-for-ai-agents)
+- Anthropic, [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) (인증 정책, 브랜딩 가이드)
+- Apple Newsroom, [Apple introduces a delightful and elegant new software design](https://www.apple.com/newsroom/2025/06/apple-introduces-a-delightful-and-elegant-new-software-design/) · Apple Developer, [Meet Liquid Glass (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/219/)
+- Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
+- Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
+- remarkjs, [react-markdown: Security](https://github.com/remarkjs/react-markdown#security)
+- Lovable, [Brainstorm in Plan mode](https://docs.lovable.dev/features/plan-mode) · [Chat mode & Follow-up questions](https://lovable.dev/blog/chat-mode-and-questions) · Cursor, [Ask mode](https://cursor.com/help/ai-features/ask-mode)
+- Next.js, [output (standalone, outputFileTracingRoot, outputFileTracingExcludes)](https://nextjs.org/docs/app/api-reference/config/next-config-js/output) · Git, [git-config: safe.directory](https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory) · [Git 2.46.0 릴리스 노트](https://github.com/git/git/blob/master/Documentation/RelNotes/2.46.0.adoc)
+- Next.js, [Authentication](https://nextjs.org/docs/app/guides/authentication) (Proxy의 낙관적 확인과 데이터 접근 계층) · [proxy.js](https://nextjs.org/docs/app/api-reference/file-conventions/proxy)
+- MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
+- StablyAI, [Orca](https://github.com/stablyai/orca)
+- mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
+- Figma, [REST API](https://www.figma.com/developers/api) (개인 액세스 토큰, `file_content:read`)
+- OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)
+- Conductor, [conductor.build](https://conductor.build) · smtg-ai, [Claude Squad](https://github.com/smtg-ai/claude-squad) · Cognition, [Devin](https://devin.ai)
+- Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
+- OpenAI, [Codex](https://openai.com/codex/)
+
+## ADR-0XX 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다
+
+상태: 채택
+관련: 테스트 저장소 dj258255/test#22, 세션 c55417ad
+
+### 맥락
+- 실측(세션 c55417ad, 테스트 저장소 PR dj258255/test#22): 처음 `POST /api/sessions/[id]/export`(`pullRequest: true`)로 PR #22를 만들었다(커밋 하나, 본문에 "## 요청"·"## 검증"·"올리기 전 점검 9/9"가 제대로 실렸다). AI 리뷰 1라운드가 경미 3·사소 1로 통과(`passed`)했고, 그 지적을 세션 대화로 고쳐 새 체크포인트가 하나 더 생겼다. 같은 요청으로 다시 export하자 응답은 `pushedSha`·`commits: 2`만 담고 `pullRequest`가 없었다 — PR에 커밋 2개가 올라갔지만 두 가지가 그대로였다: (1) PR 본문이 첫 커밋 하나만 보여 주는 그대로였다(리뷰 수정 커밋이 본문 어디에도 없다), (2) 세션의 `review` 상태가 `{"state":"passed","rounds":[{"round":1}]}` 그대로였다 — 새 코드 123줄이 AI 리뷰 없이 PR에 들어갔다.
+- 원인은 `exportSession`(`apps/studio/lib/server/sessions.ts`)에 있었다. PR을 "새로" 만들 때(`!info.pullRequestUrl`)만 `pullRequestDraft`로 본문을 만들어 `createPullRequest`를 불렀고, 이미 `info.pullRequestUrl`이 있으면 — 커밋만 올리고(`push`) 그 외에는 아무것도 하지 않았다. AI 리뷰 자동 시작도 `created`(이번에 새로 연결한 PR)가 있을 때만 걸렸다 — "이미 열려 있던 PR에 새 커밋만 올린 export는 자동으로 다시 돌리지 않는다"는 주석이 설계 의도였지만, 그 결과 재발행 경로 자체가 통째로 비어 있었다.
+- 작은 문제 하나 더: 올리기 전 미리보기(`previewExport`)의 본문에 들어가는 "올리기 전 점검" 요약은 아직 올리기 전 기준으로 계산해 "작업 트리·원격: 아직 올리지 않았습니다"가 경고로 남는데, 실제로 "PR 만들기"를 누르면 먼저 올린(push) 뒤 같은 함수(`pullRequestDraft`)로 본문을 다시 만들어 그 항목이 통과로 바뀐다 — 미리보기와 실제로 만든 PR 본문의 점검 통과 수가 달랐다(예: 8/9 vs 9/9).
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| 본문은 손대지 않고 "새 커밋이 N개 더 올라갔다"는 코멘트만 PR에 남긴다 | 가장 적은 변경 | 본문의 "## 요청"·"## 검증"·"올리기 전 점검"이 여전히 첫 커밋 기준으로 낡는다 — 실측 문제(85)를 그대로 남긴다 |
+| **(채택) PR이 이미 있으면 `pullRequestDraft`로 다시 만든 본문을 `updatePullRequestBody`(신규)로 PR에 덮어쓴다. 다만 PR 설명 전체를 지우지 않고, b-studio가 쓰는 영역만 `<!-- b-studio:begin -->`/`<!-- b-studio:end -->` 마커로 감싸 그 안만 바꾼다** | 본문이 항상 지금 커밋·점검 상태를 반영한다. 마커 밖(사람이 PR 설명 위·아래에 보탠 메모)은 그대로 둔다. 제목은 건드리지 않는다(사람이 GitHub에서 고쳤을 수 있다) | 마커가 없는 옛 PR(이 기능 이전에 만든 PR, #22 같은)은 전체를 b-studio 본문으로 간주해 통째로 마커로 감싼다 — 그 드문 경우 사람이 마커 없이 더 적어 둔 내용이 있었다면(관찰상 거의 없다, buildPullRequest가 "## 요청"·"## 검증"을 항상 넣어 식별 가능) 마커 안으로 들어간다 |
+| 이미 열린 PR에는 아예 손대지 않고, 화면에 "본문이 낡았을 수 있습니다" 안내만 띄운다 | 쓰기 동작이 없어 가장 안전하다 | 실측 그대로 버그가 남는다 — 사람이 매번 직접 PR 설명을 고쳐야 한다 |
+| 리뷰: 재발행마다 항상 1라운드부터 새로 돈다(`session.snapshot.review`를 지운다) | 구현이 가장 단순하다(`runReviewRound`를 그대로 또 부른다) | 이미 통과·사람이 확인한 라운드 기록(`humanResolutions` 등)이 사라지고, 전체 diff를 다시 리뷰해 이미 지나간 지적을 되풀이할 수 있다 — 라운드 번호도 1로 되돌아가 "몇 번째 리뷰인지"를 잃는다 |
+| **(채택) 리뷰: 마지막으로 리뷰한 커밋(직전 라운드의 headSha) 이후의 diff만, 라운드 번호를 이어서(resume) 돈다. 전체 라운드 상한(maxRounds)은 이 PR의 리뷰 호출 전체에 걸친 값으로 유지하고, 이미 상한에 닿아 있으면 리뷰를 부르지 않되 그 사실을 라운드 기록·PR 코멘트로 남긴다** | 이미 통과한 변경을 다시 지적하지 않고, 기존 라운드 기록·사람의 오탐 확인을 보존한다. 상한에 걸려 못 본 새 커밋이 "조용히 통과"로 보이지 않는다 | 라운드 하나가 "diff 전체"가 아니라 "증분"을 본다는 차이를 리뷰어 프롬프트가 알지 못한다(필요하면 추후 문맥에 "증분 리뷰"임을 명시할 수 있다) |
+| 미리보기(84): 작업 트리·원격 항목을 "PR을 만들면 올립니다"라는 문구로 바꿔 다르게 보여준다 | 미리보기가 "아직 안 올렸다"는 사실 자체는 정직하게 보여준다 | 문구만 다른 두 섹션(미리보기 vs 실제 생성)이 같은 "올리기 전 점검 N/9" 점수를 공유하는 걸 깨 버려, 숫자 자체가 달라지는 어긋남은 그대로 남는다 |
+| **(채택) 미리보기(84): 점검을 "곧 올릴 것"을 가정하고 계산한다(`assumePushed`) — 작업 트리가 깨끗한 한 "작업 트리·원격" 항목을 통과로 본다** | 미리보기 본문과 실제로 만든 PR 본문의 점검 결과(통과 수)가 항상 같다. 저장소 탭의 "올리기 전 점검" 서브탭(지금 당장 올릴 계획이 없을 때 보는 화면)은 영향을 받지 않는다(그 호출은 `assumePushed`를 주지 않는다) | 미리보기 시점에 아직 실제로는 올라가지 않았다는 사실이 이 한 항목에서만 "곧 그럴 것"으로 앞당겨 보인다 — 체크포인트로 저장하지 않은 변경이 있으면(그 경우는 push해도 안 바뀐다) 여전히 실패로 본다 |
+
+### 결정
+1. `packages/agent/src/repository.ts`에 `updatePullRequestBody()`를 추가했다. GitHub·Gitea·GitLab 모두 지원하며(`createPullRequest`와 같은 호스트 범위), 쓰기 전에 지금 본문을 먼저 읽어(GET) `mergeManagedPullRequestBody()`로 병합한 뒤 PATCH/PUT한다. 제목은 입력으로 받지도, 바꾸지도 않는다. `mergeManagedPullRequestBody(existingBody, managedBody)`는 `<!-- b-studio:begin -->`/`<!-- b-studio:end -->` 마커가 있으면 그 사이만 바꾸고, 마커가 없지만 b-studio가 만든 옛 본문으로 보이면("## 요청"·"## 검증" 절이 있으면, buildPullRequest가 내용과 무관하게 항상 넣는 절 제목이다) 통째로 마커로 감싸 바꾸고, 그 밖(마커도 없고 우리 본문 같지도 않은 — 사람이 통째로 새로 쓴 설명 등)은 기존 내용을 지우지 않고 아래에 마커 영역을 덧붙인다.
+2. `exportSession`(`apps/studio/lib/server/sessions.ts`)의 PR 분기를 둘로 나눴다. `!info.pullRequestUrl`(새 PR)이면 지금처럼 `createPullRequest`를 부르되 본문을 `mergeManagedPullRequestBody(undefined, body)`로 마커부터 감싸 만든다. `info.pullRequestUrl`이 이미 있으면(재발행) `updatePullRequestBody`로 본문만 다시 쓴다. 두 경우 모두 결과는 `pullRequest: { url, created, updated? }`에 담기고(`updated: true`는 새로 만들지 않고 기존 PR 본문만 갱신했다는 뜻), 본문 갱신이 실패해도 `pullRequestUpdateWarning`으로만 남기고 push·PR 자체의 성공은 뒤집지 않는다(추적 이슈 갱신 실패를 다루는 `requirementsTrackingWarning`과 같은 규칙, ADR-123).
+3. `packages/agent/src/checkpoints.ts`에 `diffSince(sha)`를 추가했다(`sessionDiff`와 같은 모양, 시작점만 세션 시작이 아니라 주어진 커밋). `review-round.ts`의 `runReviewRounds`가 `resume: { rounds }`를 받으면 그 뒤로 라운드 번호를 이어가고, 이미 라운드 상한에 닿아 있으면(`rounds.length + 1 > maxRounds`) 리뷰어를 부르지 않고 PR 코멘트("라운드 상한에 이미 닿아 있어 새 커밋을 리뷰하지 못했습니다")와 라운드 기록(`blocked_capped`)으로 그 사실을 남긴다. `ReviewRoundDeps`에 `commitRange`를 더해 라운드마다 "이번에 본 커밋 범위"(`since`·`head`)를 받고, `ReviewRoundView`에 `sinceSha`·`headSha`를 저장해 다음 재발행이 그 지점부터 이어볼 수 있게 한다. `buildPrReviewComment`(`packages/agent/src/pr-review.ts`)는 `since`가 있을 때만 코멘트에 "커밋 범위: since..head"를 적는다(세션 시작부터 보는 첫 리뷰는 전체가 당연해 적지 않는다).
+4. `sessions.ts`에 `continueReviewAfterNewCommits()`를 새로 더했다. 리뷰를 한 번도 돌린 적 없거나(review 없음), 지금 도는 중이거나, 마지막 라운드가 `headSha`를 남기지 않았거나(이 기능 이전에 끝난 리뷰), 그 `headSha`와 지금 HEAD가 같으면(새 커밋 없음) 아무것도 하지 않는다. 그 밖엔 `diffSince(마지막 headSha)`만으로 `runReviewRounds`를 `resume`으로 이어 돈다. `exportSession`은 이번 export로 PR을 "새로" 연결했으면(`newlyConnectedPullRequest`) 지금처럼 `runReviewRound`(처음부터)를, 이미 있던 PR에 커밋만 더 올렸으면 `continueReviewAfterNewCommits`를 부른다 — 사람이 "다시 돌리기"를 누르지 않아도 재발행마다 자동(review.auto)으로 새 범위만 리뷰한다.
+5. `submission-checklist.ts`의 `checkWorkingTree`에 `{ assumePushed }` 옵션을 더했다. `sessions.ts`의 `submissionReport`·`pullRequestDraft`가 이 옵션을 받아 올리기 전 미리보기(`previewExport`)에서만 `assumePushed: true`로 넘긴다 — 저장소 탭의 "올리기 전 점검" 서브탭(`submissionReport` 단독 호출)은 그대로 실제 상태를 보여준다.
+
+### 검증 결과
+- `packages/agent/src/repository.test.ts`(신규 테스트): `mergeManagedPullRequestBody`가 마커 있음/없음(옛 b-studio 본문/사람이 쓴 본문)의 세 갈래를 올바로 가르는 것, `updatePullRequestBody`가 GitHub·GitLab에서 GET 뒤 PATCH/PUT하고 제목은 보내지 않는 것, 거절·토큰 없음을 확인한다(가짜 fetch, 실 GitHub 호출 없음).
+- `packages/agent/src/checkpoints.test.ts`(신규 테스트): `diffSince`가 세션 시작이 아니라 주어진 커밋부터만 diff를 담는 것을 확인한다.
+- `packages/agent/src/pr-review.test.ts`(신규 테스트): `buildPrReviewComment`가 `commitRange.since`가 있을 때만 "커밋 범위"를 적는 것을 확인한다.
+- `apps/studio/lib/server/review-round.test.ts`(신규 테스트): `runReviewRounds`의 `resume`이 라운드 번호를 이어가는 것 / 이미 상한이면 리뷰어를 부르지 않고 PR 코멘트·라운드 기록을 남기는 것(`ask`가 불리지 않았음을 확인) / `commitRange` 없이도(이 기능 이전에 끝난 리뷰) 동작하는 것을 확인한다.
+- `apps/studio/lib/server/sessions-pr-reexport.test.ts`(신규): 실제 git 저장소·세션으로 `exportSession`을 끝까지 돌려 (1) 재발행이 `createPullRequest`를 또 부르지 않고 `updatePullRequestBody`로 지금까지 커밋 전부를 반영한 본문을 쓰는 것과 본문 갱신 실패가 push 성공을 뒤집지 않는 것, (2) 끝난 리뷰가 있는 PR에 새 커밋이 쌓이면 라운드 번호가 이어지고(1→2) 두 번째 코멘트에만 커밋 범위가 적히는 것, (3) 새 커밋이 없으면 리뷰가 다시 돌지 않는 것(`postComment`가 더 불리지 않음), (4) 라운드 상한에 이미 닿아 있으면 리뷰어를 부르지 않고 PR 코멘트·라운드 기록으로 남기는 것, (5) 올리기 전 미리보기와 실제로 만든 PR 본문의 "올리기 전 점검" 통과 수가 같은 것을 확인했다(원격 GitHub API·모델 호출은 모두 가짜로 바꿨다. 실 GitHub·모델·3000 포트 서버는 부르지 않는다).
+- `apps/studio/lib/submission-checklist.test.ts`(신규 테스트): `checkWorkingTree`의 `assumePushed`가 작업 트리가 깨끗하면 통과로 보고, 저장하지 않은 변경이 있으면 여전히 실패하는 것을 확인한다.
+- `pnpm typecheck`: 6개 패키지 모두 `Done`. `pnpm --filter @b-studio/studio lint`: 오류 0(기존 경고 7개는 이번 변경과 무관). 저장소 전체 `vitest run`: 297개 파일, 3152개 테스트 모두 통과.
+
+### 감수한 트레이드오프
+- **마커 없는 옛 PR은 추론으로 "b-studio 본문"을 가린다.** "## 요청"·"## 검증" 절 제목이 있으면 b-studio가 만든 본문으로 보고 통째로 마커로 감싼다 — 이 추론이 틀리면(그런 절 제목을 가진 PR을 사람이 우연히 직접 썼다면) 그 내용이 마커 "관리형 영역" 안으로 들어가 다음 재발행에서 교체 대상이 된다. 실제로 이런 절 제목은 buildPullRequest만 쓰고, `info.pullRequestUrl`이 가리키는 PR은 애초에 b-studio가 만들거나 기록한 것이라 위험은 낮다고 판단했다.
+- **증분 리뷰가 놓치는 경우가 있다.** `diffSince`는 마지막으로 리뷰한 커밋 이후만 보므로, 그 전 커밋의 변경이 이후 커밋과 상호작용해 생기는 문제(예: 나중 커밋이 이전 커밋의 전제를 깨는 경우)는 리뷰어가 두 커밋을 나란히 보지 못해 놓칠 수 있다. 매번 전체 base...head를 다시 보면 이런 상호작용은 잡지만 같은 지적을 라운드마다 되풀이하는 비용(이미 과제 67-b가 다룬 문제)이 다시 생긴다.
+- **본문 갱신·리뷰 이어가기 모두 "최종 쓰기가 이긴다"이지 낙관적 동시성 제어가 아니다.** 같은 PR을 두 세션이 동시에 재발행하면(드문 경우) 나중에 끝난 쪽의 본문·리뷰 상태가 앞선 쪽을 덮어쓸 수 있다. 세션 하나가 한 번에 하나의 export만 진행하도록 막는 `session.exporting` 잠금은 있지만, 세션이 여럿이면 이 경쟁까지는 막지 않는다.
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
 - StackBlitz, [WebContainers Commercial Usage](https://webcontainers.io/enterprise)

@@ -325,6 +325,16 @@ describe('checkWorkingTree', () => {
     expect((await checkWorkingTree(0, { hasRemote: true, pushed: false })).status).toBe('warn');
     expect((await checkWorkingTree(0, { hasRemote: true, pushed: true })).status).toBe('pass');
   });
+
+  it('assumePushed(올리기 전 미리보기)는 작업 트리가 깨끗하면 아직 올리지 않았어도 통과로 본다(버그 리포트 84: 미리보기 본문이 실제 생성 본문과 달랐다)', async () => {
+    expect((await checkWorkingTree(0, { hasRemote: true, pushed: false }, { assumePushed: true })).status).toBe('pass');
+    // 이미 올렸으면 평소대로 통과다(차이가 없다)
+    expect((await checkWorkingTree(0, { hasRemote: true, pushed: true }, { assumePushed: true })).status).toBe('pass');
+  });
+
+  it('assumePushed라도 체크포인트로 저장하지 않은 변경이 있으면 여전히 실패한다(올려도 그 변경은 안 올라간다)', async () => {
+    expect((await checkWorkingTree(2, { hasRemote: true, pushed: false }, { assumePushed: true })).status).toBe('fail');
+  });
 });
 
 describe('checkReadmeSections', () => {

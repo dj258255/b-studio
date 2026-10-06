@@ -87,6 +87,13 @@ export interface SubmissionInputs {
    * 서비스는 "실행 기록 없음"으로 본다.
    */
   testEvidence?: ChecklistTestEvidence[];
+  /**
+   * "PR 만들기"가 올리고 나면 어차피 올린 상태가 될 것을 미리 반영한다(버그 리포트: 올리기 전 미리보기 본문은
+   * "아직 올리지 않았다"고 9개 중 8개로 보여주는데, 실제로 PR을 만들면 그 사이 올라가 본문이 9/9로 나와
+   * 미리보기와 실제 본문이 달랐다). true면 작업 트리가 깨끗한 한(pendingFilesCount === 0) 원격 올리기 항목을
+   * "올렸다"로 본다 — 올리지 않은 상태를 그대로 보여 줘야 하는 저장소 탭의 "올리기 전 점검"에서는 생략한다
+   */
+  assumePushed?: boolean;
 }
 
 export interface ChecklistRequirement {
@@ -725,14 +732,20 @@ export async function checkCommitHistory(commits: ChecklistCommit[]): Promise<Ch
 // 8. 작업 트리·원격
 // ---------------------------------------------------------------------------
 
-export async function checkWorkingTree(pendingFilesCount: number, repository: ChecklistRepository | undefined): Promise<ChecklistItem> {
+export async function checkWorkingTree(
+  pendingFilesCount: number,
+  repository: ChecklistRepository | undefined,
+  { assumePushed = false }: { assumePushed?: boolean } = {},
+): Promise<ChecklistItem> {
   const id = 'working-tree';
   const title = '작업 트리·원격';
   if (pendingFilesCount > 0) {
     return { id, title, status: 'fail', reason: `체크포인트로 저장하지 않은 변경이 ${pendingFilesCount}개 있습니다.` };
   }
   if (!repository) return { id, title, status: 'skip', reason: '원격 저장소와 연결되지 않은 세션입니다.' };
-  if (!repository.pushed) return { id, title, status: 'warn', reason: '체크포인트는 있지만 아직 원격 브랜치에 올리지 않았습니다.' };
+  // 올리기 전 미리보기(assumePushed): 작업 트리가 깨끗하면 "PR 만들기"를 누르는 순간 바로 올라간다 — 실제로
+  // 만든 PR 본문(올린 뒤 계산)과 미리보기 본문이 이 항목 하나 때문에 달라 보이지 않게 미리 올린 것으로 본다
+  if (!repository.pushed && !assumePushed) return { id, title, status: 'warn', reason: '체크포인트는 있지만 아직 원격 브랜치에 올리지 않았습니다.' };
   return { id, title, status: 'pass', reason: '작업 트리가 깨끗하고 최신 체크포인트를 원격에 올렸습니다.' };
 }
 
@@ -905,7 +918,7 @@ export async function buildSubmissionChecklist(inputs: SubmissionInputs): Promis
     checkSeedData(inputs.root, inputs.hasDatabase),
     checkSecrets(inputs.root),
     checkCommitHistory(inputs.commits),
-    checkWorkingTree(inputs.pendingFilesCount, inputs.repository),
+    checkWorkingTree(inputs.pendingFilesCount, inputs.repository, { assumePushed: inputs.assumePushed }),
     checkReadmeSections(inputs.root, inputs.services),
   ]);
   return { items, score: scoreOf(items) };
