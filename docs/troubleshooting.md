@@ -1877,3 +1877,23 @@ failed to bind port 127.0.0.1:327xx: bind: address already in use
 
 ### 검증
 `apps/studio/lib/submission-checklist.test.ts`에 실측 사례를 그대로 재현한 회귀 테스트를 더했다: `.git/info/exclude`로 뺀 생성 파일의 비밀 값은 fail을 내지 않고 같은 줄이 추적 파일에 있으면 fail을 내는지, 파일 3개·69줄 커밋 하나는 pass이고 300줄을 넘는 커밋 하나는 warn인지, 커밋이 여러 개일 때의 기존 80% 로직은 그대로 동작하는지 확인했다(전체 64건 통과). `pnpm typecheck`(6/6)·`pnpm --filter @b-studio/studio lint`(오류 0)도 확인했다. 실제 Docker·GitHub·모델은 부르지 않았고, 세션 c55417ad의 작업 복사본은 읽기만 했다.
+
+## 54. 요구사항 추적 이슈가 발행 당시 표 그대로 멈춰 있음
+
+**구분:** 도그푸딩 중 발견(테스트 저장소 dj258255/test의 추적 이슈 #19) → 코드로 원인 추적 → 수정
+
+### 현상
+테스트 저장소의 추적 이슈 #19("요구사항: apr")를 열면 2026-10-01 발행 때 만든 표가 그대로 보였다. R2·R19·R20은 "작업 중", R3~R9 등은 "재확인 필요"로 남아 있는데, 정작 세션 c55417ad 기준 요구사항 20개는 전부 "검증됨"이고 하위 이슈도 PR 병합으로 모두 닫혔다. 이슈 자체도 CLOSED 상태에 `updatedAt`이 발행 시각 그대로였다. 추적 이슈 본문 첫 줄은 "상태는 발행 도구가 주기적으로 갱신합니다"라고 안내하는데, 실제로는 갱신되지 않았다.
+
+### 원인
+`buildTrackingIssueBody`(추적 이슈 표를 만드는 함수)를 실제로 호출해 본문을 다시 쓰는 곳은 `publishRequirementIssues`(사람이 "이슈로 발행"을 누를 때) 한 곳뿐이었다. 그 뒤로 "주기적으로 갱신"할 경로가 코드 어디에도 없었다 — 문구만 그렇게 약속하고 있었다. "올리고 PR 만들기"는 추적 이슈를 `관련: #19`로 가리키기만 할 뿐, 그 본문을 다시 쓰지는 않았다.
+
+### 수정
+`apps/studio/lib/server/requirement-issues.ts`에 `refreshTrackingIssueBody()`를 추가해, PR을 실제로 만들 때(`exportSession`, `pullRequest: true`)마다 이미 발행한 추적 이슈의 본문 표를 지금 요구사항 상태로 다시 쓴다. 발행한 적이 없으면 조용히 건너뛰고, 닫힌 이슈도 `state`를 주지 않아 다시 열지 않으며, 갱신이 실패해도 PR 만들기 자체는 그대로 성공시키고 경고만 남긴다. 미리보기(`export/preview`)는 원격에 쓰지 않고 "PR을 만들면 추적 이슈 #N을 갱신합니다"라고 예고만 한다. 본문 첫 줄 문구도 "이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다 + 마지막 갱신 시각"으로 사실과 맞췄다(ADR-123).
+
+### 검증
+- `apps/studio/lib/server/requirement-issues.test.ts`, `apps/studio/lib/server/sessions-tracking-refresh.test.ts`(가짜 저장소 클라이언트, 실 GitHub 호출 없음): 갱신 호출이 나가는지, 닫힌 이슈를 다시 열지 않는지, 갱신 실패가 PR 만들기를 막지 않는지, 미리보기가 원격에 쓰지 않는지 확인.
+- `pnpm typecheck` 6/6, `pnpm --filter @b-studio/studio lint` 오류 0, 전체 `vitest run` 295개 파일 통과.
+
+### 배운 점
+본문에 "자동으로 갱신합니다" 같은 문구를 적을 때는 그 갱신을 실제로 호출하는 지점이 코드에 있는지 먼저 확인해야 한다 — 발행 시점에 한 번 쓴 문구가 그대로 남아 몇 달 뒤에는 거짓 안내가 된다. 갱신 계기는 "주기적으로"보다 사람이 실제로 누르는 버튼(이슈 발행·PR 만들기)에 붙이는 쪽이 새 백그라운드 작업 없이도 확실하다.

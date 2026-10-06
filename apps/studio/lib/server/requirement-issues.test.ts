@@ -34,6 +34,7 @@ import {
   planRequirementIssuePublish,
   publishedTrackingIssue,
   publishRequirementIssues,
+  refreshTrackingIssueBody,
   resolveRequirementConflict,
   syncRequirementIssueStatus,
   type RequirementIssuesContext,
@@ -160,6 +161,54 @@ describe('publishRequirementIssues', () => {
     const updatedBody = (spies.updateIssue.mock.calls[0]![2] as { body: string }).body;
     expect(updatedBody).toContain('rev=7');
     expect(updatedBody).not.toContain('rev=5');
+  });
+});
+
+describe('refreshTrackingIssueBody(PR을 만들 때 추적 이슈 본문을 지금 상태로 다시 쓴다)', () => {
+  it('한 번도 "이슈로 발행"을 한 적이 없으면(추적 이슈가 없으면) 아무것도 쓰지 않는다', async () => {
+    const result = await refreshTrackingIssueBody(ctx, [req()], { R1: '검증됨' });
+    expect(result).toEqual({ updated: false });
+    expect(spies.updateIssue).not.toHaveBeenCalled();
+  });
+
+  it('발행한 뒤에는 추적 이슈 본문 표를 지금 요구사항 상태로 다시 쓴다', async () => {
+    spies.createIssue.mockResolvedValueOnce({ number: 10, url: 'https://github.com/acme/orders/issues/10' }).mockResolvedValueOnce({ number: 1, url: 'https://github.com/acme/orders/issues/1' });
+    await publishRequirementIssues(ctx, [req()], { R1: '미착수' }); // 발행 당시에는 "미착수"였다
+
+    spies.updateIssue.mockClear();
+    const result = await refreshTrackingIssueBody(ctx, [req()], { R1: '검증됨' }); // PR을 만들 때는 "검증됨"
+
+    expect(result).toEqual({ updated: true, issue: 1 });
+    expect(spies.updateIssue).toHaveBeenCalledOnce();
+    const [remoteArg, issueNumber, input] = spies.updateIssue.mock.calls[0]!;
+    expect(remoteArg).toBe(remote);
+    expect(issueNumber).toBe(1);
+    expect((input as { body: string }).body).toContain('검증됨');
+    expect((input as { body: string }).body).toContain('#10'); // 하위 이슈 링크도 그대로 들어간다
+  });
+
+  it('추적 이슈가 닫혀 있어도 본문만 고치고 다시 열지 않는다(state를 주지 않는다)', async () => {
+    spies.createIssue.mockResolvedValueOnce({ number: 10, url: 'https://github.com/acme/orders/issues/10' }).mockResolvedValueOnce({ number: 1, url: 'https://github.com/acme/orders/issues/1' });
+    await publishRequirementIssues(ctx, [req()], { R1: '검증됨' });
+
+    spies.updateIssue.mockClear();
+    await refreshTrackingIssueBody(ctx, [req()], { R1: '검증됨' });
+
+    const input = spies.updateIssue.mock.calls[0]![2] as Record<string, unknown>;
+    expect(input).not.toHaveProperty('state');
+  });
+
+  it('본문 첫 줄이 "주기적으로 갱신"이 아니라 발행·PR 만들기 때 갱신한다는 사실과 마지막 갱신 시각을 말한다', async () => {
+    spies.createIssue.mockResolvedValueOnce({ number: 10, url: 'a' }).mockResolvedValueOnce({ number: 1, url: 'b' });
+    await publishRequirementIssues(ctx, [req()], { R1: '미착수' });
+
+    spies.updateIssue.mockClear();
+    await refreshTrackingIssueBody(ctx, [req()], { R1: '검증됨' });
+
+    const body = (spies.updateIssue.mock.calls[0]![2] as { body: string }).body;
+    expect(body).not.toContain('주기적으로');
+    expect(body).toContain('이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다');
+    expect(body).toMatch(/마지막 갱신: \d{4}-\d{2}-\d{2}T/);
   });
 });
 

@@ -138,6 +138,8 @@ export type ChatItem =
       pullRequestError?: string;
       /** PR에 연결한 이슈 번호들 */
       issues?: number[];
+      /** 요구사항 추적 이슈 본문 갱신 경고(PR 만들기 자체는 됐다) */
+      requirementsTrackingWarning?: string;
     }
   /** main 따라잡기(ADR-076) */
   | {
@@ -492,6 +494,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
             pullRequest: event.pullRequest,
             pullRequestError: event.pullRequestError,
             ...(event.issues?.length ? { issues: event.issues } : {}),
+            ...(event.requirementsTrackingWarning ? { requirementsTrackingWarning: event.requirementsTrackingWarning } : {}),
           },
         ],
       };

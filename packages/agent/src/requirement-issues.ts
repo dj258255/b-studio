@@ -202,16 +202,21 @@ export interface TrackingRow {
   checklistOnly: boolean;
 }
 
-/** 추적 이슈 본문: 요구사항마다 표 한 줄(종류·우선순위·상태·하위 이슈 링크) + could·docs만 담는 체크리스트 절 */
-export function buildTrackingIssueBody(projectName: string, rows: readonly TrackingRow[]): string {
+/**
+ * 추적 이슈 본문: 요구사항마다 표 한 줄(종류·우선순위·상태·하위 이슈 링크) + could·docs만 담는 체크리스트 절.
+ * `updatedAt`을 주면 첫 줄에 마지막 갱신 시각을 적는다 — "주기적으로 갱신"한다는 옛 문구는 사실이 아니었다
+ * (갱신 경로가 따로 없었다, 버그 리포트). 실제로는 "이슈로 발행"·"PR 만들기" 둘 중 하나를 부를 때만 다시 쓴다
+ */
+export function buildTrackingIssueBody(projectName: string, rows: readonly TrackingRow[], options: { updatedAt?: string } = {}): string {
   const tableRows = rows
     .filter((row) => !row.checklistOnly)
     .map((row) => `| ${row.requirement.id} | ${row.requirement.title} | ${row.requirement.kind} | ${row.requirement.priority} | ${row.status} | ${row.issue !== undefined ? `#${row.issue}` : '-'} |`);
   const checklist = rows
     .filter((row) => row.checklistOnly)
     .map((row) => `- [${row.status === '검증됨' ? 'x' : ' '}] ${row.requirement.id}. ${row.requirement.title}`);
+  const updatedNote = options.updatedAt ? ` 마지막 갱신: ${options.updatedAt}.` : '';
   return [
-    `\`${projectName}\`의 \`docs/requirements.md\`에서 자동으로 만든 요구사항 추적 이슈입니다. **파일이 원본입니다** — 상태는 발행 도구가 주기적으로 갱신합니다.`,
+    `\`${projectName}\`의 \`docs/requirements.md\`에서 자동으로 만든 요구사항 추적 이슈입니다. **파일이 원본입니다** — 이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다.${updatedNote}`,
     '',
     '| id | 제목 | 종류 | 우선순위 | 상태 | 하위 이슈 |',
     '| --- | --- | --- | --- | --- | --- |',
