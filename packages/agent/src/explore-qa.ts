@@ -98,7 +98,7 @@ export class QaBrowser {
   readonly #page: Page;
   readonly #allowedOrigins: Set<string>;
   readonly #diagnostics: QaDiagnostics = emptyDiagnostics();
-  readonly #refs = new Map<string, { selector: string; stableSelector?: string }>();
+  readonly #refs = new Map<string, { selector: string; stableSelector?: string; rect: QaElement['rect'] }>();
   readonly #screencast: ReturnType<typeof createScreencast> | undefined;
   #refSeq = 0;
   #viewport: QaViewport;
@@ -195,7 +195,7 @@ export class QaBrowser {
 
   #assignRef(entry: RawElement): QaElement {
     const ref = `e${++this.#refSeq}`;
-    this.#refs.set(ref, { selector: entry.selector, ...(entry.stableSelector ? { stableSelector: entry.stableSelector } : {}) });
+    this.#refs.set(ref, { selector: entry.selector, ...(entry.stableSelector ? { stableSelector: entry.stableSelector } : {}), rect: entry.rect });
     return {
       ref,
       role: entry.role,
@@ -208,46 +208,47 @@ export class QaBrowser {
     };
   }
 
-  #resolve(ref: string): { selector: string; stableSelector?: string } {
+  #resolve(ref: string): { selector: string; stableSelector?: string; rect: QaElement['rect'] } {
     const found = this.#refs.get(ref);
     if (!found) throw new Error(`ref '${ref}'를 찾을 수 없습니다. 화면이 바뀌었을 수 있습니다 — qa_snapshot이나 qa_find로 다시 찾으세요`);
     return found;
   }
 
-  async click(target: { ref?: string; x?: number; y?: number }): Promise<{ stableSelector?: string }> {
+  async click(target: { ref?: string; x?: number; y?: number }): Promise<{ stableSelector?: string; rect?: QaElement['rect'] }> {
     if (target.ref !== undefined) {
       const resolved = this.#resolve(target.ref);
       await this.#page.click(resolved.selector, { timeout: ACTION_TIMEOUT_MS });
-      return { ...(resolved.stableSelector ? { stableSelector: resolved.stableSelector } : {}) };
+      return { ...(resolved.stableSelector ? { stableSelector: resolved.stableSelector } : {}), rect: resolved.rect };
     }
     if (target.x !== undefined && target.y !== undefined) {
       await this.#page.mouse.click(target.x, target.y);
-      return {};
+      return { rect: { x: target.x, y: target.y, width: 0, height: 0 } };
     }
     throw new Error('ref나 (x, y) 좌표 중 하나를 지정해야 합니다');
   }
 
-  async fill(ref: string, text: string): Promise<{ stableSelector?: string }> {
+  async fill(ref: string, text: string): Promise<{ stableSelector?: string; rect: QaElement['rect'] }> {
     const resolved = this.#resolve(ref);
     await this.#page.fill(resolved.selector, text, { timeout: ACTION_TIMEOUT_MS });
-    return { ...(resolved.stableSelector ? { stableSelector: resolved.stableSelector } : {}) };
+    return { ...(resolved.stableSelector ? { stableSelector: resolved.stableSelector } : {}), rect: resolved.rect };
   }
 
   /** fill과 달리 글자를 하나씩 쳐서 keyup 핸들러(자동완성 등)가 걸리게 한다 */
-  async type(ref: string, text: string): Promise<{ stableSelector?: string }> {
+  async type(ref: string, text: string): Promise<{ stableSelector?: string; rect: QaElement['rect'] }> {
     const resolved = this.#resolve(ref);
     await this.#page.focus(resolved.selector, { timeout: ACTION_TIMEOUT_MS });
     await this.#page.keyboard.type(text, { delay: 10 });
-    return { ...(resolved.stableSelector ? { stableSelector: resolved.stableSelector } : {}) };
+    return { ...(resolved.stableSelector ? { stableSelector: resolved.stableSelector } : {}), rect: resolved.rect };
   }
 
   async press(key: string): Promise<void> {
     await this.#page.keyboard.press(key);
   }
 
-  async hover(ref: string): Promise<void> {
+  async hover(ref: string): Promise<{ rect: QaElement['rect'] }> {
     const resolved = this.#resolve(ref);
     await this.#page.hover(resolved.selector, { timeout: ACTION_TIMEOUT_MS });
+    return { rect: resolved.rect };
   }
 
   async scroll(options: { ref?: string; direction?: 'up' | 'down'; amount?: number }): Promise<void> {
@@ -557,6 +558,8 @@ export interface QaActionRecord {
   stableSelector?: string;
   /** 이 행동 직후 쌓인 진단 신호 개수(그 전까지 누적과의 차이) */
   newDiagnosticsCount: number;
+  /** 행동이 가리킨 요소의 뷰포트 영역(있으면). QA 탭이 지금 누른 위치에 상자를 그리는 데 쓴다 */
+  targetRect?: { x: number; y: number; width: number; height: number };
   url: string;
   at: number;
 }
@@ -570,6 +573,7 @@ export interface QaToolOutcome {
   image?: { data: Buffer; mediaType: 'image/jpeg' };
   stableSelector?: string;
   resolvedSelector?: string;
+  rect?: { x: number; y: number; width: number; height: number };
 }
 
 /** 도구 이름과 입력을 받아 QaBrowser에서 실제로 실행한다. 루프(runExploreQa)와 claude-code 실행기(explore-qa-claude-code.ts)가 함께 쓴다 */
@@ -592,18 +596,18 @@ export async function executeQaTool(name: string, input: Record<string, unknown>
         const ref = optionalString(input, 'ref');
         const x = optionalNumber(input, 'x');
         const y = optionalNumber(input, 'y');
-        const { stableSelector } = await browser.click({ ...(ref !== undefined ? { ref } : {}), ...(x !== undefined ? { x } : {}), ...(y !== undefined ? { y } : {}) });
-        return { ok: true, text: ref ? `${ref}를 클릭했습니다` : `(${x}, ${y})를 클릭했습니다`, ...(stableSelector ? { stableSelector } : {}) };
+        const { stableSelector, rect } = await browser.click({ ...(ref !== undefined ? { ref } : {}), ...(x !== undefined ? { x } : {}), ...(y !== undefined ? { y } : {}) });
+        return { ok: true, text: ref ? `${ref}를 클릭했습니다` : `(${x}, ${y})를 클릭했습니다`, ...(stableSelector ? { stableSelector } : {}), ...(rect ? { rect } : {}) };
       }
       case 'qa_fill': {
         const ref = requireString(input, 'ref');
-        const { stableSelector } = await browser.fill(ref, requireString(input, 'text'));
-        return { ok: true, text: `${ref}에 값을 채웠습니다`, ...(stableSelector ? { stableSelector } : {}) };
+        const { stableSelector, rect } = await browser.fill(ref, requireString(input, 'text'));
+        return { ok: true, text: `${ref}에 값을 채웠습니다`, ...(stableSelector ? { stableSelector } : {}), rect };
       }
       case 'qa_type': {
         const ref = requireString(input, 'ref');
-        const { stableSelector } = await browser.type(ref, requireString(input, 'text'));
-        return { ok: true, text: `${ref}에 입력했습니다`, ...(stableSelector ? { stableSelector } : {}) };
+        const { stableSelector, rect } = await browser.type(ref, requireString(input, 'text'));
+        return { ok: true, text: `${ref}에 입력했습니다`, ...(stableSelector ? { stableSelector } : {}), rect };
       }
       case 'qa_press': {
         const key = requireString(input, 'key');
@@ -612,8 +616,8 @@ export async function executeQaTool(name: string, input: Record<string, unknown>
       }
       case 'qa_hover': {
         const ref = requireString(input, 'ref');
-        await browser.hover(ref);
-        return { ok: true, text: `${ref} 위에 마우스를 올렸습니다` };
+        const { rect } = await browser.hover(ref);
+        return { ok: true, text: `${ref} 위에 마우스를 올렸습니다`, rect };
       }
       case 'qa_scroll': {
         const ref = optionalString(input, 'ref');
@@ -817,6 +821,7 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
           ...(outcome.ok ? {} : { detail: outcome.text }),
           ...(outcome.resolvedSelector ? { resolvedSelector: outcome.resolvedSelector } : {}),
           ...(outcome.stableSelector ? { stableSelector: outcome.stableSelector } : {}),
+          ...(outcome.rect ? { targetRect: outcome.rect } : {}),
           newDiagnosticsCount: Math.max(0, total - previousDiagnosticsCount),
           url: browser.url,
           at: Date.now(),

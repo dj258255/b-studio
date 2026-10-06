@@ -128,6 +128,7 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
           ...(outcome.ok ? {} : { detail: outcome.text }),
           ...(outcome.resolvedSelector ? { resolvedSelector: outcome.resolvedSelector } : {}),
           ...(outcome.stableSelector ? { stableSelector: outcome.stableSelector } : {}),
+          ...(outcome.rect ? { targetRect: outcome.rect } : {}),
           newDiagnosticsCount: Math.max(0, total - previousDiagnosticsCount),
           url: browser.url,
           at: Date.now(),
