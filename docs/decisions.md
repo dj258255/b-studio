@@ -148,6 +148,7 @@
 - [ADR-125 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-125-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
 - [ADR-126 실행 탭에 "내 환경" 관찰 탭을 더한다: 사용자가 직접 띄운 서비스는 보되 건드리지 않는다](#adr-126-실행-탭에-내-환경-관찰-탭을-더한다-사용자가-직접-띄운-서비스는-보되-건드리지-않는다)
 - [ADR-127 QA 탭에 탐색형 QA를 더한다: 모델이 접근성 트리로 화면을 보고 스스로 조작하되, 완료 선언만으로 통과시키지 않는다](#adr-127-qa-탭에-탐색형-qa를-더한다-모델이-접근성-트리로-화면을-보고-스스로-조작하되-완료-선언만으로-통과시키지-않는다)
+- [ADR-0XX 폴더 열기 감지를 실제 저장소 구조에 맞춘다: Gradle·Maven 래퍼를 상위 폴더까지 찾고, 모노레포 앱 폴더를 두 단계까지 본다](#adr-0xx-폴더-열기-감지를-실제-저장소-구조에-맞춘다-gradlemaven-래퍼를-상위-폴더까지-찾고-모노레포-앱-폴더를-두-단계까지-본다)
 
 ---
 
@@ -5319,3 +5320,40 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **단계 타임라인 썸네일은 산출물 보관 한도(세션당 개수·용량)의 적용 대상이다.** 오래 반복해 탐색하면 오래된 썸네일부터 지워질 수 있다 — 기존 산출물 정리 규칙(ADR-099가 언급한 "마지막 하나는 남긴다" 관례)을 그대로 따른다.
 - **원격 브라우저(remote-browser.ts)와 완전히 같은 CDP 좌표계·오버레이 측정 로직을 다시 쓰지 않고 간단한 비율 계산으로 대체했다.** 탐색형 QA의 오버레이는 "지금 어디를 눌렀는지" 참고용이라, 원격 브라우저의 정밀한 드래그 선택 오버레이(`element-pick-geometry.ts`)만큼 정교할 필요가 없다고 봤다.
 - **실행이 쓴 토큰은 결과 카드에만 보여주고, 프로젝트 토큰 보고서나 사람별 한도에는 합산하지 않는다.** 그 집계(`chargeUser`, `session.snapshot.tokens`)는 대화 "실행"(`ActiveRun`, 취소·예산 한도·되돌리기가 함께 얽힌 구조)을 전제로 하고, 탐색형 QA는 그와 별개의 짧은 백그라운드 실행이다. `ActiveRun` 흉내를 내 끼워 맞추는 것보다, 지금은 결과 카드에 그 실행만의 토큰을 보여주는 선에서 멈추고 한계로 적어 둔다.
+
+---
+
+## ADR-0XX 폴더 열기 감지를 실제 저장소 구조에 맞춘다: Gradle·Maven 래퍼를 상위 폴더까지 찾고, 모노레포 앱 폴더를 두 단계까지 본다
+
+상태: 채택
+관련: ADR-067, ADR-073, ADR-083, ADR-088
+
+### 맥락
+- 실제 저장소(`pay`)를 읽기 전용 미리보기(`POST /api/projects/open`)로 열어 두 가지 문제를 확인했다.
+  1. **Gradle 래퍼가 서비스 폴더가 아니라 저장소 루트에 있었다.** pay는 `gradlew`·`gradle/wrapper/gradle-wrapper.properties`(Gradle 8.12)를 저장소 루트에 두고, 실제 Gradle 프로젝트 루트(`commerce/`, 자기 `settings.gradle`은 있다)에는 래퍼를 복사해 두지 않았다 — `./gradlew -p commerce test`처럼 상위 래퍼를 `-p`로 가리켜 쓰는 구조다. 기존 `detectSpring`(`project-detect.ts`)은 서비스 폴더 자신에서만 `gradlew`·`mvnw`를 찾아, 못 찾으면 "래퍼가 없어 `gradle:jdk21` 이미지의 도구로 실행합니다"로 잡았다 — 이미지에 든 Gradle 버전이 래퍼(8.12)와 다르면 빌드 결과가 달라질 수 있다.
+  2. **서비스가 `commerce` 하나만 잡혔다.** pay의 Next.js 앱은 `apps/web/`에 있는데, 기존 탐색은 프로젝트 폴더 바로 아래와 그 한 단계 아래만 봐서 `apps/`(컨테이너 폴더) 자체는 마커 파일이 없어 건너뛰고, `apps/web`까지는 내려가 보지 않았다.
+- 같은 저장소에 `commerce/consumer-app/`(자기 `settings.gradle`이 있는 독립 Gradle 빌드)처럼 "이미 찾은 서비스 폴더 바로 밑에 또 다른 빌드가 있는" 구조도 있었다 — 두 단계 탐색을 넓히면 이런 폴더도 걸리는데, `commerce`를 고치는 세션이 `consumer-app`까지 매번 같이 띄우는 것은 원치 않을 수 있다(ADR-083 서비스 선택).
+- `tools/`·`k6/`·`scripts/`·`docs/` 같은 폴더도 저장소에 있다. `tools/fds/requirements.txt`처럼 두 단계 더 보면 걸릴 수 있는 마커 파일이 실제로 존재해(FDS 분석 스크립트가 fastapi를 쓴다), 탐색 범위를 넓히면서 이런 노이즈까지 서비스로 잡지 않게 막아야 했다.
+- Next.js 앱(`apps/web`)은 `package-lock.json`(npm)과 `scripts/dev.mjs`(셸의 `NODE_ENV=production`을 `next dev`가 물려받아 500을 내는 것을 막으려고 `NODE_ENV=development`를 고정하는 래퍼, `package.json`의 `dev` 스크립트가 이것을 가리킨다)를 함께 쓰고 있었다. 기존 `detectNode`는 패키지 관리자는 잠금 파일로 이미 잘 골랐지만(이 부분은 원래도 맞았다), `dev` 스크립트를 쓰지 않고 항상 `next dev --hostname 0.0.0.0 --port 3000`을 직접 불러 이 래퍼를 건너뛰고 있었다.
+
+### 결정
+1. **Gradle·Maven 래퍼를 서비스 폴더에서 저장소 루트까지 거슬러 올라가며 찾는다(`findWrapperDir`).** 찾은 폴더가 서비스 폴더 자신이면 예전과 같고, 상위 폴더면 그 폴더로 옮겨 가 Gradle은 `-p <서비스 상대 경로>`로, Maven은 `-f <서비스 상대 경로>`로 서비스 폴더를 가리켜 실행한다(`cd /workspace && exec ./gradlew -p commerce bootRun --no-daemon --console=plain`). 두 플래그 모두 리액터(다중 모듈 선언) 관계와 무관하게 "이 디렉터리가 프로젝트다"로 동작해, `commerce`처럼 자기 `settings.gradle`은 있지만 `gradlew`가 없는 독립 빌드에도, 진짜 멀티 모듈 서브프로젝트에도 똑같이 먹힌다. 컨테이너 마운트는 ADR-088 그대로(프로젝트 루트 전체를 `/workspace`로 마운트)라 바꿀 것이 없었다 — `cd`만 보태면 된다. 래퍼를 어디서든 찾았으면 이미지는 `eclipse-temurin:<java>-jdk`(JDK만)로 충분하다. 래퍼가 서비스 폴더에도 상위 어디에도 없을 때만 예전처럼 `gradle:jdk<java>`/`maven:3-eclipse-temurin-<java>` 이미지의 도구를 쓰고, "버전이 다를 수 있다"고 알린다. 기존에 "루트 settings.gradle이 이 폴더를 서브프로젝트로 포함하면 실패할 수 있다"고만 적던 안내는, 래퍼를 실제로 못 찾았을 때만 의미가 있어(찾았으면 위 방식으로 이미 제대로 실행한다) 그 조건에서만 남겼다.
+2. **서비스 후보를 두 단계까지 넓히되, 컨테이너 폴더 이름으로 범위를 좁힌다.** 프로젝트 폴더 바로 아래가 단일 앱이 아니면(모노레포로 보이면), `apps`·`services`·`packages`(흔한 컨테이너 폴더 이름)의 자식 폴더까지 보고, 이미 depth-1에서 찾은 서비스 폴더(`commerce` 등) 바로 아래의 또 다른 빌드까지 본다. `frontend`·`backend`·`web` 같은 이름은 이미 depth-1 스캔이 모든 자식 폴더를 보므로 별도 처리가 필요 없었다. `k6`·`tools`·`scripts`·`docs`·`examples`·`fixtures`(와 단수형)는 어느 단계에서도 후보로 보지 않는다 — `tools/fds/requirements.txt`가 실제로 fastapi를 쓰는데도 `tools`가 컨테이너 폴더 목록에 없어 그 안을 보지 않으므로 잡히지 않는다. 너무 많이 잡히지 않게 한 프로젝트당 서비스 수를 6개로 자른다(`MAX_DETECTED_SERVICES`).
+3. **이미 찾은 서비스 하위의 또 다른 빌드는 넣되, 기본으로 띄우지 않는다.** `commerce/consumer-app`처럼 depth-1 서비스 폴더 바로 아래에서 찾은 빌드는 별도 서비스로 `studio.yaml`에 넣어 사람이 켜고 쓸 수 있게 하되, `DetectedService.defaultSelected = false`를 달아 ADR-083의 서비스 선택 초기값에서는 뺀다. `project-registry.ts`의 `registerFolder`가 부가 서비스가 하나도 없어도(`infra.length === 0`) `defaultSelected: false`가 붙은 서비스가 있으면 서비스 선택(`services.json`)을 적어, 처음 여는 순간부터 `consumer-app` 같은 서비스가 `commerce`와 함께 뜨지 않는다 — studio.yaml·compose.b-studio.yaml 자체는 평소처럼 관리형 서비스로 선언하므로, 화면의 서비스 메뉴에서 언제든 켤 수 있다. 스키마(`ManagedServiceSchema`)에 "기본 꺼짐"이라는 개념을 추가하지 않고 기존 서비스 선택 저장 파일만으로 구현했다 — 이미 있는 메커니즘(ADR-083)을 그대로 쓰는 쪽이 studio.yaml 스키마를 넓히는 것보다 작은 변경이었다.
+4. **Next.js·Vite의 `package.json`에 `dev` 스크립트가 있으면 직접 `next`·`vite`를 부르지 않고 그 스크립트를 쓴다.** `scripts/dev.mjs`처럼 `NODE_ENV` 고정 같은 사용자 로직을 b-studio가 깔아뭉개지 않기 위해서다. 포트는 `PORT` 환경 변수로 맞추고(Next.js CLI는 `-p`가 없으면 `process.env.PORT`를 기본값으로 읽는다는 공식 동작을 그대로 쓴다), 스크립트가 next·vite를 바로 부르는 흔한 경우(`"dev": "next dev"`/`"dev": "vite"`)에는 `npm run dev -- --hostname 0.0.0.0 --port 3000`처럼 `--` 뒤에 기존과 같은 플래그를 그대로 전달해 바인드 주소까지 맞춘다 — `dev.mjs`처럼 인자를 읽지 않는 래퍼라도 무시될 뿐 해롭지 않다. `dev` 스크립트가 없으면(기존 테스트 픽스처처럼) 예전과 똑같이 직접 호출한다(회귀 없음). 패키지 관리자 선택(잠금 파일 기준)은 원래도 맞게 동작하고 있었다 — pay의 `apps/web`은 `package-lock.json`만 있어 이미 npm으로 골랐다.
+
+### 측정(읽기 전용 미리보기, pay 폴더에 쓰지 않음)
+- `detectProject('/Users/beomsu/Desktop/pay')`를 워크트리에서 tsx로 직접 불러 확인했다(파일을 만들거나 등록하지 않았다). 서비스 3개를 찾았다: `commerce`(spring-boot, `commerce`, defaultSelected 없음=기본 켬), `web`(nextjs, `apps/web`, defaultSelected 없음=기본 켬), `consumer-app`(spring-boot, `commerce/consumer-app`, `defaultSelected: false`). 부가 서비스는 compose.yaml에서 mysql·redis·kafka를 가져왔고(기존 ADR-073 경로, 이번에 손대지 않았다), `defaultInfra`는 `commerce`가 셋 다 기대 Kafka·Redis·MySQL 전부로 나왔다.
+- `commerce`의 생성 `Dockerfile.b-studio`는 `FROM eclipse-temurin:21-jdk`(JDK만)·`CMD ["sh", "-c", "cd /workspace && exec ./gradlew -p commerce bootRun --no-daemon --console=plain"]`였다. `consumer-app`도 같은 방식으로 `-p commerce/consumer-app`을 썼다. `web`의 `Dockerfile.b-studio`는 `CMD ["sh", "-c", "npm ci && exec npm run dev -- --hostname 0.0.0.0 --port 3000"]`이고 `compose.b-studio.yaml`의 `web` 서비스에 `PORT: 3000` 환경 변수가 붙었다.
+- `tools/`·`k6/`·`docs/`·`scripts/`는 어느 서비스로도 잡히지 않았다(`tools/fds/requirements.txt`의 fastapi 포함).
+
+### 검증
+- `apps/studio/lib/server/project-detect.test.ts`에 세 묶음을 추가했다: (1) 래퍼가 저장소 루트에만 있을 때 Gradle·Maven 각각 `-p`/`-f`로 실행하는 것과 이미지가 JDK뿐인 것, 래퍼가 어디에도 없을 때 예전처럼 이미지 도구를 쓰는 것. (2) 루트 래퍼 + `commerce`(자기 settings.gradle) + `commerce/consumer-app`(별도 빌드) + `apps/web`(Next.js, npm) + `k6`/`tools`(FastAPI 마커 포함)/`docs`/`scripts`로 pay 구조를 흉내 낸 픽스처에서 `commerce`·`web`을 찾고 `consumer-app`은 `defaultSelected: false`로 더하며 노이즈 폴더는 전부 건너뛰는 것, 서비스가 많을 때 6개로 자르는 것, 등록(`registerFolder`) 때 `defaultSelected: false` 서비스가 서비스 선택에서 실제로 빠지는 것. (3) `scripts.dev`가 있으면 그 스크립트를 쓰고 `PORT` 환경 변수를 넣는 것.
+- 실제 모델·실제 GitHub·3000 포트 서버는 부르지 않았다. pay 폴더에는 읽기만 했다(미리보기 함수 호출, 파일 생성·등록 없음).
+- `pnpm typecheck`(6/6)·관련 vitest(`apps/studio` 전체 1727건)·`pnpm --filter @b-studio/studio lint`(오류 0)를 모두 통과했다.
+
+### 감수한 트레이드오프
+- **두 단계 탐색은 `apps`·`services`·`packages`라는 이름에만 반응한다.** 다른 이름의 컨테이너 폴더(예: `modules`)는 여전히 못 찾는다 — 목록을 늘리면 되지만, 너무 넓히면 노이즈 폴더 오탐 위험이 커진다.
+- **세션 "테스트" 탭의 러너(`sessions.ts`의 `hasBuildWrapper`/`buildTestRunPlan`)는 이번에 고치지 않았다.** 거기도 서비스 폴더 자신에서만 `gradlew`/`mvnw`를 찾는 같은 한계가 있지만, 이번 범위는 폴더 열기 감지(`project-detect.ts`)로 좁혔다 — 다음에 같은 문제가 보고되면 같은 `findWrapperDir` 방식을 옮겨 쓸 수 있다.
+- **`defaultSelected: false`는 studio.yaml 스키마가 아니라 등록 시점의 서비스 선택 파일에만 반영된다.** 서비스 선택 저장 파일이 사람이나 다른 경로로 지워지면(드문 경우), 그다음부터는 `@b-studio/spec`의 `defaultServiceSelection`이 관리형 서비스 전부를 기본값으로 돌려주므로 `consumer-app`도 다시 기본으로 뜬다 — 처음 등록 때만 확실하게 꺼 둔다.
+- **Next.js 외 프레임워크의 커스텀 dev 스크립트가 바인드 주소까지 알아서 맞추는지는 보장하지 않는다.** `--` 뒤 플래그 전달은 스크립트가 인자를 그대로 넘기는 얇은 래퍼일 때만 효과가 있다 — `dev.mjs`처럼 인자를 아예 읽지 않는 스크립트는 `PORT` 환경 변수에만 의존하는데, Next.js는 공식 동작으로 이를 지원하지만 그 밖의 프레임워크는 확인하지 않았다.
