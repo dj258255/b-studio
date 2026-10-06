@@ -25,17 +25,27 @@
 
 게이트를 통과한 파일과 그 시점의 데이터베이스 상태만 체크포인트로 저장합니다. 실패하거나 취소한 변경은 되돌립니다. Git 커밋과 PostgreSQL 덤프를 같은 시점으로 묶어 두므로 세션이 죽어도 마지막으로 검증된 상태로 복구합니다.
 
-## 실제로 재 보니
+## 핵심 결과
 
-기능이 나아졌다는 주장은 같은 과제를 반복 실행한 결과로만 합니다. 가설은 실행 전에 이슈에 먼저 적습니다. 성공 비교는 Fisher 정확 검정으로 판정합니다. 실험 열한 번의 질문과 결과는 [실험 기록](docs/experiments/README.md)에 모두 있습니다. 여기서는 방향을 바꾼 네 가지만 추립니다.
+기능이 나아졌다는 주장은 같은 과제를 반복 실행한 결과로만 합니다. 가설은 실행 전에 이슈에 먼저 적고, 성공 비교는 Fisher 정확 검정으로 판정합니다. 실험 열한 번의 질문과 결과는 모두 [실험 기록](docs/experiments/README.md)에 있습니다. 아래는 그중 판단이 갈렸던 문제를 **어려운 순서로** 적었습니다. 위쪽일수록 실험하거나 실제 환경에서 재현하지 않으면 고를 수 없었던 문제이고, 아래로 갈수록 기반 지식으로 답이 좁혀집니다.
 
-게이트를 통과한 실패가 있었습니다. 엮인 과제를 레인으로 나눠 병렬 실행하니 4/9만 성공했습니다. 실패 5건은 전부 레인 경계의 필드 불일치였고 다섯 건 모두 각자의 게이트는 통과한 상태였습니다([E1](docs/experiments/2026-09-29-e1-isolated-parallel-baseline.md)). 레인이 API 계약을 먼저 게시하게 바꾸자 9/9가 됐습니다(계약 공유 17/18 대 비공유 9/18, p = 0.007, [E2](docs/experiments/2026-09-29-e2-coordination-strategies.md) · ADR-059).
+| 문제 | 무엇이 충돌했나 | 고른 것과 그 대가 | 근거 |
+|---|---|---|---|
+| **엮인 작업의 병렬화**<br>인터페이스로 묶인 두 작업(api 응답 ↔ web 화면)을 레인으로 나눠 병렬 실행하면 통합에서 맞물리는가 | 병렬 속도 ↔ 레인 경계에서 생기는 통합 실패 | 격리 병렬 **4/9**(실패 5건 모두 레인 경계의 필드 불일치, 5건 다 **각자 게이트는 통과한 거짓 성공**). 계약을 먼저 게시하는 전략으로 **9/9**. 계약 공유 17/18 대 비공유 9/18(**p = 0.007**) | [E1](docs/experiments/2026-09-29-e1-isolated-parallel-baseline.md) · [E2](docs/experiments/2026-09-29-e2-coordination-strategies.md) · [ADR-059](docs/decisions.md#adr-059-계약으로-엮인-병렬-작업은-계약을-먼저-게시하고s2-조율은-켤-때만-한다) |
+| **샌드박스 포트·DNS: 실제 환경에서만 드러난 제약**<br>포트가 비었는지 호스트에서 확인했는데 실제 바인드는 공유 VM 안에서 일어났다. 403 하나로는 정책 위반인지 상류 DNS 장애인지 구별이 안 됐다 | 확인의 단순함 ↔ 정확함(바인드가 실제로 일어나는 자리를 보기). 보안 경계 유지(사설 주소 재바인딩 방어) ↔ 장애 원인 구분 | 포트는 40000~59999 대역을 먼저 시도하고 충돌하면 세트 전체를 재시도(최대 3회) — **재시도가 실제 방어선**. DNS 조회 실패는 403 대신 502 + 전용 헤더로 나누고 감사 로그 `decision`을 `error`로 분리. 벤치는 environment가 연달아 2회 실패하면 멈춰, **18회 중 14회·약 5시간** 반복된 사고를 다음부터 막음 | [ADR-121](docs/decisions.md#adr-121-미리-고를-호스트-포트는-4000059999-대역에서-먼저-찾고-그래도-충돌하면-전부-다시-뽑아-재시도한다) · [ADR-124](docs/decisions.md#adr-124-네트워크-상류-장애dns-실패와-정책-거부를-구별하고-벤치는-environment-연속-실패에서-멈춘다) |
+| **토큰 2배의 원인**<br>같은 과제에서 b-studio가 그냥 Claude Code보다 토큰을 2배 쓴다. 고정 문맥 때문인가, 반복 읽기 때문인가 | 신뢰성(게이트·자가 확인이 많을수록 안전) ↔ 토큰 비용 | 호출 단위로 쪼개 보니 고정 문맥은 오히려 **1/6**, 추가분의 **78%가 도구 결과 재읽기**(32.7%가 게이트와 겹치는 `run_in_service` 확인). 겹치는 자가 확인을 줄이자(lean) 성공률 유지(9/9)하며 토큰 **−41%**(24.9만, p = 0.164라 9쌍으로는 경향까지만) | [E3](docs/experiments/2026-09-29-e3-baseline-budget-escalation.md) · [E6](docs/experiments/2026-09-30-e6-token-breakdown.md) · [E7](docs/experiments/2026-09-30-e7-lean-self-check.md) · [ADR-064](docs/decisions.md#adr-064-에이전트는-게이트가-하는-확인을-되풀이하지-않는다자가-확인-lean을-기본으로) |
+| **계획-실행 분리 기각**<br>계획은 큰 모델, 실행은 작은 모델로 나누면 비용이 줄어드는가 | "모델을 나누면 싸진다"는 통념 ↔ 작은 과제에서 생기는 계획 오버헤드 | 분리 시 성공 1건당 **$1.49**, Sonnet 단독($0.23)의 **538%**(9쌍 중 8쌍에서 분리가 비쌈, p = 0.008). 계획을 "요청 범위의 최소 변경"으로 좁혀도 $0.30으로 Sonnet 단독보다 **27% 비쌈**(계획 고정비 43%) → 작은 과제는 기본값을 끈 채 유지 | [E8](docs/experiments/2026-09-30-e8-plan-execute-split.md) · [E9](docs/experiments/2026-10-01-e9-narrow-plan.md) · [ADR-075](docs/decisions.md#adr-075-계획은-큰-모델로-한-번-세우고-실행은-작은-모델로-한다) |
+| **자동 모델 선택 기각**<br>claude-code의 자동 모델 선택(auto)이 Sonnet 고정보다 싼가 | "똑똑한 라우팅이 알아서 싸게 고를 것"이라는 가정 ↔ 위험 키워드 판정의 실제 동작 | auto **8/9·$0.446**, Sonnet **7/9·$0.234**(**+91%**, 성공률 차이는 p = 1.0). 비용 차는 전부 한 과제(order-summary)에서 나왔고, 원인은 샘플 값 "결제 완료(PAID)"의 "결제"가 위험 키워드에 걸려 3번 모두 Opus로 전환(실제 모델 전환은 0회)이었다 → 결제 도메인에는 auto를 권하지 않고 Sonnet 고정 유지 | [E10](docs/experiments/2026-10-07-e10-cli-auto-router.md) |
+| **게시판 topology 기각**<br>조율 게시판을 star에서 mesh로 넓히면 통신량을 줄이면서 성공률을 지키는가 | "덜 제한하면 통신이 준다"는 가설 ↔ 실제 읽기 시점 | mesh **7/9** 대 star **5/9**(p = 0.620, 유의하지 않음). mesh의 읽기 바이트 중앙값이 **0** — 계약을 게시하기 전에 이미 읽어서 쳐낼 통신이 거의 없었다. 활성 성분은 topology가 아니라 읽는 시점 → S2(계약 먼저) 기본 유지 | [E11](docs/experiments/2026-10-05-e11-board-topology.md) · [ADR-059](docs/decisions.md#adr-059-계약으로-엮인-병렬-작업은-계약을-먼저-게시하고s2-조율은-켤-때만-한다) |
 
-토큰을 2배 쓰는 이유를 호출 단위로 추적했습니다. 같은 과제에서 b-studio는 그냥 Claude Code보다 성공 1건당 토큰을 2배 썼습니다(약 44만 대 22만, [E3](docs/experiments/2026-09-29-e3-baseline-budget-escalation.md)). 호출마다 기록해 나눠 보니 고정 문맥은 오히려 1/6이었습니다. 추가분의 78%가 도구 결과를 다시 읽는 양이었습니다([E6](docs/experiments/2026-09-30-e6-token-breakdown.md)). 게이트와 겹치는 자가 확인을 줄이자 성공률 유지(9/9) 상태에서 41% 내려왔습니다(24.9만, p = 0.164라 9쌍으로는 경향까지만, [E7](docs/experiments/2026-09-30-e7-lean-self-check.md) · ADR-064).
+**위 여섯은 실험하거나 실제 환경에서 재현하지 않으면 고를 수 없었다.** 아래 둘은 기반 지식으로 답이 좁혀지지만, 그 지식이 실제 결정에 쓰였는지는 수치로 남겼다.
 
-가설이 기각되자 기본값을 껐습니다. 계획은 큰 모델, 실행은 작은 모델로 나누면 30% 싸질 것이라고 이슈에 먼저 적고 돌렸습니다. 결과는 반대로 성공 1건당 $1.49, Sonnet 단독($0.23)의 538% 비용이었습니다(9쌍 중 8쌍에서 분리가 비쌈, p = 0.008, [E8](docs/experiments/2026-09-30-e8-plan-execute-split.md)). 계획을 "요청 범위의 최소 변경"으로 좁히자 $0.30까지 돌아왔지만 여전히 단독보다 27% 비쌌습니다([E9](docs/experiments/2026-10-01-e9-narrow-plan.md)). 작은 과제의 기본값은 끈 채로 뒀습니다(ADR-075).
+| 문제 | 근거 지식 | 적용과 대가 | 근거 |
+|---|---|---|---|
+| **완료 선언과 검증 분리**<br>에이전트의 "끝났다"는 보고를 완료 조건으로 쓸 수 있는가 | 자동화의 완료 보고와 결과 정합성은 분리해야 한다 | 모델 호출을 인터페이스로 분리하고, `end_turn` 뒤 게이트가 재시작·계약·화면·테스트·리뷰를 직접 실행한 다음에만 체크포인트. 실행 수단이 없는 필수 단계는 설정을 불러올 때 거부해 "0건 실패"가 "검사 안 함"처럼 보이지 않게 함. 대가는 요청마다 선언한 테스트 전체를 다시 돌려 게이트가 느려지는 것 | [ADR-010](docs/decisions.md#adr-010-에이전트-루프-직접-작성한-루프와-스튜디오-검증-게이트) · [ADR-049](docs/decisions.md#adr-049-워크플로-강제-필수-단계는-게이트가-직접-실행해-통과-기록을-남겨야-완료다) |
+| **체크포인트는 Git+DB 묶음**<br>검증 통과 변경만 남기고 실패분은 되돌리려면 무엇을 단위로 묶나 | Git 커밋을 체크포인트로 쓰는 버전 관리 패턴 + 같은 시점 스냅숏으로 상태 일관성 유지 | 통과 시 커밋, 실패 시 `reset --hard`+`clean -fd`로 되돌리고 같은 시점 PostgreSQL 덤프를 같이 저장. 사용자 전역 훅·서명 설정과 부딪히지 않도록 전용 커밋 설정을 둠. 대가는 되돌리기가 이후 체크포인트를 지우는 작업이라 화면에서 한 번 더 확인받는 것 | [ADR-018](docs/decisions.md#adr-018-세션-체크포인트-검증을-통과한-변경만-남긴다) |
 
-명세 문서 하나로 Spring Boot + Next.js + PostgreSQL 게시판을 b-studio 화면만으로 끝까지 만들었습니다. 요구사항 20개 추출, 이슈 20개 발행, 레인 3개 통합, 테스트 87개 통과, PR 생성과 자동 리뷰 2라운드, 병합 뒤 새 세션의 화면 확인까지 한 바퀴입니다. 걸린 마찰 70건을 번호 붙여 기록했습니다. 오해였던 1건을 뺀 69건을 PR 45개로 고쳤습니다([검증 기록](docs/verification.md#명세-기반-풀스택-도그푸딩)).
+명세 문서 하나로 Spring Boot + Next.js + PostgreSQL 게시판을 b-studio 화면만으로 끝까지 만들었습니다. 요구사항 20개 추출, 이슈 20개 발행, 레인 3개 통합, PR 생성과 자동 리뷰, 병합 뒤 새 세션의 화면 확인까지 한 바퀴를 두 번 돌렸습니다. 둘째 바퀴는 첫 바퀴가 병합된 main에서 요청 1건을 다시 PR까지 보낸 것입니다. 두 바퀴에서 걸린 마찰 84건을 번호 붙여 기록했고, 오해였던 1건을 뺀 83건을 b-studio PR 53개(#299~#387, #409·410·413·415·417·421·425·427)와 실행 환경 업그레이드 1건(lima·colima)으로 고쳤습니다. 테스트는 끝까지 91개 통과(백엔드 49·프론트 42)로 늘었습니다([검증 기록](docs/verification.md#명세-기반-풀스택-도그푸딩)).
 
 ## 그 밖의 기능
 
@@ -49,14 +59,7 @@
 
 ## 빠른 시작
 
-### 준비물
-
-- Node.js 22 이상
-- pnpm 10.29.3
-- Docker Desktop 또는 Colima
-- 에이전트를 실행하려면 `ANTHROPIC_API_KEY` 또는 로그인된 Claude Code CLI
-
-### 설치와 실행
+준비물은 Node.js 22 이상, pnpm 10.29.3, Docker Desktop 또는 Colima입니다. 에이전트를 실행하려면 `ANTHROPIC_API_KEY` 또는 로그인된 Claude Code CLI가 필요합니다.
 
 ```bash
 git clone https://github.com/dj258255/b-studio.git
@@ -66,75 +69,11 @@ pnpm install
 pnpm studio up examples/orders
 ```
 
-준비가 끝나면 터미널에 웹 미리보기와 OpenAPI 주소가 표시됩니다. `Ctrl+C`를 누르면 b-studio가 컨테이너와 샌드박스 전용 볼륨을 정리합니다.
+준비가 끝나면 터미널에 웹 미리보기와 OpenAPI 주소가 표시됩니다. `Ctrl+C`를 누르면 컨테이너와 샌드박스 전용 볼륨을 정리합니다.
 
-웹 스튜디오는 별도 터미널에서 실행합니다.
+웹 스튜디오는 `pnpm studio launch` 한 명령으로 켜고 끕니다(모델 호출 없이 보려면 `--mode demo`). CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
 
-```bash
-# 모델 호출 없이 UI와 전체 흐름 확인
-pnpm studio:demo
-
-# 이 PC의 Claude Code 로그인 사용
-pnpm studio:local
-```
-
-기본 주소는 `http://127.0.0.1:3000`입니다.
-
-### 한 번에 켜기
-
-웹 스튜디오를 한 명령으로 켜고 끕니다. Docker가 꺼져 있으면 colima를 켜고 준비되면 브라우저를 엽니다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 엽니다.
-
-```bash
-pnpm studio launch              # 이 PC의 Claude Code로 (기본)
-pnpm studio launch --mode demo  # 모델 없이 화면·흐름만
-pnpm studio stop                # launch가 띄운 스튜디오를 멈춘다
-```
-
-`launch`는 백그라운드로 띄웁니다(로그 `~/.cache/b-studio/launch/studio.log`, PID `studio.pid`). `--port`로 포트를 바꿉니다. `--no-open`을 주면 브라우저를 열지 않습니다.
-
-프로그램이 이 출력을 읽어야 하면 `--json`을 붙입니다. 브라우저를 열지 않고 준비되면 stdout에 한 줄 JSON만 씁니다(진행 안내는 stderr).
-
-```bash
-pnpm studio launch --json   # {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
-pnpm studio stop --json     # {"stopped":true}
-```
-
-### 데스크톱 앱 (macOS)
-
-터미널 대신 더블클릭으로 켜고 싶으면 얇은 Electron 껍데기를 설치합니다. 화면은 서버가 주는 웹 그대로라 스튜디오를 고쳐도(`git pull`) 앱을 다시 만들 필요가 없습니다([ADR-062](docs/decisions.md#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)).
-
-```bash
-pnpm desktop:install   # 빌드 + ~/Applications/b-studio.app 설치 + 설정 파일 쓰기
-```
-
-- 앱을 열면 저장소에서 스튜디오 서버를 스스로 켜고(이미 떠 있으면 그대로 씁니다) 창을 띄웁니다. 서버가 뜨는 동안에는 진행 안내를 보여 줍니다.
-- 창 위 도구 막대: 뒤로·앞으로·새로고침·주소 입력창·"브라우저에서 열기". 주소창에는 `127.0.0.1:3000`, `3100`(미리보기 포트), `/sessions/…` 같은 상대 경로를 넣을 수 있습니다.
-- 이 PC 주소만 앱 안에서 열리고 외부 주소(예: PR 링크)는 기본 브라우저로 넘어갑니다.
-- 앱을 닫으면 앱이 켠 서버만 끕니다. 사람이 따로 켠 서버는 그대로 둡니다.
-- 서명을 하지 않으므로 처음 한 번은 Finder에서 우클릭 → 열기로 열어야 합니다.
-- 개발 중에는 서버를 끄고 `pnpm desktop:dev`로 앱만 띄워 볼 수 있습니다.
-- Dock·Finder 아이콘은 `apps/desktop/build/icon.svg` 하나에서 나옵니다. 모양을 고쳤으면 `pnpm desktop:icon`으로 macOS 아이콘(`.icns`)과 창 아이콘, 스튜디오 favicon을 함께 다시 굽습니다(macOS 도구만 씁니다).
-
-### CLI로 에이전트 실행
-
-```bash
-# Anthropic API
-ANTHROPIC_API_KEY=... pnpm studio agent examples/orders "주문 목록에 상태 필터를 추가해 줘"
-
-# 개인 PC의 Claude Code 로그인
-pnpm studio agent examples/orders "주문 목록에 상태 필터를 추가해 줘" \
-  --backend claude-code
-```
-
-계약을 의도적으로 깨는 작업은 요청 내용에 그 의도가 드러나야 하며 `--allow-breaking`도 함께 지정해야 합니다.
-
-```bash
-pnpm studio agent examples/orders \
-  "더 이상 쓰지 않는 legacy 필드를 삭제해 줘" \
-  --allow-breaking
-```
-
-설치, 인증, 첫 실행에서 막히면 [시작하기](docs/getting-started.md)를 확인하세요.
+데스크톱 앱(macOS), `--json` 출력, 계약을 깨는 요청(`--allow-breaking`), 인증 방식은 [시작하기](docs/getting-started.md)에 정리했습니다.
 
 ## 작동 방식
 
@@ -160,23 +99,21 @@ flowchart LR
 
 구조와 경계는 [아키텍처 문서](docs/architecture.md), 선택의 근거는 [ADR](docs/decisions.md)에 정리되어 있습니다.
 
-## 프로젝트 구성
+## 저장소 구조
 
-```text
-b-studio/
-├── apps/
-│   ├── cli/                  # studio up · agent · deploy · auth
-│   ├── desktop/              # 웹 스튜디오를 감싸는 얇은 Electron 껍데기 (macOS)
-│   └── studio/               # Next.js 웹 스튜디오
-├── packages/
-│   ├── spec/                 # studio.yaml 스키마와 로더
-│   ├── sandbox/              # Docker/Kubernetes 샌드박스와 정책 경계
-│   └── agent/                # 에이전트 루프, 도구, 모델, 검증 게이트
-├── templates/                # Next.js · Spring Boot · FastAPI 원본
-├── examples/orders/          # web + api + PostgreSQL 예제
-├── config/                   # 모델 레지스트리 예시
-└── docs/                     # 사용자·운영·설계 문서
-```
+| 경로 | 무엇 | 왜 여기에 |
+|---|---|---|
+| `apps/cli/` | `studio up`·`agent`·`deploy`·`auth` 명령 | 터미널 진입점을 한 곳에 묶는다 |
+| `apps/studio/` | Next.js 웹 스튜디오(세션·미리보기·토큰·저장소 탭)와 `bench/` 실험 하네스 | 화면과 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
+| `apps/desktop/` | 웹 스튜디오를 감싸는 얇은 Electron 껍데기(macOS) | 화면은 서버가 주는 웹 그대로라 빌드 자산만 분리한다([ADR-062](docs/decisions.md#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)) |
+| `packages/spec/` | `studio.yaml` 스키마와 compose 교차 검증 | CLI·웹이 같은 로더를 공유해야 한다 |
+| `packages/sandbox/` | Docker/Kubernetes 샌드박스, edge 프록시, 정책 경계 | 격리 실행이라는 한 책임을 독립 패키지로 둔다 |
+| `packages/agent/` | 에이전트 루프, 도구, 모델 라우터, 검증 게이트, 체크포인트 | 신뢰 장치의 본체. CLI·웹 모두 이 패키지를 부른다([공구함](docs/toolkit.md)) |
+| `templates/` | Next.js·Spring Boot·FastAPI 원본 | managed 서비스를 만들 때 복사하는 뼈대. 워크스페이스 밖에 둬 템플릿 자체 의존성과 섞이지 않는다 |
+| `examples/orders/` | web + api + PostgreSQL 예제 프로젝트 | 모든 실험·E2E·도그푸딩이 쓰는 공통 과제 |
+| `config/` | 모델 레지스트리 예시 | 공급자·단가 설정을 코드 밖에 둔다 |
+| `docs/` | 사용자·운영·설계 문서, ADR, 실험 보고서 | 코드와 같은 저장소에서 같이 버전이 올라간다 |
+| `wiki/` | GitHub Wiki에 게시할 원본 | 제품 동작의 기준은 `docs/`이고 Wiki는 그 요약이다 |
 
 ## 주요 명령
 
@@ -230,6 +167,27 @@ resources:
 ```
 
 managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 설정은 [`studio.yaml` 레퍼런스](docs/configuration.md)를 참고하세요.
+
+## 지금 어디까지 왔나
+
+| 알고 싶은 것 | 확인하는 곳 |
+|---|---|
+| 지금 어디까지 왔는가 | [구현 상태와 일정](docs/status.md) — 영역별 완료 상태, [로드맵](ROADMAP.md) — 마일스톤별 완료 조건·예상과 실제 |
+| 무엇을 만들기로 했는가 | GitHub Issue(배경·선택지·완료 조건) |
+| 무엇을 바꿨는가 · 왜 그렇게 골랐는가 | GitHub PR 본문과 [설계 결정 기록(ADR)](docs/decisions.md) |
+| 실제로 무엇을 확인했는가 | [검증 기록](docs/verification.md), [실험 기록](docs/experiments/README.md) |
+| 사용자에게 무엇이 나갔는가 | [변경 기록](CHANGELOG.md) |
+| 무엇이 아직 열려 있는가 | [트러블슈팅](docs/troubleshooting.md), [검증 기록의 알려진 한계](docs/verification.md#알려진-한계) |
+
+## 한계와 확인하지 못한 것
+
+- 실제 계정으로 확인한 구독 백엔드는 Claude Code·Command Code뿐입니다. Codex는 계정 한도로, OpenCode·Gemini는 로그인 가능한 계정이 없어 실제 모델 호출까지는 확인하지 못했습니다(도구 경계만 주입 프로세스로 확인, [구현 상태](docs/status.md)).
+- `concurrency_check`(동시 요청 확인)는 가짜 요청 함수 단위 테스트로만 확인했고, 실제 Docker 샌드박스에서는 아직 돌리지 않았습니다.
+- Kubernetes 검증은 로컬 kind 기준입니다. 관리형 클러스터의 차이는 별도 확인이 필요합니다.
+- 배포 롤백은 데이터베이스 마이그레이션을 되돌리지 않습니다.
+- API 키를 쓰는 실제 외부 공급자 경로는 자격 증명이 있는 환경에서 별도 확인이 필요합니다.
+
+전체 목록과 각 항목의 조건은 [검증 기록의 알려진 한계](docs/verification.md#알려진-한계)에 있습니다.
 
 ## 문서
 
