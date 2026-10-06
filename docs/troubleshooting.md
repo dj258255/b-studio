@@ -13,9 +13,9 @@
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
 | 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55 |
 | 운영 이미지·컨테이너 배포 | 31–34 |
-| 멀티 CLI·백엔드 실행 | 43, 45, 47–49, 59 |
+| 멀티 CLI·백엔드 실행 | 43, 45, 47–49 |
 | 동시성·상태 저장 | 44 |
-| 벤치 하네스 | 42, 45–46, 55, 59 |
+| 벤치 하네스 | 42, 45–46, 55 |
 | 요구사항·PR·리뷰 추적 | 54, 56 |
 | 설계 단계에서 대비한 문제 | 22 |
 
@@ -79,6 +79,8 @@
 - [56. 이미 열린 PR에 다시 "올리고 PR 만들기"를 해도 본문·AI 리뷰가 첫 커밋 기준 그대로 멈춰 있음](#56-이미-열린-pr에-다시-올리고-pr-만들기를-해도-본문ai-리뷰가-첫-커밋-기준-그대로-멈춰-있음)
 - [57. 개발 상태 배너가 머리 줄 위에 고정된 채 겹쳐 그려짐](#57-개발-상태-배너가-머리-줄-위에-고정된-채-겹쳐-그려짐)
 - [58. 세션 재개 때 프런트엔드가 ETXTBSY로 가끔 죽어 기동 실패가 됨](#58-세션-재개-때-프런트엔드가-etxtbsy로-가끔-죽어-기동-실패가-됨)
+- [59. 폴더 열기 감지가 pay 구조에서 Gradle 래퍼를 못 찾고 Next.js 앱을 놓침](#59-폴더-열기-감지가-pay-구조에서-gradle-래퍼를-못-찾고-nextjs-앱을-놓침)
+- [60. 두 단계 아래 서비스가 있는 폴더를 열면 세션 기동이 "Dockerfile.b-studio 없음"으로 실패함](#60-두-단계-아래-서비스가-있는-폴더를-열면-세션-기동이-dockerfileb-studio-없음으로-실패함)
 - [61. S3 게시판 혼합 레인(Claude Code + Command Code)이 모든 레인 Claude Code보다 훨씬 자주 실패함](#61-s3-게시판-혼합-레인claude-code--command-code이-모든-레인-claude-code보다-훨씬-자주-실패함)
 
 ---
@@ -2030,6 +2032,49 @@ b-studio 자신의 오케스트레이션 코드에는 같은 파일에 대한 �
 
 ### 배운 점
 "같은 자원에 두 경로가 겹쳐 쓴다"는 가설은 코드를 끝까지 따라가 호출 순서(`await`로 실제로 직렬화돼 있는지)를 확인해야 기각하거나 확정할 수 있다 — 겹치는 것처럼 보이는 두 단계(스냅샷 복사·컨테이너 설치)가 실제로는 순서대로 일어난다는 것을 알고 나서야, 원인이 b-studio 밖(esbuild 자신의 설치 스크립트와 파일시스템의 쓰기 반영 타이밍)에 있다고 좁힐 수 있었다. 구조적으로 막을 수 없는 간헐적 경합은, 무한 재시도가 아니라 "알려진 신호가 보일 때만, 상한을 걸고" 재시도하는 쪽이 안전하다 — ADR-121의 포트 충돌 재시도와 같은 설계다.
+
+## 59. 폴더 열기 감지가 pay 구조에서 Gradle 래퍼를 못 찾고 Next.js 앱을 놓침
+
+**구분:** 읽기 전용 미리보기로 실제 저장소(pay) 확인 → 코드로 원인 추적 → 수정
+
+### 현상
+`POST /api/projects/open`으로 pay 폴더를 미리보기하면 서비스가 `commerce` 하나만 잡혔다. 이 서비스는 "Gradle 래퍼가 없어 `gradle:jdk21` 이미지의 도구로 실행합니다"로 분류됐고, `apps/web`(Next.js)은 아예 목록에 나타나지 않았다.
+
+### 원인
+- pay 저장소는 `gradlew`를 저장소 루트에 두고, 실제 Gradle 프로젝트 루트(`commerce/`, 자기 `settings.gradle`은 있지만 `gradlew`는 없다)는 그 래퍼를 `-p commerce`로 가리켜 쓰는 구조였다. `project-detect.ts`의 `detectSpring`은 서비스 폴더 자신에서만 `gradlew`·`mvnw`를 찾아, 상위 폴더에 있는 래퍼를 전혀 보지 못했다.
+- Next.js 앱은 `apps/web/`에 있는데, 기존 탐색은 프로젝트 폴더 바로 아래와 그 한 단계 아래까지만 봤다. `apps/`는 그 자신에 마커 파일(`package.json` 등)이 없어 후보에서 빠졌고, `apps/web`까지 내려가 보는 로직이 없었다.
+
+### 수정
+`findWrapperDir`로 서비스 폴더부터 저장소 루트까지 거슬러 올라가며 래퍼를 찾고, 상위 폴더에서 찾았으면 그 폴더로 옮겨 가 `-p`(Gradle)·`-f`(Maven)로 서비스 폴더를 가리켜 실행한다. 서비스 후보 탐색은 프로젝트 폴더가 단일 앱이 아니면 `apps`·`services`·`packages` 같은 컨테이너 폴더 한 단계 아래와, 이미 찾은 서비스 폴더 바로 아래(예: `commerce/consumer-app`, 별도 서비스로 넣되 기본 선택에서는 뺀다)까지 두 단계로 넓혔다. `k6`·`tools`·`scripts`·`docs`·`examples`·`fixtures`는 두 경우 모두 건너뛰고, 서비스 수는 6개로 자른다. 자세한 내용과 트레이드오프는 ADR-128에 남겼다.
+
+### 검증
+`apps/studio/lib/server/project-detect.test.ts`에 pay 구조를 흉내 낸 픽스처(루트 래퍼 + 하위 Gradle 프로젝트, `apps/web` Next.js npm, 노이즈 폴더)로 감지 결과를 고정했다. 실제 pay 폴더로도 읽기 전용 미리보기를 다시 돌려 서비스 3개(`commerce`·`web`·`consumer-app`, 마지막은 기본 선택 해제)와 생성 파일 내용을 확인했다 — pay 폴더에는 쓰지 않았다. `pnpm typecheck`(6/6)·`pnpm vitest run apps/studio`(1727건)·`pnpm --filter @b-studio/studio lint`(오류 0) 모두 통과했다.
+
+### 배운 점
+폴더 열기 감지의 가정(래퍼는 서비스 폴더 안에 있다, 앱은 최대 한 단계 아래에 있다)은 b-studio 자신의 모노레포에서는 둘 다 맞았지만, 실제로 도그푸딩에 쓰는 다른 저장소(pay)에서는 둘 다 깨졌다. 감지 로직을 자신의 저장소 구조만으로 검증하면 이런 구조적 차이를 놓치기 쉽다 — 실제로 열어 볼 다른 저장소로 미리보기를 직접 돌려 보는 것이 저렴하고 효과적인 확인 방법이었다.
+
+## 60. 두 단계 아래 서비스가 있는 폴더를 열면 세션 기동이 "Dockerfile.b-studio 없음"으로 실패함
+
+**증상**
+
+- 루트에 Gradle 래퍼, `commerce/`에 Spring Boot, `apps/web/`에 Next.js가 있는 저장소를 폴더 열기로 등록하고 세션을 띄웠다.
+- `docker compose build`가 `failed to read dockerfile: open Dockerfile.b-studio: no such file or directory`로 실패했다.
+
+**측정**
+
+- 원본 폴더에는 생성 Dockerfile 3개가 모두 있었다(`commerce/`, `apps/web/`, `commerce/consumer-app/`).
+- 세션 작업 복사본에는 `commerce/Dockerfile.b-studio`만 있었다.
+
+**원인**
+
+- 작업 복사본은 커밋된 상태만 복제하므로, git 추적에서 뺀 생성 파일은 `overlayGeneratedFiles`가 따로 덧씌운다.
+- 덧씌울 Dockerfile을 찾는 `generatedDockerfiles`는 "바로 아래와 한 단계 아래"만 봤다. 주석에는 "감지 깊이와 같다"고 적혀 있었다.
+- 감지 깊이를 두 단계로 늘린 #445에서 이 함수를 함께 고치지 않아 두 함수의 깊이가 어긋났다.
+
+**수정**
+
+- `generatedDockerfiles`를 두 단계까지 훑게 하고, `node_modules`·`build`·`.next`·`.gradle` 같은 큰 폴더는 건너뛴다.
+- 회귀 테스트(`project-registry-overlay.test.ts`)로 두 단계 아래 Dockerfile이 복사되고, 건너뛸 폴더 안의 같은 이름 파일은 무시되는 것을 고정했다.
 
 ## 61. S3 게시판 혼합 레인(Claude Code + Command Code)이 모든 레인 Claude Code보다 훨씬 자주 실패함
 

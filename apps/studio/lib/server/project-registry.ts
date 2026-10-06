@@ -106,7 +106,8 @@ export async function proposeFolder(folder: string, file = registryPath()): Prom
  * 폴더를 등록한다. 제안 파일을 쓰고(사용자 파일은 덮어쓰지 않는다) git 추적에서 뺀 뒤, b-studio가 실제로 읽을 수 있는지 확인하고 목록에 올린다.
  * takenIds는 다른 곳(예제 폴더)의 프로젝트 id. 같은 폴더를 다시 등록하면 기존 id를 돌려준다.
  * selectedInfra를 주면(폴더 열기 미리보기의 체크박스, ADR-083) 그 부가 서비스만 기본으로 띄우도록 서비스 선택을 저장한다.
- * 주지 않으면 detection.defaultInfra(앱이 기대는 부가 서비스의 닫힘)를 쓴다 — 아무도 기대지 않는 부가 서비스는 기본으로 뜨지 않는다
+ * 주지 않으면 detection.defaultInfra(앱이 기대는 부가 서비스의 닫힘)를 쓴다 — 아무도 기대지 않는 부가 서비스는 기본으로 뜨지 않는다.
+ * 두 단계 탐색이 찾은, defaultSelected: false가 붙은 서비스(이미 찾은 서비스 하위의 또 다른 빌드)도 같은 식으로 처음부터 꺼 둔다
  */
 export async function registerFolder(
   folder: string,
@@ -141,9 +142,15 @@ export async function registerFolder(
   // 이번에 쓴 파일의 해시를 남겨 둬야 나중에 "생성 파일 다시 만들기"가 사람이 손으로 고친 파일을 가려낼 수 있다
   await recordGeneratedHashes(id, proposal.files, file);
 
-  if (proposal.detection.infra.length > 0) {
+  // 두 단계 탐색(apps/* 등)으로 이미 찾은 서비스 하위의 또 다른 빌드까지 넣었을 때는 defaultSelected: false가 붙는다
+  // (예: commerce/consumer-app) — 그런 서비스가 있으면 부가 서비스가 없어도 선택을 적어 기본으로 띄우지 않는다
+  const hasOptedOutService = proposal.detection.services.some((service) => service.defaultSelected === false);
+  if (proposal.detection.infra.length > 0 || hasOptedOutService) {
     const infraSelected = new Set(selectedInfra ?? proposal.detection.defaultInfra);
-    const selected = [...proposal.detection.services.map((service) => service.name), ...proposal.detection.infra.filter((service) => infraSelected.has(service.name)).map((service) => service.name)];
+    const selected = [
+      ...proposal.detection.services.filter((service) => service.defaultSelected !== false).map((service) => service.name),
+      ...proposal.detection.infra.filter((service) => infraSelected.has(service.name)).map((service) => service.name),
+    ];
     await writeServiceSelection(id, selected);
   }
 
@@ -321,14 +328,21 @@ export async function overlayGeneratedFiles(sourceRoot: string, projectRoot: str
   return copied;
 }
 
-/** 폴더 바로 아래와 한 단계 아래의 Dockerfile.b-studio (project-detect가 서비스를 찾는 깊이와 같다) */
-async function generatedDockerfiles(root: string): Promise<string[]> {
+/** 덧씌울 때 건너뛰는 폴더. 서비스 폴더가 아니고 크기만 큰 곳들이다 */
+const SKIP_DIRS = new Set(['node_modules', 'build', 'dist', 'target', '.next', '.gradle', 'out', 'coverage']);
+
+/**
+ * 폴더 아래 두 단계까지의 Dockerfile.b-studio. project-detect가 서비스를 찾는 깊이(루트, 한 단계, apps/web·commerce/consumer-app 같은
+ * 두 단계)와 같아야 한다. 깊이가 어긋나면 세션 복사본에 하위 서비스의 Dockerfile이 빠져 compose build가 실패한다(트러블슈팅 60)
+ */
+async function generatedDockerfiles(root: string, depth = 2, prefix = ''): Promise<string[]> {
   const found: string[] = [];
-  if (await exists(path.join(root, GENERATED_DOCKERFILE))) found.push(GENERATED_DOCKERFILE);
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  if (await exists(path.join(root, prefix, GENERATED_DOCKERFILE))) found.push(prefix ? `${prefix}/${GENERATED_DOCKERFILE}` : GENERATED_DOCKERFILE);
+  if (depth === 0) return found;
+  const entries = await readdir(path.join(root, prefix), { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-    if (await exists(path.join(root, entry.name, GENERATED_DOCKERFILE))) found.push(`${entry.name}/${GENERATED_DOCKERFILE}`);
+    if (!entry.isDirectory() || entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+    found.push(...(await generatedDockerfiles(root, depth - 1, prefix ? `${prefix}/${entry.name}` : entry.name)));
   }
   return found;
 }
