@@ -40,6 +40,11 @@ describe('parseArgs', () => {
       orderStart: 5,
     });
   });
+
+  it('--max-env-failures를 `--플래그 값`, `--플래그=값` 형식 모두로 받는다', () => {
+    expect(parseArgs(['--max-env-failures', '3'])).toMatchObject({ maxEnvFailures: 3 });
+    expect(parseArgs(['--max-env-failures=5'])).toMatchObject({ maxEnvFailures: 5 });
+  });
 });
 
 describe('parseTopology', () => {

@@ -75,6 +75,9 @@ export interface ApiAuditEntry {
 export declare const PROXY_PORT: number;
 export declare const API_PORT: number;
 export declare const STUDIO_CALLER: 'studio';
+/** DNS 실패(상류 장애)로 502를 돌려줄 때 붙이는 헤더 이름과 값 */
+export declare const DNS_FAILURE_HEADER: 'X-B-Studio-Egress';
+export declare const DNS_FAILURE_VALUE: 'dns-failed';
 
 export declare class ApiPolicyError extends Error {
   constructor(status: number, message: string);
@@ -104,7 +107,13 @@ export declare function callerResolver(
 ): (address: string | undefined) => Promise<string | undefined>;
 export declare function callUpstream(external: EdgeExternal, secrets: Record<string, string | undefined>, request: UpstreamRequest): Promise<UpstreamResult>;
 export declare function auditApi(entry: ApiAuditEntry): void;
-export declare function startEdge(options: { forwards: Forward[]; rules: EdgeEgressRule[]; proxyPort?: number }): net.Server[];
+export declare function startEdge(options: {
+  forwards: Forward[];
+  rules: EdgeEgressRule[];
+  proxyPort?: number;
+  /** DNS 조회를 바꿔치기한다(테스트 전용). 기본은 node:dns/promises의 lookup(all:true) */
+  lookup?: (host: string) => Promise<Array<{ address: string; family: number }>>;
+}): net.Server[];
 export declare function startApiProxy(options: {
   externals: EdgeExternal[];
   secrets?: Record<string, string | undefined>;

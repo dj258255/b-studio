@@ -9,6 +9,7 @@ import {
   DEFAULT_EGRESS_ALLOW,
   EDGE_SERVICE,
   edgePortFor,
+  egressAuditExcerpt,
   parseContainerState,
   parseEgressDenial,
   parseHostPort,
@@ -175,6 +176,28 @@ describe('parseEgressDenial', () => {
     expect(parseEgressDenial('{"edge":"egress","decision":"allow","host":"registry.npmjs.org","port":443,"at":"2026-09-11T01:00:00.000Z"}')).toBeUndefined();
     expect(parseEgressDenial('{"edge":"started","forwards":[]}')).toBeUndefined();
     expect(parseEgressDenial('{"edge":"egress", 잘린 줄')).toBeUndefined();
+  });
+});
+
+describe('egressAuditExcerpt', () => {
+  it('거부와 상류 장애(DNS 실패 등) 줄만 "호스트: 이유"로 줄이고, 그 밖의 줄은 건너뛴다', () => {
+    const lines = [
+      '{"edge":"started","forwards":[]}',
+      '{"edge":"egress","decision":"allow","host":"registry.npmjs.org","port":443,"at":"2026-10-06T00:00:00.000Z"}',
+      '{"edge":"egress","decision":"error","host":"registry.npmjs.org","port":443,"reason":"이름을 풀지 못함","at":"2026-10-06T00:00:01.000Z"}',
+      '그냥 평범한 로그 줄',
+      '{"edge":"egress","decision":"deny","host":"evil.example","port":443,"reason":"허용 목록에 없는 호스트나 포트","at":"2026-10-06T00:00:02.000Z"}',
+    ];
+    expect(egressAuditExcerpt(lines)).toEqual(['registry.npmjs.org: 이름을 풀지 못함', 'evil.example: 허용 목록에 없는 호스트나 포트']);
+  });
+
+  it('max를 넘으면 최근 줄만 남긴다', () => {
+    const lines = Array.from({ length: 8 }, (_, index) => `{"edge":"egress","decision":"deny","host":"h${index}.example","port":443,"reason":"r${index}","at":"2026-10-06T00:00:00.000Z"}`);
+    expect(egressAuditExcerpt(lines, 3)).toEqual(['h5.example: r5', 'h6.example: r6', 'h7.example: r7']);
+  });
+
+  it('깨진 JSON이나 edge 로그가 아닌 줄은 조용히 건너뛴다', () => {
+    expect(egressAuditExcerpt(['{"edge":"egress", 잘린 줄', '아무 줄'])).toEqual([]);
   });
 });
 

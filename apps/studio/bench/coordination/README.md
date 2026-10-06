@@ -121,6 +121,7 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 - `--lane-backend <레인 그룹>=<백엔드>[:<모델>]` — 반복할 수 있습니다. 레인 그룹은 `api`·`web`(레인의 첫 쓰기 경로)입니다. 모르는 그룹·백엔드면 시작 전에 오류를 냅니다. 쓰는 CLI는 시작 전에 각각 로그인을 확인합니다. 요약표 "레인 백엔드" 열(예 `api:claude-code web:commandcode`)과 행의 레인별 `backend`·`model`로 남습니다. `--backend`는 계획 기본(통합 세션)으로 남습니다
 - `--prices <json 파일>` — 모델 이름 일부 → 단가 표(아래 형식). 있으면 행의 모델별 사용량(`metrics.usageByModel`)으로 `costUsd`(모델별 합)를 계산하고, 요약표의 "API 환산 비용($)" 열에 합계/중앙값(달러)을 냅니다. 단가가 없는 모델이 하나라도 있으면 비용 대신 `costNote: "단가 없음: <모델>"`을 남깁니다. **단가 값은 코드에 적지 않고 파일로만 받습니다**
 - `--concurrency N`(기본 1) — 여러 실행을 동시에 돌립니다. 아래 "동시 실행" 절을 보세요
+- `--max-env-failures N`(기본 2) — `environment` 실패가 연달아 N번 나면 남은 실행을 돌리지 않고 멈춥니다. 아래 "environment 실패가 연달아 나면 멈춤" 절을 보세요
 
 `--prices` 파일 형식(키는 모델 이름에 포함되면 매칭합니다. 예 `haiku-4-5`. 값은 100만 토큰당 달러이고, 예시는 형식만 보여 줍니다):
 
@@ -144,6 +145,15 @@ pnpm bench:coordination --backend openai --tasks orders-list,independent --strat
 
 - `--on-rate-limit stop`(기본): 다음 실행을 시작하지 않고 멈춥니다.
 - `--on-rate-limit wait`: `--rate-limit-wait-minutes`만큼 기다린 뒤 **같은 실행을 한 번만** 다시 시도합니다. 다시 시도한 실행은 행의 `retryOf`로 표시하고, 원래 행도 지우지 않고 남깁니다.
+
+## environment 실패가 연달아 나면 멈춤 (`--max-env-failures`)
+
+이슈 #411(실험 E10): 호스트 네트워크가 불안정해 레인 세션이 "앱이 켜지다가 종료됐습니다"로 반복 실패했는데, 벤치가 멈추지 않고 18회를 다 돌아 같은 원인으로 5시간을 태웠습니다.
+
+- `environment`로 분류된 실행이 **연달아** `--max-env-failures`번(기본 2) 나오면, 그 자리에서 남은 실행을 돌리지 않고 멈춥니다. 성공이나 다른 분류(예: `rate_limited`, `acceptance`)가 한 번이라도 끼면 연속 횟수는 0으로 되돌아갑니다.
+- 멈출 때 콘솔에 사유를 출력하고 종료 코드 1로 끝납니다. **이미 낸 결과(results.jsonl)는 지우지 않습니다** — `meta.json`의 `abortReason`에 "environment 실패가 연달아 N번(한도 M) 나서 멈춥니다"가 남습니다(남은 컨테이너·사용 한도 중단과 같은 자리).
+- 원인을 더 빨리 찾을 수 있도록, edge 프록시가 "DNS 조회 실패"(상류 장애, 502)와 "허용 목록 위반"(정책 거부, 403)을 구별해 응답하고, 레인 세션 기동 실패 메시지에 edge의 최근 거부·장애 기록(예: `registry.npmjs.org: 이름을 풀지 못함`)을 덧붙입니다 — `detail` 열에서 바로 보입니다.
+- `--concurrency`(동시 실행)의 자식 프로세스는 아직 적용되지 않습니다. 자식마다 과제·전략·반복 하나만 맡아 끝나므로(`--repeat-index`) "연속"의 뜻 자체가 모호해지기 때문입니다 — 직렬 실행(기본값)에서만 동작합니다.
 
 ## 사전 확인이 멈추는 이유
 

@@ -56,6 +56,8 @@ export interface Args {
   repeatIndex?: number;
   /** 내부용. 부모가 전체 계획에서 이 자식이 맡은 순번을 지정한다(행의 order가 부모의 계획 순서와 같아지게) */
   orderStart?: number;
+  /** environment 실패가 연달아 이 횟수에 이르면 남은 실행을 돌리지 않고 멈춘다(이슈 #411). 기본 2 */
+  maxEnvFailures?: number;
 }
 
 /** S3의 읽기 범위. 기본 mesh. 다른 전략에는 영향이 없다 */
@@ -99,6 +101,7 @@ export function parseArgs(argv: string[]): Args {
     else if (arg === '--child-concurrency') args.childConcurrency = Number(next(argv, index++, '--child-concurrency'));
     else if (arg === '--repeat-index') args.repeatIndex = Number(next(argv, index++, '--repeat-index'));
     else if (arg === '--order-start') args.orderStart = Number(next(argv, index++, '--order-start'));
+    else if (arg === '--max-env-failures') args.maxEnvFailures = Number(next(argv, index++, '--max-env-failures'));
     else if (arg.startsWith('--tasks=')) args.taskIds = split(arg.slice('--tasks='.length));
     else if (arg.startsWith('--strategies=')) args.strategies = split(arg.slice('--strategies='.length)) as Strategy[];
     else if (arg.startsWith('--repeats=')) args.repeats = Number(arg.slice('--repeats='.length));
@@ -124,6 +127,7 @@ export function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--child-concurrency=')) args.childConcurrency = Number(arg.slice('--child-concurrency='.length));
     else if (arg.startsWith('--repeat-index=')) args.repeatIndex = Number(arg.slice('--repeat-index='.length));
     else if (arg.startsWith('--order-start=')) args.orderStart = Number(arg.slice('--order-start='.length));
+    else if (arg.startsWith('--max-env-failures=')) args.maxEnvFailures = Number(arg.slice('--max-env-failures='.length));
     else throw new Error(`알 수 없는 인자입니다: ${arg}`);
   }
   return args;

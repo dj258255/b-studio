@@ -129,6 +129,28 @@ export function parseEgressDenial(text: string): EgressDenial | undefined {
   }
 }
 
+/**
+ * 레인 세션 기동 실패를 진단할 때 덧붙일 edge 감사 로그 최근 줄(#411, 실험 E10).
+ * 거부(deny)뿐 아니라 상류 장애(error, edge.mjs가 이름을 못 풀었을 때 등)도 함께 본다.
+ * 컨테이너가 지워지면 이 로그도 사라지므로, "앱이 켜지다가 종료됐습니다"로 실패한 바로 그 순간에
+ * "<host>: <이유>" 한 줄로 줄여 오류 메시지에 붙여야 나중에(결과 파일·UI) 원인이 남는다.
+ */
+export function egressAuditExcerpt(lines: readonly string[], max = 5): string[] {
+  const picked: string[] = [];
+  for (const line of lines) {
+    if (!line.startsWith('{"edge":"egress"')) continue;
+    let entry: { decision?: unknown; host?: unknown; reason?: unknown };
+    try {
+      entry = JSON.parse(line) as typeof entry;
+    } catch {
+      continue;
+    }
+    if ((entry.decision !== 'deny' && entry.decision !== 'error') || typeof entry.host !== 'string') continue;
+    picked.push(`${entry.host}: ${typeof entry.reason === 'string' ? entry.reason : entry.decision}`);
+  }
+  return picked.slice(-max);
+}
+
 /** `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다 */
 export function parseRuntimes(stdout: string): string[] {
   try {
