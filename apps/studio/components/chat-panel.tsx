@@ -855,6 +855,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
               {label}을 만들지 못했습니다: {item.pullRequestError}
             </p>
           )}
+          {item.requirementsTrackingWarning && <p className="text-muted">{item.requirementsTrackingWarning}</p>}
         </div>
       );
     }
