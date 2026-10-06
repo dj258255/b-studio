@@ -70,6 +70,7 @@
 - [51. 콜리마가 죽었다 살아난 뒤에도 샌드박스 기동이 옛 "Docker 데몬에 연결할 수 없음" 오류로 계속 실패함](#51-콜리마가-죽었다-살아난-뒤에도-샌드박스-기동이-옛-docker-데몬에-연결할-수-없음-오류로-계속-실패함)
 - [52. 미리 고른 호스트 포트가 colima VM 안에서는 이미 다른 컨테이너가 써서 compose up이 반복 실패함](#52-미리-고른-호스트-포트가-colima-vm-안에서는-이미-다른-컨테이너가-써서-compose-up이-반복-실패함)
 - [53. "올리기 전 점검"이 원격에 올라가지 않는 생성 파일의 비밀 값과, 커밋 하나뿐인 세션의 "독차지"를 오탐으로 알림](#53-올리기-전-점검이-원격에-올라가지-않는-생성-파일의-비밀-값과-커밋-하나뿐인-세션의-독차지를-오탐으로-알림)
+- [NN. 이미 열린 PR에 다시 "올리고 PR 만들기"를 해도 본문·AI 리뷰가 첫 커밋 기준 그대로 멈춰 있음](#nn-이미-열린-pr에-다시-올리고-pr-만들기를-해도-본문ai-리뷰가-첫-커밋-기준-그대로-멈춰-있음)
 
 ---
 
@@ -1933,3 +1934,30 @@ environment 실패는 대부분 20초 안에 끝났지만, 벤치는 그때마�
 - `packages/sandbox/src/docker/format.test.ts`: `egressAuditExcerpt()`가 `deny`·`error`만 추려 최근 N줄로 줄이는 것을 확인한다.
 - `apps/studio/bench/coordination/env-guard.test.ts`: environment가 연달아 한도에 이르면 멈추고, 성공이나 다른 분류가 끼면 연속이 끊기는 것을 가짜 결과 순서(실험 E10을 단순화)로 확인한다.
 - 교훈: 거부와 장애를 같은 상태 코드로 묶으면, 컨테이너가 사라지는 순간 "왜 막혔는지"를 되짚을 길이 없어진다 — 특히 벤치처럼 실행마다 환경을 통째로 치우는 도구에서는, 실패 자체보다 "실패를 사람이 사후에 읽을 수 있는 형태로 남기는가"가 몇 시간을 아끼는 차이를 만든다.
+
+## 56. 이미 열린 PR에 다시 "올리고 PR 만들기"를 해도 본문·AI 리뷰가 첫 커밋 기준 그대로 멈춰 있음
+
+**구분:** 도그푸딩 중 발견(세션 c55417ad, 테스트 저장소 PR dj258255/test#22) → 코드로 원인 추적 → 수정
+
+### 현상
+세션 c55417ad로 처음 `POST /api/sessions/[id]/export`(`pullRequest: true`)를 불러 PR #22를 만들었다(커밋 하나, 본문에 요청 1건·검증 목록·"올리기 전 점검 9/9"가 제대로 실렸다). AI 리뷰 1라운드가 경미 3·사소 1로 통과(`passed`)했고, 그 지적을 세션 대화로 고쳐 새 체크포인트가 하나 더 생겼다(파일 2개, +123/−31, 게이트 통과). 같은 요청으로 다시 export하자 응답은 `{"pushedSha":"5d46376…","commits":2,...}`뿐이고 `pullRequest` 항목이 없었다. PR에는 커밋 2개가 모두 올라갔지만:
+- PR 본문이 그대로였다 — "## 요청"·"## 검증" 모두 첫 커밋 하나만 보여 줬다. 리뷰 수정 커밋이 본문 어디에도 없었다.
+- AI 리뷰가 다시 돌지 않았다. 세션의 `review` 상태는 `{"state":"passed","rounds":[{"round":1,"status":"passed"}]}` 그대로였다 — 새 코드 123줄이 리뷰 없이 PR에 들어갔다.
+- (작은 것) 올리기 전 미리보기(`POST export/preview`)의 PR 본문에는 "올리기 전 점검 8/9 · ! 작업 트리·원격: 아직 원격 브랜치에 올리지 않았습니다"가 실렸는데, 실제로 만든 PR 본문은 올린 뒤 기준이라 9/9였다 — 미리보기가 실제와 달랐다.
+
+### 원인
+`exportSession`(`apps/studio/lib/server/sessions.ts`)의 PR 분기가 `!info.pullRequestUrl`(아직 PR이 없을 때)만 처리했다. 이미 `info.pullRequestUrl`이 있으면(재발행) 체크포인트를 올리는 것(`push`) 말고는 아무것도 하지 않았다 — 본문을 다시 만들거나 PR에 반영하는 코드 경로 자체가 없었다. AI 리뷰 자동 시작도 `created`(이번 export로 새로 연결한 PR)가 있을 때만 걸려, "이미 열려 있던 PR에 새 커밋만 올린 export는 자동으로 다시 돌리지 않는다"는 주석의 의도와 달리 사람이 "다시 돌리기"를 누르지 않는 한 영원히 돌지 않았다. 미리보기 쪽은 `pullRequestDraft`가 계산하는 "올리기 전 점검" 요약(`submissionReport`)이 호출 시점의 실제 push 여부를 그대로 반영해, 아직 올리지 않은 미리보기와 올린 뒤인 실제 생성이 같은 점검 함수를 쓰면서도 값이 달랐다.
+
+### 수정
+1. `packages/agent/src/repository.ts`에 `updatePullRequestBody()`를 추가했다(GitHub·Gitea·GitLab). 쓰기 전에 지금 본문을 GET으로 먼저 읽어 `mergeManagedPullRequestBody()`로 b-studio가 관리하는 영역(`<!-- b-studio:begin -->`/`<!-- b-studio:end -->` 마커 사이, 마커가 없는 옛 본문은 통째로)만 바꾸고, 사람이 마커 밖에 적은 내용과 제목은 건드리지 않는다.
+2. `exportSession`이 PR이 이미 있으면(`info.pullRequestUrl`) `pullRequestDraft`로 다시 만든 본문을 `updatePullRequestBody`로 써서 `pullRequest: { url, created: false, updated: true }`를 돌려준다. 실패해도 `pullRequestUpdateWarning`으로만 남기고 push 성공은 뒤집지 않는다.
+3. `packages/agent/src/checkpoints.ts`에 `diffSince(sha)`를 추가하고, `review-round.ts`의 `runReviewRounds`가 `resume`을 받으면 라운드 번호를 이어가며, 이미 라운드 상한에 닿아 있으면 리뷰를 부르지 않고 그 사실을 라운드 기록·PR 코멘트로 남긴다. `sessions.ts`의 `continueReviewAfterNewCommits()`가 "마지막으로 리뷰한 커밋 이후 새 커밋이 있을 때만" 이 경로로 이어 돈다 — `exportSession`이 PR을 새로 연결했을 때는 지금처럼 처음부터, 이미 있던 PR에 커밋만 더 올렸을 때는 이 함수로 그 뒤 범위만 자동(review.auto)으로 리뷰한다.
+4. `submission-checklist.ts`의 `checkWorkingTree`에 `assumePushed` 옵션을 더해, 올리기 전 미리보기(`previewExport`)만 "곧 올릴 것"을 가정해 계산한다 — 저장소 탭의 "올리기 전 점검" 서브탭은 그대로 실제 상태를 보여준다.
+
+### 검증
+- `packages/agent/src/repository.test.ts`, `packages/agent/src/checkpoints.test.ts`, `packages/agent/src/pr-review.test.ts`, `apps/studio/lib/server/review-round.test.ts`, `apps/studio/lib/submission-checklist.test.ts`에 각각 단위 테스트를 더했다.
+- `apps/studio/lib/server/sessions-pr-reexport.test.ts`(신규, 실제 git 저장소·세션으로 `exportSession`을 끝까지 돌린다): 재발행이 `createPullRequest`를 또 부르지 않고 `updatePullRequestBody`로 지금까지 커밋 전부를 반영한 본문을 쓰는 것, 끝난 리뷰가 있는 PR에 새 커밋이 쌓이면 라운드 번호가 이어지는 것(1→2, 두 번째 코멘트에만 커밋 범위 표시), 새 커밋이 없으면 리뷰가 다시 돌지 않는 것, 라운드 상한에 이미 닿아 있으면 그 사실을 남기는 것, 미리보기와 실제 PR 본문의 점검 통과 수가 같은 것을 확인했다. 원격 GitHub API·모델 호출은 모두 가짜로 바꿨다 — 실 GitHub·모델·3000 포트 서버는 부르지 않았다.
+- `pnpm typecheck` 6/6, `pnpm --filter @b-studio/studio lint` 오류 0, 저장소 전체 `vitest run` 297개 파일 3152개 테스트 통과.
+
+### 배운 점
+"처음 한 번"만 처리하고 "이미 있을 때 다시"는 다루지 않은 분기는, 기능이 정말 쓰이기 시작하는 두 번째 호출에서야 드러난다 — PR 생성·AI 리뷰 둘 다 "새로 만들 때"만 테스트돼 있었고 "이미 있는 것에 다시 반영"하는 경로는 코드에도 테스트에도 없었다. 재발행·재시도처럼 "같은 액션을 또 누른다"는 흔한 사용 패턴은 처음 설계할 때부터 별도 분기로 챙겨야 한다.

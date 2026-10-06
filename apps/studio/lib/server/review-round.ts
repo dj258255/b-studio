@@ -12,7 +12,19 @@
  *  - PR 댓글 올리기가 실패해도 라운드 자체는 멈추지 않는다(commentError로만 남긴다)
  *  - 절대 병합하지 않고, 강제 푸시도 하지 않는다(이 모듈은 그런 도구를 아예 받지 않는다)
  */
-import { buildPrReviewComment, buildPrReviewFixRequest, nextPrReviewStep, PrReviewError, requestPrReview, truncateDiff, type ModelAsk, type PrReviewFinding, type PrReviewResolvedFinding } from '@b-studio/agent';
+import {
+  buildPrReviewComment,
+  buildPrReviewFixRequest,
+  nextPrReviewStep,
+  prReviewMarker,
+  PrReviewError,
+  requestPrReview,
+  truncateDiff,
+  type ModelAsk,
+  type PrReviewCommitRange,
+  type PrReviewFinding,
+  type PrReviewResolvedFinding,
+} from '@b-studio/agent';
 import type { AgentUsage } from '@b-studio/agent';
 import type { ReviewRoundView, ReviewStateView } from '../studio-events';
 
@@ -50,6 +62,12 @@ export interface ReviewRoundDeps {
   externalContext?: (diff: string) => Promise<string | undefined>;
   /** 이전 리뷰에서 사람이 오탐으로 닫은 지적(과제 67-b, collectHumanResolvedFindings로 runReviewRound가 미리 계산해 클로저로 넘긴다). 없으면 undefined */
   resolvedContext?: () => string;
+  /**
+   * 이 라운드가 보는 커밋 범위(since 커밋 → 지금 HEAD). 이미 열린 PR에 새 커밋이 쌓여 그 범위만 다시 볼 때만
+   * 준다(sessions.ts의 continueReviewAfterNewCommits) — 처음 PR을 열 때의 전체 리뷰는 base...head가 당연해
+   * 따로 표시하지 않는다(undefined). 매 라운드 다시 불러 고침 커밋이 쌓여도 head가 그만큼 따라온다
+   */
+  commitRange?: () => Promise<PrReviewCommitRange | undefined>;
   /** PR에 댓글 하나를 남긴다. 실패하면 던진다 — 이 모듈이 잡아 commentError로만 남기고 라운드는 계속한다 */
   postComment: (body: string) => Promise<{ url?: string }>;
   /** 같은 세션에 고침을 요청하고 검증 게이트를 통과한 체크포인트까지 기다린다 */
@@ -70,16 +88,53 @@ export const REVIEW_UNSUPPORTED_BACKEND = '이 세션 백엔드는 AI 리뷰를 
 /**
  * 1라운드부터 라운드 상한까지(또는 통과·오류까지) 안에서 이어 돈다. rounds는 오래된 라운드가 먼저 온다.
  * onUpdate는 상태가 바뀔 때마다 전체 상태를 통째로 받는다(다시 재생해도 같은 결과가 나오도록 exported 이벤트와 같은 규칙).
+ *
+ * resume을 주면(continueReviewAfterNewCommits, ADR-074 재발행 리뷰 이어가기) 처음부터 새로 돌지 않고 그
+ * rounds 뒤에 이어 붙인다 — 라운드 번호가 계속 늘어나고, maxRounds는 이번 호출만이 아니라 이 PR이 지금까지
+ * 돈 리뷰 호출 전체에 걸친 상한으로 남는다. 이미 상한에 닿아 있으면(이전 라운드들만으로 rounds.length가
+ * maxRounds 이상) 리뷰어를 부르지 않고 — 조용히 건너뛰지 않고 — 그 사실을 라운드 기록과 PR 코멘트로 남긴다.
  */
-export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, onUpdate: (state: ReviewStateView) => void): Promise<void> {
+export async function runReviewRounds(
+  deps: ReviewRoundDeps,
+  maxRounds: number,
+  onUpdate: (state: ReviewStateView) => void,
+  resume?: { rounds: readonly ReviewRoundView[] },
+): Promise<void> {
   const now = deps.now ?? (() => new Date().toISOString());
-  const rounds: ReviewRoundView[] = [];
+  const rounds: ReviewRoundView[] = resume ? [...resume.rounds] : [];
   const publish = (state: ReviewStateView['state']): void => onUpdate({ state, maxRounds, rounds: [...rounds] });
   const setRound = (round: ReviewRoundView): void => {
     rounds[rounds.length - 1] = round;
   };
+  const startRound = rounds.length + 1;
 
-  for (let round = 1; round <= maxRounds; round++) {
+  if (startRound > maxRounds) {
+    const startedAt = now();
+    const range = await deps.commitRange?.();
+    const rangeNote = range?.since ? ` (\`${range.since.slice(0, 7)}\`..\`${range.head.slice(0, 7)}\`)` : '';
+    const error = `라운드 상한(${maxRounds})에 이미 닿아 있어 새 커밋${rangeNote}을 리뷰하지 못했습니다. 사람이 직접 확인하세요.`;
+    let commentUrl: string | undefined;
+    let commentError: string | undefined;
+    try {
+      commentUrl = (await deps.postComment(`## 🤖 AI 리뷰 — 라운드 상한\n\n${error}\n\n${prReviewMarker(startRound)}`)).url;
+    } catch (postError) {
+      commentError = describeError(postError);
+    }
+    rounds.push({
+      round: startRound,
+      status: 'blocked_capped',
+      error,
+      commentUrl,
+      commentError,
+      startedAt,
+      finishedAt: now(),
+      ...(range ? { headSha: range.head, ...(range.since ? { sinceSha: range.since } : {}) } : {}),
+    });
+    publish('capped');
+    return;
+  }
+
+  for (let round = startRound; round <= maxRounds; round++) {
     const startedAt = now();
     rounds.push({ round, status: 'running', startedAt });
     publish('running');
@@ -90,6 +145,7 @@ export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, 
       return;
     }
 
+    const range = await deps.commitRange?.();
     let findings: PrReviewFinding[];
     let tokens: AgentUsage | undefined;
     let omittedFiles: string[] = [];
@@ -113,13 +169,13 @@ export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, 
     } catch (error) {
       // 형식 오류로 리뷰가 실패해도 그때까지 쓴 토큰은 잃지 않는다(PrReviewError가 들고 있다)
       const usage = error instanceof PrReviewError ? error.usage : undefined;
-      setRound({ round, status: 'error', error: describeError(error), tokens: usage, startedAt, finishedAt: now() });
+      setRound({ round, status: 'error', error: describeError(error), tokens: usage, startedAt, finishedAt: now(), ...(range ? { sinceSha: range.since, headSha: range.head } : {}) });
       publish('stopped');
       return;
     }
 
     const outcome = nextPrReviewStep(findings, round, maxRounds);
-    const comment = buildPrReviewComment({ round, maxRounds, findings, outcome, omittedFiles });
+    const comment = buildPrReviewComment({ round, maxRounds, findings, outcome, omittedFiles, commitRange: range });
     let commentUrl: string | undefined;
     let commentError: string | undefined;
     try {
@@ -130,18 +186,39 @@ export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, 
     }
 
     if (outcome === 'pass' || outcome === 'cap') {
-      setRound({ round, status: outcome === 'pass' ? 'passed' : 'blocked_capped', findings, tokens, commentUrl, commentError, startedAt, finishedAt: now() });
+      setRound({
+        round,
+        status: outcome === 'pass' ? 'passed' : 'blocked_capped',
+        findings,
+        tokens,
+        commentUrl,
+        commentError,
+        startedAt,
+        finishedAt: now(),
+        ...(range ? { sinceSha: range.since, headSha: range.head } : {}),
+      });
       publish(outcome === 'pass' ? 'passed' : 'capped');
       return;
     }
 
     // outcome === 'fix': 차단·주요 지적을 같은 세션의 정상 요청 경로로 보낸다(검증 게이트·체크포인트를 그대로 거친다)
-    setRound({ round, status: 'fixing', findings, tokens, commentUrl, commentError, startedAt });
+    setRound({ round, status: 'fixing', findings, tokens, commentUrl, commentError, startedAt, ...(range ? { sinceSha: range.since, headSha: range.head } : {}) });
     publish('running');
 
     const fix = await deps.requestFix(buildPrReviewFixRequest(findings));
     if (!fix.ok) {
-      setRound({ round, status: 'fix_failed', findings, tokens, commentUrl, commentError, error: fix.error, startedAt, finishedAt: now() });
+      setRound({
+        round,
+        status: 'fix_failed',
+        findings,
+        tokens,
+        commentUrl,
+        commentError,
+        error: fix.error,
+        startedAt,
+        finishedAt: now(),
+        ...(range ? { sinceSha: range.since, headSha: range.head } : {}),
+      });
       publish('stopped');
       return;
     }
@@ -159,12 +236,24 @@ export async function runReviewRounds(deps: ReviewRoundDeps, maxRounds: number, 
         error: `고친 변경을 올리지 못했습니다: ${describeError(error)}`,
         startedAt,
         finishedAt: now(),
+        ...(range ? { sinceSha: range.since, headSha: range.head } : {}),
       });
       publish('stopped');
       return;
     }
 
-    setRound({ round, status: 'blocked_continue', findings, tokens, commentUrl, commentError, fixCheckpoint: fix.checkpoint, startedAt, finishedAt: now() });
+    setRound({
+      round,
+      status: 'blocked_continue',
+      findings,
+      tokens,
+      commentUrl,
+      commentError,
+      fixCheckpoint: fix.checkpoint,
+      startedAt,
+      finishedAt: now(),
+      ...(range ? { sinceSha: range.since, headSha: range.head } : {}),
+    });
     publish('running');
     // 다음 라운드로 이어간다(for 루프)
   }

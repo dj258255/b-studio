@@ -418,6 +418,48 @@ async function createMergeRequest(
 }
 
 /**
+ * 이미 있는 PR(MR)의 본문 중 b-studio가 관리하는 영역만 지금 초안으로 바꾼다. 제목은 건드리지 않는다
+ * (사람이 GitHub·Gitea·GitLab 화면에서 직접 고쳤을 수 있다 — PR 생성 때와 달리 재발행은 제목을 다시 쓸
+ * 이유가 없다). 쓰기 전에 지금 본문을 먼저 읽어(GET) 사람이 마커 밖에 적은 내용을 그대로 두고 병합한다
+ * (mergeManagedPullRequestBody) — createPullRequest와 같은 호스트(GitHub·Gitea·GitLab)를 지원한다.
+ */
+export async function updatePullRequestBody(
+  remote: RemoteLocation,
+  number: number,
+  managedBody: string,
+  { env = process.env, fetch: fetchFn = fetch, token: tokenOverride }: { env?: Env; fetch?: Fetch; token?: string } = {},
+): Promise<{ body: string }> {
+  if (remote.kind === 'other' || remote.kind === 'local' || !remote.host || !remote.path) {
+    throw new PullRequestError('PR을 고칠 수 있는 저장소 호스트가 아닙니다. 사내 호스트라면 B_STUDIO_GIT_PROVIDER를 설정하세요');
+  }
+  const token = tokenOverride ?? env[TOKEN_ENV[remote.kind]];
+  if (!token) throw new PullRequestError(`${TOKEN_ENV[remote.kind]} 토큰이 없어 PR을 고칠 수 없습니다`);
+
+  if (remote.kind === 'gitlab') {
+    const api = env.B_STUDIO_GITLAB_API_URL ?? `${originOf(remote)}/api/v4`;
+    const headers = { 'private-token': token, 'content-type': 'application/json' };
+    const url = `${api}/projects/${encodeURIComponent(remote.path)}/merge_requests/${number}`;
+    const current = await fetchFn(url, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+    if (!current.ok) throw new PullRequestError(`GitLab API가 MR 조회를 거절했습니다 (HTTP ${current.status}): ${await errorMessage(current)}`);
+    const existing = (await current.json()) as { description?: string | null };
+    const body = capBody(mergeManagedPullRequestBody(existing.description ?? undefined, managedBody));
+    const response = await fetchFn(url, { method: 'PUT', headers, body: JSON.stringify({ description: body }), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+    if (!response.ok) throw new PullRequestError(`GitLab API가 MR 본문 수정을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+    return { body };
+  }
+
+  const { api, headers, label, owner, repo } = gitHubStyleApi(remote, token, env);
+  const url = `${api}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`;
+  const current = await fetchFn(url, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  if (!current.ok) throw new PullRequestError(`${label} API가 PR 조회를 거절했습니다 (HTTP ${current.status}): ${await errorMessage(current)}`);
+  const existing = (await current.json()) as { body?: string | null };
+  const body = capBody(mergeManagedPullRequestBody(existing.body ?? undefined, managedBody));
+  const response = await fetchFn(url, { method: 'PATCH', headers, body: JSON.stringify({ body }), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  if (!response.ok) throw new PullRequestError(`${label} API가 PR 본문 수정을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  return { body };
+}
+
+/**
  * 원격 이슈를 조회한다. 미리보기에서 이슈가 존재하고 열려 있는지 확인할 때 쓴다.
  * GitHub·Gitea는 `GET /repos/{owner}/{repo}/issues/{n}`, GitLab은 `GET /projects/{id}/issues/{iid}`를 쓴다.
  * GitLab은 MR 설명의 `Closes #N`으로 이슈를 닫으므로 같은 문구를 쓴다
@@ -1170,6 +1212,46 @@ export async function ensureLabels(
   const existing = new Set(await listLabels(remote, deps));
   const missing = names.filter((name) => !existing.has(name));
   for (const name of missing) await createLabel(remote, name, deps);
+}
+
+// ---------------------------------------------------------------------------
+// PR 본문의 관리형 영역: 재발행(이미 열린 PR에 새 커밋을 올린 뒤 본문을 다시 쓸 때)이 사람이 PR 설명에
+// 직접 적은 내용을 지우지 않도록, b-studio가 쓰는 부분만 마커로 감싼다(요구사항 이슈의 managed region과 같은 생각,
+// requirement-issues.ts의 MANAGED_REGION_HEADER/FOOTER 참고 — 다만 PR 본문은 id·rev·hash를 붙일 대상이 하나뿐이라 더 단순하다)
+// ---------------------------------------------------------------------------
+
+export const PR_MANAGED_BODY_BEGIN = '<!-- b-studio:begin -->';
+export const PR_MANAGED_BODY_END = '<!-- b-studio:end -->';
+
+/** buildPullRequest가 만든 옛 본문(마커를 넣기 전)의 신호. 두 절 제목은 buildPullRequest가 내용과 무관하게 항상 넣는다 */
+function looksLikeLegacyManagedPullRequestBody(body: string): boolean {
+  return body.includes('## 요청') && body.includes('## 검증');
+}
+
+/**
+ * PR 본문 중 b-studio가 관리하는 영역만 지금 초안(managedBody)으로 바꾼다. 사람이 마커 밖(위·아래)에 적은
+ * 내용은 그대로 둔다.
+ * - 마커가 이미 있으면 그 사이만 바꾼다.
+ * - 마커가 없지만 b-studio가 예전에 쓴 본문으로 보이면(looksLikeLegacyManagedPullRequestBody — "## 요청"·
+ *   "## 검증" 절은 buildPullRequest만 넣는다) 통째로 마커로 감싸 바꾼다. 이런 PR은 처음 만들 때부터
+ *   b-studio만 본문을 썼던 시절의 것이라(마커를 붙이기 전) 사람이 쓴 영역이 섞여 있을 가능성이 거의 없고,
+ *   그대로 두면 새 커밋이 와도 본문이 영원히 낡은 채로 남는다(버그 리포트: PR #22).
+ * - 그 밖(본문이 비었거나, 마커도 없고 우리 본문 같지도 않은 — 사람이 통째로 새로 쓴 설명 등)은 안전한 쪽을
+ *   골라 기존 내용을 지우지 않고 그 아래에 마커로 감싼 영역을 덧붙인다.
+ */
+export function mergeManagedPullRequestBody(existingBody: string | undefined | null, managedBody: string): string {
+  const current = existingBody ?? '';
+  const beginIndex = current.indexOf(PR_MANAGED_BODY_BEGIN);
+  const endIndex = current.indexOf(PR_MANAGED_BODY_END);
+  if (beginIndex !== -1 && endIndex !== -1 && endIndex > beginIndex) {
+    const before = current.slice(0, beginIndex);
+    const after = current.slice(endIndex + PR_MANAGED_BODY_END.length);
+    return `${before}${PR_MANAGED_BODY_BEGIN}\n${managedBody}\n${PR_MANAGED_BODY_END}${after}`;
+  }
+  if (current.trim() === '' || looksLikeLegacyManagedPullRequestBody(current)) {
+    return `${PR_MANAGED_BODY_BEGIN}\n${managedBody}\n${PR_MANAGED_BODY_END}`;
+  }
+  return `${current.trimEnd()}\n\n${PR_MANAGED_BODY_BEGIN}\n${managedBody}\n${PR_MANAGED_BODY_END}`;
 }
 
 /** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
