@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertContractsBackend,
   assertContractsStrategy,
+  assertCoordinationBackend,
   assertPlainBaselineBackend,
   cliBackendsInUse,
   parseLaneBackend,
@@ -17,6 +18,7 @@ import {
   resolveVerify,
   sessionBackendOf,
   verifyNotice,
+  type Backend,
 } from './backends';
 
 describe('resolveBackend', () => {
@@ -250,6 +252,25 @@ describe('레인 사이 계약(--contracts)', () => {
     // human이면 백엔드를 가리지 않는다
     expect(() => assertContractsBackend('human', 'commandcode')).not.toThrow();
     expect(() => assertContractsBackend('human', 'opencode')).not.toThrow();
+  });
+});
+
+describe('레인 조율 게시판 백엔드(assertCoordinationBackend, 이슈 #428)', () => {
+  it('S4(공유 없음)만 돌리면 게시판을 쓰지 않으므로 백엔드와 무관하게 통과한다', () => {
+    expect(() => assertCoordinationBackend(['S4'], 'commandcode', new Map())).not.toThrow();
+    expect(() => assertCoordinationBackend(['P0', 'S0', 'S1', 'S4'], 'opencode', new Map())).not.toThrow();
+  });
+
+  it('S2·S3·S5(게시판 사용)는 계획 기본과 모든 레인 백엔드가 지원 표(backendSupportsBoard)에 있어야 통과한다', () => {
+    const laneBackends = parseLaneBackends(['api=claude-code', 'web=commandcode']);
+    expect(() => assertCoordinationBackend(['S3'], 'opencode', laneBackends)).not.toThrow();
+    expect(() => assertCoordinationBackend(['S2', 'S5'], 'gemini', new Map())).not.toThrow();
+  });
+
+  it('지원 표에 없는 백엔드면 시작 전에 이유를 담아 막는다(지금은 모든 CLI가 지원하지만, 새 백엔드를 추가하며 board 배선을 깜빡하면 여기서 걸린다)', () => {
+    expect(() => assertCoordinationBackend(['S3'], 'future-cli' as unknown as Backend, new Map())).toThrow(/게시판/);
+    const laneBackends = parseLaneBackends(['web=commandcode']);
+    expect(() => assertCoordinationBackend(['S2'], 'claude-code', new Map([...laneBackends, ['api', { group: 'api', backend: 'future-cli' as unknown as Backend }]]))).toThrow(/게시판/);
   });
 });
 

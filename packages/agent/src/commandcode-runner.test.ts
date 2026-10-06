@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseCommandCodeModels, runCommandCodeAgent, type CommandCodeProcess } from './commandcode-runner';
+import { Board } from './coordination';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
@@ -68,8 +69,8 @@ function fakeCommandCode(script: FakeRun[], hooks: FakeHooks = {}) {
   return { process, state };
 }
 
-/** 러너가 작업 폴더에 쓴 `.mcp.json`을 읽어 그대로 MCP 서버에 붙는다. 토큰은 환경 변수 참조를 실제 값으로 바꾼다 */
-async function callStudioTool(cwd: string, env: Record<string, string>, name: string, args: unknown) {
+/** 러너가 작업 폴더에 쓴 `.mcp.json`을 읽어 그대로 MCP 서버에 연결한다. 토큰은 환경 변수 참조를 실제 값으로 바꾼다 */
+async function connectStudio(cwd: string, env: Record<string, string>): Promise<Client> {
   const config = JSON.parse(await readFile(path.join(cwd, '.mcp.json'), 'utf8')) as {
     mcpServers: Record<string, { url: string; headers: { Authorization: string } }>;
   };
@@ -80,6 +81,11 @@ async function callStudioTool(cwd: string, env: Record<string, string>, name: st
   const client = new Client({ name: 'fake-cmd', version: '0.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: { authorization } } });
   await client.connect(transport);
+  return client;
+}
+
+async function callStudioTool(cwd: string, env: Record<string, string>, name: string, args: unknown) {
+  const client = await connectStudio(cwd, env);
   try {
     return await client.callTool({ name, arguments: args as Record<string, unknown> });
   } finally {
@@ -275,6 +281,83 @@ describe('runCommandCodeAgent', () => {
     expect(result.metrics?.maxContextTokens).toBe(222);
     // 이벤트에 시간이 없으므로 0("재지 않음")이다
     expect(result.metrics?.modelMs).toBe(0);
+  });
+
+  it('model을 고르면 usageByModel을 그 이름으로, 고르지 않으면 commandcode:default로 채운다(이슈 #428)', async () => {
+    const { process: namedModel } = fakeCommandCode([success('session-1', '완료', OK_USAGE)]);
+    const named = await runCommandCodeAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), process: namedModel, fetcher: async () => contract, model: 'poolside/laguna-s-2.1-free' });
+    expect(named.metrics?.usageByModel).toEqual({ 'poolside/laguna-s-2.1-free': OK_USAGE });
+
+    const { process: defaultModel } = fakeCommandCode([success('session-2', '완료', OK_USAGE)]);
+    const unnamed = await runCommandCodeAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), process: defaultModel, fetcher: async () => contract });
+    expect(unnamed.metrics?.usageByModel).toEqual({ 'commandcode:default': OK_USAGE });
+  });
+
+  it('조율 게시판을 켜면 post_note·read_notes가 도구 목록에 오르고 MCP 서버를 거쳐 레인 신원으로 게시·조회된다(이슈 #428, E12)', async () => {
+    const board = new Board({ topology: 'mesh' });
+    const { process } = fakeCommandCode([success('session-1', '계약을 남겼습니다.', OK_USAGE)], {
+      onStart: async ({ cwd, env }) => {
+        const client = await connectStudio(cwd, env);
+        try {
+          const listed = await client.listTools();
+          expect(listed.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['post_note', 'read_notes']));
+          await client.callTool({ name: 'post_note', arguments: { kind: 'contract', body: 'GET /api/orders → [{ id, amount }]', refs: ['api'] } });
+        } finally {
+          await client.close().catch(() => {});
+        }
+      },
+    });
+
+    const result = await runCommandCodeAgent({
+      request: '계약 남기기',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      process,
+      fetcher: async () => contract,
+      board: {
+        lane: 'api',
+        post: (input) => board.post(input, { lane: 'api', by: 'model' }),
+        read: (options) => board.read({ lane: 'api' }, options),
+      },
+    });
+
+    expect(result.status).toBe('done');
+    expect(board.snapshot()).toMatchObject([{ kind: 'contract', author: { lane: 'api', by: 'model' } }]);
+  });
+
+  it('읽기 전용 게시판(modelWrites: false)을 켜면 read_notes만 도구 목록에 오르고, 다른 레인이 남긴 메모를 읽는다', async () => {
+    const board = new Board({ topology: 'mesh', modelWrites: false });
+    board.post({ kind: 'fact', body: '다른 레인이 남긴 사실' }, { lane: 'platform', by: 'platform' });
+    const { process } = fakeCommandCode([success('session-1', '읽었습니다.', OK_USAGE)], {
+      onStart: async ({ cwd, env }) => {
+        const client = await connectStudio(cwd, env);
+        try {
+          const listed = await client.listTools();
+          expect(listed.tools.map((tool) => tool.name)).toContain('read_notes');
+          expect(listed.tools.map((tool) => tool.name)).not.toContain('post_note');
+          const read = await client.callTool({ name: 'read_notes', arguments: { kinds: [] } });
+          expect(JSON.stringify(read)).toContain('다른 레인이 남긴 사실');
+        } finally {
+          await client.close().catch(() => {});
+        }
+      },
+    });
+
+    const result = await runCommandCodeAgent({
+      request: '읽기만',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      process,
+      fetcher: async () => contract,
+      board: {
+        lane: 'api',
+        modelWrites: false,
+        post: (input) => board.post(input, { lane: 'api', by: 'model' }),
+        read: (options) => board.read({ lane: 'api' }, options),
+      },
+    });
+
+    expect(result.status).toBe('done');
   });
 
   it('stateDir과 함께 resume을 주면 첫 실행부터 --fork-session으로 이어받고 새 sessionId를 남긴다', async () => {

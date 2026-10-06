@@ -5,6 +5,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Board } from './coordination';
 import { GEMINI_MODEL_REQUIRED, geminiSettingsJson, runGeminiAgent, type GeminiProcess } from './gemini-cli-runner';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
@@ -68,8 +69,8 @@ function fakeGemini(script: FakeRun[], hooks: FakeHooks = {}) {
   return { process, state };
 }
 
-/** 러너가 작업 폴더에 쓴 `.gemini/settings.json`을 읽어 그대로 MCP 서버에 붙는다. 토큰은 환경 변수에서 꺼낸 실제 값을 쓴다 */
-async function callStudioTool(cwd: string, env: Record<string, string>, name: string, args: unknown) {
+/** 러너가 작업 폴더에 쓴 `.gemini/settings.json`을 읽어 그대로 MCP 서버에 연결한다. 토큰은 환경 변수에서 꺼낸 실제 값을 쓴다 */
+async function connectStudio(cwd: string, env: Record<string, string>): Promise<Client> {
   const config = JSON.parse(await readFile(path.join(cwd, '.gemini', 'settings.json'), 'utf8')) as {
     mcpServers: Record<string, { httpUrl: string; headers: { Authorization: string } }>;
   };
@@ -79,6 +80,11 @@ async function callStudioTool(cwd: string, env: Record<string, string>, name: st
   const client = new Client({ name: 'fake-gemini', version: '0.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(server.httpUrl), { requestInit: { headers: { authorization: `Bearer ${token}` } } });
   await client.connect(transport);
+  return client;
+}
+
+async function callStudioTool(cwd: string, env: Record<string, string>, name: string, args: unknown) {
+  const client = await connectStudio(cwd, env);
   try {
     return await client.callTool({ name, arguments: args as Record<string, unknown> });
   } finally {
@@ -346,6 +352,81 @@ describe('runGeminiAgent', () => {
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(220);
     expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
+  });
+
+  it('usageByModel을 고른 모델 이름으로 채운다(이슈 #428, 모델은 항상 명시하므로 백엔드 기본 키로 떨어지지 않는다)', async () => {
+    const { process } = fakeGemini([success('완료')]);
+    const result = await runGeminiAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), process, model: MODEL, fetcher: async () => contract });
+    expect(result.metrics?.usageByModel).toEqual({ [MODEL]: result.usage });
+  });
+
+  it('조율 게시판을 켜면 post_note·read_notes가 도구 목록에 오르고 MCP 서버를 거쳐 레인 신원으로 게시·조회된다(이슈 #428, E12)', async () => {
+    const board = new Board({ topology: 'mesh' });
+    const { process } = fakeGemini([success('계약을 남겼습니다.')], {
+      onStart: async ({ cwd, env }) => {
+        const client = await connectStudio(cwd, env);
+        try {
+          const listed = await client.listTools();
+          expect(listed.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(['post_note', 'read_notes']));
+          await client.callTool({ name: 'post_note', arguments: { kind: 'contract', body: 'GET /api/orders → [{ id, amount }]', refs: ['api'] } });
+        } finally {
+          await client.close().catch(() => {});
+        }
+      },
+    });
+
+    const result = await runGeminiAgent({
+      request: '계약 남기기',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      process,
+      model: MODEL,
+      fetcher: async () => contract,
+      board: {
+        lane: 'api',
+        post: (input) => board.post(input, { lane: 'api', by: 'model' }),
+        read: (options) => board.read({ lane: 'api' }, options),
+      },
+    });
+
+    expect(result.status).toBe('done');
+    expect(board.snapshot()).toMatchObject([{ kind: 'contract', author: { lane: 'api', by: 'model' } }]);
+  });
+
+  it('읽기 전용 게시판(modelWrites: false)을 켜면 read_notes만 도구 목록에 오르고, 다른 레인이 남긴 메모를 읽는다', async () => {
+    const board = new Board({ topology: 'mesh', modelWrites: false });
+    board.post({ kind: 'fact', body: '다른 레인이 남긴 사실' }, { lane: 'platform', by: 'platform' });
+    const { process } = fakeGemini([success('읽었습니다.')], {
+      onStart: async ({ cwd, env }) => {
+        const client = await connectStudio(cwd, env);
+        try {
+          const listed = await client.listTools();
+          expect(listed.tools.map((tool) => tool.name)).toContain('read_notes');
+          expect(listed.tools.map((tool) => tool.name)).not.toContain('post_note');
+          const read = await client.callTool({ name: 'read_notes', arguments: { kinds: [] } });
+          expect(JSON.stringify(read)).toContain('다른 레인이 남긴 사실');
+        } finally {
+          await client.close().catch(() => {});
+        }
+      },
+    });
+
+    const result = await runGeminiAgent({
+      request: '읽기만',
+      project,
+      sandbox: fakeSandbox(project, [true]),
+      process,
+      model: MODEL,
+      fetcher: async () => contract,
+      board: {
+        lane: 'api',
+        modelWrites: false,
+        post: (input) => board.post(input, { lane: 'api', by: 'model' }),
+        read: (options) => board.read({ lane: 'api' }, options),
+      },
+    });
+
+    expect(result.status).toBe('done');
   });
 });
 

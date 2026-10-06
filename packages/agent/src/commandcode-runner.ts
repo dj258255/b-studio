@@ -155,8 +155,12 @@ export interface CommandCodeRunResult extends AgentResult {
  * 후속 요청)를 이으려면 HOME과 cwd가 같아야 한다. 상태 폴더 없이 `resume`만 받으면 이어받을 수 없으므로
  * `--resume`을 넘기지 않고 새 대화로 시작하며 warning 이벤트 한 번으로 알린다(조용히 실패시키지 않는다).
  *
- * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
- * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
+ * 레인 조율 게시판(`board`)은 codex·claude-code 러너와 같은 규칙으로 받는다: 넘어오면 `buildTools`에 넘겨
+ * post_note·read_notes를 도구 목록에 더하고(S2·S5처럼 읽기 전용이면 post_note는 뺀다), 실행 컨텍스트에도 실어
+ * `executeTool`이 그 레인 신원으로 게시판을 읽고 쓰게 한다(이슈 #428, E12).
+ *
+ * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 실행 중 지시(`steering`).
+ * 도구 목록을 만들 때 그 옵션들이 빠지고, 지시는 넣어도 실행 끝에 적용되지 못한 것으로 안내된다.
  * 모델 승격(`escalation`)은 타입으로는 받지만 지원하지 않는다 — 무시하지 않고 warning 이벤트로 알린다(codex 러너와 같다).
  */
 export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promise<CommandCodeRunResult> {
@@ -217,11 +221,13 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
+    board: options.board,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
     // 지연 기동 세션이면 샌드박스 도구를 실행하기 직전에 켠다(핸들러가 게이트 생성까지 한다)
     ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
-  const specs = buildTools(project);
+  // 조율 게시판은 Claude Code·Codex 러너와 같게, 켠 실행에만 도구를 더한다
+  const specs = buildTools(project, { ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}) });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
   const isStudioTool = (name: string) => name.startsWith(`mcp__${SERVER}__`);
 
@@ -237,6 +243,10 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   let home: string | undefined;
   let result: CommandCodeRunResult | undefined;
   const usage = emptyUsage();
+  // 모델 이름별 사용량(벤치·스튜디오 사용량 집계가 CLI 레인 사용량을 모델별로 더하는 자리, 이슈 #428).
+  // 이 러너는 실행 내내 모델을 하나만 쓰므로(승격 미지원) usage와 같은 객체를 참조로 공유해 갱신을 한 곳에서만 한다.
+  // 모델을 고르지 않았으면(계정 기본) 백엔드 이름으로 키를 만든다
+  metrics.usageByModel = { [model ?? 'commandcode:default']: usage };
   let completedTurns = 0;
   let lastText = '';
   /** 이어받기·재시도에 쓰는 현재 세션 id. 첫 턴은 이어받을 수 있을 때만 options.resume에서 시작한다 */

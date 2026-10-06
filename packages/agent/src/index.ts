@@ -131,6 +131,8 @@ export { runClaudeCodeExploreQa, type ClaudeCodeExploreQaOptions, type ClaudeCod
 export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export {
+  backendSupportsBoard,
+  BOARD_SUPPORTED_BACKENDS,
   buildPlannerSystem,
   DEFAULT_PLAN_LIMITS,
   isInScope,

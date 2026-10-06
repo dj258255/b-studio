@@ -190,6 +190,10 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   let codexHome: string | undefined;
   let result: CodexRunResult | undefined;
   const usage = emptyUsage();
+  // 모델 이름별 사용량(벤치·스튜디오 사용량 집계가 CLI 레인 사용량을 모델별로 더하는 자리, 이슈 #428).
+  // 이 러너는 실행 내내 모델을 하나만 쓰므로(승격 미지원, 위 escalation 경고 참고) usage와 같은 객체를
+  // 참조로 공유해 갱신을 한 곳에서만 한다. 모델을 고르지 않았으면(계정 기본) 백엔드 이름으로 키를 만든다
+  metrics.usageByModel = { [model ?? 'codex:default']: usage };
   let completedTurns = 0;
   let lastText = '';
   let threadId: string | undefined;
