@@ -3,7 +3,7 @@
  * 읽기 전용 화면만 골라 찍고, 캡처한 원본을 macOS 창 틀로 다시 찍어 docs/images에 내보낸다.
  *
  * 세션은 CI·pnpm test에 쓰지 않는다. b-studio를 실제로 띄워 둔 상태에서만 수동으로 돌린다:
- *   SESSION_ID=<세션 id> PLAN_ID=<작업 분해 id> pnpm docs:screenshots
+ *   SESSION_ID=<세션 id> PLAN_ID=<작업 분해 id> FRONTEND_TAB="화면 (web)" ONLY=studio-hero-light pnpm docs:screenshots
  *
  * 상태를 바꾸는 조작(대화 전송, 승인/거절, 발행, 체크포인트 되돌리기 등)은 절대 하지 않는다. 탭 전환·스크롤·
  * 개발 배너 닫기(로컬 state만 바꾼다, DevStatusBanner 참고)·테마 전환(emulateMedia)처럼 읽기만 하는
@@ -23,6 +23,10 @@ const rawDir = path.join(here, ".raw");
 const BASE_URL = process.env.STUDIO_BASE_URL ?? "http://127.0.0.1:3000";
 const SESSION_ID = process.env.SESSION_ID ?? "c55417ad";
 const PLAN_ID = process.env.PLAN_ID ?? "45539ab6";
+/** 미리보기로 찍을 프런트엔드 탭 이름. 탭은 "화면 (<서비스 이름>)"이라 프로젝트마다 다르다 */
+const FRONTEND_TAB = process.env.FRONTEND_TAB ?? "화면 (frontend)";
+/** 쉼표로 고른 사진만 찍는다(예: ONLY=studio-hero-light,studio-requirements). 비우면 전부 */
+const ONLY = (process.env.ONLY ?? "").split(",").map((name) => name.trim()).filter(Boolean);
 const MAX_BYTES = 600_000;
 
 type ColorScheme = "light" | "dark";
@@ -102,7 +106,7 @@ const SHOTS: ShotSpec[] = [
     colorScheme: "light",
     frameWidth: 1056,
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "화면 (frontend)");
+      await clickTab(page, "미리보기 대상", FRONTEND_TAB);
       await waitLoaded(page);
       await page.waitForTimeout(1200);
       // 이 세션엔 저장된 QA 확인 프레임이 있어 "화면 확인 중 QA 보기로 자동 전환"이 앱 미리보기를
@@ -118,7 +122,7 @@ const SHOTS: ShotSpec[] = [
     colorScheme: "dark",
     frameWidth: 1056,
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "화면 (frontend)");
+      await clickTab(page, "미리보기 대상", FRONTEND_TAB);
       await waitLoaded(page);
       await page.waitForTimeout(1200);
       await clickTab(page, "화면 하위 탭", "앱 미리보기");
@@ -206,7 +210,7 @@ const SHOTS: ShotSpec[] = [
     frameWidth: 1056,
     setup: async (page) => {
       await waitLoaded(page);
-      const header = page.getByText(`apr · 작업 분해 ${PLAN_ID}`);
+      const header = page.getByText(`작업 분해 ${PLAN_ID}`);
       await header.waitFor({ state: "visible", timeout: 10_000 });
       await header.scrollIntoViewIfNeeded();
       await page.mouse.wheel(0, -40);
@@ -330,7 +334,7 @@ async function main() {
 
   const browser = await chromium.launch();
   try {
-    for (const spec of SHOTS) {
+    for (const spec of SHOTS.filter((shot) => ONLY.length === 0 || ONLY.includes(shot.name))) {
       process.stdout.write(`찍는 중: ${spec.name} ... `);
       const rawPath = await captureRaw(browser, spec);
       const framedPngPath = await frameShot(browser, spec, rawPath);
