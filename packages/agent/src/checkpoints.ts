@@ -664,6 +664,15 @@ export class CheckpointStore {
     return this.#git(['diff', '--no-color', ...(await this.#relative()), sha, 'HEAD']);
   }
 
+  /**
+   * 주어진 시각 이전에 만든 마지막 커밋(HEAD 기준). 리뷰 라운드가 끝 지점(headSha)을 기록하기 전에 끝난 옛 라운드의
+   * 기준점을 되짚을 때 쓴다 — 그 라운드가 시작될 때 HEAD였던 커밋이 곧 그 라운드가 본 diff의 끝이다
+   */
+  async commitBefore(iso: string): Promise<string | undefined> {
+    const out = await this.#git(['rev-list', '-1', `--before=${iso}`, 'HEAD']).catch(() => '');
+    return out.trim() || undefined;
+  }
+
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
   async repository(): Promise<RepositoryInfo | undefined> {
     const [base, branch] = await Promise.all([this.#getMeta('base'), this.#getMeta('branch')]);

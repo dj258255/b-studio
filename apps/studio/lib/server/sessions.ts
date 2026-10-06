@@ -3497,8 +3497,15 @@ export async function continueReviewAfterNewCommits(id: string): Promise<void> {
   if (!info?.pullRequestUrl) return;
 
   const lastRound = review.rounds[review.rounds.length - 1];
-  const sinceSha = lastRound?.headSha;
-  if (!sinceSha) return;
+  if (!lastRound) return;
+  // headSha가 없는 라운드는 이 기록이 생기기 전에 끝난 리뷰다. 그 라운드가 시작될 때의 HEAD(그 전에 만든 마지막 커밋)를
+  // 기준점으로 삼는다. 커밋 시각은 초 단위라 라운드 시작과 같은 초에 만든 커밋은 그 라운드가 본 것으로 친다(리뷰 뒤
+  // 고침 커밋은 보통 분 단위로 늦게 생긴다). 그래도 못 정하면 조용히 넘어가지 않고 대화에 알린다(도그푸딩 마찰 87)
+  const sinceSha = lastRound.headSha ?? (await session.checkpoints.commitBefore(lastRound.startedAt));
+  if (!sinceSha) {
+    emit(session, { type: 'notice', text: `PR에 새 커밋을 올렸지만 이전 리뷰 라운드 ${lastRound.round}가 어느 커밋까지 봤는지 알 수 없어 AI 리뷰를 이어 돌리지 않았습니다. 리뷰를 다시 돌리려면 PR 리뷰의 다시 돌리기를 누르세요`, at: new Date().toISOString() });
+    return;
+  }
   const headSha = await sessionHeadSha(session);
   if (!headSha || sinceSha === headSha) return;
 
