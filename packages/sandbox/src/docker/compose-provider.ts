@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
-import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, waitForReady, type ReadinessPolicy } from '../readiness';
+import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransientCrash, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { withRemovedDirectories } from '../sync-paths';
@@ -480,7 +480,7 @@ class LocalDockerSandbox implements Sandbox {
     }
   }
 
-  async #awaitReady(name: string, { signal, onStatus }: StartOptions): Promise<ServiceEndpoint> {
+  async #awaitReady(name: string, { signal, onStatus, onTransientRetry }: StartOptions, attempt = 1): Promise<ServiceEndpoint> {
     const service = this.#managed(name);
     const endpoint = await this.endpoint(name);
 
@@ -506,6 +506,17 @@ class LocalDockerSandbox implements Sandbox {
             // 로그를 못 읽어도 실패 이유는 남긴다
           }
           const excerpt = crashLogExcerpt(lines);
+
+          // 트러블슈팅 #90: 설치 스크립트가 막 쓴 실행 파일을 실행하다 생기는 일시 오류(ETXTBSY 등)로 죽었으면
+          // 같은 컨테이너를 한 번만 다시 띄워 본다(무한 재시도 금지 — attempt가 1일 때만 재시도한다). 세션
+          // c55417ad에서는 바로 다시 기동하면 정상으로 떴다 — 파일이 이미 끝까지 쓰인 뒤라 같은 경합이 되풀이되지 않는다
+          if (shouldRetryTransientCrash(attempt, excerpt)) {
+            onTransientRetry?.({ service: name, reason: excerpt.join(' / ') || reason });
+            onStatus?.({ service: name, phase: 'starting' });
+            await this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], signal);
+            return this.#awaitReady(name, { signal, onStatus, onTransientRetry }, attempt + 1);
+          }
+
           if (excerpt.length > 0) reason = `${reason}\n앱 로그 마지막 줄:\n${excerpt.join('\n')}`;
 
           // edge의 egress 감사 로그도 같이 본다(#411, 실험 E10). 레인이 "허용 목록에 없음"이 아니라

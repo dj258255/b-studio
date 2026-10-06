@@ -128,6 +128,28 @@ const CRASH_SIGNAL = /exception|error|fail|fatal|denied|forbidden|refused|not fo
 const STACK_FRAME = /^\s*(at |\.\.\. \d+ more|File ".*", line \d+)/;
 
 /**
+ * 설치 스크립트가 막 쓴 실행 파일을 거의 동시에 실행하다 생기는 일시 오류(트러블슈팅 #90).
+ * colima(virtiofs) 공유 폴더처럼 쓰기 반영이 느린 파일시스템에서 esbuild 같은 네이티브 바이너리의 설치 후
+ * 자기 검증(postinstall이 방금 쓴 바이너리를 바로 실행)이 걸리기 쉽다. 보통 같은 컨테이너를 다시 띄우면
+ * 사라지므로(파일이 이미 끝까지 쓰였다) 한 번은 다시 시도해 볼 만하다고 본다
+ */
+const TRANSIENT_BOOT_ERROR = /\bETXTBSY\b|\bEBUSY\b/;
+
+/** 죽은 컨테이너의 마지막 로그 줄(보통 {@link crashLogExcerpt}의 결과)에 알려진 일시 오류가 있는지 본다 */
+export function isTransientBootError(lines: readonly string[]): boolean {
+  return lines.some((line) => TRANSIENT_BOOT_ERROR.test(line));
+}
+
+/**
+ * 이번 기동 시도에서 컨테이너를 한 번 더 띄워 볼지 정한다(판정 로직만 떼어 두어 도커 없이 테스트한다).
+ * attempt는 1부터 시작한다 — 1번째 시도가 일시 오류로 죽었을 때만 재시도하고, 재시도(2번째 시도)도 또 죽으면
+ * 더는 재시도하지 않는다(무한 재시도 금지, 트러블슈팅 #90)
+ */
+export function shouldRetryTransientCrash(attempt: number, excerpt: readonly string[]): boolean {
+  return attempt === 1 && isTransientBootError(excerpt);
+}
+
+/**
  * 죽은 컨테이너의 마지막 로그에서 원인을 보여 줄 줄을 고른다(최대 `max`줄, 오래된 것부터).
  * 오류다운 줄이 없으면 마지막 몇 줄을 그대로 쓴다. "UND_ERR_SOCKET" 같은 연결 오류 대신 앱이 왜 죽었는지 보이려는 것이다
  * (Gradle 래퍼가 프록시 403으로 죽었는데 화면에는 소켓 오류만 보였다)
