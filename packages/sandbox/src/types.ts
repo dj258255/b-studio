@@ -66,6 +66,12 @@ export interface StartOptions {
    * 따라 띄우지 않도록 --no-deps를 함께 쓴다(선택에서 뺀 의존 서비스를 정말로 띄우지 않기 위해서다)
    */
   services?: readonly string[];
+  /**
+   * 설치 스크립트가 막 쓴 실행 파일을 실행하다 생기는 것처럼 알려진 일시 오류(ETXTBSY 등, 트러블슈팅 #90)로
+   * 컨테이너가 죽어 한 번 다시 띄울 때 알린다. 재시도가 성공하든 실패하든 한 번 불리며, 호출자가 이 사실을
+   * 세션 로그·대화에 남기는 데 쓴다(최대 1회 — 무한 재시도는 하지 않는다)
+   */
+  onTransientRetry?: (event: { service: string; reason: string }) => void;
 }
 
 export interface LogLine {
