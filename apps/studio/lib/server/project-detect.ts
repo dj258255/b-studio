@@ -1,11 +1,25 @@
 /**
  * 아무 폴더나 프로젝트로 열 때(ADR-067), 폴더를 보고 스택을 알아내 b-studio가 돌릴 파일(studio.yaml·개발용 compose·Dockerfile)을 제안한다.
  *
- * 알아내는 스택(폴더 바로 아래와 한 단계 아래 폴더):
- *  - Next.js: package.json의 의존성에 next. 패키지 관리자는 잠금 파일로(pnpm·yarn·npm)
+ * 알아내는 스택(폴더 바로 아래와 한 단계 아래 폴더, 모노레포로 보이면 apps/services/packages 같은 컨테이너 폴더와
+ * 이미 찾은 서비스 폴더 바로 아래까지 두 단계):
+ *  - Next.js: package.json의 의존성에 next. 패키지 관리자는 잠금 파일로(pnpm·yarn·npm). package.json에 dev
+ *    스크립트가 있으면(실제 저장소에서 흔한, NODE_ENV를 고정하는 scripts/dev.mjs 같은 래퍼) 직접 next/vite를
+ *    부르지 않고 그 스크립트를 그대로 쓴다(포트는 PORT 환경 변수로 맞춘다)
  *  - Vite(React·Vue·Svelte 등): package.json의 의존성에 vite(Next가 아닐 때)
- *  - Spring Boot: build.gradle(.kts)에 org.springframework.boot, 또는 pom.xml에 spring-boot
+ *  - Spring Boot: build.gradle(.kts)에 org.springframework.boot, 또는 pom.xml에 spring-boot. 서비스 폴더에
+ *    Gradle·Maven 래퍼(gradlew·mvnw)가 없으면 상위 폴더를 저장소 루트까지 거슬러 올라가 찾는다(실제 저장소에서
+ *    확인한 구조: 래퍼는 저장소 루트에, Gradle 프로젝트 루트는 하위 폴더에 따로 있다) — 찾으면 그 래퍼가 있는
+ *    폴더에서 `-p`(Gradle)·`-f`(Maven)로 서비스 폴더를 가리켜 실행하고, 이미지는 JDK만 있으면 된다(래퍼가
+ *    배포판 버전을 스스로 받으므로 이미지에 든 Gradle·Maven 버전과 어긋날 일이 없다)
  *  - FastAPI: requirements.txt·pyproject.toml에 fastapi. 앱 모듈은 `X = FastAPI(`가 있는 파일에서
+ *
+ * 모노레포로 보이는 폴더(바로 아래가 단일 앱이 아닐 때)는 두 단계까지 더 본다: apps/services/packages 같은
+ * 흔한 컨테이너 폴더 한 단계 아래, 그리고 이미 찾은 서비스 폴더 바로 아래의 또 다른 빌드(예: commerce/consumer-app
+ * 처럼 백엔드 폴더 안에 선 별도 Gradle 프로젝트가 있는 경우). 뒤의 경우는 같은 저장소의 다른 서비스로 넣되
+ * `defaultSelected: false`를 달아 사람이 서비스 선택에서 직접 켤 때까지는 기본으로 띄우지 않는다(ADR-083).
+ * k6·tools·scripts·docs·examples·fixtures처럼 테스트·도구용으로 흔히 쓰는 폴더 이름은 보지 않고, 너무 많이
+ * 잡히지 않게 서비스 수에 상한(MAX_DETECTED_SERVICES)을 둔다.
  *
  * ADR-067은 앱만 만들고 DB 같은 부가 서비스는 만들지 않아 첫 기동이 실패할 수 있었다(ADR-073).
  * 이제 앱 폴더에서 찾은 compose 파일(compose.yaml·docker-compose.yml 등)에서 postgres·redis·kafka 같은 잘 알려진 인프라
@@ -75,6 +89,11 @@ export interface DetectedService {
   dependsOn: string[];
   /** 사람이 확인해야 할 추측 */
   notes: string[];
+  /**
+   * 기본 서비스 선택(ADR-083)에 넣을지. 생략하면 true(기본 켬). 이미 찾은 서비스 폴더 하위의 또 다른 빌드처럼,
+   * 별도 서비스로는 넣지만 사람이 확인하고 켤 때까지 기본으로는 띄우고 싶지 않은 것에 false를 준다
+   */
+  defaultSelected?: boolean;
 }
 
 export interface ProjectDetection {
@@ -114,6 +133,16 @@ function containerWorkDir(servicePath: string): string {
 }
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', '.next', 'build', 'dist', 'target', '.gradle', '.venv', 'venv', '__pycache__', '.idea', '.vscode']);
+/** 테스트·예제·도구용으로 흔히 쓰는 폴더 이름. 서비스일 가능성이 낮아 두 단계 탐색에서도 보지 않는다 */
+const NOISE_DIR_NAMES = new Set(['k6', 'tools', 'tool', 'scripts', 'script', 'docs', 'doc', 'examples', 'example', 'fixtures', 'fixture']);
+/** 여러 서비스를 모아 두는 흔한 컨테이너 폴더 이름. 이 폴더 자신은 서비스가 아니고, 그 자식들을 한 단계 더 본다 */
+const APP_CONTAINER_DIR_NAMES = new Set(['apps', 'services', 'packages']);
+/** 한 프로젝트에서 찾는 서비스 수 상한. 두 단계 탐색이 너무 많이 잡지 않게 자른다 */
+const MAX_DETECTED_SERVICES = 6;
+
+function isNoiseDirName(name: string): boolean {
+  return NOISE_DIR_NAMES.has(name.toLowerCase());
+}
 
 export async function detectProject(folder: string, { ignoreExistingSpec = false }: { ignoreExistingSpec?: boolean } = {}): Promise<ProjectDetection> {
   const root = path.resolve(folder);
@@ -125,15 +154,17 @@ export async function detectProject(folder: string, { ignoreExistingSpec = false
   if (!ignoreExistingSpec && (await exists(path.join(root, SPEC_FILE)))) return { folder: root, name, hasSpec: true, services: [], infra: [], defaultInfra: [], warnings: [] };
 
   const childDirNames = await childDirs(root);
-  const candidates = ['.', ...childDirNames];
+  const depth1Names = childDirNames.filter((name) => !isNoiseDirName(name));
   const found: Array<Omit<DetectedService, 'name'>> = [];
-  for (const relative of candidates) {
+  for (const relative of ['.', ...depth1Names]) {
     const service = await detectDir(root, path.join(root, relative), relative);
     if (service) found.push(service);
   }
-  // 폴더 바로 아래가 앱이면(단일 앱 저장소) 하위 폴더에서 찾은 것은 그 앱의 일부일 가능성이 커서 버린다
+  // 폴더 바로 아래가 앱이면(단일 앱 저장소) 하위 폴더에서 찾은 것은 그 앱의 일부일 가능성이 커서 버린다.
+  // 아니면(모노레포로 보이면) 컨테이너 폴더·이미 찾은 서비스 하위까지 두 단계 더 본다
   const rootApp = found.find((service) => service.path === '.');
-  const services = nameServices(rootApp ? [rootApp] : found);
+  const deepServices = rootApp ? [rootApp] : await withDeeperCandidates(root, depth1Names, found);
+  const services = nameServices(deepServices.slice(0, MAX_DETECTED_SERVICES));
   const warnings: string[] = [];
   if (services.length === 0) {
     warnings.push('Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다. studio.yaml을 직접 쓰거나 지원하는 스택인지 확인하세요');
@@ -148,6 +179,55 @@ export async function detectProject(folder: string, { ignoreExistingSpec = false
   // 아무도 기대지 않는 부가 서비스(예: 가져왔지만 안 쓰는 카프카)는 기본으로 체크하지 않는다
   const defaultInfra = [...dependencyClosure(services.flatMap((service) => service.dependsOn), Object.fromEntries(infra.map((service) => [service.name, service.dependsOn])))];
   return { folder: root, name, hasSpec: false, services, infra, defaultInfra, warnings, ...(frontendBackendWiring ? { frontendBackendWiring } : {}) };
+}
+
+/**
+ * 폴더 바로 아래가 단일 앱이 아닐 때(모노레포로 보일 때)만 부른다. 두 갈래를 더 본다:
+ *  1. apps/services/packages 같은 흔한 컨테이너 폴더 한 단계 아래(예: apps/web) — 그 폴더 자신은 서비스가
+ *     아니고 자식들이 실제 앱이다
+ *  2. 이미 찾은 서비스 폴더(depth1Services, 아직 이 함수가 더하기 전) 바로 아래의 또 다른 빌드(예:
+ *     commerce/consumer-app) — 같은 저장소의 다른 서비스로 넣되, 사람이 서비스 선택(ADR-083)에서 확인하고
+ *     켤 때까지는 기본으로 띄우지 않는다(defaultSelected: false)
+ * 두 갈래 모두 노이즈 폴더(NOISE_DIR_NAMES)는 건너뛰고, 중복 경로는 한 번만 더한다
+ */
+async function withDeeperCandidates(
+  root: string,
+  depth1Names: readonly string[],
+  depth1Services: ReadonlyArray<Omit<DetectedService, 'name'>>,
+): Promise<Array<Omit<DetectedService, 'name'>>> {
+  const result = [...depth1Services];
+  const seen = new Set(result.map((service) => service.path));
+
+  const tryAdd = async (relative: string, decorate?: (service: Omit<DetectedService, 'name'>) => Omit<DetectedService, 'name'>): Promise<void> => {
+    if (seen.has(relative)) return;
+    seen.add(relative);
+    const service = await detectDir(root, path.join(root, relative), relative);
+    if (service) result.push(decorate ? decorate(service) : service);
+  };
+
+  for (const containerName of depth1Names) {
+    if (!APP_CONTAINER_DIR_NAMES.has(containerName)) continue;
+    const grandChildren = await childDirs(path.join(root, containerName));
+    for (const childName of grandChildren) {
+      if (isNoiseDirName(childName)) continue;
+      await tryAdd(posixJoin(containerName, childName), (service) => ({ ...service, notes: [`${containerName}/ 폴더 아래에서 찾았습니다`, ...service.notes] }));
+    }
+  }
+
+  for (const parent of depth1Services) {
+    if (parent.path === '.') continue;
+    const grandChildren = await childDirs(path.join(root, parent.path));
+    for (const childName of grandChildren) {
+      if (isNoiseDirName(childName)) continue;
+      await tryAdd(posixJoin(parent.path, childName), (service) => ({
+        ...service,
+        defaultSelected: false,
+        notes: [`${parent.path} 서비스 하위의 별도 빌드로 보여 기본으로는 띄우지 않습니다. 필요하면 서비스 선택에서 켜세요`, ...service.notes],
+      }));
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -407,9 +487,17 @@ async function detectNode(root: string, dir: string, relative: string): Promise<
   const install = lockless ? 'npm install' : { pnpm: 'pnpm install --frozen-lockfile', yarn: 'yarn install --frozen-lockfile', npm: 'npm ci' }[manager];
   const exec = { pnpm: 'pnpm exec', yarn: 'yarn', npm: 'npx' }[manager];
   const port = template === 'nextjs' ? 3000 : 5173;
-  const dev = template === 'nextjs' ? `${exec} next dev --hostname 0.0.0.0 --port ${port}` : `${exec} vite --host 0.0.0.0 --port ${port} --strictPort`;
+  const devFlags = template === 'nextjs' ? `--hostname 0.0.0.0 --port ${port}` : `--host 0.0.0.0 --port ${port} --strictPort`;
+  // package.json에 dev 스크립트가 있으면 그 스크립트를 그대로 쓴다 — 직접 next/vite를 부르면 사용자 스크립트가 하는 일
+  // (실제 저장소에서 확인한 사례: NODE_ENV=development를 고정하는 scripts/dev.mjs 래퍼)이 통째로 사라진다. 포트는
+  // PORT 환경 변수로 맞추고, 스크립트가 next·vite를 바로 부르면 `--` 뒤 플래그도 그대로 전달된다(무시해도 해롭지 않다)
+  const scripts = pkg.scripts as Record<string, unknown> | undefined;
+  const hasDevScript = typeof scripts?.dev === 'string';
+  const runDev = { pnpm: 'pnpm run dev', yarn: 'yarn run dev', npm: 'npm run dev' }[manager];
+  const dev = hasDevScript ? `${runDev} -- ${devFlags}` : template === 'nextjs' ? `${exec} next dev ${devFlags}` : `${exec} vite ${devFlags}`;
   const notes: string[] = [];
   if (lockless) notes.push('잠금 파일이 없어 npm install로 설치합니다(버전이 달라질 수 있습니다)');
+  if (hasDevScript) notes.push('package.json의 dev 스크립트를 그대로 씁니다. 포트는 PORT 환경 변수로 맞춥니다(스크립트가 다른 방식으로 포트를 읽으면 studio.yaml의 port에 맞추세요)');
   // 워크스페이스 구성원은 루트에서 설치하고(잠금 파일이 거기 있다) 서비스 폴더로 돌아와 개발 서버를 띄운다
   const command = workspaceManager
     ? `cd ${CONTAINER_WORKSPACE_ROOT} && ${install} && cd ${containerWorkDir(relative)} && exec ${dev}`
@@ -438,7 +526,7 @@ async function detectNode(root: string, dir: string, relative: string): Promise<
       '',
     ].join('\n'),
     volumes: { 'node-modules': 'node_modules', ...(template === 'nextjs' ? { next: '.next' } : {}), ...(manager === 'pnpm' ? { 'pnpm-store': '/cache/pnpm' } : {}) },
-    environment: {},
+    environment: hasDevScript ? { PORT: String(port) } : {},
     dependsOn: [],
     notes,
   };
@@ -475,21 +563,44 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
   const springdoc = build.includes('springdoc-openapi');
   const ready = actuator ? { path: '/actuator/health' } : springdoc ? { path: '/v3/api-docs' } : { path: '/', expectStatus: 404 };
   if (!actuator && !springdoc) notes.push('상태 확인 경로를 몰라 "/"가 404를 돌려주면 준비된 것으로 봅니다. actuator를 넣거나 studio.yaml의 ready를 고치세요');
-  const wrapper = isGradle ? await exists(path.join(dir, 'gradlew')) : await exists(path.join(dir, 'mvnw'));
-  const run = isGradle
-    ? wrapper
-      ? '["./gradlew", "bootRun", "--no-daemon", "--console=plain"]'
-      : '["gradle", "bootRun", "--no-daemon", "--console=plain"]'
-    : wrapper
-      ? '["./mvnw", "-q", "spring-boot:run"]'
-      : '["mvn", "-q", "spring-boot:run"]';
+  const wrapperName = isGradle ? 'gradlew' : 'mvnw';
+  // 서비스 폴더 자신에 래퍼가 없으면 상위 폴더를 저장소 루트까지 거슬러 올라가 찾는다(실제 저장소에서 확인한 구조:
+  // 래퍼는 저장소 루트에, Gradle·Maven 프로젝트 루트는 하위 폴더에 따로 있다. 1번 문제)
+  const wrapperDir = await findWrapperDir(root, dir, wrapperName);
+  const wrapper = wrapperDir !== undefined;
+  const wrapperRelative = wrapperDir ? toPosixPath(path.relative(root, wrapperDir)) || '.' : undefined;
+  // 래퍼가 이 폴더가 아니라 상위 폴더에 있으면, 그 폴더로 옮겨 가 `-p`(Gradle)·`-f`(Maven)로 이 서비스 폴더를 가리켜 실행한다.
+  // 둘 다 리액터(다중 모듈 선언) 관계와 무관하게 "이 디렉터리가 프로젝트다"로 동작해, commerce처럼 자기 settings.gradle은
+  // 있지만 gradlew가 없는 독립 빌드에도, 진짜 멀티 모듈 서브프로젝트에도 똑같이 먹힌다
+  const usesAncestorWrapper = wrapper && wrapperRelative !== relative;
+  let run: string;
+  let runIsShell = false;
+  if (usesAncestorWrapper) {
+    const subPath = toPosixPath(path.relative(wrapperDir!, dir));
+    const wrapperWorkDir = containerWorkDir(wrapperRelative!);
+    const cmd = isGradle ? `./gradlew -p ${subPath} bootRun --no-daemon --console=plain` : `./mvnw -f ${subPath} spring-boot:run -q`;
+    run = `cd ${wrapperWorkDir} && exec ${cmd}`;
+    runIsShell = true;
+  } else {
+    run = isGradle
+      ? wrapper
+        ? '["./gradlew", "bootRun", "--no-daemon", "--console=plain"]'
+        : '["gradle", "bootRun", "--no-daemon", "--console=plain"]'
+      : wrapper
+        ? '["./mvnw", "-q", "spring-boot:run"]'
+        : '["mvn", "-q", "spring-boot:run"]';
+  }
   const image = wrapper ? `eclipse-temurin:${java}-jdk` : isGradle ? `gradle:jdk${java}` : `maven:3-eclipse-temurin-${java}`;
-  if (!wrapper) notes.push(`${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다`);
-  // 이 폴더에 자기 gradlew·settings.gradle이 없는데 저장소 루트의 settings.gradle(.kts)이 이 폴더를 서브프로젝트로 포함하면
-  // 진짜 멀티 모듈 빌드의 모듈일 가능성이 크다. 지금은 이 폴더를 그대로 작업 폴더로 써서 gradlew/gradle을 돌리는데(ADR-088),
-  // 루트에만 래퍼·settings.gradle이 있는 구조라면 실패할 수 있다 — 그럴 때는 studio.yaml의 path를 저장소 루트로 옮기고
-  // Dockerfile.b-studio·테스트 명령에 `:폴더이름:bootRun`/`:폴더이름:test`처럼 서브프로젝트 경로를 직접 적어야 한다
-  if (isGradle && relative !== '.' && !(await exists(path.join(dir, 'settings.gradle.kts'))) && !(await exists(path.join(dir, 'settings.gradle')))) {
+  if (!wrapper) {
+    notes.push(`이 폴더와 상위 폴더 어디에도 ${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다. 이미지의 버전이 실제 쓰는 버전과 다르면 빌드가 달라질 수 있습니다`);
+  } else if (usesAncestorWrapper) {
+    notes.push(
+      `${isGradle ? 'Gradle' : 'Maven'} 래퍼가 이 폴더에 없어 ${wrapperRelative === '.' ? '저장소 루트' : wrapperRelative}의 래퍼로 실행합니다: ${isGradle ? `./gradlew -p ${toPosixPath(path.relative(wrapperDir!, dir))} bootRun` : `./mvnw -f ${toPosixPath(path.relative(wrapperDir!, dir))} spring-boot:run`}`,
+    );
+  }
+  // 래퍼를 찾았으면(자기 폴더든 상위 폴더든) 다중 모듈 여부와 무관하게 바로 위에서 이미 제대로 실행하므로,
+  // 래퍼가 아예 없을 때만 "서브프로젝트일 수 있다"는 안내가 의미가 있다(그래도 추측이라 돌려만 본다)
+  if (!wrapper && isGradle && relative !== '.' && !(await exists(path.join(dir, 'settings.gradle.kts'))) && !(await exists(path.join(dir, 'settings.gradle')))) {
     if (await isGradleSubproject(root, relative)) {
       notes.push(
         '저장소 루트의 settings.gradle(.kts)이 이 폴더를 서브프로젝트로 포함하는 것으로 보입니다. ' +
@@ -512,7 +623,7 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
       `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
       ...(isGradle ? ['ENV GRADLE_USER_HOME=/gradle-home', ''] : []),
       `EXPOSE ${port}`,
-      `CMD ${run}`,
+      runIsShell ? `CMD ["sh", "-c", "${run}"]` : `CMD ${run}`,
       '',
     ].join('\n'),
     volumes: isGradle ? { 'gradle-home': '/gradle-home', 'gradle-project': '.gradle', build: 'build' } : { 'maven-home': '/root/.m2', target: 'target' },
@@ -528,6 +639,22 @@ async function isGradleSubproject(root: string, relative: string): Promise<boole
   if (!settings) return false;
   const escaped = relative.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`['"]:?${escaped}['"]`).test(settings);
+}
+
+/** dir부터 root까지(포함) 거슬러 올라가며 wrapperName(gradlew·mvnw) 파일이 있는 첫 폴더. 없으면 undefined */
+async function findWrapperDir(root: string, dir: string, wrapperName: string): Promise<string | undefined> {
+  const rootResolved = path.resolve(root);
+  let current = path.resolve(dir);
+  for (;;) {
+    if (await exists(path.join(current, wrapperName))) return current;
+    if (current === rootResolved) return undefined;
+    current = path.dirname(current);
+  }
+}
+
+/** path.relative 결과를 항상 '/' 구분자로(Dockerfile·셸 명령에 그대로 쓰는 문자열이라 윈도 경로 구분자가 섞이면 안 된다) */
+function toPosixPath(value: string): string {
+  return value.split(path.sep).join('/');
 }
 
 function javaVersion(build: string): number | undefined {

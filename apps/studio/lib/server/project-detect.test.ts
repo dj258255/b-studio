@@ -679,6 +679,140 @@ describe('폴더 등록', () => {
   });
 });
 
+describe('detectProject: Gradle·Maven 래퍼를 상위 폴더까지 거슬러 올라가 찾는다(실 저장소 구조, 1번 문제)', () => {
+  it('래퍼가 저장소 루트에만 있고 Gradle 프로젝트 루트는 하위 폴더면, 그 래퍼로 -p를 써서 실행한다', async () => {
+    const root = await repo({
+      gradlew: '#!/bin/sh',
+      'gradle/wrapper/gradle-wrapper.properties': 'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.12-bin.zip\n',
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\n",
+      'commerce/build.gradle': springGradle,
+    });
+
+    const { services } = await detectProject(root);
+    const [service] = services;
+
+    expect(service!.path).toBe('commerce');
+    // 래퍼를 찾았으니 JDK 이미지면 충분하다(gradle:jdk 이미지가 아니다 — 버전이 래퍼와 어긋날 일이 없다)
+    expect(service!.dockerfile).toContain('FROM eclipse-temurin:17-jdk');
+    expect(service!.dockerfile).toContain('CMD ["sh", "-c", "cd /workspace && exec ./gradlew -p commerce bootRun --no-daemon --console=plain"]');
+    expect(service!.notes.some((note) => note.includes('저장소 루트'))).toBe(true);
+  });
+
+  it('Maven도 같은 방식으로 상위 mvnw를 찾아 -f로 서비스 폴더를 가리켜 실행한다', async () => {
+    const root = await repo({
+      mvnw: '#!/bin/sh',
+      'backend/pom.xml': '<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent></project>',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.dockerfile).toContain('FROM eclipse-temurin:21-jdk');
+    expect(service!.dockerfile).toContain('CMD ["sh", "-c", "cd /workspace && exec ./mvnw -f backend spring-boot:run -q"]');
+    expect(service!.notes.some((note) => note.includes('저장소 루트'))).toBe(true);
+  });
+
+  it('이 폴더에도 상위 어디에도 래퍼가 없으면 예전처럼 이미지의 도구로 실행하고, 버전이 다를 수 있다고 알린다', async () => {
+    const root = await repo({ 'commerce/build.gradle': springGradle });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.dockerfile).toContain('FROM gradle:jdk17');
+    expect(service!.dockerfile).toContain('CMD ["gradle", "bootRun"');
+    expect(service!.notes.some((note) => note.includes('어디에도') && note.includes('래퍼가 없어'))).toBe(true);
+  });
+});
+
+describe('detectProject: 두 단계 탐색(apps/services/packages, 이미 찾은 서비스 하위)과 노이즈 폴더 건너뛰기(2번 문제)', () => {
+  it('실 저장소 구조(pay)를 흉내낸 픽스처에서 commerce·apps/web을 찾고, consumer-app은 기본 선택 해제로 더하고, k6·tools·docs·scripts는 건너뛴다', async () => {
+    const root = await repo({
+      gradlew: '#!/bin/sh',
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\n",
+      'commerce/build.gradle': springGradle,
+      'commerce/consumer-app/settings.gradle': "rootProject.name = 'be-commerce-consumer'\n",
+      'commerce/consumer-app/build.gradle': springGradle,
+      'apps/web/package.json': nextPackage,
+      'apps/web/package-lock.json': '{}',
+      'k6/bench.js': '// 부하 테스트 스크립트\n',
+      'tools/fds/requirements.txt': 'fastapi\n', // 노이즈 폴더 안의 FastAPI 흉내 — 잡히면 안 된다
+      'tools/fds/main.py': 'from fastapi import FastAPI\napp = FastAPI()\n',
+      'docs/README.md': '# 문서\n',
+      'scripts/deploy.sh': '#!/bin/sh\n',
+    });
+
+    const detection = await detectProject(root);
+
+    const commerce = detection.services.find((service) => service.path === 'commerce');
+    const web = detection.services.find((service) => service.path === 'apps/web');
+    const consumerApp = detection.services.find((service) => service.path === 'commerce/consumer-app');
+    expect(commerce).toBeDefined();
+    expect(commerce!.defaultSelected).toBeUndefined();
+    expect(web).toBeDefined();
+    expect(web!.name).toBe('web');
+    expect(web!.notes.some((note) => note.includes('apps/'))).toBe(true);
+    expect(consumerApp).toBeDefined();
+    expect(consumerApp!.defaultSelected).toBe(false);
+    expect(consumerApp!.notes.some((note) => note.includes('별도 빌드'))).toBe(true);
+    // 노이즈 폴더는 마커 파일이 있어도(tools/fds의 FastAPI) 서비스가 되지 않는다
+    expect(detection.services.some((service) => service.path.startsWith('tools'))).toBe(false);
+    expect(detection.services.some((service) => service.path.startsWith('docs'))).toBe(false);
+    expect(detection.services.some((service) => service.path.startsWith('k6'))).toBe(false);
+    expect(detection.services.some((service) => service.path.startsWith('scripts'))).toBe(false);
+  });
+
+  it('두 단계 탐색이 찾은 서비스가 많아도 상한(6개)에서 자른다', async () => {
+    const files: Record<string, string> = { 'commerce/build.gradle': springGradle, 'commerce/gradlew': '#!/bin/sh' };
+    for (let index = 1; index <= 8; index++) {
+      files[`apps/svc${index}/package.json`] = JSON.stringify({ dependencies: { next: '16.0.0' } });
+      files[`apps/svc${index}/package-lock.json`] = '{}';
+    }
+    const root = await repo(files);
+
+    const { services } = await detectProject(root);
+
+    expect(services.length).toBe(6);
+  });
+
+  it('등록할 때 기본 선택 해제된 서비스는 처음부터 서비스 선택에서 뺀다(부가 서비스가 없어도)', async () => {
+    const root = await repo({
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\n",
+      'commerce/build.gradle': springGradle,
+      'commerce/gradlew': '#!/bin/sh',
+      'commerce/consumer-app/settings.gradle': "rootProject.name = 'be-commerce-consumer'\n",
+      'commerce/consumer-app/build.gradle': springGradle,
+      'commerce/consumer-app/gradlew': '#!/bin/sh',
+    });
+    const registry = path.join(await repo({}), 'registry.json');
+    const stateDir = await repo({});
+
+    const previous = process.env.B_STUDIO_PROJECTS_STATE_DIR;
+    process.env.B_STUDIO_PROJECTS_STATE_DIR = stateDir;
+    try {
+      const { id } = await registerFolder(root, new Set(), registry);
+      const selection = await readServiceSelection(id, stateDir);
+      expect(selection?.selected).toEqual(['commerce']);
+    } finally {
+      if (previous === undefined) delete process.env.B_STUDIO_PROJECTS_STATE_DIR;
+      else process.env.B_STUDIO_PROJECTS_STATE_DIR = previous;
+    }
+  });
+});
+
+describe('detectProject: Next.js package.json의 dev 스크립트를 존중한다(3번 문제)', () => {
+  it('scripts.dev가 있으면(예: NODE_ENV를 고정하는 scripts/dev.mjs) next를 직접 부르지 않고 그 스크립트를 쓰며, 포트는 PORT 환경 변수로 맞춘다', async () => {
+    const root = await repo({
+      'package.json': JSON.stringify({ dependencies: { next: '15.0.0' }, scripts: { dev: 'node scripts/dev.mjs', build: 'next build' } }),
+      'package-lock.json': '{}',
+      'scripts/dev.mjs': '// NODE_ENV=development 고정\n',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.dockerfile).toContain('CMD ["sh", "-c", "npm ci && exec npm run dev -- --hostname 0.0.0.0 --port 3000"]');
+    expect(service!.environment).toEqual({ PORT: '3000' });
+    expect(service!.notes.some((note) => note.includes('dev 스크립트'))).toBe(true);
+  });
+});
+
 describe('generateFiles: 생성 파일에 ADR 번호가 남아 있지 않아야 한다', () => {
   it('studio.yaml·compose.b-studio.yaml·Dockerfile.b-studio 어디에도 ADR-숫자가 없다(부가 서비스 포함)', async () => {
     const root = await repo({
