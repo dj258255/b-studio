@@ -139,7 +139,7 @@
 - [ADR-122 "올리기 전 점검"이 실제 사용에서 낸 오탐 두 건을 고친다: 추적 안 되는 생성 파일의 비밀 값, 커밋 하나의 "독차지" 경고](#adr-122-올리기-전-점검이-실제-사용에서-낸-오탐-두-건을-고친다-추적-안-되는-생성-파일의-비밀-값-커밋-하나의-독차지-경고)
 - [ADR-123 요구사항 추적 이슈 표를 PR 만들 때 다시 쓰고, 관련 줄을 하나로 합친다](#adr-123-요구사항-추적-이슈-표를-pr-만들-때-다시-쓰고-관련-줄을-하나로-합친다)
 - [ADR-124 네트워크 상류 장애(DNS 실패)와 정책 거부를 구별하고, 벤치는 environment 연속 실패에서 멈춘다](#adr-124-네트워크-상류-장애dns-실패와-정책-거부를-구별하고-벤치는-environment-연속-실패에서-멈춘다)
-- [ADR-0XX 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-0xx-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
+- [ADR-125 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-125-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
 
 ---
 
@@ -5150,7 +5150,7 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
 - OpenAI, [Codex](https://openai.com/codex/)
 
-## ADR-0XX 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다
+## ADR-125 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다
 
 상태: 채택
 관련: 테스트 저장소 dj258255/test#22, 세션 c55417ad
