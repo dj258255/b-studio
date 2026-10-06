@@ -1,8 +1,9 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { ProjectSummary } from "@/lib/studio-events";
 import type { TaskPlanMetrics } from "@/lib/task-plan-metrics";
 import type { TaskPlanLaneView, TaskPlanView } from "@/lib/task-plan-types";
-import { laneBackendLabel, LaneBackendControl, PlanTokenTotals } from "./task-plan-workbench";
+import { laneBackendLabel, LaneBackendControl, PlanTokenTotals, TaskPlanWorkbench, type PlanLimitView, type PlannerCapability } from "./task-plan-workbench";
 
 function metrics(over: Partial<TaskPlanMetrics> = {}): TaskPlanMetrics {
   return {
@@ -92,5 +93,60 @@ describe("LaneBackendControl(레인 백엔드·모델 선택기, 이슈 #398)", 
 
     expect(html).toContain('value="claude-code" selected');
     expect(html).toContain("모델 목록을 불러오는 중");
+  });
+});
+
+describe("TaskPlanWorkbench 레인 카드(이슈 #82)", () => {
+  it("작업 카드의 에이전트 요약을 대화 패널과 같은 마크다운 렌더러로 그린다(원문 **, ` 글자가 남지 않는다)", () => {
+    const planner: PlannerCapability = { mode: "api", enabled: true };
+    const limits: PlanLimitView = { maxLanes: 4, maxTasks: 12 };
+    const projects: ProjectSummary[] = [{ id: "orders", name: "orders", services: [] }];
+    const summary = "**구현 (backend만 — 이 작업의 쓰기 허용 경로)**\n`application.yml`에 설정을 더했다";
+    const taskPlan: TaskPlanView = {
+      id: "plan-1",
+      owner: "kim",
+      projectId: "orders",
+      request: "백엔드 핵심과 시드를 만들어줘",
+      modelId: "model-a",
+      status: "running",
+      createdAt: "",
+      lanes: [
+        {
+          id: "lane-1",
+          paths: ["backend/"],
+          status: "running",
+          tasks: [
+            {
+              id: "task-1",
+              title: "Backend core & seed",
+              request: "백엔드 핵심과 시드",
+              paths: ["backend/"],
+              dependsOn: [],
+              status: "done",
+              summary,
+            },
+          ],
+        },
+      ],
+    };
+
+    const html = renderToStaticMarkup(
+      <TaskPlanWorkbench
+        projects={projects}
+        models={[]}
+        initialPlans={[taskPlan]}
+        initialSelectedId="plan-1"
+        planner={planner}
+        limits={limits}
+        modelPicker={{ backend: "api", options: [], effort: { supported: false, levels: [] } }}
+        laneBackends={["claude-code"]}
+      />,
+    );
+
+    // 원문 마크다운 글자(**, `)는 그대로 남지 않고 강조·코드 태그로 바뀐다
+    expect(html).not.toContain("**구현");
+    expect(html).not.toContain("`application.yml`");
+    expect(html).toContain("<strong>구현 (backend만 — 이 작업의 쓰기 허용 경로)</strong>");
+    expect(html).toMatch(/<code[^>]*>application\.yml<\/code>/);
   });
 });

@@ -62,7 +62,11 @@ export function TokenView({ view }: { view: SessionView }) {
   const active = reports?.find((report) => report.runId === selected) ?? reports?.[0];
 
   return (
-    <div className="flex h-full flex-col">
+    // 탭 전체를 하나의 스크롤 영역으로 둔다(§83). 위 "반복 작업" 구역과 아래 그래프를 따로 된 flex 구역으로
+    // 나누면, 한쪽(반복 작업)이 길어질 때 남은 높이를 다 가져가 다른 쪽(턴별 컨텍스트)이 손바닥만 하게
+    // 짜부라든다(세션 c55417ad, 1440×900에서 32px짜리 스크롤 상자가 됐다). 접어도(기본값) 펼쳐도 같은
+    // 문제라 접는 것만으로는 못 막는다 — 안 짜부라들게 구역을 나누는 대신, 다 한 스크롤에 맡긴다
+    <div className="flex h-full flex-col overflow-y-auto">
       {/* 이 프로젝트의 모든 세션을 훑는 프로젝트 단위 구역이라, 실행별 보고서가 아직 없어도(로딩·오류·빈 상태) 따로 보여 준다 */}
       <RepeatedActionsSection projectId={view.snapshot.projectId} />
       {error ? (
@@ -92,7 +96,7 @@ export function TokenView({ view }: { view: SessionView }) {
               </button>
             ))}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-4">
+          <div className="p-4">
             <RunDetail report={active} />
           </div>
         </>
