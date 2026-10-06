@@ -11,7 +11,7 @@
 | 기동·종료·준비 판정 | 1–4, 14, 23, 36–37, 51–52 |
 | 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29, 41, 50 |
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
-| 네트워크·시크릿·격리 | 15, 17–21, 40 |
+| 네트워크·시크릿·격리 | 15, 17–21, 40, 53 |
 | 운영 이미지·컨테이너 배포 | 31–34 |
 | 설계 단계에서 대비한 문제 | 22 |
 
@@ -69,6 +69,7 @@
 - [50. 스튜디오 서버를 다시 시작한 뒤 "이어서 작업"이 저장한 요구사항을 안내 없이 지움](#50-스튜디오-서버를-다시-시작한-뒤-이어서-작업이-저장한-요구사항을-안내-없이-지움)
 - [51. 콜리마가 죽었다 살아난 뒤에도 샌드박스 기동이 옛 "Docker 데몬에 연결할 수 없음" 오류로 계속 실패함](#51-콜리마가-죽었다-살아난-뒤에도-샌드박스-기동이-옛-docker-데몬에-연결할-수-없음-오류로-계속-실패함)
 - [52. 미리 고른 호스트 포트가 colima VM 안에서는 이미 다른 컨테이너가 써서 compose up이 반복 실패함](#52-미리-고른-호스트-포트가-colima-vm-안에서는-이미-다른-컨테이너가-써서-compose-up이-반복-실패함)
+- [53. "올리기 전 점검"이 원격에 올라가지 않는 생성 파일의 비밀 값과, 커밋 하나뿐인 세션의 "독차지"를 오탐으로 알림](#53-올리기-전-점검이-원격에-올라가지-않는-생성-파일의-비밀-값과-커밋-하나뿐인-세션의-독차지를-오탐으로-알림)
 
 ---
 
@@ -1851,3 +1852,84 @@ failed to bind port 127.0.0.1:327xx: bind: address already in use
 
 ### 배운 점
 호스트에서 "포트가 비었는지" 확인하는 코드는, 실제 바인드가 다른 네트워크 네임스페이스(VM·컨테이너·다른 머신)에서 일어나는 순간 신뢰할 수 없어진다 — `listen(0)` 패턴 자체의 한계(확인과 바인드 사이의 경합)보다 훨씬 큰 구멍이다. 이런 구조에서는 "미리 잘 고르기"보다 "실패하면 실제로 다시 묻고 재시도하기"가 더 믿을 만한 방어선이다.
+
+## 53. "올리기 전 점검"이 원격에 올라가지 않는 생성 파일의 비밀 값과, 커밋 하나뿐인 세션의 "독차지"를 오탐으로 알림
+
+**구분:** 도그푸딩 중 발견(2026-10-06, 세션 c55417ad — Spring Boot + Next.js 게시판을 b-studio로 직접 만들던 중 점검 결과를 읽다가 발견) → 코드로 원인 추적 → 수정
+
+### 가설
+점검표(ADR-080)가 fail·warn을 낸 두 항목을 보고 처음에는 "점검 규칙 자체가 너무 엄격하다"고 생각했다. 비밀 값은 "`password`류 키워드 매칭이 오남발된다"고, 커밋 기록은 "80%라는 `DOMINANCE_RATIO` 문턱이 너무 낮다"고 가정했다 — 둘 다 문턱 값만 조정하면 될 것처럼 보였다.
+
+### 측정
+`compose.b-studio.yaml:37`을 직접 열어 보니 실제 줄은 `POSTGRES_PASSWORD: "${DB_PASSWORD:-community}"`였다. `git ls-files compose.b-studio.yaml`을 돌려 보니 아무것도 나오지 않았다 — 애초에 git이 추적하지 않는 파일이었다. 커밋 쪽은 `git log`로 세션 시작 이후 커밋을 세 보니 **딱 하나**(파일 3개, +60/-9=69줄)였다. `checkCommitHistory`의 "독차지" 계산식(`(dominant.stat.insertions + dominant.stat.deletions) / totalLines`)에 커밋이 하나뿐인 값을 넣어 보면 분자·분모가 같아 언제나 100%가 나온다.
+
+### 틀린 추측
+"키워드 매칭이 너무 넓다"는 틀렸다 — `password` 키워드 매칭과 6자 이상 값이라는 조건은 합리적이었다. 빠진 건 "이 파일이 애초에 비교 대상(원격에 올라갈 파일)에 들어가는가"를 한 번도 묻지 않은 것이었다. "80% 문턱이 낮다"도 틀렸다 — 문턱 자체는 커밋이 여러 개일 때는 잘 동작한다(실제로 500줄짜리 커밋 하나가 1줄짜리 커밋 옆에 있는 경우를 그대로 잡아낸다, 기존 테스트가 이를 확인한다). 문턱이 아니라 "커밋이 하나뿐이면 비교 대상이 없다"는 전제 자체가 코드에 없었다.
+
+### 원인
+1. **비밀 값(`checkSecrets`)**: `listFiles()`가 작업 복사본의 파일을 git 추적 여부와 무관하게 전부 스캔했다. b-studio가 만들고 `.git/info/exclude`로 뺀 생성 파일(`compose.b-studio.yaml`)도 그대로 스캔 대상에 들어가, 원격 저장소에는 절대 올라가지 않는 내용을 보고 fail을 냈다.
+2. **커밋 기록(`checkCommitHistory`)**: `totalLines > DOMINANCE_MIN_LINES`(50줄)이면 커밋 개수와 무관하게 비율 계산으로 들어갔다. 커밋이 하나뿐이면 그 비율은 수학적으로 항상 100%라, "독차지" 경고가 사실상 "커밋이 하나뿐이고 50줄보다 큰가"라는, 원래 의도(여러 커밋 중 하나가 쏠렸는가)와 다른 질문에 답하고 있었다.
+
+### 수정
+`apps/studio/lib/submission-checklist.ts`를 고쳤다.
+1. `listPushableFiles()`를 추가해 `git ls-files -z --cached --others --exclude-standard`로 "원격에 올라갈 파일"만 추린 뒤 비밀 값을 스캔한다(git 저장소가 아니면 기존 전체 스캔으로 되돌아간다). 더해서 `${VAR:-기본값}` 형태의 환경 변수 참조는 기본값이 짧으면(16자 미만) warn, 길고 문자 종류가 섞여 있으면 여전히 fail로 심각도를 나눴다 — 생성 파일이 빠지더라도 진짜 추적 파일에 같은 모양의 긴 비밀 기본값이 남아 있으면 잡아야 하기 때문이다.
+2. `checkCommitHistory`가 커밋이 2개 이상일 때만 기존 비율(80%) 로직을 쓰도록 했다. 커밋이 하나뿐이면 그 커밋의 절대 크기(줄 수 300 초과 또는 파일 수 15 초과)로만 "쪼개 볼까요"를 묻고, 그 미만이면 pass다.
+
+### 검증
+`apps/studio/lib/submission-checklist.test.ts`에 실측 사례를 그대로 재현한 회귀 테스트를 더했다: `.git/info/exclude`로 뺀 생성 파일의 비밀 값은 fail을 내지 않고 같은 줄이 추적 파일에 있으면 fail을 내는지, 파일 3개·69줄 커밋 하나는 pass이고 300줄을 넘는 커밋 하나는 warn인지, 커밋이 여러 개일 때의 기존 80% 로직은 그대로 동작하는지 확인했다(전체 64건 통과). `pnpm typecheck`(6/6)·`pnpm --filter @b-studio/studio lint`(오류 0)도 확인했다. 실제 Docker·GitHub·모델은 부르지 않았고, 세션 c55417ad의 작업 복사본은 읽기만 했다.
+
+## 54. 요구사항 추적 이슈가 발행 당시 표 그대로 멈춰 있음
+
+**구분:** 도그푸딩 중 발견(테스트 저장소 dj258255/test의 추적 이슈 #19) → 코드로 원인 추적 → 수정
+
+### 현상
+테스트 저장소의 추적 이슈 #19("요구사항: apr")를 열면 2026-10-01 발행 때 만든 표가 그대로 보였다. R2·R19·R20은 "작업 중", R3~R9 등은 "재확인 필요"로 남아 있는데, 정작 세션 c55417ad 기준 요구사항 20개는 전부 "검증됨"이고 하위 이슈도 PR 병합으로 모두 닫혔다. 이슈 자체도 CLOSED 상태에 `updatedAt`이 발행 시각 그대로였다. 추적 이슈 본문 첫 줄은 "상태는 발행 도구가 주기적으로 갱신합니다"라고 안내하는데, 실제로는 갱신되지 않았다.
+
+### 원인
+`buildTrackingIssueBody`(추적 이슈 표를 만드는 함수)를 실제로 호출해 본문을 다시 쓰는 곳은 `publishRequirementIssues`(사람이 "이슈로 발행"을 누를 때) 한 곳뿐이었다. 그 뒤로 "주기적으로 갱신"할 경로가 코드 어디에도 없었다 — 문구만 그렇게 약속하고 있었다. "올리고 PR 만들기"는 추적 이슈를 `관련: #19`로 가리키기만 할 뿐, 그 본문을 다시 쓰지는 않았다.
+
+### 수정
+`apps/studio/lib/server/requirement-issues.ts`에 `refreshTrackingIssueBody()`를 추가해, PR을 실제로 만들 때(`exportSession`, `pullRequest: true`)마다 이미 발행한 추적 이슈의 본문 표를 지금 요구사항 상태로 다시 쓴다. 발행한 적이 없으면 조용히 건너뛰고, 닫힌 이슈도 `state`를 주지 않아 다시 열지 않으며, 갱신이 실패해도 PR 만들기 자체는 그대로 성공시키고 경고만 남긴다. 미리보기(`export/preview`)는 원격에 쓰지 않고 "PR을 만들면 추적 이슈 #N을 갱신합니다"라고 예고만 한다. 본문 첫 줄 문구도 "이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다 + 마지막 갱신 시각"으로 사실과 맞췄다(ADR-123).
+
+### 검증
+- `apps/studio/lib/server/requirement-issues.test.ts`, `apps/studio/lib/server/sessions-tracking-refresh.test.ts`(가짜 저장소 클라이언트, 실 GitHub 호출 없음): 갱신 호출이 나가는지, 닫힌 이슈를 다시 열지 않는지, 갱신 실패가 PR 만들기를 막지 않는지, 미리보기가 원격에 쓰지 않는지 확인.
+- `pnpm typecheck` 6/6, `pnpm --filter @b-studio/studio lint` 오류 0, 전체 `vitest run` 295개 파일 통과.
+
+### 배운 점
+본문에 "자동으로 갱신합니다" 같은 문구를 적을 때는 그 갱신을 실제로 호출하는 지점이 코드에 있는지 먼저 확인해야 한다 — 발행 시점에 한 번 쓴 문구가 그대로 남아 몇 달 뒤에는 거짓 안내가 된다. 갱신 계기는 "주기적으로"보다 사람이 실제로 누르는 버튼(이슈 발행·PR 만들기)에 붙이는 쪽이 새 백그라운드 작업 없이도 확실하다.
+
+## 55. 벤치가 네트워크 장애로 생긴 environment 실패를 18번 반복하며 5시간을 태움
+
+**구분:** 도그푸딩 중 발견(실험 E10, 2026-10-06 07:45~12:58) → 코드로 원인 추적 → 재현 → 수정
+
+### 현상
+실험 E10(`pnpm bench:coordination --backend claude-code --model auto|sonnet --strategies S0 --tasks orders-list,order-detail,order-summary --repeats 1 --force`)을 18회 돌렸는데 14회가 category `environment`였다. 매번 레인 세션 준비가 "앱이 켜지다가 종료됐습니다 (컨테이너 exited)"로 실패했고, 앱 로그 마지막 줄은 한결같이
+
+```
+TypeError: fetch failed … RequestAbortedError: Proxy response (403) !== 200 when HTTP Tunneling
+```
+
+environment 실패는 대부분 20초 안에 끝났지만, 벤치는 그때마다 원인을 묻지 않고 바로 다음 실행으로 넘어가 18회를 다 채우는 데 약 5시간이 걸렸다.
+
+### 가설
+1. (틀림) 허용 목록(`EDGE_EGRESS`)에서 registry.npmjs.org 등이 빠졌다 — 같은 커밋을 `--dry`로 다시 띄우자 edge가 registry.npmjs.org·fonts.googleapis.com·fonts.gstatic.com을 모두 허용했고 앱이 바로 떴다. 허용 목록은 바뀐 적이 없었다.
+2. (맞음) 호스트 네트워크가 간헐적으로 불안정해 edge 컨테이너가 허용된 호스트의 이름조차 못 풀었다. 같은 시간대 다른 작업의 네트워크 스트림도 끊겼다.
+
+### 측정
+- `~/.cache/b-studio/bench/e10/*/results.jsonl`을 훑어 18줄 중 14줄의 `category`가 `environment`이고, `detail`에 "컨테이너 exited"와 "Proxy response (403)"이 함께 들어 있음을 셌다.
+- `packages/sandbox/edge/edge.mjs`의 `resolveAllowed`를 읽어, CONNECT·평문 HTTP 모두 허용 목록 위반과 DNS 조회 실패(`addresses.length === 0`)를 구분하지 않고 똑같이 403으로 응답한다는 것을 확인했다. 거부 이유("이름을 풀지 못함" vs "허용 목록에 없는 호스트나 포트")는 edge 컨테이너의 감사 로그에만 한 줄 JSON으로 남고, 실행이 끝나 컨테이너가 지워지면 사라진다 — 그래서 결과 파일에는 어느 쪽인지 남지 않았다.
+- `apps/studio/bench/coordination/run.ts`의 반복 루프를 읽어, `leftoverContainers`·`rate_limited`에는 중단 경로가 있지만 `environment` 분류에는 없다는 것을 확인했다.
+
+### 원인
+두 문제가 겹쳤다. ① edge가 "정책 거부"와 "상류(DNS) 장애"를 구별하지 않아 사후에 원인을 가릴 수 없었다. ② 벤치가 environment 실패를 만나도 멈추지 않아, 네트워크가 돌아올 때까지 똑같이 실패할 실행을 계속 반복했다.
+
+### 수정
+1. `packages/sandbox/edge/edge.mjs`: DNS 조회가 주소를 하나도 못 돌려주면(허용 목록은 통과했다는 전제) 403 대신 `502 Bad Gateway` + 헤더 `X-B-Studio-Egress: dns-failed`를 돌려주고, 감사 로그 `decision`도 `deny`가 아니라 `error`로 남긴다. 사설 주소로 풀리는 경우는 여전히 403(정책 위반)이다.
+2. `packages/sandbox/src/docker/format.ts`의 `egressAuditExcerpt()`와 `compose-provider.ts`의 `#awaitReady`: 레인 세션이 "앱이 켜지다가 종료됐습니다"로 실패하면, 같은 샌드박스 edge 컨테이너의 최근 egress `deny`/`error` 줄(최대 5줄)을 "호스트: 이유"로 줄여 오류 메시지에 덧붙인다. 이제 결과 파일에 "registry.npmjs.org: 이름을 풀지 못함"처럼 바로 남는다.
+3. `apps/studio/bench/coordination/env-guard.ts` + `run.ts`: environment가 연달아 `--max-env-failures`번(기본 2) 나오면 남은 실행을 돌리지 않고 멈춘다. 이미 남긴 결과는 그대로 두고, 종료 코드 1과 `meta.json`의 `abortReason`으로 "환경 장애로 멈췄다"는 사실을 남긴다.
+
+### 재발 방지와 확인
+- `packages/sandbox/edge/edge.test.ts`: 이름을 못 푼 CONNECT·평문 HTTP가 502(헤더 포함)를, 허용 목록 위반·사설 주소는 403을 돌려주고, 감사 로그 decision이 갈리는 것을 가짜 DNS 조회(`startEdge({ lookup })`)로 확인한다. 진짜 네트워크는 쓰지 않는다.
+- `packages/sandbox/src/docker/format.test.ts`: `egressAuditExcerpt()`가 `deny`·`error`만 추려 최근 N줄로 줄이는 것을 확인한다.
+- `apps/studio/bench/coordination/env-guard.test.ts`: environment가 연달아 한도에 이르면 멈추고, 성공이나 다른 분류가 끼면 연속이 끊기는 것을 가짜 결과 순서(실험 E10을 단순화)로 확인한다.
+- 교훈: 거부와 장애를 같은 상태 코드로 묶으면, 컨테이너가 사라지는 순간 "왜 막혔는지"를 되짚을 길이 없어진다 — 특히 벤치처럼 실행마다 환경을 통째로 치우는 도구에서는, 실패 자체보다 "실패를 사람이 사후에 읽을 수 있는 형태로 남기는가"가 몇 시간을 아끼는 차이를 만든다.

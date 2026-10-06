@@ -470,6 +470,9 @@ export type StudioEvent =
       pullRequestError?: string;
       /** PR에 연결한 이슈 번호들. 연결하지 않았거나 PR을 만들지 않았으면 없다 */
       issues?: number[];
+      /** 요구사항 추적 이슈 본문 갱신이 실패했다는 경고(PR 만들기 자체는 막지 않는다). 갱신할 추적 이슈가 없으면(아직
+       * "이슈로 발행"을 안 했거나 이 프로젝트가 요구사항 발행을 안 쓰면) 없다 */
+      requirementsTrackingWarning?: string;
     }
   | { type: 'deploy_started'; action: DeployAction; target: string; at: string; by?: string }
   /** 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷의 deploying.lines에서 최근 줄을 받는다 */
@@ -511,7 +514,7 @@ export interface ExportPreview {
   /** PR에 연결할 이슈 번호들. 통합 세션이면 계획의 하위 이슈가 기본값으로 온다 */
   issues: number[];
   checks: Array<{
-    id: 'issue_linked' | 'issue_open' | 'stages_passed' | 'uncheckpointed_changes' | 'running';
+    id: 'issue_linked' | 'issue_open' | 'stages_passed' | 'uncheckpointed_changes' | 'running' | 'tracking_issue_refresh';
     /** unknown: 확인하지 못했지만 올리기를 막지는 않는 항목 (예: 원격 이슈 조회 실패) */
     ok: boolean | 'unknown';
     detail: string;

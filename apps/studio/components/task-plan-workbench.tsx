@@ -9,6 +9,7 @@ import type { TaskPlanMetrics } from '@/lib/task-plan-metrics';
 import { planModelAlias, type TaskPlanLaneView, type TaskPlanStatus, type TaskPlanStepStatus, type TaskPlanStrategy, type TaskPlanView } from '@/lib/task-plan-types';
 import { describeTokens, hasTokens } from '@/lib/usage';
 import { EFFORT_LABEL, ModelPicker } from './chat-panel';
+import { Markdown } from './markdown';
 import { PlanGraphView } from './plan-graph';
 import { SESSION_BACKEND_LABEL } from './status';
 
@@ -793,7 +794,11 @@ function PlanResult({
                         <span className={`shrink-0 text-xs font-medium ${STEP_COLOR[task.status]}`}>{STEP_STATUS[task.status]}</span>
                       </div>
                       <p className="mt-1 break-all font-mono text-xs text-muted">{task.paths.join(', ')}{task.dependsOn.length > 0 ? ` · 선행: ${task.dependsOn.join(', ')}` : ''}</p>
-                      {task.summary && <p className="mt-2 text-xs leading-5 whitespace-pre-wrap text-muted">{task.summary}</p>}
+                      {task.summary && (
+                        <div className="mt-2 text-xs leading-5 text-muted [&_p]:leading-5">
+                          <Markdown text={task.summary} />
+                        </div>
+                      )}
                       {task.checkpoint && <p className="mt-1 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{task.checkpoint.shortSha}</span></p>}
                     </li>
                   ))}

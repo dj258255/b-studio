@@ -41,6 +41,7 @@ import {
   composeUpArgs,
   EDGE_SERVICE,
   edgePortFor,
+  egressAuditExcerpt,
   parseContainerState,
   parseEgressDenial,
   parseHostPort,
@@ -505,10 +506,21 @@ class LocalDockerSandbox implements Sandbox {
             // 로그를 못 읽어도 실패 이유는 남긴다
           }
           const excerpt = crashLogExcerpt(lines);
-          if (excerpt.length > 0) {
-            reason = `${reason}\n앱 로그 마지막 줄:\n${excerpt.join('\n')}`;
-            if (error instanceof Error) error.message = reason;
+          if (excerpt.length > 0) reason = `${reason}\n앱 로그 마지막 줄:\n${excerpt.join('\n')}`;
+
+          // edge의 egress 감사 로그도 같이 본다(#411, 실험 E10). 레인이 "허용 목록에 없음"이 아니라
+          // "이름을 풀지 못함"(DNS·네트워크 장애) 때문에 기동에 실패했는지는 edge 컨테이너 로그에만 남고,
+          // 실행이 끝나 컨테이너가 지워지면 사라진다 — 실패 바로 그 순간에 덧붙여야 결과 파일·UI에 남는다
+          const egressLines: string[] = [];
+          try {
+            for await (const line of this.logs({ services: [EDGE_SERVICE], tail: 200, follow: false })) egressLines.push(line.text);
+          } catch {
+            // 로그를 못 읽어도 실패 이유는 남긴다
           }
+          const egressExcerpt = egressAuditExcerpt(egressLines);
+          if (egressExcerpt.length > 0) reason = `${reason}\negress 최근 기록:\n${egressExcerpt.join('\n')}`;
+
+          if (error instanceof Error) error.message = reason;
         }
         onStatus?.({ service: name, phase: 'failed', reason });
         throw error;

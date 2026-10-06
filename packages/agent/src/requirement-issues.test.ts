@@ -166,6 +166,20 @@ describe('추적 이슈 본문', () => {
     const body = buildTrackingIssueBody('orders', [{ requirement: { id: 'R3', title: 'README', kind: 'docs', priority: 'must' }, status: '검증됨', checklistOnly: true }]);
     expect(body).toContain('- [x] R3. README');
   });
+
+  it('첫 줄은 "주기적으로 갱신"이 아니라 이슈 발행·PR 만들기 때 갱신한다고 말한다(버그 리포트 — 실제로 다시 쓰는 경로가 없었다)', () => {
+    const body = buildTrackingIssueBody('orders', []);
+    expect(body).not.toContain('주기적으로');
+    expect(body).toContain('이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다');
+  });
+
+  it('updatedAt을 주면 마지막 갱신 시각을 첫 줄에 적는다(안 주면 적지 않는다)', () => {
+    const withTimestamp = buildTrackingIssueBody('orders', [], { updatedAt: '2026-10-06T09:00:00.000Z' });
+    expect(withTimestamp).toContain('마지막 갱신: 2026-10-06T09:00:00.000Z');
+
+    const withoutTimestamp = buildTrackingIssueBody('orders', []);
+    expect(withoutTimestamp).not.toContain('마지막 갱신');
+  });
 });
 
 describe('발행 계획', () => {

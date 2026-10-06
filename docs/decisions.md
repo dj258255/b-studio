@@ -136,6 +136,9 @@
 - [ADR-119 게시판을 MCP로 열어 계획 밖 에이전트도 참여하게 한다](#adr-119-게시판을-mcp로-열어-계획-밖-에이전트도-참여하게-한다)
 - [ADR-120 OpenCode 백엔드 되살리기: 멈춰 있던 브랜치가 이미 main에 들어가 있던 것을 확인하고 문서를 맞춘다](#adr-120-opencode-백엔드-되살리기-멈춰-있던-브랜치가-이미-main에-들어가-있던-것을-확인하고-문서를-맞춘다)
 - [ADR-121 미리 고를 호스트 포트는 40000~59999 대역에서 먼저 찾고, 그래도 충돌하면 전부 다시 뽑아 재시도한다](#adr-121-미리-고를-호스트-포트는-4000059999-대역에서-먼저-찾고-그래도-충돌하면-전부-다시-뽑아-재시도한다)
+- [ADR-122 "올리기 전 점검"이 실제 사용에서 낸 오탐 두 건을 고친다: 추적 안 되는 생성 파일의 비밀 값, 커밋 하나의 "독차지" 경고](#adr-122-올리기-전-점검이-실제-사용에서-낸-오탐-두-건을-고친다-추적-안-되는-생성-파일의-비밀-값-커밋-하나의-독차지-경고)
+- [ADR-123 요구사항 추적 이슈 표를 PR 만들 때 다시 쓰고, 관련 줄을 하나로 합친다](#adr-123-요구사항-추적-이슈-표를-pr-만들-때-다시-쓰고-관련-줄을-하나로-합친다)
+- [ADR-124 네트워크 상류 장애(DNS 실패)와 정책 거부를 구별하고, 벤치는 environment 연속 실패에서 멈춘다](#adr-124-네트워크-상류-장애dns-실패와-정책-거부를-구별하고-벤치는-environment-연속-실패에서-멈춘다)
 
 ---
 
@@ -4961,6 +4964,164 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 ### 감수한 트레이드오프
 - **대역을 옮겨도 충돌이 이론적으로 0이 되지는 않는다.** 40000~59999도 결국 유한한 대역이라, 다른 프로젝트가 그 대역까지 쓰기 시작하면 다시 충돌할 수 있다. 그래서 1번 완화책만으로 끝내지 않고 2번 재시도를 반드시 함께 넣었다 — 재시도가 실제 방어선이고, 대역 이동은 재시도 횟수를 줄여 주는 보조 수단일 뿐이다.
 - **colima VM 안을 직접 들여다보지 않는다.** 더 정확한 확인(VM 안에서 직접 점유 조회)은 colima 전용 가정을 코드에 박는 대가가 더 크다고 판단해 포기했다. 재시도로 충분히 커버되는 빈도라고 보고, VM 안을 직접 보는 방식은 이 문제가 재시도로도 못 버틸 만큼 잦아지면 다시 검토한다.
+
+---
+
+## ADR-122 "올리기 전 점검"이 실제 사용에서 낸 오탐 두 건을 고친다: 추적 안 되는 생성 파일의 비밀 값, 커밋 하나의 "독차지" 경고
+
+상태: 채택
+관련: 세션 c55417ad(Spring Boot + Next.js 게시판), ADR-080(제출 준비 점검표), 트러블슈팅 #53
+
+### 맥락
+- Spring Boot + Next.js 게시판을 b-studio로 직접 만들어 보던 중(ADR-102·ADR-106·ADR-116과 같은 도그푸딩 계열), "올리기 전 점검"의 비밀 값 항목이 `compose.b-studio.yaml:37`의 `POSTGRES_PASSWORD: "${DB_PASSWORD:-community}"`를 보고 fail을 냈다. 그런데 `compose.b-studio.yaml`은 b-studio가 만드는 생성 파일이고 `.git/info/exclude`로 추적에서 빠져 있어(`git ls-files compose.b-studio.yaml`이 아무것도 안 돌려준다) 애초에 clone·원격 저장소에 올라가지 않는다. 점검이 "원격에 올라갈 파일에 비밀 값이 있는가"를 묻는 것인데, 원격에 안 올라가는 파일을 보고 fail을 낸 것이다. fix 버튼("비밀 값 빼기")의 프리필까지 이 생성 파일을 고치라고 에이전트에 시켰다.
+- 같은 점검에서 커밋 기록 항목도 "커밋 하나가 전체 변경의 100%를 차지합니다"로 warn을 냈다. 이 세션은 기준 커밋 이후 커밋이 하나뿐이고(파일 3개, +60/-9=69줄) 이게 전부다 — `checkCommitHistory`의 기존 "독차지" 로직(`DOMINANCE_MIN_LINES`·`DOMINANCE_RATIO`)은 커밋이 몇 개든 한 커밋의 비중만 보므로, 커밋이 하나뿐이면 그 비중은 항상 100%다. "한 커밋이 전체를 독차지한다"는 "비교할 다른 커밋이 있는데 그중 하나가 유난히 크다"는 뜻이어야 하는데, 비교 대상이 아예 없는 경우까지 같은 식으로 매긴 것이다.
+- 두 건 모두 점검표가 실제로 어떤 질문에 답하려는지(각각 "원격에 올라갈 파일에 비밀 값이 있는가", "여러 커밋 중 하나가 쏠렸는가")와 구현이 실제로 확인하는 범위(각각 "작업 복사본의 모든 파일", "커밋이 몇 개든 같은 비율식")가 어긋나 생긴 오탐이었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 비밀 값 점검에서 `compose.b-studio.yaml`이라는 파일 이름만 예외로 둔다 | 지금 당장은 맞지만, b-studio가 만드는 다른 생성 파일이나 프로젝트마다 다른 `.gitignore` 규칙을 하나하나 따라갈 수 없다. "원격에 올라가는가"라는 실제 질문에 직접 답하지 않고 증상 하나만 땜질한다 |
+| B. 커밋 기록의 "독차지" 경고를 아예 없앤다 | 실제로 하나의 거대한 커밋에 전체 작업이 몰려 리뷰하기 어려운 경우(예: 수백 줄짜리 뼈대 커밋)까지 놓치게 된다. 문제는 "커밋이 하나인 것"이 아니라 "비교 대상 없이 비율로 판단한 것"이다 |
+| C. (채택) 비밀 값은 git이 실제로 올릴 파일 목록(`git ls-files --cached --others --exclude-standard`)만 본다. 커밋 기록은 커밋이 2개 이상일 때만 기존 비율 로직을 쓰고, 1개면 그 커밋 자체의 절대 크기(줄 수·파일 수)로 딴 기준을 둔다 | 각 점검이 원래 답하려던 질문에 맞게 범위·기준을 고치는 근본적인 수정이라, 이름을 모르는 다른 생성 파일·다른 프로젝트에도 일반적으로 들어맞는다 |
+
+### 결정
+1. **비밀 값 점검(`checkSecrets`, `apps/studio/lib/submission-checklist.ts`)은 `listPushableFiles()`로 먼저 "원격에 올라갈 파일" 목록을 구한다.** git 저장소면 `git ls-files -z --cached --others --exclude-standard -- .`로 추적 파일과, 추적되지 않았지만 `.gitignore`·`.git/info/exclude`에 안 걸리는 새 파일만 모은다(`EXCLUDED_DIRS`에 든 경로는 한 번 더 걸러 안전판을 둔다). git 저장소가 아니면(`git rev-parse --is-inside-work-tree` 실패) 기존처럼 `listFiles()`로 전체를 스캔한다 — 원본 프로젝트가 아직 git 초기화 전인 세션에서 점검 자체가 멈추면 안 되기 때문이다.
+2. **`${VAR:-기본값}` 형태의 환경 변수 참조는 기본값의 모양을 보고 심각도를 나눈다.** `classifyPasswordAssignmentValue()`가 매치된 값 전체가 `${VAR}`나 `${VAR:-기본값}`/`${VAR-기본값}` 패턴인지 먼저 본다. 기본값이 없는 순수 참조(`${APP_SECRET}`)는 코드에 비밀 값이 전혀 없다는 뜻이라 아예 잡지 않는다(none). 기본값이 있으면 `looksLikeGeneratedSecret()`로 그 기본값만 평가한다 — **16자 미만이면 무조건 개발용 플레이스홀더로 보고 warn**(`community`·`postgres`·`changeme` 같은 흔한 기본값이 여기 해당한다), **16자 이상이면서 대문자·소문자·숫자·기호 중 2가지 이상이 섞여 있으면 실제로 생성된 비밀처럼 보여 fail**로 둔다(예: `aZ9xT3mK7pQ1vL5bN8wR2cH6`). 참조가 아니라 리터럴 문자열을 직접 대입했으면(`password: "admin-local-only"`) 길이·구성과 무관하게 항상 fail이다 — 하드코딩은 애초에 변수로 빼지 않겠다는 뜻이기 때문이다. 16자·문자 종류 2가지라는 기준에 통계적 근거는 없다 — AWS 키(20자)·hex 토큰(32자 이상)·bcrypt 해시(60자) 같은 실제 생성된 비밀의 흔한 길이보다 더 짧게 잡아, 애매하면 fail 쪽(더 안전한 쪽)으로 기울게 했다.
+3. **커밋 기록(`checkCommitHistory`)은 커밋이 2개 이상일 때만 기존 "한 커밋이 전체의 80%를 넘게 차지"(`DOMINANCE_RATIO`) 로직을 쓴다.** 커밋이 하나뿐이면 비교 대상이 없으므로 비율 대신 그 커밋 자체의 절대 크기를 본다(`singleCommitTooBig()`): 바뀐 줄 수(추가+삭제)가 300줄을 넘거나, 건드린 파일 수(`ChecklistCommit.filesChanged`, 있을 때만)가 15개를 넘으면 "더 작은 단위로 나누는 편이 기록을 읽기 좋습니다"로 warn, 아니면 그 커밋 하나만으로도 pass다. 300줄·파일 15개는 코드 리뷰 관행에서 자주 언급되는 "한 번에 제대로 보기 버거워지는" 문턱(흔히 거론되는 200~400줄 범위)보다 보수적으로 낮춰 잡은 값이다 — 정확한 수치를 공식화할 근거는 없고, 이 점검의 목적이 "기준에 어긋난다"를 가리는 게 아니라 "쪼개 볼까?"라고 한 번 묻는 보조 도구이기 때문이다.
+4. **`ChecklistCommit`에 `filesChanged?: number`를 더했다.** 서버 조립(`apps/studio/lib/server/sessions.ts`의 `submissionReport`)이 `SessionCommit.files.length`를 그대로 넘긴다. 없어도(과거 호출부·테스트) 줄 수 기준만으로 판단하므로 하위 호환은 깨지지 않는다.
+
+### 검증 결과
+- `apps/studio/lib/submission-checklist.test.ts`(13건 추가, 전체 64건 통과): git 저장소에서 `.git/info/exclude`로 뺀 생성 파일은 비밀 값 점검에서 빠지고 같은 줄이 추적 파일·추적 안 된 새 파일(ignore 안 됨)에 있으면 잡히는지, git 저장소가 아니면 기존처럼 전체를 스캔하는지, `${VAR}`(기본값 없음)는 안 잡히고 `${VAR:-community}`(짧은 기본값)는 warn, `${VAR:-aZ9xT3mK7pQ1vL5bN8wR2cH6}`(길고 무작위) 기본값은 fail, 리터럴 하드코딩은 길이와 무관하게 fail인지 확인했다. 실측 세션(c55417ad)과 같은 모양(파일 3개, +60/-9=69줄 커밋 하나)이 pass로 바뀌는지, 커밋 하나가 300줄을 넘거나 파일 15개를 넘으면 그 하나만으로도 warn인지, 커밋이 여러 개면 기존 80% 비율 로직이 그대로 동작하는지(쏠림이면 warn, 고르게 나뉘면 pass) 확인했다.
+- `apps/studio/lib/server/sessions-*.test.ts`(18개 파일, 125건): `filesChanged` 필드 추가가 `submissionReport` 조립과 기존 체크포인트·저장소 테스트를 깨지 않는지 회귀 확인했다.
+- `pnpm typecheck`: 6개 패키지 모두 `Done`. `pnpm --filter @b-studio/studio lint`: 오류 0(이번 변경과 무관한 기존 경고만 남아 있다).
+- 실제 Docker 샌드박스·모델 호출은 부르지 않았다. 세션 c55417ad의 작업 복사본(`~/.cache/b-studio/sessions/apr-c55417ad`)은 읽기만 하고 고치지 않았다 — 테스트는 임시 디렉터리에 새로 만든 git 저장소로만 검증했다.
+
+### 감수한 트레이드오프
+- **"길고 무작위로 보이는 기본값"의 16자·문자 종류 2가지 기준은 어림값이다.** `dev-secret-2024`처럼 "개발용"이라는 의도가 이름에 드러나도 길이(15자 미만이라 사실 여기 안 걸린다)나 문자 구성에 따라 fail로 분류될 수 있다. 이 점검은 사람의 판단을 대신하지 않고 올리기 전 마지막 점검의 보조 도구라, 애매하면 더 안전한 쪽(fail)으로 치우치게 뒀다.
+- **커밋 하나의 "쪼개기 권장" 300줄·파일 15개 기준도 실측에서 나온 숫자가 아니라 보수적으로 고른 값이다.** 프로젝트·팀마다 "리뷰하기 적당한 크기"는 다르므로, 다음 라운드에서 실제로 경고가 과하게/부족하게 뜨는 사례가 쌓이면 다시 조정할 여지를 남긴다.
+- **`git ls-files`를 호출하므로 비밀 값 점검이 이제 파일시스템만이 아니라 `git` 실행 파일에 기대게 됐다.** `git`이 없거나 호출이 실패하면 `listPushableFiles()`가 `undefined`를 돌려 기존 전체 스캔으로 조용히 되돌아가므로 점검 자체가 멈추지는 않지만, 그 경우 추적 안 되는 생성 파일을 다시 보게 되는 원래 오탐이 재현될 수 있다.
+- StackBlitz, [WebContainers Commercial Usage](https://webcontainers.io/enterprise)
+- vercel/next.js, [`next dev --turbo` fails in WASM #70522](https://github.com/vercel/next.js/issues/70522) · stackblitz/webcontainer-core [#2065](https://github.com/stackblitz/webcontainer-core/issues/2065)
+- CodeSandbox, [Sandpack FAQ (Nodebox)](https://sandpack.codesandbox.io/docs/resources/faq)
+- Beam, [How Lovable and Bolt Work](https://www.beam.cloud/blog/agentic-apps)
+- Vercel, [Vercel Sandbox](https://vercel.com/docs/sandbox) · [Pricing and quotas](https://vercel.com/docs/sandbox/pricing)
+- kubernetes-sigs, [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+- Replit, [Development and production databases](https://docs.replit.com/features/data-and-storage/development-and-production)
+- Upstash, [Best Sandbox Providers for AI Agents](https://upstash.com/blog/best-sandbox-providers-for-ai-agents)
+- Anthropic, [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) (인증 정책, 브랜딩 가이드)
+- Apple Newsroom, [Apple introduces a delightful and elegant new software design](https://www.apple.com/newsroom/2025/06/apple-introduces-a-delightful-and-elegant-new-software-design/) · Apple Developer, [Meet Liquid Glass (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/219/)
+- Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
+- Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
+- remarkjs, [react-markdown: Security](https://github.com/remarkjs/react-markdown#security)
+- Lovable, [Brainstorm in Plan mode](https://docs.lovable.dev/features/plan-mode) · [Chat mode & Follow-up questions](https://lovable.dev/blog/chat-mode-and-questions) · Cursor, [Ask mode](https://cursor.com/help/ai-features/ask-mode)
+- Next.js, [output (standalone, outputFileTracingRoot, outputFileTracingExcludes)](https://nextjs.org/docs/app/api-reference/config/next-config-js/output) · Git, [git-config: safe.directory](https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory) · [Git 2.46.0 릴리스 노트](https://github.com/git/git/blob/master/Documentation/RelNotes/2.46.0.adoc)
+- Next.js, [Authentication](https://nextjs.org/docs/app/guides/authentication) (Proxy의 낙관적 확인과 데이터 접근 계층) · [proxy.js](https://nextjs.org/docs/app/api-reference/file-conventions/proxy)
+- MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
+- StablyAI, [Orca](https://github.com/stablyai/orca)
+- mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
+- Figma, [REST API](https://www.figma.com/developers/api) (개인 액세스 토큰, `file_content:read`)
+- OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)
+- Conductor, [conductor.build](https://conductor.build) · smtg-ai, [Claude Squad](https://github.com/smtg-ai/claude-squad) · Cognition, [Devin](https://devin.ai)
+- Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
+- OpenAI, [Codex](https://openai.com/codex/)
+
+## ADR-123 요구사항 추적 이슈 표를 PR 만들 때 다시 쓰고, 관련 줄을 하나로 합친다
+
+상태: 채택
+관련: fix/tracking-issue-refresh, 테스트 저장소 dj258255/test 이슈 #19("요구사항: apr")
+
+### 맥락
+- 실측: 테스트 저장소의 추적 이슈 #19가 2026-10-01 발행 당시 표를 그대로 갖고 있었다. R2·R19·R20은 "작업 중", R3~R9 등은 "재확인 필요"로 남아 있는데, 정작 세션 c55417ad 기준 요구사항 20개는 전부 "검증됨"이고 하위 이슈도 PR 병합으로 모두 닫혔다. 추적 이슈 자체도 CLOSED 상태에 `updatedAt`이 발행 시각 그대로였다.
+- 추적 이슈 본문 첫 줄은 "상태는 발행 도구가 주기적으로 갱신합니다"라고 말한다(`packages/agent/src/requirement-issues.ts`의 `buildTrackingIssueBody`). 그런데 이 표를 다시 쓰는 호출 지점을 코드에서 전부 찾아보면 `publishRequirementIssues`(사람이 "이슈로 발행"을 누를 때) 하나뿐이었다 — 스케줄러·cron·폴링 같은 "주기적" 경로는 없다. 문구가 실제 동작과 달랐다.
+- "올리고 PR 만들기"(`POST /api/sessions/[id]/export`, 미리보기 `export/preview`)가 만든 PR 초안은 추적 이슈를 `관련: #19`로 가리킨다. PR은 추적 이슈로 사람을 보내는데, 그 이슈를 열면 발행 당시 그대로인 낡은 표가 보이는 어긋남이었다. 같은 PR 초안은 `관련: #16`·`관련: #19`처럼 같은 접두를 줄마다 반복해서도 붙이고 있었다.
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| 서버에 정말 주기적 갱신(타이머·cron)을 넣는다 | 문구("주기적으로 갱신")가 사실이 된다 | 세션이 떠 있지 않아도 백그라운드로 원격 API를 불러야 한다 — 이 프로젝트는 세션이 열려 있을 때만 서버가 원격에 쓴다는 전제와 어긋나고, 샌드박스·토큰이 없는 세션까지 주기적으로 깨워야 한다 |
+| **(채택) PR을 실제로 만들 때(export, `pullRequest: true`) 추적 이슈 표를 지금 상태로 다시 쓴다** | 사람이 "PR을 연다"는 분명한 계기에 맞춰 표가 갱신된다. 새 백그라운드 루프가 필요 없고, 이미 있는 저장소 클라이언트 추상(`updateIssue`)만 재사용한다 | "이슈로 발행"도 "PR 만들기"도 하지 않고 오래 방치하면 그 사이에는 여전히 낡은 채로 남는다 — 완전한 실시간 동기화는 아니다 |
+| 추적 이슈를 열 때마다 즉석에서 계산해 보여준다(저장하지 않는다) | 항상 정확하다 | GitHub 이슈 페이지는 b-studio가 렌더링을 가로챌 수 없는 정적 페이지라 애초에 불가능하다 |
+
+### 결정
+1. `apps/studio/lib/server/requirement-issues.ts`에 `refreshTrackingIssueBody()`를 추가했다. 이미 발행한 추적 이슈(사이드카 `docs/requirements.issues.json`의 `tracking`)가 있을 때만 그 본문 표를 지금 요구사항 상태로 다시 쓰고, 한 번도 "이슈로 발행"하지 않아 추적 이슈가 없으면 조용히 건너뛴다. 하위 이슈는 건드리지 않는다(만들거나 라벨을 바꾸지 않는다). 이슈가 닫혀 있어도 `updateIssue`에 `state`를 주지 않아 다시 열지 않는다 — 본문만 고친다.
+2. `exportSession`(`apps/studio/lib/server/sessions.ts`)이 `pullRequest: true`로 불릴 때마다(새 PR을 만들든, 이미 열린 PR에 커밋만 더 올리든) 이 함수를 부른다. 실패해도 잡아서 `requirementsTrackingWarning` 문구로만 남기고, 푸시·PR 생성 자체는 그대로 성공으로 돌려준다. 미리보기(`previewExport`, `export/preview`)는 원격에 아무것도 쓰지 않고, `buildExportChecks`에 확인 항목(`tracking_issue_refresh`)을 더해 "PR을 만들면 추적 이슈 #N 본문을 다시 씁니다"라고 예고만 한다.
+3. `buildTrackingIssueBody()`(`packages/agent/src/requirement-issues.ts`) 첫 줄 문구를 "상태는 발행 도구가 주기적으로 갱신합니다"에서 "이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다"로 고치고, `updatedAt` 옵션으로 마지막 갱신 시각을 함께 적는다.
+4. PR 초안(`pullRequestDraft`, sessions.ts)에서 `관련: #16` / `관련: #19`처럼 같은 접두를 줄마다 반복하던 부분을 `관련: #16, #19` 한 줄로 합쳤다(GitHub는 한 줄에 여러 `#n`이 있어도 전부 이슈로 링크하는 형식만 확인했다 — 토큰이 없어 실제로 열어 링크가 걸리는지까지는 확인하지 못했다). `Closes #n`은 손대지 않았다 — GitHub가 한 줄에 여러 `Closes`를 다루는 방식이 `관련:`과 달라, 건드리면 다른 버그를 만들 위험이 있었다.
+
+### 검증 결과
+- `apps/studio/lib/server/requirement-issues.test.ts`: `refreshTrackingIssueBody`가 추적 이슈가 없으면 아무것도 쓰지 않는다 / 있으면 지금 상태로 본문을 다시 쓴다 / `state`를 주지 않아 닫힌 이슈를 다시 열지 않는다 / 첫 줄 문구와 마지막 갱신 시각을 확인한다(가짜 저장소 클라이언트, 실 GitHub 호출 없음).
+- `apps/studio/lib/server/sessions-tracking-refresh.test.ts`(신규): 실제 git 저장소·세션으로 `exportSession(pullRequest: true)`를 끝까지 돌려, 추적 이슈 갱신 호출이 나가는지 / 갱신이 실패해도 PR 만들기 결과가 그대로 성공하는지 / `previewExport`는 원격에 쓰지 않고 예고만 하는지 확인했다(원격 API는 가짜로 바꿨다. 실 GitHub·3000 포트 서버는 부르지 않는다).
+- `apps/studio/lib/server/sessions-pr-draft-scope.test.ts`: 기존 "관련: #103"·"관련: #999" 두 줄 기대를 "관련: #103, #999" 한 줄로 고쳐 다시 확인했다.
+- `packages/agent/src/requirement-issues.test.ts`: `buildTrackingIssueBody`의 새 첫 줄 문구·`updatedAt` 옵션을 확인했다.
+- `pnpm typecheck`: 6개 패키지 모두 `Done`. `pnpm --filter @b-studio/studio lint`: 오류 0(기존 경고 7개는 이번 변경과 무관).
+- 전체 `vitest run`: 295개 파일, 3103개 테스트 모두 통과.
+
+### 감수한 트레이드오프
+- **진짜 실시간은 아니다.** "이슈로 발행"도 "PR 만들기"도 하지 않고 오래 방치하면 표는 여전히 낡는다. 둘 다 b-studio가 이미 제공하는, 원격에 쓰는 유일한 진입점이라 그 위에 얹었다 — 체크포인트마다 같은 일을 하면 원격 API 호출이 지나치게 잦아진다.
+- **갱신 실패를 조용히 삼킨다(경고로만 남긴다).** PR은 이미 성공했는데 추적 이슈만 낡은 채로 남을 수 있다 — 사람이 결과 메시지의 경고를 보고 "이슈로 발행"을 다시 눌러야 알아챈다. PR 만들기 자체를 막는 쪽은 "브랜치는 이미 올라갔는데 추적 이슈 하나 때문에 실패로 보인다"는 혼란이 더 크다고 판단했다.
+
+- 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
+- StackBlitz, [WebContainers Commercial Usage](https://webcontainers.io/enterprise)
+- vercel/next.js, [`next dev --turbo` fails in WASM #70522](https://github.com/vercel/next.js/issues/70522) · stackblitz/webcontainer-core [#2065](https://github.com/stackblitz/webcontainer-core/issues/2065)
+- CodeSandbox, [Sandpack FAQ (Nodebox)](https://sandpack.codesandbox.io/docs/resources/faq)
+- Beam, [How Lovable and Bolt Work](https://www.beam.cloud/blog/agentic-apps)
+- Vercel, [Vercel Sandbox](https://vercel.com/docs/sandbox) · [Pricing and quotas](https://vercel.com/docs/sandbox/pricing)
+- kubernetes-sigs, [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+- Replit, [Development and production databases](https://docs.replit.com/features/data-and-storage/development-and-production)
+- Upstash, [Best Sandbox Providers for AI Agents](https://upstash.com/blog/best-sandbox-providers-for-ai-agents)
+- Anthropic, [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) (인증 정책, 브랜딩 가이드)
+- Apple Newsroom, [Apple introduces a delightful and elegant new software design](https://www.apple.com/newsroom/2025/06/apple-introduces-a-delightful-and-elegant-new-software-design/) · Apple Developer, [Meet Liquid Glass (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/219/)
+- Nielsen Norman Group, [Liquid Glass](https://www.nngroup.com/articles/liquid-glass/) · MacRumors, [iOS 26.1: reduce Liquid Glass effects](https://www.macrumors.com/how-to/ios-26-1-reduce-liquid-glass-effects/)
+- Shiki, [Dual Themes](https://shiki.style/guide/dual-themes) · [RegExp Engines](https://shiki.style/guide/regex-engines) · [Fine-grained Bundle](https://shiki.style/guide/bundles)
+- remarkjs, [react-markdown: Security](https://github.com/remarkjs/react-markdown#security)
+- Lovable, [Brainstorm in Plan mode](https://docs.lovable.dev/features/plan-mode) · [Chat mode & Follow-up questions](https://lovable.dev/blog/chat-mode-and-questions) · Cursor, [Ask mode](https://cursor.com/help/ai-features/ask-mode)
+- Next.js, [output (standalone, outputFileTracingRoot, outputFileTracingExcludes)](https://nextjs.org/docs/app/api-reference/config/next-config-js/output) · Git, [git-config: safe.directory](https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory) · [Git 2.46.0 릴리스 노트](https://github.com/git/git/blob/master/Documentation/RelNotes/2.46.0.adoc)
+- Next.js, [Authentication](https://nextjs.org/docs/app/guides/authentication) (Proxy의 낙관적 확인과 데이터 접근 계층) · [proxy.js](https://nextjs.org/docs/app/api-reference/file-conventions/proxy)
+- MDN, [backdrop-filter](https://developer.mozilla.org/en-US/docs/Web/CSS/backdrop-filter) · [prefers-reduced-transparency](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-transparency) · [forced-colors](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/forced-colors) · WebKit, [bug 245510](https://bugs.webkit.org/show_bug.cgi?id=245510)
+- StablyAI, [Orca](https://github.com/stablyai/orca)
+- mapbox, [pixelmatch](https://github.com/mapbox/pixelmatch) · pngjs, [pngjs](https://github.com/pngjs/pngjs)
+- Figma, [REST API](https://www.figma.com/developers/api) (개인 액세스 토큰, `file_content:read`)
+- OpenAI, [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) · Google, [Gemini `generateContent`](https://ai.google.dev/api/generate-content)
+- Conductor, [conductor.build](https://conductor.build) · smtg-ai, [Claude Squad](https://github.com/smtg-ai/claude-squad) · Cognition, [Devin](https://devin.ai)
+- Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
+- OpenAI, [Codex](https://openai.com/codex/)
+
+## ADR-124 네트워크 상류 장애(DNS 실패)와 정책 거부를 구별하고, 벤치는 environment 연속 실패에서 멈춘다
+
+상태: 채택
+관련: 이슈 #411, 실험 E10, `packages/sandbox/edge/edge.mjs`, `apps/studio/bench/coordination/run.ts`
+
+### 맥락
+- 실험 E10(`pnpm bench:coordination --backend claude-code --model auto|sonnet --strategies S0 --tasks orders-list,order-detail,order-summary --repeats 1 --force`)을 18회 돌렸는데(2026-10-06 07:45~12:58, 약 5시간) 14회가 category `environment`였다. 증상은 매번 같았다 — 레인 세션 준비 실패 "앱이 켜지다가 종료됐습니다 (컨테이너 exited)", 앱 로그 마지막 줄 `TypeError: fetch failed … RequestAbortedError: Proxy response (403) !== 200 when HTTP Tunneling`. environment 실패는 대부분 20초 안에 끝났는데, 벤치는 원인을 묻지 않고 다음 실행으로 계속 넘어갔다.
+- 같은 커밋에서 실행 뒤 `--dry`로 다시 띄우자 edge가 registry.npmjs.org·fonts.googleapis.com·fonts.gstatic.com을 모두 허용했고 앱이 바로 떴다. 같은 시간대 다른 작업도 네트워크 스트림이 끊겼다 — 호스트 네트워크가 불안정했던 것으로 보인다.
+- 두 가지가 겹쳐 5시간을 태웠다. ① `edge.mjs`의 `resolveAllowed`가 "허용 목록 위반"과 "DNS 조회 실패"를 똑같이 403으로 답했다. CONNECT도 평문 HTTP도 403이라, 거부 이유는 edge 컨테이너 로그(JSON 한 줄)에만 남고 실행이 끝나 컨테이너가 지워지면 사라져 사후에 어느 쪽인지 가릴 수 없었다. ② 벤치(`run.ts`)가 environment 실패를 만나도 멈추지 않고 같은 네트워크 장애를 18번 반복할 때까지 그대로 돌았다.
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| (edge) 403을 그대로 두고 감사 로그 reason 문자열만 본다 | 코드를 거의 안 고친다 | 컨테이너가 지워지면 로그도 사라진다 — 이번에 실제로 그래서 원인을 사후에 가리지 못했다 |
+| **(채택) edge: 허용 목록을 통과한 뒤 DNS 조회가 주소를 하나도 못 얻으면 403 대신 502 + `X-B-Studio-Egress: dns-failed`를 돌려주고, 감사 로그 decision도 `error`로 구분한다. 세션 기동 실패 메시지에 edge의 최근 egress 기록을 덧붙인다** | 정책 거부와 상류 장애를 응답 코드·감사 로그·사람이 보는 오류 메시지 세 군데 모두에서 구별한다. 사설 주소로 풀리는 것은 여전히 정책 위반(403)이라 DNS 재바인딩 방어는 그대로다 | edge.mjs에 분기가 하나 늘고, 테스트가 진짜 DNS를 쓰지 않도록 `startEdge`에 `lookup` 주입 지점을 추가해야 했다 |
+| (벤치) 매 실행 전에 edge와 같은 이미지(`node:22-bookworm-slim`)로 `docker run`해 이름 풀이를 미리 확인한다 | 실패를 세션을 띄우기도 전에 잡아 토큰을 한 번도 안 쓰고 건너뛸 수 있다 | 실행마다 컨테이너를 하나 더 띄우는 지연과, 그 자체가 또 다른 실패 지점(도커 데몬 호출 실패 등)이 된다. 호스트에서는 풀리는데 edge 컨테이너 네트워크에서만 안 풀리는 경우(그 반대도)엔 안 맞는다 |
+| **(채택) 벤치: environment가 연달아 N번(기본 2, `--max-env-failures`) 나오면 남은 실행을 돌리지 않고 멈춘다** | 네트워크가 돌아올 때까지 똑같이 실패할 실행을 18번 반복하지 않는다. 이미 남긴 결과(results.jsonl)는 그대로 둔다. 기존 leftoverContainers·rate_limited 중단과 같은 자리(run.ts)를 그대로 쓴다 | 사전에 막지 못하고 반응형이다 — 최소 N번(기본 2번)은 그래도 돈다. 환경 실패는 20초 안에 끝나므로 이 비용은 5시간에 비해 작다고 봤다 |
+
+### 결정
+1. `packages/sandbox/edge/edge.mjs`: `resolveAllowed`가 허용 목록 검사를 통과한 뒤 `dns.lookup`이 주소를 하나도 못 돌려주면 `{ denied, upstream: true }`를 돌려준다. CONNECT·평문 HTTP 두 경로 모두 `upstream`이면 403 대신 `502 Bad Gateway` + 헤더 `X-B-Studio-Egress: dns-failed`를 돌려주고, 감사 로그(`audit()`)의 `decision`도 `deny`가 아니라 `error`로 남긴다. 사설 주소로 풀리는 경우는 여전히 정책 위반(403, `decision: deny`)이다. 테스트가 진짜 네트워크를 쓰지 않도록 `startEdge({ lookup })`로 DNS 조회 함수를 주입할 수 있게 했다.
+2. `packages/sandbox/src/docker/format.ts`에 `egressAuditExcerpt()`를 더해 edge 컨테이너 로그에서 `deny`·`error` 줄만 "호스트: 이유" 한 줄로 줄인다. `compose-provider.ts`의 `#awaitReady`가 레인 세션 기동 실패("앱이 켜지다가 종료됐습니다")를 잡을 때, 기존 앱 크래시 로그 발췌 옆에 이 edge 발췌(최대 5줄)를 덧붙인다 — 그러면 결과 파일·화면에 "registry.npmjs.org: 이름을 풀지 못함"처럼 바로 남는다.
+3. `apps/studio/bench/coordination/env-guard.ts`를 새로 더해 `nextEnvFailureStreak`·`envFailuresExceeded` 같은 순수 함수로 "environment가 연달아 몇 번인지"를 센다. `run.ts`의 반복 루프가 기존 leftoverContainers·rate_limited 중단과 같은 자리에서 이 카운터를 본다 — 한도(`--max-env-failures`, 기본 2)에 이르면 `abortReason`을 세우고 멈춘다. 종료 코드(1)와 `meta.json`의 `abortReason`·`maxEnvFailures`로 "환경 장애로 멈췄다"는 사실이 남는다. 이미 기록한 행(results.jsonl)은 그대로 둔다.
+4. 매 실행 전 사전 네트워크 확인(메모리 가드 옆에 네트워크 가드, 또는 edge 이미지로 `docker run`해 이름을 미리 풀어 보기)은 더하지 않기로 했다 — 위 표의 트레이드오프대로, 3번의 반응형 중단이 이미 5시간을 몇십 초로 줄이고, 사전 확인 자체가 새 실패 지점과 레이턴시(실행마다 컨테이너 기동)를 더하는 데 비해 얻는 것(최대 1~2회분의 시간)이 작다고 판단했다. `--concurrency`(동시 실행) 경로도 함께 미뤘다 — 자식 프로세스가 과제·전략·반복 하나만 맡아(`buildChildArgv`) "연속"의 뜻 자체가 동시에 끝나는 여러 작업 사이에서 모호해진다.
+
+### 검증 결과
+- `packages/sandbox/edge/edge.test.ts`: 이름을 못 푼 CONNECT·평문 HTTP 프록시가 502(`X-B-Studio-Egress: dns-failed`)를, 허용 목록 위반·사설 주소는 여전히 403을 돌려주고, 감사 로그 decision이 `error`/`deny`로 갈리는 것을 가짜 `lookup` 주입으로 확인한다(진짜 네트워크를 쓰지 않는다). 33개 전부 통과.
+- `packages/sandbox/src/docker/format.test.ts`: `egressAuditExcerpt()`가 `allow`·일반 로그 줄을 건너뛰고 `deny`·`error`만 "호스트: 이유"로 줄이며, `max`를 넘으면 최근 줄만 남기는 것을 확인한다.
+- `apps/studio/bench/coordination/env-guard.test.ts`: `resolveMaxEnvFailures`의 기본값·검증, `nextEnvFailureStreak`가 environment가 아닌 결과에서 0으로 끊기는 것, 실험 E10을 단순화한 가짜 결과 순서로 "두 번째 연속 environment에서 멈춰 나머지를 아낀다"를 확인한다. 실 모델·실 GitHub·3000 포트 서버는 부르지 않는다.
+- `pnpm typecheck`: 6개 패키지 모두 Done. `pnpm --filter @b-studio/studio lint`: 0 오류(기존 경고 7개는 이번 변경과 무관한 파일). 저장소 전체 `vitest run`: 295개 파일 3107개 테스트 통과.
+
+### 감수한 트레이드오프
+- **DNS 실패 신호가 완벽하지 않다.** `dns.lookup`이 빈 배열을 돌려주는 경우만 "이름을 못 풀었다"로 본다 — 느린 DNS(타임아웃)나 Node 리졸버의 다른 실패(EAI_AGAIN 등)도 같은 경로로 묶인다. 세분화하면 더 정확하지만, 지금은 "정책 위반이 아니다"만 가려도 충분하다고 보고 더 쪼개지 않았다.
+- **벤치 중단은 사전이 아니라 반응형이다.** 네트워크가 막힌 첫 N번(기본 2번)은 그래도 돈다. 장애가 그보다 짧게 끝나면 득이 없지만, 이번 실측(장애가 몇 시간 지속)에는 충분했다.
+- **`--concurrency`(동시 실행) 경로는 다루지 않았다.** 직렬 실행(기본값, 실험 E10이 쓴 경로)만 고쳤고, 동시 실행의 조기 중단은 "연속"의 뜻을 다시 정의해야 하는 별도 설계로 미뤘다.
+
+---
 
 - 토스 테크, [AI가 만든 코드가 어드민이 되기까지](https://toss.tech/article/52885)
 - StackBlitz, [WebContainers Commercial Usage](https://webcontainers.io/enterprise)
