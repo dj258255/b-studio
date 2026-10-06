@@ -57,14 +57,17 @@ export function parseSsListening(output: string): ListeningProcess[] {
 /**
  * 프로젝트가 studio.yaml에 선언한 포트에서 듣고 있는 프로세스만 남긴다(흔한 개발 포트를 넘겨짚지 않는다).
  * 포워더 프로세스(lima·ssh·vpnkit·com.docker)는 뺀다 — 그 포트를 연 컨테이너는 이미 다른 곳(내 환경 docker 목록)에서 보인다.
- * 같은 포트를 여러 줄이 보고하면(IPv4/IPv6 중복 등) 먼저 나온 것만 남긴다
+ * 같은 포트를 여러 줄이 보고하면(IPv4/IPv6 중복 등) 먼저 나온 것만 남긴다.
+ * excludePids는 스튜디오 서버 자신이다. 프로젝트가 선언한 포트(예: Next.js 3000)를 스튜디오가 듣고 있으면
+ * 사용자 앱으로 잘못 보이므로 뺀다
  */
-export function matchDeclaredPorts(listening: readonly ListeningProcess[], declaredPorts: readonly number[]): ListeningProcess[] {
+export function matchDeclaredPorts(listening: readonly ListeningProcess[], declaredPorts: readonly number[], excludePids: readonly number[] = []): ListeningProcess[] {
   const declared = new Set(declaredPorts);
+  const excluded = new Set(excludePids);
   const seen = new Set<number>();
   const result: ListeningProcess[] = [];
   for (const row of listening) {
-    if (!declared.has(row.port) || isForwarderProcess(row.command) || seen.has(row.port)) continue;
+    if (!declared.has(row.port) || excluded.has(row.pid) || isForwarderProcess(row.command) || seen.has(row.port)) continue;
     seen.add(row.port);
     result.push(row);
   }

@@ -1820,6 +1820,15 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
       // 스냅샷 사용 여부는 로그 탭에서 서비스 로그와 함께 보여 준다
       onSnapshot: (event) =>
         emit(session, { type: 'log', service: event.service, text: `[b-studio] ${describeSnapshotEvent(event)}`, at: new Date().toISOString() }),
+      // 트러블슈팅 #90: 알려진 일시 오류(ETXTBSY 등)로 죽어 한 번 다시 띄운 사실도 로그 탭에 남긴다 —
+      // 성공·실패와 무관하게 재시도했다는 사실 자체를 조용히 넘기지 않는다
+      onTransientRetry: (event) =>
+        emit(session, {
+          type: 'log',
+          service: event.service,
+          text: `[b-studio] ${event.service} 서비스가 일시 오류로 죽어 한 번 더 띄웁니다: ${event.reason}`,
+          at: new Date().toISOString(),
+        }),
       // 서비스가 준비된 직후 읽은 기동 중 수신/송신 바이트를 세션 기록에 남긴다(작업 분해 지표도 이 스냅샷에서 읽는다)
       onBootNetwork: (network) => {
         session.snapshot.bootNetwork = network;

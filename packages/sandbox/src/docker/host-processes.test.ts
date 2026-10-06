@@ -74,6 +74,10 @@ describe('matchDeclaredPorts', () => {
     expect(matchDeclaredPorts(LISTENING, [9999])).toEqual([]);
   });
 
+  it('스튜디오 서버 자신의 PID는 선언 포트를 듣고 있어도 뺀다', () => {
+    expect(matchDeclaredPorts(LISTENING, [8080, 3000], [5678])).toEqual([{ pid: 1234, command: 'java', port: 8080 }]);
+  });
+
   it('같은 포트가 중복이면 먼저 나온 것만 남긴다', () => {
     const dup = [LISTENING[0]!, { pid: 4321, command: 'java2', port: 8080 }];
     expect(matchDeclaredPorts(dup, [8080])).toEqual([LISTENING[0]]);
