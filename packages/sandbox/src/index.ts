@@ -18,3 +18,34 @@ export { RELAY_PREFIX } from './docker/relay';
 export { defaultDeployRoot, DeployError, DockerDeployer, type DeployerOptions, type DeployLog, type DeployResult, type DeployRunOptions, type DeployStage, type DeployStatus } from './docker/deploy';
 export type { DeployHistoryEntry, DeployRelease, DeployState } from './docker/deploy-plan';
 export { MIN_SECRET_LENGTH, parseDotenv, Redactor, resolveSecrets, SECRET_ENV_PREFIX, SecretError } from './secrets';
+export {
+  assertReadonlyDockerArgs,
+  execReadonlyDocker,
+  READONLY_DOCKER_SUBCOMMANDS,
+  ReadonlyDockerViolation,
+  spawnReadonlyDocker,
+} from './docker/readonly-exec';
+export {
+  classifyOwnership,
+  discoverUserContainers,
+  matchesProjectRoot,
+  mergeHostContainerStats,
+  parseHostContainers,
+  type ComposeProjectGroup,
+  type ContainerOwner,
+  type HostContainer,
+  type HostContainerPort,
+  type HostContainerWithStats,
+} from './docker/host-containers';
+export {
+  classifyActuatorProbe,
+  isForwarderProcess,
+  matchDeclaredPorts,
+  parseLsofListening,
+  parsePsRow,
+  parseSsListening,
+  probeActuator,
+  type ActuatorProbe,
+  type ListeningProcess,
+  type ProcessResourceUsage,
+} from './docker/host-processes';

@@ -8,6 +8,7 @@ import {
   REPOSITORY_SUB_TABS,
   REQUIREMENTS_SUB_TABS,
   RUN_SUB_TABS,
+  runSubTabs,
   subTabStorageKey,
   writeSubTab,
 } from "./tab-model";
@@ -63,6 +64,20 @@ describe("defaultSubTab", () => {
     expect(defaultSubTab("run")).toBe(RUN_SUB_TABS[0].id);
     expect(defaultSubTab("repository")).toBe(REPOSITORY_SUB_TABS[0].id);
   });
+
+  it("options를 주면 그 목록의 첫 번째를 돌려준다", () => {
+    expect(defaultSubTab("run", runSubTabs(false))).toBe("logs");
+  });
+});
+
+describe("runSubTabs", () => {
+  it("deploy 절이 있으면 로그·리소스·내 환경·배포 네 하위 탭을 모두 보여준다", () => {
+    expect(runSubTabs(true).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "deploy"]);
+  });
+
+  it("deploy 절이 없으면 배포 하위 탭을 숨긴다(로컬 폴더 모드 기본값)", () => {
+    expect(runSubTabs(false).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv"]);
+  });
 });
 
 describe("readSubTab", () => {
@@ -87,6 +102,12 @@ describe("readSubTab", () => {
       },
     } as unknown as Storage;
     expect(readSubTab(throwing, "run")).toBe("logs");
+  });
+
+  it("options를 주면 그 목록 기준으로 검사한다 — 숨겨진 하위 탭(배포)이 저장돼 있으면 첫 하위 탭으로 돌아간다", () => {
+    const storage = fakeStorage({ [subTabStorageKey("run")]: "deploy" });
+    expect(readSubTab(storage, "run", runSubTabs(false))).toBe("logs");
+    expect(readSubTab(storage, "run", runSubTabs(true))).toBe("deploy");
   });
 });
 

@@ -10,8 +10,8 @@
 |---|---|
 | 프로젝트 모델과 런타임 | 001–009, 021, 028, 032, 044 |
 | 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053–060 |
-| 웹 스튜디오와 세션 | 015–020, 029–031, 033, 040–041, 045–046, 052 |
-| 데이터·자원·보안 | 022–027, 038, 040, 045 |
+| 웹 스튜디오와 세션 | 015–020, 029–031, 033, 040–041, 045–046, 052, 126 |
+| 데이터·자원·보안 | 022–027, 038, 040, 045, 126 |
 | 운영 배포 | 020, 030, 032–033, 043–045 |
 
 아래 목록은 번호순 전체 색인입니다. 기존 결정을 대체할 때는 원문을 지우지 않고 새 ADR에서 대체 관계를 기록합니다.
@@ -140,6 +140,7 @@
 - [ADR-123 요구사항 추적 이슈 표를 PR 만들 때 다시 쓰고, 관련 줄을 하나로 합친다](#adr-123-요구사항-추적-이슈-표를-pr-만들-때-다시-쓰고-관련-줄을-하나로-합친다)
 - [ADR-124 네트워크 상류 장애(DNS 실패)와 정책 거부를 구별하고, 벤치는 environment 연속 실패에서 멈춘다](#adr-124-네트워크-상류-장애dns-실패와-정책-거부를-구별하고-벤치는-environment-연속-실패에서-멈춘다)
 - [ADR-125 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-125-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
+- [ADR-126 실행 탭에 "내 환경" 관찰 탭을 더한다: 사용자가 직접 띄운 서비스는 보되 건드리지 않는다](#adr-126-실행-탭에-내-환경-관찰-탭을-더한다-사용자가-직접-띄운-서비스는-보되-건드리지-않는다)
 
 ---
 
@@ -5217,3 +5218,48 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - Conductor, [conductor.build](https://conductor.build) · smtg-ai, [Claude Squad](https://github.com/smtg-ai/claude-squad) · Cognition, [Devin](https://devin.ai)
 - Visual Studio Code, [Agent Sessions view](https://code.visualstudio.com/docs/copilot/copilot-chat) · Zed, [zed.dev](https://zed.dev) · Warp, [warp.dev](https://www.warp.dev)
 - OpenAI, [Codex](https://openai.com/codex/)
+
+## ADR-126 실행 탭에 "내 환경" 관찰 탭을 더한다: 사용자가 직접 띄운 서비스는 보되 건드리지 않는다
+
+상태: 채택
+관련: 조사 보고서 `.claude/research/reports/에이전트 검증 화면과 컨테이너 자동 감지.md`
+
+### 맥락
+- 조사 보고서에 따르면 2026년 10월 현재 조사한 16개 IDE·CLI·클라우드 에이전트 도구 가운데 "완료"와 "검증됨"을 구분하는 전용 UI 배지를 공식 문서에서 발표한 곳은 하나도 없었다. 이 공백은 b-studio가 검증 게이트로 이미 메우고 있는 자리라, 게이트가 재시작·준비 판정을 책임지는 프로세스(b-studio 샌드박스)와 사용자가 직접 띄워 b-studio가 통제권이 없는 프로세스를 같은 화면에 섞으면 "이 숫자가 방금 게이트가 재시작한 결과인지" 구분이 모호해진다.
+- 도커 소켓·CLI 접근은 읽기 전용을 표방해도 사실상 호스트 root급 권한과 동급이다. `docker-socket-proxy`가 GET 전용 화이트리스트(`CONTAINERS=1`)만 열어도 `/logs`·`/archive` 같은 일부 GET 엔드포인트로 임의 컨테이너의 파일을 유출할 수 있는 취약점이 보고됐고([Tecnativa/docker-socket-proxy#182](https://github.com/Tecnativa/docker-socket-proxy/issues/182)), 인증 없이 localhost에 바인딩된 제어용 웹 UI는 DNS 리바인딩으로 위조 Origin/Host 헤더에 노출될 수 있어 Origin·Sec-Fetch-Site 검증이 완화책으로 쓰인다([dockspace#2](https://github.com/cybercore-tech/dockspace/pull/2), [compose-farm#212](https://github.com/basnijholt/compose-farm/pull/212)).
+- 호스트에서 직접 뜬 프로세스(`gradle bootRun`, `next dev`)는 b-studio가 그 프로세스를 직접 실행한 게 아니라면 stdout을 사후적으로 가로챌 표준 방법이 없다. Spring Boot Actuator는 기본적으로 `health` 엔드포인트만 열려 있고, `logfile` 엔드포인트는 사용자가 `management.endpoints.web.exposure.include`와 `logging.file.name`을 직접 설정해야만 동작한다([Spring Boot Reference: Endpoints](https://docs.spring.io/spring-boot/reference/actuator/endpoints.html)) — "제로 설정 자동 감지"가 호스트 프로세스에서는 구조적으로 성립하지 않는다.
+- Docker Compose가 리소스에 자동으로 붙이는 `com.docker.compose.project.working_dir` 레이블은 그 compose 프로젝트가 디스크의 어느 폴더에서 떴는지 직접 알려준다([compose/pkg/api/labels.go](https://github.com/docker/compose/blob/main/pkg/api/labels.go)). 다만 이 레이블 스키마는 공식 안정 API가 아니라 compose 소스코드에 박힌 사실상 표준이라, 레이블 누락이나 스키마 변경 이슈가 docker/compose 트래커에 열려 있다([docker/compose#10314](https://github.com/docker/compose/issues/10314), [#14050](https://github.com/docker/compose/issues/14050)).
+- 코드 조사: 실행 탭의 로그·리소스는 b-studio가 띄운 샌드박스 compose 프로젝트(`studio-<프로젝트>-<hex>`, `b-studio.sandbox` 라벨, `packages/sandbox/src/docker/format.ts`)만 보여주고, 배포는 `bsd-*`/`b-studio.deploy` 라벨(`packages/sandbox/src/docker/deploy-plan.ts`, `deploy.ts`, ADR-043)의 운영 배포 스택만 본다. 프로젝트의 "원본 경로"(세션 작업 복사본이 아닌, 사용자가 연 폴더)는 `apps/studio/lib/server/projects.ts`의 `findProject()`가 돌려주는 `LoadedProject.root`로 이미 정확히 구할 수 있었다(등록 폴더면 `~/.config/b-studio/projects.json`의 경로, 예제 폴더면 `projectsRoot()` 하위).
+
+### 검토한 선택지
+| 방식 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| A. 기존 로그·리소스 탭에 사용자 컨테이너를 섞어 보여준다 | 탭을 늘리지 않는다 | 게이트가 재시작한 샌드박스와 사용자가 켰다 끈 컨테이너가 섞여 "이 로그가 방금 게이트가 재시작한 결과인지" 구분이 모호해진다 — 검증 게이트의 신뢰 서사와 충돌(조사 보고서의 핵심 지적) |
+| **(채택) B. 실행 탭 안에 읽기 전용 "내 환경" 하위 탭을 새로 둔다** | 두 신뢰 수준(b-studio가 통제하는 것 / 사용자가 통제하는 것)을 화면에서부터 분리한다. 기존 로그·리소스·배포 동작은 전혀 바꾸지 않는다 | 하위 탭이 네 개로 늘어난다; 새 백엔드(레이블 매칭, 읽기 전용 화이트리스트, Origin 검증)가 필요하다 |
+| C. 배포 탭처럼 독립된 위 탭으로 둔다 | 눈에 더 잘 띈다 | 실행(로그·리소스)과 성격이 같은 "관찰" 범주인데 위 탭을 하나 더 늘리는 비용이 더 크다(ADR-087이 열세 개 탭을 네 묶음으로 줄인 방향과 반대) |
+
+### 결정
+1. `apps/studio/lib/tab-model.ts`의 `RUN_SUB_TABS`에 `myenv`("내 환경")를 로그·리소스 뒤, 배포 앞에 더했다. `runSubTabs(hasDeploy)`가 `deploy` 절이 없는 프로젝트(로컬 폴더 모드 기본값)에서는 "배포" 하위 탭 자체를 목록에서 뺀다. `defaultSubTab`/`readSubTab`/`useSubTab`에 `options` 인자를 더해, 숨긴 하위 탭이 저장된 마지막 탭이었어도 자동으로 첫 하위 탭("로그")으로 돌아가게 했다(별도 분기 없이 기존 "저장값이 지금 목록에 없으면 첫 탭으로" 규칙이 그대로 적용된다).
+2. `SessionSnapshot`에 `hasDeploy`(프로젝트 `spec.deploy`가 정의돼 있는가)를 더했다. `project.deploy`(로더가 선언하지 않은 서비스도 기본값으로 채운 값, `packages/spec/src/load.ts`)가 아니라 원본 `spec.deploy`(optional)로 판단해야 "선언하지 않았는데도 항상 켜져 있다"는 오판을 막는다.
+3. `packages/sandbox/src/docker/host-containers.ts`에 `parseHostContainers`(docker inspect JSON 파싱), `classifyOwnership`(`b-studio.sandbox`/`b-studio.deploy` 라벨로 b-studio 소유 여부 가르기), `matchesProjectRoot`(working_dir 라벨과 프로젝트 원본 경로 비교, 하위 폴더 포함), `discoverUserContainers`(소유자가 `user`이고 경로가 맞고 `oneoff`가 아닌 컨테이너만 compose 프로젝트 단위로 묶기)를 추가했다.
+4. `packages/sandbox/src/docker/readonly-exec.ts`에 `ps`·`inspect`·`logs`·`stats`(`--no-stream`과 함께만)·`events` 외의 docker 하위 명령을 실행 전에 거부하는 화이트리스트 래퍼(`execReadonlyDocker`/`spawnReadonlyDocker`)를 추가했다. 재시작·중지·삭제로 이어질 수 있는 명령은 이 래퍼를 거치는 한 호출 자체가 되지 않는다.
+5. `apps/studio/lib/server/my-env.ts`에 세션의 프로젝트 원본 경로로 사용자 compose 컨테이너를 찾고 CPU·메모리를 붙이는 `discoverMyEnv`, 로그 스트리밍 전에 요청한 컨테이너가 정말 이 프로젝트 폴더의 것인지 재확인하는 `resolveLogTarget`, studio.yaml이 선언한 포트에서만 Actuator를 확인하는 `fetchHostLog`를 뒀다. 세 라우트(`/api/sessions/[id]/my-env`, `.../logs`, `.../host-log`)는 GET만 내보내고(다른 메서드는 Next.js가 자동 405), 기존 인증 미들웨어가 GET에는 적용하지 않는 같은 출처 검사(`isSameOrigin`, `apps/studio/lib/server/auth.ts`)를 `requireSameOrigin`으로 라우트에서 직접 한 번 더 건다.
+6. 호스트 프로세스는 `packages/sandbox/src/docker/host-processes.ts`가 macOS `lsof -nP -iTCP -sTCP:LISTEN` / Linux `ss -ltnp`로 포트→PID를 찾고, `studio.yaml`이 선언한 포트(managed 서비스의 `port`)만 남기고 포워더 프로세스(`lima`·`ssh`·`vpnkit`·`com.docker` 커맨드)는 뺀다. `ps -o pid,pcpu,rss,command=`로 CPU·RSS를 읽고, `/actuator/health`·`/actuator/logfile`을 127.0.0.1의 그 포트로만 확인해 "Actuator 연결됨" 배지나 설정 안내 문구를 보여준다.
+7. 기존 "로그"·"리소스" 하위 탭의 이름·동작은 바꾸지 않았다(아래 트레이드오프에 이유를 적는다).
+
+### 검증 결과
+- `packages/sandbox/src/docker/host-containers.test.ts`(신규): 라벨 파싱, `classifyOwnership`(sandbox/deploy/user 갈림), `matchesProjectRoot`(하위 폴더 포함·다른 폴더 제외·접두사만 같은 폴더 오인식 방지), `discoverUserContainers`(b-studio 샌드박스·배포·oneoff·compose 프로젝트 라벨 없음 각각 제외), `mergeHostContainerStats`를 확인했다.
+- `packages/sandbox/src/docker/host-processes.test.ts`(신규): `lsof`/`ss` 출력 파싱, 포워더 프로세스 판별, 선언된 포트만 남기는 `matchDeclaredPorts`(중복 제거 포함), `ps` 한 줄 파싱, Actuator 응답별 분류(`classifyActuatorProbe`: health 실패/health만 성공/logfile까지 성공, 200과 206 모두 "사용 가능"), `probeActuator`가 127.0.0.1의 그 포트로만 요청하는 것을 가짜 fetch로 확인했다.
+- `packages/sandbox/src/docker/readonly-exec.test.ts`(신규): 화이트리스트 통과/거부(특히 `stats`는 `--no-stream` 없으면 거부), 거부 시 실제 프로세스를 띄우거나 실행하지 않는 것을 가짜 docker 실행 파일로 확인했다.
+- `apps/studio/lib/server/my-env.test.ts`(신규): `requireSameOrigin`이 다른 Origin을 403으로 거부하는 것을 확인했다.
+- `apps/studio/app/api/sessions/[id]/my-env/route.test.ts`·`.../host-log/route.test.ts`(신규): 같은 출처 요청은 통과하고 다른 Origin은 403으로 거부해 호출 자체를 막는 것, 세션·포트 오류를 그대로 전하는 것을 확인했다.
+- `apps/studio/lib/tab-model.test.ts`(갱신): `runSubTabs(hasDeploy)`가 배포 하위 탭을 조건부로 숨기는 것, `readSubTab`이 숨겨진 하위 탭(저장된 "배포")을 첫 하위 탭으로 되돌리는 것을 확인했다.
+- 실제 확인(실 Docker, 2026-10-07): 임시 폴더에 `busybox:1.37` 한 서비스짜리 compose 프로젝트(`myenv-check`)를 `docker compose up -d`로 띄우고, `discoverUserContainers`에 그 폴더를 프로젝트 원본 경로로 넘겨 호출하자 `com.docker.compose.project.working_dir` 레이블로 `myenv-check-demo-1` 컨테이너(서비스 `demo`, 상태 `running`, 소유자 `user`)를 정확히 찾아냈다. 확인 뒤 `docker compose down`으로 그 프로젝트만 내렸고(같은 맥에 떠 있던 다른 60여 개 컨테이너는 손대지 않았다), 임시 폴더도 지웠다.
+- `pnpm typecheck`: 7개 패키지 모두 Done(끝줄은 보고에 그대로 붙인다). `pnpm --filter @b-studio/studio lint`: 오류 0(기존 경고 7개는 이번 변경과 무관).
+
+### 감수한 트레이드오프
+- **경로 비교는 대소문자를 구분하는 문자열 비교다.** `matchesProjectRoot`는 `path.resolve` 뒤 정확히 일치하거나 접두사+구분자로만 하위 폴더를 판정한다. macOS 기본 파일시스템(APFS, 대소문자 구분 안 함)에서 대소문자만 다른 두 경로는 서로 다른 것으로 보일 수 있다 — 드문 경우라 지금은 손대지 않았다.
+- **compose 레이블 스키마는 비공식 사실상 표준이다.** `com.docker.compose.project.working_dir` 등은 docker/compose 소스코드에 박힌 값이라 스키마가 바뀌거나(#14050 논의) 레이블이 누락되면(#10314) 그 컨테이너는 조용히 "내 환경" 목록에서 빠질 뿐 오류로 보이지 않는다 — 방어적으로 파싱하되, 레이블이 아예 없는 컨테이너를 찾아내는 대안(이름 패턴 추정 등)은 넣지 않았다.
+- **호스트 프로세스 로그는 사전 설정 없이는 구조적으로 볼 수 없다.** Actuator를 노출하지 않은 Spring Boot 앱, 또는 Spring Boot가 아닌 백엔드는 "연결 안 됨" 안내만 보여준다 — 조사 보고서의 결론("제로 설정 자동 감지가 호스트 프로세스에서는 성립하지 않는다")을 그대로 받아들인 설계다.
+- **폴링 간격(4초)이라 실시간이 아니다.** `docker events` 구독으로 상태 변화를 즉시 반영하는 것은 화이트리스트에 자리만 남겨 두고(`events`) 이번에는 구현하지 않았다 — 스냅샷 폴링으로 충분하다고 판단했다.
+- **같은 출처 검사는 Origin 헤더가 없는 요청(curl 등)을 통과시킨다.** `isSameOrigin`의 기존 규칙을 그대로 재사용했다 — 그런 요청은 인증(쿠키)이 걸러낸다는 전제가 이 기능에도 그대로 적용된다.

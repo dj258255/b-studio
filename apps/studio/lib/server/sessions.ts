@@ -873,8 +873,11 @@ function projectViews(
   project: LoadedProject,
   state: 'starting' | 'stopped' = 'starting',
   offManaged: ReadonlySet<string> = new Set(),
-): Pick<SessionSnapshot, 'services' | 'externals'> {
+): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy'> {
   return {
+    // project.deploy(로더가 채운 값)는 선언하지 않은 서비스도 기본값(Dockerfile)으로 채우므로 늘 비어 있지 않다.
+    // "배포" 하위 탭을 보일지는 spec.deploy(원본, 선언했을 때만 있음)로 판단해야 한다
+    hasDeploy: project.spec.deploy !== undefined,
     services: project.managed.map(([name, service]) => ({
       name,
       template: service.template,

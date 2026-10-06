@@ -171,6 +171,30 @@ deploy:
 
 Dockerfile은 compose `build.context` 기준 경로입니다. 포트를 생략하면 첫 배포 때 루프백의 빈 포트를 선택하고 이후 릴리스에서도 유지합니다.
 
+`deploy` 절을 적지 않으면(로컬 폴더 모드 기본값) 개발 화면 실행 탭에서 "배포" 하위 탭 자체가 보이지 않습니다. 같은 PC의 Docker에만 배포하는 기능이라, 다른 호스트에 배포하는 프로젝트는 이 절을 적지 마세요.
+
+## 내 환경 관찰
+
+개발 화면 실행 탭의 "내 환경" 하위 탭은 **관찰 전용**입니다. b-studio가 띄운 샌드박스(로그·리소스 하위 탭)와는 별개로, 이 프로젝트 폴더에서 사용자가 `docker compose up`으로 직접 띄운 컨테이너와, studio.yaml이 선언한 포트에서 호스트가 직접 뜬 프로세스(`gradle bootRun`, `next dev` 등)를 찾아 보여줍니다. b-studio는 이 화면에서 아무것도 재시작·중지·삭제하지 않고, 검증 게이트·체크포인트와도 무관합니다.
+
+**docker compose 프로젝트 자동 감지**: Compose가 컨테이너에 자동으로 붙이는 `com.docker.compose.project.working_dir` 레이블이 이 프로젝트 폴더(또는 그 하위 폴더)를 가리키는 컨테이너만 모읍니다. 설정할 것은 없습니다 — 같은 폴더에서 `docker compose up -d`를 실행하면 다음에 탭을 열 때 바로 보입니다.
+
+**호스트 프로세스와 Actuator 로그**: studio.yaml의 managed 서비스가 선언한 포트에서 듣고 있는 프로세스를 PID·CPU·메모리와 함께 보여줍니다. 로그는 자동으로 가져올 수 없으므로, Spring Boot 앱이라면 Actuator의 `health`·`logfile` 엔드포인트를 열어 두면 됩니다.
+
+```yaml
+# application.yml (호스트에서 gradle bootRun으로 띄우는 Spring Boot 서비스)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,logfile
+logging:
+  file:
+    name: logs/app.log
+```
+
+이 설정이 없으면 "내 환경" 탭이 포트·PID·리소스까지는 보여주되, 로그 자리에는 설정 방법을 안내하는 문구만 남깁니다.
+
 ## 팀 워크플로
 
 모델 하네스가 Pi·Claude·API 중 무엇이든 같은 실행 기준을 적용합니다. 프롬프트 파일은 에이전트를 안내하지만, 아래 정책은 Tool Gateway가 다시 검사합니다.

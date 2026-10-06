@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionView, ChatItem } from "@/lib/session-view";
 import { previewPathFromHref, readPreviewLocationMessage } from "@/lib/preview-message";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
-import { buildTopTabs, CODE_SUB_TABS, mapLegacyTab, REPOSITORY_SUB_TABS, REQUIREMENTS_SUB_TABS, RUN_SUB_TABS, type SubTabOption } from "@/lib/tab-model";
+import { buildTopTabs, CODE_SUB_TABS, mapLegacyTab, REPOSITORY_SUB_TABS, REQUIREMENTS_SUB_TABS, runSubTabs, type SubTabOption } from "@/lib/tab-model";
 import { ApiExplorer } from "./api-explorer";
 import { useCodeOpen } from "./code-open-context";
 import { CodePanel } from "./code-panel";
@@ -14,6 +14,7 @@ import { DocsPanel } from "./docs-panel";
 import { HistoryPanel } from "./history-panel";
 import { useLiveFrames } from "./live-frames";
 import { LogPanel } from "./log-panel";
+import { MyEnvPanel } from "./my-env-panel";
 import { QaView } from "./qa-view";
 import { RemoteBrowserView } from "./remote-browser";
 import { RepositoryPanel } from "./repository-panel";
@@ -40,7 +41,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
 
   const [codeSubTab, setCodeSubTab] = useSubTab("code");
   const [requirementsSubTab, setRequirementsSubTab] = useSubTab("requirements");
-  const [runSubTab, setRunSubTab] = useSubTab("run");
+  const runOptions = runSubTabs(view.snapshot.hasDeploy ?? false);
+  const [runSubTab, setRunSubTab] = useSubTab("run", runOptions);
   const [repositorySubTab, setRepositorySubTab] = useSubTab("repository");
 
   // "테스트" 하위 탭의 file:line 링크가 codeOpen.open()을 부르면 "코드" 탭의 "파일" 하위 탭으로 전환한다
@@ -93,9 +95,11 @@ export function PreviewPanel({ view }: { view: SessionView }) {
             {requirementsSubTab === "tests" ? <TestsPanel view={view} /> : <RequirementsPanel view={view} />}
           </GroupPanel>
         ) : active.kind === "group" && active.id === "run" ? (
-          <GroupPanel label="실행" options={RUN_SUB_TABS} active={runSubTab} onChange={setRunSubTab}>
+          <GroupPanel label="실행" options={runOptions} active={runSubTab} onChange={setRunSubTab}>
             {runSubTab === "resources" ? (
               <ResourcePanel view={view} />
+            ) : runSubTab === "myenv" ? (
+              <MyEnvPanel view={view} />
             ) : runSubTab === "deploy" ? (
               <DeployPanel view={view} />
             ) : (
