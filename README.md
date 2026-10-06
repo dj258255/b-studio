@@ -8,7 +8,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
-  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 왼쪽은 실행 중인 게시판 서비스 미리보기, 오른쪽은 토큰 합계와 체크포인트 기록이 쌓인 대화 패널">
+  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 왼쪽은 실행 중인 게시판 서비스 미리보기, 오른쪽은 요청이 검증 게이트(재시작·API 계약·브라우저 확인·리뷰)를 통과해 체크포인트로 남고 브랜치에 올라간 대화 기록">
 </picture>
 
 ## 핵심 설계 세 가지
