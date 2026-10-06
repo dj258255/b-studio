@@ -51,6 +51,7 @@ import {
 import { classify } from './classify';
 import { claudeCodeContractAsk } from './contracts';
 import { startDryProvider } from './dry-provider';
+import { envFailureAbortMessage, envFailuresExceeded, nextEnvFailureStreak, resolveMaxEnvFailures } from './env-guard';
 import { evaluateMemoryGuard, memoryGuardMessage, parseDockerMemTotalMb, perRunMemoryMb, sumDockerStatsMb } from './memory-guard';
 import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
@@ -841,6 +842,8 @@ async function main(): Promise<void> {
   const backend = choice.backend;
   if (args.freeOnly) await assertFreeOnlyModel(backend, choice.model);
   const rateLimit = resolveRateLimitPolicy(args.onRateLimit, args.rateLimitWaitMinutes);
+  // environment 실패가 연달아 몇 번이면 멈출지(이슈 #411). Docker를 건드리기 전에 값부터 확인한다
+  const maxEnvFailures = resolveMaxEnvFailures(args.maxEnvFailures);
   // 오래된 도구 결과 비우기. 기본은 끔이고, API 루프(openai)에서만 뜻이 있다 — 로컬 CLI는 각자 자체 압축을 한다
   const contextClearing = resolveContextClearing(args.contextClearing);
   // 검증 범위(--verify). 기본 full(지금과 같다). light면 레인·통합 실행이 가볍게 확인한다
@@ -1133,6 +1136,8 @@ async function main(): Promise<void> {
     // --repeat-index가 있으면(자식 프로세스) 그 반복 번호 하나만 돈다. 없으면 지금과 같이 1..repeats를 모두 돈다
     const repeatStart = args.repeatIndex ?? 1;
     const repeatEnd = args.repeatIndex ?? repeats;
+    // environment 실패 연속 횟수(이슈 #411, 실험 E10). environment가 아닌 결과가 하나라도 끼면 0으로 돌아간다
+    let envFailureStreak = 0;
     for (let repeat = repeatStart; repeat <= repeatEnd && !abortReason; repeat += 1) {
       const ordered = repeat % 2 === 1 ? strategies : [...strategies].reverse();
       for (const task of tasks) {
@@ -1154,6 +1159,14 @@ async function main(): Promise<void> {
               rateLimit.policy === 'wait'
                 ? '다시 시도한 실행도 사용 한도에 걸려 멈춥니다.'
                 : `사용 한도에 걸려 멈춥니다 (--on-rate-limit wait로 기다렸다 다시 시도할 수 있습니다).`;
+            console.error(abortReason);
+            break;
+          }
+          // environment가 연달아 한도에 이르면 네트워크 등 환경 장애로 보고 멈춘다. 같은 원인으로 남은 실행을
+          // 모두 돌리며 시간(토큰)을 쓰는 대신, 이미 남긴 결과는 그대로 두고 사람이 원인을 보게 한다
+          envFailureStreak = nextEnvFailureStreak(envFailureStreak, row.category);
+          if (envFailuresExceeded(envFailureStreak, maxEnvFailures)) {
+            abortReason = envFailureAbortMessage(envFailureStreak, maxEnvFailures);
             console.error(abortReason);
             break;
           }
@@ -1208,6 +1221,7 @@ async function main(): Promise<void> {
           verify,
           selfCheck,
           concurrency: concurrencyForRecord,
+          maxEnvFailures,
           abortReason,
         },
         null,

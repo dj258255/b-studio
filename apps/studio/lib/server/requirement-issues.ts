@@ -240,7 +240,7 @@ export async function publishRequirementIssues(
       issue: store.byId[requirement.id]?.issue,
       checklistOnly: isChecklistOnly(requirement),
     }));
-    const trackingBody = buildTrackingIssueBody(ctx.projectName, rows);
+    const trackingBody = buildTrackingIssueBody(ctx.projectName, rows, { updatedAt: new Date().toISOString() });
     if (store.tracking) {
       await updateIssue(ctx.remote, store.tracking.issue, { body: trackingBody, labels: [REQUIREMENT_LABEL] }, { token: ctx.token });
     } else {
@@ -262,6 +262,37 @@ export async function publishRequirementIssues(
 
   await saveStore(ctx.root, store);
   return { plan, summary: summarizeRequirementPlan(plan), tracking: store.tracking, errors };
+}
+
+export interface TrackingIssueRefreshResult {
+  /** 이미 발행한 추적 이슈가 있어 본문을 실제로 다시 썼는가. 한 번도 "이슈로 발행"을 하지 않았으면 false(조용히 건너뛴다 — PR
+   * 만들기가 추적 이슈를 새로 만들지는 않는다, 그건 "이슈로 발행" 버튼의 몫이다) */
+  updated: boolean;
+  issue?: number;
+}
+
+/**
+ * PR을 실제로 만들 때(exportSession) 추적 이슈 본문의 표를 지금 요구사항 상태로 다시 쓴다(버그 리포트: 발행 때
+ * 만든 표가 "주기적으로 갱신"된다는 문구와 달리, 실제로 그 표를 다시 쓰는 경로가 없어 발행 당시 상태로 멈춰 있었다).
+ * 하위 이슈는 건드리지 않는다(만들거나 라벨을 바꾸지 않는다 — 그건 "이슈로 발행"·`syncSessionRequirementIssueStatus`의
+ * 몫이다). 이슈가 닫혀 있어도 다시 열지 않는다(updateIssue에 state를 주지 않는다 — 본문만 고친다).
+ */
+export async function refreshTrackingIssueBody(
+  ctx: RequirementIssuesContext,
+  requirements: readonly Requirement[],
+  statusById: Readonly<Record<string, RequirementStatus>>,
+): Promise<TrackingIssueRefreshResult> {
+  const store = await loadStore(ctx.root);
+  if (!store.tracking) return { updated: false };
+  const rows = requirements.map((requirement) => ({
+    requirement,
+    status: statusById[requirement.id] ?? ('미착수' as RequirementStatus),
+    issue: store.byId[requirement.id]?.issue,
+    checklistOnly: isChecklistOnly(requirement),
+  }));
+  const trackingBody = buildTrackingIssueBody(ctx.projectName, rows, { updatedAt: new Date().toISOString() });
+  await updateIssue(ctx.remote, store.tracking.issue, { body: trackingBody, labels: [REQUIREMENT_LABEL] }, { token: ctx.token });
+  return { updated: true, issue: store.tracking.issue };
 }
 
 export interface ConflictResolutionResult {

@@ -272,15 +272,15 @@ describe('PR 초안의 요구사항 범위(ADR-115)', () => {
     expect(preview.title).toContain('[R17]');
     expect(preview.title).not.toContain('구현과 검증');
     expect(preview.body).not.toContain('Closes #103');
-    expect(preview.body).toContain('관련: #103');
     expect(preview.body).toContain('Implements: R17@rev1');
     // R2·R5는 이번 세션이 건드리지 않았으므로 Implements에도, Closes·관련에도 나오지 않는다
     expect(preview.body).not.toContain('R2@rev');
     expect(preview.body).not.toContain('R5@rev');
     expect(preview.body).not.toContain('Closes #101');
     expect(preview.body).not.toContain('Closes #102');
-    // 추적 이슈는 이번 PR이 "남은 마지막 열린 하위 이슈"를 닫는 게 아니므로 관련으로만 가리킨다
-    expect(preview.body).toContain(`관련: #${TRACKING_ISSUE}`);
+    // 닫힌 하위 이슈(#103)와 추적 이슈(이번 PR이 "남은 마지막 열린 하위 이슈"를 닫는 게 아니므로 관련으로만
+    // 가리킨다)를 "관련:"을 줄마다 반복하지 않고 한 줄로 합친다(버그 리포트: 관련: #16 / 관련: #19가 따로 붙었다)
+    expect(preview.body).toContain(`관련: #103, #${TRACKING_ISSUE}`);
     expect(preview.body).not.toContain(`Closes #${TRACKING_ISSUE}`);
 
     await stopSession(id).catch(() => {});

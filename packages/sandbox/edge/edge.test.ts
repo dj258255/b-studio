@@ -1,8 +1,10 @@
 import http from 'node:http';
 import net from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   callerResolver,
+  DNS_FAILURE_HEADER,
+  DNS_FAILURE_VALUE,
   hasEgressRuleFor,
   isAllowedEgress,
   isAllowedCall,
@@ -343,6 +345,78 @@ describe('startEdge', () => {
 
     const status = await new Promise<string>((resolve) => {
       const socket = net.connect(proxyPort, '127.0.0.1', () => socket.write('CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n'));
+      socket.once('data', (data) => {
+        resolve(data.toString().split('\r\n')[0]!);
+        socket.destroy();
+      });
+    });
+
+    expect(status).toBe('HTTP/1.1 403 Forbidden');
+  });
+
+  /** 가짜 DNS 조회: dns-fails.example만 아무 주소도 못 푼 것으로, 그 밖은 공인 주소로 바로 돌려준다(진짜 네트워크를 쓰지 않는다) */
+  const fakeLookup = async (host: string) => (host === 'dns-fails.example' ? [] : [{ address: '203.0.113.9', family: 4 }]);
+
+  it('이름을 풀지 못한 CONNECT는 502(X-B-Studio-Egress: dns-failed)로, 허용 목록 위반은 403으로 막고 감사 로그 decision을 구별한다', async () => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => {
+      logs.push(String(line));
+    });
+    const [proxy] = startEdge({ forwards: [], rules: ['dns-fails.example'], proxyPort: 0, lookup: fakeLookup });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
+
+    const connect = (target: string) =>
+      new Promise<string>((resolve) => {
+        const socket = net.connect(proxyPort, '127.0.0.1', () => socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`));
+        socket.once('data', (data) => {
+          resolve(data.toString());
+          socket.destroy();
+        });
+      });
+
+    const dnsFailure = await connect('dns-fails.example:443');
+    expect(dnsFailure.split('\r\n')[0]).toBe('HTTP/1.1 502 Bad Gateway');
+    expect(dnsFailure).toContain(`${DNS_FAILURE_HEADER}: ${DNS_FAILURE_VALUE}`);
+
+    const policyViolation = await connect('not-allowed.example:443');
+    expect(policyViolation.split('\r\n')[0]).toBe('HTTP/1.1 403 Forbidden');
+    expect(policyViolation).not.toContain(DNS_FAILURE_HEADER);
+
+    spy.mockRestore();
+    const audits = logs.map((line) => JSON.parse(line)).filter((entry) => entry.edge === 'egress');
+    expect(audits).toEqual([
+      expect.objectContaining({ decision: 'error', host: 'dns-fails.example', reason: '이름을 풀지 못함' }),
+      expect.objectContaining({ decision: 'deny', host: 'not-allowed.example', reason: '허용 목록에 없는 호스트나 포트' }),
+    ]);
+  });
+
+  it('평문 HTTP 프록시도 이름을 풀지 못하면 502(X-B-Studio-Egress: dns-failed)를 돌려준다', async () => {
+    const [proxy] = startEdge({ forwards: [], rules: ['dns-fails.example'], proxyPort: 0, lookup: fakeLookup });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
+
+    const response = await new Promise<{ status: number; headers: http.IncomingHttpHeaders }>((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxyPort, method: 'GET', path: 'http://dns-fails.example/' }, (reply) => {
+        reply.resume();
+        reply.on('end', () => resolve({ status: reply.statusCode ?? 0, headers: reply.headers }));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+
+    expect(response.status).toBe(502);
+    expect(response.headers[DNS_FAILURE_HEADER.toLowerCase()]).toBe(DNS_FAILURE_VALUE);
+  });
+
+  it('사설 주소로 풀리는 이름은 DNS 장애가 아니라 정책 위반이라 여전히 403이다', async () => {
+    const lookup = async () => [{ address: '10.0.0.5', family: 4 }];
+    const [proxy] = startEdge({ forwards: [], rules: ['private.example'], proxyPort: 0, lookup });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
+
+    const status = await new Promise<string>((resolve) => {
+      const socket = net.connect(proxyPort, '127.0.0.1', () => socket.write('CONNECT private.example:443 HTTP/1.1\r\nHost: private.example:443\r\n\r\n'));
       socket.once('data', (data) => {
         resolve(data.toString().split('\r\n')[0]!);
         socket.destroy();
