@@ -139,7 +139,8 @@ async function listHostProcesses(declaredPorts: readonly number[]): Promise<MyEn
   if (declaredPorts.length === 0) return [];
   const listening =
     process.platform === 'linux' ? parseSsListening(await runCommand('ss', ['-ltnp'])) : parseLsofListening(await runCommand('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN']));
-  const matched = matchDeclaredPorts(listening, declaredPorts);
+  // 스튜디오 서버 자신(같은 프로세스와 그 부모)이 선언 포트를 듣고 있으면 사용자 앱이 아니다
+  const matched = matchDeclaredPorts(listening, declaredPorts, [process.pid, process.ppid]);
 
   return Promise.all(
     matched.map(async (row): Promise<MyEnvHostProcess> => {
