@@ -6,7 +6,10 @@
 
 틀린 코드도 결과 파일을 만듭니다. 에이전트는 이를 완료라고 보고합니다. 그래서 b-studio는 완료 판정과 성공 판정을 분리합니다. 에이전트가 끝났다고 말하면 플랫폼이 서비스를 다시 띄우고 준비 상태·API 계약·실제 브라우저 화면·테스트로 확인한 뒤에야 변경을 남깁니다. 코드를 직접 편집하는 IDE를 대체하는 도구가 아니라 여러 에이전트 작업을 운영하는 제어 계층입니다.
 
-![컴파일 오류를 검증 게이트가 돌려보내고 수정된 주문 화면이 미리보기에 표시된 모습](docs/images/studio-gate-retry.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
+  <img src="docs/images/studio-hero-light.jpg" alt="개발 화면. 왼쪽은 실행 중인 게시판 서비스 미리보기, 오른쪽은 토큰 합계와 체크포인트 기록이 쌓인 대화 패널">
+</picture>
 
 ## 핵심 설계 세 가지
 
@@ -37,6 +40,12 @@
 ## 그 밖의 기능
 
 작업 보드에서 여러 세션의 계획·도구 호출·로그·미리보기·diff를 함께 봅니다. 한 요청을 레인으로 나눠 병렬 실행한 뒤 통합 결과를 같은 게이트로 재검증합니다(작업 분해, 계획은 사람이 승인). Agent Fleet은 같은 요청을 2~4개 후보로 펼쳐 비교합니다. 모델 라우터는 Anthropic·OpenAI 호환·Gemini와 구독 CLI(Claude Code·Codex·Command Code·OpenCode)를 하나의 도구 계약으로 묶습니다. 토큰은 요청·세션·사용자별 한도와 턴별 문맥 분석, 비용 보고서로 관리합니다. 명세는 요구사항(EARS·시나리오)으로 추출해 이슈 발행, 추적 매트릭스, 올리기 전 점검, PR 생성과 자동 리뷰로 잇습니다. GitHub·Gitea 이슈·PR을 보는 저장소 탭, 운영 이미지 배포와 롤백, macOS 데스크톱 앱도 있습니다. 영역별 상태와 검증 범위는 [구현 상태와 일정](docs/status.md)에 따로 적었습니다.
+
+| | |
+|---|---|
+| ![요구사항 탭. R2~R20 요구사항 목록과 "20개 중 20개 검증됨" 표시, 명세·추적 매트릭스로 가는 상위 내비게이션](docs/images/studio-requirements.jpg) | ![테스트 탭. 백엔드 JUnit 테스트 결과가 요구사항 id(R로 시작하는 번호)와 나란히 붙어 있다](docs/images/studio-tests.jpg) |
+| ![저장소 탭. GitHub 이슈 목록이 우선순위·종류·상태 라벨과 함께 보인다](docs/images/studio-repository.jpg) | ![나눠서 병렬 화면. 레인별 쓰기 범위와 "검증 통과" 배지, 모델별 토큰 합계가 보인다](docs/images/studio-task-plan.jpg) |
+| ![토큰 탭. 턴별 컨텍스트 막대 그래프에서 급증한 턴이 빨간 막대로 표시되고, 아래 카드가 급증 원인과 다시 읽힐 비용을 적는다](docs/images/studio-tokens.jpg) | ![체크포인트 기록. 검증 게이트를 통과한 요청마다 커밋과 diff가 쌓인다](docs/images/studio-checkpoints.jpg) |
 
 ## 빠른 시작
 
