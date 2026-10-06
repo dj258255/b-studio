@@ -1499,6 +1499,12 @@ export async function readSessionArtifact(id: string, segments: readonly string[
   return resolveArtifact(stateDirOf(snapshot), segments);
 }
 
+/** 탐색형 QA 행동마다 찍은 썸네일을 산출물로 저장하고 식별자를 돌려준다 */
+export async function saveExploreQaArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
+  const session = requireSession(id);
+  return saveArtifact(stateDirOf(session.snapshot), 'explore-qa', input);
+}
+
 /** 요소 선택 스크린샷을 산출물로 저장하고 식별자를 돌려준다 */
 export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
   const session = requireSession(id);
@@ -1550,6 +1556,37 @@ export function remoteBrowserAllowedOrigins(id: string): string[] {
     }
   }
   return [...origins];
+}
+
+/**
+ * 탐색형 QA가 세션의 백엔드·모델 선택을 그대로 물려받기 위한 정보. api 백엔드는 세션이 고른 모델로 바로 쓸 ModelClient를
+ * 만들어 주고, claude-code 백엔드는 작업 디렉터리와 넘길 모델 이름만 돌려준다(실행은 explore-qa-runs.ts가 한다).
+ * 그 밖의 백엔드(codex·commandcode·opencode·gemini)는 아직 지원하지 않는다 — 각 CLI의 b-studio 도구 연결 방식이
+ * 서로 달라(스트리밍 입력·MCP 구성이 제각각) 탐색형 QA까지 넓히는 일은 이후 과제로 남긴다.
+ */
+export type ExploreQaBackend =
+  | { kind: 'api'; client: ModelClient }
+  | { kind: 'claude-code'; cwd: string; model?: string }
+  | { kind: 'unsupported'; backend: SessionMode };
+
+export function exploreQaBackendFor(id: string): { projectRoot: string; backend: ExploreQaBackend } {
+  const session = requireSession(id);
+  const backend = sessionBackend(session.snapshot);
+  const projectRoot = session.project.root;
+  if (backend === 'api') {
+    let model;
+    try {
+      model = modelById(session.snapshot.modelId ?? 'anthropic-default');
+    } catch {
+      model = modelById('anthropic-default');
+    }
+    return { projectRoot, backend: { kind: 'api', client: clientForModel(model, session.snapshot.effort) } };
+  }
+  if (backend === 'claude-code') {
+    const model = cliModelOverride(session.snapshot.modelId);
+    return { projectRoot, backend: { kind: 'claude-code', cwd: projectRoot, ...(model ? { model } : {}) } };
+  }
+  return { projectRoot, backend: { kind: 'unsupported', backend } };
 }
 
 /** 세션 단위 Figma 파일 키가 있으면 그걸, 없으면 studio.yaml의 design.figma를 쓴다 */

@@ -108,6 +108,7 @@ export {
   QaBrowser,
   QaOriginError,
   runExploreQa,
+  saveActionThumbnail,
   toPageCheckSteps,
   type ConvertedSteps,
   type ExploreQaEvent,

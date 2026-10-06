@@ -560,6 +560,8 @@ export interface QaActionRecord {
   newDiagnosticsCount: number;
   /** 행동이 가리킨 요소의 뷰포트 영역(있으면). QA 탭이 지금 누른 위치에 상자를 그리는 데 쓴다 */
   targetRect?: { x: number; y: number; width: number; height: number };
+  /** saveArtifact를 넘겼을 때만 채운다. 단계 타임라인의 스크린샷 썸네일 식별자 */
+  artifact?: string;
   url: string;
   at: number;
 }
@@ -723,6 +725,11 @@ export interface RunExploreQaOptions {
   viewport?: QaViewport;
   onFrame?: (frame: BrowserFrame) => void;
   onEvent?: (event: ExploreQaEvent) => void;
+  /**
+   * 주면 행동마다 뷰포트 스크린샷을 찍어 저장하고 식별자를 QaActionRecord.artifact에 남긴다(단계 타임라인 썸네일용).
+   * 모델에 보내는 토큰 비용과 무관하다(qa_screenshot 도구 호출과 별개로, 사람이 보는 화면 전용 산출물이다).
+   */
+  saveArtifact?: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => Promise<string>;
   signal?: AbortSignal;
 }
 
@@ -752,7 +759,7 @@ export function buildQaUserPrompt(goal: ExploreQaGoal): string {
  * 클라이언트나 테스트용 ScriptedModelClient를 그대로 꽂을 수 있다.
  */
 export async function runExploreQa(options: RunExploreQaOptions): Promise<ExploreQaResult> {
-  const { client, goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, signal } = options;
+  const { client, goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, saveArtifact, signal } = options;
   const maxActions = goal.maxActions ?? DEFAULT_MAX_ACTIONS;
   const maxMs = goal.maxMs ?? DEFAULT_MAX_MS;
   const repeatLimit = goal.repeatLimit ?? DEFAULT_REPEAT_LIMIT;
@@ -813,6 +820,7 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
         const outcome = await executeQaTool(call.name, input, browser);
         const diagnostics = await browser.currentDiagnostics();
         const total = diagnosticsCount(diagnostics);
+        const artifact = await saveActionThumbnail(browser, saveArtifact, actionCount);
         const record: QaActionRecord = {
           index: actionCount,
           tool: call.name,
@@ -822,6 +830,7 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
           ...(outcome.resolvedSelector ? { resolvedSelector: outcome.resolvedSelector } : {}),
           ...(outcome.stableSelector ? { stableSelector: outcome.stableSelector } : {}),
           ...(outcome.rect ? { targetRect: outcome.rect } : {}),
+          ...(artifact ? { artifact } : {}),
           newDiagnosticsCount: Math.max(0, total - previousDiagnosticsCount),
           url: browser.url,
           at: Date.now(),
@@ -861,6 +870,21 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
  * 플랫폼의 최종 판정(설계안 §6.3·§6.8): 목표 완료 선언만으로 통과시키지 않는다.
  * 진단 신호가 하나도 없고(있으면 실패), confirmText를 적었다면 그 문구가 화면에 있어야 통과다.
  */
+/** 저장이 주어졌을 때만 뷰포트 스크린샷을 찍어 저장한다(실패해도 실행은 계속한다 — 관측용이라 판정에 영향을 주지 않는다) */
+export async function saveActionThumbnail(
+  browser: QaBrowser,
+  saveArtifact: RunExploreQaOptions['saveArtifact'],
+  index: number,
+): Promise<string | undefined> {
+  if (!saveArtifact) return undefined;
+  try {
+    const data = await browser.screenshot();
+    return await saveArtifact({ name: `탐색 ${index}단계`, data, contentType: 'image/jpeg' });
+  } catch {
+    return undefined;
+  }
+}
+
 export function judge(goal: Pick<ExploreQaGoal, 'confirmText'>, diagnostics: QaDiagnostics, pageText: string): { status: 'pass' | 'fail'; reason: string } {
   const problems: string[] = [];
   if (diagnostics.consoleErrors.length > 0) problems.push(`console.error ${diagnostics.consoleErrors.length}건`);

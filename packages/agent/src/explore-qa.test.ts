@@ -356,4 +356,28 @@ describe('runExploreQa', { timeout: 60_000 }, () => {
     const result = await runExploreQa({ client, goal: { goal: '아무 목표', startPath: '/start' }, startUrl: `${base}/start`, allowedOrigins: [base] });
     expect(result.stoppedBy).toBe('no_tool_call');
   });
+
+  it('saveArtifact를 주면 행동마다 썸네일을 저장하고, 주지 않으면 전혀 찍지 않는다(토큰 비용과 무관한 관측용)', async () => {
+    const saved: string[] = [];
+    const client = new ScriptedModelClient([{ toolCalls: [{ name: 'qa_snapshot', input: {} }] }, { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '끝' } }] }]);
+    await runExploreQa({
+      client,
+      goal: { goal: '관찰만 한다', startPath: '/start' },
+      startUrl: `${base}/start`,
+      allowedOrigins: [base],
+      saveArtifact: async ({ name }) => {
+        saved.push(name);
+        return `artifact:${name}`;
+      },
+    });
+    expect(saved).toEqual(['탐색 1단계']);
+
+    const withoutSave = await runExploreQa({
+      client: new ScriptedModelClient([{ toolCalls: [{ name: 'qa_snapshot', input: {} }] }, { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '끝' } }] }]),
+      goal: { goal: '관찰만 한다', startPath: '/start' },
+      startUrl: `${base}/start`,
+      allowedOrigins: [base],
+    });
+    expect(withoutSave.actions.every((action) => action.artifact === undefined)).toBe(true);
+  });
 });

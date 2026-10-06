@@ -9,6 +9,7 @@ import {
   executeQaTool,
   judge,
   QaBrowser,
+  saveActionThumbnail,
   type ExploreQaEvent,
   type ExploreQaGoal,
   type ExploreQaResult,
@@ -16,6 +17,7 @@ import {
   type QaActionRecord,
   type QaDiagnostics,
   type QaViewport,
+  type RunExploreQaOptions,
 } from './explore-qa';
 
 /**
@@ -39,6 +41,8 @@ export interface ClaudeCodeExploreQaOptions {
   viewport?: QaViewport;
   onFrame?: (frame: BrowserFrame) => void;
   onEvent?: (event: ExploreQaEvent) => void;
+  /** 주면 행동마다 스크린샷을 찍어 저장하고 QaActionRecord.artifact에 남긴다(단계 타임라인 썸네일용) */
+  saveArtifact?: RunExploreQaOptions['saveArtifact'];
   /** 이 PC에 로그인한 Claude Code가 돌 작업 디렉터리(세션 프로젝트 루트) */
   cwd: string;
   model?: string;
@@ -80,7 +84,7 @@ class SinglePromptQueue implements AsyncIterable<SDKUserMessage> {
 }
 
 export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions): Promise<ClaudeCodeExploreQaResult> {
-  const { goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, cwd, model, sdk = DEFAULT_SDK, signal } = options;
+  const { goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, saveArtifact, cwd, model, sdk = DEFAULT_SDK, signal } = options;
   const maxActions = goal.maxActions ?? DEFAULT_MAX_ACTIONS;
   const maxMs = goal.maxMs ?? DEFAULT_MAX_MS;
   const repeatLimit = goal.repeatLimit ?? DEFAULT_REPEAT_LIMIT;
@@ -120,6 +124,7 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
         const outcome = await executeQaTool(spec.name, input, browser);
         const diagnostics = await browser.currentDiagnostics();
         const total = countDiagnostics(diagnostics);
+        const artifact = await saveActionThumbnail(browser, saveArtifact, actionCount);
         const record: QaActionRecord = {
           index: actionCount,
           tool: spec.name,
@@ -129,6 +134,7 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
           ...(outcome.resolvedSelector ? { resolvedSelector: outcome.resolvedSelector } : {}),
           ...(outcome.stableSelector ? { stableSelector: outcome.stableSelector } : {}),
           ...(outcome.rect ? { targetRect: outcome.rect } : {}),
+          ...(artifact ? { artifact } : {}),
           newDiagnosticsCount: Math.max(0, total - previousDiagnosticsCount),
           url: browser.url,
           at: Date.now(),
