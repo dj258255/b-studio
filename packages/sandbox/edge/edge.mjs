@@ -351,21 +351,33 @@ function audit(decision, host, port, reason, details = {}) {
   console.log(JSON.stringify({ edge: 'egress', decision, host, port, ...details, ...(reason ? { reason } : {}), at: new Date().toISOString() }));
 }
 
-/** 허용 목록과 주소 검사를 모두 통과한 IP를 돌려준다 */
-async function resolveAllowed(host, port, rules, request = {}) {
+/** 이 헤더가 있으면 거부가 아니라 상류(DNS) 장애다. 벤치·UI가 "허용하지 않음"과 "지금 안 됨"을 가를 때 쓴다 */
+export const DNS_FAILURE_HEADER = 'X-B-Studio-Egress';
+export const DNS_FAILURE_VALUE = 'dns-failed';
+
+/**
+ * 허용 목록과 주소 검사를 모두 통과한 IP를 돌려준다.
+ * 이름을 아예 풀지 못한 경우(addresses.length === 0)는 정책 위반이 아니라 상류 장애(DNS·네트워크)다.
+ * edge 바깥(호스트 네트워크, DNS 서버)의 문제라 요청을 막은 것과 다르게 다뤄야 한다 — 403 대신 502를 돌려주고
+ * 감사 로그 decision도 'deny'가 아닌 'error'로 남긴다(#411, 실험 E10: 18회 중 14회가 이 증상이었는데
+ * 거부 로그만 봐서는 허용 목록 문제인지 DNS 장애인지 실행이 끝난 뒤에는 가릴 수 없었다).
+ * 사설 주소로 풀리는 것은 여전히 정책 위반(DNS 재바인딩 방어)이라 403으로 둔다
+ */
+async function resolveAllowed(host, port, rules, request = {}, lookup = (name) => dns.lookup(name, { all: true })) {
   const decision = request.tunnel ? checkConnectEgress(host, port, rules) : checkHttpEgress(host, port, request.method, request.pathname, rules);
   if ('denied' in decision) return decision;
-  const addresses = await dns.lookup(host, { all: true }).catch(() => []);
+  const addresses = await lookup(host).catch(() => []);
+  if (addresses.length === 0) return { denied: '이름을 풀지 못함', upstream: true };
   // Docker 기본 네트워크에는 IPv6 경로가 없는 경우가 많으므로 IPv4를 먼저 쓴다
   const usable = addresses
     .sort((a, b) => a.family - b.family)
     .map((entry) => entry.address)
     .filter((address) => !isPrivateAddress(address));
-  if (usable.length === 0) return { denied: addresses.length === 0 ? '이름을 풀지 못함' : '사설 주소로 풀림' };
+  if (usable.length === 0) return { denied: '사설 주소로 풀림' };
   return { address: usable[0] };
 }
 
-export function startEdge({ forwards, rules, proxyPort = PROXY_PORT }) {
+export function startEdge({ forwards, rules, proxyPort = PROXY_PORT, lookup }) {
   const servers = [];
 
   for (const forward of forwards) {
@@ -391,10 +403,16 @@ export function startEdge({ forwards, rules, proxyPort = PROXY_PORT }) {
     const port = Number(url.port || 80);
     const path = url.pathname;
     const details = { method: String(request.method ?? 'GET').toUpperCase(), path };
-    const resolved = url.protocol === 'http:' ? await resolveAllowed(url.hostname, port, rules, { ...details, pathname: path }) : { denied: 'http 이외의 프로토콜' };
+    const resolved = url.protocol === 'http:' ? await resolveAllowed(url.hostname, port, rules, { ...details, pathname: path }, lookup) : { denied: 'http 이외의 프로토콜' };
     if ('denied' in resolved) {
-      audit('deny', url.hostname, port, resolved.denied, details);
-      response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end(`b-studio: ${url.hostname}:${port} 접속이 허용되지 않았습니다 (${resolved.denied})\n`);
+      audit(resolved.upstream ? 'error' : 'deny', url.hostname, port, resolved.denied, details);
+      if (resolved.upstream) {
+        response
+          .writeHead(502, { 'content-type': 'text/plain; charset=utf-8', [DNS_FAILURE_HEADER]: DNS_FAILURE_VALUE })
+          .end(`b-studio: ${url.hostname}:${port} 접속을 지금 할 수 없습니다 (${resolved.denied})\n`);
+      } else {
+        response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end(`b-studio: ${url.hostname}:${port} 접속이 허용되지 않았습니다 (${resolved.denied})\n`);
+      }
       return;
     }
     audit('allow', url.hostname, port, undefined, details);
@@ -413,10 +431,10 @@ export function startEdge({ forwards, rules, proxyPort = PROXY_PORT }) {
     socket.on('error', () => {});
     const target = splitHostPort(request.url ?? '');
     const details = { method: 'CONNECT' };
-    const resolved = target ? await resolveAllowed(target.host, target.port, rules, { tunnel: true }) : { denied: '잘못된 CONNECT 대상' };
+    const resolved = target ? await resolveAllowed(target.host, target.port, rules, { tunnel: true }, lookup) : { denied: '잘못된 CONNECT 대상' };
     if ('denied' in resolved) {
-      audit('deny', target?.host ?? request.url, target?.port, resolved.denied, details);
-      socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+      audit(resolved.upstream ? 'error' : 'deny', target?.host ?? request.url, target?.port, resolved.denied, details);
+      socket.end(resolved.upstream ? `HTTP/1.1 502 Bad Gateway\r\n${DNS_FAILURE_HEADER}: ${DNS_FAILURE_VALUE}\r\n\r\n` : 'HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
     audit('allow', target.host, target.port, undefined, details);
