@@ -323,21 +323,27 @@ export function ChatPanel({ view }: { view: SessionView }) {
       </div>
 
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
-        {chat.map((item, index) => (
-          <li key={index}>
-            <ChatEntry item={item} changedRuns={changedRuns} sessionId={snapshot.id} canManage={access.canManage} />
-            {index === chat.length - 1 && item.kind === "outcome" && item.intent === "ask" && item.status === "done" && access.canManage && (
-              <button
-                type="button"
-                onClick={buildFromPlan}
-                disabled={!canSend || !planRequest}
-                className="mt-2 rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
-              >
-                이대로 만들기
-              </button>
-            )}
-          </li>
-        ))}
+        {groupChatRows(chat).map((row) =>
+          row.kind === "noticeGroup" ? (
+            <li key={`notice-${row.startIndex}`}>
+              <NoticeGroupEntry text={row.text} count={row.count} />
+            </li>
+          ) : (
+            <li key={row.index}>
+              <ChatEntry item={row.item} changedRuns={changedRuns} sessionId={snapshot.id} canManage={access.canManage} />
+              {row.index === chat.length - 1 && row.item.kind === "outcome" && row.item.intent === "ask" && row.item.status === "done" && access.canManage && (
+                <button
+                  type="button"
+                  onClick={buildFromPlan}
+                  disabled={!canSend || !planRequest}
+                  className="mt-2 rounded-control bg-ink px-3.5 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+                >
+                  이대로 만들기
+                </button>
+              )}
+            </li>
+          ),
+        )}
         {snapshot.running && !runId && <li className="text-sm text-wait motion-safe:animate-pulse">작업하는 중</li>}
         {pending && (
           <li>
@@ -583,6 +589,45 @@ export function ChatPanel({ view }: { view: SessionView }) {
         {error && <p className="mt-2 text-sm text-fail">{error}</p>}
       </form>
     </section>
+  );
+}
+
+export type ChatRow = { kind: "noticeGroup"; text: string; count: number; startIndex: number } | { kind: "single"; item: ChatItem; index: number };
+
+/**
+ * 대화 기록은 바꾸지 않고(§81) 보여 줄 때만 접는다. 포트 충돌 등으로 샌드박스 기동을 여러 번
+ * 다시 시도하면 같은 안내(notice)가 연달아 쌓인다 — 글자가 완전히 같은 notice가 끊기지 않고
+ * 이어질 때만 한 줄로 묶는다. 사이에 다른 이벤트가 끼면(boot_network 등) 그 자리에서 묶음이 끊긴다
+ */
+export function groupChatRows(chat: readonly ChatItem[]): ChatRow[] {
+  const rows: ChatRow[] = [];
+  chat.forEach((item, index) => {
+    const prev = rows[rows.length - 1];
+    if (item.kind === "notice" && prev?.kind === "noticeGroup" && prev.text === item.text) {
+      prev.count += 1;
+      return;
+    }
+    rows.push(item.kind === "notice" ? { kind: "noticeGroup", text: item.text, count: 1, startIndex: index } : { kind: "single", item, index });
+  });
+  return rows;
+}
+
+/** count가 1이면 평소처럼 한 줄로, 여러 번 반복됐으면 접어서 보여 주고 펼치면 각 시도를 나열한다 */
+function NoticeGroupEntry({ text, count }: { text: string; count: number }) {
+  if (count <= 1) return <p className="border-l-[3px] border-line pl-3 text-sm text-muted">{text}</p>;
+  return (
+    <details className="border-l-[3px] border-line pl-3 text-sm text-muted">
+      <summary className="cursor-pointer hover:text-ink">
+        {text} · {count}번 시도
+      </summary>
+      <ol className="mt-1 space-y-0.5 pl-4 text-xs">
+        {Array.from({ length: count }, (_, i) => (
+          <li key={i}>
+            시도 {i + 1}: {text}
+          </li>
+        ))}
+      </ol>
+    </details>
   );
 }
 
