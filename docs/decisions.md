@@ -3731,7 +3731,7 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 ## ADR-091 CLI 백엔드 자동 모델 선택
 
 상태: 채택(1단계, 같은 세션 안에서만)
-관련: ADR-047, ADR-075, [E8](experiments/2026-09-30-e8-plan-execute-split.md), [E9](experiments/2026-10-01-e9-narrow-plan.md), [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)
+관련: ADR-047, ADR-075, [E8](experiments/2026-09-30-e8-plan-execute-split.md), [E9](experiments/2026-10-01-e9-narrow-plan.md), [E10](experiments/2026-10-07-e10-cli-auto-router.md)
 
 ### 맥락
 - ADR-047의 멀티 모델 라우터는 `api` 백엔드(사용자가 입력한 제공자 API 키)에만 있다. 사용자는 API 예산이 없어 구독 CLI(`claude-code` 백엔드, 로컬 Claude Agent SDK 로그인)로만 돌리는데, 이 경로는 여전히 사람이 대화 입력창에서 opus·sonnet·haiku 중 하나를 매번 손으로 고정해야 한다(model-picker.ts).
@@ -3765,7 +3765,8 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - `apps/studio/lib/server/model-picker.test.ts`: claude-code 옵션 목록에 `자동`이 포함되고(힌트 문구까지), `isSelectableModel('claude-code', 'auto')`가 통과한다.
 - `apps/studio/bench/coordination/backends.test.ts`: `resolveBackend`가 `--model auto`를 그대로 받는다(E10 벤치 배선).
 - `pnpm typecheck`(모든 워크스페이스 Done), 위 네 테스트 파일과 회귀로 돌린 `model-router.test.ts`·`escalation.test.ts` 전체 통과.
-- 실제 Claude Code CLI 호출로 자동 선택이 도는 것은 확인하지 못했다(사용자가 API 예산이 없어 구독 CLI 실 실행은 비용/사용량을 쓴다 — [E10 계획](experiments/2026-10-01-e10-cli-auto-router.md)에 실행 방법만 적어 두고 아직 실행하지 않았다). `pnpm bench:coordination --dry`로 인자 해석·하네스 배선만 확인했다.
+- 실제 Claude Code CLI 호출로 자동 선택이 도는 것은 확인하지 못했다(사용자가 API 예산이 없어 구독 CLI 실 실행은 비용/사용량을 쓴다 — E10 계획 단계에서는 실행 방법만 적어 두었다). `pnpm bench:coordination --dry`로 인자 해석·하네스 배선만 확인했다.
+- 2026-10-06 실측([E10](experiments/2026-10-07-e10-cli-auto-router.md), 과제 3개 × 3바퀴): 성공 auto 8/9 대 Sonnet 고정 7/9(p = 1.0), 성공 1건당 비용 $0.446 대 $0.234(+91%). 과제 안 모델 전환은 0회였다. 비용 차이는 order-summary 요청의 샘플 값 "결제 완료(PAID)"가 `HIGH_RISK`의 "결제"에 걸려 세 번 모두 Opus로 간 데서 나왔다. 기본값은 Sonnet 고정으로 두고, 위험 판정을 단어 일치에서 바꾸기 전에는 결제 도메인 프로젝트에 auto를 권하지 않는다.
 
 ### 감수한 트레이드오프
 - 복잡도·위험도 분류가 ADR-047과 같은 한계를 물려받는다(키워드·길이 기반, 도메인 의미를 완전히 이해하지 못함).
