@@ -221,6 +221,13 @@ export function ExploreQaView({ sessionId, service, frame }: { sessionId: string
                   모델 선언: {run.result.modelDeclared.success ? "성공" : "실패"} — {run.result.modelDeclared.summary}
                 </p>
               )}
+              {(run.result.usage.inputTokens > 0 || run.result.usage.outputTokens > 0) && (
+                <p className="mt-1 text-xs text-muted">
+                  이번 실행 토큰: 입력 {run.result.usage.inputTokens.toLocaleString("ko-KR")} · 출력 {run.result.usage.outputTokens.toLocaleString("ko-KR")}
+                  {run.result.usage.cacheReadTokens > 0 && ` · 캐시 읽기 ${run.result.usage.cacheReadTokens.toLocaleString("ko-KR")}`}
+                  <span className="block">(프로젝트 토큰 보고서에는 아직 합산되지 않습니다)</span>
+                </p>
+              )}
               {run.actions.length > 0 && (
                 <div className="mt-2">
                   <button type="button" onClick={save} disabled={saving} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink disabled:opacity-60">
