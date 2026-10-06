@@ -56,19 +56,39 @@ export function RepeatedActionsSection({ projectId }: { projectId: string }) {
   const candidates = loaded.report.candidates.filter((candidate) => !dismissed.has(candidate.id));
   if (candidates.length === 0) return null;
 
+  return <RepeatedActionsList candidates={candidates} sessionsAnalyzed={loaded.report.sessionsAnalyzed} onIgnore={(id) => void ignore(id)} />;
+}
+
+/**
+ * 후보 목록(§83). 토큰 탭은 위아래로 나뉜 flex 구역이라, 이 구역이 후보 수만큼 길어지면 아래 "턴별
+ * 컨텍스트" 그래프가 남은 높이로 짜부라든다(세션 c55417ad, 1440×900에서 32px짜리 스크롤 상자로 줄었다).
+ * 그래서 기본은 접어 개수·요약만 보여 주고, 펼쳐야 카드 목록이 나오게 한다 — 그래프가 쓸 높이를 항상 확보한다
+ */
+export function RepeatedActionsList({
+  candidates,
+  sessionsAnalyzed,
+  onIgnore,
+}: {
+  candidates: RepeatedActionCandidate[];
+  sessionsAnalyzed: number;
+  onIgnore: (candidateId: string) => void;
+}) {
   return (
     <section aria-labelledby="repeated-actions" className="border-b border-line bg-panel px-3 py-3">
-      <h2 id="repeated-actions" className="text-sm font-semibold">
-        반복 작업 {candidates.length}개
-      </h2>
-      <p className="mt-1 text-xs text-muted">
-        최근 세션 {loaded.report.sessionsAnalyzed}개에서 되풀이된 행동입니다. 스크립트나 노트로 굳히면 다음부터는 토큰을 쓰지 않습니다.
-      </p>
-      <ul className="mt-2 flex flex-col gap-2">
-        {candidates.map((candidate) => (
-          <CandidateCard key={candidate.id} candidate={candidate} onIgnore={() => void ignore(candidate.id)} />
-        ))}
-      </ul>
+      <details>
+        <summary id="repeated-actions" className="cursor-pointer text-sm font-semibold marker:text-muted">
+          반복 작업 {candidates.length}개
+        </summary>
+        <p className="mt-1 text-xs text-muted">
+          최근 세션 {sessionsAnalyzed}개에서 되풀이된 행동입니다. 스크립트나 노트로 굳히면 다음부터는 토큰을 쓰지 않습니다.
+        </p>
+        {/* 펼쳤을 때도 후보 수만큼 끝없이 길어지지 않게 자체 스크롤로 높이를 막는다 — 안 그러면 턴별 컨텍스트 그래프가 다시 밀려난다 */}
+        <ul className="mt-2 flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
+          {candidates.map((candidate) => (
+            <CandidateCard key={candidate.id} candidate={candidate} onIgnore={() => onIgnore(candidate.id)} />
+          ))}
+        </ul>
+      </details>
     </section>
   );
 }

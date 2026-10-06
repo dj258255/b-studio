@@ -30,3 +30,6 @@ __pycache__/
 
 # 에이전트 작업 트리(도구가 만드는 임시 폴더). 저장소에 넣지 않는다
 .claude/worktrees/
+
+# 문서 스크린샷 스크립트가 쓰는 임시 원본(docs:screenshots가 끝나면 지운다)
+scripts/screenshots/.raw/

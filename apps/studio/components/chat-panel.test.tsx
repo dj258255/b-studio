@@ -1,10 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { createView, reduceSession, type SessionView } from "@/lib/session-view";
+import { createView, reduceSession, type ChatItem, type SessionView } from "@/lib/session-view";
 import type { ModelPickerView } from "@/lib/server/model-picker";
 import type { SessionSnapshot, StudioEvent } from "@/lib/studio-events";
 import { SessionAccessProvider } from "./session-access";
-import { ChatPanel, handoffModelInput, ModelPicker, ModelPickerDialog, needsAccountConnect, popoverPositionFor } from "./chat-panel";
+import { ChatPanel, groupChatRows, handoffModelInput, ModelPicker, ModelPickerDialog, needsAccountConnect, popoverPositionFor } from "./chat-panel";
 
 // 비교·병렬을 보내면 그 화면으로 옮겨 가려고 라우터를 쓴다. 서버 렌더 테스트에는 앱 라우터가 없어 흉내 낸다
 vi.mock("next/navigation", () => ({ useRouter: () => ({ replace: () => undefined, push: () => undefined }) }));
@@ -390,5 +390,58 @@ describe("handoffModelInput(나눠서 병렬이 이어받을 세션 모델)", ()
 
   it("아직 모델 선택을 못 받았으면(picker 없음) 아무것도 넘기지 않아 서버 기본을 쓴다", () => {
     expect(handoffModelInput(undefined)).toEqual({});
+  });
+});
+
+describe("groupChatRows(이슈 #81 — 같은 기동 진행 줄을 렌더에서만 접는다)", () => {
+  const boot = (text: string): ChatItem => ({ kind: "notice", text });
+
+  it("글자가 같은 notice가 연달아 오면 한 묶음으로 접는다", () => {
+    const chat: ChatItem[] = [boot("샌드박스를 켜는 중입니다 (처음이면 1분 안팎)"), boot("샌드박스를 켜는 중입니다 (처음이면 1분 안팎)"), boot("샌드박스를 켜는 중입니다 (처음이면 1분 안팎)")];
+
+    const rows = groupChatRows(chat);
+
+    expect(rows).toEqual([{ kind: "noticeGroup", text: "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)", count: 3, startIndex: 0 }]);
+  });
+
+  it("사이에 다른 이벤트가 끼면 묶지 않는다", () => {
+    const chat: ChatItem[] = [
+      boot("샌드박스를 켜는 중입니다 (처음이면 1분 안팎)"),
+      { kind: "boot", network: [] },
+      boot("샌드박스를 켜는 중입니다 (처음이면 1분 안팎)"),
+    ];
+
+    const rows = groupChatRows(chat);
+
+    expect(rows).toEqual([
+      { kind: "noticeGroup", text: "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)", count: 1, startIndex: 0 },
+      { kind: "single", item: { kind: "boot", network: [] }, index: 1 },
+      { kind: "noticeGroup", text: "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)", count: 1, startIndex: 2 },
+    ]);
+  });
+
+  it("글자가 다른 notice는 묶지 않는다", () => {
+    const chat: ChatItem[] = [boot("샌드박스를 켜는 중입니다 (처음이면 1분 안팎)"), boot("다른 안내")];
+
+    const rows = groupChatRows(chat);
+
+    expect(rows).toEqual([
+      { kind: "noticeGroup", text: "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)", count: 1, startIndex: 0 },
+      { kind: "noticeGroup", text: "다른 안내", count: 1, startIndex: 1 },
+    ]);
+  });
+
+  it("실제 세션 c55417ad처럼 기동 재시도 5번 뒤 샌드박스를 띄우면, 대화 화면은 접힌 안내 한 줄과 그 아래 '띄웠습니다' 줄을 보여준다", () => {
+    const events: StudioEvent[] = [
+      ...Array.from({ length: 5 }, () => ({ type: "notice" as const, text: "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)", at: new Date().toISOString() })),
+      { type: "boot_network", at: new Date().toISOString(), network: [{ service: "web", rxBytes: 360 * 1024 * 1024, txBytes: 0 }] },
+    ];
+
+    const html = render(view(events));
+
+    expect(html).toContain("샌드박스를 켜는 중입니다 (처음이면 1분 안팎) · 5번 시도");
+    expect(html).toContain("샌드박스를 띄웠습니다");
+    // 한 줄로 접었으니 같은 안내 글자가 대화에 5번 그대로 늘어서 있지 않는다(펼쳐야만 보인다)
+    expect(html.match(/샌드박스를 켜는 중입니다 \(처음이면 1분 안팎\)/g)?.length).toBe(6); // 접힌 요약 1 + <details> 안의 시도 5
   });
 });

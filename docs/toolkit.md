@@ -12,6 +12,8 @@ b-studio는 앱 하나처럼 보이지만, 안을 열면 "에이전트의 결과
 | 토큰 경제 장치 | 도구 결과 예산, 게이트와 겹치는 자가 확인 줄이기(lean), 모델 승격 | [`packages/agent/src/loop.ts`](../packages/agent/src/loop.ts) (에이전트 루프의 예산·자가 확인) | 성공 1건당 토큰 −41%([E7](experiments/2026-09-30-e7-lean-self-check.md)), 계획·실행 모델 분리는 +538%로 기각([E8](experiments/2026-09-30-e8-plan-execute-split.md)) |
 | 벤치 하네스 | 가설을 이슈로 사전 등록하고, 같은 과제를 반복 실행해 Fisher 정확 검정으로 판정한다 | [`apps/studio/bench/coordination/`](../apps/studio/bench/coordination/) | 실험 11개, 기각 2건 포함([실험 기록](experiments/README.md)) |
 
+![나눠서 병렬 화면. 레인별 쓰기 범위와 "검증 통과" 배지, 레인이 쓴 모델별 토큰 합계가 보인다](images/studio-task-plan.jpg)
+
 ## 하나만 집어 써 보기: `studio verify`
 
 에이전트를 거치지 않은 변경 — 편집기로 직접 고친 코드 — 도 같은 게이트에 넣을 수 있습니다.

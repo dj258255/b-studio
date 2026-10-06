@@ -13,6 +13,10 @@ pnpm --filter @b-studio/studio build
 
 CI는 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)을 기준으로 실행합니다.
 
+자동 검사만으로는 요구사항과 테스트가 실제로 이어져 있는지 알 수 없습니다. 스튜디오의 "테스트" 탭은 백엔드 JUnit 결과를 요구사항 id에 직접 붙여, 통과·실패를 요구사항 단위로 읽게 합니다.
+
+![테스트 탭. 백엔드 JUnit 테스트 결과가 요구사항 id(R로 시작하는 번호)와 나란히 붙어 있다](images/studio-tests.jpg)
+
 ## 실제 환경에서 확인한 범위
 
 | 영역 | 확인 방법 | 결과 |
