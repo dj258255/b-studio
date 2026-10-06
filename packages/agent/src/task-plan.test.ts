@@ -1,7 +1,19 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelClient } from './loop';
-import { buildPlannerSystem, DEFAULT_PLAN_LIMITS, isInScope, parsePlannerReply, planAskFromClient, planLanes, planLimitsFromEnv, requestTaskPlan, TaskPlanError } from './task-plan';
+import {
+  backendSupportsBoard,
+  BOARD_SUPPORTED_BACKENDS,
+  buildPlannerSystem,
+  DEFAULT_PLAN_LIMITS,
+  isInScope,
+  parsePlannerReply,
+  planAskFromClient,
+  planLanes,
+  planLimitsFromEnv,
+  requestTaskPlan,
+  TaskPlanError,
+} from './task-plan';
 
 const task = (id: string, paths: string[], dependsOn: string[] = []) => ({ id, title: id, request: `${id} 작업`, paths, dependsOn });
 
@@ -219,5 +231,12 @@ describe('계획 상한 설정', () => {
     await expect(requestTaskPlan(ask, project, '두 곳 고쳐줘', undefined, { maxLanes: 1, maxTasks: 6 })).rejects.toThrow(/레인은 1개까지/);
     expect(seen[0]).toContain('At most 6 tasks');
     expect(seen[0]).toContain('at most 1 groups');
+  });
+});
+
+describe('레인 조율 게시판 지원 백엔드(이슈 #428, E12)', () => {
+  it('commandcode·opencode·gemini 러너가 board를 받게 된 뒤로는 모든 백엔드가 게시판을 지원한다', () => {
+    expect([...BOARD_SUPPORTED_BACKENDS].sort()).toEqual(['api', 'claude-code', 'codex', 'commandcode', 'gemini', 'opencode']);
+    for (const backend of BOARD_SUPPORTED_BACKENDS) expect(backendSupportsBoard(backend)).toBe(true);
   });
 });

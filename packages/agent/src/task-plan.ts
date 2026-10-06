@@ -63,6 +63,22 @@ const SCOPE_PATH = z
 export const PlanBackendSchema = z.enum(['api', 'claude-code', 'codex', 'commandcode', 'opencode', 'gemini']);
 export type PlanBackend = z.infer<typeof PlanBackendSchema>;
 
+/**
+ * 레인 조율 게시판(BoardAccess: post_note·read_notes)을 지원하는 백엔드 표. 판정은 이 한 곳에서만 한다
+ * (이슈 #428, E12). 벤치(bench/coordination/backends.ts)와 실행기(task-plans.ts)가 이 표를 같이 본다.
+ *
+ * E12 전에는 commandcode·opencode·gemini 러너가 buildTools에 board를 넘기지 않아 실제로는 도구 목록에
+ * post_note·read_notes가 오르지 않았다(혼합 레인 mesh 4/9, 모든 레인 claude-code 9/9, p=0.029).
+ * 이 표에 넣은 백엔드는 그 배선이 끝난 것만 의미한다 — 새 백엔드를 추가하면서 board를 잊으면 여기 넣지
+ * 않는 한 backendSupportsBoard가 false를 돌려줘 시작 전에 막힌다.
+ */
+export const BOARD_SUPPORTED_BACKENDS: ReadonlySet<PlanBackend> = new Set<PlanBackend>(['api', 'claude-code', 'codex', 'commandcode', 'opencode', 'gemini']);
+
+/** 이 백엔드가 레인 조율 게시판을 지원하는지. 단일 진실 원천은 BOARD_SUPPORTED_BACKENDS다 */
+export function backendSupportsBoard(backend: PlanBackend): boolean {
+  return BOARD_SUPPORTED_BACKENDS.has(backend);
+}
+
 export const TaskPlanSchema = z.object({
   tasks: z
     .array(

@@ -192,8 +192,13 @@ export interface GeminiRunResult extends AgentResult {
  * 완료 판정은 직접 만든 루프·다른 CLI 러너와 같은 검증 게이트가 한다. `gemini -p` 한 번이 모델 턴 하나이고,
  * 턴이 끝날 때마다 게이트를 돌리고 실패하면 결과를 다음 턴 프롬프트에 그대로 넣는다.
  *
- * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 레인 조율 게시판(`board`), 실행 중 지시(`steering`).
- * 도구 목록을 `buildTools(project)`로만 만들어 그 옵션들이 빠진다. 모델 승격(`escalation`)·노력 단계(`effort`)는
+ * 레인 조율 게시판(`board`)은 codex·claude-code 러너와 같은 규칙으로 받는다: 넘어오면 `buildTools`에 넘겨
+ * post_note·read_notes를 도구 목록에 더하고(S2·S5처럼 읽기 전용이면 post_note는 뺀다), 실행 컨텍스트에도 실어
+ * `executeTool`이 그 레인 신원으로 게시판을 읽고 쓰게 한다(이슈 #428, E12). 새 도구는 MCP 서버(`trust: true`)가
+ * 등록하는 도구라 `excludeTools` 블록리스트(알려진 내장 도구 이름만 나열)에 걸리지 않는다.
+ *
+ * 아직 다른 러너가 받는 것을 받지 않는다: 되묻기(`interactive`), 실행 중 지시(`steering`).
+ * 도구 목록을 만들 때 그 옵션들이 빠진다. 모델 승격(`escalation`)·노력 단계(`effort`)는
  * 타입으로는 받지만 지원하지 않는다 — 무시하지 않고 warning 이벤트로 알린다.
  */
 export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiRunResult> {
@@ -252,10 +257,12 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
     requestApproval: options.requestApproval,
+    board: options.board,
     onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
     ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
-  const specs = buildTools(project);
+  // 조율 게시판은 Claude Code·Codex 러너와 같게, 켠 실행에만 도구를 더한다
+  const specs = buildTools(project, { ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}) });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   const serial = serialQueue();
@@ -266,6 +273,10 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
   let home: string | undefined;
   let result: GeminiRunResult | undefined;
   const usage = emptyUsage();
+  // 모델 이름별 사용량(벤치·스튜디오 사용량 집계가 CLI 레인 사용량을 모델별로 더하는 자리, 이슈 #428).
+  // 이 러너는 실행 내내 모델을 하나만 쓰므로(승격 미지원) usage와 같은 객체를 참조로 공유해 갱신을 한 곳에서만 한다.
+  // 모델은 항상 명시해야 하므로(GEMINI_MODEL_REQUIRED) 백엔드 이름으로 떨어지는 경우가 없다
+  metrics.usageByModel = { [chosenModel]: usage };
   let completedTurns = 0;
   let lastText = '';
   let sessionId: string | undefined = canResume ? resume : undefined;

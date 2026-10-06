@@ -148,6 +148,7 @@
 - [ADR-125 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-125-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
 - [ADR-126 실행 탭에 "내 환경" 관찰 탭을 더한다: 사용자가 직접 띄운 서비스는 보되 건드리지 않는다](#adr-126-실행-탭에-내-환경-관찰-탭을-더한다-사용자가-직접-띄운-서비스는-보되-건드리지-않는다)
 - [ADR-127 QA 탭에 탐색형 QA를 더한다: 모델이 접근성 트리로 화면을 보고 스스로 조작하되, 완료 선언만으로 통과시키지 않는다](#adr-127-qa-탭에-탐색형-qa를-더한다-모델이-접근성-트리로-화면을-보고-스스로-조작하되-완료-선언만으로-통과시키지-않는다)
+- [ADR-128 CLI 러너(Command Code·OpenCode·Gemini)에 레인 조율 게시판을 연결하고, CLI 레인 사용량을 모델별로 집계한다](#adr-128-cli-러너command-codeopencodegemini에-레인-조율-게시판을-연결하고-cli-레인-사용량을-모델별로-집계한다)
 
 ---
 
@@ -5319,3 +5320,33 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **단계 타임라인 썸네일은 산출물 보관 한도(세션당 개수·용량)의 적용 대상이다.** 오래 반복해 탐색하면 오래된 썸네일부터 지워질 수 있다 — 기존 산출물 정리 규칙(ADR-099가 언급한 "마지막 하나는 남긴다" 관례)을 그대로 따른다.
 - **원격 브라우저(remote-browser.ts)와 완전히 같은 CDP 좌표계·오버레이 측정 로직을 다시 쓰지 않고 간단한 비율 계산으로 대체했다.** 탐색형 QA의 오버레이는 "지금 어디를 눌렀는지" 참고용이라, 원격 브라우저의 정밀한 드래그 선택 오버레이(`element-pick-geometry.ts`)만큼 정교할 필요가 없다고 봤다.
 - **실행이 쓴 토큰은 결과 카드에만 보여주고, 프로젝트 토큰 보고서나 사람별 한도에는 합산하지 않는다.** 그 집계(`chargeUser`, `session.snapshot.tokens`)는 대화 "실행"(`ActiveRun`, 취소·예산 한도·되돌리기가 함께 얽힌 구조)을 전제로 하고, 탐색형 QA는 그와 별개의 짧은 백그라운드 실행이다. `ActiveRun` 흉내를 내 끼워 맞추는 것보다, 지금은 결과 카드에 그 실행만의 토큰을 보여주는 선에서 멈추고 한계로 적어 둔다.
+
+## ADR-128 CLI 러너(Command Code·OpenCode·Gemini)에 레인 조율 게시판을 연결하고, CLI 레인 사용량을 모델별로 집계한다
+
+상태: 채택
+관련: ADR-059, ADR-116, ADR-119, ADR-120, ADR-118
+
+### 맥락
+- E12(이슈 #428, `~/.cache/b-studio/bench/e12/`)는 S3 게시판 전략을 mesh topology로, api 레인은 Claude Code·web 레인은 Command Code로 섞은 조건(mixed)과 모든 레인을 Claude Code로 둔 조건(claude)을 각 9회씩 돌렸다. 실측: mixed 4/9 성공, claude 9/9 성공(p = 0.029). 세션 기록을 `toolCalls`로 세어 보면 mixed의 api 레인(Claude Code) 세 반복 모두 `post_note` 1회·`read_notes` 2~4회를 불렀지만, 같은 실행의 web 레인(Command Code)은 아홉 번의 반복 전부 `post_note`·`read_notes` 호출이 **0건**이었다(세션 기록에 도구 이름 자체가 없다 — 거부가 아니라 도구가 목록에 없었다는 뜻).
+- 원인을 코드에서 확인했다. `packages/agent/src/commandcode-runner.ts`는 `buildTools(project)`를 board 옵션 없이 불렀고(옛 158행 주석이 스스로 "아직 다른 러너가 받는 것을 받지 않는다: 되묻기, 레인 조율 게시판, 실행 중 지시"라고 적어 두었다), `ToolContext`에도 `board`를 담지 않았다. `opencode-runner.ts`·`gemini-cli-runner.ts`도 같은 모양이었다. 반면 `claude-code-runner.ts`(151·160행)와 `codex-runner.ts`(175행)는 `buildTools(project, { board: options.board, ... })`로 board를 넘기고 `ToolContext.board`에도 실어, `tools.ts`의 `buildTools`가 `post_note`·`read_notes`를 도구 목록에 더하고 `executeTool`이 그 레인 신원으로 게시판을 읽고 쓰게 했다. 즉 배선이 두 갈래로 갈려 있었을 뿐, 게시판 자체(`tools.ts`·`coordination.ts`)에는 결함이 없었다.
+- 두 번째 문제: 같은 mixed 실행의 Command Code 레인 `task.run.usage`에는 입력 토큰이 실행마다 46만~160만(예: 614,537) 수준으로 실려 있었지만, `task.run.metrics.usageByModel`은 모든 Command Code 행에서 비어 있었다(`usageByModel` 키 자체가 없음). `claude-code-runner.ts`만 `metrics.usageByModel`을 채우고 있었고, `codex-runner.ts`·`commandcode-runner.ts`·`opencode-runner.ts`·`gemini-cli-runner.ts`는 전부 `usage`(합계)만 두고 모델 이름별로 쪼개지 않았다. 벤치(`apps/studio/bench/coordination/run.ts`)의 모델별 API 환산 비용(`costForUsageByModel`)은 `usageByModel` 키가 있는 모델만 계산하므로, 혼합 레인에서 CLI 백엔드가 쓴 토큰은 비용 집계에서 통째로 빠졌다.
+- 처음에는 "Command Code가 MCP 도구 호출 자체를 거부했나"를 의심했다(세 번째 겹(layer): 헤드리스 승인 거부). 하지만 `edit_file`·`read_file` 같은 다른 b-studio 도구는 같은 실행에서 정상 호출됐고, `tools.ts`의 `modelWrites`·`allowedTools` 규칙도 이 실행에서 걸릴 이유가 없었다(S3는 `modelWrites: true`). 실제 원인은 도구가 **목록에 아예 없었다**는 배선 누락이었다 — 러너가 `buildTools`를 호출할 때 board 옵션을 넘기지 않으면 `tools.ts`는 조건부 분기(`if (options.board) { ... }`)를 타지 않아 `post_note`·`read_notes`를 추가하지 않는다. 모델이 안 쓴 게 아니라 볼 수조차 없었다.
+
+### 결정
+1. **Command Code·OpenCode·Gemini 러너가 board를 받으면 claude-code·codex 러너와 같은 규칙으로 도구 목록에 넣는다.** 세 러너 모두 `buildTools(project, { ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}) })`로 바꾸고, `ToolContext`에 `board: options.board`를 더했다. `executeTool`의 board 분기(`post_note`/`read_notes` 핸들러)와 S2·S5 읽기 전용 규칙(`board.modelWrites === false`면 `post_note`를 아예 넣지 않는다)은 `tools.ts` 한 곳에서만 판정하므로 러너 쪽은 옵션을 그대로 전달하기만 하면 된다. MCP 노출 경로(`mcp-http-server.ts`의 `startToolServer`)는 `specs`와 `run` 콜백만 받는 구조라 board를 몰라도 되고(러너의 `run` 콜백이 이미 `executeTool(name, args, context)`로 board가 담긴 context를 넘긴다), 고칠 필요가 없었다. OpenCode의 에이전트 권한(`b_studio_*` 글롭)·Command Code의 설정(`mcp__b_studio__*`)·Gemini의 `excludeTools`(내장 도구 블록리스트, MCP 도구와 무관)도 모두 와일드카드나 별개 체계라 새 도구가 자동으로 통과하고 별도 수정이 필요 없었다.
+2. **레인을 만드는 쪽은 이미 board를 넘기고 있었다.** `apps/studio/lib/server/sessions.ts`의 `runPlan`은 `shared.board = plan.board`를 만들고 `...shared`로 모든 백엔드 호출에 펼쳐 넣는다 — Command Code·OpenCode·Gemini 호출부도 이미 `board`를 받고 있었지만 그 값을 쓰는 코드가 러너 안에 없었을 뿐이다. 그래서 레인 쪽은 고치지 않았다(확인만 했다).
+3. **CLI 레인(codex·commandcode·opencode·gemini) 사용량도 `metrics.usageByModel`에 넣는다.** 네 러너 모두 승격(모델 전환)을 지원하지 않아 실행 내내 모델이 하나뿐이므로, `usage`(누적 합계) 객체를 그대로 `usageByModel`의 유일한 값으로 참조 공유한다(`metrics.usageByModel = { [key]: usage }` — `usage`는 그 뒤로도 `addUsage()`로 제자리에서 바뀌므로 결과가 항상 일치한다. 복사본을 만들어 두 곳에서 따로 갱신하지 않는다). 키는 모델을 명시했으면 그 이름(opencode·gemini는 항상 명시해야 하므로 늘 모델 이름), 명시하지 않았으면(codex·commandcode는 계정 기본 모델을 쓸 수 있다) `<백엔드>:default`(`codex:default`, `commandcode:default`)로 만든다.
+4. **안전장치: 게시판이 필요한 전략에서 레인 백엔드가 board를 지원하지 않으면 시작 전에 막는다.** `packages/agent/src/task-plan.ts`에 `BOARD_SUPPORTED_BACKENDS`(지원 백엔드 표)와 `backendSupportsBoard()`를 두어 **단일 진실 원천**으로 삼았다 — 이 수정 뒤에는 `api`·`claude-code`·`codex`·`commandcode`·`opencode`·`gemini` 전부 `true`지만, 표의 목적은 "지금 전부 지원한다"가 아니라 "새 백엔드를 추가하며 board 배선을 깜빡하면 여기 넣지 않는 한 이 함수가 `false`를 돌려줘 막힌다"는 것이다. 벤치(`apps/studio/bench/coordination/backends.ts`)에 `assertCoordinationBackend(strategies, backend, laneBackends)`를 더해, 게시판을 쓰는 전략(S2·S3·S5 — S4는 코드로 확인한 대로 `laneBoard()`가 공유 없음으로 분기해 board를 아예 안 만든다)을 돌리는데 계획 기본이나 `--lane-backend`로 고른 백엔드 중 지원 표에 없는 것이 있으면 Docker·모델을 건드리기 전에 이유를 담은 오류로 멈춘다. 판정은 `backendSupportsBoard` 한 곳만 보고, `assertCoordinationBackend`는 그 표를 찾아보기만 한다.
+5. **옛 러너 주석을 실제와 맞춘다.** Command Code·OpenCode·Gemini 러너의 "아직 다른 러너가 받는 것을 받지 않는다" 목록에서 `board`를 빼고, 남은 항목(`interactive`·`steering` — 이번 수정 범위 밖)만 적었다. 세 러너 모두 board를 받는 경로를 함수 머리말 주석에 새로 설명했다.
+
+### 검증 결과
+- 단위 테스트(실 모델·실 CLI 호출 없음, 가짜 프로세스·가짜 SDK로 기존 러너 테스트와 같은 기법): `commandcode-runner.test.ts`·`opencode-runner.test.ts`·`gemini-cli-runner.test.ts`에 각각 board 테스트 두 건(① board를 켜면 MCP 서버의 `listTools()`에 `post_note`·`read_notes`가 오르고, `post_note` 호출이 레인 신원으로 실제 `Board`에 기록되는 것, ② `modelWrites: false`면 `read_notes`만 오르고 다른 레인이 남긴 메모를 읽는 것)과 `usageByModel` 테스트 한 건(모델을 명시하면 그 이름으로, 생략하면 `<백엔드>:default`로 키가 채워지는 것 — opencode·gemini는 모델이 필수라 기본 키 분기가 없다)을 더했다. `codex-runner.test.ts`에도 `usageByModel`(명시 모델 vs `codex:default`) 테스트를 더했다.
+- `task-plan.test.ts`에 `BOARD_SUPPORTED_BACKENDS`·`backendSupportsBoard`가 여섯 백엔드 모두 `true`를 돌려주는 것을 확인하는 테스트를 더했다.
+- `apps/studio/bench/coordination/backends.test.ts`에 `assertCoordinationBackend` 테스트 세 건을 더했다: S4만 쓰면(게시판 없음) 백엔드와 무관하게 통과, S2·S3·S5는 지원 표에 있는 백엔드 조합이면 통과, 지원 표에 없는 백엔드 문자열(타입 캐스팅으로 흉내 낸 가상의 미래 백엔드)을 계획 기본이나 레인 백엔드에 넣으면 시작 전에 막히는 것.
+- `pnpm typecheck`(6/6 Done), `pnpm exec vitest run`(306개 파일, 3,281건 전부 통과), `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고 9건만 유지) — 끝줄은 보고에 그대로 붙인다.
+- E12를 이 수정으로 다시 돌려 "mixed 조건의 성공률이 claude 조건에 가까워지는지"는 확인하지 않았다 — 실제 모델 호출과 샌드박스 비용이 드는 벤치 재실행이라 이번 작업 범위에서는 단위 테스트로 배선만 검증했다(ADR-119의 ADR-116 보강과 같은 유보). 재실행은 후속 실험으로 넘긴다.
+
+### 감수한 트레이드오프
+- **실행 중 지시(steering)·되묻기(interactive)는 이번에도 Command Code·OpenCode·Gemini 러너에 연결하지 않았다.** E12가 드러낸 것은 board 배선 누락뿐이라 이번 수정은 그 범위로 좁혔다 — 세 러너의 머리말 주석은 이 두 가지가 여전히 빠져 있다는 사실을 그대로 유지한다.
+- **`usageByModel`의 모델 이름은 CLI가 실제로 쓴 모델을 되돌려 받은 값이 아니라, 호출 쪽이 넘긴 `model` 옵션(또는 그 기본값 표시)이다.** Claude Code 러너처럼 SDK가 턴마다 실제로 쓴 모델 이름을 보고해 주는 구조가 아니므로, 계정 기본 모델을 쓴 실행은 실제 모델이 무엇인지 모른 채 `<백엔드>:default`로만 남는다. 모델별 단가 계산도 이 한계를 그대로 물려받는다.
+- **지원 백엔드 표(`BOARD_SUPPORTED_BACKENDS`)는 지금 전부 `true`라 `assertCoordinationBackend`의 실패 경로는 실제 백엔드로는 재현할 수 없다.** 테스트는 타입을 우회한 가상의 문자열로 그 분기를 확인했다 — 이 안전장치는 "지금 막는다"가 아니라 "나중에 깜빡했을 때 막는다"는 회귀 방지용이다.

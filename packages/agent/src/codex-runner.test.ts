@@ -325,6 +325,16 @@ describe('runCodexAgent', () => {
     }
   });
 
+  it('model을 고르면 usageByModel을 그 이름으로, 고르지 않으면 codex:default로 채운다(이슈 #428)', async () => {
+    const { sdk: namedModel } = fakeCodex([{ steps: [{ text: '완료' }], usage: usage(10) }]);
+    const named = await runCodexAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), sdk: namedModel, model: 'gpt-5-codex', fetcher: async () => contract });
+    expect(named.metrics?.usageByModel).toEqual({ 'gpt-5-codex': named.usage });
+
+    const { sdk: defaultModel } = fakeCodex([{ steps: [{ text: '완료' }], usage: usage(10) }]);
+    const unnamed = await runCodexAgent({ request: '요청', project, sandbox: fakeSandbox(project, [true]), sdk: defaultModel, fetcher: async () => contract });
+    expect(unnamed.metrics?.usageByModel).toEqual({ 'codex:default': unnamed.usage });
+  });
+
   it('이어받기는 지원하지 않는다. resume을 주면 오류를 낸다', async () => {
     const { sdk } = fakeCodex([]);
 

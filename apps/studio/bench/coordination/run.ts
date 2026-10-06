@@ -29,6 +29,7 @@ import { runConcurrent } from './concurrent-run';
 import {
   assertContractsBackend,
   assertContractsStrategy,
+  assertCoordinationBackend,
   assertPlainBaselineBackend,
   cliBackendsInUse,
   parseLaneBackends,
@@ -883,6 +884,8 @@ async function main(): Promise<void> {
   const topology = parseTopology(args.topology);
   // P0는 로컬 Claude Code 전용이다. Docker·모델을 건드리기 전에 백엔드를 확인한다
   assertPlainBaselineBackend(backend, strategies);
+  // 조율 전략(S2·S3·S5)은 게시판(post_note·read_notes)을 지원하는 백엔드에서만 쓴다. 지원 표는 한 곳(backendSupportsBoard)에서만 본다
+  assertCoordinationBackend(strategies, backend, laneBackendChoices);
   // P0는 b-studio 게이트를 쓰지 않아 verify가 적용되지 않는다. light와 함께 주면 무시하고 한 줄 알린다
   const verifyWarning = verifyNotice(verify, strategies);
   if (verifyWarning) console.warn(verifyWarning);

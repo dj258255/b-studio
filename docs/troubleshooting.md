@@ -13,9 +13,9 @@
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
 | 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55 |
 | 운영 이미지·컨테이너 배포 | 31–34 |
-| 멀티 CLI·백엔드 실행 | 43, 45, 47–49 |
+| 멀티 CLI·백엔드 실행 | 43, 45, 47–49, 59 |
 | 동시성·상태 저장 | 44 |
-| 벤치 하네스 | 42, 45–46, 55 |
+| 벤치 하네스 | 42, 45–46, 55, 59 |
 | 요구사항·PR·리뷰 추적 | 54, 56 |
 | 설계 단계에서 대비한 문제 | 22 |
 
@@ -79,6 +79,7 @@
 - [56. 이미 열린 PR에 다시 "올리고 PR 만들기"를 해도 본문·AI 리뷰가 첫 커밋 기준 그대로 멈춰 있음](#56-이미-열린-pr에-다시-올리고-pr-만들기를-해도-본문ai-리뷰가-첫-커밋-기준-그대로-멈춰-있음)
 - [57. 개발 상태 배너가 머리 줄 위에 고정된 채 겹쳐 그려짐](#57-개발-상태-배너가-머리-줄-위에-고정된-채-겹쳐-그려짐)
 - [58. 세션 재개 때 프런트엔드가 ETXTBSY로 가끔 죽어 기동 실패가 됨](#58-세션-재개-때-프런트엔드가-etxtbsy로-가끔-죽어-기동-실패가-됨)
+- [59. S3 게시판 혼합 레인(Claude Code + Command Code)이 모든 레인 Claude Code보다 훨씬 자주 실패함](#59-s3-게시판-혼합-레인claude-code--command-code이-모든-레인-claude-code보다-훨씬-자주-실패함)
 
 ---
 
@@ -2029,3 +2030,37 @@ b-studio 자신의 오케스트레이션 코드에는 같은 파일에 대한 �
 
 ### 배운 점
 "같은 자원에 두 경로가 겹쳐 쓴다"는 가설은 코드를 끝까지 따라가 호출 순서(`await`로 실제로 직렬화돼 있는지)를 확인해야 기각하거나 확정할 수 있다 — 겹치는 것처럼 보이는 두 단계(스냅샷 복사·컨테이너 설치)가 실제로는 순서대로 일어난다는 것을 알고 나서야, 원인이 b-studio 밖(esbuild 자신의 설치 스크립트와 파일시스템의 쓰기 반영 타이밍)에 있다고 좁힐 수 있었다. 구조적으로 막을 수 없는 간헐적 경합은, 무한 재시도가 아니라 "알려진 신호가 보일 때만, 상한을 걸고" 재시도하는 쪽이 안전하다 — ADR-121의 포트 충돌 재시도와 같은 설계다.
+
+## 59. S3 게시판 혼합 레인(Claude Code + Command Code)이 모든 레인 Claude Code보다 훨씬 자주 실패함
+
+**구분:** 벤치 실험 E12(이슈 #428) → 코드로 원인 추적 → 수정
+
+### 현상
+S3 게시판 전략을 mesh topology로, api 레인은 Claude Code·web 레인은 Command Code로 섞은 조건(mixed)을 9회 돌리자 4회만 성공했다. 같은 과제·같은 topology에서 모든 레인을 Claude Code로 둔 조건(claude)은 9회 모두 성공했다(p = 0.029). 원자료는 `~/.cache/b-studio/bench/e12/mixed-r*/results.jsonl`.
+
+### 가설
+1. Command Code 레인이 `post_note`·`read_notes` 호출을 정책에 거부당했다(세 번째 겹인 헤드리스 승인 거부, 또는 `checkToolPolicy`의 허용 목록 문제).
+2. Command Code가 도구를 부르기는 했는데 레인 신원(`lane`)이 잘못 묶여 다른 레인의 메모로 읽혔다.
+
+### 측정
+- mixed 세션 기록을 `toolCalls`로 세어 보니, 같은 실행의 api 레인(Claude Code) 세 반복 모두 `post_note` 1회·`read_notes` 2~4회를 불렀는데, web 레인(Command Code)은 아홉 번의 반복 전부 두 도구 호출이 **0건**이었다. 거부 이벤트(`policy` 타입, `decision: 'deny'`)도 없었다 — 도구 이름 자체가 세션 기록에 없었다.
+- `packages/agent/src/commandcode-runner.ts`를 읽었다: `buildTools(project)`를 board 옵션 없이 부르고 있었다(158행 주석이 스스로 "아직 다른 러너가 받는 것을 받지 않는다: 되묻기, 레인 조율 게시판, 실행 중 지시"라고 적어 두었다). `ToolContext`에도 `board` 필드가 없었다. `opencode-runner.ts`·`gemini-cli-runner.ts`도 같은 모양이었다.
+- `tools.ts`의 `buildTools`를 읽었다: `if (options.board) { ... }` 분기 안에서만 `post_note`·`read_notes`를 도구 목록에 더한다. `options.board`가 없으면 이 분기를 아예 타지 않는다 — 거부가 아니라 **도구 목록에 애초에 없었다**.
+- 비교를 위해 `claude-code-runner.ts`(151·160행)·`codex-runner.ts`(175행)를 읽었다: 둘 다 `buildTools(project, { board: options.board, ... })`로 board를 넘기고 `ToolContext.board`에도 실었다 — 같은 저장소 안에서 배선이 두 갈래로 갈려 있었다.
+
+### 틀린 추측
+가설 1(정책 거부)과 가설 2(레인 신원 오류)는 둘 다 "도구가 호출됐다"를 전제로 하는데, 세션 기록에는 거부 이벤트도, 성공한 `tool_call` 이벤트도 없었다 — 호출 자체가 일어나지 않았다는 뜻이고, 이는 도구 목록에 없었다는 것으로만 설명된다. `checkToolPolicy`·레인 신원 묶기(`laneBoard()`) 쪽 코드는 모두 board가 주어졌을 때의 동작이라, board가 애초에 안 넘어가면 실행되지도 않는다.
+
+### 원인
+`commandcode-runner.ts`·`opencode-runner.ts`·`gemini-cli-runner.ts` 세 러너가 `buildTools`를 호출할 때 `board` 옵션을 넘기지 않아, S3에서 모델이 다른 레인의 계약을 보지 못한 채(`read_notes` 없음) 자기 쪽 인터페이스만 추측해서 짜고, 자신의 계약도 게시하지 못했다(`post_note` 없음). mesh topology의 S3는 레인끼리 서로 계약을 맞춰야 통합 게이트를 통과하므로, 한쪽 레인이 게시판을 아예 못 보면 필드 이름·모양이 어긋나 실패율이 올라간다 — 혼합 레인에서만 실패율이 치솟은 이유다. 레인을 만드는 쪽(`apps/studio/lib/server/sessions.ts`의 `runPlan`)은 이미 `shared.board = plan.board`를 모든 백엔드 호출에 펼쳐 넣고 있었다 — 레인 쪽 배선은 정상이었고, 러너 쪽이 그 값을 받고도 쓰지 않았다.
+
+### 수정
+세 러너 모두 `buildTools(project, { ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}) })`로 바꾸고 `ToolContext`에 `board: options.board`를 더했다(claude-code·codex 러너와 같은 모양). MCP 노출 경로(`mcp-http-server.ts`)는 `specs`·`run` 콜백만 받으므로 고칠 필요가 없었다 — 러너의 `run` 콜백이 이미 `executeTool(name, args, context)`로 board가 담긴 context를 넘기기 때문이다. 겸사겸사 같은 실행의 Command Code 레인 `task.run.usage`에 입력 토큰이 실행마다 46만~160만 수준(예: 614,537)으로 실려 있는데도 `metrics.usageByModel`이 비어 있던 것도 고쳤다 — codex·commandcode·opencode·gemini 네 러너 모두 `usage`(누적 합계) 객체를 `metrics.usageByModel`의 유일한 값으로 참조 공유하게 해, 모델을 명시했으면 그 이름을, 생략했으면 `<백엔드>:default`를 키로 쓴다. 안전장치로 `packages/agent/src/task-plan.ts`에 `backendSupportsBoard()`(단일 진실 원천)를 두고, 벤치의 `assertCoordinationBackend()`가 S2·S3·S5를 돌리는데 지원하지 않는 백엔드가 섞이면 Docker·모델을 건드리기 전에 막는다. 자세한 내용은 [ADR-128](decisions.md#adr-128-cli-러너command-codeopencodegemini에-레인-조율-게시판을-연결하고-cli-레인-사용량을-모델별로-집계한다).
+
+### 검증
+- `commandcode-runner.test.ts`·`opencode-runner.test.ts`·`gemini-cli-runner.test.ts`에 board를 켜면 `post_note`·`read_notes`가 MCP 서버의 `listTools()`에 오르고 실제 호출이 레인 신원으로 `Board`에 기록되는 테스트, 읽기 전용(`modelWrites: false`)이면 `read_notes`만 오르는 테스트를 더했다. 네 러너(codex 포함) 모두 `usageByModel` 채움을 확인하는 테스트를 더했다.
+- `pnpm typecheck`(6/6 Done), `pnpm exec vitest run`(306개 파일, 3,281건 통과), `pnpm --filter @b-studio/studio lint`(오류 0).
+- E12를 이 수정으로 다시 돌려 mixed 조건의 성공률이 오르는지는 확인하지 않았다 — 실제 모델 호출·샌드박스 비용이 드는 벤치 재실행이라 이번 범위에서는 단위 테스트로 배선만 검증했다. 재실행은 후속 실험으로 남긴다.
+
+### 배운 점
+"도구 호출이 실패·거부됐다"와 "도구가 목록에 아예 없었다"는 세션 기록만 봐서는 헷갈리기 쉽다 — 거부는 `policy` 이벤트가 남고, 목록 누락은 아무 흔적도 남기지 않는다(모델이 쓰지 않은 도구는 애초에 모른다). 의심이 가는 도구의 실행 경로(`buildTools` 호출부)를 직접 비교해, 같은 기능을 하는 다른 러너와 호출 모양이 같은지부터 보는 것이 세션 기록만 들여다보는 것보다 빨랐다. 또한 "같은 저장소 안에서 같은 옵션(board)을 받는 러너 다섯 개 중 둘만 실제로 쓴다"는 것은, 새 러너를 추가할 때 기존 러너의 옵션 전달을 전부 복사하지 않으면 생기는 흔한 누락이다 — 지원 여부를 표 하나로 모아 두면(이번의 `backendSupportsBoard`) 다음에 같은 누락이 생겨도 막을 수 있다.
