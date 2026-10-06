@@ -297,6 +297,7 @@ import {
   publishedIssueNumbers,
   publishedTrackingIssue,
   publishRequirementIssues,
+  refreshTrackingIssueBody,
   REQUIREMENT_ISSUES_FILE,
   resolveRequirementConflict,
   syncRequirementIssueStatus,
@@ -2945,6 +2946,7 @@ export function buildExportChecks({
   missing,
   uncheckpointed,
   running,
+  trackingIssue,
 }: {
   issues: readonly number[];
   /** 이슈 번호별 원격 조회 결과. 없는 번호는 확인하지 못한 것으로 둔다 */
@@ -2952,6 +2954,9 @@ export function buildExportChecks({
   missing: ReadonlyArray<{ shortSha: string; subject: string; stages: readonly string[] }>;
   uncheckpointed: number;
   running: boolean;
+  /** 이미 발행한 추적 이슈 번호(있으면). "PR 만들기"가 그 본문을 지금 상태로 다시 쓴다는 사실만 알려준다 —
+   * 미리보기는 원격에 아무것도 쓰지 않는다(안내만 한다) */
+  trackingIssue?: number;
 }): ExportPreview['checks'] {
   const checks: ExportPreview['checks'] = [
     {
@@ -3008,6 +3013,9 @@ export function buildExportChecks({
     ok: !running,
     detail: running ? '작업이 진행 중입니다. 끝난 뒤에 올릴 수 있습니다' : '진행 중인 작업이 없습니다',
   });
+  if (trackingIssue !== undefined) {
+    checks.push({ id: 'tracking_issue_refresh', ok: true, detail: `PR을 만들면 요구사항 추적 이슈 #${trackingIssue} 본문 표를 지금 상태로 다시 씁니다` });
+  }
   return checks;
 }
 
@@ -3050,17 +3058,22 @@ async function pullRequestDraft(
   // 다시 올리지 않고 "관련:"으로만 가리킨다(버그 리포트: 머지돼 닫힌 이슈 19개가 그대로 Closes로 다시 올라왔다)
   // — 이미 위 issues 인자에 들어 있으면(사람이 직접 골랐으면) 다시 적지 않는다
   const relatedClosed = [...new Set(closedIssues)].filter((issue) => !issues.includes(issue));
-  const relatedAddendum = relatedClosed.length > 0 ? `\n\n${relatedClosed.map((issue) => `관련: #${issue}`).join('\n')}` : '';
   // 요구사항을 이슈로 발행했으면(ADR-092) 추적 이슈도 가리킨다. 이 PR이 연결하는 이슈들이 추적 이슈의 남은
-  // 마지막 열린 하위 이슈면 추적 이슈도 함께 닫고(Closes), 아니면 "관련:" 한 줄로 PR에서 추적 이슈로 돌아갈 수
+  // 마지막 열린 하위 이슈면 추적 이슈도 함께 닫고(Closes), 아니면 "관련:" 줄로 PR에서 추적 이슈로 돌아갈 수
   // 있게 한다(이미 위 Closes 목록에 들어 있으면 — 사람이 직접 추적 이슈를 골랐으면 — 다시 적지 않는다)
   const tracking = await publishedTrackingIssue(session.project.root).catch(() => undefined);
-  const trackingAddendum = tracking && !issues.includes(tracking.issue) ? (closesTracking ? `\n\nCloses #${tracking.issue}` : `\n\n관련: #${tracking.issue}`) : '';
+  const trackingRelated = tracking && !closesTracking && !issues.includes(tracking.issue) ? tracking.issue : undefined;
+  const trackingClosesAddendum = tracking && closesTracking && !issues.includes(tracking.issue) ? `\n\nCloses #${tracking.issue}` : '';
+  // "관련: #16"·"관련: #19"처럼 같은 접두를 줄마다 반복해 붙이면 PR 본문이 지저분해진다(버그 리포트) — 닫힌
+  // 하위 이슈·추적 이슈를 한 줄 "관련: #16, #19"로 합친다(GitHub는 한 줄에 여러 #n이 있어도 전부 링크한다).
+  // `Closes`는 GitHub가 한 줄에 여러 개를 다루는 방식이 `관련:`과 달라 건드리지 않는다
+  const relatedIssues = trackingRelated !== undefined ? [...relatedClosed, trackingRelated] : relatedClosed;
+  const relatedAddendum = relatedIssues.length > 0 ? `\n\n관련: ${relatedIssues.map((issue) => `#${issue}`).join(', ')}` : '';
   // 올리기 전 점검표 요약(ADR-107, 56번 버그: "올리기 전 점검" 탭에서 PR을 만들어도 본문이 같은 점검을 보여 준다)
   const checklistAddendum = await submissionReport(session.snapshot.id)
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
-  return { info, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingAddendum}${checklistAddendum}` };
+  return { info, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}` };
 }
 
 /**
@@ -3109,6 +3122,9 @@ export async function previewExport(
   // 돌다 실패하고 PR 생성은 되던 어긋남을 막는다
   const token = await repositoryPullRequestToken(remote);
   const issueLookups = await lookupIssues(remote, issues, token);
+  // 추적 이슈를 이미 발행했으면(ADR-092) "PR 만들기"가 그 본문을 갱신할 거라는 사실만 안내한다 — 미리보기는
+  // 원격에 아무것도 쓰지 않는다(읽기만 한다)
+  const trackingIssue = await publishedTrackingIssue(session.project.root).catch(() => undefined);
 
   return {
     title,
@@ -3122,6 +3138,7 @@ export async function previewExport(
       missing,
       uncheckpointed: (await session.checkpoints.pendingFiles()).length,
       running: session.snapshot.running,
+      trackingIssue: trackingIssue?.issue,
     }),
     review: { auto: session.project.spec.review.auto, maxRounds: session.project.spec.review.maxRounds },
   };
@@ -3219,6 +3236,9 @@ export async function exportSession(
         pullRequestError = describe(error);
       }
     }
+    // PR을 만들라고 했으면(이미 열려 있던 PR에 커밋만 더 올린 경우도 포함) 추적 이슈 본문도 지금 상태로 다시 쓴다.
+    // 실패해도 경고만 남기고 PR 만들기 결과 자체는 그대로 돌려준다(위 pullRequestError와 독립된 문제다)
+    const requirementsTrackingWarning = pullRequest ? await refreshTrackingIssueAfterExport(session) : undefined;
 
     const repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
     session.snapshot.repository = repository;
@@ -3230,6 +3250,7 @@ export async function exportSession(
       pullRequest: created,
       pullRequestError,
       issues: created && issues.length > 0 ? [...issues] : undefined,
+      requirementsTrackingWarning,
     };
     emit(session, { type: 'exported', ...result });
     // 이번에 이 세션이 PR을 새로 연결했고(이미 있던 PR을 이어서 쓰는 export가 아니고) 설정이 켜져 있으면 AI 리뷰를 자동으로 시작한다(ADR-074).
@@ -5021,6 +5042,31 @@ async function requirementsForIssues(id: string): Promise<{ requirements: Requir
   const requirements = await readSavedRequirements(session);
   const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
   return { requirements, statusById };
+}
+
+/**
+ * PR을 실제로 만들 때(exportSession, pullRequest:true) 추적 이슈 본문의 표를 지금 요구사항 상태로 다시 쓴다
+ * (버그 리포트: 발행 때 만든 표가 "주기적으로 갱신"된다는 문구와 달리, 그 표를 다시 쓰는 경로가 실제로는
+ * 없어 발행 당시 상태로 멈춰 있었다 — PR이 추적 이슈를 가리키는데 정작 그 이슈는 낡은 채로 남았다).
+ *
+ * 원격·토큰이 없거나(GitHub·Gitea가 아니거나 토큰을 못 찾음), 요구사항을 저장한 적이 없거나, 아직 "이슈로
+ * 발행"을 한 적이 없어 추적 이슈가 없으면 조용히 건너뛴다(이 프로젝트가 애초에 쓰지 않는 기능이다 — 경고가
+ * 아니다). 그 밖의 실패(네트워크·권한 등)만 경고 문구로 돌려준다 — PR은 이미 만들어졌으므로 갱신 실패가
+ * PR 만들기 결과를 뒤집지 않는다(실패해도 올리기는 끝난 것으로 본다).
+ */
+async function refreshTrackingIssueAfterExport(session: Session): Promise<string | undefined> {
+  const ctx = await requirementIssuesContext(session).catch(() => undefined);
+  if (!ctx) return undefined;
+  try {
+    const snapshot = await getSessionRequirements(session.snapshot.id);
+    if (!snapshot.exists || snapshot.requirements.length === 0) return undefined;
+    const requirements = await readSavedRequirements(session);
+    const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
+    await refreshTrackingIssueBody(ctx, requirements, statusById);
+    return undefined;
+  } catch (error) {
+    return `요구사항 추적 이슈 본문을 갱신하지 못했습니다: ${describe(error)}`;
+  }
 }
 
 /** "이슈로 발행" 미리보기(dry-run). 원격 이슈를 읽기만 하고 아무것도 쓰지 않는다 */

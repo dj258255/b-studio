@@ -188,6 +188,18 @@ describe('buildExportChecks', () => {
     expect(checks.find((check) => check.id === 'issue_linked')).toMatchObject({ ok: false });
     expect(checks.find((check) => check.id === 'issue_open')).toMatchObject({ ok: 'unknown' });
   });
+
+  it('이미 발행한 추적 이슈가 있으면 PR을 만들 때 그 본문을 갱신한다고 예고만 한다(미리보기는 원격에 쓰지 않는다)', () => {
+    const checks = buildExportChecks({ issues: [], missing: [], uncheckpointed: 0, running: false, trackingIssue: 19 });
+
+    expect(checks.find((check) => check.id === 'tracking_issue_refresh')).toMatchObject({ ok: true, detail: expect.stringContaining('#19') });
+  });
+
+  it('추적 이슈를 아직 발행하지 않았으면 안내하지 않는다', () => {
+    const checks = buildExportChecks({ issues: [], missing: [], uncheckpointed: 0, running: false });
+
+    expect(checks.find((check) => check.id === 'tracking_issue_refresh')).toBeUndefined();
+  });
 });
 
 describe('buildChecklistAddendum(PR 본문에 올리기 전 점검 요약을 덧붙인다, 56번 버그)', () => {
