@@ -153,6 +153,9 @@ importers:
       pngjs:
         specifier: 7.0.0
         version: 7.0.0
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
       zod:
         specifier: ^4.6.1
         version: 4.6.1

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 /** 서버가 프레임 채널로 보내는 한 장. 서버 형태(lib/server/live-frames.ts)와 맞춘다 */
 export interface LiveFrame {
-  source: "qa" | "remote";
+  source: "qa" | "remote" | "explore";
   check?: string;
   mime: string;
   data: string;
@@ -25,8 +25,8 @@ export interface BlockedStatus {
  * EventSource가 끊기면 스스로 다시 연결하고, 서버가 마지막 상태를 곧바로 보내 화면이 빈 채로 뜨지 않는다.
  * onLiveFrame은 프레임이 올 때마다 불린다(화면 확인이 시작되면 QA 보기로 넘기는 데 쓴다)
  */
-export function useLiveFrames(sessionId: string, onLiveFrame?: (frame: LiveFrame) => void): { qa?: LiveFrame; remote?: LiveFrame; blocked?: number } {
-  const [frames, setFrames] = useState<{ qa?: LiveFrame; remote?: LiveFrame }>({});
+export function useLiveFrames(sessionId: string, onLiveFrame?: (frame: LiveFrame) => void): { qa?: LiveFrame; remote?: LiveFrame; explore?: LiveFrame; blocked?: number } {
+  const [frames, setFrames] = useState<{ qa?: LiveFrame; remote?: LiveFrame; explore?: LiveFrame }>({});
   const [blocked, setBlocked] = useState<number>();
   const callback = useRef(onLiveFrame);
 
@@ -48,5 +48,5 @@ export function useLiveFrames(sessionId: string, onLiveFrame?: (frame: LiveFrame
     return () => source.close();
   }, [sessionId]);
 
-  return { qa: frames.qa, remote: frames.remote, blocked };
+  return { qa: frames.qa, remote: frames.remote, explore: frames.explore, blocked };
 }

@@ -5,10 +5,10 @@
  * 원격 브라우저가 막은 요청 수 같은 한 줄짜리 상태도 같은 채널로 보낸다(이것도 기록에 쌓지 않는다).
  */
 
-export type LiveFrameSource = 'qa' | 'remote';
+export type LiveFrameSource = 'qa' | 'remote' | 'explore';
 
 export interface LiveFrame {
-  /** qa: 플랫폼의 화면 확인, remote: 원격 브라우저 */
+  /** qa: 플랫폼의 화면 확인, remote: 원격 브라우저, explore: 탐색형 QA */
   source: LiveFrameSource;
   /** 화면 확인이면 무엇을 확인하는 중인지 */
   check?: string;

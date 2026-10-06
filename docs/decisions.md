@@ -147,6 +147,7 @@
 - [ADR-124 네트워크 상류 장애(DNS 실패)와 정책 거부를 구별하고, 벤치는 environment 연속 실패에서 멈춘다](#adr-124-네트워크-상류-장애dns-실패와-정책-거부를-구별하고-벤치는-environment-연속-실패에서-멈춘다)
 - [ADR-125 이미 열린 PR에 다시 export할 때 본문을 다시 쓰고, 새 커밋만큼 AI 리뷰를 이어 돈다](#adr-125-이미-열린-pr에-다시-export할-때-본문을-다시-쓰고-새-커밋만큼-ai-리뷰를-이어-돈다)
 - [ADR-126 실행 탭에 "내 환경" 관찰 탭을 더한다: 사용자가 직접 띄운 서비스는 보되 건드리지 않는다](#adr-126-실행-탭에-내-환경-관찰-탭을-더한다-사용자가-직접-띄운-서비스는-보되-건드리지-않는다)
+- [ADR-127 QA 탭에 탐색형 QA를 더한다: 모델이 접근성 트리로 화면을 보고 스스로 조작하되, 완료 선언만으로 통과시키지 않는다](#adr-127-qa-탭에-탐색형-qa를-더한다-모델이-접근성-트리로-화면을-보고-스스로-조작하되-완료-선언만으로-통과시키지-않는다)
 
 ---
 
@@ -5270,3 +5271,51 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **호스트 프로세스 로그는 사전 설정 없이는 구조적으로 볼 수 없다.** Actuator를 노출하지 않은 Spring Boot 앱, 또는 Spring Boot가 아닌 백엔드는 "연결 안 됨" 안내만 보여준다 — 조사 보고서의 결론("제로 설정 자동 감지가 호스트 프로세스에서는 성립하지 않는다")을 그대로 받아들인 설계다.
 - **폴링 간격(4초)이라 실시간이 아니다.** `docker events` 구독으로 상태 변화를 즉시 반영하는 것은 화이트리스트에 자리만 남겨 두고(`events`) 이번에는 구현하지 않았다 — 스냅샷 폴링으로 충분하다고 판단했다.
 - **같은 출처 검사는 Origin 헤더가 없는 요청(curl 등)을 통과시킨다.** `isSameOrigin`의 기존 규칙을 그대로 재사용했다 — 그런 요청은 인증(쿠키)이 걸러낸다는 전제가 이 기능에도 그대로 적용된다.
+
+---
+
+## ADR-127 QA 탭에 탐색형 QA를 더한다: 모델이 접근성 트리로 화면을 보고 스스로 조작하되, 완료 선언만으로 통과시키지 않는다
+
+상태: 채택
+관련: ADR-050, ADR-078
+
+### 맥락
+- 범수 님이 "UI/UX가 어떤지 테스트하면서 b-studio를 완성하고 싶다"고 요청했다 — Claude for Chrome처럼 에이전트가 화면을 직접 보고 클릭·입력하며 탐색하는 QA를 원한다. 기존 `browser_check`(`packages/agent/src/browser-check.ts`)는 사람이 미리 적어 둔 `click/fill/press/waitFor` 네 동작을 순서대로 재생할 뿐이라, "모델이 그때그때 화면을 보고 다음 행동을 스스로 고른다"는 탐색은 할 수 없었다.
+- 사전 조사(`.claude/research/research_notes/브라우저 에이전트 QA 메커니즘/browser_agent_mechanism.md`)에서 확인한 핵심 사실:
+  - **관찰 방식이 둘로 갈린다.** Claude in Chrome은 스크린샷(픽셀) + `read_page`(접근성 트리, ref 기반) + `get_page_text`(DOM 텍스트) + 콘솔·네트워크 로그를 함께 준다(claude.com 블로그, 이 세션에서 직접 로드한 도구 스키마로 교차 확인). Playwright MCP는 `browser_snapshot`(접근성 트리)을 기본으로 삼고 "스크린샷으로는 행동을 수행할 수 없다, 행동에는 snapshot을 쓰라"고 도구 설명 자체에 경고한다([microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)). Anthropic computer use API는 반대로 스크린샷만 본다([platform.claude.com/docs/.../computer-use-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool)).
+  - **토큰 비용이 비대칭이다.** 공식 문서는 스크린샷 1장이 "roughly 1,000–1,800 input tokens"라고 명시한다(위 computer-use-tool 문서). 접근성 트리(텍스트)는 이보다 훨씬 저렴할 것으로 보이지만, 이 비교를 수치로 직접 공개한 1차 출처는 찾지 못했다(연구 노트 §6.7의 한계로 명시) — 그래서 이 ADR은 "기본은 접근성 트리, 스크린샷은 선택"이라는 방향만 가져오고, 정확한 절감률은 b-studio 자체 환경에서 재야 할 숙제로 남긴다.
+  - **프롬프트 인젝션 방어 수치가 출처마다 어긋난다.** Anthropic은 적어도 세 가지 다른 수치 계열(23.6%→11.2%, 17.6%/3.8%→0%, "<0.08%")을 공개했고 서로 하나의 타임라인으로 조화되지 않으며, Cloud Security Alliance의 독립 보고는 Claude Code Auto Mode에서 60~80%의 공격 성공률을 주장해 벤더 수치와 정면으로 충돌한다([claude.com/blog/claude-for-chrome](https://www.claude.com/blog/claude-for-chrome), [claude.com/blog/claude-in-chrome-generally-available](https://claude.com/blog/claude-in-chrome-generally-available), [CSA 연구 노트](https://labs.cloudsecurityalliance.org/research/csa-research-note-claude-code-automode-prompt-injection-2026/)) — 이 불일치 자체가 "인젝션 방어를 벤더 수치로 안심하지 말라"는 근거다.
+  - **상용 AI QA 도구 5종(QA Wolf, Momentic, Octomind, Reflect, Checksum)이 전부 "무작위 탐색"이 아니라 목표지향(goal-directed) 탐색을 표방한다** — 순수 fuzzing/monkey testing을 내세운 곳은 하나도 없었다(각 벤더 공식 문서, 연구 노트 §4.1). 이것이 "목표 문장을 받아 그 목표를 수행한다"는 설계의 직접적 근거다.
+  - Playwright MCP 공식 문서는 스스로 "`--allowed-origins`는 보안 경계가 아니며 리다이렉트를 막지 못한다"고 경고한다([docs.stacklok.com/toolhive/guides-mcp/playwright](https://docs.stacklok.com/toolhive/guides-mcp/playwright)) — b-studio의 `restrictPageToOrigins`(네트워크 요청 자체를 가로채 막는 `page.route`)는 애플리케이션 레벨 경로이긴 해도 "허용 안 한 요청을 열어 보지도 않고 끊는다"는 점에서 단순 호스트명 비교보다 강하지만, 이 경고를 그대로 받아들여 과신하지 않는다.
+- 코드 조사: `browser-check.ts`의 `launchBrowser`·`restrictPageToOrigins`·`createScreencast`는 이미 탐색형에도 그대로 재사용 가능한 모양이었다(세 함수 모두 순수하게 Playwright `Page`/`CDPSession`만 받는다). `remote-browser.ts`의 `pick`/`pickRect`(요소를 선택자·HTML·CSS·영역으로 요약)는 "요소 하나를 설명한다"는 점에서 탐색형의 관찰 인터페이스와 생각이 같았다. 세션 백엔드는 이미 두 갈래였다 — api 백엔드는 `ModelClient`(직접 만든 도구 호출 루프, `loop.ts`)를, claude-code 백엔드는 "b-studio 도구를 로컬 MCP 서버로 노출해 CLI가 그 도구만 쓰게 한다"는 경로(`claude-code-runner.ts`)를 쓰고 있었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 스크린샷(픽셀)만으로 관찰하고 좌표로 조작한다(순수 computer use 방식) | 토큰 비용이 가장 크고(행동마다 1,000~1,800 토큰), 좌표가 레이아웃 변화에 취약해 steps로 재현하기 어렵다(CSS 선택자가 아니라 좌표를 저장해야 한다) |
+| B. 기존 `browser_check`의 steps 스키마를 확장해 모델이 긴 steps 배열을 한 번에 생성하게 한다 | "모델이 그때그때 화면을 보고 다음 행동을 고른다"는 탐색이 아니라 여전히 사전 계획이다. 화면이 예상과 다르면(로그인 안 됨, 빈 목록 등) 그대로 깨진다 |
+| **C. 접근성 트리 기반 관찰(ref)을 기본으로, 스크린샷은 선택 도구로 두는 별도 탐색 루프를 만들고, 기존 api/claude-code 백엔드 경로를 그대로 재사용한다** | 채택. 새 도구 세트·새 루프를 만들어야 하지만, 비용·재현성·기존 설계와의 일관성에서 가장 유리하다 |
+
+### 결정
+1. **관찰·행동 도구(`packages/agent/src/explore-qa.ts`의 `QaBrowser`, `buildQaTools`).** `qa_snapshot`(인터랙티브 요소 + ref, 기본 관찰)·`qa_find`(자연어로 요소 찾기, 최대 20개)·`qa_screenshot`(선택적, 도구 설명에 "자주 찍지 말라"고 명시)·`qa_click`(ref 우선, 좌표 대안)·`qa_fill`/`qa_type`·`qa_press`·`qa_hover`·`qa_scroll`·`qa_navigate`(같은 출처만)·`qa_wait`·`qa_finish`를 둔다. `QaBrowser`는 `browser-check.ts`의 `launchBrowser`·`restrictPageToOrigins`·`createScreencast`를 그대로 재사용해 별도 헤드리스 Chromium을 띄우고, 진단 신호(콘솔 오류·pageerror·4xx/5xx·가로 넘침)는 기존 `browser-check.ts`와 같은 규칙으로 모으며, 기본 접근성 위반(이미지 alt 없음·버튼/링크에 접근 가능한 이름 없음·입력칸에 라벨 없음)을 더했다. axe-core 같은 전문 도구는 "WCAG 이슈의 평균 57%만 자동 검출한다"고 스스로 인정하는 고정밀·저재현율 신호라(연구 노트 §4.3) 이번에는 가벼운 자체 점검만 두고 새 의존성을 더하지 않았다.
+2. **안정적 선택자 우선순위.** ref마다 `data-testid` > `role=<role>[name="<name>"]`(Playwright 내장 role 엔진, 스캔한 요소 안에서 역할+이름이 고유할 때만) > `text=<고유 텍스트>` 순으로 "steps로 저장해도 안전한" 선택자를 고르고, 셋 다 안 되면 CSS 구조 선택자로 **실행은 하되 저장 대상에서는 뺀다**(구조 선택자는 리팩터로 쉽게 깨져 재현성이 없다고 보기 때문).
+3. **종료 조건과 판정을 분리한다(완료 선언만으로 통과시키지 않는다).** 루프는 (a) `qa_finish` 호출, (b) 최대 행동 수(기본 30), (c) 같은 화면이 연속 반복(기본 4회, 상용 QA 도구들이 "번들 신호로 판단"하되 전용 기술은 공개하지 않는 것과 달리 b-studio는 URL+제목+인터랙티브 요소 수+본문 길이로 만든 값싼 서명을 그대로 적는다), (d) 시간 상한(기본 5분) 중 하나로 멈춘다. 멈춘 뒤 **플랫폼이 별도로** 판정한다(`judge()`): 누적 진단 신호가 0건이고, 목표에 확인 문구(`confirmText`)를 적었다면 그 문구가 최종 화면 글자에 있어야 통과다. 모델이 `qa_finish(success: true)`를 선언해도 이 판정을 거치지 않으면 통과로 치지 않는다 — b-studio가 `VerificationGate`(검증 게이트) 전체에 걸쳐 지켜 온 원칙("모델의 자기 보고를 신뢰하지 않는다")을 탐색형에도 그대로 적용한 것이다.
+4. **두 백엔드를 그대로 재사용한다.** api 백엔드는 `ModelClient` 인터페이스(`loop.ts`)를 그대로 받는 독립 루프 `runExploreQa`로 돈다 — `model-registry.ts`의 `clientForModel`이 돌려주는 실제 클라이언트도, 테스트용 `ScriptedModelClient`도 그대로 꽂힌다. 로컬 CLI 백엔드(claude-code)는 `claude-code-runner.ts`가 이미 쓰는 "b-studio 도구를 로컬 MCP 서버로 노출하고 CLI가 그 도구만 쓰게 한다"는 경로를 재사용하되(`createSdkMcpServer`+`tool()`), 검증 게이트·승격·진행 중 지시처럼 탐색형에 필요 없는 복잡도는 들이지 않는다. `interrupt()`가 스트리밍 입력에서만 동작한다는 SDK 제약(`sdk.d.ts`의 `Query.interrupt` 문서) 때문에, 종료 조건을 강제로 걸려면 한 번 보내고 끝까지 열어 두는 최소 스트리밍 큐가 필요했다. codex·commandcode·opencode·gemini 백엔드는 각자 다른 MCP·스트리밍 구성을 쓰고 있어 이번에는 넓히지 않았다(이후 과제).
+5. **기록 → 재현.** 탐색 행동 기록(`QaActionRecord`)을 `toPageCheckSteps()`가 안정적 선택자가 있는 click/fill/type/wait(forText)만 기존 `WorkflowPageStep`(click/fill/press/waitFor) 형식으로 바꾸고, 나머지(관찰 도구, 불안정한 선택자, 실패한 행동, 시간만 기다린 행동)는 "저장 불가"로 표시한다. `appendPageCheckToYaml()`은 `yaml` 패키지의 Document API로 기존 studio.yaml의 주석·들여쓰기를 보존한 채 `workflow.pageChecks`에 덧붙인다 — **사람이 "이 흐름을 게이트 화면 확인으로 저장" 버튼을 눌렀을 때만** 호출한다. b-studio는 평소 studio.yaml을 스스로 고치지 않는다는 원칙(세션 단위 설정은 별도로 둔다, `sessions.ts`의 기존 주석)의 유일한 예외지만, 사람의 명시적 행동으로만 일어나므로 그 원칙의 정신(조용히 바뀌지 않는다)은 지킨다.
+6. **화면.** 기존 QA 하위 탭(게이트 화면 확인 보기) 안에 "게이트 확인"/"탐색형 QA" 안쪽 토글을 더해 같은 탭 안에서 구분한다(화면 탭을 늘리지 않는다 — ADR-087이 열세 개 탭을 네 묶음으로 줄인 방향과 같다). 실시간 프레임은 기존 CDP screencast + SSE 경로에 새 source(`'explore'`)만 더해 재사용하고, 그 위에 지금 행동이 가리킨 요소의 상자를 겹쳐 그린다. 옆에는 단계 타임라인(행동·대상·진단 신호 개수·실패 사유·스크린샷 썸네일)을, 끝나면 결과 카드(통과/문제 발견, 멈춘 이유, 모델의 완료 선언 — 플랫폼 판정과 나란히 보여 둘이 다를 수 있다는 것 자체를 드러낸다)를 보여 준다.
+7. **비용.** 행동마다 찍는 단계 타임라인 썸네일은 `saveArtifact`를 줬을 때만 저장하고, 이는 모델에게 보내는 토큰과 무관한 관측용 산출물이다(저장을 안 주면 전혀 찍지 않는다). 모델이 보는 관찰은 기본이 접근성 트리(`qa_snapshot`/`qa_find`)이고, `qa_screenshot`은 도구 설명으로 "자주 쓰지 말라"고만 안내한다 — 실제 절감률은 b-studio 자체 환경에서 측정해야 할 숙제로 남긴다(연구 노트의 "벤더 수치를 교차검증 없이 설계 근거로 삼지 말라"는 지적을 그대로 따른다).
+
+### 검증 결과
+- `packages/agent/src/explore-qa.test.ts`(신규, 22건, 실제 헤드리스 Chromium + 정적 HTTP 서버): snapshot/find의 ref·안정적 선택자 우선순위(고유한 역할+이름은 고르고, 모호하면 CSS 전용으로 떨어져 저장 불가로 표시될 근거를 남기는 것), 같은 출처 이동은 허용하고 다른 출처는 `QaOriginError`로 막는 것, 콘솔 오류·실패한 요청·가로 넘침·기본 접근성 위반 수집, 허용 출처 밖 요청은 실패가 아니라 차단으로 기록하는 것, 화면 서명이 같은 화면에선 같고 이동하면 바뀌는 것, `judge()`가 진단 신호 0건+확인 문구 존재만으로 판정하고(완료 선언과 무관), `toPageCheckSteps()`가 변환 가능한 행동만 담고 나머지는 이유와 함께 건너뛰는 것, `ScriptedModelClient`로 끝까지 돈 루프가 관찰→채우기→클릭→확인→완료 선언을 거쳐 통과하는 것, 확인 문구가 없으면 모델이 성공을 선언해도 실패로 판정하는 것(목표 완료 선언만으로 통과시키지 않는다), 최대 행동 수·같은 화면 반복으로 멈추는 것, 도구 호출 없이 텍스트만 내면 멈추는 것, `saveArtifact`를 주면 행동마다 썸네일을 찍고 안 주면 전혀 찍지 않는 것을 확인했다.
+- `packages/agent/src/explore-qa-save.test.ts`(신규, 4건): steps 변환 + studio.yaml 병합이 기존 내용을 보존하며 pageChecks가 없던 문서에 새로 만들거나 있던 목록 뒤에 덧붙이는 것, steps 상한을 넘으면 zod 오류를 그대로 던지는 것을 확인했다.
+- `packages/agent/src/explore-qa-claude-code.test.ts`(신규, 2건, 가짜 SDK — `claude-code-runner.test.ts`와 같은 기법): MCP로 노출한 도구를 CLI가 호출해 목표를 수행하고 플랫폼이 따로 판정하는 것, 최대 행동 수에 도달하면 `interrupt()`를 불러 멈추는 것을 확인했다.
+- 실제 모델 호출은 하지 않았다(구독 사용량 보존) — 전부 `ScriptedModelClient` 또는 가짜 SDK로 도구 호출 순서를 흉내 냈다.
+- `pnpm -r typecheck`(6/6 Done), `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고만 유지), `pnpm exec vitest run`(agent 패키지 1114건, studio 1720건 전부 통과 — 전체 스위트를 한 번에 돌리면 이 변경과 무관한 두 파일이 부하로 타임아웃 나는데 단독으로는 통과한다, ADR-096·ADR-100이 이미 적어 둔 것과 같은 증상).
+
+### 감수한 트레이드오프
+- **목표 완료 선언만으로 통과시키지 않는다는 원칙이, 확인 문구를 적지 않은 목표에서는 진단 신호 0건만으로 통과를 결정한다.** 확인 문구 없이 "아무 문제가 없었다"만으로 통과시키는 것은 "화면이 실제로 바뀌었는지"를 보지 못할 수 있다 — 사람이 확인 문구를 적어 주는 것이 더 정확한 판정을 만든다는 점을 도구 설명·화면 안내로 권하는 수준에 그쳤다.
+- **claude-code 외 CLI 백엔드(codex·commandcode·opencode·gemini)는 탐색형 QA를 지원하지 않는다.** 각 CLI의 b-studio 도구 연결 방식이 서로 달라(스트리밍 입력·MCP 구성이 제각각) 이번 범위에서는 api·claude-code 두 경로만 다뤘다 — 다른 백엔드로 시작하면 명확한 오류로 알린다.
+- **접근성 트리 대 스크린샷의 실제 토큰 절감률은 측정하지 않았다.** 공식 문서가 스크린샷 비용만 수치로 공개하고 접근성 트리 비용은 공개하지 않아(연구 노트 §6.7), "기본은 트리, 스크린샷은 선택"이라는 방향만 설계에 반영했다 — 실제 절감폭은 도그푸딩에서 재야 한다.
+- **단계 타임라인 썸네일은 산출물 보관 한도(세션당 개수·용량)의 적용 대상이다.** 오래 반복해 탐색하면 오래된 썸네일부터 지워질 수 있다 — 기존 산출물 정리 규칙(ADR-099가 언급한 "마지막 하나는 남긴다" 관례)을 그대로 따른다.
+- **원격 브라우저(remote-browser.ts)와 완전히 같은 CDP 좌표계·오버레이 측정 로직을 다시 쓰지 않고 간단한 비율 계산으로 대체했다.** 탐색형 QA의 오버레이는 "지금 어디를 눌렀는지" 참고용이라, 원격 브라우저의 정밀한 드래그 선택 오버레이(`element-pick-geometry.ts`)만큼 정교할 필요가 없다고 봤다.
+- **실행이 쓴 토큰은 결과 카드에만 보여주고, 프로젝트 토큰 보고서나 사람별 한도에는 합산하지 않는다.** 그 집계(`chargeUser`, `session.snapshot.tokens`)는 대화 "실행"(`ActiveRun`, 취소·예산 한도·되돌리기가 함께 얽힌 구조)을 전제로 하고, 탐색형 QA는 그와 별개의 짧은 백그라운드 실행이다. `ActiveRun` 흉내를 내 끼워 맞추는 것보다, 지금은 결과 카드에 그 실행만의 토큰을 보여주는 선에서 멈추고 한계로 적어 둔다.

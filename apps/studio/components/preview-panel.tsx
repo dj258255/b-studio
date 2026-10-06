@@ -11,6 +11,7 @@ import { CodePanel } from "./code-panel";
 import { DeployPanel } from "./deploy-panel";
 import { DesignPanel } from "./design-panel";
 import { DocsPanel } from "./docs-panel";
+import { ExploreQaView } from "./explore-qa-view";
 import { HistoryPanel } from "./history-panel";
 import { useLiveFrames } from "./live-frames";
 import { LogPanel } from "./log-panel";
@@ -235,12 +236,22 @@ function subscribeAutoQa(listener: () => void): () => void {
  * 시작되면 자동으로 QA 보기로 넘어간다. 자동 전환은 설정(기본 켬)으로 끌 수 있고, 끄면 사람이 고른 보기를 유지한다.
  * 이 서비스를 벗어나면(다른 서비스 탭·다른 상위 탭) 보기는 기억하지 않고 "앱 미리보기"로 되돌아간다(예전과 같다)
  */
+const QA_INNER_MODES = [
+  { id: "gate", label: "게이트 확인" },
+  { id: "explore", label: "탐색형 QA" },
+] as const;
+type QaInnerMode = (typeof QA_INNER_MODES)[number]["id"];
+
 function BrowserServicePanel({ view, service }: { view: SessionView; service: ServiceView }) {
   const [mode, setMode] = useState<ScreenSubTab>("app");
+  const [qaInnerMode, setQaInnerMode] = useState<QaInnerMode>("gate");
   const autoQa = useSyncExternalStore(subscribeAutoQa, readAutoQa, () => true);
-  // 화면 확인 프레임이 오면 QA 보기로 넘어간다. 설정을 읽어 그때그때 판단한다
-  const { qa, remote, blocked } = useLiveFrames(view.snapshot.id, (frame) => {
-    if (frame.source === "qa" && readAutoQa()) setMode("qa");
+  // 화면 확인 프레임이 오면 QA 보기(게이트 확인 쪽)로 넘어간다. 설정을 읽어 그때그때 판단한다
+  const { qa, remote, explore, blocked } = useLiveFrames(view.snapshot.id, (frame) => {
+    if (frame.source === "qa" && readAutoQa()) {
+      setMode("qa");
+      setQaInnerMode("gate");
+    }
   });
 
   const browserCheck = view.chat.findLast((item): item is Extract<ChatItem, { kind: "check" }> => item.kind === "check" && item.stage === "browser_check");
@@ -249,6 +260,7 @@ function BrowserServicePanel({ view, service }: { view: SessionView; service: Se
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
         <SubTabBar label="화면 하위 탭" options={SCREEN_SUB_TABS} active={mode} onChange={(id) => setMode(id as ScreenSubTab)} />
+        {mode === "qa" && <SubTabBar label="QA 보기" options={QA_INNER_MODES} active={qaInnerMode} onChange={(id) => setQaInnerMode(id as QaInnerMode)} />}
         <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
           <input type="checkbox" checked={autoQa} onChange={(event) => writeAutoQa(event.target.checked)} className="accent-ink" />
           화면 확인 중 QA 보기로 자동 전환
@@ -259,6 +271,8 @@ function BrowserServicePanel({ view, service }: { view: SessionView; service: Se
           <AppPreview sessionId={view.snapshot.id} service={service} revision={view.completedRuns} />
         ) : mode === "remote" ? (
           <RemoteBrowserView sessionId={view.snapshot.id} service={service.name} frame={remote} blocked={blocked} />
+        ) : mode === "qa" && qaInnerMode === "explore" ? (
+          <ExploreQaView sessionId={view.snapshot.id} service={service.name} frame={explore} />
         ) : mode === "qa" ? (
           <QaView key={`${browserCheck?.name ?? ""}:${browserCheck?.steps?.length ?? 0}`} sessionId={view.snapshot.id} frame={qa} check={browserCheck} />
         ) : (
