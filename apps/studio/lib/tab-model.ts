@@ -27,9 +27,20 @@ export type RequirementsSubTab = (typeof REQUIREMENTS_SUB_TABS)[number]['id'];
 export const RUN_SUB_TABS = [
   { id: 'logs', label: '로그' },
   { id: 'resources', label: '리소스' },
+  { id: 'myenv', label: '내 환경' },
   { id: 'deploy', label: '배포' },
 ] as const satisfies readonly SubTabOption[];
 export type RunSubTab = (typeof RUN_SUB_TABS)[number]['id'];
+
+/**
+ * 실행 탭에 실제로 보일 하위 탭(ADR-1xx, "내 환경" 관찰 탭). "배포"는 프로젝트 studio.yaml에 deploy 절이
+ * 있을 때만 보인다 — 로컬 폴더 모드 기본값처럼 deploy 절이 없는 프로젝트에 배포 버튼을 보여주면 눌러도 실패만 한다.
+ * 숨긴 뒤에도 readSubTab/useSubTab이 이 목록을 기준으로 저장값을 검사하므로, 마지막으로 본 하위 탭이 숨겨진
+ * "배포"였다면 자동으로 첫 하위 탭("로그")으로 돌아간다(별도 분기 코드가 필요 없다)
+ */
+export function runSubTabs(hasDeploy: boolean): readonly SubTabOption[] {
+  return hasDeploy ? RUN_SUB_TABS : RUN_SUB_TABS.filter((tab) => tab.id !== 'deploy');
+}
 
 export const REPOSITORY_SUB_TABS = [
   { id: 'issues', label: '이슈·PR' },
@@ -53,9 +64,12 @@ export const SUB_TAB_GROUPS = {
 
 export type SubTabGroup = keyof typeof SUB_TAB_GROUPS;
 
-/** 묶음의 첫 하위 탭(기본값이자 서버 렌더 값) */
-export function defaultSubTab(group: SubTabGroup): string {
-  return SUB_TAB_GROUPS[group][0].id;
+/**
+ * 묶음의 첫 하위 탭(기본값이자 서버 렌더 값). options를 주면(실행 탭처럼 조건에 따라 하위 탭이 줄어드는 묶음)
+ * 그 목록의 첫 번째를 기본값으로 쓴다 — 정적 목록(SUB_TAB_GROUPS)은 그대로 둔 채 보이는 목록만 좁힐 수 있다
+ */
+export function defaultSubTab(group: SubTabGroup, options: readonly SubTabOption[] = SUB_TAB_GROUPS[group]): string {
+  return options[0]!.id;
 }
 
 /** localStorage에 하위 탭을 저장하는 키. 묶음마다 하나씩 둬 다른 묶음의 기억을 건드리지 않는다 */
@@ -65,15 +79,19 @@ export function subTabStorageKey(group: SubTabGroup): string {
 
 /**
  * 묶음이 마지막으로 본 하위 탭을 읽는다. storage가 없거나(서버 렌더) 읽기에 실패하거나(사생활 보호 모드 등)
- * 저장값이 지금 이 묶음의 하위 탭 목록에 없으면(예전 값·다른 묶음 값) 첫 하위 탭으로 돌아간다
+ * 저장값이 지금 보이는 하위 탭 목록에 없으면(예전 값·다른 묶음 값·조건부로 숨긴 하위 탭) 첫 하위 탭으로 돌아간다.
+ * options를 주면 그 목록으로 검사한다(실행 탭의 "배포"처럼 조건에 따라 숨을 수 있는 하위 탭을 다루기 위함)
  */
-export function readSubTab(storage: Pick<Storage, 'getItem'> | undefined, group: SubTabGroup): string {
+export function readSubTab(
+  storage: Pick<Storage, 'getItem'> | undefined,
+  group: SubTabGroup,
+  options: readonly SubTabOption[] = SUB_TAB_GROUPS[group],
+): string {
   try {
     const saved = storage?.getItem(subTabStorageKey(group));
-    const options = SUB_TAB_GROUPS[group] as readonly SubTabOption[];
-    return saved && options.some((option) => option.id === saved) ? saved : defaultSubTab(group);
+    return saved && options.some((option) => option.id === saved) ? saved : defaultSubTab(group, options);
   } catch {
-    return defaultSubTab(group);
+    return defaultSubTab(group, options);
   }
 }
 

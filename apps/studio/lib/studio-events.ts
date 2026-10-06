@@ -106,6 +106,8 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
+  /** 프로젝트 studio.yaml에 deploy 절이 있다. 없으면 실행 탭의 "배포" 하위 탭을 숨긴다(로컬 폴더 모드 기본값) */
+  hasDeploy?: boolean;
   /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
   design?: DesignView;
   /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */
