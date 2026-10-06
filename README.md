@@ -8,7 +8,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
-  <img src="docs/images/studio-hero-light.jpg" alt="개발 화면. 왼쪽은 실행 중인 게시판 서비스 미리보기, 오른쪽은 토큰 합계와 체크포인트 기록이 쌓인 대화 패널">
+  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 왼쪽은 실행 중인 게시판 서비스 미리보기, 오른쪽은 토큰 합계와 체크포인트 기록이 쌓인 대화 패널">
 </picture>
 
 ## 핵심 설계 세 가지
@@ -43,9 +43,9 @@
 
 | | |
 |---|---|
-| ![요구사항 탭. R2~R20 요구사항 목록과 "20개 중 20개 검증됨" 표시, 명세·추적 매트릭스로 가는 상위 내비게이션](docs/images/studio-requirements.jpg) | ![테스트 탭. 백엔드 JUnit 테스트 결과가 요구사항 id(R로 시작하는 번호)와 나란히 붙어 있다](docs/images/studio-tests.jpg) |
-| ![저장소 탭. GitHub 이슈 목록이 우선순위·종류·상태 라벨과 함께 보인다](docs/images/studio-repository.jpg) | ![나눠서 병렬 화면. 레인별 쓰기 범위와 "검증 통과" 배지, 모델별 토큰 합계가 보인다](docs/images/studio-task-plan.jpg) |
-| ![토큰 탭. 턴별 컨텍스트 막대 그래프에서 급증한 턴이 빨간 막대로 표시되고, 아래 카드가 급증 원인과 다시 읽힐 비용을 적는다](docs/images/studio-tokens.jpg) | ![체크포인트 기록. 검증 게이트를 통과한 요청마다 커밋과 diff가 쌓인다](docs/images/studio-checkpoints.jpg) |
+| <img src="docs/images/studio-requirements.jpg" width="380" alt="요구사항 탭. R2~R20 요구사항 목록과 &quot;20개 중 20개 검증됨&quot; 표시, 명세·추적 매트릭스로 가는 상위 내비게이션"> | <img src="docs/images/studio-tests.jpg" width="380" alt="테스트 탭. 백엔드 JUnit 테스트 결과가 요구사항 id(R로 시작하는 번호)와 나란히 붙어 있다"> |
+| <img src="docs/images/studio-repository.jpg" width="380" alt="저장소 탭. GitHub 이슈 목록이 우선순위·종류·상태 라벨과 함께 보인다"> | <img src="docs/images/studio-task-plan.jpg" width="380" alt="나눠서 병렬 화면. 레인별 쓰기 범위와 &quot;검증 통과&quot; 배지, 레인 요약이 마크다운으로 렌더된 모습"> |
+| <img src="docs/images/studio-tokens.jpg" width="380" alt="토큰 탭. 턴별 컨텍스트 막대 그래프에서 급증한 턴이 빨간 막대로 표시되고, 아래 카드가 급증 원인과 다시 읽힐 비용을 적는다"> | <img src="docs/images/studio-checkpoints.jpg" width="380" alt="체크포인트 기록. 검증 게이트를 통과한 요청마다 커밋과 diff, AI 리뷰 결과가 쌓인다"> |
 
 ## 빠른 시작
 

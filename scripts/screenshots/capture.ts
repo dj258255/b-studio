@@ -3,10 +3,11 @@
  * 읽기 전용 화면만 골라 찍고, 캡처한 원본을 macOS 창 틀로 다시 찍어 docs/images에 내보낸다.
  *
  * 세션은 CI·pnpm test에 쓰지 않는다. b-studio를 실제로 띄워 둔 상태에서만 수동으로 돌린다:
- *   SESSION_ID=<세션 id> pnpm docs:screenshots
+ *   SESSION_ID=<세션 id> PLAN_ID=<작업 분해 id> pnpm docs:screenshots
  *
  * 상태를 바꾸는 조작(대화 전송, 승인/거절, 발행, 체크포인트 되돌리기 등)은 절대 하지 않는다. 탭 전환·스크롤·
- * 테마 전환(emulateMedia)처럼 읽기만 하는 조작만 한다.
+ * 개발 배너 닫기(로컬 state만 바꾼다, DevStatusBanner 참고)·테마 전환(emulateMedia)처럼 읽기만 하는
+ * 조작만 한다.
  */
 import { chromium, type Browser, type Page } from "playwright-core";
 import { mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from "node:fs";
@@ -22,7 +23,7 @@ const rawDir = path.join(here, ".raw");
 const BASE_URL = process.env.STUDIO_BASE_URL ?? "http://127.0.0.1:3000";
 const SESSION_ID = process.env.SESSION_ID ?? "c55417ad";
 const PLAN_ID = process.env.PLAN_ID ?? "45539ab6";
-const MAX_BYTES = 360_000;
+const MAX_BYTES = 600_000;
 
 type ColorScheme = "light" | "dark";
 
@@ -32,11 +33,9 @@ interface ShotSpec {
   path: string;
   viewport: { width: number; height: number };
   colorScheme: ColorScheme;
-  /** 액자 창의 표시 너비(CSS px) */
+  /** 액자 창의 표시 너비(CSS px, 1배). 액자 렌더는 deviceScaleFactor 2라 최종 파일은 이 값의 2배 폭이 된다 */
   frameWidth: number;
   setup: (page: Page) => Promise<void>;
-  /** 표준 단일 스크린샷으로 담기 어려운 화면(예: 토큰 탭)은 직접 원본 PNG를 만들어 반환한다 */
-  custom?: (browser: Browser) => Promise<string>;
 }
 
 /** "불러오는 중" 같은 로딩 문구가 화면에서 사라질 때까지 기다린다(없으면 바로 통과) */
@@ -54,89 +53,45 @@ async function clickTab(page: Page, listName: string, tabName: string): Promise<
 }
 
 /**
- * "토큰" 탭은 이 세션에서 "반복 작업" 구역이 길어 턴별 컨텍스트 그래프·문맥 급증 카드가 평범한 뷰포트에서는
- * flex 레이아웃이 짜부라진 32px짜리 스크롤 박스 안에 거의 안 보이게 숨는다(실제 화면도 그렇게 뜬다 — 버그를
- * 만든 게 아니라 이 화면의 실제 레이아웃이다). 그래서 위쪽 창 틀(헤더·탭 줄)과, 안쪽 스크롤 박스를 그래프가
- * 보이도록 충분히 큰 뷰포트에서 따로 찍어 세로로 이어 붙인다.
+ * 개발 서버 코드가 바뀌었다는 배너(DevStatusBanner)를 닫는다. 닫기는 컴포넌트 안의 React state만
+ * 바꾸고(dismissedHead) 서버에 아무것도 보내지 않는다 — 읽기 전용 조작이다. 배너가 없으면 그냥 넘어간다
  */
-async function captureTokensRaw(browser: Browser): Promise<string> {
-  const chromePath = path.join(rawDir, "studio-tokens.chrome.png");
-  {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, colorScheme: "light" });
-    const page = await context.newPage();
-    await page.goto(`${BASE_URL}/sessions/${SESSION_ID}`, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForTimeout(900);
-    await clickTab(page, "미리보기 대상", "토큰");
-    await waitLoaded(page);
-    await page.waitForTimeout(500);
-    await page.screenshot({ path: chromePath, clip: { x: 0, y: 0, width: 1440, height: 196 } });
-    await context.close();
-  }
+async function dismissDevBanner(page: Page): Promise<void> {
+  const dismiss = page.getByRole("button", { name: "닫기" });
+  if ((await dismiss.count()) > 0) await dismiss.first().click({ timeout: 2_000 }).catch(() => {});
+}
 
-  const contentPath = path.join(rawDir, "studio-tokens.content.png");
-  {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 2000 }, deviceScaleFactor: 2, colorScheme: "light" });
-    const page = await context.newPage();
-    await page.goto(`${BASE_URL}/sessions/${SESSION_ID}`, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForTimeout(900);
-    await clickTab(page, "미리보기 대상", "토큰");
-    await waitLoaded(page);
-    const heading = page.getByRole("heading", { name: "턴별 컨텍스트" });
-    await heading.waitFor({ state: "visible", timeout: 10_000 });
-    const box = await heading.evaluate((el) => {
-      let node = el.parentElement;
-      let container: Element | null = null;
-      while (node) {
-        const style = getComputedStyle(node);
-        if (node.scrollHeight > node.clientHeight + 2 && (style.overflowY === "auto" || style.overflowY === "scroll")) {
-          container = node;
-          break;
-        }
-        node = node.parentElement;
+/**
+ * Next.js 개발 모드 표시(왼쪽 아래 "N" 동그라미, `<nextjs-portal>`)를 숨긴다. b-studio 페이지 자신과
+ * 미리보기 iframe(앱 안의 Next.js 앱) 둘 다에 떠서, 지금 열려 있는 모든 프레임에 스타일을 심는다.
+ * 페이지 상태는 전혀 안 바꾸는 순수 화면 조작이라 안전하다
+ */
+async function hideDevChrome(page: Page): Promise<void> {
+  for (const frame of page.frames()) {
+    await frame.addStyleTag({ content: "nextjs-portal, next-route-announcer { display: none !important; }" }).catch(() => {});
+  }
+}
+
+/**
+ * 대화 목록(`ol[aria-live="polite"]`)은 항상 맨 아래로 스크롤된 채 뜬다(ADR 없이 chat-panel.tsx 자체 동작).
+ * 그런데 패널 높이가 메시지 하나보다 작을 때가 많아, 맨 위 줄이 "작업 단계 · 리뷰"처럼 중간에서 반쯤
+ * 잘린 채로 찍힌다. 각 li(메시지 묶음) 경계에 맞춰 스크롤을 미세 조정해, 위쪽이 완전한 요소 하나의
+ * 시작점에서 끊기게 한다(li 하나를 통째로 더 가리는 대신, 잘린 그림을 없앤다)
+ */
+async function snapChatToCleanTop(page: Page): Promise<void> {
+  const list = page.locator('ol[aria-live="polite"]');
+  if ((await list.count()) === 0) return;
+  await list.first().evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+    const containerTop = el.getBoundingClientRect().top;
+    for (const child of Array.from(el.children)) {
+      const relTop = child.getBoundingClientRect().top - containerTop;
+      if (relTop > -2) {
+        el.scrollTop += relTop;
+        return;
       }
-      if (!container) return null;
-      const elRect = el.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      (container as HTMLElement).scrollTop = elRect.top - containerRect.top + (container as HTMLElement).scrollTop - 16;
-      const settled = container.getBoundingClientRect();
-      return { top: settled.top, left: settled.left, width: settled.width, height: settled.height };
-    });
-    if (!box) throw new Error("토큰 탭의 턴별 컨텍스트 스크롤 영역을 찾지 못했습니다");
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: contentPath, clip: { x: box.left, y: box.top, width: box.width, height: Math.min(box.height, 860) } });
-    await context.close();
-  }
-
-  const gap = 16;
-  const stitchWidth = 1440;
-  const chromeSize = await pngSize(chromePath);
-  const contentSize = await pngSize(contentPath);
-  const chromeHeight = Math.round((chromeSize.height / chromeSize.width) * stitchWidth);
-  const contentDisplayWidth = 972;
-  const contentHeight = Math.round((contentSize.height / contentSize.width) * contentDisplayWidth);
-  const stitchHeight = chromeHeight + gap + contentHeight;
-
-  const stitchHtml = `<!doctype html><html><head><meta charset="utf-8" /><style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { width: ${stitchWidth}px; height: ${stitchHeight}px; background: #fbfdfc; }
-    img { display: block; }
-    .chrome { width: ${stitchWidth}px; }
-    .content { width: ${contentDisplayWidth}px; margin: ${gap}px 0 0 12px; border: 1px solid rgba(16,42,43,0.1); border-radius: 8px; overflow: hidden; }
-  </style></head><body>
-    <img class="chrome" src="file://${chromePath}" />
-    <img class="content" src="file://${contentPath}" />
-  </body></html>`;
-  const stitchPagePath = path.join(rawDir, "studio-tokens.stitch.html");
-  writeFileSync(stitchPagePath, stitchHtml);
-
-  const stitchedPath = path.join(rawDir, "studio-tokens.png");
-  const context = await browser.newContext({ viewport: { width: stitchWidth, height: stitchHeight }, deviceScaleFactor: 1 });
-  const page = await context.newPage();
-  await page.goto(`file://${stitchPagePath}`);
-  await page.waitForTimeout(150);
-  await page.screenshot({ path: stitchedPath });
-  await context.close();
-  return stitchedPath;
+    }
+  });
 }
 
 const SHOTS: ShotSpec[] = [
@@ -145,11 +100,15 @@ const SHOTS: ShotSpec[] = [
     path: `/sessions/${SESSION_ID}`,
     viewport: { width: 1440, height: 900 },
     colorScheme: "light",
-    frameWidth: 1180,
+    frameWidth: 1056,
     setup: async (page) => {
       await clickTab(page, "미리보기 대상", "화면 (frontend)");
       await waitLoaded(page);
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(1200);
+      // 이 세션엔 저장된 QA 확인 프레임이 있어 "화면 확인 중 QA 보기로 자동 전환"이 앱 미리보기를
+      // 곧장 QA 보기로 덮어쓴다 — 게시판 화면을 보여주려면 앱 미리보기로 다시 돌려놓는다
+      await clickTab(page, "화면 하위 탭", "앱 미리보기");
+      await page.waitForTimeout(2200);
     },
   },
   {
@@ -157,11 +116,13 @@ const SHOTS: ShotSpec[] = [
     path: `/sessions/${SESSION_ID}`,
     viewport: { width: 1440, height: 900 },
     colorScheme: "dark",
-    frameWidth: 1180,
+    frameWidth: 1056,
     setup: async (page) => {
       await clickTab(page, "미리보기 대상", "화면 (frontend)");
       await waitLoaded(page);
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(1200);
+      await clickTab(page, "화면 하위 탭", "앱 미리보기");
+      await page.waitForTimeout(2200);
     },
   },
   {
@@ -169,7 +130,7 @@ const SHOTS: ShotSpec[] = [
     path: `/sessions/${SESSION_ID}`,
     viewport: { width: 1440, height: 900 },
     colorScheme: "light",
-    frameWidth: 1080,
+    frameWidth: 1056,
     setup: async (page) => {
       await clickTab(page, "미리보기 대상", "요구사항");
       await waitLoaded(page);
@@ -181,7 +142,7 @@ const SHOTS: ShotSpec[] = [
     path: `/sessions/${SESSION_ID}`,
     viewport: { width: 1440, height: 900 },
     colorScheme: "light",
-    frameWidth: 1080,
+    frameWidth: 1056,
     setup: async (page) => {
       await clickTab(page, "미리보기 대상", "요구사항");
       await waitLoaded(page);
@@ -195,7 +156,7 @@ const SHOTS: ShotSpec[] = [
     path: `/sessions/${SESSION_ID}`,
     viewport: { width: 1440, height: 900 },
     colorScheme: "light",
-    frameWidth: 1080,
+    frameWidth: 1056,
     setup: async (page) => {
       await clickTab(page, "미리보기 대상", "저장소");
       await waitLoaded(page);
@@ -210,7 +171,7 @@ const SHOTS: ShotSpec[] = [
     path: `/sessions/${SESSION_ID}`,
     viewport: { width: 1440, height: 900 },
     colorScheme: "light",
-    frameWidth: 1080,
+    frameWidth: 1056,
     setup: async (page) => {
       await clickTab(page, "미리보기 대상", "코드");
       await waitLoaded(page);
@@ -222,20 +183,27 @@ const SHOTS: ShotSpec[] = [
   {
     name: "studio-tokens",
     path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
+    // "반복 작업"이 기본으로 접히고(#421) 탭 전체가 한 스크롤로 바뀌어, 더 이상 이어 붙이지 않고 한 번에
+    // 찍는다. 그래프·표·문맥 급증 카드가 모두 들어가도록 세로로 넉넉한 뷰포트를 쓴다
+    viewport: { width: 1440, height: 1500 },
     colorScheme: "light",
-    frameWidth: 1080,
-    setup: async () => {
-      // 이 shot은 custom(captureTokensRaw)이 전부 처리한다 — 표준 단일 스크린샷으로는 안 닿는다(위 주석 참고)
+    frameWidth: 1056,
+    setup: async (page) => {
+      await clickTab(page, "미리보기 대상", "토큰");
+      await waitLoaded(page);
+      await page.waitForTimeout(600);
+      // 가장 최근 실행(PR #22 리뷰 수정)은 문맥 급증이 없다 — 급증 막대·원인 카드가 있는 실행(R17)을 고른다
+      const runTabs = page.getByRole("tablist", { name: "실행", exact: true }).getByRole("tab");
+      if ((await runTabs.count()) > 1) await runTabs.nth(1).click();
+      await page.waitForTimeout(600);
     },
-    custom: captureTokensRaw,
   },
   {
     name: "studio-task-plan",
     path: `/task-plans?id=${PLAN_ID}`,
     viewport: { width: 1440, height: 1100 },
     colorScheme: "light",
-    frameWidth: 1180,
+    frameWidth: 1056,
     setup: async (page) => {
       await waitLoaded(page);
       const header = page.getByText(`apr · 작업 분해 ${PLAN_ID}`);
@@ -250,7 +218,7 @@ const SHOTS: ShotSpec[] = [
     path: "/accounts",
     viewport: { width: 760, height: 620 },
     colorScheme: "light",
-    frameWidth: 660,
+    frameWidth: 620,
     setup: async (page) => {
       await waitLoaded(page);
       await page.waitForTimeout(800);
@@ -269,9 +237,13 @@ async function captureRaw(browser: Browser, spec: ShotSpec): Promise<string> {
   // DOM이 뜨면 바로 넘어가고, 실제 데이터가 찼는지는 각 shot의 setup()이 직접 기다린다
   await page.goto(`${BASE_URL}${spec.path}`, { waitUntil: "domcontentloaded", timeout: 30_000 });
   // 서버 렌더 HTML은 떠도 React 하이드레이션이 아직 안 끝났을 수 있다 — 지금 바로 탭을 누르면 이벤트
-  // 처리기가 안 붙어 있어 클릭이 씹힌다. 하이드레이션이 끝날 시간을 준 뒤에 setup()에서 조작한다
+  // 처리기가 안 붙어 있어 클릭이 씹힌다. 하이드레이션이 끝날 시간을 준 뒤에 조작한다
   await page.waitForTimeout(900);
+  await dismissDevBanner(page);
   await spec.setup(page);
+  await snapChatToCleanTop(page);
+  await hideDevChrome(page);
+  await page.waitForTimeout(150);
   const rawPath = path.join(rawDir, `${spec.name}.png`);
   await page.screenshot({ path: rawPath });
   await context.close();
@@ -305,6 +277,7 @@ async function pngSize(filePath: string): Promise<{ width: number; height: numbe
   return { width, height };
 }
 
+/** 액자(macOS 창 틀)를 deviceScaleFactor 2로 다시 찍어, 원본 캡처가 1배여도 최종 파일은 레티나 해상도가 되게 한다 */
 async function frameShot(browser: Browser, spec: ShotSpec, rawPath: string): Promise<string> {
   const { width: rawWidth, height: rawHeight } = await pngSize(rawPath);
   const displayWidth = spec.frameWidth;
@@ -331,7 +304,7 @@ async function frameShot(browser: Browser, spec: ShotSpec, rawPath: string): Pro
   const framePagePath = path.join(rawDir, `${spec.name}.frame.html`);
   writeFileSync(framePagePath, html);
 
-  const context = await browser.newContext({ viewport: { width: pageWidth, height: pageHeight }, deviceScaleFactor: 1 });
+  const context = await browser.newContext({ viewport: { width: pageWidth, height: pageHeight }, deviceScaleFactor: 2 });
   const page = await context.newPage();
   await page.goto(`file://${framePagePath}`);
   await page.waitForTimeout(150);
@@ -343,7 +316,7 @@ async function frameShot(browser: Browser, spec: ShotSpec, rawPath: string): Pro
 
 /** sips로 JPEG 변환, MAX_BYTES를 넘으면 품질을 낮춰 가며 다시 인코딩한다 */
 function compressToJpeg(framedPngPath: string, outPath: string): void {
-  const qualities = [85, 78, 70, 62];
+  const qualities = [82, 75, 68, 60];
   for (const quality of qualities) {
     execFileSync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", String(quality), framedPngPath, "--out", outPath], { stdio: "pipe" });
     const { size } = statSync(outPath);
@@ -359,12 +332,13 @@ async function main() {
   try {
     for (const spec of SHOTS) {
       process.stdout.write(`찍는 중: ${spec.name} ... `);
-      const rawPath = spec.custom ? await spec.custom(browser) : await captureRaw(browser, spec);
+      const rawPath = await captureRaw(browser, spec);
       const framedPngPath = await frameShot(browser, spec, rawPath);
       const outPath = path.join(outDir, `${spec.name}.jpg`);
       compressToJpeg(framedPngPath, outPath);
       const { size } = statSync(outPath);
-      console.log(`완료 (${Math.round(size / 1024)}KB) -> ${path.relative(repoRoot, outPath)}`);
+      const { width, height } = await pngSize(framedPngPath);
+      console.log(`완료 (${Math.round(size / 1024)}KB, ${width}x${height}) -> ${path.relative(repoRoot, outPath)}`);
     }
   } finally {
     await browser.close();
