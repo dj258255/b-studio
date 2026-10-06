@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { crashLogExcerpt, decideReadiness, type ReadinessPolicy } from './readiness';
+import { crashLogExcerpt, decideReadiness, isTransientBootError, shouldRetryTransientCrash, type ReadinessPolicy } from './readiness';
 import type { ProbeResult } from './types';
 
 const policy: ReadinessPolicy = { successThreshold: 2, timeoutMs: 10_000, intervalMs: 1_000 };
@@ -68,5 +68,48 @@ describe('crashLogExcerpt', () => {
     expect(crashLogExcerpt(lines, 3)).toEqual(['line 7', 'line 8', 'line 9']);
     expect(crashLogExcerpt(['x'.repeat(400)])[0]).toHaveLength(301);
     expect(crashLogExcerpt([])).toEqual([]);
+  });
+});
+
+describe('isTransientBootError', () => {
+  it('ETXTBSY가 있으면 일시 오류로 본다(트러블슈팅 #90, esbuild 설치 직후 자기 검증 경합)', () => {
+    const lines = [
+      'npm error code ETXTBSY',
+      'npm error syscall spawnSync',
+      'npm error path /workspace/frontend/node_modules/esbuild/bin/esbuild',
+      'npm error ETXTBSY: text file is busy, spawnSync /workspace/frontend/node_modules/esbuild/bin/esbuild',
+    ];
+    expect(isTransientBootError(lines)).toBe(true);
+  });
+
+  it('EBUSY도 일시 오류로 본다', () => {
+    expect(isTransientBootError(['Error: EBUSY: resource busy or locked, rename ...'])).toBe(true);
+  });
+
+  it('관련 없는 오류는 일시 오류로 보지 않는다', () => {
+    expect(isTransientBootError(['Error: Cannot find module \'next\'', 'npm error code ENOENT'])).toBe(false);
+    expect(isTransientBootError([])).toBe(false);
+  });
+
+  it('EBUSY·ETXTBSY를 부분 문자열로만 포함한 다른 단어는 오탐하지 않는다(단어 경계로 가른다)', () => {
+    expect(isTransientBootError(['warning: EBUSYTOWN rate limit exceeded'])).toBe(false);
+  });
+});
+
+describe('shouldRetryTransientCrash', () => {
+  const etxtbsy = ['npm error ETXTBSY: text file is busy, spawnSync /workspace/frontend/node_modules/esbuild/bin/esbuild'];
+  const unrelated = ['Error: Cannot find module \'next\''];
+
+  it('1번째 시도가 일시 오류로 죽었으면 재시도한다', () => {
+    expect(shouldRetryTransientCrash(1, etxtbsy)).toBe(true);
+  });
+
+  it('이미 한 번 재시도한 뒤(2번째 시도)는 같은 일시 오류가 다시 나도 더 재시도하지 않는다(상한 1회, 무한 재시도 금지)', () => {
+    expect(shouldRetryTransientCrash(2, etxtbsy)).toBe(false);
+    expect(shouldRetryTransientCrash(3, etxtbsy)).toBe(false);
+  });
+
+  it('일시 오류가 아니면 1번째 시도여도 재시도하지 않는다', () => {
+    expect(shouldRetryTransientCrash(1, unrelated)).toBe(false);
   });
 });
