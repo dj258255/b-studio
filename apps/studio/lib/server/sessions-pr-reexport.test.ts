@@ -318,8 +318,8 @@ describe('이미 열린 PR에 다시 export하기(버그 리포트 85·86)', () 
     expect(review.rounds[1]!.headSha).not.toBe(review.rounds[0]!.headSha);
     expect(fake.postComment).toHaveBeenCalledTimes(2);
     // 두 번째 라운드 코멘트에는 이번에 본 커밋 범위가 적혀 있다(첫 라운드에는 없다 — 세션 시작부터 보는 전체 리뷰다)
-    expect(fake.postComment.mock.calls[0]![2] as string).not.toContain('커밋 범위');
-    expect(fake.postComment.mock.calls[1]![2] as string).toContain('커밋 범위');
+    expect((fake.postComment.mock.calls[0] as unknown[])[2] as string).not.toContain('커밋 범위');
+    expect((fake.postComment.mock.calls[1] as unknown[])[2] as string).toContain('커밋 범위');
 
     await stopSession(id).catch(() => {});
   }, 20_000);
@@ -374,7 +374,7 @@ describe('이미 열린 PR에 다시 export하기(버그 리포트 85·86)', () 
     expect(review.rounds[1]).toMatchObject({ round: 2, status: 'blocked_capped' });
     expect(review.rounds[1]!.error).toContain('라운드 상한');
     expect(fake.postComment).toHaveBeenCalledTimes(1);
-    expect(fake.postComment.mock.calls[0]![2] as string).toContain('라운드 상한');
+    expect((fake.postComment.mock.calls[0] as unknown[])[2] as string).toContain('라운드 상한');
 
     await stopSession(id).catch(() => {});
   }, 20_000);
