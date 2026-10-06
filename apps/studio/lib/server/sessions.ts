@@ -3160,7 +3160,7 @@ export async function submissionReport(id: string): Promise<SubmissionReport> {
     latestPassedStages: session.snapshot.checkpoints[0]?.passedStages,
     pendingFilesCount,
     repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
-    commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 } })),
+    commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 }, filesChanged: commit.files.length })),
     // 명세 탭이 지금 계산한 상태를 넘긴다. 요구사항 파일을 못 읽으면 점검표가 파일의 상태 줄로 대신한다
     requirements: await getSessionRequirements(id)
       .then((snapshot) => snapshot.requirements.map(({ id: requirementId, title, priority, status, verifiedBy }) => ({ id: requirementId, title, priority, status, verifiedBy })))

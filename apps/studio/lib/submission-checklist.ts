@@ -4,9 +4,13 @@
  * 세션·샌드박스·요청은 모르므로 임시 폴더 픽스처로 테스트할 수 있다. 서버 조립(apps/studio/lib/server/sessions.ts)이
  * 세션에서 이 입력을 만들어 넘긴다.
  */
+import { execFile } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type { DocEvidence } from '@b-studio/agent';
+
+const execFileAsync = promisify(execFile);
 
 export type ChecklistStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
@@ -50,6 +54,8 @@ export interface ChecklistService {
 export interface ChecklistCommit {
   subject: string;
   stat: { insertions: number; deletions: number };
+  /** 이 커밋이 건드린 파일 수. 커밋이 하나뿐인 세션에서 "나누기엔 작다"를 줄 수만으로 판단하지 않고 파일 수로도 본다(없으면 줄 수만 본다) */
+  filesChanged?: number;
 }
 
 export interface ChecklistRepository {
@@ -136,6 +142,41 @@ async function readTextSafe(file: string): Promise<string | undefined> {
   const info = await stat(file).catch(() => undefined);
   if (!info || info.size > MAX_FILE_BYTES) return undefined;
   return readFile(file, 'utf8').catch(() => undefined);
+}
+
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+
+async function isGitRepo(root: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', root, 'rev-parse', '--is-inside-work-tree'], { env: GIT_ENV });
+    return stdout.trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 원격에 올라갈 파일만 나열한다: git이 추적하는 파일(`--cached`) + 아직 추적되지 않았지만 `.gitignore`·
+ * `.git/info/exclude`에 걸리지 않는 새 파일(`--others --exclude-standard`). b-studio가 만들고 추적에서 뺀
+ * 생성 파일(예: compose.b-studio.yaml)은 원격에 올라가지 않으므로 비밀 값 점검 대상이 아니다(실측 세션
+ * c55417ad, ADR-122) — 저장소를 clone한 사람은 이 로컬 생성물을 볼 수 없다.
+ * git 저장소가 아니면 undefined를 돌려줘 호출부가 전체 파일 스캔(listFiles)으로 되돌아가게 한다
+ */
+async function listPushableFiles(root: string): Promise<string[] | undefined> {
+  if (!(await isGitRepo(root))) return undefined;
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'],
+      { maxBuffer: 16 * 1024 * 1024, env: GIT_ENV },
+    );
+    return stdout
+      .split('\0')
+      .filter((entry) => entry.length > 0)
+      .filter((file) => !file.split('/').some((segment) => EXCLUDED_DIRS.has(segment)));
+  } catch {
+    return undefined;
+  }
 }
 
 function serviceRole(template: string): 'backend' | 'frontend' | undefined {
@@ -508,9 +549,40 @@ export async function checkSeedData(root: string, hasDatabase: boolean): Promise
 // 6. 비밀 값
 // ---------------------------------------------------------------------------
 
+type SecretSeverity = 'fail' | 'warn' | 'none';
+
 interface SecretPattern {
   name: string;
   pattern: RegExp;
+  /** 매치된 값(캡처 그룹 1)을 보고 심각도를 다시 매긴다. 없으면 매치 즉시 fail */
+  classify?: (value: string) => SecretSeverity;
+}
+
+/** `${VAR}` 전체(기본값 없음) 또는 `${VAR:-기본값}`·`${VAR-기본값}`(기본값 있음) 전체로 이뤄진 값만 잡는다 */
+const ENV_PLACEHOLDER_VALUE = /^\$\{[A-Za-z_][A-Za-z0-9_]*(?:(:-|-)([^}]*))?\}$/;
+
+/**
+ * 기본값이 실제로 생성된 비밀처럼 보이는지(길고 문자 종류가 섞여 있는지). "community"·"postgres"·"changeme"
+ * 같은 개발용 플레이스홀더는 짧은 한 단어라 걸리지 않고, 해시·토큰처럼 길고 대소문자·숫자·기호가 섞인 값만 잡는다
+ * (ADR-122가 16자·문자 종류 2가지 이상 기준의 근거를 적어 둔다)
+ */
+function looksLikeGeneratedSecret(value: string): boolean {
+  if (value.length < 16) return false;
+  const categories = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((category) => category.test(value)).length;
+  return categories >= 2;
+}
+
+/**
+ * "password: ..." 같은 대입에서 값이 환경 변수 참조 전체인지 본다. 기본값 없는 참조(`${VAR}`)는 코드에 비밀 값이
+ * 없다는 뜻이라 그대로 둔다(none). 기본값이 있으면 그 기본값만 평가해 짧은 개발용 플레이스홀더는 warn으로 낮추고,
+ * 길고 무작위로 보이는 값은 그대로 fail로 둔다. 참조가 아니라 리터럴 문자열이면(하드코딩) 항상 fail이다
+ */
+function classifyPasswordAssignmentValue(value: string): SecretSeverity {
+  const placeholder = ENV_PLACEHOLDER_VALUE.exec(value);
+  if (!placeholder) return 'fail';
+  const [, separator, fallback] = placeholder;
+  if (separator === undefined || !fallback) return 'none';
+  return looksLikeGeneratedSecret(fallback) ? 'fail' : 'warn';
 }
 
 const SECRET_PATTERNS: SecretPattern[] = [
@@ -518,7 +590,11 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { name: 'GitHub 토큰', pattern: /gh[pousr]_[A-Za-z0-9]{20,}/ },
   { name: '개인 키', pattern: /-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/ },
   { name: 'Slack 토큰', pattern: /xox[baprs]-[A-Za-z0-9-]{10,}/ },
-  { name: '비밀번호·시크릿 대입', pattern: /(password|passwd|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{6,}['"]/i },
+  {
+    name: '비밀번호·시크릿 대입',
+    pattern: /(?:password|passwd|secret|api[_-]?key)\s*[:=]\s*['"]([^'"\s]{6,})['"]/i,
+    classify: classifyPasswordAssignmentValue,
+  },
 ];
 const EXAMPLE_FILE = /(^|\/)\.env\.(example|sample|template)$|\.(example|sample)\.[a-z]+$|example|sample/i;
 /**
@@ -530,8 +606,10 @@ const TEST_OR_FIXTURE_FILE = /(^|\/)(src\/test|tests?|__tests__|fixtures?|__mock
 export async function checkSecrets(root: string): Promise<ChecklistItem> {
   const id = 'secrets';
   const title = '비밀 값';
-  const files = await listFiles(root);
-  const leaks: string[] = [];
+  // 원격에 올라갈 파일만 본다(git 저장소가 아니면 listFiles로 전체를 본다, ADR-122)
+  const files = (await listPushableFiles(root)) ?? (await listFiles(root));
+  const failLeaks: string[] = [];
+  const warnLeaks: string[] = [];
   for (const file of files) {
     if (EXAMPLE_FILE.test(file) || TEST_OR_FIXTURE_FILE.test(file)) continue;
     const ext = path.extname(file);
@@ -540,20 +618,36 @@ export async function checkSecrets(root: string): Promise<ChecklistItem> {
     if (text === undefined) continue;
     const lines = text.split('\n');
     for (const [index, line] of lines.entries()) {
-      const hit = SECRET_PATTERNS.find(({ pattern }) => pattern.test(line));
-      if (hit) leaks.push(`${file}:${index + 1} (${hit.name})`);
+      for (const { name, pattern, classify } of SECRET_PATTERNS) {
+        const match = pattern.exec(line);
+        if (!match) continue;
+        const severity = classify ? classify(match[1] ?? '') : 'fail';
+        if (severity === 'none') continue;
+        (severity === 'fail' ? failLeaks : warnLeaks).push(`${file}:${index + 1} (${name})`);
+        break;
+      }
     }
   }
-  if (leaks.length === 0) return { id, title, status: 'pass', reason: '추적한 파일에서 비밀 값 패턴을 찾지 못했습니다.' };
+  if (failLeaks.length === 0 && warnLeaks.length === 0) {
+    return { id, title, status: 'pass', reason: '추적한 파일에서 비밀 값 패턴을 찾지 못했습니다.' };
+  }
+  if (failLeaks.length > 0) {
+    return {
+      id,
+      title,
+      status: 'fail',
+      reason: `비밀 값으로 보이는 문자열이 있습니다: ${failLeaks.slice(0, 10).join(', ')}${failLeaks.length > 10 ? ` 외 ${failLeaks.length - 10}건` : ''}.`,
+      fix: {
+        label: '비밀 값 빼기',
+        prefill: `다음 위치에 비밀 값으로 보이는 문자열이 있습니다: ${failLeaks.slice(0, 10).join(', ')}. 이 값을 코드에서 지우고 환경 변수로 읽도록 바꿔 주세요. .env.example에는 값 없이 키 이름만 남기고, 실제 값은 커밋하지 않는 .env에 두세요.`,
+      },
+    };
+  }
   return {
     id,
     title,
-    status: 'fail',
-    reason: `비밀 값으로 보이는 문자열이 있습니다: ${leaks.slice(0, 10).join(', ')}${leaks.length > 10 ? ` 외 ${leaks.length - 10}건` : ''}.`,
-    fix: {
-      label: '비밀 값 빼기',
-      prefill: `다음 위치에 비밀 값으로 보이는 문자열이 있습니다: ${leaks.slice(0, 10).join(', ')}. 이 값을 코드에서 지우고 환경 변수로 읽도록 바꿔 주세요. .env.example에는 값 없이 키 이름만 남기고, 실제 값은 커밋하지 않는 .env에 두세요.`,
-    },
+    status: 'warn',
+    reason: `환경 변수 기본값이 비밀 값처럼 보이는 곳이 있습니다: ${warnLeaks.slice(0, 10).join(', ')}${warnLeaks.length > 10 ? ` 외 ${warnLeaks.length - 10}건` : ''}. 개발용 기본값이면 괜찮지만, 실제 운영 값이면 지우고 환경 변수로만 공급해 주세요.`,
   };
 }
 
@@ -568,6 +662,22 @@ const MAX_SUBJECT_CHARS = 72;
 /** 이 아래 규모의 세션은 커밋 하나가 커도 "독차지"로 보지 않는다(작은 세션은 커밋이 하나뿐인 게 자연스럽다) */
 const DOMINANCE_MIN_LINES = 50;
 const DOMINANCE_RATIO = 0.8;
+/**
+ * 커밋이 세션 전체에서 하나뿐일 때, 그 한 커밋을 쪼개라고 권할 만큼 큰지 가르는 기준(줄 수·파일 수 중 하나라도
+ * 넘으면 권한다). 커밋이 하나뿐인 것 자체는 문제가 아니다 — 한 요청짜리 작은 세션은 원래 커밋이 하나다(실측
+ * 세션 c55417ad: 파일 3개, +60/-9=69줄인데도 "100%를 차지합니다" 경고가 항상 뜨던 오탐, ADR-122).
+ * 300줄·파일 15개는 코드 리뷰 관행에서 "한 번에 제대로 리뷰하기 버거워지는" 문턱으로 흔히 언급되는 수치보다
+ * 보수적으로 낮춰 잡았다(정확한 수치는 리뷰어·언어마다 다르므로 이 점검의 목적—"쪼개 볼까?"라고 묻는 것—에
+ * 맞게 보수적으로 고른 값이다)
+ */
+const SINGLE_COMMIT_SPLIT_MIN_LINES = 300;
+const SINGLE_COMMIT_SPLIT_MIN_FILES = 15;
+
+function singleCommitTooBig(commit: ChecklistCommit): boolean {
+  const lines = commit.stat.insertions + commit.stat.deletions;
+  if (lines > SINGLE_COMMIT_SPLIT_MIN_LINES) return true;
+  return commit.filesChanged !== undefined && commit.filesChanged > SINGLE_COMMIT_SPLIT_MIN_FILES;
+}
 
 function commitSubjectIssue(subject: string): string | undefined {
   const trimmed = subject.trim();
@@ -587,6 +697,17 @@ export async function checkCommitHistory(commits: ChecklistCommit[]): Promise<Ch
   const issues = commits.map((commit) => commitSubjectIssue(commit.subject)).filter((issue): issue is string => issue !== undefined);
   if (issues.length > 0) {
     return { id, title, status: 'fail', reason: `커밋 제목 규칙을 따르지 않는 커밋이 ${issues.length}개 있습니다: ${issues.slice(0, 3).join('; ')}.` };
+  }
+
+  // 커밋이 하나뿐이면 "독차지" 개념 자체가 성립하지 않는다(비교할 다른 커밋이 없다) — 그 한 커밋이 충분히
+  // 클 때만 쪼개라고 권한다
+  if (commits.length === 1) {
+    const [only] = commits;
+    if (singleCommitTooBig(only!)) {
+      const lines = only!.stat.insertions + only!.stat.deletions;
+      return { id, title, status: 'warn', reason: `커밋 "${only!.subject}" 하나가 ${lines}줄을 바꿉니다. 더 작은 단위로 나누는 편이 기록을 읽기 좋습니다.` };
+    }
+    return { id, title, status: 'pass', reason: '커밋 1개가 제목 규칙을 따릅니다.' };
   }
 
   const totalLines = commits.reduce((sum, commit) => sum + commit.stat.insertions + commit.stat.deletions, 0);

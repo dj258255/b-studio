@@ -1,6 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildSubmissionChecklist,
@@ -29,6 +31,17 @@ async function write(file: string, content: string): Promise<void> {
   const full = path.join(root, file);
   await mkdir(path.dirname(full), { recursive: true });
   await writeFile(full, content);
+}
+
+const execFileAsync = promisify(execFile);
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', cwd, '-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args]);
+  return stdout;
+}
+
+async function initGitRepo(cwd: string): Promise<void> {
+  await execFileAsync('git', ['init', '-q', '-b', 'main', cwd]);
 }
 
 beforeEach(async () => {
@@ -274,6 +287,29 @@ describe('checkCommitHistory', () => {
     const item = await checkCommitHistory([commit('feat: 주문 생성 API를 추가한다', 10, 2)]);
     expect(item.status).toBe('pass');
   });
+
+  it('실측 세션(c55417ad)처럼 커밋 하나에 파일 3개·+60/-9=69줄이면 그대로 통과한다(기존 오탐 회귀)', async () => {
+    const item = await checkCommitHistory([{ subject: '요청: 게시판 수정사항을 반영한다', stat: { insertions: 60, deletions: 9 }, filesChanged: 3 }]);
+    expect(item.status).toBe('pass');
+  });
+
+  it('커밋이 하나뿐이어도 그 커밋이 300줄을 넘게 바꾸면 나누라고 경고한다', async () => {
+    const item = await checkCommitHistory([commit('feat: 전체 화면을 한 번에 구현한다', 280, 100)]);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('380줄');
+  });
+
+  it('커밋이 하나뿐이어도 줄 수는 적지만 파일 15개를 넘게 건드리면 나누라고 경고한다', async () => {
+    const item = await checkCommitHistory([{ subject: 'feat: 여러 서비스를 한 번에 고친다', stat: { insertions: 40, deletions: 10 }, filesChanged: 20 }]);
+    expect(item.status).toBe('warn');
+  });
+
+  it('커밋이 여러 개면 기존대로 한 커밋이 전체의 80%를 넘게 차지할 때만 경고한다', async () => {
+    const dominant = await checkCommitHistory([commit('feat: 뼈대를 만든다', 500, 0), commit('fix: 오타를 고친다', 1, 0)]);
+    expect(dominant.status).toBe('warn');
+    const balanced = await checkCommitHistory([commit('feat: 주문 생성 API를 추가한다', 100, 0), commit('feat: 주문 화면을 추가한다', 80, 0)]);
+    expect(balanced.status).toBe('pass');
+  });
 });
 
 describe('checkWorkingTree', () => {
@@ -462,6 +498,75 @@ describe('checkSecrets — 테스트 코드', () => {
     expect(item.status).toBe('fail');
     expect(item.reason).toContain('web/app/admin.ts:1');
     expect(item.reason).not.toContain('admin-local-only');
+  });
+});
+
+describe('checkSecrets — 원격에 올라갈 파일만 본다(실측 세션 c55417ad)', () => {
+  // 리터럴(하드코딩) 값이라 scan되면 무조건 fail이 되는 줄 — git 필터가 실제로 작동하는지를 "경고로 묻힐 수 있는"
+  // 환경 변수 기본값이 아니라 확실한 신호로 검증한다
+  const HARDCODED_SECRET_LINE = 'POSTGRES_PASSWORD: "actual-prod-secret-xyz789"\n';
+
+  it('git 저장소에서 .git/info/exclude로 뺀 생성 파일은 비밀 값 점검 대상에서 빠진다', async () => {
+    await initGitRepo(root);
+    // b-studio가 만들고 추적에서 뺀 생성 파일(실측 사례: compose.b-studio.yaml, ADR-080)
+    await write('compose.b-studio.yaml', HARDCODED_SECRET_LINE);
+    await appendFile(path.join(root, '.git/info/exclude'), 'compose.b-studio.yaml\n');
+
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('pass');
+    expect(item.reason).not.toContain('compose.b-studio.yaml');
+  });
+
+  it('같은 줄이 추적 파일(git add)에 있으면 그대로 잡는다', async () => {
+    await initGitRepo(root);
+    await write('docker-compose.yml', HARDCODED_SECRET_LINE);
+    await git(root, 'add', 'docker-compose.yml');
+    await git(root, 'commit', '-q', '-m', 'chore: add compose');
+
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('fail');
+    expect(item.reason).toContain('docker-compose.yml:1');
+  });
+
+  it('git add하지 않아도(untracked) .gitignore에 안 걸리는 새 파일은 잡는다', async () => {
+    await initGitRepo(root);
+    await write('config/secrets.yaml', HARDCODED_SECRET_LINE);
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('fail');
+    expect(item.reason).toContain('config/secrets.yaml:1');
+  });
+
+  it('git 저장소가 아니면 기존처럼 전체 파일을 스캔한다', async () => {
+    await write('config.ts', "const password = 'hardcoded-secret-value';\n");
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('fail');
+    expect(item.reason).toContain('config.ts:1');
+  });
+});
+
+describe('checkSecrets — 환경 변수 기본값은 길이·구성에 따라 심각도를 나눈다', () => {
+  it('기본값 없는 참조(${VAR})는 비밀 값이 아니다', async () => {
+    await write('api/src/main/resources/application.yml', 'secret: "${APP_SECRET}"\n');
+    expect((await checkSecrets(root)).status).toBe('pass');
+  });
+
+  it('짧은 개발용 기본값(${VAR:-community})은 fail이 아니라 warn으로 낮춘다', async () => {
+    await write('compose.yaml', 'services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: "${DB_PASSWORD:-community}"\n');
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('warn');
+    expect(item.reason).toContain('compose.yaml:4');
+  });
+
+  it('길고 무작위로 보이는 기본값은 여전히 fail이다', async () => {
+    await write('compose.yaml', 'services:\n  api:\n    environment:\n      API_KEY: "${API_KEY:-aZ9xT3mK7pQ1vL5bN8wR2cH6}"\n');
+    const item = await checkSecrets(root);
+    expect(item.status).toBe('fail');
+    expect(item.reason).toContain('compose.yaml:4');
+  });
+
+  it('참조가 아니라 하드코딩된 리터럴이면 기본값 길이와 무관하게 fail이다', async () => {
+    await write('api/app.ts', "const password = 'short1';\n");
+    expect((await checkSecrets(root)).status).toBe('fail');
   });
 });
 
