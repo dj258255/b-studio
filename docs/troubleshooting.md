@@ -1852,7 +1852,7 @@ failed to bind port 127.0.0.1:327xx: bind: address already in use
 ### 배운 점
 호스트에서 "포트가 비었는지" 확인하는 코드는, 실제 바인드가 다른 네트워크 네임스페이스(VM·컨테이너·다른 머신)에서 일어나는 순간 신뢰할 수 없어진다 — `listen(0)` 패턴 자체의 한계(확인과 바인드 사이의 경합)보다 훨씬 큰 구멍이다. 이런 구조에서는 "미리 잘 고르기"보다 "실패하면 실제로 다시 묻고 재시도하기"가 더 믿을 만한 방어선이다.
 
-## 53. 요구사항 추적 이슈가 발행 당시 표 그대로 멈춰 있음
+## 54. 요구사항 추적 이슈가 발행 당시 표 그대로 멈춰 있음
 
 **구분:** 도그푸딩 중 발견(테스트 저장소 dj258255/test의 추적 이슈 #19) → 코드로 원인 추적 → 수정
 
@@ -1863,7 +1863,7 @@ failed to bind port 127.0.0.1:327xx: bind: address already in use
 `buildTrackingIssueBody`(추적 이슈 표를 만드는 함수)를 실제로 호출해 본문을 다시 쓰는 곳은 `publishRequirementIssues`(사람이 "이슈로 발행"을 누를 때) 한 곳뿐이었다. 그 뒤로 "주기적으로 갱신"할 경로가 코드 어디에도 없었다 — 문구만 그렇게 약속하고 있었다. "올리고 PR 만들기"는 추적 이슈를 `관련: #19`로 가리키기만 할 뿐, 그 본문을 다시 쓰지는 않았다.
 
 ### 수정
-`apps/studio/lib/server/requirement-issues.ts`에 `refreshTrackingIssueBody()`를 추가해, PR을 실제로 만들 때(`exportSession`, `pullRequest: true`)마다 이미 발행한 추적 이슈의 본문 표를 지금 요구사항 상태로 다시 쓴다. 발행한 적이 없으면 조용히 건너뛰고, 닫힌 이슈도 `state`를 주지 않아 다시 열지 않으며, 갱신이 실패해도 PR 만들기 자체는 그대로 성공시키고 경고만 남긴다. 미리보기(`export/preview`)는 원격에 쓰지 않고 "PR을 만들면 추적 이슈 #N을 갱신합니다"라고 예고만 한다. 본문 첫 줄 문구도 "이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다 + 마지막 갱신 시각"으로 사실과 맞췄다(ADR-0XX).
+`apps/studio/lib/server/requirement-issues.ts`에 `refreshTrackingIssueBody()`를 추가해, PR을 실제로 만들 때(`exportSession`, `pullRequest: true`)마다 이미 발행한 추적 이슈의 본문 표를 지금 요구사항 상태로 다시 쓴다. 발행한 적이 없으면 조용히 건너뛰고, 닫힌 이슈도 `state`를 주지 않아 다시 열지 않으며, 갱신이 실패해도 PR 만들기 자체는 그대로 성공시키고 경고만 남긴다. 미리보기(`export/preview`)는 원격에 쓰지 않고 "PR을 만들면 추적 이슈 #N을 갱신합니다"라고 예고만 한다. 본문 첫 줄 문구도 "이슈를 발행하거나 PR을 만들 때 상태를 다시 씁니다 + 마지막 갱신 시각"으로 사실과 맞췄다(ADR-123).
 
 ### 검증
 - `apps/studio/lib/server/requirement-issues.test.ts`, `apps/studio/lib/server/sessions-tracking-refresh.test.ts`(가짜 저장소 클라이언트, 실 GitHub 호출 없음): 갱신 호출이 나가는지, 닫힌 이슈를 다시 열지 않는지, 갱신 실패가 PR 만들기를 막지 않는지, 미리보기가 원격에 쓰지 않는지 확인.
