@@ -98,6 +98,36 @@ export {
   type RemoteBrowserViewport,
 } from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
+export {
+  buildQaSystemPrompt,
+  buildQaTools,
+  buildQaUserPrompt,
+  DEFAULT_EXPLORE_VIEWPORT,
+  executeQaTool,
+  judge,
+  QaBrowser,
+  QaOriginError,
+  runExploreQa,
+  saveActionThumbnail,
+  toPageCheckSteps,
+  type ConvertedSteps,
+  type ExploreQaEvent,
+  type ExploreQaGoal,
+  type ExploreQaResult,
+  type ExploreQaStopReason,
+  type QaActionRecord,
+  type QaDiagnostics,
+  type QaElement,
+  type QaToolOutcome,
+  type QaViewport,
+  type RunExploreQaOptions,
+} from './explore-qa';
+export {
+  appendPageCheckToYaml,
+  buildPageCheckFromExploreQa,
+  type AppendPageCheckOptions,
+} from './explore-qa-save';
+export { runClaudeCodeExploreQa, type ClaudeCodeExploreQaOptions, type ClaudeCodeExploreQaResult } from './explore-qa-claude-code';
 export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export {
