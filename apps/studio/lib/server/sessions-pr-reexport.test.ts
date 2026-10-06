@@ -324,6 +324,36 @@ describe('이미 열린 PR에 다시 export하기(버그 리포트 85·86)', () 
     await stopSession(id).catch(() => {});
   }, 20_000);
 
+  it('87: 끝 지점(headSha)을 기록하기 전에 끝난 옛 라운드도 그 라운드가 시작될 때의 HEAD부터 이어 돈다', async () => {
+    await freshRoot();
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+
+    await runWrite(id, '메모 필드 추가', 'class Order { String memo; }\n');
+    fake.modelQueue.push(new ScriptedModelClient([{ text: noFindings() }]));
+    await exportSession(id, { pullRequest: true });
+    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'passed');
+    const firstHead = getSnapshot(id)!.review!.rounds[0]!.headSha;
+    expect(firstHead).toBeTruthy();
+    // 이 기능 전에 끝난 라운드처럼 끝 지점 기록을 지운다
+    delete getSnapshot(id)!.review!.rounds[0]!.headSha;
+    // 커밋 시각은 초 단위다. 실제로는 리뷰 뒤 고침 커밋이 분 단위로 늦게 생기므로, 같은 초에 겹치지 않게 1초 넘게 띄운다
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    await runWrite(id, '메모 필드 검증 추가', 'class Order { String memo; String note; }\n');
+    fake.modelQueue.push(new ScriptedModelClient([{ text: noFindings() }]));
+    await exportSession(id, { pullRequest: true });
+    await waitForEvent(id, () => (getSnapshot(id)?.review?.rounds.length ?? 0) >= 2);
+    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'passed');
+
+    const review = getSnapshot(id)!.review!;
+    expect(review.rounds.map((round) => round.round)).toEqual([1, 2]);
+    expect(review.rounds[1]!.sinceSha).toBe(firstHead);
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
   it('86: 새 커밋이 없으면 리뷰를 다시 돌리지 않는다', async () => {
     await freshRoot();
     await setupRepo();
