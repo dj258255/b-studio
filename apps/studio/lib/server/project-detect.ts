@@ -103,6 +103,16 @@ export interface DetectedService {
    * springTestCommand 참고, Gradle 서브프로젝트가 상위 래퍼를 쓸 때)
    */
   testCommand?: { command: string[]; maxAttempts?: number };
+  /**
+   * Gradle 서비스의 테스트 JVM에 Mockito를 -javaagent로 붙이는 init 스크립트가 필요하면 true(ADR-134).
+   * 샌드박스 컨테이너는 colima 공유 폴더(sshfs) 위에서 도는데, 공유 폴더 안 파일은 컨테이너 root가 만들어도
+   * 소유자가 호스트 uid(501 등)로 보인다. HotSpot의 Attach Listener는 cwd의 `.attach_pid<pid>` 트리거 파일의
+   * 소유자가 euid·root와 안 맞으면 무시하고 `/tmp`로도 넘어가지 않아, Mockito inline mock maker가 쓰는 JVM
+   * self-attach가 항상 실패한다(도그푸딩 마찰 106). `composeYaml`이 true인 서비스에 compose `configs:`로
+   * `GRADLE_USER_HOME/init.d/`에 `MOCKITO_AGENT_INIT_SCRIPT`를 심어, Mockito 공식 권장대로 attach 자체를
+   * 건너뛰게 한다. Maven은 이번 범위 밖이다(ADR-134의 "검토한 선택지" 참고)
+   */
+  mockitoAgentInit?: boolean;
 }
 
 export interface ProjectDetection {
@@ -155,6 +165,43 @@ const GRADLE_TEST_CACHE_DIR = '/tmp/gradle-test-cache';
  *  실제로 이 명령을 test 단계에서 돌린다는 것과, 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml에서
  *  직접 좁히거나 뺄 수 있다는 것을 알린다 */
 const TEST_GATE_NOTE = '게이트가 이 테스트를 test 단계에서 돌립니다. 너무 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml의 workflow.tests에서 좁히거나 지우세요';
+
+/** Gradle 서비스의 GRADLE_USER_HOME(detectSpring의 Dockerfile ENV와 composeYaml의 init 스크립트 자리가 같이 쓴다) */
+const GRADLE_USER_HOME = '/gradle-home';
+/** compose 최상위 configs:의 이름(여러 Gradle 서비스가 같은 내용을 공유한다) */
+const MOCKITO_AGENT_INIT_CONFIG_NAME = 'b_studio_mockito_agent_init';
+/**
+ * Gradle의 GRADLE_USER_HOME/init.d/*.gradle 자동 실행을 이용해, 테스트 JVM에 Mockito를 -javaagent로 붙이는
+ * init 스크립트(ADR-134, 도그푸딩 마찰 106). 컨테이너는 colima 공유 폴더(sshfs) 안에서 도는데, 공유 폴더 안
+ * 파일은 컨테이너 root가 만들어도 소유자가 호스트 uid로 보여 HotSpot의 Attach Listener가 cwd의
+ * `.attach_pid<pid>` 트리거 파일을 무시한다(소유자가 안 맞음) — Mockito의 inline mock maker가 쓰는 JVM
+ * self-attach가 항상 실패한다. Mockito 공식 권장대로 mockito-core를 javaagent로 붙여 attach 자체를 건너뛴다.
+ * 이미 다른 방법으로 javaagent가 붙어 있으면(`allJvmArgs`로 확인) 다시 붙이지 않는다. 사용자 프로젝트 파일은
+ * 건드리지 않는다 — Gradle이 이 경로를 자동으로 읽을 뿐이다. eclipse-temurin:*-jdk에서 실제로 돌려 확인했다:
+ * 이 스크립트 없이 `./gradlew test`는 "Could not initialize inline Byte Buddy mock maker"로 실패하고,
+ * 있으면 "added -javaagent:mockito-core-*.jar" 로그와 함께 통과한다.
+ */
+const MOCKITO_AGENT_INIT_SCRIPT = `// b-studio가 넣은 설정. 샌드박스 컨테이너는 colima 공유 폴더(sshfs) 안에서 도는데,
+// 공유 폴더 안 파일은 소유자가 호스트 uid로 보여 HotSpot의 Attach Listener가 cwd의 .attach_pid<pid> 트리거 파일을
+// 무시하고(소유자가 안 맞음) /tmp로 넘어가지도 않는다 — Mockito inline mock maker가 쓰는 JVM self-attach가
+// 항상 실패한다. Mockito 공식 권장대로 mockito-core를 -javaagent로 붙여 attach 자체를 건너뛴다.
+// 사용자 프로젝트 파일은 건드리지 않는다 — Gradle이 GRADLE_USER_HOME/init.d에서 자동으로 읽는 스크립트다.
+allprojects {
+  tasks.withType(Test).configureEach { t ->
+    t.doFirst {
+      if (t.allJvmArgs.any { it.startsWith('-javaagent:') && it.contains('mockito-core') }) return
+      def jar = t.classpath.files.find { it.name ==~ /mockito-core-.*\\.jar/ }
+      if (jar != null) {
+        t.jvmArgs(["-javaagent:\${jar.absolutePath}"])
+        logger.lifecycle("b-studio: added -javaagent:\${jar.name} to \${t.path} (JVM self-attach is blocked in the sandbox's shared-folder mount)")
+      }
+    }
+  }
+}
+`;
+/** mockitoAgentInit가 true인 서비스의 notes에 남기는 메모(ADR-134, 도그푸딩 마찰 106) */
+const MOCKITO_AGENT_INIT_NOTE =
+  'Mockito 같은 inline mock 라이브러리가 쓰는 JVM self-attach가 샌드박스의 공유 폴더 마운트에서는 항상 실패해(컨테이너 root가 만든 파일도 소유자가 호스트 uid로 보임), Gradle init 스크립트로 mockito-core를 -javaagent로 붙였습니다(GRADLE_USER_HOME/init.d). 사용자 프로젝트의 테스트 설정은 건드리지 않습니다';
 
 function isNoiseDirName(name: string): boolean {
   return NOISE_DIR_NAMES.has(name.toLowerCase());
@@ -731,7 +778,12 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
   }
   const image = wrapper ? `eclipse-temurin:${java}-jdk` : isGradle ? `gradle:jdk${java}` : `maven:3-eclipse-temurin-${java}`;
   const testCommand = springTestCommand({ isGradle, usesAncestorWrapper, wrapper, subPath, wrapperWorkDir });
-  if (testCommand) notes.push(TEST_GATE_NOTE);
+  // Maven은 범위 밖이다(ADR-134) — surefire의 argLine을 건드리면 사용자가 이미 쓰는 argLine 설정을 지울 위험이 있다
+  const mockitoAgentInit = isGradle && testCommand !== undefined;
+  if (testCommand) {
+    notes.push(TEST_GATE_NOTE);
+    if (mockitoAgentInit) notes.push(MOCKITO_AGENT_INIT_NOTE);
+  }
   if (!wrapper) {
     notes.push(`이 폴더와 상위 폴더 어디에도 ${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다. 이미지의 버전이 실제 쓰는 버전과 다르면 빌드가 달라질 수 있습니다`);
   } else if (usesAncestorWrapper) {
@@ -762,16 +814,16 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
       `FROM ${image}`,
       '',
       `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
-      ...(isGradle ? ['ENV GRADLE_USER_HOME=/gradle-home', ''] : []),
+      ...(isGradle ? [`ENV GRADLE_USER_HOME=${GRADLE_USER_HOME}`, ''] : []),
       `EXPOSE ${port}`,
       runIsShell ? `CMD ["sh", "-c", "${run}"]` : `CMD ${run}`,
       '',
     ].join('\n'),
-    volumes: isGradle ? { 'gradle-home': '/gradle-home', 'gradle-project': '.gradle', build: 'build' } : { 'maven-home': '/root/.m2', target: 'target' },
+    volumes: isGradle ? { 'gradle-home': GRADLE_USER_HOME, 'gradle-project': '.gradle', build: 'build' } : { 'maven-home': '/root/.m2', target: 'target' },
     environment: {},
     dependsOn: [],
     notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
-    ...(testCommand ? { testCommand } : {}),
+    ...(testCommand ? { testCommand, ...(mockitoAgentInit ? { mockitoAgentInit: true } : {}) } : {}),
   };
 }
 
@@ -1000,10 +1052,15 @@ function databasesYaml(infra: readonly InfraService[]): string[] {
 function composeYaml(services: readonly DetectedService[], infra: readonly InfraService[]): string {
   const lines = ['# b-studio가 만든 개발용 compose. 샌드박스가 이 파일로 서비스를 띄운다', 'services:'];
   const volumes: string[] = [];
+  let usesMockitoAgentInit = false;
   for (const service of services) {
     const context = service.path === '.' ? '.' : `./${service.path}`;
     const workDir = containerWorkDir(service.path);
     lines.push(`  ${service.name}:`, `    build: { context: ${context}, dockerfile: ${GENERATED_DOCKERFILE} }`, `    working_dir: ${workDir}`);
+    if (service.mockitoAgentInit) {
+      usesMockitoAgentInit = true;
+      lines.push('    configs:', `      - source: ${MOCKITO_AGENT_INIT_CONFIG_NAME}`, `        target: ${GRADLE_USER_HOME}/init.d/b-studio-mockito-agent.gradle`);
+    }
     if (Object.keys(service.environment).length > 0) {
       lines.push('    environment:');
       for (const [key, value] of Object.entries(service.environment)) lines.push(`      ${key}: ${yamlString(value)}`);
@@ -1051,6 +1108,12 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
     }
   }
   if (volumes.length > 0) lines.push('', 'volumes:', ...volumes.map((volume) => `  ${volume}:`));
+  if (usesMockitoAgentInit) {
+    // Swarm이 아닌 일반 compose에서도 configs:는 파일로 그대로 마운트된다(docker compose 2.23.1+에서 확인). 여러
+    // Gradle 서비스가 같은 init 스크립트를 공유하므로 내용은 여기 한 번만 쓴다(서비스 쪽은 source 이름만 가리킨다)
+    lines.push('', 'configs:', `  ${MOCKITO_AGENT_INIT_CONFIG_NAME}:`, '    content: |');
+    for (const line of MOCKITO_AGENT_INIT_SCRIPT.split('\n')) lines.push(line.length > 0 ? `      ${line}` : '');
+  }
   lines.push('');
   return lines.join('\n');
 }
