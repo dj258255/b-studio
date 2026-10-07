@@ -157,6 +157,7 @@
 - [ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다](#adr-134-gradle-테스트-서비스에-mockito-javaagent-init-스크립트를-compose-configs로-심어-컨테이너-안에서-inline-mock-maker의-jvm-self-attach를-우회한다)
 - [ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다](#adr-135-게이트가-다루지-않는-서비스에-생긴-테스트화면-변경을-경고로-드러내고-체크포인트-본문에-확인-범위를-남긴다)
 - [ADR-136 compose·studio.yaml이 바뀌면 그 파일이 속한 서비스 폴더를 찾는 대신 managed 서비스를 전부 다시 띄운다](#adr-136-composestudioyaml이-바뀌면-그-파일이-속한-서비스-폴더를-찾는-대신-managed-서비스를-전부-다시-띄운다)
+- [ADR-137 studio.yaml에 서비스별 systemPackages를 선언하면 생성 Dockerfile이 빌드 때 OS 패키지를 설치한다](#adr-137-studioyaml에-서비스별-systempackages를-선언하면-생성-dockerfile이-빌드-때-os-패키지를-설치한다)
 
 ---
 
