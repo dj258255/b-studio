@@ -499,6 +499,74 @@ describe('runCommandCodeAgent', () => {
       { type: 'policy', tool: 'grep', decision: 'allow', reason: '내장 도구가 실행됨(b-studio 도구 밖)' },
     ]);
   });
+
+  it('신호가 끊겨 자식이 abort 오류를 내도 프로세스를 죽이지 않고 레인 실패로 끝난다(회귀: #449 뒤 벤치가 통째로 죽은 사고)', async () => {
+    // 실측 재현: Node의 spawn+signal은 중단되면 child에 'error'(AbortError)를 낸다. 이 러너는 NDJSON 줄을
+    // 다 읽은 뒤에야 exitCode를 기다리므로, 그 사이 exitCode가 먼저 거부되면 누구도 받지 않은 거부가 되어
+    // Node 기본값대로 프로세스 전체가 죽는다(처리하지 않은 거부 → 예외로 격상). 가짜 프로세스로 같은 타이밍을
+    // 만들어, 고친 뒤에는 이 레인만 실패로 끝나고(throw 아님) 프로세스가 살아 있는지 본다
+    const controller = new AbortController();
+    const fakeProcess: CommandCodeProcess = {
+      // 실행이 정말 시작된 뒤(파일 쓰기 등 준비 단계를 지난 뒤)에만 끊어야 턴 도중 중단을 재현한다.
+      // 준비 단계 중에 끊으면 다음 턴 머리의 signal?.throwIfAborted()가 먼저 걸려 버려 재현하려는
+      // 경쟁(턴 한가운데서 exitCode가 먼저 거부되는 것)이 안 생긴다
+      run({ signal }) {
+        setTimeout(() => controller.abort(), 0);
+        const exitCode = new Promise<number>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              const error = new Error('이 작업을 취소했습니다');
+              error.name = 'AbortError';
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+        async function* lines(): AsyncGenerator<string> {
+          yield JSON.stringify({ type: 'event', event: { type: 'run_start', sessionId: 'session-1' } });
+          // 실제 cmd 프로세스가 죽는 동안 stdout이 바로 닫히지 않는 시간차를 흉내 낸다.
+          // 이 사이에 위 exitCode가 이미 거부돼 있다 — 아직 아무도 기다리지 않은 채로
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return { lines: lines(), exitCode, stderr: async () => '' };
+      },
+    };
+
+    // 이 테스트 안에서만 unhandledRejection을 가로채, 고치기 전 동작이 재현돼도 vitest 워커 전체가
+    // 죽지 않게 하면서 "처리하지 않은 거부가 실제로 떴는지"를 그대로 관찰한다
+    let unhandled: unknown;
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandled = reason;
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      const events: AgentEvent[] = [];
+      const runPromise = runCommandCodeAgent({
+        request: '추가해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        process: fakeProcess,
+        signal: controller.signal,
+        fetcher: async () => contract,
+        onEvent: (event) => events.push(event),
+      });
+
+      await expect(runPromise).rejects.toThrow(/취소/);
+      // 처리하지 않은 거부가 뜰 시간을 넉넉히 준다(가짜 프로세스의 20ms 창보다 길게)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toBeUndefined();
+
+      // 원인 2 대응: 중단되면 다음에 원인을 가릴 수 있게 마지막 상태를 warning 이벤트로 남긴다.
+      // 이 가짜 실행은 도구를 하나도 부르지 않았으므로 "도구 호출 기록이 없다"로 남아야 한다
+      // (E12b 실측과 같은 모양 — 모델 응답을 기다리는 동안 멈췄을 수 있다는 단서)
+      const warning = events.find((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
+      expect(warning?.message).toContain('중단됐습니다');
+      expect(warning?.message).toContain('도구 호출 기록이 없다');
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
 });
 
 describe('parseCommandCodeModels', () => {
