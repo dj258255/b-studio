@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { Sandbox, StartOptions } from '@b-studio/sandbox';
+import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { SAFE_SEGMENT, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
@@ -656,9 +656,25 @@ export class VerificationGate {
     // exec는 기본으로 출력의 시크릿 값을 가려서 돌려준다. 실패 출력이 모델에게 그대로 들어가므로 가린 결과만 쓴다
     const result = await this.#options.sandbox.exec(test.service, test.command, { signal: AbortSignal.any([signal, timeout]) });
     if (result.exitCode !== 0) {
+      const revived = await this.#reviveIfOomKilled(test.service, signal);
       const output = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-OUTPUT_TAIL_LINES).join('\n');
-      throw new Error(`종료 코드 ${result.exitCode}\n${output}`);
+      throw new Error(`종료 코드 ${result.exitCode}${revived ? `\n환경 문제: ${test.service} 컨테이너가 ${revived} 종료됐습니다. 코드 문제가 아닐 수 있습니다 — 서비스를 다시 띄웠습니다(다음 시도에서 이어집니다)` : ''}\n${output}`);
     }
+  }
+
+  /**
+   * test 단계 exec가 실패했을 때, 테스트 JVM이 코드 문제가 아니라 메모리 한도를 넘어 컨테이너째로
+   * 죽은 것인지 본다(트러블슈팅 116). 맞으면 다음 시도(workflow.tests의 maxAttempts)가 죽은 컨테이너에
+   * 또 부딪히지 않도록 여기서 미리 되살린다 — restartOnce(verify.ts)가 서비스 재시작 실패를 다루는 것과
+   * 같은 신호(stats().oomKilled)를 쓴다. 되살리기 자체가 실패해도(이미 한 번 죽은 컨테이너라 더 불안정할
+   * 수 있다) 원래 실패를 가리지 않도록 삼킨다 — 다음 시도가 어차피 그 실패를 다시 드러낸다
+   */
+  async #reviveIfOomKilled(service: string, signal: AbortSignal): Promise<string | undefined> {
+    const { sandbox } = this.#options;
+    const usage = (await sandbox.stats().catch(() => [])).find((candidate) => candidate.service === service);
+    if (!usage?.oomKilled) return undefined;
+    await sandbox.restart(service, { signal }).catch(() => {});
+    return `메모리 한도${usage.memoryLimitBytes ? ` (${formatBytes(usage.memoryLimitBytes)})` : ''}를 넘어`;
   }
 
   /**
