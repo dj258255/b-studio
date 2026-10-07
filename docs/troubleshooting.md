@@ -15,7 +15,7 @@
 | 운영 이미지·컨테이너 배포 | 31–34 |
 | 멀티 CLI·백엔드 실행 | 43, 45, 47–49 |
 | 동시성·상태 저장 | 44 |
-| 벤치 하네스 | 42, 45–46, 55 |
+| 벤치 하네스 | 42, 45–46, 55, 62 |
 | 요구사항·PR·리뷰 추적 | 54, 56 |
 | 설계 단계에서 대비한 문제 | 22 |
 
@@ -82,6 +82,7 @@
 - [59. 폴더 열기 감지가 pay 구조에서 Gradle 래퍼를 못 찾고 Next.js 앱을 놓침](#59-폴더-열기-감지가-pay-구조에서-gradle-래퍼를-못-찾고-nextjs-앱을-놓침)
 - [60. 두 단계 아래 서비스가 있는 폴더를 열면 세션 기동이 "Dockerfile.b-studio 없음"으로 실패함](#60-두-단계-아래-서비스가-있는-폴더를-열면-세션-기동이-dockerfileb-studio-없음으로-실패함)
 - [61. S3 게시판 혼합 레인(Claude Code + Command Code)이 모든 레인 Claude Code보다 훨씬 자주 실패함](#61-s3-게시판-혼합-레인claude-code--command-code이-모든-레인-claude-code보다-훨씬-자주-실패함)
+- [62. 중단 신호가 걸리면 Command Code·OpenCode 레인이 벤치 프로세스를 통째로 죽임](#62-중단-신호가-걸리면-command-codeopencode-레인이-벤치-프로세스를-통째로-죽임)
 
 ---
 
@@ -2109,3 +2110,44 @@ S3 게시판 전략을 mesh topology로, api 레인은 Claude Code·web 레인�
 
 ### 배운 점
 "도구 호출이 실패·거부됐다"와 "도구가 목록에 아예 없었다"는 세션 기록만 봐서는 헷갈리기 쉽다 — 거부는 `policy` 이벤트가 남고, 목록 누락은 아무 흔적도 남기지 않는다(모델이 쓰지 않은 도구는 애초에 모른다). 의심이 가는 도구의 실행 경로(`buildTools` 호출부)를 직접 비교해, 같은 기능을 하는 다른 러너와 호출 모양이 같은지부터 보는 것이 세션 기록만 들여다보는 것보다 빨랐다. 또한 "같은 저장소 안에서 같은 옵션(board)을 받는 러너 다섯 개 중 둘만 실제로 쓴다"는 것은, 새 러너를 추가할 때 기존 러너의 옵션 전달을 전부 복사하지 않으면 생기는 흔한 누락이다 — 지원 여부를 표 하나로 모아 두면(이번의 `backendSupportsBoard`) 다음에 같은 누락이 생겨도 막을 수 있다.
+
+## 62. 중단 신호가 걸리면 Command Code·OpenCode 레인이 벤치 프로세스를 통째로 죽임
+
+**구분:** 벤치 실험 E12b → 코드로 원인 추적 → 수정 + 계측
+
+### 현상
+#449(Command Code·OpenCode·Gemini 러너에 게시판 도구 연결) 병합 직후 커밋에서 같은 혼합 레인 조건(E12와 동일, api=claude-code·web=commandcode)을 다시 돌리자, 08:02에 시작한 실행이 첫 과제(orders-list) 도중 08:36에 종료 코드 1로 죽었다. 로그에는 `node:child_process:717`에서 `child.emit('error', new AbortError(...))`가 발생한 스택만 남고, 결과 폴더에는 `results.jsonl`이 한 줄도 남지 않았다. 같은 조건의 #449 이전 커밋은 9회 모두 끝까지 돌았다(4/9 성공).
+
+### 가설
+1. (원인 1) Command Code·OpenCode·Gemini 러너가 중단 신호로 자식 프로세스를 끊을 때 `'error'` 이벤트를 듣는 리스너가 없어, Node가 처리되지 않은 이벤트를 던져(uncaught) 벤치 프로세스 전체가 죽는다.
+2. (원인 2) #449가 게시판 도구(`post_note`·`read_notes`)를 Command Code 레인에 새로 연결했으니, 그 MCP 응답 모양이 CLI와 안 맞아 모델이 대기하거나, 도구 스키마(`kinds` 필수 인자)를 모델이 못 맞춰 호출을 반복하거나, MCP 서버 호출 자체가 끝나지 않았을 수 있다.
+
+### 측정
+- 원인 1: `packages/agent/src/commandcode-runner.ts`·`opencode-runner.ts`·`gemini-cli-runner.ts`의 `DEFAULT_PROCESS.run()`을 읽어 보니 세 곳 모두 `child.once('error', reject)`를 달아 두고 있었다 — "리스너가 없다"는 가설과 맞지 않았다.
+  - Node의 실제 자식 프로세스 생성·중단 동작을 작은 재현 스크립트(스캐치패드의 `repro.mjs`)로 직접 만들어 확인했다: `spawn(cmd, args, { signal })`에 `child.once('error', reject)`를 달아 둬도, 그 자식이 보내는 NDJSON 줄(`lines`)을 `for await`로 다 읽기 **전에** `signal.abort()`가 오면, `exitCode` Promise는 그 순간 거부되지만 아직 아무도 `await exitCode`를 하지 않은 상태라 Node가 "처리하지 않은 거부"로 보고 프로세스를 그대로 죽였다(Node 22 기본값 `--unhandled-rejections=throw`). `child.once('error', reject)`가 있어도, `reject()`가 만든 Promise 쪽에 아무 핸들러가 없으면 소용없었다.
+  - `gemini-cli-runner.ts`는 같은 모양의 `exitCode`를 만들지만, 바로 다음 줄에서 `exitCode.then(() => stdout, () => stdout)`로 `stdoutPromise`를 만들어 생성 시점에 핸들러를 단다 — 우연히 이 사고를 피해 갔다.
+- 원인 2: 남은 세션 기록(`~/.cache/b-studio/bench-work-UwmrXO/sessions/...`, 읽기만 함)을 확인했다.
+  - Command Code(web) 레인의 세션 전사(`*.jsonl`)는 08:04:02(KST)에 마지막으로 한 줄이 남았고, 파일 변경 시각(mtime)도 08:04:02에서 멈춰 있었다 — 그 뒤로 이 턴의 기록 파일이 32분 동안 한 글자도 자라지 않았다.
+  - 그 마지막 줄 직전에 완료된 도구 호출은 `http_request`(GET `/orders` → HTTP 404)였고, 정상적으로 결과를 돌려받았다. `read_notes`·`post_note` 호출도 그 앞에서 모두 정상 응답을 받았다(거부·재시도 흔적 없음).
+  - 같은 시각 lane-1(api, `claude-code` 백엔드)의 `session.json`은 `run_started`만 있고 `run_finished`가 없는 채로 agent 이벤트가 계속 쌓이다, `savedAt: 2026-10-06T23:36:40Z`(=08:36:40 KST, 벤치가 죽은 시각과 일치)에 저장된 채 멈춰 있었다 — 두 레인 모두 "턴 도중" 멈춰 있었다.
+
+### 틀린 추측
+"게시판 도구의 MCP 응답 모양이 안 맞아 대기한다"와 "도구 스키마(`kinds`)를 모델이 못 맞춰 반복한다"는 둘 다 기각한다 — 세션 전사에 남은 **마지막** `read_notes`·`post_note`·`http_request` 호출은 전부 정상 응답을 받았고, 그 이후로는 모델이 도구를 아예 다시 부르지 않았다(호출 자체가 없으니 반복도, 대기 중인 MCP 요청도 없다). 멈춘 자리는 도구 호출이 아니라 **그다음 모델 턴**이었다.
+
+### 원인
+**원인 1(확정)**: `commandcode-runner.ts`·`opencode-runner.ts`의 `DEFAULT_PROCESS.run()`이 만든 `exitCode` Promise는, 호출부가 NDJSON 줄(`lines`)을 다 읽은 뒤에야 `await exitCode`를 하는 구조라 그 사이에 `'error'`(중단으로 인한 `AbortError`)가 먼저 와도 받아 줄 쪽이 없다. Node는 이를 "처리하지 않은 거부"로 보고 예외로 격상시켜 벤치 프로세스 전체를 그 자리에서 죽인다 — 레인 하나의 실패가 아니라 벤치 전체의 죽음으로 번진 이유다.
+
+**원인 2(확정하지 못함)**: 측정으로 알아낸 사실은 "Command Code(web) 레인이 08:04:02 이후 32분 동안 다음 모델 응답을 받지 못한 채(또는 `cmd` 프로세스 자체가 멈춘 채) 조용히 멈춰 있었다"는 것과 "그 32분 동안에는 어떤 시간 상한도 걸리지 않았다(`RUN_TIMEOUT_MS` 40분이 아직 안 지났다)"는 것, "08:36에 무언가가 전체 실행의 신호를 끊었다"는 것뿐이다. 신호를 끊은 주체(토큰 한도·구독 쪽 상류 응답 지연·다른 메커니즘)는 원인 1의 크래시가 그 순간의 로그·메모리 상태를 그대로 날려 버려 가릴 수 없었다. 실 Command Code CLI를 다시 호출해 재현하는 것은 구독 사용량이 들어 이번 범위에서는 하지 않았다.
+
+### 수정
+**원인 1**: `commandcode-runner.ts`·`opencode-runner.ts`의 `DEFAULT_PROCESS.run()`과 그 호출부(턴 루프) 양쪽에 `exitCode.catch(() => {})`를 달아, 생성 시점에 바로 "처리됨"으로 표시해 둔다. 실제 값(성공/실패)은 그대로 아래의 `await exitCode`가 받으므로 동작은 바뀌지 않고, 그 사이 신호가 끊겨도 더는 프로세스를 죽이지 않는다. `gemini-cli-runner.ts`는 이미 안전했지만, 구조가 바뀌어도 이 보장이 깨지지 않게 같은 가드를 한 번 더(중복이어도 해가 되지 않으므로) 추가했다.
+
+**원인 2**: 확정하지 못한 원인을 코드로 "고치지"는 않되, 다음에 같은 일이 나면 가릴 수 있게 계측을 추가했다. `commandcode-runner.ts`·`opencode-runner.ts`가 신호로 끝날 때, 그 턴에서 마지막으로 완료된 도구 호출(이름·입력 일부)이나 아직 끝나지 않고 대기 중이던 도구 호출을 `warning` 이벤트로 남긴다. 이번 턴에 도구 호출이 아예 없었으면 "도구 호출 기록이 없다(첫/다음 모델 응답을 기다리는 중이었을 수 있다)"고 명시한다 — 다음에 레인이 조용히 멈추면, 이 한 줄만 보고도 MCP 쪽 문제인지 모델 호출 쪽 문제인지를 바로 구분할 수 있다.
+
+### 검증
+- Node의 실제 `spawn`+`signal` 동작을 그대로 쓰는 재현 스크립트로 고치기 전/후 동작을 직접 비교했다: 고치기 전에는 리스너가 있어도 크래시가 재현됐고, `exitCode.catch(() => {})`를 더하자 더는 죽지 않고 `AbortError`가 정상적으로 캐치됐다.
+- 두 러너 모두에 가짜 CLI로 중단 신호를 재현하는 회귀 테스트를 더했다 — 신호가 끊기면 ① 프로세스가 죽지 않고(테스트 안에서 `unhandledRejection`을 가로채 확인) ② 레인이 깨끗한 `AbortError`로 끝나며 ③ 원인 2 대응 `warning` 이벤트가 "도구 호출 기록이 없다"로 남는지 확인했다. 수정을 되돌리면(호출부·DEFAULT_PROCESS 양쪽의 `exitCode.catch`를 지우면) 이 테스트가 실제로 실패하는 것도 확인했다.
+- `pnpm typecheck`(6/6), `pnpm exec vitest run packages/agent apps/studio/bench packages/sandbox`(100개 파일, 1,572건 통과), `pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+`child.once('error', reject)`처럼 리스너를 달아 뒀다고 "처리되지 않은 거부" 문제가 끝나는 게 아니다 — 그 리스너가 만드는 결과물(Promise)을 **언제** 기다리는지가 핵심이다. 줄 단위 스트림을 다 읽은 뒤에야 결과 Promise를 기다리는 구조는, 스트림을 읽는 동안 그 Promise가 먼저 거부되면 아무도 받지 않은 채로 한동안(심하면 수십 ms 이상) 방치된다 — Node의 처리하지 않은 거부 감지는 그 짧은 창에서도 프로세스를 죽이기에 충분하다. 생성 즉시 `.catch(() => {})`를 달아 "나중에 받을 거다"라고 표시해 두는 것이 가장 값싸고 확실한 방어다. 또한 "원인을 확정하지 못했다"고 쓰는 것도 트러블슈팅의 정상적인 결론이다 — 크래시 한 번이 그 순간의 단서를 전부 지워 버리는 경우, 다음 발생에서 단서가 남게 계측을 추가하는 것이 추측으로 원인을 메우는 것보다 낫다.
