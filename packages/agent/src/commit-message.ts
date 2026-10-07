@@ -19,16 +19,24 @@ const REFACTOR_WORDS = /리팩터|리팩토링|구조\s*정리|구조\s*변경|�
 const CHORE_WORDS = /의존성|dependency|devdependency|버전\s*올리기|업그레이드|설정\s*변경|chore/i;
 /** 요청 글에서 고침을 가리키는 낱말. 이 낱말이 있어야 fix로 본다 */
 const FIX_WORDS = /고치|고쳐|버그|오류|에러|안\s*(돼|되|나와|보여)|깨지|실패하|수정해|fix|bug|error/i;
+/** 요청 글 첫 문장에서 새로 만들기를 가리키는 낱말. 첫 문장이 이 낱말을 쓰면 본문에 FIX_WORDS가 있어도 feat로 본다 */
+const FEAT_WORDS = /만들|만든|추가|더해|더하|구현|새로|add|implement|create/i;
 
 /**
  * 요청 글과 바뀐 파일에서 conventional commit 타입을 고른다. 모델을 부르지 않고 경로·낱말만 본다(ADR-080).
  * 우선순위: 테스트 파일만 바뀌었으면 test, 문서 파일만이면 docs, 새 파일뿐이면 feat,
- * 그 외에는 요청 글의 낱말로 fix·refactor·chore를 찾고, 없으면 feat로 둔다.
+ * 그 외에는 요청 첫 문장에서 고침(fix)·새로 만들기(feat) 낱말을 먼저 찾고, 없으면 요청 글 전체의 낱말로
+ * fix·refactor·chore를 찾고, 그래도 없으면 feat로 둔다.
  */
 export function classifyCommit(request: string, changes: readonly PendingChange[]): CommitType {
   if (changes.length > 0 && changes.every((change) => TEST_FILE.test(change.file))) return 'test';
   if (changes.length > 0 && changes.every((change) => DOC_FILE.test(change.file))) return 'docs';
   if (changes.length > 0 && changes.every((change) => change.change === 'added')) return 'feat';
+  // 요청의 의도는 첫 문장이 말한다. 본문의 "조회 실패 시 오류 문구를 보여 준다" 같은 동작 설명이 FIX_WORDS에
+  // 걸려 새 화면을 만든 커밋이 fix가 되던 문제(도그푸딩 버그 리포트)를 막으려고, 첫 문장을 먼저 본다
+  const intent = firstSentence(request.split('\n')[0]!.replace(/\s+/g, ' ').trim());
+  if (FIX_WORDS.test(intent)) return 'fix';
+  if (FEAT_WORDS.test(intent)) return 'feat';
   if (FIX_WORDS.test(request)) return 'fix';
   if (REFACTOR_WORDS.test(request)) return 'refactor';
   if (CHORE_WORDS.test(request)) return 'chore';
