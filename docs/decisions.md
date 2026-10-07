@@ -156,6 +156,7 @@
 - [ADR-133 폴더 열기 감지가 서비스마다 테스트 명령을 찾아 workflow.tests에 기본으로 넣고, 체크포인트 제목이 요구사항 id·조사만 남은 조각이 되지 않게 한다](#adr-133-폴더-열기-감지가-서비스마다-테스트-명령을-찾아-workflowtests에-기본으로-넣고-체크포인트-제목이-요구사항-id조사만-남은-조각이-되지-않게-한다)
 - [ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다](#adr-134-gradle-테스트-서비스에-mockito-javaagent-init-스크립트를-compose-configs로-심어-컨테이너-안에서-inline-mock-maker의-jvm-self-attach를-우회한다)
 - [ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다](#adr-135-게이트가-다루지-않는-서비스에-생긴-테스트화면-변경을-경고로-드러내고-체크포인트-본문에-확인-범위를-남긴다)
+- [ADR-136 compose·studio.yaml이 바뀌면 그 파일이 속한 서비스 폴더를 찾는 대신 managed 서비스를 전부 다시 띄운다](#adr-136-composestudioyaml이-바뀌면-그-파일이-속한-서비스-폴더를-찾는-대신-managed-서비스를-전부-다시-띄운다)
 
 ---
 
@@ -5632,3 +5633,36 @@ compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `doc
 - 테스트 공백 판정은 파일 이름 패턴만 본다(내용은 읽지 않는다). `package.json`에 `test` 스크립트를 추가했지만 테스트 파일 이름이 패턴에 걸리지 않는 드문 경우(예: 확장자 없는 스크립트, 다른 이름 규칙)는 놓칠 수 있다.
 - 화면 공백 판정은 app 라우터(`app/**/page.tsx`)만 본다(`routesFromChangedFiles`의 기존 한계, ADR-078과 동일) — pages 라우터·Vite 앱의 새 화면은 지금도 보지 않는다.
 - 경고가 쌓여도 studio.yaml을 고치는 쪽은 여전히 사람(또는 다음 요청의 에이전트) 몫이다. 같은 공백이 세션마다 반복되면 결국 선택지 B(자동 제안)가 필요해질 수 있다 — 이번에는 비용·레이어 꼬임 때문에 보류했다.
+
+## ADR-136 compose·studio.yaml이 바뀌면 그 파일이 속한 서비스 폴더를 찾는 대신 managed 서비스를 전부 다시 띄운다
+
+상태: 채택
+관련: ADR-083, ADR-101, ADR-134
+
+### 맥락
+- BE-commerce 프로젝트(pay-2)에서 "생성 파일 다시 만들기"로 `compose.b-studio.yaml`을 다시 썼다(ADR-134의 Mockito init 스크립트 설정이 새로 들어감). 떠 있는 세션에 "이 세션에도 적용"(ADR-101)을 보내자 응답이 `{"restarted":[],"skippedOff":[]}`였다. 세션 작업 복사본의 compose 파일에는 새 설정이 들어갔지만 실행 중인 컨테이너는 그대로였다(트러블슈팅 74).
+- `packages/agent/src/services.ts`의 `servicesForFiles`는 바뀐 파일이 `project.managed`의 어느 서비스 `path` 밑에 있는지만 본다. `compose.b-studio.yaml`·`studio.yaml`은 프로젝트 루트 파일이라 서비스 폴더에 속하지 않는다. backend·frontend처럼 서비스가 둘 이상이고 전부 하위 폴더면 두 파일 다 `unmatched`로 빠져 재시작 대상이 0개가 된다. 서비스가 하나뿐이고 경로가 루트(`.`)인 흔한 경우에는 `root === ''` 매칭이 모든 파일을 우연히 걸러 지금까지 드러나지 않았다.
+- `restartServicesFor`(`packages/agent/src/verify.ts`)는 이 함수 하나로 세 경로를 전부 처리한다: "이 세션에도 적용"(ADR-101), 에이전트가 실행 중 파일을 바꾼 뒤의 검증 게이트(`gate.ts`), 되돌리기. `compose.b-studio.yaml`·`studio.yaml`은 `workflow.protectedPaths`를 사람이 직접 적지 않는 한 에이전트도 고칠 수 있는 평범한 파일이라(ADR-135의 맥락에서 이미 확인됨), 세 경로 모두 같은 구멍을 공유한다.
+- 컨테이너 재시작 자체는 이미 재생성이다: `packages/sandbox`의 docker 제공자(`compose-provider.ts`)는 `restart()`에서 `--force-recreate`를 쓰고, kubernetes 제공자는 Pod를 지우고 새로 뜨는 것을 기다린다. 그래서 "단순 restart라 설정이 반영 안 된다"는 가설은 틀렸다 — 반영 메커니즘은 멀쩡했고, 재시작할 서비스를 하나도 고르지 못한 것이 전부였다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 옛 compose와 새 compose의 서비스 블록(그리고 top-level `configs`·`volumes`처럼 서비스가 참조하는 자리)을 비교해, 실제로 바뀐 서비스만 재시작한다 | YAML을 파싱해 서비스별로 비교해야 하고, 한 서비스가 top-level `configs`·`volumes`·anchor를 참조하면 그 서비스는 compose 자신의 diff만으로는 "안 바뀜"으로 보일 수 있다(참조 대상이 바뀐 것이지 서비스 블록 자체 텍스트는 그대로일 수 있음). 정교하지만, 놓치면 "재시작 안 함"으로 조용히 실패해 지금 버그와 같은 모양이 된다. 재시작 자체가 이미 재생성(비용이 적지 않음)이라 "불필요한 재시작을 줄인다"는 이득도 크지 않다 |
+| B. compose·studio.yaml이 바뀌면 (꺼 둔 서비스를 뺀) managed 서비스를 전부 재시작 대상으로 삼는다(채택) | 바뀌지 않은 서비스도 다시 띄워 시간이 더 든다. 하지만 "확인하지 않은 서비스가 옛 설정으로 계속 떠 있다"는 조용한 실패보다, "필요 이상으로 다시 띄운다"는 눈에 보이는 비용이 낫다고 판단했다 — 실패 모드의 비대칭이 선택을 가른다 |
+| C. 재시작 대상을 못 고르면 `unmatched`로 남겨 "확인 못 함"으로 보고하고 재시작은 하지 않는다(지금 동작) | 이미 겪은 버그 그 자체다. "확인 못 함"이 보고서에는 남지만(`unverifiedFiles`), API 호출자(스튜디오 UI)는 `restarted: []`만 보고 "적용됐다"고 믿기 쉽다 |
+
+### 결정
+1. **`packages/agent/src/services.ts`의 `servicesForFiles`에 "프로젝트 전역 파일" 판정을 더한다.** 바뀐 파일이 `SPEC_FILE`(`studio.yaml`) 또는 `project.composePath`(프로젝트 루트 기준 상대 경로로 바꿔 비교)와 같으면, 그 파일이 어느 서비스 폴더에 속하는지 보지 않고 `project.managed`의 모든 서비스 이름을 재시작 대상(`hit`)에 더한다. `project.root`·`project.composePath`가 없는 최소 fixture(일부 테스트)는 compose 쪽 판정을 건너뛰어 크래시 대신 예전처럼 "매칭 안 함"으로 처리한다.
+2. **`restartServicesFor`·`applyRegeneratedFilesToSession`은 고치지 않는다.** 선택한 서비스 목록이 바뀌는 지점이 `servicesForFiles` 하나뿐이라, 이 함수를 쓰는 세 경로(ADR-101의 "이 세션에도 적용", 검증 게이트, 되돌리기)가 모두 같은 수정으로 고쳐진다. 꺼 둔 서비스(ADR-083)를 거르는 필터는 `restartServicesFor`에 그대로 있어, compose·studio.yaml 변경도 꺼 둔 서비스는 재시작하지 않는다.
+3. **sandbox 쪽(`packages/sandbox`)은 바꾸지 않는다.** `restart()`가 이미 force-recreate/파드 재생성이라는 것을 코드로 확인했다 — 이 ADR이 고치는 것은 "어떤 서비스를 재시작 대상으로 고르는가"뿐이다.
+
+### 검증 결과
+- `packages/agent/src/verify.test.ts`에 `servicesForFiles`가 `studio.yaml`·compose 파일을 managed 서비스 전체로 매핑하는 테스트 3개(둘 이상 서비스, managed가 없는 경우)를 더했다. 기존 테스트의 project fixture에 `composePath`를 더하고, "compose.yaml은 unmatched"였던 단언을 "compose.yaml은 모든 서비스를 재시작 대상으로 만든다"로 고쳤다.
+- `apps/studio/lib/server/sessions-regenerate-apply.test.ts`에 backend(Spring Boot)·frontend(Next.js) 두 managed 서비스(둘 다 하위 폴더, 루트를 쓰는 서비스 없음)로 BE-commerce 모양을 흉내 낸 프로젝트를 만들어, `compose.b-studio.yaml`만 다시 쓰고 `applyRegeneratedFilesToSession`을 불렀을 때 두 서비스가 모두 재시작되는지 확인하는 테스트를 더했다. 고치기 전 코드로 이 테스트를 돌려 `restarted: []`로 실패함을 먼저 확인한 뒤, 고친 코드로 통과함을 확인했다(재현 확인).
+- `packages/agent` 테스트 1168개, `apps/studio` 테스트 1759개, `pnpm -r typecheck` 6/6, `pnpm --filter @b-studio/studio lint`가 통과했다.
+- 확인하지 못한 것: 실제 Docker로 BE-commerce 세션(5b640fd3)이나 그 컨테이너를 다시 재현해 보지는 않았다(사용자의 떠 있는 세션·컨테이너를 건드리지 않기 위해, 가짜 sandbox를 쓰는 단위·통합 테스트로만 검증했다).
+
+### 감수한 트레이드오프
+- compose·studio.yaml이 바뀌면 실제로는 한 서비스의 환경 변수 한 줄만 바뀌었어도 managed 서비스를 전부 다시 띄운다. 서비스 수가 많은 프로젝트에서는 재시작 시간이 늘어난다. 정교한 diff(선택지 A)로 줄일 수 있지만, top-level 참조를 놓칠 위험과 맞바꾸는 것이라 지금은 선택하지 않았다 — 재시작 시간이 실제로 문제가 되면 그때 선택지 A를 다시 본다.
+- `project.composePath`가 프로젝트 루트 밖(예: `../compose.yaml`)을 가리키는 드문 구성은 상대 경로 비교가 맞아떨어지지 않아 여전히 예전처럼 매칭되지 않을 수 있다 — 실제 프로젝트에서 compose 파일이 루트 밖에 있는 사례는 보지 못했다.

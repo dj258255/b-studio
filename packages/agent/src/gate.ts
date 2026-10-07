@@ -742,8 +742,8 @@ export class VerificationGate {
     const files = new Set(workspace.changedSince(this.#verifiedVersion));
     if (this.#failedServices.size > 0) {
       for (const file of workspace.changedFiles()) {
-        const [owner] = servicesForFiles(project, [file]).services;
-        if (owner && this.#failedServices.has(owner)) files.add(file);
+        // studio.yaml·compose는 모든 서비스에 속하므로(servicesForFiles) 첫 서비스만 보지 않고 전부 본다
+        if (servicesForFiles(project, [file]).services.some((owner) => this.#failedServices.has(owner))) files.add(file);
       }
     }
     return [...files].sort();
