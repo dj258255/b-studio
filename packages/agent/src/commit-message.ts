@@ -1,5 +1,6 @@
 import type { PendingChange } from './checkpoints';
 import { extractPrReviewFixTitles } from './pr-review';
+import { extractRequirementIds } from './test-discovery';
 
 /** 제목 맨 앞에 붙는 conventional commit 타입 (ADR-080). git 로그에 실제로 쓰는 이름만 받는다 */
 export type CommitType = 'feat' | 'fix' | 'test' | 'docs' | 'refactor' | 'chore';
@@ -50,14 +51,25 @@ function firstSentence(line: string): string {
 const TRAILING_REQUEST_PHRASING = /(해\s*(줘|주세요|주십시오)|부탁(?:드립니다|드려요|해요|합니다)?|주시기\s*바랍니다|바랍니다)\s*[.!?。]*$/;
 
 /**
+ * 앞 실행·네트워크 등 "지금 무엇이 바뀌었는지"가 아니라 그 바깥 상황(앞 실행의 결과, 인프라 문제)을 설명하는
+ * 문장을 가리키는 낱말(실측: 세션 5b640fd3, 체크포인트 57cced6 — 제목이 "앞 실행이 턴 상한에 걸려 변경이 모두
+ * 되돌려졌습니다"가 되어 실제로 바뀐 commerce shorts 모듈을 전혀 말하지 않았다). 이런 문장은 뒤에 진짜 요청이
+ * 이어져도 첫 문장만 보는 firstSentence 때문에 그대로 제목이 되므로, isClearChangeSentence에서 걸러
+ * 에이전트 요약·요구사항 id·바뀐 파일 같은 대체 경로로 넘긴다.
+ */
+const SITUATIONAL_WORDS =
+  /(앞|이전|지난|직전|방금)\s*(실행|시도|요청|작업)|네트워크|연결이?\s*끊|세션이?\s*끊|턴\s*상한|토큰\s*상한|되돌려지|롤백되|rate\s*limit|레이트\s*리밋|타임아웃|timeout/i;
+
+/**
  * 한 줄이 "무엇이 바뀌었는지" 분명히 말하는 서술문인지 본다(요청 글·에이전트 요약 둘 다에 쓴다). 너무 짧거나,
- * 물음표로 끝나거나, 말투를 커밋 문체로 정리(toCommitMood)하고도 부탁 어미만 남으면(예: "해주세요" 그 자체)
- * 분명하지 않다고 보고 바뀐 파일에서 뽑는 대체 경로로 넘긴다.
+ * 물음표로 끝나거나, 앞 실행·인프라 같은 상황 설명이거나(SITUATIONAL_WORDS), 말투를 커밋 문체로 정리
+ * (toCommitMood)하고도 부탁 어미만 남으면(예: "해주세요" 그 자체) 분명하지 않다고 보고 다음 대체 경로로 넘긴다.
  */
 function isClearChangeSentence(line: string): boolean {
   const trimmed = line.trim();
   if (trimmed.length < 4) return false;
   if (/[?？]\s*$/.test(trimmed)) return false;
+  if (SITUATIONAL_WORDS.test(trimmed)) return false;
   const converted = toCommitMood(trimmed);
   if (converted.trim().length < 2) return false;
   return !TRAILING_REQUEST_PHRASING.test(converted);
@@ -73,6 +85,13 @@ function fileAreaLabel(file: string): string {
   return base || name;
 }
 
+/** 바뀐 파일이 전부 added면 "더한다", 전부 deleted면 "지운다", 섞여 있으면 "고친다" */
+function describeVerb(changes: readonly PendingChange[]): string {
+  const allAdded = changes.every((change) => change.change === 'added');
+  const allDeleted = changes.every((change) => change.change === 'deleted');
+  return allDeleted ? '지운다' : allAdded ? '더한다' : '고친다';
+}
+
 /**
  * 요청 글도 에이전트 요약도 "무엇이 바뀌었는지" 분명히 말하지 않을 때 쓰는 마지막 대체 경로(ADR-080).
  * 바뀐 파일 이름에서 영역을 뽑아 최대 2개를 묶고(그 이상은 "외 N개"), 바뀐 종류(added·modified·deleted)로
@@ -82,10 +101,49 @@ function describeChangeFromFiles(changes: readonly PendingChange[]): string {
   if (changes.length === 0) return '파일을 정리한다';
   const labels = [...new Set(changes.map((change) => fileAreaLabel(change.file)))];
   const area = labels.length > 2 ? `${labels.slice(0, 2).join('·')} 외 ${labels.length - 2}개` : labels.join('·');
-  const allAdded = changes.every((change) => change.change === 'added');
-  const allDeleted = changes.every((change) => change.change === 'deleted');
-  const verb = allDeleted ? '지운다' : allAdded ? '더한다' : '고친다';
-  return `${area}를 ${verb}`;
+  return `${area}를 ${describeVerb(changes)}`;
+}
+
+/** 모듈 이름으로 쓸모없는, 언어·빌드 도구가 강제하는 흔한 폴더 이름(src, main, test 등) */
+const GENERIC_PATH_SEGMENTS =
+  /^(src|main|test|tests|__tests__|spec|specs|java|kotlin|scala|com|org|io|net|app|apps|lib|libs|pkg|packages|internal|migrations?|resources|scripts|dist|build|out|public|assets|config|node_modules|web|api|server|client|components|pages)$/i;
+
+/**
+ * 바뀐 파일 경로에서 공통 모듈 이름을 뽑는다(요구사항 id + 모듈 이름 제목을 만들 때 쓴다). 파일마다 폴더 조각 중
+ * 언어·빌드 도구가 강제하는 흔한 이름(GENERIC_PATH_SEGMENTS)을 걸러내고 남은 것 중 파일에 가장 가까운(가장
+ * 안쪽) 조각 하나를 그 파일의 모듈로 본다 — "commerce/shorts/__tests__/r22.test.ts"는 __tests__까지 걸러
+ * "shorts"가 남는다. 이 모듈이 바뀐 파일 절반 이상에서 같으면 공통 모듈로 본다. 가장 바깥 조각(commerce 같은
+ * 영역 전체)이 아니라 가장 안쪽 조각을 쓰는 이유는 "무엇이 바뀌었는지"에는 shorts처럼 더 구체적인 이름이 낫기
+ * 때문이다. 공통 모듈이 없으면 undefined — 이 경로로는 모듈을 못 찾는다는 뜻이다.
+ */
+function commonModuleLabel(changes: readonly PendingChange[]): string | undefined {
+  const perFile = changes
+    .map((change) => {
+      const segments = change.file.split('/').slice(0, -1).filter((segment) => segment && !GENERIC_PATH_SEGMENTS.test(segment));
+      return segments.at(-1);
+    })
+    .filter((segment): segment is string => Boolean(segment));
+  if (perFile.length === 0) return undefined;
+
+  const counts = new Map<string, number>();
+  for (const segment of perFile) counts.set(segment, (counts.get(segment) ?? 0) + 1);
+  let best: [string, number] | undefined;
+  for (const entry of counts) if (!best || entry[1] > best[1]) best = entry;
+  return best && best[1] >= Math.ceil(changes.length / 2) ? best[0] : undefined;
+}
+
+/**
+ * 요청 글에서 요구사항 id(R22 등)를 찾고, 바뀐 파일에서 공통 모듈 이름을 찾아 "[R22] shorts 모듈을 고친다"
+ * 같은 제목 후보를 만든다. 요청 글도 에이전트 요약도 분명하지 않을 때(generateCommitSubject의 3번 대체 경로)
+ * describeChangeFromFiles보다 먼저 쓴다 — 요구사항 id가 있으면 파일 이름을 나열하는 것보다 더 사람이 읽을 만한
+ * 제목이 된다. 요구사항 id가 없거나 공통 모듈을 못 찾으면 undefined.
+ */
+function requirementModuleCandidate(request: string, changes: readonly PendingChange[]): string | undefined {
+  const ids = extractRequirementIds(request);
+  if (ids.length === 0) return undefined;
+  const module = commonModuleLabel(changes);
+  if (!module) return undefined;
+  return `[${ids.join(', ')}] ${module} 모듈을 ${describeVerb(changes)}`;
 }
 
 /**
@@ -116,20 +174,41 @@ function reviewFixCandidate(request: string): string | undefined {
 }
 
 /**
+ * 에이전트 요약에서 제목 후보로 쓸 한 줄을 고른다. "범위: R22만 합니다"처럼 범위를 적은 줄이 있으면 그 줄(접두사는
+ * 뗀다)을 요약 첫 줄보다 우선한다 — 완료 요약은 보통 인사말이나 전체 맥락으로 시작해 첫 줄이 "무엇이 바뀌었는지"를
+ * 바로 말하지 않을 수 있지만, "범위:" 줄은 에이전트가 스스로 적은 작업 범위라 더 분명하다.
+ */
+function summaryTitleLine(agentSummary: string | undefined): string | undefined {
+  if (!agentSummary) return undefined;
+  const lines = agentSummary
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const scope = lines.find((line) => /^(범위|scope)\s*[:：]/i.test(line));
+  return scope ? scope.replace(/^(범위|scope)\s*[:：]\s*/i, '').trim() : lines[0];
+}
+
+/**
  * 요청 글과 바뀐 파일, (있으면) 에이전트 요약에서 체크포인트 커밋 제목을 만든다(ADR-080). "타입: 한국어 요약"
- * 형식이고 72자를 넘지 않는다. 제목 글은 이 순서로 고른다:
+ * 형식이고 72자를 넘지 않는다. 제목은 "무엇이 요청됐는지"가 아니라 "무엇이 바뀌었는지"를 말해야 하므로, 이 순서로
+ * 고른다:
  *  0. AI 리뷰 고침 요청이면(reviewFixCandidate) 지적 제목들로 만든다 — 요청 글 첫 문장이 라운드마다 똑같은
  *     공통 문구라 아래 1번 규칙을 쓰면 의미 없는 제목이 된다(과제 66).
  *  1. 요청 글 첫 문장이 "무엇이 바뀌었는지" 분명하면 그것을 쓴다 — 여러 문장으로 된 요청이면 첫 문장만 쓴다
  *     (firstSentence). ".env.example 파일을 만들어 주세요. 코드에서 읽는 환경 변수…를 담되…" 같은 요청
  *     전체가 제목에 그대로 들어가던 문제가 여기서 막힌다. 커밋 제목은 사람이 실제로 무엇을 부탁했는지 그대로
  *     드러내는 편이 "AI 리뷰 지적을 고쳐 주세요" 같은 맥락(PR 리뷰 트레일러·요구사항 추적이 요청 글을 다시
- *     읽는다)을 잃지 않는다.
- *  2. 요청 글이 "해주세요"처럼 부탁 어미만 있고 알맹이가 없으면(isClearChangeSentence가 거짓), 에이전트
- *     요약 첫 문장이 분명할 때 그것으로 대신한다(사람이 "이것 좀 봐주세요"처럼 구체적으로 말하지 않았을 때
- *     에이전트가 실제로 한 일을 더 잘 말해 준다).
- *  3. 그래도 분명하지 않으면 바뀐 파일에서 뽑는다.
- *  4. 요청 글마저 비어 있으면(데이터만 바뀐 체크포인트 등) "체크포인트"로 둔다.
+ *     읽는다)을 잃지 않는다. 단, 첫 문장이 "앞 실행이 턴 상한에 걸려…"처럼 지금 바뀐 것이 아니라 그 바깥
+ *     상황을 설명하면(SITUATIONAL_WORDS) isClearChangeSentence가 거짓이 되어 다음 단계로 넘어간다(실측:
+ *     세션 5b640fd3, 체크포인트 57cced6 — 제목이 상황 설명 그대로 나가 실제로 바뀐 shorts 모듈을 말하지 않았다).
+ *  2. 요청 글이 "해주세요"처럼 부탁 어미만 있거나 위 상황 설명이라 알맹이가 없으면, 에이전트 요약에서 고른 줄
+ *     (summaryTitleLine — "범위:" 줄이 있으면 그것, 없으면 첫 줄)이 분명할 때 그것으로 대신한다. 모델을 새로
+ *     부르지 않고 이미 있는 완료 요약만 읽으므로 비용이 들지 않는다.
+ *  3. 그래도 분명하지 않으면, 요청 글에 요구사항 id(R22 등)가 있고 바뀐 파일에서 공통 모듈 이름을 찾을 수 있으면
+ *     "[R22] shorts 모듈을 고친다"처럼 만든다(requirementModuleCandidate) — 파일 이름만 나열하는 4번보다
+ *     요구사항 추적에 쓸모 있는 제목이 된다.
+ *  4. 그래도 안 되면 바뀐 파일 이름에서 뽑는다(describeChangeFromFiles).
+ *  5. 요청 글마저 비어 있으면(데이터만 바뀐 체크포인트 등) "체크포인트"로 둔다.
  * studio.yaml의 checkpoints.conventionalCommits를 껐을 때는 부르지 않고 기존 "요청: ..." 형식을 그대로 쓴다.
  */
 export function generateCommitSubject(request: string, changes: readonly PendingChange[], agentSummary?: string): string {
@@ -137,10 +216,7 @@ export function generateCommitSubject(request: string, changes: readonly Pending
   const budget = MAX_SUBJECT_CHARS - type.length - 2;
 
   const requestFirstLine = request.split('\n')[0]!.replace(/\s+/g, ' ').trim();
-  const summaryLine = agentSummary
-    ?.split('\n')
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
+  const summaryLine = summaryTitleLine(agentSummary);
 
   let candidate: string;
   const reviewFix = reviewFixCandidate(request);
@@ -151,7 +227,7 @@ export function generateCommitSubject(request: string, changes: readonly Pending
   } else if (summaryLine && isClearChangeSentence(firstSentence(summaryLine))) {
     candidate = toCommitMood(firstSentence(summaryLine));
   } else if (requestFirstLine) {
-    candidate = describeChangeFromFiles(changes);
+    candidate = requirementModuleCandidate(request, changes) ?? describeChangeFromFiles(changes);
   } else {
     candidate = '체크포인트';
   }
