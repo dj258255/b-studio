@@ -81,6 +81,10 @@ describe('detectProject', () => {
     expect(compose).toContain('configs:\n  b_studio_mockito_agent_init:\n    content: |');
     expect(compose).toContain('-javaagent:');
     expect(compose).toContain('mockito-core');
+    // compose가 ${...}를 환경 변수로 치환하지 않게 Groovy 보간의 $는 $$로 적는다. 하나라도 그대로 남으면
+    // "invalid interpolation format"으로 compose 전체가 뜨지 않는다(docker compose config로 확인)
+    expect(compose).toContain('-javaagent:$${jar.absolutePath}');
+    expect(compose).not.toMatch(/(^|[^$])\$\{/m);
     // 이미 javaagent가 붙어 있으면 다시 붙이지 않는다(중복 방지)
     expect(compose).toContain("it.startsWith('-javaagent:') && it.contains('mockito-core')");
   });

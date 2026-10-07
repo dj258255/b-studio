@@ -2323,5 +2323,10 @@ compose의 일반(non-swarm) `configs:`가 파일로 그대로 마운트되는�
 - 실제 Gradle 프로젝트(호스트에 이미 받아 둔 Gradle 8.12·mockito-core 5.14.2·junit-jupiter 캐시 재사용, `--offline`, 새 다운로드 없음)를 같은 공유 폴더 cwd에서 돌려 end-to-end로 확인: 이 init 스크립트 없이 `./gradlew test`는 `Could not initialize inline Byte Buddy mock maker`로 실패하고, 있으면 `b-studio: added -javaagent:mockito-core-5.14.2.jar to :test` 로그와 함께 `BUILD SUCCESSFUL`.
 - `apps/studio/lib/server/project-detect.test.ts`에 테스트: 테스트 명령이 있는 Gradle 서비스는 `mockitoAgentInit: true`와 compose의 서비스별 `configs:` 참조 + 최상위 `configs:` 내용(javaagent·중복 방지 조건 포함)을 갖는 것, Maven 서비스는 `mockitoAgentInit`이 없는 것, Next.js 같은 비-JVM 서비스는 compose에 `configs:` 자체가 없는 것. `project-detect.test.ts` 57개 전부와 `pnpm -r typecheck`가 통과했다.
 
+### 예상과 실제
+위 검증은 세 가지를 따로 확인했다. 스크립트를 Gradle에 직접 넣은 실행, `configs: content:` 마운트, 생성 문자열이다. 생성된 compose를 그대로 `docker compose config`에 넣어 보지는 않았다. 머지 전 검토에서 넣어 보니 `invalid interpolation format for configs.b_studio_mockito_agent_init.content`로 실패했다. compose는 파일 안의 `${...}`를 환경 변수로 치환하려 들고, 스크립트의 Groovy 보간 `${jar.absolutePath}`가 여기에 걸렸다. 그대로 머지했다면 테스트 명령이 있는 모든 Gradle 세션이 기동부터 실패했을 것이다.
+
+`composeYaml`이 스크립트를 넣을 때 `$`를 `$$`로 적게 했다. 같은 모양의 compose를 `docker compose run`으로 띄워, 컨테이너 안 파일에 `${jar.absolutePath}`가 `$` 하나로 들어가는 것을 확인했다. 생성된 compose에 이스케이프하지 않은 `${`가 없는지 보는 테스트도 더했다.
+
 ### 배운 점
 `docker inspect`의 `CapAdd=[] CapDrop=[]`과 attach 실패가 같은 시점에 관찰됐다고 capability가 원인이라고 단정하면 안 된다 — 두 가지를 독립적으로 바꿔 가며(capability만 켜고 끄기, cwd만 바꾸기) 어느 쪽이 실제로 결과를 바꾸는지 각각 재현해야 한다. 이번에는 "형제 JVM attach는 capability 유무와 무관하게 성공한다"는 반례 하나가 첫 가설 전체를 기각했다.

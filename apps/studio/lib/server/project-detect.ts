@@ -1112,7 +1112,9 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
     // Swarm이 아닌 일반 compose에서도 configs:는 파일로 그대로 마운트된다(docker compose 2.23.1+에서 확인). 여러
     // Gradle 서비스가 같은 init 스크립트를 공유하므로 내용은 여기 한 번만 쓴다(서비스 쪽은 source 이름만 가리킨다)
     lines.push('', 'configs:', `  ${MOCKITO_AGENT_INIT_CONFIG_NAME}:`, '    content: |');
-    for (const line of MOCKITO_AGENT_INIT_SCRIPT.split('\n')) lines.push(line.length > 0 ? `      ${line}` : '');
+    // compose는 파일 안의 ${...}를 환경 변수로 치환하려 들어, Groovy 문자열 보간(${jar.absolutePath})이 그대로 있으면
+    // "invalid interpolation format"으로 compose 전체가 뜨지 않는다. $를 $$로 적어야 컨테이너 안 파일에 $ 하나로 들어간다
+    for (const line of MOCKITO_AGENT_INIT_SCRIPT.split('\n')) lines.push(line.length > 0 ? `      ${line.replaceAll('$', '$$$$')}` : '');
   }
   lines.push('');
   return lines.join('\n');
