@@ -151,6 +151,19 @@ describe('generateCommitSubject', () => {
     expect(subject).toBe('feat: shorts 모듈을 R25(숏폼↔상품 다중 연결)까지 확장했습니다');
   });
 
+  it('부탁 어미를 뗀 뒤 "R26의 백엔드 부분을"처럼 목적격 조사로 끝나는 명사구만 남아도 요청 글을 제목으로 쓰지 않는다(도그푸딩 버그 리포트)', () => {
+    const request = 'R26의 백엔드 부분을 해 주세요.';
+    const summary = '숏폼 피드 API에 커서 기반 페이지네이션과 다음 영상 미리 불러오기 힌트를 더했습니다.';
+    const subject = generateCommitSubject(request, [change('apps/commerce/src/shorts/feed.ts')], summary);
+    expect(subject).not.toBe('feat: R26의 백엔드 부분을');
+    expect(subject).toBe('feat: 숏폼 피드 API에 커서 기반 페이지네이션과 다음 영상 미리 불러오기 힌트를 더했습니다');
+  });
+
+  it('동사가 살아 있는 요청("주문 API를 정의해 주세요")은 그대로 커밋 문체로 바꿔 쓴다', () => {
+    const subject = generateCommitSubject('주문 API를 정의해 주세요', [change('apps/commerce/src/order/api.ts')]);
+    expect(subject).toBe('feat: 주문 API를 정의한다');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');

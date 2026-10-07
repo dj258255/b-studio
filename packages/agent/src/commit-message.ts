@@ -81,11 +81,19 @@ const PROGRESS_REPORT_WORDS = /검토\s*결과|확인해\s*보니|돌아보니|�
 const BARE_ID_OR_PRONOUN_FRAGMENT = /^(R\d+(?:\.\d+)?|이것|그것|저것|이거|그거|저거|이걸|그걸|저걸|이|그|저)(은|는|이|가|을|를|도|만|에|에서|로|으로)?$/;
 
 /**
+ * 부탁 어미를 뗀 결과가 목적격 조사(을/를)로 끝나면 동사가 빠진 명사구 조각이다(도그푸딩 버그 리포트: "R26의
+ * 백엔드 부분을 해 주세요."가 "feat: R26의 백엔드 부분을"이 됐다). BARE_ID_OR_PRONOUN_FRAGMENT는 id·대명사 하나만
+ * 남는 경우만 잡아서, 앞에 수식어가 붙은 긴 조각은 그대로 제목이 됐다. "마을"·"가을"처럼 을로 끝나는 명사가
+ * 제목 끝에 올 수는 있지만, 그때는 에이전트 요약으로 넘어갈 뿐 잘못된 제목이 되지는 않는다.
+ */
+const DANGLING_OBJECT_PARTICLE = /\S(을|를)$/;
+
+/**
  * 한 줄이 "무엇이 바뀌었는지" 분명히 말하는 서술문인지 본다(요청 글·에이전트 요약 둘 다에 쓴다). 너무 짧거나,
  * 물음표로 끝나거나, 앞 실행·인프라 같은 상황 설명이거나(SITUATIONAL_WORDS), 경과를 보고하는 말투거나
  * (PROGRESS_REPORT_WORDS), 말투를 커밋 문체로 정리(toCommitMood)하고도 부탁 어미만 남거나(예: "해주세요"
- * 그 자체) 요구사항 id·대명사에 조사만 남으면(예: "R25를", "이걸", BARE_ID_OR_PRONOUN_FRAGMENT) 분명하지
- * 않다고 보고 다음 대체 경로로 넘긴다.
+ * 그 자체) 요구사항 id·대명사에 조사만 남으면(예: "R25를", "이걸", BARE_ID_OR_PRONOUN_FRAGMENT), 목적격 조사로 끝나는 명사구만
+ * 남으면(예: "R26의 백엔드 부분을", DANGLING_OBJECT_PARTICLE) 분명하지 않다고 보고 다음 대체 경로로 넘긴다.
  */
 function isClearChangeSentence(line: string): boolean {
   const trimmed = line.trim();
@@ -96,6 +104,7 @@ function isClearChangeSentence(line: string): boolean {
   const converted = toCommitMood(trimmed).trim();
   if (converted.length < 2) return false;
   if (BARE_ID_OR_PRONOUN_FRAGMENT.test(converted)) return false;
+  if (DANGLING_OBJECT_PARTICLE.test(converted)) return false;
   return !TRAILING_REQUEST_PHRASING.test(converted);
 }
 
