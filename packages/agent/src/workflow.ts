@@ -1,7 +1,7 @@
 import { AUTO_PAGE_MAX, type LoadedProject, type WorkflowStage, type WorkflowSpec } from '@b-studio/spec';
 import { routesFromChangedFiles } from './next-routes';
 import { DEFAULT_DENIED_COMMANDS, isProtectedPath, type ExecutionPolicy } from './policy';
-import { servicesForFiles } from './services';
+import { ownsFile, servicesForFiles } from './services';
 
 /**
  * 모델의 도구 호출이나 턴 종료로 진입을 알 수 있는 진행 단계와 달리, 플랫폼이 직접 실행해 통과 여부를 판정하는 단계.
@@ -219,7 +219,7 @@ export function uncoveredChangeWarnings(project: LoadedProject, changedFiles: re
     if (!entry) continue;
     const [, spec] = entry;
 
-    if (!testedServices.has(name) && changedFiles.some((file) => isWithinService(file, spec.path) && TEST_SIGNAL_PATTERN.test(file))) {
+    if (!testedServices.has(name) && changedFiles.some((file) => ownsFile(spec, file) && TEST_SIGNAL_PATTERN.test(file))) {
       warnings.push({
         stage: 'review',
         name: `${COVERAGE_GAP_PREFIX}: ${name} 테스트`,
@@ -248,11 +248,6 @@ export function uncoveredChangeWarnings(project: LoadedProject, changedFiles: re
     }
   }
   return warnings;
-}
-
-function isWithinService(file: string, servicePath: string): boolean {
-  const root = servicePath.replace(/^\.\/?/, '').replace(/\/+$/, '');
-  return root === '' || file === root || file.startsWith(`${root}/`);
 }
 
 /**

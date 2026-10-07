@@ -859,6 +859,61 @@ describe('detectProject: Gradle·Maven 래퍼를 상위 폴더까지 거슬러 �
   });
 });
 
+describe('detectProject: 서비스 폴더 밖 서브모듈을 includes로 찾는다(도그푸딩 마찰 119, ADR-138)', () => {
+  it('Gradle settings.gradle의 include가 projectDir로 서비스 폴더 밖 형제 폴더를 가리키면 includes에 더한다(BE-commerce 실측 구조)', async () => {
+    const root = await repo({
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\ninclude(':media')\nproject(':media').projectDir = file('../media')\n",
+      'commerce/build.gradle': springGradle,
+      // media는 commerce가 기대는 서브모듈일 뿐 자기 Spring Boot 앱이 아니다(별도 서비스로 다시 잡히면 안 된다)
+      'media/build.gradle': "dependencies { implementation 'org.springframework:spring-web' }",
+    });
+
+    const detection = await detectProject(root);
+    const [service] = detection.services;
+
+    expect(service!.path).toBe('commerce');
+    expect(service!.includes).toEqual(['media']);
+    expect(service!.notes.some((note) => note.includes('includes에 더했습니다'))).toBe(true);
+
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('includes: [media]');
+
+    const project = await writeAndLoad(root, generateFiles(detection));
+    expect(project.managed.find(([name]) => name === 'commerce')?.[1]).toMatchObject({ includes: ['media'] });
+  });
+
+  it('include가 서비스 폴더 안(기본 위치)을 가리키면 이미 path로 잡히므로 includes에 넣지 않는다', async () => {
+    const root = await repo({
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\ninclude 'sub'\n",
+      'commerce/build.gradle': springGradle,
+      'commerce/sub/build.gradle': '',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.includes).toBeUndefined();
+  });
+
+  it('Maven pom.xml의 <modules>가 서비스 폴더 밖 상대 경로를 가리키면 includes에 더한다', async () => {
+    const root = await repo({
+      'commerce/pom.xml': '<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent><modules><module>../media</module></modules></project>',
+      'media/pom.xml': '<project></project>',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.includes).toEqual(['media']);
+  });
+
+  it('settings.gradle이 없거나(래퍼만 있는 단순 프로젝트) 서브모듈이 없으면 includes를 만들지 않는다', async () => {
+    const root = await repo({ 'commerce/build.gradle': springGradle, 'commerce/gradlew': '#!/bin/sh' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.includes).toBeUndefined();
+  });
+});
+
 describe('detectProject: workflow.tests 생성(버그 리포트 104 — studio.yaml에 테스트 명령이 없어 게이트가 test 단계를 건너뜀)', () => {
   it('루트 래퍼 + 하위 Gradle 서비스(pay 구조)는 상위 래퍼로 -p를 가리키고, 개발 서버와 잠금이 부딪히지 않게 테스트 전용 캐시 디렉터리를 쓴다', async () => {
     const root = await repo({

@@ -98,6 +98,35 @@ describe('servicesForFiles', () => {
     const empty = { ...project, managed: [] } as unknown as typeof project;
     expect(servicesForFiles(empty, ['compose.yaml', 'studio.yaml'])).toEqual({ services: [], unmatched: ['compose.yaml', 'studio.yaml'] });
   });
+
+  describe('includes(ADR-138, 도그푸딩 마찰 119): 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로', () => {
+    const commerce: LoadedProject = {
+      ...project,
+      managed: [
+        ['commerce', { source: 'managed', template: 'spring-boot', path: 'commerce', port: 8080, preview: 'openapi', includes: ['media'] }],
+        ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' }],
+      ],
+    } as unknown as LoadedProject;
+
+    it('includes로 선언한 폴더 밖 경로도 그 서비스 소유로 본다', () => {
+      expect(servicesForFiles(commerce, ['media/src/main/java/Shorts.java'])).toEqual({ services: ['commerce'], unmatched: [] });
+    });
+
+    it('includes 폴더 밖의 다른 파일은 여전히 매인 곳이 없는 파일로 모은다', () => {
+      expect(servicesForFiles(commerce, ['scripts/run.sh'])).toEqual({ services: [], unmatched: ['scripts/run.sh'] });
+    });
+
+    it('두 서비스가 같은 경로를 선언하면(공유 라이브러리 등) 겹치는 파일은 둘 다 재시작 대상으로 본다', () => {
+      const overlapping: LoadedProject = {
+        ...project,
+        managed: [
+          ['commerce', { source: 'managed', template: 'spring-boot', path: 'commerce', port: 8080, preview: 'openapi', includes: ['shared'] }],
+          ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser', includes: ['shared'] }],
+        ],
+      } as unknown as LoadedProject;
+      expect(servicesForFiles(overlapping, ['shared/types.ts'])).toEqual({ services: ['commerce', 'web'], unmatched: [] });
+    });
+  });
 });
 
 describe('verifyChanges', () => {

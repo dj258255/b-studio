@@ -114,6 +114,14 @@ export interface DetectedService {
    * 건너뛰게 한다. Maven은 이번 범위 밖이다(ADR-134의 "검토한 선택지" 참고)
    */
   mockitoAgentInit?: boolean;
+  /**
+   * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드에 포함되는 경로(프로젝트 루트 기준, 도그푸딩 마찰 119, ADR-138).
+   * Gradle `settings.gradle(.kts)`의 `include`가 `projectDir`로 서비스 폴더 밖 형제 폴더를 가리키거나
+   * (`detectExtraModulePaths`), Maven `pom.xml`의 `<modules>`가 상대 경로로 폴더 밖을 가리킬 때 채운다.
+   * specYaml이 `services.<이름>.includes`로 적고, `servicesForFiles`(packages/agent/src/services.ts)가
+   * `path`와 똑같이 재시작·게이트 재확인 대상으로 본다
+   */
+  includes?: string[];
 }
 
 export interface ProjectDetection {
@@ -803,6 +811,16 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
       );
     }
   }
+  // 이 서비스 폴더 자신이 Gradle·Maven 프로젝트 루트면(settings.gradle(.kts)·pom.xml이 여기 있다), 그 서브모듈 중
+  // 서비스 폴더 밖(형제 폴더 등)을 가리키는 것이 있는지 본다(도그푸딩 마찰 119, ADR-138) — 같은 jar로 배포되고
+  // 같은 test 명령이 함께 돌리는 경로인데 path 접두사만으로는 "서비스 밖 파일"로 잘못 분류된다
+  const includes = await detectExtraModulePaths(root, dir, relative, isGradle);
+  if (includes.length > 0) {
+    notes.push(
+      `${isGradle ? 'settings.gradle(.kts)의 include' : 'pom.xml의 <modules>'}가 이 서비스 폴더 밖 ${includes.join(', ')}을(를) 가리켜 includes에 더했습니다. ` +
+        '같은 빌드·테스트에 포함되는 경로입니다(재시작·게이트 재확인 대상도 이 서비스와 같아집니다). 틀렸으면 studio.yaml에서 고치세요',
+    );
+  }
   return {
     template: 'spring-boot',
     path: relative,
@@ -825,7 +843,76 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
     dependsOn: [],
     notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
     ...(testCommand ? { testCommand, ...(mockitoAgentInit ? { mockitoAgentInit: true } : {}) } : {}),
+    ...(includes.length > 0 ? { includes } : {}),
   };
+}
+
+/**
+ * 서비스 폴더(dir, settings.gradle(.kts)·pom.xml이 있는 자리)가 선언한 서브모듈 중 서비스 폴더 밖(형제 폴더 등)을
+ * 가리키는 것만 프로젝트 루트 기준 상대 경로(posix)로 돌려준다. 서비스 폴더 안을 가리키는 흔한 서브모듈(예:
+ * `include 'sub'`가 기본값대로 `dir/sub`를 가리키는 경우)은 이미 `path` 접두사로 잡히므로 뺀다.
+ *  - Gradle: `include(':media')`·`include 'media'`(Groovy·Kotlin DSL 모두, 콜론으로 중첩 경로도 받는다)를 모으고,
+ *    `project(':media').projectDir = file('../media')` 오버라이드가 있으면 그 경로를, 없으면 모듈 이름을 `/`로
+ *    이어 만든 기본 위치를 쓴다
+ *  - Maven: `<modules><module>../media</module></modules>`의 상대 경로를 그대로 쓴다
+ * 정규식으로 원문만 훑는다(Gradle·Maven을 직접 실행하지 않는다 — 래퍼·도구가 없는 프로젝트도 감지해야 한다).
+ * 변수로 조립한 경로나 여러 줄에 걸친 `include` 목록처럼 복잡한 선언은 놓칠 수 있다(알려진 한계)
+ */
+async function detectExtraModulePaths(root: string, dir: string, relative: string, isGradle: boolean): Promise<string[]> {
+  const extra: string[] = [];
+  if (isGradle) {
+    const settings = (await readText(path.join(dir, 'settings.gradle.kts'))) ?? (await readText(path.join(dir, 'settings.gradle')));
+    if (!settings) return extra;
+    const overrides = gradleProjectDirOverrides(settings);
+    for (const moduleName of gradleIncludedModules(settings)) {
+      const override = overrides.get(moduleName);
+      const resolved = path.join(dir, override ?? moduleName.split(':').filter(Boolean).join('/'));
+      const relativeToRoot = toPosixPath(path.relative(root, resolved));
+      if (!isWithinFolder(relativeToRoot, relative)) extra.push(relativeToRoot);
+    }
+  } else {
+    const pom = await readText(path.join(dir, 'pom.xml'));
+    if (!pom) return extra;
+    for (const modulePath of mavenModulePaths(pom)) {
+      const relativeToRoot = toPosixPath(path.relative(root, path.join(dir, modulePath)));
+      if (!isWithinFolder(relativeToRoot, relative)) extra.push(relativeToRoot);
+    }
+  }
+  return extra;
+}
+
+/** candidate가 folder 자신이거나 그 아래인지('.'는 저장소 루트 전체를 가리키므로 항상 안쪽으로 본다) */
+function isWithinFolder(candidate: string, folder: string): boolean {
+  return folder === '.' || candidate === folder || candidate.startsWith(`${folder}/`);
+}
+
+/**
+ * `include 'a', ':b'`(Groovy)·`include(":a")`(Kotlin DSL) 모두에서 모듈 이름(앞 콜론은 뗀다)을 모은다.
+ * `includeBuild`(복합 빌드, 별도 기능)는 단어 경계로 걸러 섞이지 않게 한다
+ */
+function gradleIncludedModules(settings: string): string[] {
+  const names = new Set<string>();
+  for (const match of settings.matchAll(/\binclude(?![A-Za-z])\s*(?:\(([^)]*)\)|([^\n]+))/g)) {
+    const body = match[1] ?? match[2] ?? '';
+    for (const literal of body.matchAll(/['"]([^'"]+)['"]/g)) names.add(literal[1]!.replace(/^:/, ''));
+  }
+  return [...names];
+}
+
+/** `project(':a').projectDir = file('../other')`(Groovy)·`File("../other")`(Kotlin DSL) 오버라이드. 키는 앞 콜론을 뗀 모듈 이름 */
+function gradleProjectDirOverrides(settings: string): Map<string, string> {
+  const overrides = new Map<string, string>();
+  for (const match of settings.matchAll(/project\(['"]:?([^'"]+)['"]\)\.projectDir\s*=\s*(?:file|File)\(['"]([^'"]+)['"]\)/g)) {
+    overrides.set(match[1]!, match[2]!);
+  }
+  return overrides;
+}
+
+/** `<modules><module>../other</module></modules>` 안의 모듈 경로 문자열(공백만 다듬는다) */
+function mavenModulePaths(pom: string): string[] {
+  const modulesBlock = pom.match(/<modules>([\s\S]*?)<\/modules>/);
+  if (!modulesBlock) return [];
+  return [...modulesBlock[1]!.matchAll(/<module>([^<]+)<\/module>/g)].map((match) => match[1]!.trim());
 }
 
 /**
@@ -999,6 +1086,8 @@ function specYaml(detection: ProjectDetection): string {
     const ready = [`path: ${service.ready.path}`, ...(service.ready.expectStatus ? [`expectStatus: ${service.ready.expectStatus}`] : []), `timeoutSeconds: ${service.template === 'spring-boot' ? 900 : 300}`];
     lines.push(`    ready: { ${ready.join(', ')} }`);
     if (service.contract) lines.push(`    contract: { extract: ${service.contract} }`);
+    // 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로(ADR-138). servicesForFiles가 path와 똑같이 재시작 대상으로 본다
+    if (service.includes && service.includes.length > 0) lines.push(`    includes: [${service.includes.map(yamlString).join(', ')}]`);
     for (const note of service.notes) lines.push(`    # 확인: ${note}`);
   }
   lines.push(...databasesYaml(detection.infra));

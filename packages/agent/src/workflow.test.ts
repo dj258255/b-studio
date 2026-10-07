@@ -179,6 +179,24 @@ describe('project workflow', () => {
       const project = projectWith({}, [apiService]);
       expect(uncoveredChangeWarnings(project, ['apps/api/src/main/resources/templates/index.html'])).toEqual([]);
     });
+
+    it('includes로 선언한 서비스 폴더 밖 경로의 테스트 파일도 그 서비스의 커버리지로 본다(ADR-138, 도그푸딩 마찰 119)', () => {
+      const commerceWithMedia: LoadedProject['managed'][number] = [
+        'commerce',
+        { source: 'managed', template: 'spring-boot', path: 'commerce', port: 8080, preview: 'openapi', includes: ['media'] } as never,
+      ];
+      const project = projectWith({ tests: [{ ...unit, service: 'web' }] }, [webService, commerceWithMedia]);
+      const warnings = uncoveredChangeWarnings(project, ['media/lib/shorts.test.ts']);
+      expect(warnings).toEqual([
+        {
+          stage: 'review',
+          name: `${COVERAGE_GAP_PREFIX}: commerce 테스트`,
+          ok: true,
+          attempts: 1,
+          detail: expect.stringContaining("workflow.tests에 'commerce' 서비스를 다루는 항목이 없어"),
+        },
+      ]);
+    });
   });
 
   describe('formatCheckedCoverage(ADR-135)', () => {

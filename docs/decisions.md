@@ -158,6 +158,7 @@
 - [ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다](#adr-135-게이트가-다루지-않는-서비스에-생긴-테스트화면-변경을-경고로-드러내고-체크포인트-본문에-확인-범위를-남긴다)
 - [ADR-136 compose·studio.yaml이 바뀌면 그 파일이 속한 서비스 폴더를 찾는 대신 managed 서비스를 전부 다시 띄운다](#adr-136-composestudioyaml이-바뀌면-그-파일이-속한-서비스-폴더를-찾는-대신-managed-서비스를-전부-다시-띄운다)
 - [ADR-137 studio.yaml에 서비스별 systemPackages를 선언하면 생성 Dockerfile이 빌드 때 OS 패키지를 설치한다](#adr-137-studioyaml에-서비스별-systempackages를-선언하면-생성-dockerfile이-빌드-때-os-패키지를-설치한다)
+- [ADR-138 studio.yaml 서비스에 includes를 더해, 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로도 재시작·게이트 대상으로 본다](#adr-138-studioyaml-서비스에-includes를-더해-서비스-폴더-밖이지만-같은-빌드에-포함되는-경로도-재시작게이트-대상으로-본다)
 
 ---
 
@@ -5713,3 +5714,52 @@ compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `doc
 - `systemPackages`는 생성 Dockerfile(`Dockerfile.b-studio`)에만 적용된다 — 사용자가 직접 Dockerfile을 쓰는 프로젝트는 이 선언이 아무 효과가 없다(조용히 무시되는 대신, Dockerfile 자체가 없어 반영할 자리가 없다는 뜻이라 오류도 나지 않는다). 이런 프로젝트는 지금처럼 Dockerfile을 직접 고쳐야 한다.
 - 지원 계열을 apt·apk 둘로 좁혔다. 베이스 이미지 계열을 바꾸는 것은 드물고(지금 모든 템플릿이 Debian 계열을 쓴다), 계열이 하나 더 필요해지면(예: Alpine 템플릿 추가) `detectPackageFamily`에 패턴을 추가하면 된다 — 이 좁은 범위가 "모르는 계열은 오류"라는 판단 기준 3을 지키는 데도 도움이 된다.
 - egress 허용 목록(패키지 생태계 저장소)이 임의 바이너리를 받는 통로라는 한계는 이 ADR로 닫히지 않는다(트러블슈팅 75의 "보안" 참고). `systemPackages`는 "런타임 apt-get을 빌드 때 선언으로 대체"할 뿐, "패키지 관리자가 받은 파일 안의 임의 코드 실행"이라는 더 넓은 경로는 그대로 남아 있다.
+
+## ADR-138 studio.yaml 서비스에 includes를 더해, 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로도 재시작·게이트 대상으로 본다
+
+상태: 채택
+관련: ADR-088, ADR-101, ADR-133, ADR-135, ADR-136, ADR-137
+
+### 맥락
+- BE-commerce 세션(pay-2, 세션 5b640fd3, 읽기만)에서 숏폼 코드를 저장소 최상위 `media/`로 옮겼다(도그푸딩 마찰 119). `media/`는 commerce 빌드의 Gradle 서브모듈이다 — `commerce/settings.gradle`에 `include(':media')`가 있고, `project(':media').projectDir`가 서비스 폴더 밖 형제 폴더(`../media`)를 가리킨다. `commerce/build.gradle`의 `implementation project(':media')`로 같은 jar에 들어가고, 게이트의 `./gradlew -p commerce test`가 `:media:test`도 함께 돌린다.
+- 체크포인트 f631255의 검증 보고서는 `media/...` 파일 30여 개를 전부 "재시작으로 확인하지 못한 파일"(unmatched)로 분류했다. `packages/agent/src/services.ts`의 `servicesForFiles`가 바뀐 파일이 서비스 폴더(`service.path`, 여기서는 `commerce`) 밑에 있는지만 보기 때문이다 — 서비스 폴더 밖이지만 그 서비스 빌드에 포함되는 경로를 알 방법이 없었다.
+- 이 판정 하나를 네 호출부가 그대로 쓴다: 재시작 대상(`packages/agent/src/verify.ts`의 `restartServicesFor`), 게이트가 실패한 서비스를 다시 확인할 파일 모으기(`gate.ts`의 `#filesToVerify`), `restart_service` 전 동기화할 파일 고르기(`tools.ts`), coverage-gap 경고(`workflow.ts`의 `uncoveredChangeWarnings`, ADR-135). `workflow.ts`에는 같은 접두사 매칭 로직이 `isWithinService`라는 이름으로 따로 복제돼 있었다 — 한쪽만 고치고 잊기 쉬운 상태였다.
+- 컨테이너 쪽은 이미 열려 있다: ADR-088이 모든 managed 서비스에 프로젝트 루트 전체를 `.:/workspace`로 마운트해 둬서, `media/`는 BE-commerce의 commerce 컨테이너 안에서 이미 보인다(`working_dir`만 서비스 폴더를 가리킨다). 이번 문제는 순수하게 **b-studio가 "무엇이 바뀌었는지" 판정하는 로직**의 문제이지, compose 마운트·빌드 컨텍스트의 문제가 아니다.
+
+### 판단 기준
+1. 실제 빌드 포함 관계(Gradle `projectDir` 오버라이드, Maven `<modules>`)를 반영할 것 — 추측이 아니라 선언을 읽을 것.
+2. 기존 재시작·게이트 경로(ADR-136이 이미 정리한 `servicesForFiles` 단일 지점)를 그대로 재사용할 것 — 새 판정 경로를 또 만들지 않을 것.
+3. 이미 studio.yaml이 있는 프로젝트(BE-commerce 등)도 기존 "생성 파일 다시 만들기"(ADR-101) 흐름으로 받을 수 있을 것 — 새 마이그레이션 경로를 만들지 않을 것.
+4. 사람이 감지가 놓친 경로를 직접 고칠 수 있을 것(복잡한 Gradle 선언은 정규식으로 다 잡지 못한다).
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) studio.yaml 서비스에 `includes`(프로젝트 루트 기준 상대 경로 배열) 선언 필드만 추가, 사람이 직접 적음 | 기준 2·3은 만족하지만 기준 1(실제 포함 관계 자동 반영)을 혼자서는 만족하지 못한다 — BE-commerce처럼 이미 멀티 모듈인 프로젝트도 사람이 Gradle 설정을 읽고 옮겨 적어야 한다 |
+| (b) 감지(`detectSpring`)만 자동으로 채우고 선언 필드는 두지 않음(내부적으로만 판정) | 기준 4 위반 — 정규식이 복잡한 선언(변수로 조립한 경로, 여러 줄 `include` 목록)을 놓치면 고칠 자리가 없다. studio.yaml에 안 보이면 사람이 "왜 이 파일이 재시작 대상인지" 알 수 없다(ADR-137이 `systemPackages`를 선택할 때 쓴 "사람이 볼 수 있을 것" 기준과 같다) |
+| (c) 둘 다: `includes` 필드를 스키마에 두고, 감지가 자동으로 채우되 사람이 studio.yaml에서 고칠 수 있게 함 | 네 기준을 모두 만족한다. ADR-137의 `systemPackages`와 같은 모양(감지 자동 채움 + 사람이 보는 선언 + "생성 파일 다시 만들기"로 기존 프로젝트도 받음). **채택** |
+| (d) `servicesForFiles`가 매 호출마다 `settings.gradle`·`pom.xml`을 파일시스템에서 다시 읽어 판정 | 기준 2 위반(판정 지점이 파일 I/O를 갖게 돼 테스트·게이트·도구 호출마다 비용이 붙는다) — Gradle·Maven 래퍼가 없는 프로젝트에서도 호출돼야 하므로 "실행해서 확인"은 애초에 불가능하고, 결국 정규식으로 원문을 읽어야 하는데 그럴 거면 감지 시점(폴더 열기)에 한 번만 하는 (c)가 낫다. 기각 |
+
+### 결정
+1. **스키마(`packages/spec/src/schema.ts`)**: `ManagedServiceSchema`에 `includes: z.array(PROJECT_RELATIVE_PATH).max(20).optional()`을 더했다. `PROJECT_RELATIVE_PATH`는 기존 `RELATIVE_PATH`(스냅샷 키 등에 쓰는, `..`·절대 경로를 거부하는 상대 경로)와 글자 규칙은 같고 "서비스 폴더 밖(형제 폴더 등)도 가리킬 수 있다"는 뜻만 다르다(에러 문구를 다르게 하려고 따로 뒀다).
+2. **판정 로직 통합(`packages/agent/src/services.ts`)**: `servicesForFiles`가 파일마다 `path`나 `includes` 중 하나라도 걸리는 서비스를 전부 "소유자"로 본다(이름을 `ownsFile`로 뽑아 export). 전에는 `project.managed.find(...)`로 첫 매치 서비스 하나만 골랐는데, 지금은 `.filter(...)`로 바꿔 겹치는 서비스를 모두 재시작 대상(`hit` Set)에 더한다. `workflow.ts`의 `uncoveredChangeWarnings`가 따로 갖고 있던 `isWithinService`(같은 접두사 매칭을 복제한 함수)를 지우고 이 `ownsFile`을 그대로 불러 쓰게 했다 — 중복 로직이 하나로 줄었다. `gate.ts`·`tools.ts`·`packages/agent/src/verify.ts`는 모두 `servicesForFiles`를 그대로 호출하므로 수정 없이 자동으로 `includes`를 받는다.
+3. **폴더 열기 감지(`apps/studio/lib/server/project-detect.ts`의 `detectSpring`)**: 서비스 폴더 자신의 `settings.gradle(.kts)`·`pom.xml`을 정규식으로 훑는 `detectExtraModulePaths`를 더했다.
+   - Gradle: `include(':media')`·`include 'media'`(Groovy·Kotlin DSL, `includeBuild`는 단어 경계로 걸러 섞이지 않는다)로 선언한 모듈 이름을 모으고, `project(':media').projectDir = file('../media')` 오버라이드가 있으면 그 경로를, 없으면 모듈 이름을 `/`로 이은 기본 위치(보통 서비스 폴더 안이라 이미 `path`로 잡힌다)를 쓴다.
+   - Maven: `<modules><module>../media</module></modules>`의 상대 경로를 그대로 쓴다.
+   - 두 경우 모두 **서비스 폴더 밖을 가리키는 것만** `includes`에 넣는다(폴더 안을 가리키면 이미 `path` 접두사로 잡히므로 중복 선언하지 않는다). Gradle·Maven을 실행하지 않고 원문만 읽으므로 래퍼가 없는 프로젝트에서도 동작하지만, 변수로 조립한 경로·여러 줄에 걸친 `include` 목록 같은 복잡한 선언은 놓칠 수 있다(알려진 한계, 판단 기준 4로 보완한다).
+   - `specYaml`이 찾은 경로를 `includes: [media]`로 적고, 서비스 notes에 "확인:" 메모(어떤 선언을 읽었는지, 틀렸으면 고치라는 안내)를 남긴다.
+4. **이미 studio.yaml이 있는 프로젝트(BE-commerce 등)**: 새 반영 경로를 만들지 않았다. "생성 파일 다시 만들기"(ADR-101, `detectProject(root, { ignoreExistingSpec: true })`)가 같은 `detectSpring` 경로를 다시 타므로, 다시 훑으면 `includes`가 자동으로 채워진 studio.yaml 제안이 나온다 — 기존 handEdited diff·파일별 덮어쓰기 선택 흐름을 그대로 쓴다(이번 변경이 그 정책을 바꾸지 않았다, ADR-101의 기존 패턴과 같다). 세션이 떠 있는 동안 사람이 studio.yaml에 직접 `includes`를 적어 넣어도, ADR-136이 이미 만들어 둔 "compose·studio.yaml이 바뀌면 managed 서비스를 전부 다시 띄운다" 경로가 그 선언을 즉시 받는다(`servicesForFiles`가 다음 호출부터 바로 `includes`를 본다 — `systemPackages`처럼 별도 동기화 모듈이 필요 없다, `includes`는 Dockerfile 본문을 고치는 선언이 아니라 판정 로직이 읽는 선언이기 때문이다).
+5. **겹침 정책**: 두 서비스가 같은 경로를 `path`나 `includes`로 선언하면(공유 라이브러리 폴더 등) 그 경로가 바뀌었을 때 둘 다 영향받는 서비스로 본다. 재시작을 덜 하는 쪽보다 더 하는 쪽이 안전하다고 봤다 — "확인하지 못한 파일"로 잘못 분류되는 이번 마찰의 반대쪽 실패(정말 영향받는 서비스를 재시작하지 않는 것)가 더 나쁘다.
+6. **컨테이너 마운트는 바꾸지 않았다**: ADR-088이 이미 모든 managed 서비스에 프로젝트 루트 전체(`.:/workspace`)를 마운트해 둔다(`apps/studio/lib/server/project-detect.ts`의 `composeYaml`). `includes`는 b-studio의 판정 로직에만 영향을 주고, compose의 볼륨·빌드 컨텍스트는 고칠 필요가 없었다.
+
+### 검증 결과
+- `packages/spec/src/spec.test.ts`: `includes`가 서비스 폴더 밖 경로를 받는 것, `..`·절대 경로를 스냅샷 키와 같은 규칙으로 거부하는 것, 생략하면 `undefined`인 것.
+- `packages/agent/src/verify.test.ts`(servicesForFiles): `includes`로 선언한 폴더 밖 경로를 그 서비스 소유로 보는 것, `includes` 밖의 다른 파일은 여전히 "매인 곳 없음"으로 모으는 것, 두 서비스가 같은 경로를 선언하면 겹치는 파일이 둘 다 재시작 대상이 되는 것.
+- `packages/agent/src/workflow.test.ts`(uncoveredChangeWarnings): `includes`로 선언한 서비스 폴더 밖 경로에 생긴 테스트 파일도 그 서비스의 coverage-gap 경고 대상이 되는 것.
+- `apps/studio/lib/server/project-detect.test.ts`: BE-commerce와 같은 구조(Gradle `include`+`projectDir` 오버라이드)에서 `includes`가 채워지고 notes·specYaml에 반영되는 것, 모듈이 서비스 폴더 안(기본 위치)을 가리키면 `includes`에 넣지 않는 것(이미 `path`로 잡힌다), Maven `<modules>`의 상대 경로를 같은 방식으로 읽는 것, `settings.gradle` 자체가 없거나 서브모듈이 없으면 `includes`를 만들지 않는 것.
+- `pnpm -r typecheck`(6/6)·`pnpm --filter @b-studio/studio lint`(오류 0)로 타입·린트를 확인했다. 실제 BE-commerce 세션(5b640fd3)이나 실제 `docker compose`로 재검증하지는 않았다 — 세션·컨테이너를 건드리지 말라는 제약 때문에 임시 저장소를 쓰는 단위 테스트로만 확인했다(확인하지 못한 것으로 남긴다). `ownsFile`로 로직을 합치면서 `gate.ts`·`tools.ts`가 자동으로 `includes`를 받는 것은 기존 `servicesForFiles` 테스트가 통과하는 것으로만 간접 확인했고, 두 파일 자신의 테스트를 새로 추가하지는 않았다(이미 `servicesForFiles` 하나만 호출하는 얇은 위임이라 중복 테스트로 보았다).
+
+### 감수한 트레이드오프
+- 정규식으로 Gradle·Kotlin DSL·Maven 선언을 읽으므로, 변수로 조립한 경로(`project(":media").projectDir = file(mediaDir)`처럼 식별자를 참조)나 여러 줄에 걸친 `include` 목록은 놓칠 수 있다. `includes`가 studio.yaml에 사람이 보는 선언으로 남아 있어 직접 고칠 수 있다는 점으로 보완한다(판단 기준 4).
+- 겹침 정책(두 서비스가 같은 경로를 선언하면 둘 다 재시작)은 드문 경우지만 과잉 재시작을 만들 수 있다. 덜 재시작해 "바뀐 코드가 반영 안 됨"으로 이어지는 쪽보다 안전하다고 보고 받아들였다.
+- `includes`는 재시작·게이트 판정에만 쓰인다 — Dockerfile·compose 생성 로직은 바꾸지 않았다(ADR-088이 이미 프로젝트 루트 전체를 마운트해 두므로 필요하지 않았다). 서비스 폴더 밖 경로를 빌드 컨텍스트에 포함해야 하는(예: 프로젝트 루트 전체를 마운트하지 않는) 다른 구조가 생기면 이 가정을 다시 봐야 한다.
