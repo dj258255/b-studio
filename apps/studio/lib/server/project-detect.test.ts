@@ -95,8 +95,29 @@ describe('detectProject', () => {
     const [service] = (await detectProject(root)).services;
 
     expect(service!.mockitoAgentInit).toBeUndefined();
+    expect(service!.testMemoryInit).toBeUndefined();
     const compose = generateFiles(await detectProject(root)).find((file) => file.path === GENERATED_COMPOSE)!.content;
     expect(compose).not.toContain('configs:');
+  });
+
+  it('Gradle 서비스는 테스트 명령이 있으면 테스트 JVM 힙·메타스페이스 상한을 거는 init 스크립트도 compose configs:로 심는다(도그푸딩 마찰 116, ADR-137): 컨테이너에 메모리 한도가 없으면 테스트 JVM의 기본 힙이 VM 전체 메모리 기준으로 잡혀, 개발 서버와 같은 컨테이너에서 돌면 메모리 한도를 넘는다', async () => {
+    const root = await repo({ 'backend/build.gradle': springGradle, 'backend/gradlew': '#!/bin/sh' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toBeDefined();
+    expect(service!.testMemoryInit).toBe(true);
+    expect(service!.notes.join(' ')).toContain('512m');
+
+    const compose = generateFiles(await detectProject(root)).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    // 서비스 블록이 공유 config를 가리킨다(Mockito init과 같은 서비스에 나란히)
+    expect(compose).toContain('configs:\n      - source: b_studio_mockito_agent_init\n        target: /gradle-home/init.d/b-studio-mockito-agent.gradle\n      - source: b_studio_test_memory_init\n        target: /gradle-home/init.d/b-studio-test-memory.gradle');
+    // 최상위 configs:에 내용이 한 번만 들어간다(여러 Gradle 서비스가 공유, Mockito init 다음에 이어진다)
+    expect(compose).toContain('  b_studio_test_memory_init:\n    content: |');
+    expect(compose).toContain("t.maxHeapSize = '512m'");
+    expect(compose).toContain('-XX:MaxMetaspaceSize=256m');
+    // 사용자가 이미 정한 값은 덮어쓰지 않는다(중복 방지, Mockito 스크립트와 같은 원칙)
+    expect(compose).toContain('if (!t.maxHeapSize)');
   });
 
   it('spring-boot-docker-compose가 있으면 샌드박스에서 끈다(부가 서비스가 없어도)', async () => {
@@ -920,6 +941,8 @@ describe('detectProject: workflow.tests 생성(버그 리포트 104 — studio.y
     expect(service!.testCommand).toEqual({ command: ['sh', '-c', 'cd /workspace && ./mvnw -f backend test'] });
     // Maven은 Mockito self-attach 수정(ADR-134)의 범위 밖이다 — surefire argLine을 건드리면 사용자 설정을 지울 위험이 있다
     expect(service!.mockitoAgentInit).toBeUndefined();
+    // 테스트 JVM 메모리 상한(ADR-137)도 같은 이유로 Maven은 범위 밖이다
+    expect(service!.testMemoryInit).toBeUndefined();
   });
 
   it('package.json에 test 스크립트가 있는 Next.js는 패키지 관리자로 돌리는 테스트 명령을 만들고 watch 모드 위험을 notes에 남긴다', async () => {

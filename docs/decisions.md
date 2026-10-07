@@ -5666,3 +5666,49 @@ compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `doc
 ### 감수한 트레이드오프
 - compose·studio.yaml이 바뀌면 실제로는 한 서비스의 환경 변수 한 줄만 바뀌었어도 managed 서비스를 전부 다시 띄운다. 서비스 수가 많은 프로젝트에서는 재시작 시간이 늘어난다. 정교한 diff(선택지 A)로 줄일 수 있지만, top-level 참조를 놓칠 위험과 맞바꾸는 것이라 지금은 선택하지 않았다 — 재시작 시간이 실제로 문제가 되면 그때 선택지 A를 다시 본다.
 - `project.composePath`가 프로젝트 루트 밖(예: `../compose.yaml`)을 가리키는 드문 구성은 상대 경로 비교가 맞아떨어지지 않아 여전히 예전처럼 매칭되지 않을 수 있다 — 실제 프로젝트에서 compose 파일이 루트 밖에 있는 사례는 보지 못했다.
+
+## ADR-137 검증 게이트의 test 단계가 메모리 한도 초과 종료를 코드 실패와 구분해 서비스를 되살리고, Gradle 테스트 JVM의 힙·메타스페이스에 상한을 건다
+
+상태: 채택
+관련: ADR-133, ADR-134, ADR-136
+
+### 맥락
+- BE-commerce 세션(작업 복사본 `pay-2-5b640fd3`)에서 문서만 바꾼 실행의 게이트 test 단계(`workflow.tests`의 `commerce-test`: `sh -c "cd /workspace && ./gradlew -p commerce test --no-daemon --console=plain --project-cache-dir /tmp/gradle-test-cache"`, `maxAttempts: 2`)가 commerce 컨테이너 안에서 돌다가, 컨테이너가 "종료 코드 1, 메모리 한도를 넘어 종료됨"으로 죽었다(도그푸딩 마찰 116, 트러블슈팅 77). 그 컨테이너에서는 이미 `./gradlew -p commerce bootRun`(Gradle 래퍼 + 빌드 JVM + 포크된 앱 JVM, 합계 약 1.4GiB)이 돌고 있었고, 테스트 JVM이 같은 메모리 한도 안에 더해졌다. 에이전트가 `restart_service`로 되살렸고 게이트가 재시도해 통과했다. 테스트 1408개 규모다.
+- 코드로 확인: `packages/agent/src/gate.ts`의 `#runTest`는 exec 실패를 그냥 `exitCode !== 0`으로만 보고 throw했다 — 메모리 부족으로 컨테이너가 죽은 것인지 테스트가 진짜 실패한 것인지 구분하지 않았다. `workflow.tests`의 `maxAttempts`(2)는 `task-graph.ts`에서 같은 `#runTest`를 다시 부를 뿐, 죽은 컨테이너를 되살리는 어떤 동작도 하지 않는다 — 컨테이너가 한 번 죽으면 재시도도 같은 죽은 컨테이너에 다시 부딪혀 실패를 반복한다. 이번 세션에서는 에이전트가 `run_in_service`·`service_stats`·`restart_service`로 수동으로 복구했다.
+- 실측으로 확인(세션 5b640fd3의 컨테이너는 `docker inspect`·`docker stats --no-stream`로 읽기만 했다): commerce 컨테이너(`studio-be-commerce-51603a-commerce-1`)는 `HostConfig.Memory=0`(메모리 한도 없음)이고, `docker stats --no-stream`로는 bootRun만 도는 상태에서 1.497GiB를 쓰고 있었다. `compose.b-studio.yaml`·`studio.yaml` 어디에도 `resources:` 블록이 없다 — `apps/studio/lib/server/project-detect.ts`는 폴더 열기 감지가 `workflow.tests`는 자동으로 채우지만(ADR-133) `resources:` 메모리 한도는 애초에 만들지 않는다. `examples/orders/studio.yaml`의 `resources:` 블록(트러블슈팅 41)은 사람이 손으로 쓴 예제일 뿐, 폴더 열기 감지가 만든 것이 아니다.
+- 컨테이너 메모리 한도가 없다는 것은, 커널 OOM killer가 컨테이너 전용 한도가 아니라 VM 전체 메모리 압박으로 컨테이너 안 프로세스를 고른다는 뜻이다 — colima VM(약 7.6GiB)을 dbtower·pay·edumeet 등 다른 프로젝트와 같이 쓰면 이 VM 전체 압박은 다른 프로젝트의 사용량에도 좌우된다. 테스트 워커 JVM의 기본 힙은 사용자가 `-Xmx`를 정하지 않으면 JVM 에르고노믹스가 "보이는 메모리"의 1/4로 자동으로 잡는데, 컨테이너 한도가 없으면 그 "보이는 메모리"가 VM 전체 메모리다 — 1408개 테스트 규모의 큰 테스트 실행에서 이 자동 크기가 bootRun의 기존 사용량과 겹치면 VM 압박에 더 쉽게 닿는다.
+
+### 판단 기준
+1. colima VM 메모리(약 7.6GiB)를 다른 프로젝트와 같이 쓰므로, 전체 사용량을 크게 늘리지 않을 것.
+2. 테스트 결과가 서비스(개발 서버) 상태에 흔들리지 않을 것.
+3. 사용자 프로젝트 파일을 바꾸지 않을 것.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 테스트를 같은 이미지의 일회용 컨테이너에서 돌린다(서비스 컨테이너와 분리, 같은 볼륨·네트워크) | 서비스 상태로부터 테스트 결과를 분리하는 효과는 있지만(기준 2), 개발 서버 메모리와 테스트 메모리의 합은 한 컨테이너 안이든 두 컨테이너로 나뉘든 그대로라 VM 전체 메모리 압박(기준 1)은 줄이지 못한다. `docker compose run` 상당의 기능(네트워크·볼륨을 서비스와 똑같이 맞춘 일회용 컨테이너)을 `packages/sandbox`의 docker·kubernetes 제공자 양쪽에 새로 만들어야 해 구현 범위도 크다 |
+| B. 서비스 컨테이너의 메모리 한도를 테스트 여유만큼 키운다 | 지금은 한도 자체가 없어(위 실측) "키운다"가 아니라 "새로 한도를 건다"는 뜻이 된다. 1408개 테스트 규모에 맞는 숫자를 실측 없이 추측해야 하고, 한도를 걸면 그 한도까지 쓸 "여지"가 생겨 동시에 뜨는 다른 세션·프로젝트와 VM을 다툴 위험이 오히려 커진다(기준 1에 역행). `examples/orders`의 2048m도 작은 예제 하나를 잰 값이라 1408개 테스트 규모에 쓸 근거가 없다 |
+| C. 테스트 JVM 메모리를 제한한다(Gradle init 스크립트로 `Test.maxHeapSize`·메타스페이스, ADR-134의 init.d 경로 재사용)(채택) | 테스트가 쓸 수 있는 메모리의 상한을 낮춰 VM 전체 사용량을 줄이는 방향이라 기준 1을 유일하게 직접 만족시킨다. 사용자 프로젝트 파일은 건드리지 않고 ADR-134와 같은 메커니즘을 그대로 쓸 수 있다(기준 3). 다만 힙 상한만으로는 트러블슈팅 41이 보여주듯 메타스페이스·네이티브 메모리까지 다 잡지 못해 완전한 보장은 아니다 |
+| D. 메모리 초과로 죽은 경우를 게이트가 구분해 "환경 문제"로 보고하고, 서비스를 되살린 뒤 재시도한다(채택) | VM 압박 자체를 줄이지는 못하지만(기준 1과 무관), 겪었을 때는 기준 2를 직접 만족시킨다 — 사람·에이전트가 수동으로 알아채고 복구하지 않아도 같은 게이트 호출 안에서 자동으로 복구된다. `verify.ts`의 `restartOnce`가 이미 쓰는 신호(`stats().oomKilled`)를 그대로 재사용할 수 있어 구현이 작다 |
+
+C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 줄이고(기준 1), D는 그래도 재발했을 때 결과가 서비스 상태에 안 흔들리게 한다(기준 2). 둘 다 사용자 프로젝트 파일을 바꾸지 않는다(기준 3). A는 기준 1을 만족시키지 못하고, B는 기준 1에 역행해 버렸다.
+
+### 결정
+1. **`packages/agent/src/gate.ts`의 `#runTest`**: exec가 실패하면(`exitCode !== 0`) `sandbox.stats()`로 그 서비스의 `oomKilled`를 본다(`verify.ts`의 `restartOnce`와 같은 신호). 메모리 한도를 넘어 죽은 것이면 `#reviveIfOomKilled`가 서비스를 되살리고(`sandbox.restart`), 에러 메시지에 "환경 문제"라고 분명히 적어(`코드 문제가 아닐 수 있습니다`) 모델이 코드를 고치려 들지 않게 한다. `workflow.tests`의 `maxAttempts`가 이미 가진 재시도 예산을 그대로 다시 쓴다 — 턴을 하나 더 쓰지 않고 같은 게이트 호출 안에서 되살아난 컨테이너로 다음 시도가 이어진다. 되살리기 자체가 실패해도(이미 불안정한 컨테이너라 더 흔들릴 수 있다) 삼키고 원래 실패를 그대로 던진다 — 다음 시도가 어차피 그 실패를 다시 드러낸다.
+2. **`apps/studio/lib/server/project-detect.ts`**: ADR-134의 `mockitoAgentInit`과 같은 조건(Gradle + 테스트 명령을 찾음)에서 `testMemoryInit` 플래그를 추가로 켠다. `Test.maxHeapSize`를 `512m`, `-XX:MaxMetaspaceSize`를 `256m`로 거는 Gradle init 스크립트(`TEST_MEMORY_INIT_SCRIPT`)를 compose `configs:`로 심는다(`GRADLE_USER_HOME/init.d/b-studio-test-memory.gradle`, Mockito init과 같은 compose 최상위 `configs:` 공유 메커니즘을 재사용하되 별도 이름·별도 파일로 둔다). 사용자가 이미 `maxHeapSize`·`MaxMetaspaceSize`를 정했으면 덮어쓰지 않는다(Mockito 스크립트의 "이미 붙어 있으면 다시 붙이지 않는다"와 같은 원칙). Maven은 ADR-134와 같은 이유(surefire의 `argLine`을 건드리면 사용자 설정을 지울 위험)로 범위 밖이다.
+3. `512m`·`256m`이라는 숫자는 1408개 테스트 규모의 실측값이 아니라 "컨테이너 한도가 없을 때 에르고노믹스가 자동으로 잡는 값보다 작게, 그러나 평범한 단위 테스트가 통상 쓰는 양보다는 넉넉하게" 잡은 보수적인 상한이다 — 아래 "감수한 트레이드오프"에 한계를 분명히 적는다.
+
+### 검증 결과
+- `packages/agent/src/gate.test.ts`에 테스트 2개를 더했다: (1) exec 실패 시 `stats().oomKilled`가 true면 되살리고 다음 시도(같은 `maxAttempts` 예산 안)에서 통과하는 것, (2) 되살려도 계속 실패하면 피드백에 "환경 문제"·"코드 문제가 아닐 수 있습니다"·메모리 한도 크기가 남는 것. 두 테스트 모두 게이트가 바뀐 파일 때문에 거치는 평소 재시작(run 단계)과 OOM 복구 재시작을 구분해 `sandbox.restarts` 호출 횟수로 확인했다.
+- `apps/studio/lib/server/project-detect.test.ts`에 테스트를 더했다: Gradle + 테스트 명령을 찾은 서비스가 `testMemoryInit: true`와 compose의 서비스별 `configs:`(Mockito init 바로 다음에 이어지는 두 번째 `configs:` 항목) + 최상위 `configs:` 내용(`maxHeapSize = '512m'`, `MaxMetaspaceSize=256m`, 중복 방지 조건)을 갖는 것, Maven·Next.js 서비스는 `testMemoryInit`이 없는 것.
+- compose YAML이 실제로 유효한지 `yaml` 패키지로 파싱해 두 `configs:` 항목(`b_studio_mockito_agent_init`·`b_studio_test_memory_init`)이 모두 서비스 블록·최상위 블록에 일관되게 나타나는 것을 확인했다.
+- **Gradle init 스크립트 메커니즘을 실제로 돌려 확인**: 이미 있는 이미지(`eclipse-temurin:21-jdk`)와 호스트에 이미 받아 둔 Gradle 8.12 배포본·junit-jupiter 5.11.4 캐시를 재사용해(`--offline`, 새 다운로드 없음) JUnit 5 테스트 하나(`Runtime.getRuntime().maxMemory()`를 출력)로 돌렸다. `--init-script`로 스크립트의 힙 값을 일부러 `777m`로 바꿔 돌리면 `maxMemory=778MB`로 보고해 init 스크립트가 실제로 테스트 워커 JVM에 적용됨을 확인했고, 실제 배포할 `512m` 스크립트로는 `maxMemory=512MB`를 확인했다. `build.gradle`에 사용자가 이미 `maxHeapSize = '300m'`을 정해 둔 경우에는 스크립트가 있어도 `maxMemory=300MB`로 남아(덮어쓰지 않음) BUILD SUCCESSFUL임을 확인했다. 이 검증 환경의 Docker VM 전체 메모리는 15.58GiB로, 사용자의 실제 colima VM(약 7.6GiB)과는 다르다 — 절대 수치가 아니라 "init 스크립트가 지정한 값으로 정확히 덮어쓴다"는 메커니즘 자체를 확인한 것이다.
+- 세션 5b640fd3의 commerce 컨테이너를 `docker inspect`·`docker stats --no-stream`로 읽기만 해 `HostConfig.Memory=0`(한도 없음)과 bootRun만 도는 상태에서 1.497GiB 사용 중임을 확인했다(위 "맥락"에 인용). 이 컨테이너는 재시작·중지하지 않았다.
+- `packages/agent` 테스트 65개(gate.test.ts), `apps/studio` 테스트 58개(project-detect.test.ts 파일 기준)가 통과했다. 전체 스위트·`pnpm -r typecheck`·lint 결과는 이 ADR을 커밋하는 시점의 보고에 남긴다.
+- 확인하지 못한 것: 실제 1408개 테스트 규모의 BE-commerce 세션(5b640fd3)에서 OOM을 다시 일으켜 이번 수정으로 통과하는지는 사용자의 떠 있는 세션·컨테이너를 건드리지 않기 위해 재현하지 않았다. 사용자의 실제 colima VM(약 7.6GiB, 다른 프로젝트와 공유)에서의 재현도 이번 범위에서는 하지 않았다. `512m`·`256m`이 1408개 테스트 전부에 충분한지(일부 테스트가 더 큰 힙을 필요로 하면 새로운 OutOfMemoryError가 생길 수 있음)도 실측하지 못했다.
+
+### 감수한 트레이드오프
+- 힙 `512m`·메타스페이스 `256m` 상한이 이 사용자의 1408개 테스트 전부에 충분한지 확인하지 못했다. 너무 작으면 지금까지 통과하던 테스트가 `OutOfMemoryError`로 새로 실패할 위험이 있다 — 사용자가 테스트에 더 큰 힙이 필요하다고 알고 있다면 `build.gradle`에 직접 `maxHeapSize`를 정해 이 상한을 넘어설 수 있다(덮어쓰지 않는 조건으로 열어 뒀다).
+- D(게이트의 자동 복구)는 VM 전체가 이미 메모리 바닥난 상황에서는 되살리기 자체도 실패할 수 있다 — 그러면 평소처럼 메모리 부족을 그대로 알린다(조용히 통과시키지는 않는다).
+- Maven·쿠버네티스 제공자(`packages/sandbox/src/kubernetes`)는 ADR-134와 같은 이유로 범위 밖이다. 쿠버네티스 경로는 compose의 `configs:`를 아직 읽지 않는다.
+- C는 테스트 JVM 하나의 힙만 제한한다 — 같은 컨테이너에서 bootRun이 더 많은 메모리를 쓰기 시작하면(예: 요청이 몰려 힙이 커짐) 여전히 VM 압박에 닿을 수 있다. 이 ADR은 "테스트가 추가하는 메모리"만 줄였지, "개발 서버가 쓰는 메모리"는 건드리지 않았다.
