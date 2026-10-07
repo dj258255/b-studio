@@ -1,0 +1,10 @@
+condition,run,task,success,category,claude_tokens,commandcode_tokens,web_board_calls,minutes
+mixed-b,mixed-r1,orders-list,True,none,94051,1226902,5,16.4
+mixed-b,mixed-r1,order-detail,True,none,102906,3355005,5,19.7
+mixed-b,mixed-r1,order-summary,True,none,42986,1512669,3,8.6
+mixed-b,mixed-r2,orders-list,True,none,66113,3390551,8,15.6
+mixed-b,mixed-r2,order-detail,True,none,89877,1423028,6,8.8
+mixed-b,mixed-r2,order-summary,True,none,78728,2423039,6,11.1
+mixed-b,mixed-r3,orders-list,True,none,43178,1866417,6,8.4
+mixed-b,mixed-r3,order-detail,True,none,124184,872061,4,5.7
+mixed-b,mixed-r3,order-summary,True,none,60413,2107276,7,11.2
