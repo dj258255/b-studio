@@ -606,6 +606,65 @@ export function detectBackendUrlEnvFromCode(sourceText: string): BackendUrlRefer
   return undefined;
 }
 
+/**
+ * 공개 접두사(NEXT_PUBLIC_·VITE_·REACT_APP_) 없이 서버 컴포넌트·서버 전용 코드(next.config.* 포함)가 바로 읽는
+ * 백엔드 주소 환경 변수(예: `process.env.SPRING_API`, fix/detect-frontend-backend-env). 이런 변수는 브라우저
+ * 번들에 박히지 않으므로(공개 주소 자리 표시자가 필요 없다) 같은 compose 네트워크 안 주소를 바로 적어도 된다.
+ * 이름 조각만으로는 오탐(예: DATABASE_URL)이 많아, 같은 줄에 http(s) 스킴 리터럴 기본값이 있을 때만 찾은 것으로 본다 —
+ * jdbc:postgresql://·postgres:// 같은 다른 스킴은 이 리터럴 모양에 맞지 않아 자연히 걸러진다.
+ */
+export interface ServerBackendUrlReference extends BackendUrlReference {
+  /** 리터럴 기본값에 적힌 포트(있으면). 백엔드 후보가 둘 이상일 때 이 포트로 어느 서비스인지 짝짓는다 */
+  port?: number;
+}
+
+/** 이름에 섞여 있으면 백엔드 주소로 의심하는 조각(fix/detect-frontend-backend-env). '_'로 나눈 토큰과 완전히 같을 때만 본다 */
+const SERVER_BACKEND_ENV_FRAGMENTS = new Set(['API', 'BACKEND', 'SERVER', 'SPRING', 'URL', 'HOST', 'BASE']);
+
+function looksLikeServerBackendEnvName(name: string): boolean {
+  return name.split('_').some((token) => SERVER_BACKEND_ENV_FRAGMENTS.has(token.toUpperCase()));
+}
+
+function portFromUrlValue(value: string): number | undefined {
+  const match = value.match(/:(\d+)(?:\D|$)/);
+  return match ? Number(match[1]) : undefined;
+}
+
+/** detectBackendUrlEnvFromCode의 서버 쪽 짝. 공개 변수로 이미 잡힌 이름은 그쪽이 우선이라 건너뛴다 */
+export function detectServerBackendUrlEnvFromCode(sourceText: string): ServerBackendUrlReference | undefined {
+  for (const line of sourceText.split('\n')) {
+    const access = ENV_ACCESS.exec(line);
+    if (!access || FRONTEND_BACKEND_ENV_NAME.test(access[1]!) || !looksLikeServerBackendEnvName(access[1]!)) continue;
+    const literal = STRING_LITERAL.exec(line);
+    if (!literal) continue;
+    return { envKey: access[1]!, suffix: suffixFromUrlValue(literal[1]!), port: portFromUrlValue(literal[1]!) };
+  }
+  return undefined;
+}
+
+/** `KEY=value`(.env.example·.env.local.example, README의 `SPRING_API=http://localhost:8080 npm run dev` 같은 코드 블록) 한 줄에서 값만 뽑는다 */
+const ENV_ASSIGNMENT = /(?:^|[\s"'])([A-Z][A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)/gm;
+
+function stripQuotes(value: string): string {
+  return /^(['"]).*\1$/.test(value) ? value.slice(1, -1) : value;
+}
+
+/**
+ * .env.example·.env.local.example나 README 코드 블록처럼 `KEY=value` 모양인 텍스트에서 백엔드 주소 변수를 찾는다.
+ * 이름이 공개 접두사(NEXT_PUBLIC_ 등)에 맞으면 공개 변수로, 아니면 서버 쪽 조각(SERVER_BACKEND_ENV_FRAGMENTS)으로 본다.
+ * 둘 다 값이 http(s) 스킴이어야 찾은 것으로 본다(스킴이 다르면 백엔드 주소가 아니다).
+ */
+export function detectBackendUrlEnvFromAssignments(text: string): (ServerBackendUrlReference & { public: boolean }) | undefined {
+  for (const match of text.matchAll(ENV_ASSIGNMENT)) {
+    const name = match[1]!;
+    const value = stripQuotes(match[2]!);
+    if (!/^https?:\/\//.test(value)) continue;
+    if (FRONTEND_BACKEND_ENV_NAME.test(name)) return { envKey: name, suffix: suffixFromUrlValue(value), port: portFromUrlValue(value), public: true };
+    if (looksLikeServerBackendEnvName(name)) return { envKey: name, suffix: suffixFromUrlValue(value), port: portFromUrlValue(value), public: false };
+  }
+  return undefined;
+}
+
 /** compose 텍스트 하나에서 특정 서비스의 environment만 꺼낸다(목록·맵 문법 모두). 서비스가 없거나 environment가 없으면 undefined */
 export function environmentFromComposeText(composeText: string, serviceName: string): Record<string, string> | undefined {
   let doc: unknown;

@@ -150,6 +150,7 @@
 - [ADR-127 QA 탭에 탐색형 QA를 더한다: 모델이 접근성 트리로 화면을 보고 스스로 조작하되, 완료 선언만으로 통과시키지 않는다](#adr-127-qa-탭에-탐색형-qa를-더한다-모델이-접근성-트리로-화면을-보고-스스로-조작하되-완료-선언만으로-통과시키지-않는다)
 - [ADR-128 폴더 열기 감지를 실제 저장소 구조에 맞춘다: Gradle·Maven 래퍼를 상위 폴더까지 찾고, 모노레포 앱 폴더를 두 단계까지 본다](#adr-128-폴더-열기-감지를-실제-저장소-구조에-맞춘다-gradlemaven-래퍼를-상위-폴더까지-찾고-모노레포-앱-폴더를-두-단계까지-본다)
 - [ADR-129 CLI 러너(Command Code·OpenCode·Gemini)에 레인 조율 게시판을 연결하고, CLI 레인 사용량을 모델별로 집계한다](#adr-129-cli-러너command-codeopencodegemini에-레인-조율-게시판을-연결하고-cli-레인-사용량을-모델별로-집계한다)
+- [ADR-130 폴더 열기 감지가 프런트엔드의 백엔드 주소를 공개 변수뿐 아니라 서버 쪽 변수(SPRING_API 등)에서도 찾아 컨테이너 사이 주소로 채운다](#adr-130-폴더-열기-감지가-프런트엔드의-백엔드-주소를-공개-변수뿐-아니라-서버-쪽-변수spring_api-등에서도-찾아-컨테이너-사이-주소로-채운다)
 
 ---
 
@@ -5388,3 +5389,37 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **실행 중 지시(steering)·되묻기(interactive)는 이번에도 Command Code·OpenCode·Gemini 러너에 연결하지 않았다.** E12가 드러낸 것은 board 배선 누락뿐이라 이번 수정은 그 범위로 좁혔다 — 세 러너의 머리말 주석은 이 두 가지가 여전히 빠져 있다는 사실을 그대로 유지한다.
 - **`usageByModel`의 모델 이름은 CLI가 실제로 쓴 모델을 되돌려 받은 값이 아니라, 호출 쪽이 넘긴 `model` 옵션(또는 그 기본값 표시)이다.** Claude Code 러너처럼 SDK가 턴마다 실제로 쓴 모델 이름을 보고해 주는 구조가 아니므로, 계정 기본 모델을 쓴 실행은 실제 모델이 무엇인지 모른 채 `<백엔드>:default`로만 남는다. 모델별 단가 계산도 이 한계를 그대로 물려받는다.
 - **지원 백엔드 표(`BOARD_SUPPORTED_BACKENDS`)는 지금 전부 `true`라 `assertCoordinationBackend`의 실패 경로는 실제 백엔드로는 재현할 수 없다.** 테스트는 타입을 우회한 가상의 문자열로 그 분기를 확인했다 — 이 안전장치는 "지금 막는다"가 아니라 "나중에 깜빡했을 때 막는다"는 회귀 방지용이다.
+
+## ADR-130 폴더 열기 감지가 프런트엔드의 백엔드 주소를 공개 변수뿐 아니라 서버 쪽 변수(SPRING_API 등)에서도 찾아 컨테이너 사이 주소로 채운다
+
+상태: 채택
+관련: ADR-095, ADR-128
+
+### 맥락
+- pay 저장소(`apps/web`, Next.js)를 폴더 열기로 다시 도그푸딩하다 겪은 버그다. `apps/web/lib/api.ts`는 `export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:8080';`로 Spring 백엔드 주소를 읽는데(README의 실행 예시도 `SPRING_API=http://localhost:8080`), b-studio가 만든 `compose.b-studio.yaml`의 `web` 서비스에는 `PORT: 3000`만 들어가고 `SPRING_API`는 전혀 채워지지 않았다. 샌드박스 안 `web` 컨테이너가 `localhost:8080`(자기 자신)을 불러 상점 카탈로그 화면이 "연결 실패, fetch failed"로 멈췄다. 사람이 `SPRING_API: "http://commerce:8080"`을 직접 넣자 바로 연결됐다.
+- 원인은 ADR-095가 만든 `FRONTEND_BACKEND_ENV_NAME`이 `NEXT_PUBLIC_*`·`VITE_*`·`REACT_APP_*`처럼 브라우저 번들에 그대로 박히는 접두사만 보기 때문이다. `SPRING_API`는 Next.js 서버 컴포넌트·`next.config.ts`의 rewrites가 서버에서만 읽는 변수라 그 접두사가 없고, 감지가 통째로 지나쳤다. `detectBackendUrlEnvFromCode`가 보는 자리(`FRONTEND_API_CLIENT_CANDIDATES`)에 `lib/api.ts`는 있었지만, 정작 이름 정규식이 걸러 버렸다.
+- 두 번째 문제: pay는 백엔드 후보가 둘(`commerce`, 그 하위의 별도 Kafka 소비자 빌드 `commerce/consumer-app`)이다. 둘 다 Spring Boot라 포트도 똑같이 기본값 8080으로 잡힌다 — ADR-095가 남긴 "처음 찾은 한 쌍만 연결한다"는 알려진 한계를 그대로 따르면 운 좋게 맞을 수도, 틀릴 수도 있었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 공개 접두사 규칙(`FRONTEND_BACKEND_ENV_NAME`)의 접두사 목록에 빈 문자열(접두사 없음)을 추가해 모든 이름을 본다 | `DATABASE_URL`·`SELF_ORIGIN`처럼 백엔드 HTTP 주소가 아닌 변수까지 오탐한다. 이름 조각(API·BACKEND·SERVER·SPRING·URL·HOST·BASE) + 같은 줄의 http(s) 스킴 리터럴 기본값까지 요구해 범위를 좁힌다(채택) |
+| B. 서버 쪽 변수도 공개 변수와 똑같이 런타임 자리 표시자(`${b-studio:services.<이름>.publicUrl}`)로 채운다 | 서버 쪽 변수는애초에 브라우저로 나가지 않으니 edge가 공개하는 포트를 몰라도 된다 — compose 네트워크 안 주소(`http://<서비스>:<포트>`)는 서비스를 만드는 시점에 이미 정해져 있어 자리 표시자도, 샌드박스가 뜬 뒤의 치환도 필요 없다. 바로 적는다(채택) |
+| C. 백엔드 후보가 둘 이상이면 ADR-095처럼 그냥 처음 찾은 것을 쓴다 | pay처럼 포트가 같은 후보가 둘이면 틀린 서비스에 연결될 위험을 그대로 안는다. 기본값의 포트로 후보를 좁히고(유일하면 그 후보, 아니면 보류), `defaultSelected: false`(ADR-083, 같은 서비스 폴더 하위의 또 다른 빌드로 보여 기본으로 띄우지 않는 서비스)는 애초에 후보에서 뺀다(채택) |
+
+### 결정
+1. **서버 쪽 백엔드 주소 변수 탐지** (`packages/spec/src/compose-import.ts`): `detectServerBackendUrlEnvFromCode`를 새로 두어, `process.env.X`의 `X`가 공개 접두사(`FRONTEND_BACKEND_ENV_NAME`, ADR-095가 이미 보는 몫이라 여기서는 건너뛴다)가 아니면서 `_`로 나눈 토큰 중 하나가 `API`·`BACKEND`·`SERVER`·`SPRING`·`URL`·`HOST`·`BASE`와 완전히 같고, 같은 줄에 `http(s)://` 스킴 리터럴 기본값이 있을 때만 찾는다. `jdbc:postgresql://`·`postgres://` 같은 다른 스킴은 이 리터럴 모양에 아예 맞지 않아 `DATABASE_URL`류를 자연히 거른다. `.env.example`·`.env.local.example`·README의 실행 예시(`API_MODE=real SPRING_API=http://localhost:8080 npm run dev`처럼 한 줄에 여러 `KEY=value`가 섞인 꼴)는 `process.env` 접근이 아니라 `detectBackendUrlEnvFromAssignments`로 따로 본다(공개·서버 양쪽 이름 규칙을 둘 다 적용해 `public` 플래그로 구분한다).
+2. **찾아보는 자리를 넓힌다** (`apps/studio/lib/server/project-detect.ts`): `FRONTEND_API_CLIENT_CANDIDATES`에 `next.config.ts/js/mjs`·`vite.config.ts/js`를 더했다(pay의 `next.config.ts`도 같은 `SPRING_API` 기본값으로 rewrites를 만든다). 알려진 자리에서 못 찾으면 `.env.example`·`.env.local.example`·`README.md`(펜스 코드 블록만, 설명 글의 우연한 `KEY=value` 모양은 보지 않는다)를 보고, 그래도 못 찾으면 `app/`·`src/`·`lib/`·`pages/`를 깊이 4·파일 40개로 바운드 둔 채 가볍게 더 훑는다(`lightFrontendSourceFiles`) — 저장소 전체를 다 읽지 않는다는 기존 원칙(ADR-095)을 그대로 지킨다.
+3. **값 채우는 방식을 visibility로 가른다**: 찾은 변수가 `NEXT_PUBLIC_*`·`VITE_*`·`REACT_APP_*`(visibility: `public`)면 ADR-095 그대로 런타임 자리 표시자로 채운다. 그 밖(visibility: `server`)은 compose 네트워크 안 주소 `http://<백엔드 서비스>:<포트>`를 바로 적는다 — 포트는 서비스를 감지한 시점에 이미 고정돼 있어(3000·8080·5173·8000) 자리 표시자나 샌드박스가 뜬 뒤의 치환이 필요 없다.
+4. **백엔드 후보가 둘 이상이면 포트로 짝짓는다**: `defaultSelected: false`(ADR-083)인 서비스는 애초에 백엔드 후보에서 뺀다 — "사람이 서비스 선택에서 직접 켤 때까지 기본으로 띄우지 않는" 서비스를 암묵적으로 자동 연결하는 것은 그 결정과 어긋난다. 남은 후보가 하나면 그대로 쓰고(ADR-095와 동일), 둘 이상이고 기본값에 포트가 있으면 그 포트와 같은 서비스가 정확히 하나일 때만 쓴다. 포트 정보가 없거나(기본값이 없는 경우, 애초에 2번에서 찾지 못해 연결 자체를 안 한다) 포트가 같은 후보가 둘 이상이면 채우지 않고 `변수 X가 백엔드 주소로 보이지만 어느 서비스인지 몰라 채우지 않았습니다`를 프런트엔드 서비스의 notes에 남긴다.
+
+### 검증 결과
+- `packages/spec/src/compose-import.test.ts`(보강): `detectServerBackendUrlEnvFromCode`가 SPRING_API 같은 이름 + 같은 줄 http(s) 기본값을 찾고, 기본값이 없으면·공개 접두사면·`DATABASE_URL`처럼 스킴이 다르면 보지 않는 것을 확인했다. `detectBackendUrlEnvFromAssignments`가 README 한 줄에 섞인 여러 `KEY=value` 중 백엔드 주소로 보이는 것만 고르고, `.env.example` 꼴에서도 찾으며, 공개 접두사 여부로 `public` 플래그를 가르는 것을 확인했다.
+- `apps/studio/lib/server/project-detect.test.ts`(보강, 새 `describe` 블록): `process.env.SPRING_API ?? 'http://localhost:8080'`을 읽는 Next.js + Spring 서비스 하나로 컨테이너 사이 주소(`http://backend:8080`)가 채워지는 것(자리 표시자가 아니다, 생성 compose에도 그대로 찍히는 것 포함), 기본값이 없으면 아무것도 연결하지 않는 것, 백엔드가 둘이고 포트가 다르면 기본값의 포트로 올바른 쪽을 고르는 것, 포트가 같아 구분할 수 없으면 채우지 않고 notes를 남기는 것, `next.config.ts`에서 찾은 `NEXT_PUBLIC_*` 변수는 여전히 자리 표시자로 채우는 것(회귀 없음), 알려진 자리에 없으면 README 코드 블록에서 찾는 것을 고정했다.
+- 실제 pay 폴더(`~/Desktop/pay`)로 `detectProject(..., { ignoreExistingSpec: true })`를 직접 불러 읽기 전용으로 미리보기를 다시 돌렸다 — `web` 서비스의 `environment.SPRING_API`가 `http://commerce:8080`으로 채워지고(사람이 손으로 넣었던 값과 동일), `consumer-app`(`defaultSelected: false`)이 백엔드 후보에서 빠져 `commerce`와의 포트 충돌(둘 다 8080) 없이 단일 후보로 결정되는 것을 확인했다. pay 폴더에는 아무것도 쓰지 않았다(파일 생성·등록 없음, `git status` 깨끗함).
+- `pnpm typecheck`(6/6), `pnpm vitest run`(307개 파일, 3,302건 전부 통과), `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고 9건만 유지) — 끝줄은 보고에 그대로 붙인다.
+
+### 감수한 트레이드오프
+- **이름 조각 규칙(API·BACKEND·SERVER·SPRING·URL·HOST·BASE)은 여전히 휴리스틱이다.** `URL`·`BASE`처럼 흔한 조각은 `DATABASE_URL` 같은 이름에도 토큰으로 걸리지만, 같은 줄의 http(s) 스킴 리터럴 기본값을 추가로 요구해 실제 오탐은 걸러진다 — 그래도 `SPRING_API_KEY`(API 토큰, 백엔드 주소가 아님)처럼 기본값이 우연히 `http://`로 시작하면 여전히 오탐할 여지는 남는다.
+- **가볍게 훑는 소스 스캔(`lightFrontendSourceFiles`)은 깊이 4·파일 40개로 자른다.** 이보다 더 깊거나 많은 파일에 변수를 선언한 저장소는 여전히 못 찾는다 — 저장소 전체를 다 읽지 않는다는 원칙(ADR-095)과의 트레이드오프다.
+- **백엔드 후보가 둘 이상이고 포트까지 같으면(이번 수정 전과 동일하게) 채우지 않는다.** pay의 `commerce`/`consumer-app`은 `defaultSelected: false` 필터로 피했지만, 둘 다 기본 선택되는 서비스이면서 포트까지 같은 저장소는 여전히 자동 연결을 포기하고 notes로 사람에게 넘긴다 — 틀린 연결보다는 보수적인 쪽을 택했다(ADR-095와 같은 태도).

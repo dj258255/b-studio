@@ -42,9 +42,11 @@ import {
   corsEnvironmentFrom,
   databaseSpecFor,
   dependencyClosure,
+  detectBackendUrlEnvFromAssignments,
   detectBackendUrlEnvFromCode,
   detectBackendUrlEnvFromEnvironment,
   detectEnvReferences,
+  detectServerBackendUrlEnvFromCode,
   importSupportingServices,
   needsDevDefaultCredentials,
   originalComposeServiceFor,
@@ -56,7 +58,6 @@ import {
   withDevDefaultCredentials,
   COMPOSE_FILE_CANDIDATES,
   isProdComposeFile,
-  type BackendUrlReference,
   type ImportedInfraService,
   type InfraService,
   type WirableInfraService,
@@ -350,45 +351,138 @@ async function disableSpringDockerCompose(root: string, services: DetectedServic
 
 /**
  * 프론트엔드(Next.js·Vite) 코드가 읽는 소스 안의 흔한 자리. lib/api.ts(실제 저장소에서 확인한 자리, docs/decisions.md ADR-095 참고)를
- * 먼저 보고, 없으면 흔히 쓰는 몇 자리만 본다 — appConfigText와 같은 생각으로, 저장소 전체를 훑지 않고 알려진 자리만 본다
+ * 먼저 보고, 없으면 흔히 쓰는 몇 자리만 본다 — appConfigText와 같은 생각으로, 저장소 전체를 훑지 않고 알려진 자리만 본다.
+ * next.config.*는 서버 컴포넌트가 아니라 빌드 설정이지만 rewrites 등에서 백엔드 주소를 그대로 읽는 경우가 많아 함께 본다(pay/apps/web 실측).
  */
 const FRONTEND_API_CLIENT_CANDIDATES = [
   'lib/api.ts', 'lib/api.js', 'lib/api.tsx',
   'src/lib/api.ts', 'src/lib/api.js',
   'app/lib/api.ts', 'src/api.ts', 'src/config.ts', 'src/lib/config.ts',
+  'next.config.ts', 'next.config.js', 'next.config.mjs',
+  'vite.config.ts', 'vite.config.js',
   '.env.local', '.env',
 ];
 
-/**
- * 프론트엔드 서비스 하나가 백엔드 주소를 어느 환경 변수로 받는지 찾는다(fix/frontend-backend-url).
- * 1) 원본 compose(이미 있다면)에 그 서비스의 environment로 선언돼 있으면 그 값을 가장 믿는다(사람이 적어 둔 것이다).
- * 2) 없으면 코드에서 `process.env.NEXT_PUBLIC_API_BASE_URL` 같은 접근을 찾는다(추정이라 notes에 남긴다).
- */
-async function detectFrontendBackendRef(
-  root: string,
-  service: DetectedService,
-  composeText: string | undefined,
-): Promise<{ ref: BackendUrlReference; fromCompose: boolean } | undefined> {
-  if (composeText) {
-    const original = originalComposeServiceFor(composeText, service.path, service.name);
-    const ref = original && detectBackendUrlEnvFromEnvironment(original.environment);
-    if (ref) return { ref, fromCompose: true };
+/** .env.example·.env.local.example·README는 코드가 아니라 `KEY=value` 모양(dotenv·README의 실행 예시)이라 detectBackendUrlEnvFromAssignments로 따로 본다 */
+const FRONTEND_ASSIGNMENT_FILE_CANDIDATES = ['.env.example', '.env.local.example', 'README.md'];
+
+/** 알려진 자리에서 못 찾았을 때만 가볍게 더 훑는 소스 폴더(fix/detect-frontend-backend-env) */
+const FRONTEND_SOURCE_SCAN_DIRS = ['app', 'src', 'lib', 'pages'];
+/** 가볍게 훑을 때 보는 확장자. 스타일·이미지·타입 선언 등은 백엔드 주소를 읽을 일이 없어 뺀다 */
+const FRONTEND_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']);
+/** 한 서비스당 더 여는 파일 수 상한. "가볍게"를 지키려는 것이라 저장소가 커도 끝없이 읽지 않는다 */
+const MAX_LIGHT_SCAN_FILES = 40;
+/** 가볍게 훑는 폴더 깊이 상한(app/src/lib/pages 자신을 0으로 센다) */
+const MAX_LIGHT_SCAN_DEPTH = 4;
+
+/** README의 펜스 코드 블록(```...```) 본문만 모은다. 설명 글에 우연히 섞인 `KEY=value` 꼴은 보지 않으려는 것이다 */
+function fencedCodeBlocks(markdown: string): string[] {
+  const blocks: string[] = [];
+  for (const match of markdown.matchAll(/```[^\n]*\n([\s\S]*?)```/g)) blocks.push(match[1]!);
+  return blocks;
+}
+
+/** serviceDir 아래 app/src/lib/pages를 바운드(깊이·파일 수) 두고 가볍게 훑어, 서비스 폴더 기준 상대 경로를 모은다 */
+async function lightFrontendSourceFiles(serviceDir: string): Promise<string[]> {
+  const files: string[] = [];
+  async function collect(dir: string, relative: string, depth: number): Promise<void> {
+    if (depth > MAX_LIGHT_SCAN_DEPTH || files.length >= MAX_LIGHT_SCAN_FILES) return;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (files.length >= MAX_LIGHT_SCAN_FILES) return;
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || IGNORED_DIRS.has(entry.name) || isNoiseDirName(entry.name)) continue;
+        await collect(path.join(dir, entry.name), posixJoin(relative, entry.name), depth + 1);
+      } else if (FRONTEND_SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+        files.push(posixJoin(relative, entry.name));
+      }
+    }
   }
-  for (const file of FRONTEND_API_CLIENT_CANDIDATES) {
-    const text = await readText(path.join(root, service.path, file));
-    if (!text) continue;
-    const ref = detectBackendUrlEnvFromCode(text);
-    if (ref) return { ref, fromCompose: false };
-  }
-  return undefined;
+  for (const top of FRONTEND_SOURCE_SCAN_DIRS) await collect(path.join(serviceDir, top), top, 0);
+  return files;
+}
+
+/** 프론트엔드가 백엔드 주소를 받는 환경 변수 하나. visibility가 'public'이면 브라우저 번들에 박히는 이름(NEXT_PUBLIC_* 등)이라
+ *  자리 표시자로 채우고, 'server'면 서버 쪽에서만 읽는 이름(예: SPRING_API)이라 컨테이너 사이 주소를 바로 적는다 */
+interface FrontendBackendMatch {
+  envKey: string;
+  suffix: string;
+  visibility: 'public' | 'server';
+  /** 기본값에 적힌 포트. 백엔드 후보가 둘 이상일 때 어느 서비스인지 짝짓는 근거다 */
+  port?: number;
+  fromCompose: boolean;
+  /** 코드·설정 파일에서 추정했으면 어느 파일인지(서비스 폴더 기준). notes에 근거로 남긴다 */
+  sourceFile?: string;
 }
 
 /**
- * 폴더에 프론트엔드와 백엔드가 함께 있으면(풀스택), 프론트엔드가 읽는 백엔드 주소 환경 변수를 찾아 샌드박스 주소로
- * 자동 연결한다. 실제 호스트 포트는 `docker compose up` 뒤에야 정해지므로(샌드박스가 무작위로 고른다), 값 대신
- * 자리 표시자(`${b-studio:services.<백엔드>.publicUrl}`)를 적어 두고 packages/sandbox가 띄우기 직전에 채운다.
+ * 프론트엔드 서비스 하나가 백엔드 주소를 어느 환경 변수로 받는지 찾는다(fix/frontend-backend-url, fix/detect-frontend-backend-env).
+ * 1) 원본 compose(이미 있다면)에 그 서비스의 environment로 선언돼 있으면 그 값을 가장 믿는다(사람이 적어 둔 것이다).
+ * 2) 없으면 알려진 자리(lib/api.ts·next.config.* 등)의 코드에서 `process.env.X` 접근을 찾는다 — 공개 접두사(NEXT_PUBLIC_ 등)가
+ *    있으면 공개 변수로, 없고 이름에 API·BACKEND·SERVER·SPRING·URL·HOST·BASE 조각이 있으면서 http(s) 기본값이 같은 줄에 있으면
+ *    서버 쪽 변수로 본다.
+ * 3) 그래도 못 찾으면 .env.example·.env.local.example·README의 실행 예시(`KEY=value`)를, 그래도 못 찾으면 app/src/lib/pages를
+ *    가볍게 더 훑는다(저장소 전체를 보지 않는다, MAX_LIGHT_SCAN_FILES).
+ */
+async function detectFrontendBackendRef(root: string, service: DetectedService, composeText: string | undefined): Promise<FrontendBackendMatch | undefined> {
+  if (composeText) {
+    const original = originalComposeServiceFor(composeText, service.path, service.name);
+    const ref = original && detectBackendUrlEnvFromEnvironment(original.environment);
+    if (ref) return { ...ref, visibility: 'public', fromCompose: true };
+  }
+
+  const serviceDir = path.join(root, service.path);
+  const fromCode = (file: string, text: string): FrontendBackendMatch | undefined => {
+    const publicRef = detectBackendUrlEnvFromCode(text);
+    if (publicRef) return { ...publicRef, visibility: 'public', fromCompose: false, sourceFile: file };
+    const serverRef = detectServerBackendUrlEnvFromCode(text);
+    if (serverRef) return { ...serverRef, visibility: 'server', fromCompose: false, sourceFile: file };
+    return undefined;
+  };
+
+  for (const file of FRONTEND_API_CLIENT_CANDIDATES) {
+    const text = await readText(path.join(serviceDir, file));
+    if (!text) continue;
+    const match = fromCode(file, text);
+    if (match) return match;
+  }
+
+  for (const file of FRONTEND_ASSIGNMENT_FILE_CANDIDATES) {
+    const text = await readText(path.join(serviceDir, file));
+    if (!text) continue;
+    for (const block of file === 'README.md' ? fencedCodeBlocks(text) : [text]) {
+      const assignment = detectBackendUrlEnvFromAssignments(block);
+      if (assignment) return { envKey: assignment.envKey, suffix: assignment.suffix, port: assignment.port, visibility: assignment.public ? 'public' : 'server', fromCompose: false, sourceFile: file };
+    }
+  }
+
+  for (const file of await lightFrontendSourceFiles(serviceDir)) {
+    const text = await readText(path.join(serviceDir, file));
+    if (!text) continue;
+    const match = fromCode(file, text);
+    if (match) return match;
+  }
+
+  return undefined;
+}
+
+/** 백엔드 후보가 둘 이상일 때 기본값의 포트로 어느 서비스인지 짝짓는다. 포트 정보가 없으면 처음 찾은 후보로(알려진 한계, ADR-095) */
+function pickBackendCandidate(candidates: readonly DetectedService[], port: number | undefined): DetectedService | undefined {
+  if (candidates.length <= 1) return candidates[0];
+  if (port === undefined) return candidates[0];
+  const matches = candidates.filter((candidate) => candidate.port === port);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * 폴더에 프론트엔드와 백엔드가 함께 있으면(풀스택), 프론트엔드가 읽는 백엔드 주소 환경 변수를 찾아 연결한다.
+ * 공개 변수(NEXT_PUBLIC_* 등, visibility: 'public')는 실제 호스트 포트가 `docker compose up` 뒤에야 정해지므로
+ * (샌드박스가 무작위로 고른다) 값 대신 자리 표시자(`${b-studio:services.<백엔드>.publicUrl}`)를 적어 두고
+ * packages/sandbox가 띄우기 직전에 채운다. 서버 쪽 변수(visibility: 'server', 예: SPRING_API)는 브라우저 번들에 박히지
+ * 않아 compose 네트워크 안 주소(`http://<백엔드 서비스>:<포트>`)를 바로 적는다 — 포트가 서비스 생성 시점에 이미 정해져 있다.
  * 백엔드가 CORS 허용 출처를 환경 변수로 받고 있었으면(원본 compose) 그 값도 그대로 가져온다.
- * 둘 이상의 프론트엔드·백엔드 후보가 있으면 처음 찾은 한 쌍만 연결한다(알려진 한계, ADR-095에 남긴다).
+ * defaultSelected가 false인 서비스(같은 서비스 폴더 하위의 또 다른 빌드 등, ADR-083)는 기본으로 띄우지 않는 보조 서비스라
+ * 백엔드 후보에서 뺀다. 후보가 둘 이상이면 기본값의 포트로 짝을 맞추고, 그래도 못 정하면 채우지 않고 notes에 남긴다.
  */
 async function wireFrontendBackendUrl(
   root: string,
@@ -396,8 +490,10 @@ async function wireFrontendBackendUrl(
   childDirNames: readonly string[],
 ): Promise<ProjectDetection['frontendBackendWiring']> {
   const frontend = services.find((service) => service.template === 'nextjs' || service.template === 'vite');
-  const backend = services.find((service) => service !== frontend && (service.template === 'spring-boot' || service.template === 'fastapi' || service.template === 'nextjs' || service.template === 'vite'));
-  if (!frontend || !backend) return undefined;
+  const backendCandidates = services.filter(
+    (service) => service !== frontend && service.defaultSelected !== false && (service.template === 'spring-boot' || service.template === 'fastapi' || service.template === 'nextjs' || service.template === 'vite'),
+  );
+  if (!frontend || backendCandidates.length === 0) return undefined;
 
   const composeFile = await findComposeFile(root, childDirNames);
   const composeText = composeFile ? await readText(composeFile.absolute) : undefined;
@@ -405,11 +501,19 @@ async function wireFrontendBackendUrl(
   const found = await detectFrontendBackendRef(root, frontend, composeText);
   if (!found) return undefined;
 
-  frontend.environment = { ...frontend.environment, [found.ref.envKey]: `${publicUrlPlaceholder(backend.name)}${found.ref.suffix}` };
+  const backend = pickBackendCandidate(backendCandidates, found.port);
+  if (!backend) {
+    frontend.notes.push(`변수 ${found.envKey}가 백엔드 주소로 보이지만 어느 서비스인지 몰라 채우지 않았습니다`);
+    return undefined;
+  }
+
+  const value = found.visibility === 'server' ? `http://${backend.name}:${backend.port}${found.suffix}` : `${publicUrlPlaceholder(backend.name)}${found.suffix}`;
+  frontend.environment = { ...frontend.environment, [found.envKey]: value };
   if (!frontend.dependsOn.includes(backend.name)) frontend.dependsOn = [...frontend.dependsOn, backend.name];
   frontend.notes.push(
-    `${frontend.name}가 ${backend.name} 주소를 ${found.ref.envKey}로 받습니다 — 샌드박스 주소로 자동 연결합니다` +
-      (found.fromCompose ? '' : ` (원본 compose에 선언돼 있지 않아 코드에서 추정했습니다. 다른 변수를 쓰면 ${found.ref.envKey} 대신 studio.yaml의 값을 고치세요)`),
+    `${frontend.name}가 ${backend.name} 주소를 ${found.envKey}로 받습니다 — ` +
+      (found.visibility === 'server' ? `컨테이너 사이 주소(${value})로 바로 연결합니다` : '샌드박스 주소로 자동 연결합니다') +
+      (found.fromCompose ? '' : ` (원본 compose에 선언돼 있지 않아 코드에서 추정했습니다${found.sourceFile ? `: ${found.sourceFile}의 기본값` : ''}. 다른 변수를 쓰면 ${found.envKey} 대신 studio.yaml의 값을 고치세요)`),
   );
 
   if (composeText) {

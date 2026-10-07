@@ -596,6 +596,108 @@ describe('detectProject: 프론트엔드→백엔드 주소 자동 연결(fix/fr
   });
 });
 
+describe('detectProject: 공개 접두사 없는 서버 쪽 백엔드 주소 변수 자동 연결(fix/detect-frontend-backend-env, pay/apps/web 실측)', () => {
+  it('서버 컴포넌트가 process.env.SPRING_API ?? "http://localhost:8080"을 읽으면 컨테이너 사이 주소로 바로 채운다(자리 표시자가 아니다)', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/lib/api.ts': "export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:8080';\n",
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.frontendBackendWiring).toEqual({ frontendService: 'frontend', backendService: 'backend', backendProbePath: '/actuator/health' });
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.SPRING_API).toBe('http://backend:8080');
+    expect(frontend.dependsOn).toContain('backend');
+    expect(frontend.notes.some((note) => note.includes('컨테이너 사이 주소(http://backend:8080)로 바로 연결합니다'))).toBe(true);
+    // 공개 변수가 아니므로 publicUrlRefs(런타임 자리 표시자 치환 대상)에는 들어가지 않는다 — 값이 이미 확정돼 있다
+    expect(generateFiles(detection).find((file) => file.path === GENERATED_COMPOSE)!.content).toContain('SPRING_API: "http://backend:8080"');
+  });
+
+  it('기본값이 없으면(process.env.SPRING_API만 있고 폴백이 없음) 추정하지 않고 아무것도 연결하지 않는다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/lib/api.ts': 'export const SPRING_API = process.env.SPRING_API;\n',
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.frontendBackendWiring).toBeUndefined();
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.SPRING_API).toBeUndefined();
+  });
+
+  it('백엔드가 둘이고 포트가 다르면 기본값의 포트로 짝을 맞춘다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/lib/api.ts': "export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:9090';\n",
+      'commerce/build.gradle': springGradle,
+      'payments/build.gradle': springGradle,
+      'payments/src/main/resources/application.properties': 'server.port=9090\n',
+    });
+
+    const detection = await detectProject(root);
+
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.SPRING_API).toBe('http://payments:9090');
+    expect(detection.frontendBackendWiring?.backendService).toBe('payments');
+  });
+
+  it('백엔드가 둘이고 포트가 같아 구분할 수 없으면 채우지 않고 notes에 남긴다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/lib/api.ts': "export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:8080';\n",
+      'commerce/build.gradle': springGradle,
+      'payments/build.gradle': springGradle,
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.frontendBackendWiring).toBeUndefined();
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.SPRING_API).toBeUndefined();
+    expect(frontend.notes).toContain('변수 SPRING_API가 백엔드 주소로 보이지만 어느 서비스인지 몰라 채우지 않았습니다');
+  });
+
+  it('NEXT_PUBLIC 변수는(새로 더 본 next.config.ts에서 찾았어도) 그대로 공개 변수라 자리 표시자로 채운다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/next.config.ts': "const base = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';\nexport default {};\n",
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const detection = await detectProject(root);
+
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.NEXT_PUBLIC_API_BASE_URL).toBe('${b-studio:services.backend.publicUrl}');
+  });
+
+  it('알려진 자리에 없으면 README 코드 블록의 실행 예시(KEY=value)에서 찾는다', async () => {
+    const root = await repo({
+      'frontend/package.json': nextPackage,
+      'frontend/package-lock.json': '{}',
+      'frontend/README.md': ['# web', '', '```bash', 'API_MODE=real SPRING_API=http://localhost:8080 npm run dev', '```', ''].join('\n'),
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const detection = await detectProject(root);
+
+    const frontend = detection.services.find((service) => service.name === 'frontend')!;
+    expect(frontend.environment.SPRING_API).toBe('http://backend:8080');
+  });
+});
+
 describe('sanitize', () => {
   it('studio.yaml 이름 규칙(소문자로 시작, 소문자·숫자·-)에 맞춘다', () => {
     expect(sanitize('My_App 2')).toBe('my-app-2');
