@@ -33,6 +33,24 @@ const asked: StudioEvent[] = [
   { type: "run_finished", runId: "r1", status: "done", summary: "이렇게 동작합니다", turns: 1 },
 ];
 
+describe("ChatPanel 게이트 체크", () => {
+  it("게이트가 다루지 않은 테스트 알림(coverage-gap)은 ok여도 초록 통과가 아니라 확인 안 됨과 설명으로 그린다(ADR-135)", () => {
+    const detail = "web에 테스트 파일·설정이 새로 생겼지만 workflow.tests에 'web' 서비스를 다루는 항목이 없어 게이트의 test 단계가 돌리지 않았습니다.";
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "숏폼 화면을 만들어 주세요" },
+        { type: "agent", runId: "r1", event: { type: "workflow_check", check: { stage: "test", name: "commerce-test", ok: true, attempts: 1 } } },
+        { type: "agent", runId: "r1", event: { type: "workflow_check", check: { stage: "review", name: "coverage-gap: web 테스트", ok: true, attempts: 1, detail } } },
+      ]),
+    );
+
+    expect(html).toContain("commerce-test · 통과");
+    expect(html).toContain("web 테스트 · 확인 안 됨");
+    expect(html).not.toContain("coverage-gap: web 테스트 · 통과");
+    expect(html).toContain(detail.replace(/'/g, "&#x27;"));
+  });
+});
+
 describe("ChatPanel 입력", () => {
   it("입력창은 하나이고, 만들기/질문 토글 대신 읽기만 스위치가 있다(기본 꺼짐)", () => {
     const html = render(view());

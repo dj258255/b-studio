@@ -154,6 +154,8 @@
 - [ADR-131 실행 실패로 되돌릴 때 DB도 마지막 덤프 시점으로 되돌리고, 턴 상한은 설정할 수 있게 하며 걸리면 게이트를 한 번 더 본다](#adr-131-실행-실패로-되돌릴-때-db도-마지막-덤프-시점으로-되돌리고-턴-상한은-설정할-수-있게-하며-걸리면-게이트를-한-번-더-본다)
 - [ADR-132 되살린 변경을 쓰지 않은 요청도 검증 게이트를 거치게 하고, 체크포인트 저장 지점에 마지막 방어선을 둔다](#adr-132-되살린-변경을-쓰지-않은-요청도-검증-게이트를-거치게-하고-체크포인트-저장-지점에-마지막-방어선을-둔다)
 - [ADR-133 폴더 열기 감지가 서비스마다 테스트 명령을 찾아 workflow.tests에 기본으로 넣고, 체크포인트 제목이 요구사항 id·조사만 남은 조각이 되지 않게 한다](#adr-133-폴더-열기-감지가-서비스마다-테스트-명령을-찾아-workflowtests에-기본으로-넣고-체크포인트-제목이-요구사항-id조사만-남은-조각이-되지-않게-한다)
+- [ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다](#adr-134-gradle-테스트-서비스에-mockito-javaagent-init-스크립트를-compose-configs로-심어-컨테이너-안에서-inline-mock-maker의-jvm-self-attach를-우회한다)
+- [ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다](#adr-135-게이트가-다루지-않는-서비스에-생긴-테스트화면-변경을-경고로-드러내고-체크포인트-본문에-확인-범위를-남긴다)
 
 ---
 
@@ -5546,7 +5548,6 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 엄격(기본으로 넣는) 쪽을 택해, Testcontainers 같은 외부 의존이 있는 모듈에서 기본 `test` 태스크가 통합 테스트까지 포함하도록 구성돼 있으면(pay의 commerce처럼 태그로 분리해 두지 않았으면) 체크포인트마다 게이트가 실패할 수 있다. notes의 narrowing 안내만으로는 사람이 studio.yaml을 열어 직접 좁히기 전까지 이 위험이 남는다.
 - `GRADLE_TEST_CACHE_DIR`는 모든 Gradle 서비스가 같은 경로 문자열(`/tmp/gradle-test-cache`)을 쓴다. 서비스마다 별도 컨테이너라 지금은 부딪히지 않지만, 한 컨테이너 안에서 `docker compose exec`를 동시에 두 번 거는 경로가 생기면(지금은 없다) 달라질 수 있다.
 - `BARE_ID_OR_PRONOUN_FRAGMENT`는 이번에 실측한 요구사항 id·지시대명사 + 조사 꼴만 잡는다. "그것만"처럼 조사가 겹치거나 목록에 없는 다른 짧은 대명사는 여전히 조각째 제목이 될 수 있다.
-
 ## ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다
 
 상태: 채택
@@ -5595,3 +5596,39 @@ compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `doc
 - Maven은 범위 밖이라 Maven 전용 테스트가 있는 서비스는 이 문제가 여전히 남는다. 사용자가 `src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker`를 직접 추가하거나 `argLine`에 `-javaagent:`를 직접 넣어야 한다.
 - 쿠버네티스 경로(`packages/sandbox/src/kubernetes`)는 compose의 `configs:`를 아직 읽지 않는다. 지금 세션은 로컬 Docker 샌드박스(`compose-provider.ts`)만 쓰므로 범위 밖에 뒀다 — 쿠버네티스 배포가 늘면 ConfigMap으로 옮겨야 한다.
 - 공유 폴더 cwd에서 JVM attach가 실패하는 조건은 Mockito의 self-attach 하나만 고친다. 같은 메커니즘을 쓰는 다른 도구(디버거의 동적 attach, 런타임 프로파일러 등)는 여전히 영향을 받는다.
+
+## ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다
+
+상태: 채택
+관련: ADR-078, ADR-090, ADR-096, ADR-127, ADR-133
+
+### 맥락
+- BE-commerce 세션(작업 복사본 `pay-2-5b640fd3`)의 체크포인트 `0434a16`("R26의 웹 화면을 만든다")은 `Workflow-Passed: run, contract_check, browser_check, test, review`였다. 그런데 그 실행에서 에이전트가 `apps/web`에 vitest 설정·`package.json`의 `test` 스크립트·`lib/shortsFeed.test.ts`를 새로 넣었는데도, 세션 `studio.yaml`의 `workflow.tests`에는 `commerce-test` 하나(다른 서비스)뿐이라 게이트의 test 단계는 `apps/web`을 전혀 돌리지 않았다. `workflow.pageChecks`도 `{ service: web, path: / }` 하나뿐이라, 요청이 "화면 확인은 `/shorts`에서"라고 적었는데도 게이트는 `/shorts`를 열어 보지 않았다.
+- 그런데도 트레일러에는 `test`·`browser_check`가 찍혀, "R26 웹이 검증됐다"처럼 보였다(버그 리포트 108). 원인은 두 군데에 걸쳐 있다: (1) `workflowStages()`·`VERIFICATION_STAGES` 판정이 "그 실행이 바꾼 서비스를 전부 확인했는가"가 아니라 "studio.yaml이 선언한 항목을 전부 통과했는가"만 보고, (2) 트레일러(`WORKFLOW_TRAILER`)와 체크포인트 본문(`checkpointBody`, `apps/studio/lib/server/sessions.ts`)이 "어떤 단계가 돌았다"만 남기고 "어느 서비스·어느 경로를 확인했는가"는 남기지 않는다. 둘 다 studio.yaml 선언 자체는 틀리지 않았다(사람이 적은 그대로 돌았다) — 문제는 이번 실행이 그 선언 밖의 영역을 건드렸다는 사실이 어디에도 드러나지 않는 것이다.
+- `packages/agent/src/policy.ts`를 보면 `studio.yaml`은 기본 보호 경로가 아니다(`protectedPaths`를 사람이 직접 적어야 막힌다) — 에이전트가 studio.yaml 자체를 고칠 수 있다는 뜻이다. `explore-qa-save.ts`는 이미 "b-studio는 평소 studio.yaml을 스스로 고치지 않는다(사람 모르게 바뀌지 않게)"는 원칙을 세워 뒀고, 저장은 사람이 "이 흐름을 게이트 화면 확인으로 저장" 버튼을 눌렀을 때만 일어난다. `apps/studio/lib/server/project-detect.ts`의 ADR-133도 같은 원칙 때문에 "생성 시점"에만 `workflow.tests`를 채우고, 이미 studio.yaml이 있는 프로젝트는 건드리지 않는다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 게이트가 실행 중 바뀐 파일을 보고, workflow.tests·workflow.pageChecks가 다루지 않는 서비스에 테스트 파일·화면 경로가 새로 생겼으면 경고만 남긴다(채택) | 경고만으로는 test·browser_check를 실제로 돌리지 못한다 — 하지만 "확인 안 됨"이 드러나므로 다음 선택(B처럼 직접 추가하거나, 요청을 다시 좁히거나)은 사람·에이전트 몫으로 남는다. 가장 작은 변경이고, 비용(게이트 시간)이 늘지 않는다 |
+| B. A에 더해, ADR-133의 감지 규칙(`testCommand`)으로 그 서비스의 테스트 명령을 만들어 그 실행의 게이트에 임시로 넣어 돌리고, studio.yaml에 넣을지 사람에게 제안한다(UI 버튼) | 감지 규칙이 `apps/studio/lib/server/project-detect.ts`(스튜디오 서버)에 있어 `packages/agent`(게이트)에서 바로 쓸 수 없다 — 끌어오려면 감지 로직을 agent 패키지로 옮기거나 중복시켜야 해서 레이어가 꼬인다. 또 "임시로 돌린다"는 그 실행에서만 유효한 test 단계를 하나 더 만드는 셈이라 재시도·트레일러·`missingVerificationStages` 판정에 새 분기가 필요하다. UI 제안·승인 흐름까지 더하면 이번 변경의 몇 배 크기가 된다 — 버그 리포트 108이 요구하는 "거짓 통과를 보이지 않는다"는 A만으로도 채울 수 있어 지금은 보류하고, 나중에 신호가 쌓이면(경고가 자주 나오는 프로젝트가 많으면) 별도로 다룬다 |
+| C. 트레일러·게이트 결과에 "어떤 서비스·어떤 테스트·어떤 경로를 확인했는가"를 담아, 바뀐 서비스 중 확인되지 않은 것을 "확인 안 됨"으로 드러낸다(채택, A와 함께) | `WORKFLOW_TRAILER`(`Workflow-Passed: run, contract_check, ...`) 값 자체를 단계 이름 나열에서 서비스·경로까지 담는 구조로 바꾸면, `parseWorkflowTrailerValues`(위조 방지를 위해 트레일러 블록의 값만 엄격한 형식으로 파싱한다)와 `releaseBlockers`(`WorkflowStage[]`만 비교한다) 양쪽의 파싱·비교 규칙을 함께 바꿔야 하고 기존 체크포인트(옛 트레일러 형식)와도 호환돼야 한다. 대신 PR 리뷰어가 보는 체크포인트 **본문**(`checkpointBody`, 트레일러와 달리 사람이 읽는 자유 형식이고 이미 "검증 결과"·"에이전트 요약"을 담고 있다)에 담는 쪽을 택했다 — 트레일러의 배포 조건 판정 역할은 그대로 두고, "무엇을 확인했는가"는 감사용 텍스트로만 늘린다 |
+| D. 요청 글(`/shorts에서 확인해 줘`)에서 경로를 뽑아 그 실행의 browser_check에 임시로 더한다 | 자유 텍스트에서 경로를 뽑는 규칙은 오탐(요청에 `/`가 들어간 다른 글자, 예시 URL 등)이 쉽고, 맞혀도 실제로 그 경로가 존재하는지 모른 채 화면을 열면 404를 "확인했다"로 착각할 수 있다. `routesFromChangedFiles`(이미 바뀐 페이지 파일에서 실제 경로를 유도하는 결정적 방법, ADR-078)가 있는데 요청 문장 파싱까지 더하면 신뢰도 낮은 경로가 하나 더 생긴다 — A·C가 "바뀐 파일에서 실제 라우트를 본다"는 같은 결정적 방법으로 이미 `/shorts` 같은 경로를 잡아내므로 기각 |
+
+### 결정
+1. **`packages/agent/src/workflow.ts`에 `uncoveredChangeWarnings(project, changedFiles)`를 더한다.** `reviewChanges()`(review 단계, 이미 보호 경로·변경 파일 수 상한을 보는 자리)가 그 결과를 이어 붙인다. 두 가지만 본다(둘 다 `ok: true`라서 게이트를 막지 않는다):
+   - **테스트 공백**: 바뀐 서비스 안에 테스트 파일·테스트 러너 설정(`*.test.*`·`*.spec.*`·`vitest|jest|playwright.config.*`·`__tests__/`)이 새로 생겼는데 `workflow.tests`에 그 서비스를 다루는 항목이 없으면 경고.
+   - **화면 공백**: Next.js 서비스에 `app/**/page.tsx` 라우트가 바뀌었는데(`routesFromChangedFiles` 재사용), `workflow.autoPageChecks.service`가 그 서비스를 맡고 있지 않고 `workflow.pageChecks`에도 **그 경로와 정확히 같은** 선언이 없으면 경고. 서비스는 같아도 경로가 다르면(`/`만 선언했는데 `/shorts`가 바뀜) 공백으로 본다 — 버그 리포트 108을 그대로 재현하는 조건이다.
+   - 두 경고 모두 `project.managed`가 없는(옛 테스트 픽스처 등) 프로젝트에서는 조용히 빈 배열을 돌려준다.
+2. **studio.yaml은 건드리지 않는다.** 테스트 명령을 자동으로 추가하거나 그 실행에서 임시로 돌리지 않는다 — `explore-qa-save.ts`·ADR-133이 세운 "studio.yaml은 사람 모르게 바뀌지 않는다" 원칙을 그대로 지킨다. 다음 행동(studio.yaml에 추가할지)은 경고 문구가 사람·에이전트에게 맡긴다.
+3. **`formatCheckedCoverage(checks)`로 체크포인트 본문에 확인 범위를 남긴다.** `apps/studio/lib/server/sessions.ts`의 `checkpointBody()`가 `formatVerificationReport` 다음에 이 결과를 이어 붙인다: 실제로 돈 `browser_check`·`test`·`concurrency_check` 이름과 통과 여부를 한 줄로, `coverage-gap:` 접두사가 붙은 경고는 "확인 안 됨" 절로 따로 모은다. 트레일러(`Workflow-Passed`)의 형식·파싱 규칙은 바꾸지 않는다 — PR 리뷰어가 본문에서 "test: commerce-test(통과)"만 보고도 web은 빠졌다는 것을 바로 알 수 있게 하는 것이 목적이다.
+
+### 검증 결과
+- `packages/agent/src/workflow.test.ts`에 `uncoveredChangeWarnings`·`formatCheckedCoverage` 테스트를 더했다: managed 없는 프로젝트는 빈 배열, workflow.tests가 다루지 않는 서비스에 테스트 파일이 생기면 경고(돌지만 막지 않음, `ok: true`), 이미 다루면 경고 없음, `pageChecks`가 `/`만 선언했는데 `/shorts`가 바뀌면 경고(버그 리포트 108 재현), `autoPageChecks`가 그 서비스를 맡으면 경고 없음, Next.js가 아닌 서비스는 화면 경고 대상이 아님을 확인했다. `pnpm --filter @b-studio/agent exec vitest run`(1162개, 기존 테스트 포함 전부 통과)으로 회귀가 없음을 봤다.
+- `apps/studio/lib/server/sessions.ts`의 `checkpointBody`는 전용 테스트 하네스가 없는 내부 함수라 별도 유닛 테스트를 추가하지 않았다 — `formatCheckedCoverage` 자체의 단위 테스트와 `pnpm --filter @b-studio/studio typecheck` 통과로 연결 지점의 타입 안전성만 확인했다.
+- 실제 BE-commerce 세션 복사본은 읽기만 했다(수정하지 않았다) — 그 세션을 다시 실행하거나 복사본을 건드리지 않고, 재현 조건(테스트 파일 서비스 bypass, pageChecks 경로 불일치)만 단위 테스트의 픽스처로 옮겨 확인했다.
+
+### 감수한 트레이드오프
+- 테스트 공백 판정은 파일 이름 패턴만 본다(내용은 읽지 않는다). `package.json`에 `test` 스크립트를 추가했지만 테스트 파일 이름이 패턴에 걸리지 않는 드문 경우(예: 확장자 없는 스크립트, 다른 이름 규칙)는 놓칠 수 있다.
+- 화면 공백 판정은 app 라우터(`app/**/page.tsx`)만 본다(`routesFromChangedFiles`의 기존 한계, ADR-078과 동일) — pages 라우터·Vite 앱의 새 화면은 지금도 보지 않는다.
+- 경고가 쌓여도 studio.yaml을 고치는 쪽은 여전히 사람(또는 다음 요청의 에이전트) 몫이다. 같은 공백이 세션마다 반복되면 결국 선택지 B(자동 제안)가 필요해질 수 있다 — 이번에는 비용·레이어 꼬임 때문에 보류했다.
