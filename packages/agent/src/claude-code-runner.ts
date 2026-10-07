@@ -14,7 +14,7 @@ import {
 import { z } from 'zod';
 import type { Effort } from './anthropic-client';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
-import { VerificationGate } from './gate';
+import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
@@ -228,7 +228,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   // 지금 열려 있는 query의 입력 큐. finish와 승격이 이 큐를 닫는다
   let currentInput: InputQueue | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion): void => {
+  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion, failureReason?: AgentResult['failureReason']): void => {
     // 본 대화의 서로 다른 assistant 메시지 수. 이미 있는 messageIds Set의 크기와 같다
     metrics.modelCalls = messageIds.size;
     result = {
@@ -246,6 +246,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       usage,
       metrics: { ...metrics },
       sessionId,
+      ...(failureReason ? { failureReason } : {}),
     };
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다
@@ -352,7 +353,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
               }
               if (turn > maxTurns) {
                 await conversation.interrupt().catch(() => {});
-                finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+                // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
+                const gateStarted = performance.now();
+                const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+                metrics.gateMs += Math.round(performance.now() - gateStarted);
+                if (recheck.pass) finish('done', recheck.summary);
+                else finish('failed', recheck.summary, undefined, 'max_turns');
                 break;
               }
             }
@@ -376,6 +382,16 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             onEvent({ type: 'tokens', usage: { ...usage } });
             const failure = describeResultFailure(message);
             if (failure) {
+              // Claude Code 자신이 턴 상한(error_max_turns)으로 끝냈어도, 바로 실패로 끝내지 않고 지금까지의
+              // 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131). 다른 실패 사유(오류 등)는 그대로 바로 끝낸다
+              if (message.subtype === 'error_max_turns') {
+                const gateStarted = performance.now();
+                const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+                metrics.gateMs += Math.round(performance.now() - gateStarted);
+                if (recheck.pass) finish('done', recheck.summary);
+                else finish('failed', recheck.summary, undefined, 'max_turns');
+                break;
+              }
               finish('failed', failure);
               break;
             }

@@ -112,8 +112,8 @@ export function HistoryPanel({ view }: { view: SessionView }) {
               </p>
             </div>
 
-            {newerCount > 0 &&
-              (confirming ? (
+            {newerCount > 0 ? (
+              confirming ? (
                 <div className="flex flex-wrap items-center gap-2 rounded-md border border-fail/40 bg-fail/10 px-3 py-2">
                   <p className="text-sm text-fail">
                     {snapshot.workspace === "local"
@@ -136,7 +136,21 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                 >
                   이 시점으로 되돌리기
                 </button>
-              ))}
+              )
+            ) : (
+              // 지금(head) 체크포인트는 파일을 움직일 게 없다. 실행 실패·중단이 되돌리지 못한 데이터베이스만
+              // 이 체크포인트 상태로 다시 맞춘다(파일·체크포인트 기록은 그대로다) — 되돌릴 데이터베이스가 없는
+              // 프로젝트에서는 서버가 거부하고(canRestore가 running·권한만 본다) 오류로 안내한다
+              <button
+                type="button"
+                onClick={() => void restore()}
+                disabled={snapshot.status !== "ready" || snapshot.running || !access.canManage}
+                title="되돌릴 파일 변경은 없지만, 실행이 중간에 멈춰 데이터베이스가 이 체크포인트와 어긋났을 수 있습니다"
+                className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+              >
+                데이터베이스 다시 맞추기
+              </button>
+            )}
           </div>
           {error && <p className="mt-2 text-sm text-fail">{error}</p>}
 

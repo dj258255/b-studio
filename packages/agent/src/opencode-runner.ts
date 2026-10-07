@@ -7,7 +7,7 @@ import type { Readable } from 'node:stream';
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
-import { VerificationGate } from './gate';
+import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
@@ -309,7 +309,7 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
   // b-studio 도구가 아닌 호출을 한 번만 기록한다
   const foreignTools = new Set<string>();
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, failureReason?: AgentResult['failureReason']): void => {
     result = {
       status,
       summary,
@@ -324,6 +324,7 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
       usage,
       metrics: { ...metrics },
       sessionId,
+      ...(failureReason ? { failureReason } : {}),
     };
     onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
   };
@@ -511,7 +512,14 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
       lastText = '';
       pending = outcome.feedback;
     }
-    if (!result) finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+    if (!result) {
+      // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
+      const gateStarted = performance.now();
+      const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+      metrics.gateMs += Math.round(performance.now() - gateStarted);
+      if (recheck.pass) finish('done', recheck.summary);
+      else finish('failed', recheck.summary, 'max_turns');
+    }
   } finally {
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
     await serial.idle();

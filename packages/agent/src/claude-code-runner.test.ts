@@ -769,3 +769,59 @@ describe('runClaudeCodeAgent 프로젝트 지침 주입(ADR-077)', () => {
     expect(result.metrics!.guideChars).toBeUndefined();
   });
 });
+
+describe('runClaudeCodeAgent 턴 상한에 걸리면 되돌리기 전에 게이트를 한 번 더 본다(ADR-131)', () => {
+  it('Claude Code 자신이 턴 상한(error_max_turns)으로 끝냈어도 지금까지의 변경이 게이트를 통과하면 done으로 남긴다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [[{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }]],
+      result: { subtype: 'error_max_turns', is_error: true, errors: ['Reached maximum number of turns (60)'] },
+    });
+    const sandbox = fakeSandbox(project, [true]);
+
+    const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('최대 턴 수(60)를 넘었습니다');
+    expect(result.summary).toContain('검증 게이트를 통과해');
+    expect(result.failureReason).toBeUndefined();
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+    expect(sandbox.restarts).toEqual(['api']);
+  });
+
+  it('턴 상한(error_max_turns)에 걸렸는데 지금까지의 변경이 게이트를 통과하지 못하면 실패로 끝내 되돌리기 경로를 타게 한다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [[{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String broken;' } }]],
+      result: { subtype: 'error_max_turns', is_error: true, errors: ['Reached maximum number of turns (60)'] },
+    });
+    // 재시작이 실패로 와서(false) 게이트가 통과하지 못한다
+    const sandbox = fakeSandbox(project, [false]);
+
+    const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('failed');
+    expect(result.failureReason).toBe('max_turns');
+    expect(result.summary).toBe('최대 턴 수(60)를 넘었습니다');
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+  });
+
+  it('러너 자신의 턴 카운터가 상한을 넘겨도(assistant 메시지 수 기준) 같은 방식으로 게이트를 한 번 더 본다', async () => {
+    // 한 번의 사용자 턴 안에서 도구 호출 3번(메시지 3개)을 내 maxTurns=2를 넘긴다 — Claude Code 쪽 error_max_turns 없이
+    // 러너 자신의 messageIds 카운터만으로 걸리는 경로를 재현한다
+    const { sdk } = fakeClaudeCode({
+      turns: [
+        [
+          { tool: 'read_file', input: { path: 'api/src/Order.java' } },
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } },
+          { tool: 'read_file', input: { path: 'api/src/Order.java' } },
+        ],
+      ],
+    });
+    const sandbox = fakeSandbox(project, [true]);
+
+    const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox, sdk, fetcher: async () => contract, maxTurns: 2 });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('최대 턴 수(2)를 넘었습니다');
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+  });
+});

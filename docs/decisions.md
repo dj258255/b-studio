@@ -9,14 +9,14 @@
 | 주제 | ADR |
 |---|---|
 | 프로젝트 모델과 런타임 | 001–009, 021, 028, 032, 044 |
-| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053–060 |
+| 에이전트와 검증 게이트 | 010–014, 034–039, 042, 047–048, 053–060, 131 |
 | 웹 스튜디오와 세션 | 015–020, 029–031, 033, 040–041, 045–046, 052, 126 |
-| 데이터·자원·보안 | 022–027, 038, 040, 045, 126 |
+| 데이터·자원·보안 | 022–027, 038, 040, 045, 126, 131 |
 | 운영 배포 | 020, 030, 032–033, 043–045 |
 | 토큰 경제·모델 전략 | 047–048, 055, 063–065, 075, 089, 091 |
 | 조율·작업 분해 | 051, 059, 068–069, 071, 116–117, 119 |
 | 요구사항·추적성·PR 리뷰 | 072, 079–081, 090, 092, 098, 103, 107, 110–111, 114–115, 122–123, 125 |
-| 도그푸딩에서 드러난 마찰 수정 | 095–096, 099, 101–102, 106, 108–109, 112–113 |
+| 도그푸딩에서 드러난 마찰 수정 | 095–096, 099, 101–102, 106, 108–109, 112–113, 131 |
 | 멀티 CLI·백엔드 | 089, 091, 093, 117–120 |
 | 실제 환경에서만 드러난 제약(네트워크·포트) | 024–027, 033, 121, 124 |
 
@@ -151,6 +151,7 @@
 - [ADR-128 폴더 열기 감지를 실제 저장소 구조에 맞춘다: Gradle·Maven 래퍼를 상위 폴더까지 찾고, 모노레포 앱 폴더를 두 단계까지 본다](#adr-128-폴더-열기-감지를-실제-저장소-구조에-맞춘다-gradlemaven-래퍼를-상위-폴더까지-찾고-모노레포-앱-폴더를-두-단계까지-본다)
 - [ADR-129 CLI 러너(Command Code·OpenCode·Gemini)에 레인 조율 게시판을 연결하고, CLI 레인 사용량을 모델별로 집계한다](#adr-129-cli-러너command-codeopencodegemini에-레인-조율-게시판을-연결하고-cli-레인-사용량을-모델별로-집계한다)
 - [ADR-130 폴더 열기 감지가 프런트엔드의 백엔드 주소를 공개 변수뿐 아니라 서버 쪽 변수(SPRING_API 등)에서도 찾아 컨테이너 사이 주소로 채운다](#adr-130-폴더-열기-감지가-프런트엔드의-백엔드-주소를-공개-변수뿐-아니라-서버-쪽-변수spring_api-등에서도-찾아-컨테이너-사이-주소로-채운다)
+- [ADR-131 실행 실패·중단으로 되돌릴 때 조용히 버리지 않는다: 바뀐 파일·DB를 보관하고 되돌리며, 턴 상한은 설정할 수 있고 걸리면 게이트를 한 번 더 본다](#adr-131-실행-실패중단으로-되돌릴-때-조용히-버리지-않는다-바뀐-파일db를-보관하고-되돌리며-턴-상한은-설정할-수-있고-걸리면-게이트를-한-번-더-본다)
 
 ---
 
@@ -5423,3 +5424,45 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **이름 조각 규칙(API·BACKEND·SERVER·SPRING·URL·HOST·BASE)은 여전히 휴리스틱이다.** `URL`·`BASE`처럼 흔한 조각은 `DATABASE_URL` 같은 이름에도 토큰으로 걸리지만, 같은 줄의 http(s) 스킴 리터럴 기본값을 추가로 요구해 실제 오탐은 걸러진다 — 그래도 `SPRING_API_KEY`(API 토큰, 백엔드 주소가 아님)처럼 기본값이 우연히 `http://`로 시작하면 여전히 오탐할 여지는 남는다.
 - **가볍게 훑는 소스 스캔(`lightFrontendSourceFiles`)은 깊이 4·파일 40개로 자른다.** 이보다 더 깊거나 많은 파일에 변수를 선언한 저장소는 여전히 못 찾는다 — 저장소 전체를 다 읽지 않는다는 원칙(ADR-095)과의 트레이드오프다.
 - **백엔드 후보가 둘 이상이고 포트까지 같으면(이번 수정 전과 동일하게) 채우지 않는다.** pay의 `commerce`/`consumer-app`은 `defaultSelected: false` 필터로 피했지만, 둘 다 기본 선택되는 서비스이면서 포트까지 같은 저장소는 여전히 자동 연결을 포기하고 notes로 사람에게 넘긴다 — 틀린 연결보다는 보수적인 쪽을 택했다(ADR-095와 같은 태도).
+
+## ADR-131 실행 실패·중단으로 되돌릴 때 조용히 버리지 않는다: 바뀐 파일·DB를 보관하고 되돌리며, 턴 상한은 설정할 수 있고 걸리면 게이트를 한 번 더 본다
+
+상태: 채택
+관련: ADR-018, ADR-099
+
+### 맥락
+- 도그푸딩 저장소(Spring Boot `commerce/` + Next.js `apps/web`) 세션 5b640fd3에서 숏폼 작업(R21·R22)을 claude-code 백엔드로 돌리다 실행 3133b5ef가 `Reached maximum number of turns (60)`으로 끝났다. 그 실행은 도구 호출 108+75+51+30=264회(run_in_service·read_file·write_file·edit_file)를 냈다. 끝난 뒤 작업 복사본의 `git status`는 비어 있고 체크포인트도 없었다 — 쓴 파일이 모두 되돌려졌다. 앞선 실행 565b3d40은 네트워크 끊김(ENOTFOUND)으로 끝났는데 같은 일이 있었을 것이다.
+- 코드를 따라가 보면 `revertRun`(`apps/studio/lib/server/sessions.ts`)이 이미 모든 실패·중단 경로(턴 상한, 모델·네트워크 오류, 게이트 실패 뒤 포기, 사용자 중지·토큰 예산 초과)에서 `CheckpointStore.discard()`를 거치고, 그 메서드가 버리기 전에 `DiscardBackup`(ADR-099)을 남긴다. 되돌린 결과는 `reverted` 세션 이벤트로 파일 목록·패치·백업 id까지 실어 나르고, 화면(`BackupRestoreButton`)이 되살리기 버튼을 보여 준다 — 이 경로 자체는 **이미 구현돼 있었다.** 그런데 이 경로를 실제 요청 실패(모델 오류·턴 상한)로 **끝까지 돌려 보는 테스트가 한 건도 없었다** — `ScriptedModelClient`로 리버트를 재현하는 통합 테스트가 비어 있어, 문서(ADR-099)가 다루는 "이어서 작업하기(resumeSession)" 경로만 고정돼 있고 "요청 도중 실패(revertRun)" 경로는 사실상 무방비였다. 이번 작업으로 이 경로를 테스트로 고정하면서 아래 두 가지 실제 버그를 찾았다.
+- **DB가 되돌아가지 않는 버그.** `revertRun`은 문서(`docs/**`)를 먼저 체크포인트로 지킨 뒤(ADR-099) 남은 변경을 버린다. 문서가 있으면 `protectPendingDocsBeforeDiscard`가 새 체크포인트(docsCheckpoint)를 만들어 `session.snapshot.checkpoints[0]`에 꽂는데, DB 복원(`session.databases.restore(session.snapshot.checkpoints[0]!.sha, …)`)이 **그 뒤의** `checkpoints[0]`을 기준점으로 썼다. docsCheckpoint는 `saveDatabases`를 부르지 않아 DB 덤프가 없으므로 복원이 `action: 'missing'`으로 조용히 아무 것도 하지 않았다 — 파일은 되돌아갔는데 그 실행이 적용한 Flyway 마이그레이션(V73)은 `flyway_schema_history`에 남아, 다음 기동 때 "적용된 마이그레이션 파일이 없다"로 실패했다(세션 5b640fd3, 체크포인트 57cced6 — 다음 요청의 에이전트가 그 고아 행을 직접 지우고 V74로 번호를 올려 우회했다). `resumeSession`(`boot()`의 `databaseFrom`)에도 같은 모양의 버그가 있었다: `localEdits`가 있을 때만 `previous.sha`(새 체크포인트가 생기기 전의 head)를 썼고, `discardWorkingCopy` 경로는 `databaseFrom`을 주지 않아 `boot()`가 새로 생긴 head(문서 체크포인트일 수 있다)로 복원을 시도했다.
+- **DB 어긋남을 수동으로 바로잡을 길이 없던 문제.** 이어서(R21이) 다시 턴 상한(60)으로 실패했을 때, 파일은 되돌아갔지만 DB에는 `75 short video upload meta`가 남았다(파일에는 V74까지만 있다). 사용자가 마지막 체크포인트(57cced6, 그 시점의 head)로 되돌리려고 `POST /api/sessions/5b640fd3/checkpoints/<sha>/restore`를 불렀더니 "이미 최신 체크포인트입니다"(409)로 거절당했다. `restoreCheckpoint`가 `target.sha === head.sha`를 무조건 막아서, head 체크포인트의 DB 상태로 돌아가는 길 자체가 없었다.
+- **턴 상한에 걸리면 바로 포기한다.** 턴 상한은 "아직 끝나지 않았다"는 신호일 뿐 "검증에 실패했다"는 신호가 아니다. 모델이 도구 호출(write_file 등)을 마지막으로 한 그 순간 턴 상한에 걸리면, 플랫폼은 그 변경이 실제로 게이트를 통과하는지 한 번도 보지 않고 버린다 — 요청이 사실상 끝나 있었어도 그렇다.
+- **턴 상한이 고정값(60)이라 조정할 수 없다.** 모든 실행기(`packages/agent/src/{loop,claude-code-runner,codex-runner,commandcode-runner,opencode-runner,gemini-cli-runner}.ts`)가 `maxTurns = 60`을 함수 시그니처 기본값으로만 받고, `studio.yaml`에도 요청 옵션에도 조정할 자리가 없었다. 복잡한 요청이 많은 프로젝트는 60번 안에 끝내지 못해 위 문제를 반복해서 겪고, 반대로 빠른 피드백이 중요한 프로젝트는 낮출 방법이 없었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 턴 상한에 걸리면 지금처럼 바로 실패로 끝낸다 | 모델이 마지막 도구 호출 직후 상한에 걸리면, 실제로 끝난 요청도 "검증 한 번 못 받고" 버려진다. 지금까지의 변경을 한 번 더 검증해 통과하면 체크포인트로 살린다(채택) |
+| B. DB 복원 기준점을 매번 `databases.save()`로 다시 맞춘다(모든 체크포인트가 덤프를 갖게 한다) | 문서 체크포인트(ADR-096)는 "검증 게이트 없이 가볍게 남긴다"는 설계 의도가 있다 — 매번 pg_dump를 추가하면 그 의도와 비용을 함께 깨뜨린다. 대신 DB 복원 기준점만 "실제로 덤프가 있는 체크포인트"로 고정하고, 복원 후에는 새 체크포인트의 덤프를 한 번만 다시 남긴다(채택) |
+| C. "지금 체크포인트로 되돌리기"가 막혀 있는 문제를 새 API·새 화면("DB를 지금 체크포인트로 되돌리기")으로 따로 만든다 | `CheckpointStore.restore(sha)`는 파일이 이미 그 상태면 아무 일도 하지 않는 안전한 연산이고, `DatabaseBranches.restore`도 어긋나지 않았으면 `'unchanged'`로 조용히 끝난다 — 기존 "되돌리기" 버튼·API·이벤트(`restored`)를 그대로 쓰면서 head를 가리키는 경우만 안내문을 "되돌렸다" 대신 "데이터베이스를 다시 맞췄다"로 바꾸는 쪽이 새 표면을 늘리지 않는다(채택, 아래 결정 2 참고) |
+| D. 턴 상한을 올려서(예: 120) 문제 빈도를 줄인다 | 임시방편이고, 프로젝트마다 적정 상한이 다르다는 근본 문제(설정 불가)를 해결하지 못한다. 기본값은 그대로 60으로 두고 studio.yaml·요청 옵션으로 조정 가능하게 한다(채택) |
+
+### 결정
+1. **턴 상한에 걸리면 되돌리기 전에 게이트를 한 번 더 본다** (`recheckGateOnMaxTurns`, `packages/agent/src/gate.ts`). 여섯 실행기(API 직접 루프 `loop.ts`, `claude-code-runner.ts` — 자체 턴 카운터와 Claude Code 자신의 `error_max_turns` 두 경로 모두, `codex-runner.ts`, `opencode-runner.ts`, `gemini-cli-runner.ts`, `commandcode-runner.ts` — 하위 CLI의 종료 코드 8) 모두 턴 상한에 걸리는 지점에서 같은 함수를 부른다. 게이트가 없으면(질문 모드·지연 기동이 아직 아무것도 바꾸지 않은 세션) 바로 실패다. 게이트가 있으면 한 번 더 `check()`를 돌려, 통과(`pass`)하면 `status: 'done'`으로 끝내 기존 체크포인트 경로(`sessions.ts`의 성공 분기)를 그대로 타게 하고, 통과하지 못하면(`retry`·`exhausted` 구분 없이) `status: 'failed'`와 `failureReason: 'max_turns'`로 끝내 기존 되돌리기 경로(`revertRun`)를 그대로 타게 한다 — **sessions.ts 쪽은 한 글자도 바꾸지 않았다.** 다른 실패 사유(모델 오류·사용자 중지)는 이미 그 안에서 게이트를 거쳤거나 거칠 이유가 없으므로 이 재확인을 거치지 않는다.
+2. **DB 복원 기준점을 "실제로 덤프가 있는 체크포인트"로 고정한다.** `revertRun`은 `discardWorkingCopy`(문서 체크포인트를 만들 수 있다)를 부르기 **전**의 `checkpoints[0].sha`를 미리 잡아 두고 그 값으로 `databases.restore()`를 부른다. 문서 체크포인트가 생겼으면 복원한(올바른) DB 상태를 그 체크포인트의 덤프로 다시 남겨(`saveDatabases`), 연속으로 실패해도 다음 되돌리기가 같은 "덤프 없음" 문제를 반복하지 않게 한다. `resumeSession`도 같은 원칙으로, `databaseFrom`을 (local 여부와 상관없이) 항상 이 함수 맨 위에서 잡아 둔 `previous.sha`로 통일했다. `restoreCheckpoint`는 대상이 지금(head) 체크포인트여도 더는 거부하지 않는다 — 파일은 움직일 게 없지만(`CheckpointStore.restore`가 안전한 무변화 연산), DB가 그 체크포인트 이후 어긋났을 수 있어 DB만 다시 맞추는 경로로 쓴다. 대화 안내문도 "되돌렸다"(뒤의 체크포인트가 사라졌다) 대신 "데이터베이스를 다시 맞췄다"로 갈라 말한다. DB를 선언하지 않은 프로젝트가 head를 가리키면 정말 할 일이 없으므로 그때만 그대로 409를 유지한다. `DiscardBackup`(파일 백업)은 그대로 파일만 담고, 백업을 되살리면(`restoreDiscardedBackup`) DB는 건드리지 않는다 — 되살린 파일(마이그레이션 SQL 포함)은 다음 요청의 게이트가 서비스를 다시 띄울 때 Flyway가 알아서 다시 적용한다.
+3. **턴 상한을 설정할 수 있게 한다**(`workflow.maxTurns`, `packages/spec/src/schema.ts`). 워크플로 정책(`maxChangedFiles`처럼 모델 프롬프트가 아니라 실행기가 직접 적용하는 수치)과 같은 자리에 뒀다. 1 이상 300 이하 정수, 생략하면 지금처럼 각 실행기 기본값(60)을 그대로 쓴다. `maxTurnsFor(project, override)`(`packages/agent/src/workflow.ts`)가 요청 옵션(override)을 studio.yaml보다 우선해 고른다. 요청 옵션은 `POST /api/sessions/[id]/messages`의 `maxTurns` 필드(1~300 정수, 생략 가능)로 받아 `sendMessage` → `RunPlan.maxTurns` → `runPlan()`의 공유 옵션(`shared.maxTurns`)을 거쳐 모든 백엔드(claude-code·codex·commandcode·opencode·gemini·api)에 똑같이 전달된다.
+
+### 검증 결과
+- `packages/agent/src/gate.test.ts`(간접, `recheckGateOnMaxTurns`는 `loop.test.ts`·`claude-code-runner.test.ts`·`commandcode-runner.test.ts`가 직접 호출 경로를 고정), `loop.test.ts`(새 `describe`): 마지막 행동이 도구 호출이라 게이트를 아직 보지 못한 채 턴 상한에 걸려도 변경이 통과하면 `done`으로 남기는 것, 통과하지 못하면 `failed`+`failureReason: 'max_turns'`로 끝내 되돌리기 경로를 타는 것, 바뀐 파일이 없으면 검증할 것도 없어 바로 통과하는 것을 확인했다.
+- `packages/agent/src/claude-code-runner.test.ts`(새 `describe`): Claude Code 자신이 보고하는 `error_max_turns`와 러너 자신의 턴 카운터(assistant 메시지 수) 두 경로 모두에서 같은 재확인이 동작하는 것을 확인했다.
+- `packages/agent/src/commandcode-runner.test.ts`(보강): 종료 코드 8(최대 턴)에서도 같은 재확인이 동작하는 것을 확인하고, 기존 "바뀐 파일 없이 종료 코드 8"이 이제 `done`(검증할 것도 없어 통과)으로 바뀌는 것에 맞춰 기존 테스트 기대값을 고쳤다.
+- `packages/agent/src/workflow.test.ts`(새 `describe`), `packages/spec/src/spec.test.ts`(보강): `maxTurnsFor`가 요청 옵션 → studio.yaml → undefined(실행기 기본값) 순으로 고르는 것, `workflow.maxTurns`가 1~300 범위 밖이면 거부되는 것을 확인했다.
+- `apps/studio/lib/server/sessions-max-turns.test.ts`(신규, 진짜 git 저장소·체크포인트·게이트에 가짜 샌드박스): `workflow.maxTurns: 1`이 실제로 실행기에 전달돼 두 번째 턴을 꺼내기도 전에 상한에 걸리는 것, 요청 옵션 `maxTurns: 2`가 studio.yaml의 1보다 우선해 대본이 끝까지 도는 것을 `ScriptedModelClient`로 확인했다.
+- `apps/studio/lib/server/sessions-revert-backup.test.ts`(신규): 모델 호출이 오류로 끝난 요청이 바뀐 파일을 보관한 뒤 되돌리고(`reverted` 이벤트의 `backup` 필드), 되살리면 작업 트리로 돌아오되 체크포인트가 아니라 미검증 상태로 남아(체크포인트 수 불변), 다음 요청이 게이트를 통과해야 비로소 그 파일이 체크포인트에 들어가는 것을 처음부터 끝까지 확인했다 — ADR-099의 백업 메커니즘 자체는 이미 구현돼 있었지만 이 경로(요청 실패 → 되돌리기)가 테스트로 고정된 적은 없었다.
+- `apps/studio/lib/server/sessions-revert-database.test.ts`(신규): 문서와 코드를 함께 바꾼 요청이 모델 오류로 끝나 되돌릴 때(문서 체크포인트가 함께 생기는 상황) DB가 `'missing'`이 아니라 실제로 `'restored'`되는 것을 확인했다 — **수정을 되돌려 보면(`dbRestorePoint`를 `discardWorkingCopy` 뒤의 `checkpoints[0]`으로 바꿔) 이 테스트가 정확히 `action: 'missing'`으로 실패하는 것도 직접 확인했다**(회귀를 실제로 재현한 뒤 고쳤다). 이어서 "이미 고친 되돌리기가 DB를 바로잡았으므로 지금 체크포인트로 되돌리기를 다시 불러도 할 일이 없다"(`action: 'unchanged'`)는 것도 같은 테스트에서 이어 확인해, 실측에서 사용자가 겪은 "수동 우회가 필요한 상태"가 이 수정 이후로는 애초에 생기지 않음을 보였다. 별도 `describe`로 "지금 체크포인트로 되돌리기"가 head를 가리켜도 거부하지 않고 어긋난 DB만 다시 맞추는 것, DB를 선언하지 않은 프로젝트는 여전히 거부하는 것도 확인했다.
+- `pnpm -r typecheck`(6/6 Done), `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고 9건만 유지), `pnpm exec vitest run`(apps/studio 213개 파일 1,744건, packages/agent 57개 파일 1,137건, packages/spec 4개 파일 110건 — 전부 통과) — 끝줄은 보고에 그대로 붙인다.
+
+### 감수한 트레이드오프
+- **턴 상한 재확인은 실패를 한 턴 더 늦게 알릴 뿐, 검증 비용 자체를 줄이지는 않는다.** `gate.check()`는 호출될 때마다 재시작·계약·테스트를 다시 돈다 — 턴 상한에 걸릴 때마다 한 번의 전체 검증 비용이 추가로 든다. 통과할 가능성이 있는 경우(모델이 막 도구 호출을 마친 직후)에만 뜻이 있어 감수했다.
+- **DB 복원은 여전히 체크포인트 단위다.** 한 요청 안에서 여러 번 마이그레이션을 적용하고 되돌리는 세밀한 추적은 하지 않는다 — "마지막 체크포인트 시점으로 전부 되돌린다"는 ADR-018의 원래 설계를 그대로 따른다.
+- **"지금 체크포인트로 되돌리기"의 화면 문구는 휴리스틱으로 가른다.** `isHead`일 때와 아닐 때 다른 문장을 보여 주지만, 실제로 무엇이 어긋났는지(파일인지 DB인지)는 서버가 미리 판정해 보여 주지 않는다 — 눌러서 결과(되돌린 서비스·데이터베이스 상태)를 보기 전에는 "할 일이 있는지"를 미리 알 수 없다.
+- **CLI 러너(Codex·Command Code·OpenCode·Gemini) 쪽 재확인은 Claude Code만큼 실전에서 검증되지 않았다.** 실제로 측정된 사고는 claude-code 백엔드였고, 나머지 다섯 실행기는 같은 패턴을 기계적으로 옮겨 단위 테스트(가짜 CLI)로만 확인했다 — 실제 CLI 프로세스로 턴 상한을 재현하는 e2e 검증은 하지 않았다.

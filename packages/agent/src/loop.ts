@@ -5,7 +5,7 @@ import type { Effort } from './anthropic-client';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
-import { VerificationGate, type GateOptions, type PageFetcher, type VerifyMode } from './gate';
+import { recheckGateOnMaxTurns, VerificationGate, type GateOptions, type PageFetcher, type VerifyMode } from './gate';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { loadProjectGuide } from './project-guide';
@@ -151,6 +151,13 @@ export interface AgentResult {
   usage: AgentUsage;
   /** 실행 지표. 로컬 Claude Code 러너는 모델 호출을 직접 보지 못해 채우지 않는다 */
   metrics?: RunMetrics;
+  /**
+   * status가 'failed'일 때만 뜻이 있다. 'max_turns'면 턴 상한에 걸려 끝났다는 뜻이다(ADR-131).
+   * 되돌리기 자체(보관 뒤 삭제)는 다른 실패 사유와 같지만, 턴 상한은 되돌리기 전에 게이트를 한 번 더 돌려
+   * 지금까지의 변경이 통과하면 실패 대신 체크포인트로 남긴다(recheckGateOnMaxTurns). 그래도 통과하지 못하면
+   * 이 표시를 달고 실패로 끝나, 다른 실패 사유와 똑같이 보관·되돌리기 경로를 탄다.
+   */
+  failureReason?: 'max_turns';
 }
 
 export type AgentEvent =
@@ -385,7 +392,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   /** 마지막으로 모델에게 보낸 게이트 실패 안내. 상한이 소진된 뒤 승격하면 같은 안내를 다시 보낸다 */
   let lastFeedback: string | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion): AgentResult => {
+  const finish = (status: AgentResult['status'], summary: string, turns: number, question?: AskUserQuestion, failureReason?: AgentResult['failureReason']): AgentResult => {
     const result: AgentResult = {
       status,
       summary,
@@ -400,6 +407,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       turns,
       usage,
       metrics: { ...metrics },
+      ...(failureReason ? { failureReason } : {}),
     };
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     return result;
@@ -573,7 +581,12 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     messages.push({ role: 'user', content: outcome.feedback });
   }
 
-  return finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`, maxTurns);
+  // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
+  const gateStarted = performance.now();
+  const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+  metrics.gateMs += Math.round(performance.now() - gateStarted);
+  if (recheck.pass) return finish('done', recheck.summary, maxTurns);
+  return finish('failed', recheck.summary, maxTurns, undefined, 'max_turns');
 }
 
 function addUsage(total: AgentUsage, usage: BetaMessage['usage']): void {

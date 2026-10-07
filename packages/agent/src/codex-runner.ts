@@ -6,7 +6,7 @@ import type { Thread, ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sd
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
-import { VerificationGate } from './gate';
+import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
@@ -200,7 +200,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   // ask_user가 남긴 질문. 있으면 이 턴이 끝날 때 실행을 끝내고 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
 
-  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion): void => {
+  const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion, failureReason?: AgentResult['failureReason']): void => {
     result = {
       status,
       summary,
@@ -216,6 +216,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
       usage,
       metrics: { ...metrics },
       threadId,
+      ...(failureReason ? { failureReason } : {}),
     };
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
   };
@@ -376,7 +377,14 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
       lastText = '';
       pending = outcome.feedback;
     }
-    if (!result) finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+    if (!result) {
+      // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
+      const gateStarted = performance.now();
+      const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+      metrics.gateMs += Math.round(performance.now() - gateStarted);
+      if (recheck.pass) finish('done', recheck.summary);
+      else finish('failed', recheck.summary, undefined, 'max_turns');
+    }
   } finally {
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
     await serial.idle();

@@ -6,7 +6,7 @@ import type { Readable } from 'node:stream';
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
-import { VerificationGate } from './gate';
+import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
@@ -282,7 +282,7 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
   let sessionId: string | undefined = canResume ? resume : undefined;
   let announced = false;
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, failureReason?: AgentResult['failureReason']): void => {
     result = {
       status,
       summary,
@@ -297,6 +297,7 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
       usage,
       metrics: { ...metrics },
       sessionId,
+      ...(failureReason ? { failureReason } : {}),
     };
     onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
   };
@@ -405,7 +406,14 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
       lastText = '';
       pending = outcome.feedback;
     }
-    if (!result) finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+    if (!result) {
+      // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
+      const gateStarted = performance.now();
+      const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+      metrics.gateMs += Math.round(performance.now() - gateStarted);
+      if (recheck.pass) finish('done', recheck.summary);
+      else finish('failed', recheck.summary, 'max_turns');
+    }
   } finally {
     await serial.idle();
     await toolServer?.close();

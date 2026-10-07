@@ -118,6 +118,13 @@ describe('parseSpec', () => {
 `)).toThrow(SpecError);
   });
 
+  it('턴 상한(workflow.maxTurns)을 읽고, 생략하면 undefined이며, 범위 밖 값은 거부한다(ADR-131)', () => {
+    expect(parseSpec(`${ORDERS_SPEC}`).workflow?.maxTurns).toBeUndefined();
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  maxTurns: 30\n`).workflow?.maxTurns).toBe(30);
+    expect(() => parseSpec(`${ORDERS_SPEC}workflow:\n  maxTurns: 0\n`)).toThrow(SpecError);
+    expect(() => parseSpec(`${ORDERS_SPEC}workflow:\n  maxTurns: 301\n`)).toThrow(SpecError);
+  });
+
   it('실행할 수단이 없는 test·browser_check를 필수 단계로 두면 거부한다', () => {
     const noTests = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [plan, test, checkpoint]\n`));
     expect(noTests.issues).toEqual(['workflow.tests: required에 test가 있으면 실행할 tests가 최소 1개 필요합니다']);

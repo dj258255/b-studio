@@ -20,6 +20,29 @@ export type GateOutcome =
   | { kind: 'retry'; feedback: string }
   | { kind: 'exhausted'; summary: string };
 
+/** recheckGateOnMaxTurns의 결과. pass면 summary를 'done' 요약으로, 아니면 'failed' 요약으로 쓴다 */
+export interface MaxTurnsRecheck {
+  pass: boolean;
+  summary: string;
+}
+
+/**
+ * 턴 상한에 걸렸을 때 바로 실패로 끝내지 않고, 지금까지의 변경이 검증 게이트를 통과하는지 한 번 더 확인한다(ADR-131).
+ * 턴 상한에 걸린 시점은 모델이 마지막 도구 호출 뒤 자기 입으로 "끝났다"고 말할 기회를 얻지 못했을 수 있어,
+ * 실제로는 요청이 끝나 있을 수도 있다 — 되돌리기 전에 한 번은 플랫폼이 직접 확인한다.
+ * 게이트가 없으면(질문 모드·지연 기동이 아직 아무것도 바꾸지 않은 세션) 확인할 것이 없어 바로 실패로 본다.
+ * 통과(pass)든 실패든 다른 실패 사유(오류·중지)와 달리 재시도 횟수를 넘겼는지는 따지지 않는다 —
+ * 어차피 턴이 남지 않아 모델에게 피드백을 돌려줄 수 없으므로, pass가 아니면 모두 실패로 끝낸다.
+ */
+export async function recheckGateOnMaxTurns(gate: VerificationGate | undefined, maxTurns: number, onEvent: (event: AgentEvent) => void): Promise<MaxTurnsRecheck> {
+  const limitMessage = `최대 턴 수(${maxTurns})를 넘었습니다`;
+  if (!gate) return { pass: false, summary: limitMessage };
+  const outcome = await gate.check();
+  if (outcome.kind !== 'pass') return { pass: false, summary: limitMessage };
+  if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+  return { pass: true, summary: `${limitMessage}. 다만 지금까지의 변경이 검증 게이트를 통과해 체크포인트로 남깁니다(요청의 일부만 끝났을 수 있습니다).` };
+}
+
 /**
  * 검증 범위. full은 지금과 같고, light(가볍게 확인)는 서비스 재시작·준비 판정·계약만 돌린다.
  * 작은 변경에서 빠른 피드백을 받으려는 것이라, 건너뛴 단계는 배포 조건(releaseRequires)이 자연히 막는다.
