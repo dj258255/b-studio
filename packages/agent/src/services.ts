@@ -11,7 +11,7 @@ export interface FileServiceMapping {
 /**
  * 바뀐 파일 경로를 보고 다시 띄워야 할 서비스를 고른다.
  * studio.yaml·compose 파일은 특정 서비스 폴더에 속하지 않지만 모든 managed 서비스의 환경 변수·마운트·
- * top-level configs를 결정한다. 둘 중 하나만 재시작하면 나머지는 옛 설정을 그대로 쓰게 되므로(트러블슈팅 72),
+ * top-level configs를 결정한다. 둘 중 하나만 재시작하면 나머지는 옛 설정을 그대로 쓰게 되므로(트러블슈팅 74),
  * 바뀌면 managed 서비스를 전부 다시 띄운다
  */
 export function servicesForFiles(project: LoadedProject, files: readonly string[]): FileServiceMapping {

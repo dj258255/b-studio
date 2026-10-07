@@ -5640,7 +5640,7 @@ compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `doc
 관련: ADR-083, ADR-101, ADR-134
 
 ### 맥락
-- BE-commerce 프로젝트(pay-2)에서 "생성 파일 다시 만들기"로 `compose.b-studio.yaml`을 다시 썼다(ADR-134의 Mockito init 스크립트 설정이 새로 들어감). 떠 있는 세션에 "이 세션에도 적용"(ADR-101)을 보내자 응답이 `{"restarted":[],"skippedOff":[]}`였다. 세션 작업 복사본의 compose 파일에는 새 설정이 들어갔지만 실행 중인 컨테이너는 그대로였다(트러블슈팅 72).
+- BE-commerce 프로젝트(pay-2)에서 "생성 파일 다시 만들기"로 `compose.b-studio.yaml`을 다시 썼다(ADR-134의 Mockito init 스크립트 설정이 새로 들어감). 떠 있는 세션에 "이 세션에도 적용"(ADR-101)을 보내자 응답이 `{"restarted":[],"skippedOff":[]}`였다. 세션 작업 복사본의 compose 파일에는 새 설정이 들어갔지만 실행 중인 컨테이너는 그대로였다(트러블슈팅 74).
 - `packages/agent/src/services.ts`의 `servicesForFiles`는 바뀐 파일이 `project.managed`의 어느 서비스 `path` 밑에 있는지만 본다. `compose.b-studio.yaml`·`studio.yaml`은 프로젝트 루트 파일이라 서비스 폴더에 속하지 않는다. backend·frontend처럼 서비스가 둘 이상이고 전부 하위 폴더면 두 파일 다 `unmatched`로 빠져 재시작 대상이 0개가 된다. 서비스가 하나뿐이고 경로가 루트(`.`)인 흔한 경우에는 `root === ''` 매칭이 모든 파일을 우연히 걸러 지금까지 드러나지 않았다.
 - `restartServicesFor`(`packages/agent/src/verify.ts`)는 이 함수 하나로 세 경로를 전부 처리한다: "이 세션에도 적용"(ADR-101), 에이전트가 실행 중 파일을 바꾼 뒤의 검증 게이트(`gate.ts`), 되돌리기. `compose.b-studio.yaml`·`studio.yaml`은 `workflow.protectedPaths`를 사람이 직접 적지 않는 한 에이전트도 고칠 수 있는 평범한 파일이라(ADR-135의 맥락에서 이미 확인됨), 세 경로 모두 같은 구멍을 공유한다.
 - 컨테이너 재시작 자체는 이미 재생성이다: `packages/sandbox`의 docker 제공자(`compose-provider.ts`)는 `restart()`에서 `--force-recreate`를 쓰고, kubernetes 제공자는 Pod를 지우고 새로 뜨는 것을 기다린다. 그래서 "단순 restart라 설정이 반영 안 된다"는 가설은 틀렸다 — 반영 메커니즘은 멀쩡했고, 재시작할 서비스를 하나도 고르지 못한 것이 전부였다.

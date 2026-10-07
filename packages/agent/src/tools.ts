@@ -418,7 +418,7 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       const target = serviceName(context, args);
       try {
         // 방금 쓴 파일을 샌드박스가 보기 전에 재시작하면 옛 코드가 빌드된다
-        const owned = workspace.changedFiles().filter((file) => servicesForFiles(context.project, [file]).services[0] === target);
+        const owned = workspace.changedFiles().filter((file) => servicesForFiles(context.project, [file]).services.includes(target));
         await sandbox.sync(owned, { signal });
         const endpoint = await sandbox.restart(target, { signal, onStatus: context.onServiceStatus });
         return success(`${target} is ready at ${endpoint.url}`);

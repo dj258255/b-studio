@@ -92,7 +92,7 @@
 - [69. 샌드박스 컨테이너 안에서 Mockito inline mock maker가 쓰는 JVM self-attach가 깨짐](#69-샌드박스-컨테이너-안에서-mockito-inline-mock-maker가-쓰는-jvm-self-attach가-깨짐)
 - [70. 게이트가 돌리지 않은 서비스의 테스트·화면 변경도 트레일러에 통과로 찍힘](#70-게이트가-돌리지-않은-서비스의-테스트화면-변경도-트레일러에-통과로-찍힘)
 - [71. 오류 상태 화면을 만든 기능 요청의 체크포인트가 fix로 분류됨](#71-오류-상태-화면을-만든-기능-요청의-체크포인트가-fix로-분류됨)
-- [72. compose 파일만 다시 만들면 "이 세션에도 적용"이 서비스를 하나도 다시 띄우지 않음](#72-compose-파일만-다시-만들면-이-세션에도-적용이-서비스를-하나도-다시-띄우지-않음)
+- [74. compose 파일만 다시 만들면 "이 세션에도 적용"이 서비스를 하나도 다시 띄우지 않음](#74-compose-파일만-다시-만들면-이-세션에도-적용이-서비스를-하나도-다시-띄우지-않음)
 
 ---
 
@@ -2384,7 +2384,7 @@ compose의 일반(non-swarm) `configs:`가 파일로 그대로 마운트되는�
 ### 배운 점
 요청 글은 의도(첫 문장)와 명세(본문)가 섞여 있다. 본문은 만들 동작을 설명하느라 "오류"·"실패" 같은 낱말을 자연스럽게 쓴다. 낱말로 의도를 분류할 때는 의도가 담긴 자리부터 봐야 한다.
 
-## 72. compose 파일만 다시 만들면 "이 세션에도 적용"이 서비스를 하나도 다시 띄우지 않음
+## 74. compose 파일만 다시 만들면 "이 세션에도 적용"이 서비스를 하나도 다시 띄우지 않음
 
 **구분:** 도그푸딩 중 실측(BE-commerce 프로젝트 pay-2, 세션 5b640fd3) → 코드로 원인 추적 → 단위 테스트로 재현 → 수정
 
@@ -2398,6 +2398,9 @@ compose의 일반(non-swarm) `configs:`가 파일로 그대로 마운트되는�
 `servicesForFiles`가 바뀐 파일이 `studio.yaml` 또는 프로젝트의 compose 파일(`project.composePath`)이면, 어느 서비스 폴더에 속하는지 따지지 않고 managed 서비스를 전부 재시작 대상으로 돌려주게 했다. 두 파일 다 모든 서비스의 환경 변수·마운트·top-level `configs`·`volumes`를 결정하므로 바뀐 서비스만 고르는 건 더 정확해 보여도 top-level 항목이 바뀌었을 때 엉뚱한 서비스를 "안전하다"고 넘기는 위험이 있다. 꺼 둔 서비스(ADR-083)는 그 뒤 단계에서 그대로 걸러진다.
 
 컨테이너 재시작 자체는 이미 재생성이었다(`packages/sandbox`의 docker·kubernetes 제공자 둘 다 `restart()`에서 force-recreate/파드 삭제 후 재생성을 한다). 그래서 "단순 restart라 설정이 반영 안 됨"은 아니었고, 문제는 전적으로 재시작할 서비스를 하나도 고르지 못한 데 있었다.
+
+
+`servicesForFiles` 결과의 첫 서비스만 그 파일의 주인으로 보던 두 곳(`gate.ts`의 실패 서비스 재확인, `tools.ts`의 `restart_service` 전 동기화)도 `services`에 포함되는지로 바꿨다. 프로젝트 전역 파일은 모든 서비스에 속하므로, 첫 서비스만 보면 두 번째 서비스를 다시 띄울 때 바뀐 compose를 동기화하지 않는다.
 
 ### 검증
 `packages/agent/src/verify.test.ts`에 `servicesForFiles`가 compose·studio.yaml을 managed 서비스 전체로 매핑하는 테스트 3개를 더했다. `apps/studio/lib/server/sessions-regenerate-apply.test.ts`에는 backend·frontend 두 서비스(둘 다 하위 폴더)를 쓰는 프로젝트로 실제 버그를 재현하는 테스트를 더했다 — 고치기 전 코드로 돌리면 `restarted: []`로 실패하고, 고친 코드로는 두 서비스 모두 재시작됨을 확인했다.
