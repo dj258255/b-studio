@@ -63,8 +63,26 @@ services:
 | `ready` | 재시작 후 준비 완료를 판정할 HTTP 요청 |
 | `contract.extract` | 실행 중인 서비스에서 OpenAPI를 읽을 경로 |
 | `snapshots` | 입력 파일 해시로 재사용할 compose 볼륨 |
+| `systemPackages` | 생성 Dockerfile이 빌드 때 설치할 OS 패키지 |
 
 `ready.path`와 `contract.extract`는 `/`로 시작해야 하며 `//`로 시작할 수 없습니다.
+
+### 시스템 패키지
+
+샌드박스는 실행 중에는 egress 허용 목록 밖의 호스트(패키지 저장소 등)를 막으므로, 서비스 컨테이너 안에서 직접 돌리는 `apt-get install`은 항상 실패합니다(도그푸딩 마찰 113). 숏폼 변환에 ffmpeg가 필요한 것처럼 OS 패키지가 필요하면 서비스에 선언하세요.
+
+```yaml
+services:
+  commerce:
+    source: managed
+    template: spring-boot
+    path: commerce
+    port: 8080
+    preview: openapi
+    systemPackages: [ffmpeg]
+```
+
+"생성 파일 다시 만들기"(ADR-101)나 세션 재시작이 생성 Dockerfile(Dockerfile.b-studio)의 `FROM` 줄 바로 뒤에 설치 명령을 넣습니다. `docker build`는 egress 허용 목록이 적용되는 샌드박스 네트워크가 아니라 호스트 Docker 데몬이 보는 네트워크로 돌기 때문에 빌드 때는 설치할 수 있습니다(런타임 격리는 그대로입니다). 이름은 영문 소문자·숫자로 시작하고 그 뒤로 영문 소문자·숫자·`.`·`+`·`-`만 받습니다(최대 20개). 베이스 이미지가 Debian·Ubuntu(apt) 또는 Alpine(apk) 계열이 아니면 그 자리에서 오류를 냅니다(ADR-137).
 
 ### 스냅샷
 

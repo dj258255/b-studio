@@ -425,4 +425,57 @@ describe('startEdge', () => {
 
     expect(status).toBe('HTTP/1.1 403 Forbidden');
   });
+
+  it('막힌 OS 패키지 저장소 호스트(deb.debian.org 등)는 평문 HTTP 403 본문에 systemPackages 선언 안내를 붙인다(도그푸딩 마찰 113)', async () => {
+    const [proxy] = startEdge({ forwards: [], rules: ['registry.npmjs.org'], proxyPort: 0 });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
+
+    const body = await new Promise<string>((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxyPort, method: 'GET', path: 'http://deb.debian.org/debian/' }, (reply) => {
+        let data = '';
+        reply.on('data', (chunk) => (data += chunk));
+        reply.on('end', () => resolve(data));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+
+    expect(body).toContain('systemPackages');
+  });
+
+  it('그 밖의 막힌 호스트(패키지 저장소가 아님)에는 systemPackages 안내를 붙이지 않는다', async () => {
+    const [proxy] = startEdge({ forwards: [], rules: ['registry.npmjs.org'], proxyPort: 0 });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
+
+    const body = await new Promise<string>((resolve, reject) => {
+      const request = http.request({ host: '127.0.0.1', port: proxyPort, method: 'GET', path: 'http://example.com/' }, (reply) => {
+        let data = '';
+        reply.on('data', (chunk) => (data += chunk));
+        reply.on('end', () => resolve(data));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+
+    expect(body).not.toContain('systemPackages');
+  });
+
+  it('막힌 패키지 저장소 호스트로의 CONNECT(HTTPS)도 403 본문에 같은 안내를 붙인다', async () => {
+    const [proxy] = startEdge({ forwards: [], rules: ['registry.npmjs.org'], proxyPort: 0 });
+    servers.push(proxy!);
+    const proxyPort = await ready(proxy!);
+
+    const raw = await new Promise<string>((resolve) => {
+      const socket = net.connect(proxyPort, '127.0.0.1', () => socket.write('CONNECT ports.ubuntu.com:443 HTTP/1.1\r\nHost: ports.ubuntu.com:443\r\n\r\n'));
+      let data = '';
+      socket.on('data', (chunk) => (data += chunk));
+      socket.on('end', () => resolve(data));
+      socket.on('close', () => resolve(data));
+    });
+
+    expect(raw.split('\r\n')[0]).toBe('HTTP/1.1 403 Forbidden');
+    expect(raw).toContain('systemPackages');
+  });
 });

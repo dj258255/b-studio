@@ -106,6 +106,45 @@ describe('proposeRegeneration / applyRegeneration(ADR-101, 생성 파일 다시 
     expect(again.files.find((file) => file.path === dockerfile!.path)?.changed).toBe(false);
   });
 
+  it('studio.yaml에 systemPackages를 더하면 다시 만들기가 그 서비스 Dockerfile에 설치 블록을 반영한다(도그푸딩 마찰 113, ADR-137)', async () => {
+    const root = await repo({ 'package.json': nextPackageNoLock });
+    const registry = path.join(await repo({}), 'projects.json');
+    const registered = await registerFolder(root, new Set(), registry);
+
+    // package.json 루트 Next.js 앱은 services.web으로 이름 붙는다(nameServices)
+    const specPath = path.join(root, 'studio.yaml');
+    const spec = await readFile(specPath, 'utf8');
+    expect(spec).toContain('web:');
+    await writeFile(specPath, spec.replace('web:\n    source: managed', 'web:\n    source: managed\n    systemPackages: [ffmpeg]'));
+
+    const proposal = await proposeRegeneration(registered.id, registry);
+    const dockerfile = proposal.files.find((file) => file.path.endsWith('Dockerfile.b-studio'));
+    expect(dockerfile?.changed).toBe(true);
+    expect(dockerfile?.newContent).toContain('RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg');
+    expect(dockerfile?.oldContent).not.toContain('ffmpeg');
+
+    const { written } = await applyRegeneration(registered.id, [dockerfile!.path], registry);
+    expect(written).toEqual([dockerfile!.path]);
+    expect(await readFile(path.join(root, dockerfile!.path), 'utf8')).toContain('apt-get install');
+
+    // 선언을 지우면 다음 다시 만들기가 블록도 지운다(재현 가능 — studio.yaml이 유일한 출처)
+    await writeFile(specPath, spec);
+    const removed = await proposeRegeneration(registered.id, registry);
+    const dockerfileAfterRemoval = removed.files.find((file) => file.path.endsWith('Dockerfile.b-studio'));
+    expect(dockerfileAfterRemoval?.newContent).not.toContain('apt-get install');
+  });
+
+  it('studio.yaml이 파싱되지 않는 동안에는(사람이 손보는 중) 다시 만들기 미리보기 자체는 막지 않는다', async () => {
+    const root = await repo({ 'package.json': nextPackageNoLock });
+    const registry = path.join(await repo({}), 'projects.json');
+    const registered = await registerFolder(root, new Set(), registry);
+    // version이 스키마가 받는 리터럴 1이 아니라 파싱 자체가 실패한다(사람이 고치는 중인 studio.yaml을 흉내)
+    await writeFile(path.join(root, 'studio.yaml'), '# b-studio가 폴더를 보고 만든 설정\nversion: 2\nname: shop\nservices: {}\n');
+
+    const proposal = await proposeRegeneration(registered.id, registry);
+    expect(proposal.eligible).toBe(true);
+  });
+
   it('손으로 고친 생성 파일은 handEdited로 경고하고, 덮어쓰지 않으면 그대로 남는다', async () => {
     const root = await repo({ 'package.json': nextPackageNoLock });
     const registry = path.join(await repo({}), 'projects.json');

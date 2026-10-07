@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
 import { workflowStages } from '@b-studio/agent';
 import { afterEach, describe, expect, it } from 'vitest';
-import { detectProject, GENERATED_COMPOSE, generateFiles, sanitize } from './project-detect';
+import { detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, sanitize } from './project-detect';
 import { excludeFromGit, projectIdFor, readRegistry, registerFolder, unregisterProject } from './project-registry';
 import { readServiceSelection } from './service-selection';
 
@@ -1151,5 +1151,46 @@ describe('generateFiles: 생성 파일에 ADR 번호가 남아 있지 않아야 
     for (const file of files) {
       expect(file.content).not.toMatch(/ADR-\d+/);
     }
+  });
+});
+
+describe('generateFiles: systemPackagesByPath(도그푸딩 마찰 113, ADR-137)', () => {
+  it('service.path로 넘긴 systemPackages를 그 서비스의 Dockerfile에만 반영한다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'package-lock.json': '{}' });
+    const detection = await detectProject(root);
+
+    const files = generateFiles(detection, { systemPackagesByPath: new Map([['.', ['ffmpeg']]]) });
+
+    const dockerfile = files.find((file) => file.path === GENERATED_DOCKERFILE)!;
+    expect(dockerfile.content).toContain('RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*');
+  });
+
+  it('path가 매칭되지 않는 선언은 반영되지 않는다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'package-lock.json': '{}' });
+    const detection = await detectProject(root);
+
+    const files = generateFiles(detection, { systemPackagesByPath: new Map([['no-such-service', ['ffmpeg']]]) });
+
+    const dockerfile = files.find((file) => file.path === GENERATED_DOCKERFILE)!;
+    expect(dockerfile.content).not.toContain('ffmpeg');
+  });
+
+  it('지원하지 않는 베이스 이미지 계열의 서비스에 systemPackages를 넘기면 조용히 무시하지 않고 오류를 던진다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'package-lock.json': '{}' });
+    const detection = await detectProject(root);
+    // Next.js 생성 이미지(node:22-bookworm-slim)는 apt 계열이다 — 모르는 계열을 흉내 내려고 FROM 줄을 바꿔치기한다
+    const withUnknownBase = { ...detection, services: detection.services.map((service) => ({ ...service, dockerfile: service.dockerfile.replace('FROM node:22-bookworm-slim', 'FROM rust:1-slim') })) };
+
+    expect(() => generateFiles(withUnknownBase, { systemPackagesByPath: new Map([['.', ['ffmpeg']]]) })).toThrow(/패키지 계열/);
+  });
+
+  it('옵션을 생략하면 기존과 같은 Dockerfile을 만든다(하위 호환)', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'package-lock.json': '{}' });
+    const detection = await detectProject(root);
+
+    const withOption = generateFiles(detection, {});
+    const withoutOption = generateFiles(detection);
+
+    expect(withOption).toEqual(withoutOption);
   });
 });

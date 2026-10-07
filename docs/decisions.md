@@ -157,6 +157,8 @@
 - [ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다](#adr-134-gradle-테스트-서비스에-mockito-javaagent-init-스크립트를-compose-configs로-심어-컨테이너-안에서-inline-mock-maker의-jvm-self-attach를-우회한다)
 - [ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다](#adr-135-게이트가-다루지-않는-서비스에-생긴-테스트화면-변경을-경고로-드러내고-체크포인트-본문에-확인-범위를-남긴다)
 - [ADR-136 compose·studio.yaml이 바뀌면 그 파일이 속한 서비스 폴더를 찾는 대신 managed 서비스를 전부 다시 띄운다](#adr-136-composestudioyaml이-바뀌면-그-파일이-속한-서비스-폴더를-찾는-대신-managed-서비스를-전부-다시-띄운다)
+- [ADR-137 studio.yaml에 서비스별 systemPackages를 선언하면 생성 Dockerfile이 빌드 때 OS 패키지를 설치한다](#adr-137-studioyaml에-서비스별-systempackages를-선언하면-생성-dockerfile이-빌드-때-os-패키지를-설치한다)
+- [ADR-138 검증 게이트의 test 단계가 메모리 한도 초과 종료를 코드 실패와 구분해 서비스를 되살리고, Gradle 테스트 JVM의 힙·메타스페이스에 상한을 건다](#adr-138-검증-게이트의-test-단계가-메모리-한도-초과-종료를-코드-실패와-구분해-서비스를-되살리고-gradle-테스트-jvm의-힙메타스페이스에-상한을-건다)
 
 ---
 
@@ -5666,6 +5668,52 @@ compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `doc
 ### 감수한 트레이드오프
 - compose·studio.yaml이 바뀌면 실제로는 한 서비스의 환경 변수 한 줄만 바뀌었어도 managed 서비스를 전부 다시 띄운다. 서비스 수가 많은 프로젝트에서는 재시작 시간이 늘어난다. 정교한 diff(선택지 A)로 줄일 수 있지만, top-level 참조를 놓칠 위험과 맞바꾸는 것이라 지금은 선택하지 않았다 — 재시작 시간이 실제로 문제가 되면 그때 선택지 A를 다시 본다.
 - `project.composePath`가 프로젝트 루트 밖(예: `../compose.yaml`)을 가리키는 드문 구성은 상대 경로 비교가 맞아떨어지지 않아 여전히 예전처럼 매칭되지 않을 수 있다 — 실제 프로젝트에서 compose 파일이 루트 밖에 있는 사례는 보지 못했다.
+
+## ADR-137 studio.yaml에 서비스별 systemPackages를 선언하면 생성 Dockerfile이 빌드 때 OS 패키지를 설치한다
+
+상태: 채택
+관련: ADR-067, ADR-101, ADR-134, ADR-136
+
+### 맥락
+- BE-commerce 세션(pay-2, 세션 5b640fd3, 읽기만)에서 숏폼 변환 측정을 하려면 commerce 서비스 컨테이너에 ffmpeg가 필요했다(도그푸딩 마찰 113). b-studio가 만든 `commerce/Dockerfile.b-studio`(`eclipse-temurin:21-jdk`, `project-detect.ts`의 `detectSpring`)에는 ffmpeg가 없었다.
+- 실행 중 `apt-get update`는 샌드박스 egress 허용 목록(`packages/sandbox/src/edge-config.ts`의 `DEFAULT_EGRESS_ALLOW`)이 `deb.debian.org`·`ports.ubuntu.com`을 막아 403으로 실패했다. 이 목록은 패키지 생태계 저장소(npm·Maven·PyPI·GitHub)만 열어 두고 OS 배포판 저장소는 열지 않는다.
+- 에이전트는 사용자 파일을 바꾸지 않았지만, 허용된 PyPI(`files.pythonhosted.org`)에서 `imageio-ffmpeg` 휠을 받아 그 안에 들어 있는 정적 ffmpeg 바이너리를 꺼내 썼다. studio.yaml 스키마(`packages/spec/src/schema.ts`)에는 managed 서비스가 OS 패키지를 선언할 자리가 전혀 없었다 — 공식 통로가 없어 에이전트가 우회로를 찾은 것이다.
+- `docker build`(compose build, `packages/sandbox/src/docker/compose-provider.ts`의 `start()`가 `compose build`를 부른 뒤에 `compose up`을 부른다)는 egress 허용 목록이 적용되는 샌드박스 런타임 네트워크가 아니라 호스트 Docker 데몬이 보는 네트워크로 돈다. compose의 `networks:`(`packages/sandbox/src/docker/format.ts`가 런타임 서비스에 `SANDBOX_NETWORK`를 붙인다)는 **런타임 컨테이너**에만 적용되고 빌드 단계의 중간 컨테이너에는 적용되지 않는다 — `compose-provider.ts`의 기존 주석("이미지 빌드 단계에서 받은 것은 컨테이너 NetIO에 잡히지 않는다")이 이미 이 한계를 적어 뒀다. **실측**: `eclipse-temurin:21-jdk`를 베이스로 `RUN apt-get update && apt-get install -y ffmpeg`만 든 Dockerfile을 이 저장소의 colima(Docker) 환경에서 실제로 빌드해(2026-10-08) 147초 만에 성공을 확인했다(egress 프록시도, 허용 목록 변경도 없이 됐다). 즉 "빌드는 호스트 네트워크로 돈다"는 코드 추론이자 동시에 이번에 직접 실측한 사실이다.
+- "생성 파일 다시 만들기"(ADR-101)는 프로젝트를 처음 연 원본 폴더를 사람이 명시적으로 다시 훑는 동작이고, `project-detect.ts`의 `detectProject(root, { ignoreExistingSpec: true })`는 폴더 구조만 다시 보고 지금 studio.yaml의 선언(사람이 더한 내용)은 보지 않는다. 세션이 떠 있는 동안 에이전트가 세션 작업 복사본의 studio.yaml만 고치는 경우(이번 마찰이 실제로 그랬다)는 이 경로를 거치지 않는다 — ADR-136이 이미 다룬 "compose·studio.yaml이 바뀌면 managed 서비스를 전부 다시 띄운다" 경로(`packages/agent/src/verify.ts`의 `restartServicesFor`)가 유일하게 세션 작업 복사본만으로 반영을 끝낼 수 있는 지점이다.
+
+### 판단 기준
+1. 샌드박스 격리를 약하게 만들지 않을 것(런타임 egress 허용 목록을 넓히지 않을 것).
+2. 재현 가능할 것 — 세션을 다시 띄워도(새 컨테이너로 다시 빌드해도) 같은 결과가 나올 것.
+3. 사람이 무엇이 설치되는지 볼 수 있을 것(선언과 생성 결과가 모두 눈에 보일 것).
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) studio.yaml 서비스에 `systemPackages` 선언 → 생성 Dockerfile에 반영 | 세 기준을 모두 만족한다. 선언(studio.yaml)과 결과(Dockerfile.b-studio 본문)가 둘 다 저장소에 남고, 같은 선언은 항상 같은 Dockerfile을 만든다(멱등). 런타임 네트워크는 그대로 둔다. **채택** |
+| (b) egress에 Debian/Ubuntu/Alpine 공식 미러를 열어 런타임 `apt-get` 허용 | 기준 1 위반. 패키지 저장소 접속은 그 자체로 임의 코드 실행 통로이고(아래 "보안" 참고), 이미 npm·Maven·PyPI로 열어 둔 것과 같은 범주의 구멍을 하나 더 내는 것이다. 설치가 "언제 일어났는지"가 실행 로그에만 남아 재현성·가시성도 (a)보다 약하다. 기각 |
+| (c) 사용자가 Dockerfile.b-studio를 직접 고치게 둠(handEdited) | 이미 가능한 경로이고 막을 생각도 없다(보조 수단으로 남긴다). 하지만 "생성 파일 다시 만들기"가 손으로 고친 파일로 보고 경고하게 되어 ADR-101의 재생성 흐름과 부딪히고, 자유 형식이라 사람이 "이 프로젝트가 설치한 시스템 패키지 전체"를 한눈에 모아 보기 어렵다(서비스마다 Dockerfile을 열어야 한다). 기준 2(재현 가능)는 만족하지만 기준 3(모아 보기)이 약해 보조 수단 밑으로 둔다 |
+
+### 결정
+1. **스키마(`packages/spec/src/schema.ts`)**: `ManagedServiceSchema`에 `systemPackages: z.array(SYSTEM_PACKAGE_NAME 정규식).max(20).optional()`을 더했다. 패키지 이름은 영문 소문자·숫자로 시작하고 그 뒤로 영문 소문자·숫자·`.`·`+`·`-`만 받는다 — apt·apk 두 계열의 실제 이름 관례를 함께 만족하면서 셸 메타문자를 막는다(이름이 생성 Dockerfile의 `RUN` 줄에 그대로 들어가므로 셸 주입 방지가 직접적인 요구사항이다).
+2. **반영 로직(`packages/spec/src/system-packages.ts`, 새 모듈)**: `detectPackageFamily(image)`가 `FROM` 줄의 이미지 이름으로 apt(Debian·Ubuntu: `node`·`python`·`eclipse-temurin`·`gradle`·`maven`·`debian`·`ubuntu` 계열, 지금 모든 생성 템플릿이 쓰는 베이스)·apk(이미지 이름에 `alpine`이 들어간 경우) 중 하나를 가린다. 모르는 계열이면 `undefined`를 돌려주고, `applySystemPackages(dockerfile, packages)`가 이를 받아 **조용히 넘어가지 않고 `SystemPackageError`를 던진다**(판단 기준 3을 어기지 않기 위해 — 설치 안 된 채 조용히 통과하면 사람이 모른다). 설치는 `FROM` 줄 바로 뒤, 마커 주석(`# b-studio: systemPackages(studio.yaml)가 설치를 선언한 패키지` ~ `# b-studio: systemPackages 끝`) 사이에 넣는다 — 다시 부르면 먼저 이전 블록을 지우고 새로 넣으므로 멱등적이고, 선언을 지우면(빈 배열) 블록도 사라진다.
+3. **두 반영 경로**:
+   - "생성 파일 다시 만들기"(`apps/studio/lib/server/project-registry.ts`의 `proposeRegeneration`)는 지금 studio.yaml을 직접 읽어(`currentSystemPackagesByPath`, 파싱 실패 시 빈 맵으로 — 사람이 studio.yaml을 손보는 중이어도 미리보기 자체는 막지 않는다) `generateFiles(detection, { systemPackagesByPath })`에 넘긴다. 사람이 diff를 보고 파일별로 덮어쓸지 고르는 기존 흐름을 그대로 탄다.
+   - 세션이 떠 있는 동안의 반영(`packages/agent/src/system-packages-sync.ts`의 `syncSystemPackages`, 새 모듈)은 `restartServicesFor`(`packages/agent/src/verify.ts`)가 `docker compose build`를 부르기 **직전**에, 지금 다시 띄우는 서비스만 골라 세션 작업 복사본의 `Dockerfile.b-studio`를 studio.yaml의 지금 선언과 맞춘다. ADR-136이 이미 "compose·studio.yaml이 바뀌면 managed 서비스를 전부 다시 띄운다"로 만들어 둔 경로를 그대로 타므로, 에이전트가 세션 안에서 studio.yaml에 `systemPackages`를 더하고 아무 파일이나 바꿔 재시작을 트리거하면(또는 다음 세션을 새로 띄우면) 반영된다. b-studio가 만든 `Dockerfile.b-studio`가 없는 서비스(사용자가 직접 다른 Dockerfile을 쓰는 경우)는 건드리지 않는다.
+4. **edge 403 응답(`packages/sandbox/edge/edge.mjs`)**: 막힌 호스트가 `debian.org`·`ubuntu.com`·`alpinelinux.org` 계열로 보일 때만 "systemPackages로 선언하라"는 안내를 403 본문에 붙인다(평문 HTTP·CONNECT 둘 다). 그 밖의 막힌 호스트(임의 API 등)에는 붙이지 않는다 — 무관한 상황에서 혼란을 주지 않기 위해서다.
+5. **오류를 400으로**: `SystemPackageError`를 `apps/studio/lib/server/errors.ts`의 `errorResponse`가 400으로 바꾸게 했다(사용자가 고칠 수 있는 입력 문제이지 서버 오류가 아니다).
+
+### 검증 결과
+- `packages/spec/src/system-packages.test.ts`(18개): family 판정, 설치·갱신·삭제 멱등성, 셸 메타문자 거부, 스키마 검증.
+- `apps/studio/lib/server/project-detect.test.ts`·`project-regenerate.test.ts`: `generateFiles`가 `systemPackagesByPath`를 반영·무시, 모르는 계열 오류, "생성 파일 다시 만들기"가 실제 studio.yaml 선언으로 diff를 만들고 선언을 지우면 블록도 사라지는 것, studio.yaml이 파싱 안 돼도 미리보기 자체는 막지 않는 것.
+- `packages/agent/src/system-packages-sync.test.ts`(7개): 재시작 대상 서비스만 동기화, 루트(`.`) 서비스 경로, 선언 없음/Dockerfile 없음은 건드리지 않음, 삭제·오류 전파.
+- `packages/sandbox/edge/edge.test.ts`: 패키지 저장소 호스트만 안내가 붙는 것(평문 HTTP·CONNECT).
+- `eclipse-temurin:21-jdk` 베이스로 `apt-get install ffmpeg`를 colima에서 실제 빌드해 성공을 확인했다(빌드한 이미지는 확인 뒤 지웠다). "빌드가 호스트 네트워크로 돈다"는 코드 추론과 실측 둘 다로 뒷받침된다.
+- 확인하지 못한 것: 실제 BE-commerce 세션(5b640fd3)이나 pay 저장소의 컨테이너에 이 기능을 적용해 보지는 않았다(세션·컨테이너를 건드리지 말라는 제약 때문에, 임시 저장소와 가짜 sandbox를 쓰는 단위·통합 테스트로만 검증했다). Alpine 계열 베이스 이미지(`apk`)는 지금 어떤 생성 템플릿도 쓰지 않아 실제 빌드로는 확인하지 못했다(단위 테스트로만 확인).
+
+### 감수한 트레이드오프
+- `systemPackages`는 생성 Dockerfile(`Dockerfile.b-studio`)에만 적용된다 — 사용자가 직접 Dockerfile을 쓰는 프로젝트는 이 선언이 아무 효과가 없다(조용히 무시되는 대신, Dockerfile 자체가 없어 반영할 자리가 없다는 뜻이라 오류도 나지 않는다). 이런 프로젝트는 지금처럼 Dockerfile을 직접 고쳐야 한다.
+- 지원 계열을 apt·apk 둘로 좁혔다. 베이스 이미지 계열을 바꾸는 것은 드물고(지금 모든 템플릿이 Debian 계열을 쓴다), 계열이 하나 더 필요해지면(예: Alpine 템플릿 추가) `detectPackageFamily`에 패턴을 추가하면 된다 — 이 좁은 범위가 "모르는 계열은 오류"라는 판단 기준 3을 지키는 데도 도움이 된다.
+- egress 허용 목록(패키지 생태계 저장소)이 임의 바이너리를 받는 통로라는 한계는 이 ADR로 닫히지 않는다(트러블슈팅 75의 "보안" 참고). `systemPackages`는 "런타임 apt-get을 빌드 때 선언으로 대체"할 뿐, "패키지 관리자가 받은 파일 안의 임의 코드 실행"이라는 더 넓은 경로는 그대로 남아 있다.
 
 ## ADR-138 검증 게이트의 test 단계가 메모리 한도 초과 종료를 코드 실패와 구분해 서비스를 되살리고, Gradle 테스트 JVM의 힙·메타스페이스에 상한을 건다
 

@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ContainerState, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
-import type { LoadedProject } from '@b-studio/spec';
+import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
@@ -324,5 +324,23 @@ describe('restartServicesFor', () => {
     expect(mentionsDeletedFile(["stat: can't stat 'V2__memo.sql': No such file or directory"], deleted)).toBe(true);
     expect(mentionsDeletedFile(['Flyway migrated V2__memo.sql'], deleted)).toBe(false);
     expect(mentionsDeletedFile(['java.nio.file.NoSuchFileException: /app/other.sql'], deleted)).toBe(false);
+  });
+});
+
+describe('restartServicesFor와 systemPackages(ADR-137)', () => {
+  it('실행 중에 studio.yaml에 systemPackages를 더하면, 세션 시작 때 읽은 project가 아니라 다시 읽은 선언으로 Dockerfile을 맞춘다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-syspkg-reload-'));
+    await mkdir(path.join(root, 'api'), { recursive: true });
+    const spec = (extra: string) => `version: 1\nname: x\nservices:\n  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi${extra} }\n`;
+    await writeFile(path.join(root, 'studio.yaml'), spec(''));
+    await writeFile(path.join(root, 'compose.yaml'), 'services:\n  api: { build: { context: ./api, dockerfile: Dockerfile.b-studio } }\n');
+    await writeFile(path.join(root, 'api/Dockerfile.b-studio'), 'FROM eclipse-temurin:21-jdk\n\nWORKDIR /workspace\n');
+    const stale = await loadProject(root);
+    // 에이전트가 실행 중에 선언을 더한다. stale에는 이 선언이 없다
+    await writeFile(path.join(root, 'studio.yaml'), spec(', systemPackages: [ffmpeg]'));
+
+    await restartServicesFor(fakeSandbox(), stale, ['studio.yaml']);
+
+    expect(await readFile(path.join(root, 'api/Dockerfile.b-studio'), 'utf8')).toContain('apt-get install -y --no-install-recommends ffmpeg');
   });
 });
