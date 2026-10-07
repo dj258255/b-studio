@@ -76,6 +76,13 @@ const SITUATIONAL_WORDS =
  * 같은 대체 경로로 넘겨야 한다). SITUATIONAL_WORDS(앞 실행·인프라 문제)와 달리 이쪽은 에이전트가 스스로
  * "확인했다"는 과정을 보고하는 말투다.
  */
+/**
+ * 지금 상태를 설명하는 문장의 끝(없습니다·않습니다·있습니다·입니다 등). 요청 첫 문장이 "…확인하지 않아서, 잰
+ * 시간이 … 보장이 없습니다."처럼 문제를 설명하면 바뀐 내용이 아니라 현상이다(도그푸딩 버그 리포트: 제목이 그
+ * 문제 설명 그대로 나갔다). 완료 요약의 "…확장했습니다"처럼 과거형으로 한 일을 말하는 끝은 걸리지 않는다.
+ */
+const STATE_DESCRIPTION_ENDING = /(없|않|있)습니다$|(입|아닙|됩|깨집|나옵|보입|걸립)니다$|(없어|않아|있어|안\s*돼|안\s*나와|안\s*보여)요$/;
+
 const PROGRESS_REPORT_WORDS = /검토\s*결과|확인해\s*보니|돌아보니|살펴보니|이미\s*.{0,25}있었|추가로\s*(만들|할|고칠)\s*것(이|가)?\s*없/;
 
 /**
@@ -112,6 +119,7 @@ function isClearChangeSentence(line: string): boolean {
   const converted = toCommitMood(trimmed).trim();
   if (converted.length < 2) return false;
   if (BARE_ID_OR_PRONOUN_FRAGMENT.test(converted)) return false;
+  if (STATE_DESCRIPTION_ENDING.test(converted)) return false;
   if (DANGLING_OBJECT_PARTICLE.test(converted)) return false;
   return !TRAILING_REQUEST_PHRASING.test(converted);
 }
@@ -221,10 +229,15 @@ function reviewFixCandidate(request: string): string | undefined {
  */
 function summaryTitleLine(agentSummary: string | undefined): string | undefined {
   if (!agentSummary) return undefined;
+  // 마크다운 머리글("## 완료")·굵은 글씨만 있는 줄("**고친 내용**")은 절 제목이라 무엇이 바뀌었는지 말하지 않는다.
+  // 나머지 줄은 목록 기호·굵은 글씨·코드 표시를 걷어 내고 본다(도그푸딩 버그 리포트: 요약 첫 줄이 "## 완료"였다)
   const lines = agentSummary
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0 && !/^#{1,6}\s/.test(line) && !/^\*\*[^*]+\*\*[:：]?$/.test(line))
+    .map((line) => line.replace(/^[-*]\s+/, '').replace(/\*\*/g, '').replace(/`/g, '').trim())
+    // "찾은 결함: …"·"원인: …"처럼 문제를 설명하는 줄은 무엇이 바뀌었는지가 아니다
+    .filter((line) => line.length > 0 && !/^(찾은\s*)?(결함|원인|문제|현상|참고|배경)\s*[:：]/.test(line));
   const scope = lines.find((line) => /^(범위|scope)\s*[:：]/i.test(line));
   return scope ? scope.replace(/^(범위|scope)\s*[:：]\s*/i, '').trim() : lines[0];
 }
@@ -265,7 +278,8 @@ export function generateCommitSubject(request: string, changes: readonly Pending
     candidate = reviewFix;
   } else if (requestFirstLine && isClearChangeSentence(firstSentence(requestFirstLine))) {
     candidate = toCommitMood(firstSentence(requestFirstLine));
-  } else if (summaryLine && isClearChangeSentence(firstSentence(summaryLine))) {
+  } else if (summaryLine && isClearChangeSentence(firstSentence(summaryLine)) && shortenPaths(toCommitMood(firstSentence(summaryLine))).length <= budget) {
+    // 요약 줄은 예산 안에 들어갈 때만 쓴다. 잘린 요약은 동사가 사라져 바뀐 파일로 만든 제목보다 못하다(도그푸딩 버그 리포트)
     candidate = toCommitMood(firstSentence(summaryLine));
   } else if (requestFirstLine) {
     candidate = requirementModuleCandidate(request, changes) ?? describeChangeFromFiles(changes);

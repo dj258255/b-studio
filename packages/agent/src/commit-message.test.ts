@@ -185,6 +185,27 @@ describe('generateCommitSubject', () => {
     expect(generateCommitSubject('apps/web/lib/api.ts에 재시도를 넣어 주세요', [change('apps/web/lib/api.ts')])).toBe('feat: apps/web/lib/api.ts에 재시도를 넣는다');
   });
 
+  it('요청 첫 문장이 문제를 설명하면("…보장이 없습니다.") 제목으로 쓰지 않고, 요약의 머리글·문제 설명 줄도 건너뛴다(도그푸딩 버그 리포트)', () => {
+    const request = 'tools/run-bench.sh가 산출물을 확인하지 않아서, 잰 시간이 맞다는 보장이 없습니다. 고쳐 주세요.';
+    const summary = '## 완료\n\n**찾은 결함**: `write_master()`가 바깥 스코프 값을 먼저 치환합니다.\n\n**고친 내용**\n- 회차마다 산출물을 확인하고 마스터 재생목록을 만들었습니다.';
+    const subject = generateCommitSubject(request, [change('tools/run-bench.sh')], summary);
+    expect(subject).not.toContain('보장이 없습니다');
+    expect(subject).not.toContain('찾은 결함');
+    expect(subject).toBe('fix: 회차마다 산출물을 확인하고 마스터 재생목록을 만들었습니다');
+  });
+
+  it('요약 줄이 72자 예산을 넘으면 잘라 쓰지 않고 바뀐 파일로 제목을 만든다', () => {
+    const summary = '회차마다 지우기 전에 세 재생목록과 세그먼트가 있는지, 길이 합이 원본과 맞는지, 썸네일이 비어 있지 않은지, 마스터 재생목록이 있는지 확인했습니다.';
+    const subject = generateCommitSubject('해 주세요', [change('tools/run-bench.sh')], summary);
+    expect(subject).not.toContain('회차마다');
+    expect(subject.length).toBeLessThanOrEqual(72);
+  });
+
+  it('완료 요약의 과거형 서술("…확장했습니다")은 상태 설명으로 보지 않는다', () => {
+    const subject = generateCommitSubject('해 주세요', [change('apps/commerce/src/shorts/link.ts')], '연결 상품 조회를 피드 응답에 넣었습니다.');
+    expect(subject).toBe('feat: 연결 상품 조회를 피드 응답에 넣었습니다');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
