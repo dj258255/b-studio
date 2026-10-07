@@ -88,6 +88,38 @@ describe('generateCommitSubject', () => {
     expect(subject).not.toMatch(/해\s*주세요/);
   });
 
+  it('요청 첫 문장이 "앞 실행이 …"처럼 상황 설명이면 제목 후보에서 빼고 에이전트 요약의 "범위:" 줄을 쓴다(실측: 세션 5b640fd3, 체크포인트 57cced6)', () => {
+    const request = '앞 실행이 턴 상한에 걸려 변경이 모두 되돌려졌습니다. 범위를 줄여 다시 해 주세요. 이번에는 R22만 합니다.';
+    const summary = '작업을 마쳤습니다.\n범위: shorts 숏폼 상태 머신과 V74 마이그레이션, R22 테스트를 추가했습니다.';
+    const changes = [
+      change('apps/commerce/src/shorts/state-machine.ts'),
+      change('apps/commerce/src/shorts/migrations/V74__add_shorts_state.sql', 'added'),
+      change('apps/commerce/src/shorts/__tests__/r22.test.ts', 'added'),
+    ];
+    const subject = generateCommitSubject(request, changes, summary);
+    expect(subject).not.toContain('앞 실행');
+    expect(subject).not.toContain('턴 상한');
+    expect(subject).not.toContain('되돌려');
+    expect(subject).toContain('shorts');
+  });
+
+  it('상황 설명 첫 문장이고 에이전트 요약도 없으면 요청의 요구사항 id와 바뀐 파일의 공통 모듈로 제목을 만든다', () => {
+    const request = '앞 실행이 턴 상한에 걸려 변경이 모두 되돌려졌습니다. 범위를 줄여 다시 해 주세요. 이번에는 R22만 합니다.';
+    const changes = [
+      change('apps/commerce/src/shorts/state-machine.ts'),
+      change('apps/commerce/src/shorts/migrations/V74__add_shorts_state.sql', 'added'),
+      change('apps/commerce/src/shorts/__tests__/r22.test.ts', 'added'),
+    ];
+    const subject = generateCommitSubject(request, changes);
+    expect(subject).toBe('feat: [R22] shorts 모듈을 고친다');
+  });
+
+  it('네트워크 끊김처럼 다른 상황 설명 낱말도 제목 후보에서 뺀다', () => {
+    expect(() => generateCommitSubject('네트워크가 끊겨서 다시 시도합니다.', [change('api/src/main/java/Order.java')])).not.toThrow();
+    const subject = generateCommitSubject('네트워크가 끊겨서 다시 시도합니다.', [change('api/src/main/java/Order.java')]);
+    expect(subject).not.toContain('네트워크');
+  });
+
   it('AI 리뷰 고침 요청(buildPrReviewFixRequest)이면 요청 글의 공통 문구 대신 지적 제목들로 제목을 만든다(과제 66 버그 리포트)', () => {
     const findings: PrReviewFinding[] = [
       { severity: 'blocker', file: 'api/SeedRunner.java', title: '시드 id 시퀀스 검증', detail: '설명' },
