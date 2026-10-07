@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isSecretFile, Workspace, WorkspaceError } from './workspace';
+import { isSecretFile, syncExternalChanges, Workspace, WorkspaceError } from './workspace';
 
 let root: string;
 let workspace: Workspace;
@@ -115,6 +115,23 @@ describe('Workspace', () => {
     expect(() => workspace.trackExternalChanges(['.env'])).toThrow(WorkspaceError);
     expect(() => workspace.trackExternalChanges(['node_modules/x.js'])).toThrow(WorkspaceError);
     expect(() => workspace.trackExternalChanges([''])).toThrow(WorkspaceError);
+    expect(workspace.changedFiles()).toEqual([]);
+  });
+});
+
+describe('syncExternalChanges (ADR-131: 게이트 없이 체크포인트가 생기던 사고 방지)', () => {
+  it('세션이 시작되기 전부터 있던 변경(보관본 되살리기 등)을 동기화해 게이트가 검증 대상으로 보게 한다', () => {
+    syncExternalChanges(workspace, ['api/src/App.java', 'web/src/page.tsx']);
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java', 'web/src/page.tsx']);
+  });
+
+  it('거부되는 경로(프로젝트 밖·생성물·비밀 파일·폴더)는 조용히 건너뛰고 나머지는 동기화한다', () => {
+    expect(() => syncExternalChanges(workspace, ['../secret.txt', '.env', 'node_modules/x.js', 'api/src/', 'api/src/App.java'])).not.toThrow();
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java']);
+  });
+
+  it('빈 목록이면 아무것도 바뀌지 않는다', () => {
+    syncExternalChanges(workspace, []);
     expect(workspace.changedFiles()).toEqual([]);
   });
 });

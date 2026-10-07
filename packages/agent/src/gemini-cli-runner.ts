@@ -14,7 +14,7 @@ import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './promp
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
-import { Workspace } from './workspace';
+import { syncExternalChanges, Workspace } from './workspace';
 
 /**
  * Gemini CLI(`gemini`, `@google/gemini-cli`) 러너.
@@ -243,6 +243,9 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
   if (effort) onEvent({ type: 'warning', message: '로컬 Gemini Agent 러너는 노력 단계를 지원하지 않습니다(CLI 플래그를 확인하지 못했습니다). 노력 단계 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
+  // 이번 실행 전부터 작업 트리에 있던 변경(보관본 되살리기 등)을 먼저 알려, 에이전트가 이번 실행에서 파일을
+  // 하나도 건드리지 않아도 게이트가 "검증할 변경 없음"으로 건너뛰지 않게 한다(ADR-131)
+  if (options.externalChanges?.length) syncExternalChanges(workspace, options.externalChanges);
   let gate: VerificationGate | undefined;
   let gatePromise: Promise<VerificationGate> | undefined;
   const gateFor = (): Promise<VerificationGate> =>
