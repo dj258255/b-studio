@@ -64,6 +64,7 @@ services:
 | `contract.extract` | 실행 중인 서비스에서 OpenAPI를 읽을 경로 |
 | `snapshots` | 입력 파일 해시로 재사용할 compose 볼륨 |
 | `systemPackages` | 생성 Dockerfile이 빌드 때 설치할 OS 패키지 |
+| `includes` | 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로(프로젝트 루트 기준) |
 
 `ready.path`와 `contract.extract`는 `/`로 시작해야 하며 `//`로 시작할 수 없습니다.
 
@@ -83,6 +84,23 @@ services:
 ```
 
 "생성 파일 다시 만들기"(ADR-101)나 세션 재시작이 생성 Dockerfile(Dockerfile.b-studio)의 `FROM` 줄 바로 뒤에 설치 명령을 넣습니다. `docker build`는 egress 허용 목록이 적용되는 샌드박스 네트워크가 아니라 호스트 Docker 데몬이 보는 네트워크로 돌기 때문에 빌드 때는 설치할 수 있습니다(런타임 격리는 그대로입니다). 이름은 영문 소문자·숫자로 시작하고 그 뒤로 영문 소문자·숫자·`.`·`+`·`-`만 받습니다(최대 20개). 베이스 이미지가 Debian·Ubuntu(apt) 또는 Alpine(apk) 계열이 아니면 그 자리에서 오류를 냅니다(ADR-137).
+
+### 서비스 폴더 밖 경로 (`includes`)
+
+Gradle 멀티 모듈처럼 서비스 폴더(`path`) 밖에 있지만 같은 빌드에 포함되는 경로가 있으면 선언하세요(도그푸딩 마찰 119). 예를 들어 `commerce/settings.gradle`이 `include(':media')`로 서비스 폴더 밖 형제 폴더(`../media`)를 서브모듈로 포함하면, `media/`의 변경도 commerce 서비스와 같이 재시작·게이트 재확인 대상이 되어야 합니다.
+
+```yaml
+services:
+  commerce:
+    source: managed
+    template: spring-boot
+    path: commerce
+    port: 8080
+    preview: openapi
+    includes: [media]
+```
+
+폴더 열기 감지가 `settings.gradle(.kts)`의 `include`+`projectDir` 오버라이드, Maven `pom.xml`의 `<modules>`를 읽어 서비스 폴더 밖을 가리키는 서브모듈만 자동으로 채웁니다(폴더 안을 가리키면 이미 `path`로 잡히므로 넣지 않습니다). 감지가 놓친 경로는 직접 추가해도 됩니다. 두 서비스가 같은 경로를 선언하면(공유 라이브러리 폴더 등) 그 경로가 바뀌었을 때 둘 다 재시작 대상이 됩니다(ADR-139).
 
 ### 스냅샷
 

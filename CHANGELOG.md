@@ -39,6 +39,7 @@
 - 조율 게시판을 켠 작업 분해 계획에 외부 에이전트(다른 Claude Code 세션·herdr·Codex CLI 등)를 MCP로 연결할 수 있습니다. 작업 분해 화면의 "조율 게시판" 절에서 "외부 에이전트 연결"로 고정 레인 이름(과 선택적 그룹)을 가진 토큰을 만들면 복사해 쓸 MCP 설정(주소·Authorization 헤더)을 보여주고, 그 토큰으로는 `post_note`·`read_notes` 도구만 열립니다 — 레인과 똑같이 실패 메모는 못 쓰고 topology 읽기 범위를 그대로 따릅니다. 토큰은 손으로 거두거나 계획이 끝나면 자동으로 거둬집니다(`POST /api/task-plans/[id]/board/tokens`, `DELETE /api/task-plans/[id]/board/tokens/[tokenId]`, ADR-119).
 - 멈춰 있던 OpenCode 백엔드 브랜치를 오늘 main에 다시 얹었습니다. 조사 결과 그 브랜치는 이미 PR #83으로 main에 들어가 그 뒤로도 계속 발전해 온 상태였고, 구현 상태 표만 낡은 문구로 남아 있었습니다 — `docs/status.md`의 OpenCode 설명을 Codex·Gemini와 같은 "실계정 확인 전" 어투로 맞췄습니다(ADR-120).
 - studio.yaml의 managed 서비스에 `systemPackages`(OS 패키지 이름 목록)를 선언할 수 있습니다. 예: `systemPackages: [ffmpeg]`. "생성 파일 다시 만들기"나 세션 재시작이 생성 Dockerfile(`Dockerfile.b-studio`)의 `FROM` 줄 바로 뒤에 설치 명령을 넣어, 런타임에는 막혀 있는 OS 패키지 저장소 접속(apt-get 등) 없이도 빌드 때 설치됩니다. Debian·Ubuntu(apt)·Alpine(apk) 계열만 지원하고, 모르는 베이스 이미지 계열이면 오류를 냅니다(ADR-137).
+- studio.yaml의 managed 서비스에 `includes`(서비스 폴더 밖이지만 같은 빌드에 포함되는 경로 목록)를 선언할 수 있습니다. Gradle 멀티 모듈이 `projectDir`로 서비스 폴더 밖 형제 폴더를 서브모듈로 포함하는 구조에서, 그 폴더의 변경도 재시작·게이트 재확인·coverage-gap 경고 대상이 되게 합니다. 폴더 열기 감지가 `settings.gradle(.kts)`의 `include`+`projectDir`, Maven `pom.xml`의 `<modules>`를 읽어 자동으로 채우고, 놓친 경로는 직접 추가할 수 있습니다(도그푸딩 마찰 119, ADR-139).
 
 ### 변경
 

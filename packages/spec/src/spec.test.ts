@@ -837,6 +837,39 @@ services:
     const error = captureError(() => parseSpec(source));
     expect(error.issues.filter((issue) => issue.startsWith('services.web.snapshots.0.key'))).toHaveLength(2);
   });
+
+  it('includes는 서비스 폴더 밖 경로도 받는다(ADR-139, 도그푸딩 마찰 119)', () => {
+    const source = `
+version: 1
+name: x
+services:
+  commerce: { source: managed, template: spring-boot, path: commerce, port: 8080, preview: openapi, includes: [media] }
+`;
+    const spec = parseSpec(source);
+    expect(spec.services.commerce).toMatchObject({ includes: ['media'] });
+  });
+
+  it('includes도 ".."나 절대 경로는 받지 않는다(스냅샷 키와 같은 규칙)', () => {
+    const source = `
+version: 1
+name: x
+services:
+  commerce: { source: managed, template: spring-boot, path: commerce, port: 8080, preview: openapi, includes: [../etc/passwd, /etc/passwd] }
+`;
+    const error = captureError(() => parseSpec(source));
+    expect(error.issues.filter((issue) => issue.startsWith('services.commerce.includes'))).toHaveLength(2);
+  });
+
+  it('includes를 생략하면 undefined다(기존 studio.yaml과 호환)', () => {
+    const source = `
+version: 1
+name: x
+services:
+  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }
+`;
+    const web = parseSpec(source).services.web;
+    expect(web?.source === 'managed' ? web.includes : undefined).toBeUndefined();
+  });
 });
 
 function captureError(fn: () => unknown): SpecError {

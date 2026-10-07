@@ -37,6 +37,14 @@ const RELATIVE_PATH = z
   .min(1)
   .refine((value) => !/^([a-zA-Z]:)?[\\/]/.test(value) && !value.split(/[\\/]/).includes('..'), '서비스 폴더 안의 상대 경로여야 합니다');
 
+/** 프로젝트 루트 기준 상대 경로. RELATIVE_PATH와 글자 규칙은 같지만 서비스 폴더 밖(형제 폴더 등)도 가리킬 수 있다 */
+const PROJECT_RELATIVE_PATH = z
+  .string()
+  .min(1)
+  .refine((value) => !/^([a-zA-Z]:)?[\\/]/.test(value) && !value.split(/[\\/]/).includes('..'), '프로젝트 루트 기준 상대 경로여야 합니다');
+
+const MAX_INCLUDES = 20;
+
 /**
  * 입력 파일 내용이 같으면 다른 세션의 결과를 재사용할 수 있는 볼륨 (의존성 설치 결과, 빌드 도구 캐시).
  * 스냅샷은 출발점일 뿐이고 서비스의 설치 단계는 그대로 돌아 내용을 확인한다.
@@ -70,6 +78,16 @@ export const ManagedServiceSchema = z.object({
    * 이름은 셸 메타문자를 막는 SYSTEM_PACKAGE_NAME만 받는다
    */
   systemPackages: z.array(z.string().regex(SYSTEM_PACKAGE_NAME, 'apt·apk 패키지 이름(영문 소문자·숫자로 시작, 그 뒤 영문 소문자·숫자·.·+·-)이어야 합니다')).max(MAX_SYSTEM_PACKAGES, `systemPackages는 최대 ${MAX_SYSTEM_PACKAGES}개까지 쓸 수 있습니다`).optional(),
+  /**
+   * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드·배포 산출물에 포함되는 경로(도그푸딩 마찰 119, ADR-139). 예:
+   * Gradle 멀티 모듈 `include(':media')`가 `projectDir`를 서비스 폴더 밖 형제 폴더(`../media`)로 돌리는 경우 —
+   * 같은 jar로 배포되고 `./gradlew -p commerce test`가 그 모듈 테스트도 함께 돌리지만, `path`만 보면 그 폴더 밖
+   * 파일이 "재시작으로 확인하지 못한 파일"로 잘못 분류된다. `servicesForFiles`(재시작 대상 판정, 게이트 재확인,
+   * restart_service 전 동기화, coverage-gap 경고가 모두 이 함수 하나를 쓴다, `packages/agent/src/services.ts`)가
+   * `path`와 똑같이 취급한다. 프로젝트 루트 기준 상대 경로만 받고, 두 서비스가 같은 경로를 선언하면(공유 라이브러리
+   * 폴더 등) 그 경로가 바뀌었을 때 둘 다 영향을 받는 서비스로 본다(재시작을 덜 하는 쪽보다 더 하는 쪽이 안전하다)
+   */
+  includes: z.array(PROJECT_RELATIVE_PATH).max(MAX_INCLUDES, `includes는 최대 ${MAX_INCLUDES}개까지 쓸 수 있습니다`).optional(),
 });
 
 /** `/api/users/*`: `*`는 한 경로 구간, `**`는 여러 구간 */

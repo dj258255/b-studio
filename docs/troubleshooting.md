@@ -99,6 +99,7 @@
 - [76. 문제를 설명하는 요청 첫 문장과 요약의 머리글이 체크포인트 제목이 됨](#76-문제를-설명하는-요청-첫-문장과-요약의-머리글이-체크포인트-제목이-됨)
 - [77. 개발 서버와 같은 컨테이너에서 돈 큰 테스트가 메모리 한도를 넘어 컨테이너를 통째로 종료시킴](#77-개발-서버와-같은-컨테이너에서-돈-큰-테스트가-메모리-한도를-넘어-컨테이너를-통째로-종료시킴)
 - [78. 괄호 꼬리가 붙은 요청과 흔한 "~어 주세요" 동사가 커밋 문체로 바뀌지 않음](#78-괄호-꼬리가-붙은-요청과-흔한-어-주세요-동사가-커밋-문체로-바뀌지-않음)
+- [79. 서비스 폴더 밖 Gradle 서브모듈 파일이 "재시작으로 확인하지 못한 파일"로 분류됨](#79-서비스-폴더-밖-gradle-서브모듈-파일이-재시작으로-확인하지-못한-파일로-분류됨)
 
 ---
 
@@ -2577,3 +2578,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 
 ### 배운 점
 어미 규칙을 하나씩 더하는 방식은 끝이 없다. 이번에는 세션에서 실제로 쓴 동사만 더했다. 같은 일이 반복되면 규칙 대신 "어미를 못 바꾸면 요약이나 파일로 넘어간다"는 대체 경로를 먼저 손봐야 한다.
+
+## 79. 서비스 폴더 밖 Gradle 서브모듈 파일이 "재시작으로 확인하지 못한 파일"로 분류됨
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 pay-2, 세션 5b640fd3, 읽기만) → 코드로 원인 추적 → 수정
+
+### 현상
+BE-commerce 세션에서 숏폼 코드를 저장소 최상위 `media/`로 옮겼다. `media/`는 commerce 빌드의 Gradle 서브모듈이다 — `commerce/settings.gradle`에 `include(':media')`가 있고 `project(':media').projectDir`가 서비스 폴더 밖 형제 폴더(`../media`)를 가리킨다. `commerce/build.gradle`의 `implementation project(':media')`로 같은 jar에 들어가고, 게이트의 `./gradlew -p commerce test`가 `:media:test`도 함께 돌린다. 그런데 체크포인트 f631255의 검증 보고서는 `media/...` 파일 30여 개를 전부 "재시작으로 확인하지 못한 파일"로 분류했다.
+
+### 원인
+`packages/agent/src/services.ts`의 `servicesForFiles`가 바뀐 파일이 서비스 폴더(`service.path`, 여기서는 `commerce`) 밑에 있는지만 본다. 서비스 폴더 밖이지만 그 서비스 빌드에 포함되는 경로(Gradle `projectDir` 오버라이드)를 알 방법이 없었다. 이 판정 하나를 재시작 대상(`verify.ts`의 `restartServicesFor`), 게이트가 실패한 서비스를 다시 확인할 파일 모으기(`gate.ts`), `restart_service` 전 동기화할 파일 고르기(`tools.ts`), coverage-gap 경고(`workflow.ts`의 `uncoveredChangeWarnings`, ADR-135)가 모두 같이 쓴다. `workflow.ts`에는 같은 접두사 매칭 로직이 `isWithinService`라는 이름으로 따로 복제돼 있었다.
+
+컨테이너 쪽은 이미 문제가 없었다 — ADR-088이 모든 managed 서비스에 프로젝트 루트 전체(`.:/workspace`)를 마운트해 둬서 `media/`는 commerce 컨테이너 안에서 이미 보인다. 순수하게 "무엇이 바뀌었는지" 판정하는 로직의 문제였다.
+
+### 수정
+studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대 경로 배열)를 더했다(`packages/spec/src/schema.ts`). `servicesForFiles`가 `path`와 `includes` 양쪽을 서비스 소유로 보고(`ownsFile`로 뽑아 `workflow.ts`의 중복 로직도 하나로 합쳤다), 겹치는 서비스가 있으면(공유 라이브러리 폴더 등) 전부 재시작 대상으로 본다(첫 매치만 고르던 것을 고쳤다). 폴더 열기 감지(`project-detect.ts`의 `detectSpring`)가 `settings.gradle(.kts)`의 `include`+`projectDir` 오버라이드, Maven `pom.xml`의 `<modules>`를 정규식으로 읽어 서비스 폴더 밖을 가리키는 서브모듈만 `includes`에 자동으로 채운다(폴더 안을 가리키면 이미 `path`로 잡히므로 넣지 않는다). 이미 studio.yaml이 있는 프로젝트(BE-commerce 등)는 "생성 파일 다시 만들기"(ADR-101)로 같은 경로를 다시 타 `includes`를 받는다(새 반영 경로를 만들지 않았다).
+
+검토한 선택지(ADR-139): (a) `includes` 선언 필드만 추가, (b) 감지만 자동으로 채움(선언 없이), (c) 둘 다(감지가 채우고 사람이 고칠 수 있게) — **(c)를 채택**했다. 감지가 복잡한 Gradle 선언(변수로 조립한 경로 등)을 놓칠 수 있어, 선언이 studio.yaml에 사람이 보는 필드로 남아 있어야 고칠 수 있기 때문이다.
+
+
+머지 전 검토에서 BE-commerce 작업 복사본에 감지를 읽기 전용으로 돌렸다. `commerce`가 `includes: [media]`를 얻었지만, `media`도 따로 Spring Boot 서비스로 잡혔다. 실제 `media/build.gradle`이 Spring Boot 플러그인을 쓰기 때문이다. 그대로면 생성 파일을 다시 만들 때 메인 클래스 없는 `media`가 독립 컨테이너로 떠 bootRun이 실패한다. `detectProject`가 다른 서비스의 `includes`에 든 폴더는 서비스 목록에서 빼게 했다(`project-detect.test.ts`에 테스트 1개). 다시 돌리면 서비스는 commerce·web·consumer-app 셋이다.
+### 검증
+`packages/spec/src/spec.test.ts`(`includes` 스키마 검증)·`packages/agent/src/verify.test.ts`(`servicesForFiles`가 `includes`를 소유로 보는 것, 겹침은 둘 다 재시작 대상인 것)·`packages/agent/src/workflow.test.ts`(`includes` 폴더의 테스트 파일도 coverage-gap 대상인 것)·`apps/studio/lib/server/project-detect.test.ts`(BE-commerce 구조의 Gradle `include`+`projectDir`, Maven `<modules>`, 폴더 안을 가리키면 넣지 않는 것). `pnpm -r typecheck`(6/6)·`pnpm --filter @b-studio/studio lint`(오류 0)를 확인했다. 실제 BE-commerce 세션(5b640fd3)이나 실제 `docker compose`로는 재검증하지 않았다(세션·컨테이너를 건드리지 말라는 제약 때문에, 임시 저장소를 쓰는 단위 테스트로만 확인했다) — 확인하지 못한 것으로 남긴다.
+
+### 배운 점
+"파일이 어느 서비스 폴더 아래 있는가"와 "파일이 어느 서비스의 빌드에 포함되는가"는 모노레포에서 다른 질문이다. Gradle·Maven의 멀티 모듈 선언은 디렉터리 트리와 다른 또 하나의 소유권 그래프를 만든다 — 폴더 구조만 보는 판정은 이 그래프를 모른다.
