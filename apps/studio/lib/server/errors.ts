@@ -1,6 +1,6 @@
 import { CheckpointError, WorkspaceError } from '@b-studio/agent';
 import { SecretError } from '@b-studio/sandbox';
-import { SpecError } from '@b-studio/spec';
+import { SpecError, SystemPackageError } from '@b-studio/spec';
 import { FigmaError } from './figma';
 
 /** 라우트 핸들러가 HTTP 상태로 바꿔 돌려줄 수 있는 오류 */
@@ -22,7 +22,7 @@ export function errorResponse(error: unknown): Response {
   // Figma 오류 문구에는 토큰 값이 들어가지 않는다(원인별 안내만 담는다)
   if (error instanceof FigmaError) return Response.json({ error: error.message }, { status: error.status });
   // 시크릿 오류 메시지에는 이름과 이유만 있고 값은 없다. 작업 공간 오류는 프로젝트 밖 경로나 비밀 파일을 요청한 경우다
-  if (error instanceof SpecError || error instanceof CheckpointError || error instanceof SecretError || error instanceof WorkspaceError) {
+  if (error instanceof SpecError || error instanceof CheckpointError || error instanceof SecretError || error instanceof WorkspaceError || error instanceof SystemPackageError) {
     return Response.json({ error: error.message }, { status: 400 });
   }
   console.error('[b-studio]', error);

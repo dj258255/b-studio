@@ -16,6 +16,20 @@ const EGRESS_PORTS = new Set([80, 443]);
 const DEFAULT_EGRESS_METHODS = ['GET', 'HEAD'];
 const DEFAULT_EGRESS_PATHS = ['/**'];
 
+/**
+ * OS 패키지 저장소로 흔히 쓰는 호스트(도그푸딩 마찰 113: deb.debian.org·ports.ubuntu.com이 403으로 막혀, 에이전트가
+ * 허용된 PyPI에서 정적 바이너리를 꺼내 쓰는 우회로를 찾았다). 이 호스트가 막히면 "런타임 접속을 열어 달라"가 아니라
+ * "studio.yaml의 systemPackages로 선언하라"는 안내가 실제로 도움이 되므로, 403 응답에 한 줄을 더 붙인다.
+ * 그 밖의 막힌 호스트(임의 API 등)에는 안내를 붙이지 않는다 — systemPackages와 무관한 상황에서 혼란을 주지 않기 위해서다
+ */
+const PACKAGE_REPO_HOST = /(^|\.)debian\.org$|(^|\.)ubuntu\.com$|(^|\.)alpinelinux\.org$/i;
+
+/** PACKAGE_REPO_HOST에 해당하는 호스트가 막혔을 때 403 본문에 덧붙일 안내. 그 밖의 호스트는 빈 문자열(붙이지 않는다) */
+function systemPackageHint(hostname) {
+  if (!PACKAGE_REPO_HOST.test(hostname)) return '';
+  return '\nOS 패키지(apt 등)가 필요하면 런타임 접속을 넓히는 대신 studio.yaml 서비스의 systemPackages에 선언하고 "생성 파일 다시 만들기"나 세션 재시작으로 반영하세요(샌드박스 안에서는 패키지 저장소 접속이 항상 막힙니다).\n';
+}
+
 /** "20000=web:3000,20001=api:8080" */
 export function parseForwards(text = '') {
   return text
@@ -411,7 +425,9 @@ export function startEdge({ forwards, rules, proxyPort = PROXY_PORT, lookup }) {
           .writeHead(502, { 'content-type': 'text/plain; charset=utf-8', [DNS_FAILURE_HEADER]: DNS_FAILURE_VALUE })
           .end(`b-studio: ${url.hostname}:${port} 접속을 지금 할 수 없습니다 (${resolved.denied})\n`);
       } else {
-        response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end(`b-studio: ${url.hostname}:${port} 접속이 허용되지 않았습니다 (${resolved.denied})\n`);
+        response
+          .writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+          .end(`b-studio: ${url.hostname}:${port} 접속이 허용되지 않았습니다 (${resolved.denied})\n${systemPackageHint(url.hostname)}`);
       }
       return;
     }
@@ -434,7 +450,14 @@ export function startEdge({ forwards, rules, proxyPort = PROXY_PORT, lookup }) {
     const resolved = target ? await resolveAllowed(target.host, target.port, rules, { tunnel: true }, lookup) : { denied: '잘못된 CONNECT 대상' };
     if ('denied' in resolved) {
       audit(resolved.upstream ? 'error' : 'deny', target?.host ?? request.url, target?.port, resolved.denied, details);
-      socket.end(resolved.upstream ? `HTTP/1.1 502 Bad Gateway\r\n${DNS_FAILURE_HEADER}: ${DNS_FAILURE_VALUE}\r\n\r\n` : 'HTTP/1.1 403 Forbidden\r\n\r\n');
+      if (resolved.upstream) {
+        socket.end(`HTTP/1.1 502 Bad Gateway\r\n${DNS_FAILURE_HEADER}: ${DNS_FAILURE_VALUE}\r\n\r\n`);
+      } else {
+        // CONNECT는 터널이라 상태 줄만으로도 충분하지만, 패키지 저장소 호스트면 본문에 안내를 붙여 둔다(클라이언트가 안 읽어도 해롭지 않다)
+        const hint = target ? systemPackageHint(target.host) : '';
+        const body = hint ? `b-studio: 접속이 허용되지 않았습니다\n${hint}` : '';
+        socket.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      }
       return;
     }
     audit('allow', target.host, target.port, undefined, details);

@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { loadProject } from '@b-studio/spec';
+import { loadProject, parseSpec } from '@b-studio/spec';
 import { StudioError } from './errors';
 import { detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, SPEC_FILE, type GeneratedFile, type ProjectDetection } from './project-detect';
 import { writeServiceSelection } from './service-selection';
@@ -193,6 +193,22 @@ export interface RegenerationProposal {
 /** 폴더 열기가 만든 studio.yaml의 첫 줄 표시. 생성 기록(해시)이 생기기 전에 연 프로젝트도 이것으로 알아본다 */
 const GENERATED_SPEC_MARKER = '# b-studio가 폴더를 보고 만든 설정';
 
+/** 지금 studio.yaml의 managed 서비스마다 선언한 systemPackages를 path 기준으로 모은다(ADR-137). 파일이 없거나 파싱이 안 되면 빈 맵 */
+async function currentSystemPackagesByPath(root: string): Promise<Map<string, readonly string[]>> {
+  const text = await readText(path.join(root, SPEC_FILE));
+  if (!text) return new Map();
+  const map = new Map<string, readonly string[]>();
+  try {
+    const spec = parseSpec(text);
+    for (const service of Object.values(spec.services)) {
+      if (service.source === 'managed' && service.systemPackages && service.systemPackages.length > 0) map.set(service.path, service.systemPackages);
+    }
+  } catch {
+    // 사람이 studio.yaml을 손보는 중이라 지금은 파싱이 안 될 수 있다 — "생성 파일 다시 만들기" 자체를 막지 않는다(반영은 다음에 한다)
+  }
+  return map;
+}
+
 /**
  * "생성 파일 다시 만들기"(ADR-101)의 미리보기: 지금 폴더를 다시 훑어(project-detect) 디스크의 생성 파일과 비교한다.
  * 아무것도 쓰지 않는다(proposeFolder와 같은 생각) — 적용은 applyRegeneration이 한다.
@@ -211,7 +227,10 @@ export async function proposeRegeneration(id: string, file = registryPath()): Pr
 
   // hasSpec 때문에 바로 멈추지 않도록, 지금 있는 studio.yaml이 없다고 치고 폴더를 처음 열 때처럼 다시 훑는다
   const detection = await detectProject(registered.path, { ignoreExistingSpec: true });
-  const freshFiles = generateFiles(detection);
+  // detectProject는 구조만 다시 보고 studio.yaml의 사람 선언(systemPackages 등)은 보지 않으므로, 지금 studio.yaml에서
+  // 직접 읽어 Dockerfile 생성에 넘긴다(ADR-137). 지금 studio.yaml이 파싱되지 않으면(손보는 중 등) 반영 없이 다시 만들기만 보여준다
+  const systemPackagesByPath = await currentSystemPackagesByPath(registered.path);
+  const freshFiles = generateFiles(detection, { systemPackagesByPath });
   if (freshFiles.length === 0) {
     return { detection, files: [], eligible: false, reason: detection.warnings[0] ?? '지금은 이 폴더에서 돌릴 서비스를 찾지 못해 다시 만들 파일이 없습니다' };
   }
