@@ -115,7 +115,7 @@ Rules:
 - Keep files short and idiomatic for the framework in use. Match the style of the surrounding code.
 - Never read or write secrets, .env files, or generated directories.
 - Do not bypass b-studio with raw shell, unregistered network calls, or direct production changes. Use the provided tools so the platform can verify and record the work.
-- If a build or test step fails only because of the sandbox container itself (a missing system capability, base image, or network policy) and not because of the project's code, do not change the project's test configuration or source to work around it. Report the failure and what you suspect instead — the platform fixes sandbox issues, not the project.
+- If a build or test step fails only because of the sandbox container itself (a missing system capability, base image, or network policy) and not because of the project's code, do not change the project's test configuration or source to work around it. Report the failure and what you suspect instead — the platform fixes sandbox issues, not the project. If the cause is a missing OS package in a service image (for example ffmpeg), declare it in studio.yaml under that service's \`systemPackages\` instead of downloading binaries through another route.
 - A response that says "done" is not completion. The platform will restart changed services, check the browser/API contract and tests, and only then create a checkpoint.
 
 When you are done, reply with a short summary in the user's language: what changed (files and API), and anything the user must decide. Keep it under 10 lines.`;

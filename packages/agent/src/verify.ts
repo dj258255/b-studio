@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import type { LoadedProject } from '@b-studio/spec';
+import { loadProject, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
 import { syncSystemPackages } from './system-packages-sync';
@@ -163,7 +163,10 @@ export async function restartServicesFor(
 
   // 다시 띄울 서비스의 Dockerfile을 지금 studio.yaml의 systemPackages 선언과 맞춘다(도그푸딩 마찰 113, ADR-137).
   // compose build(아래 restart가 돌리는 `--build`)보다 먼저 해야 이번 빌드에 반영된다
-  await syncSystemPackages(project, services);
+  // 실행 중 에이전트가 studio.yaml에 systemPackages를 더했으면, 세션이 시작할 때 읽은 project에는 그 선언이 없다.
+  // studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 맞춘다(읽지 못하면 지금 project를 그대로 쓴다)
+  const declared = files.includes(SPEC_FILE) ? await loadProject(project.root).catch(() => project) : project;
+  await syncSystemPackages(declared, services);
 
   // 파일 공유 캐시 때문에 옛 코드로 재시작하면 틀린 결과를 얻는다. 반영을 먼저 확인한다
   let sync: RestartReport['sync'];

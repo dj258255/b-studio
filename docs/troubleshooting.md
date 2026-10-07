@@ -2486,6 +2486,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 ### 보안
 패키지 저장소 접속 허용(PyPI·npm·Maven이 기본 egress 허용 목록에 있다)은 사실상 임의 바이너리를 받는 통로다 — 이번 마찰에서 에이전트가 정확히 그렇게 했다(허용된 PyPI에서 `imageio-ffmpeg` 휠을 받아 그 안의 정적 ffmpeg 바이너리를 꺼내 썼다). `systemPackages`가 apt-get 우회를 막아도, "패키지 관리자 이름으로 받은 파일 안의 임의 바이너리를 실행"이라는 경로 자체는 여전히 열려 있다(pip·npm install의 postinstall 스크립트도 같은 범주다). 지금 egress 설계를 바꾸자는 뜻은 아니다 — 패키지 생태계를 쓰려면 그 저장소들을 열어야 하고, 완전히 막으면 대부분의 템플릿이 의존성을 못 받는다. 다만 "egress 허용 목록 = 신뢰 경계"로 읽으면 안 된다는 한계를 분명히 남겨 둔다.
 
+
+머지 전 검토에서 두 가지를 더했다.
+- 실행 중 에이전트가 `studio.yaml`에 `systemPackages`를 더해도, 게이트는 세션을 시작할 때 읽은 project로 Dockerfile을 맞추고 있었다. 그래서 새 선언이 이번 재빌드에 빠졌다. `restartServicesFor`가 바뀐 파일에 `studio.yaml`이 있으면 다시 읽은 선언으로 맞추게 했다(`verify.test.ts`에 테스트 1개).
+- 에이전트 시스템 프롬프트(`packages/agent/src/prompts.ts`)의 "샌드박스 탓 실패는 보고" 규칙에 한 문장을 이었다. 서비스 이미지에 OS 패키지가 없으면, 다른 경로로 바이너리를 받지 말고 `systemPackages`로 선언하라는 내용이다.
 ### 검증
 `packages/spec/src/system-packages.test.ts`(18개): `detectPackageFamily`가 apt·apk·모름을 가리는 것, `applySystemPackages`가 멱등적으로 설치·갱신·삭제하는 것, 셸 메타문자가 든 이름을 거부하는 것, `ManagedServiceSchema`가 `systemPackages`를 검증하는 것.
 `apps/studio/lib/server/project-detect.test.ts`·`project-regenerate.test.ts`: `generateFiles`가 `systemPackagesByPath`를 반영·무시하는 것, 모르는 베이스 이미지 계열에 오류를 내는 것, "생성 파일 다시 만들기"가 실제 studio.yaml 선언을 읽어 Dockerfile diff에 반영·제거하는 것.
