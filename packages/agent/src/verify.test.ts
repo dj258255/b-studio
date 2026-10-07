@@ -373,3 +373,23 @@ describe('restartServicesFor와 systemPackages(ADR-137)', () => {
     expect(await readFile(path.join(root, 'api/Dockerfile.b-studio'), 'utf8')).toContain('apt-get install -y --no-install-recommends ffmpeg');
   });
 });
+
+describe('restartServicesFor와 실행 중 바뀐 includes(도그푸딩 마찰 121)', () => {
+  it('실행 중 studio.yaml에 includes를 더하면, 세션 시작 때 읽은 project가 아니라 다시 읽은 선언으로 소유를 판정한다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-includes-reload-'));
+    await mkdir(path.join(root, 'api'), { recursive: true });
+    await mkdir(path.join(root, 'media'), { recursive: true });
+    const spec = (extra: string) => `version: 1\nname: x\nservices:\n  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi${extra} }\n`;
+    await writeFile(path.join(root, 'studio.yaml'), spec(''));
+    await writeFile(path.join(root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
+    const stale = await loadProject(root);
+    await writeFile(path.join(root, 'studio.yaml'), spec(', includes: [media]'));
+    await writeFile(path.join(root, 'media/Shorts.java'), 'class Shorts {}\n');
+
+    const sandbox = fakeSandbox();
+    const report = await restartServicesFor(sandbox, stale, ['studio.yaml', 'media/Shorts.java']);
+
+    expect(report.unverifiedFiles).not.toContain('media/Shorts.java');
+    expect(sandbox.restarts).toContain('api');
+  });
+});

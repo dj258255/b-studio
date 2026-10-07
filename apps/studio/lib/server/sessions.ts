@@ -233,7 +233,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { dependentsOf, loadProject, figmaFileKey, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
+import { dependentsOf, loadProject, figmaFileKey, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import {
   buildSubmissionChecklist,
@@ -1485,7 +1485,7 @@ export async function applyRegeneratedFilesToSession(id: string, files: readonly
   }
   // 바뀐 studio.yaml·compose를 읽어야 새 환경 변수·마운트·pageChecks가 재시작에 반영된다. 못 읽으면(일시적인 디스크 문제 등)
   // 지금 쓰던 설정을 그대로 두고 재시작만 시도한다 — 세션을 깨뜨리는 대신 다음에 다시 시도할 여지를 남긴다
-  session.project = await loadProject(session.project.root).catch(() => session.project);
+  await reloadSessionProject(session);
 
   session.snapshot.running = true;
   try {
@@ -2647,9 +2647,9 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     session.databases.enabled &&
     (await session.checkpoints.pendingFiles()).length === 0 &&
     (await session.databases.changedSince(head, session.stop.signal));
-  const subject = session.project.spec.checkpoints.conventionalCommits
-    ? generateCommitSubject(request, await session.checkpoints.pendingChanges(), summary)
-    : `요청: ${request}`;
+  const changes = await session.checkpoints.pendingChanges();
+  const specChanged = changes.some((change) => change.file === SPEC_FILE);
+  const subject = session.project.spec.checkpoints.conventionalCommits ? generateCommitSubject(request, changes, summary) : `요청: ${request}`;
   const checkpoint = await session.checkpoints.commit(subject, body, {
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
@@ -2659,6 +2659,18 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
   emit(session, { type: 'checkpoint', runId, checkpoint });
+  // 에이전트가 이번 실행에서 studio.yaml을 바꿨으면(includes·systemPackages·workflow 등) 다음 요청부터 그 선언을 쓴다(도그푸딩 마찰 121)
+  if (specChanged) await reloadSessionProject(session);
+}
+
+/**
+ * studio.yaml을 다시 읽어 세션의 project를 바꾼다. 못 읽으면 지금 project를 그대로 둔다. 서비스 선택(offServices, ADR-083)은
+ * 파일이 아니라 세션 상태라 다시 읽은 project에 그대로 옮긴다 — 옮기지 않으면 꺼 둔 서비스가 다음 재시작에서 다시 켜진다
+ */
+async function reloadSessionProject(session: Session): Promise<void> {
+  const off = session.project.offServices;
+  session.project = await loadProject(session.project.root).catch(() => session.project);
+  if (off) session.project.offServices = off;
 }
 
 /**

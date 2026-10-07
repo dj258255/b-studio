@@ -151,7 +151,11 @@ export async function restartServicesFor(
   start?: StartOptions,
   { alsoRestart = [], deletedFileRetryDelayMs = 3_000 }: RestartOptions = {},
 ): Promise<RestartReport> {
-  const owned = servicesForFiles(project, files);
+  // 실행 중 에이전트가 studio.yaml을 바꿨으면(systemPackages·includes 등) 세션이 시작할 때 읽은 project에는 그 선언이
+  // 없다. studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 소유 판정과 Dockerfile 동기화를 한다(읽지 못하면 지금
+  // project를 그대로 쓴다). 서비스 선택(offServices)은 파일이 아니라 세션 상태라 지금 project의 것을 쓴다(도그푸딩 마찰 113·121)
+  const declared = files.includes(SPEC_FILE) ? await loadProject(project.root).catch(() => project) : project;
+  const owned = servicesForFiles(declared, files);
   const wanted = [...new Set([...owned.services, ...alsoRestart])];
   // 사용자가 서비스 선택(ADR-083)에서 꺼 둔 서비스는 재시작하지 않는다(껐는데 다시 켜 버리면 선택을 무시하는 셈이다).
   // 건너뛴 사실은 검증 보고서에 남겨, 확인하지 않은 서비스를 "검증됨"으로 부풀리지 않게 한다
@@ -163,9 +167,6 @@ export async function restartServicesFor(
 
   // 다시 띄울 서비스의 Dockerfile을 지금 studio.yaml의 systemPackages 선언과 맞춘다(도그푸딩 마찰 113, ADR-137).
   // compose build(아래 restart가 돌리는 `--build`)보다 먼저 해야 이번 빌드에 반영된다
-  // 실행 중 에이전트가 studio.yaml에 systemPackages를 더했으면, 세션이 시작할 때 읽은 project에는 그 선언이 없다.
-  // studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 맞춘다(읽지 못하면 지금 project를 그대로 쓴다)
-  const declared = files.includes(SPEC_FILE) ? await loadProject(project.root).catch(() => project) : project;
   await syncSystemPackages(declared, services);
 
   // 파일 공유 캐시 때문에 옛 코드로 재시작하면 틀린 결과를 얻는다. 반영을 먼저 확인한다
