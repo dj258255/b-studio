@@ -42,6 +42,14 @@ export const DEFAULT_DENIED_COMMANDS = [
   'mongosh',
 ] as const;
 
+/**
+ * 서비스 컨테이너 안의 `gradle --stop`·`./gradlew --stop`. bootRun으로 서비스를 돌리는 Gradle 데몬까지 멈춰 서비스가
+ * 내려간다(도그푸딩 버그 리포트: 에이전트가 조사하다 `./gradlew --stop`을 돌려 commerce 메인 프로세스가 exit 1로
+ * 죽었다). 토큰 접두사 규칙(DEFAULT_DENIED_COMMANDS)은 `./gradlew -p commerce --stop`처럼 사이에 옵션이 낀 꼴을
+ * 못 잡아 따로 본다. 명령 구분자(; & |)를 넘어가지는 않아, `./gradlew test; echo --stop` 같은 다른 명령의 인자는 무시한다.
+ */
+const GRADLE_STOP = /(?:^|[\s;&|(])(?:\S*\/)?gradlew?(?=\s)[^;&|]*\s--stop(?:\s|$)/;
+
 /** 경로 정책(쓰기 범위·보호 경로)이 걸리는 도구. 파일을 만드는 것과 지우는 것을 같게 본다 */
 const PATH_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
 
@@ -77,6 +85,13 @@ export function checkToolPolicy(
       return startsWithTokens(command, tokens) || (isShellWrapper(command) && containsCommand(command, tokens));
     });
     if (denied) return { tool, decision: 'deny', reason: `command is blocked by execution policy: ${denied}` };
+    if (GRADLE_STOP.test(command.join(' '))) {
+      return {
+        tool,
+        decision: 'deny',
+        reason: 'gradle --stop is blocked: it stops the Gradle daemon that runs this service (bootRun) and takes the service down. Use restart_service to restart the service instead',
+      };
+    }
   }
 
   if (policy?.requireApprovalFor?.includes(tool) && !hasApprovalToken(approvalToken)) {

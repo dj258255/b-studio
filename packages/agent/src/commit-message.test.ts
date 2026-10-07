@@ -174,6 +174,17 @@ describe('generateCommitSubject', () => {
     expect(subject).toBe('feat: 주문 API를 정의한다');
   });
 
+  it('긴 파일 경로 때문에 72자를 넘으면 경로를 파일 이름으로 줄여 동사까지 남긴다(도그푸딩 버그 리포트: 경로 한가운데서 잘림)', () => {
+    const request = '앞서 샌드박스 문제를 우회하려고 넣은 commerce/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker 파일을 지워 주세요.';
+    const subject = generateCommitSubject(request, [change('commerce/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker', 'deleted')]);
+    expect(subject.slice(subject.indexOf(': ') + 2)).toBe('앞서 샌드박스 문제를 우회하려고 넣은 org.mockito.plugins.MockMaker 파일을 지운다');
+    expect(subject.length).toBeLessThanOrEqual(72);
+  });
+
+  it('제목이 예산 안이면 짧은 경로는 그대로 둔다', () => {
+    expect(generateCommitSubject('apps/web/lib/api.ts에 재시도를 넣어 주세요', [change('apps/web/lib/api.ts')])).toBe('feat: apps/web/lib/api.ts에 재시도를 넣는다');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
