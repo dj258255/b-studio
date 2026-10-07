@@ -115,7 +115,6 @@ export interface DetectedService {
    */
   mockitoAgentInit?: boolean;
   /**
-<<<<<<< HEAD
    * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드에 포함되는 경로(프로젝트 루트 기준, 도그푸딩 마찰 119, ADR-139).
    * Gradle `settings.gradle(.kts)`의 `include`가 `projectDir`로 서비스 폴더 밖 형제 폴더를 가리키거나
    * (`detectExtraModulePaths`), Maven `pom.xml`의 `<modules>`가 상대 경로로 폴더 밖을 가리킬 때 채운다.
@@ -123,7 +122,7 @@ export interface DetectedService {
    * `path`와 똑같이 재시작·게이트 재확인 대상으로 본다
    */
   includes?: string[];
-=======
+  /**
    * Gradle 서비스의 테스트 JVM에 힙·메타스페이스 상한을 거는 init 스크립트가 필요하면 true(ADR-138).
    * 샌드박스 서비스 컨테이너는 보통 메모리 한도를 걸지 않는데(이 함수는 resources: 블록을 만들지 않는다),
    * `--no-daemon`으로 돌리는 테스트 JVM의 기본 힙은 JVM 에르고노믹스가 "보이는 메모리"(컨테이너 한도가 없으면
@@ -133,7 +132,6 @@ export interface DetectedService {
    * 사용자 설정을 덮어쓸 위험이 있다)
    */
   testMemoryInit?: boolean;
->>>>>>> origin/main
 }
 
 export interface ProjectDetection {
@@ -886,12 +884,8 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
     environment: {},
     dependsOn: [],
     notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
-<<<<<<< HEAD
-    ...(testCommand ? { testCommand, ...(mockitoAgentInit ? { mockitoAgentInit: true } : {}) } : {}),
-    ...(includes.length > 0 ? { includes } : {}),
-=======
     ...(testCommand ? { testCommand, ...(mockitoAgentInit ? { mockitoAgentInit: true } : {}), ...(testMemoryInit ? { testMemoryInit: true } : {}) } : {}),
->>>>>>> origin/main
+    ...(includes.length > 0 ? { includes } : {}),
   };
 }
 
