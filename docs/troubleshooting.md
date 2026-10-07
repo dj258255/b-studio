@@ -2542,8 +2542,10 @@ BE-commerce 세션에서 숏폼 코드를 저장소 최상위 `media/`로 옮겼
 ### 수정
 studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대 경로 배열)를 더했다(`packages/spec/src/schema.ts`). `servicesForFiles`가 `path`와 `includes` 양쪽을 서비스 소유로 보고(`ownsFile`로 뽑아 `workflow.ts`의 중복 로직도 하나로 합쳤다), 겹치는 서비스가 있으면(공유 라이브러리 폴더 등) 전부 재시작 대상으로 본다(첫 매치만 고르던 것을 고쳤다). 폴더 열기 감지(`project-detect.ts`의 `detectSpring`)가 `settings.gradle(.kts)`의 `include`+`projectDir` 오버라이드, Maven `pom.xml`의 `<modules>`를 정규식으로 읽어 서비스 폴더 밖을 가리키는 서브모듈만 `includes`에 자동으로 채운다(폴더 안을 가리키면 이미 `path`로 잡히므로 넣지 않는다). 이미 studio.yaml이 있는 프로젝트(BE-commerce 등)는 "생성 파일 다시 만들기"(ADR-101)로 같은 경로를 다시 타 `includes`를 받는다(새 반영 경로를 만들지 않았다).
 
-검토한 선택지(ADR-138): (a) `includes` 선언 필드만 추가, (b) 감지만 자동으로 채움(선언 없이), (c) 둘 다(감지가 채우고 사람이 고칠 수 있게) — **(c)를 채택**했다. 감지가 복잡한 Gradle 선언(변수로 조립한 경로 등)을 놓칠 수 있어, 선언이 studio.yaml에 사람이 보는 필드로 남아 있어야 고칠 수 있기 때문이다.
+검토한 선택지(ADR-139): (a) `includes` 선언 필드만 추가, (b) 감지만 자동으로 채움(선언 없이), (c) 둘 다(감지가 채우고 사람이 고칠 수 있게) — **(c)를 채택**했다. 감지가 복잡한 Gradle 선언(변수로 조립한 경로 등)을 놓칠 수 있어, 선언이 studio.yaml에 사람이 보는 필드로 남아 있어야 고칠 수 있기 때문이다.
 
+
+머지 전 검토에서 BE-commerce 작업 복사본에 감지를 읽기 전용으로 돌렸다. `commerce`가 `includes: [media]`를 얻었지만, `media`도 따로 Spring Boot 서비스로 잡혔다. 실제 `media/build.gradle`이 Spring Boot 플러그인을 쓰기 때문이다. 그대로면 생성 파일을 다시 만들 때 메인 클래스 없는 `media`가 독립 컨테이너로 떠 bootRun이 실패한다. `detectProject`가 다른 서비스의 `includes`에 든 폴더는 서비스 목록에서 빼게 했다(`project-detect.test.ts`에 테스트 1개). 다시 돌리면 서비스는 commerce·web·consumer-app 셋이다.
 ### 검증
 `packages/spec/src/spec.test.ts`(`includes` 스키마 검증)·`packages/agent/src/verify.test.ts`(`servicesForFiles`가 `includes`를 소유로 보는 것, 겹침은 둘 다 재시작 대상인 것)·`packages/agent/src/workflow.test.ts`(`includes` 폴더의 테스트 파일도 coverage-gap 대상인 것)·`apps/studio/lib/server/project-detect.test.ts`(BE-commerce 구조의 Gradle `include`+`projectDir`, Maven `<modules>`, 폴더 안을 가리키면 넣지 않는 것). `pnpm -r typecheck`(6/6)·`pnpm --filter @b-studio/studio lint`(오류 0)를 확인했다. 실제 BE-commerce 세션(5b640fd3)이나 실제 `docker compose`로는 재검증하지 않았다(세션·컨테이너를 건드리지 말라는 제약 때문에, 임시 저장소를 쓰는 단위 테스트로만 확인했다) — 확인하지 못한 것으로 남긴다.
 

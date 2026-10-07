@@ -859,7 +859,7 @@ describe('detectProject: Gradle·Maven 래퍼를 상위 폴더까지 거슬러 �
   });
 });
 
-describe('detectProject: 서비스 폴더 밖 서브모듈을 includes로 찾는다(도그푸딩 마찰 119, ADR-138)', () => {
+describe('detectProject: 서비스 폴더 밖 서브모듈을 includes로 찾는다(도그푸딩 마찰 119, ADR-139)', () => {
   it('Gradle settings.gradle의 include가 projectDir로 서비스 폴더 밖 형제 폴더를 가리키면 includes에 더한다(BE-commerce 실측 구조)', async () => {
     const root = await repo({
       'commerce/settings.gradle': "rootProject.name = 'be-commerce'\ninclude(':media')\nproject(':media').projectDir = file('../media')\n",
@@ -880,6 +880,19 @@ describe('detectProject: 서비스 폴더 밖 서브모듈을 includes로 찾는
 
     const project = await writeAndLoad(root, generateFiles(detection));
     expect(project.managed.find(([name]) => name === 'commerce')?.[1]).toMatchObject({ includes: ['media'] });
+  });
+
+  it('포함되는 폴더가 Spring Boot 플러그인을 써도 별도 서비스로 잡지 않는다(실제 BE-commerce media/는 플러그인을 쓴다)', async () => {
+    const root = await repo({
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\ninclude(':media')\nproject(':media').projectDir = file('../media')\n",
+      'commerce/build.gradle': springGradle,
+      'media/build.gradle': springGradle,
+    });
+
+    const detection = await detectProject(root);
+
+    expect(detection.services.map((service) => service.path)).toEqual(['commerce']);
+    expect(detection.services[0]!.includes).toEqual(['media']);
   });
 
   it('include가 서비스 폴더 안(기본 위치)을 가리키면 이미 path로 잡히므로 includes에 넣지 않는다', async () => {

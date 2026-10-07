@@ -180,7 +180,7 @@ describe('project workflow', () => {
       expect(uncoveredChangeWarnings(project, ['apps/api/src/main/resources/templates/index.html'])).toEqual([]);
     });
 
-    it('includes로 선언한 서비스 폴더 밖 경로의 테스트 파일도 그 서비스의 커버리지로 본다(ADR-138, 도그푸딩 마찰 119)', () => {
+    it('includes로 선언한 서비스 폴더 밖 경로의 테스트 파일도 그 서비스의 커버리지로 본다(ADR-139, 도그푸딩 마찰 119)', () => {
       const commerceWithMedia: LoadedProject['managed'][number] = [
         'commerce',
         { source: 'managed', template: 'spring-boot', path: 'commerce', port: 8080, preview: 'openapi', includes: ['media'] } as never,

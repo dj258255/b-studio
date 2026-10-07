@@ -16,7 +16,7 @@ export interface FileServiceMapping {
  *
  * 한 파일이 두 서비스 모두에 속할 수 있다(`path`나 `includes`가 겹치는 경우, 예: 공유 라이브러리 폴더). 첫 번째
  * 소유자만 고르지 않고 겹치는 서비스를 전부 재시작 대상으로 본다 — 재시작을 덜 하는 쪽보다 더 하는 쪽이 안전하다
- * (도그푸딩 마찰 119, ADR-138)
+ * (도그푸딩 마찰 119, ADR-139)
  */
 export function servicesForFiles(project: LoadedProject, files: readonly string[]): FileServiceMapping {
   const hit = new Set<string>();
@@ -42,7 +42,7 @@ export function servicesForFiles(project: LoadedProject, files: readonly string[
 
 /**
  * 서비스가 이 파일을 소유하는지: 서비스 폴더(`path`) 아래이거나, `includes`로 선언한 폴더 밖 경로 중 하나에
- * 속한다(ADR-138). `uncoveredChangeWarnings`(packages/agent/src/workflow.ts)도 같은 판정을 쓴다 — 매칭 규칙이
+ * 속한다(ADR-139). `uncoveredChangeWarnings`(packages/agent/src/workflow.ts)도 같은 판정을 쓴다 — 매칭 규칙이
  * 두 곳에 따로 있으면 한쪽만 고치고 잊기 쉽다
  */
 export function ownsFile(service: Pick<ManagedServiceSpec, 'path' | 'includes'>, file: string): boolean {

@@ -838,7 +838,7 @@ services:
     expect(error.issues.filter((issue) => issue.startsWith('services.web.snapshots.0.key'))).toHaveLength(2);
   });
 
-  it('includes는 서비스 폴더 밖 경로도 받는다(ADR-138, 도그푸딩 마찰 119)', () => {
+  it('includes는 서비스 폴더 밖 경로도 받는다(ADR-139, 도그푸딩 마찰 119)', () => {
     const source = `
 version: 1
 name: x

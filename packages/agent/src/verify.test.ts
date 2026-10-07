@@ -99,7 +99,7 @@ describe('servicesForFiles', () => {
     expect(servicesForFiles(empty, ['compose.yaml', 'studio.yaml'])).toEqual({ services: [], unmatched: ['compose.yaml', 'studio.yaml'] });
   });
 
-  describe('includes(ADR-138, 도그푸딩 마찰 119): 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로', () => {
+  describe('includes(ADR-139, 도그푸딩 마찰 119): 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로', () => {
     const commerce: LoadedProject = {
       ...project,
       managed: [

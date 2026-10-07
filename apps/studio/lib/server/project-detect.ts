@@ -115,7 +115,7 @@ export interface DetectedService {
    */
   mockitoAgentInit?: boolean;
   /**
-   * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드에 포함되는 경로(프로젝트 루트 기준, 도그푸딩 마찰 119, ADR-138).
+   * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드에 포함되는 경로(프로젝트 루트 기준, 도그푸딩 마찰 119, ADR-139).
    * Gradle `settings.gradle(.kts)`의 `include`가 `projectDir`로 서비스 폴더 밖 형제 폴더를 가리키거나
    * (`detectExtraModulePaths`), Maven `pom.xml`의 `<modules>`가 상대 경로로 폴더 밖을 가리킬 때 채운다.
    * specYaml이 `services.<이름>.includes`로 적고, `servicesForFiles`(packages/agent/src/services.ts)가
@@ -236,7 +236,11 @@ export async function detectProject(folder: string, { ignoreExistingSpec = false
   // 아니면(모노레포로 보이면) 컨테이너 폴더·이미 찾은 서비스 하위까지 두 단계 더 본다
   const rootApp = found.find((service) => service.path === '.');
   const deepServices = rootApp ? [rootApp] : await withDeeperCandidates(root, depth1Names, found);
-  const services = nameServices(deepServices.slice(0, MAX_DETECTED_SERVICES));
+  // 다른 서비스의 빌드가 포함하는 폴더(includes — 예: commerce의 settings.gradle이 include하는 media/)는 그 서비스의
+  // 일부라 따로 띄우지 않는다. 그대로 두면 메인 클래스 없는 Gradle 하위 프로젝트가 독립 Spring 앱으로 잡혀 bootRun이 실패한다
+  const included = new Set(deepServices.flatMap((service) => service.includes ?? []));
+  const standalone = deepServices.filter((service) => !included.has(service.path));
+  const services = nameServices(standalone.slice(0, MAX_DETECTED_SERVICES));
   const warnings: string[] = [];
   if (services.length === 0) {
     warnings.push('Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다. studio.yaml을 직접 쓰거나 지원하는 스택인지 확인하세요');
@@ -812,7 +816,7 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
     }
   }
   // 이 서비스 폴더 자신이 Gradle·Maven 프로젝트 루트면(settings.gradle(.kts)·pom.xml이 여기 있다), 그 서브모듈 중
-  // 서비스 폴더 밖(형제 폴더 등)을 가리키는 것이 있는지 본다(도그푸딩 마찰 119, ADR-138) — 같은 jar로 배포되고
+  // 서비스 폴더 밖(형제 폴더 등)을 가리키는 것이 있는지 본다(도그푸딩 마찰 119, ADR-139) — 같은 jar로 배포되고
   // 같은 test 명령이 함께 돌리는 경로인데 path 접두사만으로는 "서비스 밖 파일"로 잘못 분류된다
   const includes = await detectExtraModulePaths(root, dir, relative, isGradle);
   if (includes.length > 0) {
@@ -1086,7 +1090,7 @@ function specYaml(detection: ProjectDetection): string {
     const ready = [`path: ${service.ready.path}`, ...(service.ready.expectStatus ? [`expectStatus: ${service.ready.expectStatus}`] : []), `timeoutSeconds: ${service.template === 'spring-boot' ? 900 : 300}`];
     lines.push(`    ready: { ${ready.join(', ')} }`);
     if (service.contract) lines.push(`    contract: { extract: ${service.contract} }`);
-    // 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로(ADR-138). servicesForFiles가 path와 똑같이 재시작 대상으로 본다
+    // 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로(ADR-139). servicesForFiles가 path와 똑같이 재시작 대상으로 본다
     if (service.includes && service.includes.length > 0) lines.push(`    includes: [${service.includes.map(yamlString).join(', ')}]`);
     for (const note of service.notes) lines.push(`    # 확인: ${note}`);
   }

@@ -79,7 +79,7 @@ export const ManagedServiceSchema = z.object({
    */
   systemPackages: z.array(z.string().regex(SYSTEM_PACKAGE_NAME, 'apt·apk 패키지 이름(영문 소문자·숫자로 시작, 그 뒤 영문 소문자·숫자·.·+·-)이어야 합니다')).max(MAX_SYSTEM_PACKAGES, `systemPackages는 최대 ${MAX_SYSTEM_PACKAGES}개까지 쓸 수 있습니다`).optional(),
   /**
-   * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드·배포 산출물에 포함되는 경로(도그푸딩 마찰 119, ADR-138). 예:
+   * 이 서비스 폴더(`path`) 밖에 있지만 같은 빌드·배포 산출물에 포함되는 경로(도그푸딩 마찰 119, ADR-139). 예:
    * Gradle 멀티 모듈 `include(':media')`가 `projectDir`를 서비스 폴더 밖 형제 폴더(`../media`)로 돌리는 경우 —
    * 같은 jar로 배포되고 `./gradlew -p commerce test`가 그 모듈 테스트도 함께 돌리지만, `path`만 보면 그 폴더 밖
    * 파일이 "재시작으로 확인하지 못한 파일"로 잘못 분류된다. `servicesForFiles`(재시작 대상 판정, 게이트 재확인,
