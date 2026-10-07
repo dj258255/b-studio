@@ -483,6 +483,9 @@ export class VerificationGate {
       if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.consoleErrors.length > 0) problems.push(`console.error: ${result.consoleErrors.slice(0, 3).join(' | ')}`);
       if (!page.allowConsoleErrors && result.failedRequests.length > 0) problems.push(`실패한 요청: ${result.failedRequests.slice(0, 3).join(' | ')}`);
+      // <video>/<audio>/<img>의 로드·재생 실패(트러블슈팅 83). 같은 네트워크 404가 failedRequests에도 남을 수 있지만,
+      // 이쪽은 "그 요청이 실제로 어느 화면 요소의 재생을 망가뜨렸는지"를 직접 보여준다
+      if (!page.allowConsoleErrors && result.mediaErrors.length > 0) problems.push(`미디어 오류: ${result.mediaErrors.slice(0, 3).join(' | ')}`);
       // 데이터를 못 받아 로딩 상태에서 멈춘 화면(ADR-078). 실패한 요청·콘솔 오류·스크립트 예외를 증거로 함께 본다
       if (!page.allowLoadingPlaceholder) {
         const stuck = detectStuckLoading(result.text, {

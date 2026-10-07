@@ -33,6 +33,12 @@ export interface BrowserPageResult {
   /** 4xx·5xx로 끝났거나 연결되지 않은 요청. 브라우저가 스스로 여는 /favicon.ico는 제외한다 */
   failedRequests: string[];
   /**
+   * `<video>`·`<audio>`·`<img>`가 캡처 단계 `error` 이벤트로 알린 미디어 로드·재생 실패.
+   * 트러블슈팅 83: 상대 경로 미디어 주소가 백엔드로 넘어가지 않아 `<video>`의 readyState가 0에 머문 사례처럼,
+   * failedRequests(네트워크 응답)만으로는 "그 요청이 어느 화면 요소의 재생 실패로 이어졌는지"를 알 수 없어 따로 모은다
+   */
+  mediaErrors: string[];
+  /**
    * 허용한 출처 밖이라 막은 요청. 앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않고 기록만 한다.
    * allowedOrigins를 넘기지 않았으면 항상 빈 배열이다
    */
@@ -96,6 +102,37 @@ class StepWithoutActionError extends Error {}
 function isAutomaticFavicon(url: string): boolean {
   return new URL(url).pathname === '/favicon.ico';
 }
+
+/** MediaError.code → 이름. 표준에 있는 네 값만 안다(https://developer.mozilla.org/docs/Web/API/MediaError) */
+const MEDIA_ERROR_NAMES: Record<number, string> = {
+  1: 'MEDIA_ERR_ABORTED',
+  2: 'MEDIA_ERR_NETWORK',
+  3: 'MEDIA_ERR_DECODE',
+  4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+};
+
+/**
+ * 문서 전체에 캡처 단계로 `error` 리스너를 하나 달아 `<video>`·`<audio>`·`<img>`의 로드·재생 실패를 모은다.
+ * 리소스 `error` 이벤트는 버블링하지 않아 document가 직접 들을 수 없으므로 캡처 단계(`true`)로 듣는다.
+ * 에이전트 패키지는 DOM 타입을 쓰지 않아(다른 page.evaluate 호출과 같은 이유) 평문 문자열로 둔다.
+ * `window.__bStudioMediaError__`는 goto 전에 exposeFunction으로 등록해 둔다
+ */
+const MEDIA_ERROR_INIT_SCRIPT = `(() => {
+  var names = ${JSON.stringify(MEDIA_ERROR_NAMES)};
+  document.addEventListener('error', function (event) {
+    var target = event.target;
+    if (!target || !target.tagName) return;
+    var tag = target.tagName.toLowerCase();
+    var src = target.currentSrc || target.src || '';
+    if (tag === 'video' || tag === 'audio') {
+      var code = target.error && target.error.code;
+      var reason = code ? (names[code] || ('code ' + code)) : 'unknown';
+      window.__bStudioMediaError__(tag + ' ' + reason + ' ' + src);
+    } else if (tag === 'img') {
+      window.__bStudioMediaError__('img 이미지를 불러오지 못했습니다 ' + src);
+    }
+  }, true);
+})();`;
 
 /** 실패한 단계를 사람이 알아볼 수 있게 무슨 동작을 어디에 하려 했는지 적는다 */
 function describeStep(step: WorkflowPageStep): string {
@@ -222,6 +259,10 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
     const pageErrors: string[] = [];
     const consoleErrors: string[] = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
+    const mediaErrors: string[] = [];
+    // goto 전에 등록해야 첫 문서가 로드될 때부터 받는다. addInitScript는 이후의 모든 이동(워밍업 포함)에도 다시 붙는다
+    await page.exposeFunction('__bStudioMediaError__', (message: string) => mediaErrors.push(message));
+    await page.addInitScript(MEDIA_ERROR_INIT_SCRIPT);
     const failedRequests: string[] = [];
     page.on('console', (message) => {
       // 리소스 로드 실패는 브라우저가 URL 없이 남기는 문구라 원인을 알 수 없다. 요청 이벤트에서 URL과 함께 따로 모은다
@@ -256,6 +297,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         pageErrors.length = 0;
         consoleErrors.length = 0;
         failedRequests.length = 0;
+        mediaErrors.length = 0;
         failedUrls.clear();
         blockedUrls.clear();
       }
@@ -294,6 +336,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         pageErrors,
         consoleErrors,
         failedRequests,
+        mediaErrors,
         blockedRequests: [...blockedUrls],
         horizontalOverflowPx: overflow,
         ...(loadMs !== null ? { loadMs } : {}),

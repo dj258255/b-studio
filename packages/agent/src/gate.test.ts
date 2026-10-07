@@ -219,7 +219,7 @@ describe('VerificationGate 워크플로 단계', () => {
         pageErrors: [],
         consoleErrors: [],
         failedRequests: [],
-        blockedRequests: [],
+        mediaErrors: [], blockedRequests: [],
         horizontalOverflowPx: 0,
         steps: [],
       }),
@@ -251,7 +251,17 @@ describe('VerificationGate 워크플로 단계', () => {
       },
       browserRunner: async (url, options) => {
         seen.push({ url, viewport: options.viewport });
-        return { status: 200, text: '로딩', pageErrors: ['window.missing is undefined'], consoleErrors: ['hydration failed'], failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'], blockedRequests: [], horizontalOverflowPx: 510, steps: [] };
+        return {
+          status: 200,
+          text: '로딩',
+          pageErrors: ['window.missing is undefined'],
+          consoleErrors: ['hydration failed'],
+          failedRequests: ['404 http://127.0.0.1:1/_next/static/chunk.js'],
+          mediaErrors: ['video MEDIA_ERR_SRC_NOT_SUPPORTED http://127.0.0.1:1/media/master.m3u8'],
+          blockedRequests: [],
+          horizontalOverflowPx: 510,
+          steps: [],
+        };
       },
       onEvent: () => {},
     });
@@ -262,10 +272,47 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(outcome.kind).toBe('retry');
     const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
     expect(feedback).toContain('[browser_check] api /orders (browser 390x844)');
-    for (const reason of ["렌더링된 화면에 '주문 목록'가 없습니다", '스크립트 예외: window.missing is undefined', 'console.error: hydration failed', '실패한 요청: 404 http://127.0.0.1:1/_next/static/chunk.js', '가로로 510px 넘칩니다']) {
+    for (const reason of [
+      "렌더링된 화면에 '주문 목록'가 없습니다",
+      '스크립트 예외: window.missing is undefined',
+      'console.error: hydration failed',
+      '실패한 요청: 404 http://127.0.0.1:1/_next/static/chunk.js',
+      '미디어 오류: video MEDIA_ERR_SRC_NOT_SUPPORTED http://127.0.0.1:1/media/master.m3u8',
+      '가로로 510px 넘칩니다',
+    ]) {
       expect(feedback).toContain(reason);
     }
     expect(gate.passedStages.has('browser_check')).toBe(false);
+  });
+
+  it('allowConsoleErrors를 켜면 미디어 오류가 있어도 실패시키지 않는다', async () => {
+    const target = withWorkflow({
+      pageChecks: [{ service: 'api', path: '/shorts', mode: 'browser', expectStatus: 200, expectText: '숏폼', allowConsoleErrors: true, noHorizontalScroll: false }],
+    });
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox: fakeSandbox(target, [true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      browserRunner: async () => ({
+        status: 200,
+        text: '숏폼',
+        pageErrors: [],
+        consoleErrors: [],
+        failedRequests: ['404 http://127.0.0.1:1/api/v1/shorts/1/media/master.m3u8'],
+        mediaErrors: ['video MEDIA_ERR_SRC_NOT_SUPPORTED http://127.0.0.1:1/api/v1/shorts/1/media/master.m3u8'],
+        blockedRequests: [],
+        horizontalOverflowPx: 0,
+        steps: [],
+      }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
   });
 
   it('browser 모드는 steps를 러너에 그대로 넘기고 검사 이름에 단계 수를 넣는다', async () => {
@@ -295,7 +342,7 @@ describe('VerificationGate 워크플로 단계', () => {
       fetcher: async () => ORDERS_CONTRACT,
       browserRunner: async (_url, options) => {
         seen.push(options.steps);
-        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
       },
       onEvent: () => {},
     });
@@ -481,7 +528,7 @@ describe('VerificationGate 워크플로 단계', () => {
           pageErrors: [],
           consoleErrors: [],
           failedRequests: [],
-          blockedRequests: [],
+          mediaErrors: [], blockedRequests: [],
           horizontalOverflowPx: 0,
           steps: [
             { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
@@ -525,7 +572,7 @@ describe('VerificationGate 워크플로 단계', () => {
         pageErrors: [],
         consoleErrors: [],
         failedRequests: [],
-        blockedRequests: [],
+        mediaErrors: [], blockedRequests: [],
         horizontalOverflowPx: 0,
         steps: [
           { label: 'open /orders', ok: true, screenshot: Buffer.from([1]) },
@@ -604,7 +651,7 @@ describe('VerificationGate 디자인 비교', () => {
     pageErrors: [],
     consoleErrors: [],
     failedRequests: [],
-    blockedRequests: [],
+    mediaErrors: [], blockedRequests: [],
     horizontalOverflowPx: 0,
     steps: [{ label: 'open /orders', ok: true, screenshot: actual }],
   });
@@ -725,7 +772,7 @@ describe('VerificationGate 출처 제한', () => {
       fetcher: async () => ORDERS_CONTRACT,
       browserRunner: async (_url, options) => {
         origins = options.allowedOrigins;
-        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: ['http://evil.example/x'], horizontalOverflowPx: 0, steps: [] };
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: ['http://evil.example/x'], horizontalOverflowPx: 0, steps: [] };
       },
       onEvent: () => {},
     });
@@ -747,7 +794,7 @@ describe('VerificationGate 출처 제한', () => {
       pageErrors: [],
       consoleErrors: [],
       failedRequests: [],
-      blockedRequests: ['http://evil.example/a', 'http://evil.example/b'],
+      mediaErrors: [], blockedRequests: ['http://evil.example/a', 'http://evil.example/b'],
       horizontalOverflowPx: 0,
       steps: [],
     });
@@ -888,7 +935,7 @@ describe('VerificationGate 로드 시간 예산', () => {
       fetcher: async () => ORDERS_CONTRACT,
       browserRunner: async (_url, options) => {
         measure = options.measureLoad;
-        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [], ...result };
+        return { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [], ...result };
       },
       onEvent: () => {},
     });
@@ -1037,7 +1084,7 @@ describe('VerificationGate api 값 확인', () => {
 
   it('browser 모드에서도 렌더링된 글자에 같은 확인을 한다', async () => {
     const target = withWorkflow({ pageChecks: [pageCheck({ mode: 'browser' })] });
-    const rendered = { status: 200, text: '주문 목록\n홍길동', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const rendered = { status: 200, text: '주문 목록\n홍길동', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
     const passing = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) } }), rendered);
     expect(await passing.check()).toEqual({ kind: 'pass' });
 
@@ -1230,7 +1277,7 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
   it('browser 모드면 정한 창 크기로 열고, 오류 표지도 렌더링된 글자에서 본다', async () => {
     const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser', viewport: { width: 390, height: 844 } }) });
     const seen: Array<{ url: string; viewport?: { width: number; height: number } }> = [];
-    const rendered = { status: 200, text: '대시보드', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const rendered = { status: 200, text: '대시보드', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
     const passing = await setup(target, {
       browser: async (url, options) => {
         seen.push({ url, viewport: options.viewport });
@@ -1250,7 +1297,7 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
 
   it('browser 모드에서 렌더링된 글자가 로딩 문구뿐이면 실패로 본다(E8 haiku의 "Loading..."만 남은 화면, ADR-078)', async () => {
     const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser' }) });
-    const stuck = { status: 200, text: 'Loading...', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const stuck = { status: 200, text: 'Loading...', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
     const { gate, workspace } = await setup(target, { browser: async () => stuck });
     await workspace.write('web/app/dashboard/page.tsx', 'export default function Page() { return null; }\n');
 
@@ -1270,7 +1317,7 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
       pageErrors: [],
       consoleErrors: [],
       failedRequests: ['404 http://127.0.0.1:1/api/orders'],
-      blockedRequests: [],
+      mediaErrors: [], blockedRequests: [],
       horizontalOverflowPx: 0,
       steps: [],
     };
@@ -1283,6 +1330,34 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
     // 실패한 요청도, 빈 화면 사유도 함께 남는다
     expect(check.detail).toContain('실패한 요청');
     expect(check.detail).toContain('화면에 표시된 내용이 없습니다');
+  });
+
+  it('바뀐 페이지의 <video>가 미디어 주소 404로 재생되지 않으면 상태 코드가 200이어도 실패로 본다(트러블슈팅 83, BE-commerce /shorts)', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser' }) });
+    const brokenShorts = {
+      status: 200,
+      text: '숏폼 피드',
+      pageErrors: [],
+      consoleErrors: [],
+      failedRequests: [
+        '404 http://127.0.0.1:1/api/v1/shorts/1/media/master.m3u8',
+        '404 http://127.0.0.1:1/api/v1/shorts/1/media/thumb.jpg',
+      ],
+      mediaErrors: ['video MEDIA_ERR_SRC_NOT_SUPPORTED http://127.0.0.1:1/api/v1/shorts/1/media/master.m3u8'],
+      blockedRequests: [],
+      horizontalOverflowPx: 0,
+      steps: [],
+    };
+    const { gate, workspace } = await setup(target, { browser: async () => brokenShorts });
+    await workspace.write('web/app/shorts/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /shorts (자동)')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('실패한 요청: 404 http://127.0.0.1:1/api/v1/shorts/1/media/master.m3u8');
+    expect(check.detail).toContain('미디어 오류: video MEDIA_ERR_SRC_NOT_SUPPORTED http://127.0.0.1:1/api/v1/shorts/1/media/master.m3u8');
   });
 
   it('allowLoadingPlaceholder를 켜면 로딩 문구만 있는 화면도 통과시킨다(선언한 pageChecks)', async () => {
@@ -1299,7 +1374,7 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
         },
       ],
     });
-    const stuck = { status: 200, text: '로딩 중입니다...', pageErrors: [], consoleErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
+    const stuck = { status: 200, text: '로딩 중입니다...', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] };
     const { gate, workspace } = await setup(target, { browser: async () => stuck });
     await workspace.write('api/src/Progress.java', 'class Progress {}\n');
 

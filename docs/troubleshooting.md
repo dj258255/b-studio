@@ -102,6 +102,7 @@
 - [79. 서비스 폴더 밖 Gradle 서브모듈 파일이 "재시작으로 확인하지 못한 파일"로 분류됨](#79-서비스-폴더-밖-gradle-서브모듈-파일이-재시작으로-확인하지-못한-파일로-분류됨)
 - [80. 실행 중 바뀐 studio.yaml(includes 등)이 그 실행의 검증과 다음 요청에 반영되지 않음](#80-실행-중-바뀐-studioyamlincludes-등이-그-실행의-검증과-다음-요청에-반영되지-않음)
 - [81. 규칙에 없는 동사로 끝난 요청의 체크포인트 제목이 동사 조각("…경로로 재")으로 끝남](#81-규칙에-없는-동사로-끝난-요청의-체크포인트-제목이-동사-조각경로로-재으로-끝남)
+- [83. browser_check가 <video>의 재생 실패를 못 잡아 숏폼 화면의 404 미디어 주소가 통과로 남음](#83-browser_check가-video의-재생-실패를-못-잡아-숏폼-화면의-404-미디어-주소가-통과로-남음)
 
 ---
 
@@ -2653,3 +2654,24 @@ studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대
 
 ### 배운 점
 규칙 목록을 늘리는 것보다, 규칙이 실패한 결과를 알아보고 다른 경로로 넘기는 편이 버티는 힘이 크다.
+
+## 83. browser_check가 <video>의 재생 실패를 못 잡아 숏폼 화면의 404 미디어 주소가 통과로 남음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`의 체크포인트 `7e8b431`, 작업 복사본은 읽기만 함) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+체크포인트 `7e8b431`("숏폼 피드에서 변환된 영상이 실제로 재생되게")의 게이트는 `Workflow-Passed: run, contract_check, browser_check, test, review`로 통과했다. `browser_check`는 `web /` 하나만 확인했고 `/shorts`는 확인하지 않았다. 실제로 390px 창에서 `/shorts`를 열면 `<video>` 4개가 모두 `readyState` 0으로 재생되지 않았다. 콘솔에 같은 출처(`/api/v1/shorts/{id}/media/master.m3u8`·`thumb.jpg`) 404가 8건 있었다.
+
+### 원인
+`browser-check.ts`의 `failedRequests`는 이미 4xx·5xx 네트워크 응답을 모았다(ADR-050). 하지만 "그 요청이 실제로 어느 `<video>`·`<img>`의 재생·로드 실패로 이어졌는지"는 보지 않았다 — `<video src>`가 가리키는 주소가 404여도 네트워크 신호와 화면 요소를 잇는 신호가 따로 없었다. 더 근본적인 원인은 `/shorts`가 애초에 `pageChecks`에도 `autoPageChecks`에도 걸리지 않아 한 번도 열리지 않았다는 것이다(이번 수정 범위 밖, 아래 "배운 점" 참고).
+
+### 수정
+`packages/agent/src/browser-check.ts`에 `BrowserPageResult.mediaErrors`를 더했다. 문서 전체에 캡처 단계 `error` 리스너를 하나 달아 `<video>`·`<audio>`·`<img>`의 로드·재생 실패를 모은다(리소스 `error` 이벤트는 버블링하지 않아 캡처 단계에서만 잡힌다). `<video>`·`<audio>`는 `MediaError.code` 이름(`MEDIA_ERR_NETWORK` 등)과 주소를, `<img>`는 주소만 담는다. `packages/agent/src/gate.ts`의 `#checkPage`가 기존 `allowConsoleErrors` 기준(기본 꺼짐)에 이 신호를 더해, `mediaErrors`가 하나라도 있으면 상태 코드가 200이어도 실패로 본다. 같은 출처 4xx·5xx·자동 favicon 제외 기준은 그대로 둔다(ADR-140).
+
+### 검증
+- `packages/agent/src/browser-check.test.ts`: 실제 헤드리스 Chromium으로 `<video src>`·`<img src>`가 404인 로컬 HTTP 페이지를 열어 `mediaErrors`가 채워지는 것, 오류가 없으면 빈 배열인 것을 확인했다(3개 추가).
+- `packages/agent/src/gate.test.ts`: `autoPageChecks`로 자동 확인한 페이지가 `mediaErrors`만으로 실패하는 것(위 `/shorts` 사례를 그대로 재현), `allowConsoleErrors`를 켜면 실패시키지 않는 것을 확인했다(3개 추가).
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+이번 수정은 "그 화면을 열어 봤을 때 더 정확히 진단한다"만 고쳤다. `/shorts`가 애초에 어느 확인에도 걸리지 않은 커버리지 문제(바뀐 페이지를 그 실행의 화면 확인에 자동으로 더하는 것)는 그대로 남아 있다 — ADR-140의 "검토했지만 미룬 선택지"에 이유를 남겼다.
