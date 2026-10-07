@@ -65,6 +65,40 @@ describe('detectProject', () => {
     expect(services[1]!.dockerfile).toContain('npm ci && exec npx next dev');
   });
 
+  it('Gradle 서비스는 테스트 명령이 있으면 Mockito를 -javaagent로 붙이는 init 스크립트를 compose configs:로 심는다(도그푸딩 마찰 106, ADR-134): 샌드박스의 colima 공유 폴더 마운트에서는 Mockito의 inline mock maker가 쓰는 JVM self-attach가 항상 실패한다', async () => {
+    const root = await repo({ 'backend/build.gradle': springGradle, 'backend/gradlew': '#!/bin/sh' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toBeDefined();
+    expect(service!.mockitoAgentInit).toBe(true);
+    expect(service!.notes.join(' ')).toContain('self-attach');
+
+    const compose = generateFiles(await detectProject(root)).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    // 서비스 블록이 공유 config를 가리킨다
+    expect(compose).toContain('configs:\n      - source: b_studio_mockito_agent_init\n        target: /gradle-home/init.d/b-studio-mockito-agent.gradle');
+    // 최상위 configs:에 내용이 한 번만 들어간다(여러 서비스가 공유)
+    expect(compose).toContain('configs:\n  b_studio_mockito_agent_init:\n    content: |');
+    expect(compose).toContain('-javaagent:');
+    expect(compose).toContain('mockito-core');
+    // compose가 ${...}를 환경 변수로 치환하지 않게 Groovy 보간의 $는 $$로 적는다. 하나라도 그대로 남으면
+    // "invalid interpolation format"으로 compose 전체가 뜨지 않는다(docker compose config로 확인)
+    expect(compose).toContain('-javaagent:$${jar.absolutePath}');
+    expect(compose).not.toMatch(/(^|[^$])\$\{/m);
+    // 이미 javaagent가 붙어 있으면 다시 붙이지 않는다(중복 방지)
+    expect(compose).toContain("it.startsWith('-javaagent:') && it.contains('mockito-core')");
+  });
+
+  it('프론트엔드(Next.js·Vite)는 JVM이 아니라 Mockito init 스크립트를 넣지 않는다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'pnpm-lock.yaml': '' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.mockitoAgentInit).toBeUndefined();
+    const compose = generateFiles(await detectProject(root)).find((file) => file.path === GENERATED_COMPOSE)!.content;
+    expect(compose).not.toContain('configs:');
+  });
+
   it('spring-boot-docker-compose가 있으면 샌드박스에서 끈다(부가 서비스가 없어도)', async () => {
     const root = await repo({
       'backend/build.gradle': `${springGradle}\ndependencies { developmentOnly 'org.springframework.boot:spring-boot-docker-compose' }\n`,
@@ -884,6 +918,8 @@ describe('detectProject: workflow.tests 생성(버그 리포트 104 — studio.y
     const [service] = (await detectProject(root)).services;
 
     expect(service!.testCommand).toEqual({ command: ['sh', '-c', 'cd /workspace && ./mvnw -f backend test'] });
+    // Maven은 Mockito self-attach 수정(ADR-134)의 범위 밖이다 — surefire argLine을 건드리면 사용자 설정을 지울 위험이 있다
+    expect(service!.mockitoAgentInit).toBeUndefined();
   });
 
   it('package.json에 test 스크립트가 있는 Next.js는 패키지 관리자로 돌리는 테스트 명령을 만들고 watch 모드 위험을 notes에 남긴다', async () => {

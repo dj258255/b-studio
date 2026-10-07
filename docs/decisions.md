@@ -154,6 +154,7 @@
 - [ADR-131 실행 실패로 되돌릴 때 DB도 마지막 덤프 시점으로 되돌리고, 턴 상한은 설정할 수 있게 하며 걸리면 게이트를 한 번 더 본다](#adr-131-실행-실패로-되돌릴-때-db도-마지막-덤프-시점으로-되돌리고-턴-상한은-설정할-수-있게-하며-걸리면-게이트를-한-번-더-본다)
 - [ADR-132 되살린 변경을 쓰지 않은 요청도 검증 게이트를 거치게 하고, 체크포인트 저장 지점에 마지막 방어선을 둔다](#adr-132-되살린-변경을-쓰지-않은-요청도-검증-게이트를-거치게-하고-체크포인트-저장-지점에-마지막-방어선을-둔다)
 - [ADR-133 폴더 열기 감지가 서비스마다 테스트 명령을 찾아 workflow.tests에 기본으로 넣고, 체크포인트 제목이 요구사항 id·조사만 남은 조각이 되지 않게 한다](#adr-133-폴더-열기-감지가-서비스마다-테스트-명령을-찾아-workflowtests에-기본으로-넣고-체크포인트-제목이-요구사항-id조사만-남은-조각이-되지-않게-한다)
+- [ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다](#adr-134-gradle-테스트-서비스에-mockito-javaagent-init-스크립트를-compose-configs로-심어-컨테이너-안에서-inline-mock-maker의-jvm-self-attach를-우회한다)
 - [ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다](#adr-135-게이트가-다루지-않는-서비스에-생긴-테스트화면-변경을-경고로-드러내고-체크포인트-본문에-확인-범위를-남긴다)
 
 ---
@@ -5547,6 +5548,54 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - 엄격(기본으로 넣는) 쪽을 택해, Testcontainers 같은 외부 의존이 있는 모듈에서 기본 `test` 태스크가 통합 테스트까지 포함하도록 구성돼 있으면(pay의 commerce처럼 태그로 분리해 두지 않았으면) 체크포인트마다 게이트가 실패할 수 있다. notes의 narrowing 안내만으로는 사람이 studio.yaml을 열어 직접 좁히기 전까지 이 위험이 남는다.
 - `GRADLE_TEST_CACHE_DIR`는 모든 Gradle 서비스가 같은 경로 문자열(`/tmp/gradle-test-cache`)을 쓴다. 서비스마다 별도 컨테이너라 지금은 부딪히지 않지만, 한 컨테이너 안에서 `docker compose exec`를 동시에 두 번 거는 경로가 생기면(지금은 없다) 달라질 수 있다.
 - `BARE_ID_OR_PRONOUN_FRAGMENT`는 이번에 실측한 요구사항 id·지시대명사 + 조사 꼴만 잡는다. "그것만"처럼 조사가 겹치거나 목록에 없는 다른 짧은 대명사는 여전히 조각째 제목이 될 수 있다.
+## ADR-134 Gradle 테스트 서비스에 Mockito javaagent init 스크립트를 compose configs:로 심어, 컨테이너 안에서 inline mock maker의 JVM self-attach를 우회한다
+
+상태: 채택
+관련: ADR-088, ADR-133
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`)에서 검증 게이트의 test 단계(`./gradlew -p commerce test`)가 "자기 JVM에 에이전트를 붙이지 못한다"는 Mockito 오류로 깨졌다(도그푸딩 마찰 106, 트러블슈팅 69). 호스트(`/Users/beomsu/Desktop/pay`)에서는 같은 명령이 통과한다. 이전 실행의 에이전트가 사용자 프로젝트에 `mockito-extensions/org.mockito.plugins.MockMaker`(`mock-maker-subclass`)를 추가해 우회했는데, 이는 사용자가 선택한 적 없는 테스트 설정을 샌드박스 사정으로 바꾼 것이라 되돌려야 한다.
+- 첫 진단은 틀렸다. 세션 컨테이너의 `docker inspect`가 `CapAdd=[] CapDrop=[]`를 보이고 `jcmd`로 다른 JVM에 외부 attach가 실패하는 것만 보고 "Docker 기본 capability 집합에 SYS_PTRACE가 없다"고 결론 내렸었다. 사람이 직접 재현해 기각했다: 같은 조건에서 형제 JVM attach는 `--cap-add=SYS_PTRACE` 유무와 무관하게 **성공**한다.
+- 진짜 원인은 colima 공유 폴더(sshfs) 마운트다. JVM의 cwd가 공유 폴더(호스트 bind mount)이면 attach가 실패하고(`SYS_PTRACE`를 줘도 실패, 오류 문구는 세션과 동일), cwd를 `/tmp`로 바꾸면 성공한다. 공유 폴더 안에서는 컨테이너 root가 만든 파일도 `stat`로 보면 소유자가 호스트 uid(예: 501)로 보인다. HotSpot의 Attach Listener는 cwd의 `.attach_pid<pid>` 트리거 파일 소유자가 자신의 euid·root와 안 맞으면 무시하고 `/tmp`로 넘어가지도 않는다. 세션의 Gradle 테스트 JVM은 cwd가 `/workspace/commerce`(ADR-088이 프로젝트 루트 전체를 바인드 마운트하기 때문)라 항상 이 조건에 걸린다. Mockito 5+의 기본 mock maker(inline)가 바로 이 self-attach로 바이트코드 에이전트를 설치하므로 실패가 반복된다.
+- javaagent로 Mockito를 붙이면(Mockito 공식 권장 방식) attach 자체를 거치지 않아 이 문제를 피해 간다. 실제 Gradle 프로젝트로 end-to-end 확인했다(아래 검증).
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. 사용자 프로젝트에 mockito-extensions 설정을 추가해 subclass maker로 바꾸기(이전 실행이 실제로 한 것) | 사용자가 고른 적 없는 테스트 설정을 샌드박스 사정으로 바꾼다. 호스트에서 돌리면 샌드박스와 다른 mock maker를 쓰게 돼 재현성도 달라지고, 프로젝트 자체를 건드려 git diff에 사용자가 묻지 않은 변경이 남는다 |
+| B. `cap_add: [SYS_PTRACE]`를 compose에 더한다(처음에 낸 수정) | 재현으로 효과 없음을 확인했다 — 원인이 capability가 아니다 |
+| C. 컨테이너를 공유 폴더 대신 named volume으로만 마운트한다 | ADR-088(멀티 모듈 빌드·워크스페이스 밖 참조가 프로젝트 루트 전체 마운트를 요구)과 정면으로 부딪힌다. pay의 commerce처럼 `$rootDir/../docs`를 참조하는 빌드가 다시 깨진다 |
+| D. Gradle test JVM에 `-Djdk.attach.allowAttachSelf=true`만 추가한다 | 이 속성은 "같은 프로세스가 자기 자신에 attach"할 때만 관여한다. 실제로 막힌 것은 cwd 트리거 파일의 소유자 검사라 이 속성과 무관하다 |
+| E. Gradle init 스크립트로 테스트 JVM에 `-javaagent:mockito-core.jar`를 붙인다(채택) | attach 메커니즘 자체를 건너뛰어 cwd 소유자 문제와 무관해진다. 사용자 프로젝트 파일을 건드리지 않고, Gradle이 `GRADLE_USER_HOME/init.d`를 자동으로 읽으므로 b-studio가 compose `configs:`로만 심으면 된다 |
+
+Maven은 이번 범위 밖으로 뺐다: surefire는 JVM 인자를 `argLine` 하나로 받는데, 사용자가 이미 `argLine`을 쓰고 있으면 통째로 덮어써 사용자 설정을 지울 위험이 있다. Gradle의 `Test.jvmArgs`는 덧붙이는 API라 이 위험이 없다.
+
+### 결정
+`apps/studio/lib/server/project-detect.ts`의 `DetectedService`에 `mockitoAgentInit?: boolean`을 더했다. `detectSpring`이 **Gradle**이고 테스트 명령(`testCommand`)을 찾으면 이 플래그를 켠다(Maven은 켜지 않는다). `composeYaml`은 플래그가 켜진 서비스 블록에
+```yaml
+configs:
+  - source: b_studio_mockito_agent_init
+    target: /gradle-home/init.d/b-studio-mockito-agent.gradle
+```
+를 쓰고, compose 최상위에 `configs: b_studio_mockito_agent_init: content: |`로 스크립트 내용을 한 번만 둔다(여러 Gradle 서비스가 공유). 스크립트(`MOCKITO_AGENT_INIT_SCRIPT`)는 `allprojects { tasks.withType(Test).configureEach { ... } }`로 각 `Test` 태스크의 `doFirst`에서 테스트 classpath에 `mockito-core-*.jar`가 있으면 `-javaagent:`로 붙이고, 로그 한 줄(`b-studio: added -javaagent:...`)을 남긴다. 이미 다른 방법으로 javaagent가 붙어 있으면(`allJvmArgs`에서 `mockito-core`를 포함한 `-javaagent:` 확인) 다시 붙이지 않는다. `GRADLE_USER_HOME`은 기존 상수(`/gradle-home`, Dockerfile의 `ENV`·볼륨과 같은 값)를 그대로 재사용했다.
+
+compose의 일반(non-swarm) `configs:`가 swarm 전용이 아니라 로컬 `docker compose run`에서도 파일로 그대로 마운트되는지, GRADLE_USER_HOME 경로가 b-studio의 다른 상수와 맞는지를 코드와 실측 양쪽에서 확인했다(아래 검증).
+
+같은 원인(사용자 프로젝트의 테스트 설정을 바꿔 샌드박스 환경 문제를 우회하는 것)이 반복되지 않게, `packages/agent/src/prompts.ts`의 `buildSystemPrompt` Rules 절에 "빌드·테스트가 샌드박스 컨테이너 자체(권한·베이스 이미지·네트워크 정책) 때문에만 실패하면 프로젝트의 테스트 설정·소스를 바꿔 우회하지 말고 실패와 의심되는 원인을 보고하라"는 규칙을 더했다.
+
+### 검증 결과
+- **가설 기각 재현**: 세션과 같은 이미지(`eclipse-temurin:21-jdk`)의 컨테이너에서 형제 JVM에 `jcmd <pid> VM.version`을 `--cap-add=SYS_PTRACE` 유무 양쪽으로 시도해 결과가 같음(둘 다 성공)을 확인해 capability 가설을 기각했다.
+- **진짜 원인 재현**: 같은 이미지에서 cwd를 colima 공유 폴더(호스트 `~/.cache/b-studio/...` bind mount)로 두면 Mockito final-클래스 mock이 `Could not initialize inline Byte Buddy mock maker`로 실패(세션과 같은 오류 문구)하고, `-javaagent:mockito-core.jar`를 붙이면 성공(`inline mock OK: 7`)함을 확인했다. cwd를 `/tmp`로 바꾸면 javaagent 없이도 성공해, 공유 폴더 cwd가 조건임을 분리해 확인했다.
+- **configs: 전달 메커니즘**: 로컬 colima docker(`docker compose` v2.31.0)로 inline `configs: content:`가 swarm 모드 없이도 `docker compose run`에서 서비스에 파일로 마운트됨(소유자 `root`, 내용 일치)을 확인했다.
+- **end-to-end**: 호스트에 이미 받아 둔 Gradle 8.12 배포본과 mockito-core 5.14.2·junit-jupiter 5.11.4 캐시를 재사용해(`--offline`, 새 다운로드 없음) 같은 공유 폴더 cwd에서 실제 `./gradlew test`를 돌렸다. init 스크립트 없이는 `InlineMockTest > inlineMockOfFinalClassWorks() FAILED`(`MockitoInitializationException`)로 `BUILD FAILED`, `--init-script`로 `MOCKITO_AGENT_INIT_SCRIPT`와 같은 내용을 넣으면 `b-studio: added -javaagent:mockito-core-5.14.2.jar to :test` 로그와 함께 `BUILD SUCCESSFUL`.
+- `apps/studio/lib/server/project-detect.test.ts`에 테스트를 더했다: 테스트 명령이 있는 Gradle 서비스가 `mockitoAgentInit: true`와 compose의 서비스별 `configs:` 참조 + 최상위 `configs:` 내용(javaagent·중복 방지 조건 포함)을 갖는 것, Maven 서비스는 `mockitoAgentInit`이 없는 것, Next.js 같은 비-JVM 서비스는 compose에 `configs:` 자체가 없는 것. `packages/agent/src/prompts.test.ts`에 새 규칙 문구를 확인하는 테스트도 더했다.
+- `project-detect.test.ts` 57개, `prompts.test.ts`를 포함한 `packages/agent` 39개 전부 통과, `pnpm -r typecheck`(6/6), `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고 9건만 유지)를 돌렸다.
+
+### 감수한 트레이드오프
+- init 스크립트는 `Test` 타입 태스크 전부에 적용된다 — 한 서비스 안에 Mockito를 쓰지 않는 다른 테스트 태스크가 있어도 classpath에 `mockito-core`가 없으면 그냥 건너뛰므로(조건부) 해가 되지는 않지만, 매 테스트 태스크 실행마다 classpath를 한 번씩 더 스캔하는 비용이 붙는다.
+- Maven은 범위 밖이라 Maven 전용 테스트가 있는 서비스는 이 문제가 여전히 남는다. 사용자가 `src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker`를 직접 추가하거나 `argLine`에 `-javaagent:`를 직접 넣어야 한다.
+- 쿠버네티스 경로(`packages/sandbox/src/kubernetes`)는 compose의 `configs:`를 아직 읽지 않는다. 지금 세션은 로컬 Docker 샌드박스(`compose-provider.ts`)만 쓰므로 범위 밖에 뒀다 — 쿠버네티스 배포가 늘면 ConfigMap으로 옮겨야 한다.
+- 공유 폴더 cwd에서 JVM attach가 실패하는 조건은 Mockito의 self-attach 하나만 고친다. 같은 메커니즘을 쓰는 다른 도구(디버거의 동적 attach, 런타임 프로파일러 등)는 여전히 영향을 받는다.
 
 ## ADR-135 게이트가 다루지 않는 서비스에 생긴 테스트·화면 변경을 경고로 드러내고, 체크포인트 본문에 확인 범위를 남긴다
 

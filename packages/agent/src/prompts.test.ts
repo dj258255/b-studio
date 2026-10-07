@@ -32,6 +32,12 @@ describe('buildSystemPrompt 테스트 작성 기준', () => {
     // 도구 이름은 MCP 경로에서 바뀔 수 있어 이름 매핑을 거친다
     expect(buildSystemPrompt(project, { toolName: (name) => `mcp__b__${name}` })).toContain('call mcp__b__ask_user when it is in your tools');
   });
+
+  it('샌드박스 환경 문제로 빌드·테스트가 깨지면 사용자 프로젝트의 테스트 설정을 바꾸지 말고 보고하라고 이른다(도그푸딩 마찰 106)', () => {
+    const prompt = buildSystemPrompt(project);
+    expect(prompt).toContain('do not change the project\'s test configuration or source to work around it');
+    expect(prompt).toContain('Report the failure and what you suspect instead');
+  });
 });
 
 describe('buildSystemPrompt 자가 확인 범위', () => {
