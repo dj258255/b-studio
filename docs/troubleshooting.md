@@ -92,6 +92,7 @@
 - [69. 샌드박스 컨테이너 안에서 Mockito inline mock maker가 쓰는 JVM self-attach가 깨짐](#69-샌드박스-컨테이너-안에서-mockito-inline-mock-maker가-쓰는-jvm-self-attach가-깨짐)
 - [70. 게이트가 돌리지 않은 서비스의 테스트·화면 변경도 트레일러에 통과로 찍힘](#70-게이트가-돌리지-않은-서비스의-테스트화면-변경도-트레일러에-통과로-찍힘)
 - [71. 오류 상태 화면을 만든 기능 요청의 체크포인트가 fix로 분류됨](#71-오류-상태-화면을-만든-기능-요청의-체크포인트가-fix로-분류됨)
+- [73. 에이전트가 서비스 컨테이너 안에서 gradle --stop을 돌려 bootRun 중인 서비스가 내려감](#73-에이전트가-서비스-컨테이너-안에서-gradle---stop을-돌려-bootrun-중인-서비스가-내려감)
 
 ---
 
@@ -2382,3 +2383,22 @@ compose의 일반(non-swarm) `configs:`가 파일로 그대로 마운트되는�
 
 ### 배운 점
 요청 글은 의도(첫 문장)와 명세(본문)가 섞여 있다. 본문은 만들 동작을 설명하느라 "오류"·"실패" 같은 낱말을 자연스럽게 쓴다. 낱말로 의도를 분류할 때는 의도가 담긴 자리부터 봐야 한다.
+
+## 73. 에이전트가 서비스 컨테이너 안에서 gradle --stop을 돌려 bootRun 중인 서비스가 내려감
+
+**구분:** 도그푸딩 중 실측(`/Users/beomsu/Desktop/pay` 세션, 체크포인트 1e6e026을 만든 실행) → 세션 기록에서 명령 확인 → 단위 테스트로 재현 → 수정
+
+### 현상
+에이전트가 테스트를 다시 돌리기 전에 `run_in_service`로 `sh -c "cd /workspace && ./gradlew --stop 2>&1 | tail -5"`를 실행했다. commerce 컨테이너의 메인 프로세스(`./gradlew -p commerce bootRun`)가 exit 1로 내려갔고, 에이전트가 `restart_service`로 되살렸다. 에이전트 요약에도 "조사 과정의 부작용"이라고 적혀 있다.
+
+### 원인
+서비스 컨테이너는 Gradle로 bootRun을 돌린다. `--no-daemon`이어도 Gradle은 그 빌드를 위한 데몬을 띄우고, `gradle --stop`은 그 데몬까지 멈춘다. 명령 정책(`DEFAULT_DENIED_COMMANDS`)에는 이 명령이 없었다. 또 정책 규칙은 토큰 접두사로 맞추므로, 규칙을 더해도 `./gradlew -p commerce --stop`처럼 사이에 옵션이 낀 꼴은 못 잡는다.
+
+### 수정
+`packages/agent/src/policy.ts`에 `GRADLE_STOP` 검사를 더했다. `run_in_service` 명령에서 `gradle`·`gradlew` 명령의 인자에 `--stop`이 있으면 막는다. 거절 사유에는 대신 `restart_service`를 쓰라고 적는다. 명령 구분자(`;`·`&`·`|`)를 넘어 보지 않아, 다른 명령의 인자에 있는 `--stop`은 막지 않는다.
+
+### 검증
+`packages/agent/src/policy.test.ts`에 테스트 1개를 더했다. 세션에서 실제로 돈 명령, 옵션이 낀 꼴, `gradle --stop`은 막히고, 게이트의 테스트 명령과 `./gradlew test; echo --stop`은 허용되는 것을 확인했다.
+
+### 배운 점
+에이전트는 "깨끗한 상태에서 다시 돌리기"를 위해 캐시·데몬을 정리하려 든다. 사람의 로컬 환경에서는 무해한 정리 명령도, 서비스가 같은 프로세스 트리에서 도는 샌드박스에서는 서비스를 내린다.
