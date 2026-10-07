@@ -3,9 +3,11 @@ import {
   corsEnvironmentFrom,
   databaseCredentialsFor,
   databaseSpecFor,
+  detectBackendUrlEnvFromAssignments,
   detectBackendUrlEnvFromCode,
   detectBackendUrlEnvFromEnvironment,
   detectEnvReferences,
+  detectServerBackendUrlEnvFromCode,
   engineOfImage,
   environmentFromComposeText,
   FRONTEND_BACKEND_ENV_NAME,
@@ -556,6 +558,59 @@ export function apiBaseUrl(): string {
   it('process.env 접근이 없거나 이름이 맞지 않으면 undefined다', () => {
     expect(detectBackendUrlEnvFromCode('export const siteName = process.env.NEXT_PUBLIC_SITE_NAME;')).toBeUndefined();
     expect(detectBackendUrlEnvFromCode('const x = 1;')).toBeUndefined();
+  });
+});
+
+describe('detectServerBackendUrlEnvFromCode(fix/detect-frontend-backend-env)', () => {
+  it('공개 접두사 없이도 이름 조각(SPRING·API 등)과 같은 줄 http(s) 기본값이 있으면 서버 쪽 변수로 본다(pay/apps/web lib/api.ts 재현)', () => {
+    expect(detectServerBackendUrlEnvFromCode("export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:8080';")).toEqual({
+      envKey: 'SPRING_API',
+      suffix: '',
+      port: 8080,
+    });
+  });
+
+  it('포트 뒤 경로가 있으면 접미사로, 리터럴이 없으면(기본값이 없는 경우) undefined로 본다', () => {
+    expect(detectServerBackendUrlEnvFromCode("const BACKEND_URL = process.env.BACKEND_URL ?? 'http://localhost:9090/api';")).toEqual({
+      envKey: 'BACKEND_URL',
+      suffix: '/api',
+      port: 9090,
+    });
+    expect(detectServerBackendUrlEnvFromCode('const base = process.env.SPRING_API;')).toBeUndefined();
+  });
+
+  it('공개 접두사(NEXT_PUBLIC_ 등) 이름은 detectBackendUrlEnvFromCode의 몫이라 여기서는 보지 않는다', () => {
+    expect(detectServerBackendUrlEnvFromCode("const x = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8080';")).toBeUndefined();
+  });
+
+  it('이름에 조각이 없거나(관계없는 변수) DATABASE_URL처럼 스킴이 http(s)가 아니면 오탐하지 않는다', () => {
+    expect(detectServerBackendUrlEnvFromCode("const dir = process.env.FIXTURES_DIR ?? './fixtures';")).toBeUndefined();
+    expect(detectServerBackendUrlEnvFromCode('const db = process.env.DATABASE_URL ?? "postgres://localhost:5432/app";')).toBeUndefined();
+  });
+});
+
+describe('detectBackendUrlEnvFromAssignments(fix/detect-frontend-backend-env)', () => {
+  it('README 실행 예시 한 줄에 여러 KEY=value가 섞여도 백엔드 주소로 보이는 것만 찾는다(pay/apps/web README.md 재현)', () => {
+    expect(detectBackendUrlEnvFromAssignments('API_MODE=real SPRING_API=http://localhost:8080 npm run dev')).toEqual({
+      envKey: 'SPRING_API',
+      suffix: '',
+      port: 8080,
+      public: false,
+    });
+  });
+
+  it('.env.example 꼴(줄마다 KEY=value)에서도 찾고, 공개 접두사면 public: true다', () => {
+    expect(detectBackendUrlEnvFromAssignments('PORT=3000\nNEXT_PUBLIC_API_BASE_URL=http://localhost:8080/api\n')).toEqual({
+      envKey: 'NEXT_PUBLIC_API_BASE_URL',
+      suffix: '/api',
+      port: 8080,
+      public: true,
+    });
+  });
+
+  it('http(s) 스킴이 아니거나 이름에 조각이 없으면 undefined다', () => {
+    expect(detectBackendUrlEnvFromAssignments('DATABASE_URL=postgres://localhost:5432/app')).toBeUndefined();
+    expect(detectBackendUrlEnvFromAssignments('SITE_NAME=shop')).toBeUndefined();
   });
 });
 
