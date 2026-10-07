@@ -111,6 +111,7 @@ import {
   RemoteConflictError,
   reviewIndependence,
   scopedExecutionPolicy,
+  maxTurnsFor,
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
@@ -961,6 +962,7 @@ export function sendMessage(
     steering,
     interactive = false,
     verify,
+    maxTurns,
   }: {
     allowBreaking: boolean;
     by?: string;
@@ -985,6 +987,8 @@ export function sendMessage(
     interactive?: boolean;
     /** 검증 범위. 'light'(가볍게 확인)면 재시작·준비·계약만 돌린다. 생략하면 full */
     verify?: VerifyMode;
+    /** 턴 상한 요청 옵션(ADR-131). studio.yaml(workflow.maxTurns)보다 우선한다 */
+    maxTurns?: number;
   },
 ): { runId: string } {
   const session = requireSession(id);
@@ -1020,6 +1024,8 @@ export function sendMessage(
     ...(verify === 'light' ? { verify: 'light' as const } : {}),
     // "조사" 모드는 질문(ask)에만 뜻이 있다. 만들기 요청에 섞여 와도 각 러너가 다시 한번 ask와 함께 걸러 무시한다
     ...(intent === 'ask' && research ? { research: true as const } : {}),
+    // 턴 상한 요청 옵션(ADR-131). 생략하면 studio.yaml(workflow.maxTurns)이나 실행기 기본값을 쓴다
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
   };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
@@ -1307,7 +1313,10 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     for (const listener of session.listeners) replay(session, listener);
     void flushPersist(session);
     // 이어서 작업하기는 만들자마자 켠다. bootPromise를 남겨 지연 기동 경로(ensureBooted)와 같은 규칙을 쓴다
-    session.bootPromise = boot(session, { discarded, discardBackup, databaseFrom: localEdits ? previous.sha : undefined });
+    // DB 복원 기준점은 항상 previous.sha(이 함수 맨 위, localEdits·discardWorkingCopy가 새 체크포인트를 남기기 전에
+    // 잡아 둔 값)를 쓴다. localEdits·discardWorkingCopy가 만드는 체크포인트는 saveDatabases를 부르지 않아 DB 덤프가
+    // 없으므로, boot()가 그 체크포인트의 sha로 복원하면 덤프를 찾지 못해 DB가 그대로 남는다(ADR-018·ADR-131 실측)
+    session.bootPromise = boot(session, { discarded, discardBackup, databaseFrom: previous.sha });
     return session.snapshot;
   } finally {
     resuming.delete(id);
@@ -1885,7 +1894,15 @@ type RunPlan = (
   | { kind: 'commandcode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'opencode'; allowBreaking: boolean; intent: Intent }
   | { kind: 'gemini'; allowBreaking: boolean; intent: Intent }
-) & { writableScope?: readonly string[]; board?: BoardAccess; interactive?: boolean; verify?: VerifyMode; research?: boolean };
+) & {
+  writableScope?: readonly string[];
+  board?: BoardAccess;
+  interactive?: boolean;
+  verify?: VerifyMode;
+  research?: boolean;
+  /** 턴 상한 요청 옵션(ADR-131). studio.yaml(workflow.maxTurns)보다 우선한다. 생략하면 studio.yaml 값이나 실행기 기본값(60)을 쓴다 */
+  maxTurns?: number;
+};
 
 /**
  * 세션 백엔드 → 실행 방식. 데모는 준비된 대본이라 여기 없다(호출자가 시나리오를 고른다).
@@ -2351,6 +2368,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     research: plan.research === true,
     // 가볍게 확인(light)이면 게이트가 재시작·준비·계약만 돈다. 생략(full)이면 지금과 같다
     verify: plan.verify,
+    // 턴 상한(ADR-131). 요청 옵션이 studio.yaml(workflow.maxTurns)보다 우선하고, 둘 다 없으면 각 실행기 기본값(60)을 쓴다
+    ...(maxTurnsFor(session.project, plan.maxTurns) !== undefined ? { maxTurns: maxTurnsFor(session.project, plan.maxTurns) } : {}),
     // 자가 확인 범위(B_STUDIO_SELF_CHECK). 기본 lean(게이트와 겹치는 확인을 줄이게 안내, ADR-064). full이면 이전 동작
     selfCheck: selfCheckMode(),
     // 쓰기 범위는 studio.yaml 정책에 더한다. 정책을 통째로 바꾸면 금지 명령·보호 경로가 빠진다
@@ -2634,20 +2653,33 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
   emit(session, { type: 'checkpoint', runId, checkpoint });
 }
 
-/** 되돌린 파일을 돌려준다. alsoRestart는 파일과 상관없이 다시 띄울 서비스다 */
+/**
+ * 되돌린 파일을 돌려준다. alsoRestart는 파일과 상관없이 다시 띄울 서비스다.
+ *
+ * DB 복원 기준점(ADR-018·ADR-131 실측): discardWorkingCopy가 문서를 지키려고 새 체크포인트(docsCheckpoint)를
+ * 남기면 session.snapshot.checkpoints[0]이 그 문서 체크포인트로 바뀐다. 그 체크포인트는 saveDatabases를 부르지
+ * 않아 DB 덤프가 없으므로, discardWorkingCopy **뒤**의 checkpoints[0]으로 복원하면 덤프를 찾지 못해(action:
+ * 'missing') DB가 조용히 그대로 남는다 — 되돌린 파일(마이그레이션 SQL)과 실제 DB 스키마가 어긋나 다음 기동이
+ * Flyway "적용된 마이그레이션 파일이 없다" 오류로 실패한 사고가 있었다(세션 5b640fd3, 체크포인트 57cced6).
+ * 그래서 DB 복원 기준점은 discardWorkingCopy를 부르기 **전**의 checkpoints[0](실제로 덤프가 있는 체크포인트)으로 고정한다.
+ */
 async function revertRun(
   session: Session,
   runId: string,
   { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
 ): Promise<string[]> {
+  const dbRestorePoint = session.snapshot.checkpoints[0]!.sha;
   // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
   const { docsCheckpoint, files, patch, backup } = await discardWorkingCopy(session.checkpoints, (text) => session.sandbox.findSecrets(text));
   if (docsCheckpoint) {
     session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
     emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
   }
-  // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다
-  const database = await session.databases.restore(session.snapshot.checkpoints[0]!.sha, session.stop.signal);
+  // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다(위 dbRestorePoint 기준)
+  const database = await session.databases.restore(dbRestorePoint, session.stop.signal);
+  // 문서 체크포인트가 새로 생겼으면, 복원한(바른) DB 상태를 그 체크포인트의 덤프로도 남겨 다음 되돌리기가
+  // 같은 "덤프 없음" 문제를 반복하지 않게 한다(연속 실패 시나리오)
+  if (docsCheckpoint) await saveDatabases(session, docsCheckpoint.sha);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
   if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return files;
 
@@ -2863,14 +2895,26 @@ function noteForModel(session: Session, text: string): void {
   session.settledConversation = session.conversation.length;
 }
 
-/** 이 세션의 이전 체크포인트로 되돌린다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다 */
+/**
+ * 이 세션의 이전 체크포인트로 되돌린다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다.
+ *
+ * 지금(head) 체크포인트를 가리켜도 거부하지 않는다(ADR-131 실측: 세션 5b640fd3). 실행 실패·중단으로 되돌릴 때
+ * 파일은 되돌아갔지만(revertRun) 그 전에 이미 적용된 마이그레이션이 DB에 남는 경우가 있었는데, 그때 유일한
+ * 출구가 "다른 체크포인트로 되돌리기"뿐이었고 그 체크포인트가 지금(head) 체크포인트이면 "이미 최신
+ * 체크포인트입니다"로 막혀 DB를 되돌릴 길이 없었다(사용자가 체크포인트 57cced6으로 되돌리려다 겪은 409).
+ * 기존 되돌리기 버튼을 그대로 쓰는 쪽을 택했다 — 새 API·새 화면 대신, CheckpointStore.restore(sha)가 파일이
+ * 이미 그 상태면 아무것도 하지 않는 안전한 연산이고 DatabaseBranches.restore도 어긋나지 않았으면 'unchanged'로
+ * 조용히 끝나므로, "지금 체크포인트로 되돌리기"를 "DB만 다시 맞추기"의 안전한 특수 경우로 다룰 수 있다.
+ * DB를 선언하지 않은 프로젝트는 지금 체크포인트를 가리키면 정말 할 일이 없으므로 그때만 거부한다.
+ */
 export function restoreCheckpoint(id: string, sha: string): void {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되돌릴 수 있습니다');
   if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
   const target = session.snapshot.checkpoints.find((checkpoint) => checkpoint.sha === sha);
   if (!target) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
-  if (target.sha === session.snapshot.checkpoints[0]?.sha) throw new StudioError(409, '이미 최신 체크포인트입니다');
+  const isHead = target.sha === session.snapshot.checkpoints[0]?.sha;
+  if (isHead && !session.databases.enabled) throw new StudioError(409, '이미 최신 체크포인트이고 되돌릴 데이터베이스도 없습니다');
 
   session.snapshot.running = true;
   emit(session, { type: 'restore_started', checkpoint: target });
@@ -2879,9 +2923,11 @@ export function restoreCheckpoint(id: string, sha: string): void {
     let event: StudioEvent;
     try {
       await session.relaying;
-      // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099)
+      // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099).
+      // 지금 체크포인트를 가리켰으면(isHead) 보통 버릴 파일이 없어 이 단계는 사실상 아무것도 하지 않는다
       const { files, backup } = await session.checkpoints.restore(sha);
-      // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다
+      // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다.
+      // 어긋나지 않았으면(action: 'unchanged') 아무 것도 하지 않고 조용히 끝난다
       const database = await session.databases.restore(sha, session.stop.signal);
       const report = await restartServicesFor(
         session.sandbox,
@@ -2891,12 +2937,16 @@ export function restoreCheckpoint(id: string, sha: string): void {
         { alsoRestart: database.dependents },
       );
       session.snapshot.checkpoints = await session.checkpoints.list();
-      // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다
+      const databaseResynced = database.states.some((state) => state.action === 'restored');
+      // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다. 지금 체크포인트를 가리켰으면
+      // "되돌렸다"는 말 대신 무엇을 다시 맞췄는지만 말한다(뒤의 체크포인트가 사라진 게 아니므로)
       noteForModel(
         session,
-        `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 체크포인트는 모두 사라졌습니다.${
-          backup ? ` 아직 체크포인트로 남기지 않았던 변경 ${backup.files.length}개는 백업했습니다(되살리기 id: ${backup.id}).` : ''
-        }`,
+        isHead
+          ? `[b-studio] 체크포인트 ${target.shortSha}("${target.message}") 기준으로 데이터베이스를 다시 맞췄습니다.${databaseResynced ? '' : ' (이미 맞는 상태였습니다)'}`
+          : `[b-studio] 작업 복사본을 체크포인트 ${target.shortSha}("${target.message}")로 되돌렸습니다. 그 뒤의 체크포인트는 모두 사라졌습니다.${
+              backup ? ` 아직 체크포인트로 남기지 않았던 변경 ${backup.files.length}개는 백업했습니다(되살리기 id: ${backup.id}).` : ''
+            }`,
       );
       if (session.snapshot.mode === 'demo') {
         // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 남은 요청 체크포인트 수에 맞춰 다음 요청을 다시 정한다.

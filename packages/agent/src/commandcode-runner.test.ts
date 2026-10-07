@@ -250,8 +250,39 @@ describe('runCommandCodeAgent', () => {
     const login = await runCommandCodeAgent({ request: '추가해줘', project, sandbox: fakeSandbox(project, []), process: fakeCommandCode([{ exitCode: 3 }]).process, fetcher: async () => contract });
     expect(login.summary).toContain('로그인돼 있지 않습니다');
 
+    // 바뀐 파일이 없으면 게이트가 검증할 것도 없어 바로 통과한다(ADR-131) — 턴 상한에 걸렸어도 되돌릴 변경이 없으므로 done으로 끝난다
     const capped = await runCommandCodeAgent({ request: '추가해줘', project, sandbox: fakeSandbox(project, []), process: fakeCommandCode([{ exitCode: 8 }]).process, fetcher: async () => contract });
-    expect(capped.summary).toBe('최대 턴 수(60)를 넘었습니다');
+    expect(capped.status).toBe('done');
+    expect(capped.summary).toContain('최대 턴 수(60)를 넘었습니다');
+    expect(capped.summary).toContain('검증 게이트를 통과해');
+  });
+
+  it('턴 상한(종료 코드 8)에 걸려도 지금까지의 변경이 게이트를 통과하면 되돌리지 않고 체크포인트로 남긴다(ADR-131)', async () => {
+    const { process } = fakeCommandCode([{ exitCode: 8 }], {
+      onStart: async ({ cwd, env }) => {
+        await callStudioTool(cwd, env, 'edit_file', { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' });
+      },
+    });
+    const result = await runCommandCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), process, fetcher: async () => contract });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('검증 게이트를 통과해');
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+    expect(result.failureReason).toBeUndefined();
+  });
+
+  it('턴 상한(종료 코드 8)에 걸렸는데 지금까지의 변경이 게이트를 통과하지 못하면 실패로 끝내 되돌리기 경로를 타게 한다(ADR-131)', async () => {
+    const { process } = fakeCommandCode([{ exitCode: 8 }], {
+      onStart: async ({ cwd, env }) => {
+        await callStudioTool(cwd, env, 'edit_file', { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String broken;' });
+      },
+    });
+    // restart가 실패로 와서(false) 게이트가 통과하지 못한다
+    const result = await runCommandCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [false]), process, fetcher: async () => contract });
+
+    expect(result.status).toBe('failed');
+    expect(result.failureReason).toBe('max_turns');
+    expect(result.summary).toBe('최대 턴 수(60)를 넘었습니다');
   });
 
   it('턴별 usage를 실행 합계로 더하고, modelCalls·maxContextTokens를 이벤트에서 남긴다', async () => {

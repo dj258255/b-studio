@@ -7,7 +7,7 @@ import type { Readable } from 'node:stream';
 import type { Effort } from './anthropic-client';
 import { serialQueue } from './claude-code-runner';
 import type { EscalationPolicy } from './escalation';
-import { VerificationGate } from './gate';
+import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
@@ -267,7 +267,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   let currentTurn = 0;
   let turnStartedAt = 0;
 
-  const finish = (status: AgentResult['status'], summary: string): void => {
+  const finish = (status: AgentResult['status'], summary: string, failureReason?: AgentResult['failureReason']): void => {
     result = {
       status,
       summary,
@@ -282,6 +282,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
       usage,
       metrics: { ...metrics },
       sessionId,
+      ...(failureReason ? { failureReason } : {}),
     };
     onEvent(status === 'done' ? { type: 'done', result } : { type: 'failed', result });
   };
@@ -437,6 +438,16 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
       if (resultLine?.subtype === 'error') failure = classifyFailure({ exitCode: code, message, maxTurns });
       else if (code !== 0) failure = classifyFailure({ exitCode: code, message, maxTurns });
       if (failure) {
+        // Command Code 자신이 턴 상한(종료 코드 8)으로 끝냈어도, 바로 실패로 끝내지 않고 지금까지의 변경이
+        // 게이트를 통과하는지 한 번 더 본다(ADR-131). 다른 실패 사유는 그대로 바로 끝낸다
+        if (code === 8) {
+          const gateStarted = performance.now();
+          const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+          metrics.gateMs += Math.round(performance.now() - gateStarted);
+          if (recheck.pass) finish('done', recheck.summary);
+          else finish('failed', recheck.summary, 'max_turns');
+          break;
+        }
         finish('failed', failure);
         break;
       }
@@ -468,7 +479,14 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
       lastText = '';
       pending = outcome.feedback;
     }
-    if (!result) finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다`);
+    if (!result) {
+      // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
+      const gateStarted = performance.now();
+      const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
+      metrics.gateMs += Math.round(performance.now() - gateStarted);
+      if (recheck.pass) finish('done', recheck.summary);
+      else finish('failed', recheck.summary, 'max_turns');
+    }
   } finally {
     // 원인 2 대응 진단: 중단(시간 초과 포함)으로 끝나면 마지막으로 무엇을 하고 있었는지 한 줄 남긴다.
     // result가 이미 났으면(정상 종료) 남기지 않는다 — 중단이 아니라 끝난 뒤의 signal 상태일 수 있다

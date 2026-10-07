@@ -65,6 +65,14 @@ export function scopedExecutionPolicy(project: LoadedProject, writablePaths: rea
 }
 
 /**
+ * 턴 상한(ADR-131). 요청 옵션(override)이 studio.yaml(workflow.maxTurns)보다 우선한다.
+ * 둘 다 없으면 undefined를 돌려줘 각 실행기가 자신의 기본값(60)을 그대로 쓰게 한다
+ */
+export function maxTurnsFor(project: LoadedProject, override?: number): number | undefined {
+  return override ?? project.spec.workflow?.maxTurns;
+}
+
+/**
  * 이 프로젝트에서 순서대로 확인할 단계.
  * required를 생략해도 tests·pageChecks를 선언했다면 해당 단계를 필수로 넣는다. 선언한 검사를 건너뛸 방법은 두지 않는다
  */

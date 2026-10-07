@@ -853,3 +853,48 @@ describe('runAgent 프로젝트 지침 주입(ADR-077)', () => {
     expect(result.metrics!.guideChars).toBeUndefined();
   });
 });
+
+describe('runAgent 턴 상한에 걸리면 되돌리기 전에 게이트를 한 번 더 본다(ADR-131)', () => {
+  it('마지막 행동이 도구 호출이라 게이트를 아직 보지 못한 채 턴 상한에 걸려도, 지금까지의 변경이 통과하면 done으로 남긴다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+    ]);
+    const sandbox = fakeSandbox(project, [true]);
+    const events: AgentEvent[] = [];
+
+    const result = await runAgent({ request: '고쳐줘', project, sandbox, client, fetcher: async () => contract, maxTurns: 1, onEvent: collect(events) });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('최대 턴 수(1)를 넘었습니다');
+    expect(result.summary).toContain('검증 게이트를 통과해');
+    expect(result.failureReason).toBeUndefined();
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+    expect(sandbox.restarts).toEqual(['api']);
+  });
+
+  it('턴 상한에 걸렸는데 지금까지의 변경이 게이트를 통과하지 못하면 실패로 끝내 되돌리기 경로를 타게 한다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String broken;' } }] },
+    ]);
+    // 재시작이 실패로 와서(false) 게이트가 통과하지 못한다
+    const sandbox = fakeSandbox(project, [false]);
+
+    const result = await runAgent({ request: '고쳐줘', project, sandbox, client, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result.status).toBe('failed');
+    expect(result.failureReason).toBe('max_turns');
+    expect(result.summary).toBe('최대 턴 수(1)를 넘었습니다');
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+  });
+
+  it('바뀐 파일이 없으면 게이트가 검증할 것도 없어 턴 상한에 걸려도 바로 통과한다', async () => {
+    const client = new ScriptedModelClient([{ toolCalls: [{ name: 'read_file', input: { path: 'api/src/Order.java' } }] }]);
+    const sandbox = fakeSandbox(project, []);
+
+    const result = await runAgent({ request: '읽어줘', project, sandbox, client, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result.status).toBe('done');
+    expect(result.changedFiles).toEqual([]);
+    expect(sandbox.restarts).toEqual([]);
+  });
+});

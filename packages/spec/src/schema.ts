@@ -459,6 +459,11 @@ export const WorkflowSchema = z
     autoPageChecks: AutoPageChecksSchema.optional(),
     /** review 단계에서 한 번의 요청이 바꿀 수 있는 파일 수 상한. 넘으면 나눠서 요청하게 한다 */
     maxChangedFiles: z.number().int().min(1).optional(),
+    /**
+     * 한 요청 안에서 모델이 쓸 수 있는 턴(모델 호출) 상한(ADR-131). 생략하면 각 실행기의 기본값(60)을 그대로 쓴다.
+     * 복잡한 요청이 많은 프로젝트는 올리고, 빠른 피드백을 바라면 낮출 수 있다. 요청 옵션(maxTurns)이 있으면 이 값보다 우선한다
+     */
+    maxTurns: z.number().int().min(1).max(300).optional(),
     /** 이 목록 밖의 도구는 모델이 요청해도 실행하지 않는다 */
     allowedTools: z.array(z.string().min(1)).min(1).optional(),
     /** 명령의 첫 토큰부터 비교하는 추가 차단 목록 */

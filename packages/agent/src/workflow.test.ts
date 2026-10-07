@@ -4,6 +4,7 @@ import {
   DEFAULT_WORKFLOW,
   executionPolicyFor,
   formatVerifyTrailer,
+  maxTurnsFor,
   missingVerificationStages,
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
@@ -120,5 +121,19 @@ describe('project workflow', () => {
     expect(context).toContain('read_file, edit_file');
     expect(context).toContain('플랫폼이 실행할 테스트: unit(api: ./gradlew test)');
     expect(context).toContain('완료 선언은 완료 판정이 아닙니다');
+  });
+
+  describe('maxTurnsFor(ADR-131)', () => {
+    it('둘 다 없으면 undefined를 돌려줘 실행기 기본값(60)을 쓰게 한다', () => {
+      expect(maxTurnsFor(projectWith())).toBeUndefined();
+    });
+
+    it('studio.yaml의 workflow.maxTurns를 쓴다', () => {
+      expect(maxTurnsFor(projectWith({ maxTurns: 30 }))).toBe(30);
+    });
+
+    it('요청 옵션(override)이 studio.yaml보다 우선한다', () => {
+      expect(maxTurnsFor(projectWith({ maxTurns: 30 }), 90)).toBe(90);
+    });
   });
 });
