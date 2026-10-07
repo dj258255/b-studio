@@ -2548,3 +2548,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 `eclipse-temurin:21-jdk` 이미지와 호스트에 이미 받아 둔 Gradle 8.12·junit-jupiter 5.11.4 캐시로(`--offline`, 새 다운로드 없음) 실제 돌려 확인했다: init 스크립트의 힙 값을 `777m`로 바꿔 주면 테스트가 `maxMemory=778MB`로 보고해 메커니즘이 실제로 적용됨을 확인했고, 사용자가 이미 `maxHeapSize = '300m'`을 정해 둔 경우에는 덮어쓰지 않고 `300MB` 그대로 유지됐다. `packages/agent`(gate.test.ts 65개)·`apps/studio`(project-detect.test.ts 58개) 테스트와 `pnpm -r typecheck`(6/6)가 통과했다.
 
 확인하지 못한 것: 1408개 테스트 규모의 실제 세션(5b640fd3)에서 OOM을 다시 일으켜 고친 뒤 통과하는지는 떠 있는 세션·컨테이너를 건드리지 않기 위해 재현하지 않았다. `512m`·`256m`이 이 프로젝트의 모든 테스트에 충분한지도 실측하지 못했다(자세한 내용은 ADR-138).
+
+머지 전에 실제 세션에서 상한이 충분한지 쟀다(2026-10-08). BE-commerce 세션의 commerce 컨테이너에서 bootRun이 떠 있는 채로, 같은 init 스크립트를 `--init-script`로 붙여 게이트 명령을 돌렸다. `:test`와 `:media:test` 모두 `maxHeapSize=512m`로 실제 실행됐다(UP-TO-DATE 아님). 테스트 1408개(commerce 1373, media 35)가 실패 0으로 45초에 끝났고, 컨테이너는 `OOMKilled=false`로 계속 떠 있었다. OOM을 일부러 다시 일으켜 자동 복구(d)를 확인하는 것은 하지 않았다.
