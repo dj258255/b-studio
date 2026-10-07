@@ -273,10 +273,10 @@ export function assertContractsBackend(source: ContractsSource, backend: Backend
 }
 
 /** 레인 조율 게시판(post_note·read_notes)을 쓰는 전략. S4는 공유 없음이라 뺀다(근거: apps/studio/lib/server/task-plans.ts의 laneBoard) */
-const BOARD_STRATEGIES: ReadonlySet<Strategy> = new Set(['S2', 'S3', 'S5']);
+const BOARD_STRATEGIES: ReadonlySet<Strategy> = new Set(['S2', 'S3', 'S5', 'S6', 'S7']);
 
 /**
- * 조율 전략(S2·S3·S5)을 돌리는데 계획 기본이나 레인 백엔드 중 게시판을 지원하지 않는 것이 있으면 Docker·모델을
+ * 조율 전략(S2·S3·S5·S6·S7)을 돌리는데 계획 기본이나 레인 백엔드 중 게시판을 지원하지 않는 것이 있으면 Docker·모델을
  * 건드리기 전에 막는다. 지원 여부 판정은 @b-studio/agent의 backendSupportsBoard 한 곳에서만 한다(단일 진실 원천) —
  * 이 함수는 그 표를 찾아보기만 하고 스스로 판정하지 않는다.
  */
@@ -285,7 +285,7 @@ export function assertCoordinationBackend(strategies: readonly Strategy[], backe
   const backends = new Set<Backend>([backend, ...[...laneBackends.values()].map((choice) => choice.backend)]);
   for (const candidate of backends) {
     if (!backendSupportsBoard(sessionBackendOf(candidate))) {
-      throw new Error(`레인 조율 게시판(S2·S3·S5)은 ${candidate} 백엔드에서 아직 지원하지 않습니다`);
+      throw new Error(`레인 조율 게시판(S2·S3·S5·S6·S7)은 ${candidate} 백엔드에서 아직 지원하지 않습니다`);
     }
   }
 }

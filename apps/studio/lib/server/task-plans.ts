@@ -126,6 +126,8 @@ const boardTokens = planStore.boardTokens;
  * 실행기에서 만든다 — 게시판은 샌드박스·시크릿을 모르고, 값은 여기서만 다룬다.
  */
 const redactors = planStore.redactors;
+/** S7 조정자 중계가 실행 시점에 계획 모델을 부르기 위해 createTaskPlan의 project를 보관한다(게시판과 같은 수명) */
+const planProjects = new Map<string, LoadedProject>();
 /**
  * 계획별 통합 게이트 전용 pageChecks(S 서버 안에서만 넘긴다). 레인 게이트는 그대로 두고 통합 세션에만 덧붙인다.
  * 게시판처럼 서버 메모리에만 있고 재시작하면 사라진다(그때는 통합을 다시 시도해도 확인 없이 돈다)
@@ -285,7 +287,9 @@ export async function createTaskPlan(input: {
   }
   // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
   // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
-  const redactor = input.coordination?.strategy === 'S3' ? new Redactor(await resolveSecrets(project)) : undefined;
+  const redactor = input.coordination && ['S3', 'S6', 'S7'].includes(input.coordination.strategy)
+    ? new Redactor(await resolveSecrets(project))
+    : undefined;
   // 모르는 값은 조용히 버린다(이어받은 세션이 노력 단계를 지원하지 않는 백엔드였을 수도 있다) — 잘못된 값으로 계획 만들기를 막지 않는다
   const effort = asEffort(input.effort);
 
@@ -306,6 +310,7 @@ export async function createTaskPlan(input: {
     ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
   };
   plans.set(plan.id, plan);
+  planProjects.set(plan.id, project);
   attachCoordination(plan, input.coordination, redactor);
   if (input.integrationChecks?.pageChecks?.length) integrationPageChecks.set(plan.id, input.integrationChecks.pageChecks);
   persist(plan);
@@ -319,12 +324,21 @@ export async function createTaskPlan(input: {
  */
 function attachCoordination(plan: TaskPlanView, input: CoordinationInput | undefined, redactor?: Redactor): void {
   if (!input) return;
-  const topology = input.topology ?? 'mesh';
+  // S7은 레인끼리 직접 보지 못하는 것이 정의라 기본 topology가 star다
+  const topology = input.topology ?? (input.strategy === 'S7' ? 'star' : 'mesh');
+  // S6은 플랫폼이 턴마다 트레이스를 게시하고, S7은 조정자가 중계를 게시한다 — 기본 한도(메모 2KB·레인당 8개)로는 바로 막힌다
+  const limits =
+    input.strategy === 'S6'
+      ? { noteBytes: 8192, writesPerLane: 64, readLimit: 100, readBytesPerLane: 262144 }
+      : input.strategy === 'S7'
+        ? { writesPerLane: 32, readLimit: 100, readBytesPerLane: 262144 }
+        : undefined;
   const board = new Board({
     topology,
     hub: 'plan',
-    // S2·S5는 레인 읽기 전용이다. 끄면 실행기가 post_note를 도구 목록에서 뺀다
-    modelWrites: input.strategy === 'S3',
+    ...(limits ? { limits } : {}),
+    // S2·S5·S6은 레인 읽기 전용이다. 끄면 실행기가 post_note를 도구 목록에서 뺀다. S3와 S7은 레인이 쓴다
+    modelWrites: input.strategy === 'S3' || input.strategy === 'S7',
     onChange: () => {
       syncBoard(plan, board);
       persist(plan);
@@ -816,11 +830,14 @@ async function runApprovedPlan(plan: TaskPlanView): Promise<void> {
   plan.status = 'running';
   persist(plan);
 
+  // S7: 레인이 도는 동안 조정자가 레인 메모를 모델로 요약해 중계한다(레인끼리는 star라 직접 보지 못한다)
+  const relay = plan.coordination?.strategy === 'S7' ? startOrchestratorRelay(plan) : undefined;
   // 레인끼리는 의존 관계가 없으므로 작업 그래프로 동시에 돌린다. 한 레인이 실패해도 다른 레인은 끝까지 돌려 결과를 남긴다
   const results = await runTaskGraph(
     plan.lanes.map((lane) => ({ id: lane.id, run: () => runLane(plan, lane) })),
     { concurrency: PLAN_LIMITS.maxLanes },
-  );
+  ).finally(() => relay?.stop());
+  await relay?.finished;
   const failed = results.filter((result) => result.status !== 'succeeded');
   if (failed.length > 0) return fail(plan, `레인이 게이트를 통과하지 못해 통합하지 않습니다: ${failed.map((result) => `${result.id} (${result.error})`).join(', ')}`);
 
@@ -846,12 +863,19 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       task.status = 'running';
       persist(plan);
       const board = laneBoard(plan, lane, task.id);
-      const outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
-        by: plan.owner,
-        writableScope: task.paths,
-        ...(board ? { board } : {}),
-        ...(plan.verify ? { verify: plan.verify } : {}),
-      });
+      // S6: 이 레인의 진행 트레이스를 턴마다 fact 메모로 게시해 다른 레인이 읽게 한다(Cognition의 전체 공유 처방)
+      const stopTracePosting = plan.coordination?.strategy === 'S6' ? attachTracePoster(plan, lane, snapshot.id) : undefined;
+      let outcome: Awaited<ReturnType<typeof runAndWait>>;
+      try {
+        outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
+          by: plan.owner,
+          writableScope: task.paths,
+          ...(board ? { board } : {}),
+          ...(plan.verify ? { verify: plan.verify } : {}),
+        });
+      } finally {
+        stopTracePosting?.();
+      }
       // S5: 성공·실패와 무관하게 그 실행의 검증 실패 서명을 플랫폼이 게시해 다른 레인이 읽게 한다
       if (plan.coordination?.strategy === 'S5') postFailures(plan, lane, snapshot.id);
       task.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
@@ -1058,6 +1082,10 @@ function coordinationGuidance(strategy: TaskPlanStrategy | undefined): string | 
       return '[조율] 다른 레인과 맞물리는 인터페이스가 있으면 read_notes보다 먼저 post_note(contract)로 게시하세요. 그다음 시작 전과 끝내기 전에 read_notes로 다른 레인의 계약을 확인하고, 아직 게시 전이라는 안내가 오면 잠시 뒤 다시 read_notes를 부르세요';
     case 'S5':
       return '[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요';
+    case 'S6':
+      return '[조율] 다른 레인의 진행 트레이스가 fact 메모로 계속 게시됩니다. 시작 전과 파일을 바꾸기 전에 read_notes로 읽고, 상대가 이미 정한 이름·모양과 모순되지 않게 하세요';
+    case 'S7':
+      return '[조율] 당신의 메모는 다른 레인에 직접 보이지 않습니다. 다른 레인과 맞물리는 인터페이스와 진행 사실을 post_note(contract·fact)로 짧게 게시하면 조정자가 요약해 중계합니다. 시작 전과 끝내기 전에 read_notes로 조정자의 중계를 확인하세요';
     default:
       // S4는 공유 없음. 레인에는 아무것도 넘기지 않는다
       return undefined;
@@ -1119,6 +1147,105 @@ function contractNotice(plan: TaskPlanView, lane: TaskPlanLaneView, board: Board
   const waiting = plan.lanes.filter((other) => other.id !== lane.id && !posted.has(other.id)).map((other) => other.id);
   if (waiting.length === 0) return undefined;
   return `[조율] ${waiting.join(', ')}가 아직 계약을 게시하지 않았습니다. 작업을 시작하기 전에 잠시 뒤 read_notes를 한 번 더 호출하세요`;
+}
+
+/**
+ * S6: 레인 세션의 진행 트레이스를 턴 단위 fact 메모로 게시한다(모델 본문·도구 요약, 시크릿 가림).
+ * 게시는 플랫폼 명의다 — 레인의 post_note는 꺼져 있고(modelWrites=false), 플랫폼 메모는 어느 topology에서도 읽힌다.
+ */
+function attachTracePoster(plan: TaskPlanView, lane: TaskPlanLaneView, sessionId: string): () => void {
+  const board = boards.get(plan.id);
+  if (!board) return () => {};
+  const redactor = redactors.get(plan.id);
+  const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
+  let parts: string[] = [];
+  const unsubscribe = subscribe(sessionId, (event) => {
+    if (event.type !== 'agent') return;
+    const agentEvent = event.event;
+    if (agentEvent.type === 'text' && agentEvent.text.trim()) {
+      parts.push(clip(agentEvent.text.trim(), 400));
+    } else if (agentEvent.type === 'tool_call') {
+      parts.push(`→ ${agentEvent.name} ${clip(JSON.stringify(agentEvent.input ?? {}), 160)}`);
+    } else if (agentEvent.type === 'tool_result') {
+      parts.push(`← ${agentEvent.name} ${agentEvent.ok ? 'ok' : '실패'} ${clip(agentEvent.content, 240)}`);
+    } else if (agentEvent.type === 'turn_usage' && parts.length > 0) {
+      const body = `[trace ${lane.id} t${agentEvent.turn}]\n${clip(parts.join('\n'), 7000)}`;
+      parts = [];
+      board.post(
+        { kind: 'fact', body: redactor ? redactor.redact(body) : body, refs: lane.tasks[0]?.paths ? [...lane.tasks[0].paths] : [] },
+        { lane: lane.id, by: 'platform' },
+      );
+    }
+  });
+  return unsubscribe;
+}
+
+/** S7 중계 주기. 너무 짧으면 중계 호출이 토큰을 낭비하고, 너무 길면 레인이 빈손으로 기다린다 */
+const RELAY_INTERVAL_MS = 4000;
+
+/**
+ * S7: 조정자 중계. 레인이 게시한(모델 명의) 메모를 주기적으로 모아 계획 모델에게 요약을 받고,
+ * 플랫폼 명의로 재게시한다 — star에서 레인은 서로를 직접 보지 못하고 중계만 읽는다(Anthropic 오케스트레이터 패턴).
+ * 사용량은 plan.orchestrator에 누적한다(계획·계약 호출과 같은 합산 규칙).
+ */
+function startOrchestratorRelay(plan: TaskPlanView): { stop: () => void; finished: Promise<void> } {
+  const board = boards.get(plan.id);
+  const project = planProjects.get(plan.id);
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+  };
+  if (!board || !project) {
+    console.error(`[b-studio] S7 중계를 시작하지 못했습니다: board=${Boolean(board)} project=${Boolean(project)}`);
+    return { stop, finished: Promise.resolve() };
+  }
+  const ask = plannerAskFor(plan, project);
+  const relayed = new Set<string>();
+  const finished = (async () => {
+    while (!stopped) {
+      await new Promise((resolve) => setTimeout(resolve, RELAY_INTERVAL_MS));
+      const fresh = board
+        .read({ lane: 'plan' })
+        .notes.filter((note) => note.author.by === 'model' && !relayed.has(note.id));
+      if (fresh.length === 0) continue;
+      for (const note of fresh) relayed.add(note.id);
+      const listing = fresh.map((note) => `- [${note.kind}] (${note.author.lane}) ${note.body}`).join('\n');
+      try {
+        const started = performance.now();
+        const answer = await ask(
+          {
+            system:
+              '너는 병렬 작업 레인 사이의 조정자다. 레인들은 서로의 메모를 직접 보지 못한다. ' +
+              '아래 메모에서 다른 레인이 작업을 맞추는 데 필요한 사실(인터페이스 이름·모양·경로·진행 상태)만 뽑아 간결한 한국어로 재서술하라. 추측은 쓰지 마라.',
+            user: listing,
+          },
+          undefined,
+        );
+        const durationMs = Math.round(performance.now() - started);
+        const current = plan.orchestrator ?? {
+          calls: 0,
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          durationMs: 0,
+        };
+        plan.orchestrator = {
+          calls: current.calls + 1,
+          usage: {
+            inputTokens: current.usage.inputTokens + answer.usage.inputTokens,
+            outputTokens: current.usage.outputTokens + answer.usage.outputTokens,
+            cacheReadTokens: current.usage.cacheReadTokens + answer.usage.cacheReadTokens,
+            cacheWriteTokens: current.usage.cacheWriteTokens + answer.usage.cacheWriteTokens,
+          },
+          durationMs: current.durationMs + durationMs,
+        };
+        persist(plan);
+        board.post({ kind: 'fact', body: `[중계]\n${answer.text.trim().slice(0, 1800)}`, refs: [] }, { lane: 'plan', by: 'platform' });
+      } catch (error) {
+        // 중계 한 번의 실패로 레인을 멈추지 않는다. 실패는 기록해 측정에서 보이게 한다
+        console.error(`[b-studio] S7 중계 호출 실패(계획 ${plan.id})`, error);
+      }
+    }
+  })();
+  return { stop, finished };
 }
 
 /** S5: 레인 세션 기록에서 검증 실패 서명을 뽑아 플랫폼 이름으로 게시한다 */

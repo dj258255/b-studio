@@ -17,10 +17,10 @@
 import type { PlanBackend, Topology } from '@b-studio/agent';
 import type { WorkflowPageCheck } from '@b-studio/spec';
 
-export type Strategy = 'P0' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5';
+export type Strategy = 'P0' | 'S0' | 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6' | 'S7';
 
 /** 실행기가 받는 전략 전체(순서대로). P0는 작업 분해를 쓰지 않는다 */
-export const STRATEGIES: readonly Strategy[] = ['P0', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
+export const STRATEGIES: readonly Strategy[] = ['P0', 'S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'];
 
 /** 전략 표시 이름 */
 export const STRATEGY_LABELS: Record<Strategy, string> = {
@@ -31,6 +31,8 @@ export const STRATEGY_LABELS: Record<Strategy, string> = {
   S3: 'S3 게시판',
   S4: 'S4 통합 후 수리',
   S5: 'S5 실패 서명만',
+  S6: 'S6 전체 트레이스 공유',
+  S7: 'S7 조정자 중계',
 };
 
 export interface AcceptanceCheck {
@@ -170,7 +172,7 @@ export const BENCH_TASKS: BenchTask[] = [
 export interface PlannedPlan {
   tasks: PlannedTask[];
   coordination?: {
-    strategy: 'S2' | 'S3' | 'S4' | 'S5';
+    strategy: 'S2' | 'S3' | 'S4' | 'S5' | 'S6' | 'S7';
     topology?: Topology;
     contracts?: Array<{ body: string; refs: string[] }>;
   };
@@ -198,9 +200,11 @@ export function planFor(task: BenchTask, strategy: Strategy, topology: Topology 
       ? { strategy, contracts: [{ body: task.contract.body, refs: [...task.contract.refs] }] }
       : strategy === 'S3'
         ? { strategy, topology }
-        : strategy === 'S4' || strategy === 'S5'
+        : strategy === 'S4' || strategy === 'S5' || strategy === 'S6'
           ? { strategy }
-          : undefined;
+          : strategy === 'S7'
+            ? { strategy, topology: 'star' }
+            : undefined;
   // 레인 그룹은 작업의 첫 쓰기 경로다(laneGroup과 같은 기준). 그룹에 backend가 있으면 그 작업에 싣는다
   const withBackend = (planned: PlannedTask): PlannedTask => {
     const group = planned.paths[0];
@@ -221,7 +225,7 @@ export function planFor(task: BenchTask, strategy: Strategy, topology: Topology 
  * 전략이 실제로는 "공유 없음"(S1)과 같아진다. 그런 실행은 측정이 무의미하므로 시작 전에 막는다(E2 첫 시작에서 실제로 그랬다)
  */
 export function missingCoordinationTools(strategy: Strategy, allowedTools: readonly string[] | undefined): string[] {
-  const needed: Record<Strategy, string[]> = { P0: [], S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'] };
+  const needed: Record<Strategy, string[]> = { P0: [], S0: [], S1: [], S2: ['read_notes'], S3: ['post_note', 'read_notes'], S4: [], S5: ['read_notes'], S6: ['read_notes'], S7: ['post_note', 'read_notes'] };
   if (!allowedTools) return [];
   return needed[strategy].filter((name) => !allowedTools.includes(name));
 }

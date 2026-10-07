@@ -135,6 +135,8 @@ const STRATEGY_LABEL: Record<TaskPlanStrategy, string> = {
   S3: 'S3 게시판',
   S4: 'S4 통합 후 수리',
   S5: 'S5 실패 서명만',
+  S6: 'S6 전체 트레이스 공유',
+  S7: 'S7 조정자 중계',
 };
 
 /**
