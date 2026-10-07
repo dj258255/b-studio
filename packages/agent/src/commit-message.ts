@@ -14,7 +14,7 @@ const TEST_FILE = /(^|\/)(__tests__)\/.+|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)src\
 const DOC_FILE = /(^|\/)docs\/.+\.mdx?$|(^|\/)readme(\.[a-z]+)?\.md$|(^|\/)changelog\.md$/i;
 
 /** 요청 글에서 리팩터링을 가리키는 낱말 */
-const REFACTOR_WORDS = /리팩터|리팩토링|구조\s*정리|구조\s*변경|정리한다|refactor/i;
+const REFACTOR_WORDS = /리팩터|리팩토링|구조\s*정리|구조\s*변경|정리한다|옮기|옮겨|옮긴|refactor/i;
 /** 요청 글에서 잡일(의존성 올리기, 설정 변경 등)을 가리키는 낱말 */
 const CHORE_WORDS = /의존성|dependency|devdependency|버전\s*올리기|업그레이드|설정\s*변경|chore/i;
 /** 요청 글에서 고침을 가리키는 낱말. 이 낱말이 있어야 fix로 본다 */
@@ -37,6 +37,7 @@ export function classifyCommit(request: string, changes: readonly PendingChange[
   const intent = firstSentence(request.split('\n')[0]!.replace(/\s+/g, ' ').trim());
   if (FIX_WORDS.test(intent)) return 'fix';
   if (FEAT_WORDS.test(intent)) return 'feat';
+  if (REFACTOR_WORDS.test(intent)) return 'refactor';
   if (FIX_WORDS.test(request)) return 'fix';
   if (REFACTOR_WORDS.test(request)) return 'refactor';
   if (CHORE_WORDS.test(request)) return 'chore';
@@ -309,17 +310,32 @@ const MOOD_ENDINGS: ReadonlyArray<[RegExp, string]> = [
   [/보여\s*(줘|주세요|주십시오)$/, '보여 준다'],
   [/없애\s*(줘|주세요|주십시오)$/, '없앤다'],
   [/지워\s*(줘|주세요|주십시오)$/, '지운다'],
+  [/옮겨\s*(줘|주세요|주십시오)$/, '옮긴다'],
+  [/나눠\s*(줘|주세요|주십시오)$/, '나눈다'],
+  [/붙여\s*(줘|주세요|주십시오)$/, '붙인다'],
+  [/맞춰\s*(줘|주세요|주십시오)$/, '맞춘다'],
+  [/줄여\s*(줘|주세요|주십시오)$/, '줄인다'],
+  [/늘려\s*(줘|주세요|주십시오)$/, '늘린다'],
+  [/올려\s*(줘|주세요|주십시오)$/, '올린다'],
+  [/남겨\s*(줘|주세요|주십시오)$/, '남긴다'],
+  [/돌려\s*(줘|주세요|주십시오)$/, '돌린다'],
+  [/적어\s*(줘|주세요|주십시오)$/, '적는다'],
+  [/막아\s*(줘|주세요|주십시오)$/, '막는다'],
   [/(\S+)해\s*(줘|주세요|주십시오)$/, '$1한다'],
   [/\s*(해\s*)?(줘|주세요|주십시오)$/, ''],
 ];
 
 export function toCommitMood(text: string): string {
   let result = text.replace(/[.!?。]+$/, '').trim();
+  // "옮겨 주세요(R32)"처럼 끝에 괄호 꼬리(요구사항 id 등)가 붙으면 어미 규칙이 끝($)을 못 찾는다(도그푸딩 버그 리포트).
+  // 꼬리를 떼고 어미를 바꾼 뒤 다시 붙인다
+  const tail = /\s*(\([^()]*\))$/.exec(result);
+  if (tail) result = result.slice(0, tail.index).trim();
   for (const [pattern, replacement] of MOOD_ENDINGS) {
     if (pattern.test(result)) {
       result = result.replace(pattern, replacement).trim();
       break;
     }
   }
-  return result;
+  return tail ? `${result}${tail[1]}` : result;
 }

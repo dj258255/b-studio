@@ -206,6 +206,18 @@ describe('generateCommitSubject', () => {
     expect(subject).toBe('feat: 연결 상품 조회를 피드 응답에 넣었습니다');
   });
 
+  it('끝에 괄호 꼬리가 붙은 요청("…옮겨 주세요(R32)")도 어미를 바꾸고, 옮기기는 refactor로 본다(도그푸딩 버그 리포트)', () => {
+    const request = '숏폼 코드를 저장소 최상위 media/로 옮겨 주세요(R32). 결정: media/는 Gradle 하위 프로젝트입니다.';
+    const subject = generateCommitSubject(request, [change('media/src/main/java/Shorts.java', 'added'), change('commerce/build.gradle')]);
+    expect(subject).toBe('refactor: 숏폼 코드를 저장소 최상위 media/로 옮긴다(R32)');
+  });
+
+  it('흔한 "~어/아 주세요" 동사도 커밋 문체로 바꾼다', () => {
+    expect(toCommitMood('업로드와 변환을 나눠 주세요')).toBe('업로드와 변환을 나눈다');
+    expect(toCommitMood('테스트 힙을 줄여 주세요.')).toBe('테스트 힙을 줄인다');
+    expect(toCommitMood('결정을 ADR로 남겨 주세요(R32)')).toBe('결정을 ADR로 남긴다(R32)');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
