@@ -10,6 +10,7 @@ import { findSecretLeaks, formatVerificationReport, mentionsDeletedFile, restart
 
 const project = {
   root: '/tmp/orders',
+  composePath: '/tmp/orders/compose.yaml',
   managed: [
     ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' }],
     ['api', { source: 'managed', template: 'spring-boot', path: './api/', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }],
@@ -79,10 +80,23 @@ function fakeSandbox(failing: string[] = [], { syncFails = false } = {}): Sandbo
 
 describe('servicesForFiles', () => {
   it('서비스 경로 접두사로 매핑하고 서비스 밖 파일은 따로 모은다', () => {
-    expect(servicesForFiles(project, ['api/src/A.java', 'web/app/page.tsx', 'apiary.txt', 'compose.yaml'])).toEqual({
+    expect(servicesForFiles(project, ['api/src/A.java', 'web/app/page.tsx', 'apiary.txt'])).toEqual({
       services: ['web', 'api'],
-      unmatched: ['apiary.txt', 'compose.yaml'],
+      unmatched: ['apiary.txt'],
     });
+  });
+
+  it('compose 파일은 어느 서비스 폴더에도 속하지 않지만 managed 서비스를 전부 다시 띄우게 한다(트러블슈팅 72)', () => {
+    expect(servicesForFiles(project, ['compose.yaml'])).toEqual({ services: ['web', 'api'], unmatched: [] });
+  });
+
+  it('studio.yaml도 managed 서비스를 전부 다시 띄우게 한다', () => {
+    expect(servicesForFiles(project, ['studio.yaml'])).toEqual({ services: ['web', 'api'], unmatched: [] });
+  });
+
+  it('managed 서비스가 없으면 compose·studio.yaml도 확인할 서비스가 없어 따로 모은다', () => {
+    const empty = { ...project, managed: [] } as unknown as typeof project;
+    expect(servicesForFiles(empty, ['compose.yaml', 'studio.yaml'])).toEqual({ services: [], unmatched: ['compose.yaml', 'studio.yaml'] });
   });
 });
 

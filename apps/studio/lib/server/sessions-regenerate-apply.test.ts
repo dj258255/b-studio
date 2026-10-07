@@ -56,6 +56,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
   return { ...actual, providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }) };
 });
 
+import { GENERATED_COMPOSE } from './project-detect';
 import { applyRegeneration, proposeRegeneration, registerFolder } from './project-registry';
 import { applyRegeneratedFilesToSession, createSession, getSnapshot, stopSession } from './sessions';
 
@@ -75,6 +76,8 @@ async function tmp(): Promise<string> {
 }
 
 const nextPackageNoLock = JSON.stringify({ name: 'shop', dependencies: { next: '16.0.0', react: '19.0.0' } });
+const nextPackage = JSON.stringify({ name: 'shop', dependencies: { next: '16.0.0', react: '19.0.0' } });
+const springGradle = `plugins { id 'org.springframework.boot' version '3.5.0' }\njava { toolchain { languageVersion = JavaLanguageVersion.of(17) } }`;
 
 beforeEach(async () => {
   const root = await tmp();
@@ -137,6 +140,34 @@ describe('applyRegeneratedFilesToSession(ADR-101, "이 세션에도 적용")', (
     expect(fake.restartCalls).toContain('web');
     const dockerfile = await readFile(path.join(session.workDir, 'Dockerfile.b-studio'), 'utf8');
     expect(dockerfile).toContain('pnpm install --frozen-lockfile');
+
+    await stopSession(session.id).catch(() => {});
+  }, 20_000);
+
+  it('서비스가 둘 이상이고 그중 어느 서비스도 루트를 쓰지 않을 때, compose만 다시 써도 두 서비스를 모두 다시 띄운다(도그푸딩 마찰 110)', async () => {
+    // BE-commerce(pay-2)를 본뜬 모양: backend·frontend 둘 다 하위 폴더라 compose.b-studio.yaml은 어느 서비스 폴더에도 속하지 않는다
+    const folder = await tmp();
+    await mkdir(path.join(folder, 'frontend'), { recursive: true });
+    await mkdir(path.join(folder, 'backend'), { recursive: true });
+    await writeFile(path.join(folder, 'frontend', 'package.json'), nextPackage);
+    await writeFile(path.join(folder, 'frontend', 'package-lock.json'), '{}');
+    await writeFile(path.join(folder, 'backend', 'build.gradle'), springGradle);
+    await writeFile(path.join(folder, 'backend', 'gradlew'), '#!/bin/sh');
+    const registered = await registerFolder(folder, new Set());
+
+    const session = await createSession(registered.id, 'kim', 'copy');
+    expect(await waitForReady(session.id)).toBe('ready');
+    fake.restartCalls = []; // 세션 기동 중 restart가 불렸을 수 있어 비운다
+
+    // "생성 파일 다시 만들기"가 compose.b-studio.yaml만 다시 쓴 상황을 흉내 낸다(실제로는 트러블슈팅 16의 Mockito init 설정처럼 compose에만 영향을 준다)
+    const composePath = path.join(folder, GENERATED_COMPOSE);
+    const compose = await readFile(composePath, 'utf8');
+    await writeFile(composePath, `${compose}# 재시작 확인용 표시\n`);
+
+    const result = await applyRegeneratedFilesToSession(session.id, [GENERATED_COMPOSE]);
+
+    expect(result.restarted.map((check) => check.service).sort()).toEqual(['backend', 'frontend']);
+    expect(fake.restartCalls.sort()).toEqual(['backend', 'frontend']);
 
     await stopSession(session.id).catch(() => {});
   }, 20_000);
