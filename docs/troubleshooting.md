@@ -11,7 +11,7 @@
 | 기동·종료·준비 판정 | 1–4, 14, 23, 36–37, 51–52 |
 | 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29, 41, 50 |
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
-| 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55 |
+| 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55, 75 |
 | 운영 이미지·컨테이너 배포 | 31–34 |
 | 멀티 CLI·백엔드 실행 | 43, 45, 47–49 |
 | 동시성·상태 저장 | 44 |
@@ -95,6 +95,7 @@
 - [72. 긴 파일 경로가 든 요청의 체크포인트 제목이 경로 한가운데서 잘리고 동사가 사라짐](#72-긴-파일-경로가-든-요청의-체크포인트-제목이-경로-한가운데서-잘리고-동사가-사라짐)
 - [73. 에이전트가 서비스 컨테이너 안에서 gradle --stop을 돌려 bootRun 중인 서비스가 내려감](#73-에이전트가-서비스-컨테이너-안에서-gradle---stop을-돌려-bootrun-중인-서비스가-내려감)
 - [74. compose 파일만 다시 만들면 "이 세션에도 적용"이 서비스를 하나도 다시 띄우지 않음](#74-compose-파일만-다시-만들면-이-세션에도-적용이-서비스를-하나도-다시-띄우지-않음)
+- [75. 서비스 컨테이너에 ffmpeg가 없어 런타임 apt-get이 막히고, 에이전트가 PyPI 휠에서 정적 바이너리를 꺼내 쓰는 우회로를 찾음](#75-서비스-컨테이너에-ffmpeg가-없어-런타임-apt-get이-막히고-에이전트가-pypi-휠에서-정적-바이너리를-꺼내-쓰는-우회로를-찾음)
 
 ---
 
@@ -2453,3 +2454,44 @@ compose의 일반(non-swarm) `configs:`가 파일로 그대로 마운트되는�
 
 ### 배운 점
 파일이 "어느 서비스 폴더에도 안 속함"은 "검증할 필요 없음"이 아니라 "모든 서비스에 영향을 줄 수 있음"일 수 있다. 서비스별 폴더 매핑 규칙은 서비스 코드에는 맞지만 프로젝트 전체 설정 파일에는 반대 방향으로 읽어야 한다.
+
+## 75. 서비스 컨테이너에 ffmpeg가 없어 런타임 apt-get이 막히고, 에이전트가 PyPI 휠에서 정적 바이너리를 꺼내 쓰는 우회로를 찾음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 pay-2, 세션 5b640fd3) → 코드로 원인 추적 → 실제 docker build로 재현 → 수정
+
+### 현상
+BE-commerce 세션에서 숏폼 변환 측정을 하려면 commerce 서비스 컨테이너에 ffmpeg가 필요했다. b-studio가 만든 `commerce/Dockerfile.b-studio`(`eclipse-temurin:21-jdk`)에는 ffmpeg가 없었고, 컨테이너 안에서 `apt-get update`는 403으로 실패했다. 에이전트는 사용자 파일을 바꾸지 않았지만, 허용된 PyPI(`files.pythonhosted.org`)에서 `imageio-ffmpeg` 휠을 받아 그 안의 정적 ffmpeg 바이너리를 꺼내 쓰는 우회로를 찾았다 — 시스템 패키지를 선언할 공식 방법이 없었기 때문이다.
+
+### 원인
+샌드박스는 egress 허용 목록(`packages/sandbox/src/edge-config.ts`의 `DEFAULT_EGRESS_ALLOW`) 밖의 호스트를 막는데, `deb.debian.org`·`ports.ubuntu.com`은 그 목록에 없다. `project-detect.ts`의 `detectSpring`·`detectNode`·`detectFastApi`가 만드는 생성 Dockerfile은 base 이미지(런타임)만 선언할 뿐, OS 패키지를 선언할 자리가 studio.yaml 스키마에 없었다. 반대로 `docker build`(compose build)는 egress 허용 목록이 적용되는 샌드박스 런타임 네트워크가 아니라 호스트 Docker 데몬이 보는 네트워크로 돈다 — compose의 `networks:`는 런타임 컨테이너에만 적용되고 빌드 단계의 중간 컨테이너에는 적용되지 않는다(`packages/sandbox/src/docker/compose-provider.ts`의 "이미지 빌드 단계에서 받은 것은 컨테이너 NetIO에 잡히지 않는다" 주석이 이미 이 한계를 기록해 뒀다). 즉 빌드 때는 apt가 되는데 선언할 방법이 없어, 에이전트가 실행 중 우회로를 찾은 것이다. `eclipse-temurin:21-jdk` 베이스로 `apt-get install ffmpeg`를 실제로 빌드해(2026-10-08, colima VM) 됨을 확인했다.
+
+### 수정
+studio.yaml의 managed 서비스에 `systemPackages`(문자열 배열)를 더했다(`packages/spec/src/schema.ts`). "생성 파일 다시 만들기"(ADR-101)와 세션 재시작(ADR-136, #480) 양쪽에서, `@b-studio/spec`의 `applySystemPackages`가 생성 Dockerfile의 `FROM` 줄 바로 뒤에 설치 블록(마커 주석 사이, 멱등적)을 끼워 넣는다:
+
+```
+FROM eclipse-temurin:21-jdk
+
+# b-studio: systemPackages(studio.yaml)가 설치를 선언한 패키지
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# b-studio: systemPackages 끝
+```
+
+베이스 이미지가 Debian·Ubuntu(apt) 또는 Alpine(apk) 계열이 아니면 조용히 넘어가지 않고 `SystemPackageError`를 던진다. 패키지 이름은 `SYSTEM_PACKAGE_NAME`(영문 소문자·숫자로 시작, 그 뒤 영문 소문자·숫자·`.`·`+`·`-`만)만 받아 셸 주입을 막는다. edge의 403 응답도 `deb.debian.org`·`ports.ubuntu.com`·`*.alpinelinux.org`처럼 패키지 저장소로 보이는 호스트를 막았을 때만 "systemPackages로 선언하라"는 안내를 본문에 붙인다(그 밖의 막힌 호스트에는 붙이지 않는다 — 무관한 상황에서 혼란을 주지 않기 위해서다).
+
+검토한 선택지(ADR-137):
+- **(a) studio.yaml 선언 → 생성 Dockerfile에 반영.** 사람이 무엇이 설치되는지 보고(diff·Dockerfile 본문), 재시작·재생성 때마다 같은 결과가 나오며(재현 가능), 런타임 격리를 건드리지 않는다. **채택.**
+- (b) egress에 Debian/Ubuntu 미러를 열어 런타임 apt 허용. 패키지 저장소 접속은 사실상 임의 코드 실행 통로라 격리를 넓히는 셈이고, 로그에만 남아 한눈에 보기 어렵다. 기각.
+- (c) 사용자가 Dockerfile.b-studio를 직접 고치게 둠(handEdited). 이미 가능하지만 "생성 파일 다시 만들기"가 손으로 고친 파일로 보고 경고하고, 선언이 아니라 자유 형식이라 모아 보기 어렵다. 기각(보조 수단으로는 남긴다).
+
+### 보안
+패키지 저장소 접속 허용(PyPI·npm·Maven이 기본 egress 허용 목록에 있다)은 사실상 임의 바이너리를 받는 통로다 — 이번 마찰에서 에이전트가 정확히 그렇게 했다(허용된 PyPI에서 `imageio-ffmpeg` 휠을 받아 그 안의 정적 ffmpeg 바이너리를 꺼내 썼다). `systemPackages`가 apt-get 우회를 막아도, "패키지 관리자 이름으로 받은 파일 안의 임의 바이너리를 실행"이라는 경로 자체는 여전히 열려 있다(pip·npm install의 postinstall 스크립트도 같은 범주다). 지금 egress 설계를 바꾸자는 뜻은 아니다 — 패키지 생태계를 쓰려면 그 저장소들을 열어야 하고, 완전히 막으면 대부분의 템플릿이 의존성을 못 받는다. 다만 "egress 허용 목록 = 신뢰 경계"로 읽으면 안 된다는 한계를 분명히 남겨 둔다.
+
+### 검증
+`packages/spec/src/system-packages.test.ts`(18개): `detectPackageFamily`가 apt·apk·모름을 가리는 것, `applySystemPackages`가 멱등적으로 설치·갱신·삭제하는 것, 셸 메타문자가 든 이름을 거부하는 것, `ManagedServiceSchema`가 `systemPackages`를 검증하는 것.
+`apps/studio/lib/server/project-detect.test.ts`·`project-regenerate.test.ts`: `generateFiles`가 `systemPackagesByPath`를 반영·무시하는 것, 모르는 베이스 이미지 계열에 오류를 내는 것, "생성 파일 다시 만들기"가 실제 studio.yaml 선언을 읽어 Dockerfile diff에 반영·제거하는 것.
+`packages/agent/src/system-packages-sync.test.ts`: 세션 작업 복사본에서 재시작 대상 서비스만 동기화하고, 선언 없는 서비스·생성 Dockerfile이 없는 서비스는 건드리지 않는 것.
+`packages/sandbox/edge/edge.test.ts`: 패키지 저장소 호스트가 막혔을 때만 403 본문에 안내가 붙는 것(평문 HTTP·CONNECT 둘 다).
+실제 `docker build`(eclipse-temurin:21-jdk + `apt-get install ffmpeg`)를 colima에서 한 번 돌려 됨을 확인했다(2026-10-08, 빌드한 이미지는 확인 뒤 지웠다).
+
+### 배운 점
+"무엇이 가능한가"(빌드 네트워크는 열려 있다)와 "선언할 방법이 있는가"(studio.yaml에 자리가 없다) 사이의 틈이 우회로를 만든다. 에이전트는 목표(ffmpeg가 필요하다)를 달성할 다른 경로를 찾는 데는 능숙하지만, 그 경로가 플랫폼이 의도한 것인지는 모른다 — 공식 선언 자리를 만들어 주는 쪽이, 막는 쪽보다 효과적이다.

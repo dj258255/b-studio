@@ -5,6 +5,7 @@ import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox'
 import type { LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
+import { syncSystemPackages } from './system-packages-sync';
 
 export type ContractFetcher = (url: string) => Promise<OpenApiDocument>;
 
@@ -159,6 +160,10 @@ export async function restartServicesFor(
   const skippedOff = off ? wanted.filter((service) => off.has(service)) : [];
   const unmatched = owned.unmatched;
   const deleted = await deletedFiles(project.root, files);
+
+  // 다시 띄울 서비스의 Dockerfile을 지금 studio.yaml의 systemPackages 선언과 맞춘다(도그푸딩 마찰 113, ADR-137).
+  // compose build(아래 restart가 돌리는 `--build`)보다 먼저 해야 이번 빌드에 반영된다
+  await syncSystemPackages(project, services);
 
   // 파일 공유 캐시 때문에 옛 코드로 재시작하면 틀린 결과를 얻는다. 반영을 먼저 확인한다
   let sync: RestartReport['sync'];

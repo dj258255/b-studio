@@ -39,6 +39,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  applySystemPackages,
   corsEnvironmentFrom,
   databaseSpecFor,
   dependencyClosure,
@@ -962,14 +963,24 @@ async function fastApiModule(dir: string): Promise<{ target: string; found: bool
   return { target: 'main:app', found: false };
 }
 
-/** 제안한 서비스로 만들 파일. 이미 studio.yaml이 있으면 아무것도 만들지 않는다 */
-export function generateFiles(detection: ProjectDetection): GeneratedFile[] {
+/**
+ * 제안한 서비스로 만들 파일. 이미 studio.yaml이 있으면 아무것도 만들지 않는다.
+ * systemPackagesByPath를 주면(서비스 path → systemPackages, "생성 파일 다시 만들기"가 지금 studio.yaml에서 읽어 넘긴다,
+ * ADR-137) 그 서비스의 Dockerfile 본문에 설치 블록을 반영한다 — detectProject 자신은 studio.yaml을 다시 읽지 않으므로
+ * (ignoreExistingSpec가 구조 탐지만 다시 하고 사용자 선언은 보지 않는다) 이 함수가 그 둘을 잇는다
+ */
+export function generateFiles(detection: ProjectDetection, options: { systemPackagesByPath?: ReadonlyMap<string, readonly string[]> } = {}): GeneratedFile[] {
   if (detection.hasSpec || detection.services.length === 0) return [];
+  const { systemPackagesByPath } = options;
   const files: GeneratedFile[] = [
     { path: SPEC_FILE, content: specYaml(detection) },
     { path: GENERATED_COMPOSE, content: composeYaml(detection.services, detection.infra) },
   ];
-  for (const service of detection.services) files.push({ path: posixJoin(service.path, GENERATED_DOCKERFILE), content: service.dockerfile });
+  for (const service of detection.services) {
+    const systemPackages = systemPackagesByPath?.get(service.path);
+    const content = systemPackages && systemPackages.length > 0 ? applySystemPackages(service.dockerfile, systemPackages) : service.dockerfile;
+    files.push({ path: posixJoin(service.path, GENERATED_DOCKERFILE), content });
+  }
   return files;
 }
 

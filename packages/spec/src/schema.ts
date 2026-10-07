@@ -11,6 +11,14 @@ export const STUDIO_CALLER = 'studio';
  */
 const SERVICE_PATH = z.string().regex(/^\/(?!\/)/, '"/"로 시작하고 "//"로 시작하지 않는 경로여야 합니다');
 
+/**
+ * apt(Debian·Ubuntu)·apk(Alpine) 패키지 이름(도그푸딩 마찰 113). 셸을 거치지 않더라도 생성한 Dockerfile의
+ * RUN 줄에 그대로 들어가므로 셸 메타문자가 들어갈 수 없게 좁게 허용한다. 영문 소문자·숫자로 시작하고
+ * 그 뒤로 영문 소문자·숫자·`.`·`+`·`-`만 받는다(두 계열의 실제 패키지 이름 관례를 함께 만족한다)
+ */
+export const SYSTEM_PACKAGE_NAME = /^[a-z0-9][a-z0-9.+-]{0,63}$/;
+const MAX_SYSTEM_PACKAGES = 20;
+
 /** 서비스가 요청을 받을 준비가 됐는지 HTTP로 확인하는 방법 */
 export const HttpProbeSchema = z.object({
   path: SERVICE_PATH,
@@ -53,6 +61,15 @@ export const ManagedServiceSchema = z.object({
   /** 실행 중인 서버에서 OpenAPI 문서를 뽑아낼 경로 (코드 우선 방식) */
   contract: z.object({ extract: SERVICE_PATH }).optional(),
   snapshots: z.array(SnapshotSchema).optional(),
+  /**
+   * 생성 Dockerfile(Dockerfile.b-studio)이 빌드 때 설치할 OS 패키지(도그푸딩 마찰 113). 예: `[ffmpeg]`.
+   * 샌드박스는 실행 중에는 egress 허용 목록 밖의 호스트(deb.debian.org 등)를 막으므로, 런타임 `apt-get`은
+   * 항상 403으로 실패한다 — 이 필드로 선언하면 "생성 파일 다시 만들기"(ADR-101)나 세션 재시작이
+   * Dockerfile.b-studio의 `FROM` 줄 바로 뒤에 설치 명령을 넣는다(`@b-studio/spec`의 `applySystemPackages`).
+   * 베이스 이미지가 apt(Debian·Ubuntu)·apk(Alpine) 계열이 아니면 그 자리에서 오류를 낸다(조용히 무시하지 않는다).
+   * 이름은 셸 메타문자를 막는 SYSTEM_PACKAGE_NAME만 받는다
+   */
+  systemPackages: z.array(z.string().regex(SYSTEM_PACKAGE_NAME, 'apt·apk 패키지 이름(영문 소문자·숫자로 시작, 그 뒤 영문 소문자·숫자·.·+·-)이어야 합니다')).max(MAX_SYSTEM_PACKAGES, `systemPackages는 최대 ${MAX_SYSTEM_PACKAGES}개까지 쓸 수 있습니다`).optional(),
 });
 
 /** `/api/users/*`: `*`는 한 경로 구간, `**`는 여러 구간 */
