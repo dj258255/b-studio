@@ -153,6 +153,7 @@
 - [ADR-130 폴더 열기 감지가 프런트엔드의 백엔드 주소를 공개 변수뿐 아니라 서버 쪽 변수(SPRING_API 등)에서도 찾아 컨테이너 사이 주소로 채운다](#adr-130-폴더-열기-감지가-프런트엔드의-백엔드-주소를-공개-변수뿐-아니라-서버-쪽-변수spring_api-등에서도-찾아-컨테이너-사이-주소로-채운다)
 - [ADR-131 실행 실패로 되돌릴 때 DB도 마지막 덤프 시점으로 되돌리고, 턴 상한은 설정할 수 있게 하며 걸리면 게이트를 한 번 더 본다](#adr-131-실행-실패로-되돌릴-때-db도-마지막-덤프-시점으로-되돌리고-턴-상한은-설정할-수-있게-하며-걸리면-게이트를-한-번-더-본다)
 - [ADR-132 되살린 변경을 쓰지 않은 요청도 검증 게이트를 거치게 하고, 체크포인트 저장 지점에 마지막 방어선을 둔다](#adr-132-되살린-변경을-쓰지-않은-요청도-검증-게이트를-거치게-하고-체크포인트-저장-지점에-마지막-방어선을-둔다)
+- [ADR-133 폴더 열기 감지가 서비스마다 테스트 명령을 찾아 workflow.tests에 기본으로 넣고, 체크포인트 제목이 요구사항 id·조사만 남은 조각이 되지 않게 한다](#adr-133-폴더-열기-감지가-서비스마다-테스트-명령을-찾아-workflowtests에-기본으로-넣고-체크포인트-제목이-요구사항-id조사만-남은-조각이-되지-않게-한다)
 
 ---
 
@@ -5505,3 +5506,43 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - `syncExternalChanges`는 거부된 경로(비밀 파일·생성물·프로젝트 밖)를 조용히 건너뛴다. 그런 파일이 실제로 바뀌어 있으면 게이트가 그 변경을 보지 못한 채 통과할 수 있다. `commit()`의 `findSecrets` 점검이 커밋 단계에서 한 번 더 비밀 값을 잡아내므로 전적으로 무방비는 아니다.
 - 체크포인트 저장 지점의 방어선은 트레일러 문자열 모양(`Workflow-Passed: none`)만 본다. 호출하는 쪽이 애초에 트레일러를 비워서(트레일러 자체를 넘기지 않아) 커밋하는 기존 경로(`commitLocalEdits`)는 막지 않는다. 그 경로 자체를 게이트 대상으로 바꾸는 일은 이번 사고의 범위 밖이라 손대지 않았다.
 - `PROGRESS_REPORT_WORDS`는 이번에 실측한 네 가지 표현(검토 결과, 확인해 보니, 이미 …있었습니다, 추가로 …것이 없어)과 그 변형만 잡는 낱말 목록이다. 비슷한 뜻의 다른 경과 보고 표현은 여전히 제목으로 샐 수 있다.
+
+## ADR-133 폴더 열기 감지가 서비스마다 테스트 명령을 찾아 workflow.tests에 기본으로 넣고, 체크포인트 제목이 요구사항 id·조사만 남은 조각이 되지 않게 한다
+
+상태: 채택
+관련: ADR-067, ADR-073, ADR-080, ADR-083, ADR-095, ADR-128, ADR-132
+
+### 맥락
+- `/Users/beomsu/Desktop/pay`를 폴더 열기로 등록해 만든 `studio.yaml`에는 `workflow.tests`가 아예 없었다. 그 세션의 체크포인트 트레일러는 전부 `Workflow-Passed: run, contract_check, review`였고 `test` 단계가 한 번도 돌지 않았다. 숏폼 요구사항 R21·R22·R25의 테스트(JUnit, `./gradlew -p commerce test`)는 에이전트가 `run_in_service`로 스스로 돌린 것뿐이었다 — README가 말하는 "재시작·API 계약·화면·테스트로 검증한 변경만 체크포인트로 남긴다"는 원칙에서 테스트만 빠진 것이다.
+- 원인은 `project-detect.ts`의 감지가 서비스의 **실행(run) 명령**만 만들고 **테스트 명령**은 전혀 찾지 않는 데 있었다. `packages/agent/src/workflow.ts`의 `workflowStages()`는 `workflow.required`를 생략해도 `workflow.tests`가 비어 있지 않을 때만 `test` 단계를 기본 흐름(`plan → implement → run → contract_check → review → checkpoint`)에 끼워 넣는다 — 감지가 `tests`를 안 채우니 `test` 단계 자체가 아예 없는 흐름이 됐고, 이게 통과처럼 보이는 게 아니라 "이 프로젝트는 테스트가 없다"는 뜻으로 조용히 읽혔다.
+- 같은 세션에서 "R25를 해 주세요."라는 짧은 요청으로 통과한 체크포인트의 제목이 `feat: R25를`이었다(버그 리포트 103). `commit-message.ts`의 `generateCommitSubject`는 요청 글 첫 문장이 "분명한 변경 문장"이면 그것으로 제목을 삼는데, `toCommitMood`가 "~해 주세요" 어미를 떼는 마지막 대체 규칙(`/\s*(해\s*)?(줘|주세요|주십시오)$/` → `''`)이 "R25를 해 주세요"에서 " 해 주세요"까지 통째로 지워 "R25를"만 남겼다. `isClearChangeSentence`는 변환 **이후** 결과만 부탁 어미 패턴(`TRAILING_REQUEST_PHRASING`)으로 다시 보는데, 이미 어미가 지워진 "R25를"은 그 패턴에 걸리지 않아 "분명한 문장"으로 통과했다.
+
+### 검토한 선택지 (버그 리포트 104 — workflow.tests 생성)
+| 방식 | 문제 |
+|---|---|
+| A. 감지가 테스트 명령을 찾아도 notes에만 "이런 명령으로 돌릴 수 있습니다"라고 적고, `workflow.tests`에는 넣지 않는다(관대) | 사람이 studio.yaml을 열어 직접 옮겨 적어야 게이트가 실제로 test 단계를 돈다 — "재시작·계약·화면·테스트로 검증한 변경만 체크포인트로 남긴다"는 README의 약속과 어긋난 상태가 기본값으로 계속된다 |
+| B. 찾은 테스트 명령을 `workflow.tests`에 기본으로 넣는다(엄격). 느리거나 외부 의존이 있을 수 있으니 notes에 narrowing 안내를 함께 남긴다(채택) | pay의 commerce처럼 Testcontainers 의존성이 있는 모듈도 있어, 잘못 걸면 게이트가 매번 실패할 위험이 있다. 다만 실제로 pay의 `build.gradle`을 보면 `useJUnitPlatform { excludeTags 'chaos', 'integration', 'eval', 'capture', 'experiment', 'measurement' }`로 기본 `test` 태스크가 이미 Testcontainers 기반 통합 테스트를 제외하고 있다 — Gradle·Spring 생태계의 흔한 관례(단위 테스트는 `test`, 통합 테스트는 태그·별도 소스셋으로 분리)라 `./gradlew test`를 기본으로 돌려도 대개 안전하다. 게이트는 테스트별 10분 타임아웃(`TEST_TIMEOUT_MS`)과 독립 작업 그래프 동시 실행(서로 기다리지 않는다)을 이미 갖추고 있어, 느린 테스트 하나가 실패해도 다른 단계를 막지 않는다 |
+| C. 테스트 감지를 Gradle·Maven만 지원하고 Node·Python은 손대지 않는다 | 폴더 열기가 지원하는 네 템플릿(Next.js·Vite·Spring Boot·FastAPI) 중 절반만 고치면 같은 문제가 그대로 남는다. Node는 `package.json`에 `test` 스크립트가 있을 때만, Python은 `pytest` 의존성이 있을 때만 넣어 "없는데 돌리는" 실패를 피한다 |
+| D. 체크포인트 제목 조각 문제(103)는 `TRAILING_REQUEST_PHRASING`을 변환 전 원문에도 다시 적용해 고친다 | 변환 전 원문("R25를 해 주세요.")은 이미 그 패턴에 걸려 1번 규칙에서 막혔어야 하는데 실제로는 `toCommitMood` 결과만 검사해 통과했다 — 패턴을 원문에도 또 적용하는 것보다, "변환 후 결과가 요구사항 id·대명사에 조사만 붙은 조각"이라는 조건을 명시적으로 추가하는 쪽이 원인(조각 자체)을 직접 겨냥한다(채택) |
+
+### 결정
+1. **서비스마다 테스트 명령을 찾아 `workflow.tests`에 기본으로 넣는다(`apps/studio/lib/server/project-detect.ts`).** `DetectedService`에 `testCommand?: { command: string[]; maxAttempts?: number }`를 더했다.
+   - **Gradle·Maven(`detectSpring`)**: bootRun과 같은 래퍼 경로 규칙(`springTestCommand` 헬퍼)을 그대로 따른다. 래퍼가 서비스 폴더 자신에 있으면 `./gradlew test`·`./mvnw test`를 그대로 쓰고, 래퍼가 저장소 루트 같은 상위 폴더에 있으면(pay의 commerce 구조) 그 폴더로 `cd`한 뒤 `-p`(Gradle)·`-f`(Maven)로 서비스 폴더를 가리킨다. `workflow.tests`의 `command`는 `docker compose exec`에 배열 그대로 실행돼 셸을 거치지 않으므로(`packages/spec/src/schema.ts`의 `WorkflowTestSchema.command: z.array(z.string().min(1))`), `cd`가 필요하면 `['sh', '-c', '...']`로 셸을 직접 지정한다. Gradle은 개발 서버(`bootRun`)가 기본 프로젝트 캐시(`.gradle`)를 계속 쓰고 있어 테스트가 같은 캐시를 열면 잠금이 부딪히므로(`examples/orders/studio.yaml`의 `api-unit`과 같은 생각) `--project-cache-dir /tmp/gradle-test-cache`로 테스트 전용 캐시를 따로 쓰고 `maxAttempts: 2`로 한 번 재시도한다(서비스마다 별도 컨테이너라 같은 경로를 여러 서비스가 써도 부딪히지 않는다). Maven은 같은 종류의 캐시 잠금 보고가 없어 재시도를 더하지 않는다.
+   - **Node(`detectNode`)**: `package.json`에 `test` 스크립트가 있을 때만 `{pnpm|yarn|npm} run test`를 넣는다. 없으면 아무것도 넣지 않는다 — 없는 스크립트를 부르면 "missing script" 종료 코드로 바로 실패하기 때문이다.
+   - **FastAPI(`detectFastApi`)**: `requirements.txt`·`pyproject.toml` 원문에서 `pytest` 의존성이 있을 때만 `['pytest']`를 넣는다. 같은 자리에서 `testcontainers` 의존성도 함께 찾아, 있으면 "도커-인-도커가 필요해 샌드박스 안에서는 도커 소켓이 없어 실패할 수 있다"는 메모를 따로 남긴다.
+   - 테스트 명령을 넣을 때마다 서비스 notes에 공통 안내(`TEST_GATE_NOTE`)를 남긴다: "게이트가 이 테스트를 test 단계에서 돌립니다. 너무 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml의 workflow.tests에서 좁히거나 지우세요." Node는 watch 모드로 끝나지 않는 스크립트(CI 환경 변수가 없을 때의 `react-scripts test` 등)가 10분 타임아웃까지 걸릴 수 있다는 메모를 추가로 남긴다.
+   - `specYaml`의 `workflowYaml`을 `tests`·`pageChecks` 두 가지를 한 번에 만드는 함수로 합쳤다. YAML에 같은 최상위 키(`workflow:`)가 두 번 나오면 뒤엣것만 적용되므로, 테스트 명령과 프론트엔드→백엔드 자동 연결(ADR-095)이 함께 있는 프로젝트에서 한쪽이 사라지는 사고를 막으려면 반드시 한 함수에서 합쳐야 한다.
+   - `defaultSelected: false`가 붙은 서비스(같은 서비스 폴더 하위의 또 다른 빌드, ADR-083 — pay의 `consumer-app`)는 테스트 명령을 찾아도 `workflow.tests`에는 넣지 않는다. 이 서비스는 기본 서비스 선택에서 빠져 컨테이너 자체가 뜨지 않으므로, 넣으면 게이트가 `docker compose exec`할 컨테이너가 없어 test 단계가 항상 실패한다. 대신 서비스 notes에 "테스트 명령도 찾았지만 기본으로 띄우지 않아 넣지 않았다"는 메모를 남겨, 서비스 선택에서 켠 뒤 직접 studio.yaml에 추가할 수 있게 한다.
+   - 이미 생성된 프로젝트는 "생성 파일 다시 만들기"(ADR-101, `proposeRegeneration`)가 같은 `detectProject`·`generateFiles` 경로를 그대로 타므로 자동으로 반영된다. 사람이 studio.yaml을 직접 고친 적이 있으면(해시 불일치) 기존 "직접 고친 내용이 있습니다" 경고와 파일별 덮어쓰기 선택이 그대로 적용된다 — 이번 변경은 그 정책을 바꾸지 않았다.
+2. **체크포인트 제목이 "요구사항 id·대명사 + 조사"뿐인 조각이 되지 않게 한다(`packages/agent/src/commit-message.ts`).** `toCommitMood`로 부탁 어미를 뗀 결과가 `BARE_ID_OR_PRONOUN_FRAGMENT`(요구사항 id `R\d+` 또는 지시대명사 `이것/그것/저것/이거/그거/저거/이걸/그걸/저걸/이/그/저`에 조사 `은/는/이/가/을/를/도/만/에/에서/로/으로`가 붙거나 안 붙은 꼴만 잡는 패턴)와 완전히 일치하면 "분명한 변경 문장"으로 보지 않고 다음 대체 경로(에이전트 완료 요약의 "범위:"/첫 줄 → 요구사항 id + 바뀐 모듈 → 바뀐 파일 이름)로 넘어간다. "R25를 해 주세요."는 변환 뒤 "R25를"만 남아 이 패턴에 걸리므로, 완료 요약 첫 줄("shorts 모듈을 R25(숏폼↔상품 다중 연결)까지 확장했습니다.")이 있으면 그것으로, 없으면 요구사항 id + 공통 모듈 이름으로 제목을 대신한다.
+
+### 검증 결과
+- `/Users/beomsu/Desktop/pay`에 대해 `detectProject(path, { ignoreExistingSpec: true })`를 파일 생성 없이 직접 호출해 확인했다: `commerce`·`consumer-app`(둘 다 저장소 루트의 `gradlew`를 상위 래퍼로 씀) 모두 `testCommand`로 `['sh', '-c', 'cd /workspace && ./gradlew -p <경로> test --no-daemon --console=plain --project-cache-dir /tmp/gradle-test-cache']`(`maxAttempts: 2`)를 찾았지만, `consumer-app`은 `defaultSelected: false`라 생성된 `studio.yaml`의 `workflow.tests`에는 `commerce` 하나만 들어갔다(그 대신 notes에 "서비스 선택에서 켠 뒤 직접 추가하라"는 메모가 남는다). `web`(Next.js, `package.json`에 `test` 스크립트 없음)은 `testCommand` 없음을 그대로 돌려줬다. 생성될 `studio.yaml`에 `workflow.tests` 한 항목 + 기존 `pageChecks`가 `workflow:` 한 절로 합쳐진 것도 확인했다.
+- `apps/studio/lib/server/project-detect.test.ts`(새 `describe` 블록, 루트 래퍼+하위 Gradle·같은 폴더 Gradle·래퍼 없는 Gradle·Maven·`test` 스크립트 있는/없는 Next.js·`pytest` 있는/없는 FastAPI·Testcontainers 메모·`workflow:` 중복 키 방지·`defaultSelected: false` 서비스 제외 픽스처): 생성된 `testCommand`·`studio.yaml` 문자열에 더해, 생성 파일을 실제로 쓰고 `loadProject`로 읽은 뒤 `workflowStages()`가 `test`를 포함하는 것까지 확인했다.
+- `packages/agent/src/commit-message.test.ts`(새 테스트 2개): "R25를 해 주세요."를 완료 요약과 함께 주면 제목이 `feat: R25를`이 아니라 `feat: shorts 모듈을 R25(숏폼↔상품 다중 연결)까지 확장했습니다`가 되는 것, "이걸 해 주세요."도 같은 방식으로 에이전트 요약으로 넘어가는 것을 확인했다. 기존 23개 테스트는 그대로 통과했다.
+- `pnpm -r typecheck`(6/6), 관련 vitest 전부 통과, `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고 9건만 유지)를 돌렸다.
+
+### 감수한 트레이드오프
+- 엄격(기본으로 넣는) 쪽을 택해, Testcontainers 같은 외부 의존이 있는 모듈에서 기본 `test` 태스크가 통합 테스트까지 포함하도록 구성돼 있으면(pay의 commerce처럼 태그로 분리해 두지 않았으면) 체크포인트마다 게이트가 실패할 수 있다. notes의 narrowing 안내만으로는 사람이 studio.yaml을 열어 직접 좁히기 전까지 이 위험이 남는다.
+- `GRADLE_TEST_CACHE_DIR`는 모든 Gradle 서비스가 같은 경로 문자열(`/tmp/gradle-test-cache`)을 쓴다. 서비스마다 별도 컨테이너라 지금은 부딪히지 않지만, 한 컨테이너 안에서 `docker compose exec`를 동시에 두 번 거는 경로가 생기면(지금은 없다) 달라질 수 있다.
+- `BARE_ID_OR_PRONOUN_FRAGMENT`는 이번에 실측한 요구사항 id·지시대명사 + 조사 꼴만 잡는다. "그것만"처럼 조사가 겹치거나 목록에 없는 다른 짧은 대명사는 여전히 조각째 제목이 될 수 있다.

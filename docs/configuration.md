@@ -471,6 +471,25 @@ checkpoints:
 
 사내 저장소가 이미 다른 커밋 메시지 규칙을 강제한다면 꺼서 기존 형식을 유지할 수 있습니다. "제출 준비" 탭(개발 화면)이 이 제목 규칙을 포함해 커밋 기록·요구사항·테스트·README·시드·비밀 값을 점검합니다.
 
+## 폴더 열기가 만드는 workflow.tests (ADR-133)
+
+폴더 열기(ADR-067)가 서비스를 감지할 때, 서비스 폴더에서 테스트 명령도 함께 찾아 생성 `studio.yaml`의 `workflow.tests`에 기본으로 넣습니다. 넣을지 말지는 템플릿마다 다릅니다:
+
+| 템플릿 | 찾는 조건 | 만드는 명령 |
+|---|---|---|
+| Spring Boot(Gradle) | 항상 | 래퍼가 서비스 폴더 자신에 있으면 `./gradlew test --no-daemon --console=plain --project-cache-dir /tmp/gradle-test-cache`(`maxAttempts: 2`). 래퍼가 저장소 루트 같은 상위 폴더에 있으면(실제 저장소에서 흔한 구조, ADR-128) 그 폴더로 `cd`한 뒤 `-p`로 서비스 폴더를 가리킵니다. 래퍼가 전혀 없으면 이미지에 든 `gradle` 도구를 씁니다 |
+| Spring Boot(Maven) | 항상 | 같은 래퍼 경로 규칙으로 `./mvnw test`(상위 래퍼면 `-f`로 가리킴). Gradle과 달리 캐시 잠금 문제가 보고되지 않아 재시도를 더하지 않습니다 |
+| Next.js·Vite | `package.json`에 `test` 스크립트가 있을 때만 | `{pnpm|yarn|npm} run test` |
+| FastAPI | `requirements.txt`·`pyproject.toml`에 `pytest` 의존성이 있을 때만 | `pytest` |
+
+Gradle 테스트가 `--project-cache-dir`로 별도 캐시를 쓰는 이유는 개발 서버(`bootRun`)가 기본 프로젝트 캐시(`.gradle`)를 계속 쓰고 있어, 같은 캐시를 테스트가 또 열면 잠금이 부딪히기 때문입니다([`examples/orders/studio.yaml`](../examples/orders/studio.yaml)의 `api-unit`과 같은 생각입니다).
+
+테스트 명령을 넣을 때마다 그 서비스의 `# 확인:` 메모에 "게이트가 이 테스트를 test 단계에서 돌립니다. 너무 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml의 workflow.tests에서 좁히거나 지우세요"가 함께 남습니다. 실제로 테스트가 Testcontainers처럼 도커를 더 띄우려 하면(도커-인-도커) 샌드박스 안에는 도커 소켓이 없어 실패할 수 있습니다 — 통합 테스트를 JUnit 태그나 별도 소스셋으로 분리해 기본 `test`/`pytest` 태스크에서 빠지게 해 두면(흔한 Gradle·Spring 관례) 이 문제를 피할 수 있습니다. 느리거나 외부 의존이 있는 테스트는 생성된 `workflow.tests` 항목을 직접 지우거나 명령을 좁혀서 쓰세요.
+
+찾은 테스트 명령이 하나도 없으면(예: `test` 스크립트가 없는 Next.js 단일 서비스 프로젝트) `workflow.tests` 자체를 만들지 않고, `required`를 선언하지 않은 한 게이트는 `test` 단계를 건너뜁니다(위 '팀 워크플로'의 `workflowStages()` 규칙과 같습니다). "생성 파일 다시 만들기"(ADR-101)를 돌리면 이 규칙으로 `workflow.tests`를 다시 계산합니다.
+
+기본 서비스 선택(ADR-083)에서 빠진 서비스(`defaultSelected: false`, 같은 서비스 폴더 하위의 또 다른 빌드 — 예: pay의 `commerce/consumer-app`)는 테스트 명령을 찾아도 `workflow.tests`에는 넣지 않습니다. 그 서비스의 컨테이너 자체가 기본으로 뜨지 않아, 넣으면 게이트가 뜨지도 않은 컨테이너에 `exec`해 test 단계가 항상 실패하기 때문입니다. 서비스를 선택에서 켰다면 그 서비스의 `# 확인:` 메모에 적힌 명령을 `workflow.tests`에 직접 추가하세요.
+
 ## 모노레포
 
 ```yaml

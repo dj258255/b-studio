@@ -143,6 +143,19 @@ describe('generateCommitSubject', () => {
     expect(subject).not.toContain('추가로');
   });
 
+  it('요청이 "R25를 해 주세요."처럼 부탁 어미를 떼고 나면 요구사항 id+조사 조각만 남으면 에이전트 요약으로 대신한다(도그푸딩 버그 리포트: 제목이 "feat: R25를"이 됐다)', () => {
+    const request = 'R25를 해 주세요.';
+    const summary = 'shorts 모듈을 R25(숏폼↔상품 다중 연결)까지 확장했습니다.\n\n세부 설명은 아래에.';
+    const subject = generateCommitSubject(request, [change('apps/commerce/src/shorts/link.ts')], summary);
+    expect(subject).not.toBe('feat: R25를');
+    expect(subject).toBe('feat: shorts 모듈을 R25(숏폼↔상품 다중 연결)까지 확장했습니다');
+  });
+
+  it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
+    const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
+    expect(subject).not.toBe('feat: 이걸');
+  });
+
   it('AI 리뷰 고침 요청(buildPrReviewFixRequest)이면 요청 글의 공통 문구 대신 지적 제목들로 제목을 만든다(과제 66 버그 리포트)', () => {
     const findings: PrReviewFinding[] = [
       { severity: 'blocker', file: 'api/SeedRunner.java', title: '시드 id 시퀀스 검증', detail: '설명' },
