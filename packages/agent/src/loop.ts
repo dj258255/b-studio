@@ -12,7 +12,7 @@ import { loadProjectGuide } from './project-guide';
 import { createToolResultCache, type SelfCheckMode } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
-import { Workspace } from './workspace';
+import { syncExternalChanges, Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
 import { executionPolicyFor, workflowContext, type WorkflowCheck } from './workflow';
 
@@ -270,6 +270,13 @@ export interface RunAgentOptions {
   /** 레인 조율 게시판. 주면 read_notes·(모델이 쓰는 전략이면) post_note 도구가 목록에 오른다 */
   board?: BoardAccess;
   /**
+   * 이번 실행이 시작되기 전에 이미 작업 트리에 있던 변경(프로젝트 루트 기준 경로, 보관본 되살리기·사람의 직접
+   * 수정 등 — 출처를 가리지 않는다). 에이전트 도구가 이번 실행에서 손대지 않아도 게이트가 검증 대상으로 보게
+   * workspace에 동기화한다(ADR-131 되살리기 미검증 체크포인트 사고 재발 방지). 호출하는 쪽이 세션의 실제
+   * git 작업 트리 상태(checkpoints.pendingFiles())로 채운다
+   */
+  externalChanges?: readonly string[];
+  /**
    * 샌드박스를 지금 켠다(지연 기동 세션). 주면 게이트를 실행 시작 때 만들지 않고, 첫 파일 변경·샌드박스 도구 때
    * 그때 켠 뒤에 만든다 — 계약 기준을 샌드박스가 켜진 뒤, 변경 전에 잡기 위해서다. 없으면 지금처럼 시작할 때 만든다
    */
@@ -334,6 +341,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth, effort: client.info.effort });
 
   const workspace = new Workspace(project.root);
+  // 이번 실행 전부터 작업 트리에 있던 변경(보관본 되살리기 등)을 먼저 알려, 에이전트가 이번 실행에서 파일을
+  // 하나도 건드리지 않아도 게이트가 "검증할 변경 없음"으로 건너뛰지 않게 한다(ADR-131)
+  if (options.externalChanges?.length) syncExternalChanges(workspace, options.externalChanges);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
   // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다.
   // 계약 기준은 샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서 잡아야 하기 때문이다

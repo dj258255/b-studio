@@ -22,7 +22,7 @@ import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
-import { Workspace } from './workspace';
+import { syncExternalChanges, Workspace } from './workspace';
 
 const SERVER = 'b-studio';
 /** 화면 표기. Agent SDK 브랜딩 가이드는 제품 안에서 "Claude Code"라는 이름을 쓰지 않도록 한다 */
@@ -119,6 +119,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const researching = ask && research;
 
   const workspace = new Workspace(project.root);
+  // 이번 실행 전부터 작업 트리에 있던 변경(보관본 되살리기 등)을 먼저 알려, 에이전트가 이번 실행에서 파일을
+  // 하나도 건드리지 않아도 게이트가 "검증할 변경 없음"으로 건너뛰지 않게 한다(ADR-131)
+  if (options.externalChanges?.length) syncExternalChanges(workspace, options.externalChanges);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
   // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다.
   // 계약 기준은 샌드박스가 켜진 뒤, 아직 바뀌지 않은 코드에서 잡아야 하기 때문이다(API 경로와 같은 규칙)

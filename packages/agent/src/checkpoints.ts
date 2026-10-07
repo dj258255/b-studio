@@ -3,7 +3,7 @@ import { appendFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } f
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
-import { parseVerifyTrailerValues, parseWorkflowTrailerValues, WORKFLOW_TRAILER, WORKFLOW_VERIFY_TRAILER } from './workflow';
+import { formatVerifyTrailer, isDocCheckpointPath, parseVerifyTrailerValues, parseWorkflowTrailerValues, WORKFLOW_TRAILER, WORKFLOW_VERIFY_TRAILER } from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -392,6 +392,17 @@ export class CheckpointStore {
   ): Promise<Checkpoint | undefined> {
     const pending = await this.pendingFiles();
     if (!allowEmpty && pending.length === 0) return undefined;
+    // 마지막 방어선(ADR-131, session 5b640fd3 사고): 코드 변경(문서가 아닌 파일)이 있는데 트레일러가 검증
+    // 게이트를 거쳤다는 기록을 "none"(통과한 단계 없음)으로 명시하면 체크포인트를 만들지 않는다. 트레일러
+    // 자체가 없는 경우(commitLocalEdits처럼 애초에 게이트를 거치지 않기로 한 경로)는 다른 이야기라 막지 않는다
+    // — 여기서 막는 것은 "게이트가 있었는데 아무 단계도 통과하지 못했다"는 모순된 기록뿐이다. 문서만 바꿔
+    // 게이트 없이 남기는 체크포인트(Workflow-Verify: docs, ADR-096)는 예외로 그대로 둔다
+    const codeFiles = pending.filter((file) => !isDocCheckpointPath(file));
+    if (codeFiles.length > 0 && hasEmptyPassedTrailer(trailers) && !hasDocsVerifyTrailer(trailers)) {
+      throw new CheckpointError(
+        `검증 게이트를 거치지 않은 코드 변경이 있어 체크포인트를 남기지 않았습니다: ${codeFiles.slice(0, 20).join(', ')}`,
+      );
+    }
     // 검증 게이트는 에이전트 도구로 쓴 파일만 보지만, 커밋은 명령이 만든 파일까지 담는다. 올리기 전 마지막으로 막는다
     if (findSecrets) {
       const leaks = await this.#secretLeaks(pending, `${message}\n${body ?? ''}`, findSecrets);
@@ -1127,4 +1138,18 @@ function oneLine(message: string): string {
 function capText(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max)}\n[... 길어서 ${text.length - max}자를 생략했습니다 ...]\n`;
+}
+
+/** commit()에 넘긴 trailers 중 Workflow-Passed 값이 'none'(통과한 단계가 하나도 없다는 뜻)인 줄이 있는지 */
+function hasEmptyPassedTrailer(trailers: readonly string[]): boolean {
+  const prefix = `${WORKFLOW_TRAILER}:`.toLowerCase();
+  const line = trailers.find((entry) => entry.trim().toLowerCase().startsWith(prefix));
+  if (!line) return false;
+  return line.slice(line.indexOf(':') + 1).trim().toLowerCase() === 'none';
+}
+
+/** commit()에 넘긴 trailers에 문서 체크포인트 예외(Workflow-Verify: docs, ADR-096)가 있는지 */
+function hasDocsVerifyTrailer(trailers: readonly string[]): boolean {
+  const expected = formatVerifyTrailer('docs').toLowerCase();
+  return trailers.some((entry) => entry.trim().toLowerCase() === expected);
 }

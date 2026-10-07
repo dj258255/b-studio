@@ -61,15 +61,27 @@ const SITUATIONAL_WORDS =
   /(앞|이전|지난|직전|방금)\s*(실행|시도|요청|작업)|네트워크|연결이?\s*끊|세션이?\s*끊|턴\s*상한|토큰\s*상한|되돌려지|롤백되|rate\s*limit|레이트\s*리밋|타임아웃|timeout/i;
 
 /**
+ * "지금 무엇이 바뀌었는지"가 아니라 그걸 알아내기까지의 경과(검토해 보니 어땠는지, 이미 돼 있었는지, 더 할 게
+ * 없는지)를 서술하는 문장을 가리키는 낱말(실측: 세션 5b640fd3, 체크포인트 15ba740 — 요약 첫 줄이 "검토 결과,
+ * 이전 턴에서 복구된 9개 파일(R21 구현)은 이미 완성되어 있었습니다 — 추가로 만들 것이 없어 검증만"이 되어,
+ * 그대로 제목이 됐다. 바뀐 파일을 말하지 않는 경과 보고라 요구사항 id·공통 모듈(requirementModuleCandidate)
+ * 같은 대체 경로로 넘겨야 한다). SITUATIONAL_WORDS(앞 실행·인프라 문제)와 달리 이쪽은 에이전트가 스스로
+ * "확인했다"는 과정을 보고하는 말투다.
+ */
+const PROGRESS_REPORT_WORDS = /검토\s*결과|확인해\s*보니|돌아보니|살펴보니|이미\s*.{0,25}있었|추가로\s*(만들|할|고칠)\s*것(이|가)?\s*없/;
+
+/**
  * 한 줄이 "무엇이 바뀌었는지" 분명히 말하는 서술문인지 본다(요청 글·에이전트 요약 둘 다에 쓴다). 너무 짧거나,
- * 물음표로 끝나거나, 앞 실행·인프라 같은 상황 설명이거나(SITUATIONAL_WORDS), 말투를 커밋 문체로 정리
- * (toCommitMood)하고도 부탁 어미만 남으면(예: "해주세요" 그 자체) 분명하지 않다고 보고 다음 대체 경로로 넘긴다.
+ * 물음표로 끝나거나, 앞 실행·인프라 같은 상황 설명이거나(SITUATIONAL_WORDS), 경과를 보고하는 말투거나
+ * (PROGRESS_REPORT_WORDS), 말투를 커밋 문체로 정리(toCommitMood)하고도 부탁 어미만 남으면(예: "해주세요"
+ * 그 자체) 분명하지 않다고 보고 다음 대체 경로로 넘긴다.
  */
 function isClearChangeSentence(line: string): boolean {
   const trimmed = line.trim();
   if (trimmed.length < 4) return false;
   if (/[?？]\s*$/.test(trimmed)) return false;
   if (SITUATIONAL_WORDS.test(trimmed)) return false;
+  if (PROGRESS_REPORT_WORDS.test(trimmed)) return false;
   const converted = toCommitMood(trimmed);
   if (converted.trim().length < 2) return false;
   return !TRAILING_REQUEST_PHRASING.test(converted);

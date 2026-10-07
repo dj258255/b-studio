@@ -15,7 +15,7 @@ import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './promp
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, type ToolOutcome } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
-import { Workspace } from './workspace';
+import { syncExternalChanges, Workspace } from './workspace';
 
 /** MCP 서버 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: `opencode models`·`debug config`) */
 const SERVER = 'b_studio';
@@ -256,6 +256,9 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
   if (options.escalation) onEvent({ type: 'warning', message: '로컬 OpenCode Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
+  // 이번 실행 전부터 작업 트리에 있던 변경(보관본 되살리기 등)을 먼저 알려, 에이전트가 이번 실행에서 파일을
+  // 하나도 건드리지 않아도 게이트가 "검증할 변경 없음"으로 건너뛰지 않게 한다(ADR-131)
+  if (options.externalChanges?.length) syncExternalChanges(workspace, options.externalChanges);
   // 질문 모드는 파일을 바꾸지 않으므로 계약 기준을 잡거나 게이트를 돌리지 않는다.
   // 지연 기동 세션(ensureSandbox)은 게이트를 여기서 만들지 않고, 첫 파일 변경·샌드박스 도구 때 샌드박스를 켠 뒤에 만든다
   let gate: VerificationGate | undefined;

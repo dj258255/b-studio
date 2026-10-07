@@ -2359,9 +2359,14 @@ function stoppedQuestionSummary(run: ActiveRun, limit: number | undefined): stri
 
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
 async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
+  // 이번 요청 전부터 작업 트리에 있던 변경(보관본 되살리기, 사람이 편집기로 바꾼 것 등 출처를 가리지 않는다).
+  // 에이전트가 이번 실행에서 파일을 하나도 건드리지 않아도 게이트가 이 변경을 검증 대상으로 보게 한다(ADR-131:
+  // 게이트 없이 체크포인트가 생기던 사고 — session 5b640fd3, 체크포인트 15ba740).
+  const externalChanges = await session.checkpoints.pendingFiles();
   const shared = {
     project: session.project,
     sandbox: session.sandbox,
+    externalChanges,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
     // "조사" 모드(ADR-094): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다

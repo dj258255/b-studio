@@ -152,6 +152,7 @@
 - [ADR-129 CLI 러너(Command Code·OpenCode·Gemini)에 레인 조율 게시판을 연결하고, CLI 레인 사용량을 모델별로 집계한다](#adr-129-cli-러너command-codeopencodegemini에-레인-조율-게시판을-연결하고-cli-레인-사용량을-모델별로-집계한다)
 - [ADR-130 폴더 열기 감지가 프런트엔드의 백엔드 주소를 공개 변수뿐 아니라 서버 쪽 변수(SPRING_API 등)에서도 찾아 컨테이너 사이 주소로 채운다](#adr-130-폴더-열기-감지가-프런트엔드의-백엔드-주소를-공개-변수뿐-아니라-서버-쪽-변수spring_api-등에서도-찾아-컨테이너-사이-주소로-채운다)
 - [ADR-131 실행 실패로 되돌릴 때 DB도 마지막 덤프 시점으로 되돌리고, 턴 상한은 설정할 수 있게 하며 걸리면 게이트를 한 번 더 본다](#adr-131-실행-실패로-되돌릴-때-db도-마지막-덤프-시점으로-되돌리고-턴-상한은-설정할-수-있게-하며-걸리면-게이트를-한-번-더-본다)
+- [ADR-132 되살린 변경을 쓰지 않은 요청도 검증 게이트를 거치게 하고, 체크포인트 저장 지점에 마지막 방어선을 둔다](#adr-132-되살린-변경을-쓰지-않은-요청도-검증-게이트를-거치게-하고-체크포인트-저장-지점에-마지막-방어선을-둔다)
 
 ---
 
@@ -5466,3 +5467,41 @@ E4가 남긴 두 원인을 규칙으로 겨냥합니다. **둘 다 선택이고 
 - **DB 복원은 여전히 체크포인트 단위다.** 한 요청 안에서 여러 번 마이그레이션을 적용하고 되돌리는 세밀한 추적은 하지 않는다 — "마지막 체크포인트 시점으로 전부 되돌린다"는 ADR-018의 원래 설계를 그대로 따른다.
 - **"지금 체크포인트로 되돌리기"의 화면 문구는 휴리스틱으로 가른다.** `isHead`일 때와 아닐 때 다른 문장을 보여 주지만, 실제로 무엇이 어긋났는지(파일인지 DB인지)는 서버가 미리 판정해 보여 주지 않는다 — 눌러서 결과(되돌린 서비스·데이터베이스 상태)를 보기 전에는 "할 일이 있는지"를 미리 알 수 없다.
 - **CLI 러너(Codex·Command Code·OpenCode·Gemini) 쪽 재확인은 Claude Code만큼 실전에서 검증되지 않았다.** 실제로 측정된 사고는 claude-code 백엔드였고, 나머지 다섯 실행기는 같은 패턴을 기계적으로 옮겨 단위 테스트(가짜 CLI)로만 확인했다 — 실제 CLI 프로세스로 턴 상한을 재현하는 e2e 검증은 하지 않았다.
+
+## ADR-132 되살린 변경을 쓰지 않은 요청도 검증 게이트를 거치게 하고, 체크포인트 저장 지점에 마지막 방어선을 둔다
+
+상태: 채택
+관련: ADR-010, ADR-018, ADR-049, ADR-096, ADR-099, ADR-131
+
+### 맥락
+- 도그푸딩 저장소 세션 5b640fd3에서 실패한 실행 ec7db659가 변경 9개 파일을 보관(DiscardBackup, ADR-099)했다. 사람이 `POST /api/sessions/5b640fd3/discarded/<backupId>/restore`로 그 보관본을 작업 트리에 되살렸다. ADR-131의 설계대로 되살린 변경은 미검증 상태이고, 다음 요청의 검증 게이트를 거쳐야 체크포인트로 남아야 한다.
+- 다음 요청 d314c3d2(턴 상한 150)에서 에이전트는 read_file 63회, run_in_service 60회, http_request 6회만 썼다. write_file·edit_file은 한 번도 부르지 않았다. 이 실행의 이벤트는 run_started → agent(모델 호출 191회) → tokens → checkpoint → run_finished(done) 순이었고, 검증 게이트가 도는 verify_start·verify_result·workflow_check 이벤트가 하나도 없었다.
+- 그런데도 체크포인트 15ba740(파일 19개, +680/-25줄, 되살린 9개 파일과 그 전 상태의 차이)이 생겼고 커밋 트레일러가 `Workflow-Passed: none`이었다. 검증 게이트를 거치지 않은 코드 변경이 체크포인트로 남은 것이다. 같은 체크포인트의 제목도 `feat: 검토 결과, 이전 턴에서 복구된 9개 파일(R21 구현)은 이미 완성되어 있었습니다 — 추가로 만들 것이 없어 검증만`이었다. 완료 요약에 "범위:" 줄이 없어 `summaryTitleLine`이 첫 줄을 그대로 제목 후보로 넘겼는데, 그 첫 줄이 경과 보고였다.
+- 원인은 `VerificationGate.check()`(`packages/agent/src/gate.ts`)가 `workspace.changedFiles().length === 0`이면 바로 `{kind: 'pass'}`를 돌려준다는 데 있다. `changedFiles()`는 이번 실행에서 `write_file`·`edit_file` 도구로 쓴 파일만 기록하는 인메모리 집합(`Workspace`, `packages/agent/src/workspace.ts`)이다. 여섯 실행기(`loop.ts`, `claude-code-runner.ts`, `codex-runner.ts`, `commandcode-runner.ts`, `opencode-runner.ts`, `gemini-cli-runner.ts`)가 요청마다 `new Workspace(project.root)`로 빈 집합을 새로 만들고, 이번 요청 전부터 작업 트리에 있던 변경(되살린 보관본, 사람이 편집기로 바꾼 것)을 알려 주는 쪽이 아무 데도 없었다. `Workspace.trackExternalChanges()`는 이미 있었지만 `apps/cli/src/commands/verify.ts`(독립 CLI 명령)만 불렀고, 스튜디오 세션 실행 경로(`apps/studio/lib/server/sessions.ts`)는 한 번도 부르지 않았다.
+- 체크포인트가 실제로 저장되는 지점(`CheckpointStore.commit()`, `packages/agent/src/checkpoints.ts`)도 `pendingFiles()`(git 작업 트리의 실제 diff)만 보고 커밋 여부를 정했다. 게이트가 돌았는지, `Workflow-Passed` 트레일러가 비어 있는지는 전혀 확인하지 않았다. `saveCheckpoint`(`sessions.ts`)는 요청 결과가 `done`이면 트레일러 값과 상관없이 그대로 커밋을 남겼다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| A. `gate.ts`가 직접 `git status`나 `CheckpointStore`를 불러 작업 트리 상태를 본다 | 게이트는 git·체크포인트 저장소를 모르는 계층이다(기존 계층 분리, `Workspace`만 안다). `gate.ts`에 git 의존을 넣으면 CLI 명령(`apps/cli/src/commands/verify.ts`)과 스튜디오 세션 양쪽에서 쓰는 추상을 깨뜨린다 |
+| B. 호출하는 쪽(스튜디오 세션)이 실제 git 작업 트리 상태를 읽어 `Workspace`에 동기화한 뒤 게이트를 부른다 | 이미 있는 `trackExternalChanges()`를 그대로 재사용할 수 있고, CLI 명령이 이미 같은 패턴(`trackFiles`)을 쓰고 있어 검증된 길이다(채택) |
+| C. 체크포인트 저장 지점(`checkpoints.commit()`)은 그대로 두고 `saveCheckpoint`(세션 쪽)에서만 트레일러를 검사해 막는다 | 이 메서드로 커밋하는 경로가 늘어날수록(가져오기·기준 브랜치 따라잡기 등) 호출부마다 같은 검사를 반복해야 한다. 가장 낮은 공유 지점(`commit()` 자신)에 두면 새 호출부가 생겨도 자동으로 보호된다(채택) |
+| D. 완료 요약 첫 줄 거르기는 모델을 다시 불러 "제목에 쓸 한 줄"을 새로 생성한다 | #459가 이미 비용 없이(모델 재호출 없이) 완료 요약·요청 글만 읽어 제목을 고르는 방식을 정했다. 같은 원칙으로 경과 보고 낱말만 더 거르는 쪽이 비용·일관성 면에서 낫다(채택) |
+
+### 결정
+1. **이번 요청 전부터 있던 작업 트리 변경을 `Workspace`에 동기화한다.** `workspace.ts`에 `syncExternalChanges(workspace, files)`를 추가했다. 프로젝트 밖 경로·생성물·비밀 파일처럼 `trackExternalChanges`가 거부하는 경로는 조용히 건너뛰고 나머지만 동기화한다. `RunAgentOptions`(`loop.ts`)에 `externalChanges?: readonly string[]`를 추가해 다섯 CLI 러너(`claude-code-runner.ts`·`codex-runner.ts`·`commandcode-runner.ts`·`opencode-runner.ts`·`gemini-cli-runner.ts`)와 API 직접 루프 모두 `Workspace` 생성 직후 같은 함수로 동기화하게 했다. `apps/studio/lib/server/sessions.ts`의 `runPlan` 공유 옵션에 `externalChanges: await session.checkpoints.pendingFiles()`를 넣어, 되살린 보관본이든 사람이 편집기로 바꾼 것이든 출처와 상관없이 매 요청 시작 시점의 실제 git 작업 트리 상태를 넘긴다. 이제 에이전트가 이번 실행에서 파일을 하나도 쓰지 않아도, 작업 트리에 이미 바뀐 코드가 있으면 `workspace.changedFiles()`가 비지 않아 게이트가 실제로 돈다. 통과하면 체크포인트로 남고, 통과하지 못하면 기존 실패 경로(보관 뒤 되돌림)를 탄다.
+2. **체크포인트 저장 지점에 마지막 방어선을 둔다.** `CheckpointStore.commit()`(`checkpoints.ts`)이 커밋하기 전에, 바뀐 파일 중 문서가 아닌 파일(`isDocCheckpointPath`로 거른 나머지)이 있는데 트레일러의 `Workflow-Passed` 값이 `none`이면(검증 게이트가 있었는데 통과한 단계가 하나도 없다는 모순된 기록이면) `CheckpointError`를 던져 커밋하지 않는다. 트레일러에 `Workflow-Verify: docs`가 있으면(ADR-096의 문서 체크포인트) 그대로 허용한다. 트레일러 자체가 없는 경로(`commitLocalEdits`처럼 애초에 게이트를 거치지 않기로 한 기존 경로)는 막지 않는다. 막히면 `saveCheckpoint`를 부른 쪽의 기존 예외 처리가 그대로 받아, 체크포인트를 만들지 않고 보관 뒤 되돌림(ADR-099)으로 이어진다.
+3. **기록 화면에 "검증되지 않음" 표시를 더한다.** PR 초안(`repository.ts`의 `buildPullRequest`)은 이미 `passedStages`가 비어 있으면 "통과: 기록 없음"으로 보여주고 "돌리지 않은 검증" 절에 필수 단계를 함께 적고 있어 손대지 않았다. 기록 화면(`history-panel.tsx`)에는 같은 상태를 보여주는 표시가 없어, `verify`가 `light`·`docs`가 아닌데 `passedStages`가 빈 배열인 체크포인트에 "검증되지 않음" 배지를 추가했다.
+4. **완료 요약 첫 줄이 경과 보고면 제목 후보에서 뺀다.** `commit-message.ts`의 `isClearChangeSentence`에 `PROGRESS_REPORT_WORDS`(검토 결과, 확인해 보니, 돌아보니, 살펴보니, 이미 …있었, 추가로 …것이 없 같은 낱말)를 더했다. #459의 `SITUATIONAL_WORDS`(앞 실행·네트워크 등 상황 설명)와 같은 자리에서 같은 방식으로 동작하며, 걸리면 다음 대체 경로(요구사항 id + 바뀐 파일의 공통 모듈, `requirementModuleCandidate`)로 넘어간다. 기존 #459 규칙과 테스트는 그대로 유지했다.
+
+### 검증 결과
+- `packages/agent/src/workspace.test.ts`(새 `describe`): `syncExternalChanges`가 바깥 변경을 동기화하는 것, 거부되는 경로(프로젝트 밖·생성물·비밀 파일·폴더)는 조용히 건너뛰고 나머지는 동기화하는 것, 빈 목록이면 아무 일도 하지 않는 것을 확인했다.
+- `packages/agent/src/checkpoints.test.ts`(새 테스트 3개): 코드 변경이 있는데 `Workflow-Passed: none`이면 `commit()`이 거부하는 것, 트레일러 자체가 없으면(기존 `commitLocalEdits` 경로) 막지 않는 것, `Workflow-Verify: docs` 예외는 `Workflow-Passed: none`이어도 그대로 허용하는 것을 확인했다.
+- `apps/studio/lib/server/sessions-revert-backup.test.ts`(기존 테스트 보강 + 새 테스트 1개, 진짜 git 저장소·체크포인트·`ScriptedModelClient`에 가짜 샌드박스): 보관본을 되살린 뒤 파일을 쓰지 않는 요청을 보내면 `verify_start` 이벤트가 실제로 발생하는 것(게이트가 돈다), 서비스 재시작이 통과하면 그 체크포인트의 `passedStages`가 채워지고 `Workflow-Passed: none`이 아닌 것, 서비스 재시작이 실패하면 체크포인트 수가 늘지 않고 기존 실패 경로(보관 뒤 되돌림)를 그대로 타는 것을 확인했다. 수정 전 코드로 되돌려 보면 첫 번째 확장 테스트가 `passedStages`를 `undefined`로 돌려받아 실패하는 것도 직접 확인해 회귀를 재현했다.
+- `packages/agent/src/commit-message.test.ts`(새 테스트 2개): 실측 문장("검토 결과, 이전 턴에서 복구된 9개 파일(R21 구현)은 이미 완성되어 있었습니다 — 추가로 만들 것이 없어 검증만")을 그대로 완료 요약으로 주면 제목에 "검토 결과"·"이미"·"추가로"가 들어가지 않고 `[R21] shorts 모듈을 고친다`로 나오는 것, "확인해 보니"·"추가로 …것이 없어" 같은 다른 경과 보고 말투도 같은 방식으로 걸러지는 것을 확인했다. 기존 #459 테스트(상황 설명 문장 거르기) 21건은 모두 그대로 통과했다.
+- `pnpm -r typecheck`(6/6), `pnpm exec vitest run`(packages/agent 56개 파일 1,145건, apps/studio 213개 파일 1,745건, 전부 통과), `pnpm --filter @b-studio/studio lint`(오류 0, 기존 경고 9건만 유지)를 모두 돌렸다.
+
+### 감수한 트레이드오프
+- `syncExternalChanges`는 거부된 경로(비밀 파일·생성물·프로젝트 밖)를 조용히 건너뛴다. 그런 파일이 실제로 바뀌어 있으면 게이트가 그 변경을 보지 못한 채 통과할 수 있다. `commit()`의 `findSecrets` 점검이 커밋 단계에서 한 번 더 비밀 값을 잡아내므로 전적으로 무방비는 아니다.
+- 체크포인트 저장 지점의 방어선은 트레일러 문자열 모양(`Workflow-Passed: none`)만 본다. 호출하는 쪽이 애초에 트레일러를 비워서(트레일러 자체를 넘기지 않아) 커밋하는 기존 경로(`commitLocalEdits`)는 막지 않는다. 그 경로 자체를 게이트 대상으로 바꾸는 일은 이번 사고의 범위 밖이라 손대지 않았다.
+- `PROGRESS_REPORT_WORDS`는 이번에 실측한 네 가지 표현(검토 결과, 확인해 보니, 이미 …있었습니다, 추가로 …것이 없어)과 그 변형만 잡는 낱말 목록이다. 비슷한 뜻의 다른 경과 보고 표현은 여전히 제목으로 샐 수 있다.

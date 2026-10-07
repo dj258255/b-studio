@@ -110,6 +110,41 @@ describe('CheckpointStore', () => {
     expect(previous!.passedStages).toEqual(['run', 'contract_check']);
   });
 
+  it('코드 변경이 있는데 Workflow-Passed가 none이면 체크포인트를 만들지 않는다(ADR-131 마지막 방어선)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await expect(store.commit('요청: 메모 추가', '검증 없이 복원된 변경', { trailers: [formatWorkflowTrailer([])] })).rejects.toThrow(
+      '검증 게이트를 거치지 않은 코드 변경이 있어 체크포인트를 남기지 않았습니다',
+    );
+    // 막혔으므로 체크포인트가 늘지 않고, 변경은 그대로 pending에 남는다(호출하는 쪽이 되돌리기로 처리한다)
+    expect(await store.list()).toHaveLength(1);
+    expect(await store.pendingFiles()).toEqual(['api/src/Order.java']);
+  });
+
+  it('트레일러 자체가 없으면(게이트를 애초에 거치지 않기로 한 경로) 막지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const local = await store.commit('직접 수정: 파일 1개', '스튜디오 밖에서 바꾼 파일입니다.');
+    expect(local?.passedStages).toBeUndefined();
+    expect(await store.pendingFiles()).toEqual([]);
+  });
+
+  it('Workflow-Passed가 none이어도 문서 체크포인트 예외(Workflow-Verify: docs)는 그대로 허용한다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await mkdir(path.join(root, 'docs'), { recursive: true });
+    await write('docs/requirements.md', '# 요구사항\n');
+    // 실제 호출부(commitWorkingCopyDocs)는 commitPaths로 문서 경로만 좁혀 커밋하지만, 방어선 자체는 commit()에
+    // 있으므로 같은 트레일러 조합을 commit()에 직접 줘도 막지 않는지 본다(문서만 바뀌었으면 예외가 적용된다)
+    const docsOnly = await store.commit('지키기: 되돌리기 전에 문서를 체크포인트로 남긴다', undefined, {
+      trailers: [formatWorkflowTrailer([]), formatVerifyTrailer('docs')],
+    });
+    expect(docsOnly?.verify).toBe('docs');
+    expect(await store.pendingFiles()).toEqual([]);
+  });
+
   it('다른 사람이 만든 커밋의 트레일러는 무시하고, 스튜디오가 만든 체크포인트의 통과 기록은 그대로 읽는다', async () => {
     const store = new CheckpointStore(root);
     await store.init();

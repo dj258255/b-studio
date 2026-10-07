@@ -120,6 +120,29 @@ describe('generateCommitSubject', () => {
     expect(subject).not.toContain('네트워크');
   });
 
+  it('완료 요약 첫 줄이 "검토 결과…이미 완성되어 있었습니다"처럼 경과 보고면("범위:" 줄도 없으면) 제목 후보에서 빼고 요구사항 id와 공통 모듈로 제목을 만든다(실측: 세션 5b640fd3, 체크포인트 15ba740)', () => {
+    const request = '앞 실행이 턴 상한에 걸려 변경이 모두 되돌려졌습니다. R21 작업을 이어서 해 주세요.';
+    const summary = '검토 결과, 이전 턴에서 복구된 9개 파일(R21 구현)은 이미 완성되어 있었습니다 — 추가로 만들 것이 없어 검증만 했습니다.';
+    const changes = [
+      change('apps/commerce/src/shorts/state-machine.ts'),
+      change('apps/commerce/src/shorts/migrations/V74__add_shorts_state.sql'),
+      change('apps/commerce/src/shorts/__tests__/r21.test.ts'),
+    ];
+    const subject = generateCommitSubject(request, changes, summary);
+    expect(subject).not.toContain('검토 결과');
+    expect(subject).not.toContain('이미');
+    expect(subject).not.toContain('추가로');
+    expect(subject).toBe('feat: [R21] shorts 모듈을 고친다');
+  });
+
+  it('"확인해 보니"·"추가로 …것이 없어"처럼 다른 경과 보고 말투도 제목 후보에서 뺀다', () => {
+    // 요청을 물음표로 끝내 1번 규칙(요청 첫 문장)이 바로 걸러지게 하고, 2번 규칙(요약 첫 줄)만 따로 본다
+    const summary = '확인해 보니 이미 구현이 끝나 있었고, 추가로 고칠 것이 없어 검증만 진행했습니다.';
+    const subject = generateCommitSubject('이어서 진행할까요?', [change('apps/commerce/src/shorts/state-machine.ts')], summary);
+    expect(subject).not.toContain('확인해 보니');
+    expect(subject).not.toContain('추가로');
+  });
+
   it('AI 리뷰 고침 요청(buildPrReviewFixRequest)이면 요청 글의 공통 문구 대신 지적 제목들로 제목을 만든다(과제 66 버그 리포트)', () => {
     const findings: PrReviewFinding[] = [
       { severity: 'blocker', file: 'api/SeedRunner.java', title: '시드 id 시퀀스 검증', detail: '설명' },

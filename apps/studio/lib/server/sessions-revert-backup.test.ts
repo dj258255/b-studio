@@ -11,7 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
  * 상태로 남아(git에 아직 커밋되지 않은 pending 변경) 다음 요청의 검증 게이트를 거쳐야 체크포인트로 남는지 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 체크포인트, discard()의 백업·되살리기. 가짜로 바꾸는 것: 샌드박스(Docker).
  */
-const fake = vi.hoisted(() => ({ root: '' }));
+const fake = vi.hoisted(() => ({ root: '', failRestart: false }));
 
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@b-studio/sandbox')>();
@@ -22,6 +22,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
       return [];
     },
     async restart(service: string) {
+      // 되살린 변경이 이번에는 게이트를 통과하지 못하는 상황을 흉내 낸다(fake.failRestart)
+      if (fake.failRestart) throw new Error('재시작 실패(테스트)');
       return { service, containerPort: 8080, url: 'http://127.0.0.1:1' };
     },
     async sync() {
@@ -181,10 +183,70 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
     // 되살린 변경은 아직 체크포인트가 아니다(검증을 거치지 않은 미검증 상태)
     expect(getSnapshot(id)!.checkpoints.length).toBe(startCheckpoints);
 
-    // 다음 요청이 이어서 그 변경 위에 작업하고 게이트를 통과하면, 되살린 파일도 함께 체크포인트로 남는다
+    // 다음 요청이 이어서 그 변경 위에 작업하고 게이트를 통과하면, 되살린 파일도 함께 체크포인트로 남는다.
+    // 이번 요청은 모델이 파일을 하나도 쓰지 않는다(ADR-131 실측 재현: 세션 5b640fd3, 체크포인트 15ba740 —
+    // 보관본을 되살린 뒤 파일을 쓰지 않는 요청이 게이트를 건너뛰고 Workflow-Passed: none 체크포인트를 남겼다).
+    const beforeSecondRequest = events.length;
     await sendAndWaitFinished(id, '컴파일 에러 확인', [{ text: '이미 반영돼 있어 추가로 바꿀 필요가 없습니다.' }], events);
+
+    // 게이트가 실제로 돌았다(되살린 파일을 workspace가 바뀐 파일로 보고 검증을 건너뛰지 않았다)
+    const verifyStarted = events
+      .slice(beforeSecondRequest)
+      .find((event): event is Extract<StudioEvent, { type: 'agent' }> => event.type === 'agent' && event.event.type === 'verify_start');
+    expect(verifyStarted).toBeDefined();
+
     const checkpoint = getSnapshot(id)!.checkpoints[0]!;
     expect(checkpoint.files).toEqual(['api/src/Order.java']);
+    // 검증 게이트를 통과한 기록이 실제로 남는다 — Workflow-Passed가 비어 있지 않다(none이 아니다)
+    expect(checkpoint.passedStages).toBeDefined();
+    expect(checkpoint.passedStages!.length).toBeGreaterThan(0);
+    expect(checkpoint.verify).toBeUndefined();
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('되살린 뒤 파일을 쓰지 않는 요청도 게이트가 돌고, 통과하지 못하면 체크포인트로 남기지 않고 다시 보관한 뒤 되돌린다', async () => {
+    await setupProject();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    const workDir = getSnapshot(id)!.workDir;
+    const startCheckpoints = getSnapshot(id)!.checkpoints.length;
+
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, (event) => events.push(event));
+
+    await sendAndWaitFinished(
+      id,
+      '메모 필드 추가',
+      [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] }],
+      events,
+    );
+    const reverted = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'reverted' }> => event.type === 'reverted'));
+    restoreDiscardedBackup(id, reverted.backup!.id);
+    await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'backup_restored' }> => event.type === 'backup_restored'));
+    expect(getSnapshot(id)!.checkpoints.length).toBe(startCheckpoints);
+
+    // 이번에는 되살린 변경이 검증 게이트(서비스 재시작)를 통과하지 못하게 한다. 모델은 여전히 파일을 하나도 쓰지 않는다
+    fake.failRestart = true;
+    const beforeSecondRequest = events.length;
+    await sendAndWaitFinished(id, '컴파일 에러 확인', [{ text: '이미 반영돼 있어 추가로 바꿀 필요가 없습니다.' }], events);
+    fake.failRestart = false;
+
+    // 게이트가 실제로 돌았다(건너뛰지 않았다) — 통과하지 못해 체크포인트를 남기지 않았다
+    const verifyStarted = events
+      .slice(beforeSecondRequest)
+      .find((event): event is Extract<StudioEvent, { type: 'agent' }> => event.type === 'agent' && event.event.type === 'verify_start');
+    expect(verifyStarted).toBeDefined();
+    expect(getSnapshot(id)!.checkpoints.length).toBe(startCheckpoints);
+
+    // 실패했으므로 기존 실패 경로(ADR-099: 보관 뒤 되돌림)를 그대로 탄다 — 조용히 사라지지 않는다
+    const revertedAgain = await waitFor(() =>
+      events.slice(beforeSecondRequest).find((event): event is Extract<StudioEvent, { type: 'reverted' }> => event.type === 'reverted'),
+    );
+    expect(revertedAgain.files).toEqual(['api/src/Order.java']);
+    expect(revertedAgain.backup).toMatchObject({ files: ['api/src/Order.java'] });
+    expect(await readFile(path.join(workDir, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
 
     unsubscribe();
     await stopSession(id).catch(() => {});

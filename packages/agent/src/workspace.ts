@@ -227,6 +227,25 @@ export class Workspace {
   }
 }
 
+/**
+ * 바깥에서 이미 바뀐 파일(세션 시작 전에 복원된 보관본, IDE로 고친 파일 등)을 작업 공간에 동기화한다.
+ * 이번 실행의 도구 호출(write_file 등)을 거치지 않았어도 게이트가 "검증할 변경"으로 보게 하려는 것이다
+ * (gate.ts의 VerificationGate.check()는 workspace.changedFiles()만 보고 검증 여부를 정한다 — 작업 트리에
+ * 실제로 바뀐 파일이 있어도 이 동기화가 없으면 게이트가 "바뀐 파일 없음"으로 보고 검증 없이 통과시킨다).
+ * 프로젝트 밖 경로·생성물·비밀 파일처럼 trackExternalChanges가 거부하는 경로는 조용히 건너뛴다 —
+ * 검증 대상에서 빼는 것뿐이지 실행 자체를 막을 이유가 아니다(폴더 경로도 같은 이유로 건너뛴다).
+ */
+export function syncExternalChanges(workspace: Workspace, files: readonly string[]): void {
+  for (const file of files) {
+    if (file.endsWith('/')) continue;
+    try {
+      workspace.trackExternalChanges([file]);
+    } catch {
+      // 거부된 경로는 건너뛴다(위 주석 참고)
+    }
+  }
+}
+
 /** 경로의 어느 구간이든 .env·.env.* 이면 비밀 파일로 본다(.env.example 같은 예시 파일은 뺀다). Pi 확장도 같은 규칙으로 읽기를 막는다 */
 export function isSecretFile(file: string): boolean {
   return file
