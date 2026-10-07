@@ -114,6 +114,16 @@ export interface DetectedService {
    * 건너뛰게 한다. Maven은 이번 범위 밖이다(ADR-134의 "검토한 선택지" 참고)
    */
   mockitoAgentInit?: boolean;
+  /**
+   * Gradle 서비스의 테스트 JVM에 힙·메타스페이스 상한을 거는 init 스크립트가 필요하면 true(ADR-138).
+   * 샌드박스 서비스 컨테이너는 보통 메모리 한도를 걸지 않는데(이 함수는 resources: 블록을 만들지 않는다),
+   * `--no-daemon`으로 돌리는 테스트 JVM의 기본 힙은 JVM 에르고노믹스가 "보이는 메모리"(컨테이너 한도가 없으면
+   * colima VM 전체)의 1/4로 자동으로 잡는다. 같은 컨테이너에서 개발 서버(bootRun)가 이미 돌고 있으면 두 JVM의
+   * 메모리 합이 VM의 남은 메모리를 넘어 커널이 컨테이너를 통째로 종료시킨다(도그푸딩 마찰 116). Maven은
+   * mockitoAgentInit과 같은 이유로 이번 범위 밖이다(ADR-134의 "검토한 선택지" 참고 — surefire의 argLine은
+   * 사용자 설정을 덮어쓸 위험이 있다)
+   */
+  testMemoryInit?: boolean;
 }
 
 export interface ProjectDetection {
@@ -203,6 +213,31 @@ allprojects {
 /** mockitoAgentInit가 true인 서비스의 notes에 남기는 메모(ADR-134, 도그푸딩 마찰 106) */
 const MOCKITO_AGENT_INIT_NOTE =
   'Mockito 같은 inline mock 라이브러리가 쓰는 JVM self-attach가 샌드박스의 공유 폴더 마운트에서는 항상 실패해(컨테이너 root가 만든 파일도 소유자가 호스트 uid로 보임), Gradle init 스크립트로 mockito-core를 -javaagent로 붙였습니다(GRADLE_USER_HOME/init.d). 사용자 프로젝트의 테스트 설정은 건드리지 않습니다';
+
+/** compose 최상위 configs:의 이름(여러 Gradle 서비스가 같은 내용을 공유한다) */
+const TEST_MEMORY_INIT_CONFIG_NAME = 'b_studio_test_memory_init';
+/**
+ * 테스트 JVM의 힙·메타스페이스 상한을 거는 Gradle init 스크립트(ADR-138, 도그푸딩 마찰 116). `--no-daemon`
+ * 테스트는 Gradle 데몬 없이 바로 끝나지만, `Test` 태스크가 포크하는 테스트 워커 JVM의 힙은 사용자가 정하지
+ * 않으면 JVM 에르고노믹스가 자동으로 잡는다(컨테이너 메모리 한도가 없으면 colima VM 전체 메모리 기준 1/4).
+ * 같은 컨테이너에서 개발 서버(bootRun)가 이미 메모리를 쓰고 있으면 두 JVM의 합이 VM의 남은 메모리를 넘어
+ * 커널 OOM killer가 컨테이너를 통째로 종료시킨다. 사용자가 이미 maxHeapSize·메타스페이스 크기를 정했으면
+ * 덮어쓰지 않는다(Mockito 스크립트와 같은 원칙). 사용자 프로젝트 파일은 건드리지 않는다.
+ */
+const TEST_MEMORY_INIT_SCRIPT = `// b-studio가 넣은 설정. 테스트 워커 JVM의 기본 힙·메타스페이스 크기는 JVM 에르고노믹스가
+// "보이는 메모리"(이 컨테이너는 메모리 한도를 걸지 않아 colima VM 전체 메모리)를 기준으로 자동으로 잡는다.
+// 같은 컨테이너에서 개발 서버(bootRun)가 이미 돌고 있으면 두 JVM의 메모리 합이 VM의 남은 메모리를 넘어
+// 커널이 컨테이너를 통째로 종료시킨다. 사용자가 이미 정한 값은 덮어쓰지 않는다.
+allprojects {
+  tasks.withType(Test).configureEach { t ->
+    if (!t.maxHeapSize) t.maxHeapSize = '512m'
+    if (!t.jvmArgs.any { it.startsWith('-XX:MaxMetaspaceSize') }) t.jvmArgs(['-XX:MaxMetaspaceSize=256m'])
+  }
+}
+`;
+/** testMemoryInit가 true인 서비스의 notes에 남기는 메모(ADR-138, 도그푸딩 마찰 116) */
+const TEST_MEMORY_INIT_NOTE =
+  '테스트 워커 JVM의 힙(512m)·메타스페이스(256m) 상한을 Gradle init 스크립트로 걸었습니다(GRADLE_USER_HOME/init.d). 기본값은 컨테이너 메모리 한도가 없을 때 VM 전체 메모리 기준으로 자동으로 잡혀, 개발 서버(bootRun)와 같은 컨테이너에서 돌면 메모리 한도를 넘어 컨테이너가 종료될 수 있었습니다. 이미 maxHeapSize를 정했으면 덮어쓰지 않고, 사용자 프로젝트의 테스트 설정은 건드리지 않습니다';
 
 function isNoiseDirName(name: string): boolean {
   return NOISE_DIR_NAMES.has(name.toLowerCase());
@@ -781,9 +816,12 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
   const testCommand = springTestCommand({ isGradle, usesAncestorWrapper, wrapper, subPath, wrapperWorkDir });
   // Maven은 범위 밖이다(ADR-134) — surefire의 argLine을 건드리면 사용자가 이미 쓰는 argLine 설정을 지울 위험이 있다
   const mockitoAgentInit = isGradle && testCommand !== undefined;
+  // 같은 조건(Gradle + 테스트 명령 찾음)에서 테스트 JVM 메모리도 상한을 건다(ADR-138)
+  const testMemoryInit = isGradle && testCommand !== undefined;
   if (testCommand) {
     notes.push(TEST_GATE_NOTE);
     if (mockitoAgentInit) notes.push(MOCKITO_AGENT_INIT_NOTE);
+    if (testMemoryInit) notes.push(TEST_MEMORY_INIT_NOTE);
   }
   if (!wrapper) {
     notes.push(`이 폴더와 상위 폴더 어디에도 ${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다. 이미지의 버전이 실제 쓰는 버전과 다르면 빌드가 달라질 수 있습니다`);
@@ -824,7 +862,7 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
     environment: {},
     dependsOn: [],
     notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
-    ...(testCommand ? { testCommand, ...(mockitoAgentInit ? { mockitoAgentInit: true } : {}) } : {}),
+    ...(testCommand ? { testCommand, ...(mockitoAgentInit ? { mockitoAgentInit: true } : {}), ...(testMemoryInit ? { testMemoryInit: true } : {}) } : {}),
   };
 }
 
@@ -1064,14 +1102,21 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
   const lines = ['# b-studio가 만든 개발용 compose. 샌드박스가 이 파일로 서비스를 띄운다', 'services:'];
   const volumes: string[] = [];
   let usesMockitoAgentInit = false;
+  let usesTestMemoryInit = false;
   for (const service of services) {
     const context = service.path === '.' ? '.' : `./${service.path}`;
     const workDir = containerWorkDir(service.path);
     lines.push(`  ${service.name}:`, `    build: { context: ${context}, dockerfile: ${GENERATED_DOCKERFILE} }`, `    working_dir: ${workDir}`);
+    const initConfigs: string[] = [];
     if (service.mockitoAgentInit) {
       usesMockitoAgentInit = true;
-      lines.push('    configs:', `      - source: ${MOCKITO_AGENT_INIT_CONFIG_NAME}`, `        target: ${GRADLE_USER_HOME}/init.d/b-studio-mockito-agent.gradle`);
+      initConfigs.push(`      - source: ${MOCKITO_AGENT_INIT_CONFIG_NAME}`, `        target: ${GRADLE_USER_HOME}/init.d/b-studio-mockito-agent.gradle`);
     }
+    if (service.testMemoryInit) {
+      usesTestMemoryInit = true;
+      initConfigs.push(`      - source: ${TEST_MEMORY_INIT_CONFIG_NAME}`, `        target: ${GRADLE_USER_HOME}/init.d/b-studio-test-memory.gradle`);
+    }
+    if (initConfigs.length > 0) lines.push('    configs:', ...initConfigs);
     if (Object.keys(service.environment).length > 0) {
       lines.push('    environment:');
       for (const [key, value] of Object.entries(service.environment)) lines.push(`      ${key}: ${yamlString(value)}`);
@@ -1119,13 +1164,20 @@ function composeYaml(services: readonly DetectedService[], infra: readonly Infra
     }
   }
   if (volumes.length > 0) lines.push('', 'volumes:', ...volumes.map((volume) => `  ${volume}:`));
-  if (usesMockitoAgentInit) {
+  if (usesMockitoAgentInit || usesTestMemoryInit) {
     // Swarm이 아닌 일반 compose에서도 configs:는 파일로 그대로 마운트된다(docker compose 2.23.1+에서 확인). 여러
     // Gradle 서비스가 같은 init 스크립트를 공유하므로 내용은 여기 한 번만 쓴다(서비스 쪽은 source 이름만 가리킨다)
-    lines.push('', 'configs:', `  ${MOCKITO_AGENT_INIT_CONFIG_NAME}:`, '    content: |');
-    // compose는 파일 안의 ${...}를 환경 변수로 치환하려 들어, Groovy 문자열 보간(${jar.absolutePath})이 그대로 있으면
-    // "invalid interpolation format"으로 compose 전체가 뜨지 않는다. $를 $$로 적어야 컨테이너 안 파일에 $ 하나로 들어간다
-    for (const line of MOCKITO_AGENT_INIT_SCRIPT.split('\n')) lines.push(line.length > 0 ? `      ${line.replaceAll('$', '$$$$')}` : '');
+    lines.push('', 'configs:');
+    if (usesMockitoAgentInit) {
+      lines.push(`  ${MOCKITO_AGENT_INIT_CONFIG_NAME}:`, '    content: |');
+      // compose는 파일 안의 ${...}를 환경 변수로 치환하려 들어, Groovy 문자열 보간(${jar.absolutePath})이 그대로 있으면
+      // "invalid interpolation format"으로 compose 전체가 뜨지 않는다. $를 $$로 적어야 컨테이너 안 파일에 $ 하나로 들어간다
+      for (const line of MOCKITO_AGENT_INIT_SCRIPT.split('\n')) lines.push(line.length > 0 ? `      ${line.replaceAll('$', '$$$$')}` : '');
+    }
+    if (usesTestMemoryInit) {
+      lines.push(`  ${TEST_MEMORY_INIT_CONFIG_NAME}:`, '    content: |');
+      for (const line of TEST_MEMORY_INIT_SCRIPT.split('\n')) lines.push(line.length > 0 ? `      ${line.replaceAll('$', '$$$$')}` : '');
+    }
   }
   lines.push('');
   return lines.join('\n');

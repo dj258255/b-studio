@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import type { ExecResult } from '@b-studio/sandbox';
+import type { ExecResult, ServiceUsage } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
@@ -102,6 +102,63 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(gate.verified).toBe(false);
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('[test] unit (시도 2회)');
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('OrderTest > memo FAILED');
+  });
+
+  it('테스트 중 서비스가 메모리 한도를 넘어 종료되면 코드 문제로 보지 않고 되살린 뒤 다음 시도에서 통과한다(트러블슈팅 116)', async () => {
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 2 }] });
+    const sandbox = fakeSandbox(target, [true]);
+    let execCalls = 0;
+    sandbox.exec = async () => {
+      execCalls += 1;
+      return execCalls === 1 ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' };
+    };
+    sandbox.stats = async (): Promise<ServiceUsage[]> =>
+      execCalls === 1 ? [{ service: 'api', state: 'exited', oomKilled: true, memoryLimitBytes: 2 * 1024 ** 3, exitCode: 1 }] : [];
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: async () => ({ status: 200, text: '<h1>주문 목록</h1>' }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome).toEqual({ kind: 'pass' });
+    expect(execCalls).toBe(2);
+    // 첫 번째는 바뀐 파일 때문에 게이트가 거치는 평소 재시작(run 단계), 두 번째가 OOM을 보고 되살린 것
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+  });
+
+  it('메모리 한도 초과가 재시도에서도 이어지면 환경 문제라고 알리고(코드 문제라고 말하지 않는다) 되살리려 한 사실을 남긴다', async () => {
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 2 }] });
+    const sandbox = fakeSandbox(target, [true]);
+    sandbox.exec = async () => ({ exitCode: 1, stdout: '', stderr: '' });
+    sandbox.stats = async (): Promise<ServiceUsage[]> => [{ service: 'api', state: 'exited', oomKilled: true, memoryLimitBytes: 2 * 1024 ** 3, exitCode: 1 }];
+    const workspace = new Workspace(target.root);
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: async () => ({ status: 200, text: '<h1>주문 목록</h1>' }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('환경 문제');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('메모리 한도 (2.00GiB)를 넘어');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('코드 문제가 아닐 수 있습니다');
+    // 평소 재시작(run 단계) 1번 + 두 시도 각각의 OOM 복구 재시작 2번
+    expect(sandbox.restarts).toEqual(['api', 'api', 'api']);
   });
 
   it('화면 응답에 기대 문구가 없으면 통과시키지 않는다', async () => {
