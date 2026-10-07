@@ -1,5 +1,7 @@
-import type { LoadedProject, WorkflowStage, WorkflowSpec } from '@b-studio/spec';
+import { AUTO_PAGE_MAX, type LoadedProject, type WorkflowStage, type WorkflowSpec } from '@b-studio/spec';
+import { routesFromChangedFiles } from './next-routes';
 import { DEFAULT_DENIED_COMMANDS, isProtectedPath, type ExecutionPolicy } from './policy';
+import { servicesForFiles } from './services';
 
 /**
  * 모델의 도구 호출이나 턴 종료로 진입을 알 수 있는 진행 단계와 달리, 플랫폼이 직접 실행해 통과 여부를 판정하는 단계.
@@ -183,7 +185,93 @@ export function reviewChanges(project: LoadedProject, changedFiles: readonly str
       detail: over ? `한 요청에서 파일 ${changedFiles.length}개를 바꿨습니다(상한 ${workflow.maxChangedFiles}). 필요 없는 변경을 되돌리세요` : undefined,
     });
   }
+  checks.push(...uncoveredChangeWarnings(project, changedFiles));
   return checks;
+}
+
+/** coverage-gap 체크 이름에 붙는 접두사. 체크포인트 본문이 이 접두사로 "확인 안 됨" 항목만 따로 묶어 보여준다(ADR-135) */
+export const COVERAGE_GAP_PREFIX = 'coverage-gap';
+
+/** 테스트 파일·테스트 러너 설정으로 보이는 경로. 버그 리포트 108의 lib/shortsFeed.test.ts·vitest.config.ts가 둘 다 걸린다 */
+const TEST_SIGNAL_PATTERN = /\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)(vitest|jest|playwright)\.config\.[cm]?[jt]s$|(^|\/)__tests__\//;
+
+/**
+ * 이번 실행이 바꾼 파일을 보고, workflow.tests·workflow.pageChecks(또는 autoPageChecks)가 다루지 않는 서비스에
+ * 테스트 파일이나 화면 경로가 새로 생겼는지 본다(버그 리포트 108 — BE-commerce R26에서 에이전트가 apps/web에
+ * vitest·테스트 파일을 넣었지만 workflow.tests는 commerce-test 하나뿐이라 게이트가 돌리지 않았는데도
+ * 트레일러는 test·browser_check가 통과한 것처럼 보였다).
+ *
+ * 게이트를 막지 않는다(ok: true뿐이다) — studio.yaml을 몰래 고치거나 임의로 새 명령을 돌리는 대신,
+ * "이번 실행에서 확인되지 않았다"는 사실만 드러낸다(선택 A, docs/decisions.md ADR-135).
+ * 테스트 명령을 studio.yaml에 자동으로 추가하지 않는 이유: ADR-133이 이미 "studio.yaml은 사람 모르게 바뀌지
+ * 않는다"는 원칙을 세웠다(explore-qa-save.ts와 같은 원칙) — 여기서도 그 원칙을 지킨다.
+ */
+export function uncoveredChangeWarnings(project: LoadedProject, changedFiles: readonly string[]): WorkflowCheck[] {
+  if (!project.managed?.length) return [];
+  const workflow = project.spec.workflow;
+  const testedServices = new Set((workflow?.tests ?? []).map((test) => test.service));
+  const autoPageService = workflow?.autoPageChecks?.service;
+
+  const { services: touched } = servicesForFiles(project, changedFiles);
+  const warnings: WorkflowCheck[] = [];
+  for (const name of touched) {
+    const entry = project.managed.find(([serviceName]) => serviceName === name);
+    if (!entry) continue;
+    const [, spec] = entry;
+
+    if (!testedServices.has(name) && changedFiles.some((file) => isWithinService(file, spec.path) && TEST_SIGNAL_PATTERN.test(file))) {
+      warnings.push({
+        stage: 'review',
+        name: `${COVERAGE_GAP_PREFIX}: ${name} 테스트`,
+        ok: true,
+        attempts: 1,
+        detail: `${name}에 테스트 파일·설정이 새로 생겼지만 workflow.tests에 '${name}' 서비스를 다루는 항목이 없어 게이트의 test 단계가 돌리지 않았습니다. 돌려야 한다면 studio.yaml의 workflow.tests에 추가하세요.`,
+      });
+    }
+
+    // autoPageChecks가 이 서비스를 맡으면 새로 생긴 라우트를 스스로 찾아 확인(또는 건너뛴 이유를 기록)하므로 따로 보지 않는다.
+    // 선언한 pageChecks는 서비스가 같아도 **경로가 정확히 같을 때만** 그 라우트를 확인한 것으로 본다 —
+    // 버그 리포트 108에서 web pageChecks가 '/'만 선언해도 '/shorts'는 확인되지 않은 채 트레일러에 통과로 찍혔다
+    if (spec.template === 'nextjs' && autoPageService !== name) {
+      const { routes } = routesFromChangedFiles(changedFiles, spec.path, {}, AUTO_PAGE_MAX);
+      const declaredPaths = new Set((workflow?.pageChecks ?? []).filter((check) => check.service === name).map((check) => check.path));
+      const uncoveredRoutes = routes.filter((route) => !declaredPaths.has(route.path));
+      if (uncoveredRoutes.length > 0) {
+        warnings.push({
+          stage: 'review',
+          name: `${COVERAGE_GAP_PREFIX}: ${name} 화면`,
+          ok: true,
+          attempts: 1,
+          detail: `${name}에 화면 경로가 바뀌었지만(${uncoveredRoutes.map((route) => route.path).join(', ')}) workflow.pageChecks·autoPageChecks가 이 경로를 확인하지 않아 게이트가 열어 보지 않았습니다. studio.yaml에 pageChecks를 추가하거나 autoPageChecks를 켜세요.`,
+        });
+      }
+    }
+  }
+  return warnings;
+}
+
+function isWithinService(file: string, servicePath: string): boolean {
+  const root = servicePath.replace(/^\.\/?/, '').replace(/\/+$/, '');
+  return root === '' || file === root || file.startsWith(`${root}/`);
+}
+
+/**
+ * 체크포인트 본문에 남길, 게이트가 실제로 확인한 서비스·테스트·경로 요약과 확인되지 않은 항목(ADR-135).
+ * "에이전트의 완료 선언을 믿지 않는다"는 약속을 트레일러의 단계 이름뿐 아니라 무엇을 확인했는지까지 드러내서 지킨다.
+ */
+export function formatCheckedCoverage(checks: readonly WorkflowCheck[] | undefined): string {
+  if (!checks?.length) return '';
+  const gapPrefix = `${COVERAGE_GAP_PREFIX}:`;
+  const gaps = checks.filter((check) => check.name.startsWith(gapPrefix));
+  const covered = checks.filter((check) => check.stage === 'browser_check' || check.stage === 'test' || check.stage === 'concurrency_check');
+  const lines: string[] = [];
+  if (covered.length > 0) {
+    lines.push(`게이트가 확인함: ${covered.map((check) => `[${check.stage}] ${check.name}(${check.ok ? '통과' : '실패'})`).join(', ')}`);
+  }
+  if (gaps.length > 0) {
+    lines.push(`확인 안 됨:\n${gaps.map((check) => `- ${check.detail ?? check.name}`).join('\n')}`);
+  }
+  return lines.join('\n');
 }
 
 /** Pi 확장(packages/agent/pi/bstudio-policy.ts)이 읽는 환경 변수. 같은 studio.yaml에서 만들어 규칙이 두 곳에서 어긋나지 않게 한다 */

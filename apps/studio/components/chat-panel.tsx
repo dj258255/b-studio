@@ -26,6 +26,9 @@ import { useLightVerify } from "./use-light-verify";
 import { useReadOnly } from "./use-read-only";
 import { useResearch } from "./use-research";
 
+/** packages/agent의 COVERAGE_GAP_PREFIX와 같은 값. 클라이언트 번들에 agent 런타임을 끌어오지 않으려고 문자열로 둔다 */
+const COVERAGE_GAP_NAME_PREFIX = "coverage-gap:";
+
 type Intent = "build" | "ask";
 
 /** 질문의 답을 받아 만들기로 넘어갈 때 보내는 요청. 대화를 이어받으므로 앞의 계획을 가리키기만 한다 */
@@ -745,6 +748,18 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
       return <p className="text-xs font-medium tracking-wide text-muted">작업 단계 · {stageLabel(item.stage)}</p>;
 
     case "check":
+      // 게이트가 다루지 않은 테스트·화면 알림(ADR-135)은 게이트를 막지 않아 ok가 true지만 "통과"가 아니다.
+      // 초록 "통과"로 그리면 확인되지 않았다는 사실이 오히려 통과처럼 보이므로, 경고 색과 설명을 함께 보여 준다
+      if (item.name.startsWith(COVERAGE_GAP_NAME_PREFIX)) {
+        return (
+          <div className="text-xs">
+            <p className="text-wait">
+              {stageLabel(item.stage)} · {item.name.slice(COVERAGE_GAP_NAME_PREFIX.length).trim()} · 확인 안 됨
+            </p>
+            {item.detail && <p className="mt-1 whitespace-pre-wrap text-muted">{item.detail}</p>}
+          </div>
+        );
+      }
       return (
         <div className="text-xs">
           <p className={item.ok ? "text-pass" : "text-fail"}>

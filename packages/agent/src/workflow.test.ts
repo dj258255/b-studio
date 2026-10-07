@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
 import {
+  COVERAGE_GAP_PREFIX,
   DEFAULT_WORKFLOW,
   executionPolicyFor,
+  formatCheckedCoverage,
   formatVerifyTrailer,
   maxTurnsFor,
   missingVerificationStages,
@@ -12,14 +14,18 @@ import {
   releaseBlockers,
   formatWorkflowTrailer,
   reviewChanges,
+  uncoveredChangeWarnings,
   WORKFLOW_VERIFY_TRAILER,
   workflowContext,
   workflowStages,
 } from './workflow';
 
-function projectWith(workflow?: Partial<WorkflowSpec>): LoadedProject {
-  return { spec: { name: 'orders', workflow } } as unknown as LoadedProject;
+function projectWith(workflow?: Partial<WorkflowSpec>, managed?: LoadedProject['managed']): LoadedProject {
+  return { spec: { name: 'orders', workflow }, ...(managed ? { managed } : {}) } as unknown as LoadedProject;
 }
+
+const webService: LoadedProject['managed'][number] = ['web', { source: 'managed', template: 'nextjs', path: 'apps/web', port: 3000, preview: 'browser' } as never];
+const apiService: LoadedProject['managed'][number] = ['api', { source: 'managed', template: 'spring-boot', path: 'apps/api', port: 8080, preview: 'openapi' } as never];
 
 const unit = { name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 };
 
@@ -121,6 +127,75 @@ describe('project workflow', () => {
     expect(context).toContain('read_file, edit_file');
     expect(context).toContain('플랫폼이 실행할 테스트: unit(api: ./gradlew test)');
     expect(context).toContain('완료 선언은 완료 판정이 아닙니다');
+  });
+
+  describe('uncoveredChangeWarnings(ADR-135, 버그 리포트 108)', () => {
+    it('managed가 없는 프로젝트(옛 픽스처)는 조용히 빈 배열을 돌려준다', () => {
+      expect(uncoveredChangeWarnings(projectWith({ tests: [unit] }), ['apps/web/lib/x.test.ts'])).toEqual([]);
+    });
+
+    it('workflow.tests가 다루지 않는 서비스에 테스트 파일이 새로 생기면 경고만 남기고 막지 않는다', () => {
+      const project = projectWith({ tests: [{ ...unit, service: 'api' }] }, [webService, apiService]);
+      const warnings = uncoveredChangeWarnings(project, ['apps/web/lib/shortsFeed.test.ts', 'apps/web/vitest.config.ts']);
+      expect(warnings).toEqual([
+        {
+          stage: 'review',
+          name: `${COVERAGE_GAP_PREFIX}: web 테스트`,
+          ok: true,
+          attempts: 1,
+          detail: expect.stringContaining("workflow.tests에 'web' 서비스를 다루는 항목이 없어"),
+        },
+      ]);
+    });
+
+    it('workflow.tests가 그 서비스를 이미 다루면 경고를 남기지 않는다', () => {
+      const project = projectWith({ tests: [{ ...unit, service: 'web' }] }, [webService, apiService]);
+      expect(uncoveredChangeWarnings(project, ['apps/web/lib/shortsFeed.test.ts'])).toEqual([]);
+    });
+
+    it('요청이 말한 경로가 바뀌었는데 선언한 pageChecks가 다른 경로만 가리키면 "확인 안 됨"을 남긴다', () => {
+      const project = projectWith(
+        { pageChecks: [{ service: 'web', path: '/', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false }] },
+        [webService, apiService],
+      );
+      const warnings = uncoveredChangeWarnings(project, ['apps/web/app/shorts/page.tsx']);
+      expect(warnings).toEqual([
+        {
+          stage: 'review',
+          name: `${COVERAGE_GAP_PREFIX}: web 화면`,
+          ok: true,
+          attempts: 1,
+          detail: expect.stringContaining('/shorts'),
+        },
+      ]);
+    });
+
+    it('autoPageChecks가 그 서비스를 맡고 있으면 새 라우트를 따로 경고하지 않는다(게이트가 스스로 찾아본다)', () => {
+      const project = projectWith({ autoPageChecks: { service: 'web', mode: 'http', expectStatus: 200, maxPages: 5 } }, [webService, apiService]);
+      expect(uncoveredChangeWarnings(project, ['apps/web/app/shorts/page.tsx'])).toEqual([]);
+    });
+
+    it('nextjs가 아닌 서비스는 화면 경로 경고 대상이 아니다', () => {
+      const project = projectWith({}, [apiService]);
+      expect(uncoveredChangeWarnings(project, ['apps/api/src/main/resources/templates/index.html'])).toEqual([]);
+    });
+  });
+
+  describe('formatCheckedCoverage(ADR-135)', () => {
+    it('빈 배열·undefined는 빈 문자열', () => {
+      expect(formatCheckedCoverage(undefined)).toBe('');
+      expect(formatCheckedCoverage([])).toBe('');
+    });
+
+    it('실제로 돈 확인과 확인 안 된 항목을 따로 묶어 보여준다', () => {
+      const text = formatCheckedCoverage([
+        { stage: 'test', name: 'commerce-test', ok: true, attempts: 1 },
+        { stage: 'browser_check', name: 'web /', ok: true, attempts: 1 },
+        { stage: 'review', name: `${COVERAGE_GAP_PREFIX}: web 화면`, ok: true, attempts: 1, detail: 'web에 /shorts가 바뀌었지만 확인하지 않았습니다' },
+      ]);
+      expect(text).toContain('게이트가 확인함: [test] commerce-test(통과), [browser_check] web /(통과)');
+      expect(text).toContain('확인 안 됨:\n- web에 /shorts가 바뀌었지만 확인하지 않았습니다');
+    });
   });
 
   describe('maxTurnsFor(ADR-131)', () => {
