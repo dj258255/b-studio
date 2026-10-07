@@ -57,6 +57,7 @@ import {
   findCheckpointMentions,
   findGateCheckMentions,
   flattenDiscoveredFile,
+  formatCheckedCoverage,
   formatVerificationReport,
   formatVerifyTrailer,
   formatWorkflowTrailer,
@@ -2622,6 +2623,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
 function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
   const sections: string[] = [];
   if (result.report) sections.push(formatVerificationReport(result.report, { allowBreaking }));
+  const coverage = formatCheckedCoverage(result.checks);
+  if (coverage) sections.push(coverage);
   if (result.verifyAttempts > 0) sections.push(`검증 게이트 재시도: ${result.verifyAttempts}회`);
   const summary = result.summary.trim();
   if (summary) sections.push(`에이전트 요약:\n${summary.split('\n').slice(0, 30).join('\n')}`);
