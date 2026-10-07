@@ -226,6 +226,10 @@ describe('generateCommitSubject', () => {
     expect(subject).toBe('feat: 업로드 완료부터 READY까지 실제 경로 측정 스크립트를 더했습니다');
   });
 
+  it('"~게 해 주세요"는 띄어쓰기를 지켜 "~게 한다"로 바꾼다(도그푸딩 버그 리포트: "재생되게한다")', () => {
+    expect(toCommitMood('숏폼 피드에서 변환된 영상이 실제로 재생되게 해 주세요(R26 재생)')).toBe('숏폼 피드에서 변환된 영상이 실제로 재생되게 한다(R26 재생)');
+  });
+
   it('명사 뒤에 띄어 쓴 "해 주세요"는 "…한다"로 바꾸고, 조사로 끝나면 동사로 보지 않는다', () => {
     expect(toCommitMood('로그인 기능 추가 해 주세요')).toBe('로그인 기능 추가한다');
     expect(generateCommitSubject('로그인 기능 추가 해 주세요', [change('web/app/login/page.tsx')])).toBe('feat: 로그인 기능 추가한다');
