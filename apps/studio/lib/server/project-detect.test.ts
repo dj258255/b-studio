@@ -100,7 +100,7 @@ describe('detectProject', () => {
     expect(compose).not.toContain('configs:');
   });
 
-  it('Gradle 서비스는 테스트 명령이 있으면 테스트 JVM 힙·메타스페이스 상한을 거는 init 스크립트도 compose configs:로 심는다(도그푸딩 마찰 116, ADR-137): 컨테이너에 메모리 한도가 없으면 테스트 JVM의 기본 힙이 VM 전체 메모리 기준으로 잡혀, 개발 서버와 같은 컨테이너에서 돌면 메모리 한도를 넘는다', async () => {
+  it('Gradle 서비스는 테스트 명령이 있으면 테스트 JVM 힙·메타스페이스 상한을 거는 init 스크립트도 compose configs:로 심는다(도그푸딩 마찰 116, ADR-138): 컨테이너에 메모리 한도가 없으면 테스트 JVM의 기본 힙이 VM 전체 메모리 기준으로 잡혀, 개발 서버와 같은 컨테이너에서 돌면 메모리 한도를 넘는다', async () => {
     const root = await repo({ 'backend/build.gradle': springGradle, 'backend/gradlew': '#!/bin/sh' });
 
     const [service] = (await detectProject(root)).services;
@@ -941,7 +941,7 @@ describe('detectProject: workflow.tests 생성(버그 리포트 104 — studio.y
     expect(service!.testCommand).toEqual({ command: ['sh', '-c', 'cd /workspace && ./mvnw -f backend test'] });
     // Maven은 Mockito self-attach 수정(ADR-134)의 범위 밖이다 — surefire argLine을 건드리면 사용자 설정을 지울 위험이 있다
     expect(service!.mockitoAgentInit).toBeUndefined();
-    // 테스트 JVM 메모리 상한(ADR-137)도 같은 이유로 Maven은 범위 밖이다
+    // 테스트 JVM 메모리 상한(ADR-138)도 같은 이유로 Maven은 범위 밖이다
     expect(service!.testMemoryInit).toBeUndefined();
   });
 

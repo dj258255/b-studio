@@ -114,7 +114,7 @@ export interface DetectedService {
    */
   mockitoAgentInit?: boolean;
   /**
-   * Gradle 서비스의 테스트 JVM에 힙·메타스페이스 상한을 거는 init 스크립트가 필요하면 true(ADR-137).
+   * Gradle 서비스의 테스트 JVM에 힙·메타스페이스 상한을 거는 init 스크립트가 필요하면 true(ADR-138).
    * 샌드박스 서비스 컨테이너는 보통 메모리 한도를 걸지 않는데(이 함수는 resources: 블록을 만들지 않는다),
    * `--no-daemon`으로 돌리는 테스트 JVM의 기본 힙은 JVM 에르고노믹스가 "보이는 메모리"(컨테이너 한도가 없으면
    * colima VM 전체)의 1/4로 자동으로 잡는다. 같은 컨테이너에서 개발 서버(bootRun)가 이미 돌고 있으면 두 JVM의
@@ -216,7 +216,7 @@ const MOCKITO_AGENT_INIT_NOTE =
 /** compose 최상위 configs:의 이름(여러 Gradle 서비스가 같은 내용을 공유한다) */
 const TEST_MEMORY_INIT_CONFIG_NAME = 'b_studio_test_memory_init';
 /**
- * 테스트 JVM의 힙·메타스페이스 상한을 거는 Gradle init 스크립트(ADR-137, 도그푸딩 마찰 116). `--no-daemon`
+ * 테스트 JVM의 힙·메타스페이스 상한을 거는 Gradle init 스크립트(ADR-138, 도그푸딩 마찰 116). `--no-daemon`
  * 테스트는 Gradle 데몬 없이 바로 끝나지만, `Test` 태스크가 포크하는 테스트 워커 JVM의 힙은 사용자가 정하지
  * 않으면 JVM 에르고노믹스가 자동으로 잡는다(컨테이너 메모리 한도가 없으면 colima VM 전체 메모리 기준 1/4).
  * 같은 컨테이너에서 개발 서버(bootRun)가 이미 메모리를 쓰고 있으면 두 JVM의 합이 VM의 남은 메모리를 넘어
@@ -234,7 +234,7 @@ allprojects {
   }
 }
 `;
-/** testMemoryInit가 true인 서비스의 notes에 남기는 메모(ADR-137, 도그푸딩 마찰 116) */
+/** testMemoryInit가 true인 서비스의 notes에 남기는 메모(ADR-138, 도그푸딩 마찰 116) */
 const TEST_MEMORY_INIT_NOTE =
   '테스트 워커 JVM의 힙(512m)·메타스페이스(256m) 상한을 Gradle init 스크립트로 걸었습니다(GRADLE_USER_HOME/init.d). 기본값은 컨테이너 메모리 한도가 없을 때 VM 전체 메모리 기준으로 자동으로 잡혀, 개발 서버(bootRun)와 같은 컨테이너에서 돌면 메모리 한도를 넘어 컨테이너가 종료될 수 있었습니다. 이미 maxHeapSize를 정했으면 덮어쓰지 않고, 사용자 프로젝트의 테스트 설정은 건드리지 않습니다';
 
@@ -815,7 +815,7 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
   const testCommand = springTestCommand({ isGradle, usesAncestorWrapper, wrapper, subPath, wrapperWorkDir });
   // Maven은 범위 밖이다(ADR-134) — surefire의 argLine을 건드리면 사용자가 이미 쓰는 argLine 설정을 지울 위험이 있다
   const mockitoAgentInit = isGradle && testCommand !== undefined;
-  // 같은 조건(Gradle + 테스트 명령 찾음)에서 테스트 JVM 메모리도 상한을 건다(ADR-137)
+  // 같은 조건(Gradle + 테스트 명령 찾음)에서 테스트 JVM 메모리도 상한을 건다(ADR-138)
   const testMemoryInit = isGradle && testCommand !== undefined;
   if (testCommand) {
     notes.push(TEST_GATE_NOTE);
