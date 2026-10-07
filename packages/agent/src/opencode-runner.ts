@@ -133,6 +133,11 @@ const DEFAULT_PROCESS: OpenCodeProcess = {
       child.once('error', reject);
       child.once('close', (code) => resolve(code ?? 1));
     });
+    // signal이 끊기면 spawn이 이 child에 'error'(AbortError)를 낸다. 호출하는 쪽은 NDJSON 줄(`lines`)을
+    // 다 읽은 뒤에야 `exitCode`를 기다리므로, 그 사이에 이 Promise가 먼저 거부되면 아직 아무도 받지 않은
+    // 상태가 된다 — Node 기본값(처리하지 않은 거부 → 예외로 격상)이 전체 프로세스를 죽인다(commandcode 러너와 같은 모양, 실측 확인).
+    // 빈 catch로 "처리됨"만 표시해 두고, 실제 값은 그대로 아래 `await exitCode`가 받는다
+    exitCode.catch(() => {});
     return { lines, exitCode, stderr: async () => stderr };
   },
 };
@@ -308,6 +313,12 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
   let announced = false;
   // b-studio 도구가 아닌 호출을 한 번만 기록한다
   const foreignTools = new Set<string>();
+  // 원인 2(E12b, 08:02~08:36 멈춘 레인) 대응: 레인이 중단·시간 초과로 끝날 때 마지막으로 무엇을 하고 있었는지
+  // 남긴다(commandcode 러너와 같은 모양). 그 사고에서는 완료된 도구 결과 뒤 다음 모델 턴이 32분 동안 조용했다
+  let lastToolCall: { name: string; input: unknown; at: number } | undefined;
+  let pendingToolCall: { name: string; input: unknown; at: number } | undefined;
+  let currentTurn = 0;
+  let turnStartedAt = 0;
 
   const finish = (status: AgentResult['status'], summary: string, failureReason?: AgentResult['failureReason']): void => {
     result = {
@@ -364,13 +375,16 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
           // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
           signal?.throwIfAborted();
           onEvent({ type: 'tool_call', name, input: args });
+          const toolStarted = performance.now();
+          lastToolCall = { name, input: args, at: toolStarted };
+          pendingToolCall = lastToolCall;
           // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
           if (options.ensureSandbox && (SANDBOX_TOOLS.has(name) || WRITE_TOOLS.has(name))) {
             await options.ensureSandbox();
             gate = await gateFor();
           }
-          const toolStarted = performance.now();
           const outcome = await executeTool(name, args, context);
+          pendingToolCall = undefined;
           metrics.toolMs += Math.round(performance.now() - toolStarted);
           onEvent({ type: 'tool_result', name, ok: outcome.ok, content: outcome.content });
           return outcome;
@@ -395,6 +409,11 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
     for (let turn = 1; turn <= maxTurns; turn++) {
       signal?.throwIfAborted();
       onEvent({ type: 'turn', turn });
+      currentTurn = turn;
+      turnStartedAt = performance.now();
+      // 이 턴에서 모델이 아직 도구를 부르지 않았을 수 있다(예: 다음 모델 응답을 기다리는 동안 멈춤 — E12b 실측).
+      // 그 경우 아래 진단 메시지는 "도구 호출 없음"으로 남아, 도구가 아니라 모델 호출 쪽에서 멈췄다는 단서가 된다
+      pendingToolCall = undefined;
 
       // 이 턴만 중단하는 컨트롤러. 치명적 오류를 받으면 자식을 죽인다
       const turnAbort = new AbortController();
@@ -405,6 +424,11 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
         env: runEnv(home, configPath, toolServer.token),
         signal: turnSignal,
       });
+      // 아래 NDJSON 줄(`lines`)을 다 읽기 전까지는 `exitCode`를 기다리지 않는다. 그 사이 signal이 끊겨
+      // `exitCode`가 먼저 거부되면(`process` 구현이 DEFAULT_PROCESS든 테스트 가짜든) 아직 아무도 받지 않은
+      // 상태가 되어 Node가 처리하지 않은 거부를 예외로 격상시켜 프로세스 전체를 죽인다(commandcode 러너와 같은
+      // 모양, 실측 확인). `proc.run` 구현과 무관하게 여기서 한 번 더 "처리됨"으로 표시해 둔다
+      exitCode.catch(() => {});
 
       let errorMessage = '';
       let turnText = '';
@@ -521,6 +545,20 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
       else finish('failed', recheck.summary, 'max_turns');
     }
   } finally {
+    // 원인 2 대응 진단: 중단(시간 초과 포함)으로 끝나면 마지막으로 무엇을 하고 있었는지 한 줄 남긴다.
+    // result가 이미 났으면(정상 종료) 남기지 않는다 — 중단이 아니라 끝난 뒤의 signal 상태일 수 있다
+    if (signal?.aborted && !result) {
+      const waitedMs = turnStartedAt > 0 ? Math.round(performance.now() - turnStartedAt) : undefined;
+      const toolDetail = pendingToolCall
+        ? `대기 중이던 도구 호출: ${pendingToolCall.name}(${summarizeToolInput(pendingToolCall.input)}), 호출 후 ${Math.round(performance.now() - pendingToolCall.at)}ms`
+        : lastToolCall
+          ? `마지막으로 끝난 도구 호출: ${lastToolCall.name}(${summarizeToolInput(lastToolCall.input)}). 그 뒤로는 도구를 부르지 않았다(다음 모델 응답을 기다리는 중이었을 수 있다)`
+          : '도구 호출 기록이 없다(첫 모델 응답을 기다리는 중이었을 수 있다)';
+      onEvent({
+        type: 'warning',
+        message: `${currentTurn}번째 턴(시작 후 ${waitedMs ?? '?'}ms)에서 중단됐습니다. ${toolDetail}`,
+      });
+    }
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
     await serial.idle();
     await toolServer?.close();
@@ -593,6 +631,16 @@ function runEnv(home: string, configPath: string, token: string): Record<string,
     OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '1',
     [TOKEN_ENV]: token,
   };
+}
+
+/** 중단 진단 메시지에 도구 호출 입력을 짧게 적는다. 비밀을 남기지 않으려고 길이만 자르고 값은 그대로 보여준다(비밀은 애초에 입력에 오지 않는다) */
+function summarizeToolInput(input: unknown): string {
+  try {
+    const text = JSON.stringify(input) ?? String(input);
+    return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  } catch {
+    return '(직렬화할 수 없는 입력)';
+  }
 }
 
 /** 한 `step_finish`의 입력 크기 = input + cache_read + cache_write. 로컬 Claude Agent·Codex·Command Code 러너와 같은 규칙 */

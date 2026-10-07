@@ -144,6 +144,10 @@ const DEFAULT_PROCESS: GeminiProcess = {
       child.once('error', reject);
       child.once('close', (code) => resolve(code ?? 1));
     });
+    // 아래 stdoutPromise의 .then(onFulfilled, onRejected)이 생성 즉시 exitCode를 "처리됨"으로 표시해
+    // commandcode·opencode 러너와 같은 처리하지 않은 거부 문제를 막는다. 구조가 바뀌어도 이 보장이 깨지지
+    // 않게 명시적으로도 한 번 더 단다(둘 다 있어도 해는 없다)
+    exitCode.catch(() => {});
     const stdoutPromise = exitCode.then(
       () => stdout,
       () => stdout,

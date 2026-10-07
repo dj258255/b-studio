@@ -310,6 +310,70 @@ describe('runOpenCodeAgent', () => {
     expect(performance.now() - started).toBeLessThan(10_000);
   });
 
+  it('신호가 끊겨 자식이 abort 오류를 내도 프로세스를 죽이지 않고 레인 실패로 끝난다(회귀: #449 뒤 벤치가 통째로 죽은 사고)', async () => {
+    // commandcode 러너와 같은 모양의 사고. Node의 spawn+signal은 중단되면 child에 'error'(AbortError)를 낸다.
+    // 이 러너도 NDJSON 줄을 다 읽은 뒤에야 exitCode를 기다리므로, 그 사이 exitCode가 먼저 거부되면 누구도
+    // 받지 않은 거부가 되어 Node 기본값대로 프로세스 전체가 죽는다. 가짜 프로세스로 같은 타이밍을 만든다
+    const controller = new AbortController();
+    const fakeProcess: OpenCodeProcess = {
+      run({ signal }) {
+        // 실행이 정말 시작된 뒤(준비 단계를 지난 뒤)에만 끊어야 턴 도중 중단을 재현한다
+        setTimeout(() => controller.abort(), 0);
+        const exitCode = new Promise<number>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              const error = new Error('이 작업을 취소했습니다');
+              error.name = 'AbortError';
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+        async function* lines(): AsyncGenerator<string> {
+          yield JSON.stringify({ type: 'step_start', sessionID: 'ses_1', part: { type: 'step-start', sessionID: 'ses_1' } });
+          // 실제 opencode 프로세스가 죽는 동안 stdout이 바로 닫히지 않는 시간차를 흉내 낸다.
+          // 이 사이에 위 exitCode가 이미 거부돼 있다 — 아직 아무도 기다리지 않은 채로
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return { lines: lines(), exitCode, stderr: async () => '' };
+      },
+    };
+
+    // 이 테스트 안에서만 unhandledRejection을 가로채, 고치기 전 동작이 재현돼도 vitest 워커 전체가
+    // 죽지 않게 하면서 "처리하지 않은 거부가 실제로 떴는지"를 그대로 관찰한다
+    let unhandled: unknown;
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandled = reason;
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      const events: AgentEvent[] = [];
+      const runPromise = runOpenCodeAgent({
+        request: '추가해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        process: fakeProcess,
+        model: MODEL,
+        signal: controller.signal,
+        fetcher: async () => contract,
+        onEvent: (event) => events.push(event),
+      });
+
+      await expect(runPromise).rejects.toThrow(/취소/);
+      // 처리하지 않은 거부가 뜰 시간을 넉넉히 준다(가짜 프로세스의 20ms 창보다 길게)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(unhandled).toBeUndefined();
+
+      // 원인 2 대응: 중단되면 다음에 원인을 가릴 수 있게 마지막 상태를 warning 이벤트로 남긴다
+      const warning = events.find((event): event is Extract<AgentEvent, { type: 'warning' }> => event.type === 'warning');
+      expect(warning?.message).toContain('중단됐습니다');
+      expect(warning?.message).toContain('도구 호출 기록이 없다');
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
   it('사용 한도·크레딧·인증 문구를 각각 분류하고 게이트를 돌리지 않는다', async () => {
     const limit = "You've reached your usage limit. Resets in 3h.";
     const limited = await runOpenCodeAgent({

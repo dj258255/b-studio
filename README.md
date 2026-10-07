@@ -11,7 +11,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
-  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 이커머스 백엔드(Spring Boot)와 웹(Next.js)을 샌드박스에 띄워 둔 상태로, 왼쪽은 웹 미리보기, 오른쪽은 대화 패널">
+  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 이커머스 백엔드(Spring Boot)와 웹(Next.js)을 샌드박스에 띄워 둔 상태로, 오른쪽 대화에는 숏폼 상태 머신 요청이 검증 게이트(파일 반영, 서비스 재시작과 준비 판정, API 계약 비교, 리뷰)를 통과해 체크포인트로 남은 기록이 보인다">
 </picture>
 
 ## 핵심 설계 세 가지
