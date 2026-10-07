@@ -82,6 +82,7 @@
 - [59. 폴더 열기 감지가 pay 구조에서 Gradle 래퍼를 못 찾고 Next.js 앱을 놓침](#59-폴더-열기-감지가-pay-구조에서-gradle-래퍼를-못-찾고-nextjs-앱을-놓침)
 - [60. 두 단계 아래 서비스가 있는 폴더를 열면 세션 기동이 "Dockerfile.b-studio 없음"으로 실패함](#60-두-단계-아래-서비스가-있는-폴더를-열면-세션-기동이-dockerfileb-studio-없음으로-실패함)
 - [61. S3 게시판 혼합 레인(Claude Code + Command Code)이 모든 레인 Claude Code보다 훨씬 자주 실패함](#61-s3-게시판-혼합-레인claude-code--command-code이-모든-레인-claude-code보다-훨씬-자주-실패함)
+- [62. 폴더 열기 감지가 프런트엔드의 서버 쪽 백엔드 주소 변수(SPRING_API)를 못 찾아 샌드박스 안 웹이 자기 자신을 호출함](#62-폴더-열기-감지가-프런트엔드의-서버-쪽-백엔드-주소-변수spring_api를-못-찾아-샌드박스-안-웹이-자기-자신을-호출함)
 
 ---
 
@@ -2109,3 +2110,24 @@ S3 게시판 전략을 mesh topology로, api 레인은 Claude Code·web 레인�
 
 ### 배운 점
 "도구 호출이 실패·거부됐다"와 "도구가 목록에 아예 없었다"는 세션 기록만 봐서는 헷갈리기 쉽다 — 거부는 `policy` 이벤트가 남고, 목록 누락은 아무 흔적도 남기지 않는다(모델이 쓰지 않은 도구는 애초에 모른다). 의심이 가는 도구의 실행 경로(`buildTools` 호출부)를 직접 비교해, 같은 기능을 하는 다른 러너와 호출 모양이 같은지부터 보는 것이 세션 기록만 들여다보는 것보다 빨랐다. 또한 "같은 저장소 안에서 같은 옵션(board)을 받는 러너 다섯 개 중 둘만 실제로 쓴다"는 것은, 새 러너를 추가할 때 기존 러너의 옵션 전달을 전부 복사하지 않으면 생기는 흔한 누락이다 — 지원 여부를 표 하나로 모아 두면(이번의 `backendSupportsBoard`) 다음에 같은 누락이 생겨도 막을 수 있다.
+
+## 62. 폴더 열기 감지가 프런트엔드의 서버 쪽 백엔드 주소 변수(SPRING_API)를 못 찾아 샌드박스 안 웹이 자기 자신을 호출함
+
+**구분:** 읽기 전용 미리보기로 실제 저장소(pay) 확인 → 코드로 원인 추적 → 수정
+
+### 현상
+pay 저장소(`apps/web`, Next.js)를 폴더 열기로 다시 열어 세션을 띄우자 상점 카탈로그 화면이 "연결 실패, fetch failed"로 멈췄다. 생성된 `compose.b-studio.yaml`의 `web` 서비스에는 `PORT: 3000`만 있고 백엔드 주소 환경 변수가 없었다. 사람이 `SPRING_API: "http://commerce:8080"`을 직접 넣자 바로 연결됐다.
+
+### 원인
+- `apps/web/lib/api.ts`는 `export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:8080';`로 Spring 백엔드 주소를 읽는다. 샌드박스 안에서 `web` 컨테이너가 이 기본값(`localhost:8080`, 자기 자신)을 그대로 쓴 것이 직접 원인이다.
+- `project-detect.ts`의 `wireFrontendBackendUrl`은 ADR-095가 만든 `FRONTEND_BACKEND_ENV_NAME`(`NEXT_PUBLIC_*`·`VITE_*`·`REACT_APP_*`처럼 브라우저 번들에 박히는 접두사만)으로만 변수를 찾았다. `SPRING_API`는 서버 컴포넌트·`next.config.ts`가 서버에서만 읽는 변수라 이 접두사가 없어 감지가 통째로 지나쳤다 — `lib/api.ts` 자체는 이미 보는 자리(`FRONTEND_API_CLIENT_CANDIDATES`)였는데 이름 정규식이 걸렀다.
+- pay는 백엔드 후보가 둘이다(`commerce`, 그 하위 별도 빌드 `commerce/consumer-app`). 둘 다 Spring Boot라 포트도 기본값 8080으로 같아, 이름만 찾게 고쳐도 "처음 찾은 쌍만 연결한다"(ADR-095의 알려진 한계)로는 어느 쪽에 연결될지 보장할 수 없었다.
+
+### 수정
+`packages/spec/src/compose-import.ts`에 `detectServerBackendUrlEnvFromCode`(공개 접두사가 없어도 이름 조각 API·BACKEND·SERVER·SPRING·URL·HOST·BASE + 같은 줄 http(s) 기본값이 있으면 찾는다)와 `detectBackendUrlEnvFromAssignments`(.env.example·README의 `KEY=value` 꼴)를 더했다. `project-detect.ts`는 찾아보는 자리를 `next.config.*`·`vite.config.*`·`.env.example`·`.env.local.example`·README 코드 블록·`app`/`src`/`lib`/`pages`(깊이 4·파일 40개로 바운드)까지 넓혔다. 찾은 변수가 공개 접두사면 기존처럼 런타임 자리 표시자로, 아니면(서버 쪽) compose 네트워크 안 주소(`http://<백엔드 서비스>:<포트>`)를 바로 적는다 — 포트가 서비스 감지 시점에 이미 고정돼 있어 자리 표시자가 필요 없다. 백엔드 후보가 둘 이상이면 `defaultSelected: false`(ADR-083) 서비스를 먼저 빼고, 남은 후보가 둘 이상이면 기본값의 포트로 짝짓는다 — 그래도 못 정하면 채우지 않고 notes에 남긴다. 자세한 내용과 트레이드오프는 [ADR-130](decisions.md#adr-130-폴더-열기-감지가-프런트엔드의-백엔드-주소를-공개-변수뿐-아니라-서버-쪽-변수spring_api-등에서도-찾아-컨테이너-사이-주소로-채운다).
+
+### 검증
+`packages/spec/src/compose-import.test.ts`·`apps/studio/lib/server/project-detect.test.ts`에 pay 구조를 흉내 낸 픽스처(서버 컴포넌트가 `process.env.SPRING_API ?? 'http://localhost:8080'`을 읽는 Next.js + Spring 서비스, 기본값이 없는 경우, 백엔드가 둘이고 포트가 다른/같은 경우, `next.config.ts`에서 찾은 `NEXT_PUBLIC_*` 변수)로 감지 결과를 고정했다. 실제 pay 폴더로 `detectProject(..., { ignoreExistingSpec: true })`를 직접 불러 읽기 전용 미리보기를 다시 돌려 `web.environment.SPRING_API`가 `http://commerce:8080`(사람이 손으로 넣었던 값과 동일)으로 채워지는 것을 확인했다 — pay 폴더에는 아무것도 쓰지 않았다. `pnpm typecheck`(6/6)·`pnpm vitest run`(307개 파일, 3,302건)·`pnpm --filter @b-studio/studio lint`(오류 0) 모두 통과했다.
+
+### 배운 점
+ADR-095는 "프론트엔드가 백엔드 주소를 받는다"를 브라우저로 나가는 공개 변수로만 가정했는데, 실제 저장소(pay)는 서버 컴포넌트가 서버 쪽 변수로 받는 쪽이었다 — 같은 종류의 문제(ADR-128의 Gradle 래퍼·모노레포 깊이)처럼, 감지 로직의 가정은 b-studio 자신의 구조보다 실제로 도그푸딩에 쓰는 다른 저장소에서 먼저 깨졌다. 포트가 같은 백엔드 후보가 둘 이상일 때는 이름·파일 위치만으로 고치는 것보다, 애초에 "기본으로 띄우지 않는" 서비스(`defaultSelected: false`)를 후보에서 빼는 것이 포트 추측보다 더 확실한 신호였다.
