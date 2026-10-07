@@ -273,7 +273,16 @@ export function generateCommitSubject(request: string, changes: readonly Pending
     candidate = '체크포인트';
   }
 
-  return `${type}: ${summarize(candidate, budget)}`;
+  return `${type}: ${summarize(candidate.length > budget ? shortenPaths(candidate) : candidate, budget)}`;
+}
+
+/**
+ * 폴더가 두 단계 이상인 파일 경로를 마지막 이름만 남긴다. 제목이 예산을 넘을 때만 쓴다(도그푸딩 버그 리포트:
+ * "…넣은 commerce/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker 파일을 지워 주세요."가
+ * 72자에서 잘려 경로 한가운데서 끝나고 동사 "지운다"가 사라졌다). "apps/web"처럼 짧은 경로는 그대로 둔다.
+ */
+function shortenPaths(text: string): string {
+  return text.replace(/(?:[\w.@-]+\/){2,}([\w.@-]+)/g, '$1');
 }
 
 /** 부탁하는 말투("만들어 줘.")를 커밋 문체("만든다")로 바꾼다. 흔한 끝맺음만 바꾸고, 모르는 끝맺음은 그대로 둔다 */
