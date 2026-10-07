@@ -9,6 +9,11 @@
   - → 에이전트가 끝났다고 말하면 플랫폼이 서비스를 다시 띄우고 준비 상태·API 계약·실제 브라우저 화면·테스트로 확인한 뒤에야 변경을 남깁니다.
 - IDE를 대신하려는 도구는 아닙니다. 여러 에이전트의 작업을 운영하는 제어 계층입니다.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
+  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 이커머스 백엔드(Spring Boot)와 웹(Next.js)을 샌드박스에 띄워 둔 상태로, 왼쪽은 웹 미리보기, 오른쪽은 대화 패널">
+</picture>
+
 ## 핵심 설계 세 가지
 
 ### 완료는 플랫폼이 판정합니다
@@ -78,6 +83,8 @@
 | 저장소 | GitHub·Gitea 이슈·PR을 개발 화면에서 본다 |
 | 실행 환경 | 샌드박스 로그·자원, 사용자가 직접 띄운 서비스를 보기만 하는 "내 환경", 설정한 프로젝트의 운영 이미지 배포와 롤백 |
 | 앱 | 웹 스튜디오, CLI, macOS 데스크톱 앱 |
+
+<img src="docs/images/studio-requirements.jpg" width="760" alt="요구사항 탭. 라이브 커머스·숏폼 명세에서 뽑은 요구사항 32개가 인수 조건과 함께 보이고, 요구사항마다 검증 근거를 추적한다">
 
 ## 빠른 시작
 
