@@ -71,10 +71,21 @@ const SITUATIONAL_WORDS =
 const PROGRESS_REPORT_WORDS = /검토\s*결과|확인해\s*보니|돌아보니|살펴보니|이미\s*.{0,25}있었|추가로\s*(만들|할|고칠)\s*것(이|가)?\s*없/;
 
 /**
+ * toCommitMood가 부탁 어미("해 주세요" 등)를 통째로 떼어 낸 뒤 남는 것이, 요구사항 id(R25)나 짧은 대명사에
+ * 조사만 붙은 조각일 때를 가리킨다(실측: 도그푸딩 — 요청 "R25를 해 주세요."의 제목이 "feat: R25를"이 됐다.
+ * MOOD_ENDINGS의 마지막 대체 경로(`\s*(해\s*)?(줘|주세요|주십시오)$` → '')가 "를 해 주세요"를 통째로 지워
+ * "R25를"만 남기는데, 이건 "무엇이 바뀌었는지"를 말하지 않는 요청 글 조각일 뿐이다). isClearChangeSentence가
+ * toCommitMood로 바꾸고 나서야 이 조각을 보므로, TRAILING_REQUEST_PHRASING(바꾸기 전 어미 검사)만으로는
+ * 잡히지 않는다 — 그래서 변환 결과 자체를 다시 검사해야 한다.
+ */
+const BARE_ID_OR_PRONOUN_FRAGMENT = /^(R\d+(?:\.\d+)?|이것|그것|저것|이거|그거|저거|이걸|그걸|저걸|이|그|저)(은|는|이|가|을|를|도|만|에|에서|로|으로)?$/;
+
+/**
  * 한 줄이 "무엇이 바뀌었는지" 분명히 말하는 서술문인지 본다(요청 글·에이전트 요약 둘 다에 쓴다). 너무 짧거나,
  * 물음표로 끝나거나, 앞 실행·인프라 같은 상황 설명이거나(SITUATIONAL_WORDS), 경과를 보고하는 말투거나
- * (PROGRESS_REPORT_WORDS), 말투를 커밋 문체로 정리(toCommitMood)하고도 부탁 어미만 남으면(예: "해주세요"
- * 그 자체) 분명하지 않다고 보고 다음 대체 경로로 넘긴다.
+ * (PROGRESS_REPORT_WORDS), 말투를 커밋 문체로 정리(toCommitMood)하고도 부탁 어미만 남거나(예: "해주세요"
+ * 그 자체) 요구사항 id·대명사에 조사만 남으면(예: "R25를", "이걸", BARE_ID_OR_PRONOUN_FRAGMENT) 분명하지
+ * 않다고 보고 다음 대체 경로로 넘긴다.
  */
 function isClearChangeSentence(line: string): boolean {
   const trimmed = line.trim();
@@ -82,8 +93,9 @@ function isClearChangeSentence(line: string): boolean {
   if (/[?？]\s*$/.test(trimmed)) return false;
   if (SITUATIONAL_WORDS.test(trimmed)) return false;
   if (PROGRESS_REPORT_WORDS.test(trimmed)) return false;
-  const converted = toCommitMood(trimmed);
-  if (converted.trim().length < 2) return false;
+  const converted = toCommitMood(trimmed).trim();
+  if (converted.length < 2) return false;
+  if (BARE_ID_OR_PRONOUN_FRAGMENT.test(converted)) return false;
   return !TRAILING_REQUEST_PHRASING.test(converted);
 }
 

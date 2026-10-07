@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
+import { workflowStages } from '@b-studio/agent';
 import { afterEach, describe, expect, it } from 'vitest';
 import { detectProject, GENERATED_COMPOSE, generateFiles, sanitize } from './project-detect';
 import { excludeFromGit, projectIdFor, readRegistry, registerFolder, unregisterProject } from './project-registry';
@@ -821,6 +822,158 @@ describe('detectProject: Gradle·Maven 래퍼를 상위 폴더까지 거슬러 �
     expect(service!.dockerfile).toContain('FROM gradle:jdk17');
     expect(service!.dockerfile).toContain('CMD ["gradle", "bootRun"');
     expect(service!.notes.some((note) => note.includes('어디에도') && note.includes('래퍼가 없어'))).toBe(true);
+  });
+});
+
+describe('detectProject: workflow.tests 생성(버그 리포트 104 — studio.yaml에 테스트 명령이 없어 게이트가 test 단계를 건너뜀)', () => {
+  it('루트 래퍼 + 하위 Gradle 서비스(pay 구조)는 상위 래퍼로 -p를 가리키고, 개발 서버와 잠금이 부딪히지 않게 테스트 전용 캐시 디렉터리를 쓴다', async () => {
+    const root = await repo({
+      gradlew: '#!/bin/sh',
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\n",
+      'commerce/build.gradle': springGradle,
+    });
+
+    const detection = await detectProject(root);
+    const [service] = detection.services;
+
+    expect(service!.testCommand).toEqual({
+      command: ['sh', '-c', 'cd /workspace && ./gradlew -p commerce test --no-daemon --console=plain --project-cache-dir /tmp/gradle-test-cache'],
+      maxAttempts: 2,
+    });
+    expect(service!.notes.some((note) => note.includes('게이트가 이 테스트를'))).toBe(true);
+
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('workflow:');
+    expect(spec).toContain('  tests:');
+    expect(spec).toContain(
+      '    - { name: commerce-test, service: commerce, command: ["sh","-c","cd /workspace && ./gradlew -p commerce test --no-daemon --console=plain --project-cache-dir /tmp/gradle-test-cache"], maxAttempts: 2 }',
+    );
+
+    // studio.yaml에 workflow.required를 적지 않아도, tests가 있으면 게이트가 test 단계를 기본 흐름에 끼워 넣는다
+    // (packages/agent/src/workflow.ts의 workflowStages) — 버그 리포트 104가 바로 이 단계가 한 번도 안 돈 문제였다
+    const project = await writeAndLoad(root, generateFiles(detection));
+    expect(project.spec.workflow?.tests).toHaveLength(1);
+    expect(workflowStages(project)).toContain('test');
+  });
+
+  it('래퍼가 서비스 폴더 자신에 있으면 cd 없이 그 폴더에서 바로 테스트를 돈다', async () => {
+    const root = await repo({ 'backend/build.gradle': springGradle, 'backend/gradlew': '#!/bin/sh' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toEqual({
+      command: ['./gradlew', 'test', '--no-daemon', '--console=plain', '--project-cache-dir', '/tmp/gradle-test-cache'],
+      maxAttempts: 2,
+    });
+  });
+
+  it('래퍼가 전혀 없으면 이미지에 든 gradle 도구로 테스트를 돈다', async () => {
+    const root = await repo({ 'commerce/build.gradle': springGradle });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand?.command).toEqual(['gradle', 'test', '--no-daemon', '--console=plain', '--project-cache-dir', '/tmp/gradle-test-cache']);
+  });
+
+  it('Maven은 같은 방식으로 상위 mvnw를 찾아 -f로 테스트 명령을 만들고, Gradle과 달리 재시도를 더하지 않는다', async () => {
+    const root = await repo({
+      mvnw: '#!/bin/sh',
+      'backend/pom.xml': '<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent></project>',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toEqual({ command: ['sh', '-c', 'cd /workspace && ./mvnw -f backend test'] });
+  });
+
+  it('package.json에 test 스크립트가 있는 Next.js는 패키지 관리자로 돌리는 테스트 명령을 만들고 watch 모드 위험을 notes에 남긴다', async () => {
+    const pkg = JSON.stringify({ name: 'shop', dependencies: { next: '16.0.0' }, scripts: { dev: 'next dev', test: 'vitest run' } });
+    const root = await repo({ 'package.json': pkg, 'pnpm-lock.yaml': '' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toEqual({ command: ['pnpm', 'run', 'test'] });
+    expect(service!.notes.some((note) => note.includes('test 스크립트'))).toBe(true);
+  });
+
+  it('package.json에 test 스크립트가 없는 Next.js는 workflow.tests에 아무것도 넣지 않는다', async () => {
+    const root = await repo({ 'package.json': nextPackage, 'pnpm-lock.yaml': '' });
+
+    const detection = await detectProject(root);
+
+    expect(detection.services[0]!.testCommand).toBeUndefined();
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).not.toContain('workflow:');
+  });
+
+  it('pytest 의존성이 있는 FastAPI는 pytest 명령을 만든다', async () => {
+    const root = await repo({ 'requirements.txt': 'fastapi\nuvicorn\npytest\n', 'main.py': 'from fastapi import FastAPI\napp = FastAPI()\n' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toEqual({ command: ['pytest'] });
+  });
+
+  it('pytest 의존성이 없는 FastAPI는 workflow.tests에 아무것도 넣지 않는다', async () => {
+    const root = await repo({ 'requirements.txt': 'fastapi\nuvicorn\n', 'main.py': 'from fastapi import FastAPI\napp = FastAPI()\n' });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.testCommand).toBeUndefined();
+  });
+
+  it('pyproject.toml에 testcontainers 의존성이 있으면 도커-인-도커 위험을 notes에 남긴다', async () => {
+    const root = await repo({
+      'pyproject.toml': '[project]\ndependencies = ["fastapi", "pytest", "testcontainers"]\n',
+      'main.py': 'from fastapi import FastAPI\napp = FastAPI()\n',
+    });
+
+    const [service] = (await detectProject(root)).services;
+
+    expect(service!.notes.some((note) => note.includes('Testcontainers'))).toBe(true);
+  });
+
+  it('테스트 명령과 pageChecks(프론트엔드→백엔드 자동 연결)가 함께 있으면 workflow: 절 하나로 합친다(YAML 중복 키 방지)', async () => {
+    const pkg = JSON.stringify({ name: 'shop', dependencies: { next: '16.0.0' }, scripts: { test: 'vitest run' } });
+    const root = await repo({
+      'frontend/package.json': pkg,
+      'frontend/package-lock.json': '{}',
+      'frontend/lib/api.ts': "export const SPRING_API = process.env.SPRING_API ?? 'http://localhost:8080';\n",
+      'backend/build.gradle': springGradle,
+      'backend/gradlew': '#!/bin/sh',
+    });
+
+    const detection = await detectProject(root);
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+
+    expect(spec.split('\n').filter((line) => line === 'workflow:')).toHaveLength(1);
+    expect(spec).toContain('  tests:');
+    expect(spec).toContain('  pageChecks:');
+  });
+
+  it('defaultSelected: false인 서비스(같은 서비스 폴더 하위의 또 다른 빌드, pay의 consumer-app)는 테스트 명령을 찾아도 기본으로 뜨지 않아 workflow.tests에 넣지 않는다', async () => {
+    const root = await repo({
+      gradlew: '#!/bin/sh',
+      'commerce/settings.gradle': "rootProject.name = 'be-commerce'\n",
+      'commerce/build.gradle': springGradle,
+      'commerce/consumer-app/settings.gradle': "rootProject.name = 'be-commerce-consumer'\n",
+      'commerce/consumer-app/build.gradle': springGradle,
+    });
+
+    const detection = await detectProject(root);
+    const commerce = detection.services.find((service) => service.path === 'commerce')!;
+    const consumerApp = detection.services.find((service) => service.path === 'commerce/consumer-app')!;
+
+    // 둘 다 테스트 명령은 찾았지만
+    expect(commerce.testCommand).toBeDefined();
+    expect(consumerApp.testCommand).toBeDefined();
+    expect(consumerApp.defaultSelected).toBe(false);
+    expect(consumerApp.notes.some((note) => note.includes('workflow.tests에는 넣지 않았습니다'))).toBe(true);
+
+    // workflow.tests에는 기본으로 뜨는 commerce만 들어간다 — consumer-app을 넣으면 게이트가 없는 컨테이너에 exec해 늘 실패한다
+    const spec = generateFiles(detection).find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('name: commerce-test');
+    expect(spec).not.toContain('consumer-app-test');
   });
 });
 

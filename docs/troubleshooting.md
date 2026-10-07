@@ -87,6 +87,7 @@
 - [64. 체크포인트 커밋 제목이 "무엇이 바뀌었나"가 아니라 요청의 첫 문장을 그대로 씀](#64-체크포인트-커밋-제목이-무엇이-바뀌었나가-아니라-요청의-첫-문장을-그대로-씀)
 - [65. 턴 상한으로 실패한 실행이 파일은 되돌렸지만 DB는 되돌리지 않고, 지금 체크포인트로 DB만 다시 맞출 길도 없었음](#65-턴-상한으로-실패한-실행이-파일은-되돌렸지만-db는-되돌리지-않고-지금-체크포인트로-db만-다시-맞출-길도-없었음)
 - [66. 되살린 보관본을 쓰지 않는 요청이 검증 게이트 없이 체크포인트로 남음](#66-되살린-보관본을-쓰지-않는-요청이-검증-게이트-없이-체크포인트로-남음)
+- [67. 폴더 열기가 만든 studio.yaml에 테스트 명령이 없어 검증 게이트가 test 단계를 건너뛰고, 짧은 요청의 체크포인트 제목이 요구사항 id 조각이 됨](#67-폴더-열기가-만든-studioyaml에-테스트-명령이-없어-검증-게이트가-test-단계를-건너뛰고-짧은-요청의-체크포인트-제목이-요구사항-id-조각이-됨)
 
 ---
 
@@ -2239,3 +2240,23 @@ claude-code 백엔드 세션이 턴 상한(60)으로 실패해(`Reached maximum 
 
 ### 배운 점
 "게이트를 통과한 변경만 체크포인트로 남긴다"는 원칙(ADR-010·ADR-018·ADR-049)은 "이번 실행에서 에이전트가 무엇을 썼는지"와 "작업 트리에 실제로 무엇이 바뀌어 있는지"가 같다고 암묵적으로 가정했다. 되살리기(ADR-099)처럼 작업 트리를 도구 호출 밖에서 바꾸는 경로가 늘어날수록 이 가정은 깨진다. 판정은 항상 "도구가 기록한 것"이 아니라 "실제 상태"를 기준으로 해야 하고, 그 둘이 벌어질 수 있는 지점마다 명시적으로 동기화해야 한다.
+
+## 67. 폴더 열기가 만든 studio.yaml에 테스트 명령이 없어 검증 게이트가 test 단계를 건너뛰고, 짧은 요청의 체크포인트 제목이 요구사항 id 조각이 됨
+
+**구분:** 도그푸딩 중 실측(`/Users/beomsu/Desktop/pay`를 폴더 열기로 연 세션) → 코드로 감지·제목 생성 경로 추적 → 픽스처 테스트로 재현 → 수정
+
+### 현상
+`pay`를 폴더 열기로 등록해 만든 `studio.yaml`에는 `workflow.tests`가 없었다. 그 세션의 체크포인트 트레일러는 전부 `Workflow-Passed: run, contract_check, review`였고 `test` 단계가 한 번도 돌지 않았다. 숏폼 요구사항 R21·R22·R25의 JUnit 테스트(`./gradlew -p commerce test`)는 에이전트가 `run_in_service`로 스스로 돌린 것뿐이었다. 같은 세션에서 "R25를 해 주세요."라는 짧은 요청으로 통과한 체크포인트의 제목은 `feat: R25를`이었다 — 무엇이 바뀌었는지 말하지 않는 조각이었다.
+
+### 원인
+- `apps/studio/lib/server/project-detect.ts`의 감지(`detectNode`·`detectSpring`·`detectFastApi`)는 서비스의 실행(run) 명령만 만들고 테스트 명령은 전혀 찾지 않았다. `packages/agent/src/workflow.ts`의 `workflowStages()`는 `workflow.required`를 생략해도 `workflow.tests`가 비어 있지 않을 때만 `test` 단계를 기본 흐름에 끼워 넣는데, 감지가 `tests`를 채우지 않으니 `test` 단계 자체가 없는 흐름이 됐다.
+- `packages/agent/src/commit-message.ts`의 `generateCommitSubject`는 요청 글 첫 문장이 "분명한 변경 문장"(`isClearChangeSentence`)이면 그것으로 제목을 삼는다. `toCommitMood`가 "~해 주세요" 어미를 떼는 마지막 대체 규칙(`/\s*(해\s*)?(줘|주세요|주십시오)$/` → `''`)이 "R25를 해 주세요"에서 " 해 주세요"까지 통째로 지워 "R25를"만 남겼는데, `isClearChangeSentence`는 변환 **이후** 결과만 부탁 어미 패턴(`TRAILING_REQUEST_PHRASING`)으로 다시 보아 이미 어미가 지워진 "R25를"이 그 패턴에 걸리지 않고 그대로 통과했다.
+
+### 수정
+`DetectedService`에 `testCommand?: { command: string[]; maxAttempts?: number }`를 더해, `detectSpring`은 bootRun과 같은 래퍼 경로 규칙(`springTestCommand`)으로 Gradle·Maven 테스트 명령을(래퍼가 상위 폴더에 있으면 `['sh', '-c', 'cd <래퍼 폴더> && ./gradlew -p <서비스 폴더> test …']`로, Gradle은 개발 서버와 캐시가 부딪히지 않게 `--project-cache-dir`를 따로 쓰고 `maxAttempts: 2`), `detectNode`는 `package.json`에 `test` 스크립트가 있을 때만, `detectFastApi`는 `pytest` 의존성이 있을 때만(겸사겸사 `testcontainers` 의존성이 있으면 도커-인-도커 주의 메모도) 만든다. `specYaml`의 `workflowYaml`을 `tests`·`pageChecks`를 한 `workflow:` 절로 합치는 함수로 바꿔, 둘 다 있는 프로젝트에서 YAML 중복 키로 한쪽이 사라지는 사고를 막았다. 테스트 명령을 넣을 때마다 "게이트가 이 테스트를 test 단계에서 돌립니다. 너무 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml의 workflow.tests에서 좁히거나 지우세요"라는 메모를 서비스 notes에 남긴다. `defaultSelected: false`가 붙은 서비스(같은 서비스 폴더 하위의 또 다른 빌드, ADR-083 — pay의 `consumer-app`)는 테스트 명령을 찾아도 기본 서비스 선택에서 빠져 컨테이너가 뜨지 않으므로 `workflow.tests`에는 넣지 않는다. 제목 쪽은 `commit-message.ts`에 `BARE_ID_OR_PRONOUN_FRAGMENT`(요구사항 id나 지시대명사에 조사만 붙은 꼴)를 더해, `toCommitMood` 변환 결과가 이 패턴과 완전히 일치하면 조각으로 보고 다음 대체 경로(에이전트 완료 요약의 "범위:"/첫 줄 → 요구사항 id + 바뀐 모듈)로 넘어가게 했다. 자세한 내용과 트레이드오프는 [ADR-133](decisions.md#adr-133-폴더-열기-감지가-서비스마다-테스트-명령을-찾아-workflowtests에-기본으로-넣고-체크포인트-제목이-요구사항-id조사만-남은-조각이-되지-않게-한다)을 본다.
+
+### 검증
+`/Users/beomsu/Desktop/pay`에 대해 `detectProject(path, { ignoreExistingSpec: true })`를 파일 생성 없이 직접 호출해, `commerce`·`consumer-app` 모두 상위 래퍼를 가리키는 Gradle 테스트 명령을 찾는 것, 그러나 `consumer-app`은 `defaultSelected: false`(서비스 선택에서 기본으로 띄우지 않는 서비스, ADR-083)라 생성된 `studio.yaml`의 `workflow.tests`에는 `commerce` 하나만 들어가는 것(넣으면 게이트가 뜨지도 않은 컨테이너에 `exec`해 늘 실패한다), `test` 스크립트가 없는 `web`(Next.js)은 `testCommand` 없음을 그대로 돌려주는 것을 확인했다. `apps/studio/lib/server/project-detect.test.ts`(새 `describe` 블록)는 루트 래퍼+하위 Gradle·같은 폴더 Gradle·래퍼 없는 Gradle·Maven·`test` 스크립트 있는/없는 Next.js·`pytest` 있는/없는 FastAPI·`defaultSelected: false` 서비스 제외 픽스처로 생성된 `testCommand`·`studio.yaml` 문자열과, `loadProject` 뒤 `workflowStages()`가 `test`를 포함하는 것까지 확인했다. `packages/agent/src/commit-message.test.ts`(새 테스트 2개)는 "R25를 해 주세요."를 완료 요약과 함께 주면 제목이 `feat: R25를`이 아니라 요약 첫 줄로 나오는 것을 확인했다. `pnpm -r typecheck`(6/6)·관련 vitest 전부 통과·`pnpm --filter @b-studio/studio lint`(오류 0)를 돌렸다.
+
+### 배운 점
+두 문제 모두 "마지막 단계의 결과만 보고 판정한다"는 같은 모양의 구멍이었다. 감지는 "서비스를 찾았는가"만 보고 "그 서비스를 검증할 수단까지 찾았는가"는 묻지 않았고, 제목 생성은 "부탁 어미를 뗀 결과가 남아 있는가"만 보고 "그 결과가 실제로 무엇을 말하는가"는 묻지 않았다. 생성·변환 파이프라인에 단계를 더할 때는 마지막 단계의 출력이 애초의 목적(테스트 가능한 명령, 변경을 설명하는 문장)을 실제로 만족하는지 별도로 확인해야 한다.

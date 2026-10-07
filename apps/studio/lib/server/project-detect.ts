@@ -95,6 +95,14 @@ export interface DetectedService {
    * 별도 서비스로는 넣지만 사람이 확인하고 켤 때까지 기본으로는 띄우고 싶지 않은 것에 false를 준다
    */
   defaultSelected?: boolean;
+  /**
+   * 이 서비스의 테스트 명령을 찾았으면(ADR-133) specYaml이 workflow.tests에 넣어 게이트의 test 단계가 실제로
+   * 돈다. 없으면 undefined — workflow.tests에 아무것도 넣지 않고, 그래서 게이트가 test 단계 자체를 건너뛴다
+   * (버그 리포트 104). command는 `docker compose exec`에 배열 그대로 넘어가는 exec 형태라 셸을 거치지 않는다 —
+   * 래퍼가 다른 폴더에 있어 `cd`가 필요하면 `['sh', '-c', '...']`로 셸을 직접 지정한다(detectSpring의
+   * springTestCommand 참고, Gradle 서브프로젝트가 상위 래퍼를 쓸 때)
+   */
+  testCommand?: { command: string[]; maxAttempts?: number };
 }
 
 export interface ProjectDetection {
@@ -140,6 +148,13 @@ const NOISE_DIR_NAMES = new Set(['k6', 'tools', 'tool', 'scripts', 'script', 'do
 const APP_CONTAINER_DIR_NAMES = new Set(['apps', 'services', 'packages']);
 /** 한 프로젝트에서 찾는 서비스 수 상한. 두 단계 탐색이 너무 많이 잡지 않게 자른다 */
 const MAX_DETECTED_SERVICES = 6;
+
+/** 개발 서버가 쓰는 기본 프로젝트 캐시(.gradle)와 부딪히지 않게 Gradle 테스트가 따로 쓰는 캐시 디렉터리(ADR-133) */
+const GRADLE_TEST_CACHE_DIR = '/tmp/gradle-test-cache';
+/** workflow.tests에 명령을 넣을 때마다 서비스 notes에 함께 남기는 메모(ADR-133, 버그 리포트 104) — 게이트가
+ *  실제로 이 명령을 test 단계에서 돌린다는 것과, 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml에서
+ *  직접 좁히거나 뺄 수 있다는 것을 알린다 */
+const TEST_GATE_NOTE = '게이트가 이 테스트를 test 단계에서 돌립니다. 너무 느리거나 외부 의존(Testcontainers 등)이 있으면 studio.yaml의 workflow.tests에서 좁히거나 지우세요';
 
 function isNoiseDirName(name: string): boolean {
   return NOISE_DIR_NAMES.has(name.toLowerCase());
@@ -223,7 +238,13 @@ async function withDeeperCandidates(
       await tryAdd(posixJoin(parent.path, childName), (service) => ({
         ...service,
         defaultSelected: false,
-        notes: [`${parent.path} 서비스 하위의 별도 빌드로 보여 기본으로는 띄우지 않습니다. 필요하면 서비스 선택에서 켜세요`, ...service.notes],
+        notes: [
+          `${parent.path} 서비스 하위의 별도 빌드로 보여 기본으로는 띄우지 않습니다. 필요하면 서비스 선택에서 켜세요`,
+          // 기본으로 안 뜨는 서비스를 workflow.tests에 넣으면 게이트가 docker compose exec할 컨테이너가 없어 test
+          // 단계가 항상 실패한다 — 그래서 테스트 명령을 찾았어도(testCommand) workflow.tests에는 넣지 않는다(ADR-133)
+          ...(service.testCommand ? ['테스트 명령도 찾았지만, 기본으로 띄우지 않는 서비스라 workflow.tests에는 넣지 않았습니다. 서비스 선택에서 켠 뒤 studio.yaml에 직접 추가하세요'] : []),
+          ...service.notes,
+        ],
       }));
     }
   }
@@ -602,6 +623,17 @@ async function detectNode(root: string, dir: string, relative: string): Promise<
   const notes: string[] = [];
   if (lockless) notes.push('잠금 파일이 없어 npm install로 설치합니다(버전이 달라질 수 있습니다)');
   if (hasDevScript) notes.push('package.json의 dev 스크립트를 그대로 씁니다. 포트는 PORT 환경 변수로 맞춥니다(스크립트가 다른 방식으로 포트를 읽으면 studio.yaml의 port에 맞추세요)');
+  // package.json에 test 스크립트가 있을 때만 게이트 test 단계에 넣는다(ADR-133) — 없는데 넣으면 "npm test"가
+  // 스크립트를 못 찾아 바로 실패한다
+  const hasTestScript = typeof scripts?.test === 'string';
+  const runTest = { pnpm: ['pnpm', 'run', 'test'], yarn: ['yarn', 'run', 'test'], npm: ['npm', 'run', 'test'] }[manager];
+  const testCommand = hasTestScript ? { command: runTest } : undefined;
+  if (testCommand) {
+    notes.push(TEST_GATE_NOTE);
+    // watch 모드로 끝나지 않는 스크립트(예: CI 환경 변수가 없으면 계속 지켜보는 react-scripts test)면 게이트가
+    // 10분 타임아웃 뒤에야 실패로 알린다 — 미리 알린다
+    notes.push('한 번 실행하고 끝나는 형태가 아니면(예: CI 환경 변수가 없을 때 watch 모드로 멈추는 react-scripts test) 10분 타임아웃 뒤에야 실패로 알립니다. 필요하면 test 스크립트를 한 번 실행하고 끝나는 형태로 맞추세요');
+  }
   // 워크스페이스 구성원은 루트에서 설치하고(잠금 파일이 거기 있다) 서비스 폴더로 돌아와 개발 서버를 띄운다
   const command = workspaceManager
     ? `cd ${CONTAINER_WORKSPACE_ROOT} && ${install} && cd ${containerWorkDir(relative)} && exec ${dev}`
@@ -633,6 +665,7 @@ async function detectNode(root: string, dir: string, relative: string): Promise<
     environment: hasDevScript ? { PORT: String(port) } : {},
     dependsOn: [],
     notes,
+    ...(testCommand ? { testCommand } : {}),
   };
 }
 
@@ -677,11 +710,13 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
   // 둘 다 리액터(다중 모듈 선언) 관계와 무관하게 "이 디렉터리가 프로젝트다"로 동작해, commerce처럼 자기 settings.gradle은
   // 있지만 gradlew가 없는 독립 빌드에도, 진짜 멀티 모듈 서브프로젝트에도 똑같이 먹힌다
   const usesAncestorWrapper = wrapper && wrapperRelative !== relative;
+  // 서브프로젝트가 상위 래퍼를 쓸 때(usesAncestorWrapper) bootRun·test 둘 다 "래퍼 폴더로 옮겨 가 -p/-f로
+  // 서비스 폴더를 가리켜 실행"하는 같은 경로를 쓰므로 한 번만 계산해 둔다
+  const subPath = usesAncestorWrapper ? toPosixPath(path.relative(wrapperDir!, dir)) : undefined;
+  const wrapperWorkDir = usesAncestorWrapper ? containerWorkDir(wrapperRelative!) : undefined;
   let run: string;
   let runIsShell = false;
   if (usesAncestorWrapper) {
-    const subPath = toPosixPath(path.relative(wrapperDir!, dir));
-    const wrapperWorkDir = containerWorkDir(wrapperRelative!);
     const cmd = isGradle ? `./gradlew -p ${subPath} bootRun --no-daemon --console=plain` : `./mvnw -f ${subPath} spring-boot:run -q`;
     run = `cd ${wrapperWorkDir} && exec ${cmd}`;
     runIsShell = true;
@@ -695,6 +730,8 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
         : '["mvn", "-q", "spring-boot:run"]';
   }
   const image = wrapper ? `eclipse-temurin:${java}-jdk` : isGradle ? `gradle:jdk${java}` : `maven:3-eclipse-temurin-${java}`;
+  const testCommand = springTestCommand({ isGradle, usesAncestorWrapper, wrapper, subPath, wrapperWorkDir });
+  if (testCommand) notes.push(TEST_GATE_NOTE);
   if (!wrapper) {
     notes.push(`이 폴더와 상위 폴더 어디에도 ${isGradle ? 'Gradle' : 'Maven'} 래퍼가 없어 ${image} 이미지의 도구로 실행합니다. 이미지의 버전이 실제 쓰는 버전과 다르면 빌드가 달라질 수 있습니다`);
   } else if (usesAncestorWrapper) {
@@ -734,7 +771,45 @@ async function detectSpring(root: string, dir: string, relative: string): Promis
     environment: {},
     dependsOn: [],
     notes: [...notes, '첫 기동은 의존성을 받느라 몇 분 걸릴 수 있습니다'],
+    ...(testCommand ? { testCommand } : {}),
   };
+}
+
+/**
+ * Gradle·Maven 테스트 명령(ADR-133). bootRun과 같은 래퍼 경로 규칙을 따른다:
+ *  - 래퍼가 서비스 폴더 자신에 있으면 그 폴더에서 바로 돈다(`./gradlew test`·`./mvnw test`)
+ *  - 래퍼가 상위 폴더에 있으면(usesAncestorWrapper) 그 폴더로 옮겨 가 `-p`(Gradle)·`-f`(Maven)로 서비스 폴더를
+ *    가리킨다. workflow.tests의 command는 docker compose exec에 배열 그대로 실행돼(ADR-133) `cd`를 못 쓰므로
+ *    `['sh', '-c', '...']`로 셸을 직접 지정한다(bootRun의 Dockerfile CMD가 이미 쓰는 패턴과 같다)
+ *  - 래퍼가 아예 없으면(이미지의 gradle·mvn 도구로 돈다) 명령만 그 도구 이름으로 바꾼다
+ * Gradle은 개발 서버(bootRun)가 기본 프로젝트 캐시(.gradle)를 계속 쓰고 있어, 테스트가 같은 캐시를 쓰면 잠금이
+ * 부딪힌다(examples/orders/studio.yaml의 api-unit 참고) — `--project-cache-dir`로 테스트 전용 캐시를 따로 쓰고,
+ * 첫 실행은 의존성을 받느라 느리거나 잠금 대기로 실패할 수 있어 maxAttempts: 2로 한 번 재시도한다. Maven은 같은
+ * 종류의 캐시 잠금 보고가 없어 재시도를 더하지 않는다
+ */
+function springTestCommand(options: {
+  isGradle: boolean;
+  usesAncestorWrapper: boolean;
+  wrapper: boolean;
+  subPath: string | undefined;
+  wrapperWorkDir: string | undefined;
+}): { command: string[]; maxAttempts?: number } | undefined {
+  const { isGradle, usesAncestorWrapper, wrapper, subPath, wrapperWorkDir } = options;
+  if (isGradle) {
+    const gradleArgs = ['test', '--no-daemon', '--console=plain', '--project-cache-dir', GRADLE_TEST_CACHE_DIR];
+    const command = usesAncestorWrapper
+      ? ['sh', '-c', `cd ${wrapperWorkDir} && ./gradlew -p ${subPath} ${gradleArgs.join(' ')}`]
+      : wrapper
+        ? ['./gradlew', ...gradleArgs]
+        : ['gradle', ...gradleArgs];
+    return { command, maxAttempts: 2 };
+  }
+  const command = usesAncestorWrapper
+    ? ['sh', '-c', `cd ${wrapperWorkDir} && ./mvnw -f ${subPath} test`]
+    : wrapper
+      ? ['./mvnw', 'test']
+      : ['mvn', 'test'];
+  return { command };
 }
 
 /** 저장소 루트의 settings.gradle(.kts)이 이 폴더 이름을 서브프로젝트로 포함하는지(`include 'commerce'`, `include(":commerce")` 등) */
@@ -788,6 +863,18 @@ async function detectFastApi(dir: string, relative: string): Promise<Omit<Detect
   const notes: string[] = [];
   if (!entry.found) notes.push('FastAPI 앱을 만드는 파일을 찾지 못해 main:app으로 실행합니다. 다르면 Dockerfile.b-studio를 고치세요');
   const install = requirements ? 'pip install --no-cache-dir -r requirements.txt' : 'pip install --no-cache-dir uv && uv pip install --system -r pyproject.toml';
+  // pytest 의존성이 있을 때만 workflow.tests에 넣는다(ADR-133) — 없으면 "pytest: command not found"로 바로 실패한다.
+  // requirements.txt·pyproject.toml 원문만 보는 것은 hasFastApi와 같은 생각(저장소를 훑지 않고 알려진 자리만 본다)
+  const dependencyText = `${requirements ?? ''}\n${pyproject ?? ''}`;
+  const hasPytest = /(^|\n)\s*pytest\b/i.test(requirements ?? '') || /["']pytest/i.test(pyproject ?? '') || /(^|\n)\s*pytest\s*=/i.test(pyproject ?? '');
+  const testCommand = hasPytest ? { command: ['pytest'] } : undefined;
+  if (testCommand) {
+    notes.push(TEST_GATE_NOTE);
+    // Testcontainers는 도커-인-도커가 필요해 샌드박스 컨테이너 안에서는 도커 소켓이 없으면 실패한다 — 미리 알린다
+    if (/testcontainers/i.test(dependencyText)) {
+      notes.push('Testcontainers 의존성을 찾았습니다. 테스트가 도커를 더 띄우려 하면(도커-인-도커) 샌드박스 안에서는 도커 소켓이 없어 실패할 수 있습니다 — 그러면 workflow.tests에서 이 테스트를 빼세요');
+    }
+  }
   return {
     template: 'fastapi',
     path: relative,
@@ -810,6 +897,7 @@ async function detectFastApi(dir: string, relative: string): Promise<Omit<Detect
     environment: {},
     dependsOn: [],
     notes,
+    ...(testCommand ? { testCommand } : {}),
   };
 }
 
@@ -851,28 +939,50 @@ function specYaml(detection: ProjectDetection): string {
     for (const note of service.notes) lines.push(`    # 확인: ${note}`);
   }
   lines.push(...databasesYaml(detection.infra));
-  lines.push(...workflowYaml(detection.frontendBackendWiring));
+  lines.push(...workflowYaml(detection.services, detection.frontendBackendWiring));
   lines.push('');
   return lines.join('\n');
 }
 
 /**
- * 프론트엔드→백엔드 주소를 자동 연결했으면(fix/frontend-backend-url), 화면이 떠도 API 호출이 깨지는 것을 검증 게이트가
- * 잡도록 기본 pageChecks 하나를 만든다. 헤드리스 브라우저를 쓸 수 없는 샌드박스에서는 fallbackProbe가 대신
- * 백엔드 주소로 HTTP 확인만 한다(packages/agent/src/gate.ts). 다시 만들려면(studio.yaml을 직접 더 고치고 싶으면)
- * studio.yaml·compose.b-studio.yaml과 각 서비스 폴더의 Dockerfile.b-studio를 지우고 폴더를 다시 열면 된다
+ * workflow: 절 하나를 만든다. 두 가지가 이 절에 들어갈 수 있고(YAML에 같은 최상위 키가 두 번 나오면 뒤엣것만
+ * 적용되므로 반드시 한 함수에서 합쳐 하나로 내보낸다), 둘 다 없으면 workflow: 자체를 만들지 않는다:
+ *  - tests: 서비스 폴더에서 테스트 명령을 찾았으면(detectNode·detectSpring·detectFastApi의 testCommand, ADR-133)
+ *    여기 넣는다. workflowStages()(packages/agent/src/workflow.ts)가 이 배열이 비어 있지 않을 때만 test 단계를
+ *    기본 흐름에 끼워 넣으므로, 비어 있으면(이 함수를 아예 안 부르거나 tests가 없으면) 게이트가 test 단계
+ *    자체를 건너뛴다 — JUnit·pytest 등을 에이전트가 run_in_service로 스스로 돌려도 체크포인트 트레일러에
+ *    Workflow-Passed: test가 남지 않던 문제(버그 리포트 104)가 여기서 생겼다. defaultSelected: false인
+ *    서비스(같은 서비스 폴더 하위의 또 다른 빌드, ADR-083)는 기본 서비스 선택에서 빠져 컨테이너가 뜨지
+ *    않으므로 뺀다 — 넣으면 게이트가 `docker compose exec`할 컨테이너가 없어 test 단계가 항상 실패한다
+ *  - pageChecks: 프론트엔드→백엔드 주소를 자동 연결했으면(fix/frontend-backend-url) 화면이 떠도 API 호출이
+ *    깨지는 것을 검증 게이트가 잡도록 기본 화면 확인 하나. 헤드리스 브라우저를 쓸 수 없는 샌드박스에서는
+ *    fallbackProbe가 대신 백엔드 주소로 HTTP 확인만 한다(packages/agent/src/gate.ts)
+ * 다시 만들려면(studio.yaml을 직접 더 고치고 싶으면) studio.yaml·compose.b-studio.yaml과 각 서비스 폴더의
+ * Dockerfile.b-studio를 지우고 폴더를 다시 열면 된다
  */
-function workflowYaml(wiring: ProjectDetection['frontendBackendWiring']): string[] {
-  if (!wiring) return [];
-  return [
-    '',
-    '# 프론트엔드가 백엔드 주소를 자동으로 연결해 받습니다(위 서비스의 "확인:" 메모 참고). 화면은 뜨는데 API 호출만 깨지는',
-    '# 경우를 검증 게이트가 잡도록 기본 화면 확인을 하나 만들었습니다. 다시 만들려면 이 파일과 compose.b-studio.yaml·',
-    '# 각 서비스 폴더의 Dockerfile.b-studio를 지우고 폴더를 다시 여세요',
-    'workflow:',
-    '  pageChecks:',
-    `    - { service: ${wiring.frontendService}, path: /, mode: browser, fallbackProbe: { service: ${wiring.backendService}, path: ${yamlString(wiring.backendProbePath)} } }`,
-  ];
+function workflowYaml(services: readonly DetectedService[], wiring: ProjectDetection['frontendBackendWiring']): string[] {
+  const tests = services.flatMap((service) =>
+    service.testCommand && service.defaultSelected !== false ? [{ name: `${service.name}-test`, service: service.name, ...service.testCommand }] : [],
+  );
+  if (tests.length === 0 && !wiring) return [];
+  const lines: string[] = ['', 'workflow:'];
+  if (tests.length > 0) {
+    lines.push('  # 서비스 폴더에서 찾은 테스트 명령입니다(위 서비스의 "확인:" 메모 참고). 게이트가 test 단계에서 돌립니다');
+    lines.push('  tests:');
+    for (const test of tests) {
+      const parts = [`name: ${test.name}`, `service: ${test.service}`, `command: ${JSON.stringify(test.command)}`, ...(test.maxAttempts ? [`maxAttempts: ${test.maxAttempts}`] : [])];
+      lines.push(`    - { ${parts.join(', ')} }`);
+    }
+  }
+  if (wiring) {
+    lines.push(
+      '  # 프론트엔드가 백엔드 주소를 자동으로 연결해 받습니다(위 서비스의 "확인:" 메모 참고). 화면은 뜨는데 API 호출만 깨지는',
+      '  # 경우를 검증 게이트가 잡도록 기본 화면 확인을 하나 만들었습니다',
+      '  pageChecks:',
+      `    - { service: ${wiring.frontendService}, path: /, mode: browser, fallbackProbe: { service: ${wiring.backendService}, path: ${yamlString(wiring.backendProbePath)} } }`,
+    );
+  }
+  return lines;
 }
 
 /** postgres 부가 서비스 중 databases: 요건(POSTGRES_DB·POSTGRES_USER가 SQL 식별자)에 맞는 것만 체크포인트 스냅샷 대상으로 적는다 */
