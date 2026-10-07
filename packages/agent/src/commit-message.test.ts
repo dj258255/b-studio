@@ -30,6 +30,16 @@ describe('classifyCommit', () => {
     expect(classifyCommit('대시보드가 로딩에서 멈추는 버그를 고쳐 줘', [change('web/app/dashboard/page.tsx')])).toBe('fix');
   });
 
+  it('첫 문장이 새로 만들기를 말하면, 본문이 오류 상태 화면을 설명해도 fix가 아니라 feat로 본다(도그푸딩 버그 리포트: "fix: R26의 웹 화면을 만든다")', () => {
+    const request = 'R26의 웹 화면을 만들어 주세요.\n- 조회 실패 시 오류 문구와 재시도 버튼을 보여 준다.';
+    expect(classifyCommit(request, [change('apps/web/components/ShortsFeed.tsx', 'added'), change('apps/web/lib/api.ts')])).toBe('feat');
+  });
+
+  it('첫 문장이 고침을 말하면 그대로 fix로 보고, 첫 문장에 단서가 없으면 본문의 고침 낱말로 fix를 고른다', () => {
+    expect(classifyCommit('결제 화면에 버그가 있어요. 새로 고침하면 사라집니다.', [change('web/app/pay/page.tsx')])).toBe('fix');
+    expect(classifyCommit('주문 목록을 봐 주세요.\n- 두 번째 페이지가 안 나와요', [change('web/app/orders/page.tsx')])).toBe('fix');
+  });
+
   it('바뀐 파일이 섞여 있으면(테스트+일반) test·docs·feat 전용 규칙에 걸리지 않는다', () => {
     expect(classifyCommit('메모 필드 추가', [change('api/src/main/java/Order.java'), change('api/src/test/java/OrderTest.java', 'added')])).toBe('feat');
   });
