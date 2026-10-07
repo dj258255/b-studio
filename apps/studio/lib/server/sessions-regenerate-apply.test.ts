@@ -51,6 +51,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async callExternal() {
       return { decision: 'deny' as const, status: 404, body: '', masked: 0 };
     },
+    // 서비스 선택(ADR-083)을 끄고 켤 수 있어야 offServices 유지 테스트를 할 수 있다
+    async setServiceRunning() {},
     async destroy() {},
   } as unknown as Sandbox;
   return { ...actual, providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }) };
@@ -58,7 +60,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
 
 import { GENERATED_COMPOSE } from './project-detect';
 import { applyRegeneration, proposeRegeneration, registerFolder } from './project-registry';
-import { applyRegeneratedFilesToSession, createSession, getSnapshot, stopSession } from './sessions';
+import { applyRegeneratedFilesToSession, createSession, getSnapshot, setSessionServiceSelection, stopSession } from './sessions';
 
 const made: string[] = [];
 const saved = {
@@ -168,6 +170,34 @@ describe('applyRegeneratedFilesToSession(ADR-101, "이 세션에도 적용")', (
 
     expect(result.restarted.map((check) => check.service).sort()).toEqual(['backend', 'frontend']);
     expect(fake.restartCalls.sort()).toEqual(['backend', 'frontend']);
+
+    await stopSession(session.id).catch(() => {});
+  }, 20_000);
+
+  it('studio.yaml을 다시 읽어도 사람이 꺼 둔 서비스(offServices)는 계속 꺼져 있다(도그푸딩 마찰 121)', async () => {
+    const folder = await tmp();
+    await mkdir(path.join(folder, 'frontend'), { recursive: true });
+    await mkdir(path.join(folder, 'backend'), { recursive: true });
+    await writeFile(path.join(folder, 'frontend', 'package.json'), nextPackage);
+    await writeFile(path.join(folder, 'frontend', 'package-lock.json'), '{}');
+    await writeFile(path.join(folder, 'backend', 'build.gradle'), springGradle);
+    await writeFile(path.join(folder, 'backend', 'gradlew'), '#!/bin/sh');
+    const registered = await registerFolder(folder, new Set());
+
+    const session = await createSession(registered.id, 'kim', 'copy');
+    expect(await waitForReady(session.id)).toBe('ready');
+    await setSessionServiceSelection(session.id, 'frontend', false);
+    fake.restartCalls = [];
+
+    const specPath = path.join(folder, 'studio.yaml');
+    await writeFile(specPath, `${await readFile(specPath, 'utf8')}# 다시 읽기 확인용 표시\n`);
+    const first = await applyRegeneratedFilesToSession(session.id, ['studio.yaml']);
+    // 한 번 다시 읽은 뒤에도 선택이 남아 있어야 두 번째 적용에서도 frontend를 건너뛴다
+    const second = await applyRegeneratedFilesToSession(session.id, ['studio.yaml']);
+
+    expect(first.skippedOff).toEqual(['frontend']);
+    expect(second.skippedOff).toEqual(['frontend']);
+    expect(fake.restartCalls).not.toContain('frontend');
 
     await stopSession(session.id).catch(() => {});
   }, 20_000);

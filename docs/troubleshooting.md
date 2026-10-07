@@ -100,6 +100,7 @@
 - [77. 개발 서버와 같은 컨테이너에서 돈 큰 테스트가 메모리 한도를 넘어 컨테이너를 통째로 종료시킴](#77-개발-서버와-같은-컨테이너에서-돈-큰-테스트가-메모리-한도를-넘어-컨테이너를-통째로-종료시킴)
 - [78. 괄호 꼬리가 붙은 요청과 흔한 "~어 주세요" 동사가 커밋 문체로 바뀌지 않음](#78-괄호-꼬리가-붙은-요청과-흔한-어-주세요-동사가-커밋-문체로-바뀌지-않음)
 - [79. 서비스 폴더 밖 Gradle 서브모듈 파일이 "재시작으로 확인하지 못한 파일"로 분류됨](#79-서비스-폴더-밖-gradle-서브모듈-파일이-재시작으로-확인하지-못한-파일로-분류됨)
+- [80. 실행 중 바뀐 studio.yaml(includes 등)이 그 실행의 검증과 다음 요청에 반영되지 않음](#80-실행-중-바뀐-studioyamlincludes-등이-그-실행의-검증과-다음-요청에-반영되지-않음)
 
 ---
 
@@ -2603,3 +2604,28 @@ studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대
 
 ### 배운 점
 "파일이 어느 서비스 폴더 아래 있는가"와 "파일이 어느 서비스의 빌드에 포함되는가"는 모노레포에서 다른 질문이다. Gradle·Maven의 멀티 모듈 선언은 디렉터리 트리와 다른 또 하나의 소유권 그래프를 만든다 — 폴더 구조만 보는 판정은 이 그래프를 모른다.
+
+## 80. 실행 중 바뀐 studio.yaml(includes 등)이 그 실행의 검증과 다음 요청에 반영되지 않음
+
+**구분:** 도그푸딩 중 실측(`/Users/beomsu/Desktop/pay` 세션의 체크포인트 f1c52e2) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+에이전트가 한 실행 안에서 `studio.yaml`의 commerce 서비스에 `systemPackages: [ffmpeg]`와 `includes: [media]`를 더했다. `systemPackages`는 반영됐다(컨테이너에 ffmpeg 8.0.1). 그러나 검증 보고서는 `media/` 파일을 여전히 "재시작으로 확인하지 못한 파일"로 분류했다.
+
+### 원인
+- 게이트는 세션을 시작할 때 읽은 project로 판정한다. 75번 수정은 `restartServicesFor`의 Dockerfile 동기화만 다시 읽은 선언으로 바꿨다. 소유 판정(`servicesForFiles`)은 여전히 옛 project를 썼다.
+- 실행이 끝나도 세션의 project를 다시 읽지 않아, 다음 요청도 옛 선언을 썼다.
+- "이 세션에도 적용"(`applyRegeneratedFilesToSession`)은 project를 다시 읽긴 했지만, 세션 상태인 서비스 선택(`offServices`)을 버렸다. 그래서 다시 읽은 뒤에는 꺼 둔 서비스도 재시작했다.
+
+### 수정
+- `packages/agent/src/verify.ts`: `studio.yaml`이 바뀐 재시작에서는 다시 읽은 선언으로 소유 판정과 Dockerfile 동기화를 함께 한다. 서비스 선택은 지금 project의 것을 쓴다.
+- `apps/studio/lib/server/sessions.ts`: `reloadSessionProject`가 `studio.yaml`을 다시 읽고 서비스 선택을 옮긴다. 체크포인트에 `studio.yaml`이 들어가면 커밋 뒤에 부르고, "이 세션에도 적용"도 이 함수를 쓴다.
+
+### 검증
+- `verify.test.ts`: 실행 중 `includes`를 더하면 `media/` 파일이 확인 못한 파일에서 빠지고 api가 다시 뜬다.
+- `sessions-regenerate-apply.test.ts`: frontend를 꺼 둔 세션에서 "이 세션에도 적용"을 두 번 해도 두 번 다 frontend를 건너뛴다.
+
+두 파일 28개 테스트가 통과했다.
+
+### 배운 점
+75번에서 같은 원인(실행 중 바뀐 설정을 다시 읽지 않음)을 한 곳만 고쳤다. 증상이 난 경로만 고치면 같은 원인의 다른 경로가 남는다. 이번에는 세션 project를 다시 읽는 지점을 한 함수로 모았다.
