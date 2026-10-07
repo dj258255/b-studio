@@ -117,7 +117,11 @@ function isClearChangeSentence(line: string): boolean {
   if (/[?？]\s*$/.test(trimmed)) return false;
   if (SITUATIONAL_WORDS.test(trimmed)) return false;
   if (PROGRESS_REPORT_WORDS.test(trimmed)) return false;
-  const converted = toCommitMood(trimmed).trim();
+  const mood = toCommitMoodDetailed(trimmed);
+  const converted = mood.text.trim();
+  // 동사 규칙 없이 부탁 어미만 지웠는데 끝이 서술(…다)·명사형(…함·…기)이 아니면 동사 조각이 남은 것이다.
+  // 규칙을 끝없이 늘리는 대신 다음 대체 경로(요약·바뀐 파일)로 넘긴다(트러블슈팅 78의 배운 점)
+  if (mood.generic && !/(다|함|기)$/.test(converted)) return false;
   if (converted.length < 2) return false;
   if (BARE_ID_OR_PRONOUN_FRAGMENT.test(converted)) return false;
   if (STATE_DESCRIPTION_ENDING.test(converted)) return false;
@@ -322,20 +326,36 @@ const MOOD_ENDINGS: ReadonlyArray<[RegExp, string]> = [
   [/적어\s*(줘|주세요|주십시오)$/, '적는다'],
   [/막아\s*(줘|주세요|주십시오)$/, '막는다'],
   [/(\S+)해\s*(줘|주세요|주십시오)$/, '$1한다'],
+  // "로그인 기능 추가 해 주세요"처럼 명사 뒤에 띄어 쓴 "해 주세요". 목적격·보조사로 끝나면("R25를 해 주세요") 동사가 아니라
+  // 제외한다("이걸·그걸"의 걸은 "것을"의 준말이라 함께 뺀다). 이·가·도·로·에는 명사 끝 글자(추가·정도·경로 등)와 겹쳐 넣지 않았다
+  [/([^\s을를은는걸])\s+해\s*(줘|주세요|주십시오)$/, '$1한다'],
   [/\s*(해\s*)?(줘|주세요|주십시오)$/, ''],
 ];
 
 export function toCommitMood(text: string): string {
+  return toCommitMoodDetailed(text).text;
+}
+
+/** 마지막 대체 규칙(부탁 어미만 지움)의 패턴. 이 규칙만 맞았으면 동사를 바꾸지 못한 것이다 */
+const GENERIC_MOOD_ENDING = MOOD_ENDINGS[MOOD_ENDINGS.length - 1]![0];
+
+/**
+ * toCommitMood와 같지만, 구체적인 동사 규칙 없이 마지막 대체 규칙(부탁 어미만 지움)만 맞았는지도 돌려준다.
+ * "…실제 경로로 재 주세요"처럼 규칙에 없는 동사는 "…실제 경로로 재"처럼 동사 조각만 남는다(도그푸딩 버그 리포트).
+ */
+function toCommitMoodDetailed(text: string): { text: string; generic: boolean } {
   let result = text.replace(/[.!?。]+$/, '').trim();
+  let generic = false;
   // "옮겨 주세요(R32)"처럼 끝에 괄호 꼬리(요구사항 id 등)가 붙으면 어미 규칙이 끝($)을 못 찾는다(도그푸딩 버그 리포트).
   // 꼬리를 떼고 어미를 바꾼 뒤 다시 붙인다
   const tail = /\s*(\([^()]*\))$/.exec(result);
   if (tail) result = result.slice(0, tail.index).trim();
   for (const [pattern, replacement] of MOOD_ENDINGS) {
     if (pattern.test(result)) {
+      generic = pattern === GENERIC_MOOD_ENDING;
       result = result.replace(pattern, replacement).trim();
       break;
     }
   }
-  return tail ? `${result}${tail[1]}` : result;
+  return { text: tail ? `${result}${tail[1]}` : result, generic };
 }

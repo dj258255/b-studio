@@ -218,6 +218,21 @@ describe('generateCommitSubject', () => {
     expect(toCommitMood('결정을 ADR로 남겨 주세요(R32)')).toBe('결정을 ADR로 남긴다(R32)');
   });
 
+  it('규칙에 없는 동사("…재 주세요")는 부탁 어미만 떼어 동사 조각을 남기지 않고 다음 대체 경로로 넘긴다(도그푸딩 버그 리포트)', () => {
+    const request = 'R24(60초 영상 업로드 완료부터 READY까지 60초 이내)를 실제 경로로 재 주세요. 지금까지는 FFmpeg 변환 시간만 쟀습니다.';
+    const summary = '**R24 측정 완료 (실제 경로):**\n\n- 업로드 완료부터 READY까지 실제 경로 측정 스크립트를 더했습니다.';
+    const subject = generateCommitSubject(request, [change('tools/run-shorts-upload-to-ready-bench.sh', 'added'), change('docs/performance/shorts-transcode.md')], summary);
+    expect(subject).not.toMatch(/재$/);
+    expect(subject).toBe('feat: 업로드 완료부터 READY까지 실제 경로 측정 스크립트를 더했습니다');
+  });
+
+  it('명사 뒤에 띄어 쓴 "해 주세요"는 "…한다"로 바꾸고, 조사로 끝나면 동사로 보지 않는다', () => {
+    expect(toCommitMood('로그인 기능 추가 해 주세요')).toBe('로그인 기능 추가한다');
+    expect(generateCommitSubject('로그인 기능 추가 해 주세요', [change('web/app/login/page.tsx')])).toBe('feat: 로그인 기능 추가한다');
+    expect(generateCommitSubject('R25를 해 주세요', [change('apps/commerce/src/shorts/link.ts')])).not.toBe('feat: R25를한다');
+    expect(generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')])).not.toContain('이걸한다');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
