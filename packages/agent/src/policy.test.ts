@@ -13,6 +13,15 @@ describe('execution policy', () => {
     expect(DEFAULT_DENIED_COMMANDS).toContain('git push');
   });
 
+  it('blocks gradle --stop, which takes down the Gradle daemon running the service (dogfooding bug report)', () => {
+    const deny = (command: string[]) => checkToolPolicy('run_in_service', { command }, undefined, undefined).decision;
+    expect(deny(['sh', '-c', 'cd /workspace && ./gradlew --stop 2>&1 | tail -5'])).toBe('deny');
+    expect(deny(['./gradlew', '-p', 'commerce', '--stop'])).toBe('deny');
+    expect(deny(['gradle', '--stop'])).toBe('deny');
+    expect(deny(['sh', '-c', 'cd /workspace && ./gradlew -p commerce test --no-daemon'])).toBe('allow');
+    expect(deny(['sh', '-c', './gradlew test; echo --stop'])).toBe('allow');
+  });
+
   it('keeps ordinary test commands available', () => {
     expect(checkToolPolicy('run_in_service', { command: ['pnpm', 'test'] }, undefined, undefined)).toEqual({ tool: 'run_in_service', decision: 'allow' });
   });
