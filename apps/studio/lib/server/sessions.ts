@@ -56,6 +56,7 @@ import {
   fetchPullRequestDetail,
   findCheckpointMentions,
   findGateCheckMentions,
+  findUnverifiedScenarioIds,
   flattenDiscoveredFile,
   formatCheckedCoverage,
   formatVerificationReport,
@@ -292,7 +293,7 @@ import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } fro
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
-import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from './test-files';
+import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
@@ -4823,15 +4824,21 @@ function evaluateRequirement(
   issueNumber?: number,
   testRun?: TestRunEvidence,
   docSources?: readonly DocMatchSource[],
+  testRunRows: readonly MatrixTestRunRow[] = [],
 ): RequirementView {
   const docEvidence: DocEvidence | undefined = requirement.kind === 'docs' && docSources ? matchAcceptanceAgainstDocs(requirement.acceptance, docSources) : undefined;
-  const evidence: RequirementEvidence = {
+  const evidenceBase: RequirementEvidence = {
     checkpoints: findCheckpointMentions(checkpoints, requirement.id),
     tests: scanTestFilesForRequirementId(testFiles, requirement.id),
     gateChecks: findGateCheckMentions(gateChecks, requirement.id),
     ...(testRun ? { testRun } : {}),
     ...(docEvidence ? { docEvidence } : {}),
   };
+  // 요구사항 id만 단 테스트로도 요구사항 전체는 검증됨이 될 수 있다(기존 규칙) — 그래도 시나리오별로는 아직
+  // 자기 id를 단 통과 테스트가 없을 수 있어(다그푸딩 마찰 140), 추적 매트릭스를 따로 열지 않아도 그 사실을
+  // 요구사항 카드에서 바로 보게 missingScenarios를 덧붙인다
+  const missingScenarios = findUnverifiedScenarioIds(requirement, checkpoints, testFiles, gateChecks, testRunRows, evidenceBase);
+  const evidence: RequirementEvidence = { ...evidenceBase, ...(missingScenarios.length > 0 ? { missingScenarios } : {}) };
   const status = computeRequirementStatus(evidence, requirement);
   const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
   return {
@@ -4876,6 +4883,8 @@ interface RequirementEvaluationContext {
   testServices: TestServiceView[];
   head?: { sha: string; shortSha: string };
   pendingFilesCount: number;
+  /** 지금 체크포인트에서 돈 테스트 탭 실행을 테스트 단위로 펼친 목록(missingScenarios 계산에 쓴다) */
+  testRunRows: MatrixTestRunRow[];
 }
 
 /**
@@ -4898,6 +4907,7 @@ async function buildRequirementEvaluationContext(session: Session): Promise<Requ
     testServices,
     head: headInfo.head,
     pendingFilesCount: headInfo.pendingFilesCount,
+    testRunRows: buildMatrixTestRunRows(testServices, headInfo.head, headInfo.pendingFilesCount),
   };
 }
 
@@ -4910,6 +4920,7 @@ function evaluateRequirementWithContext(requirement: Requirement, context: Requi
     issueNumber,
     buildRequirementTestRunEvidence(context.testServices, requirement.id, context.head, context.pendingFilesCount),
     context.docSources,
+    context.testRunRows,
   );
 }
 
@@ -5787,7 +5798,10 @@ export interface TestsSnapshot {
 
 /** 서비스 폴더 안에서 테스트 파일을 찾아 케이스를 뽑는다. 파일 IO만 하고 판정은 하지 않는다(순수 함수는 test-discovery.ts에 있다) */
 async function discoverServiceTestRows(session: Session, spec: ManagedSpec): Promise<ServiceTestRow[]> {
-  const files = await walkServiceTestFiles(session.project.root, spec.path);
+  // includes(studio.yaml, ADR-139)가 가리키는 서비스 폴더 밖 경로도 함께 훑는다 — 그 경로의 테스트 보고서는
+  // 이미 모아 왔지만(extraReportRootsFor), 발견 단계가 그 경로를 몰라 모아 온 결과를 어느 행에도 못 붙이고
+  // 조용히 버렸다(다그푸딩 마찰 140, attachResults는 발견한 행에만 결과를 붙인다)
+  const files = await walkServiceAndIncludedTestFiles(session.project.root, spec.path, spec.includes ?? []);
   const rows: ServiceTestRow[] = [];
   for (const file of files) {
     const discovered = discoverTestsInFile(file.path, file.content);
