@@ -20,6 +20,9 @@ const PAGES: Record<string, string> = {
   '/form': `<html><body><form onsubmit="event.preventDefault(); document.getElementById('done').textContent = '제출됨'"><input id="name"></form><p id="done"></p></body></html>`,
   // screencast가 볼 화면 변화를 계속 만드는 페이지
   '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => clearInterval(timer), 1500);</script></body></html>`,
+  // 트러블슈팅 83: 상대 경로 미디어 주소가 404여서 재생되지 않는 <video>·<img>
+  '/video-404': `<html><body><video id="v" preload="auto" src="/missing.mp4"></video></body></html>`,
+  '/img-404': `<html><body><img id="i" src="/missing.png"></body></html>`,
 };
 
 let server: Server;
@@ -221,5 +224,23 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
 
   it('measureLoad를 켜지 않으면 로드 시간을 남기지 않는다', async () => {
     expect((await runInBrowser(`${base}/ok`, {})).loadMs).toBeUndefined();
+  });
+
+  it('<video>의 미디어 주소가 404면 재생 실패를 mediaErrors로 남긴다 (트러블슈팅 83)', async () => {
+    const result = await runInBrowser(`${base}/video-404`, {});
+    expect(result.mediaErrors).toHaveLength(1);
+    expect(result.mediaErrors[0]).toContain('video');
+    expect(result.mediaErrors[0]).toContain(`${base}/missing.mp4`);
+    // 같은 네트워크 404는 failedRequests에도 남는다(다른 신호로 중복 확인)
+    expect(result.failedRequests).toEqual([`404 ${base}/missing.mp4`]);
+  });
+
+  it('<img>가 404면 이미지 로드 실패를 mediaErrors로 남긴다', async () => {
+    const result = await runInBrowser(`${base}/img-404`, {});
+    expect(result.mediaErrors).toEqual([`img 이미지를 불러오지 못했습니다 ${base}/missing.png`]);
+  });
+
+  it('미디어 오류가 없으면 mediaErrors가 빈 배열이다', async () => {
+    expect((await runInBrowser(`${base}/ok`, {})).mediaErrors).toEqual([]);
   });
 });

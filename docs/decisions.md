@@ -160,6 +160,7 @@
 - [ADR-137 studio.yaml에 서비스별 systemPackages를 선언하면 생성 Dockerfile이 빌드 때 OS 패키지를 설치한다](#adr-137-studioyaml에-서비스별-systempackages를-선언하면-생성-dockerfile이-빌드-때-os-패키지를-설치한다)
 - [ADR-138 검증 게이트의 test 단계가 메모리 한도 초과 종료를 코드 실패와 구분해 서비스를 되살리고, Gradle 테스트 JVM의 힙·메타스페이스에 상한을 건다](#adr-138-검증-게이트의-test-단계가-메모리-한도-초과-종료를-코드-실패와-구분해-서비스를-되살리고-gradle-테스트-jvm의-힙메타스페이스에-상한을-건다)
 - [ADR-139 studio.yaml 서비스에 includes를 더해, 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로도 재시작·게이트 대상으로 본다](#adr-139-studioyaml-서비스에-includes를-더해-서비스-폴더-밖이지만-같은-빌드에-포함되는-경로도-재시작게이트-대상으로-본다)
+- [ADR-140 browser_check가 같은 출처 리소스 실패·콘솔 오류에 더해 `<video>`·`<audio>`·`<img>`의 로드·재생 실패를 진단 신호로 모은다](#adr-140-browser_check가-같은-출처-리소스-실패콘솔-오류에-더해-videoaudioimg의-로드재생-실패를-진단-신호로-모은다)
 
 ---
 
@@ -5810,3 +5811,46 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - 정규식으로 Gradle·Kotlin DSL·Maven 선언을 읽으므로, 변수로 조립한 경로(`project(":media").projectDir = file(mediaDir)`처럼 식별자를 참조)나 여러 줄에 걸친 `include` 목록은 놓칠 수 있다. `includes`가 studio.yaml에 사람이 보는 선언으로 남아 있어 직접 고칠 수 있다는 점으로 보완한다(판단 기준 4).
 - 겹침 정책(두 서비스가 같은 경로를 선언하면 둘 다 재시작)은 드문 경우지만 과잉 재시작을 만들 수 있다. 덜 재시작해 "바뀐 코드가 반영 안 됨"으로 이어지는 쪽보다 안전하다고 보고 받아들였다.
 - `includes`는 재시작·게이트 판정에만 쓰인다 — Dockerfile·compose 생성 로직은 바꾸지 않았다(ADR-088이 이미 프로젝트 루트 전체를 마운트해 두므로 필요하지 않았다). 서비스 폴더 밖 경로를 빌드 컨텍스트에 포함해야 하는(예: 프로젝트 루트 전체를 마운트하지 않는) 다른 구조가 생기면 이 가정을 다시 봐야 한다.
+
+## ADR-140 browser_check가 같은 출처 리소스 실패·콘솔 오류에 더해 `<video>`·`<audio>`·`<img>`의 로드·재생 실패를 진단 신호로 모은다
+
+상태: 채택
+관련: ADR-050, ADR-078, ADR-127
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기만)의 체크포인트 `7e8b431`("숏폼 피드에서 변환된 영상이 실제로 재생되게")은 게이트를 통과했다(`browser_check`는 `web /` 하나만 확인). 실제로 390px 창에서 `/shorts`를 열면 `<video>` 4개가 모두 재생되지 않았고, 콘솔에 같은 출처 404가 8건(상대 경로 미디어 주소가 Next.js로 가 백엔드로 넘어가지 않음) 있었다(트러블슈팅 83).
+- 모델은 요약에 "제 도구로 브라우저를 직접 조작할 수 없어… 미리보기로 봐 주세요"라고 적었다. 사용자는 Claude for Chrome처럼 에이전트가 화면을 직접 보고 QA하길 바란다. 탐색형 QA(ADR-127, `qa_*` 도구)는 이미 있지만 사람이 QA 탭에서 따로 여는 기능이고, 만들기 실행(게이트) 경로에는 연결돼 있지 않다.
+- `browser-check.ts`의 `failedRequests`는 이미 4xx·5xx 네트워크 응답을 같은 출처(`allowedOrigins`로 제한된 요청)만 모은다(ADR-050). 자동 favicon(`/favicon.ico`)은 빼고 본다. 하지만 "그 요청이 실제로 어느 화면 요소의 재생·로드 실패로 이어졌는지"는 보지 않는다 — 네트워크 계층 신호와 화면 요소를 잇는 신호가 없었다.
+- 과제가 제시한 선택지는 셋이다: (a) browser_check의 진단 신호를 `<video>`/`<audio>`/`<img>`까지 넓힌다, (b) 바뀐 페이지의 라우트(`routesFromChangedFiles`, ADR-078)를 그 실행의 browser_check에 자동으로 더한다, (c) 만들기 실행 중 에이전트에게 탐색형 QA의 읽기 전용 도구 일부를 준다. (a)는 필수로 주어졌고, (b)·(c)는 판단에 맡겨졌다.
+
+### 판단 기준
+1. 이번 실측(`/shorts`의 `<video>` 재생 실패)과 같은 종류의 문제를 실제로 잡을 것 — 추측이 아니라 단위 테스트로 보일 것.
+2. 기존 게이트 설계(ADR-050의 `allowConsoleErrors` 끔·같은 출처 제한, ADR-078의 "증거 있는 실패만 본다")를 깨지 않을 것 — 새 기준·새 플래그를 급하게 늘리지 않을 것.
+3. 토큰·시간 비용과 위험(기존 프로젝트의 기본 동작이 말없이 바뀌는 것)을 실제로 얻는 것과 견줄 것.
+4. 백엔드 지원 범위가 넓을 것 — 특정 세션 백엔드에서만 되는 것에 기대지 않을 것.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) browser_check가 같은 출처 리소스 실패·콘솔 오류·`<video>`/`<audio>` MediaError·`<img>` 로드 실패를 진단 신호로 모아 `allowConsoleErrors`(기본 꺼짐) 기준으로 판정 | 기준 1·2를 만족한다. 기존 `failedRequests`·`consoleErrors`가 이미 쓰는 "경계(같은 출처만 통과)·기본 실패" 틀에 신호 하나를 더하는 것이라 새 플래그가 필요 없다. 비용은 리스너 하나(이벤트 기반, 폴링 없음)라 무시할 만하다. **채택** |
+| (b) `routesFromChangedFiles`로 찾은 라우트를 studio.yaml 수정 없이 그 실행의 browser_check에 자동으로 더함(모든 Next.js 관리형 서비스에 기본 켬) | `autoPageChecks`는 ADR-078에서 이미 "바뀐 페이지를 자동으로 연다"를 구현했지만, `service`·`mode`를 studio.yaml에 적어야 켜지는 opt-in이다(README: "자동 확인은 기본 꺼짐"). BE-commerce는 이 절을 켜지 않아 `/shorts`가 한 번도 열리지 않았다 — 이번 실측의 진짜 1차 원인이다. 하지만 opt-in을 기본값으로 뒤집으면: (i) 기존 프로젝트 전부가 말없이 매 실행마다 헤드리스 브라우저를 추가로 띄운다(ADR-078이 이미 "화면 확인 1건당 1~3초"로 실측한 비용이 프로젝트마다 늘어난다), (ii) 어느 서비스로 열지(`service`) 선택 기준이 없다(여러 Next.js 서비스가 있으면 추측해야 한다). 기준 3 위반(비용·위험이 이번 한 건의 이득보다 크다) — 이번에는 미룬다. 사람이 `autoPageChecks`를 켜거나 `/shorts`를 `pageChecks`에 직접 적으면 (a)가 바로 잡는다 |
+| (c) 만들기 실행 중 에이전트에게 탐색형 QA(`qa_open`·`qa_snapshot`·진단 신호 읽기 등)의 읽기 전용 도구를 겹쳐 준다 | CHANGELOG에 적힌 대로 탐색형 QA는 지금 api·로컬 CLI(claude-code) 백엔드만 지원한다(기준 4 위반 — Codex·Command Code·OpenCode 세션은 못 쓴다). 스크린샷·접근성 스냅샷은 턴마다 토큰 비용이 늘고(연구 노트가 이미 "토큰 비용이 크다"고 적어 둠), 루프(`loop.ts`)에 새 도구 세트를 배선하고 권한·허용 출처 규칙을 다시 맞추는 일이라 이번 범위보다 크다(기준 3). 이번에는 미룬다 |
+| (d) 네트워크 404만으로 `<video>`/`<img>` 실패를 추정(새 리스너 없이 URL 확장자로 추측) | URL이 미디어 파일인지 확장자로 추측하면 쿼리스트링이 있거나 확장자 없는 스트리밍 주소(`master.m3u8`처럼 실제로는 걸리지만 API 엔드포인트가 확장자 없이 미디어를 돌려주는 경우)를 놓친다. 실제 DOM 요소의 `error` 이벤트를 듣는 편이 "그 요소가 정말 실패했는지"를 직접 본다 — 기각 |
+
+### 결정
+1. **`packages/agent/src/browser-check.ts`**: `BrowserPageResult`에 `mediaErrors: string[]`를 더했다. `runInBrowser`가 goto 전에 `page.exposeFunction('__bStudioMediaError__', ...)`로 콜백을 등록하고 `page.addInitScript(...)`로 문서 전체에 캡처 단계(`true`) `error` 리스너를 하나 단다(리소스 `error` 이벤트는 버블링하지 않아 캡처 단계에서만 document가 들을 수 있다). `<video>`·`<audio>`는 `target.error.code`를 표준 이름(`MEDIA_ERR_NETWORK` 등 네 값)으로 바꿔 주소와 함께, `<img>`는 주소만 담는다. `measureLoad`의 워밍업 이동 뒤 비우는 배열 목록에도 추가했다(기존 `pageErrors`·`consoleErrors`·`failedRequests`와 같은 자리).
+2. **`packages/agent/src/gate.ts`**: `#checkPage`가 기존 `!page.allowConsoleErrors && result.failedRequests.length > 0` 옆에 `!page.allowConsoleErrors && result.mediaErrors.length > 0`를 더했다. 새 플래그를 만들지 않고 기존 `allowConsoleErrors`(기본 꺼짐, browser 전용) 하나로 같이 켜고 끈다 — "화면 단위 증거를 얼마나 엄격히 볼지"는 이미 그 플래그가 쥐고 있던 결정이라 신호를 늘렸다고 새 결정 지점을 만들 이유가 없었다. `autoPageChecks`로 자동 확인한 페이지는 `allowConsoleErrors`가 항상 꺼짐(`autoPageCheck()`, ADR-078)이라 이 신호도 자동으로 받는다.
+3. **`packages/spec/src/schema.ts`**: `allowConsoleErrors` 필드 설명에 새 신호를 반영했다. 스키마 자체(필드·기본값)는 바꾸지 않았다.
+4. **판정 기준(이번에 정한 것)**: 같은 출처(`allowedOrigins`로 이미 제한된 요청) 4xx·5xx·연결 실패는 실패, 자동 favicon(`/favicon.ico`)은 무시(기존 ADR-050 그대로), `<video>`·`<audio>`·`<img>`의 `error` 이벤트는 하나라도 있으면 실패 — 모두 `allowConsoleErrors: true`로 한꺼번에 끌 수 있다(화면이 의도적으로 깨진 미디어를 보여주는 경우 등, noHorizontalScroll처럼 browser 전용 개별 스위치를 늘리지 않았다).
+5. **(b)·(c)는 미룬다**: 위 "검토한 선택지" 표에 이유를 남겼다. (b)는 opt-in 기본값을 뒤집는 더 큰 결정이라 ADR-078이 이미 내린 "자동 확인은 기본 꺼짐" 판단을 다시 보는 별도 논의가 필요하다. (c)는 백엔드 지원 범위·토큰 비용·루프 배선 규모가 이번 티켓 범위를 넘는다.
+
+### 검증 결과
+- `packages/agent/src/browser-check.test.ts`: 실제 헤드리스 Chromium(이미 설치된 Playwright 브라우저)으로 로컬 HTTP 서버의 `<video src="/missing.mp4">`·`<img src="/missing.png">`를 열어 `mediaErrors`가 채워지는 것, 같은 404가 `failedRequests`에도 함께 남는 것(두 신호가 서로 다른 각도로 같은 사실을 담는다), 오류가 없는 페이지는 `mediaErrors`가 빈 배열인 것을 확인했다(테스트 3개 추가, 전체 21개 통과).
+- `packages/agent/src/gate.test.ts`: `autoPageChecks`로 자동 확인한 페이지가 `mediaErrors`만으로 실패하는 것(`/shorts` 실측을 상태 코드 200·`failedRequests`·`mediaErrors`까지 그대로 재현), 선언한 `pageChecks`가 `allowConsoleErrors: true`면 `mediaErrors`가 있어도 통과하는 것, 기존 실패 사유 목록(문구·스크립트 예외·console.error·실패한 요청·가로 넘침)에 "미디어 오류" 한 줄이 더해지는 것을 확인했다(테스트 3개 추가, 전체 67개 통과).
+- `pnpm -r typecheck`(6/6)·`pnpm --filter @b-studio/studio lint`(오류 0)로 타입·린트를 확인했다.
+- 실제 BE-commerce 세션(5b640fd3)이나 `docker compose`로 재검증하지는 않았다 — 세션·컨테이너를 건드리지 말라는 제약 때문에 로컬 HTTP 서버를 쓰는 단위 테스트로만 확인했다(확인하지 못한 것으로 남긴다). `/shorts`가 이번 수정만으로 실제 세션의 다음 실행에서 열리는지도 확인하지 못했다 — `pageChecks`나 `autoPageChecks`에 그 경로가 선언돼 있어야 한다(위 (b) 참고).
+
+### 감수한 트레이드오프
+- `<video>`·`<audio>`·`<img>`의 `error` 이벤트와 네트워크 404(`failedRequests`)가 겹칠 수 있다(같은 실패가 두 줄로 보고된다). 신호를 하나로 합치지 않았다 — "그 요소가 재생되지 않았다"와 "그 요청이 404였다"는 서로 다른 증거라 한쪽만 있고 다른 쪽이 없는 경우(예: 응답은 200인데 코덱을 지원하지 않아 `MEDIA_ERR_DECODE`가 나는 경우)를 놓치지 않으려 그대로 뒀다.
+- 이번 수정은 "열어 본 화면을 더 정확히 진단한다"만 고친다. `/shorts`가 애초에 어느 확인에도 걸리지 않는 커버리지 문제(위 (b))는 남아 있다 — 사람이 `pageChecks`에 경로를 적거나 `autoPageChecks`를 켜야 이번 신호의 덕을 본다.
+- 캡처 단계 `error` 리스너는 `<script>`·`<link>` 같은 그 밖의 리소스 `error` 이벤트도 받지만, 이번에는 `<video>`·`<audio>`·`<img>`만 모은다(과제가 명시한 범위). 스크립트 로드 실패는 이미 `failedRequests`(네트워크 404)로 잡힌다.

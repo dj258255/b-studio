@@ -397,7 +397,10 @@ export const WorkflowPageCheckSchema = z
     steps: z.array(WorkflowPageStepSchema).max(PAGE_STEPS_MAX, `단계는 최대 ${PAGE_STEPS_MAX}개까지 쓸 수 있습니다`).optional(),
     /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다. mobile·tablet·desktop 이름이나 { width, height }를 받는다 */
     viewport: ViewportSchema.optional(),
-    /** browser 전용. 기본은 console.error나 실패한 요청(4xx·5xx·연결 실패, 자동 favicon 제외)이 하나라도 있으면 실패 */
+    /**
+     * browser 전용. 기본은 console.error, 실패한 요청(4xx·5xx·연결 실패, 자동 favicon 제외),
+     * `<video>`·`<audio>`·`<img>`의 로드·재생 실패(트러블슈팅 83) 중 하나라도 있으면 실패
+     */
     allowConsoleErrors: z.boolean().default(false),
     /** browser 전용. 문서가 창보다 넓어 가로 스크롤이 생기면 실패 */
     noHorizontalScroll: z.boolean().default(false),
