@@ -156,8 +156,10 @@ export interface AgentResult {
    * 되돌리기 자체(보관 뒤 삭제)는 다른 실패 사유와 같지만, 턴 상한은 되돌리기 전에 게이트를 한 번 더 돌려
    * 지금까지의 변경이 통과하면 실패 대신 체크포인트로 남긴다(recheckGateOnMaxTurns). 그래도 통과하지 못하면
    * 이 표시를 달고 실패로 끝나, 다른 실패 사유와 똑같이 보관·되돌리기 경로를 탄다.
+   * 'network'면 일시적 네트워크 오류(ENOTFOUND 등)로 재시도했지만 상한(횟수·총 대기 시간) 안에 복구되지 않아 끝났다는
+   * 뜻이다(ADR-142). 로컬 Claude Code 러너만 채운다(이어받기가 가능한 세션 id가 있어야 재시도할 수 있다).
    */
-  failureReason?: 'max_turns';
+  failureReason?: 'max_turns' | 'network';
 }
 
 export type AgentEvent =

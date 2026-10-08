@@ -36,6 +36,50 @@ export const DEFAULT_CLAUDE_CODE_EFFORT: Effort = 'high';
 /** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
 const STEERING_POLL_MS = 300;
 
+/**
+ * 일시적 네트워크 오류 재시도 기본값(ADR-142). 같은 세션을 resume으로 이어받아 지수 백오프로 기다린다.
+ * 상한(횟수·총 대기 시간 중 먼저 걸리는 쪽)을 넘으면 지금처럼 실패로 끝내되 사유를 'network'로 남긴다.
+ */
+const NETWORK_RETRY_MAX_ATTEMPTS = 6;
+const NETWORK_RETRY_MAX_WAIT_MS = 10 * 60_000;
+const NETWORK_RETRY_BASE_DELAY_MS = 5_000;
+/** 재시도로 이어받을 때 보내는 안내. 이미 한 작업을 다시 하지 말라고 짧게만 알린다 */
+const NETWORK_RESUME_PROMPT = '네트워크가 끊겼다가 돌아왔습니다. 하던 작업을 처음부터 다시 하지 말고 그대로 이어서 진행하세요.';
+
+/**
+ * 메시지에 일시적 네트워크 오류의 근거가 있는 패턴이 있는지 본다(실측: ENOTFOUND. 나머지는 Node·Anthropic API가
+ * 문서화한 같은 종류의 오류). 인증 실패·잘못된 요청 같은 영구 오류 문구는 여기 걸리지 않아야
+ * 재시도하지 않는다(ADR-142) — 근거가 없는 패턴은 넣지 않는다.
+ */
+export function isTransientNetworkFailure(message: string): boolean {
+  return /ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|Can't reach the API server|overloaded_error|\boverloaded\b/i.test(message);
+}
+
+/** 실제 대기(setTimeout). 중단 신호가 오면 바로 끝낸다 */
+function defaultNetworkWait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** 네트워크 재시도 동작을 테스트가 주입할 수 있게 연 설정. 넘기지 않으면 기본값(위 상수)과 실제 대기를 쓴다 */
+export interface NetworkRetryOptions {
+  /** 실제 sleep 대신 테스트가 주입하는 대기 함수. 시간을 흐르게 하지 않고 바로 resolve해도 된다 */
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  maxAttempts?: number;
+  maxWaitMs?: number;
+  baseDelayMs?: number;
+}
+
 /** 실제 SDK와 테스트용 가짜를 바꿔 끼우는 지점 */
 export interface ClaudeCodeSdk {
   query(params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }): ClaudeCodeQuery;
@@ -72,6 +116,8 @@ export interface ClaudeCodeRunOptions extends Omit<RunAgentOptions, 'client' | '
   /** preflight에서 확인한 인증 정보. 화면에 어떤 계정으로 실행하는지 표시한다 */
   account?: ClaudeCodeAccount;
   sdk?: ClaudeCodeSdk;
+  /** 일시적 네트워크 오류(ADR-142)를 재시도할 때의 대기 전략. 넘기지 않으면 기본 상한·실제 대기를 쓴다(테스트 전용 주입점) */
+  networkRetry?: NetworkRetryOptions;
 }
 
 export interface ClaudeCodeResult extends AgentResult {
@@ -112,9 +158,17 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     intent = 'build',
     research = false,
     steering,
+    networkRetry = {},
   } = options;
   signal?.throwIfAborted();
   const ask = intent === 'ask';
+  const networkWait = networkRetry.wait ?? defaultNetworkWait;
+  const networkMaxAttempts = networkRetry.maxAttempts ?? NETWORK_RETRY_MAX_ATTEMPTS;
+  const networkMaxWaitMs = networkRetry.maxWaitMs ?? NETWORK_RETRY_MAX_WAIT_MS;
+  const networkBaseDelayMs = networkRetry.baseDelayMs ?? NETWORK_RETRY_BASE_DELAY_MS;
+  // 실행 전체에 걸친 네트워크 재시도 횟수·누적 대기 시간. 승격으로 query를 새로 열어도(reopen) 이어서 센다
+  let networkAttempts = 0;
+  let networkWaitedMs = 0;
   // "조사" 모드는 질문(ask)일 때만 뜻이 있다 — 만들기 요청에 섞여 와도(화면이 막지만 안전망으로) 조용히 무시한다
   const researching = ask && research;
 
@@ -257,6 +311,33 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   };
 
   /**
+   * 일시적 네트워크 오류(ADR-142)에서 재시도할지 정한다. 지수 백오프로 기다린 뒤 true를 돌려주면 호출한 쪽이
+   * 같은 세션을 resume으로 이어받은 새 query를 연다. 상한(횟수·총 대기 시간 중 먼저 걸리는 쪽)을 넘었거나
+   * 아직 세션 id가 없어(첫 호출이 바로 끊긴 경우) 이어받을 대상이 없으면 false를 돌려준다 — 그 경우 호출한 쪽이
+   * 원래 보내려던 요청을 그대로 다시 보낸다(resumeForQuery·pendingPrompt를 건드리지 않는다).
+   */
+  const retryAfterNetworkFailure = async (): Promise<boolean> => {
+    if (networkAttempts >= networkMaxAttempts) return false;
+    if (networkWaitedMs >= networkMaxWaitMs) return false;
+    const delay = Math.min(networkBaseDelayMs * 2 ** networkAttempts, networkMaxWaitMs - networkWaitedMs);
+    networkAttempts += 1;
+    networkWaitedMs += delay;
+    await networkWait(delay, signal);
+    signal?.throwIfAborted();
+    onEvent({
+      type: 'warning',
+      message: `네트워크 연결이 끊겨 ${Math.round(delay / 1000)}초 기다린 뒤 하던 작업을 이어서 진행합니다 (${networkAttempts}/${networkMaxAttempts}번째 재시도)`,
+    });
+    // 이어받을 세션이 있으면 그 세션을 resume으로 이어받아 짧은 안내만 보낸다(이미 한 작업을 다시 하지 않게).
+    // 세션이 아직 없으면(첫 호출이 응답 전에 끊김) resumeForQuery·pendingPrompt를 그대로 둬 원래 요청을 다시 보낸다
+    if (sessionId) {
+      resumeForQuery = sessionId;
+      pendingPrompt = NETWORK_RESUME_PROMPT;
+    }
+    return true;
+  };
+
+  /**
    * query 하나를 끝까지 돈다. 승격이면 같은 세션을 이어받은 새 query를 모델만 바꿔 다시 연다.
    * 메시지 처리는 한 곳에만 두어(되묻기·진행 중 지시·도구 결과 캐시·턴별 사용량이 그대로 동작) 두 번 부른다.
    */
@@ -393,6 +474,18 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 metrics.gateMs += Math.round(performance.now() - gateStarted);
                 if (recheck.pass) finish('done', recheck.summary);
                 else finish('failed', recheck.summary, undefined, 'max_turns');
+                break;
+              }
+              // 일시적 네트워크 오류(ENOTFOUND 등, ADR-142)면 바로 실패로 끝내지 않고 기다렸다 같은 세션을 이어받는다.
+              // 승격처럼 이 query는 여기서 닫고 새 query를 연다(reopen). 상한을 넘으면 실패로 끝나되 사유를 남긴다
+              if (isTransientNetworkFailure(failure)) {
+                detachSteeringOnce();
+                if (await retryAfterNetworkFailure()) {
+                  conversation.close();
+                  reopen = true;
+                  break messages;
+                }
+                finish('failed', `네트워크 연결이 끊겨 재시도했지만 복구되지 않았습니다: ${failure}`, undefined, 'network');
                 break;
               }
               finish('failed', failure);
