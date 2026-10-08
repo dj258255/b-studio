@@ -6076,3 +6076,49 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 ### 감수한 트레이드오프
 - `extraReportRoots`가 허용 문자 집합을 벗어난 값을 "거부"가 아니라 "조용히 버림"으로 처리한다 — 스키마(결정 1)가 이미 입구에서 막으므로 정상 흐름에서는 절대 일어나지 않지만, 어떤 경로로든 벗어난 값이 들어오면 에러를 던지지 않고 그 서브프로젝트의 보고서만 조용히 못 모은다. 테스트 탭에 "결과 0건"으로 보일 뿐 사람에게 왜 못 모았는지 알리지 않는다 — 임의 명령 실행보다 나은 실패 모드라고 보고 감수했다.
 - 선택지 (c)(위치 인자로 넘기기)는 더 근본적인 방어지만 이번에는 넣지 않았다 — `collectGlobCommand`의 기존 계약(glob 문자열 목록)을 다시 짜야 해서 범위를 넓힌다. 작은따옴표 감싸기 + 허용 문자 집합으로도 지금 위협(studio.yaml의 `includes`)은 막힌다.
+
+## ADR-146 compose에 새로 생긴 부가 서비스를 기본값 규칙으로 자동 올리고, 저장된 선택에도 반영한다
+
+상태: 채택
+관련: ADR-073, ADR-083, ADR-139, ADR-143, 트러블슈팅 92
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기만)에서 실측(트러블슈팅 92): 체크포인트 fa89fb7(라이브 방송 R1~R3)에서 에이전트가 실행 중 사용자 compose.yaml과 생성 `compose.b-studio.yaml`에 새 부가 서비스 `mediamtx`(공식 이미지)를 더했다. 그러나 샌드박스에는 mediamtx가 뜨지 않아 실제 RTMP 송출 시험을 하지 못했다. 에이전트의 보고는 "restart_service가 studio.yaml 서비스 하나만 재기동해 mediamtx가 안 생겼고, docker CLI도 실행 정책에 막혀 수동 확인 불가"였다.
+- 세 경로를 모두 확인했지만 어느 것도 compose에 새로 생긴 서비스를 다루지 않았다. `restartServicesFor`(#480, `packages/agent/src/verify.ts`·`services.ts`)는 바뀐 파일이 속한 **managed** 서비스만 다시 띄운다 — mediamtx는 managed가 아니라 재시작 대상 자체가 아니다. 요청 전 `ensureInfra`(#511, ADR-143)는 세션이 시작할 때 한 번 계산해 메모리에 둔 `session.serviceSelection`만 확인한다 — 그 뒤 compose가 바뀌어도 다시 계산되지 않는다. 세션을 다시 시작하거나 이어서 작업해도 `serviceSelectionFor`(`apps/studio/lib/server/service-selection.ts`, ADR-083)가 저장된 `services.json`의 `selected` 목록만 compose에서 걸러내 쓸 뿐, "저장 시점에 compose에 어떤 서비스가 있었는지"를 남기지 않아 새로 생긴 서비스를 가려낼 기준이 없었다 — #518까지 반영한 studio로 다시 재개해도 같은 이유로 mediamtx가 빠졌다(실측 추가 보고).
+- `docker compose up`의 이미지 pull은 edge 프록시를 거치지 않고 Docker 데몬이 직접 호스트 네트워크로 한다는 사실은 ADR-073이 이미 확인해 둔 그대로다(`packages/sandbox/src/edge-config.ts`의 격리 모델은 컨테이너 네트워크만 막고, 이미지를 받는 `docker pull`/`compose up`은 그 밖에서 돈다) — 이번 마찰과는 무관해 egress 쪽은 다시 확인만 하고 손대지 않았다.
+
+### 판단 기준
+1. 에이전트가 managed 서비스가 기대는 부가 서비스를 compose에 더하면, 재시작·요청 전 확인·세션 재개 세 경로 모두에서 자동으로 떠야 한다.
+2. 사람이 서비스 선택 화면에서 명시적으로 끈 서비스(managed·부가 서비스 모두)는 이 자동화로 다시 켜지지 않는다.
+3. 아무도 기대지 않는, 관계가 불분명한 새 서비스를 무조건 띄워 리소스를 낭비하지 않는다(ADR-083의 "실제로 쓰는 서비스만 기본으로 띄운다"는 원칙과 맞아야 한다).
+4. 다른 세션·프로젝트(dbtower·pay·edumeet)의 컨테이너는 건드리지 않는다 — 이 세션의 compose 프로젝트 범위 안에서만 올린다.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| **(채택) (a) 재시작·세션 시작·재개 세 경로 모두에서, managed 서비스가 depends_on으로 기대는 부가 서비스 중 아직 없는 것만 기본값 규칙(ADR-083)으로 자동으로 올린다** | 기준 1·2·3·4를 모두 만족한다. depends_on 선언은 compose.yaml에 사람이 읽을 수 있게 남아, "왜 이 서비스가 켜졌는지"가 항상 코드로 드러난다(ADR-137·ADR-139가 `systemPackages`·`includes`에 쓴 것과 같은 "선언이 보여야 한다" 기준). 에이전트가 부가 서비스를 더할 때 depends_on도 같이 선언하는 것은 compose 모범 사례이기도 하다 |
+| (b) 에이전트에게 부가 서비스를 켜고 끄는 도구를 준다(사람 화면의 `setSessionServiceSelection`을 도구로도 노출) | depends_on을 선언하지 않은(또는 선언이 애매한) 부가 서비스까지 에이전트가 직접 판단해 켤 수 있다는 장점이 있다. 그러나 `packages/agent`의 도구 실행(`ToolContext`)은 5개 러너(claude-code·codex·opencode·gemini·commandcode)가 공유하는 경로라, 새 도구가 켠 선택을 `apps/studio`의 `session.serviceSelection`·`services.json`(사람 화면이 보는 상태)과 맞추려면 새 콜백을 그 경로 전체에 또 심어야 한다. 이번 마찰의 실제 원인(세 경로가 새 서비스를 전혀 보지 않음)은 (a)만으로 고쳐지고, (a)로 고쳐지지 않는 경우(depends_on 없이 추가한 부가 서비스)는 이번 실측에 없었다 — 보류 |
+| (c) (a)와 (b) 둘 다 | (b)의 추가 이득이 이번 실측으로는 확인되지 않는데 구현 범위(5개 러너 공유 경로 + 사람 화면 상태 동기화)는 (a)의 몇 배라, 지금은 비용 대비 이득이 낮다고 보고 (a)만 채택했다 |
+| (d) 새 부가 서비스가 생기면 depends_on 여부와 무관하게 무조건 띄운다 | ADR-083이 막으려던 것(앱이 쓰지 않는 부가 서비스가 기본으로 뜨는 것)을 다시 들여온다. compose에 아무 부가 서비스나 선언만 하면(의도적이든 우연이든) 리소스를 쓰게 되어 기각 |
+
+### 결정
+1. **`packages/agent/src/services.ts`**: `isComposeFile(project, file)`을 더했다 — 파일이 프로젝트의 compose 파일(`project.composePath` 기준 상대 경로)인지만 본다. studio.yaml과 달리 compose 파일이 바뀌면 depends_on 그래프가 바뀔 수 있어 재시작 쪽에서 따로 챙겨야 한다.
+2. **`packages/agent/src/verify.ts`**: `restartServicesFor`가 `files`에 compose 파일이 있으면(`isComposeFile`) studio.yaml이 바뀌었을 때처럼 `loadProject(project.root)`로 선언을 다시 읽는다. 새 내부 함수 `ensureDefaultAddons(sandbox, declared, project.offServices, signal)`가 `dependencyClosure(managed 이름들, declared.dependsOn)`(@b-studio/spec)로 기본값 규칙에 드는 이름을 모으고, managed 이름과 `project.offServices`(사람이 끈 서비스)를 뺀 나머지를 `sandbox.ensureInfra(addons)`로 올린다. `ensureInfra`는 없는 컨테이너만 올리므로(ADR-143) 이미 떠 있으면 손대지 않아 매 재시작에 다시 불러도 안전하다. `ensureInfra`가 없는 제공자(Kubernetes, 선택 메서드)는 건너뛴다. 올린 이름은 `VerificationReport.addedAddons`에, 실패 이유는 `addonError`에 남기고(관리형 서비스 재시작 결과와 독립적이라 managed 서비스가 실패하지 않았으면 게이트 `ok`에 영향을 주지 않는다), `formatVerificationReport`에 한 줄로 더한다.
+3. **`packages/agent/src/gate.ts`**: `VerificationGate.check()`가 `report.addedAddons`가 있으면 `onEvent({ type: 'warning', message: ... })`로도 알린다 — 검증 보고서 전체를 읽어야 보이는 줄과 별개로, 대화 화면에 바로 보이는 기존 알림 경로(다른 러너들이 이미 쓰는 `warning` 이벤트)를 그대로 재사용한다.
+4. **`packages/spec/src/service-selection.ts`**: 순수 함수 `newlyAddedServices(known, composeServices)`를 더했다 — `known`에 없는 compose 서비스 이름만 돌려주고, `known`이 없으면(이 비교 기준이 생기기 전 저장) 빈 배열을 돌려준다(가릴 기준이 없을 때는 아무것도 새로 켜지 않는 쪽이 사람의 기존 off 결정을 지킨다).
+5. **`apps/studio/lib/server/service-selection.ts`**: `ServiceSelectionFile`에 `known?: string[]`(저장 시점의 compose 서비스 전체)을 더했다. `writeServiceSelection`이 선택적 4번째 인자로 `known`을 받아 함께 저장한다(기존 호출부는 그대로 두면 known 없이 저장돼 동작이 바뀌지 않는다). `serviceSelectionFor`가 `newlyAddedServices`로 새로 생긴 서비스를 가려내 그중 기본값 규칙(`defaultServiceSelection`)에 드는 것만 저장된 선택에 더하고, `addedServices`로 무엇을 더했는지 돌려준다. `offManagedServices`는 `computeOffServices`로 넓혀 managed뿐 아니라 선택에 없는 모든 compose 서비스(부가 서비스 포함)를 off로 본다 — `database-branches.ts`가 이미 "서비스 선택에서 꺼 둔 데이터베이스는 건너뛴다"고 가정하고 있었지만 managed만 보는 옛 함수로는 그 가정이 한 번도 맞을 수 없었던 것도 같이 고쳤다.
+6. **`apps/studio/lib/server/sessions.ts`**: `resolveServiceSelection`이 `serviceSelectionFor`의 결과를 `session.serviceSelection`에 반영하면서, 저장된 선택이 있던 프로젝트(`!isDefault`)면 `known`을 지금 compose 서비스 전체로 다시 써 둔다(다음에 또 새 서비스가 생겼을 때 가려낼 수 있고, v1 파일을 한 번에 마이그레이션한다). 새로 켠 서비스가 있으면(`addedServices`) 세션 생성 때는 `notice` 이벤트로, 이어서 작업할 때는 같은 이벤트 더하기 대화 노트(`noteForModel`, 기존 재개 안내와 같은 자리)로 알린다. `setSessionServiceSelection`(사람이 화면에서 켜고 끄기)도 `computeOffServices`로 바꾸고 `known`을 같이 저장한다 — 사람이 지금 끈 서비스가 다음에 "새로 생긴 서비스"로 잘못 보이지 않게 한다.
+7. **(b) 보류**: 에이전트에게 부가 서비스를 켜고 끄는 도구는 이번에 추가하지 않았다. depends_on을 선언하지 않고 부가 서비스를 더하는 경우가 실제로 생기면, `ToolContext`에 서비스 선택 변경 콜백을 더해 `apps/studio`의 선택 상태와 맞추는 설계를 다음 과제로 남긴다.
+
+### 검증 결과
+- `packages/spec/src/service-selection.test.ts`: `newlyAddedServices`가 known에 없는 이름만 돌려주고, known이 없으면 빈 배열을 돌려주는지 확인했다(3개 추가).
+- `apps/studio/lib/server/service-selection.test.ts`: known이 있을 때 기댐 닫힘에 드는 새 서비스만 더하는지, 아무도 기대지 않는 새 서비스는 더하지 않는지, known이 없는 v1 파일은 아무것도 더하지 않는지, 사람이 이미 끈 서비스는 known에 있어도 그대로 off인지, `computeOffServices`가 managed·부가 서비스 모두의 off를 돌려주는지 확인했다(6개 추가, 기존 `offManagedServices` 테스트는 `computeOffServices`로 바꿔 넓어진 동작에 맞췄다).
+- `packages/agent/src/verify.test.ts`: compose가 바뀐 재시작에서 기댐 닫힘에 드는 새 부가 서비스를 `ensureInfra`로 올리는지, 아무도 기대지 않으면 올리지 않는지, 사람이 꺼 둔 서비스는 올리지 않는지, compose가 바뀌지 않았으면 다시 확인하지 않는지, `ensureInfra`가 없는 제공자는 건너뛰는지, 올리지 못하면 `addonError`로 남기면서도 managed 서비스 재시작은 그대로 진행하는지 가짜 샌드박스로 확인했다(6개 추가).
+- `packages/agent/src/gate.test.ts`: 부가 서비스를 올리면 `warning` 이벤트로도 알리는지 실제 디스크 기반 프로젝트(studio.yaml·compose.yaml)와 가짜 샌드박스로 확인했다(1개 추가).
+- `apps/studio/lib/server/sessions-addon-service.test.ts`(신규): `createSession`·`resumeSession`을 실제로 불러, known이 없으면 기본값 그대로 가는지, 재개할 때 기댐 닫힘에 드는 새 서비스를 자동으로 켜고 `notice` 이벤트로 알리는지, 사람이 끈 서비스는 새 서비스와 무관하게 그대로 꺼진 채로 남는지 확인했다(3개, 샌드박스만 가짜로 바꿨다).
+- `pnpm -r typecheck`(6/6)·`packages/agent`(1236개)·`packages/spec`(27개)·관련 `apps/studio` 세션 테스트(기존 `sessions-infra-recovery.test.ts` 등 포함)가 모두 통과했다. `pnpm --filter @b-studio/studio lint`는 오류 0(기존 경고 9개는 이 작업과 무관하다). 실제 BE-commerce 세션(`pay-2-5b640fd3`)이나 Docker를 다시 띄워 mediamtx가 실제로 뜨는지는 재검증하지 못했다 — 읽기 전용 작업 복사본이라 쓰기 작업을 할 수 없었다.
+
+### 감수한 트레이드오프
+- **depends_on을 선언하지 않고 더한 부가 서비스는 여전히 자동으로 뜨지 않는다.** ADR-083의 기본값 규칙을 그대로 따른 결과라, 에이전트가 부가 서비스를 더할 때 그 서비스를 쓰는 managed 서비스에 depends_on도 같이 선언해야 한다 — 선언하지 않으면 사람이 서비스 선택 화면에서 직접 켜야 한다(결정 7에서 보류한 도구가 대신할 수 있는 지점이다).
+- **known이 없는 v1 파일(이 기능이 생기기 전 저장)은 처음 한 번은 새로 생긴 서비스를 가리지 못한다.** 사람이 과거에 끈 서비스를 실수로 다시 켜지 않는 쪽을 우선했다 — 그 세션을 한 번이라도 시작·재개하거나 서비스 선택을 한 번만 바꾸면 known이 기록돼 그다음부터는 정상 동작한다.
+- **세션을 "새로" 만들 때(기존 프로젝트를 다시 열 때)는 `notice` 이벤트만 남기고, 이어서 작업할 때처럼 대화 노트는 남기지 않는다.** 새 대화의 첫 메시지라 노트를 붙일 자리가 없어서다 — 화면을 보고 있으면 notice로 바로 보이지만, 화면을 안 보고 있었다면 다음 메시지를 보낼 때까지는 모델도 알지 못한다.

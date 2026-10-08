@@ -112,6 +112,7 @@
 - [89. 완료 요약 첫 줄의 "…결과를 보고합니다"가 체크포인트 제목이 됨](#89-완료-요약-첫-줄의-결과를-보고합니다가-체크포인트-제목이-됨)
 - [90. includes 서브프로젝트(media)가 게이트 test 단계에서 돌아도 요구사항 테스트 증거가 0건으로 남음](#90-includes-서브프로젝트media가-게이트-test-단계에서-돌아도-요구사항-테스트-증거가-0건으로-남음)
 - [91. 손대지 않은 R1이 범위 표기(R1~R32) 때문에 "작업 중"으로 보임](#91-손대지-않은-r1이-범위-표기r1r32-때문에-작업-중으로-보임)
+- [92. 에이전트가 compose에 더한 새 부가 서비스(mediamtx)가 샌드박스에 뜨지 않음](#92-에이전트가-compose에-더한-새-부가-서비스mediamtx가-샌드박스에-뜨지-않음)
 
 ---
 
@@ -2883,3 +2884,22 @@ DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 
 
 ### 배운 점
 "여러 id를 한 번에 저장했다"는 집계 라벨과 "이 id를 직접 작업했다"는 자유 언급은 글자로는 구분되지 않는다(둘 다 `R숫자` 토큰이다). 토큰만 보는 정규식은 구두점으로 묶인 범위를 따로 가려내야 한다.
+
+## 92. 에이전트가 compose에 더한 새 부가 서비스(mediamtx)가 샌드박스에 뜨지 않음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 체크포인트 fa89fb7, 라이브 방송 R1~R3) → 코드 추적 → 수정
+
+### 현상
+에이전트가 실행 중 사용자 compose.yaml과 생성 `compose.b-studio.yaml`에 새 부가 서비스 `mediamtx`(공식 이미지, 설정은 `media/mediamtx.yml`)를 더했다. 그러나 샌드박스에는 mediamtx 컨테이너가 뜨지 않아 실제 RTMP 송출 시험을 하지 못했다.
+
+### 원인
+세 경로 모두 compose에 새로 생긴 서비스를 다루지 않았다. `restartServicesFor`(#480)는 `servicesForFiles`가 돌려주는 managed 서비스만 재시작해, managed가 아닌 부가 서비스는 재시작 대상 자체가 아니었다. 요청 전 `ensureInfra`(#511)는 세션 시작 시점에 한 번 계산해 메모리에 둔 `session.serviceSelection`만 확인해, 그 이후 compose가 바뀌어도 다시 계산되지 않았다. 세션을 다시 시작·이어서 작업해도 저장된 서비스 선택(ADR-083, `services.json`)에 `selected` 목록만 있고 "저장 시점에 compose에 어떤 서비스가 있었는지"를 남기지 않아, 새로 생긴 서비스를 가려낼 기준이 없었다.
+
+### 수정
+ADR-146으로 정리했다. (1) `restartServicesFor`가 compose 파일이 바뀐 재시작에서 다시 읽은 선언으로 depends_on 그래프를 보고, 기본값 규칙(ADR-083: managed가 depends_on으로 기대는 서비스)에 드는 부가 서비스 중 아직 없는 것만 `ensureInfra`로 이 세션의 compose 프로젝트에 올린다. (2) `services.json`에 저장 시점의 compose 서비스 전체(`known`)를 같이 남겨, 다음에 세션을 시작·재개할 때 known에 없는 서비스 중 기본값 규칙에 드는 것만 자동으로 켠다. 두 경로 모두 사람이 끈 서비스(offServices)는 그대로 둔다. 새 이미지를 받는 경로(Docker 데몬이 직접, edge 프록시를 거치지 않음)는 기존 ADR-073이 이미 확인해 둔 그대로라 손대지 않았다.
+
+### 검증
+`packages/agent/src/verify.test.ts`에 테스트 6개, `packages/agent/src/gate.test.ts`에 테스트 1개, `packages/spec/src/service-selection.test.ts`에 테스트 3개, `apps/studio/lib/server/service-selection.test.ts`에 테스트 6개, `apps/studio/lib/server/sessions-addon-service.test.ts`(신규)에 테스트 3개를 더했다. `packages/agent` 테스트 1236개, `packages/spec` 테스트 27개, 관련 apps/studio 세션 테스트가 모두 통과했다. 실제 BE-commerce 세션에서 mediamtx가 뜨는지는 읽기 전용 작업 복사본이라 다시 실행해 확인하지 못했다.
+
+### 배운 점
+"무엇을 띄울지"를 세션 시작 시점에 한 번 고정해 두면, 그 이후 compose가 바뀌었을 때 다시 계산하는 경로를 매번 따로 챙겨야 한다. 재시작·요청 전 확인·세션 재개 세 곳 모두 같은 가정("선택은 안 바뀐다")에 기대고 있었다.
