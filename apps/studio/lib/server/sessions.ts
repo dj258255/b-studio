@@ -489,7 +489,7 @@ interface Session {
 }
 
 /** 서비스 하나의 마지막 테스트 실행 결과 */
-interface StoredTestRun {
+export interface StoredTestRun {
   at: string;
   source: 'run' | 'gate';
   runner?: Runner;
@@ -6244,6 +6244,27 @@ async function hasBuildWrapper(session: Session, servicePath: string, runner: st
   return stat(path.join(session.project.root, servicePath, name)).then(() => true, () => false);
 }
 
+/**
+ * 보고서를 하나도 못 찾았을 때(다그푸딩 마찰 140) 사이드카에 남길 안내를 만든다. 흔한 원인은 workflow.tests의
+ * 명령이 studio.yaml 자동 감지가 쓰는 사용자 자신의 npm/yarn/pnpm 스크립트(ADR-133, watch 모드로 끝나지 않을
+ * 위험 때문에 b-studio가 임의로 --reporter=json 같은 플래그를 덧붙이지 않는다)라서, buildTestRunPlan이 기대하는
+ * 고정 보고서 경로(Vitest/Jest의 JEST_LIKE_REPORT_PATH)에 아무것도 남지 않는 경우다. 조용히 넘기면(예전 동작)
+ * 이 서비스는 test-results.json에 영영 나타나지 않고, 그 서비스가 유일한 증거인 요구사항은 "통과했는데 왜
+ * 검증 안 됐는지" 알 길이 없다. 이전 기록이 없거나 이미 이 안내를 보여주고 있을 때만 돌려준다(성공한 기록을
+ * 덮어쓰지 않는다 — 그 결과는 여전히 "이전 실행"으로 테스트 탭에 남는다, undefined면 아무것도 바꾸지 않는다).
+ */
+export function gateReportNotFoundEntry(previous: StoredTestRun | undefined, runner: Runner, sha: string | undefined, now: string = new Date().toISOString()): StoredTestRun | undefined {
+  if (previous && previous.error === undefined) return undefined;
+  return {
+    at: now,
+    source: 'gate',
+    runner,
+    run: { cases: [] },
+    sha,
+    error: `게이트가 돌린 테스트 명령의 보고서를 찾지 못했습니다(${runnerLabel(runner)}가 기대하는 경로에 아무것도 남지 않았습니다) — workflow.tests의 명령이 JSON/XML 보고서를 남기는지 확인하세요(Vitest/Jest는 사용자 스크립트가 --reporter=json --outputFile을 쓰지 않으면 b-studio가 찾는 자리에 남지 않습니다)`,
+  };
+}
+
 async function collectGateTestReports(session: Session): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
   await ensureTestResultsLoaded(session);
@@ -6261,22 +6282,9 @@ async function collectGateTestReports(session: Session): Promise<void> {
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
     session.testResults ??= new Map();
     if (run.cases.length === 0) {
-      // 보고서를 하나도 못 찾았다(다그푸딩 마찰 140) — 흔한 원인은 workflow.tests의 명령이 studio.yaml 자동 감지가
-      // 쓰는 사용자 자신의 npm/yarn/pnpm 스크립트(ADR-133, watch 모드로 끝나지 않을 위험 때문에 b-studio가 임의로
-      // --reporter=json 같은 플래그를 덧붙이지 않는다)라서, buildTestRunPlan이 기대하는 고정 보고서 경로(Vitest/Jest의
-      // JEST_LIKE_REPORT_PATH)에 아무것도 남지 않는 경우다. 조용히 넘기면(기존 동작) 이 서비스는 test-results.json에
-      // 영영 나타나지 않고, 그 서비스가 유일한 증거인 요구사항은 "통과했는데 왜 검증 안 됐는지" 알 길이 없다 —
-      // 그래서 이전에 성공한 기록이 없거나 이미 이 안내를 보여주고 있을 때만(성공한 기록을 덮어쓰지 않는다) 원인을 남긴다.
-      const previous = session.testResults.get(name);
-      if (!previous || previous.error !== undefined) {
-        session.testResults.set(name, {
-          at: new Date().toISOString(),
-          source: 'gate',
-          runner,
-          run: { cases: [] },
-          sha: session.snapshot.checkpoints[0]?.sha,
-          error: `게이트가 돌린 테스트 명령의 보고서를 찾지 못했습니다(${runnerLabel(runner)}가 기대하는 경로에 아무것도 남지 않았습니다) — workflow.tests의 명령이 JSON/XML 보고서를 남기는지 확인하세요(Vitest/Jest는 사용자 스크립트가 --reporter=json --outputFile을 쓰지 않으면 b-studio가 찾는 자리에 남지 않습니다)`,
-        });
+      const entry = gateReportNotFoundEntry(session.testResults.get(name), runner, session.snapshot.checkpoints[0]?.sha);
+      if (entry) {
+        session.testResults.set(name, entry);
         changed = true;
       }
       continue;

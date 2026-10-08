@@ -12,6 +12,7 @@ import {
   buildChecklistTestEvidence,
   buildExportChecks,
   buildRequirementTestRunEvidence,
+  gateReportNotFoundEntry,
   claudeCodeAutoEscalation,
   claudeCodeEscalation,
   cliModelOverride,
@@ -24,6 +25,7 @@ import {
   resolveSessionBackend,
   selfCheckMode,
   sessionBackend,
+  type StoredTestRun,
   type TestServiceView,
 } from './sessions';
 
@@ -528,5 +530,27 @@ describe('buildRequirementTestRunEvidence(요구사항별 테스트 탭 증거, 
   it('체크포인트가 없는 세션(head undefined)이면 undefined를 돌려준다', () => {
     const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
     expect(buildRequirementTestRunEvidence(services, 'R1', undefined, 0)).toBeUndefined();
+  });
+});
+
+describe('gateReportNotFoundEntry(게이트 보고서 수거 실패를 보이게 한다, 다그푸딩 마찰 140)', () => {
+  const now = '2026-01-01T00:00:00.000Z';
+
+  it('이전 기록이 없으면(이 서비스를 처음 모아 봤다) 안내를 담은 항목을 돌려준다', () => {
+    const entry = gateReportNotFoundEntry(undefined, 'vitest', 'sha1', now);
+    expect(entry).toMatchObject({ at: now, source: 'gate', runner: 'vitest', run: { cases: [] }, sha: 'sha1' });
+    expect(entry?.error).toContain('보고서를 찾지 못했습니다');
+  });
+
+  it('이전에 성공한 기록이 있으면 덮어쓰지 않는다(그 결과는 "이전 실행"으로 테스트 탭에 남는다)', () => {
+    const previous: StoredTestRun = { at: '2025-12-31T00:00:00.000Z', source: 'gate', runner: 'vitest', run: { cases: [{ classOrFile: 'a', name: 'R1', result: { status: 'pass' } }] }, sha: 'old-sha' };
+    expect(gateReportNotFoundEntry(previous, 'vitest', 'sha1', now)).toBeUndefined();
+  });
+
+  it('이전에도 이미 보고서를 못 찾았으면(계속 실패 중) 시각을 새로 고쳐 안내를 이어 돌려준다', () => {
+    const previous: StoredTestRun = { at: '2025-12-31T00:00:00.000Z', source: 'gate', runner: 'vitest', run: { cases: [] }, sha: 'old-sha', error: '게이트가 돌린 테스트 명령의 보고서를 찾지 못했습니다(…)' };
+    const entry = gateReportNotFoundEntry(previous, 'vitest', 'sha1', now);
+    expect(entry).toMatchObject({ at: now, sha: 'sha1' });
+    expect(entry?.error).toBeDefined();
   });
 });
