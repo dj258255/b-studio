@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
-import { offManagedServices, readServiceSelection, serviceSelectionFor, writeServiceSelection } from './service-selection';
+import { computeOffServices, readServiceSelection, serviceSelectionFor, writeServiceSelection } from './service-selection';
 
 const roots: string[] = [];
 
@@ -92,13 +92,68 @@ describe('serviceSelectionFor', () => {
   });
 });
 
-describe('offManagedServices', () => {
-  it('선택에 없는 managed 서비스 이름을 돌려준다', () => {
-    const multi = { managed: [['web', {}], ['api', {}], ['worker', {}]] } as unknown as LoadedProject;
-    expect(offManagedServices(multi, new Set(['web']))).toEqual(new Set(['api', 'worker']));
+describe('serviceSelectionFor와 새로 생긴 부가 서비스(도그푸딩 마찰 138, ADR-146)', () => {
+  /** commerce가 mysql·mediamtx 둘 다에 기대는, mediamtx가 저장된 선택 뒤에 compose에 추가된 프로젝트 */
+  const withMediamtx = {
+    ...project,
+    composeServices: ['commerce', 'mysql', 'redis', 'kafka', 'mediamtx'],
+    dependsOn: { ...project.dependsOn, commerce: ['mysql', 'mediamtx'], mediamtx: [] },
+  } as unknown as LoadedProject;
+
+  it('known이 있으면, 저장 뒤 새로 생긴 서비스 중 기본값 규칙(기댐 닫힘)에 드는 것만 더한다', async () => {
+    const dir = await stateDir();
+    await writeServiceSelection('orders', ['commerce', 'mysql'], dir, project.composeServices);
+    expect(await serviceSelectionFor(withMediamtx, 'orders', dir)).toEqual({
+      selected: ['commerce', 'mediamtx', 'mysql'],
+      isDefault: false,
+      addedServices: ['mediamtx'],
+    });
+  });
+
+  it('새로 생긴 서비스가 아무도 기대지 않는 부가 서비스면(예: 가져온 kafka류) 더하지 않는다', async () => {
+    const withExtra = {
+      ...withMediamtx,
+      composeServices: [...withMediamtx.composeServices, 'nobody-depends-on-this'],
+      dependsOn: { ...withMediamtx.dependsOn, 'nobody-depends-on-this': [] },
+    } as unknown as LoadedProject;
+    const dir = await stateDir();
+    await writeServiceSelection('orders', ['commerce', 'mysql'], dir, project.composeServices);
+    expect(await serviceSelectionFor(withExtra, 'orders', dir)).toEqual({
+      selected: ['commerce', 'mediamtx', 'mysql'],
+      isDefault: false,
+      addedServices: ['mediamtx'],
+    });
+  });
+
+  it('known이 없는 저장 파일(이 기능이 생기기 전)은 새로 생긴 서비스를 가리지 않는다 — 사람이 끈 결정을 건드리지 않는다', async () => {
+    const dir = await stateDir();
+    await writeServiceSelection('orders', ['commerce', 'mysql'], dir); // known 없이 저장(예전 호출)
+    expect(await serviceSelectionFor(withMediamtx, 'orders', dir)).toEqual({ selected: ['commerce', 'mysql'], isDefault: false });
+  });
+
+  it('사람이 이미 알던 서비스를 꺼 둔 선택은 known에 있어도 그대로 off로 둔다', async () => {
+    const dir = await stateDir();
+    // mysql을 알고 있었는데도 끈 선택(known에 mysql이 있다)
+    await writeServiceSelection('orders', ['commerce'], dir, project.composeServices);
+    expect(await serviceSelectionFor(withMediamtx, 'orders', dir)).toEqual({
+      selected: ['commerce', 'mediamtx'],
+      isDefault: false,
+      addedServices: ['mediamtx'],
+    });
+  });
+});
+
+describe('computeOffServices', () => {
+  it('선택에 없는 compose 서비스 이름을 돌려준다(managed·부가 서비스 모두, 도그푸딩 마찰 138)', () => {
+    const multi = { composeServices: ['web', 'api', 'worker'] } as unknown as LoadedProject;
+    expect(computeOffServices(multi, new Set(['web']))).toEqual(new Set(['api', 'worker']));
+  });
+
+  it('managed만 전부 선택했어도 아무도 선택하지 않은 부가 서비스(redis·kafka)는 off다', () => {
+    expect(computeOffServices(project, new Set(['commerce', 'mysql']))).toEqual(new Set(['redis', 'kafka']));
   });
 
   it('전부 선택했으면 빈 집합이다', () => {
-    expect(offManagedServices(project, new Set(['commerce', 'mysql']))).toEqual(new Set());
+    expect(computeOffServices(project, new Set(['commerce', 'mysql', 'redis', 'kafka']))).toEqual(new Set());
   });
 });

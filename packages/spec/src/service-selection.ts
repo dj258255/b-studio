@@ -46,3 +46,17 @@ export function missingDependencies(selected: ReadonlySet<string>, graph: Readon
 export function dependentsOf(name: string, selected: ReadonlySet<string>, graph: Readonly<Record<string, readonly string[]>>): string[] {
   return [...selected].filter((service) => service !== name && (graph[service] ?? []).includes(name)).sort();
 }
+
+/**
+ * compose 서비스 이름 중 `known`(지난번에 선택을 계산했을 때 있던 compose 서비스 이름 전체)에 없던 것(도그푸딩
+ * 마찰 138, ADR-146). 에이전트나 사람이 compose에 새 부가 서비스(mediamtx 등)를 더했을 때, 저장된 선택이 그
+ * 서비스를 몰라서 빠뜨리는 문제를 고치는 데 쓴다.
+ *
+ * known이 없으면(선택을 저장한 적은 있지만 이 비교 기준이 생기기 전 파일이라 known이 없는 경우) 빈 배열을
+ * 돌려준다 — 어느 서비스가 "새로" 생긴 것인지 가릴 기준이 없을 때는 아무것도 새로 켜지 않는 쪽이, 사람이 이미
+ * 꺼 둔 서비스를 실수로 다시 켜는 쪽보다 안전하다.
+ */
+export function newlyAddedServices(known: ReadonlySet<string> | undefined, composeServices: readonly string[]): string[] {
+  if (!known) return [];
+  return composeServices.filter((name) => !known.has(name));
+}

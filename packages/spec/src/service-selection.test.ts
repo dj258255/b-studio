@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LoadedProject } from './load';
-import { defaultServiceSelection, dependencyClosure, dependentsOf, missingDependencies } from './service-selection';
+import { defaultServiceSelection, dependencyClosure, dependentsOf, missingDependencies, newlyAddedServices } from './service-selection';
 
 describe('dependencyClosure', () => {
   it('뿌리에서 기대는 서비스를 따라가며 닫힘을 모은다', () => {
@@ -50,5 +50,19 @@ describe('dependentsOf', () => {
   it('선택에서 빠진 서비스는 세지 않는다', () => {
     const graph = { commerce: ['mysql'], worker: ['mysql'] };
     expect(dependentsOf('mysql', new Set(['worker']), graph)).toEqual(['worker']);
+  });
+});
+
+describe('newlyAddedServices(도그푸딩 마찰 138, ADR-146)', () => {
+  it('known에 없는 compose 서비스 이름만 돌려준다', () => {
+    expect(newlyAddedServices(new Set(['commerce', 'mysql']), ['commerce', 'mysql', 'mediamtx'])).toEqual(['mediamtx']);
+  });
+
+  it('새로 생긴 서비스가 없으면 빈 배열이다', () => {
+    expect(newlyAddedServices(new Set(['commerce', 'mysql']), ['commerce', 'mysql'])).toEqual([]);
+  });
+
+  it('known이 없으면(이 비교 기준이 생기기 전 저장) 빈 배열이다 — 가릴 기준이 없을 때는 아무것도 새로 켜지 않는다', () => {
+    expect(newlyAddedServices(undefined, ['commerce', 'mysql', 'mediamtx'])).toEqual([]);
   });
 });
