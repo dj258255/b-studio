@@ -195,9 +195,9 @@ describe('추적 매트릭스는 "명세" 탭 목록과 같은 평가를 쓴다(
     expect(list.requirements.find((requirement) => requirement.id === 'R1')!.status).toBe('검증됨');
     expect(list.requirements.find((requirement) => requirement.id === 'R2')!.status).toBe('검증됨');
     expect(list.requirements.find((requirement) => requirement.id === 'R3')!.status).toBe('검증됨');
-    // R4는 증거가 없지만, 네 요구사항을 한 번에 저장한 문서 체크포인트 메시지가 "R1~R4" 범위로 모든 id를 자유 언급하므로
-    // (checkpoint 증거) "미착수"가 아니라 "작업 중"이다 — applySessionRequirements의 기존 동작이지 이 버그와는 무관하다
-    expect(list.requirements.find((requirement) => requirement.id === 'R4')!.status).toBe('작업 중');
+    // R4는 증거가 없다. 네 요구사항을 한 번에 저장한 문서 체크포인트 메시지는 "R1~R4" 범위 라벨만 남기는데,
+    // 그 범위 표기의 양 끝 id는 개별 언급으로 치지 않으므로(findMentionedIds, 다그푸딩 마찰 136) "미착수"로 남는다
+    expect(list.requirements.find((requirement) => requirement.id === 'R4')!.status).toBe('미착수');
 
     // 검증 출처 배지도 목록의 verifiedBy를 더 자세히 가른 값과 맞는다
     expect(matrix.rows.find((row) => row.id === 'R1')!.verifiedBy).toBe('사람 확인');

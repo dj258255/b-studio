@@ -1136,9 +1136,31 @@ export interface RequirementEvidence {
   docEvidence?: DocEvidence;
 }
 
-/** 텍스트에서 `\bR\d+(\.\d+)?\b` 토큰(요구사항 id·시나리오 id)을 모두 뽑는다. "R1"이 "R10"의 일부로 걸리지 않는다 */
+/**
+ * "R1~R32"·"R1-R32"·"R1–R32"(en dash)처럼 두 id를 구두점으로 이은 범위 표기. `requirementRangeLabel`(studio의
+ * sessions.ts)가 "여러 요구사항을 한 번에 저장했다"는 커밋 메시지 범위 라벨로 바로 이 모양을 쓴다 — 그 라벨의
+ * 양 끝 id(R1·R32)는 "그 id를 직접 작업했다"는 자유 언급이 아니라 "저장한 전체 범위가 이만큼"이라는 집계일
+ * 뿐이라, findMentionedIds가 걸러야 한다(다그푸딩 마찰 136: 손대지 않은 R1이 이 라벨 하나로 "작업 중"이 됐다)
+ */
+const RANGE_MENTION_PATTERN = /\bR\d+(?:\.\d+)?\s*[-–—~]\s*R\d+(?:\.\d+)?\b/g;
+
+/**
+ * 텍스트에서 `\bR\d+(\.\d+)?\b` 토큰(요구사항 id·시나리오 id)을 모두 뽑는다. "R1"이 "R10"의 일부로 걸리지 않는다.
+ * "R1~R32" 같은 범위 표기 안의 양 끝 id는 개별 언급으로 보지 않고 뺀다(RANGE_MENTION_PATTERN, 마찰 136) —
+ * "R1 그리고 R32 확인"처럼 범위 구두점 없이 따로 나오는 언급은 그대로 각각 센다
+ */
 export function findMentionedIds(text: string): string[] {
-  return [...text.matchAll(REQUIREMENT_MENTION_PATTERN)].map((match) => match[0]);
+  const ranges = [...text.matchAll(RANGE_MENTION_PATTERN)].map((match) => {
+    const start = match.index ?? 0;
+    return [start, start + match[0].length] as const;
+  });
+  const insideRange = (index: number) => ranges.some(([start, end]) => index >= start && index < end);
+  const mentions: string[] = [];
+  for (const match of text.matchAll(REQUIREMENT_MENTION_PATTERN)) {
+    if (insideRange(match.index ?? 0)) continue;
+    mentions.push(match[0]);
+  }
+  return mentions;
 }
 
 /**

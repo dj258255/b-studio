@@ -110,6 +110,8 @@
 - [87. 에이전트가 형식에 맞지 않는 studio.yaml을 써도 그 실행도 다음 세션 재개도 알리지 않고 조용히 넘어감](#87-에이전트가-형식에-맞지-않는-studioyaml을-써도-그-실행도-다음-세션-재개도-알리지-않고-조용히-넘어감)
 - [88. 생성 파일 스냅샷이 없는 체크포인트로 되돌리면 studio.yaml·compose를 지워 세션이 뜨지 않음](#88-생성-파일-스냅샷이-없는-체크포인트로-되돌리면-studioyamlcompose를-지워-세션이-뜨지-않음)
 - [89. 완료 요약 첫 줄의 "…결과를 보고합니다"가 체크포인트 제목이 됨](#89-완료-요약-첫-줄의-결과를-보고합니다가-체크포인트-제목이-됨)
+- [90. includes 서브프로젝트(media)가 게이트 test 단계에서 돌아도 요구사항 테스트 증거가 0건으로 남음](#90-includes-서브프로젝트media가-게이트-test-단계에서-돌아도-요구사항-테스트-증거가-0건으로-남음)
+- [91. 손대지 않은 R1이 범위 표기(R1~R32) 때문에 "작업 중"으로 보임](#91-손대지-않은-r1이-범위-표기r1r32-때문에-작업-중으로-보임)
 
 ---
 
@@ -2843,3 +2845,41 @@ DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 
 
 ### 배운 점
 에이전트의 완료 요약은 자주 "보고합니다"·"정리했습니다" 같은 머리말로 시작한다. 요약 첫 줄은 변경을 말하는 문장이 아닐 수 있다는 전제로 걸러야 한다.
+
+## 90. includes 서브프로젝트(media)가 게이트 test 단계에서 돌아도 요구사항 테스트 증거가 0건으로 남음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, `GET /api/sessions/5b640fd3/requirements`) → 코드 추적 → 수정
+
+### 현상
+숏폼 코드를 옮긴 `media/` Gradle 서브프로젝트는 commerce 서비스의 `includes`(studio.yaml, ADR-139)로 선언돼 있다. `./gradlew -p commerce test`가 `:media:test`도 함께 돌려 `media/build/test-results/test/*.xml`에 통과 결과가 남지만, `.git/b-studio/test-results.json`에는 R22·R23·R25가 0건, R21이 1건, R26이 4건만 적혔다.
+
+### 원인
+테스트 보고서 수거 명령(`packages/agent/src/test-run.ts`의 `collectGlobCommand`)이 `build/test-results/test/*.xml`을 서비스 컨테이너의 작업 디렉터리(`working_dir: /workspace/commerce`) 기준 상대 경로로만 훑었다. `media`는 같은 컨테이너 안(`/workspace/media`, 저장소 전체가 마운트돼 있다)에 있지만 그 경로는 glob에 들어 있지 않았다. `servicesForFiles`(#490, ADR-139)만 `includes`를 따랐고, 테스트 보고서 수거는 따르지 않았다.
+
+### 수정
+`buildTestRunPlan`에 `extraReportRoots` 옵션을 더해, Gradle·Maven 보고서 glob을 서비스 자신의 경로뿐 아니라 각 `extraReportRoots`(`${CONTAINER_WORKSPACE_ROOT}/${includes 항목}`) 아래에서도 찾게 했다. `apps/studio/lib/server/sessions.ts`의 `runSessionTests`·`collectGateTestReports` 둘 다 `extraReportRootsFor(spec)`로 이 값을 만들어 넘긴다. 보안 검토로 드러난 셸 주입 위험(91번 참고)은 같이 고쳤다.
+
+### 검증
+`packages/agent/src/test-run.test.ts`에 테스트 4개(gradle·maven 각각 extraReportRoots 포함·생략, vitest·jest·pytest는 무시)를 더했다. `packages/agent` 테스트 1233개, `packages/spec` 테스트 132개가 통과했다.
+
+### 배운 점
+"서비스가 소유한 파일"(`servicesForFiles`)과 "서비스가 만드는 증거"(테스트 보고서 수거)는 둘 다 `includes`를 따라야 하는 별개의 경로다. 하나를 고치면서 둘 다 고쳤다고 생각하기 쉽다.
+
+## 91. 손대지 않은 R1이 범위 표기(R1~R32) 때문에 "작업 중"으로 보임
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, `GET /api/sessions/5b640fd3/requirements`) → 코드 추적 → 수정
+
+### 현상
+32개 요구사항 중 아무것도 바뀌지 않은 R1이 "작업 중"으로 보였다.
+
+### 원인
+요구사항을 처음 저장할 때 체크포인트 메시지에 `requirementRangeLabel`이 "docs: 요구사항을 정리한다 (R1~R32)"처럼 범위 라벨을 남긴다. `findMentionedIds`(`packages/agent/src/requirements.ts`)는 `\bR\d+(\.\d+)?\b` 토큰만 보고 "R1"·"R32"를 각각 독립된 자유 언급으로 뽑았다 — "32개를 한 번에 저장했다"는 집계 라벨일 뿐인데, 양 끝 id가 "그 요구사항을 직접 작업했다"는 체크포인트 증거(`findCheckpointMentions`)로 둔갑했다.
+
+### 수정
+`findMentionedIds`에 `RANGE_MENTION_PATTERN`(`\bR\d+(\.\d+)?\s*[-–—~]\s*R\d+(\.\d+)?\b`)을 더해, 이 범위 표기 안에 있는 양 끝 id는 개별 언급에서 뺀다. 범위 구두점 없이 따로 나오는 "R1 그리고 R32"는 전과 같이 각각 센다.
+
+### 검증
+`packages/agent/src/requirements.test.ts`에 테스트 5개(물결·하이픈·en dash 범위, 범위 밖 언급, mentionsRequirementId)를 더했다. 기존 `sessions-requirements-matrix.test.ts`가 "범위 라벨 하나로 R4가 작업 중이 된다"를 전제로 했던 부분은 "미착수로 남는다"로 바꿨다(이 버그를 고친 결과이지 회귀가 아니다). `packages/agent` 테스트 1233개, 관련 vitest가 모두 통과했다.
+
+### 배운 점
+"여러 id를 한 번에 저장했다"는 집계 라벨과 "이 id를 직접 작업했다"는 자유 언급은 글자로는 구분되지 않는다(둘 다 `R숫자` 토큰이다). 토큰만 보는 정규식은 구두점으로 묶인 범위를 따로 가려내야 한다.

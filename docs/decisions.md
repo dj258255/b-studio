@@ -165,6 +165,7 @@
 - [ADR-142 claude-code 러너가 일시적 네트워크 오류에서 바로 실패하지 않고, 같은 세션을 resume으로 이어받아 재시도한다](#adr-142-claude-code-러너가-일시적-네트워크-오류에서-바로-실패하지-않고-같은-세션을-resume으로-이어받아-재시도한다)
 - [ADR-143 세션 상태(ready)와 실제 컨테이너 상태를 분리해 보고, 모델을 부르기 전에 ensureInfra로 확인·복구한다](#adr-143-세션-상태ready와-실제-컨테이너-상태를-분리해-보고-모델을-부르기-전에-ensureinfra로-확인복구한다)
 - [ADR-144 형식이 틀린 studio.yaml을 검증 게이트와 쓰기 도구에서 즉시 알리고, 조용한 옛 설정 전환에는 경고를 남긴다](#adr-144-형식이-틀린-studioyaml을-검증-게이트와-쓰기-도구에서-즉시-알리고-조용한-옛-설정-전환에는-경고를-남긴다)
+- [ADR-145 테스트 보고서 수거가 includes 서브프로젝트 경로까지 glob하게 하고, 그 경로를 셸 명령에 넣기 전에 허용 문자로 좁힌다](#adr-145-테스트-보고서-수거가-includes-서브프로젝트-경로까지-glob하게-하고-그-경로를-셸-명령에-넣기-전에-허용-문자로-좁힌다)
 
 ---
 
@@ -6037,3 +6038,41 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - `write_file`·`edit_file`의 즉시 검증(결정 2)은 `studio.yaml`만 스키마로 보고 compose와의 교차 검증(서비스 이름 불일치 등)은 건너뛴다 — 그 오류는 턴이 끝날 때 게이트(결정 1)가 늦게라도 잡는다. 두 검증의 시점이 다르다는 사실 자체가 드러나는 불일치지만, 매 쓰기마다 compose까지 다시 읽는 비용보다는 낫다고 판단했다.
 - 세션 재개 막힘(결정 4)의 자동 복구는 이번에 넣지 않았다 — 사람이 안내받은 경로를 보고 직접 파일을 고쳐야 한다. 안내가 가리키는 스냅샷이 아예 없는 경우(내 폴더 세션, 생성 파일 스냅샷이 아직 없던 옛 세션)에는 작업 복사본 경로만 알려주고 더 도와주지 못한다.
 - `restartServicesFor`가 `specError`가 있어도 재시작 자체는 계속한다(서비스를 멈추지 않으려는 선택, ADR-080과 같은 방향) — 그래서 같은 턴 안에서는 "검증은 실패했지만 서비스는 떠 있다"는 상태가 잠깐 존재한다. 게이트가 바로 재시도를 요구하므로 길게 남는 상태는 아니라고 보고 감수했다.
+
+## ADR-145 테스트 보고서 수거가 includes 서브프로젝트 경로까지 glob하게 하고, 그 경로를 셸 명령에 넣기 전에 허용 문자로 좁힌다
+
+상태: 채택
+관련: ADR-139
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기만)에서 실측(트러블슈팅 90): `media/`가 commerce 서비스의 `includes`(studio.yaml, ADR-139)로 선언돼 있어 `./gradlew -p commerce test`가 `:media:test`도 함께 돌리지만, 테스트 보고서 수거 명령(`packages/agent/src/test-run.ts`의 `collectGlobCommand`)은 서비스 자신의 작업 디렉터리(`/workspace/commerce`) 기준 `build/test-results/test/*.xml`만 훑어 `media`의 통과 결과를 놓쳤다.
+- `includes`는 studio.yaml의 필드라 세션 중 에이전트(모델 출력)가 `write_file`·`edit_file`로 직접 고칠 수 있다(ADR-144가 형식만 검증하지, 내용의 글자 집합은 막지 않는다). 수거 명령은 `['sh', '-c', '...']`로 셸을 거치므로, 이 값을 그 문자열에 따옴표 없이 그대로 넣으면 `includes: ["media; <임의 명령>"]` 같은 값이 서비스 컨테이너에서 임의 명령을 실행하는 통로가 된다 — 코드 리뷰에서 이 경로가 바로 지적됐다.
+- `packages/spec/src/schema.ts`의 `PROJECT_RELATIVE_PATH`(`includes`가 쓰는 스키마)는 지금까지 leading slash와 `..` 세그먼트만 막았다. 공백·세미콜론·백틱·`$()`는 전부 통과했다.
+
+### 판단 기준
+1. `includes` 경로의 서브프로젝트 보고서를 실제로 찾아 모을 것.
+2. 그 값이 셸 메타문자를 담고 있어도 임의 명령 실행으로 이어지지 않을 것 — 스키마 한 겹만 믿지 않고, 셸 문자열을 조립하는 함수 자신도 안전할 것(순수 함수가 호출자의 검증을 신뢰하지 않는다).
+3. Gradle(`build/test-results/test`)·Maven(`target/surefire-reports`) 둘 다, 서브프로젝트의 `build`가 named volume이든(이 서비스 자신의 경로) 그냥 바인드 마운트든(다른 서비스가 아닌 `includes` 경로는 전체 저장소 마운트의 일부라 평범한 파일이다) 똑같이 동작할 것.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) `extraReportRoots`를 받아 glob을 서비스 자신의 경로뿐 아니라 `${CONTAINER_WORKSPACE_ROOT}/<includes 항목>` 아래에서도 찾는다(절대 경로) | 모든 서비스 컨테이너가 프로젝트 루트 전체를 `/workspace`에 마운트하므로(ADR-088) 서비스 자신의 작업 디렉터리 깊이와 무관하게 항상 같은 식으로 닿는다. `path.relative`로 상대 경로를 계산할 필요가 없어 더 단순하다 — **채택** |
+| (b) 서비스의 작업 디렉터리 기준 상대 경로(`../media`)를 계산해 쓴다 | `commerce`·`media`가 항상 저장소 루트의 직계 자식이라는 가정이 깔린다 — 서비스 폴더가 더 깊어지면(예: `apps/commerce`) 상대 경로 계산이 더 복잡해진다. 절대 경로보다 얻는 게 없다 |
+| (c) 셸 문자열 조립 대신 `sh -c '...' sh <root1> <root2>`로 root를 위치 인자로 넘긴다 | 셸 인용 자체를 완전히 피하는 가장 안전한 방법이다. 그런데 `for f in "$1"/build/...` 안에서 `*.xml` 글로빙은 여전히 셸이 하므로 위치 인자 경로 자체에는 주입 문제가 생기지 않는다 — 다만 지금 코드베이스의 `collectGlobCommand`가 이미 "glob 문자열 목록을 받아 `for` 루프로 잇는다"는 모양이라, 위치 인자로 바꾸려면 그 함수의 계약을 다시 짜야 한다. 작은따옴표 감싸기(기각하지 않은 결정 2)로 같은 안전성을 더 적은 변경으로 얻을 수 있어 이번에는 보류한다 — **다음 과제** |
+| (d) 작은따옴표로 감싸고, 허용 문자 집합(영문·숫자·`.`·`_`·`-`·`/`)을 벗어나는 값은 `collectGlobCommand`를 만드는 함수가 조용히 버린다 | 스키마(결정 1)가 이미 같은 문자 집합만 받으므로 정상 경로는 전혀 영향이 없다. 스키마를 어떤 경로로든 우회해 여기까지 왔다 해도(다른 호출자, 테스트, 미래의 리팩터) 작은따옴표 자체가 허용 문자 집합에 없어 깨고 나올 수 없고, 혹시라도 집합을 벗어난 값은 떨어뜨리기만 한다 — 임의 명령 실행보다 "그 서브프로젝트의 보고서를 못 모은다"가 항상 더 안전하다 — **채택(결정 2)** |
+
+### 결정
+1. **`packages/spec/src/schema.ts`**: `PROJECT_RELATIVE_PATH`(`includes`가 쓰는 유일한 스키마)를 `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$` 정규식 + `..` 세그먼트 금지로 좁혔다. 영문·숫자·`.`·`_`·`-`·`/`만 허용해 공백·세미콜론·백틱·`$()`·파이프 등 셸 메타문자를 전부 막는다.
+2. **`packages/agent/src/test-run.ts`**: `buildTestRunPlan`에 `extraReportRoots?: readonly string[]` 옵션을 더했다. Gradle·Maven 보고서 glob을 서비스 자신의 경로(`build/test-results/test/*.xml`·`target/surefire-reports/*.xml`)뿐 아니라 각 `extraReportRoots` 아래에서도 찾는다. 새 `SAFE_REPORT_ROOT` 정규식(스키마와 같은 문자 집합)을 통과한 root만 작은따옴표로 감싸 셸 문자열에 넣고(`'<root>'/build/test-results/test/*.xml`처럼 글로빙이 필요한 `*.xml` 부분만 따옴표 밖에 남긴다), 벗어난 값은 조용히 버린다 — 이 함수는 순수 함수라 호출자(studio)의 스키마 검증을 신뢰하지 않는다.
+3. **`apps/studio/lib/server/sessions.ts`**: `extraReportRootsFor(spec)`를 더해 `spec.includes`(ManagedServiceSpec)를 `${CONTAINER_WORKSPACE_ROOT}/<항목>` 절대 경로로 바꾼다. `runSessionTests`(사람이 테스트 탭에서 돌릴 때)와 `collectGateTestReports`(게이트 test 단계 뒤 보고서만 모을 때) 둘 다 이 값을 `buildTestRunPlan`에 넘긴다.
+4. `className`·`testName`은 그대로 둔다 — Gradle·Maven·pytest 명령(`plan.command`)은 배열로 조립해 `sandbox.exec`에 그대로 넘기므로 셸을 거치지 않는다(이 문서의 TestRunPlan 계약 그대로). 셸 문자열(`sh -c`)로 들어가는 값은 이번에 고친 `extraReportRoots`뿐이었다.
+
+### 검증 결과
+- `packages/spec/src/spec.test.ts`: `includes`에 셸 메타문자(`;`·백틱·`$()`·`&&`·`|`·공백) 6개가 섞인 값을 주면 전부 거부되는지 보는 테스트를 더했다. `packages/spec` 테스트 132개가 통과했다.
+- `packages/agent/src/test-run.test.ts`: `extraReportRoots`가 있을 때 Gradle·Maven 둘 다 그 경로까지 glob하는지, 없으면 전과 같은지, vitest·jest·pytest는 무시하는지, 위험한 값 7종을 섞어도 조용히 떨어지고 안전한 glob 하나만 남는지, 안전한 특수문자(`.`·`_`·`-`) 경로는 작은따옴표로 감싸 그대로 쓰이는지를 보는 테스트 6개를 더했다. `packages/agent` 테스트 1233개가 통과했다.
+- `apps/studio/lib/server/sessions-requirements-matrix.test.ts`·`project-detect.test.ts`로 기존 includes 경로(`media`)가 여전히 통과하는지 확인했다.
+
+### 감수한 트레이드오프
+- `extraReportRoots`가 허용 문자 집합을 벗어난 값을 "거부"가 아니라 "조용히 버림"으로 처리한다 — 스키마(결정 1)가 이미 입구에서 막으므로 정상 흐름에서는 절대 일어나지 않지만, 어떤 경로로든 벗어난 값이 들어오면 에러를 던지지 않고 그 서브프로젝트의 보고서만 조용히 못 모은다. 테스트 탭에 "결과 0건"으로 보일 뿐 사람에게 왜 못 모았는지 알리지 않는다 — 임의 명령 실행보다 나은 실패 모드라고 보고 감수했다.
+- 선택지 (c)(위치 인자로 넘기기)는 더 근본적인 방어지만 이번에는 넣지 않았다 — `collectGlobCommand`의 기존 계약(glob 문자열 목록)을 다시 짜야 해서 범위를 넓힌다. 작은따옴표 감싸기 + 허용 문자 집합으로도 지금 위협(studio.yaml의 `includes`)은 막힌다.

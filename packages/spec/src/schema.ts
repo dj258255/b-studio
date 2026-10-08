@@ -37,11 +37,19 @@ const RELATIVE_PATH = z
   .min(1)
   .refine((value) => !/^([a-zA-Z]:)?[\\/]/.test(value) && !value.split(/[\\/]/).includes('..'), '서비스 폴더 안의 상대 경로여야 합니다');
 
-/** 프로젝트 루트 기준 상대 경로. RELATIVE_PATH와 글자 규칙은 같지만 서비스 폴더 밖(형제 폴더 등)도 가리킬 수 있다 */
+/**
+ * 프로젝트 루트 기준 상대 경로(지금은 includes만 쓴다). 서비스 폴더 밖(형제 폴더 등)도 가리킬 수 있다.
+ * RELATIVE_PATH보다 글자를 더 좁게 받는다: `packages/agent/src/test-run.ts`의 테스트 보고서 수거가 이 값을
+ * (스키마를 거친 뒤에도 한 번 더 작은따옴표로 감싸지만) 결국 `sh -c` 문자열에 넣는다 — 세션 중 에이전트가
+ * studio.yaml을 직접 고칠 수 있으므로, 공백·세미콜론·백틱·`$()` 같은 셸 메타문자가 들어간 값이 여기를 통과하면
+ * 서비스 컨테이너에서 임의 명령을 실행하는 통로가 된다(보안 검토, 다그푸딩 마찰 135). 영문·숫자·.·_·-와 /만
+ * 허용한다 — 실제 폴더 이름 관례를 벗어나지 않으면서 셸 메타문자는 전부 막는다
+ */
 const PROJECT_RELATIVE_PATH = z
   .string()
   .min(1)
-  .refine((value) => !/^([a-zA-Z]:)?[\\/]/.test(value) && !value.split(/[\\/]/).includes('..'), '프로젝트 루트 기준 상대 경로여야 합니다');
+  .regex(/^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/, '영문·숫자·.·_·-와 /만 쓰는 프로젝트 루트 기준 상대 경로여야 합니다(공백·셸 메타문자는 받지 않습니다)')
+  .refine((value) => !value.split('/').includes('..'), '".."은 쓸 수 없습니다');
 
 const MAX_INCLUDES = 20;
 

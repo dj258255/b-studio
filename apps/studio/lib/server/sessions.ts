@@ -293,6 +293,7 @@ import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, ty
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from './test-files';
+import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -5709,6 +5710,17 @@ const RUN_FAILURE_TAIL_LINES = 30;
 
 type ManagedSpec = LoadedProject['managed'][number][1];
 
+/**
+ * 서비스의 `includes`(studio.yaml, ADR-139)가 가리키는 서비스 폴더 밖 경로를 컨테이너 안 절대 경로로 바꾼다.
+ * 모든 서비스 컨테이너가 프로젝트 루트 전체를 `/workspace`에 마운트하므로(ADR-088) 서비스 자신의 working_dir과
+ * 무관하게 이 경로로 항상 닿는다. Gradle 멀티 모듈 빌드에서 `-p <서비스 폴더> test`가 이 경로의 서브프로젝트
+ * 테스트도 함께 돌리지만 보고서는 그 서브프로젝트 자신의 build 밑에 남는다(도그푸딩 마찰 135) — buildTestRunPlan의
+ * extraReportRoots로 넘겨 같이 모은다
+ */
+function extraReportRootsFor(spec: ManagedSpec): string[] {
+  return (spec.includes ?? []).map((include) => `${CONTAINER_WORKSPACE_ROOT}/${include}`);
+}
+
 /** test-discovery.ts의 결과에 framework를 함께 붙인 행. attachResults는 구조적으로 호환되는 TestRow만 보고 돌려주므로, 돌아온 값도 이 모양 그대로다(as로 되돌린다) */
 interface ServiceTestRow extends TestRow {
   framework: TestFramework;
@@ -6156,7 +6168,10 @@ export async function runSessionTests(
   const runner = await detectServiceRunner(session, entry[1]);
   if (!runner) throw new StudioError(400, `${input.service} 서비스의 테스트 실행기를 알아내지 못했습니다`);
 
-  const plan = buildTestRunPlan(runner, toTestTarget(runner, input), { wrapper: await hasBuildWrapper(session, entry[1].path, runner) });
+  const plan = buildTestRunPlan(runner, toTestTarget(runner, input), {
+    wrapper: await hasBuildWrapper(session, entry[1].path, runner),
+    extraReportRoots: extraReportRootsFor(entry[1]),
+  });
   const controller = new AbortController();
   session.testControllers.set(input.service, controller);
   markTestsChanged(session);
@@ -6225,7 +6240,10 @@ async function collectGateTestReports(session: Session): Promise<void> {
     if (serviceState?.state !== 'ready') continue;
     const runner = await detectServiceRunner(session, spec);
     if (!runner) continue;
-    const plan = buildTestRunPlan(runner, undefined, { wrapper: await hasBuildWrapper(session, spec.path, runner) });
+    const plan = buildTestRunPlan(runner, undefined, {
+      wrapper: await hasBuildWrapper(session, spec.path, runner),
+      extraReportRoots: extraReportRootsFor(spec),
+    });
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
     if (run.cases.length === 0) continue;
     session.testResults ??= new Map();
