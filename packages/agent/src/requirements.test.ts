@@ -24,6 +24,7 @@ import {
   findCheckpointMentions,
   findGateCheckMentions,
   findMentionedIds,
+  findUnverifiedScenarioIds,
   isManualStepText,
   labelRecommendationSource,
   lintRequirement,
@@ -59,6 +60,7 @@ import {
   summarizeRequirementsForGuide,
   verifySpecQuote,
   type DocEvidence,
+  type GateCheckResult,
   type MatrixTestRunRow,
   type Requirement,
   type RequirementEvidence,
@@ -1258,6 +1260,50 @@ describe('추적 매트릭스의 시나리오 행 — 요구사항과 같은 함
       evaluationByRequirementId: { R1: { status: '검증됨', evidence: { checkpoints: [], tests: [], gateChecks: [] }, verifiedBy: 'manual' } },
     });
     expect(matrix.rows.find((candidate) => candidate.id === 'R1.1')!.status).toBe('검증됨');
+  });
+});
+
+describe('findUnverifiedScenarioIds — 요구사항 카드에서 "왜 시나리오별로는 아직인지" 보여주는 목록(다그푸딩 마찰 140)', () => {
+  const twoScenarios: Requirement = {
+    ...withEars,
+    id: 'R27',
+    scenarios: [
+      { id: 'R27.1', given: 'g1', when: 'w1', then: 't1' },
+      { id: 'R27.2', given: 'g2', when: 'w2', then: 't2' },
+    ],
+  };
+
+  it('시나리오가 없는 요구사항은 빈 배열이다', () => {
+    const requirement: Requirement = { ...withEars, id: 'R1', scenarios: [] };
+    expect(findUnverifiedScenarioIds(requirement, [], [], [], [], { checkpoints: [], tests: [], gateChecks: [] })).toEqual([]);
+  });
+
+  it('요구사항 id만 단 테스트가 통과해 요구사항 전체는 검증됨이어도, 시나리오 id를 단 테스트가 없으면 두 시나리오 다 미검증으로 남는다', () => {
+    // R1이 "요구사항 id만 단 테스트"로 검증됨이 되는 것과 같은 모양(실측 — BE-commerce 세션 R1)
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R27', file: 'a.java', name: 'R27: 바닥 id만', status: 'pass', at: 't', sha: 'a', shortSha: 'a' }];
+    const parentEvidence: RequirementEvidence = { checkpoints: [], tests: [], gateChecks: [], testRun: { at: 't', sha: 'a', shortSha: 'a', passed: 1, failed: 0 } };
+    const missing = findUnverifiedScenarioIds(twoScenarios, [], [], [], testRunRows, parentEvidence);
+    expect(missing).toEqual(['R27.1', 'R27.2']);
+  });
+
+  it('시나리오 id를 단 테스트가 통과한 시나리오만 목록에서 빠진다', () => {
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R27.1', file: 'a.java', name: 'R27.1 통과', status: 'pass', at: 't', sha: 'a', shortSha: 'a' }];
+    const missing = findUnverifiedScenarioIds(twoScenarios, [], [], [], testRunRows, { checkpoints: [], tests: [], gateChecks: [] });
+    expect(missing).toEqual(['R27.2']);
+  });
+
+  it('게이트 확인이 그 시나리오 id를 언급하며 통과했으면도 검증됨으로 센다', () => {
+    const gateChecks: GateCheckResult[] = [{ name: 'contract_check R27.1', ok: true }];
+    const missing = findUnverifiedScenarioIds(twoScenarios, [], [], gateChecks, [], { checkpoints: [], tests: [], gateChecks: [] });
+    expect(missing).toEqual(['R27.2']);
+  });
+
+  it('두 시나리오 다 통과했으면 빈 배열이다', () => {
+    const testRunRows: MatrixTestRunRow[] = [
+      { id: 'R27.1', file: 'a.java', name: 'a', status: 'pass', at: 't', sha: 'a', shortSha: 'a' },
+      { id: 'R27.2', file: 'a.java', name: 'b', status: 'pass', at: 't', sha: 'a', shortSha: 'a' },
+    ];
+    expect(findUnverifiedScenarioIds(twoScenarios, [], [], [], testRunRows, { checkpoints: [], tests: [], gateChecks: [] })).toEqual([]);
   });
 });
 
