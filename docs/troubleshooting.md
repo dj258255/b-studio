@@ -105,6 +105,7 @@
 - [82. "~게 해 주세요" 요청의 체크포인트 제목이 "재생되게한다"처럼 붙어 나옴](#82-게-해-주세요-요청의-체크포인트-제목이-재생되게한다처럼-붙어-나옴)
 - [83. browser_check가 <video>의 재생 실패를 못 잡아 숏폼 화면의 404 미디어 주소가 통과로 남음](#83-browser_check가-video의-재생-실패를-못-잡아-숏폼-화면의-404-미디어-주소가-통과로-남음)
 - [84. 폴더 열기가 만든 studio.yaml 등 생성 파일이 실패한 실행 뒤에도 되돌아가지 않음](#84-폴더-열기가-만든-studioyaml-등-생성-파일이-실패한-실행-뒤에도-되돌아가지-않음)
+- [85. 네트워크가 잠깐 끊기면(ENOTFOUND) 로컬 CLI 실행이 그대로 실패로 끝나 변경이 되돌려짐](#85-네트워크가-잠깐-끊기면enotfound-로컬-cli-실행이-그대로-실패로-끝나-변경이-되돌려짐)
 
 ---
 
@@ -2724,3 +2725,23 @@ studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대
 
 ### 배운 점
 "커밋에서 뺀다"가 "체크포인트 전체에서 빠진다"를 뜻하지는 않는다. 되돌리기·복원은 git 기록과 별개로 그 파일들만의 자체 타임라인을 가져야 한다. 설계안을 비교한 근거는 `decisions.md` ADR-141에 남겼다.
+
+## 85. 네트워크가 잠깐 끊기면(ENOTFOUND) 로컬 CLI 실행이 그대로 실패로 끝나 변경이 되돌려짐
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 작업 복사본은 읽기만 함) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 실행 두 건(8e8778fb·4920d817)이 모두 `run_finished` status `"error"`로 끝났다. summary는 "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"를 담고 있었다. 실행 중 바뀐 파일은 ADR-131의 되돌리기 경로를 타 보관본으로 갔고, 사람이 보관본을 되살려 같은 요청을 다시 보내야 했다. 4920d817은 되돌려지기 전까지 출력 토큰 4.6만·캐시 읽기 6,600만 토큰을 이미 썼다 — 다시 시작하는 비용이 작지 않았다.
+
+### 원인
+`claude-code-runner.ts`는 Claude Agent SDK가 낸 `result` 메시지가 `is_error: true`면(ENOTFOUND든 인증 실패든 구분 없이) 곧바로 `finish('failed', ...)`로 끝냈다. 재시도·대기 로직이 전혀 없어, 모델이 아직 아무 잘못도 하지 않았는데 일시적인 DNS 끊김만으로 실행 전체가 실패 처리됐다. ADR-131에서도 "앞선 실행 565b3d40은 네트워크 끊김(ENOTFOUND)으로 끝났다"고 같은 현상을 이미 언급했지만 그때는 되돌리기 경로만 고쳤고, 네트워크 오류 자체를 다르게 다루지는 않았다.
+
+### 수정
+`is_error` 결과 문구가 일시적 네트워크 오류 패턴(`ENOTFOUND`·`ECONNRESET`·`ETIMEDOUT`·`EAI_AGAIN`·"Can't reach the API server"·`overloaded`)과 일치하면 바로 실패로 끝내지 않는다. 지수 백오프로 기다린 뒤(상한: 6회·총 10분, 둘 중 먼저 걸리는 쪽) 같은 세션을 `resume`으로 이어받아 "하던 작업을 다시 하지 말고 이어서 하라"는 짧은 지시만 보낸다. 대기마다 `warning` 이벤트로 "네트워크 연결이 끊겨 N초 기다린 뒤 이어서 진행합니다"를 대화에 남긴다. 중단 신호(signal)가 오면 대기를 끊고 그대로 취소로 던진다. 상한을 넘으면 지금처럼 실패로 끝내되 `failureReason: 'network'`를 남겨 사유를 구분할 수 있게 한다. 인증 실패·잘못된 요청 같은 패턴에 걸리지 않는 영구 오류는 그대로 즉시 실패한다(ADR-142).
+
+### 검증
+- `packages/agent/src/claude-code-runner.test.ts`(4개 추가): 첫 시도가 ENOTFOUND로 끝나면 기다렸다 resume으로 이어받아 성공하는 것, 인증 오류 같은 영구 오류는 대기 없이 바로 실패하는 것, 재시도 상한을 넘기면 `failureReason: 'network'`로 실패하는 것, 대기 중 취소 신호가 오면 재시도하지 않고 취소를 던지는 것을 가짜 SDK 스트림으로 확인했다(실제 sleep 없이 대기 함수만 주입).
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+이번 수정은 로컬 CLI(claude-code) 백엔드만 고쳤다. Codex·Command Code·OpenCode·Gemini CLI와 API 직접 루프(`loop.ts`)는 아직 같은 문제가 있을 수 있다 — ADR-142에 CLI별 재개 방법 차이와 다음 대상을 남겼다.
