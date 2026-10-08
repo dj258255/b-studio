@@ -24,6 +24,7 @@ import {
   findCheckpointMentions,
   findGateCheckMentions,
   findMentionedIds,
+  findUnexecutedTests,
   findUnverifiedScenarioIds,
   isManualStepText,
   labelRecommendationSource,
@@ -1304,6 +1305,41 @@ describe('findUnverifiedScenarioIds — 요구사항 카드에서 "왜 시나리
       { id: 'R27.2', file: 'a.java', name: 'b', status: 'pass', at: 't', sha: 'a', shortSha: 'a' },
     ];
     expect(findUnverifiedScenarioIds(twoScenarios, [], [], [], testRunRows, { checkpoints: [], tests: [], gateChecks: [] })).toEqual([]);
+  });
+});
+
+describe('findUnexecutedTests — 발견은 됐지만 게이트 실행 결과가 없는 테스트(다그푸딩 마찰 152)', () => {
+  it('같은 서비스가 HEAD에서 돈 실행인데 이 요구사항 id가 붙은 행이 status: not-run이면 담는다', () => {
+    const testRunRows: MatrixTestRunRow[] = [
+      { id: 'R12', file: 'LiveOrderConcurrencyTest.java', name: 'R12: 동시 주문', status: 'not-run', at: 't', sha: 'a', shortSha: 'a', reason: '@Tag("integration")·@Testcontainers' },
+    ];
+    expect(findUnexecutedTests('R12', testRunRows)).toEqual([{ file: 'LiveOrderConcurrencyTest.java', name: 'R12: 동시 주문', reason: '@Tag("integration")·@Testcontainers' }]);
+  });
+
+  it('reason이 없으면(정적 추정이 못 찾았으면) reason 필드 자체가 없다', () => {
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R12', file: 'a.java', name: 'R12 이름만', status: 'not-run', at: 't', sha: 'a', shortSha: 'a' }];
+    expect(findUnexecutedTests('R12', testRunRows)).toEqual([{ file: 'a.java', name: 'R12 이름만' }]);
+  });
+
+  it('통과·실패한 행은 담지 않는다(실행 기록이 있으므로 "실행 기록 없음"이 아니다)', () => {
+    const testRunRows: MatrixTestRunRow[] = [
+      { id: 'R12', file: 'a.java', name: 'pass', status: 'pass', at: 't', sha: 'a', shortSha: 'a' },
+      { id: 'R12', file: 'a.java', name: 'fail', status: 'fail', at: 't', sha: 'a', shortSha: 'a' },
+    ];
+    expect(findUnexecutedTests('R12', testRunRows)).toEqual([]);
+  });
+
+  it('다른 요구사항 id가 붙은 행은 무시한다', () => {
+    const testRunRows: MatrixTestRunRow[] = [{ id: 'R13', file: 'a.java', name: 'x', status: 'not-run', at: 't', sha: 'a', shortSha: 'a' }];
+    expect(findUnexecutedTests('R12', testRunRows)).toEqual([]);
+  });
+
+  it('같은 file·name이 중복돼도(한 테스트가 여러 id를 언급) 한 번만 담는다', () => {
+    const testRunRows: MatrixTestRunRow[] = [
+      { id: 'R12', file: 'a.java', name: 'x', status: 'not-run', at: 't', sha: 'a', shortSha: 'a' },
+      { id: 'R12', file: 'a.java', name: 'x', status: 'not-run', at: 't', sha: 'a', shortSha: 'a' },
+    ];
+    expect(findUnexecutedTests('R12', testRunRows)).toHaveLength(1);
   });
 });
 

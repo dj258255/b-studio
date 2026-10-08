@@ -1141,6 +1141,24 @@ export interface RequirementEvidence {
    * 시나리오가 없거나 전부 검증됐으면 없다(빈 배열을 넣지 않는다).
    */
   missingScenarios?: string[];
+  /**
+   * 요구사항 id가 붙은 테스트 중 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 것(다그푸딩 마찰 152,
+   * `findUnexecutedTests`). 상태(computeRequirementStatus)는 바꾸지 않고 근거로만 보여준다 — "검증됨"이라도
+   * 이 목록이 있으면 그 테스트는 이번 판정에 실제로 기여하지 않았다는 뜻이다. 없으면 없다(빈 배열을 넣지 않는다).
+   */
+  unexecutedTests?: UnexecutedTestInfo[];
+}
+
+/** 요구사항 id가 붙었지만 지금 체크포인트에서 돈 게이트 실행 결과에 나타나지 않은 테스트 하나(다그푸딩 마찰 152) */
+export interface UnexecutedTestInfo {
+  file: string;
+  name: string;
+  /**
+   * test-discovery.ts가 정적으로 찾은 실행 환경 조건부 표시(JUnit `@Tag`·`@Testcontainers`·`@EnabledIf…` 류,
+   * pytest 커스텀 마커)를 "·"로 이어 붙인 추정 사유. 어디까지나 추정이다 — 실제로 그래서 안 돈 것인지 b-studio는
+   * 확인하지 않는다. 아무 표시도 못 찾았으면 없다
+   */
+  reason?: string;
 }
 
 /**
@@ -1832,6 +1850,8 @@ export interface MatrixTestRunRow {
   at: string;
   sha: string;
   shortSha: string;
+  /** studio가 test-discovery.ts의 envConditionalReasons를 이어 붙인 추정 사유(없으면 없다). findUnexecutedTests가 읽는다 */
+  reason?: string;
 }
 
 /** studio가 이미 계산한 요구사항 하나의 평가("명세" 탭의 목록이 보여주는 것과 완전히 같은 값). 매트릭스의 요구사항 행이
@@ -1966,6 +1986,28 @@ export function findUnverifiedScenarioIds(
       return computeRequirementStatus(scenarioEvidence, requirement) !== '검증됨';
     })
     .map((scenario) => scenario.id);
+}
+
+/**
+ * 요구사항 id가 붙은 테스트 중 지금 체크포인트에서 돈 게이트 실행 결과에 하나도 나타나지 않는 것을 찾는다
+ * (다그푸딩 마찰 152, BE-commerce R12의 `LiveOrderConcurrencyTest`처럼 `@Tag("integration")`로 기본 test
+ * 태스크에서 빠지는 테스트가 발견은 되는데 실행 기록은 전혀 없는 경우).
+ * testRunRows는 studio의 `buildMatrixTestRunRows`가 이미 "그 서비스가 지금 체크포인트에서 실제로 돈 실행만"
+ * 골라 둔 것(testRunMatchesHead) — 서비스 자체가 안 돌았으면 애초에 이 목록에 들어오지 않는다. 그래서 여기서
+ * status가 'not-run'이라는 건 "서비스는 돌았는데 이 테스트만 보고서에 없다"는 뜻이지, "아무것도 안 돌았다"는
+ * 뜻이 아니다. 상태는 바꾸지 않는다(`computeRequirementStatus`를 다시 부르지 않는다) — 보여주기만 한다.
+ */
+export function findUnexecutedTests(requirementId: string, testRunRows: readonly MatrixTestRunRow[]): UnexecutedTestInfo[] {
+  const seen = new Set<string>();
+  const result: UnexecutedTestInfo[] = [];
+  for (const row of testRunRows) {
+    if (row.id !== requirementId || row.status !== 'not-run') continue;
+    const key = `${row.file}\u0000${row.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ file: row.file, name: row.name, ...(row.reason ? { reason: row.reason } : {}) });
+  }
+  return result;
 }
 
 /** 증거·상태가 다 정해진 행 하나를 MatrixRow 모양으로 마무리한다(요구사항 행·시나리오 행이 공통으로 쓴다) */

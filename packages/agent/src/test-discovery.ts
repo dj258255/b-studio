@@ -18,6 +18,13 @@ export interface DiscoveredTestCase {
   skipped: boolean;
   /** 이름·표시 이름에서 찾은 요구사항 id(R1 등) */
   requirementIds: string[];
+  /**
+   * 이 테스트에 걸린 실행 환경 조건부 표시의 정적 추정(다그푸딩 마찰 152): JUnit `@Tag("…")`·`@Testcontainers`·
+   * `@EnabledIf…`/`@DisabledIf…` 류, pytest의 스킵·파라미터화가 아닌 커스텀 마커(`@pytest.mark.integration` 등).
+   * 게이트의 기본 test 태스크가 이런 테스트를 제외하도록 설정돼 있을 수 있다는 뜻일 뿐, 실제로 돌았는지는 이것만으로
+   * 알 수 없다 — "이유 추정"으로만 쓴다(findUnexecutedTests, requirements.ts). 없으면 undefined(빈 배열을 넣지 않는다)
+   */
+  envConditionalReasons?: string[];
 }
 
 export interface DiscoveredSuite {
@@ -28,6 +35,8 @@ export interface DiscoveredSuite {
   skipped: boolean;
   suites: DiscoveredSuite[];
   tests: DiscoveredTestCase[];
+  /** 클래스(스위트) 자체에 걸린 실행 환경 조건부 표시. 안의 모든 테스트가 물려받는다(flattenDiscoveredFile) */
+  envConditionalReasons?: string[];
 }
 
 export interface DiscoveredFile {
@@ -59,10 +68,16 @@ function countBraceDelta(line: string): number {
 // ---------------------------------------------------------------------------
 
 // 인자가 큰따옴표 문자열이면 그 안의 괄호까지 통째로 읽는다(@DisplayName("상세(단일 객체)…")) — 첫 ")"에서 끊으면 표시 이름을 놓쳤다
-const JUNIT_ANNOTATION = /@(Test|ParameterizedTest|RepeatedTest|Nested|Disabled|DisplayName)\b(?:\((\s*"(?:\\.|[^"\\])*"\s*|[^)]*)\))?/g;
+const JUNIT_ANNOTATION = /@(Test|ParameterizedTest|RepeatedTest|Nested|Disabled|DisplayName|Tag)\b(?:\((\s*"(?:\\.|[^"\\])*"\s*|[^)]*)\))?/g;
 const JUNIT_CLASS = /\bclass\s+(\w+)/;
 // public void testFoo(), void testFoo() throws Exception, fun testFoo() (Kotlin)
 const JUNIT_METHOD = /(?:^|\s)(?:fun|void|[\w<>[\],.]+)\s+(\w+)\s*\(/;
+/** Testcontainers 사용을 알리는 클래스 수준 표지. 보통 @Tag("integration")와 함께 붙어, 게이트 샌드박스에 Docker가
+ * 없으면 이 클래스의 테스트는 기본 test 태스크에서 돌아도 Testcontainers가 멈춘다(다그푸딩 마찰 152) */
+const JUNIT_TESTCONTAINERS = /@Testcontainers\b/;
+/** `@Disabled`(무조건 꺼짐, pendingDisabled가 따로 다룬다)는 제외하고, `@EnabledIf…`/`@DisabledIf…` 류(환경 변수·시스템
+ * 프로퍼티·OS·JRE 조건)만 잡는다 — 이름 뒤에 글자가 더 있어야 하므로 bare `@Disabled`는 이 패턴에 걸리지 않는다 */
+const JUNIT_CONDITIONAL_ANNOTATION = /@((?:Enabled|Disabled)[A-Za-z]+)\b/g;
 
 /** 인자가 여러 줄에 걸쳐도 이어 읽는 최대 줄 수. 닫는 괄호를 못 찾으면 표시 이름 없이 넘어간다 */
 const ANNOTATION_ARGUMENT_MAX_LINES = 20;
@@ -127,8 +142,14 @@ export function discoverJunitFile(filePath: string, content: string): Discovered
   let pendingDisplayName: string | undefined;
   let pendingDisabled = false;
   let pendingIsTest = false;
+  let pendingEnvReasons: string[] = [];
 
   const currentList = () => (stack.length > 0 ? stack[stack.length - 1]!.suite.suites : root);
+  const takeEnvReasons = (): string[] | undefined => {
+    if (pendingEnvReasons.length === 0) return undefined;
+    const unique = [...new Set(pendingEnvReasons)];
+    return unique;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -145,8 +166,16 @@ export function discoverJunitFile(filePath: string, content: string): Discovered
         const text = argument ? joinStringLiterals(argument.text) : undefined;
         if (text !== undefined) pendingDisplayName = text;
         if (argument && argument.endLine > i) argumentEndLine = argument.endLine;
+      } else if (name === 'Tag') {
+        const openIndex = line.indexOf('(', match.index + match[0].indexOf('Tag'));
+        const argument = openIndex >= 0 ? readAnnotationArgument(lines, i, openIndex) : undefined;
+        const text = argument ? joinStringLiterals(argument.text) : undefined;
+        if (text !== undefined) pendingEnvReasons.push(`@Tag("${text}")`);
+        if (argument && argument.endLine > i && (argumentEndLine === undefined || argument.endLine > argumentEndLine)) argumentEndLine = argument.endLine;
       }
     }
+    if (JUNIT_TESTCONTAINERS.test(line)) pendingEnvReasons.push('@Testcontainers');
+    for (const match of line.matchAll(JUNIT_CONDITIONAL_ANNOTATION)) pendingEnvReasons.push(`@${match[1]}`);
     // 여러 줄에 걸친 인자는 이어지는 줄까지 읽었으므로 건너뛴다(그 줄의 문자열 속 중괄호·괄호를 코드로 세지 않게)
     if (argumentEndLine !== undefined) {
       i = argumentEndLine;
@@ -158,6 +187,7 @@ export function discoverJunitFile(filePath: string, content: string): Discovered
 
     if (classMatch) {
       const name = classMatch[1]!;
+      const classEnvReasons = takeEnvReasons();
       const suite: DiscoveredSuite = {
         name,
         displayName: pendingDisplayName ?? name,
@@ -165,6 +195,7 @@ export function discoverJunitFile(filePath: string, content: string): Discovered
         skipped: pendingDisabled,
         suites: [],
         tests: [],
+        ...(classEnvReasons ? { envConditionalReasons: classEnvReasons } : {}),
       };
       currentList().push(suite);
       const delta = countBraceDelta(line);
@@ -173,16 +204,26 @@ export function discoverJunitFile(filePath: string, content: string): Discovered
       pendingDisplayName = undefined;
       pendingDisabled = false;
       pendingIsTest = false;
+      pendingEnvReasons = [];
       continue;
     }
 
     if (methodMatch) {
       const name = methodMatch[1]!;
       const displayName = pendingDisplayName ?? name;
-      const test: DiscoveredTestCase = { name, displayName, line: lineNo, skipped: pendingDisabled, requirementIds: extractRequirementIds(`${displayName} ${name}`) };
+      const envReasons = takeEnvReasons();
+      const test: DiscoveredTestCase = {
+        name,
+        displayName,
+        line: lineNo,
+        skipped: pendingDisabled,
+        requirementIds: extractRequirementIds(`${displayName} ${name}`),
+        ...(envReasons ? { envConditionalReasons: envReasons } : {}),
+      };
       const parent = stack[stack.length - 1];
       if (parent) parent.suite.tests.push(test);
       pendingDisplayName = undefined;
+      pendingEnvReasons = [];
       pendingDisabled = false;
       pendingIsTest = false;
       depth += countBraceDelta(line);
@@ -276,6 +317,10 @@ const PYTEST_CLASS = /^(\s*)class\s+(Test\w*)\b/;
 const PYTEST_DEF = /^(\s*)(?:async\s+)?def\s+(test_\w+)\s*\(/;
 const PYTEST_SKIP_MARK = /@pytest\.mark\.(?:skip|skipif)\b/;
 const PYTEST_PARAMETRIZE = /@pytest\.mark\.parametrize\b/;
+/** 스킵·파라미터화·흔한 비환경 마커는 "실행 환경 조건부 표시"로 보지 않는다. 그 밖의 커스텀 마커(`integration`·
+ * `docker` 등, 보통 `-m "not …"`으로 걸러진다)만 다그푸딩 마찰 152의 "이유 추정"으로 잡는다 */
+const PYTEST_MARK = /@pytest\.mark\.(\w+)/g;
+const PYTEST_NON_ENV_MARKS = new Set(['parametrize', 'skip', 'skipif', 'usefixtures', 'asyncio', 'xfail', 'filterwarnings']);
 
 interface PytestStackFrame {
   suite: DiscoveredSuite;
@@ -290,6 +335,7 @@ export function discoverPytestFile(filePath: string, content: string): Discovere
   const stack: PytestStackFrame[] = [];
   let pendingSkip = false;
   let pendingParametrized = false;
+  let pendingEnvReasons: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
@@ -297,6 +343,10 @@ export function discoverPytestFile(filePath: string, content: string): Discovere
 
     if (PYTEST_SKIP_MARK.test(line)) pendingSkip = true;
     if (PYTEST_PARAMETRIZE.test(line)) pendingParametrized = true;
+    for (const match of line.matchAll(PYTEST_MARK)) {
+      const mark = match[1]!;
+      if (!PYTEST_NON_ENV_MARKS.has(mark)) pendingEnvReasons.push(`@pytest.mark.${mark}`);
+    }
 
     const classMatch = PYTEST_CLASS.exec(line);
     const defMatch = !classMatch ? PYTEST_DEF.exec(line) : null;
@@ -305,11 +355,13 @@ export function discoverPytestFile(filePath: string, content: string): Discovere
       const indent = classMatch[1]!.length;
       while (stack.length > 0 && stack[stack.length - 1]!.indent >= indent) stack.pop();
       const name = classMatch[2]!;
-      const suite: DiscoveredSuite = { name, displayName: name, line: lineNo, skipped: pendingSkip, suites: [], tests: [] };
+      const envReasons = pendingEnvReasons.length > 0 ? [...new Set(pendingEnvReasons)] : undefined;
+      const suite: DiscoveredSuite = { name, displayName: name, line: lineNo, skipped: pendingSkip, suites: [], tests: [], ...(envReasons ? { envConditionalReasons: envReasons } : {}) };
       (stack.length > 0 ? stack[stack.length - 1]!.suite.suites : root).push(suite);
       stack.push({ suite, indent });
       pendingSkip = false;
       pendingParametrized = false;
+      pendingEnvReasons = [];
       continue;
     }
 
@@ -318,10 +370,19 @@ export function discoverPytestFile(filePath: string, content: string): Discovere
       while (stack.length > 0 && stack[stack.length - 1]!.indent >= indent) stack.pop();
       const name = defMatch[2]!;
       const displayName = pendingParametrized ? `${name} (매개변수화됨)` : name;
-      const test: DiscoveredTestCase = { name, displayName, line: lineNo, skipped: pendingSkip, requirementIds: extractRequirementIds(name) };
+      const envReasons = pendingEnvReasons.length > 0 ? [...new Set(pendingEnvReasons)] : undefined;
+      const test: DiscoveredTestCase = {
+        name,
+        displayName,
+        line: lineNo,
+        skipped: pendingSkip,
+        requirementIds: extractRequirementIds(name),
+        ...(envReasons ? { envConditionalReasons: envReasons } : {}),
+      };
       (stack.length > 0 ? stack[stack.length - 1]!.suite.tests : topTests).push(test);
       pendingSkip = false;
       pendingParametrized = false;
+      pendingEnvReasons = [];
       continue;
     }
 
@@ -329,6 +390,7 @@ export function discoverPytestFile(filePath: string, content: string): Discovere
     if (line.trim() && !line.trim().startsWith('#') && !line.trim().startsWith('@')) {
       pendingSkip = false;
       pendingParametrized = false;
+      pendingEnvReasons = [];
     }
   }
 
@@ -364,15 +426,25 @@ export interface FlatDiscoveredTest extends DiscoveredTestCase {
   suiteSkipped: boolean;
 }
 
+/** 부모 스위트(클래스)의 환경 조건부 표시와 테스트 자신의 표시를 합친다(순서·중복 없이). 둘 다 없으면 undefined */
+function mergeEnvConditionalReasons(...groups: Array<readonly string[] | undefined>): string[] | undefined {
+  const merged = [...new Set(groups.flatMap((group) => group ?? []))];
+  return merged.length > 0 ? merged : undefined;
+}
+
 export function flattenDiscoveredFile(file: DiscoveredFile): FlatDiscoveredTest[] {
   const rows: FlatDiscoveredTest[] = [];
-  const walkSuite = (suite: DiscoveredSuite, path: string[], ancestorSkipped: boolean) => {
+  const walkSuite = (suite: DiscoveredSuite, path: string[], ancestorSkipped: boolean, ancestorEnvReasons: string[] | undefined) => {
     const suiteSkipped = ancestorSkipped || suite.skipped;
+    const suiteEnvReasons = mergeEnvConditionalReasons(ancestorEnvReasons, suite.envConditionalReasons);
     const nextPath = [...path, suite.displayName];
-    for (const test of suite.tests) rows.push({ ...test, file: file.path, suitePath: nextPath, suiteSkipped });
-    for (const child of suite.suites) walkSuite(child, nextPath, suiteSkipped);
+    for (const test of suite.tests) {
+      const envConditionalReasons = mergeEnvConditionalReasons(suiteEnvReasons, test.envConditionalReasons);
+      rows.push({ ...test, file: file.path, suitePath: nextPath, suiteSkipped, ...(envConditionalReasons ? { envConditionalReasons } : {}) });
+    }
+    for (const child of suite.suites) walkSuite(child, nextPath, suiteSkipped, suiteEnvReasons);
   };
   for (const test of file.tests) rows.push({ ...test, file: file.path, suitePath: [], suiteSkipped: false });
-  for (const suite of file.suites) walkSuite(suite, [], false);
+  for (const suite of file.suites) walkSuite(suite, [], false, undefined);
   return rows;
 }

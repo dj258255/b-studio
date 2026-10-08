@@ -11,6 +11,7 @@ import {
   buildChecklistAddendum,
   buildChecklistTestEvidence,
   buildExportChecks,
+  buildMatrixTestRunRows,
   buildRequirementTestRunEvidence,
   gateReportNotFoundEntry,
   claudeCodeAutoEscalation,
@@ -530,6 +531,51 @@ describe('buildRequirementTestRunEvidence(요구사항별 테스트 탭 증거, 
   it('체크포인트가 없는 세션(head undefined)이면 undefined를 돌려준다', () => {
     const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
     expect(buildRequirementTestRunEvidence(services, 'R1', undefined, 0)).toBeUndefined();
+  });
+});
+
+describe('buildMatrixTestRunRows(실행 환경 조건부 표시를 reason으로 옮긴다, 다그푸딩 마찰 152)', () => {
+  const head = { sha: 'abc123', shortSha: 'abc123' };
+
+  it('status가 not-run인 행도 빠뜨리지 않고(실행 기록 없음을 가려야 하므로) envConditionalReasons를 reason으로 합친다', () => {
+    const services = [
+      testService({
+        lastRunSha: head.sha,
+        lastRunAt: '2026-01-01T09:17:00.000Z',
+        rows: [
+          testRow({
+            requirementIds: ['R12'],
+            status: 'not-run',
+            displayName: 'R12: 방송 특가 한정 수량 동시 주문',
+            envConditionalReasons: ['@Tag("integration")', '@Testcontainers'],
+          }),
+        ],
+      }),
+    ];
+    const rows = buildMatrixTestRunRows(services, head, 0);
+    expect(rows).toEqual([
+      {
+        id: 'R12',
+        file: 'OrderTest.java',
+        name: 'R12: 방송 특가 한정 수량 동시 주문',
+        status: 'not-run',
+        at: '2026-01-01T09:17:00.000Z',
+        sha: head.sha,
+        shortSha: head.shortSha,
+        reason: '@Tag("integration")·@Testcontainers',
+      },
+    ]);
+  });
+
+  it('envConditionalReasons가 없으면 reason 필드 자체가 없다', () => {
+    const services = [testService({ lastRunSha: head.sha, rows: [testRow({ requirementIds: ['R1'], status: 'pass' })] })];
+    const rows = buildMatrixTestRunRows(services, head, 0);
+    expect(rows[0]).not.toHaveProperty('reason');
+  });
+
+  it('HEAD와 체크포인트가 다른 서비스는 아예 들어오지 않는다(실행 자체가 없었다는 뜻이라 "실행 기록 없음"과 다르다)', () => {
+    const services = [testService({ lastRunSha: 'other-sha', rows: [testRow({ requirementIds: ['R1'], status: 'not-run' })] })];
+    expect(buildMatrixTestRunRows(services, head, 0)).toEqual([]);
   });
 });
 

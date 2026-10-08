@@ -118,6 +118,109 @@ class SchemaTest {
   });
 });
 
+describe('discoverJunitFile — 실행 환경 조건부 표시(다그푸딩 마찰 152)', () => {
+  it('클래스에 @Tag("integration")·@Testcontainers가 있으면 안의 모든 테스트가 물려받는다', () => {
+    const content = `
+@Tag("integration")
+@Testcontainers
+class LiveOrderConcurrencyTest {
+  @Test
+  @DisplayName("R12: 방송 특가 한정 수량 초과 판매 방지")
+  void doesNotOversell() {
+  }
+
+  @Test
+  void anotherCase() {
+  }
+}
+`;
+    const file = discoverJunitFile('LiveOrderConcurrencyTest.java', content);
+    const root = file.suites[0]!;
+    expect(root.envConditionalReasons).toEqual(['@Tag("integration")', '@Testcontainers']);
+    const rows = flattenDiscoveredFile(file);
+    expect(rows[0]!.envConditionalReasons).toEqual(['@Tag("integration")', '@Testcontainers']);
+    expect(rows[1]!.envConditionalReasons).toEqual(['@Tag("integration")', '@Testcontainers']);
+  });
+
+  it('메서드에 직접 건 @Tag는 그 메서드에만 붙고, 클래스 표시와 합쳐진다', () => {
+    const content = `
+@Tag("integration")
+class OrderTest {
+  @Test
+  @Tag("slow")
+  void slowCase() {
+  }
+
+  @Test
+  void fastCase() {
+  }
+}
+`;
+    const rows = flattenDiscoveredFile(discoverJunitFile('OrderTest.java', content));
+    expect(rows.find((row) => row.name === 'slowCase')!.envConditionalReasons).toEqual(['@Tag("integration")', '@Tag("slow")']);
+    expect(rows.find((row) => row.name === 'fastCase')!.envConditionalReasons).toEqual(['@Tag("integration")']);
+  });
+
+  it('@EnabledIfEnvironmentVariable·@DisabledIfSystemProperty 같은 조건부 애노테이션도 잡지만, bare @Disabled는 잡지 않는다', () => {
+    const content = `
+class ConditionalTest {
+  @Test
+  @EnabledIfEnvironmentVariable(named = "CI", matches = "true")
+  void onlyOnCi() {
+  }
+
+  @Test
+  @Disabled("나중에 고침")
+  void disabledCase() {
+  }
+}
+`;
+    const rows = flattenDiscoveredFile(discoverJunitFile('ConditionalTest.java', content));
+    expect(rows.find((row) => row.name === 'onlyOnCi')!.envConditionalReasons).toEqual(['@EnabledIfEnvironmentVariable']);
+    expect(rows.find((row) => row.name === 'disabledCase')!.envConditionalReasons).toBeUndefined();
+  });
+
+  it('아무 표시도 없는 평범한 테스트는 envConditionalReasons가 없다', () => {
+    const content = `
+class Plain {
+  @Test
+  void ok() {
+  }
+}
+`;
+    const rows = flattenDiscoveredFile(discoverJunitFile('Plain.java', content));
+    expect(rows[0]!.envConditionalReasons).toBeUndefined();
+  });
+});
+
+describe('discoverPytestFile — 실행 환경 조건부 표시(다그푸딩 마찰 152)', () => {
+  it('skip·skipif·parametrize가 아닌 커스텀 마커(integration·docker 등)만 잡는다', () => {
+    const content = `
+import pytest
+
+
+@pytest.mark.integration
+@pytest.mark.docker
+def test_full_checkout_flow():
+    assert True
+
+
+@pytest.mark.skip(reason="broken")
+def test_skipped():
+    pass
+
+
+@pytest.mark.parametrize("qty", [1, 2])
+def test_parametrized(qty):
+    assert qty > 0
+`;
+    const file = discoverPytestFile('test_checkout.py', content);
+    expect(file.tests[0]!.envConditionalReasons).toEqual(['@pytest.mark.integration', '@pytest.mark.docker']);
+    expect(file.tests[1]!.envConditionalReasons).toBeUndefined();
+    expect(file.tests[2]!.envConditionalReasons).toBeUndefined();
+  });
+});
+
 describe('discoverJsFile', () => {
   it('describe/it 중첩과 skip/only/todo를 찾는다', () => {
     const content = `
