@@ -251,6 +251,14 @@ export interface Sandbox {
    */
   setServiceRunning?(service: string, running: boolean, options?: { signal?: AbortSignal }): Promise<void>;
   /**
+   * 부가 서비스(studio.yaml에 적지 않은 compose 서비스, 예: 미디어 서버·DB)를 다시 만들어 띄운다(도그푸딩 마찰 143).
+   * managed 서비스의 restart()처럼 이미지를 다시 빌드하고(--build) 컨테이너를 새로 만들지만(--force-recreate),
+   * 끝날 때까지 기다리는 준비 판정(ready)은 하지 않는다 — b-studio가 부가 서비스의 헬스체크 규약(포트, 준비 신호)을
+   * 모르기 때문이다. 호출자가 데이터베이스·꺼 둔 서비스는 미리 걸러서 불러야 한다.
+   * 구현하지 않는 제공자는 undefined로 둔다(호출자가 지원 여부를 안내한다).
+   */
+  restartAddon?(service: string, options?: { signal?: AbortSignal }): Promise<void>;
+  /**
    * edge 프록시와 넘긴 서비스의 컨테이너가 실제로 떠 있는지 보고, 없으면 이 샌드박스의 compose 프로젝트
    * 안에서만(다른 프로젝트는 건드리지 않고) 다시 올린다(트러블슈팅 86, ADR-143). 세션 상태는 ready인데
    * studio 밖에서(사람이나 다른 과정이) 컨테이너를 지운 경우를 겨냥한다 — 이미지를 다시 빌드하지 않는다

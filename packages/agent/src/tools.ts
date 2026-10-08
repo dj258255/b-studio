@@ -199,7 +199,17 @@ export interface ToolOutcome {
 export function buildTools(project: LoadedProject, options: ToolBuildOptions = {}): BetaTool[] {
   const services = project.managed.map(([name]) => name);
   const contractServices = project.managed.filter(([, service]) => service.contract).map(([name]) => name);
+  const managedNames = new Set(services);
+  // 부가 서비스(studio.yaml에 적지 않은 compose 서비스, 예: 데이터베이스·미디어 서버). 이 프로젝트 자신의 compose
+  // 파일에 있는 것만이라 다른 프로젝트의 컨테이너는 애초에 여기 들어오지 않는다(도그푸딩 마찰 143, ADR-148)
+  const addonServices = composeServiceNames(project).filter((name) => !managedNames.has(name));
   const service = { type: 'string', enum: services, description: 'Managed service name' };
+  const serviceOrAddon = {
+    type: 'string',
+    enum: [...services, ...addonServices],
+    description:
+      "Managed service name, or a supporting (addon) service declared in this project's own compose file, such as a database or a media server — never a service from another project.",
+  };
 
   const tools = [
     tool('list_files', 'List files and directories under a project directory. Generated directories and secrets are hidden.', {
@@ -225,11 +235,16 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
       service,
       command: { type: 'array', items: { type: 'string' }, description: 'Program and arguments, e.g. ["./gradlew", "test"]. No shell expansion.' },
     }),
-    tool('restart_service', 'Rebuild and restart a service, then wait until it is ready.', { service }),
-    tool('service_logs', 'Show recent log lines of a service.', {
-      service,
-      lines: { type: 'integer', description: 'Number of recent lines (1-400).' },
-    }),
+    tool(
+      'restart_service',
+      "Rebuild and restart a service, then wait until it is ready. Also works for this project's supporting (addon) services declared in its own compose file (for example a media server) — there is no readiness wait for those, since b-studio does not know their health-check contract. An addon database or a service the user turned off is refused; ask the user instead.",
+      { service: serviceOrAddon },
+    ),
+    tool(
+      'service_logs',
+      "Show recent log lines of a service, including this project's supporting (addon) services such as a database or a media server. Use this before concluding that a failing addon container has no logs you can look at.",
+      { service: serviceOrAddon, lines: { type: 'integer', description: 'Number of recent lines (1-400).' } },
+    ),
     tool(
       'service_stats',
       'Show CPU and memory usage, limits, and exit status of every container in the sandbox, including supporting services such as the database. Exit code 137 or "memory limit exceeded" means the container ran out of memory.',
@@ -442,7 +457,8 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       return { ok: result.exitCode === 0, content: clipCommandOutput(raw, budget), rawChars: raw.length };
     }
     case 'restart_service': {
-      const target = serviceName(context, args);
+      const target = serviceOrAddonName(context, args);
+      if (!context.project.managed.some(([name]) => name === target)) return restartAddonService(context, target, signal);
       try {
         // 방금 쓴 파일을 샌드박스가 보기 전에 재시작하면 옛 코드가 빌드된다
         const owned = workspace.changedFiles().filter((file) => servicesForFiles(context.project, [file]).services.includes(target));
@@ -454,7 +470,7 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       }
     }
     case 'service_logs': {
-      const target = serviceName(context, args);
+      const target = serviceOrAddonName(context, args);
       // 줄 수 상한(1-400)은 그대로 두고 글자 상한만 지금 값을 유지한다
       const raw = await tailLogs(sandbox, target, clamp(integer(args, 'lines'), 1, 400));
       return { ok: true, content: clipText(raw, LOGS_OUTPUT_LIMIT), rawChars: raw.length };
@@ -623,10 +639,44 @@ async function tailLogs(sandbox: Sandbox, service: string, lines: number): Promi
   return collected.length > 0 ? collected.join('\n') : '(no logs)';
 }
 
+/** managed 서비스만 허용한다. run_in_service·http_request·get_contract는 엔드포인트(포트)나 임의 실행이 걸려 있어 부가 서비스로 넓히지 않는다 */
 function serviceName({ project }: ToolContext, args: Record<string, unknown>): string {
   const name = string(args, 'service');
   if (!project.managed.some(([serviceKey]) => serviceKey === name)) throw new ToolInputError(`Unknown service: ${name}`);
   return name;
+}
+
+/** 이 프로젝트 자신의 compose 서비스 이름 전체(부가 서비스 포함). 테스트 픽스처처럼 없으면 managed만으로 본다(옛 동작과 같다) */
+function composeServiceNames(project: LoadedProject): string[] {
+  return project.composeServices ?? project.managed.map(([name]) => name);
+}
+
+/** managed 서비스나 이 프로젝트 자신의 부가 서비스만 허용한다(도그푸딩 마찰 143). restart_service·service_logs가 쓴다 */
+function serviceOrAddonName({ project }: ToolContext, args: Record<string, unknown>): string {
+  const name = string(args, 'service');
+  if (!composeServiceNames(project).includes(name)) throw new ToolInputError(`Unknown service: ${name}`);
+  return name;
+}
+
+/**
+ * 부가 서비스 재시작(도그푸딩 마찰 143, ADR-148). 데이터베이스는 재시작하지 않는다 — DatabaseBranches가 체크포인트마다
+ * pg_dump/psql로 이 컨테이너에 접속하므로, 재시작이 그 작업과 겹치면 체크포인트 저장·복원이 실패할 수 있다.
+ * 사람이 서비스 선택에서 꺼 둔 서비스도 존중해 켜지 않는다. 둘 다 아니면 준비 판정 없이 다시 띄운다
+ */
+async function restartAddonService(context: ToolContext, target: string, signal: AbortSignal | undefined): Promise<ToolOutcome> {
+  if ((context.project.databases ?? []).some(([name]) => name === target)) {
+    return failure(`'${target}' is a database service. This tool does not restart addon databases because a checkpoint save/restore could be running against it at the same time. Ask the user to restart it outside the session if it is really stuck.`);
+  }
+  if (context.project.offServices?.has(target)) {
+    return failure(`'${target}' is turned off in this session's service selection, so it was not restarted. Ask the user to turn it on from the service menu first.`);
+  }
+  if (!context.sandbox.restartAddon) return failure(`This sandbox does not support restarting the addon service '${target}'.`);
+  try {
+    await context.sandbox.restartAddon(target, { signal });
+    return success(`${target} restart requested. Addon services have no readiness check here — call service_logs afterwards to confirm it came back up.`);
+  } catch (error) {
+    return failure(`${describe(error)}\n--- recent logs\n${clipText(await tailLogs(context.sandbox, target, 60), LOGS_OUTPUT_LIMIT)}`);
+  }
 }
 
 class ToolInputError extends Error {}

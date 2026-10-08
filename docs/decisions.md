@@ -6165,3 +6165,60 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 ### 감수한 트레이드오프
 - "요구사항 id만으로도 검증됨" 규칙을 그대로 둔 것은 과대평가 가능성을 완전히 없애지 않는다 — `missingScenarios`는 보여주기만 할 뿐 상태를 내리지 않으므로, 카드를 펼쳐 보지 않으면 여전히 "검증됨"만 보고 넘어갈 수 있다. 기존 요구사항들의 상태를 뒤집는 더 엄격한 규칙(검토한 선택지 A)은 이번 범위에서 미루고 투명성으로만 대응했다.
 - JS/TS 게이트 보고서 수거는 여전히 고치지 못한 한계로 남는다 — 사용자 스크립트가 b-studio가 기대하는 고정 경로에 보고서를 남기지 않으면 그 서비스의 증거는 영영 비어 있고, 이번에 더한 안내는 "왜 비어 있는지"만 알려줄 뿐 실제로 채워 주지는 못한다. 사용자 명령을 건드리지 않는 안전한 해법(예: 명령 자체가 아니라 stdout을 텍스트 리포터로 파싱하는 방식)은 더 큰 설계가 필요해 별도 작업으로 남긴다.
+
+## ADR-148 service_logs·restart_service를 이 세션 compose 프로젝트의 부가 서비스까지 연다
+
+상태: 채택
+관련: ADR-083(서비스 선택), ADR-143(샌드박스 인프라 부재 자동 복구), ADR-146(부가 서비스 자동 기동), 트러블슈팅 94
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기 전용 작업 복사본) 실측: 부가 서비스 `mediamtx`(studio.yaml 관리 밖, ADR-146으로 자동 기동)가 인증 오류로 멈췄다. 에이전트의 보고는 "mediamtx는 studio.yaml 관리 서비스가 아니라 `service_logs`·`run_in_service` 대상이 아니고, `docker` 명령도 실행 정책에 막혀 있어 컨테이너 로그를 볼 도구가 없다"였다. 원인을 "훅 이름이 틀렸을 것"이라고 추정만 하고 엉뚱한 곳을 고쳤다. 사람이 `docker logs`로 직접 보니 원인이 한 줄로 찍혀 있었다: `failed to authenticate: HTTP request failed: parse "http://${LIVE_HOOKS_HOST}:8080/...": invalid character "{" in host name` — 환경 변수 치환이 안 된 템플릿 문자열을 그대로 URL로 파싱하려 한 흔한 설정 오류였다. 에이전트가 로그를 볼 수 있었다면 바로 고쳤을 문제다. 에이전트는 멈춘 부가 서비스를 다시 띄울 수단도 없었다(`restart_service`는 managed만 받는다).
+- 코드 추적 결과: `packages/agent/src/tools.ts`의 `serviceName()`이 `project.managed`에 있는 이름만 받아, `run_in_service`뿐 아니라 `service_logs`·`restart_service`도 managed 서비스로 한정돼 있었다. `service_stats`만 서비스 이름 인자가 없이 샌드박스의 모든 컨테이너를 돌려줘서(`sandbox.stats()`) 실제로는 이미 부가 서비스를 포함했고 도구 설명에도 "including supporting services such as the database"라고 적혀 있었지만, 나머지 도구가 다 막혀 있으니 에이전트는 그 도구까지 끝까지 시도해 보지 않은 것으로 보인다.
+- `packages/agent/src/policy.ts`(`checkToolPolicy`)를 확인했지만 서비스 이름을 검증하는 코드는 없다 — `run_in_service`의 명령 토큰만 보고(`DEFAULT_DENIED_COMMANDS`에 `docker`가 이미 있다), 쓰기 도구의 경로만 본다. managed 제한은 전부 `tools.ts`의 도구 스키마 enum(`service: { enum: services }`)과 `serviceName()` 헬퍼에 있었다.
+- `packages/spec/src/load.ts`의 `LoadedProject`에 이미 `composeServices: string[]`(이 프로젝트 자신의 compose 파일에 있는 모든 서비스 이름, 부가 서비스 포함, ADR-146에서 추가)과 `databases: Array<[name, DatabaseSpec & { dependents: string[] }]>`(데이터베이스로 선언된 부가 서비스), `offServices?: ReadonlySet<string>`(사람이 서비스 선택에서 꺼 둔 서비스, ADR-083)가 있어 이번 범위에 새 필드가 필요 없었다. `packages/sandbox/src/docker/compose-provider.ts`의 `exec`·`logs`는 애초에 서비스 이름을 managed로 제한하지 않는다(`docker compose --project-name <이 세션 id> ... exec/logs <서비스>`로 이 세션의 compose 프로젝트 안에서만 돈다) — 제한은 전부 `tools.ts` 쪽에 있었다. `restart()`만 `#managed(name)`로 막혀 있다(포트·엔드포인트가 managed 서비스 선언에만 있어서다).
+- `packages/agent/src/database-branches.ts`의 `DatabaseBranches`는 체크포인트마다 `project.databases`에 있는 서비스에 `pg_dump`(저장)·`psql`(복원, `DROP DATABASE ... WITH (FORCE)` 포함)로 직접 접속한다. 이 작업과 컨테이너 재시작이 겹치면 접속이 끊기거나 `DROP DATABASE`가 실패할 수 있다.
+
+### 판단 기준
+1. 에이전트가 "도구가 없다"고 오판하지 않게, 실제로 쓸 수 있는 도구는 설명 문구에 부가 서비스도 대상이라고 분명히 적는다.
+2. 다른 프로젝트(dbtower·pay·edumeet 등)의 컨테이너는 절대 대상이 되면 안 된다 — 이 세션 compose 프로젝트 안의 서비스 이름만 받는다.
+3. 서비스 이름은 인자 배열로만 넘기고 셸 문자열에 넣지 않는다(기존 `exec`·`compose` 호출이 이미 그렇다. 새로 더하는 경로도 같게 한다).
+4. 사람이 서비스 선택에서 끈 서비스(`offServices`)는 도구가 다시 켜지 않는다.
+5. 데이터베이스 부가 서비스 재시작처럼 체크포인트 일관성에 영향을 줄 수 있는 동작은, 그 위험이 분명히 해소되지 않는 한 열지 않는다.
+
+### 검토한 선택지
+**service_logs·service_stats (읽기 전용)**
+| 방식 | 판단 |
+|---|---|
+| **(채택) service_logs를 managed + 이 프로젝트의 부가 서비스(`composeServices`)로 연다** | 읽기 전용이라 위험이 낮고, 이번 마찰의 직접 원인(로그를 못 봄)을 그대로 해소한다. `composeServices`는 이 프로젝트 자신의 compose 파일에서만 뽑으므로 판단 기준 2를 만족한다 |
+| service_stats | 이미 서비스 이름을 받지 않고 모든 컨테이너를 돌려줘 부가 서비스를 포함한다(변경 없음). 설명 문구도 이미 "부가 서비스 포함"이라고 적혀 있어 그대로 둔다 |
+
+**restart_service**
+| 방식 | 판단 |
+|---|---|
+| (a) 부가 서비스는 전혀 재시작하지 못하게 둔다 | 이번 마찰의 두 번째 원인(멈춘 부가 서비스를 되살릴 수단이 없음)을 그대로 남긴다. mediamtx 같은 사례(설정만 고치면 재시작으로 바로 해결)를 매번 사람에게 미루게 된다 |
+| (b) 데이터베이스를 포함해 모든 부가 서비스 재시작을 연다 | `DatabaseBranches`의 체크포인트 저장·복원(`pg_dump`/`psql`)과 재시작이 겹치면 실패할 수 있다. 재시작과 체크포인트 저장이 동시에 일어나지 않는다는 보장이 지금 실행 모델에 없어, 확인 안 된 위험을 그대로 감수하는 셈이다 |
+| **(채택) (c) 데이터베이스가 아닌 부가 서비스만 열고, 데이터베이스는 거부한다. 사람이 끈 부가 서비스도 거부한다** | mediamtx처럼 실제로 문제가 된 사례(미디어 서버, 데이터베이스 아님)를 그대로 해결하면서, 확인 안 된 위험(b)은 피한다. 데이터베이스는 `project.databases`로 이미 구분돼 있어 추가 분류 비용이 없다 |
+
+**run_in_service**
+| 방식 | 판단 |
+|---|---|
+| (a) managed만 허용(기존 그대로) | 로그·재시작만으로 이번 마찰(로그를 못 봄, 되살릴 수단이 없음)은 이미 풀린다. mediamtx의 실제 원인(환경 변수 오류)도 로그로 바로 보이는 종류였다 |
+| (b) 부가 서비스까지 연다 | 부가 서비스는 대개 공식 이미지를 그대로 쓰므로 셸이 없는 경우가 많다(예: mediamtx는 정적 Go 바이너리 하나만 들어 있는 이미지로, `/bin/sh`가 없어 대부분의 명령이 그냥 실패한다) — 실패하는 도구를 하나 더 보여주는 비용 대비, 이번 마찰을 실제로 풀어 주는 이득이 없다. 또한 `DEFAULT_DENIED_COMMANDS`(`psql`·`mysql`·`redis-cli`·`mongosh`)가 막는 범위를 부가 서비스까지 넓히면 정책 쪽도 같이 검토해야 해, 이번 범위를 넘어선다 |
+| **(채택) (a)** | 이번 마찰은 로그·재시작만으로 풀린다. 구체적인 필요(부가 서비스 안에서 명령을 실행해야만 하는 사례)가 생기면 그때 정책까지 함께 설계한다 |
+
+### 결정
+1. `packages/agent/src/tools.ts`: `serviceOrAddonName()`을 더해 `service_logs`·`restart_service`가 managed 서비스나 `composeServiceNames(project)`(=`project.composeServices`, 없으면 managed만으로 보는 기존 테스트 픽스처 호환 폴백)에 있는 이름을 받게 한다. 두 도구의 스키마 `service` 필드 enum도 `[...managed, ...부가 서비스]`로 넓힌다. `run_in_service`·`http_request`·`get_contract`는 기존 `serviceName()`(managed만)을 그대로 쓴다.
+2. `restart_service`가 managed가 아닌 이름을 받으면: (a) `project.databases`에 있으면("체크포인트 저장·복원과 겹칠 수 있다") 거부, (b) `project.offServices`에 있으면("서비스 선택에서 꺼 뒀다") 거부, (c) 둘 다 아니면 새 선택적 샌드박스 메서드 `Sandbox.restartAddon(service, options)`로 재시작한다.
+3. `packages/sandbox/src/types.ts`·`docker/compose-provider.ts`: `restartAddon`을 더한다. managed `restart()`와 같은 플래그(`up --detach --build --no-deps --force-recreate`)로 컨테이너를 다시 만들지만, 포트·엔드포인트 개념이 없는 부가 서비스라 준비 판정(`#awaitReady`)은 하지 않고 바로 끝난다. Kubernetes 제공자는 구현하지 않는다(기존 `setServiceRunning`·`ensureInfra`와 같은 패턴 — 호출자가 `undefined`를 보고 "지원하지 않는다"고 안내한다).
+4. 도구 설명 문구(모델이 보는 텍스트)에 "이 프로젝트의 부가 서비스(예: 데이터베이스·미디어 서버)도 대상"이라고 명시한다 — 에이전트가 "도구가 없다"고 오판하지 않게 하는 것이 이번 마찰의 핵심 교훈이라서다.
+
+### 검증 결과
+- `packages/agent/src/tools.test.ts`: 테스트 9개(부가 서비스 로그 허용, 다른 프로젝트 서비스 이름 거절, 데이터베이스 부가 서비스 재시작 거절, 꺼 둔 부가 서비스 재시작 거절, `restartAddon` 미지원 샌드박스 안내, `run_in_service`·`http_request`는 여전히 managed만 허용, 질문 모드에서 부가 서비스 재시작도 거절, `buildTools`의 enum 확인)를 가짜 샌드박스로 더했다.
+- 기존 `packages/agent/src/tools.test.ts`(45개)·`database-branches.test.ts`·`gate.test.ts`·`verify.test.ts`(기존 107개)·`packages/sandbox/src/docker/compose-provider.test.ts`·`usage.test.ts`가 모두 그대로 통과한다.
+- `pnpm -r typecheck`(6/6), `pnpm --filter @b-studio/studio lint`(오류 0), 관련 vitest 모두 통과했다(보고의 "검증" 절 끝부분 참고).
+- 확인하지 못한 것: 실제 BE-commerce 세션(`pay-2-5b640fd3`)은 읽기 전용 작업 복사본이라, 이 도구로 실제 `mediamtx` 컨테이너의 `LIVE_HOOKS_HOST` 오류를 찾아내고 `restart_service`로 되살리는 전체 흐름은 재현하지 못했다 — 코드 추적과 가짜 샌드박스 단위 테스트로만 검증했다. Kubernetes 제공자에서 부가 서비스 재시작을 요청했을 때의 안내 문구도 실제 Kubernetes 환경 없이 `restartAddon`이 `undefined`인 경로로만 확인했다.
+
+### 감수한 트레이드오프
+- `run_in_service`는 부가 서비스로 넓히지 않았다 — mediamtx처럼 셸이 없는 이미지가 흔하고, 실행 정책(`DEFAULT_DENIED_COMMANDS`)이 부가 서비스까지 막아야 하는지는 별도 검토가 필요해서다. 부가 서비스 안에서 명령을 실행해야만 풀리는 마찰이 나오면 그때 정책 설계까지 함께 다시 본다.
+- 데이터베이스 부가 서비스는 재시작을 아예 거부한다 — "체크포인트 저장·복원과 겹치지 않는 시점에만 허용"처럼 더 정교한 규칙도 가능하지만, 지금 실행 모델에 그 시점을 동기화할 장치가 없어 더 단순하고 안전한 쪽(전부 거부)을 택했다. 사람이 직접 재시작해야 하는 불편이 남는다.
+- `restartAddon`은 준비 판정을 하지 않는다 — b-studio가 임의의 부가 서비스(미디어 서버, 메시지 큐 등)의 헬스체크 규약을 알 방법이 없어서다. 에이전트는 재시작 뒤 `service_logs`로 직접 확인해야 하며, 도구 결과 문구에 이를 안내했다.

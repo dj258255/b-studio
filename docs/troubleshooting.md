@@ -114,6 +114,7 @@
 - [91. 손대지 않은 R1이 범위 표기(R1~R32) 때문에 "작업 중"으로 보임](#91-손대지-않은-r1이-범위-표기r1r32-때문에-작업-중으로-보임)
 - [92. 에이전트가 compose에 더한 새 부가 서비스(mediamtx)가 샌드박스에 뜨지 않음](#92-에이전트가-compose에-더한-새-부가-서비스mediamtx가-샌드박스에-뜨지-않음)
 - [93. includes 서브프로젝트의 테스트가 통과해도 "테스트" 탭·요구사항 증거에 전혀 나타나지 않음](#93-includes-서브프로젝트의-테스트가-통과해도-테스트-탭요구사항-증거에-전혀-나타나지-않음)
+- [94. service_logs·restart_service가 managed로 한정돼 있어 부가 서비스(mediamtx)가 멈춰도 로그도 못 보고 되살리지도 못함](#94-service_logsrestart_service가-managed로-한정돼-있어-부가-서비스mediamtx가-멈춰도-로그도-못-보고-되살리지도-못함)
 
 ---
 
@@ -2933,3 +2934,22 @@ R27(시청 신호 기록)의 통과 테스트 4건이 게이트 test 단계에�
 
 ### 배운 점
 "보고서를 모은다"와 "그 보고서를 어느 테스트에 붙일지 안다(발견)"는 `includes` 같은 서비스 폴더 밖 경로에서는 서로 다른 전제가 필요한 별개의 단계다 — 하나(90번, 수거)를 고치면서 다른 하나(발견)도 같이 고쳤다고 생각하기 쉽다. 또한 "요구사항이 검증됨"과 "그 요구사항의 모든 시나리오가 검증됨"은 이 설계에서 서로 다른 질문이다 — 카드 하나에 둘 다 보여주지 않으면 사람이 뒤의 질문에 스스로 답할 길이 없다.
+
+## 94. service_logs·restart_service가 managed로 한정돼 있어 부가 서비스(mediamtx)가 멈춰도 로그도 못 보고 되살리지도 못함
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 읽기 전용 작업 복사본) → 코드 추적 → 수정
+
+### 현상
+부가 서비스 `mediamtx`(studio.yaml 관리 밖, compose의 비관리 서비스, 트러블슈팅 92로 자동 기동됨)가 멈췄다. 에이전트의 보고는 "mediamtx는 studio.yaml 관리 서비스가 아니라 `service_logs`·`run_in_service` 대상이 아니고, `docker` 명령도 실행 정책에 막혀 있어 컨테이너 로그를 볼 도구가 없다"였다. 원인을 "훅 이름이 틀렸을 것"이라고 추정만 하고 엉뚱한 곳을 고쳤다. 사람이 `docker logs`로 보니 원인이 한 줄로 찍혀 있었다: `failed to authenticate: HTTP request failed: parse "http://${LIVE_HOOKS_HOST}:8080/...": invalid character "{" in host name`. 에이전트는 멈춘 부가 서비스를 다시 띄울 수단도 없었다(`restart_service`는 managed만 받는다).
+
+### 원인
+`packages/agent/src/tools.ts`의 `serviceName()`이 `project.managed`에 있는 이름만 받아, `run_in_service`뿐 아니라 `service_logs`·`restart_service`도 managed 서비스로 한정돼 있었다. `service_stats`만 서비스 이름을 받지 않고 샌드박스의 모든 컨테이너를 돌려줘서(`sandbox.stats()`) 실제로는 이미 부가 서비스를 포함했지만, 나머지 도구가 다 막혀 있으니 에이전트는 그 도구까지 시도해 보지 않은 것으로 보인다. `docker` 명령 자체는 실행 정책(`DEFAULT_DENIED_COMMANDS`, `packages/agent/src/policy.ts`)이 애초에 막는다 — `policy.ts`에는 서비스 이름을 검증하는 코드가 없고, managed 제한은 전부 `tools.ts`의 도구 스키마 enum과 `serviceName()` 헬퍼에 있었다.
+
+### 수정
+ADR-148로 정리했다. `service_logs`·`restart_service`는 managed 서비스뿐 아니라 이 세션 compose 프로젝트 자신의 부가 서비스(`LoadedProject.composeServices`)까지 허용한다 — 다른 프로젝트의 서비스 이름은 애초에 이 배열에 없어 대상이 될 수 없다. `restart_service`의 부가 서비스 재시작은 새 선택적 샌드박스 메서드 `Sandbox.restartAddon`(도커 제공자만 구현, `--build --force-recreate`로 다시 만들되 준비 판정은 하지 않는다)으로 처리하고, 데이터베이스 부가 서비스(체크포인트마다 `DatabaseBranches`가 `pg_dump`/`psql`로 그 컨테이너에 접속하므로 재시작과 겹치면 저장·복원이 실패할 수 있다)와 사람이 서비스 선택에서 꺼 둔 서비스는 거부한다. `run_in_service`·`http_request`·`get_contract`는 그대로 managed만 허용한다 — 엔드포인트(포트) 개념이 없거나 임의 명령 실행이 걸려 있어서다. 도구 설명 문구에 부가 서비스도 대상이라고 적어, 에이전트가 "도구가 없다"고 오판하지 않게 했다.
+
+### 검증
+`packages/agent/src/tools.test.ts`에 테스트 9개(부가 서비스 로그 허용, 다른 프로젝트 서비스 이름 거절, 데이터베이스·꺼 둔 부가 서비스 재시작 거절, `restartAddon` 미지원 샌드박스 안내, `run_in_service`·`http_request`는 여전히 managed만 허용, 질문 모드에서 부가 서비스 재시작도 거절)를 더했다. `pnpm -r typecheck`(6/6), 관련 vitest, `pnpm --filter @b-studio/studio lint`(오류 0) 모두 통과했다. 실제 BE-commerce 세션에서 `LIVE_HOOKS_HOST` 오류를 이 도구로 실제로 찾아내는지는 읽기 전용 작업 복사본이라 재현하지 못했다.
+
+### 배운 점
+도구 하나(`service_stats`)가 이미 부가 서비스를 다뤘어도, 나머지 도구(`service_logs`·`restart_service`)가 전부 막혀 있으면 에이전트는 "도구가 없다"고 결론짓고 남은 도구 설명까지 끝까지 찾아보지 않는다 — 일부만 열린 기능은 전부 닫힌 것과 비슷하게 취급된다. managed 제한이 실행 정책(`policy.ts`)이 아니라 도구 스키마·헬퍼(`tools.ts`)에 있었다는 사실도, 코드를 보지 않고는 "왜 막혔는지" 알기 어렵게 만들었다.
