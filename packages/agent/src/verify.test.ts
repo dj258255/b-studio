@@ -440,16 +440,18 @@ describe('restartServicesFor·verifyChanges와 형식이 틀린 studio.yaml(도�
 });
 
 describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그푸딩 마찰 138, ADR-146)', () => {
-  /** api(managed)가 mediamtx에 기대는 compose. depends_on 유무로 "기본값 규칙에 든다"를 가른다 */
-  async function projectWithAddon(dependsOnAddon: boolean): Promise<{ root: string; stale: LoadedProject }> {
+  /**
+   * api(managed)가 있는 compose에, 에이전트가 실행 중 mediamtx(아무도 depends_on으로 기대지 않는다 — 실측:
+   * BE-commerce의 MediaMTX는 commerce의 훅을 부르는 반대 방향이라 depends_on이 없다)를 더한다. stale에는
+   * 이 서비스가 없다
+   */
+  async function projectWithNewAddon(): Promise<{ root: string; stale: LoadedProject }> {
     const root = await mkdtemp(path.join(tmpdir(), 'b-studio-addon-'));
     await mkdir(path.join(root, 'api'), { recursive: true });
     await writeFile(path.join(root, 'studio.yaml'), 'version: 1\nname: x\nservices:\n  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }\n');
     await writeFile(path.join(root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
     const stale = await loadProject(root);
-    // 에이전트가 실행 중 새 부가 서비스를 더한다. stale에는 이 서비스가 없다
-    const dependsOn = dependsOnAddon ? ', depends_on: [mediamtx]' : '';
-    await writeFile(path.join(root, 'compose.yaml'), `services:\n  api: { build: ./api${dependsOn} }\n  mediamtx: { image: bluenviron/mediamtx:latest }\n`);
+    await writeFile(path.join(root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  mediamtx: { image: bluenviron/mediamtx:latest }\n');
     return { root, stale };
   }
 
@@ -467,8 +469,8 @@ describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그
     };
   }
 
-  it('compose가 바뀌어 새로 생긴 부가 서비스가 기본값 규칙(기댐)에 들면 이 세션의 compose 프로젝트에 올린다', async () => {
-    const { stale } = await projectWithAddon(true);
+  it('compose가 바뀌어 새로 생긴 부가 서비스는 아무도 depends_on으로 기대지 않아도 이 세션의 compose 프로젝트에 올린다', async () => {
+    const { stale } = await projectWithNewAddon();
     const sandbox = sandboxWithEnsureInfra();
 
     const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
@@ -476,22 +478,15 @@ describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그
     expect(sandbox.ensureInfraCalls).toEqual([['mediamtx']]);
     expect(report.addedAddons).toEqual(['mediamtx']);
     expect(formatVerificationReport({ ok: true, contracts: [], secretLeaks: [], ...report }, { allowBreaking: false })).toContain(
-      '새로 생긴 부가 서비스를 기본값 규칙(ADR-083)에 따라 올렸습니다: mediamtx',
+      '새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): mediamtx',
     );
   });
 
-  it('아무도 기대지 않는 새 부가 서비스는 기본값 규칙에 들지 않아 올리지 않는다', async () => {
-    const { stale } = await projectWithAddon(false);
-    const sandbox = sandboxWithEnsureInfra();
-
-    const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
-
-    expect(sandbox.ensureInfraCalls).toEqual([]);
-    expect(report.addedAddons).toBeUndefined();
-  });
-
-  it('사람이 꺼 둔 서비스(ADR-083)는 기댐 닫힘에 들어도 올리지 않는다', async () => {
-    const { stale } = await projectWithAddon(true);
+  it('사람이 꺼 둔 서비스(ADR-083)는 새로 생겨도 올리지 않는다', async () => {
+    const { stale } = await projectWithNewAddon();
+    // project.offServices는 세션이 시작할 때(또는 선택을 마지막으로 계산했을 때)의 compose 서비스 전체에서
+    // 고른 것이라, 보통 그때 없던 mediamtx가 여기 들어 있을 수는 없다. 그래도 사람이 이 서비스를 명시적으로
+    // 꺼 둔 경우(서비스 메뉴에서 끈 뒤 바로 compose가 또 바뀐 경우 등)를 가정해 확인한다
     const off = { ...stale, offServices: new Set(['mediamtx']) } as unknown as LoadedProject;
     const sandbox = sandboxWithEnsureInfra();
 
@@ -502,7 +497,7 @@ describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그
   });
 
   it('compose가 바뀌지 않은 재시작(studio.yaml만)은 부가 서비스를 다시 확인하지 않는다', async () => {
-    const { stale } = await projectWithAddon(true);
+    const { stale } = await projectWithNewAddon();
     const sandbox = sandboxWithEnsureInfra();
 
     await restartServicesFor(sandbox, stale, ['studio.yaml']);
@@ -511,7 +506,7 @@ describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그
   });
 
   it('ensureInfra가 없는 제공자는 건너뛴다(쿠버네티스 등)', async () => {
-    const { stale } = await projectWithAddon(true);
+    const { stale } = await projectWithNewAddon();
     const sandbox = fakeSandbox(); // ensureInfra 없음
 
     const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
@@ -521,7 +516,7 @@ describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그
   });
 
   it('부가 서비스를 올리지 못하면 addonError로 남기지만, managed 서비스 재시작은 그대로 진행한다', async () => {
-    const { stale } = await projectWithAddon(true);
+    const { stale } = await projectWithNewAddon();
     const sandbox = sandboxWithEnsureInfra(() => ({ ok: false, recovered: [], missing: ['mediamtx'], reason: '이미지를 받지 못했습니다' }));
 
     const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);

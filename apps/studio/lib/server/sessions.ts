@@ -841,9 +841,9 @@ async function startSession({
   store.sessions.set(id, session);
   registerCleanup();
   if (preview) ensurePreviewGateway(preview);
-  // 저장된 선택 뒤에 compose에 새로 생긴 부가 서비스를 기본값 규칙(ADR-083)으로 자동으로 켰으면 알린다(도그푸딩 마찰 138, ADR-146)
+  // 저장된 선택(known) 뒤에 compose에 새로 생긴 부가 서비스를 depends_on과 무관하게 자동으로 켰으면 알린다(도그푸딩 마찰 138, ADR-146)
   if (addedServices.length > 0) {
-    emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 기본값 규칙에 따라 켰습니다: ${addedServices.join(', ')}`, at: new Date().toISOString() });
+    emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
   }
   // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
   void flushPersist(session);
@@ -1337,12 +1337,12 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       ...(localEdits
         ? [`중지한 동안 폴더에서 바뀐 파일 ${localEdits.files.length}개를 이 체크포인트로 남겼습니다: ${localEdits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`]
         : []),
-      ...(addedServices.length > 0 ? [`compose에 새로 생긴 부가 서비스를 기본값 규칙에 따라 켰습니다: ${addedServices.join(', ')}.`] : []),
+      ...(addedServices.length > 0 ? [`compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}.`] : []),
     ].join(' ');
     noteForModel(session, note);
     // 사람도 바로 보도록 같은 사실을 알림 이벤트로도 남긴다(도그푸딩 마찰 138, ADR-146)
     if (addedServices.length > 0) {
-      emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 기본값 규칙에 따라 켰습니다: ${addedServices.join(', ')}`, at: new Date().toISOString() });
+      emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
     }
 
     archived.delete(id);

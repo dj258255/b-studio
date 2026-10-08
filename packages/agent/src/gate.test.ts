@@ -1502,9 +1502,9 @@ describe('가볍게 확인(verify light)', () => {
 });
 
 describe('VerificationGate와 compose에 새로 생긴 부가 서비스(도그푸딩 마찰 138, ADR-146)', () => {
-  it('에이전트가 실행 중 compose에 새로 생긴 부가 서비스를 기본값 규칙으로 올리면 warning 이벤트로도 알린다', async () => {
+  it('에이전트가 실행 중 compose에 더한 새 부가 서비스(depends_on 없음)를 올리면 warning 이벤트로도 알린다', async () => {
     // compose·studio.yaml을 실제로 디스크에 둔다 — restartServicesFor가 compose가 바뀐 재시작에서
-    // declared 프로젝트를 다시 읽어 depends_on 그래프를 보기 때문이다
+    // declared 프로젝트를 다시 읽어 지금 compose 서비스 전체를 보기 때문이다
     await writeFile(path.join(project.root, 'studio.yaml'), 'version: 1\nname: orders\nservices:\n  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: "/v3/api-docs" } }\n');
     await writeFile(path.join(project.root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
     const target = { ...project, composePath: path.join(project.root, 'compose.yaml') } as unknown as LoadedProject;
@@ -1517,8 +1517,9 @@ describe('VerificationGate와 compose에 새로 생긴 부가 서비스(도그�
     };
 
     const workspace = new Workspace(target.root);
-    // 에이전트가 실행 중 compose에 mediamtx를 더하고 api가 거기에 기대게 한다
-    await workspace.write('compose.yaml', 'services:\n  api: { build: ./api, depends_on: [mediamtx] }\n  mediamtx: { image: bluenviron/mediamtx:latest }\n');
+    // 에이전트가 실행 중 compose에 mediamtx를 더한다. 실측(BE-commerce)처럼 api는 mediamtx에 기대지 않는다
+    // (MediaMTX가 commerce의 훅을 부르는 반대 방향이라 depends_on이 없다) — depends_on 없이도 올려야 한다
+    await workspace.write('compose.yaml', 'services:\n  api: { build: ./api }\n  mediamtx: { image: bluenviron/mediamtx:latest }\n');
 
     const events: AgentEvent[] = [];
     const gate = await VerificationGate.create({
@@ -1534,6 +1535,6 @@ describe('VerificationGate와 compose에 새로 생긴 부가 서비스(도그�
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(ensureInfraCalls).toEqual([['mediamtx']]);
-    expect(events).toContainEqual({ type: 'warning', message: 'compose에 새로 생긴 부가 서비스를 기본값 규칙에 따라 올렸습니다: mediamtx' });
+    expect(events).toContainEqual({ type: 'warning', message: 'compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): mediamtx' });
   });
 });

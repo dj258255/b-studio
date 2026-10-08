@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { formatBytes, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { dependencyClosure, loadProject, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
+import { loadProject, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { isComposeFile, servicesForFiles } from './services';
 import { syncSystemPackages } from './system-packages-sync';
@@ -57,9 +57,11 @@ export interface VerificationReport {
    */
   specError?: string;
   /**
-   * compose 파일이 바뀐 재시작에서, 기본값 규칙(ADR-083: managed 서비스가 depends_on으로 기대는 서비스)에 들어
-   * 이 세션의 compose 프로젝트 안에 새로 올린 부가 서비스 이름(도그푸딩 마찰 138, ADR-146). 사람이 꺼 둔
-   * 서비스(offServices)는 올리지 않는다. 비었으면(기본) compose가 바뀌지 않았거나 올릴 새 서비스가 없었다
+   * compose 파일이 바뀐 재시작에서, 이 세션이 시작할 때는 없던(그래서 꺼 둘 기회조차 없던) 새 부가 서비스 중
+   * 이 세션의 compose 프로젝트 안에 새로 올린 이름(도그푸딩 마찰 138, ADR-146). depends_on 여부는 보지 않는다
+   * — 에이전트나 사람이 나중에 compose에 더한 부가 서비스는 쓰려고 일부러 넣은 것으로 본다(실측: BE-commerce의
+   * mediamtx는 어느 managed 서비스도 depends_on으로 기대지 않는다). 사람이 꺼 둔 서비스(offServices)는
+   * 올리지 않는다. 비었으면(기본) compose가 바뀌지 않았거나 올릴 새 서비스가 없었다
    */
   addedAddons?: string[];
   /** 위 부가 서비스를 올리려 했지만 실패했을 때의 이유. 실패해도 ok는 이 때문에 false가 되지 않는다(관리형 서비스와 별개다) */
@@ -148,7 +150,7 @@ export interface RestartReport {
   skippedOff: string[];
   /** 이번에 바뀐 studio.yaml이 스키마에 맞지 않을 때의 오류. VerificationReport.specError와 같다 */
   specError?: string;
-  /** compose가 바뀐 재시작에서 기본값 규칙(ADR-083)으로 새로 올린 부가 서비스. VerificationReport.addedAddons와 같다 */
+  /** compose가 바뀐 재시작에서 이 세션 시작 뒤 새로 생겨 올린 부가 서비스. VerificationReport.addedAddons와 같다 */
   addedAddons?: string[];
   /** 위 부가 서비스를 올리려 했지만 실패한 이유. VerificationReport.addonError와 같다 */
   addonError?: string;
@@ -176,8 +178,8 @@ export async function restartServicesFor(
   // 없다. studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 소유 판정과 Dockerfile 동기화를 한다. 스키마에 맞지 않으면
   // (도그푸딩 마찰 131) 조용히 옛 project로 넘어가지 않고 specError에 남겨 돌려준다 — verifyChanges가 이걸 보고 게이트를
   // 실패시켜야 에이전트가 같은 실행에서 고친다. 재시작 자체는 옛 project로 최대한 계속 시도한다(서비스를 완전히 멈추지 않게)
-  // compose 파일이 바뀌면(studio.yaml과 달리) depends_on 그래프가 바뀔 수 있어, 새로 생긴 부가 서비스를 기본값
-  // 규칙으로 올릴지 판단할 때도 다시 읽은 선언이 필요하다(도그푸딩 마찰 138, ADR-146)
+  // compose 파일이 바뀌면(studio.yaml과 달리) 서비스 목록 자체가 바뀔 수 있어, 새로 생긴 부가 서비스를
+  // 올릴지 판단할 때도 다시 읽은 선언이 필요하다(도그푸딩 마찰 138, ADR-146)
   const composeChanged = files.some((file) => isComposeFile(project, file));
   let declared = project;
   let specError: string | undefined;
@@ -210,9 +212,9 @@ export async function restartServicesFor(
     return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched, skippedOff, specError };
   }
 
-  // compose가 바뀐 재시작에서, 기본값 규칙(ADR-083)에 드는 부가 서비스 중 아직 없는 것을 이 세션의 compose
-  // 프로젝트 안에서 올린다. 사람이 꺼 둔 서비스는 그대로 둔다(도그푸딩 마찰 138, ADR-146)
-  const addons = composeChanged ? await ensureDefaultAddons(sandbox, declared, project.offServices, start?.signal) : undefined;
+  // compose가 바뀐 재시작에서, 이 세션이 시작할 때는 없던 새 부가 서비스를 이 세션의 compose 프로젝트 안에서
+  // 올린다. 사람이 꺼 둔 서비스는 그대로 둔다(도그푸딩 마찰 138, ADR-146)
+  const addons = composeChanged ? await ensureNewAddons(sandbox, declared, project.offServices, start?.signal) : undefined;
 
   const restarted = await Promise.all(
     services.map(async (service): Promise<ServiceCheck> => {
@@ -238,12 +240,18 @@ export async function restartServicesFor(
 }
 
 /**
- * compose 파일이 바뀐 재시작에서, 기본값 규칙(ADR-083: managed 서비스가 depends_on으로 기대는 서비스)에 드는
- * 부가 서비스 중 이 세션의 compose 프로젝트에 아직 없는 것을 올린다. 사람이 꺼 둔 서비스(off)는 건너뛴다.
+ * compose 파일이 바뀐 재시작에서, 이 세션이 시작할 때 몰랐던(그래서 `project.offServices`에 들어갈 기회조차
+ * 없었던) 부가 서비스를 올린다. managed가 depends_on으로 기대는지는 보지 않는다 — 에이전트나 사람이 나중에
+ * compose에 더한 부가 서비스는 쓰려고 일부러 넣은 것으로 본다(실측: BE-commerce의 mediamtx는 MediaMTX가
+ * commerce의 훅을 부르는 반대 방향이라 어느 managed 서비스도 depends_on으로 기대지 않는다 — depends_on 기준
+ * 첫 구현은 이 실제 사례를 놓쳤다). `project.offServices`는 세션이 시작할 때(또는 마지막으로 선택을 다시
+ * 계산했을 때)의 compose 서비스 전체에서 선택되지 않은 것이므로, 그때 없던 서비스는 애초에 off에 들어갈 수
+ * 없다 — 그래서 "off에 없다"만으로 "새로 생겼거나 이미 선택돼 있다"를 가린다(ADR-146).
+ *
  * ensureInfra는 없는 컨테이너만 올리므로(이미 떠 있으면 손대지 않는다) 매번 다시 불러도 안전하다.
  * ensureInfra가 없는 제공자(쿠버네티스 등)는 건너뛴다(도그푸딩 마찰 138, ADR-146)
  */
-async function ensureDefaultAddons(
+async function ensureNewAddons(
   sandbox: Sandbox,
   declared: LoadedProject,
   off: ReadonlySet<string> | undefined,
@@ -251,8 +259,7 @@ async function ensureDefaultAddons(
 ): Promise<{ added: string[]; error?: string }> {
   if (!sandbox.ensureInfra) return { added: [] };
   const managedNames = new Set(declared.managed.map(([name]) => name));
-  const defaultOn = dependencyClosure([...managedNames], declared.dependsOn ?? {});
-  const addons = [...defaultOn].filter((name) => !managedNames.has(name) && !off?.has(name)).sort();
+  const addons = declared.composeServices.filter((name) => !managedNames.has(name) && !off?.has(name)).sort();
   if (addons.length === 0) return { added: [] };
 
   const result = await sandbox.ensureInfra(addons, { signal }).catch((error: unknown): InfraCheckResult => ({ ok: false, recovered: [], reason: describe(error) }));
@@ -376,7 +383,7 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
     lines.push(`- 꺼 둔 서비스라 확인을 건너뜀(검증에 포함되지 않음): ${report.skippedOff.join(', ')}`);
   }
   if (report.addedAddons?.length) {
-    lines.push(`- compose에 새로 생긴 부가 서비스를 기본값 규칙(ADR-083)에 따라 올렸습니다: ${report.addedAddons.join(', ')}`);
+    lines.push(`- compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${report.addedAddons.join(', ')}`);
   }
   if (report.addonError) {
     lines.push(`- 새로 생긴 부가 서비스를 올리지 못했습니다: ${report.addonError}`);

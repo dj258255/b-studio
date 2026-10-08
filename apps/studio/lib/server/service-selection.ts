@@ -4,8 +4,11 @@
  * 실제로 개발하는 서비스만 고를 수 있게, 사용자의 선택은 사용자 저장소가 아니라 스튜디오 상태 폴더
  * `~/.cache/b-studio/projects/<프로젝트 id>/services.json`에 둔다(저장소를 더럽히지 않는다).
  *
- * 저장한 선택이 없으면 기본값(managed 서비스 + 그 서비스가 기대는(depends_on) 서비스의 닫힘, @b-studio/spec의
- * defaultServiceSelection)을 쓴다 — app이 쓰지 않는 부가 서비스(아무도 기대지 않는 카프카 등)는 기본으로 뜨지 않는다.
+ * 저장한 선택이 없으면(처음 폴더를 열 때) 기본값(managed 서비스 + 그 서비스가 기대는(depends_on) 서비스의
+ * 닫힘, @b-studio/spec의 defaultServiceSelection)을 쓴다 — app이 쓰지 않는 부가 서비스(아무도 기대지 않는
+ * 카프카 등)는 기본으로 뜨지 않는다. 저장한 뒤 compose에 새로 생긴 부가 서비스(known 기준, 도그푸딩 마찰 138,
+ * ADR-146)는 depends_on 여부와 무관하게 기본으로 켠다 — 나중에 compose에 더한 서비스는 쓰려고 일부러 넣은
+ * 것으로 본다(실측: mediamtx는 어느 managed 서비스도 depends_on으로 기대지 않는다).
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -18,8 +21,10 @@ export interface ServiceSelectionFile {
   selected: string[];
   /**
    * 이 선택을 저장할 때 compose에 있던 서비스 이름 전체(도그푸딩 마찰 138, ADR-146). 다음에 읽을 때 여기 없는
-   * 이름은 "새로 생긴 서비스"로 보고 기본값 규칙(managed + depends_on 닫힘)을 적용한다. 이 필드가 생기기 전에
-   * 저장한 파일에는 없다 — 그런 파일은 새로 생긴 서비스를 가려낼 수 없어 아무것도 자동으로 켜지 않는다.
+   * 이름은 "known 이후에 생긴 서비스"로 보고 depends_on 여부와 무관하게 기본으로 켠다 — 나중에 compose에
+   * 더한 부가 서비스는 쓰려고 일부러 넣은 것으로 본다(실측: BE-commerce의 mediamtx는 어느 managed 서비스도
+   * depends_on으로 기대지 않는다). 이 필드가 생기기 전에 저장한 파일에는 없다 — 그런 파일은 새로 생긴 서비스를
+   * 가려낼 수 없어 아무것도 자동으로 켜지 않는다(처음 폴더를 열 때와 같은 기본값 규칙으로만 간다).
    */
   known?: string[];
   updatedAt: string;
@@ -82,17 +87,23 @@ export interface ResolvedServiceSelection {
   /** 저장한 선택이 없어 기본값(관리형 + 기댐 닫힘)을 쓰고 있는지 */
   isDefault: boolean;
   /**
-   * 저장한 선택에 없었지만, 이번에 새로 생긴 서비스로 보고 기본값 규칙(managed + depends_on 닫힘)에 따라
-   * 자동으로 더한 이름(도그푸딩 마찰 138, ADR-146). 비었으면 더한 것이 없다
+   * 저장한 선택에 없었지만, known 이후에 새로 생긴 서비스로 보고 depends_on 여부와 무관하게 자동으로 켠 이름
+   * (도그푸딩 마찰 138, ADR-146). 비었으면 더한 것이 없다
    */
   addedServices?: string[];
 }
 
 /**
- * 이 프로젝트에서 띄울 서비스를 정한다. 저장한 선택이 있으면 그것을(compose에서 없어진 이름은 걸러낸다) 쓰고,
- * 저장한 뒤 compose에 새로 생긴 서비스(known 기준, 도그푸딩 마찰 138·ADR-146) 중 기본값 규칙에 드는 것만 더한다.
- * 사람이 이미 알고 있던 서비스를 꺼 둔 선택은 그대로 둔다 — known에 없던(v1 파일) 저장이면 아무것도 더하지 않는다.
- * 선택이 없거나 걸러진·더해진 뒤에도 하나도 안 남으면 기본값을 쓴다
+ * 이 프로젝트에서 띄울 서비스를 정한다(도그푸딩 마찰 138, ADR-146). 두 경우를 나눈다.
+ *  - **저장한 선택이 없다(처음 폴더를 열 때)**: ADR-083 기본값(managed + 그 서비스가 depends_on으로 기대는
+ *    서비스의 닫힘)을 쓴다. 아무도 기대지 않는 부가 서비스는 아직 뜨지 않는다.
+ *  - **저장한 선택이 있다**: 그 선택을(compose에서 없어진 이름은 걸러낸다) 쓰고, known(저장 시점의 compose
+ *    서비스 전체) 이후에 새로 생긴 서비스는 depends_on 여부와 무관하게 전부 기본으로 켠다 — 나중에 compose에
+ *    더한 부가 서비스는 쓰려고 일부러 넣은 것으로 본다. 사람이 이미 알고 있던(known에 있던) 서비스를 꺼 둔
+ *    선택은 그대로 둔다. known이 없는 저장(이 기능이 생기기 전 v1 파일)이면 가려낼 기준이 없어 아무것도
+ *    새로 켜지 않는다 — 그 세션을 한 번 더 시작·재개하거나 서비스 선택을 한 번 바꾸면 known이 생겨 그다음부터
+ *    정상 동작한다.
+ * 선택이 없거나 걸러진·더해진 뒤에도 하나도 안 남으면 기본값을 쓴다.
  */
 export async function serviceSelectionFor(project: Pick<LoadedProject, 'managed' | 'dependsOn' | 'composeServices'>, projectId: string, dir = serviceSelectionStateDir()): Promise<ResolvedServiceSelection> {
   const saved = await readServiceSelection(projectId, dir);
@@ -101,8 +112,7 @@ export async function serviceSelectionFor(project: Pick<LoadedProject, 'managed'
   const compose = new Set(project.composeServices);
   const filtered = saved.selected.filter((name) => compose.has(name));
   const known = saved.known ? new Set(saved.known) : undefined;
-  const defaultOn = new Set(defaultServiceSelection(project));
-  const addedServices = newlyAddedServices(known, project.composeServices).filter((name) => defaultOn.has(name));
+  const addedServices = newlyAddedServices(known, project.composeServices);
 
   const selected = [...new Set([...filtered, ...addedServices])].sort();
   if (selected.length === 0) return { selected: defaultServiceSelection(project), isDefault: true };

@@ -228,10 +228,13 @@ export class VerificationGate {
 
     const text = formatVerificationReport(report, { allowBreaking });
     onEvent({ type: 'verify_result', report, text });
-    // compose가 바뀐 재시작에서 기본값 규칙(ADR-083)으로 새로 올린 부가 서비스는 대화 화면에도 바로 알린다
+    // 세션이 시작할 때는 없던 부가 서비스를 새로 올렸으면 대화 화면에도 바로, 왜 켰는지와 함께 알린다
     // (도그푸딩 마찰 138, ADR-146) — report.text에도 같은 줄이 있지만, 그건 검증 결과 전체를 읽어야 보인다
     if (report.addedAddons?.length) {
-      onEvent({ type: 'warning', message: `compose에 새로 생긴 부가 서비스를 기본값 규칙에 따라 올렸습니다: ${report.addedAddons.join(', ')}` });
+      onEvent({
+        type: 'warning',
+        message: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${report.addedAddons.join(', ')}`,
+      });
     }
 
     // 서비스가 뜨지 않았거나 계약이 깨졌으면 그 위에서 테스트나 화면 확인을 돌려도 의미가 없다
