@@ -1181,7 +1181,11 @@ function attachTracePoster(plan: TaskPlanView, lane: TaskPlanLaneView, sessionId
 }
 
 /** S7 중계 주기. 너무 짧으면 중계 호출이 토큰을 낭비하고, 너무 길면 레인이 빈손으로 기다린다 */
-const RELAY_INTERVAL_MS = 4000;
+const RELAY_INTERVAL_MS = 8000;
+/** S7 중계 호출 상한. 벤치 과제 기준 넉넉한 값이고, 루프 폭주를 막는 마지막 울타리다 */
+const RELAY_MAX_CALLS = 24;
+/** 연속 실패가 이 수에 닿으면 중계를 포기한다(기록은 남긴다) — 네트워크 장애가 레인 시간을 늘리지 않게 */
+const RELAY_MAX_CONSECUTIVE_FAILURES = 3;
 
 /**
  * S7: 조정자 중계. 레인이 게시한(모델 명의) 메모를 주기적으로 모아 계획 모델에게 요약을 받고,
@@ -1201,9 +1205,12 @@ function startOrchestratorRelay(plan: TaskPlanView): { stop: () => void; finishe
   }
   const ask = plannerAskFor(plan, project);
   const relayed = new Set<string>();
+  let consecutiveFailures = 0;
   const finished = (async () => {
-    while (!stopped) {
+    // 계획이 실패·타임아웃으로 끝나면 stop()이 안 불려도 스스로 멈춘다(스모크에서 좀비 중계가 다음 실행까지 살아남았다)
+    while (!stopped && plan.status === 'running' && (plan.orchestrator?.calls ?? 0) < RELAY_MAX_CALLS) {
       await new Promise((resolve) => setTimeout(resolve, RELAY_INTERVAL_MS));
+      if (stopped || plan.status !== 'running') break;
       const fresh = board
         .read({ lane: 'plan' })
         .notes.filter((note) => note.author.by === 'model' && !relayed.has(note.id));
@@ -1239,9 +1246,15 @@ function startOrchestratorRelay(plan: TaskPlanView): { stop: () => void; finishe
         };
         persist(plan);
         board.post({ kind: 'fact', body: `[중계]\n${answer.text.trim().slice(0, 1800)}`, refs: [] }, { lane: 'plan', by: 'platform' });
+        consecutiveFailures = 0;
       } catch (error) {
         // 중계 한 번의 실패로 레인을 멈추지 않는다. 실패는 기록해 측정에서 보이게 한다
-        console.error(`[b-studio] S7 중계 호출 실패(계획 ${plan.id})`, error);
+        consecutiveFailures += 1;
+        console.error(`[b-studio] S7 중계 호출 실패(계획 ${plan.id}, 연속 ${consecutiveFailures})`, error);
+        if (consecutiveFailures >= RELAY_MAX_CONSECUTIVE_FAILURES) {
+          console.error(`[b-studio] S7 중계를 포기합니다(계획 ${plan.id}) — 레인은 중계 없이 계속 돈다`);
+          break;
+        }
       }
     }
   })();
