@@ -2895,11 +2895,15 @@ DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 
 ### 원인
 세 경로 모두 compose에 새로 생긴 서비스를 다루지 않았다. `restartServicesFor`(#480)는 `servicesForFiles`가 돌려주는 managed 서비스만 재시작해, managed가 아닌 부가 서비스는 재시작 대상 자체가 아니었다. 요청 전 `ensureInfra`(#511)는 세션 시작 시점에 한 번 계산해 메모리에 둔 `session.serviceSelection`만 확인해, 그 이후 compose가 바뀌어도 다시 계산되지 않았다. 세션을 다시 시작·이어서 작업해도 저장된 서비스 선택(ADR-083, `services.json`)에 `selected` 목록만 있고 "저장 시점에 compose에 어떤 서비스가 있었는지"를 남기지 않아, 새로 생긴 서비스를 가려낼 기준이 없었다.
 
+첫 수정은 "managed가 depends_on으로 기대는 부가 서비스만 기본으로 켠다"(ADR-083 기존 규칙)를 새로 생긴 서비스에도 그대로 적용했다. 그러나 실제 `compose.b-studio.yaml`을 확인하니 mediamtx에는 어느 managed 서비스도 depends_on을 걸지 않는다 — MediaMTX가 commerce의 웹훅을 **부르는** 반대 방향이라 commerce가 기다릴(depends_on) 이유가 없다. depends_on 기준 첫 수정은 이 실제 사례를 그대로 놓쳐, "고쳤다"고 본 마찰이 실제로는 안 고쳐진 채 남아 있었다.
+
 ### 수정
-ADR-146으로 정리했다. (1) `restartServicesFor`가 compose 파일이 바뀐 재시작에서 다시 읽은 선언으로 depends_on 그래프를 보고, 기본값 규칙(ADR-083: managed가 depends_on으로 기대는 서비스)에 드는 부가 서비스 중 아직 없는 것만 `ensureInfra`로 이 세션의 compose 프로젝트에 올린다. (2) `services.json`에 저장 시점의 compose 서비스 전체(`known`)를 같이 남겨, 다음에 세션을 시작·재개할 때 known에 없는 서비스 중 기본값 규칙에 드는 것만 자동으로 켠다. 두 경로 모두 사람이 끈 서비스(offServices)는 그대로 둔다. 새 이미지를 받는 경로(Docker 데몬이 직접, edge 프록시를 거치지 않음)는 기존 ADR-073이 이미 확인해 둔 그대로라 손대지 않았다.
+ADR-146으로 정리했다. known(마지막으로 서비스 선택을 저장했을 때의 compose 서비스 전체) 기준으로 둘로 나눈다. (1) **처음 폴더를 열 때**(저장된 선택이 없을 때)는 ADR-083 기존 기본값(managed + depends_on 닫힘)을 그대로 쓴다. (2) **그 뒤에 compose에 새로 생긴 부가 서비스**는 depends_on 여부와 무관하게 재시작·요청 전 확인·세션 재개 세 경로 모두에서 기본으로 켠다 — 저장된 뒤에 더한 서비스는 쓰려고 일부러 넣은 것으로 본다. 실행 중 재시작 경로(`ensureNewAddons`)는 `known`을 따로 안 들고도, `project.offServices`(세션이 시작할 때의 compose 서비스 전체에서 선택 안 된 것)에 없는 서비스를 전부 올려 같은 효과를 낸다 — 그때 없던 서비스는 애초에 off에 들어갈 수 없어서다. 두 경로 모두 사람이 끈 서비스(offServices)는 그대로 둔다. 올렸으면 "compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서)"로 왜 켰는지 알린다. 새 이미지를 받는 경로(Docker 데몬이 직접, edge 프록시를 거치지 않음)는 기존 ADR-073이 이미 확인해 둔 그대로라 손대지 않았다.
 
 ### 검증
-`packages/agent/src/verify.test.ts`에 테스트 6개, `packages/agent/src/gate.test.ts`에 테스트 1개, `packages/spec/src/service-selection.test.ts`에 테스트 3개, `apps/studio/lib/server/service-selection.test.ts`에 테스트 6개, `apps/studio/lib/server/sessions-addon-service.test.ts`(신규)에 테스트 3개를 더했다. `packages/agent` 테스트 1236개, `packages/spec` 테스트 27개, 관련 apps/studio 세션 테스트가 모두 통과했다. 실제 BE-commerce 세션에서 mediamtx가 뜨는지는 읽기 전용 작업 복사본이라 다시 실행해 확인하지 못했다.
+`packages/agent/src/verify.test.ts`에 테스트 5개, `packages/agent/src/gate.test.ts`에 테스트 1개, `packages/spec/src/service-selection.test.ts`에 테스트 3개, `apps/studio/lib/server/service-selection.test.ts`에 테스트 6개, `apps/studio/lib/server/sessions-addon-service.test.ts`(신규)에 테스트 5개를 더했다(depends_on 없는 새 서비스가 재개·실행 중 재시작 모두에서 켜지는지, 처음 폴더 열기에서는 안 켜지는지, 사람이 끈 서비스는 계속 꺼져 있는지 포함). `pnpm -r typecheck`(6/6), 관련 vitest가 모두 통과했다. 실제 BE-commerce 세션에서 mediamtx가 뜨는지는 읽기 전용 작업 복사본이라 다시 실행해 확인하지 못했다.
 
 ### 배운 점
 "무엇을 띄울지"를 세션 시작 시점에 한 번 고정해 두면, 그 이후 compose가 바뀌었을 때 다시 계산하는 경로를 매번 따로 챙겨야 한다. 재시작·요청 전 확인·세션 재개 세 곳 모두 같은 가정("선택은 안 바뀐다")에 기대고 있었다.
+
+depends_on은 "기동 순서" 관계만 나타낸다. "이 부가 서비스를 지금 쓴다"는 의도와 반드시 일치하지는 않는다 — 한쪽이 다른 쪽을 부르기만(웹훅) 하는 관계는 depends_on을 선언할 이유가 없다. 실측 하나(mediamtx)만으로 "보통 depends_on을 선언할 것"이라 일반화한 첫 수정은, 그 실측을 일으킨 바로 그 사례를 놓쳤다.
