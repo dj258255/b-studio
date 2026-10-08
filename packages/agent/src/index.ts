@@ -487,6 +487,7 @@ export {
   findCheckpointMentions,
   findGateCheckMentions,
   findMentionedIds,
+  findUnexecutedTests,
   findUnverifiedScenarioIds,
   isLikelyTestFile,
   isManualStepText,
@@ -578,6 +579,7 @@ export {
   type ScannedFile,
   type TestMatch,
   type TestRunEvidence,
+  type UnexecutedTestInfo,
   type Trace,
   type TraceabilityMatrix,
 } from './requirements';

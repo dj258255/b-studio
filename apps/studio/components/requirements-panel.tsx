@@ -74,6 +74,13 @@ interface DocEvidence {
   sourceSummary?: string;
 }
 
+/** 요구사항 id가 붙었지만 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 테스트 하나(다그푸딩 마찰 152) */
+interface UnexecutedTestInfo {
+  file: string;
+  name: string;
+  reason?: string;
+}
+
 interface RequirementEvidence {
   checkpoints: Array<{ sha: string; shortSha: string; message: string }>;
   tests: Array<{ file: string; name: string }>;
@@ -82,6 +89,8 @@ interface RequirementEvidence {
   docEvidence?: DocEvidence;
   /** 시나리오가 있는데 아직 "검증됨"에 이르지 못한 시나리오 id(다그푸딩 마찰 140) */
   missingScenarios?: string[];
+  /** 발견은 됐지만 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 테스트(다그푸딩 마찰 152). 상태를 바꾸지 않고 근거로만 보여준다 */
+  unexecutedTests?: UnexecutedTestInfo[];
 }
 
 interface RequirementView extends RequirementDraft {
@@ -1091,13 +1100,15 @@ function RequirementCard({
   const docEvidence = requirement.evidence.docEvidence;
   const manualVerification = requirement.manualVerification;
   const missingScenarios = requirement.evidence.missingScenarios ?? [];
+  const unexecutedTests = requirement.evidence.unexecutedTests ?? [];
   const evidenceCount =
     requirement.evidence.checkpoints.length +
     requirement.evidence.tests.length +
     requirement.evidence.gateChecks.length +
     (requirement.evidence.testRun ? 1 : 0) +
     (docEvidence ? docEvidence.matched.length + docEvidence.missing.length : 0) +
-    (manualVerification ? 1 : 0);
+    (manualVerification ? 1 : 0) +
+    unexecutedTests.length;
 
   async function copy() {
     try {
@@ -1153,6 +1164,14 @@ function RequirementCard({
                 title={`시나리오 ${missingScenarios.join(", ")}을(를) 이름에 단 통과 테스트가 아직 없습니다 — 요구사항 id만 단 테스트로 이 상태가 됐을 수 있습니다`}
               >
                 시나리오 {missingScenarios.length}개 미검증
+              </span>
+            )}
+            {unexecutedTests.length > 0 && (
+              <span
+                className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-fail"
+                title={`이 요구사항의 테스트 ${unexecutedTests.length}개는 지금 체크포인트의 게이트 실행 결과에 하나도 나타나지 않았습니다 — 발견은 됐지만 실행 기록이 없습니다`}
+              >
+                테스트 {unexecutedTests.length}개 실행 기록 없음
               </span>
             )}
             {requirement.issue !== undefined && (
@@ -1262,6 +1281,12 @@ function RequirementCard({
               )}
               {missingScenarios.length > 0 && (
                 <p className="text-fail">시나리오 {missingScenarios.join(", ")}을(를) 이름에 단 통과 테스트가 아직 없습니다 — 테스트 이름에 그 시나리오 id를 넣으면 검증됩니다.</p>
+              )}
+              {unexecutedTests.length > 0 && (
+                <p className="text-fail">
+                  이 요구사항의 테스트 {unexecutedTests.length}개(예: {unexecutedTests[0]!.name})는 게이트에서 실행되지 않았습니다
+                  {unexecutedTests[0]!.reason ? `(이유 추정: ${unexecutedTests[0]!.reason})` : ""}.
+                </p>
               )}
             </>
           )}

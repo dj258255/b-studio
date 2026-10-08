@@ -40,6 +40,7 @@
 - 멈춰 있던 OpenCode 백엔드 브랜치를 오늘 main에 다시 얹었습니다. 조사 결과 그 브랜치는 이미 PR #83으로 main에 들어가 그 뒤로도 계속 발전해 온 상태였고, 구현 상태 표만 낡은 문구로 남아 있었습니다 — `docs/status.md`의 OpenCode 설명을 Codex·Gemini와 같은 "실계정 확인 전" 어투로 맞췄습니다(ADR-120).
 - studio.yaml의 managed 서비스에 `systemPackages`(OS 패키지 이름 목록)를 선언할 수 있습니다. 예: `systemPackages: [ffmpeg]`. "생성 파일 다시 만들기"나 세션 재시작이 생성 Dockerfile(`Dockerfile.b-studio`)의 `FROM` 줄 바로 뒤에 설치 명령을 넣어, 런타임에는 막혀 있는 OS 패키지 저장소 접속(apt-get 등) 없이도 빌드 때 설치됩니다. Debian·Ubuntu(apt)·Alpine(apk) 계열만 지원하고, 모르는 베이스 이미지 계열이면 오류를 냅니다(ADR-137).
 - studio.yaml의 managed 서비스에 `includes`(서비스 폴더 밖이지만 같은 빌드에 포함되는 경로 목록)를 선언할 수 있습니다. Gradle 멀티 모듈이 `projectDir`로 서비스 폴더 밖 형제 폴더를 서브모듈로 포함하는 구조에서, 그 폴더의 변경도 재시작·게이트 재확인·coverage-gap 경고 대상이 되게 합니다. 폴더 열기 감지가 `settings.gradle(.kts)`의 `include`+`projectDir`, Maven `pom.xml`의 `<modules>`를 읽어 자동으로 채우고, 놓친 경로는 직접 추가할 수 있습니다(도그푸딩 마찰 119, ADR-139).
+- 요구사항 카드가 발견은 됐지만 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 테스트를 보여줍니다. JUnit `@Tag`·`@Testcontainers`·`@EnabledIf…`류, pytest 커스텀 마커를 정적으로 찾아 "이유 추정"으로 함께 보여주되, 요구사항 상태는 바꾸지 않습니다(ADR-149).
 
 ### 변경
 

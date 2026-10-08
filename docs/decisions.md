@@ -6222,3 +6222,40 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - `run_in_service`는 부가 서비스로 넓히지 않았다 — mediamtx처럼 셸이 없는 이미지가 흔하고, 실행 정책(`DEFAULT_DENIED_COMMANDS`)이 부가 서비스까지 막아야 하는지는 별도 검토가 필요해서다. 부가 서비스 안에서 명령을 실행해야만 풀리는 마찰이 나오면 그때 정책 설계까지 함께 다시 본다.
 - 데이터베이스 부가 서비스는 재시작을 아예 거부한다 — "체크포인트 저장·복원과 겹치지 않는 시점에만 허용"처럼 더 정교한 규칙도 가능하지만, 지금 실행 모델에 그 시점을 동기화할 장치가 없어 더 단순하고 안전한 쪽(전부 거부)을 택했다. 사람이 직접 재시작해야 하는 불편이 남는다.
 - `restartAddon`은 준비 판정을 하지 않는다 — b-studio가 임의의 부가 서비스(미디어 서버, 메시지 큐 등)의 헬스체크 규약을 알 방법이 없어서다. 에이전트는 재시작 뒤 `service_logs`로 직접 확인해야 하며, 도구 결과 문구에 이를 안내했다.
+
+## ADR-149 발견됐지만 게이트 실행 결과가 없는 테스트는 정적 추정 사유와 함께 요구사항 근거에 보여주고, 상태는 바꾸지 않는다
+
+상태: 채택
+관련: ADR-090(요구사항·시나리오·추적 매트릭스), ADR-103(문서 확인·사람 확인), ADR-147(includes 발견 누락·missingScenarios), 트러블슈팅 93
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기 전용 작업 복사본) 실측: R12(방송 특가 한정 수량 초과 판매 방지)의 핵심 보장을 확인하는 실동시성 테스트 `LiveOrderConcurrencyTest`는 Testcontainers 기반이고 `@Tag("integration")`이 붙어 있다. 프로젝트의 `build.gradle`은 기본 `test` 태스크에서 `integration` 태그를 제외한다. 샌드박스에는 Docker도 없다. 그래서 이 테스트는 게이트 test 단계에서 한 번도 실행되지 않았다. 그런데도 R12는 단위 테스트(`LiveOrderServiceTest`)만으로 "검증됨"이 됐고, 화면 어디에도 "핵심 동시성 테스트는 이 환경에서 돌지 않았다"는 사실이 보이지 않는다 — b-studio의 약속("에이전트의 완료 선언을 믿지 않는다")에 비춰 보면 빈자리다.
+- 코드 추적 결과: `computeRequirementStatus`(`packages/agent/src/requirements.ts`)는 요구사항 id가 붙은 테스트 중 하나라도 통과(`testRun.passed > 0`)하면 "검증됨"을 준다 — 같은 요구사항의 다른(더 약한) 테스트가 통과하면, 한 번도 안 돈 핵심 테스트가 있어도 상태는 그대로 "검증됨"이다. 이미 ADR-147이 "요구사항 id만 단 테스트로도 검증됨이 될 수 있다"는 규칙은 그대로 둔 채 `missingScenarios`로 시나리오별 공백만 보여줬는데, 이번 공백은 시나리오 단위가 아니라 "이 테스트가 실제로 돌았는지"였다.
+- `apps/studio/lib/server/sessions.ts`의 `buildMatrixTestRunRows`는 "테스트" 탭이 발견한 테스트 각각을, 그 서비스가 지금 체크포인트(HEAD)에서 실제로 돈 실행일 때만(`testRunMatchesHead`) `MatrixTestRunRow`로 펼쳐 둔다 — 발견됐지만 그 실행의 보고서에 없는 테스트는 이미 `status: 'not-run'`으로 거기 들어 있었다. 다만 `buildRequirementTestRunEvidence`는 `passed`·`failed`만 세고 `not-run` 행은 그냥 지나쳐, 그 정보가 통과·실패 집계 어디에도, 요구사항 근거 어디에도 나타나지 않았다 — 데이터는 이미 모여 있는데 보여주는 자리가 없었다.
+
+### 검토한 선택지
+| 방식 | 문제 |
+|---|---|
+| (a) 테스트 파일을 정적으로 봐서 실행 환경 조건(JUnit `@Tag`·`@Testcontainers`/`@Container`, `@EnabledIf…`/`@DisabledIf…`, pytest marker 등)이 붙은 테스트를 "이 환경에서 돌지 않을 수 있음"으로 표시만 한다 | 정적 추정만으로는 사실이 아니다 — `@Tag("integration")`가 있어도 CI가 그 태그를 포함해 돌릴 수도 있다. "돌지 않을 수 있다"는 추측을 "실제로 안 돌았다"처럼 보여주면 새로운 오판을 만든다 |
+| (b) 발견한 테스트 중 최근 게이트 보고서에 결과(통과·실패·건너뜀)가 하나도 없는 테스트를 "실행 기록 없음"으로 표시한다 | 사실에 가깝다(실측 가능) — 하지만 "왜 없는지"는 설명하지 못해, 사람이 다시 테스트 파일을 열어 원인을 찾아야 한다 |
+| **(c) 둘 다: (b)로 "실행 기록 없음"을 사실로 확정하고, (a)로 찾은 정적 표시를 "이유 추정"으로 덧붙인다** | 채택. 사실(실행 기록 없음)과 추측(왜 없을까)을 분리해서 보여주면, 추측이 틀려도("이유 추정"이라고 명시) 사실 자체는 흔들리지 않는다 |
+
+### 결정
+1. **(b) 실행 기록 없음 판정**: `packages/agent/src/requirements.ts`에 `findUnexecutedTests(requirementId, testRunRows)`를 더한다. `testRunRows`(`MatrixTestRunRow[]`, studio의 `buildMatrixTestRunRows`가 만든다)는 이미 "그 서비스가 HEAD에서 실제로 돈 실행"만 골라 둔 것이라(`testRunMatchesHead`), 서비스 자체가 안 돌았으면 애초에 이 목록에 들어오지 않는다 — 그래서 여기서 `status: 'not-run'`인 행은 "서비스는 돌았는데 이 테스트만 보고서에 없다"는 뜻이지 "아무것도 안 돌았다"는 뜻이 아니다. `RequirementEvidence.unexecutedTests?: UnexecutedTestInfo[]`로 평가(`evaluateRequirement`, `apps/studio/lib/server/sessions.ts`)에 얹는다. **상태(`computeRequirementStatus`)는 바꾸지 않는다** — "검증됨"인 요구사항이 갑자기 "작업 중"으로 떨어지는 ADR-147과 같은 과소평가 위험(검토한 선택지 A를 그때도 버렸다)을 다시 들이지 않는다.
+2. **(a) 정적 사유 추정**: `packages/agent/src/test-discovery.ts`에 JUnit `@Tag("…")`·`@Testcontainers`·`@EnabledIf…`/`@DisabledIf…`류, pytest의 스킵·파라미터화가 아닌 커스텀 마커(`@pytest.mark.integration` 등)를 찾아 `DiscoveredTestCase.envConditionalReasons`로 남긴다. 클래스(스위트)에 건 표시는 `flattenDiscoveredFile`이 그 안의 모든 테스트에 물려준다(클래스 전체가 `@Tag("integration")`인 경우가 흔하다). studio가 이 값을 `TestRowView.envConditionalReasons` → `MatrixTestRunRow.reason`(`"·"`로 이어 붙인 문자열)으로 옮겨 `UnexecutedTestInfo.reason`까지 전달한다. JUnit `@Container` 필드 애노테이션(클래스 선언이 아닌 멤버 변수)은 줄 단위 경량 파서로는 선언부와 메서드를 구분하기 어려워 이번 범위에서 빼고, 같이 쓰이는 `@Testcontainers` 클래스 애노테이션으로 대신한다.
+3. **요구사항 화면**: `unexecutedTests`가 있으면 카드 머리에 "테스트 N개 실행 기록 없음" 배지, "근거 보기"에 "이 요구사항의 테스트 N개(예: …)는 게이트에서 실행되지 않았습니다(이유 추정: …)" 한 줄을 보여준다(`requirements-panel.tsx`). `missingScenarios`와 같은 자리(상태는 그대로, 근거에만 추가)에 둔다.
+4. **체크포인트 본문(`formatCheckedCoverage`)에는 더하지 않는다**: 그 함수는 게이트가 "어느 서비스·어느 단계를 확인했는지"를 서비스 단위로 요약한다(ADR-135) — 테스트 하나하나 단위의 "실행 기록 없음" 목록을 거기 끼워 넣으면 요구사항이 많은 프로젝트에서 커밋 본문이 급격히 길어지고, 이미 요구사항 화면이 같은 정보를 보여주므로 두 군데가 서로 다른 시점에 어긋날 위험(사이드카 갱신 전후)만 늘어난다. 요구사항 화면을 단일 출처로 남긴다.
+5. **샌드박스 실행 환경 변수(`B_STUDIO_SANDBOX=1` 류)는 이번 범위에서 더하지 않는다**: `packages/agent/src/test-run.ts`의 `buildTestRunPlan`이 만드는 명령(`sandbox.exec(service, plan.command)`)은 환경 변수를 넘기는 통로 자체가 없다(`gate.ts`·`verify.ts`·`tools.ts`의 `exec` 호출 모두 `(service, command, { signal })`뿐이다) — 추가하려면 `Sandbox.exec`의 공개 계약과 `gate.ts`·`verify.ts`·`tools.ts`·실제 docker exec 구현까지 여러 파일을 고쳐야 하는 더 큰 변경이고, 이번 마찰의 근본 원인(샌드박스에 Docker 자체가 없어 Testcontainers가 설령 실행돼도 못 돈다)은 환경 변수 하나로 풀리지 않는다. `build.gradle`의 `useJUnitPlatform { excludeTags 'integration' }` 같은 설정은 프로젝트 자신의 것이라 "강제로 프로젝트 테스트를 바꾸지 않는다"는 원칙과도 맞물려 건드리지 않는다. 더 큰 설계(Docker-in-Docker 지원, 또는 Testcontainers 없이 컴포즈 서비스에 직접 붙는 방식으로 프로젝트 테스트를 바꾸도록 권하는 안내)는 별도 작업으로 남긴다.
+
+### 검증 결과
+- `packages/agent/src/test-discovery.test.ts`: JUnit 클래스 수준 `@Tag`·`@Testcontainers` 상속, 메서드 수준 `@Tag` 추가, `@EnabledIfEnvironmentVariable` 탐지와 bare `@Disabled` 비탐지, pytest 커스텀 마커(스킵·파라미터화 제외) 등 신규 테스트 6개.
+- `packages/agent/src/requirements.test.ts`: `findUnexecutedTests` 테스트 5개(기본 동작, reason 없음, 통과·실패 행 제외, 다른 id 제외, 중복 제거).
+- `apps/studio/lib/server/sessions.test.ts`: `buildMatrixTestRunRows`가 `envConditionalReasons`를 `reason`으로 합치는지 테스트 3개.
+- `apps/studio/lib/server/sessions-unexecuted-tests.test.ts`(신규, 임시 git 저장소 + 가짜 샌드박스, Docker·네트워크·모델 호출 없음): `@Tag("integration")` 테스트가 "테스트" 탭에 `not-run`으로 보이고, 같은 요구사항의 다른 테스트가 통과해 "검증됨"이어도 상태는 그대로인 채 `evidence.unexecutedTests`에 이유와 함께 남는지 전체 경로로 확인했다.
+- `pnpm -r typecheck`(6/6), `pnpm --filter @b-studio/studio lint`(0 errors), 관련 vitest 전체 통과.
+- 확인하지 못한 것: 실제 BE-commerce 세션에서 이 수정이 적용된 뒤 R12 카드에 "테스트 1개 실행 기록 없음" 배지가 실제로 뜨는지는 그 세션을 다시 재시작·재실행해야 보이는데, 이번 작업은 그 세션(읽기 전용, 다른 세션이 쓰는 중)과 사용자의 `:3000` studio를 건드리지 않는 제약이 있어 실측하지 못했다 — 코드 추적과 가짜 샌드박스를 쓴 단위·통합 테스트로만 검증했다. `@Container` 필드 애노테이션만 있고 `@Testcontainers` 클래스 애노테이션이 없는 드문 구성(수동으로 컨테이너 생명주기를 관리하는 경우)은 이번 정적 탐지가 놓친다.
+
+### 감수한 트레이드오프
+- "이유 추정"은 어디까지나 추정이다 — `@Tag("integration")`가 있어도 실제로는 다른 이유(타임아웃, 컴파일 실패)로 보고서에서 빠졌을 수 있고, 반대로 태그 없이도 게이트 설정에 따라 걸러질 수 있다. 추정이 틀려도 "실행 기록 없음" 자체(사실)는 그대로 남으므로 과소평가는 아니지만, 사람이 추정 사유만 보고 "그래서 괜찮다"고 넘길 위험은 남는다.
+- 상태를 바꾸지 않기로 한 ADR-147의 트레이드오프를 그대로 물려받는다 — `unexecutedTests`가 있어도 "검증됨"은 "검증됨"이다. 카드를 펼쳐 보지 않으면 배지만 보고 지나칠 수 있다.
+- 줄 단위 경량 파서의 한계로 `@Container` 필드·멀티라인 `@Tags({@Tag("a"), @Tag("b")})` 묶음 표기는 잡지 않는다. 실제 관찰한 패턴(`@Tag("integration")` + `@Testcontainers` 클래스 애노테이션)은 잡는다.

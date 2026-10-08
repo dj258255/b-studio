@@ -56,6 +56,7 @@ import {
   fetchPullRequestDetail,
   findCheckpointMentions,
   findGateCheckMentions,
+  findUnexecutedTests,
   findUnverifiedScenarioIds,
   flattenDiscoveredFile,
   formatCheckedCoverage,
@@ -4855,7 +4856,14 @@ function evaluateRequirement(
   // 자기 id를 단 통과 테스트가 없을 수 있어(다그푸딩 마찰 140), 추적 매트릭스를 따로 열지 않아도 그 사실을
   // 요구사항 카드에서 바로 보게 missingScenarios를 덧붙인다
   const missingScenarios = findUnverifiedScenarioIds(requirement, checkpoints, testFiles, gateChecks, testRunRows, evidenceBase);
-  const evidence: RequirementEvidence = { ...evidenceBase, ...(missingScenarios.length > 0 ? { missingScenarios } : {}) };
+  // 발견은 됐지만 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 테스트(다그푸딩 마찰 152) — 상태는 바꾸지 않고
+  // "검증됨이어도 이 테스트는 실제로 이번 판정에 기여하지 않았다"를 근거로만 덧붙인다
+  const unexecutedTests = findUnexecutedTests(requirement.id, testRunRows);
+  const evidence: RequirementEvidence = {
+    ...evidenceBase,
+    ...(missingScenarios.length > 0 ? { missingScenarios } : {}),
+    ...(unexecutedTests.length > 0 ? { unexecutedTests } : {}),
+  };
   const status = computeRequirementStatus(evidence, requirement);
   const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
   return {
@@ -5769,6 +5777,9 @@ export interface TestRowView {
   stack?: string[];
   /** 실패한 테스트에서만 있다. "이 테스트 고쳐 줘" 버튼이 그대로 채운다 */
   fixPrefill?: string;
+  /** test-discovery.ts가 정적으로 찾은 실행 환경 조건부 표시(다그푸딩 마찰 152). status가 'not-run'일 때 "왜 실행
+   * 기록이 없는지" 추정 사유로 쓴다 — 상태 자체를 바꾸지 않는다. 없으면 없다 */
+  envConditionalReasons?: string[];
 }
 
 export interface TestServiceView {
@@ -5933,6 +5944,7 @@ function toTestRowView(row: ServiceTestRow): TestRowView {
     ...(row.result?.failureMessage ? { failureMessage: row.result.failureMessage } : {}),
     ...(row.result?.stack ? { stack: row.result.stack } : {}),
     ...(status === 'fail' ? { fixPrefill: buildFixTestPrefill(row) } : {}),
+    ...(row.envConditionalReasons?.length ? { envConditionalReasons: row.envConditionalReasons } : {}),
   };
 }
 
@@ -6116,8 +6128,9 @@ export function buildMatrixTestRunRows(
     if (!testRunMatchesHead(service, head.sha, pendingFilesCount)) continue;
     const at = service.lastRunAt ?? new Date().toISOString();
     for (const row of service.rows) {
+      const reason = row.envConditionalReasons?.length ? row.envConditionalReasons.join('·') : undefined;
       for (const id of row.requirementIds) {
-        rows.push({ id, file: row.file, name: row.displayName, status: row.status, at, sha: head.sha, shortSha: head.shortSha });
+        rows.push({ id, file: row.file, name: row.displayName, status: row.status, at, sha: head.sha, shortSha: head.shortSha, ...(reason ? { reason } : {}) });
       }
     }
   }
