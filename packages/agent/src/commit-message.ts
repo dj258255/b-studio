@@ -82,9 +82,22 @@ const SITUATIONAL_WORDS =
  * 시간이 … 보장이 없습니다."처럼 문제를 설명하면 바뀐 내용이 아니라 현상이다(도그푸딩 버그 리포트: 제목이 그
  * 문제 설명 그대로 나갔다). 완료 요약의 "…확장했습니다"처럼 과거형으로 한 일을 말하는 끝은 걸리지 않는다.
  */
-const STATE_DESCRIPTION_ENDING = /(없|않|있)습니다$|(입|아닙|됩|깨집|나옵|보입|걸립)니다$|(없어|않아|있어|안\s*돼|안\s*나와|안\s*보여)요$/;
+const STATE_DESCRIPTION_ENDING = /(없|않|있|죽)습니다$|(입|아닙|됩|깨집|나옵|보입|걸립|실패합|멈춥|막힙|끊깁)니다$|(없어|않아|있어|안\s*돼|안\s*나와|안\s*보여)요$/;
 
 // "마무리 확인 결과를 보고합니다"처럼 보고하겠다는 말도 경과 보고다(도그푸딩 버그 리포트: 제목이 이 문장 그대로 나갔다)
+/**
+ * 요청 글 첫 문장이 과거형 서술로 끝나면(…다시 돌렸습니다, …만들었습니다) 사람이 이미 한 일이나 앞 상황을 알려 주는
+ * 맥락이지, 이번 실행이 바꿀 내용이 아니다(도그푸딩 버그 리포트: "MediaMTX를 재시작해 새 설정으로 다시 돌렸습니다(제가
+ * 대신 했습니다)."가 그대로 제목이 됐다). 완료 요약의 과거형은 에이전트가 한 일이라 요청 글에만 적용한다.
+ * 끝의 괄호 꼬리("(제가 대신 했습니다)")는 떼고 본다.
+ */
+const REQUEST_NARRATION_ENDING = /(었|았|였|했|렸|웠|겼|졌|줬|봤|뒀)습니다$/;
+
+function isRequestNarration(sentence: string): boolean {
+  const body = sentence.replace(/[.!?。]+$/, '').trim().replace(/\s*\([^()]*\)$/, '').trim();
+  return REQUEST_NARRATION_ENDING.test(body);
+}
+
 const PROGRESS_REPORT_WORDS = /검토\s*결과|확인\s*결과|확인해\s*보니|돌아보니|살펴보니|이미\s*.{0,25}있었|추가로\s*(만들|할|고칠)\s*것(이|가)?\s*없|보고(합니다|드립니다|드려요)|결과를\s*(알려|보고)|완료\s*요약/;
 
 /**
@@ -243,7 +256,7 @@ function summaryTitleLine(agentSummary: string | undefined): string | undefined 
     .filter((line) => line.length > 0 && !/^#{1,6}\s/.test(line) && !/^\*\*[^*]+\*\*[:：]?$/.test(line))
     .map((line) => line.replace(/^[-*]\s+/, '').replace(/\*\*/g, '').replace(/`/g, '').trim())
     // "찾은 결함: …"·"원인: …"처럼 문제를 설명하는 줄은 무엇이 바뀌었는지가 아니다
-    .filter((line) => line.length > 0 && !/^(찾은\s*)?(결함|원인|문제|현상|참고|배경)\s*[:：]/.test(line));
+    .filter((line) => line.length > 0 && !/^(찾은\s*)?(결함|원인|문제|현상|참고|배경|결론|요약|현재\s*상태)\s*[:：]/.test(line));
   const scope = lines.find((line) => /^(범위|scope)\s*[:：]/i.test(line));
   return scope ? scope.replace(/^(범위|scope)\s*[:：]\s*/i, '').trim() : lines[0];
 }
@@ -282,7 +295,7 @@ export function generateCommitSubject(request: string, changes: readonly Pending
   const reviewFix = reviewFixCandidate(request);
   if (reviewFix) {
     candidate = reviewFix;
-  } else if (requestFirstLine && isClearChangeSentence(firstSentence(requestFirstLine))) {
+  } else if (requestFirstLine && !isRequestNarration(firstSentence(requestFirstLine)) && isClearChangeSentence(firstSentence(requestFirstLine))) {
     candidate = toCommitMood(firstSentence(requestFirstLine));
   } else if (summaryLine && isClearChangeSentence(firstSentence(summaryLine)) && shortenPaths(toCommitMood(firstSentence(summaryLine))).length <= budget) {
     // 요약 줄은 예산 안에 들어갈 때만 쓴다. 잘린 요약은 동사가 사라져 바뀐 파일로 만든 제목보다 못하다(도그푸딩 버그 리포트)

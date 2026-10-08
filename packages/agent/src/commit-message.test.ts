@@ -245,6 +245,24 @@ describe('generateCommitSubject', () => {
     expect(subject).not.toContain('앞 실행');
   });
 
+  it('요청 첫 문장이 사람이 이미 한 일의 과거형 서술이면 제목으로 쓰지 않는다(도그푸딩 버그 리포트: "…다시 돌렸습니다(제가 대신 했습니다)")', () => {
+    const request = 'MediaMTX를 재시작해 새 설정으로 다시 돌렸습니다(제가 대신 했습니다). 결과와 근거입니다. 이어서 고쳐 주세요.';
+    const summary = 'MediaMTX Control API로 송출 상태를 읽도록 바꿨습니다.';
+    expect(generateCommitSubject(request, [change('media/src/main/java/MediaMtxPathPoller.java', 'added')], summary)).toBe('feat: MediaMTX Control API로 송출 상태를 읽도록 바꿨습니다');
+  });
+
+  it('요청 첫 문장이 "…실패합니다" 같은 현상 설명이면 제목으로 쓰지 않는다(도그푸딩 버그 리포트)', () => {
+    const subject = generateCommitSubject('MediaMTX 실제 송출이 실패합니다. 원인을 알려 드리니 고쳐 주세요.', [change('media/mediamtx.yml')]);
+    expect(subject).not.toContain('실패합니다');
+  });
+
+  it('요약 첫 줄의 "결론:"·"현재 상태:" 머리말 줄은 건너뛴다(도그푸딩 버그 리포트: "fix: 결론: MediaMTX가 …")', () => {
+    const summary = '**결론: MediaMTX가 샌드박스에서 죽어 실제 송출 검증을 끝까지 돌리지 못했습니다.**\n\n- MediaMTX 설정의 훅 이름을 runOnReady로 고쳤습니다.';
+    const subject = generateCommitSubject('해 주세요', [change('media/mediamtx.yml')], summary);
+    expect(subject).not.toContain('결론');
+    expect(subject).toBe('feat: MediaMTX 설정의 훅 이름을 runOnReady로 고쳤습니다');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
