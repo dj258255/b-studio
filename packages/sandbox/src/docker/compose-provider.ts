@@ -23,6 +23,7 @@ import type {
   ExternalCallRequest,
   ExternalCallResult,
   FileChange,
+  InfraCheckResult,
   LogLine,
   LogOptions,
   RelayedPath,
@@ -43,6 +44,7 @@ import {
   edgePortFor,
   egressAuditExcerpt,
   parseContainerState,
+  parseContainerStates,
   parseEgressDenial,
   parseHostPort,
   parseLogLine,
@@ -290,6 +292,41 @@ class LocalDockerSandbox implements Sandbox {
   async setServiceRunning(name: string, running: boolean, { signal }: { signal?: AbortSignal } = {}): Promise<void> {
     if (!this.project.composeServices.includes(name)) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 compose 서비스가 아닙니다 (${this.id})`);
     await this.#composeOrThrow(running ? ['up', '--detach', '--build', '--no-deps', name] : ['stop', name], signal);
+  }
+
+  /**
+   * edge 프록시 + 넘긴 서비스가 실제로 running인지 보고, 없으면 이 샌드박스의 compose 프로젝트 안에서만
+   * 다시 올린다(트러블슈팅 85, ADR-142). 코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이므로 이미지는
+   * 다시 빌드하지 않는다(restart()의 --build --force-recreate와 다르다). --no-deps로 넘긴 서비스만 건드린다
+   */
+  async ensureInfra(services: readonly string[], { signal }: { signal?: AbortSignal } = {}): Promise<InfraCheckResult> {
+    const expected = [...new Set([EDGE_SERVICE, ...services])].sort();
+    const missing = await this.#missingServices(expected, signal);
+    if (missing.length === 0) return { ok: true, recovered: [] };
+
+    const result = await this.#compose(['up', '--detach', '--no-deps', ...missing], signal);
+    if (result.exitCode !== 0) {
+      return { ok: false, recovered: [], missing, reason: describeDockerFailure(this.redact(result.stderr)) };
+    }
+
+    const stillMissing = await this.#missingServices(missing, signal);
+    if (stillMissing.length > 0) {
+      return {
+        ok: false,
+        recovered: missing.filter((name) => !stillMissing.includes(name)),
+        missing: stillMissing,
+        reason: `다시 올렸지만 ${stillMissing.join(', ')} 컨테이너가 여전히 running 상태가 아닙니다`,
+      };
+    }
+    return { ok: true, recovered: missing };
+  }
+
+  /** 넘긴 서비스 이름 중 컨테이너가 running이 아닌(혹은 아예 없는) 것만 돌려준다 */
+  async #missingServices(names: readonly string[], signal?: AbortSignal): Promise<string[]> {
+    if (names.length === 0) return [];
+    const { stdout } = await this.#compose(['ps', '--all', '--format', 'json', ...names], signal);
+    const states = parseContainerStates(stdout);
+    return names.filter((name) => states.get(name) !== 'running');
   }
 
   /**
