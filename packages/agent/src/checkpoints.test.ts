@@ -1062,4 +1062,31 @@ describe('CheckpointStore 생성 파일(제외됨) 스냅샷 (ADR-141, 도그푸
     expect(await store.pendingExcludedFiles()).toEqual([]);
     await expect(store.refreshExcludedSnapshot()).resolves.toBeUndefined();
   });
+
+  it('내 폴더 세션(workspace: local)처럼 작업 폴더 밖 별도 gitDir을 쓰면, 원본 폴더의 exclude와 무관하게 studio.yaml을 평범하게 추적한다', async () => {
+    // registerFolder가 원본 폴더(root)의 .git/info/exclude에 studio.yaml을 뺀 상태를 흉내 낸다
+    await git(root, 'init', '-q', '-b', 'main');
+    await git(root, 'add', '-A');
+    await git(root, 'commit', '-q', '-m', '내 커밋');
+    await excludeFromRoot('/studio.yaml');
+    await write('studio.yaml', 'version: 1\n');
+
+    // CheckpointStore는 별도 gitDir(세션 상태 폴더)을 쓴다 — 원본 폴더의 .git/info/exclude를 보지 않는다
+    const gitDir = path.join(root, '..', `${path.basename(root)}-state`, '.git');
+    const store = new CheckpointStore(root, { gitDir, excludedFiles: async () => ['studio.yaml'] });
+    await store.init('세션 시작 (내 폴더)');
+
+    // excludedFiles를 줬어도, 이 저장소(별도 gitDir) 기준으로는 studio.yaml이 무시 대상이 아니므로 평범하게 추적된다
+    expect(await store.pendingExcludedFiles()).toEqual([]);
+    expect(await store.pendingFiles()).toEqual([]); // 이미 세션 시작 커밋에 들어갔다
+
+    await write('studio.yaml', 'version: 2\n');
+    expect(await store.pendingFiles()).toEqual(['studio.yaml']);
+    const { files } = await store.discard();
+    expect(files).toEqual(['studio.yaml']);
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+
+    // 원본 폴더의 .git은 그대로다(별도 gitDir이라 건드리지 않는다)
+    expect(await git(root, 'log', '--format=%s')).toBe('내 커밋');
+  });
 });
