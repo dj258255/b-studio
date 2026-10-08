@@ -320,7 +320,7 @@ import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch'
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import { applyGeneratedFilesToWorkingCopy, findRegisteredProject, generatedFilePaths, overlayGeneratedFiles } from './project-registry';
-import { offManagedServices, serviceSelectionFor, writeServiceSelection } from './service-selection';
+import { computeOffServices, serviceSelectionFor, serviceSelectionStateDir, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
   closeUnfinished,
@@ -788,7 +788,7 @@ async function startSession({
   await assertBackendReady(backend, project.root);
   const repository = await describeRepository(checkpoints, sourceDirtyFiles);
   // 이 프로젝트에서 띄울 서비스를 정한다(ADR-083). 저장한 선택이 없으면 기본값(관리형 + 기댐 닫힘)이다
-  const serviceSelection = await resolveServiceSelection(project, projectId);
+  const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, projectId);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
   const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
@@ -841,6 +841,10 @@ async function startSession({
   store.sessions.set(id, session);
   registerCleanup();
   if (preview) ensurePreviewGateway(preview);
+  // 저장된 선택(known) 뒤에 compose에 새로 생긴 부가 서비스를 depends_on과 무관하게 자동으로 켰으면 알린다(도그푸딩 마찰 138, ADR-146)
+  if (addedServices.length > 0) {
+    emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
+  }
   // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
   void flushPersist(session);
   // 지연 기동 세션은 여기서 켜지 않는다. 첫 만들기 요청·샌드박스 도구·"지금 켜기"가 켠다
@@ -920,13 +924,19 @@ function projectViews(
 /**
  * 이 세션이 띄울 서비스를 정하고, 검증 게이트가 보도록 project.offServices에 남긴다(ADR-083).
  * project는 세션 동안 계속 같은 객체를 쓰므로(체크포인트 복원·되돌리기도 같은 project를 넘겨받는다),
- * 한 번 붙이면 이후의 재시작·검증이 모두 최신 선택을 본다
+ * 한 번 붙이면 이후의 재시작·검증이 모두 최신 선택을 본다.
+ *
+ * 저장된 선택이 있으면(saved) known 기준점을 지금 compose 서비스 전체로 다시 저장해 둔다(도그푸딩 마찰 138,
+ * ADR-146) — 그래야 다음에 또 새 서비스가 생겼을 때 가려낼 수 있고, 사람이 방금 끈 서비스도 "다음번엔 known"으로
+ * 남아 새로 생긴 것으로 잘못 보지 않는다. 저장된 선택이 전혀 없는(isDefault, 아직 아무도 고르지 않은) 프로젝트는
+ * 쓰지 않는다 — 사람이 한 번도 서비스 메뉴를 쓴 적 없는 프로젝트에 파일을 미리 만들지 않는다
  */
-async function resolveServiceSelection(project: LoadedProject, projectId: string): Promise<Set<string>> {
+async function resolveServiceSelection(project: LoadedProject, projectId: string): Promise<{ selected: Set<string>; addedServices: string[] }> {
   const resolved = await serviceSelectionFor(project, projectId);
   const selected = new Set(resolved.selected);
-  project.offServices = offManagedServices(project, selected);
-  return selected;
+  project.offServices = computeOffServices(project, selected);
+  if (!resolved.isDefault) await writeServiceSelection(projectId, resolved.selected, serviceSelectionStateDir(), project.composeServices);
+  return { selected, addedServices: resolved.addedServices ?? [] };
 }
 
 /** 새 구독자에게 지금 상태와 지금까지의 기록을 보낸 뒤 실시간 이벤트를 전달한다 */
@@ -1272,7 +1282,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     const list = await checkpoints.list();
     const head = list[0]!;
     // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
-    const serviceSelection = await resolveServiceSelection(project, data.snapshot.projectId);
+    const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
     const sandbox = await provider.create(project, { secrets });
 
@@ -1327,8 +1337,13 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       ...(localEdits
         ? [`중지한 동안 폴더에서 바뀐 파일 ${localEdits.files.length}개를 이 체크포인트로 남겼습니다: ${localEdits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`]
         : []),
+      ...(addedServices.length > 0 ? [`compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}.`] : []),
     ].join(' ');
     noteForModel(session, note);
+    // 사람도 바로 보도록 같은 사실을 알림 이벤트로도 남긴다(도그푸딩 마찰 138, ADR-146)
+    if (addedServices.length > 0) {
+      emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
+    }
 
     archived.delete(id);
     store.sessions.set(id, session);
@@ -1465,8 +1480,10 @@ export async function setSessionServiceSelection(id: string, service: string, on
   if (on) next.add(service);
   else next.delete(service);
   session.serviceSelection = next;
-  project.offServices = offManagedServices(project, next);
-  await writeServiceSelection(session.snapshot.projectId, [...next]);
+  project.offServices = computeOffServices(project, next);
+  // known도 지금 compose 서비스 전체로 같이 저장해 둔다(도그푸딩 마찰 138, ADR-146) — 사람이 지금 끈 서비스를
+  // 다음에 "새로 생긴 서비스"로 잘못 보지 않게 한다
+  await writeServiceSelection(session.snapshot.projectId, [...next], serviceSelectionStateDir(), project.composeServices);
 
   // 세션이 아직 켜지지 않았으면(idle) 다음 기동 때 선택이 반영되므로 지금 컨테이너를 건드리지 않는다
   if (session.snapshot.status === 'ready' || session.snapshot.status === 'starting') {

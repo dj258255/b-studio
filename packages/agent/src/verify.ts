@@ -1,10 +1,10 @@
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { formatBytes, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
-import { servicesForFiles } from './services';
+import { isComposeFile, servicesForFiles } from './services';
 import { syncSystemPackages } from './system-packages-sync';
 
 export type ContractFetcher = (url: string) => Promise<OpenApiDocument>;
@@ -56,6 +56,16 @@ export interface VerificationReport {
    * 잘못된 studio.yaml이 체크포인트로 남는다. 있으면 ok는 항상 false다
    */
   specError?: string;
+  /**
+   * compose 파일이 바뀐 재시작에서, 이 세션이 시작할 때는 없던(그래서 꺼 둘 기회조차 없던) 새 부가 서비스 중
+   * 이 세션의 compose 프로젝트 안에 새로 올린 이름(도그푸딩 마찰 138, ADR-146). depends_on 여부는 보지 않는다
+   * — 에이전트나 사람이 나중에 compose에 더한 부가 서비스는 쓰려고 일부러 넣은 것으로 본다(실측: BE-commerce의
+   * mediamtx는 어느 managed 서비스도 depends_on으로 기대지 않는다). 사람이 꺼 둔 서비스(offServices)는
+   * 올리지 않는다. 비었으면(기본) compose가 바뀌지 않았거나 올릴 새 서비스가 없었다
+   */
+  addedAddons?: string[];
+  /** 위 부가 서비스를 올리려 했지만 실패했을 때의 이유. 실패해도 ok는 이 때문에 false가 되지 않는다(관리형 서비스와 별개다) */
+  addonError?: string;
 }
 
 export interface SecretLeak {
@@ -85,8 +95,8 @@ export interface VerifyOptions {
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
   const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
   const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
-  const { sync, restarted, unverifiedFiles, skippedOff, specError } = await restartServicesFor(sandbox, project, changedFiles, start);
-  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff, specError };
+  const { sync, restarted, unverifiedFiles, skippedOff, specError, addedAddons, addonError } = await restartServicesFor(sandbox, project, changedFiles, start);
+  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError };
 
   // 재시작에 실패했거나(서비스가 준비 안 됨) 꺼 둬 재시작을 건너뛴 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
   const failed = new Set(restarted.filter((check) => !check.ready).map((check) => check.service));
@@ -113,7 +123,7 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     secretLeaks.length === 0 &&
     specError === undefined;
 
-  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff, specError };
+  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError };
 }
 
 /**
@@ -140,6 +150,10 @@ export interface RestartReport {
   skippedOff: string[];
   /** 이번에 바뀐 studio.yaml이 스키마에 맞지 않을 때의 오류. VerificationReport.specError와 같다 */
   specError?: string;
+  /** compose가 바뀐 재시작에서 이 세션 시작 뒤 새로 생겨 올린 부가 서비스. VerificationReport.addedAddons와 같다 */
+  addedAddons?: string[];
+  /** 위 부가 서비스를 올리려 했지만 실패한 이유. VerificationReport.addonError와 같다 */
+  addonError?: string;
 }
 
 /**
@@ -164,9 +178,12 @@ export async function restartServicesFor(
   // 없다. studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 소유 판정과 Dockerfile 동기화를 한다. 스키마에 맞지 않으면
   // (도그푸딩 마찰 131) 조용히 옛 project로 넘어가지 않고 specError에 남겨 돌려준다 — verifyChanges가 이걸 보고 게이트를
   // 실패시켜야 에이전트가 같은 실행에서 고친다. 재시작 자체는 옛 project로 최대한 계속 시도한다(서비스를 완전히 멈추지 않게)
+  // compose 파일이 바뀌면(studio.yaml과 달리) 서비스 목록 자체가 바뀔 수 있어, 새로 생긴 부가 서비스를
+  // 올릴지 판단할 때도 다시 읽은 선언이 필요하다(도그푸딩 마찰 138, ADR-146)
+  const composeChanged = files.some((file) => isComposeFile(project, file));
   let declared = project;
   let specError: string | undefined;
-  if (files.includes(SPEC_FILE)) {
+  if (files.includes(SPEC_FILE) || composeChanged) {
     try {
       declared = await loadProject(project.root);
     } catch (error) {
@@ -195,6 +212,10 @@ export async function restartServicesFor(
     return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched, skippedOff, specError };
   }
 
+  // compose가 바뀐 재시작에서, 이 세션이 시작할 때는 없던 새 부가 서비스를 이 세션의 compose 프로젝트 안에서
+  // 올린다. 사람이 꺼 둔 서비스는 그대로 둔다(도그푸딩 마찰 138, ADR-146)
+  const addons = composeChanged ? await ensureNewAddons(sandbox, declared, project.offServices, start?.signal) : undefined;
+
   const restarted = await Promise.all(
     services.map(async (service): Promise<ServiceCheck> => {
       const first = await restartOnce(sandbox, service, start);
@@ -207,7 +228,42 @@ export async function restartServicesFor(
     }),
   );
 
-  return { sync, restarted, unverifiedFiles: unmatched, skippedOff, specError };
+  return {
+    sync,
+    restarted,
+    unverifiedFiles: unmatched,
+    skippedOff,
+    specError,
+    ...(addons?.added.length ? { addedAddons: addons.added } : {}),
+    ...(addons?.error ? { addonError: addons.error } : {}),
+  };
+}
+
+/**
+ * compose 파일이 바뀐 재시작에서, 이 세션이 시작할 때 몰랐던(그래서 `project.offServices`에 들어갈 기회조차
+ * 없었던) 부가 서비스를 올린다. managed가 depends_on으로 기대는지는 보지 않는다 — 에이전트나 사람이 나중에
+ * compose에 더한 부가 서비스는 쓰려고 일부러 넣은 것으로 본다(실측: BE-commerce의 mediamtx는 MediaMTX가
+ * commerce의 훅을 부르는 반대 방향이라 어느 managed 서비스도 depends_on으로 기대지 않는다 — depends_on 기준
+ * 첫 구현은 이 실제 사례를 놓쳤다). `project.offServices`는 세션이 시작할 때(또는 마지막으로 선택을 다시
+ * 계산했을 때)의 compose 서비스 전체에서 선택되지 않은 것이므로, 그때 없던 서비스는 애초에 off에 들어갈 수
+ * 없다 — 그래서 "off에 없다"만으로 "새로 생겼거나 이미 선택돼 있다"를 가린다(ADR-146).
+ *
+ * ensureInfra는 없는 컨테이너만 올리므로(이미 떠 있으면 손대지 않는다) 매번 다시 불러도 안전하다.
+ * ensureInfra가 없는 제공자(쿠버네티스 등)는 건너뛴다(도그푸딩 마찰 138, ADR-146)
+ */
+async function ensureNewAddons(
+  sandbox: Sandbox,
+  declared: LoadedProject,
+  off: ReadonlySet<string> | undefined,
+  signal?: AbortSignal,
+): Promise<{ added: string[]; error?: string }> {
+  if (!sandbox.ensureInfra) return { added: [] };
+  const managedNames = new Set(declared.managed.map(([name]) => name));
+  const addons = declared.composeServices.filter((name) => !managedNames.has(name) && !off?.has(name)).sort();
+  if (addons.length === 0) return { added: [] };
+
+  const result = await sandbox.ensureInfra(addons, { signal }).catch((error: unknown): InfraCheckResult => ({ ok: false, recovered: [], reason: describe(error) }));
+  return { added: result.recovered, ...(result.ok ? {} : { error: result.reason ?? '알 수 없는 이유' }) };
 }
 
 async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptions): Promise<ServiceCheck> {
@@ -325,6 +381,12 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
   }
   if (report.skippedOff.length > 0) {
     lines.push(`- 꺼 둔 서비스라 확인을 건너뜀(검증에 포함되지 않음): ${report.skippedOff.join(', ')}`);
+  }
+  if (report.addedAddons?.length) {
+    lines.push(`- compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${report.addedAddons.join(', ')}`);
+  }
+  if (report.addonError) {
+    lines.push(`- 새로 생긴 부가 서비스를 올리지 못했습니다: ${report.addonError}`);
   }
   for (const leak of report.secretLeaks) {
     lines.push(`- 시크릿 값이 파일에 들어갔습니다: ${leak.file} (${leak.secrets.join(', ')}). 값은 코드에서 환경 변수로 읽고 파일에 쓰지 마세요`);
