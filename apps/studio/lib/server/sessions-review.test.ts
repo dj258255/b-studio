@@ -251,7 +251,7 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     fake.modelQueue.push(new ScriptedModelClient([{ text: noFindings() }]));
 
     await runReviewRound(id);
-    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'passed');
+    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'passed', 15_000);
 
     const review = getSnapshot(id)!.review!;
     expect(review.rounds).toHaveLength(1);
@@ -259,7 +259,9 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     expect(fake.postComment).toHaveBeenCalledTimes(1);
 
     await stopSession(id).catch(() => {});
-  });
+    // 같은 파일의 다른 테스트처럼 제한 시간을 준다. 세션 준비(git·PR 내보내기)와 리뷰가 기본 5초 안에 끝나야 해서,
+    // 병렬 테스트 부하에서 자주 시간 초과로 실패했다(도그푸딩 마찰 91)
+  }, 20_000);
 
   it('차단 지적이 있으면 고침을 요청해 검증을 통과시키고, 다음 라운드에서 통과로 끝난다', async () => {
     const id = await setupSessionWithPullRequest();
