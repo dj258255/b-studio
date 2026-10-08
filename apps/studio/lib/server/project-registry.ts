@@ -366,6 +366,20 @@ async function generatedDockerfiles(root: string, depth = 2, prefix = ''): Promi
   return found;
 }
 
+/**
+ * 지금 이 프로젝트 폴더에 있는 생성 파일(studio.yaml·compose.b-studio.yaml·Dockerfile.b-studio) 경로. CheckpointStore의
+ * excludedFiles 제공자로 넘겨, 체크포인트가 git 추적에서 뺀(.git/info/exclude, ADR-067) 이 파일들도 되돌리기·복원에서
+ * 그 시점 내용으로 맞출 수 있게 한다(도그푸딩 마찰 127, ADR-141). 디스크에 없는 후보는 뺀다 — 사용자가 직접 만든
+ * studio.yaml을 쓰는 프로젝트도 이 후보에 들어가지만, CheckpointStore가 실제로 git이 무시하는 파일만 걸러 쓰므로
+ * (평범하게 추적되는 파일이라) 아무 영향이 없다.
+ */
+export async function generatedFilePaths(projectRoot: string): Promise<string[]> {
+  const candidates = [SPEC_FILE, GENERATED_COMPOSE, ...(await generatedDockerfiles(projectRoot))];
+  const found: string[] = [];
+  for (const file of candidates) if (await exists(path.join(projectRoot, file))) found.push(file);
+  return found;
+}
+
 async function exists(file: string): Promise<boolean> {
   return stat(file).then(
     () => true,
