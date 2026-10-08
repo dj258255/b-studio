@@ -1134,6 +1134,13 @@ export interface RequirementEvidence {
   testRun?: TestRunEvidence;
   /** kind: 'docs' 요구사항의 문서 매칭 증거(있으면) */
   docEvidence?: DocEvidence;
+  /**
+   * 요구사항에 시나리오가 있는데 아직 "검증됨"에 이르지 못한 시나리오 id(다그푸딩 마찰 140, `findUnverifiedScenarioIds`).
+   * 요구사항 id만 단 테스트로도 요구사항 전체는 검증됨이 될 수 있어(기존 규칙, R1이 그 예다) 이 필드가 없어도 상태 계산은
+   * 그대로지만, 사람·에이전트가 "통과하는데 왜 시나리오별로는 아직인지"를 추적 매트릭스를 따로 열지 않고도 보게 한다.
+   * 시나리오가 없거나 전부 검증됐으면 없다(빈 배열을 넣지 않는다).
+   */
+  missingScenarios?: string[];
 }
 
 /**
@@ -1904,7 +1911,7 @@ function mergeTestMatchesWithRunRows(scanned: readonly TestMatch[], runRows: rea
  * 자신의 증거가 하나도 없어도 "작업 중"으로 보여 과대평가된다. 사람 확인(manualVerification)·내용 드리프트는 부모
  * 요구사항 객체 자체를 보고 판정하므로(computeRequirementStatus가 requirementForStatus로 받는다) 따로 다루지 않는다
  * — 이 규칙 덕에 시나리오 행의 상태는 "요구사항 목록과 같은 함수로, 증거만 시나리오로 좁혀" 계산된다 */
-function buildScenarioEvidence(params: {
+export function buildScenarioEvidence(params: {
   scenarioId: string;
   checkpoints: readonly CheckpointRef[];
   testFiles: readonly ScannedFile[];
@@ -1933,6 +1940,32 @@ function buildScenarioEvidence(params: {
     ...(testRun ? { testRun } : {}),
     ...(docEvidence ? { docEvidence } : {}),
   };
+}
+
+/**
+ * 요구사항에 시나리오가 있는데, 그 시나리오 id로는 아직 `computeRequirementStatus`가 "검증됨"을 주지 않는 시나리오
+ * id만 모은다(다그푸딩 마찰 140). 추적 매트릭스(`buildTraceabilityMatrix`)가 시나리오 행마다 계산하는 것과 같은
+ * `buildScenarioEvidence`+`computeRequirementStatus`를 그대로 재사용한다 — 두 곳이 "시나리오가 검증됐다"를
+ * 다른 기준으로 매기면 요구사항 카드와 매트릭스가 서로 다른 답을 보여주게 된다.
+ * 요구사항 전체는 요구사항 id만 단 테스트로도 검증됨이 될 수 있다(기존 규칙) — 이 함수는 그 규칙을 바꾸지 않고,
+ * "검증됨이어도 시나리오 n개는 아직 자기 id를 단 통과 테스트가 없다"는 사실만 옆에 보여준다.
+ */
+export function findUnverifiedScenarioIds(
+  requirement: Requirement,
+  checkpoints: readonly CheckpointRef[],
+  testFiles: readonly ScannedFile[],
+  gateChecks: readonly GateCheckResult[],
+  testRunRows: readonly MatrixTestRunRow[],
+  parentEvidence: RequirementEvidence,
+): string[] {
+  const scenarios = requirement.scenarios ?? [];
+  if (scenarios.length === 0) return [];
+  return scenarios
+    .filter((scenario) => {
+      const scenarioEvidence = buildScenarioEvidence({ scenarioId: scenario.id, checkpoints, testFiles, gateChecks, testRunRows, parentEvidence });
+      return computeRequirementStatus(scenarioEvidence, requirement) !== '검증됨';
+    })
+    .map((scenario) => scenario.id);
 }
 
 /** 증거·상태가 다 정해진 행 하나를 MatrixRow 모양으로 마무리한다(요구사항 행·시나리오 행이 공통으로 쓴다) */
