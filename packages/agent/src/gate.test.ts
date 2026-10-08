@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import type { ExecResult, ServiceUsage } from '@b-studio/sandbox';
+import type { ExecResult, Sandbox, ServiceUsage } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
@@ -1498,5 +1498,43 @@ describe('가볍게 확인(verify light)', () => {
     expect(commands).toEqual([['./gradlew', 'test']]);
     expect(gate.skippedStages).toEqual([]);
     expect([...gate.passedStages].sort()).toEqual(['browser_check', 'contract_check', 'review', 'run', 'test']);
+  });
+});
+
+describe('VerificationGate와 compose에 새로 생긴 부가 서비스(도그푸딩 마찰 138, ADR-146)', () => {
+  it('에이전트가 실행 중 compose에 더한 새 부가 서비스(depends_on 없음)를 올리면 warning 이벤트로도 알린다', async () => {
+    // compose·studio.yaml을 실제로 디스크에 둔다 — restartServicesFor가 compose가 바뀐 재시작에서
+    // declared 프로젝트를 다시 읽어 지금 compose 서비스 전체를 보기 때문이다
+    await writeFile(path.join(project.root, 'studio.yaml'), 'version: 1\nname: orders\nservices:\n  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: "/v3/api-docs" } }\n');
+    await writeFile(path.join(project.root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
+    const target = { ...project, composePath: path.join(project.root, 'compose.yaml') } as unknown as LoadedProject;
+
+    const sandbox = fakeSandbox(target, [true]) as Sandbox & { restarts: string[]; ensureInfra?: NonNullable<Sandbox['ensureInfra']> };
+    const ensureInfraCalls: string[][] = [];
+    sandbox.ensureInfra = async (services) => {
+      ensureInfraCalls.push([...services]);
+      return { ok: true, recovered: [...services] };
+    };
+
+    const workspace = new Workspace(target.root);
+    // 에이전트가 실행 중 compose에 mediamtx를 더한다. 실측(BE-commerce)처럼 api는 mediamtx에 기대지 않는다
+    // (MediaMTX가 commerce의 훅을 부르는 반대 방향이라 depends_on이 없다) — depends_on 없이도 올려야 한다
+    await workspace.write('compose.yaml', 'services:\n  api: { build: ./api }\n  mediamtx: { image: bluenviron/mediamtx:latest }\n');
+
+    const events: AgentEvent[] = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: async () => ({ status: 200, text: '' }),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(ensureInfraCalls).toEqual([['mediamtx']]);
+    expect(events).toContainEqual({ type: 'warning', message: 'compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): mediamtx' });
   });
 });
