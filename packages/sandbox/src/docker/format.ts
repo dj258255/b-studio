@@ -190,6 +190,27 @@ const CONTAINER_STATES: ReadonlySet<string> = new Set<ContainerState>([
   'dead',
 ]);
 
+/**
+ * `docker compose ps --format json <서비스 여럿>` 출력에서 서비스 이름 → 컨테이너 상태를 읽는다.
+ * 컨테이너가 아예 없는 서비스(지워졌거나 한 번도 뜬 적 없음)는 출력에 줄 자체가 없으므로 맵에 들어가지 않는다
+ * (ensureInfra가 이 둘을 구분하지 않고 "running이 아니면 없는 것"으로 본다)
+ */
+export function parseContainerStates(stdout: string): Map<string, ContainerState> {
+  const text = stdout.trim();
+  const states = new Map<string, ContainerState>();
+  if (!text) return states;
+
+  const rows: unknown[] = text.startsWith('[') ? JSON.parse(text) : text.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  for (const row of rows) {
+    const service = (row as { Service?: unknown } | undefined)?.Service;
+    const state = (row as { State?: unknown } | undefined)?.State;
+    if (typeof service === 'string' && typeof state === 'string' && CONTAINER_STATES.has(state)) {
+      states.set(service, state as ContainerState);
+    }
+  }
+  return states;
+}
+
 /** `docker compose ps --format json` 출력은 버전에 따라 줄 단위 JSON 또는 배열이다 */
 export function parseContainerState(stdout: string): ContainerState {
   const text = stdout.trim();

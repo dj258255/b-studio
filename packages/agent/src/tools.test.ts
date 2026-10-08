@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Board } from './coordination';
 import { buildTools, executeTool, LOCAL_TOOLS, SANDBOX_TOOLS, type BoardAccess, type ToolContext } from './tools';
 import { Workspace } from './workspace';
@@ -37,6 +37,55 @@ describe('http_request', () => {
   it('등록되지 않은 서비스 이름을 거부한다', async () => {
     const outcome = await executeTool('http_request', { service: 'db', method: 'GET', path: '/', body: '' }, context);
     expect(outcome).toEqual({ ok: false, content: 'Unknown service: db' });
+  });
+});
+
+/** 도그푸딩 마찰 130: edge·서비스 컨테이너가 없어 compose가 "is not running"으로 알리면, 도구 결과에서
+ * 자동 복구 시도와 그 결과를 분명히 알리는지 본다(ADR-143). 코드를 고쳐도 다시 뜨지 않는 문제라는 점을
+ * 모델이 알아야 restart_service·service_logs를 반복하지 않는다 */
+describe('샌드박스 인프라 부재(컨테이너가 지워짐) 자동 복구', () => {
+  const infraError = new Error('docker compose port 실패 (test)\nservice "b-studio-edge" is not running');
+
+  it('복구에 성공하면 복구 사실과 재시도 안내를 도구 결과에 남긴다', async () => {
+    const ensureInfra = vi.fn().mockResolvedValue({ ok: true, recovered: ['b-studio-edge'] });
+    const sandbox = { endpoint: vi.fn().mockRejectedValue(infraError), redact: (text: string) => text, ensureInfra } as unknown as ToolContext['sandbox'];
+
+    const outcome = await executeTool('http_request', { service: 'api', method: 'GET', path: '/', body: '' }, { ...context, sandbox });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('is not running');
+    expect(outcome.content).toContain('다시 올렸습니다');
+    expect(outcome.content).toContain('b-studio-edge');
+    expect(ensureInfra).toHaveBeenCalledWith(['api'], expect.anything());
+  });
+
+  it('복구에 실패하면 코드로 고칠 수 없는 인프라 문제라고 분명히 알린다', async () => {
+    const ensureInfra = vi.fn().mockResolvedValue({ ok: false, recovered: [], missing: ['b-studio-edge'], reason: 'docker compose up 실패' });
+    const sandbox = { endpoint: vi.fn().mockRejectedValue(infraError), redact: (text: string) => text, ensureInfra } as unknown as ToolContext['sandbox'];
+
+    const outcome = await executeTool('http_request', { service: 'api', method: 'GET', path: '/', body: '' }, { ...context, sandbox });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('샌드박스 인프라 문제라 코드로 고칠 수 없습니다');
+    expect(outcome.content).toContain('docker compose up 실패');
+  });
+
+  it('ensureInfra를 지원하지 않는 샌드박스면 원래 오류만 돌려준다(자동 복구를 시도하지 않는다)', async () => {
+    const sandbox = { endpoint: vi.fn().mockRejectedValue(infraError), redact: (text: string) => text } as unknown as ToolContext['sandbox'];
+
+    const outcome = await executeTool('http_request', { service: 'api', method: 'GET', path: '/', body: '' }, { ...context, sandbox });
+
+    expect(outcome).toEqual({ ok: false, content: infraError.message });
+  });
+
+  it('"is not running"과 무관한 오류는 평소처럼 그대로 돌려준다', async () => {
+    const ensureInfra = vi.fn();
+    const sandbox = { endpoint: vi.fn().mockRejectedValue(new Error('무언가 다른 오류')), redact: (text: string) => text, ensureInfra } as unknown as ToolContext['sandbox'];
+
+    const outcome = await executeTool('http_request', { service: 'api', method: 'GET', path: '/', body: '' }, { ...context, sandbox });
+
+    expect(outcome).toEqual({ ok: false, content: '무언가 다른 오류' });
+    expect(ensureInfra).not.toHaveBeenCalled();
   });
 });
 

@@ -163,6 +163,7 @@
 - [ADR-140 browser_check가 같은 출처 리소스 실패·콘솔 오류에 더해 `<video>`·`<audio>`·`<img>`의 로드·재생 실패를 진단 신호로 모은다](#adr-140-browser_check가-같은-출처-리소스-실패콘솔-오류에-더해-videoaudioimg의-로드재생-실패를-진단-신호로-모은다)
 - [ADR-141 체크포인트 밖(생성 파일, ADR-067)의 내용을 체크포인트 sha별 사이드카 스냅샷으로 따로 보관해 되돌리기·복원에 쓴다](#adr-141-체크포인트-밖생성-파일-adr-067의-내용을-체크포인트-sha별-사이드카-스냅샷으로-따로-보관해-되돌리기복원에-쓴다)
 - [ADR-142 claude-code 러너가 일시적 네트워크 오류에서 바로 실패하지 않고, 같은 세션을 resume으로 이어받아 재시도한다](#adr-142-claude-code-러너가-일시적-네트워크-오류에서-바로-실패하지-않고-같은-세션을-resume으로-이어받아-재시도한다)
+- [ADR-143 세션 상태(ready)와 실제 컨테이너 상태를 분리해 보고, 모델을 부르기 전에 ensureInfra로 확인·복구한다](#adr-143-세션-상태ready와-실제-컨테이너-상태를-분리해-보고-모델을-부르기-전에-ensureinfra로-확인복구한다)
 
 ---
 
@@ -5950,3 +5951,46 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - **판정은 문자열 패턴 매칭이다.** 구조화된 오류 코드가 없어, `message.result`에 "overloaded"라는 단어가 우연히 들어간 영구 오류를 네트워크 오류로 잘못 재시도할 가능성이 이론상 남아 있다(근거가 있는 패턴만 썼지만 완전히 배제하지는 못한다).
 - **대기 중에는 모델이 아무 일도 하지 않는다.** 진행 중 지시(steering)도 대기가 끝나고 새 query가 열려야 반영된다 — 재시도 대기 시간(최대 10분) 동안 사용자가 보낸 지시는 그만큼 늦게 들어간다.
 - **세션 id가 없는 첫 호출 실패는 자리에서 똑같은 요청을 다시 보낼 뿐이다.** 모델이 아직 한 번도 응답하지 않았으므로 이어받을 것이 없어 당연하지만, "재시도"라는 이름과 달리 이 경우는 사실상 처음부터 다시 시작하는 것과 같다.
+
+## ADR-143 세션 상태(ready)와 실제 컨테이너 상태를 분리해 보고, 모델을 부르기 전에 ensureInfra로 확인·복구한다
+
+상태: 채택
+관련: ADR-083, ADR-088, ADR-124, ADR-131, 트러블슈팅 86
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기만)에서 실측(트러블슈팅 86): 세션 상태는 `ready`였지만 그 세션의 compose 프로젝트에는 web·commerce 컨테이너만 있었고 mysql·redis·kafka·`b-studio-edge`는 `docker ps -a`에도 없었다. 에이전트의 첫 `http_request`부터 `service "b-studio-edge" is not running`으로 실패했고, 원인을 몰라 `restart_service`·`service_stats`·`service_logs`·`run_in_service`를 턴 상한(120)까지 반복하며 파일은 하나도 고치지 못하고 실행이 실패했다.
+- `apps/studio/lib/server/sessions.ts`의 `ensureBooted()`는 세션 상태 필드가 `ready`면 그대로 돌아간다 — 실제 컨테이너가 떠 있는지는 다시 묻지 않는다. 지연 기동(lazy) 세션만 도구 호출 시점에 이 함수를 거치는데, 이미 `ready`인 세션에는 같은 이유로 아무 효과가 없다. 즉 세션이 한 번 `ready`가 된 뒤로는, studio 밖에서(사람이나 Docker의 자체 정리가) 컨테이너를 지워도 다음 요청이 이를 전혀 확인하지 않는다.
+- `restart_service`(`packages/agent/src/tools.ts`)는 그 도구가 가리키는 서비스 하나만 `--force-recreate`로 다시 올리고 `--no-deps`를 쓴다 — edge나 mysql처럼 **다른** 서비스가 없어졌을 때는 고치지 못한다. 에이전트 루프(`packages/agent/src/loop.ts`)는 도구 실패를 `is_error` 도구 결과로 모델에 그대로 돌려줄 뿐 반복을 세거나 멈추지 않는다. "environment가 연속 N번이면 멈춘다"는 개념(ADR-124)은 `packages/agent`가 아니라 `apps/studio/bench/coordination`의 벤치 전용 로직이었다 — 실제 세션 실행에는 이런 안전장치가 없었다.
+- 사람이 studio를 재시작하고 세션을 재개하자(`resumeSession()`이 새 샌드박스를 만들고 `sandbox.start()`를 다시 불렀다) 6개 컨테이너가 모두 다시 떴다 — "다시 올리면 고쳐진다"는 사실 자체는 이미 확인됐다.
+
+### 판단 기준
+1. 세션 상태가 `ready`라는 사실이 "핵심 컨테이너가 실제로 떠 있다"는 보장이 되게 할 것.
+2. 다른 프로젝트의 컨테이너(dbtower·pay·edumeet, 다른 세션)는 절대 건드리지 않을 것 — 이 세션의 compose 프로젝트 범위 안에서만 복구할 것.
+3. 자동 복구가 안 되면 에이전트가 턴 상한까지 같은 도구를 반복하지 않고 빨리, 분명히 알 것.
+4. studio.yaml·compose.yaml을 고치는 범위를 넘지 않을 것(실험·벤치 파일은 건드리지 않는다).
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) 에이전트 루프(`packages/agent/src/loop.ts`)에 "환경 실패가 연속 N번이면 멈춘다"는 ADR-124의 벤치 로직을 그대로 옮긴다 | 도구가 실패를 몇 번 반복한 **뒤에야** 멈춘다 — 실측에서는 120턴을 다 쓰기 전에 몇 번이든 똑같이 실패할 호출을 반복하게 된다. 턴 상한(ADR-131)과 별개의 상한을 또 만들어야 하고, claude-code·codex·opencode·gemini·commandcode 5개 러너가 각자 다른 턴 루프를 가져 똑같이 반영하려면 5곳을 모두 고쳐야 한다 — 보류 |
+| **(채택) 모델을 부르기 전에(세션이 `ready`일 때만) 핵심 컨테이너가 실제로 떠 있는지 확인하고, 없으면 그 세션의 compose 프로젝트 안에서만 다시 올린다. 실패하면 모델을 한 번도 부르지 않고 바로 끝낸다** | 반복이 생기기 전에 걸러진다 — 최악의 경우에도 턴 0에서 끝난다(턴 120을 쓰는 것보다 훨씬 쌈). `apps/studio/lib/server/sessions.ts`의 `runPlan()`은 모든 백엔드(model·claude-code·codex·opencode·gemini·commandcode)가 지나가는 단일 지점이라 러너를 하나씩 고치지 않아도 된다. `preflightError`라는 기존 체계(claude-code·codex 등의 계정 확인 실패와 같은 경로)를 그대로 재사용한다 |
+| (b) 도구 호출마다(실행 전체가 아니라) 매번 ensureInfra를 돈다 | 매 도구 호출에 `docker compose ps`를 끼워 넣어 지연을 더한다. 실제 문제는 "세션이 `ready`가 된 뒤 컨테이너가 사라진" 드문 경우라, 실행 시작 한 번만 확인해도 충분하다고 봤다 — 기각(대신 도구 호출에서 실제로 "is not running" 오류를 받았을 때만 한 번 더 복구를 시도하는 좁은 보조 경로를 아래 결정 3번에 남겼다) |
+| (c) 세션 상태 자체를 주기적으로(폴링) 재확인해 `ready→failed`로 자동 전환한다 | 화면이 항상 최신 상태를 보여줄 수 있지만, 폴링 주기·리소스 비용이 늘고 "요청이 없을 때도 컨테이너를 계속 들여다본다"는 새 책임이 생긴다. 지금 마찰은 "요청을 보냈을 때" 드러났으므로, 요청 시점에만 확인하는 것으로도 실제 사고를 막는다 — 보류(화면이 요청 없이도 컨테이너 소실을 보여주는 것은 범위 밖으로 미룬다) |
+
+### 결정
+1. **`packages/sandbox`**: `Sandbox` 인터페이스에 선택적 메서드 `ensureInfra(services, options?): Promise<InfraCheckResult>`를 더했다(`types.ts`). `LocalDockerSandbox`(`docker/compose-provider.ts`)가 구현한다 — 넘긴 서비스 + edge 프록시의 컨테이너를 `docker compose ps --all --format json`(새 `parseContainerStates`, `docker/format.ts`)으로 확인하고, `running`이 아닌 것만 `compose up --detach --no-deps`로 다시 올린다. 이미지는 다시 빌드하지 않는다(코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이다). `--no-deps`와 명시한 서비스 이름만 쓰므로 이 세션의 compose 프로젝트 밖은 전혀 건드리지 않는다. **Kubernetes 제공자는 구현하지 않는다**(선택 메서드라 `undefined`, 호출하는 쪽이 건너뛴다) — 이번 마찰은 로컬 Docker 제공자에서만 실측됐고, Kubernetes의 "컨테이너가 studio 밖에서 지워진다"는 실패 양상이 같을지 확인되지 않아 범위를 좁혔다.
+2. **`apps/studio/lib/server/sessions.ts`**: `runPlan()`(모든 백엔드의 단일 진입점) 맨 앞에서 `ensureReadySessionInfra()`를 부른다. 세션 상태가 `ready`이고 `sandbox.ensureInfra`가 있을 때만 확인한다(지연 기동으로 아직 한 번도 안 띄운 세션은 건너뛴다 — 아직 컨테이너가 없는 게 정상이다). 복구했으면 세션 기록에 `notice` 이벤트로 남기고(화면에 보인다) 그대로 요청을 진행한다. 복구에 실패하면 `{ preflightError }`를 돌려줘 모델을 한 번도 부르지 않고 그 요청만 `error`로 끝낸다 — 세션 상태는 `ready`로 남아(다른 요청은 다시 시도할 수 있다), 반복되면 똑같이 빠르게(턴 0에서) 끝난다.
+3. **`packages/agent/src/tools.ts`**: 그래도 실행 중간에(예: 메모리 부족으로 컨테이너가 다시 죽는 경우) 같은 오류가 날 수 있으므로, `executeTool`의 catch 블록에서 오류 문구가 "is not running"에 맞으면 `ensureInfra`로 한 번 더 자동 복구를 시도한다(managed 서비스 이름으로). 복구했으면 그 사실과 "같은 도구를 다시 불러 보라"는 안내를, 복구에 실패했으면 "샌드박스 인프라 문제라 코드로 고칠 수 없습니다"라는 문구를 도구 결과 본문에 그대로 적는다 — 모든 러너(claude-code·codex 포함)가 이 한 지점(`executeTool`)을 지나가므로 러너별로 따로 고치지 않아도 된다. 이 경로는 재시도를 한 번만 하고 끝낸다(원래 호출을 다시 실행하지는 않는다) — 다음 호출에서 모델이 스스로 다시 시도한다.
+4. `AgentResult.failureReason`(ADR-131의 `max_turns`)에는 새 값을 더하지 않았다 — 결정 2의 `preflightError` 경로가 모델을 부르기도 전에 끝나므로 애초에 턴이 없다(`failureReason`은 턴을 쓴 실행이 어떻게 끝났는지를 가리는 개념이라 뜻이 없다).
+
+### 검증 결과
+- `packages/sandbox/src/docker/infra-recovery.test.ts`: 가짜 docker 실행 파일로 edge가 없을 때 이 세션 범위에서만 다시 올려 복구하는지(이미 떠 있는 서비스는 건드리지 않는지), 모두 떠 있으면 아무것도 안 하는지, `compose up` 자체가 실패하거나 다시 올려도 여전히 없으면 분명하게 알리는지 확인했다(4개).
+- `packages/sandbox/src/docker/format.test.ts`: `parseContainerStates`가 여러 서비스의 상태를 맵으로 읽고, 컨테이너가 아예 없는 서비스는 맵에서 빠지는 것을 확인했다(4개 추가).
+- `packages/agent/src/tools.test.ts`: `executeTool`이 "is not running" 오류에서만 자동 복구를 시도하고, 성공·실패를 도구 결과에 분명히 적으며, `ensureInfra`가 없는 샌드박스나 무관한 오류는 그대로 두는지 확인했다(4개 추가).
+- `apps/studio/lib/server/sessions-infra-recovery.test.ts`: 가짜 샌드박스로 끝까지 돌려, 복구에 성공하면 모델을 그대로 부르고 `notice`를 남기는지, 복구에 실패하면 모델을 한 번도 부르지 않고 `run_finished`가 `error`로 바로 끝나면서도 세션 상태는 `ready`로 남는지, 아직 준비되지 않은 세션은 `ensureInfra`를 부르지 않는지 확인했다(3개).
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0)로 확인했다. 실제 BE-commerce 세션이나 Docker를 다시 띄워 재검증하지는 않았다 — 세션 `pay-2-5b640fd3`의 컨테이너와 다른 프로젝트(dbtower·pay·edumeet) 컨테이너를 건드리지 말라는 제약 때문에, 임시 폴더와 가짜 docker 실행 파일·가짜 샌드박스를 쓰는 단위·통합 테스트로만 확인했다(확인하지 못한 것으로 남긴다).
+
+### 감수한 트레이드오프
+- **턴 단위 "N번 반복되면 멈춘다"는 상한은 두지 않았다.** 결정 2의 사전 확인이 모델을 부르기 전에 걸러 턴 0에서 끝나므로, 반복 자체가 거의 일어나지 않는다고 보고 더 두지 않았다 — 다만 사전 확인이 못 잡는 "실행 중간에 컨테이너가 사라지는" 경우(결정 3)는 한 번의 자동 복구 시도로만 대응하고, 그래도 안 되면 모델의 판단(요약에 남기고 멈추기)에 맡긴다. 모델이 그 안내를 무시하고 계속 반복할 가능성은 남아 있다 — 실제로 그런 사례가 더 생기면 ADR-124의 벤치 로직처럼 연속 횟수를 세는 상한을 loop.ts나 각 러너에 추가하는 쪽으로 다시 검토한다.
+- **화면이 요청을 보내기 전에는 "ready인데 컨테이너가 없다"를 보여주지 않는다.** 결정 2·3이 모두 요청이 왔을 때만 확인하므로, 세션을 열어만 두고 아무 요청도 보내지 않는 동안에는 리소스 탭(`resource-panel.tsx`)이 지워진 컨테이너를 빈 목록으로만 보여준다(명시적 경고는 없다) — 위 선택지 (c)에서 적었듯 범위 밖으로 미뤘다.
+- **Kubernetes 제공자는 이번에 손대지 않았다.** `ensureInfra`가 없으면 확인·복구를 건너뛸 뿐 실행이 막히지는 않으므로 지금 동작(옛 동작)과 같다 — 다만 Kubernetes에서 같은 종류의 마찰이 생기면 이번 Docker 구현(compose ps로 확인, compose up으로 복구)과 같은 뜻의 Pod 조회·재생성을 따로 설계해야 한다.
