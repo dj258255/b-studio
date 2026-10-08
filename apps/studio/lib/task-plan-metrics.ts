@@ -122,6 +122,13 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     maxContextTokens = Math.max(maxContextTokens, contextOf(plan.contracts.usage));
   }
 
+  // S7 조정자의 중계 호출도 실제 모델 호출이다. 계약과 같은 이유로 합계에 넣는다
+  if (plan.orchestrator) {
+    addUsage(plan.orchestrator.usage);
+    modelCalls += plan.orchestrator.calls;
+    maxContextTokens = Math.max(maxContextTokens, contextOf(plan.orchestrator.usage));
+  }
+
   for (const lane of plan.lanes) for (const task of lane.tasks) addRun(task.run);
   // 통합은 모델 없이 레인 결과를 다시 적용하는 스크립트 턴이라 모델 호출로 세지 않는다
   addRun(plan.integration?.run, false);

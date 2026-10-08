@@ -19,7 +19,7 @@ export type TaskPlanStatus = 'planning' | 'awaiting_approval' | 'running' | 'int
 export type TaskPlanStepStatus = 'queued' | 'booting' | 'running' | 'done' | 'failed' | 'skipped';
 
 /** 레인 간 조율 전략. S0·S1은 공유 없음(기존)이라 여기 없다 */
-export type TaskPlanStrategy = 'S2' | 'S3' | 'S4' | 'S5';
+export type TaskPlanStrategy = 'S2' | 'S3' | 'S4' | 'S5' | 'S6' | 'S7';
 
 /** 게시판 메모 하나(화면·기록용). Board의 Note에서 작성자와 id를 평평하게 폈다 */
 export interface TaskPlanNoteView {
@@ -197,6 +197,8 @@ export interface TaskPlanView {
   metrics?: TaskPlanMetrics;
   /** 조율 전략과 topology. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다) */
   coordination?: { strategy: TaskPlanStrategy; topology: Topology };
+  /** S7 조정자(중계)의 모델 사용량. 계획·계약 호출과 같은 방식으로 합계에 넣는다 */
+  orchestrator?: { calls: number; usage: AgentUsage; durationMs: number };
   /** 검증 범위. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다). light면 레인·통합 실행이 가볍게 확인한다. 없으면 full */
   verify?: 'light';
   /**
