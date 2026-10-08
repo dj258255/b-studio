@@ -41,7 +41,7 @@ describe('http_request', () => {
 });
 
 /** 도그푸딩 마찰 130: edge·서비스 컨테이너가 없어 compose가 "is not running"으로 알리면, 도구 결과에서
- * 자동 복구 시도와 그 결과를 분명히 알리는지 본다(ADR-142). 코드를 고쳐도 다시 뜨지 않는 문제라는 점을
+ * 자동 복구 시도와 그 결과를 분명히 알리는지 본다(ADR-143). 코드를 고쳐도 다시 뜨지 않는 문제라는 점을
  * 모델이 알아야 restart_service·service_logs를 반복하지 않는다 */
 describe('샌드박스 인프라 부재(컨테이너가 지워짐) 자동 복구', () => {
   const infraError = new Error('docker compose port 실패 (test)\nservice "b-studio-edge" is not running');

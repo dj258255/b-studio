@@ -2377,10 +2377,10 @@ function stoppedQuestionSummary(run: ActiveRun, limit: number | undefined): stri
 
 /**
  * 세션 상태는 ready인데 studio 밖에서(사람·다른 과정이) edge·부가 서비스 컨테이너를 지운 경우를 겨냥한다
- * (도그푸딩 마찰 130, 트러블슈팅 85). 상태 필드만 보고 그대로 요청을 보내면 첫 샌드박스 도구부터
+ * (도그푸딩 마찰 130, 트러블슈팅 86). 상태 필드만 보고 그대로 요청을 보내면 첫 샌드박스 도구부터
  * "service ... is not running"으로 실패하고, 에이전트는 원인을 몰라 restart_service·service_stats 같은
  * 도구를 턴 상한까지 반복한다. 모델을 부르기 전에 한 번 확인해, 없으면 이 세션의 compose 프로젝트 안에서만
- * 다시 올린다(ADR-142). 복구에 실패하면 모델을 아예 부르지 않고 바로 알려 턴을 한 개도 쓰지 않는다 —
+ * 다시 올린다(ADR-143). 복구에 실패하면 모델을 아예 부르지 않고 바로 알려 턴을 한 개도 쓰지 않는다 —
  * ensureInfra가 없는 제공자(지연 기동으로 아직 한 번도 안 띄운 세션 포함)는 건너뛴다
  */
 async function ensureReadySessionInfra(session: Session, signal: AbortSignal): Promise<{ ok: true } | { ok: false; reason: string }> {

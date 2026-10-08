@@ -7,7 +7,7 @@ import { LocalDockerProvider } from './compose-provider';
 
 /**
  * 도그푸딩 마찰 130: 세션 상태는 ready인데 studio 밖에서(사람·다른 과정이) edge·부가 서비스 컨테이너를
- * 지워, 첫 http_request부터 "service ... is not running"으로 실패했다(트러블슈팅 85). ensureInfra()가
+ * 지워, 첫 http_request부터 "service ... is not running"으로 실패했다(트러블슈팅 86). ensureInfra()가
  * 실행 전에 핵심 컨테이너를 확인하고, 없으면 이 샌드박스의 compose 프로젝트 안에서만 다시 올리는지 본다.
  *
  * 실제 docker 없이 가짜 docker 실행 파일로 `compose ps`·`compose up`을 흉내 낸다(port-conflict-retry.test.ts와

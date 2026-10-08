@@ -296,7 +296,7 @@ class LocalDockerSandbox implements Sandbox {
 
   /**
    * edge 프록시 + 넘긴 서비스가 실제로 running인지 보고, 없으면 이 샌드박스의 compose 프로젝트 안에서만
-   * 다시 올린다(트러블슈팅 85, ADR-142). 코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이므로 이미지는
+   * 다시 올린다(트러블슈팅 86, ADR-143). 코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이므로 이미지는
    * 다시 빌드하지 않는다(restart()의 --build --force-recreate와 다르다). --no-deps로 넘긴 서비스만 건드린다
    */
   async ensureInfra(services: readonly string[], { signal }: { signal?: AbortSignal } = {}): Promise<InfraCheckResult> {

@@ -8,7 +8,7 @@
 
 | 영역 | 관련 항목 |
 |---|---|
-| 기동·종료·준비 판정 | 1–4, 14, 23, 36–37, 51–52 |
+| 기동·종료·준비 판정 | 1–4, 14, 23, 36–37, 51–52, 86 |
 | 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29, 41, 50 |
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
 | 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55 |
@@ -106,6 +106,7 @@
 - [83. browser_check가 <video>의 재생 실패를 못 잡아 숏폼 화면의 404 미디어 주소가 통과로 남음](#83-browser_check가-video의-재생-실패를-못-잡아-숏폼-화면의-404-미디어-주소가-통과로-남음)
 - [84. 폴더 열기가 만든 studio.yaml 등 생성 파일이 실패한 실행 뒤에도 되돌아가지 않음](#84-폴더-열기가-만든-studioyaml-등-생성-파일이-실패한-실행-뒤에도-되돌아가지-않음)
 - [85. 네트워크가 잠깐 끊기면(ENOTFOUND) 로컬 CLI 실행이 그대로 실패로 끝나 변경이 되돌려짐](#85-네트워크가-잠깐-끊기면enotfound-로컬-cli-실행이-그대로-실패로-끝나-변경이-되돌려짐)
+- [86. 세션 상태는 ready인데 edge·부가 서비스 컨테이너가 없어 첫 도구 호출부터 반복 실패함](#86-세션-상태는-ready인데-edge부가-서비스-컨테이너가-없어-첫-도구-호출부터-반복-실패함)
 
 ---
 
@@ -2745,3 +2746,32 @@ DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 
 
 ### 배운 점
 이번 수정은 로컬 CLI(claude-code) 백엔드만 고쳤다. Codex·Command Code·OpenCode·Gemini CLI와 API 직접 루프(`loop.ts`)는 아직 같은 문제가 있을 수 있다 — ADR-142에 CLI별 재개 방법 차이와 다음 대상을 남겼다.
+
+## 86. 세션 상태는 ready인데 edge·부가 서비스 컨테이너가 없어 첫 도구 호출부터 반복 실패함
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 작업 복사본은 읽기만 함, 실행 `b29a2f7b`) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+세션 상태는 `ready`였다. 그런데 그 세션의 compose 프로젝트(`studio-be-commerce-f41ea8`)에는 web·commerce 컨테이너만 있었고, mysql·redis·kafka·`b-studio-edge`는 `docker ps -a`에도 없었다(누가 언제 지웠는지는 확인하지 못했다). 에이전트의 첫 `http_request`부터 `docker compose port 실패 (studio-be-commerce-f41ea8) | service "b-studio-edge" is not running`으로 실패했고, commerce는 DB가 없어 exit 1로 죽었다. 에이전트는 이것이 환경 문제인 줄 모르고 `restart_service` 30회, `service_stats` 29회, `service_logs` 25회, `run_in_service` 24회를 써서 턴 상한 120을 모두 썼다. 파일은 하나도 고치지 않았고 실행은 실패로 끝났다. 사람이 studio를 재시작하고 세션을 재개하자(새 샌드박스를 만들고 `sandbox.start()`를 다시 불러) 6개 컨테이너가 모두 다시 떴다.
+
+### 원인
+`ensureBooted()`(`apps/studio/lib/server/sessions.ts`)는 세션 상태 필드가 이미 `ready`면 그대로 돌아간다 — 실제 컨테이너가 떠 있는지는 다시 묻지 않는다. 지연 기동(lazy) 세션만 도구 호출 시점에 `ensureBooted()`를 거치는데, 그 함수도 같은 이유로 `ready`면 아무것도 하지 않는다. 즉 세션이 한 번이라도 `ready`가 된 뒤로는, studio 밖에서(사람이나 다른 과정이) 컨테이너를 지워도 다음 요청이 그 사실을 전혀 확인하지 않고 그대로 모델을 불렀다. `restart_service`(`packages/agent/src/tools.ts`)는 도구 자신의 서비스 하나만 `--force-recreate`로 다시 올리고 `--no-deps`를 쓰므로, edge나 mysql처럼 다른 서비스가 없어졌을 때는 전혀 고치지 못한다. 에이전트 루프(`packages/agent/src/loop.ts`)는 도구 실패를 `is_error` 도구 결과로 모델에게 그대로 돌려줄 뿐 반복을 세거나 멈추지 않는다("환경 실패" 개념은 `packages/agent`가 아니라 `apps/studio/bench/coordination`의 벤치 전용 로직이었다, ADR-124).
+
+### 수정
+`packages/sandbox`의 `Sandbox` 인터페이스에 선택적 메서드 `ensureInfra(services, options)`를 더했다. 넘긴 서비스 + edge 프록시의 컨테이너가 실제로 `running`인지 `docker compose ps`로 확인하고, 없으면 그 샌드박스의 compose 프로젝트 안에서만(`--no-deps`로 다른 프로젝트·다른 서비스는 건드리지 않는다) `compose up`으로 다시 올린다. 이미지는 다시 빌드하지 않는다(코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이라서다).
+
+`apps/studio/lib/server/sessions.ts`의 `runPlan()`(모든 백엔드가 지나가는 단일 지점)이 모델을 부르기 전에 `ensureReadySessionInfra()`로 이 확인을 한다. 세션 상태가 `ready`일 때만 확인하고(지연 기동으로 아직 한 번도 안 띄운 세션은 건드리지 않는다), 복구했으면 세션 기록에 `notice`를 남기고 그대로 진행한다. 복구에 실패하면 모델을 한 번도 부르지 않고 `preflightError`로 바로 끝내 — 턴을 한 개도 쓰지 않는다. 다른 백엔드의 `preflightError`(claude-code·codex 등 CLI 계정 확인 실패)와 같은 경로를 그대로 쓴다.
+
+그래도 실행 중간에(예: 메모리 부족으로) 컨테이너가 다시 사라지는 경우를 대비해, `packages/agent/src/tools.ts`의 `executeTool`이 어떤 도구에서든 "is not running" 오류를 받으면 `ensureInfra`로 한 번 자동 복구를 시도하고, 그 결과(복구했다/못 했다)를 도구 결과 본문에 분명히 적는다. 복구에 실패하면 "샌드박스 인프라 문제라 코드로 고칠 수 없습니다"라고 적어 같은 재시작·로그 확인을 반복하지 말라고 알린다.
+
+이번 수정은 로컬 Docker 제공자(`LocalDockerSandbox`)에만 구현했다. Kubernetes 제공자는 `ensureInfra`를 구현하지 않아(선택 메서드라 `undefined`) 호출하는 쪽이 건너뛴다 — 범위를 좁힌 이유는 `decisions.md` ADR-143에 남겼다.
+
+### 검증
+- `packages/sandbox/src/docker/infra-recovery.test.ts`: 가짜 docker 실행 파일로 edge 컨테이너가 없을 때 `ensureInfra`가 이 세션 범위에서만 다시 올려 복구하는지, 모두 떠 있으면 아무것도 안 하는지, `compose up` 자체가 실패하거나 다시 올려도 여전히 없으면 분명하게 실패로 알리는지 확인했다(4개).
+- `packages/sandbox/src/docker/format.test.ts`: `parseContainerStates`가 서비스별 상태를 맵으로 읽는지, 컨테이너가 아예 없는 서비스는 맵에 없는지 확인했다(4개 추가).
+- `packages/agent/src/tools.test.ts`: `executeTool`이 "is not running" 오류를 받으면 자동 복구를 시도하고 성공·실패를 도구 결과에 분명히 적는지, `ensureInfra`가 없는 샌드박스나 무관한 오류는 그대로 두는지 확인했다(4개 추가).
+- `apps/studio/lib/server/sessions-infra-recovery.test.ts`: 가짜 샌드박스로 끝까지 돌려, ready 세션의 `ensureInfra`가 복구에 성공하면 모델을 그대로 부르고 `notice`를 남기는지, 복구에 실패하면 모델을 한 번도 부르지 않고 `run_finished`가 `error`로 바로 끝나는지(세션 상태는 `ready`로 남아 다시 요청할 수 있는지), 아직 준비되지 않은 세션은 `ensureInfra`를 부르지 않는지 확인했다(3개).
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+"상태 필드가 ready"와 "실제로 떠 있다"는 다른 사실이다. studio가 만들지 않은 변화(사람의 수동 정리, Docker의 자체 정리 등)는 상태 캐시에 반영되지 않으므로, 상태를 신뢰하기 전에 최소한 한 번은 실제로 확인하는 지점이 있어야 한다. 이번에는 "모델을 부르기 전"을 그 지점으로 골랐다 — 실행 중 반복이 생기기 전에 걸러지므로 턴 상한까지 도구를 반복하는 것보다 비용이 훨씬 적다.

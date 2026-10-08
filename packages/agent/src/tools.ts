@@ -377,10 +377,10 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
 }
 
 /**
- * docker compose가 "service ... is not running"으로 알리는 오류(도그푸딩 마찰 130, 트러블슈팅 85) —
+ * docker compose가 "service ... is not running"으로 알리는 오류(도그푸딩 마찰 130, 트러블슈팅 86) —
  * 세션 상태는 ready인데 studio 밖에서 edge·서비스 컨테이너가 지워진 경우다. 코드를 고쳐도 다시 뜨지
  * 않으므로, 모델이 run_in_service·restart_service·service_logs 같은 도구를 반복해 턴 상한까지 쓰기 전에
- * 여기서 한 번 자동 복구를 시도하고, 결과를 도구 결과 본문에 분명히 적어 반복하지 말라고 알린다(ADR-142)
+ * 여기서 한 번 자동 복구를 시도하고, 결과를 도구 결과 본문에 분명히 적어 반복하지 말라고 알린다(ADR-143)
  */
 const INFRA_ABSENCE_PATTERN = /is not running\b/i;
 

@@ -8,7 +8,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 /**
  * 도그푸딩 마찰 130: 세션 상태는 ready인데 studio 밖에서 edge·부가 서비스 컨테이너가 지워진 채로 요청을
  * 보내면, 첫 샌드박스 도구부터 "service ... is not running"으로 실패하고 에이전트는 원인을 몰라 같은
- * 도구(restart_service·service_stats 등)를 턴 상한까지 반복했다(트러블슈팅 85). runPlan이 모델을 부르기
+ * 도구(restart_service·service_stats 등)를 턴 상한까지 반복했다(트러블슈팅 86). runPlan이 모델을 부르기
  * 전에 ensureInfra()로 확인·복구하는지, 복구에 실패하면 모델을 한 번도 부르지 않고 바로 알리는지 본다.
  *
  * 진짜로 하는 것: 파일 시스템의 git 저장소·체크포인트. 가짜로 바꾸는 것: 샌드박스(Docker)와 모델

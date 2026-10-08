@@ -252,7 +252,7 @@ export interface Sandbox {
   setServiceRunning?(service: string, running: boolean, options?: { signal?: AbortSignal }): Promise<void>;
   /**
    * edge 프록시와 넘긴 서비스의 컨테이너가 실제로 떠 있는지 보고, 없으면 이 샌드박스의 compose 프로젝트
-   * 안에서만(다른 프로젝트는 건드리지 않고) 다시 올린다(트러블슈팅 85, ADR-142). 세션 상태는 ready인데
+   * 안에서만(다른 프로젝트는 건드리지 않고) 다시 올린다(트러블슈팅 86, ADR-143). 세션 상태는 ready인데
    * studio 밖에서(사람이나 다른 과정이) 컨테이너를 지운 경우를 겨냥한다 — 이미지를 다시 빌드하지 않는다
    * (코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이라서 restart()의 force-recreate는 쓰지 않는다).
    * 구현하지 않는 제공자는 undefined로 둔다(호출자가 건너뛴다).
