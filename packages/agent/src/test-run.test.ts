@@ -116,18 +116,18 @@ describe('buildTestRunPlan — 래퍼', () => {
 });
 
 describe('buildTestRunPlan — includes 서브프로젝트 보고서(도그푸딩 마찰 135)', () => {
-  it('gradle: extraReportRoots가 있으면 그 경로의 build/test-results/test도 함께 모은다', () => {
+  it('gradle: extraReportRoots가 있으면 그 경로의 build/test-results/test도 함께 모은다(경로는 작은따옴표로 감싼다)', () => {
     const plan = buildTestRunPlan('gradle', undefined, { extraReportRoots: ['/workspace/media'] });
     const script = plan.collect[2] as string;
     expect(script).toContain('for f in build/test-results/test/*.xml');
-    expect(script).toContain('for f in /workspace/media/build/test-results/test/*.xml');
+    expect(script).toContain("for f in '/workspace/media'/build/test-results/test/*.xml");
   });
 
-  it('maven: extraReportRoots가 있으면 그 경로의 target/surefire-reports도 함께 모은다', () => {
+  it('maven: extraReportRoots가 있으면 그 경로의 target/surefire-reports도 함께 모은다(경로는 작은따옴표로 감싼다)', () => {
     const plan = buildTestRunPlan('maven', undefined, { extraReportRoots: ['/workspace/media'] });
     const script = plan.collect[2] as string;
     expect(script).toContain('for f in target/surefire-reports/*.xml');
-    expect(script).toContain('for f in /workspace/media/target/surefire-reports/*.xml');
+    expect(script).toContain("for f in '/workspace/media'/target/surefire-reports/*.xml");
   });
 
   it('extraReportRoots를 주지 않으면 전과 같은 단일 glob만 모은다', () => {
@@ -139,5 +139,28 @@ describe('buildTestRunPlan — includes 서브프로젝트 보고서(도그푸�
   it('vitest·jest·pytest는 extraReportRoots를 받아도 무시한다(단일 보고서 파일 경로라 서브프로젝트 개념이 없다)', () => {
     const plan = buildTestRunPlan('vitest', undefined, { extraReportRoots: ['/workspace/media'] });
     expect(plan.collect).toEqual(['cat', JEST_LIKE_REPORT_PATH]);
+  });
+
+  it('보안: 셸 메타문자가 섞인 extraReportRoots는 조용히 버린다(스키마를 우회해도 임의 명령을 못 심는다)', () => {
+    const dangerous = [
+      '/workspace/media; rm -rf /',
+      '/workspace/media`whoami`',
+      '/workspace/media$(whoami)',
+      '/workspace/media && echo pwned',
+      "/workspace/media' ; echo pwned ; '",
+      '/workspace/media|cat /etc/passwd',
+      '/workspace/media media2', // 공백
+    ];
+    const plan = buildTestRunPlan('gradle', undefined, { extraReportRoots: dangerous });
+    const script = plan.collect[2] as string;
+    // 안전한 기본 glob 하나만 남고, 위험한 값은 전부 조용히 빠졌다
+    expect(script).toBe(`for f in build/test-results/test/*.xml; do [ -f "$f" ] && { echo '@@@b-studio-test-report@@@'"$f"; cat "$f"; echo; }; done`);
+    for (const value of dangerous) expect(script).not.toContain(value);
+  });
+
+  it('보안: 안전한 영문·숫자·.·_·-·/ 경로는 작은따옴표로 감싸져 그대로 쓰인다', () => {
+    const plan = buildTestRunPlan('gradle', undefined, { extraReportRoots: ['/workspace/media-service_2.0'] });
+    const script = plan.collect[2] as string;
+    expect(script).toContain("'/workspace/media-service_2.0'/build/test-results/test/*.xml");
   });
 });

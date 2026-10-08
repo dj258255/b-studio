@@ -35,9 +35,27 @@ const MAVEN_REPORT_GLOB = 'target/surefire-reports/*.xml';
 const REPORT_BOUNDARY = '@@@b-studio-test-report@@@';
 
 /** glob 여러 개를 한 번의 exec로 모두 모은다(호출마다 왕복하지 않으려고 한 셸 명령에 합친다) */
-function collectGlobCommand(globs: readonly string[]): string[] {
-  const body = globs.map((glob) => `for f in ${glob}; do [ -f "$f" ] && { echo '${REPORT_BOUNDARY}'"$f"; cat "$f"; echo; }; done`).join('; ');
+function collectGlobCommand(globExprs: readonly string[]): string[] {
+  const body = globExprs.map((glob) => `for f in ${glob}; do [ -f "$f" ] && { echo '${REPORT_BOUNDARY}'"$f"; cat "$f"; echo; }; done`).join('; ');
   return ['sh', '-c', body];
+}
+
+/**
+ * extraReportRoots(studio.yaml의 includes, ADR-139)는 세션 중 에이전트(모델 출력)가 studio.yaml을 직접 고쳐
+ * 바꿀 수 있는 값이라, `sh -c` 문자열에 따옴표 없이 그대로 넣으면 `includes: ["media; <임의 명령>"]` 같은 값이
+ * 서비스 컨테이너에서 임의 명령을 실행하는 통로가 된다(보안 검토, 다그푸딩 마찰 135). `@b-studio/spec`의
+ * PROJECT_RELATIVE_PATH 스키마가 이미 영문·숫자·.·_·-·/만 허용하지만, 이 함수는 그 스키마를 거치지 않고도
+ * 안전해야 하므로(순수 함수가 호출자의 검증을 신뢰하지 않는다) 여기서도 같은 문자 집합만 받고, 통과한 경로는
+ * 작은따옴표로 감싸 셸 메타문자 해석을 막는다(허용 문자 집합 자체에 `'`가 없어 따옴표를 깨고 나올 수 없다).
+ * 글로빙이 필요한 `*.xml` 부분만 따옴표 밖에 남겨 셸이 그 부분만 확장하게 한다. 집합에 없는 문자가 섞인 값은
+ * (스키마를 우회해 여기까지 왔다는 뜻이므로) 조용히 버린다 — 떨어뜨리는 쪽이 임의 명령 실행보다 항상 안전하다.
+ */
+const SAFE_REPORT_ROOT = /^[A-Za-z0-9._/-]+$/;
+
+/** pattern(상수 glob, 사용자 입력이 아니다)과, 있으면 extraReportRoots 각각을 작은따옴표로 감싼 glob 식 목록을 만든다 */
+function reportGlobExprs(pattern: string, extraReportRoots: readonly string[]): string[] {
+  const roots = extraReportRoots.filter((root) => SAFE_REPORT_ROOT.test(root));
+  return [pattern, ...roots.map((root) => `'${root}'/${pattern}`)];
 }
 
 /**
@@ -58,14 +76,12 @@ export function buildTestRunPlan(
     case 'gradle': {
       const command = [wrapper === false ? 'gradle' : './gradlew', 'test', '--no-daemon', '--console=plain'];
       if (target?.className) command.push('--tests', target.testName ? `${target.className}.${target.testName}` : target.className);
-      const globs = [GRADLE_REPORT_GLOB, ...extraReportRoots.map((root) => `${root}/${GRADLE_REPORT_GLOB}`)];
-      return { command, collect: collectGlobCommand(globs), format: 'junit-xml' };
+      return { command, collect: collectGlobCommand(reportGlobExprs(GRADLE_REPORT_GLOB, extraReportRoots)), format: 'junit-xml' };
     }
     case 'maven': {
       const command = [wrapper === true ? './mvnw' : 'mvn', '-q', 'test'];
       if (target?.className) command.push(`-Dtest=${target.testName ? `${target.className}#${target.testName}` : target.className}`);
-      const globs = [MAVEN_REPORT_GLOB, ...extraReportRoots.map((root) => `${root}/${MAVEN_REPORT_GLOB}`)];
-      return { command, collect: collectGlobCommand(globs), format: 'junit-xml' };
+      return { command, collect: collectGlobCommand(reportGlobExprs(MAVEN_REPORT_GLOB, extraReportRoots)), format: 'junit-xml' };
     }
     case 'vitest': {
       const command = ['npx', 'vitest', 'run', '--reporter=json', `--outputFile=${JEST_LIKE_REPORT_PATH}`];

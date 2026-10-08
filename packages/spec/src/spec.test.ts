@@ -860,6 +860,17 @@ services:
     expect(error.issues.filter((issue) => issue.startsWith('services.commerce.includes'))).toHaveLength(2);
   });
 
+  it('includes는 셸 메타문자가 섞인 값을 받지 않는다(보안 검토, 다그푸딩 마찰 135 — 세션 중 에이전트가 고칠 수 있는 값이 테스트 보고서 수거의 sh -c 문자열에 들어간다)', () => {
+    const source = `
+version: 1
+name: x
+services:
+  commerce: { source: managed, template: spring-boot, path: commerce, port: 8080, preview: openapi, includes: ["media; rm -rf /", "media \`whoami\`", "media $(whoami)", "media && echo pwned", "media | cat /etc/passwd", "media 2"] }
+`;
+    const error = captureError(() => parseSpec(source));
+    expect(error.issues.filter((issue) => issue.startsWith('services.commerce.includes'))).toHaveLength(6);
+  });
+
   it('includes를 생략하면 undefined다(기존 studio.yaml과 호환)', () => {
     const source = `
 version: 1
