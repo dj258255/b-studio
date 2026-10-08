@@ -68,3 +68,13 @@ function projectWideFiles(project: LoadedProject): Set<string> {
 function normalize(servicePath: string): string {
   return servicePath.replace(/^\.\/?/, '').replace(/\/+$/, '');
 }
+
+/**
+ * 파일이 compose 파일(프로젝트 루트 기준 상대 경로)인지. studio.yaml과 달리 compose 파일은 서비스 선택의
+ * 기본값 규칙(ADR-083)이 쓰는 depends_on 그래프를 바꿀 수 있어, 재시작 쪽(verify.ts)이 새로 생긴 부가 서비스를
+ * 올릴지 판단할 때 따로 본다(도그푸딩 마찰 138, ADR-146). root·composePath가 없는 project(최소 fixture)는 false다
+ */
+export function isComposeFile(project: Pick<LoadedProject, 'root' | 'composePath'>, file: string): boolean {
+  if (!project.root || !project.composePath) return false;
+  return normalize(file) === normalize(path.relative(project.root, project.composePath));
+}

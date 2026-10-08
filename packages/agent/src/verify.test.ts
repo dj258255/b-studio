@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { ContainerState, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
+import type { ContainerState, InfraCheckResult, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
 import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
@@ -436,5 +436,98 @@ describe('restartServicesFor·verifyChanges와 형식이 틀린 studio.yaml(도�
     const fixed = await verifyChanges({ sandbox, project: stale, changedFiles: ['studio.yaml'], baselines: new Map(), allowBreaking: false });
     expect(fixed.ok).toBe(true);
     expect(fixed.specError).toBeUndefined();
+  });
+});
+
+describe('restartServicesFor와 compose에 새로 생긴 부가 서비스(도그푸딩 마찰 138, ADR-146)', () => {
+  /** api(managed)가 mediamtx에 기대는 compose. depends_on 유무로 "기본값 규칙에 든다"를 가른다 */
+  async function projectWithAddon(dependsOnAddon: boolean): Promise<{ root: string; stale: LoadedProject }> {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-addon-'));
+    await mkdir(path.join(root, 'api'), { recursive: true });
+    await writeFile(path.join(root, 'studio.yaml'), 'version: 1\nname: x\nservices:\n  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }\n');
+    await writeFile(path.join(root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
+    const stale = await loadProject(root);
+    // 에이전트가 실행 중 새 부가 서비스를 더한다. stale에는 이 서비스가 없다
+    const dependsOn = dependsOnAddon ? ', depends_on: [mediamtx]' : '';
+    await writeFile(path.join(root, 'compose.yaml'), `services:\n  api: { build: ./api${dependsOn} }\n  mediamtx: { image: bluenviron/mediamtx:latest }\n`);
+    return { root, stale };
+  }
+
+  /** fakeSandbox에 ensureInfra를 더한다. outcome이 없으면 기본으로 missing을 모두 성공적으로 올린다 */
+  function sandboxWithEnsureInfra(outcome?: (services: readonly string[]) => InfraCheckResult): Sandbox & { ensureInfraCalls: string[][] } {
+    const base = fakeSandbox();
+    const ensureInfraCalls: string[][] = [];
+    return {
+      ...base,
+      ensureInfraCalls,
+      async ensureInfra(services: readonly string[]): Promise<InfraCheckResult> {
+        ensureInfraCalls.push([...services]);
+        return outcome ? outcome(services) : { ok: true, recovered: [...services] };
+      },
+    };
+  }
+
+  it('compose가 바뀌어 새로 생긴 부가 서비스가 기본값 규칙(기댐)에 들면 이 세션의 compose 프로젝트에 올린다', async () => {
+    const { stale } = await projectWithAddon(true);
+    const sandbox = sandboxWithEnsureInfra();
+
+    const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
+
+    expect(sandbox.ensureInfraCalls).toEqual([['mediamtx']]);
+    expect(report.addedAddons).toEqual(['mediamtx']);
+    expect(formatVerificationReport({ ok: true, contracts: [], secretLeaks: [], ...report }, { allowBreaking: false })).toContain(
+      '새로 생긴 부가 서비스를 기본값 규칙(ADR-083)에 따라 올렸습니다: mediamtx',
+    );
+  });
+
+  it('아무도 기대지 않는 새 부가 서비스는 기본값 규칙에 들지 않아 올리지 않는다', async () => {
+    const { stale } = await projectWithAddon(false);
+    const sandbox = sandboxWithEnsureInfra();
+
+    const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
+
+    expect(sandbox.ensureInfraCalls).toEqual([]);
+    expect(report.addedAddons).toBeUndefined();
+  });
+
+  it('사람이 꺼 둔 서비스(ADR-083)는 기댐 닫힘에 들어도 올리지 않는다', async () => {
+    const { stale } = await projectWithAddon(true);
+    const off = { ...stale, offServices: new Set(['mediamtx']) } as unknown as LoadedProject;
+    const sandbox = sandboxWithEnsureInfra();
+
+    const report = await restartServicesFor(sandbox, off, ['compose.yaml']);
+
+    expect(sandbox.ensureInfraCalls).toEqual([]);
+    expect(report.addedAddons).toBeUndefined();
+  });
+
+  it('compose가 바뀌지 않은 재시작(studio.yaml만)은 부가 서비스를 다시 확인하지 않는다', async () => {
+    const { stale } = await projectWithAddon(true);
+    const sandbox = sandboxWithEnsureInfra();
+
+    await restartServicesFor(sandbox, stale, ['studio.yaml']);
+
+    expect(sandbox.ensureInfraCalls).toEqual([]);
+  });
+
+  it('ensureInfra가 없는 제공자는 건너뛴다(쿠버네티스 등)', async () => {
+    const { stale } = await projectWithAddon(true);
+    const sandbox = fakeSandbox(); // ensureInfra 없음
+
+    const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
+
+    expect(report.addedAddons).toBeUndefined();
+    expect(report.addonError).toBeUndefined();
+  });
+
+  it('부가 서비스를 올리지 못하면 addonError로 남기지만, managed 서비스 재시작은 그대로 진행한다', async () => {
+    const { stale } = await projectWithAddon(true);
+    const sandbox = sandboxWithEnsureInfra(() => ({ ok: false, recovered: [], missing: ['mediamtx'], reason: '이미지를 받지 못했습니다' }));
+
+    const report = await restartServicesFor(sandbox, stale, ['compose.yaml']);
+
+    expect(report.addedAddons).toBeUndefined();
+    expect(report.addonError).toBe('이미지를 받지 못했습니다');
+    expect(report.restarted.some((check) => check.service === 'api' && check.ready)).toBe(true);
   });
 });
