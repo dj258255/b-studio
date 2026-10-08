@@ -2375,8 +2375,45 @@ function stoppedQuestionSummary(run: ActiveRun, limit: number | undefined): stri
   return run.stopReason === 'budget' ? `${limitReason(run, limit)} 질문을 멈췄습니다` : '질문을 취소했습니다';
 }
 
+/**
+ * 세션 상태는 ready인데 studio 밖에서(사람·다른 과정이) edge·부가 서비스 컨테이너를 지운 경우를 겨냥한다
+ * (도그푸딩 마찰 130, 트러블슈팅 85). 상태 필드만 보고 그대로 요청을 보내면 첫 샌드박스 도구부터
+ * "service ... is not running"으로 실패하고, 에이전트는 원인을 몰라 restart_service·service_stats 같은
+ * 도구를 턴 상한까지 반복한다. 모델을 부르기 전에 한 번 확인해, 없으면 이 세션의 compose 프로젝트 안에서만
+ * 다시 올린다(ADR-142). 복구에 실패하면 모델을 아예 부르지 않고 바로 알려 턴을 한 개도 쓰지 않는다 —
+ * ensureInfra가 없는 제공자(지연 기동으로 아직 한 번도 안 띄운 세션 포함)는 건너뛴다
+ */
+async function ensureReadySessionInfra(session: Session, signal: AbortSignal): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (session.snapshot.status !== 'ready' || !session.sandbox.ensureInfra) return { ok: true };
+  let result: Awaited<ReturnType<NonNullable<Sandbox['ensureInfra']>>>;
+  try {
+    result = await session.sandbox.ensureInfra([...session.serviceSelection], { signal });
+  } catch (error) {
+    return { ok: false, reason: `샌드박스 인프라 문제라 코드로 고칠 수 없습니다 — 컨테이너 상태를 확인하지 못했습니다: ${describe(error)}` };
+  }
+  if (result.recovered.length > 0) {
+    emit(session, {
+      type: 'notice',
+      text: `세션 상태는 준비됨이었지만 컨테이너가 없어 이 세션 범위에서 다시 올렸습니다: ${result.recovered.join(', ')}`,
+      at: new Date().toISOString(),
+    });
+  }
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: `샌드박스 인프라 문제라 코드로 고칠 수 없습니다 — ${(result.missing ?? []).join(', ') || '일부 컨테이너'}를 다시 올리지 못했습니다: ${result.reason ?? '알 수 없는 이유'}`,
+    };
+  }
+  return { ok: true };
+}
+
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
 async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
+  // 세션 상태(ready)만 보고 핵심 컨테이너가 실제로 있다고 가정하지 않는다(도그푸딩 마찰 130). 이 확인은
+  // 모델 호출·게이트보다 먼저다 — 실패하면 턴을 하나도 쓰지 않고 바로 알린다
+  const infra = await ensureReadySessionInfra(session, signal);
+  if (!infra.ok) return { preflightError: infra.reason };
+
   // 이번 요청 전부터 작업 트리에 있던 변경(보관본 되살리기, 사람이 편집기로 바꾼 것 등 출처를 가리지 않는다).
   // 에이전트가 이번 실행에서 파일을 하나도 건드리지 않아도 게이트가 이 변경을 검증 대상으로 보게 한다(ADR-131:
   // 게이트 없이 체크포인트가 생기던 사고 — session 5b640fd3, 체크포인트 15ba740).
