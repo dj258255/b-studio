@@ -274,6 +274,157 @@ describe('runClaudeCodeAgent', () => {
     expect(sandbox.restarts).toEqual([]);
   });
 
+  it('인증 오류 같은 영구 오류는 기다리지 않고 바로 실패한다(네트워크 사유를 달지 않는다)', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [[{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }]],
+      result: { is_error: true, result: 'authentication_error: invalid x-api-key' },
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '추가해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+      // 재시도 판정이 잘못 걸리면 이 대기 함수가 불려 테스트가 실패한다
+      networkRetry: { wait: async () => { throw new Error('영구 오류인데 대기 함수가 불렸습니다'); } },
+    });
+
+    expect(result).toMatchObject({ status: 'failed', summary: '모델 호출이 실패했습니다: authentication_error: invalid x-api-key' });
+    expect(result.failureReason).toBeUndefined();
+    expect(events.some((event) => event.type === 'warning')).toBe(false);
+  });
+
+  it('첫 시도가 ENOTFOUND로 끝나면 기다렸다가 같은 세션을 resume으로 이어받아 이어서 성공한다', async () => {
+    const prompts: string[] = [];
+    const resumes: Array<string | undefined> = [];
+    const waits: number[] = [];
+    let queryCalls = 0;
+
+    const sdk: ClaudeCodeSdk = {
+      createSdkMcpServer: (config) => ({ type: 'sdk', name: config.name, instance: {} }) as unknown as McpServerConfig,
+      query({ prompt, options }) {
+        queryCalls += 1;
+        const call = queryCalls;
+        resumes.push(options.resume);
+        const sessionId = 'session-1';
+
+        async function* run(): AsyncGenerator<SDKMessage> {
+          yield { type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: sessionId } as unknown as SDKMessage;
+          for await (const user of prompt) {
+            prompts.push(String(user.message.content));
+            if (call === 1) {
+              // 네트워크가 끊겨 모델 호출이 ENOTFOUND로 끝난다. CLI는 더 읽지 않고 바로 끝난다
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: true,
+                result: "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+                stop_reason: 'end_turn',
+                errors: [],
+                modelUsage: {},
+                session_id: sessionId,
+              } as unknown as SDKMessage;
+              return;
+            }
+            const content = [{ type: 'text', text: '이어서 완료했습니다.' }];
+            yield { type: 'assistant', message: { id: 'm1', content }, parent_tool_use_id: null, session_id: sessionId } as unknown as SDKMessage;
+            yield {
+              type: 'result',
+              subtype: 'success',
+              is_error: false,
+              result: '이어서 완료했습니다.',
+              stop_reason: 'end_turn',
+              errors: [],
+              modelUsage: { 'test-model': { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 1, cacheCreationInputTokens: 2 } },
+              session_id: sessionId,
+            } as unknown as SDKMessage;
+          }
+        }
+
+        return Object.assign(run(), {
+          accountInfo: async () => ({}),
+          supportedModels: async () => [],
+          interrupt: async () => {},
+          close: () => {},
+        }) as unknown as ClaudeCodeQuery;
+      },
+    };
+
+    const events: AgentEvent[] = [];
+    const result = await runClaudeCodeAgent({
+      request: '주문에 메모 필드 추가',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+      // 실제 sleep 대신 기다린 시간만 기록한다(시간을 흐르게 하지 않는다)
+      networkRetry: { wait: async (ms) => { waits.push(ms); }, maxAttempts: 3, maxWaitMs: 60_000, baseDelayMs: 1_000 },
+    });
+
+    expect(result).toMatchObject({ status: 'done', summary: '이어서 완료했습니다.' });
+    expect(queryCalls).toBe(2);
+    expect(resumes).toEqual([undefined, 'session-1']);
+    expect(waits).toEqual([1_000]);
+    // 이미 한 작업을 다시 하지 않도록 원래 요청 대신 짧은 이어서 진행 안내만 보낸다
+    expect(prompts[1]).toBe('네트워크가 끊겼다가 돌아왔습니다. 하던 작업을 처음부터 다시 하지 말고 그대로 이어서 진행하세요.');
+    expect(events.some((event) => event.type === 'warning' && event.message.includes('네트워크'))).toBe(true);
+  });
+
+  it('네트워크 오류가 상한(재시도 횟수)을 넘기면 네트워크 사유로 실패한다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [[], [], []],
+      result: { is_error: true, result: 'ENOTFOUND api.anthropic.com' },
+    });
+    const waits: number[] = [];
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({
+      request: '추가해줘',
+      project,
+      sandbox: fakeSandbox(project, []),
+      sdk,
+      fetcher: async () => contract,
+      onEvent: (event) => events.push(event),
+      networkRetry: { wait: async (ms) => { waits.push(ms); }, maxAttempts: 2, maxWaitMs: 60_000, baseDelayMs: 1_000 },
+    });
+
+    expect(result).toMatchObject({ status: 'failed', failureReason: 'network' });
+    expect(result.summary).toContain('네트워크');
+    // 재시도 상한(2번)만큼만 기다리고, 더는 시도하지 않는다
+    expect(waits).toEqual([1_000, 2_000]);
+    expect(events.filter((event) => event.type === 'warning')).toHaveLength(2);
+  });
+
+  it('네트워크 재시도 대기 중 취소 신호가 오면 더 기다리지 않고 취소를 그대로 던진다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [[]],
+      result: { is_error: true, result: 'ENOTFOUND registry.npmjs.org' },
+    });
+    const controller = new AbortController();
+
+    await expect(
+      runClaudeCodeAgent({
+        request: '추가해줘',
+        project,
+        sandbox: fakeSandbox(project, []),
+        sdk,
+        signal: controller.signal,
+        fetcher: async () => contract,
+        networkRetry: {
+          maxAttempts: 3,
+          // 기다리는 동안 취소 신호가 온 상황을 흉내 낸다(실제 대기를 쓰지 않는다)
+          wait: async () => {
+            controller.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+          },
+        },
+      }),
+    ).rejects.toThrow('요청을 취소했습니다');
+  });
+
   it('취소하면 Claude Code에 중단을 넘기고 결과 대신 취소 이유를 던진다', async () => {
     const { sdk, state } = fakeClaudeCode({
       turns: [[{ tool: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }, { tool: 'read_file', input: { path: 'api/src/New.java' } }, { text: '추가했습니다.' }]],
