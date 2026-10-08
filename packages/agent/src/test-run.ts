@@ -34,26 +34,38 @@ const MAVEN_REPORT_GLOB = 'target/surefire-reports/*.xml';
 /** 여러 보고서 파일을 한 번의 exec로 모아올 때 경계로 쓰는 표지. 실제 보고서 내용에 나타날 일이 없는 문자열이다 */
 const REPORT_BOUNDARY = '@@@b-studio-test-report@@@';
 
-function collectGlobCommand(glob: string): string[] {
-  return ['sh', '-c', `for f in ${glob}; do [ -f "$f" ] && { echo '${REPORT_BOUNDARY}'"$f"; cat "$f"; echo; }; done`];
+/** glob 여러 개를 한 번의 exec로 모두 모은다(호출마다 왕복하지 않으려고 한 셸 명령에 합친다) */
+function collectGlobCommand(globs: readonly string[]): string[] {
+  const body = globs.map((glob) => `for f in ${glob}; do [ -f "$f" ] && { echo '${REPORT_BOUNDARY}'"$f"; cat "$f"; echo; }; done`).join('; ');
+  return ['sh', '-c', body];
 }
 
 /**
  * runner·대상에 맞는 테스트 실행 명령과 보고서 수거 명령을 만든다.
  * `wrapper`는 서비스 폴더에 Gradle·Maven 래퍼(gradlew·mvnw)가 있는지다. 없으면 이미지의 gradle·mvn을 쓴다(주지 않으면 이전 동작: Gradle은 래퍼, Maven은 mvn) —
  * 폴더 열기가 래퍼 없는 Spring 서비스를 gradle 이미지로 띄우기 때문이다(pay 복제본에서 `./gradlew`가 없어 실패했다)
+ * `extraReportRoots`는 이 서비스의 `includes`(ADR-139, studio.yaml)가 가리키는 서비스 폴더 밖 경로들 — 컨테이너
+ * 안에서 그 경로로도 접근할 수 있는 절대/상대 경로를 호출하는 쪽이 만들어 준다. Gradle 멀티 모듈 빌드에서
+ * `-p <서비스 폴더> test`가 그 서브프로젝트의 테스트도 함께 돌리지만(ADR-139), 보고서는 서브프로젝트 자신의
+ * build/test-results 아래에 남아 서비스 폴더만 보면 놓친다(도그푸딩 마찰 135) — 그 경로의 보고서도 같이 모은다
  */
-export function buildTestRunPlan(runner: Runner, target?: TestTarget, { wrapper }: { wrapper?: boolean } = {}): TestRunPlan {
+export function buildTestRunPlan(
+  runner: Runner,
+  target?: TestTarget,
+  { wrapper, extraReportRoots = [] }: { wrapper?: boolean; extraReportRoots?: readonly string[] } = {},
+): TestRunPlan {
   switch (runner) {
     case 'gradle': {
       const command = [wrapper === false ? 'gradle' : './gradlew', 'test', '--no-daemon', '--console=plain'];
       if (target?.className) command.push('--tests', target.testName ? `${target.className}.${target.testName}` : target.className);
-      return { command, collect: collectGlobCommand(GRADLE_REPORT_GLOB), format: 'junit-xml' };
+      const globs = [GRADLE_REPORT_GLOB, ...extraReportRoots.map((root) => `${root}/${GRADLE_REPORT_GLOB}`)];
+      return { command, collect: collectGlobCommand(globs), format: 'junit-xml' };
     }
     case 'maven': {
       const command = [wrapper === true ? './mvnw' : 'mvn', '-q', 'test'];
       if (target?.className) command.push(`-Dtest=${target.testName ? `${target.className}#${target.testName}` : target.className}`);
-      return { command, collect: collectGlobCommand(MAVEN_REPORT_GLOB), format: 'junit-xml' };
+      const globs = [MAVEN_REPORT_GLOB, ...extraReportRoots.map((root) => `${root}/${MAVEN_REPORT_GLOB}`)];
+      return { command, collect: collectGlobCommand(globs), format: 'junit-xml' };
     }
     case 'vitest': {
       const command = ['npx', 'vitest', 'run', '--reporter=json', `--outputFile=${JEST_LIKE_REPORT_PATH}`];
