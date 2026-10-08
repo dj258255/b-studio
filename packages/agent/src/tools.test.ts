@@ -111,6 +111,59 @@ describe('delete_file', () => {
   });
 });
 
+describe('write_file·edit_file과 studio.yaml 스키마 검증(도그푸딩 마찰 131)', () => {
+  // 실측: BE-commerce 세션(pay-2-5b640fd3)에서 에이전트가 workflow.autoPageChecks에 객체 대신 배열을 썼다
+  const brokenSpec = 'version: 1\nname: x\nservices:\n  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }\nworkflow:\n  autoPageChecks: [web]\n';
+  const validSpec = 'version: 1\nname: x\nservices:\n  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }\nworkflow:\n  autoPageChecks: { service: web, mode: http }\n';
+
+  it('write_file이 studio.yaml에 형식이 틀린 내용을 쓰면 쓰기는 하되 실패로 알린다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-spec-write-'));
+    const workspace = new Workspace(root);
+
+    const outcome = await executeTool('write_file', { path: 'studio.yaml', content: brokenSpec }, { ...context, workspace });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('wrote studio.yaml');
+    expect(outcome.content).toContain('workflow.autoPageChecks');
+    // 알리기만 하고 쓰기는 거부하지 않는다 — 다음 턴에서 같은 내용을 고칠 수 있어야 한다
+    expect(await readFile(path.join(root, 'studio.yaml'), 'utf8')).toBe(brokenSpec);
+  });
+
+  it('write_file이 studio.yaml에 스키마에 맞는 내용을 쓰면 통과한다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-spec-write-'));
+    const workspace = new Workspace(root);
+
+    const outcome = await executeTool('write_file', { path: 'studio.yaml', content: validSpec }, { ...context, workspace });
+
+    expect(outcome).toEqual({ ok: true, content: 'wrote studio.yaml' });
+  });
+
+  it('edit_file로 studio.yaml을 형식이 틀리게 고치면 실패로 알린다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-spec-edit-'));
+    const workspace = new Workspace(root);
+    await workspace.write('studio.yaml', validSpec);
+
+    const outcome = await executeTool(
+      'edit_file',
+      { path: 'studio.yaml', old_text: '{ service: web, mode: http }', new_text: '[web]' },
+      { ...context, workspace },
+    );
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('edited studio.yaml');
+    expect(outcome.content).toContain('workflow.autoPageChecks');
+  });
+
+  it('studio.yaml이 아닌 파일은 스키마 검증을 하지 않는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'tools-spec-other-'));
+    const workspace = new Workspace(root);
+
+    const outcome = await executeTool('write_file', { path: 'a.yaml', content: brokenSpec }, { ...context, workspace });
+
+    expect(outcome).toEqual({ ok: true, content: 'wrote a.yaml' });
+  });
+});
+
 describe('질문 모드', () => {
   const readOnly: ToolContext = { ...context, readOnly: true };
 

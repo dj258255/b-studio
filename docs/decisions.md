@@ -164,6 +164,7 @@
 - [ADR-141 체크포인트 밖(생성 파일, ADR-067)의 내용을 체크포인트 sha별 사이드카 스냅샷으로 따로 보관해 되돌리기·복원에 쓴다](#adr-141-체크포인트-밖생성-파일-adr-067의-내용을-체크포인트-sha별-사이드카-스냅샷으로-따로-보관해-되돌리기복원에-쓴다)
 - [ADR-142 claude-code 러너가 일시적 네트워크 오류에서 바로 실패하지 않고, 같은 세션을 resume으로 이어받아 재시도한다](#adr-142-claude-code-러너가-일시적-네트워크-오류에서-바로-실패하지-않고-같은-세션을-resume으로-이어받아-재시도한다)
 - [ADR-143 세션 상태(ready)와 실제 컨테이너 상태를 분리해 보고, 모델을 부르기 전에 ensureInfra로 확인·복구한다](#adr-143-세션-상태ready와-실제-컨테이너-상태를-분리해-보고-모델을-부르기-전에-ensureinfra로-확인복구한다)
+- [ADR-144 형식이 틀린 studio.yaml을 검증 게이트와 쓰기 도구에서 즉시 알리고, 조용한 옛 설정 전환에는 경고를 남긴다](#adr-144-형식이-틀린-studioyaml을-검증-게이트와-쓰기-도구에서-즉시-알리고-조용한-옛-설정-전환에는-경고를-남긴다)
 
 ---
 
@@ -5994,3 +5995,45 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - **턴 단위 "N번 반복되면 멈춘다"는 상한은 두지 않았다.** 결정 2의 사전 확인이 모델을 부르기 전에 걸러 턴 0에서 끝나므로, 반복 자체가 거의 일어나지 않는다고 보고 더 두지 않았다 — 다만 사전 확인이 못 잡는 "실행 중간에 컨테이너가 사라지는" 경우(결정 3)는 한 번의 자동 복구 시도로만 대응하고, 그래도 안 되면 모델의 판단(요약에 남기고 멈추기)에 맡긴다. 모델이 그 안내를 무시하고 계속 반복할 가능성은 남아 있다 — 실제로 그런 사례가 더 생기면 ADR-124의 벤치 로직처럼 연속 횟수를 세는 상한을 loop.ts나 각 러너에 추가하는 쪽으로 다시 검토한다.
 - **화면이 요청을 보내기 전에는 "ready인데 컨테이너가 없다"를 보여주지 않는다.** 결정 2·3이 모두 요청이 왔을 때만 확인하므로, 세션을 열어만 두고 아무 요청도 보내지 않는 동안에는 리소스 탭(`resource-panel.tsx`)이 지워진 컨테이너를 빈 목록으로만 보여준다(명시적 경고는 없다) — 위 선택지 (c)에서 적었듯 범위 밖으로 미뤘다.
 - **Kubernetes 제공자는 이번에 손대지 않았다.** `ensureInfra`가 없으면 확인·복구를 건너뛸 뿐 실행이 막히지는 않으므로 지금 동작(옛 동작)과 같다 — 다만 Kubernetes에서 같은 종류의 마찰이 생기면 이번 Docker 구현(compose ps로 확인, compose up으로 복구)과 같은 뜻의 Pod 조회·재생성을 따로 설계해야 한다.
+
+## ADR-144 형식이 틀린 studio.yaml을 검증 게이트와 쓰기 도구에서 즉시 알리고, 조용한 옛 설정 전환에는 경고를 남긴다
+
+상태: 채택
+관련: ADR-067, ADR-137, ADR-139, ADR-141
+
+### 맥락
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기만)에서 실측(트러블슈팅 87): 에이전트가 실행 중 `studio.yaml`의 `workflow.autoPageChecks`에 스키마(객체)가 아닌 배열을 썼다. 그 실행도, 이후 실행도 이 형식 오류를 알리지 않았다. 실행이 실패해 되돌려졌을 때 `studio.yaml`은 생성 파일(ADR-067)이라 git 추적 밖이고, 잘못된 편집이 작업 복사본에 그대로 남았다. 다음 세션 재개가 `loadProject()`에서 막혀 사람이 작업 복사본의 파일을 직접 고쳐야 했다.
+- `packages/agent/src/verify.ts`의 `restartServicesFor`(실행 중 바뀐 `studio.yaml`을 다시 읽어 소유 판정에 쓴다, 도그푸딩 마찰 113·121)와 `apps/studio/lib/server/sessions.ts`의 `reloadSessionProject`(체크포인트 저장·되돌리기·복원 뒤 재읽기)는 둘 다 `loadProject(...).catch(() => fallback)`로 다시 읽기 실패를 조용히 삼키고 옛 설정으로 넘어갔다 — 서비스를 계속 띄우려는 선택은 맞지만, 그 사실을 아무에게도 알리지 않았다.
+- `studio.yaml`을 쓰는 경로는 둘이다: b-studio가 직접 만든 `write_file`·`edit_file` 도구(직접 만든 루프가 쓴다)와, 로컬 CLI 백엔드(Claude Code 등)가 자신의 파일 도구로 디스크에 직접 쓰는 경로(ADR-093·117 등, b-studio의 `write_file`을 거치지 않는다). 검증 게이트(`gate.ts`의 `VerificationGate.check()`)는 "모델 호출 방식과 무관하게 같은 규칙으로 완료를 판정"하도록 이미 분리돼 있어, 두 경로 모두 턴이 끝날 때 한 번은 지나간다.
+
+### 판단 기준
+1. 에이전트가 같은 실행에서 형식 오류를 보고 스스로 고칠 기회를 줄 것 — 다음 세션까지 미루지 않을 것.
+2. 로컬 CLI 백엔드가 자신의 도구로 `studio.yaml`을 써도 빠짐없이 잡을 것.
+3. 다시 읽기 실패로 옛 설정을 계속 쓰는 다른 경로(되돌리기·복원 등)도 조용히 넘어가지 않을 것.
+4. 세션 재개가 이미 막혔다면, 적어도 어느 필드가 틀렸는지와 고칠 방법을 알려줄 것.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) 쓰기 도구(`write_file`·`edit_file`)가 `studio.yaml`을 쓴 직후 스키마로 검증해 도구 결과에 오류를 돌려준다 | 기준 1을 가장 빨리 만족한다 — 턴이 끝나기 전, 도구 호출 하나 단위로 피드백을 준다. 하지만 로컬 CLI 백엔드는 이 도구를 거치지 않으므로(기준 2) 혼자서는 불충분하다 |
+| (b) 게이트(`VerificationGate.check()` → `verifyChanges` → `restartServicesFor`)가 바뀐 파일에 `studio.yaml`이 있으면 다시 읽어 검증하고, 실패하면 게이트 실패로 돌린다 | 백엔드와 무관하게(기준 2) 턴이 끝날 때마다 반드시 지나가므로 혼자서도 기준 1·2를 만족한다. 다만 도구 호출 하나 단위보다는 피드백이 한 턴 늦다 |
+| (c) (a)와 (b)를 함께 쓴다 | (a)로 가능한 경로(직접 만든 루프)는 가장 빠른 피드백을, (b)로 모든 경로에 안전망을 둔다. 코드 추가량이 적고(둘 다 기존 함수에 몇 줄을 더하는 수준) 서로 책임이 겹치지 않는다 — **채택** |
+| (d) 세션 재개가 막히면 project(시크릿 목록)가 없어도 작업 복사본을 체크포인트 시점으로 자동으로 되돌린다(discardWorkingCopy를 loadProject보다 먼저 부른다) | 기준 4를 가장 근본적으로 푼다. 그런데 `discardWorkingCopy`가 지키는 안전장치 중 하나(문서 커밋 전 시크릿 값 검사, `protectPendingDocsBeforeDiscard`의 `findSecrets`)는 `resolveSecrets(project)`가 있어야 동작하고, project는 아직 읽지 못한 상태다. 시크릿 검사를 건너뛰고 되돌리면 문서에 섞인 시크릿 값이 가려지지 않은 채 커밋될 수 있어, 범위를 좁히지 않고 그대로 들어가면 새 위험을 들인다 — 이번에는 보류하고 "다음 과제"로 남긴다(아래 결정 4) |
+
+### 결정
+1. **`packages/agent/src/verify.ts`**: `RestartReport`·`VerificationReport`에 `specError?: string`을 더했다. `restartServicesFor`가 `studio.yaml`이 바뀐 재시작에서 `loadProject`에 실패하면 `specError`에 원인(필드별 오류 포함)을 남기고, 재시작 자체는 읽을 수 있던 옛 `project`로 최대한 계속한다(서비스를 멈추지 않는다). `verifyChanges`는 `specError`가 있으면 `ok`를 항상 `false`로 만든다 — 다른 실패(서비스 미준비, 계약 깨짐, 시크릿 노출)와 같은 자리에서 게이트가 다룬다. `formatVerificationReport`도 맨 앞에 이 사실을 적는다.
+2. **`packages/agent/src/tools.ts`**: `write_file`·`edit_file`이 `path`가 `studio.yaml`이면 쓰기가 끝난 뒤 `parseSpec`으로 검증해, 실패하면 도구 결과를 실패(`ok: false`)로 돌려준다. 쓰기는 거부하지 않는다 — 내용이 남아야 다음 턴(또는 같은 턴의 다음 도구 호출)에서 고칠 수 있다. `studio.yaml`과 compose가 서로 맞는지(서비스 이름 등)까지는 보지 않는다 — compose를 읽어야 하는 교차 검증은 비용이 더 크고, 어차피 게이트(1번)가 `loadProject`로 전체를 본다.
+3. **`apps/studio/lib/server/sessions.ts`**: `reloadSessionProject`가 다시 읽기에 실패하면 `notice` 이벤트로 "이전 설정으로 계속합니다"와 원인을 대화에 남긴다(여전히 옛 `project`로 넘어가지만, 조용하지 않다).
+4. `resumeSession`은 `loadProject`가 `SpecError`로 실패하면 그 메시지(어느 필드가 틀렸는지)에 작업 복사본의 `studio.yaml` 경로를 더해 돌려주고, 마지막 체크포인트의 생성 파일 스냅샷(ADR-141, `gitDir/b-studio/excluded/<sha>/files/studio.yaml`)이 있으면 그 경로도 안내한다(`CheckpointStore.excludedSnapshotFile`을 새로 공개했다). 사람이 그 스냅샷 내용으로 작업 복사본의 파일을 덮어쓰면 재개할 수 있다. 위 선택지 (d)의 자동 되돌리기는 이번에 다루지 않는다 — **다음 과제**: `discardWorkingCopy`가 project 없이도 안전하게(시크릿 검사 없이, 또는 시크릿 검사를 나중으로 미루고) 동작할 범위를 먼저 정한 뒤에 다시 본다.
+
+### 검증 결과
+- `packages/agent/src/verify.test.ts`: 실행 중 `studio.yaml`이 스키마에 맞지 않게 바뀌면 `specError`를 남기고 재시작은 계속하는지, `verifyChanges`가 그 경우 `ok: false`로 게이트를 실패시키고 고치면 통과하는지를 보는 테스트 2개를 더했다.
+- `packages/agent/src/tools.test.ts`: `write_file`·`edit_file`이 `studio.yaml`에 쓸 때 형식이 틀리면 실패로 알리되 쓰기는 반영하고, 맞는 내용·다른 파일에는 손대지 않는지 보는 테스트 4개를 더했다.
+- `apps/studio/lib/server/sessions-regenerate-apply.test.ts`: "이 세션에도 적용"이 `studio.yaml`을 스키마에 맞지 않게 다시 써도 `reloadSessionProject`가 `notice`를 남기고 이전 설정으로 재시작을 이어가는지 보는 테스트를 더했다.
+- `apps/studio/lib/server/sessions-resume-spec-error.test.ts`: 중지한 동안 `studio.yaml`이 깨진 채로 남으면 `resumeSession`이 틀린 필드와 마지막 체크포인트 스냅샷 경로를 담아 거부하고, 그 경로에 실제로 고칠 수 있는 옛 내용이 있는지 실제 `CheckpointStore`로 끝까지 돌려 확인하는 테스트를 더했다.
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0)로 확인했다. 실제 BE-commerce 세션이나 Docker를 다시 띄워 재검증하지는 않았다(세션·컨테이너를 건드리지 말라는 제약 때문에 임시 폴더와 가짜 샌드박스만 썼다) — 확인하지 못한 것으로 남긴다.
+
+### 감수한 트레이드오프
+- `write_file`·`edit_file`의 즉시 검증(결정 2)은 `studio.yaml`만 스키마로 보고 compose와의 교차 검증(서비스 이름 불일치 등)은 건너뛴다 — 그 오류는 턴이 끝날 때 게이트(결정 1)가 늦게라도 잡는다. 두 검증의 시점이 다르다는 사실 자체가 드러나는 불일치지만, 매 쓰기마다 compose까지 다시 읽는 비용보다는 낫다고 판단했다.
+- 세션 재개 막힘(결정 4)의 자동 복구는 이번에 넣지 않았다 — 사람이 안내받은 경로를 보고 직접 파일을 고쳐야 한다. 안내가 가리키는 스냅샷이 아예 없는 경우(내 폴더 세션, 생성 파일 스냅샷이 아직 없던 옛 세션)에는 작업 복사본 경로만 알려주고 더 도와주지 못한다.
+- `restartServicesFor`가 `specError`가 있어도 재시작 자체는 계속한다(서비스를 멈추지 않으려는 선택, ADR-080과 같은 방향) — 그래서 같은 턴 안에서는 "검증은 실패했지만 서비스는 떠 있다"는 상태가 잠깐 존재한다. 게이트가 바로 재시도를 요구하므로 길게 남는 상태는 아니라고 보고 감수했다.

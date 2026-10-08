@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { describeUsage, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import type { LoadedProject } from '@b-studio/spec';
+import { parseSpec, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
 import type { Note, NoteKind } from './coordination';
 import type { DesignSource } from './design';
@@ -417,12 +417,14 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
     case 'write_file': {
       const file = string(args, 'path');
       await workspace.write(file, string(args, 'content'));
-      return success(`wrote ${file}`);
+      const specIssue = await validateSpecWrite(workspace, file);
+      return specIssue ? failure(`wrote ${file}, but ${specIssue}`) : success(`wrote ${file}`);
     }
     case 'edit_file': {
       const file = string(args, 'path');
       await workspace.edit(file, string(args, 'old_text'), string(args, 'new_text'));
-      return success(`edited ${file}`);
+      const specIssue = await validateSpecWrite(workspace, file);
+      return specIssue ? failure(`edited ${file}, but ${specIssue}`) : success(`edited ${file}`);
     }
     case 'delete_file': {
       const file = string(args, 'path');
@@ -548,6 +550,23 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
     }
     default:
       return failure(`Unknown tool: ${name}`);
+  }
+}
+
+/**
+ * write_file·edit_file이 studio.yaml을 썼으면 그 자리에서 스키마로 검증한다(도그푸딩 마찰 131). 이 도구를 쓰는
+ * 백엔드(직접 만든 루프)에서는 검증 게이트(턴이 끝날 때)보다 먼저 알려줄 수 있다 — 로컬 CLI 백엔드(claude-code 등)는
+ * 이 도구 대신 자신의 파일 도구로 쓰므로 여기를 지나지 않지만, 그 경우는 게이트(verify.ts)가 똑같이 잡는다.
+ * compose와 맞는지까지는 보지 않는다(서비스 이름 등은 compose를 읽어야 해 여기서는 스키마만 본다) — 그건 게이트가 본다.
+ * 쓰기 자체는 막지 않고(내용은 남아야 다음 턴에서 고칠 수 있다) 오류만 돌려준다
+ */
+async function validateSpecWrite(workspace: Workspace, file: string): Promise<string | undefined> {
+  if (file !== SPEC_FILE) return undefined;
+  try {
+    parseSpec(await workspace.read(file));
+    return undefined;
+  } catch (error) {
+    return error instanceof SpecError ? error.message : describe(error);
   }
 }
 
