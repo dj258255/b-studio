@@ -978,6 +978,25 @@ describe('CheckpointStore 생성 파일(제외됨) 스냅샷 (ADR-141, 도그푸
     await expect(read('Dockerfile.b-studio')).rejects.toThrow();
   });
 
+  it('대상 체크포인트에 생성 파일 스냅샷이 없으면(기능 이전 체크포인트) 생성 파일을 지우지 않는다(도그푸딩 회귀: 세션 재개가 studio.yaml·compose를 지웠다)', async () => {
+    // 스냅샷 기능 이전에 만든 체크포인트를 흉내 낸다: excludedFiles 없이 시작한다
+    const before = new CheckpointStore(root);
+    await before.init();
+    await write('studio.yaml', 'version: 1\n');
+    await write('compose.b-studio.yaml', 'services: {}\n');
+    await excludeFromRoot('/studio.yaml');
+    await excludeFromRoot('/compose.b-studio.yaml');
+    await write('api/src/Order.java', 'class Order { int pending }\n');
+
+    // 기능이 들어온 뒤 같은 저장소를 다시 연다. HEAD 체크포인트에는 스냅샷이 없다
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml', 'compose.b-studio.yaml'] });
+    const { files } = await store.discard();
+
+    expect(files).toEqual(['api/src/Order.java']);
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+    expect(await read('compose.b-studio.yaml')).toBe('services: {}\n');
+  });
+
   it('버리기 전에 생성 파일도 백업하고, 되살리기로 그대로 되돌린다', async () => {
     const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
     const start = await store.init();
