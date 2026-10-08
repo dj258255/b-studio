@@ -26,6 +26,8 @@ const PLAN_ID = process.env.PLAN_ID ?? "45539ab6";
 /** 미리보기로 찍을 프런트엔드 탭 이름. 탭은 "화면 (<서비스 이름>)"이라 프로젝트마다 다르다 */
 const FRONTEND_TAB = process.env.FRONTEND_TAB ?? "화면 (frontend)";
 /** 쉼표로 고른 사진만 찍는다(예: ONLY=studio-hero-light,studio-requirements). 비우면 전부 */
+/** 히어로 이미지에서 미리보기로 열 경로. 비우면 앱 첫 화면 그대로 둔다(예: HERO_PREVIEW_PATH=/shorts) */
+const HERO_PREVIEW_PATH = process.env.HERO_PREVIEW_PATH ?? "";
 const ONLY = (process.env.ONLY ?? "").split(",").map((name) => name.trim()).filter(Boolean);
 const MAX_BYTES = 600_000;
 
@@ -98,6 +100,17 @@ async function snapChatToCleanTop(page: Page): Promise<void> {
   });
 }
 
+/** HERO_PREVIEW_PATH가 있으면 미리보기 경로 입력칸에 넣고 열어, 영상이 재생될 시간을 기다린다 */
+async function openHeroPreviewPath(page: Page): Promise<void> {
+  if (!HERO_PREVIEW_PATH) return;
+  // "화면 확인 중 QA 보기로 자동 전환"이 앱 미리보기를 다시 QA 보기로 덮을 수 있어, 입력 직전에 한 번 더 고른다
+  await clickTab(page, "화면 하위 탭", "앱 미리보기");
+  await page.locator("#preview-path").waitFor({ state: "visible", timeout: 15_000 });
+  await page.locator("#preview-path").fill(HERO_PREVIEW_PATH);
+  await page.getByRole("button", { name: "열기", exact: true }).click();
+  await page.waitForTimeout(8000);
+}
+
 const SHOTS: ShotSpec[] = [
   {
     name: "studio-hero-light",
@@ -113,6 +126,7 @@ const SHOTS: ShotSpec[] = [
       // 곧장 QA 보기로 덮어쓴다 — 게시판 화면을 보여주려면 앱 미리보기로 다시 돌려놓는다
       await clickTab(page, "화면 하위 탭", "앱 미리보기");
       await page.waitForTimeout(2200);
+      await openHeroPreviewPath(page);
     },
   },
   {
@@ -127,6 +141,7 @@ const SHOTS: ShotSpec[] = [
       await page.waitForTimeout(1200);
       await clickTab(page, "화면 하위 탭", "앱 미리보기");
       await page.waitForTimeout(2200);
+      await openHeroPreviewPath(page);
     },
   },
   {

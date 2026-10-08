@@ -11,7 +11,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
-  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 이커머스 백엔드(Spring Boot)와 웹(Next.js)을 샌드박스에 띄워 둔 상태로, 오른쪽 대화에는 숏폼 상태 머신 요청이 검증 게이트(파일 반영, 서비스 재시작과 준비 판정, API 계약 비교, 리뷰)를 통과해 체크포인트로 남은 기록이 보인다">
+  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 이커머스 백엔드(Spring Boot)와 웹(Next.js), 미디어 서버를 샌드박스에 띄워 둔 상태로, 왼쪽 미리보기에서는 숏폼 피드(/shorts)가 FFmpeg로 변환한 세로 영상을 재생한다. 오른쪽 대화에는 요청이 검증 게이트(브라우저 화면 확인 /, /shorts, 백엔드·웹 테스트, 리뷰)를 통과해 체크포인트로 남은 기록이 보인다">
 </picture>
 
 ## 핵심 설계 세 가지
@@ -84,7 +84,7 @@
 | 실행 환경 | 샌드박스 로그·자원, 사용자가 직접 띄운 서비스를 보기만 하는 "내 환경", 설정한 프로젝트의 운영 이미지 배포와 롤백 |
 | 앱 | 웹 스튜디오, CLI, macOS 데스크톱 앱 |
 
-<img src="docs/images/studio-requirements.jpg" width="760" alt="요구사항 탭. 라이브 커머스·숏폼 명세에서 뽑은 요구사항 32개가 인수 조건과 함께 보이고, 요구사항마다 검증 근거를 추적한다">
+<img src="docs/images/studio-requirements.jpg" width="760" alt="요구사항 탭. 라이브 커머스·숏폼 명세에서 뽑은 요구사항 32개 중 11개가 검증됨으로 표시되고, 요구사항마다 아직 테스트가 없는 시나리오 수가 배지로 보인다">
 
 ## 빠른 시작
 
