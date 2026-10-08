@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { loadProject, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
+import { loadProject, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
 import { syncSystemPackages } from './system-packages-sync';
@@ -50,6 +50,12 @@ export interface VerificationReport {
    * "검증됨"이 실제보다 부풀려 보이지 않도록 남긴다 — 실패로 세지는 않는다
    */
   skippedOff: string[];
+  /**
+   * 이번 실행이 바꾼 studio.yaml이 스키마에 맞지 않을 때의 오류(도그푸딩 마찰 131). 전에는 조용히 옛 설정으로
+   * 넘어갔지만(loadProject(...).catch(() => project)), 그러면 에이전트가 같은 실행에서 고칠 기회를 놓치고
+   * 잘못된 studio.yaml이 체크포인트로 남는다. 있으면 ok는 항상 false다
+   */
+  specError?: string;
 }
 
 export interface SecretLeak {
@@ -79,8 +85,8 @@ export interface VerifyOptions {
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
   const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
   const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
-  const { sync, restarted, unverifiedFiles, skippedOff } = await restartServicesFor(sandbox, project, changedFiles, start);
-  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff };
+  const { sync, restarted, unverifiedFiles, skippedOff, specError } = await restartServicesFor(sandbox, project, changedFiles, start);
+  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff, specError };
 
   // 재시작에 실패했거나(서비스가 준비 안 됨) 꺼 둬 재시작을 건너뛴 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
   const failed = new Set(restarted.filter((check) => !check.ready).map((check) => check.service));
@@ -104,9 +110,10 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     restarted.every((check) => check.ready) &&
     contracts.every((check) => !check.error) &&
     (allowBreaking || !breaking) &&
-    secretLeaks.length === 0;
+    secretLeaks.length === 0 &&
+    specError === undefined;
 
-  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff };
+  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff, specError };
 }
 
 /**
@@ -131,6 +138,8 @@ export interface RestartReport {
   unverifiedFiles: string[];
   /** 사용자가 꺼 둬(ADR-083) 재시작을 건너뛴 managed 서비스. 실패로 세지 않는다 */
   skippedOff: string[];
+  /** 이번에 바뀐 studio.yaml이 스키마에 맞지 않을 때의 오류. VerificationReport.specError와 같다 */
+  specError?: string;
 }
 
 /**
@@ -152,9 +161,18 @@ export async function restartServicesFor(
   { alsoRestart = [], deletedFileRetryDelayMs = 3_000 }: RestartOptions = {},
 ): Promise<RestartReport> {
   // 실행 중 에이전트가 studio.yaml을 바꿨으면(systemPackages·includes 등) 세션이 시작할 때 읽은 project에는 그 선언이
-  // 없다. studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 소유 판정과 Dockerfile 동기화를 한다(읽지 못하면 지금
-  // project를 그대로 쓴다). 서비스 선택(offServices)은 파일이 아니라 세션 상태라 지금 project의 것을 쓴다(도그푸딩 마찰 113·121)
-  const declared = files.includes(SPEC_FILE) ? await loadProject(project.root).catch(() => project) : project;
+  // 없다. studio.yaml이 바뀐 재시작에서는 다시 읽은 선언으로 소유 판정과 Dockerfile 동기화를 한다. 스키마에 맞지 않으면
+  // (도그푸딩 마찰 131) 조용히 옛 project로 넘어가지 않고 specError에 남겨 돌려준다 — verifyChanges가 이걸 보고 게이트를
+  // 실패시켜야 에이전트가 같은 실행에서 고친다. 재시작 자체는 옛 project로 최대한 계속 시도한다(서비스를 완전히 멈추지 않게)
+  let declared = project;
+  let specError: string | undefined;
+  if (files.includes(SPEC_FILE)) {
+    try {
+      declared = await loadProject(project.root);
+    } catch (error) {
+      specError = error instanceof SpecError ? error.message : describe(error);
+    }
+  }
   const owned = servicesForFiles(declared, files);
   const wanted = [...new Set([...owned.services, ...alsoRestart])];
   // 사용자가 서비스 선택(ADR-083)에서 꺼 둔 서비스는 재시작하지 않는다(껐는데 다시 켜 버리면 선택을 무시하는 셈이다).
@@ -174,7 +192,7 @@ export async function restartServicesFor(
   try {
     sync = { elapsedMs: (await sandbox.sync([...files], { signal: start?.signal })).elapsedMs };
   } catch (error) {
-    return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched, skippedOff };
+    return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched, skippedOff, specError };
   }
 
   const restarted = await Promise.all(
@@ -189,7 +207,7 @@ export async function restartServicesFor(
     }),
   );
 
-  return { sync, restarted, unverifiedFiles: unmatched, skippedOff };
+  return { sync, restarted, unverifiedFiles: unmatched, skippedOff, specError };
 }
 
 async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptions): Promise<ServiceCheck> {
@@ -270,6 +288,10 @@ export async function captureBaselines(
 
 export function formatVerificationReport(report: VerificationReport, { allowBreaking }: { allowBreaking: boolean }): string {
   const lines: string[] = [report.ok ? '검증 통과' : '검증 실패'];
+
+  if (report.specError) {
+    lines.push(`- ${SPEC_FILE} 형식이 올바르지 않아 이전 설정으로 재시작했습니다:`, ...report.specError.split('\n').map((line) => `    ${line}`));
+  }
 
   if ('error' in report.sync) {
     lines.push(`- 샌드박스 파일 반영 확인 실패: ${report.sync.error}`);

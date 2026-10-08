@@ -2796,3 +2796,29 @@ DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 
 
 ### 배운 점
 84번 ADR이 "옛 체크포인트로 되돌리면 그때는 없었다로 보고 지울 수 있다"를 알려진 한계로 적었다. 하지만 이미 떠 있는 세션은 모두 옛 체크포인트 위에 있으니, 그 한계는 머지 직후 모든 세션에서 터진다. 모르는 상태를 기본값으로 메우면 안 된다.
+
+## 87. 에이전트가 형식에 맞지 않는 studio.yaml을 써도 그 실행도 다음 세션 재개도 알리지 않고 조용히 넘어감
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 작업 복사본은 읽기만 함) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+실행 중 에이전트가 `studio.yaml`의 `workflow.autoPageChecks`에 객체 대신 배열(`[web]`)을 썼다. 스키마(`packages/spec/src/schema.ts`의 `AutoPageChecksSchema`)는 객체(`{ service, mode, … }`)다. 그 실행도, 그 뒤 실행도 이 형식 오류를 알리지 않았다. 실행이 실패해 되돌려졌을 때 `studio.yaml`은 git 추적 밖(생성 파일, ADR-067)이라 잘못된 편집이 작업 복사본에 남았다. 다음 세션 재개가 `studio.yaml 형식이 올바르지 않습니다 - workflow.autoPageChecks: Invalid input: expected object, received array`로 막혀, 사람이 작업 복사본의 파일을 직접 고쳐야 했다.
+
+### 원인
+`packages/agent/src/verify.ts`의 `restartServicesFor`는 실행 중 바뀐 `studio.yaml`을 다시 읽어 소유 판정에 쓰는데(`도그푸딩 마찰 113·121`), 다시 읽기가 실패하면 `loadProject(project.root).catch(() => project)`로 조용히 옛 `project`로 넘어갔다. 검증 게이트(`gate.ts`)는 이 결과만 보고 통과·실패를 정하므로, 형식 오류는 어디에도 드러나지 않았다. `apps/studio/lib/server/sessions.ts`의 `reloadSessionProject`도 같은 모양(`.catch(() => session.project)`)으로 체크포인트 저장·되돌리기·복원 뒤의 재읽기 실패를 삼켰다. 세션 재개(`resumeSession`)는 작업 복사본을 버리기 전에(`discardWorkingCopy`) `loadProject`를 먼저 불러, 생성 파일이 git 추적 밖이라 아직 버려지지 않은 깨진 `studio.yaml`에 그대로 걸려 막혔다.
+
+### 수정
+- `packages/agent/src/verify.ts`: `restartServicesFor`가 `studio.yaml` 다시 읽기에 실패하면 `VerificationReport.specError`에 원인(어느 필드가 틀렸는지 포함)을 남긴다. 재시작 자체는 읽을 수 있던 옛 설정으로 최대한 계속하지만(서비스를 멈추지 않는다), `verifyChanges`의 `ok`는 `specError`가 있으면 항상 `false`다 — 검증 게이트가 실패로 보고 에이전트에게 돌려줘, 같은 실행에서 고칠 기회를 준다. `formatVerificationReport`도 이 사실을 맨 앞에 적는다.
+- `packages/agent/src/tools.ts`: `write_file`·`edit_file`이 `studio.yaml`을 쓰면 그 자리에서 스키마(`parseSpec`)로 검증해 도구 결과를 실패로 돌려준다. 쓰기 자체는 거부하지 않는다(내용은 남아야 다음 턴에서 고칠 수 있다). 로컬 CLI 백엔드(Claude Code 등)는 이 도구 대신 자신의 파일 도구로 쓰므로 여기를 지나지 않지만, 그 경로는 검증 게이트(위)가 백엔드와 무관하게 똑같이 잡는다.
+- `apps/studio/lib/server/sessions.ts`: `reloadSessionProject`가 다시 읽기에 실패해도 조용히 옛 `project`로 넘어가지 않고, `notice` 이벤트로 "이전 설정으로 계속합니다"를 대화에 남긴다.
+- `resumeSession`은 `loadProject` 실패가 `SpecError`면 어느 필드가 틀렸는지(원래 메시지)에 작업 복사본 경로를 더해 돌려주고, 마지막 체크포인트의 생성 파일 스냅샷(`gitDir/b-studio/excluded/<sha>/files/studio.yaml`, ADR-141)이 있으면 그 경로도 안내해 사람이 그 내용으로 덮어쓸 수 있게 한다. `discardWorkingCopy` 전에 자동으로 되돌리는 것은 project(시크릿 목록)가 있어야 안전하게 판단할 수 있는 범위라 이번에는 다루지 않았다(ADR-144에 다음 과제로 남겼다).
+
+### 검증
+- `packages/agent/src/verify.test.ts`: 실행 중 `studio.yaml`이 스키마에 맞지 않게 바뀌면 `restartServicesFor`가 `specError`를 남기고(재시작은 계속함), `verifyChanges`는 `ok: false`로 게이트를 실패시키며, 고치면 같은 project로 다시 검증했을 때 통과하는지 보는 테스트 2개를 더했다.
+- `packages/agent/src/tools.test.ts`: `write_file`·`edit_file`이 `studio.yaml`에 형식이 틀린 내용을 쓰면 실패로 알리되 쓰기는 그대로 반영하고, 맞는 내용·다른 파일에는 영향이 없는지 보는 테스트 4개를 더했다.
+- `apps/studio/lib/server/sessions-regenerate-apply.test.ts`: "이 세션에도 적용"이 `studio.yaml`을 스키마에 맞지 않게 다시 쓰면 `reloadSessionProject`가 `notice` 이벤트를 남기고 이전 설정으로 재시작까지 이어가는지 보는 테스트를 더했다.
+- `apps/studio/lib/server/sessions-resume-spec-error.test.ts`: 중지한 동안 `studio.yaml`이 깨진 채로 남으면 `resumeSession`이 어느 필드가 틀렸는지와 마지막 체크포인트 스냅샷 경로를 담아 거부하고, 그 경로에 실제로 고칠 수 있는 옛 내용이 있는지 실제 `CheckpointStore`로 끝까지 돌려 보는 테스트를 더했다.
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+플랫폼이 강제하는 검증(게이트)은 "실행이 쓴 파일이 최소한 읽힌다"까지 확인해야 한다 — 다시 읽기 실패를 옛 설정으로 넘기는 선택 자체는 서비스를 계속 띄우기 위해 필요하지만, 그 사실을 숨기면 실패가 다음 세션까지 미뤄질 뿐이다. `.catch(() => fallback)` 패턴은 복구 수단이지 오류를 지우는 수단이 아니다.

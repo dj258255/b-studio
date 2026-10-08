@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
+import type { StudioEvent } from '@/lib/studio-events';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
@@ -60,7 +61,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
 
 import { GENERATED_COMPOSE } from './project-detect';
 import { applyRegeneration, proposeRegeneration, registerFolder } from './project-registry';
-import { applyRegeneratedFilesToSession, createSession, getSnapshot, setSessionServiceSelection, stopSession } from './sessions';
+import { applyRegeneratedFilesToSession, createSession, getSnapshot, setSessionServiceSelection, stopSession, subscribe } from './sessions';
 
 const made: string[] = [];
 const saved = {
@@ -212,6 +213,31 @@ describe('applyRegeneratedFilesToSession(ADR-101, "이 세션에도 적용")', (
     const result = await applyRegeneratedFilesToSession(session.id, written);
     expect(result.restarted.map((check) => check.service)).toContain('web');
 
+    await stopSession(session.id).catch(() => {});
+  }, 20_000);
+
+  it('studio.yaml을 스키마에 맞지 않게 고치면 다시 읽지 않고 경고를 남긴 뒤 이전 설정으로 계속한다(도그푸딩 마찰 131)', async () => {
+    const { projectId, folder } = await registerAndRegenerate();
+    const session = await createSession(projectId, 'kim', 'local');
+    expect(await waitForReady(session.id)).toBe('ready');
+
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(session.id, (event) => events.push(event));
+
+    // 실측(BE-commerce 세션 pay-2-5b640fd3)과 같은 모양의 실수: workflow.autoPageChecks에 객체 대신 배열을 쓴다
+    const specPath = path.join(folder, 'studio.yaml');
+    const original = await readFile(specPath, 'utf8');
+    await writeFile(specPath, `${original}workflow:\n  autoPageChecks: [web]\n`);
+
+    const result = await applyRegeneratedFilesToSession(session.id, ['studio.yaml']);
+
+    const notice = events.find((event): event is Extract<StudioEvent, { type: 'notice' }> => event.type === 'notice' && event.text.includes('studio.yaml'));
+    expect(notice?.text).toContain('이전 설정으로 계속합니다');
+    expect(notice?.text).toContain('workflow.autoPageChecks');
+    // 못 읽어도 조용히 멈추지 않고, 이전(읽을 수 있던) 설정으로 재시작까지 이어간다
+    expect(result.restarted.map((check) => check.service)).toContain('web');
+
+    unsubscribe();
     await stopSession(session.id).catch(() => {});
   }, 20_000);
 

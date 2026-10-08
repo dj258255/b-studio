@@ -393,3 +393,48 @@ describe('restartServicesFor와 실행 중 바뀐 includes(도그푸딩 마찰 1
     expect(sandbox.restarts).toContain('api');
   });
 });
+
+describe('restartServicesFor·verifyChanges와 형식이 틀린 studio.yaml(도그푸딩 마찰 131)', () => {
+  const spec = (autoPageChecks: string) =>
+    `version: 1\nname: x\nservices:\n  web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }\nworkflow:\n  autoPageChecks: ${autoPageChecks}\n`;
+  const validAutoPageChecks = '{ service: web, mode: http }';
+  const brokenAutoPageChecks = '[web]'; // 실측: 객체 대신 배열을 써 스키마에 맞지 않음(BE-commerce 세션 pay-2-5b640fd3)
+
+  async function brokenProject(): Promise<{ root: string; stale: LoadedProject }> {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-spec-error-'));
+    await mkdir(path.join(root, 'web'), { recursive: true });
+    await writeFile(path.join(root, 'studio.yaml'), spec(validAutoPageChecks));
+    await writeFile(path.join(root, 'compose.yaml'), 'services:\n  web: { build: ./web }\n');
+    const stale = await loadProject(root);
+    await writeFile(path.join(root, 'studio.yaml'), spec(brokenAutoPageChecks));
+    return { root, stale };
+  }
+
+  it('에이전트가 실행 중 studio.yaml을 스키마에 맞지 않게 바꾸면, 조용히 옛 설정으로 넘어가지 않고 specError로 알린다', async () => {
+    const { stale } = await brokenProject();
+    const sandbox = fakeSandbox();
+
+    const report = await restartServicesFor(sandbox, stale, ['studio.yaml']);
+
+    expect(report.specError).toContain('studio.yaml 형식이 올바르지 않습니다');
+    expect(report.specError).toContain('workflow.autoPageChecks');
+    // 읽지 못해도 재시작 자체는 옛 project로 최대한 계속한다(서비스를 멈추지 않는다)
+    expect(sandbox.restarts).toContain('web');
+  });
+
+  it('verifyChanges는 studio.yaml이 스키마에 맞지 않으면 ok:false로 게이트를 실패시키고, 고치면 통과한다', async () => {
+    const { root, stale } = await brokenProject();
+    const sandbox = fakeSandbox();
+
+    const failed = await verifyChanges({ sandbox, project: stale, changedFiles: ['studio.yaml'], baselines: new Map(), allowBreaking: false });
+    expect(failed.ok).toBe(false);
+    expect(failed.specError).toContain('workflow.autoPageChecks');
+    expect(formatVerificationReport(failed, { allowBreaking: false })).toContain('studio.yaml 형식이 올바르지 않아 이전 설정으로 재시작했습니다');
+
+    // 안내를 보고 고치면(객체로 되돌리면) 같은 project에서 다시 검증했을 때 통과한다
+    await writeFile(path.join(root, 'studio.yaml'), spec(validAutoPageChecks));
+    const fixed = await verifyChanges({ sandbox, project: stale, changedFiles: ['studio.yaml'], baselines: new Map(), allowBreaking: false });
+    expect(fixed.ok).toBe(true);
+    expect(fixed.specError).toBeUndefined();
+  });
+});
