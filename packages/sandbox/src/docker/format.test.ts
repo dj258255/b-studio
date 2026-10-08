@@ -11,6 +11,7 @@ import {
   edgePortFor,
   egressAuditExcerpt,
   parseContainerState,
+  parseContainerStates,
   parseEgressDenial,
   parseHostPort,
   parseLogLine,
@@ -223,6 +224,28 @@ describe('parseContainerState', () => {
 
   it('컨테이너가 없으면 unknown', () => {
     expect(parseContainerState('')).toBe('unknown');
+  });
+});
+
+describe('parseContainerStates', () => {
+  it('서비스 이름별 상태를 맵으로 돌려준다(줄 단위 JSON)', () => {
+    const states = parseContainerStates('{"Service":"edge","State":"running"}\n{"Service":"mysql","State":"exited"}\n');
+    expect(states.get('edge')).toBe('running');
+    expect(states.get('mysql')).toBe('exited');
+  });
+
+  it('배열 출력도 읽는다', () => {
+    const states = parseContainerStates('[{"Service":"edge","State":"running"},{"Service":"redis","State":"running"}]');
+    expect([...states.keys()].sort()).toEqual(['edge', 'redis']);
+  });
+
+  it('컨테이너가 아예 없는 서비스는 출력에 줄이 없으므로 맵에도 없다', () => {
+    const states = parseContainerStates('{"Service":"edge","State":"running"}\n');
+    expect(states.has('mysql')).toBe(false);
+  });
+
+  it('빈 출력이면 빈 맵', () => {
+    expect(parseContainerStates('').size).toBe(0);
   });
 });
 
