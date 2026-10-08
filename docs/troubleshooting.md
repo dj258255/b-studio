@@ -105,7 +105,9 @@
 - [82. "~게 해 주세요" 요청의 체크포인트 제목이 "재생되게한다"처럼 붙어 나옴](#82-게-해-주세요-요청의-체크포인트-제목이-재생되게한다처럼-붙어-나옴)
 - [83. browser_check가 <video>의 재생 실패를 못 잡아 숏폼 화면의 404 미디어 주소가 통과로 남음](#83-browser_check가-video의-재생-실패를-못-잡아-숏폼-화면의-404-미디어-주소가-통과로-남음)
 - [84. 폴더 열기가 만든 studio.yaml 등 생성 파일이 실패한 실행 뒤에도 되돌아가지 않음](#84-폴더-열기가-만든-studioyaml-등-생성-파일이-실패한-실행-뒤에도-되돌아가지-않음)
-- [87. 에이전트가 형식에 맞지 않는 studio.yaml을 써도 그 실행도 다음 세션 재개도 알리지 않고 조용히 넘어감](#87-에이전트가-형식에-맞지-않는-studioyaml을-써도-그-실행도-다음-세션-재개도-알리지-않고-조용히-넘어감)
+- [85. 네트워크가 잠깐 끊기면(ENOTFOUND) 로컬 CLI 실행이 그대로 실패로 끝나 변경이 되돌려짐](#85-네트워크가-잠깐-끊기면enotfound-로컬-cli-실행이-그대로-실패로-끝나-변경이-되돌려짐)
+- [86. 세션 상태는 ready인데 edge·부가 서비스 컨테이너가 없어 첫 도구 호출부터 반복 실패함](#86-세션-상태는-ready인데-edge부가-서비스-컨테이너가-없어-첫-도구-호출부터-반복-실패함)
+- [88. 생성 파일 스냅샷이 없는 체크포인트로 되돌리면 studio.yaml·compose를 지워 세션이 뜨지 않음](#88-생성-파일-스냅샷이-없는-체크포인트로-되돌리면-studioyamlcompose를-지워-세션이-뜨지-않음)
 
 ---
 
@@ -2303,6 +2305,7 @@ claude-code 백엔드 세션이 턴 상한(60)으로 실패해(`Reached maximum 
 
 ### 배운 점
 67번은 실제로 본 문자열 하나("R25를")에 맞춘 패턴이라, 같은 원인의 다음 변형을 놓쳤다. 증상 문자열보다 원인(동사가 빠진 문장)을 기준으로 규칙을 세워야 변형까지 잡힌다.
+
 ## 69. 샌드박스 컨테이너 안에서 Mockito inline mock maker가 쓰는 JVM self-attach가 깨짐
 
 **구분:** 도그푸딩 중 실측(`/Users/beomsu/Desktop/pay`를 본뜬 BE-commerce 세션 `pay-2-5b640fd3`, 체크포인트 110ed57) → 첫 진단이 틀려 사람이 직접 재현 → 진짜 원인으로 다시 재현 → 수정
@@ -2725,6 +2728,74 @@ studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대
 
 ### 배운 점
 "커밋에서 뺀다"가 "체크포인트 전체에서 빠진다"를 뜻하지는 않는다. 되돌리기·복원은 git 기록과 별개로 그 파일들만의 자체 타임라인을 가져야 한다. 설계안을 비교한 근거는 `decisions.md` ADR-141에 남겼다.
+
+## 85. 네트워크가 잠깐 끊기면(ENOTFOUND) 로컬 CLI 실행이 그대로 실패로 끝나 변경이 되돌려짐
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 작업 복사본은 읽기만 함) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 실행 두 건(8e8778fb·4920d817)이 모두 `run_finished` status `"error"`로 끝났다. summary는 "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"를 담고 있었다. 실행 중 바뀐 파일은 ADR-131의 되돌리기 경로를 타 보관본으로 갔고, 사람이 보관본을 되살려 같은 요청을 다시 보내야 했다. 4920d817은 되돌려지기 전까지 출력 토큰 4.6만·캐시 읽기 6,600만 토큰을 이미 썼다 — 다시 시작하는 비용이 작지 않았다.
+
+### 원인
+`claude-code-runner.ts`는 Claude Agent SDK가 낸 `result` 메시지가 `is_error: true`면(ENOTFOUND든 인증 실패든 구분 없이) 곧바로 `finish('failed', ...)`로 끝냈다. 재시도·대기 로직이 전혀 없어, 모델이 아직 아무 잘못도 하지 않았는데 일시적인 DNS 끊김만으로 실행 전체가 실패 처리됐다. ADR-131에서도 "앞선 실행 565b3d40은 네트워크 끊김(ENOTFOUND)으로 끝났다"고 같은 현상을 이미 언급했지만 그때는 되돌리기 경로만 고쳤고, 네트워크 오류 자체를 다르게 다루지는 않았다.
+
+### 수정
+`is_error` 결과 문구가 일시적 네트워크 오류 패턴(`ENOTFOUND`·`ECONNRESET`·`ETIMEDOUT`·`EAI_AGAIN`·"Can't reach the API server"·`overloaded`)과 일치하면 바로 실패로 끝내지 않는다. 지수 백오프로 기다린 뒤(상한: 6회·총 10분, 둘 중 먼저 걸리는 쪽) 같은 세션을 `resume`으로 이어받아 "하던 작업을 다시 하지 말고 이어서 하라"는 짧은 지시만 보낸다. 대기마다 `warning` 이벤트로 "네트워크 연결이 끊겨 N초 기다린 뒤 이어서 진행합니다"를 대화에 남긴다. 중단 신호(signal)가 오면 대기를 끊고 그대로 취소로 던진다. 상한을 넘으면 지금처럼 실패로 끝내되 `failureReason: 'network'`를 남겨 사유를 구분할 수 있게 한다. 인증 실패·잘못된 요청 같은 패턴에 걸리지 않는 영구 오류는 그대로 즉시 실패한다(ADR-142).
+
+### 검증
+- `packages/agent/src/claude-code-runner.test.ts`(4개 추가): 첫 시도가 ENOTFOUND로 끝나면 기다렸다 resume으로 이어받아 성공하는 것, 인증 오류 같은 영구 오류는 대기 없이 바로 실패하는 것, 재시도 상한을 넘기면 `failureReason: 'network'`로 실패하는 것, 대기 중 취소 신호가 오면 재시도하지 않고 취소를 던지는 것을 가짜 SDK 스트림으로 확인했다(실제 sleep 없이 대기 함수만 주입).
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+이번 수정은 로컬 CLI(claude-code) 백엔드만 고쳤다. Codex·Command Code·OpenCode·Gemini CLI와 API 직접 루프(`loop.ts`)는 아직 같은 문제가 있을 수 있다 — ADR-142에 CLI별 재개 방법 차이와 다음 대상을 남겼다.
+
+## 86. 세션 상태는 ready인데 edge·부가 서비스 컨테이너가 없어 첫 도구 호출부터 반복 실패함
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, 작업 복사본은 읽기만 함, 실행 `b29a2f7b`) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+세션 상태는 `ready`였다. 그런데 그 세션의 compose 프로젝트(`studio-be-commerce-f41ea8`)에는 web·commerce 컨테이너만 있었고, mysql·redis·kafka·`b-studio-edge`는 `docker ps -a`에도 없었다(누가 언제 지웠는지는 확인하지 못했다). 에이전트의 첫 `http_request`부터 `docker compose port 실패 (studio-be-commerce-f41ea8) | service "b-studio-edge" is not running`으로 실패했고, commerce는 DB가 없어 exit 1로 죽었다. 에이전트는 이것이 환경 문제인 줄 모르고 `restart_service` 30회, `service_stats` 29회, `service_logs` 25회, `run_in_service` 24회를 써서 턴 상한 120을 모두 썼다. 파일은 하나도 고치지 않았고 실행은 실패로 끝났다. 사람이 studio를 재시작하고 세션을 재개하자(새 샌드박스를 만들고 `sandbox.start()`를 다시 불러) 6개 컨테이너가 모두 다시 떴다.
+
+### 원인
+`ensureBooted()`(`apps/studio/lib/server/sessions.ts`)는 세션 상태 필드가 이미 `ready`면 그대로 돌아간다 — 실제 컨테이너가 떠 있는지는 다시 묻지 않는다. 지연 기동(lazy) 세션만 도구 호출 시점에 `ensureBooted()`를 거치는데, 그 함수도 같은 이유로 `ready`면 아무것도 하지 않는다. 즉 세션이 한 번이라도 `ready`가 된 뒤로는, studio 밖에서(사람이나 다른 과정이) 컨테이너를 지워도 다음 요청이 그 사실을 전혀 확인하지 않고 그대로 모델을 불렀다. `restart_service`(`packages/agent/src/tools.ts`)는 도구 자신의 서비스 하나만 `--force-recreate`로 다시 올리고 `--no-deps`를 쓰므로, edge나 mysql처럼 다른 서비스가 없어졌을 때는 전혀 고치지 못한다. 에이전트 루프(`packages/agent/src/loop.ts`)는 도구 실패를 `is_error` 도구 결과로 모델에게 그대로 돌려줄 뿐 반복을 세거나 멈추지 않는다("환경 실패" 개념은 `packages/agent`가 아니라 `apps/studio/bench/coordination`의 벤치 전용 로직이었다, ADR-124).
+
+### 수정
+`packages/sandbox`의 `Sandbox` 인터페이스에 선택적 메서드 `ensureInfra(services, options)`를 더했다. 넘긴 서비스 + edge 프록시의 컨테이너가 실제로 `running`인지 `docker compose ps`로 확인하고, 없으면 그 샌드박스의 compose 프로젝트 안에서만(`--no-deps`로 다른 프로젝트·다른 서비스는 건드리지 않는다) `compose up`으로 다시 올린다. 이미지는 다시 빌드하지 않는다(코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이라서다).
+
+`apps/studio/lib/server/sessions.ts`의 `runPlan()`(모든 백엔드가 지나가는 단일 지점)이 모델을 부르기 전에 `ensureReadySessionInfra()`로 이 확인을 한다. 세션 상태가 `ready`일 때만 확인하고(지연 기동으로 아직 한 번도 안 띄운 세션은 건드리지 않는다), 복구했으면 세션 기록에 `notice`를 남기고 그대로 진행한다. 복구에 실패하면 모델을 한 번도 부르지 않고 `preflightError`로 바로 끝내 — 턴을 한 개도 쓰지 않는다. 다른 백엔드의 `preflightError`(claude-code·codex 등 CLI 계정 확인 실패)와 같은 경로를 그대로 쓴다.
+
+그래도 실행 중간에(예: 메모리 부족으로) 컨테이너가 다시 사라지는 경우를 대비해, `packages/agent/src/tools.ts`의 `executeTool`이 어떤 도구에서든 "is not running" 오류를 받으면 `ensureInfra`로 한 번 자동 복구를 시도하고, 그 결과(복구했다/못 했다)를 도구 결과 본문에 분명히 적는다. 복구에 실패하면 "샌드박스 인프라 문제라 코드로 고칠 수 없습니다"라고 적어 같은 재시작·로그 확인을 반복하지 말라고 알린다.
+
+이번 수정은 로컬 Docker 제공자(`LocalDockerSandbox`)에만 구현했다. Kubernetes 제공자는 `ensureInfra`를 구현하지 않아(선택 메서드라 `undefined`) 호출하는 쪽이 건너뛴다 — 범위를 좁힌 이유는 `decisions.md` ADR-143에 남겼다.
+
+### 검증
+- `packages/sandbox/src/docker/infra-recovery.test.ts`: 가짜 docker 실행 파일로 edge 컨테이너가 없을 때 `ensureInfra`가 이 세션 범위에서만 다시 올려 복구하는지, 모두 떠 있으면 아무것도 안 하는지, `compose up` 자체가 실패하거나 다시 올려도 여전히 없으면 분명하게 실패로 알리는지 확인했다(4개).
+- `packages/sandbox/src/docker/format.test.ts`: `parseContainerStates`가 서비스별 상태를 맵으로 읽는지, 컨테이너가 아예 없는 서비스는 맵에 없는지 확인했다(4개 추가).
+- `packages/agent/src/tools.test.ts`: `executeTool`이 "is not running" 오류를 받으면 자동 복구를 시도하고 성공·실패를 도구 결과에 분명히 적는지, `ensureInfra`가 없는 샌드박스나 무관한 오류는 그대로 두는지 확인했다(4개 추가).
+- `apps/studio/lib/server/sessions-infra-recovery.test.ts`: 가짜 샌드박스로 끝까지 돌려, ready 세션의 `ensureInfra`가 복구에 성공하면 모델을 그대로 부르고 `notice`를 남기는지, 복구에 실패하면 모델을 한 번도 부르지 않고 `run_finished`가 `error`로 바로 끝나는지(세션 상태는 `ready`로 남아 다시 요청할 수 있는지), 아직 준비되지 않은 세션은 `ensureInfra`를 부르지 않는지 확인했다(3개).
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+"상태 필드가 ready"와 "실제로 떠 있다"는 다른 사실이다. studio가 만들지 않은 변화(사람의 수동 정리, Docker의 자체 정리 등)는 상태 캐시에 반영되지 않으므로, 상태를 신뢰하기 전에 최소한 한 번은 실제로 확인하는 지점이 있어야 한다. 이번에는 "모델을 부르기 전"을 그 지점으로 골랐다 — 실행 중 반복이 생기기 전에 걸러지므로 턴 상한까지 도구를 반복하는 것보다 비용이 훨씬 적다.
+
+## 88. 생성 파일 스냅샷이 없는 체크포인트로 되돌리면 studio.yaml·compose를 지워 세션이 뜨지 않음
+
+**구분:** 도그푸딩 중 실측(`/Users/beomsu/Desktop/pay` 세션 재개) → 84번 수정이 만든 회귀 → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+84번(#503)을 반영한 studio로 BE-commerce 세션을 재개하자 `docker compose build 실패 … compose.b-studio.yaml: no such file or directory`로 기동이 막혔다. 작업 복사본에서 `studio.yaml`·`compose.b-studio.yaml`·`Dockerfile.b-studio` 3개, 모두 5개 생성 파일이 지워져 있었다. 재개하면서 작업 복사본을 정리한(discard) 보관본 `excluded/`에 5개가 모두 남아 있어, 거기서 되살려 복구했다.
+
+### 원인
+`CheckpointStore.#excludedDiff`는 대상 체크포인트의 생성 파일 스냅샷 목록(manifest)이 없으면 `?? {}`로 빈 목록을 썼다. 그러면 지금 디스크에 있는 생성 파일이 모두 "그 체크포인트에는 없었다"가 되어 지워진다. 이 세션의 HEAD 체크포인트는 84번 이전에 만들어져 스냅샷이 없었다. 스냅샷은 개수 상한으로 오래된 것부터 정리되므로, 오래된 체크포인트로 복원할 때도 같은 일이 생긴다.
+
+### 수정
+`packages/agent/src/checkpoints.ts`에서 대상 체크포인트의 스냅샷이 없으면 생성 파일 상태를 모르는 것으로 보고 건드리지 않게 했다.
+
+### 검증
+`packages/agent/src/checkpoints.test.ts`에 테스트 1개를 더했다. 스냅샷 기능 없이 시작한 저장소를 기능을 켜고 다시 열어 버리면, 추적 파일만 되돌리고 생성 파일은 남는다. 고치기 전 코드에서는 생성 파일 2개까지 지워져 실패하는 것을 확인했다. 그 파일 57개 테스트가 통과했다.
+
+### 배운 점
+84번 ADR이 "옛 체크포인트로 되돌리면 그때는 없었다로 보고 지울 수 있다"를 알려진 한계로 적었다. 하지만 이미 떠 있는 세션은 모두 옛 체크포인트 위에 있으니, 그 한계는 머지 직후 모든 세션에서 터진다. 모르는 상태를 기본값으로 메우면 안 된다.
 
 ## 87. 에이전트가 형식에 맞지 않는 studio.yaml을 써도 그 실행도 다음 세션 재개도 알리지 않고 조용히 넘어감
 

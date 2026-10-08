@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { describeUsage, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { describeUsage, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { parseSpec, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
 import type { Note, NoteKind } from './coordination';
@@ -372,8 +372,33 @@ export async function executeTool(name: string, input: unknown, context: ToolCon
     const content = dedupeResult(cache, name, input, outcome.content);
     return content === outcome.content ? outcome : { ...outcome, content };
   } catch (error) {
-    return failure(describe(error));
+    return await describeSandboxFailure(error, context);
   }
+}
+
+/**
+ * docker compose가 "service ... is not running"으로 알리는 오류(도그푸딩 마찰 130, 트러블슈팅 86) —
+ * 세션 상태는 ready인데 studio 밖에서 edge·서비스 컨테이너가 지워진 경우다. 코드를 고쳐도 다시 뜨지
+ * 않으므로, 모델이 run_in_service·restart_service·service_logs 같은 도구를 반복해 턴 상한까지 쓰기 전에
+ * 여기서 한 번 자동 복구를 시도하고, 결과를 도구 결과 본문에 분명히 적어 반복하지 말라고 알린다(ADR-143)
+ */
+const INFRA_ABSENCE_PATTERN = /is not running\b/i;
+
+async function describeSandboxFailure(error: unknown, context: ToolContext): Promise<ToolOutcome> {
+  const message = describe(error);
+  if (!INFRA_ABSENCE_PATTERN.test(message) || !context.sandbox.ensureInfra) return failure(message);
+
+  const managed = context.project.managed.map(([serviceName]) => serviceName);
+  const healed = await context.sandbox.ensureInfra(managed, { signal: context.signal }).catch(
+    (healError: unknown): InfraCheckResult => ({ ok: false, recovered: [], reason: describe(healError) }),
+  );
+  if (healed.ok) {
+    return failure(`${message}\n[b-studio] 컨테이너가 없어 다시 올렸습니다(${healed.recovered.join(', ') || '이미 떠 있었습니다'}). 같은 도구를 다시 불러 보세요.`);
+  }
+  return failure(
+    `${message}\n[b-studio] 샌드박스 인프라 문제라 코드로 고칠 수 없습니다 — 컨테이너를 다시 올리지 못했습니다: ${healed.reason ?? '알 수 없는 이유'}. ` +
+      `재시작·로그 확인을 반복하지 말고 이 사실을 요약에 남기세요.`,
+  );
 }
 
 /** 도구별 실행. 예산 자르기와 반복 대체 같은 공통 처리는 executeTool이 맡는다 */
