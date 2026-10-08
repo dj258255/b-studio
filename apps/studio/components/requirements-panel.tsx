@@ -80,6 +80,8 @@ interface RequirementEvidence {
   gateChecks: Array<{ name: string; ok: boolean }>;
   testRun?: TestRunEvidence;
   docEvidence?: DocEvidence;
+  /** 시나리오가 있는데 아직 "검증됨"에 이르지 못한 시나리오 id(다그푸딩 마찰 140) */
+  missingScenarios?: string[];
 }
 
 interface RequirementView extends RequirementDraft {
@@ -1088,6 +1090,7 @@ function RequirementCard({
   const draft = useChatDraft();
   const docEvidence = requirement.evidence.docEvidence;
   const manualVerification = requirement.manualVerification;
+  const missingScenarios = requirement.evidence.missingScenarios ?? [];
   const evidenceCount =
     requirement.evidence.checkpoints.length +
     requirement.evidence.tests.length +
@@ -1142,6 +1145,14 @@ function RequirementCard({
             {requirement.verifiedBy !== "none" && requirement.verifiedBy !== "test" && (
               <span className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-ink" title="이 상태를 만든 증거의 종류">
                 {VERIFIED_BY_LABEL[requirement.verifiedBy]}
+              </span>
+            )}
+            {missingScenarios.length > 0 && (
+              <span
+                className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-fail"
+                title={`시나리오 ${missingScenarios.join(", ")}을(를) 이름에 단 통과 테스트가 아직 없습니다 — 요구사항 id만 단 테스트로 이 상태가 됐을 수 있습니다`}
+              >
+                시나리오 {missingScenarios.length}개 미검증
               </span>
             )}
             {requirement.issue !== undefined && (
@@ -1248,6 +1259,9 @@ function RequirementCard({
                   사람 확인 · {manualVerification.by} · {manualVerification.at} · 체크포인트 <span className="font-mono">{manualVerification.sha}</span> · 메모{" "}
                   {manualVerification.note}
                 </p>
+              )}
+              {missingScenarios.length > 0 && (
+                <p className="text-fail">시나리오 {missingScenarios.join(", ")}을(를) 이름에 단 통과 테스트가 아직 없습니다 — 테스트 이름에 그 시나리오 id를 넣으면 검증됩니다.</p>
               )}
             </>
           )}

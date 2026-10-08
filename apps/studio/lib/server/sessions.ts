@@ -56,6 +56,7 @@ import {
   fetchPullRequestDetail,
   findCheckpointMentions,
   findGateCheckMentions,
+  findUnverifiedScenarioIds,
   flattenDiscoveredFile,
   formatCheckedCoverage,
   formatVerificationReport,
@@ -292,7 +293,7 @@ import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } fro
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
-import { readServicePackageJson, serviceHasPomXml, walkServiceTestFiles } from './test-files';
+import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
@@ -488,7 +489,7 @@ interface Session {
 }
 
 /** 서비스 하나의 마지막 테스트 실행 결과 */
-interface StoredTestRun {
+export interface StoredTestRun {
   at: string;
   source: 'run' | 'gate';
   runner?: Runner;
@@ -4840,15 +4841,21 @@ function evaluateRequirement(
   issueNumber?: number,
   testRun?: TestRunEvidence,
   docSources?: readonly DocMatchSource[],
+  testRunRows: readonly MatrixTestRunRow[] = [],
 ): RequirementView {
   const docEvidence: DocEvidence | undefined = requirement.kind === 'docs' && docSources ? matchAcceptanceAgainstDocs(requirement.acceptance, docSources) : undefined;
-  const evidence: RequirementEvidence = {
+  const evidenceBase: RequirementEvidence = {
     checkpoints: findCheckpointMentions(checkpoints, requirement.id),
     tests: scanTestFilesForRequirementId(testFiles, requirement.id),
     gateChecks: findGateCheckMentions(gateChecks, requirement.id),
     ...(testRun ? { testRun } : {}),
     ...(docEvidence ? { docEvidence } : {}),
   };
+  // 요구사항 id만 단 테스트로도 요구사항 전체는 검증됨이 될 수 있다(기존 규칙) — 그래도 시나리오별로는 아직
+  // 자기 id를 단 통과 테스트가 없을 수 있어(다그푸딩 마찰 140), 추적 매트릭스를 따로 열지 않아도 그 사실을
+  // 요구사항 카드에서 바로 보게 missingScenarios를 덧붙인다
+  const missingScenarios = findUnverifiedScenarioIds(requirement, checkpoints, testFiles, gateChecks, testRunRows, evidenceBase);
+  const evidence: RequirementEvidence = { ...evidenceBase, ...(missingScenarios.length > 0 ? { missingScenarios } : {}) };
   const status = computeRequirementStatus(evidence, requirement);
   const workPrefill = annotateWithIssue(buildRequirementWorkPrefill(requirement), requirement, issueNumber);
   return {
@@ -4893,6 +4900,8 @@ interface RequirementEvaluationContext {
   testServices: TestServiceView[];
   head?: { sha: string; shortSha: string };
   pendingFilesCount: number;
+  /** 지금 체크포인트에서 돈 테스트 탭 실행을 테스트 단위로 펼친 목록(missingScenarios 계산에 쓴다) */
+  testRunRows: MatrixTestRunRow[];
 }
 
 /**
@@ -4915,6 +4924,7 @@ async function buildRequirementEvaluationContext(session: Session): Promise<Requ
     testServices,
     head: headInfo.head,
     pendingFilesCount: headInfo.pendingFilesCount,
+    testRunRows: buildMatrixTestRunRows(testServices, headInfo.head, headInfo.pendingFilesCount),
   };
 }
 
@@ -4927,6 +4937,7 @@ function evaluateRequirementWithContext(requirement: Requirement, context: Requi
     issueNumber,
     buildRequirementTestRunEvidence(context.testServices, requirement.id, context.head, context.pendingFilesCount),
     context.docSources,
+    context.testRunRows,
   );
 }
 
@@ -5804,7 +5815,10 @@ export interface TestsSnapshot {
 
 /** 서비스 폴더 안에서 테스트 파일을 찾아 케이스를 뽑는다. 파일 IO만 하고 판정은 하지 않는다(순수 함수는 test-discovery.ts에 있다) */
 async function discoverServiceTestRows(session: Session, spec: ManagedSpec): Promise<ServiceTestRow[]> {
-  const files = await walkServiceTestFiles(session.project.root, spec.path);
+  // includes(studio.yaml, ADR-139)가 가리키는 서비스 폴더 밖 경로도 함께 훑는다 — 그 경로의 테스트 보고서는
+  // 이미 모아 왔지만(extraReportRootsFor), 발견 단계가 그 경로를 몰라 모아 온 결과를 어느 행에도 못 붙이고
+  // 조용히 버렸다(다그푸딩 마찰 140, attachResults는 발견한 행에만 결과를 붙인다)
+  const files = await walkServiceAndIncludedTestFiles(session.project.root, spec.path, spec.includes ?? []);
   const rows: ServiceTestRow[] = [];
   for (const file of files) {
     const discovered = discoverTestsInFile(file.path, file.content);
@@ -6247,6 +6261,27 @@ async function hasBuildWrapper(session: Session, servicePath: string, runner: st
   return stat(path.join(session.project.root, servicePath, name)).then(() => true, () => false);
 }
 
+/**
+ * 보고서를 하나도 못 찾았을 때(다그푸딩 마찰 140) 사이드카에 남길 안내를 만든다. 흔한 원인은 workflow.tests의
+ * 명령이 studio.yaml 자동 감지가 쓰는 사용자 자신의 npm/yarn/pnpm 스크립트(ADR-133, watch 모드로 끝나지 않을
+ * 위험 때문에 b-studio가 임의로 --reporter=json 같은 플래그를 덧붙이지 않는다)라서, buildTestRunPlan이 기대하는
+ * 고정 보고서 경로(Vitest/Jest의 JEST_LIKE_REPORT_PATH)에 아무것도 남지 않는 경우다. 조용히 넘기면(예전 동작)
+ * 이 서비스는 test-results.json에 영영 나타나지 않고, 그 서비스가 유일한 증거인 요구사항은 "통과했는데 왜
+ * 검증 안 됐는지" 알 길이 없다. 이전 기록이 없거나 이미 이 안내를 보여주고 있을 때만 돌려준다(성공한 기록을
+ * 덮어쓰지 않는다 — 그 결과는 여전히 "이전 실행"으로 테스트 탭에 남는다, undefined면 아무것도 바꾸지 않는다).
+ */
+export function gateReportNotFoundEntry(previous: StoredTestRun | undefined, runner: Runner, sha: string | undefined, now: string = new Date().toISOString()): StoredTestRun | undefined {
+  if (previous && previous.error === undefined) return undefined;
+  return {
+    at: now,
+    source: 'gate',
+    runner,
+    run: { cases: [] },
+    sha,
+    error: `게이트가 돌린 테스트 명령의 보고서를 찾지 못했습니다(${runnerLabel(runner)}가 기대하는 경로에 아무것도 남지 않았습니다) — workflow.tests의 명령이 JSON/XML 보고서를 남기는지 확인하세요(Vitest/Jest는 사용자 스크립트가 --reporter=json --outputFile을 쓰지 않으면 b-studio가 찾는 자리에 남지 않습니다)`,
+  };
+}
+
 async function collectGateTestReports(session: Session): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
   await ensureTestResultsLoaded(session);
@@ -6262,8 +6297,15 @@ async function collectGateTestReports(session: Session): Promise<void> {
       extraReportRoots: extraReportRootsFor(spec),
     });
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
-    if (run.cases.length === 0) continue;
     session.testResults ??= new Map();
+    if (run.cases.length === 0) {
+      const entry = gateReportNotFoundEntry(session.testResults.get(name), runner, session.snapshot.checkpoints[0]?.sha);
+      if (entry) {
+        session.testResults.set(name, entry);
+        changed = true;
+      }
+      continue;
+    }
     session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: session.snapshot.checkpoints[0]?.sha });
     changed = true;
   }
