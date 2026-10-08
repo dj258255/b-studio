@@ -597,6 +597,30 @@ describe('경계 안전 정규식(\\bR\\d+(\\.\\d+)?\\b)', () => {
   });
 });
 
+describe('findMentionedIds — 범위 표기는 개별 언급이 아니다(다그푸딩 마찰 136)', () => {
+  it('"R1~R32" 범위 표기의 양 끝 id는 뽑지 않는다(물결)', () => {
+    expect(findMentionedIds('docs: 요구사항을 정리한다 (R1~R32)')).toEqual([]);
+  });
+
+  it('"R1-R32"(하이픈)·"R1–R32"(en dash) 범위 표기도 양 끝을 뽑지 않는다', () => {
+    expect(findMentionedIds('R1-R32')).toEqual([]);
+    expect(findMentionedIds('R1–R32')).toEqual([]);
+  });
+
+  it('범위 표기 앞뒤의 다른 언급은 그대로 각각 센다', () => {
+    expect(findMentionedIds('R5 완료, 전체 범위는 R1~R32')).toEqual(['R5']);
+  });
+
+  it('구두점 없이 따로 나오는 "R1 그리고 R32"는 범위가 아니라 각각의 자유 언급으로 센다', () => {
+    expect(findMentionedIds('R1 그리고 R32를 함께 확인')).toEqual(['R1', 'R32']);
+  });
+
+  it('mentionsRequirementId도 범위 표기에 걸리지 않는다(체크포인트 메시지 증거 판정이 이걸 쓴다)', () => {
+    expect(mentionsRequirementId('docs: 요구사항을 정리한다 (R1~R32)', 'R1')).toBe(false);
+    expect(mentionsRequirementId('docs: 요구사항을 정리한다 (R1~R32)', 'R32')).toBe(false);
+  });
+});
+
 describe('extractImplementsTrailers', () => {
   it('"Implements: R4" 트레일러를 찾는다', () => {
     expect(extractImplementsTrailers('feat: 로그인\n\nImplements: R4')).toEqual([{ id: 'R4' }]);
