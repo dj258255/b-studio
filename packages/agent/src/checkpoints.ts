@@ -811,7 +811,11 @@ export class CheckpointStore {
     if (!this.#excludedFiles) return [];
     const projectRoot = await this.projectRoot();
     const candidates = await this.#excludedFiles(projectRoot);
-    const manifest = (await this.#readExcludedManifest(target)) ?? {};
+    const manifest = await this.#readExcludedManifest(target);
+    // 대상 체크포인트의 스냅샷이 없으면(이 기능 이전에 만든 체크포인트, 또는 개수 상한으로 정리된 오래된 스냅샷) 그 시점의
+    // 생성 파일 상태를 모른다. 모르는 것을 "없었다"로 보면 지금 있는 studio.yaml·compose를 모두 지워 세션이 뜨지 않는다
+    // (도그푸딩 실측: 세션 재개가 생성 파일 5개를 지워 compose build가 실패했다). 모를 때는 건드리지 않는다
+    if (!manifest) return [];
     const files = [...new Set([...(await this.#ignoredAmong(candidates)), ...Object.keys(manifest)])].sort();
     const dir = this.#excludedSnapshotDir(target);
     const changes: ExcludedChange[] = [];
