@@ -295,6 +295,16 @@ class LocalDockerSandbox implements Sandbox {
   }
 
   /**
+   * 부가 서비스를 다시 만들어 띄운다(도그푸딩 마찰 143). managed 서비스의 restart()와 같은 플래그
+   * (--build --force-recreate)를 쓰지만, 포트·엔드포인트 개념이 없는 부가 서비스라 준비 판정 없이 바로 끝난다.
+   * 호출자(executeTool)는 이 메서드를 부르기 전에 데이터베이스·꺼 둔 서비스를 걸러낸다
+   */
+  async restartAddon(name: string, { signal }: { signal?: AbortSignal } = {}): Promise<void> {
+    if (!this.project.composeServices.includes(name)) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 compose 서비스가 아닙니다 (${this.id})`);
+    await this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], signal);
+  }
+
+  /**
    * edge 프록시 + 넘긴 서비스가 실제로 running인지 보고, 없으면 이 샌드박스의 compose 프로젝트 안에서만
    * 다시 올린다(트러블슈팅 86, ADR-143). 코드가 바뀐 게 아니라 컨테이너가 사라진 것뿐이므로 이미지는
    * 다시 빌드하지 않는다(restart()의 --build --force-recreate와 다르다). --no-deps로 넘긴 서비스만 건드린다
