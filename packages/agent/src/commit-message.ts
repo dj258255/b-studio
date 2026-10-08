@@ -211,7 +211,25 @@ function requirementModuleCandidate(request: string, changes: readonly PendingCh
   if (ids.length === 0) return undefined;
   const module = commonModuleLabel(changes);
   if (!module) return undefined;
-  return `[${ids.join(', ')}] ${module} 모듈을 ${describeVerb(changes)}`;
+  return `[${requirementIdLabel(ids)}] ${module} 모듈을 ${describeVerb(changes)}`;
+}
+
+/**
+ * 제목에 넣을 요구사항 id 묶음. 시나리오 id(R1.2)는 부모 요구사항(R1)으로 접고 중복을 없앤 뒤 번호순으로 늘어놓고,
+ * 셋 이상 이어지는 번호는 범위(R1~R3)로 줄인다(도그푸딩 버그 리포트: "[R1, R3, R1.2, R2.1, R2.2, R3.1, R3.2, R3.3]"처럼
+ * 요청 글에 나온 id를 그대로 나열해 제목이 길고 읽기 어려웠다)
+ */
+function requirementIdLabel(ids: readonly string[]): string {
+  const numbers = [...new Set(ids.map((id) => Number(/^R(\d+)/.exec(id)?.[1])).filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < numbers.length; ) {
+    let j = i;
+    while (j + 1 < numbers.length && numbers[j + 1] === numbers[j]! + 1) j += 1;
+    if (j - i >= 2) parts.push(`R${numbers[i]}~R${numbers[j]}`);
+    else for (let k = i; k <= j; k += 1) parts.push(`R${numbers[k]}`);
+    i = j + 1;
+  }
+  return parts.join(', ');
 }
 
 /**

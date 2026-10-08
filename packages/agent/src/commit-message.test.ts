@@ -263,6 +263,14 @@ describe('generateCommitSubject', () => {
     expect(subject).toBe('feat: MediaMTX 설정의 훅 이름을 runOnReady로 고쳤습니다');
   });
 
+  it('요구사항 id 대체 제목은 시나리오 id를 부모로 접고 이어지는 번호를 범위로 줄인다(도그푸딩 버그 리포트: "[R1, R3, R1.2, R2.1, …]")', () => {
+    const request = '라이브 방송 R1~R3의 시나리오 테스트를 채워 주세요. 요구사항 화면에 R1.2, R2.1, R2.2, R3.1, R3.2, R3.3이 "테스트 없음"으로 나옵니다.';
+    const changes = [change('media/src/test/java/com/beomsu/becommerce/live/LiveBroadcastServiceTest.java'), change('media/src/test/java/com/beomsu/becommerce/live/LiveBroadcastTest.java')];
+    const subject = generateCommitSubject(request, changes);
+    expect(subject).toContain('[R1~R3]');
+    expect(subject).not.toContain('R1.2');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
