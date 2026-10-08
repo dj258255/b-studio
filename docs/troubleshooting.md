@@ -117,6 +117,7 @@
 - [94. service_logs·restart_service가 managed로 한정돼 있어 부가 서비스(mediamtx)가 멈춰도 로그도 못 보고 되살리지도 못함](#94-service_logsrestart_service가-managed로-한정돼-있어-부가-서비스mediamtx가-멈춰도-로그도-못-보고-되살리지도-못함)
 - [95. 사람이 한 일의 과거형 서술·"…실패합니다"·"결론:" 머리말이 체크포인트 제목이 됨](#95-사람이-한-일의-과거형-서술실패합니다결론-머리말이-체크포인트-제목이-됨)
 - [96. 요구사항 id로 만든 체크포인트 제목이 시나리오 id까지 나열해 길어짐](#96-요구사항-id로-만든-체크포인트-제목이-시나리오-id까지-나열해-길어짐)
+- [97. 게이트에서 한 번도 안 돈 핵심 동시성 테스트가 다른 테스트 덕에 "검증됨"에 숨음](#97-게이트에서-한-번도-안-돈-핵심-동시성-테스트가-다른-테스트-덕에-검증됨에-숨음)
 
 ---
 
@@ -2998,3 +2999,22 @@ ADR-148로 정리했다. `service_logs`·`restart_service`는 managed 서비스�
 
 ### 검증
 `packages/agent/src/commit-message.test.ts`에 실제 요청 원문으로 테스트 1개를 더했다. `packages/agent` 테스트가 모두 통과했다.
+
+## 97. 게이트에서 한 번도 안 돈 핵심 동시성 테스트가 다른 테스트 덕에 "검증됨"에 숨음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, R12) → 코드 추적 → 수정
+
+### 현상
+R12(방송 특가 한정 수량 초과 판매 방지)의 핵심 보장을 확인하는 실동시성 테스트 `LiveOrderConcurrencyTest`는 Testcontainers 기반이고 `@Tag("integration")`이 붙어 있다. 프로젝트의 `build.gradle`은 기본 test 태스크에서 integration 태그를 제외하고, 샌드박스에는 Docker도 없어 이 테스트는 게이트 test 단계에서 한 번도 돌지 않았다. 그런데도 R12는 단위 테스트(`LiveOrderServiceTest`)만으로 "검증됨"이 됐고, 화면 어디에도 "핵심 동시성 테스트는 이 환경에서 돌지 않았다"는 사실이 보이지 않았다.
+
+### 원인
+`computeRequirementStatus`(`packages/agent/src/requirements.ts`)는 요구사항 id가 붙은 테스트 중 하나라도 통과하면 "검증됨"을 준다(ADR-147이 유지하기로 한 기존 규칙). `apps/studio/lib/server/sessions.ts`의 `buildMatrixTestRunRows`는 발견한 테스트 중 보고서에 없는 것을 이미 `status: 'not-run'`으로 펼쳐 두고 있었지만, `buildRequirementTestRunEvidence`는 `passed`·`failed`만 세고 `not-run` 행을 그냥 지나쳐 그 정보가 요구사항 근거 어디에도 나타나지 않았다.
+
+### 수정
+ADR-149로 정리했다. `packages/agent/src/requirements.ts`에 `findUnexecutedTests(requirementId, testRunRows)`를 더해, 같은 서비스가 지금 체크포인트에서 실제로 돈 실행인데 결과가 없는 테스트를 `RequirementEvidence.unexecutedTests`로 모은다(상태는 바꾸지 않는다). `packages/agent/src/test-discovery.ts`가 JUnit `@Tag`·`@Testcontainers`·`@EnabledIf…`류, pytest 커스텀 마커를 정적으로 찾아 `envConditionalReasons`로 남기고, 이 값이 `MatrixTestRunRow.reason`을 거쳐 "이유 추정"으로 요구사항 카드에 붙는다.
+
+### 검증
+`packages/agent/src/test-discovery.test.ts`에 테스트 6개, `packages/agent/src/requirements.test.ts`에 `findUnexecutedTests` 테스트 5개, `apps/studio/lib/server/sessions.test.ts`에 `buildMatrixTestRunRows` 테스트 3개, `apps/studio/lib/server/sessions-unexecuted-tests.test.ts`(신규, 임시 git 저장소 + 가짜 샌드박스)에 전체 경로 테스트 2개를 더했다. `pnpm -r typecheck`(6/6), `pnpm --filter @b-studio/studio lint`(0 errors), 관련 vitest 모두 통과했다. 실제 BE-commerce 세션에서 R12 카드에 배지가 뜨는지는 읽기 전용 작업 복사본이라 다시 실행해 확인하지 못했다.
+
+### 배운 점
+"통과한 테스트가 있다"와 "그 테스트가 요구사항이 요구하는 보장을 실제로 확인했다"는 다른 질문이다 — 더 약한 테스트의 통과가 더 강한(하지만 안 도는) 테스트의 부재를 가릴 수 있다. 실행 여부를 정적 추측(태그가 있다)이 아니라 실측(보고서에 결과가 있는지)으로 판정하고, 추측은 "이유"로만 보조하면 사실과 추측이 서로 다른 신뢰도로 공존할 수 있다.
