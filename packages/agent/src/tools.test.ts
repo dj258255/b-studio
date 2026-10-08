@@ -329,6 +329,105 @@ describe('실행 정책', () => {
   });
 });
 
+/**
+ * 도그푸딩 마찰 143: BE-commerce 세션에서 부가 서비스 mediamtx가 인증 오류로 멈췄을 때, service_logs·
+ * restart_service가 managed로만 한정돼 있어 에이전트가 로그도 못 보고 다시 띄우지도 못했다(ADR-148).
+ * 이 서비스들이 managed가 아닌, 이 프로젝트 자신의 compose 서비스(부가 서비스)까지 다루는지 확인한다
+ */
+describe('부가 서비스 도구(도그푸딩 마찰 143)', () => {
+  const addonProject = {
+    ...project,
+    composeServices: ['api', 'mediamtx', 'db'],
+    databases: [['db', { user: 'postgres', database: 'orders', dependents: ['api'] }]],
+  } as unknown as LoadedProject;
+
+  it('buildTools는 restart_service·service_logs의 enum에 부가 서비스를 넣고, run_in_service는 managed만 유지한다', () => {
+    const tools = buildTools(addonProject);
+    const enumOf = (name: string) => (tools.find((t) => t.name === name)?.input_schema as { properties?: Record<string, { enum?: string[] }> }).properties?.service?.enum;
+    expect(enumOf('restart_service')).toEqual(expect.arrayContaining(['api', 'mediamtx', 'db']));
+    expect(enumOf('service_logs')).toEqual(expect.arrayContaining(['api', 'mediamtx', 'db']));
+    expect(enumOf('run_in_service')).toEqual(['api']);
+    expect(enumOf('http_request')).toEqual(['api']);
+  });
+
+  it('service_logs는 managed가 아닌 부가 서비스의 로그도 보여준다', async () => {
+    const sandbox = {
+      ...context.sandbox,
+      async *logs() {
+        yield { service: 'mediamtx', text: 'failed to authenticate: invalid character "{" in host name', at: new Date() };
+      },
+    } as unknown as Sandbox;
+
+    const outcome = await executeTool('service_logs', { service: 'mediamtx', lines: 50 }, { ...context, project: addonProject, sandbox });
+
+    expect(outcome).toEqual({ ok: true, content: 'failed to authenticate: invalid character "{" in host name', rawChars: 58 });
+  });
+
+  it('service_logs·restart_service는 이 프로젝트의 compose 서비스가 아닌 이름(다른 프로젝트 등)을 거부한다', async () => {
+    const logs = await executeTool('service_logs', { service: 'other-project-db', lines: 10 }, { ...context, project: addonProject });
+    expect(logs).toEqual({ ok: false, content: 'Unknown service: other-project-db' });
+
+    const restart = await executeTool('restart_service', { service: 'other-project-db' }, { ...context, project: addonProject });
+    expect(restart).toEqual({ ok: false, content: 'Unknown service: other-project-db' });
+  });
+
+  it('run_in_service·http_request는 부가 서비스를 여전히 거부한다(엔드포인트가 없고 임의 실행이 걸려 있다)', async () => {
+    const run = await executeTool('run_in_service', { service: 'mediamtx', command: ['ls'] }, { ...context, project: addonProject });
+    expect(run).toEqual({ ok: false, content: 'Unknown service: mediamtx' });
+
+    const http = await executeTool('http_request', { service: 'mediamtx', method: 'GET', path: '/', body: '' }, { ...context, project: addonProject });
+    expect(http).toEqual({ ok: false, content: 'Unknown service: mediamtx' });
+  });
+
+  it('restart_service는 부가 서비스를 준비 판정 없이 sandbox.restartAddon으로 다시 띄운다', async () => {
+    const restartAddon = vi.fn().mockResolvedValue(undefined);
+    const sandbox = { ...context.sandbox, restartAddon } as unknown as Sandbox;
+
+    const outcome = await executeTool('restart_service', { service: 'mediamtx' }, { ...context, project: addonProject, sandbox });
+
+    expect(outcome.ok).toBe(true);
+    expect(outcome.content).toContain('mediamtx');
+    expect(restartAddon).toHaveBeenCalledWith('mediamtx', expect.anything());
+  });
+
+  it('restart_service는 데이터베이스 부가 서비스를 거부한다(체크포인트 저장·복원과 겹칠 수 있다)', async () => {
+    const restartAddon = vi.fn();
+    const sandbox = { ...context.sandbox, restartAddon } as unknown as Sandbox;
+
+    const outcome = await executeTool('restart_service', { service: 'db' }, { ...context, project: addonProject, sandbox });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('database service');
+    expect(restartAddon).not.toHaveBeenCalled();
+  });
+
+  it('restart_service는 사람이 서비스 선택에서 꺼 둔 부가 서비스를 켜지 않는다', async () => {
+    const restartAddon = vi.fn();
+    const sandbox = { ...context.sandbox, restartAddon } as unknown as Sandbox;
+    const offProject = { ...addonProject, offServices: new Set(['mediamtx']) } as unknown as LoadedProject;
+
+    const outcome = await executeTool('restart_service', { service: 'mediamtx' }, { ...context, project: offProject, sandbox });
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('turned off');
+    expect(restartAddon).not.toHaveBeenCalled();
+  });
+
+  it('restartAddon을 구현하지 않는 샌드박스에서는 지원하지 않는다고 분명히 알린다', async () => {
+    const sandbox = { ...context.sandbox } as unknown as Sandbox;
+
+    const outcome = await executeTool('restart_service', { service: 'mediamtx' }, { ...context, project: addonProject, sandbox });
+
+    expect(outcome).toEqual({ ok: false, content: "This sandbox does not support restarting the addon service 'mediamtx'." });
+  });
+
+  it('질문 모드에서는 부가 서비스 재시작도 거부한다', async () => {
+    const outcome = await executeTool('restart_service', { service: 'mediamtx' }, { ...context, project: addonProject, readOnly: true });
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('Question mode is read-only');
+  });
+});
+
 describe('도구 결과 예산', () => {
   it('read_file 결과를 앞쪽 위주로 자르고 원래 글자 수를 남긴다', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'tools-budget-'));
