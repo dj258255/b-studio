@@ -16,7 +16,7 @@
 | 멀티 CLI·백엔드 실행 | 43, 45, 47–49 |
 | 동시성·상태 저장 | 44 |
 | 벤치 하네스 | 42, 45–46, 55 |
-| 요구사항·PR·리뷰 추적 | 54, 56 |
+| 요구사항·PR·리뷰 추적 | 54, 56, 90, 93 |
 | 설계 단계에서 대비한 문제 | 22 |
 
 아래 목록은 번호순 전체 색인입니다. 오류 메시지나 증상으로 페이지 안을 검색한 뒤 해당 번호의 **현상 → 원인 → 해결 → 검증**을 따라가세요.
@@ -112,6 +112,7 @@
 - [89. 완료 요약 첫 줄의 "…결과를 보고합니다"가 체크포인트 제목이 됨](#89-완료-요약-첫-줄의-결과를-보고합니다가-체크포인트-제목이-됨)
 - [90. includes 서브프로젝트(media)가 게이트 test 단계에서 돌아도 요구사항 테스트 증거가 0건으로 남음](#90-includes-서브프로젝트media가-게이트-test-단계에서-돌아도-요구사항-테스트-증거가-0건으로-남음)
 - [91. 손대지 않은 R1이 범위 표기(R1~R32) 때문에 "작업 중"으로 보임](#91-손대지-않은-r1이-범위-표기r1r32-때문에-작업-중으로-보임)
+- [93. includes 서브프로젝트의 테스트가 통과해도 "테스트" 탭·요구사항 증거에 전혀 나타나지 않음](#93-includes-서브프로젝트의-테스트가-통과해도-테스트-탭요구사항-증거에-전혀-나타나지-않음)
 
 ---
 
@@ -2883,3 +2884,28 @@ DNS가 잠깐씩 끊기던 날, 로컬 CLI 백엔드(claude-code)로 돌린 긴 
 
 ### 배운 점
 "여러 id를 한 번에 저장했다"는 집계 라벨과 "이 id를 직접 작업했다"는 자유 언급은 글자로는 구분되지 않는다(둘 다 `R숫자` 토큰이다). 토큰만 보는 정규식은 구두점으로 묶인 범위를 따로 가려내야 한다.
+
+## 93. includes 서브프로젝트의 테스트가 통과해도 "테스트" 탭·요구사항 증거에 전혀 나타나지 않음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`, `GET /api/sessions/5b640fd3/requirements`, 체크포인트 `32e1c23`·`0f8d358`) → 코드 추적 → 수정
+
+### 현상
+R27(시청 신호 기록)의 통과 테스트 4건이 게이트 test 단계에서 모두 통과했고(`.git/b-studio/test-results.json`에 `pass`로 기록), 요구사항 카드의 `evidence.tests`(소스 스캔)에도 그 4건이 보이는데 `evidence.testRun`은 아예 없었다 — R27은 "작업 중"에 머물렀다. 같은 세션에서 R1은 "검증됨"이었는데, R1의 통과 증거를 들여다보면 `commerce/` 자신의 테스트(바닥 요구사항 id만 단 이름)가 통과해 생긴 것이었다. 이어진 실행(체크포인트 `0f8d358`, 시나리오 id를 테스트 이름에 추가하고 게이트 test 통과)에서는 `commerce/`의 같은 테스트 파일이 이번 실행에서 전부 `skip`으로 기록되면서(원인 불명 — 대상 저장소 자체의 증분 테스트 동작으로 보이며 b-studio 밖의 일이다) `media/`의 통과 증거만 남았고, 그 결과 32개 요구사항 중 **0개**가 검증됨이 됐다.
+
+### 원인
+"테스트" 탭의 발견 단계(`discoverServiceTestRows` → `walkServiceTestFiles(root, spec.path)`)는 서비스 폴더(`commerce/`) 안쪽만 훑는다. `media/`는 `includes`(studio.yaml, ADR-139)로 선언된 서비스 폴더 **밖**의 경로라 전혀 스캔하지 않는다. 반면 보고서 수거(`extraReportRootsFor`, 90번 항목에서 고침)는 `media/build/test-results/test/*.xml`까지 이미 잘 모아 `test-results.json`에 `media`의 통과 테스트 케이스가 그대로 들어 있었다 — 즉 **수거는 되는데 발견이 안 된다**. `attachResults`(`packages/agent/src/test-results.ts`)는 "발견한 행"에만 실행 결과를 이름으로 맞춰 붙이므로, 발견하지 못한 `media`의 테스트 케이스는 통과했어도 어느 행에도 붙지 못하고 조용히 버려졌다 — "테스트" 탭에 나타나지 않고, `buildRequirementTestRunEvidence`·`buildMatrixTestRunRows`도 그 증거를 전혀 못 봤다.
+
+애초에 품었던 가설("요구사항 id만 달고 시나리오 id가 없는 테스트는 증거로 안 친다")은 틀렸다 — `computeRequirementStatus`는 시나리오 id 없이 요구사항 id만 단 테스트의 통과도 `testRun.passed > 0`이면 그대로 "검증됨"으로 받아들인다(R1이 그 예다). 문제는 시나리오 추적 설계가 아니라 `includes` 경로 자체가 발견 단계에서 빠진 것이었다.
+
+곁다리로, 게이트가 돌린 JS/TS(Vitest/Jest) 서비스의 테스트 결과도 전혀 수거되지 않고 있었다(`web` 키가 `test-results.json`에 한 번도 생기지 않음) — `collectGateTestReports`는 `buildTestRunPlan`이 정한 고정 보고서 경로(`/tmp/b-studio-test-report.json`)를 가정하지만, 게이트는 그 경로에 결과를 남기는 b-studio 전용 명령이 아니라 `studio.yaml`에 적힌 사용자 자신의 스크립트(`npm test` 등, ADR-133)를 그대로 돌린다 — 그 스크립트가 `--reporter=json --outputFile=...`을 쓰지 않으면 아무것도 안 남는다. 지금까지는 이 실패를 완전히 조용히 넘겼다(보고서 0건 → 그냥 건너뜀, 기록도 안 남음).
+
+### 수정
+1. `apps/studio/lib/server/test-files.ts`에 `walkServiceAndIncludedTestFiles(root, servicePath, includes)`를 더해 서비스 폴더와 `includes` 경로를 함께 훑는다(`includes` 경로에서 찾은 파일은 `"<include>/<상대경로>"`로 접두어를 붙여 요구사항 탭의 전체 스캔과 표시를 맞춘다). `discoverServiceTestRows`가 이 함수를 쓰도록 바꿨다.
+2. 요구사항 id만 단 테스트로 요구사항 전체가 검증됨이 되는 기존 규칙은 그대로 두되, `packages/agent/src/requirements.ts`에 `findUnverifiedScenarioIds`를 더해 "시나리오는 있는데 아직 그 id를 단 통과 테스트가 없는 시나리오"를 `evidence.missingScenarios`로 요구사항 카드에 바로 보여준다(추적 매트릭스를 따로 열지 않아도 된다) — 요구사항 전체가 검증됨이어도 시나리오별로는 아직 안 끝났을 수 있다는 걸 가린다.
+3. `collectGateTestReports`가 보고서를 하나도 못 찾으면(`gateReportNotFoundEntry`) 그 원인을 안내로 남긴다(성공한 과거 기록은 덮어쓰지 않는다) — "테스트" 탭에 그 서비스의 에러 배너로 바로 보인다.
+
+### 검증
+`packages/agent/src/requirements.test.ts`에 `findUnverifiedScenarioIds` 테스트 5개, `apps/studio/lib/server/test-files.test.ts`(신규)에 `walkServiceAndIncludedTestFiles` 테스트 5개, `apps/studio/lib/server/sessions-test-results-includes.test.ts`(신규, 임시 git 저장소 + 가짜 샌드박스)에 "includes 경로 테스트가 테스트 탭·요구사항 증거 양쪽에 나타난다" 통합 테스트 2개, `apps/studio/lib/server/sessions.test.ts`에 `gateReportNotFoundEntry` 테스트 3개를 더했다. `pnpm -r typecheck`(6/6), 관련 vitest 모두 통과했다.
+
+### 배운 점
+"보고서를 모은다"와 "그 보고서를 어느 테스트에 붙일지 안다(발견)"는 `includes` 같은 서비스 폴더 밖 경로에서는 서로 다른 전제가 필요한 별개의 단계다 — 하나(90번, 수거)를 고치면서 다른 하나(발견)도 같이 고쳤다고 생각하기 쉽다. 또한 "요구사항이 검증됨"과 "그 요구사항의 모든 시나리오가 검증됨"은 이 설계에서 서로 다른 질문이다 — 카드 하나에 둘 다 보여주지 않으면 사람이 뒤의 질문에 스스로 답할 길이 없다.
