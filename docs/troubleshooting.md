@@ -104,6 +104,7 @@
 - [81. 규칙에 없는 동사로 끝난 요청의 체크포인트 제목이 동사 조각("…경로로 재")으로 끝남](#81-규칙에-없는-동사로-끝난-요청의-체크포인트-제목이-동사-조각경로로-재으로-끝남)
 - [82. "~게 해 주세요" 요청의 체크포인트 제목이 "재생되게한다"처럼 붙어 나옴](#82-게-해-주세요-요청의-체크포인트-제목이-재생되게한다처럼-붙어-나옴)
 - [83. browser_check가 <video>의 재생 실패를 못 잡아 숏폼 화면의 404 미디어 주소가 통과로 남음](#83-browser_check가-video의-재생-실패를-못-잡아-숏폼-화면의-404-미디어-주소가-통과로-남음)
+- [84. 폴더 열기가 만든 studio.yaml 등 생성 파일이 실패한 실행 뒤에도 되돌아가지 않음](#84-폴더-열기가-만든-studioyaml-등-생성-파일이-실패한-실행-뒤에도-되돌아가지-않음)
 
 ---
 
@@ -2695,3 +2696,31 @@ studio.yaml의 managed 서비스에 `includes`(프로젝트 루트 기준 상대
 
 ### 배운 점
 이번 수정은 "그 화면을 열어 봤을 때 더 정확히 진단한다"만 고쳤다. `/shorts`가 애초에 어느 확인에도 걸리지 않은 커버리지 문제(바뀐 페이지를 그 실행의 화면 확인에 자동으로 더하는 것)는 그대로 남아 있다 — ADR-140의 "검토했지만 미룬 선택지"에 이유를 남겼다.
+
+## 84. 폴더 열기가 만든 studio.yaml 등 생성 파일이 실패한 실행 뒤에도 되돌아가지 않음
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`의 체크포인트 `8e8778fb`, 작업 복사본은 읽기만 함) → 코드 추적 → 단위 테스트로 재현 → 수정
+
+### 현상
+실행 `8e8778fb`가 네트워크 오류로 실패했다. b-studio는 문서를 지키는 체크포인트를 남기고 작업 트리를 되돌렸지만, 그 실행이 고친 `studio.yaml`(web-test 서비스, `/shorts` pageCheck 추가)은 그대로 남았다. 되돌린 체크포인트에도, 되살리기 백업에도 이 변경은 전혀 기록되지 않았다.
+
+### 원인
+폴더 열기(ADR-067)가 만든 `studio.yaml`·`compose.b-studio.yaml`·`Dockerfile.b-studio`는 사용자 저장소를 더럽히지 않으려고 `.git/info/exclude`로 세션 작업 복사본의 git 추적에서도 뺀다. `CheckpointStore.pendingFiles()`·`discard()`·`restore()`는 모두 git(`status`·`add -A`·`reset --hard`·`clean -fd`)으로 움직이는데, git 자체가 이 파일을 무시 대상으로 보므로 전혀 보지 못한다. 그래서 체크포인트에 기록되지도, `discard()`·`restore()`의 되돌리기 대상이 되지도 않았다 — "게이트를 통과한 변경만 남긴다"는 약속이 생성 파일에는 적용되지 않았다.
+
+### 수정
+`packages/agent/src/checkpoints.ts`의 `CheckpointStore`에 `excludedFiles` 제공자(옵션)를 더했다. 체크포인트를 만들 때마다(`commit`·`init`) 제공자가 돌려준 후보 중 이 저장소가 실제로 무시하는 파일만 골라(`git status --ignored`) 그 내용을 git 밖(`gitDir/b-studio/excluded/<sha>`)에 사이드카로 남긴다. `discard()`·`restore(sha)`·`restoreBackup()`이 이 스냅샷과 지금 디스크를 비교해 같이 되돌린다. 커밋 오브젝트에는 전혀 들어가지 않으므로 `push()`·`exportTree()`에는 그대로 새지 않는다.
+
+범위를 좁힌 `commitPaths()`(문서만 먼저 지키는 체크포인트)와 원격·기준 브랜치만 들여오는 `integrateRemote()`·`integrateBase()`는 생성 파일을 바꾸지 않으므로, 지금 디스크 대신 부모 체크포인트의 스냅샷을 그대로 물려받는다(`#carryForwardExcludedSnapshot`) — 그렇지 않으면 아직 받아들이지 않은 생성 파일 변경이 "이미 그랬던 상태"로 둔갑해 영영 되돌릴 수 없어진다.
+
+`apps/studio/lib/server/project-registry.ts`에 `generatedFilePaths()`를 더해, studio 쪽(`sessions.ts`)이 세션 시작·이어서 작업하기에서 `CheckpointStore`에 넘긴다. 되돌린 파일에 `studio.yaml`이 있으면 `reloadSessionProject`를 부르도록 `revertRun`·`restoreCheckpoint`·`undoRemoteSync`·`undoBaseSync`에도 반영했다(80번과 같은 이유).
+
+내 폴더 세션(workspace: local)은 체크포인트 저장소가 사용자 폴더와 다른 별도 gitDir을 쓰므로, 애초에 이 문제의 영향을 받지 않는다(실측: 별도 gitDir은 원본 폴더의 `.git/info/exclude`를 보지 않아 `studio.yaml`을 평범하게 추적한다).
+
+### 검증
+- `packages/agent/src/checkpoints.test.ts`: 생성 파일도 discard·restore(sha)·restoreBackup이 되돌리는지, `commitPaths`가 생성 파일 변경을 받아들이지 않는지, 평범하게 추적되는 `studio.yaml`은 건드리지 않는지, 내 폴더 세션은 영향받지 않는지를 보는 테스트 7개를 더했다.
+- `apps/studio/lib/server/sessions-generated-files-revert.test.ts`: 실제 `sessions.ts` 코드로 끝까지 돌려, 실패한 실행의 `studio.yaml` 변경이 되돌아가는지와 성공한 실행의 변경이 git 기록(PR)에는 섞이지 않으면서도 다음 실행의 기준이 되는지를 보는 테스트 2개를 더했다.
+- `commitPaths`를 일부러 예전처럼 "지금 디스크를 받아들이는" 방식으로 되돌려 보니 "문서만 남긴 체크포인트는 생성 파일 변경을 받아들이지 않는다" 테스트가 실제로 실패해, 테스트가 그 회귀를 잡아내는 것을 확인했다.
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0).
+
+### 배운 점
+"커밋에서 뺀다"가 "체크포인트 전체에서 빠진다"를 뜻하지는 않는다. 되돌리기·복원은 git 기록과 별개로 그 파일들만의 자체 타임라인을 가져야 한다. 설계안을 비교한 근거는 `decisions.md` ADR-141에 남겼다.

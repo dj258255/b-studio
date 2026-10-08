@@ -161,6 +161,7 @@
 - [ADR-138 검증 게이트의 test 단계가 메모리 한도 초과 종료를 코드 실패와 구분해 서비스를 되살리고, Gradle 테스트 JVM의 힙·메타스페이스에 상한을 건다](#adr-138-검증-게이트의-test-단계가-메모리-한도-초과-종료를-코드-실패와-구분해-서비스를-되살리고-gradle-테스트-jvm의-힙메타스페이스에-상한을-건다)
 - [ADR-139 studio.yaml 서비스에 includes를 더해, 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로도 재시작·게이트 대상으로 본다](#adr-139-studioyaml-서비스에-includes를-더해-서비스-폴더-밖이지만-같은-빌드에-포함되는-경로도-재시작게이트-대상으로-본다)
 - [ADR-140 browser_check가 같은 출처 리소스 실패·콘솔 오류에 더해 `<video>`·`<audio>`·`<img>`의 로드·재생 실패를 진단 신호로 모은다](#adr-140-browser_check가-같은-출처-리소스-실패콘솔-오류에-더해-videoaudioimg의-로드재생-실패를-진단-신호로-모은다)
+- [ADR-141 체크포인트 밖(생성 파일, ADR-067)의 내용을 체크포인트 sha별 사이드카 스냅샷으로 따로 보관해 되돌리기·복원에 쓴다](#adr-141-체크포인트-밖생성-파일-adr-067의-내용을-체크포인트-sha별-사이드카-스냅샷으로-따로-보관해-되돌리기복원에-쓴다)
 
 ---
 
@@ -5854,3 +5855,45 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - `<video>`·`<audio>`·`<img>`의 `error` 이벤트와 네트워크 404(`failedRequests`)가 겹칠 수 있다(같은 실패가 두 줄로 보고된다). 신호를 하나로 합치지 않았다 — "그 요소가 재생되지 않았다"와 "그 요청이 404였다"는 서로 다른 증거라 한쪽만 있고 다른 쪽이 없는 경우(예: 응답은 200인데 코덱을 지원하지 않아 `MEDIA_ERR_DECODE`가 나는 경우)를 놓치지 않으려 그대로 뒀다.
 - 이번 수정은 "열어 본 화면을 더 정확히 진단한다"만 고친다. `/shorts`가 애초에 어느 확인에도 걸리지 않는 커버리지 문제(위 (b))는 남아 있다 — 사람이 `pageChecks`에 경로를 적거나 `autoPageChecks`를 켜야 이번 신호의 덕을 본다.
 - 캡처 단계 `error` 리스너는 `<script>`·`<link>` 같은 그 밖의 리소스 `error` 이벤트도 받지만, 이번에는 `<video>`·`<audio>`·`<img>`만 모은다(과제가 명시한 범위). 스크립트 로드 실패는 이미 `failedRequests`(네트워크 404)로 잡힌다.
+
+## ADR-141 체크포인트 밖(생성 파일, ADR-067)의 내용을 체크포인트 sha별 사이드카 스냅샷으로 따로 보관해 되돌리기·복원에 쓴다
+
+상태: 채택
+관련: ADR-067, ADR-073, ADR-099, ADR-131
+
+### 맥락
+- 폴더 열기(ADR-067)가 만든 `studio.yaml`·`compose.b-studio.yaml`·`Dockerfile.b-studio`는 사용자 저장소를 더럽히지 않으려고 세션 작업 복사본의 `.git/info/exclude`로 git 추적에서도 뺀다(`excludeFromGit`). 에이전트는 실행 중 이 파일(특히 `studio.yaml`의 `workflow.tests`·`pageChecks`·`systemPackages`·`includes`)을 일상적으로 고친다 — ADR-137·ADR-139·트러블슈팅 80이 모두 이 편집을 전제로 한다.
+- BE-commerce 세션(`pay-2-5b640fd3`, 읽기만)에서 실측(트러블슈팅 84): 실행 `8e8778fb`가 실패해 b-studio가 작업 트리를 되돌렸지만, 그 실행이 고친 `studio.yaml`은 그대로 남았다. `CheckpointStore`의 `pendingFiles()`·`discard()`·`restore()`가 모두 git(`status`·`add -A`·`reset --hard`·`clean -fd`)으로 움직이는데, git 자체가 이 파일을 무시 대상으로 보아 전혀 손대지 못했다. 같은 이유로 체크포인트에도 기록되지 않고, 되살리기 백업(ADR-099)에도 들어가지 않는다.
+- "게이트를 통과한 변경만 남긴다", "체크포인트로 되돌리면 Git과 DB가 같은 시점으로 돌아온다"는 두 약속이 생성 파일에는 적용되지 않았다.
+- 작업 복사본(workspace: copy·레인)과 내 폴더 세션(workspace: local)은 체크포인트 저장소의 위치가 다르다 — 복사본은 `overlayGeneratedFiles`가 생성 파일을 넣은 그 자리(작업 폴더)의 `.git`을 그대로 체크포인트 저장소로 쓰고, 내 폴더 세션은 사용자 폴더와 다른 별도 `gitDir`(세션 상태 폴더)을 쓴다. 이 차이 때문에 내 폴더 세션은 애초에 이 문제의 영향을 받지 않는다(별도 `gitDir`은 사용자 폴더의 `.git/info/exclude`를 보지 않으므로 `studio.yaml`을 평범하게 추적한다 — 단위 테스트로 확인).
+
+### 판단 기준
+1. 사용자 저장소(원본 폴더, PR, 내보내기)에 생성 파일이 새지 않을 것.
+2. 실패한 실행이 남긴 생성 파일 변경이 되돌려질 것(discard) — 실패 전 상태로 돌아갈 것.
+3. 체크포인트 복원(restore)이 생성 파일도 그 시점 내용으로 맞출 것 — Git과 생성 파일이 같은 시점을 가리킬 것.
+4. 내 폴더 세션(workspace: local)에서의 동작을 함께 정할 것.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| (a) 체크포인트를 만들 때(`commit`·`init`) 제외된 생성 파일의 지금 내용을 체크포인트 저장소 안(`gitDir/b-studio/excluded/<sha>`, git 오브젝트가 아니다)에 사이드카로 남기고, `discard()`·`restore(sha)`·`restoreBackup()`이 그 스냅샷과 지금 디스크를 비교해 같이 되돌린다 | 기준 1·2·3을 모두 만족한다. 생성 파일은 git 오브젝트에 전혀 들어가지 않으므로 `push()`·`exportTree()`가 손댈 필요 없이 그대로 새지 않는다(지금과 같다). 체크포인트 저장소 안에 두면 `discard()`·`restore()`가 이미 쓰는 "체크포인트 저장소가 작업 복사본과 분리돼 있다"는 성질을 그대로 재사용할 수 있다(ADR-099의 되살리기 백업과 같은 자리 규칙). **채택** |
+| (b) 세션 작업 복사본의 git 저장소에서만 생성 파일을 평범하게 추적하고(커밋에 포함), 사용자 원본 폴더로 내보낼 때(`exportTree`)·원격에 올릴 때(`push`)만 그 경로를 뺀다 | 기준 2·3은 "평범한 git 커밋"으로 자동으로 풀린다는 장점이 있다. 하지만 기준 1을 지키려면 `push()`가 올릴 커밋마다 생성 파일 경로를 뺀 새 커밋을 다시 만들어야 한다(커밋 sha가 바뀐다) — `integrateRemote()`·`integrateBase()`의 주석이 이미 밝히듯 "체크포인트마다 DB 덤프를 커밋 ID로 저장하므로 기존 체크포인트의 ID를 바꾸는 리베이스를 쓸 수 없다"는 제약과 정면으로 부딪힌다. `exportTree()`(운영 배포가 쓰는 `git archive`)도 매번 그 경로를 걸러내는 후처리가 새로 필요하다. git 기록에는 넣고 내보낼 때 다시 빼는 두 단계가, 애초에 넣지 않는 (a)보다 더 복잡하면서 얻는 것은 없다 — 기각 |
+| (c) 에이전트가 생성 파일을 바꾸면 그 변경을 커밋·게이트와 별도로 사람이 승인해야 반영되게 한다 | 생성 파일 편집은 예외가 아니라 일상이다(ADR-137의 `systemPackages`, ADR-139의 `includes`, 트러블슈팅 80의 `workflow` 편집 모두 에이전트가 실행 중 직접 쓴 것을 전제로 설계됐다). 모든 편집을 별도 승인 대상으로 두면 지금 "검증 게이트만 통과하면 자동으로 반영된다"는 세션 모델 전체를 바꾸는 큰 결정이 되어, 이번 버그(되돌리기·복원이 그 변경을 놓친다)보다 훨씬 큰 마찰을 더한다 — 기각 |
+
+### 결정
+1. **`packages/agent/src/checkpoints.ts`**: `CheckpointStoreOptions`에 `excludedFiles?: (projectRoot: string) => Promise<readonly string[]>`를 더했다. 이 제공자가 돌려준 후보 중 `git status --porcelain --ignored=matching`으로 **실제로 이 저장소가 무시하는 파일만** 걸러(`#ignoredAmong`) 다룬다 — 사용자가 직접 만든(평범하게 추적되는) `studio.yaml`을 쓰는 프로젝트는 이 필터에서 걸러져 기존 git 경로만 탄다.
+2. `commit()`·`commitPaths()`·`init()`가 체크포인트를 만들 때마다 `refreshExcludedSnapshot(sha)`를 불러, 걸러낸 파일의 지금 내용을 `gitDir/b-studio/excluded/<sha>/{manifest.json,files/*}`에 남긴다. 다만 `commitPaths()`(문서만 먼저 지키는 체크포인트, ADR-099)와 `integrateRemote()`·`integrateBase()`(원격·기준 브랜치의 내용만 들여오는 병합)는 생성 파일을 바꾸지 않는 체크포인트이므로, 지금 디스크를 받아들이는 대신 **부모 체크포인트의 스냅샷을 그대로 물려받는다**(`#carryForwardExcludedSnapshot`). 이 구분이 없으면, 예를 들어 "지키기" 체크포인트가 아직 받아들이지 않은(게이트를 거치지 않은) 생성 파일 변경을 "이미 그랬던 상태"로 둔갑시켜 뒤이은 `discard()`가 되돌리지 못하게 만든다 — 실제로 이 순서로 회귀하는 단위 테스트를 먼저 작성해 잡았다.
+3. `discard()`는 지금 HEAD 체크포인트의 스냅샷과 디스크를 비교해 바뀐 생성 파일을 되돌리고, 되돌리기 전 내용을 `restoreBackup()`이 쓰는 백업 폴더(`gitDir/b-studio/discarded/<id>/excluded-manifest.json`+`excluded/*`)에 함께 담는다 — 기존 git 패치 백업과 같은 id 아래 나란히 둔다. `restore(sha)`는 대상 체크포인트의 스냅샷을 기준으로 같은 일을 한다.
+4. **`apps/studio/lib/server/project-registry.ts`**: `generatedFilePaths(projectRoot)`를 더했다(디스크에 실제로 있는 `studio.yaml`·`compose.b-studio.yaml`·`Dockerfile.b-studio*` 후보만). **`apps/studio/lib/server/sessions.ts`**가 세션 시작(`CheckpointStore.clone`, `overlayGeneratedFiles` 직후 `refreshExcludedSnapshot`을 한 번 더 불러 시작 체크포인트의 스냅샷을 맞춘다)과 이어서 작업하기(resume)에서 이 제공자를 `CheckpointStore`에 넘긴다. 내 폴더 세션(workspace: local)에는 넘기지 않는다 — 별도 `gitDir`이라 애초에 영향이 없고, 괜히 걸러내는 비용만 더한다.
+5. 되돌린 파일에 `studio.yaml`이 있으면 `reloadSessionProject`를 부르도록 `revertRun`·`restoreCheckpoint`·`undoRemoteSync`·`undoBaseSync`에 반영했다(트러블슈팅 80·`saveCheckpoint`의 `specChanged`와 같은 이유 — Git과 세션이 들고 있는 `project` 객체가 같은 시점을 가리켜야 한다). 성공한 실행이 추적 파일 변경 없이 생성 파일만 고쳐 새 체크포인트가 생기지 않는 경우에도(`saveCheckpoint`가 `pendingExcludedFiles()`로 먼저 확인), 그 변경을 마지막 체크포인트의 스냅샷으로 남기고 필요하면 project를 다시 읽는다.
+
+### 검증 결과
+- `packages/agent/src/checkpoints.test.ts`: discard·restore(sha)·restoreBackup이 생성 파일도 되돌리는지(새로 생긴 파일은 지우는 것 포함), commitPaths가 생성 파일의 "지금 디스크" 상태를 받아들이지 않는지, 평범하게 추적되는 studio.yaml은 건드리지 않는지, excludedFiles를 주지 않으면 영향이 없는지, 내 폴더 세션(별도 gitDir)은 애초에 영향받지 않는지를 보는 테스트 7개를 더했다(전체 56개 통과).
+- `apps/studio/lib/server/sessions-generated-files-revert.test.ts`: 실제 `sessions.ts`·`project-registry.ts` 코드로 끝까지 돌려, 실패한 실행의 `studio.yaml` 변경이 되돌아가고 되돌린 파일 목록·백업에 들어가는지, 성공한 실행의 변경은 디스크에는 남지만 git 기록(`git log --all -- studio.yaml`이 비어 있다, 따라서 PR에도 섞이지 않는다)에는 없고 다음 실행의 기준이 되는지를 보는 테스트 2개를 더했다.
+- `commitPaths`를 일부러 예전처럼 "지금 디스크를 받아들이는" 방식(`refreshExcludedSnapshot`)으로 되돌려 실행해 보니, "문서만 남긴 체크포인트는 생성 파일 변경을 받아들이지 않는다" 테스트가 실제로 실패하는 것을 확인했다 — 테스트가 이 회귀를 잡아낸다는 뜻이다. `excludedFiles` 연결(session.ts)을 잠시 지우고 돌려 봐도 세션 통합 테스트가 기대대로 실패했다.
+- `pnpm -r typecheck`(6/6)·관련 vitest·`pnpm --filter @b-studio/studio lint`(오류 0)로 확인했다. 실제 BE-commerce 세션이나 Docker를 다시 띄워 재검증하지는 않았다 — 세션·컨테이너를 건드리지 말라는 제약 때문에 임시 폴더와 가짜 샌드박스를 쓰는 단위·통합 테스트로만 확인했다(확인하지 못한 것으로 남긴다).
+
+### 감수한 트레이드오프
+- 생성 파일 스냅샷은 체크포인트마다 하나씩 쌓인다(파일이 작아 디스크 비용은 무시할 만하지만, 개수 제한이 필요해 `EXCLUDED_KEEP_MAX`(200개)로 오래된 것부터 지운다 — 되살리기 백업(ADR-099)의 `BACKUP_KEEP_MAX`(10개)보다 훨씬 넉넉하게 잡았다, 둘 다 "방금 만든 것은 지우지 않는다"는 규칙은 같다).
+- `restoreBackup()`이 생성 파일을 되살릴 때는(`changes.patch`의 `git apply --check`와 달리) 그 사이 디스크가 다시 바뀌었는지 확인할 git 기반 수단이 없어 그대로 덮어쓴다 — 단순화한 알려진 한계로 남긴다.
+- 이번 기능이 배포되기 전에 만든 체크포인트는 생성 파일 스냅샷이 없다. 그런 옛 체크포인트로 되돌리거나 복원하면 "그때는 생성 파일이 없었다"로 보고 지울 수 있다 — b-studio는 개인 도구이고 세션이 오래 살아남는 경우가 드물어 감수했다(확인하지 못한 것으로 남긴다).

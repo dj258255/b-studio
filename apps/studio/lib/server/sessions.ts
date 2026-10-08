@@ -318,7 +318,7 @@ import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
-import { applyGeneratedFilesToWorkingCopy, findRegisteredProject, overlayGeneratedFiles } from './project-registry';
+import { applyGeneratedFilesToWorkingCopy, findRegisteredProject, generatedFilePaths, overlayGeneratedFiles } from './project-registry';
 import { offManagedServices, serviceSelectionFor, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
@@ -744,19 +744,33 @@ async function startSession({
     if (seed) {
       // 작업 분해 레인·통합(ADR-096): 프로젝트 원본이 아니라 그 세션의 작업 복사본에서, 그 세션의 최신 체크포인트
       // sha로 시작한다. 기준 브랜치·원격은 그 세션이 이미 기록해 둔 값을 그대로 물려받는다(inspectSource가 읽는다)
-      const cloned = await CheckpointStore.clone(seed.workDir, workDir, { branch: sessionBranchName(projectId, id), author, allowSubfolder, ref: seed.sha });
+      const cloned = await CheckpointStore.clone(seed.workDir, workDir, {
+        branch: sessionBranchName(projectId, id),
+        author,
+        allowSubfolder,
+        ref: seed.sha,
+        excludedFiles: generatedFilePaths,
+      });
       checkpoints = cloned.store;
       firstCheckpoint = cloned.start;
       sourceDirtyFiles = cloned.source.dirtyFiles;
       await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
+      // 체크포인트가 만들어진 뒤에 끼워 넣은 파일이라, 세션 시작 체크포인트의 생성 파일 스냅샷을 여기서 따로 맞춘다(도그푸딩 마찰 127)
+      await checkpoints.refreshExcludedSnapshot(firstCheckpoint.sha);
     } else if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
       // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
-      const cloned = await CheckpointStore.clone(source.root, workDir, { branch: sessionBranchName(projectId, id), author, allowSubfolder });
+      const cloned = await CheckpointStore.clone(source.root, workDir, {
+        branch: sessionBranchName(projectId, id),
+        author,
+        allowSubfolder,
+        excludedFiles: generatedFilePaths,
+      });
       checkpoints = cloned.store;
       firstCheckpoint = cloned.start;
       sourceDirtyFiles = cloned.source.dirtyFiles;
       // 폴더 열기로 등록한 프로젝트(ADR-067)는 b-studio가 만든 설정 파일이 커밋돼 있지 않아 복제에 빠진다. 복사본에 넣고 추적에서 뺀다
       await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
+      await checkpoints.refreshExcludedSnapshot(firstCheckpoint.sha);
     } else {
       await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
       checkpoints = new CheckpointStore(workDir, { author });
@@ -1222,7 +1236,10 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     }
     if (local) release = claimFolder(workDir, id);
 
-    const checkpoints = new CheckpointStore(workDir, { author: gitAuthor(), ...(local ? { gitDir: path.join(stateDirOf(data.snapshot), '.git') } : {}) });
+    const checkpoints = new CheckpointStore(workDir, {
+      author: gitAuthor(),
+      ...(local ? { gitDir: path.join(stateDirOf(data.snapshot), '.git') } : { excludedFiles: generatedFilePaths }),
+    });
     const project = await loadProject(await checkpoints.projectRoot());
     const secrets = await resolveSecrets(project);
     const previous = (await checkpoints.list())[0]!;
@@ -2649,18 +2666,30 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     (await session.databases.changedSince(head, session.stop.signal));
   const changes = await session.checkpoints.pendingChanges();
   const specChanged = changes.some((change) => change.file === SPEC_FILE);
+  // studio.yaml 등 생성 파일(ADR-067)은 git 추적 밖이라 pendingChanges에 보이지 않는다. 체크포인트를 남기기 전에
+  // 마지막 체크포인트 스냅샷과 따로 비교해 둔다(도그푸딩 마찰 127) — commit()이 체크포인트를 새로 만들면 그 안에서
+  // 스냅샷을 알아서 다시 찍으므로, 여기서는 "바뀌었는지"만 먼저 본다
+  const excludedChanged = await session.checkpoints.pendingExcludedFiles();
   const subject = session.project.spec.checkpoints.conventionalCommits ? generateCommitSubject(request, changes, summary) : `요청: ${request}`;
   const checkpoint = await session.checkpoints.commit(subject, body, {
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers,
   });
-  if (!checkpoint) return;
+  if (!checkpoint) {
+    // 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행도, 그 내용을 마지막 체크포인트 곁에 남긴다(그래야 다음
+    // 되돌리기가 이번에 바꾼 내용을 "이전 상태"로 잘못 알지 않는다)
+    if (excludedChanged.length > 0) {
+      await session.checkpoints.refreshExcludedSnapshot(head);
+      if (excludedChanged.includes(SPEC_FILE)) await reloadSessionProject(session);
+    }
+    return;
+  }
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
   emit(session, { type: 'checkpoint', runId, checkpoint });
   // 에이전트가 이번 실행에서 studio.yaml을 바꿨으면(includes·systemPackages·workflow 등) 다음 요청부터 그 선언을 쓴다(도그푸딩 마찰 121)
-  if (specChanged) await reloadSessionProject(session);
+  if (specChanged || excludedChanged.includes(SPEC_FILE)) await reloadSessionProject(session);
 }
 
 /**
@@ -2702,6 +2731,8 @@ async function revertRun(
   if (docsCheckpoint) await saveDatabases(session, docsCheckpoint.sha);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
   if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return files;
+  // 되돌린 파일에 studio.yaml(생성 파일 포함, 도그푸딩 마찰 127)이 있으면 재시작 전에 project를 다시 읽는다
+  if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
 
   const report = await restartServicesFor(
     session.sandbox,
@@ -2946,6 +2977,8 @@ export function restoreCheckpoint(id: string, sha: string): void {
       // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099).
       // 지금 체크포인트를 가리켰으면(isHead) 보통 버릴 파일이 없어 이 단계는 사실상 아무것도 하지 않는다
       const { files, backup } = await session.checkpoints.restore(sha);
+      // 되돌린 파일에 studio.yaml(생성 파일 포함, 도그푸딩 마찰 127)이 있으면 재시작 전에 project를 다시 읽는다
+      if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
       // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다.
       // 어긋나지 않았으면(action: 'unchanged') 아무 것도 하지 않고 조용히 끝난다
       const database = await session.databases.restore(sha, session.stop.signal);
@@ -3872,6 +3905,7 @@ async function undoRemoteSync(
   try {
     // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
     const { files, backup } = await session.checkpoints.restore(result.previous);
+    if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
@@ -4022,6 +4056,7 @@ async function undoBaseSync(
   try {
     // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
     const { files, backup } = await session.checkpoints.restore(result.previous);
+    if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
