@@ -15,7 +15,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
  * (ScriptedModelClient, HTTP로는 받지 않는 서버 내부 경로) — 실제 GitHub·모델을 부르지 않고, :3000에
  * dev 서버를 띄우지 않는다.
  */
-const fake = vi.hoisted(() => ({ root: '', ensureInfra: vi.fn<Sandbox['ensureInfra']>() }));
+const fake = vi.hoisted(() => ({ root: '', ensureInfra: vi.fn<NonNullable<Sandbox['ensureInfra']>>() }));
 
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@b-studio/sandbox')>();
