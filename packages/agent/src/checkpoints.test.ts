@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -946,5 +946,120 @@ describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
     await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String pending; }\n');
 
     await expect(store.integrateBase()).rejects.toThrow('체크포인트로 저장하지 않은 변경');
+  });
+});
+
+/** 폴더 열기(ADR-067)가 하듯, root의 .git/info/exclude에 패턴을 더해 그 경로를 이 저장소의 git 추적에서 뺀다 */
+async function excludeFromRoot(pattern: string): Promise<void> {
+  await mkdir(path.join(root, '.git', 'info'), { recursive: true });
+  await appendFile(path.join(root, '.git', 'info', 'exclude'), `${pattern}\n`);
+}
+
+describe('CheckpointStore 생성 파일(제외됨) 스냅샷 (ADR-141, 도그푸딩 마찰 127)', () => {
+  it('실패한 실행이 고친 생성 파일(git 추적 밖)도 discard가 되돌리고, 새로 생긴 파일은 지운다', async () => {
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml', 'Dockerfile.b-studio'] });
+    const start = await store.init();
+    // 폴더 열기가 쓴 생성 파일을 세션 시작 뒤에 끼워 넣는 것과 같은 순서(overlayGeneratedFiles 다음에 스냅샷)
+    await write('studio.yaml', 'version: 1\n');
+    await excludeFromRoot('/studio.yaml');
+    await excludeFromRoot('Dockerfile.b-studio');
+    await store.refreshExcludedSnapshot(start.sha);
+
+    // 실패할 실행: 추적되는 파일, 기존 생성 파일, 새로 찾은 서비스의 Dockerfile을 모두 고친다
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+    await write('studio.yaml', 'version: 2\nworkflow:\n  tests: true\n');
+    await write('Dockerfile.b-studio', 'FROM node\n');
+
+    const { files } = await store.discard();
+
+    expect(files.sort()).toEqual(['Dockerfile.b-studio', 'api/src/Order.java', 'studio.yaml']);
+    expect(await read('api/src/Order.java')).toBe('class Order {}\n');
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+    await expect(read('Dockerfile.b-studio')).rejects.toThrow();
+  });
+
+  it('버리기 전에 생성 파일도 백업하고, 되살리기로 그대로 되돌린다', async () => {
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
+    const start = await store.init();
+    await write('studio.yaml', 'version: 1\n');
+    await excludeFromRoot('/studio.yaml');
+    await store.refreshExcludedSnapshot(start.sha);
+
+    await write('studio.yaml', 'version: 2\n');
+    const { backup } = await store.discard();
+    expect(backup).toMatchObject({ files: ['studio.yaml'] });
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+
+    const restored = await store.restoreBackup(backup!.id);
+    expect(restored.files).toEqual(['studio.yaml']);
+    expect(await read('studio.yaml')).toBe('version: 2\n');
+  });
+
+  it('더 이른 체크포인트로 복원하면 생성 파일도 그 시점 내용으로 돌아간다', async () => {
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
+    const start = await store.init();
+    await write('studio.yaml', 'version: 1\n');
+    await excludeFromRoot('/studio.yaml');
+    await store.refreshExcludedSnapshot(start.sha);
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const checkpoint1 = (await store.commit('요청: 메모'))!;
+
+    await write('studio.yaml', 'version: 2\n');
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    await store.commit('요청: 필드 추가');
+
+    // 체크포인트 사이에 아직 체크포인트로 남기지 않은(중간에 바뀐) 내용도 있는 채로 복원한다
+    await write('studio.yaml', 'version: 3-mid-flight\n');
+    const { files } = await store.restore(checkpoint1.sha);
+
+    expect(files).toContain('studio.yaml');
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+  });
+
+  it('commitPaths로 문서만 남긴 체크포인트는 생성 파일 변경을 받아들이지 않아, 뒤이은 discard가 그대로 되돌린다', async () => {
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
+    const start = await store.init();
+    await write('studio.yaml', 'version: 1\n');
+    await excludeFromRoot('/studio.yaml');
+    await store.refreshExcludedSnapshot(start.sha);
+
+    // 실패할 실행: 문서와 studio.yaml을 함께 고친다
+    await mkdir(path.join(root, 'docs'), { recursive: true });
+    await write('docs/requirements.md', '# 요구사항\n');
+    await write('studio.yaml', 'version: 2\n');
+
+    // 지키기: 되돌리기 전에 문서만 먼저 체크포인트로 남긴다(protectPendingDocsBeforeDiscard와 같은 모양)
+    const docsCheckpoint = await store.commitPaths(['docs/requirements.md'], '지키기: 문서를 남긴다');
+    expect(docsCheckpoint).toBeDefined();
+
+    // 남은 변경(studio.yaml)을 버린다 — commitPaths가 생성 파일의 "지금 디스크" 상태를 받아들였다면 여기서 못 돌아간다
+    const { files } = await store.discard();
+    expect(files).toEqual(['studio.yaml']);
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+    expect(await read('docs/requirements.md')).toBe('# 요구사항\n');
+  });
+
+  it('git이 무시하지 않는(평범하게 추적되는) studio.yaml은 생성 파일 스냅샷이 건드리지 않는다', async () => {
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
+    await write('studio.yaml', 'version: 1\n');
+    await store.init(); // 제외하지 않았으므로 studio.yaml은 평범하게 커밋된다
+
+    expect(await store.pendingExcludedFiles()).toEqual([]);
+
+    await write('studio.yaml', 'version: 2\n');
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+    const { files } = await store.discard();
+
+    // 평범하게 추적되는 파일은 git 쪽(pendingFiles) 경로로 되돌아간다 — 생성 파일 쪽 로직이 중복으로 손대지 않는다
+    expect(files.sort()).toEqual(['api/src/Order.java', 'studio.yaml']);
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+  });
+
+  it('excludedFiles를 주지 않으면(평범한 세션) 아무 영향이 없다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    expect(await store.pendingExcludedFiles()).toEqual([]);
+    await expect(store.refreshExcludedSnapshot()).resolves.toBeUndefined();
   });
 });
