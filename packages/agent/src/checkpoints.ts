@@ -236,6 +236,16 @@ export class CheckpointStore {
   }
 
   /**
+   * 체크포인트 sha가 남긴 생성 파일 스냅샷(ADR-141) 안에서 한 파일의 경로. 그 시점에 파일이 없었을 수도 있어(아직
+   * 만들기 전, 또는 excludedFiles 제공자가 없는 저장소) 실제로 있는지는 호출하는 쪽이 따로 확인한다. 복구 안내처럼
+   * 읽기 전용으로 경로만 알고 싶을 때 쓴다 — studio.yaml 형식 오류로 project를 못 읽어 보통의 restore()를 쓸 수
+   * 없을 때(도그푸딩 마찰 131) 사람이 참고할 경로를 알려주는 용도다
+   */
+  excludedSnapshotFile(sha: string, file: string): string {
+    return path.join(this.#excludedSnapshotDir(sha), 'files', file);
+  }
+
+  /**
    * 폴더가 커밋이 있는 Git 저장소에 있는지 확인한다. 저장소가 아니면 undefined.
    * 저장소 루트가 아닌 하위 폴더는 allowSubfolder(모노레포 하위 폴더 프로젝트)일 때만 인정한다
    */

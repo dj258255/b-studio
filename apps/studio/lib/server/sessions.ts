@@ -233,7 +233,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { dependentsOf, loadProject, figmaFileKey, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
+import { dependentsOf, loadProject, figmaFileKey, SpecError, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import {
   buildSubmissionChecklist,
@@ -1240,7 +1240,13 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       author: gitAuthor(),
       ...(local ? { gitDir: path.join(stateDirOf(data.snapshot), '.git') } : { excludedFiles: generatedFilePaths }),
     });
-    const project = await loadProject(await checkpoints.projectRoot());
+    const projectRoot = await checkpoints.projectRoot();
+    // studio.yaml 형식이 틀리면(도그푸딩 마찰 131) 사람이 직접 고쳐야 이어서 작업할 수 있다. 어느 필드가 틀렸는지는
+    // SpecError.message에 이미 있으니, 고칠 수 있는 길(작업 복사본의 파일 경로, 되면 마지막 체크포인트 스냅샷 경로)만 덧붙인다
+    const project = await loadProject(projectRoot).catch(async (error: unknown) => {
+      if (!(error instanceof SpecError)) throw error;
+      throw new StudioError(400, `${error.message}\n\n${await describeSpecRecoveryHint(checkpoints, projectRoot)}`);
+    });
     const secrets = await resolveSecrets(project);
     const previous = (await checkpoints.list())[0]!;
     let discarded: string[] = [];
@@ -2693,13 +2699,46 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
 }
 
 /**
- * studio.yaml을 다시 읽어 세션의 project를 바꾼다. 못 읽으면 지금 project를 그대로 둔다. 서비스 선택(offServices, ADR-083)은
- * 파일이 아니라 세션 상태라 다시 읽은 project에 그대로 옮긴다 — 옮기지 않으면 꺼 둔 서비스가 다음 재시작에서 다시 켜진다
+ * studio.yaml을 다시 읽어 세션의 project를 바꾼다. 못 읽으면 지금 project를 그대로 두되(도그푸딩 마찰 131), 조용히
+ * 넘어가지 않고 대화에 경고를 남긴다 — 그래야 에이전트와 사람이 "옛 설정으로 계속 진행 중"이라는 사실을 놓치지 않는다
+ * (전에는 .catch(() => session.project)로 삼켰다). 서비스 선택(offServices, ADR-083)은 파일이 아니라 세션 상태라
+ * 다시 읽은 project에 그대로 옮긴다 — 옮기지 않으면 꺼 둔 서비스가 다음 재시작에서 다시 켜진다
  */
 async function reloadSessionProject(session: Session): Promise<void> {
   const off = session.project.offServices;
-  session.project = await loadProject(session.project.root).catch(() => session.project);
+  session.project = await loadProject(session.project.root).catch((error: unknown) => {
+    emit(session, {
+      type: 'notice',
+      text: `studio.yaml을 다시 읽지 못해 이전 설정으로 계속합니다: ${describe(error)}`,
+      at: new Date().toISOString(),
+    });
+    return session.project;
+  });
   if (off) session.project.offServices = off;
+}
+
+/**
+ * studio.yaml 형식 오류로 이어서 작업하지 못할 때 사람이 고칠 수 있게 남기는 안내(도그푸딩 마찰 131). 생성 파일
+ * (ADR-067)이면 마지막 체크포인트가 남긴 스냅샷(ADR-141) 경로를 알려줘 그 내용으로 되돌릴 수 있게 하고, 스냅샷이
+ * 없으면(내 폴더 세션, 아직 스냅샷이 없던 세션) 작업 복사본 경로만 알려준다. 안내를 만들다 실패해도(체크포인트 기록을
+ * 못 읽는 등) 원래 오류를 가리지 않도록 조용히 건너뛴다.
+ * 자동으로 되돌리지는 않는다 — discardWorkingCopy처럼 project(시크릿 목록)가 있어야 안전하게 버릴 수 있는 범위까지는
+ * 아직 다루지 않는다. 자동 복구는 범위가 커서 다음 과제로 남긴다(ADR-144)
+ */
+async function describeSpecRecoveryHint(checkpoints: CheckpointStore, projectRoot: string): Promise<string> {
+  const workPath = path.join(projectRoot, SPEC_FILE);
+  try {
+    const head = (await checkpoints.list(1))[0];
+    if (head) {
+      const snapshot = checkpoints.excludedSnapshotFile(head.sha, SPEC_FILE);
+      if (await stat(snapshot).then(() => true, () => false)) {
+        return `${workPath}을 위 항목에 맞게 직접 고치거나, 마지막 체크포인트(${head.shortSha})의 ${SPEC_FILE}(${snapshot})로 덮어쓴 뒤 다시 이어서 작업하세요.`;
+      }
+    }
+  } catch {
+    // 안내를 못 만들어도 원래 오류는 그대로 보여준다
+  }
+  return `${workPath}을 위 항목에 맞게 직접 고친 뒤 다시 이어서 작업하세요.`;
 }
 
 /**
