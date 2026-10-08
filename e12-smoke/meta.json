@@ -1,0 +1,34 @@
+{
+  "startedAt": "2026-10-07T23:07:13.648Z",
+  "finishedAt": "2026-10-07T23:58:36.128Z",
+  "dry": false,
+  "backend": "claude-code",
+  "requestedModel": "claude-sonnet-5",
+  "observedModels": [
+    "claude-sonnet-5"
+  ],
+  "dockerMemTotal": "16733593600",
+  "gitCommit": "324090c",
+  "tasks": [
+    "orders-list"
+  ],
+  "strategies": [
+    "S7",
+    "S6"
+  ],
+  "topology": "mesh",
+  "laneBackends": {},
+  "contracts": "human",
+  "escalateAfter": 2,
+  "escalateRetryBudget": 2,
+  "repeats": 1,
+  "runs": 2,
+  "onRateLimit": "stop",
+  "rateLimitWaitMinutes": 30,
+  "contextClearing": false,
+  "integrationChecks": false,
+  "verify": "full",
+  "selfCheck": "full",
+  "concurrency": 1,
+  "maxEnvFailures": 2
+}

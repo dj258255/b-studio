@@ -15,6 +15,8 @@ export interface Reader {
 }
 
 export function canRead(topology: Topology, reader: Reader, note: Note, hub: string): boolean {
+  // 조정자(허브)는 중계(S7)를 위해 모든 메모를 읽는다. 화면용 canLaneRead에는 허브 독자가 없어 규칙이 갈리지 않는다
+  if (reader.lane === hub) return true;
   // 플랫폼(검증기)이 쓴 메모는 topology와 무관하게 모든 레인이 읽는다
   if (note.author.by === 'platform') return true;
   // 자기 메모는 항상 읽는다

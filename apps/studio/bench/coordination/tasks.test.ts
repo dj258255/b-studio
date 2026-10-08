@@ -69,6 +69,9 @@ describe('협업 벤치 과제와 고정 계획', () => {
     expect(planFor(task, 'S3').coordination).toEqual({ strategy: 'S3', topology: 'mesh' });
     expect(planFor(task, 'S4').coordination).toEqual({ strategy: 'S4' });
     expect(planFor(task, 'S5').coordination).toEqual({ strategy: 'S5' });
+    // S6은 전략만(플랫폼이 트레이스를 게시), S7은 star가 정의의 일부다 — 레인끼리 직접 보지 못해야 중계가 뜻을 가진다
+    expect(planFor(task, 'S6').coordination).toEqual({ strategy: 'S6' });
+    expect(planFor(task, 'S7').coordination).toEqual({ strategy: 'S7', topology: 'star' });
   });
 });
 
@@ -81,6 +84,8 @@ describe('missingCoordinationTools', () => {
     expect(missingCoordinationTools('S5', base)).toEqual(['read_notes']);
     expect(missingCoordinationTools('S3', base)).toEqual(['post_note', 'read_notes']);
     expect(missingCoordinationTools('S3', [...base, 'post_note', 'read_notes'])).toEqual([]);
+    expect(missingCoordinationTools('S6', base)).toEqual(['read_notes']);
+    expect(missingCoordinationTools('S7', base)).toEqual(['post_note', 'read_notes']);
   });
 
   it('허용 목록이 없는 프로젝트는 모든 도구를 쓸 수 있다', () => {
@@ -89,7 +94,7 @@ describe('missingCoordinationTools', () => {
 
   it('벤치가 쓰는 예제 프로젝트는 모든 전략의 조율 도구를 허용한다', async () => {
     const project = await loadProject(path.resolve(import.meta.dirname, '../../../../examples/orders'));
-    const strategies: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5'];
+    const strategies: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'];
     expect(strategies.flatMap((strategy) => missingCoordinationTools(strategy, project.spec.workflow?.allowedTools))).toEqual([]);
   });
 });

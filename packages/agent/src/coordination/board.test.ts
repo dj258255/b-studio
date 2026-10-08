@@ -265,3 +265,16 @@ describe('Board.contractAuthors (이슈 #393: 읽기 타이밍 안내)', () => {
     expect(b.contractAuthors()).toEqual(new Set(['api']));
   });
 });
+
+describe('허브 독자(S7 조정자)', () => {
+  it('star에서도 허브는 레인의 모델 메모를 전부 읽는다', () => {
+    const board = new Board({ topology: 'star', hub: 'plan', modelWrites: true });
+    board.post({ kind: 'fact', body: 'api가 /api/orders를 정했다' }, { lane: 'api', by: 'model' });
+    board.post({ kind: 'fact', body: 'web이 목록 화면을 만든다' }, { lane: 'web', by: 'model' });
+    // 레인끼리는 직접 보지 못한다
+    expect(board.read({ lane: 'api' }).notes.map((note) => note.author.lane)).toEqual(['api']);
+    // 허브(조정자)는 중계를 위해 전부 본다
+    expect(board.read({ lane: 'plan' }).notes.map((note) => note.author.lane).sort()).toEqual(['api', 'web']);
+  });
+});
+
