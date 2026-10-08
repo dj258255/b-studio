@@ -237,6 +237,14 @@ describe('generateCommitSubject', () => {
     expect(generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')])).not.toContain('이걸한다');
   });
 
+  it('요약 첫 줄이 "마무리 확인 결과를 보고합니다." 같은 경과 보고면 제목으로 쓰지 않는다(도그푸딩 버그 리포트)', () => {
+    const request = '앞 실행이 네트워크 오류로 끊겨, 그 실행이 고친 apps/web/next.config.ts를 보관본에서 되살려 두었습니다. 이어서 마무리해 주세요.';
+    const summary = '마무리 확인 결과를 보고합니다.\n\n**진단**: 이전 실행이 이미 올바르게 분석·수정해 두었습니다.';
+    const subject = generateCommitSubject(request, [change('apps/web/next.config.ts')], summary);
+    expect(subject).not.toContain('보고합니다');
+    expect(subject).not.toContain('앞 실행');
+  });
+
   it('부탁 어미를 뗀 뒤 "이걸"처럼 짧은 대명사+조사만 남아도 요청 글을 제목으로 쓰지 않는다', () => {
     const subject = generateCommitSubject('이걸 해 주세요', [change('apps/commerce/src/shorts/link.ts')]);
     expect(subject).not.toBe('feat: 이걸');
