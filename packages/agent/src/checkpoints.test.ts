@@ -801,6 +801,20 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(mixed.outsideFiles).toBe(1);
   });
 
+  it('문서 체크포인트 표시를 단 커밋이 코드 파일을 문서 이름으로 옮겼으면, 목록에는 새 이름만 보여도 outsideFiles로 드러난다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    // 코드 파일을 그대로 문서 경로로 옮긴다: git은 이름 바꾸기로 보고 새 이름만 보여 준다(원래 파일은 사라졌다)
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await git(workDir, 'mv', 'api/src/Order.java', 'docs/requirements.md');
+    await git(workDir, '-c', 'user.name=b-studio', '-c', 'user.email=checkpoints@b-studio.local', 'commit', '-q', '-m', `문서: 옮긴 커밋\n\n${formatVerifyTrailer('docs')}`);
+    const moved = (await store.list())[0]!;
+    expect(moved.verify).toBe('docs');
+    expect(moved.files).toEqual(['docs/requirements.md']);
+    expect(moved.outsideFiles).toBe(1);
+  });
+
   it('Git 저장소 루트가 아닌 폴더는 복제하지 않고, 세션 이전 기록으로는 되돌리지 않는다', async () => {
     const { source, workDir } = await createSourceRepository();
     expect(await CheckpointStore.inspectSource(path.join(source, 'api'))).toBeUndefined();

@@ -20,9 +20,9 @@ export interface Checkpoint {
   /** 가볍게 확인(light) 실행이면 'light', 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'. 전체 검증이면 없다 */
   verify?: 'light' | 'docs';
   /**
-   * 문서 체크포인트(verify: 'docs')가 프로젝트 폴더 밖에서 바꾼 파일 수. files는 프로젝트 폴더 기준이라 폴더 밖 변경이 빠지므로,
-   * "이 체크포인트가 바꾼 것은 files가 전부다"라고 말하려면 이 값이 없어야 한다(ADR-156). 0이면 넣지 않고, 문서 체크포인트가
-   * 아니면 세지 않는다
+   * 문서 체크포인트(verify: 'docs')가 바꿨는데 files에는 드러나지 않는 경로 수. files는 프로젝트 폴더 기준이라 폴더 밖 변경이
+   * 빠지고, 이름 바꾸기는 새 이름만 남아 사라진 원래 파일이 안 보인다. "이 체크포인트가 바꾼 것은 files가 전부다"라고 말하려면
+   * 이 값이 없어야 한다(ADR-156). 0이면 넣지 않고, 문서 체크포인트가 아니면 세지 않는다
    */
   outsideFiles?: number;
 }
@@ -1241,28 +1241,32 @@ export class CheckpointStore {
       const files = await this.#fromRoot((await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean));
       return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
     }
-    const outsideFiles = verify === 'docs' ? await this.#changedOutsideProject(sha) : 0;
+    const files = await this.#changedFiles(sha);
+    const outsideFiles = verify === 'docs' ? await this.#changedBeyond(sha, files) : 0;
     return {
       sha,
       shortSha,
       message: subject,
       createdAt,
-      files: await this.#changedFiles(sha),
+      files,
       ...(passedStages ? { passedStages } : {}),
       ...(verify ? { verify } : {}),
       ...(outsideFiles > 0 ? { outsideFiles } : {}),
     };
   }
 
-  /** 커밋이 프로젝트 폴더 밖에서 바꾼 파일 수. 프로젝트가 저장소 루트면 밖이 없으므로 0이다 */
-  async #changedOutsideProject(sha: string): Promise<number> {
+  /**
+   * 커밋이 바꾼 경로 중 files(프로젝트 폴더 기준 목록)에 드러나지 않는 것의 수. 저장소 전체를 이름 바꾸기 감지 없이 본다 —
+   * 그래야 폴더 밖 변경과, 이름 바꾸기로 사라진 원래 파일(목록에는 새 이름만 남는다)이 둘 다 잡힌다
+   */
+  async #changedBeyond(sha: string, files: readonly string[]): Promise<number> {
     const subdir = await this.#subdir();
-    if (!subdir) return 0;
     const parent = await this.#firstParent(sha);
     const output = parent
-      ? await this.#git(['diff', '--name-only', '-z', parent, sha])
-      : await this.#git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha]);
-    return output.split('\0').filter((file) => file && !file.startsWith(`${subdir}/`)).length;
+      ? await this.#git(['diff', '--no-renames', '--name-only', '-z', parent, sha])
+      : await this.#git(['diff-tree', '--no-renames', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha]);
+    const listed = new Set(files.map((file) => (subdir ? `${subdir}/${file}` : file)));
+    return output.split('\0').filter((file) => file && !listed.has(file)).length;
   }
 
   /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */
