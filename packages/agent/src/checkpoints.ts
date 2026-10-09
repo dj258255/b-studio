@@ -925,6 +925,16 @@ export class CheckpointStore {
   }
 
   /**
+   * from에서 to까지 바뀐 경로(프로젝트 폴더 기준)와, 프로젝트 폴더 밖에서 바뀐 경로의 수. 이름 바꾸기 감지 없이 본다(이름 바꾸기로
+   * 사라진 원래 파일도 바뀐 경로로 센다). 두 체크포인트의 코드가 같은지 스냅샷의 기록이 아니라 git으로 직접 확인할 때 쓴다
+   */
+  async changedBetween(from: string, to: string): Promise<{ files: string[]; outsideFiles: number }> {
+    const all = (await this.#git(['diff', '--name-only', '-z', '--no-renames', from, to])).split('\0').filter(Boolean);
+    const files = await this.#fromRoot(all);
+    return { files, outsideFiles: all.length - files.length };
+  }
+
+  /**
    * 세션 시작(첫 체크포인트) 이후 지금 HEAD까지의 전체 변경. PR의 base...head diff와 같다(시작 커밋이 세션 브랜치가
    * 갈라진 지점이라서다). AI 리뷰가 보는 diff가 이 함수로 만든다. 크기 제한은 부르는 쪽(pr-review.ts의 truncateDiff)이 한다
    */
