@@ -130,6 +130,7 @@
 - [107. 질문으로 끝낸 실행은 게이트 검사가 실패해도 체크포인트가 남음](#107-질문으로-끝낸-실행은-게이트-검사가-실패해도-체크포인트가-남음)
 - [108. 게이트가 알려 준 sampleParams를 넣어도 같은 실행에서는 반영되지 않아 통과할 수 없었음](#108-게이트가-알려-준-sampleparams를-넣어도-같은-실행에서는-반영되지-않아-통과할-수-없었음)
 - [109. describe 제목에만 시나리오 id를 단 테스트가 실행 근거로 잡히지 않음](#109-describe-제목에만-시나리오-id를-단-테스트가-실행-근거로-잡히지-않음)
+- [110. 탐색형 QA가 화면에서 잘린 요소를 하나도 보고하지 못하고 5단계 만에 통과로 끝남](#110-탐색형-qa가-화면에서-잘린-요소를-하나도-보고하지-못하고-5단계-만에-통과로-끝남)
 
 ---
 
@@ -3399,3 +3400,67 @@ id를 묶음 제목에만 달면 실행 근거 쪽에서 세 군데가 그 제�
 
 ### 배운 점
 같은 사실(이 테스트가 어느 시나리오를 확인하는가)을 세 군데(보고서 파서, 발견 행, 정적 스캔)가 따로 뽑으면 하나만 고쳐서는 "발견됐지만 실행 기록 없음" 같은 어긋난 표시가 생긴다. 그리고 이름을 바꿔 정보를 실어 나르면 그 이름을 열쇠로 쓰는 짝짓기가 깨진다. 필드를 더하는 쪽이 저장 형식도 호환된다.
+
+## 110. 탐색형 QA가 화면에서 잘린 요소를 하나도 보고하지 못하고 5단계 만에 통과로 끝남
+
+**구분:** 실제 세션에서 관찰(로컬 CLI 백엔드) → 코드로 원인 확인 → 가짜 모델·가짜 SDK 테스트로 재현 → 수정
+
+### 현상
+방송 시청 화면(`/live/999001`)을 "처음 온 시청자의 눈으로 점검해 주세요 … 잘리거나 겹치거나 화면 밖으로 나간 요소를 찾습니다. 화면 맨 아래까지 내려가 확인합니다 … 문제가 없으면 없다고 적습니다"라는 목표로 탐색형 QA를 돌렸다(최대 행동 20). 결과는 **통과**였다.
+
+```
+status pass | reason 진단 신호가 없고 확인 조건을 만족합니다 | stoppedBy repeated_screen
+elapsed 20s, actions 5:
+  qa_navigate {"path": "/live/999001"}                                  ok
+  qa_wait {"forText": "방송", "ms": 2000}                                ok
+  qa_snapshot {}                                                        ok
+  qa_screenshot {}                                                      ok
+  qa_scroll {"ref": "\"\"", "direction": "down", "amount": 400}          실패: ref '""'를 찾을 수 없습니다…
+texts: []      usage: 입력·출력·캐시 토큰 전부 0
+```
+
+같은 화면의 캡처(1280×800)에는 눈에 보이는 문제가 있었다. 화면 아래의 로그인 줄("주문하려면 로그인하세요 [아이디][비밀번호][로그인]")이 둥근 컨테이너의 아래 경계에서 절반쯤 잘려 있고, 세로 영상 영역이 넓은 컨테이너 왼쪽에 붙어 오른쪽이 큰 빈 여백이었다. 탐색 QA는 둘 다 보고하지 않았다.
+
+### 원인
+네 가지가 겹쳤다. 모두 코드로 확인했다.
+
+1. **관찰 동작이 "같은 화면 반복"으로 끊겼다.** 반복 감지(`runExploreQa`·`runClaudeCodeExploreQa`)가 동작 뒤마다 화면 서명(주소·제목·요소 수·글자 수)을 쌓고 최근 4개가 같으면 `repeated_screen`으로 끝냈다. 화면을 바꾸지 않는 동작(navigate 직후의 wait·snapshot·screenshot, 실패한 scroll)은 서명이 그대로라 4번째 동작에서 끊겼다. 모델은 캡처를 받은 직후, 아래로 내려가 보기 전에 실행이 끝났다. 점검형 목표에서는 화면이 안 바뀌는 것이 정상이다.
+2. **모델이 본 것을 받는 자리가 없었다.** 판정(`judge`)은 진단 신호(콘솔 오류·실패한 요청·가로 넘침·접근성 위반)와 확인 문구만 봤고, 결과에 모델의 발견을 담는 필드가 없었다. `qa_finish`의 `summary`는 `modelDeclared`에만 남고 판정에 쓰이지 않았다. 휴리스틱으로 끊기면 모델에게 마지막 보고를 받을 기회도 없었다(`texts`가 비었던 이유).
+3. **로컬 CLI 백엔드에서 `qa_scroll`의 ref가 비지 못했다.** MCP 도구 인자를 zod로 옮기는 `zodShape`가 스키마의 `required`를 보지 않고 모든 인자를 필수로 만든다. `qa_scroll`·`qa_wait`·`qa_click`은 `required: []`로 정의했지만 MCP 쪽에서는 `ref`·`direction`·`amount`(`forText`·`ms`)를 모두 줘야 해서, 모델이 `ref`에 빈 값을 채워 넣었다(실측 입력이 `ref`·`direction`·`amount` 셋 다, `qa_wait`도 `forText`와 `ms` 둘 다였던 것이 증거다). 그 빈 값이 따옴표로 한 번 더 감싸여(`"\"\""`) 들어왔고, 도구는 문자열이 있으면 ref로 보고 요소를 찾다가 실패했다. 도구 설명도 "ref를 생략하면 페이지를 스크롤한다"를 분명히 말하지 않았다.
+4. **로컬 CLI 백엔드의 usage가 0이었다.** 사용량은 SDK의 `result` 메시지에서만 읽는데, 반복·한도·`qa_finish`로 멈출 때 `interrupt()`를 부르고 바로 메시지 읽기를 끊어서 `result`가 오기 전에 빠져나갔다. api 백엔드는 사용량을 읽는 코드 자체가 없어 늘 0이었다.
+
+가장 의심한 "캡처가 모델에 전달되지 않았다"는 **아니었다**. api 백엔드는 도구 결과에 `image` 블록(base64 JPEG)을 넣고, 로컬 CLI 백엔드는 MCP 결과의 `{ type: 'image', data, mimeType: 'image/jpeg' }`로 돌려준다. 설치된 로컬 CLI 실행 파일(SDK 0.3.267 동봉본)에서 MCP 결과의 image 콘텐츠를 모델 입력의 image 블록으로 바꾸는 코드(`case"image"` → `{block}`)가 지원되는 mimeType에서 쓰이는 것을 확인했다. 즉 모델은 4번째 단계에서 캡처를 받았다. 받은 직후 5번째 동작이 실패했고 곧 끊겼을 뿐이다. 다만 뷰포트 한 장이라 아래쪽(잘린 로그인 줄이 화면 맨 아래에 걸려 있다)을 보려면 스크롤이 필요했는데, 그 스크롤이 3번 때문에 실패했다.
+
+### 수정
+- 반복 감지를 `RepeatTracker`로 좁혔다. 클릭·입력·키·이동(`qa_click`·`qa_fill`·`qa_type`·`qa_press`·`qa_navigate`)이 **같은 입력으로 같은 화면에서** 연속될 때만 센다. 관찰과 실패한 동작은 세지 않고 연속도 끊지 않는다. 화면 서명에 본문 글자의 해시를 더해, 카운터처럼 같은 길이로 바뀌는 화면(0 → 1 → 2)이 같은 화면으로 보이지 않게 했다. 관찰만 끝없이 하는 경우는 행동 수·시간 한도가 막는다.
+- `qa_report_issue`(severity·summary·where·evidence)를 더하고 결과에 `findings`를 싣는다. blocker·major가 있으면 fail, minor만 있으면 pass(사유·목록에 남김), 모델이 `success: false`로 끝내도 fail이다.
+- 한도·반복·시간·도구 없음으로 끝나면 도구를 `qa_report_issue`·`qa_finish`로 좁혀 마지막 보고를 받는다(api는 모델 호출 한 번 더, 로컬 CLI는 같은 대화 안에서 조작을 닫고 보고 요청을 전달). 보고가 없으면 `inconclusive`다.
+- `qa_scroll`은 ref가 없음·빈 문자열·공백·따옴표만 든 값이면 페이지를 스크롤하고, 따옴표로 감싼 ref는 벗겨 쓴다. 필수 ref가 빈 도구는 무엇이 비었는지 알려 준다. 스크롤 결과에 현재 위치와 맨 아래 도달 여부를 담고, 화면 가운데에 포인터를 놓고 굴려 안쪽 스크롤 영역도 움직이게 했다. `zodShape(schema, { honorRequired: true })`로 로컬 CLI 백엔드가 선택 인자를 선택으로 연다(다른 호출자의 기본 동작은 그대로다).
+- 로컬 CLI 백엔드는 멈춘 뒤에도 `result`가 올 때까지 읽고(15초 안 오면 끊는다) `claude-code-runner.ts`와 같은 `ClaudeCodeUsageTracker.observeResult`로 사용량을 읽는다. `result`가 끝내 없으면 assistant 메시지의 사용량을 합친다. api 백엔드는 응답마다 `usage`를 더한다.
+- 점검형 목표(문제·점검·잘림·겹침 같은 말이 든 목표)에는 시스템 지시문에 점검 요령을 더한다: 캡처로 확인, 한 화면씩 내려가며 맨 아래까지, 잘림·겹침·넘침·대비·빈 여백·정렬을 볼 것, 본 것만 적을 것, 문제가 없으면 없다고 보고할 것.
+- 같은 요청 검증(`POST /api/sessions/[id]/explore-qa`)이 `z.union`이라 `action`이 빠지면 "Invalid input"만 남았다. `z.discriminatedUnion('action', …)`로 바꾸고 `필드: 이유` 한 줄로 알려 준다(예: `action: start·stop·save 중 하나여야 합니다`, `startPath: 필수 항목입니다`).
+
+### 확인
+고치기 전 코드에 새 테스트를 먼저 돌렸다(`packages/agent/src/explore-qa.test.ts`, 45건 중 21건 실패). 대표 출력:
+
+```
+관찰 동작(snapshot·wait·screenshot·find)이 repeatLimit보다 많이 이어져도 … 끊지 않는다
+  expected 'repeated_screen' to be 'finish'
+실패한 동작이 이어져도 같은 화면 반복으로 세지 않는다
+  expected 'repeated_screen' to be 'finish'
+모델이 목표를 달성하지 못했다고 보고하면 발견이 없어도 통과로 두지 않는다
+  expected 'pass' to be 'fail'
+보고가 오지 않으면 통과로 두지 않고 점검을 마치지 못했다고 드러낸다
+  expected 'pass' to be 'inconclusive'
+qa_scroll > ref가 빈 문자열이면 페이지를 스크롤한다   expected false to be true
+qa_scroll > ref가 따옴표 두 개이면 페이지를 스크롤한다  expected false to be true
+api 루프는 모델 응답의 usage를 합산한다
+  { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } (기대 200·14·60·10)
+```
+
+blocker·major 발견 테스트는 고치기 전에 `result.findings`가 `undefined`라 거기서 실패했고(보고를 받는 자리 자체가 없었다), 그 모델이 `qa_report_issue`를 부르면 도구 이름을 몰라 오류를 돌려받고 `qa_finish`로 끝나 통과가 나오는 것이 위 "목표를 달성하지 못했다고 보고" 테스트와 같은 경로(`pass`)다. 로컬 CLI 백엔드는 옛 `explore-qa-claude-code.ts`로 되돌려 usage 테스트만 돌렸을 때 입력·출력·캐시 토큰이 모두 0이었다.
+
+고친 뒤: `explore-qa.test.ts` 45건, `explore-qa-claude-code.test.ts` 11건(usage가 `{ 10, 5, 1, 2 }`로 실림, 한도 뒤 보고 요청이 같은 대화에 한 번 들어감, 보고 없으면 `inconclusive`), `explore-qa-save.test.ts`, `claude-code-runner.test.ts`(`zodShape` 기본 동작 유지), `explore-qa-request.test.ts`(400 문구) 모두 통과. 실제 모델·브라우저 사용 세션은 돌리지 않았다(가짜 모델·가짜 SDK와 헤드리스 Chromium에 띄운 테스트 서버만 썼다).
+
+### 배운 점
+"통과"가 자동으로 재는 신호(콘솔·요청·넘침)만의 결과라면, 사람이 눈으로 봐야 알 수 있는 문제를 찾으라는 목표에서는 통과가 의미 없다. 모델이 본 것을 받는 자리를 만들고, 받지 못한 채 끝났다는 사실도 판정에 담아야 한다. 그리고 도구 스키마를 다른 형식(MCP·zod)으로 옮길 때 선택 인자가 필수로 바뀌면, 모델은 그 값을 비워 둘 수 없어 엉뚱한 값을 채워 넣는다. 휴리스틱으로 실행을 끝낼 때는 그 휴리스틱이 정상 동작을 오탐하지 않는지부터 본다.

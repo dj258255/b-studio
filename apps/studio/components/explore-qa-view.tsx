@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ExploreQaResult, QaActionRecord } from "@b-studio/agent";
+import type { ExploreQaResult, QaActionRecord, QaFinding } from "@b-studio/agent";
 import { artifactUrl } from "@/lib/artifact-url";
 import type { LiveFrame } from "./live-frames";
 
@@ -11,6 +11,7 @@ export interface ExploreQaRun {
   goal: { goal: string; startPath: string; confirmText?: string };
   status: "running" | "done";
   actions: QaActionRecord[];
+  findings: QaFinding[];
   texts: string[];
   result?: ExploreQaResult;
   error?: string;
@@ -24,9 +25,38 @@ const STOP_REASON_LABEL: Record<string, string> = {
   finish: "목표 완료 선언",
   max_actions: "최대 행동 수 도달",
   max_time: "시간 상한 도달",
-  repeated_screen: "같은 화면 반복",
+  repeated_screen: "같은 화면에서 같은 조작 반복",
   no_tool_call: "도구 호출 없이 끝남",
 };
+
+const SEVERITY_CLASS: Record<QaFinding["severity"], string> = { blocker: "bg-fail/20 text-fail", major: "bg-fail/10 text-fail", minor: "bg-wait/20 text-wait" };
+
+/** 판정 이름과 색. 점검을 마치지 못한 실행(inconclusive)은 통과로도 실패로도 보이지 않게 따로 둔다 */
+function verdictOf(status: ExploreQaResult["status"]): { label: string; box: string; text: string } {
+  if (status === "pass") return { label: "통과", box: "border-pass/40 bg-pass/10", text: "text-pass" };
+  if (status === "inconclusive") return { label: "점검을 마치지 못함", box: "border-line bg-ground", text: "text-wait" };
+  return { label: "문제 발견", box: "border-fail/40 bg-fail/10", text: "text-fail" };
+}
+
+/** 모델이 화면을 보고 보고한 문제 목록. 실행 중에도, 끝나고 나서도 같은 모양으로 보여 준다 */
+function FindingList({ findings }: { findings: QaFinding[] }) {
+  if (findings.length === 0) return null;
+  return (
+    <div className="mb-3 rounded-control border border-line p-2 text-sm">
+      <p className="font-semibold">모델이 화면에서 본 문제 {findings.length}건</p>
+      <ul className="mt-1 space-y-1.5">
+        {findings.map((finding, index) => (
+          <li key={index} className="break-words text-xs">
+            <span className={`mr-1 rounded-sm px-1 font-medium ${SEVERITY_CLASS[finding.severity]}`}>{finding.severity}</span>
+            {finding.summary}
+            {finding.where && <span className="block text-muted">위치: {finding.where}</span>}
+            {finding.evidence && <span className="block text-muted">근거: {finding.evidence}</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 async function call(sessionId: string, body: unknown): Promise<Response> {
   return fetch(`/api/sessions/${sessionId}/explore-qa`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -212,8 +242,8 @@ export function ExploreQaView({ sessionId, service, frame }: { sessionId: string
 
         <aside className="min-h-0 overflow-y-auto border-t border-line bg-panel p-3 lg:border-t-0 lg:border-l">
           {run?.result && (
-            <div className={`mb-3 rounded-control border p-2 text-sm ${run.result.status === "pass" ? "border-pass/40 bg-pass/10" : "border-fail/40 bg-fail/10"}`}>
-              <p className={`font-semibold ${run.result.status === "pass" ? "text-pass" : "text-fail"}`}>{run.result.status === "pass" ? "통과" : "문제 발견"}</p>
+            <div className={`mb-3 rounded-control border p-2 text-sm ${verdictOf(run.result.status).box}`}>
+              <p className={`font-semibold ${verdictOf(run.result.status).text}`}>{verdictOf(run.result.status).label}</p>
               <p className="mt-1 text-xs text-muted">{run.result.reason}</p>
               <p className="mt-1 text-xs text-muted">멈춘 이유: {STOP_REASON_LABEL[run.result.stoppedBy] ?? run.result.stoppedBy}</p>
               {run.result.modelDeclared && (
@@ -252,6 +282,7 @@ export function ExploreQaView({ sessionId, service, frame }: { sessionId: string
               )}
             </div>
           )}
+          {run && <FindingList findings={run.result?.findings ?? run.findings ?? []} />}
           {run?.error && <p className="mb-3 rounded-control border border-fail/40 bg-fail/10 p-2 text-sm text-fail">{run.error}</p>}
           {run && run.actions.length > 0 ? (
             <ol className="space-y-1.5">

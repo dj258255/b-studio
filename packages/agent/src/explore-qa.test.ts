@@ -21,6 +21,8 @@ const PAGES: Record<string, string> = {
     <p id="out"></p>
     <a id="to-b" href="/b">상세로</a>
   </body></html>`,
+  '/tall': `<html><body style="margin:0"><div style="height:3000px">긴 화면</div><p id="bottom">맨 아래</p></body></html>`,
+  '/counter': `<html><body><button id="plus" onclick="const n = document.getElementById('n'); n.textContent = String(Number(n.textContent) + 1)">더하기</button><p id="n">0</p></body></html>`,
   '/b': `<html><body><h1 id="title">상세 화면</h1></body></html>`,
   '/ambiguous': `<html><body><button>자세히</button><button>자세히</button></body></html>`,
   '/diagnostics': `<html><head></head><body style="margin:0">
@@ -339,16 +341,67 @@ describe('runExploreQa', { timeout: 60_000 }, () => {
     expect(result.actions).toHaveLength(3);
   });
 
-  it('같은 화면이 반복되면(관찰만 반복) 멈춘다', async () => {
-    const client = new ScriptedModelClient(Array.from({ length: 10 }, () => ({ toolCalls: [{ name: 'qa_snapshot', input: {} }] })));
+  it('관찰 동작(snapshot·wait·screenshot·find)이 repeatLimit보다 많이 이어져도 같은 화면 반복으로 끊지 않는다', async () => {
+    const observing = [
+      { name: 'qa_snapshot', input: {} },
+      { name: 'qa_wait', input: { ms: 10 } },
+      { name: 'qa_screenshot', input: {} },
+      { name: 'qa_find', input: { query: '검색' } },
+      { name: 'qa_snapshot', input: {} },
+      { name: 'qa_screenshot', input: {} },
+    ];
+    const client = new ScriptedModelClient([
+      ...observing.map((call) => ({ toolCalls: [call] })),
+      { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '관찰만 하고 끝냈습니다' } }] },
+    ]);
     const result = await runExploreQa({
       client,
-      goal: { goal: '계속 관찰만 한다', startPath: '/start', maxActions: 30, repeatLimit: 3 },
+      goal: { goal: '화면을 점검한다', startPath: '/start', maxActions: 30, repeatLimit: 3 },
       startUrl: `${base}/start`,
       allowedOrigins: [base],
     });
+    expect(result.stoppedBy).toBe('finish');
+    expect(result.actions).toHaveLength(6);
+  });
+
+  it('실패한 동작이 이어져도 같은 화면 반복으로 세지 않는다', async () => {
+    const client = new ScriptedModelClient([
+      ...Array.from({ length: 5 }, () => ({ toolCalls: [{ name: 'qa_click', input: { ref: 'e999' } }] })),
+      { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '끝' } }] },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '실패를 반복한다', startPath: '/start', repeatLimit: 3 }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('finish');
+    expect(result.actions.filter((action) => !action.ok)).toHaveLength(5);
+  });
+
+  it('같은 화면에서 같은 조작(click)을 되풀이하면 여전히 같은 화면 반복으로 멈춘다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'qa_snapshot', input: {} }] },
+      ...Array.from({ length: 10 }, () => ({ toolCalls: [{ name: 'qa_click', input: { ref: 'e2' } }] })),
+      { text: '보고합니다' },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '같은 버튼만 누른다', startPath: '/start', maxActions: 30, repeatLimit: 3 }, startUrl: `${base}/start`, allowedOrigins: [base] });
     expect(result.stoppedBy).toBe('repeated_screen');
-    expect(result.actions).toHaveLength(3);
+    // snapshot 1번 + click 3번
+    expect(result.actions).toHaveLength(4);
+  });
+
+  it('조작 사이에 관찰이 끼어도 같은 화면에서 같은 조작이 이어지면 반복으로 센다', async () => {
+    const calls = [{ name: 'qa_snapshot', input: {} }, ...Array.from({ length: 5 }, () => [{ name: 'qa_click', input: { ref: 'e2' } }, { name: 'qa_snapshot', input: {} }]).flat()];
+    const client = new ScriptedModelClient([...calls.map((call) => ({ toolCalls: [call] })), { text: '보고합니다' }]);
+    const result = await runExploreQa({ client, goal: { goal: '누르고 본다', startPath: '/start', maxActions: 30, repeatLimit: 3 }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('repeated_screen');
+  });
+
+  it('화면 글자가 같은 길이로 바뀌는 조작은 같은 화면으로 보지 않는다', async () => {
+    // 같은 버튼을 눌러도 카운터 숫자가 0→1→2처럼 바뀐다. 글자 수·요소 수는 그대로여도 반복이 아니다
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'qa_snapshot', input: {} }] },
+      ...Array.from({ length: 4 }, () => ({ toolCalls: [{ name: 'qa_click', input: { ref: 'e1' } }] })),
+      { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '끝' } }] },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '카운터를 올린다', startPath: '/counter', repeatLimit: 3 }, startUrl: `${base}/counter`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('finish');
   });
 
   it('모델이 도구를 부르지 않고 텍스트만 내면 멈춘다', async () => {
@@ -379,5 +432,214 @@ describe('runExploreQa', { timeout: 60_000 }, () => {
       allowedOrigins: [base],
     });
     expect(withoutSave.actions.every((action) => action.artifact === undefined)).toBe(true);
+  });
+});
+
+describe('발견 보고와 판정', { timeout: 60_000 }, () => {
+  it('모델이 blocker·major 발견을 보고하면 결과에 싣고, 진단 신호가 깨끗해도 통과로 두지 않는다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'qa_screenshot', input: {} }] },
+      {
+        toolCalls: [
+          { name: 'qa_report_issue', input: { severity: 'major', summary: '아래쪽 로그인 줄이 컨테이너 경계에서 절반 잘렸습니다', where: '로그인 입력 줄', evidence: '캡처 하단' } },
+          { name: 'qa_report_issue', input: { severity: 'minor', summary: '영상 영역 오른쪽 여백이 넓습니다' } },
+        ],
+      },
+      { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '화면을 끝까지 점검했습니다' } }] },
+    ]);
+    const events: string[] = [];
+    const result = await runExploreQa({
+      client,
+      goal: { goal: '화면을 점검해 문제를 찾는다', startPath: '/start' },
+      startUrl: `${base}/start`,
+      allowedOrigins: [base],
+      onEvent: (event) => {
+        if (event.type === 'finding') events.push(event.finding.severity);
+      },
+    });
+    expect(result.diagnostics.consoleErrors).toEqual([]);
+    expect(result.findings).toEqual([
+      { severity: 'major', summary: '아래쪽 로그인 줄이 컨테이너 경계에서 절반 잘렸습니다', where: '로그인 입력 줄', evidence: '캡처 하단' },
+      { severity: 'minor', summary: '영상 영역 오른쪽 여백이 넓습니다' },
+    ]);
+    expect(events).toEqual(['major', 'minor']);
+    expect(result.status).toBe('fail');
+    expect(result.reason).toContain('잘렸습니다');
+    // 발견 보고는 화면 조작이 아니라서 행동 수에 들어가지 않는다
+    expect(result.actions.map((action) => action.tool)).toEqual(['qa_screenshot']);
+  });
+
+  it('minor 발견만 있으면 통과하되 목록과 사유에 남긴다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'qa_report_issue', input: { severity: 'minor', summary: '여백이 조금 넓습니다' } }, { name: 'qa_finish', input: { success: true, summary: '점검 끝' } }] },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/start' }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.status).toBe('pass');
+    expect(result.findings).toHaveLength(1);
+    expect(result.reason).toContain('minor 1건');
+  });
+
+  it('같은 발견을 되풀이해 보고해도 한 번만 싣고, 잘못된 심각도는 오류로 돌려준다', async () => {
+    const client = new ScriptedModelClient([
+      {
+        toolCalls: [
+          { name: 'qa_report_issue', input: { severity: 'minor', summary: '여백' } },
+          { name: 'qa_report_issue', input: { severity: 'minor', summary: '여백' } },
+          { name: 'qa_report_issue', input: { severity: 'critical', summary: '심각도가 틀렸습니다' } },
+          { name: 'qa_finish', input: { success: true, summary: '끝' } },
+        ],
+      },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/start' }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it('모델이 성공을 선언해도 진단 신호가 있으면 실패로 판정한다(기존 동작 유지)', async () => {
+    const client = new ScriptedModelClient([{ toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '문제 없습니다' } }] }]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/diagnostics' }, startUrl: `${base}/diagnostics`, allowedOrigins: [base] });
+    expect(result.modelDeclared?.success).toBe(true);
+    expect(result.status).toBe('fail');
+    expect(result.reason).toContain('console.error');
+  });
+
+  it('모델이 목표를 달성하지 못했다고 보고하면 발견이 없어도 통과로 두지 않는다', async () => {
+    const client = new ScriptedModelClient([{ toolCalls: [{ name: 'qa_finish', input: { success: false, summary: '버튼을 찾지 못했습니다' } }] }]);
+    const result = await runExploreQa({ client, goal: { goal: '버튼을 누른다', startPath: '/start' }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.status).toBe('fail');
+    expect(result.reason).toContain('버튼을 찾지 못했습니다');
+  });
+});
+
+describe('한도에 걸려 끝날 때 마지막 보고', { timeout: 60_000 }, () => {
+  const observe = { toolCalls: [{ name: 'qa_snapshot', input: {} }] };
+
+  it('최대 행동 수에 걸리면 qa_report_issue·qa_finish만 열어 한 번 더 묻고, 보고가 오면 싣는다', async () => {
+    const client = new ScriptedModelClient([
+      observe,
+      observe,
+      {
+        toolCalls: [
+          { name: 'qa_report_issue', input: { severity: 'blocker', summary: '버튼이 화면 밖으로 나갔습니다' } },
+          { name: 'qa_finish', input: { success: true, summary: '두 번 관찰한 것으로 보고합니다' } },
+        ],
+      },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/start', maxActions: 2 }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('max_actions');
+    expect(result.actions).toHaveLength(2);
+    expect(result.findings.map((finding) => finding.severity)).toEqual(['blocker']);
+    expect(result.modelDeclared?.summary).toContain('보고합니다');
+    expect(result.status).toBe('fail');
+    const wrapUp = client.requests.at(-1)!;
+    expect(wrapUp.tools?.map((tool) => tool.name).sort()).toEqual(['qa_finish', 'qa_report_issue']);
+    const last = wrapUp.messages.at(-1)!;
+    expect(JSON.stringify(last.content)).toContain('마지막');
+  });
+
+  it('보고가 오지 않으면 통과로 두지 않고 점검을 마치지 못했다고 드러낸다', async () => {
+    const client = new ScriptedModelClient([observe, observe, { text: '글만 쓰고 보고하지 않습니다' }]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/start', maxActions: 2 }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('max_actions');
+    expect(result.modelDeclared).toBeUndefined();
+    expect(result.status).toBe('inconclusive');
+    expect(result.reason).toContain('마치지 못했습니다');
+  });
+
+  it('보고를 받지 못해도 진단 신호가 있으면 실패다', async () => {
+    const client = new ScriptedModelClient([observe, { text: '보고하지 않습니다' }]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/diagnostics', maxActions: 1 }, startUrl: `${base}/diagnostics`, allowedOrigins: [base] });
+    expect(result.status).toBe('fail');
+  });
+
+  it('도구 없이 글만 내고 끝난 경우에도 한 번 더 묻는다', async () => {
+    const client = new ScriptedModelClient([
+      { text: '문제를 찾았지만 도구는 부르지 않습니다' },
+      { toolCalls: [{ name: 'qa_report_issue', input: { severity: 'major', summary: '글자가 흐립니다' } }, { name: 'qa_finish', input: { success: true, summary: '보고' } }] },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/start' }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('no_tool_call');
+    expect(result.findings).toHaveLength(1);
+    expect(result.status).toBe('fail');
+  });
+
+  it('같은 조작 반복으로 끊겨도 마지막 보고를 받는다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'qa_snapshot', input: {} }] },
+      ...Array.from({ length: 3 }, () => ({ toolCalls: [{ name: 'qa_click', input: { ref: 'e2' } }] })),
+      { toolCalls: [{ name: 'qa_finish', input: { success: false, summary: '버튼을 눌러도 변화가 없습니다' } }] },
+    ]);
+    const result = await runExploreQa({ client, goal: { goal: '버튼을 누른다', startPath: '/start', repeatLimit: 3 }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.stoppedBy).toBe('repeated_screen');
+    expect(result.modelDeclared?.summary).toContain('변화가 없습니다');
+    expect(result.status).toBe('fail');
+  });
+});
+
+describe('qa_scroll', { timeout: 60_000 }, () => {
+  it.each([
+    ['없음', {}],
+    ['빈 문자열', { ref: '' }],
+    ['따옴표 두 개', { ref: '""' }],
+    ['작은따옴표 두 개', { ref: "''" }],
+    ['공백', { ref: '   ' }],
+  ])('ref가 %s이면 페이지를 스크롤한다', async (_label, extra) => {
+    const browser = await QaBrowser.open(`${base}/tall`, { allowedOrigins: [base] });
+    try {
+      const outcome = await executeQaTool('qa_scroll', { direction: 'down', amount: 400, ...extra }, browser);
+      expect(outcome.ok).toBe(true);
+      expect(outcome.text).toContain('스크롤');
+      expect(outcome.text).toContain('y=400');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('스크롤 결과에 위치와 맨 아래 도달 여부를 알려 준다', async () => {
+    const browser = await QaBrowser.open(`${base}/tall`, { allowedOrigins: [base] });
+    try {
+      const first = await executeQaTool('qa_scroll', { direction: 'down', amount: 600 }, browser);
+      expect(first.text).toContain('맨 아래가 아닙니다');
+      const last = await executeQaTool('qa_scroll', { direction: 'down', amount: 5000 }, browser);
+      expect(last.text).toContain('맨 아래에 닿았습니다');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('따옴표로 감싼 ref도 벗겨서 찾는다', async () => {
+    const browser = await QaBrowser.open(`${base}/start`, { allowedOrigins: [base] });
+    try {
+      await executeQaTool('qa_snapshot', {}, browser);
+      const outcome = await executeQaTool('qa_click', { ref: '"e2"' }, browser);
+      expect(outcome.ok).toBe(true);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('필수 ref가 비어 있으면 무엇이 비었는지 알려 준다', async () => {
+    const browser = await QaBrowser.open(`${base}/start`, { allowedOrigins: [base] });
+    try {
+      const outcome = await executeQaTool('qa_fill', { ref: '""', text: 'x' }, browser);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.text).toContain('ref가 비어 있습니다');
+    } finally {
+      await browser.close();
+    }
+  });
+});
+
+describe('토큰 사용량', { timeout: 60_000 }, () => {
+  it('api 루프는 모델 응답의 usage를 합산한다', async () => {
+    const inner = new ScriptedModelClient([{ toolCalls: [{ name: 'qa_snapshot', input: {} }] }, { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '끝' } }] }]);
+    const client = {
+      info: inner.info,
+      async createMessage(request: Parameters<ScriptedModelClient['createMessage']>[0]) {
+        const message = await inner.createMessage(request);
+        return { ...message, usage: { ...message.usage, input_tokens: 100, output_tokens: 7, cache_read_input_tokens: 30, cache_creation_input_tokens: 5 } };
+      },
+    };
+    const result = await runExploreQa({ client, goal: { goal: '점검', startPath: '/start' }, startUrl: `${base}/start`, allowedOrigins: [base] });
+    expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 14, cacheReadTokens: 60, cacheWriteTokens: 10 });
   });
 });
