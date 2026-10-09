@@ -126,6 +126,7 @@ export {
   type QaActionRecord,
   type QaDiagnostics,
   type QaElement,
+  type QaExpectedRejection,
   type QaFinding,
   type QaFindingSeverity,
   type QaReview,

@@ -459,8 +459,8 @@ describe('발견 보고와 판정', { timeout: 60_000 }, () => {
     });
     expect(result.diagnostics.consoleErrors).toEqual([]);
     expect(result.findings).toEqual([
-      { severity: 'major', summary: '아래쪽 로그인 줄이 컨테이너 경계에서 절반 잘렸습니다', where: '로그인 입력 줄', evidence: '캡처 하단' },
-      { severity: 'minor', summary: '영상 영역 오른쪽 여백이 넓습니다' },
+      { severity: 'major', summary: '아래쪽 로그인 줄이 컨테이너 경계에서 절반 잘렸습니다', where: '로그인 입력 줄', evidence: '캡처 하단', observedAtAction: 1 },
+      { severity: 'minor', summary: '영상 영역 오른쪽 여백이 넓습니다', observedAtAction: 1 },
     ]);
     expect(events).toEqual(['major', 'minor']);
     expect(result.status).toBe('fail');

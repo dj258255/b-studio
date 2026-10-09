@@ -144,7 +144,7 @@ describe('runClaudeCodeExploreQa', { timeout: 30_000 }, () => {
       },
     });
     expect(result.diagnostics.consoleErrors).toEqual([]);
-    expect(result.findings).toEqual([{ severity: 'major', summary: '로그인 줄이 잘렸습니다', where: '화면 아래' }]);
+    expect(result.findings).toEqual([{ severity: 'major', summary: '로그인 줄이 잘렸습니다', where: '화면 아래', observedAtAction: 1 }]);
     expect(findings).toEqual(['로그인 줄이 잘렸습니다']);
     expect(result.status).toBe('fail');
     expect(result.reason).toContain('잘렸습니다');
