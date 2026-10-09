@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -65,7 +66,15 @@ export class Workspace {
   snapshotFile(file: string): Promise<string | undefined> {
     let snapshot = this.#snapshots.get(file);
     if (!snapshot) {
-      snapshot = readFile(path.join(this.root, file), 'utf8').catch(() => undefined);
+      // 부르는 그 순간의 내용을 동기적으로 읽어 고정한다. 비동기 읽기를 던져만 두면 읽기가 끝나기 전에 파일이 바뀔 수 있고,
+      // 그러면 바뀐 내용이 기준점이 되어 견줄 차이가 사라진다. 실행마다 작은 문서 하나를 한 번 읽는 것이라 막는 시간은 짧다
+      let content: string | undefined;
+      try {
+        content = readFileSync(path.join(this.root, file), 'utf8');
+      } catch {
+        content = undefined;
+      }
+      snapshot = Promise.resolve(content);
       this.#snapshots.set(file, snapshot);
     }
     return snapshot;
