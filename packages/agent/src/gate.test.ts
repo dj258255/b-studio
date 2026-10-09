@@ -1218,6 +1218,34 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     expect(gate.checks.some((c) => (c.detail ?? '').includes('이번 실행에서 바로 반영했습니다'))).toBe(false);
   });
 
+  it('고정 경로가 다른 그룹 가지에 있거나 링크·public 파일이어도 같은 주소면 값을 반영하지 않는다', async () => {
+    for (const shadow of ['group', 'symlink', 'public'] as const) {
+      const target = nextjs(project, { autoPageChecks: auto() });
+      const requested: string[] = [];
+      const { gate, workspace } = await setup(target, {
+        page: ordersApp(requested),
+        reload: edited(target, { autoPageChecks: auto({ sampleParams: { id: 'new' } }) }),
+      });
+      if (shadow === 'group') {
+        await mkdir(path.join(workspace.root, 'web/app/(admin)/orders/new'), { recursive: true });
+        await workspace.write('web/app/(shop)/orders/[id]/page.tsx', page);
+      } else {
+        await workspace.write('web/app/orders/[id]/page.tsx', page);
+        if (shadow === 'symlink') {
+          await mkdir(path.join(workspace.root, 'web/elsewhere'), { recursive: true });
+          await symlink(path.join(workspace.root, 'web/elsewhere'), path.join(workspace.root, 'web/app/orders/new'));
+        } else {
+          await mkdir(path.join(workspace.root, 'web/public/orders'), { recursive: true });
+          await writeFile(path.join(workspace.root, 'web/public/orders/new'), 'static');
+        }
+      }
+
+      expect((await gate.check()).kind, shadow).toBe('retry');
+      expect(requested.filter((url) => url.includes('/orders/')), shadow).toEqual([expect.stringMatching(/\/orders\/1$/)]);
+      expect(gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail, shadow).toContain('sampleParams.id=new은(는) 반영하지 않았습니다');
+    }
+  });
+
   it('값이 경로 이름순을 바꿔도 시작 때의 값이었다면 열었을 화면은 maxPages 밖으로 밀려나지 않는다', async () => {
     // 시작 때: /m, /z 중 이름순 첫 번째인 /m만 연다. 실행 중 id=a가 들어오면 /a가 앞서지만 /m도 그대로 연다
     const target = nextjs(project, { autoPageChecks: auto({ maxPages: 1, followImports: false, sampleParams: { id: 'z' } }) });
