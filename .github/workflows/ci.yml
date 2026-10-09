@@ -52,6 +52,8 @@ jobs:
       # 공개 미러를 먼저 보고, 거기 없으면 Docker Hub로 간다. 로그인(시크릿)은 쓰지 않는다
       - uses: docker/setup-buildx-action@v4
         with:
+          # buildkit 이미지 자체도 Docker Hub에서 받으면 같은 이유로 실패한다. 같은 미러에서 받는다
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
