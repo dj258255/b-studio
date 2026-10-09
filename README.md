@@ -235,6 +235,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 - [설계 결정 기록](docs/decisions.md)
 - [트러블슈팅](docs/troubleshooting.md)
 - [기여 가이드](CONTRIBUTING.md)
+- [에이전트 작업 규칙](AGENTS.md)
 - [보안 정책](SECURITY.md)
 - [GitHub Wiki](https://github.com/dj258255/b-studio/wiki)
 

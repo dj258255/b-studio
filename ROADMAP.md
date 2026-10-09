@@ -2,7 +2,7 @@
 
 이 문서는 현재 어디까지 왔고, 각 단계의 완료 조건과 예상·실제가 무엇인지 한 곳에 모읍니다. 무엇을 왜 만들기로 했는지는 이슈에서, 무엇이 들어갔는지는 [변경 기록](CHANGELOG.md)에서 봅니다. 이슈 상태가 바뀌거나 PR이 병합되면 이 문서를 갱신합니다.
 
-마지막 갱신: 2026-09-29
+마지막 갱신: 2026-10-10
 
 ## 상태 표기
 
@@ -39,6 +39,8 @@
 | M17 검증·조율 설정 후속 | 가볍게 확인, 승격 규칙(승격 뒤 재시도·실패 N번), 레인 수 상한 설정, 앱 아이콘 | [#171](https://github.com/dj258255/b-studio/issues/171), [#172](https://github.com/dj258255/b-studio/issues/172), [#173](https://github.com/dj258255/b-studio/issues/173), [#174](https://github.com/dj258255/b-studio/issues/174), [#181](https://github.com/dj258255/b-studio/issues/181) | 완료 | 1일 + 실험 | [#175](https://github.com/dj258255/b-studio/pull/175)~[#178](https://github.com/dj258255/b-studio/pull/178), [#182](https://github.com/dj258255/b-studio/pull/182). [E5](docs/experiments/2026-09-29-e5-light-verify.md): 가볍게 확인은 성공 9/9 유지·시간 −15%, 토큰은 줄지 않음(ADR-063) | 가볍게 확인의 효과를 같은 과제로 잼 |
 | M18 토큰 분해·자가 확인 줄이기 | b-studio가 그냥 Claude Code보다 더 쓰는 토큰의 출처를 호출 단위로 재고, 가장 큰 몫을 줄입니다 | [#185](https://github.com/dj258255/b-studio/issues/185), [#187](https://github.com/dj258255/b-studio/issues/187), [#192](https://github.com/dj258255/b-studio/issues/192), [#193](https://github.com/dj258255/b-studio/issues/193) | 완료 | 1일 + 실험 | [#186](https://github.com/dj258255/b-studio/pull/186), [#188](https://github.com/dj258255/b-studio/pull/188), [#191](https://github.com/dj258255/b-studio/pull/191), [#194](https://github.com/dj258255/b-studio/pull/194). [E6](docs/experiments/2026-09-30-e6-token-breakdown.md): 추가 문맥의 78%가 도구 결과 재읽기, 고정 문맥은 P0의 1/6. [E7](docs/experiments/2026-09-30-e7-lean-self-check.md): lean 9/9·성공 1건당 −41%(p = 0.164) → lean 기본(ADR-064). E6 첫 시도는 측정 결함(출력 토큰 과소)으로 무효 처리 | 가장 큰 몫을 줄이는 변경을 같은 과제로 전후 측정 |
 | M19 PR 흐름·과제 준비 | PR 뒤 자동 리뷰·main 따라잡기, 저장소 이슈·PR 상세, 명세 → 요구사항 → 검증 추적, 제출 준비 점검표, 반복 작업·AGENTS.md, 계획/실행 모델 분리와 그 실측 | [#226](https://github.com/dj258255/b-studio/issues/226)~[#260](https://github.com/dj258255/b-studio/issues/260) | 완료 | 2~3일 | 약 1.5일, 0.3.0([#227](https://github.com/dj258255/b-studio/pull/227)~[#261](https://github.com/dj258255/b-studio/pull/261)). E8: 계획 분리는 작은 과제에서 +538%, E9: 좁힌 계획으로 9/9·$0.30(Sonnet 단독 $0.23) | 명세·제출 점검표·이슈·PR 상세가 개발 화면에서 동작, E8·E9 사전 등록 가설 판정 |
+| 도그푸딩 마찰 수정 | 실제 프로젝트 둘을 b-studio로 개발하며 나온 마찰을 이슈·PR로 고칩니다 | [#233](https://github.com/dj258255/b-studio/pull/233)~[#598](https://github.com/dj258255/b-studio/pull/598) | 검증 중 | 예상을 적지 않음 | 09-30 ~ 10-10, 병합 182건. 지금까지 결정 기록은 161건, 실패 사례는 116건입니다. 이 기간의 이슈는 착수 명세 양식 없이 짧게 열렸고 마일스톤이 없었습니다 | 남은 마찰은 M20에서 다룹니다 |
+| M20 현업 사용 준비 | 10-10 종합 평가에서 나온 일: 플랫폼 실패를 에이전트 실패와 구분, 상태·근거 표시, 속도, 지원 범위 정리, 만들지 않은 사람의 사용 관찰 | 추적 [#611](https://github.com/dj258255/b-studio/issues/611), 하위 [#599](https://github.com/dj258255/b-studio/issues/599)~[#610](https://github.com/dj258255/b-studio/issues/610) | 구현 중 | 하위 이슈 예상의 합 약 35~55시간(결정·사람 일정 제외) | 에이전트 작업 규칙([#609](https://github.com/dj258255/b-studio/issues/609)) 진행 | 하위 이슈가 닫히고, 만들지 않은 사람이 첫 요청부터 체크포인트까지 도움 없이 가는지 관찰한 기록이 있음 |
 
 ## 왜 이 순서인가
 
