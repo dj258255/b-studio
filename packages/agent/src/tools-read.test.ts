@@ -21,7 +21,7 @@ async function setup(files: Record<string, string>, extra: Partial<ToolContext> 
 
 const numbered = (count: number) => Array.from({ length: count }, (_, index) => `line ${index + 1}`).join('\n');
 
-describe('읽기 도구: 줄 범위(read_lines)와 검색(search_files) (트러블슈팅 125)', () => {
+describe('읽기 도구: 줄 범위(read_lines)와 검색(search_files) (트러블슈팅 126)', () => {
   it('두 도구가 목록에 있고 샌드박스 없이 도는 도구로 분류돼 있다', () => {
     const names = buildTools(project).map((tool) => tool.name);
     expect(names).toEqual(expect.arrayContaining(['read_lines', 'search_files']));
