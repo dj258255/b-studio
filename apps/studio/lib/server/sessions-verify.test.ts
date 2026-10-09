@@ -5,7 +5,12 @@ import type { Sandbox } from '@b-studio/sandbox';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /** 가짜 제공자·프로젝트가 쓰는 상태. vi.mock 팩토리에서 쓰려고 hoisted로 둔다 */
-const fake = vi.hoisted(() => ({ root: '', execCalls: [] as string[][] }));
+const fake = vi.hoisted(() => ({
+  root: '',
+  execCalls: [] as string[][],
+  /** 가짜 배포기가 받은 것: 어느 체크포인트를, 어떤 파일이 든 폴더로 배포하라고 했는지 */
+  deploys: [] as Array<{ sha: string; label: string; files: string[] }>,
+}));
 
 // 샌드박스(Docker)를 띄우지 않는다. providerFromEnv만 가짜로 바꾸고 나머지는 그대로 쓴다
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
@@ -49,7 +54,23 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     },
     async destroy() {},
   } as unknown as Sandbox;
-  return { ...actual, providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }) };
+  // 운영 배포(Docker 빌드)도 하지 않는다. 꺼낸 파일 폴더와 배포하라고 넘긴 체크포인트만 적어 둔다
+  class FakeDeployer {
+    constructor(private readonly project: { root: string }) {}
+    async deploy(source: { label: string; sha: string }) {
+      const { readdir } = await import('node:fs/promises');
+      const files = (await readdir(this.project.root, { recursive: true })).map(String).sort();
+      fake.deploys.push({ sha: source.sha, label: source.label, files });
+      return { release: { id: 'release-1', source }, urls: [], previous: undefined };
+    }
+  }
+  return {
+    ...actual,
+    providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }),
+    DockerDeployer: FakeDeployer,
+    defaultDeployRoot: () => `${fake.root}-deploys`,
+    resolveSecrets: async () => ({}),
+  };
 });
 
 // 프로젝트 탐색만 임시 폴더의 studio.yaml로 바꾼다(작업 복사본·체크포인트·게이트 흐름은 실제 코드가 돈다)
@@ -256,6 +277,40 @@ describe('배포 조건은 코드가 같은 체크포인트의 통과 기록을 
     expect(message).not.toContain('검증 게이트를 거치지 않은 체크포인트입니다');
     // 가볍게 확인이 통과시킨 단계(run)는 빠진 단계로 나오지 않는다
     expect(message).not.toMatch(/통과 기록이 없는 단계: [^.(]*\brun\b/);
+
+    await stopSession(created).catch(() => {});
+  });
+
+  it('전체 검증을 통과한 체크포인트 위에 요구사항을 저장한 뒤 배포하면, 게이트를 통과한 체크포인트의 파일이 배포된다(문서 체크포인트의 파일이 아니다)', async () => {
+    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(created)).toBe('ready');
+    await runWrite(created, undefined);
+    const verified = getSnapshot(created)!.checkpoints[0]!;
+    await applySessionRequirements(created, { requirements: [{ id: 'R1', title: '주문 메모', kind: 'api', priority: 'must', acceptance: ['메모를 저장한다'] }] });
+    const head = getSnapshot(created)!.checkpoints[0]!;
+    expect(head.verify).toBe('docs');
+    expect(head.sha).not.toBe(verified.sha);
+
+    fake.deploys = [];
+    const finished = new Promise<string>((resolve) => {
+      const unsubscribe = subscribe(created, (event) => {
+        if (event.type === 'deploy_finished' || event.type === 'deploy_failed') {
+          unsubscribe();
+          resolve(event.type === 'deploy_failed' ? `failed: ${event.error}` : event.type);
+        }
+      });
+    });
+    deploySession(created, { by: 'kim' });
+    expect(getSnapshot(created)!.deploying?.target).toBe(verified.shortSha);
+    expect(await finished).toBe('deploy_finished');
+
+    expect(fake.deploys).toHaveLength(1);
+    // 통과 기록을 읽은 그 체크포인트를 배포한다
+    expect(fake.deploys[0]!.sha).toBe(verified.sha);
+    expect(fake.deploys[0]!.label).toContain(verified.shortSha);
+    // 게이트를 통과한 코드는 들어 있고, 게이트를 거치지 않은 요구사항 문서는 들어 있지 않다
+    expect(fake.deploys[0]!.files).toContain('api/src/Order.java');
+    expect(fake.deploys[0]!.files.some((file) => file.endsWith('requirements.md'))).toBe(false);
 
     await stopSession(created).catch(() => {});
   });

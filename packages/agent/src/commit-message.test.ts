@@ -305,6 +305,53 @@ describe('generateCommitSubject', () => {
       generateCommitSubject('주문에 메모 필드 추가', [change('api/src/main/java/Order.java')]),
     );
   });
+
+  describe('요약의 마무리 인사를 제목으로 쓰지 않는다(도그푸딩 마찰 184: "feat: Everything is consistent and complete")', () => {
+    // 요청 첫 문장은 상태 설명이라 제목이 되지 못하고 요약으로 넘어간다
+    const request = '방송 시청 화면(/live/[id])을 직접 열어 보니 고칠 곳이 있습니다. 1280x720 창 기준으로 봤습니다.';
+    const changes = [change('apps/web/app/globals.css'), change('apps/web/components/LiveViewer.tsx'), change('apps/web/lib/liveLogin.ts', 'added')];
+    const preamble = 'Everything is consistent and complete. All changes verified: tests pass (62/62 web), both services restarted and healthy.';
+
+    it('"## 요약" 머리글이 있으면 그 앞의 줄은 보지 않고, 뒤에 절 제목이 둘 이상이면 그것들을 묶는다', () => {
+      const summary = [
+        preamble,
+        '',
+        '## 요약',
+        '',
+        '**레이아웃/시각 수정** (`apps/web/app/live/[id]/page.tsx`, `apps/web/app/globals.css`)',
+        '- 숏폼 피드용 `.shorts-scroller`(72vh 내부 스크롤)·`.shorts-frame`(세로 9:16, 폭 300px 고정) 재사용을 그만두고, 라이브 전용 `.live-page`/`.live-frame`/`.live-video`/`.live-empty`/`.live-title`을 새로 만들었습니다.',
+        '- **검증 방법**: 브라우저 스크린샷 도구가 없어 요소 높이를 계산했습니다.',
+        '',
+        '**로그인 UX** (`apps/web/lib/liveLogin.ts` 신규)',
+        '- 빈 입력 시 서버 호출 전에 안내합니다.',
+        '',
+        '**방송 제목 표시**',
+        '- 화면 상단에 표시합니다.',
+        '',
+        '결정하실 사항은 없습니다.',
+      ].join('\n');
+      expect(generateCommitSubject(request, changes, summary)).toBe('feat: 레이아웃/시각 수정, 로그인 UX, 방송 제목 표시');
+    });
+
+    it('머리글이 없어도 요청이 한국어면 한글이 없는 줄은 건너뛰고 다음 줄을 쓴다', () => {
+      const summary = `${preamble}\n\n라이브 화면의 로그인 안내 문구를 고쳤습니다.\n\n- 나머지는 그대로입니다.`;
+      expect(generateCommitSubject(request, changes, summary)).toBe('feat: 라이브 화면의 로그인 안내 문구를 고쳤습니다');
+      // 전에는 영어 첫 문장이 그대로 제목이 됐다
+      expect(generateCommitSubject(request, changes, summary)).not.toContain('Everything');
+    });
+
+    it('요약이 영어 한 줄뿐이면 바뀐 파일로 만든다. 요청이 영어면 영어 요약 줄을 그대로 쓴다', () => {
+      expect(generateCommitSubject(request, changes, preamble)).toBe('feat: globals·LiveViewer 외 1개를 고친다');
+      expect(generateCommitSubject('Can you fix it?', changes, 'Add a memo field to orders.')).toContain('Add a memo field to orders');
+    });
+
+    it('절 제목이 보고서의 칸 이름뿐이거나 하나뿐이면 묶지 않고 바뀐 파일로 만든다', () => {
+      const report = `${preamble}\n\n## 요약\n\n**고친 내용**\n- 아주 긴 설명이 이어집니다 ${'가'.repeat(80)}\n\n**검증 방법**\n- 테스트를 돌렸습니다 ${'나'.repeat(80)}\n\n**남은 한계**\n- 없습니다 ${'다'.repeat(80)}`;
+      expect(generateCommitSubject(request, changes, report)).toBe('feat: globals·LiveViewer 외 1개를 고친다');
+      const single = `## 요약\n\n**로그인 UX**\n- 아주 긴 설명이 이어집니다 ${'가'.repeat(80)}`;
+      expect(generateCommitSubject(request, changes, single)).toBe('feat: globals·LiveViewer 외 1개를 고친다');
+    });
+  });
 });
 
 describe('toCommitMood', () => {
