@@ -25,13 +25,13 @@ describe('findStaticShadows: 값을 채운 동적 경로를 다른 고정 경로
     expect(await check(root, 'web/app/orders/[id]/page.tsx', { id: 'new' })).toEqual([{ name: 'id', value: 'new', where: 'web/app/orders/New' }]);
   });
 
-  it('겹치는 이름이 없으면 비어 있다. 자기 자신·다른 동적 폴더·인터셉트 라우트·파일은 고정 경로가 아니다', async () => {
+  it('겹치는 이름이 없으면 비어 있다. 자기 자신·다른 동적 폴더·인터셉트 라우트는 고정 경로가 아니다', async () => {
     const root = await project({
       'web/app/orders/[id]/page.tsx': page,
       'web/app/orders/[slug]/page.tsx': page,
       'web/app/orders/(.)7/page.tsx': page,
       'web/app/orders/list/page.tsx': page,
-      'web/app/orders/7.tsx': page,
+      'web/app/orders/70.tsx': page,
     });
     expect(await check(root, 'web/app/orders/[id]/page.tsx', { id: '7' })).toEqual([]);
   });
@@ -61,6 +61,47 @@ describe('findStaticShadows: 값을 채운 동적 경로를 다른 고정 경로
 
     const clean = await project({ 'web/app/orders/[id]/page.tsx': page, 'web/pages/orders/list.tsx': page, 'web/public/orders/logo.png': 'x' });
     expect(await check(clean, 'web/app/orders/[id]/page.tsx', { id: 'new' })).toEqual([]);
+  });
+
+  it('이름은 넓게 견준다: 인코딩을 풀고, 첫 점 앞까지만 보고, app 라우터의 파일도 겹친 것으로 본다', async () => {
+    const encoded = await project({ 'web/app/orders/[id]/page.tsx': page, 'web/app/orders/%5Fnew/page.tsx': page });
+    expect(await check(encoded, 'web/app/orders/[id]/page.tsx', { id: '_new' })).toEqual([{ name: 'id', value: '_new', where: 'web/app/orders/%5Fnew' }]);
+
+    const extensions = await project({ 'web/app/orders/[id]/page.tsx': page, 'web/pages/orders/new.page.tsx': page });
+    expect(await check(extensions, 'web/app/orders/[id]/page.tsx', { id: 'new' })).toEqual([{ name: 'id', value: 'new', where: 'web/pages/orders/new.page.tsx' }]);
+
+    const metadata = await project({ 'web/app/[id]/page.tsx': page, 'web/app/icon.png': 'x' });
+    expect(await check(metadata, 'web/app/[id]/page.tsx', { id: 'icon' })).toEqual([{ name: 'id', value: 'icon', where: 'web/app/icon.png' }]);
+  });
+
+  it('page가 src/app에 있어도 app 폴더의 고정 경로를 본다(어느 쪽이 쓰이는지 가리지 않는다)', async () => {
+    const root = await project({ 'web/src/app/orders/[id]/page.tsx': page, 'web/app/orders/new/page.tsx': page });
+    expect(await check(root, 'web/src/app/orders/[id]/page.tsx', { id: 'new' })).toEqual([{ name: 'id', value: 'new', where: 'web/app/orders/new' }]);
+  });
+
+  it('주소를 따라 내려가는 길에 심볼릭 링크가 있으면 따라가지 않고 모른다고 던진다(호스트와 컨테이너에서 다른 곳을 가리킬 수 있다)', async () => {
+    const unknown = async (build: (root: string) => Promise<void>, files: Record<string, string> = {}): Promise<void> => {
+      const root = await project({ 'web/app/orders/[id]/page.tsx': page, ...files });
+      await build(root);
+      await expect(check(root, 'web/app/orders/[id]/page.tsx', { id: 'new' })).rejects.toThrow(/심볼릭 링크라 그 너머의 경로를 확인할 수 없습니다/);
+    };
+    // 컨테이너 안에서만 유효한 절대 경로를 가리키는 링크: 호스트에서는 끊겨 보인다
+    await unknown((root) => symlink('/workspace/web/groups', path.join(root, 'web/app/(admin)')));
+    await unknown((root) => symlink('/workspace/web/slot', path.join(root, 'web/app/orders/@modal')));
+    await unknown((root) => symlink('/workspace/web/legacy-pages', path.join(root, 'web/pages')));
+    await unknown((root) => symlink('/workspace/web/static', path.join(root, 'web/public')));
+    // 앞 조각과 이름이 같은 폴더가 링크일 때(대소문자만 다른 형제)와 서비스 폴더 자체가 링크일 때
+    await unknown((root) => symlink('/workspace/web/other-orders', path.join(root, 'web/pages/orders')), { 'web/pages/index.tsx': page });
+    const linkedService = await project({ 'real/app/orders/[id]/page.tsx': page });
+    await symlink(path.join(linkedService, 'real'), path.join(linkedService, 'web'));
+    await expect(check(linkedService, 'web/app/orders/[id]/page.tsx', { id: 'new' })).rejects.toBeInstanceOf(StaticShadowUnknownError);
+  });
+
+  it('주소와 상관없는 자리의 링크는 막지 않는다', async () => {
+    const root = await project({ 'web/app/orders/[id]/page.tsx': page, 'web/app/about/page.tsx': page });
+    await symlink('/workspace/web/somewhere', path.join(root, 'web/app/docs'));
+    await symlink('/workspace/web/somewhere', path.join(root, 'web/app/orders/assets'));
+    expect(await check(root, 'web/app/orders/[id]/page.tsx', { id: '7' })).toEqual([]);
   });
 
   it('동적 세그먼트가 여럿이면 확인하라고 한 이름만 보고, 앞 조각은 채운 값이나 동적 폴더를 따라 내려간다', async () => {
