@@ -1,7 +1,7 @@
 import { authorizeSession, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { parseExploreQaRequest } from '@/lib/server/explore-qa-request';
-import { ExploreQaError, getExploreQaRun, saveExploreQaRun, startExploreQa, stopExploreQa } from '@/lib/server/explore-qa-runs';
+import { ExploreQaError, loadExploreQaRun, saveExploreQaRun, startExploreQa, stopExploreQa } from '@/lib/server/explore-qa-runs';
 import { recoverSessions } from '@/lib/server/sessions';
 
 /** 탐색형 QA를 시작·중지하고, 끝난 실행을 게이트 화면 확인(studio.yaml)으로 저장한다. 상태 조회는 GET으로 폴링한다 */
@@ -42,7 +42,7 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
     const { id } = await context.params;
     await recoverSessions();
     await authorizeSession(id, user);
-    const run = getExploreQaRun(id);
+    const run = await loadExploreQaRun(id);
     return Response.json(run ?? null);
   } catch (error) {
     return errorResponse(error);
