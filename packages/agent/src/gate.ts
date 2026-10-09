@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { SAFE_SEGMENT, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
+import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
@@ -144,6 +144,12 @@ export interface GateOptions {
   onBrowserFrame?: (input: { check: string; frame: BrowserFrame }) => void;
   /** 동시 요청 확인이 세션 서비스에 보내는 요청. 넘기지 않으면 실제 fetch를 쓴다 */
   requestService?: ServiceRequest;
+  /**
+   * 자동 화면 확인의 sample 값(sampleParams·sampleIdFrom)만 같은 실행에서 반영하려고 디스크의 studio.yaml을 다시 읽는 함수(ADR-160).
+   * 넘기지 않으면 이번 실행에서 studio.yaml이 바뀐 때만 `loadProject(project.root)`로 읽는다. 넘기면 자동 화면 확인을 계산할 때마다 부른다
+   * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다
+   */
+  reloadProject?: () => Promise<LoadedProject>;
 }
 
 /**
@@ -381,7 +387,8 @@ export class VerificationGate {
       // 자동 페이지는 같은 #checkPage로 돌리되 오류 화면 표지까지 본다. 추정한 id로 연 동적 경로는 probedId를 함께 넘겨 관대하게 판정한다
       nodes.push({
         id: `page:${entry.name}`,
-        run: ({ signal }) => this.#checkPage(entry.page, entry.name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}) }),
+        run: ({ signal }) =>
+          this.#checkPage(entry.page, entry.name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) }),
       });
     }
     for (const test of tests) {
@@ -432,26 +439,31 @@ export class VerificationGate {
    * 선언한 pageChecks와 같은 service+path는 두 번 열지 않고 건너뜀 check로 남긴다.
    * 동적 세그먼트에 sampleParams 값이 없어도(ADR-078) id처럼 보이는 이름이면 추정한 값으로 열어 보고, 그 라우트는 probedId를 함께 돌려준다.
    */
-  async #autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string }>; skipped: WorkflowCheck[] }> {
-    const config = this.#options.project.spec.workflow?.autoPageChecks;
-    if (!config) return { pages: [], skipped: [] };
-    const service = this.#options.project.managed.find(([name]) => name === config.service);
+  async #autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string; sampled?: string }>; skipped: WorkflowCheck[] }> {
+    const started = this.#options.project.spec.workflow?.autoPageChecks;
+    if (!started) return { pages: [], skipped: [] };
+    const service = this.#options.project.managed.find(([name]) => name === started.service);
     // 불러올 때 막지만(load.ts), 여기서도 조용히 넘어가지 않고 이유를 남긴다
     if (!service) {
       return {
         pages: [],
-        skipped: [this.#autoSkipCheck(config.service, config.service, `autoPageChecks.service '${config.service}'를 이 프로젝트의 관리형 서비스에서 찾지 못했습니다`)],
+        skipped: [this.#autoSkipCheck(started.service, started.service, `autoPageChecks.service '${started.service}'를 이 프로젝트의 관리형 서비스에서 찾지 못했습니다`)],
       };
     }
 
+    // 실행 중에 에이전트가 알려 준 sample 값만 받아들인다. 나머지 설정은 시작 때의 것이다(ADR-160)
+    const refreshed = await this.#withLatestSampleValues(started);
+    const config = refreshed.config;
     const fallbackValue = await this.#dynamicRouteFallback(config);
     const followed = config.followImports === false ? undefined : await this.#followImports(service[1].path);
     const found = followed
       ? routesFromCandidates(followed.candidates, service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue)
       : routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue);
     const declaredKeys = new Set(declared.map((page) => `${page.service} ${page.path}`));
-    const pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string }> = [];
-    const skipped = [...(followed?.notes ?? []).map((note) => this.#autoSkipCheck(config.service, note.file, note.reason)), ...found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason))];
+    const pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string; sampled?: string }> = [];
+    const skipped = [
+      ...refreshed.notes.map((note) => this.#autoSkipCheck(config.service, SPEC_FILE, note)),
+...(followed?.notes ?? []).map((note) => this.#autoSkipCheck(config.service, note.file, note.reason)), ...found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason))];
     for (const route of found.routes) {
       if (declaredKeys.has(`${config.service} ${route.path}`)) {
         skipped.push(this.#autoSkipCheck(config.service, route.file, `${route.path}은(는) 이미 선언한 pageChecks에 있어 두 번 열지 않았습니다`));
@@ -459,13 +471,56 @@ export class VerificationGate {
       }
       // id를 추정해 채운 동적 경로는 이름에 표시하고, 404·500만 실패로 보도록 probedId를 남긴다
       const probed = (route.usedFallbackParams?.length ?? 0) > 0 && fallbackValue !== undefined;
+      // sampleParams로 알려 준 값으로 연 동적 경로는 추정이 아니므로 엄격하게 판정한다. 실패하면 어느 값으로 열었는지 사유에 붙인다
+      const sampled = probed ? undefined : sampledValues(route.file, config.sampleParams);
       pages.push({
         page: autoPageCheck(config, route.path),
         name: `${config.service} ${route.path} (자동${probed ? ', id 추정' : ''}${route.cause ? ` · ${route.cause.slice(route.cause.lastIndexOf('/') + 1)} 변경` : ''})`,
         ...(probed ? { probedId: fallbackValue } : {}),
+        ...(sampled ? { sampled } : {}),
       });
     }
     return { pages, skipped };
+  }
+
+  /**
+   * 실행 중에 바뀐 studio.yaml에서 autoPageChecks의 sampleParams·sampleIdFrom만 받아들여 시작 때의 설정 위에 덮어 쓴다(ADR-160).
+   * 어느 화면을 여는지는 바뀐 파일이 정하고 이 값은 그 화면을 어떤 id로 여는지만 정하므로 확인이 줄지 않는다. 그 밖의 값
+   * (service·mode·maxPages·followImports·dynamicRouteProbe·expectStatus와 pageChecks·tests 등)은 실행을 시작할 때 고정한다 —
+   * 통째로 받으면 에이전트가 검증을 끄거나 약하게 바꿔 비켜 갈 수 있다. 읽지 못하면(형식 오류 등) 시작 때의 값으로 계속하고 그 사실을 notes로 남긴다.
+   */
+  async #withLatestSampleValues(started: AutoPageChecks): Promise<{ config: AutoPageChecks; notes: string[] }> {
+    const { project, workspace } = this.#options;
+    const reload = this.#options.reloadProject ?? (workspace.changedFiles().includes(SPEC_FILE) ? () => loadProject(project.root) : undefined);
+    if (!reload) return { config: started, notes: [] };
+    let latest: AutoPageChecks | undefined;
+    try {
+      latest = (await reload()).spec.workflow?.autoPageChecks;
+    } catch (error) {
+      const detail = error instanceof SpecError ? [error.message, ...error.issues].join(' / ') : error instanceof Error ? error.message : String(error);
+      return { config: started, notes: [`${SPEC_FILE}의 새 값을 읽지 못해 이번 검증은 실행을 시작할 때의 autoPageChecks로 진행했습니다(sampleParams·sampleIdFrom 변경 미반영): ${this.#options.sandbox.redact(detail)}`] };
+    }
+    if (!latest) return { config: started, notes: [] };
+    const notes: string[] = [];
+    const config: AutoPageChecks = { ...started };
+    const added = Object.entries(latest.sampleParams ?? {}).filter(([key, value]) => started.sampleParams?.[key] !== value);
+    if (added.length > 0) {
+      config.sampleParams = { ...started.sampleParams, ...Object.fromEntries(added) };
+      notes.push(`${SPEC_FILE}의 autoPageChecks.sampleParams(${added.map(([key, value]) => `${key}=${value}`).join(', ')})를 이번 실행에서 바로 반영했습니다`);
+    }
+    const from = latest.sampleIdFrom;
+    if (from && JSON.stringify(from) !== JSON.stringify(started.sampleIdFrom)) {
+      // 세션의 관리형 서비스만 부른다(load.ts의 pageChecks.expectFromApi와 같은 규칙). 시작 때 추정을 껐으면 id 추정 자체가 없어 쓰이지 않는다
+      if (!project.managed.some(([name]) => name === from.service)) {
+        notes.push(`${SPEC_FILE}의 autoPageChecks.sampleIdFrom.service '${from.service}'은(는) 이 프로젝트의 관리형 서비스가 아니라 반영하지 않았습니다`);
+      } else if (started.dynamicRouteProbe === false) {
+        notes.push(`autoPageChecks.dynamicRouteProbe가 실행을 시작할 때 꺼져 있어 sampleIdFrom은 반영하지 않았습니다(sampleParams는 반영됩니다)`);
+      } else {
+        config.sampleIdFrom = from;
+        notes.push(`${SPEC_FILE}의 autoPageChecks.sampleIdFrom(${from.service} ${from.path})을 이번 실행에서 바로 반영했습니다`);
+      }
+    }
+    return { config, notes };
   }
 
   /**
@@ -553,7 +608,7 @@ export class VerificationGate {
     this.#pageWarnings.set(name, list);
   }
 
-  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string } = {}): Promise<void> {
+  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string; sampled?: string } = {}): Promise<void> {
     const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
     // 자동으로 연 페이지의 실패는 경로를 앞에 붙여, 실패 서명에서 선언한 pageChecks의 실패와 구분되게 한다
     const fail = (message: string) => new Error(sandbox.redact(options.auto ? `자동 페이지 ${page.path}: ${message}` : message));
@@ -639,6 +694,7 @@ export class VerificationGate {
       if (problems.length > 0 && options.probedId !== undefined && !problems.some((problem) => problem.includes('추정한 id('))) {
         problems.push(dynamicProbeDataHint(options.probedId));
       }
+      if (problems.length > 0 && options.sampled !== undefined) problems.push(sampledValueHint(options.sampled));
       if (problems.length > 0) throw fail(problems.join('\n'));
       if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
       return;
@@ -648,7 +704,7 @@ export class VerificationGate {
       // 추정한 id로 연 동적 경로(ADR-078): id가 실제로 없을 수도 있어 404·500만 실패로 본다
       if (status === 404 || status >= 500) throw fail(dynamicProbeStatusProblem(options.probedId, status));
     } else if (status !== page.expectStatus) {
-      throw fail(`HTTP ${status} (기대 ${page.expectStatus})`);
+      throw fail(`HTTP ${status} (기대 ${page.expectStatus})${options.sampled !== undefined ? `\n${sampledValueHint(options.sampled)}` : ''}`);
     }
     if (options.auto) {
       const marker = nextErrorMarker(text, page.expectStatus);
@@ -950,6 +1006,18 @@ function missingAnyText(values: readonly string[]): string {
 /** 추정한 id로 연 화면이 상태 코드가 아닌 이유(실패한 요청, 멈춘 로딩 등)로 실패했을 때 붙이는 안내 */
 function dynamicProbeDataHint(probedId: string): string {
   return `이 화면은 추정한 id(${probedId})로 열었습니다 — 그 id의 데이터가 없어서 생긴 실패일 수 있습니다. 실제로 있는 값을 studio.yaml의 autoPageChecks.sampleParams(예: { id: "..." })나 sampleIdFrom으로 알려주면 그 값으로 엽니다`;
+}
+
+/** sampleParams로 알려 준 값으로 연 화면의 `이름=값` 목록. 동적 세그먼트가 없거나 쓴 값이 없으면 undefined */
+function sampledValues(pageFile: string, sampleParams: Readonly<Record<string, string>> | undefined): string | undefined {
+  const names = [...pageFile.matchAll(/\[(?:\.\.\.)?([A-Za-z0-9_-]+)\]/g)].map((match) => match[1]!);
+  const used = names.filter((name) => sampleParams?.[name]);
+  return used.length > 0 ? used.map((name) => `${name}=${sampleParams![name]}`).join(', ') : undefined;
+}
+
+/** sampleParams로 알려 준 값으로 연 화면이 실패했을 때 붙이는 안내. 추정이 아니므로 값이 틀렸을 수 있다는 것과 고치는 곳을 말한다 */
+function sampledValueHint(sampled: string): string {
+  return `이 화면은 studio.yaml의 autoPageChecks.sampleParams로 알려 준 값(${sampled})으로 열었습니다 — 그 값의 데이터가 실제로 없으면 같은 실패가 납니다. 앱이 실제로 가진 값으로 sampleParams를 고치세요(이 값은 같은 실행에서 바로 반영됩니다)`;
 }
 
 function dynamicProbeStatusProblem(probedId: string, status: number | null): string {

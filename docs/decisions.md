@@ -176,6 +176,7 @@
 - [ADR-156 테스트 근거의 기준 체크포인트는 문서 체크포인트를 건너뛴 가장 최근 체크포인트다](#adr-156-테스트-근거의-기준-체크포인트는-문서-체크포인트를-건너뛴-가장-최근-체크포인트다)
 - [ADR-157 요구사항 문서의 검증 기록은 에이전트 실행이 바꿀 수 없다, 게이트가 실행 전 문서와 견주고 문서를 지키는 안전망은 되돌려 적는다](#adr-157-요구사항-문서의-검증-기록은-에이전트-실행이-바꿀-수-없다-게이트가-실행-전-문서와-견주고-문서를-지키는-안전망은-되돌려-적는다)
 - [ADR-158 서비스 컨테이너에서 작업 복사본의 .git은 쓸 수 없고 b-studio 상태 폴더는 보이지 않는다, 컨테이너 마운트에서 .git을 가린다](#adr-158-서비스-컨테이너에서-작업-복사본의-git은-쓸-수-없고-b-studio-상태-폴더는-보이지-않는다-컨테이너-마운트에서-git을-가린다)
+- [ADR-160 자동 화면 확인의 sample 값은 같은 실행에서 바로 반영하고 나머지 설정은 실행 시작 때 고정한다](#adr-160-자동-화면-확인의-sample-값은-같은-실행에서-바로-반영하고-나머지-설정은-실행-시작-때-고정한다)
 
 ---
 
@@ -6644,3 +6645,50 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - bind·호스트 폴더에 묶은 로컬 볼륨·`volumes_from` 밖의 방식(NFS 같은 다른 드라이버가 같은 호스트 경로를 노출하는 경우, 컨테이너 안에서 사용자 코드가 직접 마운트하는 경우)으로 프로젝트 폴더가 붙으면 설정에서는 읽지 못한다. 사후 확인도 `docker inspect`가 호스트 경로로 보여 주는 bind와 로컬 볼륨만 본다(Docker Desktop처럼 `Source`가 `/host_mnt/…` 꼴로 보이는 환경에서는 비교가 맞지 않아 확인이 통과로 떨어질 수 있다. 이 저장소가 쓰는 colima에서는 호스트 경로 그대로였다).
 - 사용자 자신의 저장소(내 폴더 모드)에서 `[b-studio]` 절이 없으면 상태 폴더 가리개를 만들지 않으므로, 사용자의 `.git`에 우연히 `b-studio` 폴더가 이미 있는 경우에만 `b-studio-empty`가 생긴다.
 - Kubernetes 제공자는 같은 구멍이 남아 있다고 판단했고 고치지 않았다(결정 8).
+
+
+## ADR-160 자동 화면 확인의 sample 값은 같은 실행에서 바로 반영하고 나머지 설정은 실행 시작 때 고정한다
+
+상태: 채택
+관련: ADR-078(동적 경로를 추정한 id로 열기), ADR-144(형식이 틀린 studio.yaml), ADR-153(게이트 보고서 수거), ADR-154(import 역추적), 트러블슈팅 109
+
+### 맥락
+- 게이트는 실행을 시작할 때 읽은 프로젝트 설정(`GateOptions.project`)으로 돈다. 에이전트가 실행 중에 `studio.yaml`의 테스트·화면 확인·리뷰 선언을 지우거나 약하게 바꿔 검증을 비켜 가지 못하게 하려는 것이다("다음 요청부터 그 선언을 쓴다"). 재시작 소유 판정만 예외로 `loadProject`로 다시 읽은 설정을 쓴다(`restartServicesFor`, 서비스 목록과 Dockerfile 동기화는 확인을 줄이지 않는다).
+- 실제 세션 실행(8a689255)에서 막다른 길이 났다. 에이전트가 고친 `components/LiveViewer.tsx`를 쓰는 동적 경로 `/live/[id]`를 자동 화면 확인이 실제 id를 몰라 `1`로 추정해 열었고(ADR-078, ADR-154), id 1의 데이터가 없어 화면의 데이터 요청이 404였다. 체크 `web /live/1 (자동, id 추정 · LiveViewer.tsx 변경)`이 실패했고 사유는 "실제로 있는 값을 `autoPageChecks.sampleParams`나 `sampleIdFrom`으로 알려 달라"고 안내했다.
+- 에이전트는 안내대로 `studio.yaml`에 `autoPageChecks: { service: web, mode: browser, sampleParams: { id: "999001" } }`을 넣었다. 그런데 게이트는 시작 때의 설정으로 계속 `/live/1`을 열었고 3번 실패해 소진됐다. 에이전트는 "이 키가 지원되는지 확인이 안 된다"며 질문으로 멈췄다. **게이트가 알려 준 해결책을 적용해도 같은 실행에서는 통과할 수 없었다.**
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| ① 그대로(다음 요청부터 반영) | 막다른 길이 그대로 남는다. 안내하는 쪽(실패 사유)과 반영하는 쪽(게이트)이 어긋나, 사유를 따른 에이전트가 같은 실행에서는 통과할 수 없다. 실제로 재시도 3번과 사용자 질문 한 번을 쓰고 멈췄다 |
+| ② 게이트가 매번 `studio.yaml`을 통째로 다시 읽기 | 막다른 길은 풀리지만 검증을 비켜 가는 길이 열린다. 에이전트가 `tests`·`pageChecks`·`protectedPaths`를 지우거나 `autoPageChecks.followImports: false`, `dynamicRouteProbe: false`, `maxPages`를 낮춰 확인을 줄이면 같은 실행에서 바로 통과한다. 설정을 시작 때 고정한 이유와 정면으로 부딪힌다 |
+| **③ 확인을 줄이지 않는 값만 받아들이기** | 채택. 어느 화면을 여는지는 바뀐 파일이 정하고, `sampleParams`·`sampleIdFrom`은 그 화면을 **어떤 id로** 여는지만 정한다. 열리는 화면의 수·종류·판정 기준은 그대로이므로 이 두 값을 받아도 확인이 줄지 않는다. 오히려 추정 id의 관대한 판정(404·500만 실패)이 엄격한 판정(`expectStatus`와 실패한 요청)으로 바뀐다 |
+| ④ 추정 id의 데이터 부재 실패를 실패로 보지 않기 | 이미 404·500만 실패로 보는 관대한 판정이 있는데 막다른 길은 그 안에서 났다(데이터 요청 404가 화면의 `failedRequests`로 잡혔다). 여기서 더 풀면 "id를 몰라 열지 못한 화면"이 통과로 보이고, 데이터를 못 받는 화면이 그대로 체크포인트에 남는다. 확인을 줄이는 쪽이라 채택하지 않았다 |
+
+### 결정
+1. **자동 화면 확인을 계산할 때(`#autoPages`) 디스크의 `studio.yaml`을 다시 읽어 `autoPageChecks.sampleParams`와 `autoPageChecks.sampleIdFrom`만 시작 때의 설정 위에 덮어 쓴다**(`#withLatestSampleValues`). `sampleParams`는 새 키를 채우고 같은 키는 새 값으로 바꾼다. 시작 때의 다른 키는 지우지 않는다. 시작 때 `autoPageChecks`가 없었으면 아무것도 받아들이지 않는다(자동 확인을 새로 켜는 것은 확인을 더하는 일이라 이 예외의 범위가 아니다).
+2. **그 밖의 설정은 시작 때의 것으로 고정한다.** `service`, `mode`, `maxPages`, `followImports`, `dynamicRouteProbe`, `expectStatus`, `viewport`, 선언한 `pageChecks`·`tests`·`concurrencyChecks`·`protectedPaths` 등. 읽은 설정은 값 두 개를 꺼내는 데만 쓰고 나머지는 버린다. 그래서 실행 중에 `dynamicRouteProbe: false`나 `followImports: false`, `maxPages` 축소, `service` 변경, `pageChecks` 삭제가 들어와도 같은 실행에서는 적용되지 않는다.
+3. **다시 읽는 때.** 읽는 함수는 `GateOptions.reloadProject`로 바꿔 끼울 수 있다(테스트는 디스크 없이 가짜 `LoadedProject`를 돌려준다). 넘기지 않으면 이번 실행에서 `studio.yaml`이 바뀐 때만 `loadProject(project.root)`로 읽는다. 바뀌지 않았으면 읽지 않는다.
+4. **읽지 못하면 조용히 넘어가지 않는다.** 형식 오류(ADR-144)를 포함해 읽기에 실패하면 시작 때의 값으로 계속하고, `web studio.yaml (자동, 건너뜀)` check(`#autoSkipCheck`와 같은 방식, `ok`로 두되 사유는 detail)에 "새 값을 읽지 못해 이번 검증은 실행을 시작할 때의 autoPageChecks로 진행했습니다"와 스키마 오류 목록을 남긴다. 형식이 틀린 `studio.yaml`은 `restartServicesFor`의 `specError`로 게이트 자체도 이미 실패시키므로(ADR-144) 에이전트는 같은 실행에서 고칠 수 있다.
+5. **받아들인 값은 알린다.** 새 값을 반영한 검증에는 같은 건너뜀 check에 "`sampleParams(id=999001)`를 이번 실행에서 바로 반영했습니다"를 남긴다. 에이전트가 "이 키가 지원되는지" 확인할 수 없어 멈췄던 점을 막는다.
+6. **`sampleParams`로 연 화면은 추정이 아니므로 기존 규칙대로 엄격하게 판정한다**(관대한 `probedId` 판정이 아니다). 에이전트가 넣은 id의 데이터가 없으면 그대로 실패한다. 이때 사유에 "이 화면은 `studio.yaml`의 `autoPageChecks.sampleParams`로 알려 준 값(id=999001)으로 열었습니다 — 그 값의 데이터가 실제로 없으면 같은 실패가 납니다. 앱이 실제로 가진 값으로 `sampleParams`를 고치세요"를 붙인다(`sampledValueHint`). 추정 id 실패에 붙던 안내(`dynamicProbeDataHint`)와 짝이다. 전에는 값을 알려 준 뒤의 실패에 안내가 없어, 실패한 요청 문구만 보고 화면 코드를 의심하게 됐다.
+7. **`sampleIdFrom`의 안전성.** 새로 들어온 `sampleIdFrom`은 세션의 관리형 서비스만 가리킬 수 있다(`project.managed`에 있는 이름). 아니면 반영하지 않고 이유를 check에 남긴다. 이 규칙은 `pageChecks.expectFromApi.service`와 같다. 경로는 스키마가 `SERVICE_PATH`로 제한하고, 부르는 쪽(`#dynamicRouteFallback`)이 `sandbox.endpoint(service)`의 출처를 벗어나지 않는지(`url.origin`)와 뽑은 값이 `SAFE_SEGMENT`인지를 매번 검사하며, 실패하면 기본값 `1`로 물러난다. 시작 때 `dynamicRouteProbe`가 꺼져 있으면 id 추정이 없으므로 `sampleIdFrom`은 쓰지 않는다(`sampleParams`는 반영한다). `dynamicRouteProbe: false`와 `sampleIdFrom`을 함께 적은 파일은 스키마가 거절해 읽기 실패로 처리된다.
+
+### 넓히지 않은 것
+- **실행 중에 더한 `pageChecks`·`tests` 항목을 추가로 돌리는 것은 넣지 않았다.** 더하는 것은 확인을 줄이지 않지만, 받아들이려면 "어느 항목이 추가이고 어느 항목이 바꿔치기인가"를 판정해야 한다. 이름이 같은데 명령이 바뀐 `tests`, 같은 `path`에 기대 문구가 약해진 `pageChecks`, 항목 하나를 지우고 약한 항목 하나를 더한 경우가 모두 "추가"로 보일 수 있다. 판정 규칙이 새 우회로가 된다. 실측한 막다른 길은 sample 값 하나였고, 다른 선언은 다음 요청부터 적용하는 것으로 충분하다. 필요가 실측되면 별도 결정으로 다룬다.
+- `autoPageChecks`를 실행 중에 새로 켜는 것, `maxPages`를 늘리는 것도 받지 않았다. 확인을 더하는 방향이라 안전하지만 "값만 바뀐다"는 이 예외의 경계를 흐린다.
+
+### 검증 결과
+- `packages/agent/src/gate.test.ts`의 `자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-160)` 12건. 고치기 전 코드에서 9건이 실패했고(두 번째 검증도 `/orders/1`을 열어 `동적 경로를 추정한 id(1)로 열었더니 HTTP 404`로 다시 `retry`), 고친 뒤 모두 통과한다. 나머지 3건은 "적용되지 않음"을 확인하는 것이라 고치기 전에도 통과한다.
+- 확인한 것: 첫 검증 실패 뒤 `sampleParams: { id: '7' }`이 들어오면 두 번째 검증이 `/orders/7`을 열어 통과, 같은 키 덮어쓰기와 시작 때 다른 키 유지, `sampleIdFrom`이 실행 중 들어온 경우, 관리형이 아닌 서비스를 가리키는 `sampleIdFrom` 거절, 시작 때 `dynamicRouteProbe`가 꺼져 있을 때의 `sampleIdFrom` 거절, `dynamicRouteProbe: false`·`followImports: false`·`maxPages: 1`·`service` 변경·`expectStatus` 변경·`pageChecks` 삭제가 한꺼번에 들어와도 열리는 화면과 선언한 확인이 그대로, 읽기 실패 시 시작 때의 값 사용과 사실의 기록, 엄격한 판정과 안내 문구(http·browser 모드), `reloadProject`를 넘기지 않으면 `studio.yaml`이 바뀌지 않은 실행에서 디스크를 읽지 않음.
+- 기존 `gate.test.ts`·`next-routes.test.ts` 전체 통과.
+
+### 감수한 트레이드오프
+- `studio.yaml`을 바꾼 실행에서 자동 화면 확인을 계산할 때마다 파일 하나와 compose 파일을 더 읽는다(`loadProject`). 바뀌지 않은 실행에서는 읽지 않는다.
+- 에이전트가 `sampleParams`에 실제로 없는 id를 넣으면 그 값으로 엄격하게 열려 실패한다. 추정 id의 관대한 판정으로 통과하던 화면이 값을 적는 순간 더 엄격해진다. 알려 준 값이 틀렸을 때 틀렸다고 말해 주는 쪽이 맞다고 보았다.
+- 에이전트가 존재하지 않는 id로 "통과하는" 화면을 만들 수는 없다. 값이 어떻든 그 화면이 `expectStatus`와 화면 문구·요청 실패 검사를 통과해야 하기 때문이다. 다만 실제와 다른 id를 골라 데이터가 비어 있는 쉬운 화면만 열게 할 수는 있다(남은 한계).
+
+### 남은 한계
+- 에이전트가 쉬운 id(데이터가 비어 있어도 화면이 오류 없이 뜨는 id)를 골라 실패하는 id를 피할 수 있다. 추정 id로 열 때도 같은 한계가 있었고(기본값 1이 우연히 쉬운 화면일 수 있다), `sampleParams`가 diff에 남아 사람이 볼 수 있다는 점이 그나마의 안전장치다.
+- `sampleIdFrom`의 대상 서비스가 실제로 api를 갖는지(경로가 맞는지)는 부를 때 알 수 있다. 틀리면 기본값 `1`로 물러난다.
+- 읽는 것은 `autoPageChecks`의 값 두 개뿐이다. 같은 실행에서 바뀐 `pageChecks`·`tests`는 여전히 다음 요청부터 적용된다.
