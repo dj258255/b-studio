@@ -3134,6 +3134,10 @@ export function restoreDiscardedBackup(id: string, backupId: string): void {
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되살릴 수 있습니다');
   if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
 
+  // 되살리는 동안(git apply + 서비스 재시작, Spring Boot면 수십 초) 새 요청이 끼어들지 못하게 잡아 둔다(ADR-150)
+  session.snapshot.running = true;
+  emit(session, { type: 'backup_restore_started', backupId });
+
   void (async () => {
     let event: StudioEvent;
     try {
@@ -3147,6 +3151,8 @@ export function restoreDiscardedBackup(id: string, backupId: string): void {
     } catch (error) {
       event = { type: 'backup_restore_failed', backupId, error: describe(error) };
     }
+    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
+    session.snapshot.running = false;
     if (!session.stop.signal.aborted) emit(session, event);
   })();
 }

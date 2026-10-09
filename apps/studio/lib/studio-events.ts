@@ -407,6 +407,8 @@ export type StudioEvent =
       backup?: DiscardBackup;
     }
   /** discarded·reverted·restore가 남긴 백업을 작업 복사본에 되살렸다(ADR-099) */
+  /** 백업을 되살리기 시작했다. 끝날 때까지(backup_restored·backup_restore_failed) 다른 요청을 받지 않는다 */
+  | { type: 'backup_restore_started'; backupId: string }
   | { type: 'backup_restored'; backupId: string; files: string[]; restarted: ServiceCheck[] }
   | { type: 'backup_restore_failed'; backupId: string; error: string }
   | { type: 'remote_sync_started' }

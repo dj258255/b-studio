@@ -11,7 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
  * 상태로 남아(git에 아직 커밋되지 않은 pending 변경) 다음 요청의 검증 게이트를 거쳐야 체크포인트로 남는지 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 체크포인트, discard()의 백업·되살리기. 가짜로 바꾸는 것: 샌드박스(Docker).
  */
-const fake = vi.hoisted(() => ({ root: '', failRestart: false }));
+const fake = vi.hoisted(() => ({ root: '', failRestart: false, restartGate: undefined as Promise<void> | undefined }));
 
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@b-studio/sandbox')>();
@@ -23,6 +23,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     },
     async restart(service: string) {
       // 되살린 변경이 이번에는 게이트를 통과하지 못하는 상황을 흉내 낸다(fake.failRestart)
+      // 서비스가 기동하는 데 오래 걸리는 상황(Spring Boot)을 흉내 낸다(fake.restartGate)
+      if (fake.restartGate) await fake.restartGate;
       if (fake.failRestart) throw new Error('재시작 실패(테스트)');
       return { service, containerPort: 8080, url: 'http://127.0.0.1:1' };
     },
@@ -251,4 +253,75 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
     unsubscribe();
     await stopSession(id).catch(() => {});
   }, 20_000);
+
+  describe('백업을 되살리는 동안 running을 잡는다', () => {
+    /** 백업이 만들어진 세션을 준비한다: 실행이 실패해 Order.java 변경을 보관한 상태 */
+    async function sessionWithBackup(): Promise<{ id: string; events: StudioEvent[]; backupId: string; unsubscribe: () => void }> {
+      await setupProject();
+      const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+      expect(await waitForReady(id)).toBe('ready');
+      const events: StudioEvent[] = [];
+      const unsubscribe = subscribe(id, (event) => events.push(event));
+      await sendAndWaitFinished(
+        id,
+        '메모 필드 추가',
+        [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] }],
+        events,
+      );
+      const reverted = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'reverted' }> => event.type === 'reverted'));
+      return { id, events, backupId: reverted.backup!.id, unsubscribe };
+    }
+
+    it('서비스 재시작이 끝나기 전에는 sendMessage를 409로 거절하고, backup_restored 뒤에는 받아들인다', async () => {
+      const { id, events, backupId, unsubscribe } = await sessionWithBackup();
+      let release!: () => void;
+      fake.restartGate = new Promise<void>((resolve) => (release = resolve));
+      try {
+        restoreDiscardedBackup(id, backupId);
+        expect(getSnapshot(id)!.running).toBe(true);
+        expect(events.some((event) => event.type === 'backup_restore_started')).toBe(true);
+        let rejected: unknown;
+        try {
+          sendMessage(id, '끼어드는 요청', { allowBreaking: false, scriptedTurns: [{ text: '완료' }] });
+        } catch (error) {
+          rejected = error;
+        }
+        expect(rejected).toMatchObject({ status: 409, message: '이전 요청을 처리하는 중입니다' });
+        expect(events.some((event) => event.type === 'backup_restored')).toBe(false);
+
+        release();
+        await waitFor(() => events.find((event) => event.type === 'backup_restored'));
+        expect(getSnapshot(id)!.running).toBe(false);
+        expect(() => sendMessage(id, '이어서 요청', { allowBreaking: false, scriptedTurns: [{ text: '완료' }] })).not.toThrow();
+        await waitFor(() => events.filter((event) => event.type === 'run_finished').length >= 2 || undefined);
+      } finally {
+        release();
+        fake.restartGate = undefined;
+        unsubscribe();
+        await stopSession(id).catch(() => {});
+      }
+    }, 20_000);
+
+    it('되살리기가 실패해도 backup_restore_failed보다 먼저 running을 풀어 다음 요청을 받는다', async () => {
+      const { id, events, unsubscribe } = await sessionWithBackup();
+      try {
+        // 없는 백업 id라 restoreBackup이 예외로 끝난다
+        restoreDiscardedBackup(id, 'missing-backup');
+        expect(getSnapshot(id)!.running).toBe(true);
+        let runningAtFailure: boolean | undefined;
+        const stop = subscribe(id, (event) => {
+          if (event.type === 'backup_restore_failed') runningAtFailure = getSnapshot(id)!.running;
+        });
+        await waitFor(() => events.find((event) => event.type === 'backup_restore_failed'));
+        stop();
+        expect(runningAtFailure).toBe(false);
+        expect(getSnapshot(id)!.running).toBe(false);
+        expect(() => sendMessage(id, '이어서 요청', { allowBreaking: false, scriptedTurns: [{ text: '완료' }] })).not.toThrow();
+        await waitFor(() => events.filter((event) => event.type === 'run_finished').length >= 2 || undefined);
+      } finally {
+        unsubscribe();
+        await stopSession(id).catch(() => {});
+      }
+    }, 20_000);
+  });
 });
