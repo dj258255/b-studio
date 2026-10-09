@@ -262,7 +262,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     ...failureTable,
     '',
     ...(meta.backend !== 'openai'
-      ? ['로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다. 비용은 청구가 없고, 단가를 주면 API 단가 환산 추정치만 계산합니다.', '']
+      ? ['로컬 CLI 러너의 `modelMs`는 러너가 알려 주는 값만 더합니다(Claude Code는 SDK가 보고한 API 호출 시간 합, Codex·Gemini CLI는 재지 못해 들어가지 않습니다). 비용은 청구가 없고, 단가를 주면 API 단가 환산 추정치만 계산합니다.', '']
       : []),
     '반복 수가 적어 비율 대신 건수로 적습니다. 이 결과는 이 저장소·이 모델·이 과제에 한정됩니다.',
     '',

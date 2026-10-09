@@ -310,8 +310,8 @@ describe('runCommandCodeAgent', () => {
     expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(222);
-    // 이벤트에 시간이 없으므로 0("재지 않음")이다
-    expect(result.metrics?.modelMs).toBe(0);
+    // 이벤트에 시간이 없으므로 비워 둔다("재지 않음", 0초와 다르다)
+    expect(result.metrics).not.toHaveProperty('modelMs');
   });
 
   it('model을 고르면 usageByModel을 그 이름으로, 고르지 않으면 commandcode:default로 채운다(이슈 #428)', async () => {

@@ -244,7 +244,7 @@ describe('summarize', () => {
 
   it('claude-code 백엔드면 modelMs 한계 줄을 더한다', () => {
     const local = summarize([row({})], { backend: 'claude-code', requestedModel: 'sonnet' });
-    expect(local).toContain('로컬 CLI 러너는 모델 응답 대기 시간을 재지 못해 `modelMs`가 0입니다.');
+    expect(local).toContain('Codex·Gemini CLI는 재지 못해 들어가지 않습니다');
     expect(summarize([row({})], meta)).not.toContain('modelMs`가 0입니다');
   });
 
