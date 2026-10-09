@@ -25,7 +25,7 @@ const project = {
 
 /**
  * compose up이 포트 바인드 충돌로 `failUpTimes`번 실패한 뒤 성공하는 가짜 docker 실행 파일.
- * up을 부를 때마다 override 파일(두 번째 --file 인자, *compose.override.yaml로 끝난다)을 스냅샷으로 남겨
+ * 시작(compose start)을 부를 때마다 override 파일(두 번째 --file 인자, *compose.override.yaml로 끝난다)을 스냅샷으로 남겨
  * 재시도마다 포트가 다시 뽑혔는지 확인할 수 있게 한다. down·build 호출은 로그에 그대로 남는다
  */
 async function fakeDockerWithPortConflict(dir: string, failUpTimes: number, stderr: string): Promise<{ dockerBin: string; log: string; snapshotDir: string }> {
@@ -41,6 +41,10 @@ async function fakeDockerWithPortConflict(dir: string, failUpTimes: number, stde
     `#!/bin/sh
 printf '%s\\n' "$*" >> "${log}"
 
+case " $* " in
+  *" --no-trunc "*) printf 'm1\\n'; exit 0 ;;
+  *" inspect m1 "*) printf '%s\\n' '[{"Id":"m1","Config":{"Labels":{"com.docker.compose.service":"api"}},"Mounts":[]}]'; exit 0 ;;
+esac
 override=""
 for a in "$@"; do
   case "$a" in
@@ -54,7 +58,9 @@ for a in "$@"; do
     build) exit 0 ;;
     ps) exit 0 ;;
     down) exit 0 ;;
-    up)
+    up) exit 0 ;;
+    start)
+      # 컨테이너를 만들기만 하는 up(--no-start)은 포트를 묶지 않아 늘 성공한다. 바인드 충돌은 시작할 때만 난다
       count=$(cat "${counter}")
       count=$((count + 1))
       echo "$count" > "${counter}"
@@ -102,7 +108,7 @@ describe('compose up 포트 충돌 재시도', () => {
     await expect(sandbox.start()).resolves.toEqual([]);
 
     const args = await readFile(log, 'utf8');
-    expect(countCommandLines(args, 'up')).toBe(3);
+    expect(countCommandLines(args, 'start')).toBe(3);
     expect(countCommandLines(args, 'down')).toBe(2);
 
     // 재시도마다 override에 새로 쓴 포트가 서로 달라야 한다(세트 전체를 다시 뽑는다)
@@ -120,7 +126,7 @@ describe('compose up 포트 충돌 재시도', () => {
     await expect(sandbox.start()).rejects.toThrow(/포트 충돌이 반복돼 3회 재시도 후 포기했습니다/);
 
     const args = await readFile(log, 'utf8');
-    expect(countCommandLines(args, 'up')).toBe(3);
+    expect(countCommandLines(args, 'start')).toBe(3);
     expect(countCommandLines(args, 'down')).toBe(2);
   });
 
@@ -132,7 +138,7 @@ describe('compose up 포트 충돌 재시도', () => {
     await expect(sandbox.start()).rejects.toThrow(/pull access denied/);
 
     const args = await readFile(log, 'utf8');
-    expect(countCommandLines(args, 'up')).toBe(1);
+    expect(countCommandLines(args, 'start')).toBe(1);
     expect(countCommandLines(args, 'down')).toBe(0);
   });
 });

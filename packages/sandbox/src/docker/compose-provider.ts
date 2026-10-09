@@ -53,6 +53,7 @@ import {
   parseSyncOutput, SyncObservations,
 } from './format';
 import { externalCallScript } from './external-call';
+import { awaitedCondition, loadDependsOn, startWaves } from './compose-deps';
 import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
@@ -70,6 +71,9 @@ const execFileAsync = promisify(execFile);
 
 /** compose 파일이 up과 겹쳐 계속 바뀔 때 .git 마스크를 맞춰 다시 올리는 최대 횟수 */
 const GIT_MASK_ATTEMPTS = 3;
+/** 의존 서비스가 준비될 때까지 기다리는 상한. compose는 healthcheck가 실패로 끝날 때까지 기다리지만, 끝나지 않는 대기는 두지 않는다 */
+const DEPENDENCY_WAIT_MS = 300_000;
+const DEPENDENCY_POLL_MS = 500;
 
 /**
  * compose가 샌드박스용으로 빌드한 이미지(<샌드박스 id>-<서비스>)를 지운다.
@@ -211,6 +215,8 @@ class LocalDockerSandbox implements Sandbox {
   readonly #edgeScript: string;
   /** 컨테이너를 만드는 up 직전마다 compose 파일에서 다시 계산한다(#refreshGitMask) */
   #gitMask: Record<string, MaskVolume[]>;
+  /** up을 한 번에 하나씩 돌리는 줄. 만들기 → 확인 → 시작 사이에 다른 up이 끼어들지 못하게 한다 */
+  #upQueue: Promise<unknown> = Promise.resolve();
   #hostPorts: Record<string, number>;
   readonly #runtime: string | undefined;
   #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
@@ -755,27 +761,116 @@ class LocalDockerSandbox implements Sandbox {
    *  1. up 직전에 마운트를 다시 읽어 .git 마스크를 맞추고,
    *  2. up이 끝난 뒤 한 번 더 읽어 그 사이에 파일이 바뀌었으면(마스크 없는 마운트로 만들어졌을 수 있다) override를 새로 쓰고 다시 up하며,
    *     GIT_MASK_ATTEMPTS번 안에 안정되지 않으면 스택을 내리고 던진다,
-   *  3. 설정이 아니라 결과를 확인한다: 실제 컨테이너의 마운트에서 `.git` 자리의 읽기 전용 마운트가 빠졌으면 그 컨테이너를 멈추고 던진다
+   *  3. 설정이 아니라 결과를 확인한다: 실제 컨테이너의 마운트에서 `.git` 자리의 읽기 전용 마운트가 빠졌으면 던진다.
+   *
+   * 확인은 **시작하기 전에** 한다(트러블슈팅 121). 예전에는 시작한 뒤에 확인해서, 보호가 빠진 컨테이너가 멈추기 전까지 실행됐다.
+   *  - 만들기: `up --no-start`. 빌드와 다시 만들기는 여기서 한다.
+   *  - 확인: 만들어진 컨테이너의 마운트를 본다. 하나도 보이지 않으면 통과가 아니라 실패다.
+   *  - 시작: **확인한 컨테이너만** 시작한다. 시작 단계가 컨테이너를 만들 수 있으면 확인하지 않은 것이 시작되므로
+   *    (`up --no-recreate`는 없는 컨테이너를 만든다) 만들지 못하는 명령만 쓴다 — 이름을 준 up은 확인한 컨테이너의 id로
+   *    `docker start`, 전체 up은 `compose start`(의존 순서·헬스체크 대기는 `up`과 같고 컨테이너를 만들지 않는다).
+   *  - 시작한 뒤에도 한 번 더 확인한다(바깥에서 컨테이너를 바꿔 넣은 경우).
+   * 한 샌드박스의 up은 한 번에 하나만 돈다. 확인과 시작 사이에 다른 up이 컨테이너를 다시 만들어 끼워 넣지 못하게 한다
    */
   async #upWithGitMask(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+    const run = this.#upQueue.then(() => this.#upOnce(args, signal));
+    this.#upQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async #upOnce(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+    const { create, services, byId } = splitUpArgs(args);
     for (let attempt = 1; attempt <= GIT_MASK_ATTEMPTS; attempt++) {
+      signal?.throwIfAborted();
       await this.#refreshGitMask();
-      const result = await this.#docker(this.#composeArgs(args), signal);
-      if (result.exitCode !== 0) return result;
+      // 빌드 실패는 여기서 난다(`--build`는 만들기 단계에만 준다)
+      const created = await this.#docker(this.#composeArgs(create), signal);
+      if (created.exitCode !== 0) return created;
       const before = JSON.stringify(this.#gitMask);
       await this.#refreshGitMask();
       if (JSON.stringify(this.#gitMask) !== before) continue;
-      await this.#assertMasksApplied();
-      return result;
+      const verified = await this.#verifyMasks('created');
+      // 포트 바인드 충돌은 여기서 난다(바인드는 시작할 때 일어난다)
+      const started = byId ? await this.#startVerified(verified, services, signal) : await this.#docker(this.#composeArgs(['start', ...services]), signal);
+      if (started.exitCode !== 0) return started;
+      await this.#verifyMasks('started');
+      return started;
     }
     await this.#docker(this.#composeArgs(['down', '--remove-orphans']), signal);
     throw new SandboxError(`compose 파일이 계속 바뀌어 .git 보호를 확정하지 못했습니다. 서비스를 내렸습니다 (${this.id})`);
   }
 
-  /** up 뒤 실제 컨테이너의 마운트를 보고, `.git` 보호가 빠진 컨테이너가 있으면 멈추고 던진다 */
-  async #assertMasksApplied(): Promise<void> {
-    const ids = (await this.#docker(this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']))).stdout.split('\n').map((id) => id.trim()).filter(Boolean);
-    if (ids.length === 0) return;
+  /**
+   * 확인한 컨테이너를 id로 시작한다. 서비스가 여럿이면 `up --no-deps a b`가 하던 대로 **목록 안의 의존 순서**를 지키고,
+   * `service_healthy`·`service_completed_successfully` 조건은 그 상태가 될 때까지 기다린 뒤 다음 묶음을 시작한다.
+   * 목록에 없는 의존 서비스는 건드리지 않는다. 실패는 compose의 실패처럼 종료 코드와 stderr로 돌려준다
+   */
+  async #startVerified(verified: ReadonlyArray<{ id: string; service: string | undefined }>, services: readonly string[], signal?: AbortSignal): Promise<ExecResult> {
+    const idsOf = (names: readonly string[]) => verified.filter((container) => container.service !== undefined && names.includes(container.service)).map((container) => container.id);
+    const missing = services.filter((service) => idsOf([service]).length === 0);
+    if (missing.length > 0) throw new SandboxError(`만든 컨테이너를 찾지 못해 시작하지 않았습니다 (${this.id})`, missing.join(', '), { platform: true });
+    if (services.length === 1) return this.#docker(['start', ...idsOf(services)], signal);
+
+    const dependsOn = await loadDependsOn(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
+    const waves = startWaves(services, dependsOn);
+    let last: ExecResult = { exitCode: 0, stdout: '', stderr: '' };
+    for (const [index, wave] of waves.entries()) {
+      last = await this.#docker(['start', ...idsOf(wave)], signal);
+      if (last.exitCode !== 0) return last;
+      const later = waves.slice(index + 1).flat();
+      for (const service of wave) {
+        const condition = awaitedCondition(service, later, dependsOn);
+        if (!condition) continue;
+        const problem = await this.#waitForDependency(idsOf([service]), service, condition, signal);
+        if (problem) return { exitCode: 1, stdout: '', stderr: problem };
+      }
+    }
+    return last;
+  }
+
+  /** 의존 서비스가 조건을 채울 때까지 기다린다. 채우지 못하면 사유를 돌려준다(compose의 "dependency failed to start"와 같은 자리) */
+  async #waitForDependency(ids: readonly string[], service: string, condition: 'service_healthy' | 'service_completed_successfully', signal?: AbortSignal): Promise<string | undefined> {
+    const deadline = Date.now() + DEPENDENCY_WAIT_MS;
+    for (;;) {
+      signal?.throwIfAborted();
+      const inspected = await this.#docker(['inspect', '--format', '{{json .State}}', ...ids]);
+      if (inspected.exitCode !== 0) return `dependency failed to start: ${service}의 상태를 읽지 못했습니다`;
+      let states: Array<{ Status?: string; ExitCode?: number; Health?: { Status?: string } | null }>;
+      try {
+        states = inspected.stdout.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+      } catch {
+        return `dependency failed to start: ${service}의 상태를 해석하지 못했습니다`;
+      }
+      if (states.length === 0) return `dependency failed to start: ${service}의 상태를 읽지 못했습니다`;
+      if (condition === 'service_healthy') {
+        // compose와 같다: healthcheck가 없는 서비스에 service_healthy를 걸면 기다릴 수 없어 실패한다
+        if (states.some((state) => !state.Health)) return `dependency failed to start: container ${service} has no healthcheck configured`;
+        if (states.every((state) => state.Health?.Status === 'healthy')) return undefined;
+        if (states.some((state) => state.Health?.Status === 'unhealthy')) return `dependency failed to start: container ${service} is unhealthy`;
+        if (states.some((state) => state.Status === 'exited' || state.Status === 'dead')) return `dependency failed to start: container ${service} exited`;
+      } else {
+        if (states.every((state) => state.Status === 'exited' && state.ExitCode === 0)) return undefined;
+        const failed = states.find((state) => state.Status === 'exited' && state.ExitCode !== 0);
+        if (failed) return `service "${service}" didn't complete successfully: exit ${failed.ExitCode}`;
+      }
+      if (Date.now() > deadline) return `dependency failed to start: ${service}이(가) ${Math.round(DEPENDENCY_WAIT_MS / 1000)}초 안에 준비되지 않았습니다`;
+      await sleep(DEPENDENCY_POLL_MS, undefined, { signal });
+    }
+  }
+
+  /**
+   * 이 샌드박스의 실제 컨테이너 마운트를 보고, 확인한 컨테이너(id와 서비스 이름)를 돌려준다.
+   * `.git` 보호가 빠진 컨테이너가 있으면 지우고 던진다 — 시작하기 전이면 한 번도 시작되지 않고, 시작한 뒤면 바로 죽인다
+   * (`docker stop`은 종료를 10초까지 기다려 그동안 보호 없이 돈다). 목록·마운트·볼륨 정보를 읽지 못했거나
+   * 컨테이너가 하나도 보이지 않으면 확인하지 못한 것이므로 던진다
+   */
+  async #verifyMasks(phase: 'created' | 'started'): Promise<Array<{ id: string; service: string | undefined }>> {
+    const listed = await this.#docker(this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']));
+    // 목록을 읽지 못한 것을 "컨테이너 없음"으로 보면 확인을 건너뛴 채 시작하게 된다
+    if (listed.exitCode !== 0) throw new SandboxError(`컨테이너 목록을 확인하지 못했습니다 (${this.id})`, this.redact(listed.stderr), { platform: true });
+    const ids = listed.stdout.split('\n').map((id) => id.trim()).filter(Boolean);
+    // 만들기가 성공했는데 컨테이너가 보이지 않는다. 볼 것이 없다는 것은 확인했다는 뜻이 아니다
+    if (ids.length === 0) throw new SandboxError(`컨테이너가 보이지 않아 .git 보호를 확인하지 못했습니다 (${this.id})`, undefined, { platform: true });
     const inspected = await this.#docker(['inspect', ...ids]);
     if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 마운트를 확인하지 못했습니다 (${this.id})`, this.redact(inspected.stderr), { platform: true });
     let containers: Array<{ Id: string; Name?: string; Mounts?: InspectedMount[]; Config?: { Labels?: Record<string, string> } }>;
@@ -784,31 +879,47 @@ class LocalDockerSandbox implements Sandbox {
     } catch {
       throw new SandboxError(`컨테이너 마운트(docker inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
     }
+    // 목록의 컨테이너를 빠짐없이 봤는지 맞춰 본다. 일부만 돌아오면 나머지는 확인하지 않은 채 지나간다
+    const seen = new Set(Array.isArray(containers) ? containers.map((container) => container?.Id) : []);
+    if (!Array.isArray(containers) || ids.some((id) => !seen.has(id))) {
+      throw new SandboxError(`컨테이너 마운트를 일부만 확인했습니다 (${this.id})`, undefined, { platform: true });
+    }
     const names = [...new Set(containers.flatMap((container) => (container.Mounts ?? []).filter((mount) => mount.Type === 'volume' && mount.Name).map((mount) => mount.Name!)))];
     const volumeOptions: Record<string, { driver?: string; driver_opts?: Record<string, string> }> = {};
     if (names.length > 0) {
       const volumes = await this.#docker(['volume', 'inspect', ...names]);
-      if (volumes.exitCode === 0) {
-        try {
-          for (const volume of JSON.parse(volumes.stdout) as Array<{ Name: string; Driver?: string; Options?: Record<string, string> | null }>) {
-            volumeOptions[volume.Name] = { ...(volume.Driver ? { driver: volume.Driver } : {}), driver_opts: volume.Options ?? {} };
-          }
-        } catch {
-          throw new SandboxError(`볼륨 정보(docker volume inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
+      // 볼륨 정보를 읽지 못하면 호스트 폴더에 묶인 이름 있는 볼륨을 알아볼 수 없어, 그 마운트의 보호가 빠져도 지나치게 된다
+      if (volumes.exitCode !== 0) throw new SandboxError(`볼륨 정보를 확인하지 못했습니다 (${this.id})`, this.redact(volumes.stderr), { platform: true });
+      try {
+        for (const volume of JSON.parse(volumes.stdout) as Array<{ Name: string; Driver?: string; Options?: Record<string, string> | null }>) {
+          volumeOptions[volume.Name] = { ...(volume.Driver ? { driver: volume.Driver } : {}), driver_opts: volume.Options ?? {} };
         }
+      } catch {
+        throw new SandboxError(`볼륨 정보(docker volume inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
       }
+      // 물어본 볼륨이 답에 없으면 그 마운트가 호스트 폴더에 묶였는지 알 수 없다
+      const unknown = names.filter((name) => volumeOptions[name] === undefined);
+      if (unknown.length > 0) throw new SandboxError(`볼륨 정보를 일부만 확인했습니다 (${this.id})`, unknown.join(', '), { platform: true });
     }
     const failures: string[] = [];
-    const stop: string[] = [];
+    const remove: string[] = [];
     for (const container of containers) {
       const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions);
       if (missing.length === 0) continue;
-      stop.push(container.Id);
-      failures.push(`${container.Config?.Labels?.['com.docker.compose.service'] ?? container.Name ?? container.Id}: ${missing.join(', ')}`);
+      remove.push(container.Id);
+      failures.push(`${container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] ?? container.Name ?? container.Id}: ${missing.join(', ')}`);
     }
-    if (failures.length === 0) return;
-    await this.#docker(['stop', ...stop]);
-    throw new SandboxError(`컨테이너에 .git 읽기 전용 마운트가 빠져 멈췄습니다 (${this.id})`, failures.join('\n'), { platform: true });
+    if (failures.length === 0) return containers.map((container) => ({ id: container.Id, service: container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] }));
+    // 지워 두면 다음 up이 새로 만들고 다시 확인한다. 남겨 두면 만들어진 채로 있어 다른 경로로 시작될 여지가 생긴다
+    const removed = await this.#docker(['rm', '--force', ...remove]);
+    const left = removed.exitCode === 0 ? '' : ' 그 컨테이너를 지우지 못했습니다 — 아직 돌고 있을 수 있습니다';
+    throw new SandboxError(
+      phase === 'created'
+        ? `컨테이너에 .git 읽기 전용 마운트가 빠져 시작하지 않았습니다 (${this.id})${left}`
+        : `컨테이너에 .git 읽기 전용 마운트가 빠져 내렸습니다 (${this.id})${left}`,
+      failures.join('\n'),
+      { platform: true },
+    );
   }
 
   async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
@@ -894,6 +1005,24 @@ class LocalDockerSandbox implements Sandbox {
   #environment(): NodeJS.ProcessEnv {
     return { ...process.env, ...this.#secrets };
   }
+}
+
+const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
+
+/**
+ * `compose up` 인자에서 만들기 단계의 인자와 시작할 대상을 뽑는다(트러블슈팅 121).
+ *  - create: 컨테이너를 만들기만 한다(`--no-start`). 빌드와 다시 만들기(`--build`, `--force-recreate`)는 이 단계에서 한다
+ *  - services: 이름을 준 서비스. 비어 있으면 compose 파일의 모든 서비스다
+ *  - byId: 이름을 주고 `--no-deps`를 붙인 up이면 true. 의존 서비스를 따라 띄우지 않으므로 확인한 컨테이너의 id로 바로 시작한다
+ */
+export function splitUpArgs(args: readonly string[]): { create: string[]; services: string[]; byId: boolean } {
+  const [command = 'up', ...rest] = args;
+  const services = rest.filter((arg) => !arg.startsWith('-'));
+  return {
+    create: [command, '--no-start', ...rest.filter((arg) => arg !== '--detach')],
+    services,
+    byId: services.length > 0 && rest.includes('--no-deps'),
+  };
 }
 
 /**

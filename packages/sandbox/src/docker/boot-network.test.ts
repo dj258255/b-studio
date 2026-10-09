@@ -31,7 +31,10 @@ async function fakeDocker(dir: string): Promise<string> {
   await writeFile(
     bin,
     `#!/bin/sh
-case " $* " in *" --no-trunc "*) exit 0 ;; esac
+case " $* " in
+  *" --no-trunc "*) printf 'm1\\n'; exit 0 ;;
+  *" inspect m1 "*) printf '%s\\n' '[{"Id":"m1","Config":{"Labels":{"com.docker.compose.service":"api"}},"Mounts":[]}]'; exit 0 ;;
+esac
 for a in "$@"; do
   case "$a" in
     config) printf '{"services":{}}\\n'; exit 0 ;;
