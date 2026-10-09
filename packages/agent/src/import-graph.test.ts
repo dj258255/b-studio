@@ -255,6 +255,45 @@ describe('collectImportGraph', () => {
     expect(graph.incomplete).toContain('10개 중 4개까지만 읽었습니다');
   });
 
+  it('읽지 못한 파일과 폴더를 조용히 넘기지 않고 이유(incomplete)에 남긴다', async () => {
+    const base = memory({
+      'web/app/orders/page.tsx': "import { Summary } from '../../components/Summary';",
+      'web/components/Summary.tsx': 'export const Summary = 1;',
+      'web/components/Huge.tsx': 'export const Huge = 1;',
+      'web/locked/Hidden.tsx': 'export const Hidden = 1;',
+    });
+    const graph = await collectImportGraph(
+      {
+        ...base,
+        list: async (dir) => {
+          if (dir === 'web/locked') throw new Error('EACCES');
+          return base.list(dir);
+        },
+        read: async (file) => {
+          if (file === 'web/components/Huge.tsx') throw new Error('파일이 너무 큽니다');
+          return base.read(file);
+        },
+      },
+      'web',
+    );
+    // 읽은 것으로는 그래프를 만들되, 빠진 것이 있다는 사실과 무엇인지가 남는다
+    expect(graph.reverse.get('components/Summary.tsx')).toEqual(new Set(['app/orders/page.tsx']));
+    expect(graph.incomplete).toContain('폴더 1개를 훑지 못했습니다(web/locked)');
+    expect(graph.incomplete).toContain('소스 파일 1개를 읽지 못했습니다(components/Huge.tsx)');
+  });
+
+  it('목록 단계에서도 상한을 둔다: 읽기 상한의 배수만큼 찾으면 더 훑지 않는다', async () => {
+    const fileMap: Record<string, string> = {};
+    for (let dir = 0; dir < 30; dir++) for (let i = 0; i < 10; i++) fileMap[`web/lib/d${dir}/f${i}.ts`] = '';
+    const log = { reads: [] as string[], lists: [] as string[] };
+    const graph = await collectImportGraph(memory(fileMap, log), 'web', { maxFiles: 5, maxDirs: 500, maxMs: 10_000 });
+    // 5 × 4 = 20개를 찾은 데서 멈춘다 — 폴더 30개(파일 300개)를 전부 훑지 않는다
+    expect(graph.incomplete).toContain('소스 파일 20개를 찾은 데서 훑기를 멈췄습니다');
+    expect(graph.files.size).toBeLessThan(40);
+    expect(log.lists.length).toBeLessThan(10);
+    expect(graph.readCount).toBe(5);
+  });
+
   it('시간 상한을 넘으면 읽기를 멈추고 이유를 남긴다', async () => {
     const fileMap: Record<string, string> = {};
     for (let i = 0; i < 40; i++) fileMap[`web/lib/f${i}.ts`] = '';

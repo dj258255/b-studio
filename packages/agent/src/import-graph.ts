@@ -545,6 +545,10 @@ export interface ImportGraphLimits {
 }
 
 export const DEFAULT_IMPORT_GRAPH_LIMITS: ImportGraphLimits = { maxFiles: 800, maxDirs: 400, maxMs: 10_000 };
+/** 목록 단계에서 모아 두는 소스 파일 수 상한(읽기 상한의 배수). 이만큼 모이면 더 훑지 않는다 — 읽기 상한을 목록을 다 모은 뒤에만 적용하면 그 전에 메모리·시간을 한없이 쓴다 */
+const LISTED_FILES_PER_READ_LIMIT = 4;
+/** 건너뛴 이유에 이름을 적는 파일·폴더 수 */
+const NAMED_FAILURES = 3;
 /** 역추적 깊이 상한. 컴포넌트 → 화면 컴포넌트 → 래퍼 → page 정도의 사슬을 덮고, 그 너머는 사실상 공용 파일이다 */
 export const DEFAULT_TRACE_DEPTH = 5;
 
@@ -574,19 +578,27 @@ export async function collectImportGraph(
     return rootRelative.startsWith(`${service}/`) ? rootRelative.slice(service.length + 1) : undefined;
   };
   const toRoot = (inService: string): string => (service === '' ? inService : `${service}/${inService}`);
-  let incomplete: string | undefined;
+  // 그래프가 덜 만들어진 이유를 전부 모은다. 하나라도 있으면 호출자가 건너뜀 check로 남긴다 —
+  // 읽지 못한 폴더·파일을 조용히 넘기면 그 너머의 화면을 "따라갈 것이 없었다"와 구분할 수 없다
+  const reasons: string[] = [];
   const expired = (): boolean => deps.now() - started > limits.maxMs;
+  const maxListed = limits.maxFiles * LISTED_FILES_PER_READ_LIMIT;
+  const unreadableDirs: string[] = [];
 
   const files = new Set<string>();
   const queue: string[] = [service === '' ? '.' : service];
   let dirCount = 0;
   while (queue.length > 0) {
     if (dirCount >= limits.maxDirs) {
-      incomplete = `폴더 ${limits.maxDirs}개까지만 훑었습니다`;
+      reasons.push(`폴더 ${limits.maxDirs}개까지만 훑었습니다`);
+      break;
+    }
+    if (files.size >= maxListed) {
+      reasons.push(`소스 파일 ${maxListed}개를 찾은 데서 훑기를 멈췄습니다`);
       break;
     }
     if (expired()) {
-      incomplete = `폴더를 훑다가 시간 상한(${limits.maxMs}ms)을 넘었습니다`;
+      reasons.push(`폴더를 훑다가 시간 상한(${limits.maxMs}ms)을 넘었습니다`);
       break;
     }
     const dir = queue.shift()!;
@@ -595,7 +607,8 @@ export async function collectImportGraph(
     try {
       entries = await deps.list(dir);
     } catch {
-      continue; // 읽을 수 없는 폴더는 건너뛴다
+      unreadableDirs.push(dir); // 건너뛰되, 그 아래 파일이 그래프에서 빠졌다는 것을 남긴다
+      continue;
     }
     for (const entry of entries) {
       const relative = toService(entry.replace(/\/$/, ''));
@@ -612,13 +625,15 @@ export async function collectImportGraph(
   // app 아래 파일을 먼저 읽는다: 상한에 걸려도 page와 그 가까운 이웃이 그래프에 남게 한다
   const ordered = [...files].sort((a, b) => Number(isUnderApp(b)) - Number(isUnderApp(a)) || a.localeCompare(b));
   const toRead = ordered.slice(0, limits.maxFiles);
-  if (ordered.length > limits.maxFiles) incomplete ??= `소스 파일 ${ordered.length}개 중 ${limits.maxFiles}개까지만 읽었습니다`;
+  if (unreadableDirs.length > 0) reasons.push(`폴더 ${unreadableDirs.length}개를 훑지 못했습니다(${nameSome(unreadableDirs)})`);
+  if (ordered.length > limits.maxFiles) reasons.push(`소스 파일 ${ordered.length}개 중 ${limits.maxFiles}개까지만 읽었습니다`);
 
   const sources = new Map<string, string>();
+  const unreadableFiles: string[] = [];
   const BATCH = 16;
   for (let i = 0; i < toRead.length; i += BATCH) {
     if (expired()) {
-      incomplete ??= `파일을 읽다가 시간 상한(${limits.maxMs}ms)을 넘었습니다`;
+      reasons.push(`파일을 읽다가 시간 상한(${limits.maxMs}ms)을 넘었습니다(${toRead.length}개 중 ${i}개 읽음)`);
       break;
     }
     await Promise.all(
@@ -626,14 +641,22 @@ export async function collectImportGraph(
         try {
           sources.set(file, await deps.read(toRoot(file)));
         } catch {
-          // 너무 크거나 읽을 수 없는 파일은 그래프에서 빠진다
+          unreadableFiles.push(file); // 너무 크거나 읽을 수 없는 파일. 그 파일의 import는 그래프에서 빠진다
         }
       }),
     );
   }
+  if (unreadableFiles.length > 0) reasons.push(`소스 파일 ${unreadableFiles.length}개를 읽지 못했습니다(${nameSome(unreadableFiles.sort())})`);
+  const incomplete = reasons.length > 0 ? reasons.join(' · ') : undefined;
 
   const alias = await readAliasConfig(deps, toRoot);
   return { files, reverse: buildReverseGraph(sources, files, alias), readCount: sources.size, elapsedMs: deps.now() - started, ...(incomplete ? { incomplete } : {}) };
+}
+
+/** 이유에 적을 이름 몇 개. 나머지는 수로만 남긴다 */
+function nameSome(names: readonly string[]): string {
+  const shown = names.slice(0, NAMED_FAILURES).join(', ');
+  return names.length > NAMED_FAILURES ? `${shown} 외 ${names.length - NAMED_FAILURES}개` : shown;
 }
 
 function isUnderApp(file: string): boolean {
