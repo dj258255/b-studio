@@ -778,6 +778,29 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(await new CheckpointStore(workDir).projectRoot()).toBe(path.join(workDir, 'api'));
   });
 
+  it('하위 폴더 프로젝트의 문서 체크포인트가 프로젝트 폴더 밖 파일도 바꿨으면 outsideFiles로 드러난다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store, projectRoot } = await CheckpointStore.clone(path.join(source, 'api'), workDir, { branch: BRANCH, allowSubfolder: true });
+
+    // 프로젝트 안의 문서만 바꾼 문서 체크포인트: 폴더 밖 변경이 없다
+    await mkdir(path.join(projectRoot, 'docs'), { recursive: true });
+    await writeFile(path.join(projectRoot, 'docs/requirements.md'), '# 요구사항\n');
+    const inside = (await store.commitPaths(['docs/requirements.md'], '문서: 요구사항', undefined, { trailers: [formatVerifyTrailer('docs')] }))!;
+    expect(inside.verify).toBe('docs');
+    expect(inside.files).toEqual(['docs/requirements.md']);
+    expect(inside.outsideFiles).toBeUndefined();
+
+    // 같은 표시를 달았지만 저장소의 프로젝트 폴더 밖 파일도 함께 바꾼 커밋: files에는 안 보이고 outsideFiles로만 드러난다
+    await writeFile(path.join(projectRoot, 'docs/requirements.md'), '# 요구사항\n고침\n');
+    await writeFile(path.join(workDir, 'README.md'), '# orders\n폴더 밖 변경\n');
+    await git(workDir, 'add', '-A');
+    await git(workDir, '-c', 'user.name=b-studio', '-c', 'user.email=checkpoints@b-studio.local', 'commit', '-q', '-m', `문서: 섞인 커밋\n\n${formatVerifyTrailer('docs')}`);
+    const mixed = (await store.list())[0]!;
+    expect(mixed.verify).toBe('docs');
+    expect(mixed.files).toEqual(['docs/requirements.md']);
+    expect(mixed.outsideFiles).toBe(1);
+  });
+
   it('Git 저장소 루트가 아닌 폴더는 복제하지 않고, 세션 이전 기록으로는 되돌리지 않는다', async () => {
     const { source, workDir } = await createSourceRepository();
     expect(await CheckpointStore.inspectSource(path.join(source, 'api'))).toBeUndefined();

@@ -4912,7 +4912,7 @@ export function evaluateRequirement(
  * 문서의 API 명세를 읽어 검사하는 테스트가 있을 수 있고, 세션 재개는 끊긴 실행이 고친 문서를 게이트 없이 문서 체크포인트로 남긴다.
  * 표시(`verify: 'docs'`)가 잘못 붙었거나 파일 목록을 모를 때도 건너뛰지 않는다(근거가 닫히는 쪽).
  */
-export function evidenceBaseCheckpoint<T extends { verify?: string; files?: readonly string[] }>(checkpoints: readonly T[]): T | undefined {
+export function evidenceBaseCheckpoint<T extends { verify?: string; files?: readonly string[]; outsideFiles?: number }>(checkpoints: readonly T[]): T | undefined {
   return checkpoints.find((checkpoint) => !isEvidenceNeutralCheckpoint(checkpoint)) ?? checkpoints[checkpoints.length - 1];
 }
 
@@ -4922,10 +4922,14 @@ export function evidenceBaseCheckpoint<T extends { verify?: string; files?: read
  */
 const EVIDENCE_NEUTRAL_FILES: ReadonlySet<string> = new Set([REQUIREMENTS_FILE, REQUIREMENT_ISSUES_FILE]);
 
-/** 문서 체크포인트 표시가 있고, 바꾼 파일이 하나 이상이며 전부 요구사항 기록인 체크포인트 */
-function isEvidenceNeutralCheckpoint(checkpoint: { verify?: string; files?: readonly string[] }): boolean {
+/**
+ * 문서 체크포인트 표시가 있고, 바꾼 파일이 하나 이상이며 전부 요구사항 기록인 체크포인트.
+ * files는 프로젝트 폴더 기준이라 폴더 밖 변경이 빠진다 — 폴더 밖에서도 바꾼 것이 있으면(outsideFiles) 건너뛰지 않는다
+ */
+function isEvidenceNeutralCheckpoint(checkpoint: { verify?: string; files?: readonly string[]; outsideFiles?: number }): boolean {
   return (
     checkpoint.verify === 'docs' &&
+    (checkpoint.outsideFiles ?? 0) === 0 &&
     checkpoint.files !== undefined &&
     checkpoint.files.length > 0 &&
     checkpoint.files.every((file) => EVIDENCE_NEUTRAL_FILES.has(file))

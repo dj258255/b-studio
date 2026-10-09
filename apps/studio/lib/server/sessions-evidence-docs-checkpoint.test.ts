@@ -376,6 +376,11 @@ describe('evidenceBaseCheckpoint', () => {
     expect(evidenceBaseCheckpoint([cp('mixed-docs', 'docs', ['docs/requirements.md', 'docs/api-spec.md']), cp('code')])?.name).toBe('mixed-docs');
   });
 
+  it('프로젝트 폴더 밖에서도 바꾼 것이 있는 문서 체크포인트는 건너뛰지 않는다(files에는 폴더 밖 변경이 안 보인다)', () => {
+    const outside = { ...cp('outside', 'docs', ['docs/requirements.md']), outsideFiles: 1 };
+    expect(evidenceBaseCheckpoint([outside, cp('code')])?.name).toBe('outside');
+  });
+
   it('바꾼 파일을 모르거나 비어 있는 문서 체크포인트는 건너뛰지 않는다(근거가 닫히는 쪽)', () => {
     expect(evidenceBaseCheckpoint([{ name: 'unknown', verify: 'docs' }, cp('code')])?.name).toBe('unknown');
     expect(evidenceBaseCheckpoint([cp('empty', 'docs', []), cp('code')])?.name).toBe('empty');
