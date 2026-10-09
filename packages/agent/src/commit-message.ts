@@ -143,6 +143,11 @@ function isClearChangeSentence(line: string): boolean {
   return !TRAILING_REQUEST_PHRASING.test(converted);
 }
 
+export interface CommitSubjectOptions {
+  /** 요청 글이 에이전트의 질문에 대한 답이다. 답의 첫 문장은 제목으로 쓰지 않는다 */
+  requestIsAnswer?: boolean;
+}
+
 /** 파일 경로에서 커밋 제목에 쓸 사람이 읽는 영역 이름을 뽑는다(마지막 조각의 확장자를 떼고, 흔한 이름은 다듬는다) */
 function fileAreaLabel(file: string): string {
   const name = file.split('/').pop() ?? file;
@@ -301,8 +306,13 @@ function summaryTitleLine(agentSummary: string | undefined): string | undefined 
  *  4. 그래도 안 되면 바뀐 파일 이름에서 뽑는다(describeChangeFromFiles).
  *  5. 요청 글마저 비어 있으면(데이터만 바뀐 체크포인트 등) "체크포인트"로 둔다.
  * studio.yaml의 checkpoints.conventionalCommits를 껐을 때는 부르지 않고 기존 "요청: ..." 형식을 그대로 쓴다.
+ *
+ * 요청 글이 에이전트의 질문에 대한 답이면(options.requestIsAnswer) 1번을 건너뛴다. 답의 첫 문장은 선택지를 고르는 말이지
+ * 바뀐 내용이 아니다(실측: 세션 5b640fd3, 체크포인트 74d86ca — 답 "세 번째로 갑니다. sampleParams 키는 …"의 첫 문장이
+ * 제목 "test: 세 번째로 갑니다"가 됐다). 문장 꼴로는 "…로 갑니다"와 "…를 더합니다"를 가를 수 없어, 어떤 문장인지가 아니라
+ * 어떤 요청인지(질문이 걸려 있을 때 온 글)로 가른다.
  */
-export function generateCommitSubject(request: string, changes: readonly PendingChange[], agentSummary?: string): string {
+export function generateCommitSubject(request: string, changes: readonly PendingChange[], agentSummary?: string, options: CommitSubjectOptions = {}): string {
   const type = classifyCommit(request, changes);
   const budget = MAX_SUBJECT_CHARS - type.length - 2;
 
@@ -313,7 +323,7 @@ export function generateCommitSubject(request: string, changes: readonly Pending
   const reviewFix = reviewFixCandidate(request);
   if (reviewFix) {
     candidate = reviewFix;
-  } else if (requestFirstLine && !isRequestNarration(firstSentence(requestFirstLine)) && isClearChangeSentence(firstSentence(requestFirstLine))) {
+  } else if (!options.requestIsAnswer && requestFirstLine && !isRequestNarration(firstSentence(requestFirstLine)) && isClearChangeSentence(firstSentence(requestFirstLine))) {
     candidate = toCommitMood(firstSentence(requestFirstLine));
   } else if (summaryLine && isClearChangeSentence(firstSentence(summaryLine)) && shortenPaths(toCommitMood(firstSentence(summaryLine))).length <= budget) {
     // 요약 줄은 예산 안에 들어갈 때만 쓴다. 잘린 요약은 동사가 사라져 바뀐 파일로 만든 제목보다 못하다(도그푸딩 버그 리포트)
