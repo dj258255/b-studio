@@ -4,7 +4,8 @@ import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox'
 import { SAFE_SEGMENT, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
-import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromChangedFiles } from './next-routes';
+import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
+import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromCandidates, routesFromChangedFiles } from './next-routes';
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
@@ -363,7 +364,7 @@ export class VerificationGate {
 
   /**
    * 이번 실행에서 바뀐 Next.js 페이지 중 자동으로 열어 볼 것을 고른다(`workflow.autoPageChecks`).
-   * page 파일만 본다 — 같은 폴더의 layout·loading·error만 바뀐 경우는 열지 않는다(next-routes.ts의 범위 주석 참고).
+   * 바뀐 page 파일에 더해, 바뀐 컴포넌트·유틸·layout을 (몇 단계 거쳐) import하는 page도 찾는다(`followImports`, ADR-154, #followImports).
    * 선언한 pageChecks와 같은 service+path는 두 번 열지 않고 건너뜀 check로 남긴다.
    * 동적 세그먼트에 sampleParams 값이 없어도(ADR-078) id처럼 보이는 이름이면 추정한 값으로 열어 보고, 그 라우트는 probedId를 함께 돌려준다.
    */
@@ -380,10 +381,13 @@ export class VerificationGate {
     }
 
     const fallbackValue = await this.#dynamicRouteFallback(config);
-    const found = routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue);
+    const followed = config.followImports === false ? undefined : await this.#followImports(service[1].path);
+    const found = followed
+      ? routesFromCandidates(followed.candidates, service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue)
+      : routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue);
     const declaredKeys = new Set(declared.map((page) => `${page.service} ${page.path}`));
     const pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string }> = [];
-    const skipped = found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason));
+    const skipped = [...(followed?.notes ?? []).map((note) => this.#autoSkipCheck(config.service, note.file, note.reason)), ...found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason))];
     for (const route of found.routes) {
       if (declaredKeys.has(`${config.service} ${route.path}`)) {
         skipped.push(this.#autoSkipCheck(config.service, route.file, `${route.path}은(는) 이미 선언한 pageChecks에 있어 두 번 열지 않았습니다`));
@@ -393,11 +397,59 @@ export class VerificationGate {
       const probed = (route.usedFallbackParams?.length ?? 0) > 0 && fallbackValue !== undefined;
       pages.push({
         page: autoPageCheck(config, route.path),
-        name: `${config.service} ${route.path} (자동${probed ? ', id 추정' : ''})`,
+        name: `${config.service} ${route.path} (자동${probed ? ', id 추정' : ''}${route.cause ? ` · ${route.cause.slice(route.cause.lastIndexOf('/') + 1)} 변경` : ''})`,
         ...(probed ? { probedId: fallbackValue } : {}),
       });
     }
     return { pages, skipped };
+  }
+
+  /**
+   * 바뀐 소스 파일을 쓰는 page를 찾는다(`autoPageChecks.followImports`, ADR-154). 서비스 폴더의 소스를 읽어 import 그래프를 만들고
+   * 바뀐 파일에서 page까지 거꾸로 따라간다. 바뀐 파일 중 page가 아닌 소스(컴포넌트·유틸·layout 등)가 없으면 읽지 않고 undefined를 돌려
+   * 예전처럼 바뀐 page 파일만 본다. 그래프를 만들다 상한에 걸리거나 읽기에 실패하면 notes로 남긴다(조용히 포기하지 않는다).
+   */
+  async #followImports(servicePath: string): Promise<{ candidates: PageCandidate[]; notes: Array<{ file: string; reason: string }> } | undefined> {
+    const prefix = servicePath.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+    const inService = (file: string): string | undefined => (prefix === '' || prefix === '.' ? file : file.startsWith(`${prefix}/`) ? file.slice(prefix.length + 1) : undefined);
+    const changed = this.#options.workspace
+      .changedFiles()
+      .map(inService)
+      .filter((file): file is string => file !== undefined && isGraphSourceFile(file));
+    if (changed.length === 0) return undefined;
+    // 바뀐 소스가 전부 page 파일이면 import를 따라갈 이유가 없다 — 읽기 없이 예전 경로로 간다
+    if (changed.every(isPageFileInService)) return undefined;
+
+    const workspace = this.#options.workspace;
+    try {
+      const graph = await collectImportGraph(
+        // peek: 게이트가 훑어본 파일에 에이전트용 읽은 표시를 남기지 않는다(다음 쓰기에 낡은 읽기 검사가 걸리지 않게)
+        { list: (dir) => workspace.list(dir, 1), read: (file) => workspace.peek(file), now: () => Date.now() },
+        servicePath,
+        DEFAULT_IMPORT_GRAPH_LIMITS,
+      );
+      const trace = tracePages(changed, graph.reverse, graph.files, DEFAULT_TRACE_DEPTH);
+      const toProject = (file: string): string => (prefix === '' || prefix === '.' ? file : `${prefix}/${file}`);
+      const notes: Array<{ file: string; reason: string }> = [];
+      if (graph.incomplete) {
+        notes.push({
+          file: 'import 역추적',
+          reason: `${graph.incomplete}(읽은 파일 ${graph.readCount}개, ${graph.elapsedMs}ms) — 그래프가 일부만 만들어져 바뀐 파일을 쓰는 페이지를 모두 찾지 못했을 수 있습니다`,
+        });
+      }
+      for (const entry of trace.truncated) {
+        notes.push({
+          file: toProject(entry.cause),
+          reason: `${toProject(entry.cause)}에서 import를 거꾸로 ${DEFAULT_TRACE_DEPTH}단계까지 따라갔고, ${toProject(entry.stoppedAt)}를 쓰는 파일이 더 있지만 깊이 상한이라 멈췄습니다`,
+        });
+      }
+      return { candidates: trace.candidates, notes };
+    } catch (error) {
+      // 그래프를 만들지 못해도 바뀐 page 파일 확인은 계속한다. 다만 못 찾았다는 사실을 남긴다
+      const detail = error instanceof Error ? error.message : String(error);
+      const ownPages = changed.filter(isPageFileInService).map((page) => ({ page, cause: page, distance: 0, tie: 0 }));
+      return { candidates: ownPages, notes: [{ file: 'import 역추적', reason: `import 역추적에 실패해 바뀐 파일을 쓰는 페이지를 찾지 못했습니다: ${detail}` }] };
+    }
   }
 
   /** 건너뛴 자동 페이지를 남기는 check. ok로 두어 게이트를 막지 않되, 이유는 detail에 남긴다 */

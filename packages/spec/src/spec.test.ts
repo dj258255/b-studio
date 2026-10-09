@@ -204,6 +204,12 @@ describe('parseSpec', () => {
     ).toEqual(['workflow.autoPageChecks.sampleIdFrom: sampleIdFrom은 dynamicRouteProbe를 끄면 쓰이지 않습니다']);
   });
 
+  it('autoPageChecks.followImports는 생략하면 켠 것과 같고 false로 끌 수 있다(ADR-154)', () => {
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web }\n`).workflow?.autoPageChecks?.followImports).toBeUndefined();
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, followImports: false }\n`).workflow?.autoPageChecks?.followImports).toBe(false);
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web, followImports: "no" }\n`)).issues).toHaveLength(1);
+  });
+
   it('pageChecks.allowLoadingPlaceholder는 browser 전용이다(ADR-078)', () => {
     expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, allowLoadingPlaceholder: true }\n`)).issues).toEqual([
       'workflow.pageChecks.0.allowLoadingPlaceholder: allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다',
