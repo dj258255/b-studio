@@ -5,6 +5,7 @@ import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, t
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
+import { findStaticShadows, StaticShadowUnknownError } from './next-static-shadow';
 import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromCandidates, routesFromChangedFiles, type NextRoute, type NextRoutes } from './next-routes';
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
@@ -465,8 +466,8 @@ export class VerificationGate {
     if (refreshed.inRunKeys.size > 0 || refreshed.inRunSampleIdFrom) {
       // 값은 "어떤 id로 여는가"만 정해야 한다. 값이 "무엇을 여는가"를 바꾸는 두 경우를 막는다(ADR-159 결정 11)
       const startedFallback = refreshed.inRunSampleIdFrom ? await this.#dynamicRouteFallback(started) : fallbackValue;
-      // ① 같은 자리에 값과 이름이 같은 고정 경로 폴더가 있으면 라우터가 그 화면을 대신 연다 — 바뀐 동적 화면은 열리지 않는다
-      const shadowed = await this.#shadowedByStaticSibling(found.routes, refreshed, fallbackValue);
+      // ① 값을 채운 주소를 다른 고정 경로(app·pages 폴더, public 파일)가 먼저 받으면 그 화면이 대신 열린다 — 바뀐 동적 화면은 열리지 않는다
+      const shadowed = await this.#shadowedByStaticRoute(found.routes, service[1].path, refreshed, fallbackValue);
       if (shadowed.length > 0) {
         refreshed = withoutInRunValues(refreshed, started, shadowed);
         if (!refreshed.inRunSampleIdFrom) fallbackValue = startedFallback;
@@ -572,36 +573,32 @@ export class VerificationGate {
   }
 
   /**
-   * 실행 중에 받아들인 값으로 채운 동적 세그먼트 자리에, 그 값과 이름이 같은 고정 경로 폴더가 있는지 본다(ADR-159 결정 11).
-   * `app/orders/[id]`에 `id: "new"`를 넣으면 `/orders/new`는 `app/orders/new`가 받는다 — 바뀐 동적 화면 대신 다른 화면이 열려
-   * 확인 하나가 사라진다. 라우트 그룹 `(…)`은 경로에 나타나지 않으므로 건너뛰어 본다. 폴더를 읽지 못하면 받아들이지 않는 쪽으로 간다.
+   * 실행 중에 받아들인 값으로 채운 동적 경로가, 그 값 때문에 다른 고정 경로로 열리게 되는지 본다(ADR-159 결정 11, next-static-shadow.ts).
+   * `app/orders/[id]`에 `id: "new"`를 넣으면 `/orders/new`는 그 주소의 고정 경로가 받는다 — 바뀐 동적 화면 대신 다른 화면이 열려
+   * 확인 하나가 사라진다. 끝까지 확인하지 못하면(폴더를 못 읽음, 폴더가 너무 많음) 받아들이지 않는 쪽으로 간다.
    */
-  async #shadowedByStaticSibling(routes: readonly NextRoute[], latest: LatestSampleValues, fallbackValue: string | undefined): Promise<ShadowedValue[]> {
+  async #shadowedByStaticRoute(routes: readonly NextRoute[], servicePath: string, latest: LatestSampleValues, fallbackValue: string | undefined): Promise<ShadowedValue[]> {
     const found = new Map<string, ShadowedValue>();
     for (const route of routes) {
-      const segments = route.file.split('/');
-      for (const [index, segment] of segments.entries()) {
-        const name = DYNAMIC_FOLDER.exec(segment)?.[1];
-        if (name === undefined) continue;
-        const viaSampleIdFrom = !latest.inRunKeys.has(name);
-        if (viaSampleIdFrom && !(latest.inRunSampleIdFrom && route.usedFallbackParams?.includes(name))) continue;
-        const value = viaSampleIdFrom ? fallbackValue : latest.config.sampleParams?.[name];
-        if (value === undefined) continue;
-        // 그룹 폴더는 경로에 없으니, 경로상 부모는 그룹이 아닌 가장 가까운 윗폴더다
-        let parent = index;
-        while (parent > 0 && GROUP_FOLDER.test(segments[parent - 1]!)) parent -= 1;
-        const base = segments.slice(0, parent).join('/');
-        const key = viaSampleIdFrom ? 'sampleIdFrom' : name;
-        try {
-          const folder = (await this.#options.workspace.list(base === '' ? '.' : base, 3)).find((entry) => {
-            if (!entry.endsWith('/')) return false;
-            const inside = (base === '' ? entry : entry.slice(base.length + 1)).slice(0, -1).split('/');
-            return inside.at(-1) === value && inside.slice(0, -1).every((part) => GROUP_FOLDER.test(part));
-          });
-          if (folder) found.set(key, { name, value, viaSampleIdFrom, reason: `같은 자리에 고정 경로 폴더(${folder.slice(0, -1)})가 있어 그 화면이 대신 열립니다` });
-        } catch {
-          found.set(key, { name, value, viaSampleIdFrom, reason: `같은 자리에 같은 이름의 고정 경로가 있는지 확인하지 못했습니다(${base || '.'})` });
-        }
+      const names = dynamicNames(route.file);
+      const viaFallback = new Set(latest.inRunSampleIdFrom ? (route.usedFallbackParams ?? []) : []);
+      const check = new Set(names.filter((name) => latest.inRunKeys.has(name) || viaFallback.has(name)));
+      if (check.size === 0) continue;
+      const values: Record<string, string> = {};
+      for (const name of names) {
+        const value = route.usedFallbackParams?.includes(name) ? fallbackValue : latest.config.sampleParams?.[name];
+        if (value !== undefined) values[name] = value;
+      }
+      const reject = (name: string, reason: string): void => {
+        const viaSampleIdFrom = viaFallback.has(name);
+        found.set(viaSampleIdFrom ? 'sampleIdFrom' : name, { name, value: values[name] ?? '', viaSampleIdFrom, reason });
+      };
+      try {
+        const shadows = await findStaticShadows({ root: this.#options.workspace.root, servicePath, pageFile: route.file, values, check });
+        for (const shadow of shadows) reject(shadow.name, `같은 주소를 고정 경로(${shadow.where})가 먼저 받아 그 화면이 대신 열립니다`);
+      } catch (error) {
+        const why = error instanceof StaticShadowUnknownError ? error.message : '폴더를 읽지 못했습니다';
+        for (const name of check) reject(name, `같은 주소를 먼저 받는 고정 경로가 있는지 확인하지 못했습니다(${why})`);
       }
     }
     return [...found.values()];
@@ -1103,9 +1100,13 @@ interface LatestSampleValues {
   inRunSampleIdFrom: boolean;
 }
 
-/** 단순 동적 세그먼트 폴더 `[id]`와 라우트 그룹 폴더 `(group)` (next-routes.ts와 같은 규칙) */
-const DYNAMIC_FOLDER = /^\[([^[\]]+)\]$/;
-const GROUP_FOLDER = /^\(.+\)$/;
+/** page 파일 경로의 단순 동적 세그먼트 `[id]` 이름들. next-routes.ts가 경로를 만들 때와 같은 규칙(폴더 이름 전체가 `[이름]`)으로 뽑는다 */
+function dynamicNames(pageFile: string): string[] {
+  return pageFile
+    .split('/')
+    .map((segment) => /^\[([^[\]]+)\]$/.exec(segment)?.[1])
+    .filter((name): name is string => name !== undefined);
+}
 
 /** 실행 중에 받아들였다가 고정 경로와 겹쳐 되돌리는 값 */
 interface ShadowedValue {
@@ -1153,8 +1154,7 @@ function withoutInRunValues(latest: LatestSampleValues, started: AutoPageChecks,
 
 /** 이 경로가 실행 중에 받아들인 값으로 채워졌는지: 동적 세그먼트가 그 키를 쓰거나, 추정 id가 실행 중에 들어온 sampleIdFrom에서 왔을 때 */
 function usesInRunValue(route: { file: string; usedFallbackParams?: readonly string[] }, latest: LatestSampleValues): boolean {
-  const names = [...route.file.matchAll(/\[(?:\.\.\.)?([A-Za-z0-9_-]+)\]/g)].map((match) => match[1]!);
-  if (names.some((name) => latest.inRunKeys.has(name))) return true;
+  if (dynamicNames(route.file).some((name) => latest.inRunKeys.has(name))) return true;
   return latest.inRunSampleIdFrom && (route.usedFallbackParams?.length ?? 0) > 0;
 }
 
