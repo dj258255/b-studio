@@ -4906,9 +4906,17 @@ export function evaluateRequirement(
  * 체크포인트가 전부 문서 체크포인트면 가장 오래된 것을 쓴다 — 그 위에 문서 체크포인트가 더 쌓여도 기준이 움직이지 않는다.
  * 근거를 찍는 쪽(runSessionTests·collectGateTestReports)과 비교하는 쪽(요구사항 상태·올리기 전 점검)이 모두 이 함수를 쓴다.
  * 입력은 최신순(session.snapshot.checkpoints의 순서)이다.
+ *
+ * 표시(`verify: 'docs'`)만 믿지 않고 그 체크포인트가 바꾼 파일이 실제로 전부 문서 경로인지도 본다. 건너뛴다는 것은
+ * "이 체크포인트는 코드를 바꾸지 않았다"고 보는 것이라, 표시가 잘못 붙었거나 파일 목록을 모르면 건너뛰지 않는다(근거가 닫히는 쪽).
  */
-export function evidenceBaseCheckpoint<T extends { verify?: string }>(checkpoints: readonly T[]): T | undefined {
-  return checkpoints.find((checkpoint) => checkpoint.verify !== 'docs') ?? checkpoints[checkpoints.length - 1];
+export function evidenceBaseCheckpoint<T extends { verify?: string; files?: readonly string[] }>(checkpoints: readonly T[]): T | undefined {
+  return checkpoints.find((checkpoint) => !isDocsOnlyCheckpoint(checkpoint)) ?? checkpoints[checkpoints.length - 1];
+}
+
+/** 문서 체크포인트 표시가 있고, 바꾼 파일이 하나 이상이며 전부 문서 경로인 체크포인트 */
+function isDocsOnlyCheckpoint(checkpoint: { verify?: string; files?: readonly string[] }): boolean {
+  return checkpoint.verify === 'docs' && checkpoint.files !== undefined && checkpoint.files.length > 0 && checkpoint.files.every(isDocPath);
 }
 
 /** 세션의 근거 기준 체크포인트(evidenceBaseCheckpoint)와 커밋하지 않은 변경 수를 한 번에 모은다. 테스트 탭 실행이 그 체크포인트의 증거인지 비교하는 데 쓴다 */

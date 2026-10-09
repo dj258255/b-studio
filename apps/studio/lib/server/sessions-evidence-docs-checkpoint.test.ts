@@ -311,7 +311,12 @@ describe('문서 체크포인트가 생겨도 테스트 근거가 닫히지 않�
 });
 
 describe('evidenceBaseCheckpoint', () => {
-  const cp = (name: string, verify?: string) => ({ name, ...(verify ? { verify } : {}) });
+  // 문서 체크포인트는 문서 경로만, 그 밖의 체크포인트는 코드 파일을 바꾼 것으로 둔다
+  const cp = (name: string, verify?: string, files: string[] = verify === 'docs' ? ['docs/requirements.md'] : ['api/src/Order.java']) => ({
+    name,
+    files,
+    ...(verify ? { verify } : {}),
+  });
 
   it('가장 최근의 문서가 아닌 체크포인트를 고른다', () => {
     expect(evidenceBaseCheckpoint([cp('d2', 'docs'), cp('d1', 'docs'), cp('code'), cp('older')])?.name).toBe('code');
@@ -332,5 +337,15 @@ describe('evidenceBaseCheckpoint', () => {
 
   it('체크포인트가 없으면 없다', () => {
     expect(evidenceBaseCheckpoint([])).toBeUndefined();
+  });
+
+  it('문서 체크포인트 표시가 있어도 문서가 아닌 파일을 바꿨으면 건너뛰지 않는다', () => {
+    const mixed = cp('mixed', 'docs', ['docs/requirements.md', 'api/src/Order.java']);
+    expect(evidenceBaseCheckpoint([mixed, cp('code')])?.name).toBe('mixed');
+  });
+
+  it('바꾼 파일을 모르거나 비어 있는 문서 체크포인트는 건너뛰지 않는다(근거가 닫히는 쪽)', () => {
+    expect(evidenceBaseCheckpoint([{ name: 'unknown', verify: 'docs' }, cp('code')])?.name).toBe('unknown');
+    expect(evidenceBaseCheckpoint([cp('empty', 'docs', []), cp('code')])?.name).toBe('empty');
   });
 });
