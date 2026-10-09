@@ -90,5 +90,7 @@ describe('한도 정리', () => {
     await saveArtifact(stateDir, 'bbb', { name: 'later', ...png() });
     await expect(readdir(path.join(artifactRoot(stateDir), 'aaa'))).rejects.toThrow();
     expect(await readdir(path.join(artifactRoot(stateDir), 'bbb'))).toHaveLength(1);
-  });
+    // 파일 201개를 쓰고 그때마다 정리 검사를 도는 테스트라, 전체 테스트가 함께 도는 부하에서는 기본 5초를 넘긴 적이 있다
+    // (단독으로는 통과). 다른 느린 테스트와 같은 제한 시간을 준다
+  }, 20_000);
 });
