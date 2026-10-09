@@ -27,6 +27,9 @@ const MAX_SNAPSHOT_ELEMENTS = 40;
 const MAX_NAME_LENGTH = 80;
 const SCROLL_PAGE_PX = 600;
 const SCROLL_SETTLE_MS = 150;
+/** 예상된 거절을 가를 때, 조작 직후 요청이 나가길 기다리는 시간과 네트워크가 잠잠해지길 기다리는 상한 */
+const SETTLE_START_MS = 100;
+const SETTLE_NETWORK_MS = 2_000;
 /** 스크린샷은 토큰 비용이 크므로(연구 노트 §2.6, §6.7) JPEG로 압축해 보낸다 */
 const SCREENSHOT_JPEG_QUALITY = 60;
 
@@ -107,6 +110,10 @@ export class QaBrowser {
   readonly #page: Page;
   readonly #allowedOrigins: Set<string>;
   readonly #diagnostics: QaDiagnostics = emptyDiagnostics();
+  /** #diagnostics.failedRequests와 같은 순서의 상태 코드·주소. 응답이 아니라 네트워크 실패면 status가 없다 */
+  readonly #failureMeta: Array<{ status?: number; url: string }> = [];
+  /** 예상된 거절을 기다리는 동안 관찰한 4xx 응답(중복 제거 없이). 조작 하나의 구간에서만 켜진다 */
+  #rejectionWatch: Array<{ status: number; url: string }> | undefined;
   readonly #refs = new Map<string, { selector: string; stableSelector?: string; rect: QaElement['rect'] }>();
   readonly #screencast: ReturnType<typeof createScreencast> | undefined;
   #refSeq = 0;
@@ -146,13 +153,17 @@ export class QaBrowser {
       });
       const seenFailures = new Set<string>();
       // 허용 출처 밖이라 막은 요청은 앱의 오류가 아니므로 실패로 세지 않는다(browser-check.ts의 recordFailure와 같은 규칙)
-      const recordFailure = (requestUrl: string, reason: string) => {
-        if (new URL(requestUrl).pathname === '/favicon.ico' || seenFailures.has(requestUrl) || blockedUrls.has(requestUrl)) return;
+      const recordFailure = (requestUrl: string, reason: string, status?: number) => {
+        if (new URL(requestUrl).pathname === '/favicon.ico' || blockedUrls.has(requestUrl)) return;
+        // 같은 주소의 실패는 진단 신호로 한 번만 세지만, 예상된 거절을 가를 때는 매번 봐야 한다
+        if (status !== undefined && status >= 400 && status < 500) instance.#rejectionWatch?.push({ status, url: requestUrl });
+        if (seenFailures.has(requestUrl)) return;
         seenFailures.add(requestUrl);
         instance.#diagnostics.failedRequests.push(`${reason} ${requestUrl}`);
+        instance.#failureMeta.push({ ...(status !== undefined ? { status } : {}), url: requestUrl });
       };
       page.on('response', (response) => {
-        if (response.status() >= 400) recordFailure(response.url(), String(response.status()));
+        if (response.status() >= 400) recordFailure(response.url(), String(response.status()), response.status());
       });
       page.on('requestfailed', (request) => recordFailure(request.url(), request.failure()?.errorText ?? 'failed'));
 
@@ -181,6 +192,42 @@ export class QaBrowser {
       horizontalOverflowPx: overflow,
       accessibilityViolations: violations,
     };
+  }
+
+  /**
+   * 조작 하나의 구간을 시작한다. 돌려준 값은 이 시점까지 쌓인 실패한 요청 수(구간의 시작 표시)다.
+   * 구간 안에서 본 4xx 응답은 endRejectionWatch가 예상된 거절로 가려낸다
+   */
+  beginRejectionWatch(): number {
+    this.#rejectionWatch = [];
+    return this.#diagnostics.failedRequests.length;
+  }
+
+  /** 구간을 취소한다(조작이 실패해 선언을 쓰지 않을 때). 이미 쌓인 실패는 그대로 진단 신호로 남는다 */
+  cancelRejectionWatch(): void {
+    this.#rejectionWatch = undefined;
+  }
+
+  /**
+   * 구간을 끝낸다. 늦게 끝나는 fetch를 잡으려고 네트워크가 잠잠해질 때까지 잠깐 기다린 뒤,
+   * 구간 안에서 새로 생긴 4xx 응답만 진단 신호(failedRequests)에서 빼 예상된 거절로 돌려준다.
+   * 5xx·네트워크 실패와 구간 밖의 실패는 진단 신호에 그대로 남는다
+   */
+  async endRejectionWatch(mark: number): Promise<Array<{ status: number; url: string }>> {
+    await this.#page.waitForTimeout(SETTLE_START_MS);
+    await this.#page.waitForLoadState('networkidle', { timeout: SETTLE_NETWORK_MS }).catch(() => {});
+    const seen = this.#rejectionWatch ?? [];
+    this.#rejectionWatch = undefined;
+    for (let index = this.#failureMeta.length - 1; index >= mark; index -= 1) {
+      const status = this.#failureMeta[index]?.status;
+      if (status !== undefined && status >= 400 && status < 500) {
+        this.#failureMeta.splice(index, 1);
+        this.#diagnostics.failedRequests.splice(index, 1);
+      }
+    }
+    const unique = new Map<string, { status: number; url: string }>();
+    for (const entry of seen) unique.set(`${entry.status} ${entry.url}`, entry);
+    return [...unique.values()];
   }
 
   /** 지금 화면의 인터랙티브 요소 목록(접근성 트리 축약) + 새 ref를 부여한다. 최대 MAX_SNAPSHOT_ELEMENTS개까지만 돌려준다 */
@@ -502,8 +549,24 @@ export interface QaFinding {
   summary: string;
   /** 문제가 보인 요소나 위치 */
   where?: string;
-  /** 어떤 관찰에서 봤는지 */
+  /** 모델이 적은 근거(어떤 관찰에서 봤는지). 비어 있는 경우가 많다 */
   evidence?: string;
+  /** 플랫폼이 붙인다. 보고 시점에 가장 최근 캡처(qa_screenshot)·스냅샷(qa_snapshot)이 몇 번째 동작(QaActionRecord.index)이었는지. 아직 없었으면 빠진다 */
+  observedAtAction?: number;
+}
+
+/**
+ * 모델이 조작 전에 "다음 조작은 서버가 거절(4xx)하는 것이 정상"이라고 선언한 시험(qa_expect_rejection) 하나.
+ * requests가 있으면 예상한 거절이 실제로 있었던 것이고, 비어 있으면 거절 응답이 없었던 것이다(unmetRejections)
+ */
+export interface QaExpectedRejection {
+  /** 선언을 쓴 조작의 번호(QaActionRecord.index). 조작 없이 끝난 선언은 없다 */
+  actionIndex?: number;
+  tool?: string;
+  /** 모델이 적은 이유 */
+  reason: string;
+  /** 그 조작 동안 새로 생긴 4xx 응답 */
+  requests: Array<{ status: number; url: string }>;
 }
 
 const MAX_FINDINGS = 50;
@@ -593,6 +656,13 @@ export function buildQaTools(): BetaTool[] {
         evidence: { type: 'string', description: '선택. 어떤 관찰에서 봤는지(예: "두 번째 스크린샷 하단")' },
       },
       ['severity', 'summary'],
+    ),
+    tool(
+      'qa_expect_rejection',
+      '바로 다음 조작 하나는 서버가 거절(4xx)하는 것이 정상이라고 미리 알립니다. 로그인 없이 주문, 빈 값 제출처럼 일부러 거절될 조작을 하기 전에 먼저 부르세요. ' +
+        '그 조작 하나에서 생긴 4xx 응답만 "예상된 거절"로 따로 기록하고 실패로 세지 않습니다. 5xx·네트워크 실패와 다른 조작의 실패는 그대로 실패입니다. ' +
+        '선언은 다음 조작(클릭·입력·키·이동) 하나에만 쓰이고, 관찰(스냅샷·캡처·스크롤 등)은 선언을 소모하지 않습니다. 선언했는데 거절 응답이 없으면 결과로 알려 드립니다. 행동 횟수에 들지 않습니다.',
+      { reason: { type: 'string', description: '왜 거절되는 것이 정상인지 한 문장(예: "로그인하지 않았으니 주문은 401로 거절돼야 한다")' } },
     ),
     tool(
       'qa_finish',
@@ -806,6 +876,10 @@ export interface ExploreQaResult {
   modelDeclared?: { success: boolean; summary: string };
   /** 모델이 화면을 보고 보고한 문제(qa_report_issue). 판정이 통과여도 minor는 여기에 남는다 */
   findings: QaFinding[];
+  /** 모델이 미리 선언해 서버가 거절한 시험(조작과 4xx 응답). 진단 신호로 세지 않고 여기에 남긴다 */
+  expectedRejections: QaExpectedRejection[];
+  /** 거절될 것으로 선언했지만 거절 응답이 없던 조작. 진짜 문제일 수 있어 남기지만(통과한 요청 또는 클라이언트에서 막힌 요청) 판정은 바꾸지 않는다 */
+  unmetRejections: QaExpectedRejection[];
   stoppedBy: ExploreQaStopReason;
   diagnostics: QaDiagnostics;
   actions: QaActionRecord[];
@@ -815,6 +889,7 @@ export interface ExploreQaResult {
 export type ExploreQaEvent =
   | { type: 'action'; record: QaActionRecord }
   | { type: 'finding'; finding: QaFinding }
+  | { type: 'rejection'; rejection: QaExpectedRejection }
   | { type: 'text'; text: string }
   | { type: 'frame'; frame: BrowserFrame };
 
@@ -861,6 +936,7 @@ export function buildQaSystemPrompt(goal?: Pick<ExploreQaGoal, 'goal'>): string 
     '페이지를 내릴 때는 qa_scroll에 ref를 넣지 말고 direction만 주세요. 결과에 맨 아래에 닿았는지가 나옵니다.',
     '화면에서 문제를 보면 그 자리에서 qa_report_issue로 보고하세요. 본 것만 적고(추측 금지), 어느 요소가 어떻게 잘못됐는지 구체적으로 쓰세요. 문제를 찾았어도 점검을 계속할 수 있습니다.',
     '목표를 끝까지 수행했거나 더 진행할 수 없으면 qa_finish를 부르세요. 성공을 선언해도 플랫폼이 진단 신호·확인 문구·보고된 문제를 따로 확인하니 솔직하게 판단하세요. 문제가 없으면 없다고 적으면 됩니다.',
+    '일부러 거절될 조작(로그인 없이 주문, 빈 값 제출 등)을 하기 전에는 먼저 qa_expect_rejection으로 알리세요. 알리지 않은 조작에서 서버가 거절하면 실패한 요청으로 세어 문제로 판정합니다.',
     '화면을 바꾸지 않는 관찰은 필요한 만큼 해도 되지만, 같은 화면에서 같은 조작을 되풀이하지 말고 막히면 다른 요소를 시도하거나 qa_finish(success: false)로 알리세요.',
   ];
   if (goal && isInspectionGoal(goal.goal)) {
@@ -902,6 +978,63 @@ export function buildWrapUpPrompt(reason: ExploreQaStopReason): string {
 export class QaReport {
   readonly findings: QaFinding[] = [];
   declared: { success: boolean; summary: string } | undefined;
+  /** 선언한 거절이 실제로 있었던 시험 */
+  readonly expectedRejections: QaExpectedRejection[] = [];
+  readonly #unmet: QaExpectedRejection[] = [];
+  /** 선언은 했지만 아직 쓰이지 않은 것(다음 조작을 기다린다) */
+  #pendingReason: string | undefined;
+  #lastCaptureAction: number | undefined;
+
+  /** 거절될 것으로 선언했지만 거절이 없던 시험. 조작 없이 끝난 선언도 여기에 든다 */
+  get unmetRejections(): QaExpectedRejection[] {
+    return [...this.#unmet, ...(this.#pendingReason !== undefined ? [{ reason: this.#pendingReason, requests: [] }] : [])];
+  }
+
+  /** qa_expect_rejection: 바로 다음 조작 하나가 거절되는 것이 정상이라는 선언을 받는다. 두 번 선언하면 나중 것으로 바꾼다 */
+  declareRejection(input: Record<string, unknown>): { ok: boolean; text: string } {
+    const reason = typeof input.reason === 'string' ? input.reason.trim().slice(0, MAX_FINDING_DETAIL) : '';
+    if (reason === '') return { ok: false, text: 'reason(왜 거절되는 것이 정상인지)을 적어 주세요' };
+    const replaced = this.#pendingReason !== undefined;
+    this.#pendingReason = reason;
+    return {
+      ok: true,
+      text: `${replaced ? '앞의 선언을 이 선언으로 바꿨습니다. ' : ''}다음 조작 하나(클릭·입력·키·이동)에서 서버가 거절(4xx)하는지 확인합니다. 관찰 동작은 선언을 소모하지 않습니다.`,
+    };
+  }
+
+  /**
+   * 도구 하나를 실행한다. 두 백엔드가 executeQaTool 대신 이것을 부른다.
+   * 선언이 있고 이 도구가 화면을 바꾸는 조작이면 그 조작 동안 새로 생긴 4xx 응답을 예상된 거절로 옮기고(진단 신호에서 뺀다),
+   * 거절이 없었으면 그 사실을 도구 결과에 덧붙인다. 조작이 실패하면 선언은 유지한다.
+   * 가장 최근 캡처·스냅샷의 번호도 여기서 기록해 qa_report_issue의 observedAtAction에 쓴다
+   */
+  async runAction(name: string, input: Record<string, unknown>, browser: QaBrowser, index: number): Promise<{ outcome: QaToolOutcome; rejection?: QaExpectedRejection }> {
+    const reason = OPERATION_TOOLS.has(name) ? this.#pendingReason : undefined;
+    const mark = reason !== undefined ? browser.beginRejectionWatch() : 0;
+    const outcome = await executeQaTool(name, input, browser);
+    if (outcome.ok && (name === 'qa_screenshot' || name === 'qa_snapshot')) this.#lastCaptureAction = index;
+    if (reason === undefined) return { outcome };
+    if (!outcome.ok) {
+      browser.cancelRejectionWatch();
+      return { outcome };
+    }
+    this.#pendingReason = undefined;
+    const requests = await browser.endRejectionWatch(mark);
+    const rejection: QaExpectedRejection = { actionIndex: index, tool: name, reason, requests };
+    if (requests.length > 0) {
+      this.expectedRejections.push(rejection);
+      const shown = requests.map((request) => `${request.status} ${request.url}`).join(', ');
+      return { outcome: { ...outcome, text: `${outcome.text}\n예상한 거절을 확인했습니다: ${shown}` }, rejection };
+    }
+    this.#unmet.push(rejection);
+    return {
+      outcome: {
+        ...outcome,
+        text: `${outcome.text}\n거절될 것으로 선언한 조작에서 거절 응답이 없었습니다. 서버가 요청을 통과시켰거나 요청이 화면(클라이언트)에서 먼저 막혔을 수 있습니다. 통과시킨 것이 문제라면 qa_report_issue로 보고하세요.`,
+      },
+      rejection,
+    };
+  }
 
   addFinding(input: Record<string, unknown>): { ok: boolean; text: string; finding?: QaFinding } {
     const severity = input.severity;
@@ -914,7 +1047,13 @@ export class QaReport {
     if (this.findings.length >= MAX_FINDINGS) return { ok: false, text: `보고할 수 있는 문제는 최대 ${MAX_FINDINGS}건입니다` };
     const where = typeof input.where === 'string' ? input.where.trim().slice(0, MAX_FINDING_DETAIL) : '';
     const evidence = typeof input.evidence === 'string' ? input.evidence.trim().slice(0, MAX_FINDING_DETAIL) : '';
-    const finding: QaFinding = { severity: severity as QaFindingSeverity, summary, ...(where ? { where } : {}), ...(evidence ? { evidence } : {}) };
+    const finding: QaFinding = {
+      severity: severity as QaFindingSeverity,
+      summary,
+      ...(where ? { where } : {}),
+      ...(evidence ? { evidence } : {}),
+      ...(this.#lastCaptureAction !== undefined ? { observedAtAction: this.#lastCaptureAction } : {}),
+    };
     this.findings.push(finding);
     return { ok: true, text: `문제를 기록했습니다(${this.findings.length}건째)`, finding };
   }
@@ -926,6 +1065,8 @@ export class QaReport {
 
 /** 조작해서 화면을 바꾸려는 도구. 같은 화면에서 이 조작이 되풀이되는지만 "반복"으로 센다 */
 const REPEAT_TRACKED_TOOLS = new Set(['qa_click', 'qa_fill', 'qa_type', 'qa_press', 'qa_navigate']);
+/** 예상된 거절 선언을 소모하는 조작. 반복 감지가 세는 조작과 같다(hover·scroll·wait 등 관찰은 소모하지 않는다) */
+const OPERATION_TOOLS = REPEAT_TRACKED_TOOLS;
 
 /**
  * "같은 화면에서 같은 조작을 되풀이"하는 루프를 잡는다. 관찰(snapshot·find·screenshot·wait·scroll·hover)과 실패한 동작은 세지 않는다 —
@@ -965,12 +1106,20 @@ export async function buildExploreQaResult(input: {
   const { goal, browser, report, stoppedBy, actions, usage } = input;
   const diagnostics = await browser.currentDiagnostics();
   const pageText = await browser.pageText();
-  const judged = judge(goal, diagnostics, pageText, { findings: report.findings, ...(report.declared ? { declared: report.declared } : {}), stoppedBy });
+  const judged = judge(goal, diagnostics, pageText, {
+    findings: report.findings,
+    ...(report.declared ? { declared: report.declared } : {}),
+    stoppedBy,
+    expectedRejections: report.expectedRejections.length,
+    unmetRejections: report.unmetRejections.length,
+  });
   return {
     status: judged.status,
     reason: judged.reason,
     ...(report.declared ? { modelDeclared: report.declared } : {}),
     findings: [...report.findings],
+    expectedRejections: [...report.expectedRejections],
+    unmetRejections: report.unmetRejections,
     stoppedBy,
     diagnostics,
     actions,
@@ -1030,6 +1179,11 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
       return undefined;
     };
 
+    const handleExpectTool = (call: BetaToolUseBlock): BetaToolResultBlockParam => {
+      const declared = report.declareRejection((call.input ?? {}) as Record<string, unknown>);
+      return { type: 'tool_result', tool_use_id: call.id, content: declared.text, is_error: !declared.ok };
+    };
+
     for (;;) {
       if (Date.now() >= deadline) {
         stoppedBy = 'max_time';
@@ -1061,6 +1215,10 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
       let repeated = false;
       let limitHit = false;
       for (const call of toolUses) {
+        if (call.name === 'qa_expect_rejection') {
+          results.push(handleExpectTool(call));
+          continue;
+        }
         const reportResult = handleReportTool(call);
         if (reportResult) {
           results.push(reportResult);
@@ -1077,7 +1235,8 @@ export async function runExploreQa(options: RunExploreQaOptions): Promise<Explor
         }
         const input = (call.input ?? {}) as Record<string, unknown>;
         actionCount += 1;
-        const outcome = await executeQaTool(call.name, input, browser);
+        const { outcome, rejection } = await report.runAction(call.name, input, browser, actionCount);
+        if (rejection) onEvent?.({ type: 'rejection', rejection });
         const diagnostics = await browser.currentDiagnostics();
         const total = diagnosticsCount(diagnostics);
         const artifact = await saveActionThumbnail(browser, saveArtifact, actionCount);
@@ -1175,6 +1334,10 @@ export interface QaReview {
   findings: readonly QaFinding[];
   declared?: { success: boolean; summary: string };
   stoppedBy: ExploreQaStopReason;
+  /** 선언한 조작에서 서버가 거절한 시험 수. 판정은 바꾸지 않고 사유에 건수만 남긴다 */
+  expectedRejections?: number;
+  /** 거절될 것으로 선언했지만 거절 응답이 없던 조작 수. 판정은 바꾸지 않고 사유에 건수만 남긴다 */
+  unmetRejections?: number;
 }
 
 /**
@@ -1214,16 +1377,22 @@ export function judge(
       problems.push(`모델이 목표를 끝내지 못했다고 보고했습니다${review.declared.summary ? `: ${review.declared.summary}` : ''}`);
     }
   }
-  if (problems.length > 0) return { status: 'fail', reason: problems.join(' / ') };
+  const rejectionNotes = [
+    review?.expectedRejections ? `예상된 거절 ${review.expectedRejections}건은 목록 참고` : '',
+    review?.unmetRejections ? `거절될 것으로 선언했지만 거절 응답이 없던 조작 ${review.unmetRejections}건은 목록 참고` : '',
+  ].filter(Boolean);
+  if (problems.length > 0) return { status: 'fail', reason: `${problems.join(' / ')}${rejectionNotes.length > 0 ? ` (${rejectionNotes.join(', ')})` : ''}` };
 
   if (review && !review.declared) {
     const confirmed = Boolean(goal.confirmText) && !confirmMissing;
     if (!confirmed) {
       const minor = minorCount > 0 ? ` 보고된 minor ${minorCount}건은 목록에 있습니다.` : '';
-      return { status: 'inconclusive', reason: `점검을 마치지 못했습니다 — ${STOP_REASON_TEXT[review.stoppedBy]}, 모델의 마지막 보고(qa_finish)도 받지 못했습니다.${minor}` };
+      const rejections = rejectionNotes.length > 0 ? ` (${rejectionNotes.join(', ')})` : '';
+      return { status: 'inconclusive', reason: `점검을 마치지 못했습니다 — ${STOP_REASON_TEXT[review.stoppedBy]}, 모델의 마지막 보고(qa_finish)도 받지 못했습니다.${minor}${rejections}` };
     }
   }
-  return { status: 'pass', reason: minorCount > 0 ? `진단 신호가 없고 확인 조건을 만족합니다(minor ${minorCount}건은 목록 참고)` : '진단 신호가 없고 확인 조건을 만족합니다' };
+  const notes = [minorCount > 0 ? `minor ${minorCount}건은 목록 참고` : '', ...rejectionNotes].filter(Boolean);
+  return { status: 'pass', reason: `진단 신호가 없고 확인 조건을 만족합니다${notes.length > 0 ? `(${notes.join(', ')})` : ''}` };
 }
 
 // ───────────────────────────── 기록 → pageChecks steps 변환 ─────────────────────────────

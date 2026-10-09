@@ -8,7 +8,6 @@ import {
   buildQaTools,
   buildQaUserPrompt,
   buildWrapUpPrompt,
-  executeQaTool,
   QaBrowser,
   QaReport,
   RepeatTracker,
@@ -171,8 +170,14 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
           return { content: [{ type: 'text' as const, text: stopping && !wrappingUp ? '실행이 이미 끝나는 중입니다.' : buildWrapUpPrompt(stoppedBy) }], isError: true };
         }
 
+        if (spec.name === 'qa_expect_rejection') {
+          const declared = report.declareRejection(input);
+          return { content: [{ type: 'text' as const, text: declared.text }], ...(declared.ok ? {} : { isError: true }) };
+        }
+
         actionCount += 1;
-        const outcome = await executeQaTool(spec.name, input, browser);
+        const { outcome, rejection } = await report.runAction(spec.name, input, browser, actionCount);
+        if (rejection) onEvent?.({ type: 'rejection', rejection });
         const diagnostics = await browser.currentDiagnostics();
         const total = countDiagnostics(diagnostics);
         const artifact = await saveActionThumbnail(browser, saveArtifact, actionCount);

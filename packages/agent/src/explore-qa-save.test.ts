@@ -61,6 +61,8 @@ describe('새 탐색 결과 모양과 저장', () => {
       status: 'fail',
       reason: '모델이 화면에서 본 문제',
       findings: [{ severity: 'major', summary: '로그인 줄이 잘렸습니다' }],
+      expectedRejections: [],
+      unmetRejections: [],
       stoppedBy: 'finish',
       diagnostics: { consoleErrors: [], pageErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, accessibilityViolations: [] },
       actions: [

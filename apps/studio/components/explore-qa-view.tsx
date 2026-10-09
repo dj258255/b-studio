@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ExploreQaResult, QaActionRecord, QaFinding } from "@b-studio/agent";
+import type { ExploreQaResult, QaActionRecord, QaExpectedRejection, QaFinding } from "@b-studio/agent";
 import { artifactUrl } from "@/lib/artifact-url";
 import type { LiveFrame } from "./live-frames";
 
@@ -12,6 +12,7 @@ export interface ExploreQaRun {
   status: "running" | "done";
   actions: QaActionRecord[];
   findings: QaFinding[];
+  expectedRejections?: QaExpectedRejection[];
   texts: string[];
   result?: ExploreQaResult;
   error?: string;
@@ -51,6 +52,33 @@ function FindingList({ findings }: { findings: QaFinding[] }) {
             {finding.summary}
             {finding.where && <span className="block text-muted">위치: {finding.where}</span>}
             {finding.evidence && <span className="block text-muted">근거: {finding.evidence}</span>}
+            {finding.observedAtAction !== undefined && <span className="block text-muted">본 화면: {finding.observedAtAction}번째 동작의 캡처·스냅샷</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** 모델이 조작 전에 "거절되는 것이 정상"이라고 미리 알린 시험. 사람이 정말 의도한 시험이었는지 볼 수 있게 이유와 응답을 그대로 보여 준다 */
+function RejectionList({ title, hint, items }: { title: string; hint?: string; items: QaExpectedRejection[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="mb-3 rounded-control border border-line p-2 text-sm">
+      <p className="font-semibold">
+        {title} {items.length}건
+      </p>
+      {hint && <p className="mt-0.5 text-xs text-muted">{hint}</p>}
+      <ul className="mt-1 space-y-1.5">
+        {items.map((item, index) => (
+          <li key={index} className="break-words text-xs">
+            <span className="font-medium">{item.actionIndex !== undefined ? `${item.actionIndex}번째 동작 ${item.tool ?? ""}` : "조작 없이 끝남"}</span>
+            <span className="block text-muted">이유: {item.reason}</span>
+            {item.requests.map((request, requestIndex) => (
+              <span key={requestIndex} className="block font-mono text-muted">
+                {request.status} {request.url}
+              </span>
+            ))}
           </li>
         ))}
       </ul>
@@ -283,6 +311,20 @@ export function ExploreQaView({ sessionId, service, frame }: { sessionId: string
             </div>
           )}
           {run && <FindingList findings={run.result?.findings ?? run.findings ?? []} />}
+          {run && (
+            <RejectionList
+              title="예상된 거절"
+              hint="모델이 조작 전에 거절되는 것이 정상이라고 알린 시험입니다. 실패한 요청으로 세지 않았습니다."
+              items={run.result?.expectedRejections ?? run.expectedRejections ?? []}
+            />
+          )}
+          {run?.result && (
+            <RejectionList
+              title="거절 응답이 없던 시험"
+              hint="거절될 것으로 선언했지만 거절 응답이 없었습니다. 서버가 요청을 통과시켰거나 화면에서 먼저 막혔을 수 있어 확인이 필요합니다."
+              items={run.result.unmetRejections ?? []}
+            />
+          )}
           {run?.error && <p className="mb-3 rounded-control border border-fail/40 bg-fail/10 p-2 text-sm text-fail">{run.error}</p>}
           {run && run.actions.length > 0 ? (
             <ol className="space-y-1.5">
