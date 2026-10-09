@@ -278,6 +278,44 @@ export function parseSyncOutput(stdout: string): Map<string, string> {
   return seen;
 }
 
+/**
+ * 파일 반영을 기다리는 동안 파일마다 컨테이너 쪽에서 본 값을 모아 두었다가, 시간 초과 때 "늦는 것"과 "기다려도 안 되는 것"을 갈라 말한다
+ * (도그푸딩 마찰 169). 전에는 "60초 안에 반영되지 않았습니다"만 알려서 기다리면 풀릴 것처럼 읽혔고, 에이전트가 같은 파일을 다시 쓰며
+ * 재시도 세 번을 그대로 썼다. 기다리는 내내 값이 한 번도 바뀌지 않았으면 다시 써도 달라지지 않는다.
+ */
+export class SyncObservations {
+  /** 파일 → 기다리는 동안 본 값들("MISSING", 해시, 출력에 없으면 "UNSEEN") */
+  readonly #seen = new Map<string, Set<string>>();
+
+  record(file: string, value: string | undefined): void {
+    const values = this.#seen.get(file) ?? new Set<string>();
+    values.add(value ?? 'UNSEEN');
+    this.#seen.set(file, values);
+  }
+
+  /** 시간 초과 문구. 첫 문장은 전과 같고, 뒤에 파일들이 어떤 상태였는지 덧붙인다. expected는 파일 → 기대하는 값("MISSING"이면 지워져야 함) */
+  describeTimeout(pending: readonly string[], expected: ReadonlyMap<string, string>, timeoutMs: number): string {
+    const seconds = Math.round(timeoutMs / 1_000);
+    const groups = { invisible: [] as string[], stale: [] as string[], undeleted: [] as string[], changing: [] as string[] };
+    for (const file of pending) {
+      const values = [...(this.#seen.get(file) ?? [])];
+      const absent = values.every((value) => value === 'MISSING' || value === 'UNSEEN');
+      if (values.length > 1 && !absent) groups.changing.push(file);
+      else if (expected.get(file) === 'MISSING') groups.undeleted.push(file);
+      else if (absent) groups.invisible.push(file);
+      else groups.stale.push(file);
+    }
+    const notes: string[] = [];
+    if (groups.invisible.length > 0) notes.push(`${groups.invisible.join(', ')}: ${seconds}초 내내 컨테이너에서 보이지 않았습니다`);
+    if (groups.stale.length > 0) notes.push(`${groups.stale.join(', ')}: ${seconds}초 내내 이전 내용 그대로였습니다`);
+    if (groups.undeleted.length > 0) notes.push(`${groups.undeleted.join(', ')}: 지운 파일이 ${seconds}초 내내 컨테이너에 남아 있었습니다`);
+    const stuck = groups.invisible.length + groups.stale.length + groups.undeleted.length;
+    if (stuck > 0) notes.push('한 번도 바뀌지 않았으므로 기다리거나 같은 내용을 다시 써도 달라지지 않을 가능성이 큽니다. 파일 이름·경로와 서비스의 소스 마운트를 확인하세요');
+    if (groups.changing.length > 0) notes.push(`${groups.changing.join(', ')}: 반영되는 중이었지만 시간 안에 끝나지 않았습니다(다시 시도하면 될 수 있습니다)`);
+    return `${seconds}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: ${pending.join(', ')}${notes.length > 0 ? ` — ${notes.join('. ')}` : ''}`;
+  }
+}
+
 const LOG_LINE = /^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
 /** compose가 컨테이너 수명 주기를 알리는 줄: `api-1 exited with code 143`, `web-1 has been recreated` */
 const STATUS_LINE = /^(?<container>[a-z0-9][a-z0-9_.-]*)-\d+\s+(?<text>[^|\s].*)$/;
