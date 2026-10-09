@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
@@ -57,6 +58,8 @@ export type VerifyMode = 'full' | 'light';
 export type PageFetcher = (url: string, signal?: AbortSignal) => Promise<{ status: number; text: string }>;
 
 const PAGE_TIMEOUT_MS = 30_000;
+/** 샌드박스·도커 쪽 실패 뒤 한 번 다시 해 보기 전에 기다리는 시간 */
+const PLATFORM_RETRY_DELAY_MS = 1_500;
 const TEST_TIMEOUT_MS = 10 * 60_000;
 /** 동시 요청 확인에서 요청 하나가 기다릴 시간 */
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -128,6 +131,8 @@ export interface GateOptions {
   workspace: Workspace;
   allowBreaking: boolean;
   maxVerifyAttempts: number;
+  /** 샌드박스·도커 쪽 실패 뒤 다시 해 보기 전에 기다리는 시간(테스트에서 줄인다) */
+  platformRetryDelayMs?: number;
   /** 검증 범위(기본 full). light면 재시작·준비 판정·계약만 돌리고 나머지 단계는 건너뛴다 */
   verify?: VerifyMode;
   fetcher: ContractFetcher;
@@ -160,6 +165,8 @@ export interface GateOptions {
  */
 export class VerificationGate {
   attempts = 0;
+  /** 마지막 검증이 샌드박스·도커 쪽 문제로 끝나지 못했으면 그 사유. 재시도 횟수(attempts)에는 세지 않는다 */
+  platformFailure: string | undefined;
   /** 마지막 검증 결과 */
   report: VerificationReport | undefined;
   /** 마지막 검증에서 플랫폼이 실행한 화면 확인·테스트·리뷰 결과 */
@@ -271,15 +278,23 @@ export class VerificationGate {
     this.#stage('run');
     onEvent({ type: 'verify_start', files });
     this.#verifiedVersion = workspace.version;
-    const report = await verifyChanges({
-      sandbox,
-      project,
-      changedFiles: files,
-      baselines: this.#baselines,
-      allowBreaking,
-      fetcher,
-      start: { signal, onStatus: onServiceStatus },
-    });
+    const verify = () =>
+      verifyChanges({
+        sandbox,
+        project,
+        changedFiles: files,
+        baselines: this.#baselines,
+        allowBreaking,
+        fetcher,
+        start: { signal, onStatus: onServiceStatus },
+      });
+    let report = await verify();
+    // 샌드박스·도커 쪽 실패는 잠깐의 경합일 수 있다(서비스 둘이 함께 재시작될 때 등). 모델을 거치지 않고 한 번만 그대로 다시 해 본다
+    if (!report.ok && report.platformFailure) {
+      signal?.throwIfAborted();
+      await sleep(this.#options.platformRetryDelayMs ?? PLATFORM_RETRY_DELAY_MS, undefined, { signal });
+      report = await verify();
+    }
     // 도중에 취소되면 계약 조회처럼 결과로 바뀐 중단까지 게이트 실패로 알리지 않는다
     signal?.throwIfAborted();
     this.#stage('contract_check');
@@ -298,6 +313,14 @@ export class VerificationGate {
         message: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${report.addedAddons.join(', ')}`,
       });
     }
+
+    // 다시 해도 샌드박스·도커 쪽 문제면 여기서 멈춘다. 에이전트가 고칠 수 없는 실패라 재시도 횟수로 세지 않고,
+    // 고치라고 돌려보내지도 않는다(전에는 같은 실패로 재시도 3번을 다 쓰고 변경이 되돌려졌다, 트러블슈팅 117)
+    if (!report.ok && report.platformFailure) {
+      this.platformFailure = report.platformFailure;
+      return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${report.platformFailure}` };
+    }
+    this.platformFailure = undefined;
 
     // 서비스가 뜨지 않았거나 계약이 깨졌으면 그 위에서 테스트나 화면 확인을 돌려도 의미가 없다
     if (report.ok) {

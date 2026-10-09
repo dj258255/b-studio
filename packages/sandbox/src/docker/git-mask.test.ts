@@ -224,6 +224,8 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
       (caught: unknown) => caught as Error & { detail?: string },
     );
     expect(error?.message).toContain('가릴 빈 폴더를 준비하지 못했습니다');
+    // 사용자의 코드로 고칠 수 없는 실패라고 표시한다(게이트가 재시도 횟수로 세지 않는다)
+    expect((error as { platform?: boolean } | undefined)?.platform).toBe(true);
     expect(`${error?.message}\n${error?.detail ?? ''}`).toContain('폴더가 비어 있지 않습니다(leftover, link)');
     // 안의 것도, 링크가 가리키는 곳도 그대로다
     expect(await readFile(path.join(root, '.git', 'b-studio-empty', 'leftover', 'note.txt'), 'utf8')).toBe('x');

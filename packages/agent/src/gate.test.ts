@@ -1,7 +1,7 @@
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import type { ExecResult, Sandbox, ServiceUsage } from '@b-studio/sandbox';
+import { SandboxError, type ExecResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
 import { SpecError, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
@@ -67,6 +67,76 @@ async function setup(
 }
 
 const stages = (events: AgentEvent[]) => events.flatMap((event) => (event.type === 'stage' ? [event.stage] : []));
+
+describe('샌드박스·도커 쪽 실패는 에이전트의 게이트 실패로 세지 않는다 (트러블슈팅 117)', () => {
+  /** 재시작이 platformOutcomes 순서대로 실패한다: 'platform'은 샌드박스 쪽 오류, 'code'는 서비스가 뜨지 않음, true는 성공 */
+  async function gateWith(outcomes: Array<'platform' | 'code' | true>) {
+    const sandbox = fakeSandbox(project, []);
+    sandbox.restart = async (service: string) => {
+      sandbox.restarts.push(service);
+      const outcome = outcomes.shift() ?? true;
+      if (outcome === 'platform') throw new SandboxError('/work/.git/b-studio 폴더를 가릴 빈 폴더를 준비하지 못했습니다', "EEXIST: file already exists, mkdir '/work/.git/b-studio-empty'", { platform: true });
+      if (outcome === 'code') throw new Error('컨테이너가 종료됐습니다');
+      return { service, containerPort: 8080, url: 'http://127.0.0.1:1' };
+    };
+    const workspace = new Workspace(project.root);
+    const events: AgentEvent[] = [];
+    const gate = await VerificationGate.create({
+      project,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      platformRetryDelayMs: 1,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: async () => ({ status: 200, text: '<h1>주문 목록</h1>' }),
+      onEvent: (event) => events.push(event),
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return { gate, sandbox, events };
+  }
+
+  it('한 번 다시 해 보고도 샌드박스 쪽 실패면 재시도 횟수를 쓰지 않고 멈춘다. 모델에게 고치라고 돌려보내지 않는다', async () => {
+    const { gate, sandbox } = await gateWith(['platform', 'platform', 'platform']);
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('exhausted');
+    expect(outcome.kind === 'exhausted' ? outcome.summary : '').toContain('b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다');
+    expect(outcome.kind === 'exhausted' ? outcome.summary : '').toContain('가릴 빈 폴더를 준비하지 못했습니다');
+    // 재시도 횟수는 그대로다(전에는 이 실패가 세 번 쌓여 "검증 게이트를 3번 통과하지 못했습니다"가 됐다)
+    expect(gate.attempts).toBe(0);
+    expect(gate.platformFailure).toContain('가릴 빈 폴더');
+    expect(gate.report?.platformFailure).toContain('api: ');
+    // 모델을 거치지 않고 한 번만 다시 했다
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+  });
+
+  it('잠깐의 경합이라 다시 하니 됐으면 그대로 통과한다(모델은 실패를 보지 않는다)', async () => {
+    const { gate, sandbox, events } = await gateWith(['platform', true]);
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.attempts).toBe(0);
+    expect(gate.platformFailure).toBeUndefined();
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+    expect(events.filter((event) => event.type === 'verify_result')).toHaveLength(1);
+  });
+
+  it('서비스가 뜨지 않은 실패(코드가 원인일 수 있음)는 지금처럼 재시도 횟수로 세고 모델에게 돌려준다', async () => {
+    const { gate, sandbox } = await gateWith(['code']);
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(gate.attempts).toBe(1);
+    expect(gate.platformFailure).toBeUndefined();
+    expect(gate.report?.platformFailure).toBeUndefined();
+    // 다시 해 보지 않는다
+    expect(sandbox.restarts).toEqual(['api']);
+  });
+
+  it('검증 보고서 문구가 코드를 고쳐서 풀려고 하지 말라고 알린다', async () => {
+    const { gate, events } = await gateWith(['platform', 'platform']);
+    await gate.check();
+    const result = events.find((event) => event.type === 'verify_result');
+    expect(result?.type === 'verify_result' ? result.text : '').toContain('바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요');
+  });
+});
 
 describe('VerificationGate 워크플로 단계', () => {
   it('선언한 화면 확인·테스트·리뷰를 모두 실행하고 통과한 단계를 기록한다', async () => {
