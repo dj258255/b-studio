@@ -1291,6 +1291,37 @@ function mentionedIdsOfTest(name: string, suiteIds: ReadonlyMap<string, string[]
   return [...new Set([...findMentionedIds(name), ...(suiteIds.get(name) ?? [])])];
 }
 
+/** 테스트 파일 하나에서 뽑아 둔 것. 어느 id를 찾든 같으므로 파일마다 한 번만 만든다 */
+interface TestFileIndex {
+  content: string;
+  /** 선언된 테스트 이름과, 그 이름이 가리키는 id 전부(자기 이름에 단 것 + 감싼 묶음 제목에 단 것) */
+  names: Array<{ name: string; ids: string[] }>;
+  /** id처럼 보이는 조각(R3 등)이 든 메서드 이름. 선언 순서대로, 중복 포함 */
+  methods: string[];
+}
+
+const METHOD_WITH_ID_PATTERN = /\b(?:void|public|private|protected)\s+[\w<>[\],\s]*?\b(\w*[Rr]\d+\w*)\s*\(/g;
+
+/**
+ * 파일 객체별로 뽑아 둔 결과. 요구사항 탭은 요구사항마다 같은 파일 목록을 다시 훑는데(요구사항 32개 × 테스트 파일 376개에서
+ * 요청 한 번에 파일 해석이 약 2만 번, 4~5초 — 트러블슈팅 122), 파일 내용은 그 사이 바뀌지 않는다.
+ * 파일 객체가 살아 있는 동안만 남고(WeakMap), 내용이 달라졌으면 다시 만든다
+ */
+const TEST_FILE_INDEXES = new WeakMap<ScannedFile, TestFileIndex>();
+
+function testFileIndex(file: ScannedFile): TestFileIndex {
+  const cached = TEST_FILE_INDEXES.get(file);
+  if (cached && cached.content === file.content) return cached;
+  const suiteIds = collectSuiteIdsByTestName(file);
+  const index: TestFileIndex = {
+    content: file.content,
+    names: collectDeclaredTestNames(file).map((name) => ({ name, ids: mentionedIdsOfTest(name, suiteIds) })),
+    methods: [...file.content.matchAll(METHOD_WITH_ID_PATTERN)].map((match) => match[1]!),
+  };
+  TEST_FILE_INDEXES.set(file, index);
+  return index;
+}
+
 /**
  * 작업 복사본의 테스트 파일에서 id를 언급하는 테스트 이름을 찾는다.
  * Jest/Vitest/Playwright의 it('R3 …')·test('R3 …')와 JUnit의 @DisplayName("R3 …")·메서드 이름(testR3Login 등)을 본다.
@@ -1307,14 +1338,12 @@ export function scanTestFilesForRequirementId(files: readonly ScannedFile[], id:
       }
     };
 
-    const suiteIds = collectSuiteIdsByTestName(file);
-    for (const name of collectDeclaredTestNames(file)) {
-      if (mentionedIdsOfTest(name, suiteIds).some((mention) => mention === id || mention.startsWith(`${id}.`))) add(name);
+    const index = testFileIndex(file);
+    for (const { name, ids } of index.names) {
+      if (ids.some((mention) => mention === id || mention.startsWith(`${id}.`))) add(name);
     }
-
-    const methodPattern = /\b(?:void|public|private|protected)\s+[\w<>[\],\s]*?\b(\w*[Rr]\d+\w*)\s*\(/g;
-    for (const match of file.content.matchAll(methodPattern)) {
-      if (identifierMentionsId(match[1]!, id)) add(match[1]!);
+    for (const method of index.methods) {
+      if (identifierMentionsId(method, id)) add(method);
     }
   }
   return matches;
@@ -1325,9 +1354,8 @@ export function scanTestFilesForScenarioId(files: readonly ScannedFile[], scenar
   const matches: TestMatch[] = [];
   for (const file of files) {
     if (!isLikelyTestFile(file.path)) continue;
-    const suiteIds = collectSuiteIdsByTestName(file);
-    for (const name of collectDeclaredTestNames(file)) {
-      if (mentionedIdsOfTest(name, suiteIds).includes(scenarioId)) matches.push({ file: file.path, name });
+    for (const { name, ids } of testFileIndex(file).names) {
+      if (ids.includes(scenarioId)) matches.push({ file: file.path, name });
     }
   }
   return matches;
@@ -1338,9 +1366,8 @@ export function scanTestFilesForOrphans(files: readonly ScannedFile[]): TestMatc
   const matches: TestMatch[] = [];
   for (const file of files) {
     if (!isLikelyTestFile(file.path)) continue;
-    const suiteIds = collectSuiteIdsByTestName(file);
-    for (const name of collectDeclaredTestNames(file)) {
-      if (mentionedIdsOfTest(name, suiteIds).length === 0) matches.push({ file: file.path, name });
+    for (const { name, ids } of testFileIndex(file).names) {
+      if (ids.length === 0) matches.push({ file: file.path, name });
     }
   }
   return matches;
