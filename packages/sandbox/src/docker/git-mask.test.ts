@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
@@ -161,6 +161,21 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
       },
     });
     expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
+  });
+
+  it('서비스 여럿이 함께 재시작돼 동시에 불려도 실패하지 않고, 빈 폴더는 비어 있다(도그푸딩 마찰 187)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } };
+    // 앞선 기동이 남긴 빈 폴더에 누군가 넣은 내용이 있어도 비운다
+    await mkdir(path.join(root, '.git', 'b-studio-empty', 'leftover'), { recursive: true });
+    await writeFile(path.join(root, '.git', 'b-studio-empty', 'leftover', 'note.txt'), 'x');
+
+    // 전에는 "지우고 다시 만들기"가 엇갈려 EEXIST(또는 ENOENT)로 실패했다
+    const results = await Promise.all(Array.from({ length: 24 }, () => computeGitMask(root, config)));
+    for (const mask of results) expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
   });
 });
 
