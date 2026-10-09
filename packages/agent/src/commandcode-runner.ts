@@ -204,6 +204,8 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   if (options.escalation) onEvent({ type: 'warning', message: '로컬 Command Code Agent 러너는 모델 승격을 지원하지 않습니다. 승격 옵션을 무시합니다' });
 
   const workspace = new Workspace(project.root);
+  // 요구사항 문서의 실행 전 모습을 고정한다(게이트가 사람 확인 기록 위조를 견주는 기준, ADR-157)
+  workspace.beginRun();
   // 이번 실행 전부터 작업 트리에 있던 변경(보관본 되살리기 등)을 먼저 알려, 에이전트가 이번 실행에서 파일을
   // 하나도 건드리지 않아도 게이트가 "검증할 변경 없음"으로 건너뛰지 않게 한다(ADR-131)
   if (options.externalChanges?.length) syncExternalChanges(workspace, options.externalChanges);

@@ -735,7 +735,7 @@ export const REQUIREMENTS_FILE = 'docs/requirements.md';
 export type RequirementStatus = '미착수' | '작업 중' | '검증됨' | '재확인 필요' | '실패';
 export const REQUIREMENT_STATUSES: readonly RequirementStatus[] = ['미착수', '작업 중', '검증됨', '재확인 필요', '실패'];
 
-const JSON_BLOCK = /<!--\s*b-studio-requirements\s*([\s\S]*?)-->/;
+export const JSON_BLOCK = /<!--\s*b-studio-requirements\s*([\s\S]*?)-->/;
 
 function requirementHeading(requirement: Requirement): string {
   return `## ${requirement.id}. ${requirement.title}`;
@@ -750,8 +750,8 @@ const ACCEPTANCE_ITEM = /^\s+-\s+(.+?)\s*$/;
 const NFR_LINE = /^-\s*NFR:\s*지표\s+(.+?)\s*·\s*임계값\s+(.+?)\s*·\s*조건\s+(.+?)\s*·\s*측정\s+(.+?)\s*$/;
 const TRACE_LINE = /^-\s*추적:\s*(.+?)\s*$/;
 /** "- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 무엇을 어떻게 확인했나" */
-const MANUAL_VERIFICATION_LINE = /^-\s*확인:\s*(.+?)\s*·\s*(\d{4}-\d{2}-\d{2})\s*·\s*체크포인트\s+(\S+)\s*·\s*메모\s+(.+?)\s*$/;
-const REQUIREMENT_HEADING = /^##\s+(R[1-9][0-9]*)\.\s*(.+?)\s*$/;
+export const MANUAL_VERIFICATION_LINE = /^-\s*확인:\s*(.+?)\s*·\s*(\d{4}-\d{2}-\d{2})\s*·\s*체크포인트\s+(\S+)\s*·\s*메모\s+(.+?)\s*$/;
+export const REQUIREMENT_HEADING = /^##\s+(R[1-9][0-9]*)\.\s*(.+?)\s*$/;
 const ASSUMPTIONS_HEADING = /^##\s*가정\s*$/;
 const ASSUMPTION_ITEM = /^-\s+(.+?)\s*$/;
 /**

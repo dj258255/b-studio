@@ -1654,3 +1654,122 @@ describe('VerificationGate와 compose에 새로 생긴 부가 서비스(도그�
     expect(events).toContainEqual({ type: 'warning', message: 'compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): mediamtx' });
   });
 });
+
+describe('VerificationGate 요구사항 문서의 검증 기록(ADR-157)', () => {
+  const REQ = 'docs/requirements.md';
+  const PLAIN = '# 요구사항\n\n## R1. 로그인\n- 종류: api · 우선순위: must\n- 인수 조건:\n  - a\n- 상태: 미착수\n';
+  const FORGED_LINE = '- 확인: 에이전트 · 2026-10-10 · 체크포인트 abc1234 · 메모 확인함';
+  const forge = (doc: string) => doc.replace('- 상태:', `${FORGED_LINE}\n- 상태:`);
+
+  async function seedDoc(content: string): Promise<void> {
+    await mkdir(path.join(project.root, 'docs'), { recursive: true });
+    await writeFile(path.join(project.root, REQ), content);
+  }
+
+  it('실행이 사람 확인 줄을 써넣으면 manual-verification 검사가 실패하고, 되돌릴 기록을 모델에게 알린다', async () => {
+    await seedDoc(PLAIN);
+    const { gate, workspace, events } = await setup(project);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(REQ, forge(PLAIN));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.verified).toBe(false);
+    expect(gate.passedStages.has('review')).toBe(false);
+    const check = gate.checks.find((entry) => entry.name === 'manual-verification');
+    expect(check).toMatchObject({ stage: 'review', ok: false });
+    expect(events).toContainEqual({ type: 'workflow_check', check });
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('R1');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('사람 확인은 화면에서 사람만 남길 수 있습니다. 이 기록을 되돌리세요');
+  });
+
+  it('기록을 되돌린 다음 검증에서는 통과한다', async () => {
+    await seedDoc(PLAIN);
+    const { gate, workspace } = await setup(project, { restarts: [true, true, true, true] });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(REQ, forge(PLAIN));
+    expect((await gate.check()).kind).toBe('retry');
+
+    await workspace.write(REQ, PLAIN);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((entry) => entry.name === 'manual-verification')).toBe(false);
+  });
+
+  it('요구사항 본문만 고친 실행은 통과한다', async () => {
+    await seedDoc(PLAIN);
+    const { gate, workspace } = await setup(project);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(REQ, PLAIN.replace('로그인', '이메일 로그인'));
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((entry) => entry.name.startsWith('manual-verification'))).toBe(false);
+  });
+
+  it('실행 전부터 있던 사람 확인(사용자가 직접 남긴 것)은 건드리지 않으면 통과한다', async () => {
+    await seedDoc(forge(PLAIN));
+    const { gate, workspace } = await setup(project);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+  });
+
+  it('작업 공간이 모르는 경로(서비스 안 명령 등)로 문서를 고쳐 바뀐 파일 목록이 비어도 막는다', async () => {
+    await seedDoc(PLAIN);
+    const { gate, workspace, events } = await setup(project);
+    await writeFile(path.join(project.root, REQ), forge(PLAIN));
+    expect(workspace.changedFiles()).toEqual([]);
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.map((entry) => entry.name)).toEqual(['manual-verification']);
+    expect(events.some((event) => event.type === 'workflow_check' && event.check.name === 'manual-verification')).toBe(true);
+  });
+
+  it('바뀐 것이 전혀 없으면 예전처럼 검증 없이 통과한다', async () => {
+    await seedDoc(PLAIN);
+    const { gate } = await setup(project);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.verified).toBe(false);
+  });
+
+  it('가볍게 확인(light)에서도 같은 검사로 막는다', async () => {
+    await seedDoc(PLAIN);
+    const { gate, workspace } = await setup(project, { verify: 'light' });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(REQ, forge(PLAIN));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.verified).toBe(false);
+    expect(gate.checks.find((entry) => entry.name === 'manual-verification')).toMatchObject({ ok: false });
+  });
+
+  it('재시도 상한까지 못 고치면 사유에 사람 확인 기록을 적고 중단한다', async () => {
+    await seedDoc(PLAIN);
+    const { gate, workspace } = await setup(project, { restarts: [true, true, true, true] });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(REQ, forge(PLAIN));
+
+    expect((await gate.check()).kind).toBe('retry');
+    expect((await gate.check()).kind).toBe('retry');
+    const last = await gate.check();
+
+    expect(last.kind).toBe('exhausted');
+    expect(last.kind === 'exhausted' && last.summary).toContain('사람 확인');
+  });
+
+  it('사람 확인을 지우면 막지 않고 manual-verification-removed 검사로 남긴다', async () => {
+    await seedDoc(forge(PLAIN));
+    const { gate, workspace } = await setup(project);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(REQ, PLAIN);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.name === 'manual-verification-removed')).toMatchObject({ ok: true, stage: 'review' });
+  });
+});

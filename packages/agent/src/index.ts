@@ -300,6 +300,21 @@ export {
   type RequirementTrace,
   type TrackingRow,
 } from './requirement-issues';
+export {
+  describeRemovedVerifications,
+  describeVerificationTamper,
+  diffVerificationRecords,
+  hasVerificationTamper,
+  MANUAL_VERIFICATION_CHECK,
+  MANUAL_VERIFICATION_REMOVED_CHECK,
+  restoreVerificationRecords,
+  reviewRequirementRecords,
+  tamperedRequirementIds,
+  type ForgedVerification,
+  type RemovedVerification,
+  type TamperedRecord,
+  type VerificationRecordDiff,
+} from './requirement-integrity';
 export { buildTools, executeTool, PROPOSAL_OPTIONS, type AskUserQuestion, type BoardAccess, type ModeProposal, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {
   Board,

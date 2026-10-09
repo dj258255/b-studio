@@ -18,6 +18,9 @@ function isDeniedFileName(segment: string): boolean {
 const MAX_READ_BYTES = 256 * 1024;
 const MAX_LIST_ENTRIES = 500;
 
+/** 실행 시작 때 고정해 두는 요구사항 문서(requirements.ts의 REQUIREMENTS_FILE과 같은 경로 — 순환 import를 피하려 따로 적는다) */
+export const REQUIREMENTS_SNAPSHOT_FILE = 'docs/requirements.md';
+
 export class WorkspaceError extends Error {
   constructor(message: string) {
     super(message);
@@ -38,9 +41,34 @@ export class Workspace {
   readonly #changed = new Map<string, number>();
   readonly #deleted = new Set<string>();
   #version = 0;
+  /** 파일 → 실행 시작 시점의 내용(없으면 undefined). snapshotFile이 처음 부른 때의 값을 고정한다 */
+  readonly #snapshots = new Map<string, Promise<string | undefined>>();
 
   constructor(root: string) {
     this.root = path.resolve(root);
+  }
+
+  /**
+   * 에이전트 실행을 시작할 때 러너가 부른다: 게이트가 실행 끝에 견줄 기준점이 되는 파일을, 에이전트가 아무것도 바꾸기
+   * 전에 고정한다. 게이트는 지연 기동 세션이나 CLI 러너에서 파일이 바뀐 뒤에 만들어질 수 있어, 만들 때 읽으면 늦다.
+   */
+  beginRun(): void {
+    void this.snapshotFile(REQUIREMENTS_SNAPSHOT_FILE);
+  }
+
+  /**
+   * 파일의 지금 내용을 **처음 부른 때 한 번만** 읽어 고정한다. 에이전트가 파일을 바꾸기 전에(러너가 실행을 시작할 때)
+   * 불러 두면, 나중에 게이트가 "실행이 이 파일의 무엇을 바꿨나"를 견줄 기준점이 된다(요구사항 문서의 사람 확인 기록,
+   * ADR-157). 에이전트 도구와 무관하게 디스크를 직접 읽으므로 읽음 기록(#seen)이나 접근 거부 규칙에 영향이 없다.
+   * 파일이 없으면 undefined(실행이 새로 만든 문서도 구분할 수 있다).
+   */
+  snapshotFile(file: string): Promise<string | undefined> {
+    let snapshot = this.#snapshots.get(file);
+    if (!snapshot) {
+      snapshot = readFile(path.join(this.root, file), 'utf8').catch(() => undefined);
+      this.#snapshots.set(file, snapshot);
+    }
+    return snapshot;
   }
 
   /** 쓰기가 일어날 때마다 1씩 오른다. 검증 게이트가 "지난 검증 이후 바뀐 파일"을 고를 때 쓴다 */

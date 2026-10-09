@@ -13,6 +13,8 @@ import { captureBaselines, formatVerificationReport, verifyChanges, type Contrac
 import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
+import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
+import { REQUIREMENTS_FILE } from './requirements';
 import type { Workspace } from './workspace';
 
 export type GateOutcome =
@@ -188,7 +190,22 @@ export class VerificationGate {
 
   /** 계약 비교 기준은 모델이 파일을 바꾸기 전에 잡아야 한다 */
   static async create(options: GateOptions): Promise<VerificationGate> {
+    // 요구사항 문서의 실행 전 모습도 같은 이유로 여기서 고정한다(러너가 실행을 시작할 때 이미 불렀다면 그 값이 유지된다)
+    void options.workspace.snapshotFile(REQUIREMENTS_FILE);
     return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
+  }
+
+  /**
+   * 요구사항 문서의 검증 기록(사람 확인·재확인 판정 필드)이 이번 실행에서 바뀌었는지 본다(ADR-157).
+   * 바뀐 파일 목록이 아니라 디스크의 문서를 직접 견주므로 서비스 안 명령(run_in_service)이나 CLI 러너가 고친 것도 잡는다.
+   * 단계와 무관하게 항상 돌린다(가볍게 확인에서도 건너뛰지 않는다) — 파일 하나를 읽고 견주는 것뿐이라 가볍다.
+   */
+  async #requirementRecordChecks(): Promise<WorkflowCheck[]> {
+    const { workspace } = this.#options;
+    const before = await workspace.snapshotFile(REQUIREMENTS_FILE);
+    const after = await readFile(path.join(workspace.root, REQUIREMENTS_FILE), 'utf8').catch(() => undefined);
+    if (before === after) return [];
+    return reviewRequirementRecords(before, after);
   }
 
   /**
@@ -204,7 +221,14 @@ export class VerificationGate {
 
   async check(): Promise<GateOutcome> {
     const { project, sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
-    if (workspace.changedFiles().length === 0) return { kind: 'pass' };
+    const recordChecks = await this.#requirementRecordChecks();
+    if (workspace.changedFiles().length === 0) {
+      if (recordChecks.every((check) => check.ok)) return { kind: 'pass' };
+      // 바뀐 파일로 추적되지 않은 경로(서비스 안 명령 등)로 검증 기록만 고쳤다: 다른 단계는 돌릴 것이 없다
+      this.checks = recordChecks;
+      for (const check of recordChecks) onEvent({ type: 'workflow_check', check });
+      return this.#failure('', recordChecks.filter((check) => !check.ok));
+    }
 
     const files = this.#filesToVerify();
     this.#stage('run');
@@ -225,7 +249,7 @@ export class VerificationGate {
     this.report = report;
     this.#failedServices = new Set(report.restarted.filter((check) => !check.ready).map((check) => check.service));
     this.passedStages = new Set();
-    this.checks = [];
+    this.checks = [...recordChecks];
 
     const text = formatVerificationReport(report, { allowBreaking });
     onEvent({ type: 'verify_result', report, text });
@@ -245,11 +269,12 @@ export class VerificationGate {
       if (this.#options.verify === 'light') {
         // 가볍게 확인: 재시작·준비 판정·계약만 돌린다. 건너뛴 단계는 기록만 하고 실패로 보지 않는다
         this.skippedStages = missingVerificationStages(project, this.passedStages);
+        for (const check of recordChecks) onEvent({ type: 'workflow_check', check });
       } else {
         const checks = await this.#runDeclaredChecks();
         signal?.throwIfAborted();
         this.#stage('review');
-        checks.push(...reviewChanges(project, workspace.changedFiles()));
+        checks.push(...reviewChanges(project, workspace.changedFiles()), ...recordChecks);
         this.checks = checks;
         for (const check of checks) onEvent({ type: 'workflow_check', check });
         for (const stage of ['browser_check', 'test', 'concurrency_check', 'review'] as const) {
@@ -273,13 +298,22 @@ export class VerificationGate {
       return { kind: 'pass' };
     }
 
+    return this.#failure(text, failedChecks);
+  }
+
+  /** 검증 실패를 시도 횟수에 세고, 남은 기회가 있으면 모델에게 돌려줄 안내를, 없으면 중단 사유를 돌려준다 */
+  #failure(reportText: string, failedChecks: readonly WorkflowCheck[]): GateOutcome {
     this.attempts += 1;
     if (this.attempts >= this.#maxAttempts) {
-      return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다` };
+      // 사람 확인 기록 위조로 막힌 것이면 사유를 요약에 남긴다(대화에서 왜 되돌렸는지 바로 보이게)
+      const record = failedChecks.find((check) => check.name === MANUAL_VERIFICATION_CHECK);
+      const reason = record?.detail ? ` — ${record.detail.split('\n')[0]}` : '';
+      return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다${reason}` };
     }
+    const body = reportText ? `${reportText}${formatFailedChecks(failedChecks)}` : formatFailedChecks(failedChecks).trimStart();
     return {
       kind: 'retry',
-      feedback: `[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n${text}${formatFailedChecks(failedChecks)}`,
+      feedback: `[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n${body}`,
     };
   }
 
