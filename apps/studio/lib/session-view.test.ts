@@ -48,6 +48,34 @@ describe('reduceSession', () => {
     expect(view.snapshot.running).toBe(true);
   });
 
+  it('요약 중(context_compacting) 줄은 한 번만 쌓이고, 요약이 끝나면 결과 줄로 바뀐다', () => {
+    const during = fold([
+      { type: 'run_started', runId: 'r1', request: '이어서 해줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'context_compacting' } },
+      { type: 'agent', runId: 'r1', event: { type: 'context_compacting' } },
+    ]);
+    expect(during.chat.map((item) => item.kind)).toEqual(['request', 'compacting']);
+    expect(during.snapshot.running).toBe(true);
+
+    const after = fold([
+      { type: 'run_started', runId: 'r1', request: '이어서 해줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'context_compacting' } },
+      { type: 'agent', runId: 'r1', event: { type: 'context_compacted', trigger: 'auto', preTokens: 556_068, postTokens: 9_344, durationMs: 316_000 } },
+    ]);
+    expect(after.chat.map((item) => item.kind)).toEqual(['request', 'compacted']);
+    expect(after.chat[1]).toEqual({ kind: 'compacted', runId: 'r1', trigger: 'auto', preTokens: 556_068, postTokens: 9_344, durationMs: 316_000 });
+  });
+
+  it('요약 도중에 실행이 끝나면(취소·오류) 요약 중 줄을 남기지 않는다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '이어서 해줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'context_compacting' } },
+      { type: 'run_finished', runId: 'r1', status: 'cancelled', summary: '취소했습니다' },
+    ]);
+    expect(view.chat.some((item) => item.kind === 'compacting')).toBe(false);
+    expect(view.chat.at(-1)).toMatchObject({ kind: 'outcome', status: 'cancelled' });
+  });
+
   it('모델 라우팅 결정과 후보 점수를 대화 기록에 남긴다', () => {
     const initial = createView(snapshot);
     const view = reduceSession(initial, {

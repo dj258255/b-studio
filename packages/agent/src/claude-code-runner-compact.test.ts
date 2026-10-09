@@ -17,7 +17,7 @@ const WINDOW = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
  * 가짜 로컬 CLI 러너. query를 열 때마다 옵션을 기록한다.
  * failFirst면 첫 query는 네트워크 오류로 끝나 재시도가 새 query를 열게 한다. compact면 init 직후 compact_boundary를 낸다.
  */
-function fakeSdk({ failFirst = false, compact }: { failFirst?: boolean; compact?: Record<string, unknown> } = {}) {
+function fakeSdk({ failFirst = false, compact, compactingStatus = 0 }: { failFirst?: boolean; compact?: Record<string, unknown>; compactingStatus?: number } = {}) {
   const opened: Options[] = [];
   const sdk: ClaudeCodeSdk = {
     createSdkMcpServer: (config) => ({ type: 'sdk', name: config.name, instance: {} }) as unknown as McpServerConfig,
@@ -26,6 +26,8 @@ function fakeSdk({ failFirst = false, compact }: { failFirst?: boolean; compact?
       const call = opened.length;
       async function* run(): AsyncGenerator<SDKMessage> {
         yield { type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: 's1' } as unknown as SDKMessage;
+        // SDK는 요약을 시작하면 status: 'compacting'을 보낸다(되풀이해 보낼 수 있다)
+        for (let i = 0; i < compactingStatus; i++) yield { type: 'system', subtype: 'status', status: 'compacting', session_id: 's1' } as unknown as SDKMessage;
         if (compact) yield { type: 'system', subtype: 'compact_boundary', session_id: 's1', compact_metadata: compact } as unknown as SDKMessage;
         for await (const _user of prompt) {
           const failed = failFirst && call === 1;
@@ -136,8 +138,22 @@ describe('로컬 CLI 러너의 자동 압축 기준 창', () => {
     const { sdk } = fakeSdk({ compact: { trigger: 'auto', pre_tokens: 961_058, post_tokens: 270_474, duration_ms: 1200 } });
     const events = await run(sdk, {});
     expect(events.filter((event) => event.type === 'context_compacted')).toEqual([
-      { type: 'context_compacted', trigger: 'auto', preTokens: 961_058, postTokens: 270_474 },
+      { type: 'context_compacted', trigger: 'auto', preTokens: 961_058, postTokens: 270_474, durationMs: 1200 },
     ]);
+  });
+
+  it("요약이 시작되면(status: 'compacting') context_compacting을 한 번만 내고, 그 뒤에 context_compacted가 온다", async () => {
+    const { sdk } = fakeSdk({ compactingStatus: 3, compact: { trigger: 'auto', pre_tokens: 556_068, post_tokens: 9_344, duration_ms: 316_000 } });
+    const events = await run(sdk, {});
+    const kinds = events.map((event) => event.type).filter((type) => type === 'context_compacting' || type === 'context_compacted');
+    // SDK가 같은 상태를 세 번 보내도 알림은 한 번이다
+    expect(kinds).toEqual(['context_compacting', 'context_compacted']);
+  });
+
+  it('요약 상태가 없으면 context_compacting을 내지 않는다', async () => {
+    const { sdk } = fakeSdk({});
+    const events = await run(sdk, {});
+    expect(events.some((event) => event.type === 'context_compacting')).toBe(false);
   });
 
   it('post_tokens가 없으면 postTokens 없이 낸다', async () => {

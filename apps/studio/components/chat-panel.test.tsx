@@ -63,6 +63,27 @@ describe("ChatPanel 대화 압축 안내", () => {
     expect(html).toContain("96.1만 → 27만 토큰");
   });
 
+  it("요약하는 동안에는 진행 중이라는 줄을 보여 주고, 끝나면 걸린 시간을 함께 보여 준다", () => {
+    const during = render(
+      view([
+        { type: "run_started", runId: "r1", request: "계속 해줘" },
+        { type: "agent", runId: "r1", event: { type: "context_compacting" } },
+      ]),
+    );
+    expect(during).toContain("앞부분을 요약하는 중입니다");
+
+    const after = render(
+      view([
+        { type: "run_started", runId: "r1", request: "계속 해줘" },
+        { type: "agent", runId: "r1", event: { type: "context_compacting" } },
+        { type: "agent", runId: "r1", event: { type: "context_compacted", trigger: "auto", preTokens: 556_068, postTokens: 9_344, durationMs: 316_000 } },
+      ]),
+    );
+    expect(after).not.toContain("요약하는 중입니다");
+    expect(after).toContain("대화가 길어져 앞부분을 요약했습니다");
+    expect(after).toContain("5분 16초");
+  });
+
   it("압축 후 크기를 모르면 압축 전 크기만 보여 준다", () => {
     const html = render(
       view([

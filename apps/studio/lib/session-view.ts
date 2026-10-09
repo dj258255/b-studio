@@ -45,7 +45,9 @@ export type ChatItem =
   /** 게이트의 같은 실패 서명이 반복돼 더 비싼 모델로 올렸다 */
   | { kind: 'escalation'; runId: string; from: string; to: string; times: number; attempt: number }
   /** 로컬 CLI 러너가 대화가 길어져 앞부분을 요약했다. 압축 전후 토큰 수(후는 모를 수 있다) */
-  | { kind: 'compacted'; runId: string; trigger: 'auto' | 'manual'; preTokens: number; postTokens?: number }
+  | { kind: 'compacted'; runId: string; trigger: 'auto' | 'manual'; preTokens: number; postTokens?: number; durationMs?: number }
+  /** 대화 앞부분을 요약하는 중. 요약이 끝나면(compacted) 또는 실행이 끝나면 사라진다 */
+  | { kind: 'compacting'; runId: string }
   | { kind: 'stage'; runId: string; stage: string }
   /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과. browser_check면 단계별 스크린샷 식별자(steps)와 디자인 비교(compare)가 함께 온다 */
   | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare }
@@ -278,7 +280,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           tokens: event.sessionTokens ?? view.snapshot.tokens,
         }),
         chat: [
-          ...markInterrupted(view.chat, event.runId),
+          // 요약 도중에 끝난(취소·오류) 실행의 "요약 중" 줄은 남기지 않는다
+          ...markInterrupted(withoutCompacting(view.chat, event.runId), event.runId),
           { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify },
         ],
         completedRuns: view.completedRuns + 1,
@@ -602,8 +605,22 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
     case 'model_escalated':
       return [...chat, { kind: 'escalation', runId, from: event.from, to: event.to, times: event.sameSignatureTimes, attempt: event.attempt }];
 
+    case 'context_compacting':
+      // 같은 실행의 "요약 중" 줄이 이미 있으면 또 쌓지 않는다
+      return chat.some((item) => item.kind === 'compacting' && item.runId === runId) ? chat : [...chat, { kind: 'compacting', runId }];
+
     case 'context_compacted':
-      return [...chat, { kind: 'compacted', runId, trigger: event.trigger, preTokens: event.preTokens, ...(event.postTokens !== undefined ? { postTokens: event.postTokens } : {}) }];
+      return [
+        ...withoutCompacting(chat, runId),
+        {
+          kind: 'compacted',
+          runId,
+          trigger: event.trigger,
+          preTokens: event.preTokens,
+          ...(event.postTokens !== undefined ? { postTokens: event.postTokens } : {}),
+          ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+        },
+      ];
 
     // 러너가 하지 못한 것을 조용히 넘기지 않고 대화에 남긴다(예: 상태 폴더가 없어 이어받지 못함)
     case 'warning':
@@ -738,4 +755,9 @@ export function describeToolCall(name: string, input: unknown): string {
     default:
       return name;
   }
+}
+
+/** 그 실행의 "요약 중" 줄을 뺀다(요약이 끝났거나 실행이 끝났을 때) */
+function withoutCompacting(chat: readonly ChatItem[], runId: string): ChatItem[] {
+  return chat.filter((item) => !(item.kind === 'compacting' && item.runId === runId));
 }
