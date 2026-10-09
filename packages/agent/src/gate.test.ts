@@ -1190,6 +1190,34 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
     expect(check.detail).toContain('추정한 id(1)로 열었더니 HTTP 404');
   });
 
+  it('추정한 id로 연 화면이 그 id의 데이터를 못 받아 실패하면, 사유에 id가 추정값이라는 것과 실제 id를 알려 주는 방법을 붙인다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser' }) });
+    const { gate, workspace } = await setup(target, {
+      browser: async (url) => ({
+        status: 200,
+        text: '방송',
+        pageErrors: [],
+        consoleErrors: [],
+        // 화면은 떴지만, 추정한 id(1)의 방송이 없어 데이터 요청이 404다
+        failedRequests: url.endsWith('/live/1') ? ['404 http://127.0.0.1:1/api/v1/live/broadcasts/1/playback'] : [],
+        mediaErrors: [],
+        blockedRequests: [],
+        horizontalOverflowPx: 0,
+        steps: [],
+      }),
+    });
+    await workspace.write('web/app/live/[id]/page.tsx', 'export default function Page() { return null; }\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /live/1 (자동, id 추정)')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('실패한 요청: 404');
+    expect(check.detail).toContain('추정한 id(1)로 열었습니다');
+    expect(check.detail).toContain('autoPageChecks.sampleParams');
+  });
+
   it('page가 아닌 컴포넌트만 바뀌어도 그 컴포넌트를 쓰는 페이지를 열고, 500이면 실패한다(import 역추적)', async () => {
     const target = nextjs(project, { autoPageChecks: auto() });
     const requested: string[] = [];

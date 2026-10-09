@@ -634,6 +634,11 @@ export class VerificationGate {
         const marker = nextErrorMarker(result.text, page.expectStatus);
         if (marker) problems.push(`Next.js 오류 화면: '${marker}'`);
       }
+      // 추정한 id로 연 화면이 실패했으면, 그 id의 데이터가 없어서일 수 있다는 것과 실제 id를 알려 주는 방법을 붙인다.
+      // (상태 코드 문제는 이미 같은 안내를 담고 있다.) 안내가 없으면 "실패한 요청: 404 …/1/…"만 보고 화면 코드를 의심하게 된다
+      if (problems.length > 0 && options.probedId !== undefined && !problems.some((problem) => problem.includes('추정한 id('))) {
+        problems.push(dynamicProbeDataHint(options.probedId));
+      }
       if (problems.length > 0) throw fail(problems.join('\n'));
       if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
       return;
@@ -942,6 +947,11 @@ function missingAnyText(values: readonly string[]): string {
 }
 
 /** 추정한 id로 연 동적 경로가 404·500을 돌려줬을 때의 문구(ADR-078). id가 실제로 없을 수도 있다는 것과 고치는 방법을 함께 적는다 */
+/** 추정한 id로 연 화면이 상태 코드가 아닌 이유(실패한 요청, 멈춘 로딩 등)로 실패했을 때 붙이는 안내 */
+function dynamicProbeDataHint(probedId: string): string {
+  return `이 화면은 추정한 id(${probedId})로 열었습니다 — 그 id의 데이터가 없어서 생긴 실패일 수 있습니다. 실제로 있는 값을 studio.yaml의 autoPageChecks.sampleParams(예: { id: "..." })나 sampleIdFrom으로 알려주면 그 값으로 엽니다`;
+}
+
 function dynamicProbeStatusProblem(probedId: string, status: number | null): string {
   return `동적 경로를 추정한 id(${probedId})로 열었더니 HTTP ${status}을 돌려줬습니다 — id가 실제로 없을 수 있습니다. autoPageChecks.sampleParams나 sampleIdFrom으로 실제 값을 알려주면 더 정확히 확인합니다`;
 }

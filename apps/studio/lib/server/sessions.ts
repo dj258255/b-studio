@@ -3259,6 +3259,9 @@ export function restoreDiscardedBackup(id: string, backupId: string): void {
     let event: StudioEvent;
     try {
       const { files } = await session.checkpoints.restoreBackup(backupId);
+      // 되살린 파일에 studio.yaml이 있으면 재시작 전에 project를 다시 읽는다(되돌리기 경로와 같다). 안 읽으면 이어지는 실행의
+      // 게이트가 되살리기 전 선언(화면 확인·테스트 명령)으로 돈다 — 되살린 선언은 다음에 설정을 읽을 때까지 쓰이지 않는다
+      if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
       const report =
         files.length > 0
           ? await restartServicesFor(session.sandbox, session.project, files, { signal: session.stop.signal, onStatus: (status) => onServiceStatus(session, status) })
