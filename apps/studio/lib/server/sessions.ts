@@ -4853,7 +4853,7 @@ export async function recommendSessionRequirementQuestions(
  * kind: 'docs' 요구사항은 docSources(README.md·docs/**\/*.md)가 있으면 인수 조건을 그 문서와 맞춰 docEvidence를
  * 만든다(ADR-103) — 그 밖의 kind는 문서 매칭을 하지 않는다(테스트·게이트가 있는데 억지로 문서로도 통과시키지 않는다).
  */
-function evaluateRequirement(
+export function evaluateRequirement(
   requirement: Requirement,
   checkpoints: readonly CheckpointRef[],
   testFiles: readonly ScannedFile[],
@@ -4871,9 +4871,9 @@ function evaluateRequirement(
     ...(testRun ? { testRun } : {}),
     ...(docEvidence ? { docEvidence } : {}),
   };
-  // 요구사항 id만 단 테스트로도 요구사항 전체는 검증됨이 될 수 있다(기존 규칙) — 그래도 시나리오별로는 아직
-  // 자기 id를 단 통과 테스트가 없을 수 있어(다그푸딩 마찰 140), 추적 매트릭스를 따로 열지 않아도 그 사실을
-  // 요구사항 카드에서 바로 보게 missingScenarios를 덧붙인다
+  // 시나리오가 있는 요구사항은 자동 근거(테스트·게이트)로 시나리오가 전부 확인돼야 검증됨이 된다(ADR-155, ADR-147
+  // 결정 2를 대체). 아직 확인 못 한 시나리오 id를 missingScenarios로 증거에 얹으면 computeRequirementStatus가 그것을 보고
+  // 판정하고, 요구사항 카드는 "남은 것"을 보여준다. 시나리오 평가에는 이 필드가 없어 재귀로 걸리지 않는다
   const missingScenarios = findUnverifiedScenarioIds(requirement, checkpoints, testFiles, gateChecks, testRunRows, evidenceBase);
   // 발견은 됐지만 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 테스트(다그푸딩 마찰 152) — 상태는 바꾸지 않고
   // "검증됨이어도 이 테스트는 실제로 이번 판정에 기여하지 않았다"를 근거로만 덧붙인다
@@ -6147,7 +6147,8 @@ export function buildRequirementTestRunEvidence(
   for (const service of services) {
     if (!testRunMatchesHead(service, head.sha, pendingFilesCount)) continue;
     for (const row of service.rows) {
-      if (!row.requirementIds.includes(requirementId)) continue;
+      // 시나리오 id(R14.1)만 단 테스트도 부모(R14)의 근거다(ADR-155). 행 하나는 여러 id를 달아도 이 요구사항에 한 번만 센다
+      if (!row.requirementIds.some((id) => id === requirementId || id.startsWith(`${requirementId}.`))) continue;
       if (row.status === 'pass') passed++;
       else if (row.status === 'fail') failed++;
     }

@@ -1308,6 +1308,78 @@ describe('findUnverifiedScenarioIds — 요구사항 카드에서 "왜 시나리
   });
 });
 
+describe('computeRequirementStatus — 시나리오가 미확인이면 자동 근거만으로는 검증됨이 아니다(ADR-155)', () => {
+  const testRun = { at: '2026-01-01T09:17:00.000Z', sha: 'a', shortSha: 'a', passed: 1, failed: 0 };
+  const base = { checkpoints: [], tests: [], gateChecks: [] };
+  const manual: Requirement = { ...withEars, manualVerification: { by: '범수', at: '2026-10-01', sha: 'a', note: '확인함' } };
+
+  it('테스트 탭 실행이 통과해도 missingScenarios가 남아 있으면 작업 중', () => {
+    expect(computeRequirementStatus({ ...base, testRun, missingScenarios: ['R1.1'] })).toBe('작업 중');
+  });
+
+  it('missingScenarios가 없으면(시나리오가 없거나 전부 확인) 기존처럼 검증됨', () => {
+    expect(computeRequirementStatus({ ...base, testRun })).toBe('검증됨');
+  });
+
+  it('게이트 확인이 전부 통과여도 missingScenarios가 남아 있으면 작업 중', () => {
+    expect(computeRequirementStatus({ ...base, gateChecks: [{ name: 'R1', ok: true }], missingScenarios: ['R1.1'] })).toBe('작업 중');
+  });
+
+  it('missingScenarios가 있어도 실패한 테스트·게이트가 있으면 실패가 우선', () => {
+    expect(computeRequirementStatus({ ...base, testRun: { ...testRun, failed: 1 }, missingScenarios: ['R1.1'] })).toBe('실패');
+    expect(computeRequirementStatus({ ...base, gateChecks: [{ name: 'R1', ok: false }], missingScenarios: ['R1.1'] })).toBe('실패');
+  });
+
+  it('게이트가 통과이고 테스트 탭 실행에 실패가 있으면 missingScenarios가 있을 때 실패로 내린다', () => {
+    expect(computeRequirementStatus({ ...base, gateChecks: [{ name: 'R1', ok: true }], testRun: { ...testRun, failed: 1 }, missingScenarios: ['R1.1'] })).toBe('실패');
+  });
+
+  it('문서 확인·사람 확인은 missingScenarios가 있어도 검증됨을 만든다', () => {
+    const docEvidence = { matched: ['a'], missing: [], satisfied: true };
+    expect(computeRequirementStatus({ ...base, docEvidence, missingScenarios: ['R1.1'] })).toBe('검증됨');
+    expect(computeRequirementStatus({ ...base, testRun, missingScenarios: ['R1.1'] }, manual)).toBe('검증됨');
+  });
+
+  it('출처: 자동 근거가 시나리오를 다 덮지 못했으면 사람 확인·문서 확인으로 표시한다', () => {
+    const docEvidence = { matched: ['a'], missing: [], satisfied: true };
+    expect(requirementVerificationSource({ ...base, testRun, missingScenarios: ['R1.1'] }, manual)).toBe('manual');
+    expect(requirementVerificationSource({ ...base, testRun, docEvidence, missingScenarios: ['R1.1'] }, manual)).toBe('docs');
+    expect(requirementVerificationSource({ ...base, testRun }, manual)).toBe('test');
+    expect(requirementVerificationSource({ ...base, testRun, missingScenarios: ['R1.1'] })).toBe('none');
+  });
+});
+
+describe('findUnverifiedScenarioIds — 사람·문서 확인은 자동 근거 누락을 가리지 않는다(ADR-155)', () => {
+  const requirement: Requirement = {
+    ...withEars,
+    id: 'R9',
+    scenarios: [
+      { id: 'R9.1', given: 'g', when: 'w', then: 't' },
+      { id: 'R9.2', given: 'g', when: 'w', then: 't' },
+    ],
+    manualVerification: { by: '범수', at: '2026-10-01', sha: 'a', note: '확인함' },
+  };
+  const testRunRows: MatrixTestRunRow[] = [{ id: 'R9.1', file: 'a.java', name: 'R9.1', status: 'pass', at: 't', sha: 'a', shortSha: 'a' }];
+
+  it('사람 확인이 있어도 테스트가 덮지 못한 시나리오는 목록에 남는다', () => {
+    expect(findUnverifiedScenarioIds(requirement, [], [], [], testRunRows, { checkpoints: [], tests: [], gateChecks: [] })).toEqual(['R9.2']);
+  });
+
+  it('문서 확인이 만족돼도 테스트가 덮지 못한 시나리오는 목록에 남는다', () => {
+    const { manualVerification: _manual, ...withoutManual } = requirement;
+    const docEvidence = { matched: ['a'], missing: [], satisfied: true };
+    expect(findUnverifiedScenarioIds(withoutManual, [], [], [], testRunRows, { checkpoints: [], tests: [], gateChecks: [], docEvidence })).toEqual(['R9.2']);
+  });
+});
+
+describe('buildTraceabilityMatrix — 평가 없이 계산해도 목록과 같은 규칙을 쓴다(ADR-155)', () => {
+  it('요구사항 id만 단 게이트 확인이 통과해도 시나리오가 미확인이면 요구사항 행이 작업 중', () => {
+    const requirement: Requirement = { ...withEars, id: 'R15', scenarios: [{ id: 'R15.1', given: 'g', when: 'w', then: 't' }] };
+    const matrix = buildTraceabilityMatrix({ requirements: [requirement], checkpoints: [], testFiles: [], gateChecks: [{ name: 'R15 부하', ok: true }] });
+    expect(matrix.rows.find((row) => row.id === 'R15')!.status).toBe('작업 중');
+  });
+});
+
 describe('findUnexecutedTests — 발견은 됐지만 게이트 실행 결과가 없는 테스트(다그푸딩 마찰 152)', () => {
   it('같은 서비스가 HEAD에서 돈 실행인데 이 요구사항 id가 붙은 행이 status: not-run이면 담는다', () => {
     const testRunRows: MatrixTestRunRow[] = [
