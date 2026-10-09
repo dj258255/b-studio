@@ -260,7 +260,9 @@ describe('parseSyncOutput', () => {
   });
 });
 
-describe('SYNC_SCRIPT', () => {
+// 이 묶음은 테스트마다 실제 하위 프로세스(sh, find, grep, sha256sum)를 폴더 단계마다 띄운다. 전체 테스트가 함께 도는 부하에서는
+// 기본 5초를 넘긴 적이 있어(단독으로는 수십 ms) 넉넉한 제한 시간을 준다
+describe('SYNC_SCRIPT', { timeout: 20_000 }, () => {
   // runSync가 mkdtemp로 만드는 임시 폴더를 테스트마다 치운다. 안 치우면 임시 폴더에 계속 쌓이고,
   // 그 조상 폴더를 ls로 훑는 '절대 경로' 테스트(아래)가 돌릴 때마다 조금씩 느려진다
   const createdRoots: string[] = [];
