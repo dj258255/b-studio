@@ -93,6 +93,8 @@ export interface TokenTurn {
   biggestTool?: { name: string; input: string; chars: number };
   /** 그 턴 직전에 오래된 도구 결과를 묶어서 비운 기록. 비우지 않았으면 없다 */
   cleared?: { count: number; chars: number };
+  /** 이 턴 직전에 대화가 압축됐다(로컬 CLI 러너). 이 턴의 컨텍스트 감소는 이상이 아니라 압축의 결과다 */
+  compacted?: { preTokens: number; postTokens?: number };
 }
 
 export interface TokenToolTotal {
