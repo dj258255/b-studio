@@ -2,7 +2,7 @@ import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import type { ExecResult, Sandbox, ServiceUsage } from '@b-studio/sandbox';
-import type { LoadedProject, WorkflowConcurrencyCheck, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
+import { SpecError, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
@@ -40,7 +40,7 @@ function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
 
 async function setup(
   target: LoadedProject,
-  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner; verify?: 'full' | 'light' } = {},
+  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner; verify?: 'full' | 'light'; reload?: () => Promise<LoadedProject> } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
   const commands: string[][] = [];
@@ -57,6 +57,7 @@ async function setup(
     allowBreaking: false,
     maxVerifyAttempts: 3,
     ...(options.verify ? { verify: options.verify } : {}),
+    ...(options.reload ? { reloadProject: options.reload } : {}),
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
     ...(options.browser ? { browserRunner: options.browser } : {}),
@@ -1090,6 +1091,339 @@ describe('VerificationGate api 값 확인', () => {
 
     const failing = await apiGate(target, routingFetcher({ '/api/orders': { status: 200, text: JSON.stringify([{ customerName: '홍길동' }]) } }), { ...rendered, text: '주문 목록' });
     expect(failFeedback(await failing.check())).toContain("api의 $[0].customerName 값 '홍길동'이 /orders 화면에 없습니다");
+  });
+});
+
+describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () => {
+  function nextjs(target: LoadedProject, workflow: Partial<WorkflowSpec>): LoadedProject {
+    return {
+      ...target,
+      spec: { ...target.spec, workflow },
+      managed: [...target.managed, ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' }]],
+    } as unknown as LoadedProject;
+  }
+  function auto(over: Partial<NonNullable<WorkflowSpec['autoPageChecks']>> = {}): NonNullable<WorkflowSpec['autoPageChecks']> {
+    return { service: 'web', mode: 'http', expectStatus: 200, maxPages: 5, ...over };
+  }
+  /** 실행 중 에이전트가 studio.yaml을 고친 상태. 다시 읽으면 시작 때의 설정 위에 workflow 일부가 바뀌어 있다 */
+  function edited(target: LoadedProject, workflow: Partial<WorkflowSpec>): () => Promise<LoadedProject> {
+    return async () => ({ ...target, spec: { ...target.spec, workflow: { ...target.spec.workflow, ...workflow } } }) as LoadedProject;
+  }
+  const page = 'export default function Page() { return null; }\n';
+  /** id 1만 데이터가 없는 앱: /orders/1은 404, 나머지는 통과 */
+  const ordersApp =
+    (requested: string[]): PageFetcher =>
+    async (url) => {
+      requested.push(url);
+      return url.endsWith('/orders/1') ? { status: 404, text: 'Not Found' } : { status: 200, text: '주문 상세' };
+    };
+
+  it('실행 중 sampleParams가 들어오면 다음 검증은 추정한 id 대신 그 값으로 열어 통과한다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    let current = target;
+    const { gate, workspace } = await setup(target, { page: ordersApp(requested), reload: async () => current });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    expect(requested.filter((url) => url.includes('/orders/'))).toEqual([expect.stringMatching(/\/orders\/1$/)]);
+    expect(gate.checks.find((c) => c.name === 'web /orders/1 (자동, id 추정)')!.ok).toBe(false);
+
+    // 에이전트가 안내대로 studio.yaml에 sampleParams를 넣었다
+    current = await edited(target, { autoPageChecks: auto({ sampleParams: { id: '7' } }) })();
+    requested.length = 0;
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.filter((url) => url.includes('/orders/'))).toEqual([expect.stringMatching(/\/orders\/7$/)]);
+    expect(gate.checks.find((c) => c.name === 'web /orders/7 (자동)')!.ok).toBe(true);
+    expect(gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail).toContain('sampleParams(id=7)를 이번 실행에서 바로 반영했습니다');
+  });
+
+  it('sampleParams로 연 화면은 추정이 아니라 엄격하게 판정하고, 사유가 어느 값으로 열었는지 말한다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const { gate, workspace } = await setup(target, {
+      page: async () => ({ status: 404, text: 'Not Found' }),
+      reload: edited(target, { autoPageChecks: auto({ sampleParams: { id: '999001' } }) }),
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /orders/999001 (자동)')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('HTTP 404 (기대 200)');
+    expect(check.detail).toContain('sampleParams로 알려 준 값(id=999001)');
+    expect(check.detail).not.toContain('추정한 id');
+  });
+
+  it('browser 모드에서도 sampleParams로 연 화면이 데이터 요청 404로 실패하면 같은 안내를 붙인다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ mode: 'browser' }) });
+    const { gate, workspace } = await setup(target, {
+      browser: async (url) => ({
+        status: 200,
+        text: '방송',
+        pageErrors: [],
+        consoleErrors: [],
+        failedRequests: url.endsWith('/live/999001') ? ['404 http://127.0.0.1:1/api/v1/live/broadcasts/999001/playback'] : [],
+        mediaErrors: [],
+        blockedRequests: [],
+        horizontalOverflowPx: 0,
+        steps: [],
+      }),
+      reload: edited(target, { autoPageChecks: auto({ mode: 'browser', sampleParams: { id: '999001' } }) }),
+    });
+    await workspace.write('web/app/live/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /live/999001 (자동)')!;
+    expect(check.detail).toContain('실패한 요청: 404');
+    expect(check.detail).toContain('sampleParams로 알려 준 값(id=999001)');
+  });
+
+  it('실행 중에 넣은 값이 선언한 pageChecks와 같은 경로가 돼도 자동 확인을 건너뛰지 않는다(느슨한 선언으로 바꿔치기하지 못한다)', async () => {
+    // 선언한 /orders/7은 기대 상태를 500으로 적어 둔(자동 확인보다 느슨한) 확인이다. 자동 확인은 200을 기대한다
+    const target = nextjs(project, { autoPageChecks: auto(), pageChecks: [{ service: 'web', path: '/orders/7', mode: 'http', expectStatus: 500 }] as WorkflowSpec['pageChecks'] });
+    let current = target;
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => (url.includes('/orders/') ? { status: 500, text: 'Internal Server Error' } : { status: 200, text: 'ok' }),
+      reload: async () => current,
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    current = await edited(target, { autoPageChecks: auto({ sampleParams: { id: '7' } }) })();
+
+    const outcome = await gate.check();
+
+    // 자동 확인이 /orders/7을 직접 열어 500을 실패로 본다. "이미 선언돼 있다"로 건너뛰면 느슨한 선언만 남아 통과했을 것이다
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((c) => c.name === 'web /orders/7 (자동)')).toMatchObject({ ok: false });
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('두 번 열지 않았습니다'))).toBe(false);
+  });
+
+  it('값이 같은 자리의 고정 경로 폴더 이름과 같으면 반영하지 않는다(그 화면이 대신 열려 동적 화면 확인이 사라진다)', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: edited(target, { autoPageChecks: auto({ sampleParams: { id: 'new' } }) }),
+    });
+    // 고정 경로 /orders/new는 이번 실행에서 바뀐 파일이 아니어도 디스크에 있으면 라우터가 먼저 받는다
+    await mkdir(path.join(workspace.root, 'web/app/orders/(forms)/new'), { recursive: true });
+    await writeFile(path.join(workspace.root, 'web/app/orders/(forms)/new/page.tsx'), page);
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    // 값을 반영하지 않았으므로 시작 때처럼 추정한 id로 연다. /orders/new는 열지 않는다
+    expect(requested.filter((url) => url.includes('/orders/'))).toEqual([expect.stringMatching(/\/orders\/1$/)]);
+    const note = gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail!;
+    expect(note).toContain('sampleParams.id=new은(는) 반영하지 않았습니다');
+    expect(note).toContain('web/app/orders/(forms)/new');
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('이번 실행에서 바로 반영했습니다'))).toBe(false);
+  });
+
+  it('값이 경로 이름순을 바꿔도 시작 때의 값이었다면 열었을 화면은 maxPages 밖으로 밀려나지 않는다', async () => {
+    // 시작 때: /m, /z 중 이름순 첫 번째인 /m만 연다. 실행 중 id=a가 들어오면 /a가 앞서지만 /m도 그대로 연다
+    const target = nextjs(project, { autoPageChecks: auto({ maxPages: 1, followImports: false, sampleParams: { id: 'z' } }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(new URL(url).pathname);
+        return { status: 200, text: '화면' };
+      },
+      reload: edited(target, { autoPageChecks: auto({ maxPages: 1, followImports: false, sampleParams: { id: 'a' } }) }),
+    });
+    await workspace.write('web/app/m/page.tsx', page);
+    await workspace.write('web/app/[id]/page.tsx', page);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.filter((pathname) => pathname === '/a' || pathname === '/m').sort()).toEqual(['/a', '/m']);
+    expect(gate.checks.find((c) => c.name === 'web /m (자동)')!.ok).toBe(true);
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('상한(1개)을 넘었습니다') && c.name.includes('m/page.tsx'))).toBe(false);
+  });
+
+  it('경로 조각으로 쓸 수 없는 값은 반영하지 않고 이유를 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    let current = target;
+    const { gate, workspace } = await setup(target, { page: ordersApp(requested), reload: async () => current });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    // 스키마를 거치지 않은 값(주입된 다시 읽기)이 경로를 바꾸려는 문자를 담고 있다
+    current = await edited(target, { autoPageChecks: auto({ sampleParams: { id: '../../admin' } }) })();
+
+    await gate.check();
+
+    // 추정한 id로 그대로 열고, 다른 경로는 열지 않는다
+    expect(requested.filter((url) => url.includes('/orders/'))).toEqual([expect.stringMatching(/\/orders\/1$/)]);
+    expect(requested.some((url) => url.includes('admin'))).toBe(false);
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('경로 조각으로 쓸 수 없는 값'))).toBe(true);
+  });
+
+  it('studio.yaml이 다른 파일로 가는 링크면 읽지 않고, 그 파일의 내용이 사유에 실리지 않는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, { page: ordersApp(requested) });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    await workspace.write('studio.yaml', 'version: 1\n');
+    // 설정 파일 자리를 프로젝트 밖의 파일로 가는 링크로 바꾼다
+    const outside = path.join(project.root, '..', `outside-${Date.now()}.txt`);
+    await writeFile(outside, 'TOP-SECRET-HOST-CONTENT: not yaml {{{');
+    await rm(path.join(project.root, 'studio.yaml'));
+    await symlink(outside, path.join(project.root, 'studio.yaml'));
+
+    const outcome = await gate.check();
+
+    // 설정을 읽는 쪽(loadProject)이 프로젝트 밖을 가리키는 링크를 거절하고, 그 파일의 내용은 어디에도 실리지 않는다
+    const everything = `${JSON.stringify(outcome)}\n${JSON.stringify(gate.report)}\n${JSON.stringify(gate.checks)}`;
+    expect(outcome.kind).toBe('retry');
+    expect(everything).toContain('프로젝트 폴더 밖을 가리키는 링크');
+    expect(everything).not.toContain('TOP-SECRET-HOST-CONTENT');
+    await rm(outside, { force: true });
+  });
+
+  it('같은 키는 새 값으로 덮어 쓰고 시작 때의 다른 키는 그대로 둔다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ sampleParams: { id: '1', slug: 'a' } }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: edited(target, { autoPageChecks: auto({ sampleParams: { id: '9' } }) }),
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    await workspace.write('web/app/tags/[slug]/page.tsx', page);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.some((url) => url.endsWith('/orders/9'))).toBe(true);
+    expect(requested.some((url) => url.endsWith('/tags/a'))).toBe(true);
+  });
+
+  it('실행 중 sampleIdFrom이 들어오면 그 api에서 꺼낸 값으로 연다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        if (url.includes('/api/orders')) return { status: 200, text: '[{"id": 42}]' };
+        return { status: 200, text: '주문 상세' };
+      },
+      reload: edited(target, { autoPageChecks: auto({ sampleIdFrom: { service: 'api', path: '/api/orders', jsonPath: '$[0].id' } }) }),
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.some((url) => url.endsWith('/orders/42'))).toBe(true);
+    expect(gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail).toContain('sampleIdFrom(api /api/orders)');
+  });
+
+  it('실행 중 들어온 sampleIdFrom이 관리형 서비스가 아니면 반영하지 않고 이유를 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: edited(target, { autoPageChecks: auto({ sampleIdFrom: { service: 'internal-admin', path: '/ids', jsonPath: '$[0]' } }) }),
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    expect(requested.some((url) => url.includes('/ids'))).toBe(false);
+    expect(requested.some((url) => url.endsWith('/orders/1'))).toBe(true);
+    expect(gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail).toContain("'internal-admin'은(는) 이 프로젝트의 관리형 서비스가 아니라 반영하지 않았습니다");
+  });
+
+  it('시작 때 dynamicRouteProbe가 꺼져 있으면 실행 중 들어온 sampleIdFrom은 쓰지 않는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ dynamicRouteProbe: false }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: edited(target, { autoPageChecks: auto({ sampleIdFrom: { service: 'api', path: '/api/orders', jsonPath: '$[0].id' } }) }),
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    await gate.check();
+    expect(requested.some((url) => url.includes('/api/orders'))).toBe(false);
+    expect(gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail).toContain('dynamicRouteProbe가 실행을 시작할 때 꺼져 있어');
+  });
+
+  it('실행 중 dynamicRouteProbe·followImports·maxPages·service·pageChecks를 바꿔도 같은 실행에서는 적용되지 않는다(확인이 줄지 않는다)', async () => {
+    const declared = { service: 'web', path: '/dashboard', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false } as const;
+    const target = nextjs(project, { pageChecks: [declared], autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      // 확인을 끄거나 줄이려는 변경 전부와 지워 버린 pageChecks. sampleParams는 함께 들어온 정상 변경이다
+      reload: edited(target, {
+        pageChecks: [],
+        autoPageChecks: auto({ dynamicRouteProbe: false, followImports: false, maxPages: 1, service: 'api', expectStatus: 404, sampleParams: { id: '7' } }),
+      }),
+    });
+    await workspace.write('web/components/OrderCard.tsx', 'export const OrderCard = () => null;\n');
+    await workspace.write('web/app/orders/[id]/page.tsx', "import { OrderCard } from '../../../components/OrderCard';\nexport default function Page() { return OrderCard(); }\n");
+    await workspace.write('web/app/dashboard/page.tsx', page);
+    await workspace.write('web/app/reports/page.tsx', page);
+    await workspace.write('web/app/settings/page.tsx', page);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // 선언한 pageChecks(/dashboard)가 그대로 돌고, 자동 확인은 web 서비스에서 maxPages 5로 모든 페이지를 연다. 값만 바뀌었다
+    const opened = requested.map((url) => new URL(url).pathname);
+    expect(opened).toEqual(expect.arrayContaining(['/dashboard', '/orders/7', '/reports', '/settings']));
+    expect(gate.checks.some((c) => c.name === 'web /dashboard')).toBe(true);
+    expect(gate.checks.find((c) => c.name === 'web web/app/dashboard/page.tsx (자동, 건너뜀)')!.detail).toContain('이미 선언한 pageChecks');
+  });
+
+  it('실행 중 dynamicRouteProbe: false가 들어와도 추정 id 확인은 그대로 돈다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: edited(target, { autoPageChecks: auto({ dynamicRouteProbe: false }) }),
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    expect(gate.checks.find((c) => c.name === 'web /orders/1 (자동, id 추정)')!.ok).toBe(false);
+  });
+
+  it('실행 중 followImports: false가 들어와도 import 역추적은 그대로 돈다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 200, text: '주문 목록' };
+      },
+      reload: edited(target, { autoPageChecks: auto({ followImports: false }) }),
+    });
+    await mkdir(path.join(target.root, 'web/app/orders'), { recursive: true });
+    await mkdir(path.join(target.root, 'web/components'), { recursive: true });
+    await writeFile(path.join(target.root, 'web/app/orders/page.tsx'), "import { Card } from '../../components/Card';\nexport default function Page() { return Card(); }\n");
+    await workspace.write('web/components/Card.tsx', 'export const Card = () => null;\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.some((url) => url.endsWith('/orders'))).toBe(true);
+  });
+
+  it('studio.yaml을 다시 읽지 못하면 시작 때의 값으로 돌고, 읽지 못했다는 사실을 건너뜀 check에 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: async () => {
+        throw new SpecError('studio.yaml 형식이 올바르지 않습니다', ['workflow.autoPageChecks.sampleParams.id: 경로 조각으로 안전한 문자만 쓸 수 있습니다']);
+      },
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    expect(requested.some((url) => url.endsWith('/orders/1'))).toBe(true);
+    const note = gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!;
+    expect(note.ok).toBe(true);
+    expect(note.detail).toContain('새 값을 읽지 못해');
+    expect(note.detail).toContain('sampleParams.id');
+  });
+
+  it('reloadProject를 넘기지 않으면 이번 실행에서 studio.yaml이 바뀐 때만 디스크를 읽는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    // 디스크에 studio.yaml이 없는 가짜 프로젝트: 바뀌지 않았으면 읽지 않으므로 건너뜀 check가 생기지 않는다
+    const { gate, workspace } = await setup(target, { page: ordersApp([]) });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    await gate.check();
+    expect(gate.checks.some((c) => c.name === 'web studio.yaml (자동, 건너뜀)')).toBe(false);
   });
 });
 
