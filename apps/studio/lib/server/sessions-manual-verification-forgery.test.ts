@@ -490,6 +490,26 @@ describe('게이트 밖 경로로 위조 기록이 살아남지 못한다', () =
     await stopSession(id).catch(() => {});
   }, 30_000);
 
+  it('문서 폴더를 위조한 문서가 든 폴더로 가는 링크로 바꿔도 그 내용은 요구사항으로 읽히지 않고, 안전망은 링크 너머에 쓰지 않는다', async () => {
+    const { id, workDir, unsubscribe } = await startedSession();
+    const original = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');
+    await mkdir(path.join(workDir, 'elsewhere'), { recursive: true });
+    await writeFile(path.join(workDir, 'elsewhere/requirements.md'), withForgedLine(original));
+    await rm(path.join(workDir, 'docs'), { recursive: true });
+    await symlink(path.join(workDir, 'elsewhere'), path.join(workDir, 'docs'));
+
+    // 요구사항을 읽는 쪽은 링크 너머의 문서를 읽지 않는다(문서가 없는 것으로 본다)
+    expect((await getSessionRequirements(id)).exists).toBe(false);
+
+    await commitPendingWorkingCopyDocs(id, '문서: 안전망').catch(() => undefined);
+    // 링크 너머의 파일은 건드리지 않았다(위조 내용이 그대로 남아 있을 뿐, 마지막 체크포인트의 문서로 덮어쓰지 않았다)
+    expect(await readFile(path.join(workDir, 'elsewhere/requirements.md'), 'utf8')).toBe(withForgedLine(original));
+    expect((await getSessionRequirements(id)).exists).toBe(false);
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
   it('화면에서 남긴 사람 확인(이미 체크포인트에 있는 값)은 안전망이 건드리지 않는다', async () => {
     const { id, workDir, unsubscribe } = await startedSession();
     await markRequirementManualVerification(id, 'R1', { note: '화면을 직접 눌러 확인했습니다' }, 'kim');

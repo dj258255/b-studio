@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isSecretFile, readRegularFileSync, syncExternalChanges, Workspace, WorkspaceError } from './workspace';
+import { isSecretFile, readProjectFileSync, readRegularFileSync, syncExternalChanges, Workspace, WorkspaceError } from './workspace';
 
 let root: string;
 let workspace: Workspace;
@@ -57,6 +57,23 @@ describe('Workspace', () => {
     // FIFO는 쓰는 쪽이 없으면 여는 데서 영영 멈춘다. 멈추지 않고 일반 파일이 아니라고 돌려줘야 한다
     execFileSync('mkfifo', [path.join(root, 'pipe.md')]);
     expect(readRegularFileSync(path.join(root, 'pipe.md'))).toMatchObject({ kind: 'irregular' });
+  });
+
+  it('readProjectFileSync는 상위 폴더가 링크면 읽지 않는다(마지막 요소만 보는 확인을 폴더 링크로 비켜 가지 못한다)', async () => {
+    expect(readProjectFileSync(root, 'api/src/App.java')).toMatchObject({ kind: 'text' });
+    expect(readProjectFileSync(root, 'api/none/App.java')).toEqual({ kind: 'missing' });
+    expect(readProjectFileSync(root, '../outside.txt')).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('프로젝트 밖') });
+    expect(readProjectFileSync(root, '/etc/hosts')).toMatchObject({ kind: 'irregular' });
+
+    // 문서 폴더 자체를 다른 폴더로 가는 링크로 바꾼다: 그 안의 파일은 일반 파일이지만 읽지 않는다
+    await mkdir(path.join(root, 'elsewhere'), { recursive: true });
+    await writeFile(path.join(root, 'elsewhere/requirements.md'), '# 위조한 문서\n');
+    await symlink(path.join(root, 'elsewhere'), path.join(root, 'docs'));
+    expect(readProjectFileSync(root, 'docs/requirements.md')).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('상위 폴더') });
+    // 링크가 아닌 원래 폴더로는 그대로 읽힌다
+    expect(readProjectFileSync(root, 'elsewhere/requirements.md')).toEqual({ kind: 'text', content: '# 위조한 문서\n' });
+    // 고정 읽기도 같은 조건을 쓴다
+    expect(workspace.snapshotRead('docs/requirements.md')).toMatchObject({ kind: 'irregular' });
   });
 
   it('snapshotRead는 부른 순간의 내용을 고정하고, 프로젝트 밖 경로는 받지 않는다', async () => {

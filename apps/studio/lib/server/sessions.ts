@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -137,7 +137,7 @@ import {
   type CliTier,
   verifyChanges,
   workflowStages,
-  readRegularFileSync,
+  readProjectFileSync,
   Workspace,
   adrFilePath,
   appendExperimentEntry,
@@ -2926,18 +2926,46 @@ export function isDocPath(file: string): boolean {
  * 되돌린 내용을 설명하는 줄을 돌려준다(없으면 빈 배열). 문서 체크포인트 커밋이 실패해 아직 커밋되지 않은 채 남은
  * 화면의 사람 확인은 되돌려지므로 화면에서 다시 눌러야 한다 — 대화에 되돌렸다고 남긴다.
  */
+/** 프로젝트 루트 아래 폴더가 링크를 끼지 않은 일반 폴더인지(실제 위치가 루트의 실제 위치 + 같은 상대 경로인지) */
+function isPlainProjectDirectory(projectRoot: string, relative: string): boolean {
+  try {
+    return realpathSync(path.join(projectRoot, relative)) === path.join(realpathSync(projectRoot), relative);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 요구사항 문서를 읽는다. 일반 파일이고 상위 폴더에 링크가 없을 때만 읽는다(readProjectFileSync) — 문서 자리나 문서 폴더를
+ * 링크로 바꿔 다른 곳의 내용이 요구사항(과 그 안의 사람 확인)으로 읽히지 않게 한다. 없거나 읽을 수 없는 꼴이면 undefined
+ */
+function readRequirementsDocument(projectRoot: string): string | undefined {
+  const read = readProjectFileSync(projectRoot, REQUIREMENTS_FILE);
+  return read.kind === 'text' ? read.content : undefined;
+}
+
 async function restoreForgedVerificationRecords(checkpoints: CheckpointStore, projectRoot: string): Promise<string[]> {
   if (!(await checkpoints.pendingFiles()).includes(REQUIREMENTS_FILE)) return [];
   const file = path.join(projectRoot, REQUIREMENTS_FILE);
-  const read = readRegularFileSync(file);
+  const read = readProjectFileSync(projectRoot, REQUIREMENTS_FILE);
   if (read.kind === 'missing') return [];
   const committed = await checkpoints.fileAt(REQUIREMENTS_FILE);
   if (read.kind === 'irregular') {
+    // 상위 폴더(docs)가 링크면 이 경로로 쓰는 것 자체가 프로젝트 밖을 건드릴 수 있다. 아무것도 쓰지 않고 알리기만 한다 —
+    // 요구사항을 읽는 쪽(readRequirementsDocument)도 같은 조건으로 읽지 않으므로 링크 너머의 내용이 검증됨을 만들지는 못한다
+    if (!isPlainProjectDirectory(projectRoot, path.dirname(REQUIREMENTS_FILE))) {
+      return [`요구사항 문서를 읽을 수 없는 꼴이어서(${read.reason}) 되돌리지 못했습니다. 문서 폴더를 일반 폴더로 되돌려 주세요`];
+    }
     // 문서 자리에 링크·FIFO·거대한 파일이 놓였다. 그대로 커밋하면 링크 너머의 내용이 요구사항으로 읽히므로, 그 항목만
-    // 치우고(링크는 가리키는 대상이 아니라 링크 자신을 지운다) 마지막 체크포인트의 문서를 일반 파일로 되돌려 놓는다
+    // 치우고(링크는 가리키는 대상이 아니라 링크 자신을 지운다) 마지막 체크포인트의 문서를 일반 파일로 되돌려 놓는다.
+    // 되돌려 쓸 때는 배타 생성(wx)으로만 쓴다: 지우기가 실패해 링크가 남아 있으면 링크를 통해 다른 파일을 덮어쓰지 않고 그만둔다
     await rm(file, { force: true }).catch(() => {});
-    if (committed !== undefined) await writeFile(file, committed).catch(() => {});
-    return [`요구사항 문서를 읽을 수 없는 꼴이어서(${read.reason}) 마지막 체크포인트의 문서로 되돌렸습니다`];
+    const rewritten = committed === undefined ? true : await writeFile(file, committed, { flag: 'wx' }).then(() => true, () => false);
+    return [
+      rewritten
+        ? `요구사항 문서를 읽을 수 없는 꼴이어서(${read.reason}) 마지막 체크포인트의 문서로 되돌렸습니다`
+        : `요구사항 문서를 읽을 수 없는 꼴인데(${read.reason}) 치우지 못해 되돌리지 못했습니다. 일반 파일로 되돌려 주세요`,
+    ];
   }
   const working = read.content;
   const diff = diffVerificationRecords(committed, working);
@@ -4616,7 +4644,7 @@ function mergeQuestionsWithMissingReferences(questions: readonly string[], refer
 
 /** 지금 저장된 docs/requirements.md가 있으면 그 요구사항 목록을, 없으면 빈 배열을 읽는다(재추출 병합 기준점) */
 async function readSavedRequirements(session: Session): Promise<Requirement[]> {
-  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  const raw = readRequirementsDocument(session.project.root);
   if (raw === undefined) return [];
   return parseRequirementsMarkdown(raw).requirements;
 }
@@ -5091,7 +5119,7 @@ function evaluateRequirementWithContext(requirement: Requirement, context: Requi
 export async function getSessionRequirements(id: string, { strict = false }: { strict?: boolean } = {}): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const draft = await getSessionRequirementExtractionDraft(id);
-  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  const raw = readRequirementsDocument(session.project.root);
   if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [], ...(draft ? { draft } : {}) };
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps, ...(draft ? { draft } : {}) };
@@ -5241,7 +5269,7 @@ export async function markRequirementManualVerification(id: string, requirementI
   const checkpoint = evidenceBaseCheckpoint(session.snapshot.checkpoints);
   if (!checkpoint) throw new StudioError(409, '체크포인트가 하나도 없어 확인한 시점을 남길 수 없습니다 — 먼저 체크포인트를 만들어 주세요');
 
-  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  const raw = readRequirementsDocument(session.project.root);
   if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   if (!requirements.some((requirement) => requirement.id === requirementId)) throw new StudioError(404, '요구사항을 찾을 수 없습니다');
@@ -5257,7 +5285,7 @@ export async function clearRequirementManualVerification(id: string, requirement
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인을 취소할 수 있습니다');
   if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 사람 확인을 취소할 수 없습니다. 끝난 뒤에 눌러 주세요');
-  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  const raw = readRequirementsDocument(session.project.root);
   if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   const target = requirements.find((requirement) => requirement.id === requirementId);
@@ -6193,7 +6221,7 @@ async function buildTestServiceView(session: Session, serviceName: string): Prom
 
 /** docs/requirements.md에는 있지만 어느 서비스 테스트 이름에도 id가 나타나지 않는 요구사항 */
 async function requirementsWithoutTests(session: Session, services: readonly TestServiceView[]): Promise<RequirementWithoutTest[]> {
-  const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
+  const raw = readRequirementsDocument(session.project.root);
   if (!raw) return [];
   const { requirements } = parseRequirementsMarkdown(raw);
   if (requirements.length === 0) return [];
