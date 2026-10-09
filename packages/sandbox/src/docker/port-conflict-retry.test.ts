@@ -50,6 +50,7 @@ done
 
 for a in "$@"; do
   case "$a" in
+    config) printf '{"services":{}}\\n'; exit 0 ;;
     build) exit 0 ;;
     ps) exit 0 ;;
     down) exit 0 ;;

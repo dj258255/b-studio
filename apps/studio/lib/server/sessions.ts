@@ -2467,7 +2467,10 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
   // 게이트가 요구사항 문서의 검증 기록을 견줄 기준은 마지막 체크포인트에 커밋된 문서다(ADR-157). 작업 트리에는 앞선 실행이
   // 체크포인트 없이 남긴 변경(질문으로 멈춘 실행, 되살린 보관본)이 있을 수 있어, 그것을 기준으로 삼으면 그 안의 기록이 통과한다.
   // 화면에서 남긴 사람 확인은 그 자리에서 문서 체크포인트로 커밋되므로 여기에 들어 있다
-  const requirementsBaseline = (await session.checkpoints.fileAt(REQUIREMENTS_FILE)) ?? null;
+  // HEAD가 아니라 서버가 알고 있는 마지막 체크포인트의 sha로 읽는다. 저장소의 HEAD가 서버 모르게 옮겨져도(누군가 작업 복사본의
+  // 저장소에 직접 커밋해도) 기준이 따라가지 않는다. 그 sha를 읽지 못하면 문서가 없던 것으로 보아 닫히는 쪽으로 떨어진다
+  const lastCheckpointSha = session.snapshot.checkpoints[0]?.sha;
+  const requirementsBaseline = (lastCheckpointSha ? await session.checkpoints.fileAt(REQUIREMENTS_FILE, lastCheckpointSha) : undefined) ?? null;
   const shared = {
     project: session.project,
     sandbox: session.sandbox,

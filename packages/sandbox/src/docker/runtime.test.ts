@@ -5,16 +5,16 @@ import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import { LocalDockerProvider, runtimeFromEnv } from './compose-provider';
 
-/** `docker info`에만 답하는 가짜 docker 실행 파일 */
+/** `docker info`와 `docker compose config`에만 답하는 가짜 docker 실행 파일 */
 async function fakeDocker(runtimesJson: string): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'fake-docker-'));
   const bin = path.join(dir, 'docker');
-  await writeFile(bin, `#!/bin/sh\nif [ "$1" = "info" ]; then echo '${runtimesJson}'; exit 0; fi\necho "unexpected: $*" >&2\nexit 9\n`);
+  await writeFile(bin, `#!/bin/sh\nif [ "$1" = "info" ]; then echo '${runtimesJson}'; exit 0; fi\nif [ "$2" = "--project-name" ]; then echo '{"services":{}}'; exit 0; fi\necho "unexpected: $*" >&2\nexit 9\n`);
   await chmod(bin, 0o755);
   return bin;
 }
 
-const project = { spec: { name: 'orders' }, managed: [], composeServices: [] } as unknown as LoadedProject;
+const project = { spec: { name: 'orders' }, root: '/tmp/orders', composePath: '/tmp/orders/compose.yaml', managed: [], composeServices: [] } as unknown as LoadedProject;
 
 describe('컨테이너 런타임 확인', () => {
   it('등록되지 않은 런타임은 샌드박스를 만들기 전에 등록된 목록과 함께 거부한다', async () => {
