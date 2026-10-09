@@ -5,7 +5,7 @@ import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, t
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
-import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromCandidates, routesFromChangedFiles } from './next-routes';
+import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromCandidates, routesFromChangedFiles, type NextRoute, type NextRoutes } from './next-routes';
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
@@ -452,34 +452,61 @@ export class VerificationGate {
     }
 
     // 실행 중에 에이전트가 알려 준 sample 값만 받아들인다. 나머지 설정은 시작 때의 것이다(ADR-159)
-    const refreshed = await this.#withLatestSampleValues(started);
+    let refreshed = await this.#withLatestSampleValues(started);
+    const followed = started.followImports === false ? undefined : await this.#followImports(service[1].path);
+    const build = (config: AutoPageChecks, fallback: string | undefined): NextRoutes =>
+      followed
+        ? routesFromCandidates(followed.candidates, service[1].path, config.sampleParams ?? {}, config.maxPages, fallback)
+        : routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages, fallback);
+    let fallbackValue = await this.#dynamicRouteFallback(refreshed.config);
+    let found = build(refreshed.config, fallbackValue);
+    // 시작 때의 값이었다면 열었을 화면인데 실행 중 값 때문에 목록에서 빠진 것. 시작 때의 값 그대로 되살려 연다
+    const kept = new Map<NextRoute, string | undefined>();
+    if (refreshed.inRunKeys.size > 0 || refreshed.inRunSampleIdFrom) {
+      // 값은 "어떤 id로 여는가"만 정해야 한다. 값이 "무엇을 여는가"를 바꾸는 두 경우를 막는다(ADR-159 결정 11)
+      const startedFallback = refreshed.inRunSampleIdFrom ? await this.#dynamicRouteFallback(started) : fallbackValue;
+      // ① 같은 자리에 값과 이름이 같은 고정 경로 폴더가 있으면 라우터가 그 화면을 대신 연다 — 바뀐 동적 화면은 열리지 않는다
+      const shadowed = await this.#shadowedByStaticSibling(found.routes, refreshed, fallbackValue);
+      if (shadowed.length > 0) {
+        refreshed = withoutInRunValues(refreshed, started, shadowed);
+        if (!refreshed.inRunSampleIdFrom) fallbackValue = startedFallback;
+        found = build(refreshed.config, fallbackValue);
+      }
+      // ② 값이 바뀌면 경로 이름순이 바뀌어 다른 화면이 maxPages 밖으로 밀리거나, 두 파일이 같은 경로가 돼 하나가 빠질 수 있다
+      const have = new Set(found.routes.map((route) => route.file));
+      const dropped = build(started, startedFallback).routes.filter((route) => !have.has(route.file));
+      if (dropped.length > 0) {
+        for (const route of dropped) kept.set(route, startedFallback);
+        const files = new Set(dropped.map((route) => route.file));
+        found = { routes: [...found.routes, ...dropped], skipped: found.skipped.filter((entry) => !files.has(entry.file)) };
+      }
+    }
     const config = refreshed.config;
-    const fallbackValue = await this.#dynamicRouteFallback(config);
-    const followed = config.followImports === false ? undefined : await this.#followImports(service[1].path);
-    const found = followed
-      ? routesFromCandidates(followed.candidates, service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue)
-      : routesFromChangedFiles(this.#options.workspace.changedFiles(), service[1].path, config.sampleParams ?? {}, config.maxPages, fallbackValue);
     const declaredKeys = new Set(declared.map((page) => `${page.service} ${page.path}`));
     const pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string; sampled?: string }> = [];
     const skipped = [
-      ...refreshed.notes.map((note) => this.#autoSkipCheck(config.service, SPEC_FILE, note)),
-...(followed?.notes ?? []).map((note) => this.#autoSkipCheck(config.service, note.file, note.reason)), ...found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason))];
+      ...[...refreshed.notes, ...acceptedNotes(refreshed)].map((note) => this.#autoSkipCheck(config.service, SPEC_FILE, note)),
+      ...(followed?.notes ?? []).map((note) => this.#autoSkipCheck(config.service, note.file, note.reason)),
+      ...found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason)),
+    ];
     for (const route of found.routes) {
       // 선언한 pageChecks와 같은 경로는 두 번 열지 않는다. 단, 실행 중에 받아들인 값으로 채운 동적 경로는 건너뛰지 않는다: 에이전트가
       // 값을 골라 경로를 선언된 확인과 겹치게 만들면, 엄격한 자동 확인이 더 느슨할 수 있는 선언된 확인(콘솔 오류 허용 등)으로 바뀐다.
       // 값과 무관한 정적 경로는 지금처럼 건너뛴다
-      if (!usesInRunValue(route, refreshed) && declaredKeys.has(`${config.service} ${route.path}`)) {
+      const fromStart = kept.has(route);
+      if ((fromStart || !usesInRunValue(route, refreshed)) && declaredKeys.has(`${config.service} ${route.path}`)) {
         skipped.push(this.#autoSkipCheck(config.service, route.file, `${route.path}은(는) 이미 선언한 pageChecks에 있어 두 번 열지 않았습니다`));
         continue;
       }
       // id를 추정해 채운 동적 경로는 이름에 표시하고, 404·500만 실패로 보도록 probedId를 남긴다
-      const probed = (route.usedFallbackParams?.length ?? 0) > 0 && fallbackValue !== undefined;
+      const fallback = fromStart ? kept.get(route) : fallbackValue;
+      const probed = (route.usedFallbackParams?.length ?? 0) > 0 && fallback !== undefined;
       // sampleParams로 알려 준 값으로 연 동적 경로는 추정이 아니므로 엄격하게 판정한다. 실패하면 어느 값으로 열었는지 사유에 붙인다
-      const sampled = probed ? undefined : sampledValues(route.file, config.sampleParams);
+      const sampled = probed ? undefined : sampledValues(route.file, (fromStart ? started : config).sampleParams);
       pages.push({
         page: autoPageCheck(config, route.path),
         name: `${config.service} ${route.path} (자동${probed ? ', id 추정' : ''}${route.cause ? ` · ${route.cause.slice(route.cause.lastIndexOf('/') + 1)} 변경` : ''})`,
-        ...(probed ? { probedId: fallbackValue } : {}),
+        ...(probed ? { probedId: fallback } : {}),
         ...(sampled ? { sampled } : {}),
       });
     }
@@ -528,7 +555,6 @@ export class VerificationGate {
     if (added.length > 0) {
       for (const [key] of added) inRunKeys.add(key);
       config.sampleParams = { ...started.sampleParams, ...Object.fromEntries(added) };
-      notes.push(`${SPEC_FILE}의 autoPageChecks.sampleParams(${added.map(([key, value]) => `${key}=${value}`).join(', ')})를 이번 실행에서 바로 반영했습니다`);
     }
     const from = latest.sampleIdFrom;
     if (from && JSON.stringify(from) !== JSON.stringify(started.sampleIdFrom)) {
@@ -540,10 +566,45 @@ export class VerificationGate {
       } else {
         config.sampleIdFrom = from;
         inRunSampleIdFrom = true;
-        notes.push(`${SPEC_FILE}의 autoPageChecks.sampleIdFrom(${from.service} ${from.path})을 이번 실행에서 바로 반영했습니다`);
       }
     }
     return { config, notes, inRunKeys, inRunSampleIdFrom };
+  }
+
+  /**
+   * 실행 중에 받아들인 값으로 채운 동적 세그먼트 자리에, 그 값과 이름이 같은 고정 경로 폴더가 있는지 본다(ADR-159 결정 11).
+   * `app/orders/[id]`에 `id: "new"`를 넣으면 `/orders/new`는 `app/orders/new`가 받는다 — 바뀐 동적 화면 대신 다른 화면이 열려
+   * 확인 하나가 사라진다. 라우트 그룹 `(…)`은 경로에 나타나지 않으므로 건너뛰어 본다. 폴더를 읽지 못하면 받아들이지 않는 쪽으로 간다.
+   */
+  async #shadowedByStaticSibling(routes: readonly NextRoute[], latest: LatestSampleValues, fallbackValue: string | undefined): Promise<ShadowedValue[]> {
+    const found = new Map<string, ShadowedValue>();
+    for (const route of routes) {
+      const segments = route.file.split('/');
+      for (const [index, segment] of segments.entries()) {
+        const name = DYNAMIC_FOLDER.exec(segment)?.[1];
+        if (name === undefined) continue;
+        const viaSampleIdFrom = !latest.inRunKeys.has(name);
+        if (viaSampleIdFrom && !(latest.inRunSampleIdFrom && route.usedFallbackParams?.includes(name))) continue;
+        const value = viaSampleIdFrom ? fallbackValue : latest.config.sampleParams?.[name];
+        if (value === undefined) continue;
+        // 그룹 폴더는 경로에 없으니, 경로상 부모는 그룹이 아닌 가장 가까운 윗폴더다
+        let parent = index;
+        while (parent > 0 && GROUP_FOLDER.test(segments[parent - 1]!)) parent -= 1;
+        const base = segments.slice(0, parent).join('/');
+        const key = viaSampleIdFrom ? 'sampleIdFrom' : name;
+        try {
+          const folder = (await this.#options.workspace.list(base === '' ? '.' : base, 3)).find((entry) => {
+            if (!entry.endsWith('/')) return false;
+            const inside = (base === '' ? entry : entry.slice(base.length + 1)).slice(0, -1).split('/');
+            return inside.at(-1) === value && inside.slice(0, -1).every((part) => GROUP_FOLDER.test(part));
+          });
+          if (folder) found.set(key, { name, value, viaSampleIdFrom, reason: `같은 자리에 고정 경로 폴더(${folder.slice(0, -1)})가 있어 그 화면이 대신 열립니다` });
+        } catch {
+          found.set(key, { name, value, viaSampleIdFrom, reason: `같은 자리에 같은 이름의 고정 경로가 있는지 확인하지 못했습니다(${base || '.'})` });
+        }
+      }
+    }
+    return [...found.values()];
   }
 
   /**
@@ -1040,6 +1101,54 @@ interface LatestSampleValues {
   inRunKeys: Set<string>;
   /** 이번 실행 중에 새 sampleIdFrom을 받아들였는지(추정 id가 그 값에서 온다) */
   inRunSampleIdFrom: boolean;
+}
+
+/** 단순 동적 세그먼트 폴더 `[id]`와 라우트 그룹 폴더 `(group)` (next-routes.ts와 같은 규칙) */
+const DYNAMIC_FOLDER = /^\[([^[\]]+)\]$/;
+const GROUP_FOLDER = /^\(.+\)$/;
+
+/** 실행 중에 받아들였다가 고정 경로와 겹쳐 되돌리는 값 */
+interface ShadowedValue {
+  name: string;
+  value: string;
+  viaSampleIdFrom: boolean;
+  reason: string;
+}
+
+/** 받아들인 값을 알리는 문구. 되돌린 값이 빠진 마지막 상태에서 만든다 */
+function acceptedNotes(latest: LatestSampleValues): string[] {
+  const notes: string[] = [];
+  const params = [...latest.inRunKeys].map((key) => `${key}=${latest.config.sampleParams?.[key]}`);
+  if (params.length > 0) notes.push(`${SPEC_FILE}의 autoPageChecks.sampleParams(${params.join(', ')})를 이번 실행에서 바로 반영했습니다`);
+  const from = latest.config.sampleIdFrom;
+  if (latest.inRunSampleIdFrom && from) notes.push(`${SPEC_FILE}의 autoPageChecks.sampleIdFrom(${from.service} ${from.path})을 이번 실행에서 바로 반영했습니다`);
+  return notes;
+}
+
+/** 고정 경로와 겹친 값을 시작 때의 값으로 되돌린다(시작 때 없던 키는 지운다) */
+function withoutInRunValues(latest: LatestSampleValues, started: AutoPageChecks, shadowed: readonly ShadowedValue[]): LatestSampleValues {
+  const config: AutoPageChecks = { ...latest.config };
+  const sampleParams = { ...config.sampleParams };
+  const inRunKeys = new Set(latest.inRunKeys);
+  let inRunSampleIdFrom = latest.inRunSampleIdFrom;
+  const notes = [...latest.notes];
+  for (const entry of shadowed) {
+    if (entry.viaSampleIdFrom) {
+      inRunSampleIdFrom = false;
+      if (started.sampleIdFrom) config.sampleIdFrom = started.sampleIdFrom;
+      else delete config.sampleIdFrom;
+      notes.push(`${SPEC_FILE}의 autoPageChecks.sampleIdFrom으로 얻은 값(${entry.value})은 반영하지 않았습니다 — ${entry.reason}`);
+      continue;
+    }
+    inRunKeys.delete(entry.name);
+    const before = started.sampleParams?.[entry.name];
+    if (before === undefined) delete sampleParams[entry.name];
+    else sampleParams[entry.name] = before;
+    notes.push(`${SPEC_FILE}의 autoPageChecks.sampleParams.${entry.name}=${entry.value}은(는) 반영하지 않았습니다 — ${entry.reason}. 그 동적 화면이 실제로 받는 값을 적으세요`);
+  }
+  if (Object.keys(sampleParams).length > 0) config.sampleParams = sampleParams;
+  else delete config.sampleParams;
+  return { config, notes, inRunKeys, inRunSampleIdFrom };
 }
 
 /** 이 경로가 실행 중에 받아들인 값으로 채워졌는지: 동적 세그먼트가 그 키를 쓰거나, 추정 id가 실행 중에 들어온 sampleIdFrom에서 왔을 때 */

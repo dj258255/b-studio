@@ -1,4 +1,5 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
@@ -268,20 +269,42 @@ async function readProjectText(root: string, relative: string): Promise<string> 
   if (path.isAbsolute(relative) || !isInside(root, file)) {
     throw new SpecError(`${relative}: 프로젝트 폴더 안의 경로만 쓸 수 있습니다`);
   }
+  const outside = (): SpecError => new SpecError(`${relative}: 프로젝트 폴더 밖을 가리키는 링크는 읽지 않습니다`);
+  const missing = (): SpecError => new SpecError(`파일이 없습니다: ${file}`);
   let realRoot: string;
   let realFile: string;
   try {
     [realRoot, realFile] = await Promise.all([realpath(root), realpath(file)]);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new SpecError(`파일이 없습니다: ${file}`);
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missing();
     throw new SpecError(`${relative}: 파일을 열 수 없습니다`);
   }
-  if (!isInside(realRoot, realFile)) throw new SpecError(`${relative}: 프로젝트 폴더 밖을 가리키는 링크는 읽지 않습니다`);
+  if (!isInside(realRoot, realFile)) throw outside();
+
+  // 위의 확인과 여는 것 사이에 경로의 폴더나 파일이 링크로 바뀔 수 있다. 그래서 먼저 열고(마지막 조각이 링크면 열지 않는다),
+  // 연 파일이 지금도 그 경로가 가리키는 프로젝트 안의 파일과 같은 파일인지 본 뒤에 그 열린 파일에서 읽는다
+  let handle: FileHandle;
   try {
-    return await readFile(realFile, 'utf8');
+    handle = await open(realFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new SpecError(`파일이 없습니다: ${file}`);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') throw missing();
+    if (code === 'ELOOP') throw outside();
+    throw new SpecError(`${relative}: 파일을 열 수 없습니다`);
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) throw new SpecError(`${relative}: 일반 파일이 아닙니다`);
+    const [rootNow, fileNow] = await Promise.all([realpath(root), realpath(file)]);
+    const now = await lstat(fileNow);
+    if (!isInside(rootNow, fileNow) || now.dev !== opened.dev || now.ino !== opened.ino) throw outside();
+    return await handle.readFile('utf8');
+  } catch (error) {
+    if (error instanceof SpecError) throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missing();
     throw new SpecError(`${relative}: 파일을 읽을 수 없습니다`);
+  } finally {
+    await handle.close();
   }
 }
 

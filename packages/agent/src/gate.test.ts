@@ -1197,6 +1197,47 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     expect(gate.checks.some((c) => (c.detail ?? '').includes('두 번 열지 않았습니다'))).toBe(false);
   });
 
+  it('값이 같은 자리의 고정 경로 폴더 이름과 같으면 반영하지 않는다(그 화면이 대신 열려 동적 화면 확인이 사라진다)', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: ordersApp(requested),
+      reload: edited(target, { autoPageChecks: auto({ sampleParams: { id: 'new' } }) }),
+    });
+    // 고정 경로 /orders/new는 이번 실행에서 바뀐 파일이 아니어도 디스크에 있으면 라우터가 먼저 받는다
+    await mkdir(path.join(workspace.root, 'web/app/orders/(forms)/new'), { recursive: true });
+    await writeFile(path.join(workspace.root, 'web/app/orders/(forms)/new/page.tsx'), page);
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+
+    expect((await gate.check()).kind).toBe('retry');
+    // 값을 반영하지 않았으므로 시작 때처럼 추정한 id로 연다. /orders/new는 열지 않는다
+    expect(requested.filter((url) => url.includes('/orders/'))).toEqual([expect.stringMatching(/\/orders\/1$/)]);
+    const note = gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail!;
+    expect(note).toContain('sampleParams.id=new은(는) 반영하지 않았습니다');
+    expect(note).toContain('web/app/orders/(forms)/new');
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('이번 실행에서 바로 반영했습니다'))).toBe(false);
+  });
+
+  it('값이 경로 이름순을 바꿔도 시작 때의 값이었다면 열었을 화면은 maxPages 밖으로 밀려나지 않는다', async () => {
+    // 시작 때: /m, /z 중 이름순 첫 번째인 /m만 연다. 실행 중 id=a가 들어오면 /a가 앞서지만 /m도 그대로 연다
+    const target = nextjs(project, { autoPageChecks: auto({ maxPages: 1, followImports: false, sampleParams: { id: 'z' } }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(new URL(url).pathname);
+        return { status: 200, text: '화면' };
+      },
+      reload: edited(target, { autoPageChecks: auto({ maxPages: 1, followImports: false, sampleParams: { id: 'a' } }) }),
+    });
+    await workspace.write('web/app/m/page.tsx', page);
+    await workspace.write('web/app/[id]/page.tsx', page);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.filter((pathname) => pathname === '/a' || pathname === '/m').sort()).toEqual(['/a', '/m']);
+    expect(gate.checks.find((c) => c.name === 'web /m (자동)')!.ok).toBe(true);
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('상한(1개)을 넘었습니다') && c.name.includes('m/page.tsx'))).toBe(false);
+  });
+
   it('경로 조각으로 쓸 수 없는 값은 반영하지 않고 이유를 남긴다', async () => {
     const target = nextjs(project, { autoPageChecks: auto() });
     const requested: string[] = [];

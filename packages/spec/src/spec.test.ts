@@ -959,6 +959,15 @@ describe('loadProject: 프로젝트 폴더 밖의 파일은 읽지 않는다 (AD
     expect((await loadProject(dir)).composeServices).toEqual(['api']);
   });
 
+  it('설정 파일 자리에 폴더가 있으면 일반 파일이 아니라고 알린다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(path.join(dir, 'studio.yaml'), API_SPEC);
+    await mkdir(path.join(dir, 'compose.yaml'));
+    const error = await failure(dir);
+    expect(error).toBeInstanceOf(SpecError);
+    expect(error.message).toContain('compose.yaml: 일반 파일이 아닙니다');
+  });
+
   it('YAML 문법 오류는 위치만 알리고 파일 내용을 싣지 않는다', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
     await writeFile(path.join(dir, 'studio.yaml'), OUTSIDE);
