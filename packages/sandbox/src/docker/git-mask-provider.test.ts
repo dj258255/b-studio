@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LocalDockerProvider } from './compose-provider';
+import { LocalDockerProvider, splitUpArgs } from './compose-provider';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -17,7 +17,7 @@ interface Fixture {
   dir: string;
   /** `compose config`가 내보낼 설정. 호출 순서 N번째에 `config-N.json`이 있으면 그것을 대신 내보낸다 */
   configFile: string;
-  /** `docker inspect`가 내보낼 컨테이너 목록(JSON). 파일이 없으면 컨테이너가 없는 것으로 본다 */
+  /** `docker inspect`가 내보낼 컨테이너 목록(JSON). 파일이 없으면 컨테이너가 없는 것으로 본다. 호출 순서 N번째에 `inspect-N.json`이 있으면 그것을 대신 내보낸다 */
   inspectFile: string;
   /** 실행한 docker 명령 인자(줄마다 하나) */
   log: () => Promise<string>;
@@ -57,7 +57,7 @@ for a in "$@"; do
   esac
 done
 case " $* " in
-  *" ps "*) if [ -f "${inspectFile}" ]; then echo c1; fi; exit 0 ;;
+  *" ps "*) if [ -f "${dir}/ps-fails" ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi; if [ -f "${inspectFile}" ]; then echo c1; fi; exit 0 ;;
 esac
 for a in "$@"; do
   case "$a" in
@@ -69,8 +69,11 @@ for a in "$@"; do
       esac
       exit 0 ;;
     up) cp "$override" "${snapshot}"; echo up >> "${dir}/ups"; exit 0 ;;
-    inspect) cat "${inspectFile}"; exit 0 ;;
-    volume) echo '[]'; exit 0 ;;
+    inspect)
+      i=$(cat "${dir}/inspect-count" 2>/dev/null || echo 0); i=$((i + 1)); echo "$i" > "${dir}/inspect-count"
+      if [ -f "${dir}/inspect-$i.json" ]; then cat "${dir}/inspect-$i.json"; else cat "${inspectFile}"; fi
+      exit 0 ;;
+    volume) if [ -f "${dir}/volume-fails" ]; then echo "no such volume" >&2; exit 1; fi; echo '[]'; exit 0 ;;
   esac
 done
 exit 0
@@ -98,6 +101,27 @@ exit 0
     upCount: () => readFile(path.join(dir, 'ups'), 'utf8').then((text) => text.split('\n').filter(Boolean).length, () => 0),
   };
 }
+
+/** 로그에서 up 호출을 순서대로 뽑아 만들기(`--no-start`)인지 시작(`--no-recreate`)인지로 바꾼다 */
+function upPhases(log: string): string[] {
+  return log
+    .split('\n')
+    .filter((line) => / up /.test(` ${line} `) && line.includes('compose'))
+    .map((line) => (line.includes('--no-start') ? 'create' : line.includes('--no-recreate') ? 'start' : 'other'));
+}
+
+describe('up 인자를 만들기와 시작으로 나눈다', () => {
+  it('만들기는 --no-start를 더하고 --detach를 빼며, 시작은 --no-recreate를 더하고 --force-recreate·--build를 뺀다', () => {
+    expect(splitUpArgs(['up', '--detach', '--build', '--no-deps', '--force-recreate', 'api'])).toEqual({
+      create: ['up', '--no-start', '--build', '--no-deps', '--force-recreate', 'api'],
+      start: ['up', '--no-recreate', '--detach', '--no-deps', 'api'],
+    });
+    expect(splitUpArgs(['up', '--detach', '--remove-orphans'])).toEqual({
+      create: ['up', '--no-start', '--remove-orphans'],
+      start: ['up', '--no-recreate', '--detach', '--remove-orphans'],
+    });
+  });
+});
 
 describe('서비스 컨테이너의 .git 보호', () => {
   it('샌드박스를 만들 때 compose가 정규화한 마운트를 읽어 override에 .git 읽기 전용과 상태 폴더를 가리는 빈 폴더를 적는다', async () => {
@@ -163,14 +187,16 @@ describe('서비스 컨테이너의 .git 보호', () => {
   });
 
   it('up이 도는 동안 compose 파일이 바뀌어도 up 뒤에 다시 읽어 마스크를 맞추고 다시 up한다', async () => {
-    const { project, dockerBin, dir, overrideAtUp, upCount, root } = await setup();
+    const { project, dockerBin, dir, overrideAtUp, upCount, log, root } = await setup();
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
     // 호출 순서: create(1), up 직전(2), up 직후(3) — 3번째부터 마운트가 늘어난 설정이 보인다
     for (let n = 3; n <= 12; n++) await writeFile(path.join(dir, `config-${n}.json`), JSON.stringify(SERVICE(root, [{ type: 'bind', source: root, target: '/late' }])));
     await sandbox.setServiceRunning!('api', true);
 
-    expect(await upCount()).toBe(2);
+    // 만들기 → (마스크가 달라짐) → 다시 만들기 → 시작. 옛 마스크로 만든 컨테이너는 한 번도 시작되지 않는다
+    expect(await upCount()).toBe(3);
     expect(await overrideAtUp()).toContain('target: /late/.git');
+    expect(upPhases(await log())).toEqual(['create', 'create', 'start']);
   });
 
   it('마스크가 3번 안에 안정되지 않으면 서비스를 내리고 던진다', async () => {
@@ -184,22 +210,85 @@ describe('서비스 컨테이너의 .git 보호', () => {
     expect(await log()).toMatch(/ down --remove-orphans/);
   });
 
-  it('up 뒤 실제 컨테이너에 .git 읽기 전용 마운트가 빠져 있으면 그 컨테이너를 멈추고 던진다', async () => {
+  const UNMASKED = (root: string) => [
+    {
+      Id: 'c1',
+      Name: '/api-1',
+      Config: { Labels: { 'com.docker.compose.service': 'api' } },
+      Mounts: [{ Type: 'bind', Source: root, Destination: '/workspace', RW: true }],
+    },
+  ];
+  const MASKED = (root: string) => [
+    {
+      Id: 'c1',
+      Mounts: [
+        { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+        { Type: 'bind', Source: `${root}/.git`, Destination: '/workspace/.git', RW: false },
+        { Type: 'bind', Source: `${root}/.git/b-studio-empty`, Destination: '/workspace/.git/b-studio', RW: false },
+      ],
+    },
+  ];
+
+  it('만든 컨테이너에 .git 읽기 전용 마운트가 빠져 있으면 한 번도 시작하지 않고 지운 뒤 던진다(트러블슈팅 121)', async () => {
     const { project, dockerBin, inspectFile, log, root } = await setup();
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
-    await writeFile(
-      inspectFile,
-      JSON.stringify([
-        {
-          Id: 'c1',
-          Name: '/api-1',
-          Config: { Labels: { 'com.docker.compose.service': 'api' } },
-          Mounts: [{ Type: 'bind', Source: root, Destination: '/workspace', RW: true }],
-        },
-      ]),
-    );
-    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 읽기 전용 마운트가 빠져/);
-    expect(await log()).toMatch(/^stop c1$/m);
+    await writeFile(inspectFile, JSON.stringify(UNMASKED(root)));
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 읽기 전용 마운트가 빠져 시작하지 않았습니다/);
+    const lines = await log();
+    // 시작 단계의 up이 한 번도 돌지 않았다. 고치기 전에는 up이 컨테이너를 시작한 뒤에야 확인하고 멈췄다
+    expect(upPhases(lines)).toEqual(['create']);
+    expect(lines).toMatch(/^rm --force c1$/m);
+    expect(lines).not.toMatch(/^stop c1$/m);
+  });
+
+  it('만들기 → 마운트 확인 → 시작 순서로 돌고, 시작 단계는 컨테이너를 다시 만들거나 빌드하지 않는다', async () => {
+    const { project, dockerBin, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify(MASKED(root)));
+    await sandbox.setServiceRunning!('api', true);
+    const lines = (await log()).split('\n');
+    const createAt = lines.findIndex((line) => / up --no-start /.test(line));
+    const inspectAt = lines.findIndex((line, index) => index > createAt && /^inspect c1$/.test(line));
+    const startAt = lines.findIndex((line) => / up --no-recreate /.test(line));
+    expect(createAt).toBeGreaterThan(-1);
+    expect(inspectAt).toBeGreaterThan(createAt);
+    expect(startAt).toBeGreaterThan(inspectAt);
+    // 빌드는 만들기 단계에서만 한다(다시 만들기 플래그는 위의 splitUpArgs 테스트가 본다). 시작 단계가 다시 만들면 확인한 컨테이너가 아닌 것이 시작된다
+    expect(lines[createAt]).toContain('--build');
+    expect(lines[createAt]).not.toContain('--detach');
+    expect(lines[startAt]).toContain('--detach');
+    expect(lines[startAt]).not.toContain('--force-recreate');
+    expect(lines[startAt]).not.toContain('--build');
+  });
+
+  it('시작 단계에서 새로 만들어진 컨테이너에 마스크가 빠져 있으면 시작한 뒤의 확인이 멈추고 던진다', async () => {
+    const { project, dockerBin, dir, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    // 시작 전 확인(1번째 inspect)은 통과하고, 시작한 뒤(2번째)에는 보호가 빠진 컨테이너가 보인다
+    await writeFile(inspectFile, JSON.stringify(UNMASKED(root)));
+    await writeFile(path.join(dir, 'inspect-1.json'), JSON.stringify(MASKED(root)));
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 읽기 전용 마운트가 빠져 멈췄습니다/);
+    const lines = await log();
+    expect(upPhases(lines)).toEqual(['create', 'start']);
+    expect(lines).toMatch(/^stop c1$/m);
+  });
+
+  it('컨테이너 목록을 읽지 못하면 컨테이너가 없는 것으로 보지 않고, 시작하지 않은 채 던진다', async () => {
+    const { project, dockerBin, dir, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify(UNMASKED(root)));
+    await writeFile(path.join(dir, 'ps-fails'), '');
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/컨테이너 목록을 확인하지 못했습니다/);
+    expect(upPhases(await log())).toEqual(['create']);
+  });
+
+  it('이름 있는 볼륨의 정보를 읽지 못하면 그 마운트를 건너뛰지 않고, 시작하지 않은 채 던진다', async () => {
+    const { project, dockerBin, dir, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify([{ Id: 'c1', Mounts: [...MASKED(root)[0]!.Mounts, { Type: 'volume', Name: 'shop_src', Destination: '/src', RW: true }] }]));
+    await writeFile(path.join(dir, 'volume-fails'), '');
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/볼륨 정보를 확인하지 못했습니다/);
+    expect(upPhases(await log())).toEqual(['create']);
   });
 
   it('up 뒤 실제 컨테이너에 마스크가 모두 있으면 통과한다', async () => {
