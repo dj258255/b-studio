@@ -21,7 +21,7 @@ async function setup(files: Record<string, string>, extra: Partial<ToolContext> 
 
 const numbered = (count: number) => Array.from({ length: count }, (_, index) => `line ${index + 1}`).join('\n');
 
-describe('읽기 도구: 줄 범위(read_lines)와 검색(search_files) (트러블슈팅 124)', () => {
+describe('읽기 도구: 줄 범위(read_lines)와 검색(search_files) (트러블슈팅 125)', () => {
   it('두 도구가 목록에 있고 샌드박스 없이 도는 도구로 분류돼 있다', () => {
     const names = buildTools(project).map((tool) => tool.name);
     expect(names).toEqual(expect.arrayContaining(['read_lines', 'search_files']));
@@ -129,6 +129,38 @@ describe('읽기 도구: 줄 범위(read_lines)와 검색(search_files) (트러�
     expect((await executeTool('search_files', { terms: ['zzz'], path: '.', ignore_case: false, max_results: 5 }, context)).content).toBe('(no matches in 2 files)');
     expect(await executeTool('search_files', { terms: [''], path: '.', ignore_case: false, max_results: 5 }, context)).toMatchObject({ ok: false });
     expect((await executeTool('search_files', { terms: ['key='], path: '.', ignore_case: false, max_results: 5 }, context)).content).toBe('b.txt:1: key=***');
+  });
+
+  it('시크릿 값의 일부로 찾아도 걸리지 않는다 — 찾았다는 사실로 값을 알아낼 수 없다', async () => {
+    const { context } = await setup({ 'config.txt': 'token=s3cret\n' });
+    const search = (term: string) => executeTool('search_files', { terms: [term], path: '.', ignore_case: false, max_results: 5 }, context);
+    // 값 전체, 앞부분, 한 글자씩 넓혀 가는 추측이 모두 "없음"이다
+    for (const guess of ['s3cret', 's3c', 's3', '3', 'token=s', 'token=s3cret']) expect((await search(guess)).content, guess).toBe('(no matches in 1 files)');
+    // 가린 뒤의 글로는 찾을 수 있다(값이 아니라 자리만 드러난다)
+    expect((await search('token=')).content).toBe('config.txt:1: token=***');
+  });
+
+  it('여러 줄에 걸친 시크릿 값과 200자를 넘는 줄의 시크릿 값도 가려진다(가린 뒤에 줄을 나누고 자른다)', async () => {
+    const multiline = 'BEGIN\nline-a\nline-b\nEND';
+    const long = `sk-${'a'.repeat(400)}`;
+    const redact = (text: string) => text.replaceAll(multiline, '***').replaceAll(long, '***');
+    const { context } = await setup({ 'key.pem.txt': `key:\n${multiline}\n`, 'long.txt': `value=${long} tail\n` }, { sandbox: { redact } as unknown as Sandbox });
+    const search = (term: string) => executeTool('search_files', { terms: [term], path: '.', ignore_case: false, max_results: 5 }, context);
+    expect((await search('line-a')).content).toBe('(no matches in 2 files)');
+    const hit = (await search('value=')).content;
+    expect(hit).toBe('long.txt:1: value=*** tail');
+    expect(hit).not.toContain('sk-aaa');
+  });
+
+  it('상한을 넘는 파일은 읽기 전에 건너뛰고(통째로 읽어 들이지 않는다), 링크인 대상은 거절한다', async () => {
+    const { root, context } = await setup({ 'small.txt': 'needle\n', 'huge.txt': `needle\n${'x'.repeat(300 * 1024)}` });
+    await symlink('small.txt', path.join(root, 'link.txt'));
+    const all = await executeTool('search_files', { terms: ['needle'], path: '.', ignore_case: false, max_results: 5 }, context);
+    expect(all.content).toBe('small.txt:1: needle');
+    expect((await executeTool('search_files', { terms: ['needle'], path: 'huge.txt', ignore_case: false, max_results: 5 }, context)).content).toBe('(no matches in 0 files)');
+    // 링크를 직접 가리키면 따라가지 않는다
+    const linked = await executeTool('search_files', { terms: ['needle'], path: 'link.txt', ignore_case: false, max_results: 5 }, context);
+    expect(linked.content).not.toContain('needle');
   });
 
   it('질문 모드(읽기 전용)에서도 쓸 수 있다', async () => {

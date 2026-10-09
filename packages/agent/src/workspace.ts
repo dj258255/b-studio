@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
@@ -87,8 +87,10 @@ export function readRegularFileSync(absolute: string, maxBytes: number = MAX_REA
   }
 }
 const MAX_LIST_ENTRIES = 500;
-/** 검색 한 번이 훑는 파일 수의 상한. 넘으면 거기까지 찾은 것만 돌려주고 잘렸다고 알린다 */
+/** 검색 한 번이 훑는 파일 수·폴더 수·읽는 양의 상한. 넘으면 거기까지 찾은 것만 돌려주고 잘렸다고 알린다 */
 const MAX_SEARCH_FILES = 5_000;
+const MAX_SEARCH_DIRECTORIES = 5_000;
+const MAX_SEARCH_BYTES = 64 * 1024 * 1024;
 const MAX_SEARCH_LINE_CHARS = 200;
 
 export interface SearchResult {
@@ -244,19 +246,37 @@ export class Workspace {
   /**
    * 글 파일에서 낱말(글자 그대로, 정규식 아님)이 든 줄을 찾는다. 에이전트가 컨테이너 안의 grep 대신 쓴다.
    * 목록(list)과 같은 규칙으로 숨기는 폴더·비밀 파일을 건너뛰고 링크를 따라가지 않는다. 큰 파일과 이진 파일은 건너뛴다.
-   * 정규식을 받지 않는 이유: 이 코드는 studio 서버의 스레드에서 돈다. 모델이 준 정규식이 되돌아가기를 폭발시키면 서버 전체가 멈춘다
+   *  - 정규식을 받지 않는다. 이 코드는 studio 서버의 스레드에서 돈다. 모델이 준 정규식이 되돌아가기를 폭발시키면 서버 전체가 멈춘다.
+   *  - **가린 글에서 찾는다.** 파일 내용을 먼저 통째로 가리고(redact) 그 결과에서 줄을 고른다. 원문에서 찾고 결과만 가리면,
+   *    "이 낱말이 든 줄이 있는가"로 시크릿 값을 한 글자씩 알아낼 수 있고(찾았다는 사실이 새어 나간다), 줄 단위로 가리면
+   *    여러 줄에 걸친 값이나 잘린 값은 가려지지 않는다.
+   *  - 크기는 읽기 전에 본다. 훑는 파일 수·폴더 수·읽는 양에 상한을 두고, 넘으면 거기까지만 돌려주며 잘렸다고 알린다
    */
-  async search(terms: readonly string[], target = '.', { limit = 50, ignoreCase = false }: { limit?: number; ignoreCase?: boolean } = {}): Promise<SearchResult> {
+  async search(
+    terms: readonly string[],
+    target = '.',
+    { limit = 50, ignoreCase = false, redact = (text: string) => text }: { limit?: number; ignoreCase?: boolean; redact?: (text: string) => string } = {},
+  ): Promise<SearchResult> {
     const needles = terms.filter((term) => term.length > 0).map((term) => (ignoreCase ? term.toLowerCase() : term));
     if (needles.length === 0) throw new WorkspaceError('검색할 낱말이 없습니다');
     const start = await this.#resolve(target, { mustExist: true });
     const result: SearchResult = { matches: [], truncated: false, filesScanned: 0 };
+    let directories = 0;
+    let bytes = 0;
 
     const scan = async (absolute: string): Promise<void> => {
+      // 링크는 따라가지 않고, 일반 파일이 아니거나 상한을 넘는 파일은 읽기 전에 건너뛴다
+      const info = await lstat(absolute).catch(() => undefined);
+      if (!info || !info.isFile() || info.size > MAX_READ_BYTES) return;
+      if (result.filesScanned >= MAX_SEARCH_FILES || bytes + info.size > MAX_SEARCH_BYTES) {
+        result.truncated = true;
+        return;
+      }
       result.filesScanned += 1;
+      bytes += info.size;
       const buffer = await readFile(absolute).catch(() => undefined);
       if (!buffer || buffer.byteLength > MAX_READ_BYTES || buffer.subarray(0, 1024).includes(0)) return;
-      const lines = buffer.toString('utf8').split(/\r?\n/);
+      const lines = redact(buffer.toString('utf8')).split(/\r?\n/);
       for (const [index, line] of lines.entries()) {
         const hay = ignoreCase ? line.toLowerCase() : line;
         if (!needles.some((needle) => hay.includes(needle))) continue;
@@ -268,22 +288,26 @@ export class Workspace {
       }
     };
     const walk = async (absolute: string): Promise<void> => {
+      if (result.truncated) return;
+      directories += 1;
+      if (directories > MAX_SEARCH_DIRECTORIES) {
+        result.truncated = true;
+        return;
+      }
       const children = await readdir(absolute, { withFileTypes: true }).catch(() => []);
       children.sort((a, b) => a.name.localeCompare(b.name));
       for (const child of children) {
         if (result.truncated) return;
-        if (result.filesScanned >= MAX_SEARCH_FILES) {
-          result.truncated = true;
-          return;
-        }
         if (isDenied(child.name)) continue;
         const childPath = path.join(absolute, child.name);
+        // Dirent의 종류는 링크를 따라가지 않은 것이다: 링크는 폴더도 파일도 아니라서 건너뛴다
         if (child.isDirectory()) await walk(childPath);
         else if (child.isFile()) await scan(childPath);
       }
     };
 
-    if ((await stat(start)).isDirectory()) await walk(start);
+    const startInfo = await lstat(start);
+    if (startInfo.isDirectory()) await walk(start);
     else await scan(start);
     return result;
   }

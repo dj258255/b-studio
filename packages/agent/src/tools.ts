@@ -445,7 +445,7 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
     }
     case 'read_file': {
       // 파일은 앞에서부터 읽는 경우가 많아 앞쪽 위주로 자른다. 잘렸으면 가운데를 읽는 방법을 함께 알린다 —
-      // 알리지 않으면 컨테이너 안의 sed로 조금씩 읽는다(58턴 실행에서 도구 호출 86번 중 50번이 그랬다, 트러블슈팅 124)
+      // 알리지 않으면 컨테이너 안의 sed로 조금씩 읽는다(58턴 실행에서 도구 호출 86번 중 50번이 그랬다, 트러블슈팅 125)
       const raw = sandbox.redact(await workspace.read(string(args, 'path')));
       const hint = raw.length > READ_FILE_BUDGET ? `파일은 ${raw.split('\n').length}줄입니다. 생략된 부분은 read_lines로 줄 범위를 읽으세요` : undefined;
       return { ok: true, content: clipText(raw, READ_FILE_BUDGET, hint), rawChars: raw.length };
@@ -462,11 +462,12 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
     case 'search_files': {
       const terms = stringArray(args, 'terms');
       const limit = clamp(integer(args, 'max_results'), 1, 200);
-      const found = await workspace.search(terms, string(args, 'path'), { limit, ignoreCase: args.ignore_case === true });
-      if (found.matches.length === 0) return success(`(no matches in ${found.filesScanned} files)`);
+      // 가린 글에서 찾는다(workspace.search). 원문에서 찾고 결과만 가리면 "찾았다"는 사실로 시크릿 값을 알아낼 수 있다
+      const found = await workspace.search(terms, string(args, 'path'), { limit, ignoreCase: args.ignore_case === true, redact: (text) => sandbox.redact(text) });
+      if (found.matches.length === 0) return success(found.truncated ? `(no matches in the first ${found.filesScanned} files; narrow the path)` : `(no matches in ${found.filesScanned} files)`);
       const lines = found.matches.map((match) => `${match.file}:${match.line}: ${match.text}`);
       if (found.truncated) lines.push(`[... 결과가 더 있습니다. path를 좁히거나 낱말을 더 구체적으로 적으세요 ...]`);
-      return success(sandbox.redact(lines.join('\n')));
+      return success(lines.join('\n'));
     }
     case 'write_file': {
       const file = string(args, 'path');
