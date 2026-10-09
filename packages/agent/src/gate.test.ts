@@ -413,6 +413,95 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(check.detail).toContain('응답 503');
   });
 
+  describe('expectInViewport (ADR-162)', () => {
+    const viewportCheck = (extra: Record<string, unknown> = {}) =>
+      withWorkflow({
+        pageChecks: [
+          { service: 'api', path: '/', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false, expectInViewport: ['바로 주문', '주문하려면 로그인하세요'], ...extra },
+        ],
+      });
+    const runner =
+      (viewportTexts: BrowserPageResult['viewportTexts'], seen?: Array<readonly string[] | undefined>): BrowserRunner =>
+      async (_url, options) => {
+        seen?.push(options.viewportTexts);
+        return {
+          status: 200,
+          text: '바로 주문 주문하려면 로그인하세요',
+          pageErrors: [],
+          consoleErrors: [],
+          failedRequests: [],
+          mediaErrors: [],
+          blockedRequests: [],
+          horizontalOverflowPx: 0,
+          ...(viewportTexts ? { viewportTexts } : {}),
+          steps: [],
+        };
+      };
+
+    it('모두 보이면 통과하고, 적은 글자를 브라우저 러너에 넘긴다', async () => {
+      const seen: Array<readonly string[] | undefined> = [];
+      const { gate, workspace } = await setup(viewportCheck(), {
+        browser: runner({ width: 1280, height: 720, findings: [{ text: '바로 주문', visible: true }, { text: '주문하려면 로그인하세요', visible: true }] }, seen),
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(seen).toEqual([['바로 주문', '주문하려면 로그인하세요']]);
+    });
+
+    it('안쪽 영역에 잘린 글자와 창 아래로 넘친 글자를 구체적인 사유로 실패시킨다', async () => {
+      const { gate, workspace } = await setup(viewportCheck(), {
+        browser: runner({
+          width: 1280,
+          height: 720,
+          findings: [
+            { text: '바로 주문', visible: false, problem: { kind: 'clipped', side: 'bottom', px: 38, by: 'div.shorts-scroller' } },
+            { text: '주문하려면 로그인하세요', visible: false, problem: { kind: 'below', px: 12 } },
+          ],
+        }),
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await gate.check();
+      const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+      expect(feedback).toContain("'바로 주문'이 첫 화면에 다 보이지 않습니다 — div.shorts-scroller 안에서 아래로 38px 잘렸습니다(창 1280x720)");
+      expect(feedback).toContain("'주문하려면 로그인하세요'이 첫 화면에 다 보이지 않습니다 — 창 아래로 12px 넘칩니다(창 1280x720)");
+    });
+
+    it('화면에 없음과 숨겨짐을 구분해 알린다', async () => {
+      const { gate, workspace } = await setup(viewportCheck(), {
+        browser: runner({
+          width: 390,
+          height: 844,
+          findings: [{ text: '바로 주문', visible: false, problem: { kind: 'absent' } }, { text: '주문하려면 로그인하세요', visible: false, problem: { kind: 'hidden' } }],
+        }),
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await gate.check();
+      const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+      expect(feedback).toContain('화면에 없습니다(창 390x844)');
+      expect(feedback).toContain('숨겨져 있습니다(display:none·visibility:hidden이거나 크기가 0)(창 390x844)');
+    });
+
+    it('러너가 재지 못했으면 통과시키지 않는다', async () => {
+      const { gate, workspace } = await setup(viewportCheck(), { browser: runner(undefined) });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await gate.check();
+      expect(outcome.kind === 'retry' && outcome.feedback).toContain('첫 화면에 보이는지 재지 못했습니다');
+    });
+
+    it('브라우저를 못 띄워 fallbackProbe로 대신하면 이 단언을 확인하지 못했다고 남긴다', async () => {
+      const { gate, workspace } = await setup(viewportCheck({ fallbackProbe: { service: 'api', path: '/health' } }), {
+        browser: async () => {
+          throw new BrowserUnavailableError('executable not found');
+        },
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      const check = gate.checks.find((entry) => entry.stage === 'browser_check')!;
+      expect(check.detail).toContain('expectInViewport');
+      expect(check.detail).toContain('확인하지 못했습니다');
+    });
+  });
+
   it('fallbackProbe도 연결하지 못하면(연결 거부 등) 화면 확인을 실패시킨다(fix/frontend-backend-url)', async () => {
     const target = withWorkflow({
       pageChecks: [{ service: 'api', path: '/', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false, fallbackProbe: { service: 'api', path: '/actuator/health' } }],

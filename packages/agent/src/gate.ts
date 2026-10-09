@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
-import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
+import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
 import { findStaticShadows, StaticShadowUnknownError } from './next-static-shadow';
@@ -703,6 +703,7 @@ export class VerificationGate {
       try {
         result = await browserRunner(url.href, {
           viewport: page.viewport,
+          ...(page.expectInViewport ? { viewportTexts: page.expectInViewport } : {}),
           steps: page.steps,
           signal,
           // 로드 예산을 적은 확인만 잰다. 재려면 워밍업 이동을 한 번 더 해야 해서(게이트 시간이 늘고, 워밍업 때의 오류는 비운다)
@@ -717,7 +718,7 @@ export class VerificationGate {
       } catch (error) {
         // 헤드리스 브라우저를 못 띄우면(ADR-050은 원래 그대로 실패시킨다) fallbackProbe가 있는 확인만 대신 HTTP로 확인한다
         if (error instanceof BrowserUnavailableError && page.fallbackProbe) {
-          return this.#checkFallbackProbe(page.fallbackProbe, name, signal, fail, error);
+          return this.#checkFallbackProbe(page.fallbackProbe, page, name, signal, fail, error);
         }
         // 실패한 단계의 스크린샷도 결과에 남긴다
         if (error instanceof StepFailedError) this.#pageSteps.set(name, await this.#saveSteps(name, error.steps));
@@ -738,6 +739,8 @@ export class VerificationGate {
       // expectAllText는 적은 문구가 모두 있어야 통과한다. 빠진 것만 알린다
       const missingAllRendered = page.expectAllText?.filter((candidate) => !result.text.includes(candidate)) ?? [];
       if (missingAllRendered.length > 0) problems.push(missingAllText(missingAllRendered));
+      // expectInViewport: 글자가 DOM에 있는 것만이 아니라 첫 화면에 온전히 보이는지(ADR-162). 재지 못했으면 통과로 보지 않는다
+      if (page.expectInViewport) problems.push(...viewportProblems(page.expectInViewport, result.viewportTexts));
       // ④ api에서 꺼낸 값이 렌더링된 글자에 있는지. expectText와 같은 위치에서 본다
       if (api && !containsApiValue(result.text, api.value)) problems.push(missingApiValue(api, page.path));
       if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
@@ -811,6 +814,7 @@ export class VerificationGate {
    */
   async #checkFallbackProbe(
     probe: { service: string; path: string },
+    page: WorkflowPageCheck,
     name: string,
     signal: AbortSignal,
     fail: (message: string) => Error,
@@ -825,6 +829,9 @@ export class VerificationGate {
         name,
         `[참고] 헤드리스 브라우저를 쓸 수 없어(${browserError.message}) 화면 확인 대신 ${probe.service}${probe.path}로 HTTP 확인만 했습니다(응답 ${status}). 콘솔 오류·실패한 요청·화면에 보이는 오류 문구는 확인하지 못했습니다`,
       );
+      if (page.expectInViewport) {
+        this.#addWarning(name, `[참고] expectInViewport(${page.expectInViewport.map((value) => `'${value}'`).join(', ')})가 첫 화면에 보이는지는 확인하지 못했습니다 — 헤드리스 브라우저가 필요합니다`);
+      }
     } catch (error) {
       throw fail(
         `헤드리스 브라우저를 쓸 수 없어 ${probe.service}${probe.path}로 대신 확인했는데 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
@@ -1071,6 +1078,42 @@ function containsApiValue(text: string, value: string | number): boolean {
 /** api 값이 화면에 없을 때의 문구. 화면이 다른 필드 이름을 읽고 있을 수 있음을 알린다 */
 function missingApiValue(api: ApiValue, pagePath: string): string {
   return `${api.service}의 ${api.jsonPath} 값 '${String(api.value)}'이 ${pagePath} 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다`;
+}
+
+/** expectInViewport 실패 한 건의 문구. 어느 글자가 어떻게 안 보이는지와 창 크기를 적는다 */
+function viewportProblemText(finding: ViewportTextFinding, width: number, height: number): string {
+  const size = `(창 ${width}x${height})`;
+  const problem = finding.problem;
+  const head = `'${finding.text}'이 첫 화면에 다 보이지 않습니다 — `;
+  if (!problem) return `${head}보이지 않는 이유를 알 수 없습니다${size}`;
+  switch (problem.kind) {
+    case 'absent':
+      return `${head}화면에 없습니다${size}`;
+    case 'hidden':
+      return `${head}숨겨져 있습니다(display:none·visibility:hidden이거나 크기가 0)${size}`;
+    case 'clipped': {
+      const side = { bottom: '아래로', top: '위로', right: '오른쪽으로', left: '왼쪽으로' }[problem.side];
+      return `${head}${problem.by} 안에서 ${side} ${problem.px}px 잘렸습니다${size}`;
+    }
+    case 'below':
+      return `${head}창 아래로 ${problem.px}px 넘칩니다${size}`;
+    case 'above':
+      return `${head}창 위로 ${problem.px}px 넘칩니다${size}`;
+    case 'right':
+      return `${head}창 오른쪽으로 ${problem.px}px 넘칩니다${size}`;
+    case 'left':
+      return `${head}창 왼쪽으로 ${problem.px}px 넘칩니다${size}`;
+  }
+}
+
+/** expectInViewport 판정. 러너가 재지 못했거나 일부 글자의 결과가 빠졌으면 통과로 보지 않는다 */
+function viewportProblems(expected: readonly string[], report: ViewportTextReport | undefined): string[] {
+  if (!report) return [`${expected.map((value) => `'${value}'`).join(', ')}가 첫 화면에 보이는지 재지 못했습니다`];
+  return expected.flatMap((text) => {
+    const finding = report.findings.find((entry) => entry.text === text);
+    if (!finding) return [`'${text}'이 첫 화면에 보이는지 재지 못했습니다`];
+    return finding.visible ? [] : [viewportProblemText(finding, report.width, report.height)];
+  });
 }
 
 /** expectAllText 실패 문구. 빠진 문구만 적는다 */

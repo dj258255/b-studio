@@ -401,6 +401,12 @@ export const WorkflowPageCheckSchema = z
      * 화면이 다른 필드 이름·모양을 읽고 있는 불일치를 사람이 값을 미리 몰라도 잡는다
      */
     expectFromApi: WorkflowPageExpectFromApiSchema.optional(),
+    /**
+     * browser 전용(ADR-162). 이 글자들이 첫 화면(steps를 마친 뒤 창 크기 그대로, 스크롤 없이)에 온전히 보여야 통과한다(1~5개).
+     * 글자를 담은 가장 안쪽 요소가 렌더링돼 있고, 창 안에 들어 있고, 안쪽 스크롤 영역에 잘리지 않아야 보인다고 본다.
+     * expectText는 DOM에 글자가 있기만 하면 통과해서, 잘려 안 보이는 버튼을 잡지 못한다
+     */
+    expectInViewport: z.array(z.string().min(1)).min(1).max(PAGE_EXPECT_ANY_MAX, `expectInViewport는 최대 ${PAGE_EXPECT_ANY_MAX}개까지 쓸 수 있습니다`).optional(),
     /** browser 전용. 페이지를 연 뒤 순서대로 실행할 상호작용. 정해 둔 네 동작만 받는다 */
     steps: z.array(WorkflowPageStepSchema).max(PAGE_STEPS_MAX, `단계는 최대 ${PAGE_STEPS_MAX}개까지 쓸 수 있습니다`).optional(),
     /** browser 전용. 모바일 화면처럼 창 크기를 정해 확인한다. mobile·tablet·desktop 이름이나 { width, height }를 받는다 */
@@ -435,6 +441,7 @@ export const WorkflowPageCheckSchema = z
     // http 모드에서 무시되는 옵션을 받으면 검사한 것처럼 보이기만 한다
     if (check.steps) ctx.addIssue({ code: 'custom', path: ['steps'], message: 'steps는 mode: browser에서만 쓸 수 있습니다' });
     if (check.viewport) ctx.addIssue({ code: 'custom', path: ['viewport'], message: 'viewport는 mode: browser에서만 쓸 수 있습니다' });
+    if (check.expectInViewport) ctx.addIssue({ code: 'custom', path: ['expectInViewport'], message: 'expectInViewport는 mode: browser에서만 쓸 수 있습니다' });
     if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
     if (check.maxLoadMs !== undefined) ctx.addIssue({ code: 'custom', path: ['maxLoadMs'], message: 'maxLoadMs는 mode: browser에서만 쓸 수 있습니다' });

@@ -19,7 +19,7 @@ export function workflow(project: LoadedProject, options: { piEnv: boolean }): n
   for (const page of spec?.pageChecks ?? []) {
     const steps = page.steps?.length ? ` · 단계 ${page.steps.length}개` : '';
     const browser = page.mode === 'browser'
-      ? ` · 브라우저${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''}${page.noHorizontalScroll ? ' · 가로 넘침 금지' : ''}${page.allowConsoleErrors ? ' · console.error 허용' : ''}${steps}`
+      ? ` · 브라우저${page.viewport ? ` ${page.viewport.width}x${page.viewport.height}` : ''}${page.noHorizontalScroll ? ' · 가로 넘침 금지' : ''}${page.expectInViewport ? ` · 첫 화면 글자 ${page.expectInViewport.length}개` : ''}${page.allowConsoleErrors ? ' · console.error 허용' : ''}${steps}`
       : ' · HTTP';
     console.log(`  page  ${page.service} ${page.path}${browser} → ${page.expectStatus}${page.expectText ? ` · '${page.expectText}' 포함` : ''}`);
   }

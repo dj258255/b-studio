@@ -22,6 +22,14 @@ const PAGES: Record<string, string> = {
   '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => clearInterval(timer), 1500);</script></body></html>`,
   // 트러블슈팅 83: 상대 경로 미디어 주소가 404여서 재생되지 않는 <video>·<img>
   '/video-404': `<html><body><video id="v" preload="auto" src="/missing.mp4"></video></body></html>`,
+  // 안쪽 스크롤 영역에 잘린 줄(도그푸딩 사례): 영역 높이 100px 안에 150px짜리 내용이 있고, 두 번째 줄은 창 안이지만 영역 밖으로 잘린다
+  '/vp-clipped': `<html><body style="margin:0"><div class="shorts-scroller" style="height:100px;overflow:auto"><p style="margin:0;height:70px">영상</p><p style="margin:0;height:40px" id="login">주문하려면 로그인하세요</p></div></body></html>`,
+  '/vp-visible': `<html><body style="margin:0"><div class="box" style="height:200px;overflow:auto"><button style="height:30px">바로 주문</button></div></body></html>`,
+  '/vp-below': `<html><body style="margin:0"><div style="height:900px">채움</div><button style="height:40px;margin:0">바로 주문</button></body></html>`,
+  '/vp-none': `<html><body style="margin:0"><p>다른 글자</p><p style="display:none">바로 주문</p></body></html>`,
+  '/vp-hidden': `<html><body style="margin:0"><p style="visibility:hidden">바로 주문</p></body></html>`,
+  '/vp-twin': `<html><body style="margin:0"><div style="height:100px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div><p style="margin:0">바로 주문</p></body></html>`,
+  '/vp-twin-hidden': `<html><body style="margin:0"><p style="display:none">바로 주문</p><p style="margin:0">바로 주문</p></body></html>`,
   '/img-404': `<html><body><img id="i" src="/missing.png"></body></html>`,
 };
 
@@ -224,6 +232,50 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
 
   it('measureLoad를 켜지 않으면 로드 시간을 남기지 않는다', async () => {
     expect((await runInBrowser(`${base}/ok`, {})).loadMs).toBeUndefined();
+  });
+
+  describe('expectInViewport', () => {
+    const vp = { width: 800, height: 600 };
+    const measure = async (path: string, texts: string[], viewport = vp) => (await runInBrowser(`${base}${path}`, { viewport, viewportTexts: texts })).viewportTexts;
+
+    it('창 안에 온전히 들어 있으면 보인다고 한다', async () => {
+      const report = await measure('/vp-visible', ['바로 주문']);
+      expect(report).toEqual({ width: 800, height: 600, findings: [{ text: '바로 주문', visible: true }] });
+    });
+
+    it('창 아래로 넘친 글자는 몇 px 넘쳤는지 알린다', async () => {
+      const report = await measure('/vp-below', ['바로 주문'], { width: 800, height: 600 });
+      // 900px 채움 + 버튼 40px = 940, 창 600
+      expect(report?.findings[0]).toMatchObject({ text: '바로 주문', visible: false, problem: { kind: 'below', px: 340 } });
+    });
+
+    it('안쪽 스크롤 영역에 잘린 글자는 그 조상과 잘린 크기를 알린다 (창 안이어도)', async () => {
+      const report = await measure('/vp-clipped', ['영상', '주문하려면 로그인하세요']);
+      expect(report?.findings[0]).toEqual({ text: '영상', visible: true });
+      expect(report?.findings[1]).toMatchObject({
+        text: '주문하려면 로그인하세요',
+        visible: false,
+        problem: { kind: 'clipped', side: 'bottom', px: 10, by: 'div.shorts-scroller' },
+      });
+    });
+
+    it('display:none 요소와 visibility:hidden 요소는 숨겨짐이다', async () => {
+      expect((await measure('/vp-none', ['바로 주문']))?.findings[0]).toMatchObject({ visible: false, problem: { kind: 'hidden' } });
+      expect((await measure('/vp-hidden', ['바로 주문']))?.findings[0]).toMatchObject({ visible: false, problem: { kind: 'hidden' } });
+    });
+
+    it('글자가 화면에 없으면 없음이다', async () => {
+      expect((await measure('/vp-none', ['없는 글자']))?.findings[0]).toEqual({ text: '없는 글자', visible: false, problem: { kind: 'absent' } });
+    });
+
+    it('같은 글자가 둘이면 하나라도 온전히 보일 때 통과한다', async () => {
+      expect((await measure('/vp-twin', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+      expect((await measure('/vp-twin-hidden', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+    });
+
+    it('viewportTexts를 넘기지 않으면 재지 않는다', async () => {
+      expect((await runInBrowser(`${base}/vp-visible`, {})).viewportTexts).toBeUndefined();
+    });
   });
 
   it('<video>의 미디어 주소가 404면 재생 실패를 mediaErrors로 남긴다 (트러블슈팅 83)', async () => {
