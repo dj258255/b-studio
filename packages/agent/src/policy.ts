@@ -1,3 +1,4 @@
+import { canonicalProjectPath } from './path-names';
 import path from 'node:path';
 
 /** 도구 호출 전에 실행기에서 판단하는 정책. 모델 프롬프트의 지침과 달리 우회할 수 없다. */
@@ -63,6 +64,11 @@ export function checkToolPolicy(
     return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
   }
 
+  // 경로 정책이 있는데 경로가 프로젝트 밖으로 나가면(`../x`, 절대 경로) 범위를 따질 것도 없이 거절한다
+  if (PATH_WRITE_TOOLS.has(tool) && (policy?.writablePaths || policy?.protectedPaths?.length) && canonicalProjectPath(fileInput(input)) === undefined) {
+    return { tool, decision: 'deny', reason: 'path leaves the project' };
+  }
+
   if (PATH_WRITE_TOOLS.has(tool) && policy?.writablePaths) {
     const file = fileInput(input);
     if (!policy.writablePaths.some((candidate) => isProtectedPath(file, candidate))) {
@@ -120,9 +126,15 @@ function fileInput(input: unknown): string {
 
 /** 도구 호출 전 차단, 리뷰 단계의 사후 확인, Pi 확장이 같은 규칙으로 보호 경로를 판정하도록 공유한다 */
 export function isProtectedPath(file: string, candidate: string): boolean {
-  file = file.replaceAll('\\', '/').replace(/^\.\//, '');
-  const normalized = candidate.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
-  return file === normalized || file.startsWith(`${normalized}/`) || (normalized.startsWith('.') && file.startsWith(`${normalized}.`));
+  // 받은 문자열을 그대로 접두사로 비교하면 같은 파일의 다른 표기가 지나간다: `web/../.github/workflows/x`, `.github//workflows/x`,
+  // 그리고 대소문자를 구분하지 않는 볼륨의 `.GITHUB/workflows/x`(트러블슈팅 125). 둘 다 같은 꼴로 맞춘 뒤 비교한다
+  const target = canonicalProjectPath(file);
+  const rule = canonicalProjectPath(candidate);
+  // 루트 밖으로 나가는 경로는 어느 범위에도 속하지 않는다. 그런 경로의 거절은 checkToolPolicy와 작업 공간이 따로 한다
+  if (target === undefined || rule === undefined) return false;
+  // 프로젝트 전체를 가리키는 규칙(`.`)은 모든 경로를 덮는다
+  if (rule === '') return true;
+  return target === rule || target.startsWith(`${rule}/`) || (rule.startsWith('.') && target.startsWith(`${rule}.`));
 }
 
 function splitRule(rule: string): string[] {

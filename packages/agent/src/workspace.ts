@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { canonicalName } from './path-names';
 
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
 const DENIED_SEGMENTS = new Set(['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__']);
@@ -11,19 +12,6 @@ const DENIED_FILES = [/^\.env(\..*)?$/];
  * 요청을 처리하지 못했다(실사용). 실제 값이 든 .env·.env.local·.env.production 등은 그대로 막는다
  */
 const ENV_TEMPLATE_FILE = /^\.env(\.[\w-]+)*\.(example|sample|template|dist)$/;
-
-/**
- * 이름을 파일 시스템이 같은 것으로 볼 수 있는 꼴로 맞춘다(트러블슈팅 124). macOS와 Windows의 기본 볼륨은 대소문자를 구분하지 않아
- * `.GIT`·`.Env`가 `.git`·`.env`와 같은 항목이다. 이름을 글자 그대로 비교하면 숨김 검사를 대소문자만 바꿔 지나간다.
- * 유니코드 정규화 꼴과, HFS+가 이름을 비교할 때 무시하는 보이지 않는 문자(git이 `.git`을 지킬 때 거르는 것과 같은 범위)도 함께 맞춘다.
- * 대소문자를 구분하는 볼륨에서는 `.GIT`이 다른 폴더지만, 그런 이름까지 숨기는 쪽이 지나치는 것보다 낫다
- */
-function canonicalName(segment: string): string {
-  return segment
-    .normalize('NFC')
-    .replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '')
-    .toLowerCase();
-}
 
 function isDeniedFileName(segment: string): boolean {
   const name = canonicalName(segment);
@@ -376,7 +364,13 @@ export class Workspace {
       throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
     }
 
-    return absolute;
+    // 실제 저장 이름으로 돌려준다(트러블슈팅 125). 받은 표기 그대로 돌려주면 바뀐 파일 기록이 `WEB/app/page.tsx`처럼 남아,
+    // 뒤의 검사들(보호 경로의 사후 확인, 바뀐 파일 → 다시 올릴 서비스)이 같은 파일을 다른 이름으로 본다.
+    // 링크는 위에서 걸렀으므로 실제 이름과 받은 이름의 차이는 대소문자·정규화 꼴뿐이다. 아직 없는 조각은 받은 그대로 둔다
+    const stored = path.relative(native(this.root, realRoot), native(existing, realExisting));
+    // 실제 이름을 얻지 못해 어긋난 값이 나오면(루트 밖으로 나가는 상대 경로) 받은 경로를 그대로 쓴다. 위의 확인은 이미 지났다
+    if (stored === '..' || stored.startsWith(`..${path.sep}`) || path.isAbsolute(stored)) return absolute;
+    return path.join(this.root, stored, path.relative(existing, absolute));
   }
 
   /** 바깥에서 온 경로를 루트 기준 상대 경로로 정규화한다. 루트 밖 경로는 거부한다 */
