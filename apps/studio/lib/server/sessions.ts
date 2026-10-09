@@ -2307,7 +2307,19 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
         void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
-        await revertRun(session, run.id);
+        // b-studio 쪽(샌드박스·도커) 문제로 검증하지 못한 변경은 되돌리지 않는다. 에이전트가 한 일이 틀린 것이 아니고, 문제를 해결한 뒤
+        // 다음 요청의 게이트가 이 변경을 그대로 검증한다(작업 트리에 남은 변경은 externalChanges로 게이트에 들어간다, ADR-131).
+        // 체크포인트는 남기지 않는다. 내 폴더 모드는 다음 요청이 남은 변경을 "직접 수정"으로 커밋하므로 전처럼 되돌리고 보관본을 남긴다
+        const platformFailure = result.status === 'failed' ? result.report?.platformFailure : undefined;
+        if (platformFailure && session.snapshot.workspace !== 'local') {
+          emit(session, {
+            type: 'notice',
+            text: `b-studio 쪽(샌드박스·도커) 문제로 검증하지 못했습니다. 바꾼 코드의 문제가 아니라서 변경을 되돌리지 않고 작업 복사본에 그대로 뒀습니다(체크포인트는 남기지 않았습니다). 문제를 해결한 뒤 다음 요청을 보내면 그때 이 변경을 다시 검증합니다: ${platformFailure}`,
+            at: new Date().toISOString(),
+          });
+        } else {
+          await revertRun(session, run.id);
+        }
       }
     }
     finished = {
