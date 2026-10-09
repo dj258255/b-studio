@@ -739,7 +739,7 @@ export class VerificationGate {
       // expectAllText는 적은 문구가 모두 있어야 통과한다. 빠진 것만 알린다
       const missingAllRendered = page.expectAllText?.filter((candidate) => !result.text.includes(candidate)) ?? [];
       if (missingAllRendered.length > 0) problems.push(missingAllText(missingAllRendered));
-      // expectInViewport: 글자가 DOM에 있는 것만이 아니라 첫 화면에 온전히 보이는지(ADR-162). 재지 못했으면 통과로 보지 않는다
+      // expectInViewport: 글자가 DOM에 있는 것만이 아니라 첫 화면에 온전히 보이는지(ADR-161). 재지 못했으면 통과로 보지 않는다
       if (page.expectInViewport) problems.push(...viewportProblems(page.expectInViewport, result.viewportTexts));
       // ④ api에서 꺼낸 값이 렌더링된 글자에 있는지. expectText와 같은 위치에서 본다
       if (api && !containsApiValue(result.text, api.value)) problems.push(missingApiValue(api, page.path));
@@ -1090,7 +1090,11 @@ function viewportProblemText(finding: ViewportTextFinding, width: number, height
     case 'absent':
       return `${head}화면에 없습니다${size}`;
     case 'hidden':
-      return `${head}숨겨져 있습니다(display:none·visibility:hidden이거나 크기가 0)${size}`;
+      return `${head}숨겨져 있습니다(display:none·visibility:hidden, 투명하거나 크기가 거의 없음)${size}`;
+    case 'covered':
+      return `${head}${problem.by}에 덮여 있습니다${size}`;
+    case 'scrolled':
+      return `${head}잴 때 창이 ${problem.px}px 스크롤돼 있어 첫 화면이 아닙니다. 화면을 내리는 steps 없이 재세요${size}`;
     case 'clipped': {
       const side = { bottom: '아래로', top: '위로', right: '오른쪽으로', left: '왼쪽으로' }[problem.side];
       return `${head}${problem.by} 안에서 ${side} ${problem.px}px 잘렸습니다${size}`;

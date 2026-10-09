@@ -220,7 +220,7 @@ describe('parseSpec', () => {
     ).toBe(true);
   });
 
-  it('pageChecks.expectInViewport는 browser 전용이고 1~5개의 비어 있지 않은 글자만 받는다(ADR-162)', () => {
+  it('pageChecks.expectInViewport는 browser 전용이고 1~5개의 비어 있지 않은 글자만 받는다(ADR-161)', () => {
     expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectInViewport: ["바로 주문"] }\n`)).issues).toEqual([
       'workflow.pageChecks.0.expectInViewport: expectInViewport는 mode: browser에서만 쓸 수 있습니다',
     ]);

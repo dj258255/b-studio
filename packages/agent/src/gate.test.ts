@@ -413,7 +413,7 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(check.detail).toContain('응답 503');
   });
 
-  describe('expectInViewport (ADR-162)', () => {
+  describe('expectInViewport (ADR-161)', () => {
     const viewportCheck = (extra: Record<string, unknown> = {}) =>
       withWorkflow({
         pageChecks: [
@@ -466,6 +466,24 @@ describe('VerificationGate 워크플로 단계', () => {
       expect(feedback).toContain("'주문하려면 로그인하세요'이 첫 화면에 다 보이지 않습니다 — 창 아래로 12px 넘칩니다(창 1280x720)");
     });
 
+    it('다른 요소에 덮인 글자와, 창이 스크롤된 채로 잰 경우를 사유로 알린다', async () => {
+      const { gate, workspace } = await setup(viewportCheck(), {
+        browser: runner({
+          width: 1280,
+          height: 720,
+          findings: [
+            { text: '바로 주문', visible: false, problem: { kind: 'covered', by: 'div.overlay' } },
+            { text: '주문하려면 로그인하세요', visible: false, problem: { kind: 'scrolled', px: 300 } },
+          ],
+        }),
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await gate.check();
+      const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+      expect(feedback).toContain("'바로 주문'이 첫 화면에 다 보이지 않습니다 — div.overlay에 덮여 있습니다(창 1280x720)");
+      expect(feedback).toContain('잴 때 창이 300px 스크롤돼 있어 첫 화면이 아닙니다');
+    });
+
     it('화면에 없음과 숨겨짐을 구분해 알린다', async () => {
       const { gate, workspace } = await setup(viewportCheck(), {
         browser: runner({
@@ -478,7 +496,7 @@ describe('VerificationGate 워크플로 단계', () => {
       const outcome = await gate.check();
       const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
       expect(feedback).toContain('화면에 없습니다(창 390x844)');
-      expect(feedback).toContain('숨겨져 있습니다(display:none·visibility:hidden이거나 크기가 0)(창 390x844)');
+      expect(feedback).toContain('숨겨져 있습니다(display:none·visibility:hidden, 투명하거나 크기가 거의 없음)(창 390x844)');
     });
 
     it('러너가 재지 못했으면 통과시키지 않는다', async () => {

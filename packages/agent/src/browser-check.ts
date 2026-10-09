@@ -43,7 +43,7 @@ export interface BrowserPageResult {
    * allowedOrigins를 넘기지 않았으면 항상 빈 배열이다
    */
   blockedRequests: string[];
-  /** viewportTexts를 넘겼을 때만 있다. 각 글자가 첫 화면에 온전히 보이는지 잰 결과(ADR-162) */
+  /** viewportTexts를 넘겼을 때만 있다. 각 글자가 첫 화면에 온전히 보이는지 잰 결과(ADR-161) */
   viewportTexts?: ViewportTextReport;
   /** 문서 너비가 화면 너비를 넘는 픽셀 수. 0이면 가로 스크롤이 없다 */
   horizontalOverflowPx: number;
@@ -55,14 +55,17 @@ export interface BrowserPageResult {
 
 /**
  * 글자가 첫 화면에 온전히 보이지 않는 이유.
- * absent: 화면에 없음 / hidden: display:none·visibility:hidden이거나 크기 0 /
- * clipped: overflow가 visible이 아닌 조상(by)에 side 쪽으로 px만큼 잘림 / above·below·left·right: 창 밖으로 px만큼 넘침
+ * absent: 화면에 없음 / hidden: display:none·visibility:hidden이거나 크기 0, 또는 눈에 보이지 않게 만든 요소(투명, 2px보다 작은 상자, clip) /
+ * clipped: overflow가 visible이 아닌 조상(by)에 side 쪽으로 px만큼 잘림 / above·below·left·right: 창 밖으로 px만큼 넘침 /
+ * covered: 다른 요소(by)가 위에 덮여 있음 / scrolled: 잴 때 창이 px만큼 스크롤돼 있어 첫 화면이 아님
  */
 export type ViewportProblem =
   | { kind: 'absent' }
   | { kind: 'hidden' }
   | { kind: 'clipped'; side: 'top' | 'bottom' | 'left' | 'right'; px: number; by: string }
-  | { kind: 'above' | 'below' | 'left' | 'right'; px: number };
+  | { kind: 'above' | 'below' | 'left' | 'right'; px: number }
+  | { kind: 'covered'; by: string }
+  | { kind: 'scrolled'; px: number };
 
 export interface ViewportTextFinding {
   text: string;
@@ -163,15 +166,20 @@ const MEDIA_ERROR_INIT_SCRIPT = `(() => {
 })();`;
 
 /**
- * 글자가 첫 화면에 온전히 보이는지 페이지 안에서 잰다(ADR-162). 에이전트 패키지는 DOM 타입을 쓰지 않아 문자열로 둔다.
+ * 글자가 첫 화면에 온전히 보이는지 페이지 안에서 잰다(ADR-161). 에이전트 패키지는 DOM 타입을 쓰지 않아 문자열로 둔다.
  * 글자를 담은 가장 안쪽 요소(자식 요소 중 같은 글자를 담은 것이 없는 요소)마다:
  * 렌더링 여부(크기 0·display:none·visibility:hidden) → overflow가 visible이 아닌 조상의 안쪽 영역에 잘림 → 창 밖 순으로 본다.
  * 같은 글자를 담은 요소가 여럿이면 하나라도 온전히 보이면 보인 것으로 친다. 오차는 1px까지 허용한다.
+ * "하나라도"가 쉬운 통과 길이 되지 않게, 눈에 보이지 않는 요소는 보인 것으로 치지 않는다: 투명한 요소(자신과 조상의 opacity 곱이 0.1 미만),
+ * 2px보다 작은 상자와 clip을 건 요소(화면 낭독기 전용 숨김), 다른 요소에 덮인 요소(가운데 점의 맨 위 요소가 남남일 때).
+ * 창이 스크롤돼 있으면(단계가 화면을 내렸을 때) 첫 화면이 아니므로 모든 글자를 재지 않고 scrolled로 돌려준다.
  * position:fixed 요소는 조상 클리핑을 받지 않고, absolute 요소는 위치 기준 조상 바깥의 조상에는 잘리지 않는 것으로 단순하게 다룬다
  */
 export const VIEWPORT_MEASURE_SCRIPT = (texts: readonly string[]) => `((texts) => {
   var TOL = 1;
   var vw = window.innerWidth, vh = window.innerHeight;
+  var scrolled = Math.max(Math.abs(Math.round(window.scrollY || 0)), Math.abs(Math.round(window.scrollX || 0)));
+  if (scrolled > TOL) return { width: vw, height: vh, findings: texts.map(function (text) { return { text: text, visible: false, problem: { kind: 'scrolled', px: scrolled } }; }) };
   var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim(); };
   var all = Array.prototype.slice.call(document.body ? document.body.querySelectorAll('*') : []);
   all = all.filter(function (el) { return !/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|HEAD|TITLE|META|LINK)$/.test(el.tagName); });
@@ -187,6 +195,10 @@ export const VIEWPORT_MEASURE_SCRIPT = (texts: readonly string[]) => `((texts) =
     var rect = el.getBoundingClientRect();
     var style = getComputedStyle(el);
     if (el.getClientRects().length === 0 || rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.visibility === 'collapse') return { kind: 'hidden' };
+    if (rect.width < 2 || rect.height < 2 || (style.clip && style.clip !== 'auto')) return { kind: 'hidden' };
+    var opacity = 1;
+    for (var o = el; o && o.nodeType === 1; o = o.parentElement) opacity *= parseFloat(getComputedStyle(o).opacity || '1');
+    if (opacity < 0.1) return { kind: 'hidden' };
     var left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
     var skipUntilPositioned = style.position === 'absolute';
     var escapes = style.position === 'fixed';
@@ -212,6 +224,12 @@ export const VIEWPORT_MEASURE_SCRIPT = (texts: readonly string[]) => `((texts) =
     if (-top > TOL) return { kind: 'above', px: Math.round(-top) };
     if (right - vw > TOL) return { kind: 'right', px: Math.round(right - vw) };
     if (-left > TOL) return { kind: 'left', px: Math.round(-left) };
+    // 다른 요소가 위에 덮여 있는지: 가운데 점의 맨 위 요소가 이 요소와 안팎 관계가 아니면 덮인 것이다.
+    // pointer-events:none인 요소는 이 방법으로 알 수 없어 건너뛴다(비활성 버튼에 흔하다)
+    if (style.pointerEvents !== 'none') {
+      var hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) return { kind: 'covered', by: describe(hit) };
+    }
     return null;
   };
   var findings = texts.map(function (text) {

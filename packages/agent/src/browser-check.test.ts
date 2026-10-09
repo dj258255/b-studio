@@ -30,6 +30,13 @@ const PAGES: Record<string, string> = {
   '/vp-hidden': `<html><body style="margin:0"><p style="visibility:hidden">바로 주문</p></body></html>`,
   '/vp-twin': `<html><body style="margin:0"><div style="height:100px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div><p style="margin:0">바로 주문</p></body></html>`,
   '/vp-twin-hidden': `<html><body style="margin:0"><p style="display:none">바로 주문</p><p style="margin:0">바로 주문</p></body></html>`,
+  // 눈에 보이지 않는 쌍둥이: 진짜 버튼은 영역에 잘려 있고, 같은 글자가 투명하게·1px 상자로·덮인 채로 하나 더 있다
+  '/vp-twin-transparent': `<html><body style="margin:0"><div style="opacity:0"><p style="margin:0">바로 주문</p></div><div class="scroller" style="height:20px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div></body></html>`,
+  '/vp-twin-tiny': `<html><body style="margin:0"><span style="position:absolute;width:1px;height:1px;overflow:hidden">바로 주문</span><div class="scroller" style="height:20px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div></body></html>`,
+  '/vp-covered': `<html><body style="margin:0"><button style="height:40px">바로 주문</button><div class="overlay" style="position:fixed;inset:0;background:#fff"></div></body></html>`,
+  '/vp-disabled': `<html><body style="margin:0"><button style="height:40px;pointer-events:none">바로 주문</button></body></html>`,
+  // 열자마자 화면을 내리는 페이지: 글자는 창 안에 들어오지만 첫 화면이 아니다
+  '/vp-scrolled': `<html><body style="margin:0"><div style="height:900px">채움</div><button style="height:40px">바로 주문</button><div style="height:900px"></div><script>window.scrollTo(0, 700);</script></body></html>`,
   '/img-404': `<html><body><img id="i" src="/missing.png"></body></html>`,
 };
 
@@ -271,6 +278,24 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
     it('같은 글자가 둘이면 하나라도 온전히 보일 때 통과한다', async () => {
       expect((await measure('/vp-twin', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
       expect((await measure('/vp-twin-hidden', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+    });
+
+    it('같은 글자가 눈에 보이지 않게(투명, 1px 상자) 하나 더 있어도 보인 것으로 치지 않는다', async () => {
+      // 보이는 쪽이 없으므로 진짜 버튼의 잘림을 알린다
+      for (const path of ['/vp-twin-transparent', '/vp-twin-tiny']) {
+        expect((await measure(path, ['바로 주문']))?.findings[0], path).toMatchObject({ visible: false, problem: { kind: 'clipped', side: 'bottom', by: 'div.scroller' } });
+      }
+    });
+
+    it('다른 요소에 덮인 글자는 덮은 요소를 알린다. pointer-events:none인 요소는 덮임을 따지지 않는다', async () => {
+      expect((await measure('/vp-covered', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: false, problem: { kind: 'covered', by: 'div.overlay' } });
+      expect((await measure('/vp-disabled', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+    });
+
+    it('창이 스크롤돼 있으면 첫 화면이 아니므로 보인 것으로 치지 않는다', async () => {
+      const finding = (await measure('/vp-scrolled', ['바로 주문']))?.findings[0];
+      expect(finding).toMatchObject({ visible: false, problem: { kind: 'scrolled' } });
+      expect((finding?.problem as { px: number }).px).toBeGreaterThan(100);
     });
 
     it('viewportTexts를 넘기지 않으면 재지 않는다', async () => {

@@ -402,7 +402,7 @@ export const WorkflowPageCheckSchema = z
      */
     expectFromApi: WorkflowPageExpectFromApiSchema.optional(),
     /**
-     * browser 전용(ADR-162). 이 글자들이 첫 화면(steps를 마친 뒤 창 크기 그대로, 스크롤 없이)에 온전히 보여야 통과한다(1~5개).
+     * browser 전용(ADR-161). 이 글자들이 첫 화면(steps를 마친 뒤 창 크기 그대로, 스크롤 없이)에 온전히 보여야 통과한다(1~5개).
      * 글자를 담은 가장 안쪽 요소가 렌더링돼 있고, 창 안에 들어 있고, 안쪽 스크롤 영역에 잘리지 않아야 보인다고 본다.
      * expectText는 DOM에 글자가 있기만 하면 통과해서, 잘려 안 보이는 버튼을 잡지 못한다
      */
