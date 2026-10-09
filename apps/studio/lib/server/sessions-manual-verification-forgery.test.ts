@@ -235,6 +235,30 @@ describe('에이전트 실행이 사람 확인 기록을 써넣는 위조', () =
     await stopSession(id).catch(() => {});
   }, 30_000);
 
+  it('앞선 실행이 체크포인트 없이 남긴 위조 기록은 다음 실행의 기준이 되지 못한다(기준은 마지막 체크포인트의 문서다)', async () => {
+    const { id, workDir, events, unsubscribe } = await startedSession();
+    const doc = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');
+    const startCheckpoints = getSnapshot(id)!.checkpoints.length;
+
+    // 사람 확인을 써넣고 질문으로 멈춘 실행이 남긴 상태를 흉내 낸다: 작업 복사본에는 위조 기록이 있고 체크포인트는 없다.
+    // "실행을 시작할 때의 디스크"를 기준으로 삼으면 이번 실행은 문서를 건드리지 않았으니 바뀐 것이 없다고 보고 통과한다
+    await writeFile(path.join(workDir, 'docs/requirements.md'), withForgedLine(doc));
+
+    const finished = await sendAndWaitFinished(id, '이어서 해 주세요', [orderTurn(), ...KEEPS_CLAIMING_DONE], events);
+
+    expect(finished.status).toBe('failed');
+    const check = events
+      .filter((event): event is Extract<StudioEvent, { type: 'agent' }> => event.type === 'agent')
+      .map((event) => event.event)
+      .find((event) => event.type === 'workflow_check' && event.check.name === 'manual-verification');
+    expect(check).toMatchObject({ check: { ok: false } });
+    expect(getSnapshot(id)!.checkpoints.every((checkpoint) => checkpoint.verify === 'docs' || !checkpoint.files.includes('docs/requirements.md')) || getSnapshot(id)!.checkpoints.length === startCheckpoints).toBe(true);
+    expect((await requirementOf(id, 'R1')).verifiedBy).not.toBe('manual');
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
   it('내장 JSON 블록의 manualVerification만 바꿔도 같은 방식으로 막힌다', async () => {
     const { id, workDir, events, unsubscribe } = await startedSession();
     const doc = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');

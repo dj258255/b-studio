@@ -76,6 +76,24 @@ describe('Workspace', () => {
     expect(workspace.snapshotRead('docs/requirements.md')).toMatchObject({ kind: 'irregular' });
   });
 
+  it('beginRun에 기준 문서를 넘기면 디스크가 아니라 그것을 고정한다(없었으면 null)', async () => {
+    await mkdir(path.join(root, 'docs'), { recursive: true });
+    await writeFile(path.join(root, 'docs/requirements.md'), '# 디스크의 문서(체크포인트 없이 남은 변경 포함)\n');
+
+    const fromCheckpoint = new Workspace(root);
+    fromCheckpoint.beginRun('# 마지막 체크포인트의 문서\n');
+    expect(fromCheckpoint.snapshotRead('docs/requirements.md')).toEqual({ kind: 'text', content: '# 마지막 체크포인트의 문서\n' });
+
+    const noneAtCheckpoint = new Workspace(root);
+    noneAtCheckpoint.beginRun(null);
+    expect(noneAtCheckpoint.snapshotRead('docs/requirements.md')).toEqual({ kind: 'missing' });
+
+    // 넘기지 않으면 예전처럼 지금 디스크의 문서를 쓴다
+    const fromDisk = new Workspace(root);
+    fromDisk.beginRun();
+    expect(fromDisk.snapshotRead('docs/requirements.md')).toMatchObject({ kind: 'text', content: expect.stringContaining('디스크의 문서') });
+  });
+
   it('snapshotRead는 부른 순간의 내용을 고정하고, 프로젝트 밖 경로는 받지 않는다', async () => {
     const first = workspace.snapshotRead('api/src/App.java');
     expect(first).toMatchObject({ kind: 'text' });

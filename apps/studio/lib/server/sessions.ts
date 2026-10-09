@@ -2462,10 +2462,15 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
   // 에이전트가 이번 실행에서 파일을 하나도 건드리지 않아도 게이트가 이 변경을 검증 대상으로 보게 한다(ADR-131:
   // 게이트 없이 체크포인트가 생기던 사고 — session 5b640fd3, 체크포인트 15ba740).
   const externalChanges = await session.checkpoints.pendingFiles();
+  // 게이트가 요구사항 문서의 검증 기록을 견줄 기준은 마지막 체크포인트에 커밋된 문서다(ADR-157). 작업 트리에는 앞선 실행이
+  // 체크포인트 없이 남긴 변경(질문으로 멈춘 실행, 되살린 보관본)이 있을 수 있어, 그것을 기준으로 삼으면 그 안의 기록이 통과한다.
+  // 화면에서 남긴 사람 확인은 그 자리에서 문서 체크포인트로 커밋되므로 여기에 들어 있다
+  const requirementsBaseline = (await session.checkpoints.fileAt(REQUIREMENTS_FILE)) ?? null;
   const shared = {
     project: session.project,
     sandbox: session.sandbox,
     externalChanges,
+    requirementsBaseline,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
     // "조사" 모드(ADR-094): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다
