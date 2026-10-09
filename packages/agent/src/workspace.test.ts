@@ -115,6 +115,62 @@ describe('Workspace', () => {
     await expect(workspace.write('web/node_modules/x.js', '')).rejects.toThrow(WorkspaceError);
   });
 
+  describe('프로젝트 안의 링크를 따라가지 않는다 (트러블슈팅 124)', () => {
+    /** .git을 가리키는 폴더 링크 x, .env를 가리키는 파일 링크 envlink, 일반 폴더를 가리키는 링크 alias, 깨진 링크 dangling을 만든다 */
+    async function withLinks() {
+      await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+      await writeFile(path.join(root, '.git', 'b-studio', 'state.json'), '{"verified":true}');
+      await writeFile(path.join(root, '.env'), 'TOKEN=abc');
+      await mkdir(path.join(root, 'real'), { recursive: true });
+      await writeFile(path.join(root, 'real', 'a.txt'), 'a');
+      await symlink('.git', path.join(root, 'x'));
+      await symlink('.env', path.join(root, 'envlink'));
+      await symlink('real', path.join(root, 'alias'));
+      await symlink(path.join('.git', 'b-studio', 'new.json'), path.join(root, 'dangling'));
+    }
+
+    it('숨긴 경로를 가리키는 링크로 읽지 못한다', async () => {
+      await withLinks();
+      await expect(workspace.read('x/b-studio/state.json')).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.read('envlink')).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.peek('x/b-studio/state.json')).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.list('x', 2)).rejects.toThrow('링크를 거치는 경로');
+    });
+
+    it('숨긴 경로를 가리키는 링크로 쓰거나 고치거나 지우지 못하고, 호스트의 그 자리는 그대로다', async () => {
+      await withLinks();
+      await expect(workspace.write('x/b-studio/evil.json', 'tampered')).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.writeBinary('x/b-studio/evil.bin', Buffer.from('x'))).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.edit('x/b-studio/state.json', 'true', 'false')).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.remove('x/b-studio/state.json')).rejects.toThrow('링크를 거치는 경로');
+      await expect(readFile(path.join(root, '.git', 'b-studio', 'state.json'), 'utf8')).resolves.toBe('{"verified":true}');
+      await expect(readFile(path.join(root, '.git', 'b-studio', 'evil.json'), 'utf8')).rejects.toThrow();
+      expect(workspace.changedFiles()).toEqual([]);
+    });
+
+    it('깨진 링크에 쓰지 못한다(쓰기가 링크를 따라가 다른 곳에 파일을 만들지 않는다)', async () => {
+      await withLinks();
+      await expect(workspace.write('dangling', 'tampered')).rejects.toThrow('링크를 거치는 경로');
+      await expect(readFile(path.join(root, '.git', 'b-studio', 'new.json'), 'utf8')).rejects.toThrow();
+    });
+
+    it('숨기지 않은 폴더를 가리키는 링크도 따라가지 않는다(목록이 링크를 보여 주지 않는 것과 같은 규칙)', async () => {
+      await withLinks();
+      await expect(workspace.read('alias/a.txt')).rejects.toThrow('링크를 거치는 경로');
+      await expect(workspace.write('alias/b.txt', 'b')).rejects.toThrow('링크를 거치는 경로');
+      // 링크가 아닌 원래 경로로는 그대로 된다
+      await expect(workspace.read('real/a.txt')).resolves.toBe('a');
+      await workspace.write('real/b.txt', 'b');
+      expect(await workspace.list('.', 2)).toEqual(expect.arrayContaining(['real/', 'real/a.txt', 'real/b.txt']));
+      expect((await workspace.list('.', 2)).some((entry) => entry.startsWith('alias') || entry.startsWith('x') || entry === 'envlink' || entry === 'dangling')).toBe(false);
+    });
+
+    it('아직 없는 폴더 아래에 새 파일을 만드는 것은 그대로 된다', async () => {
+      await workspace.write('brand/new/dir/file.txt', 'ok');
+      await expect(readFile(path.join(root, 'brand', 'new', 'dir', 'file.txt'), 'utf8')).resolves.toBe('ok');
+    });
+  });
+
   it('프로젝트 밖을 가리키는 심볼릭 링크로 쓰지 못한다', async () => {
     const outside = await mkdtemp(path.join(tmpdir(), 'outside-'));
     await symlink(outside, path.join(root, 'escape'));
