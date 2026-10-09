@@ -48,7 +48,7 @@ import {
   extractDiffReferencedNames,
   extractImplementsTrailers,
   extractTrackingSubIssueNumbers,
-  extractRequirementIds,
+  extractRequirementIdsWithSuites,
   extractRequirementMentions,
   extractRequirementsHeuristically,
   findMentionedIds,
@@ -6189,21 +6189,22 @@ function runnerFramework(runner: Runner | undefined): TestFramework {
 /**
  * 서비스가 꺼져 있어도(재시작 직후 샌드박스가 뜨는 중 등) 사이드카(test-results.json)에 남은 마지막 실행
  * 보고서만으로 행을 만든다(58번 버그). 소스 파일을 다시 읽어 발견한 행(discoverServiceTestRows)과 붙이지
- * 않고, 보고서가 담은 케이스를 그대로 한 행씩 삼는다 — file·line·suitePath는 보고서에 없어 비워 두지만,
- * 요구사항 id는 발견 단계(test-discovery.ts)와 같은 방식(extractRequirementIds)으로 케이스 이름에서 뽑아,
+ * 않고, 보고서가 담은 케이스를 그대로 한 행씩 삼는다 — file·line은 보고서에 없어 비워 두고, suitePath는 보고서가
+ * 묶음 제목(Jest/Vitest의 ancestorTitles)을 담았을 때만 채운다. 요구사항 id는 발견 단계(test-discovery.ts)와 같은
+ * 방식(extractRequirementIdsWithSuites: 묶음 제목 + 케이스 이름)으로 뽑아,
  * 서비스가 떠야만 나오던 요구사항 증거가 재시작 직후에도 끊기지 않게 한다
  */
 function storedCaseToRow(testCase: ParsedTestCase, framework: TestFramework): ServiceTestRow {
   return {
     file: testCase.classOrFile,
     framework,
-    suitePath: [],
+    suitePath: testCase.suitePath ?? [],
     suiteSkipped: false,
     name: testCase.name,
     displayName: testCase.name,
     line: 0,
     skipped: testCase.result.status === 'skip',
-    requirementIds: extractRequirementIds(testCase.name),
+    requirementIds: extractRequirementIdsWithSuites(testCase.suitePath, testCase.name),
     result: testCase.result,
   };
 }

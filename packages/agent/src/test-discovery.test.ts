@@ -5,6 +5,7 @@ import {
   discoverPytestFile,
   discoverTestsInFile,
   extractRequirementIds,
+  extractRequirementIdsWithSuites,
   flattenDiscoveredFile,
   isTestFilePath,
 } from './test-discovery';
@@ -338,5 +339,69 @@ it('top', () => {});
       [['A'], 'a1'],
       [['A', 'B'], 'b1'],
     ]);
+  });
+});
+
+describe('묶음(describe) 제목에 단 id는 그 안의 모든 테스트의 id다', () => {
+  const content = `
+import { describe, it } from 'vitest';
+describe('R11.2: 결제 승인 실패는 재시도할 수 있다', () => {
+  it('사유를 담는다', () => {});
+  it('R11.3 기본 문구도 쓴다', () => {});
+  describe('중첩 묶음', () => {
+    it('다시 실패해도 재시도할 수 있다', () => {});
+  });
+});
+describe('R12 방송 중 주문', () => {
+  describe('R12.1: 매진', () => {
+    it('R12.1 매진이면 거절한다', () => {});
+  });
+});
+it('묶음 밖의 테스트', () => {});
+`;
+  const rows = flattenDiscoveredFile(discoverJsFile('web/src/live.test.ts', content, 'vitest'));
+  const idsOf = (name: string) => rows.find((row) => row.name === name)?.requirementIds;
+
+  it('묶음 제목의 id가 안의 테스트 행에 붙는다', () => {
+    expect(idsOf('사유를 담는다')).toEqual(['R11.2']);
+  });
+
+  it('테스트 자신의 id와 합집합이고 자신의 id가 앞에 온다', () => {
+    expect(idsOf('R11.3 기본 문구도 쓴다')).toEqual(['R11.3', 'R11.2']);
+  });
+
+  it('중첩 묶음은 바깥 묶음의 id까지 물려받는다', () => {
+    expect(idsOf('다시 실패해도 재시도할 수 있다')).toEqual(['R11.2']);
+    expect(idsOf('R12.1 매진이면 거절한다')).toEqual(['R12.1', 'R12']);
+  });
+
+  it('묶음과 제목에서 같은 id를 받아도 한 번만 센다', () => {
+    expect(idsOf('R12.1 매진이면 거절한다')!.filter((id) => id === 'R12.1')).toHaveLength(1);
+  });
+
+  it('묶음 밖의 테스트는 영향을 받지 않는다', () => {
+    expect(idsOf('묶음 밖의 테스트')).toEqual([]);
+  });
+
+  it('JUnit 클래스 수준 @DisplayName의 id도 안의 테스트가 받는다', () => {
+    const java = `
+@DisplayName("R13 라이브 지연")
+class LatencyTest {
+  @Test
+  @DisplayName("R13.1: 3초 이내다")
+  void withinThreeSeconds() {}
+  @Test
+  void plain() {}
+}
+`;
+    const javaRows = flattenDiscoveredFile(discoverJunitFile('LatencyTest.java', java));
+    expect(javaRows.find((row) => row.name === 'plain')?.requirementIds).toEqual(['R13']);
+    expect(javaRows.find((row) => row.name === 'withinThreeSeconds')?.requirementIds).toEqual(['R13.1', 'R13']);
+  });
+
+  it('extractRequirementIdsWithSuites는 묶음 경로가 없으면 제목만 본다', () => {
+    expect(extractRequirementIdsWithSuites(undefined, 'R1 확인')).toEqual(['R1']);
+    expect(extractRequirementIdsWithSuites([], '평범한 이름')).toEqual([]);
+    expect(extractRequirementIdsWithSuites(['R2.1: 묶음', 'R2 바깥'], 'R2.1 제목')).toEqual(['R2.1', 'R2']);
   });
 });
