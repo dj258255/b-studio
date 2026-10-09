@@ -161,6 +161,8 @@ interface RequirementsSnapshot {
   allMustHavesPrefill?: string;
   assumptions: string[];
   manualSteps: string[];
+  /** 검증 상태가 어느 체크포인트 기준인지(에이전트 실행 중이면 진행 중인 변경은 아직 반영되지 않았다) */
+  evidenceBasis?: { shortSha?: string; runInProgress: boolean; pendingChanges: boolean };
   /** 저장(apply)하지 않은 추출 결과가 세션 상태 폴더에 남아 있으면 있다(ADR-097, A) */
   draft?: PersistedExtractionDraft;
 }
@@ -304,6 +306,13 @@ export function restoreDraftAt(drafts: readonly RequirementDraft[], item: Requir
  */
 type PanelView = "list" | "extraction" | "matrix" | "pipeline";
 
+/** 에이전트 실행 중에 검증 상태가 마지막 체크포인트 기준임을 알리는 한 줄. 실행 중이 아니면 없다 */
+export function evidenceBasisNotice(basis: RequirementsSnapshot["evidenceBasis"]): string | undefined {
+  if (!basis?.runInProgress) return undefined;
+  const base = basis.shortSha ? `마지막 체크포인트 ${basis.shortSha}` : "마지막 체크포인트";
+  return `실행 중 — 검증 상태는 ${base} 기준입니다${basis.pendingChanges ? ". 진행 중인 변경은 체크포인트가 된 뒤에 반영됩니다" : ""}`;
+}
+
 export function RequirementsPanel({ view }: { view: SessionView }) {
   const sessionId = view.snapshot.id;
   const access = useSessionAccess();
@@ -351,7 +360,7 @@ export function RequirementsPanel({ view }: { view: SessionView }) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, revision]);
+  }, [sessionId, revision, view.snapshot.running]);
 
   /** "요구사항 뽑기"가 끝났다(아직 저장 전) — 가져오기 화면을 닫고 "추출 결과"로 넘어가, 서버가 막 남긴 draft를 다시 읽는다 */
   function onExtracted() {
@@ -487,8 +496,10 @@ export function RequirementsList({
     onWork(snapshot.allMustHavesPrefill!);
   }
 
+  const basisNotice = evidenceBasisNotice(snapshot.evidenceBasis);
   return (
     <div className="flex flex-col gap-4">
+      {basisNotice && <p className="text-xs text-muted">{basisNotice}</p>}
       {coverage && (
         <div className="glass-soft flex flex-wrap items-center gap-2 rounded-control px-3 py-2 text-sm">
           <span className="font-medium text-ink">{coverage.text}</span>

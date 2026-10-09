@@ -4,6 +4,7 @@ import { createView } from "@/lib/session-view";
 import type { SessionSnapshot } from "@/lib/studio-events";
 import {
   applyManualMatch,
+  evidenceBasisNotice,
   DiffSummary,
   ExtractionResultView,
   filterSpecCandidateFiles,
@@ -496,5 +497,19 @@ describe("applyManualMatch(자동 병합이 놓친 짝을 사람이 잇기)", ()
     );
     expect(html).toContain("기존 R4와 같음");
     expect(html).toContain("새 요구사항");
+  });
+});
+
+describe("evidenceBasisNotice", () => {
+  it("에이전트 실행 중이면 검증 상태가 마지막 체크포인트 기준임을 알린다", () => {
+    expect(evidenceBasisNotice({ shortSha: "ac3fa4b", runInProgress: true, pendingChanges: true })).toBe(
+      "실행 중 — 검증 상태는 마지막 체크포인트 ac3fa4b 기준입니다. 진행 중인 변경은 체크포인트가 된 뒤에 반영됩니다",
+    );
+    expect(evidenceBasisNotice({ shortSha: "ac3fa4b", runInProgress: true, pendingChanges: false })).toBe("실행 중 — 검증 상태는 마지막 체크포인트 ac3fa4b 기준입니다");
+  });
+
+  it("실행 중이 아니거나 정보가 없으면 안내하지 않는다", () => {
+    expect(evidenceBasisNotice({ shortSha: "ac3fa4b", runInProgress: false, pendingChanges: true })).toBeUndefined();
+    expect(evidenceBasisNotice(undefined)).toBeUndefined();
   });
 });

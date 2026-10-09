@@ -446,6 +446,8 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
+  /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
+  runsStarted?: number;
   /**
    * 샌드박스를 필요할 때 켜는 세션인지(사람이 만든 일반 세션). 켜기 전까지 snapshot.status는 idle이다.
    * 켜는 중에는 bootPromise를 공유해 동시 호출에도 한 번만 켠다
@@ -500,7 +502,8 @@ export interface StoredTestRun {
   /**
    * 이 실행 시점의 체크포인트(HEAD) SHA. 지금 체크포인트와 같을 때만(그리고 그 뒤 커밋하지 않은 변경이 없을
    * 때만) "올리기 전 점검"의 테스트 항목과 요구사항 증거가 이 실행을 믿을 수 있는 증거로 센다(버그 리포트:
-   * 테스트 탭에서 직접 돌린 결과가 증거로 치지 않던 문제). 체크포인트가 하나도 없는 세션이면 undefined
+   * 테스트 탭에서 직접 돌린 결과가 증거로 치지 않던 문제). 체크포인트가 하나도 없는 세션이거나, 체크포인트에 없는
+   * 변경이 있는 채로 돌린 실행이면 undefined(그 실행은 어느 체크포인트의 증거도 아니다)
    */
   sha?: string;
 }
@@ -1066,6 +1069,7 @@ export function sendMessage(
     ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
   };
   session.run = run;
+  session.runsStarted = (session.runsStarted ?? 0) + 1;
   session.snapshot.running = true;
   // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
   session.snapshot.pendingQuestion = undefined;
@@ -2280,7 +2284,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary);
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 단계를 돌렸다면 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
-        void collectGateTestReports(session).catch(() => {});
+        // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
+        void collectGateTestReports(session, session.snapshot.checkpoints[0]?.sha).catch(() => {});
         // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
         void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
@@ -3441,8 +3446,9 @@ export async function submissionReport(id: string, { assumePushed = false }: { a
     pendingFilesCount,
     repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
     commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 }, filesChanged: commit.files.length })),
-    // 명세 탭이 지금 계산한 상태를 넘긴다. 요구사항 파일을 못 읽으면 점검표가 파일의 상태 줄로 대신한다
-    requirements: await getSessionRequirements(id)
+    // 명세 탭이 지금 계산한 상태를 넘긴다. 이 점검은 "지금 작업 복사본을 내보내도 되는가"를 묻는 곳이라 strict로 평가해,
+    // 에이전트 실행 중이라도 미체크포인트 변경이 있으면 테스트 기록을 근거로 치지 않는다. 요구사항 파일을 못 읽으면 점검표가 파일의 상태 줄로 대신한다
+    requirements: await getSessionRequirements(id, { strict: true })
       .then((snapshot) => snapshot.requirements.map(({ id: requirementId, title, priority, status, verifiedBy }) => ({ id: requirementId, title, priority, status, verifiedBy })))
       .catch(() => undefined),
     // 게이트가 test 단계를 통과한 기록이 없어도, 테스트 탭에서 지금 체크포인트(HEAD)에 직접 돌린 결과가 있으면
@@ -4327,6 +4333,8 @@ export interface RequirementsSnapshot {
   assumptions: string[];
   /** "## 사람이 할 일" 절(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 에이전트가 절대 하지 않는다 */
   manualSteps: string[];
+  /** 검증 상태가 어느 체크포인트 기준인지. 에이전트 실행 중이면 진행 중인 변경은 아직 반영되지 않았다 */
+  evidenceBasis?: RequirementEvidenceBasis;
   /**
    * 마지막 추출 결과가 세션 상태 폴더에 남아 있으면 있다(버그 리포트 A, ADR-097 개정). "추출 결과" 하위 화면이
    * 배너 없이 항상 그대로 보여준다 — 페이지를 새로고침하거나 "뽑는 중"에 개발 서버가 재시작돼도, docs/requirements.md로
@@ -4890,6 +4898,27 @@ async function headForTestEvidence(session: Session): Promise<{ head?: { sha: st
   return { head: checkpoint && { sha: checkpoint.sha, shortSha: checkpoint.shortSha }, pendingFilesCount };
 }
 
+/** 요구사항 상태가 어느 체크포인트를 기준으로 했는지와, 그 기준에 아직 반영되지 않은 변경이 있는지 */
+export interface RequirementEvidenceBasis {
+  /** 기준 체크포인트(HEAD)의 짧은 sha. 체크포인트가 하나도 없으면 없다 */
+  shortSha?: string;
+  /** 에이전트 실행이 진행 중이라 미체크포인트 변경이 실행의 것으로 보이는지 */
+  runInProgress: boolean;
+  /** 작업 복사본에 아직 어느 체크포인트에도 없는 변경이 있는지(실행 중이면 이 변경은 검증 상태에 반영되기 전이다) */
+  pendingChanges: boolean;
+}
+
+/**
+ * "마지막 체크포인트가 무엇을 검증했는가"(요구사항 상태·시나리오 누락·추적 매트릭스)를 물을 때 테스트 실행 기록을 근거로
+ * 인정할지 정하는 미체크포인트 변경 수. 에이전트 실행이 진행 중이면 그 변경은 아직 어느 체크포인트에도 속하지 않고,
+ * 게이트를 통과하면 테스트가 다시 돌아 새 결과로 바뀌며 통과하지 못하면 버려져 HEAD가 그대로이므로 0으로 본다.
+ * 실행 중이 아니면(되살린 보관본·내 폴더 모드에서 사용자가 고친 파일) 그대로 돌려줘 근거로 인정하지 않는다.
+ * "지금 작업 복사본을 내보내도 되는가"(올리기 전 점검·배포)는 이 함수를 쓰지 않고 실제 변경 수를 그대로 쓴다.
+ */
+export function evidencePendingFilesCount(pendingFilesCount: number, agentRunActive: boolean): number {
+  return agentRunActive ? 0 : pendingFilesCount;
+}
+
 /**
  * 프리필 글의 "[R4] 제목" 첫머리에 발행된 이슈 번호를 "(#12)"로 붙인다("이 요구사항 작업"·"전체 계획 세우기" 프리필,
  * ADR-092) — 세션이 이 텍스트로 커밋을 남기면 PR 본문의 `Closes #12`로 이어진다. requirements.ts의 공용 프리필
@@ -4913,7 +4942,9 @@ interface RequirementEvaluationContext {
   docSources: DocMatchSource[];
   testServices: TestServiceView[];
   head?: { sha: string; shortSha: string };
+  /** 테스트 실행 기록을 근거로 인정할지 정하는 미체크포인트 변경 수(evidencePendingFilesCount) */
   pendingFilesCount: number;
+  evidenceBasis: RequirementEvidenceBasis;
   /** 지금 체크포인트에서 돈 테스트 탭 실행을 테스트 단위로 펼친 목록(missingScenarios 계산에 쓴다) */
   testRunRows: MatrixTestRunRow[];
 }
@@ -4923,13 +4954,16 @@ interface RequirementEvaluationContext {
  * 소스·테스트 탭 실행 증거)을 한 번만 모은다. getSessionRequirements·applySessionRequirements·사람 확인
  * 저장/취소가 모두 이 자리를 쓴다(저장소 I/O를 세 번 따로 하지 않는다)
  */
-async function buildRequirementEvaluationContext(session: Session): Promise<RequirementEvaluationContext> {
+async function buildRequirementEvaluationContext(session: Session, { strict = false }: { strict?: boolean } = {}): Promise<RequirementEvaluationContext> {
   const [testFiles, docSources, testServices, headInfo] = await Promise.all([
     scanWorkingCopyTestFiles(session.project.root),
     scanWorkingCopyDocSources(session.project.root),
     Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
     headForTestEvidence(session),
   ]);
+  // session.run은 에이전트 실행(sendRequest)만 잡는다. snapshot.running은 되돌리기·내보내기·테스트 실행에서도 true라 쓰지 않는다
+  const runInProgress = session.run !== undefined;
+  const pendingFilesCount = strict ? headInfo.pendingFilesCount : evidencePendingFilesCount(headInfo.pendingFilesCount, runInProgress);
   return {
     checkpoints: sessionCheckpointRefs(session),
     testFiles,
@@ -4937,8 +4971,9 @@ async function buildRequirementEvaluationContext(session: Session): Promise<Requ
     docSources,
     testServices,
     head: headInfo.head,
-    pendingFilesCount: headInfo.pendingFilesCount,
-    testRunRows: buildMatrixTestRunRows(testServices, headInfo.head, headInfo.pendingFilesCount),
+    pendingFilesCount,
+    evidenceBasis: { ...(headInfo.head ? { shortSha: headInfo.head.shortSha } : {}), runInProgress, pendingChanges: headInfo.pendingFilesCount > 0 },
+    testRunRows: buildMatrixTestRunRows(testServices, headInfo.head, pendingFilesCount),
   };
 }
 
@@ -4956,7 +4991,7 @@ function evaluateRequirementWithContext(requirement: Requirement, context: Requi
 }
 
 /** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과·문서에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
-export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
+export async function getSessionRequirements(id: string, { strict = false }: { strict?: boolean } = {}): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const draft = await getSessionRequirementExtractionDraft(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
@@ -4967,7 +5002,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
   // 사이드카 파일만 읽는다(원격·토큰 없이도 동작한다) — 발행한 적이 없으면 빈 채로 빠르게 끝난다
   const [issueNumbers, context] = await Promise.all([
     publishedIssueNumbers(session.project.root, requirements.map((requirement) => requirement.id)).catch(() => ({}) as Record<string, number>),
-    buildRequirementEvaluationContext(session),
+    buildRequirementEvaluationContext(session, { strict }),
   ]);
 
   const views = requirements.map((requirement) => evaluateRequirementWithContext(requirement, context, issueNumbers[requirement.id]));
@@ -4980,6 +5015,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
     manualSteps,
+    evidenceBasis: context.evidenceBasis,
     ...(draft ? { draft } : {}),
   };
 }
@@ -6226,6 +6262,13 @@ export async function runSessionTests(
   session.testControllers.set(input.service, controller);
   markTestsChanged(session);
   try {
+    // 실행 전의 체크포인트와 변경 여부를 잡아 둔다. 끝났을 때 같은 체크포인트이고 전후 모두 변경이 없어야 그 체크포인트의 증거다
+    // 테스트 탭 실행은 에이전트 실행과 동시에 돌 수 있다. 도는 사이에 에이전트가 파일을 고쳤다가 되돌려지면 전후는
+    // 깨끗해 보이므로, 에이전트 실행이 걸쳐 있었는지도 따로 본다
+    const headBefore = session.snapshot.checkpoints[0]?.sha;
+    const runsBefore = session.runsStarted ?? 0;
+    const agentBefore = session.run !== undefined;
+    const dirtyBefore = (await session.checkpoints.pendingFiles()).length > 0;
     const runSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(TEST_RUN_TIMEOUT_MS)]);
     let execResult: Awaited<ReturnType<Sandbox['exec']>> | undefined;
     try {
@@ -6236,7 +6279,13 @@ export async function runSessionTests(
     }
 
     const run = await collectParsedRun(session, input.service, plan, AbortSignal.timeout(REPORT_COLLECT_TIMEOUT_MS));
-    const sha = session.snapshot.checkpoints[0]?.sha;
+    // 체크포인트에 없는 변경이 있는 채로 돈 실행은 어느 체크포인트의 증거도 아니다. sha를 남기면 그 변경을 버린 뒤나
+    // 에이전트 실행 중(ADR-152: 미체크포인트 변경을 실행의 것으로 보고 무시한다)에 HEAD의 증거로 잘못 세게 된다
+    // 테스트가 도는 사이에 체크포인트가 바뀌었으면(headMoved) 어느 쪽 코드를 돌린 것인지 알 수 없으므로 역시 남기지 않는다
+    const dirtyAfter = (await session.checkpoints.pendingFiles()).length > 0;
+    const headMoved = session.snapshot.checkpoints[0]?.sha !== headBefore;
+    const agentOverlapped = agentBefore || session.run !== undefined || (session.runsStarted ?? 0) !== runsBefore;
+    const sha = dirtyBefore || dirtyAfter || headMoved || agentOverlapped ? undefined : headBefore;
     session.testResults ??= new Map();
     if (run.cases.length > 0) {
       session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run, sha });
@@ -6301,7 +6350,11 @@ export function gateReportNotFoundEntry(previous: StoredTestRun | undefined, run
   };
 }
 
-async function collectGateTestReports(session: Session): Promise<void> {
+/**
+ * 게이트가 남긴 테스트 보고서를 모아 verifiedSha(게이트를 통과해 방금 남긴 체크포인트)의 증거로 저장한다.
+ * 수거가 끝나기 전에 체크포인트가 더 생겨도 그 새 체크포인트에 묶이지 않는다
+ */
+async function collectGateTestReports(session: Session, verifiedSha: string | undefined): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
   await ensureTestResultsLoaded(session);
   let changed = false;
@@ -6318,14 +6371,14 @@ async function collectGateTestReports(session: Session): Promise<void> {
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
     session.testResults ??= new Map();
     if (run.cases.length === 0) {
-      const entry = gateReportNotFoundEntry(session.testResults.get(name), runner, session.snapshot.checkpoints[0]?.sha);
+      const entry = gateReportNotFoundEntry(session.testResults.get(name), runner, verifiedSha);
       if (entry) {
         session.testResults.set(name, entry);
         changed = true;
       }
       continue;
     }
-    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: session.snapshot.checkpoints[0]?.sha });
+    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: verifiedSha });
     changed = true;
   }
   if (changed) {
