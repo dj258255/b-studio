@@ -171,6 +171,36 @@ describe('Workspace', () => {
     });
   });
 
+  describe('숨긴 이름은 대소문자나 유니코드 꼴을 바꿔도 숨긴 이름이다 (트러블슈팅 124)', () => {
+    it('대소문자만 바꾼 이름으로 읽거나 쓰거나 나열하지 못한다', async () => {
+      await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+      await writeFile(path.join(root, '.git', 'b-studio', 'state.json'), '{"verified":true}');
+      await writeFile(path.join(root, '.env'), 'TOKEN=abc');
+      for (const name of ['.GIT/b-studio/state.json', '.Git/b-studio/state.json', '.ENV', '.Env', '.env.LOCAL', 'web/NODE_MODULES/x.js', 'api/Build/out.jar']) {
+        await expect(workspace.read(name), name).rejects.toThrow('생성물이나 비밀 파일');
+      }
+      await expect(workspace.write('.Git/b-studio/evil.json', 'tampered')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.write('.GIT/hooks/pre-commit', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.list('.GIT', 1)).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(readFile(path.join(root, '.git', 'b-studio', 'evil.json'), 'utf8')).rejects.toThrow();
+    });
+
+    it('보이지 않는 문자를 끼우거나 정규화 꼴을 바꾼 이름도 거절한다', async () => {
+      await expect(workspace.write('.g\u200cit/config', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.write('.git\ufeff/config', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.read('.e\u200dnv')).rejects.toThrow('생성물이나 비밀 파일');
+    });
+
+    it('예시 파일(.env.example)은 대소문자와 무관하게 그대로 다룰 수 있고, 숨긴 이름과 닮았을 뿐인 이름은 막지 않는다', async () => {
+      await workspace.write('.env.example', 'TOKEN=');
+      await workspace.write('.ENV.EXAMPLE.dist', 'TOKEN=');
+      await workspace.write('docs/git/notes.md', 'x');
+      await workspace.write('src/builder/Build.java', 'class Build {}');
+      await workspace.write('env.md', 'x');
+      expect(workspace.changedFiles()).toEqual(expect.arrayContaining(['.env.example', 'docs/git/notes.md', 'src/builder/Build.java', 'env.md']));
+    });
+  });
+
   it('프로젝트 밖을 가리키는 심볼릭 링크로 쓰지 못한다', async () => {
     const outside = await mkdtemp(path.join(tmpdir(), 'outside-'));
     await symlink(outside, path.join(root, 'escape'));

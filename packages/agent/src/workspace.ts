@@ -12,8 +12,22 @@ const DENIED_FILES = [/^\.env(\..*)?$/];
  */
 const ENV_TEMPLATE_FILE = /^\.env(\.[\w-]+)*\.(example|sample|template|dist)$/;
 
+/**
+ * 이름을 파일 시스템이 같은 것으로 볼 수 있는 꼴로 맞춘다(트러블슈팅 124). macOS와 Windows의 기본 볼륨은 대소문자를 구분하지 않아
+ * `.GIT`·`.Env`가 `.git`·`.env`와 같은 항목이다. 이름을 글자 그대로 비교하면 숨김 검사를 대소문자만 바꿔 지나간다.
+ * 유니코드 정규화 꼴과, HFS+가 이름을 비교할 때 무시하는 보이지 않는 문자(git이 `.git`을 지킬 때 거르는 것과 같은 범위)도 함께 맞춘다.
+ * 대소문자를 구분하는 볼륨에서는 `.GIT`이 다른 폴더지만, 그런 이름까지 숨기는 쪽이 지나치는 것보다 낫다
+ */
+function canonicalName(segment: string): string {
+  return segment
+    .normalize('NFC')
+    .replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '')
+    .toLowerCase();
+}
+
 function isDeniedFileName(segment: string): boolean {
-  return DENIED_FILES.some((pattern) => pattern.test(segment)) && !ENV_TEMPLATE_FILE.test(segment);
+  const name = canonicalName(segment);
+  return DENIED_FILES.some((pattern) => pattern.test(name)) && !ENV_TEMPLATE_FILE.test(name);
 }
 
 const MAX_READ_BYTES = 256 * 1024;
@@ -348,6 +362,20 @@ export class Workspace {
     const [realRoot, realExisting] = await Promise.all([realpath(/*turbopackIgnore: true*/ this.root), realpath(/*turbopackIgnore: true*/ existing)]);
     if (!isInside(realRoot, realExisting)) throw new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
 
+    // 운영체제가 알려 주는 실제 저장 이름으로 한 번 더 본다. 위의 이름 검사는 우리가 아는 변형(대소문자·정규화)만 맞추므로,
+    // 파일 시스템이 같은 항목으로 보는 다른 이름이 있어도 실제 이름이 숨긴 이름이면 여기서 걸린다
+    // (promises의 realpath에는 native가 없어 동기 판본을 쓴다. 경로 하나를 푸는 짧은 호출이다)
+    const native = (target: string, fallback: string): string => {
+      try {
+        return realpathSync.native(/*turbopackIgnore: true*/ target);
+      } catch {
+        return fallback;
+      }
+    };
+    if (path.relative(native(this.root, realRoot), native(existing, realExisting)).split(path.sep).some(isDenied)) {
+      throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
+    }
+
     return absolute;
   }
 
@@ -400,7 +428,7 @@ export function isSecretFile(file: string): boolean {
 }
 
 function isDenied(segment: string): boolean {
-  return DENIED_SEGMENTS.has(segment) || isDeniedFileName(segment);
+  return DENIED_SEGMENTS.has(canonicalName(segment)) || isDeniedFileName(segment);
 }
 
 function isInside(root: string, target: string): boolean {
