@@ -1,7 +1,7 @@
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { formatBytes, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { formatBytes, SandboxError, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { isComposeFile, servicesForFiles } from './services';
@@ -27,6 +27,8 @@ export interface ServiceCheck {
   oomKilled?: boolean;
   /** 재시작하는 동안 샌드박스 밖으로 나가려다 막힌 요청. 의존성 다운로드가 막혔다면 코드 문제가 아니다 */
   blockedEgress?: string[];
+  /** 샌드박스·도커 쪽 문제로 재시작하지 못했다(SandboxError.platform). 코드를 고쳐서 풀 수 없다 */
+  platform?: true;
 }
 
 export interface ContractCheck {
@@ -37,9 +39,14 @@ export interface ContractCheck {
 
 export interface VerificationReport {
   ok: boolean;
-  /** 재시작 전에 샌드박스가 바뀐 파일을 보게 될 때까지 기다린 결과 */
-  sync: { elapsedMs: number } | { error: string };
+  /** 재시작 전에 샌드박스가 바뀐 파일을 보게 될 때까지 기다린 결과. platform이면 샌드박스 쪽 문제로 반영을 확인하지 못했다 */
+  sync: { elapsedMs: number } | { error: string; platform?: true };
   restarted: ServiceCheck[];
+  /**
+   * 샌드박스·도커 쪽 문제로 검증을 끝내지 못했을 때의 사유(첫 줄). 있으면 ok는 false다.
+   * 에이전트가 바꾼 코드가 원인이 아니므로 게이트는 재시도 횟수로 세지 않고, 호출자는 변경을 되돌리지 않는다(트러블슈팅 117)
+   */
+  platformFailure?: string;
   contracts: ContractCheck[];
   /** 서비스에 속하지 않아 재시작으로 확인할 수 없는 파일 */
   unverifiedFiles: string[];
@@ -96,7 +103,10 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
   const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
   const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
   const { sync, restarted, unverifiedFiles, skippedOff, specError, addedAddons, addonError } = await restartServicesFor(sandbox, project, changedFiles, start);
-  if ('error' in sync) return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError };
+  const platformFailure = platformFailureOf(sync, restarted);
+  if ('error' in sync) {
+    return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError, ...(platformFailure ? { platformFailure } : {}) };
+  }
 
   // 재시작에 실패했거나(서비스가 준비 안 됨) 꺼 둬 재시작을 건너뛴 서비스의 계약은 뽑을 수 없으므로 준비된 서비스만 비교한다
   const failed = new Set(restarted.filter((check) => !check.ready).map((check) => check.service));
@@ -123,7 +133,14 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     secretLeaks.length === 0 &&
     specError === undefined;
 
-  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError };
+  return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError, ...(platformFailure ? { platformFailure } : {}) };
+}
+
+/** 반영 확인이나 재시작이 샌드박스·도커 쪽 문제로 실패했으면 그 사유의 첫 줄을 돌려준다 */
+function platformFailureOf(sync: VerificationReport['sync'], restarted: readonly ServiceCheck[]): string | undefined {
+  if ('error' in sync && sync.platform) return sync.error.split('\n')[0];
+  const failed = restarted.find((check) => !check.ready && check.platform);
+  return failed ? `${failed.service}: ${(failed.error ?? '').split('\n')[0]}` : undefined;
 }
 
 /**
@@ -209,7 +226,7 @@ export async function restartServicesFor(
   try {
     sync = { elapsedMs: (await sandbox.sync([...files], { signal: start?.signal })).elapsedMs };
   } catch (error) {
-    return { sync: { error: describe(error) }, restarted: [], unverifiedFiles: unmatched, skippedOff, specError };
+    return { sync: { error: describe(error), ...(isPlatformError(error) ? { platform: true as const } : {}) }, restarted: [], unverifiedFiles: unmatched, skippedOff, specError };
   }
 
   // compose가 바뀐 재시작에서, 이 세션이 시작할 때는 없던 새 부가 서비스를 이 세션의 compose 프로젝트 안에서
@@ -283,8 +300,12 @@ async function restartOnce(sandbox: Sandbox, service: string, start?: StartOptio
       const limit = usage.memoryLimitBytes ? ` (${formatBytes(usage.memoryLimitBytes)})` : '';
       return { service, ready: false, error: `메모리 한도${limit}를 넘어 종료됐습니다. ${describe(error)}`, logTail, oomKilled: true, ...extra };
     }
-    return { service, ready: false, error: describe(error), logTail, ...extra };
+    return { service, ready: false, error: describe(error), logTail, ...extra, ...(isPlatformError(error) ? { platform: true as const } : {}) };
   }
+}
+
+function isPlatformError(error: unknown): boolean {
+  return error instanceof SandboxError && error.platform;
 }
 
 /** 막힌 외부 접속을 "호스트:포트 (이유)"로 중복 없이 모은다 */
@@ -344,6 +365,9 @@ export async function captureBaselines(
 
 export function formatVerificationReport(report: VerificationReport, { allowBreaking }: { allowBreaking: boolean }): string {
   const lines: string[] = [report.ok ? '검증 통과' : '검증 실패'];
+  if (report.platformFailure) {
+    lines.push(`- b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요: ${report.platformFailure}`);
+  }
 
   if (report.specError) {
     lines.push(`- ${SPEC_FILE} 형식이 올바르지 않아 이전 설정으로 재시작했습니다:`, ...report.specError.split('\n').map((line) => `    ${line}`));

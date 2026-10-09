@@ -168,7 +168,7 @@ export async function computeGitMask(projectRoot: string, config: ComposeMountCo
       // (가린다는 약속이 깨지지 않게, 그리고 이 코드가 호스트의 무엇도 재귀적으로 지우지 않게 — prepareEmptyDirectory)
       await prepareEmptyDirectory(path.join(entry.dir, GIT), STATE_MASK);
     } catch (error) {
-      throw new SandboxError(`${state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, error instanceof Error ? error.message : String(error));
+      throw new SandboxError(`${state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, error instanceof Error ? error.message : String(error), { platform: true });
     }
     entry.hasState = true;
   }
