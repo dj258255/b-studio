@@ -30,6 +30,10 @@ const SCROLL_SETTLE_MS = 150;
 /** 예상된 거절을 가를 때, 조작 직후 요청이 나가길 기다리는 시간과 네트워크가 잠잠해지길 기다리는 상한 */
 const SETTLE_START_MS = 100;
 const SETTLE_NETWORK_MS = 2_000;
+/** 선언한 조작 하나가 낸 거절로 볼 수 있는 응답 수의 상한. 넘으면 그 조작의 4xx는 하나도 옮기지 않는다(화면이 깨졌을 가능성이 크다) */
+const MAX_REJECTIONS_PER_ACTION = 3;
+/** 한 실행에서 받는 선언 수의 상한. 조작마다 선언해 4xx를 모두 지우는 것을 막는다 */
+const MAX_REJECTION_DECLARATIONS = 5;
 /** 스크린샷은 토큰 비용이 크므로(연구 노트 §2.6, §6.7) JPEG로 압축해 보낸다 */
 const SCREENSHOT_JPEG_QUALITY = 60;
 
@@ -110,9 +114,11 @@ export class QaBrowser {
   readonly #page: Page;
   readonly #allowedOrigins: Set<string>;
   readonly #diagnostics: QaDiagnostics = emptyDiagnostics();
-  /** #diagnostics.failedRequests와 같은 순서의 상태 코드·주소. 응답이 아니라 네트워크 실패면 status가 없다 */
-  readonly #failureMeta: Array<{ status?: number; url: string }> = [];
-  /** 예상된 거절을 기다리는 동안 관찰한 4xx 응답(중복 제거 없이). 조작 하나의 구간에서만 켜진다 */
+  /** #diagnostics.failedRequests와 같은 순서의 주소와, 그 실패가 "거절"(조회가 아닌 요청의 4xx 응답)인지 */
+  readonly #failureMeta: Array<{ url: string; rejection: boolean }> = [];
+  /** 진단 신호로 이미 센 실패의 주소(같은 주소는 한 번만 센다). 예상된 거절로 뺀 주소는 여기서도 지워야 다음 실패를 다시 센다 */
+  readonly #seenFailures = new Set<string>();
+  /** 예상된 거절을 기다리는 동안 관찰한 거절 응답(중복 제거 없이). 조작 하나의 구간에서만 켜진다 */
   #rejectionWatch: Array<{ status: number; url: string }> | undefined;
   readonly #refs = new Map<string, { selector: string; stableSelector?: string; rect: QaElement['rect'] }>();
   readonly #screencast: ReturnType<typeof createScreencast> | undefined;
@@ -151,19 +157,21 @@ export class QaBrowser {
       page.on('console', (message) => {
         if (message.type() === 'error' && !message.text().startsWith('Failed to load resource')) instance.#diagnostics.consoleErrors.push(message.text());
       });
-      const seenFailures = new Set<string>();
       // 허용 출처 밖이라 막은 요청은 앱의 오류가 아니므로 실패로 세지 않는다(browser-check.ts의 recordFailure와 같은 규칙)
-      const recordFailure = (requestUrl: string, reason: string, status?: number) => {
+      const recordFailure = (requestUrl: string, reason: string, status?: number, method?: string) => {
         if (new URL(requestUrl).pathname === '/favicon.ico' || blockedUrls.has(requestUrl)) return;
+        // "거절"은 서버가 사용자의 동작 요청을 받아들이지 않은 것이다: 조회(GET·HEAD)가 아닌 요청의 4xx 응답만 해당한다.
+        // 화면이 데이터를 읽다 받은 404·403은 선언으로 지울 수 없다(그쪽이 진짜 결함인 경우가 많다)
+        const rejection = status !== undefined && status >= 400 && status < 500 && method !== undefined && method !== 'GET' && method !== 'HEAD';
         // 같은 주소의 실패는 진단 신호로 한 번만 세지만, 예상된 거절을 가를 때는 매번 봐야 한다
-        if (status !== undefined && status >= 400 && status < 500) instance.#rejectionWatch?.push({ status, url: requestUrl });
-        if (seenFailures.has(requestUrl)) return;
-        seenFailures.add(requestUrl);
+        if (rejection) instance.#rejectionWatch?.push({ status: status as number, url: requestUrl });
+        if (instance.#seenFailures.has(requestUrl)) return;
+        instance.#seenFailures.add(requestUrl);
         instance.#diagnostics.failedRequests.push(`${reason} ${requestUrl}`);
-        instance.#failureMeta.push({ ...(status !== undefined ? { status } : {}), url: requestUrl });
+        instance.#failureMeta.push({ url: requestUrl, rejection });
       };
       page.on('response', (response) => {
-        if (response.status() >= 400) recordFailure(response.url(), String(response.status()), response.status());
+        if (response.status() >= 400) recordFailure(response.url(), String(response.status()), response.status(), response.request().method());
       });
       page.on('requestfailed', (request) => recordFailure(request.url(), request.failure()?.errorText ?? 'failed'));
 
@@ -182,6 +190,15 @@ export class QaBrowser {
   }
 
   /** 지금까지 쌓인 진단 신호(이벤트 기반)에 그 순간의 가로 넘침·기본 접근성 위반을 더한 전체 스냅샷 */
+  /**
+   * 아직 돌아오지 않은 요청이 끝나길 잠깐 기다린다(상한 SETTLE_NETWORK_MS). 마지막 조작 직후에 실행이 끝나면
+   * 그 조작이 낸 요청의 실패가 진단 신호에 들어오기 전에 판정이 내려질 수 있다
+   */
+  async settle(): Promise<void> {
+    await this.#page.waitForTimeout(SETTLE_START_MS).catch(() => {});
+    await this.#page.waitForLoadState('networkidle', { timeout: SETTLE_NETWORK_MS }).catch(() => {});
+  }
+
   async currentDiagnostics(): Promise<QaDiagnostics> {
     const { overflow, violations } = await this.#page.evaluate<{ overflow: number; violations: string[] }>(STATIC_DIAGNOSTICS_SCRIPT);
     return {
@@ -210,24 +227,29 @@ export class QaBrowser {
 
   /**
    * 구간을 끝낸다. 늦게 끝나는 fetch를 잡으려고 네트워크가 잠잠해질 때까지 잠깐 기다린 뒤,
-   * 구간 안에서 새로 생긴 4xx 응답만 진단 신호(failedRequests)에서 빼 예상된 거절로 돌려준다.
-   * 5xx·네트워크 실패와 구간 밖의 실패는 진단 신호에 그대로 남는다
+   * 구간 안에서 새로 생긴 거절 응답(조회가 아닌 요청의 4xx)만 진단 신호(failedRequests)에서 빼 예상된 거절로 돌려준다.
+   * 조회 요청의 4xx, 5xx, 네트워크 실패, 구간 밖의 실패는 진단 신호에 그대로 남는다.
+   * 거절이 MAX_REJECTIONS_PER_ACTION건을 넘으면 조작 하나가 낸 거절로 보지 않고 하나도 옮기지 않는다(excess에 건수).
+   * 뺀 주소는 "이미 센 주소"에서도 지운다 — 그러지 않으면 같은 주소가 나중에 선언 없이 실패해도 다시 세지 않는다
    */
-  async endRejectionWatch(mark: number): Promise<Array<{ status: number; url: string }>> {
-    await this.#page.waitForTimeout(SETTLE_START_MS);
-    await this.#page.waitForLoadState('networkidle', { timeout: SETTLE_NETWORK_MS }).catch(() => {});
+  async endRejectionWatch(mark: number): Promise<{ requests: Array<{ status: number; url: string }>; excess: number }> {
+    await this.settle();
     const seen = this.#rejectionWatch ?? [];
     this.#rejectionWatch = undefined;
-    for (let index = this.#failureMeta.length - 1; index >= mark; index -= 1) {
-      const status = this.#failureMeta[index]?.status;
-      if (status !== undefined && status >= 400 && status < 500) {
-        this.#failureMeta.splice(index, 1);
-        this.#diagnostics.failedRequests.splice(index, 1);
-      }
-    }
     const unique = new Map<string, { status: number; url: string }>();
     for (const entry of seen) unique.set(`${entry.status} ${entry.url}`, entry);
-    return [...unique.values()];
+    const requests = [...unique.values()];
+    if (requests.length > MAX_REJECTIONS_PER_ACTION) return { requests: [], excess: requests.length };
+    const urls = new Set(requests.map((request) => request.url));
+    for (let index = this.#failureMeta.length - 1; index >= mark; index -= 1) {
+      const meta = this.#failureMeta[index]!;
+      if (meta.rejection && urls.has(meta.url)) {
+        this.#failureMeta.splice(index, 1);
+        this.#diagnostics.failedRequests.splice(index, 1);
+        this.#seenFailures.delete(meta.url);
+      }
+    }
+    return { requests, excess: 0 };
   }
 
   /** 지금 화면의 인터랙티브 요소 목록(접근성 트리 축약) + 새 ref를 부여한다. 최대 MAX_SNAPSHOT_ELEMENTS개까지만 돌려준다 */
@@ -660,8 +682,9 @@ export function buildQaTools(): BetaTool[] {
     tool(
       'qa_expect_rejection',
       '바로 다음 조작 하나는 서버가 거절(4xx)하는 것이 정상이라고 미리 알립니다. 로그인 없이 주문, 빈 값 제출처럼 일부러 거절될 조작을 하기 전에 먼저 부르세요. ' +
-        '그 조작 하나에서 생긴 4xx 응답만 "예상된 거절"로 따로 기록하고 실패로 세지 않습니다. 5xx·네트워크 실패와 다른 조작의 실패는 그대로 실패입니다. ' +
-        '선언은 다음 조작(클릭·입력·키·이동) 하나에만 쓰이고, 관찰(스냅샷·캡처·스크롤 등)은 선언을 소모하지 않습니다. 선언했는데 거절 응답이 없으면 결과로 알려 드립니다. 행동 횟수에 들지 않습니다.',
+        '그 조작 하나(클릭·입력·키)에서 조회가 아닌 요청(POST·PUT·DELETE 등)이 받은 4xx 응답만 "예상된 거절"로 따로 기록하고 실패로 세지 않습니다. ' +
+        '조회(GET) 요청의 4xx, 5xx, 네트워크 실패, 다른 조작의 실패는 그대로 실패입니다. 이동(qa_navigate)에는 적용되지 않습니다. ' +
+        `선언은 바로 다음 조작 한 번에만 쓰이고(그 조작이 실패해도 사라집니다), 관찰(스냅샷·캡처·스크롤 등)은 선언을 소모하지 않습니다. 한 실행에 ${MAX_REJECTION_DECLARATIONS}번까지 선언할 수 있습니다. 선언했는데 거절 응답이 없으면 결과로 알려 드립니다. 행동 횟수에 들지 않습니다.`,
       { reason: { type: 'string', description: '왜 거절되는 것이 정상인지 한 문장(예: "로그인하지 않았으니 주문은 401로 거절돼야 한다")' } },
     ),
     tool(
@@ -936,7 +959,7 @@ export function buildQaSystemPrompt(goal?: Pick<ExploreQaGoal, 'goal'>): string 
     '페이지를 내릴 때는 qa_scroll에 ref를 넣지 말고 direction만 주세요. 결과에 맨 아래에 닿았는지가 나옵니다.',
     '화면에서 문제를 보면 그 자리에서 qa_report_issue로 보고하세요. 본 것만 적고(추측 금지), 어느 요소가 어떻게 잘못됐는지 구체적으로 쓰세요. 문제를 찾았어도 점검을 계속할 수 있습니다.',
     '목표를 끝까지 수행했거나 더 진행할 수 없으면 qa_finish를 부르세요. 성공을 선언해도 플랫폼이 진단 신호·확인 문구·보고된 문제를 따로 확인하니 솔직하게 판단하세요. 문제가 없으면 없다고 적으면 됩니다.',
-    '일부러 거절될 조작(로그인 없이 주문, 빈 값 제출 등)을 하기 전에는 먼저 qa_expect_rejection으로 알리세요. 알리지 않은 조작에서 서버가 거절하면 실패한 요청으로 세어 문제로 판정합니다.',
+    '일부러 거절될 조작(로그인 없이 주문, 빈 값 제출 등)을 하기 전에는 바로 앞에서 qa_expect_rejection으로 알리세요. 알리지 않은 조작에서 서버가 거절하면 실패한 요청으로 세어 문제로 판정합니다. 화면이 데이터를 읽다 받은 오류와 서버 오류(5xx)는 선언해도 실패입니다.',
     '화면을 바꾸지 않는 관찰은 필요한 만큼 해도 되지만, 같은 화면에서 같은 조작을 되풀이하지 말고 막히면 다른 요소를 시도하거나 qa_finish(success: false)로 알리세요.',
   ];
   if (goal && isInspectionGoal(goal.goal)) {
@@ -983,6 +1006,8 @@ export class QaReport {
   readonly #unmet: QaExpectedRejection[] = [];
   /** 선언은 했지만 아직 쓰이지 않은 것(다음 조작을 기다린다) */
   #pendingReason: string | undefined;
+  /** 이번 실행에서 받은 선언 수(바꿔 쓴 선언도 센다) */
+  #declarations = 0;
   #lastCaptureAction: number | undefined;
 
   /** 거절될 것으로 선언했지만 거절이 없던 시험. 조작 없이 끝난 선언도 여기에 든다 */
@@ -994,32 +1019,50 @@ export class QaReport {
   declareRejection(input: Record<string, unknown>): { ok: boolean; text: string } {
     const reason = typeof input.reason === 'string' ? input.reason.trim().slice(0, MAX_FINDING_DETAIL) : '';
     if (reason === '') return { ok: false, text: 'reason(왜 거절되는 것이 정상인지)을 적어 주세요' };
+    if (this.#declarations >= MAX_REJECTION_DECLARATIONS) {
+      return { ok: false, text: `거절 선언은 한 실행에 ${MAX_REJECTION_DECLARATIONS}번까지입니다. 이 뒤의 조작에서 서버가 거절하면 실패한 요청으로 셉니다.` };
+    }
+    this.#declarations += 1;
     const replaced = this.#pendingReason !== undefined;
     this.#pendingReason = reason;
     return {
       ok: true,
-      text: `${replaced ? '앞의 선언을 이 선언으로 바꿨습니다. ' : ''}다음 조작 하나(클릭·입력·키·이동)에서 서버가 거절(4xx)하는지 확인합니다. 관찰 동작은 선언을 소모하지 않습니다.`,
+      text: `${replaced ? '앞의 선언을 이 선언으로 바꿨습니다. ' : ''}바로 다음 조작 하나(클릭·입력·키)에서 서버가 거절(4xx)하는지 확인합니다. 관찰 동작은 선언을 소모하지 않습니다.`,
     };
   }
 
   /**
    * 도구 하나를 실행한다. 두 백엔드가 executeQaTool 대신 이것을 부른다.
-   * 선언이 있고 이 도구가 화면을 바꾸는 조작이면 그 조작 동안 새로 생긴 4xx 응답을 예상된 거절로 옮기고(진단 신호에서 뺀다),
-   * 거절이 없었으면 그 사실을 도구 결과에 덧붙인다. 조작이 실패하면 선언은 유지한다.
+   * 선언이 있고 이 도구가 화면을 바꾸는 조작이면 선언은 **이 조작에서 쓰이고 사라진다**(성공하든 실패하든).
+   * 선언이 남아 한참 뒤의 무관한 조작에 적용되는 일이 없게 하려는 것이다.
+   *  - 클릭·입력·키가 성공하면: 그 조작 동안 새로 생긴 거절 응답을 예상된 거절로 옮긴다(진단 신호에서 뺀다). 없었으면 그 사실을 알린다.
+   *  - 조작이 실패했거나 이동(qa_navigate)이면: 아무것도 옮기지 않고 선언만 지운 뒤 모델에게 알린다. 화면을 열 때의 실패는 선언으로 지울 수 없다.
    * 가장 최근 캡처·스냅샷의 번호도 여기서 기록해 qa_report_issue의 observedAtAction에 쓴다
    */
   async runAction(name: string, input: Record<string, unknown>, browser: QaBrowser, index: number): Promise<{ outcome: QaToolOutcome; rejection?: QaExpectedRejection }> {
     const reason = OPERATION_TOOLS.has(name) ? this.#pendingReason : undefined;
-    const mark = reason !== undefined ? browser.beginRejectionWatch() : 0;
+    const watched = reason !== undefined && REJECTION_TOOLS.has(name);
+    const mark = watched ? browser.beginRejectionWatch() : 0;
     const outcome = await executeQaTool(name, input, browser);
     if (outcome.ok && (name === 'qa_screenshot' || name === 'qa_snapshot')) this.#lastCaptureAction = index;
     if (reason === undefined) return { outcome };
+    this.#pendingReason = undefined;
+    if (!watched) {
+      return { outcome: { ...outcome, text: `${outcome.text}\n이동에는 거절 선언이 적용되지 않아 선언을 지웠습니다. 화면을 열 때의 실패는 그대로 셉니다.` } };
+    }
     if (!outcome.ok) {
       browser.cancelRejectionWatch();
-      return { outcome };
+      return { outcome: { ...outcome, text: `${outcome.text}\n조작이 실패해 거절 선언을 지웠습니다. 같은 시험을 다시 하려면 조작 전에 다시 선언하세요.` } };
     }
-    this.#pendingReason = undefined;
-    const requests = await browser.endRejectionWatch(mark);
+    const { requests, excess } = await browser.endRejectionWatch(mark);
+    if (excess > 0) {
+      return {
+        outcome: {
+          ...outcome,
+          text: `${outcome.text}\n이 조작에서 거절 응답이 ${excess}건 나와 예상된 거절로 보지 않았습니다(조작 하나에 ${MAX_REJECTIONS_PER_ACTION}건까지). 실패한 요청으로 셉니다.`,
+        },
+      };
+    }
     const rejection: QaExpectedRejection = { actionIndex: index, tool: name, reason, requests };
     if (requests.length > 0) {
       this.expectedRejections.push(rejection);
@@ -1067,6 +1110,8 @@ export class QaReport {
 const REPEAT_TRACKED_TOOLS = new Set(['qa_click', 'qa_fill', 'qa_type', 'qa_press', 'qa_navigate']);
 /** 예상된 거절 선언을 소모하는 조작. 반복 감지가 세는 조작과 같다(hover·scroll·wait 등 관찰은 소모하지 않는다) */
 const OPERATION_TOOLS = REPEAT_TRACKED_TOOLS;
+/** 그중 거절을 예상된 거절로 옮길 수 있는 조작. 이동은 뺀다 — 화면을 열 때의 실패(데이터 요청 404 등)는 선언으로 지울 수 없다 */
+const REJECTION_TOOLS = new Set(['qa_click', 'qa_fill', 'qa_type', 'qa_press']);
 
 /**
  * "같은 화면에서 같은 조작을 되풀이"하는 루프를 잡는다. 관찰(snapshot·find·screenshot·wait·scroll·hover)과 실패한 동작은 세지 않는다 —
@@ -1104,6 +1149,8 @@ export async function buildExploreQaResult(input: {
   usage: AgentUsage;
 }): Promise<ExploreQaResult> {
   const { goal, browser, report, stoppedBy, actions, usage } = input;
+  // 마지막 조작이 낸 요청이 끝나길 기다린 뒤에 진단 신호를 읽는다(늦게 온 실패를 놓치지 않게)
+  await browser.settle();
   const diagnostics = await browser.currentDiagnostics();
   const pageText = await browser.pageText();
   const judged = judge(goal, diagnostics, pageText, {
