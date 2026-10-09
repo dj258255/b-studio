@@ -645,6 +645,38 @@ describe('VerificationGate 워크플로 단계', () => {
       );
     });
 
+    it('같은 화면을 다른 기대값으로 두 번 확인해도 둘 다 돌고, 이름과 근거가 서로 구별된다(트러블슈팅 120)', async () => {
+      const target = withWorkflow({ pageChecks: [page({ expectText: '주문 목록' }), page({ expectText: '합계' }), page({ expectText: '주문 목록' })] as never });
+      let opened = 0;
+      const { gate, workspace } = await setup(target, {
+        browser: async () => {
+          opened += 1;
+          return rendered({ text: '주문 목록 합계' });
+        },
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      // 고치기 전에는 여기서 "task id가 중복됩니다"로 던졌다
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(opened).toBe(3);
+      const checks = gate.checks.filter((entry) => entry.stage === 'browser_check');
+      expect(checks.map((entry) => entry.name)).toEqual(['api / (browser)', 'api / (browser) #2', 'api / (browser) #3']);
+      expect(checks[0]!.evidence).toContain("'주문 목록' 화면에 있음");
+      expect(checks[0]!.evidence).not.toContain("'합계' 화면에 있음");
+      expect(checks[1]!.evidence).toContain("'합계' 화면에 있음");
+      expect(checks[1]!.evidence).not.toContain("'주문 목록' 화면에 있음");
+    });
+
+    it('이름이 같은 확인 중 하나만 실패하면 그 확인만 실패로 남고 사유에 번호가 붙은 이름이 나온다', async () => {
+      const target = withWorkflow({ pageChecks: [page({ expectText: '주문 목록' }), page({ expectText: '없는 문구' })] as never });
+      const { gate, workspace } = await setup(target, { browser: async () => rendered() });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await gate.check();
+      expect(outcome.kind).toBe('retry');
+      expect(outcome.kind === 'retry' && outcome.feedback).toContain('api / (browser) #2');
+      const checks = gate.checks.filter((entry) => entry.stage === 'browser_check');
+      expect(checks.map((entry) => [entry.name, entry.ok])).toEqual([['api / (browser)', true], ['api / (browser) #2', false]]);
+    });
+
     it('실패한 확인에는 근거를 붙이지 않고, 통과한 확인의 근거는 모델 피드백에 싣지 않는다', async () => {
       const target = withWorkflow({ pageChecks: [page({ expectText: '주문 목록' }), page({ path: '/missing', expectText: '없는 문구' })] as never });
       const { gate, workspace } = await setup(target, { browser: async () => rendered() });
