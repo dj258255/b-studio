@@ -1,7 +1,7 @@
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { appendPageCheckToYaml, buildPageCheckFromExploreQa } from './explore-qa-save';
-import type { QaActionRecord } from './explore-qa';
+import type { ExploreQaResult, QaActionRecord } from './explore-qa';
 
 function action(overrides: Partial<QaActionRecord>): QaActionRecord {
   return { index: 1, tool: 'qa_click', input: {}, ok: true, newDiagnosticsCount: 0, url: 'http://x/', at: 0, ...overrides };
@@ -52,5 +52,25 @@ describe('appendPageCheckToYaml', () => {
     const next = appendPageCheckToYaml(original, { service: 'web', path: '/cart', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: true });
     const parsed = parse(next) as { workflow: { pageChecks: Array<{ path: string }> } };
     expect(parsed.workflow.pageChecks.map((check) => check.path)).toEqual(['/', '/cart']);
+  });
+});
+
+describe('새 탐색 결과 모양과 저장', () => {
+  it('발견(findings)과 qa_scroll 같은 관찰 행동이 있어도 저장은 행동 기록만 보고, 변환할 수 없는 행동은 건너뛴 이유를 남긴다', () => {
+    const result: ExploreQaResult = {
+      status: 'fail',
+      reason: '모델이 화면에서 본 문제',
+      findings: [{ severity: 'major', summary: '로그인 줄이 잘렸습니다' }],
+      stoppedBy: 'finish',
+      diagnostics: { consoleErrors: [], pageErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, accessibilityViolations: [] },
+      actions: [
+        action({ index: 1, tool: 'qa_scroll', input: { direction: 'down' } }),
+        action({ index: 2, tool: 'qa_click', stableSelector: 'role=button[name="검색"]' }),
+      ],
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    };
+    const { check, skipped } = buildPageCheckFromExploreQa({ service: 'web', goal: { goal: '점검', startPath: '/live' }, actions: result.actions });
+    expect(check.steps).toEqual([{ click: 'role=button[name="검색"]' }]);
+    expect(skipped).toEqual([{ index: 1, tool: 'qa_scroll', reason: expect.any(String) }]);
   });
 });

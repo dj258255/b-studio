@@ -10,6 +10,7 @@ import {
   type ExploreQaGoal,
   type ExploreQaResult,
   type QaActionRecord,
+  type QaFinding,
   type QaViewport,
 } from '@b-studio/agent';
 import { SPEC_FILE } from '@b-studio/spec';
@@ -39,6 +40,8 @@ export interface ExploreQaRun {
   goal: ExploreQaGoal;
   status: ExploreQaRunStatus;
   actions: QaActionRecord[];
+  /** 모델이 화면을 보고 보고한 문제. 실행 중에도 쌓인다(끝나면 result.findings와 같다) */
+  findings: QaFinding[];
   texts: string[];
   result?: ExploreQaResult;
   error?: string;
@@ -77,7 +80,7 @@ export function startExploreQa(sessionId: string, input: StartExploreQaInput): E
     ...(input.maxActions !== undefined ? { maxActions: input.maxActions } : {}),
     ...(input.maxMs !== undefined ? { maxMs: input.maxMs } : {}),
   };
-  const run: ExploreQaRun = { id: `explore-${Date.now()}`, service: input.service, goal, status: 'running', actions: [], texts: [], startedAt: Date.now() };
+  const run: ExploreQaRun = { id: `explore-${Date.now()}`, service: input.service, goal, status: 'running', actions: [], findings: [], texts: [], startedAt: Date.now() };
   const abort = new AbortController();
   store.set(sessionId, { run, abort });
 
@@ -85,6 +88,7 @@ export function startExploreQa(sessionId: string, input: StartExploreQaInput): E
   const allowedOrigins = remoteBrowserAllowedOrigins(sessionId);
   const onEvent = (event: ExploreQaEvent): void => {
     if (event.type === 'action') run.actions.push(event.record);
+    else if (event.type === 'finding') run.findings.push(event.finding);
     else if (event.type === 'text') run.texts.push(event.text);
   };
   const onFrame = (frame: BrowserFrame): void => {
