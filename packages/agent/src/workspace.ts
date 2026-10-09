@@ -105,14 +105,26 @@ export class Workspace {
   }
 
   async read(file: string): Promise<string> {
+    const { absolute, content } = await this.#load(file);
+    this.#seen.set(this.#relative(absolute), digest(content));
+    return content;
+  }
+
+  /**
+   * 읽은 표시(#seen)를 남기지 않고 읽는다. 게이트처럼 에이전트가 아닌 쪽이 파일을 훑어볼 때 쓴다 —
+   * read()로 읽으면 에이전트가 직접 읽지 않은 파일에도 "마지막으로 읽은 뒤 바뀌었다" 검사가 걸린다
+   */
+  async peek(file: string): Promise<string> {
+    return (await this.#load(file)).content;
+  }
+
+  async #load(file: string): Promise<{ absolute: string; content: string }> {
     const absolute = await this.#resolve(file, { mustExist: true });
     const buffer = await readFile(absolute);
     if (buffer.byteLength > MAX_READ_BYTES) {
       throw new WorkspaceError(`${file}: 파일이 너무 큽니다 (${buffer.byteLength} bytes)`);
     }
-    const content = buffer.toString('utf8');
-    this.#seen.set(this.#relative(absolute), digest(content));
-    return content;
+    return { absolute, content: buffer.toString('utf8') };
   }
 
   async write(file: string, content: string): Promise<void> {

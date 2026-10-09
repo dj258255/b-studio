@@ -423,7 +423,8 @@ export class VerificationGate {
     const workspace = this.#options.workspace;
     try {
       const graph = await collectImportGraph(
-        { list: (dir) => workspace.list(dir, 1), read: (file) => workspace.read(file), now: () => Date.now() },
+        // peek: 게이트가 훑어본 파일에 에이전트용 읽은 표시를 남기지 않는다(다음 쓰기에 낡은 읽기 검사가 걸리지 않게)
+        { list: (dir) => workspace.list(dir, 1), read: (file) => workspace.peek(file), now: () => Date.now() },
         servicePath,
         DEFAULT_IMPORT_GRAPH_LIMITS,
       );
