@@ -233,6 +233,7 @@ import {
   providerFromEnv,
   Redactor,
   resolveSecrets,
+  SandboxError,
   type DeployLog,
   type DeployResult,
   type FileChange,
@@ -281,6 +282,7 @@ import type {
   StudioEvent,
   WorkspaceKind,
 } from '@/lib/studio-events';
+import { advanceSandboxLink, newSandboxLinkTracker, sameSandboxLink, type SandboxProbe } from '@/lib/sandbox-link';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
@@ -6722,6 +6724,16 @@ function relayChanges(session: Session, renamed: string[]): void {
 function watchUsage(session: Session): void {
   if (session.usageTimer) return;
   let measuring = false;
+  // 측정 결과로 샌드박스에 닿는지도 함께 본다. "준비됨"으로 남아 있는데 도커가 끊겼거나 컨테이너가 사라진 것을 화면에 알린다
+  let link = newSandboxLinkTracker();
+  const observe = (probe: SandboxProbe) => {
+    const before = link.link;
+    link = advanceSandboxLink(link, probe, new Date().toISOString(), session.snapshot.status === 'ready');
+    if (sameSandboxLink(before, link.link)) return;
+    if (link.link) session.snapshot.sandboxLink = link.link;
+    else delete session.snapshot.sandboxLink;
+    emit(session, { type: 'sandbox_link', ...(link.link ? { link: link.link } : {}) });
+  };
   const measure = async () => {
     if (measuring || session.stop.signal.aborted) return;
     measuring = true;
@@ -6729,8 +6741,10 @@ function watchUsage(session: Session): void {
       const usage = { at: new Date().toISOString(), services: await session.sandbox.stats() };
       session.snapshot.usage = usage;
       emit(session, { type: 'usage', ...usage });
-    } catch {
-      // 재시작 중이면 컨테이너가 잠깐 없을 수 있다
+      observe({ ok: true, containers: usage.services.length });
+    } catch (error) {
+      // 재시작 중이면 컨테이너가 잠깐 없을 수 있다. 한 번으로는 상태를 바꾸지 않는다(sandbox-link.ts)
+      if (!session.stop.signal.aborted) observe({ ok: false, reason: session.sandbox.redact(error instanceof SandboxError ? (error.detail ?? error.message) : describe(error)) });
     } finally {
       measuring = false;
     }
@@ -6762,7 +6776,7 @@ function followLogs(session: Session, tail: number): void {
 
 function emit(session: Session, event: StudioEvent): void {
   // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient = event.type === 'usage' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log';
+  const transient = event.type === 'usage' || event.type === 'sandbox_link' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log';
   if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);

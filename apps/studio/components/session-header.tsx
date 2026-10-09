@@ -11,8 +11,15 @@ import { AgentsBadge } from "./agents-badge";
 import { LogoutButton } from "./logout-button";
 import { ProjectMenu } from "./project-menu";
 import { useSessionAccess } from "./session-access";
+import { describeSandboxLink } from "@/lib/sandbox-link";
 import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
 import { SupportingServicesChip } from "./supporting-services-chip";
+
+/** 연결이 끊긴 시각을 시:분으로 보여 준다. 해석할 수 없으면 원문 그대로 */
+function sinceLabel(since: string): string {
+  const at = new Date(since);
+  return Number.isNaN(at.getTime()) ? since : at.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
 
 /** Docker 런타임 이름(runsc)과 Kubernetes RuntimeClass 이름(gvisor) */
 const GVISOR_RUNTIMES = new Set(["runsc", "gvisor"]);
@@ -47,7 +54,9 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
     setResuming(false);
   }
 
-  const statusTone = snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
+  // 샌드박스에 닿지 않거나 컨테이너가 사라졌으면 "준비됨"이라고 하지 않는다. 서비스 상태도 마지막으로 본 값일 뿐이다(트러블슈팅 123)
+  const link = snapshot.status === "ready" ? snapshot.sandboxLink : undefined;
+  const statusTone = link ? "fail" : snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
   // 관리형 서비스(studio.yaml)는 줄로 하나하나 보여주고, 그 밖의 컨테이너(DB 등 부가 서비스·edge 플랫폼, ADR-073)는 칩 하나로 압축한다
   const managedNames = new Set(snapshot.services.map((service) => service.name));
   const supporting = supportingContainers(managedNames, snapshot.usage?.services);
@@ -64,7 +73,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         <h1 className="text-lg font-semibold">
           <ProjectMenu projectId={snapshot.projectId} projectName={snapshot.projectName} />
         </h1>
-        <span className={`text-sm ${TONE_TEXT[statusTone]}`}>{SESSION_STATUS_LABEL[snapshot.status]}</span>
+        <span className={`text-sm ${TONE_TEXT[statusTone]}`}>{link ? describeSandboxLink(link) : SESSION_STATUS_LABEL[snapshot.status]}</span>
       </div>
 
       <ul className="flex flex-wrap items-center gap-4 text-sm" aria-label="서비스 상태">
@@ -73,11 +82,11 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           const ended = usage && endedReason(usage);
           return (
             <li key={service.name} className="flex items-center gap-1.5">
-              <Dot tone={toneOfService(service.state)} />
+              <Dot tone={link ? "idle" : toneOfService(service.state)} />
               <span className="font-medium">{service.name}</span>
-              <span className="text-muted">{SERVICE_STATE_LABEL[service.state]}</span>
+              <span className="text-muted">{link ? "확인 불가" : SERVICE_STATE_LABEL[service.state]}</span>
               {/* 중지된 서비스에 마지막으로 잰 사용량을 남기면 아직 자원을 쓰는 것처럼 보인다 */}
-              {service.state !== "stopped" && usage?.memoryBytes !== undefined && (
+              {!link && service.state !== "stopped" && usage?.memoryBytes !== undefined && (
                 <span className="font-mono text-xs text-muted" title="메모리 사용량 / 한도">
                   {formatBytes(usage.memoryBytes)}
                   {usage.memoryLimitBytes ? ` / ${formatBytes(usage.memoryLimitBytes)}` : ""}
@@ -127,6 +136,16 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
           나란히 보기에 추가
         </button>
+        {link && (
+          <button
+            type="button"
+            onClick={resume}
+            disabled={resuming || !access.canManage}
+            className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+          >
+            {resuming ? "새 샌드박스 만드는 중" : "샌드박스 다시 올리기"}
+          </button>
+        )}
         {snapshot.status === "stopped" ? (
           <button
             type="button"
@@ -148,6 +167,14 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         )}
       </div>
 
+      {link && (
+        <p role="status" className="basis-full text-sm text-fail">
+          {link.state === "unreachable"
+            ? `도커에 물어도 답을 받지 못하고 있습니다(${sinceLabel(link.since)}부터). 아래 서비스 상태와 사용량은 마지막으로 본 값입니다. 도커가 돌아오면 저절로 풀립니다.`
+            : `도커는 답하는데 이 세션의 컨테이너가 하나도 없습니다(${sinceLabel(link.since)}부터). 도커를 다시 띄웠다면 "샌드박스 다시 올리기"를 누르세요. 작업 복사본과 체크포인트는 그대로입니다.`}
+          {link.state === "unreachable" && <span className="ml-1 text-muted">사유: {link.reason}</span>}
+        </p>
+      )}
       {snapshot.error && (
         <p className={`basis-full text-sm ${snapshot.status === "stopped" ? "text-muted" : "text-fail"}`}>{snapshot.error}</p>
       )}
