@@ -12,6 +12,7 @@ import { ScriptedModelClient } from './scripted-client';
  * 가짜 모델·가짜 SDK와 로컬 테스트 서버만 쓴다. 버튼 순서가 곧 ref다(snapshot 한 번 → e1~e5).
  * e1 로그인(401) · e2 주문(400) · e3 서버 오류(500) · e4 정상(200) · e5 요청 없음(화면만 바뀜)
  * e6 조회(GET)가 404 · e7 거절 4건이 한꺼번에 · e8 주문 주소가 이번에는 500(같은 주소, 다른 결과)
+ * e9 0.6초 뒤에 400(늦은 응답) · e10 같은 주소로 두 번 보내 401 다음 500
  */
 const PAGE = `<html><body>
   <button onclick="hit('/api/login')">로그인</button>
@@ -22,6 +23,8 @@ const PAGE = `<html><body>
   <button onclick="fetch('/api/missing')">조회</button>
   <button onclick="['a','b','c','d'].forEach(function(k){ fetch('/api/reject-'+k,{method:'POST'}); })">여러건</button>
   <button onclick="fetch('/api/order?fail=1',{method:'POST'})">주문오류</button>
+  <button onclick="fetch('/api/slow',{method:'POST'})">늦은응답</button>
+  <button onclick="fetch('/api/flip',{method:'POST'}).then(function(){ return fetch('/api/flip',{method:'POST'}); })">뒤집힘</button>
   <p id="msg"></p>
   <script>function hit(path){ fetch(path,{method:'POST'}).then(function(r){ document.getElementById('msg').textContent = path + ' ' + r.status; }); }</script>
 </body></html>`;
@@ -30,6 +33,7 @@ const STATUS: Record<string, number> = { '/api/login': 401, '/api/order': 400, '
 let server: Server;
 let base = '';
 let orderBroken = false;
+let flips = 0;
 
 beforeAll(async () => {
   server = createServer((request, response) => {
@@ -37,6 +41,19 @@ beforeAll(async () => {
     if (path === '/page') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       response.end(PAGE);
+      return;
+    }
+    if (path === '/api/slow') {
+      setTimeout(() => {
+        response.writeHead(400, { 'content-type': 'application/json' });
+        response.end('{}');
+      }, 600);
+      return;
+    }
+    if (path === '/api/flip') {
+      flips += 1;
+      response.writeHead(flips % 2 === 1 ? 401 : 500, { 'content-type': 'application/json' });
+      response.end('{}');
       return;
     }
     // 같은 주문 주소가 한 번은 거절(400)하고 한 번은 서버 오류(500)를 낸다: fail=1이 붙은 요청을 본 뒤로는 /api/order가 500이다
@@ -137,20 +154,32 @@ describe('예상된 거절 (api 백엔드)', { timeout: 60_000 }, () => {
     }
   });
 
-  it('관찰 동작은 선언을 소모하지 않는다', async () => {
-    const { result } = await runApi([
-      snapshot,
-      expectRejection('로그인 없이 주문'),
-      { name: 'qa_screenshot', input: {} },
-      { name: 'qa_scroll', input: { direction: 'down' } },
-      { name: 'qa_find', input: { query: '주문' } },
-      { name: 'qa_wait', input: { ms: 50 } },
-      click('e2'),
-      finish,
-    ]);
+  it('선언 바로 다음 호출이 클릭·입력·키가 아니면 선언은 사라진다: 관찰이나 대기를 사이에 끼워 선언을 뒤로 끌고 갈 수 없다', async () => {
+    for (const between of [{ name: 'qa_screenshot', input: {} }, { name: 'qa_scroll', input: { direction: 'down' } }, { name: 'qa_find', input: { query: '주문' } }, { name: 'qa_wait', input: { ms: 50 } }] as Call[]) {
+      const { result, client } = await runApi([snapshot, expectRejection('로그인 없이 주문'), between, click('e2'), { name: 'qa_wait', input: { ms: 500 } }, finish]);
+      expect(result.expectedRejections, between.name).toEqual([]);
+      expect(result.diagnostics.failedRequests, between.name).toHaveLength(1);
+      expect(result.status, between.name).toBe('fail');
+      expect(JSON.stringify(client.requests.map((request) => request.messages)), between.name).toContain('거절 선언 바로 다음에 클릭·입력·키가 오지 않아 선언을 지웠습니다');
+    }
+  });
+
+  it('구간 안에 도착했어도 앞선 조작이 보낸 요청의 늦은 응답은 예상된 거절로 옮기지 않는다', async () => {
+    // e9는 0.6초 뒤에 400을 돌려준다. 선언 없이 누른 뒤, 응답이 오기 전에 요청 없는 버튼(e5)을 선언하고 누른다
+    const { result } = await runApi([snapshot, click('e9'), expectRejection('빈 값은 막힌다'), click('e5'), finish]);
+    expect(result.expectedRejections).toEqual([]);
+    expect(result.unmetRejections).toHaveLength(1);
+    expect(result.diagnostics.failedRequests).toEqual([`400 ${base}/api/slow`]);
+    expect(result.status).toBe('fail');
+  });
+
+  it('같은 주소가 한 조작에서 거절(401)한 뒤 서버 오류(500)를 내면 거절만 옮기고 서버 오류는 실패로 남는다', async () => {
+    flips = 0;
+    const { result } = await runApi([snapshot, expectRejection('거절돼야 한다'), click('e10'), finish]);
     expect(result.expectedRejections).toHaveLength(1);
-    expect(result.expectedRejections[0]?.actionIndex).toBe(6);
-    expect(result.status).toBe('pass');
+    expect(result.expectedRejections[0]?.requests).toEqual([{ status: 401, url: `${base}/api/flip` }]);
+    expect(result.diagnostics.failedRequests).toEqual([`500 ${base}/api/flip`]);
+    expect(result.status).toBe('fail');
   });
 
   it('이전에 선언 없이 같은 요청이 실패한 적이 있어도, 선언한 조작의 거절은 예상된 거절로 센다', async () => {
@@ -200,7 +229,7 @@ describe('예상된 거절 (api 백엔드)', { timeout: 60_000 }, () => {
     // 이동 뒤의 클릭이 낸 400은 남은 선언에 덮이지 않고 실패로 남는다
     expect(result.diagnostics.failedRequests).toHaveLength(1);
     expect(result.status).toBe('fail');
-    expect(JSON.stringify(client.requests.map((request) => request.messages))).toContain('이동에는 거절 선언이 적용되지 않아 선언을 지웠습니다');
+    expect(JSON.stringify(client.requests.map((request) => request.messages))).toContain('거절 선언 바로 다음에 클릭·입력·키가 오지 않아 선언을 지웠습니다');
   });
 
   it('조회(GET) 요청의 4xx는 선언해도 예상된 거절이 아니다(화면이 데이터를 읽다 받은 오류)', async () => {
