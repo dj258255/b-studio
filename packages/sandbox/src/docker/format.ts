@@ -229,6 +229,11 @@ export function parseContainerState(stdout: string): ContainerState {
  * 샌드박스 쪽에서 바뀐 파일이 보이는지 확인하는 스크립트. 인자는 프로젝트 루트 기준 경로이고, 줄마다 "해시 경로"를 출력한다.
  * 빌드 도구는 루트부터 디렉터리 목록을 따라 내려가므로, 파일이 든 폴더뿐 아니라 모든 상위 폴더의 목록에 다음 경로 이름이 보여야
  * 반영된 것으로 본다. 새 폴더를 만들면 그 폴더의 목록은 바로 보이지만 상위 폴더의 목록은 파일 공유 캐시 때문에 약 19초 늦게 바뀐다
+ *
+ * 목록은 ls가 아니라 find로 읽는다. busybox의 ls는 ASCII가 아닌 글자를 `?`로 바꿔 출력해서(로캘을 줘도 같다) 한글 같은 이름은
+ * 목록과 절대 일치하지 않는다 — 그런 이름의 파일을 고친 실행은 반영 확인을 통과할 수 없었다. find는 이름을 바이트 그대로 내보낸다.
+ * find는 "<폴더>/<이름>" 꼴로 출력하므로 같은 꼴로 맞춰 비교한다(폴더가 /면 "/<이름>").
+ * -H는 폴더 자신이 심볼릭 링크일 때 따라가게 한다(ls는 따라가지만 find는 기본으로 따라가지 않는다. 예: macOS의 /tmp)
  */
 export const SYNC_SCRIPT = [
   'cd "${SYNC_ROOT:-/project}" || exit 2',
@@ -236,8 +241,11 @@ export const SYNC_SCRIPT = [
   '  p="$f"',
   '  listed=1',
   '  while [ "$p" != "." ] && [ "$p" != "/" ]; do',
-  '    if ! ls -1a "$(dirname "$p")" 2>/dev/null | grep -Fxq -- "$(basename "$p")"; then listed=0; break; fi',
-  '    p=$(dirname "$p")',
+  '    d=$(dirname "$p")',
+  '    b=$(basename "$p")',
+  '    case "$d" in /) t="/$b" ;; *) t="$d/$b" ;; esac',
+  '    if ! find -H "$d" -mindepth 1 -maxdepth 1 2>/dev/null | grep -Fxq -- "$t"; then listed=0; break; fi',
+  '    p="$d"',
   '  done',
   '  if [ "$listed" = 1 ]; then',
   '    h=$(sha256sum "$f" 2>/dev/null | cut -d " " -f 1)',

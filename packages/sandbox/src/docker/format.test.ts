@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
@@ -287,13 +288,14 @@ describe('SYNC_SCRIPT', () => {
     await writeFile(path.join(project, 'api/src/Old.java'), 'old\n');
     await writeFile(path.join(project, 'api/src/orders/Order.java'), 'order\n');
     await mkdir(bin);
-    const realLs = execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim();
+    // 스크립트는 폴더 목록을 find로 읽는다(첫 인자가 폴더, 출력은 "<폴더>/<이름>"). 그 목록에서 한 줄을 빼거나 더해 캐시를 흉내 낸다
+    const realFind = execFileSync('sh', ['-c', 'command -v find'], { encoding: 'utf8' }).trim();
     await writeFile(
-      path.join(bin, 'ls'),
-      `#!/bin/sh\nfor last in "$@"; do :; done\nif [ -n "$HIDE_IN" ] && [ "$last" = "$HIDE_IN" ]; then ${realLs} "$@" | grep -vx "$HIDE_NAME"; elif [ -n "$GHOST_IN" ] && [ "$last" = "$GHOST_IN" ]; then ${realLs} "$@"; echo "$GHOST_NAME"; else ${realLs} "$@"; fi\n`,
+      path.join(bin, 'find'),
+      `#!/bin/sh\n[ "$1" = "-H" ] && dir="$2" || dir="$1"\nif [ -n "$HIDE_IN" ] && [ "$dir" = "$HIDE_IN" ]; then ${realFind} "$@" | grep -vx "$HIDE_IN/$HIDE_NAME"; elif [ -n "$GHOST_IN" ] && [ "$dir" = "$GHOST_IN" ]; then ${realFind} "$@"; echo "$GHOST_IN/$GHOST_NAME"; else ${realFind} "$@"; fi\n`,
     );
     await writeFile(path.join(bin, 'sha256sum'), '#!/bin/sh\necho "len$(wc -c < "$1" | tr -d " ")  $1"\n');
-    await chmod(path.join(bin, 'ls'), 0o755);
+    await chmod(path.join(bin, 'find'), 0o755);
     await chmod(path.join(bin, 'sha256sum'), 0o755);
     const args = typeof files === 'function' ? files(project) : files;
     const stdout = execFileSync('sh', ['-c', SYNC_SCRIPT, 'sh', ...args], {
@@ -310,6 +312,29 @@ describe('SYNC_SCRIPT', () => {
       ['api/src/orders/Order.java', 'len6'],
       ['api/src/Gone.java', 'MISSING'],
     ]);
+  });
+
+  it('이름에 한글·공백이 있거나 점으로 시작하는 파일, 프로젝트 맨 위의 파일도 찾는다', async () => {
+    const seen = await runSync((project) => {
+      mkdirSync(path.join(project, 'docs/성능 기록'), { recursive: true });
+      writeFileSync(path.join(project, 'docs/42-라이브커머스-숏폼-명세.md'), '명세\n');
+      writeFileSync(path.join(project, 'docs/성능 기록/k6 결과.md'), '결과\n');
+      writeFileSync(path.join(project, '.env.example'), 'A=1\n');
+      writeFileSync(path.join(project, 'README.md'), '# r\n');
+      return ['docs/42-라이브커머스-숏폼-명세.md', 'docs/성능 기록/k6 결과.md', '.env.example', 'README.md', 'docs/없는-문서.md'];
+    });
+    expect(seen.get('docs/42-라이브커머스-숏폼-명세.md')).toMatch(/^len/);
+    expect(seen.get('docs/성능 기록/k6 결과.md')).toMatch(/^len/);
+    expect(seen.get('.env.example')).toBe('len4');
+    expect(seen.get('README.md')).toBe('len4');
+    expect(seen.get('docs/없는-문서.md')).toBe('MISSING');
+  });
+
+  it('목록을 ls로 읽지 않는다 — busybox의 ls는 ASCII가 아닌 글자를 ?로 바꿔 출력해 한글 이름이 목록과 일치하지 않는다', () => {
+    // 이 실패는 busybox에서만 재현된다(macOS·GNU의 ls는 파이프로 내보낼 때 이름을 그대로 준다). 그래서 위의 동작 테스트와
+    // 별개로, 스크립트가 ls 출력에 기대지 않는다는 것을 못 박는다. 재현: docker run --rm busybox:1.37 ls -1a <한글 이름이 있는 폴더>
+    expect(SYNC_SCRIPT).not.toMatch(/\bls\b/);
+    expect(SYNC_SCRIPT).toContain('find -H "$d" -mindepth 1 -maxdepth 1');
   });
 
   it('새 폴더의 목록에는 파일이 보여도 상위 폴더 목록에 새 폴더가 아직 없으면 반영되지 않은 것으로 본다', async () => {
