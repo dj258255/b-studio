@@ -495,6 +495,8 @@ interface Session {
   testResultsLoadPromise?: Promise<void>;
   /** 서비스별로 지금 도는 테스트를 취소할 수 있게 든 컨트롤러. 서비스 하나당 한 번에 하나만 돈다 */
   testControllers?: Map<string, AbortController>;
+  /** 마지막 체크포인트에 커밋된 요구사항 문서(readTrustedRequirementsDocument의 캐시). sha가 바뀌면 다시 읽는다 */
+  committedRequirements?: { sha: string; content: string | undefined };
 }
 
 /** 서비스 하나의 마지막 테스트 실행 결과 */
@@ -2290,7 +2292,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     if (!ask) {
       // 지연 기동 세션이 샌드박스를 켜지 않았다면 바뀐 것이 없다(바뀌었으면 도구/게이트가 켰다).
       // 체크포인트도 되돌리기도 샌드박스가 필요하므로, 켠 세션에서만 한다
-      if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && result.report?.ok))) {
+      if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && questionRunPassedGate(result)))) {
         // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary);
@@ -2947,6 +2949,26 @@ function isPlainProjectDirectory(projectRoot: string, relative: string): boolean
 function readRequirementsDocument(projectRoot: string): string | undefined {
   const read = readProjectFileSync(projectRoot, REQUIREMENTS_FILE);
   return read.kind === 'text' ? read.content : undefined;
+}
+
+/**
+ * 판정과 저장에 쓰는 요구사항 문서: 작업 복사본의 문서를 읽되, 검증 기록(사람 확인, 재확인 판정 필드)은 마지막 체크포인트에
+ * 커밋된 값만 인정한다(ADR-157). 화면에서 남긴 사람 확인은 그 자리에서 문서 체크포인트로 커밋되므로 여기에 들어 있다.
+ * 체크포인트 없이 작업 복사본에만 있는 기록은 누가 썼는지 알 수 없다 — 게이트가 막았는데 질문으로 멈춘 실행, 되살린 보관본,
+ * 끊긴 실행이 남긴 것일 수 있다. 그런 기록을 그대로 읽으면 체크포인트가 없어도 요구사항이 "검증됨(사람 확인)"으로 보이고,
+ * 화면에서 다른 요구사항을 저장할 때 함께 직렬화돼 문서 체크포인트로 굳는다. 본문 편집은 그대로 읽는다.
+ */
+async function readTrustedRequirementsDocument(session: Session): Promise<string | undefined> {
+  const working = readRequirementsDocument(session.project.root);
+  if (working === undefined) return undefined;
+  const sha = session.snapshot.checkpoints[0]?.sha;
+  // 화면이 자주 다시 읽는 자리라, 체크포인트가 바뀌지 않는 동안은 커밋된 문서를 다시 꺼내지 않는다(sha가 같으면 내용도 같다)
+  if (sha && session.committedRequirements?.sha !== sha) {
+    session.committedRequirements = { sha, content: await session.checkpoints.fileAt(REQUIREMENTS_FILE, sha) };
+  }
+  const committed = sha ? session.committedRequirements?.content : undefined;
+  if (committed === working) return working;
+  return hasVerificationTamper(diffVerificationRecords(committed, working)) ? restoreVerificationRecords(committed, working) : working;
 }
 
 async function restoreForgedVerificationRecords(checkpoints: CheckpointStore, projectRoot: string): Promise<string[]> {
@@ -4649,7 +4671,7 @@ function mergeQuestionsWithMissingReferences(questions: readonly string[], refer
 
 /** 지금 저장된 docs/requirements.md가 있으면 그 요구사항 목록을, 없으면 빈 배열을 읽는다(재추출 병합 기준점) */
 async function readSavedRequirements(session: Session): Promise<Requirement[]> {
-  const raw = readRequirementsDocument(session.project.root);
+  const raw = await readTrustedRequirementsDocument(session);
   if (raw === undefined) return [];
   return parseRequirementsMarkdown(raw).requirements;
 }
@@ -5060,6 +5082,17 @@ export function annotateWithIssue(prefill: string, requirement: Pick<Requirement
   return prefill.replace(bullet, `${bullet} (#${issueNumber})`);
 }
 
+/**
+ * 질문을 남기고 멈춘 실행(awaiting_input)의 변경을 체크포인트로 남겨도 되는지: 가장 최근 게이트 검증이 통과했을 때만이다.
+ * 전에는 report.ok(재시작·계약 검증)만 봐서, 선언한 체크(테스트·화면 확인·리뷰)가 실패해 게이트가 소진된 실행도 마지막 말이
+ * 질문이면 체크포인트가 남았다 — 실패하는 검사를 질문 하나로 비켜 갈 수 있었다. 통과하지 못했으면 변경을 체크포인트 없이
+ * 그대로 두고(되돌리지 않는다) 사용자의 답으로 이어지는 다음 요청이 다시 검증을 받는다.
+ * gateOutcome을 싣지 않는 결과(게이트가 돌지 않음)는 통과로 보지 않는다
+ */
+export function questionRunPassedGate(result: { gateOutcome?: 'pass' | 'retry' | 'exhausted'; report?: { ok: boolean }; checks?: ReadonlyArray<{ ok: boolean }> }): boolean {
+  return result.gateOutcome === 'pass' && result.report?.ok === true && (result.checks ?? []).every((check) => check.ok);
+}
+
 /** 세션의 체크포인트를 requirements.ts의 CheckpointRef 모양(createdAt 포함)으로 옮긴다. 증거 신선도(재확인 필요 해제) 판정에 쓴다 */
 function sessionCheckpointRefs(session: Session): CheckpointRef[] {
   return session.snapshot.checkpoints.map((checkpoint) => ({ sha: checkpoint.sha, shortSha: checkpoint.shortSha, message: checkpoint.message, createdAt: checkpoint.createdAt }));
@@ -5124,7 +5157,7 @@ function evaluateRequirementWithContext(requirement: Requirement, context: Requi
 export async function getSessionRequirements(id: string, { strict = false }: { strict?: boolean } = {}): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const draft = await getSessionRequirementExtractionDraft(id);
-  const raw = readRequirementsDocument(session.project.root);
+  const raw = await readTrustedRequirementsDocument(session);
   if (raw === undefined) return { exists: false, requirements: [], assumptions: [], manualSteps: [], ...(draft ? { draft } : {}) };
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   if (requirements.length === 0) return { exists: true, requirements: [], assumptions, manualSteps, ...(draft ? { draft } : {}) };
@@ -5274,7 +5307,7 @@ export async function markRequirementManualVerification(id: string, requirementI
   const checkpoint = evidenceBaseCheckpoint(session.snapshot.checkpoints);
   if (!checkpoint) throw new StudioError(409, '체크포인트가 하나도 없어 확인한 시점을 남길 수 없습니다 — 먼저 체크포인트를 만들어 주세요');
 
-  const raw = readRequirementsDocument(session.project.root);
+  const raw = await readTrustedRequirementsDocument(session);
   if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   if (!requirements.some((requirement) => requirement.id === requirementId)) throw new StudioError(404, '요구사항을 찾을 수 없습니다');
@@ -5290,7 +5323,7 @@ export async function clearRequirementManualVerification(id: string, requirement
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인을 취소할 수 있습니다');
   if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 사람 확인을 취소할 수 없습니다. 끝난 뒤에 눌러 주세요');
-  const raw = readRequirementsDocument(session.project.root);
+  const raw = await readTrustedRequirementsDocument(session);
   if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
   const target = requirements.find((requirement) => requirement.id === requirementId);
@@ -6226,7 +6259,7 @@ async function buildTestServiceView(session: Session, serviceName: string): Prom
 
 /** docs/requirements.md에는 있지만 어느 서비스 테스트 이름에도 id가 나타나지 않는 요구사항 */
 async function requirementsWithoutTests(session: Session, services: readonly TestServiceView[]): Promise<RequirementWithoutTest[]> {
-  const raw = readRequirementsDocument(session.project.root);
+  const raw = await readTrustedRequirementsDocument(session);
   if (!raw) return [];
   const { requirements } = parseRequirementsMarkdown(raw);
   if (requirements.length === 0) return [];

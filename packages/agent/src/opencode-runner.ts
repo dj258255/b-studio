@@ -333,6 +333,7 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
       changedFiles: workspace.changedFiles(),
       report: gate?.report,
       checks: gate?.checks,
+      ...(gate?.lastOutcome ? { gateOutcome: gate.lastOutcome } : {}),
       passedStages: gate ? [...gate.passedStages] : undefined,
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
       ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
