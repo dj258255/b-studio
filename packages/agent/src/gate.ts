@@ -401,20 +401,29 @@ export class VerificationGate {
     this.#pageLoadMs.clear();
     this.#pageWarnings.clear();
     this.#concurrencyNotes.clear();
+    // 같은 화면을 다른 기대값·다른 단계로 두 번 확인하면 이름이 같아진다. 이름은 작업 id이자 스크린샷·경고·비교 결과를 모으는 열쇠라
+    // 겹치면 게이트가 던지거나 두 확인의 결과가 섞인다(트러블슈팅 120). 둘째부터 번호를 붙여 구별한다
+    const seen = new Map<string, number>();
+    const unique = (name: string): string => {
+      const count = (seen.get(name) ?? 0) + 1;
+      seen.set(name, count);
+      return count === 1 ? name : `${name} #${count}`;
+    };
     for (const page of pages) {
       const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
       const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
-      const name = `${page.service} ${page.path}${page.mode === 'browser' ? ` (${browser}${steps})` : ''}`;
+      const name = unique(`${page.service} ${page.path}${page.mode === 'browser' ? ` (${browser}${steps})` : ''}`);
       meta.push({ stage: 'browser_check', name });
       nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, name, signal) });
     }
     for (const entry of auto.pages) {
-      meta.push({ stage: 'browser_check', name: entry.name });
+      const name = unique(entry.name);
+      meta.push({ stage: 'browser_check', name });
       // 자동 페이지는 같은 #checkPage로 돌리되 오류 화면 표지까지 본다. 추정한 id로 연 동적 경로는 probedId를 함께 넘겨 관대하게 판정한다
       nodes.push({
-        id: `page:${entry.name}`,
+        id: `page:${name}`,
         run: ({ signal }) =>
-          this.#checkPage(entry.page, entry.name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) }),
+          this.#checkPage(entry.page, name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) }),
       });
     }
     for (const test of tests) {
