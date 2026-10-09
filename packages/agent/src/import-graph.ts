@@ -530,7 +530,7 @@ export function tracePages(changed: readonly string[], reverse: ReverseImportGra
 export interface ImportGraphDeps {
   /** 폴더 하나의 직계 항목(루트 기준 경로, 폴더는 끝에 `/`). Workspace.list(dir, 1) */
   list(dir: string): Promise<string[]>;
-  /** 파일 내용. Workspace.read */
+  /** 파일 내용. 게이트는 Workspace.peek(읽은 표시를 남기지 않는 읽기)을 넘긴다 */
   read(file: string): Promise<string>;
   now(): number;
 }
