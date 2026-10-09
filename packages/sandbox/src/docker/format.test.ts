@@ -18,7 +18,7 @@ import {
   parseLogLine,
   parseRuntimes,
   parseSyncOutput,
-  SYNC_SCRIPT,
+  SYNC_SCRIPT, SyncObservations,
 } from './format';
 
 const ORDERS = {
@@ -426,3 +426,50 @@ describe('composeUpArgs', () => {
     expect(composeUpArgs([], EDGE_SERVICE)).toEqual(['--no-deps', EDGE_SERVICE]);
   });
 });
+
+describe('SyncObservations: 파일 반영 시간 초과 문구 (도그푸딩 마찰 169)', () => {
+  const HASH_OLD = 'a'.repeat(64);
+  const HASH_MID = 'b'.repeat(64);
+  const HASH_NEW = 'c'.repeat(64);
+
+  it('내내 보이지 않던 파일은 기다려도 달라지지 않는다고 알린다', () => {
+    const observations = new SyncObservations();
+    for (let check = 0; check < 5; check += 1) observations.record('web/상품.tsx', check % 2 === 0 ? 'MISSING' : undefined);
+    const message = observations.describeTimeout(['web/상품.tsx'], new Map([['web/상품.tsx', HASH_NEW]]), 60_000);
+    // 첫 문장은 전과 같다(이 문구로 실패를 알아보는 곳이 있다)
+    expect(message.startsWith('60초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: web/상품.tsx')).toBe(true);
+    expect(message).toContain('web/상품.tsx: 60초 내내 컨테이너에서 보이지 않았습니다');
+    expect(message).toContain('같은 내용을 다시 써도 달라지지 않을 가능성이 큽니다');
+    expect(message).not.toContain('다시 시도하면 될 수 있습니다');
+  });
+
+  it('내내 이전 내용이던 파일과 지웠는데 남아 있던 파일을 따로 말한다', () => {
+    const observations = new SyncObservations();
+    for (let check = 0; check < 3; check += 1) {
+      observations.record('api/Order.java', HASH_OLD);
+      observations.record('api/Old.java', HASH_OLD);
+    }
+    const message = observations.describeTimeout(['api/Order.java', 'api/Old.java'], new Map([['api/Order.java', HASH_NEW], ['api/Old.java', 'MISSING']]), 60_000);
+    expect(message).toContain('api/Order.java: 60초 내내 이전 내용 그대로였습니다');
+    expect(message).toContain('api/Old.java: 지운 파일이 60초 내내 컨테이너에 남아 있었습니다');
+    expect(message).toContain('한 번도 바뀌지 않았으므로');
+  });
+
+  it('값이 바뀌고 있던 파일은 늦는 것으로 보고 다시 시도하라고 한다', () => {
+    const observations = new SyncObservations();
+    observations.record('web/page.tsx', HASH_OLD);
+    observations.record('web/page.tsx', HASH_MID);
+    const message = observations.describeTimeout(['web/page.tsx'], new Map([['web/page.tsx', HASH_NEW]]), 30_000);
+    expect(message).toContain('web/page.tsx: 반영되는 중이었지만 시간 안에 끝나지 않았습니다(다시 시도하면 될 수 있습니다)');
+    expect(message).not.toContain('한 번도 바뀌지 않았으므로');
+    expect(message.startsWith('30초 안에')).toBe(true);
+  });
+
+  it('없다가 나타났지만 내용이 아직 다른 파일도 바뀌는 중으로 본다', () => {
+    const observations = new SyncObservations();
+    observations.record('web/new.tsx', 'MISSING');
+    observations.record('web/new.tsx', HASH_MID);
+    expect(observations.describeTimeout(['web/new.tsx'], new Map([['web/new.tsx', HASH_NEW]]), 60_000)).toContain('반영되는 중이었지만');
+  });
+});
+
