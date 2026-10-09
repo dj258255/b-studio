@@ -54,6 +54,7 @@ async function fakeDockerForInfra(
     bin,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "${log}"
+case " $* " in *" --no-trunc "*) exit 0 ;; esac
 
 for a in "$@"; do
   case "$a" in

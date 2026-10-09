@@ -4,16 +4,17 @@ import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildOverride } from './format';
-import { computeGitMask, detectGitEntries, planGitMask, type GitEntry } from './git-mask';
+import { boundDevice, collectHostMounts, computeGitMask, detectGitEntries, findMissingMasks, planGitMask, type GitEntry } from './git-mask';
 
 const ROOT = '/work/shop';
 const ro = (source: string, target: string) => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
+const empty = (dir: string, target: string) => ro(`${dir}/.git/b-studio-empty`, target);
 const dirEntry = (dir: string, hasState = true): GitEntry => ({ dir, kind: 'directory', hasState });
 
 describe('planGitMask 마운트 꼴별 계획', () => {
-  it('프로젝트 루트 전체를 마운트하면 .git은 읽기 전용, 상태 폴더는 tmpfs로 덮는다', () => {
+  it('프로젝트 루트 전체를 마운트하면 .git은 읽기 전용, 상태 폴더는 빈 폴더를 읽기 전용으로 얹어 덮는다', () => {
     const plan = planGitMask([{ service: 'api', source: ROOT, target: '/workspace' }], [dirEntry(ROOT)]);
-    expect(plan).toEqual({ api: [ro(`${ROOT}/.git`, '/workspace/.git'), { type: 'tmpfs', target: '/workspace/.git/b-studio' }] });
+    expect(plan).toEqual({ api: [ro(`${ROOT}/.git`, '/workspace/.git'), empty(ROOT, '/workspace/.git/b-studio')] });
   });
 
   it('상태 폴더가 없으면 .git만 읽기 전용으로 한다', () => {
@@ -23,7 +24,7 @@ describe('planGitMask 마운트 꼴별 계획', () => {
 
   it('상위 폴더(모노레포 저장소 루트)를 마운트하면 상위의 .git을 덮는다', () => {
     const plan = planGitMask([{ service: 'api', source: '/work', target: '/repo' }], [dirEntry('/work')]);
-    expect(plan).toEqual({ api: [ro('/work/.git', '/repo/.git'), { type: 'tmpfs', target: '/repo/.git/b-studio' }] });
+    expect(plan).toEqual({ api: [ro('/work/.git', '/repo/.git'), empty('/work', '/repo/.git/b-studio')] });
   });
 
   it('상위 폴더를 마운트하면 프로젝트 폴더와 저장소 루트 두 곳의 .git을 모두 덮는다', () => {
@@ -61,7 +62,7 @@ describe('planGitMask 마운트 꼴별 계획', () => {
     expect(plan.web?.[0]).toEqual(ro(`${ROOT}/.git`, '/srv/web/.git'));
   });
 
-  it('.git 안쪽을 직접 마운트했으면 같은 자리를 읽기 전용으로, 상태 폴더는 tmpfs로 바꿔 쓴다', () => {
+  it('.git 안쪽을 직접 마운트했으면 같은 자리를 읽기 전용으로, 상태 폴더는 빈 폴더로 바꿔 쓴다', () => {
     const plan = planGitMask(
       [
         { service: 'api', source: `${ROOT}/.git`, target: '/g' },
@@ -70,10 +71,10 @@ describe('planGitMask 마운트 꼴별 계획', () => {
       ],
       [dirEntry(ROOT)],
     );
-    expect(plan.api).toEqual([{ type: 'tmpfs', target: '/dumps' }, ro(`${ROOT}/.git`, '/g'), ro(`${ROOT}/.git/refs`, '/refs')]);
+    expect(plan.api).toEqual([empty(ROOT, '/dumps'), ro(`${ROOT}/.git`, '/g'), ro(`${ROOT}/.git/refs`, '/refs')]);
   });
 
-  it('같은 자리를 두 규칙이 덮으면 tmpfs가 남는다', () => {
+  it('같은 자리를 두 규칙이 덮으면 빈 폴더 쪽이 남는다', () => {
     const plan = planGitMask(
       [
         { service: 'api', source: ROOT, target: '/workspace' },
@@ -81,7 +82,7 @@ describe('planGitMask 마운트 꼴별 계획', () => {
       ],
       [dirEntry(ROOT)],
     );
-    expect(plan.api?.filter((volume) => volume.target === '/workspace/.git/b-studio')).toEqual([{ type: 'tmpfs', target: '/workspace/.git/b-studio' }]);
+    expect(plan.api?.filter((volume) => volume.target === '/workspace/.git/b-studio')).toEqual([empty(ROOT, '/workspace/.git/b-studio')]);
   });
 
   it('경로 이름이 공백·따옴표·$를 가져도 값 그대로 담는다(셸 문자열을 만들지 않는다)', () => {
@@ -154,9 +155,108 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
     const link = path.join(base, 'link');
     await symlink(root, link);
     const mask = await computeGitMask(root, {
-      api: { volumes: [{ type: 'bind', source: link, target: '/workspace' }] },
-      db: { volumes: [{ type: 'volume', source: 'db-data', target: '/var/lib/data' }] },
+      services: {
+        api: { volumes: [{ type: 'bind', source: link, target: '/workspace' }] },
+        db: { volumes: [{ type: 'volume', source: 'db-data', target: '/var/lib/data' }] },
+      },
     });
-    expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), { type: 'tmpfs', target: '/workspace/.git/b-studio' }] });
+    expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
+  });
+});
+
+describe('collectHostMounts bind가 아닌 꼴', () => {
+  const volumes = {
+    src: { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: '/work/shop' } },
+    rw: { driver: 'local', driver_opts: { type: 'none', o: 'rw,rbind', device: '/work/shop/api' } },
+    nfs: { driver: 'local', driver_opts: { type: 'nfs', o: 'addr=10.0.0.1', device: ':/export' } },
+    plain: {},
+  };
+
+  it('로컬 드라이버로 호스트 폴더에 묶은 이름 있는 볼륨은 bind와 같게 본다', () => {
+    expect(boundDevice(volumes.src)).toBe('/work/shop');
+    expect(boundDevice(volumes.rw)).toBe('/work/shop/api');
+    expect(boundDevice(volumes.nfs)).toBeUndefined();
+    expect(boundDevice(volumes.plain)).toBeUndefined();
+    expect(boundDevice({ driver: 'rexray', driver_opts: { o: 'bind', device: '/work/shop' } })).toBeUndefined();
+    expect(boundDevice({ driver_opts: { o: 'bind', device: 'relative' } })).toBeUndefined();
+
+    const mounts = collectHostMounts({
+      services: { api: { volumes: [{ type: 'volume', source: 'src', target: '/w' }, { type: 'volume', source: 'plain', target: '/p' }, { type: 'volume', target: '/anon' }] } },
+      volumes,
+    });
+    expect(mounts).toEqual([{ service: 'api', source: '/work/shop', target: '/w' }]);
+    expect(planGitMask(mounts, [dirEntry(ROOT)])).toEqual({ api: [ro(`${ROOT}/.git`, '/w/.git'), empty(ROOT, '/w/.git/b-studio')] });
+  });
+
+  it('volumes_from는 물려준 서비스의 마운트를 같은 target으로 물려받는다(전이적, 순환은 끊는다)', () => {
+    const mounts = collectHostMounts({
+      services: {
+        a: { volumes: [{ type: 'bind', source: ROOT, target: '/workspace' }], volumes_from: ['c'] },
+        b: { volumes_from: ['a:ro'] },
+        c: { volumes_from: ['b'] },
+      },
+    });
+    const of = (service: string) => mounts.filter((mount) => mount.service === service);
+    expect(of('a')).toEqual([{ service: 'a', source: ROOT, target: '/workspace' }]);
+    expect(of('b')).toEqual([{ service: 'b', source: ROOT, target: '/workspace' }]);
+    expect(of('c')).toEqual([{ service: 'c', source: ROOT, target: '/workspace' }]);
+    expect(Object.keys(planGitMask(mounts, [dirEntry(ROOT)])).sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('volumes_from가 compose 밖 컨테이너를 가리키면 무엇이 붙는지 알 수 없어 던진다', () => {
+    expect(() => collectHostMounts({ services: { a: { volumes_from: ['container:legacy:ro'] } } })).toThrow(/compose 밖의 컨테이너/);
+  });
+});
+
+describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function project() {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), 'git-mask-inspect-')));
+    dirs.push(root);
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    return root;
+  }
+
+  it('프로젝트 폴더를 쓰기 가능하게 붙였는데 .git 자리가 비어 있으면 그 자리를 돌려준다', async () => {
+    const root = await project();
+    const missing = await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/workspace', RW: true }], {});
+    expect(missing).toEqual(['/workspace/.git', '/workspace/.git/b-studio']);
+  });
+
+  it('이름 있는 볼륨이 호스트 폴더에 묶여 있어도 같게 본다', async () => {
+    const root = await project();
+    const options = { shop_src: { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: root } } };
+    const mounts = [{ Type: 'volume', Name: 'shop_src', Source: '/var/lib/docker/volumes/shop_src/_data', Destination: '/w', RW: true }];
+    expect(await findMissingMasks(root, mounts, options)).toEqual(['/w/.git', '/w/.git/b-studio']);
+    expect(await findMissingMasks(root, mounts, {})).toEqual([]);
+  });
+
+  it('읽기 전용 .git과 상태 폴더 가리개가 있으면 빠진 자리가 없다', async () => {
+    const root = await project();
+    const mounts = [
+      { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+    ];
+    expect(await findMissingMasks(root, mounts, {})).toEqual([]);
+  });
+
+  it('.git 자리가 쓰기 가능한 마운트로 남아 있으면 빠진 것으로 본다', async () => {
+    const root = await project();
+    const mounts = [
+      { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+    ];
+    expect(await findMissingMasks(root, mounts, {})).toEqual(['/workspace/.git']);
+  });
+
+  it('프로젝트와 무관한 마운트만 있으면 확인할 것이 없다', async () => {
+    const root = await project();
+    expect(await findMissingMasks(root, [{ Type: 'volume', Name: 'db', Destination: '/data', RW: true }], {})).toEqual([]);
   });
 });

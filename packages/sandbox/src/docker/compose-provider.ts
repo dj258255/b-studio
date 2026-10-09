@@ -53,7 +53,7 @@ import {
   parseSyncOutput,
 } from './format';
 import { externalCallScript } from './external-call';
-import { loadGitMask, type MaskVolume } from './git-mask';
+import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
@@ -67,6 +67,9 @@ import {
 } from './snapshots';
 
 const execFileAsync = promisify(execFile);
+
+/** compose 파일이 up과 겹쳐 계속 바뀔 때 .git 마스크를 맞춰 다시 올리는 최대 횟수 */
+const GIT_MASK_ATTEMPTS = 3;
 
 /**
  * compose가 샌드박스용으로 빌드한 이미지(<샌드박스 id>-<서비스>)를 지운다.
@@ -189,7 +192,7 @@ export class LocalDockerProvider implements SandboxProvider {
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     const hostPorts = await preallocatePublicUrlPorts(project);
-    const gitMask = await loadGitMask(project, { dockerBin: this.#options.dockerBin, env: { ...process.env, ...secrets } });
+    const gitMask = await loadGitMask(project, { dockerBin: this.#options.dockerBin, env: { ...process.env, ...secrets }, projectName: id, redact: (text) => new Redactor(secrets).redact(text) });
     await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
     return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts);
   }
@@ -740,10 +743,69 @@ class LocalDockerSandbox implements Sandbox {
   }
 
   async #compose(args: string[], signal?: AbortSignal): Promise<ExecResult> {
-    // 컨테이너는 up이 만들 때 마운트가 정해진다. compose 파일이 세션 중에 바뀌었을 수 있으므로(에이전트가 고칠 수 있는 파일이다)
-    // 만들기 직전에 마운트를 다시 읽어 .git 마스크를 맞춘다(ADR-158)
-    if (args[0] === 'up') await this.#refreshGitMask();
+    if (args[0] === 'up') return this.#upWithGitMask(args, signal);
     return this.#docker(this.#composeArgs(args), signal);
+  }
+
+  /**
+   * 컨테이너는 up이 만들 때 마운트가 정해진다. compose 파일은 에이전트가 세션 중에 고칠 수 있으므로(ADR-158)
+   *  1. up 직전에 마운트를 다시 읽어 .git 마스크를 맞추고,
+   *  2. up이 끝난 뒤 한 번 더 읽어 그 사이에 파일이 바뀌었으면(마스크 없는 마운트로 만들어졌을 수 있다) override를 새로 쓰고 다시 up하며,
+   *     GIT_MASK_ATTEMPTS번 안에 안정되지 않으면 스택을 내리고 던진다,
+   *  3. 설정이 아니라 결과를 확인한다: 실제 컨테이너의 마운트에서 `.git` 자리의 읽기 전용 마운트가 빠졌으면 그 컨테이너를 멈추고 던진다
+   */
+  async #upWithGitMask(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+    for (let attempt = 1; attempt <= GIT_MASK_ATTEMPTS; attempt++) {
+      await this.#refreshGitMask();
+      const result = await this.#docker(this.#composeArgs(args), signal);
+      if (result.exitCode !== 0) return result;
+      const before = JSON.stringify(this.#gitMask);
+      await this.#refreshGitMask();
+      if (JSON.stringify(this.#gitMask) !== before) continue;
+      await this.#assertMasksApplied();
+      return result;
+    }
+    await this.#docker(this.#composeArgs(['down', '--remove-orphans']), signal);
+    throw new SandboxError(`compose 파일이 계속 바뀌어 .git 보호를 확정하지 못했습니다. 서비스를 내렸습니다 (${this.id})`);
+  }
+
+  /** up 뒤 실제 컨테이너의 마운트를 보고, `.git` 보호가 빠진 컨테이너가 있으면 멈추고 던진다 */
+  async #assertMasksApplied(): Promise<void> {
+    const ids = (await this.#docker(this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']))).stdout.split('\n').map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) return;
+    const inspected = await this.#docker(['inspect', ...ids]);
+    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 마운트를 확인하지 못했습니다 (${this.id})`, this.redact(inspected.stderr));
+    let containers: Array<{ Id: string; Name?: string; Mounts?: InspectedMount[]; Config?: { Labels?: Record<string, string> } }>;
+    try {
+      containers = JSON.parse(inspected.stdout);
+    } catch {
+      throw new SandboxError(`컨테이너 마운트(docker inspect)를 해석하지 못했습니다 (${this.id})`);
+    }
+    const names = [...new Set(containers.flatMap((container) => (container.Mounts ?? []).filter((mount) => mount.Type === 'volume' && mount.Name).map((mount) => mount.Name!)))];
+    const volumeOptions: Record<string, { driver?: string; driver_opts?: Record<string, string> }> = {};
+    if (names.length > 0) {
+      const volumes = await this.#docker(['volume', 'inspect', ...names]);
+      if (volumes.exitCode === 0) {
+        try {
+          for (const volume of JSON.parse(volumes.stdout) as Array<{ Name: string; Driver?: string; Options?: Record<string, string> | null }>) {
+            volumeOptions[volume.Name] = { ...(volume.Driver ? { driver: volume.Driver } : {}), driver_opts: volume.Options ?? {} };
+          }
+        } catch {
+          throw new SandboxError(`볼륨 정보(docker volume inspect)를 해석하지 못했습니다 (${this.id})`);
+        }
+      }
+    }
+    const failures: string[] = [];
+    const stop: string[] = [];
+    for (const container of containers) {
+      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions);
+      if (missing.length === 0) continue;
+      stop.push(container.Id);
+      failures.push(`${container.Config?.Labels?.['com.docker.compose.service'] ?? container.Name ?? container.Id}: ${missing.join(', ')}`);
+    }
+    if (failures.length === 0) return;
+    await this.#docker(['stop', ...stop]);
+    throw new SandboxError(`컨테이너에 .git 읽기 전용 마운트가 빠져 멈췄습니다 (${this.id})`, failures.join('\n'));
   }
 
   async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
@@ -810,7 +872,7 @@ class LocalDockerSandbox implements Sandbox {
 
   /** compose 파일의 마운트를 다시 읽어 마스크가 달라졌으면 override를 새로 쓴다. 읽지 못하면 보호 없이 띄우지 않고 던진다 */
   async #refreshGitMask(): Promise<void> {
-    const mask = await loadGitMask(this.project, { dockerBin: this.#dockerBin, env: this.#environment() });
+    const mask = await loadGitMask(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
     if (JSON.stringify(mask) === JSON.stringify(this.#gitMask)) return;
     this.#gitMask = mask;
     await this.#writeOverride();

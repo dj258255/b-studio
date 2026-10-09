@@ -9,7 +9,7 @@ import { LocalDockerProvider, runtimeFromEnv } from './compose-provider';
 async function fakeDocker(runtimesJson: string): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), 'fake-docker-'));
   const bin = path.join(dir, 'docker');
-  await writeFile(bin, `#!/bin/sh\nif [ "$1" = "info" ]; then echo '${runtimesJson}'; exit 0; fi\nif [ "$2" = "--profile" ]; then echo '{"services":{}}'; exit 0; fi\necho "unexpected: $*" >&2\nexit 9\n`);
+  await writeFile(bin, `#!/bin/sh\nif [ "$1" = "info" ]; then echo '${runtimesJson}'; exit 0; fi\nif [ "$2" = "--project-name" ]; then echo '{"services":{}}'; exit 0; fi\necho "unexpected: $*" >&2\nexit 9\n`);
   await chmod(bin, 0o755);
   return bin;
 }

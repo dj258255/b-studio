@@ -31,6 +31,7 @@ async function fakeDocker(dir: string): Promise<string> {
   await writeFile(
     bin,
     `#!/bin/sh
+case " $* " in *" --no-trunc "*) exit 0 ;; esac
 for a in "$@"; do
   case "$a" in
     config) printf '{"services":{}}\\n'; exit 0 ;;

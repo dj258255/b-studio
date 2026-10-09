@@ -3203,9 +3203,9 @@ WRITABLE_STATE
 - b-studio 자신의 컨테이너 가운데 프로젝트 폴더를 붙이는 것은 동기화 확인의 `<root>:/project:ro` 하나뿐이고 읽기 전용이다. 구멍은 사용자 compose가 붙이는 서비스 마운트에만 있었다.
 
 ### 해결
-ADR-158로 정리했다. `docker compose --profile '*' config --format json`이 정규화한 마운트(짧은 문법·상대 경로·변수 치환·`extends`·`include`가 풀린 결과)를 읽어, 프로젝트 폴더에서 위로 올라가며 찾은 `.git`이 서비스의 마운트 안에 보이면 그 자리에 더 구체적인 마운트를 겹쳐 override에 적는다(`packages/sandbox/src/docker/git-mask.ts`). `.git`은 읽기 전용 bind, `.git/b-studio`는 빈 tmpfs다(폴더가 아직 없으면 미리 빈 폴더로 만든다). 에이전트가 compose 파일을 고쳐 마운트를 늘릴 수 있으므로 컨테이너를 만드는 `up` 직전마다 다시 계산해 override를 새로 쓰고, compose 설정을 읽지 못하면 보호 없이 띄우지 않고 멈춘다.
+ADR-158로 정리했다. `docker compose --profile '*' config --format json`이 정규화한 마운트(짧은 문법·상대 경로·변수 치환·`extends`·`include`가 풀린 결과)를 읽어, 프로젝트 폴더에서 위로 올라가며 찾은 `.git`이 서비스의 마운트 안에 보이면 그 자리에 더 구체적인 마운트를 겹쳐 override에 적는다(`packages/sandbox/src/docker/git-mask.ts`). `.git`은 읽기 전용 bind, `.git/b-studio`는 빈 폴더(`.git/b-studio-empty`)를 읽기 전용으로 얹는다(체크포인트 저장소인데 상태 폴더가 아직 없으면 미리 만든다). 에이전트가 compose 파일을 고쳐 마운트를 늘릴 수 있으므로 컨테이너를 만드는 `up` 앞뒤로 다시 계산해 달라졌으면 override를 새로 쓰고 다시 `up`하며(3번 안에 안정되지 않으면 서비스를 내리고 던진다), `up` 뒤에는 설정이 아니라 실제 컨테이너의 마운트(`docker inspect`)에서 `.git` 자리의 읽기 전용 마운트가 빠졌는지 확인해 빠졌으면 그 컨테이너를 멈춘다. compose 설정을 읽지 못하면 보호 없이 띄우지 않고 멈추며, 그 오류에는 명령줄 없이 가린 stderr만 담는다.
 
-보안 검토에서 두 가지를 더 찾아 고쳤다. 하나는 마운트를 읽는 `config`가 프로필을 켜지 않아 `profiles`가 걸린 서비스가 목록에 없었다는 점이다(서비스 이름을 직접 주고 `up`하면 프로필이 저절로 켜져 뜨는데 마스크는 없었다). 재현: 서비스 `b`에 `profiles: [debug]`를 주면 `docker compose config --format json`에는 `"b"`가 0번, `--profile '*'`를 주면 1번 나온다. 다른 하나는 상태 폴더가 마스크를 만들 때 없으면 tmpfs를 빼던 점이다. 읽기 전용 `.git` 아래에서는 마운트 지점을 새로 만들 수 없고, 빼면 나중에 b-studio가 만든 폴더가 컨테이너에 그대로 보인다.
+보안 검토에서 찾아 고친 것: (1) 마운트를 읽는 `config`가 프로필을 켜지 않아 `profiles`가 걸린 서비스가 목록에 없었다(서비스 이름을 직접 주고 `up`하면 프로필이 저절로 켜져 뜨는데 마스크는 없었다). 재현: 서비스 `b`에 `profiles: [debug]`를 주면 `docker compose config --format json`에는 `"b"`가 0번, `--profile '*'`를 주면 1번 나온다. (2) 상태 폴더 가리기를 폴더가 있을 때만 했던 점. 읽기 전용 `.git` 아래에서는 마운트 지점을 새로 만들 수 없고, 빼면 나중에 b-studio가 만든 폴더가 컨테이너에 그대로 보인다. (3) `config` 실패 오류에 `error.message`(명령줄과 stderr)를 그대로 담아 compose 오류에 섞인 치환된 시크릿 값이 샌드박스의 가리기를 거치지 않고 나갔다. 이제 stderr만 `Redactor`로 가려 담는다. (4) 마운트를 `type: bind`만 읽어 이름 있는 볼륨을 호스트 폴더에 묶은 꼴과 `volumes_from`으로 물려받은 마운트가 빠졌다. (5) 읽은 설정과 실제 기동 사이의 틈: 계산과 `up` 사이에 compose 파일이 바뀌면 마스크 없는 컨테이너가 만들어질 수 있었다. (6) 상태 폴더를 tmpfs로 가렸더니 그 서비스를 `volumes_from`으로 물려받는 서비스가 만들어지지 않았다(아래 확인).
 
 ### 확인
 실제 `LocalDockerProvider`(`create` → `setServiceRunning`)로 같은 프로젝트를 띄웠다(compose 프로젝트 `studio-bstudio-gitmask-test-0f1dab`).
@@ -3224,7 +3224,66 @@ touch: /backdoor/.git/probe: Read-only file system
 0
 ```
 
-`buildOverride` 결과로 `docker compose -f compose.yaml -f override config -q`가 통과했고(마운트: `tmpfs -> /workspace/.git/b-studio`, `bind …/.git -> /workspace/.git rw=false`, `bind … -> /workspace rw=true`), 컨테이너 안에서 `mv /workspace/.git …`은 `Device or resource busy`, `rm -rf /workspace/.git`은 `Read-only file system`이었다. `cat /workspace/.git/HEAD`는 읽혔다(빌드가 git 정보를 읽는 경우). 컨테이너가 떠 있는 동안 호스트에서 `git add -A && git commit`과 `.git/b-studio/test-results.json` 쓰기가 모두 성공했다. 모노레포 하위 폴더 프로젝트(`..:/repo`와 `.:/app` 두 마운트)는 상위 마운트의 `/repo/.git`만 막히고 `/app`에는 `.git`이 보이지 않았으며, `.git`이 파일인 폴더는 `echo … > /workspace/.git`이 `Read-only file system`이었다. 프로필이 걸린 서비스(`profiles: [debug]`)와 `.git/b-studio`가 없는 폴더도 같은 실제 경로로 확인했다: 서비스가 떴고 `/workspace/.git`에 쓰기는 `Read-only file system`, 호스트의 `.git` 안에는 빈 `b-studio`가 만들어졌고 컨테이너 안에서는 비어 보였다. 단위 테스트는 `git-mask.test.ts`(마운트 꼴별 계획, 실제 폴더 탐지), `git-mask-provider.test.ts`(모든 프로필로 읽음, 상태 폴더 미리 만들기, compose 파일이 바뀐 뒤 `up` 직전에 마스크를 다시 맞춤, 읽기 실패 시 멈춤), `buildOverride` 출력이다.
+`buildOverride` 결과로 `docker compose -f compose.yaml -f override config -q`가 통과했고(마운트: `bind …/.git/b-studio-empty -> /workspace/.git/b-studio rw=false`, `bind …/.git -> /workspace/.git rw=false`, `bind … -> /workspace rw=true`), 컨테이너 안에서 `mv /workspace/.git …`은 `Device or resource busy`, `rm -rf /workspace/.git`은 `Read-only file system`이었다. `cat /workspace/.git/HEAD`는 읽혔다(빌드가 git 정보를 읽는 경우). 컨테이너가 떠 있는 동안 호스트에서 `git add -A && git commit`과 `.git/b-studio/test-results.json` 쓰기가 모두 성공했다. 모노레포 하위 폴더 프로젝트(`..:/repo`와 `.:/app` 두 마운트)는 상위 마운트의 `/repo/.git`만 막히고 `/app`에는 `.git`이 보이지 않았으며, `.git`이 파일인 폴더는 `echo … > /workspace/.git`이 `Read-only file system`이었다. 프로필이 걸린 서비스(`profiles: [debug]`)와 `.git/b-studio`가 없는 폴더도 같은 실제 경로로 확인했다: 서비스가 떴고 `/workspace/.git`에 쓰기는 `Read-only file system`, 호스트의 `.git` 안에는 빈 `b-studio`가 만들어졌고 컨테이너 안에서는 비어 보였다(이 확인은 tmpfs로 가리던 첫 구현 때의 것이고, 이후 빈 폴더 읽기 전용 bind로 바꾼 뒤 아래 확인을 다시 했다). 단위 테스트는 `git-mask.test.ts`(마운트 꼴별 계획, 실제 폴더 탐지), `git-mask-provider.test.ts`(모든 프로필로 읽음, 상태 폴더 미리 만들기, compose 파일이 바뀐 뒤 `up` 직전에 마스크를 다시 맞춤, 읽기 실패 시 멈춤), `buildOverride` 출력이다.
+
+#### bind가 아닌 꼴 (이름 있는 볼륨, `volumes_from`)
+`config --format json`의 정규화 결과(상대 `device`는 절대 경로가 되고, `volumes_from`은 서비스 이름 목록으로 남는다):
+
+```
+"volumes": { "src": { "name": "v_src", "driver": "local", "driver_opts": { "device": "/Users/…/v/sub", "o": "bind", "type": "none" } } }
+a {"volumes": [{"type": "volume", "source": "src", "target": "/w", "volume": {}}]}
+b {"volumes_from": ["a"]}
+c {"volumes_from": ["container:foo:ro"]}
+```
+
+수정 전(마스크 없는 override)과 수정 뒤(실제 `LocalDockerProvider`)를 같은 프로젝트로 비교했다. 이름 있는 볼륨(`driver_opts.device`가 프로젝트 폴더, 서비스는 `src:/workspace`):
+
+```
+=== 수정 전
+app: WRITABLE_GIT
+{"previewToken":"secret"}
+=== 수정 뒤
+[app] $ touch /workspace/.git/probe-app
+touch: /workspace/.git/probe-app: Read-only file system [exit 1]
+[app] $ ls -A /workspace/.git/b-studio | wc -l
+0 [exit 0]
+```
+
+`volumes_from`(`side`가 `app`의 `.:/workspace`를 물려받음):
+
+```
+=== 수정 전
+app: WRITABLE_GIT
+side: WRITABLE_GIT
+{"previewToken":"secret"}
+=== 수정 뒤
+[app]  touch …/.git/probe-app → Read-only file system [exit 1] / ls -A …/b-studio | wc -l → 0
+[side] touch …/.git/probe-side → Read-only file system [exit 1] / ls -A …/b-studio | wc -l → 0
+```
+
+`volumes_from`과 마스크 마운트의 관계를 직접 확인했다(`app`에 마스크를 걸고 `side`는 `volumes_from: [app]`만 둔 compose):
+
+```
+읽기 전용 .git bind만      → side 생성 성공, side의 마운트에 `bind …/.git -> /workspace/.git rw=false`가 상속됨(상태 폴더는 1개 보임)
+tmpfs(.git/b-studio)만     → Container …-side-1 Creating / Error response from daemon: get: no such volume
+빈 폴더 읽기 전용 bind     → side 생성 성공, side의 마운트에 `…/.git/b-studio-empty -> /workspace/.git/b-studio rw=false`가 상속됨, 상태 폴더 0개
+```
+
+그래서 상태 폴더는 tmpfs가 아니라 빈 폴더 읽기 전용 bind로 가린다. 읽기 전용 bind는 상속되지만, 어느 서비스에 걸리는지 설정에서 보이게 하고 상속에 기대지 않으려고 물려받는 쪽에도 같은 target으로 직접 건다. `volumes_from: ["container:…"]`는 `SandboxError: 서비스 app의 volumes_from(container:nonexistent-legacy:ro)이 compose 밖의 컨테이너를 가리켜 무엇이 마운트되는지 알 수 없습니다. .git 보호를 정할 수 없어 멈춥니다`로 거절된다.
+
+사용자가 `.:/workspace`와 함께 `./.git:/workspace/.git:rw`, `./.git/b-studio:/state:rw`를 직접 적은 compose에 override를 합친 결과(`docker compose -f compose.yaml -f override config --format json`)는 두 항목 모두 `"read_only": true`이고 `/state`의 소스는 `…/.git/b-studio-empty`였다. 실제 컨테이너에서 `touch /workspace/.git/p`, `touch /state/p`, `touch /refs/p`가 모두 `Read-only file system`, `ls -A /state | wc -l`은 0이었다.
+
+사후 확인: `docker`를 감싸 `config --format json`이 빈 서비스를 돌려주게 해 마운트를 놓치는 상황을 흉내 내고 실제 `up`을 돌렸다.
+
+```
+sandbox id: studio-bstudio-gitmask-test-4071a7
+기동 거절: 컨테이너에 .git 읽기 전용 마운트가 빠져 멈췄습니다 (studio-bstudio-gitmask-test-4071a7)
+app: /workspace/.git, /workspace/.git/b-studio
+$ docker ps -a --filter name=gitmask-test --format '{{.Names}} {{.Status}}'
+studio-bstudio-gitmask-test-4071a7-app-1 Exited (137) Less than a second ago
+```
+
+`config`/`up`의 인자 비교: `config`는 `compose --project-name <id> --profile '*' --project-directory <루트> --file <compose> config --format json`, `up`은 `compose --project-name <id> --project-directory <루트> --file <compose> --file <override> up …`이다. 환경은 둘 다 프로세스 환경 + 시크릿이고, `COMPOSE_FILE`은 `--file`이 있어 둘 다 무시하며 `.env`는 둘 다 `--project-directory`에서 읽는다. 단위 테스트(`git-mask-provider.test.ts`)가 두 명령줄의 `--project-name`·`--project-directory`·`--file`이 같은지 확인한다. 시크릿 가리기는 가짜 docker가 stderr에 `TOKEN=s3cr3t-value`를 뱉으며 실패할 때 예외의 메시지·상세·스택 어디에도 그 값과 `--project-directory`가 없는 것으로 확인한다.
 
 ### 배운 점
 에이전트 쪽 도구의 `.git` 차단은 에이전트가 쓰는 길 하나만 막을 뿐이다. 근거를 담은 저장소는 그 저장소가 놓인 마운트에서 읽기 전용으로 막아야 컨테이너 안의 어떤 언어·도구로도 쓸 수 없다. 마운트는 사용자의 compose 파일이 정하고 그 파일도 에이전트가 고칠 수 있으므로, 마운트를 한 번만 읽어 두지 않고 컨테이너를 만드는 때마다 다시 읽어야 한다. 가리는 쪽이 읽는 설정과 실제로 띄우는 쪽의 설정(프로필, 파일, 환경)이 같은지, 그리고 가리지 못했을 때 열리는 쪽으로 떨어지지 않는지를 함께 확인해야 한다.

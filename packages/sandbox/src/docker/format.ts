@@ -19,7 +19,7 @@ const EGRESS_NETWORK = 'b-studio-egress';
  *    그 대상 서비스는 `hostPorts`로 미리 정한 호스트 포트를 그대로 공개하고(자동 배정 대신), 참조한 서비스의
  *    environment에 실제 주소(`http://127.0.0.1:<포트>`)로 채운 값을 넣는다. 포트를 `docker compose up` 뒤에야
  *    아는 서비스는(hostPorts에 없으면) 예전처럼 자동 배정한다
- *  - 프로젝트 폴더를 마운트한 서비스는 그 안의 `.git`을 읽기 전용으로, b-studio 상태 폴더(`.git/b-studio`)는 빈 tmpfs로 덮는다
+ *  - 프로젝트 폴더를 마운트한 서비스는 그 안의 `.git`을 읽기 전용으로, b-studio 상태 폴더(`.git/b-studio`)는 빈 폴더(읽기 전용)로 덮는다
  *    (`gitMask`, ADR-158). 컨테이너 안 명령이 체크포인트 저장소와 테스트 근거를 위조하지 못하게 한다
  */
 export function buildOverride(
