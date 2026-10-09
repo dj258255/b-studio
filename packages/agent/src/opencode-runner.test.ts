@@ -413,8 +413,8 @@ describe('runOpenCodeAgent', () => {
     expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(222);
-    // 스텝 시간이 없으므로 0("재지 않음")이다
-    expect(result.metrics?.modelMs).toBe(0);
+    // 스텝 시간이 없으므로 비워 둔다("재지 않음", 0초와 다르다)
+    expect(result.metrics).not.toHaveProperty('modelMs');
   });
 
   it('usageByModel을 고른 모델 이름으로 채운다(이슈 #428, 모델은 항상 명시하므로 백엔드 기본 키로 떨어지지 않는다)', async () => {

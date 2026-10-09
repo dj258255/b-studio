@@ -317,8 +317,8 @@ describe('runCodexAgent', () => {
     ]);
     expect(result.metrics?.modelCalls).toBe(2);
     expect(result.metrics?.maxContextTokens).toBe(222);
-    // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
-    expect(result.metrics?.modelMs).toBe(0);
+    // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 값이 없는 것이 "재지 않음"이다(0초와 다르다)
+    expect(result.metrics).not.toHaveProperty('modelMs');
     for (const ms of [result.metrics!.toolMs, result.metrics!.gateMs]) {
       expect(Number.isInteger(ms)).toBe(true);
       expect(ms).toBeGreaterThanOrEqual(0);

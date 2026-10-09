@@ -298,8 +298,8 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
 
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent·Codex 러너와 같은 큐를 쓴다
   const serial = serialQueue();
-  // 실행 지표. modelMs는 이벤트에 스텝 시간이 있을 때만 더한다(없으면 0 = "재지 않음")
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
+  // 실행 지표. modelMs는 이벤트에 스텝 시간이 있을 때만 더한다(한 번도 없으면 비워 둔다 = "재지 않음")
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   // 작업 폴더(cwd). project.root를 cwd로 주면 모델이 내장 도구로 작업 공간을 직접 바꿀 수 있다.
   // 상태 폴더를 주면 그 아래 고정 경로를 쓴다 — 두 러너(Command Code·OpenCode)를 같은 규칙으로 두고, 이어받을 때 조건도 같게 한다
@@ -483,7 +483,7 @@ export async function runOpenCodeAgent(options: OpenCodeRunOptions): Promise<Ope
             addUsage(usage, parsed.part?.tokens);
             metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(parsed.part?.tokens));
             const ms = stepMs(parsed.part);
-            if (ms !== undefined) metrics.modelMs += Math.round(ms);
+            if (ms !== undefined) metrics.modelMs = (metrics.modelMs ?? 0) + Math.round(ms);
             onEvent({ type: 'tokens', usage: { ...usage } });
             break;
           }

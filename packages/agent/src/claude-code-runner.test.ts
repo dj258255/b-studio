@@ -39,13 +39,15 @@ interface FakeOptions {
   modelUsages?: Array<Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }>>;
   /** supportedModels()가 돌려줄 목록(fetchClaudeCodeModels 테스트용) */
   models?: ModelInfo[];
+  /** result마다 실어 보낼 duration_api_ms(순서대로). 비면 그 필드 없이 보낸다 */
+  apiDurations?: number[];
 }
 
 /**
  * Claude Code 프로세스를 흉내 내는 가짜 SDK.
  * 사용자 메시지를 받을 때마다 준비된 단계를 실행하고, 도구 단계는 러너가 등록한 MCP 도구 핸들러를 실제로 부른다.
  */
-function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [], models = [] }: FakeOptions = {}) {
+function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [], models = [], apiDurations = [] }: FakeOptions = {}) {
   const state = { prompts: [] as string[], options: undefined as Options | undefined, closed: false };
   let tools: Array<SdkMcpToolDefinition<any>> = [];
 
@@ -89,6 +91,7 @@ function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [
             errors: [],
             modelUsage,
             session_id: sessionId,
+            ...(apiDurations.length > 0 ? { duration_api_ms: apiDurations.shift() } : {}),
             ...result,
           } as unknown as SDKMessage;
         }
@@ -213,7 +216,7 @@ describe('runClaudeCodeAgent', () => {
     expect(events.filter((e) => e.type === 'tool_result').map((e) => e.type === 'tool_result' && e.ok)).toEqual([true, true]);
   });
 
-  it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남기고 modelMs는 0으로 둔다', async () => {
+  it('실행 지표로 호출 수·최대 입력 크기·단계별 시간을 남기고, SDK가 API 시간을 알려 주지 않으면 modelMs를 비워 둔다', async () => {
     const { sdk } = fakeClaudeCode({
       turns: [
         [
@@ -237,8 +240,8 @@ describe('runClaudeCodeAgent', () => {
       { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 10, cacheReadTokens: 1_000, cacheWriteTokens: 5, contextTokens: 1_105 },
       { type: 'turn_usage', turn: 2, inputTokens: 50, outputTokens: 5, cacheReadTokens: 100, cacheWriteTokens: 0, contextTokens: 150 },
     ]);
-    // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 0은 "재지 않음"이다
-    expect(result.metrics?.modelMs).toBe(0);
+    // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 직접 재지 못한다. 값이 없는 것이 "재지 않음"이고 0초와 다르다
+    expect(result.metrics).not.toHaveProperty('modelMs');
     for (const ms of [result.metrics!.toolMs, result.metrics!.gateMs]) {
       expect(Number.isInteger(ms)).toBe(true);
       expect(ms).toBeGreaterThanOrEqual(0);
@@ -297,6 +300,33 @@ describe('runClaudeCodeAgent', () => {
     expect(events.some((event) => event.type === 'warning')).toBe(false);
   });
 
+  it('SDK가 result에 실어 주는 API 호출 시간 합을 modelMs로 남긴다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ text: '주문 API입니다.' }]], apiDurations: [3_333.4] });
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+    expect(result.status).toBe('done');
+    expect(result.metrics?.modelMs).toBe(3_333);
+  });
+
+  it('한 query에서 result가 여러 번 오면 modelMs를 더하지 않고 마지막 누적값을 쓴다', async () => {
+    // 게이트가 한 번 실패해 같은 query에서 턴이 두 번 끝난다. duration_api_ms는 그 query의 누적값이다(실측 3,333 → 5,997)
+    const { sdk } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } }, { text: '1' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }, { text: '2' }],
+      ],
+      apiDurations: [3_333, 5_997],
+    });
+    const result = await runClaudeCodeAgent({ request: '주문에 메모 필드 추가', project, sandbox: fakeSandbox(project, [false, true]), sdk, fetcher: async () => contract });
+    expect(result.status).toBe('done');
+    expect(result.metrics?.modelMs).toBe(5_997);
+  });
+
+  it('숫자가 아닌 duration_api_ms는 재지 않은 것으로 본다', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [[{ text: '주문 API입니다.' }]], result: { duration_api_ms: 'n/a' } as never });
+    const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
+    expect(result.metrics).not.toHaveProperty('modelMs');
+  });
+
   it('첫 시도가 ENOTFOUND로 끝나면 기다렸다가 같은 세션을 resume으로 이어받아 이어서 성공한다', async () => {
     const prompts: string[] = [];
     const resumes: Array<string | undefined> = [];
@@ -325,6 +355,7 @@ describe('runClaudeCodeAgent', () => {
                 stop_reason: 'end_turn',
                 errors: [],
                 modelUsage: {},
+                duration_api_ms: 1_000,
                 session_id: sessionId,
               } as unknown as SDKMessage;
               return;
@@ -339,6 +370,7 @@ describe('runClaudeCodeAgent', () => {
               stop_reason: 'end_turn',
               errors: [],
               modelUsage: { 'test-model': { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 1, cacheCreationInputTokens: 2 } },
+              duration_api_ms: 2_500,
               session_id: sessionId,
             } as unknown as SDKMessage;
           }
@@ -366,6 +398,8 @@ describe('runClaudeCodeAgent', () => {
     });
 
     expect(result).toMatchObject({ status: 'done', summary: '이어서 완료했습니다.' });
+    // query를 다시 열면 누적값이 0부터 다시 시작한다. 끝난 query의 값(1,000)에 새 query의 값(2,500)을 더한다
+    expect(result.metrics?.modelMs).toBe(3_500);
     expect(queryCalls).toBe(2);
     expect(resumes).toEqual([undefined, 'session-1']);
     expect(waits).toEqual([1_000]);
