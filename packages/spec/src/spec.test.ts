@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -898,3 +898,88 @@ function captureError(fn: () => unknown): SpecError {
   }
   return expect.unreachable('SpecError가 발생해야 합니다');
 }
+
+describe('loadProject: 프로젝트 폴더 밖의 파일은 읽지 않는다 (ADR-159)', () => {
+  const API_SPEC = 'version: 1\nname: x\nservices:\n  api: { source: managed, template: fastapi, path: api, port: 8000, preview: openapi }\n';
+  const API_COMPOSE = 'services:\n  api: { build: ./api }\n';
+  // YAML로 읽으면 문법 오류가 나는 내용. yaml 라이브러리의 오류 문구는 문제 줄을 그대로 싣는다
+  const OUTSIDE = 'token: TOP-SECRET-HOST-CONTENT\n  bad: [indent\n';
+
+  async function failure(dir: string): Promise<SpecError> {
+    return loadProject(dir).then(
+      () => expect.unreachable(),
+      (e: unknown) => e as SpecError,
+    );
+  }
+
+  it('compose가 상위 폴더나 절대 경로를 가리키면 그 파일을 열지 않고 거절한다', async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    const dir = path.join(parent, 'project');
+    await mkdir(dir);
+    await writeFile(path.join(parent, 'outside.yaml'), OUTSIDE);
+
+    for (const compose of ['../outside.yaml', path.join(parent, 'outside.yaml')]) {
+      await writeFile(path.join(dir, 'studio.yaml'), `${API_SPEC}compose: ${JSON.stringify(compose)}\n`);
+      const error = await failure(dir);
+      expect(error).toBeInstanceOf(SpecError);
+      expect(error.message).toContain('프로젝트 폴더 안의 경로만');
+      expect(error.message).not.toContain('TOP-SECRET-HOST-CONTENT');
+    }
+  });
+
+  it('studio.yaml이나 compose 파일이 프로젝트 밖을 가리키는 링크면 읽지 않는다', async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    const dir = path.join(parent, 'project');
+    await mkdir(dir);
+    await writeFile(path.join(parent, 'outside.yaml'), OUTSIDE);
+
+    await symlink(path.join(parent, 'outside.yaml'), path.join(dir, 'studio.yaml'));
+    const specError = await failure(dir);
+    expect(specError.message).toContain('프로젝트 폴더 밖을 가리키는 링크');
+    expect(specError.message).not.toContain('TOP-SECRET-HOST-CONTENT');
+
+    const second = path.join(parent, 'project2');
+    await mkdir(second);
+    await writeFile(path.join(second, 'studio.yaml'), API_SPEC);
+    await symlink(path.join(parent, 'outside.yaml'), path.join(second, 'compose.yaml'));
+    const composeError = await failure(second);
+    expect(composeError.message).toContain('프로젝트 폴더 밖을 가리키는 링크');
+    expect(composeError.message).not.toContain('TOP-SECRET-HOST-CONTENT');
+  });
+
+  it('프로젝트 안의 다른 파일을 가리키는 링크와 하위 폴더의 compose는 그대로 읽는다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await mkdir(path.join(dir, 'infra'));
+    await writeFile(path.join(dir, 'infra', 'compose.dev.yaml'), API_COMPOSE);
+    await symlink(path.join(dir, 'infra', 'compose.dev.yaml'), path.join(dir, 'compose.yaml'));
+    await writeFile(path.join(dir, 'studio.yaml'), API_SPEC);
+    expect((await loadProject(dir)).composeServices).toEqual(['api']);
+
+    await writeFile(path.join(dir, 'studio.yaml'), `${API_SPEC}compose: infra/compose.dev.yaml\n`);
+    expect((await loadProject(dir)).composeServices).toEqual(['api']);
+  });
+
+  it('설정 파일 자리에 폴더가 있으면 일반 파일이 아니라고 알린다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(path.join(dir, 'studio.yaml'), API_SPEC);
+    await mkdir(path.join(dir, 'compose.yaml'));
+    const error = await failure(dir);
+    expect(error).toBeInstanceOf(SpecError);
+    expect(error.message).toContain('compose.yaml: 일반 파일이 아닙니다');
+  });
+
+  it('YAML 문법 오류는 위치만 알리고 파일 내용을 싣지 않는다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(path.join(dir, 'studio.yaml'), OUTSIDE);
+    const specError = await failure(dir);
+    expect(specError).toBeInstanceOf(SpecError);
+    expect(specError.message).toMatch(/studio\.yaml의 YAML 문법이 올바르지 않습니다\(\d+번째 줄 \d+번째 칸\)/);
+    expect(specError.message).not.toContain('TOP-SECRET-HOST-CONTENT');
+
+    await writeFile(path.join(dir, 'studio.yaml'), API_SPEC);
+    await writeFile(path.join(dir, 'compose.yaml'), OUTSIDE);
+    const composeError = await failure(dir);
+    expect(composeError.message).toContain('compose.yaml의 YAML 문법이 올바르지 않습니다');
+    expect(composeError.message).not.toContain('TOP-SECRET-HOST-CONTENT');
+  });
+});
