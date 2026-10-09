@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
@@ -163,15 +163,42 @@ export async function computeGitMask(projectRoot: string, config: ComposeMountCo
     const empty = path.join(entry.dir, GIT, STATE_MASK);
     try {
       await mkdir(state, { recursive: true });
-      // 상태 폴더 자리에 얹을 빈 폴더. 내용이 있으면 비운다(가린다는 약속이 깨지지 않게)
-      await rm(empty, { recursive: true, force: true });
-      await mkdir(empty);
+      // 상태 폴더 자리에 얹을 빈 폴더. 없으면 만들고 있으면 그대로 둔다: 서비스 여럿이 함께 재시작되면 이 함수가 동시에 불리는데,
+      // "지우고 다시 만들기"는 서로 엇갈려 EEXIST로 실패했다(도그푸딩 마찰 187). 내용이 들어 있으면 지우지 않고 멈춘다
+      // (가린다는 약속이 깨지지 않게, 그리고 이 코드가 호스트의 무엇도 재귀적으로 지우지 않게 — prepareEmptyDirectory)
+      await prepareEmptyDirectory(path.join(entry.dir, GIT), STATE_MASK);
     } catch (error) {
       throw new SandboxError(`${state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, error instanceof Error ? error.message : String(error));
     }
     entry.hasState = true;
   }
   return planGitMask(mounts, entries);
+}
+
+/**
+ * parent 바로 아래에 name이라는 **진짜 빈 폴더**가 있게 한다. 이 함수는 아무것도 재귀적으로 지우지 않는다.
+ *  - 없으면 만든다. 이미 폴더면 그대로 둔다(동시에 불려도 엇갈리지 않게, 트러블슈팅 115).
+ *  - 그 자리에 링크나 파일이 있으면 그 항목 하나만 지우고 폴더를 만든다. 링크를 따라가지 않는다(링크가 가리키는 호스트 폴더를 비우거나,
+ *    상태 폴더를 가리키는 링크를 "빈 폴더"로 마운트하지 않게).
+ *  - 폴더에 내용이 있으면 **지우지 않고 멈춘다.** 이 폴더는 컨테이너에 읽기 전용으로만 마운트되므로 내용이 생길 일이 없다.
+ *    비워 주려고 지우기 시작하면, 확인과 삭제 사이에 그 자리가 링크로 바뀌었을 때 엉뚱한 곳을 지우는 길이 생긴다.
+ *  - 마지막에 실제 위치가 parent 바로 아래인지 확인한다.
+ */
+async function prepareEmptyDirectory(parent: string, name: string): Promise<void> {
+  const target = path.join(parent, name);
+  const before = await lstat(target).catch(() => undefined);
+  // 재귀 옵션 없이 지운다: 그 사이에 내용이 든 폴더로 바뀌었으면 실패하고 멈춘다
+  if (before && !before.isDirectory()) await rm(target, { force: true });
+  await mkdir(target, { recursive: true });
+  const after = await lstat(target);
+  if (!after.isDirectory() || (await realpath(target)) !== path.join(await realpath(parent), name)) {
+    throw new Error(`${target}이(가) 폴더가 아니거나 다른 곳을 가리킵니다`);
+  }
+  const children = await readdir(target);
+  if (children.length > 0) {
+    const shown = children.slice(0, 5).join(', ');
+    throw new Error(`${target} 폴더가 비어 있지 않습니다(${shown}${children.length > 5 ? ` 외 ${children.length - 5}개` : ''}). 이 폴더는 상태 폴더를 가리는 데 쓰는 빈 폴더입니다. 안의 항목을 확인해 직접 지운 뒤 다시 시도하세요`);
+  }
 }
 
 async function isBStudioRepository(dir: string): Promise<boolean> {
