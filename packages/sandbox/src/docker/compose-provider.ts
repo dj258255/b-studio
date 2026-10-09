@@ -50,7 +50,7 @@ import {
   parseLogLine,
   parseRuntimes,
   SYNC_SCRIPT,
-  parseSyncOutput,
+  parseSyncOutput, SyncObservations,
 } from './format';
 import { externalCallScript } from './external-call';
 import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
@@ -384,6 +384,7 @@ class LocalDockerSandbox implements Sandbox {
       await Promise.all(targets.map(async (file) => [file, await hashOrMissing(path.join(this.project.root, file))] as const)),
     );
     const started = Date.now();
+    const observations = new SyncObservations();
 
     for (let checks = 1; ; checks++) {
       const result = await this.#docker(
@@ -395,9 +396,10 @@ class LocalDockerSandbox implements Sandbox {
       const seen = parseSyncOutput(result.stdout);
       const pending = targets.filter((file) => seen.get(file) !== expected.get(file));
       if (pending.length === 0) return { elapsedMs: Date.now() - started, checks };
+      for (const file of pending) observations.record(file, seen.get(file));
 
       if (Date.now() - started >= timeoutMs) {
-        throw new SandboxError(`${Math.round(timeoutMs / 1_000)}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: ${pending.join(', ')}`);
+        throw new SandboxError(observations.describeTimeout(pending, expected, timeoutMs));
       }
       await sleep(250, undefined, { signal });
     }

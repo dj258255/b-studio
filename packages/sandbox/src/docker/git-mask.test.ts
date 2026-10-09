@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
@@ -161,6 +161,73 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
       },
     });
     expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
+  });
+
+  it('서비스 여럿이 함께 재시작돼 동시에 불려도 실패하지 않고, 빈 폴더는 비어 있다(도그푸딩 마찰 187)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } };
+    // 전에는 "지우고 다시 만들기"가 엇갈려 EEXIST(또는 ENOENT)로 실패했다
+    const results = await Promise.all(Array.from({ length: 24 }, () => computeGitMask(root, config)));
+    for (const mask of results) expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+  });
+
+  it('빈 폴더 자리가 프로젝트 밖을 가리키는 링크면 따라가지 않는다: 링크만 지우고 진짜 빈 폴더를 만든다(그 너머의 파일은 그대로)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const outside = path.join(base, 'outside');
+    await mkdir(path.join(outside, 'keep'), { recursive: true });
+    await writeFile(path.join(outside, 'important.txt'), '지우면 안 되는 파일');
+    await symlink(outside, path.join(root, '.git', 'b-studio-empty'));
+
+    await computeGitMask(root, { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } });
+
+    expect(await readFile(path.join(outside, 'important.txt'), 'utf8')).toBe('지우면 안 되는 파일');
+    expect(await readdir(outside)).toEqual(['important.txt', 'keep']);
+    const made = await lstat(path.join(root, '.git', 'b-studio-empty'));
+    expect(made.isSymbolicLink()).toBe(false);
+    expect(made.isDirectory()).toBe(true);
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+  });
+
+  it('빈 폴더 자리가 상태 폴더를 가리키는 링크여도 상태 폴더를 "빈 폴더"로 쓰지 않는다(상태는 그대로, 가리는 폴더는 진짜 빈 폴더)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    await writeFile(path.join(root, '.git', 'b-studio', 'session.json'), '{"secret":true}');
+    await symlink(path.join(root, '.git', 'b-studio'), path.join(root, '.git', 'b-studio-empty'));
+
+    await computeGitMask(root, { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } });
+
+    expect(await readFile(path.join(root, '.git', 'b-studio', 'session.json'), 'utf8')).toBe('{"secret":true}');
+    expect((await lstat(path.join(root, '.git', 'b-studio-empty'))).isSymbolicLink()).toBe(false);
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+  });
+
+  it('빈 폴더에 내용이 들어 있으면 지우지 않고 멈춘다(이 코드는 아무것도 재귀적으로 지우지 않는다)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const outside = path.join(base, 'outside');
+    await mkdir(outside);
+    await writeFile(path.join(outside, 'important.txt'), 'x');
+    await mkdir(path.join(root, '.git', 'b-studio-empty', 'leftover'), { recursive: true });
+    await writeFile(path.join(root, '.git', 'b-studio-empty', 'leftover', 'note.txt'), 'x');
+    await symlink(outside, path.join(root, '.git', 'b-studio-empty', 'link'));
+
+    const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } };
+    const error = await computeGitMask(root, config).then(
+      () => undefined,
+      (caught: unknown) => caught as Error & { detail?: string },
+    );
+    expect(error?.message).toContain('가릴 빈 폴더를 준비하지 못했습니다');
+    expect(`${error?.message}\n${error?.detail ?? ''}`).toContain('폴더가 비어 있지 않습니다(leftover, link)');
+    // 안의 것도, 링크가 가리키는 곳도 그대로다
+    expect(await readFile(path.join(root, '.git', 'b-studio-empty', 'leftover', 'note.txt'), 'utf8')).toBe('x');
+    expect(await readdir(outside)).toEqual(['important.txt']);
   });
 });
 

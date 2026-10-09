@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { externalCallScript } from '../docker/external-call';
-import { parseEgressDenial, parseSyncOutput, SYNC_SCRIPT } from '../docker/format';
+import { parseEgressDenial, parseSyncOutput, SYNC_SCRIPT, SyncObservations } from '../docker/format';
 import { EDGE_SERVICE, edgePortFor } from '../edge-config';
 import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
@@ -231,6 +231,8 @@ class KubernetesSandbox implements Sandbox {
     const targets = await this.#syncTargets(files);
     if (targets.size === 0) return { elapsedMs: 0, checks: 0 };
     const started = Date.now();
+    const observations = new SyncObservations();
+    const expected = new Map([...targets.values()].flatMap((entries) => entries.map((entry) => [entry.file, entry.expected] as const)));
     for (let checks = 1; ; checks++) {
       const pending: string[] = [];
       for (const [service, entries] of targets) {
@@ -238,11 +240,15 @@ class KubernetesSandbox implements Sandbox {
         const script = `SYNC_ROOT=/\n${SYNC_SCRIPT}`;
         const result = await this.#kubectl.run(['-n', this.#namespace, 'exec', service, '-c', service, '--', 'sh', '-c', script, 'sh', ...entries.map((entry) => entry.containerPath)], { signal });
         const seen = result.exitCode === 0 ? parseSyncOutput(result.stdout) : new Map<string, string>();
-        for (const entry of entries) if (seen.get(entry.containerPath) !== entry.expected) pending.push(entry.file);
+        for (const entry of entries) {
+          if (seen.get(entry.containerPath) === entry.expected) continue;
+          pending.push(entry.file);
+          observations.record(entry.file, seen.get(entry.containerPath));
+        }
       }
       if (pending.length === 0) return { elapsedMs: Date.now() - started, checks };
       if (Date.now() - started >= timeoutMs) {
-        throw new SandboxError(`${Math.round(timeoutMs / 1_000)}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: ${pending.join(', ')}`);
+        throw new SandboxError(observations.describeTimeout(pending, expected, timeoutMs));
       }
       await sleep(250, undefined, { signal });
     }
