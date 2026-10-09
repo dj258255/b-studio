@@ -1135,10 +1135,10 @@ export interface RequirementEvidence {
   /** kind: 'docs' 요구사항의 문서 매칭 증거(있으면) */
   docEvidence?: DocEvidence;
   /**
-   * 요구사항에 시나리오가 있는데 아직 "검증됨"에 이르지 못한 시나리오 id(다그푸딩 마찰 140, `findUnverifiedScenarioIds`).
-   * 요구사항 id만 단 테스트로도 요구사항 전체는 검증됨이 될 수 있어(기존 규칙, R1이 그 예다) 이 필드가 없어도 상태 계산은
-   * 그대로지만, 사람·에이전트가 "통과하는데 왜 시나리오별로는 아직인지"를 추적 매트릭스를 따로 열지 않고도 보게 한다.
-   * 시나리오가 없거나 전부 검증됐으면 없다(빈 배열을 넣지 않는다).
+   * 요구사항에 시나리오가 있는데 아직 자동 근거(테스트·게이트)로 확인되지 않은 시나리오 id(`findUnverifiedScenarioIds`).
+   * 비어 있지 않으면 테스트·게이트 근거만으로는 "검증됨"이 되지 않고 "작업 중"에 머문다(ADR-155, ADR-147 결정 2를 대체).
+   * 문서 확인·사람 확인은 이 목록이 남아 있어도 검증됨을 만든다(그때 출처는 문서·사람 확인으로 표시한다).
+   * 시나리오가 없거나 전부 확인됐으면 없다(빈 배열을 넣지 않는다).
    */
   missingScenarios?: string[];
   /**
@@ -1398,6 +1398,9 @@ export function discardRevisionIfNeverSaved(requirement: Requirement, previously
  * 문서의 인수 조건을 모두 찾았거나 사람이 직접 확인했다) / 실패(게이트가 하나라도 실패, 또는 테스트 탭 실행에
  * 실패가 있다). 게이트 확인·테스트 탭 실행 증거가 있으면 그것이 늘 우선한다(기존 규칙 그대로) — 실패했다면
  * 문서 확인·사람 확인이 있어도 절대 뒤집지 않는다("사람 확인이 실패한 테스트를 이기지 않는다").
+ * 시나리오가 있는 요구사항은 자동 근거(게이트·테스트 탭 실행)만으로 검증됨이 되려면 시나리오가 전부 확인돼야 한다
+ * (evidence.missingScenarios가 비어 있어야 한다, ADR-155). 남은 시나리오가 있으면 통과한 자동 근거는 "작업 중"까지만
+ * 올리고, 실패는 그대로 우선한다. 시나리오 자신의 평가에는 missingScenarios가 없으므로 이 조건이 재귀로 걸리지 않는다.
  */
 export function computeRequirementStatus(evidence: RequirementEvidence, requirement?: Requirement): RequirementStatus {
   if (requirement && requirementContentDrifted(requirement)) return '재확인 필요';
@@ -1410,16 +1413,21 @@ export function computeRequirementStatus(evidence: RequirementEvidence, requirem
     const hasFreshEvidence = freshCheckpoint || evidence.gateChecks.length > 0 || freshTestRun || freshManualVerification || freshDocEvidence;
     if (!hasFreshEvidence) return '재확인 필요';
   }
+  // 시나리오가 있는 요구사항은 시나리오가 전부 자동 근거(테스트·게이트)로 확인돼야 그 근거만으로 검증됨이 된다(ADR-155).
+  // 하나라도 남았으면(missingScenarios) 자동 근거는 "작업 중"까지만 올리고, 실패는 그대로 우선한다
+  const scenariosPending = (evidence.missingScenarios?.length ?? 0) > 0;
   if (evidence.gateChecks.length > 0) {
-    return evidence.gateChecks.every((check) => check.ok) ? '검증됨' : '실패';
+    if (!evidence.gateChecks.every((check) => check.ok)) return '실패';
+    if (!scenariosPending) return '검증됨';
   }
   if (evidence.testRun) {
     if (evidence.testRun.failed > 0) return '실패';
-    if (evidence.testRun.passed > 0) return '검증됨';
+    if (evidence.testRun.passed > 0 && !scenariosPending) return '검증됨';
   }
   if (evidence.docEvidence?.satisfied) return '검증됨';
   if (requirement?.manualVerification) return '검증됨';
-  if (evidence.checkpoints.length > 0 || evidence.tests.length > 0 || (evidence.docEvidence?.matched.length ?? 0) > 0) return '작업 중';
+  const hasPassingRun = (evidence.testRun?.passed ?? 0) > 0;
+  if (evidence.checkpoints.length > 0 || evidence.tests.length > 0 || evidence.gateChecks.length > 0 || hasPassingRun || (evidence.docEvidence?.matched.length ?? 0) > 0) return '작업 중';
   return '미착수';
 }
 
@@ -1430,11 +1438,20 @@ export function computeRequirementStatus(evidence: RequirementEvidence, requirem
  */
 export function requirementVerificationSource(evidence: RequirementEvidence, requirement?: Requirement): 'test' | 'docs' | 'manual' | 'none' {
   if (computeRequirementStatus(evidence, requirement) !== '검증됨') return 'none';
-  if (evidence.gateChecks.length > 0) return 'test';
-  if (evidence.testRun && evidence.testRun.passed > 0 && evidence.testRun.failed === 0) return 'test';
+  // 자동 근거가 시나리오를 다 덮지 못했으면(missingScenarios) 검증됨은 문서·사람 확인이 만든 것이다(ADR-155) — 일부만
+  // 덮은 테스트를 출처로 내세우면 과대평가다. 둘 다 있으면 기존 우선순위(문서 확인 > 사람 확인)를 따른다
+  if (!automaticEvidenceIncomplete(evidence)) {
+    if (evidence.gateChecks.length > 0) return 'test';
+    if (evidence.testRun && evidence.testRun.passed > 0 && evidence.testRun.failed === 0) return 'test';
+  }
   if (evidence.docEvidence?.satisfied) return 'docs';
   if (requirement?.manualVerification) return 'manual';
   return 'test';
+}
+
+/** 시나리오 중 자동 근거(테스트·게이트)로 확인되지 않은 것이 남았는지 */
+function automaticEvidenceIncomplete(evidence: RequirementEvidence): boolean {
+  return (evidence.missingScenarios?.length ?? 0) > 0;
 }
 
 /** 추적 매트릭스가 "검증 출처" 배지로 쓰는 값. requirementVerificationSource의 'test'를 "테스트 탭 실행"과 "게이트"로
@@ -1443,8 +1460,10 @@ export function requirementVerificationSource(evidence: RequirementEvidence, req
 export type MatrixVerificationBadge = '테스트 탭' | '게이트' | '문서 확인' | '사람 확인' | 'none';
 export function matrixVerificationBadge(status: RequirementStatus, evidence: RequirementEvidence, requirement?: Requirement): MatrixVerificationBadge {
   if (status !== '검증됨') return 'none';
-  if (evidence.gateChecks.length > 0) return '게이트';
-  if (evidence.testRun && evidence.testRun.passed > 0 && evidence.testRun.failed === 0) return '테스트 탭';
+  if (!automaticEvidenceIncomplete(evidence)) {
+    if (evidence.gateChecks.length > 0) return '게이트';
+    if (evidence.testRun && evidence.testRun.passed > 0 && evidence.testRun.failed === 0) return '테스트 탭';
+  }
   if (evidence.docEvidence?.satisfied) return '문서 확인';
   if (requirement?.manualVerification) return '사람 확인';
   return '테스트 탭';
@@ -1967,8 +1986,10 @@ export function buildScenarioEvidence(params: {
  * id만 모은다(다그푸딩 마찰 140). 추적 매트릭스(`buildTraceabilityMatrix`)가 시나리오 행마다 계산하는 것과 같은
  * `buildScenarioEvidence`+`computeRequirementStatus`를 그대로 재사용한다 — 두 곳이 "시나리오가 검증됐다"를
  * 다른 기준으로 매기면 요구사항 카드와 매트릭스가 서로 다른 답을 보여주게 된다.
- * 요구사항 전체는 요구사항 id만 단 테스트로도 검증됨이 될 수 있다(기존 규칙) — 이 함수는 그 규칙을 바꾸지 않고,
- * "검증됨이어도 시나리오 n개는 아직 자기 id를 단 통과 테스트가 없다"는 사실만 옆에 보여준다.
+ * ADR-155: 이 목록은 이제 요구사항 상태에도 쓰인다 — 비어 있지 않으면 테스트·게이트 근거만으로는 검증됨이 아니다.
+ * 그래서 "자동 근거로 확인됐는가"만 본다: 사람 확인(요구사항 전체에 대한 것)과 문서 확인은 시나리오 상태를 전부
+ * 검증됨으로 만들어 버리므로 시나리오 평가에서 뺀다. 시나리오 평가의 증거에는 missingScenarios가 없어
+ * computeRequirementStatus의 새 조건이 재귀로 걸리지 않는다(시나리오에는 하위 시나리오가 없다).
  */
 export function findUnverifiedScenarioIds(
   requirement: Requirement,
@@ -1980,10 +2001,16 @@ export function findUnverifiedScenarioIds(
 ): string[] {
   const scenarios = requirement.scenarios ?? [];
   if (scenarios.length === 0) return [];
+  // "자동 근거(테스트·게이트)로 확인되지 않은 시나리오"를 모은다(ADR-155). 사람 확인·문서 확인은 시나리오마다 따로
+  // 하는 확인이 아니라 요구사항 전체에 대한 것이라 시나리오 상태를 전부 검증됨으로 만들어 버리므로, 여기서는 둘 다 뺀다 —
+  // 그래야 "테스트가 일부만 덮고 나머지는 사람이 확인했다"를 요구사항 상태·출처(verifiedBy)가 구분해 보여줄 수 있다.
+  // 시나리오 평가에는 missingScenarios가 없으니 computeRequirementStatus의 새 조건이 재귀로 걸리지 않는다
+  const { manualVerification: _manual, ...automaticRequirement } = requirement;
+  const { docEvidence: _doc, ...automaticParent } = parentEvidence;
   return scenarios
     .filter((scenario) => {
-      const scenarioEvidence = buildScenarioEvidence({ scenarioId: scenario.id, checkpoints, testFiles, gateChecks, testRunRows, parentEvidence });
-      return computeRequirementStatus(scenarioEvidence, requirement) !== '검증됨';
+      const scenarioEvidence = buildScenarioEvidence({ scenarioId: scenario.id, checkpoints, testFiles, gateChecks, testRunRows, parentEvidence: automaticParent });
+      return computeRequirementStatus(scenarioEvidence, automaticRequirement) !== '검증됨';
     })
     .map((scenario) => scenario.id);
 }
@@ -2040,6 +2067,17 @@ function finalizeMatrixRow(params: {
   };
 }
 
+/** studio 평가(evaluationByRequirementId) 없이 부를 때의 요구사항 증거 — 목록과 같은 규칙으로 missingScenarios도 채운다 */
+function fallbackEvidence(requirement: Requirement, input: BuildTraceabilityMatrixInput, testRunRows: readonly MatrixTestRunRow[]): RequirementEvidence {
+  const base: RequirementEvidence = {
+    checkpoints: findCheckpointMentions(input.checkpoints, requirement.id),
+    tests: scanTestFilesForRequirementId(input.testFiles, requirement.id),
+    gateChecks: findGateCheckMentions(input.gateChecks, requirement.id),
+  };
+  const missingScenarios = findUnverifiedScenarioIds(requirement, input.checkpoints, input.testFiles, input.gateChecks, testRunRows, base);
+  return missingScenarios.length > 0 ? { ...base, missingScenarios } : base;
+}
+
 /** 요구사항·시나리오마다 추적 행을 만들고, 주인 없는 테스트·테스트 없는 필수 요구사항을 모은다. 요구사항 행의
  * 증거·상태는 evaluationByRequirementId가 있으면 그대로 쓰고(목록과 똑같다), 없으면 체크포인트·테스트·게이트만으로
  * 계산한다(studio 컨텍스트 없이 부르는 이 모듈의 단위 테스트가 이 경로를 쓴다) */
@@ -2051,13 +2089,7 @@ export function buildTraceabilityMatrix(input: BuildTraceabilityMatrixInput): Tr
 
   for (const requirement of input.requirements) {
     const evaluation = input.evaluationByRequirementId?.[requirement.id];
-    const evidence: RequirementEvidence = evaluation
-      ? evaluation.evidence
-      : {
-          checkpoints: findCheckpointMentions(input.checkpoints, requirement.id),
-          tests: scanTestFilesForRequirementId(input.testFiles, requirement.id),
-          gateChecks: findGateCheckMentions(input.gateChecks, requirement.id),
-        };
+    const evidence: RequirementEvidence = evaluation ? evaluation.evidence : fallbackEvidence(requirement, input, testRunRows);
     const status = evaluation ? evaluation.status : computeRequirementStatus(evidence, requirement);
     rows.push(
       finalizeMatrixRow({

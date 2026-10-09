@@ -87,7 +87,7 @@ interface RequirementEvidence {
   gateChecks: Array<{ name: string; ok: boolean }>;
   testRun?: TestRunEvidence;
   docEvidence?: DocEvidence;
-  /** 시나리오가 있는데 아직 "검증됨"에 이르지 못한 시나리오 id(다그푸딩 마찰 140) */
+  /** 시나리오가 있는데 아직 자동 근거(테스트·게이트)로 확인되지 않은 시나리오 id. 남아 있으면 테스트 근거만으로는 검증됨이 아니다(ADR-155) */
   missingScenarios?: string[];
   /** 발견은 됐지만 지금 체크포인트의 게이트 실행에 결과가 하나도 없는 테스트(다그푸딩 마찰 152). 상태를 바꾸지 않고 근거로만 보여준다 */
   unexecutedTests?: UnexecutedTestInfo[];
@@ -231,6 +231,20 @@ interface PersistedExtractionDraft extends ExtractionPreview {
 const KIND_LABEL: Record<RequirementKind, string> = { api: "API", ui: "화면", data: "데이터", nonfunctional: "비기능", docs: "문서" };
 const PRIORITY_LABEL: Record<RequirementPriority, string> = { must: "필수", should: "권장", could: "선택" };
 const STATUS_TONE: Record<RequirementStatus, string> = { 미착수: "text-muted", "작업 중": "text-wait", 검증됨: "text-pass", "재확인 필요": "text-wait", 실패: "text-fail" };
+/**
+ * 시나리오가 일부만 확인돼 요구사항이 "작업 중"인 이유를 한 줄로 만든다("시나리오 3개 중 2개 확인 — 남은 것: R9.3").
+ * 남은 시나리오가 없거나 시나리오 정보가 없으면 undefined. 상태가 "검증됨"인데 남은 시나리오가 있으면(사람·문서 확인이
+ * 만든 검증됨) 그 사실을 알리는 다른 문장을 낸다 — 자동 근거가 시나리오를 다 덮은 것처럼 보이지 않게 한다(ADR-155).
+ */
+export function scenarioProgressLine(requirement: Pick<RequirementView, "status" | "scenarios" | "evidence">): string | undefined {
+  const missing = requirement.evidence.missingScenarios ?? [];
+  const total = requirement.scenarios?.length ?? 0;
+  if (missing.length === 0 || total === 0) return undefined;
+  if (requirement.status === "검증됨") return `시나리오 ${missing.join(", ")}은(는) 테스트로 확인되지 않았고, 사람·문서 확인으로 검증됐습니다.`;
+  const confirmed = Math.max(0, total - missing.length);
+  return `시나리오 ${total}개 중 ${confirmed}개 확인 — 남은 것: ${missing.join(", ")}`;
+}
+
 const DIFF_LABEL: Record<RequirementDiffEntry["status"], string> = { added: "추가", changed: "변경(개정 상승)", unchanged: "그대로", removed: "명세에서 사라짐(그대로 유지됨)" };
 
 async function readJson<T>(response: Response): Promise<T & { error?: string }> {
@@ -1110,7 +1124,7 @@ function RequirementCard({
   const draft = useChatDraft();
   const docEvidence = requirement.evidence.docEvidence;
   const manualVerification = requirement.manualVerification;
-  const missingScenarios = requirement.evidence.missingScenarios ?? [];
+  const scenarioProgress = scenarioProgressLine(requirement);
   const unexecutedTests = requirement.evidence.unexecutedTests ?? [];
   const evidenceCount =
     requirement.evidence.checkpoints.length +
@@ -1169,12 +1183,9 @@ function RequirementCard({
                 {VERIFIED_BY_LABEL[requirement.verifiedBy]}
               </span>
             )}
-            {missingScenarios.length > 0 && (
-              <span
-                className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-fail"
-                title={`시나리오 ${missingScenarios.join(", ")}을(를) 이름에 단 통과 테스트가 아직 없습니다 — 요구사항 id만 단 테스트로 이 상태가 됐을 수 있습니다`}
-              >
-                시나리오 {missingScenarios.length}개 미검증
+            {scenarioProgress && requirement.status !== "검증됨" && (
+              <span className="glass-soft rounded-control px-1.5 py-0.5 font-medium text-fail" title={`${scenarioProgress} — 테스트 이름에 그 시나리오 id를 넣고 통과시키면 검증됩니다`}>
+                {scenarioProgress}
               </span>
             )}
             {unexecutedTests.length > 0 && (
@@ -1290,8 +1301,11 @@ function RequirementCard({
                   {manualVerification.note}
                 </p>
               )}
-              {missingScenarios.length > 0 && (
-                <p className="text-fail">시나리오 {missingScenarios.join(", ")}을(를) 이름에 단 통과 테스트가 아직 없습니다 — 테스트 이름에 그 시나리오 id를 넣으면 검증됩니다.</p>
+              {scenarioProgress && (
+                <p className={requirement.status === "검증됨" ? "text-muted" : "text-fail"}>
+                  {scenarioProgress}
+                  {requirement.status === "검증됨" ? "" : " — 테스트 이름에 그 시나리오 id를 넣고 통과시키면 검증됩니다."}
+                </p>
               )}
               {unexecutedTests.length > 0 && (
                 <p className="text-fail">

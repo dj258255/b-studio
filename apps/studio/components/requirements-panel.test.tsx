@@ -19,6 +19,7 @@ import {
   RequirementsList,
   RequirementsPanel,
   restoreDraftAt,
+  scenarioProgressLine,
   shouldConfirmBeforePlanAll,
 } from "./requirements-panel";
 
@@ -367,6 +368,42 @@ describe("RequirementsList 다음 단계 순서(ADR-092)", () => {
     expect(shouldConfirmBeforePlanAll(true, true, false)).toBe(false);
     expect(shouldConfirmBeforePlanAll(true, false, true)).toBe(false);
     expect(shouldConfirmBeforePlanAll(false, false, false)).toBe(false);
+  });
+});
+
+describe("시나리오 진행 문구(ADR-155)", () => {
+  const scenarios = [1, 2, 3].map((n) => ({ id: `R9.${n}`, given: "g", when: "w", then: "t" }));
+  const evidence = { checkpoints: [], tests: [], gateChecks: [], missingScenarios: ["R9.3"] };
+
+  it("시나리오 일부만 확인돼 작업 중이면 몇 개 중 몇 개 확인했는지와 남은 것을 한 줄로 보여준다", () => {
+    expect(scenarioProgressLine({ status: "작업 중", scenarios, evidence })).toBe("시나리오 3개 중 2개 확인 — 남은 것: R9.3");
+  });
+
+  it("남은 시나리오가 없으면 문구가 없다", () => {
+    expect(scenarioProgressLine({ status: "검증됨", scenarios, evidence: { checkpoints: [], tests: [], gateChecks: [] } })).toBeUndefined();
+  });
+
+  it("검증됨인데 자동 근거가 못 덮은 시나리오가 있으면(사람·문서 확인) 그 사실을 알린다", () => {
+    expect(scenarioProgressLine({ status: "검증됨", scenarios, evidence })).toContain("사람·문서 확인으로 검증됐습니다");
+  });
+
+  it("요구사항 카드가 작업 중 이유를 배지와 근거 안에 보여준다", () => {
+    const partial = {
+      ...snapshot,
+      requirements: [
+        {
+          ...snapshot.requirements[0]!,
+          id: "R9",
+          scenarios,
+          status: "작업 중" as const,
+          confidence: "🟡" as const,
+          evidence: { ...evidence, testRun: { at: "2026-01-01T09:17:00.000Z", sha: "57cb22c1234", shortSha: "57cb22c", passed: 2, failed: 0 } },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<RequirementsList sessionId="s1" snapshot={partial} canManage isGithub onWork={() => {}} onRefresh={() => {}} />);
+    expect(html).toContain("시나리오 3개 중 2개 확인 — 남은 것: R9.3");
+    expect(html).not.toContain("미검증");
   });
 });
 
