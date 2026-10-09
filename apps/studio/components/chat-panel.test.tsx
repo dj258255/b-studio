@@ -49,6 +49,27 @@ describe("ChatPanel 게이트 체크", () => {
     expect(html).not.toContain("coverage-gap: web 테스트 · 통과");
     expect(html).toContain(detail.replace(/'/g, "&#x27;"));
   });
+
+  it("통과한 확인은 무엇을 쟀는지 펼쳐 볼 수 있고, 실패한 확인은 사유만 보여 준다(#601)", () => {
+    const evidence = ["HTTP 200 (기대 200)", "첫 화면에 온전히 보임 (창 1280x720): '바로 주문'", "스크립트 예외 0건 · console.error 0건 · 실패한 요청 0건 · 미디어 오류 0건"];
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "주문 버튼을 첫 화면에 보이게 해 주세요" },
+        { type: "agent", runId: "r1", event: { type: "workflow_check", check: { stage: "browser_check", name: "web /live/1 (browser 1280x720)", ok: true, attempts: 1, evidence } } },
+        { type: "agent", runId: "r1", event: { type: "workflow_check", check: { stage: "test", name: "unit", ok: true, attempts: 1 } } },
+        { type: "agent", runId: "r1", event: { type: "workflow_check", check: { stage: "browser_check", name: "web /cart", ok: false, attempts: 1, detail: "HTTP 500 (기대 200)", evidence: ["남으면 안 되는 줄"] } } },
+      ]),
+    );
+
+    expect(html).toContain("web /live/1 (browser 1280x720) · 통과");
+    expect(html).toContain("확인한 것 3가지");
+    expect(html).toContain("첫 화면에 온전히 보임 (창 1280x720): &#x27;바로 주문&#x27;");
+    // 근거가 없는 통과에는 빈 목록을 만들지 않는다
+    expect(html.match(/확인한 것/g)).toHaveLength(1);
+    // 실패한 확인에는 근거를 그리지 않는다(사유가 그 자리를 맡는다)
+    expect(html).toContain("HTTP 500 (기대 200)");
+    expect(html).not.toContain("남으면 안 되는 줄");
+  });
 });
 
 describe("ChatPanel 대화 압축 안내", () => {
