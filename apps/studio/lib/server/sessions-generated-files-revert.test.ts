@@ -207,10 +207,15 @@ describe('생성 파일(studio.yaml 등, ADR-067)도 체크포인트 시점으�
     expect(reverted.backup).toMatchObject({ files: ['api/src/Order.java', 'studio.yaml'] });
 
     // 되살리면 생성 파일도 같이 돌아온다
+    const loaded = (globalThis as { __bStudio?: { sessions: Map<string, { project: object }> } }).__bStudio!.sessions.get(id)!;
+    const projectBeforeRestore = loaded.project;
     restoreDiscardedBackup(id, reverted.backup!.id);
     const restored = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'backup_restored' }> => event.type === 'backup_restored'));
     expect(restored.files.sort()).toEqual(['api/src/Order.java', 'studio.yaml']);
     expect(await readFile(path.join(workDir, 'studio.yaml'), 'utf8')).toBe(studioYaml(2));
+    // 세션이 들고 있는 프로젝트 설정도 되살린 studio.yaml로 다시 읽힌다(새 객체로 바뀐다) — 안 읽으면 이어지는 실행의
+    // 게이트가 되살리기 전 선언으로 돈다
+    expect(loaded.project).not.toBe(projectBeforeRestore);
 
     unsubscribe();
     await stopSession(id).catch(() => {});

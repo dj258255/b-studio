@@ -259,6 +259,36 @@ describe('에이전트 실행이 사람 확인 기록을 써넣는 위조', () =
     await stopSession(id).catch(() => {});
   }, 30_000);
 
+  it('위조한 뒤 질문으로 끝내도 체크포인트가 남지 않는다(질문은 실패한 검사를 비켜 가는 길이 아니다)', async () => {
+    const { id, workDir, events, unsubscribe } = await startedSession();
+    const doc = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');
+    const startCheckpoints = getSnapshot(id)!.checkpoints.length;
+
+    // 코드를 고치고 사람 확인을 써넣은 다음, 끝냈다고 하지 않고 질문을 남기고 멈춘다. 질문 직전에 게이트가 한 번 돌고
+    // manual-verification 검사가 실패하지만, 재시작·계약 검증(report.ok)은 통과한 상태다
+    const finished = await sendAndWaitFinished(
+      id,
+      '로그인 구현',
+      [
+        orderTurn(),
+        { toolCalls: [{ name: 'write_file', input: { path: 'docs/requirements.md', content: withForgedLine(doc) } }] },
+        { toolCalls: [{ name: 'ask_user', input: { question: '이대로 진행할까요?', options: ['예', '아니오'], allowOther: false } }] },
+      ],
+      events,
+    );
+
+    expect(finished.status).toBe('awaiting_input');
+    // 게이트 검사가 실패했으므로 체크포인트는 늘지 않는다
+    expect(getSnapshot(id)!.checkpoints.length).toBe(startCheckpoints);
+    const requirement = await requirementOf(id, 'R1');
+    expect(requirement.verifiedBy).not.toBe('manual');
+    // 변경은 버리지 않고 작업 복사본에 그대로 둔다(답으로 이어지는 다음 요청이 다시 검증을 받는다)
+    expect(await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8')).toBe(withForgedLine(doc));
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
   it('내장 JSON 블록의 manualVerification만 바꿔도 같은 방식으로 막힌다', async () => {
     const { id, workDir, events, unsubscribe } = await startedSession();
     const doc = await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8');

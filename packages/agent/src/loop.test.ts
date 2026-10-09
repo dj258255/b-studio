@@ -385,6 +385,8 @@ describe('runAgent', () => {
     });
 
     expect(result).toMatchObject({ status: 'awaiting_input', summary: '계속할까요?', changedFiles: ['api/src/New.java'] });
+    // 질문 직전에 돈 게이트의 결과를 결과에 싣는다. 호출자는 이것이 pass일 때만 그 변경을 체크포인트로 남긴다
+    expect(result.gateOutcome).toBe('pass');
     expect(result.report?.ok).toBe(true);
     expect(events.some((event) => event.type === 'verify_start')).toBe(true);
 

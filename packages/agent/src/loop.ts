@@ -132,6 +132,12 @@ export interface RunMetrics {
 export interface AgentResult {
   /** awaiting_input: 에이전트가 질문을 남기고 멈춰, 사용자 답을 다음 요청으로 기다린다 */
   status: 'done' | 'failed' | 'awaiting_input';
+  /**
+   * 가장 최근 게이트 검증의 결과(게이트가 한 번도 돌지 않았으면 없다). 질문을 남기고 멈춘 실행(awaiting_input)은 직전에
+   * 게이트를 한 번 돌리지만 그 결과와 무관하게 멈춘다. 호출자는 이 값이 'pass'일 때만 그 변경을 체크포인트로 남겨야 한다 —
+   * report.ok(재시작·계약 검증)는 선언한 체크(테스트·화면 확인·리뷰)의 실패를 담지 않는다
+   */
+  gateOutcome?: 'pass' | 'retry' | 'exhausted';
   summary: string;
   changedFiles: string[];
   /** awaiting_input이면 사용자의 답을 기다리는 질문 */
@@ -432,6 +438,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       ...(question ? { question } : {}),
       report: gate?.report,
       checks: gate?.checks,
+      ...(gate?.lastOutcome ? { gateOutcome: gate.lastOutcome } : {}),
       passedStages: gate ? [...gate.passedStages] : undefined,
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
       ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),

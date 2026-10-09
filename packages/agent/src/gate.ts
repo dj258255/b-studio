@@ -163,6 +163,11 @@ export class VerificationGate {
   skippedStages: WorkflowStage[] = [];
   /** 바뀐 파일을 실제로 검증해 통과했는지. 바뀐 파일이 없어 검증 없이 끝났다면 false라서 체크포인트 단계로 넘어가지 않는다 */
   verified = false;
+  /**
+   * 가장 최근 check()의 결과. 한 번도 돌지 않았으면 없다. verified는 한 번 통과하면 켜진 채로 남으므로, 그 뒤의 검증이
+   * 실패했는지는 이 값으로 본다(질문으로 끝난 실행이 체크포인트를 남겨도 되는지 판정하는 데 쓴다)
+   */
+  lastOutcome: GateOutcome['kind'] | undefined;
   readonly #options: GateOptions;
   readonly #baselines: ReadonlyMap<string, OpenApiDocument>;
   /** 게이트 재시도 상한. 기본은 생성 시 받은 값이고, 승격이 새 예산을 주면 커진다 */
@@ -234,7 +239,17 @@ export class VerificationGate {
     return this.attempts < this.#maxAttempts;
   }
 
+  /**
+   * 모델이 턴을 끝낼 때마다 부른다. 마지막 결과를 lastOutcome에 남긴다 — 호출자가 결과를 받아 쓰지 않는 자리(질문을 남기고
+   * 멈추기 전에 한 번 돌리는 검증)에서도 "마지막 검증이 통과했는가"를 나중에 물을 수 있어야 한다
+   */
   async check(): Promise<GateOutcome> {
+    const outcome = await this.#check();
+    this.lastOutcome = outcome.kind;
+    return outcome;
+  }
+
+  async #check(): Promise<GateOutcome> {
     const { project, sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
     const recordChecks = await this.#requirementRecordChecks();
     if (workspace.changedFiles().length === 0) {
@@ -619,6 +634,11 @@ export class VerificationGate {
         const marker = nextErrorMarker(result.text, page.expectStatus);
         if (marker) problems.push(`Next.js 오류 화면: '${marker}'`);
       }
+      // 추정한 id로 연 화면이 실패했으면, 그 id의 데이터가 없어서일 수 있다는 것과 실제 id를 알려 주는 방법을 붙인다.
+      // (상태 코드 문제는 이미 같은 안내를 담고 있다.) 안내가 없으면 "실패한 요청: 404 …/1/…"만 보고 화면 코드를 의심하게 된다
+      if (problems.length > 0 && options.probedId !== undefined && !problems.some((problem) => problem.includes('추정한 id('))) {
+        problems.push(dynamicProbeDataHint(options.probedId));
+      }
       if (problems.length > 0) throw fail(problems.join('\n'));
       if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
       return;
@@ -927,6 +947,11 @@ function missingAnyText(values: readonly string[]): string {
 }
 
 /** 추정한 id로 연 동적 경로가 404·500을 돌려줬을 때의 문구(ADR-078). id가 실제로 없을 수도 있다는 것과 고치는 방법을 함께 적는다 */
+/** 추정한 id로 연 화면이 상태 코드가 아닌 이유(실패한 요청, 멈춘 로딩 등)로 실패했을 때 붙이는 안내 */
+function dynamicProbeDataHint(probedId: string): string {
+  return `이 화면은 추정한 id(${probedId})로 열었습니다 — 그 id의 데이터가 없어서 생긴 실패일 수 있습니다. 실제로 있는 값을 studio.yaml의 autoPageChecks.sampleParams(예: { id: "..." })나 sampleIdFrom으로 알려주면 그 값으로 엽니다`;
+}
+
 function dynamicProbeStatusProblem(probedId: string, status: number | null): string {
   return `동적 경로를 추정한 id(${probedId})로 열었더니 HTTP ${status}을 돌려줬습니다 — id가 실제로 없을 수 있습니다. autoPageChecks.sampleParams나 sampleIdFrom으로 실제 값을 알려주면 더 정확히 확인합니다`;
 }
