@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
@@ -87,6 +87,16 @@ export function readRegularFileSync(absolute: string, maxBytes: number = MAX_REA
   }
 }
 const MAX_LIST_ENTRIES = 500;
+/** 검색 한 번이 훑는 파일 수의 상한. 넘으면 거기까지 찾은 것만 돌려주고 잘렸다고 알린다 */
+const MAX_SEARCH_FILES = 5_000;
+const MAX_SEARCH_LINE_CHARS = 200;
+
+export interface SearchResult {
+  matches: Array<{ file: string; line: number; text: string }>;
+  /** 결과 상한이나 파일 수 상한에 걸려 더 있을 수 있다 */
+  truncated: boolean;
+  filesScanned: number;
+}
 
 /** 실행 시작 때 고정해 두는 요구사항 문서(requirements.ts의 REQUIREMENTS_FILE과 같은 경로 — 순환 import를 피하려 따로 적는다) */
 export const REQUIREMENTS_SNAPSHOT_FILE = 'docs/requirements.md';
@@ -229,6 +239,53 @@ export class Workspace {
     const { absolute, content } = await this.#load(file);
     this.#seen.set(this.#relative(absolute), digest(content));
     return content;
+  }
+
+  /**
+   * 글 파일에서 낱말(글자 그대로, 정규식 아님)이 든 줄을 찾는다. 에이전트가 컨테이너 안의 grep 대신 쓴다.
+   * 목록(list)과 같은 규칙으로 숨기는 폴더·비밀 파일을 건너뛰고 링크를 따라가지 않는다. 큰 파일과 이진 파일은 건너뛴다.
+   * 정규식을 받지 않는 이유: 이 코드는 studio 서버의 스레드에서 돈다. 모델이 준 정규식이 되돌아가기를 폭발시키면 서버 전체가 멈춘다
+   */
+  async search(terms: readonly string[], target = '.', { limit = 50, ignoreCase = false }: { limit?: number; ignoreCase?: boolean } = {}): Promise<SearchResult> {
+    const needles = terms.filter((term) => term.length > 0).map((term) => (ignoreCase ? term.toLowerCase() : term));
+    if (needles.length === 0) throw new WorkspaceError('검색할 낱말이 없습니다');
+    const start = await this.#resolve(target, { mustExist: true });
+    const result: SearchResult = { matches: [], truncated: false, filesScanned: 0 };
+
+    const scan = async (absolute: string): Promise<void> => {
+      result.filesScanned += 1;
+      const buffer = await readFile(absolute).catch(() => undefined);
+      if (!buffer || buffer.byteLength > MAX_READ_BYTES || buffer.subarray(0, 1024).includes(0)) return;
+      const lines = buffer.toString('utf8').split(/\r?\n/);
+      for (const [index, line] of lines.entries()) {
+        const hay = ignoreCase ? line.toLowerCase() : line;
+        if (!needles.some((needle) => hay.includes(needle))) continue;
+        if (result.matches.length >= limit) {
+          result.truncated = true;
+          return;
+        }
+        result.matches.push({ file: this.#relative(absolute), line: index + 1, text: line.length > MAX_SEARCH_LINE_CHARS ? `${line.slice(0, MAX_SEARCH_LINE_CHARS)}…` : line });
+      }
+    };
+    const walk = async (absolute: string): Promise<void> => {
+      const children = await readdir(absolute, { withFileTypes: true }).catch(() => []);
+      children.sort((a, b) => a.name.localeCompare(b.name));
+      for (const child of children) {
+        if (result.truncated) return;
+        if (result.filesScanned >= MAX_SEARCH_FILES) {
+          result.truncated = true;
+          return;
+        }
+        if (isDenied(child.name)) continue;
+        const childPath = path.join(absolute, child.name);
+        if (child.isDirectory()) await walk(childPath);
+        else if (child.isFile()) await scan(childPath);
+      }
+    };
+
+    if ((await stat(start)).isDirectory()) await walk(start);
+    else await scan(start);
+    return result;
   }
 
   /**

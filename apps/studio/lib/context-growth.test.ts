@@ -42,7 +42,7 @@ describe('analyzeContextGrowth', () => {
     expect(turn2.sources[0]).toMatchObject({ kind: 'tool_result', name: 'read_file', chars: 9000 });
     expect(turn2.sources[1]!.kind).toBe('model_output');
     expect(turn2.sources[0]!.share).toBeGreaterThan(turn2.sources[1]!.share);
-    expect(turn2.sources[0]!.hint).toContain('grep');
+    expect(turn2.sources[0]!.hint).toContain('read_lines');
   });
 
   it('임계치를 넘는 증가만 급증 목록에 들어가고, 남은 턴 수만큼 다시 읽힐 비용을 추정한다', () => {

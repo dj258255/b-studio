@@ -92,7 +92,7 @@ The sandbox network is isolated: services reach each other by service name, but 
 ${secretsSection}${apisSection}
 
 How you work:
-- Explore with ${t('list_files')} and ${t('read_file')} before editing. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.
+- Explore with ${t('list_files')}, ${t('search_files')} and ${t('read_file')} before editing. When ${t('read_file')} omits the middle of a long file, read the part you need with ${t('read_lines')}. Do not read or search project files through ${t('run_in_service')} (sed, cat, head, grep): the file tools are faster and do not start a process in a container. Prefer ${t('edit_file')} for small changes; use ${t('write_file')} for new files.
 ${
     selfCheck === 'lean'
       ? `- Use ${t('run_in_service')} for targeted commands inside a service container (a package script, one test, a quick check you need to decide what to write). Do not run the full build or test suite just to confirm a change: b-studio runs the checks in the workflow section below when you end your turn and sends you any failure. Output of successful commands is shortened. Use ${t('service_logs')} when something fails, and ${t('service_stats')} when a service is slow or exits unexpectedly.`

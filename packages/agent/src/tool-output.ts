@@ -45,11 +45,11 @@ export function clipCommandOutput(text: string, budget: number = COMMAND_OUTPUT_
 }
 
 /** 파일 등 일반 글은 앞쪽 위주로 남긴다(앞 80%·뒤 20%). 처음부터 읽는 경우가 많다 */
-export function clipText(text: string, budget: number): string {
+export function clipText(text: string, budget: number, hint?: string): string {
   if (text.length <= budget) return text;
   const head = Math.floor(budget * 0.8);
   const tail = budget - head;
-  return `${text.slice(0, head)}\n${clipNote(text.length, text.length - budget)}\n${text.slice(-tail)}`;
+  return `${text.slice(0, head)}\n${clipNote(text.length, text.length - budget, hint)}\n${text.slice(-tail)}`;
 }
 
 /**
@@ -117,11 +117,11 @@ export function dedupeResult(cache: ToolResultCache, name: string, input: unknow
   return content;
 }
 
-/** 쓰기 도구가 성공하면 read_file·list_files 캐시를 비운다. 같은 경로를 다시 읽으면 내용이 달라졌을 수 있다 */
+/** 쓰기 도구가 성공하면 읽기 도구(read_file·read_lines·search_files·list_files) 캐시를 비운다. 같은 경로를 다시 읽으면 내용이 달라졌을 수 있다 */
 export function invalidateReadCache(cache: ToolResultCache): void {
   for (const key of cache.entries.keys()) {
     const name = key.slice(0, key.indexOf('\u0000'));
-    if (name === 'read_file' || name === 'list_files') cache.entries.delete(key);
+    if (name === 'read_file' || name === 'read_lines' || name === 'search_files' || name === 'list_files') cache.entries.delete(key);
   }
 }
 

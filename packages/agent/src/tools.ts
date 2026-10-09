@@ -166,6 +166,8 @@ export const SANDBOX_TOOLS: ReadonlySet<string> = new Set([
 export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   'list_files',
   'read_file',
+  'read_lines',
+  'search_files',
   'write_file',
   'edit_file',
   'delete_file',
@@ -176,6 +178,8 @@ export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   'ask_user',
   'propose_mode',
 ]);
+/** read_lines 한 번에 읽는 줄 수의 상한 */
+const MAX_READ_LINES = 400;
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const READ_ONLY_TOOL = 'Question mode is read-only, so this tool is disabled. Describe the change as a plan instead; the user can approve it with "이대로 만들기".';
 const READ_ONLY_METHOD = 'Question mode allows only GET and HEAD requests. Describe the change as a plan instead.';
@@ -216,9 +220,24 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
       path: { type: 'string', description: 'Directory relative to the project root. Use "." for the root.' },
       depth: { type: 'integer', description: 'How many directory levels to descend (1-6).' },
     }),
-    tool('read_file', 'Read a UTF-8 text file from the project.', {
+    tool('read_file', 'Read a UTF-8 text file from the project. Files over 12,000 characters come back with the middle omitted; read the omitted part with read_lines.', {
       path: { type: 'string', description: 'File path relative to the project root.' },
     }),
+    tool('read_lines', 'Read a range of lines from a UTF-8 text file. Use it when read_file omitted the middle of a long file, or when you only need the lines around a search hit. Do not use sed, head or cat in a service container for this.', {
+      path: { type: 'string', description: 'File path relative to the project root.' },
+      start_line: { type: 'integer', description: 'First line to read (1-based).' },
+      end_line: { type: 'integer', description: `Last line to read (inclusive). At most ${MAX_READ_LINES} lines per call.` },
+    }),
+    tool(
+      'search_files',
+      'Find lines in project text files that contain any of the given literal strings (not regular expressions). Returns "path:line: text" for each hit. Generated directories and secrets are skipped. Use this instead of grep in a service container.',
+      {
+        terms: { type: 'array', items: { type: 'string' }, description: 'One or more literal strings; a line matches when it contains any of them. Example: ["payments/confirm", "class PaymentConfirm"].' },
+        path: { type: 'string', description: 'Directory or file to search, relative to the project root. Use "." for the whole project.' },
+        ignore_case: { type: 'boolean', description: 'Match regardless of letter case.' },
+        max_results: { type: 'integer', description: 'How many hits to return (1-200).' },
+      },
+    ),
     tool('write_file', 'Create or overwrite a file. Parent directories are created.', {
       path: { type: 'string', description: 'File path relative to the project root.' },
       content: { type: 'string', description: 'Full file content.' },
@@ -425,9 +444,29 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       return success(entries.length > 0 ? entries.join('\n') : '(empty)');
     }
     case 'read_file': {
-      // 파일은 앞에서부터 읽는 경우가 많아 앞쪽 위주로 자른다
+      // 파일은 앞에서부터 읽는 경우가 많아 앞쪽 위주로 자른다. 잘렸으면 가운데를 읽는 방법을 함께 알린다 —
+      // 알리지 않으면 컨테이너 안의 sed로 조금씩 읽는다(58턴 실행에서 도구 호출 86번 중 50번이 그랬다, 트러블슈팅 124)
       const raw = sandbox.redact(await workspace.read(string(args, 'path')));
-      return { ok: true, content: clipText(raw, READ_FILE_BUDGET), rawChars: raw.length };
+      const hint = raw.length > READ_FILE_BUDGET ? `파일은 ${raw.split('\n').length}줄입니다. 생략된 부분은 read_lines로 줄 범위를 읽으세요` : undefined;
+      return { ok: true, content: clipText(raw, READ_FILE_BUDGET, hint), rawChars: raw.length };
+    }
+    case 'read_lines': {
+      const file = string(args, 'path');
+      const lines = sandbox.redact(await workspace.read(file)).split('\n');
+      const start = clamp(integer(args, 'start_line'), 1, Math.max(1, lines.length));
+      const end = clamp(integer(args, 'end_line'), start, Math.min(lines.length, start + MAX_READ_LINES - 1));
+      const body = lines.slice(start - 1, end).join('\n');
+      const header = `[${file} ${start}-${end}줄 / 전체 ${lines.length}줄]`;
+      return { ok: true, content: `${header}\n${clipText(body, READ_FILE_BUDGET, '줄 범위를 좁혀 다시 읽으세요')}`, rawChars: header.length + 1 + body.length };
+    }
+    case 'search_files': {
+      const terms = stringArray(args, 'terms');
+      const limit = clamp(integer(args, 'max_results'), 1, 200);
+      const found = await workspace.search(terms, string(args, 'path'), { limit, ignoreCase: args.ignore_case === true });
+      if (found.matches.length === 0) return success(`(no matches in ${found.filesScanned} files)`);
+      const lines = found.matches.map((match) => `${match.file}:${match.line}: ${match.text}`);
+      if (found.truncated) lines.push(`[... 결과가 더 있습니다. path를 좁히거나 낱말을 더 구체적으로 적으세요 ...]`);
+      return success(sandbox.redact(lines.join('\n')));
     }
     case 'write_file': {
       const file = string(args, 'path');
