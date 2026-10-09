@@ -286,6 +286,25 @@ describe('generateCommitSubject', () => {
     expect(subject).toBe('fix: 리뷰 지적 2건 반영 — 시드 id 시퀀스 검증, 마이그레이션 테스트');
     expect(subject).not.toContain('이 PR을 리뷰해');
   });
+
+  it('요청 글이 에이전트의 질문에 대한 답이면 첫 문장을 제목으로 쓰지 않고 요약·요구사항 id·바뀐 파일로 넘어간다(도그푸딩 마찰 178: "test: 세 번째로 갑니다")', () => {
+    const answer = '세 번째로 갑니다. sampleParams 키는 지원됩니다. R11.2 테스트만 더해 주세요.';
+    const changes = [change('apps/web/lib/liveOrder.test.ts', 'modified')];
+    // 답이라는 것을 모르면 지금처럼 첫 문장이 제목이 된다
+    expect(generateCommitSubject(answer, changes)).toBe('test: 세 번째로 갑니다');
+    // 요약이 바뀐 내용을 말하면 그것을 쓴다
+    expect(generateCommitSubject(answer, changes, '바로 주문 시나리오(R11.2) 테스트를 더했습니다.\n\n자세한 내용…', { requestIsAnswer: true })).toBe(
+      'test: 바로 주문 시나리오(R11.2) 테스트를 더했습니다',
+    );
+    // 요약이 없으면 요구사항 id·바뀐 파일로 만든다. 답의 첫 문장은 어디에도 나오지 않는다
+    const fallback = generateCommitSubject(answer, changes, undefined, { requestIsAnswer: true });
+    expect(fallback).not.toContain('세 번째로');
+    expect(fallback).toMatch(/^test: /);
+    // 답이 아닌 요청은 그대로다
+    expect(generateCommitSubject('주문에 메모 필드 추가', [change('api/src/main/java/Order.java')], undefined, { requestIsAnswer: false })).toBe(
+      generateCommitSubject('주문에 메모 필드 추가', [change('api/src/main/java/Order.java')]),
+    );
+  });
 });
 
 describe('toCommitMood', () => {

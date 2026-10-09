@@ -606,3 +606,35 @@ describe('게이트 밖 경로로 위조 기록이 살아남지 못한다', () =
     await stopSession(id).catch(() => {});
   }, 30_000);
 });
+
+describe('질문에 대한 답으로 이어진 실행의 체크포인트 제목(도그푸딩 마찰 178)', () => {
+  it('답의 첫 문장("세 번째로 갑니다")이 아니라 실제로 바뀐 내용으로 제목을 만든다', async () => {
+    const { id, events, unsubscribe } = await startedSession();
+
+    // 첫 실행은 아무것도 고치지 않고 질문만 남긴다
+    const asked = await sendAndWaitFinished(
+      id,
+      '주문에 메모를 넣어 주세요',
+      [{ toolCalls: [{ name: 'ask_user', input: { question: '어느 방식으로 할까요?', options: ['첫 번째', '두 번째', '세 번째'], allowOther: false } }] }],
+      events,
+    );
+    expect(asked.status).toBe('awaiting_input');
+    expect(getSnapshot(id)!.pendingQuestion).toBeDefined();
+    const before = getSnapshot(id)!.checkpoints.length;
+
+    // 답은 선택지를 고르는 말로 시작한다. 문장 꼴만 보면 "무엇을 한다"는 서술문이라 전에는 그대로 제목이 됐다
+    const finished = await sendAndWaitFinished(id, '세 번째로 갑니다. 메모 필드만 더해 주세요.', [orderTurn(), { text: '주문에 메모 필드를 더했습니다' }], events);
+    expect(finished.status).toBe('done');
+    expect(getSnapshot(id)!.checkpoints.length).toBe(before + 1);
+    const message = getSnapshot(id)!.checkpoints[0]!.message;
+    expect(message).not.toContain('세 번째로');
+    expect(message).toMatch(/주문에 메모 필드를 더했습니다$/);
+
+    // 질문이 걸려 있지 않을 때 온 요청은 전처럼 요청 글의 첫 문장이 제목이 된다
+    await sendAndWaitFinished(id, '주문 메모에 길이 제한을 둔다', [orderTurn('class Order { String memo; int max = 200; }\n'), { text: '끝났습니다' }], events);
+    expect(getSnapshot(id)!.checkpoints[0]!.message).toMatch(/주문 메모에 길이 제한을 둔다$/);
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+});

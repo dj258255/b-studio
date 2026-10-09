@@ -363,6 +363,8 @@ interface ActiveRun {
   charged?: AgentUsage;
   /** 요청을 멈춘 이유. 사용자가 취소했거나 토큰 한도에 도달했다 */
   stopReason?: 'user' | 'budget';
+  /** 에이전트의 질문이 걸려 있을 때 온 요청이다(그 질문에 대한 답). 답의 첫 문장은 체크포인트 제목으로 쓰지 않는다 */
+  answersQuestion?: boolean;
   /** 한도로 멈췄을 때 어느 한도인지 */
   limitKind?: 'session' | 'user';
   /**
@@ -1075,6 +1077,7 @@ export function sendMessage(
     by,
     // 데모(스크립트)는 실행 중 지시를 반영할 모델 호출이 없어 큐를 만들지 않는다
     ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
+    ...(session.snapshot.pendingQuestion ? { answersQuestion: true } : {}),
   };
   session.run = run;
   session.runsStarted = (session.runsStarted ?? 0) + 1;
@@ -2295,7 +2298,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && questionRunPassedGate(result)))) {
         // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
-        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary);
+        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true);
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
@@ -2748,7 +2751,7 @@ function checkpointTrailers(result: AgentResult): string[] {
   return trailers;
 }
 
-async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = [], summary?: string): Promise<void> {
+async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = [], summary?: string, requestIsAnswer = false): Promise<void> {
   const head = session.snapshot.checkpoints[0]!.sha;
   // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
   const dataOnly =
@@ -2761,7 +2764,7 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
   // 마지막 체크포인트 스냅샷과 따로 비교해 둔다(도그푸딩 마찰 127) — commit()이 체크포인트를 새로 만들면 그 안에서
   // 스냅샷을 알아서 다시 찍으므로, 여기서는 "바뀌었는지"만 먼저 본다
   const excludedChanged = await session.checkpoints.pendingExcludedFiles();
-  const subject = session.project.spec.checkpoints.conventionalCommits ? generateCommitSubject(request, changes, summary) : `요청: ${request}`;
+  const subject = session.project.spec.checkpoints.conventionalCommits ? generateCommitSubject(request, changes, summary, { requestIsAnswer }) : `요청: ${request}`;
   const checkpoint = await session.checkpoints.commit(subject, body, {
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
