@@ -3994,8 +3994,9 @@ export function deploySession(id: string, { by, sha }: { by?: string; sha?: stri
   if (session.snapshot.deploying) throw new StudioError(409, '이 세션에서 이미 배포하는 중입니다');
   const checkpoint = sha ? session.snapshot.checkpoints.find((candidate) => candidate.sha === sha) : session.snapshot.checkpoints[0];
   if (!checkpoint) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
-  // 통과 기록은 이 체크포인트의 코드가 검증을 받은 체크포인트에서 읽는다. 요구사항 기록만 바꾼 문서 체크포인트(요구사항 저장,
-  // 사람 확인 저장 등)는 게이트를 거치지 않아 통과 기록이 없지만 코드는 그 앞 체크포인트와 같다(releaseBasisCheckpoint)
+  // 배포하는 것은 게이트를 통과한 체크포인트의 파일이다. 요구사항 기록만 바꾼 문서 체크포인트(요구사항 저장, 사람 확인 저장 등)는
+  // 게이트를 거치지 않아 통과 기록이 없으므로, 그 앞의 가장 최근 체크포인트로 내려가 그 통과 기록을 보고 그 파일을 꺼낸다
+  // (releaseBasisCheckpoint). 문서 체크포인트의 파일을 꺼내면 게이트를 거치지 않은 문서 내용이 배포에 실린다
   const basis = releaseBasisCheckpoint(session.snapshot.checkpoints, checkpoint);
   // 규칙은 체크포인트 안의 studio.yaml이 아니라 실행 중인 세션의 것을 쓴다. 같은 변경에서 규칙을 느슨하게 고쳐 배포하지 못하게 한다
   const blockers = releaseBlockers(session.project, basis.passedStages);
@@ -4009,24 +4010,17 @@ export function deploySession(id: string, { by, sha }: { by?: string; sha?: stri
     );
   }
 
-  runDeployJob(session, { action: 'deploy', target: checkpoint.shortSha, by }, async (onLog) => {
+  runDeployJob(session, { action: 'deploy', target: basis.shortSha, by }, async (onLog) => {
     // 같은 체크포인트를 동시에 배포해도 폴더가 겹치지 않게 한다
-    const sourceRoot = path.join(defaultDeployRoot(), session.project.spec.name, 'sources', `${checkpoint.shortSha}-${randomBytes(3).toString('hex')}`);
+    const sourceRoot = path.join(defaultDeployRoot(), session.project.spec.name, 'sources', `${basis.shortSha}-${randomBytes(3).toString('hex')}`);
     try {
       if (basis.sha !== checkpoint.sha) {
-        // 통과 기록을 다른 체크포인트에서 읽었으면, 두 체크포인트의 차이가 요구사항 기록뿐인지 git으로 다시 확인한다(스냅샷의 기록만 믿지 않는다)
-        const between = await session.checkpoints.changedBetween(basis.sha, checkpoint.sha);
-        const others = between.files.filter((file) => !EVIDENCE_NEUTRAL_FILES.has(file));
-        if (between.outsideFiles > 0 || others.length > 0) {
-          const what = [...others.slice(0, 3), ...(between.outsideFiles > 0 ? [`프로젝트 폴더 밖 ${between.outsideFiles}개`] : [])].join(', ');
-          throw new Error(`체크포인트 ${basis.shortSha}와 ${checkpoint.shortSha} 사이에 요구사항 기록이 아닌 변경이 있어 배포하지 않습니다: ${what}`);
-        }
-        onLog({ stage: 'prepare', text: `통과 기록은 코드가 같은 체크포인트 ${basis.shortSha}의 것을 봤습니다(그 뒤로는 요구사항 기록만 바뀌었습니다)` });
+        onLog({ stage: 'prepare', text: `체크포인트 ${checkpoint.shortSha}는 요구사항 기록만 바꾼 문서 체크포인트라, 게이트를 통과한 체크포인트 ${basis.shortSha}의 파일을 배포합니다` });
       }
-      onLog({ stage: 'prepare', text: `체크포인트 ${checkpoint.shortSha}의 파일을 꺼냅니다` });
-      const project = await loadProject(await session.checkpoints.exportTree(checkpoint.sha, sourceRoot));
+      onLog({ stage: 'prepare', text: `체크포인트 ${basis.shortSha}의 파일을 꺼냅니다` });
+      const project = await loadProject(await session.checkpoints.exportTree(basis.sha, sourceRoot));
       const deployer = new DockerDeployer(project, { secrets: await resolveSecrets(project) });
-      return await deployer.deploy({ label: `체크포인트 ${checkpoint.shortSha} ${checkpoint.message}`, sha: checkpoint.sha }, { onLog, by });
+      return await deployer.deploy({ label: `체크포인트 ${basis.shortSha} ${basis.message}`, sha: basis.sha }, { onLog, by });
     } finally {
       // 이미지를 만든 뒤에는 꺼낸 파일이 필요 없다. 릴리스 compose 파일은 배포 상태 폴더에 따로 있다
       await rm(sourceRoot, { recursive: true, force: true });
@@ -5047,11 +5041,12 @@ export function evidenceBaseCheckpoint<T extends { verify?: string; files?: read
 }
 
 /**
- * 배포 조건을 볼 때 통과 기록을 읽을 체크포인트: 고른 체크포인트에서부터 요구사항 기록만 바꾼 문서 체크포인트를 건너뛴 가장 최근 것
+ * 배포할 체크포인트: 고른 체크포인트에서부터 요구사항 기록만 바꾼 문서 체크포인트를 건너뛴 가장 최근 것
  * (ADR-156의 evidenceBaseCheckpoint와 같은 규칙, 도그푸딩 마찰 166). 문서 체크포인트는 게이트를 거치지 않아 통과 기록이 없다.
  * 게이트를 통과한 체크포인트 위에 사람 확인 하나만 저장해도 HEAD가 문서 체크포인트가 되어 배포가 "검증 게이트를 거치지 않은
- * 체크포인트"로 막혔다. 건너뛰는 것은 코드를 바꿀 수 없는 체크포인트뿐이라(isEvidenceNeutralCheckpoint) 배포되는 코드는 통과 기록을
- * 읽은 체크포인트의 코드와 같다. 가볍게 확인한 체크포인트나 다른 문서를 바꾼 문서 체크포인트는 건너뛰지 않는다.
+ * 체크포인트"로 막혔다. 통과 기록도 배포할 파일도 여기서 고른 체크포인트의 것을 쓴다 — 통과 기록만 여기서 읽고 파일은 문서
+ * 체크포인트에서 꺼내면, 게이트를 거치지 않은 문서 내용이 배포에 실린다. 가볍게 확인한 체크포인트나 다른 문서를 바꾼 문서
+ * 체크포인트는 건너뛰지 않는다.
  * 입력은 최신순이고, 고른 체크포인트가 목록에 없으면 그 체크포인트를 그대로 돌려준다.
  */
 export function releaseBasisCheckpoint<T extends { sha: string; verify?: string; files?: readonly string[]; outsideFiles?: number }>(checkpoints: readonly T[], chosen: T): T {
