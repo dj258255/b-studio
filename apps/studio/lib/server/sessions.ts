@@ -500,7 +500,8 @@ export interface StoredTestRun {
   /**
    * 이 실행 시점의 체크포인트(HEAD) SHA. 지금 체크포인트와 같을 때만(그리고 그 뒤 커밋하지 않은 변경이 없을
    * 때만) "올리기 전 점검"의 테스트 항목과 요구사항 증거가 이 실행을 믿을 수 있는 증거로 센다(버그 리포트:
-   * 테스트 탭에서 직접 돌린 결과가 증거로 치지 않던 문제). 체크포인트가 하나도 없는 세션이면 undefined
+   * 테스트 탭에서 직접 돌린 결과가 증거로 치지 않던 문제). 체크포인트가 하나도 없는 세션이거나, 체크포인트에 없는
+   * 변경이 있는 채로 돌린 실행이면 undefined(그 실행은 어느 체크포인트의 증거도 아니다)
    */
   sha?: string;
 }
@@ -6251,6 +6252,7 @@ export async function runSessionTests(
   session.testControllers.set(input.service, controller);
   markTestsChanged(session);
   try {
+    const dirtyBefore = (await session.checkpoints.pendingFiles()).length > 0;
     const runSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(TEST_RUN_TIMEOUT_MS)]);
     let execResult: Awaited<ReturnType<Sandbox['exec']>> | undefined;
     try {
@@ -6261,7 +6263,10 @@ export async function runSessionTests(
     }
 
     const run = await collectParsedRun(session, input.service, plan, AbortSignal.timeout(REPORT_COLLECT_TIMEOUT_MS));
-    const sha = session.snapshot.checkpoints[0]?.sha;
+    // 체크포인트에 없는 변경이 있는 채로 돈 실행은 어느 체크포인트의 증거도 아니다. sha를 남기면 그 변경을 버린 뒤나
+    // 에이전트 실행 중(ADR-152: 미체크포인트 변경을 실행의 것으로 보고 무시한다)에 HEAD의 증거로 잘못 세게 된다
+    const dirtyAfter = (await session.checkpoints.pendingFiles()).length > 0;
+    const sha = dirtyBefore || dirtyAfter ? undefined : session.snapshot.checkpoints[0]?.sha;
     session.testResults ??= new Map();
     if (run.cases.length > 0) {
       session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run, sha });

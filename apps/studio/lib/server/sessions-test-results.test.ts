@@ -228,6 +228,31 @@ describe('테스트 탭 실행 결과 사이드카(.git/b-studio/test-results.js
     await stopSession(id).catch(() => {});
   }, 20_000);
 
+  it('체크포인트에 없는 변경이 있는 채로 돌린 실행은 sha를 남기지 않아, 그 변경을 치운 뒤에도 증거로 치지 않는다', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    const workDir = getSnapshot(id)!.workDir;
+    const sha = getSnapshot(id)!.checkpoints[0]!.sha;
+    const original = await readFile(path.join(workDir, 'web/src/App.tsx'), 'utf8');
+
+    // 아직 어느 체크포인트에도 없는 변경(되살린 보관본, 직접 고친 파일)이 있는 상태에서 테스트를 돌린다
+    await writeFile(path.join(workDir, 'web/src/App.tsx'), 'export default function App() { return <p>고친 중</p>; }\n');
+    await runSessionTests(id, { service: 'web' });
+
+    const dirtyRun = (await getSessionTests(id)).services.find((service) => service.service === 'web');
+    expect(dirtyRun?.lastRunAt).toBeDefined();
+    expect(dirtyRun?.lastRunSha).toBeUndefined();
+
+    // 그 변경을 치워 작업 복사본이 다시 HEAD와 같아져도, 그 실행은 HEAD의 코드를 돌린 것이 아니므로 증거가 아니다
+    await writeFile(path.join(workDir, 'web/src/App.tsx'), original);
+    const snapshot = await getSessionTests(id);
+    const evidence = buildChecklistTestEvidence(snapshot.services, sha, 0);
+    expect(evidence.find((entry) => entry.service === 'web')?.matchesHead).toBe(false);
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
   it('사이드카 파일이 깨져 있으면 조용히 무시하고(테스트 탭이 그대로 뜬다) 로그만 남긴다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;
