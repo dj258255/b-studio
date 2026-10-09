@@ -1,14 +1,17 @@
 import { createSdkMcpServer, query, tool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { BrowserFrame } from './browser-check';
 import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-runner';
-import { zodShape } from './claude-code-runner';
+import { ClaudeCodeUsageTracker, zodShape } from './claude-code-runner';
 import {
+  buildExploreQaResult,
   buildQaSystemPrompt,
   buildQaTools,
   buildQaUserPrompt,
+  buildWrapUpPrompt,
   executeQaTool,
-  judge,
   QaBrowser,
+  QaReport,
+  RepeatTracker,
   saveActionThumbnail,
   type ExploreQaEvent,
   type ExploreQaGoal,
@@ -19,6 +22,7 @@ import {
   type QaViewport,
   type RunExploreQaOptions,
 } from './explore-qa';
+import type { AgentUsage } from './loop';
 
 /**
  * 세션 백엔드가 claude-code(로컬 Claude Agent)일 때, 탐색형 QA도 같은 경로 — b-studio 도구를 로컬 MCP 서버로
@@ -31,6 +35,12 @@ const SERVER = 'b-studio-qa';
 const DEFAULT_MAX_ACTIONS = 30;
 const DEFAULT_MAX_MS = 5 * 60_000;
 const DEFAULT_REPEAT_LIMIT = 4;
+/** 한도에 걸린 뒤 모델이 마지막 보고를 하도록 기다리는 시간. 지나면 끊고 보고 없음으로 판정한다 */
+const WRAP_UP_GRACE_MS = 90_000;
+/** 조작이 닫힌 뒤에도 조작 도구를 이만큼 더 부르면 보고할 뜻이 없다고 보고 끊는다 */
+const WRAP_UP_REFUSALS = 3;
+/** 끊은 뒤 result(사용량)를 기다리는 시간 */
+const DRAIN_MS = 15_000;
 
 const DEFAULT_SDK: ClaudeCodeSdk = { query, createSdkMcpServer };
 
@@ -52,13 +62,24 @@ export interface ClaudeCodeExploreQaOptions {
 
 export type ClaudeCodeExploreQaResult = ExploreQaResult;
 
-/** 사용자 목표 하나만 보내고 끝까지 열어 두는 스트리밍 입력. interrupt()는 스트리밍 입력에서만 동작해 종료 조건을 강제할 수 있다 */
-class SinglePromptQueue implements AsyncIterable<SDKUserMessage> {
-  #sent = false;
+/** 사용자 글을 입력으로 보내고 끝까지 열어 두는 스트리밍 입력. interrupt()는 스트리밍 입력에서만 동작해 종료 조건을 강제할 수 있다 */
+class PromptQueue implements AsyncIterable<SDKUserMessage> {
   #closed = false;
+  readonly #pending: SDKUserMessage[] = [];
   readonly #waiting: Array<(result: IteratorResult<SDKUserMessage>) => void> = [];
 
-  constructor(private readonly text: string) {}
+  constructor(first: string) {
+    this.push(first);
+  }
+
+  /** 대화에 사용자 글을 더한다(첫 목표, 마지막 보고 요청) */
+  push(text: string): void {
+    if (this.#closed) return;
+    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
+    const waiter = this.#waiting.shift();
+    if (waiter) waiter({ value: message, done: false });
+    else this.#pending.push(message);
+  }
 
   close(): void {
     this.#closed = true;
@@ -68,10 +89,8 @@ class SinglePromptQueue implements AsyncIterable<SDKUserMessage> {
   [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
     return {
       next: (): Promise<IteratorResult<SDKUserMessage>> => {
-        if (!this.#sent) {
-          this.#sent = true;
-          return Promise.resolve({ value: { type: 'user', message: { role: 'user', content: this.text }, parent_tool_use_id: null }, done: false });
-        }
+        const message = this.#pending.shift();
+        if (message) return Promise.resolve({ value: message, done: false });
         if (this.#closed) return Promise.resolve({ value: undefined, done: true });
         return new Promise((resolve) => this.#waiting.push(resolve));
       },
@@ -94,31 +113,63 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
   try {
     const specs = buildQaTools();
     const actions: QaActionRecord[] = [];
-    const signatures: string[] = [];
-    let modelDeclared: { success: boolean; summary: string } | undefined;
+    const report = new QaReport();
+    const repeats = new RepeatTracker(repeatLimit);
+    const usageTracker = new ClaudeCodeUsageTracker();
+    // result가 오지 못한 채 끊겼을 때를 위한 대비: assistant 메시지별 사용량의 최신값
+    const assistantUsage = new Map<string, AgentUsage>();
+    let resultSeen = false;
     let stoppedBy: ExploreQaStopReason = 'max_actions';
     let actionCount = 0;
     let previousDiagnosticsCount = 0;
+    /** 한도·반복·시간으로 조작을 닫고 마지막 보고만 받는 단계 */
+    let wrappingUp = false;
+    /** 더는 기다리지 않고 대화를 끝내는 중(qa_finish를 받았거나 보고 유예가 끝남) */
     let stopping = false;
+    let refusedDuringWrapUp = 0;
+    let followUpSent = false;
     let conversation: ClaudeCodeQuery | undefined;
-    const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
+    let wrapUpTimer: ReturnType<typeof setTimeout> | undefined;
+    const abort = new AbortController();
 
-    const requestStop = (reason: ExploreQaStopReason): void => {
+    const requestStop = (): void => {
       if (stopping) return;
       stopping = true;
-      stoppedBy = reason;
       void conversation?.interrupt().catch(() => {});
+      // interrupt 뒤에도 result(사용량)가 올 때까지 읽되, 오지 않으면 끊는다
+      drainTimer = setTimeout(() => abort.abort(), DRAIN_MS);
+      drainTimer.unref?.();
+    };
+
+    /** 조작을 닫는다. 모델은 같은 대화 안에서 qa_report_issue·qa_finish만 쓸 수 있고, 유예 안에 보고하지 않으면 끊는다 */
+    const beginWrapUp = (reason: ExploreQaStopReason): void => {
+      if (wrappingUp || stopping) return;
+      wrappingUp = true;
+      stoppedBy = reason;
+      wrapUpTimer = setTimeout(requestStop, WRAP_UP_GRACE_MS);
+      wrapUpTimer.unref?.();
     };
 
     const definitions = specs.map((spec) =>
-      tool(spec.name, spec.description ?? '', zodShape(spec.input_schema as { properties?: unknown }), async (args: unknown) => {
+      tool(spec.name, spec.description ?? '', zodShape(spec.input_schema as { properties?: unknown; required?: unknown }, { honorRequired: true }), async (args: unknown) => {
         const input = (args ?? {}) as Record<string, unknown>;
+        if (spec.name === 'qa_report_issue') {
+          const added = report.addFinding(input);
+          if (added.finding) onEvent?.({ type: 'finding', finding: added.finding });
+          return { content: [{ type: 'text' as const, text: added.text }], ...(added.ok ? {} : { isError: true }) };
+        }
         if (spec.name === 'qa_finish') {
-          modelDeclared = { success: Boolean(input.success), summary: typeof input.summary === 'string' ? input.summary : '' };
-          requestStop('finish');
+          report.declare(input);
+          if (!wrappingUp) stoppedBy = 'finish';
+          requestStop();
           return { content: [{ type: 'text' as const, text: 'qa_finish를 받았습니다. 실행을 마칩니다.' }] };
         }
-        if (stopping) return { content: [{ type: 'text' as const, text: '실행이 이미 끝나는 중입니다.' }], isError: true };
+        if (wrappingUp || stopping) {
+          refusedDuringWrapUp += 1;
+          if (refusedDuringWrapUp >= WRAP_UP_REFUSALS) requestStop();
+          return { content: [{ type: 'text' as const, text: stopping && !wrappingUp ? '실행이 이미 끝나는 중입니다.' : buildWrapUpPrompt(stoppedBy) }], isError: true };
+        }
 
         actionCount += 1;
         const outcome = await executeQaTool(spec.name, input, browser);
@@ -146,22 +197,20 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
         const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [{ type: 'text', text: outcome.text }];
         if (outcome.image) content.push({ type: 'image', data: outcome.image.data.toString('base64'), mimeType: outcome.image.mediaType });
 
-        const signature = await browser.screenSignature();
-        signatures.push(signature);
-        const repeated = signatures.length >= repeatLimit && signatures.slice(-repeatLimit).every((value) => value === signature);
-        if (repeated) requestStop('repeated_screen');
-        else if (actionCount >= maxActions) requestStop('max_actions');
-        else if (Date.now() >= deadline) requestStop('max_time');
-
+        const repeated = await repeats.record(record, () => browser.screenSignature());
+        const limit: ExploreQaStopReason | undefined = repeated ? 'repeated_screen' : actionCount >= maxActions ? 'max_actions' : Date.now() >= deadline ? 'max_time' : undefined;
+        if (limit) {
+          beginWrapUp(limit);
+          content.push({ type: 'text', text: buildWrapUpPrompt(limit) });
+        }
         return { content, isError: !outcome.ok };
       }),
     );
 
-    const input = new SinglePromptQueue(buildQaUserPrompt(goal));
-    const abort = new AbortController();
+    const input = new PromptQueue(buildQaUserPrompt(goal));
     const onAbort = () => abort.abort(signal?.reason);
     signal?.addEventListener('abort', onAbort, { once: true });
-    const deadlineTimer = setTimeout(() => requestStop('max_time'), Math.max(0, deadline - Date.now()));
+    const deadlineTimer = setTimeout(() => beginWrapUp('max_time'), Math.max(0, deadline - Date.now()));
     deadlineTimer.unref?.();
 
     try {
@@ -169,7 +218,7 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
         prompt: input,
         options: {
           cwd,
-          systemPrompt: buildQaSystemPrompt(),
+          systemPrompt: buildQaSystemPrompt(goal),
           tools: [],
           mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
           allowedTools: specs.map((spec) => `mcp__${SERVER}__${spec.name}`),
@@ -182,38 +231,70 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
         },
       });
 
-      for await (const message of conversation) {
-        if (message.type === 'assistant') {
-          const text = message.message.content
-            .flatMap((block: { type: string; text?: string }) => (block.type === 'text' && block.text ? [block.text] : []))
-            .join('\n')
-            .trim();
-          if (text) onEvent?.({ type: 'text', text });
+      try {
+        for await (const message of conversation) {
+          if (message.type === 'assistant') {
+            const id = (message.message as { id?: string }).id;
+            const messageUsage = (message.message as { usage?: { input_tokens?: number | null; output_tokens?: number | null; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null } }).usage;
+            if (id && messageUsage) {
+              assistantUsage.set(id, {
+                inputTokens: messageUsage.input_tokens ?? 0,
+                outputTokens: messageUsage.output_tokens ?? 0,
+                cacheReadTokens: messageUsage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: messageUsage.cache_creation_input_tokens ?? 0,
+              });
+            }
+            const text = message.message.content
+              .flatMap((block: { type: string; text?: string }) => (block.type === 'text' && block.text ? [block.text] : []))
+              .join('\n')
+              .trim();
+            if (text) onEvent?.({ type: 'text', text });
+          }
+          if (message.type === 'result') {
+            // modelUsage는 이 query의 누적값이다. claude-code-runner.ts와 같은 규칙으로 읽는다
+            usageTracker.observeResult(message);
+            resultSeen = true;
+            // 모델이 qa_finish 없이 차례를 마쳤다(도구 없이 글만 냄, 또는 한도 뒤에도 보고 안 함). 같은 대화에서 한 번 더 묻는다
+            if (!report.declared && !stopping && !followUpSent) {
+              followUpSent = true;
+              if (!wrappingUp) beginWrapUp('no_tool_call');
+              input.push(buildWrapUpPrompt(stoppedBy));
+              continue;
+            }
+            break;
+          }
         }
-        if (message.type === 'result') {
-          const models = Object.values((message as { modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }> }).modelUsage ?? {});
-          usage.inputTokens = models.reduce((sum, value) => sum + value.inputTokens, 0);
-          usage.outputTokens = models.reduce((sum, value) => sum + value.outputTokens, 0);
-          usage.cacheReadTokens = models.reduce((sum, value) => sum + value.cacheReadInputTokens, 0);
-          usage.cacheWriteTokens = models.reduce((sum, value) => sum + value.cacheCreationInputTokens, 0);
-          break;
-        }
-        if (stopping) break;
+      } catch (error) {
+        // 끊으려고 abort한 경우의 오류는 정상 종료다. 그 밖의 오류는 그대로 올린다
+        if (!stopping && !abort.signal.aborted) throw error;
+        if (signal?.aborted) throw error;
       }
     } finally {
       clearTimeout(deadlineTimer);
+      if (drainTimer) clearTimeout(drainTimer);
+      if (wrapUpTimer) clearTimeout(wrapUpTimer);
       signal?.removeEventListener('abort', onAbort);
       input.close();
       conversation?.close();
     }
 
-    const diagnostics = await browser.currentDiagnostics();
-    const pageText = await browser.pageText();
-    const judged = judge(goal, diagnostics, pageText);
-    return { status: judged.status, reason: judged.reason, ...(modelDeclared ? { modelDeclared } : {}), stoppedBy, diagnostics, actions, usage };
+    const usage: AgentUsage = resultSeen ? { ...usageTracker.usage } : sumUsage([...assistantUsage.values()]);
+    return await buildExploreQaResult({ goal, browser, report, stoppedBy, actions, usage });
   } finally {
     await browser.close();
   }
+}
+
+function sumUsage(entries: AgentUsage[]): AgentUsage {
+  return entries.reduce(
+    (sum, entry) => ({
+      inputTokens: sum.inputTokens + entry.inputTokens,
+      outputTokens: sum.outputTokens + entry.outputTokens,
+      cacheReadTokens: sum.cacheReadTokens + entry.cacheReadTokens,
+      cacheWriteTokens: sum.cacheWriteTokens + entry.cacheWriteTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  );
 }
 
 function countDiagnostics(diagnostics: QaDiagnostics): number {
