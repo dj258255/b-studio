@@ -3,9 +3,13 @@ import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError } from './checkpoints';
 import { formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
+
+// 이 파일의 테스트는 실제 git 하위 프로세스를 여러 번 띄운다(clone·commit·push·fetch). 전체 테스트가 함께 도는 부하에서는
+// 기본 5초를 넘겨 실패한 적이 여러 번 있다(단독으로는 항상 통과). 파일 전체에 넉넉한 제한 시간을 준다
+vi.setConfig({ testTimeout: 30_000 });
 
 const execFileAsync = promisify(execFile);
 
