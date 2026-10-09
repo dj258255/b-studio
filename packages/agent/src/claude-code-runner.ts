@@ -34,7 +34,7 @@ const BACKEND = '로컬 Claude Agent';
  */
 export const DEFAULT_CLAUDE_CODE_EFFORT: Effort = 'high';
 /**
- * 자동 압축 기준 창(토큰). 이어받은 대화가 이 크기에 닿으면 SDK가 앞부분을 요약한다(ADR-162).
+ * 자동 압축 기준 창(토큰). 이어받은 대화가 이 크기에 닿으면 SDK가 앞부분을 요약한다(ADR-151).
  * 200,000은 200K 창 모델의 표준 동작과 같은 수준이다. 1M 창 모델은 SDK 기본이 훨씬 커서 대화가 수십만 토큰까지 자란다.
  */
 export const DEFAULT_COMPACT_WINDOW = 200_000;
