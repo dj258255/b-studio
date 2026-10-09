@@ -220,6 +220,21 @@ describe('parseSpec', () => {
     ).toBe(true);
   });
 
+  it('pageChecks.expectInViewport는 browser 전용이고 1~5개의 비어 있지 않은 글자만 받는다(ADR-161)', () => {
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectInViewport: ["바로 주문"] }\n`)).issues).toEqual([
+      'workflow.pageChecks.0.expectInViewport: expectInViewport는 mode: browser에서만 쓸 수 있습니다',
+    ]);
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, expectInViewport: ["바로 주문", "로그인"] }\n`).workflow?.pageChecks?.[0]
+        ?.expectInViewport,
+    ).toEqual(['바로 주문', '로그인']);
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, expectInViewport: [] }\n`)).issues).toHaveLength(1);
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, expectInViewport: [""] }\n`)).issues).toHaveLength(1);
+    expect(
+      captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, expectInViewport: [a, b, c, d, e, f] }\n`)).issues,
+    ).toHaveLength(1);
+  });
+
   it('pageChecks.fallbackProbe는 browser 전용이고, 그 자리를 가리키는 서비스는 managed여야 한다(fix/frontend-backend-url)', () => {
     expect(
       captureError(() =>

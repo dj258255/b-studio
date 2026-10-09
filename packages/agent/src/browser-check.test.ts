@@ -22,6 +22,21 @@ const PAGES: Record<string, string> = {
   '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => clearInterval(timer), 1500);</script></body></html>`,
   // 트러블슈팅 83: 상대 경로 미디어 주소가 404여서 재생되지 않는 <video>·<img>
   '/video-404': `<html><body><video id="v" preload="auto" src="/missing.mp4"></video></body></html>`,
+  // 안쪽 스크롤 영역에 잘린 줄(도그푸딩 사례): 영역 높이 100px 안에 150px짜리 내용이 있고, 두 번째 줄은 창 안이지만 영역 밖으로 잘린다
+  '/vp-clipped': `<html><body style="margin:0"><div class="shorts-scroller" style="height:100px;overflow:auto"><p style="margin:0;height:70px">영상</p><p style="margin:0;height:40px" id="login">주문하려면 로그인하세요</p></div></body></html>`,
+  '/vp-visible': `<html><body style="margin:0"><div class="box" style="height:200px;overflow:auto"><button style="height:30px">바로 주문</button></div></body></html>`,
+  '/vp-below': `<html><body style="margin:0"><div style="height:900px">채움</div><button style="height:40px;margin:0">바로 주문</button></body></html>`,
+  '/vp-none': `<html><body style="margin:0"><p>다른 글자</p><p style="display:none">바로 주문</p></body></html>`,
+  '/vp-hidden': `<html><body style="margin:0"><p style="visibility:hidden">바로 주문</p></body></html>`,
+  '/vp-twin': `<html><body style="margin:0"><div style="height:100px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div><p style="margin:0">바로 주문</p></body></html>`,
+  '/vp-twin-hidden': `<html><body style="margin:0"><p style="display:none">바로 주문</p><p style="margin:0">바로 주문</p></body></html>`,
+  // 눈에 보이지 않는 쌍둥이: 진짜 버튼은 영역에 잘려 있고, 같은 글자가 투명하게·1px 상자로·덮인 채로 하나 더 있다
+  '/vp-twin-transparent': `<html><body style="margin:0"><div style="opacity:0"><p style="margin:0">바로 주문</p></div><div class="scroller" style="height:20px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div></body></html>`,
+  '/vp-twin-tiny': `<html><body style="margin:0"><span style="position:absolute;width:1px;height:1px;overflow:hidden">바로 주문</span><div class="scroller" style="height:20px;overflow:hidden"><span style="display:block;height:40px"></span><b>바로 주문</b></div></body></html>`,
+  '/vp-covered': `<html><body style="margin:0"><button style="height:40px">바로 주문</button><div class="overlay" style="position:fixed;inset:0;background:#fff"></div></body></html>`,
+  '/vp-disabled': `<html><body style="margin:0"><button style="height:40px;pointer-events:none">바로 주문</button></body></html>`,
+  // 열자마자 화면을 내리는 페이지: 글자는 창 안에 들어오지만 첫 화면이 아니다
+  '/vp-scrolled': `<html><body style="margin:0"><div style="height:900px">채움</div><button style="height:40px">바로 주문</button><div style="height:900px"></div><script>window.scrollTo(0, 700);</script></body></html>`,
   '/img-404': `<html><body><img id="i" src="/missing.png"></body></html>`,
 };
 
@@ -224,6 +239,68 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
 
   it('measureLoad를 켜지 않으면 로드 시간을 남기지 않는다', async () => {
     expect((await runInBrowser(`${base}/ok`, {})).loadMs).toBeUndefined();
+  });
+
+  describe('expectInViewport', () => {
+    const vp = { width: 800, height: 600 };
+    const measure = async (path: string, texts: string[], viewport = vp) => (await runInBrowser(`${base}${path}`, { viewport, viewportTexts: texts })).viewportTexts;
+
+    it('창 안에 온전히 들어 있으면 보인다고 한다', async () => {
+      const report = await measure('/vp-visible', ['바로 주문']);
+      expect(report).toEqual({ width: 800, height: 600, findings: [{ text: '바로 주문', visible: true }] });
+    });
+
+    it('창 아래로 넘친 글자는 몇 px 넘쳤는지 알린다', async () => {
+      const report = await measure('/vp-below', ['바로 주문'], { width: 800, height: 600 });
+      // 900px 채움 + 버튼 40px = 940, 창 600
+      expect(report?.findings[0]).toMatchObject({ text: '바로 주문', visible: false, problem: { kind: 'below', px: 340 } });
+    });
+
+    it('안쪽 스크롤 영역에 잘린 글자는 그 조상과 잘린 크기를 알린다 (창 안이어도)', async () => {
+      const report = await measure('/vp-clipped', ['영상', '주문하려면 로그인하세요']);
+      expect(report?.findings[0]).toEqual({ text: '영상', visible: true });
+      expect(report?.findings[1]).toMatchObject({
+        text: '주문하려면 로그인하세요',
+        visible: false,
+        problem: { kind: 'clipped', side: 'bottom', px: 10, by: 'div.shorts-scroller' },
+      });
+    });
+
+    it('display:none 요소와 visibility:hidden 요소는 숨겨짐이다', async () => {
+      expect((await measure('/vp-none', ['바로 주문']))?.findings[0]).toMatchObject({ visible: false, problem: { kind: 'hidden' } });
+      expect((await measure('/vp-hidden', ['바로 주문']))?.findings[0]).toMatchObject({ visible: false, problem: { kind: 'hidden' } });
+    });
+
+    it('글자가 화면에 없으면 없음이다', async () => {
+      expect((await measure('/vp-none', ['없는 글자']))?.findings[0]).toEqual({ text: '없는 글자', visible: false, problem: { kind: 'absent' } });
+    });
+
+    it('같은 글자가 둘이면 하나라도 온전히 보일 때 통과한다', async () => {
+      expect((await measure('/vp-twin', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+      expect((await measure('/vp-twin-hidden', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+    });
+
+    it('같은 글자가 눈에 보이지 않게(투명, 1px 상자) 하나 더 있어도 보인 것으로 치지 않는다', async () => {
+      // 보이는 쪽이 없으므로 진짜 버튼의 잘림을 알린다
+      for (const path of ['/vp-twin-transparent', '/vp-twin-tiny']) {
+        expect((await measure(path, ['바로 주문']))?.findings[0], path).toMatchObject({ visible: false, problem: { kind: 'clipped', side: 'bottom', by: 'div.scroller' } });
+      }
+    });
+
+    it('다른 요소에 덮인 글자는 덮은 요소를 알린다. pointer-events:none인 요소는 덮임을 따지지 않는다', async () => {
+      expect((await measure('/vp-covered', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: false, problem: { kind: 'covered', by: 'div.overlay' } });
+      expect((await measure('/vp-disabled', ['바로 주문']))?.findings[0]).toEqual({ text: '바로 주문', visible: true });
+    });
+
+    it('창이 스크롤돼 있으면 첫 화면이 아니므로 보인 것으로 치지 않는다', async () => {
+      const finding = (await measure('/vp-scrolled', ['바로 주문']))?.findings[0];
+      expect(finding).toMatchObject({ visible: false, problem: { kind: 'scrolled' } });
+      expect((finding?.problem as { px: number }).px).toBeGreaterThan(100);
+    });
+
+    it('viewportTexts를 넘기지 않으면 재지 않는다', async () => {
+      expect((await runInBrowser(`${base}/vp-visible`, {})).viewportTexts).toBeUndefined();
+    });
   });
 
   it('<video>의 미디어 주소가 404면 재생 실패를 mediaErrors로 남긴다 (트러블슈팅 83)', async () => {

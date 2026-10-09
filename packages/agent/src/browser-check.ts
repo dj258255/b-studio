@@ -43,6 +43,8 @@ export interface BrowserPageResult {
    * allowedOrigins를 넘기지 않았으면 항상 빈 배열이다
    */
   blockedRequests: string[];
+  /** viewportTexts를 넘겼을 때만 있다. 각 글자가 첫 화면에 온전히 보이는지 잰 결과(ADR-161) */
+  viewportTexts?: ViewportTextReport;
   /** 문서 너비가 화면 너비를 넘는 픽셀 수. 0이면 가로 스크롤이 없다 */
   horizontalOverflowPx: number;
   /** measureLoad를 켰을 때 워밍업 뒤 이동의 load까지 걸린 시간(ms). 재지 못했으면 없다 */
@@ -51,7 +53,36 @@ export interface BrowserPageResult {
   steps: BrowserPageStep[];
 }
 
+/**
+ * 글자가 첫 화면에 온전히 보이지 않는 이유.
+ * absent: 화면에 없음 / hidden: display:none·visibility:hidden이거나 크기 0, 또는 눈에 보이지 않게 만든 요소(투명, 2px보다 작은 상자, clip) /
+ * clipped: overflow가 visible이 아닌 조상(by)에 side 쪽으로 px만큼 잘림 / above·below·left·right: 창 밖으로 px만큼 넘침 /
+ * covered: 다른 요소(by)가 위에 덮여 있음 / scrolled: 잴 때 창이 px만큼 스크롤돼 있어 첫 화면이 아님
+ */
+export type ViewportProblem =
+  | { kind: 'absent' }
+  | { kind: 'hidden' }
+  | { kind: 'clipped'; side: 'top' | 'bottom' | 'left' | 'right'; px: number; by: string }
+  | { kind: 'above' | 'below' | 'left' | 'right'; px: number }
+  | { kind: 'covered'; by: string }
+  | { kind: 'scrolled'; px: number };
+
+export interface ViewportTextFinding {
+  text: string;
+  visible: boolean;
+  problem?: ViewportProblem;
+}
+
+/** 측정한 창 크기와 글자별 결과 */
+export interface ViewportTextReport {
+  width: number;
+  height: number;
+  findings: ViewportTextFinding[];
+}
+
 export interface BrowserPageOptions {
+  /** 첫 화면(단계를 마친 뒤 창 크기 그대로)에 온전히 보여야 하는 글자. 넘기면 결과의 viewportTexts에 잰 값을 담는다 */
+  viewportTexts?: readonly string[];
   viewport?: { width: number; height: number };
   /** 페이지를 연 뒤 순서대로 실행할 동작. 선언한 네 동작만 받는다 */
   steps?: readonly WorkflowPageStep[];
@@ -133,6 +164,92 @@ const MEDIA_ERROR_INIT_SCRIPT = `(() => {
     }
   }, true);
 })();`;
+
+/**
+ * 글자가 첫 화면에 온전히 보이는지 페이지 안에서 잰다(ADR-161). 에이전트 패키지는 DOM 타입을 쓰지 않아 문자열로 둔다.
+ * 글자를 담은 가장 안쪽 요소(자식 요소 중 같은 글자를 담은 것이 없는 요소)마다:
+ * 렌더링 여부(크기 0·display:none·visibility:hidden) → overflow가 visible이 아닌 조상의 안쪽 영역에 잘림 → 창 밖 순으로 본다.
+ * 같은 글자를 담은 요소가 여럿이면 하나라도 온전히 보이면 보인 것으로 친다. 오차는 1px까지 허용한다.
+ * "하나라도"가 쉬운 통과 길이 되지 않게, 눈에 보이지 않는 요소는 보인 것으로 치지 않는다: 투명한 요소(자신과 조상의 opacity 곱이 0.1 미만),
+ * 2px보다 작은 상자와 clip을 건 요소(화면 낭독기 전용 숨김), 다른 요소에 덮인 요소(가운데 점의 맨 위 요소가 남남일 때).
+ * 창이 스크롤돼 있으면(단계가 화면을 내렸을 때) 첫 화면이 아니므로 모든 글자를 재지 않고 scrolled로 돌려준다.
+ * position:fixed 요소는 조상 클리핑을 받지 않고, absolute 요소는 위치 기준 조상 바깥의 조상에는 잘리지 않는 것으로 단순하게 다룬다
+ */
+export const VIEWPORT_MEASURE_SCRIPT = (texts: readonly string[]) => `((texts) => {
+  var TOL = 1;
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var scrolled = Math.max(Math.abs(Math.round(window.scrollY || 0)), Math.abs(Math.round(window.scrollX || 0)));
+  if (scrolled > TOL) return { width: vw, height: vh, findings: texts.map(function (text) { return { text: text, visible: false, problem: { kind: 'scrolled', px: scrolled } }; }) };
+  var norm = function (s) { return (s || '').replace(/\\s+/g, ' ').trim(); };
+  var all = Array.prototype.slice.call(document.body ? document.body.querySelectorAll('*') : []);
+  all = all.filter(function (el) { return !/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|HEAD|TITLE|META|LINK)$/.test(el.tagName); });
+  var textOf = new Map();
+  all.forEach(function (el) { textOf.set(el, norm(el.textContent)); });
+  var describe = function (el) {
+    var tag = el.tagName.toLowerCase();
+    var classes = (el.getAttribute('class') || '').split(/\\s+/).filter(Boolean).slice(0, 2);
+    if (classes.length) return tag + '.' + classes.join('.');
+    return el.id ? tag + '#' + el.id : tag;
+  };
+  var judge = function (el) {
+    var rect = el.getBoundingClientRect();
+    var style = getComputedStyle(el);
+    if (el.getClientRects().length === 0 || rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.visibility === 'collapse') return { kind: 'hidden' };
+    if (rect.width < 2 || rect.height < 2 || (style.clip && style.clip !== 'auto')) return { kind: 'hidden' };
+    var opacity = 1;
+    for (var o = el; o && o.nodeType === 1; o = o.parentElement) opacity *= parseFloat(getComputedStyle(o).opacity || '1');
+    if (opacity < 0.1) return { kind: 'hidden' };
+    var left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
+    var skipUntilPositioned = style.position === 'absolute';
+    var escapes = style.position === 'fixed';
+    var cur = el.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement && !escapes) {
+      var cs = getComputedStyle(cur);
+      if (skipUntilPositioned) {
+        if (cs.position !== 'static') skipUntilPositioned = false; else { cur = cur.parentElement; continue; }
+      }
+      var clipX = cs.overflowX !== 'visible', clipY = cs.overflowY !== 'visible';
+      if (clipX || clipY) {
+        var box = cur.getBoundingClientRect();
+        var cl = box.left + cur.clientLeft, ct = box.top + cur.clientTop, cr = cl + cur.clientWidth, cb = ct + cur.clientHeight;
+        if (clipY && bottom - cb > TOL) return { kind: 'clipped', side: 'bottom', px: Math.round(bottom - cb), by: describe(cur) };
+        if (clipY && ct - top > TOL) return { kind: 'clipped', side: 'top', px: Math.round(ct - top), by: describe(cur) };
+        if (clipX && right - cr > TOL) return { kind: 'clipped', side: 'right', px: Math.round(right - cr), by: describe(cur) };
+        if (clipX && cl - left > TOL) return { kind: 'clipped', side: 'left', px: Math.round(cl - left), by: describe(cur) };
+      }
+      if (cs.position === 'fixed') break;
+      cur = cur.parentElement;
+    }
+    if (bottom - vh > TOL) return { kind: 'below', px: Math.round(bottom - vh) };
+    if (-top > TOL) return { kind: 'above', px: Math.round(-top) };
+    if (right - vw > TOL) return { kind: 'right', px: Math.round(right - vw) };
+    if (-left > TOL) return { kind: 'left', px: Math.round(-left) };
+    // 다른 요소가 위에 덮여 있는지: 가운데 점의 맨 위 요소가 이 요소와 안팎 관계가 아니면 덮인 것이다.
+    // pointer-events:none인 요소는 이 방법으로 알 수 없어 건너뛴다(비활성 버튼에 흔하다)
+    if (style.pointerEvents !== 'none') {
+      var hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) return { kind: 'covered', by: describe(hit) };
+    }
+    return null;
+  };
+  var findings = texts.map(function (text) {
+    var needle = norm(text);
+    var candidates = all.filter(function (el) {
+      if (!textOf.get(el).includes(needle)) return false;
+      return !Array.prototype.some.call(el.children, function (child) { return textOf.has(child) && textOf.get(child).includes(needle); });
+    });
+    if (candidates.length === 0) return { text: text, visible: false, problem: { kind: 'absent' } };
+    var worst = null;
+    for (var i = 0; i < candidates.length; i++) {
+      var problem = judge(candidates[i]);
+      if (!problem) return { text: text, visible: true };
+      // 여러 요소가 모두 안 보이면 숨겨짐보다 "보이려다 잘린" 쪽이 고칠 단서가 많아 그쪽을 알린다
+      if (!worst || (worst.kind === 'hidden' && problem.kind !== 'hidden')) worst = problem;
+    }
+    return { text: text, visible: false, problem: worst };
+  });
+  return { width: vw, height: vh, findings: findings };
+})(${JSON.stringify(texts)})`;
 
 /** 실패한 단계를 사람이 알아볼 수 있게 무슨 동작을 어디에 하려 했는지 적는다 */
 function describeStep(step: WorkflowPageStep): string {
@@ -245,7 +362,7 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   };
 }
 
-export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
+export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
   signal?.throwIfAborted();
   const browser = await launchBrowser();
   const abort = () => void browser.close();
@@ -326,6 +443,8 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       const { text, overflow } = await page.evaluate<{ text: string; overflow: number }>(
         `({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })`,
       );
+      // 글자 위치 측정은 expectText와 같은 시점(단계를 마친 뒤)에 한다
+      const viewportReport = viewportTexts && viewportTexts.length > 0 ? await page.evaluate<ViewportTextReport>(VIEWPORT_MEASURE_SCRIPT(viewportTexts)) : undefined;
       // 이동의 load까지 걸린 시간. 워밍업 뒤 이동이라 개발 서버 콜드 스타트가 섞이지 않는다
       const loadMs = measureLoad
         ? await page.evaluate<number | null>(`(() => { const nav = performance.getEntriesByType('navigation')[0]; return nav ? Math.round(nav.loadEventEnd - nav.startTime) : null; })()`)
@@ -339,6 +458,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         mediaErrors,
         blockedRequests: [...blockedUrls],
         horizontalOverflowPx: overflow,
+        ...(viewportReport ? { viewportTexts: viewportReport } : {}),
         ...(loadMs !== null ? { loadMs } : {}),
         steps: recorded,
       };
