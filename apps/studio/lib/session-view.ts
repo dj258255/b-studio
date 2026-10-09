@@ -373,15 +373,21 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         completedRuns: view.completedRuns + 1,
       };
 
+    case 'backup_restore_started':
+      return patchSnapshot(view, { running: true });
+
     case 'backup_restored':
       return {
-        ...view,
+        ...patchSnapshot(view, { running: false }),
         chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: true, files: event.files, restarted: event.restarted } }],
         completedRuns: view.completedRuns + 1,
       };
 
     case 'backup_restore_failed':
-      return { ...view, chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: false, error: event.error } }] };
+      return {
+        ...patchSnapshot(view, { running: false }),
+        chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: false, error: event.error } }],
+      };
 
     case 'remote_sync_started':
       return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'remoteSync' }] };

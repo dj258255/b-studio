@@ -118,6 +118,7 @@
 - [95. 사람이 한 일의 과거형 서술·"…실패합니다"·"결론:" 머리말이 체크포인트 제목이 됨](#95-사람이-한-일의-과거형-서술실패합니다결론-머리말이-체크포인트-제목이-됨)
 - [96. 요구사항 id로 만든 체크포인트 제목이 시나리오 id까지 나열해 길어짐](#96-요구사항-id로-만든-체크포인트-제목이-시나리오-id까지-나열해-길어짐)
 - [97. 게이트에서 한 번도 안 돈 핵심 동시성 테스트가 다른 테스트 덕에 "검증됨"에 숨음](#97-게이트에서-한-번도-안-돈-핵심-동시성-테스트가-다른-테스트-덕에-검증됨에-숨음)
+- [98. 백업을 되살리는 동안 running을 잡지 않아 서비스 재시작 중에 새 실행이 끼어듦](#98-백업을-되살리는-동안-running을-잡지-않아-서비스-재시작-중에-새-실행이-끼어듦)
 
 ---
 
@@ -3018,3 +3019,22 @@ ADR-149로 정리했다. `packages/agent/src/requirements.ts`에 `findUnexecuted
 
 ### 배운 점
 "통과한 테스트가 있다"와 "그 테스트가 요구사항이 요구하는 보장을 실제로 확인했다"는 다른 질문이다 — 더 약한 테스트의 통과가 더 강한(하지만 안 도는) 테스트의 부재를 가릴 수 있다. 실행 여부를 정적 추측(태그가 있다)이 아니라 실측(보고서에 결과가 있는지)으로 판정하고, 추측은 "이유"로만 보조하면 사실과 추측이 서로 다른 신뢰도로 공존할 수 있다.
+
+## 98. 백업을 되살리는 동안 running을 잡지 않아 서비스 재시작 중에 새 실행이 끼어듦
+
+**구분:** 도그푸딩 중 실측(BE-commerce 세션 `pay-2-5b640fd3`) → 코드 추적 → 수정
+
+### 현상
+같은 세션 기록에서 `run_started`가 1921번, `backup_restored`가 1931번에 남았다. 백업을 되살리는 도중(서비스 재시작은 Spring Boot면 수십 초 걸린다)에 새 요청이 받아들여져, 에이전트가 서비스가 아직 재시작되는 중에 출발했다. 입력창도 잠기지 않았다.
+
+### 원인
+`apps/studio/lib/server/sessions.ts`의 `restoreDiscardedBackup`은 시작할 때 `session.snapshot.running`을 검사만 하고 되살리는 동안 잡아 두지 않았다. 바로 위 `restoreCheckpoint`와 원격 가져오기 같은 다른 경로는 `running = true`를 잡고 끝나면 이벤트보다 먼저 푼다. 화면 쪽도 되살리기에는 시작 이벤트가 없어 `running`이 켜진 적이 없었다.
+
+### 수정
+ADR-150으로 정리했다. `restoreDiscardedBackup`이 시작하자마자 `running = true`로 잡고 `backup_restore_started` 이벤트를 내며, 성공·실패 어느 쪽이든 이벤트를 내기 전에 푼다. `session-view.ts`는 시작 이벤트에서 `running`을 켜고 `backup_restored`·`backup_restore_failed`에서 끈다. `closeUnfinished`는 끝나지 못한 되살리기를 `backup_restore_failed`로 닫는다.
+
+### 검증
+`apps/studio/lib/server/sessions-revert-backup.test.ts`에 테스트 2개를 더했다(임시 저장소 + 가짜 샌드박스, 서비스 재시작을 지연시키는 가짜 포함). 재시작이 끝나기 전 `sendMessage`는 409(이전 요청을 처리하는 중입니다)로 거절되고 `backup_restored` 뒤에는 받아들여진다. 되살리기가 실패해도 `backup_restore_failed`가 나가는 시점에 `running`이 이미 풀려 있다. 고치기 전 코드에서는 두 테스트 모두 `running`이 `false`라 실패했다. `session-view.test.ts`·`session-store.test.ts`에 화면 상태와 복구 테스트를 더했다. `pnpm typecheck`(6/6), `pnpm --filter @b-studio/studio lint`(0 errors)를 확인했다. 실제 pay 세션에서 다시 재현해 보지는 않았다.
+
+### 배운 점
+"시작할 때 검사"와 "끝날 때까지 잡아 둠"은 다르다. 오래 걸리는 비동기 작업은 검사한 순간부터 끝날 때까지 같은 잠금을 쥐고 있어야 하고, 화면이 같은 잠금을 따라가려면 시작 이벤트도 있어야 한다.

@@ -362,6 +362,13 @@ describe('reduceSession', () => {
     expect(activeRun(view)).toBeUndefined();
   });
 
+  it('백업을 되살리는 동안 running이고, 성공·실패 어느 쪽이든 풀린다', () => {
+    const started: StudioEvent = { type: 'backup_restore_started', backupId: 'b1' };
+    expect(fold([started]).snapshot.running).toBe(true);
+    expect(fold([started, { type: 'backup_restored', backupId: 'b1', files: ['a.txt'], restarted: [] }]).snapshot.running).toBe(false);
+    expect(fold([started, { type: 'backup_restore_failed', backupId: 'b1', error: '충돌' }]).snapshot.running).toBe(false);
+  });
+
   it('다시 연결해 기록을 재생해도 세션 토큰 합계를 두 번 더하지 않는다', () => {
     const tokens = (input: number) => ({ inputTokens: input, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
     const history: StudioEvent[] = [
