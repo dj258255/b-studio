@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -217,6 +217,16 @@ async function makeDocsCheckpoint(id: string, name: string) {
   return checkpoint!;
 }
 
+/** 요구사항 문서만 바꿔 문서 체크포인트를 만든다(요구사항 저장·사람 확인 저장이 남기는 것과 같은 종류) */
+async function makeRequirementsCheckpoint(id: string) {
+  const file = path.join(internals(id).project.root, 'docs', 'requirements.md');
+  await writeFile(file, `${await readFile(file, 'utf8')}\n<!-- 메모 ${Date.now()}-${Math.random()} -->\n`);
+  const checkpoint = await commitWorkingCopyDocs(id, ['docs/requirements.md'], 'docs: 요구사항 메모');
+  expect(checkpoint?.verify).toBe('docs');
+  expect(checkpoint?.files).toEqual(['docs/requirements.md']);
+  return checkpoint!;
+}
+
 /** 코드를 바꾼 체크포인트(가볍게 확인)를 만든다 — 테스트를 안 돌린 코드 변경 */
 async function makeLightCodeCheckpoint(id: string) {
   const session = internals(id);
@@ -242,7 +252,7 @@ describe('문서 체크포인트가 생겨도 테스트 근거가 닫히지 않�
     expect((await r12Status(id)).r12.status).toBe('검증됨');
     const codeSha = getSnapshot(id)!.checkpoints[0]!.sha;
 
-    const docs = await makeDocsCheckpoint(id, 'notes.md');
+    const docs = await makeRequirementsCheckpoint(id);
     expect(getSnapshot(id)!.checkpoints[0]!.sha).toBe(docs.sha);
 
     const { r12, snapshot } = await r12Status(id);
@@ -268,22 +278,35 @@ describe('문서 체크포인트가 생겨도 테스트 근거가 닫히지 않�
     await stopSession(id).catch(() => {});
   }, 30_000);
 
+  it('요구사항 기록이 아닌 문서를 바꾼 문서 체크포인트는 건너뛰지 않는다 — 문서를 읽는 테스트가 있을 수 있어 근거가 닫힌다', async () => {
+    const id = await readyVerifiedSession();
+    expect((await r12Status(id)).r12.status).toBe('검증됨');
+
+    // 예: API 명세 문서. 이 문서를 읽어 검사하는 테스트가 있다면 결과가 달라질 수 있다
+    const docs = await makeDocsCheckpoint(id, 'api-spec.md');
+    const { r12, snapshot } = await r12Status(id);
+    expect(r12.status).not.toBe('검증됨');
+    expect(r12.evidence.testRun).toBeUndefined();
+    expect(docs.sha.startsWith(snapshot.evidenceBasis!.shortSha!)).toBe(true);
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
   it('문서 체크포인트가 연달아 쌓여도 유지된다', async () => {
     const id = await readyVerifiedSession();
-    await makeDocsCheckpoint(id, 'a.md');
-    await makeDocsCheckpoint(id, 'b.md');
-    await makeDocsCheckpoint(id, 'c.md');
+    await makeRequirementsCheckpoint(id);
+    await makeRequirementsCheckpoint(id);
+    await makeRequirementsCheckpoint(id);
     expect((await r12Status(id)).r12.status).toBe('검증됨');
     await stopSession(id).catch(() => {});
   }, 30_000);
 
   it('그 사이 코드 체크포인트(가볍게 확인)가 생기면 이전 근거는 닫힌다', async () => {
     const id = await readyVerifiedSession();
-    await makeDocsCheckpoint(id, 'a.md');
+    await makeRequirementsCheckpoint(id);
     await makeLightCodeCheckpoint(id);
     expect((await r12Status(id)).r12.status).not.toBe('검증됨');
     // 그 뒤 문서 체크포인트가 더 쌓여도 다시 열리지 않는다
-    await makeDocsCheckpoint(id, 'b.md');
+    await makeRequirementsCheckpoint(id);
     expect((await r12Status(id)).r12.status).not.toBe('검증됨');
     await stopSession(id).catch(() => {});
   }, 30_000);
@@ -291,7 +314,7 @@ describe('문서 체크포인트가 생겨도 테스트 근거가 닫히지 않�
   it('문서 체크포인트 뒤에 테스트 탭에서 돌린 실행이 근거로 인정된다(찍는 쪽과 비교하는 쪽이 같은 기준)', async () => {
     const id = await readyVerifiedSession();
     const codeSha = getSnapshot(id)!.checkpoints[0]!.sha;
-    await makeDocsCheckpoint(id, 'a.md');
+    await makeRequirementsCheckpoint(id);
 
     await runSessionTests(id, { service: 'api' });
     const api = (await getSessionTests(id)).services.find((service) => service.service === 'api');
@@ -303,7 +326,7 @@ describe('문서 체크포인트가 생겨도 테스트 근거가 닫히지 않�
   it('올리기 전 점검의 테스트 항목도 문서 체크포인트 때문에 달라지지 않는다', async () => {
     const id = await readyVerifiedSession();
     const before = testsItem(await submissionReport(id));
-    await makeDocsCheckpoint(id, 'a.md');
+    await makeRequirementsCheckpoint(id);
     const after = testsItem(await submissionReport(id));
     expect({ status: after.status, reason: after.reason }).toEqual({ status: before.status, reason: before.reason });
     await stopSession(id).catch(() => {});
@@ -342,6 +365,15 @@ describe('evidenceBaseCheckpoint', () => {
   it('문서 체크포인트 표시가 있어도 문서가 아닌 파일을 바꿨으면 건너뛰지 않는다', () => {
     const mixed = cp('mixed', 'docs', ['docs/requirements.md', 'api/src/Order.java']);
     expect(evidenceBaseCheckpoint([mixed, cp('code')])?.name).toBe('mixed');
+  });
+
+  it('요구사항 기록(요구사항 문서·이슈 발행 기록)만 바꾼 문서 체크포인트만 건너뛴다', () => {
+    expect(evidenceBaseCheckpoint([cp('issues', 'docs', ['docs/requirements.issues.json']), cp('code')])?.name).toBe('code');
+    expect(evidenceBaseCheckpoint([cp('both', 'docs', ['docs/requirements.md', 'docs/requirements.issues.json']), cp('code')])?.name).toBe('code');
+    // 다른 문서(ADR, API 명세, README)는 경로가 docs여도 건너뛰지 않는다
+    expect(evidenceBaseCheckpoint([cp('adr', 'docs', ['docs/adr/ADR-001.md']), cp('code')])?.name).toBe('adr');
+    expect(evidenceBaseCheckpoint([cp('readme', 'docs', ['README.md']), cp('code')])?.name).toBe('readme');
+    expect(evidenceBaseCheckpoint([cp('mixed-docs', 'docs', ['docs/requirements.md', 'docs/api-spec.md']), cp('code')])?.name).toBe('mixed-docs');
   });
 
   it('바꾼 파일을 모르거나 비어 있는 문서 체크포인트는 건너뛰지 않는다(근거가 닫히는 쪽)', () => {

@@ -3119,6 +3119,8 @@ ADR-155로 정리했다. 테스트 행이 요구사항 id나 그 시나리오 id
 
 문서 체크포인트가 문서 경로만 담는지 확인한 결과: 만드는 경로는 `commitWorkingCopyDocs`(경로가 문서가 아니면 400으로 거부)와 `protectPendingDocsBeforeDiscard`(재개·되돌리기 때 `pendingFiles().filter(isDocPath)`로 좁힘) 둘뿐이고 둘 다 `commitPaths`로 그 경로만 커밋한다. `Workflow-Verify: docs` 트레일러를 붙이는 호출이 이 둘뿐임을 `formatVerifyTrailer(` 검색으로 확인했다.
 
+건너뛰는 범위는 요구사항 기록(`docs/requirements.md`, `docs/requirements.issues.json`)만 바꾼 문서 체크포인트로 좁혔다. `docs/**` 전체를 건너뛰면 문서를 읽는 테스트(예: 문서의 API 명세와 코드의 오류 코드를 맞춰 보는 테스트)의 결과가 달라졌을 수 있는데도 근거가 유지된다. 세션 재개가 끊긴 실행의 문서를 지키며 남긴 체크포인트도 게이트를 거치지 않았으므로 건너뛰지 않는다.
+
 ### 확인
 `apps/studio/lib/server/sessions-evidence-docs-checkpoint.test.ts`(임시 git 저장소 + 가짜 샌드박스, 모델·GitHub·네트워크 호출 없음). 고치기 전 코드에서 문서 체크포인트를 `commitWorkingCopyDocs`로 남기자 `expected '작업 중' to be '검증됨'`으로 실패했고(사람 확인 저장·연달아 쌓기도 같다), 문서 체크포인트 뒤에 돌린 실행의 `lastRunSha`가 코드 체크포인트와 달랐으며(`Expected: 5db5fda…, Received: 206bf95…` 꼴), 올리기 전 점검 테스트 항목이 `pass`에서 `warn`으로 바뀌었다. 고친 뒤에는 모두 통과하고, 그 사이 코드(light) 체크포인트가 생기면 근거가 닫히는 것도 확인했다.
 
