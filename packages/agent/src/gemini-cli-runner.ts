@@ -276,7 +276,7 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
   const serial = serialQueue();
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   const workdir = stateDir ? path.join(stateDir, 'work') : await mkdtemp(path.join(tmpdir(), WORKDIR_PREFIX));
   let toolServer: Awaited<ReturnType<typeof startToolServer>> | undefined;

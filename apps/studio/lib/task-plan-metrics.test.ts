@@ -105,6 +105,15 @@ describe('summarizeTaskPlan', () => {
     expect(summary.endToEndMs).toBe(30_000);
   });
 
+  it('모델 시간을 재지 못한 실행(modelMs 없음)은 합계에 넣지 않고 잰 실행만 더한다', () => {
+    const base = basePlan();
+    const [first, ...rest] = base.lanes;
+    const unmeasured = { ...first!, tasks: first!.tasks.map((task) => ({ ...task, run: task.run ? { ...task.run, metrics: { modelCalls: 1, maxContextTokens: 10, toolMs: 1, gateMs: 1 } } : task.run })) };
+    const summary = summarizeTaskPlan({ ...base, lanes: [unmeasured, ...rest] } as TaskPlanView);
+    // 첫 레인의 100+150이 빠지고 둘째 레인의 200만 남는다. 값이 없는 실행 때문에 NaN이 되지 않는다
+    expect(summary.modelMs).toBe(200);
+  });
+
   it('통합 실행에 모델 호출 지표가 있어도 합계의 모델 호출로 세지 않는다', () => {
     const base = basePlan();
     const plan: TaskPlanView = {

@@ -1,0 +1,396 @@
+{
+ "source": "도그푸딩 세션 5b640fd3의 세션 기록(run_finished의 metrics·usage, turn_usage, tool_call, verify_*, context_compacted 이벤트)",
+ "extractedAt": "2026-10-10",
+ "note": "시간 값은 밀리초다. compactionMs는 걸린 시간이 기록된 압축만 더했다(기록이 없는 압축은 0). restMs는 durationMs에서 gateMs·toolMs·compactionMs를 뺀 값이다. modelMs는 모든 실행에서 0으로 기록돼 있다.",
+ "runs": [
+  {
+   "runId": "cd83a3c4",
+   "kind": "요구사항 여러 개 구현(게이트 3회 실패로 끝남)",
+   "status": "failed",
+   "turns": 137,
+   "durationMs": 3420669,
+   "gateMs": 180605,
+   "toolMs": 270130,
+   "modelMs": 0,
+   "compactionMs": 0,
+   "compactions": 4,
+   "restMs": 2969934,
+   "gateRuns": 3,
+   "restarted": [
+    [],
+    [],
+    []
+   ],
+   "checks": [],
+   "changedFiles": [
+    "apps/web/components/LiveViewer.tsx",
+    "apps/web/lib/liveOrder.test.ts",
+    "apps/web/lib/liveOrder.ts",
+    "apps/web/package.json",
+    "commerce/src/main/resources/db/migration/V82__seed_live_demo_broadcast.sql",
+    "docs/42-라이브커머스-숏폼-명세.md",
+    "docs/performance/live-order-r15.md",
+    "k6/live-order-flash-sale.js",
+    "studio.yaml",
+    "tools/prepare-live-order-broadcast.sh",
+    "tools/prepare-live-order-viewers.sh",
+    "tools/run-live-order-stock.sh"
+   ],
+   "firstTurnContextTokens": 25866,
+   "maxContextTokens": 169396,
+   "usage": {
+    "inputTokens": 22922,
+    "outputTokens": 231164,
+    "cacheReadTokens": 12593874,
+    "cacheWriteTokens": 492808
+   },
+   "toolCalls": {
+    "read_file": 69,
+    "list_files": 13,
+    "write_file": 8,
+    "run_in_service": 66,
+    "edit_file": 14,
+    "http_request": 5,
+    "restart_service": 2
+   },
+   "runInServiceCommands": {
+    "npx": 5,
+    "sed": 37,
+    "grep": 12,
+    "sh": 1,
+    "bash": 9,
+    "node": 1,
+    "npm": 1
+   }
+  },
+  {
+   "runId": "8a689255",
+   "kind": "화면 확인 실패를 고치다 질문으로 멈춤",
+   "status": "awaiting_input",
+   "turns": 45,
+   "durationMs": 994918,
+   "gateMs": 417106,
+   "toolMs": 154399,
+   "modelMs": 0,
+   "compactionMs": 0,
+   "compactions": 0,
+   "restMs": 423413,
+   "gateRuns": 3,
+   "restarted": [
+    [
+     "commerce",
+     "web"
+    ],
+    [
+     "commerce",
+     "web"
+    ],
+    []
+   ],
+   "checks": [
+    "web / (browser)",
+    "web /shorts (browser)",
+    "web /live/1 (자동, id 추정 · LiveViewer.tsx 변경)",
+    "commerce-test",
+    "web-test",
+    "protected-paths",
+    "web / (browser)",
+    "web /shorts (browser)",
+    "web /live/1 (자동, id 추정 · LiveViewer.tsx 변경)",
+    "commerce-test",
+    "web-test",
+    "protected-paths",
+    "web / (browser)",
+    "web /shorts (browser)",
+    "web /live/1 (자동, id 추정 · LiveViewer.tsx 변경)",
+    "commerce-test",
+    "web-test",
+    "protected-paths"
+   ],
+   "changedFiles": [
+    "apps/web/components/LiveViewer.tsx",
+    "apps/web/lib/liveOrder.test.ts",
+    "apps/web/lib/liveOrder.ts",
+    "apps/web/package.json",
+    "commerce/docs/performance/live-order-viewers-tokens.json",
+    "commerce/src/main/resources/db/migration/V82__seed_live_demo_broadcast.sql",
+    "docs/performance/live-order-r15.md",
+    "k6/live-order-flash-sale.js",
+    "tools/prepare-live-order-broadcast.sh",
+    "tools/prepare-live-order-viewers.sh",
+    "tools/run-live-order-stock.sh"
+   ],
+   "firstTurnContextTokens": 25792,
+   "maxContextTokens": 129863,
+   "usage": {
+    "inputTokens": 90,
+    "outputTokens": 32542,
+    "cacheReadTokens": 3925064,
+    "cacheWriteTokens": 106500
+   },
+   "toolCalls": {
+    "list_files": 10,
+    "run_in_service": 11,
+    "read_file": 21,
+    "delete_file": 3,
+    "edit_file": 7,
+    "restart_service": 6,
+    "http_request": 6,
+    "write_file": 2,
+    "service_logs": 1,
+    "ask_user": 1
+   },
+   "runInServiceCommands": {
+    "git": 2,
+    "npm": 1,
+    "npx": 1,
+    "sh": 3,
+    "grep": 3,
+    "echo": 1
+   }
+  },
+  {
+   "runId": "691a3431",
+   "kind": "테스트 파일 하나와 설정 수정",
+   "status": "done",
+   "turns": 9,
+   "durationMs": 384292,
+   "gateMs": 253552,
+   "toolMs": 47804,
+   "modelMs": 0,
+   "compactionMs": 0,
+   "compactions": 0,
+   "restMs": 82936,
+   "gateRuns": 1,
+   "restarted": [
+    [
+     "commerce",
+     "web"
+    ]
+   ],
+   "checks": [
+    "web / (browser)",
+    "web /shorts (browser)",
+    "web /live/999001 (browser)",
+    "commerce-test",
+    "web-test",
+    "protected-paths"
+   ],
+   "changedFiles": [
+    "apps/web/lib/liveOrder.test.ts",
+    "studio.yaml"
+   ],
+   "firstTurnContextTokens": 130750,
+   "maxContextTokens": 148899,
+   "usage": {
+    "inputTokens": 18,
+    "outputTokens": 4827,
+    "cacheReadTokens": 1282752,
+    "cacheWriteTokens": 19036
+   },
+   "toolCalls": {
+    "read_file": 4,
+    "edit_file": 2,
+    "run_in_service": 2,
+    "restart_service": 1,
+    "http_request": 1
+   },
+   "runInServiceCommands": {
+    "npm": 1,
+    "sh": 1
+   }
+  },
+  {
+   "runId": "0d7ac481",
+   "kind": "화면 배치·문구·제목 수정(파일 7개)",
+   "status": "done",
+   "turns": 58,
+   "durationMs": 1118879,
+   "gateMs": 201676,
+   "toolMs": 125710,
+   "modelMs": 0,
+   "compactionMs": 272554,
+   "compactions": 1,
+   "restMs": 518939,
+   "gateRuns": 1,
+   "restarted": [
+    [
+     "commerce",
+     "web"
+    ]
+   ],
+   "checks": [
+    "web / (browser)",
+    "web /shorts (browser)",
+    "web /live/999001 (browser)",
+    "commerce-test",
+    "web-test",
+    "web apps/web/app/live/[id]/page.tsx (자동, 건너뜀)",
+    "protected-paths"
+   ],
+   "changedFiles": [
+    "apps/web/app/globals.css",
+    "apps/web/app/live/[id]/page.tsx",
+    "apps/web/components/LiveViewer.tsx",
+    "apps/web/lib/liveLogin.test.ts",
+    "apps/web/lib/liveLogin.ts",
+    "media/src/main/java/com/beomsu/becommerce/live/web/LivePlaybackController.java",
+    "media/src/main/java/com/beomsu/becommerce/live/web/LivePlaybackView.java"
+   ],
+   "firstTurnContextTokens": 150355,
+   "maxContextTokens": 165319,
+   "usage": {
+    "inputTokens": 2832,
+    "outputTokens": 56935,
+    "cacheReadTokens": 3877146,
+    "cacheWriteTokens": 253769
+   },
+   "toolCalls": {
+    "read_file": 14,
+    "run_in_service": 51,
+    "list_files": 2,
+    "edit_file": 12,
+    "write_file": 2,
+    "restart_service": 2,
+    "http_request": 3
+   },
+   "runInServiceCommands": {
+    "sed": 8,
+    "sh": 42,
+    "npm": 1
+   }
+  },
+  {
+   "runId": "0d307a50",
+   "kind": "화면 문구 수정(플랫폼 오류로 실패)",
+   "status": "failed",
+   "turns": 13,
+   "durationMs": 351268,
+   "gateMs": 70525,
+   "toolMs": 70580,
+   "modelMs": 0,
+   "compactionMs": 0,
+   "compactions": 0,
+   "restMs": 210163,
+   "gateRuns": 3,
+   "restarted": [
+    [
+     "commerce",
+     "web"
+    ],
+    [
+     "commerce",
+     "web"
+    ],
+    [
+     "commerce",
+     "web"
+    ]
+   ],
+   "checks": [],
+   "changedFiles": [
+    "apps/web/components/LiveViewer.tsx",
+    "studio.yaml"
+   ],
+   "firstTurnContextTokens": 92840,
+   "maxContextTokens": 108611,
+   "usage": {
+    "inputTokens": 26,
+    "outputTokens": 8244,
+    "cacheReadTokens": 1228616,
+    "cacheWriteTokens": 108609
+   },
+   "toolCalls": {
+    "read_file": 2,
+    "run_in_service": 3,
+    "edit_file": 4,
+    "restart_service": 2,
+    "http_request": 1
+   },
+   "runInServiceCommands": {
+    "sh": 2,
+    "npm": 1
+   }
+  },
+  {
+   "runId": "69c35256",
+   "kind": "되살린 변경 확인(파일 1개)",
+   "status": "done",
+   "turns": 7,
+   "durationMs": 266862,
+   "gateMs": 140828,
+   "toolMs": 86650,
+   "modelMs": 0,
+   "compactionMs": 0,
+   "compactions": 0,
+   "restMs": 39384,
+   "gateRuns": 1,
+   "restarted": [
+    [
+     "web"
+    ]
+   ],
+   "checks": [
+    "web / (browser)",
+    "web /shorts (browser)",
+    "web /live/999001 (browser)",
+    "commerce-test",
+    "web-test",
+    "web apps/web/app/live/[id]/page.tsx (자동, 건너뜀)",
+    "protected-paths"
+   ],
+   "changedFiles": [
+    "apps/web/components/LiveViewer.tsx"
+   ],
+   "firstTurnContextTokens": 110504,
+   "maxContextTokens": 128845,
+   "usage": {
+    "inputTokens": 14,
+    "outputTokens": 1752,
+    "cacheReadTokens": 849384,
+    "cacheWriteTokens": 20234
+   },
+   "toolCalls": {
+    "read_file": 6,
+    "run_in_service": 1,
+    "restart_service": 2,
+    "http_request": 2
+   },
+   "runInServiceCommands": {
+    "npm": 1
+   }
+  },
+  {
+   "runId": "5e299658",
+   "kind": "스크립트 실행만(파일 변경 없음)",
+   "status": "done",
+   "turns": 4,
+   "durationMs": 35191,
+   "gateMs": 1,
+   "toolMs": 4701,
+   "modelMs": 0,
+   "compactionMs": 0,
+   "compactions": 0,
+   "restMs": 30489,
+   "gateRuns": 0,
+   "restarted": [],
+   "checks": [],
+   "changedFiles": [],
+   "firstTurnContextTokens": 129635,
+   "maxContextTokens": 133480,
+   "usage": {
+    "inputTokens": 8,
+    "outputTokens": 1340,
+    "cacheReadTokens": 523815,
+    "cacheWriteTokens": 4635
+   },
+   "toolCalls": {
+    "read_file": 1,
+    "run_in_service": 2
+   },
+   "runInServiceCommands": {
+    "sh": 2
+   }
+  }
+ ]
+}

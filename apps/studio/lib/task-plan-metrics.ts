@@ -23,7 +23,7 @@ export interface TaskPlanMetrics {
   bootMsMax: number;
   /** 레인 + 통합 기동 중 받은 바이트 합. 읽지 못한 세션은 0으로 둔다 */
   bootRxBytesTotal: number;
-  /** 모든 실행의 모델 호출 시간 합 */
+  /** 모델 호출 시간 합. 잰 실행만 더한다 — 재지 못하는 러너(Codex·Gemini CLI)의 실행은 들어가지 않는다 */
   modelMs: number;
   /** 모든 실행의 도구 실행 시간 합 */
   toolMs: number;
@@ -93,7 +93,7 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     for (const [model, entry] of Object.entries(value)) addUsageTo((usageByModel[model] ??= emptyUsage()), entry);
   };
   const addRun = (
-    run: { usage?: AgentUsage; metrics?: { modelCalls: number; maxContextTokens: number; modelMs: number; toolMs: number; gateMs: number; usageByModel?: Record<string, AgentUsage> } } | undefined,
+    run: { usage?: AgentUsage; metrics?: { modelCalls: number; maxContextTokens: number; modelMs?: number; toolMs: number; gateMs: number; usageByModel?: Record<string, AgentUsage> } } | undefined,
     countModel = true,
   ): void => {
     if (!run) return;
@@ -105,7 +105,7 @@ export function summarizeTaskPlan(plan: TaskPlanView): TaskPlanMetrics {
     if (!countModel) return;
     modelCalls += run.metrics.modelCalls;
     maxContextTokens = Math.max(maxContextTokens, run.metrics.maxContextTokens);
-    modelMs += run.metrics.modelMs;
+    modelMs += run.metrics.modelMs ?? 0;
   };
 
   // 계획 호출은 실행 기록이 없으므로 호출 수 1과 입력 크기를 직접 더한다

@@ -244,8 +244,8 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
 
   // 도구 호출은 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Agent·Codex 러너와 같은 큐를 쓴다
   const serial = serialQueue();
-  // 실행 지표. modelMs는 그 이벤트에 시간이 있을 때만 더한다(없으면 0 = "재지 않음")
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
+  // 실행 지표. modelMs는 그 이벤트에 시간이 있을 때만 더한다(한 번도 없으면 비워 둔다 = "재지 않음")
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
 
   // 작업 폴더(cwd). project.root를 cwd로 주면 모델이 내장 도구로 작업 공간을 직접 바꿀 수 있다.
   // 상태 폴더를 주면 그 아래 고정 경로를 쓴다 — cmd가 세션을 cwd로 찾으므로 다음 실행에서도 같아야 이어받는다
@@ -411,7 +411,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
             metrics.modelCalls += 1;
             metrics.maxContextTokens = Math.max(metrics.maxContextTokens, contextTokens(parsed.event.usage as CommandCodeUsage));
             const ms = durationOf(parsed.event);
-            if (ms !== undefined) metrics.modelMs += Math.round(ms);
+            if (ms !== undefined) metrics.modelMs = (metrics.modelMs ?? 0) + Math.round(ms);
             break;
           }
           case 'message_end': {

@@ -2267,7 +2267,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     // 계획 호출 토큰을 이 실행의 모델별 사용량에 "계획: <모델>"로 합친다(토큰 탭이 그대로 표로 보여준다).
     // 세션·사람 토큰 한도에는 반영하지 않는다(계획 호출은 실행 루프 밖의 별도 호출이라 그 예산 계산과 겹치면 부정확해진다) — 알려진 한계로 남긴다
     if (planUsage) {
-      const metrics: RunMetrics = result.metrics ?? { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0 };
+      const metrics: RunMetrics = result.metrics ?? { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0 };
       result.metrics = { ...metrics, usageByModel: { ...metrics.usageByModel, [`계획: ${planUsage.model}`]: planUsage.usage } };
     }
 
