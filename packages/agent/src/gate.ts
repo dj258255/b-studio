@@ -145,7 +145,7 @@ export interface GateOptions {
   /** 동시 요청 확인이 세션 서비스에 보내는 요청. 넘기지 않으면 실제 fetch를 쓴다 */
   requestService?: ServiceRequest;
   /**
-   * 자동 화면 확인의 sample 값(sampleParams·sampleIdFrom)만 같은 실행에서 반영하려고 디스크의 studio.yaml을 다시 읽는 함수(ADR-160).
+   * 자동 화면 확인의 sample 값(sampleParams·sampleIdFrom)만 같은 실행에서 반영하려고 디스크의 studio.yaml을 다시 읽는 함수(ADR-159).
    * 넘기지 않으면 이번 실행에서 studio.yaml이 바뀐 때만 `loadProject(project.root)`로 읽는다. 넘기면 자동 화면 확인을 계산할 때마다 부른다
    * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다
    */
@@ -451,7 +451,7 @@ export class VerificationGate {
       };
     }
 
-    // 실행 중에 에이전트가 알려 준 sample 값만 받아들인다. 나머지 설정은 시작 때의 것이다(ADR-160)
+    // 실행 중에 에이전트가 알려 준 sample 값만 받아들인다. 나머지 설정은 시작 때의 것이다(ADR-159)
     const refreshed = await this.#withLatestSampleValues(started);
     const config = refreshed.config;
     const fallbackValue = await this.#dynamicRouteFallback(config);
@@ -484,7 +484,7 @@ export class VerificationGate {
   }
 
   /**
-   * 실행 중에 바뀐 studio.yaml에서 autoPageChecks의 sampleParams·sampleIdFrom만 받아들여 시작 때의 설정 위에 덮어 쓴다(ADR-160).
+   * 실행 중에 바뀐 studio.yaml에서 autoPageChecks의 sampleParams·sampleIdFrom만 받아들여 시작 때의 설정 위에 덮어 쓴다(ADR-159).
    * 어느 화면을 여는지는 바뀐 파일이 정하고 이 값은 그 화면을 어떤 id로 여는지만 정하므로 확인이 줄지 않는다. 그 밖의 값
    * (service·mode·maxPages·followImports·dynamicRouteProbe·expectStatus와 pageChecks·tests 등)은 실행을 시작할 때 고정한다 —
    * 통째로 받으면 에이전트가 검증을 끄거나 약하게 바꿔 비켜 갈 수 있다. 읽지 못하면(형식 오류 등) 시작 때의 값으로 계속하고 그 사실을 notes로 남긴다.

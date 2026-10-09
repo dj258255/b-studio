@@ -389,7 +389,7 @@ workflow:
   - 상한: 역추적 깊이 5단계, 읽는 소스 800개, 훑는 폴더 400개, 전체 10초. 넘으면 거기까지 만든 그래프로 계속하고 이유(읽은 파일 수·걸린 시간 포함)를 건너뜀 check로 남깁니다.
   - 한계: 정규식 기반 근사라 변수로 만든 동적 import·번들러 전용 별칭은 따라가지 못하고, css·json import와 `pages/` 라우터는 보지 않습니다.
 
-**실행 중에 바뀐 값** (ADR-160): `autoPageChecks.sampleParams`와 `autoPageChecks.sampleIdFrom`은 **같은 실행에서 바로 반영됩니다.** 실패 사유가 "실제 값을 알려 달라"고 안내하면 `studio.yaml`에 넣은 직후 다음 검증이 그 값으로 엽니다(새 키는 채우고 같은 키는 새 값으로 바꿉니다). 어느 화면을 여는지는 바뀐 파일이 정하고 이 값은 어떤 id로 여는지만 정하므로 확인이 줄지 않기 때문입니다. `sampleIdFrom.service`는 관리형 서비스여야 하고, 반영한 값은 `web studio.yaml (자동, 건너뜀)` check에 적힙니다. `sampleParams`로 연 화면은 추정한 id가 아니므로 `expectStatus`대로 엄격하게 판정합니다. **그 밖의 설정**(`service`, `mode`, `maxPages`, `followImports`, `dynamicRouteProbe`, `expectStatus`, 선언한 `pageChecks`·`tests` 등)은 실행을 시작할 때의 값으로 고정되어 다음 요청부터 적용됩니다. `studio.yaml`을 다시 읽지 못하면(형식 오류 등) 시작 때의 값으로 계속하고 그 사실이 같은 check에 남습니다.
+**실행 중에 바뀐 값** (ADR-159): `autoPageChecks.sampleParams`와 `autoPageChecks.sampleIdFrom`은 **같은 실행에서 바로 반영됩니다.** 실패 사유가 "실제 값을 알려 달라"고 안내하면 `studio.yaml`에 넣은 직후 다음 검증이 그 값으로 엽니다(새 키는 채우고 같은 키는 새 값으로 바꿉니다). 어느 화면을 여는지는 바뀐 파일이 정하고 이 값은 어떤 id로 여는지만 정하므로 확인이 줄지 않기 때문입니다. `sampleIdFrom.service`는 관리형 서비스여야 하고, 반영한 값은 `web studio.yaml (자동, 건너뜀)` check에 적힙니다. `sampleParams`로 연 화면은 추정한 id가 아니므로 `expectStatus`대로 엄격하게 판정합니다. **그 밖의 설정**(`service`, `mode`, `maxPages`, `followImports`, `dynamicRouteProbe`, `expectStatus`, 선언한 `pageChecks`·`tests` 등)은 실행을 시작할 때의 값으로 고정되어 다음 요청부터 적용됩니다. `studio.yaml`을 다시 읽지 못하면(형식 오류 등) 시작 때의 값으로 계속하고 그 사실이 같은 check에 남습니다.
 
 **건너뛰는 경우** (조용히 사라지지 않고 `ok`인 check로 이유가 남습니다)
 

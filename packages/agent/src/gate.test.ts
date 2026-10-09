@@ -1094,7 +1094,7 @@ describe('VerificationGate api 값 확인', () => {
   });
 });
 
-describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-160)', () => {
+describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () => {
   function nextjs(target: LoadedProject, workflow: Partial<WorkflowSpec>): LoadedProject {
     return {
       ...target,
