@@ -6,6 +6,7 @@
 
 ### 추가
 
+- 게이트의 자동 화면 확인(`autoPageChecks`)이 바뀐 page 파일뿐 아니라 **바뀐 컴포넌트·유틸·layout을 (몇 단계 거쳐) import하는 page**도 찾아 엽니다. 예전에는 `components/OrderSummary.tsx`만 고쳐도 그 컴포넌트를 쓰는 화면이 한 번도 열리지 않은 채 체크포인트가 남았습니다. 서비스 소스의 import(상대 경로·`tsconfig` 별칭·재수출·동적 import)를 가벼운 파서로 거꾸로 따라가며(깊이 5단계, 파일 800개, 10초 상한), 바뀐 page 자체 → 직접 import하는 page → 먼 page 순으로 `maxPages` 안에서 고릅니다. 못 연 페이지와 상한에서 멈춘 사슬은 건너뜀 check로 남고, check 이름에 `(자동, id 추정 · OrderSummary.tsx 변경)`처럼 이유가 붙습니다. `layout`·`template`·`loading`·`error`가 바뀌면 그 폴더 아래 page를 엽니다. 끄려면 `autoPageChecks.followImports: false`(ADR-154).
 - 로컬 CLI 러너가 이어받는 대화에 자동 압축 기준 창을 둡니다. 기본 200,000 토큰이며 `B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW`로 바꾸거나 `0`·`off`로 끌 수 있습니다. 압축이 일어나면 대화에 "대화가 길어져 앞부분을 요약했습니다 · 전 → 후 토큰" 한 줄이 남고, 토큰 보고서 턴 표에도 표시됩니다(ADR-151).
 - QA 탭 안에 "탐색형 QA" 보기를 더했습니다. 목표 문장 하나로 모델이 접근성 트리로 화면을 보고 스스로 클릭·입력하며 그 목표를 수행합니다(사람이 미리 적어 둔 steps를 그대로 재생하는 기존 화면 확인과 다릅니다). 실시간 프레임 위에 지금 누른 요소를 겹쳐 그리고 단계 타임라인(행동·진단 신호·스크린샷 썸네일)을 보여주며, 목표 완료 선언만으로 통과시키지 않고 플랫폼이 진단 신호·확인 문구를 따로 확인해 판정합니다. "이 흐름을 게이트 화면 확인으로 저장" 버튼으로 안정적인 선택자(role+name/data-testid/고유 텍스트)를 가진 행동만 studio.yaml의 pageChecks로 바꿀 수 있습니다. api·로컬 CLI(claude-code) 백엔드만 지원합니다(ADR-127).
 - 개발 화면 실행 탭에 "내 환경" 하위 탭을 더했습니다. 이 프로젝트 폴더에서 사용자가 직접 `docker compose up`으로 띄운 컨테이너(compose 라벨로 b-studio의 샌드박스·운영 배포와 구분합니다)와, studio.yaml이 선언한 포트에서 호스트가 직접 뜬 프로세스(PID·CPU·메모리, Spring Boot Actuator를 열어 두면 최근 로그까지)를 읽기 전용으로 보여줍니다 — 재시작·중지 같은 쓰기 동작은 없고 검증 게이트와도 무관합니다. "배포" 하위 탭은 studio.yaml에 `deploy` 절이 있을 때만 보입니다(ADR-126).

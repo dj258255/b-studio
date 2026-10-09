@@ -1190,6 +1190,122 @@ describe('자동 페이지 확인 (autoPageChecks)', () => {
     expect(check.detail).toContain('추정한 id(1)로 열었더니 HTTP 404');
   });
 
+  it('page가 아닌 컴포넌트만 바뀌어도 그 컴포넌트를 쓰는 페이지를 열고, 500이면 실패한다(import 역추적)', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return url.endsWith('/orders/1') ? { status: 500, text: 'Internal Server Error' } : { status: 200, text: '주문 상세' };
+      },
+    });
+    // page 파일은 이번 실행에서 바뀌지 않았다(디스크에만 있다). 바뀐 것은 그 페이지가 쓰는 컴포넌트뿐이다
+    const pageFile = path.join(workspace.root, 'web/app/orders/[id]/page.tsx');
+    await mkdir(path.dirname(pageFile), { recursive: true });
+    await writeFile(pageFile, "import { OrderSummary } from '@/components/OrderSummary';\nexport default function Page() { return <OrderSummary />; }\n");
+    await workspace.write('web/components/OrderSummary.tsx', 'export function OrderSummary() { return <p>매진</p>; }\n');
+
+    const outcome = await gate.check();
+
+    expect(requested.some((url) => url.endsWith('/orders/1'))).toBe(true);
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((c) => c.name === 'web /orders/1 (자동, id 추정 · OrderSummary.tsx 변경)')!;
+    expect(check).toMatchObject({ stage: 'browser_check', ok: false });
+    expect(check.detail).toContain('HTTP 500');
+  });
+
+  /** page 파일을 이번 실행의 변경으로 기록하지 않고 디스크에만 둔다(이미 있던 페이지) */
+  async function existing(workspace: Workspace, file: string, content: string): Promise<void> {
+    const absolute = path.join(workspace.root, file);
+    await mkdir(path.dirname(absolute), { recursive: true });
+    await writeFile(absolute, content);
+  }
+
+  it('유틸만 바뀌면 컴포넌트를 거쳐 2단계 떨어진 페이지를 열고, 사슬이 깊이 상한(5단계)을 넘으면 건너뜀 check로 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 200, text: '주문 상세' };
+      },
+    });
+    await existing(workspace, 'web/app/orders/[id]/page.tsx', "import { Viewer } from '../../../components/Viewer';\nexport default Viewer;\n");
+    await existing(workspace, 'web/components/Viewer.tsx', "import { pin } from '../lib/pin';\nexport const Viewer = () => pin;\n");
+    await workspace.write('web/lib/pin.ts', 'export const pin = 1;\n');
+    // 사슬이 긴 쪽: deep0 <- deep1 <- ... <- deep6 <- 페이지(7단계)
+    for (let i = 0; i < 7; i++) await existing(workspace, `web/lib/deep${i}.ts`, i === 0 ? '' : `import './deep${i - 1}';\n`);
+    await existing(workspace, 'web/app/far/page.tsx', "import '../../lib/deep6';\nexport default function P() { return null; }\n");
+    await workspace.write('web/lib/deep0.ts', 'export const deep = 1;\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+
+    expect(requested.some((url) => url.endsWith('/orders/1'))).toBe(true);
+    expect(requested.some((url) => url.endsWith('/far'))).toBe(false);
+    expect(gate.checks.find((c) => c.name === 'web /orders/1 (자동, id 추정 · pin.ts 변경)')!.ok).toBe(true);
+    const stopped = gate.checks.find((c) => c.name === 'web web/lib/deep0.ts (자동, 건너뜀)')!;
+    expect(stopped).toMatchObject({ stage: 'browser_check', ok: true });
+    expect(stopped.detail).toContain('5단계까지 따라갔고');
+    expect(stopped.detail).toContain('깊이 상한');
+  });
+
+  it('공용 파일이 여러 페이지에 쓰이면 maxPages 안에서 가까운 것부터 열고 못 연 경로를 건너뜀 check에 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ maxPages: 2 }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 200, text: 'ok' };
+      },
+    });
+    for (const name of ['a', 'b', 'c', 'd']) {
+      await existing(workspace, `web/app/${name}/page.tsx`, "import { fmt } from '@/lib/format';\nexport default function P() { return fmt; }\n");
+    }
+    await workspace.write('web/lib/format.ts', 'export const fmt = 1;\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+
+    expect(requested.filter((url) => /\/[a-d]$/.test(url)).sort()).toEqual([expect.stringMatching(/\/a$/), expect.stringMatching(/\/b$/)]);
+    const skipped = gate.checks.find((c) => c.name === 'web web/lib/format.ts (자동, 건너뜀)')!;
+    expect(skipped.ok).toBe(true);
+    expect(skipped.detail).toContain('페이지 2개');
+    expect(skipped.detail).toContain('/c, /d');
+  });
+
+  it('followImports: false이면 바뀐 컴포넌트를 쓰는 페이지를 찾지 않는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto({ followImports: false }) });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 500, text: 'Internal Server Error' };
+      },
+    });
+    await existing(workspace, 'web/app/orders/page.tsx', "import { V } from '@/components/V';\nexport default V;\n");
+    await workspace.write('web/components/V.tsx', 'export const V = () => null;\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.some((url) => url.endsWith('/orders'))).toBe(false);
+  });
+
+  it('layout이 바뀌면 그 폴더의 페이지를 연다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => {
+        requested.push(url);
+        return { status: 200, text: 'ok' };
+      },
+    });
+    await existing(workspace, 'web/app/page.tsx', 'export default function P() { return null; }\n');
+    await existing(workspace, 'web/app/shop/page.tsx', 'export default function P() { return null; }\n');
+    await workspace.write('web/app/layout.tsx', 'export default function L({ children }) { return children; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requested.filter((url) => url.endsWith('/') || url.endsWith('/shop')).length).toBe(2);
+    expect(gate.checks.some((c) => c.name === 'web /shop (자동 · layout.tsx 변경)' && c.ok)).toBe(true);
+  });
+
   it('id를 추정해 연 동적 경로는 404·500이 아니면 다른 상태 코드라도 실패로 보지 않는다', async () => {
     const target = nextjs(project, { autoPageChecks: auto() });
     const { gate, workspace } = await setup(target, { page: async () => ({ status: 403, text: '접근 권한이 없습니다' }) });

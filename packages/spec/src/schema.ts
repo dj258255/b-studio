@@ -476,6 +476,11 @@ export const AutoPageChecksSchema = z
     dynamicRouteProbe: z.boolean().optional(),
     /** dynamicRouteProbe가 켜져 있을 때, 이 api를 불러 jsonPath로 꺼낸 첫 값을 기본값('1') 대신 쓴다(목록 api에서 실제 id를 뽑을 때) */
     sampleIdFrom: WorkflowPageExpectFromApiSchema.optional(),
+    /**
+     * ADR-154. page 파일이 아니라 컴포넌트·유틸·layout만 바뀐 실행에서도, 그 파일을 (몇 단계 거쳐) import하는 page를 찾아 연다.
+     * 생략하면 켠 것과 같다. false로 끄면 예전처럼 바뀐 page 파일만 본다
+     */
+    followImports: z.boolean().optional(),
   })
   .superRefine((config, ctx) => {
     if (config.viewport && config.mode !== 'browser') {

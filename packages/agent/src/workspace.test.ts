@@ -22,6 +22,22 @@ describe('Workspace', () => {
     expect(await workspace.list()).toEqual(['api/', 'api/src/', 'api/src/App.java', 'web/']);
   });
 
+  it('peek은 읽은 표시를 남기지 않아, 그 뒤 밖에서 바뀐 파일도 쓰기를 막지 않는다(read는 막는다)', async () => {
+    // 게이트가 훑어본 파일(peek)은 에이전트가 읽은 것이 아니므로 낡은 읽기 검사 대상이 아니다
+    expect(await workspace.peek('api/src/App.java')).toContain('class App');
+    await writeFile(path.join(root, 'api/src/App.java'), 'class App { /* 밖에서 고침 */ }\n');
+    await workspace.write('api/src/App.java', 'class App { int c = 1; }\n');
+    expect(await readFile(path.join(root, 'api/src/App.java'), 'utf8')).toBe('class App { int c = 1; }\n');
+
+    // read로 읽은 파일은 기존처럼 밖에서 바뀌면 다시 읽으라고 거절한다
+    await workspace.read('api/src/App.java');
+    await writeFile(path.join(root, 'api/src/App.java'), 'class App { /* 또 고침 */ }\n');
+    await expect(workspace.write('api/src/App.java', 'x')).rejects.toThrow('다시 읽고');
+    // peek도 read와 같은 경로 제한을 따른다
+    await expect(workspace.peek('.env')).rejects.toThrow(WorkspaceError);
+    await expect(workspace.peek('../outside.txt')).rejects.toThrow(WorkspaceError);
+  });
+
   it('프로젝트 밖, 절대 경로, 거부된 경로를 막는다', async () => {
     await expect(workspace.read('../outside.txt')).rejects.toThrow(WorkspaceError);
     await expect(workspace.read('/etc/hosts')).rejects.toThrow(WorkspaceError);

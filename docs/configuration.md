@@ -292,7 +292,7 @@ workflow:
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
 | `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `expectAnyText`는 그중 **하나라도 있으면 통과**하는 문구 목록(1~5개)입니다(같은 값의 표기가 갈릴 때, 예: `45000`/`45,000`). `expectAllText`는 **모두 있어야 통과**하는 문구 목록(1~5개)이고, 실패하면 빠진 문구만 알립니다(한 화면에 여러 값이 함께 보여야 할 때, 예: 샘플 주문 세 건의 고객 이름). `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다. `expectFromApi`를 적으면 api를 먼저 불러 그 값이 화면 글자에 있는지 확인합니다(아래 'api 값 확인') |
 | `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
-| `autoPageChecks` | **이번 실행에서 바뀐 Next.js 페이지를 게이트가 스스로 찾아 열어 봅니다**(선택, 기본 없음). `service`는 `source: managed`이면서 템플릿이 `nextjs`여야 합니다. 아래 '바뀐 페이지 자동 확인' |
+| `autoPageChecks` | **이번 실행에서 바뀐 Next.js 페이지(와 바뀐 컴포넌트·유틸을 쓰는 페이지)를 게이트가 스스로 찾아 열어 봅니다**(선택, 기본 없음). `service`는 `source: managed`이면서 템플릿이 `nextjs`여야 합니다. 아래 '바뀐 페이지 자동 확인' |
 | `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
@@ -372,14 +372,22 @@ workflow:
     sampleParams: { id: "1" }
     # browser 모드에서만
     viewport: { width: 390, height: 844 }
+    # 바뀐 컴포넌트·유틸·layout을 import하는 page도 엽니다(기본 켬). false면 바뀐 page 파일만 봅니다
+    followImports: true
 ```
 
-**찾는 규칙** (서비스 폴더 기준, `page` 파일만)
+**찾는 규칙** (서비스 폴더 기준)
 
 - `app/**/page.tsx|jsx|ts|js|mdx`와 `src/app/**/page.*`를 찾습니다.
 - 라우트 그룹 `(marketing)`은 주소에서 빼고, 동적 세그먼트 `[id]`는 `sampleParams` 값으로 채워 엽니다(`encodeURIComponent`).
 - 같은 경로를 만드는 파일이 여럿이면 하나만 열고, 경로 순으로 정렬해 `maxPages`까지만 엽니다.
 - `pageChecks`에 **이미 선언한 `service`+`path`는 두 번 열지 않습니다**(건너뜀 check로 남습니다).
+- **바뀐 파일이 page가 아니어도 찾습니다**(`followImports`, 기본 켬, ADR-154). `components/OrderSummary.tsx`나 `lib/format.ts`처럼 page가 아닌 소스(ts·tsx·js·jsx·mjs·mdx)가 바뀌면, 서비스 폴더의 소스를 읽어 import를 거꾸로 따라가 그 파일을 (직접 또는 몇 단계 거쳐) 쓰는 page를 엽니다. check 이름에 `web /orders/1 (자동, id 추정 · OrderSummary.tsx 변경)`처럼 어떤 파일의 변경 때문에 열었는지 붙습니다.
+  - import는 상대 경로, 서비스 `tsconfig.json`/`jsconfig.json`의 `paths`·`baseUrl`(못 읽으면 `@/`를 서비스 루트와 `src/`로 시도), 재수출, 정적·동적 `import('…')`를 따라갑니다. 주석·문자열 안의 가짜 import는 무시하고, `node_modules`·`.next`·빌드 산출물과 테스트·스토리 파일은 읽지 않으며, 서비스 폴더 밖으로 나가는 경로는 따라가지 않습니다.
+  - `layout`·`template`·`loading`·`error`·`not-found`가 바뀌면(또는 바뀐 파일이 그 파일에 닿으면) 그 폴더 아래의 모든 page가 후보입니다.
+  - 고르는 순서: 바뀐 page 자체 → 바뀐 파일을 직접 import하는 page → 거리가 먼 page. `maxPages`를 넘으면 가까운 것부터 열고, 못 연 경로는 건너뜀 check에 적습니다.
+  - 상한: 역추적 깊이 5단계, 읽는 소스 800개, 훑는 폴더 400개, 전체 10초. 넘으면 거기까지 만든 그래프로 계속하고 이유(읽은 파일 수·걸린 시간 포함)를 건너뜀 check로 남깁니다.
+  - 한계: 정규식 기반 근사라 변수로 만든 동적 import·번들러 전용 별칭은 따라가지 못하고, css·json import와 `pages/` 라우터는 보지 않습니다.
 
 **건너뛰는 경우** (조용히 사라지지 않고 `ok`인 check로 이유가 남습니다)
 
@@ -390,6 +398,8 @@ workflow:
 | `(.)`·`(..)`(인터셉트 라우트) | 화면 주소가 아닙니다 |
 | `sampleParams`에 값이 없는 `[id]` | `동적 세그먼트 'id'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요` |
 | `maxPages`를 넘은 페이지 | 상한(N개)을 넘었습니다 |
+| import 역추적 중 상한에 걸린 경우 | 깊이(5단계)·파일 수·폴더 수·시간 상한에서 멈췄고, 그 너머의 페이지는 확인하지 못했습니다 |
+| `maxPages`를 넘은 import 역추적 후보 | 바뀐 파일마다 한 줄로 묶어 못 연 경로를 적습니다 |
 
 **무엇을 확인하나**
 
