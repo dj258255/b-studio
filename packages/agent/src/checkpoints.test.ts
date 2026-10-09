@@ -805,31 +805,6 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(mixed.outsideFiles).toBe(1);
   });
 
-  it('changedBetween은 두 체크포인트 사이에 바뀐 경로를 프로젝트 기준으로, 폴더 밖 변경은 수로 돌려준다(여러 커밋에 걸쳐도, 이름 바꾸기도)', async () => {
-    const { source, workDir } = await createSourceRepository();
-    const { store, projectRoot } = await CheckpointStore.clone(path.join(source, 'api'), workDir, { branch: BRANCH, allowSubfolder: true });
-    const base = (await store.list())[0]!;
-
-    await mkdir(path.join(projectRoot, 'docs'), { recursive: true });
-    await writeFile(path.join(projectRoot, 'docs/requirements.md'), '# 요구사항\n');
-    const first = (await store.commitPaths(['docs/requirements.md'], '문서: 요구사항', undefined, { trailers: [formatVerifyTrailer('docs')] }))!;
-    await writeFile(path.join(projectRoot, 'docs/requirements.md'), '# 요구사항\n고침\n');
-    const second = (await store.commitPaths(['docs/requirements.md'], '문서: 요구사항 고침', undefined, { trailers: [formatVerifyTrailer('docs')] }))!;
-    // 문서만 바뀐 두 커밋 사이: 그 파일 하나뿐이다
-    expect(await store.changedBetween(base.sha, second.sha)).toEqual({ files: ['docs/requirements.md'], outsideFiles: 0 });
-    expect(await store.changedBetween(first.sha, first.sha)).toEqual({ files: [], outsideFiles: 0 });
-
-    // 그 뒤에 코드와 프로젝트 폴더 밖 파일이 바뀌면 둘 다 드러난다
-    await writeFile(path.join(projectRoot, 'Order.java'), 'class Order { String memo; }\n');
-    await writeFile(path.join(workDir, 'README.md'), '# orders\n폴더 밖 변경\n');
-    await git(workDir, 'add', '-A');
-    await git(workDir, '-c', 'user.name=b-studio', '-c', 'user.email=checkpoints@b-studio.local', 'commit', '-q', '-m', '섞인 커밋');
-    const mixed = (await store.list())[0]!;
-    const between = await store.changedBetween(base.sha, mixed.sha);
-    expect(between.files.sort()).toEqual(['Order.java', 'docs/requirements.md']);
-    expect(between.outsideFiles).toBe(1);
-  });
-
   it('문서 체크포인트 표시를 단 커밋이 코드 파일을 문서 이름으로 옮겼으면, 목록에는 새 이름만 보여도 outsideFiles로 드러난다', async () => {
     const { source, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
