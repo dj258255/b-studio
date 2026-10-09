@@ -8,9 +8,10 @@ import { AUTO_PAGE_DEFAULT, AUTO_PAGE_MAX } from '@b-studio/spec';
  * 경로를 유도한다.
  *
  * 범위(한계):
- *  - **page 파일만 본다.** 같은 폴더의 layout·loading·error만 바뀐 경우는 열지 않는다 —
- *    그 폴더에 페이지 파일이 실제로 있는지 작업 공간에서 싸게 알 방법이 없고(존재 확인은 비동기 읽기),
- *    그런 변경은 대개 page 파일도 함께 바뀐다. 필요해지면 그때 workspace를 넘겨받아 넓힌다.
+ *  - `routesFromChangedFiles`는 **바뀐 page 파일만** 본다. 컴포넌트·유틸·layout만 바뀐 실행은 `routesFromCandidates`가 맡는다 —
+ *    게이트가 서비스 소스의 import를 거꾸로 따라가(import-graph.ts, ADR-154) 찾은 "바뀐 파일을 쓰는 page"를 거리순으로 받아
+ *    같은 규칙으로 경로를 만든다. 그 추적의 한계(정규식 기반 근사, 별칭·동적 import 범위, 깊이·파일 수·시간 상한)는 import-graph.ts 머리 주석 참고.
+ *  - layout·template·loading·error·not-found가 바뀌면 그 폴더 아래의 page를 대상으로 삼는다(폴더가 얕은 page 먼저, `maxPages` 안에서).
  *  - app 라우터(`app/**`·`src/app/**`)만 본다. pages 라우터는 다루지 않는다.
  *  - 파일이 있다는 것만 본다(빌드·타입 검사는 게이트의 다른 단계가 맡는다).
  */
@@ -25,6 +26,10 @@ export interface NextRoute {
    * 값이 있으면 호출자는 이 경로가 "추정한 id"로 열렸다는 뜻으로, 404·500만 실패로 보는 등 관대하게 판정해야 한다
    */
   usedFallbackParams?: string[];
+  /** import 역추적으로 찾은 경로면 이 page를 열게 한 바뀐 파일(프로젝트 루트 기준). page 파일 자체가 바뀐 것이면 없다 */
+  cause?: string;
+  /** import 역추적으로 찾은 경로면 바뀐 파일에서 page까지의 import 단계 수(1 이상) */
+  distance?: number;
 }
 
 export interface SkippedNextRoute {
@@ -89,6 +94,40 @@ function normalizePath(value: string): string {
     .replace(/\/$/, '');
 }
 
+/** 서비스 기준 page 파일 경로(`app/orders/[id]/page.tsx`)에서 열 경로를 만든다. 만들 수 없으면 이유를 돌려준다 */
+function routeFromPage(
+  relative: string,
+  sampleParams: Readonly<Record<string, string>>,
+  fallbackValue: string | undefined,
+): { path: string; usedFallbackParams: string[] } | { reason: string } | undefined {
+  const match = PAGE_FILE.exec(relative);
+  if (!match) return undefined;
+  const folder = (match[1] ?? '').replace(/\/$/, '');
+  const segments = folder === '' ? [] : folder.split('/');
+  const parts: string[] = [];
+  const usedFallback: string[] = [];
+  for (const segment of segments) {
+    const classified = classify(segment);
+    if (classified.kind === 'skip') return { reason: classified.reason };
+    if (classified.kind === 'group') continue;
+    if (classified.kind === 'dynamic') {
+      const value = sampleParams[classified.name];
+      if (value !== undefined && value !== '') {
+        parts.push(encodeURIComponent(value));
+        continue;
+      }
+      if (fallbackValue !== undefined && isIdLikeSegment(classified.name)) {
+        parts.push(encodeURIComponent(fallbackValue));
+        usedFallback.push(classified.name);
+        continue;
+      }
+      return { reason: `동적 세그먼트 '${classified.name}'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요` };
+    }
+    parts.push(segment);
+  }
+  return { path: `/${parts.join('/')}`, usedFallbackParams: usedFallback };
+}
+
 /**
  * 바뀐 파일에서 열어 볼 페이지를 고른다.
  *  - 서비스 폴더(`servicePath`) 밖의 파일은 보지 않는다
@@ -113,43 +152,14 @@ export function routesFromChangedFiles(
     // 서비스 폴더 밖의 파일은 이 서비스의 페이지가 아니다
     const relative = prefix === '' || prefix === '.' ? file : file.startsWith(`${prefix}/`) ? file.slice(prefix.length + 1) : undefined;
     if (relative === undefined) continue;
-    const match = PAGE_FILE.exec(relative);
-    if (!match) continue;
-
-    const folder = (match[1] ?? '').replace(/\/$/, '');
-    const segments = folder === '' ? [] : folder.split('/');
-    const parts: string[] = [];
-    const usedFallback: string[] = [];
-    let reason: string | undefined;
-    for (const segment of segments) {
-      const classified = classify(segment);
-      if (classified.kind === 'skip') {
-        reason = classified.reason;
-        break;
-      }
-      if (classified.kind === 'group') continue;
-      if (classified.kind === 'dynamic') {
-        const value = sampleParams[classified.name];
-        if (value !== undefined && value !== '') {
-          parts.push(encodeURIComponent(value));
-          continue;
-        }
-        if (fallbackValue !== undefined && isIdLikeSegment(classified.name)) {
-          parts.push(encodeURIComponent(fallbackValue));
-          usedFallback.push(classified.name);
-          continue;
-        }
-        reason = `동적 세그먼트 '${classified.name}'의 값이 없습니다 — autoPageChecks.sampleParams에 넣으세요`;
-        break;
-      }
-      parts.push(segment);
-    }
-    if (reason !== undefined) {
-      skipped.push({ file, reason });
+    const built = routeFromPage(relative, sampleParams, fallbackValue);
+    if (built === undefined) continue;
+    if ('reason' in built) {
+      skipped.push({ file, reason: built.reason });
       continue;
     }
-    const path = `/${parts.join('/')}`;
-    if (!routes.has(path)) routes.set(path, { path, file, ...(usedFallback.length > 0 ? { usedFallbackParams: usedFallback } : {}) });
+    const { path, usedFallbackParams } = built;
+    if (!routes.has(path)) routes.set(path, { path, file, ...(usedFallbackParams.length > 0 ? { usedFallbackParams } : {}) });
   }
 
   const sorted = [...routes.values()].sort((a, b) => a.path.localeCompare(b.path));
@@ -157,4 +167,78 @@ export function routesFromChangedFiles(
     skipped.push({ file: route.file, reason: `한 번에 열어 보는 페이지 상한(${limit}개)을 넘었습니다 — autoPageChecks.maxPages를 늘리세요` });
   }
   return { routes: sorted.slice(0, limit), skipped };
+}
+
+/** import 역추적이 찾은 "열어 볼 page" 후보. 파일 경로는 모두 서비스 폴더 기준이다 */
+export interface RouteCandidate {
+  page: string;
+  /** 이 page를 열게 한 바뀐 파일 */
+  cause: string;
+  /** 바뀐 파일에서 page까지의 import 단계 수. 0이면 바뀐 page 자체 */
+  distance: number;
+  /** 같은 거리끼리의 순서(작을수록 먼저) */
+  tie?: number;
+}
+
+/** 상한 때문에 못 연 페이지를 한 줄로 남길 때 이름을 몇 개까지 적을지 */
+const OVERFLOW_NAMES = 8;
+
+/**
+ * import 역추적으로 모은 후보에서 열어 볼 페이지를 고른다. 우선순위: (a) 바뀐 page 자체(거리 0), (b) 바뀐 파일을 직접 import하는 page(거리 1),
+ * (c) 거리가 먼 page 순 — 같은 거리에서는 `tie`, 그다음 파일 경로 순. 경로 하나는 한 번만 열고(가장 가까운 후보), `maxPages`를 넘는 것은 skipped에 남긴다.
+ *  - 상한을 넘은 거리 0 후보는 `routesFromChangedFiles`처럼 페이지마다 한 줄로 남긴다
+ *  - 상한을 넘은 거리 1 이상 후보는 바뀐 파일마다 한 줄로 묶어 어떤 경로를 못 열었는지 적는다(공용 파일이 수십 페이지를 끌어와도 결과가 길어지지 않게)
+ * 돌려주는 `file`·`cause`는 프로젝트 루트 기준이다.
+ */
+export function routesFromCandidates(
+  candidates: readonly RouteCandidate[],
+  servicePath: string,
+  sampleParams: Readonly<Record<string, string>> = {},
+  maxPages: number = AUTO_PAGE_DEFAULT,
+  fallbackValue?: string,
+): NextRoutes {
+  const prefix = normalizePath(servicePath);
+  const limit = Math.max(1, Math.min(Math.floor(maxPages), AUTO_PAGE_MAX));
+  const toProject = (inService: string): string => (prefix === '' || prefix === '.' ? inService : `${prefix}/${inService}`);
+  const ordered = [...candidates].sort((a, b) => a.distance - b.distance || (a.tie ?? 0) - (b.tie ?? 0) || a.page.localeCompare(b.page));
+
+  const routes: NextRoute[] = [];
+  const skipped: SkippedNextRoute[] = [];
+  const seen = new Set<string>();
+  const overflow = new Map<string, { paths: string[] }>();
+  for (const candidate of ordered) {
+    const built = routeFromPage(candidate.page, sampleParams, fallbackValue);
+    if (built === undefined) continue;
+    const file = toProject(candidate.page);
+    const cause = toProject(candidate.cause);
+    if ('reason' in built) {
+      skipped.push({ file, reason: candidate.distance > 0 ? `${built.reason} (${cause} 변경으로 찾은 페이지)` : built.reason });
+      continue;
+    }
+    if (seen.has(built.path)) continue;
+    seen.add(built.path);
+    if (routes.length < limit) {
+      routes.push({
+        path: built.path,
+        file,
+        ...(built.usedFallbackParams.length > 0 ? { usedFallbackParams: built.usedFallbackParams } : {}),
+        ...(candidate.distance > 0 ? { cause, distance: candidate.distance } : {}),
+      });
+    } else if (candidate.distance === 0) {
+      skipped.push({ file, reason: `한 번에 열어 보는 페이지 상한(${limit}개)을 넘었습니다 — autoPageChecks.maxPages를 늘리세요` });
+    } else {
+      const entry = overflow.get(cause) ?? { paths: [] };
+      entry.paths.push(built.path);
+      overflow.set(cause, entry);
+    }
+  }
+  for (const [cause, entry] of overflow) {
+    const shown = entry.paths.slice(0, OVERFLOW_NAMES).join(', ');
+    const rest = entry.paths.length > OVERFLOW_NAMES ? ` 외 ${entry.paths.length - OVERFLOW_NAMES}개` : '';
+    skipped.push({
+      file: cause,
+      reason: `${cause} 변경을 쓰는 페이지 ${entry.paths.length}개를 한 번에 열어 보는 페이지 상한(${limit}개) 때문에 열지 못했습니다: ${shown}${rest} — autoPageChecks.maxPages를 늘리면 더 엽니다`,
+    });
+  }
+  return { routes, skipped };
 }
