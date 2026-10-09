@@ -565,6 +565,20 @@ export class CheckpointStore {
   }
 
   /**
+   * 체크포인트(기본 HEAD)에 커밋된 파일 내용(프로젝트 폴더 기준 경로). 그 시점에 파일이 없으면 undefined.
+   * 작업 복사본이 아니라 커밋된 값을 읽으므로, 에이전트가 작업 트리에서 바꾼 것과 무관한 "믿을 수 있는 기준"이다
+   * (요구사항 문서의 사람 확인 기록 되돌리기, ADR-157).
+   */
+  async fileAt(file: string, ref = 'HEAD'): Promise<string | undefined> {
+    const subdir = await this.#subdir();
+    const target = subdir ? `${subdir}/${file}` : file;
+    return this.#git(['show', `${ref}:${target}`]).then(
+      (out) => out,
+      () => undefined,
+    );
+  }
+
+  /**
    * 이 세션 기록에 있는 체크포인트로 되돌린다. 그 뒤의 체크포인트는 기록(reflog)에 남아 되찾을 길이 있지만,
    * 아직 체크포인트로 남기지 않은 변경(pending)은 이대로면 영영 사라지므로 버리기 전에 백업한다(ADR-099).
    * 돌려주는 파일 목록으로 어떤 서비스를 재시작할지 정한다.

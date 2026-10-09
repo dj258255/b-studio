@@ -847,6 +847,20 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(await store.pendingFiles()).toEqual(['api/src/Order.java']);
   });
 
+  it('fileAt은 커밋된 파일 내용을 읽고, 작업 트리에서 바뀐 값이나 없는 파일에는 속지 않는다(ADR-157)', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    expect(await store.fileAt('docs/requirements.md')).toBeUndefined();
+
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/requirements.md'), '# 요구사항\n');
+    await store.commitPaths(['docs/requirements.md'], '문서: 요구사항');
+
+    // 작업 트리를 고쳐도 커밋된 값을 돌려준다
+    await writeFile(path.join(workDir, 'docs/requirements.md'), '# 바꾼 값\n');
+    expect(await store.fileAt('docs/requirements.md')).toBe('# 요구사항\n');
+  });
+
   it('commitPaths도 시크릿 값이 든 파일은 커밋하지 않는다', async () => {
     const { source, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });

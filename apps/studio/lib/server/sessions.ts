@@ -93,6 +93,10 @@ import {
   requestQuestionRecommendations,
   requestRequirementsExtraction,
   REQUIREMENTS_FILE,
+  describeVerificationTamper,
+  diffVerificationRecords,
+  hasVerificationTamper,
+  restoreVerificationRecords,
   RequirementSchema,
   requirementConfidence,
   requirementVerificationSource,
@@ -133,6 +137,7 @@ import {
   type CliTier,
   verifyChanges,
   workflowStages,
+  readRegularFileSync,
   Workspace,
   adrFilePath,
   appendExperimentEntry,
@@ -1269,6 +1274,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     const previous = (await checkpoints.list())[0]!;
     let discarded: string[] = [];
     let discardBackup: DiscardBackup | undefined;
+    let restoredRecords: string[] = [];
     let localEdits: Checkpoint | undefined;
     if (local) {
       // 샌드박스를 멈춘 동안 IDE에서 고친 파일일 수 있어 버리지 않고 체크포인트로 남긴다
@@ -1281,9 +1287,10 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-099)
       // 남은 변경은 되살릴 수 있게 백업한 뒤에야 마지막 체크포인트에서 시작한다
       const redactor = new Redactor(secrets);
-      const { docsCheckpoint, files, backup } = await discardWorkingCopy(checkpoints, (text) => redactor.find(text));
+      const { docsCheckpoint, files, backup, restoredRecords: restored } = await discardWorkingCopy(checkpoints, projectRoot, (text) => redactor.find(text));
       discarded = files;
       discardBackup = backup;
+      restoredRecords = restored;
       if (docsCheckpoint) history = [...history, { type: 'docs_checkpoint', checkpoint: docsCheckpoint }];
     }
     const list = await checkpoints.list();
@@ -1351,6 +1358,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     if (addedServices.length > 0) {
       emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
     }
+    if (restoredRecords.length > 0) emit(session, { type: 'notice', text: verificationRestoredNotice(restoredRecords), at: new Date().toISOString() });
 
     archived.delete(id);
     store.sessions.set(id, session);
@@ -2825,7 +2833,8 @@ async function revertRun(
 ): Promise<string[]> {
   const dbRestorePoint = session.snapshot.checkpoints[0]!.sha;
   // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
-  const { docsCheckpoint, files, patch, backup } = await discardWorkingCopy(session.checkpoints, (text) => session.sandbox.findSecrets(text));
+  const { docsCheckpoint, files, patch, backup, restoredRecords } = await discardWorkingCopy(session.checkpoints, session.project.root, (text) => session.sandbox.findSecrets(text));
+  if (restoredRecords.length > 0) emit(session, { type: 'notice', text: verificationRestoredNotice(restoredRecords), at: new Date().toISOString() });
   if (docsCheckpoint) {
     session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
     emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
@@ -2909,14 +2918,53 @@ export function isDocPath(file: string): boolean {
 // 나쁘다) 여기서 손대지 않고, CheckpointStore.restore()의 백업만으로 지킨다.
 // ---------------------------------------------------------------------------
 
+/**
+ * 게이트를 거치지 않고 문서를 체크포인트로 남기는 안전망 앞에서, 작업 복사본의 요구사항 문서에 에이전트가 써넣은 검증 기록
+ * (사람 확인, 재확인 판정 필드)을 마지막 체크포인트의 값으로 되돌려 적는다(ADR-157). 안 그러면 게이트가 막은 실행이나 끊긴
+ * 실행의 위조 기록이 "문서를 지키는" 체크포인트에 실려 "검증됨(사람 확인)"으로 굳는다. 요구사항 본문 편집은 그대로 둔다.
+ * 기준은 마지막 체크포인트에 커밋된 값(화면의 사람 확인은 문서 체크포인트로 커밋되므로 그대로 남는다)이다.
+ * 되돌린 내용을 설명하는 줄을 돌려준다(없으면 빈 배열). 문서 체크포인트 커밋이 실패해 아직 커밋되지 않은 채 남은
+ * 화면의 사람 확인은 되돌려지므로 화면에서 다시 눌러야 한다 — 대화에 되돌렸다고 남긴다.
+ */
+async function restoreForgedVerificationRecords(checkpoints: CheckpointStore, projectRoot: string): Promise<string[]> {
+  if (!(await checkpoints.pendingFiles()).includes(REQUIREMENTS_FILE)) return [];
+  const file = path.join(projectRoot, REQUIREMENTS_FILE);
+  const read = readRegularFileSync(file);
+  if (read.kind === 'missing') return [];
+  const committed = await checkpoints.fileAt(REQUIREMENTS_FILE);
+  if (read.kind === 'irregular') {
+    // 문서 자리에 링크·FIFO·거대한 파일이 놓였다. 그대로 커밋하면 링크 너머의 내용이 요구사항으로 읽히므로, 그 항목만
+    // 치우고(링크는 가리키는 대상이 아니라 링크 자신을 지운다) 마지막 체크포인트의 문서를 일반 파일로 되돌려 놓는다
+    await rm(file, { force: true }).catch(() => {});
+    if (committed !== undefined) await writeFile(file, committed).catch(() => {});
+    return [`요구사항 문서를 읽을 수 없는 꼴이어서(${read.reason}) 마지막 체크포인트의 문서로 되돌렸습니다`];
+  }
+  const working = read.content;
+  const diff = diffVerificationRecords(committed, working);
+  if (!hasVerificationTamper(diff)) return [];
+  await writeFile(file, restoreVerificationRecords(committed, working));
+  return describeVerificationTamper(diff);
+}
+
+/** 되돌린 검증 기록을 대화에 알리는 문구 */
+function verificationRestoredNotice(lines: readonly string[]): string {
+  return `요구사항 문서의 검증 기록을 마지막 체크포인트의 값으로 되돌려 적었습니다. 사람 확인은 화면에서 사람만 남길 수 있습니다 — ${lines.join(' / ')}`;
+}
+
 /** discard() 직전에 문서 경로(docs/** 등)만 먼저 체크포인트로 남긴다. 남길 문서가 없으면 아무것도 하지 않는다(undefined) */
-async function protectPendingDocsBeforeDiscard(checkpoints: CheckpointStore, findSecrets: (text: string) => string[]): Promise<Checkpoint | undefined> {
+async function protectPendingDocsBeforeDiscard(
+  checkpoints: CheckpointStore,
+  projectRoot: string,
+  findSecrets: (text: string) => string[],
+): Promise<{ checkpoint?: Checkpoint; restoredRecords: string[] }> {
+  const restoredRecords = await restoreForgedVerificationRecords(checkpoints, projectRoot);
   const pending = (await checkpoints.pendingFiles()).filter(isDocPath);
-  if (pending.length === 0) return undefined;
-  return checkpoints.commitPaths(pending, '지키기: 되돌리기 전에 문서를 체크포인트로 남긴다', undefined, {
+  if (pending.length === 0) return { restoredRecords };
+  const checkpoint = await checkpoints.commitPaths(pending, '지키기: 되돌리기 전에 문서를 체크포인트로 남긴다', undefined, {
     findSecrets,
     trailers: [formatVerifyTrailer('docs')],
   });
+  return { checkpoint, restoredRecords };
 }
 
 /**
@@ -2925,11 +2973,12 @@ async function protectPendingDocsBeforeDiscard(checkpoints: CheckpointStore, fin
  */
 async function discardWorkingCopy(
   checkpoints: CheckpointStore,
+  projectRoot: string,
   findSecrets: (text: string) => string[],
-): Promise<{ docsCheckpoint?: Checkpoint; files: string[]; patch: string; backup?: DiscardBackup }> {
-  const docsCheckpoint = await protectPendingDocsBeforeDiscard(checkpoints, findSecrets);
+): Promise<{ docsCheckpoint?: Checkpoint; files: string[]; patch: string; backup?: DiscardBackup; restoredRecords: string[] }> {
+  const { checkpoint: docsCheckpoint, restoredRecords } = await protectPendingDocsBeforeDiscard(checkpoints, projectRoot, findSecrets);
   const { files, patch, backup } = await checkpoints.discard();
-  return { docsCheckpoint, files, patch, backup };
+  return { docsCheckpoint, files, patch, backup, restoredRecords };
 }
 
 /** "체크포인트에 없던 변경 N개를 버렸습니다/백업했습니다" 안내문. files가 비어 있으면 빈 문자열 */
@@ -2974,6 +3023,9 @@ export async function commitWorkingCopyDocs(sessionId: string, paths: readonly s
  */
 export async function commitPendingWorkingCopyDocs(sessionId: string, message: string): Promise<Checkpoint | undefined> {
   const session = requireSession(sessionId);
+  // 게이트를 거치지 않는 안전망이라 에이전트가 써넣은 검증 기록은 커밋 전에 되돌려 적는다(ADR-157)
+  const restoredRecords = await restoreForgedVerificationRecords(session.checkpoints, session.project.root);
+  if (restoredRecords.length > 0) emit(session, { type: 'notice', text: verificationRestoredNotice(restoredRecords), at: new Date().toISOString() });
   const pending = (await session.checkpoints.pendingFiles()).filter(isDocPath);
   return commitWorkingCopyDocs(sessionId, pending, message);
 }
@@ -5107,6 +5159,9 @@ function alignScenarioIdsInInput(input: unknown): unknown {
 export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
+  // 에이전트 실행이 도는 동안은 받지 않는다: 저장하면 재확인 판정 필드(hash·revisedAt)가 바뀌는데, 게이트는 실행 전 문서와
+  // 견주어 그것을 실행이 바꾼 것으로 보고 실행을 실패시킨다(ADR-157). 조용히 받아 두고 긴 실행을 되돌리는 것보다 지금 알린다
+  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 요구사항을 저장할 수 없습니다. 끝난 뒤에 저장해 주세요');
   // 화면이 보낸 시나리오 id가 요구사항 id와 어긋나면(재추출 병합이 요구사항 id만 바꾼 경우) 검증 전에 맞춘다
   const parsed = ApplyRequirementsSchema.safeParse(alignScenarioIdsInInput(input));
   if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
@@ -5177,6 +5232,9 @@ async function writeAndCommitRequirements(
 export async function markRequirementManualVerification(id: string, requirementId: string, input: { note: string }, by: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인할 수 있습니다');
+  // 에이전트 실행이 도는 동안은 받지 않는다: 게이트가 실행 전 문서와 견주어 이 기록을 실행이 넣은 것으로 오인하고(ADR-157),
+  // 같은 문서를 에이전트도 쓰고 있어 서로 덮어쓸 수 있다
+  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 사람 확인을 남길 수 없습니다. 끝난 뒤에 눌러 주세요');
   const note = input.note?.trim() ?? '';
   if (!note) throw new StudioError(400, '무엇을 어떻게 확인했는지 메모를 적어야 합니다');
   if (note.length > MANUAL_VERIFICATION_NOTE_MAX) throw new StudioError(400, `메모는 ${MANUAL_VERIFICATION_NOTE_MAX}자 이내로 적어 주세요`);
@@ -5198,6 +5256,7 @@ export async function markRequirementManualVerification(id: string, requirementI
 export async function clearRequirementManualVerification(id: string, requirementId: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인을 취소할 수 있습니다');
+  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 사람 확인을 취소할 수 없습니다. 끝난 뒤에 눌러 주세요');
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
   if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
@@ -5311,6 +5370,10 @@ export async function writeSessionDoc(id: string, file: string, content: string)
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
   if (!isDocsTabPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
+  // 요구사항 문서는 실행 중에 받지 않는다(applySessionRequirements와 같은 이유, ADR-157). 다른 문서는 그대로 받는다
+  if (file === REQUIREMENTS_FILE && session.snapshot.running) {
+    throw new StudioError(409, '요청을 처리하는 동안에는 요구사항 문서를 저장할 수 없습니다. 끝난 뒤에 저장해 주세요');
+  }
   await new Workspace(session.project.root).write(file, content);
   await commitDocTabChange(id, file, `docs: ${file} 내용을 고친다`);
   return { path: file, content };
