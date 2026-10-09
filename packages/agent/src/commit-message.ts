@@ -264,24 +264,61 @@ function reviewFixCandidate(request: string): string | undefined {
   return titles ? `리뷰 지적 ${titles.length}건 반영 — ${titles.join(', ')}` : undefined;
 }
 
+/** 요약 본문이 시작되는 머리글: "## 요약", "## 완료 요약", "## Summary", "## 변경 내용" */
+const SUMMARY_HEADING = /^#{1,6}\s*(완료\s*)?(요약|summary|변경\s*(내용|사항)|한\s*일)\s*$/i;
+const HANGUL = /[가-힣]/;
+
 /**
  * 에이전트 요약에서 제목 후보로 쓸 한 줄을 고른다. "범위: R22만 합니다"처럼 범위를 적은 줄이 있으면 그 줄(접두사는
  * 뗀다)을 요약 첫 줄보다 우선한다 — 완료 요약은 보통 인사말이나 전체 맥락으로 시작해 첫 줄이 "무엇이 바뀌었는지"를
  * 바로 말하지 않을 수 있지만, "범위:" 줄은 에이전트가 스스로 적은 작업 범위라 더 분명하다.
+ *
+ * 줄의 꼴이 아니라 자리와 언어로 거르는 규칙 둘(실측: 세션 5b640fd3, 체크포인트 62866d6 — 요약이 "Everything is consistent
+ * and complete. All changes verified: …"로 시작하고 실제 내용은 그 아래 "## 요약" 절에 있었는데 첫 줄이 제목이 됐다):
+ *  - "## 요약" 같은 머리글이 있으면 그 앞은 마무리 인사·경과 보고로 보고 머리글 뒤의 줄만 본다.
+ *  - 요청 글이 한국어인데(preferHangul) 한글이 하나도 없는 줄은 건너뛴다. 영어로 된 경과 문장은 한국어 낱말 규칙
+ *    (PROGRESS_REPORT_WORDS 등)에 걸리지 않아 "분명한 서술문"으로 통과한다.
  */
-function summaryTitleLine(agentSummary: string | undefined): string | undefined {
+function summaryTitleLine(agentSummary: string | undefined, preferHangul = false): string | undefined {
   if (!agentSummary) return undefined;
-  // 마크다운 머리글("## 완료")·굵은 글씨만 있는 줄("**고친 내용**")은 절 제목이라 무엇이 바뀌었는지 말하지 않는다.
-  // 나머지 줄은 목록 기호·굵은 글씨·코드 표시를 걷어 내고 본다(도그푸딩 버그 리포트: 요약 첫 줄이 "## 완료"였다)
-  const lines = agentSummary
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !/^#{1,6}\s/.test(line) && !/^\*\*[^*]+\*\*[:：]?$/.test(line))
+  const all = agentSummary.split('\n').map((line) => line.trim());
+  const heading = all.findIndex((line) => SUMMARY_HEADING.test(line));
+  // 마크다운 머리글("## 완료")·굵은 글씨만 있는 줄("**고친 내용**", 뒤에 괄호로 파일만 나열한 "**레이아웃 수정** (a.tsx, b.css)")은
+  // 절 제목이라 무엇이 바뀌었는지 말하지 않는다. 나머지 줄은 목록 기호·굵은 글씨·코드 표시를 걷어 내고 본다
+  // (도그푸딩 버그 리포트: 요약 첫 줄이 "## 완료"였다)
+  const lines = (heading >= 0 ? all.slice(heading + 1) : all)
+    .filter((line) => line.length > 0 && !/^#{1,6}\s/.test(line) && !/^\*\*[^*]+\*\*\s*(\([^()]*\))?\s*[:：]?$/.test(line))
     .map((line) => line.replace(/^[-*]\s+/, '').replace(/\*\*/g, '').replace(/`/g, '').trim())
     // "찾은 결함: …"·"원인: …"처럼 문제를 설명하는 줄은 무엇이 바뀌었는지가 아니다
-    .filter((line) => line.length > 0 && !/^(찾은\s*)?(결함|원인|문제|현상|참고|배경|결론|요약|현재\s*상태)\s*[:：]/.test(line));
+    .filter((line) => line.length > 0 && !/^(찾은\s*)?(결함|원인|문제|현상|참고|배경|결론|요약|현재\s*상태)\s*[:：]/.test(line))
+    .filter((line) => !preferHangul || HANGUL.test(line));
   const scope = lines.find((line) => /^(범위|scope)\s*[:：]/i.test(line));
   return scope ? scope.replace(/^(범위|scope)\s*[:：]\s*/i, '').trim() : lines[0];
+}
+
+/** 절 제목 한 줄: "**로그인 UX**", "**레이아웃 수정** (a.tsx, b.css)", "**방송 제목 표시**:" */
+const SECTION_LABEL = /^\*\*([^*]+)\*\*\s*(\([^()]*\))?\s*[:：]?$/;
+/** 바뀐 영역이 아니라 보고서의 칸 이름인 절 제목("고친 내용", "검증 방법", "남은 한계" 등) */
+const REPORT_SECTION_LABEL = /^(고친|바꾼|수정한|변경한)?\s*(내용|사항|파일|것)$|요약|범위|검증|확인|테스트|결과|한계|남은|다음|결정|주의|배경|원인|참고|summary|verification|notes?$/i;
+
+/**
+ * 에이전트 요약이 바뀐 영역마다 굵은 글씨 절 제목을 달았으면 그 제목들을 묶어 제목 후보로 쓴다
+ * ("레이아웃/시각 수정, 로그인 UX, 방송 제목 표시"). 요약 첫 줄도 요구사항 id도 쓸 수 없을 때, 파일 이름을 나열하는
+ * 마지막 경로보다 무엇이 바뀌었는지를 더 잘 말한다(실측: 세션 5b640fd3, 체크포인트 62866d6 — 파일 이름으로는
+ * "globals·page 외 5개를 고친다"가 된다). 절 제목이 둘 이상이고 예산 안에 들어갈 때만 쓴다. 하나뿐이면 그것이 바뀐 영역인지
+ * 보고서의 칸 이름인지 가르기 어렵다.
+ */
+function sectionLabelsCandidate(agentSummary: string | undefined, budget: number, preferHangul: boolean): string | undefined {
+  if (!agentSummary) return undefined;
+  const labels = agentSummary
+    .split('\n')
+    .map((line) => SECTION_LABEL.exec(line.trim().replace(/^[-*]\s+/, ''))?.[1]?.trim())
+    .filter((label): label is string => label !== undefined && label.length > 0 && !REPORT_SECTION_LABEL.test(label))
+    .filter((label) => !preferHangul || HANGUL.test(label));
+  const unique = [...new Set(labels)];
+  if (unique.length < 2) return undefined;
+  const joined = unique.join(', ');
+  return joined.length <= budget ? joined : undefined;
 }
 
 /**
@@ -298,12 +335,14 @@ function summaryTitleLine(agentSummary: string | undefined): string | undefined 
  *     상황을 설명하면(SITUATIONAL_WORDS) isClearChangeSentence가 거짓이 되어 다음 단계로 넘어간다(실측:
  *     세션 5b640fd3, 체크포인트 57cced6 — 제목이 상황 설명 그대로 나가 실제로 바뀐 shorts 모듈을 말하지 않았다).
  *  2. 요청 글이 "해주세요"처럼 부탁 어미만 있거나 위 상황 설명이라 알맹이가 없으면, 에이전트 요약에서 고른 줄
- *     (summaryTitleLine — "범위:" 줄이 있으면 그것, 없으면 첫 줄)이 분명할 때 그것으로 대신한다. 모델을 새로
+ *     (summaryTitleLine — "범위:" 줄이 있으면 그것, 없으면 첫 줄. "## 요약" 머리글이 있으면 그 뒤만 보고, 요청이 한국어면
+ *     한글이 없는 줄은 건너뛴다)이 분명할 때 그것으로 대신한다. 모델을 새로
  *     부르지 않고 이미 있는 완료 요약만 읽으므로 비용이 들지 않는다.
  *  3. 그래도 분명하지 않으면, 요청 글에 요구사항 id(R22 등)가 있고 바뀐 파일에서 공통 모듈 이름을 찾을 수 있으면
  *     "[R22] shorts 모듈을 고친다"처럼 만든다(requirementModuleCandidate) — 파일 이름만 나열하는 4번보다
  *     요구사항 추적에 쓸모 있는 제목이 된다.
- *  4. 그래도 안 되면 바뀐 파일 이름에서 뽑는다(describeChangeFromFiles).
+ *  4. 그래도 안 되면 에이전트 요약의 절 제목들을 묶어 쓰고(sectionLabelsCandidate, 둘 이상이고 예산 안일 때), 그것도 없으면
+ *     바뀐 파일 이름에서 뽑는다(describeChangeFromFiles).
  *  5. 요청 글마저 비어 있으면(데이터만 바뀐 체크포인트 등) "체크포인트"로 둔다.
  * studio.yaml의 checkpoints.conventionalCommits를 껐을 때는 부르지 않고 기존 "요청: ..." 형식을 그대로 쓴다.
  *
@@ -317,7 +356,7 @@ export function generateCommitSubject(request: string, changes: readonly Pending
   const budget = MAX_SUBJECT_CHARS - type.length - 2;
 
   const requestFirstLine = request.split('\n')[0]!.replace(/\s+/g, ' ').trim();
-  const summaryLine = summaryTitleLine(agentSummary);
+  const summaryLine = summaryTitleLine(agentSummary, HANGUL.test(request));
 
   let candidate: string;
   const reviewFix = reviewFixCandidate(request);
@@ -329,7 +368,7 @@ export function generateCommitSubject(request: string, changes: readonly Pending
     // 요약 줄은 예산 안에 들어갈 때만 쓴다. 잘린 요약은 동사가 사라져 바뀐 파일로 만든 제목보다 못하다(도그푸딩 버그 리포트)
     candidate = toCommitMood(firstSentence(summaryLine));
   } else if (requestFirstLine) {
-    candidate = requirementModuleCandidate(request, changes) ?? describeChangeFromFiles(changes);
+    candidate = requirementModuleCandidate(request, changes) ?? sectionLabelsCandidate(agentSummary, budget, HANGUL.test(request)) ?? describeChangeFromFiles(changes);
   } else {
     candidate = '체크포인트';
   }
