@@ -166,15 +166,34 @@ export async function computeGitMask(projectRoot: string, config: ComposeMountCo
       // 상태 폴더 자리에 얹을 빈 폴더. 내용이 있으면 비운다(가린다는 약속이 깨지지 않게).
       // 폴더 자체는 지우지 않는다: 서비스 여럿이 함께 재시작되면 이 함수가 동시에 불리는데, "지우고 다시 만들기"는 서로 엇갈려
       // EEXIST로 실패했다(도그푸딩 마찰 187). 그리고 먼저 뜬 서비스의 컨테이너가 이 폴더를 이미 마운트하고 있을 수 있다.
-      // 있으면 그대로 두고 안의 항목만 지우면 몇 번을, 동시에 불러도 결과가 같다
-      await mkdir(empty, { recursive: true });
-      for (const name of await readdir(empty)) await rm(path.join(empty, name), { recursive: true, force: true });
+      // 있으면 그대로 두고 안의 항목만 지우면 몇 번을, 동시에 불러도 결과가 같다. 그 자리가 링크면 따라가지 않는다(prepareEmptyDirectory)
+      await prepareEmptyDirectory(path.join(entry.dir, GIT), STATE_MASK);
     } catch (error) {
       throw new SandboxError(`${state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, error instanceof Error ? error.message : String(error));
     }
     entry.hasState = true;
   }
   return planGitMask(mounts, entries);
+}
+
+/**
+ * parent 바로 아래에 name이라는 **진짜 빈 폴더**가 있게 한다. 링크는 절대 따라가지 않는다.
+ *  - 그 자리에 링크나 파일이 있으면 그 항목만 지운다. 링크를 따라가 안을 비우면 링크가 가리키는 호스트의 아무 폴더나 지워지고,
+ *    링크가 상태 폴더를 가리키면 "빈 폴더"라며 상태 폴더를 그대로 마운트하게 된다.
+ *  - 진짜 폴더면 지우지 않고 안의 항목만 지운다(동시에 불려도 엇갈리지 않게, 트러블슈팅 115).
+ *  - 비우기 전에 그 폴더의 실제 위치가 parent 바로 아래인지 다시 확인한다(확인과 비우기 사이에 링크로 바뀌었을 때를 대비).
+ * 항목을 지울 때 쓰는 rm은 링크를 따라가지 않는다(링크면 링크만 지운다).
+ */
+async function prepareEmptyDirectory(parent: string, name: string): Promise<void> {
+  const target = path.join(parent, name);
+  const before = await lstat(target).catch(() => undefined);
+  if (before && !before.isDirectory()) await rm(target, { force: true });
+  await mkdir(target, { recursive: true });
+  const after = await lstat(target);
+  if (!after.isDirectory() || (await realpath(target)) !== path.join(await realpath(parent), name)) {
+    throw new Error(`${target}이(가) 폴더가 아니거나 다른 곳을 가리킵니다`);
+  }
+  for (const child of await readdir(target)) await rm(path.join(target, child), { recursive: true, force: true });
 }
 
 async function isBStudioRepository(dir: string): Promise<boolean> {
