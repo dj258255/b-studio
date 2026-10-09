@@ -635,6 +635,22 @@ function NoticeGroupEntry({ text, count }: { text: string; count: number }) {
   );
 }
 
+/** 통과한 확인의 근거(무엇을 봤더니 통과였는지)를 펼쳐 보는 목록 */
+export function CheckEvidence({ lines }: { lines: readonly string[] }) {
+  return (
+    <details className="mt-0.5">
+      <summary className="cursor-pointer text-muted hover:text-ink">확인한 것 {lines.length}가지</summary>
+      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted">
+        {lines.map((line, index) => (
+          <li key={index} className="break-words">
+            {line}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem; changedRuns: ReadonlySet<string>; sessionId: string; canManage: boolean }) {
   // baseSync(main 따라잡기, ADR-076)의 "대화 입력창에 채우기"가 쓴다. 조건 없이 맨 위에서 불러 훅 순서를 지킨다
   const draft = useChatDraft();
@@ -780,6 +796,8 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
             {item.attempts > 1 ? ` (시도 ${item.attempts}회)` : ""}
           </p>
           {!item.ok && item.detail && <pre className="mt-1 whitespace-pre-wrap text-muted">{item.detail}</pre>}
+          {/* 통과한 확인이 무엇을 쟀는지. 접어 두어 대화의 줄 수를 늘리지 않는다 */}
+          {item.ok && item.evidence && item.evidence.length > 0 && <CheckEvidence lines={item.evidence} />}
         </div>
       );
 
