@@ -58,6 +58,16 @@ export function extractRequirementIds(text: string): string[] {
   return [...found];
 }
 
+/**
+ * 묶음(describe·클래스) 제목 경로에 단 id까지 합쳐 테스트 하나의 id를 구한다. `describe('R11.2: …')` 아래 `it('…')`처럼
+ * 시나리오 id를 묶음 제목에만 다는 것은 vitest·jest에서 흔한 쓰기 방식이라, 묶음 제목의 id는 그 안의 모든 테스트의 id다
+ * (중첩 묶음은 바깥 것까지). 테스트 자신의 제목에 단 id가 앞에 오고, 묶음 id는 바깥에서 안쪽 순서로 뒤따르며,
+ * 같은 id를 둘 다에서 받아도 한 번만 센다. 발견 단계(flattenDiscoveredFile)와 보고서 단계(sessions.ts)가 같은 규칙을 쓴다
+ */
+export function extractRequirementIdsWithSuites(suitePath: readonly string[] | undefined, title: string): string[] {
+  return [...new Set([...extractRequirementIds(title), ...(suitePath ?? []).flatMap((suite) => extractRequirementIds(suite))])];
+}
+
 function countBraceDelta(line: string): number {
   // 문자열 리터럴 안의 중괄호까지 정확히 가리려면 전체 토크나이저가 필요하다. 여기서는 규모상 줄 단위로 단순히 센다(가벼운 토큰화 허용)
   return (line.match(/\{/g)?.length ?? 0) - (line.match(/\}/g)?.length ?? 0);
@@ -440,7 +450,9 @@ export function flattenDiscoveredFile(file: DiscoveredFile): FlatDiscoveredTest[
     const nextPath = [...path, suite.displayName];
     for (const test of suite.tests) {
       const envConditionalReasons = mergeEnvConditionalReasons(suiteEnvReasons, test.envConditionalReasons);
-      rows.push({ ...test, file: file.path, suitePath: nextPath, suiteSkipped, ...(envConditionalReasons ? { envConditionalReasons } : {}) });
+      // 묶음 제목에 단 id도 이 테스트의 id다(extractRequirementIdsWithSuites). 테스트 자신의 id가 앞에 온다
+      const requirementIds = [...new Set([...test.requirementIds, ...extractRequirementIdsWithSuites(nextPath, '')])];
+      rows.push({ ...test, requirementIds, file: file.path, suitePath: nextPath, suiteSkipped, ...(envConditionalReasons ? { envConditionalReasons } : {}) });
     }
     for (const child of suite.suites) walkSuite(child, nextPath, suiteSkipped, suiteEnvReasons);
   };

@@ -23,6 +23,12 @@ export interface ParsedTestCase {
   classOrFile: string;
   /** JUnit은 메서드 이름, Jest/Vitest는 ancestorTitles를 포함한 전체 제목 */
   name: string;
+  /**
+   * 바깥 → 안쪽 순서의 묶음(describe) 제목들. Jest/Vitest 보고서의 ancestorTitles에서 온다. name에는 it 제목만 있어
+   * 묶음 제목에 단 요구사항·시나리오 id가 사라지므로 따로 싣는다(이름을 바꾸면 발견 행과의 짝짓기·화면 표시가 흔들린다).
+   * 이 필드가 생기기 전에 저장된 결과와 JUnit XML에는 없다 — 없으면 묶음 정보가 없다는 뜻이다
+   */
+  suitePath?: string[];
   result: TestCaseResult;
 }
 
@@ -113,6 +119,19 @@ interface JestLikeReport {
   testResults?: JestLikeFileResult[];
 }
 
+/** 보고서 한 건의 묶음 제목들. ancestorTitles가 없는 옛 형식은 fullName이 title로 끝나면 그 앞부분을 묶음 하나로 본다 */
+function jestLikeSuitePath(assertion: JestLikeAssertion): string[] {
+  if (Array.isArray(assertion.ancestorTitles)) {
+    return assertion.ancestorTitles.filter((title): title is string => typeof title === 'string' && title.trim() !== '');
+  }
+  const { fullName, title } = assertion;
+  if (typeof fullName === 'string' && typeof title === 'string' && title !== '' && fullName.length > title.length && fullName.endsWith(title)) {
+    const prefix = fullName.slice(0, fullName.length - title.length).trim();
+    if (prefix) return [prefix];
+  }
+  return [];
+}
+
 function jestLikeStatus(status: string | undefined): TestStatus {
   if (status === 'passed') return 'pass';
   if (status === 'failed') return 'fail';
@@ -138,9 +157,11 @@ export function parseJestLikeJson(json: string): ParsedTestRun {
       const failureText = assertion.failureMessages?.[0];
       const failureMessage = failureText?.split('\n')[0];
       const stack = failureText ? failureText.split('\n').slice(0, MAX_STACK_LINES) : undefined;
+      const suitePath = jestLikeSuitePath(assertion);
       cases.push({
         classOrFile,
         name: title,
+        ...(suitePath.length > 0 ? { suitePath } : {}),
         result: {
           status,
           ...(durationMs !== undefined ? { durationMs } : {}),
@@ -219,6 +240,8 @@ export function attachResults(rows: readonly TestRow[], run: ParsedTestRun): Tes
         let score = 0;
         if (haystack.includes(fileBase)) score += 2;
         for (const suite of suiteNames) if (haystack.includes(suite)) score += 1;
+        // 보고서가 묶음 경로를 담고 있으면(Jest/Vitest) 발견 행의 묶음 경로와 같을 때 가장 강하게 친다
+        if (candidate.suitePath && candidate.suitePath.length === row.suitePath.length && candidate.suitePath.every((title, index) => plainName(title) === plainName(row.suitePath[index]!))) score += 4;
         return { candidate, score };
       })
       .sort((a, b) => b.score - a.score);
