@@ -1145,11 +1145,6 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   session.stop.abort();
   session.logFollower?.abort();
   clearInterval(session.usageTimer);
-  // 중지한 세션에는 재는 것이 없다. 연결 상태를 남기면 다음에 올릴 때 낡은 값이 보인다
-  if (session.snapshot.sandboxLink) {
-    delete session.snapshot.sandboxLink;
-    emit(session, { type: 'sandbox_link' });
-  }
   session.fileWatcher?.close();
   await session.sandbox.destroy().catch(() => {});
   // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
@@ -1164,6 +1159,12 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
     emit(session, { type: 'service', service: service.name, state: 'stopped' });
   }
   setStatus(session, 'stopped');
+  // 중지한 세션에는 재는 것이 없다. 연결 상태를 남기면 다음에 올릴 때 낡은 값이 보인다.
+  // 상태를 바꾼 뒤에 지운다 — 먼저 지우면 정리하는 몇 초 동안 화면이 "준비됨"으로 돌아간다
+  if (session.snapshot.sandboxLink) {
+    delete session.snapshot.sandboxLink;
+    emit(session, { type: 'sandbox_link' });
+  }
   await flushPersist(session);
   return session.snapshot;
 }
