@@ -57,6 +57,7 @@ printf '%s\\n' "$*" >> "${log}"
 
 for a in "$@"; do
   case "$a" in
+    config) printf '{"services":{}}\\n'; exit 0 ;;
     ps)
       count=$(cat "${psLog}")
       count=$((count + 1))

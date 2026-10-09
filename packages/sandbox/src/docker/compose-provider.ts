@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -53,6 +53,7 @@ import {
   parseSyncOutput,
 } from './format';
 import { externalCallScript } from './external-call';
+import { loadGitMask, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
@@ -188,8 +189,9 @@ export class LocalDockerProvider implements SandboxProvider {
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     const hostPorts = await preallocatePublicUrlPorts(project);
-    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts })));
-    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript);
+    const gitMask = await loadGitMask(project, { dockerBin: this.#options.dockerBin, env: { ...process.env, ...secrets } });
+    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
+    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts);
   }
 }
 
@@ -204,6 +206,9 @@ class LocalDockerSandbox implements Sandbox {
   readonly #secrets: Record<string, string>;
   readonly #redactor: Redactor;
   readonly #edgeScript: string;
+  /** 컨테이너를 만드는 up 직전마다 compose 파일에서 다시 계산한다(#refreshGitMask) */
+  #gitMask: Record<string, MaskVolume[]>;
+  #hostPorts: Record<string, number>;
   readonly #runtime: string | undefined;
   #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
 
@@ -215,8 +220,12 @@ class LocalDockerSandbox implements Sandbox {
     options: LocalDockerProviderOptions,
     secrets: Record<string, string>,
     edgeScript: string,
+    gitMask: Record<string, MaskVolume[]>,
+    hostPorts: Record<string, number>,
   ) {
     this.#edgeScript = edgeScript;
+    this.#gitMask = gitMask;
+    this.#hostPorts = hostPorts;
     this.id = id;
     this.project = project;
     this.#workDir = workDir;
@@ -730,7 +739,10 @@ class LocalDockerSandbox implements Sandbox {
     ];
   }
 
-  #compose(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+  async #compose(args: string[], signal?: AbortSignal): Promise<ExecResult> {
+    // 컨테이너는 up이 만들 때 마운트가 정해진다. compose 파일이 세션 중에 바뀌었을 수 있으므로(에이전트가 고칠 수 있는 파일이다)
+    // 만들기 직전에 마운트를 다시 읽어 .git 마스크를 맞춘다(ADR-158)
+    if (args[0] === 'up') await this.#refreshGitMask();
     return this.#docker(this.#composeArgs(args), signal);
   }
 
@@ -792,11 +804,24 @@ class LocalDockerSandbox implements Sandbox {
    * 집합을 project에서 다시 읽어 매번 새 포트를 배정하므로, 충돌난 포트 하나만이 아니라 세트 전체가 바뀐다
    */
   async #regeneratePorts(): Promise<void> {
-    const hostPorts = await preallocatePublicUrlPorts(this.project);
-    await writeFile(
-      this.#overridePath,
-      stringify(buildOverride(this.project, this.id, { edgeScript: this.#edgeScript, runtime: this.#runtime, hostPorts })),
-    );
+    this.#hostPorts = await preallocatePublicUrlPorts(this.project);
+    await this.#writeOverride();
+  }
+
+  /** compose 파일의 마운트를 다시 읽어 마스크가 달라졌으면 override를 새로 쓴다. 읽지 못하면 보호 없이 띄우지 않고 던진다 */
+  async #refreshGitMask(): Promise<void> {
+    const mask = await loadGitMask(this.project, { dockerBin: this.#dockerBin, env: this.#environment() });
+    if (JSON.stringify(mask) === JSON.stringify(this.#gitMask)) return;
+    this.#gitMask = mask;
+    await this.#writeOverride();
+  }
+
+  /** 다른 compose 호출이 반쯤 쓰인 파일을 읽지 않도록 임시 파일에 쓴 뒤 바꿔 넣는다 */
+  async #writeOverride(): Promise<void> {
+    const yaml = stringify(buildOverride(this.project, this.id, { edgeScript: this.#edgeScript, runtime: this.#runtime, hostPorts: this.#hostPorts, gitMask: this.#gitMask }));
+    const temporary = `${this.#overridePath}.${randomBytes(4).toString('hex')}.tmp`;
+    await writeFile(temporary, yaml);
+    await rename(temporary, this.#overridePath);
   }
 
   /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다 */

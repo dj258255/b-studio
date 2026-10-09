@@ -11,7 +11,7 @@
 | 기동·종료·준비 판정 | 1–4, 14, 23, 36–37, 51–52 |
 | 검증 게이트·파일 반영·되돌리기 | 5, 10, 12–13, 24–27, 29, 41, 50 |
 | 미리보기·로그·UI | 6–11, 16, 28, 30, 35 |
-| 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55 |
+| 네트워크·시크릿·격리 | 15, 17–21, 40, 53, 55, 105 |
 | 운영 이미지·컨테이너 배포 | 31–34 |
 | 멀티 CLI·백엔드 실행 | 43, 45, 47–49 |
 | 동시성·상태 저장 | 44 |
@@ -125,6 +125,7 @@
 - [102. 문서 체크포인트가 생기면 저장된 테스트 근거의 sha가 어긋나 모든 요구사항의 검증됨이 닫힘](#102-문서-체크포인트가-생기면-저장된-테스트-근거의-sha가-어긋나-모든-요구사항의-검증됨이-닫힘)
 - [103. 이름에 한글이 든 파일을 고친 실행이 "샌드박스에 반영되지 않았습니다"로 게이트를 통과하지 못함](#103-이름에-한글이-든-파일을-고친-실행이-샌드박스에-반영되지-않았습니다로-게이트를-통과하지-못함)
 - [104. 에이전트 실행이 요구사항 문서에 사람 확인 기록을 써넣어 스스로 검증됨을 만들 수 있었음](#104-에이전트-실행이-요구사항-문서에-사람-확인-기록을-써넣어-스스로-검증됨을-만들-수-있었음)
+- [105. 서비스 컨테이너 안 명령이 작업 복사본의 .git을 고쳐 체크포인트와 테스트 근거를 위조할 수 있었음](#105-서비스-컨테이너-안-명령이-작업-복사본의-git을-고쳐-체크포인트와-테스트-근거를-위조할-수-있었음)
 
 ---
 
@@ -3174,3 +3175,56 @@ ADR-157로 정리했다. 러너가 실행을 시작할 때 요구사항 문서�
 
 ### 배운 점
 "기록을 남길 수 있는 사람"을 화면 권한으로만 정해 두면, 같은 기록을 쓸 수 있는 다른 쓰기 경로(에이전트의 파일 도구, 서비스 안 명령, 게이트 뒤의 보존 커밋)가 모두 우회로가 된다. 길마다 막는 대신 결과물(디스크의 문서)을 실행 전과 견주는 쪽이 도구가 늘어도 깨지지 않는다. 게이트가 막은 변경이 "문서를 지키는" 안전망을 타고 다시 들어오는지도 따로 봐야 한다.
+
+## 105. 서비스 컨테이너 안 명령이 작업 복사본의 .git을 고쳐 체크포인트와 테스트 근거를 위조할 수 있었음
+
+**구분:** 코드 추적과 실제 컨테이너 재현으로 발견 → 수정 (무결성 구멍)
+
+### 현상
+에이전트는 `run_in_service`로 서비스 컨테이너 안에서 셸·파이썬·자바를 실행할 수 있다. 그 컨테이너 안에서 작업 복사본의 `.git`에 쓸 수 있었다. 실행 중인 세션 컨테이너에서도 같은 모양이었다: `docker inspect`가 작업 복사본(프로젝트 폴더) 전체를 `/workspace`에 `rw=true`로 bind한 것을 보였고, `touch /workspace/.git/probe`가 성공했다. `.git`에는 체크포인트 저장소(객체·refs·HEAD, 근거 판정이 "마지막 체크포인트"로 믿는 기준)와 b-studio의 상태 폴더 `.git/b-studio`(`session.json`의 대화와 `previewToken`, 요구사항 "검증됨"의 입력인 `test-results.json`, 생성 파일 스냅샷, 보관본, DB 덤프)가 함께 있다.
+
+### 재현 (고치기 전 코드)
+임시 폴더에 `git init`한 작은 프로젝트(`compose.yaml`: busybox 서비스 하나, `.:/workspace`)를 만들고 `buildOverride`가 만든 override로 컨테이너를 띄웠다(compose 프로젝트 `bstudio-gitmask-test-before`).
+
+```
+$ docker inspect bstudio-gitmask-test-before-app-1 --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}} rw={{.RW}}{{end}}'
+bind /Users/…/bstudio-gm-test/proj -> /workspace rw=true
+$ docker exec … sh -c 'touch /workspace/.git/probe && echo WRITABLE_GIT'
+WRITABLE_GIT
+$ docker exec … sh -c 'cat /workspace/.git/b-studio/session.json'
+{"previewToken":"secret"}
+$ docker exec … sh -c 'echo forged > /workspace/.git/b-studio/test-results.json && echo WRITABLE_STATE'
+WRITABLE_STATE
+```
+
+### 원인
+- 서비스 컨테이너의 마운트는 사용자의 compose 파일(폴더 열기가 만든 `compose.b-studio.yaml` 또는 사용자가 직접 쓴 파일)이 정하고, b-studio의 override(`buildOverride`)는 네트워크·프록시·자원 한도만 덧씌웠다. 프로젝트 폴더를 통째로 읽기·쓰기로 붙이는 것이 보통의 꼴이라 `.git`도 그대로 붙었다.
+- 에이전트의 파일 도구(`isDenied`)는 `.git`을 막지만 컨테이너 쪽은 막지 않는다. 명령 정책의 문자열 검사는 컨테이너 안 스크립트가 경로를 조립해 쓰는 것을 막을 수 없다. 컨테이너에 git 실행 파일이 없어도 파일을 직접 쓰는 데는 필요 없다.
+- b-studio 자신의 컨테이너 가운데 프로젝트 폴더를 붙이는 것은 동기화 확인의 `<root>:/project:ro` 하나뿐이고 읽기 전용이다. 구멍은 사용자 compose가 붙이는 서비스 마운트에만 있었다.
+
+### 해결
+ADR-158로 정리했다. `docker compose --profile '*' config --format json`이 정규화한 마운트(짧은 문법·상대 경로·변수 치환·`extends`·`include`가 풀린 결과)를 읽어, 프로젝트 폴더에서 위로 올라가며 찾은 `.git`이 서비스의 마운트 안에 보이면 그 자리에 더 구체적인 마운트를 겹쳐 override에 적는다(`packages/sandbox/src/docker/git-mask.ts`). `.git`은 읽기 전용 bind, `.git/b-studio`는 빈 tmpfs다(폴더가 아직 없으면 미리 빈 폴더로 만든다). 에이전트가 compose 파일을 고쳐 마운트를 늘릴 수 있으므로 컨테이너를 만드는 `up` 직전마다 다시 계산해 override를 새로 쓰고, compose 설정을 읽지 못하면 보호 없이 띄우지 않고 멈춘다.
+
+보안 검토에서 두 가지를 더 찾아 고쳤다. 하나는 마운트를 읽는 `config`가 프로필을 켜지 않아 `profiles`가 걸린 서비스가 목록에 없었다는 점이다(서비스 이름을 직접 주고 `up`하면 프로필이 저절로 켜져 뜨는데 마스크는 없었다). 재현: 서비스 `b`에 `profiles: [debug]`를 주면 `docker compose config --format json`에는 `"b"`가 0번, `--profile '*'`를 주면 1번 나온다. 다른 하나는 상태 폴더가 마스크를 만들 때 없으면 tmpfs를 빼던 점이다. 읽기 전용 `.git` 아래에서는 마운트 지점을 새로 만들 수 없고, 빼면 나중에 b-studio가 만든 폴더가 컨테이너에 그대로 보인다.
+
+### 확인
+실제 `LocalDockerProvider`(`create` → `setServiceRunning`)로 같은 프로젝트를 띄웠다(compose 프로젝트 `studio-bstudio-gitmask-test-0f1dab`).
+
+```
+sandbox id: studio-bstudio-gitmask-test-0f1dab
+$ touch /workspace/.git/probe
+touch: /workspace/.git/probe: Read-only file system
+$ ls -A /workspace/.git/b-studio | wc -l
+0
+$ echo ok > /workspace/app/new.txt && cat /workspace/app/new.txt && rm /workspace/app/new.txt
+ok
+(compose 파일에 `.:/backdoor` 마운트를 더한 뒤 같은 서비스를 다시 올림)
+$ touch /backdoor/.git/probe; ls -A /backdoor/.git/b-studio | wc -l
+touch: /backdoor/.git/probe: Read-only file system
+0
+```
+
+`buildOverride` 결과로 `docker compose -f compose.yaml -f override config -q`가 통과했고(마운트: `tmpfs -> /workspace/.git/b-studio`, `bind …/.git -> /workspace/.git rw=false`, `bind … -> /workspace rw=true`), 컨테이너 안에서 `mv /workspace/.git …`은 `Device or resource busy`, `rm -rf /workspace/.git`은 `Read-only file system`이었다. `cat /workspace/.git/HEAD`는 읽혔다(빌드가 git 정보를 읽는 경우). 컨테이너가 떠 있는 동안 호스트에서 `git add -A && git commit`과 `.git/b-studio/test-results.json` 쓰기가 모두 성공했다. 모노레포 하위 폴더 프로젝트(`..:/repo`와 `.:/app` 두 마운트)는 상위 마운트의 `/repo/.git`만 막히고 `/app`에는 `.git`이 보이지 않았으며, `.git`이 파일인 폴더는 `echo … > /workspace/.git`이 `Read-only file system`이었다. 프로필이 걸린 서비스(`profiles: [debug]`)와 `.git/b-studio`가 없는 폴더도 같은 실제 경로로 확인했다: 서비스가 떴고 `/workspace/.git`에 쓰기는 `Read-only file system`, 호스트의 `.git` 안에는 빈 `b-studio`가 만들어졌고 컨테이너 안에서는 비어 보였다. 단위 테스트는 `git-mask.test.ts`(마운트 꼴별 계획, 실제 폴더 탐지), `git-mask-provider.test.ts`(모든 프로필로 읽음, 상태 폴더 미리 만들기, compose 파일이 바뀐 뒤 `up` 직전에 마스크를 다시 맞춤, 읽기 실패 시 멈춤), `buildOverride` 출력이다.
+
+### 배운 점
+에이전트 쪽 도구의 `.git` 차단은 에이전트가 쓰는 길 하나만 막을 뿐이다. 근거를 담은 저장소는 그 저장소가 놓인 마운트에서 읽기 전용으로 막아야 컨테이너 안의 어떤 언어·도구로도 쓸 수 없다. 마운트는 사용자의 compose 파일이 정하고 그 파일도 에이전트가 고칠 수 있으므로, 마운트를 한 번만 읽어 두지 않고 컨테이너를 만드는 때마다 다시 읽어야 한다. 가리는 쪽이 읽는 설정과 실제로 띄우는 쪽의 설정(프로필, 파일, 환경)이 같은지, 그리고 가리지 못했을 때 열리는 쪽으로 떨어지지 않는지를 함께 확인해야 한다.

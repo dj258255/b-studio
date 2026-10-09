@@ -33,6 +33,7 @@ async function fakeDocker(dir: string): Promise<string> {
     `#!/bin/sh
 for a in "$@"; do
   case "$a" in
+    config) printf '{"services":{}}\\n'; exit 0 ;;
     build|up) exit 0 ;;
     port) printf '0.0.0.0:34567\\n'; exit 0 ;;
     ps) echo x >> "${counterFile}"; printf 'c1\\nc2\\nc3\\n'; exit 0 ;;

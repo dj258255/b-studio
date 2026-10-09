@@ -1,6 +1,7 @@
 import { publicUrlPlaceholder, resolvePublicUrlPlaceholders, type LoadedProject } from '@b-studio/spec';
 import { directHosts, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, edgeEnvironment, edgePortFor, proxyEnvironment } from '../edge-config';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
+import type { MaskVolume } from './git-mask';
 
 export { DEFAULT_EGRESS_ALLOW, EDGE_PROXY_PORT, EDGE_SERVICE, edgePortFor } from '../edge-config';
 
@@ -18,11 +19,18 @@ const EGRESS_NETWORK = 'b-studio-egress';
  *    그 대상 서비스는 `hostPorts`로 미리 정한 호스트 포트를 그대로 공개하고(자동 배정 대신), 참조한 서비스의
  *    environment에 실제 주소(`http://127.0.0.1:<포트>`)로 채운 값을 넣는다. 포트를 `docker compose up` 뒤에야
  *    아는 서비스는(hostPorts에 없으면) 예전처럼 자동 배정한다
+ *  - 프로젝트 폴더를 마운트한 서비스는 그 안의 `.git`을 읽기 전용으로, b-studio 상태 폴더(`.git/b-studio`)는 빈 tmpfs로 덮는다
+ *    (`gitMask`, ADR-158). 컨테이너 안 명령이 체크포인트 저장소와 테스트 근거를 위조하지 못하게 한다
  */
 export function buildOverride(
   project: LoadedProject,
   sandboxId: string,
-  { edgeScript = '', runtime, hostPorts = {} }: { edgeScript?: string; runtime?: string; hostPorts?: Record<string, number> } = {},
+  {
+    edgeScript = '',
+    runtime,
+    hostPorts = {},
+    gitMask = {},
+  }: { edgeScript?: string; runtime?: string; hostPorts?: Record<string, number>; gitMask?: Readonly<Record<string, readonly MaskVolume[]>> } = {},
 ) {
   const composeServices = project.composeServices ?? project.managed.map(([name]) => name);
   const externals = project.external ?? [];
@@ -38,6 +46,11 @@ export function buildOverride(
   );
   for (const [name] of project.managed) {
     services[name] = { ...services[name], labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name } };
+  }
+
+  // 같은 target의 마운트는 compose가 override 쪽으로 합치므로 사용자의 마운트 위에 `.git` 마운트가 겹친다
+  for (const [name, volumes] of Object.entries(gitMask)) {
+    if (volumes.length > 0) services[name] = { ...services[name], volumes: [...volumes] };
   }
 
   // 시크릿 값은 override 파일에 쓰지 않는다. 값 자리를 비워 두면 compose가 자기 프로세스 환경에서 채운다
