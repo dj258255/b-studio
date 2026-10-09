@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { summarizeJsonContent, summarizeLargeJsonFile } from './json-summary';
 import type { AgentUsage } from './loop';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
+import { discoverTestsInFile, flattenDiscoveredFile } from './test-discovery';
 import { Workspace, WorkspaceError } from './workspace';
 
 export const REQUIREMENT_KINDS = ['api', 'ui', 'data', 'nonfunctional', 'docs'] as const;
@@ -1267,6 +1268,30 @@ function collectDeclaredTestNames(file: ScannedFile): string[] {
 }
 
 /**
+ * 테스트 이름마다 그 테스트를 감싼 묶음(describe·클래스) 제목에 단 id를 모은다. 묶음 제목에 단 id는 그 안의 모든
+ * 테스트의 id다(test-discovery.ts의 extractRequirementIdsWithSuites와 같은 규칙) — 실행 근거 쪽과 어긋나면
+ * "발견은 되는데 주인 없는 테스트"처럼 보인다. 발견기가 못 읽는 모양이면 빈 맵이다(그 파일은 테스트 자신의 id만 본다).
+ * 같은 이름의 테스트가 다른 묶음에 있으면 id를 합친다
+ */
+function collectSuiteIdsByTestName(file: ScannedFile): Map<string, string[]> {
+  const byName = new Map<string, Set<string>>();
+  const discovered = discoverTestsInFile(file.path, file.content);
+  if (!discovered) return new Map();
+  for (const row of flattenDiscoveredFile(discovered)) {
+    if (row.suitePath.length === 0) continue;
+    const ids = byName.get(row.displayName.trim()) ?? new Set<string>();
+    for (const title of row.suitePath) for (const id of findMentionedIds(title)) ids.add(id);
+    byName.set(row.displayName.trim(), ids);
+  }
+  return new Map([...byName].map(([name, ids]) => [name, [...ids]]));
+}
+
+/** 테스트 이름 하나가 가리키는 id 전부: 자기 이름에 단 것 + 감싼 묶음 제목에 단 것(중복 없이) */
+function mentionedIdsOfTest(name: string, suiteIds: ReadonlyMap<string, string[]>): string[] {
+  return [...new Set([...findMentionedIds(name), ...(suiteIds.get(name) ?? [])])];
+}
+
+/**
  * 작업 복사본의 테스트 파일에서 id를 언급하는 테스트 이름을 찾는다.
  * Jest/Vitest/Playwright의 it('R3 …')·test('R3 …')와 JUnit의 @DisplayName("R3 …")·메서드 이름(testR3Login 등)을 본다.
  */
@@ -1282,8 +1307,9 @@ export function scanTestFilesForRequirementId(files: readonly ScannedFile[], id:
       }
     };
 
+    const suiteIds = collectSuiteIdsByTestName(file);
     for (const name of collectDeclaredTestNames(file)) {
-      if (mentionsRequirementId(name, id)) add(name);
+      if (mentionedIdsOfTest(name, suiteIds).some((mention) => mention === id || mention.startsWith(`${id}.`))) add(name);
     }
 
     const methodPattern = /\b(?:void|public|private|protected)\s+[\w<>[\],\s]*?\b(\w*[Rr]\d+\w*)\s*\(/g;
@@ -1299,8 +1325,9 @@ export function scanTestFilesForScenarioId(files: readonly ScannedFile[], scenar
   const matches: TestMatch[] = [];
   for (const file of files) {
     if (!isLikelyTestFile(file.path)) continue;
+    const suiteIds = collectSuiteIdsByTestName(file);
     for (const name of collectDeclaredTestNames(file)) {
-      if (findMentionedIds(name).includes(scenarioId)) matches.push({ file: file.path, name });
+      if (mentionedIdsOfTest(name, suiteIds).includes(scenarioId)) matches.push({ file: file.path, name });
     }
   }
   return matches;
@@ -1311,8 +1338,9 @@ export function scanTestFilesForOrphans(files: readonly ScannedFile[]): TestMatc
   const matches: TestMatch[] = [];
   for (const file of files) {
     if (!isLikelyTestFile(file.path)) continue;
+    const suiteIds = collectSuiteIdsByTestName(file);
     for (const name of collectDeclaredTestNames(file)) {
-      if (findMentionedIds(name).length === 0) matches.push({ file: file.path, name });
+      if (mentionedIdsOfTest(name, suiteIds).length === 0) matches.push({ file: file.path, name });
     }
   }
   return matches;

@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
@@ -66,7 +67,7 @@ export interface LoadedProject {
 }
 
 export function parseSpec(source: string): StudioSpec {
-  const result = StudioSpecSchema.safeParse(parse(source));
+  const result = StudioSpecSchema.safeParse(parseYaml(source, SPEC_FILE));
   if (!result.success) {
     throw new SpecError(
       `${SPEC_FILE} 형식이 올바르지 않습니다`,
@@ -85,9 +86,9 @@ const ComposeSchema = z.object({
 
 export async function loadProject(dir: string): Promise<LoadedProject> {
   const root = path.resolve(dir);
-  const spec = parseSpec(await readText(path.join(root, SPEC_FILE)));
+  const spec = parseSpec(await readProjectText(root, SPEC_FILE));
   const composePath = path.resolve(root, spec.compose);
-  const compose = ComposeSchema.safeParse(parse(await readText(composePath), { merge: true }));
+  const compose = ComposeSchema.safeParse(parseYaml(await readProjectText(root, spec.compose), spec.compose, { merge: true }));
   if (!compose.success) {
     throw new SpecError(`${spec.compose}에 services 항목이 없습니다`);
   }
@@ -258,11 +259,70 @@ function mountsVolume(service: unknown, volume: string): boolean {
   );
 }
 
-async function readText(file: string): Promise<string> {
+/**
+ * 프로젝트 폴더 안의 설정 파일을 읽는다. 경로가 프로젝트 폴더를 벗어나거나(`compose: ../../x`, 절대 경로), 파일이 프로젝트 밖을
+ * 가리키는 심볼릭 링크면 읽지 않는다. studio.yaml과 그 안의 `compose` 값은 에이전트가 고칠 수 있는 내용이고 이 함수는
+ * 호스트에서 돈다 — 막지 않으면 호스트의 아무 파일이나 읽혀, 그 내용이 형식 오류 문구를 타고 대화로 돌아갈 수 있다
+ */
+async function readProjectText(root: string, relative: string): Promise<string> {
+  const file = path.resolve(root, relative);
+  if (path.isAbsolute(relative) || !isInside(root, file)) {
+    throw new SpecError(`${relative}: 프로젝트 폴더 안의 경로만 쓸 수 있습니다`);
+  }
+  const outside = (): SpecError => new SpecError(`${relative}: 프로젝트 폴더 밖을 가리키는 링크는 읽지 않습니다`);
+  const missing = (): SpecError => new SpecError(`파일이 없습니다: ${file}`);
+  let realRoot: string;
+  let realFile: string;
   try {
-    return await readFile(file, 'utf8');
+    [realRoot, realFile] = await Promise.all([realpath(root), realpath(file)]);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new SpecError(`파일이 없습니다: ${file}`);
-    throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missing();
+    throw new SpecError(`${relative}: 파일을 열 수 없습니다`);
+  }
+  if (!isInside(realRoot, realFile)) throw outside();
+
+  // 위의 확인과 여는 것 사이에 경로의 폴더나 파일이 링크로 바뀔 수 있다. 그래서 먼저 열고(마지막 조각이 링크면 열지 않는다),
+  // 연 파일이 지금도 그 경로가 가리키는 프로젝트 안의 파일과 같은 파일인지 본 뒤에 그 열린 파일에서 읽는다
+  let handle: FileHandle;
+  try {
+    handle = await open(realFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') throw missing();
+    if (code === 'ELOOP') throw outside();
+    throw new SpecError(`${relative}: 파일을 열 수 없습니다`);
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) throw new SpecError(`${relative}: 일반 파일이 아닙니다`);
+    const [rootNow, fileNow] = await Promise.all([realpath(root), realpath(file)]);
+    const now = await lstat(fileNow);
+    if (!isInside(rootNow, fileNow) || now.dev !== opened.dev || now.ino !== opened.ino) throw outside();
+    return await handle.readFile('utf8');
+  } catch (error) {
+    if (error instanceof SpecError) throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missing();
+    throw new SpecError(`${relative}: 파일을 읽을 수 없습니다`);
+  } finally {
+    await handle.close();
+  }
+}
+
+function isInside(parent: string, target: string): boolean {
+  const relative = path.relative(parent, target);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/**
+ * YAML을 해석한다. 문법 오류는 위치(줄·칸)만 담은 SpecError로 바꾼다 — yaml 라이브러리의 오류 문구에는 문제 줄의 내용이
+ * 그대로 실려, 읽으면 안 되는 파일이 읽혔을 때 그 내용이 새는 길이 된다
+ */
+function parseYaml(source: string, label: string, options?: { merge?: boolean }): unknown {
+  try {
+    return parse(source, options);
+  } catch (error) {
+    const pos = (error as { linePos?: Array<{ line: number; col: number }> }).linePos?.[0];
+    const code = (error as { code?: string }).code;
+    throw new SpecError(`${label}의 YAML 문법이 올바르지 않습니다${pos ? `(${pos.line}번째 줄 ${pos.col}번째 칸)` : ''}${code ? ` [${code}]` : ''}`);
   }
 }

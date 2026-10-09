@@ -695,6 +695,7 @@ export {
   discoverTestsInFile,
   detectJsFramework,
   extractRequirementIds,
+  extractRequirementIdsWithSuites,
   flattenDiscoveredFile,
   isTestFilePath,
   JS_TEST_FILE_PATTERN,
