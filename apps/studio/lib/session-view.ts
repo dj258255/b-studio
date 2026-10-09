@@ -483,6 +483,9 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'usage':
       return patchSnapshot(view, { usage: { at: event.at, services: event.services } });
 
+    case 'sandbox_link':
+      return patchSnapshot(view, { sandboxLink: event.link });
+
     case 'files_changed':
       return patchSnapshot(view, { fileRevision: event.revision });
 

@@ -1,3 +1,4 @@
+import type { SandboxLink } from './sandbox-link';
 import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 
@@ -124,6 +125,8 @@ export interface SessionSnapshot {
   repository?: RepositoryView;
   /** 가장 최근에 잰 컨테이너별 자원 사용량 */
   usage?: { at: string; services: ServiceUsage[] };
+  /** 샌드박스에 닿지 않거나 컨테이너가 사라졌으면 있다(트러블슈팅 123). status가 ready여도 이 값이 있으면 서비스 상태를 믿을 수 없다 */
+  sandboxLink?: SandboxLink;
   /** 서비스가 준비된 직후 한 번 읽은 컨테이너별 수신/송신 바이트(수명 누계). 못 읽으면 없다 */
   bootNetwork?: BootNetwork;
   /** 프로젝트 폴더의 파일이 바뀔 때마다 늘어난다. 서비스 안에서 명령이 만든 파일도 코드 화면이 다시 불러오는 기준이다 */
@@ -316,6 +319,8 @@ export type StudioEvent =
   | { type: 'log'; service: string; text: string; at: string }
   /** 몇 초마다 온다. 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'usage'; at: string; services: ServiceUsage[] }
+  /** 샌드박스 연결 상태가 바뀌었다. link가 없으면 문제없음으로 돌아온 것이다. 사용량처럼 기록에 쌓지 않는다 */
+  | { type: 'sandbox_link'; link?: SandboxLink }
   /** 파일 변경을 모아 알린다. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'files_changed'; revision: number }
   /** "테스트" 탭(ADR-084)이 다시 불러올 때가 됐다는 신호. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */

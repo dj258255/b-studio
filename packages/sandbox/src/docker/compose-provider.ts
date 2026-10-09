@@ -71,6 +71,8 @@ const execFileAsync = promisify(execFile);
 
 /** compose 파일이 up과 겹쳐 계속 바뀔 때 .git 마스크를 맞춰 다시 올리는 최대 횟수 */
 const GIT_MASK_ATTEMPTS = 3;
+/** 사용량 조회(ps·inspect·stats) 전체의 상한. 평소에는 2~3초 걸린다 */
+const STATS_TIMEOUT_MS = 15_000;
 /** 의존 서비스가 준비될 때까지 기다리는 상한. compose는 healthcheck가 실패로 끝날 때까지 기다리지만, 끝나지 않는 대기는 두지 않는다 */
 const DEPENDENCY_WAIT_MS = 300_000;
 const DEPENDENCY_POLL_MS = 500;
@@ -146,6 +148,8 @@ export interface LocalDockerProviderOptions {
   readiness?: Partial<ReadinessPolicy>;
   /** 샌드박스 컨테이너에 쓸 Docker 런타임 (예: gVisor의 runsc). 비우면 데몬 기본값(runc) */
   runtime?: string;
+  /** 사용량 조회(ps·inspect·stats) 전체의 상한(ms). 기본 15초. 테스트에서 짧게 준다 */
+  statsTimeoutMs?: number;
 }
 
 /**
@@ -215,6 +219,7 @@ class LocalDockerSandbox implements Sandbox {
   readonly #edgeScript: string;
   /** 컨테이너를 만드는 up 직전마다 compose 파일에서 다시 계산한다(#refreshGitMask) */
   #gitMask: Record<string, MaskVolume[]>;
+  readonly #statsTimeoutMs: number;
   /** up을 한 번에 하나씩 돌리는 줄. 만들기 → 확인 → 시작 사이에 다른 up이 끼어들지 못하게 한다 */
   #upQueue: Promise<unknown> = Promise.resolve();
   #hostPorts: Record<string, number>;
@@ -242,6 +247,7 @@ class LocalDockerSandbox implements Sandbox {
     this.#dockerBin = options.dockerBin ?? 'docker';
     this.#readiness = options.readiness ?? {};
     this.#runtime = options.runtime;
+    this.#statsTimeoutMs = options.statsTimeoutMs ?? STATS_TIMEOUT_MS;
     this.#secrets = secrets;
     this.#redactor = new Redactor(secrets);
   }
@@ -425,15 +431,22 @@ class LocalDockerSandbox implements Sandbox {
   }
 
   async stats(): Promise<ServiceUsage[]> {
-    const ids = (await this.#compose(['ps', '--all', '--quiet'])).stdout.split('\n').filter(Boolean);
+    // 끊긴 소켓에 건 호출은 끝나지 않을 수 있다. 몇 초마다 재는 쪽이 앞선 측정을 기다리다 영영 멈추지 않게 상한을 둔다(트러블슈팅 123)
+    const signal = AbortSignal.timeout(this.#statsTimeoutMs);
+    const unanswered = `도커가 ${this.#statsTimeoutMs / 1000}초 안에 응답하지 않았습니다`;
+    const listed = await this.#docker(this.#composeArgs(['ps', '--all', '--quiet']), signal);
+    // 목록을 읽지 못한 것을 "컨테이너 없음"으로 돌려주면 도커에 닿지 않는 것과 컨테이너가 없는 것을 구분할 수 없다
+    if (listed.exitCode !== 0) throw new SandboxError(`컨테이너 목록을 읽지 못했습니다 (${this.id})`, signal.aborted ? unanswered : this.redact(listed.stderr), { platform: true });
+    const ids = listed.stdout.split('\n').filter(Boolean);
     if (ids.length === 0) return [];
-    const inspected = await this.#docker(['inspect', ...ids]);
-    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 상태를 읽지 못했습니다 (${this.id})`, inspected.stderr, { platform: true });
+    const inspected = await this.#docker(['inspect', ...ids], signal);
+    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 상태를 읽지 못했습니다 (${this.id})`, signal.aborted ? unanswered : inspected.stderr, { platform: true });
     const rows = parseInspectOutput(inspected.stdout);
 
     // docker stats는 CPU 사용률을 재느라 1초 남짓 걸리므로 실행 중인 컨테이너만 묻는다
     const running = rows.filter((row) => row.state === 'running').map((row) => row.name);
-    const stats = running.length > 0 ? await this.#docker(['stats', '--no-stream', '--format', '{{json .}}', ...running]) : undefined;
+    const stats = running.length > 0 ? await this.#docker(['stats', '--no-stream', '--format', '{{json .}}', ...running], signal) : undefined;
+    if (signal.aborted) throw new SandboxError(`컨테이너 사용량을 읽지 못했습니다 (${this.id})`, unanswered, { platform: true });
     const managedNames = new Set(this.project.managed.map(([name]) => name));
     return mergeUsage(rows, stats?.exitCode === 0 ? parseStatsOutput(stats.stdout) : [], managedNames);
   }
