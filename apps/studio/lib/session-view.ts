@@ -44,6 +44,8 @@ export type ChatItem =
   | { kind: 'backend'; runId: string; backend: string; model: string; auth?: string; effort?: Effort }
   /** 게이트의 같은 실패 서명이 반복돼 더 비싼 모델로 올렸다 */
   | { kind: 'escalation'; runId: string; from: string; to: string; times: number; attempt: number }
+  /** 로컬 CLI 러너가 대화가 길어져 앞부분을 요약했다. 압축 전후 토큰 수(후는 모를 수 있다) */
+  | { kind: 'compacted'; runId: string; trigger: 'auto' | 'manual'; preTokens: number; postTokens?: number }
   | { kind: 'stage'; runId: string; stage: string }
   /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과. browser_check면 단계별 스크린샷 식별자(steps)와 디자인 비교(compare)가 함께 온다 */
   | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare }
@@ -371,15 +373,21 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         completedRuns: view.completedRuns + 1,
       };
 
+    case 'backup_restore_started':
+      return patchSnapshot(view, { running: true });
+
     case 'backup_restored':
       return {
-        ...view,
+        ...patchSnapshot(view, { running: false }),
         chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: true, files: event.files, restarted: event.restarted } }],
         completedRuns: view.completedRuns + 1,
       };
 
     case 'backup_restore_failed':
-      return { ...view, chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: false, error: event.error } }] };
+      return {
+        ...patchSnapshot(view, { running: false }),
+        chat: [...view.chat, { kind: 'backupRestored', backupId: event.backupId, result: { ok: false, error: event.error } }],
+      };
 
     case 'remote_sync_started':
       return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'remoteSync' }] };
@@ -593,6 +601,9 @@ function applyAgentEvent(chat: ChatItem[], runId: string, event: AgentEvent): Ch
       return applySteerApplied(chat, runId, event.count);
     case 'model_escalated':
       return [...chat, { kind: 'escalation', runId, from: event.from, to: event.to, times: event.sameSignatureTimes, attempt: event.attempt }];
+
+    case 'context_compacted':
+      return [...chat, { kind: 'compacted', runId, trigger: event.trigger, preTokens: event.preTokens, ...(event.postTokens !== undefined ? { postTokens: event.postTokens } : {}) }];
 
     // 러너가 하지 못한 것을 조용히 넘기지 않고 대화에 남긴다(예: 상태 폴더가 없어 이어받지 못함)
     case 'warning':

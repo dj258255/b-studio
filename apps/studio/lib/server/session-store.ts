@@ -92,6 +92,7 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
   const openRuns = new Set<string>();
   let openRestore: Checkpoint | undefined;
   let openRemoteSync = false;
+  let openBackupRestore: string | undefined;
   let openDeploy: Extract<StudioEvent, { type: 'deploy_started' }> | undefined;
   for (const event of history) {
     if (event.type === 'deploy_started') openDeploy = event;
@@ -100,6 +101,8 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
     else if (event.type === 'run_finished') openRuns.delete(event.runId);
     else if (event.type === 'restore_started') openRestore = event.checkpoint;
     else if (event.type === 'restored' || event.type === 'restore_failed') openRestore = undefined;
+    else if (event.type === 'backup_restore_started') openBackupRestore = event.backupId;
+    else if (event.type === 'backup_restored' || event.type === 'backup_restore_failed') openBackupRestore = undefined;
     else if (event.type === 'remote_sync_started') openRemoteSync = true;
     else if (event.type === 'remote_synced' || event.type === 'remote_sync_failed') openRemoteSync = false;
   }
@@ -107,6 +110,7 @@ export function closeUnfinished(history: readonly StudioEvent[], reason: string)
     ...history,
     ...[...openRuns].map((runId): StudioEvent => ({ type: 'run_finished', runId, status: 'error', summary: reason })),
     ...(openRestore ? [{ type: 'restore_failed', checkpoint: openRestore, error: reason } satisfies StudioEvent] : []),
+    ...(openBackupRestore ? [{ type: 'backup_restore_failed', backupId: openBackupRestore, error: reason } satisfies StudioEvent] : []),
     ...(openRemoteSync ? [{ type: 'remote_sync_failed', error: reason } satisfies StudioEvent] : []),
     ...(openDeploy ? [{ type: 'deploy_failed', action: openDeploy.action, target: openDeploy.target, error: reason } satisfies StudioEvent] : []),
   ];

@@ -37,6 +37,17 @@ describe('reduceSession', () => {
     expect(view.snapshot.running).toBe(true);
   });
 
+  it('대화 압축(context_compacted)을 대화에 한 줄로 남기고 실행은 멈추지 않는다', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '이어서 해줘' },
+      { type: 'agent', runId: 'r1', event: { type: 'context_compacted', trigger: 'auto', preTokens: 961_058, postTokens: 270_474 } },
+    ]);
+
+    expect(view.chat.map((item) => item.kind)).toEqual(['request', 'compacted']);
+    expect(view.chat[1]).toEqual({ kind: 'compacted', runId: 'r1', trigger: 'auto', preTokens: 961_058, postTokens: 270_474 });
+    expect(view.snapshot.running).toBe(true);
+  });
+
   it('모델 라우팅 결정과 후보 점수를 대화 기록에 남긴다', () => {
     const initial = createView(snapshot);
     const view = reduceSession(initial, {
@@ -349,6 +360,13 @@ describe('reduceSession', () => {
     ]);
     expect(view.snapshot.running).toBe(true);
     expect(activeRun(view)).toBeUndefined();
+  });
+
+  it('백업을 되살리는 동안 running이고, 성공·실패 어느 쪽이든 풀린다', () => {
+    const started: StudioEvent = { type: 'backup_restore_started', backupId: 'b1' };
+    expect(fold([started]).snapshot.running).toBe(true);
+    expect(fold([started, { type: 'backup_restored', backupId: 'b1', files: ['a.txt'], restarted: [] }]).snapshot.running).toBe(false);
+    expect(fold([started, { type: 'backup_restore_failed', backupId: 'b1', error: '충돌' }]).snapshot.running).toBe(false);
   });
 
   it('다시 연결해 기록을 재생해도 세션 토큰 합계를 두 번 더하지 않는다', () => {

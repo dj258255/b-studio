@@ -325,13 +325,19 @@ function TurnsTable({ turns, jumps }: { turns: TokenReport["turns"]; jumps?: Con
                 <th scope="row" className="py-2 pr-4 font-medium">{turn.turn}</th>
                 <td className="py-2 pr-4 font-mono text-xs">{number(turn.contextTokens)}</td>
                 <td className={`py-2 pr-4 font-mono text-xs ${isJump ? "text-fail" : ""}`}>
-                  +{number(turn.delta)}
+                  {turn.delta < 0 ? `-${number(-turn.delta)}` : `+${number(turn.delta)}`}
                   {isJump && <span className="ml-1">급증</span>}
+                  {turn.compacted && <span className="ml-1 text-muted">요약됨</span>}
                 </td>
                 <td className="py-2 pr-4 font-mono text-xs">{number(turn.output)}</td>
                 <td className="py-2 pr-4 font-mono text-xs">{number(turn.cacheRead)}</td>
                 <td className="py-2 pr-4 text-muted">
-                  {turn.cleared ? `도구 결과 ${number(turn.cleared.count)}개 비움(${number(turn.cleared.chars)}자)` : "-"}
+                  {[
+                    turn.cleared ? `도구 결과 ${number(turn.cleared.count)}개 비움(${number(turn.cleared.chars)}자)` : undefined,
+                    turn.compacted ? `대화 요약(${number(turn.compacted.preTokens)}${turn.compacted.postTokens !== undefined ? ` → ${number(turn.compacted.postTokens)}` : ""} 토큰)` : undefined,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "-"}
                 </td>
                 <td className="py-2 text-muted">
                   {turn.biggestTool ? `${turn.biggestTool.name} ${turn.biggestTool.input} · ${number(turn.biggestTool.chars)}자` : "-"}

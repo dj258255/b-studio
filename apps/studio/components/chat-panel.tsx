@@ -744,6 +744,14 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
         </p>
       );
 
+    case "compacted":
+      return (
+        <p className="text-sm text-muted">
+          {item.trigger === "manual" ? "대화를 요약했습니다" : "대화가 길어져 앞부분을 요약했습니다"} · {formatTokenCount(item.preTokens)}
+          {item.postTokens !== undefined && ` → ${formatTokenCount(item.postTokens)}`} 토큰
+        </p>
+      );
+
     case "stage":
       return <p className="text-xs font-medium tracking-wide text-muted">작업 단계 · {stageLabel(item.stage)}</p>;
 

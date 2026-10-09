@@ -51,6 +51,30 @@ describe("ChatPanel 게이트 체크", () => {
   });
 });
 
+describe("ChatPanel 대화 압축 안내", () => {
+  it("압축 전후 토큰 수를 한 줄로 보여 준다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "계속 해줘" },
+        { type: "agent", runId: "r1", event: { type: "context_compacted", trigger: "auto", preTokens: 961_058, postTokens: 270_474 } },
+      ]),
+    );
+    expect(html).toContain("대화가 길어져 앞부분을 요약했습니다");
+    expect(html).toContain("96.1만 → 27만 토큰");
+  });
+
+  it("압축 후 크기를 모르면 압축 전 크기만 보여 준다", () => {
+    const html = render(
+      view([
+        { type: "run_started", runId: "r1", request: "계속 해줘" },
+        { type: "agent", runId: "r1", event: { type: "context_compacted", trigger: "auto", preTokens: 500_000 } },
+      ]),
+    );
+    expect(html).toContain("50만 토큰");
+    expect(html).not.toContain("→");
+  });
+});
+
 describe("ChatPanel 입력", () => {
   it("입력창은 하나이고, 만들기/질문 토글 대신 읽기만 스위치가 있다(기본 꺼짐)", () => {
     const html = render(view());
