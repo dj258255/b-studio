@@ -1,6 +1,6 @@
 import { AUTO_PAGE_MAX } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { isIdLikeSegment, routesFromChangedFiles } from './next-routes';
+import { isIdLikeSegment, routesFromCandidates, routesFromChangedFiles } from './next-routes';
 
 describe('routesFromChangedFiles', () => {
   it('서비스 폴더 안의 바뀐 page 파일에서 경로를 만든다', () => {
@@ -176,5 +176,56 @@ describe('routesFromChangedFiles', () => {
     it('우연히 id로 끝나는 낱말이나 관계없는 이름은 id로 보지 않는다', () => {
       for (const name of ['grid', 'slug', 'category', 'locale', 'valid']) expect(isIdLikeSegment(name)).toBe(false);
     });
+  });
+});
+
+describe('routesFromCandidates', () => {
+  const candidate = (page: string, cause: string, distance: number, tie = 0) => ({ page, cause, distance, tie });
+
+  it('바뀐 page(거리 0), 직접 import하는 page(거리 1), 먼 page 순으로 maxPages까지 고르고 나머지는 원인별로 묶어 남긴다', () => {
+    const result = routesFromCandidates(
+      [
+        candidate('app/c/page.tsx', 'lib/util.ts', 3),
+        candidate('app/b/page.tsx', 'lib/util.ts', 1),
+        candidate('app/a/page.tsx', 'lib/util.ts', 2),
+        candidate('app/d/page.tsx', 'lib/util.ts', 3),
+        candidate('app/own/page.tsx', 'app/own/page.tsx', 0),
+      ],
+      'web',
+      {},
+      3,
+    );
+
+    expect(result.routes).toEqual([
+      { path: '/own', file: 'web/app/own/page.tsx' },
+      { path: '/b', file: 'web/app/b/page.tsx', cause: 'web/lib/util.ts', distance: 1 },
+      { path: '/a', file: 'web/app/a/page.tsx', cause: 'web/lib/util.ts', distance: 2 },
+    ]);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]!.file).toBe('web/lib/util.ts');
+    expect(result.skipped[0]!.reason).toContain('페이지 2개');
+    expect(result.skipped[0]!.reason).toContain('/c, /d');
+    expect(result.skipped[0]!.reason).toContain('상한(3개)');
+  });
+
+  it('같은 경로는 가장 가까운 후보 하나만 쓰고, 동적 세그먼트는 기존 규칙(id 추정)으로 채운다', () => {
+    const result = routesFromCandidates(
+      [candidate('app/live/[id]/page.tsx', 'lib/b.ts', 2), candidate('app/live/[id]/page.tsx', 'components/A.tsx', 1), candidate('app/tags/[slug]/page.tsx', 'components/A.tsx', 1)],
+      'apps/web',
+      {},
+      5,
+      '1',
+    );
+
+    expect(result.routes).toEqual([{ path: '/live/1', file: 'apps/web/app/live/[id]/page.tsx', cause: 'apps/web/components/A.tsx', distance: 1, usedFallbackParams: ['id'] }]);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]!.reason).toContain("동적 세그먼트 'slug'의 값이 없습니다");
+    expect(result.skipped[0]!.reason).toContain('components/A.tsx 변경으로 찾은 페이지');
+  });
+
+  it('거리 0 후보가 상한을 넘으면 기존처럼 페이지마다 한 줄로 남긴다', () => {
+    const result = routesFromCandidates([candidate('app/a/page.tsx', 'app/a/page.tsx', 0), candidate('app/b/page.tsx', 'app/b/page.tsx', 0)], 'web', {}, 1);
+    expect(result.routes.map((route) => route.path)).toEqual(['/a']);
+    expect(result.skipped).toEqual([{ file: 'web/app/b/page.tsx', reason: '한 번에 열어 보는 페이지 상한(1개)을 넘었습니다 — autoPageChecks.maxPages를 늘리세요' }]);
   });
 });
