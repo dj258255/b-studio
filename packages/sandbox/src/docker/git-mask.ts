@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
@@ -163,9 +163,12 @@ export async function computeGitMask(projectRoot: string, config: ComposeMountCo
     const empty = path.join(entry.dir, GIT, STATE_MASK);
     try {
       await mkdir(state, { recursive: true });
-      // 상태 폴더 자리에 얹을 빈 폴더. 내용이 있으면 비운다(가린다는 약속이 깨지지 않게)
-      await rm(empty, { recursive: true, force: true });
-      await mkdir(empty);
+      // 상태 폴더 자리에 얹을 빈 폴더. 내용이 있으면 비운다(가린다는 약속이 깨지지 않게).
+      // 폴더 자체는 지우지 않는다: 서비스 여럿이 함께 재시작되면 이 함수가 동시에 불리는데, "지우고 다시 만들기"는 서로 엇갈려
+      // EEXIST로 실패했다(도그푸딩 마찰 187). 그리고 먼저 뜬 서비스의 컨테이너가 이 폴더를 이미 마운트하고 있을 수 있다.
+      // 있으면 그대로 두고 안의 항목만 지우면 몇 번을, 동시에 불러도 결과가 같다
+      await mkdir(empty, { recursive: true });
+      for (const name of await readdir(empty)) await rm(path.join(empty, name), { recursive: true, force: true });
     } catch (error) {
       throw new SandboxError(`${state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, error instanceof Error ? error.message : String(error));
     }
