@@ -4013,6 +4013,16 @@ export function deploySession(id: string, { by, sha }: { by?: string; sha?: stri
     // 같은 체크포인트를 동시에 배포해도 폴더가 겹치지 않게 한다
     const sourceRoot = path.join(defaultDeployRoot(), session.project.spec.name, 'sources', `${checkpoint.shortSha}-${randomBytes(3).toString('hex')}`);
     try {
+      if (basis.sha !== checkpoint.sha) {
+        // 통과 기록을 다른 체크포인트에서 읽었으면, 두 체크포인트의 차이가 요구사항 기록뿐인지 git으로 다시 확인한다(스냅샷의 기록만 믿지 않는다)
+        const between = await session.checkpoints.changedBetween(basis.sha, checkpoint.sha);
+        const others = between.files.filter((file) => !EVIDENCE_NEUTRAL_FILES.has(file));
+        if (between.outsideFiles > 0 || others.length > 0) {
+          const what = [...others.slice(0, 3), ...(between.outsideFiles > 0 ? [`프로젝트 폴더 밖 ${between.outsideFiles}개`] : [])].join(', ');
+          throw new Error(`체크포인트 ${basis.shortSha}와 ${checkpoint.shortSha} 사이에 요구사항 기록이 아닌 변경이 있어 배포하지 않습니다: ${what}`);
+        }
+        onLog({ stage: 'prepare', text: `통과 기록은 코드가 같은 체크포인트 ${basis.shortSha}의 것을 봤습니다(그 뒤로는 요구사항 기록만 바뀌었습니다)` });
+      }
       onLog({ stage: 'prepare', text: `체크포인트 ${checkpoint.shortSha}의 파일을 꺼냅니다` });
       const project = await loadProject(await session.checkpoints.exportTree(checkpoint.sha, sourceRoot));
       const deployer = new DockerDeployer(project, { secrets: await resolveSecrets(project) });
