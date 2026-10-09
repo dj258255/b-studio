@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -17,6 +17,43 @@ function isDeniedFileName(segment: string): boolean {
 }
 
 const MAX_READ_BYTES = 256 * 1024;
+
+/** readRegularFileSync의 결과: 없음, 읽은 글, 또는 읽지 않은 이유(일반 파일이 아님·너무 큼·읽기 실패) */
+export type RegularFileRead = { kind: 'missing' } | { kind: 'text'; content: string } | { kind: 'irregular'; reason: string };
+
+/**
+ * 일반 파일이고 상한 이하일 때만 동기적으로 읽는다. 서버의 이벤트 루프를 막는 읽기라 조건을 좁힌다:
+ * - 마지막 경로 요소가 심볼릭 링크면 따라가지 않는다(O_NOFOLLOW). 링크로 바꿔치기한 문서를 읽지 않는다
+ * - FIFO·장치 같은 것은 여는 데서 멈추지 않게 O_NONBLOCK으로 열고, 연 뒤 일반 파일인지 확인한다
+ * - 크기는 연 파일 자체(fstat)로 확인해, 확인과 읽기 사이에 다른 파일로 바뀌는 틈을 두지 않는다
+ */
+export function readRegularFileSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
+  let fd: number;
+  try {
+    fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' };
+    return { kind: 'irregular', reason: code === 'ELOOP' || code === 'EMLINK' ? '심볼릭 링크입니다' : `열 수 없습니다(${code ?? '알 수 없는 오류'})` };
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return { kind: 'irregular', reason: '일반 파일이 아닙니다' };
+    if (stat.size > maxBytes) return { kind: 'irregular', reason: `너무 큽니다(${stat.size}바이트, 상한 ${maxBytes}바이트)` };
+    const buffer = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const read = readSync(fd, buffer, offset, stat.size - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    return { kind: 'text', content: buffer.subarray(0, offset).toString('utf8') };
+  } catch {
+    return { kind: 'irregular', reason: '읽을 수 없습니다' };
+  } finally {
+    closeSync(fd);
+  }
+}
 const MAX_LIST_ENTRIES = 500;
 
 /** 실행 시작 때 고정해 두는 요구사항 문서(requirements.ts의 REQUIREMENTS_FILE과 같은 경로 — 순환 import를 피하려 따로 적는다) */
@@ -42,8 +79,8 @@ export class Workspace {
   readonly #changed = new Map<string, number>();
   readonly #deleted = new Set<string>();
   #version = 0;
-  /** 파일 → 실행 시작 시점의 내용(없으면 undefined). snapshotFile이 처음 부른 때의 값을 고정한다 */
-  readonly #snapshots = new Map<string, Promise<string | undefined>>();
+  /** 파일 → 실행 시작 시점에 읽은 결과. snapshotRead가 처음 부른 때의 값을 고정한다 */
+  readonly #snapshots = new Map<string, RegularFileRead>();
 
   constructor(root: string) {
     this.root = path.resolve(root);
@@ -54,7 +91,7 @@ export class Workspace {
    * 전에 고정한다. 게이트는 지연 기동 세션이나 CLI 러너에서 파일이 바뀐 뒤에 만들어질 수 있어, 만들 때 읽으면 늦다.
    */
   beginRun(): void {
-    void this.snapshotFile(REQUIREMENTS_SNAPSHOT_FILE);
+    this.snapshotRead(REQUIREMENTS_SNAPSHOT_FILE);
   }
 
   /**
@@ -64,18 +101,25 @@ export class Workspace {
    * 파일이 없으면 undefined(실행이 새로 만든 문서도 구분할 수 있다).
    */
   snapshotFile(file: string): Promise<string | undefined> {
-    let snapshot = this.#snapshots.get(file);
+    const read = this.snapshotRead(file);
+    return Promise.resolve(read.kind === 'text' ? read.content : undefined);
+  }
+
+  /**
+   * snapshotFile과 같은 고정이지만 읽은 결과를 그대로 돌려준다(없음·글·읽을 수 없는 꼴을 구분한다).
+   * 부르는 그 순간에 동기적으로 읽는다: 비동기 읽기를 던져만 두면 읽기가 끝나기 전에 파일이 바뀔 수 있고, 그러면 바뀐 내용이
+   * 기준점이 되어 견줄 차이가 사라진다. 서버를 막는 읽기이므로 일반 파일이고 크기 상한 이하일 때만 읽는다(readRegularFileSync).
+   * 경로는 프로젝트 루트 기준 상대 경로만 받는다
+   */
+  snapshotRead(file: string): RegularFileRead {
+    const normalized = path.normalize(file);
+    if (path.isAbsolute(file) || normalized === '..' || normalized.startsWith(`..${path.sep}`)) {
+      throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
+    }
+    let snapshot = this.#snapshots.get(normalized);
     if (!snapshot) {
-      // 부르는 그 순간의 내용을 동기적으로 읽어 고정한다. 비동기 읽기를 던져만 두면 읽기가 끝나기 전에 파일이 바뀔 수 있고,
-      // 그러면 바뀐 내용이 기준점이 되어 견줄 차이가 사라진다. 실행마다 작은 문서 하나를 한 번 읽는 것이라 막는 시간은 짧다
-      let content: string | undefined;
-      try {
-        content = readFileSync(path.join(this.root, file), 'utf8');
-      } catch {
-        content = undefined;
-      }
-      snapshot = Promise.resolve(content);
-      this.#snapshots.set(file, snapshot);
+      snapshot = readRegularFileSync(path.join(this.root, normalized));
+      this.#snapshots.set(normalized, snapshot);
     }
     return snapshot;
   }

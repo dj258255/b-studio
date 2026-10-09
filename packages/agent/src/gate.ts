@@ -15,7 +15,7 @@ import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
 import { REQUIREMENTS_FILE } from './requirements';
-import type { Workspace } from './workspace';
+import { readRegularFileSync, type Workspace } from './workspace';
 
 export type GateOutcome =
   | { kind: 'pass' }
@@ -191,7 +191,7 @@ export class VerificationGate {
   /** 계약 비교 기준은 모델이 파일을 바꾸기 전에 잡아야 한다 */
   static async create(options: GateOptions): Promise<VerificationGate> {
     // 요구사항 문서의 실행 전 모습도 같은 이유로 여기서 고정한다(러너가 실행을 시작할 때 이미 불렀다면 그 값이 유지된다)
-    void options.workspace.snapshotFile(REQUIREMENTS_FILE);
+    options.workspace.snapshotRead(REQUIREMENTS_FILE);
     return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
   }
 
@@ -202,10 +202,25 @@ export class VerificationGate {
    */
   async #requirementRecordChecks(): Promise<WorkflowCheck[]> {
     const { workspace } = this.#options;
-    const before = await workspace.snapshotFile(REQUIREMENTS_FILE);
-    const after = await readFile(path.join(workspace.root, REQUIREMENTS_FILE), 'utf8').catch(() => undefined);
-    if (before === after) return [];
-    return reviewRequirementRecords(before, after);
+    const before = workspace.snapshotRead(REQUIREMENTS_FILE);
+    const after = readRegularFileSync(path.join(workspace.root, REQUIREMENTS_FILE));
+    // 문서 자리에 링크·FIFO·거대한 파일이 놓였으면 견줄 수 없다. "문서가 없다"로 넘기면 링크 너머의 내용이 나중에 읽혀
+    // 검증됨을 만들 수 있으므로 통과시키지 않는다
+    if (after.kind === 'irregular') {
+      return [
+        {
+          stage: 'review',
+          name: MANUAL_VERIFICATION_CHECK,
+          ok: false,
+          attempts: 1,
+          detail: `${REQUIREMENTS_FILE}을(를) 읽을 수 없어 검증 기록을 견줄 수 없습니다: ${after.reason}. 일반 파일로 되돌리세요`,
+        },
+      ];
+    }
+    const beforeText = before.kind === 'text' ? before.content : undefined;
+    const afterText = after.kind === 'text' ? after.content : undefined;
+    if (beforeText === afterText) return [];
+    return reviewRequirementRecords(beforeText, afterText);
   }
 
   /**

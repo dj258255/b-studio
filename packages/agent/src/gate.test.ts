@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import type { ExecResult, Sandbox, ServiceUsage } from '@b-studio/sandbox';
@@ -1726,6 +1726,22 @@ describe('VerificationGate 요구사항 문서의 검증 기록(ADR-157)', () =>
     expect(outcome.kind).toBe('retry');
     expect(gate.checks.map((entry) => entry.name)).toEqual(['manual-verification']);
     expect(events.some((event) => event.type === 'workflow_check' && event.check.name === 'manual-verification')).toBe(true);
+  });
+
+  it('문서 자리에 링크를 놓아 바꿔치기하면, 링크 너머의 내용을 읽지 않고 막는다', async () => {
+    await seedDoc(PLAIN);
+    const { gate } = await setup(project);
+    // 위조한 문서를 다른 곳에 두고 요구사항 문서를 그리로 가는 링크로 바꾼다
+    await writeFile(path.join(project.root, 'docs/elsewhere.md'), forge(PLAIN));
+    await rm(path.join(project.root, REQ));
+    await symlink(path.join(project.root, 'docs/elsewhere.md'), path.join(project.root, REQ));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.name === 'manual-verification');
+    expect(check).toMatchObject({ ok: false });
+    expect(check?.detail).toContain('읽을 수 없어');
   });
 
   it('바뀐 것이 전혀 없으면 예전처럼 검증 없이 통과한다', async () => {

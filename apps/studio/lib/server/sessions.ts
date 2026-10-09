@@ -137,6 +137,7 @@ import {
   type CliTier,
   verifyChanges,
   workflowStages,
+  readRegularFileSync,
   Workspace,
   adrFilePath,
   appendExperimentEntry,
@@ -2928,9 +2929,17 @@ export function isDocPath(file: string): boolean {
 async function restoreForgedVerificationRecords(checkpoints: CheckpointStore, projectRoot: string): Promise<string[]> {
   if (!(await checkpoints.pendingFiles()).includes(REQUIREMENTS_FILE)) return [];
   const file = path.join(projectRoot, REQUIREMENTS_FILE);
-  const working = await readFile(file, 'utf8').catch(() => undefined);
-  if (working === undefined) return [];
+  const read = readRegularFileSync(file);
+  if (read.kind === 'missing') return [];
   const committed = await checkpoints.fileAt(REQUIREMENTS_FILE);
+  if (read.kind === 'irregular') {
+    // 문서 자리에 링크·FIFO·거대한 파일이 놓였다. 그대로 커밋하면 링크 너머의 내용이 요구사항으로 읽히므로, 그 항목만
+    // 치우고(링크는 가리키는 대상이 아니라 링크 자신을 지운다) 마지막 체크포인트의 문서를 일반 파일로 되돌려 놓는다
+    await rm(file, { force: true }).catch(() => {});
+    if (committed !== undefined) await writeFile(file, committed).catch(() => {});
+    return [`요구사항 문서를 읽을 수 없는 꼴이어서(${read.reason}) 마지막 체크포인트의 문서로 되돌렸습니다`];
+  }
+  const working = read.content;
   const diff = diffVerificationRecords(committed, working);
   if (!hasVerificationTamper(diff)) return [];
   await writeFile(file, restoreVerificationRecords(committed, working));

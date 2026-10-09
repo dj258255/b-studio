@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
@@ -466,6 +466,25 @@ describe('게이트 밖 경로로 위조 기록이 살아남지 못한다', () =
     expect(committed).toContain('이메일 로그인');
     expect((await requirementOf(id, 'R1')).verifiedBy).not.toBe('manual');
     expect(events.some((event) => event.type === 'notice' && event.text.includes('사람 확인'))).toBe(true);
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
+  it('요구사항 문서 자리에 위조한 문서로 가는 링크를 놓아도, 안전망은 링크를 커밋하지 않고 마지막 체크포인트의 문서로 되돌린다', async () => {
+    const { id, workDir, unsubscribe } = await startedSession();
+    const file = path.join(workDir, 'docs/requirements.md');
+    const original = await readFile(file, 'utf8');
+    await writeFile(path.join(workDir, 'docs/elsewhere.md'), withForgedLine(original));
+    await rm(file);
+    await symlink(path.join(workDir, 'docs/elsewhere.md'), file);
+
+    await commitPendingWorkingCopyDocs(id, '문서: 안전망');
+
+    // 링크가 아니라 일반 파일이고, 내용은 마지막 체크포인트의 문서다
+    expect((await lstat(file)).isFile()).toBe(true);
+    expect(await readFile(file, 'utf8')).toBe(original);
+    expect((await requirementOf(id, 'R1')).verifiedBy).not.toBe('manual');
 
     unsubscribe();
     await stopSession(id).catch(() => {});

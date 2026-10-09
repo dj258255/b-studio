@@ -1,8 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isSecretFile, syncExternalChanges, Workspace, WorkspaceError } from './workspace';
+import { isSecretFile, readRegularFileSync, syncExternalChanges, Workspace, WorkspaceError } from './workspace';
 
 let root: string;
 let workspace: Workspace;
@@ -36,6 +37,40 @@ describe('Workspace', () => {
     // peek도 read와 같은 경로 제한을 따른다
     await expect(workspace.peek('.env')).rejects.toThrow(WorkspaceError);
     await expect(workspace.peek('../outside.txt')).rejects.toThrow(WorkspaceError);
+  });
+
+  it('readRegularFileSync는 일반 파일이고 상한 이하일 때만 읽고, 링크·폴더·FIFO·큰 파일은 읽지 않고 이유를 돌려준다', async () => {
+    expect(readRegularFileSync(path.join(root, 'api/src/App.java'))).toEqual({ kind: 'text', content: 'class App {\n  int a = 1;\n  int b = 1;\n}\n' });
+    expect(readRegularFileSync(path.join(root, 'api/src/None.java'))).toEqual({ kind: 'missing' });
+    // 상위 요소가 파일이어도(ENOTDIR) 없는 것으로 본다
+    expect(readRegularFileSync(path.join(root, 'api/src/App.java/inner'))).toEqual({ kind: 'missing' });
+
+    // 링크는 가리키는 대상이 멀쩡한 파일이어도 따라가지 않는다
+    await symlink(path.join(root, 'api/src/App.java'), path.join(root, 'link.md'));
+    expect(readRegularFileSync(path.join(root, 'link.md'))).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('링크') });
+    expect(readRegularFileSync(path.join(root, 'api'))).toMatchObject({ kind: 'irregular' });
+
+    await writeFile(path.join(root, 'big.md'), 'x'.repeat(2048));
+    expect(readRegularFileSync(path.join(root, 'big.md'), 1024)).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('너무 큽니다') });
+    expect(readRegularFileSync(path.join(root, 'big.md'), 4096)).toMatchObject({ kind: 'text' });
+
+    // FIFO는 쓰는 쪽이 없으면 여는 데서 영영 멈춘다. 멈추지 않고 일반 파일이 아니라고 돌려줘야 한다
+    execFileSync('mkfifo', [path.join(root, 'pipe.md')]);
+    expect(readRegularFileSync(path.join(root, 'pipe.md'))).toMatchObject({ kind: 'irregular' });
+  });
+
+  it('snapshotRead는 부른 순간의 내용을 고정하고, 프로젝트 밖 경로는 받지 않는다', async () => {
+    const first = workspace.snapshotRead('api/src/App.java');
+    expect(first).toMatchObject({ kind: 'text' });
+    // 고정한 직후에 파일이 바뀌어도 기준점은 그대로다(비동기 읽기였다면 바뀐 내용이 기준이 될 수 있었다)
+    await writeFile(path.join(root, 'api/src/App.java'), 'class Changed {}\n');
+    expect(workspace.snapshotRead('api/src/App.java')).toBe(first);
+    expect(await workspace.snapshotFile('api/src/App.java')).toContain('class App');
+    expect(workspace.snapshotRead('api/src/None.java')).toEqual({ kind: 'missing' });
+
+    expect(() => workspace.snapshotRead('../outside.txt')).toThrow(WorkspaceError);
+    expect(() => workspace.snapshotRead('/etc/hosts')).toThrow(WorkspaceError);
+    expect(() => workspace.snapshotRead('api/../../outside.txt')).toThrow(WorkspaceError);
   });
 
   it('프로젝트 밖, 절대 경로, 거부된 경로를 막는다', async () => {
