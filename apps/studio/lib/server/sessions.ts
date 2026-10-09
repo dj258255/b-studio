@@ -3435,8 +3435,9 @@ export async function submissionReport(id: string, { assumePushed = false }: { a
     pendingFilesCount,
     repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
     commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 }, filesChanged: commit.files.length })),
-    // 명세 탭이 지금 계산한 상태를 넘긴다. 요구사항 파일을 못 읽으면 점검표가 파일의 상태 줄로 대신한다
-    requirements: await getSessionRequirements(id)
+    // 명세 탭이 지금 계산한 상태를 넘긴다. 이 점검은 "지금 작업 복사본을 내보내도 되는가"를 묻는 곳이라 strict로 평가해,
+    // 에이전트 실행 중이라도 미체크포인트 변경이 있으면 테스트 기록을 근거로 치지 않는다. 요구사항 파일을 못 읽으면 점검표가 파일의 상태 줄로 대신한다
+    requirements: await getSessionRequirements(id, { strict: true })
       .then((snapshot) => snapshot.requirements.map(({ id: requirementId, title, priority, status, verifiedBy }) => ({ id: requirementId, title, priority, status, verifiedBy })))
       .catch(() => undefined),
     // 게이트가 test 단계를 통과한 기록이 없어도, 테스트 탭에서 지금 체크포인트(HEAD)에 직접 돌린 결과가 있으면
@@ -4321,6 +4322,8 @@ export interface RequirementsSnapshot {
   assumptions: string[];
   /** "## 사람이 할 일" 절(저장소 권한·협업자 추가, 이메일 제출 등) — 요구사항이 아니다, 에이전트가 절대 하지 않는다 */
   manualSteps: string[];
+  /** 검증 상태가 어느 체크포인트 기준인지. 에이전트 실행 중이면 진행 중인 변경은 아직 반영되지 않았다 */
+  evidenceBasis?: RequirementEvidenceBasis;
   /**
    * 마지막 추출 결과가 세션 상태 폴더에 남아 있으면 있다(버그 리포트 A, ADR-097 개정). "추출 결과" 하위 화면이
    * 배너 없이 항상 그대로 보여준다 — 페이지를 새로고침하거나 "뽑는 중"에 개발 서버가 재시작돼도, docs/requirements.md로
@@ -4884,6 +4887,27 @@ async function headForTestEvidence(session: Session): Promise<{ head?: { sha: st
   return { head: checkpoint && { sha: checkpoint.sha, shortSha: checkpoint.shortSha }, pendingFilesCount };
 }
 
+/** 요구사항 상태가 어느 체크포인트를 기준으로 했는지와, 그 기준에 아직 반영되지 않은 변경이 있는지 */
+export interface RequirementEvidenceBasis {
+  /** 기준 체크포인트(HEAD)의 짧은 sha. 체크포인트가 하나도 없으면 없다 */
+  shortSha?: string;
+  /** 에이전트 실행이 진행 중이라 미체크포인트 변경이 실행의 것으로 보이는지 */
+  runInProgress: boolean;
+  /** 작업 복사본에 아직 어느 체크포인트에도 없는 변경이 있는지(실행 중이면 이 변경은 검증 상태에 반영되기 전이다) */
+  pendingChanges: boolean;
+}
+
+/**
+ * "마지막 체크포인트가 무엇을 검증했는가"(요구사항 상태·시나리오 누락·추적 매트릭스)를 물을 때 테스트 실행 기록을 근거로
+ * 인정할지 정하는 미체크포인트 변경 수. 에이전트 실행이 진행 중이면 그 변경은 아직 어느 체크포인트에도 속하지 않고,
+ * 게이트를 통과하면 테스트가 다시 돌아 새 결과로 바뀌며 통과하지 못하면 버려져 HEAD가 그대로이므로 0으로 본다.
+ * 실행 중이 아니면(되살린 보관본·내 폴더 모드에서 사용자가 고친 파일) 그대로 돌려줘 근거로 인정하지 않는다.
+ * "지금 작업 복사본을 내보내도 되는가"(올리기 전 점검·배포)는 이 함수를 쓰지 않고 실제 변경 수를 그대로 쓴다.
+ */
+export function evidencePendingFilesCount(pendingFilesCount: number, agentRunActive: boolean): number {
+  return agentRunActive ? 0 : pendingFilesCount;
+}
+
 /**
  * 프리필 글의 "[R4] 제목" 첫머리에 발행된 이슈 번호를 "(#12)"로 붙인다("이 요구사항 작업"·"전체 계획 세우기" 프리필,
  * ADR-092) — 세션이 이 텍스트로 커밋을 남기면 PR 본문의 `Closes #12`로 이어진다. requirements.ts의 공용 프리필
@@ -4907,7 +4931,9 @@ interface RequirementEvaluationContext {
   docSources: DocMatchSource[];
   testServices: TestServiceView[];
   head?: { sha: string; shortSha: string };
+  /** 테스트 실행 기록을 근거로 인정할지 정하는 미체크포인트 변경 수(evidencePendingFilesCount) */
   pendingFilesCount: number;
+  evidenceBasis: RequirementEvidenceBasis;
   /** 지금 체크포인트에서 돈 테스트 탭 실행을 테스트 단위로 펼친 목록(missingScenarios 계산에 쓴다) */
   testRunRows: MatrixTestRunRow[];
 }
@@ -4917,13 +4943,16 @@ interface RequirementEvaluationContext {
  * 소스·테스트 탭 실행 증거)을 한 번만 모은다. getSessionRequirements·applySessionRequirements·사람 확인
  * 저장/취소가 모두 이 자리를 쓴다(저장소 I/O를 세 번 따로 하지 않는다)
  */
-async function buildRequirementEvaluationContext(session: Session): Promise<RequirementEvaluationContext> {
+async function buildRequirementEvaluationContext(session: Session, { strict = false }: { strict?: boolean } = {}): Promise<RequirementEvaluationContext> {
   const [testFiles, docSources, testServices, headInfo] = await Promise.all([
     scanWorkingCopyTestFiles(session.project.root),
     scanWorkingCopyDocSources(session.project.root),
     Promise.all(session.project.managed.map(([name]) => buildTestServiceView(session, name))),
     headForTestEvidence(session),
   ]);
+  // session.run은 에이전트 실행(sendRequest)만 잡는다. snapshot.running은 되돌리기·내보내기·테스트 실행에서도 true라 쓰지 않는다
+  const runInProgress = session.run !== undefined;
+  const pendingFilesCount = strict ? headInfo.pendingFilesCount : evidencePendingFilesCount(headInfo.pendingFilesCount, runInProgress);
   return {
     checkpoints: sessionCheckpointRefs(session),
     testFiles,
@@ -4931,8 +4960,9 @@ async function buildRequirementEvaluationContext(session: Session): Promise<Requ
     docSources,
     testServices,
     head: headInfo.head,
-    pendingFilesCount: headInfo.pendingFilesCount,
-    testRunRows: buildMatrixTestRunRows(testServices, headInfo.head, headInfo.pendingFilesCount),
+    pendingFilesCount,
+    evidenceBasis: { ...(headInfo.head ? { shortSha: headInfo.head.shortSha } : {}), runInProgress, pendingChanges: headInfo.pendingFilesCount > 0 },
+    testRunRows: buildMatrixTestRunRows(testServices, headInfo.head, pendingFilesCount),
   };
 }
 
@@ -4950,7 +4980,7 @@ function evaluateRequirementWithContext(requirement: Requirement, context: Requi
 }
 
 /** 세션의 docs/requirements.md를 읽어 체크포인트·테스트 파일·게이트 결과·문서에서 증거를 모으고 상태를 매긴다. "명세" 탭이 연다 */
-export async function getSessionRequirements(id: string): Promise<RequirementsSnapshot> {
+export async function getSessionRequirements(id: string, { strict = false }: { strict?: boolean } = {}): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   const draft = await getSessionRequirementExtractionDraft(id);
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
@@ -4961,7 +4991,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
   // 사이드카 파일만 읽는다(원격·토큰 없이도 동작한다) — 발행한 적이 없으면 빈 채로 빠르게 끝난다
   const [issueNumbers, context] = await Promise.all([
     publishedIssueNumbers(session.project.root, requirements.map((requirement) => requirement.id)).catch(() => ({}) as Record<string, number>),
-    buildRequirementEvaluationContext(session),
+    buildRequirementEvaluationContext(session, { strict }),
   ]);
 
   const views = requirements.map((requirement) => evaluateRequirementWithContext(requirement, context, issueNumbers[requirement.id]));
@@ -4974,6 +5004,7 @@ export async function getSessionRequirements(id: string): Promise<RequirementsSn
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
     manualSteps,
+    evidenceBasis: context.evidenceBasis,
     ...(draft ? { draft } : {}),
   };
 }
