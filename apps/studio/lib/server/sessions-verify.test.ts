@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Sandbox } from '@b-studio/sandbox';
@@ -10,6 +10,9 @@ const fake = vi.hoisted(() => ({
   execCalls: [] as string[][],
   /** 가짜 배포기가 받은 것: 어느 체크포인트를, 어떤 파일이 든 폴더로 배포하라고 했는지 */
   deploys: [] as Array<{ sha: string; label: string; files: string[] }>,
+  /** 재시작을 실패시킨다: 'platform'은 샌드박스 쪽 오류(SandboxError.platform), 'code'는 서비스가 뜨지 않음 */
+  restartFails: undefined as undefined | 'platform' | 'code',
+  restarts: 0,
 }));
 
 // 샌드박스(Docker)를 띄우지 않는다. providerFromEnv만 가짜로 바꾸고 나머지는 그대로 쓴다
@@ -22,6 +25,9 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
       return [];
     },
     async restart(service: string) {
+      fake.restarts += 1;
+      if (fake.restartFails === 'platform') throw new actual.SandboxError('/work/.git/b-studio 폴더를 가릴 빈 폴더를 준비하지 못했습니다', 'EEXIST: file already exists', { platform: true });
+      if (fake.restartFails === 'code') throw new Error('컨테이너가 종료됐습니다');
       return { service, containerPort: 8080, url: 'http://127.0.0.1:1' };
     },
     async sync() {
@@ -314,5 +320,74 @@ describe('배포 조건은 코드가 같은 체크포인트의 통과 기록을 
 
     await stopSession(created).catch(() => {});
   });
+});
+
+describe('샌드박스·도커 쪽 문제로 검증하지 못한 변경은 되돌리지 않는다 (트러블슈팅 117)', () => {
+  /** 요청을 보내고 그 실행의 이벤트만 모은다(구독은 지난 이벤트를 다시 보내므로 실행 id로 거른다) */
+  async function runAndCollect(id: string, turns: unknown[]) {
+    const events: Array<{ type: string; [key: string]: unknown }> = [];
+    const { runId } = sendMessage(id, '주문에 메모 필드 추가', { allowBreaking: false, scriptedTurns: turns as never });
+    let unsubscribe: () => void = () => {};
+    const finished = await new Promise<{ status: string; summary: string }>((resolve) => {
+      unsubscribe = subscribe(id, (event) => {
+        if ((event as { runId?: string }).runId !== undefined && (event as { runId?: string }).runId !== runId) return;
+        events.push(event as never);
+        if (event.type === 'run_finished' && event.runId === runId) resolve({ status: event.status, summary: event.summary });
+      });
+    });
+    unsubscribe();
+    return { finished, events };
+  }
+
+  it('플랫폼 쪽 실패면 실행은 실패로 끝나지만 변경이 작업 복사본에 남고, 다음 요청의 게이트가 그 변경을 검증해 체크포인트로 남긴다', async () => {
+    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(created)).toBe('ready');
+    const workDir = getSnapshot(created)!.workDir;
+    const before = getSnapshot(created)!.checkpoints.length;
+
+    fake.restartFails = 'platform';
+    fake.restarts = 0;
+    const first = await runAndCollect(created, writeTurns);
+    fake.restartFails = undefined;
+
+    expect(first.finished.status).toBe('failed');
+    expect(first.finished.summary).toContain('b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다');
+    expect(first.finished.summary).not.toContain('번 통과하지 못했습니다');
+    // 되돌리지 않았다: 파일이 그대로 있고, 되돌림 이벤트가 없고, 체크포인트도 늘지 않았다
+    expect(await readFile(path.join(workDir, 'api/src/Order.java'), 'utf8')).toBe('class Order { String memo; }\n');
+    expect(first.events.some((event) => event.type === 'reverted')).toBe(false);
+    expect(getSnapshot(created)!.checkpoints.length).toBe(before);
+    expect(first.events.some((event) => event.type === 'notice' && String(event.text).includes('변경을 되돌리지 않고 작업 복사본에 그대로 뒀습니다'))).toBe(true);
+    // 모델을 거치지 않고 한 번만 다시 해 봤다
+    expect(fake.restarts).toBe(2);
+
+    // 문제가 풀린 뒤의 다음 요청: 에이전트가 파일을 건드리지 않아도 남은 변경이 게이트를 거쳐 체크포인트가 된다
+    const second = await runAndCollect(created, [{ text: '앞의 변경을 그대로 마무리했습니다.' }]);
+    expect(second.finished.status).toBe('done');
+    const head = getSnapshot(created)!.checkpoints[0]!;
+    expect(getSnapshot(created)!.checkpoints.length).toBe(before + 1);
+    expect(head.files).toContain('api/src/Order.java');
+    expect(head.passedStages).toEqual(expect.arrayContaining(['run', 'test']));
+
+    await stopSession(created).catch(() => {});
+  }, 30_000);
+
+  it('서비스가 뜨지 않은 실패는 지금처럼 재시도를 다 쓰고 되돌린다', async () => {
+    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(created)).toBe('ready');
+    const workDir = getSnapshot(created)!.workDir;
+
+    fake.restartFails = 'code';
+    const run = await runAndCollect(created, [...writeTurns, { text: '완료했습니다' }, { text: '완료했습니다' }, { text: '완료했습니다' }]);
+    fake.restartFails = undefined;
+
+    expect(run.finished.status).toBe('failed');
+    expect(run.finished.summary).toContain('번 통과하지 못했습니다');
+    expect(run.events.some((event) => event.type === 'reverted')).toBe(true);
+    // 마지막 체크포인트의 내용으로 돌아갔다
+    expect(await readFile(path.join(workDir, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
+
+    await stopSession(created).catch(() => {});
+  }, 30_000);
 });
 

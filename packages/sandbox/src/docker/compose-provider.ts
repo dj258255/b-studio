@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
-import { SandboxError } from '../errors';
+import { isDockerUnreachable, SandboxError } from '../errors';
 import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransientCrash, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
@@ -391,7 +391,7 @@ class LocalDockerSandbox implements Sandbox {
         ['run', '--rm', '--network', 'none', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...targets],
         signal,
       );
-      if (result.exitCode !== 0) throw new SandboxError('샌드박스 파일 반영 확인에 실패했습니다', result.stderr);
+      if (result.exitCode !== 0) throw new SandboxError('샌드박스 파일 반영 확인에 실패했습니다', result.stderr, { platform: true });
 
       const seen = parseSyncOutput(result.stdout);
       const pending = targets.filter((file) => seen.get(file) !== expected.get(file));
@@ -399,7 +399,8 @@ class LocalDockerSandbox implements Sandbox {
       for (const file of pending) observations.record(file, seen.get(file));
 
       if (Date.now() - started >= timeoutMs) {
-        throw new SandboxError(observations.describeTimeout(pending, expected, timeoutMs));
+        // 반영이 끝나지 않은 것은 호스트와 컨테이너 사이의 파일 공유 문제다. 코드를 고쳐서 풀 수 없다
+        throw new SandboxError(observations.describeTimeout(pending, expected, timeoutMs), undefined, { platform: true });
       }
       await sleep(250, undefined, { signal });
     }
@@ -421,7 +422,7 @@ class LocalDockerSandbox implements Sandbox {
     const ids = (await this.#compose(['ps', '--all', '--quiet'])).stdout.split('\n').filter(Boolean);
     if (ids.length === 0) return [];
     const inspected = await this.#docker(['inspect', ...ids]);
-    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 상태를 읽지 못했습니다 (${this.id})`, inspected.stderr);
+    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 상태를 읽지 못했습니다 (${this.id})`, inspected.stderr, { platform: true });
     const rows = parseInspectOutput(inspected.stdout);
 
     // docker stats는 CPU 사용률을 재느라 1초 남짓 걸리므로 실행 중인 컨테이너만 묻는다
@@ -776,12 +777,12 @@ class LocalDockerSandbox implements Sandbox {
     const ids = (await this.#docker(this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']))).stdout.split('\n').map((id) => id.trim()).filter(Boolean);
     if (ids.length === 0) return;
     const inspected = await this.#docker(['inspect', ...ids]);
-    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 마운트를 확인하지 못했습니다 (${this.id})`, this.redact(inspected.stderr));
+    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 마운트를 확인하지 못했습니다 (${this.id})`, this.redact(inspected.stderr), { platform: true });
     let containers: Array<{ Id: string; Name?: string; Mounts?: InspectedMount[]; Config?: { Labels?: Record<string, string> } }>;
     try {
       containers = JSON.parse(inspected.stdout);
     } catch {
-      throw new SandboxError(`컨테이너 마운트(docker inspect)를 해석하지 못했습니다 (${this.id})`);
+      throw new SandboxError(`컨테이너 마운트(docker inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
     }
     const names = [...new Set(containers.flatMap((container) => (container.Mounts ?? []).filter((mount) => mount.Type === 'volume' && mount.Name).map((mount) => mount.Name!)))];
     const volumeOptions: Record<string, { driver?: string; driver_opts?: Record<string, string> }> = {};
@@ -793,7 +794,7 @@ class LocalDockerSandbox implements Sandbox {
             volumeOptions[volume.Name] = { ...(volume.Driver ? { driver: volume.Driver } : {}), driver_opts: volume.Options ?? {} };
           }
         } catch {
-          throw new SandboxError(`볼륨 정보(docker volume inspect)를 해석하지 못했습니다 (${this.id})`);
+          throw new SandboxError(`볼륨 정보(docker volume inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
         }
       }
     }
@@ -807,7 +808,7 @@ class LocalDockerSandbox implements Sandbox {
     }
     if (failures.length === 0) return;
     await this.#docker(['stop', ...stop]);
-    throw new SandboxError(`컨테이너에 .git 읽기 전용 마운트가 빠져 멈췄습니다 (${this.id})`, failures.join('\n'));
+    throw new SandboxError(`컨테이너에 .git 읽기 전용 마운트가 빠져 멈췄습니다 (${this.id})`, failures.join('\n'), { platform: true });
   }
 
   async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
@@ -830,7 +831,8 @@ class LocalDockerSandbox implements Sandbox {
     const result = await this.#compose(args, signal);
     if (result.exitCode !== 0) {
       // 디스크 부족이면 원본 stderr는 그대로 두고 다음에 할 일만 덧붙인다
-      throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)));
+      // 빌드 실패처럼 코드가 원인일 수 있는 실패가 섞여 있으므로, 도커에 닿지 못한 것이 분명할 때만 플랫폼 쪽으로 표시한다
+      throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)), { platform: isDockerUnreachable(result.stderr) });
     }
     return result;
   }
@@ -854,7 +856,7 @@ class LocalDockerSandbox implements Sandbox {
         if (!isPortBindConflict(detail)) throw error;
         if (isLastAttempt) {
           const message = error instanceof Error ? error.message : String(error);
-          throw new SandboxError(`${message}\n포트 충돌이 반복돼 ${PORT_RETRY_ATTEMPTS}회 재시도 후 포기했습니다`);
+          throw new SandboxError(`${message}\n포트 충돌이 반복돼 ${PORT_RETRY_ATTEMPTS}회 재시도 후 포기했습니다`, undefined, { platform: true });
         }
         await this.#regeneratePorts();
         // 일부만 뜬 컨테이너를 정리한다. down이 실패해도(예: 이미 아무것도 안 떠 있음) 다음 up은 --remove-orphans로 이어간다
