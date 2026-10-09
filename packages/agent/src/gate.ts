@@ -163,6 +163,11 @@ export class VerificationGate {
   skippedStages: WorkflowStage[] = [];
   /** 바뀐 파일을 실제로 검증해 통과했는지. 바뀐 파일이 없어 검증 없이 끝났다면 false라서 체크포인트 단계로 넘어가지 않는다 */
   verified = false;
+  /**
+   * 가장 최근 check()의 결과. 한 번도 돌지 않았으면 없다. verified는 한 번 통과하면 켜진 채로 남으므로, 그 뒤의 검증이
+   * 실패했는지는 이 값으로 본다(질문으로 끝난 실행이 체크포인트를 남겨도 되는지 판정하는 데 쓴다)
+   */
+  lastOutcome: GateOutcome['kind'] | undefined;
   readonly #options: GateOptions;
   readonly #baselines: ReadonlyMap<string, OpenApiDocument>;
   /** 게이트 재시도 상한. 기본은 생성 시 받은 값이고, 승격이 새 예산을 주면 커진다 */
@@ -234,7 +239,17 @@ export class VerificationGate {
     return this.attempts < this.#maxAttempts;
   }
 
+  /**
+   * 모델이 턴을 끝낼 때마다 부른다. 마지막 결과를 lastOutcome에 남긴다 — 호출자가 결과를 받아 쓰지 않는 자리(질문을 남기고
+   * 멈추기 전에 한 번 돌리는 검증)에서도 "마지막 검증이 통과했는가"를 나중에 물을 수 있어야 한다
+   */
   async check(): Promise<GateOutcome> {
+    const outcome = await this.#check();
+    this.lastOutcome = outcome.kind;
+    return outcome;
+  }
+
+  async #check(): Promise<GateOutcome> {
     const { project, sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
     const recordChecks = await this.#requirementRecordChecks();
     if (workspace.changedFiles().length === 0) {
