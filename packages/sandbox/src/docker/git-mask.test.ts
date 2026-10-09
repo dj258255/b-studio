@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
@@ -176,6 +176,55 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
     const results = await Promise.all(Array.from({ length: 24 }, () => computeGitMask(root, config)));
     for (const mask of results) expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
     expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+  });
+
+  it('빈 폴더 자리가 프로젝트 밖을 가리키는 링크면 따라가지 않는다: 링크만 지우고 진짜 빈 폴더를 만든다(그 너머의 파일은 그대로)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const outside = path.join(base, 'outside');
+    await mkdir(path.join(outside, 'keep'), { recursive: true });
+    await writeFile(path.join(outside, 'important.txt'), '지우면 안 되는 파일');
+    await symlink(outside, path.join(root, '.git', 'b-studio-empty'));
+
+    await computeGitMask(root, { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } });
+
+    expect(await readFile(path.join(outside, 'important.txt'), 'utf8')).toBe('지우면 안 되는 파일');
+    expect(await readdir(outside)).toEqual(['important.txt', 'keep']);
+    const made = await lstat(path.join(root, '.git', 'b-studio-empty'));
+    expect(made.isSymbolicLink()).toBe(false);
+    expect(made.isDirectory()).toBe(true);
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+  });
+
+  it('빈 폴더 자리가 상태 폴더를 가리키는 링크여도 상태 폴더를 "빈 폴더"로 쓰지 않는다(상태는 그대로, 가리는 폴더는 진짜 빈 폴더)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    await writeFile(path.join(root, '.git', 'b-studio', 'session.json'), '{"secret":true}');
+    await symlink(path.join(root, '.git', 'b-studio'), path.join(root, '.git', 'b-studio-empty'));
+
+    await computeGitMask(root, { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } });
+
+    expect(await readFile(path.join(root, '.git', 'b-studio', 'session.json'), 'utf8')).toBe('{"secret":true}');
+    expect((await lstat(path.join(root, '.git', 'b-studio-empty'))).isSymbolicLink()).toBe(false);
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+  });
+
+  it('빈 폴더 안에 든 링크는 링크만 지운다(가리키는 곳은 그대로)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const outside = path.join(base, 'outside');
+    await mkdir(outside);
+    await writeFile(path.join(outside, 'important.txt'), 'x');
+    await mkdir(path.join(root, '.git', 'b-studio-empty'));
+    await symlink(outside, path.join(root, '.git', 'b-studio-empty', 'link'));
+
+    await computeGitMask(root, { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }] } } });
+
+    expect(await readdir(path.join(root, '.git', 'b-studio-empty'))).toEqual([]);
+    expect(await readdir(outside)).toEqual(['important.txt']);
   });
 });
 
