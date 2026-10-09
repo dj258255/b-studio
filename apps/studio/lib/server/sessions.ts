@@ -5110,6 +5110,9 @@ function alignScenarioIdsInInput(input: unknown): unknown {
 export async function applySessionRequirements(id: string, input: unknown): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
+  // 에이전트 실행이 도는 동안은 받지 않는다: 저장하면 재확인 판정 필드(hash·revisedAt)가 바뀌는데, 게이트는 실행 전 문서와
+  // 견주어 그것을 실행이 바꾼 것으로 보고 실행을 실패시킨다(ADR-157). 조용히 받아 두고 긴 실행을 되돌리는 것보다 지금 알린다
+  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 요구사항을 저장할 수 없습니다. 끝난 뒤에 저장해 주세요');
   // 화면이 보낸 시나리오 id가 요구사항 id와 어긋나면(재추출 병합이 요구사항 id만 바꾼 경우) 검증 전에 맞춘다
   const parsed = ApplyRequirementsSchema.safeParse(alignScenarioIdsInInput(input));
   if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
@@ -5318,6 +5321,10 @@ export async function writeSessionDoc(id: string, file: string, content: string)
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
   if (!isDocsTabPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
+  // 요구사항 문서는 실행 중에 받지 않는다(applySessionRequirements와 같은 이유, ADR-157). 다른 문서는 그대로 받는다
+  if (file === REQUIREMENTS_FILE && session.snapshot.running) {
+    throw new StudioError(409, '요청을 처리하는 동안에는 요구사항 문서를 저장할 수 없습니다. 끝난 뒤에 저장해 주세요');
+  }
   await new Workspace(session.project.root).write(file, content);
   await commitDocTabChange(id, file, `docs: ${file} 내용을 고친다`);
   return { path: file, content };

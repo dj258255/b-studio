@@ -72,6 +72,7 @@ import {
   sendMessage,
   stopSession,
   subscribe,
+  writeSessionDoc,
 } from './sessions';
 
 let root: string;
@@ -335,6 +336,11 @@ describe('에이전트 실행이 사람 확인 기록을 써넣는 위조', () =
     expect(getSnapshot(id)!.running).toBe(true);
     await expect(markRequirementManualVerification(id, 'R2', { note: '실행 중에 누름' }, 'kim')).rejects.toMatchObject({ status: 409 });
     await expect(clearRequirementManualVerification(id, 'R1')).rejects.toMatchObject({ status: 409 });
+    // 요구사항 저장(명세 탭)과 문서 탭의 요구사항 문서 저장도 같은 이유로 받지 않는다 — 받으면 재확인 판정 필드가 바뀌어
+    // 게이트가 이 실행을 실패시킨다. 다른 문서는 실행 중에도 저장된다
+    await expect(applySessionRequirements(id, { requirements: [] })).rejects.toMatchObject({ status: 409 });
+    await expect(writeSessionDoc(id, 'docs/requirements.md', '# 요구사항\n')).rejects.toMatchObject({ status: 409 });
+    await expect(writeSessionDoc(id, 'README.md', '# 메모\n')).resolves.toMatchObject({ path: 'README.md' });
     await waitFor(() => events.find((event) => event.type === 'run_finished'));
 
     // 실행이 끝난 뒤에는 다시 받는다
