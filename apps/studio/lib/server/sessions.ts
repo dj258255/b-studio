@@ -1145,6 +1145,11 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   session.stop.abort();
   session.logFollower?.abort();
   clearInterval(session.usageTimer);
+  // 중지한 세션에는 재는 것이 없다. 연결 상태를 남기면 다음에 올릴 때 낡은 값이 보인다
+  if (session.snapshot.sandboxLink) {
+    delete session.snapshot.sandboxLink;
+    emit(session, { type: 'sandbox_link' });
+  }
   session.fileWatcher?.close();
   await session.sandbox.destroy().catch(() => {});
   // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
@@ -6726,6 +6731,11 @@ function watchUsage(session: Session): void {
   let measuring = false;
   // 측정 결과로 샌드박스에 닿는지도 함께 본다. "준비됨"으로 남아 있는데 도커가 끊겼거나 컨테이너가 사라진 것을 화면에 알린다
   let link = newSandboxLinkTracker();
+  // 새로 재기 시작한다. 앞선 샌드박스에서 남은 연결 상태(중지 전에 "컨테이너 없음"이었던 것 등)를 들고 가지 않는다
+  if (session.snapshot.sandboxLink) {
+    delete session.snapshot.sandboxLink;
+    emit(session, { type: 'sandbox_link' });
+  }
   const observe = (probe: SandboxProbe) => {
     const before = link.link;
     link = advanceSandboxLink(link, probe, new Date().toISOString(), session.snapshot.status === 'ready');

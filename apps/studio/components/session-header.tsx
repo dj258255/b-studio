@@ -56,6 +56,24 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
 
   // 샌드박스에 닿지 않거나 컨테이너가 사라졌으면 "준비됨"이라고 하지 않는다. 서비스 상태도 마지막으로 본 값일 뿐이다(트러블슈팅 123)
   const link = snapshot.status === "ready" ? snapshot.sandboxLink : undefined;
+  /**
+   * 컨테이너가 사라진 세션을 다시 올린다. 서버는 중지한 세션만 이어서 작업하게 하므로(남은 샌드박스를 먼저 정리해야 한다)
+   * 중지한 뒤에 이어서 작업을 부른다. 중지가 끝나야 다음으로 간다
+   */
+  async function reboot() {
+    setResuming(true);
+    setResumeError(undefined);
+    const stopped = await fetch(`/api/sessions/${snapshot.id}`, { method: "DELETE" });
+    if (!stopped.ok) {
+      setResumeError((await stopped.json().catch(() => ({}))).error ?? "샌드박스를 정리하지 못했습니다");
+      setResuming(false);
+      return;
+    }
+    const response = await fetch(`/api/sessions/${snapshot.id}/resume`, { method: "POST" });
+    if (!response.ok) setResumeError((await response.json().catch(() => ({}))).error ?? "샌드박스를 다시 올리지 못했습니다");
+    setResuming(false);
+  }
+
   const statusTone = link ? "fail" : snapshot.status === "ready" ? "pass" : snapshot.status === "failed" ? "fail" : snapshot.status === "stopped" ? "idle" : "wait";
   // 관리형 서비스(studio.yaml)는 줄로 하나하나 보여주고, 그 밖의 컨테이너(DB 등 부가 서비스·edge 플랫폼, ADR-073)는 칩 하나로 압축한다
   const managedNames = new Set(snapshot.services.map((service) => service.name));
@@ -82,9 +100,10 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           const ended = usage && endedReason(usage);
           return (
             <li key={service.name} className="flex items-center gap-1.5">
-              <Dot tone={link ? "idle" : toneOfService(service.state)} />
+              {/* 꺼 둔 서비스는 컨테이너가 없는 것이 정상이라 그대로 "꺼 둠"이다 */}
+              <Dot tone={link && service.state !== "off" ? "idle" : toneOfService(service.state)} />
               <span className="font-medium">{service.name}</span>
-              <span className="text-muted">{link ? "확인 불가" : SERVICE_STATE_LABEL[service.state]}</span>
+              <span className="text-muted">{link && service.state !== "off" ? "확인 불가" : SERVICE_STATE_LABEL[service.state]}</span>
               {/* 중지된 서비스에 마지막으로 잰 사용량을 남기면 아직 자원을 쓰는 것처럼 보인다 */}
               {!link && service.state !== "stopped" && usage?.memoryBytes !== undefined && (
                 <span className="font-mono text-xs text-muted" title="메모리 사용량 / 한도">
@@ -136,14 +155,15 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
           나란히 보기에 추가
         </button>
-        {link && (
+        {/* 닿지 않을 때는 다시 올릴 수도 없다. 도커가 돌아오면 저절로 풀린다 */}
+        {link?.state === "missing" && (
           <button
             type="button"
-            onClick={resume}
+            onClick={reboot}
             disabled={resuming || !access.canManage}
             className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
           >
-            {resuming ? "새 샌드박스 만드는 중" : "샌드박스 다시 올리기"}
+            {resuming ? "샌드박스 다시 올리는 중" : "샌드박스 다시 올리기"}
           </button>
         )}
         {snapshot.status === "stopped" ? (

@@ -18,6 +18,7 @@ const snapshot: SessionSnapshot = {
   services: [
     { name: "api", template: "spring-boot", preview: "openapi", state: "ready", hasContract: true },
     { name: "web", template: "nextjs", preview: "browser", state: "ready", hasContract: false },
+    { name: "admin", template: "nextjs", preview: "browser", state: "off", hasContract: false },
   ],
   usage: { at: "2026-10-10T00:00:00.000Z", services: [{ service: "api", state: "running", memoryBytes: 512 * 1024 * 1024 } as never] },
 };
@@ -37,12 +38,15 @@ describe("세션 헤더의 샌드박스 연결 상태 (트러블슈팅 123)", ()
     expect(html).toContain("샌드박스에 닿지 않습니다");
     expect(html).not.toContain("준비됨");
     expect(html.match(/확인 불가/g)).toHaveLength(2);
+    // 꺼 둔 서비스는 컨테이너가 없는 것이 정상이라 그대로다
+    expect(html).toContain("꺼 둠");
     expect(html).toContain("도커에 물어도 답을 받지 못하고 있습니다");
     expect(html).toContain("Cannot connect to the Docker daemon");
     expect(html).toContain("마지막으로 본 값");
     // 마지막으로 잰 메모리 사용량을 지금 값처럼 보여 주지 않는다
     expect(html).not.toContain("512");
-    expect(html).toContain("샌드박스 다시 올리기");
+    // 닿지 않을 때는 다시 올릴 수도 없으므로 버튼을 두지 않는다
+    expect(html).not.toContain("샌드박스 다시 올리기");
   });
 
   it("컨테이너가 사라졌으면 다시 올리라고 안내한다", () => {
