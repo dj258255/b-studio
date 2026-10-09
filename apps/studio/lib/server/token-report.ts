@@ -43,6 +43,9 @@ interface DraftRun {
   turns: Array<{ turn: number; contextTokens: number; output: number; cacheRead: number }>;
   /** 턴별로 비운 도구 결과(횟수·글자). 비우기는 그 턴의 모델 호출 전에 일어나 turn_usage보다 먼저 온다 */
   clearedByTurn: Map<number, { count: number; chars: number }>;
+  /** 압축(compact_boundary)은 다음 모델 호출 전에 일어나므로, 다음에 오는 turn_usage에 붙일 때까지 들고 있는다 */
+  pendingCompaction?: { preTokens: number; postTokens?: number };
+  compactedByTurn: Map<number, { preTokens: number; postTokens?: number }>;
   /** 이 실행의 agent 이벤트를 그대로 모아 둔다(context-growth.ts가 턴별 증가 원인을 다시 계산할 때 쓴다) */
   rawEvents: StudioEvent[];
   pending: PendingCall[];
@@ -77,7 +80,7 @@ export function buildTokenReports(events: readonly StudioEvent[], pricing: Token
 
   for (const event of events) {
     if (event.type === 'run_started') {
-      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), rawEvents: [], pending: [], results: [], usage: emptyUsage() };
+      current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), compactedByTurn: new Map(), rawEvents: [], pending: [], results: [], usage: emptyUsage() };
       runs.push(current);
       continue;
     }
@@ -113,7 +116,14 @@ function applyAgentEvent(run: DraftRun, event: Exclude<AgentEvent, { type: 'toke
     case 'turn':
       run.currentTurn = event.turn;
       break;
+    case 'context_compacted':
+      run.pendingCompaction = { preTokens: event.preTokens, ...(event.postTokens !== undefined ? { postTokens: event.postTokens } : {}) };
+      break;
     case 'turn_usage':
+      if (run.pendingCompaction) {
+        run.compactedByTurn.set(event.turn, run.pendingCompaction);
+        run.pendingCompaction = undefined;
+      }
       run.turns.push({ turn: event.turn, contextTokens: event.contextTokens, output: event.outputTokens, cacheRead: event.cacheReadTokens });
       break;
     case 'context_cleared': {
@@ -156,6 +166,7 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
       cacheRead: turn.cacheRead,
       ...(biggest ? { biggestTool: { name: biggest.name, input: summarizeInput(biggest.name, biggest.input), chars: biggest.chars } } : {}),
       ...(cleared ? { cleared } : {}),
+      ...(run.compactedByTurn.has(turn.turn) ? { compacted: run.compactedByTurn.get(turn.turn)! } : {}),
     });
     previous = turn.contextTokens;
   }

@@ -33,6 +33,39 @@ const BACKEND = '로컬 Claude Agent';
  * 리터럴을 두 곳에 따로 적지 않고 이 상수 하나로 맞춘다(apps/studio/lib/server/model-picker.ts가 그대로 쓴다).
  */
 export const DEFAULT_CLAUDE_CODE_EFFORT: Effort = 'high';
+/**
+ * 자동 압축 기준 창(토큰). 이어받은 대화가 이 크기에 닿으면 SDK가 앞부분을 요약한다(ADR-151).
+ * 200,000은 200K 창 모델의 표준 동작과 같은 수준이다. 1M 창 모델은 SDK 기본이 훨씬 커서 대화가 수십만 토큰까지 자란다.
+ */
+export const DEFAULT_COMPACT_WINDOW = 200_000;
+/** 이보다 작은 창은 압축이 너무 자주 일어나 쓸모가 없으므로 무시한다 */
+export const MIN_COMPACT_WINDOW = 50_000;
+export const COMPACT_WINDOW_ENV = 'B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW';
+const SDK_COMPACT_WINDOW_ENV = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
+
+export interface CompactWindowSetting {
+  /** SDK에 넘길 창 크기. null이면 넘기지 않아 SDK 기본 동작을 쓴다 */
+  window: number | null;
+  /** 값을 무시하고 기본값을 쓴 경우의 안내 */
+  ignored?: string;
+}
+
+/**
+ * B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW 값을 해석한다(순수 함수).
+ * 비어 있으면 기본값, `0`·`off`면 끄기(null), 숫자가 아니거나 MIN_COMPACT_WINDOW 미만이면 기본값을 쓰고 이유를 돌려준다.
+ */
+export function resolveCompactWindow(raw: string | undefined): CompactWindowSetting {
+  const text = raw?.trim();
+  if (!text) return { window: DEFAULT_COMPACT_WINDOW };
+  if (text === '0' || text.toLowerCase() === 'off') return { window: null };
+  const value = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+  if (Number.isSafeInteger(value) && value >= MIN_COMPACT_WINDOW) return { window: value };
+  return {
+    window: DEFAULT_COMPACT_WINDOW,
+    ignored: `${COMPACT_WINDOW_ENV}=${text} 값을 무시하고 기본값 ${DEFAULT_COMPACT_WINDOW.toLocaleString('ko-KR')} 토큰을 씁니다 (${MIN_COMPACT_WINDOW.toLocaleString('ko-KR')} 이상의 정수, 끄려면 0 또는 off)`,
+  };
+}
+
 /** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
 const STEERING_POLL_MS = 300;
 
@@ -118,6 +151,8 @@ export interface ClaudeCodeRunOptions extends Omit<RunAgentOptions, 'client' | '
   sdk?: ClaudeCodeSdk;
   /** 일시적 네트워크 오류(ADR-142)를 재시도할 때의 대기 전략. 넘기지 않으면 기본 상한·실제 대기를 쓴다(테스트 전용 주입점) */
   networkRetry?: NetworkRetryOptions;
+  /** 환경 변수. 넘기지 않으면 process.env를 쓴다(테스트 전용 주입점) */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface ClaudeCodeResult extends AgentResult {
@@ -159,8 +194,17 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     research = false,
     steering,
     networkRetry = {},
+    env: processEnv = process.env,
   } = options;
   signal?.throwIfAborted();
+  // 자동 압축 기준 창. 사용자가 프로세스 환경에 직접 준 값은 덮어쓰지 않는다. 모든 query(재시도·승격으로 다시 여는 것 포함)가 이 env를 쓴다
+  const compact = processEnv[SDK_COMPACT_WINDOW_ENV]?.trim() ? { window: null } : resolveCompactWindow(processEnv[COMPACT_WINDOW_ENV]);
+  const queryEnv: Record<string, string | undefined> = {
+    ...processEnv,
+    CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio',
+    ...(compact.window !== null ? { [SDK_COMPACT_WINDOW_ENV]: String(compact.window) } : {}),
+  };
+  if (compact.ignored) onEvent({ type: 'warning', message: compact.ignored });
   const ask = intent === 'ask';
   const networkWait = networkRetry.wait ?? defaultNetworkWait;
   const networkMaxAttempts = networkRetry.maxAttempts ?? NETWORK_RETRY_MAX_ATTEMPTS;
@@ -368,7 +412,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         abortController: abort,
         // 실패한 실행이 다음 요청의 대화를 오염시키지 않도록 매번 갈라서 이어받는다
         ...(resumeForQuery ? { resume: resumeForQuery, forkSession: true } : {}),
-        env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
+        env: queryEnv,
       },
     });
     input.push(pendingPrompt);
@@ -405,6 +449,10 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 auth: account ? describeAccount(account) : undefined,
                 effort,
               });
+            }
+            if (message.subtype === 'compact_boundary') {
+              const { trigger, pre_tokens, post_tokens } = message.compact_metadata;
+              onEvent({ type: 'context_compacted', trigger, preTokens: pre_tokens, ...(post_tokens !== undefined ? { postTokens: post_tokens } : {}) });
             }
             break;
 

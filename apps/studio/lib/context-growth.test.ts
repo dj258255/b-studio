@@ -124,6 +124,21 @@ describe('analyzeContextGrowth', () => {
     expect(report.jumps).toEqual([]);
   });
 
+  it('대화 압축으로 줄어든 턴과 그 뒤의 정상 증가를 급증으로 보지 않는다', () => {
+    const events: StudioEvent[] = [
+      agent({ type: 'turn', turn: 1 }),
+      agent({ type: 'turn_usage', turn: 1, inputTokens: 961_058, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 961_058 }),
+      agent({ type: 'turn', turn: 2 }),
+      agent({ type: 'context_compacted', trigger: 'auto', preTokens: 961_058, postTokens: 270_474 }),
+      agent({ type: 'turn_usage', turn: 2, inputTokens: 270_474, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 270_474 }),
+      agent({ type: 'turn', turn: 3 }),
+      agent({ type: 'turn_usage', turn: 3, inputTokens: 272_000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 272_000 }),
+    ];
+    const report = analyzeContextGrowth(events);
+    expect(report.turns[1]!.delta).toBe(-690_584);
+    expect(report.jumps).toEqual([]);
+  });
+
   it('턴 사용량이 없으면 빈 보고서를 낸다', () => {
     expect(analyzeContextGrowth([])).toEqual({ turns: [], jumps: [] });
   });

@@ -188,6 +188,11 @@ export type AgentEvent =
    * clearedCount: 표시 문구로 바꾼 도구 결과 수, clearedChars: 그때 줄어든 글자 수
    */
   | { type: 'context_cleared'; turn: number; clearedCount: number; clearedChars: number }
+  /**
+   * 로컬 CLI 러너가 이어받은 대화가 길어져 앞부분을 요약으로 바꿨다(SDK의 compact_boundary).
+   * trigger: auto는 자동 압축, manual은 사용자가 보낸 압축. preTokens는 압축 직전, postTokens는 압축 직후 크기(모르면 없다)
+   */
+  | { type: 'context_compacted'; trigger: 'auto' | 'manual'; preTokens: number; postTokens?: number }
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   /** chars: 모델에 간 글자 수(자르기·반복 대체 뒤). rawChars: 자르기 전 원래 글자 수. 토큰 탭이 이 둘로 낭비를 찾는다 */

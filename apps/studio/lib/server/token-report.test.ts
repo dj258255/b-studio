@@ -171,6 +171,26 @@ describe('buildTokenReports', () => {
     expect(report!.cleared).toEqual({ count: 3, chars: 24_000 });
   });
 
+  it('대화 압축은 다음 턴에 표시하고, 컨텍스트가 줄어든 턴을 급증 경고로 보지 않는다', () => {
+    const events: StudioEvent[] = [
+      { type: 'run_started', runId: 'r1', request: '요청' },
+      agent('r1', { type: 'turn', turn: 1 }),
+      agent('r1', { type: 'turn_usage', turn: 1, inputTokens: 961_058, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 961_058 }),
+      agent('r1', { type: 'turn', turn: 2 }),
+      agent('r1', { type: 'context_compacted', trigger: 'auto', preTokens: 961_058, postTokens: 270_474 }),
+      agent('r1', { type: 'turn_usage', turn: 2, inputTokens: 270_474, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 270_474 }),
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: 'ok', turns: 2 },
+    ];
+
+    const [report] = buildTokenReports(events);
+
+    expect(report!.turns[0]!.compacted).toBeUndefined();
+    expect(report!.turns[1]!.compacted).toEqual({ preTokens: 961_058, postTokens: 270_474 });
+    expect(report!.turns[1]!.delta).toBeLessThan(0);
+    // (첫 턴은 이어받은 대화 전체가 늘어난 양으로 잡히는 기존 동작이라 둘째 턴만 본다)
+    expect(report!.warnings.some((warning) => warning.kind === 'context_jump' && warning.turn === 2)).toBe(false);
+  });
+
   it('비운 적이 없으면 합계가 0이다', () => {
     const [report] = buildTokenReports(sampleEvents());
     expect(report!.cleared).toEqual({ count: 0, chars: 0 });
