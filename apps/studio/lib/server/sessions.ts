@@ -1576,6 +1576,11 @@ export async function saveExploreQaArtifact(id: string, input: { name: string; d
   return saveArtifact(stateDirOf(session.snapshot), 'explore-qa', input);
 }
 
+/** 세션 상태 폴더(작업 복사본의 루트). 탐색형 QA가 끝난 실행을 파일로 남길 자리를 정하는 데 쓴다 */
+export function sessionStateDir(id: string): string {
+  return stateDirOf(requireSession(id).snapshot);
+}
+
 /** 요소 선택 스크린샷을 산출물로 저장하고 식별자를 돌려준다 */
 export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
   const session = requireSession(id);

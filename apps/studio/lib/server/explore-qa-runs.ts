@@ -16,7 +16,8 @@ import {
 } from '@b-studio/agent';
 import { SPEC_FILE } from '@b-studio/spec';
 import { publish } from './live-frames';
-import { exploreQaBackendFor, remoteBrowserAllowedOrigins, remoteBrowserUrl, saveExploreQaArtifact } from './sessions';
+import { EXPLORE_QA_RUN_FILE, readExploreQaRunFile, writeExploreQaRunFile } from './explore-qa-run-file';
+import { exploreQaBackendFor, remoteBrowserAllowedOrigins, remoteBrowserUrl, saveExploreQaArtifact, sessionStateDir } from './sessions';
 
 /**
  * 세션마다 탐색형 QA 실행 하나를 관리한다(원격 브라우저의 remote-browsers.ts와 같은 모양).
@@ -102,15 +103,23 @@ export function startExploreQa(sessionId: string, input: StartExploreQaInput): E
     saveExploreQaArtifact(sessionId, artifactInput);
 
   const { projectRoot, backend } = exploreQaBackendFor(sessionId);
+  // 끝난 실행은 세션 상태 폴더에 남긴다. studio를 다시 띄워도 판정·발견 목록을 볼 수 있다(이슈 #602).
+  // 남기지 못해도 실행 결과에는 영향이 없다(메모리의 기록은 그대로다)
+  const runFile = path.join(sessionStateDir(sessionId), EXPLORE_QA_RUN_FILE);
+  const persist = (): void => {
+    void writeExploreQaRunFile(runFile, run).catch((error: unknown) => console.error('[b-studio] 탐색형 QA 실행 기록을 저장하지 못했습니다', error));
+  };
   const finish = (result: ExploreQaResult): void => {
     run.status = 'done';
     run.result = result;
     run.finishedAt = Date.now();
+    persist();
   };
   const fail = (error: unknown): void => {
     run.status = 'done';
     run.error = error instanceof Error ? error.message : String(error);
     run.finishedAt = Date.now();
+    persist();
   };
 
   if (backend.kind === 'api') {
@@ -139,6 +148,21 @@ export function getExploreQaRun(sessionId: string): ExploreQaRun | undefined {
   return store.get(sessionId)?.run;
 }
 
+/**
+ * 지금 도는(또는 마지막으로 끝난) 실행. 메모리에 없으면(studio를 다시 띄운 뒤) 세션 상태 폴더에 남겨 둔 마지막 실행을 읽어 온다.
+ * 읽어 온 실행은 메모리에 올려 두어, 다음 조회와 "게이트 화면 확인으로 저장"이 같은 실행을 본다
+ */
+export async function loadExploreQaRun(sessionId: string): Promise<ExploreQaRun | undefined> {
+  const current = getExploreQaRun(sessionId);
+  if (current) return current;
+  const saved = await readExploreQaRunFile(path.join(sessionStateDir(sessionId), EXPLORE_QA_RUN_FILE));
+  // 읽는 사이에 새 실행이 시작됐으면 그쪽이 먼저다
+  const started = getExploreQaRun(sessionId);
+  if (started) return started;
+  if (saved) store.set(sessionId, { run: saved, abort: new AbortController() });
+  return saved;
+}
+
 /** 실행 중이면 멈춘다. 이미 끝났으면 아무것도 하지 않는다 */
 export function stopExploreQa(sessionId: string): void {
   const entry = store.get(sessionId);
@@ -164,7 +188,7 @@ export interface SaveExploreQaResult {
  * 원칙의 유일한 예외 — 사람의 명시적 행동으로만 일어난다).
  */
 export async function saveExploreQaRun(sessionId: string, input: SaveExploreQaInput): Promise<SaveExploreQaResult> {
-  const run = getExploreQaRun(sessionId);
+  const run = await loadExploreQaRun(sessionId);
   if (!run || run.status !== 'done') throw new ExploreQaError(409, '저장할 수 있는 끝난 실행이 없습니다');
   if (run.actions.length === 0) throw new ExploreQaError(400, '저장할 행동이 없습니다');
 
