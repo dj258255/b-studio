@@ -192,7 +192,12 @@ export type AgentEvent =
    * 로컬 CLI 러너가 이어받은 대화가 길어져 앞부분을 요약으로 바꿨다(SDK의 compact_boundary).
    * trigger: auto는 자동 압축, manual은 사용자가 보낸 압축. preTokens는 압축 직전, postTokens는 압축 직후 크기(모르면 없다)
    */
-  | { type: 'context_compacted'; trigger: 'auto' | 'manual'; preTokens: number; postTokens?: number }
+  | { type: 'context_compacted'; trigger: 'auto' | 'manual'; preTokens: number; postTokens?: number; durationMs?: number }
+  /**
+   * 로컬 CLI 러너가 대화 앞부분을 요약하기 시작했다(SDK의 status: 'compacting'). 큰 대화는 몇 분이 걸리고 그동안 턴이 없으므로,
+   * 화면이 멈춘 것처럼 보이지 않게 알린다. 끝나면 context_compacted가 온다
+   */
+  | { type: 'context_compacting' }
   | { type: 'text'; text: string }
   | { type: 'tool_call'; name: string; input: unknown }
   /** chars: 모델에 간 글자 수(자르기·반복 대체 뒤). rawChars: 자르기 전 원래 글자 수. 토큰 탭이 이 둘로 낭비를 찾는다 */

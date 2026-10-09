@@ -12,6 +12,7 @@ import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import { submitEntry } from "@/lib/home-entry";
 import type { EffortPickerView, ModelPickerOption, ModelPickerView } from "@/lib/server/model-picker";
 import { activeRun, outcomeText, runsWithChanges, type ChatItem, type SessionView } from "@/lib/session-view";
+import { formatElapsed } from "@/lib/split";
 import { describeTokens, formatBytes, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { useChatDraft } from "./chat-draft-context";
 import { DiffView } from "./diff-view";
@@ -744,11 +745,15 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
         </p>
       );
 
+    case "compacting":
+      return <p className="text-sm text-muted">대화가 길어져 앞부분을 요약하는 중입니다. 큰 대화는 몇 분 걸릴 수 있습니다</p>;
+
     case "compacted":
       return (
         <p className="text-sm text-muted">
           {item.trigger === "manual" ? "대화를 요약했습니다" : "대화가 길어져 앞부분을 요약했습니다"} · {formatTokenCount(item.preTokens)}
           {item.postTokens !== undefined && ` → ${formatTokenCount(item.postTokens)}`} 토큰
+          {item.durationMs !== undefined && ` · ${formatElapsed(item.durationMs)}`}
         </p>
       );
 
