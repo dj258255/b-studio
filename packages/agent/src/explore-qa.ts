@@ -1058,14 +1058,15 @@ export class QaReport {
    * 가장 최근 캡처·스냅샷의 번호도 여기서 기록해 qa_report_issue의 observedAtAction에 쓴다
    */
   runAction(name: string, input: Record<string, unknown>, browser: QaBrowser, index: number): Promise<{ outcome: QaToolOutcome; rejection?: QaExpectedRejection }> {
-    const run = this.#queue.then(() => this.#runActionNow(name, input, browser, index));
+    // 선언은 이 호출이 **요청된 순간**에 잡는다. 줄을 서 있다가 실행될 때 읽으면, 선언보다 먼저 요청된 조작이 나중에 온 선언을 써 버린다
+    const reason = this.#pendingReason;
+    this.#pendingReason = undefined;
+    const run = this.#queue.then(() => this.#runActionNow(name, input, browser, index, reason));
     this.#queue = run.catch(() => {});
     return run;
   }
 
-  async #runActionNow(name: string, input: Record<string, unknown>, browser: QaBrowser, index: number): Promise<{ outcome: QaToolOutcome; rejection?: QaExpectedRejection }> {
-    const reason = this.#pendingReason;
-    this.#pendingReason = undefined;
+  async #runActionNow(name: string, input: Record<string, unknown>, browser: QaBrowser, index: number, reason: string | undefined): Promise<{ outcome: QaToolOutcome; rejection?: QaExpectedRejection }> {
     const watched = reason !== undefined && REJECTION_TOOLS.has(name);
     const mark = watched ? browser.beginRejectionWatch() : 0;
     let outcome: QaToolOutcome;

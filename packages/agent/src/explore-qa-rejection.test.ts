@@ -4,7 +4,7 @@ import type { McpServerConfig, SDKMessage, SdkMcpToolDefinition } from '@anthrop
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-runner';
 import { runClaudeCodeExploreQa } from './explore-qa-claude-code';
-import { buildQaSystemPrompt, buildQaTools, judge, runExploreQa, type QaDiagnostics, type QaFinding } from './explore-qa';
+import { buildQaSystemPrompt, buildQaTools, judge, QaBrowser, QaReport, runExploreQa, type QaDiagnostics, type QaFinding } from './explore-qa';
 import { ScriptedModelClient } from './scripted-client';
 
 /**
@@ -291,6 +291,29 @@ describe('예상된 거절 (api 백엔드)', { timeout: 60_000 }, () => {
   it('reason이 비면 오류로 돌려준다', async () => {
     const { client } = await runApi([{ name: 'qa_expect_rejection', input: { reason: '  ' } }, finish]);
     expect(JSON.stringify(client.requests.at(-1)!.messages)).toContain('reason(왜 거절되는 것이 정상인지)');
+  });
+});
+
+describe('선언과 조작의 순서 (도구 호출이 겹쳐 올 때)', { timeout: 60_000 }, () => {
+  it('선언은 그 뒤에 요청된 조작에만 쓰인다: 먼저 요청돼 줄을 서 있던 호출이 나중에 온 선언을 쓰지 않는다', async () => {
+    const browser = await QaBrowser.open(`${base}/page`, { allowedOrigins: [base] });
+    try {
+      const report = new QaReport();
+      await report.runAction('qa_snapshot', {}, browser, 1);
+      // 대기가 먼저 요청되고, 그 뒤에 선언이 오고, 그 뒤에 클릭이 요청된다(로컬 CLI 백엔드는 도구 호출이 겹쳐 올 수 있다)
+      const waiting = report.runAction('qa_wait', { ms: 200 }, browser, 2);
+      expect(report.declareRejection({ reason: '주문은 거절돼야 한다' }).ok).toBe(true);
+      const clicking = report.runAction('qa_click', { ref: 'e2' }, browser, 3);
+      const [waited, clicked] = await Promise.all([waiting, clicking]);
+      expect(waited.outcome.text).not.toContain('선언을 지웠습니다');
+      expect(clicked.rejection?.requests).toEqual([{ status: 400, url: `${base}/api/order` }]);
+      expect(report.expectedRejections).toHaveLength(1);
+      expect(report.expectedRejections[0]?.actionIndex).toBe(3);
+      await browser.settle();
+      expect((await browser.currentDiagnostics()).failedRequests).toEqual([]);
+    } finally {
+      await browser.close();
+    }
   });
 });
 
