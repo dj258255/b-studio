@@ -17,7 +17,7 @@ interface Fixture {
   dir: string;
   /** `compose config`가 내보낼 설정. 호출 순서 N번째에 `config-N.json`이 있으면 그것을 대신 내보낸다 */
   configFile: string;
-  /** `docker inspect`가 내보낼 컨테이너 목록(JSON). 파일이 없으면 컨테이너가 없는 것으로 본다. 호출 순서 N번째에 `inspect-N.json`이 있으면 그것을 대신 내보낸다 */
+  /** `docker inspect`가 내보낼 컨테이너 목록(JSON). 파일이 없으면 마운트가 없는 api 컨테이너 하나(c1)를 내보낸다. 호출 순서 N번째에 `inspect-N.json`이 있으면 그것을 대신 내보낸다 */
   inspectFile: string;
   /** 실행한 docker 명령 인자(줄마다 하나) */
   log: () => Promise<string>;
@@ -57,7 +57,7 @@ for a in "$@"; do
   esac
 done
 case " $* " in
-  *" ps "*) if [ -f "${dir}/ps-fails" ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi; if [ -f "${inspectFile}" ]; then echo c1; fi; exit 0 ;;
+  *" ps "*) if [ -f "${dir}/ps-fails" ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi; if [ -f "${dir}/ps-empty" ]; then exit 0; fi; echo c1; exit 0 ;;
 esac
 for a in "$@"; do
   case "$a" in
@@ -71,7 +71,7 @@ for a in "$@"; do
     up) cp "$override" "${snapshot}"; echo up >> "${dir}/ups"; exit 0 ;;
     inspect)
       i=$(cat "${dir}/inspect-count" 2>/dev/null || echo 0); i=$((i + 1)); echo "$i" > "${dir}/inspect-count"
-      if [ -f "${dir}/inspect-$i.json" ]; then cat "${dir}/inspect-$i.json"; else cat "${inspectFile}"; fi
+      if [ -f "${dir}/inspect-$i.json" ]; then cat "${dir}/inspect-$i.json"; elif [ -f "${inspectFile}" ]; then cat "${inspectFile}"; else printf '%s\\n' '[{"Id":"c1","Config":{"Labels":{"com.docker.compose.service":"api"}},"Mounts":[]}]'; fi
       exit 0 ;;
     volume) if [ -f "${dir}/volume-fails" ]; then echo "no such volume" >&2; exit 1; fi; echo '[]'; exit 0 ;;
   esac
@@ -102,24 +102,27 @@ exit 0
   };
 }
 
-/** 로그에서 up 호출을 순서대로 뽑아 만들기(`--no-start`)인지 시작(`--no-recreate`)인지로 바꾼다 */
+/** 로그에서 만들기(`up --no-start`)와 시작(`docker start <id>` 또는 `compose … start`)을 순서대로 뽑는다. 그 밖의 up은 'up'으로 남긴다 */
 function upPhases(log: string): string[] {
-  return log
-    .split('\n')
-    .filter((line) => / up /.test(` ${line} `) && line.includes('compose'))
-    .map((line) => (line.includes('--no-start') ? 'create' : line.includes('--no-recreate') ? 'start' : 'other'));
+  return log.split('\n').flatMap((line) => {
+    const tokens = line.split(' ');
+    if (tokens.includes('up')) return [tokens.includes('--no-start') ? 'create' : 'up'];
+    if (tokens[0] === 'start' || (tokens[0] === 'compose' && tokens.includes('start'))) return ['start'];
+    return [];
+  });
 }
 
-describe('up 인자를 만들기와 시작으로 나눈다', () => {
-  it('만들기는 --no-start를 더하고 --detach를 빼며, 시작은 --no-recreate를 더하고 --force-recreate·--build를 뺀다', () => {
+describe('up 인자에서 만들기 단계와 시작할 대상을 뽑는다', () => {
+  it('만들기는 --no-start를 더하고 --detach를 뺀다. 이름을 주고 --no-deps를 붙였으면 확인한 컨테이너의 id로 시작한다', () => {
     expect(splitUpArgs(['up', '--detach', '--build', '--no-deps', '--force-recreate', 'api'])).toEqual({
       create: ['up', '--no-start', '--build', '--no-deps', '--force-recreate', 'api'],
-      start: ['up', '--no-recreate', '--detach', '--no-deps', 'api'],
+      services: ['api'],
+      byId: true,
     });
-    expect(splitUpArgs(['up', '--detach', '--remove-orphans'])).toEqual({
-      create: ['up', '--no-start', '--remove-orphans'],
-      start: ['up', '--no-recreate', '--detach', '--remove-orphans'],
-    });
+  });
+
+  it('이름이 없는 전체 up은 compose start로 시작한다(의존 순서와 헬스체크 대기를 compose가 맡는다)', () => {
+    expect(splitUpArgs(['up', '--detach', '--remove-orphans'])).toEqual({ create: ['up', '--no-start', '--remove-orphans'], services: [], byId: false });
   });
 });
 
@@ -194,7 +197,7 @@ describe('서비스 컨테이너의 .git 보호', () => {
     await sandbox.setServiceRunning!('api', true);
 
     // 만들기 → (마스크가 달라짐) → 다시 만들기 → 시작. 옛 마스크로 만든 컨테이너는 한 번도 시작되지 않는다
-    expect(await upCount()).toBe(3);
+    expect(await upCount()).toBe(2);
     expect(await overrideAtUp()).toContain('target: /late/.git');
     expect(upPhases(await log())).toEqual(['create', 'create', 'start']);
   });
@@ -221,6 +224,7 @@ describe('서비스 컨테이너의 .git 보호', () => {
   const MASKED = (root: string) => [
     {
       Id: 'c1',
+      Config: { Labels: { 'com.docker.compose.service': 'api' } },
       Mounts: [
         { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
         { Type: 'bind', Source: `${root}/.git`, Destination: '/workspace/.git', RW: false },
@@ -241,7 +245,7 @@ describe('서비스 컨테이너의 .git 보호', () => {
     expect(lines).not.toMatch(/^stop c1$/m);
   });
 
-  it('만들기 → 마운트 확인 → 시작 순서로 돌고, 시작 단계는 컨테이너를 다시 만들거나 빌드하지 않는다', async () => {
+  it('만들기 → 마운트 확인 → 시작 순서로 돌고, 확인한 컨테이너를 id로 시작한다', async () => {
     const { project, dockerBin, inspectFile, log, root } = await setup();
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
     await writeFile(inspectFile, JSON.stringify(MASKED(root)));
@@ -249,28 +253,60 @@ describe('서비스 컨테이너의 .git 보호', () => {
     const lines = (await log()).split('\n');
     const createAt = lines.findIndex((line) => / up --no-start /.test(line));
     const inspectAt = lines.findIndex((line, index) => index > createAt && /^inspect c1$/.test(line));
-    const startAt = lines.findIndex((line) => / up --no-recreate /.test(line));
+    const startAt = lines.findIndex((line) => line === 'start c1');
     expect(createAt).toBeGreaterThan(-1);
     expect(inspectAt).toBeGreaterThan(createAt);
     expect(startAt).toBeGreaterThan(inspectAt);
-    // 빌드는 만들기 단계에서만 한다(다시 만들기 플래그는 위의 splitUpArgs 테스트가 본다). 시작 단계가 다시 만들면 확인한 컨테이너가 아닌 것이 시작된다
     expect(lines[createAt]).toContain('--build');
     expect(lines[createAt]).not.toContain('--detach');
-    expect(lines[startAt]).toContain('--detach');
-    expect(lines[startAt]).not.toContain('--force-recreate');
-    expect(lines[startAt]).not.toContain('--build');
+    // 시작 단계는 컨테이너를 만들 수 있는 명령(up)을 쓰지 않는다. `up --no-recreate`는 없는 컨테이너를 새로 만들어 시작한다
+    expect(upPhases(await log())).toEqual(['create', 'start']);
   });
 
-  it('시작 단계에서 새로 만들어진 컨테이너에 마스크가 빠져 있으면 시작한 뒤의 확인이 멈추고 던진다', async () => {
+  it('만든 컨테이너 가운데 올리려던 서비스의 것이 없으면 시작하지 않고 던진다', async () => {
+    const { project, dockerBin, inspectFile, log } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify([{ Id: 'c1', Config: { Labels: { 'com.docker.compose.service': 'other' } }, Mounts: [] }]));
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/만든 컨테이너를 찾지 못해 시작하지 않았습니다/);
+    expect(upPhases(await log())).toEqual(['create']);
+  });
+
+  it('컨테이너가 하나도 보이지 않으면 확인한 것으로 치지 않고, 시작하지 않은 채 던진다', async () => {
+    const { project, dockerBin, dir, log } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(path.join(dir, 'ps-empty'), '');
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/컨테이너가 보이지 않아 \.git 보호를 확인하지 못했습니다/);
+    expect(upPhases(await log())).toEqual(['create']);
+  });
+
+  it('inspect가 목록의 컨테이너 일부만 돌려주면 나머지를 확인하지 않은 채 시작하지 않는다', async () => {
+    const { project, dockerBin, inspectFile, log } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify([{ Id: 'someone-else', Config: { Labels: { 'com.docker.compose.service': 'api' } }, Mounts: [] }]));
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/일부만 확인했습니다/);
+    expect(upPhases(await log())).toEqual(['create']);
+  });
+
+  it('한 샌드박스의 up은 한 번에 하나만 돈다(만들기 → 확인 → 시작 사이에 다른 up이 끼어들지 않는다)', async () => {
+    const { project, dockerBin, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify(MASKED(root)));
+    await Promise.all([sandbox.setServiceRunning!('api', true), sandbox.setServiceRunning!('api', true), sandbox.setServiceRunning!('api', true)]);
+    expect(upPhases(await log())).toEqual(['create', 'start', 'create', 'start', 'create', 'start']);
+  });
+
+  it('시작한 뒤에 보호가 빠진 컨테이너가 보이면(바깥에서 바꿔 넣은 경우) 바로 지우고 던진다', async () => {
     const { project, dockerBin, dir, inspectFile, log, root } = await setup();
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
     // 시작 전 확인(1번째 inspect)은 통과하고, 시작한 뒤(2번째)에는 보호가 빠진 컨테이너가 보인다
     await writeFile(inspectFile, JSON.stringify(UNMASKED(root)));
     await writeFile(path.join(dir, 'inspect-1.json'), JSON.stringify(MASKED(root)));
-    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 읽기 전용 마운트가 빠져 멈췄습니다/);
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 읽기 전용 마운트가 빠져 내렸습니다/);
     const lines = await log();
     expect(upPhases(lines)).toEqual(['create', 'start']);
-    expect(lines).toMatch(/^stop c1$/m);
+    // 멈추기(stop)는 종료를 10초까지 기다린다. 그동안 보호 없이 돌므로 바로 지운다
+    expect(lines).toMatch(/^rm --force c1$/m);
+    expect(lines).not.toMatch(/^stop c1$/m);
   });
 
   it('컨테이너 목록을 읽지 못하면 컨테이너가 없는 것으로 보지 않고, 시작하지 않은 채 던진다', async () => {
@@ -294,19 +330,7 @@ describe('서비스 컨테이너의 .git 보호', () => {
   it('up 뒤 실제 컨테이너에 마스크가 모두 있으면 통과한다', async () => {
     const { project, dockerBin, inspectFile, root } = await setup();
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
-    await writeFile(
-      inspectFile,
-      JSON.stringify([
-        {
-          Id: 'c1',
-          Mounts: [
-            { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
-            { Type: 'bind', Source: `${root}/.git`, Destination: '/workspace/.git', RW: false },
-            { Type: 'bind', Source: `${root}/.git/b-studio-empty`, Destination: '/workspace/.git/b-studio', RW: false },
-          ],
-        },
-      ]),
-    );
+    await writeFile(inspectFile, JSON.stringify(MASKED(root)));
     await expect(sandbox.setServiceRunning!('api', true)).resolves.toBeUndefined();
   });
 

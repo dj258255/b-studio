@@ -25,6 +25,10 @@ async function fakeDocker(dir: string): Promise<{ dockerBin: string; log: string
     bin,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "${log}"
+case " $* " in
+  *" --no-trunc "*) printf 'm1\\n'; exit 0 ;;
+  *" inspect m1 "*) printf '%s\\n' '[{"Id":"m1","Config":{"Labels":{"com.docker.compose.service":"api"}},"Mounts":[]}]'; exit 0 ;;
+esac
 for a in "$@"; do
   case "$a" in
     config) printf '{"services":{}}\\n'; exit 0 ;;

@@ -54,7 +54,10 @@ async function fakeDockerForInfra(
     bin,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "${log}"
-case " $* " in *" --no-trunc "*) exit 0 ;; esac
+case " $* " in
+  *" --no-trunc "*) printf 'm1\\n'; exit 0 ;;
+  *" inspect m1 "*) printf '%s\\n' '[{"Id":"m1","Config":{"Labels":{"com.docker.compose.service":"b-studio-edge"}},"Mounts":[]}]'; exit 0 ;;
+esac
 
 for a in "$@"; do
   case "$a" in
