@@ -269,9 +269,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다
   const serial = serialQueue();
-  // 실행 지표. modelMs는 모델 응답 대기가 SDK 안에서 일어나 이 러너가 관찰하지 못하므로 0으로 둔다.
-  // 0은 "재지 않음"이고, 전체 시간에서 도구·게이트 시간을 뺀 추측값을 넣지 않는다
-  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, modelMs: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
+  // 실행 지표. 모델 응답 대기는 SDK 안에서 일어나 이 러너가 직접 재지 못한다. SDK가 result에 실어 주는 API 호출 시간 합(duration_api_ms)을
+  // modelMs로 쓰고, result가 한 번도 오지 않으면 비워 둔다("재지 않음"). 전체 시간에서 도구·게이트 시간을 뺀 추측값은 넣지 않는다
+  const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
   const definitions = specs.map((spec) =>
     tool(spec.name, spec.description ?? '', zodShape(spec.input_schema), (args) =>
       serial(async () => {
@@ -316,6 +316,10 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const queryUsage = emptyUsage();
   let queryByModel: Record<string, AgentUsage> = {};
   const usageByModelBase: Record<string, AgentUsage> = {};
+  // duration_api_ms도 modelUsage처럼 이 query의 누적값이다(한 query에서 result가 두 번 오면 3,333 → 5,997ms로 늘었다).
+  // 끝난 query들의 값(base)에 지금 query의 값을 더한다
+  let modelMsBase = 0;
+  let queryModelMs: number | undefined;
   const syncUsage = (): void => {
     usage.inputTokens = baseUsage.inputTokens + queryUsage.inputTokens;
     usage.outputTokens = baseUsage.outputTokens + queryUsage.outputTokens;
@@ -529,6 +533,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             syncUsage();
             queryByModel = usageByModelOf(message);
             metrics.usageByModel = mergeUsageByModel(usageByModelBase, queryByModel);
+            const apiMs = apiDurationOf(message);
+            if (apiMs !== undefined) {
+              // 누적값이라 줄어들 수 없다. 줄어든 값이 오면(형식이 바뀐 경우) 이미 잰 것을 깎지 않는다
+              queryModelMs = Math.max(queryModelMs ?? 0, apiMs);
+              metrics.modelMs = modelMsBase + queryModelMs;
+            }
             onEvent({ type: 'tokens', usage: { ...usage } });
             const failure = describeResultFailure(message);
             if (failure) {
@@ -639,6 +649,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       // 이 query의 사용량을 실행 전체 누적에 더한다. 승격이 없으면 여기서 한 번만 더해 결과가 지금과 같다
       addUsageInto(baseUsage, queryUsage);
       for (const [model, usage] of Object.entries(queryByModel)) addUsageInto((usageByModelBase[model] ??= emptyUsage()), usage);
+      modelMsBase += queryModelMs ?? 0;
+      queryModelMs = undefined;
     }
   };
 
@@ -787,6 +799,12 @@ type AssistantTokenUsage = {
 };
 
 /** modelUsage는 query 전체의 누적값이므로 더하지 않고 최신 값으로 바꾼다 */
+/** result가 알려 주는 API 호출 시간 합(ms). 유한한 0 이상의 수가 아니면 재지 않은 것으로 본다 */
+function apiDurationOf(message: SDKResultMessage): number | undefined {
+  const value: unknown = message.duration_api_ms;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+}
+
 function setUsage(usage: AgentUsage, message: SDKResultMessage): void {
   const models = Object.values(message.modelUsage ?? {});
   usage.inputTokens = models.reduce((sum, model) => sum + model.inputTokens, 0);

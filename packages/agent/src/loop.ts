@@ -112,8 +112,12 @@ export interface RunMetrics {
   modelCalls: number;
   /** 호출 한 번의 입력 크기(input+cache_read+cache_creation) 중 최댓값 */
   maxContextTokens: number;
-  /** createMessage 호출에 걸린 시간 합 */
-  modelMs: number;
+  /**
+   * 모델 호출에 걸린 시간 합. **없으면 "재지 않음"이다(0초와 다르다).**
+   * api 백엔드는 createMessage 호출을 직접 잰다. 로컬 Claude Code 러너는 SDK가 결과에 실어 주는 API 호출 시간 합(duration_api_ms)을 쓴다 —
+   * 부가 호출까지 더한 값이라 벽시계 시간보다 클 수 있다. 호출 경계가 보이지 않는 러너(Codex·Gemini CLI)는 비워 둔다
+   */
+  modelMs?: number;
   /** executeTool 실행 시간 합 */
   toolMs: number;
   /** gate.check() 실행 시간 합 */
@@ -475,7 +479,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
 
     const modelStarted = performance.now();
     const message = await activeClient.createMessage({ system, tools, messages }, signal);
-    metrics.modelMs += Math.round(performance.now() - modelStarted);
+    metrics.modelMs = (metrics.modelMs ?? 0) + Math.round(performance.now() - modelStarted);
     metrics.modelCalls += 1;
     const turnContext = contextTokens(message.usage);
     metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
