@@ -185,6 +185,13 @@ type GateSession = Parameters<typeof collectGateTestReports>[0];
 type GateChecks = NonNullable<Parameters<typeof collectGateTestReports>[2]>;
 const check = (name: string, ok: boolean, stage: GateChecks[number]['stage'] = 'test'): GateChecks[number] => ({ stage, name, ok, attempts: 1 });
 
+/** 게이트가 실행을 시작할 때 쓴 선언(픽스처 studio.yaml의 workflow.tests와 같다) */
+const DECLARED = [
+  { name: 'api-test', service: 'api' },
+  { name: 'web-unit', service: 'web' },
+  { name: 'web-smoke', service: 'web' },
+];
+
 function internals(id: string): GateSession {
   const store = (globalThis as { __bStudio?: { sessions: Map<string, GateSession> } }).__bStudio;
   const session = store?.sessions.get(id);
@@ -211,7 +218,7 @@ describe('게이트 보고서 수거는 이번 게이트가 통과시킨 test �
     fake.reports.set('web', jestJson('R2: 화면이 뜬다'));
 
     // api는 통과했고, web은 test 체크 하나가 실패했다(체크포인트가 남는 awaiting_input 경로)
-    await collectGateTestReports(internals(id), sha, [check('api-test', true), check('web-unit', true), check('web-smoke', false)]);
+    await collectGateTestReports(internals(id), sha, [check('api-test', true), check('web-unit', true), check('web-smoke', false)], DECLARED);
 
     const api = await lastRun(id, 'api');
     expect(api?.lastRunSha).toBe(sha);
@@ -232,7 +239,7 @@ describe('게이트 보고서 수거는 이번 게이트가 통과시킨 test �
     fake.reports.set('web', jestJson('R2: 고치는 중에 돌린 테스트'));
 
     // test 단계를 돌리지 못했거나 가볍게 확인(light)이었던 실행 — test 체크가 하나도 없다
-    await collectGateTestReports(internals(id), sha, [check('/', true, 'browser_check'), check('리뷰', true, 'review')]);
+    await collectGateTestReports(internals(id), sha, [check('/', true, 'browser_check'), check('리뷰', true, 'review')], DECLARED);
 
     for (const service of ['api', 'web']) {
       const view = await lastRun(id, service);
@@ -248,7 +255,7 @@ describe('게이트 보고서 수거는 이번 게이트가 통과시킨 test �
     const sha = getSnapshot(id)!.checkpoints[0]!.sha;
     fake.reports.set('api', junitXml('R1: 실패한 실행의 보고서'));
 
-    await collectGateTestReports(internals(id), sha, [check('api-test', false)]);
+    await collectGateTestReports(internals(id), sha, [check('api-test', false)], DECLARED);
 
     expect((await lastRun(id, 'api'))?.lastRunSha).toBeUndefined();
     await stopSession(id).catch(() => {});
@@ -259,10 +266,10 @@ describe('게이트 보고서 수거는 이번 게이트가 통과시킨 test �
     const sha = getSnapshot(id)!.checkpoints[0]!.sha;
     fake.reports.set('web', jestJson('R2: 화면이 뜬다'));
 
-    await collectGateTestReports(internals(id), sha, [check('web-unit', true), check('web-smoke', false)]);
+    await collectGateTestReports(internals(id), sha, [check('web-unit', true), check('web-smoke', false)], DECLARED);
     expect((await lastRun(id, 'web'))?.lastRunSha).toBeUndefined();
 
-    await collectGateTestReports(internals(id), sha, [check('web-unit', true), check('web-smoke', true)]);
+    await collectGateTestReports(internals(id), sha, [check('web-unit', true), check('web-smoke', true)], DECLARED);
     expect((await lastRun(id, 'web'))?.lastRunSha).toBe(sha);
     await stopSession(id).catch(() => {});
   }, 20_000);
@@ -272,11 +279,11 @@ describe('게이트 보고서 수거는 이번 게이트가 통과시킨 test �
     const oldSha = getSnapshot(id)!.checkpoints[0]!.sha;
     fake.reports.set('api', junitXml('R1: 주문이 만들어진다'));
     fake.reports.set('web', jestJson('R2: 화면이 뜬다'));
-    await collectGateTestReports(internals(id), oldSha, [check('api-test', true), check('web-unit', true), check('web-smoke', true)]);
+    await collectGateTestReports(internals(id), oldSha, [check('api-test', true), check('web-unit', true), check('web-smoke', true)], DECLARED);
 
     // 새 체크포인트가 생겼고, 이번 게이트는 api만 통과시켰다(web의 test 체크는 돌지 않았다)
     const newSha = 'f'.repeat(40);
-    await collectGateTestReports(internals(id), newSha, [check('api-test', true)]);
+    await collectGateTestReports(internals(id), newSha, [check('api-test', true)], DECLARED);
 
     const snapshot = await getSessionTests(id);
     const api = snapshot.services.find((service) => service.service === 'api')!;
@@ -288,5 +295,21 @@ describe('게이트 보고서 수거는 이번 게이트가 통과시킨 test �
     expect(evidence.find((entry) => entry.service === 'api')?.matchesHead).toBe(true);
     expect(evidence.find((entry) => entry.service === 'web')?.matchesHead).toBe(false);
     await stopSession(id).catch(() => {});
+  }, 20_000);
+  it('에이전트가 이번 실행에서 workflow.tests를 고쳐도, 체크는 게이트가 실제로 쓴 선언으로 서비스에 짝짓는다', async () => {
+    const id = await readySession();
+    const sha = getSnapshot(id)!.checkpoints[0]!.sha;
+    fake.reports.set('api', junitXml('R1: 주문이 만들어진다'));
+    fake.reports.set('web', jestJson('R2: 화면이 뜬다'));
+
+    // 게이트는 api-test(api) 하나만 선언된 설정으로 돌았고 그것만 통과했다. 그 뒤 설정이 다시 읽혀(체크포인트 저장)
+    // 지금 선언은 같은 이름을 web에 붙이고 있다 — 지금 선언으로 짝지으면 게이트가 돌리지 않은 web이 근거를 얻는다
+    const session = internals(id) as unknown as { project: { spec: { workflow?: { tests?: Array<{ name: string; service: string; command: string[] }> } } } };
+    session.project.spec.workflow = { ...session.project.spec.workflow, tests: [{ name: 'api-test', service: 'web', command: ['true'] }] };
+
+    await collectGateTestReports(internals(id), sha, [check('api-test', true)], [{ name: 'api-test', service: 'api' }]);
+
+    expect((await lastRun(id, 'api'))?.lastRunSha).toBe(sha);
+    expect((await lastRun(id, 'web'))?.lastRunSha).toBeUndefined();
   }, 20_000);
 });

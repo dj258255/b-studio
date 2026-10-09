@@ -279,7 +279,7 @@ import type {
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
-import { servicesWithPassedGateTests } from './gate-test-evidence';
+import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-evidence';
 import { claudeCodeAsk } from './claude-code-ask';
 import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
@@ -2235,6 +2235,9 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     const agentStarted = performance.now();
     // 계획-실행 분리(ADR-075). 설정이 없거나 이 요청이 대상이 아니면 원래 요청 그대로 돌려준다(지금과 같은 동작)
     const { request: executionRequest, planUsage } = await withPlanBrief(session, run, request, plan, signal);
+    // 게이트는 실행을 시작할 때의 선언으로 test를 돌린다. 에이전트가 이번 실행에서 studio.yaml을 고치면 체크포인트 저장이
+    // 설정을 다시 읽으므로(reloadSessionProject), 보고서 수거가 체크를 서비스에 짝지을 선언은 지금 잡아 둔다(ADR-153)
+    const gateTests = session.project.spec.workflow?.tests ?? [];
     const result = await runPlan(session, run, executionRequest, plan, signal);
     // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
     if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
@@ -2287,7 +2290,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
         // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
-        void collectGateTestReports(session, session.snapshot.checkpoints[0]?.sha, result.checks ?? []).catch(() => {});
+        void collectGateTestReports(session, session.snapshot.checkpoints[0]?.sha, result.checks ?? [], gateTests).catch(() => {});
         // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
         void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
@@ -6360,9 +6363,16 @@ export function gateReportNotFoundEntry(previous: StoredTestRun | undefined, run
  * 에이전트가 실행 도중 돌린 부분 테스트나 이전 실행이 남긴 보고서가 새 체크포인트의 근거로 올라가면 안 되기 때문이다.
  * 모으지 않은 서비스의 저장된 기록은 지우지도, 새 sha로 옮기지도 않는다 — 옛 sha 그대로 "이전 실행"으로 남아 근거에서 닫힌다
  */
-export async function collectGateTestReports(session: Session, verifiedSha: string | undefined, checks: readonly WorkflowCheck[]): Promise<void> {
+export async function collectGateTestReports(
+  session: Session,
+  verifiedSha: string | undefined,
+  checks: readonly WorkflowCheck[],
+  gateTests: readonly DeclaredGateTest[],
+): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
-  const passedServices = servicesWithPassedGateTests(session.project.spec.workflow?.tests ?? [], checks);
+  // 체크 이름을 서비스에 짝짓는 선언은 게이트가 실제로 쓴 것(gateTests)이어야 한다. 지금의 session.project는 이번 실행이
+  // 고친 studio.yaml로 이미 바뀌었을 수 있어, 그것으로 짝지으면 게이트가 돌리지 않은 서비스가 근거를 얻는다
+  const passedServices = servicesWithPassedGateTests(gateTests, checks);
   if (passedServices.size === 0) return;
   await ensureTestResultsLoaded(session);
   let changed = false;
