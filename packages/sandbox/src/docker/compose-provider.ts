@@ -53,6 +53,7 @@ import {
   parseSyncOutput, SyncObservations,
 } from './format';
 import { externalCallScript } from './external-call';
+import { awaitedCondition, loadDependsOn, startWaves } from './compose-deps';
 import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
@@ -70,6 +71,9 @@ const execFileAsync = promisify(execFile);
 
 /** compose 파일이 up과 겹쳐 계속 바뀔 때 .git 마스크를 맞춰 다시 올리는 최대 횟수 */
 const GIT_MASK_ATTEMPTS = 3;
+/** 의존 서비스가 준비될 때까지 기다리는 상한. compose는 healthcheck가 실패로 끝날 때까지 기다리지만, 끝나지 않는 대기는 두지 않는다 */
+const DEPENDENCY_WAIT_MS = 300_000;
+const DEPENDENCY_POLL_MS = 500;
 
 /**
  * compose가 샌드박스용으로 빌드한 이미지(<샌드박스 id>-<서비스>)를 지운다.
@@ -786,22 +790,72 @@ class LocalDockerSandbox implements Sandbox {
       await this.#refreshGitMask();
       if (JSON.stringify(this.#gitMask) !== before) continue;
       const verified = await this.#verifyMasks('created');
-      let startArgs: string[];
-      if (byId) {
-        const missing = services.filter((service) => !verified.some((container) => container.service === service));
-        if (missing.length > 0) throw new SandboxError(`만든 컨테이너를 찾지 못해 시작하지 않았습니다 (${this.id})`, missing.join(', '), { platform: true });
-        startArgs = ['start', ...verified.filter((container) => container.service !== undefined && services.includes(container.service)).map((container) => container.id)];
-      } else {
-        startArgs = this.#composeArgs(['start', ...services]);
-      }
       // 포트 바인드 충돌은 여기서 난다(바인드는 시작할 때 일어난다)
-      const started = await this.#docker(startArgs, signal);
+      const started = byId ? await this.#startVerified(verified, services, signal) : await this.#docker(this.#composeArgs(['start', ...services]), signal);
       if (started.exitCode !== 0) return started;
       await this.#verifyMasks('started');
       return started;
     }
     await this.#docker(this.#composeArgs(['down', '--remove-orphans']), signal);
     throw new SandboxError(`compose 파일이 계속 바뀌어 .git 보호를 확정하지 못했습니다. 서비스를 내렸습니다 (${this.id})`);
+  }
+
+  /**
+   * 확인한 컨테이너를 id로 시작한다. 서비스가 여럿이면 `up --no-deps a b`가 하던 대로 **목록 안의 의존 순서**를 지키고,
+   * `service_healthy`·`service_completed_successfully` 조건은 그 상태가 될 때까지 기다린 뒤 다음 묶음을 시작한다.
+   * 목록에 없는 의존 서비스는 건드리지 않는다. 실패는 compose의 실패처럼 종료 코드와 stderr로 돌려준다
+   */
+  async #startVerified(verified: ReadonlyArray<{ id: string; service: string | undefined }>, services: readonly string[], signal?: AbortSignal): Promise<ExecResult> {
+    const idsOf = (names: readonly string[]) => verified.filter((container) => container.service !== undefined && names.includes(container.service)).map((container) => container.id);
+    const missing = services.filter((service) => idsOf([service]).length === 0);
+    if (missing.length > 0) throw new SandboxError(`만든 컨테이너를 찾지 못해 시작하지 않았습니다 (${this.id})`, missing.join(', '), { platform: true });
+    if (services.length === 1) return this.#docker(['start', ...idsOf(services)], signal);
+
+    const dependsOn = await loadDependsOn(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
+    const waves = startWaves(services, dependsOn);
+    let last: ExecResult = { exitCode: 0, stdout: '', stderr: '' };
+    for (const [index, wave] of waves.entries()) {
+      last = await this.#docker(['start', ...idsOf(wave)], signal);
+      if (last.exitCode !== 0) return last;
+      const later = waves.slice(index + 1).flat();
+      for (const service of wave) {
+        const condition = awaitedCondition(service, later, dependsOn);
+        if (!condition) continue;
+        const problem = await this.#waitForDependency(idsOf([service]), service, condition, signal);
+        if (problem) return { exitCode: 1, stdout: '', stderr: problem };
+      }
+    }
+    return last;
+  }
+
+  /** 의존 서비스가 조건을 채울 때까지 기다린다. 채우지 못하면 사유를 돌려준다(compose의 "dependency failed to start"와 같은 자리) */
+  async #waitForDependency(ids: readonly string[], service: string, condition: 'service_healthy' | 'service_completed_successfully', signal?: AbortSignal): Promise<string | undefined> {
+    const deadline = Date.now() + DEPENDENCY_WAIT_MS;
+    for (;;) {
+      signal?.throwIfAborted();
+      const inspected = await this.#docker(['inspect', '--format', '{{json .State}}', ...ids]);
+      if (inspected.exitCode !== 0) return `dependency failed to start: ${service}의 상태를 읽지 못했습니다`;
+      let states: Array<{ Status?: string; ExitCode?: number; Health?: { Status?: string } | null }>;
+      try {
+        states = inspected.stdout.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+      } catch {
+        return `dependency failed to start: ${service}의 상태를 해석하지 못했습니다`;
+      }
+      if (states.length === 0) return `dependency failed to start: ${service}의 상태를 읽지 못했습니다`;
+      if (condition === 'service_healthy') {
+        // compose와 같다: healthcheck가 없는 서비스에 service_healthy를 걸면 기다릴 수 없어 실패한다
+        if (states.some((state) => !state.Health)) return `dependency failed to start: container ${service} has no healthcheck configured`;
+        if (states.every((state) => state.Health?.Status === 'healthy')) return undefined;
+        if (states.some((state) => state.Health?.Status === 'unhealthy')) return `dependency failed to start: container ${service} is unhealthy`;
+        if (states.some((state) => state.Status === 'exited' || state.Status === 'dead')) return `dependency failed to start: container ${service} exited`;
+      } else {
+        if (states.every((state) => state.Status === 'exited' && state.ExitCode === 0)) return undefined;
+        const failed = states.find((state) => state.Status === 'exited' && state.ExitCode !== 0);
+        if (failed) return `service "${service}" didn't complete successfully: exit ${failed.ExitCode}`;
+      }
+      if (Date.now() > deadline) return `dependency failed to start: ${service}이(가) ${Math.round(DEPENDENCY_WAIT_MS / 1000)}초 안에 준비되지 않았습니다`;
+      await sleep(DEPENDENCY_POLL_MS, undefined, { signal });
+    }
   }
 
   /**

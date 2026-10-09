@@ -3773,7 +3773,7 @@ SDK에 짧은 질문 둘을 한 대화로 보내 `result` 두 개를 받았다(2
 1. **만들기**: `up --no-start`. 빌드(`--build`)와 다시 만들기(`--force-recreate`)는 여기서 한다.
 2. **확인**: 만들어진 컨테이너의 `docker inspect` 마운트를 본다. 시작 전의 컨테이너도 마운트와 읽기 전용 여부가 나온다. 보호가 빠졌으면 그 컨테이너를 지우고 던진다.
 3. **시작**: **확인한 컨테이너만** 시작한다. 컨테이너를 만들 수 없는 명령만 쓴다.
-   - 이름을 준 up(`--no-deps api`): 확인한 컨테이너의 id로 `docker start <id>`.
+   - 이름을 준 up(`--no-deps api db`): 확인한 컨테이너의 id로 `docker start <id>`. 서비스가 여럿이면 **목록 안의 의존 순서**를 지키고, `service_healthy`·`service_completed_successfully` 조건은 그 상태가 될 때까지 기다린 뒤 다음 묶음을 시작한다(`compose-deps.ts`). 목록에 없는 의존 서비스는 건드리지 않는다.
    - 전체 up: `compose start`. 의존 순서와 헬스체크 대기는 `up`과 같고, 컨테이너가 없으면 만들지 않고 실패한다.
 4. 시작한 뒤에도 한 번 더 확인한다(바깥에서 컨테이너를 바꿔 넣은 경우). 여기서 걸리면 멈추지 않고 바로 지운다 — `docker stop`은 10초를 기다린다.
 5. 한 샌드박스의 up은 한 번에 하나만 돈다. 만들기 → 확인 → 시작 사이에 다른 up이 컨테이너를 다시 만들어 끼워 넣지 못한다.
@@ -3794,6 +3794,8 @@ SDK에 짧은 질문 둘을 한 대화로 보내 `result` 두 개를 받았다(2
 
 `compose start api`는 꺼 둔 의존 서비스까지 켜므로 이름을 준 up에는 쓰지 않고 id로 시작한다.
 
+id로 시작하게 바꾼 직후에는 순서를 잃었다. 실제 세션을 이 코드로 다시 열어 보니 `commerce`가 `mysql`보다 먼저 시작됐다(이번에는 올라왔다). 예전 방식을 재 보니 `up --detach --no-deps db app`은 목록 안의 의존을 지켜 `db`가 healthy가 된 뒤(3초 뒤)에 `app`을 시작했다. `docker start <id…>`는 한꺼번에 시작한다. 그래서 compose가 정규화한 설정에서 `depends_on`을 읽어 같은 순서와 대기를 직접 지키게 했다. 고친 뒤 같은 프로젝트에서 `db` +0초, `api` +3초로 예전과 같았다.
+
 같은 확인의 다른 빈틈도 막았다. 확인할 것이 보이지 않는 경우를 통과로 치던 자리들이다.
 
 - 컨테이너 목록(`compose ps`)을 읽지 못하면 "컨테이너 없음"으로 보고 지나갔다 → 던진다.
@@ -3810,15 +3812,18 @@ SDK에 짧은 질문 둘을 한 대화로 보내 `result` 두 개를 받았다(2
 | 서비스 하나, 변조 | `up --no-start … api` | create → destroy | "시작하지 않았습니다"로 던짐 |
 | 서비스 하나, 정상 | `up --no-start … api` → `start <id>` | create → start | `.git`과 상태 폴더가 읽기 전용 |
 | 서비스 하나, 확인 뒤 컨테이너가 사라짐 | `up --no-start … api` → `start <id>` | create → destroy | 시작 실패. 새 컨테이너가 만들어지지 않음 |
+| 이름 둘(`api`, `db`), 정상 | `up --no-start … api b-studio-edge db` → `start <db, edge>` → `start <api>` | create db, create api → start db → (3초) → start api | `db`가 healthy가 된 뒤에 `api` 시작 |
+| 이름 둘, 변조 | `up --no-start … api b-studio-edge db` | create db, create api → destroy api | 아무것도 시작되지 않음 |
 | 전체, 정상 | `up --no-start` → `compose start` | create db, create api → start db → start api | 의존 순서대로 시작 |
 | 전체, 변조 | `up --no-start` | create db, create api → destroy api | 아무것도 시작되지 않음 |
 
-단위 테스트: `packages/sandbox` 295건 → 305건, 모두 통과. 순서·시작 방식·확인할 것이 없는 경우·직렬화 테스트를 더했고, 다른 테스트 파일 4개의 가짜 도커가 확인 단계의 목록·마운트 조회와 시작 명령에 답하도록 고쳤다(전에는 "컨테이너 없음"을 돌려줘 확인을 건너뛰게 했다).
+단위 테스트: `packages/sandbox` 295건 → 315건, 모두 통과. 순서·시작 방식·확인할 것이 없는 경우·직렬화 테스트를 더했고, 다른 테스트 파일 4개의 가짜 도커가 확인 단계의 목록·마운트 조회와 시작 명령에 답하도록 고쳤다(전에는 "컨테이너 없음"을 돌려줘 확인을 건너뛰게 했다).
 
 ### 배운 점
 "확인한 것"과 "쓰는 것"이 같은지는 명령의 이름으로 판단하면 안 된다. `--no-recreate`는 "있는 것을 다시 만들지 않는다"이지 "없는 것을 만들지 않는다"가 아니었다. 확인 뒤의 단계에는 확인한 대상을 가리키는 값(id)을 넘기거나, 대상을 새로 만들 수 없는 명령만 써야 한다. 그리고 "볼 것이 없음"을 통과로 두면, 볼 것을 없애는 것이 통과하는 길이 된다.
 
 ### 한계
+- 의존 순서와 대기를 직접 구현했으므로 compose와 어긋날 수 있다. 본 조건은 `service_started`·`service_healthy`·`service_completed_successfully` 셋이고, `required: false`와 `restart: true`는 따로 다루지 않는다. 기다리는 상한은 5분이다(compose는 healthcheck가 실패로 끝날 때까지 기다린다).
 - `up`마다 compose 호출과 `inspect`가 한 번씩 늘었고, 한 샌드박스의 up이 차례로 돈다(서비스 둘을 함께 재시작하면 하나씩 돈다). 늘어난 시간은 재지 않았다. 실제 세션에서 잰 뒤 적는다.
 - Kubernetes 제공자는 보지 않았다(클러스터가 없다).
 - 확인은 `docker inspect`가 알려 주는 마운트를 믿는다. 도커를 직접 다루는 다른 프로세스가 컨테이너를 바꿔 넣는 것은 시작한 뒤의 확인으로만 잡는다.
