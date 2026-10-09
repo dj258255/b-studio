@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Requirement } from '@b-studio/agent';
+import { discoverJsFile, flattenDiscoveredFile, type Requirement } from '@b-studio/agent';
 import {
   buildMatrixTestRunRows,
   buildRequirementTestRunEvidence,
@@ -164,5 +164,51 @@ describe('evaluateRequirement — 시나리오가 있는 요구사항의 검증�
     const view = evaluate(requirement('R15', 1), [], [{ name: 'R15.1 부하 점검', ok: true }]);
     expect(view.status).toBe('검증됨');
     expect(view.verifiedBy).toBe('test');
+  });
+});
+
+describe('묶음(describe) 제목의 id가 시나리오 판정에 닿는 방식(ADR-155 개정)', () => {
+  const rowsOf = (...lines: string[]) =>
+    flattenDiscoveredFile(discoverJsFile('web/src/liveOrder.test.ts', lines.join('\n'), 'vitest')).map((discovered) =>
+      row(discovered.name, discovered.requirementIds),
+    );
+
+  it('R11.1·R11.2를 describe 제목에만 달아도 통과하면 R11이 검증됨이다', () => {
+    const rows = rowsOf(
+      "describe('R11.1: 승인', () => {",
+      "  it('완료가 된다', () => {});",
+      '});',
+      "describe('R11.2: 실패', () => {",
+      "  it('사유를 담는다', () => {});",
+      "  it('기본 문구를 쓴다', () => {});",
+      '});',
+    );
+    const view = evaluate(requirement('R11', 2), rows);
+    expect(view.status).toBe('검증됨');
+    expect(view.evidence.missingScenarios).toBeUndefined();
+    expect(view.evidence.testRun).toMatchObject({ passed: 3, failed: 0 });
+  });
+
+  it('describe에 요구사항 id(R11)만 달면 그 안의 모든 테스트가 R11의 근거지만 시나리오가 없으니 여전히 작업 중이다', () => {
+    const rows = rowsOf("describe('R11 방송 중 주문', () => {", "  it('완료가 된다', () => {});", "  it('사유를 담는다', () => {});", '});');
+    expect(rows.every((candidate) => candidate.requirementIds.join() === 'R11')).toBe(true);
+    const view = evaluate(requirement('R11', 2), rows);
+    expect(view.status).toBe('작업 중');
+    expect(view.verifiedBy).toBe('none');
+    expect(view.evidence.testRun).toMatchObject({ passed: 2 });
+    expect(view.evidence.missingScenarios).toEqual(['R11.1', 'R11.2']);
+  });
+
+  it('묶음에 R11, 안쪽 묶음에 R11.1만 있으면 R11.2는 남는다', () => {
+    const rows = rowsOf("describe('R11 방송 중 주문', () => {", "  describe('R11.1: 승인', () => {", "    it('완료가 된다', () => {});", '  });', '});');
+    const view = evaluate(requirement('R11', 2), rows);
+    expect(view.status).toBe('작업 중');
+    expect(view.evidence.missingScenarios).toEqual(['R11.2']);
+  });
+
+  it('묶음과 제목에 같은 시나리오 id가 중복돼도 통과 수는 한 번만 센다', () => {
+    const rows = rowsOf("describe('R11.1: 승인', () => {", "  it('R11.1 완료가 된다', () => {});", '});');
+    expect(rows[0]!.requirementIds).toEqual(['R11.1']);
+    expect(buildRequirementTestRunEvidence([service(rows)], 'R11', head, 0)).toMatchObject({ passed: 1 });
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { discoverJsFile, discoverJunitFile, discoverPytestFile, flattenDiscoveredFile } from './test-discovery';
+import type { ParsedTestRun } from './test-results';
 import { attachResults, buildAddTestPrefill, buildFixTestPrefill, countByStatus, parseJestLikeJson, parseJUnitXml } from './test-results';
 
 const GRADLE_JUNIT_XML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -82,6 +83,76 @@ describe('parseJestLikeJson', () => {
 
   it('JSON이 깨져도 던지지 않고 빈 결과를 돌려준다', () => {
     expect(parseJestLikeJson('not json')).toEqual({ cases: [] });
+  });
+
+  it('ancestorTitles를 바깥 → 안쪽 순서의 suitePath로 싣고, 이름은 it 제목 그대로 둔다', () => {
+    const run = parseJestLikeJson(JEST_JSON);
+    expect(run.cases[0]).toMatchObject({ name: '[R2] creates an order', suitePath: ['OrderService'] });
+    expect(run.cases[2]).toMatchObject({ name: 'refunds payment', suitePath: ['OrderService', 'when cancelled'] });
+  });
+
+  it('vitest 형식: describe에만 id를 단 케이스의 묶음 제목이 suitePath에 남는다', () => {
+    const run = parseJestLikeJson(
+      JSON.stringify({
+        testResults: [
+          {
+            name: '/workspace/web/src/liveOrder.test.ts',
+            assertionResults: [{ ancestorTitles: ['R11.2: 결제 실패는 재시도할 수 있다'], fullName: 'R11.2: 결제 실패는 재시도할 수 있다 사유를 담는다', title: '사유를 담는다', status: 'passed', duration: 1 }],
+          },
+        ],
+      }),
+    );
+    expect(run.cases).toHaveLength(1);
+    expect(run.cases[0]).toMatchObject({ name: '사유를 담는다', suitePath: ['R11.2: 결제 실패는 재시도할 수 있다'] });
+  });
+
+  it('ancestorTitles가 비었거나 없으면 suitePath 필드를 만들지 않는다(최상위 테스트)', () => {
+    const run = parseJestLikeJson(
+      JSON.stringify({ testResults: [{ name: 'a.test.ts', assertionResults: [{ ancestorTitles: [], title: 'top', fullName: 'top', status: 'passed' }, { title: 'bare', status: 'passed' }] }] }),
+    );
+    expect(run.cases.map((testCase) => 'suitePath' in testCase)).toEqual([false, false]);
+  });
+
+  it('ancestorTitles가 없는 옛 형식은 fullName이 title로 끝나면 앞부분을 묶음으로 본다', () => {
+    const run = parseJestLikeJson(
+      JSON.stringify({ testResults: [{ name: 'a.test.ts', assertionResults: [{ title: '사유를 담는다', fullName: 'R11.2: 묶음 사유를 담는다', status: 'passed' }] }] }),
+    );
+    expect(run.cases[0]!.suitePath).toEqual(['R11.2: 묶음']);
+  });
+
+  it('JUnit XML 케이스에는 suitePath가 없다', () => {
+    expect(parseJUnitXml(GRADLE_JUNIT_XML).cases.every((testCase) => !('suitePath' in testCase))).toBe(true);
+  });
+});
+
+describe('attachResults — 묶음 경로 필드', () => {
+  const row = (suitePath: string[]) => ({
+    file: 'web/src/live.test.ts',
+    framework: 'vitest' as const,
+    suitePath,
+    suiteSkipped: false,
+    name: '사유를 담는다',
+    displayName: '사유를 담는다',
+    line: 1,
+    skipped: false,
+    requirementIds: [],
+  });
+
+  it('이전에 저장된 결과(suitePath 필드 없음)도 그대로 읽혀 이름으로 짝지어진다', () => {
+    const stored = JSON.parse(JSON.stringify({ cases: [{ classOrFile: '/workspace/web/src/live.test.ts', name: '사유를 담는다', result: { status: 'pass', durationMs: 1 } }] })) as ParsedTestRun;
+    const [attached] = attachResults([row(['R11.2: 묶음'])], stored);
+    expect(attached!.result?.status).toBe('pass');
+  });
+
+  it('이름이 같은 케이스가 여럿이면 보고서의 묶음 경로가 같은 것을 먼저 짝짓는다', () => {
+    const run: ParsedTestRun = {
+      cases: [
+        { classOrFile: '/workspace/web/src/live.test.ts', name: '사유를 담는다', suitePath: ['다른 묶음'], result: { status: 'fail' } },
+        { classOrFile: '/workspace/web/src/live.test.ts', name: '사유를 담는다', suitePath: ['R11.2: 묶음'], result: { status: 'pass' } },
+      ],
+    };
+    const [attached] = attachResults([row(['R11.2: 묶음'])], run);
+    expect(attached!.result?.status).toBe('pass');
   });
 });
 

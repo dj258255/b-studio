@@ -1653,3 +1653,38 @@ describe('requirementSimilarity — 재추출 병합이 같은 요구사항을 �
   });
 });
 
+
+describe('묶음(describe) 제목에 단 id는 정적 스캔에서도 그 안의 테스트의 id다', () => {
+  const files = [
+    {
+      path: 'web/src/liveOrder.test.ts',
+      content: [
+        "import { describe, it } from 'vitest';",
+        "describe('R11.2: 결제 승인 실패는 재시도할 수 있다', () => {",
+        "  it('paymentFailed에 서버 message를 담는다', () => {});",
+        '});',
+        "describe('R12 방송 중 주문', () => {",
+        "  it('주문이 만들어진다', () => {});",
+        '});',
+        "it('아무 id도 없는 테스트', () => {});",
+      ].join('\n'),
+    },
+  ];
+
+  it('scanTestFilesForScenarioId: 묶음 제목의 시나리오 id로 안의 테스트가 잡힌다', () => {
+    expect(scanTestFilesForScenarioId(files, 'R11.2')).toEqual([{ file: 'web/src/liveOrder.test.ts', name: 'paymentFailed에 서버 message를 담는다' }]);
+  });
+
+  it('scanTestFilesForRequirementId: 묶음의 시나리오 id는 부모 요구사항의, 요구사항 id는 그대로 요구사항의 근거다', () => {
+    expect(scanTestFilesForRequirementId(files, 'R11').map((match) => match.name)).toEqual(['paymentFailed에 서버 message를 담는다']);
+    expect(scanTestFilesForRequirementId(files, 'R12').map((match) => match.name)).toEqual(['주문이 만들어진다']);
+  });
+
+  it('scanTestFilesForOrphans: 묶음 제목에 id가 있으면 주인 없는 테스트가 아니다', () => {
+    expect(scanTestFilesForOrphans(files).map((match) => match.name)).toEqual(['아무 id도 없는 테스트']);
+  });
+
+  it('묶음에 요구사항 id(R12)만 있으면 시나리오 id(R12.1) 스캔에는 걸리지 않는다', () => {
+    expect(scanTestFilesForScenarioId(files, 'R12.1')).toEqual([]);
+  });
+});
