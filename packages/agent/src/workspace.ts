@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
@@ -12,8 +12,22 @@ const DENIED_FILES = [/^\.env(\..*)?$/];
  */
 const ENV_TEMPLATE_FILE = /^\.env(\.[\w-]+)*\.(example|sample|template|dist)$/;
 
+/**
+ * 이름을 파일 시스템이 같은 것으로 볼 수 있는 꼴로 맞춘다(트러블슈팅 124). macOS와 Windows의 기본 볼륨은 대소문자를 구분하지 않아
+ * `.GIT`·`.Env`가 `.git`·`.env`와 같은 항목이다. 이름을 글자 그대로 비교하면 숨김 검사를 대소문자만 바꿔 지나간다.
+ * 유니코드 정규화 꼴과, HFS+가 이름을 비교할 때 무시하는 보이지 않는 문자(git이 `.git`을 지킬 때 거르는 것과 같은 범위)도 함께 맞춘다.
+ * 대소문자를 구분하는 볼륨에서는 `.GIT`이 다른 폴더지만, 그런 이름까지 숨기는 쪽이 지나치는 것보다 낫다
+ */
+function canonicalName(segment: string): string {
+  return segment
+    .normalize('NFC')
+    .replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '')
+    .toLowerCase();
+}
+
 function isDeniedFileName(segment: string): boolean {
-  return DENIED_FILES.some((pattern) => pattern.test(segment)) && !ENV_TEMPLATE_FILE.test(segment);
+  const name = canonicalName(segment);
+  return DENIED_FILES.some((pattern) => pattern.test(name)) && !ENV_TEMPLATE_FILE.test(name);
 }
 
 const MAX_READ_BYTES = 256 * 1024;
@@ -241,7 +255,7 @@ export class Workspace {
 
   async #load(file: string): Promise<{ absolute: string; content: string }> {
     const absolute = await this.#resolve(file, { mustExist: true });
-    const buffer = await readFile(absolute);
+    const buffer = await readNoFollow(absolute);
     if (buffer.byteLength > MAX_READ_BYTES) {
       throw new WorkspaceError(`${file}: 파일이 너무 큽니다 (${buffer.byteLength} bytes)`);
     }
@@ -252,7 +266,7 @@ export class Workspace {
     const absolute = await this.#resolve(file, { mustExist: false });
     await this.#assertNotStale(absolute);
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, content);
+    await writeNoFollow(absolute, content);
     this.#record(absolute, content);
   }
 
@@ -263,7 +277,7 @@ export class Workspace {
   async writeBinary(file: string, data: Buffer): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: false });
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, data);
+    await writeNoFollow(absolute, data);
     const relative = this.#relative(absolute);
     this.#seen.delete(relative);
     this.#deleted.delete(relative);
@@ -274,7 +288,7 @@ export class Workspace {
   async edit(file: string, oldText: string, newText: string): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: true });
     await this.#assertNotStale(absolute);
-    const current = await readFile(absolute, 'utf8');
+    const current = (await readNoFollow(absolute)).toString('utf8');
 
     const first = current.indexOf(oldText);
     if (oldText.length === 0 || first === -1) {
@@ -285,7 +299,7 @@ export class Workspace {
     }
 
     const next = current.slice(0, first) + newText + current.slice(first + oldText.length);
-    await writeFile(absolute, next);
+    await writeNoFollow(absolute, next);
     this.#record(absolute, next);
   }
 
@@ -306,7 +320,7 @@ export class Workspace {
     const seen = this.#seen.get(relative);
     if (seen === undefined) return;
 
-    const current = await readFile(absolute, 'utf8').catch(() => undefined);
+    const current = await readNoFollow(absolute).then((buffer) => buffer.toString('utf8'), () => undefined);
     if (current !== undefined && digest(current) !== seen) {
       throw new WorkspaceError(`${relative}: 마지막으로 읽은 뒤 다른 곳에서 파일이 바뀌었습니다. 다시 읽고 수정하세요`);
     }
@@ -330,11 +344,37 @@ export class Workspace {
       throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
     }
 
-    // 존재하는 가장 가까운 상위 경로의 실제 위치로 심볼릭 링크 탈출을 막는다
+    // 파일 도구는 링크를 따라가지 않는다(트러블슈팅 124). 위의 숨김 검사는 이름만 보므로, 프로젝트 안의 링크가 숨긴 경로(.git, .env)를
+    // 가리키면 그 이름으로는 지나가고 실제 위치가 프로젝트 안이라 아래의 검사도 지나갔다 — 체크포인트 저장소를 읽고 쓸 수 있었다.
+    // 경로의 조각을 위에서부터 하나씩 보고, 링크가 하나라도 있으면(깨진 링크 포함) 거절한다. 목록(list)이 링크를 보여 주지 않는 것과 같은 규칙이다
+    let current = this.root;
+    for (const segment of relative === '' ? [] : relative.split(path.sep)) {
+      current = path.join(current, segment);
+      const info = await lstat(current).catch(() => undefined);
+      // 여기부터는 아직 없는 경로다(쓰기가 새로 만든다). 없는 것 아래에는 링크도 없다
+      if (!info) break;
+      if (info.isSymbolicLink()) throw new WorkspaceError(`${file}: 링크를 거치는 경로는 다룰 수 없습니다`);
+    }
+
+    // 존재하는 가장 가까운 상위 경로의 실제 위치로 심볼릭 링크 탈출을 막는다(루트 자체가 링크를 거쳐 있는 경우까지 본다)
     const existing = await nearestExisting(absolute);
     if (mustExist && existing !== absolute) throw new WorkspaceError(`${file}: 파일이 없습니다`);
     const [realRoot, realExisting] = await Promise.all([realpath(/*turbopackIgnore: true*/ this.root), realpath(/*turbopackIgnore: true*/ existing)]);
     if (!isInside(realRoot, realExisting)) throw new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
+
+    // 운영체제가 알려 주는 실제 저장 이름으로 한 번 더 본다. 위의 이름 검사는 우리가 아는 변형(대소문자·정규화)만 맞추므로,
+    // 파일 시스템이 같은 항목으로 보는 다른 이름이 있어도 실제 이름이 숨긴 이름이면 여기서 걸린다
+    // (promises의 realpath에는 native가 없어 동기 판본을 쓴다. 경로 하나를 푸는 짧은 호출이다)
+    const native = (target: string, fallback: string): string => {
+      try {
+        return realpathSync.native(/*turbopackIgnore: true*/ target);
+      } catch {
+        return fallback;
+      }
+    };
+    if (path.relative(native(this.root, realRoot), native(existing, realExisting)).split(path.sep).some(isDenied)) {
+      throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
+    }
 
     return absolute;
   }
@@ -388,7 +428,7 @@ export function isSecretFile(file: string): boolean {
 }
 
 function isDenied(segment: string): boolean {
-  return DENIED_SEGMENTS.has(segment) || isDeniedFileName(segment);
+  return DENIED_SEGMENTS.has(canonicalName(segment)) || isDeniedFileName(segment);
 }
 
 function isInside(root: string, target: string): boolean {
@@ -407,6 +447,28 @@ async function nearestExisting(target: string): Promise<string> {
       if (parent === current) return current;
       current = parent;
     }
+  }
+}
+
+/**
+ * 마지막 조각이 링크면 따라가지 않고 실패하게 연다(O_NOFOLLOW). #resolve가 경로를 확인한 뒤 실제로 읽고 쓰기까지의 사이에
+ * 그 파일이 링크로 바뀌는 경합을 좁힌다. 상위 폴더가 그 사이에 링크로 바뀌는 것까지는 막지 못한다(남은 한계)
+ */
+async function readNoFollow(absolute: string): Promise<Buffer> {
+  const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeNoFollow(absolute: string, data: string | Buffer): Promise<void> {
+  const handle = await open(absolute, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o666);
+  try {
+    await handle.writeFile(data);
+  } finally {
+    await handle.close();
   }
 }
 
