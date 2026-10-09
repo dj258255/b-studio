@@ -15,7 +15,7 @@ import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
 import { REQUIREMENTS_FILE } from './requirements';
-import { readRegularFileSync, type Workspace } from './workspace';
+import { readProjectFileSync, type Workspace } from './workspace';
 
 export type GateOutcome =
   | { kind: 'pass' }
@@ -203,7 +203,7 @@ export class VerificationGate {
   async #requirementRecordChecks(): Promise<WorkflowCheck[]> {
     const { workspace } = this.#options;
     const before = workspace.snapshotRead(REQUIREMENTS_FILE);
-    const after = readRegularFileSync(path.join(workspace.root, REQUIREMENTS_FILE));
+    const after = readProjectFileSync(workspace.root, REQUIREMENTS_FILE);
     // 문서 자리에 링크·FIFO·거대한 파일이 놓였으면 견줄 수 없다. "문서가 없다"로 넘기면 링크 너머의 내용이 나중에 읽혀
     // 검증됨을 만들 수 있으므로 통과시키지 않는다
     if (after.kind === 'irregular') {

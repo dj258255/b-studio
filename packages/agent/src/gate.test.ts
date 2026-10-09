@@ -1744,6 +1744,20 @@ describe('VerificationGate 요구사항 문서의 검증 기록(ADR-157)', () =>
     expect(check?.detail).toContain('읽을 수 없어');
   });
 
+  it('문서 폴더 자체를 위조한 문서가 든 폴더로 가는 링크로 바꿔도 막는다', async () => {
+    await seedDoc(PLAIN);
+    const { gate } = await setup(project);
+    await mkdir(path.join(project.root, 'elsewhere'), { recursive: true });
+    await writeFile(path.join(project.root, 'elsewhere', path.basename(REQ)), forge(PLAIN));
+    await rm(path.join(project.root, path.dirname(REQ)), { recursive: true });
+    await symlink(path.join(project.root, 'elsewhere'), path.join(project.root, path.dirname(REQ)));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((entry) => entry.name === 'manual-verification')).toMatchObject({ ok: false, detail: expect.stringContaining('상위 폴더') });
+  });
+
   it('바뀐 것이 전혀 없으면 예전처럼 검증 없이 통과한다', async () => {
     await seedDoc(PLAIN);
     const { gate } = await setup(project);

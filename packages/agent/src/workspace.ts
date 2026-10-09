@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -27,6 +27,38 @@ export type RegularFileRead = { kind: 'missing' } | { kind: 'text'; content: str
  * - FIFO·장치 같은 것은 여는 데서 멈추지 않게 O_NONBLOCK으로 열고, 연 뒤 일반 파일인지 확인한다
  * - 크기는 연 파일 자체(fstat)로 확인해, 확인과 읽기 사이에 다른 파일로 바뀌는 틈을 두지 않는다
  */
+/**
+ * 프로젝트 루트 기준 경로의 파일을 readRegularFileSync로 읽되, 상위 폴더 어느 것도 심볼릭 링크가 아닐 때만 읽는다.
+ * readRegularFileSync의 O_NOFOLLOW는 마지막 경로 요소만 본다 — `docs` 폴더 자체를 링크로 바꾸면 그 너머의 파일이 읽힌다.
+ * 상위 폴더의 실제 위치가 "루트의 실제 위치 + 같은 상대 경로"와 같은지 견줘, 링크가 하나라도 끼어 있으면 읽지 않는다.
+ * 확인과 여는 것 사이에 폴더가 바뀌는 틈까지는 막지 못한다(연 뒤에 확인할 방법이 없다). 그래서 실제 위치로 연다
+ */
+export function readProjectFileSync(root: string, relative: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
+  const normalized = path.normalize(relative);
+  if (path.isAbsolute(relative) || normalized === '..' || normalized.startsWith(`..${path.sep}`)) {
+    return { kind: 'irregular', reason: '프로젝트 밖 경로입니다' };
+  }
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    return { kind: 'irregular', reason: '프로젝트 폴더를 열 수 없습니다' };
+  }
+  const parent = path.dirname(normalized);
+  if (parent !== '.') {
+    let realParent: string;
+    try {
+      realParent = realpathSync(path.join(root, parent));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' };
+      return { kind: 'irregular', reason: `상위 폴더를 열 수 없습니다(${code ?? '알 수 없는 오류'})` };
+    }
+    if (realParent !== path.join(realRoot, parent)) return { kind: 'irregular', reason: '상위 폴더가 심볼릭 링크입니다' };
+  }
+  return readRegularFileSync(path.join(realRoot, normalized), maxBytes);
+}
+
 export function readRegularFileSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
   let fd: number;
   try {
@@ -118,7 +150,7 @@ export class Workspace {
     }
     let snapshot = this.#snapshots.get(normalized);
     if (!snapshot) {
-      snapshot = readRegularFileSync(path.join(this.root, normalized));
+      snapshot = readProjectFileSync(this.root, normalized);
       this.#snapshots.set(normalized, snapshot);
     }
     return snapshot;
