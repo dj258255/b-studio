@@ -1178,6 +1178,64 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     expect(check.detail).toContain('sampleParams로 알려 준 값(id=999001)');
   });
 
+  it('실행 중에 넣은 값이 선언한 pageChecks와 같은 경로가 돼도 자동 확인을 건너뛰지 않는다(느슨한 선언으로 바꿔치기하지 못한다)', async () => {
+    // 선언한 /orders/7은 기대 상태를 500으로 적어 둔(자동 확인보다 느슨한) 확인이다. 자동 확인은 200을 기대한다
+    const target = nextjs(project, { autoPageChecks: auto(), pageChecks: [{ service: 'web', path: '/orders/7', mode: 'http', expectStatus: 500 }] as WorkflowSpec['pageChecks'] });
+    let current = target;
+    const { gate, workspace } = await setup(target, {
+      page: async (url) => (url.includes('/orders/') ? { status: 500, text: 'Internal Server Error' } : { status: 200, text: 'ok' }),
+      reload: async () => current,
+    });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    current = await edited(target, { autoPageChecks: auto({ sampleParams: { id: '7' } }) })();
+
+    const outcome = await gate.check();
+
+    // 자동 확인이 /orders/7을 직접 열어 500을 실패로 본다. "이미 선언돼 있다"로 건너뛰면 느슨한 선언만 남아 통과했을 것이다
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((c) => c.name === 'web /orders/7 (자동)')).toMatchObject({ ok: false });
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('두 번 열지 않았습니다'))).toBe(false);
+  });
+
+  it('경로 조각으로 쓸 수 없는 값은 반영하지 않고 이유를 남긴다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    let current = target;
+    const { gate, workspace } = await setup(target, { page: ordersApp(requested), reload: async () => current });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    // 스키마를 거치지 않은 값(주입된 다시 읽기)이 경로를 바꾸려는 문자를 담고 있다
+    current = await edited(target, { autoPageChecks: auto({ sampleParams: { id: '../../admin' } }) })();
+
+    await gate.check();
+
+    // 추정한 id로 그대로 열고, 다른 경로는 열지 않는다
+    expect(requested.filter((url) => url.includes('/orders/'))).toEqual([expect.stringMatching(/\/orders\/1$/)]);
+    expect(requested.some((url) => url.includes('admin'))).toBe(false);
+    expect(gate.checks.some((c) => (c.detail ?? '').includes('경로 조각으로 쓸 수 없는 값'))).toBe(true);
+  });
+
+  it('studio.yaml이 다른 파일로 가는 링크면 읽지 않고, 그 파일의 내용이 사유에 실리지 않는다', async () => {
+    const target = nextjs(project, { autoPageChecks: auto() });
+    const requested: string[] = [];
+    const { gate, workspace } = await setup(target, { page: ordersApp(requested) });
+    await workspace.write('web/app/orders/[id]/page.tsx', page);
+    await workspace.write('studio.yaml', 'version: 1\n');
+    // 설정 파일 자리를 프로젝트 밖의 파일로 가는 링크로 바꾼다
+    const outside = path.join(project.root, '..', `outside-${Date.now()}.txt`);
+    await writeFile(outside, 'TOP-SECRET-HOST-CONTENT: not yaml {{{');
+    await rm(path.join(project.root, 'studio.yaml'));
+    await symlink(outside, path.join(project.root, 'studio.yaml'));
+
+    const outcome = await gate.check();
+
+    // 설정을 읽는 쪽(loadProject)이 프로젝트 밖을 가리키는 링크를 거절하고, 그 파일의 내용은 어디에도 실리지 않는다
+    const everything = `${JSON.stringify(outcome)}\n${JSON.stringify(gate.report)}\n${JSON.stringify(gate.checks)}`;
+    expect(outcome.kind).toBe('retry');
+    expect(everything).toContain('프로젝트 폴더 밖을 가리키는 링크');
+    expect(everything).not.toContain('TOP-SECRET-HOST-CONTENT');
+    await rm(outside, { force: true });
+  });
+
   it('같은 키는 새 값으로 덮어 쓰고 시작 때의 다른 키는 그대로 둔다', async () => {
     const target = nextjs(project, { autoPageChecks: auto({ sampleParams: { id: '1', slug: 'a' } }) });
     const requested: string[] = [];

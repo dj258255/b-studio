@@ -6673,6 +6673,12 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 5. **받아들인 값은 알린다.** 새 값을 반영한 검증에는 같은 건너뜀 check에 "`sampleParams(id=999001)`를 이번 실행에서 바로 반영했습니다"를 남긴다. 에이전트가 "이 키가 지원되는지" 확인할 수 없어 멈췄던 점을 막는다.
 6. **`sampleParams`로 연 화면은 추정이 아니므로 기존 규칙대로 엄격하게 판정한다**(관대한 `probedId` 판정이 아니다). 에이전트가 넣은 id의 데이터가 없으면 그대로 실패한다. 이때 사유에 "이 화면은 `studio.yaml`의 `autoPageChecks.sampleParams`로 알려 준 값(id=999001)으로 열었습니다 — 그 값의 데이터가 실제로 없으면 같은 실패가 납니다. 앱이 실제로 가진 값으로 `sampleParams`를 고치세요"를 붙인다(`sampledValueHint`). 추정 id 실패에 붙던 안내(`dynamicProbeDataHint`)와 짝이다. 전에는 값을 알려 준 뒤의 실패에 안내가 없어, 실패한 요청 문구만 보고 화면 코드를 의심하게 됐다.
 7. **`sampleIdFrom`의 안전성.** 새로 들어온 `sampleIdFrom`은 세션의 관리형 서비스만 가리킬 수 있다(`project.managed`에 있는 이름). 아니면 반영하지 않고 이유를 check에 남긴다. 이 규칙은 `pageChecks.expectFromApi.service`와 같다. 경로는 스키마가 `SERVICE_PATH`로 제한하고, 부르는 쪽(`#dynamicRouteFallback`)이 `sandbox.endpoint(service)`의 출처를 벗어나지 않는지(`url.origin`)와 뽑은 값이 `SAFE_SEGMENT`인지를 매번 검사하며, 실패하면 기본값 `1`로 물러난다. 시작 때 `dynamicRouteProbe`가 꺼져 있으면 id 추정이 없으므로 `sampleIdFrom`은 쓰지 않는다(`sampleParams`는 반영한다). `dynamicRouteProbe: false`와 `sampleIdFrom`을 함께 적은 파일은 스키마가 거절해 읽기 실패로 처리된다.
+8. **실행 중 값으로 채운 경로는 선언한 확인과 겹쳐도 건너뛰지 않는다.** 자동 확인은 선언한 `pageChecks`와 같은 경로를 두 번 열지 않는다. 그런데 에이전트가 값을 골라 자동 확인의 경로를 선언된 확인과 겹치게 만들 수 있으면(`/orders/[id]`에 `id: "7"`, 선언에는 `allowConsoleErrors: true`가 붙은 `/orders/7`), 엄격한 자동 확인이 더 느슨한 선언된 확인으로 바뀐다. 값 하나로 확인 하나가 사라지는 셈이라 "확인을 줄이지 않는 값만 받는다"는 이 결정의 전제가 깨진다. 그래서 동적 세그먼트가 이번 실행에서 받아들인 `sampleParams` 키를 쓰거나, 추정 id가 이번 실행에서 받아들인 `sampleIdFrom`에서 온 경로는 선언과 겹쳐도 자동 확인을 그대로 돌린다(`usesInRunValue`). 값과 무관한 정적 경로와 시작 때부터 있던 값으로 채운 경로는 전처럼 건너뛴다.
+9. **값은 경로 조각으로 쓸 수 있는 문자만 받는다.** 받아들이기 전에 키와 값을 `SAFE_SEGMENT`(영문·숫자·`_`·`-`)로 다시 거른다. 스키마가 같은 제한을 걸지만 `reloadProject`를 바꿔 끼운 경로나 스키마가 느슨해진 뒤에도 `../admin` 같은 값이 다른 화면을 열게 두지 않으려는 것이다. 거절한 키는 건너뜀 check에 이유와 함께 남긴다.
+10. **다시 읽는 파일은 프로젝트 폴더 안의 것만이다.** 다시 읽기는 호스트에서 일어나고 실패 문구가 에이전트에게 돌아가므로, 읽으면 안 되는 파일이 읽히면 그 내용이 모델에게 넘어간다. 두 층으로 막는다.
+   - 게이트는 `loadProject`를 부르기 전에 `studio.yaml`이 일반 파일인지 본다(`readProjectFileSync`, ADR-157과 같은 함수). 링크나 폴더면 읽지 않고 시작 때의 값으로 간다. 읽기 실패의 상세는 `SpecError`일 때만 싣고 그 밖의 오류 문구는 싣지 않는다.
+   - `loadProject` 자체를 조였다(`packages/spec/src/load.ts`의 `readProjectText`). `studio.yaml`과 `compose:`가 가리키는 파일은 프로젝트 폴더 안의 상대 경로여야 하고(`../x`, 절대 경로 거절), 실제 위치(`realpath`)가 프로젝트 밖이면 "프로젝트 폴더 밖을 가리키는 링크는 읽지 않습니다"로 거절한다. 프로젝트 안의 다른 파일을 가리키는 링크와 하위 폴더의 compose 파일은 그대로 읽는다. 전에는 `compose:`에 아무 문자열이나 적을 수 있었고 그 파일을 YAML로 해석했다.
+   - YAML 문법 오류는 위치와 오류 코드만 담은 `SpecError`로 바꾼다(`parseYaml`). yaml 라이브러리의 오류 문구에는 문제가 난 줄이 그대로 실린다(`token: TOP-SECRET…` 한 줄이 통째로 나온다). 형식이 틀린 파일의 위치는 알려 주되 내용은 문구에 싣지 않는다.
 
 ### 넓히지 않은 것
 - **실행 중에 더한 `pageChecks`·`tests` 항목을 추가로 돌리는 것은 넣지 않았다.** 더하는 것은 확인을 줄이지 않지만, 받아들이려면 "어느 항목이 추가이고 어느 항목이 바꿔치기인가"를 판정해야 한다. 이름이 같은데 명령이 바뀐 `tests`, 같은 `path`에 기대 문구가 약해진 `pageChecks`, 항목 하나를 지우고 약한 항목 하나를 더한 경우가 모두 "추가"로 보일 수 있다. 판정 규칙이 새 우회로가 된다. 실측한 막다른 길은 sample 값 하나였고, 다른 선언은 다음 요청부터 적용하는 것으로 충분하다. 필요가 실측되면 별도 결정으로 다룬다.
@@ -6681,11 +6687,14 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 ### 검증 결과
 - `packages/agent/src/gate.test.ts`의 `자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)` 12건. 고치기 전 코드에서 9건이 실패했고(두 번째 검증도 `/orders/1`을 열어 `동적 경로를 추정한 id(1)로 열었더니 HTTP 404`로 다시 `retry`), 고친 뒤 모두 통과한다. 나머지 3건은 "적용되지 않음"을 확인하는 것이라 고치기 전에도 통과한다.
 - 확인한 것: 첫 검증 실패 뒤 `sampleParams: { id: '7' }`이 들어오면 두 번째 검증이 `/orders/7`을 열어 통과, 같은 키 덮어쓰기와 시작 때 다른 키 유지, `sampleIdFrom`이 실행 중 들어온 경우, 관리형이 아닌 서비스를 가리키는 `sampleIdFrom` 거절, 시작 때 `dynamicRouteProbe`가 꺼져 있을 때의 `sampleIdFrom` 거절, `dynamicRouteProbe: false`·`followImports: false`·`maxPages: 1`·`service` 변경·`expectStatus` 변경·`pageChecks` 삭제가 한꺼번에 들어와도 열리는 화면과 선언한 확인이 그대로, 읽기 실패 시 시작 때의 값 사용과 사실의 기록, 엄격한 판정과 안내 문구(http·browser 모드), `reloadProject`를 넘기지 않으면 `studio.yaml`이 바뀌지 않은 실행에서 디스크를 읽지 않음.
-- 기존 `gate.test.ts`·`next-routes.test.ts` 전체 통과.
+- 같은 묶음에 3건을 더했다(모두 15건). 실행 중 넣은 값이 선언한 느슨한 `pageChecks`와 같은 경로를 만들어도 자동 확인이 그대로 도는지, `../admin`처럼 경로 조각으로 쓸 수 없는 값이 거절되는지, `studio.yaml`이 프로젝트 밖 파일을 가리키는 링크일 때 그 파일의 내용(`TOP-SECRET-HOST-CONTENT`)이 게이트 결과·보고서·check 어디에도 없는지.
+- `packages/spec/src/spec.test.ts`의 `loadProject: 프로젝트 폴더 밖의 파일은 읽지 않는다 (ADR-159)` 4건. `compose: ../outside.yaml`과 절대 경로 거절, `studio.yaml`·compose 파일이 밖을 가리키는 링크일 때 거절, 프로젝트 안 링크와 하위 폴더 compose 허용, YAML 문법 오류 문구에 위치만 있고 내용이 없음. `load.ts`를 고치기 전으로 되돌리면 이 중 3건이 실패한다(허용을 확인하는 1건은 전에도 통과).
+- 기존 `gate.test.ts`·`next-routes.test.ts`·`verify.test.ts`와 `packages/spec` 전체 통과.
 
 ### 감수한 트레이드오프
 - `studio.yaml`을 바꾼 실행에서 자동 화면 확인을 계산할 때마다 파일 하나와 compose 파일을 더 읽는다(`loadProject`). 바뀌지 않은 실행에서는 읽지 않는다.
 - 에이전트가 `sampleParams`에 실제로 없는 id를 넣으면 그 값으로 엄격하게 열려 실패한다. 추정 id의 관대한 판정으로 통과하던 화면이 값을 적는 순간 더 엄격해진다. 알려 준 값이 틀렸을 때 틀렸다고 말해 주는 쪽이 맞다고 보았다.
+- `compose:`에 프로젝트 폴더 밖 경로(`../infra/compose.yaml`)를 적어 쓰던 프로젝트는 이제 `loadProject`가 거절한다. 세션의 작업 복사본은 프로젝트 폴더 하나만 담고 샌드박스도 그 폴더만 반영하므로 밖의 compose 파일은 원래도 세션에서 온전히 동작하지 않았다. 저장소 안에서 이 형태를 쓰는 예제·테스트는 없었다.
 - 에이전트가 존재하지 않는 id로 "통과하는" 화면을 만들 수는 없다. 값이 어떻든 그 화면이 `expectStatus`와 화면 문구·요청 실패 검사를 통과해야 하기 때문이다. 다만 실제와 다른 id를 골라 데이터가 비어 있는 쉬운 화면만 열게 할 수는 있다(남은 한계).
 
 ### 남은 한계

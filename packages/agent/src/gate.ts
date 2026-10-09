@@ -465,7 +465,10 @@ export class VerificationGate {
       ...refreshed.notes.map((note) => this.#autoSkipCheck(config.service, SPEC_FILE, note)),
 ...(followed?.notes ?? []).map((note) => this.#autoSkipCheck(config.service, note.file, note.reason)), ...found.skipped.map((entry) => this.#autoSkipCheck(config.service, entry.file, entry.reason))];
     for (const route of found.routes) {
-      if (declaredKeys.has(`${config.service} ${route.path}`)) {
+      // 선언한 pageChecks와 같은 경로는 두 번 열지 않는다. 단, 실행 중에 받아들인 값으로 채운 동적 경로는 건너뛰지 않는다: 에이전트가
+      // 값을 골라 경로를 선언된 확인과 겹치게 만들면, 엄격한 자동 확인이 더 느슨할 수 있는 선언된 확인(콘솔 오류 허용 등)으로 바뀐다.
+      // 값과 무관한 정적 경로는 지금처럼 건너뛴다
+      if (!usesInRunValue(route, refreshed) && declaredKeys.has(`${config.service} ${route.path}`)) {
         skipped.push(this.#autoSkipCheck(config.service, route.file, `${route.path}은(는) 이미 선언한 pageChecks에 있어 두 번 열지 않았습니다`));
         continue;
       }
@@ -489,22 +492,41 @@ export class VerificationGate {
    * (service·mode·maxPages·followImports·dynamicRouteProbe·expectStatus와 pageChecks·tests 등)은 실행을 시작할 때 고정한다 —
    * 통째로 받으면 에이전트가 검증을 끄거나 약하게 바꿔 비켜 갈 수 있다. 읽지 못하면(형식 오류 등) 시작 때의 값으로 계속하고 그 사실을 notes로 남긴다.
    */
-  async #withLatestSampleValues(started: AutoPageChecks): Promise<{ config: AutoPageChecks; notes: string[] }> {
+  async #withLatestSampleValues(started: AutoPageChecks): Promise<LatestSampleValues> {
     const { project, workspace } = this.#options;
-    const reload = this.#options.reloadProject ?? (workspace.changedFiles().includes(SPEC_FILE) ? () => loadProject(project.root) : undefined);
-    if (!reload) return { config: started, notes: [] };
+    const unchanged: LatestSampleValues = { config: started, notes: [], inRunKeys: new Set(), inRunSampleIdFrom: false };
+    let reload = this.#options.reloadProject;
+    if (!reload) {
+      if (!workspace.changedFiles().includes(SPEC_FILE)) return unchanged;
+      // 디스크에서 다시 읽기 전에 설정 파일이 일반 파일인지 본다. 호스트에서 읽는 파일이라, 다른 곳으로 가는 링크로 바뀌어 있으면
+      // 그 너머의 내용이 형식 오류 문구를 타고 모델에게 돌아갈 수 있다. 일반 파일이 아니면 읽지 않고 시작 때의 값으로 간다
+      const file = readProjectFileSync(project.root, SPEC_FILE);
+      if (file.kind !== 'text') {
+        return { ...unchanged, notes: [`${SPEC_FILE}을(를) 일반 파일로 읽을 수 없어(${file.kind === 'irregular' ? file.reason : '파일 없음'}) 이번 검증은 실행을 시작할 때의 autoPageChecks로 진행했습니다`] };
+      }
+      reload = () => loadProject(project.root);
+    }
     let latest: AutoPageChecks | undefined;
     try {
       latest = (await reload()).spec.workflow?.autoPageChecks;
     } catch (error) {
-      const detail = error instanceof SpecError ? [error.message, ...error.issues].join(' / ') : error instanceof Error ? error.message : String(error);
-      return { config: started, notes: [`${SPEC_FILE}의 새 값을 읽지 못해 이번 검증은 실행을 시작할 때의 autoPageChecks로 진행했습니다(sampleParams·sampleIdFrom 변경 미반영): ${this.#options.sandbox.redact(detail)}`] };
+      // 형식 오류(SpecError)의 항목은 방금 확인한 일반 파일 studio.yaml에서 온 것이라 그대로 알려 준다. 그 밖의 오류 문구는 어디서 온
+      // 내용인지 알 수 없으므로(설정이 가리키는 다른 파일일 수 있다) 문구를 싣지 않는다
+      const detail = error instanceof SpecError ? `: ${this.#options.sandbox.redact([error.message, ...error.issues].join(' / '))}` : '';
+      return { ...unchanged, notes: [`${SPEC_FILE}의 새 값을 읽지 못해 이번 검증은 실행을 시작할 때의 autoPageChecks로 진행했습니다(sampleParams·sampleIdFrom 변경 미반영)${detail}`] };
     }
-    if (!latest) return { config: started, notes: [] };
+    if (!latest) return unchanged;
     const notes: string[] = [];
     const config: AutoPageChecks = { ...started };
-    const added = Object.entries(latest.sampleParams ?? {}).filter(([key, value]) => started.sampleParams?.[key] !== value);
+    const inRunKeys = new Set<string>();
+    let inRunSampleIdFrom = false;
+    const changed = Object.entries(latest.sampleParams ?? {}).filter(([key, value]) => started.sampleParams?.[key] !== value);
+    // 스키마가 이미 같은 제한을 걸지만, 경로 조각으로 쓰이는 값이라 여기서도 안전한 문자만 받는다(다른 문자는 경로를 바꿔 다른 화면을 열게 한다)
+    const added = changed.filter(([key, value]) => SAFE_SEGMENT.test(key) && typeof value === 'string' && SAFE_SEGMENT.test(value));
+    const rejected = changed.filter((entry) => !added.includes(entry)).map(([key]) => key);
+    if (rejected.length > 0) notes.push(`${SPEC_FILE}의 autoPageChecks.sampleParams 중 ${rejected.join(', ')}은(는) 경로 조각으로 쓸 수 없는 값이라 반영하지 않았습니다(영문·숫자·_·-만)`);
     if (added.length > 0) {
+      for (const [key] of added) inRunKeys.add(key);
       config.sampleParams = { ...started.sampleParams, ...Object.fromEntries(added) };
       notes.push(`${SPEC_FILE}의 autoPageChecks.sampleParams(${added.map(([key, value]) => `${key}=${value}`).join(', ')})를 이번 실행에서 바로 반영했습니다`);
     }
@@ -517,10 +539,11 @@ export class VerificationGate {
         notes.push(`autoPageChecks.dynamicRouteProbe가 실행을 시작할 때 꺼져 있어 sampleIdFrom은 반영하지 않았습니다(sampleParams는 반영됩니다)`);
       } else {
         config.sampleIdFrom = from;
+        inRunSampleIdFrom = true;
         notes.push(`${SPEC_FILE}의 autoPageChecks.sampleIdFrom(${from.service} ${from.path})을 이번 실행에서 바로 반영했습니다`);
       }
     }
-    return { config, notes };
+    return { config, notes, inRunKeys, inRunSampleIdFrom };
   }
 
   /**
@@ -1009,6 +1032,23 @@ function dynamicProbeDataHint(probedId: string): string {
 }
 
 /** sampleParams로 알려 준 값으로 연 화면의 `이름=값` 목록. 동적 세그먼트가 없거나 쓴 값이 없으면 undefined */
+/** 실행 중에 다시 읽은 설정에서 받아들인 sample 값 */
+interface LatestSampleValues {
+  config: AutoPageChecks;
+  notes: string[];
+  /** 이번 실행 중에 새로 받아들인 sampleParams의 키 */
+  inRunKeys: Set<string>;
+  /** 이번 실행 중에 새 sampleIdFrom을 받아들였는지(추정 id가 그 값에서 온다) */
+  inRunSampleIdFrom: boolean;
+}
+
+/** 이 경로가 실행 중에 받아들인 값으로 채워졌는지: 동적 세그먼트가 그 키를 쓰거나, 추정 id가 실행 중에 들어온 sampleIdFrom에서 왔을 때 */
+function usesInRunValue(route: { file: string; usedFallbackParams?: readonly string[] }, latest: LatestSampleValues): boolean {
+  const names = [...route.file.matchAll(/\[(?:\.\.\.)?([A-Za-z0-9_-]+)\]/g)].map((match) => match[1]!);
+  if (names.some((name) => latest.inRunKeys.has(name))) return true;
+  return latest.inRunSampleIdFrom && (route.usedFallbackParams?.length ?? 0) > 0;
+}
+
 function sampledValues(pageFile: string, sampleParams: Readonly<Record<string, string>> | undefined): string | undefined {
   const names = [...pageFile.matchAll(/\[(?:\.\.\.)?([A-Za-z0-9_-]+)\]/g)].map((match) => match[1]!);
   const used = names.filter((name) => sampleParams?.[name]);
