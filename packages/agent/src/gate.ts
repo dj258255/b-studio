@@ -4,6 +4,7 @@ import path from 'node:path';
 import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
+import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
 import { findStaticShadows, StaticShadowUnknownError } from './next-static-shadow';
@@ -392,7 +393,8 @@ export class VerificationGate {
     if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
 
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
-    const nodes: TaskNode<void>[] = [];
+    // 각 확인은 통과하면 무엇을 쟀는지(근거)를 돌려준다. 이름으로 모으지 않는다 — 이름이 같은 확인끼리 근거가 바뀌어 붙지 않게 한다
+    const nodes: TaskNode<string[] | void>[] = [];
     this.#pageSteps.clear();
     this.#pageCompares.clear();
     this.#pageBlocked.clear();
@@ -443,11 +445,15 @@ export class VerificationGate {
       const detail = [result.error, note, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined, ...warnings]
         .filter((line) => line !== undefined)
         .join('\n');
+      const ok = result.status === 'succeeded';
+      // 근거는 통과한 확인에만 붙인다. 실패하면 사유(detail)가 그 자리를 맡는다
+      const evidence = ok && result.value ? result.value : undefined;
       return {
         ...entry,
-        ok: result.status === 'succeeded',
+        ok,
         attempts: result.attempts,
         detail: detail || undefined,
+        ...(evidence?.length ? { evidence } : {}),
         ...(steps ? { steps } : {}),
         ...(compare ? { compare } : {}),
         ...(loadMs !== undefined ? { metrics: { loadMs } } : {}),
@@ -712,7 +718,7 @@ export class VerificationGate {
     this.#pageWarnings.set(name, list);
   }
 
-  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string; sampled?: string } = {}): Promise<void> {
+  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string; sampled?: string } = {}): Promise<string[]> {
     const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
     // 자동으로 연 페이지의 실패는 경로를 앞에 붙여, 실패 서명에서 선언한 pageChecks의 실패와 구분되게 한다
     const fail = (message: string) => new Error(sandbox.redact(options.auto ? `자동 페이지 ${page.path}: ${message}` : message));
@@ -721,6 +727,8 @@ export class VerificationGate {
     const endpoint = await sandbox.endpoint(page.service);
     const url = new URL(page.path, endpoint.url);
     if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
+    const redact = (line: string) => sandbox.redact(line);
+    const evidenceContext: PageEvidenceContext = { redact, ...(options.auto ? { auto: true } : {}), ...(options.probedId !== undefined ? { probedId: options.probedId } : {}), ...(api ? { api } : {}) };
     if (page.mode === 'browser') {
       let result: BrowserPageResult;
       try {
@@ -804,7 +812,7 @@ export class VerificationGate {
       if (problems.length > 0 && options.sampled !== undefined) problems.push(sampledValueHint(options.sampled));
       if (problems.length > 0) throw fail(problems.join('\n'));
       if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
-      return;
+      return evidenceOrNone(() => finishEvidence(browserPageEvidence(page, result, evidenceContext), redact));
     }
     const { status, text } = await pageFetcher(url.href, signal);
     if (options.probedId !== undefined) {
@@ -828,6 +836,7 @@ export class VerificationGate {
     if (missingAll.length > 0) throw fail(missingAllText(missingAll));
     // ④ api에서 꺼낸 값이 응답 본문(http) 글자에 있는지
     if (api && !containsApiValue(text, api.value)) throw fail(missingApiValue(api, page.path));
+    return evidenceOrNone(() => finishEvidence(httpPageEvidence(page, { status, text }, evidenceContext), redact));
   }
 
   /**
@@ -842,7 +851,7 @@ export class VerificationGate {
     signal: AbortSignal,
     fail: (message: string) => Error,
     browserError: BrowserUnavailableError,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const { sandbox, pageFetcher = fetchPage } = this.#options;
     const endpoint = await sandbox.endpoint(probe.service);
     const url = new URL(probe.path, endpoint.url);
@@ -855,6 +864,7 @@ export class VerificationGate {
       if (page.expectInViewport) {
         this.#addWarning(name, `[참고] expectInViewport(${page.expectInViewport.map((value) => `'${value}'`).join(', ')})가 첫 화면에 보이는지는 확인하지 못했습니다 — 헤드리스 브라우저가 필요합니다`);
       }
+      return evidenceOrNone(() => finishEvidence([`헤드리스 브라우저 없이 ${probe.service}${probe.path}의 HTTP 응답(${status})만 확인했습니다 — 화면은 열지 않았습니다`], (line) => sandbox.redact(line)));
     } catch (error) {
       throw fail(
         `헤드리스 브라우저를 쓸 수 없어 ${probe.service}${probe.path}로 대신 확인했는데 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
@@ -950,8 +960,9 @@ export class VerificationGate {
     return saved;
   }
 
-  async #runTest(test: WorkflowTest, signal: AbortSignal): Promise<void> {
+  async #runTest(test: WorkflowTest, signal: AbortSignal): Promise<string[]> {
     const timeout = AbortSignal.timeout(TEST_TIMEOUT_MS);
+    const startedAt = performance.now();
     // exec는 기본으로 출력의 시크릿 값을 가려서 돌려준다. 실패 출력이 모델에게 그대로 들어가므로 가린 결과만 쓴다
     const result = await this.#options.sandbox.exec(test.service, test.command, { signal: AbortSignal.any([signal, timeout]) });
     if (result.exitCode !== 0) {
@@ -959,6 +970,7 @@ export class VerificationGate {
       const output = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-OUTPUT_TAIL_LINES).join('\n');
       throw new Error(`종료 코드 ${result.exitCode}${revived ? `\n환경 문제: ${test.service} 컨테이너가 ${revived} 종료됐습니다. 코드 문제가 아닐 수 있습니다 — 서비스를 다시 띄웠습니다(다음 시도에서 이어집니다)` : ''}\n${output}`);
     }
+    return evidenceOrNone(() => finishEvidence(testEvidence(test.service, test.command, performance.now() - startedAt), (line) => this.#options.sandbox.redact(line)));
   }
 
   /**
@@ -1086,6 +1098,15 @@ function describeConcurrencyExpect(expect: ConcurrencyExpect): string {
 }
 
 /** api에서 꺼낸 값. 화면 글자와 비교한다 */
+/** 근거는 사람이 보는 표시일 뿐이라, 만들다 실패해도 이미 내려진 통과 판정을 뒤집지 않는다(근거 없이 통과로 남는다) */
+function evidenceOrNone(build: () => string[]): string[] {
+  try {
+    return build();
+  } catch {
+    return [];
+  }
+}
+
 interface ApiValue {
   service: string;
   jsonPath: string;

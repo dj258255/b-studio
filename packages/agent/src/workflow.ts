@@ -43,6 +43,8 @@ export interface WorkflowCheck {
   compare?: WorkflowCompare;
   /** 측정값. browser 모드 화면 확인의 로드 시간(loadMs). 예산(maxLoadMs)을 적은 확인만 잰다 */
   metrics?: { loadMs?: number };
+  /** 통과한 확인이 무엇을 쟀는지(상태 코드, 확인한 문구, 첫 화면에서 잰 글자와 창 크기, 오류 건수 등). 사람이 보는 용도라 모델 피드백에는 싣지 않는다 */
+  evidence?: string[];
 }
 
 /** studio.yaml의 선언을 실행기 정책으로 변환한다. 프롬프트와 별개로 항상 적용된다. */

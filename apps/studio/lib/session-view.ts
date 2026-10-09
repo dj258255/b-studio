@@ -50,7 +50,7 @@ export type ChatItem =
   | { kind: 'compacting'; runId: string }
   | { kind: 'stage'; runId: string; stage: string }
   /** 플랫폼이 직접 실행한 화면 확인·테스트·리뷰 결과. browser_check면 단계별 스크린샷 식별자(steps)와 디자인 비교(compare)가 함께 온다 */
-  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare }
+  | { kind: 'check'; runId: string; stage: string; name: string; ok: boolean; attempts: number; detail?: string; steps?: WorkflowStepCheck[]; compare?: WorkflowCompare; evidence?: string[] }
   | { kind: 'reply'; runId: string; text: string }
   | { kind: 'tools'; runId: string; calls: ToolCallView[] }
   /** interrupted: 결과가 오기 전에 요청이 끝났다 (서버가 멈췄거나 요청이 오류로 끝남) */

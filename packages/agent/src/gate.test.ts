@@ -588,6 +588,110 @@ describe('VerificationGate 워크플로 단계', () => {
       expect(check.detail).toContain('expectInViewport');
       expect(check.detail).toContain('확인하지 못했습니다');
     });
+
+    it('통과하면 잰 글자와 창 크기, 본 것과 오류 건수가 근거로 남는다(#601)', async () => {
+      const { gate, workspace } = await setup(viewportCheck({ expectText: '바로 주문' }), {
+        browser: runner({ width: 1280, height: 720, findings: [{ text: '바로 주문', visible: true }, { text: '주문하려면 로그인하세요', visible: true }] }),
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      const check = gate.checks.find((entry) => entry.stage === 'browser_check')!;
+      expect(check.evidence).toEqual([
+        'HTTP 200 (기대 200)',
+        "'바로 주문' 화면에 있음",
+        "첫 화면에 온전히 보임 (창 1280x720): '바로 주문', '주문하려면 로그인하세요'",
+        '스크립트 예외 0건 · console.error 0건 · 실패한 요청 0건 · 미디어 오류 0건',
+      ]);
+      // 통과 근거는 실패 사유 자리(detail)에 섞지 않는다 — 모델 피드백은 detail만 읽는다
+      expect(check.detail).toBeUndefined();
+    });
+
+    it('fallbackProbe로 대신한 통과는 화면을 열지 않았다고 근거에 적는다', async () => {
+      const { gate, workspace } = await setup(viewportCheck({ fallbackProbe: { service: 'api', path: '/health' } }), {
+        browser: async () => {
+          throw new BrowserUnavailableError('executable not found');
+        },
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      const check = gate.checks.find((entry) => entry.stage === 'browser_check')!;
+      expect(check.evidence).toEqual(['헤드리스 브라우저 없이 api/health의 HTTP 응답(200)만 확인했습니다 — 화면은 열지 않았습니다']);
+    });
+  });
+
+  describe('통과한 확인의 근거 (#601)', () => {
+    const page = (extra: Record<string, unknown> = {}) => ({ service: 'api', path: '/', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false, ...extra });
+    const rendered = (extra: Partial<BrowserPageResult> = {}): BrowserPageResult => ({
+      status: 200,
+      text: '주문 목록',
+      pageErrors: [],
+      consoleErrors: [],
+      failedRequests: [],
+      mediaErrors: [],
+      blockedRequests: [],
+      horizontalOverflowPx: 0,
+      steps: [],
+      ...extra,
+    });
+
+    it('허용한 콘솔 오류·실패한 요청은 0건이라고 적지 않고 건수와 허용했다는 사실을 적는다', async () => {
+      const { gate, workspace } = await setup(withWorkflow({ pageChecks: [page({ allowConsoleErrors: true })] as never }), {
+        browser: async () => rendered({ consoleErrors: ['boom', 'again'], failedRequests: ['404 /api/x'] }),
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(gate.checks.find((entry) => entry.stage === 'browser_check')!.evidence).toContain(
+        '스크립트 예외 0건 — console.error 2건 · 실패한 요청 1건 · 미디어 오류 0건은 실패로 보지 않았습니다(allowConsoleErrors)',
+      );
+    });
+
+    it('실패한 확인에는 근거를 붙이지 않고, 통과한 확인의 근거는 모델 피드백에 싣지 않는다', async () => {
+      const target = withWorkflow({ pageChecks: [page({ expectText: '주문 목록' }), page({ path: '/missing', expectText: '없는 문구' })] as never });
+      const { gate, workspace } = await setup(target, { browser: async () => rendered() });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await gate.check();
+      expect(outcome.kind).toBe('retry');
+      const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+      expect(feedback).toContain("'없는 문구'가 없습니다");
+      expect(feedback).not.toContain('화면에 있음');
+      expect(feedback).not.toContain('스크립트 예외 0건');
+      const [passed, failed] = gate.checks.filter((entry) => entry.stage === 'browser_check');
+      expect(passed!.evidence).toContain("'주문 목록' 화면에 있음");
+      expect(failed!.ok).toBe(false);
+      expect(failed!.evidence).toBeUndefined();
+    });
+
+    it('http 확인은 자바스크립트를 실행하지 않았다고 근거에 적는다', async () => {
+      const target = withWorkflow({ pageChecks: [{ service: 'api', path: '/', mode: 'http', expectStatus: 200, expectText: '주문 목록', allowConsoleErrors: false, noHorizontalScroll: false }] });
+      const { gate, workspace } = await setup(target);
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(gate.checks.find((entry) => entry.stage === 'browser_check')!.evidence).toEqual([
+        'HTTP 200 (기대 200)',
+        "'주문 목록' 응답 본문에 있음",
+        'HTTP 확인이라 자바스크립트를 실행하지 않았습니다 — 화면에 그려졌는지, 콘솔 오류·실패한 요청은 보지 않았습니다',
+      ]);
+    });
+
+    it('테스트는 어디서 무슨 명령을 돌렸는지와 걸린 시간을 남긴다', async () => {
+      const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }] });
+      const { gate, workspace } = await setup(target);
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      const evidence = gate.checks.find((entry) => entry.stage === 'test')!.evidence!;
+      expect(evidence[0]).toBe('api에서 `./gradlew test` 종료 코드 0');
+      expect(evidence[1]).toMatch(/^걸린 시간 \d+\.\d초$/);
+    });
+
+    it('근거를 만들다 실패해도 통과 판정은 그대로다', async () => {
+      // 러너가 형식에 맞지 않는 결과를 돌려줘도(steps 없음) 이미 내려진 판정을 근거 때문에 뒤집지 않는다
+      const { gate, workspace } = await setup(withWorkflow({ pageChecks: [page({ steps: [{ click: '주문' }] })] as never }), {
+        browser: async () => ({ ...rendered(), steps: undefined }) as never,
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(gate.checks.find((entry) => entry.stage === 'browser_check')!.evidence).toBeUndefined();
+    });
   });
 
   it('fallbackProbe도 연결하지 못하면(연결 거부 등) 화면 확인을 실패시킨다(fix/frontend-backend-url)', async () => {

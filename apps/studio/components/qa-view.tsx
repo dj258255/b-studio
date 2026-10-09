@@ -12,6 +12,8 @@ export interface QaCheck {
   detail?: string;
   steps?: WorkflowStepCheck[];
   compare?: WorkflowCompare;
+  /** 통과한 확인이 무엇을 쟀는지(상태 코드, 확인한 문구, 첫 화면에서 잰 글자와 창 크기, 오류 건수 등) */
+  evidence?: string[];
 }
 
 /**
@@ -61,6 +63,22 @@ export function QaView({ sessionId, frame, check }: { sessionId: string; frame?:
         </div>
 
         <aside className="min-h-0 overflow-y-auto border-t border-line bg-panel p-3 lg:border-t-0 lg:border-l">
+          {/* 통과의 근거. 실패는 위의 사유가 대신한다 */}
+          {check?.ok && check.evidence && check.evidence.length > 0 && !live && (
+            <section aria-label="확인한 것" className="mb-3 border-b border-line pb-3">
+              <h3 className="text-xs font-medium text-muted">확인한 것</h3>
+              <ul className="mt-1.5 space-y-1 text-sm">
+                {check.evidence.map((line, lineIndex) => (
+                  <li key={lineIndex} className="flex items-start gap-2">
+                    <span aria-hidden className="text-pass">
+                      ✓
+                    </span>
+                    <span className="min-w-0 flex-1 break-words">{line}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {check?.steps?.length ? (
             <>
               <ol className="space-y-1.5">
