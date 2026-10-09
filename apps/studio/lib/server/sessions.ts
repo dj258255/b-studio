@@ -446,6 +446,8 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
+  /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
+  runsStarted?: number;
   /**
    * 샌드박스를 필요할 때 켜는 세션인지(사람이 만든 일반 세션). 켜기 전까지 snapshot.status는 idle이다.
    * 켜는 중에는 bootPromise를 공유해 동시 호출에도 한 번만 켠다
@@ -1067,6 +1069,7 @@ export function sendMessage(
     ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
   };
   session.run = run;
+  session.runsStarted = (session.runsStarted ?? 0) + 1;
   session.snapshot.running = true;
   // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
   session.snapshot.pendingQuestion = undefined;
@@ -2281,7 +2284,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary);
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 단계를 돌렸다면 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
-        void collectGateTestReports(session).catch(() => {});
+        // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
+        void collectGateTestReports(session, session.snapshot.checkpoints[0]?.sha).catch(() => {});
         // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
         void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
@@ -6258,6 +6262,12 @@ export async function runSessionTests(
   session.testControllers.set(input.service, controller);
   markTestsChanged(session);
   try {
+    // 실행 전의 체크포인트와 변경 여부를 잡아 둔다. 끝났을 때 같은 체크포인트이고 전후 모두 변경이 없어야 그 체크포인트의 증거다
+    // 테스트 탭 실행은 에이전트 실행과 동시에 돌 수 있다. 도는 사이에 에이전트가 파일을 고쳤다가 되돌려지면 전후는
+    // 깨끗해 보이므로, 에이전트 실행이 걸쳐 있었는지도 따로 본다
+    const headBefore = session.snapshot.checkpoints[0]?.sha;
+    const runsBefore = session.runsStarted ?? 0;
+    const agentBefore = session.run !== undefined;
     const dirtyBefore = (await session.checkpoints.pendingFiles()).length > 0;
     const runSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(TEST_RUN_TIMEOUT_MS)]);
     let execResult: Awaited<ReturnType<Sandbox['exec']>> | undefined;
@@ -6271,8 +6281,11 @@ export async function runSessionTests(
     const run = await collectParsedRun(session, input.service, plan, AbortSignal.timeout(REPORT_COLLECT_TIMEOUT_MS));
     // 체크포인트에 없는 변경이 있는 채로 돈 실행은 어느 체크포인트의 증거도 아니다. sha를 남기면 그 변경을 버린 뒤나
     // 에이전트 실행 중(ADR-152: 미체크포인트 변경을 실행의 것으로 보고 무시한다)에 HEAD의 증거로 잘못 세게 된다
+    // 테스트가 도는 사이에 체크포인트가 바뀌었으면(headMoved) 어느 쪽 코드를 돌린 것인지 알 수 없으므로 역시 남기지 않는다
     const dirtyAfter = (await session.checkpoints.pendingFiles()).length > 0;
-    const sha = dirtyBefore || dirtyAfter ? undefined : session.snapshot.checkpoints[0]?.sha;
+    const headMoved = session.snapshot.checkpoints[0]?.sha !== headBefore;
+    const agentOverlapped = agentBefore || session.run !== undefined || (session.runsStarted ?? 0) !== runsBefore;
+    const sha = dirtyBefore || dirtyAfter || headMoved || agentOverlapped ? undefined : headBefore;
     session.testResults ??= new Map();
     if (run.cases.length > 0) {
       session.testResults.set(input.service, { at: new Date().toISOString(), source: 'run', runner, run, sha });
@@ -6337,7 +6350,11 @@ export function gateReportNotFoundEntry(previous: StoredTestRun | undefined, run
   };
 }
 
-async function collectGateTestReports(session: Session): Promise<void> {
+/**
+ * 게이트가 남긴 테스트 보고서를 모아 verifiedSha(게이트를 통과해 방금 남긴 체크포인트)의 증거로 저장한다.
+ * 수거가 끝나기 전에 체크포인트가 더 생겨도 그 새 체크포인트에 묶이지 않는다
+ */
+async function collectGateTestReports(session: Session, verifiedSha: string | undefined): Promise<void> {
   if (session.snapshot.status !== 'ready') return;
   await ensureTestResultsLoaded(session);
   let changed = false;
@@ -6354,14 +6371,14 @@ async function collectGateTestReports(session: Session): Promise<void> {
     const run = await collectParsedRun(session, name, plan, AbortSignal.timeout(GATE_REPORT_COLLECT_TIMEOUT_MS));
     session.testResults ??= new Map();
     if (run.cases.length === 0) {
-      const entry = gateReportNotFoundEntry(session.testResults.get(name), runner, session.snapshot.checkpoints[0]?.sha);
+      const entry = gateReportNotFoundEntry(session.testResults.get(name), runner, verifiedSha);
       if (entry) {
         session.testResults.set(name, entry);
         changed = true;
       }
       continue;
     }
-    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: session.snapshot.checkpoints[0]?.sha });
+    session.testResults.set(name, { at: new Date().toISOString(), source: 'gate', runner, run, sha: verifiedSha });
     changed = true;
   }
   if (changed) {

@@ -80,7 +80,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { createSession, evidencePendingFilesCount, getSessionRequirements, getSnapshot, runSessionTests, stopSession, submissionReport } from './sessions';
+import { createSession, evidencePendingFilesCount, getSessionRequirements, getSessionTests, getSnapshot, runSessionTests, stopSession, submissionReport } from './sessions';
 
 let root: string;
 const saved = {
@@ -278,6 +278,24 @@ describe('에이전트 실행 중에도 마지막 체크포인트의 테스트 �
 
     stopFakeAgentRun(id);
     await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('에이전트 실행이 걸쳐 있는 동안 돌린 테스트 탭 실행은 작업 복사본이 깨끗해 보여도 sha를 남기지 않는다', async () => {
+    const id = await readyVerifiedSession();
+    const sha = getSnapshot(id)!.checkpoints[0]!.sha;
+
+    // 에이전트가 아직 파일을 쓰기 전이라 전후 모두 변경이 없지만, 도는 사이에 고쳤다가 되돌렸을 수 있다
+    startFakeAgentRun(id);
+    await runSessionTests(id, { service: 'api' });
+    stopFakeAgentRun(id);
+    const overlapped = (await getSessionTests(id)).services.find((service) => service.service === 'api');
+    expect(overlapped?.lastRunAt).toBeDefined();
+    expect(overlapped?.lastRunSha).toBeUndefined();
+
+    // 실행이 없을 때 깨끗한 상태에서 돌리면 지금 체크포인트의 증거로 남는다(기존 동작)
+    await runSessionTests(id, { service: 'api' });
+    const clean = (await getSessionTests(id)).services.find((service) => service.service === 'api');
+    expect(clean?.lastRunSha).toBe(sha);
   }, 20_000);
 });
 
