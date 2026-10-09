@@ -2290,7 +2290,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
         // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
-        void collectGateTestReports(session, session.snapshot.checkpoints[0]?.sha, result.checks ?? [], gateTests).catch(() => {});
+        void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, result.checks ?? [], gateTests).catch(() => {});
         // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
         void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
@@ -3447,7 +3447,8 @@ export async function submissionReport(id: string, { assumePushed = false }: { a
     services,
     // studio.yaml의 databases(스냅샷 대상)만 보면 compose에서 가져온 mysql·mongo를 놓친다. compose 파일의 DB 이미지도 본다
     hasDatabase: session.project.databases.length > 0 || (await composeHasDatabase(session.project.composePath)),
-    latestPassedStages: session.snapshot.checkpoints[0]?.passedStages,
+    // 문서 체크포인트는 통과한 단계를 남기지 않는다. 그 앞의 코드 체크포인트가 통과시킨 단계를 본다(ADR-156)
+    latestPassedStages: evidenceBaseCheckpoint(session.snapshot.checkpoints)?.passedStages,
     pendingFilesCount,
     repository: repository && { hasRemote: true, pushed: repository.pushedSha === session.snapshot.checkpoints[0]?.sha },
     commits: commits.map((commit) => ({ subject: commit.subject, stat: commit.stat ?? { insertions: 0, deletions: 0 }, filesChanged: commit.files.length })),
@@ -3458,7 +3459,7 @@ export async function submissionReport(id: string, { assumePushed = false }: { a
       .catch(() => undefined),
     // 게이트가 test 단계를 통과한 기록이 없어도, 테스트 탭에서 지금 체크포인트(HEAD)에 직접 돌린 결과가 있으면
     // 증거로 센다(버그 리포트: "전체 실행"으로 백엔드·프런트엔드 모두 통과했는데 "확인 필요"로 남던 문제)
-    testEvidence: buildChecklistTestEvidence(testServices, session.snapshot.checkpoints[0]?.sha, pendingFilesCount),
+    testEvidence: buildChecklistTestEvidence(testServices, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, pendingFilesCount),
     assumePushed,
   });
 }
@@ -4896,16 +4897,55 @@ export function evaluateRequirement(
   };
 }
 
-/** 세션의 지금 체크포인트(HEAD)와 커밋하지 않은 변경 수를 한 번에 모은다. 테스트 탭 실행이 그 체크포인트의 증거인지 비교하는 데 쓴다 */
+/**
+ * 테스트 근거의 기준 체크포인트(ADR-156): 가장 최근의, 문서 체크포인트(`Workflow-Verify: docs`)가 아닌 체크포인트.
+ * 문서 체크포인트는 문서 경로(docs/**, 루트 *.md, .github/pull_request_template.md)만 담도록 commitWorkingCopyDocs·
+ * protectPendingDocsBeforeDiscard가 강제하므로 코드 동작을 바꾸지 못한다 — 요구사항 저장·사람 확인 저장·이슈 발행·세션 재개로
+ * 문서 체크포인트가 맨 앞에 놓여도 "그 실행이 찍힌 sha"를 비교하는 기준은 옮겨 가지 않아야 한다.
+ * `Workflow-Verify: light` 체크포인트는 코드를 바꾸고 테스트를 안 돌렸으므로 건너뛰지 않는다(근거가 닫히는 게 맞다).
+ * 체크포인트가 전부 문서 체크포인트면 가장 오래된 것을 쓴다 — 그 위에 문서 체크포인트가 더 쌓여도 기준이 움직이지 않는다.
+ * 근거를 찍는 쪽(runSessionTests·collectGateTestReports)과 비교하는 쪽(요구사항 상태·올리기 전 점검)이 모두 이 함수를 쓴다.
+ * 입력은 최신순(session.snapshot.checkpoints의 순서)이다.
+ *
+ * 건너뛰는 것은 문서 체크포인트 전부가 아니라, **b-studio가 직접 쓰는 요구사항 기록**(EVIDENCE_NEUTRAL_FILES)만 바꾼 것뿐이다.
+ * 건너뛴다는 것은 "이 체크포인트는 테스트 결과를 바꿀 수 없다"고 보는 것인데, `docs/**`라는 경로만으로는 그렇게 말할 수 없다 —
+ * 문서의 API 명세를 읽어 검사하는 테스트가 있을 수 있고, 세션 재개는 끊긴 실행이 고친 문서를 게이트 없이 문서 체크포인트로 남긴다.
+ * 표시(`verify: 'docs'`)가 잘못 붙었거나 파일 목록을 모를 때도 건너뛰지 않는다(근거가 닫히는 쪽).
+ */
+export function evidenceBaseCheckpoint<T extends { verify?: string; files?: readonly string[]; outsideFiles?: number }>(checkpoints: readonly T[]): T | undefined {
+  return checkpoints.find((checkpoint) => !isEvidenceNeutralCheckpoint(checkpoint)) ?? checkpoints[checkpoints.length - 1];
+}
+
+/**
+ * 테스트 근거에 영향을 주지 않는다고 보는 파일: 요구사항 문서와 이슈 발행 기록. 둘 다 b-studio가 화면 동작(요구사항 저장,
+ * 사람 확인 저장·취소, 이슈 발행)으로 직접 쓰는 기록이고, 요구사항 내용이 바뀐 것은 요구사항마다 "재확인 필요"로 따로 잡는다
+ */
+const EVIDENCE_NEUTRAL_FILES: ReadonlySet<string> = new Set([REQUIREMENTS_FILE, REQUIREMENT_ISSUES_FILE]);
+
+/**
+ * 문서 체크포인트 표시가 있고, 바꾼 파일이 하나 이상이며 전부 요구사항 기록인 체크포인트.
+ * files는 프로젝트 폴더 기준이라 폴더 밖 변경이 빠진다 — 폴더 밖에서도 바꾼 것이 있으면(outsideFiles) 건너뛰지 않는다
+ */
+function isEvidenceNeutralCheckpoint(checkpoint: { verify?: string; files?: readonly string[]; outsideFiles?: number }): boolean {
+  return (
+    checkpoint.verify === 'docs' &&
+    (checkpoint.outsideFiles ?? 0) === 0 &&
+    checkpoint.files !== undefined &&
+    checkpoint.files.length > 0 &&
+    checkpoint.files.every((file) => EVIDENCE_NEUTRAL_FILES.has(file))
+  );
+}
+
+/** 세션의 근거 기준 체크포인트(evidenceBaseCheckpoint)와 커밋하지 않은 변경 수를 한 번에 모은다. 테스트 탭 실행이 그 체크포인트의 증거인지 비교하는 데 쓴다 */
 async function headForTestEvidence(session: Session): Promise<{ head?: { sha: string; shortSha: string }; pendingFilesCount: number }> {
-  const checkpoint = session.snapshot.checkpoints[0];
+  const checkpoint = evidenceBaseCheckpoint(session.snapshot.checkpoints);
   const pendingFilesCount = (await session.checkpoints.pendingFiles()).length;
   return { head: checkpoint && { sha: checkpoint.sha, shortSha: checkpoint.shortSha }, pendingFilesCount };
 }
 
 /** 요구사항 상태가 어느 체크포인트를 기준으로 했는지와, 그 기준에 아직 반영되지 않은 변경이 있는지 */
 export interface RequirementEvidenceBasis {
-  /** 기준 체크포인트(HEAD)의 짧은 sha. 체크포인트가 하나도 없으면 없다 */
+  /** 기준 체크포인트(문서 체크포인트를 건너뛴 가장 최근 체크포인트, evidenceBaseCheckpoint)의 짧은 sha. 체크포인트가 하나도 없으면 없다 */
   shortSha?: string;
   /** 에이전트 실행이 진행 중이라 미체크포인트 변경이 실행의 것으로 보이는지 */
   runInProgress: boolean;
@@ -5140,7 +5180,7 @@ export async function markRequirementManualVerification(id: string, requirementI
   const note = input.note?.trim() ?? '';
   if (!note) throw new StudioError(400, '무엇을 어떻게 확인했는지 메모를 적어야 합니다');
   if (note.length > MANUAL_VERIFICATION_NOTE_MAX) throw new StudioError(400, `메모는 ${MANUAL_VERIFICATION_NOTE_MAX}자 이내로 적어 주세요`);
-  const checkpoint = session.snapshot.checkpoints[0];
+  const checkpoint = evidenceBaseCheckpoint(session.snapshot.checkpoints);
   if (!checkpoint) throw new StudioError(409, '체크포인트가 하나도 없어 확인한 시점을 남길 수 없습니다 — 먼저 체크포인트를 만들어 주세요');
 
   const raw = await new Workspace(session.project.root).read(REQUIREMENTS_FILE).catch(() => undefined);
@@ -6271,7 +6311,8 @@ export async function runSessionTests(
     // 실행 전의 체크포인트와 변경 여부를 잡아 둔다. 끝났을 때 같은 체크포인트이고 전후 모두 변경이 없어야 그 체크포인트의 증거다
     // 테스트 탭 실행은 에이전트 실행과 동시에 돌 수 있다. 도는 사이에 에이전트가 파일을 고쳤다가 되돌려지면 전후는
     // 깨끗해 보이므로, 에이전트 실행이 걸쳐 있었는지도 따로 본다
-    const headBefore = session.snapshot.checkpoints[0]?.sha;
+    // 근거 기준은 문서 체크포인트를 건너뛴다 — 도는 사이에 문서 체크포인트가 생긴 것은 코드가 바뀐 게 아니다(ADR-156)
+    const headBefore = evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha;
     const runsBefore = session.runsStarted ?? 0;
     const agentBefore = session.run !== undefined;
     const dirtyBefore = (await session.checkpoints.pendingFiles()).length > 0;
@@ -6289,7 +6330,7 @@ export async function runSessionTests(
     // 에이전트 실행 중(ADR-152: 미체크포인트 변경을 실행의 것으로 보고 무시한다)에 HEAD의 증거로 잘못 세게 된다
     // 테스트가 도는 사이에 체크포인트가 바뀌었으면(headMoved) 어느 쪽 코드를 돌린 것인지 알 수 없으므로 역시 남기지 않는다
     const dirtyAfter = (await session.checkpoints.pendingFiles()).length > 0;
-    const headMoved = session.snapshot.checkpoints[0]?.sha !== headBefore;
+    const headMoved = evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha !== headBefore;
     const agentOverlapped = agentBefore || session.run !== undefined || (session.runsStarted ?? 0) !== runsBefore;
     const sha = dirtyBefore || dirtyAfter || headMoved || agentOverlapped ? undefined : headBefore;
     session.testResults ??= new Map();
