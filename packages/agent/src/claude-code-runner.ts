@@ -429,6 +429,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       detachSteering();
     };
 
+    // 요약 중 상태를 한 번만 알리기 위한 표시(compact_boundary에서 푼다)
+    let compacting = false;
     try {
       messages: for await (const message of conversation) {
         if ('session_id' in message && message.session_id) sessionId = message.session_id;
@@ -450,9 +452,21 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 effort,
               });
             }
+            // 요약이 시작됐다. SDK는 같은 상태를 되풀이해 보낼 수 있어 요약 한 번에 한 번만 알린다
+            if (message.subtype === 'status' && message.status === 'compacting' && !compacting) {
+              compacting = true;
+              onEvent({ type: 'context_compacting' });
+            }
             if (message.subtype === 'compact_boundary') {
-              const { trigger, pre_tokens, post_tokens } = message.compact_metadata;
-              onEvent({ type: 'context_compacted', trigger, preTokens: pre_tokens, ...(post_tokens !== undefined ? { postTokens: post_tokens } : {}) });
+              compacting = false;
+              const { trigger, pre_tokens, post_tokens, duration_ms } = message.compact_metadata;
+              onEvent({
+                type: 'context_compacted',
+                trigger,
+                preTokens: pre_tokens,
+                ...(post_tokens !== undefined ? { postTokens: post_tokens } : {}),
+                ...(duration_ms !== undefined ? { durationMs: duration_ms } : {}),
+              });
             }
             break;
 
