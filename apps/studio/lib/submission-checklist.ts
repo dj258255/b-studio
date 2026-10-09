@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import type { DocEvidence } from '@b-studio/agent';
+import { readProjectFileSync, type DocEvidence } from '@b-studio/agent';
 
 const execFileAsync = promisify(execFile);
 
@@ -259,13 +259,28 @@ export async function checkRequirements(root: string, live?: readonly ChecklistR
   const id = 'requirements';
   const title = '요구사항';
   if (live && live.length > 0) return requirementsFromLive(id, title, live);
-  const text = await readTextSafe(path.join(root, 'docs', 'requirements.md'));
-  if (text === undefined) {
+  // 여기부터는 명세 탭이 계산한 상태가 없을 때의 대체 경로다: 문서에 적힌 체크박스와 "상태:" 줄을 읽는다.
+  // 문서는 요구사항을 읽는 다른 자리와 같은 조건으로만 읽는다(일반 파일, 상위 폴더에 링크 없음). 읽을 수 없는 꼴이면 건너뛰지
+  // 않고 실패로 둔다 — 건너뛰면 문서를 링크로 바꾸는 것만으로 이 항목이 사라진다
+  const read = readProjectFileSync(root, path.join('docs', 'requirements.md'), MAX_FILE_BYTES);
+  if (read.kind === 'irregular') {
+    return { id, title, status: 'fail', reason: `docs/requirements.md를 읽을 수 없습니다: ${read.reason}. 일반 파일로 되돌려 주세요.` };
+  }
+  if (read.kind === 'missing') {
     return { id, title, status: 'skip', reason: 'docs/requirements.md가 없어 건너뜁니다.' };
   }
-  const { total, unresolved } = parseRequirementsDoc(text);
+  const { total, unresolved } = parseRequirementsDoc(read.content);
   if (total === 0) return { id, title, status: 'warn', reason: 'docs/requirements.md에서 체크박스나 "상태:" 항목을 찾지 못했습니다.' };
-  if (unresolved === 0) return { id, title, status: 'pass', reason: `요구사항 ${total}개가 모두 완료·확인 상태입니다.` };
+  // 문서에 적힌 표시는 누구나(에이전트도) 쓸 수 있어 근거가 아니다. 전부 완료로 적혀 있어도 통과를 주지 않고 경고로 둔다 —
+  // 통과를 주면 요구사항 문서를 평범한 체크리스트로 바꿔 쓰는 것만으로 테스트·게이트 근거 판정을 비켜 갈 수 있다
+  if (unresolved === 0) {
+    return {
+      id,
+      title,
+      status: 'warn',
+      reason: `요구사항 ${total}개가 문서에 모두 완료·확인으로 적혀 있습니다. 문서에 적힌 표시만으로는 검증됐다고 보지 않습니다. "명세" 탭에서 요구사항을 정리하면 테스트·게이트 근거로 판정합니다.`,
+    };
+  }
   if (unresolved === total) return { id, title, status: 'fail', reason: `요구사항 ${total}개 중 아직 확인된 항목이 없습니다.` };
   return { id, title, status: 'warn', reason: `요구사항 ${total}개 중 ${unresolved}개가 미완료·미검증입니다.` };
 }

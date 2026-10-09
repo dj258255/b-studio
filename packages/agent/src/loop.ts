@@ -225,6 +225,13 @@ export type AgentEvent =
 export interface RunAgentOptions {
   request: string;
   /**
+   * 요구사항 문서의 기준 내용: 마지막 체크포인트에 커밋된 docs/requirements.md(그때 문서가 없었으면 null).
+   * 넘기면 게이트가 "실행을 시작할 때의 디스크"가 아니라 이것과 견준다(ADR-157). 실행을 시작할 때의 디스크에는 앞선 실행이
+   * 체크포인트 없이 남긴 변경이 들어 있을 수 있다 — 사람 확인을 써넣고 질문으로 멈춘 실행의 다음 실행이 그 예다.
+   * 넘기지 않으면(체크포인트를 모르는 호출자) 실행을 시작할 때의 디스크를 기준으로 쓴다
+   */
+  requirementsBaseline?: string | null;
+  /**
    * 이전 요청부터 이어지는 대화 기록. 넘기면 이번 실행의 메시지가 여기에 이어 붙는다.
    * 실행 중 예외가 나면 이번 실행분은 되돌려 다음 요청이 깨진 대화로 시작하지 않게 한다.
    */
@@ -353,8 +360,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   if (client.info) onEvent({ type: 'session', backend: client.info.backend, model: client.info.model, auth: client.info.auth, effort: client.info.effort });
 
   const workspace = new Workspace(project.root);
-  // 요구사항 문서의 실행 전 모습을 고정한다(게이트가 사람 확인 기록 위조를 견주는 기준, ADR-157)
-  workspace.beginRun();
+  // 요구사항 문서의 기준을 고정한다(게이트가 사람 확인 기록 위조를 견주는 기준, ADR-157). 호출자가 마지막 체크포인트의
+  // 문서를 넘겼으면 그것을, 아니면 지금 디스크의 문서를 쓴다
+  workspace.beginRun(options.requirementsBaseline);
   // 이번 실행 전부터 작업 트리에 있던 변경(보관본 되살리기 등)을 먼저 알려, 에이전트가 이번 실행에서 파일을
   // 하나도 건드리지 않아도 게이트가 "검증할 변경 없음"으로 건너뛰지 않게 한다(ADR-131)
   if (options.externalChanges?.length) syncExternalChanges(workspace, options.externalChanges);

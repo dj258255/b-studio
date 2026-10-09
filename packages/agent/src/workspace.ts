@@ -122,7 +122,15 @@ export class Workspace {
    * 에이전트 실행을 시작할 때 러너가 부른다: 게이트가 실행 끝에 견줄 기준점이 되는 파일을, 에이전트가 아무것도 바꾸기
    * 전에 고정한다. 게이트는 지연 기동 세션이나 CLI 러너에서 파일이 바뀐 뒤에 만들어질 수 있어, 만들 때 읽으면 늦다.
    */
-  beginRun(): void {
+  beginRun(requirementsBaseline?: string | null): void {
+    // 호출자가 마지막 체크포인트의 문서를 알고 있으면 그것을 기준으로 삼는다(디스크에는 체크포인트 없이 남은 변경이 있을 수 있다)
+    if (requirementsBaseline !== undefined) {
+      this.#snapshots.set(
+        path.normalize(REQUIREMENTS_SNAPSHOT_FILE),
+        requirementsBaseline === null ? { kind: 'missing' } : { kind: 'text', content: requirementsBaseline },
+      );
+      return;
+    }
     this.snapshotRead(REQUIREMENTS_SNAPSHOT_FILE);
   }
 
