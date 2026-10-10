@@ -5,6 +5,7 @@ import { formatBytes, SandboxError, type Sandbox, type StartOptions } from '@b-s
 import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
+import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, withDeclaredChecks } from './declared-checks';
 import { judgeLoad, loadRequestFor } from './load-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
@@ -137,6 +138,12 @@ export interface GateOptions {
   platformRetryDelayMs?: number;
   /** 검증 범위(기본 full). light면 재시작·준비 판정·계약만 돌리고 나머지 단계는 건너뛴다 */
   verify?: VerifyMode;
+  /**
+   * 사용자가 이 요청에서 확인 선언(tests·pageChecks·concurrencyChecks·loadChecks·autoPageChecks·required)의 변경을 허용했다(ADR-164).
+   * 켜면 검증할 때 studio.yaml을 다시 읽어 바뀐 선언으로 돌리고, 무엇이 바뀌었는지 리뷰 단계에 남긴다.
+   * 끄면(기본) 실행을 시작할 때의 선언으로 돈다. 사람이 보낸 요청의 옵션으로만 켠다 — 에이전트가 켤 방법은 없다
+   */
+  allowCheckChanges?: boolean;
   fetcher: ContractFetcher;
   pageFetcher?: PageFetcher;
   browserRunner?: BrowserRunner;
@@ -204,9 +211,14 @@ export class VerificationGate {
   #concurrencyNotes = new Map<string, string>();
   /** 부하 확인을 b-studio 쪽 문제(러너를 띄우지 못함 등)로 재지 못했을 때의 사유. 코드를 고쳐서 풀 수 없으므로 재시도 횟수로 세지 않는다 */
   #loadPlatformFailure: string | undefined;
+  /** 이번 검증에 쓰는 프로젝트. 보통은 실행을 시작할 때의 것이고, 사용자가 선언 변경을 허용한 요청에서만 확인 선언이 지금 파일의 것으로 바뀐다 */
+  #project: LoadedProject;
+  /** 이번 실행에서 확인 선언이 바뀌었지만 허용되지 않아 쓰지 않은 변경의 요약. 실패 안내에 싣는다 */
+  #unadoptedChange: string | undefined;
 
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
+    this.#project = options.project;
     this.#baselines = baselines;
     this.#maxAttempts = options.maxVerifyAttempts;
   }
@@ -268,8 +280,11 @@ export class VerificationGate {
   }
 
   async #check(): Promise<GateOutcome> {
-    const { project, sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
-    const recordChecks = await this.#requirementRecordChecks();
+    const { sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
+    // 확인 선언을 먼저 정한다. 그 뒤의 모든 단계가 같은 선언을 본다
+    const declaredChecks = await this.#reviewDeclaredChecks();
+    const project = this.#project;
+    const recordChecks = [...(await this.#requirementRecordChecks()), ...declaredChecks];
     if (workspace.changedFiles().length === 0) {
       if (recordChecks.every((check) => check.ok)) return { kind: 'pass' };
       // 바뀐 파일로 추적되지 않은 경로(서비스 안 명령 등)로 검증 기록만 고쳤다: 다른 단계는 돌릴 것이 없다
@@ -379,13 +394,70 @@ export class VerificationGate {
       // 사람 확인 기록 위조로 막힌 것이면 사유를 요약에 남긴다(대화에서 왜 되돌렸는지 바로 보이게)
       const record = failedChecks.find((check) => check.name === MANUAL_VERIFICATION_CHECK);
       const reason = record?.detail ? ` — ${record.detail.split('\n')[0]}` : '';
-      return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다${reason}` };
+      // 선언을 고치려던 요청이면 사용자가 다음에 할 일을 알 수 있게 한다(같은 요청을 다시 보내도 같은 자리에서 막힌다)
+      const declared = this.#unadoptedChange ? ` — 확인의 선언을 바꾸려던 것이면 '확인 선언 변경 허용'을 켜고 다시 요청하세요(이번 실행에서 바뀐 선언: ${this.#unadoptedChange})` : '';
+      return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다${reason}${declared}` };
     }
     const body = reportText ? `${reportText}${formatFailedChecks(failedChecks)}` : formatFailedChecks(failedChecks).trimStart();
+    // 선언을 고쳐도 이 실행의 검증에는 쓰이지 않는다는 것을 모델이 모르면 같은 수정을 되풀이하다 시도를 다 쓴다
+    const declared = this.#unadoptedChange
+      ? `\n\n[참고] 이번 실행에서 ${SPEC_FILE}의 확인 선언을 바꿨지만(${this.#unadoptedChange}) 이 검증은 실행을 시작할 때의 선언으로 돌았습니다. 선언은 사용자가 허용한 요청에서만 그 실행의 검증에 쓰입니다. 선언을 바꾸는 것이 사용자의 요청이면 같은 수정을 되풀이하지 말고, 되묻기 도구(ask_user)로 사용자에게 "'확인 선언 변경 허용'을 켜고 답해 달라"고 알리세요.`
+      : '';
     return {
       kind: 'retry',
-      feedback: `[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n${body}`,
+      feedback: `[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n${body}${declared}`,
     };
+  }
+
+  /**
+   * 이번 검증에 쓸 확인 선언을 정한다(ADR-164). 기본은 실행을 시작할 때의 선언이다 — 에이전트가 실행 도중에 확인을 지우거나
+   * 느슨하게 고쳐 비켜 가지 못하게 한다(ADR-159). 사용자가 이 요청에서 선언 변경을 허용했을 때만 지금 파일의 선언을 쓰고,
+   * 무엇이 바뀌었는지 리뷰 단계의 확인으로 남긴다. 허용했는데 파일을 읽지 못하면 옛 선언으로 조용히 통과시키지 않고 실패로 알린다.
+   * 허용하지 않았는데 선언이 바뀌어 있으면 그 사실만 기억해 두었다가 실패 안내에 싣는다
+   */
+  async #reviewDeclaredChecks(): Promise<WorkflowCheck[]> {
+    const started = this.#options.project;
+    this.#project = started;
+    this.#unadoptedChange = undefined;
+    const allowed = this.#options.allowCheckChanges === true;
+    const latest = await this.#latestWorkflow(allowed);
+    if (!latest) return [];
+    if ('error' in latest) {
+      if (!allowed) return [];
+      return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: false, attempts: 1, detail: `${SPEC_FILE}을(를) 다시 읽지 못해 바뀐 확인 선언으로 검증하지 못했습니다${latest.error}` }];
+    }
+    const change = diffDeclaredChecks(started.spec.workflow, latest.workflow);
+    if (!hasDeclaredCheckChange(change)) return [];
+    const summary = this.#options.sandbox.redact(describeDeclaredCheckChange(change));
+    if (!allowed) {
+      this.#unadoptedChange = summary;
+      return [];
+    }
+    this.#project = { ...started, spec: { ...started.spec, workflow: withDeclaredChecks(started.spec.workflow, latest.workflow) } } as LoadedProject;
+    return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: true, attempts: 1, detail: `사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — ${summary}` }];
+  }
+
+  /**
+   * 지금 디스크의 studio.yaml에서 workflow를 읽는다. 읽을 까닭이 없으면(이번 실행에서 바뀌지 않았고 허용도 없으면) undefined.
+   * 설정 파일이 일반 파일인지 먼저 본다 — 호스트에서 읽는 파일이라 다른 곳으로 가는 링크로 바뀌어 있으면 그 너머의 내용이
+   * 형식 오류 문구를 타고 모델에게 돌아갈 수 있다(#withLatestSampleValues와 같은 규칙)
+   */
+  async #latestWorkflow(always: boolean): Promise<{ workflow: LoadedProject['spec']['workflow'] } | { error: string } | undefined> {
+    const { workspace } = this.#options;
+    const root = this.#options.project.root;
+    let reload = this.#options.reloadProject;
+    if (!reload) {
+      if (!always && !workspace.changedFiles().includes(SPEC_FILE)) return undefined;
+      const file = readProjectFileSync(root, SPEC_FILE);
+      if (file.kind !== 'text') return { error: `(${file.kind === 'irregular' ? file.reason : '파일 없음'})` };
+      reload = () => loadProject(root);
+    }
+    try {
+      return { workflow: (await reload()).spec.workflow };
+    } catch (error) {
+      // 형식 오류의 항목만 알려 준다. 그 밖의 오류 문구는 어디서 온 내용인지 알 수 없어 싣지 않는다
+      return { error: error instanceof SpecError ? `: ${this.#options.sandbox.redact([error.message, ...error.issues].join(' / '))}` : '' };
+    }
   }
 
   #stage(stage: WorkflowStage): void {
@@ -394,7 +466,7 @@ export class VerificationGate {
 
   /** studio.yaml에 선언한 화면 확인·테스트·동시 요청 확인은 서로 기다릴 이유가 없으므로 작업 그래프로 동시에 돌린다 */
   async #runDeclaredChecks(): Promise<WorkflowCheck[]> {
-    const workflow = this.#options.project.spec.workflow;
+    const workflow = this.#project.spec.workflow;
     const pages = workflow?.pageChecks ?? [];
     const tests = workflow?.tests ?? [];
     const concurrency = workflow?.concurrencyChecks ?? [];
@@ -528,9 +600,9 @@ export class VerificationGate {
    * 동적 세그먼트에 sampleParams 값이 없어도(ADR-078) id처럼 보이는 이름이면 추정한 값으로 열어 보고, 그 라우트는 probedId를 함께 돌려준다.
    */
   async #autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: Array<{ page: WorkflowPageCheck; name: string; probedId?: string; sampled?: string }>; skipped: WorkflowCheck[] }> {
-    const started = this.#options.project.spec.workflow?.autoPageChecks;
+    const started = this.#project.spec.workflow?.autoPageChecks;
     if (!started) return { pages: [], skipped: [] };
-    const service = this.#options.project.managed.find(([name]) => name === started.service);
+    const service = this.#project.managed.find(([name]) => name === started.service);
     // 불러올 때 막지만(load.ts), 여기서도 조용히 넘어가지 않고 이유를 남긴다
     if (!service) {
       return {

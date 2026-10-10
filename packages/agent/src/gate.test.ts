@@ -40,7 +40,7 @@ function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
 
 async function setup(
   target: LoadedProject,
-  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner; verify?: 'full' | 'light'; reload?: () => Promise<LoadedProject> } = {},
+  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner; verify?: 'full' | 'light'; reload?: () => Promise<LoadedProject>; allowCheckChanges?: boolean } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
   const commands: string[][] = [];
@@ -58,6 +58,7 @@ async function setup(
     maxVerifyAttempts: 3,
     ...(options.verify ? { verify: options.verify } : {}),
     ...(options.reload ? { reloadProject: options.reload } : {}),
+    ...(options.allowCheckChanges ? { allowCheckChanges: true } : {}),
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
     ...(options.browser ? { browserRunner: options.browser } : {}),
@@ -2697,5 +2698,125 @@ describe('VerificationGate 부하 확인 (ADR-163)', () => {
     expect(called).toBe(0);
     expect(gate.skippedStages).toContain('load_check');
     expect(gate.passedStages.has('load_check')).toBe(false);
+  });
+});
+
+describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 실행의 검증에 쓴다 (ADR-164)', () => {
+  const unit = { name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 };
+  const failing = (command: string[]): ExecResult => (command.includes('./gradlew') ? { exitCode: 1, stdout: '', stderr: 'FAILED' } : { exitCode: 0, stdout: '', stderr: '' });
+  const withLatest = (target: LoadedProject, workflow: Partial<WorkflowSpec>) => async () => ({ ...target, spec: { ...target.spec, workflow } }) as LoadedProject;
+
+  it('허용이 없으면 에이전트가 고친 선언을 쓰지 않고, 왜 그런지와 다음에 할 일을 모델에게 알린다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    // 에이전트가 실패하는 테스트를 항상 통과하는 명령으로 바꿨다
+    const { gate, workspace, commands } = await setup(target, { exec: failing, reload: withLatest(target, { tests: [{ ...unit, command: ['true'] }] }) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    // 시작할 때의 명령으로 돌았다
+    expect(commands).toEqual([['./gradlew', 'test']]);
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('이번 실행에서 studio.yaml의 확인 선언을 바꿨지만(변경: 테스트 unit) 이 검증은 실행을 시작할 때의 선언으로 돌았습니다');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain("'확인 선언 변경 허용'을 켜고 답해 달라");
+    expect(gate.checks.some((check) => check.name === 'declared-checks')).toBe(false);
+  });
+
+  it('허용 없이 시도를 다 쓰면 사용자에게 보이는 사유에 빠져나오는 길을 적는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target, { exec: failing, reload: withLatest(target, {}) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    await gate.check();
+    await gate.check();
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('exhausted');
+    expect(outcome.kind === 'exhausted' && outcome.summary).toContain("확인의 선언을 바꾸려던 것이면 '확인 선언 변경 허용'을 켜고 다시 요청하세요(이번 실행에서 바뀐 선언: 삭제: 테스트 unit)");
+  });
+
+  it('선언이 바뀌지 않았으면 실패 안내에 아무것도 덧붙이지 않는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target, { exec: failing, reload: withLatest(target, { tests: [unit] }) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind === 'retry' && outcome.feedback).not.toContain('확인 선언');
+  });
+
+  it('허용하면 바뀐 선언으로 검증하고, 무엇이 바뀌었는지 리뷰 단계에 남긴다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const latest = { tests: [{ ...unit, command: ['./gradlew', 'test', '--tests', 'OrderTest'] }, { name: 'lint', service: 'api', command: ['lint'], maxAttempts: 1 }] };
+    const { gate, workspace, commands } = await setup(target, { reload: withLatest(target, latest), allowCheckChanges: true });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(commands).toEqual(expect.arrayContaining([['./gradlew', 'test', '--tests', 'OrderTest'], ['lint']]));
+    expect(commands).toHaveLength(2);
+    const record = gate.checks.find((check) => check.name === 'declared-checks');
+    expect(record).toMatchObject({ stage: 'review', ok: true });
+    expect(record?.detail).toBe('사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 추가: 테스트 lint · 변경: 테스트 unit');
+    expect(gate.passedStages.has('test')).toBe(true);
+  });
+
+  it('허용하면 지운 확인은 돌지 않고, 지웠다는 사실이 남는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace, commands } = await setup(target, { exec: failing, reload: withLatest(target, {}), allowCheckChanges: true });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(commands).toEqual([]);
+    expect(gate.checks.find((check) => check.name === 'declared-checks')?.detail).toContain('삭제: 테스트 unit');
+    // 돌지 않은 단계가 통과로 남지 않는다
+    expect(gate.passedStages.has('test')).toBe(false);
+  });
+
+  it('허용해도 실행 정책(바꿀 수 있는 파일 수 등)은 실행을 시작할 때의 것이다', async () => {
+    const target = withWorkflow({ tests: [unit], maxChangedFiles: 1 });
+    const { gate, workspace } = await setup(target, { reload: withLatest(target, { tests: [unit], maxChangedFiles: 100, loadChecks: [] }), allowCheckChanges: true });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write('api/src/Item.java', 'class Item {}\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.some((check) => check.stage === 'review' && !check.ok)).toBe(true);
+  });
+
+  it('허용했는데 선언이 그대로면 기록을 남기지 않는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target, { reload: withLatest(target, { tests: [unit] }), allowCheckChanges: true });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((check) => check.name === 'declared-checks')).toBe(false);
+  });
+
+  it('허용했는데 설정을 읽지 못하면 옛 선언으로 조용히 통과시키지 않고 실패로 알린다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target, {
+      reload: async () => {
+        throw new SpecError('studio.yaml 형식이 올바르지 않습니다', ['workflow.tests.0.command: 필수입니다']);
+      },
+      allowCheckChanges: true,
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const record = gate.checks.find((check) => check.name === 'declared-checks');
+    expect(record).toMatchObject({ stage: 'review', ok: false });
+    expect(record?.detail).toContain('다시 읽지 못해 바뀐 확인 선언으로 검증하지 못했습니다');
+    expect(record?.detail).toContain('workflow.tests.0.command: 필수입니다');
+    expect(gate.passedStages.has('review')).toBe(false);
+  });
+
+  it('시도마다 선언을 다시 본다: 첫 시도에 고친 선언이 둘째 시도에 또 바뀌면 그것으로 돈다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    let latest: Partial<WorkflowSpec> = { tests: [{ ...unit, command: ['./gradlew', 'broken'] }] };
+    const { gate, workspace, commands } = await setup(target, { exec: failing, reload: async () => ({ ...target, spec: { ...target.spec, workflow: latest } }) as LoadedProject, allowCheckChanges: true });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect((await gate.check()).kind).toBe('retry');
+    latest = { tests: [{ ...unit, command: ['lint'] }] };
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(commands).toEqual([['./gradlew', 'broken'], ['lint']]);
   });
 });

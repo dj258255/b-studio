@@ -215,7 +215,7 @@ export async function runCommandCodeAgent(options: CommandCodeRunOptions): Promi
   let gate: VerificationGate | undefined;
   let gatePromise: Promise<VerificationGate> | undefined;
   const gateFor = (): Promise<VerificationGate> =>
-    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, allowCheckChanges: options.allowCheckChanges, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   // 프로젝트 루트(project.root)의 AGENTS.md를 읽는다(ADR-077). 이 러너의 자체 workdir과는 다른 폴더다
   const guide = await loadProjectGuide(project);

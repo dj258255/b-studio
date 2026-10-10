@@ -8,7 +8,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await authorizeSession(id, user);
-    const body = (await request.json().catch(() => ({}))) as { text?: unknown; allowBreaking?: unknown; intent?: unknown; verify?: unknown; research?: unknown; maxTurns?: unknown };
+    const body = (await request.json().catch(() => ({}))) as { text?: unknown; allowBreaking?: unknown; allowCheckChanges?: unknown; intent?: unknown; verify?: unknown; research?: unknown; maxTurns?: unknown };
     if (typeof body.text !== 'string') throw new StudioError(400, 'text가 필요합니다');
     const intent = body.intent ?? 'build';
     if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
@@ -24,6 +24,8 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     return Response.json(
       sendMessage(id, body.text, {
         allowBreaking: body.allowBreaking === true,
+        // 확인 선언 변경 허용(ADR-164): 사람이 보낸 이 요청에서만 켜진다
+        allowCheckChanges: body.allowCheckChanges === true,
         by: user,
         intent,
         // "조사" 모드: 질문(ask)에서만 뜻이 있다(화면도 읽기만일 때만 보여 준다)

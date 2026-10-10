@@ -13,6 +13,8 @@ const fake = vi.hoisted(() => ({
   /** 재시작을 실패시킨다: 'platform'은 샌드박스 쪽 오류(SandboxError.platform), 'code'는 서비스가 뜨지 않음 */
   restartFails: undefined as undefined | 'platform' | 'code',
   restarts: 0,
+  /** 이 낱말이 든 명령은 종료 코드 1로 끝난다(선언한 테스트를 실패시킬 때 쓴다) */
+  failCommands: [] as string[],
 }));
 
 // 샌드박스(Docker)를 띄우지 않는다. providerFromEnv만 가짜로 바꾸고 나머지는 그대로 쓴다
@@ -45,6 +47,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async *logs() {},
     async exec(_service: string, command: string[]) {
       fake.execCalls.push(command);
+      if (fake.failCommands.some((word) => command.includes(word))) return { exitCode: 1, stdout: '', stderr: 'FAILED' };
       return { exitCode: 0, stdout: '', stderr: '' };
     },
     async execToFile() {
@@ -84,7 +87,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { applySessionRequirements, createSession, deploySession, getSnapshot, releaseBasisCheckpoint, sendMessage, stopSession, subscribe } from './sessions';
+import { applySessionRequirements, createSession, deploySession, getSnapshot, releaseBasisCheckpoint, sendMessage, sessionHistory, stopSession, subscribe } from './sessions';
 
 let root: string;
 const saved = {
@@ -116,6 +119,7 @@ workflow:
   await writeFile(path.join(root, 'project', 'api', 'src', 'Order.java'), 'class Order {}\n');
   fake.root = path.join(root, 'project');
   fake.execCalls = [];
+  fake.failCommands = [];
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
   process.env.B_STUDIO_SESSIONS_DIR = path.join(root, 'sessions');
@@ -391,3 +395,97 @@ describe('샌드박스·도커 쪽 문제로 검증하지 못한 변경은 되�
   }, 30_000);
 });
 
+describe('지금 실패하는 확인의 선언은 사용자가 허용한 요청에서 고친다 (ADR-164, 트러블슈팅 129)', () => {
+  const FIXED_SPEC = `version: 1
+name: verifyproj
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
+workflow:
+  required: [plan, implement, run, contract_check, test, review, checkpoint]
+  tests:
+    - name: unit
+      service: api
+      command: [./gradlew, check]
+  releaseRequires: [test, checkpoint]
+`;
+  /** 선언을 고치고 파일 하나를 바꾼 뒤 턴을 끝낸다. 게이트가 되돌려 보낼 때마다 한 줄씩 더 말한다 */
+  const fixDeclarationTurns = [
+    { toolCalls: [{ name: 'write_file', input: { path: 'studio.yaml', content: FIXED_SPEC } }, { name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] },
+    { text: '선언을 고쳤습니다.' },
+    { text: '선언은 이미 고쳤습니다.' },
+    { text: '선언은 이미 고쳤습니다.' },
+    { text: '선언은 이미 고쳤습니다.' },
+  ];
+
+  async function runFix(id: string, allowCheckChanges: boolean): Promise<{ status?: string; summary?: string }> {
+    const finished = new Promise<{ status?: string; summary?: string }>((resolve) => {
+      const unsubscribe = subscribe(id, (event) => {
+        if (event.type === 'run_finished') {
+          unsubscribe();
+          resolve(event as { status?: string; summary?: string });
+        }
+      });
+    });
+    sendMessage(id, '테스트 선언을 ./gradlew check로 바꿔 주세요', { allowBreaking: false, ...(allowCheckChanges ? { allowCheckChanges: true } : {}), scriptedTurns: fixDeclarationTurns });
+    return finished;
+  }
+
+  it('허용이 없으면 고친 선언이 쓰이지 않아 실패하고 되돌려지며, 빠져나오는 길을 사유에 적는다', async () => {
+    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(created)).toBe('ready');
+    // 지금 선언된 테스트(./gradlew test)가 실패하고 있다
+    fake.failCommands = ['test'];
+    fake.execCalls = [];
+    const workDir = getSnapshot(created)!.workDir!;
+
+    const finished = await runFix(created, false);
+
+    expect(finished.status).toBe('failed');
+    // 세 번 모두 실행을 시작할 때의 선언으로 돌았다
+    expect(fake.execCalls).toEqual([['./gradlew', 'test'], ['./gradlew', 'test'], ['./gradlew', 'test']]);
+    expect(JSON.stringify(sessionHistory(created))).toContain("확인의 선언을 바꾸려던 것이면 '확인 선언 변경 허용'을 켜고 다시 요청하세요");
+    // 변경은 되돌려졌고 선언도 옛 것이다
+    expect(await readFile(path.join(workDir, 'studio.yaml'), 'utf8')).toContain('command: [./gradlew, test]');
+    expect(getSnapshot(created)!.checkpoints.some((checkpoint) => checkpoint.message.includes('테스트 선언'))).toBe(false);
+
+    await stopSession(created).catch(() => {});
+  });
+
+  it('허용하면 고친 선언으로 검증해 체크포인트를 만들고, 다음 요청부터 그 선언을 쓴다', async () => {
+    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(created)).toBe('ready');
+    fake.failCommands = ['test'];
+    fake.execCalls = [];
+    const workDir = getSnapshot(created)!.workDir!;
+
+    const finished = await runFix(created, true);
+
+    expect(finished.status).toBe('done');
+    // 옛 선언(./gradlew test)은 돌지 않았고 고친 선언이 돌았다
+    expect(fake.execCalls).toEqual([['./gradlew', 'check']]);
+    const checkpoint = getSnapshot(created)!.checkpoints[0]!;
+    expect(checkpoint.passedStages).toEqual(expect.arrayContaining(['run', 'contract_check', 'test', 'review']));
+    expect(await readFile(path.join(workDir, 'studio.yaml'), 'utf8')).toContain('command: [./gradlew, check]');
+    // 무엇이 바뀌었는지가 대화 기록에 남는다
+    expect(JSON.stringify(sessionHistory(created))).toContain('사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 변경: 테스트 unit');
+
+    // 다음 요청은 허용 없이도 고친 선언으로 돈다
+    fake.execCalls = [];
+    const { runId } = sendMessage(created, '주문에 메모 필드 하나 더', {
+      allowBreaking: false,
+      scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; String note; }\n' } }] }, { text: '추가했습니다.' }],
+    });
+    // 구독하면 지난 기록부터 다시 받으므로 이번 실행의 끝만 기다린다
+    await new Promise<void>((resolve) => {
+      const stop = subscribe(created, (event) => {
+        if (event.type !== 'run_finished' || (event as { runId?: string }).runId !== runId) return;
+        // 지난 기록을 다시 받는 동안에는 아직 stop이 없다. 다음 틱에 구독을 푼다
+        queueMicrotask(() => stop());
+        resolve();
+      });
+    });
+    expect(fake.execCalls).toEqual([['./gradlew', 'check']]);
+
+    await stopSession(created).catch(() => {});
+  });
+});
