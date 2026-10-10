@@ -40,6 +40,10 @@ describe('경로를 비교할 수 있는 꼴로 맞춘다 (트러블슈팅 125)'
     expect(normalizeProjectPath('WEB/app/../App//Page.tsx')).toBe('WEB/App/Page.tsx');
     expect(normalizeProjectPath('./web/')).toBe('web');
     expect(normalizeProjectPath('a\0b')).toBeUndefined();
+    // 콜론이 든 평범한 이름은 상대 경로다. 드라이브 절대 경로만 거른다
+    expect(normalizeProjectPath('notes/a:b.txt')).toBe('notes/a:b.txt');
+    expect(normalizeProjectPath('a:b.txt')).toBe('a:b.txt');
+    expect(normalizeProjectPath('C:/Windows/x')).toBeUndefined();
   });
 
   it('POSIX에서 역슬래시가 든 경로는 받지 않는다 — 검사는 구분자로, 파일 시스템은 이름의 글자로 읽어 어긋난다', () => {

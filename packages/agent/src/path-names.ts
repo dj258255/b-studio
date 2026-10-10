@@ -25,7 +25,8 @@ export function normalizeProjectPath(file: string, { lenientSeparators = false }
     if (path.sep !== '\\' && !lenientSeparators) return undefined;
     slashed = file.replaceAll('\\', '/');
   }
-  if (slashed.startsWith('/') || /^[A-Za-z]:/.test(slashed)) return undefined;
+  // 절대 경로(`/x`, Windows의 `C:/x`). `a:b.txt`처럼 콜론이 든 평범한 이름은 상대 경로다
+  if (slashed.startsWith('/') || /^[A-Za-z]:\//.test(slashed)) return undefined;
   const normalized = path.posix.normalize(slashed).replace(/\/$/, '');
   if (normalized === '.' || normalized === '') return '';
   if (normalized === '..' || normalized.startsWith('../')) return undefined;
