@@ -368,3 +368,94 @@ describe('레인 백엔드 열(--lane-backend)', () => {
     expect(markdown.split('\n').find((line) => line.includes('orders-list'))).toContain('| — |');
   });
 });
+
+describe('테스트를 건넨 실행(handoff) 열', () => {
+  const handoff = (over: Partial<NonNullable<BenchRow['handoff']>> = {}): NonNullable<BenchRow['handoff']> => ({
+    variant: 'conflict',
+    protected: false,
+    file: 'api/src/test/java/com/example/api/OrdersListHandoffTest.java',
+    changed: false,
+    writeAttempts: 0,
+    denied: 0,
+    apiUnit: 'fail',
+    ...over,
+  });
+  const headerOf = (markdown: string) => markdown.split('\n').find((line) => line.startsWith('| 과제 |'))!;
+
+  it('handoff가 있는 행이 하나도 없으면 요약은 글자까지 예전과 같다(열을 더하지 않는다)', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', metrics: metrics({ endToEndMs: 30_000 }) }),
+        row({ taskId: 'orders-list', strategy: 'S1', success: false, category: 'acceptance', metrics: metrics({ endToEndMs: 50_000 }) }),
+      ],
+      meta,
+    );
+    expect(markdown).toMatchInlineSnapshot(`
+      "# 협업 벤치마크 요약
+
+      백엔드 openai · 요청한 모델 test-model · 관측한 모델 없음 · 실행 2회 · 검증 full · 컨텍스트 비우기 off · 계약 human
+
+      ## 과제 × 전략
+
+      | 과제 | 엮임 | 전략 | 성공 | 성공 1건당 토큰 | 종단 시간 중앙값(s) | 입력 토큰 중앙값 | 출력 토큰 중앙값 | 모델 호출 중앙값 | 최대 컨텍스트 중앙값 | 기동 시간 합 중앙값(s) | 기동 수신(중앙값) | 읽은 파일 수 중앙값 | 실패 서명 중앙값 | 반복 실패 중앙값 | 게시·읽기 바이트 중앙값 | 비운 도구 결과 중앙값 | 승격 건수 | 수리(시도/성공) | API 환산 비용($) | 레인 백엔드 |
+      |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+      | orders-list | O | S0 | 1/1 | 0 | 30.0 | 0 | 0 | 0 | 0 | 0.0 | 0KiB | — | — | — | — | — | 0 | 0/0 | — | — |
+      | orders-list | O | S1 | 0/1 | — | 50.0 | 0 | 0 | 0 | 0 | 0.0 | 0KiB | — | — | — | — | — | 0 | 0/0 | — | — |
+
+      ## 전략별 실패 원인
+
+      | 전략 | none | plan_rejected | scope_violation | lane_gate | integration_gate | acceptance | rate_limited | provider_gate | environment | timeout | unknown |
+      |---|---|---|---|---|---|---|---|---|---|---|---|
+      | S0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+      | S1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 |
+
+      반복 수가 적어 비율 대신 건수로 적습니다. 이 결과는 이 저장소·이 모델·이 과제에 한정됩니다.
+      "
+    `);
+    expect(markdown).not.toContain('건넨 테스트');
+  });
+
+  it('하나라도 있으면 열 5개를 표 끝에 더하고, 건넨 테스트가 없는 행은 —로 둔다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', handoff: handoff({ changed: true, writeAttempts: 2, denied: 1, apiUnit: 'pass' }) }),
+        row({ taskId: 'orders-list', strategy: 'S0', repeat: 2, handoff: handoff({ changed: false, writeAttempts: 0, denied: 0, apiUnit: 'fail' }) }),
+        row({ taskId: 'order-detail', strategy: 'S0' }),
+      ],
+      meta,
+    );
+    const header = headerOf(markdown);
+    expect(header.endsWith('| 건넨 테스트 | 파일 바뀜 | 쓰기 시도 합 | 보호 거절 합 | api-unit 통과 |')).toBe(true);
+    const listLine = markdown.split('\n').find((line) => line.startsWith('| orders-list'))!;
+    expect(listLine.endsWith('| conflict | 1/2 | 2 | 1 | 1/2 |')).toBe(true);
+    const detailLine = markdown.split('\n').find((line) => line.startsWith('| order-detail'))!;
+    expect(detailLine.endsWith('| — | — | — | — | — |')).toBe(true);
+  });
+
+  it('보호를 켠 실행은 변형 뒤에 +protect를 붙인다', () => {
+    const markdown = summarize([row({ taskId: 'orders-list', strategy: 'S0', handoff: handoff({ protected: true }) })], meta);
+    expect(markdown.split('\n').find((line) => line.startsWith('| orders-list'))!).toContain('| conflict+protect |');
+  });
+
+  it('unknown은 0이나 false로 합치지 않고 따로 적는다', () => {
+    const markdown = summarize(
+      [
+        row({ taskId: 'orders-list', strategy: 'S0', handoff: handoff({ changed: 'unknown', writeAttempts: 'unknown', denied: 'unknown', apiUnit: 'unknown' }) }),
+        row({ taskId: 'orders-list', strategy: 'S0', repeat: 2, handoff: handoff({ changed: true, writeAttempts: 3, denied: 2, apiUnit: 'pass' }) }),
+        row({ taskId: 'orders-list', strategy: 'S0', repeat: 3, handoff: handoff({ changed: false, writeAttempts: 0, denied: 0, apiUnit: 'fail' }) }),
+      ],
+      meta,
+    );
+    const line = markdown.split('\n').find((candidate) => candidate.startsWith('| orders-list'))!;
+    expect(line.endsWith('| conflict | 1/3 (모름 1) | 3 (모름 1) | 2 (모름 1) | 1/3 (모름 1) |')).toBe(true);
+  });
+
+  it('모든 값을 모르면 0이 아니라 모름으로 적는다', () => {
+    const markdown = summarize(
+      [row({ taskId: 'orders-list', strategy: 'S0', handoff: handoff({ changed: 'unknown', writeAttempts: 'unknown', denied: 'unknown', apiUnit: 'unknown' }) })],
+      meta,
+    );
+    const line = markdown.split('\n').find((candidate) => candidate.startsWith('| orders-list'))!;
+    expect(line.endsWith('| conflict | 모름 | 모름 | 모름 | 모름 |')).toBe(true);
+  });
+});

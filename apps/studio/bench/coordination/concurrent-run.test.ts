@@ -121,6 +121,8 @@ describe('serializeArgv ↔ parseArgs 왕복', () => {
       planModel: 'opus',
       executeModel: 'haiku',
       planAlways: true,
+      handoffTests: 'conflict',
+      protectHandoff: true,
     };
     const roundtripped = parseArgs(serializeArgv(args));
     expect(roundtripped).toEqual(args);
@@ -170,6 +172,22 @@ describe('synthesizeCrashRow', () => {
     expect(row.category).toBe('unknown');
     expect(row.detail).toContain('종료 코드 1');
     expect(row.leftoverContainers).toEqual([]);
+    // 테스트를 건네지 않은 실행의 대체 행에는 handoff 필드가 없다
+    expect('handoff' in row).toBe(false);
+  });
+
+  it('테스트를 건넨 실행의 대체 행에는 조건을 남기고 센 값은 모두 unknown으로 둔다(0으로 적지 않는다)', () => {
+    const unit = { order: 7, repeat: 1, task: orders!, strategy: 'S0' as const };
+    const row = synthesizeCrashRow(unit, 'claude-code', 'sonnet', { after: 2, retryBudget: 2 }, '종료 코드 1', { variant: 'conflict', protect: true });
+    expect(row.handoff).toEqual({
+      variant: 'conflict',
+      protected: true,
+      file: 'api/src/test/java/com/example/api/OrdersListHandoffTest.java',
+      changed: 'unknown',
+      writeAttempts: 'unknown',
+      denied: 'unknown',
+      apiUnit: 'unknown',
+    });
   });
 });
 

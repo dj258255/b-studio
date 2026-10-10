@@ -12,6 +12,12 @@ describe('parseArgs', () => {
     expect(parseArgs(['--backend=claude-code', '--model=sonnet'])).toEqual({ dry: false, force: false, backend: 'claude-code', model: 'sonnet' });
   });
 
+  it('--handoff-tests는 값을 받고 --protect-handoff는 플래그다', () => {
+    expect(parseArgs(['--handoff-tests', 'correct'])).toEqual({ dry: false, force: false, handoffTests: 'correct' });
+    expect(parseArgs(['--handoff-tests=conflict', '--protect-handoff'])).toEqual({ dry: false, force: false, handoffTests: 'conflict', protectHandoff: true });
+    expect(() => parseArgs(['--handoff-tests'])).toThrow(/--handoff-tests 뒤에 값이 필요합니다/);
+  });
+
   it('--tasks·--strategies는 콤마로 나누고 앞뒤 공백을 없앤다', () => {
     const args = parseArgs(['--tasks', ' orders-list, order-detail ', '--strategies', 'S0,S1']);
     expect(args.taskIds).toEqual(['orders-list', 'order-detail']);

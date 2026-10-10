@@ -17,6 +17,7 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Backend, BenchVerify, ContractsSource, EscalationChoice, PlanExecuteChoice, RateLimitPolicy } from './backends';
 import type { Args } from './args';
+import { handoffChoiceOf, handoffTestFor, unknownHandoff, type HandoffChoice } from './handoff';
 import { runPool } from './pool';
 import { redact } from './redact';
 import { summarize, type BenchRow } from './summary';
@@ -71,6 +72,8 @@ export function serializeArgv(args: Omit<Args, 'concurrency' | 'childConcurrency
   if (args.integrationChecks) argv.push('--integration-checks');
   if (args.verify) argv.push('--verify', args.verify);
   if (args.selfCheck) argv.push('--self-check', args.selfCheck);
+  if (args.handoffTests) argv.push('--handoff-tests', args.handoffTests);
+  if (args.protectHandoff) argv.push('--protect-handoff');
   if (args.taskIds && args.taskIds.length > 0) argv.push('--tasks', args.taskIds.join(','));
   if (args.strategies && args.strategies.length > 0) argv.push('--strategies', args.strategies.join(','));
   if (args.repeats !== undefined) argv.push('--repeats', String(args.repeats));
@@ -108,7 +111,14 @@ export function childEnv(base: NodeJS.ProcessEnv, projectId: string): NodeJS.Pro
 }
 
 /** 자식 프로세스가 결과 행을 하나도 남기지 못했을 때(설정 단계에서 죽음 등) 쓸 대체 행. 실험이 그 자리를 잃지 않게 한다 */
-export function synthesizeCrashRow(unit: PlannedUnit, backend: string, requestedModel: string, escalation: EscalationChoice, message: string): BenchRow {
+export function synthesizeCrashRow(
+  unit: PlannedUnit,
+  backend: string,
+  requestedModel: string,
+  escalation: EscalationChoice,
+  message: string,
+  handoff?: HandoffChoice,
+): BenchRow {
   const now = new Date().toISOString();
   return {
     order: unit.order,
@@ -140,6 +150,8 @@ export function synthesizeCrashRow(unit: PlannedUnit, backend: string, requested
     detail: `동시 실행 자식 프로세스가 결과를 남기지 못했습니다(${backend}): ${message}`,
     leftoverContainers: [],
     estimatedCostUsd: 0,
+    // 테스트를 건넨 실행이면 조건은 남기고 센 값은 모두 unknown이다. 센 적이 없는 값을 0으로 적지 않는다
+    ...(handoff ? { handoff: unknownHandoff(handoff, handoffTestFor(unit.task.id)?.file ?? '') } : {}),
   };
 }
 
@@ -292,6 +304,7 @@ export async function runConcurrent(options: RunConcurrentOptions): Promise<void
           verify: options.verify,
           selfCheck: options.selfCheck,
           concurrency,
+          ...(handoffChoiceOf(args) ? { handoffTests: args.handoffTests, protectHandoff: args.protectHandoff === true } : {}),
           abortReason,
         },
         null,
@@ -369,7 +382,7 @@ export async function readChildRow(
   }
   const tail = readLogTail(logPath);
   const reason = outcome.signal ? `신호 ${outcome.signal}로 끝났습니다` : `종료 코드 ${outcome.code}`;
-  return synthesizeCrashRow(unit, options.backend, options.requestedModel, options.escalation, `${reason}${tail ? ` · ${tail}` : ''}`);
+  return synthesizeCrashRow(unit, options.backend, options.requestedModel, options.escalation, `${reason}${tail ? ` · ${tail}` : ''}`, handoffChoiceOf(options.args));
 }
 
 function readLogTail(logPath: string): string {
