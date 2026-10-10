@@ -51,6 +51,19 @@ export const DEFAULT_DENIED_COMMANDS = [
  */
 const GRADLE_STOP = /(?:^|[\s;&|(])(?:\S*\/)?gradlew?(?=\s)[^;&|]*\s--stop(?:\s|$)/;
 
+/**
+ * 허용 목록에 직접 적혀 있지 않아도 다른 읽기 도구의 권한으로 쓸 수 있는 도구(트러블슈팅 127).
+ * 줄 범위 읽기는 read_file이 읽는 것의 일부이고, 검색은 read_file로 읽을 수 있는 파일을 list_files로 볼 수 있는 범위에서 훑는 것이라
+ * 그 도구들이 허용돼 있으면 권한이 늘지 않는다. 이렇게 두지 않으면 allowedTools를 적어 둔 기존 studio.yaml에서는 새 읽기 도구가 모두 막힌다
+ */
+const IMPLIED_BY: Readonly<Record<string, readonly string[]>> = { read_lines: ['read_file'], search_files: ['read_file', 'list_files'] };
+
+export function isToolAllowed(tool: string, allowedTools: readonly string[]): boolean {
+  if (allowedTools.includes(tool)) return true;
+  const implied = IMPLIED_BY[tool];
+  return implied !== undefined && implied.every((required) => allowedTools.includes(required));
+}
+
 /** 경로 정책(쓰기 범위·보호 경로)이 걸리는 도구. 파일을 만드는 것과 지우는 것을 같게 본다 */
 const PATH_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
 
@@ -60,7 +73,7 @@ export function checkToolPolicy(
   policy: ExecutionPolicy | undefined,
   approvalToken: string | undefined,
 ): PolicyDecision {
-  if (policy?.allowedTools && !policy.allowedTools.includes(tool)) {
+  if (policy?.allowedTools && !isToolAllowed(tool, policy.allowedTools)) {
     return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
   }
 

@@ -64,6 +64,8 @@ workflow:
   releaseRequires: [contract_check, test, review, checkpoint]
 ```
 
+`read_lines`(줄 범위 읽기)와 `search_files`(낱말 검색)는 목록에 따로 적지 않아도 됩니다. `read_lines`는 `read_file`이 허용돼 있으면, `search_files`는 `read_file`과 `list_files`가 모두 허용돼 있으면 함께 허용됩니다. 그 도구들로 이미 할 수 있는 일의 일부라 권한이 늘지 않습니다.
+
 `AGENTS.md`, `CLAUDE.md`와 시스템 프롬프트는 에이전트가 다음 행동을 선택하도록 돕는 컨텍스트입니다. 보안과 완료 판정은 이 파일을 믿지 않고 실행기에서 다시 검사합니다.
 
 | 통제 | 위치 | 우회되면 |

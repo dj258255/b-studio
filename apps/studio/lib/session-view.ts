@@ -739,6 +739,10 @@ export function describeToolCall(name: string, input: unknown): string {
       return `파일 목록 ${text(args.path)}`;
     case 'read_file':
       return `읽기 ${text(args.path)}`;
+    case 'read_lines':
+      return `읽기 ${text(args.path)} ${typeof args.start_line === 'number' ? args.start_line : '?'}-${typeof args.end_line === 'number' ? args.end_line : '?'}줄`;
+    case 'search_files':
+      return `검색 ${Array.isArray(args.terms) ? args.terms.filter((term): term is string => typeof term === 'string').map((term) => `"${term}"`).join(' | ') : ''} (${text(args.path) || '.'})`;
     case 'write_file':
       return `작성 ${text(args.path)}`;
     case 'edit_file':

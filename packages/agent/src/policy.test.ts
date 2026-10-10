@@ -33,6 +33,20 @@ describe('execution policy', () => {
     expect(checkToolPolicy('write_file', {}, { requireApprovalFor: ['write_file'] }, 'approval-1').decision).toBe('allow');
   });
 
+  it('줄 범위 읽기와 검색은 그 바탕이 되는 읽기 도구가 허용돼 있으면 함께 허용된다(권한이 늘지 않는다)', () => {
+    // read_lines는 read_file이 읽는 것의 일부다
+    expect(checkToolPolicy('read_lines', {}, { allowedTools: ['read_file'] }, undefined).decision).toBe('allow');
+    expect(checkToolPolicy('read_lines', {}, { allowedTools: ['list_files'] }, undefined).decision).toBe('deny');
+    // search_files는 내용을 읽고(read_file) 경로를 드러내므로(list_files) 둘 다 있어야 한다
+    expect(checkToolPolicy('search_files', {}, { allowedTools: ['read_file', 'list_files'] }, undefined).decision).toBe('allow');
+    expect(checkToolPolicy('search_files', {}, { allowedTools: ['read_file'] }, undefined).decision).toBe('deny');
+    expect(checkToolPolicy('search_files', {}, { allowedTools: ['list_files'] }, undefined).decision).toBe('deny');
+    // 직접 적어도 된다
+    expect(checkToolPolicy('search_files', {}, { allowedTools: ['search_files'] }, undefined).decision).toBe('allow');
+    // 쓰기 도구는 다른 도구로부터 따라오지 않는다
+    expect(checkToolPolicy('edit_file', {}, { allowedTools: ['read_file', 'list_files', 'write_file'] }, undefined).decision).toBe('deny');
+  });
+
   it('쓰기 범위를 지정하면 그 밖의 파일 쓰기를 막고, 보호 경로 규칙은 그대로 적용한다', () => {
     const policy = { writablePaths: ['web/app/plan-a'], protectedPaths: ['web/app/plan-a/secret'] };
     expect(checkToolPolicy('write_file', { path: 'web/app/plan-a/page.tsx' }, policy, undefined).decision).toBe('allow');
