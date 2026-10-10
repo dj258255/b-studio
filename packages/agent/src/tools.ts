@@ -445,7 +445,7 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
     }
     case 'read_file': {
       // 파일은 앞에서부터 읽는 경우가 많아 앞쪽 위주로 자른다. 잘렸으면 가운데를 읽는 방법을 함께 알린다 —
-      // 알리지 않으면 컨테이너 안의 sed로 조금씩 읽는다(58턴 실행에서 도구 호출 86번 중 50번이 그랬다, 트러블슈팅 126)
+      // 알리지 않으면 컨테이너 안의 sed로 조금씩 읽는다(58턴 실행에서 도구 호출 86번 중 50번이 그랬다, 트러블슈팅 127)
       const raw = sandbox.redact(await workspace.read(string(args, 'path')));
       const hint = raw.length > READ_FILE_BUDGET ? `파일은 ${raw.split('\n').length}줄입니다. 생략된 부분은 read_lines로 줄 범위를 읽으세요` : undefined;
       return { ok: true, content: clipText(raw, READ_FILE_BUDGET, hint), rawChars: raw.length };
