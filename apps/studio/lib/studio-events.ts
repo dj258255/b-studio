@@ -536,7 +536,7 @@ export interface ExportPreview {
   /** PR에 연결할 이슈 번호들. 통합 세션이면 계획의 하위 이슈가 기본값으로 온다 */
   issues: number[];
   checks: Array<{
-    id: 'issue_linked' | 'issue_open' | 'stages_passed' | 'uncheckpointed_changes' | 'running' | 'tracking_issue_refresh';
+    id: 'base_on_remote' | 'issue_linked' | 'issue_open' | 'stages_passed' | 'uncheckpointed_changes' | 'running' | 'tracking_issue_refresh';
     /** unknown: 확인하지 못했지만 올리기를 막지는 않는 항목 (예: 원격 이슈 조회 실패) */
     ok: boolean | 'unknown';
     detail: string;

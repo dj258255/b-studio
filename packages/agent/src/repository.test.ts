@@ -127,6 +127,36 @@ describe('createPullRequest', () => {
     expect(calls[1]?.method).toBe('GET');
   });
 
+  it('대상 브랜치가 원격에 없어 거절되면 GitHub가 준 필드·코드와 함께 무엇을 볼지 알린다', async () => {
+    // GitHub는 이 경우 errors[]에 message 없이 필드와 코드만 준다. 예전에는 "Validation Failed"만 보였다
+    const { fn } = fakeFetch([
+      { status: 422, body: { message: 'Validation Failed', errors: [{ resource: 'PullRequest', field: 'base', code: 'invalid' }] } },
+      { status: 200, body: [] },
+    ]);
+    const error = await createPullRequest(parseRemote('https://github.com/acme/orders', {}), { ...input, base: 'feat/local-only' }, {
+      env: { B_STUDIO_GITHUB_TOKEN: 't' },
+      fetch: fn,
+    }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(PullRequestError);
+    expect((error as Error).message).toBe(
+      'GitHub API가 PR 생성을 거절했습니다 (HTTP 422): Validation Failed (PullRequest.base: invalid) 대상 브랜치(`feat/local-only`)가 원격 저장소에 있는지 확인하세요.',
+    );
+  });
+
+  it('대상 브랜치와 무관한 거절에는 브랜치 안내를 붙이지 않는다', async () => {
+    const { fn } = fakeFetch([
+      { status: 422, body: { message: 'Validation Failed', errors: [{ resource: 'PullRequest', code: 'custom', message: 'No commits between main and b-studio/orders-s1' }] } },
+      { status: 200, body: [] },
+    ]);
+    await expect(createPullRequest(parseRemote('https://github.com/acme/orders', {}), input, { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn })).rejects.toThrow(
+      /^GitHub API가 PR 생성을 거절했습니다 \(HTTP 422\): Validation Failed \(No commits between main and b-studio\/orders-s1\)$/,
+    );
+  });
+
   it('사내 GitLab에 MR을 만든다', async () => {
     const { fn, calls } = fakeFetch([{ status: 201, body: { web_url: 'https://gitlab.corp.local/platform/orders/-/merge_requests/3', iid: 3 } }]);
     const remote = parseRemote('git@gitlab.corp.local:platform/orders.git', { B_STUDIO_GIT_PROVIDER: 'gitlab' });
@@ -221,6 +251,17 @@ describe('postComment', () => {
 });
 
 describe('buildPullRequest', () => {
+  it('갈라져 나온 브랜치가 원격에 없어 기본 브랜치를 대상으로 삼았으면 본문에 그 사실을 적는다', () => {
+    const commits = [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 메모 필드 추가', body: '', files: ['api/Order.java'] }];
+    const fallback = buildPullRequest({ projectName: 'orders', base: 'main', missingBase: 'feat/local-only', branch: 'b-studio/orders-s1', commits });
+    expect(fallback.body).toContain('- 기준 브랜치: `main`\n  - 세션은 `feat/local-only`에서 갈라져 나왔지만 그 브랜치가 원격에 없어 원격의 기본 브랜치를 대상으로 했습니다.');
+    expect(fallback.body).toContain('`feat/local-only`에만 있던 커밋도 이 PR에 들어 있습니다.');
+
+    const usual = buildPullRequest({ projectName: 'orders', base: 'main', branch: 'b-studio/orders-s1', commits });
+    expect(usual.body).toContain('- 기준 브랜치: `main`\n- 세션 브랜치: `b-studio/orders-s1`');
+    expect(usual.body).not.toContain('원격에 없어');
+  });
+
   it('세션 커밋만으로 제목과 요청별 검증 결과를 만든다(제목은 가장 많이 바뀐 커밋을 요약한다)', () => {
     const { title, body } = buildPullRequest({
       projectName: 'orders',

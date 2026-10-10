@@ -56,6 +56,8 @@ export interface RepositoryInfo {
   /** 스튜디오가 마지막으로 확인한 원격 브랜치의 끝 커밋(올렸거나 가져왔을 때). 다음에 올릴 때 원격이 이 상태 그대로인지 확인한다 */
   remoteSha?: string;
   pullRequestUrl?: string;
+  /** 마지막으로 확인한 PR 대상 브랜치(pullRequestTarget). 기준 브랜치가 원격에 없으면 base와 다르다 */
+  pullRequestBase?: string;
 }
 
 export interface SessionCommit {
@@ -115,6 +117,14 @@ export interface RemoteCommit {
   shortSha: string;
   subject: string;
   author: string;
+}
+
+/** PR을 열 원격 브랜치. 세션의 기준 브랜치는 원본 폴더가 체크아웃해 둔 브랜치일 뿐이라 원격에 없을 수 있다 */
+export interface PullRequestTarget {
+  /** PR의 대상 브랜치. 기준 브랜치가 원격에 있으면 그것이고, 없으면 원격의 기본 브랜치다 */
+  base: string;
+  /** 기준 브랜치가 원격에 없을 때 그 이름. 원격의 기본 브랜치도 알 수 없으면 base가 이 값과 같다(PR을 만들 수 없다) */
+  missingBase?: string;
 }
 
 /** 기준 브랜치(세션이 갈라져 나온 브랜치, 보통 main)가 이 세션보다 얼마나 앞서 있는지(ADR-076) */
@@ -963,7 +973,27 @@ export class CheckpointStore {
       pushedSha: await this.#getMeta('pushed'),
       remoteSha: await this.#getMeta('remote'),
       pullRequestUrl: await this.#getMeta('pullrequest'),
+      pullRequestBase: await this.#getMeta('pullrequestBase'),
     };
+  }
+
+  /**
+   * PR을 어느 원격 브랜치로 열지 원격에 물어 정한다. 기준 브랜치가 원격에 없으면(원본 폴더가 올리지 않은 로컬
+   * 브랜치를 체크아웃하고 있던 경우) 원격의 기본 브랜치를 대상으로 삼고, 원래의 기준 브랜치 이름을 함께 돌려준다.
+   * 원격에 닿지 못하면 던진다. 부르는 쪽이 "확인하지 못함"으로 다룬다
+   */
+  async pullRequestTarget(): Promise<PullRequestTarget> {
+    const info = await this.repository();
+    if (!info) throw new CheckpointError('원격 저장소와 연결되지 않은 세션입니다');
+
+    const baseRef = `refs/heads/${info.base}`;
+    const listed = await this.#git(['ls-remote', '--symref', 'origin', 'HEAD', baseRef], { timeout: PUSH_TIMEOUT_MS });
+    const lines = listed.split('\n').map((line) => line.trim());
+    const target: PullRequestTarget = lines.some((line) => line.endsWith(`\t${baseRef}`))
+      ? { base: info.base }
+      : { base: /^ref: refs\/heads\/(\S+)\tHEAD$/.exec(lines.find((line) => line.startsWith('ref: ')) ?? '')?.[1] ?? info.base, missingBase: info.base };
+    await this.#setMeta('pullrequestBase', target.base);
+    return target;
   }
 
   async recordPullRequest(url: string): Promise<void> {
