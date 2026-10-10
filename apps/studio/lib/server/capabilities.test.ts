@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionMode } from '@/lib/studio-events';
-import { buildCapabilities } from './capabilities';
+import { buildCapabilities, EXPERIMENTAL_REASON } from './capabilities';
 
 describe('buildCapabilities', () => {
   it('API 모드는 한 명·비교·나눠서 병렬을 모두 쓸 수 있다', () => {
@@ -13,6 +13,7 @@ describe('buildCapabilities', () => {
       split: { enabled: true },
       backends: ['api', 'claude-code'],
       openFolder: false,
+      experimental: true,
     });
     // enabled면 이유를 붙이지 않는다(화면이 빈 문구를 그리지 않게)
     expect(caps.fleet.reason).toBeUndefined();
@@ -49,8 +50,22 @@ describe('buildCapabilities', () => {
   it('홈 화면이 기대는 키 이름을 고정한다', () => {
     const caps = buildCapabilities({ mode: 'api', backends: ['api', 'codex'] as SessionMode[], openFolder: false });
 
-    expect(Object.keys(caps).sort()).toEqual(['backends', 'fleet', 'mode', 'openFolder', 'single', 'split']);
+    expect(Object.keys(caps).sort()).toEqual(['backends', 'experimental', 'fleet', 'mode', 'openFolder', 'single', 'split']);
     expect(Object.keys(caps.single).sort()).toEqual(['enabled']);
     expect(caps.backends).toEqual(['api', 'codex']);
+  });
+
+  it('실험 기능을 켜지 않았으면 비교·나눠서 병렬을 꺼진 것으로 알리고 켜는 방법을 적는다 (ADR-166)', () => {
+    const caps = buildCapabilities({ mode: 'claude-code', backends: ['claude-code'], openFolder: true, experimental: false });
+
+    expect(caps.experimental).toBe(false);
+    // 한 세션에 요청 하나는 그대로다
+    expect(caps.single).toEqual({ enabled: true });
+    expect(caps.fleet).toEqual({ enabled: false, reason: EXPERIMENTAL_REASON });
+    expect(caps.split).toEqual({ enabled: false, reason: EXPERIMENTAL_REASON });
+    expect(EXPERIMENTAL_REASON).toContain('B_STUDIO_EXPERIMENTAL=1');
+    // 백엔드 목록과 폴더 열기는 건드리지 않는다
+    expect(caps.backends).toEqual(['claude-code']);
+    expect(caps.openFolder).toBe(true);
   });
 });

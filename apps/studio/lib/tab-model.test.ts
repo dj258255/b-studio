@@ -9,6 +9,7 @@ import {
   REQUIREMENTS_SUB_TABS,
   RUN_SUB_TABS,
   runSubTabs,
+  screenSubTabs,
   subTabStorageKey,
   writeSubTab,
 } from "./tab-model";
@@ -38,22 +39,50 @@ describe("mapLegacyTab", () => {
     expect(mapLegacyTab("resources")).toEqual({ group: "run", subTab: "resources" });
     expect(mapLegacyTab("repository")).toEqual({ group: "repository", subTab: "issues" });
     expect(mapLegacyTab("submission")).toEqual({ group: "repository", subTab: "presubmit" });
-    expect(mapLegacyTab("tokens")).toEqual({ group: "tokens" });
+    // 토큰은 실행 묶음의 하위 탭으로 옮겼다(ADR-166)
+    expect(mapLegacyTab("tokens")).toEqual({ group: "run", subTab: "tokens" });
   });
 });
 
 describe("buildTopTabs", () => {
-  it("서비스·사내 API 뒤에 코드·요구사항·실행·저장소·문서·현황·토큰 일곱 고정 탭을 둔다", () => {
+  it("서비스·사내 API 뒤에 코드·요구사항·실행·저장소 네 고정 탭을 둔다 (ADR-166)", () => {
     const tabs = buildTopTabs([{ name: "api", preview: "openapi" } as never], []);
-    const ids = tabs.map((tab) => tab.id);
-    expect(ids).toEqual(["api", "code", "requirements", "run", "repository", "docs", "status", "tokens"]);
-    expect(tabs.find((tab) => tab.id === "docs")).toEqual({ kind: "docs", id: "docs", label: "문서" });
-    expect(tabs.find((tab) => tab.id === "status")).toEqual({ kind: "status", id: "status", label: "현황" });
+    expect(tabs.map((tab) => tab.id)).toEqual(["api", "code", "requirements", "run", "repository"]);
+    // 문서·현황·토큰은 위 탭이 아니다(요구사항·실행 묶음의 하위 탭)
+    expect(REQUIREMENTS_SUB_TABS.map((tab) => tab.id)).toEqual(["spec", "tests", "docs", "status"]);
+    expect(RUN_SUB_TABS.map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "deploy", "tokens"]);
   });
 
   it("서비스·사내 API가 없어도 고정 탭 순서는 그대로다", () => {
     const tabs = buildTopTabs([], []);
-    expect(tabs.map((tab) => tab.id)).toEqual(["code", "requirements", "run", "repository", "docs", "status", "tokens"]);
+    expect(tabs.map((tab) => tab.id)).toEqual(["code", "requirements", "run", "repository"]);
+  });
+
+  it("꺼 둔 서비스와 로그 전용 서비스는 위 탭을 두지 않는다", () => {
+    const tabs = buildTopTabs(
+      [
+        { name: "commerce", preview: "openapi", state: "ready" },
+        { name: "web", preview: "browser", state: "ready" },
+        { name: "consumer-app", preview: "browser", state: "off" },
+        { name: "worker", preview: "logs", state: "ready" },
+        { name: "booting", preview: "browser", state: "starting" },
+      ] as never,
+      [{ name: "users" } as never],
+    );
+    // 켜 둔 서비스 3 + 사내 API 1 + 고정 4. 뜨는 중인 서비스는 탭을 둔다(곧 화면이 생긴다)
+    expect(tabs.map((tab) => tab.id)).toEqual(["commerce", "web", "booting", "external:users", "code", "requirements", "run", "repository"]);
+  });
+
+  it("서비스 둘을 켠 프로젝트의 위 탭은 여섯 개다", () => {
+    const tabs = buildTopTabs(
+      [
+        { name: "commerce", preview: "openapi", state: "ready" },
+        { name: "web", preview: "browser", state: "ready" },
+        { name: "consumer-app", preview: "browser", state: "off" },
+      ] as never,
+      [],
+    );
+    expect(tabs).toHaveLength(6);
   });
 });
 
@@ -71,12 +100,24 @@ describe("defaultSubTab", () => {
 });
 
 describe("runSubTabs", () => {
-  it("deploy 절이 있으면 로그·리소스·내 환경·배포 네 하위 탭을 모두 보여준다", () => {
-    expect(runSubTabs(true).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "deploy"]);
+  it("배포는 deploy 절이 있고 실험 기능을 켰을 때만 보인다 (ADR-166)", () => {
+    expect(runSubTabs(true, true).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "deploy", "tokens"]);
+    // 운영 배포는 실험 기능이다. deploy 절이 있어도 켜지 않았으면 숨긴다
+    expect(runSubTabs(true).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "tokens"]);
+    expect(runSubTabs(true, false).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "tokens"]);
   });
 
-  it("deploy 절이 없으면 배포 하위 탭을 숨긴다(로컬 폴더 모드 기본값)", () => {
-    expect(runSubTabs(false).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv"]);
+  it("deploy 절이 없으면 실험 기능을 켜도 배포 하위 탭을 숨긴다(로컬 폴더 모드 기본값)", () => {
+    expect(runSubTabs(false, true).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "tokens"]);
+    expect(runSubTabs(false).map((tab) => tab.id)).toEqual(["logs", "resources", "myenv", "tokens"]);
+  });
+});
+
+describe("screenSubTabs", () => {
+  it("원격 브라우저와 디자인 비교는 실험 기능을 켰을 때만 보인다 (ADR-166)", () => {
+    expect(screenSubTabs().map((tab) => tab.id)).toEqual(["app", "qa"]);
+    expect(screenSubTabs(false).map((tab) => tab.id)).toEqual(["app", "qa"]);
+    expect(screenSubTabs(true).map((tab) => tab.id)).toEqual(["app", "remote", "qa", "design"]);
   });
 });
 
@@ -106,8 +147,9 @@ describe("readSubTab", () => {
 
   it("options를 주면 그 목록 기준으로 검사한다 — 숨겨진 하위 탭(배포)이 저장돼 있으면 첫 하위 탭으로 돌아간다", () => {
     const storage = fakeStorage({ [subTabStorageKey("run")]: "deploy" });
-    expect(readSubTab(storage, "run", runSubTabs(false))).toBe("logs");
-    expect(readSubTab(storage, "run", runSubTabs(true))).toBe("deploy");
+    expect(readSubTab(storage, "run", runSubTabs(false, true))).toBe("logs");
+    expect(readSubTab(storage, "run", runSubTabs(true, false))).toBe("logs");
+    expect(readSubTab(storage, "run", runSubTabs(true, true))).toBe("deploy");
   });
 });
 

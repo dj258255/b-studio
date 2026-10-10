@@ -18,9 +18,13 @@ export const CODE_SUB_TABS = [
 ] as const satisfies readonly SubTabOption[];
 export type CodeSubTab = (typeof CODE_SUB_TABS)[number]['id'];
 
+// 문서·현황은 예전에 위 탭이었다(ADR-094, ADR-098). 위 탭이 열 개까지 늘어 요구사항 묶음 안으로 옮겼다(ADR-166):
+// 조사 → 문서 → 요구사항으로 이어지는 흐름(ADR-094)과, 그 결과를 모아 보는 현황이 한 묶음에 있다
 export const REQUIREMENTS_SUB_TABS = [
   { id: 'spec', label: '명세' },
   { id: 'tests', label: '테스트' },
+  { id: 'docs', label: '문서' },
+  { id: 'status', label: '현황' },
 ] as const satisfies readonly SubTabOption[];
 export type RequirementsSubTab = (typeof REQUIREMENTS_SUB_TABS)[number]['id'];
 
@@ -29,6 +33,8 @@ export const RUN_SUB_TABS = [
   { id: 'resources', label: '리소스' },
   { id: 'myenv', label: '내 환경' },
   { id: 'deploy', label: '배포' },
+  // 토큰은 예전에 위 탭이었다. 실행에 든 비용이라 실행 묶음에 둔다(ADR-166)
+  { id: 'tokens', label: '토큰' },
 ] as const satisfies readonly SubTabOption[];
 export type RunSubTab = (typeof RUN_SUB_TABS)[number]['id'];
 
@@ -38,8 +44,23 @@ export type RunSubTab = (typeof RUN_SUB_TABS)[number]['id'];
  * 숨긴 뒤에도 readSubTab/useSubTab이 이 목록을 기준으로 저장값을 검사하므로, 마지막으로 본 하위 탭이 숨겨진
  * "배포"였다면 자동으로 첫 하위 탭("로그")으로 돌아간다(별도 분기 코드가 필요 없다)
  */
-export function runSubTabs(hasDeploy: boolean): readonly SubTabOption[] {
-  return hasDeploy ? RUN_SUB_TABS : RUN_SUB_TABS.filter((tab) => tab.id !== 'deploy');
+export function runSubTabs(hasDeploy: boolean, experimental = false): readonly SubTabOption[] {
+  // 운영 배포는 실험 기능이다(ADR-166). deploy 절이 있어도 실험 기능을 켜지 않았으면 숨긴다
+  return hasDeploy && experimental ? RUN_SUB_TABS : RUN_SUB_TABS.filter((tab) => tab.id !== 'deploy');
+}
+
+/** "화면" 탭(서비스별)의 하위 탭. 앱은 iframe, 원격 브라우저와 QA는 서버가 중계하는 프레임을, 디자인 비교는 Figma 프레임을 그린다 */
+export const SCREEN_SUB_TABS = [
+  { id: 'app', label: '앱 미리보기' },
+  { id: 'remote', label: '원격 브라우저' },
+  { id: 'qa', label: 'QA' },
+  { id: 'design', label: '디자인 비교' },
+] as const satisfies readonly SubTabOption[];
+export type ScreenSubTab = (typeof SCREEN_SUB_TABS)[number]['id'];
+
+/** 화면 탭에 실제로 보일 하위 탭. 원격 브라우저와 디자인 비교는 실험 기능이라 켜지 않았으면 숨긴다(ADR-166) */
+export function screenSubTabs(experimental = false): readonly SubTabOption[] {
+  return experimental ? SCREEN_SUB_TABS : SCREEN_SUB_TABS.filter((tab) => tab.id === 'app' || tab.id === 'qa');
 }
 
 export const REPOSITORY_SUB_TABS = [
@@ -56,11 +77,8 @@ export const SUB_TAB_GROUPS = {
   repository: REPOSITORY_SUB_TABS,
 } as const;
 
-// "문서" 탭(ADR-094)은 하위 탭을 두지 않는다 — 문서 목록·미리보기·편집이 한 화면 안에서 함께 움직이고(트리에서 고르면
-// 바로 미리보기·편집이 바뀐다), "코드" 탭의 파일/변경 기록처럼 서로 다른 내용을 번갈아 보여줄 하위 화면이 없다.
-// 코드 탭의 하위 탭으로 넣는 대신 독립된 위 탭으로 둔 이유: 문서 쓰기는 코드를 "보는" 작업이 아니라 조사 결과를
-// 저장소 문서로 정리하는 별도 작업 흐름이라(ADR-094의 연구 → 문서화 → 요구사항 흐름), 요구사항 탭과 같은 급의
-// 눈에 띄는 자리가 필요하다 — 코드 탭 안에 묻으면 "문서 쓰기"가 "코드 읽기"의 부속 기능처럼 보인다.
+// "문서"(ADR-094)는 코드 묶음이 아니라 요구사항 묶음의 하위 탭이다 — 문서 쓰기는 코드를 "보는" 작업이 아니라 조사 결과를
+// 저장소 문서로 정리해 요구사항으로 잇는 흐름이라, 코드 탭 안에 두면 "코드 읽기"의 부속 기능처럼 보인다.
 
 export type SubTabGroup = keyof typeof SUB_TAB_GROUPS;
 
@@ -111,31 +129,25 @@ export function writeSubTab(storage: Pick<Storage, 'setItem'> | undefined, group
 export type TopTab =
   | { kind: 'service'; id: string; label: string; service: ServiceView }
   | { kind: 'external'; id: string; label: string; external: ExternalApiView }
-  | { kind: 'group'; id: SubTabGroup; label: string }
-  | { kind: 'docs'; id: 'docs'; label: string }
-  | { kind: 'status'; id: 'status'; label: string }
-  | { kind: 'tokens'; id: 'tokens'; label: string };
+  | { kind: 'group'; id: SubTabGroup; label: string };
 
 /**
- * 개발 화면의 위 탭 목록을 만든다. 화면·API는 서비스마다(로그 전용 서비스는 뺀다), 사내 API는 등록한 것마다,
- * 나머지는 코드·요구사항·실행·저장소·문서·현황·토큰 일곱 자리로 고정한다(ADR-087, 문서는 ADR-094, 현황은
- * ADR-098에서 더했다). "현황"은 코드·요구사항·저장소·문서를 각각 들여다보지 않고도 "지금 어디까지 왔는가"를
- * 한 화면에서 읽을 수 있게 그 탭들의 데이터를 다시 모아 보여 주는 자리라, 모으는 대상인 저장소·문서 뒤에 둔다.
- * 서비스 개수와 무관하게 결정론적이라 렌더링 없이 테스트한다(PreviewPanel이 이 목록으로 그린다).
+ * 개발 화면의 위 탭 목록을 만든다. 화면·API는 **켜 둔** 서비스마다(로그 전용 서비스와 꺼 둔 서비스는 뺀다), 사내 API는 등록한 것마다,
+ * 나머지는 코드·요구사항·실행·저장소 네 묶음으로 고정한다(ADR-087, ADR-166). 문서·현황은 요구사항 묶음의, 토큰은 실행 묶음의
+ * 하위 탭이다. 위 탭의 수는 "켜 둔 서비스 수 + 사내 API 수 + 4"다.
+ * 꺼 둔 서비스(ADR-083)는 보여 줄 화면이 없어 탭을 두지 않는다 — 머리의 서비스 메뉴에서 켜면 탭이 생긴다.
+ * 결정론적이라 렌더링 없이 테스트한다(PreviewPanel이 이 목록으로 그린다).
  */
 export function buildTopTabs(services: readonly ServiceView[], externals: readonly ExternalApiView[] = []): TopTab[] {
   return [
     ...services
-      .filter((service) => service.preview !== 'logs')
+      .filter((service) => service.preview !== 'logs' && service.state !== 'off')
       .map((service): TopTab => ({ kind: 'service', id: service.name, label: `${service.preview === 'browser' ? '화면' : 'API'} (${service.name})`, service })),
     ...externals.map((external): TopTab => ({ kind: 'external', id: `external:${external.name}`, label: `사내 API (${external.name})`, external })),
     { kind: 'group', id: 'code', label: '코드' },
     { kind: 'group', id: 'requirements', label: '요구사항' },
     { kind: 'group', id: 'run', label: '실행' },
     { kind: 'group', id: 'repository', label: '저장소' },
-    { kind: 'docs', id: 'docs', label: '문서' },
-    { kind: 'status', id: 'status', label: '현황' },
-    { kind: 'tokens', id: 'tokens', label: '토큰' },
   ];
 }
 
@@ -148,7 +160,7 @@ export type LegacyTabId = 'design' | 'requirements' | 'tests' | 'code' | 'histor
 
 export interface MappedTab {
   /** "screen"은 화면(서비스별) 탭 안의 하위 탭이라 SubTabGroup(이 파일에서 PreviewPanel이 직접 그리는 묶음)에는 없다 */
-  group: SubTabGroup | 'screen' | 'tokens';
+  group: SubTabGroup | 'screen';
   subTab?: string;
 }
 
@@ -180,6 +192,6 @@ export function mapLegacyTab(id: LegacyTabId): MappedTab {
     case 'submission':
       return { group: 'repository', subTab: 'presubmit' };
     case 'tokens':
-      return { group: 'tokens' };
+      return { group: 'run', subTab: 'tokens' };
   }
 }

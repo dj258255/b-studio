@@ -4,6 +4,7 @@ import { parseSpec, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/s
 import { summarizeContract } from './contract-diff';
 import type { Note, NoteKind } from './coordination';
 import type { DesignSource } from './design';
+import { experimentalEnabled } from './experimental';
 import { checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 import { servicesForFiles } from './services';
 import {
@@ -349,6 +350,11 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
           allowOther: { type: 'boolean', description: 'true to also let the user type a free-form answer.' },
         },
       ),
+    );
+  }
+  // 나눠서 병렬·여러 명 비교는 실험 기능이다(ADR-166). 켜지 않았으면 에이전트가 그쪽으로 넘기자고 제안하지 않는다
+  if (options.interactive && experimentalEnabled()) {
+    tools.push(
       tool(
         'propose_mode',
         'Offer to hand this request to several agents instead of doing it alone. Use rarely, before making changes: "split" when the work clearly divides into independent parts in different services that can be built at the same time (for example an API and a page that only share a contract); "fleet" when the user asks for alternatives or the right design is genuinely open and comparing two or three independent attempts is worth the extra cost. Most requests should simply be done yourself. Calling this ends the run; the user either accepts (the studio starts the split or comparison) or answers "continue alone" in a follow-up request.',

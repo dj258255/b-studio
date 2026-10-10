@@ -152,9 +152,12 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         >
           {SESSION_BACKEND_LABEL[snapshot.backend ?? snapshot.mode]}
         </span>
-        <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
-          나란히 보기에 추가
-        </button>
+        {/* 나란히 보기는 여러 세션을 견주는 화면이라 실험 기능이다(ADR-166). 켜지 않았으면 단추를 두지 않는다 */}
+        {snapshot.experimental && (
+          <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
+            나란히 보기에 추가
+          </button>
+        )}
         {/* 닿지 않을 때는 다시 올릴 수도 없다. 도커가 돌아오면 저절로 풀린다 */}
         {link?.state === "missing" && (
           <button

@@ -735,3 +735,4 @@ export {
   type TestRunPlan,
   type TestTarget,
 } from './test-run';
+export { experimentalEnabled } from './experimental';
