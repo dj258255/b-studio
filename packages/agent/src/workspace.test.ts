@@ -191,6 +191,23 @@ describe('Workspace', () => {
       await expect(workspace.read('.e\u200dnv')).rejects.toThrow('생성물이나 비밀 파일');
     });
 
+    it('소문자 변환이 놓치는 닮은 글자와 끝의 점으로도 숨긴 이름에 닿지 못한다', async () => {
+      await expect(workspace.write('web/node_module\u017f/x.js', '')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.write('.git./config', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.write('\uff0egit/config', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+    });
+
+    it('예시 파일 예외는 좁게 본다: 예시 이름을 닮게 꾸민 비밀 파일 이름은 열어 주지 않는다', async () => {
+      await expect(workspace.write('.env.exampl\u200ce', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.write('.env.\u00e9xample', 'x')).rejects.toThrow('생성물이나 비밀 파일');
+    });
+
+    it('POSIX에서 역슬래시가 든 경로는 받지 않는다(실행 정책이 읽는 경로와 어긋나지 않게)', async () => {
+      if (path.sep === '\\') return;
+      await expect(workspace.write('docs\\..\\x.md', 'x')).rejects.toThrow('쓸 수 없는 글자');
+      await expect(workspace.read('api\\src\\App.java')).rejects.toThrow('쓸 수 없는 글자');
+    });
+
     it('예시 파일(.env.example)은 대소문자와 무관하게 그대로 다룰 수 있고, 숨긴 이름과 닮았을 뿐인 이름은 막지 않는다', async () => {
       await workspace.write('.env.example', 'TOKEN=');
       await workspace.write('.ENV.EXAMPLE.dist', 'TOKEN=');

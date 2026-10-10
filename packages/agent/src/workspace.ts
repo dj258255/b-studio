@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { canonicalName } from './path-names';
+import { foldName } from './path-names';
 
 /** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
 const DENIED_SEGMENTS = new Set(['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__']);
@@ -14,8 +14,8 @@ const DENIED_FILES = [/^\.env(\..*)?$/];
 const ENV_TEMPLATE_FILE = /^\.env(\.[\w-]+)*\.(example|sample|template|dist)$/;
 
 function isDeniedFileName(segment: string): boolean {
-  const name = canonicalName(segment);
-  return DENIED_FILES.some((pattern) => pattern.test(name)) && !ENV_TEMPLATE_FILE.test(name);
+  // 숨기는 쪽은 넓게 접은 이름으로 보고, 예외(예시 파일)는 좁게 본다: 예외는 허용 목록이라 닮은 이름까지 열어 주면 안 된다
+  return DENIED_FILES.some((pattern) => pattern.test(foldName(segment))) && !ENV_TEMPLATE_FILE.test(segment.normalize('NFC').toLowerCase());
 }
 
 const MAX_READ_BYTES = 256 * 1024;
@@ -323,6 +323,9 @@ export class Workspace {
 
   async #resolve(file: string, { mustExist }: { mustExist: boolean }): Promise<string> {
     if (path.isAbsolute(file)) throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
+    // POSIX에서 역슬래시는 구분자가 아니라 이름의 한 글자다. 실행 정책은 그런 경로를 받지 않으므로(path-names.ts) 여기서도 받지 않는다.
+    // 한쪽만 받으면 검사한 경로와 쓰는 경로가 달라진다
+    if (file.includes('\0') || (path.sep !== '\\' && file.includes('\\'))) throw new WorkspaceError(`${file}: 경로에 쓸 수 없는 글자가 있습니다`);
 
     const absolute = path.resolve(this.root, file);
     if (!isInside(this.root, absolute)) throw new WorkspaceError(`${file}: 프로젝트 밖 경로입니다`);
@@ -422,7 +425,7 @@ export function isSecretFile(file: string): boolean {
 }
 
 function isDenied(segment: string): boolean {
-  return DENIED_SEGMENTS.has(canonicalName(segment)) || isDeniedFileName(segment);
+  return DENIED_SEGMENTS.has(foldName(segment)) || isDeniedFileName(segment);
 }
 
 function isInside(root: string, target: string): boolean {
