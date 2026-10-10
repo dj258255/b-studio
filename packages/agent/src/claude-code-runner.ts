@@ -403,7 +403,15 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       prompt: input,
       options: {
         cwd: project.root,
-        systemPrompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide),
+        // 지시문을 대화에 기록해 두고 이어받을 때 그대로 다시 쓰는 것이 SDK의 기본이다(snapshot). 그러면 이어받은 대화는 처음 만들 때의
+        // 지시문으로만 돈다 — b-studio를 올려도, studio.yaml의 workflow나 프로젝트 안내 파일을 고쳐도 대화가 압축될 때까지 전달되지 않는다
+        // (트러블슈팅 130). 요청마다 대화를 이어받는 구조라 기록을 끄고 매번 지금의 지시문을 보낸다. 지시문이 그대로면 캐시도 그대로고,
+        // 바뀐 요청에서만 대화 캐시를 한 번 새로 쓴다
+        systemPrompt: {
+          type: 'custom',
+          prompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide),
+          snapshot: false,
+        },
         // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다.
         // "조사" 모드(researching)만 예외로 내장 WebSearch·WebFetch를 더 연다 — 파일·명령 도구는 절대 열지 않는다
         // (읽기 전용은 여전히 ToolContext.readOnly=ask가 b-studio 도구 쪽에서 막는다)
