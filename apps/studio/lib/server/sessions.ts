@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import {
+  experimentalEnabled,
   appendPlanToRequest,
   AssumptionSchema,
   attachResults,
@@ -911,8 +912,10 @@ function projectViews(
   project: LoadedProject,
   state: 'starting' | 'stopped' = 'starting',
   offManaged: ReadonlySet<string> = new Set(),
-): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy'> {
+): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy' | 'experimental'> {
   return {
+    // 서버 설정이라 프로젝트와 무관하지만, 화면이 탭을 그릴 때 함께 읽도록 여기서 싣는다(다시 열 때마다 지금 값으로 바뀐다)
+    experimental: experimentalEnabled(),
     // project.deploy(로더가 채운 값)는 선언하지 않은 서비스도 기본값(Dockerfile)으로 채우므로 늘 비어 있지 않다.
     // "배포" 하위 탭을 보일지는 spec.deploy(원본, 선언했을 때만 있음)로 판단해야 한다
     hasDeploy: project.spec.deploy !== undefined,

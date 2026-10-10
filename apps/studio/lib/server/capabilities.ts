@@ -12,9 +12,13 @@
  * - `openFolder`: 이 PC의 폴더를 프로젝트로 열 수 있는가(ADR-067). 인증을 끈 개인 PC 모드에서만 된다 —
  *   개발 화면 머리의 프로젝트 메뉴(ADR-070)가 이 값으로 "폴더 열기…" 항목을 보일지 정한다.
  *
+ * - `experimental`: 실험 기능을 화면에 보이는가(B_STUDIO_EXPERIMENTAL, ADR-166). 꺼져 있으면 `fleet`·`split`도 꺼진 것으로 알린다 —
+ *   화면이 그 방식을 권하지 않게 하려는 것이고, API는 그대로 받는다(숨기는 것이지 막는 것이 아니다).
+ *
  * 목록은 각 기능이 실제로 막는 곳과 같은 상수(FLEET_MODES·PLANNER_MODES)를 쓴다 — 두 곳이 갈라지면
  * 화면이 되는 것처럼 보이는데 서버는 거부하는 상태가 된다.
  */
+import { experimentalEnabled } from '@b-studio/agent';
 import type { SessionMode } from '@/lib/studio-events';
 import { FLEET_MODES } from './fleets';
 import { allowedBackends, localFolderAllowed, sessionMode } from './sessions';
@@ -33,11 +37,28 @@ export interface StudioCapabilities {
   split: CapabilityState;
   backends: SessionMode[];
   openFolder: boolean;
+  experimental: boolean;
 }
 
+/** 실험 기능을 켜지 않아 꺼진 방식의 사유. 켜는 방법을 함께 알린다 */
+export const EXPERIMENTAL_REASON = '실험 기능이라 기본으로 숨겨 둡니다. B_STUDIO_EXPERIMENTAL=1로 스튜디오를 띄우면 쓸 수 있습니다';
+
 /** 순수 계산. 라우트와 테스트가 같은 함수를 쓴다 */
-export function buildCapabilities(input: { mode: SessionMode; backends: readonly SessionMode[]; openFolder: boolean }): StudioCapabilities {
+export function buildCapabilities(input: { mode: SessionMode; backends: readonly SessionMode[]; openFolder: boolean; experimental?: boolean }): StudioCapabilities {
   const { mode } = input;
+  // 생략하면 켠 것으로 본다(이 함수는 "서버가 할 수 있는가"를 계산하고, 숨김은 호출자가 넘긴다)
+  const experimental = input.experimental ?? true;
+  if (!experimental) {
+    return {
+      mode,
+      single: { enabled: true },
+      fleet: { enabled: false, reason: EXPERIMENTAL_REASON },
+      split: { enabled: false, reason: EXPERIMENTAL_REASON },
+      backends: [...input.backends],
+      openFolder: input.openFolder,
+      experimental,
+    };
+  }
   return {
     mode,
     // 한 세션에 요청 하나는 모든 모드에서 된다(데모는 준비된 대본으로 돈다)
@@ -50,11 +71,12 @@ export function buildCapabilities(input: { mode: SessionMode; backends: readonly
       : { enabled: false, reason: `계획을 모델에게 받으려면 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}여야 합니다 (지금 모드: ${mode})` },
     backends: [...input.backends],
     openFolder: input.openFolder,
+    experimental,
   };
 }
 
 /** 지금 서버 설정(B_STUDIO_MODE·B_STUDIO_BACKENDS·B_STUDIO_AUTH)으로 계산한 값 */
 export function studioCapabilities(): StudioCapabilities {
   const mode = sessionMode();
-  return buildCapabilities({ mode, backends: [...allowedBackends(mode)], openFolder: localFolderAllowed() });
+  return buildCapabilities({ mode, backends: [...allowedBackends(mode)], openFolder: localFolderAllowed(), experimental: experimentalEnabled() });
 }

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionView, ChatItem } from "@/lib/session-view";
 import { previewPathFromHref, readPreviewLocationMessage } from "@/lib/preview-message";
 import type { ExternalApiView, ServiceView } from "@/lib/studio-events";
-import { buildTopTabs, CODE_SUB_TABS, mapLegacyTab, REPOSITORY_SUB_TABS, REQUIREMENTS_SUB_TABS, runSubTabs, type SubTabOption } from "@/lib/tab-model";
+import { buildTopTabs, CODE_SUB_TABS, mapLegacyTab, REPOSITORY_SUB_TABS, REQUIREMENTS_SUB_TABS, runSubTabs, screenSubTabs, type ScreenSubTab, type SubTabOption } from "@/lib/tab-model";
 import { ApiExplorer } from "./api-explorer";
 import { useCodeOpen } from "./code-open-context";
 import { CodePanel } from "./code-panel";
@@ -30,8 +30,8 @@ import { TokenView } from "./token-view";
 import { useSubTab } from "./use-sub-tab";
 
 /**
- * 개발 화면의 위 탭(ADR-087). 화면·API는 서비스마다, 나머지는 코드(파일/변경 기록)·요구사항(명세/테스트)·
- * 실행(로그/리소스/배포)·저장소(이슈·PR/올리기 전 점검)·토큰 다섯 자리로 묶었다(예전엔 열 개가 넘는 낱개 탭이었다).
+ * 개발 화면의 위 탭(ADR-087, ADR-166). 화면·API는 켜 둔 서비스마다, 나머지는 코드(파일/변경 기록)·요구사항(명세/테스트/문서/현황)·
+ * 실행(로그/리소스/내 환경/토큰, 실험 기능을 켰으면 배포)·저장소(이슈·PR/올리기 전 점검) 네 자리로 묶었다.
  * 탭 목록은 순수 함수(buildTopTabs)로 만들어 렌더링 없이 테스트하고, 묶음마다 마지막으로 본 하위 탭은
  * localStorage에 기억한다(use-sub-tab.ts).
  */
@@ -42,7 +42,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
 
   const [codeSubTab, setCodeSubTab] = useSubTab("code");
   const [requirementsSubTab, setRequirementsSubTab] = useSubTab("requirements");
-  const runOptions = runSubTabs(view.snapshot.hasDeploy ?? false);
+  const experimental = view.snapshot.experimental === true;
+  const runOptions = runSubTabs(view.snapshot.hasDeploy ?? false, experimental);
   const [runSubTab, setRunSubTab] = useSubTab("run", runOptions);
   const [repositorySubTab, setRepositorySubTab] = useSubTab("repository");
 
@@ -93,7 +94,15 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           </GroupPanel>
         ) : active.kind === "group" && active.id === "requirements" ? (
           <GroupPanel label="요구사항" options={REQUIREMENTS_SUB_TABS} active={requirementsSubTab} onChange={setRequirementsSubTab}>
-            {requirementsSubTab === "tests" ? <TestsPanel view={view} /> : <RequirementsPanel view={view} />}
+            {requirementsSubTab === "tests" ? (
+              <TestsPanel view={view} />
+            ) : requirementsSubTab === "docs" ? (
+              <DocsPanel view={view} />
+            ) : requirementsSubTab === "status" ? (
+              <StatusPanel view={view} />
+            ) : (
+              <RequirementsPanel view={view} />
+            )}
           </GroupPanel>
         ) : active.kind === "group" && active.id === "run" ? (
           <GroupPanel label="실행" options={runOptions} active={runSubTab} onChange={setRunSubTab}>
@@ -103,6 +112,8 @@ export function PreviewPanel({ view }: { view: SessionView }) {
               <MyEnvPanel view={view} />
             ) : runSubTab === "deploy" ? (
               <DeployPanel view={view} />
+            ) : runSubTab === "tokens" ? (
+              <TokenView view={view} />
             ) : (
               <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
             )}
@@ -111,16 +122,10 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           <GroupPanel label="저장소" options={REPOSITORY_SUB_TABS} active={repositorySubTab} onChange={setRepositorySubTab}>
             {repositorySubTab === "presubmit" ? <SubmissionPanel view={view} /> : <RepositoryPanel view={view} />}
           </GroupPanel>
-        ) : active.kind === "docs" ? (
-          <DocsPanel view={view} />
-        ) : active.kind === "status" ? (
-          <StatusPanel view={view} />
-        ) : active.kind === "tokens" ? (
-          <TokenView view={view} />
         ) : active.kind === "external" ? (
           <ExternalApiPanel sessionId={view.snapshot.id} external={active.external} ready={view.snapshot.status === "ready"} revision={view.completedRuns} />
         ) : active.kind !== "service" ? (
-          // 도달할 일 없는 안전망(위에서 group·docs·status·tokens·external·service 여섯 kind를 모두 다뤘다)
+          // 도달할 일 없는 안전망(위에서 group·external·service 세 kind를 모두 다뤘다)
           <LogPanel logs={view.logs} services={view.snapshot.services.map((service) => service.name)} />
         ) : view.snapshot.status === "idle" ? (
           // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다
@@ -200,16 +205,6 @@ function SubTabBar({ label, options, active, onChange }: { label: string; option
   );
 }
 
-/** "화면" 탭(서비스별)의 하위 탭. 앱은 기존 iframe, 원격 브라우저와 QA는 서버가 중계하는 프레임을, 디자인 비교는 Figma 프레임을 그린다 */
-const SCREEN_SUB_TABS = [
-  { id: "app", label: "앱 미리보기" },
-  { id: "remote", label: "원격 브라우저" },
-  { id: "qa", label: "QA" },
-  { id: "design", label: "디자인 비교" },
-] as const;
-
-type ScreenSubTab = (typeof SCREEN_SUB_TABS)[number]["id"];
-
 /**
  * 화면 확인 중 QA 보기로 자동 전환하는 설정. 새로 고쳐도 남도록 localStorage에 둔다.
  * useSyncExternalStore로 읽어, 효과 안에서 setState하지 않고도 저장값을 반영한다(서버 렌더는 기본 켬)
@@ -232,7 +227,7 @@ function subscribeAutoQa(listener: () => void): () => void {
 }
 
 /**
- * 브라우저 서비스의 "화면" 탭. 하위 탭(앱 미리보기/원격 브라우저/QA/디자인 비교)을 보여 주고, 화면 확인(QA)이
+ * 브라우저 서비스의 "화면" 탭. 하위 탭(앱 미리보기/QA, 실험 기능을 켰으면 원격 브라우저/디자인 비교도)을 보여 주고, 화면 확인(QA)이
  * 시작되면 자동으로 QA 보기로 넘어간다. 자동 전환은 설정(기본 켬)으로 끌 수 있고, 끄면 사람이 고른 보기를 유지한다.
  * 이 서비스를 벗어나면(다른 서비스 탭·다른 상위 탭) 보기는 기억하지 않고 "앱 미리보기"로 되돌아간다(예전과 같다)
  */
@@ -259,7 +254,7 @@ function BrowserServicePanel({ view, service }: { view: SessionView; service: Se
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
-        <SubTabBar label="화면 하위 탭" options={SCREEN_SUB_TABS} active={mode} onChange={(id) => setMode(id as ScreenSubTab)} />
+        <SubTabBar label="화면 하위 탭" options={screenSubTabs(view.snapshot.experimental === true)} active={mode} onChange={(id) => setMode(id as ScreenSubTab)} />
         {mode === "qa" && <SubTabBar label="QA 보기" options={QA_INNER_MODES} active={qaInnerMode} onChange={(id) => setQaInnerMode(id as QaInnerMode)} />}
         <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
           <input type="checkbox" checked={autoQa} onChange={(event) => writeAutoQa(event.target.checked)} className="accent-ink" />

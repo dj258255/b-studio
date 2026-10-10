@@ -259,9 +259,19 @@ describe('되묻기 도구(ask_user)', () => {
 });
 
 describe('방식 제안 도구(propose_mode)', () => {
-  it('interactive일 때만 목록에 넣는다(ask_user와 같다)', () => {
+  it('interactive이고 실험 기능을 켰을 때만 목록에 넣는다 (ADR-166)', () => {
+    vi.stubEnv('B_STUDIO_EXPERIMENTAL', '1');
     expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('propose_mode');
     expect(buildTools(project, { interactive: true }).map((candidate) => candidate.name)).toContain('propose_mode');
+    vi.unstubAllEnvs();
+  });
+
+  it('실험 기능을 켜지 않았으면 넘기자고 제안하지 않는다. 되묻기는 그대로다 (ADR-166)', () => {
+    vi.stubEnv('B_STUDIO_EXPERIMENTAL', '');
+    const names = buildTools(project, { interactive: true }).map((candidate) => candidate.name);
+    expect(names).not.toContain('propose_mode');
+    expect(names).toContain('ask_user');
+    vi.unstubAllEnvs();
   });
 
   it('제안을 질문으로 넘긴다. 첫 선택지는 넘기기, 둘째는 한 명으로 계속이다', async () => {
@@ -619,7 +629,10 @@ describe('도구 분류 (샌드박스 필요 여부)', () => {
       managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }]],
       external: [['users', { source: 'external', baseUrl: 'https://users.example.com', policy: { mask: [], maskPatterns: [] } }]],
     } as unknown as LoadedProject;
+    // 실험 기능에 묶인 도구(propose_mode)도 켠다
+    vi.stubEnv('B_STUDIO_EXPERIMENTAL', '1');
     const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, design: true, interactive: true }).map((candidate) => candidate.name);
+    vi.unstubAllEnvs();
 
     for (const name of names) {
       expect(SANDBOX_TOOLS.has(name) || LOCAL_TOOLS.has(name), `분류가 없는 도구: ${name}`).toBe(true);
