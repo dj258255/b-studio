@@ -250,6 +250,53 @@ describe('postComment', () => {
   });
 });
 
+describe('buildPullRequest 길이 예산(이슈 #663)', () => {
+  /** 요청 하나의 커밋 본문이 약 3,000자인 세션. 60건이면 상세만 18만 자라 상한(60,000자)을 크게 넘는다 */
+  function longSession(count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      sha: String(index).padStart(40, '0'),
+      shortSha: String(index).padStart(7, '0'),
+      subject: `요청: ${index + 1}번째 변경`,
+      body: `검증 통과\n${`- ${index + 1}번째 요청의 게이트 결과와 에이전트 요약 `.repeat(120)}`,
+      files: [`api/src/Feature${index + 1}.java`],
+      passedStages: ['run', 'test'] as const,
+    }));
+  }
+  const appendix = '\n\nImplements: R1@rev1\n\n## 올리기 전 점검 9/9 통과\n\n- ✓ 테스트: 통과';
+
+  it('상한을 넘으면 끝을 자르지 않고 오래된 요청의 상세부터 줄인다. 검증 절·덧붙임·모든 요청 제목은 남는다', () => {
+    const commits = longSession(60);
+    const { body } = buildPullRequest({ projectName: 'orders', base: 'main', branch: 'b-studio/orders-s1', commits: commits.map((commit) => ({ ...commit, passedStages: [...commit.passedStages] })), requiredStages: ['run', 'test'], appendix });
+
+    // 마커로 감싸도 GitHub의 한도 안이다
+    expect(mergeManagedPullRequestBody(undefined, body).length).toBeLessThanOrEqual(60_000);
+    expect(body).not.toContain('본문이 길어 뒷부분을 생략했습니다');
+    // 끝에 있는 절과 덧붙임이 남는다
+    expect(body).toContain('## 검증');
+    expect(body).toContain('## 돌리지 않은 검증');
+    expect(body.endsWith(appendix)).toBe(true);
+    // 요청 60건의 제목과 검증 줄은 모두 있다
+    for (const index of [1, 30, 60]) {
+      expect(body).toContain(`### ${index}. ${index}번째 변경`);
+      expect(body).toContain(`${index}번째 변경 — 통과: run, test`);
+    }
+    // 상세는 최근 요청 것이 남고 오래된 것이 빠진다
+    expect(body).toContain('- 60번째 요청의 게이트 결과와 에이전트 요약');
+    expect(body).not.toContain('- 1번째 요청의 게이트 결과와 에이전트 요약');
+    const omitted = /앞의 (\d+)건은 게이트 결과와 에이전트 요약을 싣지 않았습니다/.exec(body);
+    expect(omitted).not.toBeNull();
+    expect(Number(omitted![1])).toBeGreaterThan(30);
+    expect(Number(omitted![1])).toBeLessThan(60);
+  });
+
+  it('상한 안이면 아무것도 줄이지 않고 안내도 넣지 않는다', () => {
+    const { body } = buildPullRequest({ projectName: 'orders', base: 'main', branch: 'b-studio/orders-s1', commits: longSession(5).map((commit) => ({ ...commit, passedStages: [...commit.passedStages] })), appendix });
+    expect(body).not.toContain('싣지 않았습니다');
+    for (const index of [1, 5]) expect(body).toContain(`- ${index}번째 요청의 게이트 결과와 에이전트 요약`);
+    expect(body.endsWith(appendix)).toBe(true);
+  });
+});
+
 describe('buildPullRequest', () => {
   it('갈라져 나온 브랜치가 원격에 없어 기본 브랜치를 대상으로 삼았으면 본문에 그 사실을 적는다', () => {
     const commits = [{ sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 메모 필드 추가', body: '', files: ['api/Order.java'] }];
@@ -1022,6 +1069,30 @@ describe('mergeManagedPullRequestBody', () => {
     expect(merged).toBe(`${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
   });
 
+  it('상한에서 잘린 옛 본문(## 요청은 있고 ## 검증은 잘려 없다)도 b-studio의 것으로 보고 통째로 바꾼다(이슈 #663, 실측: BE-commerce PR #470)', () => {
+    const truncated = ['`be-commerce` 프로젝트의 b-studio 세션에서 처리한 요청 47건입니다.', '', '## 요청', '', '### 1. 요구사항을 정리한다', '', '상세 '.repeat(2000), '', '(본문이 길어 뒷부분을 생략했습니다)'].join('\n');
+    expect(truncated).not.toContain('## 검증');
+    const merged = mergeManagedPullRequestBody(truncated, '새 초안');
+    // 예전에는 옛 본문 뒤에 새 영역을 붙였고, 합친 것이 다시 잘려 새 초안이 사라졌다
+    expect(merged).toBe(`${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('닫는 마커가 잘려 없는 본문은 여는 마커부터 끝까지를 관리 영역으로 보고 바꾼다', () => {
+    const cut = `사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n옛 초안이 길어서 닫는 마커 앞에서 잘렸다\n\n(본문이 길어 뒷부분을 생략했습니다)`;
+    const merged = mergeManagedPullRequestBody(cut, '새 초안');
+    expect(merged).toBe(`사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('관리 영역이 한도를 넘으면 닫는 마커와 마커 밖의 글을 지키고 관리 영역의 끝만 줄인다', () => {
+    const existing = `사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n옛 초안\n${PR_MANAGED_BODY_END}\n\n사람이 아래에 적은 메모`;
+    const merged = mergeManagedPullRequestBody(existing, `머리 ${'가'.repeat(70_000)} 꼬리`);
+    expect(merged.length).toBeLessThanOrEqual(60_000);
+    expect(merged.startsWith(`사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n머리 `)).toBe(true);
+    expect(merged.endsWith(`(본문이 길어 뒷부분을 생략했습니다)\n${PR_MANAGED_BODY_END}\n\n사람이 아래에 적은 메모`)).toBe(true);
+    // 줄인 본문을 다시 갱신해도 마커 쌍을 찾아 그 사이만 바꾼다
+    expect(mergeManagedPullRequestBody(merged, '다음 초안')).toBe(`사람이 위에 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n다음 초안\n${PR_MANAGED_BODY_END}\n\n사람이 아래에 적은 메모`);
+  });
+
   it('마커도 없고 b-studio 본문 같지도 않으면(사람이 통째로 새로 쓴 설명) 지우지 않고 아래에 마커 영역을 덧붙인다', () => {
     const humanWritten = '이 PR은 결제 재시도 로직을 담당 팀과 상의해 직접 작성했습니다.';
     const merged = mergeManagedPullRequestBody(humanWritten, '새 초안');
@@ -1040,6 +1111,12 @@ describe('updatePullRequestBody', () => {
     expect((calls[1]!.body as { body: string }).body).toBe(`사람이 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
     expect((calls[1]!.body as { title?: string }).title).toBeUndefined();
     expect(result.body).toBe(`사람이 적은 메모\n\n${PR_MANAGED_BODY_BEGIN}\n새 초안\n${PR_MANAGED_BODY_END}`);
+  });
+
+  it('사람이 쓴 긴 본문 때문에 관리 영역이 들어갈 자리가 없으면 고치지 않고 알린다(갱신됐다고 하지 않는다)', async () => {
+    const { fn, calls } = fakeFetch([{ status: 200, body: { body: '사람이 직접 쓴 아주 긴 설명 '.repeat(4000) } }]);
+    await expect(updatePullRequestBody(github, 22, '새 초안', { env: { B_STUDIO_GITHUB_TOKEN: 't' }, fetch: fn })).rejects.toThrow('PR 본문이 길이 한도에 가까워 b-studio 영역을 넣지 못했습니다');
+    expect(calls).toHaveLength(1);
   });
 
   it('GitLab은 MR을 GET한 뒤 description만 PUT한다', async () => {

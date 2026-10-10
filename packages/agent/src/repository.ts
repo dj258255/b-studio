@@ -317,6 +317,8 @@ export function canCreatePullRequest(remote: RemoteLocation, env: Env = process.
   return remote.kind !== 'other' && remote.kind !== 'local' && Boolean(token ?? env[TOKEN_ENV[remote.kind]]);
 }
 
+const MANAGED_BODY_NO_ROOM = 'PR 본문이 길이 한도에 가까워 b-studio 영역을 넣지 못했습니다. PR 설명에서 직접 쓴 글을 줄인 뒤 다시 올리세요';
+
 /** 이미 같은 브랜치로 열린 PR이 있으면 새로 만들지 않고 그 주소를 돌려준다 */
 export async function createPullRequest(
   remote: RemoteLocation,
@@ -445,7 +447,8 @@ export async function updatePullRequestBody(
     const current = await fetchFn(url, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
     if (!current.ok) throw new PullRequestError(`GitLab API가 MR 조회를 거절했습니다 (HTTP ${current.status}): ${await errorMessage(current)}`);
     const existing = (await current.json()) as { description?: string | null };
-    const body = capBody(mergeManagedPullRequestBody(existing.description ?? undefined, managedBody));
+    const body = mergeManagedPullRequestBody(existing.description ?? undefined, managedBody);
+    if (managedBodySqueezedOut(body, managedBody)) throw new PullRequestError(MANAGED_BODY_NO_ROOM);
     const response = await fetchFn(url, { method: 'PUT', headers, body: JSON.stringify({ description: body }), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
     if (!response.ok) throw new PullRequestError(`GitLab API가 MR 본문 수정을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
     return { body };
@@ -456,7 +459,8 @@ export async function updatePullRequestBody(
   const current = await fetchFn(url, { headers, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
   if (!current.ok) throw new PullRequestError(`${label} API가 PR 조회를 거절했습니다 (HTTP ${current.status}): ${await errorMessage(current)}`);
   const existing = (await current.json()) as { body?: string | null };
-  const body = capBody(mergeManagedPullRequestBody(existing.body ?? undefined, managedBody));
+  const body = mergeManagedPullRequestBody(existing.body ?? undefined, managedBody);
+  if (managedBodySqueezedOut(body, managedBody)) throw new PullRequestError(MANAGED_BODY_NO_ROOM);
   const response = await fetchFn(url, { method: 'PATCH', headers, body: JSON.stringify({ body }), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
   if (!response.ok) throw new PullRequestError(`${label} API가 PR 본문 수정을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
   return { body };
@@ -1226,35 +1230,65 @@ export async function ensureLabels(
 export const PR_MANAGED_BODY_BEGIN = '<!-- b-studio:begin -->';
 export const PR_MANAGED_BODY_END = '<!-- b-studio:end -->';
 
-/** buildPullRequest가 만든 옛 본문(마커를 넣기 전)의 신호. 두 절 제목은 buildPullRequest가 내용과 무관하게 항상 넣는다 */
+/** 한도를 넘는 본문의 끝을 줄였을 때 붙이는 안내. 이 문구로 끝나는 본문은 b-studio가 줄인 것이다 */
+const TRUNCATED_BODY_NOTICE = '(본문이 길어 뒷부분을 생략했습니다)';
+/** 관리 영역을 감싸는 마커 둘과 줄바꿈의 길이 */
+const MANAGED_MARKER_CHARS = PR_MANAGED_BODY_BEGIN.length + PR_MANAGED_BODY_END.length + 2;
+/** 사람이 쓴 글이 한도를 거의 다 채웠을 때, 이보다 작은 자리에는 관리 영역을 넣지 않는다 */
+const MIN_MANAGED_BODY_CHARS = 2_000;
+
+/**
+ * buildPullRequest가 만든 옛 본문(마커를 넣기 전)의 신호. 두 절 제목은 buildPullRequest가 내용과 무관하게 항상 넣는다.
+ * 한도에서 끝이 잘린 본문은 뒤쪽 절("## 검증")이 없으므로, 앞쪽 절과 줄였다는 안내로 알아본다(이슈 #663 —
+ * 잘린 본문을 사람이 쓴 것으로 보고 새 영역을 그 뒤에 붙였고, 합친 것이 다시 잘려 새 영역이 통째로 사라졌다)
+ */
 function looksLikeLegacyManagedPullRequestBody(body: string): boolean {
-  return body.includes('## 요청') && body.includes('## 검증');
+  if (!body.includes('## 요청')) return false;
+  return body.includes('## 검증') || body.trimEnd().endsWith(TRUNCATED_BODY_NOTICE);
+}
+
+/** 마커 밖의 글(before·after)을 지키면서 관리 영역을 한도 안에 넣는다. 넘치면 관리 영역의 끝만 줄이고 닫는 마커는 남긴다 */
+function wrapManagedBody(before: string, managedBody: string, after: string): string {
+  const room = MAX_PULL_REQUEST_BODY - before.length - after.length - MANAGED_MARKER_CHARS;
+  const managed = managedBody.length <= room ? managedBody : `${managedBody.slice(0, Math.max(0, room - TRUNCATED_BODY_NOTICE.length - 2))}\n\n${TRUNCATED_BODY_NOTICE}`;
+  return `${before}${PR_MANAGED_BODY_BEGIN}\n${managed}\n${PR_MANAGED_BODY_END}${after}`;
 }
 
 /**
  * PR 본문 중 b-studio가 관리하는 영역만 지금 초안(managedBody)으로 바꾼다. 사람이 마커 밖(위·아래)에 적은
  * 내용은 그대로 둔다.
- * - 마커가 이미 있으면 그 사이만 바꾼다.
+ * - 마커가 이미 있으면 그 사이만 바꾼다. 닫는 마커가 없으면(예전에 끝이 잘린 본문) 여는 마커부터 끝까지를 바꾼다.
  * - 마커가 없지만 b-studio가 예전에 쓴 본문으로 보이면(looksLikeLegacyManagedPullRequestBody — "## 요청"·
  *   "## 검증" 절은 buildPullRequest만 넣는다) 통째로 마커로 감싸 바꾼다. 이런 PR은 처음 만들 때부터
  *   b-studio만 본문을 썼던 시절의 것이라(마커를 붙이기 전) 사람이 쓴 영역이 섞여 있을 가능성이 거의 없고,
  *   그대로 두면 새 커밋이 와도 본문이 영원히 낡은 채로 남는다(버그 리포트: PR #22).
  * - 그 밖(본문이 비었거나, 마커도 없고 우리 본문 같지도 않은 — 사람이 통째로 새로 쓴 설명 등)은 안전한 쪽을
  *   골라 기존 내용을 지우지 않고 그 아래에 마커로 감싼 영역을 덧붙인다.
+ *
+ * 돌려주는 본문은 한도(MAX_PULL_REQUEST_BODY) 안이다. 넘치면 관리 영역의 끝을 줄이고 닫는 마커와 마커 밖의 글은
+ * 남긴다(이슈 #663 — 합친 글의 끝을 잘라 닫는 마커가 사라지면 다음 갱신이 영역을 찾지 못한다). 마커 밖의 글만으로
+ * 한도가 차서 관리 영역이 들어갈 자리가 없으면 한도를 넘는 글을 그대로 돌려준다. 부르는 쪽이 길이를 보고 거절한다.
  */
 export function mergeManagedPullRequestBody(existingBody: string | undefined | null, managedBody: string): string {
   const current = existingBody ?? '';
   const beginIndex = current.indexOf(PR_MANAGED_BODY_BEGIN);
   const endIndex = current.indexOf(PR_MANAGED_BODY_END);
-  if (beginIndex !== -1 && endIndex !== -1 && endIndex > beginIndex) {
+  if (beginIndex !== -1) {
     const before = current.slice(0, beginIndex);
-    const after = current.slice(endIndex + PR_MANAGED_BODY_END.length);
-    return `${before}${PR_MANAGED_BODY_BEGIN}\n${managedBody}\n${PR_MANAGED_BODY_END}${after}`;
+    const after = endIndex > beginIndex ? current.slice(endIndex + PR_MANAGED_BODY_END.length) : '';
+    return wrapManagedBody(before, managedBody, after);
   }
-  if (current.trim() === '' || looksLikeLegacyManagedPullRequestBody(current)) {
-    return `${PR_MANAGED_BODY_BEGIN}\n${managedBody}\n${PR_MANAGED_BODY_END}`;
-  }
-  return `${current.trimEnd()}\n\n${PR_MANAGED_BODY_BEGIN}\n${managedBody}\n${PR_MANAGED_BODY_END}`;
+  if (current.trim() === '' || looksLikeLegacyManagedPullRequestBody(current)) return wrapManagedBody('', managedBody, '');
+  return wrapManagedBody(`${current.trimEnd()}\n\n`, managedBody, '');
+}
+
+/** 마커 밖의 글이 한도를 거의 채워 관리 영역이 제 구실을 못 할 만큼 줄었는가 */
+function managedBodySqueezedOut(body: string, managedBody: string): boolean {
+  if (body.length > MAX_PULL_REQUEST_BODY) return true;
+  const begin = body.indexOf(PR_MANAGED_BODY_BEGIN);
+  const end = body.indexOf(PR_MANAGED_BODY_END);
+  const kept = end - begin - PR_MANAGED_BODY_BEGIN.length - 2;
+  return kept < Math.min(managedBody.length, MIN_MANAGED_BODY_CHARS);
 }
 
 /** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
@@ -1322,6 +1356,7 @@ export function buildPullRequest({
   issues,
   requirementIds = [],
   requiredStages = [],
+  appendix = '',
 }: {
   projectName: string;
   /** PR의 대상 브랜치 */
@@ -1338,6 +1373,8 @@ export function buildPullRequest({
   requirementIds?: readonly string[];
   /** 이 프로젝트의 필수 워크플로 단계. 통과 기록이 없는 검증 단계를 "돌리지 않은 검증"에 모은다 */
   requiredStages?: readonly WorkflowStage[];
+  /** 본문 끝에 그대로 붙일 글(요구사항 줄·점검표 등). 길이 예산에 함께 넣어 본문을 줄일 때도 잘리지 않게 한다 */
+  appendix?: string;
 }): PullRequestDraft {
   const requests = commits.map(requestName);
   const title = buildPullRequestTitle(projectName, commits, requirementIds);
@@ -1359,15 +1396,16 @@ export function buildPullRequest({
     })
     .filter((entry): entry is { shortSha: string; subject: string; stages: WorkflowStage[] } => entry !== undefined);
 
-  const sections = commits.map((commit, index) => {
+  /** 요청 하나의 절. withDetails가 거짓이면 접어 둔 상세(게이트 결과·에이전트 요약)를 뺀다. 상세는 커밋 본문에도 있다 */
+  const section = (commit: SessionCommit, index: number, withDetails: boolean): string => {
     const shown = commit.files.slice(0, 10).map((file) => `\`${file}\``);
     const more = commit.files.length > shown.length ? ` 외 ${commit.files.length - shown.length}개` : '';
     const lines = [`### ${index + 1}. ${requests[index]}`, '', `커밋 \`${commit.shortSha}\`, 파일 ${commit.files.length}개: ${shown.join(', ')}${more}`];
-    if (commit.body) {
+    if (commit.body && withDetails) {
       lines.push('', '<details>', '<summary>검증 게이트 결과와 에이전트 요약</summary>', '', '~~~text', commit.body, '~~~', '', '</details>');
     }
     return lines.join('\n');
-  });
+  };
 
   const verification = commits.map((commit, index) => {
     if (isDocsExempt(commit)) return `- \`${commit.shortSha}\` ${requests[index]} — 문서 체크포인트(게이트 대상 아님)`;
@@ -1383,7 +1421,8 @@ export function buildPullRequest({
   // Closes는 여기 한 곳에서만 쓴다 — sessions.ts의 요구사항 Implements 절은 같은 이슈 번호를 다시 Closes로
   // 적지 않는다(버그 리포트: 검증된 요구사항의 이슈가 위아래 두 번 Closes로 나왔다)
   const linked = [...new Set([...(issue === undefined ? [] : [issue]), ...(issues ?? [])])];
-  const body = [
+  /** 앞에서부터 omitted건의 상세를 뺀 본문. 뺀 것이 있으면 "## 요청" 아래에 몇 건인지 적는다 */
+  const render = (omitted: number): string => [
     ...(linked.length === 0 ? [] : [...linked.map((number) => `Closes #${number}`), '(`Closes #n`은 이 PR이 기본 브랜치로 열릴 때만 이슈를 자동으로 닫습니다.)', '']),
     `\`${projectName}\` 프로젝트의 b-studio 세션에서 처리한 요청 ${commits.length}건입니다.`,
     '요청마다 스튜디오가 바뀐 서비스를 재시작하고 준비 상태와 API 계약을 확인했고, **검증 게이트를 통과한 변경만** 커밋했습니다.',
@@ -1396,7 +1435,8 @@ export function buildPullRequest({
     '',
     '## 요청',
     '',
-    sections.join('\n\n'),
+    ...(omitted > 0 ? [`본문 길이 한도 때문에 앞의 ${omitted}건은 게이트 결과와 에이전트 요약을 싣지 않았습니다. 각 커밋의 본문에 그대로 있습니다.`, ''] : []),
+    commits.map((commit, index) => section(commit, index, index >= omitted)).join('\n\n'),
     '',
     '## 검증',
     '',
@@ -1405,8 +1445,21 @@ export function buildPullRequest({
     '## 돌리지 않은 검증',
     '',
     unverified.join('\n'),
-  ].join('\n');
-  return { title, body: capBody(body), missing };
+  ].join('\n') + appendix;
+
+  // 한도를 넘으면 끝을 자르지 않고 오래된 요청의 상세부터 뺀다(이슈 #663). 끝에는 검증 요약·돌리지 않은 검증·덧붙임
+  // (요구사항 줄, 점검표)이 있어, 끝을 자르면 리뷰어가 먼저 볼 것이 사라진다. 마커로 감쌀 자리도 남긴다.
+  // 상세를 다 빼고도 넘치면(요청이 수백 건) 마지막 수단으로 끝을 자른다
+  const budget = MAX_PULL_REQUEST_BODY - MANAGED_MARKER_CHARS;
+  const withDetails = commits.map((commit) => Boolean(commit.body));
+  let omitted = 0;
+  let body = render(0);
+  while (body.length > budget && omitted < commits.length) {
+    omitted += 1;
+    // 상세가 없는 요청은 빼도 길이가 그대로라 다시 만들지 않는다
+    if (withDetails[omitted - 1]) body = render(omitted);
+  }
+  return { title, body: body.length > budget ? `${body.slice(0, budget - TRUNCATED_BODY_NOTICE.length - 2)}\n\n${TRUNCATED_BODY_NOTICE}` : body, missing };
 }
 
 /** 체크포인트 커밋 제목에서 "요청: " 접두사를 뺀 사람이 읽는 이름 */
@@ -1450,7 +1503,7 @@ function encodeRef(ref: string): string {
 }
 
 function capBody(body: string): string {
-  return body.length <= MAX_PULL_REQUEST_BODY ? body : `${body.slice(0, MAX_PULL_REQUEST_BODY)}\n\n(본문이 길어 뒷부분을 생략했습니다)`;
+  return body.length <= MAX_PULL_REQUEST_BODY ? body : `${body.slice(0, MAX_PULL_REQUEST_BODY)}\n\n${TRUNCATED_BODY_NOTICE}`;
 }
 
 async function errorMessage(response: Response): Promise<string> {

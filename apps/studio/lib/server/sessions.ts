@@ -3476,17 +3476,7 @@ async function pullRequestDraft(
   // 지금 세션 HEAD에서 검증됨이고 이번 세션 범위 안인 요구사항(ADR-115, ADR-092 개정) — 제목·Closes·
   // Implements가 모두 이 기준을 쓴다
   const { refs, closedIssues, closesTracking } = await verifiedRequirementSummary(session, commits, info, planRequirementIds);
-  const draft = buildPullRequest({
-    projectName: session.project.spec.name,
-    base: target.base,
-    missingBase: target.missingBase,
-    branch: info.branch,
-    commits,
-    issues,
-    requirementIds: refs.map((ref) => ref.id),
-    requiredStages: workflowStages(session.project),
-  });
-  // Closes는 위 draft.body 맨 위(issues 인자)가 이미 책임지므로, 여기서는 Implements: Rn@revN만 덧붙인다 —
+  // Closes는 본문 맨 위(buildPullRequest의 issues 인자)가 책임지므로, 여기서는 Implements: Rn@revN만 덧붙인다 —
   // 같은 이슈 번호를 두 번 Closes로 적지 않는다(버그 리포트: Closes #20이 본문에 두 번 나왔다)
   const requirementsAddendum = buildRequirementsAddendum(refs, { includeCloses: false });
   // 검증됐지만 이슈가 이미 닫혀 있는 요구사항(이전 세션의 PR이 머지되며 자동으로 닫힌 이슈 등)은 Closes로
@@ -3511,7 +3501,20 @@ async function pullRequestDraft(
   const checklistAddendum = await submissionReport(session.snapshot.id, { assumePushed })
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
-  return { info, target, targetError, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}` };
+  // 덧붙임을 본문과 함께 넘겨 같은 길이 예산 안에서 만든다(이슈 #663). 예전에는 본문을 먼저 한도에서 자르고 그 뒤에
+  // 덧붙임을 붙였고, PR을 만들 때 한 번 더 잘려 요구사항 줄과 점검표가 요청이 많은 세션의 PR에서 통째로 빠졌다
+  const draft = buildPullRequest({
+    projectName: session.project.spec.name,
+    base: target.base,
+    missingBase: target.missingBase,
+    branch: info.branch,
+    commits,
+    issues,
+    requirementIds: refs.map((ref) => ref.id),
+    requiredStages: workflowStages(session.project),
+    appendix: `${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}`,
+  });
+  return { info, target, targetError, ...draft };
 }
 
 /** 기준 브랜치가 원격에 없고 원격의 기본 브랜치도 알 수 없어 PR을 열 대상이 없는 경우 */
