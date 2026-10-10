@@ -279,6 +279,14 @@ workflow:
       expect:
         successCount: { exactly: 1 }
         then: { method: GET, path: /api/products/1, jsonPath: "$.stock", equals: 0 }
+  loadChecks:
+    - name: orders-p95
+      service: api
+      method: GET
+      path: /api/orders
+      concurrent: 100
+      requests: 1000
+      expect: { p95Ms: 200 }
   allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract]
   deniedCommands: [npm publish, git push, terraform apply]
   requireApprovalFor: [restart_service]
@@ -289,10 +297,11 @@ workflow:
 
 | 키 | 적용 방식 |
 |---|---|
-| `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`concurrency_check`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests`·`concurrencyChecks` 단계를 더합니다 |
+| `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`concurrency_check`·`load_check`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests`·`concurrencyChecks`·`loadChecks` 단계를 더합니다 |
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
 | `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `expectAnyText`는 그중 **하나라도 있으면 통과**하는 문구 목록(1~5개)입니다(같은 값의 표기가 갈릴 때, 예: `45000`/`45,000`). `expectAllText`는 **모두 있어야 통과**하는 문구 목록(1~5개)이고, 실패하면 빠진 문구만 알립니다(한 화면에 여러 값이 함께 보여야 할 때, 예: 샘플 주문 세 건의 고객 이름). `expectInViewport`는 `mode: browser` 전용으로, 적은 글자(1~5개)가 **스크롤하지 않은 첫 화면에 온전히 보여야 통과**합니다(`expectText`는 DOM에 있기만 하면 통과해서, 안쪽 스크롤 영역에 잘린 버튼을 잡지 못합니다). `steps`를 마친 뒤 `viewport`(없으면 기본 창) 크기로 잽니다. 글자를 담은 가장 안쪽 요소가 렌더링돼 있고(크기가 0이 아니고 `display:none`·`visibility:hidden`이 아님), 그 사각형이 창 안에 들어 있고, `overflow`가 `visible`이 아닌 조상(안쪽 스크롤 영역)에 잘리지 않아야 보인다고 봅니다. 오차는 1px까지 허용하며, 같은 글자를 담은 요소가 여럿이면 하나라도 보이면 통과합니다. 투명하거나(`opacity`) 2px보다 작은 상자에 든 글자, 다른 요소에 덮인 글자는 보이는 것으로 치지 않고, `steps`가 창을 스크롤해 둔 상태면 첫 화면이 아니므로 실패합니다. 실패하면 어느 글자가 창 아래로 몇 px 넘쳤는지, 어떤 조상에 잘렸는지, 화면에 없는지, 숨겨졌는지와 창 크기를 알립니다. 헤드리스 브라우저를 못 띄우면 이 확인은 건너뛰지 않고, `fallbackProbe`가 없으면 화면 확인 전체가 실패하고, 있으면 "확인하지 못했다"는 참고 문구가 결과에 남습니다. 자동 화면 확인(`autoPageChecks`)에는 없습니다. `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다. `expectFromApi`를 적으면 api를 먼저 불러 그 값이 화면 글자에 있는지 확인합니다(아래 'api 값 확인') 통과한 확인은 무엇을 쟀는지(상태 코드, 화면에 있던 문구, 첫 화면에 보인 글자와 창 크기, 오류 건수, 허용했거나 보지 않은 것)를 결과에 남기며 대화의 확인 줄과 QA 탭에서 펼쳐 볼 수 있습니다. |
 | `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
+| `loadChecks` | `load_check` 단계에서 같은 요청을 동시에 많이 보내 **응답 시간**을 잽니다(최대 5개). 호스트가 아니라 샌드박스 네트워크 안의 일회용 컨테이너에서 보냅니다. 아래 [부하 확인](#부하-확인-loadchecks)에 따로 적었습니다 |
 | `autoPageChecks` | **이번 실행에서 바뀐 Next.js 페이지(와 바뀐 컴포넌트·유틸을 쓰는 페이지)를 게이트가 스스로 찾아 열어 봅니다**(선택, 기본 없음). `service`는 `source: managed`이면서 템플릿이 `nextjs`여야 합니다. 아래 '바뀐 페이지 자동 확인' |
 | `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
@@ -302,11 +311,62 @@ workflow:
 
 불러올 때 검사하는 규칙:
 
-- `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가, `concurrency_check`가 있으면 `concurrencyChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
-- `tests`·`pageChecks`·`concurrencyChecks`의 `service`는 `source: managed` 서비스여야 합니다. `pageChecks.expectFromApi.service`(값을 꺼낼 api)도 마찬가지입니다.
+- `required`에 `test`가 있으면 `tests`가, `browser_check`가 있으면 `pageChecks`가, `concurrency_check`가 있으면 `concurrencyChecks`가, `load_check`가 있으면 `loadChecks`가 최소 하나 있어야 합니다. 실행할 수단이 없는 필수 단계는 통과처럼 보이기만 하기 때문입니다.
+- `tests`·`pageChecks`·`concurrencyChecks`·`loadChecks`의 `service`는 `source: managed` 서비스여야 합니다. `pageChecks.expectFromApi.service`(값을 꺼낼 api)도 마찬가지입니다.
 - `autoPageChecks.service`는 `source: managed`이면서 템플릿이 `nextjs`인 서비스여야 합니다(열어 볼 경로를 app 라우터 구조에서 찾습니다).
-- 테스트·동시 요청 확인 이름은 중복될 수 없습니다.
+- 테스트·동시 요청 확인·부하 확인 이름은 서로 중복될 수 없습니다.
 - `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
+
+### 부하 확인 (`loadChecks`)
+
+"동시 1,000건에서 p95 200ms 이내" 같은 응답 시간 요구를 게이트가 직접 잽니다(ADR-163).
+
+```yaml
+workflow:
+  loadChecks:
+    - name: reject-p95
+      service: api
+      method: POST
+      path: /api/orders
+      headers: { Idempotency-Key: "k-{{uuid}}" }
+      body: '{"productId":1,"qty":1,"n":{{seq}}}'
+      concurrent: 1000        # 동시에 열어 둘 연결 수 (1~1000)
+      requests: 1000          # 재는 요청의 전체 건수 (concurrent~10000, 생략하면 concurrent)
+      warmup: 0               # 재기 전에 보내는 준비 요청 수 (0~1000, 응답 시간에 넣지 않음)
+      expect:
+        p95Ms: 200            # p50Ms · p95Ms · p99Ms · maxMs 중 하나 이상
+        latencyOf: [409]      # 이 상태 코드의 응답만으로 응답 시간을 냄 (생략하면 전부)
+        successCount: { exactly: 50 }
+        allStatusIn: [201, 409]
+```
+
+| 항목 | 내용 |
+|---|---|
+| 어디서 보내나 | 샌드박스의 internal 네트워크에 붙인 일회용 컨테이너. 서비스 이름과 컨테이너 포트(`http://api:8080`)로 직접 부릅니다. 호스트로 공개한 포트를 거치지 않습니다 |
+| 러너 | 샌드박스 출입구(edge)와 같은 이미지(`node:22-bookworm-slim`)에서 도는 b-studio의 스크립트. 새 이미지를 받지 않습니다(`--pull never`). 마운트·공개 포트·환경 변수가 없고, 읽기 전용 파일 시스템에 권한을 모두 내려놓은 채 돕니다 |
+| 응답 시간의 뜻 | 요청을 연결에 실어 보낸 때부터 응답 본문을 다 받을 때까지. 연결은 미리 맺어 두므로 들어가지 않고, 연결에 걸린 시간은 따로 남깁니다 |
+| 요청의 모양 | 연결 `concurrent`개가 `requests`건을 나눠 보냅니다. 각 연결은 앞 요청의 응답을 받은 뒤 다음 요청을 보냅니다 |
+| `{{seq}}`·`{{uuid}}` | `path`·`headers` 값·`body`에서 요청 번호(1부터)와 요청마다 새 값으로 바뀝니다. 멱등 키처럼 요청마다 달라야 하는 값에 씁니다 |
+| 제한 시간 | 요청 하나 10초, 전체 60초. 넘긴 요청은 "응답을 받지 못한 요청"입니다 |
+| 순서 | 화면 확인·테스트·동시 요청 확인이 모두 끝난 뒤, 선언한 순서대로 하나씩 잽니다(서로의 부하가 섞이지 않게). 한 번의 실패를 재시도로 덮지 않습니다 |
+
+통과하지 않는 경우:
+
+- 응답 시간이 기준을 넘음.
+- **응답을 받지 못한 요청이 하나라도 있음**(연결 실패, 제한 시간 초과). 느린 요청이 표본에서 빠진 채 통과하지 않게 합니다.
+- 응답 시간을 잴 응답이 없음(`latencyOf`의 상태 코드가 한 건도 없는 경우 등).
+- **서버 오류(5xx)가 있음.** 빨리 실패하는 서비스가 응답 시간 기준을 통과하지 않게 합니다. 일부러 받는 것이면 `allStatusIn`에 적습니다.
+- `successCount`·`allStatusIn`이 어긋남.
+
+알아 둘 것:
+
+- **로컬 기계 하나에서 잰 값입니다.** 러너와 서비스가 같은 도커 VM의 CPU를 나눠 씁니다. 운영 성능을 뜻하지 않습니다.
+- 러너는 응답 시간을 **높게 잴 수는 있어도 낮게 재지는 않습니다**(응답을 받아 놓고 시각을 늦게 적을 수는 있어도 일찍 적지는 못합니다). 응답이 흩어져 오면 p95가 1~5ms, 1,000건이 같은 순간에 돌아오면 19~36ms 높게 나왔습니다(ADR-163의 실측). 기준을 넘겼을 때 러너가 많이 밀렸으면 실패 사유에 그 값을 함께 알립니다.
+- 요청마다 다른 로그인이 필요한 시나리오(사용자 1,000명이 각자 주문)는 선언할 수 없습니다. `Authorization`·`Cookie` 헤더는 받지 않습니다.
+- `warmup`은 상태를 바꾸는 요청이면 준비 요청도 상태를 바꿉니다(재고가 줄어드는 주문 등).
+- 로컬 Docker 제공자에서만 됩니다. Kubernetes 제공자에서는 "지원하지 않는다"로 끝나고 통과로 세지 않습니다.
+- [가볍게 확인](#가볍게-확인-요청-옵션-verify)에서는 재지 않고 건너뛴 단계로 남습니다.
+- `path`에는 공백·줄바꿈·비ASCII 문자를 쓸 수 없습니다(퍼센트 인코딩해서 적습니다).
 
 ### 가볍게 확인 (요청 옵션 `verify`)
 

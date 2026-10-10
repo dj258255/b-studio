@@ -271,14 +271,14 @@ describe('화면 요구를 화면 확인으로 선언하게 하는 안내 (ADR-1
 describe('응답 시간 요구를 부하 확인으로 선언하게 하는 안내 (ADR-163, #605)', () => {
   const withServices = (services: Array<[string, { preview: string }]>): LoadedProject => ({ spec: { name: 'shop', services: {} }, managed: services } as unknown as LoadedProject);
 
-  it('화면이 있든 없든 문맥에 들어가고, 호스트에서 부하 도구를 돌리라고 안내하지 말라는 말과 대신 쓸 선언이 있다', () => {
+  it('화면이 있든 없든 문맥에 들어가고, 선언하라는 지시와 스크립트·절차 문서로 대신하지 말라는 말이 있다', () => {
     for (const services of [[['api', { preview: 'openapi' }]], [['web', { preview: 'browser' }]]] as Array<Array<[string, { preview: string }]>>) {
       expect(workflowContext(withServices(services))).toContain(LOAD_CHECK_GUIDE);
     }
-    expect(LOAD_CHECK_GUIDE).toContain('호스트에서 부하 도구를 돌리라고 안내하지 마세요');
-    expect(LOAD_CHECK_GUIDE).toContain('workflow.loadChecks');
+    expect(LOAD_CHECK_GUIDE).toContain('workflow.loadChecks에 선언하세요');
+    expect(LOAD_CHECK_GUIDE).toContain('부하 도구 스크립트나 사람이 돌리는 절차 문서로 대신하지 마세요');
     expect(LOAD_CHECK_GUIDE).toContain('다음 요청부터');
-    expect(LOAD_CHECK_GUIDE).toContain('선언할 수 없으니 그렇다고 적으세요');
+    expect(LOAD_CHECK_GUIDE).toContain('그렇다고 적으세요');
   });
 
   it('안내의 예시는 실제 스키마가 받아들이는 꼴이다', () => {
