@@ -2264,6 +2264,13 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         `[b-studio] 사용자가 스튜디오 밖에서 파일 ${edits.files.length}개를 바꿔 체크포인트 ${edits.shortSha}로 남겼습니다: ${edits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`,
       );
     }
+    // 허용이 켜진 요청임을 모델도 알아야 한다. 모르면 "허용을 켜고 다시 요청해 달라"고 되묻거나, 이미 반영된 선언을 반영되지 않았다고 요약한다
+    if (plan.allowCheckChanges) {
+      noteForModel(
+        session,
+        `[b-studio] 사용자가 이 요청에 '확인 선언 변경 허용'을 켰습니다. 이번 실행의 검증은 ${SPEC_FILE}의 지금 확인 선언(tests·pageChecks·concurrencyChecks·loadChecks·autoPageChecks·required)으로 돕니다. 사용자가 요청한 선언만 바꾸고, 바꾼 것은 검증 결과의 declared-checks 줄에 남습니다.`,
+      );
+    }
     const agentStarted = performance.now();
     // 계획-실행 분리(ADR-075). 설정이 없거나 이 요청이 대상이 아니면 원래 요청 그대로 돌려준다(지금과 같은 동작)
     const { request: executionRequest, planUsage } = await withPlanBrief(session, run, request, plan, signal);
