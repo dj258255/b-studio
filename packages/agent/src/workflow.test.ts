@@ -232,7 +232,7 @@ describe('project workflow', () => {
   });
 });
 
-describe('화면 요구를 화면 확인으로 선언하게 하는 안내 (트러블슈팅 128)', () => {
+describe('화면 요구를 화면 확인으로 선언하게 하는 안내 (ADR-161 덧붙임, #604)', () => {
   const withServices = (services: Array<[string, { preview: string }]>): LoadedProject => ({ spec: { name: 'shop', services: {} }, managed: services } as unknown as LoadedProject);
 
   it('화면이 있는 프로젝트의 문맥에는 단언 필드와 "다음 요청부터 확인된다"가 들어 있다', () => {
