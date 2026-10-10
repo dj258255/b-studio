@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyCommit, generateCommitSubject, toCommitMood } from './commit-message';
 import type { PendingChange } from './checkpoints';
+import { recheckGateOnMaxTurns, type VerificationGate } from './gate';
 import { buildPrReviewFixRequest, type PrReviewFinding } from './pr-review';
 
 function change(file: string, kind: PendingChange['change'] = 'modified'): PendingChange {
@@ -122,6 +123,26 @@ describe('generateCommitSubject', () => {
     ];
     const subject = generateCommitSubject(request, changes);
     expect(subject).toBe('feat: [R22] shorts 모듈을 고친다');
+  });
+
+  it('턴 상한에서 게이트를 통과해 남긴 체크포인트는 플랫폼의 종료 안내를 제목으로 쓰지 않는다(실측: 세션 5b640fd3, 체크포인트 516fe67)', async () => {
+    // 완료 요약을 실제 함수로 만든다. 문구가 바뀌어도 이 테스트가 같은 문장을 본다
+    const passingGate = { verified: true, check: async () => ({ kind: 'pass' }) } as unknown as VerificationGate;
+    const { pass, summary } = await recheckGateOnMaxTurns(passingGate, 40, () => {});
+    expect(pass).toBe(true);
+    expect(summary).toContain('최대 턴 수(40)를 넘었습니다');
+
+    const request = '앞의 수정(0a6f7f0)을 올린 뒤 PR #470의 CI를 다시 돌렸습니다. 이번에는 허용 목록에 넣지 말고 CI에서 실제로 돌게 고쳐 주세요. 이 두 테스트는 R23의 유일한 실제 변환 검증입니다.';
+    const changes = [
+      change('.github/workflows/ci.yml'),
+      change('commerce/src/test/java/com/beomsu/becommerce/live/LiveOrderHoldReconciliationSandboxTest.java'),
+      change('commerce/src/test/java/com/beomsu/becommerce/live/LiveOrderHoldReconciliationTest.java'),
+    ];
+    const subject = generateCommitSubject(request, changes, summary);
+    expect(subject).not.toContain('턴 수');
+    expect(subject).not.toContain('넘었습니다');
+    // 요약이 없을 때와 같은 대체 경로(요구사항 id·바뀐 파일)로 간다
+    expect(subject).toBe(generateCommitSubject(request, changes));
   });
 
   it('네트워크 끊김처럼 다른 상황 설명 낱말도 제목 후보에서 뺀다', () => {
