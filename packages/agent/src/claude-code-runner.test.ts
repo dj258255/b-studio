@@ -23,6 +23,13 @@ beforeEach(async () => {
   project = await createOrdersProject('claude-code-test-');
 });
 
+/** 러너가 넘긴 지시문의 글. 러너는 지시문을 기록하지 않게 객체 꼴로 넘긴다(트러블슈팅 130) */
+function promptOf(options: Options | undefined): string {
+  const prompt = options?.systemPrompt;
+  if (typeof prompt === 'object' && prompt !== null && !Array.isArray(prompt) && prompt.type === 'custom') return Array.isArray(prompt.prompt) ? prompt.prompt.join('') : prompt.prompt;
+  return typeof prompt === 'string' ? prompt : '';
+}
+
 type Step = ({ tool: string; input: Record<string, unknown> } | { text: string }) & {
   /** 이 assistant 메시지의 usage. 주면 실행 지표(maxContextTokens) 계산에 쓰인다 */
   usage?: Record<string, number>;
@@ -195,7 +202,7 @@ describe('runClaudeCodeAgent', () => {
     expect(state.options?.allowedTools).toContain('mcp__b-studio__edit_file');
     expect(state.options?.allowedTools?.every((name) => name.startsWith('mcp__b-studio__'))).toBe(true);
     expect(state.options?.resume).toBeUndefined();
-    expect(state.options?.systemPrompt).toEqual(expect.stringContaining('mcp__b-studio__read_file'));
+    expect(promptOf(state.options)).toEqual(expect.stringContaining('mcp__b-studio__read_file'));
 
     expect(result).toMatchObject({ status: 'done', summary: '컴파일 에러를 고쳤습니다.', verifyAttempts: 1, turns: 4, sessionId: 'new-session' });
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
@@ -262,6 +269,16 @@ describe('runClaudeCodeAgent', () => {
 
     expect(state.options).toMatchObject({ resume: 'previous-session', forkSession: true });
     expect(result).toMatchObject({ status: 'done', sessionId: 'forked-session', turns: 1 });
+  });
+
+  it('지시문을 대화에 기록하지 않게 넘긴다 — 이어받은 대화도 지금의 지시문으로 돈다 (트러블슈팅 130)', async () => {
+    const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '네.' }]] });
+
+    await runClaudeCodeAgent({ request: '이어서', project, sandbox: fakeSandbox(project, []), sdk, resume: 'previous-session', fetcher: async () => contract });
+
+    // 글만 넘기면 SDK가 처음 만들 때의 지시문을 기록해 두고, 이어받을 때 새로 넘긴 지시문을 무시한다
+    expect(state.options?.systemPrompt).toMatchObject({ type: 'custom', snapshot: false });
+    expect(promptOf(state.options)).toContain('[b-studio workflow]');
   });
 
   it('모델 호출이 오류로 끝나면 게이트를 돌리지 않고 실패한다', async () => {
@@ -940,8 +957,8 @@ describe('runClaudeCodeAgent 프로젝트 지침 주입(ADR-077)', () => {
 
     const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
 
-    expect(state.options?.systemPrompt).toContain('[b-studio project guide: AGENTS.md]');
-    expect(state.options?.systemPrompt).toContain('scripts/web-test.sh');
+    expect(promptOf(state.options)).toContain('[b-studio project guide: AGENTS.md]');
+    expect(promptOf(state.options)).toContain('scripts/web-test.sh');
     expect(result.metrics!.guideChars).toBe('## 스크립트\n- pnpm test 대신 scripts/web-test.sh를 실행\n'.length);
   });
 
@@ -950,7 +967,7 @@ describe('runClaudeCodeAgent 프로젝트 지침 주입(ADR-077)', () => {
 
     const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });
 
-    expect(state.options?.systemPrompt).not.toContain('[b-studio project guide');
+    expect(promptOf(state.options)).not.toContain('[b-studio project guide');
     expect(result.metrics!.guideChars).toBeUndefined();
   });
 });
