@@ -290,6 +290,8 @@ export function workflowContext(project: LoadedProject): string {
   const tests = workflow?.tests?.map((test) => `${test.name}(${test.service}: ${test.command.join(' ')})`).join(', ');
   const pages = workflow?.pageChecks?.map((check) => `${check.service} ${check.path}`).join(', ');
   const concurrency = workflow?.concurrencyChecks?.map((check) => `${check.name}(${check.service} ${check.method} ${check.path} ×${check.concurrent})`).join(', ');
+  // 화면이 있는 프로젝트에만 붙인다. 화면이 없으면 고정 문맥을 늘리지 않는다
+  const assertions = (project.managed ?? []).some(([, service]) => service.preview === 'browser') ? PAGE_ASSERTION_GUIDE : '';
   return `
 [b-studio workflow]
 이 프로젝트의 작업은 다음 순서로 진행합니다: ${stages.join(' → ')}.
@@ -297,8 +299,21 @@ export function workflowContext(project: LoadedProject): string {
 허용 도구: ${tools}
 보호 경로: ${protectedPaths}
 ${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}${concurrency ? `플랫폼이 동시에 보낼 요청: ${concurrency}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
-`;
+${assertions}`;
 }
+
+/**
+ * 화면에 대한 요구를 화면 확인으로 선언하게 하는 안내(ADR-161 덧붙임, #604). 단언(`expectInViewport` 등)은 studio.yaml의 필드를 알아야 걸 수 있는데
+ * 지시문에 그 설명이 없어, 요청에 필드 이름을 적어 줘야 에이전트가 걸었다. 게이트가 볼 수 있는 것을 쓰는 쪽이 모르면 게이트는 있는 것보다 덜 본다.
+ * 선언은 이번 요청의 게이트가 아니라 다음 요청부터 쓰인다(게이트는 실행을 시작할 때의 설정으로 돈다, ADR-159). 그 사실도 함께 알려 요약이
+ * "확인됐다"고 적지 않게 한다
+ */
+export const PAGE_ASSERTION_GUIDE = `화면에 대한 요구("~가 보여야 한다", "스크롤 없이 보여야 한다", "누르면 ~가 나와야 한다")를 받으면 눈으로 봤다고만 하지 말고 studio.yaml의 workflow.pageChecks에 선언하세요. 선언한 것은 플랫폼이 요청마다 직접 잽니다. 이번 요청이 아니라 다음 요청부터 확인되므로, 요약에는 "선언했다"고 쓰고 "확인됐다"고 쓰지 마세요.
+- 화면에 있어야 하는 글자: expectText: "글자" (여럿이면 expectAllText: ["가", "나"])
+- 스크롤하지 않은 첫 화면에 보여야 하는 글자: expectInViewport: ["글자"] (mode: browser에서만. 창 크기는 viewport: mobile | tablet | desktop | { width, height })
+- 누른 뒤의 화면: steps: [{ click: "선택자" }, { fill: { selector: "선택자", text: "값" } }, { waitFor: "선택자" }] 뒤에 위 단언
+예: - { service: web, path: /cart, mode: browser, expectInViewport: ["주문하기"] }
+`;
 
 export function describeWorkflow(workflow: WorkflowSpec | undefined): string {
   if (!workflow) return DEFAULT_WORKFLOW.join(' → ');

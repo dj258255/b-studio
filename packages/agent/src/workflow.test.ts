@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
+import { WorkflowPageCheckSchema, type LoadedProject, type WorkflowSpec } from '@b-studio/spec';
 import {
   COVERAGE_GAP_PREFIX,
   DEFAULT_WORKFLOW,
@@ -8,6 +8,7 @@ import {
   formatVerifyTrailer,
   maxTurnsFor,
   missingVerificationStages,
+  PAGE_ASSERTION_GUIDE,
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
   piPolicyEnvironment,
@@ -228,5 +229,30 @@ describe('project workflow', () => {
     it('요청 옵션(override)이 studio.yaml보다 우선한다', () => {
       expect(maxTurnsFor(projectWith({ maxTurns: 30 }), 90)).toBe(90);
     });
+  });
+});
+
+describe('화면 요구를 화면 확인으로 선언하게 하는 안내 (ADR-161 덧붙임, #604)', () => {
+  const withServices = (services: Array<[string, { preview: string }]>): LoadedProject => ({ spec: { name: 'shop', services: {} }, managed: services } as unknown as LoadedProject);
+
+  it('화면이 있는 프로젝트의 문맥에는 단언 필드와 "다음 요청부터 확인된다"가 들어 있다', () => {
+    const context = workflowContext(withServices([['web', { preview: 'browser' }], ['api', { preview: 'openapi' }]]));
+    expect(context).toContain(PAGE_ASSERTION_GUIDE);
+    for (const field of ['workflow.pageChecks', 'expectText', 'expectAllText', 'expectInViewport', 'steps', 'viewport']) expect(PAGE_ASSERTION_GUIDE).toContain(field);
+    expect(PAGE_ASSERTION_GUIDE).toContain('다음 요청부터');
+    expect(PAGE_ASSERTION_GUIDE).toContain('"확인됐다"고 쓰지 마세요');
+  });
+
+  it('화면이 없는 프로젝트(API만)의 문맥에는 붙이지 않는다', () => {
+    expect(workflowContext(withServices([['api', { preview: 'openapi' }]]))).not.toContain('expectInViewport');
+  });
+
+  it('안내의 예시는 실제 스키마가 받아들이는 꼴이다', () => {
+    const parsed = WorkflowPageCheckSchema.safeParse({ service: 'web', path: '/cart', mode: 'browser', expectInViewport: ['주문하기'], viewport: 'mobile', steps: [{ click: 'text=주문' }, { fill: { selector: '#qty', text: '2' } }, { waitFor: 'text=완료' }], expectAllText: ['가', '나'], expectText: '글자' });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('고정 문맥을 크게 늘리지 않는다(700자 이하)', () => {
+    expect(PAGE_ASSERTION_GUIDE.length).toBeLessThanOrEqual(700);
   });
 });
