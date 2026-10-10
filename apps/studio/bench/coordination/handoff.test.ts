@@ -21,6 +21,7 @@ import {
   parseHandoffMode,
   readFileState,
   readHandoffSource,
+  runReportsFromEvents,
   resolveHandoff,
   summarizeHandoff,
   unknownHandoff,
@@ -321,6 +322,25 @@ describe('세션 기록에서 세기', () => {
     expect(lastApiUnit([check('test', 'api-unit', true), check('test', 'api-unit', false)])).toBe('fail');
     expect(lastApiUnit([check('test', 'web-lint', true), check('review', 'protected-paths', true)])).toBeUndefined();
     expect(lastApiUnit([])).toBeUndefined();
+  });
+
+  it('실행 종료 이벤트(done·failed)의 상태와 요약 글을 순서대로 뽑고 다른 이벤트는 넘긴다', () => {
+    const events = [
+      agent({ type: 'text', text: '중간 글' }),
+      agent({ type: 'done', result: { status: 'done', summary: 'api를 만들었다. 테스트의 박철호는 요청의 박철수와 다르다.', changedFiles: ['api/a.java'], gateOutcome: 'pass' } }),
+      check('test', 'api-unit', true),
+      agent({ type: 'failed', result: { status: 'failed', summary: '게이트를 통과하지 못했다', changedFiles: [], gateOutcome: 'exhausted' } }),
+    ];
+    expect(runReportsFromEvents('s1', events)).toEqual([
+      { sessionId: 's1', runId: 'r1', status: 'done', gateOutcome: 'pass', summary: 'api를 만들었다. 테스트의 박철호는 요청의 박철수와 다르다.' },
+      { sessionId: 's1', runId: 'r1', status: 'failed', gateOutcome: 'exhausted', summary: '게이트를 통과하지 못했다' },
+    ]);
+    expect(runReportsFromEvents('s1', [check('test', 'api-unit', true)])).toEqual([]);
+  });
+
+  it('요약이 글이 아닌 종료 이벤트는 빈 글로 남긴다(행을 빼지 않는다)', () => {
+    const events = [agent({ type: 'done', result: { status: 'done', changedFiles: [] } })];
+    expect(runReportsFromEvents('s2', events)).toEqual([{ sessionId: 's2', runId: 'r1', status: 'done', summary: '' }]);
   });
 
   it('기록이 상한(5,000개)에 이르면 오래된 것이 잘렸을 수 있다', () => {
