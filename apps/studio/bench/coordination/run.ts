@@ -51,13 +51,25 @@ import {
 } from './backends';
 import { classify } from './classify';
 import { claudeCodeContractAsk } from './contracts';
+import {
+  handoffEventsTrusted,
+  handoffTestFor,
+  installHandoff,
+  readFileState,
+  resolveHandoff,
+  summarizeHandoff,
+  unknownHandoff,
+  withHandoffAsk,
+  type HandoffChoice,
+  type InstalledHandoff,
+} from './handoff';
 import { startDryProvider } from './dry-provider';
 import { envFailureAbortMessage, envFailuresExceeded, nextEnvFailureStreak, resolveMaxEnvFailures } from './env-guard';
 import { evaluateMemoryGuard, memoryGuardMessage, parseDockerMemTotalMb, perRunMemoryMb, sumDockerStatsMb } from './memory-guard';
 import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
-import { summarize, type BenchEscalation, type BenchLaneRow, type BenchRow } from './summary';
+import { summarize, type BenchEscalation, type BenchHandoffRow, type BenchLaneRow, type BenchRow } from './summary';
 import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
@@ -281,6 +293,9 @@ interface RunContext {
    * 동시 실행일 때의 시간 지표는 직렬 실행과 비교할 수 없어 행마다 남겨 둔다 */
   concurrency: number;
 
+  /** 테스트를 함께 건네는 조건(--handoff-tests correct|conflict, --protect-handoff). none이면 없다 */
+  handoff?: HandoffChoice;
+
   /** 벤치가 만든 프로젝트 복사본. P0는 이 폴더에서 Claude Code를 돌린다 */
   projectDir: string;
   /** P0 실행마다 복사본을 처음 상태로 되돌린다(반복이 서로 영향을 주지 않게) */
@@ -295,7 +310,12 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
 
   const startedAt = new Date().toISOString();
   const { taskPlans, sessions, localUser } = context;
-  const planJson = planFor(task, strategy, context.topology, context.laneBackends);
+  // 테스트를 건네면 api 작업 요청 끝에 부탁 문장을 붙인다(없으면 예전과 같은 계획 그대로)
+  const handoffSpec = context.handoff ? handoffTestFor(task.id) : undefined;
+  if (context.handoff && !handoffSpec) throw new Error(`과제 ${task.id}에는 건넬 테스트가 없습니다`);
+  const fixedPlan = planFor(task, strategy, context.topology, context.laneBackends);
+  const planJson = handoffSpec ? withHandoffAsk(fixedPlan, handoffSpec.file) : fixedPlan;
+  let handoffInstalled: InstalledHandoff | undefined;
   // --integration-checks일 때만 엮인 과제의 통합 게이트에 확인을 더한다(독립 과제는 없다)
   const integrationChecks = context.integrationChecks ? integrationChecksFor(task) : undefined;
   // 계약의 출처. S2에서만 뜻이 있다(다른 전략은 계약을 쓰지 않는다)
@@ -308,6 +328,12 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
   let harnessError: string | undefined;
 
   try {
+    // 실행마다 복사본을 처음 상태로 되돌린 뒤 이 과제의 테스트를 넣는다(앞 실행이 남긴 것이 섞이지 않게).
+    // 세션은 이 복사본에서 작업 폴더를 만들므로(커밋 없는 cp 경로) 세션을 만들기 전에 넣어야 한다
+    if (context.handoff) {
+      await context.resetProject();
+      handoffInstalled = await installHandoff(context.projectDir, task.id, context.handoff);
+    }
     // openai 백엔드는 프록시가 계획 요청에 이 JSON을 돌려준다. 로컬 CLI 백엔드는 계획을 서버 안에서 넘긴다
     if (context.backend === 'openai' && context.proxy) context.proxy.setPlan(planJson);
     // 모델 계약: 고정 계획은 그대로 두고 계약만 계획 모델에게 받아 coordination.contracts로 넘긴다.
@@ -411,6 +437,14 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     }
   }
 
+  // 건넨 테스트의 끝 상태와 기록은 세션을 내리기 전에 읽는다(내린 뒤에는 샌드박스 상태가 바뀐다)
+  let handoffRow: BenchHandoffRow | undefined;
+  if (context.handoff && handoffSpec) {
+    handoffRow = handoffInstalled
+      ? await observeHandoff(context, handoffInstalled, plan, laneSessionIds, integrationSessionId, sessionEvents)
+      : unknownHandoff(context.handoff, handoffSpec.file);
+  }
+
   // 세션을 모두 내린다. 실패·시간 초과로 끝났어도 남기지 않는다.
   // stopSession이 실패하면 activeSessions에 남겨, 남은 컨테이너가 있을 때 다시 시도한다
   for (const id of sessionIds) {
@@ -434,6 +468,15 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       }
     }
     leftoverContainers = runningContainers(`studio-${PROJECT_ID}-`);
+  }
+  // 건넨 테스트를 넣은 복사본을 처음 상태로 되돌린다. 다음 실행에 앞 과제의 테스트가 남으면 안 된다.
+  // 되돌리지 못하면 이 행을 오류로 남긴다(P0와 같은 규칙)
+  if (context.handoff) {
+    try {
+      await context.resetProject();
+    } catch (error) {
+      harnessError ??= `프로젝트 복사본을 되돌리지 못했습니다: ${describe(error)}`;
+    }
   }
   const success = !harnessError && plan.status === 'done' && Boolean(acceptance) && acceptance!.every((result) => result.ok);
   const classification = classify(plan, acceptance, harnessError);
@@ -502,6 +545,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     metrics,
     coordination: plan.metrics?.coordination,
     contracts,
+    ...(handoffRow ? { handoff: handoffRow } : {}),
     acceptance,
     success,
     category: classification.category,
@@ -512,6 +556,43 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     ...(cost.costUsd !== undefined ? { costUsd: cost.costUsd } : {}),
     ...(cost.costNote ? { costNote: cost.costNote } : {}),
   };
+}
+
+/**
+ * 건넨 테스트가 끝난 뒤 어떤 상태인지 세션 기록과 작업 폴더에서 읽는다(세션을 내리기 전에 부른다).
+ * - changed: 통합 세션 작업 폴더와 레인 세션 작업 폴더의 그 파일을 원본과 견준다. 통합 세션은 레인이 바꾼 파일을 보호 경로 때문에
+ *   다시 쓰지 못하고 원본인 채로 남을 수 있어(통합은 실패한다) 레인도 함께 읽는다. 통합 세션이 없으면(레인에서 끝남) 레인만 읽는다
+ * - 쓰기 시도·거절: 레인 세션 기록에서만 센다. 통합 세션의 쓰기는 레인 결과를 스크립트로 다시 쓰는 것이라 에이전트의 시도가 아니다
+ * - api-unit: 레인 → 통합 순서로 이은 기록의 마지막 값
+ */
+async function observeHandoff(
+  context: RunContext,
+  installed: InstalledHandoff,
+  plan: TaskPlanView,
+  laneSessionIds: string[],
+  integrationSessionId: string | undefined,
+  sessionEvents: Map<string, StudioEvent[]>,
+): Promise<BenchHandoffRow> {
+  const choice = context.handoff!;
+  const readIds = [...(integrationSessionId ? [integrationSessionId] : []), ...laneSessionIds];
+  const states = await Promise.all(readIds.map((id) => readFileState(context.sessions.getSnapshot(id)?.workDir, installed.file, installed.source)));
+  const laneEvents = laneSessionIds.flatMap((id) => {
+    const events = sessionEvents.get(id);
+    return events ? [events] : [];
+  });
+  const defaultLaneBackend = sessionBackendOf(context.backend);
+  const laneBackends = plan.lanes.filter((lane) => lane.sessionId).map((lane) => lane.backend ?? defaultLaneBackend);
+  // 기록을 읽지 못한 레인이 있으면 센 값이 모자라므로 믿지 않는다
+  const eventsTrusted = laneEvents.length === laneSessionIds.length && handoffEventsTrusted(laneBackends);
+  const integrationEvents = integrationSessionId ? sessionEvents.get(integrationSessionId) : undefined;
+  return summarizeHandoff({
+    ...choice,
+    file: installed.file,
+    states,
+    laneEvents,
+    testEvents: [...laneEvents, ...(integrationEvents ? [integrationEvents] : [])],
+    eventsTrusted,
+  });
 }
 
 /**
@@ -893,6 +974,14 @@ async function main(): Promise<void> {
   const contractsSource = resolveContractsSource(args.contracts);
   assertContractsStrategy(contractsSource, strategies);
   assertContractsBackend(contractsSource, backend);
+  // 테스트를 함께 건네는 옵션(이슈 #650). 거부 규칙은 Docker를 건드리기 전에 확인한다. P0는 --dry가 조용히 빼기 전의 값(args.strategies)으로 본다
+  const handoff = resolveHandoff({ handoffTests: args.handoffTests, protectHandoff: args.protectHandoff, requestedStrategies: args.strategies, taskIds: tasks.map((task) => task.id) });
+  if (handoff && strategies.some((strategy) => strategy !== 'S0')) {
+    console.warn(
+      '경고: 건넨 테스트는 S0(한 레인)에서 쓰도록 만들었습니다. 레인을 나누는 전략에서는 web 레인의 게이트도 api-unit을 돌려 건넨 테스트에 걸릴 수 있고, ' +
+        '레인 사이 합치기가 보호 경로 때문에 막힐 수 있어 결과를 S0와 같은 뜻으로 읽을 수 없습니다.',
+    );
+  }
   // S0는 api·web 작업을 한 레인에 넣는다. 레인 백엔드가 갈리면 한 세션으로 돌릴 수 없으므로 시작 전에 막는다
   if (strategies.includes('S0')) {
     const serverLaneBackend = sessionBackendOf(backend);
@@ -1115,6 +1204,7 @@ async function main(): Promise<void> {
       ...(planExecute.execute ? { executeModel: planExecute.execute } : {}),
       ...(prices ? { prices } : {}),
       concurrency: concurrencyForRecord,
+      ...(handoff ? { handoff } : {}),
 
       projectDir,
       resetProject,
@@ -1225,6 +1315,7 @@ async function main(): Promise<void> {
           selfCheck,
           concurrency: concurrencyForRecord,
           maxEnvFailures,
+          ...(handoff ? { handoffTests: handoff.variant, protectHandoff: handoff.protect } : {}),
           abortReason,
         },
         null,

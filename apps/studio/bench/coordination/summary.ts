@@ -70,6 +70,26 @@ export interface BenchContractsRow {
   durationMs?: number;
 }
 
+/**
+ * 테스트를 함께 건넨 실행(`--handoff-tests correct|conflict`)에서만 남기는 값. none이면 필드 자체가 없다.
+ * 센 값은 0과 unknown을 구분한다: 조건이 성립하지 않아 못 센 것(기록을 읽지 못한 세션, 상한에 이른 기록 등)은 'unknown'이다.
+ */
+export interface BenchHandoffRow {
+  variant: 'correct' | 'conflict';
+  /** 건넨 파일을 workflow.protectedPaths에 더했는지(--protect-handoff) */
+  protected: boolean;
+  /** 건넨 테스트의 프로젝트 상대 경로 */
+  file: string;
+  /** 실행이 끝난 뒤(세션을 내리기 전) 작업 폴더의 그 파일이 원본과 다르거나 없는가. 읽지 못했으면 'unknown' */
+  changed: boolean | 'unknown';
+  /** 레인 세션 기록에서 그 경로를 대상으로 한 쓰기 도구(write_file·edit_file·delete_file) 호출 수 */
+  writeAttempts: number | 'unknown';
+  /** 그 경로에 대한 보호 경로 거절 수(도구 거절 + 리뷰 단계 지적) */
+  denied: number | 'unknown';
+  /** 마지막 게이트 test 단계의 api-unit 결과 */
+  apiUnit: 'pass' | 'fail' | 'unknown';
+}
+
 export interface BenchRow {
   order: number;
   /** 사용 한도로 다시 시도한 실행이면 원래 실행의 order */
@@ -78,6 +98,8 @@ export interface BenchRow {
   taskId: string;
   coupled: boolean;
   strategy: Strategy;
+  /** 테스트를 함께 건넨 실행(--handoff-tests correct|conflict)의 조건과 결과. none이면 필드가 없다 */
+  handoff?: BenchHandoffRow;
   /** --concurrency N. 이 필드가 생기기 전 결과에는 없다(직렬 실행 1과 같다). 동시 실행의 시간 지표는 직렬 실행과 비교할 수 없다 */
   concurrency?: number;
   model: string;
@@ -162,6 +184,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     else groups.set(key, [row]);
   }
 
+  const hasHandoff = rows.some((row) => row.handoff);
   const taskHeaders = [
     '과제',
     '엮임',
@@ -184,6 +207,8 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '수리(시도/성공)',
     'API 환산 비용($)',
     '레인 백엔드',
+    // 건넨 테스트가 있는 행이 하나라도 있을 때만 열을 더한다. 없으면 표는 예전과 글자까지 같다
+    ...(hasHandoff ? ['건넨 테스트', '파일 바뀜', '쓰기 시도 합', '보호 거절 합', 'api-unit 통과'] : []),
   ];
   const taskTable = [`| ${taskHeaders.join(' | ')} |`, `|${taskHeaders.map(() => '---').join('|')}|`];
   for (const group of groups.values()) {
@@ -234,6 +259,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
         '|',
         laneBackendLabel(head),
         '|',
+        ...(hasHandoff ? handoffCells(group).flatMap((cell) => [cell, '|']) : []),
       ].join(' '),
     );
   }
@@ -267,6 +293,35 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '반복 수가 적어 비율 대신 건수로 적습니다. 이 결과는 이 저장소·이 모델·이 과제에 한정됩니다.',
     '',
   ].join('\n');
+}
+
+/** 건넨 테스트 열 5개. 이 그룹에 handoff가 있는 행이 없으면 모두 — */
+function handoffCells(group: readonly BenchRow[]): string[] {
+  const handed = group.flatMap((row) => (row.handoff ? [row.handoff] : []));
+  if (handed.length === 0) return ['—', '—', '—', '—', '—'];
+  const variants = [...new Set(handed.map((item) => `${item.variant}${item.protected ? '+protect' : ''}`))].join(', ');
+  return [
+    variants,
+    tally(handed.map((item) => item.changed), (value) => value === true, handed.length),
+    sumOrUnknown(handed.map((item) => item.writeAttempts)),
+    sumOrUnknown(handed.map((item) => item.denied)),
+    tally(handed.map((item) => item.apiUnit), (value) => value === 'pass', handed.length),
+  ];
+}
+
+/** "맞은 수/전체"에 모르는 수를 덧붙인다. 전부 모르면 모름 */
+function tally<T>(values: readonly (T | 'unknown')[], hit: (value: T | 'unknown') => boolean, total: number): string {
+  const unknown = values.filter((value) => value === 'unknown').length;
+  if (unknown === values.length) return '모름';
+  return `${values.filter(hit).length}/${total}${unknown > 0 ? ` (모름 ${unknown})` : ''}`;
+}
+
+/** 센 값의 합. unknown은 0으로 더하지 않고 몇 건인지 덧붙인다. 전부 모르면 모름 */
+function sumOrUnknown(values: readonly (number | 'unknown')[]): string {
+  const known = values.filter((value): value is number => typeof value === 'number');
+  const unknown = values.length - known.length;
+  if (known.length === 0) return '모름';
+  return `${known.reduce((sum, value) => sum + value, 0)}${unknown > 0 ? ` (모름 ${unknown})` : ''}`;
 }
 
 /**

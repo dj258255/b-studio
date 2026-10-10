@@ -56,6 +56,10 @@ export interface Args {
   repeatIndex?: number;
   /** 내부용. 부모가 전체 계획에서 이 자식이 맡은 순번을 지정한다(행의 order가 부모의 계획 순서와 같아지게) */
   orderStart?: number;
+  /** 테스트를 함께 건네는지(none|correct|conflict). 기본 none이고 이때 동작은 옵션이 없던 때와 같다(이슈 #650) */
+  handoffTests?: string;
+  /** 건넨 테스트 파일을 workflow.protectedPaths에 더해 보호한다. --handoff-tests가 correct·conflict일 때만 */
+  protectHandoff?: boolean;
   /** environment 실패가 연달아 이 횟수에 이르면 남은 실행을 돌리지 않고 멈춘다(이슈 #411). 기본 2 */
   maxEnvFailures?: number;
 }
@@ -74,6 +78,8 @@ export function parseArgs(argv: string[]): Args {
     if (arg === '--dry') args.dry = true;
     else if (arg === '--force') args.force = true;
     else if (arg === '--integration-checks') args.integrationChecks = true;
+    else if (arg === '--protect-handoff') args.protectHandoff = true;
+    else if (arg === '--handoff-tests') args.handoffTests = next(argv, index++, '--handoff-tests');
     else if (arg === '--verify') args.verify = next(argv, index++, '--verify');
     else if (arg === '--self-check') args.selfCheck = next(argv, index++, '--self-check');
     else if (arg === '--tasks') args.taskIds = split(next(argv, index++, '--tasks'));
@@ -113,6 +119,7 @@ export function parseArgs(argv: string[]): Args {
     else if (arg.startsWith('--topology=')) args.topology = arg.slice('--topology='.length);
     else if (arg.startsWith('--contracts=')) args.contracts = arg.slice('--contracts='.length);
     else if (arg.startsWith('--context-clearing=')) args.contextClearing = arg.slice('--context-clearing='.length);
+    else if (arg.startsWith('--handoff-tests=')) args.handoffTests = arg.slice('--handoff-tests='.length);
     else if (arg.startsWith('--verify=')) args.verify = arg.slice('--verify='.length);
     else if (arg.startsWith('--self-check=')) args.selfCheck = arg.slice('--self-check='.length);
     else if (arg.startsWith('--escalate-to=')) args.escalateTo = arg.slice('--escalate-to='.length);

@@ -1,0 +1,44 @@
+package com.example.api;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.test.web.servlet.MockMvc;
+
+// 데이터베이스 없이 뜨도록 DB 관련 자동 설정을 끈다. 컨트롤러와 서비스 빈은 모두 불러온다.
+@SpringBootTest(properties = {
+        "spring.autoconfigure.exclude="
+                + "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
+                + "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration,"
+                + "org.springframework.boot.data.jpa.autoconfigure.JpaRepositoriesAutoConfiguration,"
+                + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration",
+        "spring.flyway.enabled=false"
+})
+@AutoConfigureMockMvc
+class OrderDetailHandoffTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Test
+    void returnsOrderOneDetail() throws Exception {
+        mockMvc.perform(get("/api/orders/1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.customerName").value("김민수"))
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[?(@.name == '사과')].quantity").value(2))
+                .andExpect(jsonPath("$.items[?(@.name == '배')].quantity").value(1))
+                .andExpect(jsonPath("$.shippingMemo").value("문 앞에 놓아 주세요"));
+    }
+
+    @Test
+    void returnsNotFoundForUnknownOrder() throws Exception {
+        mockMvc.perform(get("/api/orders/999"))
+                .andExpect(status().isNotFound());
+    }
+}
