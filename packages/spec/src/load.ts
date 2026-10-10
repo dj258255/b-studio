@@ -169,6 +169,9 @@ export async function loadProject(dir: string): Promise<LoadedProject> {
   spec.workflow?.concurrencyChecks?.forEach((check, index) => {
     if (!managedNames.has(check.service)) issues.push(`workflow.concurrencyChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
   });
+  spec.workflow?.loadChecks?.forEach((check, index) => {
+    if (!managedNames.has(check.service)) issues.push(`workflow.loadChecks.${index}.service: '${check.service}'은(는) source: managed 서비스가 아닙니다`);
+  });
 
   // 런타임 공개 URL 자리 표시자(fix/frontend-backend-url)가 가리키는 서비스도 샌드박스가 포트를 공개하는 관리형 서비스여야 한다
   const publicUrlRefs = findPublicUrlRefs(compose.data.services);

@@ -1,8 +1,8 @@
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
-import { SandboxError, type ExecResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
-import { SpecError, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
+import { SandboxError, type ExecResult, type LoadRequest, type LoadResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
+import { SpecError, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
@@ -2504,5 +2504,198 @@ describe('VerificationGate 요구사항 문서의 검증 기록(ADR-157)', () =>
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(gate.checks.find((entry) => entry.name === 'manual-verification-removed')).toMatchObject({ ok: true, stage: 'review' });
+  });
+});
+
+describe('VerificationGate 부하 확인 (ADR-163)', () => {
+  const load = (over: Partial<WorkflowLoadCheck> = {}): WorkflowLoadCheck => ({
+    name: 'orders-p95',
+    service: 'api',
+    method: 'POST',
+    path: '/api/products/1/orders',
+    concurrent: 1000,
+    warmup: 0,
+    expect: { p95Ms: 200, latencyOf: [409] },
+    ...over,
+  });
+  const measured = (over: Partial<LoadResult> = {}): LoadResult => ({
+    requests: 1000,
+    concurrent: 1000,
+    threads: 4,
+    completed: 1000,
+    elapsedMs: 640,
+    statuses: { '201': 50, '409': 950 },
+    errors: {},
+    latency: { count: 950, p50: 12, p95: 45.6, p99: 60, max: 70 },
+    connect: { count: 1000, p50: 60, p95: 80, p99: 85, max: 90, errors: 0 },
+    loopDelay: { p99: 3, max: 9 },
+    warmup: { requests: 0, errors: 0 },
+    ...over,
+  });
+
+  async function loadGate(target: LoadedProject, runLoad: Sandbox['runLoad'] | undefined, extra: { exec?: () => Promise<ExecResult> } = {}) {
+    const workspace = new Workspace(target.root);
+    const sandbox = fakeSandbox(target, [true, true, true]);
+    if (runLoad) sandbox.runLoad = runLoad;
+    if (extra.exec) sandbox.exec = extra.exec;
+    const events: AgentEvent[] = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      onEvent: (event) => events.push(event),
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return { gate, events };
+  }
+
+  it('선언한 부하를 샌드박스의 러너에 맡기고, 기준 안이면 근거와 함께 통과한다', async () => {
+    const requests: LoadRequest[] = [];
+    const { gate, events } = await loadGate(withWorkflow({ loadChecks: [load()] }), async (request) => {
+      requests.push(request);
+      return measured();
+    });
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(requests).toEqual([{ service: 'api', method: 'POST', path: '/api/products/1/orders', concurrent: 1000, requests: 1000, warmup: 0, latencyOf: [409] }]);
+    const check = gate.checks.find((entry) => entry.stage === 'load_check');
+    expect(check).toMatchObject({ name: 'orders-p95', ok: true, attempts: 1 });
+    expect(check?.detail).toContain('409 응답 950건) p50 12ms · p95 45.6ms');
+    expect(check?.evidence).toContain('409 응답 p95 45.6ms (기준 200ms 이하, 950건)');
+    expect(gate.passedStages.has('load_check')).toBe(true);
+    expect(events).toContainEqual({ type: 'stage', stage: 'load_check', source: 'platform' });
+  });
+
+  it('기준을 넘기면 잰 값과 함께 되돌려 보내고 단계는 통과로 남지 않는다', async () => {
+    const { gate } = await loadGate(withWorkflow({ loadChecks: [load()] }), async () => measured({ latency: { count: 950, p50: 150, p95: 310.4, p99: 400, max: 500 } }));
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('[load_check] orders-p95');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('409 응답 p95 310.4ms (기준: 200ms 이하)');
+    expect(gate.passedStages.has('load_check')).toBe(false);
+    expect(gate.checks.find((entry) => entry.stage === 'load_check')?.evidence).toBeUndefined();
+  });
+
+  it('응답을 받지 못한 요청이 있으면 응답 시간이 좋아도 통과하지 않는다', async () => {
+    const { gate } = await loadGate(withWorkflow({ loadChecks: [load()] }), async () => measured({ completed: 990, statuses: { '409': 990 }, errors: { TIMEOUT: 10 }, latency: { count: 990, p50: 1, p95: 2, p99: 3, max: 4 } }));
+
+    const outcome = await gate.check();
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('응답을 받지 못한 요청 10건 (TIMEOUT:10)');
+  });
+
+  it('여러 개를 선언하면 하나씩 차례로 잰다(서로의 부하가 섞이지 않게)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const order: string[] = [];
+    const { gate } = await loadGate(withWorkflow({ loadChecks: [load({ name: 'first' }), load({ name: 'second', path: '/b' }), load({ name: 'third', path: '/c' })] }), async (request) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      order.push(request.path);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      return measured();
+    });
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(maxInFlight).toBe(1);
+    expect(order).toEqual(['/api/products/1/orders', '/b', '/c']);
+  });
+
+  it('테스트와 함께 선언하면 테스트가 끝난 뒤에 잰다', async () => {
+    const sequence: string[] = [];
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }], loadChecks: [load()] });
+    const { gate } = await loadGate(
+      target,
+      async () => {
+        sequence.push('load');
+        return measured();
+      },
+      {
+        exec: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          sequence.push('test done');
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+      },
+    );
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(sequence).toEqual(['test done', 'load']);
+  });
+
+  it('러너를 띄우지 못한 것은 b-studio 쪽 문제로 알리고 재시도 횟수로 세지 않는다', async () => {
+    const { gate } = await loadGate(withWorkflow({ loadChecks: [load()] }), async () => {
+      throw new SandboxError('부하 러너를 실행하지 못했습니다 (종료 코드 125)', 'network studio-x_b-studio-sandbox not found', { platform: true });
+    });
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('exhausted');
+    expect(outcome.kind === 'exhausted' && outcome.summary).toContain('바꾼 코드의 문제가 아닙니다');
+    expect(outcome.kind === 'exhausted' && outcome.summary).toContain("부하 확인 'orders-p95'");
+    expect(gate.attempts).toBe(0);
+    expect(gate.platformFailure).toContain('network studio-x_b-studio-sandbox not found');
+    expect(gate.checks.find((entry) => entry.stage === 'load_check')).toMatchObject({ ok: false });
+    expect(gate.verified).toBe(false);
+  });
+
+  it('서비스가 꺼져 있어 재지 못한 것은 평범한 실패다(플랫폼 문제로 넘기지 않는다)', async () => {
+    const { gate } = await loadGate(withWorkflow({ loadChecks: [load()] }), async () => {
+      throw new SandboxError("'api' 서비스가 실행 중이 아니어서 부하 확인을 돌릴 수 없습니다 (상태: exited)");
+    });
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('실행 중이 아니어서');
+    expect(gate.platformFailure).toBeUndefined();
+    expect(gate.attempts).toBe(1);
+  });
+
+  it('부하 확인을 지원하지 않는 제공자에서는 통과로 세지 않고 지원하지 않는다고 알린다', async () => {
+    const { gate } = await loadGate(withWorkflow({ loadChecks: [load()] }), undefined);
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('exhausted');
+    expect(outcome.kind === 'exhausted' && outcome.summary).toContain('부하 확인(workflow.loadChecks)을 지원하지 않습니다');
+    expect(gate.passedStages.has('load_check')).toBe(false);
+    expect(gate.verified).toBe(false);
+  });
+
+  it('결과에 시크릿 값이 섞여 있으면 가려서 남긴다', async () => {
+    const target = withWorkflow({ loadChecks: [load()] });
+    const workspace = new Workspace(target.root);
+    const sandbox = fakeSandbox(target, [true]);
+    sandbox.redact = (text) => text.replaceAll('s3cr3t-value', '[가림]');
+    sandbox.runLoad = async () => {
+      throw new SandboxError('부하 러너의 결과를 읽지 못했습니다', 'token=s3cr3t-value', { platform: true });
+    };
+    const gate = await VerificationGate.create({ project: target, sandbox, workspace, allowBreaking: false, maxVerifyAttempts: 3, fetcher: async () => ORDERS_CONTRACT, onEvent: () => {} });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    await gate.check();
+    expect(gate.platformFailure).toContain('[가림]');
+    expect(gate.platformFailure).not.toContain('s3cr3t-value');
+    expect(JSON.stringify(gate.checks)).not.toContain('s3cr3t-value');
+  });
+
+  it('가볍게 확인(light)에서는 재지 않고 건너뛴 단계로 남긴다', async () => {
+    const target = withWorkflow({ loadChecks: [load()] });
+    const workspace = new Workspace(target.root);
+    const sandbox = fakeSandbox(target, [true]);
+    let called = 0;
+    sandbox.runLoad = async () => {
+      called += 1;
+      return measured();
+    };
+    const gate = await VerificationGate.create({ project: target, sandbox, workspace, allowBreaking: false, maxVerifyAttempts: 3, verify: 'light', fetcher: async () => ORDERS_CONTRACT, onEvent: () => {} });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(called).toBe(0);
+    expect(gate.skippedStages).toContain('load_check');
+    expect(gate.passedStages.has('load_check')).toBe(false);
   });
 });

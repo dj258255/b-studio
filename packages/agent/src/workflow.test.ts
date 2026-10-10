@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WorkflowPageCheckSchema, type LoadedProject, type WorkflowSpec } from '@b-studio/spec';
+import { WorkflowLoadCheckSchema, WorkflowPageCheckSchema, type LoadedProject, type WorkflowSpec } from '@b-studio/spec';
 import {
   COVERAGE_GAP_PREFIX,
   DEFAULT_WORKFLOW,
@@ -8,6 +8,7 @@ import {
   formatVerifyTrailer,
   maxTurnsFor,
   missingVerificationStages,
+  LOAD_CHECK_GUIDE,
   PAGE_ASSERTION_GUIDE,
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
@@ -62,6 +63,16 @@ describe('project workflow', () => {
     expect(workflowStages(project)).toContain('concurrency_check');
     expect(missingVerificationStages(project, new Set(['run', 'contract_check', 'review']))).toEqual(['concurrency_check']);
     expect(workflowContext(project)).toContain('플랫폼이 동시에 보낼 요청: stock(api POST /api/products/1/orders ×5)');
+  });
+
+  it('선언한 부하 확인은 자동으로 필수 단계가 되고 모델 컨텍스트에 기준과 함께 나온다', () => {
+    const project = projectWith({
+      loadChecks: [{ name: 'orders-p95', service: 'api', method: 'POST', path: '/api/orders', concurrent: 1000, warmup: 0, expect: { p95Ms: 200, latencyOf: [409] } }],
+    });
+    expect(workflowStages(project)).toEqual(['plan', 'implement', 'run', 'contract_check', 'load_check', 'review', 'checkpoint']);
+    expect(missingVerificationStages(project, new Set(['run', 'contract_check', 'review']))).toEqual(['load_check']);
+    expect(workflowContext(project)).toContain('플랫폼이 샌드박스 안에서 잴 응답 시간: orders-p95(api POST /api/orders 동시 1000 · p95 200ms 이하, 409 응답만)');
+    expect(formatCheckedCoverage([{ stage: 'load_check', name: 'orders-p95', ok: true, attempts: 1 }])).toBe('게이트가 확인함: [load_check] orders-p95(통과)');
   });
 
   it('통과 기록이 없는 검증 단계만 빠진 단계로 본다 (plan·implement·checkpoint는 게이트가 판정하지 않는다)', () => {
@@ -254,5 +265,29 @@ describe('화면 요구를 화면 확인으로 선언하게 하는 안내 (ADR-1
 
   it('고정 문맥을 크게 늘리지 않는다(700자 이하)', () => {
     expect(PAGE_ASSERTION_GUIDE.length).toBeLessThanOrEqual(700);
+  });
+});
+
+describe('응답 시간 요구를 부하 확인으로 선언하게 하는 안내 (ADR-163, #605)', () => {
+  const withServices = (services: Array<[string, { preview: string }]>): LoadedProject => ({ spec: { name: 'shop', services: {} }, managed: services } as unknown as LoadedProject);
+
+  it('화면이 있든 없든 문맥에 들어가고, 선언하라는 지시와 스크립트·절차 문서로 대신하지 말라는 말이 있다', () => {
+    for (const services of [[['api', { preview: 'openapi' }]], [['web', { preview: 'browser' }]]] as Array<Array<[string, { preview: string }]>>) {
+      expect(workflowContext(withServices(services))).toContain(LOAD_CHECK_GUIDE);
+    }
+    expect(LOAD_CHECK_GUIDE).toContain('workflow.loadChecks에 선언하세요');
+    expect(LOAD_CHECK_GUIDE).toContain('부하 도구 스크립트나 사람이 돌리는 절차 문서로 대신하지 마세요');
+    expect(LOAD_CHECK_GUIDE).toContain('다음 요청부터');
+    expect(LOAD_CHECK_GUIDE).toContain('그렇다고 적으세요');
+  });
+
+  it('안내의 예시는 실제 스키마가 받아들이는 꼴이다', () => {
+    expect(LOAD_CHECK_GUIDE).toContain('- { name: orders-p95, service: api, method: GET, path: /orders, concurrent: 100, requests: 1000, expect: { p95Ms: 200 } }');
+    const parsed = WorkflowLoadCheckSchema.safeParse({ name: 'orders-p95', service: 'api', method: 'GET', path: '/orders', concurrent: 100, requests: 1000, expect: { p95Ms: 200 } });
+    expect(parsed.success).toBe(true);
+  });
+
+  it('고정 문맥을 크게 늘리지 않는다(450자 이하)', () => {
+    expect(LOAD_CHECK_GUIDE.length).toBeLessThanOrEqual(450);
   });
 });

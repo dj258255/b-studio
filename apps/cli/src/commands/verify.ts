@@ -154,6 +154,7 @@ function stageLabel(stage: string): string {
       contract_check: 'API 계약 확인',
       test: '테스트',
       concurrency_check: '동시 요청 확인',
+      load_check: '부하 확인',
       review: '리뷰',
       checkpoint: '체크포인트',
     } as Record<string, string>

@@ -218,6 +218,7 @@ export const WorkflowStageSchema = z.enum([
   'contract_check',
   'test',
   'concurrency_check',
+  'load_check',
   'review',
   'checkpoint',
 ]);
@@ -294,6 +295,80 @@ export const WorkflowConcurrencyCheckSchema = z.object({
   concurrent: z.number().int().min(2).max(20),
   expect: ConcurrencyExpectSchema,
 });
+
+const MAX_LOAD_CHECKS = 5;
+/** 부하 확인 한 번에 보낼 수 있는 동시 요청 수와 전체 요청 수의 상한. 로컬 기계 하나에서 재는 것이라 넉넉히 두지 않는다 */
+export const MAX_LOAD_CONCURRENT = 1000;
+export const MAX_LOAD_REQUESTS = 10_000;
+
+/**
+ * 부하 확인의 기대. 응답 시간 기준(p50Ms·p95Ms·p99Ms·maxMs) 중 최소 하나는 적어야 한다.
+ * 응답을 받지 못한 요청(연결 실패, 제한 시간 초과)이 하나라도 있으면 기준과 상관없이 실패다 — 느린 요청이 표본에서 빠져 통과하는 일을 막는다.
+ */
+export const LoadExpectSchema = z
+  .object({
+    /** 응답 시간 기준(ms). 이 값 이하여야 통과한다 */
+    p50Ms: z.number().positive().optional(),
+    p95Ms: z.number().positive().optional(),
+    p99Ms: z.number().positive().optional(),
+    maxMs: z.number().positive().optional(),
+    /** 응답 시간을 이 상태 코드의 응답만으로 낸다. 예: 거절 응답(409)만의 p95. 생략하면 받은 응답 전부로 낸다 */
+    latencyOf: z.array(z.number().int().min(100).max(599)).min(1).optional(),
+    /** 성공(2xx) 건수. exactly와 atMost 중 최소 하나를 적는다 */
+    successCount: z
+      .object({
+        exactly: z.number().int().min(0).optional(),
+        atMost: z.number().int().min(0).optional(),
+      })
+      .refine((value) => value.exactly !== undefined || value.atMost !== undefined, 'successCount에는 exactly나 atMost 중 하나가 필요합니다')
+      .optional(),
+    /** 모든 응답의 상태 코드가 이 목록 안에 있어야 한다 */
+    allStatusIn: z.array(z.number().int().min(100).max(599)).min(1).optional(),
+  })
+  .refine(
+    (value) => value.p50Ms !== undefined || value.p95Ms !== undefined || value.p99Ms !== undefined || value.maxMs !== undefined,
+    'expect에는 응답 시간 기준(p50Ms·p95Ms·p99Ms·maxMs) 중 하나가 필요합니다. 건수만 볼 것이면 concurrencyChecks를 쓰세요',
+  );
+
+/**
+ * 같은 요청을 동시에 많이 보내 응답 시간을 재는 선언적 검사.
+ * 호스트가 아니라 샌드박스 네트워크 안의 일회용 컨테이너에서 보낸다 — 호스트에서 공개 포트로 보내면 그 통로의 지연이 섞이고,
+ * 통로가 끊기면 도커 연결 전체가 끊긴다(트러블슈팅 128). 로컬 기계에서 잰 값이라 운영 성능을 뜻하지 않는다.
+ */
+export const WorkflowLoadCheckSchema = z
+  .object({
+    name: z.string().regex(NAME),
+    service: z.string().regex(NAME),
+    method: z.enum(['POST', 'PUT', 'PATCH', 'DELETE', 'GET']),
+    /** `{{seq}}`(요청 번호)와 `{{uuid}}`(요청마다 새 값)를 쓸 수 있다. headers 값과 body에서도 같다 */
+    path: SERVICE_PATH,
+    /** JSON 문자열. GET에는 보내지 않는다 */
+    body: z.string().max(MAX_CONCURRENCY_BODY, `body는 ${MAX_CONCURRENCY_BODY}자 이하여야 합니다`).optional(),
+    headers: z
+      .record(z.string().regex(HEADER_NAME, 'HTTP 헤더 이름이어야 합니다'), z.string().min(1))
+      .refine((headers) => Object.keys(headers).length <= MAX_CONCURRENCY_HEADERS, `headers는 최대 ${MAX_CONCURRENCY_HEADERS}개까지 쓸 수 있습니다`)
+      .refine(
+        (headers) => Object.keys(headers).every((name) => !CREDENTIAL_HEADERS.has(name.toLowerCase())),
+        '비밀 값을 담는 인증 헤더는 쓸 수 없습니다. 인증이 필요하면 서비스가 secrets의 환경 변수를 읽게 하세요',
+      )
+      // 줄바꿈이 들어가면 다른 헤더를 끼워 넣을 수 있다. 그 밖의 제어 문자·비ASCII 문자는 러너가 요청을 만들지 못한다
+      .refine((headers) => Object.values(headers).every((value) => /^[\x20-\x7e]+$/.test(value)), 'headers 값에는 줄바꿈·제어 문자·비ASCII 문자를 쓸 수 없습니다')
+      .optional(),
+    /** 동시에 열어 둘 연결 수. 연결마다 앞 요청의 응답을 받은 뒤 다음 요청을 보낸다 */
+    concurrent: z.number().int().min(1).max(MAX_LOAD_CONCURRENT),
+    /** 재는 요청의 전체 건수. 생략하면 concurrent와 같다(연결마다 한 건) */
+    requests: z.number().int().min(1).max(MAX_LOAD_REQUESTS).optional(),
+    /** 재기 전에 보내는 준비 요청 수. 응답 시간에 넣지 않는다. 상태를 바꾸는 요청이면 준비 요청도 상태를 바꾼다는 점에 주의한다 */
+    warmup: z.number().int().min(0).max(1000).default(0),
+    expect: LoadExpectSchema,
+  })
+  .superRefine((check, ctx) => {
+    if (check.requests !== undefined && check.requests < check.concurrent) {
+      ctx.addIssue({ code: 'custom', path: ['requests'], message: 'requests는 concurrent 이상이어야 합니다' });
+    }
+    // 공백·줄바꿈·비ASCII 문자가 든 경로는 요청 줄을 깨뜨린다. 한글 같은 값은 퍼센트 인코딩해서 적는다
+    if (!/^[\x21-\x7e]+$/.test(check.path)) ctx.addIssue({ code: 'custom', path: ['path'], message: 'path에는 공백·줄바꿈·비ASCII 문자를 쓸 수 없습니다(퍼센트 인코딩해서 적으세요)' });
+  });
 
 /**
  * browser_check의 browser 모드에서 페이지를 연 뒤 순서대로 실행할 동작 하나.
@@ -513,6 +588,8 @@ export const WorkflowSchema = z
     pageChecks: z.array(WorkflowPageCheckSchema).optional(),
     /** required에 concurrency_check를 넣으면 최소 하나가 필요하다. 선언적 동시 요청과 결과 불변식으로 정합성을 본다 */
     concurrencyChecks: z.array(WorkflowConcurrencyCheckSchema).max(MAX_CONCURRENCY_CHECKS, `concurrencyChecks는 최대 ${MAX_CONCURRENCY_CHECKS}개까지 쓸 수 있습니다`).optional(),
+    /** required에 load_check를 넣으면 최소 하나가 필요하다. 샌드박스 안에서 동시 요청의 응답 시간을 잰다 */
+    loadChecks: z.array(WorkflowLoadCheckSchema).max(MAX_LOAD_CHECKS, `loadChecks는 최대 ${MAX_LOAD_CHECKS}개까지 쓸 수 있습니다`).optional(),
     /** 이번 실행에서 바뀐 Next.js 페이지를 게이트가 스스로 찾아 열어 본다(선택). example 프로젝트에는 켜지 않는다 */
     autoPageChecks: AutoPageChecksSchema.optional(),
     /** review 단계에서 한 번의 요청이 바꿀 수 있는 파일 수 상한. 넘으면 나눠서 요청하게 한다 */
@@ -545,6 +622,9 @@ export const WorkflowSchema = z
     if (required.has('concurrency_check') && !workflow.concurrencyChecks?.length) {
       ctx.addIssue({ code: 'custom', path: ['concurrencyChecks'], message: 'required에 concurrency_check가 있으면 실행할 concurrencyChecks가 최소 1개 필요합니다' });
     }
+    if (required.has('load_check') && !workflow.loadChecks?.length) {
+      ctx.addIssue({ code: 'custom', path: ['loadChecks'], message: 'required에 load_check가 있으면 실행할 loadChecks가 최소 1개 필요합니다' });
+    }
     const names = new Set<string>();
     workflow.tests?.forEach((test, index) => {
       if (names.has(test.name)) ctx.addIssue({ code: 'custom', path: ['tests', index, 'name'], message: `테스트 이름 '${test.name}'이 중복됩니다` });
@@ -552,6 +632,10 @@ export const WorkflowSchema = z
     });
     workflow.concurrencyChecks?.forEach((check, index) => {
       if (names.has(check.name)) ctx.addIssue({ code: 'custom', path: ['concurrencyChecks', index, 'name'], message: `동시 요청 확인 이름 '${check.name}'이 중복됩니다` });
+      names.add(check.name);
+    });
+    workflow.loadChecks?.forEach((check, index) => {
+      if (names.has(check.name)) ctx.addIssue({ code: 'custom', path: ['loadChecks', index, 'name'], message: `부하 확인 이름 '${check.name}'이 중복됩니다` });
       names.add(check.name);
     });
   });
@@ -694,6 +778,8 @@ export type WorkflowSpec = z.infer<typeof WorkflowSchema>;
 export type WorkflowTest = z.infer<typeof WorkflowTestSchema>;
 export type WorkflowConcurrencyCheck = z.infer<typeof WorkflowConcurrencyCheckSchema>;
 export type ConcurrencyExpect = z.infer<typeof ConcurrencyExpectSchema>;
+export type WorkflowLoadCheck = z.infer<typeof WorkflowLoadCheckSchema>;
+export type LoadExpect = z.infer<typeof LoadExpectSchema>;
 export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 export type WorkflowPageExpectFromApi = z.infer<typeof WorkflowPageExpectFromApiSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
