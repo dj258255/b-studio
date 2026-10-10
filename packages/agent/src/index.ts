@@ -198,6 +198,7 @@ export {
   redactCredentials,
   RemoteConflictError,
   type BaseStatus,
+  type PullRequestTarget,
   type Checkpoint,
   type DiscardBackup,
   type GitAuthor,

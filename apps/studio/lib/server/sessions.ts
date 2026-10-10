@@ -197,6 +197,7 @@ import {
   type ModelClient,
   type ModelClientInfo,
   type PullRequestDraft,
+  type PullRequestTarget,
   type ReferencedFile,
   type Recommendation,
   type RemoteLocation,
@@ -3462,15 +3463,23 @@ async function pullRequestDraft(
   issues: readonly number[],
   planRequirementIds: readonly string[] = [],
   { assumePushed = false }: { assumePushed?: boolean } = {},
-): Promise<PullRequestDraft & { info: RepositoryInfo }> {
+): Promise<PullRequestDraft & { info: RepositoryInfo; target: PullRequestTarget; targetError?: string }> {
   const info = (await session.checkpoints.repository())!;
+  // PR의 대상 브랜치를 원격에 물어 정한다. 기준 브랜치가 원격에 없으면 원격의 기본 브랜치가 대상이 된다.
+  // 원격에 닿지 못하면 예전처럼 기준 브랜치를 그대로 쓰고, 미리보기가 "확인하지 못함"으로 알린다
+  let targetError: string | undefined;
+  const target = await session.checkpoints.pullRequestTarget().catch((error: unknown): PullRequestTarget => {
+    targetError = describe(error);
+    return { base: info.base };
+  });
   const commits = await session.checkpoints.sessionCommits();
   // 지금 세션 HEAD에서 검증됨이고 이번 세션 범위 안인 요구사항(ADR-115, ADR-092 개정) — 제목·Closes·
   // Implements가 모두 이 기준을 쓴다
   const { refs, closedIssues, closesTracking } = await verifiedRequirementSummary(session, commits, info, planRequirementIds);
   const draft = buildPullRequest({
     projectName: session.project.spec.name,
-    base: info.base,
+    base: target.base,
+    missingBase: target.missingBase,
     branch: info.branch,
     commits,
     issues,
@@ -3502,7 +3511,28 @@ async function pullRequestDraft(
   const checklistAddendum = await submissionReport(session.snapshot.id, { assumePushed })
     .then((report) => buildChecklistAddendum(report))
     .catch(() => '');
-  return { info, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}` };
+  return { info, target, targetError, ...draft, body: `${draft.body}${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}` };
+}
+
+/** 기준 브랜치가 원격에 없고 원격의 기본 브랜치도 알 수 없어 PR을 열 대상이 없는 경우 */
+function hasNoPullRequestTarget(target: PullRequestTarget): boolean {
+  return target.missingBase !== undefined && target.missingBase === target.base;
+}
+
+/** 미리보기의 "PR 대상 브랜치" 확인 줄. 기준 브랜치가 원격에 있으면 줄을 두지 않는다 */
+export function pullRequestTargetCheck(target: PullRequestTarget, targetError?: string): ExportPreview['checks'][number] | undefined {
+  if (targetError !== undefined) {
+    return { id: 'base_on_remote', ok: 'unknown', detail: `기준 브랜치(${target.base})가 원격에 있는지 확인하지 못했습니다: ${targetError}` };
+  }
+  if (target.missingBase === undefined) return undefined;
+  if (hasNoPullRequestTarget(target)) {
+    return { id: 'base_on_remote', ok: false, detail: `기준 브랜치(${target.missingBase})가 원격에 없고 원격의 기본 브랜치도 알 수 없습니다. 브랜치는 올라가지만 PR은 만들 수 없습니다` };
+  }
+  return {
+    id: 'base_on_remote',
+    ok: false,
+    detail: `기준 브랜치(${target.missingBase})가 원격에 없습니다. PR의 대상은 원격의 기본 브랜치(${target.base})이고, ${target.missingBase}에만 있는 커밋도 함께 들어갑니다`,
+  };
 }
 
 /**
@@ -3548,7 +3578,7 @@ export async function previewExport(
   // assumePushed: true(버그 리포트 84) — 미리보기는 아직 올리지 않았지만, "PR 만들기"를 누르면 먼저 올리고 나서
   // 이 본문을 다시 계산하므로(exportSession) 작업 트리가 깨끗한 한 점검표의 "작업 트리·원격" 항목은 실제로
   // 만들어질 본문과 같이 통과로 보여야 미리보기 ≡ 실제 본문이 유지된다
-  const { info, title, body, missing } = await pullRequestDraft(session, issues, planRequirementIds, { assumePushed: true });
+  const { info, title, body, missing, target, targetError } = await pullRequestDraft(session, issues, planRequirementIds, { assumePushed: true });
   const remote = parseRemote(info.remoteUrl);
   // PR 생성(exportSession)과 같은 토큰을 먼저 찾아 이슈 확인에도 그대로 쓴다(ADR-107) — 이슈 조회만 토큰 없이
   // 돌다 실패하고 PR 생성은 되던 어긋남을 막는다
@@ -3558,20 +3588,24 @@ export async function previewExport(
   // 원격에 아무것도 쓰지 않는다(읽기만 한다)
   const trackingIssue = await publishedTrackingIssue(session.project.root).catch(() => undefined);
 
+  const targetCheck = info.pullRequestUrl ? undefined : pullRequestTargetCheck(target, targetError);
   return {
     title,
     body,
-    canCreate: canCreatePullRequest(remote, process.env, token),
+    canCreate: canCreatePullRequest(remote, process.env, token) && !hasNoPullRequestTarget(target),
     existingPullRequest: info.pullRequestUrl,
     issues: [...issues],
-    checks: buildExportChecks({
-      issues,
-      issueLookups,
-      missing,
-      uncheckpointed: (await session.checkpoints.pendingFiles()).length,
-      running: session.snapshot.running,
-      trackingIssue: trackingIssue?.issue,
-    }),
+    checks: [
+      ...(targetCheck ? [targetCheck] : []),
+      ...buildExportChecks({
+        issues,
+        issueLookups,
+        missing,
+        uncheckpointed: (await session.checkpoints.pendingFiles()).length,
+        running: session.snapshot.running,
+        trackingIssue: trackingIssue?.issue,
+      }),
+    ],
     review: { auto: session.project.spec.review.auto, maxRounds: session.project.spec.review.maxRounds },
   };
 }
@@ -3665,13 +3699,16 @@ export async function exportSession(
     let newlyConnectedPullRequest = false;
     if (pullRequest && !info.pullRequestUrl) {
       try {
-        const { title, body } = await pullRequestDraft(session, issues, planRequirementIds);
+        const { title, body, target } = await pullRequestDraft(session, issues, planRequirementIds);
+        if (hasNoPullRequestTarget(target)) {
+          throw new Error(`기준 브랜치(${target.base})가 원격에 없고 원격의 기본 브랜치도 알 수 없어 PR을 만들지 않았습니다. 브랜치는 올라갔습니다`);
+        }
         const remote = parseRemote(info.remoteUrl);
         // 미리보기(canCreate)가 "만들 수 있다"고 본 것과 같은 토큰으로 실제로 만든다(ADR-107)
         const token = await repositoryPullRequestToken(remote);
         // 본문을 b-studio 관리 영역 마커로 감싸 만든다(버그 리포트 85) — 다음에 같은 PR에 새 커밋이 올라가도
         // 이 마커 사이만 다시 쓰고, 사람이 PR 설명에 마커 밖으로 보탠 내용은 건드리지 않는다
-        const result = await createPullRequest(remote, { title, body: mergeManagedPullRequestBody(undefined, body), base: info.base, branch: info.branch }, { token });
+        const result = await createPullRequest(remote, { title, body: mergeManagedPullRequestBody(undefined, body), base: target.base, branch: info.branch }, { token });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
         newlyConnectedPullRequest = true;
@@ -4390,7 +4427,8 @@ async function describeRepository(store: CheckpointStore, sourceDirtyFiles: numb
     sourceDirtyFiles,
     pushedSha: info.pushedSha,
     pullRequestUrl: info.pullRequestUrl,
-    compareUrl: compareUrl(remote, info.base, info.branch),
+    // 기준 브랜치가 원격에 없으면 마지막으로 확인한 PR 대상(원격의 기본 브랜치)으로 작성 페이지 주소를 만든다
+    compareUrl: compareUrl(remote, info.pullRequestBase ?? info.base, info.branch),
     canCreatePullRequest: canCreatePullRequest(remote, process.env, token),
   };
 }

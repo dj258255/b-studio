@@ -382,7 +382,10 @@ async function createGitHubStylePullRequest(
       if (existing) return { url: existing.html_url, number: existing.number, created: false };
     }
   }
-  throw new PullRequestError(`${label} API가 PR 생성을 거절했습니다 (HTTP ${response.status}): ${await errorMessage(response)}`);
+  const text = await response.text().catch(() => '');
+  // GitHub는 없는 브랜치를 대상으로 하면 사유 없이 { field: 'base', code: 'invalid' }만 돌려준다
+  const hint = apiErrorFields(text).includes('base') ? ` 대상 브랜치(\`${input.base}\`)가 원격 저장소에 있는지 확인하세요.` : '';
+  throw new PullRequestError(`${label} API가 PR 생성을 거절했습니다 (HTTP ${response.status}): ${describeApiError(text)}${hint}`);
 }
 
 async function createMergeRequest(
@@ -1312,6 +1315,7 @@ function buildPullRequestTitle(projectName: string, commits: readonly SessionCom
 export function buildPullRequest({
   projectName,
   base,
+  missingBase,
   branch,
   commits,
   issue,
@@ -1320,7 +1324,10 @@ export function buildPullRequest({
   requiredStages = [],
 }: {
   projectName: string;
+  /** PR의 대상 브랜치 */
   base: string;
+  /** 세션이 갈라져 나온 브랜치가 원격에 없어 base(원격의 기본 브랜치)를 대상으로 삼았을 때, 그 브랜치의 이름 */
+  missingBase?: string;
   branch: string;
   commits: SessionCommit[];
   /** 연결할 이슈 번호 하나. issues와 함께 주면 둘을 합친다 */
@@ -1382,6 +1389,9 @@ export function buildPullRequest({
     '요청마다 스튜디오가 바뀐 서비스를 재시작하고 준비 상태와 API 계약을 확인했고, **검증 게이트를 통과한 변경만** 커밋했습니다.',
     '',
     `- 기준 브랜치: \`${base}\``,
+    ...(missingBase !== undefined && missingBase !== base
+      ? [`  - 세션은 \`${missingBase}\`에서 갈라져 나왔지만 그 브랜치가 원격에 없어 원격의 기본 브랜치를 대상으로 했습니다. \`${missingBase}\`에만 있던 커밋도 이 PR에 들어 있습니다.`]
+      : []),
     `- 세션 브랜치: \`${branch}\``,
     '',
     '## 요청',
@@ -1444,10 +1454,43 @@ function capBody(body: string): string {
 }
 
 async function errorMessage(response: Response): Promise<string> {
-  const text = await response.text().catch(() => '');
+  return describeApiError(await response.text().catch(() => ''));
+}
+
+interface ApiErrorEntry {
+  message?: unknown;
+  resource?: unknown;
+  field?: unknown;
+  code?: unknown;
+}
+
+function apiErrorEntries(text: string): ApiErrorEntry[] {
   try {
-    const data = JSON.parse(text) as { message?: unknown; errors?: Array<{ message?: string }> | unknown };
-    const detail = Array.isArray(data.errors) ? data.errors.map((error: { message?: string }) => error.message).filter(Boolean).join('; ') : '';
+    const data = JSON.parse(text) as { errors?: unknown };
+    return Array.isArray(data.errors) ? data.errors.filter((error): error is ApiErrorEntry => typeof error === 'object' && error !== null) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 거절 사유가 가리키는 입력 필드 이름들(GitHub의 errors[].field) */
+function apiErrorFields(text: string): string[] {
+  return apiErrorEntries(text).flatMap((error) => (typeof error.field === 'string' ? [error.field] : []));
+}
+
+/** errors[]에 message가 없으면(GitHub의 검증 실패가 그렇다) "PullRequest.base: invalid"처럼 필드와 코드로 적는다 */
+function describeApiError(text: string): string {
+  try {
+    const data = JSON.parse(text) as { message?: unknown };
+    const detail = apiErrorEntries(text)
+      .map((error) => {
+        if (typeof error.message === 'string' && error.message) return error.message;
+        const where = [error.resource, error.field].filter((part): part is string => typeof part === 'string' && part !== '').join('.');
+        const code = typeof error.code === 'string' ? error.code : '';
+        return where && code ? `${where}: ${code}` : where || code;
+      })
+      .filter(Boolean)
+      .join('; ');
     const message = typeof data.message === 'string' ? data.message : JSON.stringify(data.message ?? data);
     return `${message}${detail ? ` (${detail})` : ''}`.slice(0, 300);
   } catch {

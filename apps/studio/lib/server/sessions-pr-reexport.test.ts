@@ -238,6 +238,87 @@ async function runWrite(id: string, request: string, content: string): Promise<v
 const noFindings = () => JSON.stringify({ findings: [] });
 const blockerFinding = () => JSON.stringify({ findings: [{ severity: 'blocker', file: 'api/src/Order.java', title: '문제', detail: '설명' }] });
 
+describe('기준 브랜치가 원격에 없는 세션(이슈 #657)', () => {
+  /** 원본 폴더가 올리지 않은 로컬 브랜치를 체크아웃하고 있다. 세션의 기준 브랜치가 그 브랜치가 된다 */
+  async function checkoutLocalOnlyBranch(): Promise<void> {
+    await git(fake.sourceRoot, 'checkout', '-q', '-b', 'feat/local-only');
+    await writeFile(path.join(fake.sourceRoot, 'NOTE.md'), 'local only\n');
+    await git(fake.sourceRoot, 'add', '-A');
+    await git(fake.sourceRoot, 'commit', '-q', '-m', 'local only');
+  }
+
+  it('미리보기가 먼저 알리고, PR은 원격의 기본 브랜치를 대상으로 만들며 본문에 그 사실을 적는다', async () => {
+    await freshRoot();
+    await setupRepo();
+    await checkoutLocalOnlyBranch();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    expect(getSnapshot(id)?.repository?.base).toBe('feat/local-only');
+
+    await runWrite(id, '메모 필드 추가', 'class Order { String memo; }\n');
+    const preview = await previewExport(id);
+    expect(preview.checks[0]).toEqual({
+      id: 'base_on_remote',
+      ok: false,
+      detail: '기준 브랜치(feat/local-only)가 원격에 없습니다. PR의 대상은 원격의 기본 브랜치(main)이고, feat/local-only에만 있는 커밋도 함께 들어갑니다',
+    });
+    expect(preview.body).toContain('- 기준 브랜치: `main`');
+
+    const result = await exportSession(id, { pullRequest: true, review: false });
+    expect(result.pullRequestError).toBeUndefined();
+    expect(fake.createPullRequest).toHaveBeenCalledTimes(1);
+    const input = (fake.createPullRequest.mock.calls[0] as unknown[])[1] as { base: string; body: string };
+    // 예전에는 원격에 없는 feat/local-only를 대상으로 보내 GitHub가 422로 거절했다
+    expect(input.base).toBe('main');
+    expect(input.body).toContain('세션은 `feat/local-only`에서 갈라져 나왔지만 그 브랜치가 원격에 없어 원격의 기본 브랜치를 대상으로 했습니다.');
+    // 미리보기의 본문과 실제로 보낸 본문이 같은 대상을 적는다
+    expect(input.body).toContain('- 기준 브랜치: `main`');
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('기준 브랜치가 원격에 있으면 확인 줄을 더하지 않고 그 브랜치를 그대로 대상으로 쓴다', async () => {
+    await freshRoot();
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+
+    await runWrite(id, '메모 필드 추가', 'class Order { String memo; }\n');
+    const preview = await previewExport(id);
+    expect(preview.checks.map((check) => check.id)).not.toContain('base_on_remote');
+
+    await exportSession(id, { pullRequest: true, review: false });
+    const input = (fake.createPullRequest.mock.calls[0] as unknown[])[1] as { base: string; body: string };
+    expect(input.base).toBe('main');
+    expect(input.body).not.toContain('원격에 없어');
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('원격의 기본 브랜치도 알 수 없으면 브랜치만 올리고 PR은 만들지 않으며 까닭을 알린다', async () => {
+    await freshRoot();
+    await setupRepo();
+    await checkoutLocalOnlyBranch();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await runWrite(id, '메모 필드 추가', 'class Order { String memo; }\n');
+    // 원격의 HEAD가 가리키는 브랜치를 지운다
+    await execFileAsync('git', ['-C', path.join(root, 'orders.git'), 'update-ref', '-d', 'refs/heads/main']);
+
+    const preview = await previewExport(id);
+    expect(preview.canCreate).toBe(false);
+    expect(preview.checks[0]).toMatchObject({ id: 'base_on_remote', ok: false });
+    expect(preview.checks[0]?.detail).toContain('원격의 기본 브랜치도 알 수 없습니다');
+
+    const result = await exportSession(id, { pullRequest: true, review: false });
+    expect(result.sha).toBeTruthy();
+    expect(fake.createPullRequest).not.toHaveBeenCalled();
+    expect(result.pullRequestError).toBe('기준 브랜치(feat/local-only)가 원격에 없고 원격의 기본 브랜치도 알 수 없어 PR을 만들지 않았습니다. 브랜치는 올라갔습니다');
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+});
+
 describe('이미 열린 PR에 다시 export하기(버그 리포트 85·86)', () => {
   it('85: 본문을 다시 쓴다 — 새 PR을 또 만들지 않고 updatePullRequestBody로 제목 없이 본문만 갱신하고, 지금까지의 커밋을 모두 반영한다', async () => {
     await freshRoot();

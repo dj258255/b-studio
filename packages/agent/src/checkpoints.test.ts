@@ -537,6 +537,60 @@ async function pushReviewerCommit(base: string, remote: string, file: string, co
   return git(reviewer, 'rev-parse', 'HEAD');
 }
 
+describe('CheckpointStore PR 대상 브랜치', () => {
+  it('기준 브랜치가 원격에 있으면 그 브랜치가 대상이다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    expect(await store.pullRequestTarget()).toEqual({ base: 'main' });
+    expect((await store.repository())?.pullRequestBase).toBe('main');
+  });
+
+  it('기준 브랜치가 원격에 없으면(올리지 않은 로컬 브랜치에서 시작한 세션) 원격의 기본 브랜치가 대상이고 원래 이름을 함께 준다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    await git(source, 'checkout', '-q', '-b', 'feat/local-only');
+    await writeFile(path.join(source, 'NOTE.md'), 'local only\n');
+    await git(source, 'add', '-A');
+    await git(source, 'commit', '-q', '-m', 'local only');
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    expect((await store.repository())?.base).toBe('feat/local-only');
+    expect((await store.repository())?.pullRequestBase).toBeUndefined();
+
+    expect(await store.pullRequestTarget()).toEqual({ base: 'main', missingBase: 'feat/local-only' });
+    // 작성 페이지 주소가 같은 대상을 쓰도록 마지막으로 확인한 값을 남긴다
+    expect((await store.repository())?.pullRequestBase).toBe('main');
+  });
+
+  it('이름의 끝만 같은 원격 브랜치를 기준 브랜치로 잘못 보지 않는다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    // 원격에는 release/only만 있고, 세션의 기준은 로컬에만 있는 only다
+    await git(source, 'checkout', '-q', '-b', 'release/only');
+    await git(source, 'push', '-q', 'origin', 'release/only');
+    await git(source, 'checkout', '-q', '-b', 'only');
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+
+    expect(await store.pullRequestTarget()).toEqual({ base: 'main', missingBase: 'only' });
+  });
+
+  it('원격에 기준 브랜치도 기본 브랜치도 없으면 대상을 정하지 못했다고 알린다(base가 missingBase와 같다)', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    await git(source, 'checkout', '-q', '-b', 'feat/local-only');
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    // 원격의 HEAD가 가리키는 브랜치를 지워 기본 브랜치를 알 수 없게 한다
+    await execFileAsync('git', ['-C', remote, 'update-ref', '-d', 'refs/heads/main']);
+
+    expect(await store.pullRequestTarget()).toEqual({ base: 'feat/local-only', missingBase: 'feat/local-only' });
+  });
+
+  it('원격에 닿지 못하면 던진다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await rm(remote, { recursive: true, force: true });
+
+    await expect(store.pullRequestTarget()).rejects.toThrow();
+  });
+});
+
 describe('CheckpointStore 원격 변경 가져오기', () => {
   it('리뷰어 커밋을 병합 커밋 하나로 가져오고, 받아들인 뒤 올리면 원격을 덮어쓰지 않고 이어 붙인다', async () => {
     const { base, source, remote, workDir } = await createSourceRepository();
