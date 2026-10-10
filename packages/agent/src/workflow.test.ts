@@ -211,6 +211,16 @@ describe('project workflow', () => {
     });
   });
 
+  it('사용자가 허용해 확인 선언이 바뀐 체크포인트는 그 사실을 본문에 남긴다 (ADR-164)', () => {
+    const text = formatCheckedCoverage([
+      { stage: 'test', name: 'unit', ok: true, attempts: 1 },
+      { stage: 'review', name: 'declared-checks', ok: true, attempts: 1, detail: '사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 변경: 테스트 unit' },
+    ]);
+    expect(text).toBe('게이트가 확인함: [test] unit(통과)\n확인 선언 변경: 사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 변경: 테스트 unit');
+    // 읽지 못해 실패한 기록은 본문에 "바뀌었다"로 남기지 않는다
+    expect(formatCheckedCoverage([{ stage: 'review', name: 'declared-checks', ok: false, attempts: 1, detail: '다시 읽지 못해…' }])).toBe('');
+  });
+
   describe('formatCheckedCoverage(ADR-135)', () => {
     it('빈 배열·undefined는 빈 문자열', () => {
       expect(formatCheckedCoverage(undefined)).toBe('');

@@ -27,6 +27,19 @@ describe('chatRequestBody', () => {
     expect(chatRequestBody({ text: '질문', intent: 'ask' }).allowBreaking).toBe(false);
   });
 
+  it('확인 선언 변경 허용은 켰을 때만, 만들기 요청에만 싣는다 (ADR-164)', () => {
+    expect(chatRequestBody({ text: '테스트 선언을 고쳐 줘', intent: 'build', allowCheckChanges: true })).toEqual({
+      text: '테스트 선언을 고쳐 줘',
+      allowBreaking: false,
+      intent: 'build',
+      allowCheckChanges: true,
+    });
+    expect(chatRequestBody({ text: '테스트 선언을 고쳐 줘', intent: 'build', allowCheckChanges: false })).not.toHaveProperty('allowCheckChanges');
+    expect(chatRequestBody({ text: '테스트 선언을 고쳐 줘', intent: 'build' })).not.toHaveProperty('allowCheckChanges');
+    // 질문은 게이트를 돌리지 않는다
+    expect(chatRequestBody({ text: '선언이 뭐야?', intent: 'ask', allowCheckChanges: true })).not.toHaveProperty('allowCheckChanges');
+  });
+
   it('가볍게 확인이 켜지면 만들기 요청에 verify light를 싣고, 질문 경로에는 싣지 않는다', () => {
     expect(chatRequestBody({ text: '메모 추가', intent: 'build', lightVerify: true })).toEqual({
       text: '메모 추가',

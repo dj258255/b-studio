@@ -1,5 +1,6 @@
 import { AUTO_PAGE_MAX, type LoadedProject, type WorkflowStage, type WorkflowSpec } from '@b-studio/spec';
 import { routesFromChangedFiles } from './next-routes';
+import { DECLARED_CHECKS_CHECK } from './declared-checks';
 import { describeLoadExpect } from './load-check';
 import { DEFAULT_DENIED_COMMANDS, isProtectedPath, type ExecutionPolicy } from './policy';
 import { ownsFile, servicesForFiles } from './services';
@@ -270,6 +271,9 @@ export function formatCheckedCoverage(checks: readonly WorkflowCheck[] | undefin
   if (gaps.length > 0) {
     lines.push(`확인 안 됨:\n${gaps.map((check) => `- ${check.detail ?? check.name}`).join('\n')}`);
   }
+  // 사용자가 허용해 확인 선언이 바뀐 체크포인트는 그 사실을 본문에 남긴다(ADR-164). 무엇으로 검증했는지가 달라졌기 때문이다
+  const declared = checks.find((check) => check.stage === 'review' && check.name === DECLARED_CHECKS_CHECK && check.ok && check.detail);
+  if (declared) lines.push(`확인 선언 변경: ${declared.detail}`);
   return lines.join('\n');
 }
 

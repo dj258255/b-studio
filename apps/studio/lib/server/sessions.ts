@@ -1005,6 +1005,7 @@ export function sendMessage(
     steering,
     interactive = false,
     verify,
+    allowCheckChanges = false,
     maxTurns,
   }: {
     allowBreaking: boolean;
@@ -1030,6 +1031,8 @@ export function sendMessage(
     interactive?: boolean;
     /** 검증 범위. 'light'(가볍게 확인)면 재시작·준비·계약만 돌린다. 생략하면 full */
     verify?: VerifyMode;
+    /** 사용자가 이 요청에서 확인 선언의 변경을 허용했다(ADR-164). 사람이 보낸 요청(messages 라우트)만 켠다 */
+    allowCheckChanges?: boolean;
     /** 턴 상한 요청 옵션(ADR-131). studio.yaml(workflow.maxTurns)보다 우선한다 */
     maxTurns?: number;
   },
@@ -1065,6 +1068,8 @@ export function sendMessage(
     interactive,
     // 가볍게 확인은 검증 범위만 바꾼다. 질문(intent ask)은 게이트를 돌리지 않으므로 뜻이 없다
     ...(verify === 'light' ? { verify: 'light' as const } : {}),
+    // 확인 선언 변경 허용(ADR-164). 질문(ask)은 게이트를 돌리지 않으므로 뜻이 없다
+    ...(allowCheckChanges && intent === 'build' ? { allowCheckChanges: true as const } : {}),
     // "조사" 모드는 질문(ask)에만 뜻이 있다. 만들기 요청에 섞여 와도 각 러너가 다시 한번 ask와 함께 걸러 무시한다
     ...(intent === 'ask' && research ? { research: true as const } : {}),
     // 턴 상한 요청 옵션(ADR-131). 생략하면 studio.yaml(workflow.maxTurns)이나 실행기 기본값을 쓴다
@@ -1974,6 +1979,7 @@ type RunPlan = (
   board?: BoardAccess;
   interactive?: boolean;
   verify?: VerifyMode;
+  allowCheckChanges?: boolean;
   research?: boolean;
   /** 턴 상한 요청 옵션(ADR-131). studio.yaml(workflow.maxTurns)보다 우선한다. 생략하면 studio.yaml 값이나 실행기 기본값(60)을 쓴다 */
   maxTurns?: number;
@@ -2510,6 +2516,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     research: plan.research === true,
     // 가볍게 확인(light)이면 게이트가 재시작·준비·계약만 돈다. 생략(full)이면 지금과 같다
     verify: plan.verify,
+    // 확인 선언 변경 허용(ADR-164). 켜면 게이트가 이번 실행에서 바뀐 studio.yaml의 선언으로 검증한다
+    allowCheckChanges: plan.allowCheckChanges === true,
     // 턴 상한(ADR-131). 요청 옵션이 studio.yaml(workflow.maxTurns)보다 우선하고, 둘 다 없으면 각 실행기 기본값(60)을 쓴다
     ...(maxTurnsFor(session.project, plan.maxTurns) !== undefined ? { maxTurns: maxTurnsFor(session.project, plan.maxTurns) } : {}),
     // 자가 확인 범위(B_STUDIO_SELF_CHECK). 기본 lean(게이트와 겹치는 확인을 줄이게 안내, ADR-064). full이면 이전 동작

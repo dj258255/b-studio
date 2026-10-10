@@ -315,6 +315,8 @@ export interface RunAgentOptions {
    * 테스트·화면 확인·동시 요청·리뷰는 건너뛴다. 건너뛴 단계는 결과의 skippedStages로 남고 배포 조건이 막는다
    */
   verify?: VerifyMode;
+  /** 사용자가 이 요청에서 확인 선언의 변경을 허용했다(ADR-164). 켜면 게이트가 바뀐 선언으로 검증한다. 사람이 보낸 요청에서만 켠다 */
+  allowCheckChanges?: boolean;
   /**
    * 자가 확인 범위(기본 full). lean이면 프롬프트가 게이트와 겹치는 확인(전체 빌드·테스트, 끝난 변경의 재시작·HTTP 확인)을
    * 하지 말라고 안내하고, 성공한 run_in_service 출력을 짧게 돌려준다
@@ -389,6 +391,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       allowBreaking,
       maxVerifyAttempts,
       verify: options.verify,
+      allowCheckChanges: options.allowCheckChanges,
       fetcher,
       pageFetcher,
       browserRunner,

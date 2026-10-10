@@ -229,7 +229,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let gate: VerificationGate | undefined;
   let gatePromise: Promise<VerificationGate> | undefined;
   const gateFor = (): Promise<VerificationGate> =>
-    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent }));
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, allowCheckChanges: options.allowCheckChanges, fetcher, pageFetcher, browserRunner, saveArtifact, onBrowserFrame, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   // 프로젝트 루트(세션 작업 복사본)의 AGENTS.md를 실행마다 새로 읽는다(ADR-077). 승격으로 runQuery를 다시 열어도
   // 같은 실행 안이므로 다시 읽지 않고 이 값을 그대로 재사용한다(아래 클로저가 캡처한다)

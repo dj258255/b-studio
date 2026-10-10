@@ -54,6 +54,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
   const [text, setText] = useState("");
   const [capabilities, setCapabilities] = useState<ChatCapabilities>();
   const [allowBreaking, setAllowBreaking] = useState(false);
+  // 확인 선언 변경 허용(ADR-164). 한 요청에만 주는 허락이라 보낸 뒤에는 끈다
+  const [allowCheckChanges, setAllowCheckChanges] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   /** 대화 입력창의 모델 선택(고를 수 있는 목록 + 지금 값). 데모 세션은 모델을 부르지 않으므로 불러오지 않는다 */
@@ -217,11 +219,12 @@ export function ChatPanel({ view }: { view: SessionView }) {
     const response = await fetch(`/api/sessions/${snapshot.id}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, lightVerify, research })),
+      body: JSON.stringify(chatRequestBody({ text: attachments ? `${attachments}\n\n${request}` : request, intent: sendIntent, allowBreaking, allowCheckChanges, lightVerify, research })),
     });
     if (response.ok) {
       setText("");
       clearSelections();
+      setAllowCheckChanges(false);
     } else setError((await response.json()).error ?? "요청을 보내지 못했습니다");
     setSending(false);
   }
@@ -558,10 +561,19 @@ export function ChatPanel({ view }: { view: SessionView }) {
             {/* 대화 칸이 좁아 모델 이름이 길어지면 버튼 글자가 두 줄로 꺾였다 — 줄이 모자라면 체크박스 줄을 위로 넘긴다 */}
             <div className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
               {intent === "build" ? (
-                <label className="flex items-center gap-2 text-sm text-muted">
-                  <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
-                  필드 삭제나 타입 변경 허용
-                </label>
+                <div className="flex flex-col gap-1">
+                  <label className="flex items-center gap-2 text-sm text-muted">
+                    <input type="checkbox" checked={allowBreaking} onChange={(event) => setAllowBreaking(event.target.checked)} className="accent-ink" />
+                    필드 삭제나 타입 변경 허용
+                  </label>
+                  <label
+                    className="flex items-center gap-2 text-sm text-muted"
+                    title="켜면 이번 요청에서 바뀐 studio.yaml의 확인 선언(테스트·화면 확인·부하 확인 등)으로 검증합니다. 끄면 요청을 시작할 때의 선언으로 검증합니다. 이 요청에만 적용됩니다."
+                  >
+                    <input type="checkbox" checked={allowCheckChanges} onChange={(event) => setAllowCheckChanges(event.target.checked)} className="accent-ink" />
+                    확인 선언 변경 허용
+                  </label>
+                </div>
               ) : (
                 <span />
               )}
