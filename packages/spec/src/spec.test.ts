@@ -338,6 +338,74 @@ describe('parseSpec', () => {
     expect(duplicate.issues).toEqual(["workflow.concurrencyChecks.1.name: 동시 요청 확인 이름 'same'이 중복됩니다"]);
   });
 
+  it('부하 확인은 응답 시간 기준이 필요하고, 범위·경로·헤더를 검사한다 (ADR-163)', () => {
+    const spec = parseSpec(`${ORDERS_SPEC}workflow:
+  loadChecks:
+    - name: orders-p95
+      service: api
+      method: POST
+      path: "/api/orders?key={{uuid}}"
+      body: '{"qty":1,"n":{{seq}}}'
+      headers: { Idempotency-Key: "k-{{uuid}}" }
+      concurrent: 1000
+      requests: 5000
+      warmup: 50
+      expect: { p95Ms: 200, latencyOf: [409], successCount: { exactly: 50 }, allStatusIn: [201, 409] }
+`);
+    expect(spec.workflow?.loadChecks?.[0]).toEqual({
+      name: 'orders-p95',
+      service: 'api',
+      method: 'POST',
+      path: '/api/orders?key={{uuid}}',
+      body: '{"qty":1,"n":{{seq}}}',
+      headers: { 'Idempotency-Key': 'k-{{uuid}}' },
+      concurrent: 1000,
+      requests: 5000,
+      warmup: 50,
+      expect: { p95Ms: 200, latencyOf: [409], successCount: { exactly: 50 }, allStatusIn: [201, 409] },
+    });
+    // requests와 warmup은 생략할 수 있다
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  loadChecks:\n    - { name: a, service: api, method: GET, path: /, concurrent: 1, expect: { maxMs: 50 } }\n`).workflow?.loadChecks?.[0]).toMatchObject({ concurrent: 1, warmup: 0 });
+
+    const oneLiner = (line: string) => captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  loadChecks:\n    - ${line}\n`)).issues;
+    const base = 'name: a, service: api, method: GET';
+    // 응답 시간 기준이 없으면 부하 확인이 아니다
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 10, expect: { allStatusIn: [200] } }`)).toEqual([
+      'workflow.loadChecks.0.expect: expect에는 응답 시간 기준(p50Ms·p95Ms·p99Ms·maxMs) 중 하나가 필요합니다. 건수만 볼 것이면 concurrencyChecks를 쓰세요',
+    ]);
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 10, expect: { p95Ms: 0 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.expect.p95Ms'))).toBe(true);
+    // 동시 1~1000, 전체 10000까지, 준비 1000까지
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 0, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.concurrent'))).toBe(true);
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 1001, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.concurrent'))).toBe(true);
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 10, requests: 10001, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.requests'))).toBe(true);
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 10, warmup: 1001, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.warmup'))).toBe(true);
+    // 전체 건수가 연결 수보다 적을 수 없다
+    expect(oneLiner(`{ ${base}, path: /, concurrent: 10, requests: 9, expect: { p95Ms: 200 } }`)).toEqual(['workflow.loadChecks.0.requests: requests는 concurrent 이상이어야 합니다']);
+    // //host 경로, 공백·줄바꿈·비ASCII 문자가 든 경로는 거부
+    expect(oneLiner(`{ ${base}, path: //evil.example.com, concurrent: 2, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.path'))).toBe(true);
+    expect(oneLiner(`{ ${base}, path: "/a b", concurrent: 2, expect: { p95Ms: 200 } }`)).toEqual(['workflow.loadChecks.0.path: path에는 공백·줄바꿈·비ASCII 문자를 쓸 수 없습니다(퍼센트 인코딩해서 적으세요)']);
+    expect(oneLiner(`{ ${base}, path: "/a\\r\\nHost: evil", concurrent: 2, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.path'))).toBe(true);
+    expect(oneLiner(`{ ${base}, path: "/검색", concurrent: 2, expect: { p95Ms: 200 } }`).some((issue) => issue.startsWith('workflow.loadChecks.0.path'))).toBe(true);
+    // 비밀 값을 담는 인증 헤더, 줄바꿈이 든 헤더 값은 거부
+    expect(oneLiner(`{ ${base}, path: /, headers: { Authorization: "Bearer x" }, concurrent: 2, expect: { p95Ms: 200 } }`)).toEqual([
+      'workflow.loadChecks.0.headers: 비밀 값을 담는 인증 헤더는 쓸 수 없습니다. 인증이 필요하면 서비스가 secrets의 환경 변수를 읽게 하세요',
+    ]);
+    expect(oneLiner(`{ ${base}, path: /, headers: { X-A: "1\\r\\nX-B: 2" }, concurrent: 2, expect: { p95Ms: 200 } }`)).toEqual(['workflow.loadChecks.0.headers: headers 값에는 줄바꿈·제어 문자·비ASCII 문자를 쓸 수 없습니다']);
+
+    // required에 load_check가 있으면 최소 하나 필요
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [load_check]\n`)).issues).toEqual(['workflow.loadChecks: required에 load_check가 있으면 실행할 loadChecks가 최소 1개 필요합니다']);
+    // 이름은 테스트·동시 요청 확인과도 겹칠 수 없다
+    const duplicate = captureError(() =>
+      parseSpec(
+        `${ORDERS_SPEC}workflow:\n  tests:\n    - { name: same, service: api, command: [echo, ok] }\n  loadChecks:\n    - { name: same, service: api, method: GET, path: /, concurrent: 2, expect: { p95Ms: 200 } }\n`,
+      ),
+    );
+    expect(duplicate.issues).toEqual(["workflow.loadChecks.0.name: 부하 확인 이름 'same'이 중복됩니다"]);
+    // 최대 5개
+    const six = Array.from({ length: 6 }, (_, index) => `    - { name: l${index}, service: api, method: GET, path: /, concurrent: 2, expect: { p95Ms: 200 } }`).join('\n');
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  loadChecks:\n${six}\n`)).issues).toEqual(['workflow.loadChecks: loadChecks는 최대 5개까지 쓸 수 있습니다']);
+  });
+
   it('maxLoadMs는 browser 모드에서만 받는다', () => {
     expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, maxLoadMs: 2000 }\n`).workflow?.pageChecks?.[0]).toMatchObject({
       maxLoadMs: 2000,
@@ -651,6 +719,8 @@ workflow:
   pageChecks:
     - { service: web, path: /, expectFromApi: { service: db, path: /api/orders, jsonPath: "$[0].customerName" } }
     - { service: api, path: /, mode: browser, fallbackProbe: { service: db, path: /health } }
+  loadChecks:
+    - { name: db-load, service: db, method: GET, path: /, concurrent: 2, expect: { p95Ms: 200 } }
 `,
     );
     await writeFile(path.join(dir, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  db: { image: postgres:17-alpine }\n');
@@ -664,6 +734,7 @@ workflow:
       "workflow.pageChecks.0.service: 'web'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.0.expectFromApi.service: 'db'은(는) source: managed 서비스가 아닙니다",
       "workflow.pageChecks.1.fallbackProbe.service: 'db'은(는) source: managed 서비스가 아닙니다",
+      "workflow.loadChecks.0.service: 'db'은(는) source: managed 서비스가 아닙니다",
     ]);
   });
 

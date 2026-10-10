@@ -24,6 +24,8 @@ import type {
   ExternalCallResult,
   FileChange,
   InfraCheckResult,
+  LoadRequest,
+  LoadResult,
   LogLine,
   LogOptions,
   RelayedPath,
@@ -51,9 +53,11 @@ import {
   parseRuntimes,
   SYNC_SCRIPT,
   parseSyncOutput, SyncObservations,
+  SANDBOX_NETWORK,
 } from './format';
 import { externalCallScript } from './external-call';
 import { awaitedCondition, loadDependsOn, startWaves } from './compose-deps';
+import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
 import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
@@ -115,6 +119,11 @@ export function describeDockerFailure(error: unknown): string {
 
 /** 샌드박스 출입구 스크립트. 원격 Docker 호스트에서도 돌도록 파일을 마운트하지 않고 내용을 compose 설정에 넣는다 */
 const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
+
+/** 부하 확인 러너. edge와 같은 까닭으로 파일을 마운트하지 않고 내용을 표준 입력으로 넘긴다 */
+const LOAD_RUNNER_SCRIPT = new URL('../../load/runner.mjs', import.meta.url);
+/** 러너가 스스로 끝내는 상한(요청 제한 시간 포함) 뒤에도 돌아오지 않으면 도커 쪽이 멈춘 것으로 본다 */
+const LOAD_RUN_GRACE_MS = 30_000;
 
 /** 파일 반영 확인에 쓰는 작은 이미지. 서비스 컨테이너가 죽어 있어도 확인할 수 있도록 별도 컨테이너로 돌린다 */
 const SYNC_HELPER_IMAGE = 'busybox:1.37';
@@ -222,6 +231,8 @@ class LocalDockerSandbox implements Sandbox {
   readonly #statsTimeoutMs: number;
   /** up을 한 번에 하나씩 돌리는 줄. 만들기 → 확인 → 시작 사이에 다른 up이 끼어들지 못하게 한다 */
   #upQueue: Promise<unknown> = Promise.resolve();
+  #loadRunner: Promise<string> | undefined;
+  #daemonCpus: Promise<number | undefined> | undefined;
   #hostPorts: Record<string, number>;
   readonly #runtime: string | undefined;
   #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
@@ -550,6 +561,36 @@ class LocalDockerSandbox implements Sandbox {
     if (result.exitCode !== 0 || !last) throw new SandboxError('사내 API 호출을 실행하지 못했습니다', this.redact(result.stderr));
     const parsed = JSON.parse(last) as ExternalCallResult;
     return { ...parsed, body: this.redact(parsed.body) };
+  }
+
+  async runLoad(request: LoadRequest, { signal }: { signal?: AbortSignal } = {}): Promise<LoadResult> {
+    const service = this.#managed(request.service);
+    // 꺼 뒀거나 죽은 서비스에 보내면 전부 연결 실패로만 나온다. 보내기 전에 까닭을 알린다
+    const state = await this.state(request.service);
+    if (state !== 'running') throw new SandboxError(`'${request.service}' 서비스가 실행 중이 아니어서 부하 확인을 돌릴 수 없습니다 (상태: ${state})`);
+
+    this.#loadRunner ??= readFile(LOAD_RUNNER_SCRIPT, 'utf8');
+    this.#daemonCpus ??= this.#docker(['info', '--format', '{{.NCPU}}']).then((info) => (info.exitCode === 0 ? Number.parseInt(info.stdout.trim(), 10) || undefined : undefined));
+    const threads = loadThreads(request.concurrent, await this.#daemonCpus);
+    const name = `${this.id}-load-${randomBytes(4).toString('hex')}`;
+    const script = loadScript(await this.#loadRunner, loadConfig(request, { port: service.port, threads }));
+    const limit = AbortSignal.timeout(LOAD_DEADLINE_MS + LOAD_REQUEST_TIMEOUT_MS + LOAD_RUN_GRACE_MS);
+    const args = loadRunArgs({ name, network: `${this.id}_${SANDBOX_NETWORK}`, sandboxId: this.id, threads, ...(this.#runtime ? { runtime: this.#runtime } : {}) });
+    const result = await this.#docker(args, signal ? AbortSignal.any([signal, limit]) : limit, script);
+
+    if (signal?.aborted || limit.aborted) {
+      // 중단하면 docker 클라이언트만 끝나고 컨테이너는 남는다. 이 실행이 만든 이름으로만 지운다
+      await this.#docker(['rm', '--force', name]).catch(() => undefined);
+      signal?.throwIfAborted();
+      throw new SandboxError('부하 러너가 제한 시간 안에 끝나지 않았습니다', undefined, { platform: true });
+    }
+    if (result.exitCode !== 0) {
+      const reason = result.exitCode === 137 ? '러너가 메모리 한도(512MB)를 넘어 종료됐습니다' : this.redact(result.stderr.trim().split('\n').slice(-5).join('\n'));
+      throw new SandboxError(`부하 러너를 실행하지 못했습니다 (종료 코드 ${result.exitCode})`, reason, { platform: true });
+    }
+    const parsed = parseLoadOutput(result.stdout, request);
+    if (!parsed) throw new SandboxError('부하 러너의 결과를 읽지 못했습니다', this.redact(result.stdout.trim().split('\n').slice(-3).join('\n')), { platform: true });
+    return parsed;
   }
 
   async destroy(): Promise<void> {

@@ -1,5 +1,6 @@
 import { AUTO_PAGE_MAX, type LoadedProject, type WorkflowStage, type WorkflowSpec } from '@b-studio/spec';
 import { routesFromChangedFiles } from './next-routes';
+import { describeLoadExpect } from './load-check';
 import { DEFAULT_DENIED_COMMANDS, isProtectedPath, type ExecutionPolicy } from './policy';
 import { ownsFile, servicesForFiles } from './services';
 
@@ -7,7 +8,7 @@ import { ownsFile, servicesForFiles } from './services';
  * 모델의 도구 호출이나 턴 종료로 진입을 알 수 있는 진행 단계와 달리, 플랫폼이 직접 실행해 통과 여부를 판정하는 단계.
  * 이 단계가 필수인데 통과 기록이 없으면 게이트가 완료로 인정하지 않는다.
  */
-export const VERIFICATION_STAGES: readonly WorkflowStage[] = ['run', 'browser_check', 'contract_check', 'test', 'concurrency_check', 'review'];
+export const VERIFICATION_STAGES: readonly WorkflowStage[] = ['run', 'browser_check', 'contract_check', 'test', 'concurrency_check', 'load_check', 'review'];
 
 /** workflow를 선언하지 않았을 때도 플랫폼이 항상 실행하는 단계만 둔다. 실행 수단이 없는 단계를 기본값에 넣으면 통과처럼 보이기만 한다 */
 export const DEFAULT_WORKFLOW: readonly WorkflowStage[] = ['plan', 'implement', 'run', 'contract_check', 'review', 'checkpoint'];
@@ -32,7 +33,7 @@ export interface WorkflowCompare {
 }
 
 export interface WorkflowCheck {
-  stage: 'browser_check' | 'test' | 'concurrency_check' | 'review';
+  stage: 'browser_check' | 'test' | 'concurrency_check' | 'load_check' | 'review';
   name: string;
   ok: boolean;
   attempts: number;
@@ -88,6 +89,7 @@ export function workflowStages(project: LoadedProject): readonly WorkflowStage[]
   if (workflow?.pageChecks?.length) insertBefore('browser_check', 'contract_check');
   if (workflow?.tests?.length) insertBefore('test', 'review');
   if (workflow?.concurrencyChecks?.length) insertBefore('concurrency_check', 'review');
+  if (workflow?.loadChecks?.length) insertBefore('load_check', 'review');
   return stages;
 }
 
@@ -260,7 +262,7 @@ export function formatCheckedCoverage(checks: readonly WorkflowCheck[] | undefin
   if (!checks?.length) return '';
   const gapPrefix = `${COVERAGE_GAP_PREFIX}:`;
   const gaps = checks.filter((check) => check.name.startsWith(gapPrefix));
-  const covered = checks.filter((check) => check.stage === 'browser_check' || check.stage === 'test' || check.stage === 'concurrency_check');
+  const covered = checks.filter((check) => check.stage === 'browser_check' || check.stage === 'test' || check.stage === 'concurrency_check' || check.stage === 'load_check');
   const lines: string[] = [];
   if (covered.length > 0) {
     lines.push(`게이트가 확인함: ${covered.map((check) => `[${check.stage}] ${check.name}(${check.ok ? '통과' : '실패'})`).join(', ')}`);
@@ -290,6 +292,7 @@ export function workflowContext(project: LoadedProject): string {
   const tests = workflow?.tests?.map((test) => `${test.name}(${test.service}: ${test.command.join(' ')})`).join(', ');
   const pages = workflow?.pageChecks?.map((check) => `${check.service} ${check.path}`).join(', ');
   const concurrency = workflow?.concurrencyChecks?.map((check) => `${check.name}(${check.service} ${check.method} ${check.path} ×${check.concurrent})`).join(', ');
+  const loads = workflow?.loadChecks?.map((check) => `${check.name}(${check.service} ${check.method} ${check.path} 동시 ${check.concurrent} · ${describeLoadExpect(check.expect)})`).join(', ');
   // 화면이 있는 프로젝트에만 붙인다. 화면이 없으면 고정 문맥을 늘리지 않는다
   const assertions = (project.managed ?? []).some(([, service]) => service.preview === 'browser') ? PAGE_ASSERTION_GUIDE : '';
   return `
@@ -298,8 +301,8 @@ export function workflowContext(project: LoadedProject): string {
 에이전트의 완료 선언은 완료 판정이 아닙니다. 턴을 끝내면 플랫폼이 서비스 재시작·API 계약${pages ? '·화면 확인' : ''}${tests ? '·테스트' : ''}·리뷰를 직접 실행하고, 모두 통과해야 체크포인트를 만듭니다.
 허용 도구: ${tools}
 보호 경로: ${protectedPaths}
-${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}${concurrency ? `플랫폼이 동시에 보낼 요청: ${concurrency}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
-${assertions}`;
+${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}${concurrency ? `플랫폼이 동시에 보낼 요청: ${concurrency}\n` : ''}${loads ? `플랫폼이 샌드박스 안에서 잴 응답 시간: ${loads}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
+${assertions}${LOAD_CHECK_GUIDE}`;
 }
 
 /**
@@ -313,6 +316,15 @@ export const PAGE_ASSERTION_GUIDE = `화면에 대한 요구("~가 보여야 한
 - 스크롤하지 않은 첫 화면에 보여야 하는 글자: expectInViewport: ["글자"] (mode: browser에서만. 창 크기는 viewport: mobile | tablet | desktop | { width, height })
 - 누른 뒤의 화면: steps: [{ click: "선택자" }, { fill: { selector: "선택자", text: "값" } }, { waitFor: "선택자" }] 뒤에 위 단언
 예: - { service: web, path: /cart, mode: browser, expectInViewport: ["주문하기"] }
+`;
+
+/**
+ * 응답 시간 요구를 부하 확인으로 선언하게 하는 안내(ADR-163, #605). 샌드박스에 부하 도구가 없어 에이전트가 "호스트에서 부하 도구를 돌리라"는
+ * 문서를 남겼고, 그 절차대로 공개 포트에 동시 1,000건을 보냈더니 호스트와 도커 사이 연결이 끊겼다(트러블슈팅 128).
+ * 하지 말아야 할 안내와 대신 쓸 선언을 함께 적는다. 화면 단언처럼 선언은 다음 요청부터 쓰인다
+ */
+export const LOAD_CHECK_GUIDE = `응답 시간에 대한 요구("p95 200ms 이내", "동시 1,000건")를 받으면 호스트에서 부하 도구를 돌리라고 안내하지 마세요. 호스트로 공개한 포트는 미리보기용 통로라 부하를 실으면 끊깁니다. studio.yaml의 workflow.loadChecks에 선언하면 플랫폼이 샌드박스 네트워크 안에서 잽니다(다음 요청부터). 요청마다 다른 로그인이 필요한 시나리오는 선언할 수 없으니 그렇다고 적으세요.
+예: - { name: orders-p95, service: api, method: GET, path: /orders, concurrent: 100, requests: 1000, expect: { p95Ms: 200 } }
 `;
 
 export function describeWorkflow(workflow: WorkflowSpec | undefined): string {

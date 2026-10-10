@@ -191,6 +191,57 @@ export interface ExecResult {
   stderr: string;
 }
 
+/** 부하 확인 한 번. 대상은 managed 서비스 하나이고, 샌드박스 네트워크 안에서 서비스 이름과 컨테이너 포트로 직접 부른다 */
+export interface LoadRequest {
+  service: string;
+  method: string;
+  /** "/"로 시작하는 경로와 쿼리. `{{seq}}`·`{{uuid}}`는 러너가 요청마다 채운다 */
+  path: string;
+  headers?: Record<string, string>;
+  /** GET에는 보내지 않는다 */
+  body?: string;
+  /** 동시에 열어 둘 연결 수 */
+  concurrent: number;
+  /** 재는 요청의 전체 건수 */
+  requests: number;
+  /** 재기 전에 보내는 준비 요청 수 */
+  warmup?: number;
+  /** 응답 시간을 이 상태 코드의 응답만으로 낸다. 없으면 받은 응답 전부 */
+  latencyOf?: readonly number[];
+}
+
+/** 응답 시간 요약(ms). 표본이 없으면 count만 0으로 온다 */
+export interface LatencySummary {
+  count: number;
+  p50?: number;
+  p95?: number;
+  p99?: number;
+  max?: number;
+}
+
+/** 부하 러너가 잰 값. 판정은 들어 있지 않다 */
+export interface LoadResult {
+  requests: number;
+  concurrent: number;
+  /** 러너가 쓴 스레드 수 */
+  threads: number;
+  /** 응답을 받은 요청 수 */
+  completed: number;
+  /** 재는 요청을 보내기 시작해서 마지막 응답을 받을 때까지 */
+  elapsedMs: number;
+  /** 상태 코드별 응답 수 */
+  statuses: Record<string, number>;
+  /** 응답을 받지 못한 요청 수(사유별: TIMEOUT, ECONNRESET, DEADLINE 등) */
+  errors: Record<string, number>;
+  /** 응답 시간. latencyOf를 줬으면 그 상태 코드의 응답만 */
+  latency: LatencySummary;
+  /** 연결을 맺는 데 걸린 시간. 응답 시간에는 들어가지 않는다 */
+  connect: LatencySummary & { errors: number };
+  /** 러너 자신이 밀린 정도(ms). 크면 응답 시간에 러너의 지연이 섞였다 */
+  loopDelay: { p99: number; max: number };
+  warmup: { requests: number; errors: number };
+}
+
 export interface ExecFileOptions {
   signal?: AbortSignal;
   /**
@@ -266,6 +317,13 @@ export interface Sandbox {
    * 구현하지 않는 제공자는 undefined로 둔다(호출자가 건너뛴다).
    */
   ensureInfra?(services: readonly string[], options?: { signal?: AbortSignal }): Promise<InfraCheckResult>;
+  /**
+   * 샌드박스 네트워크 안의 일회용 컨테이너에서 같은 요청을 동시에 보내 응답 시간을 잰다(workflow.loadChecks, ADR-163).
+   * 호스트의 공개 포트를 거치지 않는다 — 그 통로의 지연이 섞이지 않고, 호스트와 도커 사이 연결에 부하를 싣지 않는다.
+   * 잰 값만 돌려주고 판정하지 않는다. 러너를 띄우지 못했거나 결과를 읽지 못하면 platform 오류로 던진다.
+   * 구현하지 않는 제공자는 undefined로 둔다(호출자가 지원 여부를 안내한다).
+   */
+  runLoad?(request: LoadRequest, options?: { signal?: AbortSignal }): Promise<LoadResult>;
   destroy(): Promise<void>;
 }
 

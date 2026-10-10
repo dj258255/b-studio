@@ -1,10 +1,11 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { formatBytes, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
+import { formatBytes, SandboxError, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
+import { judgeLoad, loadRequestFor } from './load-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
 import { findStaticShadows, StaticShadowUnknownError } from './next-static-shadow';
@@ -201,6 +202,8 @@ export class VerificationGate {
   #pageWarnings = new Map<string, string[]>();
   /** 동시 요청 확인 이름 → 통과했을 때의 요약(성공 건수·상태 분포·then 값) */
   #concurrencyNotes = new Map<string, string>();
+  /** 부하 확인을 b-studio 쪽 문제(러너를 띄우지 못함 등)로 재지 못했을 때의 사유. 코드를 고쳐서 풀 수 없으므로 재시도 횟수로 세지 않는다 */
+  #loadPlatformFailure: string | undefined;
 
   private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
     this.#options = options;
@@ -334,11 +337,18 @@ export class VerificationGate {
       } else {
         const checks = await this.#runDeclaredChecks();
         signal?.throwIfAborted();
+        // 부하 확인을 재지 못한 것이 b-studio 쪽 문제면 여기서 멈춘다. 서비스 재시작의 플랫폼 실패와 같은 규칙이다(트러블슈팅 117)
+        if (this.#loadPlatformFailure) {
+          this.checks = [...checks, ...recordChecks];
+          for (const check of this.checks) onEvent({ type: 'workflow_check', check });
+          this.platformFailure = this.#loadPlatformFailure;
+          return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${this.#loadPlatformFailure}` };
+        }
         this.#stage('review');
         checks.push(...reviewChanges(project, workspace.changedFiles()), ...recordChecks);
         this.checks = checks;
         for (const check of checks) onEvent({ type: 'workflow_check', check });
-        for (const stage of ['browser_check', 'test', 'concurrency_check', 'review'] as const) {
+        for (const stage of ['browser_check', 'test', 'concurrency_check', 'load_check', 'review'] as const) {
           const ofStage = checks.filter((check) => check.stage === stage);
           if (ofStage.length > 0 && ofStage.every((check) => check.ok)) this.passedStages.add(stage);
         }
@@ -388,9 +398,11 @@ export class VerificationGate {
     const pages = workflow?.pageChecks ?? [];
     const tests = workflow?.tests ?? [];
     const concurrency = workflow?.concurrencyChecks ?? [];
+    const loads = workflow?.loadChecks ?? [];
     // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
     const auto = await this.#autoPages(pages);
-    if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
+    this.#loadPlatformFailure = undefined;
+    if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && loads.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
 
     const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
     // 각 확인은 통과하면 무엇을 쟀는지(근거)를 돌려준다. 이름으로 모으지 않는다 — 이름이 같은 확인끼리 근거가 바뀌어 붙지 않게 한다
@@ -468,8 +480,45 @@ export class VerificationGate {
         ...(loadMs !== undefined ? { metrics: { loadMs } } : {}),
       };
     });
+    // 부하 확인은 다른 확인이 모두 끝난 뒤에 하나씩 돌린다. 화면 확인·테스트와 함께 돌리면 서로의 부하가 응답 시간에 섞인다
+    const loadChecks = await this.#runLoadChecks(loads);
     // 건너뛴 라우트도 check로 남긴다(ok). 조용히 사라지면 "확인했다"처럼 보인다
-    return [...checks, ...auto.skipped];
+    return [...checks, ...loadChecks, ...auto.skipped];
+  }
+
+  /**
+   * 샌드박스 네트워크 안의 러너로 응답 시간을 재고 선언한 기준과 비교한다(ADR-163).
+   * 한 번의 실패를 재시도로 덮지 않는다 — 다시 재서 통과한 값을 고르면 느린 순간이 숨는다.
+   * 재지 못한 확인은 통과로 세지 않는다. 제공자가 지원하지 않거나 러너를 띄우지 못한 것은 b-studio 쪽 문제로 따로 알린다
+   */
+  async #runLoadChecks(loads: readonly WorkflowLoadCheck[]): Promise<WorkflowCheck[]> {
+    if (loads.length === 0) return [];
+    this.#stage('load_check');
+    const { sandbox, signal } = this.#options;
+    const redact = (line: string) => sandbox.redact(line);
+    const checks: WorkflowCheck[] = [];
+    for (const check of loads) {
+      signal?.throwIfAborted();
+      const entry = { stage: 'load_check' as const, name: check.name, attempts: 1 };
+      if (!sandbox.runLoad) {
+        const detail = '이 샌드박스 제공자는 부하 확인(workflow.loadChecks)을 지원하지 않습니다. 로컬 Docker 제공자에서만 잴 수 있습니다';
+        this.#loadPlatformFailure ??= `부하 확인 '${check.name}': ${detail}`;
+        checks.push({ ...entry, ok: false, detail });
+        continue;
+      }
+      try {
+        const judged = judgeLoad(check, await sandbox.runLoad(loadRequestFor(check), { signal }));
+        const ok = judged.problems.length === 0;
+        const evidence = ok ? evidenceOrNone(() => finishEvidence(judged.evidence, redact)) : [];
+        checks.push({ ...entry, ok, detail: redact([judged.note, ...judged.problems].join('\n')), ...(evidence.length ? { evidence } : {}) });
+      } catch (error) {
+        signal?.throwIfAborted();
+        const detail = redact(error instanceof Error ? error.message : String(error));
+        if (error instanceof SandboxError && error.platform) this.#loadPlatformFailure ??= `부하 확인 '${check.name}': ${detail}`;
+        checks.push({ ...entry, ok: false, detail });
+      }
+    }
+    return checks;
   }
 
   /**
