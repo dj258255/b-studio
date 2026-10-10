@@ -2,7 +2,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import type { AgentUsage, ModelClient } from './loop';
-import { isProtectedPath } from './policy';
+import { isProtectedPath, isWithinScope } from './policy';
 
 /**
  * 한 요청을 하위 작업으로 나눈 계획.
@@ -180,7 +180,7 @@ export function planLanes(input: unknown, limits: PlanLimits = DEFAULT_PLAN_LIMI
 
 /** 파일이 그 작업(레인)의 쓰기 범위 안에 있는지. 명령으로 만든 파일처럼 도구 게이트를 거치지 않은 변경을 합치기 전에 다시 본다 */
 export function isInScope(file: string, paths: readonly string[]): boolean {
-  return paths.some((scope) => isProtectedPath(file, scope));
+  return paths.some((scope) => isWithinScope(file, scope));
 }
 
 function topologicalOrder(tasks: PlannedTask[]): PlannedTask[] {
