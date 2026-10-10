@@ -650,7 +650,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       }
     } catch (error) {
       conversation.close();
-      throw error;
+      // SDK는 오류 결과(턴 상한 등)를 준 뒤에 같은 사유로 예외도 던진다. 그 결과로 이미 실행을 끝냈으면(result) 그 판정을 지킨다.
+      // 던지게 두면 호출자가 오류로 보고, 턴 상한에서 게이트를 통과해 남기기로 한 변경까지 되돌린다(ADR-131, 트러블슈팅 131)
+      if (!result) throw error;
     } finally {
       detachSteeringOnce();
       input.close();

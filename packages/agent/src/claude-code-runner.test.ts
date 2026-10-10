@@ -48,13 +48,15 @@ interface FakeOptions {
   models?: ModelInfo[];
   /** result마다 실어 보낼 duration_api_ms(순서대로). 비면 그 필드 없이 보낸다 */
   apiDurations?: number[];
+  /** 결과를 준 뒤에 이 문구로 예외를 던진다. 실제 SDK는 오류 결과(턴 상한 등) 뒤에 같은 사유로 예외도 던진다 */
+  throwAfterResult?: string;
 }
 
 /**
  * Claude Code 프로세스를 흉내 내는 가짜 SDK.
  * 사용자 메시지를 받을 때마다 준비된 단계를 실행하고, 도구 단계는 러너가 등록한 MCP 도구 핸들러를 실제로 부른다.
  */
-function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [], models = [], apiDurations = [] }: FakeOptions = {}) {
+function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [], models = [], apiDurations = [], throwAfterResult }: FakeOptions = {}) {
   const state = { prompts: [] as string[], options: undefined as Options | undefined, closed: false };
   let tools: Array<SdkMcpToolDefinition<any>> = [];
 
@@ -101,6 +103,7 @@ function fakeClaudeCode({ turns = [], result = {}, account = {}, modelUsages = [
             ...(apiDurations.length > 0 ? { duration_api_ms: apiDurations.shift() } : {}),
             ...result,
           } as unknown as SDKMessage;
+          if (throwAfterResult) throw new Error(throwAfterResult);
         }
       }
 
@@ -1004,6 +1007,43 @@ describe('runClaudeCodeAgent 턴 상한에 걸리면 되돌리기 전에 게이�
     expect(result.failureReason).toBe('max_turns');
     expect(result.summary).toBe('최대 턴 수(60)를 넘었습니다');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
+  });
+
+  it('SDK가 턴 상한 결과 뒤에 예외를 던져도, 게이트를 통과한 변경은 done으로 남긴다 (트러블슈팅 131)', async () => {
+    // 실제 SDK(0.3.267)의 동작: error_max_turns 결과를 준 뒤 "Claude Code returned an error result: …"를 던진다.
+    // 그 예외가 밖으로 나가면 세션이 실행을 오류로 끝내고 변경을 되돌린다
+    const { sdk } = fakeClaudeCode({
+      turns: [[{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }]],
+      result: { subtype: 'error_max_turns', is_error: true, errors: ['Reached maximum number of turns (60)'] },
+      throwAfterResult: 'Claude Code returned an error result: Reached maximum number of turns (60)',
+    });
+    const sandbox = fakeSandbox(project, [true]);
+
+    const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('검증 게이트를 통과해 체크포인트로 남깁니다');
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
+  });
+
+  it('SDK가 턴 상한 결과 뒤에 예외를 던져도, 게이트를 통과하지 못했으면 실패(max_turns)로 끝난다', async () => {
+    const { sdk } = fakeClaudeCode({
+      turns: [[{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String broken;' } }]],
+      result: { subtype: 'error_max_turns', is_error: true, errors: ['Reached maximum number of turns (60)'] },
+      throwAfterResult: 'Claude Code returned an error result: Reached maximum number of turns (60)',
+    });
+    const sandbox = fakeSandbox(project, [false]);
+
+    const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(result.status).toBe('failed');
+    expect(result.failureReason).toBe('max_turns');
+    expect(result.summary).toBe('최대 턴 수(60)를 넘었습니다');
+  });
+
+  it('결과를 받기 전에 난 예외는 그대로 던진다(삼키지 않는다)', async () => {
+    const { sdk } = fakeClaudeCode({ turns: [] });
+    await expect(runClaudeCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), sdk, fetcher: async () => contract })).rejects.toThrow('스크립트에 남은 턴이 없습니다');
   });
 
   it('러너 자신의 턴 카운터가 상한을 넘겨도(assistant 메시지 수 기준) 같은 방식으로 게이트를 한 번 더 본다', async () => {
