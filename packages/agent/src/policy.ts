@@ -1,3 +1,4 @@
+import { canonicalProjectPath, normalizeProjectPath } from './path-names';
 import path from 'node:path';
 
 /** 도구 호출 전에 실행기에서 판단하는 정책. 모델 프롬프트의 지침과 달리 우회할 수 없다. */
@@ -76,9 +77,14 @@ export function checkToolPolicy(
     return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
   }
 
+  // 경로 정책이 있는데 경로가 프로젝트 밖으로 나가면(`../x`, 절대 경로) 범위를 따질 것도 없이 거절한다
+  if (PATH_WRITE_TOOLS.has(tool) && (policy?.writablePaths || policy?.protectedPaths?.length) && normalizeProjectPath(fileInput(input)) === undefined) {
+    return { tool, decision: 'deny', reason: 'path leaves the project' };
+  }
+
   if (PATH_WRITE_TOOLS.has(tool) && policy?.writablePaths) {
     const file = fileInput(input);
-    if (!policy.writablePaths.some((candidate) => isProtectedPath(file, candidate))) {
+    if (!policy.writablePaths.some((candidate) => isWithinScope(file, candidate))) {
       return { tool, decision: 'deny', reason: `path is outside this task's writable scope: ${policy.writablePaths.join(', ')}` };
     }
   }
@@ -128,14 +134,35 @@ function commandInput(input: unknown): string[] {
 function fileInput(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '';
   const file = (input as Record<string, unknown>).path;
-  return typeof file === 'string' ? file.replaceAll('\\', '/') : '';
+  // 받은 그대로 돌려준다. 역슬래시를 여기서 구분자로 바꾸면 POSIX의 실제 경로와 어긋난다(path-names.ts)
+  return typeof file === 'string' ? file : '';
 }
 
 /** 도구 호출 전 차단, 리뷰 단계의 사후 확인, Pi 확장이 같은 규칙으로 보호 경로를 판정하도록 공유한다 */
 export function isProtectedPath(file: string, candidate: string): boolean {
-  file = file.replaceAll('\\', '/').replace(/^\.\//, '');
-  const normalized = candidate.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
-  return file === normalized || file.startsWith(`${normalized}/`) || (normalized.startsWith('.') && file.startsWith(`${normalized}.`));
+  // 거부 목록이다: 넓게 맞춘다(path-names.ts). 받은 문자열을 그대로 접두사로 비교하면 같은 파일의 다른 표기가 지나간다 —
+  // `web/../.github/workflows/x`, `.github//workflows/x`, 대소문자를 구분하지 않는 볼륨의 `.GITHUB/workflows/x`(트러블슈팅 125)
+  const target = canonicalProjectPath(file);
+  const rule = canonicalProjectPath(candidate, { lenientSeparators: true });
+  // 꼴을 맞출 수 없는 경로나 규칙은 보호되는 쪽으로 본다. 거부 목록은 모르면 막는다
+  if (target === undefined || rule === undefined) return true;
+  // 프로젝트 전체를 가리키는 규칙(`.`)은 모든 경로를 덮는다
+  if (rule === '') return true;
+  return target === rule || target.startsWith(`${rule}/`) || (rule.startsWith('.') && target.startsWith(`${rule}.`));
+}
+
+/**
+ * 파일이 쓰기 범위(허용 목록) 안에 있는지. **좁게 맞춘다**(트러블슈팅 126): 표기만 정리하고 이름은 글자 그대로 비교한다.
+ * 보호 경로처럼 이름을 접어서 비교하면 다른 폴더가 범위 안으로 판정된다 — 대소문자를 구분하는 볼륨에서 `WEB/app`은 `web/app`이 아니다.
+ * 꼴을 맞출 수 없는 경로나 범위는 범위 밖으로 본다. 허용 목록은 모르면 막는다.
+ * `.env`가 `.env.local`을 덮는 점 접두사 규칙도 쓰지 않는다(보호 경로를 위한 규칙이고, 범위에 쓰면 `.github`이 `.github.bak`까지 연다)
+ */
+export function isWithinScope(file: string, scope: string): boolean {
+  const target = normalizeProjectPath(file);
+  const rule = normalizeProjectPath(scope, { lenientSeparators: true });
+  if (target === undefined || rule === undefined) return false;
+  if (rule === '') return true;
+  return target === rule || target.startsWith(`${rule}/`);
 }
 
 function splitRule(rule: string): string[] {

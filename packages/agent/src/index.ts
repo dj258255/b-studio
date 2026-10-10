@@ -387,7 +387,7 @@ export {
   type ClearToolResults,
   type ContextClearingPolicy,
 } from './context-clearing';
-export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
+export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, isWithinScope, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 export {
   COVERAGE_GAP_PREFIX,
   DEFAULT_WORKFLOW,

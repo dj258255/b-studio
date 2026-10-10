@@ -343,17 +343,30 @@ function authorLaneGroup(lanes: readonly TaskPlanLaneView[], laneId: string): st
   return lane ? laneGroup(lane) : undefined;
 }
 
-/** 레인이 쓴 파일 중 쓰기 범위 밖에 있는 것. 통합 전에 서버가 다시 거르는 것과 같은 규칙(isProtectedPath)이다 */
+/** 레인이 쓴 파일 중 쓰기 범위 밖에 있는 것. 통합 전에 서버가 다시 거르는 것과 같은 규칙(isWithinScope)이다 */
 export function laneViolation(lane: TaskPlanLaneView): string[] | undefined {
   if (!lane.changedFiles || lane.changedFiles.length === 0) return undefined;
   const outside = lane.changedFiles.filter((file) => !lane.paths.some((scope) => inScope(file, scope)));
   return outside.length > 0 ? outside : undefined;
 }
 
+/** 서버의 isWithinScope(packages/agent/src/policy.ts)와 같은 규칙: 표기만 정리하고 이름은 글자 그대로 비교한다. 화면 표시용 사본이다 */
 function inScope(file: string, scope: string): boolean {
-  const normalizedFile = file.replaceAll('\\', '/').replace(/^\.\//, '');
-  const normalized = scope.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
-  return normalizedFile === normalized || normalizedFile.startsWith(`${normalized}/`) || (normalized.startsWith('.') && normalizedFile.startsWith(`${normalized}.`));
+  const tidy = (value: string): string | undefined => {
+    const parts: string[] = [];
+    for (const part of value.split('/')) {
+      if (part === '' || part === '.') continue;
+      if (part === '..') {
+        if (parts.length === 0) return undefined;
+        parts.pop();
+      } else parts.push(part);
+    }
+    return parts.join('/');
+  };
+  const target = file.startsWith('/') ? undefined : tidy(file);
+  const rule = tidy(scope.replaceAll('\\', '/'));
+  if (target === undefined || rule === undefined) return false;
+  return rule === '' || target === rule || target.startsWith(`${rule}/`);
 }
 
 function verticalPath(from: PlanGraphNode, to: PlanGraphNode): string {
