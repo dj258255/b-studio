@@ -418,7 +418,7 @@ export {
 } from './workflow';
 export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
-export { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt } from './prompts';
+export { AGENT_LANGUAGE_INSTRUCTION, AGENT_LANGUAGE_REMINDER, buildAskRequest, buildSystemPrompt, withLanguageReminder } from './prompts';
 export { readProjectFileSync, readRegularFileSync, Workspace, WorkspaceError, type RegularFileRead } from './workspace';
 export {
   aggregateModelStats,

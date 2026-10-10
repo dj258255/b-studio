@@ -11,6 +11,19 @@ import type { SelfCheckMode } from './tool-output';
  */
 export const AGENT_LANGUAGE_INSTRUCTION = '사용자에게 보이는 설명·요약·질문은 한국어로 쓴다(코드·명령·식별자는 원문 그대로).';
 
+/**
+ * 요청 글 끝에 붙이는 언어 알림(트러블슈팅 132). 지시문의 언어 지침만으로는 도구 호출 사이의 진행 문장이 영어로 나왔다
+ * (실제 세션의 진행 문장 37건 중 25건, "Now let's run the web tests"). 지시문에 "진행 문장도 한국어"라고 적어도 그대로였고(5건 중 5건 영어),
+ * 같은 말을 요청 글 끝에 적자 7건 모두 한국어였다. 긴 대화에서는 지시문보다 방금 받은 요청이 가깝다.
+ * 화면에 보이는 요청 글과 체크포인트 제목에는 붙지 않는다(모델에게 보내는 글에만 붙인다)
+ */
+export const AGENT_LANGUAGE_REMINDER = '[b-studio] 도구를 부르기 전후에 적는 짧은 진행 문장도 한국어로 써 주세요.';
+
+/** 모델에게 보내는 요청 글 끝에 언어 알림을 붙인다 */
+export function withLanguageReminder(request: string): string {
+  return `${request}\n\n${AGENT_LANGUAGE_REMINDER}`;
+}
+
 /** 정책을 모델이 읽을 한 줄로: 누가 어떤 메서드·경로를 부를 수 있는지와 가리는 필드 */
 function describeAccess(policy: ExternalPolicy): string {
   const access = policy.allow

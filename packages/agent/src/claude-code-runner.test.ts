@@ -14,6 +14,7 @@ import {
   type ClaudeCodeSdk,
 } from './claude-code-runner';
 import type { AgentEvent } from './loop';
+import { AGENT_LANGUAGE_REMINDER } from './prompts';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 import { buildTools } from './tools';
 
@@ -272,6 +273,23 @@ describe('runClaudeCodeAgent', () => {
 
     expect(state.options).toMatchObject({ resume: 'previous-session', forkSession: true });
     expect(result).toMatchObject({ status: 'done', sessionId: 'forked-session', turns: 1 });
+  });
+
+  it('모델에게 보내는 요청 글 끝에 언어 알림을 붙인다. 게이트가 되돌려 보내는 글에는 붙이지 않는다 (트러블슈팅 132)', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String broken;' } }, { text: '고쳤습니다.' }],
+        [{ tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam; String broken;', new_text: 'customerName;' } }, { text: '다시 고쳤습니다.' }],
+      ],
+    });
+    // 첫 검증은 실패(재시작 실패), 둘째는 통과
+    await runClaudeCodeAgent({ request: '주문에 메모 필드를 더해 주세요', project, sandbox: fakeSandbox(project, [false, true]), sdk, fetcher: async () => contract });
+
+    expect(state.prompts[0]).toBe(`주문에 메모 필드를 더해 주세요\n\n${AGENT_LANGUAGE_REMINDER}`);
+    expect(AGENT_LANGUAGE_REMINDER).toContain('진행 문장도 한국어');
+    // 게이트의 안내는 이미 한국어이고 같은 실행 안의 글이다
+    expect(state.prompts[1]).toContain('[b-studio 검증 게이트]');
+    expect(state.prompts[1]).not.toContain(AGENT_LANGUAGE_REMINDER);
   });
 
   it('지시문을 대화에 기록하지 않게 넘긴다 — 이어받은 대화도 지금의 지시문으로 돈다 (트러블슈팅 130)', async () => {
