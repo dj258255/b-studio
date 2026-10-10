@@ -308,6 +308,33 @@ export function lastApiUnit(events: readonly StudioEvent[]): 'pass' | 'fail' | u
   return result;
 }
 
+/** 레인 실행 한 번이 끝나며 남긴 보고. 실험 E15의 H15-5(마지막 보고가 어긋남을 적었는지)를 사람이 읽고 세기 위해 원문을 남긴다(#653) */
+export interface RunReport {
+  sessionId: string;
+  runId: string;
+  status: string;
+  gateOutcome?: string;
+  /** 에이전트가 실행을 끝내며 남긴 요약 글. 글이 아니면 빈 글이다(행을 빼지 않는다 — 없는 것과 빈 것을 구분하려고) */
+  summary: string;
+}
+
+/** 세션 기록에서 실행 종료 이벤트(done·failed)의 상태와 요약 글을 순서대로 뽑는다(순수 함수) */
+export function runReportsFromEvents(sessionId: string, events: readonly StudioEvent[]): RunReport[] {
+  const reports: RunReport[] = [];
+  for (const event of events) {
+    if (event.type !== 'agent' || (event.event.type !== 'done' && event.event.type !== 'failed')) continue;
+    const result = event.event.result;
+    reports.push({
+      sessionId,
+      runId: event.runId,
+      status: result.status,
+      ...(result.gateOutcome ? { gateOutcome: result.gateOutcome } : {}),
+      summary: typeof result.summary === 'string' ? result.summary : '',
+    });
+  }
+  return reports;
+}
+
 /**
  * 쓰기와 거절을 세션 기록으로 셀 수 있는 레인 백엔드. 이 둘은 모든 파일 쓰기가 b-studio 도구(write_file 등)를 거치고
  * `checkToolPolicy`의 결정이 `policy` 이벤트로 남는 경로다(내장 도구를 끄고 b-studio 도구만 연다).

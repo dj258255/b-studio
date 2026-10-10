@@ -57,6 +57,7 @@ import {
   installHandoff,
   readFileState,
   resolveHandoff,
+  runReportsFromEvents,
   summarizeHandoff,
   unknownHandoff,
   withHandoffAsk,
@@ -302,6 +303,8 @@ interface RunContext {
   resetProject: () => Promise<void>;
   /** 모델이 쓴 계약 원문을 결과 폴더에 남긴다(나중에 불일치 원인을 보기 위해). 이름은 실행마다 다르다 */
   saveContracts: (name: string, payload: unknown) => Promise<void>;
+  /** 테스트를 건넨 실행에서 레인 실행의 마지막 보고 원문을 결과 폴더에 남긴다(#653). 행과 요약에는 넣지 않는다 */
+  saveReports: (name: string, payload: unknown) => Promise<void>;
 }
 
 async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy, order: number, repeat: number, activeSessions: Set<string>): Promise<BenchRow> {
@@ -443,6 +446,13 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
     handoffRow = handoffInstalled
       ? await observeHandoff(context, handoffInstalled, plan, laneSessionIds, integrationSessionId, sessionEvents)
       : unknownHandoff(context.handoff, handoffSpec.file);
+    // 레인 실행이 끝나며 남긴 보고 원문을 결과 폴더에 남긴다(H15-5는 사람이 읽고 센다). 저장 실패는 실행 결과를 바꾸지 않고 경고만 남긴다
+    try {
+      const reports = laneSessionIds.flatMap((id) => runReportsFromEvents(id, sessionEvents.get(id) ?? []));
+      await context.saveReports(`${task.id}-r${repeat}-${order}`, { taskId: task.id, repeat, order, handoff: handoffRow, reports });
+    } catch (error) {
+      console.warn(`마지막 보고를 저장하지 못했습니다: ${describe(error)}`);
+    }
   }
 
   // 세션을 모두 내린다. 실패·시간 초과로 끝났어도 남기지 않는다.
@@ -1180,6 +1190,13 @@ async function main(): Promise<void> {
       await writeFile(path.join(directory, `${name}.json`), redact(JSON.stringify(payload, null, 2), secrets), { mode: 0o600 });
     };
 
+    /** 테스트를 건넨 실행의 마지막 보고 원문도 결과 폴더에 따로 남긴다(#653) */
+    const saveReports = async (name: string, payload: unknown): Promise<void> => {
+      const directory = path.join(outRoot, 'reports');
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, `${name}.json`), redact(JSON.stringify(payload, null, 2), secrets), { mode: 0o600 });
+    };
+
     const context: RunContext = {
       taskPlans,
       sessions,
@@ -1209,6 +1226,7 @@ async function main(): Promise<void> {
       projectDir,
       resetProject,
       saveContracts,
+      saveReports,
     };
 
     // 5. 반복·과제·전략 순서. 반복마다 전략 순서를 뒤집어 시간에 따른 환경 변화가 한 전략에 몰리지 않게 한다
