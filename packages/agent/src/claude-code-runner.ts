@@ -17,7 +17,7 @@ import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldP
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
 import { loadProjectGuide } from './project-guide';
-import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
+import { buildAskRequest, buildSystemPrompt, projectGuideSection, withLanguageReminder } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
@@ -305,7 +305,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let lastFeedback: string | undefined;
   let modelForQuery = model;
   let resumeForQuery = resume;
-  let pendingPrompt = ask ? buildAskRequest(request, { toolName, ...(researching ? { research: { webToolsAvailable: true } } : {}) }) : request;
+  // 요청 글 끝에 언어 알림을 붙인다. 지시문에만 적으면 진행 문장이 영어로 나온다(트러블슈팅 132)
+  let pendingPrompt = withLanguageReminder(ask ? buildAskRequest(request, { toolName, ...(researching ? { research: { webToolsAvailable: true } } : {}) }) : request);
   // 승격으로 다음 query를 열어야 하면 true. 게이트 재시도는 같은 대화에 이어 넣는다
   let reopen = false;
 

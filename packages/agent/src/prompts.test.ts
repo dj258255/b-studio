@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { ProjectGuide } from './project-guide';
-import { AGENT_LANGUAGE_INSTRUCTION, buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
+import { AGENT_LANGUAGE_INSTRUCTION, AGENT_LANGUAGE_REMINDER, buildAskRequest, buildSystemPrompt, projectGuideSection, withLanguageReminder } from './prompts';
 
 const project = {
   spec: { name: 'orders' },
@@ -60,6 +60,14 @@ describe('buildSystemPrompt 자가 확인 범위', () => {
     expect(prompt).not.toContain('(build, tests, package scripts)');
     // 게이트 설명(재시작·준비·계약)은 두 범위가 같다
     expect(prompt).toContain('compares its API contract with the session start');
+  });
+});
+
+describe('withLanguageReminder', () => {
+  it('요청 글은 그대로 두고 끝에 알림 한 줄을 붙인다', () => {
+    expect(withLanguageReminder('주문 목록에 필터를 더해 주세요')).toBe(`주문 목록에 필터를 더해 주세요\n\n${AGENT_LANGUAGE_REMINDER}`);
+    // 질문 모드의 안내가 앞에 붙은 글에도 같은 자리에 붙는다
+    expect(withLanguageReminder(buildAskRequest('이 함수는 뭘 하나요?')).endsWith(AGENT_LANGUAGE_REMINDER)).toBe(true);
   });
 });
 
