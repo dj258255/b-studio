@@ -115,6 +115,26 @@ export function formatVerifyTrailer(mode: 'light' | 'docs'): string {
   return `${WORKFLOW_VERIFY_TRAILER}: ${mode}`;
 }
 
+/**
+ * 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트임을 커밋 본문 끝에 남기는 트레일러(ADR-131 덧붙임).
+ * 게이트 증거로는 그대로 센다(통과한 것은 사실이다). 다만 요청이 끝났다는 뜻은 아니어서, 기록 화면과 올리기 전 미리보기가
+ * 이 값으로 "하다 만 것"임을 알린다
+ */
+export const WORKFLOW_INCOMPLETE_TRAILER = 'Workflow-Incomplete';
+
+export function formatIncompleteTrailer(reason: 'max_turns'): string {
+  return `${WORKFLOW_INCOMPLETE_TRAILER}: ${reason}`;
+}
+
+/** git이 트레일러 블록에서 읽은 Workflow-Incomplete 값. 아는 사유('max_turns')가 아니면 undefined */
+export function parseIncompleteTrailerValues(values: readonly string[]): 'max_turns' | undefined {
+  const value = values
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .at(-1);
+  return value === 'max_turns' ? value : undefined;
+}
+
 /** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'·'docs'가 아니면 undefined(전체 검증 실행) */
 export function parseVerifyTrailerValues(values: readonly string[]): 'light' | 'docs' | undefined {
   const value = values

@@ -47,6 +47,7 @@ export async function recheckGateOnMaxTurns(gate: VerificationGate | undefined, 
   if (!gate) return { pass: false, summary: limitMessage };
   const outcome = await gate.check();
   if (outcome.kind !== 'pass') return { pass: false, summary: limitMessage };
+  gate.passedAtTurnLimit = true;
   if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
   return { pass: true, summary: `${limitMessage}. 다만 지금까지의 변경이 검증 게이트를 통과해 체크포인트로 남깁니다(요청의 일부만 끝났을 수 있습니다).` };
 }
@@ -191,6 +192,11 @@ export class VerificationGate {
    * 실패했는지는 이 값으로 본다(질문으로 끝난 실행이 체크포인트를 남겨도 되는지 판정하는 데 쓴다)
    */
   lastOutcome: GateOutcome['kind'] | undefined;
+  /**
+   * 턴 상한에 닿은 뒤의 재검증(recheckGateOnMaxTurns)을 통과했다. 이때 남기는 체크포인트는 게이트는 통과했지만 모델이
+   * 다음 도구를 부르려던 중에 끊긴 상태라, 실행 결과에 "하다 만 것"으로 표시한다(AgentResult.incomplete, ADR-131 덧붙임)
+   */
+  passedAtTurnLimit = false;
   readonly #options: GateOptions;
   readonly #baselines: ReadonlyMap<string, OpenApiDocument>;
   /** 게이트 재시도 상한. 기본은 생성 시 받은 값이고, 승격이 새 예산을 주면 커진다 */

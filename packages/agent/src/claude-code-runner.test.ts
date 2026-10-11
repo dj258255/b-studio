@@ -1007,6 +1007,7 @@ describe('runClaudeCodeAgent 턴 상한에 걸리면 되돌리기 전에 게이�
     expect(result.summary).toContain('최대 턴 수(60)를 넘었습니다');
     expect(result.summary).toContain('검증 게이트를 통과해');
     expect(result.failureReason).toBeUndefined();
+    expect(result.incomplete).toBe('max_turns');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
     expect(sandbox.restarts).toEqual(['api']);
   });
@@ -1082,6 +1083,7 @@ describe('runClaudeCodeAgent 턴 상한에 걸리면 되돌리기 전에 게이�
 
     expect(result.status).toBe('done');
     expect(result.summary).toContain('최대 턴 수(2)를 넘었습니다');
+    expect(result.incomplete).toBe('max_turns');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
   });
 });

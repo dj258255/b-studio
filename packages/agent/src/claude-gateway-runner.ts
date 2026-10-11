@@ -558,6 +558,7 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
       ...(gate.lastOutcome ? { gateOutcome: gate.lastOutcome } : {}),
       passedStages: [...gate.passedStages],
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(status === 'done' && gate.passedAtTurnLimit ? { incomplete: 'max_turns' as const } : {}),
       ...(gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate.attempts,
       turns: messageIds.size,
@@ -585,6 +586,7 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     const started = performance.now();
     const recheck = settled ? { pass: true, summary: `최대 턴 수(${maxTurns})를 넘었습니다. 다만 지금까지의 변경이 검증 게이트를 통과해 체크포인트로 남깁니다(요청의 일부만 끝났을 수 있습니다).` } : await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
     metrics.gateMs += Math.round(performance.now() - started);
+    if (recheck.pass) gate.passedAtTurnLimit = true;
     return finish(recheck.pass ? 'done' : 'failed', recheck.summary, recheck.pass ? undefined : 'max_turns');
   }
   if (!settled) {

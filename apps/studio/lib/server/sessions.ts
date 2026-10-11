@@ -63,6 +63,7 @@ import {
   flattenDiscoveredFile,
   formatCheckedCoverage,
   formatVerificationReport,
+  formatIncompleteTrailer,
   formatVerifyTrailer,
   formatWorkflowTrailer,
   isBlockingFinding,
@@ -2395,6 +2396,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       metrics: result.metrics,
       durationMs: Math.round(performance.now() - agentStarted),
       ...(result.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(result.status === 'done' && result.incomplete === 'max_turns' ? { incomplete: 'max_turns' as const } : {}),
       // 가볍게 확인이 건너뛴 단계를 함께 남긴다(프로젝트 토큰 보고서가 이 수를 센다)
       ...(result.skippedStages && result.skippedStages.length > 0 ? { skippedStages: [...result.skippedStages] } : {}),
     };
@@ -2834,6 +2836,8 @@ function checkpointTrailers(result: AgentResult): string[] {
   const trailers = [formatWorkflowTrailer(result.passedStages)];
   // 가볍게 확인한 체크포인트는 건너뛴 단계를 채우지 못한다(배포 조건이 막는다). 화면이 안내를 바꾸도록 표시를 남긴다
   if (result.verify === 'light') trailers.push(formatVerifyTrailer('light'));
+  // 턴 상한에서 게이트만 통과한 실행은 체크포인트로 남기되 하다 만 것으로 표시한다(ADR-131 덧붙임)
+  if (result.incomplete === 'max_turns') trailers.push(formatIncompleteTrailer('max_turns'));
   return trailers;
 }
 
@@ -3415,6 +3419,27 @@ type IssueLookupResult = { ok: true; state: 'open' | 'closed'; title: string } |
  * 통합 세션에서 이슈 목록 한 줄이 너무 길었다) */
 const SUMMARIZE_ISSUE_LIST_THRESHOLD = 5;
 
+export interface TurnLimitedCommits {
+  /** 턴 상한에서 게이트만 통과해 남긴 체크포인트. 오래된 것부터 */
+  commits: Array<{ shortSha: string; subject: string }>;
+  /** 그 가운데 마지막 것 뒤에, 게이트를 통과하며 끝까지 간 요청이 남긴 체크포인트 수 */
+  finishedAfter: number;
+}
+
+/**
+ * 세션의 커밋(오래된 것부터)에서 턴 상한에 닿아 멈춘 실행이 남긴 체크포인트를 고른다(ADR-131 덧붙임).
+ * 표시는 그 커밋의 사실이라 지워지지 않는다. 대신 그 뒤에 끝까지 간 요청이 있는지를 함께 센다 — 이어서 마무리했다면
+ * 그 요청이 여기에 잡힌다. 문서 체크포인트와 게이트 기록이 없는 커밋(사람이 직접 고친 것, 가져온 커밋)은 세지 않는다:
+ * 그것으로 남은 일이 끝났는지는 플랫폼이 본 적이 없다
+ */
+export function turnLimitedCommits(commits: ReadonlyArray<Pick<SessionCommit, 'shortSha' | 'subject' | 'incomplete' | 'verify' | 'passedStages'>>): TurnLimitedCommits {
+  const last = commits.findLastIndex((commit) => commit.incomplete === 'max_turns');
+  return {
+    commits: commits.filter((commit) => commit.incomplete === 'max_turns').map(({ shortSha, subject }) => ({ shortSha, subject })),
+    finishedAfter: last < 0 ? 0 : commits.slice(last + 1).filter((commit) => commit.passedStages !== undefined && commit.verify !== 'docs').length,
+  };
+}
+
 /**
  * 미리보기의 확인 목록을 만든다. 세션 없이 계산할 수 있도록 순수 함수로 둔다.
  * 어떤 항목이 false여도 올리기를 막지는 않는다. 사람이 보고 판단한다
@@ -3426,6 +3451,7 @@ export function buildExportChecks({
   uncheckpointed,
   running,
   trackingIssue,
+  turnLimited,
 }: {
   issues: readonly number[];
   /** 이슈 번호별 원격 조회 결과. 없는 번호는 확인하지 못한 것으로 둔다 */
@@ -3436,6 +3462,8 @@ export function buildExportChecks({
   /** 이미 발행한 추적 이슈 번호(있으면). "PR 만들기"가 그 본문을 지금 상태로 다시 쓴다는 사실만 알려준다 —
    * 미리보기는 원격에 아무것도 쓰지 않는다(안내만 한다) */
   trackingIssue?: number;
+  /** 턴 상한에서 게이트만 통과해 남긴 체크포인트(turnLimitedCommits). 하나도 없으면 줄을 만들지 않는다 */
+  turnLimited?: TurnLimitedCommits;
 }): ExportPreview['checks'] {
   const checks: ExportPreview['checks'] = [
     {
@@ -3482,6 +3510,22 @@ export function buildExportChecks({
     ok: missing.length === 0,
     detail: missing.length === 0 ? '모든 커밋이 필수 단계를 통과했습니다' : `필수 단계 기록이 없는 커밋 ${missing.length}개가 있습니다`,
   });
+  if (turnLimited && turnLimited.commits.length > 0) {
+    const list = turnLimited.commits.map((commit) => commit.shortSha).join(', ');
+    checks.push(
+      turnLimited.finishedAfter === 0
+        ? {
+            id: 'turn_limit',
+            ok: false,
+            detail: `턴 상한에 닿아 멈춘 실행이 남긴 체크포인트(${list})가 있고, 그 뒤에 끝까지 간 요청이 없습니다. 게이트는 통과했지만 요청이 끝나지 않았을 수 있습니다. 변경 내용을 확인하거나 이어서 마무리한 뒤 올리세요`,
+          }
+        : {
+            id: 'turn_limit',
+            ok: 'unknown',
+            detail: `턴 상한에 닿아 멈춘 실행이 남긴 체크포인트(${list}) 뒤에 끝까지 간 요청이 ${turnLimited.finishedAfter}건 있습니다. 그 요청이 남은 일을 마무리했는지는 확인하지 못합니다`,
+          },
+    );
+  }
   checks.push({
     id: 'uncheckpointed_changes',
     ok: uncheckpointed === 0,
@@ -3516,7 +3560,7 @@ async function pullRequestDraft(
   issues: readonly number[],
   planRequirementIds: readonly string[] = [],
   { assumePushed = false }: { assumePushed?: boolean } = {},
-): Promise<PullRequestDraft & { info: RepositoryInfo; target: PullRequestTarget; targetError?: string }> {
+): Promise<PullRequestDraft & { info: RepositoryInfo; target: PullRequestTarget; targetError?: string; commits: SessionCommit[] }> {
   const info = (await session.checkpoints.repository())!;
   // PR의 대상 브랜치를 원격에 물어 정한다. 기준 브랜치가 원격에 없으면 원격의 기본 브랜치가 대상이 된다.
   // 원격에 닿지 못하면 예전처럼 기준 브랜치를 그대로 쓰고, 미리보기가 "확인하지 못함"으로 알린다
@@ -3567,7 +3611,7 @@ async function pullRequestDraft(
     requiredStages: workflowStages(session.project),
     appendix: `${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}`,
   });
-  return { info, target, targetError, ...draft };
+  return { info, target, targetError, commits, ...draft };
 }
 
 /** 기준 브랜치가 원격에 없고 원격의 기본 브랜치도 알 수 없어 PR을 열 대상이 없는 경우 */
@@ -3634,7 +3678,7 @@ export async function previewExport(
   // assumePushed: true(버그 리포트 84) — 미리보기는 아직 올리지 않았지만, "PR 만들기"를 누르면 먼저 올리고 나서
   // 이 본문을 다시 계산하므로(exportSession) 작업 트리가 깨끗한 한 점검표의 "작업 트리·원격" 항목은 실제로
   // 만들어질 본문과 같이 통과로 보여야 미리보기 ≡ 실제 본문이 유지된다
-  const { info, title, body, missing, target, targetError } = await pullRequestDraft(session, issues, planRequirementIds, { assumePushed: true });
+  const { info, title, body, missing, target, targetError, commits } = await pullRequestDraft(session, issues, planRequirementIds, { assumePushed: true });
   const remote = parseRemote(info.remoteUrl);
   // PR 생성(exportSession)과 같은 토큰을 먼저 찾아 이슈 확인에도 그대로 쓴다(ADR-107) — 이슈 조회만 토큰 없이
   // 돌다 실패하고 PR 생성은 되던 어긋남을 막는다
@@ -3660,6 +3704,7 @@ export async function previewExport(
         uncheckpointed: (await session.checkpoints.pendingFiles()).length,
         running: session.snapshot.running,
         trackingIssue: trackingIssue?.issue,
+        turnLimited: turnLimitedCommits(commits),
       }),
     ],
     review: { auto: session.project.spec.review.auto, maxRounds: session.project.spec.review.maxRounds },

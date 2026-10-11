@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
-import { formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
+import { formatIncompleteTrailer, formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
 
 // 이 파일의 테스트는 실제 git 하위 프로세스를 여러 번 띄운다(clone·commit·push·fetch). 전체 테스트가 함께 도는 부하에서는
 // 기본 5초를 넘겨 실패한 적이 여러 번 있다(단독으로는 항상 통과). 파일 전체에 넉넉한 제한 시간을 준다
@@ -112,6 +112,40 @@ describe('CheckpointStore', () => {
     expect(latest!.verify).toBeUndefined();
     expect(previous!.verify).toBe('light');
     expect(previous!.passedStages).toEqual(['run', 'contract_check']);
+  });
+
+  it('Workflow-Incomplete 트레일러가 있으면 턴 상한에서 남긴 체크포인트로 읽고, 통과 단계는 그대로 남는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const limited = await store.commit('요청: 메모 추가', '검증 결과', {
+      trailers: [formatWorkflowTrailer(['run', 'contract_check', 'test']), formatIncompleteTrailer('max_turns')],
+    });
+    expect(limited?.incomplete).toBe('max_turns');
+    expect(limited?.passedStages).toEqual(['run', 'contract_check', 'test']);
+
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    const finished = await store.commit('요청: 이어서 마무리', '검증 결과', { trailers: [formatWorkflowTrailer(['run', 'contract_check', 'test'])] });
+    expect(finished?.incomplete).toBeUndefined();
+
+    // 스튜디오를 다시 켜도(목록을 Git에서 다시 읽어도) 같은 값이 나온다. 표시는 그 커밋의 것이라 뒤의 체크포인트가 지우지 않는다
+    const [latest, previous] = await store.list();
+    expect(latest!.incomplete).toBeUndefined();
+    expect(previous!.incomplete).toBe('max_turns');
+    // PR 본문이 읽는 세션 커밋 목록에도 같은 표시가 온다
+    expect((await store.sessionCommits()).map((commit) => commit.incomplete)).toEqual(['max_turns', undefined]);
+  });
+
+  it('본문(에이전트 요약)에 적힌 Workflow-Incomplete 줄과 모르는 사유는 표시로 읽지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const inBody = await store.commit('요청: 메모 추가', `에이전트 요약:\n${formatIncompleteTrailer('max_turns')}\n\n끝`, { trailers: [formatWorkflowTrailer(['run'])] });
+    expect(inBody?.incomplete).toBeUndefined();
+
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    const unknown = await store.commit('요청: 메모 추가 2', '검증 결과', { trailers: [formatWorkflowTrailer(['run']), 'Workflow-Incomplete: whatever'] });
+    expect(unknown?.incomplete).toBeUndefined();
   });
 
   it('코드 변경이 있는데 Workflow-Passed가 none이면 체크포인트를 만들지 않는다(ADR-131 마지막 방어선)', async () => {

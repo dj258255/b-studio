@@ -712,4 +712,18 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
     expect(outcomeText(outcome({ status: 'failed', summary: '게이트 실패' }), true)).toBe('완료하지 못함: 게이트 실패');
     expect(outcomeText(outcome({ status: 'error', summary: '연결 끊김' }), true)).toBe('오류: 연결 끊김');
   });
+
+  it('턴 상한에서 게이트만 통과한 실행은 "완료"라고 적지 않는다', () => {
+    expect(outcomeText(outcome({ turns: 41, incomplete: 'max_turns' }), true)).toBe('턴 상한에서 멈춤, 41턴');
+    // 실패로 끝난 실행의 문구는 표시와 무관하게 그대로다
+    expect(outcomeText(outcome({ status: 'failed', summary: '최대 턴 수(40)를 넘었습니다', incomplete: 'max_turns' }), true)).toBe('완료하지 못함: 최대 턴 수(40)를 넘었습니다');
+  });
+
+  it('종료 이벤트의 하다 만 것 표시가 결과 줄로 옮겨진다', () => {
+    const base = createView(snapshot);
+    const limited = reduceSession(base, { type: 'run_finished', runId: 'r1', status: 'done', summary: '최대 턴 수(40)를 넘었습니다.', turns: 41, incomplete: 'max_turns' });
+    expect(limited.chat.at(-1)).toMatchObject({ kind: 'outcome', incomplete: 'max_turns' });
+    const normal = reduceSession(base, { type: 'run_finished', runId: 'r2', status: 'done', summary: '끝', turns: 3 });
+    expect(normal.chat.at(-1)).not.toHaveProperty('incomplete');
+  });
 });

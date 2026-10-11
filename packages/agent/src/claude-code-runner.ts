@@ -350,6 +350,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       ...(gate?.lastOutcome ? { gateOutcome: gate.lastOutcome } : {}),
       passedStages: gate ? [...gate.passedStages] : undefined,
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(status === 'done' && gate?.passedAtTurnLimit ? { incomplete: 'max_turns' as const } : {}),
       ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns: messageIds.size,

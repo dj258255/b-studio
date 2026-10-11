@@ -474,6 +474,7 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     const result = await promise;
     expect(result.status).toBe('done');
     expect(result.summary).toContain('최대 턴 수');
+    expect(result.incomplete).toBe('max_turns');
   });
 
   it('취소하면 CLI를 끝내고 취소 사유를 던진다', async () => {

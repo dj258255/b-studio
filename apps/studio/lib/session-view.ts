@@ -66,6 +66,8 @@ export type ChatItem =
       intent?: 'ask';
       /** 가볍게 확인(light)으로 끝난 요청. 테스트·화면 확인·리뷰를 건너뛰었다 */
       verify?: 'light';
+      /** 턴 상한에 닿았지만 게이트를 통과해 체크포인트로 남긴 요청. 요청이 끝나지 않았을 수 있다 */
+      incomplete?: 'max_turns';
     }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   /** 에이전트의 제안을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘겼다(ADR-068) */
@@ -285,7 +287,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         chat: [
           // 요약 도중에 끝난(취소·오류) 실행의 "요약 중" 줄은 남기지 않는다
           ...markInterrupted(withoutCompacting(view.chat, event.runId), event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.incomplete ? { incomplete: event.incomplete } : {}) },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,
@@ -728,6 +730,8 @@ type OutcomeItem = Extract<ChatItem, { kind: 'outcome' }>;
 /** 실행 결과 한 줄. 바꾼 파일이 없으면 "답만 했습니다"로 알린다(대화 화면과 나란히 보기 칸이 같은 문구를 쓴다) */
 export function outcomeText(item: OutcomeItem, hasChanges: boolean): string {
   // 턴 수를 모르는 실행(세션 터미널: 턴은 CLI 안에서 돈다)에는 턴 수를 적지 않는다
+  // 턴 상한에서 게이트만 통과한 실행은 "완료"라고 적지 않는다. 모델이 다음 도구를 부르려던 중에 끊겼다(ADR-131 덧붙임)
+  if (item.status === 'done' && item.incomplete === 'max_turns') return `턴 상한에서 멈춤${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'awaiting_input') return '답을 기다립니다';
   if (item.status === 'cancelled') return item.summary;
