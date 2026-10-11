@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
+import { CheckpointError, CheckpointStore, isIndexLockFailure, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
 import { formatIncompleteTrailer, formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
 
 // 이 파일의 테스트는 실제 git 하위 프로세스를 여러 번 띄운다(clone·commit·push·fetch). 전체 테스트가 함께 도는 부하에서는
@@ -1336,3 +1336,62 @@ describe('CheckpointStore 검증한 내용만 커밋한다 (이슈 #677)', () =>
     expect(await store.commit('feat: 메모', undefined, { expectStaged: prints })).toBeDefined();
   });
 });
+
+describe('인덱스 잠금 충돌(#682)', () => {
+  const lockPath = () => path.join(root, '.git/index.lock');
+
+  it('다른 git이 인덱스 잠금을 쥐고 있어도 잠금이 풀리면 체크포인트를 남긴다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    // 다른 git 프로세스가 인덱스를 쓰는 중인 상태: 잠금 파일이 있다가 잠시 뒤 사라진다
+    await writeFile(lockPath(), '');
+    const release = setTimeout(() => void rm(lockPath(), { force: true }), 250);
+
+    const checkpoint = await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run'])] });
+    clearTimeout(release);
+
+    expect(checkpoint?.files).toEqual(['api/src/Order.java']);
+    expect(await store.pendingFiles()).toEqual([]);
+  });
+
+  it('잠금이 끝내 풀리지 않으면 잠금 파일을 지우지 않고 원래의 오류로 끝낸다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await writeFile(lockPath(), '');
+
+    const started = Date.now();
+    await expect(store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run'])] })).rejects.toThrow(/index\.lock/);
+    // 바로 포기하지 않고 기다려 봤다
+    expect(Date.now() - started).toBeGreaterThan(2_000);
+    // 살아 있는 git의 잠금일 수 있으므로 건드리지 않는다
+    expect(await readFile(lockPath(), 'utf8')).toBe('');
+    // 변경은 작업 복사본에 그대로 있다
+    await rm(lockPath());
+    expect(await store.pendingFiles()).toEqual(['api/src/Order.java']);
+  });
+
+  it('git을 부를 때 선택적 잠금을 끈다 — 상태를 읽는 명령이 인덱스 잠금을 잡지 않는다', async () => {
+    // 진짜 git 앞에 환경 변수를 받아 적는 껍데기를 둔다
+    const seen = path.join(root, '..', `${path.basename(root)}.optional-locks`);
+    const wrapper = path.join(root, '..', `${path.basename(root)}.git-wrapper.sh`);
+    await writeFile(wrapper, `#!/bin/sh\nprintf '%s\\n' "\${GIT_OPTIONAL_LOCKS-unset}" >> '${seen}'\nexec git "$@"\n`);
+    await chmod(wrapper, 0o755);
+    const store = new CheckpointStore(root, { gitBin: wrapper });
+    await store.init();
+    await store.pendingFiles();
+
+    const values = (await readFile(seen, 'utf8')).trim().split('\n');
+    expect(values.length).toBeGreaterThan(0);
+    expect(new Set(values)).toEqual(new Set(['0']));
+  });
+
+  it('잠금 충돌만 다시 해 볼 실패로 본다', () => {
+    expect(isIndexLockFailure("fatal: Unable to create '/w/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository")).toBe(true);
+    expect(isIndexLockFailure("error: could not lock config file .git/config: File exists")).toBe(false);
+    expect(isIndexLockFailure("fatal: pathspec 'index.lock' did not match any files")).toBe(false);
+    expect(isIndexLockFailure('')).toBe(false);
+  });
+});
+

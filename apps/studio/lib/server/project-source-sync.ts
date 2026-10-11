@@ -67,7 +67,8 @@ export interface FetchOriginMainResult {
 async function git(root: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', root, ...args], {
     maxBuffer: 16 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes' },
+    // 원본 폴더에서는 사용자의 IDE·셸도 git을 돌린다. 상태를 읽는 명령이 인덱스 잠금을 잡아 그쪽을 실패시키지 않게 한다(#682)
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes' },
   });
   return stdout;
 }
