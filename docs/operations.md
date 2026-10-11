@@ -318,6 +318,7 @@ pnpm studio sandbox prune
 
 - 이슈 연결 여부와 원격 이슈의 존재·열림 여부. 이슈 조회는 GitHub·Gitea `GET /repos/{owner}/{repo}/issues/{n}`, GitLab `GET /projects/{id}/issues/{iid}`를 씁니다. 조회 실패(네트워크·권한·토큰 없음)는 `?`와 이유로 두고 막지 않습니다.
 - 필수 워크플로 단계 기록(`Workflow-Passed` 트레일러)이 없는 커밋 수.
+- 턴 상한에 닿아 멈춘 실행이 남긴 체크포인트(`Workflow-Incomplete` 트레일러). 그 뒤에 끝까지 간 요청이 없으면 ✗, 있으면 `?`와 건수로 보입니다. 그런 체크포인트가 없으면 줄이 없습니다.
 - 체크포인트로 남기지 않은 변경 수.
 - 진행 중인 작업 여부.
 
