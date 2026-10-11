@@ -297,6 +297,7 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
+import { disposeSessionTerminal } from './session-terminal';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -916,10 +917,11 @@ function projectViews(
   project: LoadedProject,
   state: 'starting' | 'stopped' = 'starting',
   offManaged: ReadonlySet<string> = new Set(),
-): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy' | 'experimental'> {
+): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy' | 'experimental' | 'terminal'> {
   return {
     // 서버 설정이라 프로젝트와 무관하지만, 화면이 탭을 그릴 때 함께 읽도록 여기서 싣는다(다시 열 때마다 지금 값으로 바뀐다)
     experimental: experimentalEnabled(),
+    terminal: sessionTerminalAllowed(),
     // project.deploy(로더가 채운 값)는 선언하지 않은 서비스도 기본값(Dockerfile)으로 채우므로 늘 비어 있지 않다.
     // "배포" 하위 탭을 보일지는 spec.deploy(원본, 선언했을 때만 있음)로 판단해야 한다
     hasDeploy: project.spec.deploy !== undefined,
@@ -1158,6 +1160,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   session.logFollower?.abort();
   clearInterval(session.usageTimer);
   session.fileWatcher?.close();
+  // 세션 터미널의 컨테이너는 compose 밖에서 띄운 것이라 따로 지운다(#673)
+  await disposeSessionTerminal(id, session.sandbox.id);
   await session.sandbox.destroy().catch(() => {});
   // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
   await closeRemoteBrowser(id).catch(() => {});
@@ -7010,6 +7014,22 @@ export function previewAccessUrl(id: string, service: string, requestedPath: str
   url.searchParams.set('ticket', ticket);
   url.searchParams.set('next', target);
   return url.toString();
+}
+
+/**
+ * 세션 터미널(#673)을 쓸 수 있는가. 컨테이너 안의 셸을 여는 일이라 실험 기능을 켠 개인 PC 모드에서만 연다.
+ * 다른 실험 기능은 숨기기만 하지만(ADR-166) 이것은 막는다 — 새로 여는 입력 통로이고, 여러 사람이 쓰는 서버에서는 누구의 컨테이너에 누가 붙는지를 아직 정하지 않았다
+ */
+export function sessionTerminalAllowed(): boolean {
+  return experimentalEnabled() && localFolderAllowed();
+}
+
+/** 세션 터미널이 붙을 자리: 샌드박스 id와 작업 복사본. 샌드박스가 준비된 세션만 */
+export function sessionTerminalTarget(id: string): { sandboxId: string; root: string } {
+  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '세션이 준비된 뒤에 터미널을 열 수 있습니다');
+  return { sandboxId: session.sandbox.id, root: session.project.root };
 }
 
 function requireSession(id: string): Session {

@@ -49,3 +49,17 @@ export {
   type ListeningProcess,
   type ProcessResourceUsage,
 } from './docker/host-processes';
+export {
+  AGENT_HOME_VOLUME,
+  AGENT_IMAGE,
+  AGENT_SERVICE,
+  AGENT_TERMINAL_COMMAND,
+  AGENT_WORKSPACE,
+  agentContainerName,
+  clampTerminalSize,
+  ensureAgentContainer,
+  openAgentTerminal,
+  removeAgentContainer,
+  type AgentTerminal,
+  type TerminalSize,
+} from './docker/agent-terminal';
