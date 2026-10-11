@@ -486,6 +486,12 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
+  /**
+   * 마지막 체크포인트(head)에서 작업 복사본이 그대로일 때 서비스에서 읽은 계약(#677). 그 체크포인트에 검증된 계약 기록이 없을 때만 쓴다.
+   * 파일로 남기지 않는다 — 서비스가 그 체크포인트의 코드로 떠 있다는 것을 게이트가 확인한 값이 아니라서, 한번 남기면 어긋난 값이
+   * 계속 기준이 된다. 이 프로세스가 사는 동안, 같은 체크포인트에서 실패한 실행이 변경을 남겼을 때 다음 실행이 다시 읽지 않게 하는 데만 쓴다
+   */
+  capturedContracts?: { head: string; contracts: ContractSet };
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
@@ -7240,7 +7246,16 @@ async function keepVerifiedContracts(session: Session, contracts: ContractSet | 
  * 그때는 지금 계약이 기준이 된다(게이트가 한 번도 통과한 적 없는 세션에 변경이 먼저 있던 경우, ADR-131과 같은 한계)
  */
 async function contractBaselinesFor(session: Session, runId: string): Promise<ContractSet | undefined> {
-  for (const checkpoint of session.snapshot.checkpoints.slice(0, CONTRACT_LOOKBACK)) {
+  const [head, ...earlier] = session.snapshot.checkpoints.slice(0, CONTRACT_LOOKBACK);
+  if (head) {
+    // 1) 마지막 체크포인트를 통과시킨 검증이 본 계약
+    const exact = await readContractRecord(stateDirOf(session.snapshot), head.sha);
+    if (exact) return exact as ContractSet;
+    // 2) 그 체크포인트에서 변경이 생기기 전에 읽어 둔 계약(이 프로세스의 메모리)
+    if (session.capturedContracts?.head === head.sha) return session.capturedContracts.contracts;
+  }
+  // 3) 검증을 통과한 더 앞의 체크포인트의 계약. 오래된 것과 견주는 쪽이 닫힌 쪽이다
+  for (const checkpoint of earlier) {
     const kept = await readContractRecord(stateDirOf(session.snapshot), checkpoint.sha);
     if (kept) return kept as ContractSet;
   }
@@ -7326,13 +7341,15 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     const workspace = new Workspace(project.root);
     workspace.beginRun(requirementsBaseline);
     // 계약 비교의 기준은 마지막 체크포인트의 계약이다.
-    //  - 그 체크포인트에 계약 기록이 있으면(게이트가 통과시키며 남긴 것) 그것을 쓴다
-    //  - 기록이 없고 작업 복사본이 체크포인트 그대로면 지금 서비스의 계약이 곧 그것이다. 읽어서 기록으로 남긴다
-    //  - 기록이 없고 변경이 남아 있으면 지금 계약을 기준으로 읽지 않는다. 기록이 있는 가장 가까운 체크포인트의 것을 쓴다
+    //  - 그 체크포인트에 검증된 계약 기록이 있으면(게이트가 통과시키며 남긴 것) 그것을 쓴다
+    //  - 없으면, 같은 체크포인트에서 앞서 읽어 둔 것이 있으면 그것을 쓴다(다시 읽지 않는다 — 그 사이 실패한 실행의 코드로 서비스가 떠 있을 수 있다)
+    //  - 그것도 없고 작업 복사본이 체크포인트 그대로면 지금 서비스의 계약을 읽는다(게이트가 읽는다). 메모리에만 둔다
+    //  - 그것도 없고 변경이 남아 있으면 지금 계약을 기준으로 읽지 않는다. 기록이 있는 더 앞의 체크포인트의 것을 쓴다
     const head = session.snapshot.checkpoints[0]?.sha;
     const dirty = (await changesOutsideTools(session)).length > 0;
     const exact = head ? ((await readContractRecord(stateDirOf(session.snapshot), head)) as ContractSet | undefined) : undefined;
-    const kept = exact ?? (dirty ? await contractBaselinesFor(session, run.id) : undefined);
+    const captured = head && session.capturedContracts?.head === head ? session.capturedContracts.contracts : undefined;
+    const kept = exact ?? captured ?? (dirty ? await contractBaselinesFor(session, run.id) : undefined);
     // CLI는 b-studio 도구를 거치지 않고 파일을 고친다. 변경은 작업 복사본의 상태로만 안다.
     //  - 실행 전부터 있던 변경도 검증 대상이다(ADR-131). 게이트가 다룰 수 없는 경로는 처음부터 있었어도 봐주지 않는다:
     //    터미널의 실행은 변경을 되돌리지 않으므로, 봐주면 앞 실행이 남긴 비밀 파일이나 링크가 다음 실행에서 그대로 커밋된다
@@ -7358,10 +7375,10 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
         run.verifiedContracts = contracts;
       },
     });
-    // 체크포인트 그대로인 상태에서 방금 읽은 계약은 그 체크포인트의 계약이다. 이 실행이 실패해 변경을 남겨도 다음 실행이 이것과 견준다.
-    // 읽는 동안 파일이 바뀌었으면(앞 실행이 띄워 둔 프로세스 등) 그 계약을 체크포인트의 것으로 남기지 않는다 — 한번 남긴 기록은 계속 기준이 된다
-    if (!kept && !dirty && head && gate.baselines.size > 0 && (await changesOutsideTools(session)).length === 0 && session.snapshot.checkpoints[0]?.sha === head) {
-      await keepVerifiedContracts(session, gate.baselines);
+    // 체크포인트 그대로인 상태에서 방금 읽은 계약을 이 체크포인트의 것으로 기억해 둔다. 이 실행이 실패해 변경을 남겨도 다음 실행이
+    // 다시 읽지 않고 이것과 견준다. 파일로는 남기지 않는다(Session.capturedContracts). 읽는 동안 파일이 바뀌었으면 기억하지 않는다
+    if (!kept && !dirty && head && (await changesOutsideTools(session)).length === 0 && session.snapshot.checkpoints[0]?.sha === head) {
+      session.capturedContracts = { head, contracts: gate.baselines };
     }
     const context: ToolContext = {
       project,

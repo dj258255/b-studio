@@ -593,32 +593,55 @@ describe('실패한 실행이 남긴 변경은 다음 실행에서도 같은 기
     await stopSession(session.id);
   }, 60_000);
 
-  it('기준은 체크포인트 곁에 파일로 남는다(메모리가 아니다). 통과한 검증이 본 계약이 그 체크포인트의 기록이 된다', async () => {
+  it('파일로 남기는 기준은 게이트가 통과시키며 본 계약뿐이다. 서비스에서 읽기만 한 계약은 파일로 남기지 않는다', async () => {
     const session = await open();
-    const recordOf = async (sha: string) => JSON.parse(await readFile(path.join(session.work, '.git/b-studio/contracts', `${sha}.json`), 'utf8')) as { api: ReturnType<typeof contractWith> };
+    const recordFile = (sha: string) => path.join(session.work, '.git/b-studio/contracts', `${sha}.json`);
+    const recordOf = async (sha: string) => JSON.parse(await readFile(recordFile(sha), 'utf8')) as { api: ReturnType<typeof contractWith> };
     const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
     await session.gateway.prompt({ prompt: 'note 필드를 더해줘' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
-    // 쓰기 직전에(작업 복사본이 체크포인트 그대로일 때) 읽은 계약이 그 체크포인트의 기록으로 남았다
-    expect(Object.keys((await recordOf(start)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo']);
+    // 쓰기 직전에 서비스에서 읽은 계약은 이 실행의 기준으로만 쓴다. 게이트가 그 체크포인트의 코드와 맞는지 확인한 값이 아니라서 남기지 않는다
+    await expect(readFile(recordFile(start), 'utf8')).rejects.toThrow();
 
     service.doc = contractWith(['id', 'memo', 'note']);
     await session.gateway.stop({ last_assistant_message: '더했습니다.' });
     const head = getSnapshot(session.id)!.checkpoints[0]!.sha;
     expect(head).not.toBe(start);
     expect(Object.keys((await recordOf(head)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo', 'note']);
+    await expect(readFile(recordFile(start), 'utf8')).rejects.toThrow();
 
     // 체크포인트 뒤에 서비스가 다른 계약을 내놓아도(코드가 또 바뀌었다) 기록은 게이트가 본 것 그대로다
     service.doc = contractWith(['id']);
     await session.gateway.prompt({ prompt: '아무것도 하지 마' });
     await session.gateway.stop({ last_assistant_message: '네' });
     expect(Object.keys((await recordOf(head)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo', 'note']);
-    // 그 기록이 다음 실행의 기준이다: 지금 서비스의 계약(필드 둘이 빠짐)을 기준으로 다시 읽지 않는다
+    // 그 기록이 다음 실행의 기준이다: 작업 복사본이 체크포인트 그대로여도 지금 서비스의 계약(필드 둘이 빠짐)을 기준으로 다시 읽지 않는다
     await session.gateway.prompt({ prompt: '필드를 빼줘' });
     await write(session, 'api/src/Order.java', 'class Order {}\n');
     const answer = await session.gateway.stop({});
     expect(answer.feedback).toContain('memo');
     expect(answer.feedback).toContain('note');
+    await stopSession(session.id);
+  }, 60_000);
+
+  it('검증된 기록이 없는 체크포인트에서는 처음 읽은 계약을 그 체크포인트의 것으로 기억하고, 다시 읽지 않는다(실패한 실행의 코드로 뜬 서비스를 기준으로 삼지 않는다)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: 'memo를 빼줘' });
+    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+    service.doc = contractWith(['id']);
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    // 파일을 원래대로 돌려놓는다. 작업 복사본은 체크포인트 그대로지만 서비스는 여전히 고친 코드로 떠 있다(계약에 memo가 없다)
+    await edit(session, 'api/src/Order.java', 'class Order {}\n');
+    expect(await git(session, 'status', '--porcelain')).toBe('');
+
+    // 새 실행이 같은 변경을 다시 한다. 지금 서비스의 계약을 다시 읽었다면 "원래 없던 필드"가 되어 통과했을 것이다
+    await session.gateway.prompt({ prompt: '다시 memo를 빼줘' });
+    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+    expect((await session.gateway.stop({})).feedback).toContain('memo');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
     await stopSession(session.id);
   }, 60_000);
 
