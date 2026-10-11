@@ -2892,4 +2892,50 @@ describe('이미 잡아 둔 계약 기준을 이어 쓴다 (이슈 #677)', () =>
     // 읽은 서비스는 방금 본 계약으로, 읽지 않은 서비스는 기준의 것 그대로
     expect(handed).toEqual([{ api: added, billing: { paths: { '/pay': { post: {} } } } }]);
   });
+
+  it('받은 기준에 없는 서비스는 지금 계약으로 채운다(기준이 아예 없으면 그 서비스에서 빠지는 것을 잡지 못한다). 받은 기준은 그대로 둔다', async () => {
+    const fetched: string[] = [];
+    const create = (baselines: VerificationGate['baselines']) =>
+      VerificationGate.create({
+        project,
+        sandbox: fakeSandbox(project, [true]),
+        workspace: new Workspace(project.root),
+        allowBreaking: false,
+        maxVerifyAttempts: 3,
+        fetcher: async (url) => {
+          fetched.push(url);
+          return ORDERS_CONTRACT;
+        },
+        onEvent: () => {},
+        baselines,
+      });
+    // 다른 서비스의 기준만 받았다: api의 기준이 없다 → 지금 계약으로 채운다
+    const billing = { paths: { '/pay': { post: {} } } };
+    const filled = await create(new Map([['billing', billing]]));
+    expect(fetched).toHaveLength(1);
+    expect(filled.baselines.get('api')).toEqual(ORDERS_CONTRACT);
+    expect(filled.baselines.get('billing')).toBe(billing);
+    // api의 기준을 받았으면 읽지 않고, 받은 것을 쓴다
+    fetched.length = 0;
+    const kept = { paths: {} };
+    const given = await create(new Map([['api', kept]]));
+    expect(fetched).toEqual([]);
+    expect(given.baselines.get('api')).toBe(kept);
+
+    // 서비스 둘 가운데 하나의 기준만 받았다: 없는 쪽만 지금 계약으로 채우고, 받은 쪽은 지금 계약으로 덮지 않는다
+    const [, api] = project.managed[0]!;
+    const two = { ...project, managed: [...project.managed, ['web', { ...api, path: 'web', contract: { extract: '/openapi.json' } }]] } as typeof project;
+    const mixed = await VerificationGate.create({
+      project: two,
+      sandbox: fakeSandbox(two, [true]),
+      workspace: new Workspace(two.root),
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      onEvent: () => {},
+      baselines: new Map([['api', kept]]),
+    });
+    expect(mixed.baselines.get('api')).toBe(kept);
+    expect(mixed.baselines.get('web')).toEqual(ORDERS_CONTRACT);
+  });
 });

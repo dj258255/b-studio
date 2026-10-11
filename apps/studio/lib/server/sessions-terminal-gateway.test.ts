@@ -24,6 +24,10 @@ const fake = vi.hoisted(() => ({
   /** 켜면 서비스 재시작이 샌드박스 쪽 문제로 실패한다 */
   startFails: false,
   starts: 0,
+  /** 서비스를 다시 띄운 횟수 */
+  restarts: 0,
+  /** 켜면 서비스를 다시 띄우지 못한다 */
+  restartFails: false,
   interrupts: [] as string[],
   /** holdWord가 든 명령은 hold가 풀릴 때까지 끝나지 않는다(실행이나 검증을 열어 둔 채로 두는 데 쓴다) */
   holdWord: undefined as string | undefined,
@@ -43,6 +47,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
       return [];
     },
     async restart(service: string) {
+      fake.restarts += 1;
+      if (fake.restartFails) throw new Error('컨테이너가 종료됐습니다');
       return { service, containerPort: 8080, url: fake.serviceUrl };
     },
     async sync() {
@@ -117,6 +123,8 @@ workflow:
   fake.failCommands = [];
   fake.startFails = false;
   fake.starts = 0;
+  fake.restarts = 0;
+  fake.restartFails = false;
   fake.interrupts = [];
   fake.holdWord = undefined;
   fake.hold = undefined;
@@ -141,12 +149,15 @@ afterEach(async () => {
 });
 
 /** 서비스가 지금 내놓는 API 계약. 테스트가 doc을 바꾸면 "고친 코드로 다시 뜬 서비스의 계약"이 바뀐다 */
-const service = { doc: undefined as unknown };
+const service = { doc: undefined as unknown, down: false, onFetch: undefined as (() => void) | undefined };
 async function serveContract(): Promise<void> {
   service.doc = contractWith(['id', 'memo']);
+  service.down = false;
+  service.onFetch = undefined;
   const server = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify(service.doc));
+    service.onFetch?.();
+    response.writeHead(service.down ? 503 : 200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(service.down ? { error: 'starting' } : service.doc));
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -593,38 +604,99 @@ describe('실패한 실행이 남긴 변경은 다음 실행에서도 같은 기
     await stopSession(session.id);
   }, 60_000);
 
-  it('파일로 남기는 기준은 게이트가 통과시키며 본 계약뿐이다. 서비스에서 읽기만 한 계약은 파일로 남기지 않는다', async () => {
+  it('기준은 체크포인트 곁의 파일에서만 온다. 기록이 없는 체크포인트에서는 서비스를 그 코드로 다시 띄운 직후에 읽은 계약을 남긴다', async () => {
     const session = await open();
     const recordFile = (sha: string) => path.join(session.work, '.git/b-studio/contracts', `${sha}.json`);
-    const recordOf = async (sha: string) => JSON.parse(await readFile(recordFile(sha), 'utf8')) as { api: ReturnType<typeof contractWith> };
+    const fieldsAt = async (sha: string) => Object.keys((JSON.parse(await readFile(recordFile(sha), 'utf8')) as { api: ReturnType<typeof contractWith> }).api.components.schemas.OrderResponse.properties);
     const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
-    await session.gateway.prompt({ prompt: 'note 필드를 더해줘' });
-    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
-    // 쓰기 직전에 서비스에서 읽은 계약은 이 실행의 기준으로만 쓴다. 게이트가 그 체크포인트의 코드와 맞는지 확인한 값이 아니라서 남기지 않는다
     await expect(readFile(recordFile(start), 'utf8')).rejects.toThrow();
+
+    await session.gateway.prompt({ prompt: 'note 필드를 더해줘' });
+    const restartsBefore = fake.restarts;
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    // 이미 떠 있던 서비스가 이 체크포인트의 코드로 떠 있다는 보장이 없다. 다시 띄운 뒤에 읽어 기록으로 남겼다
+    expect(fake.restarts).toBe(restartsBefore + 1);
+    expect(await fieldsAt(start)).toEqual(['id', 'memo']);
 
     service.doc = contractWith(['id', 'memo', 'note']);
     await session.gateway.stop({ last_assistant_message: '더했습니다.' });
     const head = getSnapshot(session.id)!.checkpoints[0]!.sha;
     expect(head).not.toBe(start);
-    expect(Object.keys((await recordOf(head)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo', 'note']);
-    await expect(readFile(recordFile(start), 'utf8')).rejects.toThrow();
+    // 통과한 검증이 본 계약이 새 체크포인트의 기록이다
+    expect(await fieldsAt(head)).toEqual(['id', 'memo', 'note']);
 
     // 체크포인트 뒤에 서비스가 다른 계약을 내놓아도(코드가 또 바뀌었다) 기록은 게이트가 본 것 그대로다
     service.doc = contractWith(['id']);
     await session.gateway.prompt({ prompt: '아무것도 하지 마' });
     await session.gateway.stop({ last_assistant_message: '네' });
-    expect(Object.keys((await recordOf(head)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo', 'note']);
-    // 그 기록이 다음 실행의 기준이다: 작업 복사본이 체크포인트 그대로여도 지금 서비스의 계약(필드 둘이 빠짐)을 기준으로 다시 읽지 않는다
+    expect(await fieldsAt(head)).toEqual(['id', 'memo', 'note']);
+    // 그 기록이 다음 실행의 기준이다: 작업 복사본이 체크포인트 그대로여도 지금 서비스의 계약(필드 둘이 빠짐)을 기준으로 다시 읽지 않고,
+    // 기록이 있으니 서비스를 다시 띄우지도 않는다
+    const restartsAtHead = fake.restarts;
     await session.gateway.prompt({ prompt: '필드를 빼줘' });
     await write(session, 'api/src/Order.java', 'class Order {}\n');
+    expect(fake.restarts).toBe(restartsAtHead);
     const answer = await session.gateway.stop({});
     expect(answer.feedback).toContain('memo');
     expect(answer.feedback).toContain('note');
     await stopSession(session.id);
   }, 60_000);
 
-  it('검증된 기록이 없는 체크포인트에서는 처음 읽은 계약을 그 체크포인트의 것으로 기억하고, 다시 읽지 않는다(실패한 실행의 코드로 뜬 서비스를 기준으로 삼지 않는다)', async () => {
+  it('이 호출이 샌드박스를 막 켰으면 서비스는 지금의 코드로 뜬 것이다. 다시 띄우지 않고 읽어 남긴다', async () => {
+    const session = await open({ lazy: true });
+    const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect(fake.starts).toBe(1);
+    expect(fake.restarts).toBe(0);
+    expect(await readFile(path.join(session.work, '.git/b-studio/contracts', `${start}.json`), 'utf8')).toContain('memo');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('계약을 다 읽지 못했으면 그 체크포인트의 기록으로 남기지 않는다(일부만 읽힌 계약이 기준으로 굳지 않는다)', async () => {
+    const session = await open();
+    const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
+    const recordFile = path.join(session.work, '.git/b-studio/contracts', `${start}.json`);
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    // 쓰기 직전에 서비스가 아직 계약을 내놓지 못한다
+    service.down = true;
+    expect(await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).toEqual({});
+    await expect(readFile(recordFile, 'utf8')).rejects.toThrow();
+    service.down = false;
+    // 이 실행은 그대로 돈다(게이트가 읽은 것으로). 통과하면 그 검증이 본 계약이 새 체크포인트의 기록이 된다
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    const head = getSnapshot(session.id)!.checkpoints[0]!.sha;
+    expect(await readFile(path.join(session.work, '.git/b-studio/contracts', `${head}.json`), 'utf8')).toContain('memo');
+    await expect(readFile(recordFile, 'utf8')).rejects.toThrow();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('서비스를 다시 띄우지 못했거나 계약을 읽는 동안 작업 복사본이 바뀌었으면 기록으로 남기지 않는다', async () => {
+    const failing = await open();
+    const recordOf = (session: Opened) => path.join(session.work, '.git/b-studio/contracts', `${getSnapshot(session.id)!.checkpoints[0]!.sha}.json`);
+    await failing.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    fake.restartFails = true;
+    const record = recordOf(failing);
+    await write(failing, 'api/src/Order.java', 'class Order { String memo; }\n');
+    // 서비스가 이 체크포인트의 코드로 떴다는 것을 확인하지 못했다
+    await expect(readFile(record, 'utf8')).rejects.toThrow();
+    fake.restartFails = false;
+    await stopSession(failing.id);
+
+    const racing = await open();
+    await racing.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    const racingRecord = recordOf(racing);
+    // 계약을 읽는 바로 그때 뒤에서 파일이 바뀐다: 읽은 계약이 체크포인트의 코드와 맞는지 알 수 없다
+    service.onFetch = () => {
+      service.onFetch = undefined;
+      writeFileSync(path.join(racing.work, 'api/src/Sneaked.java'), 'class Sneaked {}\n');
+    };
+    await write(racing, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await expect(readFile(racingRecord, 'utf8')).rejects.toThrow();
+    await stopSession(racing.id);
+  }, 60_000);
+
+  it('파일을 되돌려 놓았을 뿐 서비스는 고친 코드로 떠 있어도, 그 서비스의 계약을 기준으로 삼지 않는다', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
     await session.gateway.prompt({ prompt: 'memo를 빼줘' });

@@ -486,12 +486,6 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
-  /**
-   * 마지막 체크포인트(head)에서 작업 복사본이 그대로일 때 서비스에서 읽은 계약(#677). 그 체크포인트에 검증된 계약 기록이 없을 때만 쓴다.
-   * 파일로 남기지 않는다 — 서비스가 그 체크포인트의 코드로 떠 있다는 것을 게이트가 확인한 값이 아니라서, 한번 남기면 어긋난 값이
-   * 계속 기준이 된다. 이 프로세스가 사는 동안, 같은 체크포인트에서 실패한 실행이 변경을 남겼을 때 다음 실행이 다시 읽지 않게 하는 데만 쓴다
-   */
-  capturedContracts?: { head: string; contracts: ContractSet };
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
@@ -7222,6 +7216,36 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   return run;
 }
 
+/** 계약을 내놓는 서비스(꺼 둔 것은 뺀다) */
+function contractServices(project: LoadedProject): string[] {
+  return project.managed.filter(([name, service]) => service.contract && !project.offServices?.has(name)).map(([name]) => name);
+}
+
+/**
+ * 계약 기록이 없는 체크포인트의 계약을 읽어 그 체크포인트의 기록으로 남긴다(#677). 작업 복사본이 체크포인트 그대로일 때만 부른다.
+ *
+ * 한번 남긴 기록은 계속 기준이 되므로, "지금 떠 있는 서비스의 계약"을 그냥 읽어 남기지 않는다 — 서비스가 그 체크포인트의 코드로
+ * 떠 있다는 보장이 없다(실패한 실행이 고친 코드로 떠 있는 채 파일만 되돌려 놓았을 수 있다). 보장을 만든 뒤에 읽는다:
+ * 방금 이 호출이 샌드박스를 켰으면(bootedNow) 서비스는 지금의 작업 복사본으로 막 뜬 것이고, 아니면 계약을 내놓는 서비스를 다시 띄운다.
+ * 일부만 읽혔거나 읽는 동안 작업 복사본이 바뀌었으면 남기지 않고 undefined를 돌려준다(그 실행은 게이트가 읽은 것으로 돌고, 다음에 다시 해 본다).
+ * 메모리에 따로 들고 있지 않는다. 기록은 파일 하나뿐이다
+ */
+async function recordHeadContracts(session: Session, head: string, { bootedNow, signal }: { bootedNow: boolean; signal: AbortSignal }): Promise<ContractSet | undefined> {
+  const services = contractServices(session.project);
+  if (services.length === 0) return undefined;
+  if (!bootedNow) {
+    const report = await restartServicesFor(session.sandbox, session.project, [], { signal, onStatus: (event) => onServiceStatus(session, event) }, { alsoRestart: services });
+    if ('error' in report.sync || !services.every((name) => report.restarted.some((check) => check.service === name && check.ready))) return undefined;
+  }
+  const contracts = await captureBaselines(session.sandbox, session.project, fetchContract);
+  if (!services.every((name) => contracts.has(name))) return undefined;
+  signal.throwIfAborted();
+  if ((await changesOutsideTools(session)).length > 0 || session.snapshot.checkpoints[0]?.sha !== head) return undefined;
+  // 남기지 못해도 이 실행은 방금 읽은 것으로 돈다. 다음 실행은 기록이 없으니 같은 절차를 다시 밟는다
+  await saveContractRecord(stateDirOf(session.snapshot), head, contracts).catch((error: unknown) => console.error('[b-studio] 체크포인트의 계약 기록을 남기지 못했습니다', error));
+  return contracts;
+}
+
 /** 기준을 찾아 거슬러 올라갈 체크포인트의 수 */
 const CONTRACT_LOOKBACK = 200;
 
@@ -7246,21 +7270,13 @@ async function keepVerifiedContracts(session: Session, contracts: ContractSet | 
  * 그때는 지금 계약이 기준이 된다(게이트가 한 번도 통과한 적 없는 세션에 변경이 먼저 있던 경우, ADR-131과 같은 한계)
  */
 async function contractBaselinesFor(session: Session, runId: string): Promise<ContractSet | undefined> {
-  const [head, ...earlier] = session.snapshot.checkpoints.slice(0, CONTRACT_LOOKBACK);
-  if (head) {
-    // 1) 마지막 체크포인트를 통과시킨 검증이 본 계약
-    const exact = await readContractRecord(stateDirOf(session.snapshot), head.sha);
-    if (exact) return exact as ContractSet;
-    // 2) 그 체크포인트에서 변경이 생기기 전에 읽어 둔 계약(이 프로세스의 메모리)
-    if (session.capturedContracts?.head === head.sha) return session.capturedContracts.contracts;
-  }
-  // 3) 검증을 통과한 더 앞의 체크포인트의 계약. 오래된 것과 견주는 쪽이 닫힌 쪽이다
-  for (const checkpoint of earlier) {
+  // 마지막 체크포인트의 기록부터, 없으면 그 앞의 것. 오래된 것과 견주는 쪽이 닫힌 쪽이다
+  for (const checkpoint of session.snapshot.checkpoints.slice(0, CONTRACT_LOOKBACK)) {
     const kept = await readContractRecord(stateDirOf(session.snapshot), checkpoint.sha);
     if (kept) return kept as ContractSet;
   }
   // 계약을 내놓는 서비스가 없으면 견줄 것도 없다
-  if (!session.project.managed.some(([name, service]) => service.contract && !session.project.offServices?.has(name))) return undefined;
+  if (contractServices(session.project).length === 0) return undefined;
   emit(session, {
     type: 'agent',
     runId,
@@ -7331,6 +7347,8 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
   };
   const prepared = (async (): Promise<TerminalVerification> => {
     signal.throwIfAborted();
+    // 이 호출이 샌드박스를 켜는가. 그렇다면 서비스는 지금의 작업 복사본으로 막 뜬 것이다(아래 recordHeadContracts)
+    const bootedNow = session.snapshot.status !== 'ready';
     await ensureBooted(session);
     const infra = await ensureReadySessionInfra(session, signal);
     if (!infra.ok) throw new Error(infra.reason);
@@ -7340,16 +7358,14 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     const project = session.project;
     const workspace = new Workspace(project.root);
     workspace.beginRun(requirementsBaseline);
-    // 계약 비교의 기준은 마지막 체크포인트의 계약이다.
-    //  - 그 체크포인트에 검증된 계약 기록이 있으면(게이트가 통과시키며 남긴 것) 그것을 쓴다
-    //  - 없으면, 같은 체크포인트에서 앞서 읽어 둔 것이 있으면 그것을 쓴다(다시 읽지 않는다 — 그 사이 실패한 실행의 코드로 서비스가 떠 있을 수 있다)
-    //  - 그것도 없고 작업 복사본이 체크포인트 그대로면 지금 서비스의 계약을 읽는다(게이트가 읽는다). 메모리에만 둔다
-    //  - 그것도 없고 변경이 남아 있으면 지금 계약을 기준으로 읽지 않는다. 기록이 있는 더 앞의 체크포인트의 것을 쓴다
+    // 계약 비교의 기준은 마지막 체크포인트의 계약이다. 기록(파일)에서만 온다.
+    //  - 그 체크포인트에 계약 기록이 있으면 그것을 쓴다(게이트가 통과시키며 남겼거나, 아래처럼 서비스를 그 코드로 띄운 직후에 읽어 남긴 것)
+    //  - 없고 작업 복사본이 체크포인트 그대로면, 서비스가 이 코드로 떠 있게 한 뒤 읽어 기록으로 남기고 그것을 쓴다
+    //  - 없고 변경이 남아 있으면 지금 계약을 기준으로 읽지 않는다. 기록이 있는 더 앞의 체크포인트의 것을 쓴다
     const head = session.snapshot.checkpoints[0]?.sha;
     const dirty = (await changesOutsideTools(session)).length > 0;
     const exact = head ? ((await readContractRecord(stateDirOf(session.snapshot), head)) as ContractSet | undefined) : undefined;
-    const captured = head && session.capturedContracts?.head === head ? session.capturedContracts.contracts : undefined;
-    const kept = exact ?? captured ?? (dirty ? await contractBaselinesFor(session, run.id) : undefined);
+    const kept = exact ?? (dirty ? await contractBaselinesFor(session, run.id) : head ? await recordHeadContracts(session, head, { bootedNow, signal }) : undefined);
     // CLI는 b-studio 도구를 거치지 않고 파일을 고친다. 변경은 작업 복사본의 상태로만 안다.
     //  - 실행 전부터 있던 변경도 검증 대상이다(ADR-131). 게이트가 다룰 수 없는 경로는 처음부터 있었어도 봐주지 않는다:
     //    터미널의 실행은 변경을 되돌리지 않으므로, 봐주면 앞 실행이 남긴 비밀 파일이나 링크가 다음 실행에서 그대로 커밋된다
@@ -7375,11 +7391,6 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
         run.verifiedContracts = contracts;
       },
     });
-    // 체크포인트 그대로인 상태에서 방금 읽은 계약을 이 체크포인트의 것으로 기억해 둔다. 이 실행이 실패해 변경을 남겨도 다음 실행이
-    // 다시 읽지 않고 이것과 견준다. 파일로는 남기지 않는다(Session.capturedContracts). 읽는 동안 파일이 바뀌었으면 기억하지 않는다
-    if (!kept && !dirty && head && (await changesOutsideTools(session)).length === 0 && session.snapshot.checkpoints[0]?.sha === head) {
-      session.capturedContracts = { head, contracts: gate.baselines };
-    }
     const context: ToolContext = {
       project,
       selfCheck: selfCheckMode(),

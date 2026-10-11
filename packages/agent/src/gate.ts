@@ -242,7 +242,13 @@ export class VerificationGate {
   static async create(options: GateOptions): Promise<VerificationGate> {
     // 요구사항 문서의 실행 전 모습도 같은 이유로 여기서 고정한다(러너가 실행을 시작할 때 이미 불렀다면 그 값이 유지된다)
     options.workspace.snapshotRead(REQUIREMENTS_FILE);
-    return new VerificationGate(options, options.baselines ?? (await captureBaselines(options.sandbox, options.project, options.fetcher)));
+    if (!options.baselines) return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
+    // 받은 기준에 없는 서비스(기준을 남긴 뒤에 계약을 내놓기 시작했거나 그때 꺼져 있던 서비스)는 지금 계약으로 채운다.
+    // 기준이 아예 없으면 그 서비스의 모든 항목이 "추가"로 보여 이번 실행에서 빠지는 것도 잡지 못한다. 받은 기준이 있는 서비스는 그대로 둔다
+    const missing = options.project.managed.some(([name, service]) => service.contract && !options.project.offServices?.has(name) && !options.baselines!.has(name));
+    if (!missing) return new VerificationGate(options, options.baselines);
+    const live = await captureBaselines(options.sandbox, options.project, options.fetcher);
+    return new VerificationGate(options, new Map([...live, ...options.baselines]));
   }
 
   /** 이 게이트가 견주는 계약 기준 */
