@@ -1,8 +1,9 @@
-import type { AgentTerminal, TerminalSize } from '@b-studio/sandbox';
+import type { AgentGatewayAddress, AgentTerminal, TerminalSize } from '@b-studio/sandbox';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   closeSessionTerminal,
   disposeSessionTerminal,
+  interruptSessionTerminal,
   MAX_TERMINAL_INPUT,
   openSessionTerminal,
   resizeSessionTerminal,
@@ -13,11 +14,14 @@ import {
 } from './session-terminal';
 
 /** 도커 없이 도는 가짜. 컨테이너를 띄운 횟수, 연 터미널, 쓴 입력, 지운 컨테이너를 기록한다 */
-function fakeBackend(options: { failEnsure?: string } = {}) {
-  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal> };
+const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:41001', hookToken: 'hook-token', mcpUrl: 'http://host.docker.internal:41002/mcp', mcpToken: 'mcp-token' };
+
+function fakeBackend(options: { failEnsure?: string; unreachable?: boolean } = {}) {
+  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[] };
   const backend: TerminalBackend = {
-    async ensureContainer(target) {
+    async ensureContainer(target, gateway) {
       record.ensured.push(target.sandboxId);
+      record.gateways.push(gateway);
       await new Promise((resolve) => setTimeout(resolve, 5));
       if (options.failEnsure) throw new Error(options.failEnsure);
       return `${target.sandboxId}-agent`;
@@ -29,6 +33,10 @@ function fakeBackend(options: { failEnsure?: string } = {}) {
     },
     async removeContainer(sandboxId) {
       record.removed.push(sandboxId);
+    },
+    async reachable(container) {
+      record.probed.push(container);
+      return options.unreachable !== true;
     },
   };
   return { backend, record };
@@ -234,5 +242,77 @@ describe('세션 터미널 (이슈 #673)', () => {
     expect(record.terminals[0]!.closed).toBe(true);
     expect(record.removed).toEqual(['studio-orders-abc123', 'studio-orders-abc123']);
     expect(() => writeSessionTerminal(id, 'x')).toThrow('터미널이 열려 있지 않습니다');
+  });
+
+  it('관문이 있으면 먼저 띄우고, 그 주소를 적은 설정을 컨테이너에 붙이고, 컨테이너에서 닿는 것을 확인한 뒤에 연다', async () => {
+    const { backend, record } = fakeBackend();
+    const order: string[] = [];
+    const gateway = async () => {
+      order.push('gateway');
+      return address;
+    };
+    const watched: TerminalBackend = {
+      ...backend,
+      ensureContainer: async (given, config) => {
+        order.push('container');
+        return backend.ensureContainer(given, config);
+      },
+      reachable: async (container) => {
+        order.push('probe');
+        return backend.reachable(container);
+      },
+      open: (container, options) => {
+        order.push('open');
+        return backend.open(container, options);
+      },
+    };
+    await openSessionTerminal(id, { ...target, gateway }, { cols: 80, rows: 24 }, watched);
+    // CLI는 뜨자마자 훅을 부른다. 관문이 먼저 떠 있어야 하고, 닿는 것을 본 뒤에 연다
+    expect(order).toEqual(['gateway', 'container', 'probe', 'open']);
+    expect(record.gateways).toEqual([address]);
+    expect(record.probed).toEqual([`${target.sandboxId}-agent`]);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+
+    // 관문 없이 여는 호출(옛 호출자)은 설정을 붙이지 않고 닿는지도 묻지 않는다
+    const plain = fakeBackend();
+    id = `s-${++session}`;
+    await openSessionTerminal(id, target, { cols: 80, rows: 24 }, plain.backend);
+    expect(plain.record.gateways).toEqual([undefined]);
+    expect(plain.record.probed).toEqual([]);
+    await disposeSessionTerminal(id, target.sandboxId, plain.backend);
+  });
+
+  it('관문을 띄우지 못하면 터미널을 열지 않는다(훅 없는 CLI를 관문이 붙은 것처럼 내주지 않는다)', async () => {
+    const { backend, record } = fakeBackend();
+    const gateway = async (): Promise<AgentGatewayAddress> => {
+      throw new Error('포트를 열지 못했습니다');
+    };
+    await expect(openSessionTerminal(id, { ...target, gateway }, { cols: 80, rows: 24 }, backend)).rejects.toThrow('터미널을 열지 못했습니다: 포트를 열지 못했습니다');
+    expect(record.ensured).toEqual([]);
+    expect(record.terminals).toEqual([]);
+  });
+
+  it('컨테이너에서 관문에 닿지 못하면 터미널을 열지 않고 사유를 알린다(관문 없이 열어 주지 않는다). 닿게 되면 다시 열 수 있다', async () => {
+    const { backend, record } = fakeBackend({ unreachable: true });
+    const messages: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await expect(openSessionTerminal(id, { ...target, gateway: async () => address }, { cols: 80, rows: 24 }, backend)).rejects.toThrow('컨테이너에서 b-studio에 닿지 못합니다');
+    expect(record.terminals).toEqual([]);
+    expect(messages.at(-1)).toMatchObject({ kind: 'status', state: 'closed', message: expect.stringContaining('host.docker.internal') });
+
+    const reachable = fakeBackend();
+    await openSessionTerminal(id, { ...target, gateway: async () => address }, { cols: 80, rows: 24 }, reachable.backend);
+    expect(reachable.record.terminals).toHaveLength(1);
+    expect(messages.at(-1)).toEqual({ kind: 'status', state: 'open' });
+    await disposeSessionTerminal(id, target.sandboxId, reachable.backend);
+  });
+
+  it('실행을 취소하면 CLI에 Esc를 보낸다. 터미널이 없으면 아무 일도 하지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    interruptSessionTerminal(id);
+    await openSessionTerminal(id, target, { cols: 80, rows: 24 }, backend);
+    interruptSessionTerminal(id);
+    expect(record.terminals[0]!.written).toEqual(['\x1b']);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
   });
 });

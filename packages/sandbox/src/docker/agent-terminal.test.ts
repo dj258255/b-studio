@@ -1,10 +1,39 @@
+import { execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
-import { AGENT_CLI_PACKAGE, AGENT_IMAGE, AGENT_TERMINAL_COMMAND, agentContainerName, agentHomeVolume, agentResizeArgs, agentRunArgs, agentTerminalArgs, clampTerminalSize, openAgentTerminal } from './agent-terminal';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  AGENT_CLI_PACKAGE,
+  AGENT_GATEWAY_TARGET,
+  AGENT_HOOK_EVENTS,
+  AGENT_IMAGE,
+  AGENT_TERMINAL_COMMAND,
+  AGENT_READ_TOOLS,
+  AGENT_WRITE_TOOL_MATCHER,
+  agentContainerName,
+  agentGatewayFiles,
+  agentHomeVolume,
+  agentManagedMcp,
+  agentManagedSettings,
+  agentResizeArgs,
+  agentRunArgs,
+  agentTerminalArgs,
+  clampTerminalSize,
+  ensureAgentContainer,
+  openAgentTerminal,
+  probeAgentGateway,
+  removeAgentGatewayConfig,
+  writeAgentGatewayConfig,
+  type AgentGatewayAddress,
+} from './agent-terminal';
 import type { MaskVolume } from './git-mask';
 
+const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:41001', hookToken: 'hook-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaa', mcpUrl: 'http://host.docker.internal:41002/mcp', mcpToken: 'mcp-token-bbbbbbbbbbbbbbbbbbbbbbbbbbbbb' };
 const mask = (source: string, target: string): MaskVolume => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
 const plan = {
   name: 'studio-orders-abc123-agent',
@@ -66,6 +95,14 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
   it('컨테이너 이름에 쓸 수 없는 글자는 바꾼다', () => {
     expect(agentContainerName('studio-orders-abc123')).toBe('studio-orders-abc123-agent');
     expect(agentContainerName('studio/../x y')).toBe('studio-..-x-y-agent');
+  });
+});
+
+describe('터미널의 기본 명령', () => {
+  it('Ctrl-C를 받아도 감싼 셸은 죽지 않는다(죽으면 터미널이 통째로 끝난다). 신호를 무시하지는 않아 CLI는 그대로 받는다', () => {
+    expect(AGENT_TERMINAL_COMMAND.split('\n')[0]).toBe('trap : INT');
+    // 무시(trap '' INT)는 자식 프로세스에 물려 내려간다. 받아서 아무것도 하지 않는 쪽이어야 한다
+    expect(AGENT_TERMINAL_COMMAND).not.toContain("trap '' INT");
   });
 });
 
@@ -138,5 +175,308 @@ describe('가상 터미널', () => {
     expect(exit).toBe(0);
     // 닫힌 뒤의 입력은 조용히 버린다
     expect(() => terminal.write('x')).not.toThrow();
+  });
+});
+
+describe('관문 설정 (이슈 #673 2단계)', () => {
+  it('관문 폴더는 CLI의 관리 설정 자리에 읽기 전용으로만 붙는다. 주지 않으면 붙이지 않는다', () => {
+    const mountsOf = (args: string[]) => args.flatMap((arg, index) => (arg === '--mount' ? [args[index + 1]!] : []));
+    expect(mountsOf(agentRunArgs(plan)).some((mount) => mount.includes(AGENT_GATEWAY_TARGET))).toBe(false);
+    const mounts = mountsOf(agentRunArgs({ ...plan, gatewayDir: '/home/me/.cache/b-studio/agent-gateway/abc' }));
+    expect(mounts.at(-1)).toBe('type=bind,source=/home/me/.cache/b-studio/agent-gateway/abc,target=/etc/claude-code,readonly');
+    expect(() => agentRunArgs({ ...plan, gatewayDir: '/tmp/a,target=/workspace' })).toThrow('쉼표');
+  });
+
+  it('관리 설정은 훅 다섯과 b-studio 도구의 허락만 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
+    const settings = agentManagedSettings() as { permissions: { allow: string[] }; hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number }> }>> };
+    expect(Object.keys(settings).sort()).toEqual(['disableAllHooks', 'hooks', 'permissions']);
+    // 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)이 훅을 통째로 끄지 못하게 관리 설정에서 값을 정해 둔다
+    expect((settings as unknown as { disableAllHooks: boolean }).disableAllHooks).toBe(false);
+    expect(settings.permissions.allow).toEqual(['mcp__b-studio']);
+    expect(Object.keys(settings.hooks).sort()).toEqual(['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'UserPromptSubmit']);
+    const command = (name: string) => settings.hooks[name]![0]!.hooks[0]!;
+    // node는 이름이 아니라 자리로 부른다. 터미널의 PATH 앞쪽(홈 폴더)에 같은 이름을 두어 훅을 바꿔치기하지 못한다
+    expect(command('UserPromptSubmit').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs prompt');
+    expect(command('Stop').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop');
+    expect(command('SessionStart').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-start');
+    expect(command('SessionEnd').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-end');
+    expect(command('PreToolUse').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs pre-tool');
+    expect(settings.hooks.PreToolUse![0]!.matcher).toBe(AGENT_WRITE_TOOL_MATCHER);
+    const hooked = (tool: string) => new RegExp(AGENT_WRITE_TOOL_MATCHER).test(tool);
+    // 셸, 편집 도구, b-studio 도구에 건다. 모르는 도구(CLI에 새로 생긴 것)도 건다 — 빠지면 그 도구로 바꾼 파일은 변경 전 기준 없이 바뀐다
+    for (const tool of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'mcp__b-studio__run_in_service', 'SomeNewTool', 'Workflow']) expect(hooked(tool)).toBe(true);
+    // 읽기 도구만 건너뛴다. 이름이 읽기 도구로 시작하거나 끝나기만 하는 다른 도구는 건다
+    for (const tool of AGENT_READ_TOOLS) expect(hooked(tool)).toBe(false);
+    for (const tool of ['ReadAndWrite', 'XRead', 'Read|Write', 'read']) expect(hooked(tool)).toBe(true);
+    expect(AGENT_READ_TOOLS).not.toContain('Bash');
+    expect(AGENT_READ_TOOLS).not.toContain('Write');
+    // 게이트 한 번이 수 분 걸린다. 훅이 그보다 먼저 끊기면 결과가 에이전트에게 가지 못한다
+    expect(command('Stop').timeout).toBeGreaterThanOrEqual(1800);
+    expect(command('PreToolUse').timeout).toBeGreaterThanOrEqual(600);
+  });
+
+  it('주소와 토큰은 환경 변수가 아니라 설정 파일에 적는다(CLI의 사용자 설정이 환경을 덮어쓸 수 있다). 관리 설정과 스크립트에는 없다', () => {
+    const files = agentGatewayFiles(address);
+    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'managed-mcp.json', 'managed-settings.json']);
+    expect(JSON.parse(files['b-studio-gateway.json']!)).toEqual({ url: address.hookUrl, token: address.hookToken });
+    expect(agentManagedMcp(address)).toEqual({ mcpServers: { 'b-studio': { type: 'http', url: address.mcpUrl, headers: { Authorization: `Bearer ${address.mcpToken}` } } } });
+    // 환경 변수로 푸는 자리(${...})가 없다
+    for (const content of Object.values(files)) expect(content).not.toContain('${');
+    for (const name of ['managed-settings.json', 'b-studio-hook.mjs']) {
+      expect(files[name]).not.toContain(address.hookToken);
+      expect(files[name]).not.toContain(address.mcpToken);
+      expect(files[name]).not.toContain('41001');
+    }
+    // 스크립트는 환경 변수에서 주소를 읽지 않는다
+    expect(files['b-studio-hook.mjs']).not.toContain('process.env');
+    expect(files['b-studio-hook.mjs']).toContain("new URL('./b-studio-gateway.json', import.meta.url)");
+  });
+
+  it('세션마다 따로 쓰고 이 사용자만 읽게 둔다. 주소가 바뀌면 다시 쓰고, 세션이 멈추면 자기가 쓴 것만 지운다', async () => {
+    const root = path.join(await mkdtemp(path.join(tmpdir(), 'b-studio-gateway-config-')), 'agent-gateway');
+    const dir = await writeAgentGatewayConfig('studio-orders-abc123', address, root);
+    expect(dir).toBe(path.join(await realpath(root), 'studio-orders-abc123'));
+    expect((await readdir(dir)).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'managed-mcp.json', 'managed-settings.json']);
+    expect((await stat(root)).mode & 0o777).toBe(0o700);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    for (const name of await readdir(dir)) expect((await stat(path.join(dir, name))).mode & 0o777).toBe(0o600);
+
+    // 스튜디오를 다시 띄우면 주소와 토큰이 바뀐다. 같은 폴더에 다시 쓴다(떠 있는 컨테이너는 이 폴더를 붙인 채다)
+    const next = { ...address, hookUrl: 'http://host.docker.internal:52001', hookToken: 'new-hook-token' };
+    expect(await writeAgentGatewayConfig('studio-orders-abc123', next, root)).toBe(dir);
+    expect(JSON.parse(await readFile(path.join(dir, 'b-studio-gateway.json'), 'utf8'))).toEqual({ url: next.hookUrl, token: 'new-hook-token' });
+    expect((await readdir(dir)).some((name) => name.endsWith('.tmp'))).toBe(false);
+    // 다른 세션은 다른 폴더다
+    expect(await writeAgentGatewayConfig('studio-orders-zzz999', address, root)).not.toBe(dir);
+
+    // 지울 때는 자기가 쓴 파일만 지운다. 모르는 파일이 있으면 그 파일과 폴더는 남긴다
+    await writeFile(path.join(dir, 'someone-else.txt'), 'x');
+    await removeAgentGatewayConfig('studio-orders-abc123', root);
+    expect(await readdir(dir)).toEqual(['someone-else.txt']);
+    await removeAgentGatewayConfig('studio-orders-zzz999', root);
+    expect(await readdir(root)).toEqual(['studio-orders-abc123']);
+    // 없는 세션을 지워도 아무 일도 없다
+    await removeAgentGatewayConfig('never-existed', root);
+  });
+
+  it('샌드박스 id로 폴더 밖을 가리킬 수 없다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-gateway-config-'));
+    await expect(writeAgentGatewayConfig('..', address, root)).rejects.toThrow('관문 설정 폴더를 정할 수 없습니다');
+    await expect(writeAgentGatewayConfig('', address, root)).rejects.toThrow('관문 설정 폴더를 정할 수 없습니다');
+    // 구분자는 다른 글자로 바뀐다
+    expect(await writeAgentGatewayConfig('../../etc', address, root)).toBe(path.join(await realpath(root), '..-..-etc'));
+    await expect(removeAgentGatewayConfig('..', root)).rejects.toThrow('관문 설정 폴더를 정할 수 없습니다');
+  });
+
+  it('터미널을 여는 명령줄과 환경에는 관문의 주소도 토큰도 없다', () => {
+    const args = agentTerminalArgs('c', { id: 'main', size: { cols: 80, rows: 24 } });
+    expect(args.join(' ')).not.toContain('host.docker.internal');
+    expect(args.join(' ')).not.toContain('GATEWAY');
+    const spawned: string[][] = [];
+    openAgentTerminal('c', {
+      id: 'main',
+      size: { cols: 80, rows: 24 },
+      spawnProcess: (_bin, spawnArgs) => {
+        spawned.push(spawnArgs);
+        return Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true }) as unknown as ChildProcessWithoutNullStreams;
+      },
+    });
+    expect(spawned).toEqual([args]);
+  });
+});
+
+// node 프로세스를 여러 번 띄운다. 부하가 높을 때를 위해 넉넉히 준다
+describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)', { timeout: 30_000 }, () => {
+  const servers: Server[] = [];
+  afterEach(async () => {
+    for (const server of servers.splice(0)) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  /** 스크립트와, 그 옆에 놓이는 주소 파일을 임시 폴더에 쓴다. gateway를 주지 않으면 주소 파일이 없다 */
+  async function script(gateway?: { url: string; token: string } | string): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-hook-script-'));
+    const file = path.join(dir, 'b-studio-hook.mjs');
+    await writeFile(file, agentGatewayFiles(address)['b-studio-hook.mjs']!);
+    if (gateway !== undefined) await writeFile(path.join(dir, 'b-studio-gateway.json'), typeof gateway === 'string' ? gateway : JSON.stringify(gateway));
+    return file;
+  }
+
+  async function gateway(reply: (request: IncomingMessage, body: string) => { status: number; body: string }) {
+    const seen: Array<{ url: string; authorization: string | undefined; body: string }> = [];
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        seen.push({ url: request.url ?? '', authorization: request.headers.authorization, body });
+        const answer = reply(request, body);
+        response.writeHead(answer.status, { 'content-type': 'application/json' });
+        response.end(answer.body);
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, seen };
+  }
+
+  function run(file: string, event: string, input: string, env: Record<string, string> = {}): Promise<{ code: number | null; stdout: string }> {
+    return new Promise((resolve) => {
+      const child = execFile(process.execPath, [file, event], { env: { PATH: process.env.PATH, ...env } }, (error, stdout) => resolve({ code: error ? (error as { code?: number }).code ?? 1 : 0, stdout }));
+      child.stdin!.end(input);
+    });
+  }
+  const denied = (stdout: string) => (JSON.parse(stdout) as { hookSpecificOutput: { hookEventName: string; permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+
+  it('훅의 입력을 그 종류의 경로로 보내고, 관문의 답을 그대로 출력한다', async () => {
+    const { url, seen } = await gateway(() => ({ status: 200, body: JSON.stringify({ decision: 'block', reason: '검증 실패: 고치세요' }) }));
+    const file = await script({ url, token: 'tok' });
+    const input = JSON.stringify({ hook_event_name: 'Stop', last_assistant_message: '끝났습니다' });
+    const result = await run(file, 'stop', input);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ decision: 'block', reason: '검증 실패: 고치세요' });
+    expect(seen).toEqual([{ url: '/stop', authorization: 'Bearer tok', body: input }]);
+  });
+
+  it('주소는 옆의 파일에서만 읽는다. 환경 변수로 다른 주소를 줘도, 주소를 비워도 따르지 않는다', async () => {
+    const real = await gateway(() => ({ status: 200, body: '{}' }));
+    const decoy = await gateway(() => ({ status: 200, body: '{}' }));
+    const file = await script({ url: real.url, token: 'tok' });
+    // CLI의 사용자 설정(env)으로 환경을 덮어쓴 경우
+    for (const env of [{ B_STUDIO_GATEWAY_URL: decoy.url, B_STUDIO_GATEWAY_TOKEN: 'evil' }, { B_STUDIO_GATEWAY_URL: '', B_STUDIO_GATEWAY_TOKEN: '' }]) {
+      expect(await run(file, 'pre-tool', '{"tool_name":"Write"}', env)).toEqual({ code: 0, stdout: '{}' });
+    }
+    expect(real.seen).toHaveLength(2);
+    expect(real.seen.every((request) => request.authorization === 'Bearer tok')).toBe(true);
+    expect(decoy.seen).toEqual([]);
+  });
+
+  it('관문에 닿지 못하면: 파일을 바꿀 수 있는 도구는 거절하고, 요청은 막지 않되 알리고, 턴의 끝은 막지 않는다', async () => {
+    const file = await script({ url: 'http://127.0.0.1:1', token: 'tok' });
+    const prompt = await run(file, 'prompt', '{"prompt":"고쳐줘"}');
+    expect(prompt.code).toBe(0);
+    const said = JSON.parse(prompt.stdout) as { systemMessage?: string; decision?: string };
+    expect(said.systemMessage).toContain('관문에 닿지 못했습니다');
+    expect(said.systemMessage).toContain('체크포인트도 생기지 않습니다');
+    // 요청을 막는 출력이 아니다
+    expect(said.decision).toBeUndefined();
+
+    // 쓰기 직전: 변경 전 기준을 잡지 못한 채 바뀌게 두지 않는다
+    const tool = await run(file, 'pre-tool', '{"tool_name":"Write"}');
+    expect(tool.code).toBe(0);
+    expect(denied(tool.stdout)).toMatchObject({ hookEventName: 'PreToolUse', permissionDecision: 'deny' });
+    expect(denied(tool.stdout).permissionDecisionReason).toContain('관문에 닿지 못해');
+
+    // 턴의 끝은 막지 않는다(막으면 CLI가 끝나지 않는다). 검증이 돌지 않았으니 체크포인트도 없다
+    for (const event of ['stop', 'session-start', 'session-end']) expect(await run(file, event, '{}')).toEqual({ code: 0, stdout: '' });
+  });
+
+  it('주소 파일이 없거나 읽을 수 없어도 닿지 못한 것과 같다(관문 없이 조용히 지나가는 길이 없다)', async () => {
+    for (const config of [undefined, '{깨진 json', '{}', JSON.stringify({ url: '', token: 'tok' }), JSON.stringify({ url: 'http://127.0.0.1:1' }), JSON.stringify({ url: 'not a url', token: 'tok' })]) {
+      const file = await script(config);
+      expect(denied((await run(file, 'pre-tool', '{"tool_name":"Bash"}')).stdout).permissionDecision).toBe('deny');
+      expect(JSON.parse((await run(file, 'prompt', '{}')).stdout).systemMessage).toContain('관문에 닿지 못했습니다');
+      expect(await run(file, 'stop', '{}')).toEqual({ code: 0, stdout: '' });
+      expect((await run(file, 'ping', '')).code).not.toBe(0);
+    }
+  });
+
+  it('관문이 오류로 답했거나 읽을 수 없는 답을 주면 닿지 못한 것으로 본다(그 답을 CLI에 넘기지 않는다)', async () => {
+    const failing = await gateway(() => ({ status: 500, body: JSON.stringify({ decision: 'block', reason: '서버 오류인데 막는 꼴' }) }));
+    expect(await run(await script({ url: failing.url, token: 'tok' }), 'stop', '{}')).toEqual({ code: 0, stdout: '' });
+    const garbled = await gateway(() => ({ status: 200, body: '<html>프록시 오류</html>' }));
+    expect(await run(await script({ url: garbled.url, token: 'tok' }), 'stop', '{}')).toEqual({ code: 0, stdout: '' });
+    // 쓰기 직전의 훅은 오류 답도 거절로 바꾼다. 서버가 준 "{}"(허용)로 읽지 않는다
+    const allowing = await gateway(() => ({ status: 500, body: '{}' }));
+    expect(denied((await run(await script({ url: allowing.url, token: 'tok' }), 'pre-tool', '{}')).stdout).permissionDecision).toBe('deny');
+  });
+
+  it('모르는 종류는 아무 데도 보내지 않는다', async () => {
+    const { url, seen } = await gateway(() => ({ status: 200, body: '{}' }));
+    const file = await script({ url, token: 'tok' });
+    expect(await run(file, 'constructor', '{}')).toEqual({ code: 0, stdout: '' });
+    expect(await run(file, '', '{}')).toEqual({ code: 0, stdout: '' });
+    expect(seen).toEqual([]);
+    // 훅으로 거는 종류는 설정이 거는 종류와 같다
+    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['pre-tool', 'prompt', 'session-end', 'session-start', 'stop']);
+  });
+
+  it('닿는지 묻는 일(ping)은 닿으면 0, 닿지 못하거나 관문이 오류로 답하면 0이 아닌 값으로 끝난다', async () => {
+    const up = await gateway(() => ({ status: 200, body: '{}' }));
+    expect((await run(await script({ url: up.url, token: 'tok' }), 'ping', '')).code).toBe(0);
+    expect(up.seen).toMatchObject([{ url: '/ping', authorization: 'Bearer tok' }]);
+    expect((await run(await script({ url: 'http://127.0.0.1:1', token: 'tok' }), 'ping', '')).code).not.toBe(0);
+    const refusing = await gateway(() => ({ status: 403, body: '{}' }));
+    expect((await run(await script({ url: refusing.url, token: 'tok' }), 'ping', '')).code).not.toBe(0);
+  });
+});
+
+// 가짜 docker(셸 스크립트)를 여러 번 띄운다. 전체 테스트가 함께 도는 부하에서는 기본 5초를 넘긴 적이 있다(단독으로는 1초 안팎)
+describe('컨테이너를 띄운 뒤의 확인 (관문 설정)', { timeout: 30_000 }, () => {
+  /** 가짜 docker: 부른 인자를 적고, inspect는 상태 파일을 돌려주고, run은 "띄운 뒤의 모습"을 상태로 옮긴다 */
+  async function fakeDocker(): Promise<{ bin: string; dir: string; root: string; calls: () => Promise<string[]>; mounts: (extra: unknown[]) => string }> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-fake-docker-'));
+    const root = path.join(dir, 'project');
+    await mkdir(root);
+    const bin = path.join(dir, 'docker');
+    await writeFile(
+      bin,
+      ['#!/bin/sh', `D='${dir}'`, 'echo "$@" >> "$D/calls"', 'case "$1" in', '  inspect) [ -f "$D/inspect.json" ] && cat "$D/inspect.json" || exit 1 ;;', '  run) cp "$D/after-run.json" "$D/inspect.json" ;;', '  rm) rm -f "$D/inspect.json" ;;', 'esac', ''].join('\n'),
+    );
+    await chmod(bin, 0o755);
+    const realRoot = await realpath(root);
+    return {
+      bin,
+      dir,
+      root,
+      calls: async () => (await readFile(path.join(dir, 'calls'), 'utf8')).trim().split('\n'),
+      mounts: (extra) => JSON.stringify([{ State: { Running: true }, Mounts: [{ Type: 'bind', Source: realRoot, Destination: '/workspace', RW: true }, ...extra] }]),
+    };
+  }
+  const gatewayDir = '/Users/me/.cache/b-studio/agent-gateway/0123456789abcdef';
+
+  it('관문 폴더가 읽기 전용으로 붙은 것을 확인하고서야 컨테이너를 내준다. 도커가 경로 앞에 붙인 접두어는 받아들인다', async () => {
+    const docker = await fakeDocker();
+    await writeFile(path.join(docker.dir, 'after-run.json'), docker.mounts([{ Type: 'bind', Source: `/host_mnt${gatewayDir}`, Destination: '/etc/claude-code', RW: false }]));
+    expect(await ensureAgentContainer('sb', docker.root, { projectId: 'p', gatewayDir, dockerBin: docker.bin })).toBe('sb-agent');
+    const calls = await docker.calls();
+    expect(calls.find((call) => call.startsWith('run '))).toContain(`type=bind,source=${gatewayDir},target=/etc/claude-code,readonly`);
+    // 이미 맞게 떠 있으면 다시 띄우지 않는다
+    expect(await ensureAgentContainer('sb', docker.root, { projectId: 'p', gatewayDir, dockerBin: docker.bin })).toBe('sb-agent');
+    expect((await docker.calls()).filter((call) => call.startsWith('run '))).toHaveLength(1);
+  });
+
+  it('띄웠는데 관문 폴더가 없거나, 쓸 수 있게 붙었거나, 다른 폴더가 붙었으면 지우고 던진다', async () => {
+    for (const extra of [[], [{ Type: 'bind', Source: gatewayDir, Destination: '/etc/claude-code', RW: true }], [{ Type: 'bind', Source: '/Users/me/.cache/b-studio/agent-gateway/ffffffffffffffff', Destination: '/etc/claude-code', RW: false }]]) {
+      const docker = await fakeDocker();
+      await writeFile(path.join(docker.dir, 'after-run.json'), docker.mounts(extra));
+      await expect(ensureAgentContainer('sb', docker.root, { projectId: 'p', gatewayDir, dockerBin: docker.bin })).rejects.toThrow('관문 설정을 확인하지 못해');
+      expect((await docker.calls()).at(-1)).toBe('rm --force sb-agent');
+    }
+  });
+
+  it('관문 없이 떠 있던 컨테이너(앞 판이 띄운 것)는 다시 쓰지 않고 새로 띄운다. 반대도 같다', async () => {
+    const docker = await fakeDocker();
+    const withGateway = docker.mounts([{ Type: 'bind', Source: gatewayDir, Destination: '/etc/claude-code', RW: false }]);
+    // 관문 없이 떠 있다 → 관문을 붙여 달라고 하면 지우고 새로 띄운다
+    await writeFile(path.join(docker.dir, 'inspect.json'), docker.mounts([]));
+    await writeFile(path.join(docker.dir, 'after-run.json'), withGateway);
+    await ensureAgentContainer('sb', docker.root, { projectId: 'p', gatewayDir, dockerBin: docker.bin });
+    expect((await docker.calls()).slice(1, 3).map((call) => call.split(' ')[0])).toEqual(['rm', 'run']);
+    // 관문을 붙인 채 떠 있다 → 관문 없이 달라고 하면 그것도 새로 띄운다
+    await writeFile(path.join(docker.dir, 'after-run.json'), docker.mounts([]));
+    await ensureAgentContainer('sb', docker.root, { projectId: 'p', dockerBin: docker.bin });
+    const runs = (await docker.calls()).filter((call) => call.startsWith('run '));
+    expect(runs).toHaveLength(2);
+    expect(runs[1]).not.toContain('/etc/claude-code');
+  });
+
+  it('컨테이너에서 관문에 닿는지는 훅과 같은 스크립트로 묻는다. 명령줄에 주소나 토큰을 싣지 않는다', async () => {
+    const docker = await fakeDocker();
+    expect(await probeAgentGateway('sb-agent', { dockerBin: docker.bin })).toBe(true);
+    expect(await docker.calls()).toEqual(['exec sb-agent /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs ping']);
+    // docker가 0이 아닌 값으로 끝나면(스크립트가 닿지 못했다고 알리면) 닿지 못한 것이다
+    await writeFile(docker.bin, '#!/bin/sh\nexit 1\n');
+    expect(await probeAgentGateway('sb-agent', { dockerBin: docker.bin })).toBe(false);
+    expect(await probeAgentGateway('sb-agent', { dockerBin: path.join(docker.dir, 'no-such-docker') })).toBe(false);
   });
 });

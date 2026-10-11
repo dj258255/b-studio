@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { appendFile, cp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
@@ -183,6 +183,19 @@ export class CheckpointError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'CheckpointError';
+  }
+}
+
+/**
+ * 스테이징된 내용이 검증한 내용과 다르다(검증한 뒤에 파일이 바뀌었다). 체크포인트를 만들지 않았고 스테이징도 풀었다.
+ * 작업 복사본은 그대로다
+ */
+export class StagedMismatchError extends CheckpointError {
+  readonly files: string[];
+  constructor(files: string[]) {
+    super(`검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않았습니다: ${files.slice(0, 20).join(', ')}${files.length > 20 ? ` 외 ${files.length - 20}개` : ''}`);
+    this.name = 'StagedMismatchError';
+    this.files = files;
   }
 }
 
@@ -440,7 +453,20 @@ export class CheckpointStore {
       allowEmpty = false,
       findSecrets,
       trailers = [],
-    }: { allowEmpty?: boolean; findSecrets?: (text: string) => string[]; trailers?: readonly string[] } = {},
+      expectStaged,
+    }: {
+      allowEmpty?: boolean;
+      findSecrets?: (text: string) => string[];
+      trailers?: readonly string[];
+      /**
+       * 검증한 내용의 지문(stagedFingerprints가 준 것). 주면 스테이징한 뒤 커밋하기 전에 견준다: 스테이징된 변경이 이것과
+       * 하나라도 다르면(내용이 다르거나, 여기 없는 파일이 스테이징됐거나, 여기 있는 변경이 사라졌으면) 스테이징을 풀고
+       * StagedMismatchError를 던진다. 커밋은 작업 복사본이 아니라 인덱스에서 만들어지므로, 견준 내용이 곧 커밋되는 내용이다.
+       * 에이전트의 프로세스가 살아 있는 채로 검증하는 자리(세션 터미널)에서 쓴다 — 게이트가 통과시킨 뒤 커밋 전에 바뀐 내용이
+       * 체크포인트에 들어가지 않게 한다
+       */
+      expectStaged?: ReadonlyMap<string, string>;
+    } = {},
   ): Promise<Checkpoint | undefined> {
     const pending = await this.pendingFiles();
     if (!allowEmpty && pending.length === 0) return undefined;
@@ -461,6 +487,16 @@ export class CheckpointStore {
       if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
     }
     await this.#git(['add', '-A', ...(await this.#scope())]);
+    if (expectStaged) {
+      const mismatched = await this.#stagedMismatch(expectStaged).catch(async (error: unknown) => {
+        await this.#git(['reset', '-q', ...(await this.#scope())]).catch(() => {});
+        throw error;
+      });
+      if (mismatched.length > 0) {
+        await this.#git(['reset', '-q', ...(await this.#scope())]);
+        throw new StagedMismatchError(mismatched);
+      }
+    }
     const text = body?.trim();
     // 기본 정리 모드는 #으로 시작하는 줄(마크다운 제목)을 지우므로 공백만 정리한다
     await this.#git([
@@ -471,6 +507,58 @@ export class CheckpointStore {
     const checkpoint = await this.#checkpoint('HEAD');
     await this.refreshExcludedSnapshot(checkpoint.sha);
     return checkpoint;
+  }
+
+  /**
+   * 작업 복사본의 파일이 지금 스테이징되면 인덱스에 들어갈 모습의 지문(프로젝트 기준 경로 → 지문).
+   * 일반 파일은 git이 add할 때와 같은 변환(줄 끝, 필터)을 거친 blob id라서, 스테이징한 뒤 인덱스의 id와 그대로 견줄 수 있다.
+   * 없는 파일은 `missing`, 링크는 `link:<가리키는 곳>`, 그 밖(폴더, 장치)은 `other`다.
+   */
+  async stagedFingerprints(files: readonly string[]): Promise<Map<string, string>> {
+    const projectRoot = await this.projectRoot();
+    const subdir = await this.#subdir();
+    const prints = new Map<string, string>();
+    const regular: string[] = [];
+    for (const file of files) {
+      const info = await lstat(path.join(projectRoot, file)).catch(() => undefined);
+      if (!info) prints.set(file, 'missing');
+      else if (info.isSymbolicLink()) prints.set(file, `link:${await readlink(path.join(projectRoot, file)).catch(() => '')}`);
+      else if (!info.isFile()) prints.set(file, 'other');
+      else regular.push(file);
+    }
+    // 인자 길이 상한을 넘지 않게 나눠 부른다. 순서대로 한 줄에 id 하나가 온다
+    for (let index = 0; index < regular.length; index += 200) {
+      const chunk = regular.slice(index, index + 200);
+      const ids = (await this.#git(['hash-object', '--', ...chunk.map((file) => (subdir ? `${subdir}/${file}` : file))])).split('\n').filter(Boolean);
+      // 그 사이에 파일이 사라지거나 바뀌어 개수가 맞지 않으면 어느 것도 믿지 않는다
+      if (ids.length !== chunk.length) throw new CheckpointError('파일의 지문을 읽는 동안 작업 복사본이 바뀌었습니다');
+      chunk.forEach((file, offset) => prints.set(file, `blob:${ids[offset]!}`));
+    }
+    return prints;
+  }
+
+  /** 스테이징된 변경이 기대한 지문과 다른 파일들. 기대에 없는데 스테이징된 것과, 기대에 있는데 스테이징되지 않은 것도 포함한다 */
+  async #stagedMismatch(expected: ReadonlyMap<string, string>): Promise<string[]> {
+    const scope = await this.#scope();
+    // HEAD와 다른 스테이징된 경로. 이름 변경은 옛 경로(삭제)와 새 경로(추가)로 따로 본다
+    const staged = await this.#fromRoot((await this.#git(['diff', '--cached', '--name-only', '--no-renames', '-z', ...scope])).split('\0').filter(Boolean));
+    const index = new Map<string, string>();
+    for (const entry of (await this.#git(['ls-files', '--stage', '-z', ...scope])).split('\0').filter(Boolean)) {
+      const tab = entry.indexOf('\t');
+      const [mode, id] = entry.slice(0, tab).split(' ');
+      const [file] = await this.#fromRoot([entry.slice(tab + 1)]);
+      if (file === undefined) continue;
+      index.set(file, mode === '120000' ? 'link:' : mode === '160000' ? 'other' : `blob:${id}`);
+    }
+    const mismatched = new Set<string>();
+    for (const file of staged) {
+      const actual = index.get(file) ?? 'missing';
+      if (expected.get(file) !== actual) mismatched.add(file);
+    }
+    for (const file of expected.keys()) {
+      if (!staged.includes(file)) mismatched.add(file);
+    }
+    return [...mismatched].sort();
   }
 
   /**
