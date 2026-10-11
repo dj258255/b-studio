@@ -1,3 +1,5 @@
+import type { ChatItem } from './session-view';
+
 /** 세션 터미널 화면이 쓰는 작은 순수 함수들(이슈 #673). 화면 컴포넌트와 따로 두어 브라우저 없이 테스트한다 */
 
 export type TerminalStatus =
@@ -47,5 +49,38 @@ export function writeAgentSurface(storage: Pick<Storage, 'setItem'> | undefined,
     storage?.setItem(SURFACE_KEY, surface);
   } catch {
     // 기억하지 못해도 화면은 그대로 쓴다
+  }
+}
+
+/** 터미널에서 보낸 마지막 요청이 지금 어디까지 왔는지. 터미널을 보는 동안에는 대화 창이 가려져 있어 한 줄로 알려 준다 */
+export interface TerminalGateStatus {
+  tone: 'working' | 'ok' | 'fail' | 'idle';
+  text: string;
+}
+
+export function terminalGateStatus(chat: readonly ChatItem[]): TerminalGateStatus | undefined {
+  const request = chat.findLast((item): item is Extract<ChatItem, { kind: 'request' }> => item.kind === 'request' && item.via === 'terminal');
+  if (!request) return undefined;
+  const ofRun = chat.filter((item) => 'runId' in item && item.runId === request.runId);
+  const gate = ofRun.findLast((item): item is Extract<ChatItem, { kind: 'gate' }> => item.kind === 'gate');
+  const outcome = ofRun.findLast((item): item is Extract<ChatItem, { kind: 'outcome' }> => item.kind === 'outcome');
+  if (!outcome) {
+    if (gate && !gate.interrupted) {
+      // 서비스 재시작과 계약 결과(report)가 온 뒤에 테스트·화면 확인이 이어진다. 그 확인들의 실패는 report가 아니라 확인 항목에 있다
+      const failed = (gate.report && !gate.report.ok) || ofRun.slice(ofRun.lastIndexOf(gate)).some((item) => item.kind === 'check' && !item.ok);
+      if (failed) return { tone: 'fail', text: '검증을 통과하지 못해 결과를 에이전트에게 돌려줬습니다. 고친 뒤 턴이 끝나면 다시 검증합니다' };
+      return { tone: 'working', text: '검증하는 중입니다. 서비스를 다시 띄우고 확인을 돌립니다' };
+    }
+    return { tone: 'working', text: '요청을 처리하는 중입니다. 턴이 끝나면 검증합니다' };
+  }
+  switch (outcome.status) {
+    case 'done':
+      return gate ? { tone: 'ok', text: '마지막 요청이 검증을 통과했습니다. 체크포인트로 남겼습니다' } : { tone: 'idle', text: '마지막 요청은 파일을 바꾸지 않고 끝났습니다' };
+    case 'failed':
+      return { tone: 'fail', text: '마지막 요청이 검증을 통과하지 못해 변경을 되돌렸습니다. 대화 탭에서 사유를 보고 되살릴 수 있습니다' };
+    case 'cancelled':
+      return { tone: 'idle', text: '마지막 요청을 닫고 변경을 되돌렸습니다. 대화 탭에서 되살릴 수 있습니다' };
+    default:
+      return { tone: 'fail', text: '마지막 요청을 검증하지 못했습니다. 대화 창에서 사유를 확인하세요' };
   }
 }

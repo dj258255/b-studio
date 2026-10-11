@@ -21,7 +21,7 @@ export interface ToolCallView {
 
 export type ChatItem =
   | { kind: 'boot'; network: BootNetwork }
-  | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask' }
+  | { kind: 'request'; runId: string; text: string; by?: string; intent?: 'ask'; /** 세션 터미널에서 보낸 요청(#673) */ via?: 'terminal' }
   /** 실행 중 보낸 지시. queued: 아직 반영 전, applied: 대화에 들어감, dropped: 끝날 때까지 반영되지 못함 */
   | { kind: 'steer'; runId: string; text: string; status: 'queued' | 'applied' | 'dropped' }
   /** 러너가 무언가를 하지 못했다는 안내(예: 상태 폴더가 없어 이전 대화를 이어받지 못함). 실행은 계속된다 */
@@ -249,8 +249,11 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       if (event.runId.startsWith('review-')) return view;
       return {
         ...patchSnapshot(view, { running: true, pendingQuestion: undefined }),
-        chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent }],
+        chat: [...view.chat, { kind: 'request', runId: event.runId, text: event.request, by: event.by, intent: event.intent, ...(event.via ? { via: event.via } : {}) }],
       };
+    case 'terminal_prompt':
+      // 터미널에서 끊고 다시 말한 것. 같은 실행에 이미 들어간 지시다
+      return { ...view, chat: [...view.chat, { kind: 'steer', runId: event.runId, text: event.text, status: 'applied' }] };
     case 'plan_brief':
       return { ...view, chat: [...view.chat, { kind: 'planBrief', runId: event.runId, model: event.model, text: event.text }] };
     case 'agent':
@@ -724,7 +727,8 @@ type OutcomeItem = Extract<ChatItem, { kind: 'outcome' }>;
 
 /** 실행 결과 한 줄. 바꾼 파일이 없으면 "답만 했습니다"로 알린다(대화 화면과 나란히 보기 칸이 같은 문구를 쓴다) */
 export function outcomeText(item: OutcomeItem, hasChanges: boolean): string {
-  if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}, ${item.turns ?? 0}턴`;
+  // 턴 수를 모르는 실행(세션 터미널: 턴은 CLI 안에서 돈다)에는 턴 수를 적지 않는다
+  if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'awaiting_input') return '답을 기다립니다';
   if (item.status === 'cancelled') return item.summary;
   return `${item.status === 'failed' ? '완료하지 못함' : '오류'}: ${item.summary}`;

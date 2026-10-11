@@ -85,6 +85,33 @@ describe('startToolServer', () => {
     expect(await rawPost(server, { host: `localhost:${port}`, authorization })).toBe(200);
   });
 
+  it('컨테이너가 호스트를 부르는 이름은 따로 허용했을 때만 받는다. 그때도 다른 이름과 토큰 없는 요청은 거부한다', async () => {
+    const plain = await start(async () => ({ ok: true, content: 'ok' }));
+    expect(await rawPost(plain, { host: 'host.docker.internal:1234', authorization: `Bearer ${plain.token}` })).toBe(403);
+
+    const server = await startToolServer({ specs: buildTools(project), run: async () => ({ ok: true, content: 'ok' }), allowedHosts: ['host.docker.internal'] });
+    opened.push(server);
+    const authorization = `Bearer ${server.token}`;
+    expect(await rawPost(server, { host: `host.docker.internal:${server.port}`, authorization })).toBe(200);
+    // 이름은 대소문자를 가리지 않는다
+    expect(await rawPost(server, { host: `Host.Docker.Internal:${server.port}`, authorization })).toBe(200);
+    expect(await rawPost(server, { host: 'evil.com', authorization })).toBe(403);
+    // 끝이나 앞이 같은 이름은 다른 이름이다
+    expect(await rawPost(server, { host: 'host.docker.internal.evil.com', authorization })).toBe(403);
+    expect(await rawPost(server, { host: 'evil-host.docker.internal', authorization })).toBe(403);
+    expect(await rawPost(server, { host: `host.docker.internal:${server.port}`, authorization: 'Bearer nope' })).toBe(401);
+  });
+
+  it('도구 목록을 함수로 주면 요청마다 다시 읽는다(서버가 사는 동안 프로젝트 설정이 바뀌는 자리)', async () => {
+    let specs = buildTools(project).filter((spec) => spec.name === 'list_files');
+    const server = await startToolServer({ specs: () => specs, run: async () => ({ ok: true, content: 'ok' }) });
+    opened.push(server);
+    const client = await connect(server);
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(['list_files']);
+    specs = buildTools(project).filter((spec) => spec.name === 'read_file' || spec.name === 'list_files');
+    expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(['list_files', 'read_file']);
+  });
+
   it('close() 뒤에는 연결할 수 없다', async () => {
     const server = await start(async () => ({ ok: true, content: 'ok' }));
     const client = await connect(server);

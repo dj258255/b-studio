@@ -143,6 +143,20 @@ import {
   workflowStages,
   readProjectFileSync,
   Workspace,
+  ChangeTracker,
+  createToolResultCache,
+  executeTool,
+  fetchContract,
+  gatewayToolSpecs,
+  rejectedChangeFeedback,
+  serialQueue,
+  StagedMismatchError,
+  terminalGatewayNote,
+  VerificationGate,
+  type GateOutcome,
+  type HookInput,
+  type ToolContext,
+  type ToolOutcome,
   adrFilePath,
   appendExperimentEntry,
   appendRoadmapTradeoffEntry,
@@ -297,7 +311,9 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
-import { disposeSessionTerminal } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal } from './session-terminal';
+import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
+import { AGENT_READ_TOOLS, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -380,6 +396,8 @@ interface ActiveRun {
    * 러너가 다음 모델 호출 직전에 꺼내 가고, 남은 지시는 실행이 끝날 때 버림으로 기록한다
    */
   steering?: SteeringQueue;
+  /** 세션 터미널에서 시작한 실행이면 그 상태(#673). 러너가 아니라 CLI의 훅이 시작과 끝을 알린다 */
+  terminal?: TerminalRunState;
 }
 
 /** eager: 세션을 만들 때 샌드박스를 바로 켠다(레인·플릿·벤치·이어서 하기). on-demand: 첫 필요 때 켠다(사람이 만든 일반 세션) */
@@ -462,6 +480,10 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
+  /** 터미널의 CLI가 모르는 채 바뀐 사실(실행의 변경을 되돌렸다). 다음 요청의 맥락에 덧붙여 알린다 */
+  terminalNotes?: string[];
+  /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
+  terminalLabel?: string;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -1118,6 +1140,8 @@ export function cancelRun(id: string, runId: string): void {
   session.snapshot.cancelling = 'user';
   emit(session, { type: 'run_cancelling', runId });
   run.cancel.abort(new DOMException('요청을 취소했습니다', 'AbortError'));
+  // 터미널에서 시작한 실행이면 CLI에도 멈추라고 알린다(Esc). 실행을 닫는 일은 중단 신호를 듣는 쪽이 한다
+  if (run.terminal) interruptSessionTerminal(id);
 }
 
 /**
@@ -1157,11 +1181,16 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status === 'stopped') return session.snapshot;
   session.stop.abort();
+  // 터미널에서 연 실행은 기다리는 러너가 없다. 여기서 닫아 두지 않으면 세션에 걸린 채 남는다(끝났다는 알림은 내지 않는다 — 멈춘 세션의 실행은 기록을 읽을 때 중단으로 본다)
+  const terminalRun = openTerminalRun(session);
+  if (terminalRun) settleTerminalRun(session, terminalRun, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
   session.logFollower?.abort();
   clearInterval(session.usageTimer);
   session.fileWatcher?.close();
   // 세션 터미널의 컨테이너는 compose 밖에서 띄운 것이라 따로 지운다(#673)
   await disposeSessionTerminal(id, session.sandbox.id);
+  // 터미널이 부르던 관문도 닫는다. 그 뒤에 늦게 온 훅은 닿지 못하고, CLI는 막히지 않은 채 끝난다
+  await closeSessionGateway(id).catch(() => {});
   await session.sandbox.destroy().catch(() => {});
   // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
   await closeRemoteBrowser(id).catch(() => {});
@@ -2616,7 +2645,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     // 질문은 파일을 바꾸지 않아 관문이 할 일이 없으므로 러너가 맡는다. 결과의 꼴이 같아 체크포인트·되돌리기는 그대로다
     const viaGateway = gatewayEnabled() && plan.intent !== 'ask';
     const runClaude = viaGateway
-      ? (options: ClaudeCodeRunOptions) => runClaudeGatewayAgent({ ...options, pendingFiles: () => session.checkpoints.pendingFiles() })
+      ? (options: ClaudeCodeRunOptions) => runClaudeGatewayAgent({ ...options, pendingFiles: () => changesOutsideTools(session) })
       : runClaudeCodeAgent;
     const result = await runClaude({
       ...shared,
@@ -2808,7 +2837,17 @@ function checkpointTrailers(result: AgentResult): string[] {
   return trailers;
 }
 
-async function saveCheckpoint(session: Session, runId: string, request: string, body: string, trailers: string[] = [], summary?: string, requestIsAnswer = false): Promise<void> {
+async function saveCheckpoint(
+  session: Session,
+  runId: string,
+  request: string,
+  body: string,
+  trailers: string[] = [],
+  summary?: string,
+  requestIsAnswer = false,
+  /** 검증한 내용의 지문. 주면 스테이징된 내용이 이것과 같을 때만 커밋한다(다르면 StagedMismatchError) */
+  expectStaged?: ReadonlyMap<string, string>,
+): Promise<void> {
   const head = session.snapshot.checkpoints[0]!.sha;
   // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
   const dataOnly =
@@ -2826,6 +2865,7 @@ async function saveCheckpoint(session: Session, runId: string, request: string, 
     allowEmpty: dataOnly,
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers,
+    ...(expectStaged ? { expectStaged } : {}),
   });
   if (!checkpoint) {
     // 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행도, 그 내용을 마지막 체크포인트 곁에 남긴다(그래야 다음
@@ -7029,14 +7069,543 @@ export function sessionTerminalAllowed(): boolean {
  * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
  * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
  */
-export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean } {
+export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean; gateway: () => Promise<AgentGatewayAddress> } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
   // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
   const alive = (): boolean => !session.stop.signal.aborted && session.snapshot.status !== 'stopped' && session.snapshot.status !== 'failed';
   if (!alive()) throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업을 누른 뒤 다시 여세요');
-  return { sandboxId: session.sandbox.id, root: session.project.root, projectId: session.snapshot.projectId, alive };
+  return {
+    sandboxId: session.sandbox.id,
+    root: session.project.root,
+    projectId: session.snapshot.projectId,
+    alive,
+    // 관문은 세션에 하나다. 터미널을 다시 열어도 같은 것을 쓴다
+    gateway: () => ensureSessionGateway(id, () => terminalGatewayHandlers(id)),
+  };
+}
+
+// ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
+//
+// 터미널에서는 러너가 아니라 사용자가 CLI를 직접 몬다. b-studio는 CLI의 훅이 알려 주는 세 순간에만 붙는다:
+//   요청의 시작 → 실행 한 건을 연다(run_started). 대화 창의 요청과 같은 자리(session.run)를 쓰므로 둘이 겹치지 않는다
+//   쓰기 직전   → 샌드박스를 켜고 변경 전 기준(계약, 요구사항 문서)을 잡을 때까지 기다리게 한다
+//   턴의 끝     → 작업 복사본의 변경을 게이트에 넣고 돌린다. 통과하면 체크포인트, 실패하면 결과를 에이전트에게 돌려준다
+//
+// 통과하지 못한 채 끝난 실행(재시도 상한, 취소, CLI 종료)은 대화 창의 요청과 똑같이 닫는다: 이번 실행의 변경을 마지막
+// 체크포인트로 되돌리고 보관본을 남긴다. CLI가 살아 있어도 그렇게 한다 — 되돌리지 않으면 다음 실행이 검증되지 않은 변경 위에서
+// 시작하고, "기준은 실행을 시작할 때의 상태"라는 게이트의 전제가 깨진다(계약을 깨는 변경이 다음 실행에서 원래 그랬던 것이 된다,
+// 트러블슈팅 139). CLI에는 다음 요청 때 되돌렸다는 사실을 알려 파일을 다시 읽게 한다.
+//
+// 훅은 통로일 뿐이다. 훅이 불리지 않으면 검증이 돌지 않고, 검증이 돌지 않으면 체크포인트가 생기지 않는다.
+
+const TERMINAL_MAX_VERIFY_ATTEMPTS = 3;
+const TERMINAL_FALLBACK_REQUEST = '터미널에서 이어진 작업';
+/** 기록에 남기는 요청 글의 상한. 붙여넣은 긴 글이 세션 기록을 채우지 않게 한다 */
+const TERMINAL_REQUEST_LIMIT = 8000;
+
+interface TerminalVerification {
+  workspace: Workspace;
+  tracker: ChangeTracker;
+  gate: VerificationGate;
+  context: ToolContext;
+  /** 게이트가 돌릴 테스트 선언. 보고서를 수거할 때 체크를 서비스에 짝짓는다(ADR-153) */
+  gateTests: NonNullable<NonNullable<LoadedProject['spec']['workflow']>['tests']>;
+}
+
+interface TerminalRunState {
+  /** 체크포인트 제목의 바탕이 되는 첫 요청 */
+  request: string;
+  startedMs: number;
+  /** 샌드박스 켜기와 변경 전 기준. 파일을 바꿀 수 있는 첫 도구나 턴의 끝에서 한 번 만든다(질문만 하는 턴은 샌드박스를 켜지 않는다) */
+  verification?: Promise<TerminalVerification>;
+  /** 게이트 밖의 이유(다룰 수 없는 경로가 바뀜, 검증하는 동안 파일이 바뀜)로 돌려보낸 횟수 */
+  unsettledAttempts: number;
+  /** 마지막으로 에이전트에게 돌려준 검증 결과. 고치지 않고 CLI가 끝나면 이 사유로 실패를 남긴다 */
+  lastFeedback?: string;
+  /** 도구 호출과 턴 끝 검증을 한 줄로 세운다 */
+  serial: ReturnType<typeof serialQueue>;
+  /** 턴 끝 검증이 도는 중이다. 이때 온 취소는 검증이 중단으로 끝나면서 마무리된다 */
+  checking: boolean;
+  settled: boolean;
+}
+
+function clipText(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit)}… (${text.length - limit}자 줄임)` : text;
+}
+
+/** 훅이 준 도구 입력에서 긴 글(파일 내용 등)을 줄인다. 세션 기록에는 무엇을 했는지만 남기면 된다 */
+function clipToolInput(input: unknown): Record<string, unknown> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return {};
+  return Object.fromEntries(Object.entries(input).map(([key, value]) => [key, typeof value === 'string' ? clipText(value, 2000) : value]));
+}
+
+/** 관문의 훅이 가리키는 세션. 멈춘 세션은 받지 않는다(켜다 실패한 세션은 받는다 — 열려 있는 터미널에서 고치는 중일 수 있다) */
+function terminalSession(id: string): Session {
+  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
+  const session = requireSession(id);
+  if (session.stop.signal.aborted || session.snapshot.status === 'stopped') throw new StudioError(409, '멈춘 세션입니다');
+  return session;
+}
+
+/**
+ * 열려 있는 터미널 실행. 대화 창의 실행이거나, 이미 닫혔거나, 취소를 받아 닫히는 중인 실행이면 없다.
+ * 닫히는 중인 실행(되돌리는 동안)은 세션에 걸려 있어 새 요청과 도구 호출을 막지만, 그 실행에 이어 붙이지는 않는다
+ */
+function openTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRunState }) | undefined {
+  const run = session.run;
+  return run?.terminal && !run.terminal.settled && !run.cancel.signal.aborted ? (run as ActiveRun & { terminal: TerminalRunState }) : undefined;
+}
+
+/** 지금 터미널의 요청을 받을 수 없으면 그 이유 */
+function terminalBusy(session: Session): string | undefined {
+  if (session.exporting) return '[b-studio] 원격 저장소에 올리는 중입니다. 끝난 뒤 다시 보내세요.';
+  if (session.run || session.snapshot.running) return '[b-studio] 앞선 요청을 처리하는 중입니다(대화 창에서 보낸 요청이거나 검증 결과를 저장하는 중). 끝난 뒤 다시 보내세요.';
+  return undefined;
+}
+
+/** 실행 한 건을 연다. 대화 창의 요청(sendMessage)과 같은 순서로 준비한다: 스튜디오 밖의 수정을 먼저 체크포인트로 남긴다 */
+async function beginTerminalRun(session: Session, request: string): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
+  try {
+    await session.relaying;
+    const edits = await saveLocalEdits(session);
+    if (edits) emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
+  } catch (error) {
+    return { busy: `[b-studio] 스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}` };
+  }
+  // 기다리는 사이에 다른 요청이 시작됐을 수 있다. 여기부터 실행을 여는 데까지는 기다림이 없다
+  const opened = openTerminalRun(session);
+  if (opened) return opened;
+  const busy = terminalBusy(session);
+  if (busy) return { busy };
+  const terminal: TerminalRunState = { request, startedMs: performance.now(), unsettledAttempts: 0, serial: serialQueue(), checking: false, settled: false };
+  const run: ActiveRun & { terminal: TerminalRunState } = {
+    id: randomUUID().slice(0, 8),
+    startedAt: new Date().toISOString(),
+    cancel: new AbortController(),
+    baseTokens: session.snapshot.tokens,
+    tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    by: session.snapshot.owner,
+    terminal,
+  };
+  session.run = run;
+  session.runsStarted = (session.runsStarted ?? 0) + 1;
+  session.snapshot.running = true;
+  session.snapshot.pendingQuestion = undefined;
+  emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt });
+  run.cancel.signal.addEventListener(
+    'abort',
+    () => {
+      // 검증이 도는 중이면 그 검증이 중단으로 끝나면서 닫는다. 아니면 하던 도구 호출 뒤에 줄을 서서 닫는다
+      if (!terminal.checking) void terminal.serial(() => abandonTerminalRun(session, run, { status: 'cancelled' })).catch((error: unknown) => console.error('[b-studio] 터미널 실행을 닫지 못했습니다', error));
+    },
+    { once: true },
+  );
+  return run;
+}
+
+/**
+ * b-studio 도구를 거치지 않고 바뀐 파일(CLI가 직접 고친 것). 작업 복사본의 상태로 안다.
+ * git이 추적하지 않는 생성 파일(studio.yaml 등, ADR-067)도 함께 본다 — 빠지면 확인 선언을 고친 것이 검증 없이 지나간다
+ */
+async function changesOutsideTools(session: Session): Promise<string[]> {
+  return [...new Set([...(await session.checkpoints.pendingFiles()), ...(await session.checkpoints.pendingExcludedFiles())])];
+}
+
+/**
+ * 통과하지 못한 채 끝나는 실행을 닫는다. 대화 창의 요청(execute)과 같은 규칙이다:
+ *  - 이번 실행의 변경을 마지막 체크포인트로 되돌린다. 보관본이 남아 화면에서 되살릴 수 있다. 서비스도 되돌린 코드로 다시 뜬다
+ *  - 샌드박스·도커 쪽 문제로 검증하지 못한 것(platformFailure)은 되돌리지 않는다. 바꾼 코드의 문제가 아니다(트러블슈팅 117)
+ *  - 샌드박스가 켜져 있지 않으면 되돌릴 수 없다
+ * 되돌리는 동안에도 실행은 세션에 걸려 있어(session.run) 다른 요청이 끼어들지 못한다. 한 번만 한다
+ */
+async function abandonTerminalRun(
+  session: Session,
+  run: ActiveRun & { terminal: TerminalRunState },
+  { status, reason, platformFailure }: { status: 'failed' | 'cancelled' | 'error'; /** 왜 닫는가(사람이 읽을 글). 취소는 정해진 글을 쓴다 */ reason?: string; platformFailure?: string },
+): Promise<string> {
+  const state = run.terminal;
+  if (state.settled) return '';
+  state.settled = true;
+  let summary = reason ?? '';
+  if (session.stop.signal.aborted) {
+    announceTerminalRun(session, run, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
+    return summary;
+  }
+  if (platformFailure && session.snapshot.workspace !== 'local') {
+    const text = `b-studio 쪽(샌드박스·도커) 문제로 검증하지 못했습니다. 바꾼 코드의 문제가 아니라서 변경을 되돌리지 않고 작업 복사본에 그대로 뒀습니다(체크포인트는 남기지 않았습니다). 문제를 해결한 뒤 다음 요청을 보내면 그때 이 변경을 다시 검증합니다: ${platformFailure}`;
+    emit(session, { type: 'notice', text, at: new Date().toISOString() });
+    summary = `${summary}\n\n변경은 되돌리지 않았습니다.`.trim();
+  } else if (session.snapshot.status !== 'ready') {
+    summary = `${summary}\n\n샌드박스가 켜져 있지 않아 변경을 되돌리지 못했습니다.`.trim();
+  } else {
+    const cancelled = status === 'cancelled';
+    // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
+    const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
+    let revertError: unknown;
+    const reverted = await revertRun(session, run.id, { cancelled, alsoRestart: unsettled }).catch((cause: unknown) => {
+      revertError = cause;
+      console.error('[b-studio] 되돌리기 실패', cause);
+      return undefined;
+    });
+    if (reverted && reverted.length > 0) {
+      (session.terminalNotes ??= []).push(
+        `[b-studio] 앞 요청("${clipText(state.request, 200)}")의 변경은 검증을 통과하지 못했거나 닫혀서 마지막 체크포인트로 되돌렸습니다. 되돌린 파일 ${reverted.length}개: ${reverted.slice(0, 20).join(', ')}${reverted.length > 20 ? ' 외' : ''}. 이 파일을 다루기 전에 다시 읽으세요. 보관본은 b-studio 화면에서 되살릴 수 있습니다.`,
+      );
+    }
+    const outcome = !reverted ? `변경을 되돌리지 못했습니다: ${describe(revertError)}` : reverted.length > 0 ? `바뀐 파일 ${reverted.length}개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다)` : '바뀐 파일은 없었습니다';
+    summary = cancelled && !reason ? stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError) : `${summary}\n\n${outcome}.`.trim();
+  }
+  announceTerminalRun(session, run, { status, summary });
+  return summary;
+}
+
+/** 통과했거나 바꾼 것 없이 끝난 실행을 닫는다 */
+function settleTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary'>): void {
+  if (run.terminal.settled) return;
+  run.terminal.settled = true;
+  announceTerminalRun(session, run, finished);
+}
+
+/** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
+function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary'>): void {
+  if (session.run === run) session.run = undefined;
+  // 세션이 멈추는 중이면 stopSession이 상태를 정리한다. 여기서는 끝났다는 알림만 건너뛴다
+  if (session.stop.signal.aborted) return;
+  session.snapshot.running = false;
+  session.snapshot.cancelling = undefined;
+  session.settledConversation = session.conversation.length;
+  emit(session, {
+    type: 'run_finished',
+    runId: run.id,
+    ...finished,
+    durationMs: Math.round(performance.now() - run.terminal.startedMs),
+    sessionTokens: session.snapshot.tokens,
+    nextDemoRequest: session.snapshot.nextDemoRequest,
+    nextDemoQuestion: session.snapshot.nextDemoQuestion,
+  });
+}
+
+/** 작업(도구 호출)이 속할 실행. 열려 있으면 그것을, 없으면 새로 연다 — 요청의 시작을 알리는 훅 없이 이어진 턴도 실행으로 잡는다 */
+async function terminalRunForWork(session: Session): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
+  const opened = openTerminalRun(session);
+  if (opened) return opened;
+  const busy = terminalBusy(session);
+  if (busy) return { busy };
+  return beginTerminalRun(session, session.terminalLabel ?? TERMINAL_FALLBACK_REQUEST);
+}
+
+/** 중단 신호가 오면 기다리던 일을 놓는다(일 자체는 뒤에서 끝난다) */
+function untilAborted<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/**
+ * 변경 전 기준을 잡는다: 샌드박스를 켜고, 지금 작업 복사본의 변경을 게이트에 알리고, 계약 기준을 읽어 둔다.
+ * 실행마다 한 번이다. 실패하면 버려서 다음 필요 때 다시 해 본다
+ */
+function terminalVerification(session: Session, run: ActiveRun & { terminal: TerminalRunState }): Promise<TerminalVerification> {
+  const state = run.terminal;
+  if (state.verification) return state.verification;
+  const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+  const onEvent = (event: AgentEvent): void => {
+    // 토큰과 질문은 러너만 낸다(세션 이벤트의 agent 꼴에도 없다). 게이트와 도구가 내는 것만 옮긴다
+    if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
+  };
+  const prepared = (async (): Promise<TerminalVerification> => {
+    signal.throwIfAborted();
+    await ensureBooted(session);
+    const infra = await ensureReadySessionInfra(session, signal);
+    if (!infra.ok) throw new Error(infra.reason);
+    // 기준은 서버가 아는 마지막 체크포인트의 문서다(runPlan과 같은 이유, ADR-157)
+    const lastCheckpointSha = session.snapshot.checkpoints[0]?.sha;
+    const requirementsBaseline = (lastCheckpointSha ? await session.checkpoints.fileAt(REQUIREMENTS_FILE, lastCheckpointSha) : undefined) ?? null;
+    const project = session.project;
+    const workspace = new Workspace(project.root);
+    workspace.beginRun(requirementsBaseline);
+    // CLI는 b-studio 도구를 거치지 않고 파일을 고친다. 변경은 작업 복사본의 상태로만 안다.
+    //  - 실행 전부터 있던 변경도 검증 대상이다(ADR-131). 게이트가 다룰 수 없는 경로는 처음부터 있었어도 봐주지 않는다:
+    //    터미널의 실행은 변경을 되돌리지 않으므로, 봐주면 앞 실행이 남긴 비밀 파일이나 링크가 다음 실행에서 그대로 커밋된다
+    //  - 지문은 git이 스테이징할 때의 것을 쓴다. 통과한 뒤 커밋되는 내용이 검증한 내용과 같은지 그대로 견준다
+    const tracker = new ChangeTracker(workspace, () => changesOutsideTools(session), { tolerateExisting: false, fingerprint: (files) => session.checkpoints.stagedFingerprints(files) });
+    await tracker.sync();
+    const serviceStatus = (event: ServiceStatusEvent): void => onServiceStatus(session, event);
+    const gate = await VerificationGate.create({
+      project,
+      sandbox: session.sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
+      fetcher: fetchContract,
+      signal,
+      onServiceStatus: serviceStatus,
+      onEvent,
+      saveArtifact: (input) => saveSessionArtifact(session, run.id, input),
+      onBrowserFrame: ({ check, frame }) =>
+        publish(session.snapshot.id, { source: 'qa', check, mime: 'image/jpeg', data: frame.data.toString('base64'), width: frame.width, height: frame.height, at: frame.at }),
+    });
+    const context: ToolContext = {
+      project,
+      selfCheck: selfCheckMode(),
+      workspace,
+      sandbox: session.sandbox,
+      fetcher: fetchContract,
+      signal,
+      onServiceStatus: serviceStatus,
+      policy: scopedExecutionPolicy(project, undefined),
+      onPolicyDecision: (decision) => onEvent({ type: 'policy', ...decision }),
+      toolResults: createToolResultCache(),
+    };
+    return { workspace, tracker, gate, context, gateTests: project.spec.workflow?.tests ?? [] };
+  })();
+  state.verification = prepared;
+  prepared.catch(() => {
+    if (state.verification === prepared) state.verification = undefined;
+  });
+  return prepared;
+}
+
+/** 요청의 시작(UserPromptSubmit 훅) */
+async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ blocked?: string; note?: string }> {
+  const session = terminalSession(id);
+  const prompt = typeof input.prompt === 'string' ? clipText(input.prompt.trim(), TERMINAL_REQUEST_LIMIT) : '';
+  if (!prompt) return {};
+  // 마지막으로 받은 요청 글을 기억해 둔다. 앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙지만,
+  // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
+  session.terminalLabel = prompt;
+  const opened = openTerminalRun(session);
+  if (opened) {
+    // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
+    emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
+    return {};
+  }
+  const busy = terminalBusy(session);
+  if (busy) return { blocked: busy };
+  // "/"로 시작하는 명령은 CLI 안에서 끝나는 것이 많다(/model, /clear). 실행은 실제로 작업이 시작될 때 연다
+  if (prompt.startsWith('/')) return {};
+  const run = await beginTerminalRun(session, prompt);
+  if ('busy' in run) return { blocked: run.busy };
+  // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
+  const notes = session.terminalNotes?.splice(0) ?? [];
+  return notes.length > 0 ? { note: notes.join('\n') } : {};
+}
+
+/** 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅) */
+async function terminalToolStarting(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
+  const session = terminalSession(id);
+  const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
+  // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
+  if ((AGENT_READ_TOOLS as readonly string[]).includes(tool)) return {};
+  const run = await terminalRunForWork(session);
+  if ('busy' in run) return { deny: run.busy };
+  // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
+  if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
+  const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+  try {
+    await untilAborted(signal, terminalVerification(session, run));
+    return {};
+  } catch (error) {
+    if (signal.aborted) return { deny: '[b-studio] 요청을 닫아 도구를 쓰지 않았습니다.' };
+    // 변경 전 기준을 잡지 못했으면 바꾸게 두지 않는다. 두면 그 변경은 기준 없이 바뀐 것이 되어, 나중에 잡는 기준에 섞여 들어간다
+    // (계약을 깨는 변경이 "원래 그랬던 것"이 된다). 켜지지 않는 원인이 프로젝트의 파일이면 사람이 터미널의 셸에서 직접 고친다
+    const deny = `[b-studio] 샌드박스를 준비하지 못해 파일을 바꿀 수 있는 도구를 막았습니다: ${describe(error)}\n원인을 고친 뒤 다시 시도하세요. 터미널의 셸에서 사람이 직접 고칠 수 있습니다.`;
+    emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message: deny } });
+    return { deny };
+  }
+}
+
+/** b-studio 도구 호출(MCP). 서비스 컨테이너 안에서 돈다 */
+async function runTerminalTool(id: string, name: string, args: unknown): Promise<ToolOutcome> {
+  let session: Session;
+  try {
+    session = terminalSession(id);
+  } catch (error) {
+    return { ok: false, content: describe(error) };
+  }
+  // 내주는 도구는 샌드박스가 있어야 도는 것뿐이다. 도구 서버가 이미 목록 밖의 이름을 받지 않지만 여기서도 본다
+  // (파일 도구가 이 길로 불리면 변경 추적과 쓰기 직전의 훅을 건너뛴다)
+  if (!gatewayToolSpecs(session.project).some((spec) => spec.name === name)) return { ok: false, content: `[b-studio] ${name}: 터미널에 내주지 않는 도구입니다` };
+  const run = await terminalRunForWork(session);
+  if ('busy' in run) return { ok: false, content: run.busy };
+  let verification: TerminalVerification;
+  try {
+    verification = await untilAborted(AbortSignal.any([session.stop.signal, run.cancel.signal]), terminalVerification(session, run));
+  } catch (error) {
+    return { ok: false, content: `[b-studio] 샌드박스를 쓸 수 없습니다: ${describe(error)}` };
+  }
+  return run.terminal.serial(async () => {
+    emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name, input: args } });
+    const outcome = await executeTool(name, args, verification.context);
+    emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_result', name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length } });
+    return outcome;
+  });
+}
+
+/** 턴의 끝(Stop 훅). 게이트를 돌려 통과면 체크포인트를 남기고, 실패면 결과를 에이전트에게 돌려준다 */
+async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedback?: string; message?: string }> {
+  const session = terminalSession(id);
+  const run = openTerminalRun(session);
+  // 실행이 없으면 이 턴은 아무것도 바꾸지 않았다(바꿨다면 쓰기 직전의 훅이 실행을 열었다)
+  if (!run) return {};
+  const text = typeof input.last_assistant_message === 'string' ? input.last_assistant_message.trim() : '';
+  return run.terminal.serial(() => finishTerminalTurn(session, run, text));
+}
+
+async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string): Promise<{ feedback?: string; message?: string }> {
+  const state = run.terminal;
+  if (state.settled) return {};
+  const onEvent = (event: AgentEvent): void => {
+    // 토큰과 질문은 러너만 낸다(세션 이벤트의 agent 꼴에도 없다). 게이트와 도구가 내는 것만 옮긴다
+    if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
+  };
+  if (text) onEvent({ type: 'text', text: clipText(text, TERMINAL_REQUEST_LIMIT) });
+  state.checking = true;
+  try {
+    // 기준을 잡은 적이 없고 작업 복사본도 그대로면 답만 한 턴이다. 샌드박스를 켜지 않고 끝낸다
+    if (!state.verification && (await session.checkpoints.pendingFiles()).length === 0 && (await session.checkpoints.pendingExcludedFiles()).length === 0) {
+      settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
+      return {};
+    }
+    const verification = await terminalVerification(session, run);
+    const { tracker, gate } = verification;
+    const started = performance.now();
+    const { rejected } = await tracker.sync();
+    /** 게이트 밖의 이유로 통과시키지 않는다. 상한까지는 에이전트에게 돌려주고, 넘으면 실패로 끝낸다 */
+    const unsettled = (summary: string, feedback: string): GateOutcome => {
+      state.unsettledAttempts += 1;
+      return state.unsettledAttempts >= TERMINAL_MAX_VERIFY_ATTEMPTS ? { kind: 'exhausted', summary } : { kind: 'retry', feedback };
+    };
+    const moved = (files: readonly string[]): GateOutcome =>
+      unsettled(
+        `검증하는 동안 파일이 계속 바뀌어 통과시키지 않았습니다: ${files.slice(0, 5).join(', ')}`,
+        ['[b-studio 검증 게이트] 검증하는 동안 바뀐 파일이 있어 통과로 인정하지 않았습니다.', ...files.slice(0, 20).map((file) => `- ${file}`), '뒤에서 파일을 바꾸는 명령이 돌고 있으면 끝낸 뒤 턴을 끝내세요.'].join('\n'),
+      );
+    let outcome: GateOutcome;
+    if (rejected.length > 0) {
+      // 게이트가 다룰 수 없는 경로(비밀 파일, 생성물, 링크)가 바뀌었다. 건너뛰면 검증하지 않은 파일이 체크포인트에 들어간다
+      outcome = unsettled(`게이트가 검증할 수 없는 경로가 남아 통과시키지 않았습니다: ${rejected.slice(0, 5).join(', ')}`, rejectedChangeFeedback(rejected));
+    } else {
+      outcome = await gate.check();
+      if (outcome.kind === 'pass') {
+        // 게이트는 수 초에서 수 분을 돈다. 그동안 파일이 바뀌었으면 게이트가 본 것과 지금이 다르다
+        const during = await tracker.sync();
+        if (during.changed.length > 0 || during.rejected.length > 0) outcome = moved([...during.changed, ...during.rejected]);
+      }
+    }
+    if (run.cancel.signal.aborted || session.stop.signal.aborted) throw run.cancel.signal.reason ?? session.stop.signal.reason;
+    if (outcome.kind === 'pass') {
+      // 통과: 여기부터는 취소를 받지 않는다(대화 창의 요청과 같다)
+      if (session.run === run) session.run = undefined;
+      const head = session.snapshot.checkpoints[0]?.sha;
+      // 커밋되는 내용이 방금 검증한 내용과 같아야 한다. git이 추적하지 않는 생성 파일은 인덱스에 없으므로 견줄 대상에서 뺀다
+      const generated = new Set(await session.checkpoints.pendingExcludedFiles());
+      const expectStaged = new Map([...tracker.tracked].filter(([file]) => !generated.has(file)));
+      const passed = terminalResult(verification, 'done', text, 'pass', started);
+      try {
+        if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+        await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged);
+      } catch (error) {
+        if (!(error instanceof StagedMismatchError)) throw error;
+        // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
+        if (session.run === undefined && !state.settled) session.run = run;
+        outcome = moved(error.files);
+      }
+      if (outcome.kind === 'pass') {
+        const saved = session.snapshot.checkpoints[0];
+        const checkpointed = saved !== undefined && saved.sha !== head;
+        if (checkpointed) {
+          if (passed.checks) session.lastGateChecks = passed.checks;
+          void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests).catch(() => {});
+          void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
+          // 대화 창의 에이전트는 터미널에서 일어난 일을 모른다. 다음 요청에서 알린다
+          noteForModel(session, `[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 ${saved.shortSha}를 남겼습니다(파일 ${saved.files.length}개: ${saved.files.slice(0, 20).join(', ')}). 이 파일을 다루기 전에 다시 읽으세요.`);
+        }
+        onEvent({ type: 'done', result: passed });
+        settleTerminalRun(session, run, { status: 'done', summary: text || (checkpointed ? '검증을 통과해 체크포인트를 남겼습니다.' : '바꾼 파일 없이 끝났습니다.') });
+        return { message: checkpointed ? `[b-studio] 검증 통과 — 체크포인트 ${saved.shortSha}` : '[b-studio] 검증 통과 — 남길 변경이 없어 체크포인트는 만들지 않았습니다' };
+      }
+    }
+    if (outcome.kind === 'retry') {
+      state.lastFeedback = outcome.feedback;
+      return { feedback: outcome.feedback };
+    }
+    if (outcome.kind === 'exhausted') {
+      const result = terminalResult(verification, 'failed', outcome.summary, 'exhausted', started);
+      onEvent({ type: 'failed', result });
+      const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: outcome.summary, platformFailure: gate.platformFailure });
+      return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+    }
+    return {};
+  } catch (error) {
+    if (session.stop.signal.aborted) {
+      settleTerminalRun(session, run, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
+      return {};
+    }
+    if (run.cancel.signal.aborted) {
+      const summary = await abandonTerminalRun(session, run, { status: 'cancelled' });
+      return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+    }
+    console.error('[b-studio] 터미널 실행의 검증 실패', error);
+    const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}` });
+    return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+  } finally {
+    state.checking = false;
+  }
+}
+
+/** 게이트의 결과를 실행 결과의 꼴로 옮긴다(체크포인트 본문과 트레일러, 대화 창의 결과 카드가 이 꼴을 읽는다) */
+function terminalResult(verification: TerminalVerification, status: 'done' | 'failed', summary: string, outcome: GateOutcome['kind'], startedMs: number): AgentResult {
+  const { workspace, gate } = verification;
+  return {
+    status,
+    summary,
+    changedFiles: workspace.changedFiles(),
+    report: gate.report,
+    checks: gate.checks,
+    gateOutcome: outcome,
+    passedStages: [...gate.passedStages],
+    verifyAttempts: gate.attempts,
+    turns: 0,
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    metrics: { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: Math.round(performance.now() - startedMs) },
+  };
+}
+
+/** CLI가 끝났다(SessionEnd 훅). 열려 있던 실행을 닫는다 — 검증이 도는 중이면 그 검증이 닫는다 */
+async function terminalCliEnded(id: string): Promise<void> {
+  const session = terminalSession(id);
+  const run = openTerminalRun(session);
+  if (!run || run.terminal.checking) return;
+  const feedback = run.terminal.lastFeedback;
+  await run.terminal.serial(() =>
+    feedback
+      ? abandonTerminalRun(session, run, { status: 'failed', reason: `검증을 통과하지 못한 채 CLI가 끝났습니다.\n\n${clipText(feedback, 4000)}` })
+      : abandonTerminalRun(session, run, { status: 'cancelled', reason: 'CLI가 끝나 요청을 닫았습니다.' }),
+  );
+}
+
+/** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */
+function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
+  return {
+    note: async () => terminalGatewayNote(terminalSession(id).project),
+    prompt: (input) => terminalPromptSubmitted(id, input),
+    preTool: (input) => terminalToolStarting(id, input),
+    stop: (input) => terminalTurnEnded(id, input),
+    sessionEnd: () => terminalCliEnded(id),
+    toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
+    runTool: (name, args) => runTerminalTool(id, name, args),
+  };
+}
+
+/** 테스트가 관문의 서버 없이 처리만 부르는 자리 */
+export function terminalGatewayHandlersForTest(id: string): TerminalGatewayHandlers {
+  return terminalGatewayHandlers(id);
 }
 
 function requireSession(id: string): Session {

@@ -11,7 +11,7 @@ import { SessionAccessProvider, type SessionAccess } from "./session-access";
 import { RequirementsImportProvider, type RequirementsImport, type RequirementsImportTarget } from "./requirements-import-context";
 import { SessionHeader } from "./session-header";
 import { TerminalPanel } from "./terminal-panel";
-import { readAgentSurface, writeAgentSurface, type AgentSurface } from "@/lib/terminal";
+import { readAgentSurface, terminalGateStatus, writeAgentSurface, type AgentSurface } from "@/lib/terminal";
 import { useSession } from "./use-session";
 
 /** 브라우저에 기억해 둔 값은 이 화면이 떠 있는 동안 바깥에서 바뀌지 않는다. 처음 한 번 읽으려고만 구독한다 */
@@ -101,7 +101,7 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
                     </div>
                     {showTerminal && (
                       <div className="grid min-h-0 flex-1">
-                        <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} />
+                        <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} gate={terminalGateStatus(view.chat)} />
                       </div>
                     )}
                   </div>

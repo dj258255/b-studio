@@ -4,7 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, guardBuiltinTool, runClaudeGatewayAgent } from './claude-gateway-runner';
+import { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, guardBuiltinTool, runClaudeGatewayAgent, terminalGatewayNote } from './claude-gateway-runner';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { SANDBOX_TOOLS, WRITE_TOOLS } from './tools';
@@ -523,5 +523,19 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     await expect(
       runClaudeGatewayAgent({ request: '설명해 줘', project, sandbox: fakeSandbox(project, []), pendingFiles, intent: 'ask', cliCommand: [process.execPath, cliPath] }),
     ).rejects.toThrow('질문 모드');
+  });
+});
+
+describe('terminalGatewayNote (세션 터미널의 CLI가 대화를 시작할 때 받는 글, 이슈 #673)', () => {
+  it('서비스가 이 컨테이너에서 돌지 않는다는 것, 쓸 도구, 커밋하지 않는다는 것, 검증 결과가 돌아오는 꼴을 알린다', async () => {
+    const project = await createOrdersProject('b-studio-terminal-note-');
+    const note = terminalGatewayNote(project);
+    expect(project.managed.length).toBeGreaterThan(0);
+    for (const [name] of project.managed) expect(note).toContain(name);
+    for (const spec of gatewayToolSpecs(project)) expect(note).toContain(`mcp__b-studio__${spec.name}`);
+    expect(note).toContain('커밋하지 않는다');
+    expect(note).toContain('Stop hook feedback');
+    // 훅의 덧붙임은 길이 상한이 있다(1만 자). 넉넉히 아래에 둔다
+    expect(note.length).toBeLessThan(3000);
   });
 });

@@ -1,15 +1,15 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
-import { lstat, mkdtemp, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { ChangeTracker, rejectedChangeFeedback } from './change-tracker';
 import { describeAccount, serialQueue, type ClaudeCodeResult, type ClaudeCodeRunOptions } from './claude-code-runner';
 import { fetchContract } from './verify';
 import { recheckGateOnMaxTurns, VerificationGate, type GateOutcome } from './gate';
 import { emptyUsage, type AgentResult, type AgentUsage, type RunMetrics } from './loop';
-import { startToolServer, tokenMatches } from './mcp-http-server';
+import { startHookServer } from './hook-server';
+import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { projectGuideSection, withLanguageReminder } from './prompts';
 import { createToolResultCache } from './tool-output';
@@ -57,13 +57,11 @@ const MCP_TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 const STOP_HOOK_TIMEOUT_SECONDS = 3600;
 /** 도구 호출 전 경로 검사가 답을 기다리는 시간(초). 파일 몇 개의 상태를 보는 짧은 일이다 */
 const PRE_TOOL_HOOK_TIMEOUT_SECONDS = 20;
-const MAX_HOOK_BODY_BYTES = 4 * 1024 * 1024;
 
 /** PreToolUse 훅의 거절 출력 */
 function preToolDeny(reason: string): Record<string, unknown> {
   return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
 }
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ClaudeGatewayRunOptions extends ClaudeCodeRunOptions {
@@ -89,6 +87,24 @@ function gatewayNote(toolNames: readonly string[]): string {
     '이 작업 폴더는 b-studio 세션의 작업 복사본이다. 서비스는 컨테이너에서 돌고 이 폴더가 그 안에 연결되어 있다.',
     `호스트 셸은 없다. 빌드·테스트 같은 명령은 mcp__${SERVER}__run_in_service로 서비스 컨테이너 안에서 돌린다. 쓸 수 있는 b-studio 도구: ${toolNames.map((name) => `mcp__${SERVER}__${name}`).join(', ')}.`,
     '턴을 끝내면 b-studio가 검증 게이트(서비스 재시작, API 계약, 선언한 확인)를 돌린다. 실패하면 결과가 "Stop hook feedback"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.',
+    '사용자에게 보이는 글은 한국어로 쓴다.',
+  ].join('\n');
+}
+
+/**
+ * 세션 터미널(이슈 #673)에서 컨테이너 안의 CLI가 대화를 시작할 때 받는 글. 훅의 덧붙임으로 들어가므로 짧게 쓴다.
+ * 러너 방식과 다른 점만 적는다: 여기는 서비스가 도는 곳이 아니고, 커밋은 b-studio가 한다.
+ */
+export function terminalGatewayNote(project: LoadedProject): string {
+  const services = project.managed.map(([name]) => name);
+  const tools = gatewayToolSpecs(project).map((spec) => `mcp__${SERVER}__${spec.name}`);
+  return [
+    '# b-studio',
+    `이 작업 폴더는 b-studio 세션의 작업 복사본이다. 프로젝트의 서비스(${services.join(', ') || '없음'})는 이 컨테이너가 아니라 각자의 컨테이너에서 돌고, 같은 폴더가 그 안에 연결되어 있다.`,
+    `이 컨테이너에는 프로젝트의 런타임과 의존성이 없다. 빌드·테스트·서버 명령은 여기의 셸이 아니라 mcp__${SERVER}__run_in_service로 서비스 컨테이너 안에서 돌린다. 쓸 수 있는 b-studio 도구: ${tools.join(', ')}.`,
+    '.git은 읽기 전용이다. 커밋하지 않는다. 턴을 끝내면 b-studio가 검증 게이트(서비스 재시작, API 계약, 선언한 확인)를 돌리고, 통과하면 체크포인트(커밋)를 남긴다.',
+    '검증이 실패하면 결과가 "Stop hook feedback"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.',
+    '끝내 통과하지 못하면 b-studio가 이번 요청의 변경을 되돌린다(보관본은 남는다). 되돌렸다는 알림을 받으면 파일을 다시 읽는다.',
     '사용자에게 보이는 글은 한국어로 쓴다.',
   ].join('\n');
 }
@@ -171,153 +187,6 @@ function relativeToRoot(file: string, root: string, realRoot: string): string | 
   return undefined;
 }
 
-/** 바뀐 파일을 작업 공간(게이트가 보는 목록)에 옮긴다. 내용이 그대로인 파일은 다시 알리지 않는다 */
-class ChangeTracker {
-  readonly #workspace: Workspace;
-  readonly #pendingFiles: () => Promise<readonly string[]>;
-  /** 파일 → 마지막으로 게이트에 알린 때의 지문 */
-  readonly #tracked = new Map<string, string>();
-  /** 실행 전부터 있던, 게이트가 다루지 않는 경로 → 그때의 지문. 그대로면 이번 실행의 탓이 아니다 */
-  readonly #toleratedRejects = new Map<string, string>();
-  #started = false;
-
-  constructor(workspace: Workspace, pendingFiles: () => Promise<readonly string[]>) {
-    this.#workspace = workspace;
-    this.#pendingFiles = pendingFiles;
-  }
-
-  /**
-   * 지금의 변경을 게이트에 알린다. changed는 지난번 이후 새로 바뀐 파일, rejected는 이번 실행에서 바뀌었는데 게이트가
-   * 다룰 수 없는 경로(비밀 파일, 생성물, 프로젝트 밖)다. rejected를 건너뛰면 검증하지 않은 파일이 체크포인트에 들어간다.
-   */
-  async sync(): Promise<{ changed: string[]; rejected: string[] }> {
-    const first = !this.#started;
-    this.#started = true;
-    const changed: string[] = [];
-    const rejected: string[] = [];
-    for (const file of await this.#pendingFiles()) {
-      if (file.endsWith('/')) continue;
-      const print = await fingerprint(path.resolve(this.#workspace.root, file));
-      if (this.#tracked.get(file) === print) continue;
-      try {
-        // 링크는 검증 대상으로 받지 않는다. 게이트는 링크 너머의 내용을 보고 통과시키는데 체크포인트에는 링크만 들어간다.
-        // 프로젝트 안에 밖을 가리키는 링크가 남아 있으면 그 뒤의 파일 도구 호출이 그것을 거쳐 나갈 수도 있다
-        if (print.startsWith('link:')) throw new WorkspaceError(`${file}: 링크는 검증할 수 없습니다`);
-        this.#workspace.trackExternalChanges([file]);
-        this.#tracked.set(file, print);
-        changed.push(file);
-      } catch {
-        if (first) this.#toleratedRejects.set(file, print);
-        else if (this.#toleratedRejects.get(file) !== print) rejected.push(file);
-      }
-    }
-    return { changed: changed.sort(), rejected: rejected.sort() };
-  }
-}
-
-/**
- * 파일의 지문. 내용의 해시를 쓴다 — 수정 시각과 크기는 컨테이너 안 명령으로 맞춰 놓을 수 있어서, 게이트가 통과시킨 뒤에
- * 내용만 바꾼 파일을 "그대로"라고 보게 된다. 링크는 따라가지 않고 링크라는 사실과 가리키는 곳을 지문으로 삼는다.
- */
-async function fingerprint(absolute: string): Promise<string> {
-  try {
-    const info = await lstat(absolute);
-    if (info.isSymbolicLink()) return `link:${await readlink(absolute).catch(() => '')}`;
-    if (!info.isFile()) return `other:${info.mode}`;
-    return `file:${createHash('sha256').update(await readFile(absolute)).digest('hex')}`;
-  } catch {
-    return 'missing';
-  }
-}
-
-interface StopHookInput {
-  stop_hook_active?: unknown;
-  last_assistant_message?: unknown;
-}
-
-interface PreToolHookInput {
-  tool_name?: unknown;
-  tool_input?: unknown;
-}
-
-type HookInput = StopHookInput & PreToolHookInput;
-type HookHandler = (input: HookInput) => Promise<Record<string, unknown>>;
-
-interface HookServer {
-  /** 뒤에 /stop, /pre-tool을 붙여 부른다 */
-  url: string;
-  token: string;
-  close(): Promise<void>;
-}
-
-/** 훅 명령이 부르는 루프백 서버. 요청 본문은 CLI가 훅에 준 JSON, 응답은 CLI가 훅의 출력으로 읽을 JSON이다 */
-async function startHookServer(routes: Readonly<Record<string, HookHandler>>): Promise<HookServer> {
-  const token = randomBytes(24).toString('hex');
-  const http = createServer((req, res) => {
-    void handleHook(req, res, token, routes);
-  });
-  http.on('clientError', (_error, socket) => socket.destroy());
-  // 게이트가 도는 동안 연결을 끊지 않는다
-  http.requestTimeout = 0;
-  http.headersTimeout = 0;
-  await listen(http);
-  const address = http.address();
-  if (address === null || typeof address === 'string') throw new Error('게이트 훅 서버가 포트를 열지 못했습니다');
-  let closed = false;
-  return {
-    url: `http://127.0.0.1:${address.port}`,
-    token,
-    async close() {
-      if (closed) return;
-      closed = true;
-      http.closeAllConnections();
-      await new Promise<void>((resolve) => http.close(() => resolve()));
-    },
-  };
-}
-
-async function handleHook(req: IncomingMessage, res: ServerResponse, token: string, routes: Readonly<Record<string, HookHandler>>): Promise<void> {
-  const reply = (status: number, body: unknown): void => {
-    res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(body));
-  };
-  const host = (req.headers.host ?? '').replace(/:\d+$/, '');
-  if (!LOOPBACK_HOSTS.has(host)) return reply(403, { error: '루프백에서만 접근할 수 있습니다' });
-  if (!tokenMatches(req.headers.authorization, token)) return reply(401, { error: 'unauthorized' });
-  const handler = req.method === 'POST' && req.url && Object.hasOwn(routes, req.url) ? routes[req.url] : undefined;
-  if (!handler) return reply(404, { error: 'not found' });
-  try {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of req as AsyncIterable<Buffer>) {
-      size += chunk.length;
-      if (size > MAX_HOOK_BODY_BYTES) return reply(413, { error: 'too large' });
-      chunks.push(chunk);
-    }
-    let input: HookInput = {};
-    try {
-      const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-      if (typeof parsed === 'object' && parsed !== null) input = parsed as HookInput;
-    } catch {
-      // 훅 입력을 읽지 못해도 검증은 돈다. 입력은 요약에만 쓴다
-    }
-    reply(200, await handler(input));
-  } catch (error) {
-    // 5xx로 답한다. Stop 훅은 CLI가 멈추게 두고(판정은 마지막 검증이 한다), PreToolUse 훅은 명령이 실패를 거절로 바꾼다(-f)
-    reply(500, { error: error instanceof Error ? error.message : String(error) });
-  }
-}
-
-function listen(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-}
-
 /** CLI의 stream-json 한 줄. SDK의 메시지와 같은 꼴이지만 여기서는 필요한 필드만 본다 */
 interface CliMessage {
   type?: string;
@@ -364,15 +233,6 @@ function usageOf(models: NonNullable<CliMessage['modelUsage']>): AgentUsage {
     usage.cacheWriteTokens += model.cacheCreationInputTokens ?? 0;
   }
   return usage;
-}
-
-function rejectedFeedback(rejected: readonly string[]): string {
-  return [
-    '[b-studio 검증 게이트] 게이트가 검증할 수 없는 경로가 이번 실행에서 바뀌어 통과시키지 않았습니다.',
-    ...rejected.slice(0, 20).map((file) => `- ${file}`),
-    ...(rejected.length > 20 ? [`- 외 ${rejected.length - 20}개`] : []),
-    '비밀 파일(.env 등)이나 생성물은 체크포인트에 넣지 않습니다. 필요 없는 파일이면 지우고, 생성물이면 .gitignore에 넣은 뒤 턴을 끝내세요.',
-  ].join('\n');
 }
 
 export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): Promise<ClaudeCodeResult> {
@@ -457,7 +317,7 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
         const { rejected } = await tracker.sync();
         if (rejected.length > 0) {
           rejectedAttempts += 1;
-          const feedback = rejectedFeedback(rejected);
+          const feedback = rejectedChangeFeedback(rejected);
           lastOutcome = rejectedAttempts >= maxVerifyAttempts ? { kind: 'exhausted', summary: `게이트가 검증할 수 없는 경로가 남아 통과시키지 않았습니다: ${rejected.slice(0, 5).join(', ')}` } : { kind: 'retry', feedback };
         } else {
           lastOutcome = await gate.check();
@@ -721,7 +581,7 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
   const settled = lastOutcome?.kind === 'pass' && after.changed.length === 0 && after.rejected.length === 0;
   if (failure) {
     // 턴 상한: 안내 문구와 판정은 러너 방식과 같은 함수가 만든다. 게이트가 다루지 못하는 경로가 남았으면 통과시키지 않는다
-    if (after.rejected.length > 0) return finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다. ${rejectedFeedback(after.rejected)}`, 'max_turns');
+    if (after.rejected.length > 0) return finish('failed', `최대 턴 수(${maxTurns})를 넘었습니다. ${rejectedChangeFeedback(after.rejected)}`, 'max_turns');
     const started = performance.now();
     const recheck = settled ? { pass: true, summary: `최대 턴 수(${maxTurns})를 넘었습니다. 다만 지금까지의 변경이 검증 게이트를 통과해 체크포인트로 남깁니다(요청의 일부만 끝났을 수 있습니다).` } : await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
     metrics.gateMs += Math.round(performance.now() - started);
