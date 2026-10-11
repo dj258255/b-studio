@@ -72,7 +72,9 @@ export {
   type GeminiRunOptions,
   type GeminiRunResult,
 } from './gemini-cli-runner';
-export { startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
+export { hostAllowed, startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
+export { startHookServer, type HookHandler, type HookInput, type HookServer, type HookServerOptions } from './hook-server';
+export { ChangeTracker, rejectedChangeFeedback, type ChangeTrackerOptions, type Fingerprinter } from './change-tracker';
 export { boardMcpToolSpecs, externalBoardAccess, runBoardMcpTool, type BoardMcpToolSpec } from './board-mcp';
 export { handleBoardMcpRequest } from './board-mcp-server';
 export { fetchPage, recheckGateOnMaxTurns, VerificationGate, type GateOutcome, type MaxTurnsRecheck, type PageFetcher, type ServiceRequest, type VerifyMode } from './gate';
@@ -194,6 +196,7 @@ export {
 export { classifyCommit, generateCommitSubject, type CommitType } from './commit-message';
 export {
   CheckpointError,
+  StagedMismatchError,
   CheckpointStore,
   redactCredentials,
   RemoteConflictError,
@@ -737,4 +740,5 @@ export {
   type TestTarget,
 } from './test-run';
 export { experimentalEnabled, gatewayEnabled } from './experimental';
-export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, runClaudeGatewayAgent, type ClaudeGatewayRunOptions } from './claude-gateway-runner';
+export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, runClaudeGatewayAgent, terminalGatewayNote, type ClaudeGatewayRunOptions } from './claude-gateway-runner';
+export { serialQueue } from './claude-code-runner';

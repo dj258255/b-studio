@@ -680,9 +680,10 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
       return (
         <div className={`border-l-[3px] pl-3 ${item.intent === "ask" ? "border-line" : "border-ink"}`}>
           <p className="font-medium leading-7 whitespace-pre-wrap">{item.text}</p>
-          {(item.intent === "ask" || item.by) && (
+          {(item.intent === "ask" || item.by || item.via) && (
             <p className="text-xs text-muted">
               {item.intent === "ask" && <span className="mr-1.5 rounded-full border border-line px-1.5 py-px">질문</span>}
+              {item.via === "terminal" && <span className="mr-1.5 rounded-full border border-line px-1.5 py-px">터미널</span>}
               {item.by}
             </p>
           )}

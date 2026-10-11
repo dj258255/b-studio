@@ -637,6 +637,20 @@ describe('reduceSession', () => {
     expect(view.logs.at(-1)?.text).toBe(`line ${LOG_LIMIT + 4}`);
   });
 
+  it('터미널에서 보낸 요청은 표시를 달고, 끝나기 전에 이어 보낸 말은 같은 실행의 반영된 지시로 넣는다(이슈 #673)', () => {
+    const view = fold([
+      { type: 'run_started', runId: 't1', request: '메모 필드 추가', via: 'terminal', by: 'kim' },
+      { type: 'terminal_prompt', runId: 't1', text: '아니, note로', at: '2026-10-12T00:00:00.000Z' },
+    ]);
+    expect(view.chat).toEqual([
+      { kind: 'request', runId: 't1', text: '메모 필드 추가', by: 'kim', intent: undefined, via: 'terminal' },
+      { kind: 'steer', runId: 't1', text: '아니, note로', status: 'applied' },
+    ]);
+    expect(view.snapshot.running).toBe(true);
+    // 대화 창의 요청에는 표시가 없다
+    expect(fold([{ type: 'run_started', runId: 'c1', request: '요청' }]).chat[0]).not.toHaveProperty('via');
+  });
+
   it('진행 중 지시를 대기로 넣고, 반영되면 반영됨, 끝까지 남으면 적용 실패로 표시한다', () => {
     const view = fold([
       { type: 'run_started', runId: 'r1', request: '요청' },
@@ -689,6 +703,9 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
   it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {
     expect(outcomeText(outcome(), true)).toBe('완료, 1턴');
     expect(outcomeText(outcome({ turns: 3 }), false)).toBe('답만 했습니다(바꾼 파일 없음), 3턴');
+    // 턴 수를 모르는 실행(세션 터미널)에는 0턴이라고 적지 않는다
+    expect(outcomeText(outcome({ turns: undefined }), true)).toBe('완료');
+    expect(outcomeText(outcome({ turns: 0 }), true)).toBe('완료, 0턴');
     // 답을 기다리거나 취소·실패한 실행의 문구는 그대로다
     expect(outcomeText(outcome({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?' }), false)).toBe('답을 기다립니다');
     expect(outcomeText(outcome({ status: 'cancelled', summary: '요청을 취소했습니다' }), true)).toBe('요청을 취소했습니다');
