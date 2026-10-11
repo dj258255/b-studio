@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { lstat, mkdtemp, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -34,6 +34,13 @@ import type { LoadedProject } from '@b-studio/spec';
  *  - PreToolUse 훅: 도구를 쓰기 직전에 Workspace와 같은 규칙으로 경로를 본다(프로젝트 밖, 링크 경유, .git·.env·생성물).
  *    작업 복사본의 .git은 호스트의 git이 그대로 믿으므로(.git/config, 훅) 여기에 쓰면 호스트에서 코드가 실행된다.
  *    이 훅은 닫힌 쪽으로 실패한다: 검사 서버에 닿지 못하면 거절한다.
+ *
+ * 남는 틈(이 경로를 지원 기능으로 올리기 전에 막아야 한다): 경로 검사는 훅에서, 실제 읽기·쓰기는 그 뒤에 CLI 프로세스에서
+ * 일어난다. 그 사이에 컨테이너 안에서 도는 명령(작업 복사본이 연결되어 있다)이 검사한 경로를 밖을 가리키는 링크로 바꾸면
+ * 검사를 지난 호출이 호스트의 다른 파일에 닿는다. 다른 프로세스의 도구를 경로 검사로 가두는 한 이 경쟁은 없앨 수 없다.
+ * CLI의 작업 폴더 가두기가 한 겹 더 있지만 같은 종류의 검사다. 없애려면 CLI 프로세스 자체를 운영체제 수준에서 가두거나
+ * (파일 쓰기를 작업 복사본으로 제한) CLI를 컨테이너 안에서 돌려야 한다. 그때까지 이 경로는 기본으로 꺼 두고, 믿는 요청
+ * (벤치 과제)으로만 돌린다. 바꿔치기를 한 뒤 링크를 남겨 둔 경우는 게이트가 링크를 거절해 체크포인트가 되지 않는다.
  *
  * 훅은 에이전트에게 실패를 돌려주는 통로일 뿐이고 판정의 근거가 아니다. 훅이 불리지 않았거나(턴 상한, 훅 명령 실패)
  * 통과한 뒤에 파일이 또 바뀌었으면 CLI가 끝난 뒤 러너가 게이트를 한 번 더 돈다. 그 결과가 실행의 결과다.
@@ -113,6 +120,10 @@ export async function guardBuiltinTool(workspace: Workspace, toolName: unknown, 
       continue;
     }
     if (typeof value !== 'string') return `${toolName}: ${field}를 읽지 못했습니다`;
+    // 이 검사와 CLI가 같은 글자를 다른 경로로 읽으면 검사가 뜻이 없다. 그래서 풀이가 갈릴 수 있는 꼴은 받지 않는다:
+    // 상대 경로와 "~"(CLI가 홈 폴더로 풀 수 있다), 정리되지 않은 경로("..", ".", 겹친 "/" — 글자로 정리한 결과와
+    // 운영체제가 링크를 따라가며 푼 결과가 다르다). CLI의 파일 도구는 절대 경로를 쓰게 되어 있다
+    if (!isCanonicalAbsolute(value)) return `${toolName}: ${value}는 받지 않습니다. 정리된 절대 경로만 쓸 수 있습니다`;
     const relative = relativeToRoot(value, workspace.root, realRoot);
     if (relative === undefined) return `${toolName}: ${value}는 프로젝트 밖 경로입니다`;
     // 프로젝트 루트 자체는 찾기 도구(Glob·Grep)의 시작점으로만 받는다
@@ -129,17 +140,30 @@ export async function guardBuiltinTool(workspace: Workspace, toolName: unknown, 
   for (const field of fields.patterns) {
     const value = input[field];
     if (value === undefined || value === null) continue;
-    // 찾는 패턴으로 프로젝트 밖을 가리키지 못하게 한다
-    if (typeof value !== 'string' || path.isAbsolute(value) || value.startsWith('~') || value.split(/[\\/]/).includes('..')) {
-      return `${toolName}: ${field}는 프로젝트 안의 상대 패턴만 쓸 수 있습니다`;
-    }
+    if (typeof value !== 'string' || !isConfinedPattern(value)) return `${toolName}: ${field}는 프로젝트 안의 상대 패턴만 쓸 수 있습니다`;
   }
   return undefined;
 }
 
-/** CLI는 절대 경로를 준다. 프로젝트 루트(또는 그 실제 위치) 아래면 루트 기준 상대 경로로, 아니면 undefined */
+/** 다르게 풀릴 여지가 없는 절대 경로인가: 절대 경로이고, 정리해도 그대로이고, 끝에 구분자가 없다 */
+function isCanonicalAbsolute(file: string): boolean {
+  if (file.includes('\0') || !path.isAbsolute(file)) return false;
+  return path.normalize(file) === file && (file === path.sep || !file.endsWith(path.sep));
+}
+
+/**
+ * 찾기 패턴이 프로젝트 밖을 가리킬 수 없는가. 패턴은 시작 경로(검사한 경로나 작업 폴더)에 붙어 풀리므로,
+ * 절대 경로·홈 폴더로 시작하거나 위로 올라가는 조각이 있으면 안 된다. 중괄호는 갈래마다 따로 풀리므로("{/etc,x}")
+ * 갈래의 시작도 패턴의 시작과 똑같이 본다.
+ */
+function isConfinedPattern(pattern: string): boolean {
+  if (pattern.includes('\0')) return false;
+  if (/(^|[{,])\s*[\\/~]/.test(pattern)) return false;
+  return !pattern.split(/[\\/{},]/).some((segment) => segment.trim() === '..');
+}
+
+/** 프로젝트 루트(또는 그 실제 위치) 아래의 절대 경로면 루트 기준 상대 경로로, 아니면 undefined */
 function relativeToRoot(file: string, root: string, realRoot: string): string | undefined {
-  if (!path.isAbsolute(file)) return file;
   for (const base of [root, realRoot]) {
     const relative = path.relative(base, file);
     if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return relative;
@@ -176,6 +200,9 @@ class ChangeTracker {
       const print = await fingerprint(path.resolve(this.#workspace.root, file));
       if (this.#tracked.get(file) === print) continue;
       try {
+        // 링크는 검증 대상으로 받지 않는다. 게이트는 링크 너머의 내용을 보고 통과시키는데 체크포인트에는 링크만 들어간다.
+        // 프로젝트 안에 밖을 가리키는 링크가 남아 있으면 그 뒤의 파일 도구 호출이 그것을 거쳐 나갈 수도 있다
+        if (print.startsWith('link:')) throw new WorkspaceError(`${file}: 링크는 검증할 수 없습니다`);
         this.#workspace.trackExternalChanges([file]);
         this.#tracked.set(file, print);
         changed.push(file);
@@ -188,10 +215,16 @@ class ChangeTracker {
   }
 }
 
+/**
+ * 파일의 지문. 내용의 해시를 쓴다 — 수정 시각과 크기는 컨테이너 안 명령으로 맞춰 놓을 수 있어서, 게이트가 통과시킨 뒤에
+ * 내용만 바꾼 파일을 "그대로"라고 보게 된다. 링크는 따라가지 않고 링크라는 사실과 가리키는 곳을 지문으로 삼는다.
+ */
 async function fingerprint(absolute: string): Promise<string> {
   try {
-    const info = await stat(absolute);
-    return `${info.mtimeMs}:${info.size}`;
+    const info = await lstat(absolute);
+    if (info.isSymbolicLink()) return `link:${await readlink(absolute).catch(() => '')}`;
+    if (!info.isFile()) return `other:${info.mode}`;
+    return `file:${createHash('sha256').update(await readFile(absolute)).digest('hex')}`;
   } catch {
     return 'missing';
   }

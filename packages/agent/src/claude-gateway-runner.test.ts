@@ -19,7 +19,7 @@ const execFileAsync = promisify(execFile);
  */
 const FAKE_CLI = String.raw`
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const args = process.argv.slice(2);
@@ -32,9 +32,11 @@ const stopCommand = settings.hooks.Stop[0].hooks[0].command;
 const preToolCommand = settings.hooks.PreToolUse[0].hooks[0].command;
 const log = { args, prompt, systemPrompt: readFileSync(valueOf('--append-system-prompt-file'), 'utf8'), hooks: [], preTools: [], env: { gate: Boolean(process.env.B_STUDIO_GATE_TOKEN), mcp: Boolean(process.env.B_STUDIO_MCP_TOKEN) }, settings: readFileSync(valueOf('--settings'), 'utf8'), mcp: readFileSync(valueOf('--mcp-config'), 'utf8') };
 const emit = (message) => process.stdout.write(JSON.stringify(message) + '\n');
-const write = (file, content) => {
+const write = (file, content, time) => {
   mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
   writeFileSync(path.resolve(file), content);
+  // time(초): 수정 시각을 정해진 값으로 맞춘다. 컨테이너 안 명령이 내용만 바꾸고 수정 시각을 되돌려 놓은 경우를 만든다
+  if (time !== undefined) utimesSync(path.resolve(file), time, time);
 };
 const flush = () => writeFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify(log));
 // 진짜 CLI처럼 도구를 쓰기 직전에 PreToolUse 훅 명령을 셸로 실행하고, 거절(permissionDecision: deny)이면 도구를 쓰지 않는다
@@ -53,9 +55,11 @@ let active = false;
 let lastText = '';
 for (const round of scenario.rounds) {
   for (const call of round.calls ?? []) preTool(call.tool, call.input, round.breakPreTool);
+  // 링크는 CLI의 도구가 아니라 컨테이너 안 명령이 만든다(작업 복사본이 연결되어 있다). 훅을 거치지 않는다
+  for (const link of round.links ?? []) symlinkSync(link.target, path.resolve(link.file));
   for (const item of round.writes ?? []) {
     // skipPreTool: 훅을 돌리지 않는 CLI를 흉내 낸다(훅이 빠져도 게이트가 막는지 보려고)
-    if (round.skipPreTool || preTool('Write', { file_path: path.resolve(item.file), content: item.content }, round.breakPreTool)) write(item.file, item.content);
+    if (round.skipPreTool || preTool('Write', { file_path: path.resolve(item.file), content: item.content }, round.breakPreTool)) write(item.file, item.content, item.time);
   }
   turns += 1;
   lastText = round.text ?? '';
@@ -74,7 +78,7 @@ for (const round of scenario.rounds) {
     emit({ type: 'user', message: { content: [{ type: 'text', text: 'Stop hook feedback:\n' + decision.reason }] } });
     continue;
   }
-  for (const item of round.writesAfterStop ?? []) write(item.file, item.content);
+  for (const item of round.writesAfterStop ?? []) write(item.file, item.content, item.time);
   break;
 }
 flush();
@@ -92,12 +96,14 @@ process.exit(scenario.exitCode ?? 0);
 `;
 
 interface Round {
-  writes?: Array<{ file: string; content: string }>;
+  writes?: Array<{ file: string; content: string; time?: number }>;
   text?: string;
   /** false면 훅을 부르지 않고 다음 회차로 간다(턴 상한·훅 실패로 훅 없이 끝나는 경우를 만든다) */
   stop?: boolean;
   /** 훅이 통과시킨 뒤에 파일을 더 바꾼다 */
-  writesAfterStop?: Array<{ file: string; content: string }>;
+  writesAfterStop?: Array<{ file: string; content: string; time?: number }>;
+  /** 컨테이너 안 명령이 만든 것처럼 링크를 만든다(도구 호출 전 검사를 거치지 않는다) */
+  links?: Array<{ file: string; target: string }>;
   /** 훅 명령이 인증에 실패하게 한다(게이트 서버에 닿지 못한 경우) */
   breakHook?: boolean;
   /** 이 회차에서 멈춰 기다린다(취소 시험) */
@@ -402,9 +408,44 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     await expect(stat(path.join(project.root, '.git/b-studio-hooks/pre-commit'))).rejects.toThrow();
     await expect(stat(path.join(project.root, 'api/.env'))).rejects.toThrow();
     expect(await readFile(path.join(project.root, '.git/config'), 'utf8')).toBe(before);
-    // link-out은 이 테스트가 실행 전에 만들어 둔 링크라 바뀐 파일 목록에 있다. CLI가 만든 것은 Order.java뿐이다
-    expect(result).toMatchObject({ status: 'done', changedFiles: ['api/src/Order.java', 'link-out'] });
+    // link-out은 이 테스트가 실행 전에 만들어 둔 링크다. 링크는 검증 대상으로 받지 않고, 실행 전부터 있던 것은 이번 실행의 탓으로 보지 않는다
+    expect(result).toMatchObject({ status: 'done', changedFiles: ['api/src/Order.java'] });
     expect(events.filter((event) => event.type === 'warning')).toHaveLength(9);
+  });
+
+  it('게이트가 통과시킨 뒤 수정 시각과 크기를 그대로 두고 내용만 바꿔도 다시 검증한다', async () => {
+    const same = FIXED.replace('memo', 'mema');
+    expect(same.length).toBe(FIXED.length);
+    // 두 판의 수정 시각을 초 단위의 같은 값으로 맞춘다(밀리초 아래 자리까지 같아야 수정 시각·크기 지문이 속는다)
+    const time = 1_700_000_000;
+    const { promise, sandbox } = await run(
+      [{ writes: [{ file: 'api/src/Order.java', content: FIXED, time }], text: '끝냈습니다.', writesAfterStop: [{ file: 'api/src/Order.java', content: same, time }] }],
+      [true, false],
+    );
+    const result = await promise;
+    const info = await stat(path.join(project.root, 'api/src/Order.java'));
+    expect([info.mtimeMs, info.size]).toEqual([time * 1000, FIXED.length]);
+
+    // 지문이 수정 시각·크기였다면 "그대로"로 보고 첫 통과를 그대로 썼을 것이다
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+    expect(result.status).toBe('failed');
+  });
+
+  it('실행 중에 프로젝트 안에 링크가 생기면(컨테이너 안 명령) 통과시키지 않는다', async () => {
+    const { promise, log } = await run(
+      [
+        { writes: [{ file: 'api/src/Order.java', content: FIXED }], links: [{ file: 'api/src/Hosts.java', target: '/etc/hosts' }], text: '끝냈습니다.' },
+        { text: '그대로 둡니다.', stop: false },
+      ],
+      [true, true, true],
+    );
+    const result = await promise;
+
+    const { hooks } = await log();
+    expect(hooks[0]!.decision.decision).toBe('block');
+    expect(hooks[0]!.decision.reason).toContain('api/src/Hosts.java');
+    expect(result.status).toBe('failed');
+    expect(result.changedFiles).toEqual(['api/src/Order.java']);
   });
 
   it('도구 호출 전 검사에 닿지 못하면 도구를 쓰지 않는다(닫힌 쪽으로 실패)', async () => {
@@ -445,7 +486,19 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     expect(await deniedReason('Write', { file_path: path.join(project.root, '.git/hooks/pre-commit') })).toContain('생성물이나 비밀 파일');
     expect(await deniedReason('Read', { file_path: path.join(project.root, '.GIT/config') })).toContain('생성물이나 비밀 파일');
     expect(await deniedReason('Write', { file_path: path.join(project.root, 'node_modules/x/index.js') })).toContain('생성물이나 비밀 파일');
-    expect(await deniedReason('Read', { file_path: path.join(project.root, '..', 'sibling.txt') })).toContain('프로젝트 밖');
+    expect(await deniedReason('Read', { file_path: path.join(path.dirname(project.root), 'sibling.txt') })).toContain('프로젝트 밖');
+    // CLI와 다르게 풀릴 수 있는 꼴은 받지 않는다: 상대 경로, 홈 폴더, 정리되지 않은 경로
+    for (const file_path of ['api/src/Order.java', '~/.ssh/id_rsa', '~', `${project.root}/api/../../outside.txt`, `${project.root}/api/./src/Order.java`, `${project.root}//api/src/Order.java`, `${project.root}/api/src/`, ` ${project.root}/api/src/Order.java`]) {
+      expect(await deniedReason('Read', { file_path }), file_path).toContain('정리된 절대 경로만');
+    }
+    expect(await deniedReason('Grep', { pattern: 'x', path: 'api' })).toContain('정리된 절대 경로만');
+    // 찾기 패턴: 중괄호 갈래가 절대 경로·홈 폴더·위쪽을 가리키는 것도 거절한다
+    for (const pattern of ['{/etc/passwd,x}', '{x,~/.ssh/*}', 'a/{b,../../c}/**', '{..,x}/y', '\\\\etc', '**/..']) {
+      expect(await deniedReason('Glob', { pattern }), pattern).toContain('상대 패턴');
+    }
+    for (const pattern of ['**/*.{java,kt}', 'api/src/**', '*.md', 'a..b/**']) {
+      expect(await deniedReason('Glob', { pattern }), pattern).toBeUndefined();
+    }
     expect(await deniedReason('Write', { file_path: project.root })).toContain('루트 자체');
     expect(await deniedReason('Edit', {})).toContain('file_path가 없습니다');
     expect(await deniedReason('Read', { file_path: 42 })).toContain('읽지 못했습니다');
