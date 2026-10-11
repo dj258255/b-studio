@@ -35,6 +35,9 @@ const request = (pathname: string, init: { method?: string; headers?: Record<str
   cookie: init.cookie,
 });
 
+/** 이 컴퓨터의 주소로 온 요청 */
+const LOCAL = { host: '127.0.0.1:3000' };
+
 describe('authConfig', () => {
   it('설정하지 않으면 인증 없이 동작하고, 모르는 값과 약한 설정은 거부한다', () => {
     expect(authConfig({}).mode).toBe('none');
@@ -173,14 +176,55 @@ describe('decideRequest', () => {
     expect(decideRequest(request('/api/projects', { cookie }), TOKEN_ENV, NOW, broken)).toMatchObject({ kind: 'reject', status: 500, message: expect.stringContaining('revocations.json') });
     // 로그인 경로와 인증을 끈 스튜디오는 기록을 읽지 않는다
     expect(decideRequest(request('/login'), TOKEN_ENV, NOW, broken)).toEqual({ kind: 'pass' });
-    expect(decideRequest(request('/api/projects'), {}, NOW, broken)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    expect(decideRequest(request('/api/projects', { headers: LOCAL }), {}, NOW, broken)).toEqual({ kind: 'allow', user: LOCAL_USER });
   });
 
   it('다른 출처에서 보낸 상태 변경 요청은 인증 모드와 상관없이 막는다', () => {
     const crossSite = { method: 'POST', headers: { origin: 'https://evil.example' } };
     expect(decideRequest(request('/api/sessions', crossSite), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
     expect(decideRequest(request('/api/auth/login', crossSite), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 403 });
-    expect(decideRequest(request('/api/sessions', { method: 'POST', headers: { origin: 'http://studio.internal:3000' } }), {}, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    expect(decideRequest(request('/api/sessions', { method: 'POST', headers: { ...LOCAL, origin: 'http://127.0.0.1:3000' } }), {}, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    // 이 컴퓨터의 주소로 왔어도 다른 사이트의 화면이 보낸 요청은 막는다
+    expect(decideRequest(request('/api/sessions', { method: 'POST', headers: { ...LOCAL, origin: 'https://evil.example' } }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+  });
+
+  it('인증이 없는 모드는 이 컴퓨터의 주소로 온 요청만 받는다. 다른 사이트가 자기 이름을 이 컴퓨터로 풀리게 해도(DNS 리바인딩) 읽지도 쓰지도 못한다 (#675)', () => {
+    // 리바인딩된 요청: 브라우저가 그 사이트의 이름을 Host와 Origin 양쪽에 넣는다. 같은 출처 검사는 둘이 같아 지나간다
+    const rebound = { host: 'evil.example:3000', origin: 'http://evil.example:3000' };
+    expect(decideRequest(request('/api/sessions', { headers: rebound }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403, message: expect.stringContaining('B_STUDIO_ALLOWED_HOSTS') });
+    expect(decideRequest(request('/api/sessions/abc/messages', { method: 'POST', headers: rebound }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+    // 화면도 내주지 않는다(세션 내용이 화면에 실린다)
+    expect(decideRequest(request('/sessions/abc', { headers: rebound }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+
+    for (const host of ['127.0.0.1:3000', 'localhost:3000', 'LOCALHOST', '[::1]:3000', '127.0.0.1']) {
+      expect(decideRequest(request('/api/sessions', { headers: { host } }), {}, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    }
+    // 루프백처럼 보이는 다른 이름과, 브라우저의 스크립트가 넣을 수 있는 헤더는 믿지 않는다
+    for (const host of ['127.0.0.1.evil.example', 'localhost.evil.example:3000', 'evil-localhost', '127.0.0.2', '0.0.0.0:3000', '']) {
+      expect(decideRequest(request('/api/sessions', { headers: { host } }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+    }
+    expect(decideRequest(request('/api/sessions', { headers: { ...rebound, 'x-forwarded-host': '127.0.0.1:3000' } }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+
+    // 상태 확인 경로는 사용자 데이터가 없어 그대로 통과한다(컨테이너의 상태 확인이 IP로 부른다)
+    expect(decideRequest(request('/api/health', { headers: { host: '10.0.0.7:3000' } }), {}, NOW)).toEqual({ kind: 'pass' });
+  });
+
+  it('인증 없이 다른 이름으로 띄운 구성은 그 이름을 적어야 받는다. 적은 이름만 받는다', () => {
+    const env = { B_STUDIO_ALLOWED_HOSTS: ' Studio.Internal , build-box ' };
+    expect(decideRequest(request('/api/sessions'), env, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    expect(decideRequest(request('/api/sessions', { headers: { host: 'build-box:8080' } }), env, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    expect(decideRequest(request('/api/sessions', { headers: LOCAL }), env, NOW)).toEqual({ kind: 'allow', user: LOCAL_USER });
+    expect(decideRequest(request('/api/sessions', { headers: { host: 'evil.example:3000' } }), env, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+    expect(decideRequest(request('/api/sessions', { headers: { host: 'studio.internal.evil.example' } }), env, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+    // 적어 둔 이름으로 와도 다른 사이트의 화면이 보낸 쓰기 요청은 막는다
+    expect(decideRequest(request('/api/sessions', { method: 'POST', headers: { origin: 'https://evil.example' } }), env, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+    // 빈 값과 쉼표만 있는 값은 아무 이름도 허용하지 않는다
+    expect(decideRequest(request('/api/sessions'), { B_STUDIO_ALLOWED_HOSTS: ' , ' }, NOW)).toMatchObject({ kind: 'reject', status: 403 });
+  });
+
+  it('인증을 켠 모드는 Host로 거르지 않는다(누구인지는 쿠키와 프록시가 가린다)', () => {
+    expect(decideRequest(request('/api/projects', { headers: { host: 'studio.corp.example' }, cookie: signSession('alice', SECRET, NOW, 1) }), TOKEN_ENV, NOW)).toEqual({ kind: 'allow', user: 'alice' });
+    expect(decideRequest(request('/', { headers: { host: 'studio.corp.example', 'x-forwarded-email': 'alice@corp.example', [PROXY_SECRET_HEADER]: PROXY_SECRET } }), PROXY_ENV, NOW)).toEqual({ kind: 'allow', user: 'alice@corp.example' });
   });
 
   it('게시판 MCP 경로는 로그인 쿠키 없이도 통과시킨다 — 그 라우트 안에서 토큰으로 따로 인증한다(외부 에이전트 연결)', () => {
