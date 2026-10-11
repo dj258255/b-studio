@@ -3,7 +3,16 @@ import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rm
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
-import { formatVerifyTrailer, isDocCheckpointPath, parseVerifyTrailerValues, parseWorkflowTrailerValues, WORKFLOW_TRAILER, WORKFLOW_VERIFY_TRAILER } from './workflow';
+import {
+  formatVerifyTrailer,
+  isDocCheckpointPath,
+  parseIncompleteTrailerValues,
+  parseVerifyTrailerValues,
+  parseWorkflowTrailerValues,
+  WORKFLOW_INCOMPLETE_TRAILER,
+  WORKFLOW_TRAILER,
+  WORKFLOW_VERIFY_TRAILER,
+} from './workflow';
 
 const execFileAsync = promisify(execFile);
 
@@ -19,6 +28,8 @@ export interface Checkpoint {
   passedStages?: WorkflowStage[];
   /** 가볍게 확인(light) 실행이면 'light', 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'. 전체 검증이면 없다 */
   verify?: 'light' | 'docs';
+  /** 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트면 'max_turns'(커밋 본문의 Workflow-Incomplete 트레일러). 요청이 끝나지 않았을 수 있다 */
+  incomplete?: 'max_turns';
   /**
    * 문서 체크포인트(verify: 'docs')가 바꿨는데 files에는 드러나지 않는 경로 수. files는 프로젝트 폴더 기준이라 폴더 밖 변경이
    * 빠지고, 이름 바꾸기는 새 이름만 남아 사라진 원래 파일이 안 보인다. "이 체크포인트가 바꾼 것은 files가 전부다"라고 말하려면
@@ -73,6 +84,8 @@ export interface SessionCommit {
   /** 커밋 본문의 Workflow-Verify 트레일러. 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'.
    * PR 본문(buildPullRequest)이 이 값으로 "필수 단계 기록이 없다"가 아니라 "문서 체크포인트"로 보여준다 */
   verify?: 'light' | 'docs';
+  /** 커밋 본문의 Workflow-Incomplete 트레일러. 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트면 'max_turns' */
+  incomplete?: 'max_turns';
 }
 
 export interface PushResult {
@@ -1094,7 +1107,7 @@ export class CheckpointStore {
     const records = (
       await this.#git([
         'log', '--first-parent', '--reverse',
-        `--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x1e`,
+        `--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_INCOMPLETE_TRAILER},valueonly,separator=%x1f)%x1e`,
         `${start}..HEAD`,
       ])
     )
@@ -1103,11 +1116,12 @@ export class CheckpointStore {
       .filter(Boolean);
     return Promise.all(
       records.map(async (record) => {
-        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = '', verifyTrailers = ''] = record.split('\0');
+        const [sha = '', shortSha = '', subject = '', body = '', authorEmail = '', trailers = '', verifyTrailers = '', incompleteTrailers = ''] = record.split('\0');
         // 통과 기록·문서 체크포인트 표시는 스튜디오가 만든 커밋에서만 읽는다(#checkpoint와 같은 경계)
         const ours = authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase();
         const passedStages = ours ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
         const verify = ours ? parseVerifyTrailerValues(verifyTrailers.split('\x1f')) : undefined;
+        const incomplete = ours ? parseIncompleteTrailerValues(incompleteTrailers.split('\x1f')) : undefined;
         return {
           sha,
           shortSha,
@@ -1117,6 +1131,7 @@ export class CheckpointStore {
           stat: await this.#commitStat(sha),
           ...(passedStages ? { passedStages } : {}),
           ...(verify ? { verify } : {}),
+          ...(incomplete ? { incomplete } : {}),
         };
       }),
     );
@@ -1354,10 +1369,10 @@ export class CheckpointStore {
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
     // 트레일러는 git이 마지막 문단에서만 읽는다. 본문(에이전트 요약)에 같은 모양의 줄이 있어도 통과 기록이 되지 않는다
-    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = '', verifyTrailers = ''] = (
+    const [sha = '', shortSha = '', subject = '', createdAt = '', authorEmail = '', trailers = '', verifyTrailers = '', incompleteTrailers = ''] = (
       await this.#git([
         'show', '-s',
-        `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)`,
+        `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_INCOMPLETE_TRAILER},valueonly,separator=%x1f)`,
         ref,
       ])
     )
@@ -1367,6 +1382,7 @@ export class CheckpointStore {
     const ours = authorEmail.trim().toLowerCase() === this.#author.email.trim().toLowerCase();
     const passedStages = ours ? parseWorkflowTrailerValues(trailers.split('\x1f')) : undefined;
     const verify = ours ? parseVerifyTrailerValues(verifyTrailers.split('\x1f')) : undefined;
+    const incomplete = ours ? parseIncompleteTrailerValues(incompleteTrailers.split('\x1f')) : undefined;
 
     if (sha === (await this.#startSha())) {
       const base = await this.#getMeta('base');
@@ -1383,6 +1399,7 @@ export class CheckpointStore {
       files,
       ...(passedStages ? { passedStages } : {}),
       ...(verify ? { verify } : {}),
+      ...(incomplete ? { incomplete } : {}),
       ...(outsideFiles > 0 ? { outsideFiles } : {}),
     };
   }

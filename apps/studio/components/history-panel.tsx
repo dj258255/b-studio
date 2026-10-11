@@ -82,6 +82,10 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                     {checkpoint.verify === "docs" && (
                       <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">문서</span>
                     )}
+                    {/* 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트. 요청이 끝나지 않았을 수 있다(ADR-131 덧붙임) */}
+                    {checkpoint.incomplete === "max_turns" && (
+                      <span className="ml-1.5 rounded-full border border-wait/40 bg-wait/10 px-1.5 py-px align-middle text-[10px] font-normal text-wait">턴 상한</span>
+                    )}
                     {/* 가볍게·문서 체크포인트가 아닌데 통과한 검증 단계 기록이 하나도 없다(Workflow-Passed: none).
                         정상 경로로는 생기지 않아야 할 상태라(ADR-131 사고) 눈에 띄게 알린다 */}
                     {checkpoint.verify === undefined && checkpoint.passedStages?.length === 0 && (
@@ -110,6 +114,9 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                 {active.verify === "docs" && (
                   <span className="ml-1.5 rounded-full border border-line px-1.5 py-px align-middle text-[10px] font-normal text-muted">문서</span>
                 )}
+                {active.incomplete === "max_turns" && (
+                  <span className="ml-1.5 rounded-full border border-wait/40 bg-wait/10 px-1.5 py-px align-middle text-[10px] font-normal text-wait">턴 상한</span>
+                )}
                 {active.verify === undefined && active.passedStages?.length === 0 && (
                   <span className="ml-1.5 rounded-full border border-fail/40 bg-fail/10 px-1.5 py-px align-middle text-[10px] font-normal text-fail">
                     검증되지 않음
@@ -121,6 +128,7 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                 {active.createdAt && `, ${new Date(active.createdAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`}
                 {active.verify === "light" && ", 가볍게 확인(배포 조건 미충족)"}
                 {active.verify === "docs" && ", 문서만 바꿔 검증 게이트 없이 남긴 체크포인트"}
+                {active.incomplete === "max_turns" && ", 턴 상한에 닿아 멈춘 실행이 남긴 체크포인트(게이트는 통과, 요청이 끝나지 않았을 수 있음)"}
                 {active.verify === undefined && active.passedStages?.length === 0 && ", 검증 게이트를 통과한 기록이 없습니다(배포 조건 미충족)"}
               </p>
             </div>

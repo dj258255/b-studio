@@ -170,6 +170,12 @@ export interface AgentResult {
    * 뜻이다(ADR-142). 로컬 Claude Code 러너만 채운다(이어받기가 가능한 세션 id가 있어야 재시도할 수 있다).
    */
   failureReason?: 'max_turns' | 'network';
+  /**
+   * status가 'done'일 때만 뜻이 있다. 'max_turns'면 턴 상한에 닿았지만 그때의 변경이 게이트를 통과해 체크포인트로 남긴
+   * 실행이다(ADR-131). 턴 상한은 모델이 다음 도구를 부르려는 순간에 걸리므로, 게이트가 통과했어도 요청은 끝나지 않았을 수
+   * 있다 — 세션이 체크포인트에 표시를 남기고(Workflow-Incomplete), 올리기 전 미리보기가 그것을 알린다
+   */
+  incomplete?: 'max_turns';
 }
 
 export type AgentEvent =
@@ -448,6 +454,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       ...(gate?.lastOutcome ? { gateOutcome: gate.lastOutcome } : {}),
       passedStages: gate ? [...gate.passedStages] : undefined,
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
+      ...(status === 'done' && gate?.passedAtTurnLimit ? { incomplete: 'max_turns' as const } : {}),
       ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns,

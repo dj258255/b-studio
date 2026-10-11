@@ -11,6 +11,7 @@ import {
   buildChecklistAddendum,
   buildChecklistTestEvidence,
   buildExportChecks,
+  turnLimitedCommits,
   buildMatrixTestRunRows,
   buildRequirementTestRunEvidence,
   gateReportNotFoundEntry,
@@ -100,6 +101,65 @@ describe('annotateWithIssue · annotateAllMustHavesPrefill(ADR-092)', () => {
     expect(annotated).toContain('- [R7] 로그인 API (#12)');
     expect(annotated).toContain('- [R8] 목록 API');
     expect(annotated).not.toContain('R8] 목록 API (#');
+  });
+});
+
+describe('턴 상한에서 남긴 체크포인트를 올리기 전에 알린다(ADR-131 덧붙임)', () => {
+  const commit = (shortSha: string, extra: { incomplete?: 'max_turns'; verify?: 'light' | 'docs'; passedStages?: ('run' | 'test')[] } = { passedStages: ['run', 'test'] }) => ({
+    shortSha,
+    subject: `요청 ${shortSha}`,
+    ...extra,
+  });
+  const base = { issues: [], missing: [], uncheckpointed: 0, running: false };
+
+  it('턴 상한에서 남긴 체크포인트가 없으면 줄을 만들지 않는다', () => {
+    const turnLimited = turnLimitedCommits([commit('aaaaaaa'), commit('bbbbbbb')]);
+    expect(turnLimited).toEqual({ commits: [], finishedAfter: 0 });
+    expect(buildExportChecks({ ...base, turnLimited }).some((check) => check.id === 'turn_limit')).toBe(false);
+    expect(buildExportChecks(base).some((check) => check.id === 'turn_limit')).toBe(false);
+  });
+
+  it('가장 최근의 것이 턴 상한에서 남긴 체크포인트면 확인이 필요하다고 알린다', () => {
+    const turnLimited = turnLimitedCommits([commit('aaaaaaa'), commit('516fe67', { incomplete: 'max_turns', passedStages: ['run', 'test'] })]);
+    expect(turnLimited).toEqual({ commits: [{ shortSha: '516fe67', subject: '요청 516fe67' }], finishedAfter: 0 });
+    const check = buildExportChecks({ ...base, turnLimited }).find((entry) => entry.id === 'turn_limit')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('516fe67');
+    expect(check.detail).toContain('끝까지 간 요청이 없습니다');
+  });
+
+  it('그 뒤에 끝까지 간 요청이 있으면 확인하지 못함으로 낮추고 건수를 적는다', () => {
+    const turnLimited = turnLimitedCommits([
+      commit('516fe67', { incomplete: 'max_turns', passedStages: ['run', 'test'] }),
+      commit('ccccccc'),
+      commit('ddddddd'),
+    ]);
+    expect(turnLimited.finishedAfter).toBe(2);
+    const check = buildExportChecks({ ...base, turnLimited }).find((entry) => entry.id === 'turn_limit')!;
+    expect(check.ok).toBe('unknown');
+    expect(check.detail).toContain('끝까지 간 요청이 2건');
+    expect(check.detail).toContain('확인하지 못합니다');
+  });
+
+  it('문서 체크포인트와 게이트 기록이 없는 커밋은 끝까지 간 요청으로 세지 않는다', () => {
+    const turnLimited = turnLimitedCommits([
+      commit('516fe67', { incomplete: 'max_turns', passedStages: ['run', 'test'] }),
+      commit('d0c5aaa', { verify: 'docs', passedStages: [] }),
+      commit('1oca1aa', {}),
+    ]);
+    expect(turnLimited.finishedAfter).toBe(0);
+    expect(buildExportChecks({ ...base, turnLimited }).find((entry) => entry.id === 'turn_limit')!.ok).toBe(false);
+  });
+
+  it('여러 번 닿았으면 모두 적고, 마지막 것 뒤만 센다', () => {
+    const turnLimited = turnLimitedCommits([
+      commit('1111111', { incomplete: 'max_turns', passedStages: ['run'] }),
+      commit('2222222'),
+      commit('3333333', { incomplete: 'max_turns', passedStages: ['run'] }),
+    ]);
+    expect(turnLimited.commits.map((entry) => entry.shortSha)).toEqual(['1111111', '3333333']);
+    expect(turnLimited.finishedAfter).toBe(0);
+    expect(buildExportChecks({ ...base, turnLimited }).find((entry) => entry.id === 'turn_limit')!.detail).toContain('1111111, 3333333');
   });
 });
 

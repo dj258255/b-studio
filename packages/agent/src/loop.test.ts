@@ -870,8 +870,22 @@ describe('runAgent 턴 상한에 걸리면 되돌리기 전에 게이트를 한 
     expect(result.summary).toContain('최대 턴 수(1)를 넘었습니다');
     expect(result.summary).toContain('검증 게이트를 통과해');
     expect(result.failureReason).toBeUndefined();
+    // 게이트는 통과했지만 모델이 다음 도구를 부르려던 중에 끊겼다. 하다 만 것으로 표시한다(ADR-131 덧붙임)
+    expect(result.incomplete).toBe('max_turns');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
     expect(sandbox.restarts).toEqual(['api']);
+  });
+
+  it('턴 상한 안에서 스스로 끝낸 실행에는 하다 만 것 표시가 없다', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } }] },
+      { text: '고쳤습니다.' },
+    ]);
+
+    const result = await runAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), client, fetcher: async () => contract, maxTurns: 2 });
+
+    expect(result.status).toBe('done');
+    expect(result.incomplete).toBeUndefined();
   });
 
   it('턴 상한에 걸렸는데 지금까지의 변경이 게이트를 통과하지 못하면 실패로 끝내 되돌리기 경로를 타게 한다', async () => {
@@ -885,6 +899,8 @@ describe('runAgent 턴 상한에 걸리면 되돌리기 전에 게이트를 한 
 
     expect(result.status).toBe('failed');
     expect(result.failureReason).toBe('max_turns');
+    // 실패한 실행은 되돌려진다. 체크포인트가 남지 않으니 표시할 것도 없다
+    expect(result.incomplete).toBeUndefined();
     expect(result.summary).toBe('최대 턴 수(1)를 넘었습니다');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
   });

@@ -1072,11 +1072,18 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
       );
 
     case "outcome": {
-      const tone = item.status === "done" ? "text-pass" : item.status === "awaiting_input" ? "text-wait" : item.status === "cancelled" ? "text-muted" : "text-fail";
+      const turnLimited = item.status === "done" && item.incomplete === "max_turns";
+      const tone = turnLimited ? "text-wait" : item.status === "done" ? "text-pass" : item.status === "awaiting_input" ? "text-wait" : item.status === "cancelled" ? "text-muted" : "text-fail";
       return (
         <div className="text-sm">
           {/* 바꾼 파일이 없으면 "답만 했습니다"로 알린다(입력이 하나로 합쳐진 뒤의 기본 경로) */}
           <p className={tone}>{outcomeText(item, changedRuns.has(item.runId))}</p>
+          {turnLimited && (
+            <p className="mt-0.5 text-xs text-muted">
+              {changedRuns.has(item.runId) ? "그때까지의 변경이 검증 게이트를 통과해 체크포인트로 남겼습니다. " : ""}
+              요청이 끝나지 않았을 수 있으니 {changedRuns.has(item.runId) ? "변경 내용을 확인하거나 " : ""}이어서 마무리해 달라고 요청하세요
+            </p>
+          )}
           {item.verify === "light" && <p className="mt-0.5 text-xs text-muted">가볍게 확인: 테스트·화면 확인·리뷰를 건너뛰었습니다</p>}
           {hasTokens(item.usage) && <p className="mt-0.5 text-xs text-muted">{describeTokens(item.usage)}</p>}
         </div>

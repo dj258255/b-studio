@@ -267,6 +267,7 @@ describe('runCommandCodeAgent', () => {
 
     expect(result.status).toBe('done');
     expect(result.summary).toContain('검증 게이트를 통과해');
+    expect(result.incomplete).toBe('max_turns');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
     expect(result.failureReason).toBeUndefined();
   });

@@ -1410,7 +1410,9 @@ export function buildPullRequest({
   const verification = commits.map((commit, index) => {
     if (isDocsExempt(commit)) return `- \`${commit.shortSha}\` ${requests[index]} — 문서 체크포인트(게이트 대상 아님)`;
     const passed = commit.passedStages ?? [];
-    return `- \`${commit.shortSha}\` ${requests[index]} — 통과: ${passed.length > 0 ? passed.join(', ') : '기록 없음'}`;
+    // 턴 상한에서 게이트만 통과해 남긴 체크포인트는 통과 단계와 함께 그 사실을 적는다(ADR-131 덧붙임)
+    const incomplete = commit.incomplete === 'max_turns' ? ' · 턴 상한에서 멈춘 실행(요청이 끝나지 않았을 수 있음)' : '';
+    return `- \`${commit.shortSha}\` ${requests[index]} — 통과: ${passed.length > 0 ? passed.join(', ') : '기록 없음'}${incomplete}`;
   });
   const docsNotes = commits
     .map((commit, index) => (isDocsExempt(commit) ? `- \`${commit.shortSha}\` ${requests[index]} — 문서만 바뀜(게이트 대상 아님)` : undefined))

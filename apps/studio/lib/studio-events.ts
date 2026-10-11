@@ -369,6 +369,8 @@ export type StudioEvent =
       durationMs?: number;
       /** 가볍게 확인(light) 실행이면 'light'. 테스트·화면 확인·동시 요청·리뷰를 건너뛰었다 */
       verify?: 'light';
+      /** 턴 상한에 닿았지만 게이트를 통과해 체크포인트로 남긴 실행이면 'max_turns'. 요청이 끝나지 않았을 수 있다(ADR-131 덧붙임) */
+      incomplete?: 'max_turns';
       /** 가볍게 확인이 건너뛴 검증 단계(프로젝트 토큰 보고서가 이 수를 센다). light가 아니면 없다 */
       skippedStages?: string[];
       sessionTokens?: AgentUsage;
@@ -550,7 +552,7 @@ export interface ExportPreview {
   /** PR에 연결할 이슈 번호들. 통합 세션이면 계획의 하위 이슈가 기본값으로 온다 */
   issues: number[];
   checks: Array<{
-    id: 'base_on_remote' | 'issue_linked' | 'issue_open' | 'stages_passed' | 'uncheckpointed_changes' | 'running' | 'tracking_issue_refresh';
+    id: 'base_on_remote' | 'issue_linked' | 'issue_open' | 'stages_passed' | 'turn_limit' | 'uncheckpointed_changes' | 'running' | 'tracking_issue_refresh';
     /** unknown: 확인하지 못했지만 올리기를 막지는 않는 항목 (예: 원격 이슈 조회 실패) */
     ok: boolean | 'unknown';
     detail: string;

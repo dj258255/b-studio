@@ -463,6 +463,24 @@ describe('buildPullRequest', () => {
     expect(body).toContain('## 돌리지 않은 검증\n\n모든 커밋이 필수 단계를 통과했습니다');
   });
 
+  it('턴 상한에서 남긴 체크포인트는 통과 단계와 함께 그 사실을 적는다(ADR-131 덧붙임)', () => {
+    const { body, missing } = buildPullRequest({
+      projectName: 'orders',
+      base: 'main',
+      branch: 'b-studio/orders-s1',
+      requiredStages: ['run', 'contract_check'],
+      commits: [
+        { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: '요청: 메모 추가', body: '', files: ['api/Order.java'], passedStages: ['run', 'contract_check'], incomplete: 'max_turns' },
+        { sha: 'b'.repeat(40), shortSha: 'bbbbbbb', subject: '요청: 이어서 마무리', body: '', files: ['api/Order.java'], passedStages: ['run', 'contract_check'] },
+      ],
+    });
+
+    // 게이트는 통과했으므로 필수 단계 누락은 아니다
+    expect(missing).toEqual([]);
+    expect(body).toContain('- `aaaaaaa` 메모 추가 — 통과: run, contract_check · 턴 상한에서 멈춘 실행(요청이 끝나지 않았을 수 있음)');
+    expect(body).toContain('- `bbbbbbb` 이어서 마무리 — 통과: run, contract_check\n');
+  });
+
   it('문서 체크포인트(Workflow-Verify: docs)는 필수 단계 누락으로 세지 않고 "문서 체크포인트"로 보여준다', () => {
     const { body, missing } = buildPullRequest({
       projectName: 'orders',

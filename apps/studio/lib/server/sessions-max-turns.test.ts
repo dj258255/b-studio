@@ -170,8 +170,50 @@ describe('턴 상한을 studio.yaml과 요청 옵션으로 바꿀 수 있다(ADR
     expect(finished.status).toBe('done');
     expect(finished.summary).not.toContain('최대 턴 수');
     expect(finished.summary).toBe('못 받을 턴입니다.');
+    // 스스로 끝낸 실행에는 하다 만 것 표시가 없다
+    expect(finished.incomplete).toBeUndefined();
+    expect(getSnapshot(id)!.checkpoints[0]!.incomplete).toBeUndefined();
 
     unsubscribe();
     await stopSession(id).catch(() => {});
   }, 20_000);
+
+  it('턴 상한에서 남긴 체크포인트는 하다 만 것으로 표시되고, 이어서 끝낸 요청의 체크포인트에는 표시가 없다(ADR-131 덧붙임)', async () => {
+    await setupProject(1);
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, (event) => events.push(event));
+    const finishedRuns = () => events.filter((event): event is Extract<StudioEvent, { type: 'run_finished' }> => event.type === 'run_finished');
+
+    sendMessage(id, '메모 필드 추가', { allowBreaking: false, scriptedTurns: oneToolCallTurn });
+    const limited = await waitFor(() => finishedRuns()[0]);
+    expect(limited.status).toBe('done');
+    expect(limited.incomplete).toBe('max_turns');
+    const saved = events.find((event): event is Extract<StudioEvent, { type: 'checkpoint' }> => event.type === 'checkpoint')!;
+    expect(saved.checkpoint.incomplete).toBe('max_turns');
+    // 게이트는 통과했다. 통과 단계 기록은 그대로 남는다
+    expect(saved.checkpoint.passedStages).toContain('run');
+    expect(getSnapshot(id)!.checkpoints[0]).toMatchObject({ sha: saved.checkpoint.sha, incomplete: 'max_turns' });
+
+    // 이어서 마무리: 상한을 넉넉히 주면 스스로 끝낸다
+    sendMessage(id, '이어서 마무리', {
+      allowBreaking: false,
+      maxTurns: 5,
+      scriptedTurns: [
+        { toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'String memo;', new_text: 'String memo; String note;' } }] },
+        { text: '마무리했습니다.' },
+      ],
+    });
+    const finished = await waitFor(() => finishedRuns()[1]);
+    expect(finished.status).toBe('done');
+    expect(finished.incomplete).toBeUndefined();
+    const [latest, previous] = getSnapshot(id)!.checkpoints;
+    expect(latest!.incomplete).toBeUndefined();
+    expect(previous!.incomplete).toBe('max_turns');
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
 });

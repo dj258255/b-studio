@@ -474,6 +474,16 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     const result = await promise;
     expect(result.status).toBe('done');
     expect(result.summary).toContain('최대 턴 수');
+    expect(result.incomplete).toBe('max_turns');
+  });
+
+  it('멈춤 훅이 이미 통과시킨 상태에서 턴 상한으로 끝나도 하다 만 것으로 표시한다', async () => {
+    // 훅의 검증이 통과했고 그 뒤로 바뀐 것이 없으면 마지막 검증을 다시 돌리지 않는다. 그 길에서도 표시는 남아야 한다
+    const { promise, sandbox } = await run([{ writes: [{ file: 'api/src/Order.java', content: FIXED }], text: '하던 중' }], [true], { scenario: { resultSubtype: 'error_max_turns' } });
+    const result = await promise;
+    expect(result.status).toBe('done');
+    expect(result.incomplete).toBe('max_turns');
+    expect(sandbox.restarts).toEqual(['api']);
   });
 
   it('취소하면 CLI를 끝내고 취소 사유를 던진다', async () => {
