@@ -421,6 +421,8 @@ export { compareScreenshot, VisualCompareError, type CompareResult } from './vis
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
 export { AGENT_LANGUAGE_INSTRUCTION, AGENT_LANGUAGE_REMINDER, buildAskRequest, buildSystemPrompt, withLanguageReminder } from './prompts';
 export { readProjectFileSync, readRegularFileSync, Workspace, WorkspaceError, type RegularFileRead } from './workspace';
+// CLI의 내장 파일 도구를 프로젝트 안으로 가두는 경로 검사. 벤치의 기준선 팔(P0)도 같은 규칙을 쓴다(#671)
+export { guardBuiltinTool } from './claude-gateway-runner';
 export {
   aggregateModelStats,
   classifyComplexity,

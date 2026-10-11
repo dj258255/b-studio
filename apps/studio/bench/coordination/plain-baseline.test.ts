@@ -1,9 +1,10 @@
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildPlainRequest, PLAIN_BASELINE_TOOLS, runPlainBaseline, type PlainBaselineQuery, type PlainBaselineSdk } from './plain-baseline';
+import { Workspace } from '@b-studio/agent';
+import { buildPlainRequest, confineToProject, PLAIN_BASELINE_TOOLS, runPlainBaseline, type PlainBaselineQuery, type PlainBaselineSdk } from './plain-baseline';
 import { BENCH_TASKS } from './tasks';
 
 const task = BENCH_TASKS[0]!;
@@ -88,8 +89,9 @@ describe('runPlainBaseline', () => {
       cwd: projectDir,
       systemPrompt: { type: 'preset', preset: 'claude_code' },
       tools: [...PLAIN_BASELINE_TOOLS],
-      allowedTools: [...PLAIN_BASELINE_TOOLS],
-      permissionMode: 'dontAsk',
+      // 내장 도구를 허용 목록에 넣지 않는다. 넣으면 경로와 무관하게 허용된다(#671)
+      allowedTools: [],
+      permissionMode: 'acceptEdits',
       settingSources: ['project'],
       mcpServers: {},
       strictMcpConfig: true,
@@ -98,11 +100,44 @@ describe('runPlainBaseline', () => {
       maxTurns: 60,
     });
     expect(state.options?.tools).not.toContain('Bash');
-    expect(state.options?.allowedTools).not.toContain('Bash');
     for (const forbidden of ['Bash', 'WebFetch', 'WebSearch', 'Task']) {
-      expect(state.options?.allowedTools, forbidden).not.toContain(forbidden);
+      expect(state.options?.tools, forbidden).not.toContain(forbidden);
     }
+    // 도구를 쓰기 직전의 경로 검사가 걸려 있다. 모든 도구에 건다(matcher 없음)
+    expect(state.options?.hooks?.PreToolUse).toHaveLength(1);
+    expect(state.options?.hooks?.PreToolUse?.[0]?.matcher).toBeUndefined();
+    expect(state.options?.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
     expect(state.closed).toBe(true);
+  });
+
+  it('파일 도구를 프로젝트 복사본 안으로 가둔다: 밖의 경로, 링크를 거치는 경로, 숨긴 경로를 거절한다 (#671)', async () => {
+    const outside = path.join(projectDir, '..', `${path.basename(projectDir)}-outside`);
+    await mkdir(outside, { recursive: true });
+    await writeFile(path.join(outside, 'secret.txt'), 'x');
+    await symlink(outside, path.join(projectDir, 'link-out'));
+    const confine = confineToProject(new Workspace(projectDir));
+    const decide = async (tool_name: string, tool_input: unknown) => {
+      const output = (await confine({ hook_event_name: 'PreToolUse', tool_name, tool_input, tool_use_id: 't1' } as never, 't1', { signal: new AbortController().signal })) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+      return output.hookSpecificOutput?.permissionDecision ?? 'pass';
+    };
+    // 복사본 안의 평범한 파일은 결정을 내리지 않는다(허용은 CLI의 권한이 한다)
+    expect(await decide('Read', { file_path: path.join(projectDir, 'api/src/Order.java') })).toBe('pass');
+    expect(await decide('Write', { file_path: path.join(projectDir, 'api/src/New.java'), content: 'x' })).toBe('pass');
+    expect(await decide('Grep', { pattern: 'Order', path: projectDir })).toBe('pass');
+    // 실측에서 뚫렸던 것들
+    expect(await decide('Read', { file_path: path.join(outside, 'secret.txt') })).toBe('deny');
+    expect(await decide('Read', { file_path: '/etc/hosts' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(outside, 'escape.txt'), content: 'x' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(projectDir, 'link-out/via-link.txt'), content: 'x' })).toBe('deny');
+    expect(await decide('Grep', { pattern: 'x', path: outside })).toBe('deny');
+    expect(await decide('Glob', { pattern: '../**/*.txt' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(projectDir, '.git/config'), content: 'x' })).toBe('deny');
+    // 주지 않은 도구와 읽을 수 없는 입력도 거절한다
+    expect(await decide('Bash', { command: 'cat /etc/hosts' })).toBe('deny');
+    expect(await decide('Read', {})).toBe('deny');
+    expect(await decide('Read', { file_path: 'relative/path.txt' })).toBe('deny');
+    // 다른 종류의 훅 입력에는 결정을 내리지 않는다
+    expect(await confine({ hook_event_name: 'Stop' } as never, undefined, { signal: new AbortController().signal })).toEqual({});
   });
 
   it('복사본에 훅·MCP 설정 파일이 있으면 모델을 부르기 전에 거부한다', async () => {
