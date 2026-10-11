@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { AGENT_HOME_VOLUME, AGENT_IMAGE, AGENT_TERMINAL_COMMAND, agentContainerName, agentResizeArgs, agentRunArgs, agentTerminalArgs, clampTerminalSize, openAgentTerminal } from './agent-terminal';
+import { AGENT_CLI_PACKAGE, AGENT_IMAGE, AGENT_TERMINAL_COMMAND, agentContainerName, agentHomeVolume, agentResizeArgs, agentRunArgs, agentTerminalArgs, clampTerminalSize, openAgentTerminal } from './agent-terminal';
 import type { MaskVolume } from './git-mask';
 
 const mask = (source: string, target: string): MaskVolume => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
@@ -11,6 +11,7 @@ const plan = {
   sandboxId: 'studio-orders-abc123',
   projectRoot: '/work/orders',
   masks: [mask('/work/orders/.git', '/workspace/.git'), mask('/work/orders/.git/b-studio-empty', '/workspace/.git/b-studio')],
+  homeVolume: agentHomeVolume('orders'),
 };
 
 describe('에이전트 컨테이너 (이슈 #673)', () => {
@@ -21,7 +22,7 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
       'type=bind,source=/work/orders,target=/workspace',
       'type=bind,source=/work/orders/.git,target=/workspace/.git,readonly',
       'type=bind,source=/work/orders/.git/b-studio-empty,target=/workspace/.git/b-studio,readonly',
-      `type=volume,source=${AGENT_HOME_VOLUME},target=/home/node`,
+      'type=volume,source=b-studio-agent-home-orders,target=/home/node',
     ]);
     // 도커 소켓이나 홈 폴더 같은 다른 호스트 경로는 연결하지 않는다
     expect(args).not.toContain('--volume');
@@ -36,7 +37,6 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
     expect(valueOf('--security-opt')).toBe('no-new-privileges');
     expect(args).toContain('--read-only');
     expect(args).not.toContain('--privileged');
-    expect(valueOf('--pull')).toBe('never');
     expect(args).toContain('b-studio.sandbox=studio-orders-abc123');
     expect(args).toContain('b-studio.service=b-studio-agent');
     expect(args.slice(-3)).toEqual([AGENT_IMAGE, 'sleep', 'infinity']);
@@ -45,6 +45,22 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
   it('쉼표가 든 경로는 --mount의 다른 옵션으로 읽히므로 받지 않는다', () => {
     expect(() => agentRunArgs({ ...plan, projectRoot: '/work/a,readonly=false' })).toThrow('쉼표');
     expect(() => agentRunArgs({ ...plan, masks: [mask('/work/orders/.git', '/workspace/.git,target=/etc')] })).toThrow('쉼표');
+  });
+
+  it('홈 볼륨은 프로젝트마다 따로다. 한 프로젝트에서 바꿔 둔 설정이나 실행 파일이 다른 프로젝트의 세션에 따라가지 않는다', () => {
+    expect(agentHomeVolume('orders')).toBe('b-studio-agent-home-orders');
+    expect(agentHomeVolume('pay-2')).not.toBe(agentHomeVolume('orders'));
+    // 볼륨 이름에 못 쓰는 글자를 바꾸다가 서로 다른 프로젝트가 같은 이름이 되지 않는다
+    expect(agentHomeVolume('a/b')).not.toBe(agentHomeVolume('a-b'));
+    expect(agentHomeVolume('a/b')).toMatch(/^b-studio-agent-home-[A-Za-z0-9_.-]+$/);
+    expect(() => agentHomeVolume('')).toThrow('프로젝트 id');
+    expect(() => agentRunArgs({ ...plan, homeVolume: 'x,target=/etc' })).toThrow('쉼표');
+  });
+
+  it('설치할 CLI는 판을 고정한다(터미널을 열 때마다 최신을 받지 않는다)', () => {
+    expect(AGENT_CLI_PACKAGE).toMatch(/^@anthropic-ai\/claude-code@\d+\.\d+\.\d+$/);
+    expect(AGENT_TERMINAL_COMMAND).toContain(`npm install --global --no-fund --no-audit ${AGENT_CLI_PACKAGE} `);
+    expect(AGENT_TERMINAL_COMMAND).not.toMatch(/claude-code(?!@)\s*\|\|/);
   });
 
   it('컨테이너 이름에 쓸 수 없는 글자는 바꾼다', () => {

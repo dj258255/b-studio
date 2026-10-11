@@ -121,7 +121,7 @@ export function TerminalPanel({ sessionId, ready }: { sessionId: string; ready: 
     };
   }, [sessionId, ready, access.canManage, post]);
 
-  const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? "세션이 준비되면 열립니다" : terminalStatusLabel(status);
+  const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? "멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다" : terminalStatusLabel(status);
   const stopped = status.state === "closed" || status.state === "exited";
 
   return (
@@ -138,7 +138,7 @@ export function TerminalPanel({ sessionId, ready }: { sessionId: string; ready: 
         )}
       </div>
       <p className="border-b border-line px-5 py-2 text-xs text-muted">
-        이 세션의 에이전트 컨테이너 안입니다. 작업 폴더는 <code>/workspace</code>이고 이 컴퓨터의 다른 파일은 보이지 않습니다. 여기서 고친 것은 다음 요청의 검증 때 함께 확인됩니다.
+        이 세션의 에이전트 컨테이너 안입니다. 작업 폴더는 <code>/workspace</code>이고 이 컴퓨터의 다른 파일은 보이지 않습니다. 로그인은 프로젝트마다 한 번 합니다. 여기서 고친 것은 다음 요청의 검증 때 함께 확인됩니다.
       </p>
       <div className="min-h-0 flex-1 bg-[#0d1117] p-2">
         <div ref={container} className="h-full w-full" />

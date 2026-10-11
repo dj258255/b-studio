@@ -70,7 +70,7 @@ class FakeTerminal implements AgentTerminal {
   }
 }
 
-const target = { sandboxId: 'studio-orders-abc123', root: '/work/orders' };
+const target = { sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' };
 const decode = (messages: TerminalMessage[]) => messages.flatMap((message) => (message.kind === 'data' ? [Buffer.from(message.data, 'base64').toString('utf8')] : [])).join('');
 let session = 0;
 let id: string;
@@ -157,11 +157,21 @@ describe('세션 터미널 (이슈 #673)', () => {
   it('세션을 다시 열어 샌드박스가 바뀌면 옛 터미널과 컨테이너를 정리하고 새로 연다', async () => {
     const { backend, record } = fakeBackend();
     await openSessionTerminal(id, target, {}, backend);
-    await openSessionTerminal(id, { sandboxId: 'studio-orders-def456', root: '/work/orders' }, {}, backend);
+    await openSessionTerminal(id, { sandboxId: 'studio-orders-def456', root: '/work/orders', projectId: 'orders' }, {}, backend);
     expect(record.terminals[0]!.closed).toBe(true);
     expect(record.removed).toEqual(['studio-orders-abc123']);
     expect(record.terminals[1]!.container).toBe('studio-orders-def456-agent');
     await disposeSessionTerminal(id, 'studio-orders-def456', backend);
+  });
+
+  it('화면이 출력 통로를 먼저 열고 그다음에 "열기"를 보내도, 먼저 붙은 화면이 출력을 받는다', async () => {
+    const { backend, record } = fakeBackend();
+    const messages: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await openSessionTerminal(id, target, {}, backend);
+    record.terminals[0]!.emit('ready\r\n');
+    expect(decode(messages)).toBe('ready\r\n');
+    await disposeSessionTerminal(id, target.sandboxId, backend);
   });
 
   it('컨테이너를 띄우지 못하면 사유를 던지고 화면에도 알린다. 다시 열 수 있다', async () => {

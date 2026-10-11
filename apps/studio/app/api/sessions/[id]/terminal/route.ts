@@ -1,8 +1,17 @@
 import { z } from 'zod';
 import { authorizeSession, requireUser } from '@/lib/server/access';
+import { isLoopbackHost } from '@/lib/server/auth';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { closeSessionTerminal, MAX_TERMINAL_INPUT, openSessionTerminal, resizeSessionTerminal, subscribeSessionTerminal, writeSessionTerminal } from '@/lib/server/session-terminal';
 import { recoverSessions, sessionTerminalTarget } from '@/lib/server/sessions';
+
+/**
+ * 터미널은 컨테이너 안의 셸에 닿는 통로다. 이 컴퓨터의 주소로 들어온 요청만 받는다.
+ * 개인 PC 모드에는 인증이 없어서, 다른 사이트가 자기 도메인을 127.0.0.1로 풀리게 하면(DNS 리바인딩) 같은 출처로 보인다
+ */
+function assertLocalRequest(headers: Headers): void {
+  if (!isLoopbackHost(headers)) throw new StudioError(403, '세션 터미널은 이 컴퓨터의 주소(127.0.0.1 · localhost)로 연 화면에서만 씁니다');
+}
 
 const size = { cols: z.number().int().min(1).max(1000), rows: z.number().int().min(1).max(1000) };
 const requestSchema = z.discriminatedUnion('action', [
@@ -21,6 +30,7 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
   let cleanup = () => {};
 
   try {
+    assertLocalRequest(request.headers);
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await recoverSessions();
@@ -79,6 +89,7 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
  */
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/terminal'>) {
   try {
+    assertLocalRequest(request.headers);
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await recoverSessions();

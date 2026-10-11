@@ -36,6 +36,8 @@ export interface TerminalTarget {
   sandboxId: string;
   /** 작업 복사본(호스트 절대 경로) */
   root: string;
+  /** CLI의 홈 볼륨을 나누는 단위 */
+  projectId: string;
 }
 
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
@@ -46,7 +48,7 @@ export interface TerminalBackend {
 }
 
 const DOCKER_BACKEND: TerminalBackend = {
-  ensureContainer: (target) => ensureAgentContainer(target.sandboxId, target.root),
+  ensureContainer: (target) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId }),
   open: (container, options) => openAgentTerminal(container, options),
   removeContainer: (sandboxId) => removeAgentContainer(sandboxId),
 };

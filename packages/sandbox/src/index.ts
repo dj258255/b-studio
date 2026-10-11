@@ -50,7 +50,9 @@ export {
   type ProcessResourceUsage,
 } from './docker/host-processes';
 export {
-  AGENT_HOME_VOLUME,
+  AGENT_CLI_PACKAGE,
+  AGENT_HOME_VOLUME_PREFIX,
+  agentHomeVolume,
   AGENT_IMAGE,
   AGENT_SERVICE,
   AGENT_TERMINAL_COMMAND,

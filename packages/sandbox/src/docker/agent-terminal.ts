@@ -24,8 +24,20 @@ export const AGENT_IMAGE = EDGE_IMAGE;
 export const AGENT_SERVICE = 'b-studio-agent';
 /** 컨테이너 안에서 작업 복사본이 보이는 자리. 폴더 열기로 만든 서비스 컨테이너와 같다(ADR-088) */
 export const AGENT_WORKSPACE = '/workspace';
-/** CLI의 홈 폴더. 세션이 바뀌어도 로그인과 설치한 CLI가 남게 이 컴퓨터에서 하나를 같이 쓴다 */
-export const AGENT_HOME_VOLUME = 'b-studio-agent-home';
+/**
+ * CLI의 홈 폴더를 두는 볼륨. 세션이 바뀌어도 로그인과 설치한 CLI가 남게 하되, **프로젝트마다 따로** 둔다.
+ * 홈 폴더에는 로그인 정보와 CLI의 설정(훅), 셸 설정, 설치한 실행 파일이 있다. 모든 세션이 하나를 같이 쓰면 한 프로젝트의
+ * 터미널에서 바꿔 둔 것이 다른 프로젝트의 세션에 그대로 따라간다. 대가는 프로젝트마다 로그인을 한 번씩 하는 것이다.
+ */
+export const AGENT_HOME_VOLUME_PREFIX = 'b-studio-agent-home';
+export function agentHomeVolume(projectId: string): string {
+  // 볼륨 이름에 쓸 수 있는 글자만 남긴다. 서로 다른 id가 같은 이름이 되지 않게 걸러 낸 글자가 있으면 길이를 덧붙인다
+  const safe = projectId.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 80);
+  if (!safe) throw new SandboxError('프로젝트 id가 비어 있어 에이전트 홈 볼륨을 정할 수 없습니다');
+  return `${AGENT_HOME_VOLUME_PREFIX}-${safe}${safe === projectId ? '' : `-${projectId.length}`}`;
+}
+/** 컨테이너에 설치할 CLI의 판. 고정해 둔다 — 터미널을 열 때마다 "지금 최신"을 받으면 무엇이 깔리는지 알 수 없다. 올릴 때는 가두기를 다시 확인한다(ADR-168) */
+export const AGENT_CLI_PACKAGE = '@anthropic-ai/claude-code@2.1.296';
 const AGENT_HOME = '/home/node';
 const NPM_PREFIX = `${AGENT_HOME}/.npm-global`;
 const AGENT_PATH = `${NPM_PREFIX}/bin:${AGENT_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
@@ -43,7 +55,7 @@ const MAX_ROWS = 200;
 export const AGENT_TERMINAL_COMMAND = [
   'if ! command -v claude >/dev/null 2>&1; then',
   '  printf "%s\\n" "[b-studio] 이 컨테이너에 claude CLI를 설치합니다(처음 한 번)."',
-  '  npm install --global --no-fund --no-audit @anthropic-ai/claude-code || printf "%s\\n" "[b-studio] 설치하지 못했습니다. 네트워크를 확인하고 npm install -g @anthropic-ai/claude-code 를 다시 실행하세요."',
+  `  npm install --global --no-fund --no-audit ${AGENT_CLI_PACKAGE} || printf "%s\\n" "[b-studio] 설치하지 못했습니다. 네트워크를 확인하고 npm install -g ${AGENT_CLI_PACKAGE} 를 다시 실행하세요."`,
   'fi',
   'if command -v claude >/dev/null 2>&1; then claude; fi',
   'printf "%s\\n" "[b-studio] claude에서 나왔습니다. 다시 띄우려면 claude 를 입력하세요."',
@@ -59,6 +71,8 @@ export interface AgentContainerPlan {
   projectRoot: string;
   /** `.git`을 막는 마운트(읽기 전용, 상태 폴더는 빈 폴더). computeGitMask가 계산한다 */
   masks: readonly MaskVolume[];
+  /** CLI의 홈 폴더를 둘 볼륨(agentHomeVolume) */
+  homeVolume: string;
   image?: string;
 }
 
@@ -76,7 +90,7 @@ export function agentContainerName(sandboxId: string): string {
  */
 export function agentRunArgs(plan: AgentContainerPlan): string[] {
   const mount = (volume: MaskVolume): string => `type=bind,source=${volume.source},target=${volume.target},readonly`;
-  for (const value of [plan.projectRoot, ...plan.masks.flatMap((volume) => [volume.source, volume.target])]) {
+  for (const value of [plan.projectRoot, plan.homeVolume, ...plan.masks.flatMap((volume) => [volume.source, volume.target])]) {
     // --mount의 값은 쉼표로 나뉜다. 쉼표가 든 경로를 그대로 넣으면 다른 옵션으로 읽힌다
     if (value.includes(',')) throw new SandboxError('경로에 쉼표가 있어 에이전트 컨테이너에 연결할 수 없습니다', value);
   }
@@ -84,7 +98,6 @@ export function agentRunArgs(plan: AgentContainerPlan): string[] {
     'run',
     '--detach',
     '--init',
-    '--pull', 'never',
     '--name', plan.name,
     '--label', `b-studio.sandbox=${plan.sandboxId}`,
     '--label', `b-studio.service=${AGENT_SERVICE}`,
@@ -99,7 +112,7 @@ export function agentRunArgs(plan: AgentContainerPlan): string[] {
     '--memory', '2g',
     '--mount', `type=bind,source=${plan.projectRoot},target=${AGENT_WORKSPACE}`,
     ...plan.masks.flatMap((volume) => ['--mount', mount(volume)]),
-    '--mount', `type=volume,source=${AGENT_HOME_VOLUME},target=${AGENT_HOME}`,
+    '--mount', `type=volume,source=${plan.homeVolume},target=${AGENT_HOME}`,
     '--env', `HOME=${AGENT_HOME}`,
     '--env', `NPM_CONFIG_PREFIX=${NPM_PREFIX}`,
     '--env', `PATH=${AGENT_PATH}`,
@@ -160,6 +173,8 @@ export function agentResizeArgs(name: string, id: string, size: TerminalSize): s
 }
 
 export interface AgentContainerOptions {
+  /** 홈 볼륨을 나누는 단위(프로젝트 id) */
+  projectId: string;
   dockerBin?: string;
   image?: string;
 }
@@ -169,7 +184,7 @@ export interface AgentContainerOptions {
  * 띄운 뒤에는 설정이 아니라 결과를 본다: 실제 마운트에서 `.git`이 읽기 전용으로 덮였는지 확인하고, 아니면 지우고 던진다.
  * 확인하기 전에는 누구도 이 컨테이너에서 명령을 돌리지 않는다(이름을 돌려주지 않는다)
  */
-export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { dockerBin = 'docker', image }: AgentContainerOptions = {}): Promise<string> {
+export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { projectId, dockerBin = 'docker', image }: AgentContainerOptions): Promise<string> {
   const name = agentContainerName(sandboxId);
   const docker = (args: string[]) => execFileAsync(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
   const root = await realpath(projectRoot);
@@ -180,7 +195,7 @@ export async function ensureAgentContainer(sandboxId: string, projectRoot: strin
 
   const masks = (await computeGitMask(root, { services: { [AGENT_SERVICE]: { volumes: [{ type: 'bind', source: root, target: AGENT_WORKSPACE }] } } }))[AGENT_SERVICE] ?? [];
   try {
-    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, image }));
+    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId), image }));
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 띄우지 못했습니다', describe(error), { platform: true });
   }

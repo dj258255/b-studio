@@ -7024,12 +7024,16 @@ export function sessionTerminalAllowed(): boolean {
   return experimentalEnabled() && localFolderAllowed();
 }
 
-/** 세션 터미널이 붙을 자리: 샌드박스 id와 작업 복사본. 샌드박스가 준비된 세션만 */
-export function sessionTerminalTarget(id: string): { sandboxId: string; root: string } {
+/**
+ * 세션 터미널이 붙을 자리: 샌드박스 id(컨테이너 이름과 라벨), 작업 복사본, 프로젝트 id(홈 볼륨).
+ * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
+ * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
+ */
+export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '세션이 준비된 뒤에 터미널을 열 수 있습니다');
-  return { sandboxId: session.sandbox.id, root: session.project.root };
+  if (session.snapshot.status === 'stopped' || session.snapshot.status === 'failed') throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업을 누른 뒤 다시 여세요');
+  return { sandboxId: session.sandbox.id, root: session.project.root, projectId: session.snapshot.projectId };
 }
 
 function requireSession(id: string): Session {

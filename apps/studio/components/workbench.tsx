@@ -101,7 +101,7 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
                     </div>
                     {showTerminal && (
                       <div className="grid min-h-0 flex-1">
-                        <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status === "ready"} />
+                        <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} />
                       </div>
                     )}
                   </div>
