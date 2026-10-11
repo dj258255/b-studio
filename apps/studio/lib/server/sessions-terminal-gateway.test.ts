@@ -26,8 +26,8 @@ const fake = vi.hoisted(() => ({
   starts: 0,
   /** 서비스를 다시 띄운 횟수 */
   restarts: 0,
-  /** 켜면 서비스를 다시 띄우지 못한다 */
-  restartFails: false,
+  /** 서비스를 다시 띄우지 못하게 한다. 'platform'은 샌드박스·도커 쪽 문제(바꾼 코드의 탓이 아니다) */
+  restartFails: false as false | 'platform',
   interrupts: [] as string[],
   /** holdWord가 든 명령은 hold가 풀릴 때까지 끝나지 않는다(실행이나 검증을 열어 둔 채로 두는 데 쓴다) */
   holdWord: undefined as string | undefined,
@@ -48,7 +48,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     },
     async restart(service: string) {
       fake.restarts += 1;
-      if (fake.restartFails) throw new Error('컨테이너가 종료됐습니다');
+      if (fake.restartFails === 'platform') throw new actual.SandboxError('도커에 닿지 못했습니다', 'Cannot connect to the Docker daemon', { platform: true });
       return { service, containerPort: 8080, url: fake.serviceUrl };
     },
     async sync() {
@@ -199,6 +199,18 @@ async function open({ lazy = false }: { lazy?: boolean } = {}): Promise<Opened> 
   return { id, work: root, gateway: terminalGatewayHandlersForTest(id), events, ofType: (type) => events.filter((event): event is Extract<StudioEvent, { type: typeof type }> => event.type === type) };
 }
 
+/** 실행이 닫혔다는 알림이 count개 올 때까지 기다린다(화면의 취소처럼 답을 기다리지 않는 길에서 쓴다) */
+async function finishedRuns(session: Opened, count: number): Promise<Array<Extract<StudioEvent, { type: 'run_finished' }>>> {
+  const started = Date.now();
+  while (session.ofType('run_finished').length < count) {
+    if (Date.now() - started > 10_000) throw new Error(`실행이 닫히지 않았습니다 (${session.ofType('run_finished').length}/${count})`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return session.ofType('run_finished');
+}
+const ORIGINAL = 'class Order {}\n';
+const fileOf = (session: Opened, file = 'api/src/Order.java') => readFile(path.join(session.work, file), 'utf8');
+
 const edit = (session: Opened, file: string, content: string) => writeFile(path.join(session.work, file), content);
 const git = async (session: Opened, ...args: string[]) => (await execFileAsync('git', ['-C', session.work, ...args])).stdout;
 /** CLI가 하는 대로: 쓰기 직전의 훅을 부르고 파일을 고친다 */
@@ -268,18 +280,20 @@ describe('터미널에서 온 요청은 게이트를 지나야 체크포인트�
     await stopSession(session.id);
   }, 30_000);
 
-  it('재시도 상한까지 통과하지 못하면 실패로 끝낸다. 변경은 되돌리지 않지만 체크포인트도 남기지 않는다', async () => {
+  it('재시도 상한까지 통과하지 못하면 실패로 끝내고, 대화 창의 요청처럼 이번 실행의 변경을 되돌린다(보관본은 남는다)', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo }\n');
+    await edit(session, 'api/src/Extra.java', 'class Extra {}\n');
     fake.failCommands = ['test'];
     expect((await session.gateway.stop({})).feedback).toBeDefined();
     expect((await session.gateway.stop({})).feedback).toBeDefined();
     const last = await session.gateway.stop({ last_assistant_message: '더는 못 고치겠습니다.' });
-    // 상한을 다 쓰면 더 막지 않는다(막으면 CLI가 끝나지 않는다). 대신 실패로 닫는다
+    // 상한을 다 쓰면 더 막지 않는다(막으면 CLI가 끝나지 않는다). 실패로 닫고 되돌린다
     expect(last.feedback).toBeUndefined();
-    expect(last.message).toContain('체크포인트를 남기지 않았습니다');
+    expect(last.message).toContain('검증 게이트를 3번 통과하지 못했습니다');
+    expect(last.message).toContain('바뀐 파일 2개를 되돌렸습니다');
 
     const snapshot = getSnapshot(session.id)!;
     expect(snapshot.checkpoints).toHaveLength(before);
@@ -287,17 +301,41 @@ describe('터미널에서 온 요청은 게이트를 지나야 체크포인트�
     const finished = session.ofType('run_finished')[0]!;
     expect(finished.status).toBe('failed');
     expect(finished.summary).toContain('검증 게이트를 3번 통과하지 못했습니다');
-    expect(finished.summary).toContain('변경은 작업 폴더에 그대로 있습니다');
-    // 되돌리지 않았다: CLI가 고친 내용이 그대로 있다
-    expect(await readFile(path.join(session.work, 'api/src/Order.java'), 'utf8')).toBe('class Order { String memo }\n');
-    expect(session.ofType('reverted')).toEqual([]);
+    // 작업 복사본은 마지막 체크포인트 그대로다. 새로 만든 파일도 없다
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    await expect(fileOf(session, 'api/src/Extra.java')).rejects.toThrow();
+    expect(await git(session, 'status', '--porcelain')).toBe('');
+    // 되돌린 것은 보관본으로 남아 화면에서 되살릴 수 있다
+    const reverted = session.ofType('reverted');
+    expect(reverted).toHaveLength(1);
+    expect(reverted[0]!.files.sort()).toEqual(['api/src/Extra.java', 'api/src/Order.java']);
+    expect(reverted[0]!.backup).toBeDefined();
 
-    // 다음 요청의 검증은 남은 변경을 함께 본다. 테스트가 통과하게 되면 그때 체크포인트가 된다
+    // CLI는 파일이 되돌려진 것을 모른다. 다음 요청의 맥락에 한 번 알린다
     fake.failCommands = [];
-    await session.gateway.prompt({ prompt: '이어서 고쳐줘' });
-    expect((await session.gateway.stop({ last_assistant_message: '확인했습니다.' })).message).toContain('검증 통과 — 체크포인트');
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
-    expect(getSnapshot(session.id)!.checkpoints[0]!.files).toEqual(['api/src/Order.java']);
+    const next = await session.gateway.prompt({ prompt: '다시 해줘' });
+    expect(next.note).toContain('되돌렸습니다');
+    expect(next.note).toContain('api/src/Order.java');
+    expect(next.note).toContain('다시 읽으세요');
+    await session.gateway.stop({ last_assistant_message: '네' });
+    expect((await session.gateway.prompt({ prompt: '또' })).note).toBeUndefined();
+    await session.gateway.stop({ last_assistant_message: '네' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('샌드박스·도커 쪽 문제로 검증하지 못한 실행은 되돌리지 않는다(바꾼 코드의 문제가 아니다). 체크포인트도 남기지 않는다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    fake.restartFails = 'platform';
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toBeUndefined();
+    expect(answer.message).toContain('b-studio 쪽(샌드박스·도커) 문제');
+    expect(await fileOf(session)).toBe('class Order { String memo; }\n');
+    expect(session.ofType('reverted')).toEqual([]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
     await stopSession(session.id);
   }, 30_000);
 
@@ -381,21 +419,37 @@ describe('터미널의 실행과 대화 창의 요청은 겹치지 않는다', (
     await stopSession(session.id);
   }, 30_000);
 
-  it('화면에서 취소하면 실행을 닫고 CLI에 멈추라고 알린다. 변경은 되돌리지 않고 체크포인트도 남기지 않는다', async () => {
+  it('화면에서 취소하면 CLI에 멈추라고 알리고, 대화 창의 취소처럼 이번 실행의 변경을 되돌린다', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
     const runId = session.ofType('run_started')[0]!.runId;
 
+    // 되돌린 직후, 실행이 닫혔다는 알림이 나가기 전의 순간에 대화 창에서 요청을 보내 본다
+    const duringRevert: string[] = [];
+    subscribe(session.id, (event) => {
+      if (event.type !== 'reverted') return;
+      try {
+        sendMessage(session.id, '끼어드는 요청', { allowBreaking: false, scriptedTurns: [{ text: '네' }] });
+        duringRevert.push('받았다');
+      } catch (error) {
+        duringRevert.push(error instanceof Error ? error.message : String(error));
+      }
+    });
+
     cancelRun(session.id, runId);
     expect(fake.interrupts).toEqual([session.id]);
-    const finished = session.ofType('run_finished')[0]!;
-    expect(finished).toMatchObject({ runId, status: 'cancelled' });
-    expect(finished.summary).toContain('변경은 작업 폴더에 그대로 있습니다');
+    // 되돌리는 동안에는 실행이 걸려 있어 다른 요청이 끼어들지 못한다
+    expect(() => sendMessage(session.id, '다른 요청', { allowBreaking: false })).toThrow('이전 요청을 처리하는 중입니다');
+    expect((await session.gateway.prompt({ prompt: '끼어드는 요청' })).blocked).toContain('앞선 요청을 처리하는 중입니다');
+    const [finished] = await finishedRuns(session, 1);
+    expect(finished).toMatchObject({ runId, status: 'cancelled', summary: '요청을 취소하고 바뀐 파일 1개를 되돌렸습니다' });
+    expect(duringRevert).toEqual(['이전 요청을 처리하는 중입니다']);
     expect(getSnapshot(session.id)!.running).toBe(false);
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
-    expect(await readFile(path.join(session.work, 'api/src/Order.java'), 'utf8')).toBe('class Order { String memo; }\n');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    expect(session.ofType('reverted')).toMatchObject([{ runId, cancelled: true, files: ['api/src/Order.java'] }]);
     // 닫힌 실행의 턴이 늦게 끝나도 체크포인트는 생기지 않는다
     expect(await session.gateway.stop({ last_assistant_message: '끝' })).toEqual({});
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
@@ -437,12 +491,12 @@ describe('턴의 끝이 겹치거나 도중에 끊길 때', () => {
     release();
     const answer = await stopping;
     expect(answer.feedback).toBeUndefined();
-    expect(answer.message).toContain('요청을 닫았습니다');
+    expect(answer.message).toContain('요청을 취소하고 바뀐 파일 1개를 되돌렸습니다');
     expect(session.ofType('run_finished')).toMatchObject([{ status: 'cancelled' }]);
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
     expect(getSnapshot(session.id)!.running).toBe(false);
-    // 테스트는 통과했지만(가짜는 0으로 끝난다) 취소한 실행은 체크포인트가 되지 않는다
-    expect(await readFile(path.join(session.work, 'api/src/Order.java'), 'utf8')).toBe('class Order { String memo; }\n');
+    // 테스트는 통과했지만(가짜는 0으로 끝난다) 취소한 실행은 체크포인트가 되지 않고 되돌려진다
+    expect(await fileOf(session)).toBe(ORIGINAL);
     await stopSession(session.id);
   }, 30_000);
 });
@@ -523,242 +577,92 @@ describe('샌드박스를 필요할 때 켜는 세션(개인 PC 모드의 기본
   }, 30_000);
 });
 
-describe('실패한 실행이 남긴 변경은 다음 실행에서도 같은 기준으로 본다 (변경을 되돌리지 않는 대신)', () => {
-  it('계약을 깨는 변경은 실행을 바꿔도 통과하지 못한다(다음 실행이 남은 변경을 기준으로 삼지 않는다)', async () => {
+describe('통과하지 못한 실행의 변경은 남지 않는다 (다음 실행은 체크포인트 그대로에서 시작한다)', () => {
+  it('계약을 깨는 변경은 실행을 바꿔도 통과하지 못한다. 실패한 실행의 변경이 다음 실행의 기준에 섞이지 않는다', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
-    await session.gateway.prompt({ prompt: '주문 응답에서 memo를 빼줘' });
-    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
-    // 고친 코드로 서비스가 다시 뜨면 계약에서 필드가 사라진다
-    service.doc = contractWith(['id']);
-    const first = await session.gateway.stop({ last_assistant_message: 'memo를 뺐습니다.' });
-    expect(first.feedback).toContain('memo');
-    await session.gateway.stop({});
-    expect((await session.gateway.stop({})).message).toContain('체크포인트를 남기지 않았습니다');
-    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
-
-    // 새 실행: 아무것도 고치지 않고 턴만 끝낸다. 기준을 새로 잡았다면 "원래 그랬던 계약"이 되어 통과했을 것이다
-    await session.gateway.prompt({ prompt: '됐어, 그대로 끝내줘' });
-    const second = await session.gateway.stop({ last_assistant_message: '끝냈습니다.' });
-    expect(second.feedback).toContain('memo');
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
-
-    // 화면에서 닫고 다시 시작해도, CLI를 끝냈다 다시 띄워도 같다
-    cancelRun(session.id, session.ofType('run_started')[1]!.runId);
-    await session.gateway.prompt({ prompt: '다시' });
-    await session.gateway.sessionEnd({});
-    await session.gateway.prompt({ prompt: '또 다시' });
-    expect((await session.gateway.stop({})).feedback).toContain('memo');
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
-
-    // 계약을 되돌려 놓으면(필드를 다시 넣으면) 통과한다
-    service.doc = contractWith(['id', 'memo']);
-    expect((await session.gateway.stop({ last_assistant_message: '되돌렸습니다.' })).message).toContain('검증 통과 — 체크포인트');
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
-
-    // 체크포인트가 생기면 그 계약이 새 기준이다: 필드를 더하는 것은 깨는 변경이 아니다
-    await session.gateway.prompt({ prompt: 'note 필드를 더해줘' });
-    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
-    service.doc = contractWith(['id', 'memo', 'note']);
-    expect((await session.gateway.stop({ last_assistant_message: '더했습니다.' })).message).toContain('검증 통과 — 체크포인트');
-    await stopSession(session.id);
-  }, 60_000);
-
-  it('터미널에서 막힌 계약 변경은 대화 창의 요청으로도 통과하지 못한다(같은 기준으로 본다)', async () => {
-    const session = await open();
-    const before = getSnapshot(session.id)!.checkpoints.length;
-    await session.gateway.prompt({ prompt: '주문 응답에서 memo를 빼줘' });
-    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
-    service.doc = contractWith(['id']);
-    await session.gateway.stop({});
-    await session.gateway.stop({});
-    await session.gateway.stop({});
-    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
-
-    // 대화 창에서 아무 요청이나 보낸다. 남은 변경은 "실행 전부터 있던 변경"으로 게이트에 들어간다
-    const finished = new Promise<Extract<StudioEvent, { type: 'run_finished' }>>((resolve) => subscribe(session.id, (event) => event.type === 'run_finished' && event.runId !== session.ofType('run_started')[0]!.runId && resolve(event)));
-    sendMessage(session.id, '마무리해줘', { allowBreaking: false, scriptedTurns: [{ text: '마무리했습니다.' }, { text: '고칠 수 없습니다.' }, { text: '고칠 수 없습니다.' }, { text: '고칠 수 없습니다.' }] });
-    const outcome = await finished;
-    // 기준을 새로 읽었다면 통과해 체크포인트가 됐을 것이다
-    expect(outcome.status).toBe('failed');
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
-    await stopSession(session.id);
-  }, 60_000);
-
-  it('대화 창의 요청이 남긴 체크포인트도 그때의 계약을 기준으로 잡아 둔다(그 뒤 터미널에서 실패한 변경이 그 기준과 견줘진다)', async () => {
-    const session = await open();
-    // 대화 창의 요청이 필드를 더해 체크포인트를 남긴다
-    const done = new Promise<void>((resolve) => subscribe(session.id, (event) => event.type === 'run_finished' && resolve()));
-    service.doc = contractWith(['id', 'memo', 'note']);
-    sendMessage(session.id, 'note 필드를 더해줘', { allowBreaking: false, scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; String note; }\n' } }] }, { text: '더했습니다.' }] });
-    await done;
-    const before = getSnapshot(session.id)!.checkpoints.length;
-
-    // 방금 더한 note가 훅을 거치지 않고 빠진다(사람이 셸에서 고쳤거나 훅이 닿지 못했다). 터미널의 첫 검증은 이미 바뀐 상태에서 시작한다.
-    // 그래도 기준은 대화 창의 체크포인트 때 잡아 둔 계약이라 깨는 변경으로 잡힌다(지금 계약을 기준으로 읽으면 놓친다)
-    await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
-    service.doc = contractWith(['id', 'memo']);
-    await session.gateway.prompt({ prompt: '정리해줘' });
-    expect((await session.gateway.stop({})).feedback).toContain('note');
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
-    await stopSession(session.id);
-  }, 60_000);
-
-  it('기준은 체크포인트 곁의 파일에서만 온다. 기록이 없는 체크포인트에서는 서비스를 그 코드로 다시 띄운 직후에 읽은 계약을 남긴다', async () => {
-    const session = await open();
-    const recordFile = (sha: string) => path.join(session.work, '.git/b-studio/contracts', `${sha}.json`);
-    const fieldsAt = async (sha: string) => Object.keys((JSON.parse(await readFile(recordFile(sha), 'utf8')) as { api: ReturnType<typeof contractWith> }).api.components.schemas.OrderResponse.properties);
-    const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
-    await expect(readFile(recordFile(start), 'utf8')).rejects.toThrow();
-
-    await session.gateway.prompt({ prompt: 'note 필드를 더해줘' });
-    const restartsBefore = fake.restarts;
-    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
-    // 이미 떠 있던 서비스가 이 체크포인트의 코드로 떠 있다는 보장이 없다. 다시 띄운 뒤에 읽어 기록으로 남겼다
-    expect(fake.restarts).toBe(restartsBefore + 1);
-    expect(await fieldsAt(start)).toEqual(['id', 'memo']);
-
-    service.doc = contractWith(['id', 'memo', 'note']);
-    await session.gateway.stop({ last_assistant_message: '더했습니다.' });
-    const head = getSnapshot(session.id)!.checkpoints[0]!.sha;
-    expect(head).not.toBe(start);
-    // 통과한 검증이 본 계약이 새 체크포인트의 기록이다
-    expect(await fieldsAt(head)).toEqual(['id', 'memo', 'note']);
-
-    // 체크포인트 뒤에 서비스가 다른 계약을 내놓아도(코드가 또 바뀌었다) 기록은 게이트가 본 것 그대로다
-    service.doc = contractWith(['id']);
-    await session.gateway.prompt({ prompt: '아무것도 하지 마' });
-    await session.gateway.stop({ last_assistant_message: '네' });
-    expect(await fieldsAt(head)).toEqual(['id', 'memo', 'note']);
-    // 그 기록이 다음 실행의 기준이다: 작업 복사본이 체크포인트 그대로여도 지금 서비스의 계약(필드 둘이 빠짐)을 기준으로 다시 읽지 않고,
-    // 기록이 있으니 서비스를 다시 띄우지도 않는다
-    const restartsAtHead = fake.restarts;
-    await session.gateway.prompt({ prompt: '필드를 빼줘' });
-    await write(session, 'api/src/Order.java', 'class Order {}\n');
-    expect(fake.restarts).toBe(restartsAtHead);
-    const answer = await session.gateway.stop({});
-    expect(answer.feedback).toContain('memo');
-    expect(answer.feedback).toContain('note');
-    await stopSession(session.id);
-  }, 60_000);
-
-  it('이 호출이 샌드박스를 막 켰으면 서비스는 지금의 코드로 뜬 것이다. 다시 띄우지 않고 읽어 남긴다', async () => {
-    const session = await open({ lazy: true });
-    const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
-    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
-    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
-    expect(fake.starts).toBe(1);
-    expect(fake.restarts).toBe(0);
-    expect(await readFile(path.join(session.work, '.git/b-studio/contracts', `${start}.json`), 'utf8')).toContain('memo');
-    await stopSession(session.id);
-  }, 30_000);
-
-  it('계약을 다 읽지 못했으면 그 체크포인트의 기록으로 남기지 않는다(일부만 읽힌 계약이 기준으로 굳지 않는다)', async () => {
-    const session = await open();
-    const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
-    const recordFile = path.join(session.work, '.git/b-studio/contracts', `${start}.json`);
-    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
-    // 쓰기 직전에 서비스가 아직 계약을 내놓지 못한다
-    service.down = true;
-    expect(await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).toEqual({});
-    await expect(readFile(recordFile, 'utf8')).rejects.toThrow();
-    service.down = false;
-    // 이 실행은 그대로 돈다(게이트가 읽은 것으로). 통과하면 그 검증이 본 계약이 새 체크포인트의 기록이 된다
-    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
-    const head = getSnapshot(session.id)!.checkpoints[0]!.sha;
-    expect(await readFile(path.join(session.work, '.git/b-studio/contracts', `${head}.json`), 'utf8')).toContain('memo');
-    await expect(readFile(recordFile, 'utf8')).rejects.toThrow();
-    await stopSession(session.id);
-  }, 30_000);
-
-  it('서비스를 다시 띄우지 못했거나 계약을 읽는 동안 작업 복사본이 바뀌었으면 기록으로 남기지 않는다', async () => {
-    const failing = await open();
-    const recordOf = (session: Opened) => path.join(session.work, '.git/b-studio/contracts', `${getSnapshot(session.id)!.checkpoints[0]!.sha}.json`);
-    await failing.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
-    fake.restartFails = true;
-    const record = recordOf(failing);
-    await write(failing, 'api/src/Order.java', 'class Order { String memo; }\n');
-    // 서비스가 이 체크포인트의 코드로 떴다는 것을 확인하지 못했다
-    await expect(readFile(record, 'utf8')).rejects.toThrow();
-    fake.restartFails = false;
-    await stopSession(failing.id);
-
-    const racing = await open();
-    await racing.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
-    const racingRecord = recordOf(racing);
-    // 계약을 읽는 바로 그때 뒤에서 파일이 바뀐다: 읽은 계약이 체크포인트의 코드와 맞는지 알 수 없다
-    service.onFetch = () => {
-      service.onFetch = undefined;
-      writeFileSync(path.join(racing.work, 'api/src/Sneaked.java'), 'class Sneaked {}\n');
+    const breakIt = async () => {
+      await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+      // 고친 코드로 서비스가 다시 뜨면 계약에서 필드가 사라진다
+      service.doc = contractWith(['id']);
     };
-    await write(racing, 'api/src/Order.java', 'class Order { String memo; }\n');
-    await expect(readFile(racingRecord, 'utf8')).rejects.toThrow();
-    await stopSession(racing.id);
-  }, 60_000);
+    await session.gateway.prompt({ prompt: '주문 응답에서 memo를 빼줘' });
+    await breakIt();
+    expect((await session.gateway.stop({ last_assistant_message: 'memo를 뺐습니다.' })).feedback).toContain('memo');
+    await session.gateway.stop({});
+    expect((await session.gateway.stop({})).message).toContain('되돌렸습니다');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    // 되돌린 코드로 서비스가 다시 뜬다(계약도 원래대로)
+    service.doc = contractWith(['id', 'memo']);
 
-  it('파일을 되돌려 놓았을 뿐 서비스는 고친 코드로 떠 있어도, 그 서비스의 계약을 기준으로 삼지 않는다', async () => {
-    const session = await open();
-    const before = getSnapshot(session.id)!.checkpoints.length;
-    await session.gateway.prompt({ prompt: 'memo를 빼줘' });
-    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
-    service.doc = contractWith(['id']);
-    await session.gateway.stop({});
-    await session.gateway.stop({});
-    await session.gateway.stop({});
-    // 파일을 원래대로 돌려놓는다. 작업 복사본은 체크포인트 그대로지만 서비스는 여전히 고친 코드로 떠 있다(계약에 memo가 없다)
-    await edit(session, 'api/src/Order.java', 'class Order {}\n');
-    expect(await git(session, 'status', '--porcelain')).toBe('');
-
-    // 새 실행이 같은 변경을 다시 한다. 지금 서비스의 계약을 다시 읽었다면 "원래 없던 필드"가 되어 통과했을 것이다
+    // 새 실행이 같은 변경을 다시 해도, 화면에서 닫고 다시 해도 같다: 매번 체크포인트 그대로에서 시작하므로 매번 깨는 변경으로 잡힌다
     await session.gateway.prompt({ prompt: '다시 memo를 빼줘' });
-    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+    await breakIt();
+    expect((await session.gateway.stop({})).feedback).toContain('memo');
+    cancelRun(session.id, session.ofType('run_started')[1]!.runId);
+    await finishedRuns(session, 2);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    service.doc = contractWith(['id', 'memo']);
+
+    await session.gateway.prompt({ prompt: '또 memo를 빼줘' });
+    await breakIt();
     expect((await session.gateway.stop({})).feedback).toContain('memo');
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+
+    // 계약을 깨지 않는 변경은 통과한다
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    service.doc = contractWith(['id', 'memo', 'note']);
+    expect((await session.gateway.stop({ last_assistant_message: 'note를 더했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
     await stopSession(session.id);
   }, 60_000);
 
-  it('검증을 통과한 체크포인트가 하나도 없는데 변경이 먼저 있으면, 지금 계약이 기준이 된다는 것을 실행에 알린다', async () => {
+  it('터미널에서 막힌 변경은 대화 창의 요청으로 넘어가지 않는다(남아 있지 않다)', async () => {
     const session = await open();
-    // 어떤 실행보다 먼저 파일이 바뀌어 있다(사람이 셸에서 고쳤다)
-    await edit(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문 응답에서 memo를 빼줘' });
+    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
     service.doc = contractWith(['id']);
-    await session.gateway.prompt({ prompt: '정리해줘' });
-    const answer = await session.gateway.stop({ last_assistant_message: '정리했습니다.' });
-    const warnings = session.ofType('agent').flatMap((event) => (event.event.type === 'warning' ? [event.event.message] : []));
-    expect(warnings.some((message) => message.includes('API 계약 기록이 없어'))).toBe(true);
-    // 남긴 한계: 이 경우는 통과한다. 조용히 지나가지 않고 알린 것을 확인한다
-    expect(answer.message).toContain('검증 통과');
-    await stopSession(session.id);
-  }, 30_000);
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    service.doc = contractWith(['id', 'memo']);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
 
-  it('앞 실행이 남긴 비밀 파일과 링크는 다음 실행에서도 통과시키지 않는다("원래 있던 것"으로 봐주지 않는다)', async () => {
+    // 대화 창에서 아무 요청이나 보낸다. 남은 변경이 있었다면 "실행 전부터 있던 변경"으로 게이트에 들어가 체크포인트가 됐을 것이다
+    const finished = new Promise<Extract<StudioEvent, { type: 'run_finished' }>>((resolve) => subscribe(session.id, (event) => event.type === 'run_finished' && event.runId !== session.ofType('run_started')[0]!.runId && resolve(event)));
+    sendMessage(session.id, '마무리해줘', { allowBreaking: false, scriptedTurns: [{ text: '마무리했습니다.' }] });
+    expect((await finished).status).toBe('done');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(await git(session, 'log', '--oneline', '-S', 'memo 없음')).toBe('');
+    await stopSession(session.id);
+  }, 60_000);
+
+  it('실패한 실행이 만든 비밀 파일과 링크도 남지 않는다', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
     await session.gateway.prompt({ prompt: '설정 파일 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
     await edit(session, '.env', 'API_KEY=secret\n');
     await symlink('/etc/hosts', path.join(session.work, 'api/src/hosts'));
+    expect((await session.gateway.stop({})).feedback).toContain('게이트가 검증할 수 없는 경로');
     await session.gateway.stop({});
-    await session.gateway.stop({});
-    expect((await session.gateway.stop({})).message).toContain('체크포인트를 남기지 않았습니다');
+    expect((await session.gateway.stop({})).message).toContain('되돌렸습니다');
+    await expect(fileOf(session, '.env')).rejects.toThrow();
+    await expect(fileOf(session, 'api/src/hosts')).rejects.toThrow();
 
-    await session.gateway.prompt({ prompt: '이어서' });
-    fake.execCalls = [];
-    const answer = await session.gateway.stop({ last_assistant_message: '끝냈습니다.' });
-    // 게이트를 돌리기 전에 막는다(커밋 전 대조에 기대지 않는다)
-    expect(answer.feedback).toContain('게이트가 검증할 수 없는 경로');
-    expect(answer.feedback).toContain('.env');
-    expect(answer.feedback).toContain('api/src/hosts');
-    expect(fake.execCalls).toEqual([]);
-    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
-    expect(await git(session, 'log', '--oneline', '--', '.env', 'api/src/hosts')).toBe('');
+    await session.gateway.prompt({ prompt: '메모 필드만 추가해줘' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    expect(getSnapshot(session.id)!.checkpoints[0]!.files).toEqual(['api/src/Order.java']);
     await stopSession(session.id);
   }, 30_000);
 
-  it('훅보다 먼저 생긴 다루지 못하는 경로도 통과시키지 않는다', async () => {
+  it('실행보다 먼저 있던 다루지 못하는 경로도 봐주지 않는다(체크포인트에 실리게 두지 않는다)', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
-    // 쓰기 직전의 훅이 처음 불리기 전에 이미 있다(사람이 셸에서 만들었거나, 훅이 닿지 못한 사이에 생겼다)
+    // 쓰기 직전의 훅이 처음 불리기 전에 이미 있다(사람이 셸에서 만들었다)
     await edit(session, '.env', 'API_KEY=secret\n');
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
@@ -840,6 +744,8 @@ describe('체크포인트에는 검증한 내용만 들어간다 (검증과 커�
     }
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
     expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    // 통과하지 못한 채 끝났으니 되돌린다
+    expect(await fileOf(session)).toBe(ORIGINAL);
     await stopSession(session.id);
   }, 30_000);
 });
@@ -906,12 +812,16 @@ describe('요청의 경계', () => {
     await stopSession(session.id);
   }, 30_000);
 
-  it('CLI가 끝나면 열려 있던 실행을 닫는다. 검증에 막힌 채 끝났으면 그 사유로 실패를 남긴다', async () => {
+  it('CLI가 끝나면 열려 있던 실행을 닫고 변경을 되돌린다. 검증에 막힌 채 끝났으면 그 사유로 실패를 남긴다', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '첫 요청' });
+    await write(session, 'api/src/Order.java', 'class Order { String half; }\n');
     await session.gateway.sessionEnd({ reason: 'prompt_input_exit' });
     expect(session.ofType('run_finished')[0]).toMatchObject({ status: 'cancelled' });
+    expect(session.ofType('run_finished')[0]!.summary).toContain('CLI가 끝나 요청을 닫았습니다');
+    expect(session.ofType('run_finished')[0]!.summary).toContain('바뀐 파일 1개를 되돌렸습니다');
     expect(getSnapshot(session.id)!.running).toBe(false);
+    expect(await fileOf(session)).toBe(ORIGINAL);
 
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo }\n');
@@ -922,6 +832,7 @@ describe('요청의 경계', () => {
     expect(finished.status).toBe('failed');
     expect(finished.summary).toContain('검증을 통과하지 못한 채 CLI가 끝났습니다');
     expect(finished.summary).toContain('unit');
+    expect(await fileOf(session)).toBe(ORIGINAL);
     // 닫힌 뒤의 종료 알림은 아무 일도 하지 않는다
     await session.gateway.sessionEnd({});
     expect(session.ofType('run_finished')).toHaveLength(2);

@@ -140,7 +140,7 @@ export function TerminalPanel({ sessionId, ready, gate }: { sessionId: string; r
         )}
       </div>
       <p className="border-b border-line px-5 py-2 text-xs text-muted">
-        이 세션의 에이전트 컨테이너 안입니다. 작업 폴더는 <code>/workspace</code>이고 이 컴퓨터의 다른 파일은 보이지 않습니다. 로그인은 프로젝트마다 한 번 합니다. 요청을 보내면 턴이 끝날 때 검증하고, 통과하면 체크포인트를 남깁니다.
+        이 세션의 에이전트 컨테이너 안입니다. 작업 폴더는 <code>/workspace</code>이고 이 컴퓨터의 다른 파일은 보이지 않습니다. 로그인은 프로젝트마다 한 번 합니다. 요청을 보내면 턴이 끝날 때 검증하고, 통과하면 체크포인트를 남깁니다. 끝내 통과하지 못하면 대화 창의 요청처럼 변경을 되돌립니다.
       </p>
       {gate && (
         <p className="flex items-center gap-2 border-b border-line px-5 py-2 text-xs" role="status" aria-label="검증 상태">

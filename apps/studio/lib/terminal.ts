@@ -77,9 +77,9 @@ export function terminalGateStatus(chat: readonly ChatItem[]): TerminalGateStatu
     case 'done':
       return gate ? { tone: 'ok', text: '마지막 요청이 검증을 통과했습니다. 체크포인트로 남겼습니다' } : { tone: 'idle', text: '마지막 요청은 파일을 바꾸지 않고 끝났습니다' };
     case 'failed':
-      return { tone: 'fail', text: '마지막 요청이 검증을 통과하지 못했습니다. 변경은 작업 폴더에 남아 있고 체크포인트는 없습니다' };
+      return { tone: 'fail', text: '마지막 요청이 검증을 통과하지 못해 변경을 되돌렸습니다. 대화 탭에서 사유를 보고 되살릴 수 있습니다' };
     case 'cancelled':
-      return { tone: 'idle', text: '마지막 요청을 닫았습니다. 변경은 작업 폴더에 남아 있고 체크포인트는 없습니다' };
+      return { tone: 'idle', text: '마지막 요청을 닫고 변경을 되돌렸습니다. 대화 탭에서 되살릴 수 있습니다' };
     default:
       return { tone: 'fail', text: '마지막 요청을 검증하지 못했습니다. 대화 창에서 사유를 확인하세요' };
   }

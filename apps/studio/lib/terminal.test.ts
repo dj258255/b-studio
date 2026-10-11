@@ -65,8 +65,8 @@ describe('터미널에서 보낸 마지막 요청의 검증 상태 (이슈 #673 
   });
 
   it('끝난 요청: 실패·닫힘·검증 못 함을 통과처럼 보이지 않게 한다. 파일을 바꾸지 않은 요청은 체크포인트를 말하지 않는다', () => {
-    expect(terminalGateStatus(chatOf([started, verifying, verified(true), check(false), finished('failed')]))).toMatchObject({ tone: 'fail', text: expect.stringContaining('체크포인트는 없습니다') });
-    expect(terminalGateStatus(chatOf([started, finished('cancelled')]))).toMatchObject({ tone: 'idle', text: expect.stringContaining('닫았습니다') });
+    expect(terminalGateStatus(chatOf([started, verifying, verified(true), check(false), finished('failed')]))).toMatchObject({ tone: 'fail', text: expect.stringContaining('변경을 되돌렸습니다') });
+    expect(terminalGateStatus(chatOf([started, finished('cancelled')]))).toMatchObject({ tone: 'idle', text: expect.stringContaining('닫고 변경을 되돌렸습니다') });
     expect(terminalGateStatus(chatOf([started, finished('error')]))).toMatchObject({ tone: 'fail', text: expect.stringContaining('검증하지 못했습니다') });
     const answered = terminalGateStatus(chatOf([started, finished('done')]))!;
     expect(answered.tone).toBe('idle');

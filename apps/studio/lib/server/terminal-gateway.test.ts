@@ -38,8 +38,13 @@ function post(url: string, token: string, body: unknown, host?: string): Promise
 }
 
 describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () => {
-  it('요청을 막을 때만 막는 꼴을 낸다', async () => {
+  it('요청을 막을 때만 막는 꼴을 낸다. 알릴 것이 있으면 그 요청의 맥락에 덧붙인다', async () => {
     expect(await terminalHookRoutes(handlers())['/prompt']({ prompt: '고쳐줘' })).toEqual({});
+    expect(await terminalHookRoutes(handlers({ prompt: async () => ({ note: '앞 요청의 변경을 되돌렸습니다' }) }))['/prompt']({})).toEqual({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: '앞 요청의 변경을 되돌렸습니다' },
+    });
+    // 막는 요청에는 덧붙이지 않는다(에이전트에게 가지 않는 요청이다)
+    expect(await terminalHookRoutes(handlers({ prompt: async () => ({ blocked: '실행 중', note: '알림' }) }))['/prompt']({})).toEqual({ decision: 'block', reason: '실행 중' });
     expect(await terminalHookRoutes(handlers({ prompt: async () => ({ blocked: '대화 창의 요청이 실행 중입니다' }) }))['/prompt']({})).toEqual({ decision: 'block', reason: '대화 창의 요청이 실행 중입니다' });
   });
 

@@ -18,8 +18,8 @@ import { AGENT_GATEWAY_HOST, type AgentGatewayAddress, type AgentHookEvent } fro
 export interface TerminalGatewayHandlers {
   /** 대화가 시작될 때 CLI의 맥락에 넣을 글. 없으면 넣지 않는다 */
   note(): Promise<string | undefined>;
-  /** 사용자가 요청을 보냈다. blocked를 주면 요청을 막고 그 글을 사용자에게 보인다 */
-  prompt(input: HookInput): Promise<{ blocked?: string }>;
+  /** 사용자가 요청을 보냈다. blocked를 주면 요청을 막고 그 글을 사용자에게 보인다. note는 이 요청의 맥락에 덧붙여 에이전트에게 알린다 */
+  prompt(input: HookInput): Promise<{ blocked?: string; note?: string }>;
   /** 파일을 바꿀 수 있는 도구를 쓰기 직전. deny를 주면 도구를 막고, message는 막지 않고 사용자에게만 알린다 */
   preTool(input: HookInput): Promise<{ deny?: string; message?: string }>;
   /** 턴이 끝났다. feedback을 주면 멈추지 못하게 하고 그 글을 에이전트에게 돌려준다. message는 사용자에게만 보인다 */
@@ -49,8 +49,9 @@ export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/
       return note ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } } : {};
     },
     '/prompt': async (input) => {
-      const { blocked } = await handlers.prompt(input);
-      return blocked ? { decision: 'block', reason: blocked } : {};
+      const { blocked, note } = await handlers.prompt(input);
+      if (blocked) return { decision: 'block', reason: blocked };
+      return note ? { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: note } } : {};
     },
     '/pre-tool': async (input) => {
       const { deny, message } = await handlers.preTool(input);

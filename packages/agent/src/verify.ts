@@ -91,8 +91,6 @@ export interface VerifyOptions {
   allowBreaking: boolean;
   fetcher?: ContractFetcher;
   start?: StartOptions;
-  /** 비교하려고 읽은 지금의 계약을 건네받는다(서비스마다 한 번). 통과한 검증의 계약을 다음 기준으로 남기는 데 쓴다 */
-  onContract?: (service: string, contract: OpenApiDocument) => void;
 }
 
 /**
@@ -102,7 +100,7 @@ export interface VerifyOptions {
  *  2. 계약을 다시 추출해 세션 시작 시점과 비교했을 때 호환을 깨지 않는지
  */
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
-  const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start, onContract } = options;
+  const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
   const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
   const { sync, restarted, unverifiedFiles, skippedOff, specError, addedAddons, addonError } = await restartServicesFor(sandbox, project, changedFiles, start);
   const platformFailure = platformFailureOf(sync, restarted);
@@ -120,7 +118,6 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
       try {
         const endpoint = await sandbox.endpoint(name);
         const current = await fetcher(new URL(service.contract!.extract, endpoint.url).toString());
-        onContract?.(name, current);
         return { service: name, changes: diffContracts(baselines.get(name), current) };
       } catch (error) {
         return { service: name, changes: [], error: describe(error) };

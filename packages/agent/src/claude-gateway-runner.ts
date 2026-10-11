@@ -104,6 +104,7 @@ export function terminalGatewayNote(project: LoadedProject): string {
     `이 컨테이너에는 프로젝트의 런타임과 의존성이 없다. 빌드·테스트·서버 명령은 여기의 셸이 아니라 mcp__${SERVER}__run_in_service로 서비스 컨테이너 안에서 돌린다. 쓸 수 있는 b-studio 도구: ${tools.join(', ')}.`,
     '.git은 읽기 전용이다. 커밋하지 않는다. 턴을 끝내면 b-studio가 검증 게이트(서비스 재시작, API 계약, 선언한 확인)를 돌리고, 통과하면 체크포인트(커밋)를 남긴다.',
     '검증이 실패하면 결과가 "Stop hook feedback"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.',
+    '끝내 통과하지 못하면 b-studio가 이번 요청의 변경을 되돌린다(보관본은 남는다). 되돌렸다는 알림을 받으면 파일을 다시 읽는다.',
     '사용자에게 보이는 글은 한국어로 쓴다.',
   ].join('\n');
 }
@@ -280,8 +281,6 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     browserRunner: options.browserRunner,
     saveArtifact: options.saveArtifact,
     onBrowserFrame: options.onBrowserFrame,
-    baselines: options.contractBaselines,
-    onContractsVerified: options.onContractsVerified,
     signal,
     onServiceStatus,
     onEvent,

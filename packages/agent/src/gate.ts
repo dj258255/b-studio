@@ -165,19 +165,6 @@ export interface GateOptions {
    * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다
    */
   reloadProject?: () => Promise<LoadedProject>;
-  /**
-   * 이미 잡아 둔 계약 기준(서비스 → 변경 전 계약). 주면 지금 계약을 다시 읽지 않고 이것과 견준다.
-   * 기준은 "마지막 체크포인트의 계약"이어야 한다. 실패한 실행이 변경을 되돌리지 않고 끝나는 자리(세션 터미널)에서는
-   * 다음 실행이 기준을 새로 잡으면 남은 변경이 기준에 들어가, 계약을 깨는 변경이 두 번째 실행에서 통과한다.
-   * 그런 자리에서는 마지막으로 검증을 통과한 체크포인트의 계약(onContractsVerified가 건넨 것)을 넘긴다
-   */
-  baselines?: ReadonlyMap<string, OpenApiDocument>;
-  /**
-   * 검증이 통과할 때마다, 그 검증이 본 계약(서비스 → 계약)을 건네받는다. 이번에 읽지 않은 서비스는 기준의 것이 그대로 들어 있다.
-   * 호출자가 체크포인트 곁에 남겨 두었다가 다음 실행의 기준(baselines)으로 넘긴다. 체크포인트 뒤에 서비스에서 다시 읽지 않는다 —
-   * 그 사이에 코드가 또 바뀌었을 수 있고, 여기서 건네는 것은 게이트가 실제로 검증한 바로 그 계약이다
-   */
-  onContractsVerified?: (contracts: ReadonlyMap<string, OpenApiDocument>) => void;
 }
 
 /**
@@ -208,8 +195,6 @@ export class VerificationGate {
   readonly #baselines: ReadonlyMap<string, OpenApiDocument>;
   /** 게이트 재시도 상한. 기본은 생성 시 받은 값이고, 승격이 새 예산을 주면 커진다 */
   #maxAttempts: number;
-  /** 지금 도는 검증이 서비스에서 읽은 계약 */
-  #currentContracts = new Map<string, OpenApiDocument>();
   #verifiedVersion = 0;
   #failedServices = new Set<string>();
   /** 화면 확인 이름 → 단계 결과. 실패해 예외로 끝나도 실패 단계의 스크린샷을 남기려고 따로 모은다 */
@@ -242,18 +227,7 @@ export class VerificationGate {
   static async create(options: GateOptions): Promise<VerificationGate> {
     // 요구사항 문서의 실행 전 모습도 같은 이유로 여기서 고정한다(러너가 실행을 시작할 때 이미 불렀다면 그 값이 유지된다)
     options.workspace.snapshotRead(REQUIREMENTS_FILE);
-    if (!options.baselines) return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
-    // 받은 기준에 없는 서비스(기준을 남긴 뒤에 계약을 내놓기 시작했거나 그때 꺼져 있던 서비스)는 지금 계약으로 채운다.
-    // 기준이 아예 없으면 그 서비스의 모든 항목이 "추가"로 보여 이번 실행에서 빠지는 것도 잡지 못한다. 받은 기준이 있는 서비스는 그대로 둔다
-    const missing = options.project.managed.some(([name, service]) => service.contract && !options.project.offServices?.has(name) && !options.baselines!.has(name));
-    if (!missing) return new VerificationGate(options, options.baselines);
-    const live = await captureBaselines(options.sandbox, options.project, options.fetcher);
-    return new VerificationGate(options, new Map([...live, ...options.baselines]));
-  }
-
-  /** 이 게이트가 견주는 계약 기준 */
-  get baselines(): ReadonlyMap<string, OpenApiDocument> {
-    return this.#baselines;
+    return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
   }
 
   /**
@@ -300,11 +274,8 @@ export class VerificationGate {
    * 멈추기 전에 한 번 돌리는 검증)에서도 "마지막 검증이 통과했는가"를 나중에 물을 수 있어야 한다
    */
   async check(): Promise<GateOutcome> {
-    this.#currentContracts = new Map();
     const outcome = await this.#check();
     this.lastOutcome = outcome.kind;
-    // 이번 검증이 서비스에서 계약을 읽고 통과했을 때만 건넨다(바뀐 파일이 없어 검증 없이 지난 통과는 본 계약이 없다)
-    if (outcome.kind === 'pass' && this.#currentContracts.size > 0) this.#options.onContractsVerified?.(new Map([...this.#baselines, ...this.#currentContracts]));
     return outcome;
   }
 
@@ -335,7 +306,6 @@ export class VerificationGate {
         allowBreaking,
         fetcher,
         start: { signal, onStatus: onServiceStatus },
-        onContract: (service, contract) => this.#currentContracts.set(service, contract),
       });
     let report = await verify();
     // 샌드박스·도커 쪽 실패는 잠깐의 경합일 수 있다(서비스 둘이 함께 재시작될 때 등). 모델을 거치지 않고 한 번만 그대로 다시 해 본다
