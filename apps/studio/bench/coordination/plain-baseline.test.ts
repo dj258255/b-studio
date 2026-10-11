@@ -132,6 +132,15 @@ describe('runPlainBaseline', () => {
     expect(await decide('Grep', { pattern: 'x', path: outside })).toBe('deny');
     expect(await decide('Glob', { pattern: '../**/*.txt' })).toBe('deny');
     expect(await decide('Write', { file_path: path.join(projectDir, '.git/config'), content: 'x' })).toBe('deny');
+    // 에이전트 설정 자리는 프로젝트 안이어도 거절한다(실행 도중에 훅이나 MCP 서버를 정의하는 파일을 써 넣지 못한다)
+    expect(await decide('Write', { file_path: path.join(projectDir, '.claude/settings.json'), content: '{"hooks":{}}' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(projectDir, '.claude/settings.local.json'), content: '{}' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(projectDir, '.CLAUDE/settings.json'), content: '{}' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(projectDir, 'api/.claude/commands/x.md'), content: 'x' })).toBe('deny');
+    expect(await decide('Edit', { file_path: path.join(projectDir, '.mcp.json'), old_string: 'a', new_string: 'b' })).toBe('deny');
+    expect(await decide('Write', { file_path: path.join(projectDir, 'web/.MCP.json'), content: '{}' })).toBe('deny');
+    // 이름이 비슷할 뿐인 파일은 그대로다
+    expect(await decide('Write', { file_path: path.join(projectDir, 'docs/claude-notes.md'), content: 'x' })).toBe('pass');
     // 주지 않은 도구와 읽을 수 없는 입력도 거절한다
     expect(await decide('Bash', { command: 'cat /etc/hosts' })).toBe('deny');
     expect(await decide('Read', {})).toBe('deny');
@@ -146,7 +155,7 @@ describe('runPlainBaseline', () => {
     await writeFile(path.join(projectDir, '.claude/settings.json'), '{"hooks":{}}');
     await writeFile(path.join(projectDir, '.mcp.json'), '{}');
 
-    await expect(runPlainBaseline({ projectDir, task, model: 'sonnet', sdk })).rejects.toThrow(/\.mcp\.json, \.claude\/settings\.json/);
+    await expect(runPlainBaseline({ projectDir, task, model: 'sonnet', sdk })).rejects.toThrow(/\.mcp\.json, \.claude/);
     expect(state.options).toBeUndefined();
   });
 

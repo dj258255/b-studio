@@ -168,12 +168,30 @@ export async function runPlainBaseline({
  * 통과면 아무 결정도 돌려주지 않는다(허용할지는 CLI의 권한이 한 번 더 정한다)
  */
 export function confineToProject(workspace: Workspace): HookCallback {
+  const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: `[벤치 P0] ${reason}` } });
   return async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     const denied = await guardBuiltinTool(workspace, input.tool_name, input.tool_input).catch(() => '경로를 확인하지 못했습니다');
-    if (denied === undefined) return {};
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[벤치 P0] ${denied}` } };
+    if (denied !== undefined) return deny(denied);
+    // 에이전트 설정 자리는 프로젝트 안이어도 받지 않는다. 이 실행은 프로젝트 설정을 싣는다(settingSources) — 실행 전에 그런 파일이
+    // 없는 것을 확인하지만, 실행 도중에 모델이 훅이나 MCP 서버를 정의하는 파일을 써 넣으면 호스트에서 명령이 돌 수 있다
+    const target = agentConfigPath(workspace.root, input.tool_input);
+    if (target !== undefined) return deny(`${target}: 에이전트 설정 경로는 다룰 수 없습니다`);
+    return {};
   };
+}
+
+/** 도구 입력이 가리키는 경로가 에이전트 설정 자리(.claude 폴더, .mcp.json)면 그 상대 경로. 대소문자를 가리지 않는다(macOS의 파일 시스템) */
+function agentConfigPath(root: string, toolInput: unknown): string | undefined {
+  const input = typeof toolInput === 'object' && toolInput !== null ? (toolInput as Record<string, unknown>) : {};
+  for (const field of ['file_path', 'path']) {
+    const value = input[field];
+    if (typeof value !== 'string') continue;
+    const relative = path.relative(root, value);
+    const segments = relative.split(path.sep).map((segment) => segment.toLowerCase());
+    if (segments.includes('.claude') || segments.at(-1) === '.mcp.json') return relative;
+  }
+  return undefined;
 }
 
 export function buildPlainRequest(task: BenchTask): string {
@@ -207,7 +225,8 @@ function diffFiles(before: Map<string, string>, after: Map<string, string>): str
 
 /** 복사본 안에서 훅·MCP 서버를 정의할 수 있는 에이전트 설정 파일(있으면 실행을 거부한다) */
 export async function projectAgentSettings(projectDir: string): Promise<string[]> {
-  const candidates = ['.mcp.json', '.claude/settings.json', '.claude/settings.local.json'];
+  // .claude 폴더가 통째로 있으면 돌리지 않는다. 설정 파일 말고도 그 아래의 명령·에이전트·스킬 정의가 실린다
+  const candidates = ['.mcp.json', '.claude'];
   const found: string[] = [];
   for (const relative of candidates) {
     try {
