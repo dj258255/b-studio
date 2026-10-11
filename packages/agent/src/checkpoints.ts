@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
@@ -236,9 +236,6 @@ const BACKUP_KEEP_BYTES = 200 * 1024 * 1024;
 const EXCLUDED_DIRNAME = 'b-studio/excluded';
 /** 생성 파일은 작아서(studio.yaml 등 텍스트 몇 개) discard 백업(10개)보다 훨씬 넉넉하게 남겨도 된다 */
 const EXCLUDED_KEEP_MAX = 200;
-/** 체크포인트마다 게이트가 검증한 API 계약을 두는 자리(저장소의 상태 폴더 아래 — 컨테이너에는 가려져 있다) */
-const CONTRACTS_DIRNAME = 'b-studio/contracts';
-const CONTRACTS_KEEP_MAX = 200;
 
 /**
  * 세션 작업 복사본의 Git 기록으로 체크포인트를 관리한다.
@@ -510,41 +507,6 @@ export class CheckpointStore {
     const checkpoint = await this.#checkpoint('HEAD');
     await this.refreshExcludedSnapshot(checkpoint.sha);
     return checkpoint;
-  }
-
-  /**
-   * 체크포인트의 API 계약(서비스 → 계약)을 그 체크포인트 곁에 남긴다. 게이트가 그 체크포인트를 통과시킬 때 실제로 본 계약이어야 한다.
-   * 다음 실행의 계약 비교가 이것을 기준으로 삼는다 — 작업 복사본에 검증되지 않은 변경이 남아 있을 때, 지금 서비스가 내놓는 계약을
-   * 기준으로 읽으면 그 변경이 기준에 들어가기 때문이다. git 기록이 아니라 저장소의 상태 폴더에 둔다(push에 실리지 않는다)
-   */
-  async saveContracts(sha: string, contracts: ReadonlyMap<string, unknown>): Promise<void> {
-    const commit = await this.#resolve(sha);
-    const root = path.join(this.gitDir, CONTRACTS_DIRNAME);
-    await mkdir(root, { recursive: true });
-    const target = path.join(root, `${commit}.json`);
-    const staged = `${target}.${process.pid}.tmp`;
-    await writeFile(staged, JSON.stringify(Object.fromEntries(contracts)));
-    await rename(staged, target);
-    // 오래된 것부터 지운다(체크포인트 목록보다 넉넉히 남긴다)
-    const files = (await readdir(root).catch(() => [] as string[])).filter((name) => name.endsWith('.json'));
-    if (files.length > CONTRACTS_KEEP_MAX) {
-      const aged = await Promise.all(files.map(async (name) => ({ name, at: (await stat(path.join(root, name)).catch(() => undefined))?.mtimeMs ?? 0 })));
-      for (const { name } of aged.sort((a, b) => a.at - b.at).slice(0, files.length - CONTRACTS_KEEP_MAX)) await rm(path.join(root, name), { force: true });
-    }
-  }
-
-  /** 체크포인트 곁에 남긴 API 계약. 남긴 적이 없거나 읽을 수 없으면 undefined(없는 것을 빈 계약으로 읽지 않는다) */
-  async contractsAt(sha: string): Promise<Map<string, unknown> | undefined> {
-    if (!SHA.test(sha) || sha.length !== 40) return undefined;
-    const text = await readFile(path.join(this.gitDir, CONTRACTS_DIRNAME, `${sha}.json`), 'utf8').catch(() => undefined);
-    if (text === undefined) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
-      return new Map(Object.entries(parsed));
-    } catch {
-      return undefined;
-    }
   }
 
   /**

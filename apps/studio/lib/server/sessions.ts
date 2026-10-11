@@ -313,6 +313,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
+import { readContractRecord, saveContractRecord } from './contract-records';
 import { AGENT_READ_TOOLS, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
@@ -7226,7 +7227,7 @@ const CONTRACT_LOOKBACK = 200;
 async function keepVerifiedContracts(session: Session, contracts: ContractSet | undefined): Promise<void> {
   const head = session.snapshot.checkpoints[0]?.sha;
   if (!head || !contracts || contracts.size === 0) return;
-  await session.checkpoints.saveContracts(head, contracts).catch((error: unknown) => console.error('[b-studio] 체크포인트의 계약 기록을 남기지 못했습니다', error));
+  await saveContractRecord(stateDirOf(session.snapshot), head, contracts).catch((error: unknown) => console.error('[b-studio] 체크포인트의 계약 기록을 남기지 못했습니다', error));
 }
 
 /**
@@ -7240,7 +7241,7 @@ async function keepVerifiedContracts(session: Session, contracts: ContractSet | 
  */
 async function contractBaselinesFor(session: Session, runId: string): Promise<ContractSet | undefined> {
   for (const checkpoint of session.snapshot.checkpoints.slice(0, CONTRACT_LOOKBACK)) {
-    const kept = await session.checkpoints.contractsAt(checkpoint.sha);
+    const kept = await readContractRecord(stateDirOf(session.snapshot), checkpoint.sha);
     if (kept) return kept as ContractSet;
   }
   // 계약을 내놓는 서비스가 없으면 견줄 것도 없다
@@ -7330,7 +7331,7 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     //  - 기록이 없고 변경이 남아 있으면 지금 계약을 기준으로 읽지 않는다. 기록이 있는 가장 가까운 체크포인트의 것을 쓴다
     const head = session.snapshot.checkpoints[0]?.sha;
     const dirty = (await changesOutsideTools(session)).length > 0;
-    const exact = head ? ((await session.checkpoints.contractsAt(head)) as ContractSet | undefined) : undefined;
+    const exact = head ? ((await readContractRecord(stateDirOf(session.snapshot), head)) as ContractSet | undefined) : undefined;
     const kept = exact ?? (dirty ? await contractBaselinesFor(session, run.id) : undefined);
     // CLI는 b-studio 도구를 거치지 않고 파일을 고친다. 변경은 작업 복사본의 상태로만 안다.
     //  - 실행 전부터 있던 변경도 검증 대상이다(ADR-131). 게이트가 다룰 수 없는 경로는 처음부터 있었어도 봐주지 않는다:
@@ -7358,7 +7359,7 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
       },
     });
     // 체크포인트 그대로인 상태에서 방금 읽은 계약은 그 체크포인트의 계약이다. 이 실행이 실패해 변경을 남겨도 다음 실행이 이것과 견준다
-    if (!kept && !dirty && head && gate.baselines.size > 0) await session.checkpoints.saveContracts(head, gate.baselines).catch(() => {});
+    if (!kept && !dirty && head && gate.baselines.size > 0) await keepVerifiedContracts(session, gate.baselines);
     const context: ToolContext = {
       project,
       selfCheck: selfCheckMode(),
