@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionSnapshot } from "@/lib/studio-events";
 import { ChatDraftProvider, type ChatDraft } from "./chat-draft-context";
 import { ChatPanel } from "./chat-panel";
@@ -10,7 +10,12 @@ import { ElementSelectionProvider, type ElementSelection } from "./selection-con
 import { SessionAccessProvider, type SessionAccess } from "./session-access";
 import { RequirementsImportProvider, type RequirementsImport, type RequirementsImportTarget } from "./requirements-import-context";
 import { SessionHeader } from "./session-header";
+import { TerminalPanel } from "./terminal-panel";
+import { readAgentSurface, writeAgentSurface, type AgentSurface } from "@/lib/terminal";
 import { useSession } from "./use-session";
+
+/** 브라우저에 기억해 둔 값은 이 화면이 떠 있는 동안 바깥에서 바뀌지 않는다. 처음 한 번 읽으려고만 구독한다 */
+const subscribeToNothing = (): (() => void) => () => {};
 
 export function Workbench({ initial, access }: { initial: SessionSnapshot; access: SessionAccess }) {
   const view = useSession(initial);
@@ -49,6 +54,18 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
     [requirementsImportTarget],
   );
 
+  // 에이전트에게 일을 시키는 자리: 대화 패널이거나, 컨테이너 안의 CLI에 붙는 터미널(실험, 이슈 #673).
+  // 고른 자리는 브라우저에 기억한다. 서버가 그린 첫 화면과 어긋나지 않게 붙은 뒤에 읽는다
+  const terminalAvailable = view.snapshot.terminal === true;
+  const remembered = useSyncExternalStore<AgentSurface>(subscribeToNothing, () => readAgentSurface(window.localStorage), () => "chat");
+  const [chosen, setChosen] = useState<AgentSurface>();
+  const surface = chosen ?? remembered;
+  const chooseSurface = (next: AgentSurface): void => {
+    setChosen(next);
+    writeAgentSurface(window.localStorage, next);
+  };
+  const showTerminal = terminalAvailable && surface === "terminal";
+
   return (
     <SessionAccessProvider value={access}>
       <ElementSelectionProvider value={elements}>
@@ -58,9 +75,36 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
               {/* 헤더·미리보기·대화를 바탕 위에 떠 있는 시트로 두어, 뒤의 빛이 유리 표면 사이로 보이게 한다 */}
               <div className="grid h-dvh grid-rows-[auto_minmax(0,1fr)] gap-3 p-3 text-ink">
                 <SessionHeader snapshot={view.snapshot} />
-                <div className="grid min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_27rem] lg:grid-rows-1">
+                {/* 터미널은 글자 칸이 넉넉해야 해서 대화보다 넓게 준다 */}
+                <div className={`grid min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3 lg:grid-rows-1 ${showTerminal ? "lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" : "lg:grid-cols-[minmax(0,1fr)_27rem]"}`}>
                   <PreviewPanel view={view} />
-                  <ChatPanel view={view} />
+                  <div className="flex min-h-0 flex-col gap-2">
+                    {terminalAvailable && (
+                      <div className="glass flex gap-1 self-start rounded-control p-1" role="tablist" aria-label="에이전트와 일하는 자리">
+                        {(["chat", "terminal"] as const).map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            role="tab"
+                            aria-selected={surface === option}
+                            onClick={() => chooseSurface(option)}
+                            className={`rounded-control px-3 py-1 text-sm font-medium ${surface === option ? "bg-ink text-panel" : "text-muted hover:text-ink"}`}
+                          >
+                            {option === "chat" ? "대화" : "터미널"}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {/* 대화 패널은 숨기기만 한다. 지우면 입력하던 글과 형제 패널이 등록해 둔 채우기 함수를 잃는다 */}
+                    <div className={`min-h-0 flex-1 ${showTerminal ? "hidden" : "grid"}`}>
+                      <ChatPanel view={view} />
+                    </div>
+                    {showTerminal && (
+                      <div className="grid min-h-0 flex-1">
+                        <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </RequirementsImportProvider>

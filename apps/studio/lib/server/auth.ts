@@ -238,6 +238,18 @@ export function isSameOrigin(headers: Headers): boolean {
   }
 }
 
+/**
+ * 요청이 이 컴퓨터의 주소(127.0.0.1·localhost·::1)로 들어왔는가. Host 헤더로 본다.
+ * 인증이 없는 개인 PC 모드에서 같은 출처 검사(isSameOrigin)만으로는 DNS 리바인딩을 막지 못한다: 다른 사이트가 자기 도메인을
+ * 127.0.0.1로 풀리게 하면 브라우저는 그 도메인을 Origin과 Host 양쪽에 넣어 보내고, 둘이 같으니 같은 출처로 보인다.
+ * Host는 브라우저의 스크립트가 바꿀 수 없으므로(x-forwarded-host는 바꿀 수 있다) 이 값만 본다.
+ */
+export function isLoopbackHost(headers: Headers): boolean {
+  const host = (headers.get('host') ?? '').trim().toLowerCase();
+  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.replace(/:\d+$/, '');
+  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]';
+}
+
 /** 로그인 뒤 돌아갈 경로. 다른 사이트로 보내는 주소("//evil", "https://…")는 첫 화면으로 바꾼다 */
 export function safeNextPath(value: string | undefined): string {
   if (!value || !value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\')) return '/';
