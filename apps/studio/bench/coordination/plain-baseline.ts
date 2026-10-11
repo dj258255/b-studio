@@ -5,12 +5,17 @@
  * 도구는 파일 도구(Read·Edit·Write·Glob·Grep)만 준다. **Bash·WebFetch·WebSearch·Task가 없어** 모델이 스스로
  * 서비스를 띄우거나 명령을 돌려 확인할 수 없다. 그래서 인수 검사는 뒤에서 스튜디오가 세션만 띄워 확인한다(run.ts).
  * 이 모듈은 파일 변경과 토큰만 잰다 — 그래서 "Bash가 없어 스스로 실행해 볼 수 없다"는 한계가 결과에 그대로 남는다.
+ *
+ * 파일 도구는 프로젝트 복사본 안으로 가둔다(#671). 허용 목록에 내장 도구의 이름만 넣으면 경로와 무관하게 허용된다 —
+ * 실측(SDK, CLI 2.1.296)에서 복사본 밖의 파일을 읽고, 밖에 쓰고, 복사본 안의 링크를 거쳐서도 밖에 썼다. 그래서 관문 러너
+ * (ADR-168)와 같은 두 겹을 쓴다: 편집 자동 수락 모드(작업 폴더 밖은 권한을 물어야 하고, 물을 사람이 없어 거절된다)와,
+ * 도구를 쓰기 직전에 경로를 보는 훅(프로젝트 밖, 링크를 거치는 경로, `.git`·`.env`·생성물을 거절한다).
  */
 import { createHash } from 'node:crypto';
 import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { query, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { ClaudeCodeUsageTracker, describeResultFailure, type AgentUsage } from '@b-studio/agent';
+import { query, type HookCallback, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { ClaudeCodeUsageTracker, describeResultFailure, guardBuiltinTool, Workspace, type AgentUsage } from '@b-studio/agent';
 import { isRateLimited } from './classify';
 import type { BenchTask } from './tasks';
 import { TurnRecorder, type TurnRecord } from './turns';
@@ -98,8 +103,11 @@ export async function runPlainBaseline({
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         // 파일 도구만. Bash가 없어 스스로 실행해 확인할 수 없다
         tools: [...PLAIN_BASELINE_TOOLS],
-        allowedTools: [...PLAIN_BASELINE_TOOLS],
-        permissionMode: 'dontAsk',
+        // 허용 목록에 내장 도구를 넣지 않는다. 넣으면 CLI가 경로와 무관하게 허용한다(머리 주석의 실측)
+        allowedTools: [],
+        // 작업 폴더 안의 편집만 받아들인다. 밖의 읽기·쓰기는 권한을 물어야 하고, 물을 사람이 없어 거절된다
+        permissionMode: 'acceptEdits',
+        hooks: { PreToolUse: [{ hooks: [confineToProject(new Workspace(projectDir))] }] },
         // 복사본 안의 CLAUDE.md·AGENTS.md는 그냥 Claude Code처럼 읽되, 사용자 전역 설정·훅·플러그인은 싣지 않는다
         settingSources: ['project'],
         // 프로젝트의 .mcp.json 등 다른 MCP 설정을 싣지 않는다
@@ -155,6 +163,37 @@ export async function runPlainBaseline({
 }
 
 /** 과제 전체를 한 에이전트에게 한 번에 맡긴다: 전체 요청 + api 요청 + web 요청 */
+/**
+ * 도구를 쓰기 직전에 경로를 본다. 프로젝트 복사본 밖이거나 링크를 거치거나 숨긴 경로면 거절하고, 확인하지 못해도 거절한다.
+ * 통과면 아무 결정도 돌려주지 않는다(허용할지는 CLI의 권한이 한 번 더 정한다)
+ */
+export function confineToProject(workspace: Workspace): HookCallback {
+  const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: `[벤치 P0] ${reason}` } });
+  return async (input) => {
+    if (input.hook_event_name !== 'PreToolUse') return {};
+    const denied = await guardBuiltinTool(workspace, input.tool_name, input.tool_input).catch(() => '경로를 확인하지 못했습니다');
+    if (denied !== undefined) return deny(denied);
+    // 에이전트 설정 자리는 프로젝트 안이어도 받지 않는다. 이 실행은 프로젝트 설정을 싣는다(settingSources) — 실행 전에 그런 파일이
+    // 없는 것을 확인하지만, 실행 도중에 모델이 훅이나 MCP 서버를 정의하는 파일을 써 넣으면 호스트에서 명령이 돌 수 있다
+    const target = agentConfigPath(workspace.root, input.tool_input);
+    if (target !== undefined) return deny(`${target}: 에이전트 설정 경로는 다룰 수 없습니다`);
+    return {};
+  };
+}
+
+/** 도구 입력이 가리키는 경로가 에이전트 설정 자리(.claude 폴더, .mcp.json)면 그 상대 경로. 대소문자를 가리지 않는다(macOS의 파일 시스템) */
+function agentConfigPath(root: string, toolInput: unknown): string | undefined {
+  const input = typeof toolInput === 'object' && toolInput !== null ? (toolInput as Record<string, unknown>) : {};
+  for (const field of ['file_path', 'path']) {
+    const value = input[field];
+    if (typeof value !== 'string') continue;
+    const relative = path.relative(root, value);
+    const segments = relative.split(path.sep).map((segment) => segment.toLowerCase());
+    if (segments.includes('.claude') || segments.at(-1) === '.mcp.json') return relative;
+  }
+  return undefined;
+}
+
 export function buildPlainRequest(task: BenchTask): string {
   return [task.request, task.api.request, task.web.request].join('\n');
 }
@@ -186,7 +225,8 @@ function diffFiles(before: Map<string, string>, after: Map<string, string>): str
 
 /** 복사본 안에서 훅·MCP 서버를 정의할 수 있는 에이전트 설정 파일(있으면 실행을 거부한다) */
 export async function projectAgentSettings(projectDir: string): Promise<string[]> {
-  const candidates = ['.mcp.json', '.claude/settings.json', '.claude/settings.local.json'];
+  // .claude 폴더가 통째로 있으면 돌리지 않는다. 설정 파일 말고도 그 아래의 명령·에이전트·스킬 정의가 실린다
+  const candidates = ['.mcp.json', '.claude'];
   const found: string[] = [];
   for (const relative of candidates) {
     try {
