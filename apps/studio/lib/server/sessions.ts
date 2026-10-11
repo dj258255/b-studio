@@ -7358,8 +7358,11 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
         run.verifiedContracts = contracts;
       },
     });
-    // 체크포인트 그대로인 상태에서 방금 읽은 계약은 그 체크포인트의 계약이다. 이 실행이 실패해 변경을 남겨도 다음 실행이 이것과 견준다
-    if (!kept && !dirty && head && gate.baselines.size > 0) await keepVerifiedContracts(session, gate.baselines);
+    // 체크포인트 그대로인 상태에서 방금 읽은 계약은 그 체크포인트의 계약이다. 이 실행이 실패해 변경을 남겨도 다음 실행이 이것과 견준다.
+    // 읽는 동안 파일이 바뀌었으면(앞 실행이 띄워 둔 프로세스 등) 그 계약을 체크포인트의 것으로 남기지 않는다 — 한번 남긴 기록은 계속 기준이 된다
+    if (!kept && !dirty && head && gate.baselines.size > 0 && (await changesOutsideTools(session)).length === 0 && session.snapshot.checkpoints[0]?.sha === head) {
+      await keepVerifiedContracts(session, gate.baselines);
+    }
     const context: ToolContext = {
       project,
       selfCheck: selfCheckMode(),
