@@ -1302,3 +1302,44 @@ describe('CheckpointStore 검증한 내용만 커밋한다 (이슈 #677)', () =>
     expect(await store.commit('feat: 메모', undefined, { expectStaged: prints })).toBeDefined();
   });
 });
+
+describe('CheckpointStore 체크포인트 곁의 API 계약 (이슈 #677)', () => {
+  const contracts = new Map<string, unknown>([['api', { paths: { '/api/orders': { get: {} } } }]]);
+
+  it('체크포인트마다 따로 남기고 그대로 읽는다. 남긴 적 없는 체크포인트는 없다고 답한다(빈 계약으로 읽지 않는다)', async () => {
+    const store = new CheckpointStore(root);
+    const first = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const second = (await store.commit('feat: 메모'))!;
+    await store.saveContracts(second.sha, contracts);
+
+    expect(Object.fromEntries((await store.contractsAt(second.sha))!)).toEqual(Object.fromEntries(contracts));
+    expect(await store.contractsAt(first.sha)).toBeUndefined();
+    // git 기록에도 작업 복사본에도 실리지 않는다(컨테이너에 가려지는 저장소의 상태 폴더에 둔다)
+    expect(await store.pendingFiles()).toEqual([]);
+    expect((await execFileAsync('git', ['-C', root, 'status', '--porcelain', '--ignored'])).stdout).toBe('');
+    expect(await readFile(path.join(root, '.git/b-studio/contracts', `${second.sha}.json`), 'utf8')).toContain('/api/orders');
+  });
+
+  it('없는 체크포인트에는 남기지 않는다. 짧은 id나 이상한 글자로는 읽지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    const first = await store.init();
+    await expect(store.saveContracts('0'.repeat(40), contracts)).rejects.toThrow(CheckpointError);
+    await expect(store.saveContracts('../../etc/passwd', contracts)).rejects.toThrow(CheckpointError);
+    await store.saveContracts(first.sha, contracts);
+    expect(await store.contractsAt(first.sha.slice(0, 7))).toBeUndefined();
+    expect(await store.contractsAt('../' + first.sha)).toBeUndefined();
+    expect(await store.contractsAt('HEAD')).toBeUndefined();
+  });
+
+  it('기록이 깨졌거나 꼴이 다르면 없는 것으로 본다', async () => {
+    const store = new CheckpointStore(root);
+    const first = await store.init();
+    await store.saveContracts(first.sha, contracts);
+    const file = path.join(root, '.git/b-studio/contracts', `${first.sha}.json`);
+    for (const broken of ['{깨진', '[]', '"글자"', 'null']) {
+      await writeFile(file, broken);
+      expect(await store.contractsAt(first.sha)).toBeUndefined();
+    }
+  });
+});

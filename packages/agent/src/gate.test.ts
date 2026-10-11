@@ -2857,7 +2857,39 @@ describe('이미 잡아 둔 계약 기준을 이어 쓴다 (이슈 #677)', () =>
     expect(outcome.kind).toBe('retry');
     expect(kept.report?.ok).toBe(false);
     expect(kept.baselines.get('api')).toBe(ORDERS_CONTRACT);
-    // 새로 잡은 게이트의 기준도 꺼내 다음 실행에 넘길 수 있다
     expect(fresh.baselines.get('api')).toEqual(broken);
+  });
+
+  it('통과한 검증이 본 계약을 건넨다(체크포인트 곁에 남길 것). 실패한 검증과 검증 없이 지난 통과는 건네지 않는다', async () => {
+    const added = { paths: ORDERS_CONTRACT.paths, components: { schemas: { OrderResponse: { properties: { id: { type: 'integer' }, memo: { type: 'string' }, note: { type: 'string' } } } } } };
+    const removed = { paths: ORDERS_CONTRACT.paths, components: { schemas: { OrderResponse: { properties: { id: { type: 'integer' } } } } } };
+    let current: unknown = added;
+    const handed: Array<Record<string, unknown>> = [];
+    const workspace = new Workspace(project.root);
+    const gate = await VerificationGate.create({
+      project,
+      sandbox: fakeSandbox(project, [true, true, true, true]),
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => current as typeof ORDERS_CONTRACT,
+      onEvent: () => {},
+      // 기준에는 이번에 읽지 않을 다른 서비스의 계약도 들어 있다
+      baselines: new Map([['api', ORDERS_CONTRACT], ['billing', { paths: { '/pay': { post: {} } } }]]),
+      onContractsVerified: (contracts) => handed.push(Object.fromEntries(contracts)),
+    });
+    // 바뀐 파일이 없으면 서비스에서 계약을 읽지 않는다. 건넬 것이 없다
+    expect((await gate.check()).kind).toBe('pass');
+    expect(handed).toEqual([]);
+
+    workspace.trackExternalChanges(['api/src/Order.java']);
+    current = removed;
+    expect((await gate.check()).kind).toBe('retry');
+    expect(handed).toEqual([]);
+
+    current = added;
+    expect((await gate.check()).kind).toBe('pass');
+    // 읽은 서비스는 방금 본 계약으로, 읽지 않은 서비스는 기준의 것 그대로
+    expect(handed).toEqual([{ api: added, billing: { paths: { '/pay': { post: {} } } } }]);
   });
 });

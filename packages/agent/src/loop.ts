@@ -247,6 +247,8 @@ export interface RunAgentOptions {
    * 계약을 깨는 변경이 "원래 그랬던 것"이 되어 통과한다(GateOptions.baselines). 모든 러너가 같은 옵션을 받는다
    */
   contractBaselines?: import('./gate').GateOptions['baselines'];
+  /** 검증이 통과할 때 그 검증이 본 계약을 건네받는다(GateOptions.onContractsVerified). 호출자가 체크포인트 곁에 남긴다 */
+  onContractsVerified?: import('./gate').GateOptions['onContractsVerified'];
   /**
    * 이전 요청부터 이어지는 대화 기록. 넘기면 이번 실행의 메시지가 여기에 이어 붙는다.
    * 실행 중 예외가 나면 이번 실행분은 되돌려 다음 요청이 깨진 대화로 시작하지 않게 한다.
@@ -404,6 +406,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       saveArtifact,
       onBrowserFrame,
       baselines: options.contractBaselines,
+      onContractsVerified: options.onContractsVerified,
       signal,
       onServiceStatus,
       onEvent,

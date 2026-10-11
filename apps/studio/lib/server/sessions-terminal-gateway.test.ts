@@ -593,6 +593,49 @@ describe('실패한 실행이 남긴 변경은 다음 실행에서도 같은 기
     await stopSession(session.id);
   }, 60_000);
 
+  it('기준은 체크포인트 곁에 파일로 남는다(메모리가 아니다). 통과한 검증이 본 계약이 그 체크포인트의 기록이 된다', async () => {
+    const session = await open();
+    const recordOf = async (sha: string) => JSON.parse(await readFile(path.join(session.work, '.git/b-studio/contracts', `${sha}.json`), 'utf8')) as { api: ReturnType<typeof contractWith> };
+    const start = getSnapshot(session.id)!.checkpoints[0]!.sha;
+    await session.gateway.prompt({ prompt: 'note 필드를 더해줘' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    // 쓰기 직전에(작업 복사본이 체크포인트 그대로일 때) 읽은 계약이 그 체크포인트의 기록으로 남았다
+    expect(Object.keys((await recordOf(start)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo']);
+
+    service.doc = contractWith(['id', 'memo', 'note']);
+    await session.gateway.stop({ last_assistant_message: '더했습니다.' });
+    const head = getSnapshot(session.id)!.checkpoints[0]!.sha;
+    expect(head).not.toBe(start);
+    expect(Object.keys((await recordOf(head)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo', 'note']);
+
+    // 체크포인트 뒤에 서비스가 다른 계약을 내놓아도(코드가 또 바뀌었다) 기록은 게이트가 본 것 그대로다
+    service.doc = contractWith(['id']);
+    await session.gateway.prompt({ prompt: '아무것도 하지 마' });
+    await session.gateway.stop({ last_assistant_message: '네' });
+    expect(Object.keys((await recordOf(head)).api.components.schemas.OrderResponse.properties)).toEqual(['id', 'memo', 'note']);
+    // 그 기록이 다음 실행의 기준이다: 지금 서비스의 계약(필드 둘이 빠짐)을 기준으로 다시 읽지 않는다
+    await session.gateway.prompt({ prompt: '필드를 빼줘' });
+    await write(session, 'api/src/Order.java', 'class Order {}\n');
+    const answer = await session.gateway.stop({});
+    expect(answer.feedback).toContain('memo');
+    expect(answer.feedback).toContain('note');
+    await stopSession(session.id);
+  }, 60_000);
+
+  it('검증을 통과한 체크포인트가 하나도 없는데 변경이 먼저 있으면, 지금 계약이 기준이 된다는 것을 실행에 알린다', async () => {
+    const session = await open();
+    // 어떤 실행보다 먼저 파일이 바뀌어 있다(사람이 셸에서 고쳤다)
+    await edit(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+    service.doc = contractWith(['id']);
+    await session.gateway.prompt({ prompt: '정리해줘' });
+    const answer = await session.gateway.stop({ last_assistant_message: '정리했습니다.' });
+    const warnings = session.ofType('agent').flatMap((event) => (event.event.type === 'warning' ? [event.event.message] : []));
+    expect(warnings.some((message) => message.includes('API 계약 기록이 없어'))).toBe(true);
+    // 남긴 한계: 이 경우는 통과한다. 조용히 지나가지 않고 알린 것을 확인한다
+    expect(answer.message).toContain('검증 통과');
+    await stopSession(session.id);
+  }, 30_000);
+
   it('앞 실행이 남긴 비밀 파일과 링크는 다음 실행에서도 통과시키지 않는다("원래 있던 것"으로 봐주지 않는다)', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
