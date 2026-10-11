@@ -4,6 +4,7 @@ import {
   closeSessionTerminal,
   disposeSessionTerminal,
   interruptSessionTerminal,
+  NO_GATEWAY_NOTE,
   MAX_TERMINAL_INPUT,
   openSessionTerminal,
   resizeSessionTerminal,
@@ -286,5 +287,38 @@ describe('세션 터미널 (이슈 #673)', () => {
     interruptSessionTerminal(id);
     expect(record.terminals[0]!.written).toEqual(['\x1b']);
     await disposeSessionTerminal(id, target.sandboxId, backend);
+  });
+
+  it('컨테이너에서 관문에 닿지 못하면 관문 없이 열고 그 사실을 화면에 알린다. 주소를 넘긴 채 열지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    const asked: string[] = [];
+    const unreachable: TerminalBackend = {
+      ...backend,
+      reachable: async (container, env) => {
+        asked.push(`${container} ${Object.keys(env).join(',')}`);
+        return false;
+      },
+    };
+    const messages: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await openSessionTerminal(id, { ...target, gateway: async () => ({ B_STUDIO_GATEWAY_URL: 'http://host.docker.internal:1', B_STUDIO_GATEWAY_TOKEN: 'tok' }) }, { cols: 80, rows: 24 }, unreachable);
+    expect(asked).toEqual([`${target.sandboxId}-agent B_STUDIO_GATEWAY_URL,B_STUDIO_GATEWAY_TOKEN`]);
+    expect(record.envs).toEqual([undefined]);
+    expect(messages.at(-1)).toEqual({ kind: 'status', state: 'open', message: NO_GATEWAY_NOTE });
+    // 나중에 붙은 화면에도 같은 말을 준다
+    const late: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => late.push(message));
+    expect(late.at(-1)).toEqual({ kind: 'status', state: 'open', message: NO_GATEWAY_NOTE });
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+
+    // 닿으면 주소를 넘기고 덧붙이는 말이 없다
+    id = `s-${++session}`;
+    const reachable = fakeBackend();
+    const seen: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => seen.push(message));
+    await openSessionTerminal(id, { ...target, gateway: async () => ({ B_STUDIO_GATEWAY_URL: 'u' }) }, { cols: 80, rows: 24 }, { ...reachable.backend, reachable: async () => true });
+    expect(reachable.record.envs).toEqual([{ B_STUDIO_GATEWAY_URL: 'u' }]);
+    expect(seen.at(-1)).toEqual({ kind: 'status', state: 'open' });
+    await disposeSessionTerminal(id, target.sandboxId, reachable.backend);
   });
 });

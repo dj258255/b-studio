@@ -59,6 +59,10 @@ describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () =>
     expect(await terminalHookRoutes(handlers())['/pre-tool']({})).toEqual({});
   });
 
+  it('닿는지 묻는 요청에는 빈 답을 준다(처리를 부르지 않는다)', async () => {
+    expect(await terminalHookRoutes(handlers())['/ping']({})).toEqual({});
+  });
+
   it('대화의 시작: 안내 글이 있으면 맥락에 덧붙인다', async () => {
     expect(await terminalHookRoutes(handlers({ note: async () => '# b-studio\n안내' }))['/session-start']({})).toEqual({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: '# b-studio\n안내' } });
     expect(await terminalHookRoutes(handlers())['/session-start']({})).toEqual({});

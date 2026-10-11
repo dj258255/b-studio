@@ -2820,3 +2820,44 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
     expect(commands).toEqual([['./gradlew', 'broken'], ['lint']]);
   });
 });
+
+describe('이미 잡아 둔 계약 기준을 이어 쓴다 (이슈 #677)', () => {
+  it('기준을 주면 지금 계약을 기준으로 읽지 않는다. 남은 변경이 기준에 들어가지 않아, 계약을 깨는 변경이 다음 실행에서도 막힌다', async () => {
+    const broken = { paths: ORDERS_CONTRACT.paths, components: { schemas: { OrderResponse: { properties: { id: { type: 'integer' } } } } } };
+    const fetched: string[] = [];
+    const gateFor = async (baselines?: VerificationGate['baselines']) => {
+      const workspace = new Workspace(project.root);
+      workspace.trackExternalChanges(['api/src/main/java/com/example/orders/OrderResponse.java']);
+      return VerificationGate.create({
+        project,
+        sandbox: fakeSandbox(project, [true, true, true]),
+        workspace,
+        allowBreaking: false,
+        maxVerifyAttempts: 3,
+        // 지금 서비스가 내놓는 계약은 필드가 빠진 것이다(앞 실행이 남긴 변경)
+        fetcher: async (url) => {
+          fetched.push(url);
+          return broken;
+        },
+        onEvent: () => {},
+        ...(baselines ? { baselines } : {}),
+      });
+    };
+
+    // 기준을 새로 잡으면 남은 변경이 기준이 되어 깨진 것을 보지 못한다(이 길을 막으려는 것이다)
+    const fresh = await gateFor();
+    expect((await fresh.check()).kind).toBe('pass');
+
+    // 앞 실행이 잡아 둔 기준(필드가 있던 계약)을 이어 쓰면 막힌다
+    fetched.length = 0;
+    const kept = await gateFor(new Map([['api', ORDERS_CONTRACT]]));
+    // 만들 때는 계약을 읽지 않았다
+    expect(fetched).toEqual([]);
+    const outcome = await kept.check();
+    expect(outcome.kind).toBe('retry');
+    expect(kept.report?.ok).toBe(false);
+    expect(kept.baselines.get('api')).toBe(ORDERS_CONTRACT);
+    // 새로 잡은 게이트의 기준도 꺼내 다음 실행에 넘길 수 있다
+    expect(fresh.baselines.get('api')).toEqual(broken);
+  });
+});

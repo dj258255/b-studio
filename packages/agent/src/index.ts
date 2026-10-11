@@ -74,7 +74,7 @@ export {
 } from './gemini-cli-runner';
 export { hostAllowed, startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { startHookServer, type HookHandler, type HookInput, type HookServer, type HookServerOptions } from './hook-server';
-export { ChangeTracker, rejectedChangeFeedback } from './change-tracker';
+export { ChangeTracker, rejectedChangeFeedback, type ChangeTrackerOptions, type Fingerprinter } from './change-tracker';
 export { boardMcpToolSpecs, externalBoardAccess, runBoardMcpTool, type BoardMcpToolSpec } from './board-mcp';
 export { handleBoardMcpRequest } from './board-mcp-server';
 export { fetchPage, recheckGateOnMaxTurns, VerificationGate, type GateOutcome, type MaxTurnsRecheck, type PageFetcher, type ServiceRequest, type VerifyMode } from './gate';
@@ -196,6 +196,7 @@ export {
 export { classifyCommit, generateCommitSubject, type CommitType } from './commit-message';
 export {
   CheckpointError,
+  StagedMismatchError,
   CheckpointStore,
   redactCredentials,
   RemoteConflictError,

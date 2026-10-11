@@ -77,20 +77,35 @@ export const AGENT_HOOK_EVENTS = {
   'session-end': 10,
 } as const;
 export type AgentHookEvent = keyof typeof AGENT_HOOK_EVENTS;
-/** 파일을 바꿀 수 있는 내장 도구. 읽기 도구는 훅을 거치지 않는다(호출마다 훅 프로세스가 뜬다) */
-export const AGENT_WRITE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'] as const;
+/** 터미널을 열기 전에 컨테이너에서 관문에 닿는지 묻는 일이 기다리는 시간(초) */
+const AGENT_PING_SECONDS = 5;
+/**
+ * 파일을 바꾸지 않는 내장 도구. 이것들만 쓰기 직전의 훅을 건너뛴다(호출마다 훅 프로세스가 뜨므로 읽기까지 걸면 느려진다).
+ * 거꾸로 "바꾸는 도구"를 나열하지 않는다 — CLI에 새 도구가 생기거나 이름이 바뀌면, 나열에서 빠진 도구로 바꾼 파일은
+ * 변경 전 기준 없이 바뀐다. 모르는 도구는 바꾸는 도구로 본다
+ */
+export const AGENT_READ_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'TodoWrite', 'ToolSearch', 'AskUserQuestion', 'Agent', 'Task'] as const;
+/** 쓰기 직전의 훅을 거는 도구 이름의 패턴: 읽기 도구가 아닌 모든 것 */
+export const AGENT_WRITE_TOOL_MATCHER = `^(?!(?:${AGENT_READ_TOOLS.join('|')})$).+`;
 const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
+/** 훅을 돌릴 node. 이름으로 찾지 않는다 — 터미널의 PATH는 홈 폴더의 실행 파일 자리가 앞에 있어, 거기에 같은 이름을 두면 훅이 바뀐다 */
+const HOOK_NODE = '/usr/local/bin/node';
 const MCP_SERVER = 'b-studio';
 
 /**
  * 훅 명령이 실행하는 스크립트(컨테이너 안의 node). 훅의 입력(JSON)을 관문에 그대로 보내고 답을 그대로 출력한다.
- * 관문에 닿지 못하면 CLI를 막지 않는다. 요청을 보낼 때만 그 사실을 사용자에게 알린다.
+ *
+ * 관문의 주소가 없으면(관문 없이 연 터미널) 아무것도 하지 않는다. 주소가 있는데 닿지 못하거나 관문이 오류로 답하면:
+ *  - 쓰기 직전: 도구를 거절한다. 변경 전 기준을 잡지 못한 채 바뀌게 두면 그 변경이 나중에 잡는 기준에 섞여 들어간다
+ *  - 요청의 시작: 막지 않고 사용자에게 알린다
+ *  - 턴의 끝과 그 밖: 막지 않는다(막으면 CLI가 끝나지 않는다). 검증이 돌지 않았으므로 체크포인트는 생기지 않는다
+ * `ping`은 훅이 아니라 터미널을 열기 전에 호스트가 "컨테이너에서 관문에 닿는가"를 묻는 데 쓴다(닿으면 0으로 끝난다).
  * fetch를 쓰지 않는다 — 응답 머리를 기다리는 기본 상한(5분)이 게이트 한 번보다 짧을 수 있다.
  */
 export const AGENT_HOOK_SCRIPT = `// b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.
 import http from 'node:http';
 
-const TIMEOUT_SECONDS = ${JSON.stringify(AGENT_HOOK_EVENTS)};
+const TIMEOUT_SECONDS = ${JSON.stringify({ ...AGENT_HOOK_EVENTS, ping: AGENT_PING_SECONDS + 3 })};
 const event = process.argv[2] ?? '';
 
 function finish(output) {
@@ -99,14 +114,17 @@ function finish(output) {
 }
 
 function unreachable(why) {
-  if (event !== 'prompt') finish();
-  finish({ systemMessage: '[b-studio] 관문에 닿지 못했습니다(' + why + '). 이 요청의 변경은 검증 없이 작업 폴더에 남고 체크포인트는 생기지 않습니다.' });
+  if (event === 'ping') process.exit(1);
+  if (event === 'prompt') finish({ systemMessage: '[b-studio] 관문에 닿지 못했습니다(' + why + '). 이 요청의 변경은 검증되지 않고 체크포인트도 생기지 않습니다.' });
+  if (event === 'pre-tool') finish({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: '[b-studio] 관문에 닿지 못해(' + why + ') 파일을 바꿀 수 있는 도구를 막았습니다. 변경 전 기준을 잡을 수 없습니다.' } });
+  finish();
 }
 
 if (!Object.hasOwn(TIMEOUT_SECONDS, event)) finish();
 const base = process.env.${AGENT_GATEWAY_ENV.hookUrl};
 const token = process.env.${AGENT_GATEWAY_ENV.hookToken};
-if (!base || !token) unreachable('관문 주소가 없습니다');
+// 관문 없이 연 터미널이다. 훅은 아무것도 하지 않는다
+if (!base || !token) process.exit(event === 'ping' ? 1 : 0);
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -139,14 +157,14 @@ request.end(body);
 
 /** CLI의 관리 설정. 훅 넷과 b-studio 도구의 사용 허락만 적는다 */
 export function agentManagedSettings(): Record<string, unknown> {
-  const hook = (event: AgentHookEvent) => ({ type: 'command', command: `node ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, timeout: AGENT_HOOK_EVENTS[event] });
+  const hook = (event: AgentHookEvent) => ({ type: 'command', command: `${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, timeout: AGENT_HOOK_EVENTS[event] });
   return {
     // b-studio 도구는 서비스 컨테이너 안에서 돌고 b-studio의 실행 정책을 거친다. 호출마다 묻지 않게 한다
     permissions: { allow: [`mcp__${MCP_SERVER}`] },
     hooks: {
       SessionStart: [{ hooks: [hook('session-start')] }],
       UserPromptSubmit: [{ hooks: [hook('prompt')] }],
-      PreToolUse: [{ matcher: AGENT_WRITE_TOOLS.join('|'), hooks: [hook('pre-tool')] }],
+      PreToolUse: [{ matcher: AGENT_WRITE_TOOL_MATCHER, hooks: [hook('pre-tool')] }],
       Stop: [{ hooks: [hook('stop')] }],
       SessionEnd: [{ hooks: [hook('session-end')] }],
     },
@@ -205,6 +223,8 @@ const MAX_ROWS = 200;
  * 환경 변수로 넘겨 `sh -c "$변수"`로 실행한다. 명령 글을 따옴표 안에 끼워 넣지 않는다.
  */
 export const AGENT_TERMINAL_COMMAND = [
+  // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
+  'trap : INT',
   'if ! command -v claude >/dev/null 2>&1; then',
   '  printf "%s\\n" "[b-studio] 이 컨테이너에 claude CLI를 설치합니다(처음 한 번)."',
   `  npm install --global --no-fund --no-audit ${AGENT_CLI_PACKAGE} || printf "%s\\n" "[b-studio] 설치하지 못했습니다. 네트워크를 확인하고 npm install -g ${AGENT_CLI_PACKAGE} 를 다시 실행하세요."`,
@@ -369,6 +389,18 @@ export async function ensureAgentContainer(sandboxId: string, projectRoot: strin
     throw new SandboxError('에이전트 컨테이너의 .git 보호와 관문 설정을 확인하지 못해 컨테이너를 지웠습니다', started ? `마운트 ${started.mounts.length}개` : '컨테이너가 뜨지 않았습니다', { platform: true });
   }
   return name;
+}
+
+/**
+ * 컨테이너 안에서 관문에 닿는가. 닿지 못하는 도커 환경(컨테이너가 호스트의 루프백에 닿지 못하는 리눅스 엔진 등)에서는
+ * 관문을 붙인 것처럼 터미널을 열지 않으려고 먼저 묻는다. 주소와 토큰은 값 없이 이름만 명령줄에 싣는다
+ */
+export async function probeAgentGateway(name: string, env: Readonly<Record<string, string>>, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<boolean> {
+  const args = ['exec', ...Object.keys(env).flatMap((variable) => ['--env', variable]), name, HOOK_NODE, `${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME}`, 'ping'];
+  return execFileAsync(dockerBin, args, { cwd: tmpdir(), env: { ...process.env, ...env }, timeout: (AGENT_PING_SECONDS + 10) * 1000 }).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** 세션을 정리할 때 부른다. 없으면 아무 일도 하지 않는다 */

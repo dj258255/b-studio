@@ -40,8 +40,10 @@ export interface TerminalGateway {
 const say = (message: string | undefined): Record<string, unknown> => (message ? { systemMessage: message } : {});
 
 /** 훅 종류 → 처리. 핸들러가 던지면 훅 서버가 5xx로 답하고, 훅 스크립트는 CLI를 막지 않는다(판정은 호스트의 게이트가 한다) */
-export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent}`, (input: HookInput) => Promise<Record<string, unknown>>> {
+export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}`, (input: HookInput) => Promise<Record<string, unknown>>> {
   return {
+    // 터미널을 열기 전에 컨테이너에서 여기에 닿는지 묻는다
+    '/ping': async () => ({}),
     '/session-start': async () => {
       const note = await handlers.note();
       return note ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } } : {};

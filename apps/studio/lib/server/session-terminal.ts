@@ -1,4 +1,4 @@
-import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, removeAgentContainer, writeAgentGatewayConfig, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
+import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, probeAgentGateway, removeAgentContainer, writeAgentGatewayConfig, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
 import { StudioError } from './errors';
 
 /**
@@ -29,6 +29,8 @@ interface TerminalState {
   bytes: number;
   listeners: Set<Listener>;
   size: TerminalSize;
+  /** 열려 있는 터미널에 대해 화면에 함께 알릴 말(관문 없이 열었다는 것) */
+  note?: string;
 }
 
 export interface TerminalTarget {
@@ -55,12 +57,18 @@ export interface TerminalBackend {
   ensureContainer(target: TerminalTarget): Promise<string>;
   open(container: string, options: { id: string; size: TerminalSize; env?: Readonly<Record<string, string>> }): AgentTerminal;
   removeContainer(sandboxId: string): Promise<void>;
+  /** 컨테이너 안에서 관문에 닿는가. 없으면 닿는다고 본다 */
+  reachable?(container: string, env: Readonly<Record<string, string>>): Promise<boolean>;
 }
+
+/** 관문에 닿지 못해 관문 없이 열었을 때 화면에 알리는 말 */
+export const NO_GATEWAY_NOTE = '관문 없음 — 이 도커 환경에서는 컨테이너가 b-studio에 닿지 못합니다. 여기서 한 변경은 검증되지 않고 체크포인트도 생기지 않습니다';
 
 const DOCKER_BACKEND: TerminalBackend = {
   ensureContainer: async (target) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(target.gateway ? { gatewayDir: await writeAgentGatewayConfig() } : {}) }),
   open: (container, options) => openAgentTerminal(container, options),
   removeContainer: (sandboxId) => removeAgentContainer(sandboxId),
+  reachable: (container, env) => probeAgentGateway(container, env),
 };
 
 // 개발 서버의 HMR로 모듈이 다시 로드돼도 열린 터미널을 잃지 않도록 전역에 둔다
@@ -120,12 +128,18 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
     try {
       if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
       // 관문을 먼저 띄운다. 터미널 안의 CLI는 뜨자마자 훅을 부른다
-      const env = target.gateway ? await target.gateway() : undefined;
+      let env = target.gateway ? await target.gateway() : undefined;
       const container = await backend.ensureContainer(target);
       // 컨테이너를 띄우는 동안 세션이 멈췄으면 방금 띄운 것을 지우고 열지 않는다
       if (target.alive && !target.alive()) {
         await backend.removeContainer(target.sandboxId).catch(() => {});
         throw new Error('세션이 멈췄습니다');
+      }
+      // 컨테이너에서 관문에 닿지 못하는 환경이면 관문 없이 연다. 주소를 넘긴 채 열면 훅이 파일을 바꾸는 도구를 모두 막는다
+      current.note = undefined;
+      if (env && backend.reachable && !(await backend.reachable(container, env))) {
+        env = undefined;
+        current.note = NO_GATEWAY_NOTE;
       }
       const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted, ...(env ? { env } : {}) });
       current.terminal = terminal;
@@ -142,7 +156,7 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
         current.terminal = undefined;
         emit(current, { kind: 'exit', code });
       });
-      emit(current, { kind: 'status', state: 'open' });
+      emit(current, { kind: 'status', state: 'open', ...(current.note ? { message: current.note } : {}) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit(current, { kind: 'status', state: 'closed', message });
@@ -160,7 +174,7 @@ export function subscribeSessionTerminal(sessionId: string, listener: Listener):
   const state = stateFor(sessionId);
   state.listeners.add(listener);
   if (state.chunks.length > 0) listener({ kind: 'data', data: Buffer.concat(state.chunks).toString('base64') });
-  listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed' });
+  listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed', ...(state.terminal && state.note ? { message: state.note } : {}) });
   return () => unsubscribe(sessionId, state, listener);
 }
 

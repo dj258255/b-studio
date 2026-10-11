@@ -165,6 +165,13 @@ export interface GateOptions {
    * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다
    */
   reloadProject?: () => Promise<LoadedProject>;
+  /**
+   * 이미 잡아 둔 계약 기준(서비스 → 변경 전 계약). 주면 지금 계약을 다시 읽지 않고 이것과 견준다.
+   * 기준은 "마지막 체크포인트의 계약"이어야 한다. 실패한 실행이 변경을 되돌리지 않고 끝나는 자리(세션 터미널)에서는
+   * 다음 실행이 기준을 새로 잡으면 남은 변경이 기준에 들어가, 계약을 깨는 변경이 두 번째 실행에서 통과한다.
+   * 그런 자리에서는 변경이 남아 있는 동안 앞 실행의 기준(gate.baselines)을 넘겨 이어 쓴다
+   */
+  baselines?: ReadonlyMap<string, OpenApiDocument>;
 }
 
 /**
@@ -227,7 +234,12 @@ export class VerificationGate {
   static async create(options: GateOptions): Promise<VerificationGate> {
     // 요구사항 문서의 실행 전 모습도 같은 이유로 여기서 고정한다(러너가 실행을 시작할 때 이미 불렀다면 그 값이 유지된다)
     options.workspace.snapshotRead(REQUIREMENTS_FILE);
-    return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
+    return new VerificationGate(options, options.baselines ?? (await captureBaselines(options.sandbox, options.project, options.fetcher)));
+  }
+
+  /** 이 게이트가 견주는 계약 기준. 변경을 남긴 채 끝난 실행의 다음 실행이 이어 쓴다(GateOptions.baselines) */
+  get baselines(): ReadonlyMap<string, OpenApiDocument> {
+    return this.#baselines;
   }
 
   /**

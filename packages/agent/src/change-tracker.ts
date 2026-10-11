@@ -9,19 +9,41 @@ import { WorkspaceError, type Workspace } from './workspace';
  * 호스트에서 도는 관문 러너와 컨테이너 안의 터미널 실행이 함께 쓴다.
  */
 
+/** 파일들의 지금 지문(프로젝트 루트 기준 경로 → 지문). 한 번의 읽기로 정한다 */
+export type Fingerprinter = (files: readonly string[]) => Promise<ReadonlyMap<string, string>>;
+
+export interface ChangeTrackerOptions {
+  /**
+   * 처음 본 때부터 있던, 게이트가 다루지 않는 경로(비밀 파일, 생성물, 링크)를 그대로면 봐줄지(기본 true).
+   * 실패한 실행이 변경을 되돌리는 자리(러너)에서는 그런 경로가 이번 실행의 탓이 아니므로 봐준다.
+   * 되돌리지 않는 자리(세션 터미널)에서는 false로 둔다 — 앞 실행이 남긴 비밀 파일이나 링크가 다음 실행에서
+   * "원래 있던 것"이 되어 검증 없이 체크포인트에 들어간다.
+   */
+  tolerateExisting?: boolean;
+  /**
+   * 지문을 만드는 방법(기본: 내용의 해시). 커밋될 내용과 견주려면 git이 스테이징할 때와 같은 방식의 지문을 준다
+   * (CheckpointStore.stagedFingerprints). 링크는 `link:`로 시작하는 지문이어야 한다
+   */
+  fingerprint?: Fingerprinter;
+}
+
 /** 바뀐 파일을 작업 공간(게이트가 보는 목록)에 옮긴다. 내용이 그대로인 파일은 다시 알리지 않는다 */
 export class ChangeTracker {
   readonly #workspace: Workspace;
   readonly #pendingFiles: () => Promise<readonly string[]>;
+  readonly #tolerateExisting: boolean;
+  readonly #fingerprint: Fingerprinter;
   /** 파일 → 마지막으로 게이트에 알린 때의 지문 */
   readonly #tracked = new Map<string, string>();
   /** 실행 전부터 있던, 게이트가 다루지 않는 경로 → 그때의 지문. 그대로면 이번 실행의 탓이 아니다 */
   readonly #toleratedRejects = new Map<string, string>();
   #started = false;
 
-  constructor(workspace: Workspace, pendingFiles: () => Promise<readonly string[]>) {
+  constructor(workspace: Workspace, pendingFiles: () => Promise<readonly string[]>, { tolerateExisting = true, fingerprint }: ChangeTrackerOptions = {}) {
     this.#workspace = workspace;
     this.#pendingFiles = pendingFiles;
+    this.#tolerateExisting = tolerateExisting;
+    this.#fingerprint = fingerprint ?? ((files) => contentFingerprints(workspace.root, files));
   }
 
   /**
@@ -33,9 +55,14 @@ export class ChangeTracker {
     this.#started = true;
     const changed: string[] = [];
     const rejected: string[] = [];
-    for (const file of await this.#pendingFiles()) {
-      if (file.endsWith('/')) continue;
-      const print = await fingerprint(path.resolve(this.#workspace.root, file));
+    const files = (await this.#pendingFiles()).filter((file) => !file.endsWith('/'));
+    const prints = await this.#fingerprint(files);
+    // 지난번에 알렸는데 지금은 변경 목록에 없는 파일(되돌려 놓았다)은 더 따라가지 않는다
+    for (const file of [...this.#tracked.keys()]) {
+      if (!files.includes(file)) this.#tracked.delete(file);
+    }
+    for (const file of files) {
+      const print = prints.get(file) ?? 'missing';
       if (this.#tracked.get(file) === print) continue;
       try {
         // 링크는 검증 대상으로 받지 않는다. 게이트는 링크 너머의 내용을 보고 통과시키는데 체크포인트에는 링크만 들어간다.
@@ -45,12 +72,25 @@ export class ChangeTracker {
         this.#tracked.set(file, print);
         changed.push(file);
       } catch {
-        if (first) this.#toleratedRejects.set(file, print);
+        this.#tracked.delete(file);
+        if (first && this.#tolerateExisting) this.#toleratedRejects.set(file, print);
         else if (this.#toleratedRejects.get(file) !== print) rejected.push(file);
       }
     }
     return { changed: changed.sort(), rejected: rejected.sort() };
   }
+
+  /** 마지막 sync 때 게이트에 알린 파일과 그 지문. 커밋될 내용이 이것과 같은지 견주는 데 쓴다 */
+  get tracked(): ReadonlyMap<string, string> {
+    return new Map(this.#tracked);
+  }
+}
+
+/** 기본 지문: 파일마다 내용의 해시 */
+async function contentFingerprints(root: string, files: readonly string[]): Promise<Map<string, string>> {
+  const prints = new Map<string, string>();
+  for (const file of files) prints.set(file, await fingerprint(path.resolve(root, file)));
+  return prints;
 }
 
 /**

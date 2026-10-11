@@ -14,7 +14,8 @@ import {
   AGENT_HOOK_EVENTS,
   AGENT_IMAGE,
   AGENT_TERMINAL_COMMAND,
-  AGENT_WRITE_TOOLS,
+  AGENT_READ_TOOLS,
+  AGENT_WRITE_TOOL_MATCHER,
   agentContainerName,
   agentGatewayFiles,
   agentHomeVolume,
@@ -91,6 +92,14 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
   it('컨테이너 이름에 쓸 수 없는 글자는 바꾼다', () => {
     expect(agentContainerName('studio-orders-abc123')).toBe('studio-orders-abc123-agent');
     expect(agentContainerName('studio/../x y')).toBe('studio-..-x-y-agent');
+  });
+});
+
+describe('터미널의 기본 명령', () => {
+  it('Ctrl-C를 받아도 감싼 셸은 죽지 않는다(죽으면 터미널이 통째로 끝난다). 신호를 무시하지는 않아 CLI는 그대로 받는다', () => {
+    expect(AGENT_TERMINAL_COMMAND.split('\n')[0]).toBe('trap : INT');
+    // 무시(trap '' INT)는 자식 프로세스에 물려 내려간다. 받아서 아무것도 하지 않는 쪽이어야 한다
+    expect(AGENT_TERMINAL_COMMAND).not.toContain("trap '' INT");
   });
 });
 
@@ -175,19 +184,27 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     expect(() => agentRunArgs({ ...plan, gatewayDir: '/tmp/a,target=/workspace' })).toThrow('쉼표');
   });
 
-  it('관리 설정은 훅 다섯과 b-studio 도구의 허락만 적는다. 파일을 바꿀 수 있는 도구에만 쓰기 직전의 훅을 건다', () => {
+  it('관리 설정은 훅 다섯과 b-studio 도구의 허락만 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
     const settings = agentManagedSettings() as { permissions: { allow: string[] }; hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number }> }>> };
     expect(Object.keys(settings).sort()).toEqual(['hooks', 'permissions']);
     expect(settings.permissions.allow).toEqual(['mcp__b-studio']);
     expect(Object.keys(settings.hooks).sort()).toEqual(['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'UserPromptSubmit']);
     const command = (name: string) => settings.hooks[name]![0]!.hooks[0]!;
-    expect(command('UserPromptSubmit').command).toBe('node /etc/claude-code/b-studio-hook.mjs prompt');
-    expect(command('Stop').command).toBe('node /etc/claude-code/b-studio-hook.mjs stop');
-    expect(command('SessionStart').command).toBe('node /etc/claude-code/b-studio-hook.mjs session-start');
-    expect(command('SessionEnd').command).toBe('node /etc/claude-code/b-studio-hook.mjs session-end');
-    expect(settings.hooks.PreToolUse![0]!.matcher).toBe(AGENT_WRITE_TOOLS.join('|'));
-    // 셸과 편집 도구가 모두 들어 있다. 하나라도 빠지면 그 도구로 바꾼 파일은 변경 전 기준 없이 바뀐다
-    for (const tool of ['Edit', 'Write', 'Bash', 'NotebookEdit']) expect(settings.hooks.PreToolUse![0]!.matcher).toContain(tool);
+    // node는 이름이 아니라 자리로 부른다. 터미널의 PATH 앞쪽(홈 폴더)에 같은 이름을 두어 훅을 바꿔치기하지 못한다
+    expect(command('UserPromptSubmit').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs prompt');
+    expect(command('Stop').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop');
+    expect(command('SessionStart').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-start');
+    expect(command('SessionEnd').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-end');
+    expect(command('PreToolUse').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs pre-tool');
+    expect(settings.hooks.PreToolUse![0]!.matcher).toBe(AGENT_WRITE_TOOL_MATCHER);
+    const hooked = (tool: string) => new RegExp(AGENT_WRITE_TOOL_MATCHER).test(tool);
+    // 셸, 편집 도구, b-studio 도구에 건다. 모르는 도구(CLI에 새로 생긴 것)도 건다 — 빠지면 그 도구로 바꾼 파일은 변경 전 기준 없이 바뀐다
+    for (const tool of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'mcp__b-studio__run_in_service', 'SomeNewTool', 'Workflow']) expect(hooked(tool)).toBe(true);
+    // 읽기 도구만 건너뛴다. 이름이 읽기 도구로 시작하거나 끝나기만 하는 다른 도구는 건다
+    for (const tool of AGENT_READ_TOOLS) expect(hooked(tool)).toBe(false);
+    for (const tool of ['ReadAndWrite', 'XRead', 'Read|Write', 'read']) expect(hooked(tool)).toBe(true);
+    expect(AGENT_READ_TOOLS).not.toContain('Bash');
+    expect(AGENT_READ_TOOLS).not.toContain('Write');
     // 게이트 한 번이 수 분 걸린다. 훅이 그보다 먼저 끊기면 결과가 에이전트에게 가지 못한다
     expect(command('Stop').timeout).toBeGreaterThanOrEqual(1800);
     expect(command('PreToolUse').timeout).toBeGreaterThanOrEqual(600);
@@ -294,17 +311,27 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(seen).toEqual([{ url: '/stop', authorization: 'Bearer tok', body: input }]);
   });
 
-  it('관문에 닿지 못하면 CLI를 막지 않는다. 요청을 보낼 때만 그 사실을 사용자에게 알린다', async () => {
+  it('관문에 닿지 못하면: 파일을 바꿀 수 있는 도구는 거절하고, 요청은 막지 않되 알리고, 턴의 끝은 막지 않는다', async () => {
     const file = await script();
     const closed = { [AGENT_GATEWAY_ENV.hookUrl]: 'http://127.0.0.1:1', [AGENT_GATEWAY_ENV.hookToken]: 'tok' };
     const prompt = await run(file, 'prompt', closed, '{"prompt":"고쳐줘"}');
     expect(prompt.code).toBe(0);
     const said = JSON.parse(prompt.stdout) as { systemMessage?: string; decision?: string };
     expect(said.systemMessage).toContain('관문에 닿지 못했습니다');
-    expect(said.systemMessage).toContain('체크포인트는 생기지 않습니다');
-    // 막는 출력이 아니다
+    expect(said.systemMessage).toContain('체크포인트도 생기지 않습니다');
+    // 요청을 막는 출력이 아니다
     expect(said.decision).toBeUndefined();
-    for (const event of ['pre-tool', 'stop', 'session-start', 'session-end']) expect(await run(file, event, closed, '{}')).toEqual({ code: 0, stdout: '' });
+
+    // 쓰기 직전: 변경 전 기준을 잡지 못한 채 바뀌게 두지 않는다
+    const tool = await run(file, 'pre-tool', closed, '{"tool_name":"Write"}');
+    expect(tool.code).toBe(0);
+    const denied = JSON.parse(tool.stdout) as { hookSpecificOutput: { hookEventName: string; permissionDecision: string; permissionDecisionReason: string } };
+    expect(denied.hookSpecificOutput.hookEventName).toBe('PreToolUse');
+    expect(denied.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toContain('관문에 닿지 못해');
+
+    // 턴의 끝은 막지 않는다(막으면 CLI가 끝나지 않는다). 검증이 돌지 않았으니 체크포인트도 없다
+    for (const event of ['stop', 'session-start', 'session-end']) expect(await run(file, event, closed, '{}')).toEqual({ code: 0, stdout: '' });
   });
 
   it('관문이 오류로 답했거나 읽을 수 없는 답을 주면 닿지 못한 것으로 본다(그 답을 CLI에 넘기지 않는다)', async () => {
@@ -314,17 +341,35 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(await run(file, 'stop', env, '{}')).toEqual({ code: 0, stdout: '' });
     const garbled = await gateway(() => ({ status: 200, body: '<html>프록시 오류</html>' }));
     expect(await run(file, 'stop', { ...env, [AGENT_GATEWAY_ENV.hookUrl]: garbled.url }, '{}')).toEqual({ code: 0, stdout: '' });
+    // 쓰기 직전의 훅은 오류 답도 거절로 바꾼다. 서버가 준 "{}"(허용)로 읽지 않는다
+    const allowing = await gateway(() => ({ status: 500, body: '{}' }));
+    const tool = await run(file, 'pre-tool', { ...env, [AGENT_GATEWAY_ENV.hookUrl]: allowing.url }, '{}');
+    expect(JSON.parse(tool.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
   });
 
-  it('주소나 토큰이 없으면 아무 데도 보내지 않는다. 모르는 종류도 같다', async () => {
+  it('관문의 주소가 없으면(관문 없이 연 터미널) 아무 데도 보내지 않고 아무것도 막지 않는다. 모르는 종류도 같다', async () => {
     const file = await script();
     const { url, seen } = await gateway(() => ({ status: 200, body: '{}' }));
-    expect(await run(file, 'stop', {}, '{}')).toEqual({ code: 0, stdout: '' });
-    expect(await run(file, 'stop', { [AGENT_GATEWAY_ENV.hookUrl]: url }, '{}')).toEqual({ code: 0, stdout: '' });
+    for (const event of ['prompt', 'pre-tool', 'stop', 'session-start', 'session-end']) {
+      expect(await run(file, event, {}, '{}')).toEqual({ code: 0, stdout: '' });
+      expect(await run(file, event, { [AGENT_GATEWAY_ENV.hookUrl]: url }, '{}')).toEqual({ code: 0, stdout: '' });
+    }
     expect(await run(file, 'constructor', { [AGENT_GATEWAY_ENV.hookUrl]: url, [AGENT_GATEWAY_ENV.hookToken]: 'tok' }, '{}')).toEqual({ code: 0, stdout: '' });
     expect(seen).toEqual([]);
-    // 스크립트가 아는 종류는 설정이 거는 종류와 같다
+    // 훅으로 거는 종류는 설정이 거는 종류와 같다
     expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['pre-tool', 'prompt', 'session-end', 'session-start', 'stop']);
+  });
+
+  it('닿는지 묻는 일(ping)은 닿으면 0, 닿지 못하거나 관문이 오류로 답하거나 주소가 없으면 0이 아닌 값으로 끝난다', async () => {
+    const file = await script();
+    const up = await gateway(() => ({ status: 200, body: '{}' }));
+    const env = { [AGENT_GATEWAY_ENV.hookUrl]: up.url, [AGENT_GATEWAY_ENV.hookToken]: 'tok' };
+    expect((await run(file, 'ping', env, '')).code).toBe(0);
+    expect(up.seen).toMatchObject([{ url: '/ping', authorization: 'Bearer tok' }]);
+    expect((await run(file, 'ping', { ...env, [AGENT_GATEWAY_ENV.hookUrl]: 'http://127.0.0.1:1' }, '')).code).not.toBe(0);
+    const refusing = await gateway(() => ({ status: 403, body: '{}' }));
+    expect((await run(file, 'ping', { ...env, [AGENT_GATEWAY_ENV.hookUrl]: refusing.url }, '')).code).not.toBe(0);
+    expect((await run(file, 'ping', {}, '')).code).not.toBe(0);
   });
 });
 

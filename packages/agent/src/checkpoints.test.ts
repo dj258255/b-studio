@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError } from './checkpoints';
+import { CheckpointError, CheckpointStore, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
 import { formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
 
 // 이 파일의 테스트는 실제 git 하위 프로세스를 여러 번 띄운다(clone·commit·push·fetch). 전체 테스트가 함께 도는 부하에서는
@@ -1216,5 +1216,89 @@ describe('CheckpointStore 생성 파일(제외됨) 스냅샷 (ADR-141, 도그푸
 
     // 원본 폴더의 .git은 그대로다(별도 gitDir이라 건드리지 않는다)
     expect(await git(root, 'log', '--format=%s')).toBe('내 커밋');
+  });
+});
+
+describe('CheckpointStore 검증한 내용만 커밋한다 (이슈 #677)', () => {
+  const staged = async () => (await execFileAsync('git', ['-C', root, 'diff', '--cached', '--name-only'])).stdout.trim();
+
+  it('스테이징된 내용이 검증한 지문과 같으면 커밋한다. 지문은 git이 스테이징할 때의 blob id다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await write('api/src/New.java', 'class New {}\n');
+    const prints = await store.stagedFingerprints(await store.pendingFiles());
+    expect([...prints.keys()].sort()).toEqual(['api/src/New.java', 'api/src/Order.java']);
+    const expected = (await execFileAsync('git', ['-C', root, 'hash-object', 'api/src/Order.java'])).stdout.trim();
+    expect(prints.get('api/src/Order.java')).toBe(`blob:${expected}`);
+
+    const checkpoint = await store.commit('feat: 메모', undefined, { expectStaged: prints });
+    expect(checkpoint?.files.sort()).toEqual(['api/src/New.java', 'api/src/Order.java']);
+  });
+
+  it('지문을 뜬 뒤에 내용이 바뀌었으면 커밋하지 않고 스테이징을 푼다. 작업 복사본은 그대로 둔다', async () => {
+    const store = new CheckpointStore(root);
+    const first = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const prints = await store.stagedFingerprints(await store.pendingFiles());
+    // 검증이 끝난 뒤, 커밋 전에 다른 내용으로 바뀌었다
+    await write('api/src/Order.java', 'class Order { String memo; /* 검증하지 않은 줄 */ }\n');
+
+    const failure = await store.commit('feat: 메모', undefined, { expectStaged: prints }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(StagedMismatchError);
+    expect((failure as StagedMismatchError).files).toEqual(['api/src/Order.java']);
+    expect((failure as Error).message).toContain('검증한 뒤에 바뀐 파일');
+    expect((await store.list(5))[0]!.sha).toBe(first.sha);
+    expect(await staged()).toBe('');
+    expect(await read('api/src/Order.java')).toContain('검증하지 않은 줄');
+    // 다시 지문을 뜨면(다시 검증하면) 커밋된다
+    expect(await store.commit('feat: 메모', undefined, { expectStaged: await store.stagedFingerprints(await store.pendingFiles()) })).toBeDefined();
+  });
+
+  it('검증에 없던 파일이 스테이징되거나, 검증한 변경이 사라졌으면 커밋하지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    const first = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const prints = await store.stagedFingerprints(await store.pendingFiles());
+
+    // 검증한 뒤에 새 파일이 생겼다
+    await write('api/src/Sneaked.java', 'class Sneaked {}\n');
+    const added = await store.commit('feat: 메모', undefined, { expectStaged: prints }).catch((error: unknown) => error);
+    expect((added as StagedMismatchError).files).toEqual(['api/src/Sneaked.java']);
+    await rm(path.join(root, 'api/src/Sneaked.java'));
+
+    // 검증한 변경이 원래대로 돌아갔다(검증한 조합이 아니다)
+    await write('api/src/Extra.java', 'class Extra {}\n');
+    const both = await store.stagedFingerprints(await store.pendingFiles());
+    await write('api/src/Order.java', 'class Order {}\n');
+    const reverted = await store.commit('feat: 메모', undefined, { expectStaged: both }).catch((error: unknown) => error);
+    expect((reverted as StagedMismatchError).files).toEqual(['api/src/Order.java']);
+    expect((await store.list(5))[0]!.sha).toBe(first.sha);
+    expect(await staged()).toBe('');
+  });
+
+  it('지운 파일은 "없음"으로, 링크는 링크로 지문을 뜬다. 지운 것이 되살아났으면 다르다고 본다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await rm(path.join(root, 'api/src/Order.java'));
+    await execFileAsync('ln', ['-s', '/etc/hosts', path.join(root, 'api/src/hosts')]);
+    const prints = await store.stagedFingerprints(['api/src/Order.java', 'api/src/hosts', 'api/src']);
+    expect(Object.fromEntries(prints)).toEqual({ 'api/src/Order.java': 'missing', 'api/src/hosts': 'link:/etc/hosts', 'api/src': 'other' });
+    await rm(path.join(root, 'api/src/hosts'));
+
+    const deletion = new Map([['api/src/Order.java', 'missing']]);
+    await write('api/src/Order.java', 'class Order { /* 되살아남 */ }\n');
+    await expect(store.commit('chore: 지움', undefined, { expectStaged: deletion })).rejects.toBeInstanceOf(StagedMismatchError);
+    await rm(path.join(root, 'api/src/Order.java'));
+    expect((await store.commit('chore: 지움', undefined, { expectStaged: deletion }))?.files).toEqual(['api/src/Order.java']);
+  });
+
+  it('줄 끝 변환이 켜진 저장소에서도 같은 내용이면 같다고 본다(지문과 인덱스가 같은 변환을 거친다)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await execFileAsync('git', ['-C', root, 'config', 'core.autocrlf', 'input']);
+    await write('api/src/Order.java', 'class Order {\r\n  String memo;\r\n}\r\n');
+    const prints = await store.stagedFingerprints(await store.pendingFiles());
+    expect(await store.commit('feat: 메모', undefined, { expectStaged: prints })).toBeDefined();
   });
 });
