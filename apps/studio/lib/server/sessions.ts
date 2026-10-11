@@ -8,6 +8,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import {
   experimentalEnabled,
+  gatewayEnabled,
   appendPlanToRequest,
   AssumptionSchema,
   attachResults,
@@ -123,6 +124,8 @@ import {
   restartServicesFor,
   runAgent,
   runClaudeCodeAgent,
+  runClaudeGatewayAgent,
+  type ClaudeCodeRunOptions,
   runCodexAgent,
   runCommandCodeAgent,
   runOpenCodeAgent,
@@ -2605,7 +2608,13 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     }
 
     const { claudeCode } = session;
-    const result = await runClaudeCodeAgent({
+    // 관문 방식(이슈 #670, B_STUDIO_GATEWAY): 러너 대신 claude CLI를 그대로 띄우고 도구(MCP)와 게이트(Stop 훅)만 붙인다.
+    // 질문은 파일을 바꾸지 않아 관문이 할 일이 없으므로 러너가 맡는다. 결과의 꼴이 같아 체크포인트·되돌리기는 그대로다
+    const viaGateway = gatewayEnabled() && plan.intent !== 'ask';
+    const runClaude = viaGateway
+      ? (options: ClaudeCodeRunOptions) => runClaudeGatewayAgent({ ...options, pendingFiles: () => session.checkpoints.pendingFiles() })
+      : runClaudeCodeAgent;
+    const result = await runClaude({
       ...shared,
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),

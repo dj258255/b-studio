@@ -736,4 +736,5 @@ export {
   type TestRunPlan,
   type TestTarget,
 } from './test-run';
-export { experimentalEnabled } from './experimental';
+export { experimentalEnabled, gatewayEnabled } from './experimental';
+export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, runClaudeGatewayAgent, type ClaudeGatewayRunOptions } from './claude-gateway-runner';

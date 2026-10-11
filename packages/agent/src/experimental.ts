@@ -9,3 +9,14 @@ export function experimentalEnabled(env: Record<string, string | undefined> = pr
   const value = env.B_STUDIO_EXPERIMENTAL?.trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'on';
 }
+
+/**
+ * 관문 방식(이슈 #670, E17)을 쓸지(B_STUDIO_GATEWAY). 기본은 끈다.
+ *
+ * 켜면 claude-code 백엔드의 만들기 요청이 러너(`runClaudeCodeAgent`) 대신 `claude` CLI를 그대로 띄우는 경로(`runClaudeGatewayAgent`)로 돈다.
+ * 화면에 드러내는 실험 기능(B_STUDIO_EXPERIMENTAL)과 따로 둔다 — 같은 세션에서 두 방식을 견주려면 이것만 바꿔야 한다.
+ */
+export function gatewayEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const value = env.B_STUDIO_GATEWAY?.trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'on';
+}
