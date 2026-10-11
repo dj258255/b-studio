@@ -1,6 +1,8 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { realpath } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { EDGE_IMAGE } from '../edge-config';
 import { SandboxError } from '../errors';
@@ -42,6 +44,156 @@ const AGENT_HOME = '/home/node';
 const NPM_PREFIX = `${AGENT_HOME}/.npm-global`;
 const AGENT_PATH = `${NPM_PREFIX}/bin:${AGENT_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
 
+/**
+ * 관문 설정(이슈 #673 2단계): 컨테이너 안의 CLI가 요청의 시작·쓰기 직전·턴 끝에 호스트의 b-studio를 부르게 한다.
+ *
+ * CLI의 관리 설정 자리(`/etc/claude-code`)에 읽기 전용으로 붙인다. 이 자리의 설정은 사용자·프로젝트 설정보다 앞서고
+ * 컨테이너 안에서는 바꿀 수 없어서, `claude`를 어떻게 띄우든(감싸개 없이 실행 파일을 직접 불러도) 훅이 붙는다.
+ * 파일에는 비밀이 없다. 호스트의 주소와 토큰은 터미널을 열 때 그 프로세스의 환경 변수로만 넘긴다.
+ *
+ * 훅은 판정이 아니라 통로다. 훅이 불리지 않으면(설정을 못 읽었거나 관문에 닿지 못하면) 검증이 돌지 않고,
+ * 검증이 돌지 않으면 체크포인트가 생기지 않는다. 체크포인트는 호스트만 만든다(컨테이너에서 `.git`은 읽기 전용이다).
+ */
+export const AGENT_GATEWAY_TARGET = '/etc/claude-code';
+/** 컨테이너에서 호스트를 부르는 이름. Docker Desktop과 colima가 호스트의 루프백으로 이어 준다 */
+export const AGENT_GATEWAY_HOST = 'host.docker.internal';
+export const AGENT_GATEWAY_ENV = {
+  hookUrl: 'B_STUDIO_GATEWAY_URL',
+  hookToken: 'B_STUDIO_GATEWAY_TOKEN',
+  mcpUrl: 'B_STUDIO_MCP_URL',
+  mcpToken: 'B_STUDIO_MCP_TOKEN',
+} as const;
+/** 훅의 종류(스크립트의 인자이자 관문의 경로) → 기다리는 시간(초) */
+export const AGENT_HOOK_EVENTS = {
+  /** 대화가 시작될 때. 이 작업 폴더가 무엇인지 알리는 글을 받는다 */
+  'session-start': 15,
+  /** 사용자가 요청을 보냈을 때. 실행 한 건이 시작된다 */
+  prompt: 60,
+  /** 파일을 바꿀 수 있는 도구를 쓰기 직전. 샌드박스가 켜지고 변경 전 기준을 잡을 때까지 기다린다 */
+  'pre-tool': 1800,
+  /** 턴이 끝날 때. 검증 게이트가 돈다(한 번이 수 분 걸릴 수 있다) */
+  stop: 3600,
+  /** CLI가 끝날 때. 열려 있던 실행을 닫는다 */
+  'session-end': 10,
+} as const;
+export type AgentHookEvent = keyof typeof AGENT_HOOK_EVENTS;
+/** 파일을 바꿀 수 있는 내장 도구. 읽기 도구는 훅을 거치지 않는다(호출마다 훅 프로세스가 뜬다) */
+export const AGENT_WRITE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'] as const;
+const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
+const MCP_SERVER = 'b-studio';
+
+/**
+ * 훅 명령이 실행하는 스크립트(컨테이너 안의 node). 훅의 입력(JSON)을 관문에 그대로 보내고 답을 그대로 출력한다.
+ * 관문에 닿지 못하면 CLI를 막지 않는다. 요청을 보낼 때만 그 사실을 사용자에게 알린다.
+ * fetch를 쓰지 않는다 — 응답 머리를 기다리는 기본 상한(5분)이 게이트 한 번보다 짧을 수 있다.
+ */
+export const AGENT_HOOK_SCRIPT = `// b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.
+import http from 'node:http';
+
+const TIMEOUT_SECONDS = ${JSON.stringify(AGENT_HOOK_EVENTS)};
+const event = process.argv[2] ?? '';
+
+function finish(output) {
+  if (output !== undefined) process.stdout.write(JSON.stringify(output));
+  process.exit(0);
+}
+
+function unreachable(why) {
+  if (event !== 'prompt') finish();
+  finish({ systemMessage: '[b-studio] 관문에 닿지 못했습니다(' + why + '). 이 요청의 변경은 검증 없이 작업 폴더에 남고 체크포인트는 생기지 않습니다.' });
+}
+
+if (!Object.hasOwn(TIMEOUT_SECONDS, event)) finish();
+const base = process.env.${AGENT_GATEWAY_ENV.hookUrl};
+const token = process.env.${AGENT_GATEWAY_ENV.hookToken};
+if (!base || !token) unreachable('관문 주소가 없습니다');
+
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const body = Buffer.concat(chunks);
+
+let url;
+try {
+  url = new URL(base + '/' + event);
+} catch {
+  unreachable('관문 주소를 읽지 못했습니다');
+}
+const request = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': body.length, authorization: 'Bearer ' + token } }, (response) => {
+  const parts = [];
+  response.on('data', (part) => parts.push(part));
+  response.on('error', () => unreachable('응답이 끊겼습니다'));
+  response.on('end', () => {
+    if (response.statusCode !== 200) unreachable('HTTP ' + response.statusCode);
+    try {
+      finish(JSON.parse(Buffer.concat(parts).toString('utf8')));
+    } catch {
+      unreachable('응답을 읽지 못했습니다');
+    }
+  });
+});
+// 훅의 상한보다 조금 먼저 끊는다. CLI가 훅을 죽이기 전에 스스로 끝나야 출력이 남는다
+request.setTimeout(Math.max(1, TIMEOUT_SECONDS[event] - 3) * 1000, () => request.destroy(new Error('시간 초과')));
+request.on('error', (error) => unreachable(error.code ?? error.message));
+request.end(body);
+`;
+
+/** CLI의 관리 설정. 훅 넷과 b-studio 도구의 사용 허락만 적는다 */
+export function agentManagedSettings(): Record<string, unknown> {
+  const hook = (event: AgentHookEvent) => ({ type: 'command', command: `node ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, timeout: AGENT_HOOK_EVENTS[event] });
+  return {
+    // b-studio 도구는 서비스 컨테이너 안에서 돌고 b-studio의 실행 정책을 거친다. 호출마다 묻지 않게 한다
+    permissions: { allow: [`mcp__${MCP_SERVER}`] },
+    hooks: {
+      SessionStart: [{ hooks: [hook('session-start')] }],
+      UserPromptSubmit: [{ hooks: [hook('prompt')] }],
+      PreToolUse: [{ matcher: AGENT_WRITE_TOOLS.join('|'), hooks: [hook('pre-tool')] }],
+      Stop: [{ hooks: [hook('stop')] }],
+      SessionEnd: [{ hooks: [hook('session-end')] }],
+    },
+  };
+}
+
+/** CLI의 관리 MCP 설정. 주소와 토큰은 환경 변수의 이름만 적는다(CLI가 읽을 때 풀어 넣는다) */
+export function agentManagedMcp(): Record<string, unknown> {
+  return { mcpServers: { [MCP_SERVER]: { type: 'http', url: `\${${AGENT_GATEWAY_ENV.mcpUrl}}`, headers: { Authorization: `Bearer \${${AGENT_GATEWAY_ENV.mcpToken}}` } } } };
+}
+
+/** 관문 설정 파일의 이름 → 내용 */
+export function agentGatewayFiles(): Record<string, string> {
+  return {
+    'managed-settings.json': `${JSON.stringify(agentManagedSettings(), null, 2)}\n`,
+    'managed-mcp.json': `${JSON.stringify(agentManagedMcp(), null, 2)}\n`,
+    [HOOK_SCRIPT_NAME]: AGENT_HOOK_SCRIPT,
+  };
+}
+
+/** 관문 설정을 두는 호스트 폴더의 상위 폴더. 기본 ~/.cache/b-studio/agent-gateway */
+export function defaultAgentGatewayRoot(): string {
+  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_AGENT_GATEWAY_DIR ?? path.join(homedir(), '.cache/b-studio/agent-gateway'));
+}
+
+/**
+ * 관문 설정 파일을 호스트에 쓰고 그 폴더를 돌려준다. 폴더 이름에 내용의 해시를 넣는다 — 판이 다른 b-studio가 같은 호스트에서
+ * 함께 돌아도 서로의 스크립트를 덮어쓰지 않고, 떠 있는 컨테이너가 보는 파일이 도중에 바뀌지 않는다.
+ * 이미 같은 내용이면 건드리지 않는다. 내용이 다르면(누가 고쳤으면) 다시 쓴다
+ */
+export async function writeAgentGatewayConfig(root: string = defaultAgentGatewayRoot()): Promise<string> {
+  const files = agentGatewayFiles();
+  const hash = createHash('sha256');
+  for (const [name, content] of Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) hash.update(`${name}\0${content}\0`);
+  const dir = path.join(root, hash.digest('hex').slice(0, 16));
+  await mkdir(dir, { recursive: true, mode: 0o755 });
+  for (const [name, content] of Object.entries(files)) {
+    const target = path.join(dir, name);
+    if ((await readFile(target, 'utf8').catch(() => undefined)) === content) continue;
+    // 같은 폴더에 임시 이름으로 쓰고 옮긴다. 읽는 쪽(컨테이너 안의 CLI)이 반쯤 쓰인 파일을 보지 않는다
+    const staged = `${target}.${process.pid}.tmp`;
+    await writeFile(staged, content, { mode: 0o644 });
+    await rename(staged, target);
+  }
+  return realpath(dir);
+}
+
 /** 터미널 크기의 허용 범위. 숫자가 아닌 값이 셸 명령에 들어가지 않게 정수로 좁힌다 */
 const MIN_COLS = 20;
 const MAX_COLS = 400;
@@ -73,6 +225,8 @@ export interface AgentContainerPlan {
   masks: readonly MaskVolume[];
   /** CLI의 홈 폴더를 둘 볼륨(agentHomeVolume) */
   homeVolume: string;
+  /** 관문 설정을 둔 호스트 폴더(writeAgentGatewayConfig). 주면 CLI의 관리 설정 자리에 읽기 전용으로 붙인다 */
+  gatewayDir?: string;
   image?: string;
 }
 
@@ -90,7 +244,7 @@ export function agentContainerName(sandboxId: string): string {
  */
 export function agentRunArgs(plan: AgentContainerPlan): string[] {
   const mount = (volume: MaskVolume): string => `type=bind,source=${volume.source},target=${volume.target},readonly`;
-  for (const value of [plan.projectRoot, plan.homeVolume, ...plan.masks.flatMap((volume) => [volume.source, volume.target])]) {
+  for (const value of [plan.projectRoot, plan.homeVolume, ...(plan.gatewayDir ? [plan.gatewayDir] : []), ...plan.masks.flatMap((volume) => [volume.source, volume.target])]) {
     // --mount의 값은 쉼표로 나뉜다. 쉼표가 든 경로를 그대로 넣으면 다른 옵션으로 읽힌다
     if (value.includes(',')) throw new SandboxError('경로에 쉼표가 있어 에이전트 컨테이너에 연결할 수 없습니다', value);
   }
@@ -113,6 +267,7 @@ export function agentRunArgs(plan: AgentContainerPlan): string[] {
     '--mount', `type=bind,source=${plan.projectRoot},target=${AGENT_WORKSPACE}`,
     ...plan.masks.flatMap((volume) => ['--mount', mount(volume)]),
     '--mount', `type=volume,source=${plan.homeVolume},target=${AGENT_HOME}`,
+    ...(plan.gatewayDir ? ['--mount', `type=bind,source=${plan.gatewayDir},target=${AGENT_GATEWAY_TARGET},readonly`] : []),
     '--env', `HOME=${AGENT_HOME}`,
     '--env', `NPM_CONFIG_PREFIX=${NPM_PREFIX}`,
     '--env', `PATH=${AGENT_PATH}`,
@@ -148,9 +303,12 @@ const ttyFile = (id: string): string => `/tmp/b-studio-tty-${id}`;
  * `script`가 가상 터미널을 만들고 표준 입출력(파이프)과 잇는다. 터미널의 장치 이름을 파일에 적어 두어 크기를 바꿀 때 쓴다.
  * 명령과 크기는 환경 변수로 넘긴다(인자의 글에 끼워 넣지 않는다)
  */
-export function agentTerminalArgs(name: string, { id, size, command = AGENT_TERMINAL_COMMAND }: { id: string; size: TerminalSize; command?: string }): string[] {
+export function agentTerminalArgs(name: string, { id, size, command = AGENT_TERMINAL_COMMAND, inherit = [] }: { id: string; size: TerminalSize; command?: string; inherit?: readonly string[] }): string[] {
   assertTerminalId(id);
   const { cols, rows } = clampTerminalSize(size);
+  for (const variable of inherit) {
+    if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(variable)) throw new SandboxError('터미널에 넘길 환경 변수의 이름이 올바르지 않습니다', variable);
+  }
   return [
     'exec',
     '--interactive',
@@ -160,6 +318,8 @@ export function agentTerminalArgs(name: string, { id, size, command = AGENT_TERM
     '--env', `B_STUDIO_TTY_FILE=${ttyFile(id)}`,
     '--env', `B_STUDIO_TTY_SIZE=rows ${rows} cols ${cols}`,
     '--env', `B_STUDIO_TERMINAL_COMMAND=${command}`,
+    // 값 없이 이름만 준다: docker가 자기 환경에서 값을 읽어 넘긴다. 값(관문의 토큰)이 명령줄에 남지 않는다
+    ...inherit.flatMap((variable) => ['--env', variable]),
     name,
     'script', '--quiet', '--flush', '--command', 'stty $B_STUDIO_TTY_SIZE; tty > "$B_STUDIO_TTY_FILE"; exec sh -c "$B_STUDIO_TERMINAL_COMMAND"', '/dev/null',
   ];
@@ -175,6 +335,8 @@ export function agentResizeArgs(name: string, id: string, size: TerminalSize): s
 export interface AgentContainerOptions {
   /** 홈 볼륨을 나누는 단위(프로젝트 id) */
   projectId: string;
+  /** 관문 설정을 둔 호스트 폴더. 주면 CLI의 관리 설정 자리에 붙이고, 붙었는지를 띄운 뒤에 확인한다 */
+  gatewayDir?: string;
   dockerBin?: string;
   image?: string;
 }
@@ -184,25 +346,27 @@ export interface AgentContainerOptions {
  * 띄운 뒤에는 설정이 아니라 결과를 본다: 실제 마운트에서 `.git`이 읽기 전용으로 덮였는지 확인하고, 아니면 지우고 던진다.
  * 확인하기 전에는 누구도 이 컨테이너에서 명령을 돌리지 않는다(이름을 돌려주지 않는다)
  */
-export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { projectId, dockerBin = 'docker', image }: AgentContainerOptions): Promise<string> {
+export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { projectId, gatewayDir, dockerBin = 'docker', image }: AgentContainerOptions): Promise<string> {
   const name = agentContainerName(sandboxId);
   const docker = (args: string[]) => execFileAsync(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
   const root = await realpath(projectRoot);
 
+  // 설정이 다른 컨테이너(관문 없이 띄운 것, 다른 판의 설정을 붙인 것)는 다시 쓰지 않고 새로 띄운다
+  const ready = async (mounts: readonly InspectedMount[]): Promise<boolean> => (await masksInPlace(root, mounts)) && gatewayInPlace(gatewayDir, mounts);
   const existing = await inspect(dockerBin, name);
-  if (existing?.running && (await masksInPlace(root, existing.mounts))) return name;
+  if (existing?.running && (await ready(existing.mounts))) return name;
   if (existing) await docker(['rm', '--force', name]).catch(() => {});
 
   const masks = (await computeGitMask(root, { services: { [AGENT_SERVICE]: { volumes: [{ type: 'bind', source: root, target: AGENT_WORKSPACE }] } } }))[AGENT_SERVICE] ?? [];
   try {
-    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId), image }));
+    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId), gatewayDir, image }));
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 띄우지 못했습니다', describe(error), { platform: true });
   }
   const started = await inspect(dockerBin, name);
-  if (!started?.running || !(await masksInPlace(root, started.mounts))) {
+  if (!started?.running || !(await ready(started.mounts))) {
     await docker(['rm', '--force', name]).catch(() => {});
-    throw new SandboxError('에이전트 컨테이너의 .git 보호를 확인하지 못해 컨테이너를 지웠습니다', started ? `마운트 ${started.mounts.length}개` : '컨테이너가 뜨지 않았습니다', { platform: true });
+    throw new SandboxError('에이전트 컨테이너의 .git 보호와 관문 설정을 확인하지 못해 컨테이너를 지웠습니다', started ? `마운트 ${started.mounts.length}개` : '컨테이너가 뜨지 않았습니다', { platform: true });
   }
   return name;
 }
@@ -214,6 +378,16 @@ export async function removeAgentContainer(sandboxId: string, { dockerBin = 'doc
 
 async function masksInPlace(projectRoot: string, mounts: readonly InspectedMount[]): Promise<boolean> {
   return (await findMissingMasks(projectRoot, mounts, {})).length === 0;
+}
+
+/** 관문 설정이 정한 대로 붙어 있는가: 주었으면 그 폴더가 읽기 전용으로, 주지 않았으면 그 자리에 아무것도 없어야 한다 */
+function gatewayInPlace(gatewayDir: string | undefined, mounts: readonly InspectedMount[]): boolean {
+  const mounted = mounts.filter((mount) => mount.Destination === AGENT_GATEWAY_TARGET);
+  if (gatewayDir === undefined) return mounted.length === 0;
+  // Docker Desktop은 호스트 경로 앞에 자기 접두어(/host_mnt)를 붙여 알려 주기도 한다(실측: 같은 컨테이너에서 이 마운트만 붙었다).
+  // 그래서 끝이 같은지로 본다. 폴더 이름이 내용의 해시라 다른 판의 설정과는 끝이 다르다
+  const source = mounted[0]?.Source ?? '';
+  return mounted.length === 1 && (source === gatewayDir || source.endsWith(gatewayDir)) && mounted[0]!.RW === false;
 }
 
 async function inspect(dockerBin: string, name: string): Promise<{ running: boolean; mounts: InspectedMount[] } | undefined> {
@@ -237,14 +411,21 @@ export interface AgentTerminal {
 }
 
 /** 프로세스를 띄우는 자리(테스트가 가짜를 끼운다) */
-export type SpawnTerminal = (command: string, args: string[]) => ChildProcessWithoutNullStreams;
+export type SpawnTerminal = (command: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcessWithoutNullStreams;
 
 /** 컨테이너 안에 가상 터미널을 열고 기본 명령(CLI)을 띄운다. 컨테이너는 ensureAgentContainer가 확인한 것이어야 한다 */
 export function openAgentTerminal(
   name: string,
-  { id, size, command, dockerBin = 'docker', spawnProcess = (bin, args) => spawn(bin, args, { cwd: tmpdir() }) }: { id: string; size: TerminalSize; command?: string; dockerBin?: string; spawnProcess?: SpawnTerminal },
+  {
+    id,
+    size,
+    command,
+    env = {},
+    dockerBin = 'docker',
+    spawnProcess = (bin, args, processEnv) => spawn(bin, args, { cwd: tmpdir(), env: processEnv }),
+  }: { id: string; size: TerminalSize; command?: string; /** 터미널 안의 프로세스에 넘길 환경 변수(관문의 주소와 토큰) */ env?: Readonly<Record<string, string>>; dockerBin?: string; spawnProcess?: SpawnTerminal },
 ): AgentTerminal {
-  const child = spawnProcess(dockerBin, agentTerminalArgs(name, { id, size, command }));
+  const child = spawnProcess(dockerBin, agentTerminalArgs(name, { id, size, command, inherit: Object.keys(env) }), { ...process.env, ...env });
   // 닫힌 뒤에 들어온 입력으로 프로세스 전체가 죽지 않게 한다
   child.stdin.on('error', () => {});
   return {

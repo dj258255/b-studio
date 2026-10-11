@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   closeSessionTerminal,
   disposeSessionTerminal,
+  interruptSessionTerminal,
   MAX_TERMINAL_INPUT,
   openSessionTerminal,
   resizeSessionTerminal,
@@ -14,15 +15,17 @@ import {
 
 /** 도커 없이 도는 가짜. 컨테이너를 띄운 횟수, 연 터미널, 쓴 입력, 지운 컨테이너를 기록한다 */
 function fakeBackend(options: { failEnsure?: string } = {}) {
-  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal> };
+  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as boolean[], envs: [] as Array<Readonly<Record<string, string>> | undefined> };
   const backend: TerminalBackend = {
     async ensureContainer(target) {
       record.ensured.push(target.sandboxId);
+      record.gateways.push(target.gateway !== undefined);
       await new Promise((resolve) => setTimeout(resolve, 5));
       if (options.failEnsure) throw new Error(options.failEnsure);
       return `${target.sandboxId}-agent`;
     },
-    open(container, { id, size }) {
+    open(container, { id, size, env }) {
+      record.envs.push(env);
       const terminal = new FakeTerminal(container, id, size);
       record.terminals.push(terminal);
       return terminal;
@@ -234,5 +237,54 @@ describe('세션 터미널 (이슈 #673)', () => {
     expect(record.terminals[0]!.closed).toBe(true);
     expect(record.removed).toEqual(['studio-orders-abc123', 'studio-orders-abc123']);
     expect(() => writeSessionTerminal(id, 'x')).toThrow('터미널이 열려 있지 않습니다');
+  });
+
+  it('관문이 있으면 먼저 띄우고, 그 주소와 토큰을 터미널 안의 프로세스에 넘긴다. 없으면 넘기지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    const order: string[] = [];
+    const env = { B_STUDIO_GATEWAY_URL: 'http://host.docker.internal:1234', B_STUDIO_GATEWAY_TOKEN: 'tok' };
+    const gateway = async () => {
+      order.push('gateway');
+      return env;
+    };
+    const watched: TerminalBackend = {
+      ...backend,
+      ensureContainer: async (given) => {
+        order.push('container');
+        return backend.ensureContainer(given);
+      },
+    };
+    await openSessionTerminal(id, { ...target, gateway }, { cols: 80, rows: 24 }, watched);
+    // CLI는 뜨자마자 훅을 부른다. 관문이 먼저 떠 있어야 한다
+    expect(order).toEqual(['gateway', 'container']);
+    expect(record.gateways).toEqual([true]);
+    expect(record.envs).toEqual([env]);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+
+    const plain = fakeBackend();
+    id = `s-${++session}`;
+    await openSessionTerminal(id, target, { cols: 80, rows: 24 }, plain.backend);
+    expect(plain.record.gateways).toEqual([false]);
+    expect(plain.record.envs).toEqual([undefined]);
+    await disposeSessionTerminal(id, target.sandboxId, plain.backend);
+  });
+
+  it('관문을 띄우지 못하면 터미널을 열지 않는다(훅 없는 CLI를 관문이 붙은 것처럼 내주지 않는다)', async () => {
+    const { backend, record } = fakeBackend();
+    const gateway = async (): Promise<Record<string, string>> => {
+      throw new Error('포트를 열지 못했습니다');
+    };
+    await expect(openSessionTerminal(id, { ...target, gateway }, { cols: 80, rows: 24 }, backend)).rejects.toThrow('터미널을 열지 못했습니다: 포트를 열지 못했습니다');
+    expect(record.ensured).toEqual([]);
+    expect(record.terminals).toEqual([]);
+  });
+
+  it('실행을 취소하면 CLI에 Esc를 보낸다. 터미널이 없으면 아무 일도 하지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    interruptSessionTerminal(id);
+    await openSessionTerminal(id, target, { cols: 80, rows: 24 }, backend);
+    interruptSessionTerminal(id);
+    expect(record.terminals[0]!.written).toEqual(['\x1b']);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
   });
 });

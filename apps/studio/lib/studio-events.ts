@@ -330,7 +330,19 @@ export type StudioEvent =
   /** "테스트" 탭(ADR-084)이 다시 불러올 때가 됐다는 신호. 사용량처럼 기록에 쌓지 않고 스냅샷의 최신 값만 바꾼다 */
   | { type: 'tests_changed'; revision: number; running: string[] }
   /** by: 요청을 보낸 사람. intent가 ask면 파일을 바꾸지 않는 질문이다 */
-  | { type: 'run_started'; runId: string; request: string; by?: string; intent?: 'ask'; /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */ at?: string }
+  | {
+      type: 'run_started';
+      runId: string;
+      request: string;
+      by?: string;
+      intent?: 'ask';
+      /** 세션 터미널에서 CLI에 직접 보낸 요청이면 'terminal'(#673). 대화 창의 요청에는 없다 */
+      via?: 'terminal';
+      /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */
+      at?: string;
+    }
+  /** 터미널 실행이 끝나기 전에 사용자가 CLI에 이어서 보낸 말(도중에 끊고 다시 말한 경우). 같은 실행에 속한다 */
+  | { type: 'terminal_prompt'; runId: string; text: string; at: string }
   /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. 화면은 "계획(모델명)" 접기 블록으로 보여준다 */
   | { type: 'plan_brief'; runId: string; model: string; text: string; usage: AgentUsage; durationMs: number }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }

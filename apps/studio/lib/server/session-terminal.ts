@@ -1,4 +1,4 @@
-import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, removeAgentContainer, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
+import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, removeAgentContainer, writeAgentGatewayConfig, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
 import { StudioError } from './errors';
 
 /**
@@ -43,17 +43,22 @@ export interface TerminalTarget {
    * 여는 쪽이 컨테이너를 띄우면, 멈춘 세션의 작업 복사본을 붙인 컨테이너가 남는다. 띄운 뒤에 한 번 더 물어 지운다
    */
   alive?: () => boolean;
+  /**
+   * 관문(#673 2단계)을 띄우고 터미널 안의 프로세스에 넘길 환경 변수(관문의 주소와 토큰)를 돌려준다.
+   * 주면 컨테이너에 CLI의 관리 설정(훅, b-studio 도구)을 붙인다. 주지 않으면 관문 없는 터미널이다
+   */
+  gateway?: () => Promise<Readonly<Record<string, string>>>;
 }
 
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
 export interface TerminalBackend {
   ensureContainer(target: TerminalTarget): Promise<string>;
-  open(container: string, options: { id: string; size: TerminalSize }): AgentTerminal;
+  open(container: string, options: { id: string; size: TerminalSize; env?: Readonly<Record<string, string>> }): AgentTerminal;
   removeContainer(sandboxId: string): Promise<void>;
 }
 
 const DOCKER_BACKEND: TerminalBackend = {
-  ensureContainer: (target) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId }),
+  ensureContainer: async (target) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(target.gateway ? { gatewayDir: await writeAgentGatewayConfig() } : {}) }),
   open: (container, options) => openAgentTerminal(container, options),
   removeContainer: (sandboxId) => removeAgentContainer(sandboxId),
 };
@@ -114,13 +119,15 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
     emit(current, { kind: 'status', state: 'opening' });
     try {
       if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
+      // 관문을 먼저 띄운다. 터미널 안의 CLI는 뜨자마자 훅을 부른다
+      const env = target.gateway ? await target.gateway() : undefined;
       const container = await backend.ensureContainer(target);
       // 컨테이너를 띄우는 동안 세션이 멈췄으면 방금 띄운 것을 지우고 열지 않는다
       if (target.alive && !target.alive()) {
         await backend.removeContainer(target.sandboxId).catch(() => {});
         throw new Error('세션이 멈췄습니다');
       }
-      const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted });
+      const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted, ...(env ? { env } : {}) });
       current.terminal = terminal;
       current.size = wanted;
       current.chunks = [];
@@ -168,6 +175,14 @@ export function writeSessionTerminal(sessionId: string, data: string): void {
   const terminal = terminals.get(sessionId)?.terminal;
   if (!terminal) throw new StudioError(409, '터미널이 열려 있지 않습니다');
   terminal.write(data);
+}
+
+/**
+ * 터미널 안의 CLI에 하던 일을 멈추라고 알린다(Esc). 화면에서 실행을 취소했을 때 쓴다.
+ * 터미널이 없으면 아무 일도 하지 않는다. CLI가 아니라 셸이 떠 있으면 Esc는 아무 일도 하지 않는다
+ */
+export function interruptSessionTerminal(sessionId: string): void {
+  terminals.get(sessionId)?.terminal?.write('\x1b');
 }
 
 export async function resizeSessionTerminal(sessionId: string, size: { cols?: unknown; rows?: unknown }): Promise<void> {
