@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { AgentUsage } from "@b-studio/agent";
+import { requestSummaryLine, type RequestTotals } from "@/lib/request-outcomes";
 import type { SessionView } from "@/lib/session-view";
 import type { ContextJump, TokenReport, TokenWarningKind } from "@/lib/token-types";
 import { formatTokenCount } from "@/lib/usage";
@@ -35,6 +36,7 @@ export function TokenView({ view }: { view: SessionView }) {
   // 실행이 끝날 때마다 다시 불러온다
   const revision = view.completedRuns;
   const [reports, setReports] = useState<TokenReport[]>();
+  const [requests, setRequests] = useState<RequestTotals>();
   const [error, setError] = useState<string>();
   const [selected, setSelected] = useState<string>();
 
@@ -42,13 +44,14 @@ export function TokenView({ view }: { view: SessionView }) {
     let cancelled = false;
     fetch(`/api/sessions/${sessionId}/tokens`, { cache: "no-store" })
       .then(async (response) => {
-        const data = (await response.json().catch(() => ({}))) as { runs?: TokenReport[]; error?: string };
+        const data = (await response.json().catch(() => ({}))) as { runs?: TokenReport[]; requests?: RequestTotals; error?: string };
         if (cancelled) return;
         if (!response.ok) {
           setError(data.error ?? "토큰 보고서를 불러오지 못했습니다");
           return;
         }
         setReports(data.runs ?? []);
+        setRequests(data.requests);
         setError(undefined);
       })
       .catch(() => {
@@ -77,6 +80,7 @@ export function TokenView({ view }: { view: SessionView }) {
         <p className="p-6 text-sm text-muted">아직 끝난 요청이 없습니다. 요청을 하나 보내면 턴별 컨텍스트와 도구 결과 크기를 여기서 볼 수 있습니다.</p>
       ) : (
         <>
+          <RequestSummaryLine requests={requests} />
           <div role="tablist" aria-label="실행" className="flex flex-wrap gap-1 border-b border-line bg-panel px-3 py-2">
             {reports.map((report) => (
               <button
@@ -102,6 +106,23 @@ export function TokenView({ view }: { view: SessionView }) {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * 사람이 다시 손댄 횟수 한 줄(#668). 기록으로 가를 수 있는 것만 세므로, 한 번에 끝난 수는 실제보다 많게 나올 수 있다 —
+ * 그 사실을 줄 옆에 적는다
+ */
+export function RequestSummaryLine({ requests }: { requests?: RequestTotals }) {
+  const line = requests ? requestSummaryLine(requests) : "";
+  if (!line) return null;
+  return (
+    <p className="border-b border-line bg-panel px-4 py-2 text-sm">
+      {line}
+      <span className="ml-2 text-xs text-muted">
+        남은 기록으로 센 값입니다. 완료로 끝났지만 결과가 틀려 다시 시킨 요청은 잡지 못해, 한 번에 끝난 수는 실제보다 많을 수 있습니다
+      </span>
+    </p>
   );
 }
 
