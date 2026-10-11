@@ -280,6 +280,7 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     browserRunner: options.browserRunner,
     saveArtifact: options.saveArtifact,
     onBrowserFrame: options.onBrowserFrame,
+    baselines: options.contractBaselines,
     signal,
     onServiceStatus,
     onEvent,

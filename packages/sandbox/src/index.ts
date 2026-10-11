@@ -51,7 +51,6 @@ export {
 } from './docker/host-processes';
 export {
   AGENT_CLI_PACKAGE,
-  AGENT_GATEWAY_ENV,
   AGENT_GATEWAY_HOST,
   AGENT_GATEWAY_TARGET,
   AGENT_HOOK_EVENTS,
@@ -62,6 +61,7 @@ export {
   agentManagedMcp,
   agentManagedSettings,
   defaultAgentGatewayRoot,
+  removeAgentGatewayConfig,
   writeAgentGatewayConfig,
   AGENT_HOME_VOLUME_PREFIX,
   agentHomeVolume,
@@ -75,6 +75,7 @@ export {
   openAgentTerminal,
   probeAgentGateway,
   removeAgentContainer,
+  type AgentGatewayAddress,
   type AgentHookEvent,
   type AgentTerminal,
   type TerminalSize,

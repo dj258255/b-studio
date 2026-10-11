@@ -313,7 +313,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
-import { AGENT_READ_TOOLS } from '@b-studio/sandbox';
+import { AGENT_READ_TOOLS, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -481,11 +481,12 @@ interface Session {
   exporting: boolean;
   run?: ActiveRun;
   /**
-   * 터미널 실행이 견주는 계약 기준(#677). 기준은 마지막 체크포인트의 계약이어야 하므로, 작업 복사본이 체크포인트 그대로일 때만
-   * 새로 잡고 변경이 남아 있는 동안에는 이것을 이어 쓴다. 터미널의 실행은 실패해도 변경을 되돌리지 않는다 — 실행마다 기준을
-   * 새로 잡으면 남은 변경이 기준에 들어가, 계약을 깨는 변경이 다음 실행에서 통과한다
+   * 마지막 체크포인트 때의 계약(#677). 게이트의 계약 비교는 이것과 견줘야 한다. 작업 복사본이 체크포인트 그대로일 때는 실행이
+   * 시작할 때 읽은 계약이 곧 이것이지만, 검증되지 않은 변경이 남아 있으면 그렇지 않다 — 터미널의 실행은 실패해도 변경을 되돌리지
+   * 않으므로, 다음 실행(터미널이든 대화 창이든)이 기준을 새로 읽으면 남은 변경이 기준에 들어가 계약을 깨는 변경이 통과한다.
+   * 그래서 체크포인트가 생길 때 잡아 두고, 변경이 남아 있는 실행에는 이것을 넘긴다. 메모리에만 둔다(세션을 다시 열면 없다)
    */
-  terminalBaselines?: VerificationGate['baselines'];
+  contractBaselines?: VerificationGate['baselines'];
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
@@ -2368,7 +2369,9 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && questionRunPassedGate(result)))) {
         // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
         // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
+        const headBefore = session.snapshot.checkpoints[0]?.sha;
         await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true);
+        if (session.snapshot.checkpoints[0]?.sha !== headBefore) await rememberContractBaselines(session);
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
@@ -2561,6 +2564,9 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     sandbox: session.sandbox,
     externalChanges,
     requirementsBaseline,
+    // 검증되지 않은 변경이 남아 있으면(터미널의 실행이 실패하거나 닫히며 남긴 것 등) 지금 계약을 기준으로 읽게 두지 않고
+    // 마지막 체크포인트 때 잡아 둔 계약과 견주게 한다. 터미널에서 막힌 변경이 대화 창의 요청으로는 통과하는 길을 막는다(#677)
+    ...(externalChanges.length > 0 && session.contractBaselines ? { contractBaselines: session.contractBaselines } : {}),
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
     // "조사" 모드(ADR-094): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다
@@ -3297,6 +3303,8 @@ export function restoreCheckpoint(id: string, sha: string): void {
       // restore()가 아직 체크포인트로 남기지 않은 변경을 버리기 전에 되살릴 수 있게 백업한다(ADR-099).
       // 지금 체크포인트를 가리켰으면(isHead) 보통 버릴 파일이 없어 이 단계는 사실상 아무것도 하지 않는다
       const { files, backup } = await session.checkpoints.restore(sha);
+      // 다른 체크포인트로 돌아갔다. 잡아 둔 계약은 그 체크포인트의 것이 아니다
+      session.contractBaselines = undefined;
       // 되돌린 파일에 studio.yaml(생성 파일 포함, 도그푸딩 마찰 127)이 있으면 재시작 전에 project를 다시 읽는다
       if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
       // 파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못하므로 DB도 같은 시점으로 맞춘다.
@@ -4283,6 +4291,7 @@ async function undoRemoteSync(
   try {
     // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
     const { files, backup } = await session.checkpoints.restore(result.previous);
+    session.contractBaselines = undefined;
     if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
@@ -4434,6 +4443,7 @@ async function undoBaseSync(
   try {
     // 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 버리기 전에 백업한다(ADR-099)
     const { files, backup } = await session.checkpoints.restore(result.previous);
+    session.contractBaselines = undefined;
     if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
@@ -7073,7 +7083,7 @@ export function sessionTerminalAllowed(): boolean {
  * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
  * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
  */
-export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean; gateway: () => Promise<Readonly<Record<string, string>>> } {
+export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean; gateway: () => Promise<AgentGatewayAddress> } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
@@ -7207,6 +7217,17 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
 }
 
 /**
+ * 방금 생긴 체크포인트의 계약을 기준으로 잡아 둔다(Session.contractBaselines). 게이트가 서비스를 다시 띄우고 통과시킨 직후라
+ * 지금 서비스가 내놓는 계약이 곧 체크포인트의 계약이다. 읽지 못한 서비스는 앞에 잡아 둔 것을 그대로 둔다 — 기준이 없으면
+ * 계약의 모든 항목이 "추가"로 보여 깨는 변경을 놓친다(더 오래된 기준과 견주는 쪽이 닫힌 쪽이다)
+ */
+async function rememberContractBaselines(session: Session): Promise<void> {
+  if (session.snapshot.status !== 'ready') return;
+  const captured = await captureBaselines(session.sandbox, session.project, fetchContract).catch(() => new Map<string, never>());
+  session.contractBaselines = new Map([...(session.contractBaselines ?? []), ...captured]);
+}
+
+/**
  * b-studio 도구를 거치지 않고 바뀐 파일(CLI가 직접 고친 것). 작업 복사본의 상태로 안다.
  * git이 추적하지 않는 생성 파일(studio.yaml 등, ADR-067)도 함께 본다 — 빠지면 확인 선언을 고친 것이 검증 없이 지나간다
  */
@@ -7280,7 +7301,7 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     // 기준은 마지막 체크포인트의 계약이다. 작업 복사본이 체크포인트 그대로일 때만 새로 잡고, 변경이 남아 있으면
     // (앞 실행이 실패하거나 닫히며 남긴 것) 그때 잡아 둔 기준을 이어 쓴다. 이어 쓸 것이 없는데 변경이 있으면 지금 상태가 기준이 된다
     // — 스튜디오 밖에서 바꾼 것이거나, 세션을 다시 연 뒤다(ADR-131과 같은 한계)
-    const kept = (await changesOutsideTools(session)).length > 0 ? session.terminalBaselines : undefined;
+    const kept = (await changesOutsideTools(session)).length > 0 ? session.contractBaselines : undefined;
     // CLI는 b-studio 도구를 거치지 않고 파일을 고친다. 변경은 작업 복사본의 상태로만 안다.
     //  - 실행 전부터 있던 변경도 검증 대상이다(ADR-131). 게이트가 다룰 수 없는 경로는 처음부터 있었어도 봐주지 않는다:
     //    터미널의 실행은 변경을 되돌리지 않으므로, 봐주면 앞 실행이 남긴 비밀 파일이나 링크가 다음 실행에서 그대로 커밋된다
@@ -7303,7 +7324,7 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
         publish(session.snapshot.id, { source: 'qa', check, mime: 'image/jpeg', data: frame.data.toString('base64'), width: frame.width, height: frame.height, at: frame.at }),
       ...(kept ? { baselines: kept } : {}),
     });
-    session.terminalBaselines = gate.baselines;
+    session.contractBaselines = gate.baselines;
     const context: ToolContext = {
       project,
       selfCheck: selfCheckMode(),
@@ -7330,13 +7351,15 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   const session = terminalSession(id);
   const prompt = typeof input.prompt === 'string' ? clipText(input.prompt.trim(), TERMINAL_REQUEST_LIMIT) : '';
   if (!prompt) return {};
+  // 마지막으로 받은 요청 글을 기억해 둔다. 앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙지만,
+  // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
+  session.terminalLabel = prompt;
   const opened = openTerminalRun(session);
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
     return {};
   }
-  session.terminalLabel = prompt;
   const busy = terminalBusy(session);
   if (busy) return { blocked: busy };
   // "/"로 시작하는 명령은 CLI 안에서 끝나는 것이 많다(/model, /clear). 실행은 실제로 작업이 시작될 때 연다
@@ -7469,6 +7492,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         const saved = session.snapshot.checkpoints[0];
         const checkpointed = saved !== undefined && saved.sha !== head;
         if (checkpointed) {
+          await rememberContractBaselines(session);
           if (passed.checks) session.lastGateChecks = passed.checks;
           void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests).catch(() => {});
           void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});

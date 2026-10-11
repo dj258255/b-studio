@@ -727,7 +727,8 @@ type OutcomeItem = Extract<ChatItem, { kind: 'outcome' }>;
 
 /** 실행 결과 한 줄. 바꾼 파일이 없으면 "답만 했습니다"로 알린다(대화 화면과 나란히 보기 칸이 같은 문구를 쓴다) */
 export function outcomeText(item: OutcomeItem, hasChanges: boolean): string {
-  if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}, ${item.turns ?? 0}턴`;
+  // 턴 수를 모르는 실행(세션 터미널: 턴은 CLI 안에서 돈다)에는 턴 수를 적지 않는다
+  if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'awaiting_input') return '답을 기다립니다';
   if (item.status === 'cancelled') return item.summary;
   return `${item.status === 'failed' ? '완료하지 못함' : '오류'}: ${item.summary}`;

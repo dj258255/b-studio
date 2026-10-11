@@ -18,11 +18,6 @@ describe('세션 터미널 화면의 순수 함수', () => {
     expect(terminalStatusLabel({ state: 'exited', code: 137 })).toBe('터미널이 끝났습니다 (종료 코드 137)');
   });
 
-  it('열렸지만 관문이 없으면 그 사실을 함께 알린다', () => {
-    expect(terminalStatusLabel({ state: 'open' })).toBe('열림');
-    expect(terminalStatusLabel({ state: 'open', message: '관문 없음 — 검증되지 않습니다' })).toBe('열림 · 관문 없음 — 검증되지 않습니다');
-  });
-
   it('마지막으로 고른 자리를 기억한다. 저장소를 쓰지 못해도 대화로 열린다', () => {
     const store = new Map<string, string>();
     const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => void store.set(key, value) };

@@ -242,6 +242,12 @@ export interface RunAgentOptions {
    */
   requirementsBaseline?: string | null;
   /**
+   * 이미 잡아 둔 계약 기준(서비스 → 마지막 체크포인트 때의 계약). 넘기면 게이트가 지금 계약을 기준으로 다시 읽지 않는다.
+   * 실행을 시작할 때 작업 트리에 검증되지 않은 변경이 남아 있으면(externalChanges) 호출자가 넘긴다 — 그 변경이 기준에 들어가면
+   * 계약을 깨는 변경이 "원래 그랬던 것"이 되어 통과한다(GateOptions.baselines). 모든 러너가 같은 옵션을 받는다
+   */
+  contractBaselines?: import('./gate').GateOptions['baselines'];
+  /**
    * 이전 요청부터 이어지는 대화 기록. 넘기면 이번 실행의 메시지가 여기에 이어 붙는다.
    * 실행 중 예외가 나면 이번 실행분은 되돌려 다음 요청이 깨진 대화로 시작하지 않게 한다.
    */
@@ -397,6 +403,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       browserRunner,
       saveArtifact,
       onBrowserFrame,
+      baselines: options.contractBaselines,
       signal,
       onServiceStatus,
       onEvent,

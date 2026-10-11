@@ -70,7 +70,7 @@ describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () =>
 });
 
 describe('관문 서버', () => {
-  it('컨테이너가 부르는 이름으로 온 요청을 받고, 주소와 토큰은 환경 변수로만 내준다', async () => {
+  it('컨테이너가 부르는 이름으로 온 요청을 받는다. 주소는 컨테이너에서 호스트를 부르는 이름으로 내준다', async () => {
     const seen: unknown[] = [];
     const gateway = await startTerminalGateway(
       handlers({
@@ -81,20 +81,20 @@ describe('관문 서버', () => {
       }),
     );
     opened.push(gateway);
-    expect(Object.keys(gateway.env).sort()).toEqual(['B_STUDIO_GATEWAY_TOKEN', 'B_STUDIO_GATEWAY_URL', 'B_STUDIO_MCP_TOKEN', 'B_STUDIO_MCP_URL']);
-    expect(gateway.env.B_STUDIO_GATEWAY_URL).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
-    expect(gateway.env.B_STUDIO_MCP_URL).toMatch(/^http:\/\/host\.docker\.internal:\d+\/mcp$/);
+    expect(Object.keys(gateway.address).sort()).toEqual(['hookToken', 'hookUrl', 'mcpToken', 'mcpUrl']);
+    expect(gateway.address.hookUrl).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+    expect(gateway.address.mcpUrl).toMatch(/^http:\/\/host\.docker\.internal:\d+\/mcp$/);
     // 두 서버의 토큰은 다르다
-    expect(gateway.env.B_STUDIO_GATEWAY_TOKEN).not.toBe(gateway.env.B_STUDIO_MCP_TOKEN);
+    expect(gateway.address.hookToken).not.toBe(gateway.address.mcpToken);
 
-    const url = `${gateway.env.B_STUDIO_GATEWAY_URL}/prompt`;
+    const url = `${gateway.address.hookUrl}/prompt`;
     const host = new URL(url).host;
-    expect(await post(url, gateway.env.B_STUDIO_GATEWAY_TOKEN!, { prompt: '고쳐줘' }, host)).toEqual({ status: 200, body: {} });
+    expect(await post(url, gateway.address.hookToken!, { prompt: '고쳐줘' }, host)).toEqual({ status: 200, body: {} });
     expect(seen).toEqual([{ prompt: '고쳐줘' }]);
     // 다른 이름으로 부르면(브라우저가 이 포트를 다른 사이트의 이름으로 부르게 만든 경우) 받지 않는다
-    expect((await post(url, gateway.env.B_STUDIO_GATEWAY_TOKEN!, {}, 'evil.example.com')).status).toBe(403);
+    expect((await post(url, gateway.address.hookToken!, {}, 'evil.example.com')).status).toBe(403);
     // 도구 서버의 토큰으로는 훅을 부를 수 없다
-    expect((await post(url, gateway.env.B_STUDIO_MCP_TOKEN!, {}, host)).status).toBe(401);
+    expect((await post(url, gateway.address.mcpToken!, {}, host)).status).toBe(401);
     expect(seen).toHaveLength(1);
   });
 
@@ -102,8 +102,8 @@ describe('관문 서버', () => {
     const gateway = await startTerminalGateway(handlers());
     opened.push(gateway);
     // MCP의 요청 하나(JSON-RPC)를 컨테이너가 부르는 이름으로 보낸다. 답은 JSON이거나 이벤트 한 줄이다
-    const call = async (method: string, params: unknown, token = gateway.env.B_STUDIO_MCP_TOKEN!): Promise<{ status: number; result?: { tools?: Array<{ name: string }>; content?: unknown } }> => {
-      const url = new URL(gateway.env.B_STUDIO_MCP_URL!);
+    const call = async (method: string, params: unknown, token = gateway.address.mcpToken!): Promise<{ status: number; result?: { tools?: Array<{ name: string }>; content?: unknown } }> => {
+      const url = new URL(gateway.address.mcpUrl!);
       return new Promise((resolve, reject) => {
         const request = httpRequest(
           { host: '127.0.0.1', port: url.port, path: url.pathname, method: 'POST', headers: { host: url.host, 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` } },
@@ -127,7 +127,7 @@ describe('관문 서버', () => {
     const called = await call('tools/call', { name: 'run_in_service', arguments: { service: 'api' } });
     expect(called.result?.content).toEqual([{ type: 'text', text: 'run_in_service {"service":"api"}' }]);
     // 훅 서버의 토큰으로는 도구를 부를 수 없다
-    expect((await call('tools/list', {}, gateway.env.B_STUDIO_GATEWAY_TOKEN!)).status).toBe(401);
+    expect((await call('tools/list', {}, gateway.address.hookToken!)).status).toBe(401);
   });
 
   it('처리가 던지면 5xx로 답한다. 훅 스크립트는 이것을 막는 답으로 읽지 않는다', async () => {
@@ -139,8 +139,8 @@ describe('관문 서버', () => {
       }),
     );
     opened.push(gateway);
-    const url = `${gateway.env.B_STUDIO_GATEWAY_URL}/stop`;
-    expect(await post(url, gateway.env.B_STUDIO_GATEWAY_TOKEN!, {}, new URL(url).host)).toEqual({ status: 500, body: { error: '멈춘 세션입니다' } });
+    const url = `${gateway.address.hookUrl}/stop`;
+    expect(await post(url, gateway.address.hookToken!, {}, new URL(url).host)).toEqual({ status: 500, body: { error: '멈춘 세션입니다' } });
   });
 });
 
@@ -160,7 +160,7 @@ describe('세션의 관문', () => {
     expect(started).toBe(1);
     // 다른 세션은 다른 관문이다(다른 포트, 다른 토큰)
     const other = await ensureSessionGateway('s-two', handlers, start);
-    expect(other.B_STUDIO_GATEWAY_TOKEN).not.toBe(first.B_STUDIO_GATEWAY_TOKEN);
+    expect(other.hookToken).not.toBe(first.hookToken);
     expect(started).toBe(2);
     await closeSessionGateway('s-one');
     await closeSessionGateway('s-two');
@@ -168,12 +168,12 @@ describe('세션의 관문', () => {
 
   it('닫으면 그 주소로는 더 닿지 않고, 다시 열면 새 토큰을 쓴다', async () => {
     const env = await ensureSessionGateway('s-close', handlers);
-    const url = `${env.B_STUDIO_GATEWAY_URL}/prompt`;
-    expect((await post(url, env.B_STUDIO_GATEWAY_TOKEN!, {}, new URL(url).host)).status).toBe(200);
+    const url = `${env.hookUrl}/prompt`;
+    expect((await post(url, env.hookToken!, {}, new URL(url).host)).status).toBe(200);
     await closeSessionGateway('s-close');
-    await expect(post(url, env.B_STUDIO_GATEWAY_TOKEN!, {}, new URL(url).host)).rejects.toThrow();
+    await expect(post(url, env.hookToken!, {}, new URL(url).host)).rejects.toThrow();
     const again = await ensureSessionGateway('s-close', handlers);
-    expect(again.B_STUDIO_GATEWAY_TOKEN).not.toBe(env.B_STUDIO_GATEWAY_TOKEN);
+    expect(again.hookToken).not.toBe(env.hookToken);
     await closeSessionGateway('s-close');
   });
 

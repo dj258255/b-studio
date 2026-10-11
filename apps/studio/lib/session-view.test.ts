@@ -703,6 +703,9 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
   it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {
     expect(outcomeText(outcome(), true)).toBe('완료, 1턴');
     expect(outcomeText(outcome({ turns: 3 }), false)).toBe('답만 했습니다(바꾼 파일 없음), 3턴');
+    // 턴 수를 모르는 실행(세션 터미널)에는 0턴이라고 적지 않는다
+    expect(outcomeText(outcome({ turns: undefined }), true)).toBe('완료');
+    expect(outcomeText(outcome({ turns: 0 }), true)).toBe('완료, 0턴');
     // 답을 기다리거나 취소·실패한 실행의 문구는 그대로다
     expect(outcomeText(outcome({ status: 'awaiting_input', summary: '어떤 형태로 만들까요?' }), false)).toBe('답을 기다립니다');
     expect(outcomeText(outcome({ status: 'cancelled', summary: '요청을 취소했습니다' }), true)).toBe('요청을 취소했습니다');

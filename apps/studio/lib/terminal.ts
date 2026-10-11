@@ -24,8 +24,7 @@ export function terminalStatusLabel(status: TerminalStatus): string {
     case 'opening':
       return '컨테이너를 준비하는 중';
     case 'open':
-      // 열렸지만 함께 알릴 것이 있다(관문 없이 열림)
-      return status.message ? `열림 · ${status.message}` : '열림';
+      return '열림';
     case 'exited':
       return status.code === 0 || status.code === null ? '터미널이 끝났습니다' : `터미널이 끝났습니다 (종료 코드 ${status.code})`;
     case 'closed':

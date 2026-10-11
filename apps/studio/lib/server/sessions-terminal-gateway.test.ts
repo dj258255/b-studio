@@ -553,6 +553,46 @@ describe('실패한 실행이 남긴 변경은 다음 실행에서도 같은 기
     await stopSession(session.id);
   }, 60_000);
 
+  it('터미널에서 막힌 계약 변경은 대화 창의 요청으로도 통과하지 못한다(같은 기준으로 본다)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문 응답에서 memo를 빼줘' });
+    await write(session, 'api/src/Order.java', 'class Order { /* memo 없음 */ }\n');
+    service.doc = contractWith(['id']);
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+
+    // 대화 창에서 아무 요청이나 보낸다. 남은 변경은 "실행 전부터 있던 변경"으로 게이트에 들어간다
+    const finished = new Promise<Extract<StudioEvent, { type: 'run_finished' }>>((resolve) => subscribe(session.id, (event) => event.type === 'run_finished' && event.runId !== session.ofType('run_started')[0]!.runId && resolve(event)));
+    sendMessage(session.id, '마무리해줘', { allowBreaking: false, scriptedTurns: [{ text: '마무리했습니다.' }, { text: '고칠 수 없습니다.' }, { text: '고칠 수 없습니다.' }, { text: '고칠 수 없습니다.' }] });
+    const outcome = await finished;
+    // 기준을 새로 읽었다면 통과해 체크포인트가 됐을 것이다
+    expect(outcome.status).toBe('failed');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    await stopSession(session.id);
+  }, 60_000);
+
+  it('대화 창의 요청이 남긴 체크포인트도 그때의 계약을 기준으로 잡아 둔다(그 뒤 터미널에서 실패한 변경이 그 기준과 견줘진다)', async () => {
+    const session = await open();
+    // 대화 창의 요청이 필드를 더해 체크포인트를 남긴다
+    const done = new Promise<void>((resolve) => subscribe(session.id, (event) => event.type === 'run_finished' && resolve()));
+    service.doc = contractWith(['id', 'memo', 'note']);
+    sendMessage(session.id, 'note 필드를 더해줘', { allowBreaking: false, scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; String note; }\n' } }] }, { text: '더했습니다.' }] });
+    await done;
+    const before = getSnapshot(session.id)!.checkpoints.length;
+
+    // 방금 더한 note가 훅을 거치지 않고 빠진다(사람이 셸에서 고쳤거나 훅이 닿지 못했다). 터미널의 첫 검증은 이미 바뀐 상태에서 시작한다.
+    // 그래도 기준은 대화 창의 체크포인트 때 잡아 둔 계약이라 깨는 변경으로 잡힌다(지금 계약을 기준으로 읽으면 놓친다)
+    await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    service.doc = contractWith(['id', 'memo']);
+    await session.gateway.prompt({ prompt: '정리해줘' });
+    expect((await session.gateway.stop({})).feedback).toContain('note');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    await stopSession(session.id);
+  }, 60_000);
+
   it('앞 실행이 남긴 비밀 파일과 링크는 다음 실행에서도 통과시키지 않는다("원래 있던 것"으로 봐주지 않는다)', async () => {
     const session = await open();
     const before = getSnapshot(session.id)!.checkpoints.length;
@@ -678,6 +718,28 @@ describe('요청의 경계', () => {
     await session.gateway.stop({ last_assistant_message: 'note로 바꿨습니다.' });
     // 제목은 실행을 연 첫 요청에서 나온다
     expect(getSnapshot(session.id)!.checkpoints[0]!.message).toBe('feat: 주문에 메모 필드 추가');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙고, 그 뒤에 시작된 작업은 그 요청의 이름으로 새 실행이 된다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    let release = (): void => {};
+    fake.holdWord = 'test';
+    fake.hold = new Promise<void>((resolve) => (release = resolve));
+    const stopping = session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    while (!fake.execCalls.some((command) => command.includes('test'))) await new Promise((resolve) => setTimeout(resolve, 10));
+    // CLI는 검증을 기다리는 동안 친 요청을 받아 두었다가, 검증이 끝나면 처리한다
+    expect(await session.gateway.prompt({ prompt: 'note 필드도 더해줘' })).toEqual({});
+    release();
+    expect((await stopping).message).toContain('검증 통과 — 체크포인트');
+    fake.holdWord = undefined;
+
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    expect(session.ofType('run_started').map((event) => event.request)).toEqual(['주문에 메모 필드 추가', 'note 필드도 더해줘']);
+    expect((await session.gateway.stop({ last_assistant_message: '더했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints[0]!.message).toBe('feat: note 필드도 더한다');
     await stopSession(session.id);
   }, 30_000);
 

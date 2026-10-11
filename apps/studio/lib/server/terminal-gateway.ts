@@ -1,5 +1,5 @@
 import { startHookServer, startToolServer, type HookInput, type HookServer, type ToolOutcome, type ToolServer, type ToolServerOptions } from '@b-studio/agent';
-import { AGENT_GATEWAY_ENV, AGENT_GATEWAY_HOST, type AgentHookEvent } from '@b-studio/sandbox';
+import { AGENT_GATEWAY_HOST, type AgentGatewayAddress, type AgentHookEvent } from '@b-studio/sandbox';
 
 /**
  * 세션 터미널의 관문(이슈 #673 2단계): 컨테이너 안의 CLI가 부르는 서버 둘을 세션마다 띄운다.
@@ -7,7 +7,7 @@ import { AGENT_GATEWAY_ENV, AGENT_GATEWAY_HOST, type AgentHookEvent } from '@b-s
  *  - 도구 서버(MCP): 서비스 컨테이너 안에서 도는 b-studio 도구
  *
  * 둘 다 127.0.0.1에만 열고 서버마다 새 토큰을 쓴다. 컨테이너는 호스트를 `host.docker.internal`로 부르므로 그 이름의 Host만 더 받는다.
- * 주소와 토큰은 파일에 쓰지 않고 터미널을 여는 프로세스의 환경 변수로만 넘긴다.
+ * 주소와 토큰은 컨테이너에 읽기 전용으로 붙는 세션별 설정 파일로 건넨다(환경 변수는 CLI의 사용자 설정이 덮어쓸 수 있다).
  *
  * 컨테이너 안에서 온 값은 모두 바깥에서 온 값이다. 이 토큰을 가진 쪽(터미널 안의 CLI와 그것이 돌린 명령)이 할 수 있는 일은
  * "요청이 시작됐다·끝났다"고 알리는 것과 서비스 컨테이너의 도구를 부르는 것뿐이다. 통과 여부는 여기서 받는 값이 아니라
@@ -31,8 +31,8 @@ export interface TerminalGatewayHandlers {
 }
 
 export interface TerminalGateway {
-  /** 터미널 안의 프로세스에 넘길 환경 변수(관문의 주소와 토큰) */
-  env: Readonly<Record<string, string>>;
+  /** 컨테이너 안의 CLI가 부를 주소와 토큰. 컨테이너의 설정 파일에 적는다 */
+  address: AgentGatewayAddress;
   close(): Promise<void>;
 }
 
@@ -81,11 +81,11 @@ export async function startTerminalGateway(handlers: TerminalGatewayHandlers): P
   }
   const servers = [hook, tools];
   return {
-    env: {
-      [AGENT_GATEWAY_ENV.hookUrl]: `http://${AGENT_GATEWAY_HOST}:${hook.port}`,
-      [AGENT_GATEWAY_ENV.hookToken]: hook.token,
-      [AGENT_GATEWAY_ENV.mcpUrl]: `http://${AGENT_GATEWAY_HOST}:${tools.port}/mcp`,
-      [AGENT_GATEWAY_ENV.mcpToken]: tools.token,
+    address: {
+      hookUrl: `http://${AGENT_GATEWAY_HOST}:${hook.port}`,
+      hookToken: hook.token,
+      mcpUrl: `http://${AGENT_GATEWAY_HOST}:${tools.port}/mcp`,
+      mcpToken: tools.token,
     },
     async close() {
       await Promise.allSettled(servers.map((server) => server.close()));
@@ -102,8 +102,8 @@ interface GatewayEntry {
 const globalStore = globalThis as typeof globalThis & { __bStudioTerminalGateways?: Map<string, GatewayEntry> };
 const gateways = (globalStore.__bStudioTerminalGateways ??= new Map());
 
-/** 세션의 관문이 떠 있게 하고 터미널에 넘길 환경 변수를 돌려준다. handlers는 세션을 id로 찾아야 한다(세션 객체는 이어서 작업할 때 바뀐다) */
-export async function ensureSessionGateway(sessionId: string, handlers: () => TerminalGatewayHandlers, start: typeof startTerminalGateway = startTerminalGateway): Promise<Readonly<Record<string, string>>> {
+/** 세션의 관문이 떠 있게 하고 그 주소를 돌려준다. handlers는 세션을 id로 찾아야 한다(세션 객체는 이어서 작업할 때 바뀐다) */
+export async function ensureSessionGateway(sessionId: string, handlers: () => TerminalGatewayHandlers, start: typeof startTerminalGateway = startTerminalGateway): Promise<AgentGatewayAddress> {
   let entry = gateways.get(sessionId);
   if (!entry) {
     const created: GatewayEntry = { starting: start(handlers()) };
@@ -114,7 +114,7 @@ export async function ensureSessionGateway(sessionId: string, handlers: () => Te
       if (gateways.get(sessionId) === created) gateways.delete(sessionId);
     });
   }
-  return (await entry.starting).env;
+  return (await entry.starting).address;
 }
 
 /** 세션이 멈출 때 부른다. 띄우는 중이면 끝나기를 기다렸다가 닫는다 */

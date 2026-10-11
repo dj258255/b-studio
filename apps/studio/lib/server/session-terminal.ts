@@ -1,4 +1,4 @@
-import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, probeAgentGateway, removeAgentContainer, writeAgentGatewayConfig, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
+import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, probeAgentGateway, removeAgentContainer, removeAgentGatewayConfig, writeAgentGatewayConfig, type AgentGatewayAddress, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
 import { StudioError } from './errors';
 
 /**
@@ -29,8 +29,6 @@ interface TerminalState {
   bytes: number;
   listeners: Set<Listener>;
   size: TerminalSize;
-  /** 열려 있는 터미널에 대해 화면에 함께 알릴 말(관문 없이 열었다는 것) */
-  note?: string;
 }
 
 export interface TerminalTarget {
@@ -46,29 +44,32 @@ export interface TerminalTarget {
    */
   alive?: () => boolean;
   /**
-   * 관문(#673 2단계)을 띄우고 터미널 안의 프로세스에 넘길 환경 변수(관문의 주소와 토큰)를 돌려준다.
-   * 주면 컨테이너에 CLI의 관리 설정(훅, b-studio 도구)을 붙인다. 주지 않으면 관문 없는 터미널이다
+   * 관문(#673 2단계)을 띄우고 그 주소를 돌려준다. 주면 컨테이너에 CLI의 관리 설정(훅, b-studio 도구)과 그 주소를 붙이고,
+   * 컨테이너에서 관문에 닿는 것을 확인한 뒤에야 터미널을 연다. 주지 않으면 관문 없는 터미널이다(테스트와 옛 호출자)
    */
-  gateway?: () => Promise<Readonly<Record<string, string>>>;
+  gateway?: () => Promise<AgentGatewayAddress>;
 }
 
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
 export interface TerminalBackend {
-  ensureContainer(target: TerminalTarget): Promise<string>;
-  open(container: string, options: { id: string; size: TerminalSize; env?: Readonly<Record<string, string>> }): AgentTerminal;
+  /** gateway를 주면 그 주소를 적은 설정을 컨테이너에 붙인다 */
+  ensureContainer(target: TerminalTarget, gateway?: AgentGatewayAddress): Promise<string>;
+  open(container: string, options: { id: string; size: TerminalSize }): AgentTerminal;
+  /** 컨테이너와, 그 컨테이너에 붙였던 관문 설정을 지운다 */
   removeContainer(sandboxId: string): Promise<void>;
-  /** 컨테이너 안에서 관문에 닿는가. 없으면 닿는다고 본다 */
-  reachable?(container: string, env: Readonly<Record<string, string>>): Promise<boolean>;
+  /** 컨테이너 안에서 관문에 닿는가 */
+  reachable(container: string): Promise<boolean>;
 }
 
-/** 관문에 닿지 못해 관문 없이 열었을 때 화면에 알리는 말 */
-export const NO_GATEWAY_NOTE = '관문 없음 — 이 도커 환경에서는 컨테이너가 b-studio에 닿지 못합니다. 여기서 한 변경은 검증되지 않고 체크포인트도 생기지 않습니다';
-
 const DOCKER_BACKEND: TerminalBackend = {
-  ensureContainer: async (target) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(target.gateway ? { gatewayDir: await writeAgentGatewayConfig() } : {}) }),
+  ensureContainer: async (target, gateway) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}) }),
   open: (container, options) => openAgentTerminal(container, options),
-  removeContainer: (sandboxId) => removeAgentContainer(sandboxId),
-  reachable: (container, env) => probeAgentGateway(container, env),
+  removeContainer: async (sandboxId) => {
+    await removeAgentContainer(sandboxId);
+    // 토큰이 든 설정을 남겨 두지 않는다
+    await removeAgentGatewayConfig(sandboxId).catch(() => {});
+  },
+  reachable: (container) => probeAgentGateway(container),
 };
 
 // 개발 서버의 HMR로 모듈이 다시 로드돼도 열린 터미널을 잃지 않도록 전역에 둔다
@@ -128,20 +129,19 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
     try {
       if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
       // 관문을 먼저 띄운다. 터미널 안의 CLI는 뜨자마자 훅을 부른다
-      let env = target.gateway ? await target.gateway() : undefined;
-      const container = await backend.ensureContainer(target);
+      const gateway = target.gateway ? await target.gateway() : undefined;
+      const container = await backend.ensureContainer(target, gateway);
       // 컨테이너를 띄우는 동안 세션이 멈췄으면 방금 띄운 것을 지우고 열지 않는다
       if (target.alive && !target.alive()) {
         await backend.removeContainer(target.sandboxId).catch(() => {});
         throw new Error('세션이 멈췄습니다');
       }
-      // 컨테이너에서 관문에 닿지 못하는 환경이면 관문 없이 연다. 주소를 넘긴 채 열면 훅이 파일을 바꾸는 도구를 모두 막는다
-      current.note = undefined;
-      if (env && backend.reachable && !(await backend.reachable(container, env))) {
-        env = undefined;
-        current.note = NO_GATEWAY_NOTE;
+      // 컨테이너에서 관문에 닿지 못하면 열지 않는다. 관문 없이 열어 주면 그 터미널의 변경은 검증 없이 쌓이고,
+      // "닿지 못하게 만들기"가 곧 검증을 끄는 방법이 된다
+      if (gateway && !(await backend.reachable(container))) {
+        throw new Error('컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다');
       }
-      const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted, ...(env ? { env } : {}) });
+      const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted });
       current.terminal = terminal;
       current.size = wanted;
       current.chunks = [];
@@ -156,7 +156,7 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
         current.terminal = undefined;
         emit(current, { kind: 'exit', code });
       });
-      emit(current, { kind: 'status', state: 'open', ...(current.note ? { message: current.note } : {}) });
+      emit(current, { kind: 'status', state: 'open' });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit(current, { kind: 'status', state: 'closed', message });
@@ -174,7 +174,7 @@ export function subscribeSessionTerminal(sessionId: string, listener: Listener):
   const state = stateFor(sessionId);
   state.listeners.add(listener);
   if (state.chunks.length > 0) listener({ kind: 'data', data: Buffer.concat(state.chunks).toString('base64') });
-  listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed', ...(state.terminal && state.note ? { message: state.note } : {}) });
+  listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed' });
   return () => unsubscribe(sessionId, state, listener);
 }
 
