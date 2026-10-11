@@ -245,9 +245,33 @@ export function isSameOrigin(headers: Headers): boolean {
  * Host는 브라우저의 스크립트가 바꿀 수 없으므로(x-forwarded-host는 바꿀 수 있다) 이 값만 본다.
  */
 export function isLoopbackHost(headers: Headers): boolean {
-  const host = (headers.get('host') ?? '').trim().toLowerCase();
-  const name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.replace(/:\d+$/, '');
+  const name = requestHostName(headers);
   return name === '127.0.0.1' || name === 'localhost' || name === '[::1]';
+}
+
+/** Host 헤더에서 포트를 뗀 이름(소문자). IPv6는 대괄호째로 둔다 */
+function requestHostName(headers: Headers): string {
+  const host = (headers.get('host') ?? '').trim().toLowerCase();
+  return host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.replace(/:\d+$/, '');
+}
+
+/**
+ * 인증이 없는 모드에서 루프백 말고도 받을 Host 이름(`B_STUDIO_ALLOWED_HOSTS`, 쉼표로 구분, 포트 없이).
+ * 인증 없이 다른 이름으로 띄운 구성(사설망 안의 호스트 이름, 앞단 프록시)이 계속 돌게 하는 길이다. 적은 이름으로 온 요청은
+ * 누구의 것인지 가릴 수단이 없으므로, 그 이름으로 닿을 수 있는 사람을 모두 믿는다는 뜻이다
+ */
+export function allowedHosts(env: Env = process.env): ReadonlySet<string> {
+  return new Set(
+    (env.B_STUDIO_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/** 인증이 없는 모드에서 받을 요청인가: 이 컴퓨터의 주소로 왔거나, 따로 허용한 이름으로 왔다 */
+export function isTrustedHost(headers: Headers, env: Env = process.env): boolean {
+  return isLoopbackHost(headers) || allowedHosts(env).has(requestHostName(headers));
 }
 
 /** 로그인 뒤 돌아갈 경로. 다른 사이트로 보내는 주소("//evil", "https://…")는 첫 화면으로 바꾼다 */
@@ -354,6 +378,13 @@ export function decideRequest(
     return { kind: 'reject', status: 403, message: '다른 출처에서 보낸 요청은 받지 않습니다' };
   }
   if (PUBLIC_PATHS.has(request.pathname) || BOARD_MCP_PATH.test(request.pathname)) return { kind: 'pass' };
+
+  // 인증이 없는 모드에는 요청을 보낸 쪽을 가릴 수단이 Host뿐이다. 다른 사이트가 자기 도메인을 127.0.0.1로 풀리게 하면
+  // (DNS 리바인딩) 브라우저는 그 도메인을 Origin과 Host 양쪽에 넣어 보내 같은 출처 검사를 지나고, 읽기 요청은 그 검사도
+  // 거치지 않는다. 이 컴퓨터의 주소로 온 요청과 따로 허용한 이름으로 온 요청만 받는다(읽기 포함, 화면 포함)
+  if (config.mode === 'none' && !isTrustedHost(request.headers, env)) {
+    return { kind: 'reject', status: 403, message: '인증 없이 띄운 스튜디오는 이 컴퓨터의 주소(127.0.0.1 · localhost)로 온 요청만 받습니다. 다른 이름으로 쓰려면 B_STUDIO_ALLOWED_HOSTS에 그 이름을 적거나 인증을 켜세요' };
+  }
 
   let revocations = NO_REVOCATIONS;
   if (config.mode === 'token') {
