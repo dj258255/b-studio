@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { TokenReport } from "@/lib/token-types";
-import { RunDetail } from "./token-view";
+import { RequestSummaryLine, RunDetail } from "./token-view";
 
 function report(over: Partial<TokenReport> = {}): TokenReport {
   return {
@@ -154,5 +154,20 @@ describe("RunDetail 문맥 급증", () => {
     expect(html).toContain("급증");
     // 그래프에 급증 막대의 툴팁(title)이 있다
     expect(html).toContain("<title>");
+  });
+});
+
+describe("한 번에 끝난 요청 한 줄(#668)", () => {
+  const requests = { total: 19, oneShot: 8, redone: 6, asked: 1, reverted: 2, gateFailedRuns: 4, gateFailures: 7, turnLimited: 2 };
+
+  it("집계가 있으면 한 줄과 읽는 법을 함께 적는다", () => {
+    const html = renderToStaticMarkup(<RequestSummaryLine requests={requests} />);
+    expect(html).toContain("요청 19건 가운데 한 번에 끝난 것 8건 · 다시 손댄 요청 6건 · 되묻기 1건 · 되돌림 2건 · 게이트 실패 7회(4건) · 턴 상한 2건");
+    expect(html).toContain("한 번에 끝난 수는 실제보다 많을 수 있습니다");
+  });
+
+  it("집계가 없거나(옛 서버) 끝난 요청이 없으면 아무것도 그리지 않는다", () => {
+    expect(renderToStaticMarkup(<RequestSummaryLine />)).toBe("");
+    expect(renderToStaticMarkup(<RequestSummaryLine requests={{ ...requests, total: 0 }} />)).toBe("");
   });
 });
