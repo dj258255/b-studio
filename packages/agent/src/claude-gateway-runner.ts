@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -15,7 +15,7 @@ import { projectGuideSection, withLanguageReminder } from './prompts';
 import { createToolResultCache } from './tool-output';
 import { buildTools, executeTool, SANDBOX_TOOLS, type ToolContext } from './tools';
 import { executionPolicyFor } from './workflow';
-import { Workspace } from './workspace';
+import { Workspace, WorkspaceError } from './workspace';
 import type { LoadedProject } from '@b-studio/spec';
 
 /**
@@ -26,6 +26,14 @@ import type { LoadedProject } from '@b-studio/spec';
  * 직접 고치고, b-studio는 두 군데에서만 붙는다:
  *  - 샌드박스 도구(run_in_service 등)를 루프백 HTTP MCP로 내준다. 호스트 셸(Bash)은 주지 않는다.
  *  - 에이전트가 멈출 때 Stop 훅이 루프백 서버를 불러 검증 게이트를 돈다. 실패하면 사유를 돌려줘 이어서 고치게 한다.
+ *
+ * CLI의 내장 도구는 b-studio의 파일 도구(Workspace)를 거치지 않고 호스트의 파일 시스템을 직접 만진다. 그래서 두 겹으로 가둔다:
+ *  - CLI 자신의 권한: 편집 자동 수락 모드(acceptEdits)는 작업 폴더 안의 편집만 받아들이고, 밖의 읽기·쓰기는 권한을 물어야 해서
+ *    headless에서는 거절된다. 내장 도구를 허용 목록(--allowedTools)에 넣지 않는다 — 넣으면 경로와 무관하게 허용된다
+ *    (실측 CLI 2.1.296: 허용 목록에 Read·Write를 넣자 /etc/hosts를 읽고 작업 폴더 밖에 파일을 썼다).
+ *  - PreToolUse 훅: 도구를 쓰기 직전에 Workspace와 같은 규칙으로 경로를 본다(프로젝트 밖, 링크 경유, .git·.env·생성물).
+ *    작업 복사본의 .git은 호스트의 git이 그대로 믿으므로(.git/config, 훅) 여기에 쓰면 호스트에서 코드가 실행된다.
+ *    이 훅은 닫힌 쪽으로 실패한다: 검사 서버에 닿지 못하면 거절한다.
  *
  * 훅은 에이전트에게 실패를 돌려주는 통로일 뿐이고 판정의 근거가 아니다. 훅이 불리지 않았거나(턴 상한, 훅 명령 실패)
  * 통과한 뒤에 파일이 또 바뀌었으면 CLI가 끝난 뒤 러너가 게이트를 한 번 더 돈다. 그 결과가 실행의 결과다.
@@ -40,8 +48,16 @@ const GATE_TOKEN_ENV = 'B_STUDIO_GATE_TOKEN';
 const MCP_TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 /** 훅 명령이 게이트를 기다리는 시간(초). 게이트 한 번이 수 분 걸릴 수 있다(E14: 141~254초) */
 const STOP_HOOK_TIMEOUT_SECONDS = 3600;
+/** 도구 호출 전 경로 검사가 답을 기다리는 시간(초). 파일 몇 개의 상태를 보는 짧은 일이다 */
+const PRE_TOOL_HOOK_TIMEOUT_SECONDS = 20;
 const MAX_HOOK_BODY_BYTES = 4 * 1024 * 1024;
+
+/** PreToolUse 훅의 거절 출력 */
+function preToolDeny(reason: string): Record<string, unknown> {
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
+}
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ClaudeGatewayRunOptions extends ClaudeCodeRunOptions {
   /**
@@ -68,6 +84,67 @@ function gatewayNote(toolNames: readonly string[]): string {
     '턴을 끝내면 b-studio가 검증 게이트(서비스 재시작, API 계약, 선언한 확인)를 돌린다. 실패하면 결과가 "Stop hook feedback"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.',
     '사용자에게 보이는 글은 한국어로 쓴다.',
   ].join('\n');
+}
+
+/** 내장 도구마다 경로가 들어 있는 입력 필드. 여기에 없는 내장 도구는 거절한다 */
+const PATH_FIELDS: Readonly<Record<string, { required: readonly string[]; optional: readonly string[]; patterns: readonly string[] }>> = {
+  Read: { required: ['file_path'], optional: [], patterns: [] },
+  Edit: { required: ['file_path'], optional: [], patterns: [] },
+  Write: { required: ['file_path'], optional: [], patterns: [] },
+  Glob: { required: [], optional: ['path'], patterns: ['pattern'] },
+  Grep: { required: [], optional: ['path'], patterns: ['glob'] },
+};
+
+/**
+ * CLI가 도구를 쓰기 직전에 부른다(PreToolUse 훅). 거절할 이유를 돌려주고, 통과면 undefined다.
+ * b-studio 도구(MCP)는 자기 정책이 있어 그대로 둔다. 내장 도구는 경로가 Workspace의 규칙을 지날 때만 통과시킨다.
+ */
+export async function guardBuiltinTool(workspace: Workspace, toolName: unknown, toolInput: unknown): Promise<string | undefined> {
+  if (typeof toolName !== 'string') return '도구 이름을 읽지 못했습니다';
+  if (toolName.startsWith(`mcp__${SERVER}__`)) return undefined;
+  const fields = PATH_FIELDS[toolName];
+  if (!fields) return `${toolName}: 이 세션에서 쓸 수 없는 도구입니다`;
+  const input = typeof toolInput === 'object' && toolInput !== null ? (toolInput as Record<string, unknown>) : {};
+  const realRoot = await realpath(workspace.root).catch(() => workspace.root);
+  for (const field of [...fields.required, ...fields.optional]) {
+    const value = input[field];
+    if (value === undefined || value === null || value === '') {
+      if (fields.required.includes(field)) return `${toolName}: ${field}가 없습니다`;
+      continue;
+    }
+    if (typeof value !== 'string') return `${toolName}: ${field}를 읽지 못했습니다`;
+    const relative = relativeToRoot(value, workspace.root, realRoot);
+    if (relative === undefined) return `${toolName}: ${value}는 프로젝트 밖 경로입니다`;
+    // 프로젝트 루트 자체는 찾기 도구(Glob·Grep)의 시작점으로만 받는다
+    if (relative === '') {
+      if (fields.required.includes(field)) return `${toolName}: 프로젝트 루트 자체는 다룰 수 없습니다`;
+      continue;
+    }
+    try {
+      await workspace.assertToolPath(relative);
+    } catch (error) {
+      return `${toolName}: ${error instanceof WorkspaceError ? error.message : `${value}를 확인하지 못했습니다`}`;
+    }
+  }
+  for (const field of fields.patterns) {
+    const value = input[field];
+    if (value === undefined || value === null) continue;
+    // 찾는 패턴으로 프로젝트 밖을 가리키지 못하게 한다
+    if (typeof value !== 'string' || path.isAbsolute(value) || value.startsWith('~') || value.split(/[\\/]/).includes('..')) {
+      return `${toolName}: ${field}는 프로젝트 안의 상대 패턴만 쓸 수 있습니다`;
+    }
+  }
+  return undefined;
+}
+
+/** CLI는 절대 경로를 준다. 프로젝트 루트(또는 그 실제 위치) 아래면 루트 기준 상대 경로로, 아니면 undefined */
+function relativeToRoot(file: string, root: string, realRoot: string): string | undefined {
+  if (!path.isAbsolute(file)) return file;
+  for (const base of [root, realRoot]) {
+    const relative = path.relative(base, file);
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return relative;
+  }
+  return undefined;
 }
 
 /** 바뀐 파일을 작업 공간(게이트가 보는 목록)에 옮긴다. 내용이 그대로인 파일은 다시 알리지 않는다 */
@@ -125,17 +202,26 @@ interface StopHookInput {
   last_assistant_message?: unknown;
 }
 
-interface StopHookServer {
+interface PreToolHookInput {
+  tool_name?: unknown;
+  tool_input?: unknown;
+}
+
+type HookInput = StopHookInput & PreToolHookInput;
+type HookHandler = (input: HookInput) => Promise<Record<string, unknown>>;
+
+interface HookServer {
+  /** 뒤에 /stop, /pre-tool을 붙여 부른다 */
   url: string;
   token: string;
   close(): Promise<void>;
 }
 
-/** Stop 훅 명령이 부르는 루프백 서버. 요청 본문은 CLI가 훅에 준 JSON, 응답은 CLI가 훅의 출력으로 읽을 JSON이다 */
-async function startStopHookServer(onStop: (input: StopHookInput) => Promise<Record<string, unknown>>): Promise<StopHookServer> {
+/** 훅 명령이 부르는 루프백 서버. 요청 본문은 CLI가 훅에 준 JSON, 응답은 CLI가 훅의 출력으로 읽을 JSON이다 */
+async function startHookServer(routes: Readonly<Record<string, HookHandler>>): Promise<HookServer> {
   const token = randomBytes(24).toString('hex');
   const http = createServer((req, res) => {
-    void handleStopHook(req, res, token, onStop);
+    void handleHook(req, res, token, routes);
   });
   http.on('clientError', (_error, socket) => socket.destroy());
   // 게이트가 도는 동안 연결을 끊지 않는다
@@ -146,7 +232,7 @@ async function startStopHookServer(onStop: (input: StopHookInput) => Promise<Rec
   if (address === null || typeof address === 'string') throw new Error('게이트 훅 서버가 포트를 열지 못했습니다');
   let closed = false;
   return {
-    url: `http://127.0.0.1:${address.port}/stop`,
+    url: `http://127.0.0.1:${address.port}`,
     token,
     async close() {
       if (closed) return;
@@ -157,7 +243,7 @@ async function startStopHookServer(onStop: (input: StopHookInput) => Promise<Rec
   };
 }
 
-async function handleStopHook(req: IncomingMessage, res: ServerResponse, token: string, onStop: (input: StopHookInput) => Promise<Record<string, unknown>>): Promise<void> {
+async function handleHook(req: IncomingMessage, res: ServerResponse, token: string, routes: Readonly<Record<string, HookHandler>>): Promise<void> {
   const reply = (status: number, body: unknown): void => {
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(body));
@@ -165,7 +251,8 @@ async function handleStopHook(req: IncomingMessage, res: ServerResponse, token: 
   const host = (req.headers.host ?? '').replace(/:\d+$/, '');
   if (!LOOPBACK_HOSTS.has(host)) return reply(403, { error: '루프백에서만 접근할 수 있습니다' });
   if (!tokenMatches(req.headers.authorization, token)) return reply(401, { error: 'unauthorized' });
-  if (req.method !== 'POST' || req.url !== '/stop') return reply(404, { error: 'not found' });
+  const handler = req.method === 'POST' && req.url && Object.hasOwn(routes, req.url) ? routes[req.url] : undefined;
+  if (!handler) return reply(404, { error: 'not found' });
   try {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -174,16 +261,16 @@ async function handleStopHook(req: IncomingMessage, res: ServerResponse, token: 
       if (size > MAX_HOOK_BODY_BYTES) return reply(413, { error: 'too large' });
       chunks.push(chunk);
     }
-    let input: StopHookInput = {};
+    let input: HookInput = {};
     try {
       const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-      if (typeof parsed === 'object' && parsed !== null) input = parsed as StopHookInput;
+      if (typeof parsed === 'object' && parsed !== null) input = parsed as HookInput;
     } catch {
       // 훅 입력을 읽지 못해도 검증은 돈다. 입력은 요약에만 쓴다
     }
-    reply(200, await onStop(input));
+    reply(200, await handler(input));
   } catch (error) {
-    // 훅이 실패로 끝나면 CLI는 멈추게 둔다. 판정은 CLI가 끝난 뒤의 마지막 검증이 한다
+    // 5xx로 답한다. Stop 훅은 CLI가 멈추게 두고(판정은 마지막 검증이 한다), PreToolUse 훅은 명령이 실패를 거절로 바꾼다(-f)
     reply(500, { error: error instanceof Error ? error.message : String(error) });
   }
 }
@@ -364,13 +451,22 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
         return outcome;
       }),
   });
-  const hook = await startStopHookServer(async (input) => {
-    if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) lastText = input.last_assistant_message.trim();
-    // 상한을 다 쓴 뒤에는 막지 않는다. 막으면 CLI가 끝나지 않는다
-    if (exhausted !== undefined) return {};
-    const outcome = await runGate();
-    if (outcome.kind === 'retry') return { decision: 'block', reason: outcome.feedback };
-    return {};
+  const hook = await startHookServer({
+    '/stop': async (input) => {
+      if (typeof input.last_assistant_message === 'string' && input.last_assistant_message.trim()) lastText = input.last_assistant_message.trim();
+      // 상한을 다 쓴 뒤에는 막지 않는다. 막으면 CLI가 끝나지 않는다
+      if (exhausted !== undefined) return {};
+      const outcome = await runGate();
+      if (outcome.kind === 'retry') return { decision: 'block', reason: outcome.feedback };
+      return {};
+    },
+    '/pre-tool': async (input) => {
+      const denied = await guardBuiltinTool(workspace, input.tool_name, input.tool_input);
+      // 통과면 아무 결정도 돌려주지 않는다. 허용할지는 CLI의 권한(작업 폴더 가두기)이 한 번 더 정한다
+      if (denied === undefined) return {};
+      onEvent({ type: 'warning', message: `막은 도구 호출 — ${denied}` });
+      return preToolDeny(`[b-studio] ${denied}`);
+    },
   });
 
   const usage = emptyUsage();
@@ -445,24 +541,48 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     const settingsPath = path.join(dir, 'settings.json');
     const mcpPath = path.join(dir, 'mcp.json');
     // 토큰은 파일에 쓰지 않는다. CLI 프로세스의 환경 변수로만 넘기고, 훅 명령과 MCP 설정은 그 이름만 적는다
-    const stopCommand = `curl -sS --max-time ${STOP_HOOK_TIMEOUT_SECONDS} -X POST -H 'content-type: application/json' -H "authorization: Bearer $${GATE_TOKEN_ENV}" --data-binary @- ${hook.url}`;
-    await writeFile(settingsPath, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: stopCommand, timeout: STOP_HOOK_TIMEOUT_SECONDS }] }] } }, null, 2), { mode: 0o600 });
+    const post = (route: string, seconds: number, flags: string): string =>
+      `curl ${flags} --max-time ${seconds} -X POST -H 'content-type: application/json' -H "authorization: Bearer $${GATE_TOKEN_ENV}" --data-binary @- ${hook.url}${route}`;
+    const stopCommand = post('/stop', STOP_HOOK_TIMEOUT_SECONDS, '-sS');
+    // 닫힌 쪽으로 실패한다: 검사 서버에 닿지 못했거나 서버가 오류로 답하면(-f) 거절을 출력한다. 출력이 없으면 CLI는 도구를 그대로 쓴다
+    const preToolCommand = `${post('/pre-tool', PRE_TOOL_HOOK_TIMEOUT_SECONDS, '-fsS')} || printf '%s' '${JSON.stringify(preToolDeny('[b-studio] 경로 검사에 닿지 못해 도구 호출을 거절했습니다'))}'`;
+    await writeFile(
+      settingsPath,
+      JSON.stringify(
+        {
+          hooks: {
+            PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: preToolCommand, timeout: PRE_TOOL_HOOK_TIMEOUT_SECONDS + 5 }] }],
+            Stop: [{ hooks: [{ type: 'command', command: stopCommand, timeout: STOP_HOOK_TIMEOUT_SECONDS }] }],
+          },
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
     await writeFile(mcpPath, JSON.stringify({ mcpServers: { [SERVER]: { type: 'http', url: tools.url, headers: { Authorization: `Bearer \${${MCP_TOKEN_ENV}}` } } } }, null, 2), { mode: 0o600 });
 
-    const allowed = [...GATEWAY_BUILTIN_TOOLS, ...specs.map((spec) => `mcp__${SERVER}__${spec.name}`)];
+    // 허용 목록에는 b-studio 도구만 넣는다. 내장 도구를 넣으면 CLI가 경로와 무관하게 허용한다(머리 주석의 실측)
+    const allowed = specs.map((spec) => `mcp__${SERVER}__${spec.name}`);
+    // 요청 글과 프로젝트 안내는 인자로 넘기지 않는다. 둘 다 바깥에서 온 글일 수 있고(이슈 본문, 저장소의 AGENTS.md),
+    // "--"로 시작하면 CLI가 옵션으로 읽는다. 요청은 표준 입력으로, 지시문 덧붙임은 파일로 넘긴다
+    const notePath = path.join(dir, 'system-prompt.md');
+    await writeFile(notePath, gatewayNote(specs.map((spec) => spec.name)) + projectGuideSection(guide), { mode: 0o600 });
     const args = [
       ...commandArgs,
       '-p',
-      withLanguageReminder(request),
       '--output-format',
       'stream-json',
       '--verbose',
+      // 명령·코드를 돌리는 내장 도구와 WebFetch를 CLI 쪽에서도 뺀다(--tools가 이미 고르지만, 새 도구가 생겨도 열리지 않게 한 겹 더 둔다)
+      '--restricted',
       '--tools',
       GATEWAY_BUILTIN_TOOLS.join(','),
       '--allowedTools',
       allowed.join(','),
+      // 작업 폴더 안의 편집만 받아들인다. 밖의 읽기·쓰기는 권한을 물어야 하고, 물을 사람이 없는 -p에서는 거절된다
       '--permission-mode',
-      'dontAsk',
+      'acceptEdits',
       '--mcp-config',
       mcpPath,
       '--strict-mcp-config',
@@ -471,19 +591,23 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
       // 사용자 전역·프로젝트 설정(훅, 플러그인)은 싣지 않는다. 프로젝트 안내(AGENTS.md)는 아래 덧붙임으로 넣는다
       '--setting-sources',
       '',
-      '--append-system-prompt',
-      gatewayNote(specs.map((spec) => spec.name)) + projectGuideSection(guide),
+      '--append-system-prompt-file',
+      notePath,
       '--max-turns',
       String(maxTurns),
       ...(model ? ['--model', model] : []),
       ...(effort ? ['--effort', effort] : []),
-      ...(resume ? ['--resume', resume, '--fork-session'] : []),
+      // 이어받을 대화의 id는 CLI가 준 값만 받는다(UUID 꼴이 아니면 인자에 넣지 않는다)
+      ...(resume && SESSION_ID.test(resume) ? ['--resume', resume, '--fork-session'] : []),
     ];
     const child = spawn(command, args, {
       cwd: project.root,
       env: { ...processEnv, [GATE_TOKEN_ENV]: hook.token, [MCP_TOKEN_ENV]: tools.token, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    // 입력 쪽이 먼저 닫혀도(CLI가 바로 끝난 경우) 실행 전체가 예외로 죽지 않게 한다. 실패는 종료 코드와 결과 메시지로 드러난다
+    child.stdin.on('error', () => {});
+    child.stdin.end(withLanguageReminder(request));
     const exited = new Promise<number | null>((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (code) => resolve(code));

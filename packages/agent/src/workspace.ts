@@ -205,6 +205,15 @@ export class Workspace {
     }
   }
 
+  /**
+   * 파일 도구가 다룰 수 있는 경로인지 본다. 읽지도 쓰지도 않는다. 다룰 수 없으면 WorkspaceError를 던진다.
+   * b-studio 도구를 거치지 않는 하네스(관문 방식의 CLI 내장 도구)가 파일을 건드리기 전에 같은 규칙으로 가두려고 연다:
+   * 프로젝트 밖, 링크를 거치는 경로, 숨긴 이름(.git·.env·생성물)을 파일 도구와 똑같이 거절한다.
+   */
+  async assertToolPath(file: string): Promise<void> {
+    await this.#resolve(file, { mustExist: false });
+  }
+
   /** 주어진 버전 이후에 바뀐 파일 */
   changedSince(version: number): string[] {
     return [...this.#changed.entries()]
