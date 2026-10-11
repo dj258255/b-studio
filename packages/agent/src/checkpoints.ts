@@ -1504,24 +1504,52 @@ export class CheckpointStore {
   }
 }
 
-/** 셸을 거치지 않고 인자 배열로 실행한다. 원격 작업이 사람의 입력(비밀번호, 호스트 키 확인)을 기다리며 멈추지 않게 한다 */
+/**
+ * 인덱스 잠금(`.git/index.lock`)을 다른 git이 쥐고 있어 실패했을 때 다시 해 보는 간격(ms). 합쳐서 약 3초.
+ * 잠금은 보통 수십 ms 안에 풀린다. 죽은 git이 남긴 잠금은 끝까지 풀리지 않으므로 그때는 원래의 오류를 그대로 낸다(잠금 파일을
+ * 스스로 지우지 않는다 — 살아 있는 git의 것일 수 있다)
+ */
+const INDEX_LOCK_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800, 1400];
+
+/** git이 인덱스 잠금을 얻지 못해 아무것도 하지 않고 끝났는가. 이 실패는 다시 해도 안전하다 */
+export function isIndexLockFailure(stderr: string): boolean {
+  return /index\.lock/.test(stderr) && /File exists|Unable to create|Another git process/i.test(stderr);
+}
+
+/**
+ * 셸을 거치지 않고 인자 배열로 실행한다. 원격 작업이 사람의 입력(비밀번호, 호스트 키 확인)을 기다리며 멈추지 않게 한다.
+ *
+ * 인덱스 잠금의 충돌 둘을 여기서 다룬다(#682).
+ * - `GIT_OPTIONAL_LOCKS=0`: `git status` 같은 읽기 명령은 인덱스를 새로 고치려고 잠금을 잠깐 잡는다(선택적 잠금). 뒤에서 도는
+ *   상태 읽기(요구사항 계산, 미리보기, 화면의 주기적 조회)가 그 잠금을 쥔 사이에 체크포인트의 `git add`가 오면 실패했다.
+ *   읽기 명령이 잠금을 잡지 않게 한다. 내 폴더 모드에서 사용자의 IDE·셸이 돌리는 git을 방해하지 않는 효과도 있다
+ * - 그래도 부딪히면(쓰기끼리, 또는 스튜디오 밖의 git과) 잠깐 기다렸다 다시 한다
+ */
 async function runGit(gitBin: string, args: string[], { timeout }: { timeout?: number } = {}): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync(gitBin, args, {
-      maxBuffer: 64 * 1024 * 1024,
-      timeout,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-        GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes',
-      },
-    });
-    return stdout;
-  } catch (error) {
-    const failure = error as { stderr?: string; killed?: boolean };
-    const command = subcommand(args);
-    const stderr = redactCredentials(failure.stderr?.trim() ?? '');
-    throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${stderr ? `: ${stderr}` : ''}`);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { stdout } = await execFileAsync(gitBin, args, {
+        maxBuffer: 64 * 1024 * 1024,
+        timeout,
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_OPTIONAL_LOCKS: '0',
+          GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes',
+        },
+      });
+      return stdout;
+    } catch (error) {
+      const failure = error as { stderr?: string; killed?: boolean };
+      const delay = INDEX_LOCK_RETRY_DELAYS_MS[attempt];
+      if (delay !== undefined && !failure.killed && isIndexLockFailure(failure.stderr ?? '')) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      const command = subcommand(args);
+      const stderr = redactCredentials(failure.stderr?.trim() ?? '');
+      throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${stderr ? `: ${stderr}` : ''}`);
+    }
   }
 }
 
