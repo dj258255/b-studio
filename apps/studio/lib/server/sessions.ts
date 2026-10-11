@@ -7029,11 +7029,14 @@ export function sessionTerminalAllowed(): boolean {
  * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
  * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
  */
-export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string } {
+export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
-  if (session.snapshot.status === 'stopped' || session.snapshot.status === 'failed') throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업을 누른 뒤 다시 여세요');
-  return { sandboxId: session.sandbox.id, root: session.project.root, projectId: session.snapshot.projectId };
+  // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
+  // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
+  const alive = (): boolean => !session.stop.signal.aborted && session.snapshot.status !== 'stopped' && session.snapshot.status !== 'failed';
+  if (!alive()) throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업을 누른 뒤 다시 여세요');
+  return { sandboxId: session.sandbox.id, root: session.project.root, projectId: session.snapshot.projectId, alive };
 }
 
 function requireSession(id: string): Session {

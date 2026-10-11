@@ -188,6 +188,34 @@ describe('세션 터미널 (이슈 #673)', () => {
     await disposeSessionTerminal(id, target.sandboxId, working.backend);
   });
 
+  it('컨테이너를 띄우는 동안 세션이 멈추면 방금 띄운 컨테이너를 지우고 터미널을 열지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    let alive = true;
+    const opening = openSessionTerminal(id, { ...target, alive: () => alive }, {}, backend);
+    // ensureContainer가 도는 사이에 세션이 멈춘다
+    alive = false;
+    await expect(opening).rejects.toThrow('세션이 멈췄습니다');
+    expect(record.ensured).toEqual(['studio-orders-abc123']);
+    expect(record.removed).toEqual(['studio-orders-abc123']);
+    expect(record.terminals).toHaveLength(0);
+
+    // 이미 멈춘 세션이면 컨테이너를 띄우지도 않는다
+    const again = fakeBackend();
+    await expect(openSessionTerminal(id, { ...target, alive: () => false }, {}, again.backend)).rejects.toThrow('세션이 멈췄습니다');
+    expect(again.record.ensured).toEqual([]);
+  });
+
+  it('여는 도중에 정리가 오면 열기가 끝나기를 기다렸다가 닫고 지운다(지운 뒤에 터미널이 생기지 않는다)', async () => {
+    const { backend, record } = fakeBackend();
+    const opening = openSessionTerminal(id, target, {}, backend);
+    const disposing = disposeSessionTerminal(id, target.sandboxId, backend);
+    await Promise.all([opening, disposing]);
+    expect(record.terminals).toHaveLength(1);
+    expect(record.terminals[0]!.closed).toBe(true);
+    expect(record.removed).toEqual(['studio-orders-abc123']);
+    expect(() => writeSessionTerminal(id, 'x')).toThrow('터미널이 열려 있지 않습니다');
+  });
+
   it('너무 긴 입력은 받지 않는다. 열려 있지 않으면 크기 변경은 조용히 넘긴다', async () => {
     const { backend } = fakeBackend();
     await expect(resizeSessionTerminal(id, { cols: 80, rows: 24 })).resolves.toBeUndefined();

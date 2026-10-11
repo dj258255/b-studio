@@ -127,7 +127,14 @@ describe('세션 터미널을 열 수 있는 자리 (이슈 #673)', () => {
     await setup();
     const id = (await createSession('termproj', 'kim', 'copy')).id;
     await waitFor(id, 'ready');
-    await stopSession(id);
+    const target = sessionTerminalTarget(id);
+    expect(target.alive()).toBe(true);
+    // 멈추기 시작한 순간부터 받지 않는다. 상태가 stopped로 바뀌는 것은 정리가 끝난 뒤다
+    const stopping = stopSession(id);
+    expect(getSnapshot(id)?.status).toBe('ready');
+    expect(target.alive()).toBe(false);
+    expect(() => sessionTerminalTarget(id)).toThrow('멈춘 세션에서는 터미널을 열 수 없습니다');
+    await stopping;
     expect(fake.disposed).toEqual([[id, 'studio-terminal-fake']]);
     expect(() => sessionTerminalTarget(id)).toThrow('멈춘 세션에서는 터미널을 열 수 없습니다');
   }, 20_000);

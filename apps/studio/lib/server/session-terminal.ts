@@ -38,6 +38,11 @@ export interface TerminalTarget {
   root: string;
   /** CLI의 홈 볼륨을 나누는 단위 */
   projectId: string;
+  /**
+   * 세션이 아직 살아 있는가. 세션을 멈추는 일과 터미널을 여는 일이 겹칠 수 있다: 멈추는 쪽이 컨테이너를 지운 뒤에
+   * 여는 쪽이 컨테이너를 띄우면, 멈춘 세션의 작업 복사본을 붙인 컨테이너가 남는다. 띄운 뒤에 한 번 더 물어 지운다
+   */
+  alive?: () => boolean;
 }
 
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
@@ -108,7 +113,13 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
   current.opening ??= (async () => {
     emit(current, { kind: 'status', state: 'opening' });
     try {
+      if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
       const container = await backend.ensureContainer(target);
+      // 컨테이너를 띄우는 동안 세션이 멈췄으면 방금 띄운 것을 지우고 열지 않는다
+      if (target.alive && !target.alive()) {
+        await backend.removeContainer(target.sandboxId).catch(() => {});
+        throw new Error('세션이 멈췄습니다');
+      }
       const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted });
       current.terminal = terminal;
       current.size = wanted;
@@ -178,6 +189,8 @@ export function closeSessionTerminal(sessionId: string): void {
 
 /** 세션이 멈출 때 부른다. 터미널을 닫고 컨테이너를 지운다. 열린 적이 없어도 컨테이너가 남아 있을 수 있어 지우기는 늘 한다 */
 export async function disposeSessionTerminal(sessionId: string, sandboxId: string, backend: TerminalBackend = DOCKER_BACKEND): Promise<void> {
+  // 열고 있는 중이면 끝나기를 기다린 뒤에 닫는다. 기다리지 않으면 지운 뒤에 컨테이너와 터미널이 생긴다
+  await terminals.get(sessionId)?.opening?.catch(() => {});
   closeSessionTerminal(sessionId);
   terminals.delete(sessionId);
   await backend.removeContainer(sandboxId).catch(() => {});
