@@ -543,8 +543,11 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
         }
         const blocks = Array.isArray(message.message.content) ? (message.message.content as Array<{ type?: string; text?: string; name?: string; input?: unknown }>) : [];
         for (const block of blocks) {
-          // 내장 도구의 호출도 화면이 따라갈 수 있게 남긴다. b-studio 도구는 MCP 쪽에서 이미 남긴다
-          if (block.type === 'tool_use' && block.name && !block.name.startsWith(`mcp__${SERVER}__`)) onEvent({ type: 'tool_call', name: block.name, input: block.input });
+          if (block.type !== 'tool_use' || !block.name || block.name.startsWith(`mcp__${SERVER}__`)) continue;
+          // 내장 도구의 호출도 화면이 따라갈 수 있게 남긴다. b-studio 도구는 MCP 쪽에서 이미 남긴다.
+          // 열어 주지 않은 도구(Bash 등)를 모델이 부르려 한 것은 실행되지 않으므로 호출로 세지 않고 따로 적는다
+          if ((GATEWAY_BUILTIN_TOOLS as readonly string[]).includes(block.name)) onEvent({ type: 'tool_call', name: block.name, input: block.input });
+          else onEvent({ type: 'warning', message: `모델이 이 세션에 없는 도구를 부르려 했습니다: ${block.name}` });
         }
         const text = blocks
           .flatMap((block) => (block.type === 'text' && block.text ? [block.text] : []))

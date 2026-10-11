@@ -63,7 +63,7 @@ for (const round of scenario.rounds) {
   }
   turns += 1;
   lastText = round.text ?? '';
-  emit({ type: 'assistant', message: { id: 'msg-' + turns, content: [{ type: 'text', text: lastText }], usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 } } });
+  emit({ type: 'assistant', message: { id: 'msg-' + turns, content: [...(round.toolUses ?? []).map((name) => ({ type: 'tool_use', name, input: {} })), { type: 'text', text: lastText }], usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 } } });
   if (round.hang) {
     flush();
     await new Promise((resolve) => setTimeout(resolve, 60_000));
@@ -110,6 +110,8 @@ interface Round {
   hang?: boolean;
   /** 쓰지 않는 도구 호출(Read·Glob 등). PreToolUse 훅의 판정만 기록한다 */
   calls?: Array<{ tool: string; input: Record<string, unknown> }>;
+  /** 모델이 낸 도구 호출 블록의 이름들(스트림에만 싣는다) */
+  toolUses?: string[];
   /** 쓰기 전에 PreToolUse 훅을 돌리지 않는다(훅이 빠진 CLI) */
   skipPreTool?: boolean;
   /** PreToolUse 훅 명령이 검사 서버에 닿지 못하게 한다 */
@@ -457,6 +459,14 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     expect(preTools[0]!.reason).toContain('경로 검사에 닿지 못해');
     expect(await readFile(path.join(project.root, 'api/src/Order.java'), 'utf8')).toBe('class Order { String customerNam; }\n');
     expect(result.changedFiles).toEqual([]);
+  });
+
+  it('내장 도구의 호출은 기록에 남기고, 열어 주지 않은 도구를 부르려 한 것은 호출로 세지 않고 경고로 남긴다', async () => {
+    const { promise, events } = await run([{ toolUses: ['Read', 'Bash', 'mcp__b-studio__run_in_service'], writes: [{ file: 'api/src/Order.java', content: FIXED }], text: '끝냈습니다.' }], [true]);
+    await promise;
+    // b-studio 도구는 MCP 서버가 실제로 불렸을 때 남기므로 스트림의 블록으로는 세지 않는다
+    expect(events.flatMap((event) => (event.type === 'tool_call' ? [event.name] : []))).toEqual(['Read']);
+    expect(events.flatMap((event) => (event.type === 'warning' ? [event.message] : []))).toEqual(['모델이 이 세션에 없는 도구를 부르려 했습니다: Bash']);
   });
 
   it('턴 상한으로 끝난 실행은 마지막 검증의 결과를 따른다 (ADR-131)', async () => {
