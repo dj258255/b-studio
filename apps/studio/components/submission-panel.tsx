@@ -101,7 +101,7 @@ function SubmissionList({ view }: { view: SessionView }) {
         </span>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted">
-        PR을 올리거나 저장소를 넘기기 전에 테스트·실행 방법·환경 변수·비밀 값·커밋 기록·문서를 확인합니다. “고치기”는 대화 입력창에 요청 글만 채우고 바로 보내지 않습니다.
+        PR을 올리거나 저장소를 넘기기 전에 테스트·실행 방법·환경 변수·비밀 값·커밋 기록·문서를 확인합니다. “고치기”는 입력창(터미널의 입력 줄이나 대화 입력창)에 요청 글만 채우고 바로 보내지 않습니다.
       </p>
       <ul className="mt-3 space-y-2">
         {report.items.map((item) => (

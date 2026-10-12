@@ -146,13 +146,13 @@ export function RemoteBrowserView({ sessionId, service, frame, blocked }: { sess
   async function pick(x: number, y: number): Promise<void> {
     const response = await call(sessionId, { action: "pick", x, y });
     const body = (await response.json().catch(() => ({}))) as ElementSelection & { error?: string };
-    applySelection(body, response, "요소를 대화 입력창에 첨부했습니다");
+    applySelection(body, response, "요소를 입력창에 넣었습니다");
   }
 
   async function pickRect(rect: Rect): Promise<void> {
     const response = await call(sessionId, { action: "pickRect", rect });
     const body = (await response.json().catch(() => ({}))) as ElementSelection & { error?: string };
-    applySelection(body, response, "드래그한 영역의 요소를 대화 입력창에 첨부했습니다");
+    applySelection(body, response, "드래그한 영역의 요소를 입력창에 넣었습니다");
   }
 
   /** 드래그가 끝났을 때: 너무 작으면 클릭으로, 아니면 영역 선택으로 처리한다 */

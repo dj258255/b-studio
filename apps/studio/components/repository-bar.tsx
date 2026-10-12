@@ -188,7 +188,7 @@ export function RepositoryBar({ view }: { view: SessionView }) {
             type="button"
             onClick={() => void resolveWithAgent()}
             disabled={!idle || resolving}
-            title="충돌하면 자동으로 고치지 않고, 사람이 보고 다듬어 보낼 요청을 대화 입력창에 채웁니다"
+            title="충돌하면 자동으로 고치지 않고, 사람이 보고 다듬어 보낼 요청을 입력창(터미널의 입력 줄이나 대화 입력창)에 채웁니다"
             className="rounded-control px-2.5 py-1 text-xs font-medium text-muted hover:text-ink disabled:opacity-50"
           >
             {resolving ? "맡기는 중" : "충돌 시 에이전트에게 맡기기"}
