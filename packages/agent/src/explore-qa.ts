@@ -134,8 +134,8 @@ export class QaBrowser {
   #rejectionWatch: Array<{ status: number; url: string }> | undefined;
   /** 구간 안에서 시작된 요청들. 응답이 왔을 때 이 구간의 조작이 보낸 요청인지 가르는 데 쓴다 */
   #watchStarted: WeakSet<object> | undefined;
-  /** 아직 끝나지 않은 요청. settle이 이것이 빌 때까지 기다린다 */
-  #pending: PendingRequests | undefined;
+  /** 아직 끝나지 않은 요청. settle이 이것이 빌 때까지 기다린다. 페이지를 받는 순간부터 센다(없으면 기다림을 건너뛰게 되므로 선택 값으로 두지 않는다) */
+  readonly #pending: PendingRequests;
   readonly #refs = new Map<string, { selector: string; stableSelector?: string; rect: QaElement['rect'] }>();
   readonly #screencast: ReturnType<typeof createScreencast> | undefined;
   #refSeq = 0;
@@ -153,6 +153,7 @@ export class QaBrowser {
     this.#allowedOrigins = allowedOrigins;
     this.#viewport = viewport;
     this.#screencast = screencast;
+    this.#pending = trackPendingRequests(page);
   }
 
   static async open(url: string, options: { allowedOrigins: readonly string[]; viewport?: QaViewport; onFrame?: (frame: BrowserFrame) => void }): Promise<QaBrowser> {
@@ -190,7 +191,6 @@ export class QaBrowser {
         instance.#failureMeta.push({ rejection, startedInWatch });
       };
       page.on('request', (request) => instance.#watchStarted?.add(request));
-      instance.#pending = trackPendingRequests(page);
       page.on('response', (response) => {
         if (response.status() >= 400) recordFailure(response.url(), String(response.status()), { status: response.status(), method: response.request().method(), request: response.request() });
       });
@@ -216,7 +216,6 @@ export class QaBrowser {
    * 그 조작이 낸 요청의 실패가 진단 신호에 들어오기 전에 판정이 내려질 수 있다
    */
   async settle(): Promise<void> {
-    if (!this.#pending) return;
     await this.#pending.waitForIdle({ graceMs: SETTLE_START_MS, quietMs: SETTLE_QUIET_MS, timeoutMs: SETTLE_NETWORK_MS });
   }
 
