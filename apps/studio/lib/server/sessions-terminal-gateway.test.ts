@@ -892,18 +892,37 @@ describe('읽기만 요청은 훅으로 막는다 (이슈 #689)', () => {
     await stopSession(session.id);
   }, 30_000);
 
-  it('열려 있는 실행에 이어 온 요청은 가장 최근 것을 따른다: 쓰던 중에 읽기만으로 바꾸면 그때부터 막는다', async () => {
+  it('읽기만은 실행이 닫힐 때까지 풀리지 않는다: 같은 실행에 표시 없는 요청이 이어 와도 쓰기를 열어 주지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '[읽기만] 구조를 설명해줘' });
+    // 도중에 끊고 한마디 더 했다(같은 실행에 잇는다). 표시가 없다고 쓰기로 바뀌지 않는다
+    expect((await session.gateway.prompt({ prompt: '더 자세히, 필요하면 고쳐도 돼' })).note).toContain('읽기만');
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toContain('읽기만 요청');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    // 실행이 끝난 뒤의 새 요청은 쓸 수 있다
+    await session.gateway.stop({ last_assistant_message: '설명했습니다.' });
+    expect((await session.gateway.prompt({ prompt: '메모 필드를 추가해줘' })).note).toBeUndefined();
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('쓰던 실행에 읽기만 요청이 이어 오면 그때부터 막는다', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '메모 필드를 추가해줘' });
     expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
-    // 도중에 끊고 읽기만으로 다시 말했다(같은 실행에 잇는다)
     expect((await session.gateway.prompt({ prompt: '[읽기만] 잠깐, 방금 바꾼 것만 설명해줘' })).note).toContain('읽기만');
     expect((await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n')).deny).toContain('읽기만 요청');
-    // 다시 보통 요청으로 바꾸면 풀린다
-    expect((await session.gateway.prompt({ prompt: '좋아, note도 추가해줘' })).note).toBeUndefined();
-    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n')).deny).toBeUndefined();
     await stopSession(session.id);
   }, 30_000);
+
+  it('표시 앞의 빈칸·보이지 않는 글자, 조합형 한글로 들어온 표시도 읽기만으로 본다', async () => {
+    for (const prompt of ['   [읽기만] 설명해줘', `${String.fromCharCode(0x200b, 0xfeff, 0x202e)}[읽기만] 설명해줘`, '[읽기만] 설명해줘'.normalize('NFD')]) {
+      const session = await open();
+      await session.gateway.prompt({ prompt });
+      expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny, JSON.stringify(prompt)).toContain('읽기만 요청');
+      await stopSession(session.id);
+    }
+  }, 60_000);
 
   it('글 중간에 표시가 있는 것은 읽기만이 아니다', async () => {
     const session = await open();

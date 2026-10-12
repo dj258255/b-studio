@@ -124,14 +124,11 @@ export function terminalActivity(chat: readonly ChatItem[], checkpoints: Readonl
 }
 
 /**
- * 읽기만 요청의 표시. 요청 글이 이것으로 시작하면 플랫폼이 그 실행에서 파일을 바꿀 수 있는 도구를 모두 거절한다
- * (쓰기 직전의 훅, sessions.ts의 terminalToolStarting). 문장으로 부탁하는 것이 아니라 훅이 막는다
+ * 읽기만 요청의 표시. 요청 글이 이것으로 시작하면 플랫폼이 그 실행에서 파일을 바꾸거나 명령을 돌리는 도구를 모두 거절한다.
+ * 문장으로 부탁하는 것이 아니라 훅이 막는다. 표시를 알아보는 규칙은 서버 쪽 한 곳에만 있다(@b-studio/sandbox의 isReadOnlyPrompt) —
+ * 화면은 글 앞에 이 표시를 붙이기만 한다. 값은 그쪽의 AGENT_READ_ONLY_MARK와 같아야 한다(테스트가 묶어 둔다)
  */
 export const TERMINAL_READ_ONLY_MARK = '[읽기만]';
-
-export function isReadOnlyPrompt(prompt: string): boolean {
-  return prompt.trimStart().startsWith(TERMINAL_READ_ONLY_MARK);
-}
 
 /** 붙여 넣는 글의 길이 상한. 터미널에 한꺼번에 밀어 넣는 양을 묶는다 */
 export const TERMINAL_PASTE_LIMIT = 8_000;
@@ -153,7 +150,8 @@ const UNSAFE_PASTE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202
  * - 읽기만이면 표시를 앞에 붙인다. 플랫폼이 그 표시를 보고 쓰기 도구를 막는다
  */
 export function terminalPasteText(text: string, { readOnly = false, multiline = true }: { readOnly?: boolean; multiline?: boolean } = {}): string {
-  let body = text.replace(/\r\n?/g, '\n').replace(/\t/g, '  ').replace(UNSAFE_PASTE_CHARS, '').trim();
+  // 줄·문단 구분자(U+2028·U+2029)도 줄바꿈으로 본다. 아래에서 줄바꿈을 빈칸으로 바꿀 때 함께 바뀌어야 한다
+  let body = text.replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(/\t/g, '  ').replace(UNSAFE_PASTE_CHARS, '').trim();
   if (body === '') return '';
   if (!multiline) body = body.replace(/\s*\n\s*/g, ' ');
   if (body.length > TERMINAL_PASTE_LIMIT) body = `${body.slice(0, TERMINAL_PASTE_LIMIT)}…(잘림)`;

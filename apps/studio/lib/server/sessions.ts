@@ -263,7 +263,6 @@ import {
 } from '@b-studio/sandbox';
 import { dependentsOf, loadProject, figmaFileKey, SpecError, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
-import { isReadOnlyPrompt, TERMINAL_READ_ONLY_MARK } from '@/lib/terminal';
 import {
   buildSubmissionChecklist,
   matchAcceptanceAgainstDocs,
@@ -315,7 +314,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
-import { AGENT_READ_TOOLS, type AgentGatewayAddress } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, isReadOnlyPrompt, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -7164,9 +7163,10 @@ interface TerminalRunState {
   /** 체크포인트 제목의 바탕이 되는 첫 요청 */
   request: string;
   /**
-   * 읽기만 요청이다(요청 글이 TERMINAL_READ_ONLY_MARK로 시작한다). 이 실행에서는 파일을 바꿀 수 있는 도구를 모두 거절한다.
+   * 읽기만 요청이다(요청 글이 AGENT_READ_ONLY_MARK로 시작한다). 이 실행에서는 파일을 바꿀 수 있는 도구를 모두 거절한다.
    * 대화 창의 "읽기만"은 읽기 전용 도구만 주는 강제였다. 터미널에서도 문장으로 부탁하지 않고 훅으로 막는다(이슈 #689).
-   * 같은 실행에 이어 온 요청이 있으면 가장 최근 요청을 따른다
+   * 한 번 켜지면 실행이 닫힐 때까지 꺼지지 않는다. 같은 실행에 이어 온 요청에 표시가 없다고 풀어 주면, 읽기만으로 시작한 일이
+   * 뒤따르는 한마디("더 자세히")에 쓰기로 바뀐다. 바꾸려면 이 실행이 끝난 뒤 표시 없이 새로 요청한다
    */
   readOnly: boolean;
   startedMs: number;
@@ -7435,8 +7435,8 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
-    // 읽기만인지는 가장 최근 요청을 따른다
-    opened.terminal.readOnly = isReadOnlyPrompt(prompt);
+    // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
+    if (isReadOnlyPrompt(prompt)) opened.terminal.readOnly = true;
     return opened.terminal.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
   }
   const busy = terminalBusy(session);
@@ -7454,7 +7454,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
 /** 읽기만 요청에서 에이전트에게 덧붙이는 말. 도구가 거절되는 까닭을 미리 알려 헛돌지 않게 한다 */
 const TERMINAL_READ_ONLY_NOTE = '[b-studio] 이 요청은 읽기만입니다. 파일을 바꾸거나 명령을 돌리는 도구(Write·Edit·Bash·b-studio 도구)는 거절됩니다. Read·Glob·Grep으로 읽고 답만 하세요.';
 /** 읽기만 실행에서 쓰기 도구를 거절하는 말 */
-const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 "${TERMINAL_READ_ONLY_MARK}" 없이 다시 요청하세요.`;
+const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 이 요청이 끝난 뒤 "${AGENT_READ_ONLY_MARK}" 없이 새로 요청하세요.`;
 
 /** 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅) */
 async function terminalToolStarting(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {

@@ -1,16 +1,17 @@
 import type { VerificationReport } from '@b-studio/agent';
+import { AGENT_READ_ONLY_MARK, isReadOnlyPrompt } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 import { createView, reduceSession } from './session-view';
 import type { SessionSnapshot, StudioEvent } from './studio-events';
 import {
   clampSplit,
   decodeTerminalData,
-  isReadOnlyPrompt,
   readAgentSurface,
   readRecordOpen,
   readSplit,
   SPLIT_DEFAULT,
   TERMINAL_PASTE_LIMIT,
+  TERMINAL_READ_ONLY_MARK,
   terminalActivity,
   terminalGateStatus,
   terminalPasteText,
@@ -86,12 +87,13 @@ describe('세션 터미널 화면의 순수 함수', () => {
     expect(terminalPasteText('   ')).toBe('');
   });
 
-  it('읽기만은 문장이 아니라 플랫폼이 알아보는 표시로 적는다', () => {
+  it('읽기만은 문장이 아니라 플랫폼이 알아보는 표시로 적는다. 화면이 붙이는 표시를 서버의 규칙이 알아본다', () => {
+    expect(TERMINAL_READ_ONLY_MARK).toBe(AGENT_READ_ONLY_MARK);
     const pasted = terminalPasteText('R3가 무슨 뜻인지 알려줘', { readOnly: true });
     expect(pasted).toBe('[읽기만] R3가 무슨 뜻인지 알려줘');
     expect(isReadOnlyPrompt(pasted)).toBe(true);
-    expect(isReadOnlyPrompt('  [읽기만] 앞에 빈칸이 있어도')).toBe(true);
-    expect(isReadOnlyPrompt('이 요청은 [읽기만]이 아니다')).toBe(false);
+    // 여러 줄이어도, 본문이 다른 모드를 여는 글자로 시작해도 표시가 맨 앞이다
+    expect(isReadOnlyPrompt(terminalPasteText('/clear\n둘째 줄', { readOnly: true }))).toBe(true);
     expect(terminalPasteText('   ', { readOnly: true })).toBe('');
   });
 
@@ -112,6 +114,8 @@ describe('세션 터미널 화면의 순수 함수', () => {
   it('CLI가 붙여 넣기 모드를 켜 두지 않았으면 한 줄로 만든다 — 그 상태의 줄바꿈은 Enter다', () => {
     expect(terminalPasteText('첫 줄\n  rm -rf /workspace\n\n셋째 줄', { multiline: false })).toBe('첫 줄 rm -rf /workspace 셋째 줄');
     expect(terminalPasteText('첫 줄\n둘째 줄', { multiline: true })).toBe('첫 줄\n둘째 줄');
+    // 줄·문단 구분자도 줄바꿈이다. 한 줄로 만들 때 빠지지 않는다
+    expect(terminalPasteText(`첫 줄${String.fromCharCode(0x2028)}둘째 줄${String.fromCharCode(0x2029)}셋째 줄`, { multiline: false })).toBe('첫 줄 둘째 줄 셋째 줄');
   });
 
   it('입력 줄의 다른 모드를 여는 글자로 시작하면 보통 요청으로 만든다', () => {

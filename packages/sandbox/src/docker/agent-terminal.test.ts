@@ -12,6 +12,7 @@ import {
   AGENT_GATEWAY_TARGET,
   AGENT_HOOK_EVENTS,
   AGENT_IMAGE,
+  AGENT_READ_ONLY_MARK,
   AGENT_TERMINAL_COMMAND,
   AGENT_READ_TOOLS,
   AGENT_WRITE_TOOL_MATCHER,
@@ -30,6 +31,7 @@ import {
   removeAgentGatewayConfig,
   writeAgentGatewayConfig,
   type AgentGatewayAddress,
+  isReadOnlyPrompt,
 } from './agent-terminal';
 import type { MaskVolume } from './git-mask';
 
@@ -374,6 +376,54 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
 
     // 턴의 끝은 막지 않는다(막으면 CLI가 끝나지 않는다). 검증이 돌지 않았으니 체크포인트도 없다
     for (const event of ['stop', 'session-start', 'session-end']) expect(await run(file, event, '{}')).toEqual({ code: 0, stdout: '' });
+  });
+
+  it('읽기만 요청은 관문에 등록하지 못하면 보내지 않는다(보통 요청은 알리기만 하고 보낸다)', async () => {
+    // 서버가 이 요청을 읽기만으로 알지 못한 채 진행되면, 뒤따르는 쓰기 도구가 보통 요청의 것으로 받아들여진다
+    for (const config of [{ url: 'http://127.0.0.1:1', token: 'tok' }, undefined, '{깨진 json']) {
+      const file = await script(config);
+      const blocked = JSON.parse((await run(file, 'prompt', JSON.stringify({ prompt: '[읽기만] 구조를 설명해줘' }))).stdout) as { decision?: string; reason?: string; systemMessage?: string };
+      expect(blocked.decision).toBe('block');
+      expect(blocked.reason).toContain('읽기만 요청을 등록하지 못해');
+      const plain = JSON.parse((await run(file, 'prompt', JSON.stringify({ prompt: '구조를 설명해줘' }))).stdout) as { decision?: string; systemMessage?: string };
+      expect(plain.decision).toBeUndefined();
+      expect(plain.systemMessage).toContain('관문에 닿지 못했습니다');
+    }
+    // 관문이 오류로 답해도 같다
+    const failing = await gateway(() => ({ status: 500, body: '{}' }));
+    expect(JSON.parse((await run(await script({ url: failing.url, token: 'tok' }), 'prompt', JSON.stringify({ prompt: '[읽기만] 설명' }))).stdout)).toMatchObject({ decision: 'block' });
+    // 닿으면 관문의 답을 그대로 낸다(막지 않는다)
+    const working = await gateway(() => ({ status: 200, body: JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: '읽기만입니다' } }) }));
+    expect(JSON.parse((await run(await script({ url: working.url, token: 'tok' }), 'prompt', JSON.stringify({ prompt: '[읽기만] 설명' }))).stdout)).toEqual({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: '읽기만입니다' },
+    });
+  });
+
+  it('읽기만 표시를 알아보는 규칙은 서버와 훅 스크립트가 같다', async () => {
+    const invisible = String.fromCharCode(0x200b, 0xfeff, 0x202e, 0x2066);
+    const cases: Array<[string, boolean]> = [
+      ['[읽기만] 설명해줘', true],
+      ['[읽기만]설명해줘', true],
+      ['   \n\t[읽기만] 앞에 빈칸', true],
+      [`${invisible}[읽기만] 앞에 보이지 않는 글자`, true],
+      ['[읽기만] 조합형으로 들어온 표시'.normalize('NFD'), true],
+      ['이 요청은 [읽기만]이 아니다', false],
+      ['[ 읽기만 ] 띄어 쓴 것', false],
+      ['［읽기만］ 전각 괄호', false],
+      ['[읽기] 다른 낱말', false],
+      ['', false],
+    ];
+    const file = await script({ url: 'http://127.0.0.1:1', token: 'tok' });
+    for (const [prompt, expected] of cases) {
+      expect(isReadOnlyPrompt(prompt), JSON.stringify(prompt)).toBe(expected);
+      // 스크립트는 닿지 못했을 때 읽기만 요청만 막는다. 그 판정이 서버의 것과 같아야 한다
+      const said = JSON.parse((await run(file, 'prompt', JSON.stringify({ prompt }))).stdout) as { decision?: string };
+      expect(said.decision === 'block', JSON.stringify(prompt)).toBe(expected);
+    }
+    expect(AGENT_READ_ONLY_MARK).toBe('[읽기만]');
+    // 요청 글이 글자가 아니면(훅 입력이 이상하면) 읽기만으로 보지 않고 보통 요청처럼 알린다
+    expect(JSON.parse((await run(file, 'prompt', JSON.stringify({ prompt: 42 }))).stdout)).toMatchObject({ systemMessage: expect.stringContaining('관문에 닿지 못했습니다') });
+    expect(JSON.parse((await run(file, 'prompt', '깨진 입력')).stdout)).toMatchObject({ systemMessage: expect.stringContaining('관문에 닿지 못했습니다') });
   });
 
   it('주소 파일이 없거나 읽을 수 없어도 닿지 못한 것과 같다(관문 없이 조용히 지나가는 길이 없다)', async () => {
