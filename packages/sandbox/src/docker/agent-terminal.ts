@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { EDGE_IMAGE } from '../edge-config';
 import { SandboxError } from '../errors';
 import { computeGitMask, findMissingMasks, type InspectedMount, type MaskVolume } from './git-mask';
+import { assertSandboxId } from '../sandbox-id';
 
 const execFileAsync = promisify(execFile);
 
@@ -107,6 +108,20 @@ const MCP_SERVER = 'b-studio';
  * `ping`은 훅이 아니라 터미널을 열기 전에 호스트가 "컨테이너에서 관문에 닿는가"를 묻는 데 쓴다(닿으면 0으로 끝난다).
  * fetch를 쓰지 않는다 — 응답 머리를 기다리는 기본 상한(5분)이 게이트 한 번보다 짧을 수 있다.
  */
+/**
+ * 읽기만 요청의 표시. 요청 글이 이것으로 시작하면 그 실행에서는 파일을 바꾸거나 명령을 돌리는 도구를 모두 거절한다(이슈 #689).
+ * 표시를 알아보는 곳은 여기 하나다 — 서버(sessions.ts)와 컨테이너 안의 훅 스크립트가 같은 규칙을 쓴다. 둘이 다르게 읽으면
+ * 한쪽은 읽기만으로 알고 다른 쪽은 아닌 요청이 생긴다
+ */
+export const AGENT_READ_ONLY_MARK = '[읽기만]';
+/** 표시 앞에 있어도 되는 것: 빈칸과 눈에 보이지 않는 글자(폭 없는 빈칸, 방향 제어, BOM). 눈에는 표시로 시작하는 글이 표시로 읽히게 한다 */
+const READ_ONLY_LEADING = String.raw`^[\s\u200b-\u200f\u2060\ufeff\u202a-\u202e\u2066-\u2069]+`;
+
+/** 조합형(NFD)으로 들어온 한글도 같은 글로 본다 */
+export function isReadOnlyPrompt(prompt: string): boolean {
+  return prompt.normalize('NFC').replace(new RegExp(READ_ONLY_LEADING), '').startsWith(AGENT_READ_ONLY_MARK);
+}
+
 export const AGENT_HOOK_SCRIPT = `// b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
@@ -119,14 +134,31 @@ function finish(output) {
   process.exit(0);
 }
 
+// 읽기만 요청인가. 서버와 같은 규칙이다(isReadOnlyPrompt)
+function readOnlyPrompt() {
+  try {
+    const prompt = JSON.parse(body.toString('utf8')).prompt;
+    return typeof prompt === 'string' && prompt.normalize('NFC').replace(new RegExp(${JSON.stringify(READ_ONLY_LEADING)}), '').startsWith(${JSON.stringify(AGENT_READ_ONLY_MARK)});
+  } catch {
+    return false;
+  }
+}
+
 function unreachable(why) {
   if (event === 'ping') process.exit(1);
+  // 읽기만 요청은 등록하지 못하면 보내지 않는다. 그냥 보내면 서버는 이 요청이 읽기만인 줄 모르고, 뒤따르는 쓰기 도구를 보통 요청의 것으로 받아 준다
+  if (event === 'prompt' && readOnlyPrompt()) finish({ decision: 'block', reason: '[b-studio] 읽기만 요청을 등록하지 못해 보내지 않았습니다(' + why + '). 다시 보내 주세요.' });
   if (event === 'prompt') finish({ systemMessage: '[b-studio] 관문에 닿지 못했습니다(' + why + '). 이 요청의 변경은 검증되지 않고 체크포인트도 생기지 않습니다.' });
   if (event === 'pre-tool') finish({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: '[b-studio] 관문에 닿지 못해(' + why + ') 파일을 바꿀 수 있는 도구를 막았습니다. 변경 전 기준을 잡을 수 없습니다.' } });
   finish();
 }
 
 if (!Object.hasOwn(TIMEOUT_SECONDS, event)) finish();
+// 입력을 먼저 읽는다. 관문에 닿지 못했을 때도 요청 글을 보고 판단할 것이 있다(읽기만 요청)
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const body = Buffer.concat(chunks);
+
 let base;
 let token;
 try {
@@ -137,10 +169,6 @@ try {
   // 아래에서 주소가 없는 것으로 다룬다
 }
 if (typeof base !== 'string' || typeof token !== 'string' || !base || !token) unreachable('관문의 주소를 읽지 못했습니다');
-
-const chunks = [];
-for await (const chunk of process.stdin) chunks.push(chunk);
-const body = Buffer.concat(chunks);
 
 let url;
 try {
@@ -256,7 +284,9 @@ export const AGENT_TERMINAL_COMMAND = [
   'fi',
   'if command -v claude >/dev/null 2>&1; then claude; fi',
   'printf "%s\\n" "[b-studio] claude에서 나왔습니다. 다시 띄우려면 claude 를 입력하세요."',
-  'exec bash -l',
+  // 로그인 셸(-l)로 띄우지 않는다. 로그인 셸은 /etc/profile을 읽어 PATH를 기본값으로 되돌리고, 그러면 홈 볼륨에 설치한
+  // claude를 찾지 못한다(안내대로 claude를 치면 "command not found"였다)
+  'exec bash',
 ].join('\n');
 
 export interface AgentContainerPlan {
@@ -421,6 +451,16 @@ export async function probeAgentGateway(name: string, { dockerBin = 'docker' }: 
     () => true,
     () => false,
   );
+}
+
+/**
+ * 에이전트 컨테이너를 지우는 명령. 스튜디오가 종료 신호를 받았을 때는 기다릴 수 없어, 떼어 놓은 프로세스로 이 명령을 돌린다.
+ * 에이전트 컨테이너는 compose 프로젝트에 속하지 않아 샌드박스를 내리는 명령(compose down)으로는 지워지지 않는다
+ */
+export function agentCleanupCommand(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): { command: string; args: string[] } {
+  // 저장된 값으로 무언가를 지우기 전에 형식을 본다. 아니면 이름이 "-agent"로 끝나는 남의 컨테이너를 가리킬 수 있다
+  assertSandboxId(sandboxId);
+  return { command: dockerBin, args: ['rm', '--force', agentContainerName(sandboxId)] };
 }
 
 /** 세션을 정리할 때 부른다. 없으면 아무 일도 하지 않는다 */

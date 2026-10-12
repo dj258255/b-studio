@@ -312,9 +312,9 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
-import { disposeSessionTerminal, interruptSessionTerminal } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
-import { AGENT_READ_TOOLS, type AgentGatewayAddress } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -1465,7 +1465,24 @@ async function recover(): Promise<void> {
     };
     archived.set(id, entry);
     if (interrupted) entry.cleanup = cleanupSandbox(entry);
+    // 세션 터미널의 컨테이너는 샌드박스(compose 프로젝트) 밖에 있어 위의 정리로 지워지지 않는다. 샌드박스를 켜지 않은(idle) 세션에도
+    // 있을 수 있다 — 터미널은 샌드박스 없이 열린다. 멈춘 세션은 멈출 때 이미 지웠다
+    if (data.snapshot.status !== 'stopped') entry.cleanup = entry.cleanup.then(() => cleanupTerminalLeftovers(id, data.sandbox.id));
   }
+}
+
+/**
+ * 이전 스튜디오 프로세스가 남긴 세션 터미널을 치운다: 에이전트 컨테이너와, 그 컨테이너에 붙였던 관문 설정(토큰이 든 폴더).
+ * 남겨 두면 스튜디오를 다시 띄울 때마다 세션마다 컨테이너가 하나씩 쌓인다(작업 복사본을 붙든 채로). 실패해도 세션을 여는 데는 지장이 없다
+ */
+async function cleanupTerminalLeftovers(sessionId: string, sandboxId: string): Promise<void> {
+  // 저장된 기록의 값으로 컨테이너를 지운다. b-studio가 만든 id의 꼴이 아니면 지우지 않는다(샌드박스 정리와 같은 규칙).
+  // 꼴을 보지 않으면 손상된 기록이 이름이 "-agent"로 끝나는 남의 컨테이너를 가리킬 수 있다
+  if (!SANDBOX_ID.test(sandboxId)) {
+    console.error('[b-studio] 이전 세션 터미널을 정리하지 않았습니다: 샌드박스 id의 꼴이 아닙니다', sessionId);
+    return;
+  }
+  await disposeSessionTerminal(sessionId, sandboxId).catch((error: unknown) => console.error('[b-studio] 이전 세션 터미널을 정리하지 못했습니다', sessionId, describe(error)));
 }
 
 async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
@@ -7162,6 +7179,13 @@ interface TerminalVerification {
 interface TerminalRunState {
   /** 체크포인트 제목의 바탕이 되는 첫 요청 */
   request: string;
+  /**
+   * 읽기만 요청이다(요청 글이 AGENT_READ_ONLY_MARK로 시작한다). 이 실행에서는 파일을 바꿀 수 있는 도구를 모두 거절한다.
+   * 대화 창의 "읽기만"은 읽기 전용 도구만 주는 강제였다. 터미널에서도 문장으로 부탁하지 않고 훅으로 막는다(이슈 #689).
+   * 한 번 켜지면 실행이 닫힐 때까지 꺼지지 않는다. 같은 실행에 이어 온 요청에 표시가 없다고 풀어 주면, 읽기만으로 시작한 일이
+   * 뒤따르는 한마디("더 자세히")에 쓰기로 바뀐다. 바꾸려면 이 실행이 끝난 뒤 표시 없이 새로 요청한다
+   */
+  readOnly: boolean;
   startedMs: number;
   /** 샌드박스 켜기와 변경 전 기준. 파일을 바꿀 수 있는 첫 도구나 턴의 끝에서 한 번 만든다(질문만 하는 턴은 샌드박스를 켜지 않는다) */
   verification?: Promise<TerminalVerification>;
@@ -7224,7 +7248,7 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   if (opened) return opened;
   const busy = terminalBusy(session);
   if (busy) return { busy };
-  const terminal: TerminalRunState = { request, startedMs: performance.now(), unsettledAttempts: 0, serial: serialQueue(), checking: false, settled: false };
+  const terminal: TerminalRunState = { request, readOnly: isReadOnlyPrompt(request), startedMs: performance.now(), unsettledAttempts: 0, serial: serialQueue(), checking: false, settled: false };
   const run: ActiveRun & { terminal: TerminalRunState } = {
     id: randomUUID().slice(0, 8),
     startedAt: new Date().toISOString(),
@@ -7428,7 +7452,9 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
-    return {};
+    // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
+    if (isReadOnlyPrompt(prompt)) opened.terminal.readOnly = true;
+    return opened.terminal.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
   }
   const busy = terminalBusy(session);
   if (busy) return { blocked: busy };
@@ -7438,8 +7464,14 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if ('busy' in run) return { blocked: run.busy };
   // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
   const notes = session.terminalNotes?.splice(0) ?? [];
+  if (run.terminal.readOnly) notes.push(TERMINAL_READ_ONLY_NOTE);
   return notes.length > 0 ? { note: notes.join('\n') } : {};
 }
+
+/** 읽기만 요청에서 에이전트에게 덧붙이는 말. 도구가 거절되는 까닭을 미리 알려 헛돌지 않게 한다 */
+const TERMINAL_READ_ONLY_NOTE = '[b-studio] 이 요청은 읽기만입니다. 파일을 바꾸거나 명령을 돌리는 도구(Write·Edit·Bash·b-studio 도구)는 거절됩니다. Read·Glob·Grep으로 읽고 답만 하세요.';
+/** 읽기만 실행에서 쓰기 도구를 거절하는 말 */
+const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 이 요청이 끝난 뒤 "${AGENT_READ_ONLY_MARK}" 없이 새로 요청하세요.`;
 
 /** 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅) */
 async function terminalToolStarting(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
@@ -7449,6 +7481,8 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   if ((AGENT_READ_TOOLS as readonly string[]).includes(tool)) return {};
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { deny: run.busy };
+  // 읽기만 요청: 읽기 도구가 아닌 것은 모두 거절한다(샌드박스도 켜지 않는다)
+  if (run.terminal.readOnly) return { deny: TERMINAL_READ_ONLY_DENY };
   // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
@@ -7478,6 +7512,8 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   if (!gatewayToolSpecs(session.project).some((spec) => spec.name === name)) return { ok: false, content: `[b-studio] ${name}: 터미널에 내주지 않는 도구입니다` };
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { ok: false, content: run.busy };
+  // 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행에서는 돌리지 않는다
+  if (run.terminal.readOnly) return { ok: false, content: TERMINAL_READ_ONLY_DENY };
   let verification: TerminalVerification;
   try {
     verification = await untilAborted(AbortSignal.any([session.stop.signal, run.cancel.signal]), terminalVerification(session, run));
@@ -7638,11 +7674,23 @@ async function terminalCliEnded(id: string): Promise<void> {
 /** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */
 function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
   return {
-    note: async () => terminalGatewayNote(terminalSession(id).project),
-    prompt: (input) => terminalPromptSubmitted(id, input),
+    // 세션 시작 훅이 이 안내를 받아 간다. CLI가 떴다는 뜻이기도 하다 — 화면은 그때부터 다른 패널의 글을 터미널에 붙여 넣는다
+    note: async () => {
+      const note = terminalGatewayNote(terminalSession(id).project);
+      noteSessionTerminalCli(id, true);
+      return note;
+    },
+    prompt: (input) => {
+      // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
+      noteSessionTerminalCli(id, true);
+      return terminalPromptSubmitted(id, input);
+    },
     preTool: (input) => terminalToolStarting(id, input),
     stop: (input) => terminalTurnEnded(id, input),
-    sessionEnd: () => terminalCliEnded(id),
+    sessionEnd: async () => {
+      noteSessionTerminalCli(id, false);
+      await terminalCliEnded(id);
+    },
     toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
     runTool: (name, args) => runTerminalTool(id, name, args),
   };
@@ -7823,8 +7871,10 @@ function registerCleanup(): void {
       session.stop.abort();
       clearTimeout(session.persist.timer);
       try {
-        const command = providerFromEnv().cleanupCommand?.(session.sandbox.id);
-        if (command) {
+        // 샌드박스를 내리는 명령과, 그 밖에 있는 세션 터미널의 컨테이너를 지우는 명령. 터미널의 컨테이너는 실험 기능을 켰을 때만 있다
+        const commands = [providerFromEnv().cleanupCommand?.(session.sandbox.id), sessionTerminalAllowed() ? agentCleanupCommand(session.sandbox.id) : undefined];
+        for (const command of commands) {
+          if (!command) continue;
           // 새 프로세스 그룹으로 띄워 터미널의 신호와 스튜디오의 강제 종료가 닿지 않게 한다
           const child = spawn(command.command, command.args, { cwd: tmpdir(), detached: true, stdio: 'ignore' });
           child.on('error', (error) => console.error('[b-studio] 샌드박스 정리 명령을 실행하지 못했습니다', error));

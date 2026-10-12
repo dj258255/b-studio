@@ -55,6 +55,7 @@ export {
   AGENT_GATEWAY_TARGET,
   AGENT_HOOK_EVENTS,
   AGENT_HOOK_SCRIPT,
+  AGENT_READ_ONLY_MARK,
   AGENT_READ_TOOLS,
   AGENT_WRITE_TOOL_MATCHER,
   agentGatewayFiles,
@@ -71,7 +72,9 @@ export {
   AGENT_WORKSPACE,
   agentContainerName,
   clampTerminalSize,
+  agentCleanupCommand,
   ensureAgentContainer,
+  isReadOnlyPrompt,
   openAgentTerminal,
   probeAgentGateway,
   removeAgentContainer,
@@ -80,3 +83,4 @@ export {
   type AgentTerminal,
   type TerminalSize,
 } from './docker/agent-terminal';
+export { assertSandboxId, SANDBOX_ID } from './sandbox-id';

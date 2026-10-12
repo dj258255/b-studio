@@ -29,6 +29,8 @@ const fake = vi.hoisted(() => ({
   /** 서비스를 다시 띄우지 못하게 한다. 'platform'은 샌드박스·도커 쪽 문제(바꾼 코드의 탓이 아니다) */
   restartFails: false as false | 'platform',
   interrupts: [] as string[],
+  /** 화면에 알린 "에이전트 CLI가 떠 있는가"의 기록 */
+  cli: [] as boolean[],
   /** holdWord가 든 명령은 hold가 풀릴 때까지 끝나지 않는다(실행이나 검증을 열어 둔 채로 두는 데 쓴다) */
   holdWord: undefined as string | undefined,
   hold: undefined as Promise<void> | undefined,
@@ -92,6 +94,9 @@ vi.mock('./session-terminal', () => ({
   interruptSessionTerminal: (sessionId: string) => {
     fake.interrupts.push(sessionId);
   },
+  noteSessionTerminalCli: (_sessionId: string, alive: boolean) => {
+    fake.cli.push(alive);
+  },
 }));
 
 import { cancelRun, createSession, getSnapshot, sendMessage, sessionHistory, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
@@ -125,6 +130,7 @@ workflow:
   fake.starts = 0;
   fake.restarts = 0;
   fake.restartFails = false;
+  fake.cli = [];
   fake.interrupts = [];
   fake.holdWord = undefined;
   fake.hold = undefined;
@@ -851,6 +857,81 @@ describe('요청의 경계', () => {
   }, 30_000);
 });
 
+describe('읽기만 요청은 훅으로 막는다 (이슈 #689)', () => {
+  it('표시로 시작하는 요청에서는 파일을 바꾸거나 명령을 돌리는 도구를 모두 거절한다. 샌드박스도 켜지 않는다', async () => {
+    const session = await open({ lazy: true });
+    const answer = await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    // 에이전트가 헛돌지 않게 미리 알린다
+    expect(answer.note).toContain('읽기만');
+    for (const tool of ['Write', 'Edit', 'Bash', 'NotebookEdit', 'mcp__b-studio__run_in_service']) {
+      const denied = await session.gateway.preTool({ tool_name: tool, tool_input: { file_path: '/workspace/api/src/Order.java', content: 'class Hacked {}\n', command: 'rm -rf .' } });
+      expect(denied.deny, tool).toContain('읽기만 요청');
+    }
+    // 훅을 거치지 않고 도구 서버로 바로 불려도 돌지 않는다
+    expect(await session.gateway.runTool('run_in_service', { service: 'api', command: ['sh', '-c', 'echo hi > api/src/x'] })).toMatchObject({ ok: false, content: expect.stringContaining('읽기만 요청') });
+    expect(fake.execCalls).toEqual([]);
+    expect(getSnapshot(session.id)!.status).toBe('idle');
+    // 읽기 도구는 그대로 쓴다
+    expect(await session.gateway.preTool({ tool_name: 'Read', tool_input: { file_path: '/workspace/api/src/Order.java' } })).toEqual({});
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    expect(await session.gateway.stop({ last_assistant_message: 'Order는 한 곳에서 씁니다.' })).toEqual({});
+    expect(session.ofType('run_finished')[0]).toMatchObject({ status: 'done', summary: 'Order는 한 곳에서 씁니다.' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('다음 요청에 표시가 없으면 다시 쓸 수 있다. 표시는 요청마다 본다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '[읽기만] 구조를 설명해줘' });
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toContain('읽기만 요청');
+    await session.gateway.stop({ last_assistant_message: '설명했습니다.' });
+
+    expect((await session.gateway.prompt({ prompt: '메모 필드를 추가해줘' })).note).toBeUndefined();
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
+    await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(session.ofType('checkpoint')).toHaveLength(1);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('읽기만은 실행이 닫힐 때까지 풀리지 않는다: 같은 실행에 표시 없는 요청이 이어 와도 쓰기를 열어 주지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '[읽기만] 구조를 설명해줘' });
+    // 도중에 끊고 한마디 더 했다(같은 실행에 잇는다). 표시가 없다고 쓰기로 바뀌지 않는다
+    expect((await session.gateway.prompt({ prompt: '더 자세히, 필요하면 고쳐도 돼' })).note).toContain('읽기만');
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toContain('읽기만 요청');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    // 실행이 끝난 뒤의 새 요청은 쓸 수 있다
+    await session.gateway.stop({ last_assistant_message: '설명했습니다.' });
+    expect((await session.gateway.prompt({ prompt: '메모 필드를 추가해줘' })).note).toBeUndefined();
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('쓰던 실행에 읽기만 요청이 이어 오면 그때부터 막는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '메모 필드를 추가해줘' });
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
+    expect((await session.gateway.prompt({ prompt: '[읽기만] 잠깐, 방금 바꾼 것만 설명해줘' })).note).toContain('읽기만');
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n')).deny).toContain('읽기만 요청');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('표시 앞의 빈칸·보이지 않는 글자, 조합형 한글로 들어온 표시도 읽기만으로 본다', async () => {
+    for (const prompt of ['   [읽기만] 설명해줘', `${String.fromCharCode(0x200b, 0xfeff, 0x202e)}[읽기만] 설명해줘`, '[읽기만] 설명해줘'.normalize('NFD')]) {
+      const session = await open();
+      await session.gateway.prompt({ prompt });
+      expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny, JSON.stringify(prompt)).toContain('읽기만 요청');
+      await stopSession(session.id);
+    }
+  }, 60_000);
+
+  it('글 중간에 표시가 있는 것은 읽기만이 아니다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '문서의 [읽기만] 표기를 고쳐줘' });
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+});
+
 describe('b-studio 도구와 세션의 수명', () => {
   it('도구 호출은 서비스 컨테이너에서 돌고 대화 기록에 남는다. 실행이 없으면 실행을 연다', async () => {
     const session = await open();
@@ -870,6 +951,16 @@ describe('b-studio 도구와 세션의 수명', () => {
     const refused = await session.gateway.runTool('write_file', { path: 'api/src/Order.java', content: 'class Hacked {}\n' });
     expect(refused).toEqual({ ok: false, content: '[b-studio] write_file: 터미널에 내주지 않는 도구입니다' });
     expect(await readFile(path.join(session.work, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('CLI의 세션 시작·끝 훅으로 에이전트 CLI가 떠 있는지를 화면에 알린다(떠 있을 때만 다른 패널의 글을 붙여 넣는다, 이슈 #689)', async () => {
+    const session = await open();
+    expect(fake.cli).toEqual([]);
+    await session.gateway.note();
+    expect(fake.cli).toEqual([true]);
+    await session.gateway.sessionEnd({});
+    expect(fake.cli).toEqual([true, false]);
     await stopSession(session.id);
   }, 30_000);
 

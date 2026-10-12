@@ -529,3 +529,43 @@ describe("groupChatRows(이슈 #81 — 같은 기동 진행 줄을 렌더에서�
     expect(html.match(/샌드박스를 켜는 중입니다 \(처음이면 1분 안팎\)/g)?.length).toBe(6); // 접힌 요약 1 + <details> 안의 시도 5
   });
 });
+
+describe("ChatPanel 기록 모드(이슈 #689)", () => {
+  const gated: StudioEvent[] = [
+    { type: "run_started", runId: "t1", request: "메모 필드 추가", via: "terminal" },
+    { type: "agent", runId: "t1", event: { type: "workflow_check", check: { stage: "test", name: "unit", ok: false, attempts: 1, detail: "expected 1 to be 2" } } },
+    { type: "reverted", runId: "t1", files: ["api/Order.java"], patch: "", restarted: [], databases: [], backup: { id: "b1", files: ["api/Order.java"], createdAt: "2026-10-12T00:00:00.000Z" } } as StudioEvent,
+    { type: "run_finished", runId: "t1", status: "failed", summary: "검증 게이트를 3번 통과하지 못했습니다" },
+  ];
+  const recordOf = (state: SessionView) =>
+    renderToStaticMarkup(
+      <SessionAccessProvider value={{ canManage: true, canLogout: false }}>
+        <ChatPanel view={state} mode="record" />
+      </SessionAccessProvider>,
+    );
+
+  it("입력창 없이 기록만 그린다. 실패 사유와 되살리기는 그대로 보인다", () => {
+    const html = recordOf(view(gated));
+    expect(html).toContain("활동 기록");
+    expect(html).not.toContain("<textarea");
+    expect(html).not.toContain("요청 보내기");
+    expect(html).not.toContain("가볍게 확인");
+    // 터미널에는 한 줄만 찍히는 것들이 여기에 있다
+    expect(html).toContain("unit · 실패");
+    expect(html).toContain("expected 1 to be 2");
+    expect(html).toContain("되살리기");
+  });
+
+  it("기록이 없으면 무엇이 쌓이는지 알린다", () => {
+    const html = recordOf(view());
+    expect(html).toContain("아직 기록이 없습니다");
+    expect(html).not.toContain("<textarea");
+  });
+
+  it("기본 모드는 전과 같이 입력창을 그린다", () => {
+    const html = render(view(gated));
+    expect(html).toContain("<textarea");
+    expect(html).not.toContain("활동 기록");
+  });
+});
+

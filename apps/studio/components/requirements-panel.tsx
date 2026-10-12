@@ -1211,10 +1211,10 @@ function RequirementCard({
             <button
               type="button"
               onClick={() => draft.fill(buildRequirementAskPrefill(requirement), { readOnly: true })}
-              title="대화창을 읽기만 모드로 열고 이 요구사항을 맥락으로 채웁니다"
+              title="이 요구사항을 맥락으로 입력창에 채웁니다. 읽기만으로 보냅니다(터미널에서는 글 앞에 [읽기만] 표시가 붙고, 그 요청에서는 파일을 바꾸는 도구가 거절됩니다)"
               className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink"
             >
-              대화에서 묻기
+              읽기만으로 묻기
             </button>
           )}
           {canManage && (

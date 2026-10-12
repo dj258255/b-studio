@@ -17,7 +17,12 @@ const TERMINAL_ID = 'main';
 export type TerminalMessage =
   | { kind: 'data'; data: string }
   | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string }
-  | { kind: 'exit'; code: number | null };
+  | { kind: 'exit'; code: number | null }
+  /**
+   * 터미널 안에 에이전트 CLI가 떠 있는가(CLI의 세션 시작·끝 훅으로 안다). 화면은 떠 있을 때만 다른 패널의 글을 붙여 넣는다 —
+   * 셸 프롬프트에 붙여 넣으면 사람이 요청인 줄 알고 누른 Enter가 그 글을 명령으로 실행한다(이슈 #689)
+   */
+  | { kind: 'cli'; alive: boolean };
 
 type Listener = (message: TerminalMessage) => void;
 
@@ -29,6 +34,8 @@ interface TerminalState {
   bytes: number;
   listeners: Set<Listener>;
   size: TerminalSize;
+  /** 에이전트 CLI가 떠 있다고 알려 왔는가. 터미널이 닫히거나 끝나면 거짓으로 돌린다 */
+  cli: boolean;
 }
 
 export interface TerminalTarget {
@@ -80,7 +87,7 @@ const terminals = (globalStore.__bStudioTerminals ??= new Map());
 function stateFor(sessionId: string): TerminalState {
   let state = terminals.get(sessionId);
   if (!state) {
-    state = { sandboxId: '', chunks: [], bytes: 0, listeners: new Set(), size: clampTerminalSize({}) };
+    state = { sandboxId: '', chunks: [], bytes: 0, listeners: new Set(), size: clampTerminalSize({}), cli: false };
     terminals.set(sessionId, state);
   }
   return state;
@@ -154,6 +161,7 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
         // 닫고 새로 연 뒤에 옛 프로세스의 종료가 늦게 와도 새 터미널을 지우지 않는다
         if (current.terminal !== terminal) return;
         current.terminal = undefined;
+        setCli(current, false);
         emit(current, { kind: 'exit', code });
       });
       emit(current, { kind: 'status', state: 'open' });
@@ -175,7 +183,24 @@ export function subscribeSessionTerminal(sessionId: string, listener: Listener):
   state.listeners.add(listener);
   if (state.chunks.length > 0) listener({ kind: 'data', data: Buffer.concat(state.chunks).toString('base64') });
   listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed' });
+  listener({ kind: 'cli', alive: state.cli });
   return () => unsubscribe(sessionId, state, listener);
+}
+
+function setCli(state: TerminalState, alive: boolean): void {
+  if (state.cli === alive) return;
+  state.cli = alive;
+  emit(state, { kind: 'cli', alive });
+}
+
+/**
+ * 에이전트 CLI가 떴다·끝났다(관문의 세션 시작·끝 훅이 부른다). 터미널이 열려 있지 않으면 떴다는 알림은 받지 않는다 —
+ * 닫힌 터미널에 "떠 있음"이 남으면 다음에 연 터미널(셸)에 글이 붙는다
+ */
+export function noteSessionTerminalCli(sessionId: string, alive: boolean): void {
+  const state = terminals.get(sessionId);
+  if (!state) return;
+  setCli(state, alive && state.terminal !== undefined);
 }
 
 function unsubscribe(sessionId: string, state: TerminalState, listener: Listener): void {
@@ -213,6 +238,7 @@ export function closeSessionTerminal(sessionId: string): void {
   const terminal = state.terminal;
   state.terminal = undefined;
   terminal.close();
+  setCli(state, false);
   emit(state, { kind: 'status', state: 'closed' });
 }
 

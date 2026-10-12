@@ -48,7 +48,12 @@ export function handoffModelInput(picker: ModelPickerView | undefined): { sessio
   };
 }
 
-export function ChatPanel({ view }: { view: SessionView }) {
+/**
+ * mode가 "record"면 입력창 없이 기록만 그린다(이슈 #689). 터미널 중심 화면에서 요청은 터미널로 보내고, 이 패널은 게이트 상세·
+ * 체크포인트·되돌림과 되살리기·올리기 결과가 쌓이는 읽기 전용 활동 기록이 된다. 기록 안의 버튼(되살리기 등)은 그대로 쓴다
+ */
+export function ChatPanel({ view, mode = "chat" }: { view: SessionView; mode?: "chat" | "record" }) {
+  const record = mode === "record";
   const { snapshot, chat } = view;
   const router = useRouter();
   const [text, setText] = useState("");
@@ -73,6 +78,8 @@ export function ChatPanel({ view }: { view: SessionView }) {
   // 저장소 탭의 "이 이슈로 작업"이 입력창을 채울 수 있도록 채우기 함수를 등록한다(사람이 보고 고친 뒤 직접 보낸다)
   const draft = useChatDraft();
   useEffect(() => {
+    // 기록 모드에는 입력창이 없다. 채우기는 터미널이 받는다(TerminalPanel이 등록한다)
+    if (record) return;
     draft.register((value, mode) => {
       setText(value);
       // "대화에서 묻기"(요구사항 카드, ADR-094)는 읽기만·조사를 함께 켜 달라고 부탁할 수 있다
@@ -82,7 +89,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
     });
     return () => draft.register(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft]);
+  }, [draft, record]);
   const limit = snapshot.tokenLimit;
   const used = totalTokens(snapshot.tokens);
   const budgetReached = limit !== undefined && used >= limit;
@@ -302,10 +309,10 @@ export function ChatPanel({ view }: { view: SessionView }) {
   }
 
   return (
-    <section className="glass flex min-h-0 flex-col overflow-hidden rounded-panel" aria-label="대화">
-      <div className="border-b border-line px-5 py-3">
+    <section className="glass flex min-h-0 flex-col overflow-hidden rounded-panel" aria-label={record ? "활동 기록" : "대화"}>
+      <div className={record ? "border-b border-line px-5 py-2" : "border-b border-line px-5 py-3"}>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-          <h2 className="font-semibold">대화</h2>
+          <h2 className="font-semibold">{record ? "활동 기록" : "대화"}</h2>
           {/* 세션 한도를 쓰지 않고 사람 한도만 정한 서버에서도 내 사용량이 보이게 한다 */}
           {(hasTokens(snapshot.tokens) || limit !== undefined || personalLimit !== undefined) && (
             <span className="text-xs text-muted" title="이 세션의 요청들이 쓴 모델 토큰입니다. 취소하거나 실패한 요청도 그때까지 쓴 양을 더합니다">
@@ -326,7 +333,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
             </span>
           )}
         </div>
-        <p className="mt-0.5 text-sm text-muted">{hintFor(view, access, personal && { reached: personalReached, window: personal.window })}</p>
+        {!record && <p className="mt-0.5 text-sm text-muted">{hintFor(view, access, personal && { reached: personalReached, window: personal.window })}</p>}
       </div>
 
       <ol ref={listRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4" aria-live="polite">
@@ -338,7 +345,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
           ) : (
             <li key={row.index}>
               <ChatEntry item={row.item} changedRuns={changedRuns} sessionId={snapshot.id} canManage={access.canManage} />
-              {row.index === chat.length - 1 && row.item.kind === "outcome" && row.item.intent === "ask" && row.item.status === "done" && access.canManage && (
+              {!record && row.index === chat.length - 1 && row.item.kind === "outcome" && row.item.intent === "ask" && row.item.status === "done" && access.canManage && (
                 <button
                   type="button"
                   onClick={buildFromPlan}
@@ -372,6 +379,10 @@ export function ChatPanel({ view }: { view: SessionView }) {
         )}
       </ol>
 
+      {record && chat.length === 0 && !snapshot.running && (
+        <p className="border-t border-line px-5 py-3 text-xs text-muted">아직 기록이 없습니다. 터미널에서 요청을 보내면 검증 결과와 체크포인트가 여기에 쌓입니다.</p>
+      )}
+      {!record && (
       <form
         className="border-t border-line px-5 py-4"
         onSubmit={(event) => {
@@ -604,6 +615,7 @@ export function ChatPanel({ view }: { view: SessionView }) {
         {modelError && <p className="mt-2 text-sm text-fail">{modelError}</p>}
         {error && <p className="mt-2 text-sm text-fail">{error}</p>}
       </form>
+      )}
     </section>
   );
 }
@@ -1623,7 +1635,7 @@ function formatContextWindow(tokens?: number): string | undefined {
   return tokens >= 1000 ? `컨텍스트 ${Math.round(tokens / 1000)}K 토큰` : `컨텍스트 ${tokens} 토큰`;
 }
 
-function stageLabel(stage: string): string {
+export function stageLabel(stage: string): string {
   return (
     {
       plan: "계획",
