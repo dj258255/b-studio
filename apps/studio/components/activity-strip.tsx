@@ -28,54 +28,61 @@ export function ActivityStrip({ view, open, onToggle, onUseChat }: { view: Sessi
   }
 
   return (
-    <section className="glass flex flex-wrap items-center gap-x-3 gap-y-1 rounded-panel px-4 py-2 text-xs" aria-label="활동">
-      <p className="flex min-w-0 flex-1 items-center gap-2" role="status" aria-label="검증 상태">
-        <span aria-hidden className={`size-2 shrink-0 rounded-full ${TONE[status?.tone ?? "idle"]}`} />
-        <span className="min-w-0 truncate" title={status?.text}>
-          {status?.text ?? "터미널에서 요청을 보내면 턴이 끝날 때 검증하고, 통과하면 체크포인트를 남깁니다"}
-        </span>
-      </p>
-      {stages.length > 0 && (
-        <ul className="flex flex-wrap items-center gap-x-2" aria-label="단계별 결과">
-          {stages.map((entry) => (
-            <li key={entry.stage} className={entry.ok ? "text-pass" : "font-medium text-fail"}>
-              <span aria-hidden>{entry.ok ? "✓" : "✗"}</span> {stageLabel(entry.stage)}
-              <span className="sr-only">{entry.ok ? " 통과" : " 실패"}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {checkpoint && (
-        <p className="whitespace-nowrap text-muted">
-          체크포인트 <span className="font-mono text-ink">{checkpoint.shortSha}</span>
-          {checkpoint.incomplete && <span className="ml-1.5 rounded-full border border-wait/40 bg-wait/10 px-1.5 py-px text-[10px] text-wait">턴 상한</span>}
+    <section className="glass flex flex-col gap-1.5 rounded-panel px-4 py-2 text-xs" aria-label="활동">
+      {/* 첫 줄: 지금 상태와 버튼. 둘째 줄: 단계별 결과와 체크포인트(있을 때만). 한 줄에 다 넣으면 좁은 칸에서 상태 글이 잘린다 */}
+      <div className="flex items-center gap-3">
+        <p className="flex min-w-0 flex-1 items-center gap-2" role="status" aria-label="검증 상태">
+          <span aria-hidden className={`size-2 shrink-0 rounded-full ${TONE[status?.tone ?? "idle"]}`} />
+          <span className="min-w-0 truncate" title={status?.text}>
+            {status?.text ?? "터미널에서 요청을 보내면 턴이 끝날 때 검증하고, 통과하면 체크포인트를 남깁니다"}
+          </span>
         </p>
-      )}
-      <div className="flex items-center gap-2">
-        {runId && access.canManage && !view.snapshot.cancelling &&
-          (confirming === runId ? (
-            <>
-              <button type="button" onClick={() => void cancel(runId)} className="rounded-control bg-fail px-2.5 py-1 font-medium text-panel hover:bg-fail/85">
-                변경 되돌리고 취소
+        <div className="flex shrink-0 items-center gap-2">
+          {runId && access.canManage && !view.snapshot.cancelling &&
+            (confirming === runId ? (
+              <>
+                <button type="button" onClick={() => void cancel(runId)} className="rounded-control bg-fail px-2.5 py-1 font-medium text-panel hover:bg-fail/85">
+                  변경 되돌리고 취소
+                </button>
+                <button type="button" onClick={() => setConfirming(undefined)} className="rounded-control border border-line px-2.5 py-1 hover:border-ink">
+                  계속 진행
+                </button>
+              </>
+            ) : (
+              <button type="button" onClick={() => setConfirming(runId)} className="rounded-control border border-line px-2.5 py-1 hover:border-ink">
+                요청 취소
               </button>
-              <button type="button" onClick={() => setConfirming(undefined)} className="rounded-control border border-line px-2.5 py-1 hover:border-ink">
-                계속 진행
-              </button>
-            </>
-          ) : (
-            <button type="button" onClick={() => setConfirming(runId)} className="rounded-control border border-line px-2.5 py-1 hover:border-ink">
-              요청 취소
-            </button>
-          ))}
-        <button type="button" onClick={onToggle} aria-expanded={open} className="rounded-control border border-line px-2.5 py-1 font-medium hover:border-ink">
-          {open ? "기록 접기" : "기록 펼치기"}
-        </button>
-        <button type="button" onClick={onUseChat} className="text-muted underline-offset-2 hover:text-ink hover:underline" title="터미널 대신 대화 입력창으로 요청을 보냅니다. 언제든 다시 돌아올 수 있습니다">
-          대화 입력으로 보기
-        </button>
+            ))}
+          <button type="button" onClick={onToggle} aria-expanded={open} className="rounded-control border border-line px-2.5 py-1 font-medium hover:border-ink">
+            {open ? "기록 접기" : "기록 펼치기"}
+          </button>
+          <button type="button" onClick={onUseChat} className="text-muted underline-offset-2 hover:text-ink hover:underline" title="터미널 대신 대화 입력창으로 요청을 보냅니다. 언제든 다시 돌아올 수 있습니다">
+            대화 입력으로 보기
+          </button>
+        </div>
       </div>
+      {(stages.length > 0 || checkpoint) && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-4">
+          {stages.length > 0 && (
+            <ul className="flex flex-wrap items-center gap-x-2.5" aria-label="단계별 결과">
+              {stages.map((entry) => (
+                <li key={entry.stage} className={entry.ok ? "text-pass" : "font-medium text-fail"}>
+                  <span aria-hidden>{entry.ok ? "✓" : "✗"}</span> {stageLabel(entry.stage)}
+                  <span className="sr-only">{entry.ok ? " 통과" : " 실패"}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {checkpoint && (
+            <p className="whitespace-nowrap text-muted">
+              체크포인트 <span className="font-mono text-ink">{checkpoint.shortSha}</span>
+              {checkpoint.incomplete && <span className="ml-1.5 rounded-full border border-wait/40 bg-wait/10 px-1.5 py-px text-[10px] text-wait">턴 상한</span>}
+            </p>
+          )}
+        </div>
+      )}
       {error && (
-        <p role="alert" className="w-full text-fail">
+        <p role="alert" className="text-fail">
           {error}
         </p>
       )}

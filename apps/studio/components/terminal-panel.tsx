@@ -61,7 +61,8 @@ export function TerminalPanel({
       if (disposed) return;
       const terminal = new Terminal({
         cursorBlink: true,
-        fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+        // 한글은 영문 글꼴에 없어 대체 글꼴로 그려진다. 고정 폭 한글 글꼴이 깔려 있으면 그것을 먼저 쓴다(칸 너비에 맞아 글자 사이가 벌어지지 않는다)
+        fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", "D2Coding", "Sarasa Mono K", "NanumGothicCoding", "Nanum Gothic Coding", monospace',
         fontSize: 13,
         scrollback: 5000,
         theme: { background: "#0d1117", foreground: "#e6edf3", cursor: "#e6edf3", selectionBackground: "#264f78" },
