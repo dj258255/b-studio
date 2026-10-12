@@ -164,6 +164,23 @@ describe('예상된 거절 (api 백엔드)', { timeout: 60_000 }, () => {
     }
   });
 
+  it('화면이 한동안 잠잠했던 뒤의 조작이라도, 그 조작이 보낸 요청의 응답이 올 때까지 기다려 예상된 거절로 옮긴다(#684)', async () => {
+    // e9는 0.6초 뒤에 400을 돌려준다. 그 전에 0.8초를 쉬어 화면이 이미 "네트워크 잠잠" 상태에 든 뒤에 누른다.
+    // 그 상태는 한 번 들면 유지되므로, 그것만 기다리면 조작 뒤 0.1초 만에 구간이 닫혀 응답을 놓친다
+    const { result } = await runApi([snapshot, { name: 'qa_wait', input: { ms: 800 } }, expectRejection('늦게 오는 거절'), click('e9'), finish]);
+    expect(result.expectedRejections).toHaveLength(1);
+    expect(result.expectedRejections[0]?.requests).toEqual([{ status: 400, url: `${base}/api/slow` }]);
+    expect(result.unmetRejections).toEqual([]);
+    expect(result.diagnostics.failedRequests).toEqual([]);
+    expect(result.status).toBe('pass');
+  });
+
+  it('마지막 조작이 보낸 요청의 실패도, 화면이 잠잠했던 뒤라도 응답이 올 때까지 기다려 판정에 넣는다(#684)', async () => {
+    const { result } = await runApi([snapshot, { name: 'qa_wait', input: { ms: 800 } }, click('e9'), finish]);
+    expect(result.diagnostics.failedRequests).toEqual([`400 ${base}/api/slow`]);
+    expect(result.status).toBe('fail');
+  });
+
   it('구간 안에 도착했어도 앞선 조작이 보낸 요청의 늦은 응답은 예상된 거절로 옮기지 않는다', async () => {
     // e9는 0.6초 뒤에 400을 돌려준다. 선언 없이 누른 뒤, 응답이 오기 전에 요청 없는 버튼(e5)을 선언하고 누른다
     const { result } = await runApi([snapshot, click('e9'), expectRejection('빈 값은 막힌다'), click('e5'), finish]);
