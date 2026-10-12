@@ -1,5 +1,6 @@
 import type { Browser, CDPSession, Page } from 'playwright-core';
 import type { WorkflowPageStep } from '@b-studio/spec';
+import { trackPendingRequests } from './pending-requests';
 
 /** CDP screencast로 받은 화면 한 장. `at`은 프레임을 받은 시각(ms) */
 export interface BrowserFrame {
@@ -108,6 +109,9 @@ export type BrowserRunner = (url: string, options: BrowserPageOptions) => Promis
 const NAVIGATION_TIMEOUT_MS = 30_000;
 /** 네트워크가 잠잠해질 때까지 기다리되, 개발 서버의 HMR 연결처럼 끝나지 않는 요청 때문에 멈추지 않게 상한을 둔다 */
 const SETTLE_TIMEOUT_MS = 5_000;
+/** 단계를 마친 뒤: 핸들러가 요청을 내보낼 시간과, 떠 있는 요청이 없는 채로 이어져야 하는 시간 */
+const STEP_SETTLE_START_MS = 100;
+const STEP_SETTLE_QUIET_MS = 100;
 const STEP_TIMEOUT_MS = 5_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 /** screencast 전송량 상한. 프레임은 세션 기록에 남기지 않고 실시간 채널로만 보낸다 */
@@ -397,6 +401,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       if (response.status() >= 400) recordFailure(response.url(), String(response.status()));
     });
     page.on('requestfailed', (request) => recordFailure(request.url(), request.failure()?.errorText ?? 'failed'));
+    const pending = trackPendingRequests(page);
 
     const screencast = onFrame ? createScreencast(await page.context().newCDPSession(page), viewport, onFrame) : undefined;
     const recorded: BrowserPageStep[] = [];
@@ -439,6 +444,9 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
           throw new StepFailedError(`${index + 1}번째 단계 실패 (${describeStep(step)}): ${reason}`, recorded);
         }
       }
+      // 단계가 낸 요청이 끝나길 기다린다. 기다리지 않으면 마지막 단계가 보낸 요청의 실패(제출이 받은 500 등)가
+      // 기록되기 전에 결과를 돌려준다. 문서의 "네트워크 잠잠" 상태는 한 번 들면 유지돼 여기서는 기다림이 되지 않는다(#684)
+      if (steps.length > 0) await pending.waitForIdle({ graceMs: STEP_SETTLE_START_MS, quietMs: STEP_SETTLE_QUIET_MS, timeoutMs: SETTLE_TIMEOUT_MS });
       // 에이전트 패키지는 DOM 타입을 쓰지 않으므로 페이지 안에서 실행할 식은 문자열로 넘긴다
       const { text, overflow } = await page.evaluate<{ text: string; overflow: number }>(
         `({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })`,

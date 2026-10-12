@@ -3,6 +3,7 @@ import type { WorkflowPageStep } from '@b-studio/spec';
 import type { Browser, Page } from 'playwright-core';
 import { createScreencast, launchBrowser, restrictPageToOrigins, type BrowserFrame, type OriginBlockEvent } from './browser-check';
 import type { AgentUsage, ModelClient } from './loop';
+import { trackPendingRequests, type PendingRequests } from './pending-requests';
 
 type BetaTool = Anthropic.Beta.BetaTool;
 type BetaMessageParam = Anthropic.Beta.BetaMessageParam;
@@ -27,8 +28,12 @@ const MAX_SNAPSHOT_ELEMENTS = 40;
 const MAX_NAME_LENGTH = 80;
 const SCROLL_PAGE_PX = 600;
 const SCROLL_SETTLE_MS = 150;
-/** 예상된 거절을 가를 때, 조작 직후 요청이 나가길 기다리는 시간과 네트워크가 잠잠해지길 기다리는 상한 */
+/**
+ * 조작 뒤에 그 조작이 낸 요청이 끝나길 기다리는 시간: 요청이 나가길 기다리는 시간, 떠 있는 요청이 없는 채로 이어져야 하는 시간, 상한.
+ * 떠 있는 요청을 직접 센다(pending-requests.ts) — 문서의 "네트워크 잠잠" 상태는 한 번 들면 유지돼 기다림이 되지 않는다(#684)
+ */
 const SETTLE_START_MS = 100;
+const SETTLE_QUIET_MS = 100;
 const SETTLE_NETWORK_MS = 2_000;
 /** 선언한 조작 하나가 낸 거절로 볼 수 있는 응답 수의 상한. 넘으면 그 조작의 4xx는 하나도 옮기지 않는다(화면이 깨졌을 가능성이 크다) */
 const MAX_REJECTIONS_PER_ACTION = 3;
@@ -128,6 +133,8 @@ export class QaBrowser {
   #rejectionWatch: Array<{ status: number; url: string }> | undefined;
   /** 구간 안에서 시작된 요청들. 응답이 왔을 때 이 구간의 조작이 보낸 요청인지 가르는 데 쓴다 */
   #watchStarted: WeakSet<object> | undefined;
+  /** 아직 끝나지 않은 요청. settle이 이것이 빌 때까지 기다린다 */
+  #pending: PendingRequests | undefined;
   readonly #refs = new Map<string, { selector: string; stableSelector?: string; rect: QaElement['rect'] }>();
   readonly #screencast: ReturnType<typeof createScreencast> | undefined;
   #refSeq = 0;
@@ -182,6 +189,7 @@ export class QaBrowser {
         instance.#failureMeta.push({ rejection, startedInWatch });
       };
       page.on('request', (request) => instance.#watchStarted?.add(request));
+      instance.#pending = trackPendingRequests(page);
       page.on('response', (response) => {
         if (response.status() >= 400) recordFailure(response.url(), String(response.status()), { status: response.status(), method: response.request().method(), request: response.request() });
       });
@@ -207,8 +215,8 @@ export class QaBrowser {
    * 그 조작이 낸 요청의 실패가 진단 신호에 들어오기 전에 판정이 내려질 수 있다
    */
   async settle(): Promise<void> {
-    await this.#page.waitForTimeout(SETTLE_START_MS).catch(() => {});
-    await this.#page.waitForLoadState('networkidle', { timeout: SETTLE_NETWORK_MS }).catch(() => {});
+    if (!this.#pending) return;
+    await this.#pending.waitForIdle({ graceMs: SETTLE_START_MS, quietMs: SETTLE_QUIET_MS, timeoutMs: SETTLE_NETWORK_MS });
   }
 
   async currentDiagnostics(): Promise<QaDiagnostics> {

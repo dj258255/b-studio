@@ -15,6 +15,8 @@ const PAGES: Record<string, string> = {
   '/missing-chunk': `<html><body><p>표</p><script src="/chunk.js"></script></body></html>`,
   '/wide': `<html><head><meta name="viewport" content="width=device-width"></head><body style="margin:0"><div style="width:900px">표</div></body></html>`,
   // 입력값을 버튼으로 옮겨 그리는 페이지. 처음 화면에는 결과 문구가 없다
+  // 누르면 0.4초 뒤에 500을 받는 제출. 화면에는 아무 변화가 없다
+  '/submit-fails': `<html><body><button id="send" onclick="fetch('/api/slow-fail',{method:'POST'})">제출</button></body></html>`,
   '/interactive': `<html><body><input id="q"><button id="go" onclick="document.getElementById('out').textContent = document.getElementById('q').value">검색</button><p id="out"></p></body></html>`,
   // 입력칸에서 Enter를 누르면 폼이 제출되는 페이지
   '/form': `<html><body><form onsubmit="event.preventDefault(); document.getElementById('done').textContent = '제출됨'"><input id="name"></form><p id="done"></p></body></html>`,
@@ -67,6 +69,13 @@ beforeAll(async () => {
     if (path === '/pixel.png') {
       response.writeHead(200, { 'content-type': 'image/png' });
       response.end(PIXEL);
+      return;
+    }
+    if (path === '/api/slow-fail') {
+      setTimeout(() => {
+        response.writeHead(500, { 'content-type': 'application/json' });
+        response.end('{}');
+      }, 400);
       return;
     }
     if (path === '/sw.js') {
@@ -165,6 +174,21 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
       ['click #go', true],
     ]);
     for (const step of result.steps) expect(step.screenshot?.subarray(0, 8)).toEqual(PNG_SIGNATURE);
+  });
+
+  it('마지막 단계가 보낸 요청의 실패를 응답이 올 때까지 기다려 결과에 넣는다(#684)', async () => {
+    // 제출은 0.4초 뒤에 500을 받는다. 단계를 마치자마자 결과를 돌려주면 이 실패가 빠져 화면 확인이 통과한다
+    const result = await runInBrowser(`${base}/submit-fails`, { steps: [{ click: '#send' }] });
+    expect(result.failedRequests).toEqual([`500 ${base}/api/slow-fail`]);
+  });
+
+  it('단계가 없으면 기다림을 더하지 않는다', async () => {
+    const started = Date.now();
+    const result = await runInBrowser(`${base}/submit-fails`, {});
+    expect(result.failedRequests).toEqual([]);
+    expect(result.steps.map((step) => step.label)).toEqual(['open /submit-fails']);
+    // 여는 데 드는 시간만 든다(브라우저 기동 포함). 상한(5초)까지 기다리지 않는다
+    expect(Date.now() - started).toBeLessThan(4_000);
   });
 
   it('capture를 끄면 스크린샷 없이 단계 결과만 남긴다', async () => {
