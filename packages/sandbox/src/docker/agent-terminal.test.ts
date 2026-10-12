@@ -32,6 +32,7 @@ import {
   writeAgentGatewayConfig,
   type AgentGatewayAddress,
   isReadOnlyPrompt,
+  agentCleanupCommand,
 } from './agent-terminal';
 import type { MaskVolume } from './git-mask';
 
@@ -86,6 +87,13 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
     expect(agentHomeVolume('a/b')).toMatch(/^b-studio-agent-home-[A-Za-z0-9_.-]+$/);
     expect(() => agentHomeVolume('')).toThrow('프로젝트 id');
     expect(() => agentRunArgs({ ...plan, homeVolume: 'x,target=/etc' })).toThrow('쉼표');
+  });
+
+  it('에이전트 컨테이너를 지우는 명령은 그 샌드박스의 컨테이너 이름만 가리킨다(스튜디오가 종료 신호를 받았을 때 떼어 놓고 돌린다)', () => {
+    expect(agentCleanupCommand('studio-orders-abc123')).toEqual({ command: 'docker', args: ['rm', '--force', agentContainerName('studio-orders-abc123')] });
+    expect(agentCleanupCommand('studio-orders-abc123', { dockerBin: 'docker-test' }).command).toBe('docker-test');
+    // 셸을 거치지 않는 인자 배열이고, 이름에 쓸 수 없는 글자는 빠진다(저장된 기록의 값이 그대로 명령이 되지 않는다)
+    expect(agentCleanupCommand('x; rm -rf /').args).toEqual(['rm', '--force', 'x--rm--rf---agent']);
   });
 
   it('CLI에서 나온 뒤의 셸은 로그인 셸이 아니다 — 로그인 셸은 PATH를 기본값으로 되돌려 설치한 CLI를 찾지 못한다', () => {

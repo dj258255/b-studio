@@ -72,6 +72,7 @@ export {
   AGENT_WORKSPACE,
   agentContainerName,
   clampTerminalSize,
+  agentCleanupCommand,
   ensureAgentContainer,
   isReadOnlyPrompt,
   openAgentTerminal,

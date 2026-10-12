@@ -452,6 +452,14 @@ export async function probeAgentGateway(name: string, { dockerBin = 'docker' }: 
   );
 }
 
+/**
+ * 에이전트 컨테이너를 지우는 명령. 스튜디오가 종료 신호를 받았을 때는 기다릴 수 없어, 떼어 놓은 프로세스로 이 명령을 돌린다.
+ * 에이전트 컨테이너는 compose 프로젝트에 속하지 않아 샌드박스를 내리는 명령(compose down)으로는 지워지지 않는다
+ */
+export function agentCleanupCommand(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): { command: string; args: string[] } {
+  return { command: dockerBin, args: ['rm', '--force', agentContainerName(sandboxId)] };
+}
+
 /** 세션을 정리할 때 부른다. 없으면 아무 일도 하지 않는다 */
 export async function removeAgentContainer(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<void> {
   await execFileAsync(dockerBin, ['rm', '--force', agentContainerName(sandboxId)], { cwd: tmpdir() }).catch(() => {});

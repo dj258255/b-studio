@@ -314,7 +314,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
-import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, isReadOnlyPrompt, type AgentGatewayAddress } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -1465,7 +1465,18 @@ async function recover(): Promise<void> {
     };
     archived.set(id, entry);
     if (interrupted) entry.cleanup = cleanupSandbox(entry);
+    // 세션 터미널의 컨테이너는 샌드박스(compose 프로젝트) 밖에 있어 위의 정리로 지워지지 않는다. 샌드박스를 켜지 않은(idle) 세션에도
+    // 있을 수 있다 — 터미널은 샌드박스 없이 열린다. 멈춘 세션은 멈출 때 이미 지웠다
+    if (data.snapshot.status !== 'stopped') entry.cleanup = entry.cleanup.then(() => cleanupTerminalLeftovers(id, data.sandbox.id));
   }
+}
+
+/**
+ * 이전 스튜디오 프로세스가 남긴 세션 터미널을 치운다: 에이전트 컨테이너와, 그 컨테이너에 붙였던 관문 설정(토큰이 든 폴더).
+ * 남겨 두면 스튜디오를 다시 띄울 때마다 세션마다 컨테이너가 하나씩 쌓인다(작업 복사본을 붙든 채로). 실패해도 세션을 여는 데는 지장이 없다
+ */
+async function cleanupTerminalLeftovers(sessionId: string, sandboxId: string): Promise<void> {
+  await disposeSessionTerminal(sessionId, sandboxId).catch((error: unknown) => console.error('[b-studio] 이전 세션 터미널을 정리하지 못했습니다', sessionId, describe(error)));
 }
 
 async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
@@ -7854,8 +7865,10 @@ function registerCleanup(): void {
       session.stop.abort();
       clearTimeout(session.persist.timer);
       try {
-        const command = providerFromEnv().cleanupCommand?.(session.sandbox.id);
-        if (command) {
+        // 샌드박스를 내리는 명령과, 그 밖에 있는 세션 터미널의 컨테이너를 지우는 명령. 터미널의 컨테이너는 실험 기능을 켰을 때만 있다
+        const commands = [providerFromEnv().cleanupCommand?.(session.sandbox.id), sessionTerminalAllowed() ? agentCleanupCommand(session.sandbox.id) : undefined];
+        for (const command of commands) {
+          if (!command) continue;
           // 새 프로세스 그룹으로 띄워 터미널의 신호와 스튜디오의 강제 종료가 닿지 않게 한다
           const child = spawn(command.command, command.args, { cwd: tmpdir(), detached: true, stdio: 'ignore' });
           child.on('error', (error) => console.error('[b-studio] 샌드박스 정리 명령을 실행하지 못했습니다', error));
