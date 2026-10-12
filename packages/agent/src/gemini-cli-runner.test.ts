@@ -188,6 +188,36 @@ describe('runGeminiAgent', () => {
     expect(state.calls[1]!.args[1]).toContain('cannot find symbol');
   });
 
+  it('턴 상한에 닿은 뒤의 재검증이 통과하면 done으로 남기되 하다 만 것으로 표시한다(ADR-131 덧붙임)', async () => {
+    const { process, state } = fakeGemini([success('메모를 추가했습니다.', OK_TOKENS, 'ses_1')], {
+      onStart: async ({ cwd, env }) => {
+        await callStudioTool(cwd, env, 'edit_file', { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' });
+      },
+    });
+    const sandbox = fakeSandbox(project, [false, true]);
+
+    const result = await runGeminiAgent({ request: '주문에 메모 필드 추가', project, sandbox, process, model: MODEL, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('최대 턴 수(1)를 넘었습니다');
+    expect(result.incomplete).toBe('max_turns');
+    expect(state.calls).toHaveLength(1);
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+  });
+
+  it('턴 상한에 닿은 뒤의 재검증도 실패하면 실패로 끝나고 표시는 없다', async () => {
+    const { process } = fakeGemini([success('메모를 추가했습니다.', OK_TOKENS, 'ses_1')], {
+      onStart: async ({ cwd, env }) => {
+        await callStudioTool(cwd, env, 'edit_file', { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' });
+      },
+    });
+
+    const result = await runGeminiAgent({ request: '주문에 메모 필드 추가', project, sandbox: fakeSandbox(project, [false, false]), process, model: MODEL, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result).toMatchObject({ status: 'failed', failureReason: 'max_turns' });
+    expect(result.incomplete).toBeUndefined();
+  });
+
   it('세션 id를 한 번도 받지 못하면 --resume 없이 매 턴을 새 대화로 시작한다', async () => {
     const { process, state } = fakeGemini([success('메모를 추가했습니다.'), success('컴파일 에러를 고쳤습니다.')], {
       onStart: async ({ cwd, env }) => {
