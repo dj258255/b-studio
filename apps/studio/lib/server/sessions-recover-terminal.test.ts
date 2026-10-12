@@ -45,7 +45,7 @@ afterAll(() => {
   else process.env.B_STUDIO_SESSIONS_DIR = saved.sessions;
 });
 
-async function persisted(root: string, id: string, status: 'ready' | 'idle' | 'stopped', pid: number): Promise<void> {
+async function persisted(root: string, id: string, status: 'ready' | 'idle' | 'stopped', pid: number, sandboxId = `studio-proj-${id}`): Promise<void> {
   const dir = path.join(root, `proj-${id}`, '.git', 'b-studio');
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -60,7 +60,7 @@ async function persisted(root: string, id: string, status: 'ready' | 'idle' | 's
       demoIndex: 0,
       claudeCode: { notes: [] },
       sourceDirtyFiles: 0,
-      sandbox: { id: `studio-proj-${id}`, provider: 'fake' },
+      sandbox: { id: sandboxId, provider: 'fake' },
     }),
   );
 }
@@ -74,10 +74,14 @@ describe('이전 프로세스가 남긴 세션 터미널의 정리', () => {
     await persisted(root, 'aaa111', 'ready', dead);
     await persisted(root, 'bbb222', 'idle', dead);
     await persisted(root, 'ccc333', 'stopped', dead);
+    // 손상된 기록: 샌드박스 id가 b-studio의 꼴이 아니다(다른 프로젝트의 컨테이너 이름을 가리키게 조작된 경우)
+    await persisted(root, 'ddd444', 'idle', dead, 'pay');
 
     await recoverSessions();
     const started = Date.now();
     while (fake.disposed.length < 2 && Date.now() - started < 5_000) await new Promise((resolve) => setTimeout(resolve, 10));
+    // 뒤늦게 오는 정리가 없는지 조금 더 기다린다
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     // 켜져 있던 세션: 샌드박스를 내리고, 그 밖에 있는 터미널의 컨테이너도 치운다
     expect(fake.cleaned).toEqual(['studio-proj-aaa111']);
@@ -86,7 +90,9 @@ describe('이전 프로세스가 남긴 세션 터미널의 정리', () => {
       // idle 세션은 샌드박스가 없어도 터미널은 열려 있었을 수 있다
       ['bbb222', 'studio-proj-bbb222'],
     ]);
-    // 세 세션 모두 기록은 남아 이어서 작업할 수 있다
-    for (const id of ['aaa111', 'bbb222', 'ccc333']) expect(getSnapshot(id)).toBeDefined();
+    // 꼴이 아닌 id로는 아무것도 지우지 않는다("pay-agent" 같은 남의 컨테이너를 건드리지 않는다)
+    expect(fake.disposed.some(([sessionId]) => sessionId === 'ddd444')).toBe(false);
+    // 세션의 기록은 모두 남아 이어서 작업할 수 있다
+    for (const id of ['aaa111', 'bbb222', 'ccc333', 'ddd444']) expect(getSnapshot(id)).toBeDefined();
   });
 });

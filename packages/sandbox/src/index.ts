@@ -83,3 +83,4 @@ export {
   type AgentTerminal,
   type TerminalSize,
 } from './docker/agent-terminal';
+export { assertSandboxId, SANDBOX_ID } from './sandbox-id';

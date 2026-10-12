@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { EDGE_IMAGE } from '../edge-config';
 import { SandboxError } from '../errors';
 import { computeGitMask, findMissingMasks, type InspectedMount, type MaskVolume } from './git-mask';
+import { assertSandboxId } from '../sandbox-id';
 
 const execFileAsync = promisify(execFile);
 
@@ -457,6 +458,8 @@ export async function probeAgentGateway(name: string, { dockerBin = 'docker' }: 
  * 에이전트 컨테이너는 compose 프로젝트에 속하지 않아 샌드박스를 내리는 명령(compose down)으로는 지워지지 않는다
  */
 export function agentCleanupCommand(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): { command: string; args: string[] } {
+  // 저장된 값으로 무언가를 지우기 전에 형식을 본다. 아니면 이름이 "-agent"로 끝나는 남의 컨테이너를 가리킬 수 있다
+  assertSandboxId(sandboxId);
   return { command: dockerBin, args: ['rm', '--force', agentContainerName(sandboxId)] };
 }
 

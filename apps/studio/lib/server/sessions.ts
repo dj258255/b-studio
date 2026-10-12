@@ -314,7 +314,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
-import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, type AgentGatewayAddress } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -1476,6 +1476,12 @@ async function recover(): Promise<void> {
  * 남겨 두면 스튜디오를 다시 띄울 때마다 세션마다 컨테이너가 하나씩 쌓인다(작업 복사본을 붙든 채로). 실패해도 세션을 여는 데는 지장이 없다
  */
 async function cleanupTerminalLeftovers(sessionId: string, sandboxId: string): Promise<void> {
+  // 저장된 기록의 값으로 컨테이너를 지운다. b-studio가 만든 id의 꼴이 아니면 지우지 않는다(샌드박스 정리와 같은 규칙).
+  // 꼴을 보지 않으면 손상된 기록이 이름이 "-agent"로 끝나는 남의 컨테이너를 가리킬 수 있다
+  if (!SANDBOX_ID.test(sandboxId)) {
+    console.error('[b-studio] 이전 세션 터미널을 정리하지 않았습니다: 샌드박스 id의 꼴이 아닙니다', sessionId);
+    return;
+  }
   await disposeSessionTerminal(sessionId, sandboxId).catch((error: unknown) => console.error('[b-studio] 이전 세션 터미널을 정리하지 못했습니다', sessionId, describe(error)));
 }
 
