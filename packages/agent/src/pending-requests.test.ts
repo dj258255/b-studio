@@ -8,6 +8,7 @@ import { trackPendingRequests } from './pending-requests';
 /**
  * 떠 있는 요청을 세어 기다리는 도우미(#684). 실제 브라우저와 로컬 서버를 쓴다.
  * /slow 0.5초 뒤 응답 · /chain 응답을 받으면 이어서 /slow를 보낸다 · /never 응답하지 않는다
+ * /slow-body 머리는 바로, 본문은 0.8초 뒤에 끝난다
  * /events 머리만 보내고 본문을 끝내지 않는 이벤트 스트림 · /slow-events 그 머리를 0.5초 뒤에 보낸다
  */
 const PAGE = `<html><body>
@@ -15,6 +16,7 @@ const PAGE = `<html><body>
   <button id="chain" onclick="fetch('/quick',{method:'POST'}).then(function(){ return fetch('/slow',{method:'POST'}); })">이어짐</button>
   <button id="never" onclick="fetch('/never',{method:'POST'})">안 끝남</button>
   <button id="none" onclick="document.title='눌림'">요청 없음</button>
+  <button id="slow-body" onclick="fetch('/slow-body',{method:'POST'}).then(function(r){ return r.text(); }).then(function(){ return fetch('/slow',{method:'POST'}); })">본문이 늦음</button>
   <button id="events" onclick="window.es = new EventSource('/events')">스트림</button>
   <button id="slow-events" onclick="window.es = new EventSource('/slow-events')">늦은 스트림</button>
   <button id="spa" onclick="fetch('/slow',{method:'POST'}); history.pushState({}, '', '/next'); location.hash = 'done'">화면 전환</button>
@@ -30,6 +32,13 @@ beforeAll(async () => {
   server = createServer((request, response) => {
     const path = request.url ?? '';
     if (path === '/never') return;
+    if (path === '/slow-body') {
+      // 머리는 바로, 본문은 0.8초 뒤에 끝난다
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.write('시작');
+      setTimeout(() => response.end('끝'), 800);
+      return;
+    }
     if (path === '/events' || path === '/slow-events') {
       // 머리를 보낸 뒤 본문을 끝내지 않는다. 늦은 쪽은 머리를 0.5초 뒤에 보낸다
       setTimeout(
@@ -94,6 +103,16 @@ describe('떠 있는 요청을 세어 기다린다', { timeout: 60_000 }, () => 
   it('응답을 받고 이어서 보낸 요청까지 기다린다', async () => {
     const pending = await open();
     await page.click('#chain');
+    await pending.waitForIdle(idle);
+    expect(answered).toEqual(['/slow']);
+    await page.close();
+  });
+
+  it('보통 요청은 본문이 끝날 때까지 떠 있는 것으로 센다 — 본문을 다 받은 뒤에 이어 보내는 요청을 놓치지 않는다', async () => {
+    // 머리는 바로 오고 본문이 0.8초 걸린다. 머리만 보고 끝난 것으로 치면 잠잠한 시간(0.1초)이 지나 기다림이 끝나고,
+    // 본문을 다 읽은 뒤에 나가는 다음 요청을 보지 못한다
+    const pending = await open();
+    await page.click('#slow-body');
     await pending.waitForIdle(idle);
     expect(answered).toEqual(['/slow']);
     await page.close();
