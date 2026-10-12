@@ -86,6 +86,12 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
     expect(() => agentRunArgs({ ...plan, homeVolume: 'x,target=/etc' })).toThrow('쉼표');
   });
 
+  it('CLI에서 나온 뒤의 셸은 로그인 셸이 아니다 — 로그인 셸은 PATH를 기본값으로 되돌려 설치한 CLI를 찾지 못한다', () => {
+    const lines = AGENT_TERMINAL_COMMAND.split('\n');
+    expect(lines.at(-1)).toBe('exec bash');
+    expect(AGENT_TERMINAL_COMMAND).not.toMatch(/bash\s+(-l|--login)/);
+  });
+
   it('설치할 CLI는 판을 고정한다(터미널을 열 때마다 최신을 받지 않는다)', () => {
     expect(AGENT_CLI_PACKAGE).toMatch(/^@anthropic-ai\/claude-code@\d+\.\d+\.\d+$/);
     expect(AGENT_TERMINAL_COMMAND).toContain(`npm install --global --no-fund --no-audit ${AGENT_CLI_PACKAGE} `);

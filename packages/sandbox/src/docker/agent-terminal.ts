@@ -256,7 +256,9 @@ export const AGENT_TERMINAL_COMMAND = [
   'fi',
   'if command -v claude >/dev/null 2>&1; then claude; fi',
   'printf "%s\\n" "[b-studio] claude에서 나왔습니다. 다시 띄우려면 claude 를 입력하세요."',
-  'exec bash -l',
+  // 로그인 셸(-l)로 띄우지 않는다. 로그인 셸은 /etc/profile을 읽어 PATH를 기본값으로 되돌리고, 그러면 홈 볼륨에 설치한
+  // claude를 찾지 못한다(안내대로 claude를 치면 "command not found"였다)
+  'exec bash',
 ].join('\n');
 
 export interface AgentContainerPlan {

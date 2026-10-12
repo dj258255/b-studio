@@ -7663,7 +7663,11 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       noteSessionTerminalCli(id, true);
       return note;
     },
-    prompt: (input) => terminalPromptSubmitted(id, input),
+    prompt: (input) => {
+      // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
+      noteSessionTerminalCli(id, true);
+      return terminalPromptSubmitted(id, input);
+    },
     preTool: (input) => terminalToolStarting(id, input),
     stop: (input) => terminalTurnEnded(id, input),
     sessionEnd: async () => {
