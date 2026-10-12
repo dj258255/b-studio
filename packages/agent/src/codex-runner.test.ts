@@ -258,6 +258,43 @@ describe('runCodexAgent', () => {
     expect(state.prompts[1]).toContain('cannot find symbol');
   });
 
+  it('턴 상한에 닿은 뒤의 재검증이 통과하면 done으로 남기되 하다 만 것으로 표시한다(ADR-131 덧붙임)', async () => {
+    // 상한이 1이라 게이트의 실패를 돌려줄 턴이 없다. 재검증이 통과하면(같은 변경이 두 번째에는 통과) 체크포인트로 남는다
+    const { sdk, state } = fakeCodex([
+      {
+        steps: [
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } },
+          { text: '메모를 추가했습니다.' },
+        ],
+      },
+    ]);
+    const sandbox = fakeSandbox(project, [false, true]);
+
+    const result = await runCodexAgent({ request: '주문에 메모 필드 추가', project, sandbox, sdk, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('최대 턴 수(1)를 넘었습니다');
+    expect(result.incomplete).toBe('max_turns');
+    expect(state.prompts).toHaveLength(1);
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+  });
+
+  it('턴 상한에 닿은 뒤의 재검증도 실패하면 실패로 끝나고 표시는 없다', async () => {
+    const { sdk } = fakeCodex([
+      {
+        steps: [
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' } },
+          { text: '메모를 추가했습니다.' },
+        ],
+      },
+    ]);
+
+    const result = await runCodexAgent({ request: '주문에 메모 필드 추가', project, sandbox: fakeSandbox(project, [false, false]), sdk, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result).toMatchObject({ status: 'failed', failureReason: 'max_turns' });
+    expect(result.incomplete).toBeUndefined();
+  });
+
   it('사용 한도 오류를 한도 문구로 분류하고 게이트를 돌리지 않는다', async () => {
     // 0단계에서 확인한 실제 문구. 계정이 이 오류로 실패한다
     const limit = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits";

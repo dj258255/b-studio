@@ -238,6 +238,36 @@ describe('runOpenCodeAgent', () => {
     await runOpenCodeAgent({ request: '질문', intent: 'ask', project, sandbox: fakeSandbox(project, []), process, model: MODEL, fetcher: async () => contract });
   });
 
+  it('턴 상한에 닿은 뒤의 재검증이 통과하면 done으로 남기되 하다 만 것으로 표시한다(ADR-131 덧붙임)', async () => {
+    const { process, state } = fakeOpenCode([success('ses_1', '메모를 추가했습니다.')], {
+      onStart: async ({ cwd, env }) => {
+        await callStudioTool(cwd, env, 'edit_file', { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' });
+      },
+    });
+    const sandbox = fakeSandbox(project, [false, true]);
+
+    const result = await runOpenCodeAgent({ request: '주문에 메모 필드 추가', project, sandbox, process, model: MODEL, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('최대 턴 수(1)를 넘었습니다');
+    expect(result.incomplete).toBe('max_turns');
+    expect(state.calls).toHaveLength(1);
+    expect(sandbox.restarts).toEqual(['api', 'api']);
+  });
+
+  it('턴 상한에 닿은 뒤의 재검증도 실패하면 실패로 끝나고 표시는 없다', async () => {
+    const { process } = fakeOpenCode([success('ses_1', '메모를 추가했습니다.')], {
+      onStart: async ({ cwd, env }) => {
+        await callStudioTool(cwd, env, 'edit_file', { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerNam; String memo;' });
+      },
+    });
+
+    const result = await runOpenCodeAgent({ request: '주문에 메모 필드 추가', project, sandbox: fakeSandbox(project, [false, false]), process, model: MODEL, fetcher: async () => contract, maxTurns: 1 });
+
+    expect(result).toMatchObject({ status: 'failed', failureReason: 'max_turns' });
+    expect(result.incomplete).toBeUndefined();
+  });
+
   it('게이트가 실패하면 같은 세션을 갈라 이어받아 다시 돌리고(새 sessionId), 통과하면 끝난다', async () => {
     const { process, state } = fakeOpenCode([success('ses_1', '메모를 추가했습니다.'), success('ses_2', '컴파일 에러를 고쳤습니다.')], {
       onStart: async ({ cwd, env }) => {
