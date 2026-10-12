@@ -7,6 +7,7 @@ import {
   MAX_TERMINAL_INPUT,
   openSessionTerminal,
   resizeSessionTerminal,
+  noteSessionTerminalCli,
   subscribeSessionTerminal,
   writeSessionTerminal,
   type TerminalBackend,
@@ -106,24 +107,62 @@ describe('세션 터미널 (이슈 #673)', () => {
     const { backend, record } = fakeBackend();
     const first: TerminalMessage[] = [];
     const stop = subscribeSessionTerminal(id, (message) => first.push(message));
-    expect(first).toEqual([{ kind: 'status', state: 'closed' }]);
+    expect(first).toEqual([{ kind: 'status', state: 'closed' }, { kind: 'cli', alive: false }]);
 
     await openSessionTerminal(id, target, { cols: 100, rows: 30 }, backend);
     record.terminals[0]!.emit(Buffer.from([0x1b, 0x5b, 0x32, 0x4a]));
     record.terminals[0]!.emit('한글 출력\r\n');
-    expect(first.map((message) => (message.kind === 'status' ? message.state : message.kind))).toEqual(['closed', 'opening', 'open', 'data', 'data']);
+    expect(first.map((message) => (message.kind === 'status' ? message.state : message.kind))).toEqual(['closed', 'cli', 'opening', 'open', 'data', 'data']);
     expect(decode(first)).toBe('\u001b[2J한글 출력\r\n');
 
     const late: TerminalMessage[] = [];
     const stopLate = subscribeSessionTerminal(id, (message) => late.push(message));
     expect(decode(late)).toBe('\u001b[2J한글 출력\r\n');
-    expect(late.at(-1)).toEqual({ kind: 'status', state: 'open' });
+    expect(late.at(-2)).toEqual({ kind: 'status', state: 'open' });
+    expect(late.at(-1)).toEqual({ kind: 'cli', alive: false });
 
     stop();
     stopLate();
     // 화면이 모두 닫혀도 터미널은 살아 있다
     expect(() => writeSessionTerminal(id, 'ls\r')).not.toThrow();
     expect(record.terminals[0]!.written).toEqual(['ls\r']);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+  });
+
+  it('에이전트 CLI가 떠 있는지를 화면에 알린다. 터미널이 닫히거나 끝나면 떠 있지 않은 것으로 돌린다(이슈 #689)', async () => {
+    const { backend, record } = fakeBackend();
+    const alive = (messages: TerminalMessage[]) => messages.flatMap((message) => (message.kind === 'cli' ? [message.alive] : []));
+    const seen: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => seen.push(message));
+    // 터미널이 열려 있지 않으면 떴다는 알림을 받지 않는다(닫힌 터미널에 "떠 있음"이 남지 않게)
+    noteSessionTerminalCli(id, true);
+    expect(alive(seen)).toEqual([false]);
+
+    await openSessionTerminal(id, target, {}, backend);
+    noteSessionTerminalCli(id, true);
+    noteSessionTerminalCli(id, true);
+    expect(alive(seen)).toEqual([false, true]);
+    // 나중에 붙은 화면도 지금 값을 받는다
+    const late: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => late.push(message))();
+    expect(alive(late)).toEqual([true]);
+
+    // CLI가 끝났다고 알려 오면
+    noteSessionTerminalCli(id, false);
+    expect(alive(seen)).toEqual([false, true, false]);
+
+    // 알림 없이 터미널이 끝나도(프로세스가 죽었다) 떠 있지 않은 것으로 돌린다
+    noteSessionTerminalCli(id, true);
+    record.terminals[0]!.exit(137);
+    expect(alive(seen)).toEqual([false, true, false, true, false]);
+
+    // 닫을 때도 같다
+    await openSessionTerminal(id, target, {}, backend);
+    noteSessionTerminalCli(id, true);
+    closeSessionTerminal(id);
+    expect(alive(seen).at(-1)).toBe(false);
+    // 모르는 세션은 조용히 넘어간다
+    expect(() => noteSessionTerminalCli('없는-세션', true)).not.toThrow();
     await disposeSessionTerminal(id, target.sandboxId, backend);
   });
 

@@ -124,13 +124,41 @@ export function terminalActivity(chat: readonly ChatItem[], checkpoints: Readonl
 }
 
 /**
- * 다른 패널이 "입력창에 채우기"로 넘긴 글을 터미널의 입력 줄에 붙여 넣을 꼴로 다듬는다(이슈 #689).
- * 대화 입력창에서는 "읽기만" 스위치를 함께 켤 수 있었다. 터미널에는 그 스위치가 없으므로 같은 뜻을 글로 앞에 적는다
+ * 읽기만 요청의 표시. 요청 글이 이것으로 시작하면 플랫폼이 그 실행에서 파일을 바꿀 수 있는 도구를 모두 거절한다
+ * (쓰기 직전의 훅, sessions.ts의 terminalToolStarting). 문장으로 부탁하는 것이 아니라 훅이 막는다
  */
-export function terminalPasteText(text: string, mode?: { readOnly?: boolean }): string {
-  const body = text.replace(/\r\n?/g, '\n').trim();
+export const TERMINAL_READ_ONLY_MARK = '[읽기만]';
+
+export function isReadOnlyPrompt(prompt: string): boolean {
+  return prompt.trimStart().startsWith(TERMINAL_READ_ONLY_MARK);
+}
+
+/** 붙여 넣는 글의 길이 상한. 터미널에 한꺼번에 밀어 넣는 양을 묶는다 */
+export const TERMINAL_PASTE_LIMIT = 8_000;
+
+/**
+ * 제어 문자와 방향 제어 문자. 터미널에 붙여 넣는 것은 글이 아니라 키 입력이다 — 남이 쓴 글(이슈 본문, 리뷰 지적, 미리보기의 HTML)에
+ * ESC나 붙여 넣기 끝 표시가 들어 있으면 붙여 넣기 구간을 빠져나와 Enter까지 누를 수 있다. xterm의 paste는 걸러 주지 않는다(6.0.0에서 확인).
+ * 줄바꿈과 탭만 남기고 C0·DEL·C1을 지운다. 방향 제어 문자(U+202A~202E, U+2066~2069)는 사람이 보는 글과 실제 글을 다르게 만들 수 있어 함께 지운다
+ */
+// eslint-disable-next-line no-control-regex
+const UNSAFE_PASTE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * 다른 패널이 "입력창에 채우기"로 넘긴 글을 터미널의 입력 줄에 붙여 넣을 꼴로 다듬는다(이슈 #689).
+ * - 제어 문자를 지운다(위)
+ * - multiline이 거짓이면(CLI가 붙여 넣기 모드를 켜 두지 않았다 — 셸 프롬프트일 수 있다) 줄바꿈을 빈칸으로 바꾼다.
+ *   그 상태에서 줄바꿈은 Enter로 들어가, 글의 줄마다 명령으로 실행된다
+ * - 입력 줄의 첫 글자로 CLI의 다른 모드를 여는 글자("!" 셸, "/" 명령)로 시작하면 앞에 말을 붙여 보통 요청으로 만든다
+ * - 읽기만이면 표시를 앞에 붙인다. 플랫폼이 그 표시를 보고 쓰기 도구를 막는다
+ */
+export function terminalPasteText(text: string, { readOnly = false, multiline = true }: { readOnly?: boolean; multiline?: boolean } = {}): string {
+  let body = text.replace(/\r\n?/g, '\n').replace(/\t/g, '  ').replace(UNSAFE_PASTE_CHARS, '').trim();
   if (body === '') return '';
-  return mode?.readOnly ? `파일은 바꾸지 말고 답만 해 주세요.\n\n${body}` : body;
+  if (!multiline) body = body.replace(/\s*\n\s*/g, ' ');
+  if (body.length > TERMINAL_PASTE_LIMIT) body = `${body.slice(0, TERMINAL_PASTE_LIMIT)}…(잘림)`;
+  if (readOnly) return `${TERMINAL_READ_ONLY_MARK} ${body}`;
+  return /^[!/]/.test(body) ? `요청: ${body}` : body;
 }
 
 /** 터미널과 작업 패널 사이 경계의 자리(왼쪽 칸이 차지하는 비율). 너무 좁아져 쓸 수 없게 되지 않도록 범위를 둔다 */

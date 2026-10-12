@@ -539,7 +539,7 @@ describe("ChatPanel 기록 모드(이슈 #689)", () => {
   ];
   const recordOf = (state: SessionView) =>
     renderToStaticMarkup(
-      <SessionAccessProvider value={{ canManage: true, isOwner: true }}>
+      <SessionAccessProvider value={{ canManage: true, canLogout: false }}>
         <ChatPanel view={state} mode="record" />
       </SessionAccessProvider>,
     );

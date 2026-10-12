@@ -33,6 +33,8 @@ export function TerminalPanel({
   const draft = useChatDraft();
   const container = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<TerminalStatus>({ state: "idle" });
+  /** 다른 패널이 넘긴 글을 붙여 넣지 않았을 때 그 까닭. 조용히 버리지 않는다 */
+  const [pasteNotice, setPasteNotice] = useState<string>();
   // "다시 열기"가 부를 함수. 터미널을 만든 효과가 채워 둔다
   const reopen = useRef<() => void>(() => {});
 
@@ -101,6 +103,8 @@ export function TerminalPanel({
       };
       reopen.current = open;
 
+      // 터미널 안에 에이전트 CLI가 떠 있는가(서버가 CLI의 세션 시작·끝 훅으로 알려 준다)
+      let cliAlive = false;
       const events = new EventSource(`/api/sessions/${sessionId}/terminal`);
       // 연결이 끊겼다 다시 붙으면 서버가 최근 출력을 처음부터 다시 준다. 겹쳐 그리지 않게 화면을 비우고 받는다
       events.onopen = () => terminal.reset();
@@ -108,7 +112,10 @@ export function TerminalPanel({
         const message = JSON.parse(event.data as string) as TerminalMessage;
         if (message.kind === "data") terminal.write(decodeTerminalData(message.data));
         else if (message.kind === "exit") setStatus({ state: "exited", code: message.code });
-        else setStatus({ state: message.state, message: message.message });
+        else if (message.kind === "cli") {
+          cliAlive = message.alive;
+          if (message.alive) setPasteNotice(undefined);
+        } else setStatus({ state: message.state, message: message.message });
       };
 
       // 패널 크기가 바뀌면 글자 칸 수를 다시 맞추고 컨테이너 쪽 터미널에도 알린다
@@ -127,9 +134,18 @@ export function TerminalPanel({
       terminal.focus();
       if (acceptDraft) {
         draft.register((text, mode) => {
-          const value = terminalPasteText(text, mode);
+          // 남이 쓴 글이 들어온다(이슈 본문, 리뷰 지적, 미리보기의 HTML). 제어 문자를 지우고, CLI가 붙여 넣기 모드를 켜 두지
+          // 않았으면(셸 프롬프트일 수 있다) 한 줄로 만든다 — 그 상태의 줄바꿈은 Enter다
+          const value = terminalPasteText(text, { readOnly: mode?.readOnly, multiline: terminal.modes.bracketedPasteMode });
           if (!value) return;
-          // paste는 CLI가 켜 둔 붙여 넣기 모드에 맞춰 보낸다. 여러 줄도 한 덩어리로 들어가고 Enter는 누르지 않는다
+          // CLI가 떠 있을 때만 붙여 넣는다. 셸 프롬프트에 붙여 넣으면 요청인 줄 알고 누른 Enter가 그 글을 명령으로 실행한다
+          if (!cliAlive) {
+            setPasteNotice("터미널에 에이전트 CLI가 떠 있지 않아 글을 붙여 넣지 않았습니다. claude를 실행한 뒤 다시 누르세요");
+            terminal.focus();
+            return;
+          }
+          setPasteNotice(undefined);
+          // 붙여 넣기만 하고 Enter는 누르지 않는다. 사람이 보고 고친 뒤 직접 보낸다
           terminal.paste(value);
           terminal.focus();
         });
@@ -164,6 +180,11 @@ export function TerminalPanel({
           <button type="button" onClick={() => reopen.current()} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
             다시 열기
           </button>
+        )}
+        {pasteNotice && (
+          <p role="alert" className="text-xs text-wait">
+            {pasteNotice}
+          </p>
         )}
         {/* 안내는 접어 둔다. 터미널의 글자 칸을 아끼고, 처음 쓰는 사람은 펼쳐 읽는다 */}
         <details className="group ml-auto text-xs text-muted">

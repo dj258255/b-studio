@@ -24,7 +24,7 @@ function view(events: StudioEvent[] = [], over: Partial<SessionSnapshot> = {}): 
 
 const render = (state: SessionView, { open = false, canManage = true } = {}) =>
   renderToStaticMarkup(
-    <SessionAccessProvider value={{ canManage, isOwner: canManage }}>
+    <SessionAccessProvider value={{ canManage, canLogout: false }}>
       <ActivityStrip view={state} open={open} onToggle={() => {}} onUseChat={() => {}} />
     </SessionAccessProvider>,
   );

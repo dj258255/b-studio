@@ -263,6 +263,7 @@ import {
 } from '@b-studio/sandbox';
 import { dependentsOf, loadProject, figmaFileKey, SpecError, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
+import { isReadOnlyPrompt, TERMINAL_READ_ONLY_MARK } from '@/lib/terminal';
 import {
   buildSubmissionChecklist,
   matchAcceptanceAgainstDocs,
@@ -312,7 +313,7 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
-import { disposeSessionTerminal, interruptSessionTerminal } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { AGENT_READ_TOOLS, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
@@ -7162,6 +7163,12 @@ interface TerminalVerification {
 interface TerminalRunState {
   /** 체크포인트 제목의 바탕이 되는 첫 요청 */
   request: string;
+  /**
+   * 읽기만 요청이다(요청 글이 TERMINAL_READ_ONLY_MARK로 시작한다). 이 실행에서는 파일을 바꿀 수 있는 도구를 모두 거절한다.
+   * 대화 창의 "읽기만"은 읽기 전용 도구만 주는 강제였다. 터미널에서도 문장으로 부탁하지 않고 훅으로 막는다(이슈 #689).
+   * 같은 실행에 이어 온 요청이 있으면 가장 최근 요청을 따른다
+   */
+  readOnly: boolean;
   startedMs: number;
   /** 샌드박스 켜기와 변경 전 기준. 파일을 바꿀 수 있는 첫 도구나 턴의 끝에서 한 번 만든다(질문만 하는 턴은 샌드박스를 켜지 않는다) */
   verification?: Promise<TerminalVerification>;
@@ -7224,7 +7231,7 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   if (opened) return opened;
   const busy = terminalBusy(session);
   if (busy) return { busy };
-  const terminal: TerminalRunState = { request, startedMs: performance.now(), unsettledAttempts: 0, serial: serialQueue(), checking: false, settled: false };
+  const terminal: TerminalRunState = { request, readOnly: isReadOnlyPrompt(request), startedMs: performance.now(), unsettledAttempts: 0, serial: serialQueue(), checking: false, settled: false };
   const run: ActiveRun & { terminal: TerminalRunState } = {
     id: randomUUID().slice(0, 8),
     startedAt: new Date().toISOString(),
@@ -7428,7 +7435,9 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
-    return {};
+    // 읽기만인지는 가장 최근 요청을 따른다
+    opened.terminal.readOnly = isReadOnlyPrompt(prompt);
+    return opened.terminal.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
   }
   const busy = terminalBusy(session);
   if (busy) return { blocked: busy };
@@ -7438,8 +7447,14 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if ('busy' in run) return { blocked: run.busy };
   // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
   const notes = session.terminalNotes?.splice(0) ?? [];
+  if (run.terminal.readOnly) notes.push(TERMINAL_READ_ONLY_NOTE);
   return notes.length > 0 ? { note: notes.join('\n') } : {};
 }
+
+/** 읽기만 요청에서 에이전트에게 덧붙이는 말. 도구가 거절되는 까닭을 미리 알려 헛돌지 않게 한다 */
+const TERMINAL_READ_ONLY_NOTE = '[b-studio] 이 요청은 읽기만입니다. 파일을 바꾸거나 명령을 돌리는 도구(Write·Edit·Bash·b-studio 도구)는 거절됩니다. Read·Glob·Grep으로 읽고 답만 하세요.';
+/** 읽기만 실행에서 쓰기 도구를 거절하는 말 */
+const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 "${TERMINAL_READ_ONLY_MARK}" 없이 다시 요청하세요.`;
 
 /** 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅) */
 async function terminalToolStarting(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
@@ -7449,6 +7464,8 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   if ((AGENT_READ_TOOLS as readonly string[]).includes(tool)) return {};
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { deny: run.busy };
+  // 읽기만 요청: 읽기 도구가 아닌 것은 모두 거절한다(샌드박스도 켜지 않는다)
+  if (run.terminal.readOnly) return { deny: TERMINAL_READ_ONLY_DENY };
   // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
@@ -7478,6 +7495,8 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   if (!gatewayToolSpecs(session.project).some((spec) => spec.name === name)) return { ok: false, content: `[b-studio] ${name}: 터미널에 내주지 않는 도구입니다` };
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { ok: false, content: run.busy };
+  // 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행에서는 돌리지 않는다
+  if (run.terminal.readOnly) return { ok: false, content: TERMINAL_READ_ONLY_DENY };
   let verification: TerminalVerification;
   try {
     verification = await untilAborted(AbortSignal.any([session.stop.signal, run.cancel.signal]), terminalVerification(session, run));
@@ -7638,11 +7657,19 @@ async function terminalCliEnded(id: string): Promise<void> {
 /** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */
 function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
   return {
-    note: async () => terminalGatewayNote(terminalSession(id).project),
+    // 세션 시작 훅이 이 안내를 받아 간다. CLI가 떴다는 뜻이기도 하다 — 화면은 그때부터 다른 패널의 글을 터미널에 붙여 넣는다
+    note: async () => {
+      const note = terminalGatewayNote(terminalSession(id).project);
+      noteSessionTerminalCli(id, true);
+      return note;
+    },
     prompt: (input) => terminalPromptSubmitted(id, input),
     preTool: (input) => terminalToolStarting(id, input),
     stop: (input) => terminalTurnEnded(id, input),
-    sessionEnd: () => terminalCliEnded(id),
+    sessionEnd: async () => {
+      noteSessionTerminalCli(id, false);
+      await terminalCliEnded(id);
+    },
     toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
     runTool: (name, args) => runTerminalTool(id, name, args),
   };
