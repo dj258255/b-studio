@@ -138,7 +138,6 @@ export const TERMINAL_PASTE_LIMIT = 8_000;
  * ESC나 붙여 넣기 끝 표시가 들어 있으면 붙여 넣기 구간을 빠져나와 Enter까지 누를 수 있다. xterm의 paste는 걸러 주지 않는다(6.0.0에서 확인).
  * 줄바꿈과 탭만 남기고 C0·DEL·C1을 지운다. 방향 제어 문자(U+202A~202E, U+2066~2069)는 사람이 보는 글과 실제 글을 다르게 만들 수 있어 함께 지운다
  */
-// eslint-disable-next-line no-control-regex
 const UNSAFE_PASTE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
 
 /**
