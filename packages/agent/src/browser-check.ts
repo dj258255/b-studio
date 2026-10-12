@@ -111,7 +111,8 @@ const NAVIGATION_TIMEOUT_MS = 30_000;
 const SETTLE_TIMEOUT_MS = 5_000;
 /** 단계를 마친 뒤: 핸들러가 요청을 내보낼 시간과, 떠 있는 요청이 없는 채로 이어져야 하는 시간 */
 const STEP_SETTLE_START_MS = 100;
-const STEP_SETTLE_QUIET_MS = 100;
+/** 브라우저의 "네트워크 잠잠"과 같은 길이(0.5초) */
+const STEP_SETTLE_QUIET_MS = 500;
 const STEP_TIMEOUT_MS = 5_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 /** screencast 전송량 상한. 프레임은 세션 기록에 남기지 않고 실시간 채널로만 보낸다 */

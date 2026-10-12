@@ -8,12 +8,16 @@ import { trackPendingRequests } from './pending-requests';
 /**
  * 떠 있는 요청을 세어 기다리는 도우미(#684). 실제 브라우저와 로컬 서버를 쓴다.
  * /slow 0.5초 뒤 응답 · /chain 응답을 받으면 이어서 /slow를 보낸다 · /never 응답하지 않는다
+ * /events 머리만 보내고 본문을 끝내지 않는 이벤트 스트림 · /slow-events 그 머리를 0.5초 뒤에 보낸다
  */
 const PAGE = `<html><body>
   <button id="slow" onclick="fetch('/slow',{method:'POST'})">늦음</button>
   <button id="chain" onclick="fetch('/quick',{method:'POST'}).then(function(){ return fetch('/slow',{method:'POST'}); })">이어짐</button>
   <button id="never" onclick="fetch('/never',{method:'POST'})">안 끝남</button>
   <button id="none" onclick="document.title='눌림'">요청 없음</button>
+  <button id="events" onclick="window.es = new EventSource('/events')">스트림</button>
+  <button id="slow-events" onclick="window.es = new EventSource('/slow-events')">늦은 스트림</button>
+  <button id="spa" onclick="fetch('/slow',{method:'POST'}); history.pushState({}, '', '/next'); location.hash = 'done'">화면 전환</button>
 </body></html>`;
 
 let server: Server;
@@ -26,6 +30,18 @@ beforeAll(async () => {
   server = createServer((request, response) => {
     const path = request.url ?? '';
     if (path === '/never') return;
+    if (path === '/events' || path === '/slow-events') {
+      // 머리를 보낸 뒤 본문을 끝내지 않는다. 늦은 쪽은 머리를 0.5초 뒤에 보낸다
+      setTimeout(
+        () => {
+          answered.push(path);
+          response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+          response.write('data: hello\n\n');
+        },
+        path === '/slow-events' ? 500 : 0,
+      );
+      return;
+    }
     if (path === '/slow') {
       setTimeout(() => {
         answered.push(path);
@@ -106,17 +122,50 @@ describe('떠 있는 요청을 세어 기다린다', { timeout: 60_000 }, () => 
     await page.close();
   });
 
-  it('문서가 바뀌면 앞 문서가 보내 둔 요청은 세지 않는다', async () => {
+  it('같은 문서 안의 이동(주소만 바뀜)은 떠 있는 요청을 버리지 않는다', async () => {
+    // 한 화면 앱의 라우팅은 문서를 바꾸지 않고 주소만 바꾼다. 그때 보낸 요청은 계속 살아 있다.
+    // 이것을 문서 이동으로 보고 지우면 응답 전에 기다림이 끝난다(화면이 주소를 바꿔 실패를 숨길 수 있다)
+    const pending = await open();
+    await page.click('#spa');
+    await page.waitForTimeout(50);
+    expect(page.url()).toBe(`${base}/next#done`);
+    expect(pending.size).toBe(1);
+    await pending.waitForIdle(idle);
+    expect(answered).toEqual(['/slow']);
+    await page.close();
+  });
+
+  it('문서가 바뀌어도 앞 문서가 보내 둔 요청을 지우지 않는다 — 가를 수 없으면 기다리는 쪽을 고른다', async () => {
     const pending = await open();
     await page.click('#never');
     await page.waitForTimeout(100);
     expect(pending.size).toBe(1);
     await page.goto(`${base}/page`, { waitUntil: 'load' });
+    // 브라우저는 앞 문서의 요청이 끝났다고 알려 주지 않는다. 같은 문서 안의 이동과 가를 신호가 없어 그대로 둔다
+    const started = Date.now();
+    await pending.waitForIdle({ ...idle, timeoutMs: 600 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(580);
+    await page.close();
+  });
+
+  it('이벤트 스트림은 응답의 머리가 오면 끝난 것으로 본다(본문은 끝나지 않는다)', async () => {
+    const pending = await open();
+    await page.click('#events');
     const started = Date.now();
     await pending.waitForIdle(idle);
-    // 앞 문서의 끝나지 않는 요청 때문에 상한(2초)까지 가지 않는다
-    expect(Date.now() - started).toBeLessThan(1_000);
+    // 상한(2초)까지 가지 않는다
+    expect(Date.now() - started).toBeLessThan(1_500);
     expect(pending.size).toBe(0);
+    await page.close();
+  });
+
+  it('이벤트 스트림도 응답의 머리가 올 때까지는 기다린다', async () => {
+    const pending = await open();
+    await page.click('#slow-events');
+    await page.waitForTimeout(100);
+    expect(pending.size).toBe(1);
+    await pending.waitForIdle(idle);
+    expect(answered).toEqual(['/slow-events']);
     await page.close();
   });
 });

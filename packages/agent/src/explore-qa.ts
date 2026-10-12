@@ -33,7 +33,8 @@ const SCROLL_SETTLE_MS = 150;
  * 떠 있는 요청을 직접 센다(pending-requests.ts) — 문서의 "네트워크 잠잠" 상태는 한 번 들면 유지돼 기다림이 되지 않는다(#684)
  */
 const SETTLE_START_MS = 100;
-const SETTLE_QUIET_MS = 100;
+/** 브라우저의 "네트워크 잠잠"과 같은 길이(0.5초). 응답을 받고 조금 뒤에 이어 보내는 요청(지연, 디바운스)까지 본다 */
+const SETTLE_QUIET_MS = 500;
 const SETTLE_NETWORK_MS = 2_000;
 /** 선언한 조작 하나가 낸 거절로 볼 수 있는 응답 수의 상한. 넘으면 그 조작의 4xx는 하나도 옮기지 않는다(화면이 깨졌을 가능성이 크다) */
 const MAX_REJECTIONS_PER_ACTION = 3;
