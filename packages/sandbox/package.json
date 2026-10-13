@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@b-studio/spec": "workspace:*",
+    "@lydell/node-pty": "1.1.0",
     "yaml": "^2.9.0"
   }
 }
