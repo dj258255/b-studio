@@ -6,7 +6,6 @@ import type { SessionSnapshot, StudioEvent } from './studio-events';
 import {
   clampSplit,
   decodeTerminalData,
-  readAgentSurface,
   readRecordOpen,
   readSplit,
   SPLIT_DEFAULT,
@@ -16,7 +15,6 @@ import {
   terminalGateStatus,
   terminalPasteText,
   terminalStatusLabel,
-  writeAgentSurface,
   writeRecordOpen,
   writeSplit,
 } from './terminal';
@@ -40,20 +38,6 @@ describe('세션 터미널 화면의 순수 함수', () => {
     return { store, storage: { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => void store.set(key, value) } };
   };
   const broken = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } };
-
-  it('일을 시키는 자리는 터미널이 기본이다. 사람이 대화 입력을 골랐을 때만 대화로 열린다(이슈 #689)', () => {
-    const { store, storage } = memory();
-    expect(readAgentSurface(storage)).toBe('terminal');
-    writeAgentSurface(storage, 'chat');
-    expect(readAgentSurface(storage)).toBe('chat');
-    writeAgentSurface(storage, 'terminal');
-    expect(readAgentSurface(storage)).toBe('terminal');
-    store.set('b-studio:agent-surface', '<script>');
-    expect(readAgentSurface(storage)).toBe('terminal');
-    expect(readAgentSurface(broken)).toBe('terminal');
-    expect(() => writeAgentSurface(broken, 'chat')).not.toThrow();
-    expect(readAgentSurface(undefined)).toBe('terminal');
-  });
 
   it('경계의 자리를 기억하되 쓸 수 없을 만큼 좁아지지 않게 범위 안으로 맞춘다', () => {
     const { store, storage } = memory();

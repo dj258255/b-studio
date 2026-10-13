@@ -25,7 +25,7 @@ function view(events: StudioEvent[] = [], over: Partial<SessionSnapshot> = {}): 
 const render = (state: SessionView, { open = false, canManage = true } = {}) =>
   renderToStaticMarkup(
     <SessionAccessProvider value={{ canManage, canLogout: false }}>
-      <ActivityStrip view={state} open={open} onToggle={() => {}} onUseChat={() => {}} />
+      <ActivityStrip view={state} open={open} onToggle={() => {}} />
     </SessionAccessProvider>,
   );
 
@@ -43,6 +43,8 @@ describe("터미널 아래의 활동 줄(이슈 #689)", () => {
     expect(html).not.toContain("체크포인트 <span");
     expect(html).toContain("기록 펼치기");
     expect(html).not.toContain("요청 취소");
+    // 대화 입력으로 되돌아가는 길은 없다. 요청은 터미널로만 보낸다
+    expect(html).not.toContain("대화 입력");
   });
 
   it("끝난 요청: 검증 상태, 단계별 통과·실패, 가장 최근 체크포인트를 보인다", () => {
