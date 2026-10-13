@@ -11,7 +11,7 @@ import { SessionAccessProvider, type SessionAccess } from "./session-access";
 import { RequirementsImportProvider, type RequirementsImport, type RequirementsImportTarget } from "./requirements-import-context";
 import { SessionHeader } from "./session-header";
 import { TerminalPanel } from "./terminal-panel";
-import { clampSplit, DEFAULT_AGENT_SURFACE, readAgentSurface, readRecordOpen, readSplit, SPLIT_DEFAULT, SPLIT_MAX, SPLIT_MIN, writeAgentSurface, writeRecordOpen, writeSplit, type AgentSurface } from "@/lib/terminal";
+import { clampSplit, readRecordOpen, readSplit, SPLIT_DEFAULT, SPLIT_MAX, SPLIT_MIN, writeRecordOpen, writeSplit } from "@/lib/terminal";
 import { ActivityStrip } from "./activity-strip";
 import { useSession } from "./use-session";
 
@@ -45,17 +45,9 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
   );
 
   // 에이전트에게 일을 시키는 자리(이슈 #689). 터미널을 쓸 수 있는 세션은 터미널이 화면의 중심이고 대화 패널은 입력창 없는
-  // 활동 기록이 된다. 사람이 "대화 입력으로 보기"를 고르면 예전의 대화 창으로 돌아간다. 고른 것은 브라우저에 기억한다.
-  // 서버가 그린 첫 화면과 어긋나지 않게 붙은 뒤에 읽는다
-  const terminalAvailable = view.snapshot.terminal === true;
-  const remembered = useSyncExternalStore<AgentSurface>(subscribeToNothing, () => readAgentSurface(window.localStorage), () => DEFAULT_AGENT_SURFACE);
-  const [chosen, setChosen] = useState<AgentSurface>();
-  const surface = chosen ?? remembered;
-  const chooseSurface = (next: AgentSurface): void => {
-    setChosen(next);
-    writeAgentSurface(window.localStorage, next);
-  };
-  const terminalFirst = terminalAvailable && surface === "terminal";
+  // 활동 기록이다. 대화 입력으로 되돌아가는 길은 두지 않는다 — 요청은 터미널로만 보낸다. 터미널을 쓸 수 없는 스튜디오
+  // (서버 모드 등)에서만 대화 창을 그린다
+  const terminalFirst = view.snapshot.terminal === true;
 
   // 미리보기에서 고른 요소를 일을 시키는 자리까지 나른다(두 패널이 형제라 여기서 들고 있는다).
   // 대화 입력창은 고른 요소를 목록으로 모았다가 요청과 함께 보낸다. 터미널에는 모아 둘 자리가 없으므로 고르는 즉시 입력 줄에 붙여 넣는다
@@ -112,7 +104,7 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
                       <div className={`grid min-h-0 ${recordOpen ? "flex-[3]" : "flex-1"}`}>
                         <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} acceptDraft />
                       </div>
-                      <ActivityStrip view={view} open={recordOpen} onToggle={toggleRecord} onUseChat={() => chooseSurface("chat")} />
+                      <ActivityStrip view={view} open={recordOpen} onToggle={toggleRecord} />
                       {recordOpen && (
                         <div className="grid min-h-0 flex-[2]">
                           <ChatPanel view={view} mode="record" />
@@ -126,15 +118,6 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
                   <div className="grid min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_27rem] lg:grid-rows-1">
                     <PreviewPanel view={view} />
                     <div className="flex min-h-0 flex-col gap-2">
-                      {terminalAvailable && (
-                        <button
-                          type="button"
-                          onClick={() => chooseSurface("terminal")}
-                          className="glass self-start rounded-control px-3 py-1.5 text-sm font-medium text-muted hover:text-ink"
-                        >
-                          터미널 중심으로 보기
-                        </button>
-                      )}
                       <div className="grid min-h-0 flex-1">
                         <ChatPanel view={view} />
                       </div>

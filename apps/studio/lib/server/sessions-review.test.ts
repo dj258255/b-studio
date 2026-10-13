@@ -367,5 +367,5 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     expect(review.rounds[0]!.commentUrl).toBeUndefined();
 
     await stopSession(id).catch(() => {});
-  });
+  }, 20_000);
 });

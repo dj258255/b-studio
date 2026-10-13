@@ -32,31 +32,6 @@ export function terminalStatusLabel(status: TerminalStatus): string {
   }
 }
 
-export type AgentSurface = 'chat' | 'terminal';
-const SURFACE_KEY = 'b-studio:agent-surface';
-
-/**
- * 일을 시키는 자리. 터미널을 쓸 수 있는 세션은 터미널이 기본이다(이슈 #689) — 사람이 "대화 입력으로 보기"를 골랐을 때만 대화다.
- * 저장소를 못 쓰는 환경에서도 터미널로 둔다(터미널을 쓸 수 없는 세션에서는 이 값을 보지 않고 대화 창을 그린다)
- */
-export const DEFAULT_AGENT_SURFACE: AgentSurface = 'terminal';
-
-export function readAgentSurface(storage: Pick<Storage, 'getItem'> | undefined): AgentSurface {
-  try {
-    return storage?.getItem(SURFACE_KEY) === 'chat' ? 'chat' : DEFAULT_AGENT_SURFACE;
-  } catch {
-    return DEFAULT_AGENT_SURFACE;
-  }
-}
-
-export function writeAgentSurface(storage: Pick<Storage, 'setItem'> | undefined, surface: AgentSurface): void {
-  try {
-    storage?.setItem(SURFACE_KEY, surface);
-  } catch {
-    // 기억하지 못해도 화면은 그대로 쓴다
-  }
-}
-
 /** 터미널에서 보낸 마지막 요청이 지금 어디까지 왔는지. 터미널 아래의 활동 줄이 한 줄로 알려 준다(자세한 것은 펼친 기록에 있다) */
 export interface TerminalGateStatus {
   tone: 'working' | 'ok' | 'fail' | 'idle';
