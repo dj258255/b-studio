@@ -97,6 +97,7 @@ vi.mock('./session-terminal', () => ({
   noteSessionTerminalCli: (_sessionId: string, alive: boolean) => {
     fake.cli.push(alive);
   },
+  sessionTerminalMode: () => 'container',
 }));
 
 import { cancelRun, createSession, getSnapshot, sendMessage, sessionHistory, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';

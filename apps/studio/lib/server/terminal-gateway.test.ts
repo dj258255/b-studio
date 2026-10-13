@@ -103,6 +103,20 @@ describe('관문 서버', () => {
     expect(seen).toHaveLength(1);
   });
 
+  it('이 컴퓨터 방식이면 루프백 호스트로 열고, host.docker.internal로 온 요청은 받지 않는다', async () => {
+    const gateway = await startTerminalGateway(handlers(), '127.0.0.1');
+    opened.push(gateway);
+    expect(gateway.address.hookUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(gateway.address.mcpUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
+
+    const url = `${gateway.address.hookUrl}/prompt`;
+    const port = new URL(url).port;
+    // 루프백 이름(127.0.0.1)으로 온 요청은 받는다
+    expect((await post(url, gateway.address.hookToken!, { prompt: '고쳐줘' }, `127.0.0.1:${port}`)).status).toBe(200);
+    // 컨테이너 방식의 이름으로 온 요청은 받지 않는다(허용 목록에 넣지 않았다)
+    expect((await post(url, gateway.address.hookToken!, {}, `host.docker.internal:${port}`)).status).toBe(403);
+  });
+
   it('b-studio 도구를 MCP로 내주고 호출을 처리에 넘긴다', async () => {
     const gateway = await startTerminalGateway(handlers());
     opened.push(gateway);

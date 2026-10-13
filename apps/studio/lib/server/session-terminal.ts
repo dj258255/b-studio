@@ -1,4 +1,20 @@
-import { clampTerminalSize, ensureAgentContainer, openAgentTerminal, probeAgentGateway, removeAgentContainer, removeAgentGatewayConfig, writeAgentGatewayConfig, type AgentGatewayAddress, type AgentTerminal, type TerminalSize } from '@b-studio/sandbox';
+import {
+  clampTerminalSize,
+  ensureAgentContainer,
+  findHostCli,
+  openAgentTerminal,
+  openHostTerminal,
+  probeAgentGateway,
+  probeHostGateway,
+  removeAgentContainer,
+  removeAgentGatewayConfig,
+  removeHostGatewayConfig,
+  writeAgentGatewayConfig,
+  writeHostGatewayConfig,
+  type AgentGatewayAddress,
+  type AgentTerminal,
+  type TerminalSize,
+} from '@b-studio/sandbox';
 import { StudioError } from './errors';
 
 /**
@@ -13,6 +29,20 @@ const REPLAY_BYTES = 512 * 1024;
 /** 한 번에 받는 입력의 상한. 붙여넣기까지는 받고, 그 이상은 잘못된 요청으로 본다 */
 export const MAX_TERMINAL_INPUT = 256 * 1024;
 const TERMINAL_ID = 'main';
+
+export type TerminalMode = 'container' | 'host';
+
+/**
+ * 터미널을 여는 방식(B_STUDIO_TERMINAL): 컨테이너 안의 CLI를 붙이거나, 이 컴퓨터의 CLI를 세션의 작업 복사본에서 띄운다.
+ * 비었거나 container면 컨테이너, host면 이 컴퓨터, 그 밖은 던진다 — sessionMode와 같은 태도다:
+ * 오타가 조용히 다른 방식으로 떨어지지 않는다
+ */
+export function sessionTerminalMode(env: Record<string, string | undefined> = process.env): TerminalMode {
+  const value = env.B_STUDIO_TERMINAL?.trim();
+  if (!value || value === 'container') return 'container';
+  if (value === 'host') return 'host';
+  throw new StudioError(500, `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${value})`);
+}
 
 export type TerminalMessage =
   | { kind: 'data'; data: string }
@@ -59,25 +89,63 @@ export interface TerminalTarget {
 
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
 export interface TerminalBackend {
-  /** gateway를 주면 그 주소를 적은 설정을 컨테이너에 붙인다 */
-  ensureContainer(target: TerminalTarget, gateway?: AgentGatewayAddress): Promise<string>;
-  open(container: string, options: { id: string; size: TerminalSize }): AgentTerminal;
-  /** 컨테이너와, 그 컨테이너에 붙였던 관문 설정을 지운다 */
-  removeContainer(sandboxId: string): Promise<void>;
-  /** 컨테이너 안에서 관문에 닿는가 */
-  reachable(container: string): Promise<boolean>;
+  /** 터미널이 붙을 자리를 준비하고 그 자리를 가리키는 값을 돌려준다(컨테이너 이름, 또는 관문 설정 폴더) */
+  prepare(target: TerminalTarget, gateway?: AgentGatewayAddress): Promise<string>;
+  open(place: string, options: { id: string; size: TerminalSize; target: TerminalTarget }): AgentTerminal | Promise<AgentTerminal>;
+  /** 준비한 것(컨테이너, 관문 설정)을 지운다 */
+  remove(sandboxId: string): Promise<void>;
+  /** 그 자리에서 관문에 닿는가 */
+  reachable(place: string): Promise<boolean>;
+  /** 닿지 못할 때 사용자에게 보일 글 */
+  readonly unreachable: string;
+}
+
+/** 컨테이너를 지우고, 그것이 실패해도 토큰이 든 관문 설정은 지운다 */
+export async function removeContainerAndConfig(
+  sandboxId: string,
+  removeContainer: (id: string) => Promise<void> = removeAgentContainer,
+  removeConfig: (id: string) => Promise<void> = removeAgentGatewayConfig,
+): Promise<void> {
+  try {
+    await removeContainer(sandboxId);
+  } finally {
+    // 토큰이 든 설정을 남겨 두지 않는다. 컨테이너 지우기가 실패해도 지운다
+    await removeConfig(sandboxId).catch(() => {});
+  }
 }
 
 const DOCKER_BACKEND: TerminalBackend = {
-  ensureContainer: async (target, gateway) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}) }),
-  open: (container, options) => openAgentTerminal(container, options),
-  removeContainer: async (sandboxId) => {
-    await removeAgentContainer(sandboxId);
-    // 토큰이 든 설정을 남겨 두지 않는다
-    await removeAgentGatewayConfig(sandboxId).catch(() => {});
-  },
-  reachable: (container) => probeAgentGateway(container),
+  prepare: async (target, gateway) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}) }),
+  open: (place, options) => openAgentTerminal(place, options),
+  remove: (sandboxId) => removeContainerAndConfig(sandboxId),
+  reachable: (place) => probeAgentGateway(place),
+  unreachable: '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다',
 };
+
+const HOST_BACKEND: TerminalBackend = {
+  prepare: async (target, gateway) => {
+    // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
+    const cli = await findHostCli();
+    return gateway ? writeHostGatewayConfig(target.sandboxId, gateway, cli) : '';
+  },
+  open: (place, options) => openHostTerminal({ id: options.id, size: options.size, cwd: options.target.root, gatewayDir: place || undefined }),
+  remove: (sandboxId) => removeHostGatewayConfig(sandboxId),
+  reachable: (place) => probeHostGateway(place),
+  unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다. 스튜디오를 다시 띄운 뒤 터미널을 다시 여세요',
+};
+
+/** 지금 방식에 맞는 백엔드. 부를 때 정해진다 — 스튜디오를 다른 방식으로 띄우면 그 방식으로 연다 */
+export function terminalBackend(mode: TerminalMode = sessionTerminalMode()): TerminalBackend {
+  return mode === 'host' ? HOST_BACKEND : DOCKER_BACKEND;
+}
+
+/**
+ * 앞 방식이 남긴 찌꺼기(컨테이너, 토큰이 든 관문 설정)를 지운다. 스튜디오를 다른 방식으로 다시 띄웠을 때 두 방식을 모두 치운다.
+ * 한쪽이 실패해도 다른 쪽을 부른다
+ */
+export async function removeTerminalLeftovers(sandboxId: string, backends: readonly TerminalBackend[] = [DOCKER_BACKEND, HOST_BACKEND]): Promise<void> {
+  await Promise.allSettled(backends.map((backend) => backend.remove(sandboxId)));
+}
 
 // 개발 서버의 HMR로 모듈이 다시 로드돼도 열린 터미널을 잃지 않도록 전역에 둔다
 const globalStore = globalThis as typeof globalThis & { __bStudioTerminals?: Map<string, TerminalState> };
@@ -113,14 +181,14 @@ function remember(state: TerminalState, chunk: Buffer): void {
  * 세션의 터미널을 연다. 이미 열려 있으면 크기만 맞추고 그대로 쓴다. 동시에 여러 번 불려도 컨테이너와 터미널은 하나만 만든다.
  * 컨테이너를 띄우거나 `.git` 보호를 확인하지 못하면 던지고, 그 사유를 연결된 화면에도 알린다
  */
-export async function openSessionTerminal(sessionId: string, target: TerminalTarget, size: { cols?: unknown; rows?: unknown }, backend: TerminalBackend = DOCKER_BACKEND): Promise<void> {
+export async function openSessionTerminal(sessionId: string, target: TerminalTarget, size: { cols?: unknown; rows?: unknown }, backend: TerminalBackend = terminalBackend()): Promise<void> {
   const wanted = clampTerminalSize(size);
   const state = stateFor(sessionId);
   // 세션을 다시 열어 샌드박스가 바뀌었으면 옛 터미널은 옛 컨테이너의 것이다. 터미널과 컨테이너만 정리하고,
   // 붙어 있는 화면(구독자)은 그대로 둔다 — 화면은 출력 통로를 먼저 열고 그다음에 "열기"를 보낸다
   if (state.sandboxId && state.sandboxId !== target.sandboxId) {
     closeSessionTerminal(sessionId);
-    await backend.removeContainer(state.sandboxId).catch(() => {});
+    await backend.remove(state.sandboxId).catch(() => {});
     state.chunks = [];
     state.bytes = 0;
   }
@@ -137,18 +205,18 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
       if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
       // 관문을 먼저 띄운다. 터미널 안의 CLI는 뜨자마자 훅을 부른다
       const gateway = target.gateway ? await target.gateway() : undefined;
-      const container = await backend.ensureContainer(target, gateway);
-      // 컨테이너를 띄우는 동안 세션이 멈췄으면 방금 띄운 것을 지우고 열지 않는다
+      const place = await backend.prepare(target, gateway);
+      // 자리를 준비하는 동안 세션이 멈췄으면 방금 만든 것을 지우고 열지 않는다
       if (target.alive && !target.alive()) {
-        await backend.removeContainer(target.sandboxId).catch(() => {});
+        await backend.remove(target.sandboxId).catch(() => {});
         throw new Error('세션이 멈췄습니다');
       }
-      // 컨테이너에서 관문에 닿지 못하면 열지 않는다. 관문 없이 열어 주면 그 터미널의 변경은 검증 없이 쌓이고,
+      // 관문에 닿지 못하면 열지 않는다. 관문 없이 열어 주면 그 터미널의 변경은 검증 없이 쌓이고,
       // "닿지 못하게 만들기"가 곧 검증을 끄는 방법이 된다
-      if (gateway && !(await backend.reachable(container))) {
-        throw new Error('컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다');
+      if (gateway && !(await backend.reachable(place))) {
+        throw new Error(backend.unreachable);
       }
-      const terminal = backend.open(container, { id: TERMINAL_ID, size: wanted });
+      const terminal = await backend.open(place, { id: TERMINAL_ID, size: wanted, target });
       current.terminal = terminal;
       current.size = wanted;
       current.chunks = [];
@@ -243,10 +311,10 @@ export function closeSessionTerminal(sessionId: string): void {
 }
 
 /** 세션이 멈출 때 부른다. 터미널을 닫고 컨테이너를 지운다. 열린 적이 없어도 컨테이너가 남아 있을 수 있어 지우기는 늘 한다 */
-export async function disposeSessionTerminal(sessionId: string, sandboxId: string, backend: TerminalBackend = DOCKER_BACKEND): Promise<void> {
+export async function disposeSessionTerminal(sessionId: string, sandboxId: string, backend: TerminalBackend = terminalBackend()): Promise<void> {
   // 열고 있는 중이면 끝나기를 기다린 뒤에 닫는다. 기다리지 않으면 지운 뒤에 컨테이너와 터미널이 생긴다
   await terminals.get(sessionId)?.opening?.catch(() => {});
   closeSessionTerminal(sessionId);
   terminals.delete(sessionId);
-  await backend.removeContainer(sandboxId).catch(() => {});
+  await backend.remove(sandboxId).catch(() => {});
 }

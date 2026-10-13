@@ -27,7 +27,8 @@ const execFileAsync = promisify(execFile);
  *  - 격리가 없다. CLI는 이 컴퓨터의 다른 파일에도 닿을 수 있다. 평소 터미널에서 CLI를 쓰는 것과 같은 신뢰 수준이다
  *  - 훅과 b-studio 도구는 관리 설정 자리가 아니라 실행 인자(`--settings`, `--mcp-config`)로 붙인다.
  *    인자로 준 설정은 프로젝트·사용자 설정보다 앞선다. 다만 CLI를 인자 없이 직접 띄우면 붙지 않는다 —
- *    그래서 터미널의 PATH 맨 앞에 인자를 붙여 주는 감싸개(`claude`)를 둔다
+ *    그래서 사용자의 로그인 셸 시작 파일 끝에 `claude`를 감싸개를 부르는 **함수**로 정의한다(함수는 PATH 순서와 무관하다).
+ *    터미널에서는 사용자의 셸이 그대로 열리고, 시작 파일이 PATH 앞에 진짜 `claude`를 두어도 이 함수가 이긴다
  *
  * 훅은 여기서도 판정이 아니라 통로다. 훅이 불리지 않으면 검증이 돌지 않고, 검증이 돌지 않으면 체크포인트가 생기지 않는다
  */
@@ -38,7 +39,28 @@ const SETTINGS_FILE = 'settings.json';
 const MCP_FILE = 'mcp.json';
 const WRAPPER_DIR = 'bin';
 const WRAPPER_NAME = 'claude';
+/** 셸 시작 파일을 두는 폴더와 그 안의 파일들(폴더 기준). 사용자 셸을 열 때 ZDOTDIR/--rcfile로 이 자리를 가리킨다 */
+const SHELL_DIR = 'shell';
+const ZSH_DIR = path.join(SHELL_DIR, 'zsh');
+const ZSH_START_FILES = ['.zshenv', '.zprofile', '.zshrc', '.zlogin'] as const;
+const BASH_RC_FILE = path.join(SHELL_DIR, 'bashrc');
+/** 관문 폴더 안에 만들 폴더들. 지울 때는 이 역순으로 지운다 */
+const GATEWAY_DIRS = [WRAPPER_DIR, SHELL_DIR, ZSH_DIR] as const;
+/** 관문 폴더에 쓰는 파일들(폴더 기준). hostGatewayFiles의 키와 같아야 한다 */
+const GATEWAY_FILE_NAMES = [
+  SETTINGS_FILE,
+  MCP_FILE,
+  HOOK_SCRIPT_NAME,
+  GATEWAY_FILE_NAME,
+  path.join(WRAPPER_DIR, WRAPPER_NAME),
+  ...ZSH_START_FILES.map((name) => path.join(ZSH_DIR, name)),
+  BASH_RC_FILE,
+];
 const HOST_PING_SECONDS = 5;
+/** 첫 실행의 표식. 안쪽에서 연 셸이나 CLI가 띄운 셸이 CLI를 또 띄우지 않게 export한다 */
+const SHELL_STARTED_VAR = 'BSTUDIO_TERMINAL_STARTED';
+/** CLI에서 나온 뒤 사용자에게 보이는 한 줄(셸 시작 파일·대체 명령이 함께 쓴다) */
+const SHELL_STARTED_NOTICE = '[b-studio] claude에서 나왔습니다. 다시 띄우려면 claude 를 입력하세요.';
 
 /** 셸 명령에 넣을 글을 작은따옴표로 감싼다. 경로에 빈칸이나 따옴표가 있어도 한 덩어리로 읽힌다 */
 export function shellQuote(value: string): string {
@@ -91,6 +113,79 @@ export function hostCliWrapper(dir: string, claudePath: string): string {
   ].join('\n');
 }
 
+/** 감싸개(관문 폴더 안)의 절대 경로. 셸 함수가 이것을 부른다 */
+function wrapperPath(dir: string): string {
+  return path.join(dir, WRAPPER_DIR, WRAPPER_NAME);
+}
+
+/**
+ * zsh 시작 파일 하나의 틀. ZDOTDIR을 사용자의 것으로 두고 사용자의 파일을 그대로 읽은 뒤, b-studio의 몇 줄을 더한다.
+ * 그래야 사용자 설정(플러그인·별칭·프롬프트)이 평소 터미널과 같고, 우리 파일은 ZDOTDIR을 우리 폴더로 되돌려 다음 파일도 우리가 읽는다
+ */
+function zshStartFile(name: string, extra: { before?: readonly string[]; after?: readonly string[] } = {}): string {
+  return [
+    '# b-studio가 만든 파일입니다. 사용자의 시작 파일을 그대로 읽은 뒤 b-studio의 몇 줄을 더합니다.',
+    'BSTUDIO_ZDOTDIR="$ZDOTDIR"',
+    'ZDOTDIR="${BSTUDIO_USER_ZDOTDIR:-$HOME}"',
+    ...(extra.before ?? []),
+    `[ -r "$ZDOTDIR/${name}" ] && . "$ZDOTDIR/${name}"`,
+    '# 사용자의 파일이 ZDOTDIR을 바꿨으면 그 값을 사용자의 것으로 기억한다',
+    'export BSTUDIO_USER_ZDOTDIR="$ZDOTDIR"',
+    'ZDOTDIR="$BSTUDIO_ZDOTDIR"',
+    'unset BSTUDIO_ZDOTDIR',
+    ...(extra.after ?? []),
+    '',
+  ].join('\n');
+}
+
+/** zsh의 관문 폴더에 둘 네 파일 → 내용 */
+export function hostZshFiles(dir: string): Record<(typeof ZSH_START_FILES)[number], string> {
+  const wrapper = shellQuote(wrapperPath(dir));
+  return {
+    '.zshenv': zshStartFile('.zshenv'),
+    '.zprofile': zshStartFile('.zprofile'),
+    '.zshrc': zshStartFile('.zshrc', {
+      // macOS의 /etc/zshrc가 HISTFILE을 $ZDOTDIR 아래로 잡는다. 그대로 두면 명령 기록이 관문 폴더에 쌓였다가 지워진다
+      before: ['HISTFILE="${BSTUDIO_USER_ZDOTDIR:-$HOME}/.zsh_history"'],
+      // 별칭은 함수보다 먼저 풀린다. 사용자가 `alias claude=…`를 두었으면(예전 설치 방식) 그 별칭을 지우고 함수를 정의한다.
+      // `function name { … }` 꼴은 이름 자리에서 별칭을 풀지 않는다. PATH 순서와도 무관하므로 진짜 claude를 PATH 앞에 두어도 이긴다
+      after: ['unalias claude 2>/dev/null', `function claude { ${wrapper} "$@"; }`],
+    }),
+    '.zlogin': zshStartFile('.zlogin', {
+      after: [
+        `if [[ -o interactive && -z "$${SHELL_STARTED_VAR}" ]]; then`,
+        `  export ${SHELL_STARTED_VAR}=1`,
+        '  claude',
+        `  print -r -- ${shellQuote(SHELL_STARTED_NOTICE)}`,
+        'fi',
+      ],
+    }),
+  };
+}
+
+/** bash의 관문 폴더에 둘 시작 파일 → 내용. 로그인 셸의 순서(/etc/profile, 그다음 사용자 파일 하나)를 흉내 낸다 */
+export function hostBashRc(dir: string): string {
+  const wrapper = shellQuote(wrapperPath(dir));
+  return [
+    '# b-studio가 만든 파일입니다. 로그인 셸의 순서를 흉내 낸 뒤 b-studio의 몇 줄을 더합니다.',
+    '[ -r /etc/profile ] && . /etc/profile',
+    'if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"',
+    'elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"',
+    'elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"',
+    'fi',
+    // 별칭은 함수보다 먼저 풀린다. 대화형(-i)이라 사용자의 `alias claude=…`가 있으면 그 별칭을 지우고 함수를 정의한다.
+    // `function name { … }` 꼴은 이름 자리에서 별칭을 풀지 않는다. PATH 순서와도 무관하므로 진짜 claude를 PATH 앞에 두어도 이긴다
+    'unalias claude 2>/dev/null',
+    `function claude { ${wrapper} "$@"; }`,
+    `if [ -z "$${SHELL_STARTED_VAR}" ]; then`,
+    `  export ${SHELL_STARTED_VAR}=1`,
+    '  claude',
+    `  printf '%s\\n' ${shellQuote(SHELL_STARTED_NOTICE)}`,
+    'fi',
+    '',
+  ].join('\n');
+}
+
 /** 관문 폴더에 둘 파일의 이름(폴더 기준) → 내용 */
 export function hostGatewayFiles(address: AgentGatewayAddress, dir: string, cli: HostCli): Record<string, string> {
   return {
@@ -99,6 +194,8 @@ export function hostGatewayFiles(address: AgentGatewayAddress, dir: string, cli:
     [HOOK_SCRIPT_NAME]: AGENT_HOOK_SCRIPT,
     [GATEWAY_FILE_NAME]: `${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`,
     [path.join(WRAPPER_DIR, WRAPPER_NAME)]: hostCliWrapper(dir, cli.claudePath),
+    ...Object.fromEntries(Object.entries(hostZshFiles(dir)).map(([name, content]) => [path.join(ZSH_DIR, name), content])),
+    [BASH_RC_FILE]: hostBashRc(dir),
   };
 }
 
@@ -109,9 +206,13 @@ export function hostGatewayFiles(address: AgentGatewayAddress, dir: string, cli:
 export async function writeHostGatewayConfig(sandboxId: string, address: AgentGatewayAddress, cli: HostCli, root: string = defaultAgentGatewayRoot()): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const made = gatewayDirFor(sandboxId, root);
-  await mkdir(path.join(made, WRAPPER_DIR), { recursive: true, mode: 0o700 });
+  await mkdir(made, { recursive: true, mode: 0o700 });
+  for (const name of GATEWAY_DIRS) await mkdir(path.join(made, name), { recursive: true, mode: 0o700 });
   // 훅 명령과 감싸개에 이 폴더의 경로가 들어간다. 링크를 푼 진짜 경로로 적는다
   const dir = await realpath(made);
+  // 이미 있던 폴더에는 mkdir의 mode가 적용되지 않는다. 부를 때마다 다시 조인다
+  await chmod(dir, 0o700);
+  for (const name of GATEWAY_DIRS) await chmod(path.join(dir, name), 0o700);
   for (const [name, content] of Object.entries(hostGatewayFiles(address, dir, cli))) {
     const target = path.join(dir, name);
     const executable = name.startsWith(`${WRAPPER_DIR}${path.sep}`);
@@ -121,7 +222,8 @@ export async function writeHostGatewayConfig(sandboxId: string, address: AgentGa
       await writeFile(staged, content, { mode: executable ? 0o700 : 0o600 });
       await rename(staged, target);
     }
-    if (executable) await chmod(target, 0o700);
+    // 내용이 같아 쓰지 않았어도 권한이 넓혀져 있을 수 있다(주소 파일에는 토큰이 있다). 부를 때마다 다시 조인다
+    await chmod(target, executable ? 0o700 : 0o600);
   }
   return dir;
 }
@@ -129,17 +231,18 @@ export async function writeHostGatewayConfig(sandboxId: string, address: AgentGa
 /** 세션이 멈출 때 그 세션의 관문 설정을 지운다. 이 코드가 쓴 파일만 지우고, 폴더는 비었을 때만 지운다 */
 export async function removeHostGatewayConfig(sandboxId: string, root: string = defaultAgentGatewayRoot()): Promise<void> {
   const dir = gatewayDirFor(sandboxId, root);
-  for (const name of [SETTINGS_FILE, MCP_FILE, HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, path.join(WRAPPER_DIR, WRAPPER_NAME)]) await rm(path.join(dir, name), { force: true }).catch(() => {});
-  await rmdir(path.join(dir, WRAPPER_DIR)).catch(() => {});
+  for (const name of GATEWAY_FILE_NAMES) await rm(path.join(dir, name), { force: true }).catch(() => {});
+  for (const name of [...GATEWAY_DIRS].reverse()) await rmdir(path.join(dir, name)).catch(() => {});
   await rmdir(dir).catch(() => {});
 }
 
 /** 훅이 관문에 닿는가. 터미널의 훅이 쓰는 바로 그 스크립트와 주소 파일로 묻는다 */
 export async function probeHostGateway(dir: string, nodePath: string = process.execPath): Promise<boolean> {
-  return execFileAsync(nodePath, [path.join(dir, HOOK_SCRIPT_NAME), 'ping'], { timeout: (HOST_PING_SECONDS + 10) * 1000 }).then(
-    () => true,
-    () => false,
-  );
+  return new Promise<boolean>((resolve) => {
+    // 훅 스크립트는 ping에서도 표준 입력을 다 읽는다. 열어 두면 입력을 기다리다 끝나지 않으므로 닫아 준다
+    const child = execFile(nodePath, [path.join(dir, HOOK_SCRIPT_NAME), 'ping'], { timeout: (HOST_PING_SECONDS + 10) * 1000 }, (error) => resolve(!error));
+    child.stdin?.end();
+  });
 }
 
 /**
@@ -155,17 +258,78 @@ export const HOST_TERMINAL_COMMAND = [
   'exec "${SHELL:-/bin/sh}"',
 ].join('\n');
 
-/** 터미널에 넘길 환경. 스튜디오의 설정 값(`B_STUDIO_*`, 토큰이 들어 있다)은 넘기지 않고, 감싸개를 PATH 맨 앞에 둔다 */
+/** 터미널로 그대로 넘기는 이름. 나머지(PATH의 실제 내용, 버전 관리자, 프록시 등)는 사용자의 로그인 셸이 시작 파일로 만든다 */
+const TERMINAL_ENV_NAMES = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TMPDIR', 'TZ', 'SSH_AUTH_SOCK', 'DISPLAY', 'WAYLAND_DISPLAY', '__CF_USER_TEXT_ENCODING'];
+/** 앞머리로 넘기는 이름 */
+const TERMINAL_ENV_PREFIXES = ['LC_', 'XDG_'];
+/** 터미널의 PATH. 감싸개 폴더가 있으면 그 앞에 두고, 스튜디오 프로세스의 PATH는 넘기지 않는다 */
+const TERMINAL_PATH = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+
+/** B_STUDIO_TERMINAL_ENV: 터미널에 더 넘길 환경 변수 이름. 쉼표로 구분하고, 빈 것은 건너뛰고, 틀린 이름은 던진다 */
+function extraTerminalEnvNames(env: Record<string, string | undefined>): string[] {
+  const raw = env.B_STUDIO_TERMINAL_ENV?.trim();
+  if (!raw) return [];
+  const names: string[] = [];
+  for (const piece of raw.split(',')) {
+    const name = piece.trim();
+    if (!name) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.startsWith('B_STUDIO_')) {
+      throw new SandboxError('B_STUDIO_TERMINAL_ENV에 쓸 수 없는 환경 변수 이름이 있습니다', `${name} — 영문·숫자·밑줄로 된 이름이어야 하고 B_STUDIO_로 시작할 수 없습니다`);
+    }
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * 터미널에 넘길 환경. 스튜디오 프로세스의 환경을 그대로 내려보내지 않고 **허용한 이름만** 넘긴다.
+ * 스튜디오를 에이전트 CLI 안에서 띄우면 `CLAUDECODE`·`CLAUDE_CODE_*` 표식이 터미널의 CLI까지 내려가 안쪽 세션으로 오해되고
+ * ("inherited CLAUDE_CODE_CHILD_SESSION marker"), pnpm이 끼운 PATH(`node_modules/.bin`)와 `NODE_ENV` 등도 함께 내려간다.
+ * `B_STUDIO_`만 빼는 것으로는 부족하다. 나머지는 사용자의 로그인 셸이 시작 파일로 만든다 — 평소 터미널을 열 때와 같다
+ */
 export function hostTerminalEnv(gatewayDir: string | undefined, env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const wanted = new Set([...TERMINAL_ENV_NAMES, ...extraTerminalEnvNames(env)]);
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (value === undefined || key.startsWith('B_STUDIO_')) continue;
-    result[key] = value;
+    if (value === undefined) continue;
+    if (wanted.has(key) || TERMINAL_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) result[key] = value;
   }
   result.TERM = 'xterm-256color';
   result.COLORTERM = 'truecolor';
-  if (gatewayDir) result.PATH = `${path.join(gatewayDir, WRAPPER_DIR)}${path.delimiter}${env.PATH ?? ''}`;
+  result.PATH = [...(gatewayDir ? [path.join(gatewayDir, WRAPPER_DIR)] : []), ...TERMINAL_PATH].join(path.delimiter);
   return result;
+}
+
+/** 셸 함수를 정의할 자리가 없는 셸( fish 등)의 대체 명령. 감싸개 절대 경로로 띄우고, 다시 띄울 때도 그 경로를 쓰라고 알린다 */
+function hostFallbackCommand(dir: string): string {
+  const safe = `[b-studio] 이 셸에서는 claude를 다시 띄울 때 검증이 붙지 않을 수 있습니다. '${wrapperPath(dir)}'로 띄우세요.`;
+  return [
+    // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
+    'trap : INT',
+    shellQuote(wrapperPath(dir)),
+    `printf "%s\\n" ${shellQuote(SHELL_STARTED_NOTICE)}`,
+    `printf "%s\\n" ${shellQuote(safe)}`,
+    'exec "${SHELL:-/bin/sh}"',
+  ].join('\n');
+}
+
+/**
+ * PTY로 띄울 것: 실행 파일, 인자, 추가 환경 변수.
+ * 사용자의 로그인 셸을 열고, 그 시작 파일 끝에 둔 `claude` 함수와 첫 실행으로 CLI를 붙인다(셸 함수는 PATH 순서와 무관하다).
+ * 관문 폴더가 없으면(훅 없이 여는 터미널, 테스트) 지금처럼 셸 하나로 CLI를 띄우고 끝낸다
+ */
+export function hostShellLaunch(gatewayDir: string | undefined, env: Record<string, string | undefined> = process.env): { file: string; args: string[]; env: Record<string, string> } {
+  if (!gatewayDir) return { file: '/bin/sh', args: ['-c', HOST_TERMINAL_COMMAND], env: {} };
+  const shell = path.isAbsolute(env.SHELL ?? '') ? env.SHELL! : '/bin/sh';
+  const name = path.basename(shell);
+  if (name === 'zsh') {
+    return { file: shell, args: ['-l', '-i'], env: { ZDOTDIR: path.join(gatewayDir, ZSH_DIR), BSTUDIO_USER_ZDOTDIR: env.ZDOTDIR ?? env.HOME ?? '' } };
+  }
+  if (name === 'bash') {
+    return { file: shell, args: ['--rcfile', path.join(gatewayDir, BASH_RC_FILE), '-i'], env: {} };
+  }
+  // fish 등: 셸 함수를 정의할 자리가 없다. 감싸개 절대 경로로 한 번 띄우고, 다시 띄울 때는 그 경로를 쓰라고 알린다
+  return { file: '/bin/sh', args: ['-c', hostFallbackCommand(gatewayDir)], env: {} };
 }
 
 /** node-pty가 주는 가상 터미널에서 이 모듈이 쓰는 부분 */
@@ -191,7 +355,6 @@ export async function openHostTerminal({
   size,
   cwd,
   gatewayDir,
-  command = HOST_TERMINAL_COMMAND,
   env = process.env,
   spawnPty = spawnWithNodePty,
 }: {
@@ -201,14 +364,14 @@ export async function openHostTerminal({
   cwd: string;
   /** 관문 설정을 둔 폴더(writeHostGatewayConfig). 주지 않으면 훅 없이 띄운다 */
   gatewayDir?: string;
-  command?: string;
   env?: Record<string, string | undefined>;
   spawnPty?: SpawnHostPty;
 }): Promise<AgentTerminal> {
   const { cols, rows } = clampTerminalSize(size);
+  const launch = hostShellLaunch(gatewayDir, env);
   let pty: HostPty;
   try {
-    pty = await spawnPty('/bin/sh', ['-c', command], { name: 'xterm-256color', cols, rows, cwd, env: hostTerminalEnv(gatewayDir, env) });
+    pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...launch.env } });
   } catch (error) {
     throw new SandboxError('이 컴퓨터에서 터미널을 열지 못했습니다', error instanceof Error ? error.message : String(error), { platform: true });
   }

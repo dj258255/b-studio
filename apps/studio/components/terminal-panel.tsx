@@ -18,6 +18,7 @@ export function TerminalPanel({
   ready,
   gate,
   acceptDraft = false,
+  mode = "container",
 }: {
   sessionId: string;
   ready: boolean;
@@ -28,6 +29,8 @@ export function TerminalPanel({
    * 글은 CLI의 입력 줄에 붙여 넣기만 하고 보내지 않는다. 사람이 보고 고친 뒤 직접 Enter를 누른다
    */
   acceptDraft?: boolean;
+  /** 터미널을 여는 방식. host면 이 컴퓨터의 CLI를 띄운다고 안내한다 */
+  mode?: "container" | "host";
 }) {
   const access = useSessionAccess();
   const draft = useChatDraft();
@@ -167,7 +170,7 @@ export function TerminalPanel({
     };
   }, [sessionId, ready, access.canManage, post, acceptDraft, draft]);
 
-  const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? "멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다" : terminalStatusLabel(status);
+  const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? "멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다" : terminalStatusLabel(status, mode);
   const stopped = status.state === "closed" || status.state === "exited";
 
   return (
@@ -191,8 +194,14 @@ export function TerminalPanel({
         <details className="group ml-auto text-xs text-muted">
           <summary className="cursor-pointer list-none rounded-control px-1.5 py-0.5 hover:text-ink [&::-webkit-details-marker]:hidden">안내</summary>
           <p className="absolute right-3 z-10 mt-1 w-80 rounded-panel border border-line bg-panel p-3 leading-relaxed shadow-lg">
-            이 세션의 에이전트 컨테이너 안입니다. 작업 폴더는 <code>/workspace</code>이고 이 컴퓨터의 다른 파일은 보이지 않습니다. 로그인은 프로젝트마다 한 번 합니다. 요청을 보내면 턴이 끝날 때
-            검증하고, 통과하면 체크포인트를 남깁니다. 끝내 통과하지 못하면 변경을 되돌립니다(기록에서 되살릴 수 있습니다).
+            {mode === "host" ? (
+              "이 컴퓨터에서 도는 claude입니다. 작업 폴더는 이 세션의 작업 복사본이고, 로그인과 설정은 평소 쓰던 그대로입니다. 요청을 보내면 턴이 끝날 때 검증하고, 통과하면 체크포인트를 남깁니다. 끝내 통과하지 못하면 변경을 되돌립니다(기록에서 되살릴 수 있습니다)."
+            ) : (
+              <>
+                이 세션의 에이전트 컨테이너 안입니다. 작업 폴더는 <code>/workspace</code>이고 이 컴퓨터의 다른 파일은 보이지 않습니다. 로그인은 프로젝트마다 한 번 합니다. 요청을 보내면 턴이 끝날 때
+                검증하고, 통과하면 체크포인트를 남깁니다. 끝내 통과하지 못하면 변경을 되돌립니다(기록에서 되살릴 수 있습니다).
+              </>
+            )}
           </p>
         </details>
       </div>

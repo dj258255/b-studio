@@ -6,39 +6,46 @@ import {
   interruptSessionTerminal,
   MAX_TERMINAL_INPUT,
   openSessionTerminal,
+  removeContainerAndConfig,
+  removeTerminalLeftovers,
   resizeSessionTerminal,
   noteSessionTerminalCli,
+  sessionTerminalMode,
   subscribeSessionTerminal,
   writeSessionTerminal,
   type TerminalBackend,
   type TerminalMessage,
+  type TerminalTarget,
 } from './session-terminal';
 
-/** 도커 없이 도는 가짜. 컨테이너를 띄운 횟수, 연 터미널, 쓴 입력, 지운 컨테이너를 기록한다 */
+/** 도커 없이 도는 가짜. 자리를 준비한 횟수, 연 터미널, 쓴 입력, 지운 것을 기록한다 */
 const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:41001', hookToken: 'hook-token', mcpUrl: 'http://host.docker.internal:41002/mcp', mcpToken: 'mcp-token' };
+const CONTAINER_UNREACHABLE = '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다';
 
-function fakeBackend(options: { failEnsure?: string; unreachable?: boolean } = {}) {
-  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[] };
+function fakeBackend(options: { failPrepare?: string; unreachable?: boolean } = {}) {
+  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[], targets: [] as TerminalTarget[] };
   const backend: TerminalBackend = {
-    async ensureContainer(target, gateway) {
+    async prepare(target, gateway) {
       record.ensured.push(target.sandboxId);
       record.gateways.push(gateway);
       await new Promise((resolve) => setTimeout(resolve, 5));
-      if (options.failEnsure) throw new Error(options.failEnsure);
+      if (options.failPrepare) throw new Error(options.failPrepare);
       return `${target.sandboxId}-agent`;
     },
-    open(container, { id, size }) {
-      const terminal = new FakeTerminal(container, id, size);
+    open(place, { id, size, target }) {
+      record.targets.push(target);
+      const terminal = new FakeTerminal(place, id, size);
       record.terminals.push(terminal);
       return terminal;
     },
-    async removeContainer(sandboxId) {
+    async remove(sandboxId) {
       record.removed.push(sandboxId);
     },
-    async reachable(container) {
-      record.probed.push(container);
+    async reachable(place) {
+      record.probed.push(place);
       return options.unreachable !== true;
     },
+    unreachable: CONTAINER_UNREACHABLE,
   };
   return { backend, record };
 }
@@ -222,7 +229,7 @@ describe('세션 터미널 (이슈 #673)', () => {
   });
 
   it('컨테이너를 띄우지 못하면 사유를 던지고 화면에도 알린다. 다시 열 수 있다', async () => {
-    const failing = fakeBackend({ failEnsure: '에이전트 컨테이너의 .git 보호를 확인하지 못해 컨테이너를 지웠습니다' });
+    const failing = fakeBackend({ failPrepare: '에이전트 컨테이너의 .git 보호를 확인하지 못해 컨테이너를 지웠습니다' });
     const messages: TerminalMessage[] = [];
     subscribeSessionTerminal(id, (message) => messages.push(message));
     await expect(openSessionTerminal(id, target, {}, failing.backend)).rejects.toThrow('터미널을 열지 못했습니다: 에이전트 컨테이너의 .git 보호');
@@ -239,7 +246,7 @@ describe('세션 터미널 (이슈 #673)', () => {
     const { backend, record } = fakeBackend();
     let alive = true;
     const opening = openSessionTerminal(id, { ...target, alive: () => alive }, {}, backend);
-    // ensureContainer가 도는 사이에 세션이 멈춘다
+    // prepare가 도는 사이에 세션이 멈춘다
     alive = false;
     await expect(opening).rejects.toThrow('세션이 멈췄습니다');
     expect(record.ensured).toEqual(['studio-orders-abc123']);
@@ -292,9 +299,9 @@ describe('세션 터미널 (이슈 #673)', () => {
     };
     const watched: TerminalBackend = {
       ...backend,
-      ensureContainer: async (given, config) => {
+      prepare: async (given, config) => {
         order.push('container');
-        return backend.ensureContainer(given, config);
+        return backend.prepare(given, config);
       },
       reachable: async (container) => {
         order.push('probe');
@@ -353,5 +360,79 @@ describe('세션 터미널 (이슈 #673)', () => {
     interruptSessionTerminal(id);
     expect(record.terminals[0]!.written).toEqual(['\x1b']);
     await disposeSessionTerminal(id, target.sandboxId, backend);
+  });
+
+  it('sessionTerminalMode: 없음·빈 값·container는 container, host는 host, 그 밖은 던진다', () => {
+    expect(sessionTerminalMode({})).toBe('container');
+    expect(sessionTerminalMode({ B_STUDIO_TERMINAL: '' })).toBe('container');
+    expect(sessionTerminalMode({ B_STUDIO_TERMINAL: 'container' })).toBe('container');
+    expect(sessionTerminalMode({ B_STUDIO_TERMINAL: 'host' })).toBe('host');
+    expect(() => sessionTerminalMode({ B_STUDIO_TERMINAL: 'hosts' })).toThrow('B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다');
+  });
+
+  it('관문에 닿지 못하면 그 백엔드의 안내 글을 그대로 보인다(방식마다 다르다)', async () => {
+    const { backend } = fakeBackend({ unreachable: true });
+    const host: TerminalBackend = { ...backend, unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다' };
+    const messages: TerminalMessage[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await expect(openSessionTerminal(id, { ...target, gateway: async () => address }, {}, host)).rejects.toThrow('이 컴퓨터에서 b-studio의 관문에 닿지 못합니다');
+    expect(messages.at(-1)).toMatchObject({ kind: 'status', state: 'closed', message: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다' });
+  });
+
+  it('open이 Promise를 돌려줘도 열리고, open에 target이 그대로 넘어온다', async () => {
+    const { backend, record } = fakeBackend();
+    const promiseOpen: TerminalBackend = { ...backend, open: (place, options) => Promise.resolve(backend.open(place, options)) };
+    await openSessionTerminal(id, target, {}, promiseOpen);
+    expect(record.terminals).toHaveLength(1);
+    expect(record.targets).toEqual([target]);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+  });
+
+  it('찌꺼기 정리는 한쪽이 던져도 다른 쪽을 부른다', async () => {
+    const calls: string[] = [];
+    const make = (name: string, fail: boolean): TerminalBackend => ({
+      async prepare() {
+        return name;
+      },
+      open() {
+        throw new Error('이 테스트는 터미널을 열지 않는다');
+      },
+      async remove() {
+        calls.push(name);
+        if (fail) throw new Error(`${name} 실패`);
+      },
+      async reachable() {
+        return true;
+      },
+      unreachable: '',
+    });
+    await removeTerminalLeftovers('studio-orders-abc123', [make('docker', true), make('host', false)]);
+    expect(calls).toEqual(['docker', 'host']);
+  });
+
+  it('컨테이너 지우기가 실패해도 토큰이 든 설정은 지우고, 그 실패는 그대로 나온다', async () => {
+    const calls: string[] = [];
+    const removeContainer = async (id: string) => {
+      calls.push(`container:${id}`);
+      throw new Error('도커에 닿지 못했습니다');
+    };
+    const removeConfig = async (id: string) => {
+      calls.push(`config:${id}`);
+    };
+    await expect(removeContainerAndConfig('studio-orders-abc123', removeContainer, removeConfig)).rejects.toThrow('도커에 닿지 못했습니다');
+    expect(calls).toEqual(['container:studio-orders-abc123', 'config:studio-orders-abc123']);
+  });
+
+  it('설정 지우기가 실패해도 컨테이너 지우기가 성공했으면 던지지 않는다', async () => {
+    const calls: string[] = [];
+    const removeContainer = async (id: string) => {
+      calls.push(`container:${id}`);
+    };
+    const removeConfig = async (id: string) => {
+      calls.push(`config:${id}`);
+      throw new Error('설정을 지우지 못했습니다');
+    };
+    await expect(removeContainerAndConfig('studio-orders-abc123', removeContainer, removeConfig)).resolves.toBeUndefined();
+    expect(calls).toEqual(['container:studio-orders-abc123', 'config:studio-orders-abc123']);
   });
 });

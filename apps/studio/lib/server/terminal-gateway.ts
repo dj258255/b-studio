@@ -1,5 +1,6 @@
 import { startHookServer, startToolServer, type HookInput, type HookServer, type ToolOutcome, type ToolServer, type ToolServerOptions } from '@b-studio/agent';
-import { AGENT_GATEWAY_HOST, type AgentGatewayAddress, type AgentHookEvent } from '@b-studio/sandbox';
+import { AGENT_GATEWAY_HOST, HOST_GATEWAY_HOST, type AgentGatewayAddress, type AgentHookEvent } from '@b-studio/sandbox';
+import { sessionTerminalMode } from './session-terminal';
 
 /**
  * 세션 터미널의 관문(이슈 #673 2단계): 컨테이너 안의 CLI가 부르는 서버 둘을 세션마다 띄운다.
@@ -69,8 +70,11 @@ export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/
   };
 }
 
-export async function startTerminalGateway(handlers: TerminalGatewayHandlers): Promise<TerminalGateway> {
-  const allowedHosts = [AGENT_GATEWAY_HOST];
+export async function startTerminalGateway(handlers: TerminalGatewayHandlers, host?: string): Promise<TerminalGateway> {
+  // 컨테이너 방식의 CLI는 호스트를 host.docker.internal로 부른다. 이 컴퓨터 방식의 CLI는 같은 컴퓨터라 루프백으로 부른다
+  const gatewayHost = host ?? (sessionTerminalMode() === 'host' ? HOST_GATEWAY_HOST : AGENT_GATEWAY_HOST);
+  // 컨테이너 방식은 그 이름을 더 받고, 이 컴퓨터 방식은 루프백 이름만 받는다(다른 이름으로 온 요청은 거부)
+  const allowedHosts = gatewayHost === AGENT_GATEWAY_HOST ? [AGENT_GATEWAY_HOST] : [];
   let hook: HookServer | undefined;
   let tools: ToolServer | undefined;
   try {
@@ -83,9 +87,9 @@ export async function startTerminalGateway(handlers: TerminalGatewayHandlers): P
   const servers = [hook, tools];
   return {
     address: {
-      hookUrl: `http://${AGENT_GATEWAY_HOST}:${hook.port}`,
+      hookUrl: `http://${gatewayHost}:${hook.port}`,
       hookToken: hook.token,
-      mcpUrl: `http://${AGENT_GATEWAY_HOST}:${tools.port}/mcp`,
+      mcpUrl: `http://${gatewayHost}:${tools.port}/mcp`,
       mcpToken: tools.token,
     },
     async close() {

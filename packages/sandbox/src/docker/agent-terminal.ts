@@ -209,7 +209,9 @@ export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string):
   return {
     // b-studio 도구는 서비스 컨테이너 안에서 돌고 b-studio의 실행 정책을 거친다. 호출마다 묻지 않게 한다
     permissions: { allow: [`mcp__${MCP_SERVER}`] },
-    // 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)에서 훅을 통째로 끄지 못하게 여기서 값을 정해 둔다
+    // 훅을 통째로 끄지 못하게 여기서 값을 정해 둔다. 컨테이너에서는 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)이,
+    // 이 컴퓨터에서는 작업 복사본의 프로젝트 설정(.claude/settings.json)이 에이전트가 쓸 수 있는 자리다.
+    // 값을 주지 않은 실행 인자 설정은 프로젝트 설정의 disableAllHooks: true에 진다(CLI 2.1.296에서 실측, 트러블슈팅 145)
     disableAllHooks: false,
     hooks: {
       SessionStart: [{ hooks: [hook('session-start')] }],

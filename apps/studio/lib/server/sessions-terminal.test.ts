@@ -53,6 +53,7 @@ vi.mock('./session-terminal', () => ({
     fake.disposed.push([sessionId, sandboxId]);
   },
   noteSessionTerminalCli: () => {},
+  sessionTerminalMode: () => 'container',
 }));
 
 import { createSession, getSnapshot, sessionTerminalAllowed, sessionTerminalTarget, stopSession } from './sessions';

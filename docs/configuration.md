@@ -300,6 +300,22 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - 터미널의 한글은 고정 폭 한글 글꼴(D2Coding 등)이 깔려 있으면 그것으로 그립니다. 없으면 글자 사이가 조금 벌어져 보일 수 있습니다.
 - 로그인을 지우려면 `docker volume rm b-studio-agent-home-<프로젝트 id>`.
 
+### 이 컴퓨터의 CLI로 열기 (`B_STUDIO_TERMINAL=host`)
+
+기본은 위의 컨테이너 방식입니다. 이 컴퓨터에 깔린 `claude`를 그대로 쓰려면 이렇게 띄웁니다(ADR-173).
+
+```bash
+B_STUDIO_EXPERIMENTAL=1 B_STUDIO_TERMINAL=host pnpm studio launch
+```
+
+- 터미널은 **평소 쓰는 로그인 셸**(zsh, bash)로 열리고, 세션의 작업 복사본에서 `claude`가 한 번 뜹니다. 로그인·설정·플러그인은 이 컴퓨터의 것 그대로입니다. 에이전트 컨테이너는 뜨지 않습니다.
+- 훅과 b-studio 도구는 `claude`를 부를 때 실행 인자로 붙습니다. 그 터미널 안에서는 `claude`가 인자를 붙여 주는 셸 함수라서, CLI에서 나왔다가 다시 띄워도 검증이 붙습니다. `~/.claude`는 건드리지 않습니다.
+- zsh·bash가 아닌 셸에서는 처음 띄울 때만 확실히 붙습니다. 다시 띄울 때는 터미널에 찍히는 경로로 띄우세요.
+- 터미널의 환경에는 정해 둔 이름(`HOME`, `SHELL`, 로캘, `SSH_AUTH_SOCK` 등)만 넘기고, 나머지는 셸의 시작 파일이 평소처럼 만듭니다. 스튜디오를 띄운 환경에만 있는 값을 넘기려면 `B_STUDIO_TERMINAL_ENV`에 이름을 쉼표로 적습니다(예: `HTTPS_PROXY,AWS_PROFILE`).
+- `claude`가 PATH에 없으면 `B_STUDIO_CLAUDE_BIN`에 절대 경로를 적습니다.
+- **격리가 없습니다.** CLI는 이 컴퓨터의 다른 파일에도 닿습니다. 평소 터미널에서 CLI를 쓰는 것과 같은 신뢰 수준입니다. 작업 복사본의 `.git`도 읽기 전용이 아닙니다(CLI에는 커밋하지 말라고 알립니다. 체크포인트는 b-studio가 남깁니다).
+- 관문 설정 파일은 같은 사용자의 것이라 에이전트가 고칠 수 있습니다. 변조를 감지하는 장치는 아직 없어서 기본값이 아닙니다.
+
 ## 관문 방식 (`B_STUDIO_GATEWAY`, 실험)
 
 에이전트를 러너로 돌리는 대신 `claude` CLI를 세션 작업 복사본에서 그대로 띄우고, b-studio는 도구(MCP)와 검증 게이트(멈춤 훅)만 붙이는 경로입니다(ADR-168, [실험 17](experiments/2026-10-11-e17-gateway-runner.md)). **기본은 꺼져 있고, 믿는 요청으로만 쓰세요.**
