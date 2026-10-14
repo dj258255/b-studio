@@ -198,6 +198,7 @@ export {
   CheckpointError,
   StagedMismatchError,
   CheckpointStore,
+  GIT_HARDENING,
   redactCredentials,
   RemoteConflictError,
   type BaseStatus,

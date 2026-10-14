@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -100,7 +100,7 @@ vi.mock('./session-terminal', () => ({
   sessionTerminalMode: () => 'container',
 }));
 
-import { cancelRun, createSession, getSnapshot, sendMessage, sessionHistory, sessionTerminalTarget, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL };
 
@@ -1148,6 +1148,168 @@ describe('읽기만 실행은 사람이 미리 고쳐 둔 파일로 오탐하지
     const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
     expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌어 되돌렸습니다');
     expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('작업 복사본의 Git을 믿지 않는다 (이슈 #699)', () => {
+  const headOf = async (session: Opened) => (await git(session, 'rev-parse', 'HEAD')).trim();
+  /** 기억한 Git 상태(작업 복사본 밖)의 마지막 체크포인트가 지금 HEAD와 같은지 본다 */
+  const expectMemoryIsHead = async (session: Opened) => {
+    expect(rememberedGitForTest(session.id)!.lastCheckpoint).toBe(await headOf(session));
+  };
+  /** 이 세션 기록에 이 종류의 이벤트가 count개 올 때까지 기다린다 */
+  async function waitForEvent(session: Opened, type: StudioEvent['type'], count: number): Promise<void> {
+    const started = Date.now();
+    while (session.events.filter((event) => event.type === type).length < count) {
+      if (Date.now() - started > 10_000) throw new Error(`${type} 이벤트가 오지 않았습니다`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it('세션 생성·체크포인트·되돌리기·버리기 뒤에 기억한 마지막 체크포인트가 실제 HEAD와 같다', async () => {
+    const session = await open();
+    // 세션 생성: 시작 체크포인트가 HEAD이고 브랜치는 main이다(원격이 없어 기억한 주소는 없다)
+    expect(rememberedGitForTest(session.id)).toEqual({ branch: 'main', lastCheckpoint: await headOf(session) });
+
+    // 체크포인트를 남기면 기억도 지금 HEAD로 갱신된다
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    await expectMemoryIsHead(session);
+
+    // 실패로 되돌리기(discard) 뒤에도 기억이 실제 HEAD와 같다
+    await session.gateway.prompt({ prompt: '메모에 note도 넣어줘' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    fake.failCommands = ['test'];
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    await session.gateway.stop({ last_assistant_message: '못 고치겠습니다.' });
+    await expectMemoryIsHead(session);
+
+    // 되돌리기(restoreCheckpoint)로 시작 체크포인트로 가면 기억도 그 HEAD로 맞춰진다
+    fake.failCommands = [];
+    const start = getSnapshot(session.id)!.checkpoints.at(-1)!;
+    restoreCheckpoint(session.id, start.sha);
+    await waitForEvent(session, 'restored', 1);
+    expect(await headOf(session)).toBe(start.sha);
+    await expectMemoryIsHead(session);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('에이전트가 직접 만든 커밋은 턴 끝에 풀어 검증에 넣는다 — 기록에 남지 않는다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    const remembered = rememberedGitForTest(session.id)!;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    // 에이전트가 습관적으로 직접 커밋한다(두 번)
+    await git(session, 'add', '-A');
+    await git(session, 'commit', '-q', '-m', 'agent commit 1');
+    await edit(session, 'api/src/Extra.java', 'class Extra {}\n');
+    await git(session, 'add', '-A');
+    await git(session, 'commit', '-q', '-m', 'agent commit 2');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message).toContain('검증 통과');
+    const snapshot = getSnapshot(session.id)!;
+    // 기억한 체크포인트 위에 b-studio의 체크포인트 하나만 있다(에이전트의 커밋은 풀려 기록에 남지 않는다)
+    expect(snapshot.checkpoints).toHaveLength(before + 1);
+    const subjects = (await git(session, 'log', '--format=%s', `${remembered.lastCheckpoint}..HEAD`)).trim().split('\n');
+    expect(subjects).toHaveLength(1);
+    expect(subjects.join(' ')).not.toContain('agent commit');
+    await expectMemoryIsHead(session);
+    // 다음 요청에 "풀었다"는 안내가 붙고, 커밋하지 말라고 알린다
+    const next = await session.gateway.prompt({ prompt: '고마워' });
+    expect(next.note).toContain('커밋');
+    await session.gateway.stop({ last_assistant_message: '네' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('에이전트가 브랜치를 바꿔 커밋하면(풀 수 없는 모양) 되돌리고 실행을 실패로 닫는다(보관본이 남는다)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    const remembered = rememberedGitForTest(session.id)!;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await git(session, 'checkout', '-q', '-b', 'agent-branch');
+    await git(session, 'add', '-A');
+    await git(session, 'commit', '-q', '-m', 'agent on other branch');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message).toContain('되돌렸습니다');
+    const snapshot = getSnapshot(session.id)!;
+    expect(snapshot.checkpoints).toHaveLength(before);
+    expect(snapshot.running).toBe(false);
+    expect(session.ofType('run_finished')[0]!).toMatchObject({ status: 'failed' });
+    // 세션 브랜치로 돌아와 기억한 체크포인트에 있다
+    expect((await git(session, 'symbolic-ref', '--short', 'HEAD')).trim()).toBe(remembered.branch);
+    expect(await headOf(session)).toBe(remembered.lastCheckpoint);
+    await expectMemoryIsHead(session);
+    // 에이전트의 변경은 보관본으로 남았다(되살릴 수 있다)
+    const backupDir = path.join(session.work, '.git/b-studio/discarded');
+    const ids = await readdir(backupDir);
+    expect(ids.length).toBeGreaterThan(0);
+    const meta = JSON.parse(await readFile(path.join(backupDir, ids[0]!, 'meta.json'), 'utf8')) as { files: string[] };
+    expect(meta.files).toContain('api/src/Order.java');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('에이전트가 기록을 되감으면(reset --hard) 되돌리고 복구한다', async () => {
+    const session = await open();
+    // 체크포인트를 하나 만들어 되감을 여지를 만든다
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    const remembered = rememberedGitForTest(session.id)!;
+
+    await session.gateway.prompt({ prompt: 'note도 넣어줘' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    // 에이전트가 직전 체크포인트를 되감는다(기억한 체크포인트가 HEAD의 조상이 아니다)
+    await git(session, 'reset', '--hard', 'HEAD~1');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message).toContain('되돌렸습니다');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished').at(-1)!).toMatchObject({ status: 'failed' });
+    expect(await headOf(session)).toBe(remembered.lastCheckpoint);
+    await expectMemoryIsHead(session);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('읽기만 실행 도중 훅을 우회해 커밋이 생기면 되돌리고 실패로 닫는다(읽기만은 Git도 바꾸지 않는다)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    const remembered = rememberedGitForTest(session.id)!;
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    // 훅을 우회해 파일을 바꾸고 커밋한다(읽기만에서는 있을 수 없는 일)
+    await edit(session, 'api/src/Order.java', 'class Order { String hacked; }\n');
+    await git(session, 'add', '-A');
+    await git(session, 'commit', '-q', '-m', 'readonly bypass commit');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
+    expect(answer.message).toContain('되돌렸습니다');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished').at(-1)!).toMatchObject({ status: 'failed' });
+    // 기억한 체크포인트로 되돌아왔고 파일도 원래대로다
+    expect(await headOf(session)).toBe(remembered.lastCheckpoint);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('기억이 없으면(확인하지 못했으면) 턴 끝 검사가 통과로 두지 않고 실패로 닫는다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setGitMemoryForTest(session.id, undefined);
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message).toContain('기억하지 못해');
+    // 게이트를 돌리지 않았고 체크포인트도 만들지 않았다
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished').at(-1)!).toMatchObject({ status: 'failed' });
     await stopSession(session.id);
   }, 30_000);
 });
