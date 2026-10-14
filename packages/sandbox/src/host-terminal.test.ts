@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,13 +8,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { AGENT_HOOK_SCRIPT, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
 import { SandboxError } from './errors';
 import {
+  checkHostGatewayConfig,
+  expectedHostGatewayFiles,
   findHostCli,
+  findUnhookedCli,
   hostBashRc,
   hostGatewaySettings,
   hostShellLaunch,
   hostTerminalEnv,
   hostZshFiles,
   HOST_TERMINAL_COMMAND,
+  listProcesses,
   openHostTerminal,
   probeHostGateway,
   removeHostGatewayConfig,
@@ -298,7 +302,7 @@ describe('openHostTerminal', () => {
     const sizes: Array<[number, number]> = [];
     const signals: Array<string | undefined> = [];
     const spawns: Array<{ file: string; args: string[]; options: { cwd: string; env: Record<string, string>; cols: number; rows: number } }> = [];
-    const pty: HostPty = { write: (data) => writes.push(data), resize: (cols, rows) => sizes.push([cols, rows]), kill: (signal) => signals.push(signal), onData: () => {}, onExit: () => {} };
+    const pty: HostPty = { pid: 4321, write: (data) => writes.push(data), resize: (cols, rows) => sizes.push([cols, rows]), kill: (signal) => signals.push(signal), onData: () => {}, onExit: () => {} };
     const spawnPty = (file: string, args: string[], options: { cwd: string; env: Record<string, string>; cols: number; rows: number }) => {
       spawns.push({ file, args, options });
       return pty;
@@ -332,7 +336,7 @@ describe('openHostTerminal', () => {
   it('터미널이 끝나면(exit) 그 뒤의 입력을 무시한다', async () => {
     const writes: string[] = [];
     let exit: ((event: { exitCode: number; signal?: number }) => void) | undefined;
-    const pty: HostPty = { write: (data) => writes.push(data), resize: () => {}, kill: () => {}, onData: () => {}, onExit: (listener) => void (exit = listener) };
+    const pty: HostPty = { pid: 1, write: (data) => writes.push(data), resize: () => {}, kill: () => {}, onData: () => {}, onExit: (listener) => void (exit = listener) };
     const terminal = await openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/work', spawnPty: () => pty });
 
     const seen: Array<number | null> = [];
@@ -426,5 +430,145 @@ describe('probeHostGateway', () => {
 
     await new Promise<void>((resolve) => server.close(() => resolve()));
     expect(await probeHostGateway(dir)).toBe(false);
+  });
+});
+
+describe('expectedHostGatewayFiles / checkHostGatewayConfig', () => {
+  it('갓 쓴 폴더는 통과하고, 내용·권한·링크·폴더가 바뀌면 그 이름을 돌려준다', async () => {
+    const root = await tempDir('b-studio-host-check-');
+    const dir = await writeHostGatewayConfig('studio-orders-abc', address, cli, root);
+    const expected = expectedHostGatewayFiles(address, dir, cli);
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual([]);
+
+    // 내용이 바뀌면 그 파일 이름
+    await writeFile(path.join(dir, 'settings.json'), '{}\n');
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual(['settings.json']);
+    await writeHostGatewayConfig('studio-orders-abc', address, cli, root);
+
+    // 없어지면 그 파일 이름
+    await rm(path.join(dir, 'mcp.json'));
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual(['mcp.json']);
+    await writeHostGatewayConfig('studio-orders-abc', address, cli, root);
+
+    // 권한이 넓어지면 그 파일 이름(주소 파일에는 토큰이 있다)
+    await chmod(path.join(dir, 'settings.json'), 0o644);
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual(['settings.json']);
+    await writeHostGatewayConfig('studio-orders-abc', address, cli, root);
+
+    // 기대하는 파일 자리가 다른 곳을 가리키는 심볼릭 링크가 되면 그 파일 이름
+    const elsewhere = path.join(root, 'elsewhere.json');
+    await writeFile(elsewhere, expected['settings.json']!.content);
+    await rm(path.join(dir, 'settings.json'));
+    await symlink(elsewhere, path.join(dir, 'settings.json'));
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual(['settings.json']);
+    await writeHostGatewayConfig('studio-orders-abc', address, cli, root);
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual([]);
+
+    // 기대하지 않은 파일이 생긴 것은 위반으로 보지 않는다
+    await writeFile(path.join(dir, 'extra.txt'), '남겨 둘 것');
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual([]);
+
+    // 폴더 권한이 넓어지면 그 폴더 이름(관문 폴더 자체는 '.')
+    await chmod(path.join(dir, 'bin'), 0o755);
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual(['bin']);
+    await chmod(dir, 0o755);
+    expect((await checkHostGatewayConfig(dir, expected)).sort()).toEqual(['.', 'bin']);
+  });
+});
+
+describe('findUnhookedCli', () => {
+  const settingsPath = '/Users/kim/.cache/b-studio/agent-gateway/studio-orders-abc/settings.json';
+  const cliPath = '/Users/kim/.local/bin/claude';
+
+  it('PTY 아래에서 우리 설정이 붙은 claude는 통과하고, 붙지 않은 것은 걸린다', () => {
+    const processes = [
+      { pid: 1, ppid: 0, args: '/sbin/launchd' },
+      { pid: 100, ppid: 1, args: '/bin/zsh -l -i' },
+      { pid: 101, ppid: 100, args: `${cliPath} --settings ${settingsPath} --mcp-config /x/mcp.json` },
+      { pid: 102, ppid: 100, args: `${cliPath} --resume` },
+      { pid: 103, ppid: 100, args: 'node /Users/kim/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js' },
+      // 감싸개(셸 스크립트)가 exec로 진짜 CLI가 되기 전 잠깐 보이는 모습. 첫 낱말이 /bin/sh라 CLI로 보지 않는다
+      { pid: 104, ppid: 100, args: `/bin/sh /Users/kim/.cache/b-studio/agent-gateway/studio-orders-abc/bin/claude --settings x` },
+      // PTY 밖(다른 부모)의 인자 없는 claude는 무시한다
+      { pid: 999, ppid: 1, args: cliPath },
+    ];
+    expect(
+      findUnhookedCli(100, processes, { settingsPath, cliPath }).map((entry) => entry.pid),
+    ).toEqual([102, 103]);
+  });
+
+  it('손자 프로세스(셸 → 셸 → claude)도 찾는다', () => {
+    const processes = [
+      { pid: 100, ppid: 1, args: '/bin/zsh' },
+      { pid: 110, ppid: 100, args: '/bin/bash' },
+      { pid: 111, ppid: 110, args: cliPath },
+    ];
+    expect(findUnhookedCli(100, processes, { settingsPath, cliPath }).map((entry) => entry.pid)).toEqual([111]);
+  });
+
+  it('관문 경로에 빈칸이 있어도 붙은 것과 붙지 않은 것을 맞게 가른다', () => {
+    const spaced = '/Users/kim/My Folder/.cache/b-studio/agent-gateway/studio-orders-abc/settings.json';
+    const processes = [
+      { pid: 100, ppid: 1, args: '/bin/zsh' },
+      { pid: 101, ppid: 100, args: `${cliPath} --settings ${spaced} --mcp-config /x` },
+      { pid: 102, ppid: 100, args: `${cliPath} --resume` },
+    ];
+    expect(findUnhookedCli(100, processes, { settingsPath: spaced, cliPath }).map((entry) => entry.pid)).toEqual([102]);
+  });
+});
+
+describe('listProcesses', () => {
+  it('이 테스트 프로세스가 목록에 있고 부모 pid가 process.ppid와 같다', async () => {
+    const processes = await listProcesses();
+    const self = processes.find((entry) => entry.pid === process.pid);
+    expect(self).toBeDefined();
+    expect(self!.ppid).toBe(process.ppid);
+  });
+});
+
+describe('관문 폴더 안의 링크를 따라가지 않는다', () => {
+  it('하위 폴더 자리가 관문 폴더 밖을 가리키는 링크여도 그 너머를 고치지 않고 자리를 새로 만든다', async () => {
+    const root = await tempDir('b-studio-host-safe-');
+    const outside = await tempDir('b-studio-host-safe-out-');
+    const dir = await writeHostGatewayConfig('studio-orders-safe', address, cli, root);
+
+    // bin 자리를 관문 폴더 밖을 가리키는 링크로 바꾼다
+    await rm(path.join(dir, 'bin'), { recursive: true, force: true });
+    await symlink(outside, path.join(dir, 'bin'));
+
+    await writeHostGatewayConfig('studio-orders-safe', address, cli, root);
+
+    // bin은 진짜 폴더가 되고 그 안에 감싸개가 있다
+    expect((await stat(path.join(dir, 'bin'))).isDirectory()).toBe(true);
+    expect(await exists(path.join(dir, 'bin', 'claude'))).toBe(true);
+    // 밖의 폴더에는 아무것도 생기지 않았다
+    expect(await readdir(outside)).toEqual([]);
+    // 임시 파일이 남지 않는다
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('관문 폴더 자체가 링크면 쓰지 않고 던진다(그 너머를 건드리지 않는다)', async () => {
+    const root = await tempDir('b-studio-host-linked-');
+    const outside = await tempDir('b-studio-host-linked-out-');
+    await symlink(outside, path.join(root, 'studio-orders-linked'));
+    await expect(writeHostGatewayConfig('studio-orders-linked', address, cli, root)).rejects.toThrow('관문 폴더가 심볼릭 링크입니다');
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it('관문 폴더를 지울 때도 링크를 따라가지 않는다', async () => {
+    const root = await tempDir('b-studio-host-remove-link-');
+    const outside = await tempDir('b-studio-host-remove-out-');
+    // 밖에 지워지면 안 되는 파일을 둔다
+    await writeFile(path.join(outside, 'claude'), '건드리지 마라\n');
+    const dir = await writeHostGatewayConfig('studio-orders-rm', address, cli, root);
+    await rm(path.join(dir, 'bin'), { recursive: true, force: true });
+    await symlink(outside, path.join(dir, 'bin'));
+
+    await removeHostGatewayConfig('studio-orders-rm', root);
+
+    // 밖의 파일은 그대로다
+    expect(await readFile(path.join(outside, 'claude'), 'utf8')).toBe('건드리지 마라\n');
+    // 관문 폴더와 그 링크 자리는 지워졌다
+    expect(await exists(dir)).toBe(false);
   });
 });

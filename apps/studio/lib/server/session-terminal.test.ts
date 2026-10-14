@@ -12,6 +12,7 @@ import {
   noteSessionTerminalCli,
   sessionTerminalMode,
   subscribeSessionTerminal,
+  terminalBackend,
   writeSessionTerminal,
   type TerminalBackend,
   type TerminalMessage,
@@ -434,5 +435,74 @@ describe('세션 터미널 (이슈 #673)', () => {
     };
     await expect(removeContainerAndConfig('studio-orders-abc123', removeContainer, removeConfig)).resolves.toBeUndefined();
     expect(calls).toEqual(['container:studio-orders-abc123', 'config:studio-orders-abc123']);
+  });
+});
+
+describe('터미널 감시(백엔드의 watch, 이슈 #695)', () => {
+  it('감시가 위반을 알리면 구독자에게 경고를 보내고 target.onViolation을 같은 글로 부른다', async () => {
+    const { backend } = fakeBackend();
+    let report: ((reason: string) => void) | undefined;
+    let stops = 0;
+    const watching: TerminalBackend = {
+      ...backend,
+      watch: (_place, _terminal, _target, reportViolation) => {
+        report = reportViolation;
+        return () => {
+          stops += 1;
+        };
+      },
+    };
+    const messages: TerminalMessage[] = [];
+    const violations: string[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await openSessionTerminal(id, { ...target, onViolation: (reason) => violations.push(reason) }, {}, watching);
+    expect(typeof report).toBe('function');
+    report!('관문 파일이 바뀌어 되돌렸습니다: settings.json');
+    expect(violations).toEqual(['관문 파일이 바뀌어 되돌렸습니다: settings.json']);
+    expect(messages.at(-1)).toEqual({ kind: 'warning', message: '관문 파일이 바뀌어 되돌렸습니다: settings.json' });
+
+    // 닫으면 감시가 멈춘다. 두 번 닫아도 한 번만 멈춘다
+    closeSessionTerminal(id);
+    closeSessionTerminal(id);
+    expect(stops).toBe(1);
+    await disposeSessionTerminal(id, target.sandboxId, watching);
+    expect(stops).toBe(1);
+  });
+
+  it('터미널이 끝나면(onExit) 감시가 멈춘다', async () => {
+    const { backend, record } = fakeBackend();
+    let stops = 0;
+    const watching: TerminalBackend = { ...backend, watch: () => () => void (stops += 1) };
+    await openSessionTerminal(id, target, {}, watching);
+    record.terminals[0]!.exit(0);
+    expect(stops).toBe(1);
+    await disposeSessionTerminal(id, target.sandboxId, watching);
+    expect(stops).toBe(1);
+  });
+
+  it('세션을 정리하면(dispose) 감시가 멈춘다', async () => {
+    const { backend } = fakeBackend();
+    let stops = 0;
+    const watching: TerminalBackend = { ...backend, watch: () => () => void (stops += 1) };
+    await openSessionTerminal(id, target, {}, watching);
+    await disposeSessionTerminal(id, target.sandboxId, watching);
+    expect(stops).toBe(1);
+  });
+
+  it('watch가 없는 백엔드는 지금과 같이 연다', async () => {
+    const { backend, record } = fakeBackend();
+    await openSessionTerminal(id, target, {}, backend);
+    expect(record.terminals).toHaveLength(1);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+  });
+
+  it('기억한 관문이 없으면 조용히 넘어가지 않고 알린다(개발 서버가 모듈을 다시 읽은 경우)', () => {
+    const reports: string[] = [];
+    const backend = terminalBackend('host');
+    expect(typeof backend.watch).toBe('function');
+    const stop = backend.watch!('/nonexistent/gateway', new FakeTerminal('/nonexistent/gateway', 'main', { cols: 80, rows: 24 }), target, (reason) => reports.push(reason));
+    expect(reports).toEqual(['관문 감시를 시작하지 못했습니다(기억한 관문이 없습니다). 터미널을 닫았다가 다시 여세요']);
+    // 멈춤 함수는 안전한 no-op이다
+    expect(() => stop()).not.toThrow();
   });
 });

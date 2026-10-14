@@ -483,6 +483,11 @@ interface Session {
   run?: ActiveRun;
   /** 터미널의 CLI가 모르는 채 바뀐 사실(실행의 변경을 되돌렸다). 다음 요청의 맥락에 덧붙여 알린다 */
   terminalNotes?: string[];
+  /**
+   * 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI, 이슈 #695). 열린 실행이 없을 때 받으면 여기 담아 두었다가
+   * 그 뒤 처음 끝나는 실행을 실패로 닫고 되돌린다. 세션이 멈추면 지운다
+   */
+  pendingViolation?: string;
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
@@ -1185,6 +1190,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status === 'stopped') return session.snapshot;
   session.stop.abort();
+  // 감시가 담아 둔 위반은 세션이 멈추면 지운다
+  session.pendingViolation = undefined;
   // 터미널에서 연 실행은 기다리는 러너가 없다. 여기서 닫아 두지 않으면 세션에 걸린 채 남는다(끝났다는 알림은 내지 않는다 — 멈춘 세션의 실행은 기록을 읽을 때 중단으로 본다)
   const terminalRun = openTerminalRun(session);
   if (terminalRun) settleTerminalRun(session, terminalRun, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
@@ -7136,18 +7143,20 @@ export function sessionTerminalAllowed(): boolean {
  * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
  * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
  */
-export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean; gateway: () => Promise<AgentGatewayAddress> } {
+export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean; onViolation: (reason: string) => void; gateway: () => Promise<AgentGatewayAddress> } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
   // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
-  const alive = (): boolean => !session.stop.signal.aborted && session.snapshot.status !== 'stopped' && session.snapshot.status !== 'failed';
+  const alive = (): boolean => terminalSessionAlive(session);
   if (!alive()) throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업을 누른 뒤 다시 여세요');
   return {
     sandboxId: session.sandbox.id,
     root: session.project.root,
     projectId: session.snapshot.projectId,
     alive,
+    // 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 세션 쪽에서 처리한다
+    onViolation: (reason: string) => terminalViolation(id, reason),
     // 관문은 세션에 하나다. 터미널을 다시 열어도 같은 것을 쓴다
     gateway: () => ensureSessionGateway(id, () => terminalGatewayHandlers(id)),
   };
@@ -7203,6 +7212,16 @@ interface TerminalRunState {
   /** 턴 끝 검증이 도는 중이다. 이때 온 취소는 검증이 중단으로 끝나면서 마무리된다 */
   checking: boolean;
   settled: boolean;
+  /**
+   * 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI, 이슈 #695). 검증이 도는 중이면 큐를 기다리지 않고 곧바로 여기 적고,
+   * finishTerminalTurn이 시작할 때와 체크포인트를 남기기 직전에 본다. 있으면 통과로 남기지 않고 실패로 닫는다
+   */
+  violation?: string;
+  /**
+   * 읽기만 실행이 열릴 때 잡은 작업 복사본의 지문(CheckpointStore.pendingFingerprint). 끝날 때 다시 잡아 다르면 위반이다.
+   * 사람이 요청 전에 미리 고쳐 둔 파일은 양쪽에 모두 들어가므로 다르지 않다(오탐하지 않는다)
+   */
+  readOnlyFingerprint?: string;
 }
 
 function clipText(text: string, limit: number): string {
@@ -7223,6 +7242,11 @@ function terminalSession(id: string): Session {
   return session;
 }
 
+/** 세션 터미널 자리가 아직 살아 있는가. sessionTerminalTarget과 위반 처리기가 같은 기준을 쓴다 */
+function terminalSessionAlive(session: Session): boolean {
+  return !session.stop.signal.aborted && session.snapshot.status !== 'stopped' && session.snapshot.status !== 'failed';
+}
+
 /**
  * 열려 있는 터미널 실행. 대화 창의 실행이거나, 이미 닫혔거나, 취소를 받아 닫히는 중인 실행이면 없다.
  * 닫히는 중인 실행(되돌리는 동안)은 세션에 걸려 있어 새 요청과 도구 호출을 막지만, 그 실행에 이어 붙이지는 않는다
@@ -7230,6 +7254,39 @@ function terminalSession(id: string): Session {
 function openTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRunState }) | undefined {
   const run = session.run;
   return run?.terminal && !run.terminal.settled && !run.cancel.signal.aborted ? (run as ActiveRun & { terminal: TerminalRunState }) : undefined;
+}
+
+/**
+ * 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI, 이슈 #695)을 처리한다. 활동 기록에 남기고,
+ * 열린 실행이 있으면 그 실행을 실패로 닫고 이번 실행의 변경을 되돌린다. 열린 실행이 없거나 이미 닫혔으면
+ * 담아 두었다가 그 뒤 처음 끝나는 실행에서 처리한다(finishTerminalTurn).
+ */
+function terminalViolation(id: string, reason: string): void {
+  const session = store.sessions.get(id);
+  if (!session) return;
+  // 세션이 멈추는 중이거나 멈췄으면 아무것도 남기지 않는다. 담아 둔 위반을 실행할 다음 턴이 없다
+  if (!terminalSessionAlive(session)) return;
+  const message = `[b-studio] 검증을 우회할 수 있는 일이 감지되었습니다: ${reason}`;
+  const run = openTerminalRun(session);
+  if (run) {
+    emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
+    // 검증이 도는 중이면 큐를 기다리지 않고 곧바로 표시한다. finishTerminalTurn이 시작할 때와 체크포인트를 남기기 직전에 본다
+    run.terminal.violation = reason;
+    // 되돌리는 동안에도 실행은 세션에 걸려 있어 다른 요청이 끼어들지 못한다. 이미 닫혔으면 abandonTerminalRun이 아무 일도 하지 않는다
+    void run.terminal
+      .serial(() => abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청의 변경을 되돌렸습니다: ${reason}` }))
+      .catch((error: unknown) => console.error('[b-studio] 감지된 위반으로 터미널 실행을 닫지 못했습니다', error));
+    return;
+  }
+  // 열린 실행이 없거나 이미 닫혔다. 그 위반은 그 뒤 처음 끝나는 실행의 것이다
+  emit(session, { type: 'notice', text: message, at: new Date().toISOString() });
+  session.pendingViolation = reason;
+}
+
+/** 위반 사유로 실행을 실패로 닫고 이번 실행의 변경을 되돌린다. 에이전트에게는 되돌린 결과를 알린다(피드백이 아니다) */
+async function failTerminalRunForViolation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, reason: string): Promise<{ message: string }> {
+  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청의 변경을 되돌렸습니다: ${reason}` });
+  return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
 }
 
 /** 지금 터미널의 요청을 받을 수 없으면 그 이유 */
@@ -7253,7 +7310,19 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   if (opened) return opened;
   const busy = terminalBusy(session);
   if (busy) return { busy };
-  const terminal: TerminalRunState = { request, readOnly: isReadOnlyPrompt(request), startedMs: performance.now(), unsettledAttempts: 0, serial: serialQueue(), checking: false, settled: false };
+  const readOnly = isReadOnlyPrompt(request);
+  const terminal: TerminalRunState = {
+    request,
+    readOnly,
+    // 읽기만 실행이 열리는 순간의 작업 복사본 지문을 지금 잡아 둔다. 끝날 때 다시 잡아 이 실행이 파일을 바꿨는지 가린다
+    // (사람이 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다)
+    ...(readOnly ? { readOnlyFingerprint: await session.checkpoints.pendingFingerprint() } : {}),
+    startedMs: performance.now(),
+    unsettledAttempts: 0,
+    serial: serialQueue(),
+    checking: false,
+    settled: false,
+  };
   const run: ActiveRun & { terminal: TerminalRunState } = {
     id: randomUUID().slice(0, 8),
     startedAt: new Date().toISOString(),
@@ -7458,7 +7527,11 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
     // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
-    if (isReadOnlyPrompt(prompt)) opened.terminal.readOnly = true;
+    if (isReadOnlyPrompt(prompt)) {
+      // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
+      opened.terminal.readOnlyFingerprint ??= await session.checkpoints.pendingFingerprint();
+      opened.terminal.readOnly = true;
+    }
     return opened.terminal.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
   }
   const busy = terminalBusy(session);
@@ -7546,6 +7619,34 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
 async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string): Promise<{ feedback?: string; message?: string }> {
   const state = run.terminal;
   if (state.settled) return {};
+  // 감시가 찾은 위반을 그때는 열린 실행이 없어 담아 두었다면, 그 뒤 처음 끝나는 이 실행을 실패로 닫고 되돌린다
+  if (session.pendingViolation !== undefined) {
+    const reason = session.pendingViolation;
+    session.pendingViolation = undefined;
+    return failTerminalRunForViolation(session, run, reason);
+  }
+  // 검증이 도는 중에 온 위반은 큐를 기다리지 않고 여기 적혀 있다. 통과로 남기지 않는다
+  if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
+  // 읽기만 실행은 파일을 바꾸지 않는다. 열릴 때 잡은 지문과 지금 지문을 견준다 —
+  // 사람이 요청 전에 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다.
+  // 이 규칙은 훅과 무관하게 컨테이너 방식에도 똑같이 적용된다
+  if (state.readOnly) {
+    const before = state.readOnlyFingerprint;
+    const after = await session.checkpoints.pendingFingerprint().catch(() => undefined);
+    if (before === undefined || after === undefined || before !== after) {
+      // 달라졌거나(훅이 우회되어 바뀐 채 끝났다) 재지 못했다(확신할 수 없다). 통과로 남기지 않고 실패로 닫고 되돌린다
+      const changed = [...new Set([...(await session.checkpoints.pendingFiles()), ...(await session.checkpoints.pendingExcludedFiles())])];
+      const reason =
+        before === undefined || after === undefined
+          ? '[b-studio] 읽기만 요청인데 파일이 바뀌었는지 확인하지 못해 되돌렸습니다'
+          : `[b-studio] 읽기만 요청인데 파일이 바뀌어 되돌렸습니다: ${changed.slice(0, 5).join(', ')}`;
+      const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
+      return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+    }
+    // 이 실행이 바꾼 것이 없다(사람이 미리 고쳐 둔 파일이 있어도). 게이트를 돌리지 않고 답만 한 턴으로 끝낸다
+    settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
+    return {};
+  }
   const onEvent = (event: AgentEvent): void => {
     // 토큰과 질문은 러너만 낸다(세션 이벤트의 agent 꼴에도 없다). 게이트와 도구가 내는 것만 옮긴다
     if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
@@ -7586,6 +7687,8 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     }
     if (run.cancel.signal.aborted || session.stop.signal.aborted) throw run.cancel.signal.reason ?? session.stop.signal.reason;
     if (outcome.kind === 'pass') {
+      // 게이트가 도는 동안 위반이 왔으면(큐를 기다리지 않고 state.violation에 적혔다) 통과시키지 않는다
+      if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
       // 통과: 여기부터는 취소를 받지 않는다(대화 창의 요청과 같다)
       if (session.run === run) session.run = undefined;
       const head = session.snapshot.checkpoints[0]?.sha;

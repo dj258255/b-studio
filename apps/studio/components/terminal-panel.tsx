@@ -38,6 +38,8 @@ export function TerminalPanel({
   const [status, setStatus] = useState<TerminalStatus>({ state: "idle" });
   /** 다른 패널이 넘긴 글을 붙여 넣지 않았을 때 그 까닭. 조용히 버리지 않는다 */
   const [pasteNotice, setPasteNotice] = useState<string>();
+  /** 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI). 터미널 위에 바로 보이고, 사용자가 닫을 수 있다 */
+  const [warning, setWarning] = useState<string>();
   // "다시 열기"가 부를 함수. 터미널을 만든 효과가 채워 둔다
   const reopen = useRef<() => void>(() => {});
 
@@ -119,7 +121,8 @@ export function TerminalPanel({
         else if (message.kind === "cli") {
           cliAlive = message.alive;
           if (message.alive) setPasteNotice(undefined);
-        } else setStatus({ state: message.state, message: message.message });
+        } else if (message.kind === "warning") setWarning(message.message);
+        else setStatus({ state: message.state, message: message.message });
       };
 
       // 패널 크기가 바뀌면 글자 칸 수를 다시 맞추고 컨테이너 쪽 터미널에도 알린다
@@ -188,6 +191,15 @@ export function TerminalPanel({
         {pasteNotice && (
           <p role="alert" className="text-xs text-wait">
             {pasteNotice}
+          </p>
+        )}
+        {/* 감시가 찾은 위반은 터미널 위에 바로 보이고, 사용자가 닫을 수 있다 */}
+        {warning && (
+          <p role="alert" className="flex flex-wrap items-center gap-x-2 text-xs text-fail">
+            <span>{warning}</span>
+            <button type="button" onClick={() => setWarning(undefined)} className="rounded-control border border-line px-1.5 hover:border-ink" aria-label="경고 닫기">
+              닫기
+            </button>
           </p>
         )}
         {/* 안내는 접어 둔다. 터미널의 글자 칸을 아끼고, 처음 쓰는 사람은 펼쳐 읽는다 */}

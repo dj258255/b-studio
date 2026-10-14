@@ -1,7 +1,14 @@
+import { watch as watchFs } from 'node:fs';
+import path from 'node:path';
 import {
+  checkHostGatewayConfig,
   clampTerminalSize,
+  defaultAgentGatewayRoot,
   ensureAgentContainer,
+  expectedHostGatewayFiles,
   findHostCli,
+  findUnhookedCli,
+  listProcesses,
   openAgentTerminal,
   openHostTerminal,
   probeAgentGateway,
@@ -13,6 +20,8 @@ import {
   writeHostGatewayConfig,
   type AgentGatewayAddress,
   type AgentTerminal,
+  type HostCli,
+  type ProcessEntry,
   type TerminalSize,
 } from '@b-studio/sandbox';
 import { StudioError } from './errors';
@@ -29,6 +38,12 @@ const REPLAY_BYTES = 512 * 1024;
 /** 한 번에 받는 입력의 상한. 붙여넣기까지는 받고, 그 이상은 잘못된 요청으로 본다 */
 export const MAX_TERMINAL_INPUT = 256 * 1024;
 const TERMINAL_ID = 'main';
+/** 이 컴퓨터 방식의 관문 설정 파일 이름. host-terminal.ts의 SETTINGS_FILE과 같아야 한다 */
+const HOST_SETTINGS_FILE = 'settings.json';
+/** 이 컴퓨터 방식에서 관문 폴더에 바뀐 것이 없는지 보는 주기 */
+const HOST_WATCH_INTERVAL_MS = 3_000;
+/** fs.watch가 준 신호를 검사 한 번으로 모으는 시간 */
+const HOST_WATCH_DEBOUNCE_MS = 250;
 
 export type TerminalMode = 'container' | 'host';
 
@@ -52,7 +67,12 @@ export type TerminalMessage =
    * 터미널 안에 에이전트 CLI가 떠 있는가(CLI의 세션 시작·끝 훅으로 안다). 화면은 떠 있을 때만 다른 패널의 글을 붙여 넣는다 —
    * 셸 프롬프트에 붙여 넣으면 사람이 요청인 줄 알고 누른 Enter가 그 글을 명령으로 실행한다(이슈 #689)
    */
-  | { kind: 'cli'; alive: boolean };
+  | { kind: 'cli'; alive: boolean }
+  /**
+   * 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI). 터미널 패널의 경고 줄에 바로 보인다.
+   * 다시 연결한 화면에는 마지막 경고를 되풀이하지 않는다(활동 기록에는 세션 이벤트로 남는다)
+   */
+  | { kind: 'warning'; message: string };
 
 type Listener = (message: TerminalMessage) => void;
 
@@ -66,6 +86,8 @@ interface TerminalState {
   size: TerminalSize;
   /** 에이전트 CLI가 떠 있다고 알려 왔는가. 터미널이 닫히거나 끝나면 거짓으로 돌린다 */
   cli: boolean;
+  /** 열려 있는 터미널의 감시를 멈추는 함수(백엔드가 watch를 줄 때만). 터미널이 끝나거나 닫히면 부른다 */
+  watchStop?: () => void;
 }
 
 export interface TerminalTarget {
@@ -85,6 +107,10 @@ export interface TerminalTarget {
    * 컨테이너에서 관문에 닿는 것을 확인한 뒤에야 터미널을 연다. 주지 않으면 관문 없는 터미널이다(테스트와 옛 호출자)
    */
   gateway?: () => Promise<AgentGatewayAddress>;
+  /**
+   * 감시가 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 찾았을 때 부른다. 세션은 이 실행을 실패로 닫고 되돌린다(이슈 #695)
+   */
+  onViolation?: (reason: string) => void;
 }
 
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
@@ -98,6 +124,11 @@ export interface TerminalBackend {
   reachable(place: string): Promise<boolean>;
   /** 닿지 못할 때 사용자에게 보일 글 */
   readonly unreachable: string;
+  /**
+   * 열린 터미널을 감시한다. 위반을 찾으면 report를 부른다. 돌려준 함수로 멈춘다.
+   * 관문을 쓰지 않는 백엔드(컨테이너)는 이 메서드를 두지 않는다 — 관리 설정이 읽기 전용 마운트라 필요 없다
+   */
+  watch?(place: string, terminal: AgentTerminal, target: TerminalTarget, report: (reason: string) => void): () => void;
 }
 
 /** 컨테이너를 지우고, 그것이 실패해도 토큰이 든 관문 설정은 지운다 */
@@ -122,16 +153,156 @@ const DOCKER_BACKEND: TerminalBackend = {
   unreachable: '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다',
 };
 
+/** 이 컴퓨터 방식에서 prepare가 쓴 관문. 감시(watch)가 폴더 경로를 열쇠로 꺼내 쓴다 */
+interface HostGatewayWatch {
+  address: AgentGatewayAddress;
+  cli: HostCli;
+  root: string;
+  expected: Record<string, { content: string; mode: number }>;
+}
+// 개발 서버의 HMR로 모듈이 다시 로드돼도 기억한 관문을 잃지 않도록 전역에 둔다(터미널과 같은 이유)
+const gatewayStore = globalThis as typeof globalThis & { __bStudioHostGateways?: Map<string, HostGatewayWatch> };
+const hostGateways = (gatewayStore.__bStudioHostGateways ??= new Map());
+
 const HOST_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
     const cli = await findHostCli();
-    return gateway ? writeHostGatewayConfig(target.sandboxId, gateway, cli) : '';
+    if (!gateway) return '';
+    const root = defaultAgentGatewayRoot();
+    const dir = await writeHostGatewayConfig(target.sandboxId, gateway, cli, root);
+    // 감시가 꺼내 쓸 것을 폴더 경로로 기억한다. 기대 파일(내용·권한의 근거)을 여기서 한 번 만들어 두고 검사·복구에 쓴다
+    hostGateways.set(dir, { address: gateway, cli, root, expected: expectedHostGatewayFiles(gateway, dir, cli) });
+    return dir;
   },
   open: (place, options) => openHostTerminal({ id: options.id, size: options.size, cwd: options.target.root, gatewayDir: place || undefined }),
   remove: (sandboxId) => removeHostGatewayConfig(sandboxId),
   reachable: (place) => probeHostGateway(place),
   unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다. 스튜디오를 다시 띄운 뒤 터미널을 다시 여세요',
+  /**
+   * 이 컴퓨터 방식에서는 CLI가 관문 파일을 고칠 수 있고, 셸에서 훅 없이 CLI를 직접 띄울 수 있다.
+   * 미리 막을 수 없으니 관문 파일이 쓴 그대로인지 계속 보고, 훅 없이 뜬 CLI가 있으면 알린다(감지·복구)
+   */
+  watch: (place, terminal, target, report) => {
+    // 관문 없이 연 터미널(place가 빈 값)은 감시하지 않는다
+    if (!place) return () => {};
+    const saved = hostGateways.get(place);
+    // 개발 서버가 모듈을 다시 읽으면 기억한 관문이 비어 있을 수 있다. 조용히 넘어가면 감시가 꺼진 것을 모른다
+    if (!saved) {
+      report('관문 감시를 시작하지 못했습니다(기억한 관문이 없습니다). 터미널을 닫았다가 다시 여세요');
+      return () => {};
+    }
+    const { address, cli, root, expected } = saved;
+    const settingsPath = path.join(place, HOST_SETTINGS_FILE);
+    // PTY의 pid. 이 아래에서 도는 프로세스 중 훅 없는 CLI를 찾는다(pid를 모르면 파일 검사만 한다)
+    const rootPid = (terminal as AgentTerminal & { pid?: number }).pid;
+    const warnedPids = new Set<number>();
+    let stopped = false;
+    let debounce: NodeJS.Timeout | undefined;
+    let fileFailures = 0;
+    let fileReported = false;
+    let psFailures = 0;
+    let psReported = false;
+    let inFlight = false;
+    let rerun = false;
+
+    const inspect = async (): Promise<void> => {
+      // 관문 파일 검사. 던지면 이 회차 파일 검사는 건너뛰되, 세 번 연달아 실패하면 감시가 조용히 꺼진 것처럼 보이지 않게 한 번 알린다
+      let changed: string[] | undefined;
+      try {
+        changed = await checkHostGatewayConfig(place, expected);
+        fileFailures = 0;
+      } catch {
+        fileFailures += 1;
+        if (fileFailures >= 3 && !fileReported) {
+          fileReported = true;
+          report('관문 파일을 확인하지 못했습니다');
+        }
+      }
+      if (changed && changed.length > 0) {
+        // 쓴 그대로 되돌린다. 되돌리지 못하면 되돌렸다고 말하지 않는다(사유를 함께 남긴다)
+        try {
+          await writeHostGatewayConfig(target.sandboxId, address, cli, root);
+          report(`관문 파일이 바뀌어 되돌렸습니다: ${changed.join(', ')}`);
+        } catch (error) {
+          report(`관문 파일이 바뀌었는데 되돌리지 못했습니다: ${changed.join(', ')} (${error instanceof Error ? error.message : String(error)})`);
+        }
+      }
+      if (rootPid === undefined) return;
+      let processes: ProcessEntry[];
+      try {
+        processes = await listProcesses();
+      } catch {
+        // 이번 회차는 건너뛴다. 세 번 연달아 실패하면 한 번 알린다
+        psFailures += 1;
+        if (psFailures >= 3 && !psReported) {
+          psReported = true;
+          report('터미널의 프로세스를 확인하지 못했습니다');
+        }
+        return;
+      }
+      psFailures = 0;
+      for (const entry of findUnhookedCli(rootPid, processes, { settingsPath, cliPath: cli.claudePath })) {
+        // 같은 pid는 한 번만 알린다
+        if (warnedPids.has(entry.pid)) continue;
+        warnedPids.add(entry.pid);
+        report(`검증이 붙지 않은 CLI가 터미널에서 돌고 있습니다(pid ${entry.pid}). 이 터미널의 claude는 b-studio가 붙여 주는 설정으로 띄워야 합니다`);
+      }
+    };
+
+    // 주기 검사와 fs.watch 신호의 검사가 겹쳐 돌지 않게 한다. 돌고 있으면 끝난 뒤 한 번만 다시 돈다
+    const check = async (): Promise<void> => {
+      if (stopped) return;
+      if (inFlight) {
+        rerun = true;
+        return;
+      }
+      inFlight = true;
+      try {
+        do {
+          rerun = false;
+          await inspect();
+        } while (rerun && !stopped);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    // fs.watch가 신호를 줄 때마다 곧바로 검사하지 않고 250ms로 모은다
+    const schedule = (): void => {
+      if (stopped) return;
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => void check(), HOST_WATCH_DEBOUNCE_MS);
+    };
+    // 관문 폴더와, 기대 파일이 놓인 폴더들(재귀 아님). 파일이 있는 자리에서 신호가 오게 한다
+    const watchedDirs = new Set<string>([place]);
+    for (const name of Object.keys(expected)) {
+      const dir = path.dirname(name);
+      if (dir && dir !== '.') watchedDirs.add(path.join(place, dir));
+    }
+    const watchers: Array<{ close(): void }> = [];
+    for (const dir of watchedDirs) {
+      try {
+        watchers.push(watchFs(dir, schedule));
+      } catch {
+        // 폴더가 아직 없을 수 있다(주기 검사가 다음 회차에 잡는다)
+      }
+    }
+    const timer = setInterval(() => void check(), HOST_WATCH_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      if (debounce) clearTimeout(debounce);
+      for (const watcher of watchers) {
+        try {
+          watcher.close();
+        } catch {
+          // 이미 닫혔다
+        }
+      }
+      if (hostGateways.get(place) === saved) hostGateways.delete(place);
+    };
+  },
 };
 
 /** 지금 방식에 맞는 백엔드. 부를 때 정해진다 — 스튜디오를 다른 방식으로 띄우면 그 방식으로 연다 */
@@ -229,9 +400,17 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
         // 닫고 새로 연 뒤에 옛 프로세스의 종료가 늦게 와도 새 터미널을 지우지 않는다
         if (current.terminal !== terminal) return;
         current.terminal = undefined;
+        stopWatching(current);
         setCli(current, false);
         emit(current, { kind: 'exit', code });
       });
+      // 관문 파일 변조와 훅 없이 뜬 CLI를 감시한다. 찾으면 화면에 경고를 보내고 세션에 알린다(이슈 #695)
+      if (backend.watch) {
+        current.watchStop = backend.watch(place, terminal, target, (reason) => {
+          emit(current, { kind: 'warning', message: reason });
+          target.onViolation?.(reason);
+        });
+      }
       emit(current, { kind: 'status', state: 'open' });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -299,12 +478,25 @@ export async function resizeSessionTerminal(sessionId: string, size: { cols?: un
   await state.terminal.resize(state.size);
 }
 
+/** 열려 있는 터미널의 감시를 멈춘다. 여러 번 불려도 안전하다(멈춤 함수를 한 번만 부른다) */
+function stopWatching(state: TerminalState): void {
+  const stop = state.watchStop;
+  state.watchStop = undefined;
+  if (!stop) return;
+  try {
+    stop();
+  } catch {
+    // 감시를 멈추지 못해도 터미널 정리를 막지 않는다
+  }
+}
+
 /** 터미널만 닫는다. 컨테이너는 남는다(다시 열면 바로 붙는다) */
 export function closeSessionTerminal(sessionId: string): void {
   const state = terminals.get(sessionId);
   if (!state?.terminal) return;
   const terminal = state.terminal;
   state.terminal = undefined;
+  stopWatching(state);
   terminal.close();
   setCli(state, false);
   emit(state, { kind: 'status', state: 'closed' });
@@ -314,6 +506,9 @@ export function closeSessionTerminal(sessionId: string): void {
 export async function disposeSessionTerminal(sessionId: string, sandboxId: string, backend: TerminalBackend = terminalBackend()): Promise<void> {
   // 열고 있는 중이면 끝나기를 기다린 뒤에 닫는다. 기다리지 않으면 지운 뒤에 컨테이너와 터미널이 생긴다
   await terminals.get(sessionId)?.opening?.catch(() => {});
+  // 터미널이 없어도 감시가 남아 있으면 멈춘다(감시를 멈추지 않고 남기는 길이 없게 한다)
+  const state = terminals.get(sessionId);
+  if (state) stopWatching(state);
   closeSessionTerminal(sessionId);
   terminals.delete(sessionId);
   await backend.remove(sandboxId).catch(() => {});
