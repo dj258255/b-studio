@@ -92,12 +92,25 @@ function gatewayNote(toolNames: readonly string[]): string {
 }
 
 /**
- * 세션 터미널(이슈 #673)에서 컨테이너 안의 CLI가 대화를 시작할 때 받는 글. 훅의 덧붙임으로 들어가므로 짧게 쓴다.
+ * 세션 터미널(이슈 #673)에서 CLI가 대화를 시작할 때 받는 글. 훅의 덧붙임으로 들어가므로 짧게 쓴다.
  * 러너 방식과 다른 점만 적는다: 여기는 서비스가 도는 곳이 아니고, 커밋은 b-studio가 한다.
+ * container는 CLI가 에이전트 컨테이너 안에서 돌고, host는 이 컴퓨터에서 돈다(그 차이만 글에 담는다)
  */
-export function terminalGatewayNote(project: LoadedProject): string {
+export function terminalGatewayNote(project: LoadedProject, mode: 'container' | 'host' = 'container'): string {
   const services = project.managed.map(([name]) => name);
   const tools = gatewayToolSpecs(project).map((spec) => `mcp__${SERVER}__${spec.name}`);
+  if (mode === 'host') {
+    return [
+      '# b-studio',
+      `이 작업 폴더는 b-studio 세션의 작업 복사본이고, 이 CLI는 이 컴퓨터에서 돈다. 프로젝트의 서비스(${services.join(', ') || '없음'})는 각자의 컨테이너에서 돌고, 같은 폴더가 그 안에 연결되어 있다.`,
+      `빌드·테스트·서버 명령은 mcp__${SERVER}__run_in_service로 서비스 컨테이너 안에서 돌린다(검증 게이트가 보는 환경이 그쪽이다). 쓸 수 있는 b-studio 도구: ${tools.join(', ')}.`,
+      '커밋하지 않는다. git commit·git push·git reset·git checkout·git stash로 기록이나 브랜치를 바꾸지 않는다. 체크포인트(커밋)는 턴이 끝난 뒤 b-studio가 검증을 통과시켜 남긴다.',
+      '작업 폴더 밖의 파일을 바꾸지 않는다.',
+      '검증이 실패하면 결과가 "Stop hook feedback"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.',
+      '끝내 통과하지 못하면 b-studio가 이번 요청의 변경을 되돌린다(기록에서 되살릴 수 있다).',
+      '사용자에게 보이는 글은 한국어로 쓴다.',
+    ].join('\n');
+  }
   return [
     '# b-studio',
     `이 작업 폴더는 b-studio 세션의 작업 복사본이다. 프로젝트의 서비스(${services.join(', ') || '없음'})는 이 컨테이너가 아니라 각자의 컨테이너에서 돌고, 같은 폴더가 그 안에 연결되어 있다.`,

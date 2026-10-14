@@ -35,6 +35,7 @@ vi.mock('./session-terminal', () => ({
   },
   interruptSessionTerminal: () => {},
   noteSessionTerminalCli: () => {},
+  removeTerminalLeftovers: async () => {},
 }));
 
 import { getSnapshot, recoverSessions } from './sessions';

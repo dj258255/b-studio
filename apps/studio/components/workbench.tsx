@@ -102,7 +102,7 @@ export function Workbench({ initial, access }: { initial: SessionSnapshot; acces
                   >
                     <div className="flex min-h-0 flex-col gap-2">
                       <div className={`grid min-h-0 ${recordOpen ? "flex-[3]" : "flex-1"}`}>
-                        <TerminalPanel sessionId={view.snapshot.id} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} acceptDraft />
+                        <TerminalPanel sessionId={view.snapshot.id} mode={view.snapshot.terminalMode} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} acceptDraft />
                       </div>
                       <ActivityStrip view={view} open={recordOpen} onToggle={toggleRecord} />
                       {recordOpen && (

@@ -17,12 +17,12 @@ export function decodeTerminalData(data: string): Uint8Array {
   return bytes;
 }
 
-export function terminalStatusLabel(status: TerminalStatus): string {
+export function terminalStatusLabel(status: TerminalStatus, mode: 'container' | 'host' = 'container'): string {
   switch (status.state) {
     case 'idle':
       return '연결하는 중';
     case 'opening':
-      return '컨테이너를 준비하는 중';
+      return mode === 'host' ? '터미널을 여는 중' : '컨테이너를 준비하는 중';
     case 'open':
       return '열림';
     case 'exited':

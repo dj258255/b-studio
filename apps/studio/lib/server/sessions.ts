@@ -312,7 +312,7 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
@@ -940,11 +940,14 @@ function projectViews(
   project: LoadedProject,
   state: 'starting' | 'stopped' = 'starting',
   offManaged: ReadonlySet<string> = new Set(),
-): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy' | 'experimental' | 'terminal'> {
+): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy' | 'experimental' | 'terminal' | 'terminalMode'> {
+  const terminal = sessionTerminalAllowed();
   return {
     // 서버 설정이라 프로젝트와 무관하지만, 화면이 탭을 그릴 때 함께 읽도록 여기서 싣는다(다시 열 때마다 지금 값으로 바뀐다)
     experimental: experimentalEnabled(),
-    terminal: sessionTerminalAllowed(),
+    terminal,
+    // 터미널을 쓸 수 있을 때만 방식을 싣는다. 쓸 수 없으면 화면이 터미널을 그리지 않으므로 방식도 알릴 것이 없다
+    ...(terminal ? { terminalMode: sessionTerminalMode() } : {}),
     // project.deploy(로더가 채운 값)는 선언하지 않은 서비스도 기본값(Dockerfile)으로 채우므로 늘 비어 있지 않다.
     // "배포" 하위 탭을 보일지는 spec.deploy(원본, 선언했을 때만 있음)로 판단해야 한다
     hasDeploy: project.spec.deploy !== undefined,
@@ -1483,6 +1486,8 @@ async function cleanupTerminalLeftovers(sessionId: string, sandboxId: string): P
     return;
   }
   await disposeSessionTerminal(sessionId, sandboxId).catch((error: unknown) => console.error('[b-studio] 이전 세션 터미널을 정리하지 못했습니다', sessionId, describe(error)));
+  // 스튜디오를 다른 방식으로 띄웠을 수 있다. 두 방식이 남긴 찌꺼기(컨테이너, 토큰이 든 관문 설정)를 모두 치운다
+  await removeTerminalLeftovers(sandboxId);
 }
 
 async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
@@ -7676,7 +7681,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
   return {
     // 세션 시작 훅이 이 안내를 받아 간다. CLI가 떴다는 뜻이기도 하다 — 화면은 그때부터 다른 패널의 글을 터미널에 붙여 넣는다
     note: async () => {
-      const note = terminalGatewayNote(terminalSession(id).project);
+      const note = terminalGatewayNote(terminalSession(id).project, sessionTerminalMode());
       noteSessionTerminalCli(id, true);
       return note;
     },

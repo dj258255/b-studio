@@ -113,6 +113,8 @@ export interface SessionSnapshot {
   experimental?: boolean;
   /** 세션 터미널을 쓸 수 있다(실험 기능을 켠 개인 PC 모드, 이슈 #673). 없거나 false면 대화 패널만 보인다 */
   terminal?: boolean;
+  /** 터미널을 여는 방식(B_STUDIO_TERMINAL): container는 에이전트 컨테이너 안의 CLI, host는 이 컴퓨터의 CLI. terminal을 쓸 수 있을 때만 있다 */
+  terminalMode?: 'container' | 'host';
   /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
   design?: DesignView;
   /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */

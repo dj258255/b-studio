@@ -11,8 +11,9 @@ const nextConfig: NextConfig = {
     "/*": ["./components/**/*", "./lib/**/*"],
   },
   // 플랫폼별 Claude Code 실행 파일을 자기 패키지 위치 기준으로 찾으므로 번들에 넣지 않고 node_modules에서 그대로 불러온다.
-  // playwright-core(browser_check의 browser 모드)도 내부 모듈과 브라우저 레지스트리를 패키지 위치 기준으로 찾는다
-  serverExternalPackages: ["@anthropic-ai/claude-agent-sdk", "playwright-core"],
+  // playwright-core(browser_check의 browser 모드)도 내부 모듈과 브라우저 레지스트리를 패키지 위치 기준으로 찾는다.
+  // @lydell/node-pty(이 컴퓨터의 세션 터미널)는 네이티브 모듈이라 번들에 넣지 않고 그대로 불러온다
+  serverExternalPackages: ["@anthropic-ai/claude-agent-sdk", "playwright-core", "@lydell/node-pty"],
 };
 
 export default nextConfig;

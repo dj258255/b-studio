@@ -548,4 +548,19 @@ describe('terminalGatewayNote (세션 터미널의 CLI가 대화를 시작할 �
     // 훅의 덧붙임은 길이 상한이 있다(1만 자). 넉넉히 아래에 둔다
     expect(note.length).toBeLessThan(3000);
   });
+
+  it('호스트 모드 글은 이 컴퓨터에서 돈다고 알리고, 그 CLI에 대해 컨테이너·읽기 전용이라는 말을 쓰지 않는다', async () => {
+    const project = await createOrdersProject('b-studio-terminal-note-host-');
+    const note = terminalGatewayNote(project, 'host');
+    expect(project.managed.length).toBeGreaterThan(0);
+    for (const [name] of project.managed) expect(note).toContain(name);
+    for (const spec of gatewayToolSpecs(project)) expect(note).toContain(`mcp__b-studio__${spec.name}`);
+    expect(note).toContain('커밋하지 않는다');
+    expect(note).toContain('run_in_service');
+    expect(note).toContain('이 컴퓨터에서 돈다');
+    expect(note).not.toContain('읽기 전용');
+    expect(note).not.toContain('이 컨테이너');
+    expect(note).toContain('Stop hook feedback');
+    expect(note.length).toBeLessThan(3000);
+  });
 });

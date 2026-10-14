@@ -91,8 +91,8 @@ const AGENT_PING_SECONDS = 5;
 export const AGENT_READ_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'TodoWrite', 'ToolSearch', 'AskUserQuestion', 'Agent', 'Task'] as const;
 /** 쓰기 직전의 훅을 거는 도구 이름의 패턴: 읽기 도구가 아닌 모든 것 */
 export const AGENT_WRITE_TOOL_MATCHER = `^(?!(?:${AGENT_READ_TOOLS.join('|')})$).+`;
-const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
-const GATEWAY_FILE_NAME = 'b-studio-gateway.json';
+export const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
+export const GATEWAY_FILE_NAME = 'b-studio-gateway.json';
 /** 훅을 돌릴 node. 이름으로 찾지 않는다 — 터미널의 PATH는 홈 폴더의 실행 파일 자리가 앞에 있어, 거기에 같은 이름을 두면 훅이 바뀐다 */
 const HOOK_NODE = '/usr/local/bin/node';
 const MCP_SERVER = 'b-studio';
@@ -197,11 +197,21 @@ request.end(body);
 
 /** CLI의 관리 설정. 훅과 b-studio 도구의 사용 허락만 적는다 */
 export function agentManagedSettings(): Record<string, unknown> {
-  const hook = (event: AgentHookEvent) => ({ type: 'command', command: `${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, timeout: AGENT_HOOK_EVENTS[event] });
+  return gatewaySettings((event) => `${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`);
+}
+
+/**
+ * 훅과 b-studio 도구의 사용 허락을 적은 CLI 설정. 훅 명령을 어떻게 부를지만 자리마다 다르다
+ * (컨테이너: 관리 설정 자리의 스크립트, 이 컴퓨터: 세션의 관문 폴더에 둔 스크립트 — host-terminal.ts)
+ */
+export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string): Record<string, unknown> {
+  const hook = (event: AgentHookEvent) => ({ type: 'command', command: hookCommand(event), timeout: AGENT_HOOK_EVENTS[event] });
   return {
     // b-studio 도구는 서비스 컨테이너 안에서 돌고 b-studio의 실행 정책을 거친다. 호출마다 묻지 않게 한다
     permissions: { allow: [`mcp__${MCP_SERVER}`] },
-    // 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)에서 훅을 통째로 끄지 못하게 여기서 값을 정해 둔다
+    // 훅을 통째로 끄지 못하게 여기서 값을 정해 둔다. 컨테이너에서는 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)이,
+    // 이 컴퓨터에서는 작업 복사본의 프로젝트 설정(.claude/settings.json)이 에이전트가 쓸 수 있는 자리다.
+    // 값을 주지 않은 실행 인자 설정은 프로젝트 설정의 disableAllHooks: true에 진다(CLI 2.1.296에서 실측, 트러블슈팅 145)
     disableAllHooks: false,
     hooks: {
       SessionStart: [{ hooks: [hook('session-start')] }],
@@ -233,7 +243,7 @@ export function defaultAgentGatewayRoot(): string {
   return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_AGENT_GATEWAY_DIR ?? path.join(homedir(), '.cache/b-studio/agent-gateway'));
 }
 
-function gatewayDirFor(sandboxId: string, root: string): string {
+export function gatewayDirFor(sandboxId: string, root: string): string {
   const safe = sandboxId.replace(/[^A-Za-z0-9_.-]/g, '-');
   if (!safe || safe === '.' || safe === '..') throw new SandboxError('샌드박스 id로 관문 설정 폴더를 정할 수 없습니다', sandboxId);
   return path.join(root, safe);
