@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -82,7 +82,7 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   return { ...actual, canCreatePullRequest: () => fake.canCreatePullRequest };
 });
 
-import { createSession, exportSession, getSnapshot, resumeSession, sendMessage, sessionHistory, stopSession, subscribe } from './sessions';
+import { createSession, exportSession, getSnapshot, rememberedGitForTest, resumeSession, sendMessage, sessionHistory, setGitMemoryForTest, stopSession, subscribe, syncRemote } from './sessions';
 
 let root: string;
 const saved = {
@@ -225,4 +225,72 @@ describe('재연결 replay 순서(59번 버그: 기록 재생이 지금 스냅�
 
     await stopSession(id).catch(() => {});
   }, 20_000);
+});
+
+describe('작업 복사본 밖에 기억한 Git 상태 (이슈 #699)', () => {
+  const workDirOf = (id: string) => getSnapshot(id)!.workDir;
+  const headOf = (id: string) => git(workDirOf(id), 'rev-parse', 'HEAD');
+
+  it('원격 병합(syncRemote) 뒤에 기억한 마지막 체크포인트가 실제 HEAD와 같다', async () => {
+    await setupRepo();
+    const id = (await createSession('replayproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await runWrite(id, 'class Order { String memo; }\n');
+    await exportSession(id, { pullRequest: false, review: false });
+    const branch = `b-studio/replayproj-${id}`;
+
+    // 리뷰어가 세션 브랜치에 커밋을 하나 올린다
+    const reviewer = await mkdtemp(path.join(root, 'reviewer-'));
+    await git(root, 'clone', '-q', '--branch', branch, fake.remote, reviewer);
+    await writeFile(path.join(reviewer, 'REVIEW.md'), 'reviewer\n');
+    await git(reviewer, 'add', '-A');
+    await git(reviewer, 'commit', '-q', '-m', 'reviewer note');
+    await git(reviewer, 'push', '-q', 'origin', 'HEAD');
+
+    const outcome = new Promise<string>((resolve) => {
+      const unsubscribe = subscribe(id, (event) => {
+        if (event.type === 'remote_synced' || event.type === 'remote_sync_failed') {
+          unsubscribe();
+          resolve(event.type);
+        }
+      });
+    });
+    syncRemote(id);
+    expect(await outcome).toBe('remote_synced');
+    // 병합 커밋이 생겼고 기억도 그 HEAD로 갱신된다
+    expect(rememberedGitForTest(id)!.lastCheckpoint).toBe(await headOf(id));
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
+  it('기억 기록이 없는 옛 세션을 이어서 작업하면 지금 값으로 채운다', async () => {
+    await setupRepo();
+    const id = (await createSession('replayproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await runWrite(id, 'class Order { String memo; }\n');
+    await stopSession(id);
+
+    // 이 필드가 생기기 전에 저장한 세션처럼 session.json에서 git 기록을 지운다
+    const file = path.join(workDirOf(id), '.git', 'b-studio', 'session.json');
+    const data = JSON.parse(await readFile(file, 'utf8'));
+    delete data.git;
+    await writeFile(file, JSON.stringify(data));
+
+    await resumeSession(id);
+    expect(rememberedGitForTest(id)!.lastCheckpoint).toBe(await headOf(id));
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+
+  it('기억이 없는 세션은 올리기를 통과로 두지 않고 멈춘다(원격에 아무것도 가지 않는다)', async () => {
+    await setupRepo();
+    const id = (await createSession('replayproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await runWrite(id, 'class Order { String memo; }\n');
+    const branch = `b-studio/replayproj-${id}`;
+    setGitMemoryForTest(id, undefined);
+
+    await expect(exportSession(id, { pullRequest: false, review: false })).rejects.toThrow(/기억하지 못해/);
+    // 원격에 세션 브랜치가 생기지 않았다
+    await expect(git(fake.remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`)).rejects.toThrow();
+    await stopSession(id).catch(() => {});
+  }, 30_000);
 });

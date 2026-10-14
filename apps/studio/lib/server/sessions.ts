@@ -367,6 +367,7 @@ import {
   writeSession,
   writeSessionSync,
   type PersistedSession,
+  type RememberedGit,
 } from './session-store';
 
 type Conversation = NonNullable<Parameters<typeof runAgent>[0]['conversation']>;
@@ -535,6 +536,13 @@ interface Session {
   testControllers?: Map<string, AbortController>;
   /** 마지막 체크포인트에 커밋된 요구사항 문서(readTrustedRequirementsDocument의 캐시). sha가 바뀌면 다시 읽는다 */
   committedRequirements?: { sha: string; content: string | undefined };
+  /**
+   * b-studio가 작업 복사본 밖(세션 저장)에 기억해 두는 Git 상태(이슈 #699): 세션 브랜치, 마지막 체크포인트(HEAD),
+   * 원격 주소. 세션을 만들거나 이어서 작업할 때 채우고, b-studio가 스스로 HEAD를 움직이는 자리마다 갱신한다.
+   * 이 컴퓨터 방식에서는 에이전트가 작업 복사본의 .git을 고칠 수 있어, 터미널 턴 끝 검사와 올리기·가져오기 전
+   * 확인이 이 값과 지금 Git을 견준다
+   */
+  git?: RememberedGit;
 }
 
 /** 서비스 하나의 마지막 테스트 실행 결과 */
@@ -891,6 +899,8 @@ async function startSession({
 
   store.sessions.set(id, session);
   registerCleanup();
+  // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
+  session.git = await initialGitMemory(checkpoints);
   if (preview) ensurePreviewGateway(preview);
   // 저장된 선택(known) 뒤에 compose에 새로 생긴 부가 서비스를 depends_on과 무관하게 자동으로 켰으면 알린다(도그푸딩 마찰 138, ADR-146)
   if (addedServices.length > 0) {
@@ -1345,6 +1355,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     let discardBackup: DiscardBackup | undefined;
     let restoredRecords: string[] = [];
     let localEdits: Checkpoint | undefined;
+    let resumeDocsCheckpoint: Checkpoint | undefined;
     if (local) {
       // 샌드박스를 멈춘 동안 IDE에서 고친 파일일 수 있어 버리지 않고 체크포인트로 남긴다
       const redactor = new Redactor(secrets);
@@ -1356,11 +1367,12 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-099)
       // 남은 변경은 되살릴 수 있게 백업한 뒤에야 마지막 체크포인트에서 시작한다
       const redactor = new Redactor(secrets);
-      const { docsCheckpoint, files, backup, restoredRecords: restored } = await discardWorkingCopy(checkpoints, projectRoot, (text) => redactor.find(text));
+      const { docsCheckpoint: docs, files, backup, restoredRecords: restored } = await discardWorkingCopy(checkpoints, projectRoot, (text) => redactor.find(text));
       discarded = files;
       discardBackup = backup;
       restoredRecords = restored;
-      if (docsCheckpoint) history = [...history, { type: 'docs_checkpoint', checkpoint: docsCheckpoint }];
+      resumeDocsCheckpoint = docs;
+      if (docs) history = [...history, { type: 'docs_checkpoint', checkpoint: docs }];
     }
     const list = await checkpoints.list();
     const head = list[0]!;
@@ -1412,6 +1424,9 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 세션 단위 디자인 설정을 되살리고, 화면 상태를 다시 계산한다(studio.yaml 설정이 바뀌었을 수 있다)
     session.design = data.design;
     session.snapshot.design = sessionDesignView(session);
+    // 기억한 Git 상태를 되살린다(이슈 #699). 이 기록이 없던 옛 세션이거나, 이어서 시작하며 b-studio가 HEAD를
+    // 움직였으면(문서·직접 수정 체크포인트) 지금 값을 그 시점의 것으로 믿고 채운다
+    session.git = data.git && !localEdits && !resumeDocsCheckpoint ? data.git : await initialGitMemory(checkpoints);
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
@@ -2870,6 +2885,39 @@ function checkpointTrailers(result: AgentResult): string[] {
   return trailers;
 }
 
+/**
+ * 세션을 만들거나 이어서 작업할 때 기억할 Git 상태(작업 복사본 밖, 세션 저장)를 지금 값으로 채운다(이슈 #699).
+ * 이 기록이 없던 옛 세션은 처음 읽을 때의 값을 그 시점의 것으로 믿는다. 분리된 HEAD 등 브랜치가 없는 모양이면 없다
+ */
+async function initialGitMemory(checkpoints: CheckpointStore): Promise<RememberedGit | undefined> {
+  const { head, branch } = await checkpoints.headState().catch(() => ({ head: '', branch: undefined }));
+  if (!head || !branch) return undefined;
+  const originUrl = await checkpoints.remoteUrl().catch(() => undefined);
+  return { branch, lastCheckpoint: head, ...(originUrl ? { originUrl } : {}) };
+}
+
+/**
+ * b-studio가 스스로 HEAD를 움직이는 자리마다 기억해 두는 Git 상태를 지금 HEAD로 맞춘다(이슈 #699).
+ * 세션 브랜치와 마지막 체크포인트를 지금 값으로 새로 적고, 기억한 원격 주소는 그대로 둔다. 분리된 HEAD 등
+ * b-studio가 움직인 것이 아닌 모양이면 건드리지 않는다(그 모양은 다음 턴의 검사가 잡는다)
+ */
+async function rememberGit(session: Session): Promise<void> {
+  const { head, branch } = await session.checkpoints.headState().catch(() => ({ head: '', branch: undefined }));
+  if (!head || !branch) return;
+  session.git = { branch, lastCheckpoint: head, ...(session.git?.originUrl ? { originUrl: session.git.originUrl } : {}) };
+}
+
+/**
+ * 작업 복사본 밖에 기억한 Git 상태. 없으면(세션을 만들 때 Git 상태를 읽지 못했거나 기록이 손상됐으면) 확인하지 못한
+ * 것이므로 멈춘다 — 확인하지 못한 상태를 통과로 두지 않는다(이슈 #699). 올리기·가져오기·PR이 이 값을 필수로 받는다
+ */
+function requireGitMemory(session: Session): RememberedGit {
+  if (!session.git) {
+    throw new CheckpointError('[b-studio] 작업 복사본의 Git 상태를 기억하지 못해 확인하지 못했습니다. 작업 복사본의 git 저장소를 확인한 뒤 다시 시도하세요');
+  }
+  return session.git;
+}
+
 async function saveCheckpoint(
   session: Session,
   runId: string,
@@ -2911,6 +2959,7 @@ async function saveCheckpoint(
   }
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  await rememberGit(session);
   emit(session, { type: 'checkpoint', runId, checkpoint });
   // 에이전트가 이번 실행에서 studio.yaml을 바꿨으면(includes·systemPackages·workflow 등) 다음 요청부터 그 선언을 쓴다(도그푸딩 마찰 121)
   if (specChanged || excludedChanged.includes(SPEC_FILE)) await reloadSessionProject(session);
@@ -2982,6 +3031,8 @@ async function revertRun(
     session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
     emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
   }
+  // 되돌리기가 남긴 HEAD(문서 체크포인트 또는 그대로)를 다시 기억한다. 다음 턴 검사가 b-studio 자신의 커밋을 에이전트의 것으로 보지 않게 한다
+  await rememberGit(session);
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다(위 dbRestorePoint 기준)
   const database = await session.databases.restore(dbRestorePoint, session.stop.signal);
   // 문서 체크포인트가 새로 생겼으면, 복원한(바른) DB 상태를 그 체크포인트의 덤프로도 남겨 다음 되돌리기가
@@ -3026,6 +3077,7 @@ async function saveLocalEdits(session: Session): Promise<Checkpoint | undefined>
   if (!checkpoint) return undefined;
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  await rememberGit(session);
   return checkpoint;
 }
 
@@ -3203,6 +3255,7 @@ export async function commitWorkingCopyDocs(sessionId: string, paths: readonly s
   });
   if (!checkpoint) return undefined;
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  await rememberGit(session);
   emit(session, { type: 'docs_checkpoint', checkpoint });
   return checkpoint;
 }
@@ -3339,6 +3392,7 @@ export function restoreCheckpoint(id: string, sha: string): void {
         { alsoRestart: database.dependents },
       );
       session.snapshot.checkpoints = await session.checkpoints.list();
+      await rememberGit(session);
       const databaseResynced = database.states.some((state) => state.action === 'restored');
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다. 지금 체크포인트를 가리켰으면
       // "되돌렸다"는 말 대신 무엇을 다시 맞췄는지만 말한다(뒤의 체크포인트가 사라진 게 아니므로)
@@ -3591,10 +3645,13 @@ async function pullRequestDraft(
   { assumePushed = false }: { assumePushed?: boolean } = {},
 ): Promise<PullRequestDraft & { info: RepositoryInfo; target: PullRequestTarget; targetError?: string; commits: SessionCommit[] }> {
   const info = (await session.checkpoints.repository())!;
+  // 기억한 Git 상태를 확인한다. 없으면(확인하지 못했으면) PR 대상을 확인하지 못한 것이므로 멈춘다(이슈 #699)
+  const remembered = session.git;
+  if (!remembered) throw new StudioError(409, '작업 복사본의 Git 상태를 기억하지 못해 PR 대상을 확인하지 못했습니다. 작업 복사본의 git 저장소를 확인한 뒤 다시 시도하세요');
   // PR의 대상 브랜치를 원격에 물어 정한다. 기준 브랜치가 원격에 없으면 원격의 기본 브랜치가 대상이 된다.
   // 원격에 닿지 못하면 예전처럼 기준 브랜치를 그대로 쓰고, 미리보기가 "확인하지 못함"으로 알린다
   let targetError: string | undefined;
-  const target = await session.checkpoints.pullRequestTarget().catch((error: unknown): PullRequestTarget => {
+  const target = await session.checkpoints.pullRequestTarget(remembered).catch((error: unknown): PullRequestTarget => {
     targetError = describe(error);
     return { base: info.base };
   });
@@ -3812,13 +3869,27 @@ export async function exportSession(
   try {
     // main 따라잡기(ADR-076): 기준 브랜치가 앞서 있고 깨끗하게 병합할 수 있으면 올리기 전에 조용히 먼저 따라잡는다
     await autoCatchUpBase(session);
-    const pushed = await session.checkpoints.push().catch((error: unknown) => {
+    // 기억한 Git 상태를 확인한다. 없으면(확인하지 못했으면) 통과로 두지 않고 멈춘다(이슈 #699)
+    let remembered: RememberedGit;
+    try {
+      remembered = requireGitMemory(session);
+    } catch (error) {
+      throw new StudioError(409, describe(error));
+    }
+    const pushed = await session.checkpoints.push(remembered).catch((error: unknown) => {
       // git 명령 자체가 실패하면(인증, 네트워크) 원격 문제이고, 나머지는 지금 상태로는 올릴 수 없다는 뜻이다
       const gitFailure = error instanceof CheckpointError && error.message.startsWith('git ');
       throw new StudioError(gitFailure ? 502 : 409, describe(error));
     });
 
     const info = (await session.checkpoints.repository())!;
+    // PR 만들기 직전에 한 번 더 확인한다(위 push도 #remoteGit 안에서 확인하지만, 여기서는 사람이 고친 것이 있으면 그대로 멈춘다).
+    // 올릴 브랜치·원격 주소는 저장소 설정(b-studio.branch, remote.origin.url)이 아니라 기억한 값에서 읽는다(이슈 #699)
+    await session.checkpoints.assertTrustedGit(remembered).catch((error: unknown) => {
+      throw new StudioError(409, describe(error));
+    });
+    const trustedBranch = remembered.branch;
+    const trustedRemoteUrl = remembered.originUrl ?? info.remoteUrl;
     let created: ExportResult['pullRequest'];
     let pullRequestError: string | undefined;
     let pullRequestUpdateWarning: string | undefined;
@@ -3833,12 +3904,12 @@ export async function exportSession(
         if (hasNoPullRequestTarget(target)) {
           throw new Error(`기준 브랜치(${target.base})가 원격에 없고 원격의 기본 브랜치도 알 수 없어 PR을 만들지 않았습니다. 브랜치는 올라갔습니다`);
         }
-        const remote = parseRemote(info.remoteUrl);
+        const remote = parseRemote(trustedRemoteUrl);
         // 미리보기(canCreate)가 "만들 수 있다"고 본 것과 같은 토큰으로 실제로 만든다(ADR-107)
         const token = await repositoryPullRequestToken(remote);
         // 본문을 b-studio 관리 영역 마커로 감싸 만든다(버그 리포트 85) — 다음에 같은 PR에 새 커밋이 올라가도
         // 이 마커 사이만 다시 쓰고, 사람이 PR 설명에 마커 밖으로 보탠 내용은 건드리지 않는다
-        const result = await createPullRequest(remote, { title, body: mergeManagedPullRequestBody(undefined, body), base: target.base, branch: info.branch }, { token });
+        const result = await createPullRequest(remote, { title, body: mergeManagedPullRequestBody(undefined, body), base: target.base, branch: trustedBranch }, { token });
         await session.checkpoints.recordPullRequest(result.url);
         created = { url: result.url, created: result.created };
         newlyConnectedPullRequest = true;
@@ -3852,7 +3923,7 @@ export async function exportSession(
       // 건드리지 않는다. 실패해도 경고만 남기고 push·PR 자체는 이미 끝난 것으로 본다
       try {
         const { body } = await pullRequestDraft(session, issues, planRequirementIds);
-        const remote = parseRemote(info.remoteUrl);
+        const remote = parseRemote(trustedRemoteUrl);
         const token = await repositoryPullRequestToken(remote);
         const number = parsePullRequestNumber(info.pullRequestUrl);
         if (number === undefined) throw new Error('PR 주소에서 번호를 읽지 못했습니다');
@@ -4043,7 +4114,7 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
-      await session.checkpoints.push();
+      await session.checkpoints.push(requireGitMemory(session));
       const repository = await describeRepository(session.checkpoints, session.sourceDirtyFiles);
       if (repository) session.snapshot.repository = repository;
     },
@@ -4126,7 +4197,7 @@ export async function continueReviewAfterNewCommits(id: string): Promise<void> {
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
-      await session.checkpoints.push();
+      await session.checkpoints.push(requireGitMemory(session));
       const repository = await describeRepository(session.checkpoints, session.sourceDirtyFiles);
       if (repository) session.snapshot.repository = repository;
     },
@@ -4307,7 +4378,7 @@ async function runRemoteSync(session: Session): Promise<StudioEvent> {
   try {
     // 계약 비교 기준은 가져온 파일이 반영되기 전에 잡는다
     baselines = await captureBaselines(session.sandbox, session.project);
-    result = await session.checkpoints.integrateRemote();
+    result = await session.checkpoints.integrateRemote(requireGitMemory(session));
   } catch (error) {
     return { type: 'remote_sync_failed', error: describe(error), conflicts: error instanceof RemoteConflictError ? error.conflicts : undefined };
   }
@@ -4329,6 +4400,7 @@ async function runRemoteSync(session: Session): Promise<StudioEvent> {
     const checkpoint = result.checkpoint!;
     await saveDatabases(session, checkpoint.sha);
     session.snapshot.checkpoints = await session.checkpoints.list();
+    await rememberGit(session);
     const repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
     session.snapshot.repository = repository;
     noteForModel(
@@ -4357,6 +4429,7 @@ async function undoRemoteSync(
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
+    await rememberGit(session);
     return {
       type: 'remote_sync_failed',
       error,
@@ -4379,7 +4452,13 @@ async function undoRemoteSync(
 export async function baseStatus(id: string, options: { force?: boolean } = {}): Promise<BaseStatus> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 확인할 기준 브랜치가 없습니다');
-  return session.checkpoints.baseStatus(options);
+  const remembered = session.git;
+  // 확인하지 못했으면 통과로 두지 않는다(이슈 #699)
+  if (!remembered) throw new StudioError(409, '작업 복사본의 Git 상태를 기억하지 못해 기준 브랜치를 확인하지 못했습니다. 작업 복사본의 git 저장소를 확인한 뒤 다시 시도하세요');
+  // baseStatus는 새로 가져올 때 원격에 닿는다. 그 전에 기억한 Git과 견주는 확인을 지난다(#remoteGit) — 실패는 409로 알린다
+  return session.checkpoints.baseStatus(remembered, options).catch((error: unknown) => {
+    throw new StudioError(409, describe(error));
+  });
 }
 
 /**
@@ -4447,7 +4526,7 @@ async function runBaseCatchUp(session: Session): Promise<StudioEvent> {
   try {
     // 계약 비교 기준은 병합한 변경이 반영되기 전에 잡는다
     baselines = await captureBaselines(session.sandbox, session.project);
-    result = await session.checkpoints.integrateBase();
+    result = await session.checkpoints.integrateBase(requireGitMemory(session));
   } catch (error) {
     return { type: 'base_sync_failed', error: describe(error), conflicts: error instanceof RemoteConflictError ? error.conflicts : undefined };
   }
@@ -4467,10 +4546,11 @@ async function runBaseCatchUp(session: Session): Promise<StudioEvent> {
     const checkpoint = result.checkpoint!;
     await saveDatabases(session, checkpoint.sha);
     session.snapshot.checkpoints = await session.checkpoints.list();
+    await rememberGit(session);
     let repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
     // PR이 이미 있는 세션은 뒤처진 채 두지 않고 바로 밀어 둔다(다음 리뷰·머지가 최신 기준으로 돈다). PR을 새로 만들지는 않는다
     if (repository.pullRequestUrl) {
-      await session.checkpoints.push();
+      await session.checkpoints.push(requireGitMemory(session));
       repository = (await describeRepository(session.checkpoints, session.sourceDirtyFiles))!;
     }
     session.snapshot.repository = repository;
@@ -4508,6 +4588,7 @@ async function undoBaseSync(
     const database = await session.databases.restore(result.previous, session.stop.signal);
     const restart = await restartServicesFor(session.sandbox, session.project, files, start, { alsoRestart: database.dependents });
     session.snapshot.checkpoints = await session.checkpoints.list();
+    await rememberGit(session);
     return {
       type: 'base_sync_failed',
       error,
@@ -4531,8 +4612,11 @@ async function autoCatchUpBase(session: Session): Promise<void> {
   if (!session.snapshot.repository) return;
   if (session.project.spec.repository?.autoCatchUp === false) return;
   if (session.snapshot.running) return;
+  const remembered = session.git;
+  // 확인하지 못했으면 따라잡지 않는다. 올리기·리뷰의 가드가 이 상태를 통과로 두지 않고 멈춘다(이슈 #699)
+  if (!remembered) return;
 
-  const status = await session.checkpoints.baseStatus().catch(() => undefined);
+  const status = await session.checkpoints.baseStatus(remembered).catch(() => undefined);
   if (!status || status.behind === 0) return;
 
   session.snapshot.running = true;
@@ -7005,6 +7089,7 @@ function toPersisted(session: Session): PersistedSession {
     sourceDirtyFiles: session.sourceDirtyFiles,
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
+    git: session.git,
   };
 }
 
@@ -7631,6 +7716,10 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
   // 사람이 요청 전에 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다.
   // 이 규칙은 훅과 무관하게 컨테이너 방식에도 똑같이 적용된다
   if (state.readOnly) {
+    // 읽기만은 Git도 바꾸지 않는다. 훅을 우회해 요청 도중 커밋이 생겼으면 그 자리에서 되돌리고 실패로 닫는다(이슈 #699).
+    // 읽기만은 커밋할 수 없으므로 풀지 않고(allowUnwind: false) 기억한 체크포인트로 되돌리기만 한다
+    const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
+    if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
     const before = state.readOnlyFingerprint;
     const after = await session.checkpoints.pendingFingerprint().catch(() => undefined);
     if (before === undefined || after === undefined || before !== after) {
@@ -7647,6 +7736,10 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
     return {};
   }
+  // 에이전트가 작업 복사본의 Git을 직접 움직였는지 본다(이슈 #699). b-studio가 기억한 곳과 같으면 그대로 간다.
+  // 직접 만든 커밋은 풀어 검증에 넣고, 풀 수 없는 모양(브랜치 전환, 기록 되감기)이면 되돌리고 실행을 실패로 닫는다
+  const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: true });
+  if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
   const onEvent = (event: AgentEvent): void => {
     // 토큰과 질문은 러너만 낸다(세션 이벤트의 agent 꼴에도 없다). 게이트와 도구가 내는 것만 옮긴다
     if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
@@ -7748,6 +7841,66 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
   }
 }
 
+/**
+ * 터미널 실행이 작업 복사본의 Git 기록을 b-studio가 기억한 것과 다르게 만들었는지 본다(이슈 #699). allowUnwind가 참이고
+ * 같은 브랜치에서 기억한 체크포인트가 HEAD의 조상이면 에이전트가 직접 만든 커밋을 풀어(reset --soft) 검증에 넣는다.
+ * 브랜치를 바꿨거나 분리된 HEAD이거나 기록을 되감았으면(풀 수 없는 모양) 지금 변경을 백업하고 기억한 체크포인트로
+ * 되돌린 뒤 실행을 실패로 닫는다. 읽기만 실행은 풀지 않는다(allowUnwind: false) — 되돌리고 실패로만 닫는다.
+ * 기억이 없으면(확인하지 못했으면) 통과로 두지 않고 실행을 실패로 닫는다.
+ * 되돌려 실패로 닫았으면 { failed: true, summary }, 그 밖에는 { failed: false, summary: '' }
+ */
+async function reconcileTerminalGit(
+  session: Session,
+  run: ActiveRun & { terminal: TerminalRunState },
+  { allowUnwind }: { allowUnwind: boolean },
+): Promise<{ failed: boolean; summary: string }> {
+  const remembered = session.git;
+  // 기억이 없으면 확인하지 못한 것이다. 통과로 두지 않고 실패로 닫는다(이슈 #699)
+  if (!remembered) {
+    const summary = await abandonTerminalRun(session, run, {
+      status: 'failed',
+      reason: '[b-studio] 작업 복사본의 Git 상태를 기억하지 못해 확인하지 못했습니다. 작업 복사본의 git 저장소를 확인한 뒤 다시 요청하세요',
+    });
+    return { failed: true, summary };
+  }
+  const state = await session.checkpoints.headState();
+  if (state.head === remembered.lastCheckpoint && state.branch === remembered.branch) return { failed: false, summary: '' };
+  const sameBranch = state.branch === remembered.branch;
+  // 같은 브랜치에서 기억한 체크포인트가 HEAD의 조상이면 에이전트가 그 위에 커밋만 얹은 것이다 — 풀어서 검증에 넣는다
+  const aheadOnSameBranch = sameBranch && (await session.checkpoints.isAncestorOf(remembered.lastCheckpoint, state.head));
+  // 읽기만 실행(allowUnwind: false)은 풀지 않는다 — 읽기만은 커밋할 수 없으므로 되돌리고 실패로 닫기만 한다
+  if (allowUnwind && aheadOnSameBranch) {
+    const count = await session.checkpoints.uncommitTo(remembered.lastCheckpoint);
+    if (count > 0) {
+      const text = `[b-studio] 작업 복사본에 b-studio가 만들지 않은 커밋 ${count}개가 있어 풀었습니다. b-studio가 검증한 뒤 직접 커밋합니다.`;
+      emit(session, { type: 'notice', text, at: new Date().toISOString() });
+      (session.terminalNotes ??= []).push(`${text} 터미널에서 git commit 하지 마세요 — b-studio가 커밋합니다.`);
+    }
+    return { failed: false, summary: '' };
+  }
+  const which = !sameBranch
+    ? state.branch === undefined
+      ? 'HEAD가 브랜치가 아니라 커밋을 가리킴'
+      : `브랜치가 ${state.branch}(으)로 바뀜`
+    : aheadOnSameBranch
+      ? '기록에 b-studio가 만들지 않은 커밋이 있음'
+      : '기록이 b-studio의 체크포인트보다 뒤로 되감기거나 고쳐짐';
+  let backupNote = '';
+  try {
+    const reverted = await session.checkpoints.restoreRememberedHead(remembered);
+    backupNote = reverted.files.length > 0 ? ` 바뀐 파일 ${reverted.files.length}개는 보관본으로 남겼습니다${reverted.backup ? `(id: ${reverted.backup.id})` : ''}.` : '';
+  } catch (error) {
+    const reason = `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${which}) 마지막 체크포인트로 되돌리려 했지만 되돌리지 못했습니다: ${describe(error)}`;
+    const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
+    return { failed: true, summary };
+  }
+  const summary = await abandonTerminalRun(session, run, {
+    status: 'failed',
+    reason: `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${which}) 마지막 체크포인트로 되돌렸습니다.${backupNote}`,
+  });
+  return { failed: true, summary };
+}
+
 /** 게이트의 결과를 실행 결과의 꼴로 옮긴다(체크포인트 본문과 트레일러, 대화 창의 결과 카드가 이 꼴을 읽는다) */
 function terminalResult(verification: TerminalVerification, status: 'done' | 'failed', summary: string, outcome: GateOutcome['kind'], startedMs: number): AgentResult {
   const { workspace, gate } = verification;
@@ -7807,6 +7960,17 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
 /** 테스트가 관문의 서버 없이 처리만 부르는 자리 */
 export function terminalGatewayHandlersForTest(id: string): TerminalGatewayHandlers {
   return terminalGatewayHandlers(id);
+}
+
+/** 테스트가 작업 복사본 밖에 기억한 Git 상태(이슈 #699)를 직접 보는 자리 */
+export function rememberedGitForTest(id: string): RememberedGit | undefined {
+  return store.sessions.get(id)?.git;
+}
+
+/** 테스트가 기억을 지우거나 바꿔 "확인하지 못한 상태"를 흉내 내는 자리(이슈 #699) */
+export function setGitMemoryForTest(id: string, remembered: RememberedGit | undefined): void {
+  const session = store.sessions.get(id);
+  if (session) session.git = remembered;
 }
 
 function requireSession(id: string): Session {

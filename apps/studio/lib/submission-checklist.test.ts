@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -562,6 +562,20 @@ describe('checkSecrets — 원격에 올라갈 파일만 본다(실측 세션 c5
     const item = await checkSecrets(root);
     expect(item.status).toBe('fail');
     expect(item.reason).toContain('config.ts:1');
+  });
+
+  it('읽기 전용으로 부르는 git도 저장소의 fsmonitor를 쓰지 않는다(설정돼 있어도 그 명령이 돌지 않는다)', async () => {
+    await initGitRepo(root);
+    await write('README.md', '# 프로젝트\n');
+    // fsmonitor를 켜면 색인을 새로 고치는 git 명령(ls-files 등)이 이 스크립트를 돌린다(이슈 #699)
+    const marker = path.join(root, 'fsmonitor-ran');
+    const hook = path.join(root, 'fsmonitor.sh');
+    await writeFile(hook, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
+    await chmod(hook, 0o755);
+    await git(root, 'config', 'core.fsmonitor', hook);
+
+    await checkSecrets(root);
+    await expect(stat(marker)).rejects.toThrow();
   });
 });
 
