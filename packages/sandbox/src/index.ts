@@ -84,7 +84,10 @@ export {
   type TerminalSize,
 } from './docker/agent-terminal';
 export {
+  checkHostGatewayConfig,
+  expectedHostGatewayFiles,
   findHostCli,
+  findUnhookedCli,
   hostBashRc,
   hostCliWrapper,
   hostGatewayFiles,
@@ -94,6 +97,7 @@ export {
   hostZshFiles,
   HOST_GATEWAY_HOST,
   HOST_TERMINAL_COMMAND,
+  listProcesses,
   openHostTerminal,
   probeHostGateway,
   removeHostGatewayConfig,
@@ -101,6 +105,7 @@ export {
   writeHostGatewayConfig,
   type HostCli,
   type HostPty,
+  type ProcessEntry,
   type SpawnHostPty,
 } from './host-terminal';
 export { assertSandboxId, SANDBOX_ID } from './sandbox-id';

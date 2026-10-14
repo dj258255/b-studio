@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -46,6 +47,8 @@ const ZSH_START_FILES = ['.zshenv', '.zprofile', '.zshrc', '.zlogin'] as const;
 const BASH_RC_FILE = path.join(SHELL_DIR, 'bashrc');
 /** 관문 폴더 안에 만들 폴더들. 지울 때는 이 역순으로 지운다 */
 const GATEWAY_DIRS = [WRAPPER_DIR, SHELL_DIR, ZSH_DIR] as const;
+/** 권한을 700으로 유지해야 하는 폴더들(폴더 기준 이름). 빈 이름은 관문 폴더 그 자체를 뜻한다 */
+const GATEWAY_FOLDER_NAMES = ['', WRAPPER_DIR, SHELL_DIR, ZSH_DIR] as const;
 /** 관문 폴더에 쓰는 파일들(폴더 기준). hostGatewayFiles의 키와 같아야 한다 */
 const GATEWAY_FILE_NAMES = [
   SETTINGS_FILE,
@@ -186,53 +189,141 @@ export function hostBashRc(dir: string): string {
   ].join('\n');
 }
 
+/** 관문 폴더에 있어야 할 파일: 이름(폴더 기준) → { 내용, 권한 }. 내용·권한의 근거를 한 곳에 둔다 */
+export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: string, cli: HostCli): Record<string, { content: string; mode: number }> {
+  const file = (content: string): { content: string; mode: number } => ({ content, mode: 0o600 });
+  return {
+    [SETTINGS_FILE]: file(`${JSON.stringify(hostGatewaySettings(dir, cli.nodePath), null, 2)}\n`),
+    [MCP_FILE]: file(`${JSON.stringify(agentManagedMcp(address), null, 2)}\n`),
+    [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
+    [GATEWAY_FILE_NAME]: file(`${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`),
+    [path.join(WRAPPER_DIR, WRAPPER_NAME)]: { content: hostCliWrapper(dir, cli.claudePath), mode: 0o700 },
+    ...Object.fromEntries(Object.entries(hostZshFiles(dir)).map(([name, content]) => [path.join(ZSH_DIR, name), file(content)])),
+    [BASH_RC_FILE]: file(hostBashRc(dir)),
+  };
+}
+
 /** 관문 폴더에 둘 파일의 이름(폴더 기준) → 내용 */
 export function hostGatewayFiles(address: AgentGatewayAddress, dir: string, cli: HostCli): Record<string, string> {
-  return {
-    [SETTINGS_FILE]: `${JSON.stringify(hostGatewaySettings(dir, cli.nodePath), null, 2)}\n`,
-    [MCP_FILE]: `${JSON.stringify(agentManagedMcp(address), null, 2)}\n`,
-    [HOOK_SCRIPT_NAME]: AGENT_HOOK_SCRIPT,
-    [GATEWAY_FILE_NAME]: `${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`,
-    [path.join(WRAPPER_DIR, WRAPPER_NAME)]: hostCliWrapper(dir, cli.claudePath),
-    ...Object.fromEntries(Object.entries(hostZshFiles(dir)).map(([name, content]) => [path.join(ZSH_DIR, name), content])),
-    [BASH_RC_FILE]: hostBashRc(dir),
-  };
+  return Object.fromEntries(Object.entries(expectedHostGatewayFiles(address, dir, cli)).map(([name, spec]) => [name, spec.content]));
+}
+
+/** 부모가 진짜 폴더일 때만 자식을 본다. 부모가 링크면 그 너머로 들어가지 않는다(관문 폴더 밖을 건드리지 않는다) */
+async function lstatChild(parent: string, child: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  const info = await lstat(parent).catch(() => undefined);
+  if (!info?.isDirectory() || info.isSymbolicLink()) return undefined;
+  return lstat(child).catch(() => undefined);
+}
+
+/** 보통 폴더일 때만 권한을 조인다(링크를 따라가 그 너머의 폴더 권한을 바꾸지 않는다) */
+async function chmodRealDir(target: string, mode: number): Promise<void> {
+  const info = await lstat(target).catch(() => undefined);
+  if (info?.isDirectory() && !info.isSymbolicLink()) await chmod(target, mode);
+}
+
+/**
+ * 관문 폴더 아래의 폴더 자리를 확보한다. 자리가 링크거나 폴더가 아니면 자리 자체를 지우고 새로 만든다 —
+ * 링크의 대상은 건드리지 않는다. `mkdir`은 자리 자체만 만들고 링크를 따라가지 않는다
+ */
+async function ensureGatewayDir(target: string): Promise<void> {
+  const info = await lstat(target).catch(() => undefined);
+  if (info && (!info.isDirectory() || info.isSymbolicLink())) await rm(target, { force: true });
+  await mkdir(target, { recursive: true, mode: 0o700 });
+  const after = await lstat(target).catch(() => undefined);
+  if (!after?.isDirectory() || after.isSymbolicLink()) throw new SandboxError('관문 폴더를 만들지 못했습니다', target);
 }
 
 /**
  * 세션의 관문 설정을 이 컴퓨터에 쓰고 그 폴더를 돌려준다. 토큰이 들어 있으므로 이 사용자만 읽을 수 있게 둔다.
- * 컨테이너 방식과 같은 폴더(`<루트>/<샌드박스 id>`)를 쓴다 — 세션은 한 번에 한 방식으로만 열린다
+ * 컨테이너 방식과 같은 폴더(`<루트>/<샌드박스 id>`)를 쓴다 — 세션은 한 번에 한 방식으로만 열린다.
+ * 관문 폴더 안의 링크를 따라가지 않는다: 하위 폴더 자리가 링크면 그 자리만 지우고 새로 만든다
  */
 export async function writeHostGatewayConfig(sandboxId: string, address: AgentGatewayAddress, cli: HostCli, root: string = defaultAgentGatewayRoot()): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const made = gatewayDirFor(sandboxId, root);
+  // 관문 폴더 자체가 링크면 그 너머를 건드리지 않고 멈춘다(루트 아래의 세션 폴더를 링크로 바꾼 경우다)
+  const madeInfo = await lstat(made).catch(() => undefined);
+  if (madeInfo?.isSymbolicLink()) throw new SandboxError('관문 폴더가 심볼릭 링크입니다', made);
   await mkdir(made, { recursive: true, mode: 0o700 });
-  for (const name of GATEWAY_DIRS) await mkdir(path.join(made, name), { recursive: true, mode: 0o700 });
-  // 훅 명령과 감싸개에 이 폴더의 경로가 들어간다. 링크를 푼 진짜 경로로 적는다
+  // 훅 명령과 감싸개에 이 폴더의 경로가 들어간다. 링크를 푼 진짜 경로로 적는다(위에서 링크가 아님을 확인했다)
   const dir = await realpath(made);
+  for (const name of GATEWAY_DIRS) await ensureGatewayDir(path.join(dir, name));
   // 이미 있던 폴더에는 mkdir의 mode가 적용되지 않는다. 부를 때마다 다시 조인다
-  await chmod(dir, 0o700);
-  for (const name of GATEWAY_DIRS) await chmod(path.join(dir, name), 0o700);
-  for (const [name, content] of Object.entries(hostGatewayFiles(address, dir, cli))) {
+  await chmodRealDir(dir, 0o700);
+  for (const name of GATEWAY_DIRS) await chmodRealDir(path.join(dir, name), 0o700);
+  for (const [name, { content, mode }] of Object.entries(expectedHostGatewayFiles(address, dir, cli))) {
     const target = path.join(dir, name);
-    const executable = name.startsWith(`${WRAPPER_DIR}${path.sep}`);
-    if ((await readFile(target, 'utf8').catch(() => undefined)) !== content) {
-      // 같은 폴더에 임시 이름으로 쓰고 옮긴다. 읽는 쪽(훅, CLI)이 반쯤 쓰인 파일을 보지 않는다
-      const staged = `${target}.${process.pid}.tmp`;
-      await writeFile(staged, content, { mode: executable ? 0o700 : 0o600 });
+    // 기대하는 자리가 보통 파일이 아니면(없거나, 심볼릭 링크거나, 폴더면) 다시 쓴다. 링크를 남겨 두면 검사가 매번 위반으로 본다
+    const info = await lstat(target).catch(() => undefined);
+    const same = info?.isFile() === true && !info.isSymbolicLink() && (await readFile(target, 'utf8').catch(() => undefined)) === content;
+    if (!same) {
+      // 추측할 수 없는 이름을 새로 만들 때만 쓰고(wx) 옮긴다. 미리 심어 둔 링크를 따라 쓰지 않는다.
+      // rename은 자리의 링크를 그 대상이 아니라 자리 자체로 바꾼다
+      const staged = `${target}.${randomBytes(8).toString('hex')}.tmp`;
+      await writeFile(staged, content, { mode, flag: 'wx' });
       await rename(staged, target);
     }
-    // 내용이 같아 쓰지 않았어도 권한이 넓혀져 있을 수 있다(주소 파일에는 토큰이 있다). 부를 때마다 다시 조인다
-    await chmod(target, executable ? 0o700 : 0o600);
+    // 내용이 같아 쓰지 않았어도 권한이 넓혀져 있을 수 있다(주소 파일에는 토큰이 있다). 보통 파일일 때만 다시 조인다
+    const after = await lstat(target).catch(() => undefined);
+    if (after?.isFile() && !after.isSymbolicLink()) await chmod(target, mode);
   }
   return dir;
 }
 
-/** 세션이 멈출 때 그 세션의 관문 설정을 지운다. 이 코드가 쓴 파일만 지우고, 폴더는 비었을 때만 지운다 */
+/**
+ * 관문 폴더가 쓴 그대로인가. 다르거나 없거나 권한이 다른 파일의 이름(폴더 기준)을 돌려준다.
+ * 권한을 700으로 유지해야 하는 폴더(관문 폴더·bin·shell·shell/zsh)의 권한이 다르면 그 폴더 이름도 넣는다
+ * (관문 폴더 자체는 '.'). 기대하는 파일 자리가 심볼릭 링크면 다른 것을 가리킨 것이므로 위반으로 본다.
+ * 관문 폴더 안에 기대하지 않은 파일이 생긴 것은 위반으로 보지 않는다(우리가 읽지 않는다)
+ */
+export async function checkHostGatewayConfig(dir: string, expected: Record<string, { content: string; mode: number }>): Promise<string[]> {
+  const bad: string[] = [];
+  for (const [name, spec] of Object.entries(expected)) {
+    const target = path.join(dir, name);
+    const info = await lstat(target).catch(() => undefined);
+    if (!info || info.isSymbolicLink() || !info.isFile() || (info.mode & 0o777) !== spec.mode || (await readFile(target, 'utf8').catch(() => undefined)) !== spec.content) {
+      bad.push(name);
+    }
+  }
+  for (const name of GATEWAY_FOLDER_NAMES) {
+    const target = name ? path.join(dir, name) : dir;
+    const info = await lstat(target).catch(() => undefined);
+    if (!info || info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o777) !== 0o700) bad.push(name || '.');
+  }
+  return bad;
+}
+
+/**
+ * 세션이 멈출 때 그 세션의 관문 설정을 지운다. 이 코드가 쓴 파일만 지우고, 폴더는 비었을 때만 지운다.
+ * 링크를 따라가지 않는다: 관문 폴더 자체나 하위 폴더가 링크면 그 너머의 파일은 건드리지 않고 링크 자리만 지운다
+ */
 export async function removeHostGatewayConfig(sandboxId: string, root: string = defaultAgentGatewayRoot()): Promise<void> {
   const dir = gatewayDirFor(sandboxId, root);
-  for (const name of GATEWAY_FILE_NAMES) await rm(path.join(dir, name), { force: true }).catch(() => {});
-  for (const name of [...GATEWAY_DIRS].reverse()) await rmdir(path.join(dir, name)).catch(() => {});
+  const dirInfo = await lstat(dir).catch(() => undefined);
+  // 관문 폴더 자체가 링크면 그 너머를 건드리지 않고 링크만 지운다
+  if (dirInfo?.isSymbolicLink()) {
+    await rm(dir, { force: true }).catch(() => {});
+    return;
+  }
+  if (!dirInfo) return;
+  // 하위 폴더가 링크면 그 안으로 들어가지 않고 링크 자체만 지운다
+  for (const name of GATEWAY_DIRS) {
+    const folder = path.join(dir, name);
+    const info = await lstatChild(path.dirname(folder), folder);
+    if (info?.isSymbolicLink()) await rm(folder, { force: true }).catch(() => {});
+  }
+  // 파일은 그 부모 폴더가 진짜일 때만 지운다(부모가 링크면 그 너머의 파일을 지우지 않는다)
+  for (const name of GATEWAY_FILE_NAMES) {
+    const target = path.join(dir, name);
+    if (!(await lstatChild(path.dirname(target), target))) continue;
+    await rm(target, { force: true }).catch(() => {});
+  }
+  // 진짜 폴더만 비었을 때 지운다(역순)
+  for (const name of [...GATEWAY_DIRS].reverse()) {
+    const folder = path.join(dir, name);
+    const info = await lstatChild(path.dirname(folder), folder);
+    if (info?.isDirectory() && !info.isSymbolicLink()) await rmdir(folder).catch(() => {});
+  }
   await rmdir(dir).catch(() => {});
 }
 
@@ -243,6 +334,62 @@ export async function probeHostGateway(dir: string, nodePath: string = process.e
     const child = execFile(nodePath, [path.join(dir, HOOK_SCRIPT_NAME), 'ping'], { timeout: (HOST_PING_SECONDS + 10) * 1000 }, (error) => resolve(!error));
     child.stdin?.end();
   });
+}
+
+/** 이 컴퓨터의 프로세스 하나. `ps`가 준 pid·부모 pid·인자 한 줄 */
+export interface ProcessEntry {
+  pid: number;
+  ppid: number;
+  args: string;
+}
+
+/** `ps -A -o pid=,ppid=,args=`로 이 컴퓨터의 프로세스 목록을 읽는다(macOS와 리눅스 둘 다 된다) */
+export async function listProcesses(): Promise<ProcessEntry[]> {
+  const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid=,args=']);
+  const entries: ProcessEntry[] = [];
+  for (const line of stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (!match) continue;
+    entries.push({ pid: Number(match[1]), ppid: Number(match[2]), args: match[3]!.trimEnd() });
+  }
+  return entries;
+}
+
+/**
+ * 이 프로세스가 에이전트 CLI로 보이는가. 첫 낱말의 파일 이름이 `claude`이거나, 첫 낱말이 cliPath와 같거나,
+ * 인자에 `/@anthropic-ai/claude-code/`가 들었을 때. 감싸개(`bin/claude`, 셸 스크립트)는 `exec`로 진짜 CLI가 되므로
+ * 잠깐 `/bin/sh <감싸개>`로 보일 수 있는데, 첫 낱말이 `/bin/sh`라 이 규칙에 걸리지 않는다
+ */
+function looksLikeAgentCli(args: string, cliPath: string): boolean {
+  const first = args.trim().split(/\s+/)[0] ?? '';
+  return path.basename(first) === 'claude' || first === cliPath || args.includes('/@anthropic-ai/claude-code/');
+}
+
+/**
+ * root(PTY의 pid) 아래에서 도는 에이전트 CLI 중 우리 설정이 붙지 않은 것.
+ * 붙었다고 보는 것은 인자에 `--settings <settingsPath>`가 그대로 있는 것이다 — 관문 폴더 경로에 빈칸이 있어도
+ * `ps`의 인자 한 줄에서 그대로 견줄 수 있게 문자열 포함으로 본다
+ */
+export function findUnhookedCli(root: number, processes: readonly ProcessEntry[], expected: { settingsPath: string; cliPath: string }): ProcessEntry[] {
+  const children = new Map<number, ProcessEntry[]>();
+  for (const process of processes) {
+    const list = children.get(process.ppid);
+    if (list) list.push(process);
+    else children.set(process.ppid, [process]);
+  }
+  const found: ProcessEntry[] = [];
+  const seen = new Set<number>([root]);
+  // 직계 자식뿐 아니라 손자(셸 → 셸 → claude)까지 본다. 같은 pid를 두 번 보지 않는다
+  const walk = (pid: number): void => {
+    for (const child of children.get(pid) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      if (looksLikeAgentCli(child.args, expected.cliPath) && !child.args.includes(`--settings ${expected.settingsPath}`)) found.push(child);
+      walk(child.pid);
+    }
+  };
+  walk(root);
+  return found;
 }
 
 /**
@@ -334,6 +481,8 @@ export function hostShellLaunch(gatewayDir: string | undefined, env: Record<stri
 
 /** node-pty가 주는 가상 터미널에서 이 모듈이 쓰는 부분 */
 export interface HostPty {
+  /** 이 가상 터미널의 pid. 감시가 이 아래에서 훅 없이 뜬 CLI를 찾는 데 쓴다 */
+  readonly pid: number;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
@@ -366,7 +515,7 @@ export async function openHostTerminal({
   gatewayDir?: string;
   env?: Record<string, string | undefined>;
   spawnPty?: SpawnHostPty;
-}): Promise<AgentTerminal> {
+}): Promise<AgentTerminal & { pid: number }> {
   const { cols, rows } = clampTerminalSize(size);
   const launch = hostShellLaunch(gatewayDir, env);
   let pty: HostPty;
@@ -378,6 +527,7 @@ export async function openHostTerminal({
   let closed = false;
   return {
     id,
+    pid: pty.pid,
     write(data) {
       if (!closed) pty.write(data);
     },

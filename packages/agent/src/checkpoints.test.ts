@@ -1393,5 +1393,30 @@ describe('인덱스 잠금 충돌(#682)', () => {
     expect(isIndexLockFailure("fatal: pathspec 'index.lock' did not match any files")).toBe(false);
     expect(isIndexLockFailure('')).toBe(false);
   });
+
+  it('pendingFingerprint: 바뀐 파일의 경로와 내용으로 지문을 만들고, 내용이 바뀌거나 지워지면 달라진다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    // 갓 만든 세션은 바뀐 파일이 없어 빈 지문이다
+    expect(await store.pendingFingerprint()).toBe('');
+
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const edited = await store.pendingFingerprint();
+    expect(edited).toContain('api/src/Order.java');
+    // 같은 내용을 다시 재면 지문이 같다
+    expect(await store.pendingFingerprint()).toBe(edited);
+
+    // 내용이 바뀌면 지문이 달라진다
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    expect(await store.pendingFingerprint()).not.toBe(edited);
+
+    // 새 파일도 지문에 들어간다
+    await write('api/src/Extra.java', 'class Extra {}\n');
+    expect(await store.pendingFingerprint()).toContain('api/src/Extra.java');
+
+    // 추적하던 파일이 지워지면 없어진 표시가 들어간다(빈 파일과 가른다)
+    await rm(path.join(root, 'api/src/Order.java'));
+    expect(await store.pendingFingerprint()).toContain('api/src/Order.java deleted');
+  });
 });
 

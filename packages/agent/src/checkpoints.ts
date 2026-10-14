@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -420,6 +421,22 @@ export class CheckpointStore {
       }
     }
     return (await this.#fromRoot([...new Set(files)])).sort();
+  }
+
+  /**
+   * 마지막 체크포인트 이후 바뀐 파일(추적 밖 생성물 포함)의 지문. 경로와 내용의 sha256을 정렬해 하나로 잇는다.
+   * 지워진 파일은 내용 대신 표시를 넣는다(빈 파일과 없어진 파일을 가른다). 읽기만 실행이 도는 동안 작업 복사본이
+   * 바뀌었는지 시작과 끝에서 견주는 데 쓴다 — 사람이 미리 고쳐 둔 파일은 양쪽에 모두 들어가므로 다르지 않다.
+   */
+  async pendingFingerprint(): Promise<string> {
+    const projectRoot = await this.projectRoot();
+    const files = [...new Set([...(await this.pendingFiles()), ...(await this.pendingExcludedFiles())])].sort();
+    const parts: string[] = [];
+    for (const file of files) {
+      const content = await readFile(path.join(projectRoot, file)).catch(() => undefined);
+      parts.push(`${file} ${content === undefined ? 'deleted' : createHash('sha256').update(content).digest('hex')}`);
+    }
+    return parts.join('\n');
   }
 
   /** 마지막 체크포인트 이후 바뀐 파일과 바뀐 종류. 코드 화면이 추가·수정·삭제를 구분해 보여 줄 때 쓴다 */

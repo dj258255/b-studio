@@ -100,7 +100,7 @@ vi.mock('./session-terminal', () => ({
   sessionTerminalMode: () => 'container',
 }));
 
-import { cancelRun, createSession, getSnapshot, sendMessage, sessionHistory, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, sendMessage, sessionHistory, sessionTerminalTarget, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL };
 
@@ -986,6 +986,168 @@ describe('b-studio 도구와 세션의 수명', () => {
     process.env.B_STUDIO_EXPERIMENTAL = '1';
     await expect(session.gateway.stop({})).rejects.toThrow('실험 기능을 켠 개인 PC 모드에서만');
     process.env.B_STUDIO_AUTH = 'none';
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('감시가 찾은 위반은 그 실행을 통과로 남기지 않는다 (이슈 #695)', () => {
+  it('열린 실행 중 위반이 오면 그 실행을 실패로 닫고 바뀐 파일을 되돌린다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    sessionTerminalTarget(session.id).onViolation('관문 파일이 바뀌어 되돌렸습니다: settings.json');
+
+    const [finished] = await finishedRuns(session, 1);
+    expect(finished.status).toBe('failed');
+    expect(finished.summary).toContain('검증을 우회할 수 있는 일이 감지되어');
+    expect(finished.summary).toContain('바뀐 파일 1개를 되돌렸습니다');
+    expect(getSnapshot(session.id)!.running).toBe(false);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    expect(session.ofType('reverted')).toMatchObject([{ files: ['api/src/Order.java'] }]);
+    // 활동 기록에도 경고가 남는다
+    expect(session.ofType('agent').some((event) => event.event.type === 'warning' && event.event.message.includes('settings.json'))).toBe(true);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('열린 실행이 없을 때 위반이 오면 담아 두었다가 그 뒤 처음 끝나는 실행을 실패로 닫고, 그다음 실행은 평소대로다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    sessionTerminalTarget(session.id).onViolation('검증이 붙지 않은 CLI가 터미널에서 돌고 있습니다(pid 4321)');
+    // 담아 둔 위반은 세션 수준의 경고 이벤트로 활동 기록에 남는다. 아직 닫을 실행이 없다
+    expect(session.ofType('notice').some((event) => event.text.includes('검증을 우회할 수 있는 일이 감지'))).toBe(true);
+    expect(session.ofType('run_finished')).toEqual([]);
+
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toBeUndefined();
+    expect(answer.message).toContain('검증을 우회할 수 있는 일이 감지되어');
+    expect(answer.message).toContain('pid 4321');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(getSnapshot(session.id)!.running).toBe(false);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    // 되돌린 것은 보관본으로 남는다
+    expect(session.ofType('reverted')).toMatchObject([{ files: ['api/src/Order.java'] }]);
+
+    // 그다음 실행은 평소대로 게이트를 지나 체크포인트가 된다
+    await session.gateway.prompt({ prompt: '다시 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('읽기만 실행은 파일이 바뀐 채 끝나면 게이트를 돌리지 않고 되돌린다 (이슈 #695)', () => {
+  it('읽기만 실행 중 파일이 바뀐 채 턴이 끝나면 실패로 닫고 되돌린다(게이트를 돌리지 않는다)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    // 훅을 거치지 않고 파일이 바뀐다(훅이 우회된 경우)
+    await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
+    expect(answer.feedback).toBeUndefined();
+    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌어 되돌렸습니다');
+    expect(fake.execCalls).toEqual([]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(getSnapshot(session.id)!.running).toBe(false);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('읽기만 실행에서 파일이 그대로면 지금처럼 게이트 없이 끝난다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    expect(await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' })).toEqual({});
+    expect(fake.execCalls).toEqual([]);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'done', summary: '한 곳에서 씁니다.' }]);
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('검증이 도는 중에 온 위반은 통과로 남지 않는다 (이슈 #695 수정)', () => {
+  it('게이트가 도는 동안 위반이 오면 그 실행을 실패로 닫고 체크포인트를 남기지 않는다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    // 선언한 테스트가 끝나지 않고 멈춰 있게 만든다(게이트가 도는 중)
+    let release = (): void => {};
+    fake.holdWord = 'test';
+    fake.hold = new Promise<void>((resolve) => (release = resolve));
+    const stopping = session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    while (!fake.execCalls.some((command) => command.includes('test'))) await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // 게이트가 도는 중에 위반이 온다. 큐를 기다리지 않고 곧바로 표시되어야 한다
+    sessionTerminalTarget(session.id).onViolation('관문 파일이 바뀌어 되돌렸습니다: settings.json');
+    release();
+    const answer = await stopping;
+
+    expect(answer.feedback).toBeUndefined();
+    expect(answer.message).toContain('검증을 우회할 수 있는 일이 감지되어');
+    expect(answer.message).toContain('바뀐 파일 1개를 되돌렸습니다');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(getSnapshot(session.id)!.running).toBe(false);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    // 되돌린 것은 한 번만 남는다(큐에 넣은 abandon과 겹쳐 두 번 닫지 않는다)
+    expect(session.ofType('reverted')).toHaveLength(1);
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('멈춘 세션에 온 위반은 남지 않는다 (이슈 #695 수정)', () => {
+  it('세션을 멈춘 뒤 온 위반은 경고도 담아 둔 위반도 남기지 않는다', async () => {
+    const session = await open();
+    const target = sessionTerminalTarget(session.id);
+    await stopSession(session.id);
+    const notices = session.ofType('notice').length;
+    const warnings = session.ofType('agent').filter((event) => event.event.type === 'warning').length;
+
+    target.onViolation('관문 파일이 바뀌어 되돌렸습니다: settings.json');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(session.ofType('notice')).toHaveLength(notices);
+    expect(session.ofType('agent').filter((event) => event.event.type === 'warning')).toHaveLength(warnings);
+    expect(session.ofType('run_finished')).toEqual([]);
+    expect(getSnapshot(session.id)!.status).toBe('stopped');
+  }, 30_000);
+});
+
+describe('읽기만 실행은 사람이 미리 고쳐 둔 파일로 오탐하지 않는다 (이슈 #695 수정)', () => {
+  it('사람이 고쳐 둔 파일이 있는 채 읽기만 요청이 아무것도 안 바꾸고 끝나면 done이고 그 파일은 그대로다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    // 사람이 요청 전에 셸에서 파일을 고쳐 둔다
+    await edit(session, 'api/src/Human.java', 'class Human {}\n');
+
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    expect(await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' })).toEqual({});
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'done' }]);
+    // 게이트를 돌리지 않았고 체크포인트도 만들지 않았다
+    expect(fake.execCalls).toEqual([]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    // 사람의 파일은 그대로 남아 있다
+    expect(await fileOf(session, 'api/src/Human.java')).toBe('class Human {}\n');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('같은 상태에서 요청 도중 파일이 하나 더 바뀌면 실패로 닫고 되돌린다', async () => {
+    const session = await open();
+    await edit(session, 'api/src/Human.java', 'class Human {}\n');
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    // 요청 도중 훅을 거치지 않고 파일이 바뀐다
+    await edit(session, 'api/src/Order.java', 'class Order { String hacked; }\n');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
+    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌어 되돌렸습니다');
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
     await stopSession(session.id);
   }, 30_000);
 });
