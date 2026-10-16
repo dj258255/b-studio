@@ -27,6 +27,7 @@ import { StatusPanel } from "./status-panel";
 import { SubmissionPanel } from "./submission-panel";
 import { TestsPanel } from "./tests-panel";
 import { TokenView } from "./token-view";
+import { useScrollFade } from "./use-scroll-fade";
 import { useSubTab } from "./use-sub-tab";
 
 /**
@@ -68,23 +69,30 @@ export function PreviewPanel({ view }: { view: SessionView }) {
     setRequirementsSubTab("spec");
   }
 
+  // 좁은 화면에서 탭이 넘치면 가장자리를 흐려 넘길 수 있음을 알리고, 고른 탭은 보이도록 넘긴다
+  const tablistRef = useRef<HTMLDivElement>(null);
+  useScrollFade(tablistRef, active.id, tabs.map((tab) => tab.id).join(" "));
+
   return (
     <section className="flex min-h-0 flex-col gap-2" aria-label="미리보기">
-      <div role="tablist" aria-label="미리보기 대상" className="glass flex max-w-full gap-1 self-start overflow-x-auto rounded-panel p-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            role="tab"
-            type="button"
-            aria-selected={tab.id === active.id}
-            onClick={() => setActiveId(tab.id)}
-            className={`shrink-0 rounded-control px-3.5 py-1.5 text-sm font-medium whitespace-nowrap ${
-              tab.id === active.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      {/* 유리 표면은 바깥에 두고 안쪽 막대만 넘기고 흐린다(흐림 마스크가 유리의 그림자까지 자르지 않게) */}
+      <div className="glass max-w-full self-start rounded-panel p-1">
+        <div ref={tablistRef} role="tablist" aria-label="미리보기 대상" className="scroll-fade-x flex gap-1 overflow-x-auto">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              role="tab"
+              type="button"
+              aria-selected={tab.id === active.id}
+              onClick={() => setActiveId(tab.id)}
+              className={`tap-target shrink-0 rounded-control px-3.5 py-1.5 text-sm font-medium whitespace-nowrap ${
+                tab.id === active.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div role="tabpanel" className="min-h-0 flex-1 overflow-hidden rounded-panel border border-line bg-panel">
@@ -196,7 +204,7 @@ function SubTabBar({ label, options, active, onChange }: { label: string; option
           role="tab"
           aria-selected={active === option.id}
           onClick={() => onChange(option.id)}
-          className={`rounded-md px-2.5 py-1 font-medium transition-colors ${active === option.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
+          className={`tap-target rounded-md px-2.5 py-1 font-medium transition-colors ${active === option.id ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
         >
           {option.label}
         </button>
