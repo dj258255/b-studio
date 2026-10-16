@@ -36,6 +36,8 @@ const fake = vi.hoisted(() => ({
   hold: undefined as Promise<void> | undefined,
   /** 서비스가 떠 있는 주소. 테스트마다 계약을 내놓는 작은 서버를 띄운다 */
   serviceUrl: 'http://127.0.0.1:1',
+  /** 세션 터미널 방식. 'host'(이 컴퓨터 방식)면 작업 복사본의 Git을 더 의심한다(이슈 #706) */
+  terminalMode: 'container' as 'container' | 'host',
 }));
 
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
@@ -97,7 +99,7 @@ vi.mock('./session-terminal', () => ({
   noteSessionTerminalCli: (_sessionId: string, alive: boolean) => {
     fake.cli.push(alive);
   },
-  sessionTerminalMode: () => 'container',
+  sessionTerminalMode: () => fake.terminalMode,
 }));
 
 import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
@@ -135,6 +137,7 @@ workflow:
   fake.interrupts = [];
   fake.holdWord = undefined;
   fake.hold = undefined;
+  fake.terminalMode = 'container';
   await serveContract();
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
@@ -192,9 +195,9 @@ interface Opened {
   ofType<T extends StudioEvent['type']>(type: T): Array<Extract<StudioEvent, { type: T }>>;
 }
 
-async function open({ lazy = false }: { lazy?: boolean } = {}): Promise<Opened> {
+async function open({ lazy = false, workspace = 'copy' }: { lazy?: boolean; workspace?: 'copy' | 'local' } = {}): Promise<Opened> {
   // lazy: 사람이 만든 일반 세션처럼 샌드박스를 필요할 때 켠다(개인 PC 모드의 기본)
-  const id = (await createSession('termgw', 'kim', 'copy', lazy ? { boot: 'on-demand' } : {})).id;
+  const id = (await createSession('termgw', 'kim', workspace, lazy ? { boot: 'on-demand' } : {})).id;
   const started = Date.now();
   while (getSnapshot(id)?.status !== (lazy ? 'idle' : 'ready')) {
     if (Date.now() - started > 10_000) throw new Error(`세션이 준비되지 않았습니다 (${getSnapshot(id)?.status})`);
@@ -1310,6 +1313,70 @@ describe('작업 복사본의 Git을 믿지 않는다 (이슈 #699)', () => {
     // 게이트를 돌리지 않았고 체크포인트도 만들지 않았다
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
     expect(session.ofType('run_finished').at(-1)!).toMatchObject({ status: 'failed' });
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('끼워 넣은 커밋을 체크포인트로 받아들이지 않는다 (이슈 #706)', () => {
+  const FORGED = '꾸민 체크포인트';
+  /** b-studio의 체크포인트처럼 꾸민 커밋을 넣는다(같은 작성자 이메일, 통과 트레일러). 무시되는 파일만 강제로 더한다 */
+  async function forge(gitArgs: string[], work: string): Promise<string> {
+    const run = async (...args: string[]) => (await execFileAsync('git', [...gitArgs, ...args])).stdout.trim();
+    await mkdir(path.join(work, 'node_modules'), { recursive: true });
+    await writeFile(path.join(work, 'node_modules/forged.js'), 'forged\n');
+    await run('add', '-f', 'node_modules/forged.js');
+    await run('-c', 'user.name=b-studio', '-c', 'user.email=verify@example.com', 'commit', '-q', '-m', FORGED, '-m', 'Workflow-Passed: run, contract_check, test, review');
+    return run('rev-parse', 'HEAD');
+  }
+
+  it('게이트가 도는 동안 뒤에서 커밋을 끼워 넣으면 그 위에 체크포인트를 남기지 않고, 끼워 넣은 커밋도 기록에 남지 않는다', async () => {
+    fake.terminalMode = 'host';
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    const remembered = rememberedGitForTest(session.id)!;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    let release = (): void => {};
+    fake.holdWord = 'test';
+    fake.hold = new Promise<void>((resolve) => (release = resolve));
+    const stopping = session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    while (!fake.execCalls.some((command) => command.includes('test'))) await new Promise((resolve) => setTimeout(resolve, 10));
+    // 게이트가 도는 사이에 뒤에서 돌던 프로세스가 커밋을 끼워 넣는다
+    await forge(['-C', session.work], session.work);
+    release();
+
+    const answer = await stopping;
+    expect(answer.message).not.toContain('검증 통과');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished').at(-1)!).toMatchObject({ status: 'failed' });
+    // 기억한 체크포인트로 돌아왔고, 꾸민 커밋은 세션 기록에 없다
+    expect((await git(session, 'rev-parse', 'HEAD')).trim()).toBe(remembered.lastCheckpoint);
+    expect(rememberedGitForTest(session.id)!.lastCheckpoint).toBe(remembered.lastCheckpoint);
+    expect(await git(session, 'log', '--format=%s', 'HEAD')).not.toContain(FORGED);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('턴 사이에 끼워 넣은 커밋은 다음 요청을 시작할 때 사람의 수정과 함께 체크포인트로 굳히지 않는다(내 폴더)', async () => {
+    fake.terminalMode = 'host';
+    const session = await open({ workspace: 'local' });
+    const remembered = rememberedGitForTest(session.id)!;
+    const gitDir = path.join(getSnapshot(session.id)!.stateDir!, '.git');
+    // 턴 사이: 사람이 파일을 고쳐 두고, 뒤에서 돌던 프로세스가 체크포인트 저장소에 커밋을 끼워 넣는다
+    await edit(session, 'api/src/Order.java', 'class Order { String human; }\n');
+    const forged = await forge(['--git-dir', gitDir, '--work-tree', session.work], session.work);
+
+    await session.gateway.prompt({ prompt: '주문 설명을 알려줘' });
+    const log = (await execFileAsync('git', ['--git-dir', gitDir, 'log', '--format=%H %s', 'HEAD'])).stdout;
+    // 꾸민 커밋은 기록에 없고, 기억한 체크포인트는 b-studio가 남긴 커밋이다
+    expect(log).not.toContain(forged);
+    expect(log).not.toContain(FORGED);
+    const now = rememberedGitForTest(session.id)!;
+    expect(now.lastCheckpoint).not.toBe(forged);
+    expect(getSnapshot(session.id)!.checkpoints.some((checkpoint) => checkpoint.passedStages !== undefined)).toBe(false);
+    // 사람의 수정은 잃지 않았다
+    expect(await fileOf(session)).toBe('class Order { String human; }\n');
+    expect(now.lastCheckpoint === remembered.lastCheckpoint || log.includes(now.lastCheckpoint)).toBe(true);
+    await session.gateway.stop({ last_assistant_message: '설명했습니다.' });
     await stopSession(session.id);
   }, 30_000);
 });
