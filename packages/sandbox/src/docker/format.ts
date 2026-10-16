@@ -8,7 +8,7 @@ export { DEFAULT_EGRESS_ALLOW, EDGE_PROXY_PORT, EDGE_SERVICE, edgePortFor } from
 /** 외부로 나갈 수 없는 네트워크. 모든 서비스가 여기에만 붙는다 */
 export const SANDBOX_NETWORK = 'b-studio-sandbox';
 /** edge만 붙는 네트워크. 허용한 외부 호스트로 나갈 때 쓴다 */
-const EGRESS_NETWORK = 'b-studio-egress';
+export const EGRESS_NETWORK = 'b-studio-egress';
 
 /**
  * 사용자의 compose 파일은 건드리지 않고 덧씌울 설정.
