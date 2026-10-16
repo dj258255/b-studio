@@ -234,6 +234,21 @@ export class StagedMismatchError extends CheckpointError {
 }
 
 /** 원격 커밋과 같은 곳을 고쳐 가져오지 못했다. 작업 복사본은 가져오기 전 그대로다 */
+/**
+ * 체크포인트를 남기려는데 HEAD가 b-studio가 기대한 커밋이 아니다(이슈 #706). 이 컴퓨터 방식에서 뒤에서 도는 프로세스가 커밋을
+ * 끼워 넣으면 그 위에 체크포인트를 쌓지 않는다. 끼워 넣은 커밋이 b-studio의 작성자와 통과 트레일러를 흉내 내도 기록에 들어가지 않는다
+ */
+export class HeadMovedError extends CheckpointError {
+  readonly expected: string;
+  readonly actual: string;
+  constructor(expected: string, actual: string) {
+    super(`HEAD(${actual.slice(0, 7)})가 b-studio가 마지막으로 남긴 체크포인트(${expected.slice(0, 7)})와 달라 체크포인트를 남기지 않았습니다`);
+    this.name = 'HeadMovedError';
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 export class RemoteConflictError extends CheckpointError {
   readonly conflicts: string[];
 
@@ -265,21 +280,43 @@ const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-stud
  * 것이 달라진다. hooksPath를 /dev/null로 두면 `<hooksPath>/<훅 이름>`이 없어 어떤 훅도 돌지 않는다.
  * 모든 git 호출의 인자 맨 앞(하위 명령보다 앞)에 붙인다
  */
-export const GIT_HARDENING = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'];
+export const GIT_HARDENING = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=/dev/null'];
 /**
- * 올리기·가져오기 전에 없어야 하는 저장소 로컬 설정(이슈 #699, 대소문자 무시). 원격 주소를 바꾸거나 자격 증명을
- * 가로챌 수 있는 값들이다. 사용자의 전역 설정은 보지 않고(`git config --local`) 에이전트가 작업 복사본의
- * `.git/config`에 넣은 것만 잡는다
+ * 작업 복사본의 저장소 설정(로컬·worktree 범위, include로 끌어온 것 포함)에 없어야 하는 키(이슈 #699·#706, 대소문자 무시).
+ * 원격 주소를 바꾸거나 자격 증명을 가로채는 값, b-studio의 git이 프로그램을 부르게 하는 값(필터, diff·병합 드라이버,
+ * 서명 프로그램, 프록시), 작업 폴더를 옮기는 값이다. include는 펼쳐 읽지만 키 자체도 막는다(조건부 include는 읽는 쪽과
+ * 쓰는 쪽에서 조건이 다르게 풀릴 수 있다). 사용자의 전역·시스템 설정은 보지 않는다
  */
 const DANGEROUS_LOCAL_CONFIG = [
+  /^include\./i,
+  /^includeif\./i,
   /^url\..*\.insteadof$/i,
   /^url\..*\.pushinsteadof$/i,
   /^credential\./i,
-  /^core\.sshcommand$/i,
-  /^http\..*\.extraheader$/i,
-  /^remote\.origin\.pushurl$/i,
-  /^remote\.origin\.receivepack$/i,
+  /^core\.(sshcommand|gitproxy|askpass|worktree)$/i,
+  /^http\.(.*\.)?(extraheader|proxy|ssl|cookiefile)/i,
+  /^remote\..*\.(pushurl|receivepack|uploadpack|proxy|vcs)/i,
+  /^protocol\./i,
+  /^filter\./i,
+  /^diff\.external$/i,
+  /^diff\..*\.(textconv|command)$/i,
+  /^merge\..*\.driver$/i,
+  /^gpg\./i,
 ];
+/** 켜져 있으면 막는 키. b-studio가 스스로 false로 넣는 commit.gpgsign이 여기 있다 */
+const DANGEROUS_WHEN_ENABLED = [/^commit\.gpgsign$/i, /^tag\.gpgsign$/i];
+/**
+ * b-studio의 git에 넘기는 환경 변수 중 GIT_*로 시작해도 남기는 것(이슈 #706). 나머지 GIT_*(GIT_DIR, GIT_INDEX_FILE,
+ * GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT 등)는 스튜디오 프로세스에 우연히 들어 있어도 넘기지 않는다 — 저장소·인덱스·설정을
+ * 바꿔 b-studio가 본 것과 다른 것을 커밋하게 한다. PATH·HOME·프록시·인증서 변수는 자격 증명 도우미와 원격 연결에 필요해 그대로 둔다
+ */
+const PASSED_GIT_ENV = new Set([
+  'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
+  'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_SSH_VARIANT', 'GIT_ASKPASS',
+  'GIT_SSL_CAINFO', 'GIT_SSL_CAPATH',
+  'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM',
+]);
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
 const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts', '*.b-studio-relay-*'];
 /** discard()·restore() 백업을 이 안에 둔다(ADR-099). 작업 복사본이 아니라 체크포인트 저장소 쪽이라 커밋·게이트에 걸리지 않는다 */
@@ -526,6 +563,7 @@ export class CheckpointStore {
       findSecrets,
       trailers = [],
       expectStaged,
+      expectedHead,
     }: {
       allowEmpty?: boolean;
       findSecrets?: (text: string) => string[];
@@ -538,10 +576,18 @@ export class CheckpointStore {
        * 체크포인트에 들어가지 않게 한다
        */
       expectStaged?: ReadonlyMap<string, string>;
+      /**
+       * b-studio가 마지막으로 남긴 체크포인트(이슈 #706). 주면 지금 HEAD가 이것과 같을 때만 그 위에 커밋하고, 다르면
+       * HeadMovedError를 던진다. 주지 않으면 이 함수가 시작할 때의 HEAD를 부모로 삼는다. 어느 쪽이든 HEAD를 바꾸는 순간에
+       * 원자적으로 비교하므로, 스테이징과 커밋 사이에 끼어든 커밋 위에 쌓지 않는다
+       */
+      expectedHead?: string;
     } = {},
   ): Promise<Checkpoint | undefined> {
     const pending = await this.pendingFiles();
     if (!allowEmpty && pending.length === 0) return undefined;
+    // 부모는 스테이징하기 전에 정한다. 그 뒤에 끼어든 커밋은 HEAD를 옮길 때 걸린다
+    const parent = await this.#expectHead(expectedHead);
     // 마지막 방어선(ADR-131, session 5b640fd3 사고): 코드 변경(문서가 아닌 파일)이 있는데 트레일러가 검증
     // 게이트를 거쳤다는 기록을 "none"(통과한 단계 없음)으로 명시하면 체크포인트를 만들지 않는다. 트레일러
     // 자체가 없는 경우(commitLocalEdits처럼 애초에 게이트를 거치지 않기로 한 경로)는 다른 이야기라 막지 않는다
@@ -558,6 +604,8 @@ export class CheckpointStore {
       const leaks = await this.#secretLeaks(pending, `${message}\n${body ?? ''}`, findSecrets);
       if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
     }
+    // add는 저장소 설정의 필터를 돈다. 돌기 전에 설정을 본다(이슈 #706)
+    await this.#assertSafeLocalGit();
     await this.#git(['add', '-A', ...(await this.#scope())]);
     if (expectStaged) {
       const mismatched = await this.#stagedMismatch(expectStaged).catch(async (error: unknown) => {
@@ -570,13 +618,12 @@ export class CheckpointStore {
       }
     }
     const text = body?.trim();
-    // 기본 정리 모드는 #으로 시작하는 줄(마크다운 제목)을 지우므로 공백만 정리한다
-    await this.#git([
-      'commit', '-q', '--cleanup=whitespace', ...(allowEmpty ? ['--allow-empty'] : []),
-      '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
-      ...(trailers.length > 0 ? ['-m', trailers.map(oneLine).join('\n')] : []),
-    ]);
-    const checkpoint = await this.#checkpoint('HEAD');
+    const tree = (await this.#git(['write-tree'])).trim();
+    const sha = await this.#commitTree(tree, parent, commitMessage(message, text, trailers), { allowEmpty }).catch(async (error: unknown) => {
+      await this.#git(['reset', '-q', ...(await this.#scope())]).catch(() => {});
+      throw error;
+    });
+    const checkpoint = await this.#checkpoint(sha);
     await this.refreshExcludedSnapshot(checkpoint.sha);
     return checkpoint;
   }
@@ -587,6 +634,8 @@ export class CheckpointStore {
    * 없는 파일은 `missing`, 링크는 `link:<가리키는 곳>`, 그 밖(폴더, 장치)은 `other`다.
    */
   async stagedFingerprints(files: readonly string[]): Promise<Map<string, string>> {
+    // hash-object도 add처럼 필터를 돈다. 돌기 전에 설정을 본다(이슈 #706)
+    await this.#assertSafeLocalGit();
     const projectRoot = await this.projectRoot();
     const subdir = await this.#subdir();
     const prints = new Map<string, string>();
@@ -642,7 +691,11 @@ export class CheckpointStore {
     paths: readonly string[],
     message: string,
     body?: string,
-    { findSecrets, trailers = [] }: { findSecrets?: (text: string) => string[]; trailers?: readonly string[] } = {},
+    {
+      findSecrets,
+      trailers = [],
+      expectedHead,
+    }: { findSecrets?: (text: string) => string[]; trailers?: readonly string[]; /** commit()의 expectedHead와 같다(이슈 #706) */ expectedHead?: string } = {},
   ): Promise<Checkpoint | undefined> {
     if (paths.length === 0) return undefined;
     const subdir = await this.#subdir();
@@ -653,16 +706,23 @@ export class CheckpointStore {
       const leaks = await this.#secretLeaks(paths, `${message}\n${body ?? ''}`, findSecrets);
       if (leaks.length > 0) throw new CheckpointError(`시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: ${leaks.join(', ')}`);
     }
-    const parentSha = await this.#headSha();
+    const parentSha = await this.#expectHead(expectedHead);
+    await this.#assertSafeLocalGit();
+    // 부모의 트리에 이 경로들만 얹은 트리를 따로 만든다(git commit -- 경로와 같은 결과). 진짜 인덱스의 다른 스테이징은 건드리지 않는다
+    const gitDir = (await this.#git(['rev-parse', '--absolute-git-dir'])).trim();
+    const index = path.join(gitDir, `b-studio-index-${process.pid}-${backupId()}`);
+    let tree: string;
+    try {
+      const env = { GIT_INDEX_FILE: index };
+      await this.#git(['read-tree', parentSha], { env });
+      await this.#git(['add', '-A', '--', ...scoped], { env });
+      tree = (await this.#git(['write-tree'], { env })).trim();
+    } finally {
+      await rm(index, { force: true });
+    }
     await this.#git(['add', '-A', '--', ...scoped]);
-    const text = body?.trim();
-    await this.#git([
-      'commit', '-q', '--cleanup=whitespace',
-      '-m', oneLine(message), ...(text ? ['-m', capText(text, MAX_BODY_CHARS)] : []),
-      ...(trailers.length > 0 ? ['-m', trailers.map(oneLine).join('\n')] : []),
-      '--', ...scoped,
-    ]);
-    const checkpoint = await this.#checkpoint('HEAD');
+    const sha = await this.#commitTree(tree, parentSha, commitMessage(message, body?.trim(), trailers), { allowEmpty: false });
+    const checkpoint = await this.#checkpoint(sha);
     // 범위를 좁힌 커밋이라 생성 파일은 바꾸지 않았다 — 지금 디스크를 받아들이지 않고 부모의 스냅샷을 그대로 물려받는다
     await this.#carryForwardExcludedSnapshot(parentSha, checkpoint.sha);
     return checkpoint;
@@ -1064,10 +1124,12 @@ export class CheckpointStore {
    */
   async exportTree(sha: string, dest: string): Promise<string> {
     const commit = await this.#resolve(sha);
+    // archive는 smudge 필터와 export-subst·export-ignore 속성을 따른다. 검증한 체크포인트와 다른 것이 나가지 않게 먼저 본다(이슈 #706)
+    await this.#assertSafeLocalGit();
     await mkdir(dest, { recursive: true });
     const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
     await new Promise<void>((resolve, reject) => {
-      const git = spawn(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'archive', '--format=tar', commit], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const git = spawn(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'archive', '--format=tar', commit], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv() });
       // root로 돌면 GNU tar는 기록된 소유자(uid 0)로 chown하려 해, 호스트 폴더를 마운트한 컨테이너에서 실패한다 (docs/troubleshooting.md 34)
       const tar = spawn('tar', ['-x', '--no-same-owner', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
       git.stdout.pipe(tar.stdin);
@@ -1224,17 +1286,88 @@ export class CheckpointStore {
     }
   }
 
-  /** 저장소 로컬 설정에 원격 주소를 바꾸거나 자격 증명을 가로챌 수 있는 값이 있으면 그 키 이름들(이슈 #699) */
+  /**
+   * 저장소 설정에 원격 주소를 바꾸거나, 자격 증명을 가로채거나, b-studio의 git이 프로그램을 부르게 하는 값이 있으면 그 설명들
+   * (이슈 #699·#706). git이 실제로 읽는 규칙 그대로 읽는다: include를 펼치고(`--includes`), worktree 설정(`config.worktree`)도
+   * 포함한다. 범위(`--show-scope`)가 local·worktree인 것만 본다 — 전역·시스템 설정은 사용자의 것이고, command는 b-studio가 붙인 `-c`다
+   */
   async #dangerousLocalConfig(): Promise<string[]> {
-    // 값에 개행이 들어갈 수 있어 -z(NUL 구분)로 읽고, 각 항목은 "키\n값" 꼴이다.
+    // 값에 개행이 들어갈 수 있어 -z(NUL 구분)로 읽는다. 항목마다 "범위\0출처\0키\n값\0"이다.
     // 읽지 못하면 빈 목록이 아니라 던진다 — 확인하지 못한 것을 "위험한 값이 없다"로 보면 안 된다
-    const out = await this.#git(['config', '--local', '--list', '-z']);
+    const fields = (await this.#git(['config', '--list', '--includes', '--show-scope', '--show-origin', '-z'])).split('\0');
+    if (fields.at(-1) === '') fields.pop();
+    if (fields.length % 3 !== 0) throw new CheckpointError('저장소 설정을 읽었지만 형식을 알아보지 못해 확인하지 못했습니다');
     const found: string[] = [];
-    for (const entry of out.split('\0').filter(Boolean)) {
-      const key = entry.split('\n')[0]!;
-      if (DANGEROUS_LOCAL_CONFIG.some((pattern) => pattern.test(key))) found.push(`저장소 설정에 ${key}이(가) 있습니다`);
+    for (let index = 0; index < fields.length; index += 3) {
+      const scope = fields[index]!;
+      if (scope !== 'local' && scope !== 'worktree') continue;
+      const entry = fields[index + 2]!;
+      const newline = entry.indexOf('\n');
+      const key = newline < 0 ? entry : entry.slice(0, newline);
+      const value = newline < 0 ? 'true' : entry.slice(newline + 1);
+      const enabled = !/^(false|no|off|0)$/i.test(value.trim());
+      // 작업 폴더 밖 저장소(내 폴더 방식)는 git init이 core.worktree를 적고, b-studio는 --work-tree를 직접 넘겨 그 값을 쓰지 않는다
+      if (/^core\.worktree$/i.test(key) && this.#separateGitDir) continue;
+      if (DANGEROUS_LOCAL_CONFIG.some((pattern) => pattern.test(key)) || (enabled && DANGEROUS_WHEN_ENABLED.some((pattern) => pattern.test(key)))) {
+        found.push(`저장소 설정에 ${key}이(가) 있습니다${scope === 'worktree' ? '(config.worktree)' : ''}`);
+      }
     }
     return found;
+  }
+
+  /**
+   * `.git/info/attributes`에 적힌 속성(이슈 #706). 커밋에 들어가지 않고 에이전트가 고칠 수 있는 파일인데, 필터·diff·병합
+   * 드라이버를 걸거나 내보내기(git archive)에서 파일을 빼고 바꾼다(export-ignore, export-subst). b-studio는 이 파일을 쓰지 않으므로
+   * 주석과 빈 줄이 아닌 줄이 있으면 모두 알린다
+   */
+  async #infoAttributes(): Promise<string[]> {
+    const file = path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', 'info/attributes'])).trim());
+    const text = await readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return '';
+      throw new CheckpointError(`.git/info/attributes를 읽지 못해 확인하지 못했습니다: ${error.message}`);
+    });
+    const lines = text.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+    return lines.length > 0 ? [`.git/info/attributes에 속성이 있습니다: ${lines.slice(0, 3).join(' / ')}`] : [];
+  }
+
+  /**
+   * add·hash-object·commit·archive처럼 저장소 설정에 따라 프로그램을 부르거나 내용을 바꾸는 명령 앞에서 본다(이슈 #706).
+   * 위험한 설정이나 `.git/info/attributes`가 있으면 던진다. 컨테이너 방식은 `.git`이 읽기 전용이라 여기 걸릴 것이 없다
+   */
+  async #assertSafeLocalGit(): Promise<void> {
+    const found = [...(await this.#dangerousLocalConfig()), ...(await this.#infoAttributes())];
+    if (found.length > 0) {
+      throw new CheckpointError(
+        `작업 복사본의 Git 설정이 b-studio가 커밋하거나 내보내는 내용을 바꿀 수 있어 멈췄습니다:\n- ${found.join('\n- ')}\n사람이 직접 고친 것이면 되돌린 뒤 다시 시도하세요.`,
+      );
+    }
+  }
+
+  /** expectedHead를 주면 지금 HEAD가 그것과 같은지 보고, 그 sha(주지 않았으면 지금 HEAD)를 돌려준다(이슈 #706) */
+  async #expectHead(expectedHead: string | undefined): Promise<string> {
+    const head = (await this.#git(['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
+    if (expectedHead !== undefined && head !== expectedHead) throw new HeadMovedError(expectedHead, head);
+    return head;
+  }
+
+  /**
+   * 트리와 부모를 정해 커밋을 만들고, HEAD가 아직 그 부모일 때만 HEAD를 옮긴다(이슈 #706). `git commit`은 그 순간의 HEAD를
+   * 부모로 삼아, 스테이징과 커밋 사이에 끼어든 커밋 위에 체크포인트를 쌓았다. `update-ref`의 옛 값 비교는 ref 잠금 안에서 한다.
+   * 옮기지 못하면 HeadMovedError를 던진다. 만든 커밋의 sha를 돌려준다
+   */
+  async #commitTree(tree: string, parent: string, message: string, { allowEmpty }: { allowEmpty: boolean }): Promise<string> {
+    if (!allowEmpty && tree === (await this.#git(['rev-parse', `${parent}^{tree}`])).trim()) {
+      throw new CheckpointError('git commit 실패: 커밋할 변경이 없습니다');
+    }
+    const sha = (await this.#git(['commit-tree', tree, '-p', parent, '-m', message])).trim();
+    try {
+      await this.#git(['update-ref', '-m', `commit: ${message.split('\n')[0]}`, 'HEAD', sha, parent]);
+    } catch (error) {
+      const head = await this.#git(['rev-parse', '--verify', 'HEAD']).then((out) => out.trim(), () => '');
+      if (head !== parent) throw new HeadMovedError(parent, head);
+      throw error;
+    }
+    return sha;
   }
 
   /**
@@ -1674,9 +1807,12 @@ export class CheckpointStore {
     await appendFile(file, `${separator}# b-studio 샌드박스 생성물\n${missing.join('\n')}\n`);
   }
 
-  async #git(args: string[], options?: { timeout?: number }): Promise<string> {
+  async #git(args: string[], options?: { timeout?: number; env?: Record<string, string> }): Promise<string> {
     const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
-    return runGit(this.#gitBin, ['-C', this.root, ...location, ...args], options);
+    // diff·show의 출력은 리뷰·화면·보관본으로 간다. 저장소 설정의 외부 diff와 textconv가 내용을 바꾸지 못하게 한다(이슈 #706)
+    const [command, ...rest] = args;
+    const hardened = command === 'diff' || command === 'show' ? [command, '--no-ext-diff', '--no-textconv', ...rest] : args;
+    return runGit(this.#gitBin, ['-C', this.root, ...location, ...hardened], options);
   }
 }
 
@@ -1701,18 +1837,13 @@ export function isIndexLockFailure(stderr: string): boolean {
  *   읽기 명령이 잠금을 잡지 않게 한다. 내 폴더 모드에서 사용자의 IDE·셸이 돌리는 git을 방해하지 않는 효과도 있다
  * - 그래도 부딪히면(쓰기끼리, 또는 스튜디오 밖의 git과) 잠깐 기다렸다 다시 한다
  */
-async function runGit(gitBin: string, args: string[], { timeout }: { timeout?: number } = {}): Promise<string> {
+async function runGit(gitBin: string, args: string[], { timeout, env }: { timeout?: number; env?: Record<string, string> } = {}): Promise<string> {
   for (let attempt = 0; ; attempt++) {
     try {
       const { stdout } = await execFileAsync(gitBin, [...GIT_HARDENING, ...args], {
         maxBuffer: 64 * 1024 * 1024,
         timeout,
-        env: {
-          ...process.env,
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_OPTIONAL_LOCKS: '0',
-          GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes',
-        },
+        env: { ...gitEnv(), ...env },
       });
       return stdout;
     } catch (error) {
@@ -1727,6 +1858,43 @@ async function runGit(gitBin: string, args: string[], { timeout }: { timeout?: n
       throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${stderr ? `: ${stderr}` : ''}`);
     }
   }
+}
+
+/**
+ * b-studio가 부르는 git의 환경(이슈 #706). 스튜디오 프로세스의 환경에서 PASSED_GIT_ENV 밖의 GIT_*를 빼고, 사람의 입력을
+ * 기다리지 않게 하는 값과 시스템 속성 파일을 읽지 않는 값을 더한다. 시스템 설정(GIT_CONFIG_NOSYSTEM)은 끄지 않는다 — macOS의
+ * git은 자격 증명 도우미(osxkeychain)를 시스템 설정에 두고, 그 파일은 에이전트가 고칠 수 없다
+ */
+export function gitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^GIT_/i.test(key) && !PASSED_GIT_ENV.has(key)) delete env[key];
+  }
+  return {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND ?? 'ssh -o BatchMode=yes',
+  };
+}
+
+/** 체크포인트 커밋 메시지. `git commit --cleanup=whitespace -m 제목 -m 본문 -m 트레일러`가 만드는 것과 같은 글이다 */
+function commitMessage(subject: string, body: string | undefined, trailers: readonly string[]): string {
+  const paragraphs = [oneLine(subject), ...(body ? [capText(body, MAX_BODY_CHARS)] : []), ...(trailers.length > 0 ? [trailers.map(oneLine).join('\n')] : [])];
+  return stripSpace(paragraphs.join('\n\n'));
+}
+
+/** `git stripspace`(주석은 남긴다): 줄 끝 공백을 지우고, 빈 줄 여럿을 하나로 줄이고, 앞뒤의 빈 줄을 없앤다. 끝 줄바꿈은 붙이지 않는다 */
+function stripSpace(text: string): string {
+  const lines: string[] = [];
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/[ \t\r\v\f]+$/, '');
+    if (line === '' && (lines.length === 0 || lines.at(-1) === '')) continue;
+    lines.push(line);
+  }
+  while (lines.at(-1) === '') lines.pop();
+  return lines.join('\n');
 }
 
 /** 오류 메시지에 넣을 git 하위 명령. 앞에 붙인 위치·설정 옵션(-C, --git-dir, --work-tree, -c)과 그 값은 건너뛴다 */

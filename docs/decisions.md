@@ -7820,6 +7820,37 @@ ADR-094는 "문서 쓰기는 코드 읽기의 부속이 아니라 요구사항 �
 - 브랜치 전환으로 실패할 때 남는 글이 "보관본으로 남겼습니다" 뒤에 "바뀐 파일은 없었습니다"를 붙인다(보관한 뒤 되돌릴 것이 없어서다). 사실과 어긋나지는 않지만 헷갈린다.
 - 사용자 원본 폴더를 따라잡는 `project-source-sync`의 `merge --ff-only`는 그 폴더의 훅을 돌 수 있다(세션 작업 복사본이 아니라 손대지 않았다).
 
+
+### 덧붙임: 기대한 부모로만 커밋하고 git 설정·필터를 막는다(이슈 [#706](https://github.com/dj258255/b-studio/issues/706))
+#699 뒤에 남은 틈 셋을 코드를 읽어 찾았다.
+- 요청을 시작할 때 스튜디오 밖의 수정을 체크포인트로 남기는 커밋이 HEAD를 확인하지 않았고, 그 뒤 기억을 지금 HEAD로 새로 잡았다. 턴 사이에 끼워 넣은 커밋이 b-studio의 작성자 이메일과 `Workflow-Passed:` 트레일러를 흉내 내면 통과한 체크포인트로 읽혔다. 게이트가 도는 동안 끼워 넣은 커밋도 체크포인트 커밋의 부모가 되어 같은 길로 들어갔고, 되돌리기도 끝에서 지금 HEAD를 다시 기억했다.
+- 위험 설정 검사가 `git config --local --list`라 `include.path`·`includeIf`와 `config.worktree`를 펼치지 않았다. 검사는 원격 명령 앞에서만 돌았다.
+- b-studio의 git은 저장소 설정의 clean·smudge 필터, 전역 속성 파일, `.git/info/attributes`, 외부 diff와 textconv를 그대로 따랐다. 스튜디오 프로세스의 환경도 통째로 넘겼다.
+
+결정:
+1. 체크포인트 커밋은 `git commit` 대신 `write-tree`, `commit-tree -p <부모>`, `update-ref HEAD <새 커밋> <부모>`로 만든다. 부모는 스테이징하기 전에 정하고, HEAD를 옮길 때 ref 잠금 안에서 옛 값을 비교한다. 이 원자적 비교는 두 방식 모두에 적용된다.
+2. 이 컴퓨터 방식에서는 부모가 기억한 마지막 체크포인트와 같아야 한다. 다르면 체크포인트를 남기지 않는다(`HeadMovedError`). 기억은 b-studio가 만든 커밋의 sha로 갱신하고, 지금 HEAD를 다시 읽어 갱신하지 않는다.
+3. 이 컴퓨터 방식에서 요청을 시작할 때(터미널과 대화 창) 스튜디오 밖의 수정을 남기기 전에 HEAD를 기억에 맞춘다. 위에 얹은 커밋은 풀어 변경으로 돌리고(그 커밋의 작성자와 트레일러는 버려진다), 풀 수 없는 모양은 보관본을 남기고 되돌린다. 턴 끝 검사와 같은 처리다.
+4. 게이트가 통과한 뒤 커밋하려는데 HEAD가 움직였으면 기억한 체크포인트로 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다. 되돌리기도 HEAD가 기억과 다르면 그 위에서 되돌리지 않고 기억한 체크포인트로 돌아간다.
+5. 저장소 설정은 `git config --list --includes --show-scope --show-origin`으로 읽고 local·worktree 범위만 본다. `include.*`·`includeIf.*` 키는 펼친 내용과 상관없이 막는다. 막는 목록에 `http.*`의 프록시·TLS·쿠키 설정, `core.gitProxy`·`core.askPass`·`core.worktree`, `remote.*`의 `uploadpack`·`proxy`·`vcs`, `protocol.*`, `filter.*`, `diff.external`·`diff.*.textconv`·`diff.*.command`, `merge.*.driver`, `gpg.*`, 켜진 `commit.gpgSign`·`tag.gpgSign`을 더했다. 기존 정규식이 놓치던 하위 절 없는 `http.extraHeader`도 잡는다. b-studio가 스스로 넣는 `commit.gpgsign=false`와 내 폴더 방식의 `core.worktree`는 막지 않는다.
+6. 이 검사와 `.git/info/attributes` 검사(주석과 빈 줄이 아닌 줄이 있으면 멈춘다)를 원격 명령 앞뿐 아니라 체크포인트의 add·commit, 지문을 재는 hash-object, 배포가 쓰는 archive 앞에서도 돌린다.
+7. b-studio의 모든 git에 `-c core.attributesFile=/dev/null`과 `GIT_ATTR_NOSYSTEM=1`을 붙인다. diff·show에는 `--no-ext-diff --no-textconv`를 붙인다. 넘기는 환경에서 `GIT_*`는 작성자·커미터, ssh, askpass, 인증서, 전역 설정 위치만 남긴다.
+
+하지 않은 것:
+- 지문을 `hash-object --no-filters`로 재지 않는다. 저장소의 `.gitattributes`가 거는 줄 끝 변환과 전역 설정의 LFS 필터는 `git add`도 똑같이 적용한다. 필터 없이 재면 이런 저장소에서 검증한 지문과 스테이징된 지문이 늘 달라 체크포인트를 남기지 못한다. 위험한 쪽인 저장소 설정의 필터는 6번이 막는다.
+- `GIT_CONFIG_NOSYSTEM=1`을 넣지 않는다. macOS의 git은 자격 증명 도우미(osxkeychain)를 시스템 설정에 둔다(이 기기에서 확인). 끄면 올리기가 인증에 실패한다. 시스템 설정은 에이전트가 고칠 수 없는 파일이다.
+- 환경 변수를 최소 목록으로 줄이지 않고 `GIT_*`만 거른다. 자격 증명 도우미가 `GH_TOKEN`, 프록시, 인증서 변수를 읽는다.
+- 올리기는 지금처럼 원격 이름 `origin`으로 한다. 주소를 바꾸는 `insteadOf`·`pushInsteadOf`·`pushurl`은 설정 검사가 막는다.
+
+자동 검사: `pnpm typecheck` 6/6, studio lint 오류 0. `pnpm test` 367개 파일 4,564개 중 4,563개 통과, 실패 1개는 부하 중 20초 시간 초과(`sessions-pr-reexport`)로 단독으로 세 번 다시 돌려 모두 통과했다. 새 테스트 29개(agent 27, studio 2)가 고치기 전 코드에서 27개 실패했다(나머지 둘은 커밋 모양과 `commit.gpgsign=false`를 지키는 회귀 테스트). 변이 열둘(기대한 HEAD 비교, `update-ref` 옛 값, 요청 시작의 맞추기, 체크포인트의 기대 HEAD, worktree 범위, 커밋 앞 설정 검사, `info/attributes` 검사, `core.attributesFile`, `GIT_*` 거르기, `--no-textconv`, 새 금지 키, include 키)을 테스트가 잡는다. include 키 거절과 include 펼치기는 서로를 받친다: 키 거절만 빼면 펼친 `pushInsteadOf`가 걸리고, 둘 다 빼면 `includeIf` 테스트만 실패한다.
+
+남는 것:
+- 사용자의 전역 설정(`~/.gitconfig`)은 보지 않는다. 이 컴퓨터 방식에서 에이전트는 같은 사용자라 이 파일도 고칠 수 있다. 작정한 우회는 범위 밖이다(위 감시 절과 같다).
+- 저장소에 커밋된 `.gitattributes`의 `export-subst`·`export-ignore`는 막지 않는다. 체크포인트 안에 보이는 파일이라 리뷰에서 볼 수 있다.
+- 내 폴더 방식에서 요청을 시작할 때 끼워 넣은 커밋을 풀면, 그 내용은 사람의 수정과 함께 "직접 수정" 체크포인트가 된다. 게이트를 거치지 않지만 통과 기록도 남지 않는다. 내 폴더 방식이 요청 사이의 변경을 다루는 기존 규칙과 같다.
+- 되돌리기와 보관본을 만드는 `git add`(버리기, 기억한 곳으로 되돌리기)는 설정 검사를 하지 않는다. 복구가 막히지 않게 하려는 것이고, 그 결과는 체크포인트가 되지 않는다.
+- 진짜 CLI로 재지 않았다. 임시 저장소와 임시 bare 원격으로 도는 테스트로만 봤다.
+
 ## ADR-174 만든 서비스 컨테이너의 실제 설정으로 격리를 확인하고, compose CLI에는 studio의 환경 변수를 넘기지 않는다
 
 상태: 채택
