@@ -9,6 +9,9 @@ const fake = vi.hoisted(() => ({
   root: '',
   startCalls: 0,
   startError: undefined as string | undefined,
+  /** 시작에 실패한 컨테이너에 남은 로그 줄. logs()가 돌려준다 */
+  logLines: [] as { service: string; text: string; at: Date }[],
+  logCalls: [] as { tail?: number; follow?: boolean }[],
 }));
 
 // 샌드박스(Docker)를 띄우지 않는다. providerFromEnv만 가짜로 바꾸고 나머지는 그대로 쓴다
@@ -37,7 +40,10 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async stats() {
       return [];
     },
-    async *logs() {},
+    async *logs(options: { tail?: number; follow?: boolean } = {}) {
+      fake.logCalls.push({ tail: options.tail, follow: options.follow });
+      yield* fake.logLines;
+    },
     async exec() {
       return { exitCode: 0, stdout: '', stderr: '' };
     },
@@ -82,6 +88,8 @@ services:
   fake.root = path.join(root, 'project');
   fake.startCalls = 0;
   fake.startError = undefined;
+  fake.logLines = [];
+  fake.logCalls = [];
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
   process.env.B_STUDIO_SESSIONS_DIR = path.join(root, 'sessions');
@@ -158,6 +166,28 @@ describe('샌드박스 지연 기동', () => {
     // start가 실제로 다시 불렸어야 한다(캐시된 실패를 그냥 돌려준 게 아니다)
     expect(fake.startCalls).toBe(2);
     expect(getSnapshot(created)?.status).toBe('ready');
+    await stopSession(created).catch(() => {});
+  });
+
+  it('시작에 실패하면 죽은 컨테이너의 마지막 로그를 실행 탭 로그에 남긴다(준비된 뒤에만 붙는 로그 구독에 기대지 않는다, #718)', async () => {
+    fake.startError = '앱이 켜지다가 종료됐습니다 (컨테이너 exited)';
+    fake.logLines = [
+      { service: 'web', text: 'Error [TurbopackInternalError]: Too many open files (os error 24)', at: new Date('2026-10-16T00:00:01Z') },
+      { service: 'web', text: ' ELIFECYCLE  Command failed with exit code 1.', at: new Date('2026-10-16T00:00:02Z') },
+    ];
+    const created = (await createSession('lazyproj', 'kim', 'copy', { boot: 'on-demand' })).id;
+
+    await expect(bootSession(created)).rejects.toThrow(/종료됐습니다/);
+    expect(getSnapshot(created)?.status).toBe('failed');
+
+    const logs: string[] = [];
+    subscribe(created, (event) => {
+      if (event.type === 'log') logs.push(`${event.service} ${event.text}`);
+    })();
+    expect(logs).toContain('web Error [TurbopackInternalError]: Too many open files (os error 24)');
+    expect(logs).toContain('web  ELIFECYCLE  Command failed with exit code 1.');
+    // 따라가지 않고 지금까지의 줄만 한 번 읽는다(끝나지 않는 구독을 남기지 않는다)
+    expect(fake.logCalls).toEqual([{ tail: expect.any(Number), follow: false }]);
     await stopSession(created).catch(() => {});
   });
 

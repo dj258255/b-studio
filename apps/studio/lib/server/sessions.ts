@@ -577,6 +577,9 @@ const HISTORY_LIMIT = 5_000;
 /** docker stats 한 번이 1초 남짓 걸리므로 넉넉히 둔다 */
 const USAGE_INTERVAL_MS = 5_000;
 const LOG_LIMIT = 1_000;
+/** 시작에 실패했을 때 서비스마다 읽어 둘 마지막 로그 줄 수와 그 읽기에 쓸 시간 */
+const FAILURE_LOG_TAIL = 100;
+const FAILURE_LOG_TIMEOUT_MS = 10_000;
 /** 도구 호출마다 이벤트가 오므로 모아서 쓴다 */
 const PERSIST_DELAY_MS = 500;
 const GENERATED = /[/\\](node_modules|\.next|build|\.gradle|\.venv)([/\\]|$)/;
@@ -2028,7 +2031,10 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
     }
     setStatus(session, 'ready');
   } catch (error) {
-    if (!signal.aborted) setStatus(session, 'failed', describe(error));
+    if (signal.aborted) return;
+    // 실패를 알리기 전에 컨테이너의 마지막 줄을 실행 탭 로그에 남긴다. 화면이 실패를 보고 그 로그를 가리키기 때문이다
+    await captureFailureLogs(session);
+    setStatus(session, 'failed', describe(error));
   }
 }
 
@@ -7131,6 +7137,24 @@ function watchUsage(session: Session): void {
   void measure();
   session.usageTimer = setInterval(() => void measure(), USAGE_INTERVAL_MS);
   session.usageTimer.unref();
+}
+
+/**
+ * 로그 구독(followLogs)은 세션이 준비된 뒤에야 붙으므로, 시작에 실패하면 죽은 컨테이너의 줄이 실행 탭에 하나도 남지 않는다(#718).
+ * 실패한 그 순간 서비스마다 마지막 줄을 한 번 읽어(따라가지 않는다) 로그에 더한다. 못 읽어도 실패 알림은 그대로 간다
+ */
+async function captureFailureLogs(session: Session): Promise<void> {
+  const isNew = skipAlreadySeen(session.logs.flatMap((event) => (event.type === 'log' ? [event] : [])));
+  const signal = AbortSignal.any([session.stop.signal, AbortSignal.timeout(FAILURE_LOG_TIMEOUT_MS)]);
+  try {
+    for await (const line of session.sandbox.logs({ tail: FAILURE_LOG_TAIL, follow: false, signal })) {
+      if (signal.aborted) break;
+      const event = { type: 'log', service: line.service, text: line.text, at: line.at.toISOString() } as const;
+      if (isNew(event)) emit(session, event);
+    }
+  } catch {
+    // 도커에 닿지 않거나 시간이 다 됐다. 실패 이유에는 이미 앱 로그의 마지막 줄이 붙어 있다
+  }
 }
 
 function followLogs(session: Session, tail: number): void {

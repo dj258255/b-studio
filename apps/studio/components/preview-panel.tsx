@@ -23,6 +23,7 @@ import { useRequirementsImport } from "./requirements-import-context";
 import { RequirementsPanel } from "./requirements-panel";
 import { ResourcePanel } from "./resource-panel";
 import { SERVICE_STATE_LABEL, TONE_TEXT, toneOfService } from "./status";
+import { FailureDetails } from "./failure-details";
 import { StatusPanel } from "./status-panel";
 import { SubmissionPanel } from "./submission-panel";
 import { TestsPanel } from "./tests-panel";
@@ -131,7 +132,7 @@ export function PreviewPanel({ view }: { view: SessionView }) {
           // 지연 기동 세션은 아직 샌드박스를 켜지 않았다. 빈 화면 대신 켜는 방법을 보여 준다
           <IdleServicePanel sessionId={view.snapshot.id} service={active.service} />
         ) : !active.service.url ? (
-          <ServicePending sessionId={view.snapshot.id} service={active.service} />
+          <ServicePending sessionId={view.snapshot.id} service={active.service} sessionFailed={view.snapshot.status === "failed"} />
         ) : (
           // 재시작 중에도 미리보기를 지우지 않아 입력한 경로와 요청이 유지된다. 준비되면 새 주소로 다시 불러온다
           <div className="flex h-full flex-col">
@@ -438,11 +439,11 @@ function ExternalApiPanel({ sessionId, external, ready, revision }: { sessionId:
 function RestartBanner({ service }: { service: ServiceView }) {
   const failed = service.state === "failed";
   return (
-    <p role="status" className={`border-b px-4 py-2 text-sm ${failed ? "border-fail/40 bg-fail/10 text-fail" : "border-wait/40 bg-wait/10 text-wait"}`}>
+    <div role="status" className={`min-w-0 border-b px-4 py-2 text-sm ${failed ? "border-fail/40 bg-fail/10 text-fail" : "border-wait/40 bg-wait/10 text-wait"}`}>
       {service.name} {SERVICE_STATE_LABEL[service.state]}
-      {service.detail ? `: ${service.detail}` : ""}
       {failed ? ". 대화의 검증 게이트에서 원인을 확인하세요." : ". 준비되면 새 주소로 다시 불러옵니다."}
-    </p>
+      {service.detail && <FailureDetails text={service.detail} className="mt-1" />}
+    </div>
   );
 }
 
@@ -481,7 +482,7 @@ function IdleServicePanel({ sessionId, service }: { sessionId: string; service: 
   );
 }
 
-function ServicePending({ sessionId, service }: { sessionId: string; service: ServiceView }) {
+function ServicePending({ sessionId, service, sessionFailed }: { sessionId: string; service: ServiceView; sessionFailed: boolean }) {
   const tone = toneOfService(service.state);
   const [turningOn, setTurningOn] = useState(false);
   const [error, setError] = useState<string>();
@@ -503,13 +504,17 @@ function ServicePending({ sessionId, service }: { sessionId: string; service: Se
       <p className={`text-lg font-semibold ${TONE_TEXT[tone]}`}>
         {service.name} {service.state === "off" ? "꺼 둔 서비스입니다" : SERVICE_STATE_LABEL[service.state]}
       </p>
-      {service.detail && <p className="mt-2 max-w-[70ch] font-mono text-sm break-words text-muted">{service.detail}</p>}
+      {service.detail && <FailureDetails text={service.detail} className="mt-2 max-w-[70ch] font-mono text-sm text-muted" />}
       <p className="mt-4 max-w-[60ch] text-sm leading-6 text-muted">
         {service.state === "off"
           ? "서비스 선택에서 이 서비스를 꺼 뒀습니다. 켜면 이미지를 다시 빌드하고 준비될 때까지 기다립니다."
           : service.state === "stopped"
             ? "샌드박스가 없어 미리보기를 열 수 없습니다. 이어서 작업하면 마지막 체크포인트로 서비스를 다시 띄웁니다."
-            : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 실행 탭의 로그에서 진행 상황을 볼 수 있습니다."}
+            : sessionFailed
+              ? "샌드박스를 시작하지 못했습니다. 실행 탭의 로그에서 컨테이너의 마지막 줄을 확인하고, 위의 '다시 시작'으로 다시 시도하세요."
+              : service.state === "failed"
+                ? "이 서비스를 띄우지 못했습니다. 실행 탭의 로그에서 컨테이너의 마지막 줄을 볼 수 있습니다."
+                : "처음 시작할 때는 의존성을 내려받느라 몇 분 걸릴 수 있습니다. 실행 탭의 로그에서 진행 상황을 볼 수 있습니다."}
       </p>
       {service.state === "off" && (
         <button
