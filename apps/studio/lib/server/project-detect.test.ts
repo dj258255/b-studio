@@ -831,6 +831,23 @@ describe('폴더 등록', () => {
     expect(projectIdFor('/Users/me/_x', new Set())).toBe('x');
   });
 
+  it('사용자 저장소의 무시 목록에 내부 문서 번호를 남기지 않는다(이슈 #720)', async () => {
+    const root = await repo({ '.git/info/exclude': '' });
+
+    expect(await excludeFromGit(root, ['studio.yaml'])).toBe(true);
+    const exclude = await readFile(path.join(root, '.git/info/exclude'), 'utf8');
+    expect(exclude).toBe('# b-studio가 만든 파일\n/studio.yaml\n');
+    expect(exclude).not.toMatch(/ADR/);
+  });
+
+  it('예전 머리글(ADR 번호가 붙은 것)로 이미 뺀 파일은 다시 적지 않는다', async () => {
+    const before = '# b-studio가 만든 파일(ADR-067)\n/studio.yaml\n';
+    const root = await repo({ '.git/info/exclude': before });
+
+    expect(await excludeFromGit(root, ['studio.yaml'])).toBe(true);
+    expect(await readFile(path.join(root, '.git/info/exclude'), 'utf8')).toBe(before);
+  });
+
   it('git 저장소가 아니면 빼지 않고 false를 돌려준다', async () => {
     const root = await repo({ 'package.json': nextPackage });
     expect(await excludeFromGit(root, ['studio.yaml'])).toBe(false);

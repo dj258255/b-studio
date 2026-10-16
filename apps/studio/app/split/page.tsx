@@ -1,7 +1,10 @@
+import type { Metadata } from "next";
 import { SplitPicker, SplitView } from "@/components/split-view";
 import { pageUser } from "@/lib/server/access";
 import { getSnapshot, listSessions, recoverSessions } from "@/lib/server/sessions";
 import { parseSplitIds } from "@/lib/split";
+
+export const metadata: Metadata = { title: "나란히 보기" };
 
 /**
  * 세션 2~4개를 나란히 보는 화면. `?ids=a,b,c`로 대상을 받고, 없으면 세션 고르기 화면을 보여 준다.

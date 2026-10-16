@@ -58,3 +58,26 @@ describe("WorkOverview의 지우기 동작", () => {
     expect(html).not.toMatch(/지우기[^>]*disabled/);
   });
 });
+
+describe("개입이 필요한 줄(이슈 #720)", () => {
+  it("상태와 개입 사유가 같은 말(오류)이면 한 번만 쓴다", () => {
+    const html = render([item({ id: "s1", state: "error", attention: "error", reason: "앱이 켜지다가 종료됐습니다" })]);
+
+    expect(html.match(/>오류</g)).toHaveLength(1);
+  });
+
+  it("사유 한 줄과 그 세션을 여는 '열기'를 보여 준다", () => {
+    const html = render([item({ id: "s1", state: "error", attention: "error", reason: "앱이 켜지다가 종료됐습니다" })]);
+
+    expect(html).toContain("앱이 켜지다가 종료됐습니다");
+    expect(html).toMatch(/<a[^>]*href="\/sessions\/s1"[^>]*>열기<\/a>/);
+  });
+
+  it("상태와 사유가 다르면 둘 다 보인다", () => {
+    const html = render([item({ id: "s1", state: "idle", attention: "gate_failed" })]);
+
+    expect(html).toContain(">대기<");
+    expect(html).toContain(">검증 실패<");
+  });
+});
+

@@ -16,6 +16,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, 
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
+import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
 
 /** MCP 서버 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: `cmd mcp list`·명령 문서) */
 const SERVER = 'b_studio';
@@ -609,12 +610,12 @@ function classifyFailure({ exitCode, message, maxTurns }: { exitCode: number; me
  */
 export async function preflightCommandCode(
   { command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {},
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true } | CliPreflightFailure> {
   try {
     await run(command, ['status'], timeoutMs);
     return { ok: true };
   } catch (error) {
-    return { ok: false, reason: `Command Code CLI에 로그인돼 있지 않습니다. 터미널에서 "${command}"를 실행해 로그인하세요. (${describe(error)})` };
+    return cliPreflightFailure(`Command Code CLI에 로그인돼 있지 않습니다. 터미널에서 "${command}"를 실행해 로그인하세요.`, error);
   }
 }
 
@@ -708,6 +709,3 @@ function run(command: string, args: string[], timeoutMs: number): Promise<string
   });
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

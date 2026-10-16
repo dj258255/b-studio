@@ -12,6 +12,9 @@ import { GIT_HARDENING, readProjectFileSync, type DocEvidence } from '@b-studio/
 
 const execFileAsync = promisify(execFile);
 
+// 화면(클라이언트)도 쓰는 순수 함수라 node 모듈이 없는 파일에 두고 여기서도 내보낸다
+export { formatSubmissionScore } from './submission-score';
+
 export type ChecklistStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
 export interface ChecklistFix {

@@ -245,7 +245,7 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 | 실행 탭의 하위 탭: 로그 · 리소스 · 내 환경 · 토큰 | `deploy` 절이 있으면 배포가 더해집니다 |
 | 세션 머리에 "나란히 보기에 추가"가 없습니다 | 있습니다 |
 | 에이전트가 "나눠서 병렬·여러 명 비교로 넘기자"고 제안하지 않습니다(`propose_mode` 도구가 없습니다) | 제안합니다 |
-| `/api/capabilities`의 `fleet`·`split`이 꺼진 것으로 나오고 사유에 켜는 방법이 적힙니다 | 서버 모드에 따라 켜집니다 |
+| `/api/capabilities`의 `fleet`·`split`이 꺼진 것으로 나오고, 사유와 함께 이 절로 오는 링크(`docsUrl`)가 붙습니다 | 서버 모드에 따라 켜집니다 |
 
 - **숨기는 것이지 막는 것이 아닙니다.** `/fleets`·`/task-plans`·`/split` 페이지와 그 API, 벤치, E2E는 켜지 않아도 그대로 동작합니다.
 - 다른 백엔드(`B_STUDIO_BACKENDS`), Kubernetes 제공자, gVisor 런타임은 각자의 환경 변수로 고르는 것이라 이 값과 무관합니다. 그 값을 직접 넣었다면 이미 고른 것으로 봅니다.

@@ -1,8 +1,11 @@
+import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { LoginForm } from "@/components/login-form";
 import { authConfig, safeNextPath, SESSION_COOKIE } from "@/lib/server/auth";
 import { activeSessionUser } from "@/lib/server/auth-state";
+
+export const metadata: Metadata = { title: "로그인" };
 
 export default async function LoginPage(props: PageProps<"/login">) {
   const { next } = await props.searchParams;

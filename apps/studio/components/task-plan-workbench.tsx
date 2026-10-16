@@ -8,6 +8,7 @@ import type { ProjectSummary, SessionMode } from '@/lib/studio-events';
 import type { TaskPlanMetrics } from '@/lib/task-plan-metrics';
 import { planModelAlias, type TaskPlanLaneView, type TaskPlanStatus, type TaskPlanStepStatus, type TaskPlanStrategy, type TaskPlanView } from '@/lib/task-plan-types';
 import { describeTokens, hasTokens } from '@/lib/usage';
+import { CapabilityReason } from './capability-reason';
 import { EFFORT_LABEL, ModelPicker } from './chat-panel';
 import { Markdown } from './markdown';
 import { PlanGraphView } from './plan-graph';
@@ -304,6 +305,8 @@ export interface PlannerCapability {
   mode: SessionMode;
   enabled: boolean;
   reason?: string;
+  /** 실험 기능이라 꺼 둔 경우 켜는 방법을 적은 문서 */
+  docsUrl?: string;
 }
 
 /** 이 서버의 계획 상한(설정에서 온다). 화면이 몇 개까지 계획하는지 그대로 보여 준다 */
@@ -447,7 +450,7 @@ export function TaskPlanWorkbench({
             모델이 작업·쓰기 범위·의존 관계를 제안하고 스튜디오가 검증합니다. 이어진 작업은 한 세션에서 차례로, 독립 작업은 다른 세션에서 동시에 돌린 뒤 결과를 새 세션에서 합쳐 다시 검증합니다.
           </p>
           <p className="mt-1 text-xs text-muted">
-            이 서버는 작업 {limits.maxTasks}개·레인 {limits.maxLanes}개까지 계획합니다(독립 레인은 최대 {limits.maxLanes}개가 동시에 돕니다).
+            이 서버는 작업 {limits.maxTasks}개까지 계획하고, 서로 기다리지 않는 묶음은 최대 {limits.maxLanes}개까지 동시에 돌립니다.
           </p>
 
           <label className="mt-5 block text-sm font-medium" htmlFor="plan-project">프로젝트</label>
@@ -469,7 +472,13 @@ export function TaskPlanWorkbench({
           {modelRequired && picker.options.every((option) => option.id === '') && (
             <p className="mt-1 text-xs text-fail">도구 호출을 지원하고 API 키가 설정된 모델이 없습니다</p>
           )}
-          {!planner.enabled && <p className="mt-1 text-xs text-wait">{planner.reason ?? '이 모드에서는 모델에게 계획을 받을 수 없습니다'}</p>}
+          {!planner.enabled && (
+            <CapabilityReason
+              reason={planner.reason ?? '이 모드에서는 모델에게 계획을 받을 수 없습니다'}
+              {...(planner.docsUrl ? { docsUrl: planner.docsUrl } : {})}
+              className="mt-1 text-xs text-wait"
+            />
+          )}
 
           <label className="mt-4 block text-sm font-medium" htmlFor="plan-request">요청</label>
           <textarea
