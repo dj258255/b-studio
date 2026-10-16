@@ -41,7 +41,7 @@ export function ProjectMenu({ projectId, projectName }: { projectId: string; pro
         onClick={() => setOpen((value) => !value)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="inline-flex items-baseline gap-1 rounded-control hover:text-ink/75"
+        className="tap-target inline-flex items-baseline gap-1 rounded-control hover:text-ink/75"
       >
         {projectName}
         <span aria-hidden className="text-xs text-muted">▾</span>
@@ -176,7 +176,7 @@ function ProjectMenuPopover({
         role="menu"
         aria-label="프로젝트 메뉴"
         style={{ top: position.top, left: position.left }}
-        className="glass fixed max-h-[calc(100vh-2rem)] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-panel p-2 text-sm shadow-xl"
+        className="menu-surface fixed max-h-[calc(100vh-2rem)] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-panel p-2 text-sm shadow-xl"
       >
         <p className="px-2 pb-1 pt-1 text-xs font-medium text-muted">프로젝트</p>
         {!usable ? (
