@@ -1,0 +1,10 @@
+replicaCount: 2
+image:
+  repository: busybox
+  tag: "1.37"
+service:
+  port: 8080
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi

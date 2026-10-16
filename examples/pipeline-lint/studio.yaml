@@ -1,0 +1,66 @@
+version: 1
+name: pipeline-lint
+
+# 웹 앱이 아닌 저장소에도 게이트를 쓰는 예: 데이터 파이프라인 정의(Argo WorkflowTemplate, Airflow DAG,
+# 쿠버네티스 매니페스트, Helm 차트)를 고친 뒤 정적 검사를 통과해야 완료로 인정한다.
+# 클러스터·Airflow를 실제로 띄우지 않는다. 검사는 모두 toolbox 컨테이너 안에서 네트워크 없이 돈다.
+workflow:
+  # run: toolbox가 다시 떠서 준비 판정을 통과한다. test: 아래 명령이 모두 종료 코드 0이다.
+  # review: 보호 경로·변경 크기를 본다. checkpoint: 통과한 상태를 남긴다
+  required: [plan, implement, run, test, review, checkpoint]
+  # test 단계: 게이트가 toolbox 컨테이너 안(/work = 이 폴더)에서 명령을 셸 없이 실행한다. 종료 코드 0이어야 통과
+  tests:
+    # 필드 이름(strict 디코딩)과 템플릿·파라미터 참조를 확인한다. --offline은 Argo 서버 없이 파일만 본다
+    - { name: argo-lint, service: toolbox, command: [argo, lint, --offline, workflows/] }
+    # 스키마에 없는 필드도 오류로 본다(-strict). 스키마는 이미지에 넣어 둔 쿠버네티스 1.34.0 것을 쓴다.
+    # 이미지에 없는 종류(kind)는 "스키마를 찾지 못함"으로 실패한다 — toolbox/Dockerfile의 SCHEMA_KINDS에 더한다
+    - name: kubeconform
+      service: toolbox
+      command:
+        - kubeconform
+        - -strict
+        - -summary
+        - -kubernetes-version
+        - 1.34.0
+        - -schema-location
+        - /opt/k8s-schemas/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json
+        - manifests/
+    # DAG 파일을 import만 해 본다. 스케줄러·DB 없이 돈다(AIRFLOW_HOME은 이미지에서 /tmp/airflow로 둔다).
+    # Airflow 3.3에서 DagBag은 airflow.dag_processing.dagbag에 있고 include_examples 인자가 없다(예제 DAG는 읽지 않는다)
+    - name: airflow-dag-import
+      service: toolbox
+      command:
+        - python
+        - -c
+        - "from airflow.dag_processing.dagbag import DagBag; b = DagBag('dags'); assert not b.import_errors, b.import_errors; assert b.dags, 'DAG를 하나도 읽지 못했습니다'; print(f'DAG {len(b.dags)}개, import 오류 0개')"
+    # 차트를 렌더링한 결과를 같은 스키마로 확인한다. 두 명령을 이어야 해서 이것만 sh -c를 쓴다.
+    # 파이프(helm template | kubeconform -)로 이으면 helm이 실패해도 kubeconform이 빈 입력을 받아 0으로 끝날 수 있어
+    # 렌더링 결과를 파일에 쓰고 &&로 잇는다
+    - name: helm-template
+      service: toolbox
+      command:
+        - sh
+        - -c
+        - "helm template report-api charts/report-api > /tmp/rendered.yaml && kubeconform -strict -summary -kubernetes-version 1.34.0 -schema-location '/opt/k8s-schemas/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json' /tmp/rendered.yaml"
+  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs]
+  deniedCommands: [kubectl apply, kubectl delete, helm install, helm upgrade, argo submit]
+  # 검사 도구와 스키마를 바꾸면 검사가 느슨해질 수 있어 toolbox 폴더는 사람 승인 없이 바꾸지 못하게 한다
+  protectedPaths: [toolbox, .github/workflows]
+  maxChangedFiles: 20
+  releaseRequires: [test, review, checkpoint]
+
+services:
+  toolbox:
+    source: managed
+    # 템플릿 이름은 표시용이다. 이미지는 compose.yaml의 build(toolbox/Dockerfile)로 만든다
+    template: pipeline-toolbox
+    # 정의 파일이 어느 폴더에 있든 바뀌면 toolbox를 다시 띄우고 test 단계를 돌린다
+    path: .
+    # toolbox는 서버가 아니지만 managed 서비스에는 포트가 필요해, 이미지가 빈 폴더를 내주는 HTTP 서버를 띄워 둔다.
+    # 준비 판정은 "컨테이너가 살아 있다"만 뜻한다. 실제 검사는 위 tests가 한다
+    port: 8080
+    preview: logs
+    ready: { path: /, timeoutSeconds: 120 }
+
+resources:
+  toolbox: { memory: 1g, cpus: 2 }

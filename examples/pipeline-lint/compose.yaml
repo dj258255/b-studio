@@ -1,0 +1,7 @@
+# 표준 compose 파일이라 스튜디오 없이 `docker compose up`으로도 똑같이 실행된다
+services:
+  toolbox:
+    build: { context: ./toolbox }
+    volumes:
+      # 검사할 정의 파일(workflows·dags·manifests·charts)이 들어 있는 프로젝트 폴더 전체
+      - ./:/work

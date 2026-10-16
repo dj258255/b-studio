@@ -1,0 +1,79 @@
+# 매일 밤 원천 데이터를 내려받아 집계하고 보고서를 올리는 예시 WorkflowTemplate.
+# 실제로 실행하지 않는다. `argo lint --offline`이 필드 이름과 형식, 템플릿 참조를 확인한다
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: nightly-report
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: run-date
+        value: "2026-01-01"
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: extract
+            template: extract
+            arguments:
+              parameters:
+                - name: run-date
+                  value: "{{workflow.parameters.run-date}}"
+          - name: aggregate
+            template: aggregate
+            dependencies: [extract]
+            arguments:
+              artifacts:
+                - name: raw
+                  from: "{{tasks.extract.outputs.artifacts.raw}}"
+          - name: publish
+            template: publish
+            dependencies: [aggregate]
+            arguments:
+              parameters:
+                - name: row-count
+                  value: "{{tasks.aggregate.outputs.parameters.row-count}}"
+
+    - name: extract
+      inputs:
+        parameters:
+          - name: run-date
+      container:
+        image: busybox:1.37
+        command: [sh, -c]
+        args: ["echo extract {{inputs.parameters.run-date}} > /tmp/raw.csv"]
+      outputs:
+        artifacts:
+          - name: raw
+            path: /tmp/raw.csv
+
+    - name: aggregate
+      inputs:
+        artifacts:
+          - name: raw
+            path: /tmp/raw.csv
+      script:
+        image: python:3.12-slim
+        command: [python]
+        source: |
+          rows = open("/tmp/raw.csv").read().splitlines()
+          open("/tmp/row-count", "w").write(str(len(rows)))
+      outputs:
+        parameters:
+          - name: row-count
+            valueFrom:
+              path: /tmp/row-count
+
+    - name: publish
+      inputs:
+        parameters:
+          - name: row-count
+      container:
+        image: busybox:1.37
+        command: [sh, -c]
+        args: ["echo published {{inputs.parameters.row-count}} rows"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
