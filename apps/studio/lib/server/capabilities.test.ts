@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionMode } from '@/lib/studio-events';
-import { buildCapabilities, EXPERIMENTAL_REASON } from './capabilities';
+import { buildCapabilities, EXPERIMENTAL_DOCS_URL, EXPERIMENTAL_REASON } from './capabilities';
 
 describe('buildCapabilities', () => {
   it('API 모드는 한 명·비교·나눠서 병렬을 모두 쓸 수 있다', () => {
@@ -61,9 +61,12 @@ describe('buildCapabilities', () => {
     expect(caps.experimental).toBe(false);
     // 한 세션에 요청 하나는 그대로다
     expect(caps.single).toEqual({ enabled: true });
-    expect(caps.fleet).toEqual({ enabled: false, reason: EXPERIMENTAL_REASON });
-    expect(caps.split).toEqual({ enabled: false, reason: EXPERIMENTAL_REASON });
-    expect(EXPERIMENTAL_REASON).toContain('B_STUDIO_EXPERIMENTAL=1');
+    expect(caps.fleet).toEqual({ enabled: false, reason: EXPERIMENTAL_REASON, docsUrl: EXPERIMENTAL_DOCS_URL });
+    expect(caps.split).toEqual({ enabled: false, reason: EXPERIMENTAL_REASON, docsUrl: EXPERIMENTAL_DOCS_URL });
+    // 화면에 그대로 나가는 문구라 환경 변수 이름은 넣지 않고, 켜는 방법은 설정 문서 링크로 넘긴다(이슈 #720)
+    expect(EXPERIMENTAL_REASON).toContain('실험 기능입니다');
+    expect(EXPERIMENTAL_REASON).not.toContain('B_STUDIO_EXPERIMENTAL');
+    expect(EXPERIMENTAL_DOCS_URL).toMatch(/^https:\/\/github\.com\/.+\/docs\/configuration\.md#/);
     // 백엔드 목록과 폴더 열기는 건드리지 않는다
     expect(caps.backends).toEqual(['claude-code']);
     expect(caps.openFolder).toBe(true);

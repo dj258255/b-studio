@@ -1,7 +1,10 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { WorkOverview } from '@/components/work-overview';
 import { pageUser } from '@/lib/server/access';
 import { listAgentOverview } from '@/lib/server/agents-overview';
+
+export const metadata: Metadata = { title: '작업' };
 
 export default async function WorkPage() {
   const user = await pageUser();

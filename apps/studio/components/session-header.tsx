@@ -155,7 +155,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         </span>
         {/* 나란히 보기는 여러 세션을 견주는 화면이라 실험 기능이다(ADR-166). 켜지 않았으면 단추를 두지 않는다 */}
         {snapshot.experimental && (
-          <button type="button" onClick={addToSplit} className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
+          <button type="button" onClick={addToSplit} className="tap-target glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
             나란히 보기에 추가
           </button>
         )}
@@ -165,7 +165,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             type="button"
             onClick={reboot}
             disabled={resuming || !access.canManage}
-            className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+            className="tap-target rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
           >
             {resuming ? "샌드박스 다시 올리는 중" : "샌드박스 다시 올리기"}
           </button>
@@ -176,7 +176,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             type="button"
             onClick={reboot}
             disabled={resuming || !access.canManage}
-            className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+            className="tap-target rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
           >
             {resuming ? "다시 시작하는 중" : "다시 시작"}
           </button>
@@ -186,7 +186,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             type="button"
             onClick={resume}
             disabled={resuming || !access.canManage}
-            className="rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+            className="tap-target rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
           >
             {resuming ? "새 샌드박스 만드는 중" : "이어서 작업"}
           </button>
@@ -195,7 +195,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             type="button"
             onClick={stop}
             disabled={stopping || resuming || !access.canManage}
-            className="glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
+            className="tap-target glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
           >
             {stopping ? "중지하는 중" : "샌드박스 중지"}
           </button>

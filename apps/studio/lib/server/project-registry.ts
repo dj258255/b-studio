@@ -320,7 +320,8 @@ export async function excludeFromGit(root: string, files: readonly string[]): Pr
   if (missing.length === 0) return true;
   await mkdir(path.dirname(excludeFile), { recursive: true });
   const prefix = current.length > 0 && !current.endsWith('\n') ? '\n' : '';
-  await appendFile(excludeFile, `${prefix}# b-studio가 만든 파일(ADR-067)\n${missing.join('\n')}\n`);
+  // 사용자 저장소에 남는 글이라 내부 문서 번호를 붙이지 않는다. 이 머리글을 찾아 읽는 코드는 없다(줄 단위로만 비교한다)
+  await appendFile(excludeFile, `${prefix}# b-studio가 만든 파일\n${missing.join('\n')}\n`);
   return true;
 }
 

@@ -27,6 +27,7 @@ export {
   type ClaudeCodeRunOptions,
   type ClaudeCodeSdk,
 } from './claude-code-runner';
+export { cliPreflightFailure, describeCliError, type CliPreflightFailure } from './cli-failure';
 export type { ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 export {
   preflightCodex,

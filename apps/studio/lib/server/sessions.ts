@@ -264,8 +264,10 @@ import {
 } from '@b-studio/sandbox';
 import { dependentsOf, loadProject, figmaFileKey, SpecError, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
+import { serviceNotReadyMessage, storedResultNotice } from '@/lib/test-run-state';
 import {
   buildSubmissionChecklist,
+  formatSubmissionScore,
   matchAcceptanceAgainstDocs,
   type ChecklistService,
   type ChecklistStatus,
@@ -3738,7 +3740,7 @@ const CHECKLIST_STATUS_ICON: Record<ChecklistStatus, string> = { pass: '✓', wa
  */
 export function buildChecklistAddendum(report: SubmissionReport): string {
   const lines = report.items.map((item) => `- ${CHECKLIST_STATUS_ICON[item.status]} ${item.title}: ${item.reason}`);
-  return `\n\n## 올리기 전 점검 ${report.score.passed}/${report.score.total} 통과\n\n${lines.join('\n')}`;
+  return `\n\n## 올리기 전 점검 ${formatSubmissionScore(report)}\n\n${lines.join('\n')}`;
 }
 
 /** 미리보기와 실제 생성이 어긋나지 않도록 PR 제목·본문을 한 곳에서 만든다 */
@@ -6657,7 +6659,7 @@ async function buildTestServiceView(session: Session, serviceName: string): Prom
         lastRunSource: stored.source,
         ...(stored.sha !== undefined ? { lastRunSha: stored.sha } : {}),
         // 마지막 실행 자체가 실패했으면(컴파일 오류 등) 그 이유를 먼저 보여준다 — "꺼져 있다"는 안내보다 더 급하다
-        ...(stored.error ? { error: stored.error } : { notice: '서비스가 꺼져 있어 마지막 실행 결과만 보여 줍니다' }),
+        ...(stored.error ? { error: stored.error } : { notice: storedResultNotice(serviceState?.state) }),
         rows: rows.map(toTestRowView),
       };
     }
@@ -6668,7 +6670,7 @@ async function buildTestServiceView(session: Session, serviceName: string): Prom
       supported: false,
       counts: { pass: 0, fail: 0, skip: 0, notRun: 0 },
       rows: [],
-      error: '서비스가 꺼져 있습니다',
+      error: serviceNotReadyMessage(serviceState?.state),
     };
   }
 
@@ -6851,7 +6853,7 @@ export async function runSessionTests(
   const entry = session.project.managed.find(([name]) => name === input.service);
   if (!entry) throw new StudioError(404, `${input.service} 서비스가 없습니다`);
   const serviceState = session.snapshot.services.find((candidate) => candidate.name === input.service);
-  if (serviceState?.state !== 'ready') throw new StudioError(409, '서비스가 꺼져 있습니다');
+  if (serviceState?.state !== 'ready') throw new StudioError(409, serviceNotReadyMessage(serviceState?.state));
 
   // 사이드카에 남겨 둔 다른 서비스의 결과를 잃지 않으려면, 이번 실행 결과를 쓰기 전에 먼저 복원해 둬야 한다
   await ensureTestResultsLoaded(session);

@@ -6,6 +6,7 @@ import type { AgentUsage, ModelProfile, RoutingDecision } from '@b-studio/agent'
 import type { FleetMemberStatus, FleetMemberView, FleetView } from '@/lib/fleet-types';
 import type { ProjectSummary } from '@/lib/studio-events';
 import { formatTokenCount, totalTokens } from '@/lib/usage';
+import { CapabilityReason } from './capability-reason';
 import { SESSION_BACKEND_LABEL } from './status';
 
 type ModelOption = ModelProfile & { configured: boolean };
@@ -34,6 +35,8 @@ const STATUS_COLOR: Record<FleetMemberStatus, string> = {
 export interface FleetCapability {
   enabled: boolean;
   reason?: string;
+  /** 실험 기능이라 꺼 둔 경우 켜는 방법을 적은 문서 */
+  docsUrl?: string;
 }
 
 export function FleetWorkbench({
@@ -156,9 +159,15 @@ export function FleetWorkbench({
           <h2 className="text-lg font-semibold">새 병렬 작업</h2>
           <p className="mt-1 text-sm leading-6 text-muted">후보마다 독립된 세션 브랜치와 샌드박스를 만듭니다. 실행 버튼을 누르면 선택한 후보 수만큼 비용이 발생합니다.</p>
           <p className="mt-2 text-sm leading-6 text-wait">
-            멤버 수만큼 샌드박스가 동시에 뜹니다 — Docker 메모리·디스크를 멤버 수만큼 씁니다. 한 번에 띄울 수 있는 수를 멤버 수 이하로 두세요.
+            비교할 모델 수만큼 샌드박스가 동시에 뜨고, Docker 메모리·디스크도 그만큼 씁니다. 한 번에 띄울 수 있는 수보다 적게 고르세요.
           </p>
-          {!capability.enabled && <p className="mt-2 text-sm leading-6 text-fail">{capability.reason ?? '이 모드에서는 여러 후보 비교를 쓸 수 없습니다'}</p>}
+          {!capability.enabled && (
+            <CapabilityReason
+              reason={capability.reason ?? '이 모드에서는 여러 후보 비교를 쓸 수 없습니다'}
+              {...(capability.docsUrl ? { docsUrl: capability.docsUrl } : {})}
+              className="mt-2 text-sm leading-6 text-fail"
+            />
+          )}
 
           <label className="mt-5 block text-sm font-medium" htmlFor="fleet-project">프로젝트</label>
           <select
@@ -188,7 +197,7 @@ export function FleetWorkbench({
               onClick={() => void previewRoute()}
               className="rounded-control border border-line px-3 py-1.5 text-xs font-medium hover:border-ink disabled:opacity-50"
             >
-              {loading === 'route' ? '분석 중' : '라우터 추천'}
+              {loading === 'route' ? '분석 중' : '모델 추천'}
             </button>
           </div>
           <div className="mt-2 space-y-2">

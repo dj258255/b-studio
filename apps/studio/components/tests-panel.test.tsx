@@ -27,4 +27,10 @@ describe("TestsPanel", () => {
     expect(html).toContain("요구사항 연결");
     expect(html).toContain("불러오는 중");
   });
+
+  it("돌릴 수 있는지 모를 때는 전체 실행을 끄고 이유를 알린다(이슈 #720)", () => {
+    const html = renderToStaticMarkup(<TestsPanel view={createView(baseSnapshot)} />);
+
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="테스트 목록을 불러오는 중입니다"[^>]*>전체 실행<\/button>/);
+  });
 });

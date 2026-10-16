@@ -15,6 +15,7 @@ import {
   isSelectable,
   membersSummary,
   selectAllState,
+  showAttentionLabel,
   splitSelection,
   toggleSelectAll,
   WORK_MODE_LABEL,
@@ -272,11 +273,20 @@ function WorkRow({ work, checked, onToggle, onDeleted }: { work: WorkItem; check
               <span className={`text-sm font-medium ${TONE_TEXT[state.tone]}`}>{state.label}</span>
             </span>
             <span className="glass-soft rounded-full px-2 py-0.5 text-xs font-medium text-muted">{WORK_MODE_LABEL[work.mode]}</span>
-            {work.attention && <span className={`text-sm font-medium ${ATTENTION_TONE[work.attention]}`}>{ATTENTION_LABEL[work.attention]}</span>}
+            {work.attention && showAttentionLabel(work) && <span className={`text-sm font-medium ${ATTENTION_TONE[work.attention]}`}>{ATTENTION_LABEL[work.attention]}</span>}
             <span className="ml-auto text-xs text-muted">{timeOf(work.lastActivityAt)}</span>
           </div>
           <p className="mt-1.5 font-medium break-words">{work.title}</p>
         </Link>
+        {/* 개입이 필요한 줄은 까닭 한 줄과 바로 가는 버튼을 둔다(사유 이름만으로는 무엇을 할지 모른다) */}
+        {work.attention && (
+          <div className="mt-1 flex items-start gap-2">
+            <p className={`min-w-0 flex-1 text-xs leading-5 break-words ${ATTENTION_TONE[work.attention]}`}>{work.reason ?? ""}</p>
+            <Link href={work.href} className="glass-soft shrink-0 rounded-control px-2 py-0.5 text-xs font-medium hover:bg-panel">
+              열기
+            </Link>
+          </div>
+        )}
         <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
           <p className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
             <span>{work.projectName}</span>

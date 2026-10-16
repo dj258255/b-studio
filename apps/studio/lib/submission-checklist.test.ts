@@ -16,6 +16,7 @@ import {
   checkTests,
   checkWorkingTree,
   matchAcceptanceAgainstDocs,
+  formatSubmissionScore,
   scoreOf,
   type ChecklistCommit,
   type ChecklistRequirement,
@@ -623,3 +624,18 @@ describe('checkEnvExample — 필요한 변수만', () => {
     expect(item.reason).not.toContain('PORT');
   });
 });
+
+describe('formatSubmissionScore(건너뛴 항목을 조용히 빼지 않는다, 이슈 #720)', () => {
+  const item = (id: string, status: 'pass' | 'warn' | 'fail' | 'skip') => ({ id, title: id, status, reason: '' });
+
+  it('건너뛴 항목 수를 따로 적는다', () => {
+    const items = [item('a', 'skip'), item('b', 'warn'), item('c', 'fail'), item('d', 'warn'), item('e', 'warn'), item('f', 'pass'), item('g', 'skip')];
+    expect(formatSubmissionScore({ items, score: scoreOf(items) })).toBe('1/5 통과 · 건너뜀 2');
+  });
+
+  it('건너뛴 항목이 없으면 통과 수만 적는다', () => {
+    const items = [item('a', 'pass'), item('b', 'fail')];
+    expect(formatSubmissionScore({ items, score: scoreOf(items) })).toBe('1/2 통과');
+  });
+});
+

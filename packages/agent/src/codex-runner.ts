@@ -16,6 +16,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuesti
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
+import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
 
 /** Codex 설정에서 MCP 서버를 부르는 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: 바이너리 문자열) */
 const SERVER = 'b_studio';
@@ -414,12 +415,12 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
  */
 export async function preflightCodex(
   { command = 'codex', timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {},
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true } | CliPreflightFailure> {
   try {
     await run(command, ['login', 'status'], timeoutMs);
     return { ok: true };
   } catch (error) {
-    return { ok: false, reason: `Codex CLI에 로그인돼 있지 않습니다. 터미널에서 "codex"를 실행해 "Sign in with ChatGPT"로 로그인하세요. (${describe(error)})` };
+    return cliPreflightFailure(`Codex CLI에 로그인돼 있지 않습니다. 터미널에서 "codex"를 실행해 "Sign in with ChatGPT"로 로그인하세요.`, error);
   }
 }
 
@@ -486,6 +487,3 @@ function run(command: string, args: string[], timeoutMs: number): Promise<string
   });
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
