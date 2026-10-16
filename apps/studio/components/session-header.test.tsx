@@ -71,3 +71,37 @@ describe("세션 헤더의 샌드박스 연결 상태 (트러블슈팅 123)", ()
     expect(html).not.toContain("샌드박스 컨테이너가 없습니다");
   });
 });
+
+describe("시작에 실패한 세션의 헤더 (#718)", () => {
+  const error = [
+    "앱이 켜지다가 종료됐습니다 (컨테이너 exited)",
+    "앱 로그 마지막 줄:",
+    "https://bugs.nextjs.org/search?category=turbopack-error-report&title=Turbopack%20Error%3A%20Too%20many%20open%20files%20%28os%20error%2024%29&body=Turbopack%20version",
+    "Error [TurbopackInternalError]: Too many open files (os error 24)",
+  ].join("\n");
+  const failed: SessionSnapshot = { ...snapshot, status: "failed", error, usage: undefined };
+
+  it("다시 시작 단추를 보여 준다", () => {
+    const html = render([], failed);
+    expect(html).toContain("다시 시작");
+  });
+
+  it("오류는 요약 한 줄과 자세히 아래 원문으로 나누고, 끊기지 않는 URL도 줄바꿈되게 한다", () => {
+    const html = render([], failed);
+    expect(html).toContain("앱이 켜지다가 종료됐습니다 (컨테이너 exited)");
+    expect(html).toContain("자세히");
+    expect(html).toContain("[overflow-wrap:anywhere]");
+    expect(html).toContain("min-w-0");
+    // 원문은 자세히 안에 그대로 남는다
+    expect(html).toContain("Too many open files (os error 24)");
+  });
+
+  it("알려진 실패는 원인과 조치를 한 줄로 알린다", () => {
+    const html = render([], failed);
+    expect(html).toContain("fs.inotify.max_user_instances");
+  });
+
+  it("준비된 세션에는 다시 시작 단추가 없다", () => {
+    expect(render()).not.toContain("다시 시작");
+  });
+});
