@@ -166,6 +166,8 @@ export interface RunConcurrentOptions {
   outRoot: string;
   dockerMemTotal: string;
   commitAtStart: string;
+  /** 시작할 때의 전체 해시와 커밋하지 않은 변경(이슈 #704) */
+  gitAtStart?: { gitCommitFull: string; gitDirty: boolean | 'unknown'; gitDirtyFiles?: string[] };
   contextClearing: boolean;
   contractsSource: ContractsSource;
   verify: BenchVerify;
@@ -283,6 +285,7 @@ export async function runConcurrent(options: RunConcurrentOptions): Promise<void
           observedModels,
           dockerMemTotal: options.dockerMemTotal,
           gitCommit: options.commitAtStart,
+          ...options.gitAtStart,
           tasks: options.tasks.map((task) => task.id),
           strategies: options.strategies,
           topology: options.topology,

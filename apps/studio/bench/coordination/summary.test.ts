@@ -409,6 +409,21 @@ describe('테스트를 건넨 실행(handoff) 열', () => {
       | S0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
       | S1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 |
 
+      ## 전략별 성공(과제 합산, Wilson 95% 구간)
+
+      | 전략 | 성공 | 95% 구간 |
+      |---|---|---|
+      | S0 | 1/1 | 0.21~1.00 |
+      | S1 | 0/1 | 0.00~0.79 |
+
+      ## 전략 쌍 비교(Fisher 양측, 사후 탐색)
+
+      | 전략 A | 전략 B | 성공 A | 성공 B | p |
+      |---|---|---|---|---|
+      | S0 | S1 | 1/1 | 0/1 | 1.000 |
+
+      과제를 합친 건수라 같은 과제를 반복한 실행 사이의 상관을 무시합니다. 실행 전에 정하지 않은 비교는 탐색 결과로만 읽습니다.
+
       반복 수가 적어 비율 대신 건수로 적습니다. 이 결과는 이 저장소·이 모델·이 과제에 한정됩니다.
       "
     `);
@@ -457,5 +472,28 @@ describe('테스트를 건넨 실행(handoff) 열', () => {
     );
     const line = markdown.split('\n').find((candidate) => candidate.startsWith('| orders-list'))!;
     expect(line.endsWith('| conflict | 모름 | 모름 | 모름 | 모름 |')).toBe(true);
+  });
+});
+
+describe('전략별 성공 구간과 전략 쌍 비교', () => {
+  const runs = (strategy: BenchRow['strategy'], ok: number, total: number) =>
+    Array.from({ length: total }, (_, index) => row({ strategy, taskId: `task-${index % 3}`, success: index < ok, repeat: index }));
+
+  it('전략마다 과제를 합친 성공 건수와 Wilson 95% 구간을, 전략 쌍마다 Fisher 양측 p를 적는다', () => {
+    const markdown = summarize([...runs('S1', 4, 9), ...runs('S2', 9, 9), ...runs('S4', 5, 9)], meta);
+    expect(markdown).toContain('## 전략별 성공(과제 합산, Wilson 95% 구간)');
+    expect(markdown).toContain('| S1 | 4/9 | 0.19~0.73 |');
+    expect(markdown).toContain('| S2 | 9/9 | 0.70~1.00 |');
+    expect(markdown).toContain('## 전략 쌍 비교(Fisher 양측, 사후 탐색)');
+    expect(markdown).toContain('| S1 | S2 | 4/9 | 9/9 | 0.029 |');
+    expect(markdown).toContain('| S1 | S4 | 4/9 | 5/9 | 1.000 |');
+    // 판정은 실행 전에 이슈에 적은 비교로만 한다. 이 표만 보고 유의하다고 읽지 않게 적어 둔다
+    expect(markdown).toContain('실행 전에 정하지 않은 비교는 탐색 결과로만 읽습니다');
+  });
+
+  it('전략이 하나뿐이면 쌍 비교 절을 넣지 않는다', () => {
+    const markdown = summarize(runs('S1', 4, 9), meta);
+    expect(markdown).toContain('## 전략별 성공(과제 합산, Wilson 95% 구간)');
+    expect(markdown).not.toContain('## 전략 쌍 비교');
   });
 });

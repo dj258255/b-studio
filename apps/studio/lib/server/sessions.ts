@@ -152,6 +152,7 @@ import {
   rejectedChangeFeedback,
   serialQueue,
   StagedMismatchError,
+  HeadMovedError,
   terminalGatewayNote,
   VerificationGate,
   type GateOutcome,
@@ -2337,6 +2338,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     let edits: Checkpoint | undefined;
     try {
       await session.relaying;
+      // 이 컴퓨터 방식에서 요청 사이에 끼워 넣은 커밋을 체크포인트로 굳히지 않게 먼저 기억한 곳에 맞춘다(이슈 #706)
+      if (!ask) await realignGitBeforeRun(session);
       // 요청이 실패하거나 취소돼 마지막 체크포인트로 되돌릴 때 사람이 고친 파일까지 지우지 않도록 먼저 남긴다
       if (!ask) edits = await saveLocalEdits(session);
     } catch (error) {
@@ -2901,10 +2904,90 @@ async function initialGitMemory(checkpoints: CheckpointStore): Promise<Remembere
  * 세션 브랜치와 마지막 체크포인트를 지금 값으로 새로 적고, 기억한 원격 주소는 그대로 둔다. 분리된 HEAD 등
  * b-studio가 움직인 것이 아닌 모양이면 건드리지 않는다(그 모양은 다음 턴의 검사가 잡는다)
  */
-async function rememberGit(session: Session): Promise<void> {
+async function rememberGit(session: Session, created?: string): Promise<void> {
   const { head, branch } = await session.checkpoints.headState().catch(() => ({ head: '', branch: undefined }));
   if (!head || !branch) return;
-  session.git = { branch, lastCheckpoint: head, ...(session.git?.originUrl ? { originUrl: session.git.originUrl } : {}) };
+  // b-studio가 방금 만든 커밋을 알면 지금 HEAD를 다시 읽은 값이 아니라 그 커밋을 기억한다(이슈 #706). 만든 직후에 끼어든
+  // 커밋이 있으면 기억과 HEAD가 달라 다음 검사가 잡는다
+  session.git = { branch, lastCheckpoint: created ?? head, ...(session.git?.originUrl ? { originUrl: session.git.originUrl } : {}) };
+}
+
+/**
+ * 작업 복사본의 Git을 에이전트가 고칠 수 있는 방식인가(이 컴퓨터 방식, 이슈 #706). 컨테이너 방식은 `.git`을 읽기 전용으로
+ * 붙여 HEAD가 b-studio 밖에서 움직이지 않는다. 방식 값을 읽지 못하면 의심하는 쪽으로 둔다
+ */
+function untrustedGit(): boolean {
+  try {
+    return sessionTerminalMode() === 'host';
+  } catch {
+    return true;
+  }
+}
+
+/** 체크포인트를 남길 때 HEAD가 있어야 할 곳(이슈 #706). 이 컴퓨터 방식에서만 기억한 체크포인트를 준다 */
+function expectedHeadFor(session: Session): string | undefined {
+  return untrustedGit() ? session.git?.lastCheckpoint : undefined;
+}
+
+/** 작업 복사본의 Git을 기억한 곳에 맞춘 결과(이슈 #699·#706) */
+type GitRealignment =
+  | { kind: 'same' }
+  | { kind: 'unwound'; count: number }
+  | { kind: 'restored'; which: string; files: string[]; patch: string; backup?: DiscardBackup }
+  | { kind: 'unrestorable'; which: string; error: unknown };
+
+/**
+ * 지금 HEAD·브랜치가 기억한 것과 다르면 맞춘다(이슈 #699·#706). allowUnwind가 참이고 같은 브랜치에서 기억한 체크포인트 위에
+ * 커밋만 얹었으면 풀어(reset --soft) 변경으로 돌린다 — 그 커밋의 작성자·트레일러는 버려진다. 그 밖(브랜치 전환, 분리된 HEAD,
+ * 되감기)이면 바뀐 파일을 보관본으로 남기고 기억한 체크포인트로 되돌린다. 실행을 닫는 일은 부르는 쪽이 한다
+ */
+async function realignGit(session: Session, remembered: RememberedGit, { allowUnwind }: { allowUnwind: boolean }): Promise<GitRealignment> {
+  const state = await session.checkpoints.headState();
+  if (state.head === remembered.lastCheckpoint && state.branch === remembered.branch) return { kind: 'same' };
+  const sameBranch = state.branch === remembered.branch;
+  // 같은 브랜치에서 기억한 체크포인트가 HEAD의 조상이면 그 위에 커밋만 얹은 것이다 — 풀어서 검증에 넣는다
+  const aheadOnSameBranch = sameBranch && (await session.checkpoints.isAncestorOf(remembered.lastCheckpoint, state.head));
+  if (allowUnwind && aheadOnSameBranch) {
+    const count = await session.checkpoints.uncommitTo(remembered.lastCheckpoint);
+    if (count > 0) {
+      const text = `[b-studio] 작업 복사본에 b-studio가 만들지 않은 커밋 ${count}개가 있어 풀었습니다. b-studio가 검증한 뒤 직접 커밋합니다.`;
+      emit(session, { type: 'notice', text, at: new Date().toISOString() });
+      (session.terminalNotes ??= []).push(`${text} 터미널에서 git commit 하지 마세요 — b-studio가 커밋합니다.`);
+    }
+    return { kind: 'unwound', count };
+  }
+  const which = !sameBranch
+    ? state.branch === undefined
+      ? 'HEAD가 브랜치가 아니라 커밋을 가리킴'
+      : `브랜치가 ${state.branch}(으)로 바뀜`
+    : aheadOnSameBranch
+      ? '기록에 b-studio가 만들지 않은 커밋이 있음'
+      : '기록이 b-studio의 체크포인트보다 뒤로 되감기거나 고쳐짐';
+  try {
+    const reverted = await session.checkpoints.restoreRememberedHead(remembered);
+    return { kind: 'restored', which, ...reverted };
+  } catch (error) {
+    return { kind: 'unrestorable', which, error };
+  }
+}
+
+/**
+ * 요청을 시작하기 전에 작업 복사본의 Git을 기억한 곳에 맞춘다(이 컴퓨터 방식, 이슈 #706). 맞추지 않고 스튜디오 밖의 수정을
+ * 체크포인트로 남기면, 턴 사이에 끼워 넣은 커밋(b-studio의 작성자와 통과 트레일러를 흉내 낸 것) 위에 쌓이고 그 커밋이 기억에
+ * 들어간다. 위에 얹은 커밋은 풀어 변경으로 돌리고, 풀 수 없는 모양이면 보관본을 남기고 되돌린다. 되돌리지 못하면 던진다
+ */
+async function realignGitBeforeRun(session: Session): Promise<void> {
+  if (!untrustedGit() || !session.git) return;
+  const realigned = await realignGit(session, session.git, { allowUnwind: true });
+  if (realigned.kind === 'unrestorable') {
+    throw new CheckpointError(`작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${realigned.which}) 되돌리려 했지만 되돌리지 못했습니다: ${describe(realigned.error)}`);
+  }
+  if (realigned.kind === 'restored') {
+    const kept = realigned.files.length > 0 ? ` 바뀐 파일 ${realigned.files.length}개는 보관본으로 남겼습니다${realigned.backup ? `(id: ${realigned.backup.id})` : ''}.` : '';
+    const text = `[b-studio] 요청 사이에 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라져(${realigned.which}) 마지막 체크포인트로 되돌렸습니다.${kept}`;
+    emit(session, { type: 'notice', text, at: new Date().toISOString() });
+    (session.terminalNotes ??= []).push(text);
+  }
 }
 
 /**
@@ -2947,6 +3030,7 @@ async function saveCheckpoint(
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers,
     ...(expectStaged ? { expectStaged } : {}),
+    expectedHead: expectedHeadFor(session),
   });
   if (!checkpoint) {
     // 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행도, 그 내용을 마지막 체크포인트 곁에 남긴다(그래야 다음
@@ -2959,7 +3043,7 @@ async function saveCheckpoint(
   }
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
-  await rememberGit(session);
+  await rememberGit(session, checkpoint.sha);
   emit(session, { type: 'checkpoint', runId, checkpoint });
   // 에이전트가 이번 실행에서 studio.yaml을 바꿨으면(includes·systemPackages·workflow 등) 다음 요청부터 그 선언을 쓴다(도그푸딩 마찰 121)
   if (specChanged || excludedChanged.includes(SPEC_FILE)) await reloadSessionProject(session);
@@ -3024,15 +3108,24 @@ async function revertRun(
   { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
 ): Promise<string[]> {
   const dbRestorePoint = session.snapshot.checkpoints[0]!.sha;
+  // 이 컴퓨터 방식에서 HEAD가 기억과 다르면(실행 도중 끼워 넣은 커밋 등) 그 위에서 되돌리지 않는다. 기억한 체크포인트와 다른
+  // 부분을 모두 보관본으로 남기고 그 체크포인트로 되돌린다(이슈 #706). 되돌리지 못하면 던진다(되돌리지 못했다고 알린다)
+  const realigned = untrustedGit() && session.git ? await realignGit(session, session.git, { allowUnwind: false }) : { kind: 'same' as const };
+  if (realigned.kind === 'unrestorable') throw realigned.error;
   // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
-  const { docsCheckpoint, files, patch, backup, restoredRecords } = await discardWorkingCopy(session.checkpoints, session.project.root, (text) => session.sandbox.findSecrets(text));
+  const { docsCheckpoint, files, patch, backup, restoredRecords } =
+    realigned.kind === 'restored'
+      ? { docsCheckpoint: undefined, files: realigned.files, patch: realigned.patch, backup: realigned.backup, restoredRecords: [] as string[] }
+      : await discardWorkingCopy(session.checkpoints, session.project.root, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session));
   if (restoredRecords.length > 0) emit(session, { type: 'notice', text: verificationRestoredNotice(restoredRecords), at: new Date().toISOString() });
   if (docsCheckpoint) {
     session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
     emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
   }
-  // 되돌리기가 남긴 HEAD(문서 체크포인트 또는 그대로)를 다시 기억한다. 다음 턴 검사가 b-studio 자신의 커밋을 에이전트의 것으로 보지 않게 한다
-  await rememberGit(session);
+  // 되돌리기가 남긴 HEAD(문서 체크포인트 또는 그대로)를 다시 기억한다. 다음 턴 검사가 b-studio 자신의 커밋을 에이전트의 것으로 보지 않게 한다.
+  // 이 컴퓨터 방식에서는 b-studio가 만든 문서 체크포인트만 기억에 넣는다. 지금 HEAD를 다시 읽으면 그 사이에 끼어든 커밋이 들어간다(이슈 #706)
+  if (docsCheckpoint) await rememberGit(session, docsCheckpoint.sha);
+  else if (!untrustedGit()) await rememberGit(session);
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다(위 dbRestorePoint 기준)
   const database = await session.databases.restore(dbRestorePoint, session.stop.signal);
   // 문서 체크포인트가 새로 생겼으면, 복원한(바른) DB 상태를 그 체크포인트의 덤프로도 남겨 다음 되돌리기가
@@ -3073,19 +3166,19 @@ class LocalEditsError extends Error {}
  */
 async function saveLocalEdits(session: Session): Promise<Checkpoint | undefined> {
   if (session.snapshot.workspace !== 'local') return undefined;
-  const checkpoint = await commitLocalEdits(session.checkpoints, (text) => session.sandbox.findSecrets(text));
+  const checkpoint = await commitLocalEdits(session.checkpoints, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session));
   if (!checkpoint) return undefined;
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
-  await rememberGit(session);
+  await rememberGit(session, checkpoint.sha);
   return checkpoint;
 }
 
 /** 검증 게이트 없이 체크포인트로 남긴다. 시크릿 값이 든 파일이 있으면 남기지 않고 오류를 낸다 */
-async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text: string) => string[]): Promise<Checkpoint | undefined> {
+async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text: string) => string[], expectedHead?: string): Promise<Checkpoint | undefined> {
   const files = await checkpoints.pendingFiles();
   if (files.length === 0) return undefined;
-  return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', { findSecrets });
+  return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', { findSecrets, expectedHead });
 }
 
 // ---------------------------------------------------------------------------
@@ -3199,6 +3292,7 @@ async function protectPendingDocsBeforeDiscard(
   checkpoints: CheckpointStore,
   projectRoot: string,
   findSecrets: (text: string) => string[],
+  expectedHead?: string,
 ): Promise<{ checkpoint?: Checkpoint; restoredRecords: string[] }> {
   const restoredRecords = await restoreForgedVerificationRecords(checkpoints, projectRoot);
   const pending = (await checkpoints.pendingFiles()).filter(isDocPath);
@@ -3206,6 +3300,7 @@ async function protectPendingDocsBeforeDiscard(
   const checkpoint = await checkpoints.commitPaths(pending, '지키기: 되돌리기 전에 문서를 체크포인트로 남긴다', undefined, {
     findSecrets,
     trailers: [formatVerifyTrailer('docs')],
+    expectedHead,
   });
   return { checkpoint, restoredRecords };
 }
@@ -3218,8 +3313,10 @@ async function discardWorkingCopy(
   checkpoints: CheckpointStore,
   projectRoot: string,
   findSecrets: (text: string) => string[],
+  /** 문서 체크포인트를 남길 때 HEAD가 있어야 할 곳(이슈 #706) */
+  expectedHead?: string,
 ): Promise<{ docsCheckpoint?: Checkpoint; files: string[]; patch: string; backup?: DiscardBackup; restoredRecords: string[] }> {
-  const { checkpoint: docsCheckpoint, restoredRecords } = await protectPendingDocsBeforeDiscard(checkpoints, projectRoot, findSecrets);
+  const { checkpoint: docsCheckpoint, restoredRecords } = await protectPendingDocsBeforeDiscard(checkpoints, projectRoot, findSecrets, expectedHead);
   const { files, patch, backup } = await checkpoints.discard();
   return { docsCheckpoint, files, patch, backup, restoredRecords };
 }
@@ -3252,10 +3349,11 @@ export async function commitWorkingCopyDocs(sessionId: string, paths: readonly s
   const checkpoint = await session.checkpoints.commitPaths(paths, message, undefined, {
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers: [formatVerifyTrailer('docs')],
+    expectedHead: expectedHeadFor(session),
   });
   if (!checkpoint) return undefined;
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
-  await rememberGit(session);
+  await rememberGit(session, checkpoint.sha);
   emit(session, { type: 'docs_checkpoint', checkpoint });
   return checkpoint;
 }
@@ -7385,6 +7483,8 @@ function terminalBusy(session: Session): string | undefined {
 async function beginTerminalRun(session: Session, request: string): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
   try {
     await session.relaying;
+    // 턴 사이에 끼워 넣은 커밋 위에 스튜디오 밖의 수정을 쌓아 그 커밋을 기억에 넣지 않게, 먼저 기억한 곳에 맞춘다(이슈 #706)
+    await realignGitBeforeRun(session);
     const edits = await saveLocalEdits(session);
     if (edits) emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
   } catch (error) {
@@ -7793,6 +7893,14 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
         await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged);
       } catch (error) {
+        if (error instanceof HeadMovedError) {
+          // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
+          // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다
+          if (session.run === undefined && !state.settled) session.run = run;
+          const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
+          if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
+          throw error;
+        }
         if (!(error instanceof StagedMismatchError)) throw error;
         // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
         if (session.run === undefined && !state.settled) session.run = run;
@@ -7863,40 +7971,19 @@ async function reconcileTerminalGit(
     });
     return { failed: true, summary };
   }
-  const state = await session.checkpoints.headState();
-  if (state.head === remembered.lastCheckpoint && state.branch === remembered.branch) return { failed: false, summary: '' };
-  const sameBranch = state.branch === remembered.branch;
-  // 같은 브랜치에서 기억한 체크포인트가 HEAD의 조상이면 에이전트가 그 위에 커밋만 얹은 것이다 — 풀어서 검증에 넣는다
-  const aheadOnSameBranch = sameBranch && (await session.checkpoints.isAncestorOf(remembered.lastCheckpoint, state.head));
-  // 읽기만 실행(allowUnwind: false)은 풀지 않는다 — 읽기만은 커밋할 수 없으므로 되돌리고 실패로 닫기만 한다
-  if (allowUnwind && aheadOnSameBranch) {
-    const count = await session.checkpoints.uncommitTo(remembered.lastCheckpoint);
-    if (count > 0) {
-      const text = `[b-studio] 작업 복사본에 b-studio가 만들지 않은 커밋 ${count}개가 있어 풀었습니다. b-studio가 검증한 뒤 직접 커밋합니다.`;
-      emit(session, { type: 'notice', text, at: new Date().toISOString() });
-      (session.terminalNotes ??= []).push(`${text} 터미널에서 git commit 하지 마세요 — b-studio가 커밋합니다.`);
-    }
-    return { failed: false, summary: '' };
-  }
-  const which = !sameBranch
-    ? state.branch === undefined
-      ? 'HEAD가 브랜치가 아니라 커밋을 가리킴'
-      : `브랜치가 ${state.branch}(으)로 바뀜`
-    : aheadOnSameBranch
-      ? '기록에 b-studio가 만들지 않은 커밋이 있음'
-      : '기록이 b-studio의 체크포인트보다 뒤로 되감기거나 고쳐짐';
-  let backupNote = '';
-  try {
-    const reverted = await session.checkpoints.restoreRememberedHead(remembered);
-    backupNote = reverted.files.length > 0 ? ` 바뀐 파일 ${reverted.files.length}개는 보관본으로 남겼습니다${reverted.backup ? `(id: ${reverted.backup.id})` : ''}.` : '';
-  } catch (error) {
-    const reason = `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${which}) 마지막 체크포인트로 되돌리려 했지만 되돌리지 못했습니다: ${describe(error)}`;
+  // 같은 브랜치에서 위에 커밋만 얹었으면 풀어서 검증에 넣는다. 읽기만 실행(allowUnwind: false)은 풀지 않는다 — 읽기만은 커밋할 수
+  // 없으므로 되돌리고 실패로 닫기만 한다
+  const realigned = await realignGit(session, remembered, { allowUnwind });
+  if (realigned.kind === 'same' || realigned.kind === 'unwound') return { failed: false, summary: '' };
+  if (realigned.kind === 'unrestorable') {
+    const reason = `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${realigned.which}) 마지막 체크포인트로 되돌리려 했지만 되돌리지 못했습니다: ${describe(realigned.error)}`;
     const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
     return { failed: true, summary };
   }
+  const backupNote = realigned.files.length > 0 ? ` 바뀐 파일 ${realigned.files.length}개는 보관본으로 남겼습니다${realigned.backup ? `(id: ${realigned.backup.id})` : ''}.` : '';
   const summary = await abandonTerminalRun(session, run, {
     status: 'failed',
-    reason: `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${which}) 마지막 체크포인트로 되돌렸습니다.${backupNote}`,
+    reason: `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${realigned.which}) 마지막 체크포인트로 되돌렸습니다.${backupNote}`,
   });
   return { failed: true, summary };
 }

@@ -50,6 +50,7 @@ async function setup({ git = 'b-studio' }: { git?: 'b-studio' | 'user' } = {}): 
     bin,
     `#!/bin/sh
 printf '%s\\n' "$*" >> "${log}"
+env >> "${dir}/docker.env"
 override=""
 for a in "$@"; do
   case "$a" in
@@ -339,6 +340,59 @@ describe('서비스 컨테이너의 .git 보호', () => {
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
     await writeFile(configFile, 'not json');
     await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 보호/);
+  });
+});
+
+describe('compose 파일로 바꾼 컨테이너 권한과 환경(이슈 #701)', () => {
+  const ESCALATED = (root: string) => [
+    {
+      Id: 'c1',
+      Config: { Labels: { 'com.docker.compose.service': 'api' } },
+      HostConfig: { Privileged: true },
+      Mounts: [
+        { Type: 'bind', Source: '/var/run/docker.sock', Destination: '/var/run/docker.sock', RW: true },
+        { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+        { Type: 'bind', Source: `${root}/.git`, Destination: '/workspace/.git', RW: false },
+        { Type: 'bind', Source: `${root}/.git/b-studio-empty`, Destination: '/workspace/.git/b-studio', RW: false },
+      ],
+    },
+  ];
+
+  it('만든 컨테이너가 privileged이거나 도커 소켓을 붙였으면 한 번도 시작하지 않고 지운 뒤 던진다', async () => {
+    const { project, dockerBin, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify(ESCALATED(root)));
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/샌드박스 격리를 벗어나는 설정이 있어 시작하지 않았습니다/);
+    const lines = await log();
+    expect(upPhases(lines)).toEqual(['create']);
+    expect(lines).toMatch(/^rm --force c1$/m);
+  });
+
+  it('시작한 뒤에 권한이 바뀐 컨테이너가 보이면 바로 지우고 던진다', async () => {
+    const { project, dockerBin, dir, inspectFile, log, root } = await setup();
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    await writeFile(inspectFile, JSON.stringify(ESCALATED(root).map((container) => ({ ...container, HostConfig: {}, Mounts: container.Mounts.slice(1) }))));
+    // 두 번째 inspect(시작한 뒤)만 권한이 올라간 컨테이너를 돌려준다
+    await writeFile(path.join(dir, 'inspect-2.json'), JSON.stringify(ESCALATED(root)));
+    await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/샌드박스 격리를 벗어나는 설정이 있어 내렸습니다/);
+    expect(await log()).toMatch(/^rm --force c1$/m);
+  });
+
+  it('compose를 부를 때 studio의 환경 변수를 넘기지 않는다(compose 파일의 ${VAR}로 꺼낼 수 없다)', async () => {
+    const { project, dockerBin, dir, inspectFile, root } = await setup();
+    const previous = process.env.B_STUDIO_LEAK_PROBE;
+    process.env.B_STUDIO_LEAK_PROBE = 'studio-only-value-701';
+    try {
+      const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+      await writeFile(inspectFile, JSON.stringify(ESCALATED(root).map((container) => ({ ...container, HostConfig: {}, Mounts: container.Mounts.slice(1) }))));
+      await sandbox.setServiceRunning!('api', true);
+    } finally {
+      if (previous === undefined) delete process.env.B_STUDIO_LEAK_PROBE;
+      else process.env.B_STUDIO_LEAK_PROBE = previous;
+    }
+    const env = await readFile(path.join(dir, 'docker.env'), 'utf8');
+    expect(env).toMatch(/^PATH=/m);
+    expect(env).not.toContain('studio-only-value-701');
   });
 });
 
