@@ -338,6 +338,27 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 - 사용자 전역 설정과 프로젝트의 `.claude` 설정(훅, 플러그인)은 싣지 않습니다.
 - 값은 `1`·`true`·`on`입니다. 설치된 `claude` CLI가 있어야 합니다(2.1.296에서 확인).
 
+## 그 밖의 서버 환경 변수
+
+실행 모드, 인증, 토큰 한도, 모델 승격처럼 자주 쓰는 환경 변수는 [운영 문서](operations.md)에 있습니다. 아래는 거기에 없던 것입니다. 모두 스튜디오를 띄울 때 읽습니다.
+
+| 변수 | 하는 일 | 기본값 |
+|---|---|---|
+| `B_STUDIO_ANTHROPIC_MODEL` | API 모드에서 모델 레지스트리(`B_STUDIO_MODEL_REGISTRY`)를 정하지 않았을 때 쓰는 Claude 모델 이름 | `claude-opus-5` |
+| `B_STUDIO_ANTHROPIC_CONTEXT` | 위 기본 모델의 컨텍스트 크기(토큰). 0 이하이거나 숫자가 아니면 기본값을 씁니다 | `200000` |
+| `B_STUDIO_OPENCODE_MODEL` | `opencode` 백엔드의 모델(`provider/model`). 세션에서 고른 모델이 먼저입니다. 둘 다 없으면 실행이 "모델을 골라야 합니다" 오류로 끝납니다 | 없음 |
+| `B_STUDIO_GEMINI_MODEL` | Gemini CLI 백엔드의 모델(예: `gemini-2.5-pro`). 세션에서 고른 모델이 먼저이고, 둘 다 없으면 같은 오류로 끝납니다 | 없음 |
+| `B_STUDIO_FIGMA_API` | Figma REST API 주소. 테스트에서 가짜 서버를 가리킬 때 씁니다 | `https://api.figma.com` |
+| `B_STUDIO_DOCKER_BIN` | 실행 탭의 "내 환경"이 컨테이너를 읽을 때 부르는 docker 실행 파일 | `docker` |
+| `B_STUDIO_AUTH_STATE_DIR` | 로그아웃한 세션과 운영자가 무효화한 사용자를 적는 파일(`revocations.json`)의 폴더 | `~/.cache/b-studio/auth` |
+| `B_STUDIO_TASK_PLANS_DIR` | 작업 분해 계획을 저장하는 폴더 | `~/.cache/b-studio/task-plans` |
+| `B_STUDIO_MODEL_OBSERVATIONS_FILE` | API 모드의 모델 라우터가 쓰는 모델별 실측 기록(게이트 통과 여부 등, 최근 5,000건) | `~/.cache/b-studio/model-observations.json` |
+| `B_STUDIO_MODEL_DEFAULTS_FILE` | 프로젝트·백엔드마다 마지막에 고른 모델을 기억하는 파일. 새 세션의 기본 모델이 됩니다 | `~/.cache/b-studio/model-defaults.json` |
+| `B_STUDIO_REPEATED_ACTIONS_DIR` | 되풀이 행동 후보(ADR-077)에서 무시하기로 한 목록을 프로젝트별로 두는 폴더 | `~/.cache/b-studio/repeated-actions` |
+| `B_STUDIO_DESKTOP_CONFIG` | 데스크톱 앱이 읽는 설정 파일 경로(`pnpm desktop:install`이 만드는 파일). 테스트·개발용입니다 | `~/.config/b-studio/desktop.json` |
+
+벤치·부하 시험이 자식 프로세스에 넘기는 값(`B_STUDIO_BENCH_*`)과 터미널·관문이 컨테이너나 훅에 넘기는 값(`B_STUDIO_TTY_*`, `B_STUDIO_TERMINAL_COMMAND`, `B_STUDIO_GATE_TOKEN`, `B_STUDIO_LOAD`)은 b-studio가 스스로 채우므로 설정하지 않습니다.
+
 ## 팀 워크플로
 
 모델 하네스가 Pi·Claude·API 중 무엇이든 같은 실행 기준을 적용합니다. 프롬프트 파일은 에이전트를 안내하지만, 아래 정책은 Tool Gateway가 다시 검사합니다.
