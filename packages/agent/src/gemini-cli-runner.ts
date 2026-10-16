@@ -15,6 +15,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, 
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
+import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
 
 /**
  * Gemini CLI(`gemini`, `@google/gemini-cli`) 러너.
@@ -514,12 +515,12 @@ function classifyFailure({ exitCode, displayMessage, matchText, raw, parsed }: {
  * 로그인 여부까지 확인하는 공식 명령을 찾지 못해(0단계 한계), CLI 존재만 확인한다 — 설치 안 됨과 로그인 안 됨을
  * 구분하지 못할 수 있다(opencode 러너의 preflight와 같은 한계).
  */
-export async function preflightGemini({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<{ ok: true } | { ok: false; reason: string }> {
+export async function preflightGemini({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<{ ok: true } | CliPreflightFailure> {
   try {
     await run(command, ['--version'], timeoutMs);
     return { ok: true };
   } catch (error) {
-    return { ok: false, reason: `Gemini CLI를 찾지 못했습니다. 터미널에서 "${command}"가 실행되는지, 로그인돼 있는지 확인하세요. (${describe(error)})` };
+    return cliPreflightFailure(`Gemini CLI를 찾지 못했습니다. 터미널에서 "${command}"가 실행되는지, 로그인돼 있는지 확인하세요.`, error);
   }
 }
 
@@ -570,6 +571,3 @@ function run(command: string, args: string[], timeoutMs: number): Promise<string
   });
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

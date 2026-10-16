@@ -120,3 +120,23 @@ describe("ProjectTokenView", () => {
     expect(html).toContain("시각을 남기지 않은 실행 2개는 기간 필터에서 뺐습니다");
   });
 });
+
+describe("머리 안내 문구(이슈 #720)", () => {
+  const normalOnly = () => report({ requests: [], sessions: 1 });
+
+  it("실험 기능이 꺼져 있으면 작업 분해·Fleet 같은 숨긴 기능 이름을 적지 않는다", () => {
+    const html = renderToStaticMarkup(<ProjectTokenView report={normalOnly()} experimental={false} />);
+
+    expect(html).toContain("이 프로젝트의 모든 세션이 쓴 토큰과 b-studio가 줄인 양을 모았습니다.");
+    expect(html).not.toContain("레인");
+    expect(html).not.toContain("Fleet");
+    expect(html).not.toContain("통합");
+  });
+
+  it("실험 기능이 켜져 있으면 어떤 세션까지 모았는지 함께 적는다", () => {
+    const html = renderToStaticMarkup(<ProjectTokenView report={normalOnly()} experimental />);
+
+    expect(html).toContain("나눠서 병렬");
+    expect(html).toContain("여러 명 비교");
+  });
+});

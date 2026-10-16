@@ -38,4 +38,20 @@ describe("AccountCard", () => {
     expect(html).toContain("설치 안 됨");
     expect(html).not.toContain(">로그인<");
   });
+
+  it("CLI 원문은 요약 아래 접힌 칸에 따로 둔다(이슈 #720)", () => {
+    const withDetail: AccountStatus = { ...needsLogin, detail: "Command failed: codex login status\nNot logged in" };
+    const html = renderToStaticMarkup(<AccountCard initial={withDetail} onChanged={() => undefined} />);
+
+    expect(html).toContain("Codex CLI에 로그인돼 있지 않습니다.");
+    expect(html).toMatch(/<details[^>]*>.*<summary[^>]*>CLI 원문 보기<\/summary>.*Command failed: codex login status/s);
+    // 요약 문단에는 원문이 섞이지 않는다
+    expect(html).not.toMatch(/<p( [^>]*)?>[^<]*Command failed/);
+  });
+
+  it("원문이 없으면 접힌 칸도 그리지 않는다", () => {
+    const html = renderToStaticMarkup(<AccountCard initial={needsLogin} onChanged={() => undefined} />);
+
+    expect(html).not.toContain("<details");
+  });
 });
