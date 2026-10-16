@@ -12,6 +12,8 @@ import { isDockerUnreachable, SandboxError } from '../errors';
 import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransientCrash, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
+import { composeEnvironment } from './compose-env';
+import { findPolicyViolations, type InspectedContainerPolicy } from './container-policy';
 import { withRemovedDirectories } from '../sync-paths';
 import type {
   BootNetwork,
@@ -44,6 +46,7 @@ import {
   composeUpArgs,
   EDGE_SERVICE,
   edgePortFor,
+  EGRESS_NETWORK,
   egressAuditExcerpt,
   parseContainerState,
   parseContainerStates,
@@ -209,7 +212,7 @@ export class LocalDockerProvider implements SandboxProvider {
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     const hostPorts = await preallocatePublicUrlPorts(project);
-    const gitMask = await loadGitMask(project, { dockerBin: this.#options.dockerBin, env: { ...process.env, ...secrets }, projectName: id, redact: (text) => new Redactor(secrets).redact(text) });
+    const gitMask = await loadGitMask(project, { dockerBin: this.#options.dockerBin, env: composeEnvironment(secrets), projectName: id, redact: (text) => new Redactor(secrets).redact(text) });
     await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
     return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts);
   }
@@ -927,7 +930,7 @@ class LocalDockerSandbox implements Sandbox {
     if (ids.length === 0) throw new SandboxError(`컨테이너가 보이지 않아 .git 보호를 확인하지 못했습니다 (${this.id})`, undefined, { platform: true });
     const inspected = await this.#docker(['inspect', ...ids]);
     if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 마운트를 확인하지 못했습니다 (${this.id})`, this.redact(inspected.stderr), { platform: true });
-    let containers: Array<{ Id: string; Name?: string; Mounts?: InspectedMount[]; Config?: { Labels?: Record<string, string> } }>;
+    let containers: Array<Omit<InspectedContainerPolicy, 'Mounts' | 'Config'> & { Id: string; Name?: string; Mounts?: InspectedMount[]; Config?: { Labels?: Record<string, string> } }>;
     try {
       containers = JSON.parse(inspected.stdout);
     } catch {
@@ -956,17 +959,31 @@ class LocalDockerSandbox implements Sandbox {
       if (unknown.length > 0) throw new SandboxError(`볼륨 정보를 일부만 확인했습니다 (${this.id})`, unknown.join(', '), { platform: true });
     }
     const failures: string[] = [];
+    const violations: string[] = [];
     const remove: string[] = [];
     for (const container of containers) {
+      const name = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] ?? container.Name ?? container.Id;
+      // compose 파일로 권한·네임스페이스·네트워크·포트·호스트 경로를 바꾼 컨테이너(이슈 #701). 마운트처럼 실제 설정을 본다
+      const escalated = findPolicyViolations(container, { projectName: this.id, sandboxNetwork: SANDBOX_NETWORK, egressNetwork: EGRESS_NETWORK, edgeService: EDGE_SERVICE });
       const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions);
-      if (missing.length === 0) continue;
+      if (escalated.length === 0 && missing.length === 0) continue;
       remove.push(container.Id);
-      failures.push(`${container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] ?? container.Name ?? container.Id}: ${missing.join(', ')}`);
+      if (escalated.length > 0) violations.push(`${name}: ${escalated.join(', ')}`);
+      if (missing.length > 0) failures.push(`${name}: ${missing.join(', ')}`);
     }
-    if (failures.length === 0) return containers.map((container) => ({ id: container.Id, service: container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] }));
+    if (remove.length === 0) return containers.map((container) => ({ id: container.Id, service: container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] }));
     // 지워 두면 다음 up이 새로 만들고 다시 확인한다. 남겨 두면 만들어진 채로 있어 다른 경로로 시작될 여지가 생긴다
     const removed = await this.#docker(['rm', '--force', ...remove]);
     const left = removed.exitCode === 0 ? '' : ' 그 컨테이너를 지우지 못했습니다 — 아직 돌고 있을 수 있습니다';
+    if (violations.length > 0) {
+      // 에이전트가 고친 compose 파일이 원인이므로 플랫폼 실패로 표시하지 않는다. 에이전트가 사유를 읽고 compose를 되돌릴 수 있다
+      throw new SandboxError(
+        phase === 'created'
+          ? `컨테이너에 샌드박스 격리를 벗어나는 설정이 있어 시작하지 않았습니다 (${this.id})${left}`
+          : `컨테이너에 샌드박스 격리를 벗어나는 설정이 있어 내렸습니다 (${this.id})${left}`,
+        [...violations, ...failures].join('\n'),
+      );
+    }
     throw new SandboxError(
       phase === 'created'
         ? `컨테이너에 .git 읽기 전용 마운트가 빠져 시작하지 않았습니다 (${this.id})${left}`
@@ -1055,9 +1072,9 @@ class LocalDockerSandbox implements Sandbox {
     await rename(temporary, this.#overridePath);
   }
 
-  /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다 */
+  /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다. studio 자신의 환경 변수는 넘기지 않는다(compose-env.ts) */
   #environment(): NodeJS.ProcessEnv {
-    return { ...process.env, ...this.#secrets };
+    return composeEnvironment(this.#secrets);
   }
 }
 
