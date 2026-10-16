@@ -12,6 +12,7 @@ import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
 import type { LaneTrace, PlanBriefRecord } from './trace';
 import type { TurnRecord } from './turns';
+import { fisherExactTwoSided, formatP, wilsonInterval } from './stats';
 
 export interface BenchLaneRow {
   id: string;
@@ -272,6 +273,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
   }
 
   const planBriefLine = planBriefSummaryLine(rows);
+  const comparison = strategyComparison(rows, strategies);
 
   return [
     '# 협업 벤치마크 요약',
@@ -287,6 +289,7 @@ export function summarize(rows: BenchRow[], meta: SummaryMeta): string {
     '',
     ...failureTable,
     '',
+    ...comparison,
     ...(meta.backend !== 'openai'
       ? ['로컬 CLI 러너의 `modelMs`는 러너가 알려 주는 값만 더합니다(Claude Code는 SDK가 보고한 API 호출 시간 합, Codex·Gemini CLI는 재지 못해 들어가지 않습니다). 비용은 청구가 없고, 단가를 주면 API 단가 환산 추정치만 계산합니다.', '']
       : []),
@@ -413,4 +416,38 @@ function repairCell(group: readonly BenchRow[]): string {
   const attempted = group.filter((row) => row.integration?.repair?.attempted);
   const repaired = attempted.filter((row) => row.integration?.repair?.status === 'done');
   return `${attempted.length}/${repaired.length}`;
+}
+
+/**
+ * 전략별 성공(과제를 합친 건수, Wilson 95% 구간)과 전략 쌍의 Fisher 양측 p(이슈 #704).
+ * 과제를 합친 건수는 과제 사이의 차이와 같은 과제 반복 사이의 상관을 무시한다. 판정은 실행 전에 이슈에 적은 비교로만 하고,
+ * 이 표의 나머지 쌍은 탐색 결과다(E2의 대표 숫자를 결과를 본 뒤 묶었던 일을 되풀이하지 않는다)
+ */
+function strategyComparison(rows: readonly BenchRow[], strategies: readonly string[]): string[] {
+  const tally = new Map(strategies.map((strategy) => {
+    const of = rows.filter((row) => row.strategy === strategy);
+    return [strategy, { ok: of.filter((row) => row.success).length, total: of.length }];
+  }));
+  const ratio = (value: number) => value.toFixed(2);
+  const lines = ['## 전략별 성공(과제 합산, Wilson 95% 구간)', '', '| 전략 | 성공 | 95% 구간 |', '|---|---|---|'];
+  for (const [strategy, { ok, total }] of tally) {
+    const [low, high] = wilsonInterval(ok, total);
+    lines.push(`| ${strategy} | ${ok}/${total} | ${ratio(low)}~${ratio(high)} |`);
+  }
+  lines.push('');
+  if (strategies.length < 2) return lines;
+  lines.push('## 전략 쌍 비교(Fisher 양측, 사후 탐색)', '', '| 전략 A | 전략 B | 성공 A | 성공 B | p |', '|---|---|---|---|---|');
+  for (const [index, a] of strategies.entries()) {
+    for (const b of strategies.slice(index + 1)) {
+      const left = tally.get(a)!;
+      const right = tally.get(b)!;
+      lines.push(`| ${a} | ${b} | ${left.ok}/${left.total} | ${right.ok}/${right.total} | ${formatP(fisherExactTwoSided(left.ok, left.total, right.ok, right.total))} |`);
+    }
+  }
+  lines.push(
+    '',
+    '과제를 합친 건수라 같은 과제를 반복한 실행 사이의 상관을 무시합니다. 실행 전에 정하지 않은 비교는 탐색 결과로만 읽습니다.',
+    '',
+  );
+  return lines;
 }

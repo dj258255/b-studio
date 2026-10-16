@@ -80,6 +80,7 @@ import { costForUsageByModel, parsePriceTable, type TokenPrices } from '../../li
 import type { SessionSnapshot, StudioEvent } from '../../lib/studio-events';
 import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
 import type { TaskPlanView } from '../../lib/task-plan-types';
+import { gitState, type GitState } from './git-state';
 
 type TaskPlansModule = typeof import('../../lib/server/task-plans');
 type SessionsModule = typeof import('../../lib/server/sessions');
@@ -165,8 +166,12 @@ async function memoryGuard(examplesDir: string, force: boolean, concurrency: num
 }
 
 function gitCommit(): string {
-  const git = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' });
-  return git.status === 0 ? git.stdout.trim() : '알 수 없음';
+  return gitState().shortCommit;
+}
+
+/** meta.json에 남기는 코드 상태. 짧은 해시(gitCommit)는 예전 결과와 맞추려고 그대로 둔다(이슈 #704) */
+function gitMeta(state: GitState): { gitCommitFull: string; gitDirty: boolean | 'unknown'; gitDirtyFiles?: string[] } {
+  return { gitCommitFull: state.commit, gitDirty: state.dirty, ...(state.dirtyFiles.length > 0 ? { gitDirtyFiles: state.dirtyFiles } : {}) };
 }
 
 function runningContainers(prefix: string): string[] {
@@ -1026,6 +1031,7 @@ async function main(): Promise<void> {
       outRoot,
       dockerMemTotal,
       commitAtStart: gitCommit(),
+      gitAtStart: gitMeta(gitState()),
       contextClearing,
       contractsSource,
       verify,
@@ -1063,7 +1069,8 @@ async function main(): Promise<void> {
   const activeSessions = new Set<string>();
   const startedAt = new Date().toISOString();
   // 실행 중에 작업 트리가 바뀌어도(병합·pull) 이미 올라간 코드는 시작 시점의 것이다. 그래서 커밋은 시작할 때 읽는다
-  const commitAtStart = gitCommit();
+  const stateAtStart = gitState();
+  const commitAtStart = stateAtStart.shortCommit;
 
   let cleaned = false;
   const cleanup = async (): Promise<void> => {
@@ -1308,6 +1315,7 @@ async function main(): Promise<void> {
           observedModels,
           dockerMemTotal,
           gitCommit: commitAtStart,
+          ...gitMeta(stateAtStart),
           // 끝날 때 다르면 기록한다. 결과를 해석할 때 어느 코드로 돌았는지 헷갈리지 않게
           ...(gitCommit() === commitAtStart ? {} : { gitCommitAtEnd: gitCommit() }),
           tasks: tasks.map((task) => task.id),
