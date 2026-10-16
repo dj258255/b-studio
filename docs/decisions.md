@@ -191,6 +191,7 @@
 - [ADR-171 다시 손댄 요청은 기록에 남은 사실로만 세고, 한쪽으로 치우친 값이라고 적어서 낸다](#adr-171-다시-손댄-요청은-기록에-남은-사실로만-세고-한쪽으로-치우친-값이라고-적어서-낸다)
 - [ADR-172 세션 화면의 중심을 터미널로 옮기고, 대화 패널은 입력창 없는 활동 기록으로 둔다](#adr-172-세션-화면의-중심을-터미널로-옮기고-대화-패널은-입력창-없는-활동-기록으로-둔다)
 - [ADR-173 세션 터미널을 이 컴퓨터의 CLI로도 연다: 사용자의 로그인 셸에서 띄우고 훅은 실행 인자로 붙인다](#adr-173-세션-터미널을-이-컴퓨터의-cli로도-연다-사용자의-로그인-셸에서-띄우고-훅은-실행-인자로-붙인다)
+- [ADR-174 만든 서비스 컨테이너의 실제 설정으로 격리를 확인하고, compose CLI에는 studio의 환경 변수를 넘기지 않는다](#adr-174-만든-서비스-컨테이너의-실제-설정으로-격리를-확인하고-compose-cli에는-studio의-환경-변수를-넘기지-않는다)
 
 ---
 
@@ -7849,3 +7850,40 @@ ADR-094는 "문서 쓰기는 코드 읽기의 부속이 아니라 요구사항 �
 - 내 폴더 방식에서 요청을 시작할 때 끼워 넣은 커밋을 풀면, 그 내용은 사람의 수정과 함께 "직접 수정" 체크포인트가 된다. 게이트를 거치지 않지만 통과 기록도 남지 않는다. 내 폴더 방식이 요청 사이의 변경을 다루는 기존 규칙과 같다.
 - 되돌리기와 보관본을 만드는 `git add`(버리기, 기억한 곳으로 되돌리기)는 설정 검사를 하지 않는다. 복구가 막히지 않게 하려는 것이고, 그 결과는 체크포인트가 되지 않는다.
 - 진짜 CLI로 재지 않았다. 임시 저장소와 임시 bare 원격으로 도는 테스트로만 봤다.
+
+## ADR-174 만든 서비스 컨테이너의 실제 설정으로 격리를 확인하고, compose CLI에는 studio의 환경 변수를 넘기지 않는다
+
+상태: 채택
+관련: ADR-024(네트워크 격리), ADR-158(.git 마스크, 만들기 → 확인 → 시작), 이슈 [#701](https://github.com/dj258255/b-studio/issues/701)
+
+### 맥락
+- 샌드박스 격리(internal 네트워크, edge 출구, `.git` 읽기 전용)는 b-studio가 쓰는 override와 사용자의 `compose.yaml`을 compose가 합친 결과다. 사용자 compose 파일은 에이전트가 세션 중에 고칠 수 있다(ADR-158).
+- 만든 컨테이너에서 확인하던 것은 `.git` 마운트 하나였다. `privileged`, 도커 소켓 마운트, 호스트 네임스페이스, 추가 네트워크, 서비스 포트 공개는 보지 않았다.
+- 에이전트가 `write_file`로 compose를 고치면 게이트가 바뀐 것을 알아채 서비스를 다시 만든다(`verify.ts`의 `composeChanged`). `requireApprovalFor: [restart_service]`로는 이 재시작을 막지 못한다.
+- compose CLI는 `{ ...process.env, ...시크릿 }`으로 돌았다. compose 파일의 `${VAR}`는 이 환경에서 채워지므로 studio를 띄운 셸의 자격 증명을 컨테이너 환경으로 꺼낼 수 있었다. 가림은 선언된 시크릿만 안다.
+- 실제 Docker(2026-10-16, Docker 29.5.2)에서 고치기 전 코드로 `privileged: true`, `/var/run/docker.sock` 마운트, `networks: [default]`를 넣은 compose가 모두 시작됐고, studio 프로세스에만 있던 환경 변수 값이 컨테이너의 응답에 나왔다.
+
+### 검토한 선택지
+
+| 방식 | 판단 |
+|---|---|
+| **만든 컨테이너의 `docker inspect`를 거부 목록으로 보고, 걸리면 시작하지 않고 지운다** | 채택. ADR-158의 만들기 → 확인 → 시작 자리에 얹는다. 보간·프로필·병합·`service:` 참조를 compose가 푼 결과를 보므로 확인하는 쪽과 실제로 도는 쪽이 같은 값을 읽는다 |
+| 사용자 compose 파일만 `config --format json`으로 읽어 검사 | 정규화가 네트워크가 없는 서비스에도 `default`를 적어, 사용자가 일부러 `networks: [default]`를 적은 경우와 구분할 수 없다 |
+| 병합한 설정(사용자 + override)을 `config`로 읽어 검사 | 쓸 수 있지만 확인 대상(설정)과 실제(컨테이너)가 다시 갈린다. 만든 뒤 검사가 이미 결과를 본다 |
+| `protectedPaths`에 `compose.yaml` 추가 | 파일 도구만 막는다. `run_in_service`의 셸로는 쓸 수 있다 |
+
+compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `SSH_AUTH_SOCK`, `XDG_*` 일부, Windows의 CLI용 이름, `DOCKER_*`·`COMPOSE_*`·`BUILDKIT_*`·`BUILDX_*`·`LC_*`)과 선언된 시크릿으로 정했다. 사용자 compose의 `${…}`를 모두 거절하는 방식은 `.env`로 값을 주는 흔한 구성을 깨뜨려 고르지 않았다.
+
+### 결정
+- 거부 목록: `privileged`, `cap_add`, `devices`, GPU 요청, seccomp·AppArmor를 끄거나 SELinux 라벨을 끄는 `security_opt`, `no-new-privileges=false`, `pid`·`ipc`·`uts`·`userns_mode`·`cgroup`·`network_mode`의 `host`와 `container:`, 이 샌드박스의 `b-studio-sandbox`(edge는 `b-studio-egress`까지) 밖의 네트워크, edge가 아닌 서비스의 포트 공개, 도커·containerd 등의 소켓과 시스템 폴더(`/`, `/etc`, `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containerd`, `/boot`) 마운트, 서비스 이름 `studio`(edge가 studio 자신의 호출로 본다).
+- 만든 직후(시작 전)와 시작한 직후 두 번 본다. 걸리면 지우고 사유를 서비스별로 적어 던진다. 에이전트의 compose가 원인이므로 플랫폼 실패로 표시하지 않는다.
+- edge 서비스도 같은 검사를 받는다. 사용자 compose에 같은 이름의 서비스를 두면 override와 합쳐지기 때문이다.
+
+### 대가
+- compose 파일의 `${VAR}`로 studio를 띄운 셸의 값을 쓰던 프로젝트는 그 값을 `.env`나 선언된 시크릿으로 옮겨야 한다.
+- 위 설정이 꼭 필요한 프로젝트(도커 안의 도커, GPU)는 컨테이너 방식으로 돌릴 수 없다.
+
+### 남는 것
+- 프로젝트 밖의 다른 폴더 바인드는 막지 않는다. 모노레포 저장소 루트처럼 프로젝트의 상위 폴더를 마운트하는 구성을 지원하기 때문이다. 홈 폴더 전체를 붙이는 compose는 이 검사를 지난다.
+- 컨테이너가 만들어진 상태로는 잠시 남는다(시작되지 않는다). 시작한 뒤의 두 번째 확인 전에 바깥에서 바꿔 넣은 컨테이너는 그 사이 돈다(ADR-158과 같다).
+- Kubernetes 제공자(`compose-model.ts`)와 배포(`deploy.ts`)는 여전히 `process.env`로 compose를 부른다. 실험 경로라 이번에 고치지 않았다.
