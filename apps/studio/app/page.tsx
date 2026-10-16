@@ -1,8 +1,11 @@
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { ResumeSessionChoice } from "@/components/resume-session-choice";
 import { WorkspaceLauncher } from "@/components/workspace-launcher";
 import { pageUser } from "@/lib/server/access";
 import { findWorkspaceChoice } from "@/lib/server/workspace-entry";
+
+export const metadata: Metadata = { title: "개발 화면" };
 
 /**
  * 앱의 첫 화면. 입력창 대신 마지막 프로젝트의 개발 화면(대화+미리보기)을 바로 연다(ADR-066).

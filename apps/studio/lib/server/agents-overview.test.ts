@@ -199,3 +199,33 @@ function fleetView(overrides: Partial<FleetView> = {}): FleetView {
     ...overrides,
   };
 }
+
+describe('개입 사유 한 줄(작업 서랍, 이슈 #720)', () => {
+  it('세션 오류는 오류 문구의 첫 줄을 색 코드 없이 짧게 붙인다', () => {
+    const error = '앱이 켜지다가 종료됐습니다 (컨테이너 exited) \u001b[31mFATAL\u001b[39m: Too many open files\n두 번째 줄';
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ status: 'failed', error }) })] });
+
+    expect(items[0]!.reason).toBe('앱이 켜지다가 종료됐습니다 (컨테이너 exited) FATAL: Too many open files');
+  });
+
+  it('긴 오류는 잘라서 끝에 말줄임을 붙인다', () => {
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ status: 'failed', error: 'x'.repeat(500) }) })] });
+
+    expect(items[0]!.reason!.length).toBeLessThanOrEqual(121);
+    expect(items[0]!.reason!.endsWith('…')).toBe(true);
+  });
+
+  it('검증 실패는 마지막 실행 요약을 사유로 쓴다', () => {
+    const recent: StudioEvent[] = [{ type: 'run_finished', runId: 'r1', status: 'failed', summary: '테스트 2개가 실패했습니다\n자세한 내용' }];
+    const { items } = overview({ sessions: [source({ recent })] });
+
+    expect(items[0]!.reason).toBe('테스트 2개가 실패했습니다');
+  });
+
+  it('개입할 일이 없으면 사유를 붙이지 않는다', () => {
+    const { items } = overview({ sessions: [source()] });
+
+    expect(items[0]!.reason).toBeUndefined();
+  });
+});
+

@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { TaskPlanWorkbench } from '@/components/task-plan-workbench';
 import { pageUser } from '@/lib/server/access';
@@ -7,6 +8,8 @@ import { listModelOptions } from '@/lib/server/model-registry';
 import { canPublishIssues, listProjects } from '@/lib/server/projects';
 import { planModelAlias } from '@/lib/task-plan-types';
 import { listTaskPlans, PLAN_LIMITS, selectableLaneBackends } from '@/lib/server/task-plans';
+
+export const metadata: Metadata = { title: '나눠서 병렬' };
 
 export default async function TaskPlansPage(props: { searchParams: Promise<{ id?: string | string[] }> }) {
   const requested = (await props.searchParams).id;
@@ -25,6 +28,7 @@ export default async function TaskPlansPage(props: { searchParams: Promise<{ id?
     mode: capabilities.mode,
     enabled: capabilities.split.enabled,
     ...(capabilities.split.reason ? { reason: capabilities.split.reason } : {}),
+    ...(capabilities.split.docsUrl ? { docsUrl: capabilities.split.docsUrl } : {}),
   };
   // "새 작업 분해" 폼의 모델·노력 단계 기본값. 방금 이 화면으로 넘어온 계획(?id=, 나눠서 병렬 제안 수락)이 있으면
   // 그 계획이 이어받은 세션 값을 그대로 보여 준다 — 폼에서 다시 계획을 만들 때도 같은 모델·노력으로 시작한다
@@ -40,8 +44,8 @@ export default async function TaskPlansPage(props: { searchParams: Promise<{ id?
           <p className="text-sm font-semibold text-muted">b-studio / 나눠서 병렬</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">한 요청을 나눠 동시에 실행하고 합친 결과를 다시 검증합니다</h1>
         </div>
-        <Link href="/work" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          작업 목록
+        <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+          개발 화면으로
         </Link>
       </header>
       <TaskPlanWorkbench

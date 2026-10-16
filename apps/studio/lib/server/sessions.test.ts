@@ -280,6 +280,18 @@ describe('buildChecklistAddendum(PR 본문에 올리기 전 점검 요약을 덧
     expect(addendum).toContain('- ✗ 작업 트리·원격: 아직 원격 브랜치에 올리지 않았습니다');
   });
 
+  it('건너뛴 항목이 있으면 머리글에 그 수를 함께 적는다(이슈 #720)', () => {
+    const addendum = buildChecklistAddendum({
+      score: { passed: 1, total: 1 },
+      items: [
+        { id: 'tests', title: '테스트', status: 'pass', reason: '모두 통과했습니다' },
+        { id: 'requirements', title: '요구사항', status: 'skip', reason: 'docs/requirements.md가 없어 건너뜁니다.' },
+      ],
+    });
+
+    expect(addendum).toContain('## 올리기 전 점검 1/1 통과 · 건너뜀 1');
+  });
+
   it('항목이 없어도(score 0/0) 머리글만 남긴다', () => {
     const addendum = buildChecklistAddendum({ score: { passed: 0, total: 0 }, items: [] });
     expect(addendum).toContain('## 올리기 전 점검 0/0 통과');

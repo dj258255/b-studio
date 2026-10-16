@@ -18,7 +18,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "b-studio",
+  // 화면마다 자기 이름을 앞에 둔다(탭 여러 개를 열어도 구분된다). 이름을 정하지 않은 화면은 b-studio만 보인다
+  title: { default: "b-studio", template: "%s · b-studio" },
   description: "사내 API와 정책 위에서 화면과 백엔드를 함께 만들고 바로 확인하는 작업대",
 };
 

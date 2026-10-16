@@ -170,6 +170,12 @@ export function AccountCard({ initial, onChanged }: { initial: AccountStatus; on
       </div>
 
       {!status.connected && status.reason && <p className="text-sm text-muted">{status.reason}</p>}
+      {!status.connected && status.detail && (
+        <details className="text-xs text-muted">
+          <summary className="cursor-pointer select-none hover:text-ink">CLI 원문 보기</summary>
+          <pre className="mt-1.5 max-h-48 overflow-auto rounded-control bg-ink/5 px-2.5 py-2 font-mono break-words whitespace-pre-wrap">{status.detail}</pre>
+        </details>
+      )}
       {error && (
         <p role="alert" className="text-sm text-fail">
           {error}

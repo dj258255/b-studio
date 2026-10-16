@@ -17,6 +17,7 @@
  */
 import { spawn as nodeSpawn } from 'node:child_process';
 import { describeAccount, preflightClaudeCode, preflightCodex, preflightCommandCode, preflightGemini, preflightOpenCode } from '@b-studio/agent';
+import { stripAnsi } from '@b-studio/sandbox';
 
 /** 계정 연결 화면이 다루는 백엔드. api·demo는 로그인 CLI가 없어 뺀다 */
 export const CLI_ACCOUNT_BACKENDS = ['claude-code', 'codex', 'commandcode', 'opencode', 'gemini'] as const;
@@ -48,8 +49,10 @@ export interface AccountStatus {
   installed: boolean;
   /** 연결돼 있을 때 preflight가 이미 알고 있는 계정 종류(예: "Max 구독"). 모르면 비워 둔다 — 토큰 파일을 따로 읽어 지어내지 않는다 */
   accountKind?: string;
-  /** 연결돼 있지 않을 때 preflight가 돌려준 이유(사람이 읽는 문장) */
+  /** 연결돼 있지 않을 때 사람이 할 일을 적은 한국어 요약 */
   reason?: string;
+  /** CLI가 찍은 원문(색 코드를 지운 것). 화면은 요약 아래에 접어 둔다 */
+  detail?: string;
 }
 
 /** 로그인 명령 하나. command·args는 화면의 복사 버튼과 실제로 띄우는 자식 프로세스가 함께 쓴다 */
@@ -112,32 +115,43 @@ export interface AccountPreflights {
   gemini?: typeof preflightGemini;
 }
 
+/** preflight가 돌려준 실패를 화면 상태로 옮긴다. 요약과 원문을 나누고, 둘 다 터미널 색 코드를 지운다 */
+function notConnected(
+  backend: CliAccountBackend,
+  label: string,
+  result: { reason: string; summary?: string; detail?: string },
+): AccountStatus {
+  const detail = result.detail ? stripAnsi(result.detail).trim() : '';
+  return {
+    backend,
+    label,
+    connected: false,
+    // 설치 여부는 원문(ENOENT 등)까지 보고 가린다
+    installed: !looksNotInstalled(result.reason),
+    reason: stripAnsi(result.summary ?? result.reason).trim(),
+    ...(detail ? { detail } : {}),
+  };
+}
+
 /** 백엔드 하나의 지금 상태. 토큰·자격 증명 파일은 읽지 않고 preflight 결과만 옮긴다 */
 export async function checkAccountStatus(backend: CliAccountBackend, preflights: AccountPreflights = {}): Promise<AccountStatus> {
   const label = BACKEND_LABEL[backend];
   if (backend === 'claude-code') {
     const result = await (preflights.claudeCode ?? preflightClaudeCode)();
     if (result.ok) return { backend, label, connected: true, installed: true, accountKind: describeAccount(result.account) };
-    return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
+    return notConnected(backend, label, result);
   }
-  if (backend === 'codex') {
-    const result = await (preflights.codex ?? preflightCodex)();
-    if (result.ok) return { backend, label, connected: true, installed: true };
-    return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
-  }
-  if (backend === 'commandcode') {
-    const result = await (preflights.commandCode ?? preflightCommandCode)();
-    if (result.ok) return { backend, label, connected: true, installed: true };
-    return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
-  }
-  if (backend === 'opencode') {
-    const result = await (preflights.openCode ?? preflightOpenCode)();
-    if (result.ok) return { backend, label, connected: true, installed: true };
-    return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
-  }
-  const result = await (preflights.gemini ?? preflightGemini)();
+  const preflight =
+    backend === 'codex'
+      ? (preflights.codex ?? preflightCodex)
+      : backend === 'commandcode'
+        ? (preflights.commandCode ?? preflightCommandCode)
+        : backend === 'opencode'
+          ? (preflights.openCode ?? preflightOpenCode)
+          : (preflights.gemini ?? preflightGemini);
+  const result = await preflight();
   if (result.ok) return { backend, label, connected: true, installed: true };
-  return { backend, label, connected: false, installed: !looksNotInstalled(result.reason), reason: result.reason };
+  return notConnected(backend, label, result);
 }
 
 export async function listAccountStatuses(preflights: AccountPreflights = {}): Promise<AccountStatus[]> {
@@ -208,7 +222,7 @@ export function extractLoginHint(line: string): { url?: string; code?: string } 
 }
 
 function pushLine(progress: LoginProgress, chunk: string): void {
-  for (const raw of chunk.split(/\r?\n/)) {
+  for (const raw of stripAnsi(chunk).split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
     progress.lines.push(line);

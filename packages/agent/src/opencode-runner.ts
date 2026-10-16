@@ -16,6 +16,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, 
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
+import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
 
 /** MCP 서버 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: `opencode models`·`debug config`) */
 const SERVER = 'b_studio';
@@ -702,12 +703,12 @@ function classifyFailure({ exitCode, message }: { exitCode: number; message: str
  * 샌드박스를 띄우기 전에 이 PC의 OpenCode CLI가 있는지 확인한다.
  * `opencode --version`만 부르므로 모델 호출도, 사용량도 쓰지 않는다. 토큰·계정 정보는 읽지 않는다.
  */
-export async function preflightOpenCode({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<{ ok: true } | { ok: false; reason: string }> {
+export async function preflightOpenCode({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<{ ok: true } | CliPreflightFailure> {
   try {
     await run(command, ['--version'], timeoutMs);
     return { ok: true };
   } catch (error) {
-    return { ok: false, reason: `OpenCode CLI를 찾지 못했습니다. 터미널에서 "${command}"가 실행되는지 확인하세요. (${describe(error)})` };
+    return cliPreflightFailure(`OpenCode CLI를 찾지 못했습니다. 터미널에서 "${command}"가 실행되는지 확인하세요.`, error);
   }
 }
 
@@ -809,6 +810,3 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

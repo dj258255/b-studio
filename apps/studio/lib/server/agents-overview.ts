@@ -8,6 +8,7 @@
  * 권한 규칙을 새로 만들지 않는다(로그인한 사람이 볼 수 있는 것은 그대로).
  */
 import type { AgentEvent, AgentUsage } from '@b-studio/agent';
+import { stripAnsi } from '@b-studio/sandbox';
 import type { FleetView } from '@/lib/fleet-types';
 import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-events';
 import type { TaskPlanView } from '@/lib/task-plan-types';
@@ -25,6 +26,8 @@ export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'error' |
 export const ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'error', 'budget'];
 /** 제목은 요청 앞 이 글자 수로 줄인다 */
 export const TITLE_CHARS = 80;
+/** 개입 사유 한 줄은 이 글자 수로 줄인다 */
+export const REASON_CHARS = 120;
 
 export interface AgentItem {
   kind: AgentKind;
@@ -37,6 +40,8 @@ export interface AgentItem {
   owner?: string;
   state: AgentState;
   attention?: AgentAttention;
+  /** 개입이 필요한 까닭 한 줄(세션 오류의 첫 줄, 검증 실패한 실행의 요약). 알 수 없으면 없다 */
+  reason?: string;
   /** 이 항목이 실제로 쓰는 백엔드(레인은 그 레인이 고른 backend). 알 수 없으면 없다 */
   backend?: SessionMode;
   lastActivityAt: string;
@@ -99,6 +104,8 @@ interface AgentRow {
   fallbackState?: AgentState;
   /** 스냅샷이 없을 때의 개입 사유 */
   fallbackAttention?: AgentAttention;
+  /** 스냅샷이 없을 때 개입 사유를 설명하는 원문(레인 오류) */
+  fallbackReason?: string;
   /** 계획 승인 대기(세션 밖 사실) */
   approval?: boolean;
   /** 이 항목이 쓰는 백엔드 */
@@ -153,7 +160,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         owner: plan.owner,
         ...(source
           ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}) }
-          : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane) }),
+          : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane), ...(lane.error ? { fallbackReason: lane.error } : {}) }),
         // 레인은 그 레인이 고른 백엔드(세션이 있으면 스냅샷)를 보여 준다
         backend: source ? sessionBackend(source.snapshot) : lane.backend,
         group: planGroup(plan.id),
@@ -219,6 +226,7 @@ export async function listAgentOverview(user: string): Promise<{ items: AgentIte
 function evaluate(row: AgentRow, now: number): AgentItem {
   const state = stateOf(row);
   const attention = attentionOf(row);
+  const reason = attention ? reasonOf(row, attention) : undefined;
   const tokens = row.tokens ?? row.snapshot?.tokens;
   const runningForMs = state === 'working' && row.runningSince ? Math.max(0, now - Date.parse(row.runningSince)) : undefined;
   return {
@@ -230,6 +238,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.owner ? { owner: row.owner } : {}),
     state,
     ...(attention ? { attention } : {}),
+    ...(reason ? { reason } : {}),
     ...(row.backend ? { backend: row.backend } : {}),
     lastActivityAt: row.updatedAt,
     ...(runningForMs !== undefined ? { runningForMs } : {}),
@@ -266,6 +275,28 @@ function attentionOf(row: AgentRow): AgentAttention | undefined {
   if (!snapshot && row.fallbackAttention) candidates.push(row.fallbackAttention);
   if (finished?.status === 'cancelled' && cancelledByBudget(recent, finished.runId)) candidates.push('budget');
   return ATTENTION_PRIORITY.find((attention) => candidates.includes(attention));
+}
+
+/** 개입 사유를 설명하는 한 줄. 사유 이름(오류·검증 실패)만으로는 무엇을 할지 모르므로 원문의 첫 줄을 붙인다 */
+function reasonOf(row: AgentRow, attention: AgentAttention): string | undefined {
+  const snapshot = row.snapshot;
+  if (!snapshot) return row.fallbackReason ? oneLine(row.fallbackReason) : undefined;
+  if (attention === 'error' && snapshot.error) return oneLine(snapshot.error);
+  if (attention === 'gate_failed') {
+    const event = (row.recent ?? []).findLast((candidate) => candidate.type === 'run_finished');
+    if (event?.type === 'run_finished' && event.summary) return oneLine(event.summary);
+  }
+  return undefined;
+}
+
+/** 색 코드를 지우고 비어 있지 않은 첫 줄만 남겨 REASON_CHARS로 자른다 */
+function oneLine(text: string): string | undefined {
+  const line = stripAnsi(text)
+    .split('\n')
+    .map((candidate) => candidate.replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  if (!line) return undefined;
+  return line.length > REASON_CHARS ? `${line.slice(0, REASON_CHARS).trimEnd()}…` : line;
 }
 
 function hasPendingQuestion(snapshot: SessionSnapshot | undefined): boolean {
