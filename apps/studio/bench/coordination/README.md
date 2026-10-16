@@ -92,6 +92,8 @@ pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --t
 
 요약 표(`summary.md`)에는 `handoff`가 있는 행이 하나라도 있을 때만 열 5개(`건넨 테스트`, `파일 바뀜`, `쓰기 시도 합`, `보호 거절 합`, `api-unit 통과`)가 붙습니다. `unknown`은 합에 0으로 더하지 않고 `(모름 n)`으로 따로 적습니다. `meta.json`에도 `handoffTests`·`protectHandoff`가 남습니다.
 
+요약 끝에는 전략별 성공(과제 합산)과 Wilson 95% 구간, 전략 쌍마다 Fisher 양측 p값이 붙습니다(`stats.ts`). 과제를 합친 건수라 같은 과제 반복 사이의 상관을 무시하므로, 판정은 실행 전에 이슈에 적은 비교로만 하고 나머지 쌍은 탐색 결과로 읽습니다. `meta.json`에는 짧은 해시(`gitCommit`)와 함께 전체 해시(`gitCommitFull`), 커밋하지 않은 변경이 있었는지(`gitDirty`)와 그 경로(`gitDirtyFiles`)가 남습니다([#704](https://github.com/dj258255/b-studio/issues/704)).
+
 ### 보호 경로가 걸리는 곳과 한계
 
 claude-code 백엔드는 내장 파일 도구를 모두 끄고 b-studio 도구(MCP)만 엽니다. 도구 호출은 `executeTool` → `checkToolPolicy`(`packages/agent/src/policy.ts`)를 지나고, 보호 경로에 걸리면 `policy` 이벤트(deny)와 실패한 `tool_result`가 남습니다. 게이트의 review 단계(`reviewChanges`, `packages/agent/src/workflow.ts`)는 바뀐 파일을 한 번 더 보고 `protected-paths` 확인을 남깁니다.
