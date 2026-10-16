@@ -44,8 +44,8 @@ export default async function TaskPlansPage(props: { searchParams: Promise<{ id?
           <p className="text-sm font-semibold text-muted">b-studio / 나눠서 병렬</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">한 요청을 나눠 동시에 실행하고 합친 결과를 다시 검증합니다</h1>
         </div>
-        <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          개발 화면으로
+        <Link href="/work" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+          작업 목록
         </Link>
       </header>
       <TaskPlanWorkbench

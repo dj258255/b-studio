@@ -71,8 +71,8 @@ describe("탭 제목", () => {
 });
 
 describe("뒤로 가는 링크", () => {
-  it.each(["app/accounts/page.tsx", "app/work/page.tsx", "app/fleets/page.tsx", "app/task-plans/page.tsx", "app/projects/[id]/tokens/page.tsx"])(
-    "%s는 '개발 화면으로' 한 가지 말을 쓴다",
+  it.each(["app/accounts/page.tsx", "app/work/page.tsx", "app/projects/[id]/tokens/page.tsx"])(
+    "%s는 개발 화면으로 가는 링크를 '개발 화면으로' 한 가지 말로 쓴다",
     async (file) => {
       const text = await source(file);
       expect(text).toContain("개발 화면으로");
@@ -80,4 +80,11 @@ describe("뒤로 가는 링크", () => {
       expect(text).not.toMatch(/>\s*작업 목록\s*</);
     },
   );
+
+  // 여러 명 비교·나눠서 병렬은 작업 목록에서 여는 화면이라 작업 목록으로 돌아간다. 말을 맞추려고 목적지를 바꾸지 않는다
+  it.each(["app/fleets/page.tsx", "app/task-plans/page.tsx"])("%s는 작업 목록으로 돌아가는 링크를 둔다", async (file) => {
+    const text = await source(file);
+    expect(text).toMatch(/href="\/work"[^>]*>\s*작업 목록\s*</);
+    expect(text).not.toContain("← 개발 화면으로");
+  });
 });

@@ -30,8 +30,8 @@ export default async function FleetsPage(props: { searchParams: Promise<{ id?: s
           <p className="text-sm font-semibold text-muted">b-studio / 여러 명 비교</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">같은 요청을 격리된 여러 에이전트에서 비교합니다</h1>
         </div>
-        <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          개발 화면으로
+        <Link href="/work" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
+          작업 목록
         </Link>
       </header>
       <FleetWorkbench projects={projects} models={models} initialFleets={initial} initialSelectedId={selectedId} fleet={fleet} />
