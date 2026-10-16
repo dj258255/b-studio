@@ -197,6 +197,7 @@ export { classifyCommit, generateCommitSubject, type CommitType } from './commit
 export {
   CheckpointError,
   StagedMismatchError,
+  HeadMovedError,
   CheckpointStore,
   GIT_HARDENING,
   redactCredentials,

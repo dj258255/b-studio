@@ -191,6 +191,7 @@
 - [ADR-171 다시 손댄 요청은 기록에 남은 사실로만 세고, 한쪽으로 치우친 값이라고 적어서 낸다](#adr-171-다시-손댄-요청은-기록에-남은-사실로만-세고-한쪽으로-치우친-값이라고-적어서-낸다)
 - [ADR-172 세션 화면의 중심을 터미널로 옮기고, 대화 패널은 입력창 없는 활동 기록으로 둔다](#adr-172-세션-화면의-중심을-터미널로-옮기고-대화-패널은-입력창-없는-활동-기록으로-둔다)
 - [ADR-173 세션 터미널을 이 컴퓨터의 CLI로도 연다: 사용자의 로그인 셸에서 띄우고 훅은 실행 인자로 붙인다](#adr-173-세션-터미널을-이-컴퓨터의-cli로도-연다-사용자의-로그인-셸에서-띄우고-훅은-실행-인자로-붙인다)
+- [ADR-174 만든 서비스 컨테이너의 실제 설정으로 격리를 확인하고, compose CLI에는 studio의 환경 변수를 넘기지 않는다](#adr-174-만든-서비스-컨테이너의-실제-설정으로-격리를-확인하고-compose-cli에는-studio의-환경-변수를-넘기지-않는다)
 
 ---
 
@@ -7942,3 +7943,70 @@ ADR-094는 "문서 쓰기는 코드 읽기의 부속이 아니라 요구사항 �
 - 브랜치 전환으로 실패할 때 남는 글이 "보관본으로 남겼습니다" 뒤에 "바뀐 파일은 없었습니다"를 붙인다(보관한 뒤 되돌릴 것이 없어서다). 사실과 어긋나지는 않지만 헷갈린다.
 - 사용자 원본 폴더를 따라잡는 `project-source-sync`의 `merge --ff-only`는 그 폴더의 훅을 돌 수 있다(세션 작업 복사본이 아니라 손대지 않았다).
 
+
+### 덧붙임: 기대한 부모로만 커밋하고 git 설정·필터를 막는다(이슈 [#706](https://github.com/dj258255/b-studio/issues/706))
+#699 뒤에 남은 틈 셋을 코드를 읽어 찾았다.
+- 요청을 시작할 때 스튜디오 밖의 수정을 체크포인트로 남기는 커밋이 HEAD를 확인하지 않았고, 그 뒤 기억을 지금 HEAD로 새로 잡았다. 턴 사이에 끼워 넣은 커밋이 b-studio의 작성자 이메일과 `Workflow-Passed:` 트레일러를 흉내 내면 통과한 체크포인트로 읽혔다. 게이트가 도는 동안 끼워 넣은 커밋도 체크포인트 커밋의 부모가 되어 같은 길로 들어갔고, 되돌리기도 끝에서 지금 HEAD를 다시 기억했다.
+- 위험 설정 검사가 `git config --local --list`라 `include.path`·`includeIf`와 `config.worktree`를 펼치지 않았다. 검사는 원격 명령 앞에서만 돌았다.
+- b-studio의 git은 저장소 설정의 clean·smudge 필터, 전역 속성 파일, `.git/info/attributes`, 외부 diff와 textconv를 그대로 따랐다. 스튜디오 프로세스의 환경도 통째로 넘겼다.
+
+결정:
+1. 체크포인트 커밋은 `git commit` 대신 `write-tree`, `commit-tree -p <부모>`, `update-ref HEAD <새 커밋> <부모>`로 만든다. 부모는 스테이징하기 전에 정하고, HEAD를 옮길 때 ref 잠금 안에서 옛 값을 비교한다. 이 원자적 비교는 두 방식 모두에 적용된다.
+2. 이 컴퓨터 방식에서는 부모가 기억한 마지막 체크포인트와 같아야 한다. 다르면 체크포인트를 남기지 않는다(`HeadMovedError`). 기억은 b-studio가 만든 커밋의 sha로 갱신하고, 지금 HEAD를 다시 읽어 갱신하지 않는다.
+3. 이 컴퓨터 방식에서 요청을 시작할 때(터미널과 대화 창) 스튜디오 밖의 수정을 남기기 전에 HEAD를 기억에 맞춘다. 위에 얹은 커밋은 풀어 변경으로 돌리고(그 커밋의 작성자와 트레일러는 버려진다), 풀 수 없는 모양은 보관본을 남기고 되돌린다. 턴 끝 검사와 같은 처리다.
+4. 게이트가 통과한 뒤 커밋하려는데 HEAD가 움직였으면 기억한 체크포인트로 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다. 되돌리기도 HEAD가 기억과 다르면 그 위에서 되돌리지 않고 기억한 체크포인트로 돌아간다.
+5. 저장소 설정은 `git config --list --includes --show-scope --show-origin`으로 읽고 local·worktree 범위만 본다. `include.*`·`includeIf.*` 키는 펼친 내용과 상관없이 막는다. 막는 목록에 `http.*`의 프록시·TLS·쿠키 설정, `core.gitProxy`·`core.askPass`·`core.worktree`, `remote.*`의 `uploadpack`·`proxy`·`vcs`, `protocol.*`, `filter.*`, `diff.external`·`diff.*.textconv`·`diff.*.command`, `merge.*.driver`, `gpg.*`, 켜진 `commit.gpgSign`·`tag.gpgSign`을 더했다. 기존 정규식이 놓치던 하위 절 없는 `http.extraHeader`도 잡는다. b-studio가 스스로 넣는 `commit.gpgsign=false`와 내 폴더 방식의 `core.worktree`는 막지 않는다.
+6. 이 검사와 `.git/info/attributes` 검사(주석과 빈 줄이 아닌 줄이 있으면 멈춘다)를 원격 명령 앞뿐 아니라 체크포인트의 add·commit, 지문을 재는 hash-object, 배포가 쓰는 archive 앞에서도 돌린다.
+7. b-studio의 모든 git에 `-c core.attributesFile=/dev/null`과 `GIT_ATTR_NOSYSTEM=1`을 붙인다. diff·show에는 `--no-ext-diff --no-textconv`를 붙인다. 넘기는 환경에서 `GIT_*`는 작성자·커미터, ssh, askpass, 인증서, 전역 설정 위치만 남긴다.
+
+하지 않은 것:
+- 지문을 `hash-object --no-filters`로 재지 않는다. 저장소의 `.gitattributes`가 거는 줄 끝 변환과 전역 설정의 LFS 필터는 `git add`도 똑같이 적용한다. 필터 없이 재면 이런 저장소에서 검증한 지문과 스테이징된 지문이 늘 달라 체크포인트를 남기지 못한다. 위험한 쪽인 저장소 설정의 필터는 6번이 막는다.
+- `GIT_CONFIG_NOSYSTEM=1`을 넣지 않는다. macOS의 git은 자격 증명 도우미(osxkeychain)를 시스템 설정에 둔다(이 기기에서 확인). 끄면 올리기가 인증에 실패한다. 시스템 설정은 에이전트가 고칠 수 없는 파일이다.
+- 환경 변수를 최소 목록으로 줄이지 않고 `GIT_*`만 거른다. 자격 증명 도우미가 `GH_TOKEN`, 프록시, 인증서 변수를 읽는다.
+- 올리기는 지금처럼 원격 이름 `origin`으로 한다. 주소를 바꾸는 `insteadOf`·`pushInsteadOf`·`pushurl`은 설정 검사가 막는다.
+
+자동 검사: `pnpm typecheck` 6/6, studio lint 오류 0. `pnpm test` 367개 파일 4,564개 중 4,563개 통과, 실패 1개는 부하 중 20초 시간 초과(`sessions-pr-reexport`)로 단독으로 세 번 다시 돌려 모두 통과했다. 새 테스트 29개(agent 27, studio 2)가 고치기 전 코드에서 27개 실패했다(나머지 둘은 커밋 모양과 `commit.gpgsign=false`를 지키는 회귀 테스트). 변이 열둘(기대한 HEAD 비교, `update-ref` 옛 값, 요청 시작의 맞추기, 체크포인트의 기대 HEAD, worktree 범위, 커밋 앞 설정 검사, `info/attributes` 검사, `core.attributesFile`, `GIT_*` 거르기, `--no-textconv`, 새 금지 키, include 키)을 테스트가 잡는다. include 키 거절과 include 펼치기는 서로를 받친다: 키 거절만 빼면 펼친 `pushInsteadOf`가 걸리고, 둘 다 빼면 `includeIf` 테스트만 실패한다.
+
+남는 것:
+- 사용자의 전역 설정(`~/.gitconfig`)은 보지 않는다. 이 컴퓨터 방식에서 에이전트는 같은 사용자라 이 파일도 고칠 수 있다. 작정한 우회는 범위 밖이다(위 감시 절과 같다).
+- 저장소에 커밋된 `.gitattributes`의 `export-subst`·`export-ignore`는 막지 않는다. 체크포인트 안에 보이는 파일이라 리뷰에서 볼 수 있다.
+- 내 폴더 방식에서 요청을 시작할 때 끼워 넣은 커밋을 풀면, 그 내용은 사람의 수정과 함께 "직접 수정" 체크포인트가 된다. 게이트를 거치지 않지만 통과 기록도 남지 않는다. 내 폴더 방식이 요청 사이의 변경을 다루는 기존 규칙과 같다.
+- 되돌리기와 보관본을 만드는 `git add`(버리기, 기억한 곳으로 되돌리기)는 설정 검사를 하지 않는다. 복구가 막히지 않게 하려는 것이고, 그 결과는 체크포인트가 되지 않는다.
+- 진짜 CLI로 재지 않았다. 임시 저장소와 임시 bare 원격으로 도는 테스트로만 봤다.
+
+## ADR-174 만든 서비스 컨테이너의 실제 설정으로 격리를 확인하고, compose CLI에는 studio의 환경 변수를 넘기지 않는다
+
+상태: 채택
+관련: ADR-024(네트워크 격리), ADR-158(.git 마스크, 만들기 → 확인 → 시작), 이슈 [#701](https://github.com/dj258255/b-studio/issues/701)
+
+### 맥락
+- 샌드박스 격리(internal 네트워크, edge 출구, `.git` 읽기 전용)는 b-studio가 쓰는 override와 사용자의 `compose.yaml`을 compose가 합친 결과다. 사용자 compose 파일은 에이전트가 세션 중에 고칠 수 있다(ADR-158).
+- 만든 컨테이너에서 확인하던 것은 `.git` 마운트 하나였다. `privileged`, 도커 소켓 마운트, 호스트 네임스페이스, 추가 네트워크, 서비스 포트 공개는 보지 않았다.
+- 에이전트가 `write_file`로 compose를 고치면 게이트가 바뀐 것을 알아채 서비스를 다시 만든다(`verify.ts`의 `composeChanged`). `requireApprovalFor: [restart_service]`로는 이 재시작을 막지 못한다.
+- compose CLI는 `{ ...process.env, ...시크릿 }`으로 돌았다. compose 파일의 `${VAR}`는 이 환경에서 채워지므로 studio를 띄운 셸의 자격 증명을 컨테이너 환경으로 꺼낼 수 있었다. 가림은 선언된 시크릿만 안다.
+- 실제 Docker(2026-10-16, Docker 29.5.2)에서 고치기 전 코드로 `privileged: true`, `/var/run/docker.sock` 마운트, `networks: [default]`를 넣은 compose가 모두 시작됐고, studio 프로세스에만 있던 환경 변수 값이 컨테이너의 응답에 나왔다.
+
+### 검토한 선택지
+
+| 방식 | 판단 |
+|---|---|
+| **만든 컨테이너의 `docker inspect`를 거부 목록으로 보고, 걸리면 시작하지 않고 지운다** | 채택. ADR-158의 만들기 → 확인 → 시작 자리에 얹는다. 보간·프로필·병합·`service:` 참조를 compose가 푼 결과를 보므로 확인하는 쪽과 실제로 도는 쪽이 같은 값을 읽는다 |
+| 사용자 compose 파일만 `config --format json`으로 읽어 검사 | 정규화가 네트워크가 없는 서비스에도 `default`를 적어, 사용자가 일부러 `networks: [default]`를 적은 경우와 구분할 수 없다 |
+| 병합한 설정(사용자 + override)을 `config`로 읽어 검사 | 쓸 수 있지만 확인 대상(설정)과 실제(컨테이너)가 다시 갈린다. 만든 뒤 검사가 이미 결과를 본다 |
+| `protectedPaths`에 `compose.yaml` 추가 | 파일 도구만 막는다. `run_in_service`의 셸로는 쓸 수 있다 |
+
+compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `SSH_AUTH_SOCK`, `XDG_*` 일부, Windows의 CLI용 이름, `DOCKER_*`·`COMPOSE_*`·`BUILDKIT_*`·`BUILDX_*`·`LC_*`)과 선언된 시크릿으로 정했다. 사용자 compose의 `${…}`를 모두 거절하는 방식은 `.env`로 값을 주는 흔한 구성을 깨뜨려 고르지 않았다.
+
+### 결정
+- 거부 목록: `privileged`, `cap_add`, `devices`, GPU 요청, seccomp·AppArmor를 끄거나 SELinux 라벨을 끄는 `security_opt`, `no-new-privileges=false`, `pid`·`ipc`·`uts`·`userns_mode`·`cgroup`·`network_mode`의 `host`와 `container:`, 이 샌드박스의 `b-studio-sandbox`(edge는 `b-studio-egress`까지) 밖의 네트워크, edge가 아닌 서비스의 포트 공개, 도커·containerd 등의 소켓과 시스템 폴더(`/`, `/etc`, `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/var/lib/docker`, `/var/lib/containerd`, `/boot`) 마운트, 서비스 이름 `studio`(edge가 studio 자신의 호출로 본다).
+- 만든 직후(시작 전)와 시작한 직후 두 번 본다. 걸리면 지우고 사유를 서비스별로 적어 던진다. 에이전트의 compose가 원인이므로 플랫폼 실패로 표시하지 않는다.
+- edge 서비스도 같은 검사를 받는다. 사용자 compose에 같은 이름의 서비스를 두면 override와 합쳐지기 때문이다.
+
+### 대가
+- compose 파일의 `${VAR}`로 studio를 띄운 셸의 값을 쓰던 프로젝트는 그 값을 `.env`나 선언된 시크릿으로 옮겨야 한다.
+- 위 설정이 꼭 필요한 프로젝트(도커 안의 도커, GPU)는 컨테이너 방식으로 돌릴 수 없다.
+
+### 남는 것
+- 프로젝트 밖의 다른 폴더 바인드는 막지 않는다. 모노레포 저장소 루트처럼 프로젝트의 상위 폴더를 마운트하는 구성을 지원하기 때문이다. 홈 폴더 전체를 붙이는 compose는 이 검사를 지난다.
+- 컨테이너가 만들어진 상태로는 잠시 남는다(시작되지 않는다). 시작한 뒤의 두 번째 확인 전에 바깥에서 바꿔 넣은 컨테이너는 그 사이 돈다(ADR-158과 같다).
+- Kubernetes 제공자(`compose-model.ts`)와 배포(`deploy.ts`)는 여전히 `process.env`로 compose를 부른다. 실험 경로라 이번에 고치지 않았다.
