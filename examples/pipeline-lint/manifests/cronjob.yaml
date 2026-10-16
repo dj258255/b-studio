@@ -1,0 +1,31 @@
+# 원천 데이터를 매시간 옮기는 예시 CronJob. 클러스터에 적용하지 않고 kubeconform으로 스키마만 확인한다
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sales-sync
+  labels:
+    app.kubernetes.io/name: sales-sync
+spec:
+  schedule: "15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: sync
+              image: busybox:1.37
+              command: [sh, -c, "echo syncing $(SOURCE_BUCKET) to $(TARGET_TABLE)"]
+              envFrom:
+                - configMapRef:
+                    name: sales-sync-config
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 64Mi
+                limits:
+                  memory: 128Mi

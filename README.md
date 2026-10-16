@@ -140,6 +140,7 @@ flowchart LR
 | `packages/agent/` | 에이전트 루프, 도구, 모델 라우터, 검증 게이트, 체크포인트 | 신뢰 장치의 본체. CLI·웹 모두 이 패키지를 부른다([공구함](docs/toolkit.md)) |
 | `templates/` | Next.js·Spring Boot·FastAPI 원본 | managed 서비스를 만들 때 복사하는 뼈대. 워크스페이스 밖에 둬 템플릿 자체 의존성과 섞이지 않는다 |
 | `examples/orders/` | web + api + PostgreSQL 예제 프로젝트 | 모든 실험·E2E·도그푸딩이 쓰는 공통 과제 |
+| `examples/pipeline-lint/` | Argo·Airflow·쿠버네티스·Helm 정의를 `workflow.tests`로 정적 검사하는 예제 | 웹 앱이 아닌 저장소에도 게이트를 쓰는 구성을 보인다 |
 | `config/` | 모델 레지스트리 예시 | 공급자·단가 설정을 코드 밖에 둔다 |
 | `docs/` | 사용자·운영·설계 문서, ADR, 실험 보고서 | 코드와 같은 저장소에서 같이 버전이 올라간다 |
 | `wiki/` | GitHub Wiki에 게시할 원본 | 제품 동작의 기준은 `docs/`이고 Wiki는 그 요약이다 |
