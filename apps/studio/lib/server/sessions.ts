@@ -315,7 +315,7 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, warnSessionTerminal } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
@@ -516,6 +516,8 @@ interface Session {
   lazy: boolean;
   bootPromise?: Promise<void>;
   usageTimer?: NodeJS.Timeout;
+  /** 터미널 실행의 정체를 보는 타이머(#B5). 열린 터미널 실행이 있을 때만 돌고, 실행이 닫히거나 세션이 멈추면 지운다 */
+  terminalStallTimer?: NodeJS.Timeout;
   /** 에이전트 도구를 거치지 않은 파일 변경(서비스 안에서 명령이 만든 파일 등)을 코드 화면에 알린다 */
   fileWatcher?: FileWatcher;
   /** 내 폴더에서 새로 만든 폴더를 서비스 컨테이너 안에서 옮겼다 되돌린 시각. 그 이동이 다시 변경 알림으로 오는 것을 거른다 */
@@ -1223,6 +1225,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   if (terminalRun) settleTerminalRun(session, terminalRun, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
   session.logFollower?.abort();
   clearInterval(session.usageTimer);
+  // 터미널 실행의 정체 감시도 멈춘다(#B5). 세션에 타이머가 걸린 채 남지 않게 한다
+  stopTerminalStallWatch(session);
   session.fileWatcher?.close();
   // 세션 터미널의 컨테이너는 compose 밖에서 띄운 것이라 따로 지운다(#673)
   await disposeSessionTerminal(id, session.sandbox.id);
@@ -2533,9 +2537,24 @@ async function chargeUser(run: ActiveRun, usage: AgentUsage): Promise<void> {
   if (!run.by || parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT) === undefined) return;
   const delta = subtractTokens(usage, run.charged);
   run.charged = usage;
+  await recordUserUsage(run.by, delta);
+}
+
+/**
+ * 늦게 온(실행이 닫힌 뒤 도착한) 터미널 사용량을 사람 몫에 더한다(#B5 수정 1). 실행 객체가 없어
+ * 늘어난 만큼이 곧 usage 전체다. chargeUser와 같은 조건(사람 한도를 정했을 때만)으로 기록한다
+ */
+async function chargeLateTerminalUsage(session: Session, usage: AgentUsage): Promise<void> {
+  const by = session.snapshot.owner;
+  if (!by || parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT) === undefined) return;
+  await recordUserUsage(by, usage);
+}
+
+/** 사람 몫에 delta를 더한다(늘어난 것이 없으면 건너뛴다). 기록을 쓰지 못해도 실행은 계속한다 */
+async function recordUserUsage(by: string, delta: AgentUsage): Promise<void> {
   if (!hasTokens(delta)) return;
   try {
-    await addUserUsage(run.by, delta, parseUsageWindow(process.env.B_STUDIO_USER_TOKEN_WINDOW));
+    await addUserUsage(by, delta, parseUsageWindow(process.env.B_STUDIO_USER_TOKEN_WINDOW));
   } catch (error) {
     console.error('[b-studio] 사람별 토큰 사용량을 기록하지 못했습니다', error);
   }
@@ -7386,6 +7405,8 @@ const TERMINAL_REQUEST_LIMIT = 8000;
 const TERMINAL_LATE_USAGE_MS = 5_000;
 /** 같은 requestId를 두 번 세지 않게 기억하는 개수. 세션마다 이만큼만 최근 것을 기억한다 */
 const TERMINAL_SEEN_USAGE_LIMIT = 2_000;
+/** 터미널 실행의 정체로 보는 기본 시간(초). 열린 실행에 이만큼 훅도 텔레메트리도 없으면 한 번 알린다(#B5) */
+const TERMINAL_STALL_DEFAULT_SECONDS = 120;
 
 interface TerminalVerification {
   workspace: Workspace;
@@ -7428,6 +7449,22 @@ interface TerminalRunState {
    * 사람이 요청 전에 미리 고쳐 둔 파일은 양쪽에 모두 들어가므로 다르지 않다(오탐하지 않는다)
    */
   readOnlyFingerprint?: string;
+  /**
+   * 이 실행에 붙은 모델 호출 수(텔레메트리 run_usage 개수, #B5). 터미널 실행의 "턴"이다 — 턴 상한을 이 수로 센다
+   */
+  modelCalls: number;
+  /**
+   * 마지막으로 훅 호출이나 텔레메트리가 온 시각(Date.now()). 정체 감시가 이 값과 지금을 견준다.
+   * 대화 실행의 startedAt과 달리 실행이 사는 동안 움직인다
+   */
+  lastActivityMs: number;
+  /** 이 실행에서 정체 경고를 이미 한 번 보냈는가. 움직임이 다시 생기면 거짓으로 돌려 다음 정체에 다시 알린다 */
+  stallNotified: boolean;
+  /**
+   * 한도에 닿아 그 뒤의 쓰기 도구를 거절하는 중이다(#B5). max_turns는 턴 상한에 닿은 것(실행은 열린 채 두고
+   * 턴이 끝나기를 기다린다), budget은 세션·사람 토큰 한도에 닿아 실행을 멈추고 되돌리는 중인 것이다
+   */
+  limitReason?: 'max_turns' | 'budget';
 }
 
 function clipText(text: string, limit: number): string {
@@ -7463,16 +7500,131 @@ function openTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRun
 }
 
 /**
+ * B_STUDIO_TERMINAL_STALL_SECONDS(#B5). 터미널 실행에 이만큼(초) 움직임이 없으면 한 번 알린다. 비었으면 120초,
+ * 양의 정수가 아니면 던진다(오타가 조용히 다른 시간이 되지 않게, parseTokenLimit과 같은 태도)
+ */
+function terminalStallMs(): number {
+  const value = process.env.B_STUDIO_TERMINAL_STALL_SECONDS?.trim();
+  if (!value) return TERMINAL_STALL_DEFAULT_SECONDS * 1000;
+  if (!/^\d+$/.test(value) || Number(value) <= 0) throw new StudioError(500, `B_STUDIO_TERMINAL_STALL_SECONDS는 양의 정수여야 합니다 (지금 값: ${value})`);
+  return Number(value) * 1000;
+}
+
+/** 정체 감시 타이머를 세션마다 하나 띄운다. 이미 돌면 그대로 둔다 — 실행이 바뀌어도 하나만 돈다 */
+function startTerminalStallWatch(session: Session, stallMs: number): void {
+  if (session.terminalStallTimer) return;
+  session.terminalStallTimer = setInterval(() => checkTerminalStall(session, stallMs), stallMs);
+  // 이 타이머가 프로세스를 붙잡지 않게 한다(세션이 멈추면 지운다)
+  session.terminalStallTimer.unref?.();
+}
+
+/** 정체 감시를 멈춘다. 여러 번 불려도 안전하다 */
+function stopTerminalStallWatch(session: Session): void {
+  if (!session.terminalStallTimer) return;
+  clearInterval(session.terminalStallTimer);
+  session.terminalStallTimer = undefined;
+}
+
+/**
+ * 정체 알림 문구(#B5 수정 3). 설정한 시간으로 만든다 — 60초의 배수면 N분, 아니면 N초. 멈추거나 되돌리지 않고
+ * 사람에게만 알린다(사람의 확인을 기다리는 경우가 흔하다)
+ */
+function terminalStallMessage(stallMs: number): string {
+  const seconds = Math.round(stallMs / 1000);
+  const label = seconds % 60 === 0 ? `${seconds / 60}분` : `${seconds}초`;
+  return `터미널 요청이 ${label} 넘게 움직임이 없습니다. CLI가 확인을 기다리는지 터미널을 보세요`;
+}
+
+/**
+ * 정체 감시 한 회차. 열린 실행이 없으면 타이머를 멈추고, 있으면 마지막 활동이 정체 시간을 넘었는지 본다.
+ * 한 번 알린 실행은 움직임이 다시 생기기 전까지 다시 알리지 않는다(stallNotified). 멈추거나 되돌리지 않는다
+ */
+function checkTerminalStall(session: Session, stallMs: number): void {
+  const run = openTerminalRun(session);
+  if (!run) {
+    stopTerminalStallWatch(session);
+    return;
+  }
+  if (run.terminal.stallNotified) return;
+  if (Date.now() - run.terminal.lastActivityMs < stallMs) return;
+  run.terminal.stallNotified = true;
+  const message = terminalStallMessage(stallMs);
+  emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
+  warnSessionTerminal(session.snapshot.id, message);
+}
+
+/** 훅 호출이나 텔레메트리가 왔다: 그 실행의 마지막 활동 시각을 지금으로 옮기고 다음 정체를 다시 알릴 수 있게 한다 */
+function noteTerminalActivity(run: ActiveRun & { terminal: TerminalRunState }): void {
+  run.terminal.lastActivityMs = Date.now();
+  run.terminal.stallNotified = false;
+}
+
+/** 세션·사람 토큰 한도를 이미 넘었으면 그 사유(대화 실행의 409와 같은 문구). 넘지 않았으면 undefined */
+function terminalBudgetMessage(session: Session): string | undefined {
+  const limit = session.snapshot.tokenLimit;
+  if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit) {
+    return `이 세션은 토큰 한도(${formatTokenCount(limit)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`;
+  }
+  const personal = userTokenBudget(session.snapshot.owner);
+  if (personal && personal.used >= personal.limit) {
+    return `${describeWindow(personal.window)} 쓸 수 있는 토큰 한도(${formatTokenCount(personal.limit)})에 도달해 새 요청을 받지 않습니다. 기간이 바뀐 뒤에 다시 요청하세요`;
+  }
+  return undefined;
+}
+
+/** 한도에 닿은 실행의 쓰기 도구를 거절할 사유(#B5). 한도에 닿지 않았으면 undefined */
+function terminalRunLimitDeny(session: Session, run: ActiveRun & { terminal: TerminalRunState }): string | undefined {
+  if (run.terminal.limitReason === 'max_turns') {
+    return `[b-studio] 턴 상한(${maxTurnsFor(session.project) ?? 0})에 닿았습니다. 지금까지 한 것을 정리하고 턴을 끝내세요`;
+  }
+  if (run.terminal.limitReason === 'budget') {
+    return `[b-studio] ${limitReason(run, session.snapshot.tokenLimit)} 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 턴을 끝내세요`;
+  }
+  return undefined;
+}
+
+/**
+ * 텔레메트리로 사용량이 더해진 뒤 한도를 본다(#B5). 대화 실행(runPlan의 tokens 처리)과 같은 꼴이다:
+ * 턴 상한에 닿았으면 그 실행의 쓰기 도구를 막고(max_turns), 세션·사람 토큰 한도를 넘었으면 그 실행을
+ * 멈추고 되돌린다(budget). 한 번 닿으면 다시 보지 않는다.
+ */
+function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: TerminalRunState }): void {
+  const state = run.terminal;
+  // 턴 상한(ADR-131). 요청 옵션은 없다 — studio.yaml(workflow.maxTurns)만 본다
+  if (state.limitReason !== 'budget') {
+    const maxTurns = maxTurnsFor(session.project);
+    if (maxTurns !== undefined && state.modelCalls >= maxTurns) state.limitReason = 'max_turns';
+  }
+  // 이미 멈추는 중이거나 토큰 한도로 멈춘 실행은 다시 보지 않는다
+  if (run.cancel.signal.aborted || state.limitReason === 'budget') return;
+  const limit = session.snapshot.tokenLimit;
+  const personal = userTokenBudget(run.by);
+  const overSession = limit !== undefined && totalTokens(session.snapshot.tokens) >= limit;
+  // 사람 몫은 chargeUser가 저장한 뒤의 값으로만 본다(#B5 수정 2). 이 실행 누적을 더하면 이미 저장된 몫과 겹쳐 일찍 넘긴다
+  const overUser = personal !== undefined && personal.used >= personal.limit;
+  if (!overSession && !overUser) return;
+  run.stopReason = 'budget';
+  run.limitKind = overSession ? 'session' : 'user';
+  state.limitReason = 'budget';
+  session.snapshot.cancelling = 'budget';
+  emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
+  run.cancel.abort(new DOMException(overSession ? '세션 토큰 한도에 도달했습니다' : '사람별 토큰 한도에 도달했습니다', 'AbortError'));
+  // CLI에 하던 일을 멈추라고 알린다(Esc). 실행을 닫는 일은 중단 신호를 듣는 쪽이 한다(cancelRun과 같다)
+  interruptSessionTerminal(session.snapshot.id);
+}
+
+/**
  * 터미널의 CLI가 보낸 텔레메트리 로그(#726). `api_request`만 꺼내 그 요청이 속한 실행에 붙인다.
  * 실행에 붙지 못한 것(실행 밖에서 사람이 CLI에서 대화만 한 것 등)은 버린다 — 활동 기록에 남기지 않는다
  */
-function terminalTelemetry(id: string, body: unknown): void {
+async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   const session = terminalSession(id);
-  for (const request of apiRequestsFromOtlp(body)) attributeRunUsage(session, request);
+  // 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게, #B5 수정 2)
+  for (const request of apiRequestsFromOtlp(body)) await attributeRunUsage(session, request);
 }
 
 /** 꺼낸 사용량 하나를 실행에 붙인다. 같은 requestId는 한 번만 세고, 어느 실행에도 안 맞으면 버린다 */
-function attributeRunUsage(session: Session, request: ApiRequestUsage): void {
+async function attributeRunUsage(session: Session, request: ApiRequestUsage): Promise<void> {
   const open = openTerminalRun(session);
   let runId: string | undefined;
   if (open && request.at >= Date.parse(open.startedAt)) {
@@ -7506,7 +7658,23 @@ function attributeRunUsage(session: Session, request: ApiRequestUsage): void {
     totals.usage = addTokens(totals.usage, usage);
     totals.usageByModel[request.model] = addTokens(totals.usageByModel[request.model], usage);
     totals.modelCalls += 1;
+    // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
+    open.terminal.modelCalls += 1;
+    noteTerminalActivity(open);
+    // 대화 실행(runPlan의 tokens 처리)과 같은 꼴로 세션 합계·사람 몫에 더한다. 사용량은 실행 누적값이라 늘어난 만큼만 더해진다
+    session.snapshot.tokens = addTokens(open.baseTokens, totals.usage);
+    emit(session, { type: 'tokens', runId: open.id, usage: totals.usage, sessionTokens: session.snapshot.tokens });
+    // 사람 몫을 먼저 저장한 뒤(await) 저장된 값으로 한도를 판정한다(#B5 수정 2)
+    await chargeUser(open, totals.usage);
+    // 한도를 넘었으면 그 실행을 멈추고 되돌린다(budget). 턴 상한에 닿았으면 그 뒤의 쓰기 도구를 막는다(max_turns)
+    checkTerminalLimits(session, open);
+    return;
   }
+  // 실행이 닫힌 뒤 늦게 온 사용량도 세션 합계·사람 몫에 더한다(#B5 수정 1). 실행은 이미 닫혔으니 멈출 것은 없고,
+  // 넘었으면 다음 요청 시작이 막히는 것으로 충분하다
+  session.snapshot.tokens = addTokens(session.snapshot.tokens, usage);
+  emit(session, { type: 'tokens', runId, usage, sessionTokens: session.snapshot.tokens });
+  await chargeLateTerminalUsage(session, usage);
 }
 
 /** 터미널 실행의 합계를 run_finished.metrics에 실을 꼴로 만든다. 매 호출은 모델 이름별로만 세고 툴 시간은 재지 않는다 */
@@ -7570,6 +7738,8 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   if (opened) return opened;
   const busy = terminalBusy(session);
   if (busy) return { busy };
+  // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
+  const stallMs = terminalStallMs();
   const readOnly = isReadOnlyPrompt(request);
   const terminal: TerminalRunState = {
     request,
@@ -7582,6 +7752,10 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
     serial: serialQueue(),
     checking: false,
     settled: false,
+    // 턴 상한·정체 감시가 보는 값들(#B5). 요청을 여는 순간부터 활동이 시작된 것으로 본다
+    modelCalls: 0,
+    lastActivityMs: Date.now(),
+    stallNotified: false,
   };
   const run: ActiveRun & { terminal: TerminalRunState } = {
     id: randomUUID().slice(0, 8),
@@ -7597,6 +7771,8 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   session.snapshot.running = true;
   session.snapshot.pendingQuestion = undefined;
   emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt });
+  // 정체 감시를 켠다(#B5). 실행이 닫히거나 세션이 멈추면 타이머도 멈춘다
+  startTerminalStallWatch(session, stallMs);
   run.cancel.signal.addEventListener(
     'abort',
     () => {
@@ -7665,15 +7841,17 @@ async function abandonTerminalRun(
 }
 
 /** 통과했거나 바꾼 것 없이 끝난 실행을 닫는다 */
-function settleTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary'>): void {
+function settleTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete'>): void {
   if (run.terminal.settled) return;
   run.terminal.settled = true;
   announceTerminalRun(session, run, finished);
 }
 
 /** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
-function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary'>): void {
+function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete'>): void {
   if (session.run === run) session.run = undefined;
+  // 실행이 닫혔으면 정체 감시도 멈춘다. 돌고 있던 타이머가 다음 회차에 스스로 멈추게 두지 않는다
+  stopTerminalStallWatch(session);
   // 닫힌 실행의 시작·끝을 남긴다. 내보내기 주기 때문에 실행이 닫힌 뒤 몇 초 안에 도착한 사용량을 여기 붙인다(#726)
   session.terminalRun = { runId: run.id, startedMs: Date.parse(run.startedAt), endedMs: Date.now() };
   // 세션이 멈추는 중이면 stopSession이 상태를 정리한다. 여기서는 끝났다는 알림만 건너뛴다
@@ -7790,6 +7968,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
+    noteTerminalActivity(opened);
     // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
     if (isReadOnlyPrompt(prompt)) {
       // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
@@ -7802,6 +7981,9 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (busy) return { blocked: busy };
   // "/"로 시작하는 명령은 CLI 안에서 끝나는 것이 많다(/model, /clear). 실행은 실제로 작업이 시작될 때 연다
   if (prompt.startsWith('/')) return {};
+  // 새 요청을 받기 전에 토큰 한도를 본다(#B5). 대화 실행의 409와 같은 문구로 막는다
+  const budget = terminalBudgetMessage(session);
+  if (budget) return { blocked: budget };
   const run = await beginTerminalRun(session, prompt);
   if ('busy' in run) return { blocked: run.busy };
   // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
@@ -7819,12 +8001,21 @@ const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바
 async function terminalToolStarting(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
   const session = terminalSession(id);
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
+  // 훅이 왔다는 것은 CLI가 움직인다는 뜻이다. 도구의 종류와 무관하게 정체 감시의 활동을 갱신한다(#B5)
+  const running = openTerminalRun(session);
+  if (running) noteTerminalActivity(running);
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
   if ((AGENT_READ_TOOLS as readonly string[]).includes(tool)) return {};
+  // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다
+  const budget = terminalBudgetMessage(session);
+  if (budget) return { deny: `[b-studio] ${budget}` };
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { deny: run.busy };
   // 읽기만 요청: 읽기 도구가 아닌 것은 모두 거절한다(샌드박스도 켜지 않는다)
   if (run.terminal.readOnly) return { deny: TERMINAL_READ_ONLY_DENY };
+  // 한도에 닿은 실행이면 그 뒤의 쓰기 도구를 거절한다(#B5). 턴 상한은 실행이 열린 채로 턴이 끝나기를 기다린다
+  const limited = terminalRunLimitDeny(session, run);
+  if (limited) return { deny: limited };
   // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
@@ -7852,10 +8043,17 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   // 내주는 도구는 샌드박스가 있어야 도는 것뿐이다. 도구 서버가 이미 목록 밖의 이름을 받지 않지만 여기서도 본다
   // (파일 도구가 이 길로 불리면 변경 추적과 쓰기 직전의 훅을 건너뛴다)
   if (!gatewayToolSpecs(session.project).some((spec) => spec.name === name)) return { ok: false, content: `[b-studio] ${name}: 터미널에 내주지 않는 도구입니다` };
+  // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5)
+  const budget = terminalBudgetMessage(session);
+  if (budget) return { ok: false, content: `[b-studio] ${budget}` };
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { ok: false, content: run.busy };
+  noteTerminalActivity(run);
   // 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행에서는 돌리지 않는다
   if (run.terminal.readOnly) return { ok: false, content: TERMINAL_READ_ONLY_DENY };
+  // 한도에 닿은 실행이면 훅을 거치지 않고 이 길로 불려도 돌리지 않는다(#B5)
+  const limited = terminalRunLimitDeny(session, run);
+  if (limited) return { ok: false, content: limited };
   let verification: TerminalVerification;
   try {
     verification = await untilAborted(AbortSignal.any([session.stop.signal, run.cancel.signal]), terminalVerification(session, run));
@@ -7876,6 +8074,7 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
   const run = openTerminalRun(session);
   // 실행이 없으면 이 턴은 아무것도 바꾸지 않았다(바꿨다면 쓰기 직전의 훅이 실행을 열었다)
   if (!run) return {};
+  noteTerminalActivity(run);
   const text = typeof input.last_assistant_message === 'string' ? input.last_assistant_message.trim() : '';
   return run.terminal.serial(() => finishTerminalTurn(session, run, text));
 }
@@ -7958,6 +8157,10 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       }
     }
     if (run.cancel.signal.aborted || session.stop.signal.aborted) throw run.cancel.signal.reason ?? session.stop.signal.reason;
+    // 턴 상한에 닿은 실행은 재시도하지 않는다(#B5, ADR-131). 게이트를 통과하지 못하면 대화 실행처럼 실패로 닫고 되돌린다
+    if (state.limitReason === 'max_turns' && outcome.kind === 'retry') {
+      outcome = { kind: 'exhausted', summary: `최대 턴 수(${maxTurnsFor(session.project) ?? 0})를 넘었습니다` };
+    }
     if (outcome.kind === 'pass') {
       // 게이트가 도는 동안 위반이 왔으면(큐를 기다리지 않고 state.violation에 적혔다) 통과시키지 않는다
       if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
@@ -7968,6 +8171,8 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       const generated = new Set(await session.checkpoints.pendingExcludedFiles());
       const expectStaged = new Map([...tracker.tracked].filter(([file]) => !generated.has(file)));
       const passed = terminalResult(run, verification, 'done', text, 'pass', started);
+      // 턴 상한에 닿아 게이트만 통과한 실행은 하다 만 것으로 표시한다(#B5, ADR-131 덧붙임)
+      if (state.limitReason === 'max_turns') passed.incomplete = 'max_turns';
       try {
         if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
         await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged);
@@ -7996,7 +8201,11 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
           noteForModel(session, `[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 ${saved.shortSha}를 남겼습니다(파일 ${saved.files.length}개: ${saved.files.slice(0, 20).join(', ')}). 이 파일을 다루기 전에 다시 읽으세요.`);
         }
         onEvent({ type: 'done', result: passed });
-        settleTerminalRun(session, run, { status: 'done', summary: text || (checkpointed ? '검증을 통과해 체크포인트를 남겼습니다.' : '바꾼 파일 없이 끝났습니다.') });
+        settleTerminalRun(session, run, {
+          status: 'done',
+          summary: text || (checkpointed ? '검증을 통과해 체크포인트를 남겼습니다.' : '바꾼 파일 없이 끝났습니다.'),
+          ...(passed.incomplete ? { incomplete: passed.incomplete } : {}),
+        });
         return { message: checkpointed ? `[b-studio] 검증 통과 — 체크포인트 ${saved.shortSha}` : '[b-studio] 검증 통과 — 남길 변경이 없어 체크포인트는 만들지 않았습니다' };
       }
     }
@@ -8120,7 +8329,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       await terminalCliEnded(id);
     },
     telemetry: async (body) => {
-      terminalTelemetry(id, body);
+      await terminalTelemetry(id, body);
     },
     toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
     runTool: (name, args) => runTerminalTool(id, name, args),

@@ -31,6 +31,8 @@ const fake = vi.hoisted(() => ({
   interrupts: [] as string[],
   /** 화면에 알린 "에이전트 CLI가 떠 있는가"의 기록 */
   cli: [] as boolean[],
+  /** 터미널 패널로 보낸 경고 줄(#B5) */
+  warnings: [] as string[],
   /** holdWord가 든 명령은 hold가 풀릴 때까지 끝나지 않는다(실행이나 검증을 열어 둔 채로 두는 데 쓴다) */
   holdWord: undefined as string | undefined,
   hold: undefined as Promise<void> | undefined,
@@ -100,30 +102,35 @@ vi.mock('./session-terminal', () => ({
     fake.cli.push(alive);
   },
   sessionTerminalMode: () => fake.terminalMode,
+  warnSessionTerminal: (_sessionId: string, message: string) => {
+    fake.warnings.push(message);
+  },
 }));
 
 import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
-const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL };
+const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
+
+/** 게이트를 도는 기본 프로젝트. maxTurns를 주면 턴 상한 테스트가 쓴다(#B5) */
+function studioYaml(maxTurns?: number): string {
+  return `version: 1
+name: termgw
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: /v3/api-docs } }
+workflow:
+  required: [plan, implement, run, contract_check, test, review, checkpoint]${maxTurns !== undefined ? `\n  maxTurns: ${maxTurns}` : ''}
+  tests:
+    - name: unit
+      service: api
+      command: [./gradlew, test]
+`;
+}
 
 beforeEach(async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'b-studio-termgw-session-'));
   const project = path.join(root, 'project');
   await mkdir(path.join(project, 'api/src'), { recursive: true });
-  await writeFile(
-    path.join(project, 'studio.yaml'),
-    `version: 1
-name: termgw
-services:
-  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: /v3/api-docs } }
-workflow:
-  required: [plan, implement, run, contract_check, test, review, checkpoint]
-  tests:
-    - name: unit
-      service: api
-      command: [./gradlew, test]
-`,
-  );
+  await writeFile(path.join(project, 'studio.yaml'), studioYaml());
   await writeFile(path.join(project, 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
   await writeFile(path.join(project, 'api/src/Order.java'), 'class Order {}\n');
   fake.root = project;
@@ -134,6 +141,7 @@ workflow:
   fake.restarts = 0;
   fake.restartFails = false;
   fake.cli = [];
+  fake.warnings = [];
   fake.interrupts = [];
   fake.holdWord = undefined;
   fake.hold = undefined;
@@ -143,6 +151,8 @@ workflow:
   process.env.B_STUDIO_AUTH = 'none';
   process.env.B_STUDIO_EXPERIMENTAL = '1';
   process.env.B_STUDIO_SESSIONS_DIR = path.join(root, 'sessions');
+  // 사람별 토큰 사용량을 이 테스트의 임시 폴더에만 쓴다(실제 ~/.cache를 건드리지 않는다)
+  process.env.B_STUDIO_USAGE_DIR = path.join(root, 'usage');
   Object.assign(process.env, {
     GIT_AUTHOR_NAME: 'verify',
     GIT_AUTHOR_EMAIL: 'verify@example.com',
@@ -180,7 +190,13 @@ const contractWith = (fields: string[]) => ({
 });
 
 afterAll(() => {
-  for (const [key, value] of [['B_STUDIO_MODE', saved.mode], ['B_STUDIO_AUTH', saved.auth], ['B_STUDIO_SESSIONS_DIR', saved.sessions], ['B_STUDIO_EXPERIMENTAL', saved.experimental]] as const) {
+  for (const [key, value] of [
+    ['B_STUDIO_MODE', saved.mode],
+    ['B_STUDIO_AUTH', saved.auth],
+    ['B_STUDIO_SESSIONS_DIR', saved.sessions],
+    ['B_STUDIO_EXPERIMENTAL', saved.experimental],
+    ['B_STUDIO_USAGE_DIR', saved.usage],
+  ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -1457,5 +1473,252 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     expect(session.ofType('run_usage')).toEqual([]);
     expect(session.ofType('run_finished')).toEqual([]);
     await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('터미널 실행에도 턴 상한·토큰 한도·정체 알림을 건다 (#B5)', () => {
+  const otlp = (records: Array<Record<string, unknown>>): unknown => ({ resourceLogs: [{ scopeLogs: [{ logRecords: records }] }] });
+  const req = (inputTokens: number, outputTokens: number, requestId?: string): Record<string, unknown> => ({
+    timeUnixNano: String(Date.now() * 1_000_000),
+    attributes: [
+      { key: 'event.name', value: { stringValue: 'claude_code.api_request' } },
+      { key: 'model', value: { stringValue: 'claude-sonnet-5' } },
+      { key: 'input_tokens', value: { intValue: String(inputTokens) } },
+      { key: 'output_tokens', value: { intValue: String(outputTokens) } },
+      { key: 'cache_read_tokens', value: { intValue: '0' } },
+      { key: 'cache_creation_tokens', value: { intValue: '0' } },
+      ...(requestId !== undefined ? [{ key: 'request_id', value: { stringValue: requestId } }] : []),
+    ],
+  });
+
+  it('텔레메트리로 세션 토큰 한도를 넘으면 실행을 멈추고 되돌리며, 다음 요청을 막는다', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    try {
+      const session = await open();
+      const before = getSnapshot(session.id)!.checkpoints.length;
+      await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+      await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+      await session.gateway.telemetry(otlp([req(1000, 0)]));
+
+      // 대화 실행처럼 멈춘다: 취소 중(budget) 표시를 남기고 CLI에 Esc를 보낸다
+      expect(session.ofType('run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+      expect(fake.interrupts).toEqual([session.id]);
+      const [finished] = await finishedRuns(session, 1);
+      expect(finished.status).toBe('cancelled');
+      expect(finished.summary).toContain('세션 토큰 한도');
+      expect(finished.summary).toContain('바뀐 파일 1개를 되돌렸습니다');
+      expect(getSnapshot(session.id)!.running).toBe(false);
+      expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+      expect(await fileOf(session)).toBe(ORIGINAL);
+      // 세션 합계와 사람 몫에 더해졌고 대화 실행과 같은 tokens 이벤트가 남았다
+      expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 1000 });
+      expect(session.ofType('tokens').at(-1)).toMatchObject({ usage: { inputTokens: 1000 } });
+
+      // 한도를 넘은 뒤의 새 요청은 대화 실행의 409와 같은 문구로 막힌다
+      const blocked = await session.gateway.prompt({ prompt: '다시 해줘' });
+      expect(blocked.blocked).toContain('이 세션은 토큰 한도');
+      expect(session.ofType('run_started')).toHaveLength(1);
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
+    }
+  }, 30_000);
+
+  it('사람별 토큰 한도를 넘어도 같은 방식으로 멈추고, 다음 요청을 막는다', async () => {
+    process.env.B_STUDIO_USER_TOKEN_LIMIT = '1000';
+    try {
+      const session = await open();
+      const before = getSnapshot(session.id)!.checkpoints.length;
+      await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+      await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+      await session.gateway.telemetry(otlp([req(1000, 0)]));
+
+      const [finished] = await finishedRuns(session, 1);
+      expect(finished.status).toBe('cancelled');
+      expect(finished.summary).toContain('오늘 쓸 수 있는 토큰 한도');
+      expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+      expect(await fileOf(session)).toBe(ORIGINAL);
+
+      const blocked = await session.gateway.prompt({ prompt: '다시 해줘' });
+      expect(blocked.blocked).toContain('오늘 쓸 수 있는 토큰 한도');
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
+    }
+  }, 30_000);
+
+  it('턴 상한에 닿으면 그 뒤 쓰기 도구를 거절하고, 턴이 끝나 게이트를 통과하면 하다 만 체크포인트로 남긴다', async () => {
+    await writeFile(path.join(fake.root, 'studio.yaml'), studioYaml(2));
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    // 모델 호출 2번 = 턴 상한(2)에 닿는다
+    await session.gateway.telemetry(otlp([req(10, 1, 'turn-1'), req(10, 1, 'turn-2')]));
+    const denied = await session.gateway.preTool({ tool_name: 'Write', tool_input: { file_path: '/workspace/api/src/Order.java', content: 'class Order { String memo; String note; }\n' } });
+    expect(denied.deny).toContain('턴 상한(2)에 닿았습니다');
+    expect(await fileOf(session)).toBe('class Order { String memo; }\n');
+
+    // 턴이 끝나면 평소처럼 게이트를 돌리고, 통과하면 하다 만 것으로 표시해 체크포인트를 남긴다
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    expect(getSnapshot(session.id)!.checkpoints[0]!.incomplete).toBe('max_turns');
+    expect(session.ofType('run_finished')[0]).toMatchObject({ status: 'done', incomplete: 'max_turns' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('턴 상한에 닿았는데 게이트를 통과하지 못하면 재시도하지 않고 실패로 닫고 되돌린다', async () => {
+    await writeFile(path.join(fake.root, 'studio.yaml'), studioYaml(1));
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.telemetry(otlp([req(10, 1, 'turn-1')]));
+
+    fake.failCommands = ['test'];
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    // 게이트가 실패를 돌려주면 대화 실행처럼 재시도하지 않고 실패로 닫는다
+    expect(answer.feedback).toBeUndefined();
+    expect(answer.message).toContain('최대 턴 수(1)를 넘었습니다');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(getSnapshot(session.id)!.running).toBe(false);
+    expect(session.ofType('run_finished')[0]).toMatchObject({ status: 'failed' });
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('한도가 없으면 텔레메트리가 와도 멈추지 않고 평소처럼 체크포인트를 남긴다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    await session.gateway.telemetry(otlp([req(10, 1, 'no-limit')]));
+    expect(session.ofType('run_cancelling')).toEqual([]);
+    expect(getSnapshot(session.id)!.running).toBe(true);
+
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    expect(getSnapshot(session.id)!.checkpoints[0]!.incomplete).toBeUndefined();
+    expect(session.ofType('run_finished')[0]!.incomplete).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('정체를 한 번만 알리고, 다시 움직인 뒤 또 멈추면 다시 알린다. 실행이 닫히면 타이머도 멈춘다', async () => {
+    const session = await open();
+    // 120초를 기다리지 않도록 가짜 타이머로 시계와 setInterval만 돌린다(setTimeout은 실제로 두어 async가 흐르게 한다)
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+      const stalled = (): Array<Extract<StudioEvent, { type: 'agent' }>> =>
+        session.ofType('agent').filter((event) => event.event.type === 'warning' && event.event.message.includes('움직임이 없습니다'));
+      const panelWarnings = (): string[] => fake.warnings.filter((message) => message.includes('움직임이 없습니다'));
+
+      vi.advanceTimersByTime(120_000);
+      expect(stalled()).toHaveLength(1);
+      expect(panelWarnings()).toHaveLength(1);
+      // 기본 120초는 "2분"으로 표기된다(#B5 수정 3)
+      expect(stalled()[0]!.event).toMatchObject({ message: expect.stringContaining('2분 넘게') });
+      // 정체는 알리기만 한다(멈추거나 되돌리지 않는다)
+      expect(getSnapshot(session.id)!.running).toBe(true);
+
+      // 더 기다려도 한 번뿐이다
+      vi.advanceTimersByTime(120_000);
+      expect(stalled()).toHaveLength(1);
+
+      // 움직임이 생기면(텔레메트리) 다음 정체에 다시 알린다
+      await session.gateway.telemetry(otlp([req(10, 1, 'act-1')]));
+      vi.advanceTimersByTime(120_000);
+      expect(stalled()).toHaveLength(2);
+      expect(panelWarnings()).toHaveLength(2);
+
+      // 실행이 닫히면 타이머가 멈춘다
+      await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+      expect(getSnapshot(session.id)!.running).toBe(false);
+      vi.advanceTimersByTime(120_000);
+      expect(stalled()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('실행이 닫힌 뒤 늦게 온 사용량도 세션 합계·사람 몫에 더해져, 다음 요청을 막는다', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    try {
+      const session = await open();
+      await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+      await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+      expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+      const runId = session.ofType('run_started')[0]!.runId;
+      // 실행 도중에는 텔레메트리가 없어 세션 합계가 비어 있다
+      expect(getSnapshot(session.id)!.tokens).toBeUndefined();
+
+      // 실행이 닫힌 뒤(내보내기 주기) 5초 안에 온 사용량도 그 실행의 몫으로 세션 합계에 더해진다
+      await session.gateway.telemetry(otlp([req(1000, 0)]));
+      expect(session.ofType('run_usage').at(-1)).toMatchObject({ runId, usage: { inputTokens: 1000 } });
+      expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 1000 });
+      expect(session.ofType('tokens').at(-1)).toMatchObject({ runId, sessionTokens: { inputTokens: 1000 } });
+
+      // 실행은 이미 닫혔으니 멈출 것은 없고, 넘었으니 다음 요청 시작이 막힌다
+      expect(session.ofType('run_finished')).toHaveLength(1);
+      const blocked = await session.gateway.prompt({ prompt: '다시 해줘' });
+      expect(blocked.blocked).toContain('이 세션은 토큰 한도');
+      expect(session.ofType('run_started')).toHaveLength(1);
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
+    }
+  }, 30_000);
+
+  it('텔레메트리가 여러 건 연달아 와도 사람 한도를 실제 합계에서 넘긴다(일찍 넘기지 않는다)', async () => {
+    process.env.B_STUDIO_USER_TOKEN_LIMIT = '1000';
+    try {
+      const session = await open();
+      await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+      await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+      // 400씩 두 번 = 800. 한도(1000) 아래라 여기서 멈추면 안 된다
+      await session.gateway.telemetry(otlp([req(400, 0, 'p-1')]));
+      await session.gateway.telemetry(otlp([req(400, 0, 'p-2')]));
+      expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 800 });
+      expect(session.ofType('run_cancelling')).toEqual([]);
+      expect(getSnapshot(session.id)!.running).toBe(true);
+
+      // 세 번째에서 실제 합계 1200이 한도를 넘어 그때 멈춘다
+      await session.gateway.telemetry(otlp([req(400, 0, 'p-3')]));
+      expect(session.ofType('run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+      const [finished] = await finishedRuns(session, 1);
+      expect(finished.status).toBe('cancelled');
+      expect(finished.summary).toContain('오늘 쓸 수 있는 토큰 한도');
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
+    }
+  }, 30_000);
+
+  it('정체 알림 문구는 설정한 시간으로 만든다(60초의 배수면 분, 아니면 초)', async () => {
+    process.env.B_STUDIO_TERMINAL_STALL_SECONDS = '90';
+    try {
+      const session = await open();
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+      try {
+        await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+        vi.advanceTimersByTime(90_000);
+        const warning = session.ofType('agent').find((event) => event.event.type === 'warning' && event.event.message.includes('움직임이 없습니다'));
+        expect(warning?.event).toMatchObject({ message: expect.stringContaining('90초 넘게') });
+        expect(fake.warnings.some((message) => message.includes('90초 넘게'))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_TERMINAL_STALL_SECONDS;
+    }
   }, 30_000);
 });

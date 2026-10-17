@@ -450,6 +450,16 @@ export function noteSessionTerminalCli(sessionId: string, alive: boolean): void 
   setCli(state, alive && state.terminal !== undefined);
 }
 
+/**
+ * 터미널 패널의 경고 줄에 한 줄 보낸다(그 세션의 터미널이 화면에 열려 있을 때만). 감시가 찾은 위반과 같은 길이다.
+ * 정체 알림처럼 세션 쪽에서 보내는 경고에 쓴다. 다시 연결한 화면에는 되풀이하지 않는다(마지막 경고를 저장하지 않는다)
+ */
+export function warnSessionTerminal(sessionId: string, message: string): void {
+  const state = terminals.get(sessionId);
+  if (!state) return;
+  emit(state, { kind: 'warning', message });
+}
+
 function unsubscribe(sessionId: string, state: TerminalState, listener: Listener): void {
   state.listeners.delete(listener);
   // 열린 적 없는 빈 자리만 치운다. 열린 터미널은 화면이 닫혀도 살아 있다
