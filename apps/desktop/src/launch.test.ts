@@ -48,6 +48,12 @@ describe('parseLaunchResult', () => {
     expect(parseLaunchResult(launchJson({ started: false })).started).toBe(false);
   });
 
+  it('openUrl은 http로 시작할 때만 쓴다(그 주소로 창을 처음 연다)', () => {
+    expect(parseLaunchResult(launchJson({ openUrl: 'http://127.0.0.1:3000/local-auth?token=abc' })).openUrl).toBe('http://127.0.0.1:3000/local-auth?token=abc');
+    expect(parseLaunchResult(launchJson()).openUrl).toBeUndefined();
+    expect(parseLaunchResult(launchJson({ openUrl: 'file:///etc/passwd' })).openUrl).toBeUndefined();
+  });
+
   it('url·port가 없거나 JSON이 없으면 이유를 담아 던진다', () => {
     expect(() => parseLaunchResult('준비 완료')).toThrow(/준비 결과를 읽지 못했습니다/);
     expect(() => parseLaunchResult('')).toThrow(/\(출력 없음\)/);

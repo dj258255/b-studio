@@ -1,9 +1,10 @@
 import { request as httpRequest } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { closeSessionGateway, ensureSessionGateway, startTerminalGateway, terminalHookRoutes, type TerminalGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 
 const opened: TerminalGateway[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const gateway of opened.splice(0)) await gateway.close();
 });
 
@@ -76,6 +77,8 @@ describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () =>
 
 describe('관문 서버', () => {
   it('컨테이너가 부르는 이름으로 온 요청을 받는다. 주소는 컨테이너에서 호스트를 부르는 이름으로 내준다', async () => {
+    // 기본 방식이 이 컴퓨터(host)로 바뀌어(ADR-173 덧붙임), 컨테이너 방식은 환경 변수로 명시한다
+    vi.stubEnv('B_STUDIO_TERMINAL', 'container');
     const seen: unknown[] = [];
     const gateway = await startTerminalGateway(
       handlers({

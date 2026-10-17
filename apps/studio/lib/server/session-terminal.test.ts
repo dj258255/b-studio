@@ -363,9 +363,9 @@ describe('세션 터미널 (이슈 #673)', () => {
     await disposeSessionTerminal(id, target.sandboxId, backend);
   });
 
-  it('sessionTerminalMode: 없음·빈 값·container는 container, host는 host, 그 밖은 던진다', () => {
-    expect(sessionTerminalMode({})).toBe('container');
-    expect(sessionTerminalMode({ B_STUDIO_TERMINAL: '' })).toBe('container');
+  it('sessionTerminalMode: 없음·빈 값은 host(기본), container는 container, host는 host, 그 밖은 던진다', () => {
+    expect(sessionTerminalMode({})).toBe('host');
+    expect(sessionTerminalMode({ B_STUDIO_TERMINAL: '' })).toBe('host');
     expect(sessionTerminalMode({ B_STUDIO_TERMINAL: 'container' })).toBe('container');
     expect(sessionTerminalMode({ B_STUDIO_TERMINAL: 'host' })).toBe('host');
     expect(() => sessionTerminalMode({ B_STUDIO_TERMINAL: 'hosts' })).toThrow('B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다');

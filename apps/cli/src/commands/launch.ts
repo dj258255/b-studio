@@ -1,6 +1,6 @@
 import { execFile, spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, openSync } from 'node:fs';
+import { chmodSync, closeSync, openSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -15,6 +15,15 @@ export const MODE_ENV: Record<LaunchMode, string> = { local: 'claude-code', demo
 
 /** 이미 떠 있는지 확인할 때 응답 본문에 있어야 하는 b-studio 표지 */
 export const STUDIO_MARKER = 'b-studio';
+
+/**
+ * 로컬 토큰을 쿠키로 바꾸는 스튜디오의 교환 페이지(apps/studio/lib/server/local-token.ts의 LOCAL_TOKEN_PAGE_PATH와 같아야 한다).
+ * 브라우저를 이 주소로 열면 페이지가 주소의 `#` 뒤에서 토큰을 읽어 본문으로 교환하고 쿠키를 받는다.
+ * 토큰을 쿼리(`?token=`)에 싣지 않는다 — 개발 서버 로그에 그대로 남는다
+ */
+const LOCAL_AUTH_PATH = '/local-auth';
+/** 서버가 시작할 때 만들어 두는 로컬 토큰 파일 이름(studio의 local-token.ts와 같아야 한다) */
+const LOCAL_TOKEN_FILE = 'local-token';
 
 const READY_TIMEOUT_MS = 90_000;
 const READY_INTERVAL_MS = 1_000;
@@ -64,6 +73,11 @@ export interface LaunchDeps {
   spawn: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string }) => { pid: number | undefined };
   /** 브라우저 열기 */
   open: (url: string) => Promise<void>;
+  /**
+   * 스튜디오가 시작할 때 만들어 둔 로컬 토큰을 읽는다. 없으면(옛 서버, 아직 안 뜬 서버) undefined —
+   * 그러면 브라우저를 토큰 없는 주소로 연다
+   */
+  readLocalToken: () => Promise<string | undefined>;
   /** pid가 살아 있는지(스테일한 서버를 죽이기 전에 확인한다) */
   isAlive: (pid: number) => boolean;
   /** 분리해 띄운 프로세스 그룹에 신호를 보낸다(`studio stop`과 같은 방식) */
@@ -93,6 +107,11 @@ export interface LaunchOptions {
 /** `launch --json`이 stdout에 쓰는 한 줄. Electron 앱이 기대는 계약이라 테스트로 고정한다 */
 export interface LaunchResult {
   url: string;
+  /**
+   * 브라우저가 열 주소(`<origin>/local-auth#<토큰>`). 토큰 파일이 없으면 url과 같다.
+   * 이 주소를 열면 페이지가 `#` 뒤의 토큰을 본문으로 교환해 터미널용 쿠키를 받고 첫 화면으로 온다
+   */
+  openUrl: string;
   port: number;
   /** B_STUDIO_MODE 값(예: claude-code) */
   mode: string;
@@ -153,13 +172,14 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
     const nested = await deps.probe(`${origin}${NESTED_HEALTH_PATH}`);
     const stale = !nested.reachable || nested.status !== 200;
     if (!stale) {
+      const openUrl = await localOpenUrl(deps, origin, info);
       if (json) {
-        console.log(launchResultJson({ url: origin, port: options.port, mode: stored.mode, pid: stored.pid, started: false }));
+        console.log(launchResultJson({ url: origin, openUrl, port: options.port, mode: stored.mode, pid: stored.pid, started: false }));
         return 0;
       }
       info(`이미 스튜디오가 ${url}에서 실행 중입니다.`);
-      if (open) await deps.open(url);
-      else info(url);
+      info(openUrl);
+      if (open) await deps.open(openUrl);
       return 0;
     }
     info(`스튜디오가 떠 있지만 라우트 표가 오래된 것 같아 다시 켭니다 (포트 ${options.port}).`);
@@ -228,15 +248,30 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
   }
 
   // 6. 열기 / JSON 한 줄
+  const openUrl = await localOpenUrl(deps, origin, info);
   if (json) {
-    console.log(launchResultJson({ url: origin, port: options.port, mode: envMode, pid: child.pid ?? null, started: true }));
+    console.log(launchResultJson({ url: origin, openUrl, port: options.port, mode: envMode, pid: child.pid ?? null, started: true }));
     return 0;
   }
   info(`스튜디오가 떴습니다: ${url}`);
   info(`종료: pnpm studio stop · 로그: ${deps.paths.log}`);
-  if (open) await deps.open(url);
-  else info(url);
+  info(openUrl);
+  if (open) await deps.open(openUrl);
   return 0;
+}
+
+/**
+ * 브라우저를 열 주소를 만든다. 서버가 시작할 때 만들어 둔 로컬 토큰을 파일에서 읽어 교환 페이지 주소를 만들고,
+ * 파일이 없으면(옛 서버) 토큰 없는 주소를 돌려주면서 사람에게 알린다.
+ * 토큰은 주소의 `#` 뒤에 싣는다 — `#` 뒤는 서버로 가지 않아 개발 서버 로그에 남지 않는다(쿼리는 남는다)
+ */
+async function localOpenUrl(deps: LaunchDeps, origin: string, info: (text: string) => void): Promise<string> {
+  const token = await deps.readLocalToken();
+  if (!token) {
+    info('터미널을 쓰려면 스튜디오를 다시 띄우세요');
+    return `${origin}/`;
+  }
+  return `${origin}${LOCAL_AUTH_PATH}#${encodeURIComponent(token)}`;
 }
 
 /** PID 파일에서 pid와 CLI 모드를 읽는다. 없거나 깨졌으면 pid=null, mode=요청한 모드의 B_STUDIO_MODE 값 */
@@ -291,9 +326,24 @@ function realExec(command: string, args: readonly string[]): Promise<ExecResult>
   });
 }
 
+/**
+ * launch가 남기는 로그 파일을 연다. 없으면 0600으로 만들고, 이미 있으면 권한을 0600으로 조인다 —
+ * 개발 서버가 요청 주소를 쿼리까지 찍으므로, 그 로그는 이 사용자만 읽을 수 있어야 한다
+ * (같은 컴퓨터의 다른 사용자 계정도 읽을 수 있으면 토큰이 막으려던 상대에게 그대로 열린다)
+ */
+export function openLaunchLog(file: string): number {
+  const fd = openSync(file, 'a', 0o600);
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    // 권한을 조이지 못해도 로그를 남기는 것은 막지 않는다
+  }
+  return fd;
+}
+
 function realSpawn(command: string, args: readonly string[], { cwd, env, logPath }: { cwd: string; env: NodeJS.ProcessEnv; logPath: string }): { pid: number | undefined } {
   // 로그 파일을 열어 자식의 stdout·stderr로 넘긴다. 부모는 곧 끝나므로 연 fd는 바로 닫는다(자식은 복사본을 갖는다)
-  const log = openSync(logPath, 'a');
+  const log = openLaunchLog(logPath);
   try {
     const child = spawnProcess(command, [...args], { cwd, env, detached: true, stdio: ['ignore', log, log] });
     child.unref();
@@ -315,6 +365,13 @@ async function realLockfileHash(repoRoot: string): Promise<string | undefined> {
 
 /** 마지막 설치 표지 파일. 없으면(한 번도 설치한 적 없음) undefined */
 async function realReadInstallMarker(file: string): Promise<string | undefined> {
+  const raw = await readFile(file, 'utf8').catch(() => undefined);
+  const trimmed = raw?.trim();
+  return trimmed || undefined;
+}
+
+/** 서버가 시작할 때 만들어 둔 로컬 토큰. 없으면(옛 서버, 아직 안 뜬 서버) undefined */
+async function realReadLocalToken(file: string): Promise<string | undefined> {
   const raw = await readFile(file, 'utf8').catch(() => undefined);
   const trimmed = raw?.trim();
   return trimmed || undefined;
@@ -348,6 +405,7 @@ export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform:
     exec: realExec,
     spawn: realSpawn,
     open: realOpen(platform),
+    readLocalToken: () => realReadLocalToken(path.join(launchDir, LOCAL_TOKEN_FILE)),
     lockfileHash: () => realLockfileHash(repoRoot),
     readInstallMarker: () => realReadInstallMarker(installMarker),
     writeInstallMarker: (hash) => realWriteInstallMarker(installMarker, hash),
