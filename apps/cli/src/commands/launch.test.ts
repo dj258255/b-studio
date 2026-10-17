@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { closeSync } from 'node:fs';
+import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isBStudio, LAUNCH_MODES, launchArgs, launchResultJson, MODE_ENV, runLaunch, studioOrigin, studioUrl, type ExecResult, type LaunchDeps, type ProbeResult } from './launch';
+import { isBStudio, LAUNCH_MODES, launchArgs, launchResultJson, MODE_ENV, openLaunchLog, runLaunch, studioOrigin, studioUrl, type ExecResult, type LaunchDeps, type ProbeResult } from './launch';
 
 let dir: string;
 
@@ -34,6 +35,8 @@ function harness(
     lockHash?: string;
     /** 마지막 설치 표지에 적혀 있던 해시 */
     installMarker?: string;
+    /** 로컬 토큰 파일에 적혀 있다고 볼 값. 생략하면 undefined(옛 서버) */
+    localToken?: string;
   } = {},
 ): Harness {
   const probes: string[] = [];
@@ -66,6 +69,7 @@ function harness(
     open: async (url) => {
       opens.push(url);
     },
+    readLocalToken: async () => options.localToken,
     isAlive: (pid) => alive.has(pid),
     killGroup: (pid, signal) => {
       alive.delete(pid);
@@ -103,9 +107,23 @@ describe('launch 유틸', () => {
   });
 
   it('launch JSON 한 줄의 모양을 고정한다 (Electron 앱이 기대는 계약)', () => {
-    expect(launchResultJson({ url: 'http://127.0.0.1:3000', port: 3000, mode: 'claude-code', pid: 12345, started: true })).toBe(
-      '{"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}',
+    expect(launchResultJson({ url: 'http://127.0.0.1:3000', openUrl: 'http://127.0.0.1:3000/local-auth#abc', port: 3000, mode: 'claude-code', pid: 12345, started: true })).toBe(
+      '{"url":"http://127.0.0.1:3000","openUrl":"http://127.0.0.1:3000/local-auth#abc","port":3000,"mode":"claude-code","pid":12345,"started":true}',
     );
+  });
+
+  it('로그 파일은 이 사용자만 읽게(0600) 만들고, 이미 있으면 열 때 권한을 조인다', async () => {
+    // 이미 넓은 권한으로 만들어진 파일(옛 방식)
+    const existing = path.join(dir, 'studio.log');
+    await writeFile(existing, '이전 내용\n');
+    await chmod(existing, 0o644);
+    closeSync(openLaunchLog(existing));
+    expect((await stat(existing)).mode & 0o777).toBe(0o600);
+
+    // 새로 만드는 파일
+    const fresh = path.join(dir, 'fresh.log');
+    closeSync(openLaunchLog(fresh));
+    expect((await stat(fresh)).mode & 0o777).toBe(0o600);
   });
 });
 
@@ -118,7 +136,7 @@ describe('runLaunch --json', () => {
     expect(await runLaunch({ mode: 'local', port: 3000, open: true, json: true }, h.deps)).toBe(0);
     expect(h.opens).toEqual([]);
     expect(out.mock.calls).toHaveLength(1);
-    expect(JSON.parse(out.mock.calls[0]![0] as string)).toEqual({ url: 'http://127.0.0.1:3000', port: 3000, mode: 'claude-code', pid: 4242, started: true });
+    expect(JSON.parse(out.mock.calls[0]![0] as string)).toEqual({ url: 'http://127.0.0.1:3000', openUrl: 'http://127.0.0.1:3000/', port: 3000, mode: 'claude-code', pid: 4242, started: true });
     // 진행 안내(시작·종료 안내)는 stderr로 간다
     expect(err.mock.calls.length).toBeGreaterThan(0);
   });
@@ -132,7 +150,36 @@ describe('runLaunch --json', () => {
     expect(await runLaunch({ mode: 'local', port: 3000, open: true, json: true }, h.deps)).toBe(0);
     expect(h.spawns).toEqual([]);
     expect(h.opens).toEqual([]);
-    expect(JSON.parse(out.mock.calls[0]![0] as string)).toEqual({ url: 'http://127.0.0.1:3000', port: 3000, mode: 'demo', pid: 999, started: false });
+    expect(JSON.parse(out.mock.calls[0]![0] as string)).toEqual({ url: 'http://127.0.0.1:3000', openUrl: 'http://127.0.0.1:3000/', port: 3000, mode: 'demo', pid: 999, started: false });
+  });
+
+  it('토큰 파일이 있으면 openUrl이 교환 페이지 주소(토큰은 # 뒤)이고, 브라우저를 그 주소로 연다', async () => {
+    const token = 'c'.repeat(64);
+    const expected = `http://127.0.0.1:3000/local-auth#${token}`;
+    const h = harness({ probe: [up, nestedOk], localToken: token });
+    const out = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: true, json: true }, h.deps)).toBe(0);
+    const openUrl = JSON.parse(out.mock.calls[0]![0] as string).openUrl as string;
+    expect(openUrl).toBe(expected);
+    // 토큰을 쿼리에 싣지 않는다(개발 서버 로그에 남는다). # 뒤에만 싣는다
+    expect(openUrl).toContain('#');
+    expect(openUrl).not.toContain('?token=');
+
+    const human = harness({ probe: [up, nestedOk], localToken: token });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await runLaunch({ mode: 'local', port: 3000, open: true }, human.deps)).toBe(0);
+    expect(human.opens).toEqual([expected]);
+  });
+
+  it('토큰 파일이 없으면(옛 서버) 토큰 없는 주소를 열고, 다시 띄우라고 알린다', async () => {
+    const h = harness({ probe: [up, nestedOk] });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: true }, h.deps)).toBe(0);
+    expect(h.opens).toEqual(['http://127.0.0.1:3000/']);
+    expect(log.mock.calls.flat().join('\n')).toContain('터미널을 쓰려면 스튜디오를 다시 띄우세요');
   });
 
   it('준비되지 않으면 JSON을 쓰지 않고 종료 코드 1', async () => {

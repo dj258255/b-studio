@@ -93,7 +93,7 @@ export async function findHostCli(env: Record<string, string | undefined> = proc
     if (path.isAbsolute(found)) claudePath = found;
   }
   if (!claudePath) {
-    throw new SandboxError('이 컴퓨터에서 claude CLI를 찾지 못했습니다', 'claude를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CLAUDE_BIN에 절대 경로를 적습니다');
+    throw new SandboxError('이 컴퓨터에서 claude CLI를 찾지 못했습니다', 'claude를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CLAUDE_BIN에 절대 경로를 적습니다. B_STUDIO_TERMINAL=container로 띄우면 컨테이너 안에 설치해 씁니다');
   }
   return { claudePath, nodePath: process.execPath };
 }

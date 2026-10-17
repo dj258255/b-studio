@@ -40,6 +40,11 @@ export function TerminalPanel({
   const [pasteNotice, setPasteNotice] = useState<string>();
   /** 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI). 터미널 위에 바로 보이고, 사용자가 닫을 수 있다 */
   const [warning, setWarning] = useState<string>();
+  /**
+   * 로컬 토큰 없이 부른 403을 받았을 때 터미널 자리에 보이는 안내(ADR-173 덧붙임).
+   * `pnpm studio launch`가 연 창(쿠키가 심어진 창)에서만 터미널을 쓸 수 있다는 뜻이다
+   */
+  const [notice, setNotice] = useState<string>();
   // "다시 열기"가 부를 함수. 터미널을 만든 효과가 채워 둔다
   const reopen = useRef<() => void>(() => {});
 
@@ -48,6 +53,8 @@ export function TerminalPanel({
       const response = await fetch(`/api/sessions/${sessionId}/terminal`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) {
         const reason = await response.json().then((data: { error?: string }) => data.error, () => undefined);
+        // 로컬 토큰이 없어 거절당했으면 그 안내를 터미널 자리에 보인다(열기·입력이 여기로 온다)
+        if (response.status === 403) setNotice(reason ?? "터미널은 `pnpm studio launch`가 연 창에서 씁니다. 다른 창이면 launch가 찍은 주소로 여세요");
         throw new Error(reason ?? `요청이 실패했습니다 (${response.status})`);
       }
     },
@@ -123,6 +130,11 @@ export function TerminalPanel({
           if (message.alive) setPasteNotice(undefined);
         } else if (message.kind === "warning") setWarning(message.message);
         else setStatus({ state: message.state, message: message.message });
+      };
+      // 출력 통로도 같은 쿠키가 있어야 열린다. 403 같은 영구 실패면 연결이 곧 닫히고, 바로 뒤의 열기 POST가 같은 사유로 안내를 채운다
+      events.onerror = () => {
+        if (disposed || events.readyState !== EventSource.CLOSED) return;
+        setStatus((current) => (current.state === "open" ? current : { state: "closed" }));
       };
 
       // 패널 크기가 바뀌면 글자 칸 수를 다시 맞추고 컨테이너 쪽 터미널에도 알린다
@@ -223,8 +235,16 @@ export function TerminalPanel({
           {gate.text}
         </p>
       )}
-      <div className="min-h-0 flex-1 bg-[#0d1117] p-2">
+      <div className="relative min-h-0 flex-1 bg-[#0d1117] p-2">
         <div ref={container} className="h-full w-full" />
+        {/* 로컬 토큰이 없어 터미널 통로가 403을 돌려줬을 때 그 안내를 터미널 자리에 보인다 */}
+        {notice && (
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <p role="alert" className="max-w-md rounded-panel border border-line bg-[#0d1117]/95 p-4 text-sm leading-relaxed text-[#e6edf3] shadow-lg">
+              {notice}
+            </p>
+          </div>
+        )}
       </div>
     </section>
   );

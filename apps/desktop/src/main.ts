@@ -134,8 +134,11 @@ async function start(): Promise<void> {
 function openStudio(): void {
   const target = studio;
   if (!win || !target) return;
+  // 처음 여는 주소는 로컬 토큰 교환 주소다(있으면). 그 주소를 열면 터미널용 쿠키가 심어지고 스튜디오 첫 화면으로 온다.
+  // 옛 CLI가 openUrl을 주지 않으면 url을 연다(터미널은 별도 창 안내를 따른다)
+  const startUrl = target.launched.openUrl ?? target.launched.url;
   toolbar = createView('toolbar');
-  content = createStudioView(target.launched.url);
+  content = createStudioView(startUrl);
   win.contentView.addChildView(toolbar);
   win.contentView.addChildView(content);
   if (loading) {
@@ -145,7 +148,7 @@ function openStudio(): void {
     loadingQueue = [];
   }
   layout();
-  toolbar.webContents.on('did-finish-load', () => toolbarUrl(target.launched.url));
+  toolbar.webContents.on('did-finish-load', () => toolbarUrl(startUrl));
   installMenu();
 }
 

@@ -78,6 +78,8 @@ describe('decideUrl', () => {
   it('절대 주소도 같은 규칙으로 가른다', () => {
     expect(decideUrl('http://127.0.0.1:3000/sessions/abc')).toEqual({ kind: 'app', url: 'http://127.0.0.1:3000/sessions/abc' });
     expect(decideUrl('http://localhost:3100/orders/1')).toMatchObject({ kind: 'app' });
+    // 로컬 토큰 교환 주소도 이 PC 주소라 앱 안에서 연다(쿠키를 심고 첫 화면으로 온다)
+    expect(decideUrl('http://127.0.0.1:3000/local-auth?token=abc')).toEqual({ kind: 'app', url: 'http://127.0.0.1:3000/local-auth?token=abc' });
     expect(decideUrl('https://www.figma.com/file/abc/x')).toMatchObject({ kind: 'external' });
     expect(decideUrl('file:///tmp/x')).toMatchObject({ kind: 'reject' });
     expect(decideUrl('about:blank')).toMatchObject({ kind: 'reject' });

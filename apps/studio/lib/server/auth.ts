@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { LOCAL_TOKEN_API_PATH, LOCAL_TOKEN_PAGE_PATH } from './local-token';
 
 /**
  * 스튜디오 접근 인증. proxy.ts가 모든 요청 앞에서 쓰므로 무거운 서버 모듈(에이전트, 샌드박스)을 불러오지 않는다.
@@ -346,7 +347,7 @@ export type RequestDecision =
   | { kind: 'pass' }
   | { kind: 'allow'; user: string }
   | { kind: 'redirect'; location: string }
-  | { kind: 'reject'; status: 401 | 403 | 500; message: string };
+  | { kind: 'reject'; status: 401 | 403 | 404 | 500; message: string };
 
 export interface IncomingRequest {
   method: string;
@@ -376,6 +377,14 @@ export function decideRequest(
   const api = request.pathname.startsWith('/api/');
   if (api && request.method !== 'GET' && request.method !== 'HEAD' && !isSameOrigin(request.headers)) {
     return { kind: 'reject', status: 403, message: '다른 출처에서 보낸 요청은 받지 않습니다' };
+  }
+
+  // 로컬 토큰 교환(개인 PC 모드 전용). 교환 판단 자체는 페이지와 라우트가 한다 — 토큰이 주소의 `#` 뒤에 실려 오고
+  // 본문으로 옮겨 오므로, 여기서는 로그인 모드에서 이 경로들이 아무 일도 하지 않게 404로 막고 개인 PC 모드에서 통과시킨다.
+  // 다른 출처의 쓰기 거부(위의 같은 출처 검사)는 /api 경로에 이미 적용됐다
+  if (request.pathname === LOCAL_TOKEN_PAGE_PATH || request.pathname === LOCAL_TOKEN_API_PATH) {
+    if (config.mode !== 'none') return { kind: 'reject', status: 404, message: '없는 경로입니다' };
+    return { kind: 'pass' };
   }
   if (PUBLIC_PATHS.has(request.pathname) || BOARD_MCP_PATH.test(request.pathname)) return { kind: 'pass' };
 

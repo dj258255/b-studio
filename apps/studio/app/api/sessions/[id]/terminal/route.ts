@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { authorizeSession, requireUser } from '@/lib/server/access';
-import { isLoopbackHost } from '@/lib/server/auth';
+import { authConfig, isLoopbackHost } from '@/lib/server/auth';
 import { errorResponse, StudioError } from '@/lib/server/errors';
+import { hasLocalToken, LOCAL_TOKEN_COOKIE } from '@/lib/server/local-token';
 import { closeSessionTerminal, MAX_TERMINAL_INPUT, openSessionTerminal, resizeSessionTerminal, subscribeSessionTerminal, writeSessionTerminal } from '@/lib/server/session-terminal';
 import { recoverSessions, sessionTerminalTarget } from '@/lib/server/sessions';
 
@@ -11,6 +12,29 @@ import { recoverSessions, sessionTerminalTarget } from '@/lib/server/sessions';
  */
 function assertLocalRequest(headers: Headers): void {
   if (!isLoopbackHost(headers)) throw new StudioError(403, '세션 터미널은 이 컴퓨터의 주소(127.0.0.1 · localhost)로 연 화면에서만 씁니다');
+}
+
+/**
+ * 개인 PC 모드의 터미널 통로는 `studio launch`가 심은 로컬 토큰 쿠키가 있어야 쓴다(ADR-173 덧붙임).
+ * 같은 컴퓨터의 다른 프로세스가 스튜디오 포트로 보내는 요청을 가릴 수단이 인증에는 없기 때문이다. 인증을 켠 서버(token·proxy)는 로그인으로 충분하다
+ */
+function assertLocalToken(headers: Headers): void {
+  if (authConfig().mode !== 'none') return;
+  if (!hasLocalToken(cookieValue(headers, LOCAL_TOKEN_COOKIE))) {
+    throw new StudioError(403, '터미널은 `pnpm studio launch`가 연 창에서 씁니다. 다른 창이면 launch가 찍은 주소로 여세요');
+  }
+}
+
+/** Cookie 헤더에서 이름 하나의 값을 꺼낸다 */
+function cookieValue(headers: Headers, name: string): string | undefined {
+  const header = headers.get('cookie');
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
 }
 
 const size = { cols: z.number().int().min(1).max(1000), rows: z.number().int().min(1).max(1000) };
@@ -31,6 +55,7 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
 
   try {
     assertLocalRequest(request.headers);
+    assertLocalToken(request.headers);
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await recoverSessions();
@@ -90,6 +115,7 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/terminal'>) {
   try {
     assertLocalRequest(request.headers);
+    assertLocalToken(request.headers);
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await recoverSessions();

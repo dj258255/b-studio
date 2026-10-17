@@ -78,7 +78,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { createSession, commitWorkingCopyDocs, evidenceBaseCheckpoint, getSessionRequirements, getSessionTests, getSnapshot, runSessionTests, stopSession, markRequirementManualVerification, submissionReport } from './sessions';
+import { createSession, commitWorkingCopyDocs, evidenceBaseCheckpoint, getSessionRequirements, getSessionTests, getSnapshot, rememberedGitForTest, runSessionTests, setGitMemoryForTest, stopSession, markRequirementManualVerification, submissionReport } from './sessions';
 
 let root: string;
 const saved = {
@@ -191,7 +191,7 @@ interface TestSessionInternals {
   run?: unknown;
   snapshot: { running: boolean; checkpoints: Array<{ sha: string; shortSha: string; verify?: string }> };
   project: { root: string };
-  checkpoints: { commit(message: string, body?: string, options?: { trailers?: string[] }): Promise<{ sha: string; shortSha: string; verify?: string } | undefined> };
+  checkpoints: { commit(message: string, body?: string, options?: { trailers?: string[]; expectedHead?: string }): Promise<{ sha: string; shortSha: string; verify?: string } | undefined> };
 }
 
 function internals(id: string): TestSessionInternals {
@@ -230,10 +230,14 @@ async function makeRequirementsCheckpoint(id: string) {
 /** 코드를 바꾼 체크포인트(가볍게 확인)를 만든다 — 테스트를 안 돌린 코드 변경 */
 async function makeLightCodeCheckpoint(id: string) {
   const session = internals(id);
+  const remembered = rememberedGitForTest(id);
   await writeFile(path.join(session.project.root, 'api', 'src', `code-${Date.now()}.txt`), 'changed\n');
-  const checkpoint = await session.checkpoints.commit('요청: 코드를 바꾼다', undefined, { trailers: [formatVerifyTrailer('light')] });
+  // 제품(saveCheckpoint)처럼 기억한 체크포인트 위에만 남기고(expectedHead), 남긴 뒤 기억을 그 커밋의 sha로 갱신한다(이슈 #706).
+  // 갱신을 빠뜨리면 다음 문서 체크포인트가 "HEAD가 기억과 다르다"로 거부된다(이 컴퓨터 방식)
+  const checkpoint = await session.checkpoints.commit('요청: 코드를 바꾼다', undefined, { trailers: [formatVerifyTrailer('light')], expectedHead: remembered!.lastCheckpoint });
   expect(checkpoint?.verify).toBe('light');
   session.snapshot.checkpoints = [checkpoint!, ...session.snapshot.checkpoints];
+  setGitMemoryForTest(id, { ...remembered!, lastCheckpoint: checkpoint!.sha });
   return checkpoint!;
 }
 

@@ -1681,6 +1681,9 @@ describe('작업 복사본의 git 설정을 펼쳐 읽고 더 넓게 막는다 (
     expect(await remoteBranch(evil)).toBeUndefined();
   });
 
+  // includeIf가 가리키는 경로는 그 테스트의 임시 폴더 안의 "없는 파일"이어야 한다. 이 컴퓨터에 폴더로 있는 고정 경로(예전 값
+  // /tmp/x)를 넣으면 git이 설정을 읽다 먼저 실패해(Is a directory / bad config line) 기대한 "저장소 설정" 오류가 아니게 된다.
+  // 없는 경로면 git은 includeIf 대상을 조용히 건너뛰고, 키 자체는 설정에 남아 아래 검사에 걸린다. %ROOT%를 그 임시 폴더로 바꾼다
   it.each([
     ['http.proxy', 'http://127.0.0.1:9'],
     ['http.extraHeader', 'Authorization: x'],
@@ -1696,10 +1699,10 @@ describe('작업 복사본의 git 설정을 펼쳐 읽고 더 넓게 막는다 (
     ['diff.external', '/bin/false'],
     ['diff.evil.textconv', 'cat'],
     ['merge.evil.driver', 'cat'],
-    ['includeIf.gitdir:/.path', '/tmp/x'],
+    ['includeIf.gitdir:/.path', '%ROOT%/missing-include-config'],
   ])('저장소 설정에 %s가 있으면 올리기 전에 멈춘다', async (key, value) => {
     const { store, remote, workDir, remembered } = await prepare();
-    await git(workDir, 'config', key, value);
+    await git(workDir, 'config', key, value.replace('%ROOT%', root));
 
     await expect(store.assertTrustedGit(remembered)).rejects.toThrow(/저장소 설정/);
     expect(await remoteBranch(remote)).toBeUndefined();

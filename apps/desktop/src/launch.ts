@@ -34,6 +34,11 @@ export interface CommandRunner {
 
 export interface LaunchResult {
   url: string;
+  /**
+   * 브라우저로 열 주소(`<origin>/local-auth#<토큰>`). 있으면 이 주소로 처음 연다 — 교환 페이지가 `#` 뒤의 토큰으로
+   * 터미널용 쿠키를 받고 첫 화면으로 온다. 없으면(옛 CLI) url을 연다
+   */
+  openUrl?: string;
   port: number;
   mode: string;
   /** 서버 프로세스 id(참고용) */
@@ -75,10 +80,12 @@ export function parseLaunchResult(stdout: string): LaunchResult {
   }
   const value = parsed as Record<string, unknown>;
   const url = typeof value.url === 'string' && value.url.startsWith('http') ? value.url : undefined;
+  const openUrl = typeof value.openUrl === 'string' && value.openUrl.startsWith('http') ? value.openUrl : undefined;
   const port = typeof value.port === 'number' && Number.isInteger(value.port) ? value.port : undefined;
   if (!url || port === undefined) throw new Error(`서버 준비 결과에 url·port가 없습니다: ${JSON.stringify(value).slice(0, 200)}`);
   return {
     url,
+    ...(openUrl ? { openUrl } : {}),
     port,
     mode: typeof value.mode === 'string' ? value.mode : '',
     pid: typeof value.pid === 'number' ? value.pid : 0,

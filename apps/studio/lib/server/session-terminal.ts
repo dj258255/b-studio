@@ -49,13 +49,13 @@ export type TerminalMode = 'container' | 'host';
 
 /**
  * 터미널을 여는 방식(B_STUDIO_TERMINAL): 컨테이너 안의 CLI를 붙이거나, 이 컴퓨터의 CLI를 세션의 작업 복사본에서 띄운다.
- * 비었거나 container면 컨테이너, host면 이 컴퓨터, 그 밖은 던진다 — sessionMode와 같은 태도다:
+ * 비었으면 host(이 컴퓨터 방식, ADR-173 덧붙임), container면 컨테이너, host면 이 컴퓨터, 그 밖은 던진다 — sessionMode와 같은 태도다:
  * 오타가 조용히 다른 방식으로 떨어지지 않는다
  */
 export function sessionTerminalMode(env: Record<string, string | undefined> = process.env): TerminalMode {
   const value = env.B_STUDIO_TERMINAL?.trim();
-  if (!value || value === 'container') return 'container';
-  if (value === 'host') return 'host';
+  if (!value || value === 'host') return 'host';
+  if (value === 'container') return 'container';
   throw new StudioError(500, `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${value})`);
 }
 
