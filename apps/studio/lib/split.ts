@@ -102,17 +102,43 @@ export function defaultFocusId(panes: readonly { id: string; attention: boolean 
   return panes.find((pane) => pane.attention)?.id ?? panes[0]?.id;
 }
 
-export type SplitKeyAction = { type: 'focus'; index: number } | { type: 'exitFocus' };
+export interface SplitSelectionState {
+  /** 고른 칸. 없으면 첫 칸을 쓴다. 선택은 레이아웃(그리드·집중)을 바꾸지 않는다 */
+  selectedId?: string;
+}
+
+export type SplitSelectionAction = { type: 'select'; id: string };
+
+export function initialSplitSelection(): SplitSelectionState {
+  return {};
+}
+
+/** 칸을 고른다. 그리드·집중 모드는 그대로 둔다(집중은 칸 머리의 버튼이 바꾼다) */
+export function splitSelectionReducer(state: SplitSelectionState, action: SplitSelectionAction): SplitSelectionState {
+  return { selectedId: action.id };
+}
 
 /**
- * 전역 단축키 해석. ⌘/Ctrl+1~4는 글자를 치는 중에도 동작한다(칸을 바꾸는 것이라 입력을 방해하지 않는다).
+ * 지금 그릴 수 있는 선택. 고른 칸이 없거나 사라졌으면(칸을 뺐으면) 첫 칸으로 돌아간다 — 선택이 사라지지 않게 한다.
+ * 칸이 하나도 없으면 없다
+ */
+export function selectedPaneId(selectedId: string | undefined, panes: readonly { id: string }[]): string | undefined {
+  if (selectedId && panes.some((pane) => pane.id === selectedId)) return selectedId;
+  return panes[0]?.id;
+}
+
+export type SplitKeyAction = { type: 'select'; index: number } | { type: 'exitFocus' };
+
+/**
+ * 전역 단축키 해석. ⌘/Ctrl+1~4는 그 칸을 고른다(선택은 레이아웃을 바꾸지 않는다 — 집중은 칸 머리의 버튼으로만 한다).
+ * 글자를 치는 중에도 동작한다(칸을 고르는 것이라 입력을 방해하지 않는다).
  * 그 밖의 키는 입력 중이면 무시한다 — 글자를 치다 Esc 한 번으로 화면이 바뀌면 안 된다
  */
 export function splitKeyAction(event: { key: string; metaKey: boolean; ctrlKey: boolean }, context: { typing: boolean; paneCount: number }): SplitKeyAction | undefined {
   const mod = event.metaKey || event.ctrlKey;
   if (mod && /^[1-4]$/.test(event.key)) {
     const index = Number(event.key) - 1;
-    return index < context.paneCount ? { type: 'focus', index } : undefined;
+    return index < context.paneCount ? { type: 'select', index } : undefined;
   }
   if (context.typing) return undefined;
   if (event.key === 'Escape') return { type: 'exitFocus' };
@@ -150,6 +176,14 @@ export type PaneDisplay = 'grid' | 'big' | 'hidden';
 export function paneDisplay(effectiveMode: SplitLayoutMode, id: string, focusId: string | undefined): PaneDisplay {
   if (effectiveMode === 'grid') return 'grid';
   return id === focusId ? 'big' : 'hidden';
+}
+
+/**
+ * 지금 크게 보이는 칸. 좁은 화면(<900px)은 한 칸만 보이므로 "고른 칸(선택)"에서 계산한다 —
+ * 레이아웃 상태(그리드·집중)는 건드리지 않는다(넓은 화면으로 돌아왔을 때 영향을 주지 않게). 넓은 화면은 집중 대상(focusId)을 쓴다
+ */
+export function shownPaneId(narrow: boolean, selectedId: string | undefined, focusId: string | undefined): string | undefined {
+  return narrow ? selectedId : focusId;
 }
 
 /** 칸에 있는 세션이 모두 같은 Agent Fleet 멤버면 그 Fleet을 찾는다("이것으로 채택" 버튼을 보여줄 때 쓴다) */

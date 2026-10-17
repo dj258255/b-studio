@@ -8,6 +8,7 @@ import {
   fleetForIds,
   formatElapsed,
   initialSplitLayout,
+  initialSplitSelection,
   lastOutcomeStatus,
   MAX_SPLIT,
   nextSplitIds,
@@ -15,8 +16,11 @@ import {
   paneState,
   parseSplitIds,
   readStoredSplitIds,
+  selectedPaneId,
+  shownPaneId,
   splitKeyAction,
   splitLayoutReducer,
+  splitSelectionReducer,
   SPLIT_STORAGE_KEY,
   splitGridClass,
   splitHref,
@@ -112,9 +116,9 @@ describe('defaultFocusId', () => {
 });
 
 describe('splitKeyAction', () => {
-  it('⌘/Ctrl+1~4는 입력 중에도 그 칸을 집중하고, 범위를 넘으면 무시한다', () => {
-    expect(splitKeyAction({ key: '2', metaKey: true, ctrlKey: false }, { typing: true, paneCount: 4 })).toEqual({ type: 'focus', index: 1 });
-    expect(splitKeyAction({ key: '3', metaKey: false, ctrlKey: true }, { typing: false, paneCount: 4 })).toEqual({ type: 'focus', index: 2 });
+  it('⌘/Ctrl+1~4는 입력 중에도 그 칸을 고르고, 범위를 넘으면 무시한다', () => {
+    expect(splitKeyAction({ key: '2', metaKey: true, ctrlKey: false }, { typing: true, paneCount: 4 })).toEqual({ type: 'select', index: 1 });
+    expect(splitKeyAction({ key: '3', metaKey: false, ctrlKey: true }, { typing: false, paneCount: 4 })).toEqual({ type: 'select', index: 2 });
     expect(splitKeyAction({ key: '4', metaKey: true, ctrlKey: false }, { typing: false, paneCount: 2 })).toBeUndefined();
   });
 
@@ -122,6 +126,34 @@ describe('splitKeyAction', () => {
     expect(splitKeyAction({ key: 'Escape', metaKey: false, ctrlKey: false }, { typing: false, paneCount: 2 })).toEqual({ type: 'exitFocus' });
     expect(splitKeyAction({ key: 'Escape', metaKey: false, ctrlKey: false }, { typing: true, paneCount: 2 })).toBeUndefined();
     expect(splitKeyAction({ key: 'a', metaKey: false, ctrlKey: false }, { typing: false, paneCount: 2 })).toBeUndefined();
+  });
+});
+
+describe('선택 상태 (splitSelectionReducer / selectedPaneId)', () => {
+  it('칸을 고르면 그 칸이 선택이 된다(레이아웃은 그대로)', () => {
+    const initial = initialSplitSelection();
+    expect(initial).toEqual({});
+    expect(splitSelectionReducer(initial, { type: 'select', id: 'b' })).toEqual({ selectedId: 'b' });
+    expect(splitSelectionReducer({ selectedId: 'b' }, { type: 'select', id: 'c' })).toEqual({ selectedId: 'c' });
+  });
+
+  it('고른 칸이 없으면 첫 칸, 사라졌으면(칸을 뺐으면) 남은 첫 칸으로 옮겨 간다', () => {
+    const panes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    expect(selectedPaneId(undefined, panes)).toBe('a');
+    expect(selectedPaneId('b', panes)).toBe('b');
+    // 선택한 칸을 빼면 첫 남은 칸으로
+    expect(selectedPaneId('b', [{ id: 'a' }, { id: 'c' }])).toBe('a');
+    // 선택하지 않은 칸을 빼면 선택은 그대로
+    expect(selectedPaneId('c', [{ id: 'a' }, { id: 'c' }])).toBe('c');
+    expect(selectedPaneId('a', [])).toBeUndefined();
+  });
+
+  it('좁은 화면에서 크게 보이는 칸은 선택에서 계산한다(레이아웃 상태를 쓰지 않는다)', () => {
+    // 좁은 화면: 고른 칸이 보인다
+    expect(shownPaneId(true, 'b', 'a')).toBe('b');
+    // 넓은 화면: 집중 대상(focusId)이 보인다(선택과 다를 수 있다)
+    expect(shownPaneId(false, 'b', 'a')).toBe('a');
+    expect(shownPaneId(true, undefined, 'a')).toBeUndefined();
   });
 });
 

@@ -12,7 +12,7 @@ const TONE: Record<TerminalGateStatus["tone"], string> = { working: "bg-wait mot
  * 터미널 아래의 활동 줄(이슈 #689). 터미널에는 "검증 통과 — 체크포인트" 한 줄만 찍히므로, 마지막 요청이 어디까지 왔는지와
  * 어느 단계가 통과·실패했는지, 가장 최근 체크포인트를 한 줄로 보여 준다. 자세한 것(실패 사유, 되살리기)은 펼친 기록에 있다
  */
-export function ActivityStrip({ view, open, onToggle }: { view: SessionView; open: boolean; onToggle: () => void }) {
+export function ActivityStrip({ view, open, onToggle }: { view: SessionView; open: boolean; onToggle?: () => void }) {
   const access = useSessionAccess();
   const { status, stages, checkpoint, usage } = terminalActivity(view.chat, view.snapshot.checkpoints, view.runUsage);
   const runId = activeRun(view);
@@ -53,9 +53,11 @@ export function ActivityStrip({ view, open, onToggle }: { view: SessionView; ope
                 요청 취소
               </button>
             ))}
-          <button type="button" onClick={onToggle} aria-expanded={open} className="rounded-control border border-line px-2.5 py-1 font-medium hover:border-ink">
-            {open ? "기록 접기" : "기록 펼치기"}
-          </button>
+          {onToggle && (
+            <button type="button" onClick={onToggle} aria-expanded={open} className="rounded-control border border-line px-2.5 py-1 font-medium hover:border-ink">
+              {open ? "기록 접기" : "기록 펼치기"}
+            </button>
+          )}
         </div>
       </div>
       {(stages.length > 0 || checkpoint || usage !== undefined) && (
