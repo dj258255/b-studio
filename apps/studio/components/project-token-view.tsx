@@ -22,7 +22,7 @@ import {
  * 프로젝트 토큰 보고서 화면. 쓴 양과 줄인 양을 나눠 보여 주고, 과제 README에 붙일 마크다운을 복사하거나 파일로 받는다.
  * 좁은 화면에서는 표를 압축 표기(text-xs, 최소 너비 없음)로 그려 가로 스크롤을 만들지 않는다(토큰 탭과 같은 규칙).
  */
-export function ProjectTokenView({ report }: { report: ProjectTokenReport }) {
+export function ProjectTokenView({ report, experimental = false }: { report: ProjectTokenReport; /** 실험 기능(나눠서 병렬·여러 명 비교)을 화면에 보이는가 */ experimental?: boolean }) {
   const [copy, setCopy] = useState<"idle" | "copying" | "copied" | "failed">("idle");
   const params = new URLSearchParams({ format: "markdown" });
   if (report.range?.from) params.set("from", report.range.from);
@@ -55,7 +55,10 @@ export function ProjectTokenView({ report }: { report: ProjectTokenReport }) {
       <h1 className="text-2xl font-semibold tracking-tight">토큰 보고서 — {report.projectName}</h1>
       <p className="mt-2 text-sm text-muted">{header}</p>
       <p className="mt-1 text-sm text-muted">
-        이 프로젝트의 모든 세션(작업 분해 레인·통합·Fleet 멤버 포함)이 쓴 토큰과 b-studio가 줄인 양을 모았습니다.
+        {/* 실험 기능을 숨긴 서버에서는 그 기능 이름을 꺼내지 않는다 */}
+        {experimental
+          ? "이 프로젝트의 모든 세션(나눠서 병렬·여러 명 비교로 만든 세션 포함)이 쓴 토큰과 b-studio가 줄인 양을 모았습니다."
+          : "이 프로젝트의 모든 세션이 쓴 토큰과 b-studio가 줄인 양을 모았습니다."}
       </p>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">

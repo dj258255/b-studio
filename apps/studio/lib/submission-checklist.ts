@@ -8,9 +8,12 @@ import { execFile } from 'node:child_process';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { readProjectFileSync, type DocEvidence } from '@b-studio/agent';
+import { GIT_HARDENING, readProjectFileSync, type DocEvidence } from '@b-studio/agent';
 
 const execFileAsync = promisify(execFile);
+
+// 화면(클라이언트)도 쓰는 순수 함수라 node 모듈이 없는 파일에 두고 여기서도 내보낸다
+export { formatSubmissionScore } from './submission-score';
 
 export type ChecklistStatus = 'pass' | 'warn' | 'fail' | 'skip';
 
@@ -155,7 +158,7 @@ const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 
 async function isGitRepo(root: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', root, 'rev-parse', '--is-inside-work-tree'], { env: GIT_ENV });
+    const { stdout } = await execFileAsync('git', [...GIT_HARDENING, '-C', root, 'rev-parse', '--is-inside-work-tree'], { env: GIT_ENV });
     return stdout.trim() === 'true';
   } catch {
     return false;
@@ -174,7 +177,7 @@ async function listPushableFiles(root: string): Promise<string[] | undefined> {
   try {
     const { stdout } = await execFileAsync(
       'git',
-      ['-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'],
+      [...GIT_HARDENING, '-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.'],
       { maxBuffer: 16 * 1024 * 1024, env: GIT_ENV },
     );
     return stdout

@@ -28,6 +28,8 @@ export interface CapabilityState {
   enabled: boolean;
   /** 못 하는 이유. enabled가 false일 때만 있다 */
   reason?: string;
+  /** 켜는 방법을 적은 문서. 실험 기능이라 꺼 둔 경우에만 있다 */
+  docsUrl?: string;
 }
 
 export interface StudioCapabilities {
@@ -40,8 +42,13 @@ export interface StudioCapabilities {
   experimental: boolean;
 }
 
-/** 실험 기능을 켜지 않아 꺼진 방식의 사유. 켜는 방법을 함께 알린다 */
-export const EXPERIMENTAL_REASON = '실험 기능이라 기본으로 숨겨 둡니다. B_STUDIO_EXPERIMENTAL=1로 스튜디오를 띄우면 쓸 수 있습니다';
+/**
+ * 실험 기능을 켜지 않아 꺼진 방식의 사유. 화면에 그대로 나가므로 환경 변수 이름은 넣지 않고,
+ * 켜는 방법은 설정 문서(`EXPERIMENTAL_DOCS_URL`)로 잇는다
+ */
+export const EXPERIMENTAL_REASON = '실험 기능입니다. 켜는 방법은 설정 문서에 있습니다.';
+/** 설정 문서의 "실험 기능" 절 */
+export const EXPERIMENTAL_DOCS_URL = 'https://github.com/dj258255/b-studio/blob/main/docs/configuration.md#실험-기능-b_studio_experimental';
 
 /** 순수 계산. 라우트와 테스트가 같은 함수를 쓴다 */
 export function buildCapabilities(input: { mode: SessionMode; backends: readonly SessionMode[]; openFolder: boolean; experimental?: boolean }): StudioCapabilities {
@@ -52,8 +59,8 @@ export function buildCapabilities(input: { mode: SessionMode; backends: readonly
     return {
       mode,
       single: { enabled: true },
-      fleet: { enabled: false, reason: EXPERIMENTAL_REASON },
-      split: { enabled: false, reason: EXPERIMENTAL_REASON },
+      fleet: { enabled: false, reason: EXPERIMENTAL_REASON, docsUrl: EXPERIMENTAL_DOCS_URL },
+      split: { enabled: false, reason: EXPERIMENTAL_REASON, docsUrl: EXPERIMENTAL_DOCS_URL },
       backends: [...input.backends],
       openFolder: input.openFolder,
       experimental,

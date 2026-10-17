@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { SessionView } from "@/lib/session-view";
+import { formatSubmissionScore } from "@/lib/submission-score";
 import { useChatDraft } from "./chat-draft-context";
 import { RepositoryUploadActions } from "./repository-upload-actions";
 
@@ -97,7 +98,7 @@ function SubmissionList({ view }: { view: SessionView }) {
       <div className="flex items-center justify-between">
         <h3 className="font-medium">올리기 전 점검</h3>
         <span className="text-sm text-muted">
-          {report.score.passed}/{report.score.total} 통과
+          {formatSubmissionScore(report)}
         </span>
       </div>
       <p className="mt-1 text-xs leading-5 text-muted">

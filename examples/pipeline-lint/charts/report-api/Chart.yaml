@@ -1,0 +1,6 @@
+apiVersion: v2
+name: report-api
+description: 집계 결과를 읽어 주는 작은 API의 예시 차트
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

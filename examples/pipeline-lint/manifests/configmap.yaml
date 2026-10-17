@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sales-sync-config
+  labels:
+    app.kubernetes.io/name: sales-sync
+data:
+  SOURCE_BUCKET: example-raw
+  TARGET_TABLE: analytics.daily_sales

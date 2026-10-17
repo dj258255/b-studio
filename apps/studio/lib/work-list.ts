@@ -31,6 +31,8 @@ export interface WorkItem {
   owner?: string;
   state: AgentState;
   attention?: AgentAttention;
+  /** 개입 사유 한 줄. 그 사유를 가진 첫 구성원의 것을 쓴다 */
+  reason?: string;
   lastActivityAt: string;
   /** 구성원 토큰 합. 아무도 토큰이 없으면 없다 */
   tokens?: Usage;
@@ -61,6 +63,7 @@ function toWork(key: string, members: AgentItem[]): WorkItem {
   const state = STATE_PRIORITY.find((candidate) => members.some((member) => member.state === candidate)) ?? first.state;
   const lastActivityAt = members.map((member) => member.lastActivityAt).reduce((latest, at) => (at > latest ? at : latest));
   const tokens = sumTokens(members);
+  const reason = attention ? members.find((member) => member.attention === attention && member.reason)?.reason : undefined;
   return {
     key,
     mode,
@@ -70,6 +73,7 @@ function toWork(key: string, members: AgentItem[]): WorkItem {
     ...(first.owner ? { owner: first.owner } : {}),
     state,
     ...(attention ? { attention } : {}),
+    ...(reason ? { reason } : {}),
     lastActivityAt,
     ...(tokens ? { tokens } : {}),
     members,
@@ -185,3 +189,11 @@ export function toggleSelectAll(shown: readonly WorkItem[], selectedKeys: readon
   if (selectAllState(shown, selectedKeys) === 'all') return selectedKeys.filter((key) => !keys.includes(key));
   return [...selectedKeys, ...keys.filter((key) => !selectedKeys.includes(key))];
 }
+
+/**
+ * 줄 머리에 개입 사유 이름을 따로 적을지. 상태 이름과 같은 말(오류·오류)이면 두 번 쓰지 않는다(이슈 #720)
+ */
+export function showAttentionLabel(work: Pick<WorkItem, 'state' | 'attention'>): boolean {
+  return work.attention !== undefined && !(work.attention === 'error' && work.state === 'error');
+}
+

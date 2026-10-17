@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { FleetWorkbench } from '@/components/fleet-workbench';
 import { pageUser } from '@/lib/server/access';
@@ -5,6 +6,8 @@ import { studioCapabilities } from '@/lib/server/capabilities';
 import { listFleets } from '@/lib/server/fleets';
 import { listModelOptions } from '@/lib/server/model-registry';
 import { listProjects } from '@/lib/server/projects';
+
+export const metadata: Metadata = { title: '여러 명 비교' };
 
 export default async function FleetsPage(props: { searchParams: Promise<{ id?: string | string[] }> }) {
   const requested = (await props.searchParams).id;
@@ -14,7 +17,11 @@ export default async function FleetsPage(props: { searchParams: Promise<{ id?: s
   const initial = listFleets(user);
   // 이 서버에서 여러 후보 비교를 쓸 수 있는지(데모만 못 쓴다). 화면이 이유까지 그대로 보여 준다
   const capabilities = studioCapabilities();
-  const fleet = { enabled: capabilities.fleet.enabled, ...(capabilities.fleet.reason ? { reason: capabilities.fleet.reason } : {}) };
+  const fleet = {
+    enabled: capabilities.fleet.enabled,
+    ...(capabilities.fleet.reason ? { reason: capabilities.fleet.reason } : {}),
+    ...(capabilities.fleet.docsUrl ? { docsUrl: capabilities.fleet.docsUrl } : {}),
+  };
 
   return (
     <main className="mx-auto max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">

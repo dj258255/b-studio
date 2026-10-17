@@ -85,7 +85,7 @@ export function AgentsBadge() {
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        className="glass-soft inline-flex items-center rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel"
+        className="tap-target glass-soft inline-flex items-center rounded-control px-3 py-1.5 font-medium text-ink hover:bg-panel"
       >
         작업
         {attention > 0 && (

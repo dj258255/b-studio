@@ -150,3 +150,27 @@ describe("TaskPlanWorkbench 레인 카드(이슈 #82)", () => {
     expect(html).toMatch(/<code[^>]*>application\.yml<\/code>/);
   });
 });
+
+describe("실험 기능을 켜지 않은 서버에서 주소로 연 작업 분해 화면(이슈 #720)", () => {
+  it("환경 변수 이름 대신 실험 기능이라고 알리고 켜는 방법 문서로 잇는다", () => {
+    const docsUrl = "https://github.com/dj258255/b-studio/blob/main/docs/configuration.md#실험-기능";
+    const html = renderToStaticMarkup(
+      <TaskPlanWorkbench
+        projects={[{ id: "orders", name: "orders", services: [] }]}
+        models={[]}
+        initialPlans={[]}
+        planner={{ mode: "claude-code", enabled: false, reason: "실험 기능입니다. 켜는 방법은 설정 문서에 있습니다.", docsUrl }}
+        limits={{ maxLanes: 3, maxTasks: 6 }}
+        modelPicker={{ backend: "claude-code", options: [], effort: { supported: false, levels: [] } }}
+        laneBackends={[]}
+      />,
+    );
+
+    expect(html).toContain("실험 기능입니다");
+    expect(html).toContain(`href="${docsUrl}"`);
+    expect(html).not.toContain("B_STUDIO_EXPERIMENTAL");
+    // 상한 안내에 내부 용어(레인)를 쓰지 않는다
+    expect(html).toContain("작업 6개");
+    expect(html).not.toContain("레인 3개");
+  });
+});

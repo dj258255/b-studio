@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { SessionView } from "@/lib/session-view";
+import { runAllBlockedReason } from "@/lib/test-run-state";
 import { useChatDraft } from "./chat-draft-context";
 import { useCodeOpen } from "./code-open-context";
 import { Dot, type Tone } from "./status";
@@ -126,6 +127,9 @@ export function TestsPanel({ view }: { view: SessionView }) {
     });
   }
 
+  // 돌릴 수 있는 서비스가 없으면(시작 실패·꺼짐·실행기 없음) 누를 수 없게 하고 이유를 옆에 적는다
+  const runAllBlocked = runAllBlockedReason(snapshot?.error ? [] : snapshot?.data?.services);
+
   async function runAll() {
     if (!snapshot?.data) return;
     for (const service of snapshot.data.services) {
@@ -158,10 +162,12 @@ export function TestsPanel({ view }: { view: SessionView }) {
             </button>
           ))}
         </div>
+        {runAllBlocked && snapshot?.data && <span className="text-xs text-muted">{runAllBlocked}</span>}
         <button
           type="button"
           onClick={() => void runAll()}
-          disabled={runningLocally !== undefined}
+          disabled={runningLocally !== undefined || runAllBlocked !== undefined}
+          title={runAllBlocked ?? "돌릴 수 있는 서비스의 테스트를 모두 돌립니다"}
           className="shrink-0 rounded-control bg-ink px-3 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
         >
           전체 실행

@@ -1,5 +1,6 @@
 import { publicUrlPlaceholder, resolvePublicUrlPlaceholders, type LoadedProject } from '@b-studio/spec';
 import { directHosts, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, edgeEnvironment, edgePortFor, proxyEnvironment } from '../edge-config';
+import { stripAnsi } from '../ansi';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
 import type { MaskVolume } from './git-mask';
 
@@ -8,7 +9,7 @@ export { DEFAULT_EGRESS_ALLOW, EDGE_PROXY_PORT, EDGE_SERVICE, edgePortFor } from
 /** 외부로 나갈 수 없는 네트워크. 모든 서비스가 여기에만 붙는다 */
 export const SANDBOX_NETWORK = 'b-studio-sandbox';
 /** edge만 붙는 네트워크. 허용한 외부 호스트로 나갈 때 쓴다 */
-const EGRESS_NETWORK = 'b-studio-egress';
+export const EGRESS_NETWORK = 'b-studio-egress';
 
 /**
  * 사용자의 compose 파일은 건드리지 않고 덧씌울 설정.
@@ -319,15 +320,14 @@ export class SyncObservations {
 const LOG_LINE = /^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
 /** compose가 컨테이너 수명 주기를 알리는 줄: `api-1 exited with code 143`, `web-1 has been recreated` */
 const STATUS_LINE = /^(?<container>[a-z0-9][a-z0-9_.-]*)-\d+\s+(?<text>[^|\s].*)$/;
-/** --no-color를 줘도 상태 줄 앞에는 줄 지우기(ESC [K) 같은 제어 코드가 붙는다 */
-const ANSI_ESCAPE = /\u001b\[[0-9;?]*[A-Za-z]/g;
 
 /**
  * `docker compose logs --timestamps` 한 줄: `api-1  | 2026-09-10T11:48:35.123456789Z 메시지`.
  * 내용이 없는 줄은 undefined를 돌려 건너뛰게 한다.
  */
 export function parseLogLine(raw: string): LogLine | undefined {
-  const line = raw.replace(ANSI_ESCAPE, '');
+  // --no-color를 줘도 상태 줄 앞에는 줄 지우기(ESC [K) 같은 제어 코드가 붙는다
+  const line = stripAnsi(raw);
   if (line.trim() === '') return undefined;
 
   const groups = LOG_LINE.exec(line)?.groups;

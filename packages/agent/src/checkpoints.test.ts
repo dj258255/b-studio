@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -528,7 +528,7 @@ describe('CheckpointStore', () => {
     const store = new CheckpointStore(root);
     await store.init();
     expect(await store.repository()).toBeUndefined();
-    await expect(store.push()).rejects.toThrow('원격 저장소와 연결되지 않은 세션');
+    await expect(store.push(await rememberedFor(store))).rejects.toThrow('원격 저장소와 연결되지 않은 세션');
   });
 });
 
@@ -537,6 +537,16 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', cwd, '-c', 'user.name=test', '-c', 'user.email=test@example.com', ...args]);
   return stdout.trim();
 }
+
+/**
+ * CheckpointStore가 지금 작업 복사본에서 기억할 Git 상태(브랜치·HEAD·원격 주소). 올리기·가져오기·PR은 이 값을
+ * 필수로 받는다(이슈 #699) — 부르기 직전 지금 HEAD로 계산해 넘긴다
+ */
+const rememberedFor = async (store: CheckpointStore) => {
+  const { head, branch } = await store.headState();
+  const originUrl = await store.remoteUrl();
+  return { branch: branch!, lastCheckpoint: head, ...(originUrl ? { originUrl } : {}) };
+};
 
 /** origin(bare 저장소)으로 main을 올려 둔 원본 저장소를 만든다 */
 async function createSourceRepository() {
@@ -576,7 +586,7 @@ describe('CheckpointStore PR 대상 브랜치', () => {
     const { source, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
 
-    expect(await store.pullRequestTarget()).toEqual({ base: 'main' });
+    expect(await store.pullRequestTarget(await rememberedFor(store))).toEqual({ base: 'main' });
     expect((await store.repository())?.pullRequestBase).toBe('main');
   });
 
@@ -590,7 +600,7 @@ describe('CheckpointStore PR 대상 브랜치', () => {
     expect((await store.repository())?.base).toBe('feat/local-only');
     expect((await store.repository())?.pullRequestBase).toBeUndefined();
 
-    expect(await store.pullRequestTarget()).toEqual({ base: 'main', missingBase: 'feat/local-only' });
+    expect(await store.pullRequestTarget(await rememberedFor(store))).toEqual({ base: 'main', missingBase: 'feat/local-only' });
     // 작성 페이지 주소가 같은 대상을 쓰도록 마지막으로 확인한 값을 남긴다
     expect((await store.repository())?.pullRequestBase).toBe('main');
   });
@@ -603,7 +613,7 @@ describe('CheckpointStore PR 대상 브랜치', () => {
     await git(source, 'checkout', '-q', '-b', 'only');
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
 
-    expect(await store.pullRequestTarget()).toEqual({ base: 'main', missingBase: 'only' });
+    expect(await store.pullRequestTarget(await rememberedFor(store))).toEqual({ base: 'main', missingBase: 'only' });
   });
 
   it('원격에 기준 브랜치도 기본 브랜치도 없으면 대상을 정하지 못했다고 알린다(base가 missingBase와 같다)', async () => {
@@ -613,7 +623,7 @@ describe('CheckpointStore PR 대상 브랜치', () => {
     // 원격의 HEAD가 가리키는 브랜치를 지워 기본 브랜치를 알 수 없게 한다
     await execFileAsync('git', ['-C', remote, 'update-ref', '-d', 'refs/heads/main']);
 
-    expect(await store.pullRequestTarget()).toEqual({ base: 'feat/local-only', missingBase: 'feat/local-only' });
+    expect(await store.pullRequestTarget(await rememberedFor(store))).toEqual({ base: 'feat/local-only', missingBase: 'feat/local-only' });
   });
 
   it('원격에 닿지 못하면 던진다', async () => {
@@ -621,7 +631,7 @@ describe('CheckpointStore PR 대상 브랜치', () => {
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
     await rm(remote, { recursive: true, force: true });
 
-    await expect(store.pullRequestTarget()).rejects.toThrow();
+    await expect(store.pullRequestTarget(await rememberedFor(store))).rejects.toThrow();
   });
 });
 
@@ -633,13 +643,13 @@ describe('CheckpointStore 원격 변경 가져오기', () => {
 
     await writeFile(order, 'class Order { String a; }\n');
     await store.commit('요청: A');
-    await store.push();
+    await store.push(await rememberedFor(store));
     const theirs = await pushReviewerCommit(base, remote, 'NOTE.md', 'review\n', 'review note');
     await writeFile(order, 'class Order { String b; }\n');
     const b = (await store.commit('요청: B'))!;
-    await expect(store.push()).rejects.toThrow('원격 변경을 가져온 뒤 다시 올리세요');
+    await expect(store.push(await rememberedFor(store))).rejects.toThrow('원격 변경을 가져온 뒤 다시 올리세요');
 
-    const result = await store.integrateRemote();
+    const result = await store.integrateRemote(await rememberedFor(store));
     expect(result).toMatchObject({
       status: 'merged',
       remoteSha: theirs,
@@ -657,7 +667,7 @@ describe('CheckpointStore 원격 변경 가져오기', () => {
     expect(await store.patch(result.checkpoint!.sha)).toContain('+review');
 
     await store.acceptRemote(result);
-    expect(await store.push()).toEqual({ sha: result.checkpoint!.sha, commits: 3, forced: false });
+    expect(await store.push(await rememberedFor(store))).toEqual({ sha: result.checkpoint!.sha, commits: 3, forced: false });
     await expect(git(remote, 'merge-base', '--is-ancestor', theirs, `refs/heads/${BRANCH}`)).resolves.toBe('');
   });
 
@@ -668,12 +678,12 @@ describe('CheckpointStore 원격 변경 가져오기', () => {
 
     await writeFile(order, 'class Order { String a; }\n');
     await store.commit('요청: A');
-    await store.push();
+    await store.push(await rememberedFor(store));
     await pushReviewerCommit(base, remote, 'api/src/Order.java', 'class Order { String reviewer; }\n', 'reviewer edit');
     await writeFile(order, 'class Order { String mine; }\n');
     const mine = (await store.commit('요청: 내 변경'))!;
 
-    const error = await store.integrateRemote().then(
+    const error = await store.integrateRemote(await rememberedFor(store)).then(
       () => undefined,
       (reason: unknown) => reason,
     );
@@ -689,12 +699,12 @@ describe('CheckpointStore 원격 변경 가져오기', () => {
     const { source, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
     const head = await git(workDir, 'rev-parse', 'HEAD');
-    expect(await store.integrateRemote()).toEqual({ status: 'up-to-date', commits: [], files: [], previous: head });
+    expect(await store.integrateRemote(await rememberedFor(store))).toEqual({ status: 'up-to-date', commits: [], files: [], previous: head });
 
     await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String a; }\n');
     const a = (await store.commit('요청: A'))!;
-    await store.push();
-    expect(await store.integrateRemote()).toEqual({ status: 'up-to-date', remoteSha: a.sha, commits: [], files: [], previous: a.sha });
+    await store.push(await rememberedFor(store));
+    expect(await store.integrateRemote(await rememberedFor(store))).toEqual({ status: 'up-to-date', remoteSha: a.sha, commits: [], files: [], previous: a.sha });
   });
 
   it('올린 뒤 되돌린 기록에는 버린 체크포인트 없이 원격에만 있는 변경을 옮겨 오고, 받아들이기 전에는 원격 상태로 기록하지 않는다', async () => {
@@ -706,11 +716,11 @@ describe('CheckpointStore 원격 변경 가져오기', () => {
     const a = (await store.commit('요청: A'))!;
     await writeFile(order, 'class Order { String b; }\n');
     await store.commit('요청: B');
-    await store.push();
+    await store.push(await rememberedFor(store));
     await store.restore(a.sha);
     const theirs = await pushReviewerCommit(base, remote, 'NOTE.md', 'review\n', 'review note');
 
-    const result = await store.integrateRemote();
+    const result = await store.integrateRemote(await rememberedFor(store));
     expect(result).toMatchObject({ status: 'picked', remoteSha: theirs, files: ['NOTE.md'], previous: a.sha, commits: [{ subject: 'review note' }] });
     // 버린 B의 변경은 다시 들어오지 않는다
     expect(await readFile(order, 'utf8')).toBe('class Order { String a; }\n');
@@ -719,13 +729,13 @@ describe('CheckpointStore 원격 변경 가져오기', () => {
     // 검증에 실패해 가져오기를 되돌렸다면, 원격 상태로 기록하지 않았으므로 올려도 리뷰어 커밋을 덮어쓰지 않는다
     await store.restore(a.sha);
     await expect(store.acceptRemote(result)).rejects.toThrow('원격 상태로 기록하지 않았습니다');
-    await expect(store.push()).rejects.toThrow('덮어쓰지 않았습니다');
+    await expect(store.push(await rememberedFor(store))).rejects.toThrow('덮어쓰지 않았습니다');
     expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(theirs);
 
     // 다시 가져와 받아들이면 원격 브랜치를 지금 기록으로 맞춘다. 리뷰어 변경은 내용으로 남는다
-    const again = await store.integrateRemote();
+    const again = await store.integrateRemote(await rememberedFor(store));
     await store.acceptRemote(again);
-    expect(await store.push()).toMatchObject({ sha: again.checkpoint!.sha, forced: true });
+    expect(await store.push(await rememberedFor(store))).toMatchObject({ sha: again.checkpoint!.sha, forced: true });
     expect(await git(remote, 'show', `refs/heads/${BRANCH}:NOTE.md`)).toBe('review');
   });
 });
@@ -762,12 +772,12 @@ describe('CheckpointStore 원격 저장소 연동', () => {
   it('올리면 원격에 세션 브랜치가 생기고, 기준 브랜치에서 갈라져 있다', async () => {
     const { source, remote, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
-    await expect(store.push()).rejects.toThrow('올릴 체크포인트가 없습니다');
+    await expect(store.push(await rememberedFor(store))).rejects.toThrow('올릴 체크포인트가 없습니다');
 
     await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
     const checkpoint = (await store.commit('요청: 메모 추가'))!;
 
-    expect(await store.push()).toEqual({ sha: checkpoint.sha, commits: 1, forced: false });
+    expect(await store.push(await rememberedFor(store))).toEqual({ sha: checkpoint.sha, commits: 1, forced: false });
     expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(checkpoint.sha);
     expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}^`)).toBe(await git(remote, 'rev-parse', 'refs/heads/main'));
     expect((await store.repository())?.pushedSha).toBe(checkpoint.sha);
@@ -782,10 +792,10 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     const a = (await store.commit('요청: A'))!;
     await writeFile(order, 'class Order { String b; }\n');
     await store.commit('요청: B');
-    await store.push();
+    await store.push(await rememberedFor(store));
 
     await store.restore(a.sha);
-    expect(await store.push()).toEqual({ sha: a.sha, commits: 1, forced: true });
+    expect(await store.push(await rememberedFor(store))).toEqual({ sha: a.sha, commits: 1, forced: true });
     expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(a.sha);
 
     // 리뷰어가 같은 브랜치에 커밋을 올린다
@@ -799,7 +809,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
 
     await writeFile(order, 'class Order { String c; }\n');
     await store.commit('요청: C');
-    await expect(store.push()).rejects.toThrow('덮어쓰지 않았습니다');
+    await expect(store.push(await rememberedFor(store))).rejects.toThrow('덮어쓰지 않았습니다');
     expect(await git(remote, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(theirs);
   });
 
@@ -822,7 +832,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
 
     await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; }\n');
     const checkpoint = (await store.commit('요청: 메모 추가'))!;
-    await store.push();
+    await store.push(await rememberedFor(store));
 
     expect((await store.repository())?.remoteUrl).toBe(await realpath(source));
     expect(await git(source, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(checkpoint.sha);
@@ -863,7 +873,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
 
     await writeFile(path.join(projectRoot, 'src/Memo.java'), 'class Memo {}\n');
     await store.commit('요청: 메모 다시');
-    await store.push();
+    await store.push(await rememberedFor(store));
     // 원격에는 저장소 루트 기준 경로로 올라간다
     expect(await git(remote, 'show', `refs/heads/${BRANCH}:api/src/Memo.java`)).toBe('class Memo {}');
     // 서버를 다시 시작해도 작업 복사본만으로 프로젝트 폴더를 찾는다
@@ -1013,14 +1023,14 @@ describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
     const { base, source, remote, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
 
-    expect(await store.baseStatus()).toMatchObject({ base: 'main', behind: 0 });
+    expect(await store.baseStatus(await rememberedFor(store))).toMatchObject({ base: 'main', behind: 0 });
 
     await pushToBase(base, remote, 'CHANGELOG.md', '# changes\n', 'main 변경');
     // 방금 가져왔으므로(throttle 안) 강제로 다시 가져오지 않으면 새 커밋을 보지 못한다
-    const throttled = await store.baseStatus();
+    const throttled = await store.baseStatus(await rememberedFor(store));
     expect(throttled).toMatchObject({ base: 'main', behind: 0 });
 
-    const forced = await store.baseStatus({ force: true });
+    const forced = await store.baseStatus(await rememberedFor(store), { force: true });
     expect(forced).toMatchObject({ base: 'main', behind: 1 });
     expect(Date.parse(forced.lastFetchedAt)).toBeGreaterThanOrEqual(Date.parse(throttled.lastFetchedAt));
   });
@@ -1030,7 +1040,7 @@ describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
     const head = await git(workDir, 'rev-parse', 'HEAD');
 
-    expect(await store.integrateBase()).toMatchObject({ status: 'up-to-date', commits: [], files: [] });
+    expect(await store.integrateBase(await rememberedFor(store))).toMatchObject({ status: 'up-to-date', commits: [], files: [] });
     expect(await git(workDir, 'rev-parse', 'HEAD')).toBe(head);
   });
 
@@ -1043,7 +1053,7 @@ describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
 
     const theirs = await pushToBase(base, remote, 'CHANGELOG.md', '# changes\n', 'main 변경');
 
-    const result = await store.integrateBase();
+    const result = await store.integrateBase(await rememberedFor(store));
     expect(result).toMatchObject({
       status: 'merged',
       remoteSha: theirs,
@@ -1071,7 +1081,7 @@ describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
 
     await pushToBase(base, remote, 'api/src/Order.java', 'class Order { String main; }\n', 'main 변경');
 
-    const error = await store.integrateBase().then(
+    const error = await store.integrateBase(await rememberedFor(store)).then(
       () => undefined,
       (reason: unknown) => reason,
     );
@@ -1088,7 +1098,7 @@ describe('CheckpointStore main 따라잡기 (ADR-076)', () => {
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
     await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String pending; }\n');
 
-    await expect(store.integrateBase()).rejects.toThrow('체크포인트로 저장하지 않은 변경');
+    await expect(store.integrateBase(await rememberedFor(store))).rejects.toThrow('체크포인트로 저장하지 않은 변경');
   });
 });
 
@@ -1420,3 +1430,358 @@ describe('인덱스 잠금 충돌(#682)', () => {
   });
 });
 
+describe('b-studio가 부르는 git은 저장소 훅을 쓰지 않는다 (이슈 #699)', () => {
+  const marker = () => path.join(root, 'hook-ran');
+  const hook = () => `#!/bin/sh\n: > '${marker()}'\nexit 1\n`;
+
+  it('저장소의 pre-commit 훅이 있어도(b-studio 설정을 지워 기본 훅 폴더를 쓰게 해도) 체크포인트를 남기되 훅은 돌지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    // b-studio가 설정한 core.hooksPath를 지워 기본 훅 폴더(.git/hooks)를 쓰게 하고, 실패하는 훅을 심는다
+    await execFileAsync('git', ['-C', root, 'config', '--unset', 'core.hooksPath']);
+    await writeFile(path.join(root, '.git/hooks/pre-commit'), hook());
+    await chmod(path.join(root, '.git/hooks/pre-commit'), 0o755);
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const checkpoint = await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run'])] });
+    expect(checkpoint?.files).toEqual(['api/src/Order.java']);
+    // 훅이 돌지 않았다(돌면 표시 파일이 생기고 커밋이 실패한다)
+    await expect(stat(marker())).rejects.toThrow();
+  });
+
+  it('core.hooksPath를 다른 폴더로 바꿔도(에이전트가 husky를 넣은 경우) 그 훅은 돌지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const hooks = path.join(root, '..', `${path.basename(root)}.husky`);
+    await mkdir(hooks, { recursive: true });
+    await writeFile(path.join(hooks, 'pre-commit'), hook());
+    await chmod(path.join(hooks, 'pre-commit'), 0o755);
+    await execFileAsync('git', ['-C', root, 'config', 'core.hooksPath', hooks]);
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const checkpoint = await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run'])] });
+    expect(checkpoint?.files).toEqual(['api/src/Order.java']);
+    await expect(stat(marker())).rejects.toThrow();
+  });
+});
+
+describe('올리기 전에 작업 복사본의 Git을 믿지 않는다 (이슈 #699)', () => {
+  /** 원격(bare)의 세션 브랜치 끝 sha. 없으면 undefined */
+  const remoteBranch = (remote: string) => git(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}`).catch(() => undefined);
+  const commitA = async (workDir: string, store: CheckpointStore) => {
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String a; }\n');
+    await store.commit('요청: A');
+  };
+
+  it('b-studio.branch 설정을 main으로 바꿔도 올리기는 기억한 세션 브랜치로만 간다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await commitA(workDir, store);
+    const remembered = await rememberedFor(store);
+    // 에이전트가 세션 브랜치 설정(config)을 main으로 바꾼다 — 그래도 올리기는 기억한 브랜치로 가야 한다
+    await git(workDir, 'config', 'b-studio.branch', 'main');
+
+    await store.push(remembered);
+    // 세션 브랜치로만 올라갔고, 원격의 main은 그대로다
+    expect(await remoteBranch(remote)).toBe((await store.headState()).head);
+    expect(await git(remote, 'rev-parse', 'refs/heads/main')).toBe(await git(source, 'rev-parse', 'main'));
+  });
+
+  it('remote.origin.url이 기억한 주소와 다르면 멈추고 아무것도 올리지 않는다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await commitA(workDir, store);
+    const remembered = await rememberedFor(store);
+    await git(workDir, 'remote', 'set-url', 'origin', path.join(root, 'evil.git'));
+
+    await expect(store.push(remembered)).rejects.toThrow(/remote\.origin\.url/);
+    expect(await remoteBranch(remote)).toBeUndefined();
+  });
+
+  it('url.*.insteadOf 같은 설정이 있으면 멈추고 아무것도 올리지 않는다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await commitA(workDir, store);
+    const remembered = await rememberedFor(store);
+    await git(workDir, 'config', 'url.file:///evil/.insteadOf', 'https://evil/');
+
+    await expect(store.push(remembered)).rejects.toThrow(/저장소 설정/);
+    expect(await remoteBranch(remote)).toBeUndefined();
+  });
+
+  it('HEAD가 기억한 체크포인트와 다르면(에이전트가 직접 커밋) 멈추고 아무것도 올리지 않는다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await commitA(workDir, store);
+    const remembered = await rememberedFor(store);
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String b; }\n');
+    await git(workDir, 'add', '-A');
+    await git(workDir, 'commit', '-q', '-m', '에이전트가 직접 커밋');
+
+    await expect(store.push(remembered)).rejects.toThrow(/체크포인트/);
+    expect(await remoteBranch(remote)).toBeUndefined();
+  });
+
+  it('원격 가져오기도 기억한 Git과 다르면 멈춘다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await commitA(workDir, store);
+    const remembered = await rememberedFor(store);
+    await git(workDir, 'checkout', '-q', '--detach');
+
+    await expect(store.integrateRemote(remembered)).rejects.toThrow(/브랜치/);
+  });
+
+  it('저장소 설정을 읽지 못하면 빈 목록으로 넘기지 않고 올리기를 멈춘다', async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store: base } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await commitA(workDir, base);
+    // 저장소 설정 목록(`git config --list`)만 실패하는 껍데기를 둔다(설정을 읽지 못하는 경우)
+    const wrapper = path.join(root, '..', `${path.basename(root)}.config-fail.sh`);
+    await writeFile(wrapper, `#!/bin/sh\ncase "$*" in *"config --list"*) exit 1;; esac\nexec git "$@"\n`);
+    await chmod(wrapper, 0o755);
+    const store = new CheckpointStore(workDir, { gitBin: wrapper });
+    const remembered = await rememberedFor(store);
+
+    await expect(store.push(remembered)).rejects.toThrow();
+    expect(await remoteBranch(remote)).toBeUndefined();
+  });
+
+  it('원격 주소를 바꾸면 baseStatus가 원격(fetch)에 닿기 전에 멈춘다', async () => {
+    const { source, workDir } = await createSourceRepository();
+    await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    // baseStatus가 부르는 git을 가로채 원격 명령(fetch·ls-remote)이 불렸는지 본다
+    const log = path.join(root, '..', `${path.basename(root)}.git-calls`);
+    const wrapper = path.join(root, '..', `${path.basename(root)}.git-spy.sh`);
+    await writeFile(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec git "$@"\n`);
+    await chmod(wrapper, 0o755);
+    const store = new CheckpointStore(workDir, { gitBin: wrapper });
+    const remembered = await rememberedFor(store);
+    await git(workDir, 'remote', 'set-url', 'origin', path.join(root, 'evil.git'));
+
+    await expect(store.baseStatus(remembered, { force: true })).rejects.toThrow(/remote\.origin\.url/);
+    // 원격에 닿는 명령(fetch·ls-remote)이 한 번도 불리지 않았다
+    const calls = await readFile(log, 'utf8').catch(() => '');
+    expect(calls).not.toMatch(/fetch|ls-remote/);
+  });
+});
+
+
+describe('체크포인트는 기대한 부모 위에만 만든다 (이슈 #706)', () => {
+  /** b-studio가 만든 것처럼 보이게 꾸민 커밋(작성자 이메일과 통과 트레일러를 흉내 낸다). 무시되는 파일만 강제로 더한다 */
+  async function forgeCommit(): Promise<string> {
+    await mkdir(path.join(root, 'node_modules'), { recursive: true });
+    await writeFile(path.join(root, 'node_modules/forged.js'), 'forged\n');
+    await execFileAsync('git', ['-C', root, 'add', '-f', 'node_modules/forged.js']);
+    await execFileAsync('git', ['-C', root, '-c', 'user.name=b-studio', '-c', 'user.email=checkpoints@b-studio.local', 'commit', '-q', '-m', '꾸민 커밋', '-m', formatWorkflowTrailer(['run', 'contract_check', 'test', 'review'])]);
+    return git(root, 'rev-parse', 'HEAD');
+  }
+
+  it('기억한 HEAD를 주면, 그 사이에 끼워 넣은 커밋 위에는 체크포인트를 만들지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    const start = await store.init();
+    const forged = await forgeCommit();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    await expect(store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run'])], expectedHead: start.sha })).rejects.toThrow(/HEAD/);
+    // 끼워 넣은 커밋 위에 아무것도 쌓이지 않았고 스테이징도 남지 않았다
+    expect(await git(root, 'rev-parse', 'HEAD')).toBe(forged);
+    expect(await git(root, 'diff', '--cached', '--name-only')).toBe('');
+  });
+
+  it('스테이징한 뒤 커밋하기 전에 다른 프로세스가 커밋을 끼워 넣으면 그 위에 쌓지 않는다(원자적으로 비교해 바꾼다)', async () => {
+    const base = new CheckpointStore(root);
+    await base.init();
+    const before = await git(root, 'rev-parse', 'HEAD');
+    // `git add -A`가 끝난 직후에 한 번, 다른 인덱스로 빈 커밋을 하나 끼워 넣는 껍데기
+    const marker = path.join(root, '..', `${path.basename(root)}.inserted`);
+    const wrapper = path.join(root, '..', `${path.basename(root)}.git-insert.sh`);
+    const index = path.join(root, '..', `${path.basename(root)}.other-index`);
+    await writeFile(
+      wrapper,
+      `#!/bin/sh
+git "$@" || exit $?
+case "$*" in *" add -A"*)
+  if [ ! -e '${marker}' ]; then
+    : > '${marker}'
+    GIT_INDEX_FILE='${index}' git -C '${root}' read-tree HEAD
+    GIT_INDEX_FILE='${index}' git -C '${root}' -c user.name=b-studio -c user.email=checkpoints@b-studio.local commit -q --allow-empty -m '끼워 넣은 커밋' -m '${formatWorkflowTrailer(['run'])}'
+  fi;;
+esac
+`,
+    );
+    await chmod(wrapper, 0o755);
+    const store = new CheckpointStore(root, { gitBin: wrapper });
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await store.commit('요청: 메모 추가', '검증 결과').then(
+      (checkpoint) => checkpoint,
+      (error: unknown) => error,
+    );
+    const inserted = await git(root, 'rev-parse', 'HEAD~0');
+    expect(inserted).not.toBe(before);
+    // 끼워 넣은 커밋은 그대로 HEAD에 있고, 그 위에 b-studio의 체크포인트가 쌓이지 않았다
+    expect(await git(root, 'log', '-1', '--format=%s')).toBe('끼워 넣은 커밋');
+    expect(outcome).toBeInstanceOf(CheckpointError);
+  });
+
+  it('기억한 HEAD와 같으면 평소처럼 남기고, 커밋 모양(메시지 문단·트레일러·작성자)은 git commit과 같다', async () => {
+    const store = new CheckpointStore(root);
+    const start = await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const checkpoint = await store.commit('요청: 메모 추가', '## 검증 결과  \n\n\n- run 통과\n', { trailers: [formatWorkflowTrailer(['run', 'review'])], expectedHead: start.sha });
+    expect(checkpoint?.passedStages).toEqual(['run', 'review']);
+    expect(await git(root, 'rev-parse', 'HEAD^')).toBe(start.sha);
+    expect(await git(root, 'log', '-1', '--format=%B')).toBe('요청: 메모 추가\n\n## 검증 결과\n\n- run 통과\n\nWorkflow-Passed: run, review');
+    expect(await git(root, 'log', '-1', '--format=%ae %ce')).toBe('checkpoints@b-studio.local checkpoints@b-studio.local');
+    expect(await git(root, 'status', '--porcelain')).toBe('');
+  });
+
+  it('문서만 남기는 커밋(commitPaths)도 기억한 HEAD와 다르면 남기지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    const start = await store.init();
+    const forged = await forgeCommit();
+    await write('README.md', '# 문서\n');
+
+    await expect(store.commitPaths(['README.md'], 'docs: 문서', undefined, { expectedHead: start.sha })).rejects.toThrow(/HEAD/);
+    expect(await git(root, 'rev-parse', 'HEAD')).toBe(forged);
+  });
+});
+
+describe('작업 복사본의 git 설정을 펼쳐 읽고 더 넓게 막는다 (이슈 #706)', () => {
+  const remoteBranch = (remote: string) => git(remote, 'rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}`).catch(() => undefined);
+  const prepare = async () => {
+    const { source, remote, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String a; }\n');
+    await store.commit('요청: A');
+    const evil = path.join(root, 'evil.git');
+    await execFileAsync('git', ['init', '-q', '--bare', evil]);
+    return { store, remote, workDir, evil, remembered: await rememberedFor(store) };
+  };
+
+  it('include.path로 끌어온 pushInsteadOf가 있으면 멈추고 아무 데도 올리지 않는다', async () => {
+    const { store, remote, workDir, evil, remembered } = await prepare();
+    const included = path.join(root, 'included.gitconfig');
+    await writeFile(included, `[url "${evil}"]\n\tpushInsteadOf = ${remembered.originUrl}\n`);
+    await git(workDir, 'config', 'include.path', included);
+
+    await expect(store.push(remembered)).rejects.toThrow(/저장소 설정/);
+    expect(await remoteBranch(remote)).toBeUndefined();
+    expect(await remoteBranch(evil)).toBeUndefined();
+  });
+
+  it('config.worktree에 둔 pushInsteadOf도 읽어 멈춘다', async () => {
+    const { store, remote, workDir, evil, remembered } = await prepare();
+    await git(workDir, 'config', 'extensions.worktreeConfig', 'true');
+    await git(workDir, 'config', '--worktree', `url.${evil}.pushInsteadOf`, remembered.originUrl!);
+
+    await expect(store.push(remembered)).rejects.toThrow(/저장소 설정/);
+    expect(await remoteBranch(remote)).toBeUndefined();
+    expect(await remoteBranch(evil)).toBeUndefined();
+  });
+
+  it.each([
+    ['http.proxy', 'http://127.0.0.1:9'],
+    ['http.extraHeader', 'Authorization: x'],
+    ['core.gitProxy', '/bin/false'],
+    ['core.askPass', '/bin/false'],
+    ['core.worktree', '/tmp'],
+    ['remote.origin.uploadpack', '/bin/false'],
+    ['remote.origin.proxy', 'http://127.0.0.1:9'],
+    ['protocol.ext.allow', 'always'],
+    ['filter.evil.clean', 'cat'],
+    ['gpg.program', '/bin/false'],
+    ['commit.gpgSign', 'true'],
+    ['diff.external', '/bin/false'],
+    ['diff.evil.textconv', 'cat'],
+    ['merge.evil.driver', 'cat'],
+    ['includeIf.gitdir:/.path', '/tmp/x'],
+  ])('저장소 설정에 %s가 있으면 올리기 전에 멈춘다', async (key, value) => {
+    const { store, remote, workDir, remembered } = await prepare();
+    await git(workDir, 'config', key, value);
+
+    await expect(store.assertTrustedGit(remembered)).rejects.toThrow(/저장소 설정/);
+    expect(await remoteBranch(remote)).toBeUndefined();
+  });
+
+  it('b-studio가 스스로 넣는 commit.gpgsign=false는 막지 않는다', async () => {
+    const { store, remembered } = await prepare();
+    await expect(store.assertTrustedGit(remembered)).resolves.toBeUndefined();
+  });
+
+  it('저장소 설정에 clean 필터가 있으면 체크포인트를 남기지 않는다(필터도 돌지 않는다)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const marker = path.join(root, '..', `${path.basename(root)}.filter-ran`);
+    await git(root, 'config', 'filter.evil.clean', `sh -c ": > '${marker}'; sed s/memo/hacked/"`);
+    await write('.gitattributes', '*.java filter=evil\n');
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    await expect(store.commit('요청: 메모 추가', '검증 결과')).rejects.toThrow(/설정/);
+    await expect(stat(marker)).rejects.toThrow();
+    expect(await store.list()).toHaveLength(1);
+  });
+});
+
+describe('b-studio의 git은 필터·속성·환경으로 내용이 바뀌지 않는다 (이슈 #706)', () => {
+  it('.git/info/attributes로 내보내기에서 파일을 빼거나 바꾸려 하면 내보내지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const checkpoint = (await store.commit('요청: 메모 추가'))!;
+    await mkdir(path.join(root, '.git/info'), { recursive: true });
+    await writeFile(path.join(root, '.git/info/attributes'), 'api/src/Order.java export-ignore\n');
+
+    const out = path.join(root, '..', `${path.basename(root)}.export`);
+    await expect(store.exportTree(checkpoint.sha, out)).rejects.toThrow(/attributes/);
+  });
+
+  it('전역 속성 파일(core.attributesFile)이 거는 clean 필터는 b-studio의 커밋에 쓰이지 않는다', async () => {
+    const attributes = path.join(root, '..', `${path.basename(root)}.attributes`);
+    await writeFile(attributes, '*.java filter=hide\n');
+    await writeFile(process.env.GIT_CONFIG_GLOBAL!, `[core]\n\tattributesFile = ${attributes}\n[filter "hide"]\n\tclean = sed s/memo/hacked/\n`);
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const prints = await store.stagedFingerprints(['api/src/Order.java']);
+
+    await store.commit('요청: 메모 추가', undefined, { expectStaged: prints });
+    // 작업 복사본에서 검증한 내용 그대로 커밋됐다
+    expect(await git(root, 'show', 'HEAD:api/src/Order.java')).toBe('class Order { String memo; }');
+  });
+
+  it('스튜디오 프로세스의 환경에 든 git 설정 주입(GIT_CONFIG_COUNT 등)은 b-studio의 git에 넘기지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const saved = { ...process.env };
+    Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.email', GIT_CONFIG_VALUE_0: 'evil@example.com' });
+    try {
+      await write('api/src/Order.java', 'class Order { String memo; }\n');
+      const checkpoint = await store.commit('요청: 메모 추가', undefined, { trailers: [formatWorkflowTrailer(['run'])] });
+      expect(checkpoint?.passedStages).toEqual(['run']);
+      expect(await git(root, 'log', '-1', '--format=%ae')).toBe('checkpoints@b-studio.local');
+    } finally {
+      for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  });
+
+  it('diff를 바꾸는 설정(textconv)이 있어도 리뷰가 보는 diff는 실제 내용이다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await git(root, 'config', 'diff.hide.textconv', 'sh -c "echo 아무것도 없음"');
+    await write('.gitattributes', '*.java diff=hide\n');
+    await git(root, 'add', '.gitattributes');
+    await git(root, 'commit', '-q', '-m', 'attrs');
+    await git(root, 'config', '--unset', 'diff.hide.textconv');
+    await write('api/src/Order.java', 'class Order { String hacked; }\n');
+    await git(root, 'add', '-A');
+    await git(root, 'commit', '-q', '-m', 'change');
+    await git(root, 'config', 'diff.hide.textconv', 'sh -c "echo 아무것도 없음"');
+
+    expect(await store.sessionDiff()).toContain('String hacked');
+  });
+});

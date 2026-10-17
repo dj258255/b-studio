@@ -43,7 +43,7 @@ export function SupportingServicesChip({ sessionId, services }: { sessionId: str
         aria-haspopup="menu"
         aria-expanded={open}
         title="서비스 켜고 끄기"
-        className="glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted hover:bg-panel"
+        className="tap-target glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted hover:bg-panel"
       >
         서비스{services.length > 0 ? ` +${services.length}` : ""}
       </button>
@@ -153,7 +153,7 @@ function ServicesPopover({
         role="menu"
         aria-label="서비스 켜고 끄기"
         style={{ top: position.top, left: position.left }}
-        className="glass fixed max-h-[calc(100vh-2rem)] w-80 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-panel p-2 text-sm shadow-xl"
+        className="menu-surface fixed max-h-[calc(100vh-2rem)] w-80 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-panel p-2 text-sm shadow-xl"
       >
         <div className="flex items-center justify-between gap-2 px-2 py-1">
           <p className="text-xs font-medium text-muted">띄울 서비스를 고르세요. 끈 서비스는 다음에 켤 때까지 띄우지 않습니다</p>

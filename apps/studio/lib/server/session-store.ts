@@ -9,6 +9,20 @@ import type { SessionSnapshot, StudioEvent } from '../studio-events';
 const FILE = path.join('.git', 'b-studio', 'session.json');
 export const PERSISTED_HISTORY_LIMIT = 2_000;
 
+/**
+ * b-studio가 작업 복사본 밖에 기억해 두는 Git 상태(이슈 #699). CheckpointStore의 같은 이름 타입과 구조가 같다 —
+ * 여기서 따로 두는 것은 세션 저장이 이 값의 주인이고, studio가 agent 패키지의 내부 타입을 직접 가져오지 않게 하기 위함이다.
+ * 올리기·가져오기는 이 구조를 그대로 받아 지금 Git과 견준다
+ */
+export interface RememberedGit {
+  /** 세션 브랜치 이름. 지금 체크아웃된 브랜치가 이것과 다르면 멈춘다 */
+  branch: string;
+  /** b-studio가 마지막으로 남긴 체크포인트(HEAD). 지금 HEAD가 이것과 다르면 멈춘다 */
+  lastCheckpoint: string;
+  /** 기억한 origin 주소. 있으면 지금 remote.origin.url과 같아야 한다 */
+  originUrl?: string;
+}
+
 /** 스튜디오 서버가 다시 시작돼도 세션을 이어서 띄울 수 있게 남기는 상태 */
 export interface PersistedSession {
   version: 1;
@@ -41,6 +55,12 @@ export interface PersistedSession {
   sandbox: { id: string; provider: string };
   /** 원격 미리보기 주소에 넣는 토큰. 이어서 작업해도 같은 주소를 쓰도록 남긴다 */
   previewToken?: string;
+  /**
+   * b-studio가 작업 복사본 밖에 기억해 두는 Git 상태(이슈 #699): 세션 브랜치, 마지막 체크포인트(HEAD), 원격 주소.
+   * 이 컴퓨터 방식에서는 에이전트가 작업 복사본의 .git을 고칠 수 있어, 올리기·가져오기·터미널 턴 끝 검사가 이 값과
+   * 지금 Git을 견준다. 이 필드가 생기기 전 기록에는 없다 — 그때는 처음 읽을 때 지금 값으로 채운다
+   */
+  git?: RememberedGit;
 }
 
 export function sessionFile(stateDir: string): string {

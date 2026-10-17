@@ -1,7 +1,10 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { AccountsPanel } from '@/components/accounts-panel';
 import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
+
+export const metadata: Metadata = { title: '계정 연결' };
 
 /**
  * 계정 연결 화면(ADR-093). 내 폴더에서 바로 작업하기(ADR-067)와 같은 조건(개인 PC 모드)에서만 연다 —

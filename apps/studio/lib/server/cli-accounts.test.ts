@@ -150,6 +150,40 @@ describe('checkAccountStatus', () => {
   });
 });
 
+describe('checkAccountStatus의 이유 문구(이슈 #720)', () => {
+  it('요약과 CLI 원문을 나눠 담고, 둘 다 색 코드를 지운다', async () => {
+    const detail = 'Command failed: cmd status\n- Checking authentication status...\n\u001b[31m✖\u001b[39m Not authenticated';
+    const status = await checkAccountStatus('commandcode', {
+      commandCode: async () => ({
+        ok: false,
+        reason: `Command Code CLI에 로그인돼 있지 않습니다. 터미널에서 "cmd"를 실행해 로그인하세요. (${detail})`,
+        summary: 'Command Code CLI에 로그인돼 있지 않습니다. 터미널에서 "cmd"를 실행해 로그인하세요.',
+        detail,
+      }),
+    });
+
+    expect(status.reason).toBe('Command Code CLI에 로그인돼 있지 않습니다. 터미널에서 "cmd"를 실행해 로그인하세요.');
+    expect(status.detail).toBe('Command failed: cmd status\n- Checking authentication status...\n✖ Not authenticated');
+    expect(status.installed).toBe(true);
+  });
+
+  it('요약을 따로 주지 않는 확인 함수도 색 코드는 지운다', async () => {
+    const status = await checkAccountStatus('codex', { codex: async () => ({ ok: false, reason: '\u001b[31m✖\u001b[39m Not logged in' }) });
+
+    expect(status.reason).toBe('✖ Not logged in');
+    expect(status.detail).toBeUndefined();
+  });
+
+  it('설치 여부는 원문(ENOENT)까지 보고 가린다', async () => {
+    const status = await checkAccountStatus('opencode', {
+      openCode: async () => ({ ok: false, reason: 'OpenCode CLI를 찾지 못했습니다. (spawn opencode ENOENT)', summary: 'OpenCode CLI를 찾지 못했습니다.', detail: 'spawn opencode ENOENT' }),
+    });
+
+    expect(status.installed).toBe(false);
+    expect(status.reason).toBe('OpenCode CLI를 찾지 못했습니다.');
+  });
+});
+
 describe('listAccountStatuses', () => {
   it('다섯 백엔드를 모두 확인한다', async () => {
     const statuses = await listAccountStatuses({
@@ -191,6 +225,16 @@ describe('startLogin / getLoginProgress / cancelLogin (상태 기계)', () => {
     expect(progress.url).toBe('https://github.com/login/device');
     expect(progress.code).toBe('WXYZ-1234');
     expect(progress.lines).toContain('To authenticate, visit https://github.com/login/device and enter code WXYZ-1234');
+  });
+
+  it('로그인 로그 줄의 색 코드를 지운다', () => {
+    const child = fakeChild();
+    const progress = startLogin('commandcode', { spawn: vi.fn(() => child) });
+
+    child.stderr.emit('data', '\u001b[32m✔\u001b[39m Open https://commandcode.ai/login\n');
+
+    expect(progress.lines).toEqual(['✔ Open https://commandcode.ai/login']);
+    expect(progress.url).toBe('https://commandcode.ai/login');
   });
 
   it('이미 돌고 있으면 다시 띄우지 않고 같은 진행 상황을 돌려준다', () => {
