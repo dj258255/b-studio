@@ -15,6 +15,7 @@ import {
   terminalGateStatus,
   terminalPasteText,
   terminalStatusLabel,
+  terminalUsageText,
   writeRecordOpen,
   writeSplit,
 } from './terminal';
@@ -198,5 +199,48 @@ describe('터미널에서 보낸 마지막 요청의 검증 상태 (이슈 #673 
     it('턴 상한에서 남긴 체크포인트는 그렇다고 알린다', () => {
       expect(terminalActivity(chatOf([]), [{ shortSha: '7e12902', incomplete: 'max_turns' }, { shortSha: 'c846466' }]).checkpoint).toEqual({ shortSha: '7e12902', incomplete: true });
     });
+  });
+});
+
+describe('활동 줄의 사용량 (CLI 텔레메트리, 이슈 #726)', () => {
+  const snapshot: SessionSnapshot = { id: 's1', projectId: 'orders', projectName: 'orders', workDir: '/tmp/orders-s1', status: 'ready', mode: 'claude-code', running: false, checkpoints: [], services: [] };
+  const started = (runId: string): StudioEvent => ({ type: 'run_started', runId, request: '주문에 메모 필드 추가', via: 'terminal' });
+  const usage = (runId: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number, extra: Partial<Extract<StudioEvent, { type: 'run_usage' }>> = {}): StudioEvent => ({ type: 'run_usage', runId, model: 'claude-sonnet-5', usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }, ...extra });
+  const finished = (runId: string, durationMs: number): StudioEvent => ({ type: 'run_finished', runId, status: 'done', summary: '끝', durationMs });
+  const viewOf = (events: StudioEvent[]) => events.reduce(reduceSession, createView(snapshot));
+
+  it('터미널 실행이 아예 없으면 사용량 줄을 만들지 않는다. 실행은 있는데 못 받았으면 "사용량 모름"이다', () => {
+    expect(terminalActivity(viewOf([]).chat, [], []).usage).toBeUndefined();
+    // 대화 창의 요청은 터미널 실행이 아니다
+    expect(terminalActivity(viewOf([{ type: 'run_started', runId: 'c1', request: '대화 창 요청' }]).chat, [], []).usage).toBeUndefined();
+    expect(terminalActivity(viewOf([started('t1')]).chat, [], []).usage).toBe('unknown');
+    expect(terminalUsageText('unknown')).toBe('사용량 모름');
+  });
+
+  it('마지막 터미널 실행의 run_usage를 합쳐 토큰·캐시 적중률·비용을 만들고, 걸린 시간은 실행 전체의 벽시계 시간이다', () => {
+    const view = viewOf([started('t1'), usage('t1', 2000, 100, 8000, 0, { costUsd: 0.04 }), usage('t1', 1000, 50, 2000, 0), finished('t1', 6200)]);
+    // 캐시 적중률 = 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기) = 10000 ÷ 13000. 시간은 run_usage가 아니라 run_finished.durationMs에서 온다
+    expect(terminalActivity(view.chat, [], view.runUsage).usage).toEqual({ tokens: 13_150, cacheHitRatio: 10_000 / 13_000, durationMs: 6200, costUsd: 0.04 });
+    expect(terminalUsageText({ tokens: 13_150, cacheHitRatio: 10_000 / 13_000, durationMs: 6200, costUsd: 0.04 })).toBe('토큰 1.3만 · 캐시 77% · 6.2초 · $0.04');
+  });
+
+  it('실행이 아직 열려 있으면 걸린 시간을 보이지 않는다(토큰·캐시는 보인다)', () => {
+    const view = viewOf([started('t1'), usage('t1', 10, 5, 0, 0)]);
+    expect(terminalActivity(view.chat, [], view.runUsage).usage).toEqual({ tokens: 15, cacheHitRatio: 0 });
+  });
+
+  it('작은 비용을 부풀리지 않는다: 0은 $0, 0.01달러 미만은 유효숫자 두 자리', () => {
+    expect(terminalUsageText({ tokens: 100, cacheHitRatio: 0, costUsd: 0.00536 })).toBe('토큰 100 · 캐시 0% · $0.0054');
+    expect(terminalUsageText({ tokens: 100, cacheHitRatio: 0, costUsd: 0.00789 })).toBe('토큰 100 · 캐시 0% · $0.0079');
+    expect(terminalUsageText({ tokens: 100, cacheHitRatio: 0, costUsd: 0 })).toBe('토큰 100 · 캐시 0% · $0');
+    expect(terminalUsageText({ tokens: 100, cacheHitRatio: 0, costUsd: 1.5 })).toBe('토큰 100 · 캐시 0% · $1.50');
+    expect(terminalUsageText({ tokens: 100, cacheHitRatio: 0, costUsd: 0.0123 })).toBe('토큰 100 · 캐시 0% · $0.01');
+    // 시간·비용을 못 받았으면 그 칸은 붙이지 않는다
+    expect(terminalUsageText({ tokens: 100, cacheHitRatio: 0 })).toBe('토큰 100 · 캐시 0%');
+  });
+
+  it('마지막 터미널 실행의 것만 센다(앞 실행의 사용량은 지금 상태가 아니다)', () => {
+    const view = viewOf([started('t1'), usage('t1', 500, 50, 0, 0), finished('t1', 1000), started('t2'), usage('t2', 10, 5, 0, 0)]);
+    expect(terminalActivity(view.chat, [], view.runUsage).usage).toEqual({ tokens: 15, cacheHitRatio: 0 });
   });
 });

@@ -15,6 +15,7 @@ function handlers(overrides: Partial<TerminalGatewayHandlers> = {}): TerminalGat
     preTool: async () => ({}),
     stop: async () => ({}),
     sessionEnd: async () => {},
+    telemetry: async () => {},
     toolSpecs: () => [{ name: 'run_in_service', description: '서비스에서 명령 실행', input_schema: { type: 'object', properties: { service: { type: 'string', description: '서비스' } }, required: ['service'] } }] as never,
     runTool: async (name, args) => ({ ok: true, content: `${name} ${JSON.stringify(args)}` }),
     ...overrides,
@@ -103,6 +104,22 @@ describe('관문 서버', () => {
     expect((await post(url, gateway.address.hookToken!, {}, 'evil.example.com')).status).toBe(403);
     // 도구 서버의 토큰으로는 훅을 부를 수 없다
     expect((await post(url, gateway.address.mcpToken!, {}, host)).status).toBe(401);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('텔레메트리 로그(/v1/logs)를 받아 처리에 넘기고 빈 답(200)을 준다. 토큰·Host 규칙은 훅과 같다', async () => {
+    const seen: unknown[] = [];
+    const gateway = await startTerminalGateway(handlers({ telemetry: async (body) => void seen.push(body) }), '127.0.0.1');
+    opened.push(gateway);
+    const url = `${gateway.address.hookUrl}/v1/logs`;
+    const port = new URL(url).port;
+    const body = { resourceLogs: [{ scopeLogs: [{ logRecords: [] }] }] };
+    expect(await post(url, gateway.address.hookToken!, body, `127.0.0.1:${port}`)).toEqual({ status: 200, body: {} });
+    expect(seen).toEqual([body]);
+    // 토큰이 틀리면 받지 않는다
+    expect((await post(url, 'wrong-token', body, `127.0.0.1:${port}`)).status).toBe(401);
+    // 루프백이 아닌 Host는 받지 않는다
+    expect((await post(url, gateway.address.hookToken!, body, `host.docker.internal:${port}`)).status).toBe(403);
     expect(seen).toHaveLength(1);
   });
 

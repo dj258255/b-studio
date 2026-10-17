@@ -195,16 +195,35 @@ request.on('error', (error) => unreachable(error.code ?? error.message));
 request.end(body);
 `;
 
-/** CLI의 관리 설정. 훅과 b-studio 도구의 사용 허락만 적는다 */
-export function agentManagedSettings(): Record<string, unknown> {
-  return gatewaySettings((event) => `${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`);
+/**
+ * 터미널의 CLI가 모델 요청마다 쓴 양을 관문으로 보내게 하는 환경 변수(#726).
+ * 관문의 훅 서버가 받는 자리(`/v1/logs`)로, 훅과 같은 주소·토큰을 쓴다.
+ * 요청 글·도구 내용을 싣는 설정(`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS` 등)은 켜지 않는다 — 쓰는 양만 본다.
+ * 내보내기 주기를 1초로 두어 짧은 실행(답만 한 턴)도 CLI가 끝나기 전에 보낸다
+ */
+export function agentTelemetryEnv(address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>): Record<string, string> {
+  return {
+    CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+    OTEL_LOGS_EXPORTER: 'otlp',
+    OTEL_METRICS_EXPORTER: 'none',
+    OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${address.hookUrl}/v1/logs`,
+    OTEL_EXPORTER_OTLP_LOGS_HEADERS: `Authorization=Bearer ${address.hookToken}`,
+    OTEL_LOGS_EXPORT_INTERVAL: '1000',
+  };
+}
+
+/** CLI의 관리 설정. 훅과 b-studio 도구의 사용 허락, 그 밖에 텔레메트리 설정을 적는다 */
+export function agentManagedSettings(address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>): Record<string, unknown> {
+  return gatewaySettings((event) => `${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, address);
 }
 
 /**
  * 훅과 b-studio 도구의 사용 허락을 적은 CLI 설정. 훅 명령을 어떻게 부를지만 자리마다 다르다
  * (컨테이너: 관리 설정 자리의 스크립트, 이 컴퓨터: 세션의 관문 폴더에 둔 스크립트 — host-terminal.ts)
+ * 주소와 토큰은 텔레메트리를 관문으로 보내는 env에만 들어간다(이 파일은 600으로 쓴다)
  */
-export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string): Record<string, unknown> {
+export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string, address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>): Record<string, unknown> {
   const hook = (event: AgentHookEvent) => ({ type: 'command', command: hookCommand(event), timeout: AGENT_HOOK_EVENTS[event] });
   return {
     // b-studio 도구는 서비스 컨테이너 안에서 돌고 b-studio의 실행 정책을 거친다. 호출마다 묻지 않게 한다
@@ -213,6 +232,8 @@ export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string):
     // 이 컴퓨터에서는 작업 복사본의 프로젝트 설정(.claude/settings.json)이 에이전트가 쓸 수 있는 자리다.
     // 값을 주지 않은 실행 인자 설정은 프로젝트 설정의 disableAllHooks: true에 진다(CLI 2.1.296에서 실측, 트러블슈팅 145)
     disableAllHooks: false,
+    // CLI의 사용자 설정(env)이 이 값을 덮어쓰지 못하게 관리 설정에서 정해 둔다. 훅과 같은 이유다
+    env: agentTelemetryEnv(address),
     hooks: {
       SessionStart: [{ hooks: [hook('session-start')] }],
       UserPromptSubmit: [{ hooks: [hook('prompt')] }],
@@ -231,7 +252,7 @@ export function agentManagedMcp(address: AgentGatewayAddress): Record<string, un
 /** 관문 설정 파일의 이름 → 내용 */
 export function agentGatewayFiles(address: AgentGatewayAddress): Record<string, string> {
   return {
-    'managed-settings.json': `${JSON.stringify(agentManagedSettings(), null, 2)}\n`,
+    'managed-settings.json': `${JSON.stringify(agentManagedSettings(address), null, 2)}\n`,
     'managed-mcp.json': `${JSON.stringify(agentManagedMcp(address), null, 2)}\n`,
     [HOOK_SCRIPT_NAME]: AGENT_HOOK_SCRIPT,
     [GATEWAY_FILE_NAME]: `${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`,

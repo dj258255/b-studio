@@ -98,9 +98,9 @@ export async function findHostCli(env: Record<string, string | undefined> = proc
   return { claudePath, nodePath: process.execPath };
 }
 
-/** 이 컴퓨터용 CLI 설정: 훅 명령이 세션의 관문 폴더에 둔 스크립트를 부른다 */
-export function hostGatewaySettings(dir: string, nodePath: string): Record<string, unknown> {
-  return gatewaySettings((event) => `${shellQuote(nodePath)} ${shellQuote(path.join(dir, HOOK_SCRIPT_NAME))} ${event}`);
+/** 이 컴퓨터용 CLI 설정: 훅 명령이 세션의 관문 폴더에 둔 스크립트를 부른다(텔레메트리도 같은 관문 주소로 보낸다) */
+export function hostGatewaySettings(address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>, dir: string, nodePath: string): Record<string, unknown> {
+  return gatewaySettings((event) => `${shellQuote(nodePath)} ${shellQuote(path.join(dir, HOOK_SCRIPT_NAME))} ${event}`, address);
 }
 
 /**
@@ -193,7 +193,7 @@ export function hostBashRc(dir: string): string {
 export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: string, cli: HostCli): Record<string, { content: string; mode: number }> {
   const file = (content: string): { content: string; mode: number } => ({ content, mode: 0o600 });
   return {
-    [SETTINGS_FILE]: file(`${JSON.stringify(hostGatewaySettings(dir, cli.nodePath), null, 2)}\n`),
+    [SETTINGS_FILE]: file(`${JSON.stringify(hostGatewaySettings(address, dir, cli.nodePath), null, 2)}\n`),
     [MCP_FILE]: file(`${JSON.stringify(agentManagedMcp(address), null, 2)}\n`),
     [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
     [GATEWAY_FILE_NAME]: file(`${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`),

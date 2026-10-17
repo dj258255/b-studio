@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { activeRun, type SessionView } from "@/lib/session-view";
-import { terminalActivity, type TerminalGateStatus } from "@/lib/terminal";
+import { terminalActivity, terminalUsageText, type TerminalGateStatus } from "@/lib/terminal";
 import { stageLabel } from "./chat-panel";
 import { useSessionAccess } from "./session-access";
 
@@ -14,7 +14,7 @@ const TONE: Record<TerminalGateStatus["tone"], string> = { working: "bg-wait mot
  */
 export function ActivityStrip({ view, open, onToggle }: { view: SessionView; open: boolean; onToggle: () => void }) {
   const access = useSessionAccess();
-  const { status, stages, checkpoint } = terminalActivity(view.chat, view.snapshot.checkpoints);
+  const { status, stages, checkpoint, usage } = terminalActivity(view.chat, view.snapshot.checkpoints, view.runUsage);
   const runId = activeRun(view);
   /** 되돌리는 동작이라 한 번 더 누르게 한다. 요청이 바뀌면 확인 상태도 사라지도록 요청 id로 둔다 */
   const [confirming, setConfirming] = useState<string>();
@@ -58,7 +58,7 @@ export function ActivityStrip({ view, open, onToggle }: { view: SessionView; ope
           </button>
         </div>
       </div>
-      {(stages.length > 0 || checkpoint) && (
+      {(stages.length > 0 || checkpoint || usage !== undefined) && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-4">
           {stages.length > 0 && (
             <ul className="flex flex-wrap items-center gap-x-2.5" aria-label="단계별 결과">
@@ -74,6 +74,11 @@ export function ActivityStrip({ view, open, onToggle }: { view: SessionView; ope
             <p className="whitespace-nowrap text-muted">
               체크포인트 <span className="font-mono text-ink">{checkpoint.shortSha}</span>
               {checkpoint.incomplete && <span className="ml-1.5 rounded-full border border-wait/40 bg-wait/10 px-1.5 py-px text-[10px] text-wait">턴 상한</span>}
+            </p>
+          )}
+          {usage !== undefined && (
+            <p className="whitespace-nowrap text-muted" aria-label="사용량">
+              {terminalUsageText(usage)}
             </p>
           )}
         </div>

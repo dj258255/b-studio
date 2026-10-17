@@ -77,4 +77,27 @@ describe("터미널 아래의 활동 줄(이슈 #689)", () => {
   it("기록을 펼쳐 뒀으면 접기로 바뀐다", () => {
     expect(render(view(), { open: true })).toContain("기록 접기");
   });
+
+  it("마지막 터미널 실행의 토큰·캐시 적중률·걸린 시간·비용을 한 줄로 보인다(#726)", () => {
+    // 터미널 실행은 있는데 사용량을 못 받았으면 0이 아니라 "사용량 모름"이다
+    expect(render(view([started]))).toContain("사용량 모름");
+    const html = render(
+      view([
+        started,
+        { type: "run_usage", runId: "t1", model: "claude-sonnet-5", usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 4000, cacheWriteTokens: 0 }, costUsd: 0.04 },
+        // 걸린 시간은 실행이 끝날 때 오는 run_finished.durationMs에서 온다(벽시계 시간)
+        { type: "run_finished", runId: "t1", status: "done", summary: "끝", durationMs: 6200 },
+      ]),
+    );
+    expect(html).toContain("토큰 ");
+    expect(html).toContain("캐시 80%");
+    expect(html).toContain("6.2초");
+    expect(html).toContain("$0.04");
+    expect(html).not.toContain("사용량 모름");
+  });
+
+  it("터미널 실행이 하나도 없으면 사용량 줄을 그리지 않는다(#726)", () => {
+    expect(render(view([{ type: "run_started", runId: "c1", request: "대화 창 요청" }]))).not.toContain("사용량");
+    expect(render(view())).not.toContain("사용량");
+  });
 });

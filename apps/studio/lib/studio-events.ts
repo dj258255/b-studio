@@ -345,6 +345,11 @@ export type StudioEvent =
     }
   /** 터미널 실행이 끝나기 전에 사용자가 CLI에 이어서 보낸 말(도중에 끊고 다시 말한 경우). 같은 실행에 속한다 */
   | { type: 'terminal_prompt'; runId: string; text: string; at: string }
+  /**
+   * 터미널 실행의 CLI가 텔레메트리로 알려 온 모델 요청 한 건의 사용량(#726). 로그 내보내기 주기(1초)가 있어
+   * 실행이 닫힌 뒤 몇 초 안에 도착한 것도 그 실행에 붙는다. 토큰·캐시·비용·모델별 사용량을 이것을 합쳐 만든다
+   */
+  | { type: 'run_usage'; runId: string; model: string; usage: AgentUsage; costUsd?: number; durationMs?: number }
   /** 계획-실행 분리(ADR-075). 실행 전에 계획 모델이 쓴 짧은 계획. 화면은 "계획(모델명)" 접기 블록으로 보여준다 */
   | { type: 'plan_brief'; runId: string; model: string; text: string; usage: AgentUsage; durationMs: number }
   | { type: 'agent'; runId: string; event: Exclude<AgentEvent, { type: 'tokens' }> }

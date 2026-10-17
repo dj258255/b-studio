@@ -23,6 +23,7 @@ import {
   agentManagedSettings,
   agentResizeArgs,
   agentRunArgs,
+  agentTelemetryEnv,
   agentTerminalArgs,
   clampTerminalSize,
   ensureAgentContainer,
@@ -203,9 +204,9 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     expect(() => agentRunArgs({ ...plan, gatewayDir: '/tmp/a,target=/workspace' })).toThrow('쉼표');
   });
 
-  it('관리 설정은 훅 다섯과 b-studio 도구의 허락만 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
-    const settings = agentManagedSettings() as { permissions: { allow: string[] }; hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number }> }>> };
-    expect(Object.keys(settings).sort()).toEqual(['disableAllHooks', 'hooks', 'permissions']);
+  it('관리 설정은 훅 다섯과 b-studio 도구의 허락, 텔레메트리 env를 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
+    const settings = agentManagedSettings(address) as { permissions: { allow: string[] }; hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number }> }>> };
+    expect(Object.keys(settings).sort()).toEqual(['disableAllHooks', 'env', 'hooks', 'permissions']);
     // 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)이 훅을 통째로 끄지 못하게 관리 설정에서 값을 정해 둔다
     expect((settings as unknown as { disableAllHooks: boolean }).disableAllHooks).toBe(false);
     expect(settings.permissions.allow).toEqual(['mcp__b-studio']);
@@ -231,18 +232,35 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     expect(command('PreToolUse').timeout).toBeGreaterThanOrEqual(600);
   });
 
-  it('주소와 토큰은 환경 변수가 아니라 설정 파일에 적는다(CLI의 사용자 설정이 환경을 덮어쓸 수 있다). 관리 설정과 스크립트에는 없다', () => {
+  it('관리 설정의 env가 CLI의 텔레메트리를 관문으로 보내게 한다(요청 글·도구 내용을 싣는 설정은 켜지 않는다)', () => {
+    const env = (agentManagedSettings(address) as { env: Record<string, string> }).env;
+    expect(env).toEqual({
+      CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+      OTEL_LOGS_EXPORTER: 'otlp',
+      OTEL_METRICS_EXPORTER: 'none',
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${address.hookUrl}/v1/logs`,
+      OTEL_EXPORTER_OTLP_LOGS_HEADERS: `Authorization=Bearer ${address.hookToken}`,
+      OTEL_LOGS_EXPORT_INTERVAL: '1000',
+    });
+    // 요청 글·도구 내용을 싣는 설정은 켜지 않는다
+    expect(Object.keys(env).some((name) => name.includes('PROMPTS') || name.includes('TOOL_DETAILS'))).toBe(false);
+    // 이 컴퓨터 방식(127.0.0.1)에서도 주소 꼴이 그대로 맞는다
+    expect(agentTelemetryEnv({ hookUrl: 'http://127.0.0.1:41001', hookToken: 't' }).OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe('http://127.0.0.1:41001/v1/logs');
+  });
+
+  it('주소와 토큰은 설정 파일에 적는다(CLI의 사용자 설정이 환경을 덮어쓸 수 있다). 스크립트는 파일에서 읽는다', () => {
     const files = agentGatewayFiles(address);
     expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'managed-mcp.json', 'managed-settings.json']);
     expect(JSON.parse(files['b-studio-gateway.json']!)).toEqual({ url: address.hookUrl, token: address.hookToken });
     expect(agentManagedMcp(address)).toEqual({ mcpServers: { 'b-studio': { type: 'http', url: address.mcpUrl, headers: { Authorization: `Bearer ${address.mcpToken}` } } } });
     // 환경 변수로 푸는 자리(${...})가 없다
     for (const content of Object.values(files)) expect(content).not.toContain('${');
-    for (const name of ['managed-settings.json', 'b-studio-hook.mjs']) {
-      expect(files[name]).not.toContain(address.hookToken);
-      expect(files[name]).not.toContain(address.mcpToken);
-      expect(files[name]).not.toContain('41001');
-    }
+    // 텔레메트리 env는 훅 주소와 토큰을 싣는다. 이 파일도 600으로 쓴다. mcp 토큰은 여기 없다
+    const env = (JSON.parse(files['managed-settings.json']!) as { env: Record<string, string> }).env;
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe(`${address.hookUrl}/v1/logs`);
+    expect(env.OTEL_EXPORTER_OTLP_LOGS_HEADERS).toBe(`Authorization=Bearer ${address.hookToken}`);
+    expect(files['managed-settings.json']).not.toContain(address.mcpToken);
     // 스크립트는 환경 변수에서 주소를 읽지 않는다
     expect(files['b-studio-hook.mjs']).not.toContain('process.env');
     expect(files['b-studio-hook.mjs']).toContain("new URL('./b-studio-gateway.json', import.meta.url)");

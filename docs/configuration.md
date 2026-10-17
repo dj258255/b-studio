@@ -302,6 +302,10 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - 터미널의 한글은 고정 폭 한글 글꼴(D2Coding 등)이 깔려 있으면 그것으로 그립니다. 없으면 글자 사이가 조금 벌어져 보일 수 있습니다.
 - 컨테이너 방식에서 로그인을 지우려면 `docker volume rm b-studio-agent-home-<프로젝트 id>`.
 
+- 터미널 아래 활동 줄에 마지막 요청의 **토큰 · 캐시 적중률 · 걸린 시간 · 비용**이 보입니다(ADR-176). CLI의 공식 텔레메트리를 세션의 관문(이 컴퓨터의 127.0.0.1)이 받아 셉니다. 요청 글과 도구 내용은 보내지 않게 둡니다. 받은 것이 없으면 "사용량 모름"이라고 보입니다. 같은 숫자가 토큰 화면에도 실행별로 들어갑니다.
+
+<img src="images/studio-terminal-usage.png" width="760" alt="세션 화면의 활동 줄에 '토큰 5.1천 · 캐시 90% · 14.0초 · $0.0053'이 보인다">
+
 ### 이 컴퓨터의 CLI로 열기 (기본)
 
 기본 방식입니다. 컨테이너 안에서 열려면 `B_STUDIO_TERMINAL=container`를 줍니다(`B_STUDIO_EXPERIMENTAL=1 B_STUDIO_TERMINAL=container pnpm studio launch`).

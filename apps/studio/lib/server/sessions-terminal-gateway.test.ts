@@ -1380,3 +1380,82 @@ describe('끼워 넣은 커밋을 체크포인트로 받아들이지 않는다 (
     await stopSession(session.id);
   }, 30_000);
 });
+
+describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)', () => {
+  /** OTLP/HTTP JSON 로그 한 묶음. 문서의 속성 이름으로 만든다 */
+  const otlp = (records: Array<Record<string, unknown>>): unknown => ({ resourceLogs: [{ scopeLogs: [{ logRecords: records }] }] });
+  const req = (inputTokens: number, outputTokens: number, requestId?: string): Record<string, unknown> => ({
+    timeUnixNano: String(Date.now() * 1_000_000),
+    attributes: [
+      { key: 'event.name', value: { stringValue: 'claude_code.api_request' } },
+      { key: 'model', value: { stringValue: 'claude-sonnet-5' } },
+      { key: 'input_tokens', value: { intValue: String(inputTokens) } },
+      { key: 'output_tokens', value: { intValue: String(outputTokens) } },
+      { key: 'cache_read_tokens', value: { intValue: '0' } },
+      { key: 'cache_creation_tokens', value: { intValue: '0' } },
+      ...(requestId !== undefined ? [{ key: 'request_id', value: { stringValue: requestId } }] : []),
+    ],
+  });
+
+  it('열린 실행 중에 온 사용량이 그 실행의 run_usage로 남고 run_finished.usage·metrics에 실린다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.telemetry(otlp([req(1000, 100), req(2000, 200)]));
+
+    const runId = session.ofType('run_started')[0]!.runId;
+    expect(session.ofType('run_usage')).toHaveLength(2);
+    expect(session.ofType('run_usage').every((event) => event.runId === runId)).toBe(true);
+    expect(session.ofType('run_usage')[0]).toMatchObject({ model: 'claude-sonnet-5', usage: { inputTokens: 1000, outputTokens: 100 } });
+
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    const finished = session.ofType('run_finished')[0]!;
+    expect(finished.usage).toEqual({ inputTokens: 3000, outputTokens: 300, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(finished.metrics?.modelCalls).toBe(2);
+    expect(finished.metrics?.usageByModel).toEqual({ 'claude-sonnet-5': { inputTokens: 3000, outputTokens: 300, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('실행이 닫힌 뒤 5초 안에 온 것도 그 실행에 붙는다(내보내기 주기)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    const runId = session.ofType('run_started')[0]!.runId;
+
+    await session.gateway.telemetry(otlp([req(40, 4)]));
+    expect(session.ofType('run_usage')).toMatchObject([{ runId, usage: { inputTokens: 40, outputTokens: 4 } }]);
+    // 닫힌 실행의 것이라 그 실행의 사용량을 다시 바꾸지는 않는다(run_finished는 그대로다)
+    expect(session.ofType('run_finished')[0]!.usage).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('같은 requestId는 한 번만 센다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '요청' });
+    await session.gateway.telemetry(otlp([req(100, 10, 'req-1')]));
+    await session.gateway.telemetry(otlp([req(100, 10, 'req-1')]));
+    expect(session.ofType('run_usage')).toHaveLength(1);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('실행 밖에서 버린 requestId는 기억하지 않는다(뒤에 맞는 실행 창 안에서 오면 센다)', async () => {
+    const session = await open();
+    // 실행이 하나도 없을 때 온 것 — 버려진다. 이때 번호를 기억하면 뒤에서 놓친다
+    await session.gateway.telemetry(otlp([req(100, 10, 'req-1')]));
+    expect(session.ofType('run_usage')).toEqual([]);
+
+    await session.gateway.prompt({ prompt: '요청' });
+    await session.gateway.telemetry(otlp([req(100, 10, 'req-1')]));
+    expect(session.ofType('run_usage')).toHaveLength(1);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('실행 밖에서 온 것(사람이 CLI에서 대화만 한 것)은 활동 기록에 남기지 않는다', async () => {
+    const session = await open();
+    await session.gateway.telemetry(otlp([req(100, 10)]));
+    expect(session.ofType('run_usage')).toEqual([]);
+    expect(session.ofType('run_finished')).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+});
