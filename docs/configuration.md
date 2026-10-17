@@ -306,6 +306,10 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 
 <img src="images/studio-terminal-usage.png" width="760" alt="세션 화면의 활동 줄에 '토큰 5.1천 · 캐시 90% · 14.0초 · $0.0053'이 보인다">
 
+- **여러 세션을 나란히**: 세션 화면 머리의 "나란히 보기에 추가" 또는 `/split?ids=<id>,<id>`로 최대 4칸을 엽니다. 터미널 세션의 칸은 터미널과 사용량 줄이고, 오른쪽에 선택한 칸의 결과(바뀐 파일, 미리보기)가 보입니다. 머리의 `+ 새 터미널`이 같은 프로젝트로 칸을 하나 더 엽니다. 숫자키 ⌘/Ctrl+1~4는 칸을 고르고, 크게 보려면 칸 머리의 집중 버튼을 누릅니다(ADR-177).
+
+<img src="images/studio-terminal-grid.png" width="760" alt="나란히 보기의 터미널 격자와 오른쪽 결과 칸">
+
 ### 이 컴퓨터의 CLI로 열기 (기본)
 
 기본 방식입니다. 컨테이너 안에서 열려면 `B_STUDIO_TERMINAL=container`를 줍니다(`B_STUDIO_EXPERIMENTAL=1 B_STUDIO_TERMINAL=container pnpm studio launch`).

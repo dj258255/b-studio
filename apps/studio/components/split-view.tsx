@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { Checkpoint } from "@b-studio/agent";
 import type { FleetView } from "@/lib/fleet-types";
+import { createView, type SessionView } from "@/lib/session-view";
 import {
   broadcastTarget,
   defaultFocusId,
@@ -12,15 +12,20 @@ import {
   fleetForIds,
   formatElapsed,
   initialSplitLayout,
+  initialSplitSelection,
   lastOutcomeStatus,
   MAX_SPLIT,
+  nextSplitIds,
   paneDisplay,
   paneSummary,
+  selectedPaneId,
+  shownPaneId,
   splitGridClass,
   splitHref,
   splitKeyAction,
   splitLayoutReducer,
   splitLines,
+  splitSelectionReducer,
   type PaneSummary,
   type SplitLine,
 } from "@/lib/split";
@@ -28,8 +33,11 @@ import { answerRequest } from "@/lib/question-answer";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
 import type { SessionSnapshot, SessionStatus, SessionSummary } from "@/lib/studio-events";
 import { describeTokens, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
-import { DiffView } from "./diff-view";
-import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService, type Tone } from "./status";
+import { ActivityStrip } from "./activity-strip";
+import { Dot, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "./status";
+import { PaneFilesTab, PanePreviewTab, SplitResultPanel } from "./split-result-panel";
+import { TerminalPanel } from "./terminal-panel";
+import { TerminalStreamProvider } from "./terminal-stream";
 import { useLightVerify } from "./use-light-verify";
 import { useNarrow } from "./use-narrow";
 import { useReadOnly } from "./use-read-only";
@@ -64,31 +72,79 @@ function attentionRing(summary: Pick<PaneSummary, "tone" | "attention">): string
 
 /**
  * 나란히 보기 화면. 칸마다 세션 화면과 같은 이벤트 스트림(SSE)을 하나 열고,
- * 그 이벤트를 세션 화면과 같은 변환(reduceSession)으로 접어 대화를 보여 준다.
- * 위쪽 머리에서 배치(그리드·집중)를 고르고, 모든 칸에 같은 요청을 한 번에 보낼 수 있다(ADR-071)
+ * 그 이벤트를 세션 화면과 같은 변환(reduceSession)으로 접어 대화를 보여 준다(B4).
+ *
+ * 터미널 세션(snapshot.terminal === true)의 칸은 대화 탭·입력창 없이 터미널과 활동 줄을 그린다.
+ * 터미널 출력용 연결은 칸이 몇 개든 하나로 묶고(TerminalStreamProvider), 고른 칸의 결과는 오른쪽 결과 칸에서 본다.
+ * ⌘/Ctrl+1~4는 칸을 "고른다"(선택). 선택은 배치를 바꾸지 않는다 — 집중은 칸 머리의 버튼으로만 한다(ADR-071)
  */
 export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
   const router = useRouter();
   const ids = useMemo(() => panes.map((pane) => pane.id), [panes]);
   const idsKey = ids.join(",");
   const [layout, dispatchLayout] = useReducer(splitLayoutReducer, initialSplitLayout());
+  const [selection, dispatchSelection] = useReducer(splitSelectionReducer, undefined, initialSplitSelection);
   const narrow = useNarrow();
   const mode = effectiveLayoutMode(layout.mode, narrow);
+  const selectedId = selectedPaneId(selection.selectedId, panes);
   // 칸마다 자기 상태를 보고한다(대화창 안 SessionPane이 useSession으로 실시간 값을 받는다). 처음에는 서버가 준 스냅샷으로 채운다
   const [summaries, setSummaries] = useState<Record<string, PaneSummary>>({});
+  // 고른 칸의 결과 칸이 쓰려고, 칸이 받은 최신 화면 상태를 여기서도 들고 있는다(칸마다 하나)
+  const [views, setViews] = useState<Record<string, SessionView>>({});
   const [fleet, setFleet] = useState<FleetView>();
   const [broadcast, setBroadcast] = useState<Broadcast>();
   const [broadcastText, setBroadcastText] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string>();
 
   const report = useCallback((id: string, summary: PaneSummary) => {
     setSummaries((prev) => (samePaneSummary(prev[id], summary) ? prev : { ...prev, [id]: summary }));
   }, []);
+  const reportView = useCallback((id: string, view: SessionView) => {
+    setViews((prev) => (prev[id] === view ? prev : { ...prev, [id]: view }));
+  }, []);
 
   const summaryFor = useCallback((pane: SplitPaneInit): PaneSummary => summaries[pane.id] ?? fallbackSummary(pane), [summaries]);
   const focusId = layout.focusId ?? defaultFocusId(panes.map((pane) => ({ id: pane.id, attention: summaryFor(pane).attention })));
+  // 좁은 화면(<900px)은 한 칸만 보이므로 "고른 칸"에서 보이는 칸을 계산한다. 선택은 레이아웃(그리드·집중) 상태를 바꾸지 않는다
+  const shownId = shownPaneId(narrow, selectedId, focusId);
+  // 터미널 출력용 연결은 하나다. 터미널 세션 칸이 없으면 통로도 열지 않는다
+  const terminalIds = useMemo(() => panes.filter((pane) => pane.snapshot?.terminal === true).map((pane) => pane.id), [panes]);
+
+  /** 칸을 고른다. 레이아웃(그리드·집중)은 바꾸지 않는다 — 집중은 칸 머리의 버튼으로만 한다 */
+  function choose(id: string) {
+    dispatchSelection({ type: "select", id });
+  }
 
   function close(id: string) {
     router.replace(splitHref(ids.filter((candidate) => candidate !== id)));
+  }
+
+  /** 선택한 칸(없으면 첫 칸)의 프로젝트로 새 터미널 세션을 만들어 주소의 ids에 더한다(B4) */
+  async function addTerminal() {
+    if (adding) return;
+    const base = panes.find((pane) => pane.id === selectedId) ?? panes[0];
+    const projectId = base?.snapshot?.projectId;
+    if (!projectId) return;
+    setAdding(true);
+    setAddError(undefined);
+    try {
+      const response = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, workspace: "copy" }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { id?: string; error?: string };
+      if (!response.ok || !data.id) {
+        setAddError(data.error ?? "새 터미널을 만들지 못했습니다");
+        return;
+      }
+      router.push(splitHref(nextSplitIds(ids, data.id)));
+    } catch (error) {
+      setAddError(error instanceof Error ? error.message : "새 터미널을 만들지 못했습니다");
+    } finally {
+      setAdding(false);
+    }
   }
 
   // 칸이 모두 같은 Agent Fleet 멤버인지 확인한다. 완료 등으로 상태가 바뀌면(toneKey) 최신 멤버 상태를 다시 받는다
@@ -108,7 +164,7 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
     };
   }, [idsKey, toneKey, ids]);
 
-  // 전역 단축키: ⌘/Ctrl+1~4로 칸을 집중하고 Esc로 나간다. 입력 중에는 ⌘+숫자만 동작한다(lib/split.ts의 splitKeyAction)
+  // 전역 단축키: ⌘/Ctrl+1~4로 칸을 고르고, Esc로 집중을 나간다. 입력 중에는 ⌘+숫자만 동작한다(lib/split.ts의 splitKeyAction)
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -121,10 +177,11 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
         dispatchLayout({ type: "exitFocus" });
         return;
       }
-      const id = panes[action.index]?.id;
-      if (!id) return;
+      const pane = panes[action.index];
+      if (!pane) return;
       event.preventDefault();
-      dispatchLayout({ type: "focus", id });
+      // 숫자키는 칸을 고르기만 한다(집중 대상은 바꾸지 않는다)
+      dispatchSelection({ type: "select", id: pane.id });
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -138,127 +195,141 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
     setBroadcastText("");
   }
 
+  const canAddTerminal = panes.length < MAX_SPLIT && terminalIds.length > 0;
+  const selectedPane = panes.find((pane) => pane.id === selectedId);
+  // 칸이 받은 최신 상태를 쓴다. 아직 이벤트를 못 받았으면(서버 렌더 등) 서버가 준 스냅샷으로 시작한다
+  const selectedView = (selectedId ? views[selectedId] : undefined) ?? (selectedPane?.snapshot ? createView(selectedPane.snapshot) : undefined);
+
   return (
-    <div className="grid h-dvh grid-rows-[auto_minmax(0,1fr)] gap-3 p-3 text-ink">
-      <header className="glass flex flex-col gap-2.5 rounded-panel px-5 py-3">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <Link href="/" className="font-semibold tracking-tight hover:underline">
-            b-studio
-          </Link>
-          <h1 className="text-lg font-semibold">나란히 보기</h1>
-          <p className="text-sm text-muted">{panes.length}개 세션</p>
-          <div className="glass-soft inline-flex rounded-control p-0.5 text-sm" role="group" aria-label="배치">
-            <button
-              type="button"
-              aria-pressed={layout.mode === "grid"}
-              onClick={() => dispatchLayout({ type: "exitFocus" })}
-              className={`rounded-md px-2.5 py-1 font-medium transition-colors ${layout.mode === "grid" ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
-            >
-              그리드
-            </button>
-            <button
-              type="button"
-              aria-pressed={layout.mode === "focus"}
-              disabled={!focusId}
-              onClick={() => focusId && dispatchLayout({ type: "focus", id: focusId })}
-              className={`rounded-md px-2.5 py-1 font-medium transition-colors disabled:opacity-50 ${layout.mode === "focus" ? "bg-panel text-ink ring-1 ring-line" : "text-muted hover:text-ink"}`}
-            >
-              집중
-            </button>
-          </div>
-          <div className="ml-auto flex items-center gap-3 text-sm">
-            <Link href="/split" className="glass-soft rounded-control px-3.5 py-1.5 font-medium hover:bg-panel">
-              세션 고르기
+    <TerminalStreamProvider ids={terminalIds}>
+      <div className="grid h-dvh grid-rows-[auto_minmax(0,1fr)] gap-3 p-3 text-ink">
+        <header className="glass flex flex-col gap-2.5 rounded-panel px-5 py-3">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <Link href="/" className="font-semibold tracking-tight hover:underline">
+              b-studio
             </Link>
-          </div>
-        </div>
-
-        {/* 상태 칩. 눌러서 그 칸을 집중해서 본다(좁은 화면·집중 모드에서는 이 칩이 곧 칸 전환 탭이다) */}
-        <div role="tablist" aria-label="세션" className="flex flex-wrap gap-1.5">
-          {panes.map((pane) => {
-            const summary = summaryFor(pane);
-            const active = mode === "focus" && focusId === pane.id;
-            return (
-              <button
-                key={pane.id}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => dispatchLayout({ type: "focus", id: pane.id })}
-                title={summary.projectName}
-                className={`flex max-w-[12rem] items-center gap-1.5 rounded-control px-2.5 py-1 text-xs font-medium transition-colors ${
-                  active ? "bg-panel ring-1 ring-line" : "glass-soft hover:bg-panel"
-                } ${attentionRing(summary)}`}
-              >
-                <Dot tone={summary.tone} />
-                <span className="truncate">{summary.projectName}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <form onSubmit={sendBroadcast} className="flex items-end gap-2">
-          <label htmlFor="split-broadcast" className="sr-only">
-            모두에게 보낼 요청
-          </label>
-          <textarea
-            id="split-broadcast"
-            value={broadcastText}
-            onChange={(event) => setBroadcastText(event.target.value)}
-            rows={1}
-            placeholder="모두에게 보내기 — 대기 중인 칸은 요청으로, 작업 중인 칸은 진행 중 지시로 들어갑니다"
-            className="min-w-0 flex-1 resize-none rounded-control border border-line bg-panel px-2 py-1.5 text-sm leading-5 placeholder:text-muted"
-          />
-          <button type="submit" disabled={!broadcastText.trim()} className="shrink-0 rounded-control bg-ink px-3 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50">
-            모두에게 보내기
-          </button>
-        </form>
-      </header>
-
-      <div className={mode === "grid" ? splitGridClass(panes.length) : "flex min-h-0 flex-1 flex-col"}>
-        {panes.map((pane) => {
-          const display = paneDisplay(mode, pane.id, focusId);
-          return (
-            <div key={pane.id} className={display === "hidden" ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
-              <SplitPane
-                id={pane.id}
-                snapshot={pane.snapshot}
-                onClose={() => close(pane.id)}
-                onFocus={() => dispatchLayout({ type: "focus", id: pane.id })}
-                onReport={report}
-                broadcast={broadcast}
-                fleet={fleet}
-                onWinnerChosen={(sessionId) => setFleet((prev) => (prev ? { ...prev, winnerSessionId: sessionId } : prev))}
-              />
+            <h1 className="text-lg font-semibold">나란히 보기</h1>
+            <p className="text-sm text-muted">{panes.length}개 세션</p>
+            <div className="ml-auto flex items-center gap-3 text-sm">
+              {canAddTerminal && (
+                <button type="button" onClick={() => void addTerminal()} disabled={adding} className="glass-soft rounded-control px-3.5 py-1.5 font-medium hover:bg-panel disabled:opacity-50">
+                  + 새 터미널
+                </button>
+              )}
+              <Link href="/split" className="glass-soft rounded-control px-3.5 py-1.5 font-medium hover:bg-panel">
+                세션 고르기
+              </Link>
             </div>
-          );
-        })}
+          </div>
+
+          {addError && (
+            <p role="alert" className="text-xs text-fail">
+              {addError}
+            </p>
+          )}
+
+          {/* 상태 칩. 눌러서 그 칸을 고른다(좁은 화면에서는 이 칩이 곧 칸 전환 탭이다) */}
+          <div role="tablist" aria-label="세션" className="flex flex-wrap gap-1.5">
+            {panes.map((pane) => {
+              const summary = summaryFor(pane);
+              const active = selectedId === pane.id;
+              return (
+                <button
+                  key={pane.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => choose(pane.id)}
+                  title={summary.projectName}
+                  className={`flex max-w-[12rem] items-center gap-1.5 rounded-control px-2.5 py-1 text-xs font-medium transition-colors ${
+                    active ? "bg-panel ring-1 ring-line" : "glass-soft hover:bg-panel"
+                  } ${attentionRing(summary)}`}
+                >
+                  <Dot tone={summary.tone} />
+                  <span className="truncate">{summary.projectName}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <form onSubmit={sendBroadcast} className="flex items-end gap-2">
+            <label htmlFor="split-broadcast" className="sr-only">
+              모두에게 보낼 요청
+            </label>
+            <textarea
+              id="split-broadcast"
+              value={broadcastText}
+              onChange={(event) => setBroadcastText(event.target.value)}
+              rows={1}
+              placeholder="모두에게 보내기 — 대기 중인 칸은 요청으로, 작업 중인 칸은 진행 중 지시로 들어갑니다"
+              className="min-w-0 flex-1 resize-none rounded-control border border-line bg-panel px-2 py-1.5 text-sm leading-5 placeholder:text-muted"
+            />
+            <button type="submit" disabled={!broadcastText.trim()} className="shrink-0 rounded-control bg-ink px-3 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50">
+              모두에게 보내기
+            </button>
+          </form>
+        </header>
+
+        <div className="flex min-h-0 flex-1 gap-3">
+          <div className={mode === "grid" ? `${splitGridClass(panes.length)} min-h-0 flex-1` : "flex min-h-0 flex-1 flex-col"}>
+            {panes.map((pane) => {
+              const display = paneDisplay(mode, pane.id, shownId);
+              return (
+                <div key={pane.id} className={display === "hidden" ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
+                  <SplitPane
+                    id={pane.id}
+                    snapshot={pane.snapshot}
+                    selected={selectedId === pane.id}
+                    onSelect={() => choose(pane.id)}
+                    onClose={() => close(pane.id)}
+                    onFocus={() => dispatchLayout({ type: "focus", id: pane.id })}
+                    onReport={report}
+                    onView={reportView}
+                    broadcast={broadcast}
+                    fleet={fleet}
+                    onWinnerChosen={(sessionId) => setFleet((prev) => (prev ? { ...prev, winnerSessionId: sessionId } : prev))}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          {/* 결과 칸은 넓은 화면에서만 그린다(좁은 화면에서는 칸 하나가 화면을 다 쓴다) */}
+          {!narrow && selectedView && <SplitResultPanel view={selectedView} />}
+        </div>
       </div>
-    </div>
+    </TerminalStreamProvider>
   );
 }
 
 function SplitPane({
   id,
   snapshot,
+  selected,
+  onSelect,
   onClose,
   onFocus,
   onReport,
+  onView,
   broadcast,
   fleet,
   onWinnerChosen,
 }: {
   id: string;
   snapshot?: SessionSnapshot;
+  selected: boolean;
+  onSelect: () => void;
   onClose: () => void;
   onFocus: () => void;
   onReport: (id: string, summary: PaneSummary) => void;
+  onView: (id: string, view: SessionView) => void;
   broadcast?: Broadcast;
   fleet?: FleetView;
   onWinnerChosen: (sessionId: string) => void;
 }) {
   if (!snapshot) return <MissingPane id={id} onClose={onClose} />;
-  return <SessionPane snapshot={snapshot} onClose={onClose} onFocus={onFocus} onReport={onReport} broadcast={broadcast} fleet={fleet} onWinnerChosen={onWinnerChosen} />;
+  return (
+    <SessionPane snapshot={snapshot} selected={selected} onSelect={onSelect} onClose={onClose} onFocus={onFocus} onReport={onReport} onView={onView} broadcast={broadcast} fleet={fleet} onWinnerChosen={onWinnerChosen} />
+  );
 }
 
 function MissingPane({ id, onClose }: { id: string; onClose: () => void }) {
@@ -283,20 +354,29 @@ const PANE_TABS: Array<{ id: PaneTab; label: string }> = [
   { id: "preview", label: "미리보기" },
 ];
 
-/** 칸 하나: 머리(상태·백엔드·토큰·경과 시간·집중·세션 화면·빼기) · 탭(대화·바뀐 파일·미리보기) · 입력창 */
+/**
+ * 칸 하나. 터미널 세션이면 머리 + 터미널 + 활동 줄만 그린다(대화 탭·입력창 없음 — 요청은 터미널로만 보낸다).
+ * 그 밖의 세션은 지금처럼 머리(상태·백엔드·토큰·경과 시간·집중·세션 화면·빼기) · 탭(대화·바뀐 파일·미리보기) · 입력창을 그린다
+ */
 function SessionPane({
   snapshot,
+  selected,
+  onSelect,
   onClose,
   onFocus,
   onReport,
+  onView,
   broadcast,
   fleet,
   onWinnerChosen,
 }: {
   snapshot: SessionSnapshot;
+  selected: boolean;
+  onSelect: () => void;
   onClose: () => void;
   onFocus: () => void;
   onReport: (id: string, summary: PaneSummary) => void;
+  onView: (id: string, view: SessionView) => void;
   broadcast?: Broadcast;
   fleet?: FleetView;
   onWinnerChosen: (sessionId: string) => void;
@@ -323,6 +403,7 @@ function SessionPane({
   const backendLabel = SESSION_BACKEND_LABEL[view.snapshot.backend ?? view.snapshot.mode];
   const fleetMember = fleet?.members.find((member) => member.sessionId === snapshot.id);
   const isWinner = fleet?.winnerSessionId === snapshot.id;
+  const terminalFirst = view.snapshot.terminal === true;
 
   // 위(SplitView)에 지금 상태를 알려 상태 칩·집중 기본값·좁은 화면 전환에 쓰게 한다
   useEffect(() => {
@@ -330,6 +411,11 @@ function SessionPane({
     // summary는 매 렌더 새 객체라 값 자체(칸 이름·상태)로만 다시 알린다
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot.id, summary.projectName, summary.tone, summary.label, summary.attention]);
+
+  // 고른 칸의 결과 칸이 같은 화면 상태를 쓰도록 올린다
+  useEffect(() => {
+    onView(snapshot.id, view);
+  }, [snapshot.id, view, onView]);
 
   useEffect(() => {
     const list = listRef.current;
@@ -366,6 +452,8 @@ function SessionPane({
   }
 
   useEffect(() => {
+    // 터미널 세션에는 대화 입력이 없다. "모두에게 보내기"도 대화 통로로 보내므로 이 칸은 건너뛴다
+    if (terminalFirst) return;
     if (!broadcast || broadcast.nonce === lastBroadcastNonce.current) return;
     lastBroadcastNonce.current = broadcast.nonce;
     applyBroadcast(broadcast.text);
@@ -394,7 +482,12 @@ function SessionPane({
   }
 
   return (
-    <section className={`glass flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel ${attentionRing(summary)}`} aria-label={`${view.snapshot.projectName} 세션`}>
+    <section
+      className={`glass flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel ${attentionRing(summary)} ${selected ? "outline outline-2 -outline-offset-2 outline-ink/70" : ""}`}
+      aria-label={`${view.snapshot.projectName} 세션`}
+      aria-current={selected ? "true" : undefined}
+      onClick={onSelect}
+    >
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-line px-3 py-2" onDoubleClick={onFocus}>
         <Dot tone={summary.tone} />
         <span className="min-w-0 max-w-[14rem] truncate text-sm font-semibold">{view.snapshot.projectName}</span>
@@ -444,213 +537,148 @@ function SessionPane({
         </div>
       </div>
 
-      <div role="tablist" aria-label="칸 보기" className="flex gap-1 border-b border-line bg-panel px-2 py-1">
-        {PANE_TABS.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === entry.id}
-            onClick={() => setTab(entry.id)}
-            className={`rounded-control px-2.5 py-1 text-xs font-medium ${tab === entry.id ? "bg-ground text-ink" : "text-muted hover:text-ink"}`}
-          >
-            {entry.label}
-          </button>
-        ))}
-      </div>
-
-      <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "chat" ? (
-          <ol ref={listRef} className="space-y-2.5 px-3 py-2.5" aria-live="polite">
-            {lines.length === 0 && <li className="text-sm text-muted">아직 대화가 없습니다.</li>}
-            {lines.map((line) => (
-              <SplitLineView key={line.key} line={line} />
-            ))}
-          </ol>
-        ) : tab === "files" ? (
-          <PaneFilesTab sessionId={snapshot.id} checkpoint={view.snapshot.checkpoints[0]} />
-        ) : (
-          <PanePreviewTab services={view.snapshot.services} status={view.snapshot.status} />
-        )}
-      </div>
-
-      <form
-        className="border-t border-line px-3 py-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void send();
-        }}
-      >
-        {broadcastNote && (
-          <p role="status" className="mb-1.5 text-xs text-muted">
-            {broadcastNote}
-          </p>
-        )}
-        {view.snapshot.pendingQuestion && !view.snapshot.running && (
-          <div className="mb-2 rounded-control border border-line bg-panel px-2 py-1.5" role="group" aria-label="에이전트의 질문">
-            <p className="text-xs font-medium">{view.snapshot.pendingQuestion.question}</p>
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {view.snapshot.pendingQuestion.options.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  disabled={sending || !canSend}
-                  onClick={() => void send(answerRequest(view.snapshot.pendingQuestion!.question, option))}
-                  className="glass-soft rounded-control px-2 py-1 text-xs hover:bg-panel disabled:opacity-50"
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
+      {terminalFirst ? (
+        // 터미널 세션: 터미널과 활동 줄만. 대화 탭·입력창은 두지 않는다(요청은 터미널로만 보낸다)
+        <>
+          <div className="grid min-h-0 flex-1">
+            <TerminalPanel sessionId={snapshot.id} mode={view.snapshot.terminalMode} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} />
           </div>
-        )}
-        {view.snapshot.running && (
-          <p role="status" className="mb-1.5 text-xs text-wait">
-            작업 중입니다. 보내면 진행 중 지시로 다음 모델 호출 직전에 들어갑니다
-          </p>
-        )}
-        <div className="flex items-end gap-2">
-          <label htmlFor={`split-request-${snapshot.id}`} className="sr-only">
-            {view.snapshot.projectName} 세션에 보낼 요청
-          </label>
-          <textarea
-            id={`split-request-${snapshot.id}`}
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && canSend && text.trim()) {
-                event.preventDefault();
-                void send();
-              }
-            }}
-            rows={2}
-            disabled={!canSend}
-            placeholder={!canSend ? "지금은 보낼 수 없습니다" : steering ? "진행 중 지시" : readOnly ? "이 세션에 보낼 질문" : "이 세션에 보낼 요청"}
-            className="min-w-0 flex-1 resize-none rounded-control border border-line bg-panel px-2 py-1.5 text-sm leading-5 placeholder:text-muted disabled:opacity-60"
-          />
-          <button
-            type="submit"
-            disabled={!canSend || sending || !text.trim()}
-            className="rounded-control bg-ink px-3 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
-          >
-            {sending ? "보내는 중" : steering ? "진행 중 지시" : "보내기"}
-          </button>
-        </div>
-        {/* 실행 중에는 지시만 보내므로 스위치를 감춘다. 대화 화면과 같은 규칙(읽기만 → 질문 경로) */}
-        {!steering && (
-          <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={readOnly}
-              onClick={() => setReadOnly(!readOnly)}
-              title="켜면 파일을 바꾸지 않고 답과 계획만 받습니다"
-              className={`rounded-control px-2 py-0.5 font-medium transition-colors ${
-                readOnly ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
-              }`}
-            >
-              읽기만
-            </button>
-            {/* 읽기만이 켜지면 숨긴다(질문은 게이트를 돌리지 않는다). 대화 화면과 같은 규칙 */}
-            {!readOnly && (
-              <button
-                type="button"
-                role="switch"
-                aria-checked={lightVerify}
-                onClick={() => setLightVerify(!lightVerify)}
-                title="테스트·화면 확인·리뷰를 건너뛰고 서비스 재시작·계약만 확인합니다"
-                className={`rounded-control px-2 py-0.5 font-medium transition-colors ${
-                  lightVerify ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
-                }`}
-              >
-                가볍게 확인
-              </button>
-            )}
-            <span className="min-w-0 text-muted">
-              {readOnly ? "파일은 바꾸지 않습니다" : lightVerify ? "테스트·화면 확인·리뷰를 건너뜁니다" : "바꾸면 게이트를 통과해야 남습니다"}
-            </span>
-          </div>
-        )}
-        {error && <p className="mt-1.5 text-xs text-fail">{error}</p>}
-      </form>
-    </section>
-  );
-}
-
-/** [바뀐 파일] 탭. 가장 최근 체크포인트의 파일 목록과 diff를 보여 준다(기록 탭과 같은 API를 쓴다) */
-function PaneFilesTab({ sessionId, checkpoint }: { sessionId: string; checkpoint?: Checkpoint }) {
-  const [patch, setPatch] = useState<{ sha: string; text?: string; error?: string }>();
-
-  useEffect(() => {
-    if (!checkpoint) return;
-    let cancelled = false;
-    fetch(`/api/sessions/${sessionId}/checkpoints/${checkpoint.sha}`)
-      .then(async (response) => {
-        const data = (await response.json().catch(() => ({}))) as { patch?: string; error?: string };
-        if (!cancelled) setPatch(response.ok ? { sha: checkpoint.sha, text: data.patch } : { sha: checkpoint.sha, error: data.error ?? "바뀐 내용을 불러오지 못했습니다" });
-      })
-      .catch((reason: unknown) => {
-        if (!cancelled) setPatch({ sha: checkpoint.sha, error: String(reason) });
-      });
-    return () => {
-      cancelled = true;
-    };
-    // sha가 같으면 같은 체크포인트다. sha만 보고 다시 부르면 된다
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, checkpoint?.sha]);
-
-  if (!checkpoint) return <p className="p-3 text-sm text-muted">아직 체크포인트가 없습니다.</p>;
-
-  return (
-    <div className="p-2">
-      <p className="mb-2 px-1 text-xs text-muted">
-        {checkpoint.message} · <span className="font-mono">{checkpoint.shortSha}</span> · 파일 {checkpoint.files.length}개
-      </p>
-      {checkpoint.files.length > 0 && (
-        <ul className="mb-2 space-y-0.5 px-1">
-          {checkpoint.files.map((file) => (
-            <li key={file} className="truncate font-mono text-xs text-muted">
-              {file}
-            </li>
-          ))}
-        </ul>
-      )}
-      {patch?.sha !== checkpoint.sha ? (
-        <p className="px-1 text-sm text-muted">불러오는 중</p>
-      ) : patch.error ? (
-        <p className="px-1 text-sm text-fail">{patch.error}</p>
+          <ActivityStrip view={view} open={false} />
+        </>
       ) : (
-        <DiffView patch={patch.text ?? ""} />
-      )}
-    </div>
-  );
-}
+        <>
+          <div role="tablist" aria-label="칸 보기" className="flex gap-1 border-b border-line bg-panel px-2 py-1">
+            {PANE_TABS.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === entry.id}
+                onClick={() => setTab(entry.id)}
+                className={`rounded-control px-2.5 py-1 text-xs font-medium ${tab === entry.id ? "bg-ground text-ink" : "text-muted hover:text-ink"}`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
 
-/** [미리보기] 탭. 게이트웨이 티켓 발급 등 내장 미리보기의 복잡함은 피하고, 화면 서비스마다 여는 링크만 준다 */
-function PanePreviewTab({ services, status }: { services: SessionSnapshot["services"]; status: SessionStatus }) {
-  const previews = services.filter((service) => service.preview === "browser");
-  if (previews.length === 0) return <p className="p-3 text-sm text-muted">이 세션에는 화면 미리보기가 없습니다.</p>;
-  if (status === "idle") return <p className="p-3 text-sm text-muted">대기(샌드박스 꺼짐) 상태입니다. 요청을 보내면 켭니다.</p>;
-  return (
-    <ul className="space-y-2 p-3">
-      {previews.map((service) => {
-        const url = service.previewUrl ?? service.url;
-        return (
-          <li key={service.name} className="flex items-center justify-between gap-2 rounded-control border border-line px-3 py-2">
-            <span className="min-w-0 truncate text-sm">
-              <span className="font-medium">{service.name}</span> <span className={`text-xs ${TONE_TEXT[toneOfService(service.state)]}`}>{SERVICE_STATE_LABEL[service.state]}</span>
-            </span>
-            {url ? (
-              <a href={url} target="_blank" rel="noopener noreferrer" className="glass-soft shrink-0 rounded-control px-2.5 py-1 text-xs font-medium hover:bg-panel">
-                열기
-              </a>
+          <div role="tabpanel" className="min-h-0 flex-1 overflow-y-auto">
+            {tab === "chat" ? (
+              <ol ref={listRef} className="space-y-2.5 px-3 py-2.5" aria-live="polite">
+                {lines.length === 0 && <li className="text-sm text-muted">아직 대화가 없습니다.</li>}
+                {lines.map((line) => (
+                  <SplitLineView key={line.key} line={line} />
+                ))}
+              </ol>
+            ) : tab === "files" ? (
+              <PaneFilesTab sessionId={snapshot.id} checkpoint={view.snapshot.checkpoints[0]} />
             ) : (
-              <span className="shrink-0 text-xs text-muted">준비되면 열립니다</span>
+              <PanePreviewTab services={view.snapshot.services} status={view.snapshot.status} />
             )}
-          </li>
-        );
-      })}
-    </ul>
+          </div>
+
+          <form
+            className="border-t border-line px-3 py-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void send();
+            }}
+          >
+            {broadcastNote && (
+              <p role="status" className="mb-1.5 text-xs text-muted">
+                {broadcastNote}
+              </p>
+            )}
+            {view.snapshot.pendingQuestion && !view.snapshot.running && (
+              <div className="mb-2 rounded-control border border-line bg-panel px-2 py-1.5" role="group" aria-label="에이전트의 질문">
+                <p className="text-xs font-medium">{view.snapshot.pendingQuestion.question}</p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {view.snapshot.pendingQuestion.options.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      disabled={sending || !canSend}
+                      onClick={() => void send(answerRequest(view.snapshot.pendingQuestion!.question, option))}
+                      className="glass-soft rounded-control px-2 py-1 text-xs hover:bg-panel disabled:opacity-50"
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {view.snapshot.running && (
+              <p role="status" className="mb-1.5 text-xs text-wait">
+                작업 중입니다. 보내면 진행 중 지시로 다음 모델 호출 직전에 들어갑니다
+              </p>
+            )}
+            <div className="flex items-end gap-2">
+              <label htmlFor={`split-request-${snapshot.id}`} className="sr-only">
+                {view.snapshot.projectName} 세션에 보낼 요청
+              </label>
+              <textarea
+                id={`split-request-${snapshot.id}`}
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && canSend && text.trim()) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+                rows={2}
+                disabled={!canSend}
+                placeholder={!canSend ? "지금은 보낼 수 없습니다" : steering ? "진행 중 지시" : readOnly ? "이 세션에 보낼 질문" : "이 세션에 보낼 요청"}
+                className="min-w-0 flex-1 resize-none rounded-control border border-line bg-panel px-2 py-1.5 text-sm leading-5 placeholder:text-muted disabled:opacity-60"
+              />
+              <button
+                type="submit"
+                disabled={!canSend || sending || !text.trim()}
+                className="rounded-control bg-ink px-3 py-2 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-50"
+              >
+                {sending ? "보내는 중" : steering ? "진행 중 지시" : "보내기"}
+              </button>
+            </div>
+            {/* 실행 중에는 지시만 보내므로 스위치를 감춘다. 대화 화면과 같은 규칙(읽기만 → 질문 경로) */}
+            {!steering && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={readOnly}
+                  onClick={() => setReadOnly(!readOnly)}
+                  title="켜면 파일을 바꾸지 않고 답과 계획만 받습니다"
+                  className={`rounded-control px-2 py-0.5 font-medium transition-colors ${
+                    readOnly ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                  }`}
+                >
+                  읽기만
+                </button>
+                {/* 읽기만이 켜지면 숨긴다(질문은 게이트를 돌리지 않는다). 대화 화면과 같은 규칙 */}
+                {!readOnly && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={lightVerify}
+                    onClick={() => setLightVerify(!lightVerify)}
+                    title="테스트·화면 확인·리뷰를 건너뛰고 서비스 재시작·계약만 확인합니다"
+                    className={`rounded-control px-2 py-0.5 font-medium transition-colors ${
+                      lightVerify ? "bg-panel text-ink ring-1 ring-line" : "glass-soft text-muted hover:text-ink"
+                    }`}
+                  >
+                    가볍게 확인
+                  </button>
+                )}
+                <span className="min-w-0 text-muted">
+                  {readOnly ? "파일은 바꾸지 않습니다" : lightVerify ? "테스트·화면 확인·리뷰를 건너뜁니다" : "바꾸면 게이트를 통과해야 남습니다"}
+                </span>
+              </div>
+            )}
+            {error && <p className="mt-1.5 text-xs text-fail">{error}</p>}
+          </form>
+        </>
+      )}
+    </section>
   );
 }
 

@@ -6,6 +6,7 @@ import type { TerminalMessage } from "@/lib/server/session-terminal";
 import { decodeTerminalData, terminalPasteText, terminalStatusLabel, type TerminalGateStatus, type TerminalStatus } from "@/lib/terminal";
 import { useChatDraft } from "./chat-draft-context";
 import { useSessionAccess } from "./session-access";
+import { useTerminalStream, type TerminalStreamMessage } from "./terminal-stream";
 
 /**
  * 세션 터미널(이슈 #673). 세션의 에이전트 컨테이너 안에서 도는 CLI에 붙는 진짜 터미널이다.
@@ -34,6 +35,8 @@ export function TerminalPanel({
 }) {
   const access = useSessionAccess();
   const draft = useChatDraft();
+  // 나란히 보기에서는 공급자가 연 하나의 통로에서 받는다(없으면 undefined — 이 패널이 자기 통로를 연다)
+  const stream = useTerminalStream(sessionId);
   const container = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<TerminalStatus>({ state: "idle" });
   /** 다른 패널이 넘긴 글을 붙여 넣지 않았을 때 그 까닭. 조용히 버리지 않는다 */
@@ -84,6 +87,22 @@ export function TerminalPanel({
       terminal.open(element);
       fit.fit();
 
+      // 다시 보낸 출력(재연결·구독 직후 처음 받는 출력 묶음)을 그리는 동안에는 xterm의 자동 응답을 입력으로 보내지 않는다.
+      // 다시 보낸 질의(장치 속성·커서 위치 등)에 xterm이 답하고 그 답이 입력으로 POST되어 셸에 글자로 들어가는 것을 막는다(실측).
+      // 실시간 출력의 질의 응답은 지금처럼 보낸다(CLI가 실제로 묻는 질의에는 답해야 한다)
+      let replaying = false;
+      let replayWrites = 0;
+      let replayBurstEnded = false;
+      const endReplayIfDrained = (): void => {
+        if (replayBurstEnded && replayWrites === 0) replaying = false;
+      };
+      /** 다시 보내기를 그리기 시작한다. 출력 묶음 뒤에 오는 상태·cli가 오면 묶음이 끝난 것으로 보고, 그리기가 다 끝나면 실시간으로 돌아간다 */
+      const beginReplay = (): void => {
+        replaying = true;
+        replayWrites = 0;
+        replayBurstEnded = false;
+      };
+
       // 입력은 친 순서대로 가야 한다. 요청을 하나씩 이어 보내고, 기다리는 동안 친 글자는 모아서 한 번에 보낸다
       let pending = "";
       let sending = false;
@@ -104,6 +123,8 @@ export function TerminalPanel({
         }
       };
       const input = terminal.onData((data) => {
+        // 다시 보내기를 그리는 동안 온 것은 xterm이 다시 보낸 질의에 답한 자동 응답이다(사람이 친 키가 아니다). 입력으로 보내지 않는다
+        if (replaying) return;
         pending += data;
         void flush();
       });
@@ -118,24 +139,60 @@ export function TerminalPanel({
 
       // 터미널 안에 에이전트 CLI가 떠 있는가(서버가 CLI의 세션 시작·끝 훅으로 알려 준다)
       let cliAlive = false;
-      const events = new EventSource(`/api/sessions/${sessionId}/terminal`);
-      // 연결이 끊겼다 다시 붙으면 서버가 최근 출력을 처음부터 다시 준다. 겹쳐 그리지 않게 화면을 비우고 받는다
-      events.onopen = () => terminal.reset();
-      events.onmessage = (event) => {
-        const message = JSON.parse(event.data as string) as TerminalMessage;
-        if (message.kind === "data") terminal.write(decodeTerminalData(message.data));
-        else if (message.kind === "exit") setStatus({ state: "exited", code: message.code });
+      const onMessage = (message: TerminalStreamMessage): void => {
+        // 다시 연결했으니 화면을 비우고 받는다(서버가 최근 출력을 다시 보낸다)
+        if (message.kind === "reset") {
+          terminal.reset();
+          beginReplay();
+          return;
+        }
+        if (message.kind === "data") {
+          const bytes = decodeTerminalData(message.data);
+          if (replaying) {
+            // 다시 보낸 출력은 그리기가 끝난 뒤에 실시간으로 돌아가게, write 콜백으로 그리기 끝을 센다(묶음이 여러 개면 마지막까지)
+            replayWrites += 1;
+            terminal.write(bytes, () => {
+              replayWrites -= 1;
+              endReplayIfDrained();
+            });
+          } else {
+            terminal.write(bytes);
+          }
+          return;
+        }
+        // 출력 묶음 뒤에 오는 상태·cli 등이 오면 다시 보내기가 끝난 것으로 본다(그리기가 다 끝나면 자동 응답을 다시 보낸다)
+        if (replaying) {
+          replayBurstEnded = true;
+          endReplayIfDrained();
+        }
+        if (message.kind === "exit") setStatus({ state: "exited", code: message.code });
         else if (message.kind === "cli") {
           cliAlive = message.alive;
           if (message.alive) setPasteNotice(undefined);
         } else if (message.kind === "warning") setWarning(message.message);
         else setStatus({ state: message.state, message: message.message });
       };
-      // 출력 통로도 같은 쿠키가 있어야 열린다. 403 같은 영구 실패면 연결이 곧 닫히고, 바로 뒤의 열기 POST가 같은 사유로 안내를 채운다
-      events.onerror = () => {
-        if (disposed || events.readyState !== EventSource.CLOSED) return;
-        setStatus((current) => (current.state === "open" ? current : { state: "closed" }));
-      };
+      // 공급자가 있으면 그 하나의 통로에서 받는다. 없으면 이 패널이 자기 통로를 연다
+      let closeEvents: () => void = () => {};
+      if (stream) {
+        // 공급자는 구독하는 순간 되보내기 몫(출력·상태·cli)을 먼저 준다. 그것을 다시 보내기로 보고 그리는 동안 응답을 막는다
+        beginReplay();
+        closeEvents = stream(onMessage);
+      } else {
+        const events = new EventSource(`/api/sessions/${sessionId}/terminal`);
+        // 연결이 끊겼다 다시 붙으면 서버가 최근 출력을 처음부터 다시 준다. 겹쳐 그리지 않게 화면을 비우고 받고, 그리는 동안 응답을 막는다
+        events.onopen = () => {
+          terminal.reset();
+          beginReplay();
+        };
+        events.onmessage = (event) => onMessage(JSON.parse(event.data as string) as TerminalMessage);
+        // 출력 통로도 같은 쿠키가 있어야 열린다. 403 같은 영구 실패면 연결이 곧 닫히고, 바로 뒤의 열기 POST가 같은 사유로 안내를 채운다
+        events.onerror = () => {
+          if (disposed || events.readyState !== EventSource.CLOSED) return;
+          setStatus((current) => (current.state === "open" ? current : { state: "closed" }));
+        };
+        closeEvents = () => events.close();
+      }
 
       // 패널 크기가 바뀌면 글자 칸 수를 다시 맞추고 컨테이너 쪽 터미널에도 알린다
       let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -173,7 +230,7 @@ export function TerminalPanel({
         if (acceptDraft) draft.register(undefined);
         clearTimeout(resizeTimer);
         observer.disconnect();
-        events.close();
+        closeEvents();
         input.dispose();
         terminal.dispose();
       };
@@ -183,7 +240,7 @@ export function TerminalPanel({
       disposed = true;
       dispose();
     };
-  }, [sessionId, ready, access.canManage, post, acceptDraft, draft]);
+  }, [sessionId, ready, access.canManage, post, acceptDraft, draft, stream]);
 
   const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? "멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다" : terminalStatusLabel(status, mode);
   const stopped = status.state === "closed" || status.state === "exited";

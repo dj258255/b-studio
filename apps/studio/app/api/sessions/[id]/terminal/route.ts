@@ -1,41 +1,9 @@
 import { z } from 'zod';
-import { authorizeSession, requireUser } from '@/lib/server/access';
-import { authConfig, isLoopbackHost } from '@/lib/server/auth';
+import { authorizeSession } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
-import { hasLocalToken, LOCAL_TOKEN_COOKIE } from '@/lib/server/local-token';
-import { closeSessionTerminal, MAX_TERMINAL_INPUT, openSessionTerminal, resizeSessionTerminal, subscribeSessionTerminal, writeSessionTerminal } from '@/lib/server/session-terminal';
-import { recoverSessions, sessionTerminalTarget } from '@/lib/server/sessions';
-
-/**
- * 터미널은 컨테이너 안의 셸에 닿는 통로다. 이 컴퓨터의 주소로 들어온 요청만 받는다.
- * 개인 PC 모드에는 인증이 없어서, 다른 사이트가 자기 도메인을 127.0.0.1로 풀리게 하면(DNS 리바인딩) 같은 출처로 보인다
- */
-function assertLocalRequest(headers: Headers): void {
-  if (!isLoopbackHost(headers)) throw new StudioError(403, '세션 터미널은 이 컴퓨터의 주소(127.0.0.1 · localhost)로 연 화면에서만 씁니다');
-}
-
-/**
- * 개인 PC 모드의 터미널 통로는 `studio launch`가 심은 로컬 토큰 쿠키가 있어야 쓴다(ADR-173 덧붙임).
- * 같은 컴퓨터의 다른 프로세스가 스튜디오 포트로 보내는 요청을 가릴 수단이 인증에는 없기 때문이다. 인증을 켠 서버(token·proxy)는 로그인으로 충분하다
- */
-function assertLocalToken(headers: Headers): void {
-  if (authConfig().mode !== 'none') return;
-  if (!hasLocalToken(cookieValue(headers, LOCAL_TOKEN_COOKIE))) {
-    throw new StudioError(403, '터미널은 `pnpm studio launch`가 연 창에서 씁니다. 다른 창이면 launch가 찍은 주소로 여세요');
-  }
-}
-
-/** Cookie 헤더에서 이름 하나의 값을 꺼낸다 */
-function cookieValue(headers: Headers, name: string): string | undefined {
-  const header = headers.get('cookie');
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq < 0) continue;
-    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return undefined;
-}
+import { closeSessionTerminal, MAX_TERMINAL_INPUT, openSessionTerminal, resizeSessionTerminal, subscribeSessionTerminal, writeSessionTerminal, type TerminalMessage } from '@/lib/server/session-terminal';
+import { sessionTerminalTarget } from '@/lib/server/sessions';
+import { assertTerminalAccess } from '@/lib/server/terminal-access';
 
 const size = { cols: z.number().int().min(1).max(1000), rows: z.number().int().min(1).max(1000) };
 const requestSchema = z.discriminatedUnion('action', [
@@ -46,48 +14,75 @@ const requestSchema = z.discriminatedUnion('action', [
 ]);
 
 /**
+ * 단일 터미널 통로의 쓰기와 정리(B4 2차). 묶음 통로(terminals/stream/route.ts)의 같은 함수와 같은 꼴이다 —
+ * 쓰기(controller.enqueue)가 실패하면(소비자가 끊김) 그 자리에서 정리한다. "닫힘 표시(closed)"와 "정리 끝남(cleaned)"을
+ * 따로 두어, 어느 길로 닫히든(쓰기 실패·abort·cancel) 정리가 한 번은 돈다. 단일 통로는 id 없이 메시지를 그대로 싣는다
+ */
+export function createTerminalSse(controller: ReadableStreamDefaultController<Uint8Array>) {
+  const encoder = new TextEncoder();
+  let closed = false;
+  let cleaned = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let unsubscribe: (() => void) | undefined;
+
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    closed = true;
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+    unsubscribe?.();
+    try {
+      controller.close();
+    } catch {
+      // 이미 닫힌 스트림
+    }
+  };
+  const write = (chunk: string): void => {
+    if (closed) return;
+    try {
+      controller.enqueue(encoder.encode(chunk));
+    } catch {
+      // 쓰기가 실패하면 곧바로 정리한다
+      cleanup();
+    }
+  };
+
+  return {
+    cleanup,
+    closed: () => closed,
+    /** 메시지 한 조각을 SSE로 보낸다 */
+    message: (message: TerminalMessage) => write(`data: ${JSON.stringify(message)}\n\n`),
+    /** 연결이 끊기면 풀 구독을 등록한다 */
+    track: (stop: () => void) => {
+      unsubscribe = stop;
+    },
+    /** 프록시가 유휴 연결을 끊지 않도록 주기적으로 주석 줄을 보낸다 */
+    startHeartbeat: () => {
+      heartbeat = setInterval(() => write(': ping\n\n'), 15_000);
+    },
+  };
+}
+
+/**
  * 세션 터미널의 출력을 Server-Sent Events로 흘려보낸다(이슈 #673). 연결하면 최근 출력과 지금 상태를 곧바로 받는다.
  * 출력은 화면 제어 문자가 섞인 바이트라 base64로 싣고, 세션 기록에는 남기지 않는다
  */
 export async function GET(request: Request, context: RouteContext<'/api/sessions/[id]/terminal'>) {
-  const encoder = new TextEncoder();
   let cleanup = () => {};
 
   try {
-    assertLocalRequest(request.headers);
-    assertLocalToken(request.headers);
-    const user = requireUser(request.headers);
+    const user = await assertTerminalAccess(request.headers);
     const { id } = await context.params;
-    await recoverSessions();
     await authorizeSession(id, user);
     // 쓸 수 없는 서버에서는 통로 자체를 열지 않는다
     sessionTerminalTarget(id);
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        let closed = false;
-        const write = (chunk: string) => {
-          if (closed) return;
-          try {
-            controller.enqueue(encoder.encode(chunk));
-          } catch {
-            closed = true;
-          }
-        };
-        const unsubscribe = subscribeSessionTerminal(id, (message) => write(`data: ${JSON.stringify(message)}\n\n`));
-        // 프록시가 유휴 연결을 끊지 않도록 주기적으로 주석 줄을 보낸다
-        const heartbeat = setInterval(() => write(': ping\n\n'), 15_000);
-        cleanup = () => {
-          if (closed) return;
-          closed = true;
-          clearInterval(heartbeat);
-          unsubscribe();
-          try {
-            controller.close();
-          } catch {
-            // 이미 닫힌 스트림
-          }
-        };
-        request.signal.addEventListener('abort', cleanup, { once: true });
+        const out = createTerminalSse(controller);
+        cleanup = out.cleanup;
+        out.track(subscribeSessionTerminal(id, (message) => out.message(message)));
+        out.startHeartbeat();
+        request.signal.addEventListener('abort', out.cleanup, { once: true });
       },
       cancel() {
         cleanup();
@@ -114,11 +109,8 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
  */
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/terminal'>) {
   try {
-    assertLocalRequest(request.headers);
-    assertLocalToken(request.headers);
-    const user = requireUser(request.headers);
+    const user = await assertTerminalAccess(request.headers);
     const { id } = await context.params;
-    await recoverSessions();
     await authorizeSession(id, user);
     const target = sessionTerminalTarget(id);
     const parsed = requestSchema.safeParse(await request.json().catch(() => undefined));

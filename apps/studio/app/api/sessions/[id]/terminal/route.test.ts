@@ -31,7 +31,7 @@ vi.mock('@/lib/server/local-token', () => ({
   localTokenPath: () => '/tmp/b-studio-local-token',
 }));
 
-import { GET, POST } from './route';
+import { createTerminalSse, GET, POST } from './route';
 
 const TOKEN = mocks.localToken;
 const COOKIE = `b_studio_local=${TOKEN}`;
@@ -160,5 +160,44 @@ describe('터미널 통로의 로컬 토큰(개인 PC 모드, ADR-173 덧붙임)
     vi.stubEnv('B_STUDIO_AUTH_TOKENS', `kim:${'k'.repeat(32)}`);
     expect((await post({ action: 'open', cols: 80, rows: 24 }, '127.0.0.1:3000', null)).status).toBe(200);
     expect(mocks.openSessionTerminal).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('단일 터미널 통로의 쓰기와 정리(B4 2차)', () => {
+  const fakeController = (enqueue: (chunk: Uint8Array) => void, close: () => void): ReadableStreamDefaultController<Uint8Array> =>
+    ({ enqueue, close }) as unknown as ReadableStreamDefaultController<Uint8Array>;
+
+  it('쓰기가 실패하면 그 자리에서 정리한다(구독 해제·close가 한 번)', () => {
+    const close = vi.fn();
+    const stream = createTerminalSse(fakeController(() => { throw new Error('closed'); }, close));
+    const unsubscribe = vi.fn();
+    stream.track(unsubscribe);
+
+    stream.message({ kind: 'data', data: 'aGk=' });
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(stream.closed()).toBe(true);
+    // 정리는 한 번만 돈다(뒤이은 cleanup은 아무 일도 하지 않는다)
+    stream.cleanup();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('쓰기가 성공하면 정리는 닫힘 경로에서 한 번 돈다', () => {
+    const enqueue = vi.fn();
+    const close = vi.fn();
+    const stream = createTerminalSse(fakeController(enqueue, close));
+    const unsubscribe = vi.fn();
+    stream.track(unsubscribe);
+
+    stream.message({ kind: 'data', data: 'aGk=' });
+    expect(new TextDecoder().decode(enqueue.mock.calls[0]![0] as Uint8Array)).toBe('data: {"kind":"data","data":"aGk="}\n\n');
+    expect(unsubscribe).not.toHaveBeenCalled();
+
+    stream.cleanup();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(stream.closed()).toBe(true);
   });
 });
