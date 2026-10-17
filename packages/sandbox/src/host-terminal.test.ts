@@ -168,12 +168,22 @@ describe('hostShellLaunch', () => {
 
 describe('hostGatewaySettings', () => {
   it('훅이 꺼지지 않게 disableAllHooks를 false로 정하고, 훅 명령이 이 node와 관문 폴더의 스크립트를 가리킨다', () => {
-    const settings = hostGatewaySettings('/gateway', '/n/bin/node');
+    const settings = hostGatewaySettings(address, '/gateway', '/n/bin/node');
     expect(settings.disableAllHooks).toBe(false);
     const sessionStart = (settings.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>).SessionStart![0]!.hooks[0]!.command;
     expect(sessionStart).toContain("'/n/bin/node'");
     expect(sessionStart).toContain(`'${path.join('/gateway', HOOK_SCRIPT_NAME)}'`);
     expect(sessionStart).toContain('session-start');
+    // 텔레메트리 env도 같은 관문 주소·토큰으로 보낸다
+    expect(settings.env).toEqual({
+      CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+      OTEL_LOGS_EXPORTER: 'otlp',
+      OTEL_METRICS_EXPORTER: 'none',
+      OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: 'http/json',
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${address.hookUrl}/v1/logs`,
+      OTEL_EXPORTER_OTLP_LOGS_HEADERS: `Authorization=Bearer ${address.hookToken}`,
+      OTEL_LOGS_EXPORT_INTERVAL: '1000',
+    });
   });
 });
 

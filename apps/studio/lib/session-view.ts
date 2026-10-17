@@ -62,6 +62,8 @@ export type ChatItem =
       summary: string;
       turns?: number;
       usage?: AgentUsage;
+      /** 요청이 시작한 뒤 끝난 시각까지의 벽시계 시간(run_finished.durationMs). 활동 줄이 "걸린 시간"으로 쓴다 */
+      durationMs?: number;
       /** 질문 모드 요청의 결과 */
       intent?: 'ask';
       /** 가볍게 확인(light)으로 끝난 요청. 테스트·화면 확인·리뷰를 건너뛰었다 */
@@ -180,6 +182,8 @@ export interface SessionView {
   completedRuns: number;
   /** 처리 중인 요청이 지금까지 쓴 토큰 */
   runTokens?: { runId: string; usage: AgentUsage };
+  /** 터미널 실행의 CLI가 텔레메트리로 알려 온 모델별 사용량(#726). 활동 줄이 마지막 실행의 것을 합쳐 보여준다 */
+  runUsage: Array<{ runId: string; usage: AgentUsage; costUsd?: number; durationMs?: number }>;
   /** 배포가 끝날 때마다 늘어난다. 배포 탭이 운영 상태를 다시 불러오는 기준이다 */
   deployRevision: number;
 }
@@ -189,7 +193,7 @@ export const LOG_LIMIT = 1000;
 export const DEPLOY_LINE_LIMIT = 200;
 
 export function createView(snapshot: SessionSnapshot): SessionView {
-  return { snapshot, chat: [], logs: [], completedRuns: 0, deployRevision: 0 };
+  return { snapshot, chat: [], logs: [], completedRuns: 0, runUsage: [], deployRevision: 0 };
 }
 
 /**
@@ -267,6 +271,13 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'tokens':
       // 합계를 더하지 않고 서버가 보낸 값으로 바꿔서, 다시 연결해 기록을 재생해도 두 번 세지 않는다
       return { ...patchSnapshot(view, { tokens: event.sessionTokens }), runTokens: { runId: event.runId, usage: event.usage } };
+    case 'run_usage':
+      // 터미널 실행의 CLI가 알려 온 모델 사용량(#726). 대화 줄은 만들지 않고, 활동 줄이 마지막 실행의 것을 합쳐 보여준다.
+      // 걸린 시간은 실행이 끝날 때 run_finished.durationMs로 오므로 여기서는 담지 않는다
+      return {
+        ...view,
+        runUsage: [...view.runUsage, { runId: event.runId, usage: event.usage, ...(event.costUsd !== undefined ? { costUsd: event.costUsd } : {}) }],
+      };
     case 'run_cancelling':
       return patchSnapshot(view, { cancelling: event.reason ?? 'user' });
     case 'run_finished': {
@@ -287,7 +298,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         chat: [
           // 요약 도중에 끝난(취소·오류) 실행의 "요약 중" 줄은 남기지 않는다
           ...markInterrupted(withoutCompacting(view.chat, event.runId), event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.incomplete ? { incomplete: event.incomplete } : {}) },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}), ...(event.incomplete ? { incomplete: event.incomplete } : {}) },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,

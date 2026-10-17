@@ -53,6 +53,11 @@ interface DraftRun {
   usage: AgentUsage;
   /** run_finished.metrics.usageByModel. 한 실행에 모델이 섞였을 때만 있다 */
   usageByModel?: Record<string, AgentUsage>;
+  /**
+   * run_usage 이벤트(터미널 실행의 CLI 텔레메트리, #726)로 온 사용량 합계. 실행이 닫힌 뒤 늦게 온 것도 여기 더한다.
+   * run_finished.usage와 값이 겹치므로 finalize에서 둘 중 하나만 쓴다(중복으로 두 번 더하지 않는다)
+   */
+  telemetry?: { usage: AgentUsage; usageByModel: Record<string, AgentUsage>; costUsd?: number; modelCalls: number };
   /** model_escalated 이벤트. 한 실행에 한 번만 온다 */
   escalation?: { from: string; to: string; attempt: number };
   /** run_finished.metrics.guideChars. 프로젝트 지침(AGENTS.md, ADR-077)을 읽어 시스템 프롬프트에 더했을 때만 있다 */
@@ -73,15 +78,49 @@ function emptyUsage(): AgentUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
 
+/** 두 사용량을 더한다 */
+function addUsage(base: AgentUsage, usage: AgentUsage): AgentUsage {
+  return { inputTokens: base.inputTokens + usage.inputTokens, outputTokens: base.outputTokens + usage.outputTokens, cacheReadTokens: base.cacheReadTokens + usage.cacheReadTokens, cacheWriteTokens: base.cacheWriteTokens + usage.cacheWriteTokens };
+}
+
+/** 화면에서 보이는 네 값의 합. telemetry와 run_finished를 견주는 기준이다 */
+function usageTotal(usage: AgentUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+}
+
+/** 토큰을 하나라도 쓴 모델만 남긴다. 아무것도 안 쓴 모델은 단가가 없어도 비용이 0이라 표에서 뺀다 */
+function usedByModel(usageByModel: Record<string, AgentUsage>): Record<string, AgentUsage> | undefined {
+  const used = Object.entries(usageByModel).filter(([, usage]) => usageTotal(usage) > 0);
+  return used.length > 0 ? Object.fromEntries(used) : undefined;
+}
+
+/** run_usage 이벤트 하나를 그 실행의 텔레메트리 합계에 더한다 */
+function addTelemetry(run: DraftRun, event: Extract<StudioEvent, { type: 'run_usage' }>): void {
+  const telemetry = (run.telemetry ??= { usage: emptyUsage(), usageByModel: {}, modelCalls: 0 });
+  telemetry.usage = addUsage(telemetry.usage, event.usage);
+  telemetry.usageByModel[event.model] = addUsage(telemetry.usageByModel[event.model] ?? emptyUsage(), event.usage);
+  // CLI가 cost_usd를 실제로 보냈을 때만 값이 있다(0도 보낸 값이다). 하나도 안 보냈으면 없음으로 남긴다
+  if (event.costUsd !== undefined) telemetry.costUsd = (telemetry.costUsd ?? 0) + event.costUsd;
+  telemetry.modelCalls += 1;
+}
+
 /** 세션 기록에서 실행별 보고서를 만든다. 최신 실행이 먼저 온다 */
 export function buildTokenReports(events: readonly StudioEvent[], pricing: TokenPricing = {}): TokenReport[] {
   const runs: DraftRun[] = [];
+  const byId = new Map<string, DraftRun>();
   let current: DraftRun | undefined;
 
   for (const event of events) {
     if (event.type === 'run_started') {
       current = { runId: event.runId, request: event.request, turns: [], clearedByTurn: new Map(), compactedByTurn: new Map(), rawEvents: [], pending: [], results: [], usage: emptyUsage() };
       runs.push(current);
+      byId.set(current.runId, current);
+      continue;
+    }
+    // 실행이 닫힌 뒤에도 늦게 올 수 있다(CLI 텔레메트리의 내보내기 주기). 지금 열린 실행이 아니라 runId로 찾는다(#726)
+    if (event.type === 'run_usage') {
+      const run = byId.get(event.runId);
+      if (run) addTelemetry(run, event);
       continue;
     }
     if (!current) continue;
@@ -191,7 +230,13 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
   const warnings = warningsFor(run, turns);
   // 단가 표를 읽지 못했으면 경고를 남기고 단가 없음으로 취급한다
   if (pricing.error) warnings.unshift({ kind: 'price_table', message: pricing.error });
-  const cost = resolveCost(run, pricing);
+  // 실행이 닫힌 뒤 늦게 온 텔레메트리(run_usage)는 run_finished.usage에 아직 반영되지 않았다. 두 값이 겹치므로 하나만 쓴다:
+  // 텔레메트리 합계가 run_finished.usage 이상이면 텔레메트리를 쓴다(같으면 같은 값이라 두 번 더하지 않고, 늦게 온 것만 있으면 텔레메트리가 크다).
+  // 열린 실행에서는 합계를 run_finished.usage에 실으므로 둘이 같고, 닫힌 뒤 늦게 온 것이 있으면 텔레메트리만 그것을 담는다
+  const useTelemetry = run.telemetry !== undefined && usageTotal(run.telemetry.usage) >= usageTotal(run.usage);
+  const usage = useTelemetry ? run.telemetry!.usage : run.usage;
+  const usageByModel = useTelemetry ? usedByModel(run.telemetry!.usageByModel) : run.usageByModel;
+  const cost = resolveCost(run, pricing, usage, usageByModel);
 
   return {
     runId: run.runId,
@@ -200,10 +245,10 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
     toolTotals,
     biggest,
     warnings,
-    totals: run.usage,
-    ...(run.usageByModel ? { usageByModel: run.usageByModel } : {}),
+    totals: usage,
+    ...(usageByModel ? { usageByModel } : {}),
     ...(cost.modelCosts ? { modelCosts: cost.modelCosts } : {}),
-    cacheHitRatio: cacheHitRatio(run.usage),
+    cacheHitRatio: cacheHitRatio(usage),
     cleared: clearedTotals(run.clearedByTurn),
     trimmed: trimmedTotals(run),
     priceSource: cost.priceSource,
@@ -222,23 +267,28 @@ function finalize(run: DraftRun, pricing: TokenPricing): TokenReport {
 function resolveCost(
   run: DraftRun,
   pricing: TokenPricing,
+  usage: AgentUsage,
+  usageByModel: Record<string, AgentUsage> | undefined,
 ): { priceSource: 'by-model' | 'single' | 'none'; estimatedCostUsd?: number; priceNote?: string; modelCosts?: Record<string, number> } {
-  const usageByModel = run.usageByModel;
   if (pricing.byModel && usageByModel && Object.keys(usageByModel).length > 0) {
     const { costUsd, costNote } = costForUsageByModel(usageByModel, pricing.byModel);
     const modelCosts: Record<string, number> = {};
-    for (const [model, usage] of Object.entries(usageByModel)) {
+    for (const [model, modelUsage] of Object.entries(usageByModel)) {
       const prices = matchTokenPrices(pricing.byModel, model);
-      if (prices) modelCosts[model] = estimateCostUsd(usage, prices);
+      if (prices) modelCosts[model] = estimateCostUsd(modelUsage, prices);
     }
     return { priceSource: 'by-model', ...(costUsd !== undefined ? { estimatedCostUsd: costUsd } : {}), ...(costNote ? { priceNote: costNote } : {}), modelCosts };
   }
   if (pricing.single) {
     const modelCosts = usageByModel
-      ? Object.fromEntries(Object.entries(usageByModel).map(([model, usage]) => [model, estimateCostUsd(usage, pricing.single!)]))
+      ? Object.fromEntries(Object.entries(usageByModel).map(([model, modelUsage]) => [model, estimateCostUsd(modelUsage, pricing.single!)]))
       : undefined;
-    return { priceSource: 'single', estimatedCostUsd: estimateCostUsd(run.usage, pricing.single), ...(modelCosts ? { modelCosts } : {}) };
+    return { priceSource: 'single', estimatedCostUsd: estimateCostUsd(usage, pricing.single), ...(modelCosts ? { modelCosts } : {}) };
   }
+  // 단가 환경 변수가 없어도 CLI가 준 cost_usd가 있으면 그것을 쓴다(#726). 0도 CLI가 보고한 값이다(없는 것과 다르다).
+  // 단가로 계산한 것이 아니라 그대로 보였음을 남긴다
+  const cliCost = run.telemetry?.costUsd;
+  if (cliCost !== undefined) return { priceSource: 'none', estimatedCostUsd: cliCost, priceNote: 'CLI가 보고한 비용' };
   return { priceSource: 'none', priceNote: '단가 미설정' };
 }
 

@@ -1,4 +1,6 @@
+import type { AgentUsage } from '@b-studio/agent';
 import type { ChatItem } from './session-view';
+import { formatTokenCount } from './usage';
 
 /** 세션 터미널 화면이 쓰는 작은 순수 함수들(이슈 #673). 화면 컴포넌트와 따로 두어 브라우저 없이 테스트한다 */
 
@@ -65,19 +67,93 @@ export function terminalGateStatus(chat: readonly ChatItem[]): TerminalGateStatu
   }
 }
 
-/** 터미널 아래 활동 줄에 그릴 것(이슈 #689): 마지막 터미널 요청의 검증 상태와 단계별 결과, 가장 최근 체크포인트 */
+/** 마지막 터미널 실행의 사용량 요약(#726). CLI가 텔레메트리로 알려 온 모델 사용량을 합쳐 만든다 */
+export interface TerminalUsageSummary {
+  /** 입력·출력·캐시 읽기·캐시 쓰기의 합 */
+  tokens: number;
+  cacheHitRatio: number;
+  /** 실행 전체의 벽시계 시간(run_finished.durationMs). 실행이 아직 열려 있으면 없다 — 그때는 시간을 보이지 않는다 */
+  durationMs?: number;
+  costUsd?: number;
+}
+
+/** run_usage 이벤트에서 화면이 쓰는 부분. session-view가 이 꼴로 모아 둔다 */
+export interface TerminalUsageEntry {
+  runId: string;
+  usage: AgentUsage;
+  costUsd?: number;
+}
+
+/** 걸린 시간 한 칸. 초 단위 한 자리 */
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}초`;
+}
+
+/**
+ * 비용 한 칸. 작은 값을 부풀리지 않는다: 0은 `$0`, 0.01달러 이상은 소수 둘째 자리, 그보다 작으면 유효숫자 두 자리(`$0.0054`)
+ */
+export function formatCostShort(cost: number): string {
+  if (cost === 0) return '$0';
+  return `$${Math.abs(cost) >= 0.01 ? cost.toFixed(2) : cost.toPrecision(2)}`;
+}
+
+/**
+ * 활동 줄에 그릴 사용량 한 줄(#726). 'unknown'은 CLI가 보낸 것이 하나도 없을 때다 — 0 토큰과 다르다.
+ * 숫자 꼴은 토큰 화면과 같게 맞춘다(formatTokenCount). 시간은 실행이 끝나 알게 됐을 때만 붙인다
+ */
+export function terminalUsageText(usage: TerminalUsageSummary | 'unknown'): string {
+  if (usage === 'unknown') return '사용량 모름';
+  const parts = [`토큰 ${formatTokenCount(usage.tokens)}`, `캐시 ${Math.round(usage.cacheHitRatio * 100)}%`];
+  if (usage.durationMs !== undefined) parts.push(formatSeconds(usage.durationMs));
+  if (usage.costUsd !== undefined) parts.push(formatCostShort(usage.costUsd));
+  return parts.join(' · ');
+}
+
+/** 터미널 아래 활동 줄에 그릴 것(이슈 #689): 마지막 터미널 요청의 검증 상태와 단계별 결과, 가장 최근 체크포인트, 사용량(#726) */
 export interface TerminalActivity {
   status?: TerminalGateStatus;
   /** 마지막 터미널 요청의 마지막 검증 회차가 확인한 단계. 확인한 순서대로, 단계마다 하나 */
   stages: Array<{ stage: string; ok: boolean }>;
   /** 세션의 가장 최근 체크포인트(세션 시작은 뺀다). 턴 상한에서 남긴 것이면 incomplete */
   checkpoint?: { shortSha: string; incomplete: boolean };
+  /** 마지막 터미널 실행의 사용량. 터미널 실행이 아예 없으면 없다(줄을 그리지 않는다). 실행은 있는데 못 받았으면 'unknown' */
+  usage?: TerminalUsageSummary | 'unknown';
 }
 
-export function terminalActivity(chat: readonly ChatItem[], checkpoints: ReadonlyArray<{ shortSha: string; incomplete?: 'max_turns' }>): TerminalActivity {
+/**
+ * 마지막 터미널 실행의 사용량을 합친다. 캐시 적중률 = 캐시 읽기 ÷ (입력 + 캐시 읽기 + 캐시 쓰기)(토큰 화면과 같은 정의).
+ * 걸린 시간은 실행 전체의 벽시계 시간(run_finished.durationMs)이다. run_usage가 하나도 없으면 'unknown'
+ */
+function usageSummary(runId: string, entries: readonly TerminalUsageEntry[], durationMs: number | undefined): TerminalUsageSummary | 'unknown' {
+  const ofRun = entries.filter((entry) => entry.runId === runId);
+  if (ofRun.length === 0) return 'unknown';
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let costUsd: number | undefined;
+  for (const entry of ofRun) {
+    input += entry.usage.inputTokens;
+    output += entry.usage.outputTokens;
+    cacheRead += entry.usage.cacheReadTokens;
+    cacheWrite += entry.usage.cacheWriteTokens;
+    if (entry.costUsd !== undefined) costUsd = (costUsd ?? 0) + entry.costUsd;
+  }
+  const denominator = input + cacheRead + cacheWrite;
+  return {
+    tokens: input + output + cacheRead + cacheWrite,
+    cacheHitRatio: denominator === 0 ? 0 : cacheRead / denominator,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
+export function terminalActivity(chat: readonly ChatItem[], checkpoints: ReadonlyArray<{ shortSha: string; incomplete?: 'max_turns' }>, runUsage: readonly TerminalUsageEntry[] = []): TerminalActivity {
   const status = terminalGateStatus(chat);
   const request = chat.findLast((item): item is Extract<ChatItem, { kind: 'request' }> => item.kind === 'request' && item.via === 'terminal');
   const stages: TerminalActivity['stages'] = [];
+  /** 실행 전체의 벽시계 시간. 실행이 끝나 run_finished로 왔을 때만 안다 */
+  let durationMs: number | undefined;
   if (request) {
     const ofRun = chat.filter((item) => 'runId' in item && item.runId === request.runId);
     const lastGate = ofRun.findLastIndex((item) => item.kind === 'gate');
@@ -92,10 +168,18 @@ export function terminalActivity(chat: readonly ChatItem[], checkpoints: Readonl
         else stages.push({ stage: item.stage, ok: item.ok });
       }
     }
+    const outcome = ofRun.findLast((item): item is Extract<ChatItem, { kind: 'outcome' }> => item.kind === 'outcome');
+    durationMs = outcome?.durationMs;
   }
   // 목록의 마지막은 세션 시작 체크포인트다
   const latest = checkpoints.length > 1 ? checkpoints[0] : undefined;
-  return { ...(status ? { status } : {}), stages, ...(latest ? { checkpoint: { shortSha: latest.shortSha, incomplete: latest.incomplete === 'max_turns' } } : {}) };
+  return {
+    ...(status ? { status } : {}),
+    stages,
+    ...(latest ? { checkpoint: { shortSha: latest.shortSha, incomplete: latest.incomplete === 'max_turns' } } : {}),
+    // 터미널 실행이 하나도 없으면 사용량 줄 자체를 만들지 않는다(아무 실행도 없는데 "사용량 모름"을 보이지 않는다)
+    ...(request ? { usage: usageSummary(request.runId, runUsage, durationMs) } : {}),
+  };
 }
 
 /**

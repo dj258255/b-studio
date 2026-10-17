@@ -317,6 +317,7 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
+import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
@@ -403,6 +404,11 @@ interface ActiveRun {
   steering?: SteeringQueue;
   /** 세션 터미널에서 시작한 실행이면 그 상태(#673). 러너가 아니라 CLI의 훅이 시작과 끝을 알린다 */
   terminal?: TerminalRunState;
+  /**
+   * 터미널 실행의 CLI가 텔레메트리로 알려 온 사용량 합계(#726). 열린 실행이면 여기에 더해
+   * 닫힐 때 run_finished.usage·metrics에 실린다. 열린 실행에 붙지 못한(늦게 온) 것은 run_usage 이벤트로만 남는다
+   */
+  terminalUsage?: { usage: AgentUsage; usageByModel: Record<string, AgentUsage>; modelCalls: number };
 }
 
 /** eager: 세션을 만들 때 샌드박스를 바로 켠다(레인·플릿·벤치·이어서 하기). on-demand: 첫 필요 때 켠다(사람이 만든 일반 세션) */
@@ -494,6 +500,13 @@ interface Session {
   pendingViolation?: string;
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
+  /**
+   * 가장 최근에 닫힌 터미널 실행의 시작·끝 시각(#726). CLI의 텔레메트리는 내보내기 주기가 있어 실행이 닫힌 뒤
+   * 몇 초 안에 도착할 수 있다. 그때 이 실행에 붙인다(실행이 끝난 뒤 늦게 온 사용량도 그 실행의 몫이다)
+   */
+  terminalRun?: { runId: string; startedMs: number; endedMs: number };
+  /** 같은 requestId의 텔레메트리를 두 번 세지 않게 최근 것만 기억한다(#726) */
+  seenUsageIds?: Set<string>;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -7365,6 +7378,14 @@ const TERMINAL_MAX_VERIFY_ATTEMPTS = 3;
 const TERMINAL_FALLBACK_REQUEST = '터미널에서 이어진 작업';
 /** 기록에 남기는 요청 글의 상한. 붙여넣은 긴 글이 세션 기록을 채우지 않게 한다 */
 const TERMINAL_REQUEST_LIMIT = 8000;
+/**
+ * 실행이 닫힌 뒤 이 시간 안에 도착한 텔레메트리는 그 실행의 몫으로 본다(#726).
+ * CLI의 로그 내보내기 기본 주기가 1초라 짧은 실행의 마지막 묶음이 닫힌 뒤에 올 수 있다. 너무 길게 두면
+ * 실행 밖에서 쓴 것(사람이 CLI에서 대화만 한 것)이 앞 실행에 잘못 붙는다
+ */
+const TERMINAL_LATE_USAGE_MS = 5_000;
+/** 같은 requestId를 두 번 세지 않게 기억하는 개수. 세션마다 이만큼만 최근 것을 기억한다 */
+const TERMINAL_SEEN_USAGE_LIMIT = 2_000;
 
 interface TerminalVerification {
   workspace: Workspace;
@@ -7439,6 +7460,58 @@ function terminalSessionAlive(session: Session): boolean {
 function openTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRunState }) | undefined {
   const run = session.run;
   return run?.terminal && !run.terminal.settled && !run.cancel.signal.aborted ? (run as ActiveRun & { terminal: TerminalRunState }) : undefined;
+}
+
+/**
+ * 터미널의 CLI가 보낸 텔레메트리 로그(#726). `api_request`만 꺼내 그 요청이 속한 실행에 붙인다.
+ * 실행에 붙지 못한 것(실행 밖에서 사람이 CLI에서 대화만 한 것 등)은 버린다 — 활동 기록에 남기지 않는다
+ */
+function terminalTelemetry(id: string, body: unknown): void {
+  const session = terminalSession(id);
+  for (const request of apiRequestsFromOtlp(body)) attributeRunUsage(session, request);
+}
+
+/** 꺼낸 사용량 하나를 실행에 붙인다. 같은 requestId는 한 번만 세고, 어느 실행에도 안 맞으면 버린다 */
+function attributeRunUsage(session: Session, request: ApiRequestUsage): void {
+  const open = openTerminalRun(session);
+  let runId: string | undefined;
+  if (open && request.at >= Date.parse(open.startedAt)) {
+    runId = open.id;
+  } else {
+    const last = session.terminalRun;
+    // 가장 최근에 닫힌 실행이고 그 시작과 끝(+5초) 사이에 든 것만 붙인다
+    if (last && request.at >= last.startedMs && request.at <= last.endedMs + TERMINAL_LATE_USAGE_MS) runId = last.runId;
+  }
+  // 실행에 붙일지 정한 뒤에 기억한다. 실행 밖으로 버린 것은 기억하지 않아야 한다 —
+  // 지금 기억해 두면 나중에 같은 번호가 맞는 실행 창 안에서 와도 중복으로 보고 놓친다
+  if (!runId) return;
+  if (request.requestId !== undefined) {
+    const seen = (session.seenUsageIds ??= new Set());
+    if (seen.has(request.requestId)) return;
+    seen.add(request.requestId);
+    if (seen.size > TERMINAL_SEEN_USAGE_LIMIT) seen.delete(seen.values().next().value!);
+  }
+  const usage: AgentUsage = { inputTokens: request.inputTokens, outputTokens: request.outputTokens, cacheReadTokens: request.cacheReadTokens, cacheWriteTokens: request.cacheWriteTokens };
+  emit(session, {
+    type: 'run_usage',
+    runId,
+    model: request.model,
+    usage,
+    ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}),
+    ...(request.durationMs !== undefined ? { durationMs: request.durationMs } : {}),
+  });
+  // 열린 실행에 붙는 것은 그 실행의 합계에도 더해, 닫힐 때 run_finished.usage·metrics에 실리게 한다
+  if (open && runId === open.id) {
+    const totals = (open.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0 });
+    totals.usage = addTokens(totals.usage, usage);
+    totals.usageByModel[request.model] = addTokens(totals.usageByModel[request.model], usage);
+    totals.modelCalls += 1;
+  }
+}
+
+/** 터미널 실행의 합계를 run_finished.metrics에 실을 꼴로 만든다. 매 호출은 모델 이름별로만 세고 툴 시간은 재지 않는다 */
+function terminalRunMetrics(run: ActiveRun): RunMetrics {
+  return { modelCalls: run.terminalUsage?.modelCalls ?? 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(run.terminalUsage ? { usageByModel: run.terminalUsage.usageByModel } : {}) };
 }
 
 /**
@@ -7601,6 +7674,8 @@ function settleTerminalRun(session: Session, run: ActiveRun & { terminal: Termin
 /** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
 function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary'>): void {
   if (session.run === run) session.run = undefined;
+  // 닫힌 실행의 시작·끝을 남긴다. 내보내기 주기 때문에 실행이 닫힌 뒤 몇 초 안에 도착한 사용량을 여기 붙인다(#726)
+  session.terminalRun = { runId: run.id, startedMs: Date.parse(run.startedAt), endedMs: Date.now() };
   // 세션이 멈추는 중이면 stopSession이 상태를 정리한다. 여기서는 끝났다는 알림만 건너뛴다
   if (session.stop.signal.aborted) return;
   session.snapshot.running = false;
@@ -7610,6 +7685,8 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
     type: 'run_finished',
     runId: run.id,
     ...finished,
+    // CLI가 알려 온 사용량이 있으면 실행 지표와 함께 싣는다(텔레메트리를 못 받았으면 지금처럼 없다)
+    ...(run.terminalUsage ? { usage: run.terminalUsage.usage, metrics: terminalRunMetrics(run) } : {}),
     durationMs: Math.round(performance.now() - run.terminal.startedMs),
     sessionTokens: session.snapshot.tokens,
     nextDemoRequest: session.snapshot.nextDemoRequest,
@@ -7890,7 +7967,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       // 커밋되는 내용이 방금 검증한 내용과 같아야 한다. git이 추적하지 않는 생성 파일은 인덱스에 없으므로 견줄 대상에서 뺀다
       const generated = new Set(await session.checkpoints.pendingExcludedFiles());
       const expectStaged = new Map([...tracker.tracked].filter(([file]) => !generated.has(file)));
-      const passed = terminalResult(verification, 'done', text, 'pass', started);
+      const passed = terminalResult(run, verification, 'done', text, 'pass', started);
       try {
         if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
         await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged);
@@ -7928,7 +8005,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       return { feedback: outcome.feedback };
     }
     if (outcome.kind === 'exhausted') {
-      const result = terminalResult(verification, 'failed', outcome.summary, 'exhausted', started);
+      const result = terminalResult(run, verification, 'failed', outcome.summary, 'exhausted', started);
       onEvent({ type: 'failed', result });
       const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: outcome.summary, platformFailure: gate.platformFailure });
       return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
@@ -7991,7 +8068,7 @@ async function reconcileTerminalGit(
 }
 
 /** 게이트의 결과를 실행 결과의 꼴로 옮긴다(체크포인트 본문과 트레일러, 대화 창의 결과 카드가 이 꼴을 읽는다) */
-function terminalResult(verification: TerminalVerification, status: 'done' | 'failed', summary: string, outcome: GateOutcome['kind'], startedMs: number): AgentResult {
+function terminalResult(run: ActiveRun, verification: TerminalVerification, status: 'done' | 'failed', summary: string, outcome: GateOutcome['kind'], startedMs: number): AgentResult {
   const { workspace, gate } = verification;
   return {
     status,
@@ -8003,8 +8080,9 @@ function terminalResult(verification: TerminalVerification, status: 'done' | 'fa
     passedStages: [...gate.passedStages],
     verifyAttempts: gate.attempts,
     turns: 0,
-    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    metrics: { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: Math.round(performance.now() - startedMs) },
+    // CLI가 텔레메트리로 알려 온 터미널 실행의 사용량(#726). 받은 것이 없으면 0이다
+    usage: run.terminalUsage?.usage ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    metrics: { modelCalls: run.terminalUsage?.modelCalls ?? 0, maxContextTokens: 0, toolMs: 0, gateMs: Math.round(performance.now() - startedMs), ...(run.terminalUsage ? { usageByModel: run.terminalUsage.usageByModel } : {}) },
   };
 }
 
@@ -8040,6 +8118,9 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     sessionEnd: async () => {
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
+    },
+    telemetry: async (body) => {
+      terminalTelemetry(id, body);
     },
     toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
     runTool: (name, args) => runTerminalTool(id, name, args),

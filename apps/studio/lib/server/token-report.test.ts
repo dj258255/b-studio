@@ -302,6 +302,73 @@ describe('summarizeInput', () => {
   });
 });
 
+describe('터미널 실행의 텔레메트리 (run_usage, 이슈 #726)', () => {
+  const usageEvent = (runId: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }, extra: Partial<Extract<StudioEvent, { type: 'run_usage' }>> = {}): StudioEvent => ({ type: 'run_usage', runId, model: 'claude-sonnet-5', usage, ...extra });
+
+  it('열린 실행의 합계를 run_finished.usage에 실었으면 같은 값이라 두 번 더하지 않는다', () => {
+    const usage = { inputTokens: 100, outputTokens: 10, cacheReadTokens: 500, cacheWriteTokens: 0 };
+    const events: StudioEvent[] = [
+      { type: 'run_started', runId: 'r1', request: '요청', via: 'terminal' },
+      usageEvent('r1', usage),
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: 'ok', usage },
+    ];
+    const [report] = buildTokenReports(events);
+    expect(report!.totals).toEqual(usage);
+    expect(report!.cacheHitRatio).toBeCloseTo(500 / 600, 5);
+  });
+
+  it('실행이 닫힌 뒤 늦게 온 run_usage는 runId로 그 실행에 붙고, run_finished.usage보다 크면 그것을 쓴다', () => {
+    const early = { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const late = { inputTokens: 40, outputTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const events: StudioEvent[] = [
+      { type: 'run_started', runId: 'r1', request: '요청', via: 'terminal' },
+      usageEvent('r1', early),
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: 'ok', usage: early },
+      // 실행이 닫힌 뒤 도착한다(내보내기 주기)
+      usageEvent('r1', late),
+      // 새 실행이 시작돼도 앞 실행(r1)에 붙는다
+      { type: 'run_started', runId: 'r2', request: '다음', via: 'terminal' },
+    ];
+    const reports = buildTokenReports(events);
+    expect(reports.find((report) => report.runId === 'r1')!.totals).toEqual({ inputTokens: 140, outputTokens: 14, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    // 새 실행에는 아직 아무것도 없다
+    expect(reports.find((report) => report.runId === 'r2')!.totals).toEqual({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  });
+
+  it('모델별 사용량과 CLI가 보고한 비용을 싣는다(단가 환경 변수가 없어도)', () => {
+    const events: StudioEvent[] = [
+      { type: 'run_started', runId: 'r1', request: '요청', via: 'terminal' },
+      usageEvent('r1', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }, { costUsd: 0.01 }),
+      usageEvent('r1', { inputTokens: 0, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 }, { costUsd: 0.005 }),
+    ];
+    const [report] = buildTokenReports(events);
+    expect(report!.usageByModel).toEqual({ 'claude-sonnet-5': { inputTokens: 100, outputTokens: 15, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+    expect(report!.estimatedCostUsd).toBeCloseTo(0.015, 8);
+    expect(report!.priceNote).toBe('CLI가 보고한 비용');
+    expect(report!.priceSource).toBe('none');
+  });
+
+  it('CLI가 보낸 비용 0도 "CLI가 보고한 비용"으로 쓴다(없는 것과 다르다)', () => {
+    const events: StudioEvent[] = [{ type: 'run_started', runId: 'r1', request: '요청', via: 'terminal' }, usageEvent('r1', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }, { costUsd: 0 })];
+    const [report] = buildTokenReports(events);
+    expect(report!.estimatedCostUsd).toBe(0);
+    expect(report!.priceNote).toBe('CLI가 보고한 비용');
+    expect(report!.priceSource).toBe('none');
+    // cost_usd를 아예 안 보냈으면 비용은 없는 것으로 본다
+    const [withoutCost] = buildTokenReports([{ type: 'run_started', runId: 'r2', request: '요청', via: 'terminal' }, usageEvent('r2', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 })]);
+    expect(withoutCost!.estimatedCostUsd).toBeUndefined();
+    expect(withoutCost!.priceNote).toBe('단가 미설정');
+  });
+
+  it('단가 환경 변수가 있으면 그 단가로 계산한다(CLI가 보고한 비용보다 우선)', () => {
+    const single = prices(3, 15, 0.3, 3.75);
+    const events: StudioEvent[] = [{ type: 'run_started', runId: 'r1', request: '요청', via: 'terminal' }, usageEvent('r1', { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }, { costUsd: 999 })];
+    const [report] = buildTokenReports(events, { single });
+    expect(report!.priceSource).toBe('single');
+    expect(report!.estimatedCostUsd).toBeCloseTo(estimateCostUsd({ inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 }, single), 8);
+  });
+});
+
 describe('pricesFromEnv', () => {
   it('네 단가가 모두 있어야 하고, 잘못된 값은 없는 것으로 본다', () => {
     const complete = { B_STUDIO_PRICE_INPUT_PER_M: '3', B_STUDIO_PRICE_OUTPUT_PER_M: '15', B_STUDIO_PRICE_CACHE_READ_PER_M: '0.3', B_STUDIO_PRICE_CACHE_WRITE_PER_M: '3.75' };
