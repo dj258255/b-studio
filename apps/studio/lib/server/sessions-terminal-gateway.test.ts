@@ -1490,6 +1490,8 @@ describe('터미널 실행에도 턴 상한·토큰 한도·정체 알림을 건
       ...(requestId !== undefined ? [{ key: 'request_id', value: { stringValue: requestId } }] : []),
     ],
   });
+  /** 텔레메트리 시각(at, ms)을 직접 정하는 요청. 앞 실행의 늦은 사용량을 흉내 낼 때 쓴다 */
+  const reqAt = (at: number, inputTokens: number, outputTokens: number, requestId?: string): Record<string, unknown> => ({ ...req(inputTokens, outputTokens, requestId), timeUnixNano: String(at * 1_000_000) });
 
   it('텔레메트리로 세션 토큰 한도를 넘으면 실행을 멈추고 되돌리며, 다음 요청을 막는다', async () => {
     process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
@@ -1719,6 +1721,67 @@ describe('터미널 실행에도 턴 상한·토큰 한도·정체 알림을 건
       await stopSession(session.id);
     } finally {
       delete process.env.B_STUDIO_TERMINAL_STALL_SECONDS;
+    }
+  }, 30_000);
+
+  it('어느 실행에도 붙지 않는 사용량으로도 세션 한도를 넘기면 다음 요청이 막힌다', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    try {
+      const session = await open();
+      // 실행을 한 번도 열지 않았다: 사용량이 붙을 실행 창이 없다(붙지 않아도 한도에는 든다)
+      await session.gateway.telemetry(otlp([req(1000, 0)]));
+      expect(session.ofType('run_usage')).toEqual([]);
+      expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 1000 });
+      expect(session.ofType('tokens').at(-1)).toMatchObject({ sessionTokens: { inputTokens: 1000 } });
+
+      const blocked = await session.gateway.prompt({ prompt: '해줘' });
+      expect(blocked.blocked).toContain('이 세션은 토큰 한도');
+      expect(session.ofType('run_started')).toEqual([]);
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
+    }
+  }, 30_000);
+
+  it('앞 실행의 늦은 사용량이 새 실행이 열린 뒤 더해져도 세션 합계에서 사라지지 않는다', async () => {
+    const session = await open();
+    // 앞 실행(A)을 열고 끝낸다(닫힘). A의 창 안 시각을 하나 잡아 둔다
+    await session.gateway.prompt({ prompt: '첫 요청' });
+    const aStarted = Date.now();
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    const runA = session.ofType('run_started')[0]!.runId;
+
+    // 새 실행(B)을 연다
+    await session.gateway.prompt({ prompt: '두 번째 요청' });
+    const runB = session.ofType('run_started')[1]!.runId;
+
+    // A의 늦은 사용량이 B가 열린 뒤 도착한다(시각은 A의 창 안). 열린 B가 아니라 닫힌 A에 붙는다
+    await session.gateway.telemetry(otlp([reqAt(aStarted, 300, 0, 'late-a')]));
+    expect(session.ofType('run_usage').at(-1)).toMatchObject({ runId: runA, usage: { inputTokens: 300 } });
+    expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 300 });
+
+    // 이어서 B에 붙는 사용량이 와도 A의 몫이 덮이지 않는다(합계 = 300 + 400)
+    await session.gateway.telemetry(otlp([req(400, 0, 'b-1')]));
+    expect(session.ofType('run_usage').at(-1)).toMatchObject({ runId: runB, usage: { inputTokens: 400 } });
+    expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 700 });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('같은 요청 번호가 두 번 와도 붙지 않은 사용량은 합계에 한 번만 들어간다', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    try {
+      const session = await open();
+      await session.gateway.telemetry(otlp([req(600, 0, 'dup-x')]));
+      await session.gateway.telemetry(otlp([req(600, 0, 'dup-x')]));
+      expect(session.ofType('run_usage')).toEqual([]);
+      // 두 번 더하면 1200이라 한도를 넘지만, 한 번만 세므로 600이다
+      expect(getSnapshot(session.id)!.tokens).toMatchObject({ inputTokens: 600 });
+      // 한도를 넘지 않았으니 다음 요청은 막히지 않는다
+      expect((await session.gateway.prompt({ prompt: '해줘' })).blocked).toBeUndefined();
+      await stopSession(session.id);
+    } finally {
+      delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
     }
   }, 30_000);
 });

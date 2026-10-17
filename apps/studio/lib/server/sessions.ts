@@ -507,6 +507,11 @@ interface Session {
   terminalRun?: { runId: string; startedMs: number; endedMs: number };
   /** 같은 requestId의 텔레메트리를 두 번 세지 않게 최근 것만 기억한다(#726) */
   seenUsageIds?: Set<string>;
+  /**
+   * 한도 계산(세션 합계·사람 몫)용 중복 방지(#B5 수정 2차). 실행에 붙지 않은 것도 세므로 귀속용(seenUsageIds)과
+   * 별개로 둔다 — 귀속은 붙인 것만 기억하고, 이쪽은 받은 모든 요청 번호를 기억한다
+   */
+  countedUsageIds?: Set<string>;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -2541,10 +2546,10 @@ async function chargeUser(run: ActiveRun, usage: AgentUsage): Promise<void> {
 }
 
 /**
- * 늦게 온(실행이 닫힌 뒤 도착한) 터미널 사용량을 사람 몫에 더한다(#B5 수정 1). 실행 객체가 없어
- * 늘어난 만큼이 곧 usage 전체다. chargeUser와 같은 조건(사람 한도를 정했을 때만)으로 기록한다
+ * 터미널 사용량을 사람 몫에 더한다(#B5 수정 2차). 실행에 붙든 안 붙든 받은 만큼(usage)을 세션 주인 몫으로 더한다
+ * (터미널 실행의 by도 주인이다). chargeUser와 같은 조건(사람 한도를 정했을 때만)으로 기록한다
  */
-async function chargeLateTerminalUsage(session: Session, usage: AgentUsage): Promise<void> {
+async function chargeTerminalOwnerUsage(session: Session, usage: AgentUsage): Promise<void> {
   const by = session.snapshot.owner;
   if (!by || parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT) === undefined) return;
   await recordUserUsage(by, usage);
@@ -7614,18 +7619,46 @@ function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: Term
 }
 
 /**
- * 터미널의 CLI가 보낸 텔레메트리 로그(#726). `api_request`만 꺼내 그 요청이 속한 실행에 붙인다.
- * 실행에 붙지 못한 것(실행 밖에서 사람이 CLI에서 대화만 한 것 등)은 버린다 — 활동 기록에 남기지 않는다
+ * 터미널의 CLI가 보낸 텔레메트리 로그(#726). `api_request`만 꺼내 그 요청이 속한 실행에 붙이고,
+ * 실행에 붙든 안 붙든 받은 사용량을 한도 계산에도 더한다(#B5 수정 2차)
  */
 async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   const session = terminalSession(id);
-  // 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게, #B5 수정 2)
+  // 레코드를 받은 순서대로 처리한다. 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게)
   for (const request of apiRequestsFromOtlp(body)) await attributeRunUsage(session, request);
 }
 
-/** 꺼낸 사용량 하나를 실행에 붙인다. 같은 requestId는 한 번만 세고, 어느 실행에도 안 맞으면 버린다 */
+/** 한도 계산용 중복 방지. 실행에 붙지 않은 것도 세므로 귀속용(seenUsageIds)과 별개의 기억을 쓴다. 셌으면 참 */
+function countTerminalUsageOnce(session: Session, requestId: string | undefined): boolean {
+  // 요청 번호가 없으면 중복을 가릴 수 없다. 그대로 센다
+  if (requestId === undefined) return true;
+  const counted = (session.countedUsageIds ??= new Set());
+  if (counted.has(requestId)) return false;
+  counted.add(requestId);
+  if (counted.size > TERMINAL_SEEN_USAGE_LIMIT) counted.delete(counted.values().next().value!);
+  return true;
+}
+
+/**
+ * 꺼낸 사용량 하나를 처리한다(#B5 수정 2차). 한도 계산과 실행 귀속을 나눈다:
+ *  - 한도 계산(세션 합계·사람 몫): 실행에 붙든 안 붙든, 받은 사용량을 받은 순서대로 더한다. 세션 합계는 언제나
+ *    더하기로만 바꾼다 — baseTokens에서 다시 계산하면 그 실행이 열린 뒤 늦게 더한 앞 실행의 것을 덮어 버린다.
+ *    같은 요청 번호는 한 번만 센다(요청 번호가 없으면 가릴 수 없어 그대로 더한다)
+ *  - 실행 귀속(run_usage·실행 합계·턴 수): 지금 규칙 그대로. 붙은 실행이 있을 때만 붙이고, 붙인 것만 기억한다(B3)
+ */
 async function attributeRunUsage(session: Session, request: ApiRequestUsage): Promise<void> {
   const open = openTerminalRun(session);
+  const usage: AgentUsage = { inputTokens: request.inputTokens, outputTokens: request.outputTokens, cacheReadTokens: request.cacheReadTokens, cacheWriteTokens: request.cacheWriteTokens };
+
+  // 1) 한도 계산: 붙든 안 붙든 받은 사용량을 모두 세션 합계에 더한다(더하기로만).
+  //    같은 요청 번호를 다시 받으면 더하지 않는다(그때 sessionTokens는 undefined가 된다)
+  let sessionTokens: AgentUsage | undefined;
+  if (countTerminalUsageOnce(session, request.requestId)) {
+    sessionTokens = addTokens(session.snapshot.tokens, usage);
+    session.snapshot.tokens = sessionTokens;
+  }
+
+  // 2) 실행 귀속: 열린 실행, 또는 막 닫힌 실행(+5초) 창에 드는 것만 붙인다
   let runId: string | undefined;
   if (open && request.at >= Date.parse(open.startedAt)) {
     runId = open.id;
@@ -7636,45 +7669,44 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
   }
   // 실행에 붙일지 정한 뒤에 기억한다. 실행 밖으로 버린 것은 기억하지 않아야 한다 —
   // 지금 기억해 두면 나중에 같은 번호가 맞는 실행 창 안에서 와도 중복으로 보고 놓친다
-  if (!runId) return;
-  if (request.requestId !== undefined) {
+  if (runId !== undefined && request.requestId !== undefined) {
     const seen = (session.seenUsageIds ??= new Set());
-    if (seen.has(request.requestId)) return;
-    seen.add(request.requestId);
-    if (seen.size > TERMINAL_SEEN_USAGE_LIMIT) seen.delete(seen.values().next().value!);
+    if (seen.has(request.requestId)) runId = undefined;
+    else {
+      seen.add(request.requestId);
+      if (seen.size > TERMINAL_SEEN_USAGE_LIMIT) seen.delete(seen.values().next().value!);
+    }
   }
-  const usage: AgentUsage = { inputTokens: request.inputTokens, outputTokens: request.outputTokens, cacheReadTokens: request.cacheReadTokens, cacheWriteTokens: request.cacheWriteTokens };
-  emit(session, {
-    type: 'run_usage',
-    runId,
-    model: request.model,
-    usage,
-    ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}),
-    ...(request.durationMs !== undefined ? { durationMs: request.durationMs } : {}),
-  });
-  // 열린 실행에 붙는 것은 그 실행의 합계에도 더해, 닫힐 때 run_finished.usage·metrics에 실리게 한다
-  if (open && runId === open.id) {
-    const totals = (open.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0 });
-    totals.usage = addTokens(totals.usage, usage);
-    totals.usageByModel[request.model] = addTokens(totals.usageByModel[request.model], usage);
-    totals.modelCalls += 1;
-    // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
-    open.terminal.modelCalls += 1;
-    noteTerminalActivity(open);
-    // 대화 실행(runPlan의 tokens 처리)과 같은 꼴로 세션 합계·사람 몫에 더한다. 사용량은 실행 누적값이라 늘어난 만큼만 더해진다
-    session.snapshot.tokens = addTokens(open.baseTokens, totals.usage);
-    emit(session, { type: 'tokens', runId: open.id, usage: totals.usage, sessionTokens: session.snapshot.tokens });
-    // 사람 몫을 먼저 저장한 뒤(await) 저장된 값으로 한도를 판정한다(#B5 수정 2)
-    await chargeUser(open, totals.usage);
-    // 한도를 넘었으면 그 실행을 멈추고 되돌린다(budget). 턴 상한에 닿았으면 그 뒤의 쓰기 도구를 막는다(max_turns)
-    checkTerminalLimits(session, open);
-    return;
+  if (runId !== undefined) {
+    emit(session, {
+      type: 'run_usage',
+      runId,
+      model: request.model,
+      usage,
+      ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}),
+      ...(request.durationMs !== undefined ? { durationMs: request.durationMs } : {}),
+    });
+    // 열린 실행에 붙는 것은 그 실행의 합계에도 더해, 닫힐 때 run_finished.usage·metrics에 실리게 한다
+    if (open && runId === open.id) {
+      const totals = (open.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0 });
+      totals.usage = addTokens(totals.usage, usage);
+      totals.usageByModel[request.model] = addTokens(totals.usageByModel[request.model], usage);
+      totals.modelCalls += 1;
+      // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
+      open.terminal.modelCalls += 1;
+      noteTerminalActivity(open);
+    }
   }
-  // 실행이 닫힌 뒤 늦게 온 사용량도 세션 합계·사람 몫에 더한다(#B5 수정 1). 실행은 이미 닫혔으니 멈출 것은 없고,
-  // 넘었으면 다음 요청 시작이 막히는 것으로 충분하다
-  session.snapshot.tokens = addTokens(session.snapshot.tokens, usage);
-  emit(session, { type: 'tokens', runId, usage, sessionTokens: session.snapshot.tokens });
-  await chargeLateTerminalUsage(session, usage);
+
+  // 3) 같은 요청 번호를 다시 받았으면(이미 셌으면) 사람 몫·합계 알림·한도 판정을 건너뛴다
+  if (sessionTokens === undefined) return;
+  // 사람 몫을 먼저 저장한 뒤(await) 저장된 값으로 한도를 판정한다(#B5 수정 1·2차). 붙지 않은 것은 세션 주인 몫이다
+  await chargeTerminalOwnerUsage(session, usage);
+  // 화면이 세션 합계를 맞추도록 알린다. 붙은 실행이 있으면 그 실행 id로, 없으면 빈 id로(터미널 화면은 실행별 표시를 쓰지 않는다)
+  emit(session, { type: 'tokens', runId: runId ?? '', usage, sessionTokens });
+  // 한도를 넘었으면 열린 실행이 있을 때 그 실행을 멈추고 되돌린다. 없으면 다음 요청 시작이 막히는 것으로 충분하다
+  const stillOpen = openTerminalRun(session);
+  if (stillOpen) checkTerminalLimits(session, stillOpen);
 }
 
 /** 터미널 실행의 합계를 run_finished.metrics에 실을 꼴로 만든다. 매 호출은 모델 이름별로만 세고 툴 시간은 재지 않는다 */
