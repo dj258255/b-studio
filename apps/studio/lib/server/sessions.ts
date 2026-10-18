@@ -7646,6 +7646,15 @@ function openTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRun
 }
 
 /**
+ * 그 세션에 지금 열려 있는 터미널 실행의 id(없으면 undefined). 작업 카드 레인이 비정상 종료 뒤
+ * 남아 있는 실행을 찾아 취소할 때 쓴다(#B6a 수정 4). 세션이 없으면(멈춰 기록만 남았으면) 없다
+ */
+export function openTerminalRunId(id: string): string | undefined {
+  const session = store.sessions.get(id);
+  return session ? openTerminalRun(session)?.id : undefined;
+}
+
+/**
  * B_STUDIO_TERMINAL_STALL_SECONDS(#B5). 터미널 실행에 이만큼(초) 움직임이 없으면 한 번 알린다. 비었으면 120초,
  * 양의 정수가 아니면 던진다(오타가 조용히 다른 시간이 되지 않게, parseTokenLimit과 같은 태도)
  */

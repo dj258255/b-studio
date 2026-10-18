@@ -2,7 +2,7 @@ import type { AgentUsage, RunMetrics } from '@b-studio/agent';
 import type { StudioEvent } from '@/lib/studio-events';
 import { terminalPasteText } from '@/lib/terminal';
 import { openSessionTerminal, sessionTerminalCliAlive, writeSessionTerminal } from './session-terminal';
-import { getSnapshot, sessionHistory, sessionTerminalTarget, setTerminalTaskContext, subscribe } from './sessions';
+import { cancelRun, getSnapshot, openTerminalRunId, sessionHistory, sessionTerminalTarget, setTerminalTaskContext, subscribe } from './sessions';
 import type { TaskCardDone } from './task-cards';
 
 /**
@@ -37,6 +37,12 @@ export interface TerminalTaskDeps {
   setTaskContext: (sessionId: string, context: { writableScope: readonly string[]; doneTests: readonly TaskCardDone[] } | undefined) => void;
   /** 세션이 아직 살아 있는가를 알기 위한 상태 읽기 */
   status: (sessionId: string) => string | undefined;
+  /** 그 세션에 열려 있는 터미널 실행의 id(없으면 undefined). 비정상 종료 뒤 남은 실행을 찾는다 */
+  openRunId: (sessionId: string) => string | undefined;
+  /** 실행 하나를 취소한다(CLI에 Esc, 중단 신호를 받은 쪽이 되돌리고 닫는다) */
+  cancelRun: (sessionId: string, runId: string) => void;
+  /** 취소한 실행이 닫히기를 기다리는 상한. 넘으면 맥락을 지우지 않고 남긴다 */
+  closeTimeoutMs: number;
   /** CLI가 뜨기를 기다리는 상한 */
   cliTimeoutMs: number;
   /** 붙여 넣은 요청이 실행으로 이어지기를 기다리는 상한(Enter를 한 번 더 보낸 뒤 이 시간을 또 기다린다) */
@@ -69,6 +75,9 @@ const defaultDeps: TerminalTaskDeps = {
   readEvents: sessionHistory,
   setTaskContext: setTerminalTaskContext,
   status: (sessionId) => getSnapshot(sessionId)?.status,
+  openRunId: openTerminalRunId,
+  cancelRun,
+  closeTimeoutMs: 60_000,
   cliTimeoutMs: 10 * 60_000,
   submitTimeoutMs: 30_000,
   runTimeoutMs: 30 * 60_000,
@@ -106,14 +115,16 @@ export async function runTerminalTask(
   const deps: TerminalTaskDeps = { ...defaultDeps, ...overrides };
   deps.setTaskContext(sessionId, { writableScope: options.writableScope, doneTests: options.doneTests });
   let unsubscribe: (() => void) | undefined;
+  /** 붙여 넣은 뒤인가. 이 뒤로는 터미널의 실행이 열려 있을 수 있다 */
+  let pasted = false;
   try {
     // 1·2. CLI가 뜰 때까지 기다린다
     options.onWaiting?.(WAIT_CLI_NOTE);
     await waitForCli(sessionId, deps);
     options.onWaiting?.(undefined);
 
-    const pasted = terminalPasteText(request);
-    if (!pasted) throw new Error('붙여 넣을 요청 글이 비어 있습니다');
+    const pasteText = terminalPasteText(request);
+    if (!pasteText) throw new Error('붙여 넣을 요청 글이 비어 있습니다');
 
     // 3. 이벤트를 구독한 뒤 붙여 넣는다. 이미 있던 실행(앞 작업 등)은 건너뛴다
     const box: { started?: Extract<StudioEvent, { type: 'run_started' }>; finished?: Extract<StudioEvent, { type: 'run_finished' }> } = {};
@@ -124,7 +135,8 @@ export async function runTerminalTask(
       else if (event.type === 'run_usage') usages.push({ runId: event.runId, usage: event.usage, ...(event.costUsd !== undefined ? { costUsd: event.costUsd } : {}) });
       else if (event.type === 'run_finished' && box.started !== undefined && event.runId === box.started.runId) box.finished = event;
     });
-    deps.driver.write(sessionId, `\x1b[200~${pasted}\x1b[201~`);
+    deps.driver.write(sessionId, `\x1b[200~${pasteText}\x1b[201~`);
+    pasted = true;
     deps.driver.write(sessionId, '\r');
 
     // 4. 요청이 실행으로 이어졌는가. 안 되면 Enter를 한 번 더 보낸다
@@ -144,6 +156,8 @@ export async function runTerminalTask(
     // 비용은 하나라도 알려 온 것이 있을 때만 싣는다(없으면 필드를 두지 않는다 — 0과 모름을 구분한다)
     let costUsd: number | undefined;
     for (const entry of ofRun) if (entry.costUsd !== undefined) costUsd = (costUsd ?? 0) + entry.costUsd;
+    // 정상 종료: 기다린 실행이 닫혔다. 맥락을 지우고 결과를 돌려준다
+    deps.setTaskContext(sessionId, undefined);
     return {
       runId: started.runId,
       status: finished.status,
@@ -153,11 +167,48 @@ export async function runTerminalTask(
       ...(finished.durationMs !== undefined ? { durationMs: finished.durationMs } : {}),
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
+  } catch (error) {
+    // 비정상 종료(시간 초과·예외). 붙여 넣은 뒤라면 그 세션에 터미널 실행이 아직 열려 있을 수 있다 — 맥락을 그냥 지우면
+    // 에이전트가 카드 범위·완료 검사 없이 계속 일하고, 턴이 끝나면 범위 밖 변경이 체크포인트로 남는다.
+    // 열린 실행을 취소하고 닫힐 때까지 맥락을 유지한다(#B6a 수정 4)
+    const leftover = pasted && (await settleAbandonedRun(sessionId, deps));
+    if (leftover) {
+      throw new Error(`${errorMessage(error)}\n[b-studio] 카드의 쓰기 범위가 그 세션에 남아 있습니다 — 실행을 시간 안에 닫지 못했습니다. 세션을 멈추면 맥락이 사라집니다.`);
+    }
+    deps.setTaskContext(sessionId, undefined);
+    throw error;
   } finally {
     options.onWaiting?.(undefined);
-    deps.setTaskContext(sessionId, undefined);
     unsubscribe?.();
   }
+}
+
+/**
+ * 비정상 종료 뒤 열린 터미널 실행을 취소하고 닫히기를 기다린다(#B6a 수정 4).
+ * 닫혔거나(다른 실행으로 바뀌었거나) 열린 실행이 없거나 세션이 멈췄으면 거짓, 상한 안에 닫히지 않았으면 참.
+ * 참이면 부르는 쪽이 맥락을 지우지 않는다 — 지우면 범위·완료 검사 없이 계속 일하게 된다
+ */
+async function settleAbandonedRun(sessionId: string, deps: TerminalTaskDeps): Promise<boolean> {
+  const runId = deps.openRunId(sessionId);
+  if (runId === undefined) return false;
+  try {
+    deps.cancelRun(sessionId, runId);
+  } catch {
+    // 그 사이 닫혔다. 아래에서 확인한다
+  }
+  const started = Date.now();
+  for (;;) {
+    // 세션이 멈추면 실행도 맥락도 의미가 없다(이어서 작업하면 새 세션 객체라 맥락이 사라진다)
+    const status = deps.status(sessionId);
+    if (status === 'stopped' || status === 'failed') return false;
+    if (deps.openRunId(sessionId) !== runId) return false;
+    if (Date.now() - started > deps.closeTimeoutMs) return true;
+    await deps.sleep(deps.pollMs);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function waitForCli(sessionId: string, deps: TerminalTaskDeps): Promise<void> {

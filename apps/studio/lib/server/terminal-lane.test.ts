@@ -8,6 +8,8 @@ vi.mock('./sessions', () => ({
   sessionTerminalTarget: () => ({}),
   setTerminalTaskContext: () => {},
   subscribe: () => () => {},
+  openTerminalRunId: () => undefined,
+  cancelRun: () => {},
 }));
 vi.mock('./session-terminal', () => ({
   openSessionTerminal: async () => {},
@@ -27,9 +29,13 @@ async function until(check: () => boolean, message: string): Promise<void> {
   }
 }
 
-function harness(config: { alive?: boolean | (() => boolean); startOnEnter?: number } = {}) {
+function harness(
+  config: { alive?: boolean | (() => boolean); startOnEnter?: number; runTimeoutMs?: number; closeTimeoutMs?: number } = {},
+) {
   const writes: string[] = [];
   const contexts: Array<{ writableScope: readonly string[]; doneTests: readonly TaskCardDone[] } | undefined> = [];
+  /** 가짜 세션 상태·열린 실행. 테스트가 바꿔 멈춤·늦은 종료를 흉내 낸다 */
+  const state = { status: 'ready' as string, open: undefined as string | undefined, cancels: [] as string[] };
   let listener: ((event: StudioEvent) => void) | undefined;
   let enters = 0;
   let runs = 0;
@@ -47,6 +53,7 @@ function harness(config: { alive?: boolean | (() => boolean); startOnEnter?: num
       enters += 1;
       if (enters === startOnEnter) {
         lastRunId = `run-${++runs}`;
+        state.open = lastRunId;
         emit({ type: 'run_started', runId: lastRunId, request: 'do it', via: 'terminal' });
       }
     },
@@ -64,15 +71,20 @@ function harness(config: { alive?: boolean | (() => boolean); startOnEnter?: num
     setTaskContext: (_sessionId, context) => {
       contexts.push(context);
     },
-    status: () => 'ready',
+    status: () => state.status,
+    openRunId: () => state.open,
+    cancelRun: (_sessionId, runId) => {
+      state.cancels.push(runId);
+    },
     cliTimeoutMs: 200,
     submitTimeoutMs: 60,
-    runTimeoutMs: 400,
+    runTimeoutMs: config.runTimeoutMs ?? 400,
+    closeTimeoutMs: config.closeTimeoutMs ?? 200,
     usageGraceMs: 0,
     pollMs: 2,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
-  return { writes, deps, contexts, emit, startedRunId: () => lastRunId };
+  return { writes, deps, contexts, emit, state, startedRunId: () => lastRunId };
 }
 
 describe('터미널 레인의 한 작업', () => {
@@ -200,5 +212,58 @@ describe('터미널 레인의 한 작업', () => {
     await until(() => h2.writes.length >= 2, '붙여 넣지 않았습니다');
     h2.emit({ type: 'run_finished', runId: h2.startedRunId(), status: 'done', summary: '끝', usage });
     expect((await running2).costUsd).toBeUndefined();
+  });
+});
+
+describe('비정상 종료 뒤 맥락이 남지 않게 한다 (수정 4)', () => {
+  /** 던진 오류를 값으로 받아, 처리하지 않은 rejection이 되지 않게 한다 */
+  const settle = <T>(promise: Promise<T>): Promise<{ value?: T; error?: Error }> =>
+    promise.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error: error as Error }),
+    );
+
+  it('실행 시간 초과면 실행을 취소하고, run_finished가 올 때까지 맥락을 유지한 뒤 지운다', async () => {
+    const h = harness({ runTimeoutMs: 60 });
+    const running = settle(runTerminalTask('s1', 'do it', options(), h.deps));
+
+    await until(() => h.state.cancels.length > 0, '실행을 취소하지 않았습니다');
+    expect(h.state.cancels).toEqual(['run-1']);
+    // 아직 run_finished가 오지 않았다 — 맥락이 남아 있다
+    expect(h.contexts.at(-1)).toBeDefined();
+
+    // 그 실행이 닫히면 그때 맥락을 지운다
+    h.state.open = undefined;
+    const outcome = await running;
+    expect(outcome.error?.message).toContain('끝나지 않았습니다');
+    expect(h.contexts.at(-1)).toBeUndefined();
+  });
+
+  it('취소해도 상한 안에 닫히지 않으면 맥락을 지우지 않고 안내를 덧붙여 던진다', async () => {
+    const h = harness({ runTimeoutMs: 40, closeTimeoutMs: 40 });
+    const outcome = await settle(runTerminalTask('s1', 'do it', options(), h.deps));
+
+    expect(h.state.cancels).toEqual(['run-1']);
+    expect(outcome.error?.message).toContain('카드의 쓰기 범위가 그 세션에 남아 있습니다');
+    // 맥락을 지우지 않았다(setTaskContext(undefined)가 불리지 않았다)
+    expect(h.contexts.at(-1)).toBeDefined();
+  });
+
+  it('붙여 넣기 실패(run_started 안 옴)면 그 사이 열린 실행이 없으니 지금처럼 지운다', async () => {
+    const h = harness({ startOnEnter: 99 });
+    await expect(runTerminalTask('s1', 'do it', options(), h.deps)).rejects.toThrow('들어가지 않았습니다');
+    expect(h.state.open).toBeUndefined();
+    expect(h.contexts.at(-1)).toBeUndefined();
+  });
+
+  it('세션이 멈추면 맥락을 지운다', async () => {
+    const h = harness();
+    const running = settle(runTerminalTask('s1', 'do it', options(), h.deps));
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+    h.state.status = 'stopped';
+
+    const outcome = await running;
+    expect(outcome.error?.message).toContain('멈춰');
+    expect(h.contexts.at(-1)).toBeUndefined();
   });
 });
