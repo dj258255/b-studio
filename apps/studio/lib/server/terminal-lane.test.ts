@@ -30,13 +30,26 @@ async function until(check: () => boolean, message: string): Promise<void> {
 }
 
 function harness(
-  config: { alive?: boolean | (() => boolean); startOnEnter?: number; runTimeoutMs?: number; closeTimeoutMs?: number } = {},
+  config: {
+    alive?: boolean | (() => boolean);
+    startOnEnter?: number;
+    runTimeoutMs?: number;
+    closeTimeoutMs?: number;
+    submitTimeoutMs?: number;
+    /** 붙여 넣기 전에 열려 있는 실행 id */
+    preOpen?: string;
+    /** 첫 Enter에서 다른 요청의 run_started를 먼저 보낸다 */
+    foreignFirst?: boolean;
+    /** run_started.request를 <pasted_content>로 감싼다 */
+    wrap?: boolean;
+  } = {},
 ) {
   const writes: string[] = [];
   const contexts: Array<{ writableScope: readonly string[]; doneTests: readonly TaskCardDone[] } | undefined> = [];
-  /** 가짜 세션 상태·열린 실행. 테스트가 바꿔 멈춤·늦은 종료를 흉내 낸다 */
-  const state = { status: 'ready' as string, open: undefined as string | undefined, cancels: [] as string[] };
+  /** 가짜 세션 상태·열린 실행. 테스트가 바꿔 멈춤·늦은 종료·다른 실행을 흉내 낸다 */
+  const state = { status: 'ready' as string, open: config.preOpen as string | undefined, cancels: [] as string[] };
   let listener: ((event: StudioEvent) => void) | undefined;
+  let pastedText = '';
   let enters = 0;
   let runs = 0;
   let lastRunId = '';
@@ -49,13 +62,19 @@ function harness(
     cliAlive: () => alive(),
     write: (_sessionId: string, data: string) => {
       writes.push(data);
+      // bracketed paste로 들어온 우리 글을 기억한다 — run_started의 request와 견줄 때 쓴다
+      if (data.startsWith('\x1b[200~')) {
+        pastedText = data.slice('\x1b[200~'.length, -'\x1b[201~'.length);
+        return;
+      }
       if (data !== '\r') return;
       enters += 1;
-      if (enters === startOnEnter) {
-        lastRunId = `run-${++runs}`;
-        state.open = lastRunId;
-        emit({ type: 'run_started', runId: lastRunId, request: 'do it', via: 'terminal' });
-      }
+      if (enters !== startOnEnter) return;
+      if (config.foreignFirst) emit({ type: 'run_started', runId: 'foreign-1', request: '사람이 그 사이 친 다른 요청', via: 'terminal' });
+      lastRunId = `run-${++runs}`;
+      state.open = lastRunId;
+      const requestText = config.wrap ? `<pasted_content id="x">\n${pastedText}\n</pasted_content id="x">` : pastedText;
+      emit({ type: 'run_started', runId: lastRunId, request: requestText, via: 'terminal' });
     },
   };
 
@@ -77,7 +96,7 @@ function harness(
       state.cancels.push(runId);
     },
     cliTimeoutMs: 200,
-    submitTimeoutMs: 60,
+    submitTimeoutMs: config.submitTimeoutMs ?? 60,
     runTimeoutMs: config.runTimeoutMs ?? 400,
     closeTimeoutMs: config.closeTimeoutMs ?? 200,
     usageGraceMs: 0,
@@ -215,7 +234,7 @@ describe('터미널 레인의 한 작업', () => {
   });
 });
 
-describe('비정상 종료 뒤 맥락이 남지 않게 한다 (수정 4)', () => {
+describe('비정상 종료 뒤 맥락은 우리 실행의 run_finished 또는 세션 멈춤에서만 지운다 (수정 4·5)', () => {
   /** 던진 오류를 값으로 받아, 처리하지 않은 rejection이 되지 않게 한다 */
   const settle = <T>(promise: Promise<T>): Promise<{ value?: T; error?: Error }> =>
     promise.then(
@@ -223,23 +242,28 @@ describe('비정상 종료 뒤 맥락이 남지 않게 한다 (수정 4)', () =>
       (error: unknown) => ({ error: error as Error }),
     );
 
-  it('실행 시간 초과면 실행을 취소하고, run_finished가 올 때까지 맥락을 유지한 뒤 지운다', async () => {
-    const h = harness({ runTimeoutMs: 60 });
+  it('실행 시간 초과면 열린 실행을 취소하고, 실행이 바뀌면 그것도 취소하며, 맥락은 남긴다 (수정 4 (a) 갱신 · 5 (a))', async () => {
+    const h = harness({ runTimeoutMs: 60, closeTimeoutMs: 400 });
     const running = settle(runTerminalTask('s1', 'do it', options(), h.deps));
 
-    await until(() => h.state.cancels.length > 0, '실행을 취소하지 않았습니다');
+    await until(() => h.state.cancels.length >= 1, '실행을 취소하지 않았습니다');
     expect(h.state.cancels).toEqual(['run-1']);
-    // 아직 run_finished가 오지 않았다 — 맥락이 남아 있다
     expect(h.contexts.at(-1)).toBeDefined();
 
-    // 그 실행이 닫히면 그때 맥락을 지운다
+    // 열린 실행이 다른 id로 바뀌면 닫힘으로 보지 않고 그 실행도 취소한다
+    h.state.open = 'run-2';
+    await until(() => h.state.cancels.length >= 2, '바뀐 실행을 취소하지 않았습니다');
+    expect(h.state.cancels).toEqual(['run-1', 'run-2']);
+
+    // 열린 실행이 없어져도 우리 실행의 run_finished를 받지 않았으므로 맥락은 남는다
     h.state.open = undefined;
     const outcome = await running;
     expect(outcome.error?.message).toContain('끝나지 않았습니다');
-    expect(h.contexts.at(-1)).toBeUndefined();
+    expect(outcome.error?.message).toContain('카드의 쓰기 범위가 그 세션에 남아 있습니다');
+    expect(h.contexts.at(-1)).toBeDefined();
   });
 
-  it('취소해도 상한 안에 닫히지 않으면 맥락을 지우지 않고 안내를 덧붙여 던진다', async () => {
+  it('취소해도 상한 안에 닫히지 않으면 맥락을 지우지 않고 안내를 덧붙여 던진다 (수정 4 (b))', async () => {
     const h = harness({ runTimeoutMs: 40, closeTimeoutMs: 40 });
     const outcome = await settle(runTerminalTask('s1', 'do it', options(), h.deps));
 
@@ -249,21 +273,70 @@ describe('비정상 종료 뒤 맥락이 남지 않게 한다 (수정 4)', () =>
     expect(h.contexts.at(-1)).toBeDefined();
   });
 
-  it('붙여 넣기 실패(run_started 안 옴)면 그 사이 열린 실행이 없으니 지금처럼 지운다', async () => {
+  it('붙여 넣은 뒤 우리 run_started가 오지 않으면 맥락을 남기고, 세션이 멈추면 지운다 (수정 5 (b))', async () => {
+    // 남긴다: 붙여 넣은 글이 나중에 들어갈 수 있다
     const h = harness({ startOnEnter: 99 });
-    await expect(runTerminalTask('s1', 'do it', options(), h.deps)).rejects.toThrow('들어가지 않았습니다');
-    expect(h.state.open).toBeUndefined();
+    const outcome = await settle(runTerminalTask('s1', 'do it', options(), h.deps));
+    expect(outcome.error?.message).toContain('들어가지 않았습니다');
+    expect(outcome.error?.message).toContain('붙여 넣은 요청이 나중에 들어갈 수 있어');
+    expect(h.contexts.at(-1)).toBeDefined();
+
+    // 세션이 멈추면 지운다
+    const h2 = harness({ startOnEnter: 99 });
+    const running = settle(runTerminalTask('s2', 'do it', options(), h2.deps));
+    await until(() => h2.writes.length >= 2, '붙여 넣지 않았습니다');
+    h2.state.status = 'stopped';
+    const stopped = await running;
+    expect(stopped.error?.message).toContain('멈춰');
+    expect(h2.contexts.at(-1)).toBeUndefined();
+  });
+
+  it('다른 요청의 run_started가 먼저 와도 무시하고, 우리 실행의 run_finished로 정상 종료한다 (수정 5 (c))', async () => {
+    const h = harness({ foreignFirst: true });
+    const running = settle(runTerminalTask('s1', 'do it', options(), h.deps));
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '끝', durationMs: 5 });
+    const outcome = await running;
+    expect(outcome.value).toMatchObject({ runId: 'run-1', status: 'done' });
+    // 우리 실행이 끝났으니 맥락을 지웠다
     expect(h.contexts.at(-1)).toBeUndefined();
   });
 
-  it('세션이 멈추면 맥락을 지운다', async () => {
-    const h = harness();
+  it('붙여 넣은 요청이 <pasted_content>로 감싸져 와도 우리 실행으로 잡는다 (수정 5 (d))', async () => {
+    const h = harness({ wrap: true });
     const running = settle(runTerminalTask('s1', 'do it', options(), h.deps));
     await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
-    h.state.status = 'stopped';
 
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '끝' });
     const outcome = await running;
-    expect(outcome.error?.message).toContain('멈춰');
+    expect(outcome.value).toMatchObject({ runId: 'run-1', status: 'done' });
+    expect(h.contexts.at(-1)).toBeUndefined();
+  });
+
+  it('붙여 넣기 전에 열린 실행이 있으면 닫히기를 기다렸다가 붙여 넣는다 (수정 5 (e))', async () => {
+    const h = harness({ preOpen: 'run-pre', submitTimeoutMs: 300 });
+    const running = settle(runTerminalTask('s1', 'do it', options(), h.deps));
+
+    // 앞선 실행이 열려 있는 동안에는 붙여 넣지 않는다
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(h.writes).toEqual([]);
+    expect(h.state.cancels).toEqual([]);
+
+    h.state.open = undefined;
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '끝' });
+    const outcome = await running;
+    expect(outcome.value).toMatchObject({ status: 'done' });
+    expect(h.contexts.at(-1)).toBeUndefined();
+  });
+
+  it('붙여 넣기 전에 열린 실행이 상한 안에 닫히지 않으면 붙여 넣지 않고 던지며 맥락을 지운다 (수정 5 (e))', async () => {
+    const h = harness({ preOpen: 'run-pre', submitTimeoutMs: 40 });
+    await expect(runTerminalTask('s1', 'do it', options(), h.deps)).rejects.toThrow('앞선 실행이 남아 있어');
+
+    expect(h.writes).toEqual([]);
+    expect(h.state.cancels).toEqual([]);
     expect(h.contexts.at(-1)).toBeUndefined();
   });
 });

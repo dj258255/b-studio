@@ -69,6 +69,13 @@ export const terminalLaneDriver: TerminalLaneDriver = {
 const WAIT_CLI_NOTE =
   '터미널의 claude가 뜨기를 기다립니다. 새 세션 폴더마다 claude가 폴더 신뢰를 묻습니다 — 격자에서 그 칸을 열어 "Yes, I trust this folder"를 고르세요.';
 
+/**
+ * 비정상 종료 뒤 맥락을 남길 때 오류 글에 덧붙이는 안내(#B6a 수정 5). 남아 있다는 사실과 푸는 방법(세션을 멈추기)을 적는다.
+ * 우리 실행이 아직 시작되지 않았으면 붙여 넣은 글이 나중에 들어갈 수 있다는 것을, 시작됐으면 실행이 남아 있다는 것을 적는다
+ */
+const LEFTOVER_QUEUED_NOTE = '[b-studio] 붙여 넣은 요청이 나중에 들어갈 수 있어 카드의 쓰기 범위를 그 세션에 남겨 둡니다. 풀려면 세션을 멈추세요.';
+const LEFTOVER_RUN_NOTE = '[b-studio] 카드의 쓰기 범위가 그 세션에 남아 있습니다 — 실행을 닫지 못했습니다. 풀려면 세션을 멈추세요.';
+
 const defaultDeps: TerminalTaskDeps = {
   driver: terminalLaneDriver,
   subscribe,
@@ -101,10 +108,11 @@ export interface TerminalTaskResult {
  * 카드의 한 작업을 세션 터미널에서 돌린다.
  *  1. 카드 맥락(쓰기 범위·완료 검사)을 세션에 건다 — 게이트와 쓰기 검사가 이 값을 본다
  *  2. CLI가 뜰 때까지 기다린다(폴더 신뢰 확인을 사람이 눌러 줘야 할 수 있다)
- *  3. 이벤트를 구독한 뒤 요청을 붙여 넣는다(bracketed paste + Enter)
- *  4. run_started가 오지 않으면 Enter를 한 번 더 보낸다
+ *  3. 붙여 넣기 전에 열린 실행이 없어질 때까지 기다린 뒤, 이벤트를 구독하고 요청을 붙여 넣는다(bracketed paste + Enter)
+ *  4. 우리가 붙여 넣은 글의 run_started를 기다린다(다른 요청의 실행은 무시). 오지 않으면 Enter를 한 번 더 보낸다
  *  5. 그 runId의 run_finished를 기다리고, 늦게 온 텔레메트리까지 더해 사용량을 만든다
- *  6. 끝나면(성공·실패 둘 다) 맥락을 지우고 구독을 푼다
+ *  6. 맥락은 **우리 실행의 run_finished를 받았거나 세션이 멈췄을 때만** 지운다. 그 밖의 비정상 종료는 열린 실행을
+ *     취소해 보되 맥락을 남긴다(붙여 넣은 글이 나중에 들어가 계속 돌 수 있으므로) — 오류 글에 남은 사실과 푸는 방법을 적는다
  */
 export async function runTerminalTask(
   sessionId: string,
@@ -117,6 +125,8 @@ export async function runTerminalTask(
   let unsubscribe: (() => void) | undefined;
   /** 붙여 넣은 뒤인가. 이 뒤로는 터미널의 실행이 열려 있을 수 있다 */
   let pasted = false;
+  /** 우리가 붙여 넣은 요청의 실행을 잡았는가(그 실행의 run_finished만 정상 종료로 본다) */
+  let ourRunStarted = false;
   try {
     // 1·2. CLI가 뜰 때까지 기다린다
     options.onWaiting?.(WAIT_CLI_NOTE);
@@ -126,13 +136,18 @@ export async function runTerminalTask(
     const pasteText = terminalPasteText(request);
     if (!pasteText) throw new Error('붙여 넣을 요청 글이 비어 있습니다');
 
-    // 3. 이벤트를 구독한 뒤 붙여 넣는다. 이미 있던 실행(앞 작업 등)은 건너뛴다
+    // 4. 붙여 넣기 전에 열린 실행이 없을 때까지 기다린다 — 열린 실행에 우리 글이 이어 붙으면(terminal_prompt)
+    // 우리 run_started가 오지 않는다. 상한을 넘으면 붙여 넣지 않는다(아직 붙여 넣기 전이라 맥락은 지워도 된다)
+    if (!(await waitForNoOpenRun(sessionId, deps))) throw new Error('터미널에 앞선 실행이 남아 있어 요청을 붙여 넣지 않았습니다(시간 안에 끝나지 않았습니다)');
+
+    // 3. 이벤트를 구독한 뒤 붙여 넣는다. 이미 있던 실행(앞 작업 등)은 건너뛰고, 우리가 붙여 넣은 글의 실행만 잡는다
     const box: { started?: Extract<StudioEvent, { type: 'run_started' }>; finished?: Extract<StudioEvent, { type: 'run_finished' }> } = {};
     const usages: Array<{ runId: string; usage: AgentUsage; costUsd?: number }> = [];
     const seen = new Set(deps.readEvents(sessionId).flatMap((event) => (event.type === 'run_started' ? [event.runId] : [])));
     unsubscribe = deps.subscribe(sessionId, (event) => {
-      if (event.type === 'run_started' && event.via === 'terminal' && !seen.has(event.runId) && box.started === undefined) box.started = event;
-      else if (event.type === 'run_usage') usages.push({ runId: event.runId, usage: event.usage, ...(event.costUsd !== undefined ? { costUsd: event.costUsd } : {}) });
+      if (event.type === 'run_started' && event.via === 'terminal' && box.started === undefined && !seen.has(event.runId) && isOurRequest(event.request, pasteText)) {
+        box.started = event;
+      } else if (event.type === 'run_usage') usages.push({ runId: event.runId, usage: event.usage, ...(event.costUsd !== undefined ? { costUsd: event.costUsd } : {}) });
       else if (event.type === 'run_finished' && box.started !== undefined && event.runId === box.started.runId) box.finished = event;
     });
     deps.driver.write(sessionId, `\x1b[200~${pasteText}\x1b[201~`);
@@ -146,6 +161,7 @@ export async function runTerminalTask(
       started = await waitFor(sessionId, deps, deps.submitTimeoutMs, () => box.started);
     }
     if (!started) throw new Error('요청이 터미널의 claude에 들어가지 않았습니다(입력 줄에 글이 남아 있으면 그 칸에서 Enter를 누르세요)');
+    ourRunStarted = true;
 
     // 5. 그 실행의 끝을 기다린다
     const finished = await waitFor(sessionId, deps, deps.runTimeoutMs, () => box.finished);
@@ -168,15 +184,22 @@ export async function runTerminalTask(
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } catch (error) {
-    // 비정상 종료(시간 초과·예외). 붙여 넣은 뒤라면 그 세션에 터미널 실행이 아직 열려 있을 수 있다 — 맥락을 그냥 지우면
-    // 에이전트가 카드 범위·완료 검사 없이 계속 일하고, 턴이 끝나면 범위 밖 변경이 체크포인트로 남는다.
-    // 열린 실행을 취소하고 닫힐 때까지 맥락을 유지한다(#B6a 수정 4)
-    const leftover = pasted && (await settleAbandonedRun(sessionId, deps));
-    if (leftover) {
-      throw new Error(`${errorMessage(error)}\n[b-studio] 카드의 쓰기 범위가 그 세션에 남아 있습니다 — 실행을 시간 안에 닫지 못했습니다. 세션을 멈추면 맥락이 사라집니다.`);
+    // 붙여 넣은 뒤에는 우리 요청의 run_finished를 받았거나 세션이 멈췄을 때만 지운다(#B6a 수정 5).
+    // 세션이 멈추면 실행도 맥락도 의미가 없다(이어서 작업하면 새 세션 객체라 맥락이 사라진다)
+    const status = deps.status(sessionId);
+    if (status === 'stopped' || status === 'failed') {
+      deps.setTaskContext(sessionId, undefined);
+      throw error;
     }
-    deps.setTaskContext(sessionId, undefined);
-    throw error;
+    // 붙여 넣기 전이면 이 세션에 우리 요청이 들어가지 않았다 — 지워도 된다
+    if (!pasted) {
+      deps.setTaskContext(sessionId, undefined);
+      throw error;
+    }
+    // 그 밖의 비정상 종료: 열린 실행을 취소해 보되 맥락은 남긴다(닫힌 쪽). 붙여 넣은 글은 입력 줄·CLI 대기열에
+    // 남아 나중에 들어가 계속 돌 수 있으므로, 지금 지우면 범위·완료 검사 없이 일하게 된다
+    await cancelOpenRuns(sessionId, deps);
+    throw new Error(`${errorMessage(error)}\n${ourRunStarted ? LEFTOVER_RUN_NOTE : LEFTOVER_QUEUED_NOTE}`);
   } finally {
     options.onWaiting?.(undefined);
     unsubscribe?.();
@@ -184,27 +207,54 @@ export async function runTerminalTask(
 }
 
 /**
- * 비정상 종료 뒤 열린 터미널 실행을 취소하고 닫히기를 기다린다(#B6a 수정 4).
- * 닫혔거나(다른 실행으로 바뀌었거나) 열린 실행이 없거나 세션이 멈췄으면 거짓, 상한 안에 닫히지 않았으면 참.
- * 참이면 부르는 쪽이 맥락을 지우지 않는다 — 지우면 범위·완료 검사 없이 계속 일하게 된다
+ * 붙여 넣기 전에 열린 터미널 실행이 없어질 때까지 기다린다(#B6a 수정 5). 열린 실행에 우리 글이 이어 붙으면
+ * (terminal_prompt) 우리 run_started가 오지 않기 때문이다. 없어지면 참, 상한을 넘거나 세션이 멈추면 거짓
  */
-async function settleAbandonedRun(sessionId: string, deps: TerminalTaskDeps): Promise<boolean> {
-  const runId = deps.openRunId(sessionId);
-  if (runId === undefined) return false;
-  try {
-    deps.cancelRun(sessionId, runId);
-  } catch {
-    // 그 사이 닫혔다. 아래에서 확인한다
-  }
+async function waitForNoOpenRun(sessionId: string, deps: TerminalTaskDeps): Promise<boolean> {
   const started = Date.now();
   for (;;) {
-    // 세션이 멈추면 실행도 맥락도 의미가 없다(이어서 작업하면 새 세션 객체라 맥락이 사라진다)
+    if (deps.openRunId(sessionId) === undefined) return true;
     const status = deps.status(sessionId);
     if (status === 'stopped' || status === 'failed') return false;
-    if (deps.openRunId(sessionId) !== runId) return false;
-    if (Date.now() - started > deps.closeTimeoutMs) return true;
+    if (Date.now() - started > deps.submitTimeoutMs) return false;
     await deps.sleep(deps.pollMs);
   }
+}
+
+/**
+ * 비정상 종료 뒤 열린 터미널 실행을 취소한다(#B6a 수정 5). 열린 실행이 바뀌면 그 실행도 취소하고,
+ * 열린 실행이 없어질 때까지(또는 closeTimeoutMs까지) 기다린다. **맥락은 지우지 않는다** — 지우는 판단은
+ * 부르는 쪽의 규칙(우리 실행의 run_finished 또는 세션 stopped/failed)만 따른다
+ */
+async function cancelOpenRuns(sessionId: string, deps: TerminalTaskDeps): Promise<void> {
+  let cancelled: string | undefined;
+  const started = Date.now();
+  for (;;) {
+    const runId = deps.openRunId(sessionId);
+    if (runId === undefined) return;
+    if (runId !== cancelled) {
+      try {
+        deps.cancelRun(sessionId, runId);
+      } catch {
+        // 그 사이 닫혔다. 다음 회차에 다시 본다
+      }
+      cancelled = runId;
+    }
+    if (Date.now() - started > deps.closeTimeoutMs) return;
+    await deps.sleep(deps.pollMs);
+  }
+}
+
+/**
+ * run_started가 우리가 붙여 넣은 요청의 실행인가(#B6a 수정 5). CLI는 붙여 넣은 글을 `<pasted_content …>` 표시로
+ * 감쌀 수 있으므로 그 표시를 지운 뒤, 붙여 넣은 글의 첫 줄(앞뒤 공백 정리, 80자까지)을 포함하는지 본다.
+ * 사람이 그 사이 친 요청 등 다른 실행과 섞이지 않게 한다
+ */
+function isOurRequest(runRequest: unknown, pasteText: string): boolean {
+  if (typeof runRequest !== 'string') return false;
+  const stripped = runRequest.replace(/<\/?pasted_content[^>]*>/g, '');
+  const firstLine = (pasteText.split('\n')[0] ?? '').trim().slice(0, 80);
+  return firstLine !== '' && stripped.includes(firstLine);
 }
 
 function errorMessage(error: unknown): string {
