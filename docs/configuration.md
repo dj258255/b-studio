@@ -312,6 +312,8 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 
 <img src="images/studio-terminal-grid.png" width="760" alt="나란히 보기의 터미널 격자와 오른쪽 결과 칸">
 
+- **작업 카드**(서버, ADR-178): `POST /api/task-plans`에 `{ projectId, cards: [{ title, request, paths, doneCommand?, doneService? }] }`를 보내면 카드를 레인으로 묶어 레인마다 세션 터미널에서 돌립니다. 쓰기 범위가 겹치는 카드는 한 레인에서 순서대로, 겹치지 않으면 동시에 돕니다(동시 레인은 `B_STUDIO_MAX_LANES`, 기본 3). 카드의 경로 밖 쓰기는 막히고, `doneCommand`는 그 카드 동안만 게이트의 테스트로 돌며 통과해야 끝납니다. 레인마다 CLI가 폴더 신뢰를 처음 한 번 묻습니다 — 그 칸에서 고르세요. 카드를 쓰는 화면은 다음 묶음입니다.
+
 ### 이 컴퓨터의 CLI로 열기 (기본)
 
 기본 방식입니다. 컨테이너 안에서 열려면 `B_STUDIO_TERMINAL=container`를 줍니다(`B_STUDIO_EXPERIMENTAL=1 B_STUDIO_TERMINAL=container pnpm studio launch`).

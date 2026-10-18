@@ -107,6 +107,12 @@ const fake = vi.hoisted(() => ({
   },
   /** 이 서버에서 고를 수 있는 백엔드(setLaneBackend·selectableLaneBackends가 읽는다). 허용 목록을 좁히는 테스트만 바꾼다 */
   allowedBackends: new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']),
+  /** sessionTerminalAllowed()가 돌려줄 값(카드 계획은 이 값이 참일 때만 만들어진다) */
+  terminalAllowed: true,
+  /** runTerminalTask(터미널 레인의 한 작업)가 불린 기록(순서대로) */
+  terminalSends: [] as Array<{ sessionId: string; request: string; options: { writableScope: readonly string[]; doneTests: readonly unknown[]; onWaiting?: (note?: string) => void } }>,
+  /** runTerminalTask가 결과에 실어 줄 비용(달러). undefined면 싣지 않는다(수정 6) */
+  terminalCostUsd: undefined as number | undefined,
 }));
 
 // 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다
@@ -174,6 +180,7 @@ vi.mock('./projects', () => ({
 
 vi.mock('./sessions', () => ({
   allowedBackends: () => fake.allowedBackends,
+  sessionTerminalAllowed: () => fake.terminalAllowed,
   commitPendingWorkingCopyDocs: async (sessionId: string, message: string) => {
     fake.docsCommitted.push({ sessionId, message });
     return undefined;
@@ -278,6 +285,36 @@ vi.mock('./sessions', () => ({
   },
 }));
 
+// 터미널 레인의 한 작업. 실제로는 세션 터미널을 열어 CLI에 요청을 붙여 넣지만, 여기서는 그 자리를 흉내 낸다:
+// 그 작업이 쓸 파일을 작업 폴더에 쓰고 체크포인트를 남긴 뒤(레인 결과 기록), 결과를 돌려준다.
+vi.mock('./terminal-lane', () => ({
+  terminalLaneDriver: {
+    open: async () => {},
+    cliAlive: () => true,
+    write: () => {},
+  },
+  runTerminalTask: async (
+    sessionId: string,
+    request: string,
+    options: { writableScope: readonly string[]; doneTests: readonly unknown[]; onWaiting?: (note?: string) => void },
+  ) => {
+    fake.terminalSends.push({ sessionId, request, options });
+    const session = fake.sessions.get(sessionId)!;
+    const taskId = /\[id:([a-z0-9-]+)\]/.exec(request)?.[1];
+    const deleted = taskId ? (fake.deletes[taskId] ?? []) : [];
+    const files = taskId ? fake.writes[taskId] : undefined;
+    const runId = `terminal-${fake.terminalSends.length}`;
+    if (files === 'fail' || files === undefined) return { runId, status: 'failed', summary: '검증 게이트를 통과하지 못했습니다', ...fake.run };
+    for (const [file, content] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(session.workDir, file)), { recursive: true });
+      writeFileSync(path.join(session.workDir, file), content);
+    }
+    for (const file of deleted) rmSync(path.join(session.workDir, file), { force: true });
+    session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set([...Object.keys(files), ...deleted])] });
+    return { runId, status: 'done', summary: '완료', ...fake.run, ...(fake.terminalCostUsd !== undefined ? { costUsd: fake.terminalCostUsd } : {}) };
+  },
+}));
+
 import { StudioError } from './errors';
 import { clearRepositoryTokenCache } from './repo-token';
 import {
@@ -285,6 +322,7 @@ import {
   createTaskPlan,
   deleteTaskPlan,
   getTaskPlan,
+  listTaskPlans,
   mintBoardToken,
   planRequirementIds,
   rejectTaskPlan,
@@ -338,6 +376,9 @@ beforeEach(() => {
   fake.subIssues = [];
   fake.failIssue = false;
   fake.allowedBackends = new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']);
+  fake.terminalAllowed = true;
+  fake.terminalSends = [];
+  fake.terminalCostUsd = undefined;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
   // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
@@ -1991,5 +2032,144 @@ describe('게시판 외부 에이전트 토큰', () => {
 
     expect(plan.status).toBe('failed');
     expect(resolveBoardToken(created.id, `Bearer ${minted.token}`)).toBeUndefined();
+  });
+});
+
+describe('사람이 쓴 작업 카드(#B6a)', () => {
+  /** 작업 id는 카드 순서로 card-1, card-2, …가 붙는다 — 어느 카드인지 알아보려고 id 표시를 요청 글에 넣는다 */
+  const card = (id: string, paths: string[], extra: Record<string, unknown> = {}) => ({ title: id, request: `[id:${id}] ${id} 작업`, paths, ...extra });
+
+  it('카드 계획은 승인 대기 없이 곧바로 돌고, 레인이 터미널에서 돌며 작업마다 쓰기 범위와 완료 검사가 넘어간다', async () => {
+    fake.writes = { 'card-1': { 'web/a/one.md': 'one' }, 'card-2': { 'web/b/one.md': 'b' } };
+    // 터미널 실행이 비용을 알려 왔으면 task.run에 남는다(수정 6)
+    fake.terminalCostUsd = 0.42;
+
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: '카드 실행',
+      owner: 'kim',
+      cards: [card('card-1', ['web/a'], { doneCommand: 'pnpm test', doneService: 'web' }), card('card-2', ['web/b'])],
+    });
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    expect(plan.source).toBe('cards');
+    expect(plan.runner).toBe('terminal');
+    expect(plan.modelId).toBe('terminal');
+    // 사람이 실행을 누른 것이 승인이다 — 승인 대기 없이 approvedAt이 남는다
+    expect(plan.approvedBy).toBe('kim');
+    expect(plan.approvedAt).toBeDefined();
+    // 계획 모델을 한 번도 부르지 않았다
+    expect(fake.modelCalls).toBe(0);
+
+    // 레인 작업은 터미널에서 돌았다: 작업마다 그 카드의 쓰기 범위·완료 검사가 넘어간다
+    const ofCard1 = fake.terminalSends.find((send) => send.request.includes('[id:card-1]'))!;
+    expect(ofCard1.options.writableScope).toEqual(['web/a']);
+    expect(ofCard1.options.doneTests).toEqual([{ name: 'done-card-1', service: 'web', command: ['sh', '-c', 'pnpm test'] }]);
+    expect(ofCard1.request).toContain('완료 조건: 플랫폼이 턴의 끝에 `pnpm test`(web)을 돌려 통과해야 체크포인트를 남깁니다.');
+    const ofCard2 = fake.terminalSends.find((send) => send.request.includes('[id:card-2]'))!;
+    expect(ofCard2.options.writableScope).toEqual(['web/b']);
+    expect(ofCard2.options.doneTests).toEqual([]);
+    expect(ofCard2.request).not.toContain('완료 조건:');
+
+    // 레인·작업 보기에 완료 조건이 남는다(다시 시작해도 이것으로 완료 검사를 다시 만든다)
+    const doneTask = plan.lanes.flatMap((lane) => lane.tasks).find((item) => item.id === 'card-1')!;
+    expect(doneTask).toMatchObject({ doneCommand: 'pnpm test', doneService: 'web' });
+    // 터미널 실행이 알려 온 비용이 작업 기록에 남는다
+    expect(doneTask.run?.costUsd).toBe(0.42);
+    // 레인·통합 세션에는 모델 옵션을 넘기지 않는다(터미널 레인은 CLI가, 통합은 스크립트 턴이 돈다)
+    expect(fake.sessionOptions.every((options) => options.modelId === undefined && options.backend === undefined)).toBe(true);
+    expect(plan.integration?.status).toBe('done');
+  });
+
+  it('겹치는 쓰기 범위의 카드는 한 레인에서 순서대로, 겹치지 않으면 다른 레인으로 돈다', async () => {
+    fake.writes = { 'card-1': { 'web/a/one.md': 'one' }, 'card-2': { 'web/a/two.md': 'two' }, 'card-3': { 'web/b/one.md': 'b' } };
+
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: '겹치는 카드',
+      owner: 'kim',
+      cards: [card('card-1', ['web/a']), card('card-2', ['web/a']), card('card-3', ['web/b'])],
+    });
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    // card-1·card-2는 한 레인에 순서대로, card-3은 다른 레인
+    const lane = plan.lanes.find((candidate) => candidate.tasks.length === 2)!;
+    expect(lane.tasks.map((item) => item.id)).toEqual(['card-1', 'card-2']);
+    const sends = fake.terminalSends.filter((send) => send.sessionId === lane.sessionId);
+    expect(sends.map((send) => (send.request.includes('[id:card-1]') ? 'card-1' : 'card-2'))).toEqual(['card-1', 'card-2']);
+    expect(plan.lanes.find((candidate) => candidate.tasks[0]!.id === 'card-3')!.sessionId).not.toBe(lane.sessionId);
+  });
+
+  it('세션 터미널을 쓸 수 없으면 카드 계획은 409로 거부한다', async () => {
+    fake.terminalAllowed = false;
+
+    const error = await createTaskPlan({ projectId: 'orders', request: '카드', owner: 'kim', cards: [card('card-1', ['web/a'])] }).catch((cause: unknown) => cause);
+
+    expect((error as { status?: number }).status).toBe(409);
+    expect((error as Error).message).toContain('작업 카드는 세션 터미널을 쓸 수 있을 때');
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  it('cards와 presetPlan을 함께 넘기면 400, 카드 형식이 틀리면 400으로 거부한다', async () => {
+    const both = await createTaskPlan({
+      projectId: 'orders',
+      request: '요청',
+      owner: 'kim',
+      cards: [card('card-1', ['web/a'])],
+      presetPlan: { tasks: [task('a', ['web/a'])] },
+    }).catch((cause: unknown) => cause);
+    expect((both as { status?: number }).status).toBe(400);
+
+    const bad = await createTaskPlan({ projectId: 'orders', request: '요청', owner: 'kim', cards: [] }).catch((cause: unknown) => cause);
+    expect((bad as { status?: number }).status).toBe(400);
+  });
+
+  it('레인이 게이트를 통과하지 못하면 계획이 실패한다', async () => {
+    fake.writes = { 'card-1': 'fail' };
+
+    const created = await createTaskPlan({ projectId: 'orders', request: '카드 실패', owner: 'kim', cards: [card('card-1', ['web/a'])] });
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('failed');
+    expect(plan.lanes[0]!.status).toBe('failed');
+    expect(plan.integration).toBeUndefined();
+  });
+
+  it('카드 경로 형식이 틀리거나 상한을 넘으면 응답 전에 400이고 계획을 저장하지 않는다 (수정 4)', async () => {
+    const before = listTaskPlans('kim').length;
+    const bads: ReadonlyArray<unknown> = [
+      [card('card-1', ['../x'])],
+      [card('card-1', ['/etc/x'])],
+      ['t1', 't2', 't3', 't4', 't5', 't6', 't7'].map((id) => card(id, [`web/${id}`])),
+    ];
+    for (const cards of bads) {
+      const error = await createTaskPlan({ projectId: 'orders', request: '요청', owner: 'kim', cards }).catch((cause: unknown) => cause);
+      expect((error as { status?: number }).status).toBe(400);
+    }
+    // 계획이 하나도 저장되지 않았다
+    expect(listTaskPlans('kim')).toHaveLength(before);
+    expect(fake.sessions.size).toBe(0);
+  });
+
+  it('카드 계획에 request가 없거나 비면 카드 제목으로 계획 요청을 만든다 (수정 2-3)', async () => {
+    fake.writes = { 'card-1': { 'web/a/one.md': 'one' }, 'card-2': { 'web/b/one.md': 'b' } };
+    const created = await createTaskPlan({ projectId: 'orders', owner: 'kim', cards: [card('card-1', ['web/a']), card('card-2', ['web/b'])] });
+    const plan = await finished(created.id);
+    expect(plan.request).toBe('작업 카드: card-1 · card-2');
+
+    // 빈 문자열도 같다
+    const empty = await createTaskPlan({ projectId: 'orders', request: '   ', owner: 'kim', cards: [card('card-1', ['web/a'])] });
+    expect(empty.request).toBe('작업 카드: card-1');
+    await finished(empty.id);
+
+    // 200자를 넘으면 자르고 …를 붙인다
+    const long = [1, 2, 3].map((n) => ({ title: '가'.repeat(80), request: `[id:card-${n}] 작업`, paths: [`web/${n}`] }));
+    const capped = await createTaskPlan({ projectId: 'orders', owner: 'kim', cards: long });
+    const settled = await finished(capped.id);
+    const full = `작업 카드: ${['가'.repeat(80), '가'.repeat(80), '가'.repeat(80)].join(' · ')}`;
+    expect(settled.request).toBe(`${full.slice(0, 200)}…`);
+    expect(settled.request.length).toBe(201);
   });
 });
