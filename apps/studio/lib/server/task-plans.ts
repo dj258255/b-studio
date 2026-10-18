@@ -67,7 +67,9 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { allowedBackends, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { allowedBackends, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
+import { cardsToPlan, type TaskCardDone } from './task-cards';
 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
@@ -195,7 +197,11 @@ function plannerAskFor(plan: TaskPlanView, project: LoadedProject): PlanAsk {
 
 export async function createTaskPlan(input: {
   projectId: string;
-  request: string;
+  /**
+   * 계획 전체를 나타내는 요청 글. 카드 계획(cards)에서는 없거나 비어도 된다 — 그때는 카드 제목들로 만든 글을 쓴다.
+   * 그 밖의 계획(모델·고정)에서는 필수다
+   */
+  request?: string;
   /**
    * API 모드는 모델 레지스트리 id. 로컬 Claude Code 모드는 보통 쓰지 않지만(모델은 그 CLI가 정한다),
    * 세션에서 이어받은 값(별칭 `sonnet`·`opus`·`haiku`·`fable`, 빈 문자열 = 계정 기본)을 명시적으로 넘길 수 있다
@@ -211,6 +217,12 @@ export async function createTaskPlan(input: {
    * 있으면 모델 레지스트리 확인을 건너뛰고 이 계획을 planLanes로 검증해 쓴다.
    */
   presetPlan?: unknown;
+  /**
+   * 사람이 쓴 작업 카드들(#B6a). HTTP 라우트가 받는다. 모델을 부르지 않고 카드를 레인으로 묶어,
+   * 레인마다 세션 터미널에서 돌린다. 세션 터미널을 쓸 수 있을 때만 받는다(B_STUDIO_EXPERIMENTAL=1, 개인 PC 모드).
+   * presetPlan과 함께 줄 수 없다
+   */
+  cards?: unknown;
   /** 서버 안에서만 넘긴다(벤치마크·테스트). 조율 전략 S2~S5와 topology·계약. HTTP 라우트는 이 필드를 넘기지 않는다 */
   coordination?: CoordinationInput;
   /**
@@ -232,24 +244,34 @@ export async function createTaskPlan(input: {
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
-  if (preset === undefined) {
-    // 모델이 만드는 계획은 모델을 부를 수 있는 모드에서만 만든다(유료 API 또는 이 PC에 로그인한 Claude Code 구독)
-    if (!(PLANNER_MODES as readonly string[]).includes(mode)) {
-      throw new StudioError(
-        409,
-        `모델이 만드는 작업 계획은 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}에서만 만들 수 있습니다 (지금 모드: ${mode}). 이 모드에서는 고정 계획만 쓸 수 있습니다`,
-      );
+  const cards = input.cards;
+  if (cards !== undefined && preset !== undefined) throw new StudioError(400, '작업 카드(cards)와 고정 계획(presetPlan)을 함께 넘길 수 없습니다');
+  // 카드 계획은 모델을 부르지 않으므로 B_STUDIO_MODE 검사(PLANNER_MODES)를 하지 않는다. 세션 터미널 확인은 아래에서 한다
+  if (cards === undefined) {
+    if (preset === undefined) {
+      // 모델이 만드는 계획은 모델을 부를 수 있는 모드에서만 만든다(유료 API 또는 이 PC에 로그인한 Claude Code 구독)
+      if (!(PLANNER_MODES as readonly string[]).includes(mode)) {
+        throw new StudioError(
+          409,
+          `모델이 만드는 작업 계획은 B_STUDIO_MODE=${PLANNER_MODES.join(' 또는 ')}에서만 만들 수 있습니다 (지금 모드: ${mode}). 이 모드에서는 고정 계획만 쓸 수 있습니다`,
+        );
+      }
+    } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode' && mode !== 'opencode') {
+      // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode·opencode 모드에서도 쓴다. demo는 지금처럼 거부한다
+      throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex, commandcode 또는 opencode에서만 사용할 수 있습니다');
     }
-  } else if (mode !== 'api' && mode !== 'claude-code' && mode !== 'codex' && mode !== 'commandcode' && mode !== 'opencode') {
-    // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode·opencode 모드에서도 쓴다. demo는 지금처럼 거부한다
-    throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex, commandcode 또는 opencode에서만 사용할 수 있습니다');
   }
-  const request = input.request.trim();
-  if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
-  if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
+  const requestText = (input.request ?? '').trim();
+  // 요청 글은 카드 계획이면 없어도 된다(카드 제목으로 만든다). 그 밖의 계획에서는 필수다
+  if (!requestText && cards === undefined) throw new StudioError(400, '요청 내용을 입력하세요');
+  if (requestText.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
 
   let modelId = input.modelId?.trim() ?? '';
-  if (preset === undefined) {
+  if (cards !== undefined) {
+    // 카드 계획은 모델을 부르지 않는다. 세션 터미널을 쓸 수 있을 때만 만들고, 기록용 모델 id는 'terminal'이다
+    if (!sessionTerminalAllowed()) throw new StudioError(409, '작업 카드는 세션 터미널을 쓸 수 있을 때(B_STUDIO_EXPERIMENTAL=1, 개인 PC 모드) 씁니다');
+    modelId = 'terminal';
+  } else if (preset === undefined) {
     if (mode === 'claude-code') {
       // 세션에서 이어받은 명시적 모델이 있으면(빈 문자열 = 이어받은 세션도 "기본"을 썼다는 뜻) 그 별칭을 그대로 쓴다.
       // 아예 넘기지 않았으면(세션 없이 이 화면에서 바로 만든 계획) 예전처럼 서버 환경 변수·계정 기본으로 돌아간다.
@@ -269,6 +291,20 @@ export async function createTaskPlan(input: {
 
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
+  // 카드 → 계획. 형식이 틀리면 여기서 400으로 거절한다(모델을 부르지 않으므로 계획 단계 실패가 없다).
+  // 완료 조건을 돌릴 서비스 목록은 이 프로젝트의 관리형 서비스 이름이다
+  const cardData = cards === undefined ? undefined : cardsToPlan(cards, project.managed.map(([name]) => name));
+  // 계획 검증(경로 형식·상한)도 응답 전에 동기로 돌린다(#B6a 수정 4). 그래야 잘못된 카드가 400으로 거절되고 계획이 저장되지 않는다
+  if (cardData) {
+    try {
+      planLanes(cardData.plan, PLAN_LIMITS);
+    } catch (error) {
+      if (error instanceof TaskPlanError) throw new StudioError(400, error.message);
+      throw error;
+    }
+  }
+  // 요청 글이 없으면(카드 계획) 카드 제목들로 만든 한 줄을 계획의 요청으로 쓴다
+  const request = requestText || cardRequest(cardData!);
   // 같은 프로젝트·소유자의 세션에서 넘긴 것인지 확인한다 — 다른 사람·다른 프로젝트의 세션에서 시작하지 못하게 막는다
   if (input.sourceSessionId !== undefined) {
     const source = getSnapshot(input.sourceSessionId);
@@ -283,7 +319,7 @@ export async function createTaskPlan(input: {
     });
     // 설계 파이프라인(ADR-100): 레인으로 나누는 것도 구현의 한 형태다. 요청이 언급한 요구사항을 다루는 설계가
     // 있는데 아직 승인되지 않았으면 레인을 만들기 전에 막는다(옵트인 — 그 요구사항을 다루는 설계가 없으면 통과)
-    await assertDesignApprovedForRequest(input.sourceSessionId, input.request);
+    await assertDesignApprovedForRequest(input.sourceSessionId, request);
   }
   // S3만 모델이 게시판에 쓴다. 그 본문·refs는 계획 기록과 화면에 남으므로 게시 전에 프로젝트 시크릿 값을 가린다.
   // 가림은 조율 모듈이 아니라 실행기(여기)에서 한다. 샌드박스와 같은 값을 쓴다
@@ -305,6 +341,8 @@ export async function createTaskPlan(input: {
     createdAt: new Date().toISOString(),
     lanes: [],
     ...(preset === undefined ? {} : { preset: true as const }),
+    // 사람이 쓴 작업 카드로 만든 계획. 레인은 세션 터미널에서 돈다
+    ...(cardData !== undefined ? { source: 'cards' as const, runner: 'terminal' as const } : {}),
     // 가볍게 확인은 레인·통합 실행에 그대로 넘긴다. 없으면(full) 지금과 한 글자도 다르지 않다
     ...(input.verify === 'light' ? { verify: 'light' as const } : {}),
     ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
@@ -314,7 +352,7 @@ export async function createTaskPlan(input: {
   attachCoordination(plan, input.coordination, redactor);
   if (input.integrationChecks?.pageChecks?.length) integrationPageChecks.set(plan.id, input.integrationChecks.pageChecks);
   persist(plan);
-  void execute(plan, preset).catch((error: unknown) => fail(plan, describe(error)));
+  void execute(plan, preset, cardData).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
 }
 
@@ -746,13 +784,20 @@ export function resumeTaskPlan(id: string, owner: string): TaskPlanView {
   return clone(plan);
 }
 
-async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
+async function execute(plan: TaskPlanView, preset?: unknown, cards?: ReturnType<typeof cardsToPlan>): Promise<void> {
   const project = await findProject(plan.projectId);
   if (!project) return fail(plan, '프로젝트를 찾을 수 없습니다');
 
+  // 모델이 계획을 만드는 경로인가(카드·고정 계획은 모델을 부르지 않는다)
+  const usedModel = preset === undefined && cards === undefined;
   let lanes: TaskLane[];
+  let cardDone: Record<string, TaskCardDone> | undefined;
   try {
-    if (preset === undefined) {
+    if (cards !== undefined) {
+      // 사람이 쓴 카드는 모델을 부르지 않는다. plan.planning은 남기지 않는다(모델 호출이 없었다)
+      lanes = planLanes(cards.plan, PLAN_LIMITS);
+      cardDone = cards.done;
+    } else if (preset === undefined) {
       const planned = await requestTaskPlan(plannerAskFor(plan, project), project, plan.request, undefined, PLAN_LIMITS);
       plan.planning = { usage: planned.usage, durationMs: planned.durationMs };
       lanes = planned.lanes;
@@ -769,7 +814,7 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
   }
   // 모델이 만든 계획(API 모드)은 backend를 쓰지 않는다 — 계획 프롬프트를 바꾸지 않았으므로 모델이 실수로 넣어도 무시한다.
   // 고정 계획(presetPlan, 서버 안에서만)만 backend·model을 쓴다
-  const laneTasks = preset === undefined ? lanes.map((lane) => ({ ...lane, tasks: lane.tasks.map((task) => ({ ...task, backend: undefined, model: undefined })) })) : lanes;
+  const laneTasks = usedModel ? lanes.map((lane) => ({ ...lane, tasks: lane.tasks.map((task) => ({ ...task, backend: undefined, model: undefined })) })) : lanes;
   plan.lanes = laneTasks.map((lane) => ({
     id: lane.id,
     paths: lane.paths,
@@ -777,12 +822,25 @@ async function execute(plan: TaskPlanView, preset?: unknown): Promise<void> {
     ...(lane.tasks[0]?.backend ? { backend: lane.tasks[0].backend } : {}),
     ...(lane.tasks[0]?.model ? { model: lane.tasks[0].model } : {}),
     status: 'queued',
-    tasks: lane.tasks.map((task) => ({ ...task, status: 'queued' })),
+    // 카드 계획이면 완료 검사를 작업에 남긴다(다시 시작해도 이것으로 완료 검사를 다시 만든다). 명령은 ['sh','-c', 문자열]이다
+    tasks: lane.tasks.map((task) => ({
+      ...task,
+      ...(cardDone?.[task.id] ? { doneCommand: cardDone[task.id]!.command.slice(2).join(' '), doneService: cardDone[task.id]!.service } : {}),
+      status: 'queued',
+    })),
   }));
   // 레인을 만든 직후, 레인을 돌리기 전에 레인 사이 계약을 받아 S2로 게시한다.
   // 실패해도 계획은 계속 간다(계약 없이) — 경고 한 줄만 남긴다
-  if (preset === undefined && lanes.length >= 2 && !plan.coordination && contractsSetting()) {
+  if (usedModel && lanes.length >= 2 && !plan.coordination && contractsSetting()) {
     await askLaneContracts(plan, project, lanes);
+  }
+  // 사람이 쓴 카드에서 "실행"을 누른 것이 승인이다(승인 함수가 남기는 것과 같은 필드). 모델 계획은 승인을 기다린다
+  if (cards !== undefined) {
+    plan.approvedBy = plan.owner;
+    plan.approvedAt = new Date().toISOString();
+    persist(plan);
+    await runApprovedPlan(plan);
+    return;
   }
   // 사람이 승인할 때까지 여기서 멈춘다. 승인 없이 레인을 돌리지 않는다
   plan.status = 'awaiting_approval';
@@ -856,6 +914,8 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     await waitForReady(snapshot.id);
     lane.bootMs = Math.round(performance.now() - bootStarted);
     lane.bootRxBytes = bootRxBytes(snapshot.id);
+    // 터미널 레인은 세션 터미널을 연다 — 그 안의 CLI에 요청을 붙여 넣어 돌린다(화면 없는 실행기 대신)
+    if (plan.runner === 'terminal') await (terminalLaneDeps?.driver ?? terminalLaneDriver).open(snapshot.id);
     lane.status = 'running';
     persist(plan);
 
@@ -865,20 +925,43 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       const board = laneBoard(plan, lane, task.id);
       // S6: 이 레인의 진행 트레이스를 턴마다 fact 메모로 게시해 다른 레인이 읽게 한다(Cognition의 전체 공유 처방)
       const stopTracePosting = plan.coordination?.strategy === 'S6' ? attachTracePoster(plan, lane, snapshot.id) : undefined;
-      let outcome: Awaited<ReturnType<typeof runAndWait>>;
+      let outcome: Awaited<ReturnType<typeof runAndWait>> & { costUsd?: number };
       try {
-        outcome = await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
-          by: plan.owner,
-          writableScope: task.paths,
-          ...(board ? { board } : {}),
-          ...(plan.verify ? { verify: plan.verify } : {}),
-        });
+        outcome =
+          plan.runner === 'terminal'
+            ? await runTerminalTask(
+                snapshot.id,
+                taskRequest(plan, lane, index),
+                {
+                  // 카드의 쓰기 범위와 완료 검사를 그 작업의 실행 동안만 건다
+                  writableScope: task.paths,
+                  doneTests: taskDoneTests(task),
+                  onWaiting: (note) => {
+                    lane.waiting = note;
+                    persist(plan);
+                  },
+                },
+                terminalLaneDeps,
+              )
+            : await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
+                by: plan.owner,
+                writableScope: task.paths,
+                ...(board ? { board } : {}),
+                ...(plan.verify ? { verify: plan.verify } : {}),
+              });
       } finally {
         stopTracePosting?.();
       }
       // S5: 성공·실패와 무관하게 그 실행의 검증 실패 서명을 플랫폼이 게시해 다른 레인이 읽게 한다
       if (plan.coordination?.strategy === 'S5') postFailures(plan, lane, snapshot.id);
-      task.run = { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
+      task.run = {
+        status: outcome.status,
+        durationMs: outcome.durationMs,
+        usage: outcome.usage,
+        metrics: outcome.metrics,
+        // 터미널 실행이 CLI 텔레메트리로 알려 온 비용이 있으면 남긴다(없으면 필드를 두지 않는다)
+        ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}),
+      };
       task.summary = outcome.summary;
       if (outcome.status !== 'done') {
         task.status = 'failed';
@@ -947,7 +1030,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const extraPageChecks = integrationPageChecks.get(plan.id);
     // Command Code 모드는 모델을 세션에 고정하지 않으므로 sessionModelOption이 빈 객체를 돌려준다(빈 모델 id를 넘기지 않는다)
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', {
-      ...sessionModelOption(plan.modelId, plan.effort),
+      ...sessionModelOption(plan),
       ...(extraPageChecks ? { extraPageChecks } : {}),
       ...seedFromSessionOption(plan),
     });
@@ -1027,11 +1110,13 @@ async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
  * 세션에 넘기면 sessions.ts의 cliModelOverride가 "계획 기록용 id"로 보고 걸러내 서버 기본으로 떨어진다(레인·통합 세션이
  * 계획과 다른 모델로 도는 버그였다). planModelAlias로 접두어를 뗀 실제 별칭(sonnet 등)만 세션에 넘긴다.
  */
-function sessionModelOption(modelId: string, effort?: Effort): { modelId?: string; effort?: Effort } {
+function sessionModelOption(plan: TaskPlanView): { modelId?: string; effort?: Effort } {
+  // 터미널 레인의 통합은 스크립트 턴이라 모델을 부르지 않는다 — 모델 옵션을 넘기지 않는다
+  if (plan.runner === 'terminal') return {};
   const mode = process.env.B_STUDIO_MODE?.trim();
   if (mode === 'commandcode' || mode === 'opencode') return {};
-  const resolved = planModelAlias(modelId);
-  return { ...(resolved ? { modelId: resolved } : {}), ...(effort ? { effort } : {}) };
+  const resolved = planModelAlias(plan.modelId);
+  return { ...(resolved ? { modelId: resolved } : {}), ...(plan.effort ? { effort: plan.effort } : {}) };
 }
 
 /**
@@ -1039,9 +1124,11 @@ function sessionModelOption(modelId: string, effort?: Effort): { modelId?: strin
  * 없으면 기존처럼 계획의 modelId·effort와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
  */
 function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string } {
+  // 터미널 레인은 모델 옵션을 넘기지 않는다(그 레인의 CLI가 모델을 정한다)
+  if (plan.runner === 'terminal') return {};
   const head = lane.tasks[0];
   const backend = head?.backend;
-  if (!backend) return sessionModelOption(plan.modelId, plan.effort);
+  if (!backend) return sessionModelOption(plan);
   // 레인이 고른 노력 단계가 있으면 그 값을, 없으면 계획 기본(plan.effort)을 쓴다(지금까지의 동작과 같다, #398)
   const effort = lane.effort ?? plan.effort;
   // api는 모델 레지스트리 id를, commandcode·opencode는 그 CLI의 모델 id를 세션에 넘긴다. claude-code·codex도 고른 모델을 세션에 실어
@@ -1063,13 +1150,33 @@ function seedFromSessionOption(plan: TaskPlanView): { seedFromSessionId?: string
 function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number): string {
   const task = lane.tasks[index]!;
   const previous = lane.tasks.slice(0, index).map((item) => `- ${item.title}`).join('\n');
-  const request = `${task.request}
+  let request = `${task.request}
 
 [작업 분해] 전체 요청: ${plan.request}
 이 작업이 파일을 쓸 수 있는 경로: ${task.paths.join(', ')} (그 밖의 쓰기는 실행기가 막습니다)${previous ? `\n같은 작업 공간에서 먼저 끝난 작업:\n${previous}` : ''}`;
   // 조율을 켠 실행에서만 요청 끝에 한 줄을 더한다. 도구는 실행기가 알아서 목록에 넣는다
   const guidance = coordinationGuidance(plan.coordination?.strategy);
-  return guidance ? `${request}\n${guidance}` : request;
+  if (guidance) request = `${request}\n${guidance}`;
+  // 카드에 완료 명령이 있으면 그 카드의 실행 동안 게이트의 test 단계에 더해진다는 것을 알린다
+  if (task.doneCommand) request = `${request}\n완료 조건: 플랫폼이 턴의 끝에 \`${task.doneCommand}\`(${task.doneService})을 돌려 통과해야 체크포인트를 남깁니다.`;
+  return request;
+}
+
+/** 이 작업에 걸 완료 검사(gate의 workflow.tests에 넣을 꼴). 카드에 완료 명령이 없으면 빈 배열 */
+function taskDoneTests(task: TaskPlanTaskView): TaskCardDone[] {
+  return task.doneCommand && task.doneService ? [{ name: `done-${task.id}`, service: task.doneService, command: ['sh', '-c', task.doneCommand] }] : [];
+}
+
+/** 카드 계획에 요청 글이 없을 때 쓸 한 줄(#B6a 수정 2-3). 카드 제목들을 · 로 잇고, 200자를 넘으면 자르고 …를 붙인다 */
+function cardRequest(cardData: ReturnType<typeof cardsToPlan>): string {
+  const text = `작업 카드: ${cardData.plan.tasks.map((task) => task.title).join(' · ')}`;
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
+/** 테스트가 터미널 레인의 driver·이벤트 통로·시계를 바꿔 끼우는 자리. undefined면 실제 값(terminal-lane.ts)을 쓴다 */
+let terminalLaneDeps: Partial<TerminalTaskDeps> | undefined;
+export function setTerminalLaneDepsForTest(deps: Partial<TerminalTaskDeps> | undefined): void {
+  terminalLaneDeps = deps;
 }
 
 function coordinationGuidance(strategy: TaskPlanStrategy | undefined): string | undefined {

@@ -75,6 +75,8 @@ export interface TaskPlanRunMetricsView {
   durationMs?: number;
   usage?: AgentUsage;
   metrics?: RunMetrics;
+  /** 터미널 실행의 CLI가 텔레메트리로 알려 온 비용 합(달러). 없으면 없다(0으로 채우지 않는다) */
+  costUsd?: number;
 }
 
 export interface TaskPlanTaskView {
@@ -87,6 +89,10 @@ export interface TaskPlanTaskView {
   backend?: PlanBackend;
   /** 이 작업에 고정한 모델(백엔드마다 뜻이 다르다) */
   model?: string;
+  /** 이 카드의 완료 조건 명령(사람이 쓴 작업 카드). 없으면 없다. 다시 시작해도 이것으로 완료 검사를 다시 만든다 */
+  doneCommand?: string;
+  /** 완료 조건을 돌릴 서비스 이름 */
+  doneService?: string;
   status: TaskPlanStepStatus;
   summary?: string;
   checkpoint?: TaskPlanCheckpointView;
@@ -110,6 +116,8 @@ export interface TaskPlanLaneView {
   paths: string[];
   status: TaskPlanStepStatus;
   tasks: TaskPlanTaskView[];
+  /** 지금 무엇을 기다리는지 화면에 보여 줄 한 줄(터미널 레인). 없으면 없다 */
+  waiting?: string;
   error?: string;
   /** 세션 생성부터 준비까지 걸린 시간 */
   bootMs?: number;
@@ -193,6 +201,10 @@ export interface TaskPlanView {
   contracts?: TaskPlanContractsView;
   /** 모델에게 계획을 받지 않고 서버 안에서 고정했다(벤치마크·테스트). 이때는 planning이 없다 */
   preset?: true;
+  /** 사람이 쓴 작업 카드로 만든 계획이면 'cards' */
+  source?: 'cards';
+  /** 레인을 돌리는 방식. 'terminal'이면 레인마다 세션 터미널을 열어 그 안의 CLI에 요청을 붙여 넣는다 */
+  runner?: 'terminal';
   /** 계획 전체 합계 지표 */
   metrics?: TaskPlanMetrics;
   /** 조율 전략과 topology. 서버 안에서만 정한다(HTTP 라우트는 받지 않는다) */

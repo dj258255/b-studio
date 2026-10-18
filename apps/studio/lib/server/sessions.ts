@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -68,6 +68,7 @@ import {
   formatWorkflowTrailer,
   isBlockingFinding,
   isDocCheckpointPath,
+  isInScope,
   isLikelyTestFile,
   labelRecommendationSource,
   listIssues,
@@ -318,6 +319,7 @@ import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, warnSessionTerminal } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
+import type { TaskCardDone } from './task-cards';
 import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
@@ -505,6 +507,11 @@ interface Session {
    * 몇 초 안에 도착할 수 있다. 그때 이 실행에 붙인다(실행이 끝난 뒤 늦게 온 사용량도 그 실행의 몫이다)
    */
   terminalRun?: { runId: string; startedMs: number; endedMs: number };
+  /**
+   * 이 세션의 터미널 카드 실행 맥락(#B6a). 터미널 도구의 쓰기 검사(terminalToolStarting)와 턴 끝 검사
+   * (finishTerminalTurn)가 이 값을 본다. 걸 때 기억한 원래 workflow도 함께 두어 지우면 그 값으로 돌린다
+   */
+  terminalTaskContext?: { writableScope: readonly string[]; doneTests: readonly TaskCardDone[]; original: LoadedProject['spec']['workflow'] };
   /** 같은 requestId의 텔레메트리를 두 번 세지 않게 최근 것만 기억한다(#726) */
   seenUsageIds?: Set<string>;
   /**
@@ -3096,7 +3103,9 @@ async function saveCheckpoint(
  */
 async function reloadSessionProject(session: Session): Promise<void> {
   const off = session.project.offServices;
+  let reloaded = true;
   session.project = await loadProject(session.project.root).catch((error: unknown) => {
+    reloaded = false;
     emit(session, {
       type: 'notice',
       text: `studio.yaml을 다시 읽지 못해 이전 설정으로 계속합니다: ${describe(error)}`,
@@ -3105,6 +3114,16 @@ async function reloadSessionProject(session: Session): Promise<void> {
     return session.project;
   });
   if (off) session.project.offServices = off;
+  // 카드 실행 맥락이 걸려 있으면 완료 검사를 다시 입힌다(#B6a 수정 1). 다시 읽으면 session.project가 새 객체라
+  // 맥락의 완료 검사가 통째로 사라진다. 다시 읽은 workflow를 새 original로 삼고 그 위에 완료 검사를 다시 더한다 —
+  // 그래야 나중에 맥락을 지울 때 옛 workflow가 아니라 다시 읽은 workflow로 돌아간다. 못 읽었으면(project가 그대로)
+  // 지금까지의 original을 그대로 둔다(이미 입혀진 것을 다시 입혀 중복시키지 않는다)
+  const context = session.terminalTaskContext;
+  if (context) {
+    const original = reloaded ? session.project.spec.workflow : context.original;
+    session.project.spec.workflow = withDoneTests(original, context.doneTests);
+    session.terminalTaskContext = { ...context, original };
+  }
 }
 
 /**
@@ -7496,12 +7515,143 @@ function terminalSessionAlive(session: Session): boolean {
 }
 
 /**
+ * 터미널 실행 하나 동안 걸 카드의 쓰기 범위와 완료 검사(#B6a). undefined면 지운다.
+ * 처음 걸 때 세션 프로젝트의 원래 workflow를 기억하고, 걸 때마다 원래 값 + 이 카드의 완료 검사로 바꾼다.
+ * 세션 프로젝트 객체는 세션마다 따로라 다른 세션에 새지 않는다(createSession의 extraPageChecks와 같은 이유).
+ * 게이트는 실행할 때 session.project.spec.workflow를 읽으므로(미리 복사해 두지 않는다) 이 값이 그대로 쓰인다.
+ */
+export function setTerminalTaskContext(id: string, context: { writableScope: readonly string[]; doneTests: readonly TaskCardDone[] } | undefined): void {
+  const session = requireSession(id);
+  if (context === undefined) {
+    if (session.terminalTaskContext) {
+      session.project.spec.workflow = session.terminalTaskContext.original;
+      session.terminalTaskContext = undefined;
+    }
+    return;
+  }
+  const original = session.terminalTaskContext ? session.terminalTaskContext.original : session.project.spec.workflow;
+  session.project.spec.workflow = withDoneTests(original, context.doneTests);
+  session.terminalTaskContext = { writableScope: context.writableScope, doneTests: context.doneTests, original };
+}
+
+/**
+ * 프로젝트 workflow에 이 카드의 완료 검사를 더한다. required가 명시돼 있고 test가 없으면 review 앞에 test를 넣는다
+ * (workflowStages가 하는 것과 같은 규칙 — tests가 있으면 test 단계를 필수로 본다)
+ */
+function withDoneTests(workflow: LoadedProject['spec']['workflow'], doneTests: readonly TaskCardDone[]): LoadedProject['spec']['workflow'] {
+  if (doneTests.length === 0) return workflow;
+  const tests = [...(workflow?.tests ?? []), ...doneTests.map((test) => ({ name: test.name, service: test.service, command: [...test.command], maxAttempts: 1 }))];
+  const required = workflow?.required;
+  let withTest = required;
+  if (required && !required.includes('test')) {
+    const at = required.indexOf('review');
+    withTest = at >= 0 ? [...required.slice(0, at), 'test', ...required.slice(at)] : [...required, 'test'];
+  }
+  return { ...workflow, tests, ...(withTest ? { required: withTest } : {}) };
+}
+
+/**
+ * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 없으면 undefined.
+ * 파일을 다루는 내장 도구는 file_path(Write·Edit 등)나 notebook_path(NotebookEdit)를 쓴다
+ */
+function terminalToolFilePath(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null) return undefined;
+  const record = input as Record<string, unknown>;
+  for (const key of ['file_path', 'notebook_path']) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim() !== '') return value;
+  }
+  return undefined;
+}
+
+/**
+ * 터미널 도구가 준 파일 경로를 작업 복사본 기준 상대 경로로 바꾼다. 컨테이너 방식은 작업 복사본을 /workspace에
+ * 붙이므로 그 아래 경로를 상대 경로로 본다. 이 컴퓨터 방식에서 /workspace/… 는 작업 복사본 밖이다(그대로 두면
+ * 아래 isAbsolute 분기가 밖으로 판정해 undefined가 된다). 이 컴퓨터 방식은 작업 복사본의 절대 경로만 받는다.
+ * 작업 복사본 밖이면 undefined(허용 목록은 모르면 범위 밖으로 본다)
+ */
+function terminalRelativePath(file: string, session: Session): string | undefined {
+  const value = file.trim();
+  if (sessionTerminalMode() === 'container') {
+    if (value === '/workspace') return '';
+    if (value.startsWith('/workspace/')) return value.slice('/workspace/'.length);
+  }
+  if (path.isAbsolute(value)) {
+    const relative = path.relative(session.snapshot.workDir, value);
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return relative.split(path.sep).join('/');
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * 상대 경로가 작업 복사본 밖을 가리키는 링크를 지나지 않는가(#B6a 수정 3). 그 경로(이미 있는 가장 가까운 조상,
+ * 파일 자신 포함)를 realpath로 풀어 작업 복사본의 실제 위치(realpath(root)) 밖이면 거짓을 돌려준다.
+ * 링크는 문자열 비교로는 범위 안으로 보이지만 그 너머는 작업 복사본 밖이다 — 허용 목록은 모르면 막는다
+ */
+async function terminalPathConfined(root: string, relative: string): Promise<boolean> {
+  const realRoot = await realpath(root).catch(() => root);
+  let target = relative;
+  for (;;) {
+    try {
+      const real = await realpath(path.resolve(root, target));
+      return real === realRoot || real.startsWith(`${realRoot}${path.sep}`);
+    } catch {
+      // 아직 없는 경로다. 한 단계 위로 올라가 이미 있는 조상을 본다
+      const parent = path.dirname(target);
+      if (parent === target || parent === '.') return true;
+      target = parent;
+    }
+  }
+}
+
+/**
+ * 완료 검사를 서비스에서 돌려 실패한 것들의 이름·사유를 돌려준다. 게이트의 test 단계(`#runTest`)와 같은 exec 경로를 쓴다.
+ * 바뀐 파일이 없어 게이트가 test 단계를 돌리지 않을 때 이 함수로 완료 검사만 돌린다(#B6a 수정 2-1·3)
+ */
+async function runDoneTests(
+  sandbox: Session['sandbox'],
+  doneTests: readonly TaskCardDone[],
+  signal: AbortSignal,
+): Promise<Array<{ name: string; detail: string }>> {
+  const failures: Array<{ name: string; detail: string }> = [];
+  for (const test of doneTests) {
+    signal.throwIfAborted();
+    let exitCode = -1;
+    let output = '';
+    try {
+      const result = await sandbox.exec(test.service, test.command, { signal });
+      exitCode = result.exitCode;
+      output = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-20).join('\n');
+    } catch (error) {
+      output = describe(error);
+    }
+    if (exitCode !== 0) failures.push({ name: test.name, detail: `종료 코드 ${exitCode}${output ? `\n${output}` : ''}` });
+  }
+  return failures;
+}
+
+/** 완료 검사 실패를 게이트 실패와 같은 모양의 feedback으로 만든다 */
+function doneTestsFeedback(failures: readonly { name: string; detail: string }[]): string {
+  return `[b-studio 검증 게이트] 완료 조건이 통과하지 못했습니다. 고친 뒤 턴을 끝내세요.\n\n${failures.map((failure) => `- ${failure.name}\n${failure.detail}`).join('\n')}`;
+}
+
+/**
  * 열려 있는 터미널 실행. 대화 창의 실행이거나, 이미 닫혔거나, 취소를 받아 닫히는 중인 실행이면 없다.
  * 닫히는 중인 실행(되돌리는 동안)은 세션에 걸려 있어 새 요청과 도구 호출을 막지만, 그 실행에 이어 붙이지는 않는다
  */
 function openTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRunState }) | undefined {
   const run = session.run;
   return run?.terminal && !run.terminal.settled && !run.cancel.signal.aborted ? (run as ActiveRun & { terminal: TerminalRunState }) : undefined;
+}
+
+/**
+ * 그 세션에 지금 열려 있는 터미널 실행의 id(없으면 undefined). 작업 카드 레인이 비정상 종료 뒤
+ * 남아 있는 실행을 찾아 취소할 때 쓴다(#B6a 수정 4). 세션이 없으면(멈춰 기록만 남았으면) 없다
+ */
+export function openTerminalRunId(id: string): string | undefined {
+  const session = store.sessions.get(id);
+  return session ? openTerminalRun(session)?.id : undefined;
 }
 
 /**
@@ -8048,6 +8198,20 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   // 한도에 닿은 실행이면 그 뒤의 쓰기 도구를 거절한다(#B5). 턴 상한은 실행이 열린 채로 턴이 끝나기를 기다린다
   const limited = terminalRunLimitDeny(session, run);
   if (limited) return { deny: limited };
+  // 카드 실행 맥락이 있으면 쓰기 범위를 건다(#B6a). 도구 입력의 파일 경로를 작업 복사본 기준 상대 경로로 바꿔 본다.
+  // 읽기 도구는 위에서 이미 통과했다(AGENT_READ_TOOLS). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
+  const card = session.terminalTaskContext;
+  if (card) {
+    const path0 = terminalToolFilePath(input.tool_input);
+    if (path0 !== undefined) {
+      const relative = terminalRelativePath(path0, session);
+      // 범위 안이어도 작업 복사본 밖을 가리키는 링크를 지나면 막는다(링크는 글자로는 안이지만 실제 파일은 밖이다)
+      const confined = relative !== undefined && (await terminalPathConfined(session.snapshot.workDir, relative));
+      if (relative === undefined || !isInScope(relative, card.writableScope) || !confined) {
+        return { deny: `[b-studio] 이 카드가 쓸 수 있는 경로는 ${card.writableScope.join(', ')}입니다. ${relative ?? path0}은 범위 밖이라 쓰지 않았습니다.` };
+      }
+    }
+  }
   // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
@@ -8157,10 +8321,61 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
   if (text) onEvent({ type: 'text', text: clipText(text, TERMINAL_REQUEST_LIMIT) });
   state.checking = true;
   try {
-    // 기준을 잡은 적이 없고 작업 복사본도 그대로면 답만 한 턴이다. 샌드박스를 켜지 않고 끝낸다
-    if (!state.verification && (await session.checkpoints.pendingFiles()).length === 0 && (await session.checkpoints.pendingExcludedFiles()).length === 0) {
+    // 기준을 잡은 적이 없고 작업 복사본도 그대로면 답만 한 턴이다(샌드박스를 켜지 않고 끝낸다). 다만 카드에 완료 검사가
+    // 있으면 이 지름길을 타지 않는다 — 게이트는 바뀐 파일이 없으면 test 단계를 돌리지 않아, 쓰기가 모두 거절돼 아무것도
+    // 안 바뀐 카드가 완료 명령이 있는데도 통과로 끝난다(#B6a 수정 2-1)
+    const unchanged = (await session.checkpoints.pendingFiles()).length === 0 && (await session.checkpoints.pendingExcludedFiles()).length === 0;
+    const doneTests = session.terminalTaskContext?.doneTests ?? [];
+    if (!state.verification && unchanged) {
+      if (doneTests.length > 0) {
+        // 완료 검사만 서비스에서 직접 돌린다(게이트는 바뀐 파일이 없으면 돌릴 수 없다). 서비스가 떠 있어야 하므로
+        // 게이트와 같은 방식으로 샌드박스를 켠다. 재시도 셈은 게이트 실패와 같은 unsettledAttempts를 쓴다
+        const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+        signal.throwIfAborted();
+        await ensureBooted(session);
+        const infra = await ensureReadySessionInfra(session, signal);
+        if (!infra.ok) throw new Error(infra.reason);
+        const failures = await runDoneTests(session.sandbox, doneTests, signal);
+        // 완료 검사를 도는 동안 감시가 위반을 찾았으면(큐를 기다리지 않고 state.violation에 적힌다) 통과로 남기지 않는다
+        if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
+        if (failures.length === 0) {
+          settleTerminalRun(session, run, { status: 'done', summary: text || '완료 조건을 통과했습니다.' });
+          return {};
+        }
+        state.unsettledAttempts += 1;
+        if (state.unsettledAttempts >= TERMINAL_MAX_VERIFY_ATTEMPTS) {
+          const summary = await abandonTerminalRun(session, run, {
+            status: 'failed',
+            reason: `완료 조건을 ${state.unsettledAttempts}번 통과하지 못했습니다: ${failures.map((failure) => failure.name).join(', ')}`,
+          });
+          return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+        }
+        const feedback = doneTestsFeedback(failures);
+        state.lastFeedback = feedback;
+        return { feedback };
+      }
       settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
       return {};
+    }
+    // 카드의 쓰기 범위를 턴 끝에서도 본다(#B6a). 훅을 거치지 않은 변경(셸 명령 등)을 여기서 잡는다.
+    // 게이트를 돌리지 않고 돌려보내며, 게이트 실패와 같은 재시도 셈에 넣어 무한히 돌지 않게 한다
+    const card = session.terminalTaskContext;
+    if (card) {
+      const changed = await changesOutsideTools(session);
+      const outside = changed.filter((file) => !isInScope(file, card.writableScope)).sort();
+      if (outside.length > 0) {
+        state.unsettledAttempts += 1;
+        if (state.unsettledAttempts >= TERMINAL_MAX_VERIFY_ATTEMPTS) {
+          const summary = await abandonTerminalRun(session, run, {
+            status: 'failed',
+            reason: `이 카드의 쓰기 범위(${card.writableScope.join(', ')}) 밖 파일을 바꿨습니다: ${outside.slice(0, 5).join(', ')}`,
+          });
+          return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+        }
+        const feedback = `[b-studio] 이 카드의 쓰기 범위(${card.writableScope.join(', ')}) 밖 파일을 바꿨습니다: ${outside.slice(0, 20).join(', ')}. 되돌린 뒤 턴을 끝내세요.`;
+        state.lastFeedback = feedback;
+        return { feedback };
+      }
     }
     const verification = await terminalVerification(session, run);
     const { tracker, gate } = verification;
@@ -8187,6 +8402,13 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         const during = await tracker.sync();
         if (during.changed.length > 0 || during.rejected.length > 0) outcome = moved([...during.changed, ...during.rejected]);
       }
+    }
+    // 검증 상태가 이미 세워져 있어(도구 호출·쓰기 직전 훅) 이 게이트 경로로 왔더라도, 바뀐 파일이 없으면 게이트는 test 단계를
+    // 돌리지 않는다(변경 0이면 곧바로 통과한다). 카드의 완료 검사가 있으면 여기서 대신 돌린다(#B6a 수정 3).
+    // 바뀐 파일이 있으면 게이트의 test 단계가 workflow.tests(완료 검사 포함)를 이미 돌렸으므로 다시 돌리지 않는다
+    if (outcome.kind === 'pass' && doneTests.length > 0 && verification.workspace.changedFiles().length === 0) {
+      const failures = await runDoneTests(session.sandbox, doneTests, AbortSignal.any([session.stop.signal, run.cancel.signal]));
+      if (failures.length > 0) outcome = unsettled('완료 조건을 통과하지 못했습니다', doneTestsFeedback(failures));
     }
     if (run.cancel.signal.aborted || session.stop.signal.aborted) throw run.cancel.signal.reason ?? session.stop.signal.reason;
     // 턴 상한에 닿은 실행은 재시도하지 않는다(#B5, ADR-131). 게이트를 통과하지 못하면 대화 실행처럼 실패로 닫고 되돌린다

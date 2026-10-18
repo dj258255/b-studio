@@ -65,4 +65,29 @@ describe('POST /api/task-plans', () => {
     expect(response.status).toBe(400);
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
   });
+
+  it('카드(cards)를 넘기면 그대로 createTaskPlan에 넘긴다', async () => {
+    const cards = [{ title: 'A', request: 'A 작업', paths: ['web/a'], doneCommand: 'pnpm test', doneService: 'web' }];
+
+    const response = await post({ projectId: 'orders', request: '요청', owner: 'kim', cards });
+
+    expect(response.status).toBe(201);
+    expect(mocks.createTaskPlan).toHaveBeenCalledWith({ projectId: 'orders', request: '요청', owner: 'kim', cards });
+  });
+
+  it('카드가 있으면 request 없이도 받아 그대로 createTaskPlan에 넘긴다 (수정 2-3)', async () => {
+    const cards = [{ title: 'A', request: 'A 작업', paths: ['web/a'] }];
+
+    const response = await post({ projectId: 'orders', owner: 'kim', cards });
+
+    expect(response.status).toBe(201);
+    expect(mocks.createTaskPlan).toHaveBeenCalledWith({ projectId: 'orders', owner: 'kim', cards });
+  });
+
+  it('카드가 없으면 request는 여전히 필요하다 (수정 2-3)', async () => {
+    const response = await post({ projectId: 'orders' });
+
+    expect(response.status).toBe(400);
+    expect(mocks.createTaskPlan).not.toHaveBeenCalled();
+  });
 });

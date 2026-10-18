@@ -107,7 +107,7 @@ vi.mock('./session-terminal', () => ({
   },
 }));
 
-import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -123,6 +123,21 @@ workflow:
     - name: unit
       service: api
       command: [./gradlew, test]
+`;
+}
+
+/** unit 테스트의 명령만 바꾼 studio.yaml. 다시 읽기가 실제로 새 값을 집어오는지 보려고 쓴다(수정 1) */
+function studioYamlWithTestCommand(command: string): string {
+  return `version: 1
+name: termgw
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: /v3/api-docs } }
+workflow:
+  required: [plan, implement, run, contract_check, test, review, checkpoint]
+  tests:
+    - name: unit
+      service: api
+      command: [${command}]
 `;
 }
 
@@ -1783,5 +1798,223 @@ describe('터미널 실행에도 턴 상한·토큰 한도·정체 알림을 건
     } finally {
       delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
     }
+  }, 30_000);
+});
+
+describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린다 (#B6a)', () => {
+  it('쓰기 범위 밖 파일로의 Write는 거절하고, 범위 안은 지금처럼 게이트를 지나 체크포인트가 된다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+
+    const denied = await write(session, 'web/other.txt', 'x');
+    expect(denied.deny).toContain('이 카드가 쓸 수 있는 경로는 api/src입니다');
+    expect(denied.deny).toContain('web/other.txt');
+    // 거절된 도구는 파일을 만들지 못했다
+    await expect(fileOf(session, 'web/other.txt')).rejects.toThrow();
+
+    expect(await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).toEqual({});
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('훅을 거치지 않고 범위 밖 파일을 바꾼 턴은 게이트를 돌리지 않고 돌려보낸다. 되돌리고 턴을 끝내면 통과한다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+
+    // 셸 명령처럼 훅을 거치지 않은 경로로 범위 밖 파일이 바뀐다
+    await edit(session, 'outside.txt', 'x');
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toContain('이 카드의 쓰기 범위(api/src) 밖 파일을 바꿨습니다');
+    expect(answer.feedback).toContain('outside.txt');
+    expect(answer.feedback).toContain('되돌린 뒤 턴을 끝내세요');
+    // 게이트를 돌리지 않았다(선언한 테스트도 안 돌았다). 체크포인트도 남기지 않았다
+    expect(fake.execCalls).toEqual([]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished')).toEqual([]);
+
+    // 되돌리고 턴을 끝내면 통과한다
+    await rm(path.join(session.work, 'outside.txt'));
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '되돌렸습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('카드의 완료 검사가 그 실행의 게이트 test 단계에서 돌고, 실패하면 feedback으로 돌려준다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }] });
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    // 완료 검사가 통과하지 못하면 그 회차로 돌려준다(선언한 unit과 함께 게이트의 test 단계에서 돌았다)
+    fake.failCommands = ['echo done'];
+    const failed = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(failed.feedback).toContain('[b-studio 검증 게이트]');
+    expect(failed.feedback).toContain('done-card-1');
+    expect(fake.execCalls).toEqual([['./gradlew', 'test'], ['sh', '-c', 'echo done']]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+
+    // 완료 검사를 통과하면 체크포인트를 남긴다
+    fake.failCommands = [];
+    expect((await session.gateway.stop({ last_assistant_message: '고쳤습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('맥락을 지우면 완료 검사도 쓰기 범위도 풀리고 원래 workflow로 돌아온다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }] });
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    // 맥락이 걸려 있는 동안에는 범위 밖을 쓸 수 없다
+    expect((await write(session, 'api/other.txt', 'x')).deny).toContain('범위 밖이라 쓰지 않았습니다');
+    setTerminalTaskContext(session.id, undefined);
+
+    // 맥락을 지우면 범위 밖 파일도 쓸 수 있다
+    expect(await write(session, 'api/other.txt', 'x')).toEqual({});
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    // 완료 검사는 돌지 않고 원래 선언한 테스트만 돌았다
+    expect(fake.execCalls).toEqual([['./gradlew', 'test']]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('맥락을 건 뒤 studio.yaml을 다시 읽어도 완료 검사가 남고, 지우면 다시 읽은 workflow로 돌아간다 (수정 1)', async () => {
+    const session = await open();
+    setTerminalTaskContext(session.id, {
+      writableScope: ['api/src', 'studio.yaml'],
+      doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }],
+    });
+
+    // 첫 턴: 파일을 바꾸고 studio.yaml도 바꿔, 체크포인트 때 project를 다시 읽게 한다
+    await session.gateway.prompt({ prompt: '메모 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await write(session, 'studio.yaml', studioYamlWithTestCommand('echo, changed'));
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+
+    // 다시 읽은 뒤에도 완료 검사가 남아 있다: 다음 턴은 다시 읽은 unit(echo changed)과 완료 검사가 함께 돈다
+    fake.execCalls = [];
+    await session.gateway.prompt({ prompt: 'note도 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(fake.execCalls.map((command) => command.join(' ')).sort()).toEqual(['echo changed', 'sh -c echo done']);
+
+    // 맥락을 지우면 다시 읽은 workflow(바뀐 unit)로 돌아간다: 완료 검사는 더 돌지 않는다
+    setTerminalTaskContext(session.id, undefined);
+    fake.execCalls = [];
+    await session.gateway.prompt({ prompt: '한 번 더' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; String note; String extra; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(fake.execCalls).toEqual([['echo', 'changed']]);
+    await stopSession(session.id);
+  }, 60_000);
+
+  it('바꾼 파일이 없어도 카드에 완료 검사가 있으면 완료 명령을 돌린다 (수정 2-1)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }] });
+    await session.gateway.prompt({ prompt: '아무것도 바꾸지 말고 설명만' });
+
+    // 아무 파일도 바꾸지 않았어도 완료 검사는 돌고, 실패하면 게이트 실패처럼 feedback으로 돌려준다
+    fake.failCommands = ['echo done'];
+    const failed = await session.gateway.stop({ last_assistant_message: '설명했습니다.' });
+    expect(failed.feedback).toContain('done-card-1');
+    expect(fake.execCalls).toEqual([['sh', '-c', 'echo done']]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(getSnapshot(session.id)!.running).toBe(true);
+
+    // 완료 검사를 통과하면 체크포인트 없이 done으로 끝난다
+    fake.failCommands = [];
+    expect(await session.gateway.stop({ last_assistant_message: '설명했습니다.' })).toEqual({});
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(session.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('바꾼 파일이 없고 완료 검사도 없으면 지금처럼 게이트 없이 끝난다 (수정 2-1)', async () => {
+    const session = await open();
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ prompt: '아무것도 바꾸지 말고 설명만' });
+    expect(await session.gateway.stop({ last_assistant_message: '설명했습니다.' })).toEqual({});
+    expect(fake.execCalls).toEqual([]);
+    expect(session.ofType('run_finished')[0]).toMatchObject({ status: 'done', summary: '설명했습니다.' });
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('검증 상태가 세워져 있어도 바뀐 파일이 없으면 카드의 완료 검사를 돌린다 (수정 3)', async () => {
+    // (a) b-studio 도구 호출로 검증 상태가 세워진 뒤, 바뀐 파일 없이 턴을 끝낸다
+    const viaTool = await open();
+    setTerminalTaskContext(viaTool.id, { writableScope: ['api/src'], doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }] });
+    await viaTool.gateway.prompt({ prompt: '서비스 상태만 확인' });
+    expect((await viaTool.gateway.runTool('run_in_service', { service: 'api', command: ['ls'] })).ok).toBe(true);
+
+    // 완료 검사가 실패하면 feedback으로 돌려주고 done이 아니다(실행은 열린 채)
+    fake.failCommands = ['echo done'];
+    const failed = await viaTool.gateway.stop({ last_assistant_message: '확인했습니다.' });
+    expect(failed.feedback).toContain('done-card-1');
+    expect(fake.execCalls).toContainEqual(['sh', '-c', 'echo done']);
+    expect(viaTool.ofType('run_finished')).toEqual([]);
+    expect(getSnapshot(viaTool.id)!.running).toBe(true);
+
+    // 완료 검사를 통과하면 체크포인트 없이 done으로 끝난다
+    fake.failCommands = [];
+    expect((await viaTool.gateway.stop({ last_assistant_message: '확인했습니다.' })).message).toContain('체크포인트는 만들지 않았습니다');
+    expect(viaTool.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    setTerminalTaskContext(viaTool.id, undefined);
+    await stopSession(viaTool.id);
+
+    // (b) 쓰기 직전 훅으로 검증 상태가 세워졌지만 실제로 파일을 안 바꾼 경우
+    const viaHook = await open();
+    const before = getSnapshot(viaHook.id)!.checkpoints.length;
+    setTerminalTaskContext(viaHook.id, { writableScope: ['api/src'], doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }] });
+    await viaHook.gateway.prompt({ prompt: '메모 추가' });
+    expect(await viaHook.gateway.preTool({ tool_name: 'Write', tool_input: { file_path: '/workspace/api/src/Order.java', content: 'class Order { String memo; }\n' } })).toEqual({});
+    // 실제로는 파일을 쓰지 않았다(바뀐 파일 0개)
+    fake.execCalls = [];
+    expect((await viaHook.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('체크포인트는 만들지 않았습니다');
+    expect(fake.execCalls).toEqual([['sh', '-c', 'echo done']]);
+    expect(getSnapshot(viaHook.id)!.checkpoints).toHaveLength(before);
+    expect(viaHook.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    setTerminalTaskContext(viaHook.id, undefined);
+    await stopSession(viaHook.id);
+  }, 60_000);
+
+  it('이 컴퓨터 방식에서는 /workspace/… 를 작업 복사본으로 보지 않는다 (수정 2)', async () => {
+    fake.terminalMode = 'host';
+    const session = await open();
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ prompt: '메모 추가' });
+
+    // 이 컴퓨터 방식에서 /workspace/api/src/Order.java 는 작업 복사본 밖이다 — 범위 안으로 오인하지 않는다
+    const denied = await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect(denied.deny).toContain('범위 밖이라 쓰지 않았습니다');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('범위 안 경로라도 작업 복사본 밖을 가리키는 링크를 지나면 거절한다 (수정 3)', async () => {
+    const session = await open();
+    // 범위 안(api)에 있지만 실제로는 작업 복사본 밖을 가리키는 링크
+    await symlink('/etc', path.join(session.work, 'api/link'));
+    setTerminalTaskContext(session.id, { writableScope: ['api'], doneTests: [] });
+    await session.gateway.prompt({ prompt: '링크를 통해 쓰기' });
+
+    const denied = await write(session, 'api/link/a.txt', 'x');
+    expect(denied.deny).toContain('범위 밖이라 쓰지 않았습니다');
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
   }, 30_000);
 });

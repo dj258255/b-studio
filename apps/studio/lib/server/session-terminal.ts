@@ -450,6 +450,11 @@ export function noteSessionTerminalCli(sessionId: string, alive: boolean): void 
   setCli(state, alive && state.terminal !== undefined);
 }
 
+/** 터미널 안에 에이전트 CLI가 떠 있는가. 열린 적 없는 세션이면 없다(거짓) */
+export function sessionTerminalCliAlive(sessionId: string): boolean {
+  return terminals.get(sessionId)?.cli ?? false;
+}
+
 /**
  * 터미널 패널의 경고 줄에 한 줄 보낸다(그 세션의 터미널이 화면에 열려 있을 때만). 감시가 찾은 위반과 같은 길이다.
  * 정체 알림처럼 세션 쪽에서 보내는 경고에 쓴다. 다시 연결한 화면에는 되풀이하지 않는다(마지막 경고를 저장하지 않는다)
