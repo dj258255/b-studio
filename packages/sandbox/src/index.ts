@@ -76,6 +76,7 @@ export {
   agentCleanupCommand,
   ensureAgentContainer,
   isReadOnlyPrompt,
+  unwrapPastedPrompt,
   openAgentTerminal,
   probeAgentGateway,
   removeAgentContainer,

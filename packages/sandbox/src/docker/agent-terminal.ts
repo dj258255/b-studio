@@ -117,9 +117,22 @@ export const AGENT_READ_ONLY_MARK = '[읽기만]';
 /** 표시 앞에 있어도 되는 것: 빈칸과 눈에 보이지 않는 글자(폭 없는 빈칸, 방향 제어, BOM). 눈에는 표시로 시작하는 글이 표시로 읽히게 한다 */
 const READ_ONLY_LEADING = String.raw`^[\s\u200b-\u200f\u2060\ufeff\u202a-\u202e\u2066-\u2069]+`;
 
+/**
+ * 여러 줄로 붙여 넣은 요청을 claude가 감싸는 표시. 여는 표시 뒤와 닫는 표시 앞의 줄바꿈 하나도 표시와 함께 지운다 —
+ * 사람이 글을 치다가 붙여 넣으면 감싸개가 글 중간에 올 수 있고, 여러 번 붙여 넣으면 감싸개도 여러 개다.
+ * 서버와 컨테이너 안의 훅 스크립트가 같은 규칙을 써야 한다(둘이 다르게 읽으면 한쪽만 감싸개를 벗긴다).
+ */
+const PASTED_OPEN = String.raw`<pasted_content(?:\s+id="[^"]*")?>\r?\n?`;
+const PASTED_CLOSE = String.raw`\r?\n?</pasted_content(?:\s+id="[^"]*")?>`;
+
+/** 붙여 넣은 요청의 감싸개 표시만 지우고 안의 글은 남긴다. 표시가 없으면 그대로 돌려준다 */
+export function unwrapPastedPrompt(prompt: string): string {
+  return prompt.replace(new RegExp(PASTED_OPEN, 'g'), '').replace(new RegExp(PASTED_CLOSE, 'g'), '');
+}
+
 /** 조합형(NFD)으로 들어온 한글도 같은 글로 본다 */
 export function isReadOnlyPrompt(prompt: string): boolean {
-  return prompt.normalize('NFC').replace(new RegExp(READ_ONLY_LEADING), '').startsWith(AGENT_READ_ONLY_MARK);
+  return unwrapPastedPrompt(prompt).normalize('NFC').replace(new RegExp(READ_ONLY_LEADING), '').startsWith(AGENT_READ_ONLY_MARK);
 }
 
 export const AGENT_HOOK_SCRIPT = `// b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.
@@ -134,11 +147,13 @@ function finish(output) {
   process.exit(0);
 }
 
-// 읽기만 요청인가. 서버와 같은 규칙이다(isReadOnlyPrompt)
+// 읽기만 요청인가. 서버와 같은 규칙이다(isReadOnlyPrompt) — 붙여 넣은 요청의 감싸개를 먼저 벗긴다
 function readOnlyPrompt() {
   try {
     const prompt = JSON.parse(body.toString('utf8')).prompt;
-    return typeof prompt === 'string' && prompt.normalize('NFC').replace(new RegExp(${JSON.stringify(READ_ONLY_LEADING)}), '').startsWith(${JSON.stringify(AGENT_READ_ONLY_MARK)});
+    if (typeof prompt !== 'string') return false;
+    const unwrapped = prompt.replace(new RegExp(${JSON.stringify(PASTED_OPEN)}, 'g'), '').replace(new RegExp(${JSON.stringify(PASTED_CLOSE)}, 'g'), '');
+    return unwrapped.normalize('NFC').replace(new RegExp(${JSON.stringify(READ_ONLY_LEADING)}), '').startsWith(${JSON.stringify(AGENT_READ_ONLY_MARK)});
   } catch {
     return false;
   }
