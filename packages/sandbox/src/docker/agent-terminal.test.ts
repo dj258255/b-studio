@@ -33,6 +33,7 @@ import {
   writeAgentGatewayConfig,
   type AgentGatewayAddress,
   isReadOnlyPrompt,
+  unwrapPastedPrompt,
   agentCleanupCommand,
 } from './agent-terminal';
 import type { MaskVolume } from './git-mask';
@@ -112,6 +113,27 @@ describe('에이전트 컨테이너 (이슈 #673)', () => {
   it('컨테이너 이름에 쓸 수 없는 글자는 바꾼다', () => {
     expect(agentContainerName('studio-orders-abc123')).toBe('studio-orders-abc123-agent');
     expect(agentContainerName('studio/../x y')).toBe('studio-..-x-y-agent');
+  });
+});
+
+describe('붙여 넣은 요청의 감싸개를 벗긴다 (이슈 #733)', () => {
+  it('감싸개 표시만 지우고 안의 글은 남긴다. 여는 표시 뒤와 닫는 표시 앞의 줄바꿈 하나도 함께 지운다', () => {
+    expect(unwrapPastedPrompt('<pasted_content id="e4a3">\na 모듈을 만들어 주세요\n</pasted_content id="e4a3">')).toBe('a 모듈을 만들어 주세요');
+    // id 없는 꼴도 벗긴다
+    expect(unwrapPastedPrompt('<pasted_content>\n설명해 줘\n</pasted_content>')).toBe('설명해 줘');
+    // 줄바꿈 없이 붙은 감싸개도 벗긴다
+    expect(unwrapPastedPrompt('<pasted_content id="x">내용</pasted_content id="x">')).toBe('내용');
+  });
+
+  it('여러 번 붙여 넣으면 감싸개도 여러 개다. 사람이 친 글은 그대로 남는다', () => {
+    expect(unwrapPastedPrompt('<pasted_content id="a">\n첫째\n</pasted_content id="a">\n<pasted_content id="b">\n둘째\n</pasted_content id="b">')).toBe('첫째\n둘째');
+    expect(unwrapPastedPrompt('먼저 이걸 봐줘\n<pasted_content id="a">\n붙여 넣은 글\n</pasted_content id="a">')).toBe('먼저 이걸 봐줘\n붙여 넣은 글');
+  });
+
+  it('감싸개가 없으면 그대로 돌려준다. 안의 글에 표시와 비슷한 글자가 있어도 바꾸지 않는다', () => {
+    expect(unwrapPastedPrompt('그냥 보통 요청입니다')).toBe('그냥 보통 요청입니다');
+    expect(unwrapPastedPrompt('a < b && c > d (`<pasted>` 아님)')).toBe('a < b && c > d (`<pasted>` 아님)');
+    expect(unwrapPastedPrompt('<pasted_content id="x">\nif (a < b) { c(); }\n</pasted_content id="x">')).toBe('if (a < b) { c(); }');
   });
 });
 
@@ -433,6 +455,10 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
       ['   \n\t[읽기만] 앞에 빈칸', true],
       [`${invisible}[읽기만] 앞에 보이지 않는 글자`, true],
       ['[읽기만] 조합형으로 들어온 표시'.normalize('NFD'), true],
+      // 붙여 넣은 요청은 감싸개를 벗기고 맨 앞 규칙을 본다(이슈 #733)
+      ['<pasted_content id="x">\n[읽기만] 설명해 줘\n</pasted_content id="x">', true],
+      ['[읽기만] <pasted_content id="x">\n설명\n</pasted_content id="x">', true],
+      ['<pasted_content id="x">\n설명\n[읽기만] 이거 고쳐줘\n</pasted_content id="x">', false],
       ['이 요청은 [읽기만]이 아니다', false],
       ['[ 읽기만 ] 띄어 쓴 것', false],
       ['［읽기만］ 전각 괄호', false],

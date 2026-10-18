@@ -320,7 +320,7 @@ import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCl
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
-import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -8141,7 +8141,7 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
 /** 요청의 시작(UserPromptSubmit 훅) */
 async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ blocked?: string; note?: string }> {
   const session = terminalSession(id);
-  const prompt = typeof input.prompt === 'string' ? clipText(input.prompt.trim(), TERMINAL_REQUEST_LIMIT) : '';
+  const prompt = typeof input.prompt === 'string' ? clipText(unwrapPastedPrompt(input.prompt).trim(), TERMINAL_REQUEST_LIMIT) : '';
   if (!prompt) return {};
   // 마지막으로 받은 요청 글을 기억해 둔다. 앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙지만,
   // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
