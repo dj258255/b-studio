@@ -1693,7 +1693,7 @@ function hintFor({ snapshot, chat }: SessionView, access: SessionAccess, persona
   }
   if (snapshot.status === "idle") return "샌드박스는 아직 꺼져 있습니다. 첫 만들기 요청이나 미리보기의 '지금 켜기'를 누를 때 켭니다. 질문만 하면 켜지 않습니다.";
   if (snapshot.status === "starting") return "샌드박스를 준비하고 있습니다. 서비스가 모두 준비되면 요청할 수 있습니다.";
-  if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 오류를 확인하세요.";
+  if (snapshot.status === "failed") return "샌드박스를 시작하지 못했습니다. 위의 안내를 확인하고 '다시 시작'을 누르세요.";
   if (snapshot.status === "stopped") return "샌드박스를 중지했습니다. 이어서 작업하면 마지막 체크포인트로 새 샌드박스를 띄웁니다.";
   if (snapshot.workspace === "local" && snapshot.running && !isAsking({ snapshot, chat })) {
     return "처리하는 동안 폴더에서 고친 파일은 요청이 실패하거나 취소되면 함께 되돌아갑니다.";

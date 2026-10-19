@@ -102,3 +102,43 @@ describe("PreviewPanel 위 탭(ADR-087)", () => {
     expect(html).not.toContain("제출");
   });
 });
+
+describe("시작에 실패한 서비스의 미리보기 (#718)", () => {
+  const detail = [
+    "앱이 켜지다가 종료됐습니다 (컨테이너 exited)",
+    "앱 로그 마지막 줄:",
+    "https://bugs.nextjs.org/search?category=turbopack-error-report&title=Turbopack%20Error%3A%20Too%20many%20open%20files%20%28os%20error%2024%29",
+    "Error [TurbopackInternalError]: Too many open files (os error 24)",
+  ].join("\n");
+  const failed: SessionSnapshot = {
+    ...baseSnapshot,
+    status: "failed",
+    error: detail,
+    services: [{ name: "web", template: "next", preview: "browser", state: "failed", hasContract: false, detail }],
+  };
+
+  it("의존성을 내려받는 중이라는 안내 대신 실패에 맞는 안내를 보여 준다", () => {
+    const html = renderToStaticMarkup(<PreviewPanel view={createView(failed)} />);
+
+    expect(html).not.toContain("의존성을 내려받느라");
+    expect(html).toContain("시작하지 못했습니다");
+    expect(html).toContain("실행 탭의 로그");
+    expect(html).toContain("다시 시작");
+  });
+
+  it("오류 원문은 요약 한 줄과 자세히 아래에 두고, 긴 URL도 줄바꿈되게 한다", () => {
+    const html = renderToStaticMarkup(<PreviewPanel view={createView(failed)} />);
+
+    expect(html).toContain("자세히");
+    expect(html).toContain("[overflow-wrap:anywhere]");
+    expect(html).toContain("Too many open files (os error 24)");
+  });
+
+  it("세션은 준비됐는데 서비스 하나가 실패했으면 다시 시작을 가리키지 않는다(헤더에 그 단추가 없다)", () => {
+    const html = renderToStaticMarkup(<PreviewPanel view={createView({ ...failed, status: "ready", error: undefined })} />);
+
+    expect(html).not.toContain("의존성을 내려받느라");
+    expect(html).toContain("실행 탭의 로그");
+    expect(html).not.toContain("다시 시작");
+  });
+});

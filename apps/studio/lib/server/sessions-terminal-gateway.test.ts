@@ -965,6 +965,20 @@ describe('읽기만 요청은 훅으로 막는다 (이슈 #689)', () => {
     expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeUndefined();
     await stopSession(session.id);
   }, 30_000);
+
+  it('붙여 넣은 요청의 감싸개를 벗겨서 읽기만으로 본다. 실행 이름에도 감싸개가 남지 않는다', async () => {
+    const session = await open({ lazy: true });
+    const wrapped = '<pasted_content id="e4a3">\n[읽기만] Order가 어디서 쓰이는지 알려줘\n</pasted_content id="e4a3">';
+    expect((await session.gateway.prompt({ prompt: wrapped })).note).toContain('읽기만');
+    for (const tool of ['Write', 'Edit', 'Bash', 'NotebookEdit', 'mcp__b-studio__run_in_service']) {
+      const denied = await session.gateway.preTool({ tool_name: tool, tool_input: { file_path: '/workspace/api/src/Order.java', content: 'class Hacked {}\n', command: 'rm -rf .' } });
+      expect(denied.deny, tool).toContain('읽기만 요청');
+    }
+    // 실행 이름(체크포인트 제목의 바탕)에 감싸개가 남지 않는다
+    expect(session.ofType('run_started')[0]!.request).toBe('[읽기만] Order가 어디서 쓰이는지 알려줘');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    await stopSession(session.id);
+  }, 30_000);
 });
 
 describe('b-studio 도구와 세션의 수명', () => {
