@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { ExploreQaRun } from './explore-qa-runs';
 
@@ -20,9 +21,14 @@ const MAX_BYTES = 5 * 1024 * 1024;
 export async function writeExploreQaRunFile(file: string, run: ExploreQaRun): Promise<void> {
   if (run.status !== 'done') return;
   await mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, JSON.stringify({ format: FORMAT, run }), 'utf8');
-  await rename(temporary, file);
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify({ format: FORMAT, run }), 'utf8');
+    await rename(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 /** 남겨 둔 실행을 읽는다. 없거나, 형식이 다르거나, 끝난 실행이 아니면 undefined */
