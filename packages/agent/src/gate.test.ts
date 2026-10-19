@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
@@ -2961,5 +2962,42 @@ describe('VerificationGate 평가 자산 (ADR-175)', () => {
     expect(outcome.kind).toBe('retry');
     // 테스트를 선언하지 않았으므로 review 단계로 남는다 — 시작 때의 선언(evaluationAssets)으로 검사가 돈다
     expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ stage: 'review', ok: false });
+  });
+
+  it('글자로는 같아지는 서로 다른 바이트로 자산을 바꿔도 지문이 달라 실패한다(parser differential)', async () => {
+    // 0xff와 0xfe는 UTF-8로 글자로 바꾸면 같은 '�A'가 된다 — 글자 해시였다면 지문이 같아 통과한다
+    expect(Buffer.from([0xff, 0x41]).toString('utf8')).toBe(Buffer.from([0xfe, 0x41]).toString('utf8'));
+    await mkdir(path.join(project.root, ASSET_DIR), { recursive: true });
+    await writeFile(path.join(project.root, ASSET_FILE), Buffer.from([0xff, 0x41]));
+    const target = withWorkflow({ tests: [unit], evaluationAssets: [ASSET_DIR] });
+    const { gate } = await setup(target);
+    await writeFile(path.join(project.root, ASSET_FILE), Buffer.from([0xfe, 0x41]));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ stage: 'test', ok: false });
+  });
+
+  it('테스트가 도는 동안 평가 자산을 고치면 test 단계가 실패한다(TOCTOU)', async () => {
+    await seedAsset();
+    const target = withWorkflow({ tests: [unit], evaluationAssets: [ASSET_DIR] });
+    const { gate, workspace } = await setup(target, {
+      exec: () => {
+        // 선언한 테스트를 돌리는 그 사이에 자산을 고친다 — 검사 전 지문은 통과했던 상태다
+        writeFileSync(path.join(project.root, ASSET_FILE), 'expect(1).toBe(2)\n');
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    // 선언한 테스트는 통과했지만, 도는 사이에 바뀐 자산을 근거로 삼을 수 없으므로 test 단계는 실패다
+    expect(gate.checks.find((entry) => entry.name === 'unit')).toMatchObject({ stage: 'test', ok: true });
+    const check = gate.checks.find((entry) => entry.name === 'evaluation-assets');
+    expect(check).toMatchObject({ stage: 'test', ok: false });
+    expect(check?.detail).toContain(ASSET_FILE);
   });
 });

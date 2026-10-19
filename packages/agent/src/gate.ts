@@ -22,7 +22,7 @@ import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
 import { REQUIREMENTS_FILE } from './requirements';
-import { readProjectFileSync, readRegularFileSync, type Workspace } from './workspace';
+import { readProjectFileSync, readRegularFileBytesSync, type Workspace } from './workspace';
 
 export type GateOutcome =
   | { kind: 'pass' }
@@ -314,6 +314,20 @@ export class VerificationGate {
   }
 
   /**
+   * 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었는지 다시 견준다(TOCTOU). 검사 전에만 견주면 검사가 도는 사이에 바뀐 것을
+   * 놓친다(그 뒤의 통과 판정은 고친 자산을 근거로 삼는다). 검사 뒤 디스크의 지문을 다시 떠 기준과 견주고, 다르면 같은
+   * evaluation-assets 실패로 결과를 바꾼다. 검사 전에 이미 실패했으면 그대로 둔다(바뀐 파일이 0개라 선언 검사를 건너뛰는
+   * 경로에서는 지금처럼 한 번만 견준다).
+   * 남은 한계: 테스트가 도는 동안 잠깐 바꿨다가 되돌리는 경우는 이 견줌으로 막지 못한다(평가 자산을 읽기 전용으로 따로 붙이는 후속).
+   */
+  async #recheckEvaluationAssets(recordChecks: WorkflowCheck[]): Promise<void> {
+    if (this.#evaluationAssets.length === 0) return;
+    const index = recordChecks.findIndex((check) => check.name === 'evaluation-assets');
+    if (index === -1 || !recordChecks[index]!.ok) return;
+    recordChecks[index] = (await this.#evaluationAssetChecks())[0]!;
+  }
+
+  /**
    * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
    * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
    * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
@@ -408,6 +422,8 @@ export class VerificationGate {
       } else {
         const checks = await this.#runDeclaredChecks();
         signal?.throwIfAborted();
+        // 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었을 수 있다. 검사 뒤에 지문을 다시 떠 견주고, 다르면 같은 실패로 바꾼다(TOCTOU)
+        await this.#recheckEvaluationAssets(recordChecks);
         // 부하 확인을 재지 못한 것이 b-studio 쪽 문제면 여기서 멈춘다. 서비스 재시작의 플랫폼 실패와 같은 규칙이다(트러블슈팅 117)
         if (this.#loadPlatformFailure) {
           this.checks = [...checks, ...recordChecks];
@@ -1333,12 +1349,14 @@ async function walkEvaluationAssetDir(dir: string, relative: string, scan: Evalu
   return undefined;
 }
 
-/** 일반 파일 하나의 내용을 지문에 담는다. 파일 수 상한을 넘거나 읽을 수 없으면 실패한다 */
+/** 일반 파일 하나의 내용을 지문에 담는다. 바이트로 해시한다 — 글자로 바꾸면 서로 다른 바이트가 같은 글자가 되어, 이미지·바이너리 자산을 바꿔도 지문이 같아진다(parser differential). 파일 수 상한을 넘거나 읽을 수 없거나 읽는 도중 바뀌었으면 실패한다 */
 function recordEvaluationFile(absolute: string, relative: string, scan: EvaluationAssetScan): string | undefined {
   scan.count += 1;
   if (scan.count > MAX_EVALUATION_ASSET_FILES) return `파일이 ${MAX_EVALUATION_ASSET_FILES}개를 넘습니다 — 선언을 좁히세요`;
-  const read = readRegularFileSync(absolute);
-  if (read.kind !== 'text') return read.kind === 'irregular' ? read.reason : '파일이 없습니다';
+  const read = readRegularFileBytesSync(absolute);
+  if (read.kind !== 'bytes') return read.kind === 'irregular' ? read.reason : '파일이 없습니다';
+  // 확인한 크기만큼 다 읽지 못했으면 지문을 뜨는 동안 파일이 바뀐 것이다. 어중간하게 읽은 바이트를 지문으로 삼지 않는다(닫힌 쪽)
+  if (!read.complete) return '읽는 동안 파일이 바뀌었습니다';
   scan.digests.set(relative, createHash('sha256').update(read.content).digest('hex'));
   return undefined;
 }
