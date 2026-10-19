@@ -49,15 +49,24 @@ export interface WorkflowCheck {
   evidence?: string[];
 }
 
+/**
+ * 에이전트가 바꿀 수 없는 경로: 보호 경로와 평가 자산. 평가 자산(테스트·채점 스크립트·기대값 파일)을 파일 도구 정책과
+ * 리뷰 단계의 사후 확인에서 보호 경로와 같게 본다 — 그래야 파일 도구로 바로 고치는 길이 막힌다(ADR-175)
+ */
+export function protectedPathsFor(workflow: WorkflowSpec | undefined): string[] {
+  return [...(workflow?.protectedPaths ?? []), ...(workflow?.evaluationAssets ?? [])];
+}
+
 /** studio.yaml의 선언을 실행기 정책으로 변환한다. 프롬프트와 별개로 항상 적용된다. */
 export function executionPolicyFor(project: LoadedProject): ExecutionPolicy | undefined {
   const workflow = project.spec.workflow;
   if (!workflow) return undefined;
+  const protectedPaths = protectedPathsFor(workflow);
   return {
     allowedTools: workflow.allowedTools,
     deniedCommands: workflow.deniedCommands,
     requireApprovalFor: workflow.requireApprovalFor,
-    protectedPaths: workflow.protectedPaths,
+    protectedPaths: protectedPaths.length > 0 ? protectedPaths : undefined,
   };
 }
 
@@ -190,7 +199,7 @@ export function missingVerificationStages(project: LoadedProject, passed: Readon
 export function reviewChanges(project: LoadedProject, changedFiles: readonly string[]): WorkflowCheck[] {
   const workflow = project.spec.workflow;
   const checks: WorkflowCheck[] = [];
-  const touched = (workflow?.protectedPaths ?? []).flatMap((rule) =>
+  const touched = protectedPathsFor(workflow).flatMap((rule) =>
     changedFiles.filter((file) => isProtectedPath(file, rule)).map((file) => `${file} (보호 경로 ${rule})`),
   );
   checks.push({
@@ -302,7 +311,7 @@ export function piPolicyEnvironment(project: LoadedProject): Record<string, stri
   const workflow = project.spec.workflow;
   return {
     BSTUDIO_WORKFLOW: workflowStages(project).join(' → '),
-    BSTUDIO_PROTECTED_PATHS: (workflow?.protectedPaths ?? []).join(','),
+    BSTUDIO_PROTECTED_PATHS: protectedPathsFor(workflow).join(','),
     BSTUDIO_DENIED_COMMANDS: [...new Set([...DEFAULT_DENIED_COMMANDS, ...(workflow?.deniedCommands ?? [])])].join(','),
   };
 }
@@ -313,6 +322,8 @@ export function workflowContext(project: LoadedProject): string {
   const stages = workflowStages(project);
   const tools = workflow?.allowedTools?.join(', ') ?? 'b-studio 기본 도구';
   const protectedPaths = workflow?.protectedPaths?.join(', ') || '없음';
+  // 평가 자산은 플랫폼이 지키고 바꾸면 test 단계가 실패한다. 선언이 없으면 줄을 넣지 않는다
+  const evaluationAssets = workflow?.evaluationAssets?.join(', ');
   const tests = workflow?.tests?.map((test) => `${test.name}(${test.service}: ${test.command.join(' ')})`).join(', ');
   const pages = workflow?.pageChecks?.map((check) => `${check.service} ${check.path}`).join(', ');
   const concurrency = workflow?.concurrencyChecks?.map((check) => `${check.name}(${check.service} ${check.method} ${check.path} ×${check.concurrent})`).join(', ');
@@ -325,7 +336,7 @@ export function workflowContext(project: LoadedProject): string {
 에이전트의 완료 선언은 완료 판정이 아닙니다. 턴을 끝내면 플랫폼이 서비스 재시작·API 계약${pages ? '·화면 확인' : ''}${tests ? '·테스트' : ''}·리뷰를 직접 실행하고, 모두 통과해야 체크포인트를 만듭니다.
 허용 도구: ${tools}
 보호 경로: ${protectedPaths}
-${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}${concurrency ? `플랫폼이 동시에 보낼 요청: ${concurrency}\n` : ''}${loads ? `플랫폼이 샌드박스 안에서 잴 응답 시간: ${loads}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
+${evaluationAssets ? `평가 자산(플랫폼이 지키고, 바꾸면 test 단계가 실패): ${evaluationAssets}\n` : ''}${tests ? `플랫폼이 실행할 테스트: ${tests}\n` : ''}${pages ? `플랫폼이 확인할 화면: ${pages}\n` : ''}${concurrency ? `플랫폼이 동시에 보낼 요청: ${concurrency}\n` : ''}${loads ? `플랫폼이 샌드박스 안에서 잴 응답 시간: ${loads}\n` : ''}실패하면 우회하지 말고 검증 결과에 표시된 원인을 고친 뒤 다시 턴을 끝내세요.
 ${assertions}${LOAD_CHECK_GUIDE}`;
 }
 

@@ -2820,3 +2820,146 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
     expect(commands).toEqual([['./gradlew', 'broken'], ['lint']]);
   });
 });
+
+describe('VerificationGate 평가 자산 (ADR-175)', () => {
+  const ASSET_DIR = 'tests/acceptance';
+  const ASSET_FILE = 'tests/acceptance/a.test.js';
+  const ORIGINAL = 'expect(1).toBe(1)\n';
+
+  /** 실행 시작 전에 있던 평가 자산을 디스크에 둔다(게이트를 만들 때 이 지문이 기준점이 된다) */
+  async function seedAsset(): Promise<void> {
+    await mkdir(path.join(project.root, ASSET_DIR), { recursive: true });
+    await writeFile(path.join(project.root, ASSET_FILE), ORIGINAL);
+  }
+
+  const unit = { name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 };
+
+  it('테스트를 선언한 실행에서 평가 자산을 명령으로 고치면 test 단계가 실패한다(바뀐 파일 목록에 안 잡혀도)', async () => {
+    await seedAsset();
+    const target = withWorkflow({ tests: [unit], evaluationAssets: [ASSET_DIR] });
+    const { gate, workspace, events } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    // 서비스 안 명령(run_in_service)처럼 파일 도구·바뀐 파일 목록을 거치지 않고 디스크를 직접 고친다
+    await writeFile(path.join(project.root, ASSET_FILE), 'expect(1).toBe(2)\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.verified).toBe(false);
+    // 선언한 테스트는 돌아서 통과했지만, 자산이 바뀌어 그 결과를 믿을 수 없으므로 test 단계는 실패다
+    expect(gate.checks.find((entry) => entry.name === 'unit')).toMatchObject({ stage: 'test', ok: true });
+    expect(gate.passedStages.has('test')).toBe(false);
+    const check = gate.checks.find((entry) => entry.name === 'evaluation-assets');
+    expect(check).toMatchObject({ stage: 'test', ok: false });
+    expect(check?.detail).toContain('평가 자산이 바뀌었습니다');
+    expect(check?.detail).toContain(ASSET_FILE);
+    expect(check?.detail).toContain('평가 자산은 사람이 고칩니다 — 되돌리고 구현을 고치세요');
+    expect(outcome.kind === 'retry' && outcome.feedback).toContain('evaluation-assets');
+    expect(events).toContainEqual({ type: 'workflow_check', check });
+  });
+
+  it('평가 자산을 되돌리면 다음 검사에서 통과한다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ tests: [unit], evaluationAssets: [ASSET_DIR] });
+    const { gate, workspace } = await setup(target, { restarts: [true, true, true, true] });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await writeFile(path.join(project.root, ASSET_FILE), 'expect(1).toBe(2)\n');
+    expect((await gate.check()).kind).toBe('retry');
+
+    await writeFile(path.join(project.root, ASSET_FILE), ORIGINAL);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ ok: true, stage: 'test' });
+    expect(gate.passedStages.has('test')).toBe(true);
+  });
+
+  it('테스트가 없으면 평가 자산 검사는 review 단계로 남아 test 단계를 채우지 않는다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ ok: true, stage: 'review' });
+    // 테스트를 돌리지 않았으므로 test 단계가 통과로 생기지 않는다
+    expect(gate.passedStages.has('test')).toBe(false);
+    expect(gate.passedStages.has('review')).toBe(true);
+  });
+
+  it('테스트가 없으면 바뀐 평가 자산은 review 단계 실패로 남는다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    const { gate } = await setup(target);
+    await writeFile(path.join(project.root, ASSET_FILE), 'expect(1).toBe(2)\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ stage: 'review', ok: false });
+  });
+
+  it('선언한 폴더에 새 파일을 더하면 실패한다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    const { gate } = await setup(target);
+    await writeFile(path.join(project.root, ASSET_DIR, 'b.test.js'), 'expect(2).toBe(2)\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')?.detail).toContain('b.test.js');
+  });
+
+  it('선언한 폴더의 파일을 지우면 실패한다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    const { gate } = await setup(target);
+    await rm(path.join(project.root, ASSET_FILE));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')?.detail).toContain(ASSET_FILE);
+  });
+
+  it('선언 밖 파일을 고쳐도 이 검사는 통과한다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await mkdir(path.join(project.root, 'notes'), { recursive: true });
+    await writeFile(path.join(project.root, 'notes/readme.md'), '바뀐 메모\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ ok: true });
+  });
+
+  it('평가 자산 자리를 링크로 바꾸면 그 너머를 읽지 않고 실패한다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    const { gate } = await setup(target);
+    await writeFile(path.join(project.root, 'outside.test.js'), ORIGINAL);
+    await rm(path.join(project.root, ASSET_FILE));
+    await symlink(path.join(project.root, 'outside.test.js'), path.join(project.root, ASSET_FILE));
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')?.detail).toContain('심볼릭 링크');
+  });
+
+  it('에이전트가 실행 중 studio.yaml에서 평가 자산 선언을 지워도 시작 때의 선언으로 검사한다', async () => {
+    await seedAsset();
+    const target = withWorkflow({ evaluationAssets: [ASSET_DIR] });
+    // 실행 중 studio.yaml에서 evaluationAssets를 지운 상태
+    const reload = async () => ({ ...target, spec: { ...target.spec, workflow: {} } }) as LoadedProject;
+    const { gate } = await setup(target, { reload });
+    await writeFile(path.join(project.root, ASSET_FILE), 'expect(1).toBe(2)\n');
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    // 테스트를 선언하지 않았으므로 review 단계로 남는다 — 시작 때의 선언(evaluationAssets)으로 검사가 돈다
+    expect(gate.checks.find((entry) => entry.name === 'evaluation-assets')).toMatchObject({ stage: 'review', ok: false });
+  });
+});
