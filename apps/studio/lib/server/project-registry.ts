@@ -3,8 +3,8 @@
  * 폴더에 studio.yaml이 없으면 project-detect가 제안한 파일을 폴더에 쓰고, git 저장소면 `.git/info/exclude`로 추적에서 뺀다
  * (저장소의 기록·상태는 바뀌지 않는다). 개인 PC 전용이다 — 서버가 아무 경로나 읽고 쓰게 되므로 로컬 폴더를 허용한 모드에서만 쓴다.
  */
-import { createHash } from 'node:crypto';
-import { appendFile, copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFile, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { loadProject, parseSpec } from '@b-studio/spec';
@@ -51,9 +51,14 @@ export async function readRegistry(file = registryPath()): Promise<RegisteredPro
 
 async function writeRegistry(projects: readonly RegisteredProject[], file = registryPath()): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ version: 1, projects: [...projects] } satisfies RegistryFile, null, 2)}\n`);
-  await rename(temporary, file);
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify({ version: 1, projects: [...projects] } satisfies RegistryFile, null, 2)}\n`);
+    await rename(temporary, file);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 /** 등록한 프로젝트 하나. 없으면 undefined(id가 틀렸거나 등록을 지운 경우) */

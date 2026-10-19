@@ -60,4 +60,16 @@ describe('끝난 탐색형 QA 실행을 파일로 남기고 다시 읽는다 (�
     await writeFile(file, JSON.stringify([done]));
     expect(await readExploreQaRunFile(file)).toBeUndefined();
   });
+
+  it('같은 파일에 동시에 여러 번 쓰면 임시 이름이 겹치지 않아 모두 성공하고, 남은 .tmp 없이 하나의 온전한 실행만 남는다', async () => {
+    const file = await stateFile();
+    const runs = Array.from({ length: 30 }, (_, index) => ({ ...done, id: `explore-${index}`, findings: [] }));
+
+    // 옛 이름(`${file}.<pid>.tmp`)이면 같은 임시 파일에 겹쳐 써 rename이 ENOENT로 실패한다
+    await expect(Promise.all(runs.map((run) => writeExploreQaRunFile(file, run)))).resolves.toBeDefined();
+
+    expect((await readdir(path.dirname(file))).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    const saved = await readExploreQaRunFile(file);
+    expect(saved).toEqual(runs.find((run) => run.id === saved?.id));
+  });
 });
