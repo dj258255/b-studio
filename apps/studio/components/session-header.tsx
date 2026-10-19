@@ -8,6 +8,7 @@ import type { SessionSnapshot } from "@/lib/studio-events";
 import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
 import { AgentsBadge } from "./agents-badge";
+import { FailureDetails } from "./failure-details";
 import { LogoutButton } from "./logout-button";
 import { ProjectMenu } from "./project-menu";
 import { useSessionAccess } from "./session-access";
@@ -57,7 +58,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
   // 샌드박스에 닿지 않거나 컨테이너가 사라졌으면 "준비됨"이라고 하지 않는다. 서비스 상태도 마지막으로 본 값일 뿐이다(트러블슈팅 123)
   const link = snapshot.status === "ready" ? snapshot.sandboxLink : undefined;
   /**
-   * 컨테이너가 사라진 세션을 다시 올린다. 서버는 중지한 세션만 이어서 작업하게 하므로(남은 샌드박스를 먼저 정리해야 한다)
+   * 컨테이너가 사라졌거나 시작에 실패한 세션을 다시 올린다("샌드박스 중지" 뒤 "이어서 작업"과 같다). 서버는 중지한 세션만 이어서 작업하게 하므로(남은 샌드박스를 먼저 정리해야 한다)
    * 중지한 뒤에 이어서 작업을 부른다. 중지가 끝나야 다음으로 간다
    */
   async function reboot() {
@@ -120,7 +121,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         </li>
       </ul>
 
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex min-w-0 flex-wrap items-center gap-3">
         <AgentsBadge />
         {access.viewer && (
           <span className="text-xs text-muted">
@@ -169,6 +170,17 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
             {resuming ? "샌드박스 다시 올리는 중" : "샌드박스 다시 올리기"}
           </button>
         )}
+        {/* 시작에 실패하면 중지한 뒤 이어서 작업하는 두 단계를 단추 하나로 한다(#718) */}
+        {snapshot.status === "failed" && (
+          <button
+            type="button"
+            onClick={reboot}
+            disabled={resuming || !access.canManage}
+            className="tap-target rounded-control bg-ink px-4 py-1.5 text-sm font-medium text-panel hover:bg-ink/85 disabled:opacity-60"
+          >
+            {resuming ? "다시 시작하는 중" : "다시 시작"}
+          </button>
+        )}
         {snapshot.status === "stopped" ? (
           <button
             type="button"
@@ -182,7 +194,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           <button
             type="button"
             onClick={stop}
-            disabled={stopping || !access.canManage}
+            disabled={stopping || resuming || !access.canManage}
             className="tap-target glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:text-fail disabled:opacity-60"
           >
             {stopping ? "중지하는 중" : "샌드박스 중지"}
@@ -191,7 +203,7 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </div>
 
       {link && (
-        <p role="status" className="basis-full text-sm text-fail">
+        <p role="status" className="min-w-0 basis-full text-sm [overflow-wrap:anywhere] break-words text-fail">
           {link.state === "unreachable"
             ? `도커에 물어도 답을 받지 못하고 있습니다(${sinceLabel(link.since)}부터). 아래 서비스 상태와 사용량은 마지막으로 본 값입니다. 도커가 돌아오면 저절로 풀립니다.`
             : `도커는 답하는데 이 세션의 컨테이너가 하나도 없습니다(${sinceLabel(link.since)}부터). 도커를 다시 띄웠다면 "샌드박스 다시 올리기"를 누르세요. 작업 복사본과 체크포인트는 그대로입니다.`}
@@ -199,9 +211,14 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         </p>
       )}
       {snapshot.error && (
-        <p className={`basis-full text-sm ${snapshot.status === "stopped" ? "text-muted" : "text-fail"}`}>{snapshot.error}</p>
+        <FailureDetails
+          text={snapshot.error}
+          workDir={snapshot.workDir}
+          hint={snapshot.status === "failed"}
+          className={`basis-full text-sm ${snapshot.status === "stopped" ? "text-muted" : "text-fail"}`}
+        />
       )}
-      {resumeError && <p className="basis-full text-sm text-fail">{resumeError}</p>}
+      {resumeError && <FailureDetails text={resumeError} className="basis-full text-sm text-fail" />}
     </header>
   );
 }
