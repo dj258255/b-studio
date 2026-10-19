@@ -260,6 +260,11 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
     case 'terminal_prompt':
       // 터미널에서 끊고 다시 말한 것. 같은 실행에 이미 들어간 지시다
       return { ...view, chat: [...view.chat, { kind: 'steer', runId: event.runId, text: event.text, status: 'applied' }] };
+    case 'terminal_attention':
+      // CLI가 사람을 기다리기 시작했거나(걸 때) 풀렸다(풀 때). 걸 때는 kind가 있고, 풀 때는 없다(지운다)
+      return patchSnapshot(view, {
+        terminalAttention: event.kind !== undefined ? { kind: event.kind, message: event.message ?? '', at: event.at } : undefined,
+      });
     case 'plan_brief':
       return { ...view, chat: [...view.chat, { kind: 'planBrief', runId: event.runId, model: event.model, text: event.text }] };
     case 'agent':

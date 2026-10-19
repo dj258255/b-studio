@@ -79,8 +79,16 @@ export const AGENT_HOOK_EVENTS = {
   stop: 3600,
   /** CLI가 끝날 때. 열려 있던 실행을 닫는다 */
   'session-end': 10,
+  /** CLI가 사람을 기다릴 때(확인 창·되묻기·입력 대기). 실행이 사람을 기다린다는 표시를 남긴다(B7). 판정을 바꾸지 않는다 */
+  notification: 15,
 } as const;
 export type AgentHookEvent = keyof typeof AGENT_HOOK_EVENTS;
+/**
+ * 사람을 기다림을 알리는 알림의 종류(B7). CLI의 `Notification` 훅 matcher는 입력의 `notification_type`을 본다.
+ * `permission_prompt`(권한 확인)·`elicitation_dialog`(되묻기)·`agent_needs_input`(입력 필요)·`idle_prompt`(입력 대기)를 받는다.
+ * input 대기는 실행이 열려 있을 때만 사람이 볼 일이라, 거르는 규칙은 세션 쪽에서 한 번 더 본다
+ */
+export const AGENT_NOTIFICATION_MATCHER = 'permission_prompt|elicitation_dialog|agent_needs_input|idle_prompt';
 /** 터미널을 열기 전에 컨테이너에서 관문에 닿는지 묻는 일이 기다리는 시간(초) */
 const AGENT_PING_SECONDS = 5;
 /**
@@ -255,6 +263,8 @@ export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string, 
       PreToolUse: [{ matcher: AGENT_WRITE_TOOL_MATCHER, hooks: [hook('pre-tool')] }],
       Stop: [{ hooks: [hook('stop')] }],
       SessionEnd: [{ hooks: [hook('session-end')] }],
+      // 사람을 기다리는 창이 뜨면 알린다(B7). matcher는 입력의 notification_type을 본다
+      Notification: [{ matcher: AGENT_NOTIFICATION_MATCHER, hooks: [hook('notification')] }],
     },
   };
 }

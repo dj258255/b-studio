@@ -727,3 +727,23 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
     expect(normal.chat.at(-1)).not.toHaveProperty('incomplete');
   });
 });
+
+describe('터미널의 사람 기다림 (B7)', () => {
+  it('알림으로 걸면 스냅샷에 남고, 풀림 이벤트(kind 없음)로 지워진다', () => {
+    const waiting = fold([{ type: 'terminal_attention', kind: 'permission_prompt', message: 'Do you want to create …?', at: '2026-10-19T00:00:00.000Z' }]);
+    expect(waiting.snapshot.terminalAttention).toEqual({ kind: 'permission_prompt', message: 'Do you want to create …?', at: '2026-10-19T00:00:00.000Z' });
+
+    const moved = fold([{ type: 'terminal_attention', at: '2026-10-19T00:01:00.000Z' }], waiting);
+    expect(moved.snapshot.terminalAttention).toBeUndefined();
+  });
+
+  it('기록을 다시 재생해도 같은 상태가 된다(스냅샷으로 접는다)', () => {
+    const events: StudioEvent[] = [
+      { type: 'terminal_attention', kind: 'idle_prompt', message: '입력 대기', at: '2026-10-19T00:00:00.000Z' },
+      { type: 'run_started', runId: 'r1', request: '고쳐줘', via: 'terminal' },
+      { type: 'terminal_attention', at: '2026-10-19T00:02:00.000Z' },
+    ];
+    expect(fold(events.slice(0, 1)).snapshot.terminalAttention).toMatchObject({ kind: 'idle_prompt', message: '입력 대기' });
+    expect(fold(events).snapshot.terminalAttention).toBeUndefined();
+  });
+});

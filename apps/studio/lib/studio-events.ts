@@ -119,6 +119,11 @@ export interface SessionSnapshot {
   design?: DesignView;
   /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */
   pendingQuestion?: PendingQuestion;
+  /**
+   * 터미널의 CLI가 사람을 기다린다(B7): 권한 확인 창·되묻기·입력 대기에서 멈춰 있다. 없으면 기다리는 중이 아니다.
+   * kind는 CLI가 알린 notification_type, message는 그 창이 보여 준 글, at은 건 시각(ISO)이다
+   */
+  terminalAttention?: { kind: string; message: string; at: string };
   /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
@@ -345,6 +350,11 @@ export type StudioEvent =
     }
   /** 터미널 실행이 끝나기 전에 사용자가 CLI에 이어서 보낸 말(도중에 끊고 다시 말한 경우). 같은 실행에 속한다 */
   | { type: 'terminal_prompt'; runId: string; text: string; at: string }
+  /**
+   * 터미널의 CLI가 사람을 기다리기 시작했거나(걸 때) 기다림이 풀렸다(B7). 걸 때는 kind·message가 있고,
+   * 풀 때는 kind 없이 온다(그때 terminalAttention을 지운다). 기록을 다시 재생해도 같은 상태가 되게 스냅샷으로 접는다
+   */
+  | { type: 'terminal_attention'; kind?: string; message?: string; at: string }
   /**
    * 터미널 실행의 CLI가 텔레메트리로 알려 온 모델 요청 한 건의 사용량(#726). 로그 내보내기 주기(1초)가 있어
    * 실행이 닫힌 뒤 몇 초 안에 도착한 것도 그 실행에 붙는다. 토큰·캐시·비용·모델별 사용량을 이것을 합쳐 만든다

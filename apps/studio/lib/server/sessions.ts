@@ -1235,6 +1235,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   session.stop.abort();
   // 감시가 담아 둔 위반은 세션이 멈추면 지운다
   session.pendingViolation = undefined;
+  // 멈춘 세션에는 사람을 기다리는 터미널도 없다(B7)
+  clearTerminalAttention(session);
   // 터미널에서 연 실행은 기다리는 러너가 없다. 여기서 닫아 두지 않으면 세션에 걸린 채 남는다(끝났다는 알림은 내지 않는다 — 멈춘 세션의 실행은 기록을 읽을 때 중단으로 본다)
   const terminalRun = openTerminalRun(session);
   if (terminalRun) settleTerminalRun(session, terminalRun, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
@@ -7732,10 +7734,31 @@ function checkTerminalStall(session: Session, stallMs: number): void {
   warnSessionTerminal(session.snapshot.id, message);
 }
 
-/** 훅 호출이나 텔레메트리가 왔다: 그 실행의 마지막 활동 시각을 지금으로 옮기고 다음 정체를 다시 알릴 수 있게 한다 */
-function noteTerminalActivity(run: ActiveRun & { terminal: TerminalRunState }): void {
+/**
+ * 훅 호출이나 텔레메트리가 왔다: 그 실행의 마지막 활동 시각을 지금으로 옮기고 다음 정체를 다시 알릴 수 있게 한다.
+ * 훅이 왔다는 것은 CLI가 다시 움직였다는 뜻이므로, 사람을 기다림 표시(B7)도 함께 푼다
+ */
+function noteTerminalActivity(session: Session, run: ActiveRun & { terminal: TerminalRunState }): void {
   run.terminal.lastActivityMs = Date.now();
   run.terminal.stallNotified = false;
+  clearTerminalAttention(session);
+}
+
+/**
+ * 터미널의 CLI가 사람을 기다리기 시작했다(Notification 훅, B7). 스냅샷에 남기고 세션 이벤트로 알린다.
+ * 알리기만 하고 판정을 바꾸지 않는다 — 여기서 권한을 대신 허락하거나 CLI의 확인 창을 건너뛰지 않는다
+ */
+function setTerminalAttention(session: Session, kind: string, message: string): void {
+  const at = new Date().toISOString();
+  session.snapshot.terminalAttention = { kind, message, at };
+  emit(session, { type: 'terminal_attention', kind, message, at });
+}
+
+/** CLI가 다시 움직였다: 사람을 기다림 표시를 푼다(없으면 아무 일도 하지 않는다) */
+function clearTerminalAttention(session: Session): void {
+  if (!session.snapshot.terminalAttention) return;
+  session.snapshot.terminalAttention = undefined;
+  emit(session, { type: 'terminal_attention', at: new Date().toISOString() });
 }
 
 /** 세션·사람 토큰 한도를 이미 넘었으면 그 사유(대화 실행의 409와 같은 문구). 넘지 않았으면 undefined */
@@ -7798,8 +7821,11 @@ function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: Term
  */
 async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   const session = terminalSession(id);
+  const requests = apiRequestsFromOtlp(body);
+  // 모델 요청이 왔다는 것은 CLI가 다시 움직였다는 뜻이다. 사람을 기다림 표시를 푼다(B7)
+  if (requests.length > 0) clearTerminalAttention(session);
   // 레코드를 받은 순서대로 처리한다. 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게)
-  for (const request of apiRequestsFromOtlp(body)) await attributeRunUsage(session, request);
+  for (const request of requests) await attributeRunUsage(session, request);
 }
 
 /** 한도 계산용 중복 방지. 실행에 붙지 않은 것도 세므로 귀속용(seenUsageIds)과 별개의 기억을 쓴다. 셌으면 참 */
@@ -7868,7 +7894,7 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
       totals.modelCalls += 1;
       // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
       open.terminal.modelCalls += 1;
-      noteTerminalActivity(open);
+      noteTerminalActivity(session, open);
     }
   }
 
@@ -8056,6 +8082,8 @@ function settleTerminalRun(session: Session, run: ActiveRun & { terminal: Termin
 /** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
 function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete'>): void {
   if (session.run === run) session.run = undefined;
+  // 실행이 닫혔으면 사람을 기다릴 일도 없다(B7). 실행이 닫힌 뒤의 대기는 사람이 볼 일이 아니다
+  clearTerminalAttention(session);
   // 실행이 닫혔으면 정체 감시도 멈춘다. 돌고 있던 타이머가 다음 회차에 스스로 멈추게 두지 않는다
   stopTerminalStallWatch(session);
   // 닫힌 실행의 시작·끝을 남긴다. 내보내기 주기 때문에 실행이 닫힌 뒤 몇 초 안에 도착한 사용량을 여기 붙인다(#726)
@@ -8174,7 +8202,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
-    noteTerminalActivity(opened);
+    noteTerminalActivity(session, opened);
     // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
     if (isReadOnlyPrompt(prompt)) {
       // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
@@ -8209,7 +8237,7 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   // 훅이 왔다는 것은 CLI가 움직인다는 뜻이다. 도구의 종류와 무관하게 정체 감시의 활동을 갱신한다(#B5)
   const running = openTerminalRun(session);
-  if (running) noteTerminalActivity(running);
+  if (running) noteTerminalActivity(session, running);
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
   if ((AGENT_READ_TOOLS as readonly string[]).includes(tool)) return {};
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다
@@ -8268,7 +8296,7 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   if (budget) return { ok: false, content: `[b-studio] ${budget}` };
   const run = await terminalRunForWork(session);
   if ('busy' in run) return { ok: false, content: run.busy };
-  noteTerminalActivity(run);
+  noteTerminalActivity(session, run);
   // 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행에서는 돌리지 않는다
   if (run.terminal.readOnly) return { ok: false, content: TERMINAL_READ_ONLY_DENY };
   // 한도에 닿은 실행이면 훅을 거치지 않고 이 길로 불려도 돌리지 않는다(#B5)
@@ -8294,7 +8322,7 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
   const run = openTerminalRun(session);
   // 실행이 없으면 이 턴은 아무것도 바꾸지 않았다(바꿨다면 쓰기 직전의 훅이 실행을 열었다)
   if (!run) return {};
-  noteTerminalActivity(run);
+  noteTerminalActivity(session, run);
   const text = typeof input.last_assistant_message === 'string' ? input.last_assistant_message.trim() : '';
   return run.terminal.serial(() => finishTerminalTurn(session, run, text));
 }
@@ -8576,6 +8604,8 @@ function terminalResult(run: ActiveRun, verification: TerminalVerification, stat
 /** CLI가 끝났다(SessionEnd 훅). 열려 있던 실행을 닫는다 — 검증이 도는 중이면 그 검증이 닫는다 */
 async function terminalCliEnded(id: string): Promise<void> {
   const session = terminalSession(id);
+  // CLI가 끝났으면 사람을 기다릴 일도 없다(B7)
+  clearTerminalAttention(session);
   const run = openTerminalRun(session);
   if (!run || run.terminal.checking) return;
   const feedback = run.terminal.lastFeedback;
@@ -8584,6 +8614,29 @@ async function terminalCliEnded(id: string): Promise<void> {
       ? abandonTerminalRun(session, run, { status: 'failed', reason: `검증을 통과하지 못한 채 CLI가 끝났습니다.\n\n${clipText(feedback, 4000)}` })
       : abandonTerminalRun(session, run, { status: 'cancelled', reason: 'CLI가 끝나 요청을 닫았습니다.' }),
   );
+}
+
+/**
+ * permission_prompt(권한 확인)·elicitation_dialog(되묻기)·agent_needs_input(입력 필요)는 언제나 사람을 기다리는 것으로 본다.
+ * idle_prompt(입력 대기)는 열린 실행이 있을 때만 본다 — 실행이 끝난 뒤의 입력 대기는 사람이 볼 일이 아니다(B7)
+ */
+const TERMINAL_ATTENTION_ALWAYS = new Set(['permission_prompt', 'elicitation_dialog', 'agent_needs_input']);
+
+/**
+ * CLI가 사람을 기다린다(Notification 훅, B7): 권한 확인 창·되묻기·입력 대기에서 멈춰 있다.
+ * 스냅샷에 표시만 남긴다 — 권한을 대신 허락하거나 CLI의 확인 창을 건너뛰지 않는다
+ */
+function terminalNotification(id: string, input: HookInput): void {
+  const session = terminalSession(id);
+  const kind = typeof input.notification_type === 'string' ? input.notification_type : '';
+  if (!kind) return;
+  if (kind === 'idle_prompt') {
+    if (!openTerminalRun(session)) return;
+  } else if (!TERMINAL_ATTENTION_ALWAYS.has(kind)) {
+    // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
+    return;
+  }
+  setTerminalAttention(session, kind, typeof input.message === 'string' ? input.message : '');
 }
 
 /** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */
@@ -8605,6 +8658,9 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     sessionEnd: async () => {
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
+    },
+    notification: async (input) => {
+      terminalNotification(id, input);
     },
     telemetry: async (body) => {
       await terminalTelemetry(id, body);

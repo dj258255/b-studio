@@ -8231,3 +8231,16 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 | 실행 | `/split?plan=…`, 레인 칸 2개, 카드별 진행과 사용량 |
 | 끝 | 카드 셋 통과, 통합 통과, 계획 합계 토큰 1.2만 · 캐시 90% · 52.6초 · $0.0097 |
 | 같은 프로젝트로 레인 둘이 동시에 세션을 만듦 | 처음에는 서비스 선택 파일의 임시 이름이 겹쳐 하나가 `ENOENT`로 실패 → 임시 이름에 무작위 값을 더해 해결(같은 꼴 두 곳은 #737) |
+
+### 덧붙임: 칸에서 확인을 기다리면 보인다 (이슈 #739)
+
+<img src="images/studio-terminal-attention.png" width="760" alt="나란히 보기의 터미널 칸. CLI가 'Do you want to create z.mjs?'를 묻고 있고, 칸 머리에 '확인 기다림', 활동 줄과 오른쪽 결과 칸에 'claude가 이 칸에서 확인을 기다립니다: Claude needs your permission'이 보인다">
+
+카드 실측에서 사용자의 CLI가 수동 권한 모드면 파일을 쓸 때마다 확인을 묻고 멈췄는데, 카드 진행과 칸은 "도는 중"으로만 보였다(정체 알림은 120초 뒤).
+
+- 관문이 CLI의 `Notification` 훅(`permission_prompt`·`elicitation_dialog`·`agent_needs_input`·`idle_prompt`)을 받아 세션에 "확인 기다림"을 건다. `idle_prompt`는 열린 실행이 있을 때만 건다(끝난 뒤의 입력 대기는 사람이 볼 일이 아니다).
+- CLI가 다시 움직였다는 신호(다음 훅, 모델 요청 텔레메트리, 실행 닫힘, CLI 끝, 세션 멈춤)에서 푼다.
+- 칸 머리는 "확인 기다림"과 주의 테두리, 활동 줄은 그 메시지, 카드 진행은 레인의 기다리는 이유로 보인다.
+- 알리기만 한다. 권한을 대신 허락하는 훅(PermissionRequest)은 쓰지 않는다 — 사용자가 정한 권한 모드다.
+
+실측(진짜 CLI 2.1.302, 가짜 모델): 파일 쓰기 → 권한 확인 창 → 2초 안에 `terminalAttention: permission_prompt "Claude needs your permission"`, 화면에 위 표시 → Enter(Yes) → 1초 안에 풀림.

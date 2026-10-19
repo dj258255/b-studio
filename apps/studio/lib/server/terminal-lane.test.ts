@@ -47,7 +47,7 @@ function harness(
   const writes: string[] = [];
   const contexts: Array<{ writableScope: readonly string[]; doneTests: readonly TaskCardDone[] } | undefined> = [];
   /** 가짜 세션 상태·열린 실행. 테스트가 바꿔 멈춤·늦은 종료·다른 실행을 흉내 낸다 */
-  const state = { status: 'ready' as string, open: config.preOpen as string | undefined, cancels: [] as string[] };
+  const state = { status: 'ready' as string, open: config.preOpen as string | undefined, cancels: [] as string[], attention: undefined as { kind: string; message: string } | undefined };
   let listener: ((event: StudioEvent) => void) | undefined;
   let pastedText = '';
   let enters = 0;
@@ -91,6 +91,7 @@ function harness(
       contexts.push(context);
     },
     status: () => state.status,
+    attention: () => state.attention,
     openRunId: () => state.open,
     cancelRun: (_sessionId, runId) => {
       state.cancels.push(runId);
@@ -125,6 +126,26 @@ describe('터미널 레인의 한 작업', () => {
     expect(waiting.at(-1)).toBeUndefined();
     // 맥락을 걸고(쓰기 범위·완료 검사) 끝나면 지운다
     expect(h.contexts).toEqual([{ writableScope: ['api/src'], doneTests: [] }, undefined]);
+  });
+
+  it('실행을 기다리는 동안 CLI가 확인을 기다리면 카드에 그 사실을 보여 주고, 풀리면 지운다(B7)', async () => {
+    const h = harness();
+    const waiting: Array<string | undefined> = [];
+    const running = runTerminalTask('s1', 'do it', options({ onWaiting: (note) => waiting.push(note) }), h.deps);
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+
+    // CLI가 권한 확인 창에서 멈춘다(터미널Attention이 걸린다)
+    h.state.attention = { kind: 'permission_prompt', message: 'Do you want to create …?' };
+    await until(() => waiting.some((note) => note?.includes('확인을 기다립니다')), '확인 기다림을 알리지 않았습니다');
+    expect(waiting.at(-1)).toBe('칸에서 claude가 확인을 기다립니다: Do you want to create …?');
+
+    // 사람이 확인하고 CLI가 움직인다 → 표시가 풀린다
+    h.state.attention = undefined;
+    await until(() => waiting.at(-1) === undefined, '기다림을 지우지 않았습니다');
+
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '끝' });
+    await running;
+    expect(waiting.at(-1)).toBeUndefined();
   });
 
   it('CLI가 늦게 떠도 기다렸다가 진행하고, 기다리는 동안 무엇을 기다리는지 알린다', async () => {

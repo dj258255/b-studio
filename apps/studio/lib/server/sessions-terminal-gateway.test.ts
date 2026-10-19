@@ -1200,6 +1200,89 @@ describe('읽기만 실행은 사람이 미리 고쳐 둔 파일로 오탐하지
   }, 30_000);
 });
 
+describe('터미널의 사람 기다림을 알린다 (B7)', () => {
+  const otlp = (records: Array<Record<string, unknown>>): unknown => ({ resourceLogs: [{ scopeLogs: [{ logRecords: records }] }] });
+  const req = (): Record<string, unknown> => ({
+    timeUnixNano: String(Date.now() * 1_000_000),
+    attributes: [
+      { key: 'event.name', value: { stringValue: 'claude_code.api_request' } },
+      { key: 'model', value: { stringValue: 'claude-sonnet-5' } },
+      { key: 'input_tokens', value: { intValue: '10' } },
+      { key: 'output_tokens', value: { intValue: '1' } },
+      { key: 'cache_read_tokens', value: { intValue: '0' } },
+      { key: 'cache_creation_tokens', value: { intValue: '0' } },
+    ],
+  });
+
+  it('권한 확인 알림은 스냅샷·이벤트에 걸리고, CLI가 다음 도구를 쓰면 풀린다(풀림엔 kind가 없다)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: 'Do you want to create api/src/Order.java?' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Do you want to create api/src/Order.java?' });
+    expect(session.ofType('terminal_attention')).toMatchObject([{ kind: 'permission_prompt', message: 'Do you want to create api/src/Order.java?' }]);
+
+    // 사람이 확인하고 CLI가 도구를 쓴다 → 신호가 왔으니 표시가 풀린다
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
+    const events = session.ofType('terminal_attention');
+    expect(events).toHaveLength(2);
+    expect(events[1]!.kind).toBeUndefined();
+    expect(events[1]!.message).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('입력 대기(idle_prompt)는 열린 실행이 없으면 무시하고, 있으면 건다', async () => {
+    const session = await open();
+    // 실행이 하나도 없을 때의 입력 대기는 사람이 볼 일이 아니다
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
+    expect(session.ofType('terminal_attention')).toEqual([]);
+
+    // 실행이 열려 있으면 건다
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'idle_prompt', message: '입력 대기' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('모르는 알림 종류는 건지 않는다', async () => {
+    const session = await open();
+    await session.gateway.notification({ notification_type: 'some_future_kind', message: 'x' });
+    expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
+    expect(session.ofType('terminal_attention')).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('되묻기(agent_needs_input)는 텔레메트리(모델 요청)가 오면 풀린다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.notification({ notification_type: 'agent_needs_input', message: '무엇을 할까요?' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'agent_needs_input' });
+
+    await session.gateway.telemetry(otlp([req()]));
+    expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('CLI가 끝나면(session-end)와 세션을 멈추면 각각 풀린다', async () => {
+    const first = await open();
+    await first.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await first.gateway.notification({ notification_type: 'permission_prompt', message: 'm' });
+    expect(getSnapshot(first.id)!.terminalAttention).toBeDefined();
+    await first.gateway.sessionEnd({});
+    expect(getSnapshot(first.id)!.terminalAttention).toBeUndefined();
+    await stopSession(first.id);
+
+    const second = await open();
+    await second.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await second.gateway.notification({ notification_type: 'permission_prompt', message: 'm' });
+    expect(getSnapshot(second.id)!.terminalAttention).toBeDefined();
+    await stopSession(second.id);
+    expect(getSnapshot(second.id)!.terminalAttention).toBeUndefined();
+  }, 30_000);
+});
+
 describe('작업 복사본의 Git을 믿지 않는다 (이슈 #699)', () => {
   const headOf = async (session: Opened) => (await git(session, 'rev-parse', 'HEAD')).trim();
   /** 기억한 Git 상태(작업 복사본 밖)의 마지막 체크포인트가 지금 HEAD와 같은지 본다 */

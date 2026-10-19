@@ -5,7 +5,7 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AGENT_HOOK_SCRIPT, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
+import { AGENT_HOOK_SCRIPT, AGENT_NOTIFICATION_MATCHER, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
 import { SandboxError } from './errors';
 import {
   checkHostGatewayConfig,
@@ -174,6 +174,13 @@ describe('hostGatewaySettings', () => {
     expect(sessionStart).toContain("'/n/bin/node'");
     expect(sessionStart).toContain(`'${path.join('/gateway', HOOK_SCRIPT_NAME)}'`);
     expect(sessionStart).toContain('session-start');
+    // B7: 사람을 기다리는 창에서 오는 알림 훅도 같은 관문 스크립트로 건다(관문 파일 기대값도 이 설정을 그대로 담는다)
+    const hooks = settings.hooks as Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+    expect(hooks.Notification![0]!.matcher).toBe(AGENT_NOTIFICATION_MATCHER);
+    const notification = hooks.Notification![0]!.hooks[0]!.command;
+    expect(notification).toContain(`'${path.join('/gateway', HOOK_SCRIPT_NAME)}'`);
+    expect(notification).toContain('notification');
+    expect(expectedHostGatewayFiles(address, '/gateway', { claudePath: '/usr/local/bin/claude', nodePath: '/n/bin/node' })['settings.json']!.content).toContain(`"${AGENT_NOTIFICATION_MATCHER}"`);
     // 텔레메트리 env도 같은 관문 주소·토큰으로 보낸다
     expect(settings.env).toEqual({
       CLAUDE_CODE_ENABLE_TELEMETRY: '1',
