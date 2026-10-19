@@ -581,6 +581,40 @@ async function pushReviewerCommit(base: string, remote: string, file: string, co
   return git(reviewer, 'rev-parse', 'HEAD');
 }
 
+describe('패치는 자르기 전에 가린다 (#751)', () => {
+  const secret = 'sk_test_ABCDEFGHIJKLMNOP';
+  const redact = (text: string) => text.replaceAll(secret, '[KEY 가림]');
+
+  /** 20만 자 상한 경계에 시크릿이 걸치도록 앞을 채운 한 줄. 자른 뒤 가리면 앞 6글자가 남는다 */
+  async function straddlingLine(measure: () => Promise<string>): Promise<string> {
+    await write('api/src/Order.java', `${'a'.repeat(10)}\n`);
+    const header = (await measure()).indexOf(`+${'a'.repeat(10)}`) + 1;
+    return `${'a'.repeat(200_000 - header - 6)}${secret}\n`;
+  }
+
+  it('pendingPatch는 가림 함수를 자르기 전에 적용해 경계에 걸친 값의 앞부분도 남기지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await write('api/src/Order.java', await straddlingLine(() => store.pendingPatch('api/src/Order.java')));
+
+    const patch = await store.pendingPatch('api/src/Order.java', redact);
+    expect(patch).toContain('길어서');
+    expect(patch).not.toContain(secret.slice(0, 6));
+  });
+
+  it('체크포인트 patch도 가림 함수를 자르기 전에 적용한다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const line = await straddlingLine(() => store.pendingPatch('api/src/Order.java'));
+    await write('api/src/Order.java', line);
+    const checkpoint = await store.commit('요청: 긴 줄');
+
+    const patch = await store.patch(checkpoint!.sha, redact);
+    expect(patch).toContain('길어서');
+    expect(patch).not.toContain(secret.slice(0, 6));
+  });
+});
+
 describe('CheckpointStore PR 대상 브랜치', () => {
   it('기준 브랜치가 원격에 있으면 그 브랜치가 대상이다', async () => {
     const { source, workDir } = await createSourceRepository();

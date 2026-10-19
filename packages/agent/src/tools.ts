@@ -546,7 +546,7 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       const raw = context.sandbox.redact(result.body);
       return {
         ok: result.decision === 'allow',
-        content: `HTTP ${result.status}\ncontent-type: ${result.contentType ?? 'unknown'}\npolicy: ${policy}\n\n${clipBody(raw, result.contentType ?? undefined)}`,
+        content: `HTTP ${result.status}\ncontent-type: ${result.contentType ?? 'unknown'}\npolicy: ${policy}\n\n${clipBody(raw, result.contentType ?? undefined, (text) => context.sandbox.redact(text))}`,
         rawChars: raw.length,
       };
     }
@@ -670,12 +670,15 @@ async function httpRequest(context: ToolContext, args: Record<string, unknown>):
   // 서비스가 응답에 환경 변수 값을 그대로 담아 보낼 수 있다
   const raw = context.sandbox.redact(text);
   // 4xx/5xx도 요청 자체는 수행됐으므로 정상 결과로 돌려주고 판단은 모델에게 맡긴다
-  return { ok: true, content: `HTTP ${response.status}\ncontent-type: ${contentType}\n\n${clipBody(raw, contentType)}`, rawChars: raw.length };
+  return { ok: true, content: `HTTP ${response.status}\ncontent-type: ${contentType}\n\n${clipBody(raw, contentType, (text) => context.sandbox.redact(text))}`, rawChars: raw.length };
 }
 
-/** HTTP 응답 본문을 예산에 맞춘다. HTML이면 태그를 벗긴 "보이는 글자"를 기준으로 한다(개발 서버 HTML이 13,430자였다) */
-function clipBody(body: string, contentType: string | undefined): string {
-  return clipText(isHtmlContent(contentType, body) ? visibleHtml(body) : body, HTTP_BODY_BUDGET);
+/**
+ * HTTP 응답 본문을 예산에 맞춘다. HTML이면 태그를 벗긴 "보이는 글자"를 기준으로 한다(개발 서버 HTML이 13,430자였다).
+ * 엔티티를 풀면 `&lt;`처럼 인코딩돼 앞의 가림을 빠져나간 값이 원래 모양이 되므로, 푼 글을 자르기 전에 한 번 더 가린다(#751)
+ */
+function clipBody(body: string, contentType: string | undefined, redact: (text: string) => string): string {
+  return clipText(isHtmlContent(contentType, body) ? redact(visibleHtml(body)) : body, HTTP_BODY_BUDGET);
 }
 
 async function tailLogs(sandbox: Sandbox, service: string, lines: number): Promise<string> {
