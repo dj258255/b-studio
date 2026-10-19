@@ -50,7 +50,7 @@ describe('시작 순서', () => {
   });
 });
 
-describe('확인한 컨테이너를 의존 순서대로 시작한다 (트러블슈팅 121)', () => {
+describe('확인한 컨테이너를 의존 순서대로 시작한다 (트러블슈팅 121)', { timeout: 20_000 }, () => {
   const dirs: string[] = [];
   afterEach(async () => {
     await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -101,7 +101,7 @@ exit 0
 
   it('healthy를 기다리는 서비스는 의존 서비스가 healthy가 된 뒤에 시작한다', async () => {
     const { dockerBin, log } = await fakeDocker('service_healthy', ['{"Status":"running","Health":{"Status":"starting"}}', '{"Status":"running","Health":{"Status":"starting"}}', '{"Status":"running","Health":{"Status":"healthy"}}']);
-    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    const sandbox = await new LocalDockerProvider({ dockerBin, dependencyPollMs: 10 }).create(project);
     await sandbox.ensureInfra!(['api', 'db']);
     const lines = (await log()).split('\n');
     // 첫 묶음(의존이 없는 db와 edge)을 시작하고, db의 상태를 세 번 본 뒤에 api를 시작한다
@@ -115,7 +115,7 @@ exit 0
 
   it('의존 서비스가 unhealthy가 되면 뒤의 서비스를 시작하지 않고 실패로 돌려준다', async () => {
     const { dockerBin, log } = await fakeDocker('service_healthy', ['{"Status":"running","Health":{"Status":"unhealthy"}}']);
-    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    const sandbox = await new LocalDockerProvider({ dockerBin, dependencyPollMs: 10 }).create(project);
     const result = await sandbox.ensureInfra!(['api', 'db']);
     expect(result.ok).toBe(false);
     expect(result.reason).toContain('container db is unhealthy');
@@ -124,7 +124,7 @@ exit 0
 
   it('healthcheck가 없는 서비스에 service_healthy를 걸면 compose처럼 실패한다', async () => {
     const { dockerBin, log } = await fakeDocker('service_healthy', ['{"Status":"running"}']);
-    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    const sandbox = await new LocalDockerProvider({ dockerBin, dependencyPollMs: 10 }).create(project);
     const result = await sandbox.ensureInfra!(['api', 'db']);
     expect(result.ok).toBe(false);
     expect(result.reason).toContain('has no healthcheck configured');
@@ -133,7 +133,7 @@ exit 0
 
   it('service_started 조건은 순서만 지키고 상태를 기다리지 않는다', async () => {
     const { dockerBin, log } = await fakeDocker('service_started', ['{"Status":"running"}']);
-    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    const sandbox = await new LocalDockerProvider({ dockerBin, dependencyPollMs: 10 }).create(project);
     await sandbox.ensureInfra!(['api', 'db']);
     expect(starts(await log())).toEqual(['start c-db c-edge', 'start c-api']);
     expect(await log()).not.toContain('inspect --format');
@@ -141,12 +141,25 @@ exit 0
 
   it('service_completed_successfully는 의존 서비스가 0으로 끝난 뒤에 시작하고, 0이 아니면 시작하지 않는다', async () => {
     const done = await fakeDocker('service_completed_successfully', ['{"Status":"running"}', '{"Status":"exited","ExitCode":0}']);
-    await (await new LocalDockerProvider({ dockerBin: done.dockerBin }).create(project)).ensureInfra!(['api', 'db']);
+    await (await new LocalDockerProvider({ dockerBin: done.dockerBin, dependencyPollMs: 10 }).create(project)).ensureInfra!(['api', 'db']);
     expect(starts(await done.log())).toEqual(['start c-db c-edge', 'start c-api']);
 
     const failed = await fakeDocker('service_completed_successfully', ['{"Status":"exited","ExitCode":3}']);
-    const result = await (await new LocalDockerProvider({ dockerBin: failed.dockerBin }).create(project)).ensureInfra!(['api', 'db']);
+    const result = await (await new LocalDockerProvider({ dockerBin: failed.dockerBin, dependencyPollMs: 10 }).create(project)).ensureInfra!(['api', 'db']);
     expect(result.ok).toBe(false);
     expect(starts(await failed.log())).toEqual(['start c-db c-edge']);
+  });
+
+  it('폴링 간격을 주지 않으면 기본 500ms마다 다시 확인한다', async () => {
+    // 상태를 두 번 읽는 쪽은 한 번 더 쉬므로, 한 번에 끝나는 쪽보다 확인 간격만큼 오래 걸린다(오버헤드는 양쪽이 같다)
+    const twice = await fakeDocker('service_completed_successfully', ['{"Status":"running"}', '{"Status":"exited","ExitCode":0}']);
+    const once = await fakeDocker('service_completed_successfully', ['{"Status":"exited","ExitCode":0}']);
+    const elapsed = async (dockerBin: string) => {
+      const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+      const started = Date.now();
+      await sandbox.ensureInfra!(['api', 'db']);
+      return Date.now() - started;
+    };
+    expect((await elapsed(twice.dockerBin)) - (await elapsed(once.dockerBin))).toBeGreaterThanOrEqual(400);
   });
 });

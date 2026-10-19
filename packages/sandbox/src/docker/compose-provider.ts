@@ -162,6 +162,8 @@ export interface LocalDockerProviderOptions {
   runtime?: string;
   /** 사용량 조회(ps·inspect·stats) 전체의 상한(ms). 기본 15초. 테스트에서 짧게 준다 */
   statsTimeoutMs?: number;
+  /** 의존 서비스가 준비됐는지 다시 확인하기까지의 간격(ms). 기본 500ms. 테스트에서 짧게 준다 */
+  dependencyPollMs?: number;
 }
 
 /**
@@ -232,6 +234,8 @@ class LocalDockerSandbox implements Sandbox {
   /** 컨테이너를 만드는 up 직전마다 compose 파일에서 다시 계산한다(#refreshGitMask) */
   #gitMask: Record<string, MaskVolume[]>;
   readonly #statsTimeoutMs: number;
+  /** 의존 서비스 준비 확인 간격. 기다리는 상한(DEPENDENCY_WAIT_MS)과는 별개다 */
+  readonly #dependencyPollMs: number;
   /** up을 한 번에 하나씩 돌리는 줄. 만들기 → 확인 → 시작 사이에 다른 up이 끼어들지 못하게 한다 */
   #upQueue: Promise<unknown> = Promise.resolve();
   #loadRunner: Promise<string> | undefined;
@@ -262,6 +266,7 @@ class LocalDockerSandbox implements Sandbox {
     this.#readiness = options.readiness ?? {};
     this.#runtime = options.runtime;
     this.#statsTimeoutMs = options.statsTimeoutMs ?? STATS_TIMEOUT_MS;
+    this.#dependencyPollMs = options.dependencyPollMs ?? DEPENDENCY_POLL_MS;
     this.#secrets = secrets;
     this.#redactor = new Redactor(secrets);
   }
@@ -911,7 +916,7 @@ class LocalDockerSandbox implements Sandbox {
         if (failed) return `service "${service}" didn't complete successfully: exit ${failed.ExitCode}`;
       }
       if (Date.now() > deadline) return `dependency failed to start: ${service}이(가) ${Math.round(DEPENDENCY_WAIT_MS / 1000)}초 안에 준비되지 않았습니다`;
-      await sleep(DEPENDENCY_POLL_MS, undefined, { signal });
+      await sleep(this.#dependencyPollMs, undefined, { signal });
     }
   }
 
