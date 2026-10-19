@@ -7,7 +7,8 @@
  *  2) 샌드박스를 아직 켜지 않은 세션(지연 기동)·중지된 세션 → "이어서 열기"를 눌러야 켠다(ADR-104) —
  *     서버를 막 재시작했을 때는 모든 세션이 중지로 보이는데, 예전처럼 첫 화면을 열자마자 되살리면 다른
  *     프로젝트로 시작하려던 사람에게는 헛된 기동이다(샌드박스 켜기는 비용이 든다)
- *  3) 고를 세션이 아예 없으면(새 프로젝트) → 잃을 것이 없으니 그 프로젝트로 새 세션을 만들고 바로 켠다
+ *  3) 고를 세션이 아예 없으면(새 프로젝트) → 그 프로젝트로 새 세션을 만들고 바로 켠다. 다만 주소로 프로젝트를 정하지 않았는데
+ *     프로젝트가 둘 이상이면 이름순 첫 프로젝트를 켜지 않고 고르게 한다(#749) — 2)와 같은 이유로 헛된 기동이다
  * 여러 명 비교 참가자·나눠서 병렬 레인·통합 세션은 사람이 직접 개발하는 세션이 아니라 고르지 않는다.
  */
 import type { SessionSummary, WorkspaceKind } from '../studio-events';
@@ -80,20 +81,32 @@ export function excludedSessions(viewer: string): Set<string> {
 export type WorkspaceChoice =
   | { kind: 'live'; id: string }
   | { kind: 'resumable'; sessionId: string; projectId: string; projectName: string; updatedAt: string }
-  | { kind: 'start'; projectId?: string };
+  | { kind: 'start'; projectId?: string }
+  | { kind: 'pick'; projects: ProjectChoice[] };
+
+/** 첫 실행에서 고를 프로젝트 */
+export interface ProjectChoice {
+  id: string;
+  name: string;
+}
 
 /**
  * pickWorkspace가 고른 결과를 첫 화면이 보여줄 모양으로 바꾼다(순수 함수 — 부작용 없이 테스트한다, ADR-104).
  *  - live: 이미 켜져 있거나 켜는 중 → 읽기만 하고 바로 그 화면으로 보낸다
  *  - resumable: 지연 기동·중지 세션이 있다 → 사람이 "이어서 열기"를 눌러야 샌드박스를 켠다
- *  - start: 고를 세션이 없다(새 프로젝트) → 잃을 것이 없으니 바로 만들어 켠다(기존 흐름, WorkspaceLauncher)
+ *  - start: 고를 세션이 없다(새 프로젝트) → 바로 만들어 켠다(기존 흐름, WorkspaceLauncher)
+ *  - pick: 고를 세션이 없고, 주소로 정한 프로젝트도 없는데 프로젝트가 둘 이상이다 → 켜지 않고 프로젝트를 고르게 한다(#749)
  */
-export function workspaceChoiceFor(pick: WorkspacePick): WorkspaceChoice {
+export function workspaceChoiceFor(
+  pick: WorkspacePick,
+  options: { projects?: readonly ProjectChoice[]; requested?: boolean } = {},
+): WorkspaceChoice {
   const session = pick.session;
   if (session?.status === 'ready' || session?.status === 'starting') return { kind: 'live', id: session.id };
   if (session?.status === 'idle' || session?.status === 'stopped') {
     return { kind: 'resumable', sessionId: session.id, projectId: session.projectId, projectName: session.projectName, updatedAt: session.updatedAt };
   }
+  if (!session && !options.requested && options.projects && options.projects.length > 1) return { kind: 'pick', projects: [...options.projects] };
   return { kind: 'start', ...(pick.projectId ? { projectId: pick.projectId } : {}) };
 }
 
@@ -115,7 +128,7 @@ export async function findWorkspaceChoice(viewer: string, options: { projectId?:
     ...(options.projectId ? { projectId: options.projectId } : {}),
     localAllowed: localFolderAllowed(),
   });
-  return workspaceChoiceFor(pick);
+  return workspaceChoiceFor(pick, { projects: projects.map((project) => ({ id: project.id, name: project.name })), requested: Boolean(options.projectId) });
 }
 
 // 첫 화면이 두 번 불려도(React 개발 모드의 이중 실행, 탭 두 개) 세션을 두 개 만들지 않도록 사람마다 한 번에 하나만 연다
