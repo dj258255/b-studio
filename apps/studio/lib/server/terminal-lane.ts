@@ -37,6 +37,10 @@ export interface TerminalTaskDeps {
   setTaskContext: (sessionId: string, context: { writableScope: readonly string[]; doneTests: readonly TaskCardDone[] } | undefined) => void;
   /** 세션이 아직 살아 있는가를 알기 위한 상태 읽기 */
   status: (sessionId: string) => string | undefined;
+  /**
+   * 그 세션에 걸린 "사람을 기다림" 표시(없으면 undefined, B7). 실행을 기다리는 동안 카드 레인에 그대로 보여 준다
+   */
+  attention: (sessionId: string) => { kind: string; message: string } | undefined;
   /** 그 세션에 열려 있는 터미널 실행의 id(없으면 undefined). 비정상 종료 뒤 남은 실행을 찾는다 */
   openRunId: (sessionId: string) => string | undefined;
   /** 실행 하나를 취소한다(CLI에 Esc, 중단 신호를 받은 쪽이 되돌리고 닫는다) */
@@ -82,6 +86,7 @@ const defaultDeps: TerminalTaskDeps = {
   readEvents: sessionHistory,
   setTaskContext: setTerminalTaskContext,
   status: (sessionId) => getSnapshot(sessionId)?.status,
+  attention: (sessionId) => getSnapshot(sessionId)?.terminalAttention,
   openRunId: openTerminalRunId,
   cancelRun,
   closeTimeoutMs: 60_000,
@@ -163,8 +168,8 @@ export async function runTerminalTask(
     if (!started) throw new Error('요청이 터미널의 claude에 들어가지 않았습니다(입력 줄에 글이 남아 있으면 그 칸에서 Enter를 누르세요)');
     ourRunStarted = true;
 
-    // 5. 그 실행의 끝을 기다린다
-    const finished = await waitFor(sessionId, deps, deps.runTimeoutMs, () => box.finished);
+    // 5. 그 실행의 끝을 기다린다. 기다리는 동안 CLI가 확인 창에서 멈추면 카드에 그 사실을 보여 준다(B7)
+    const finished = await waitForRun(sessionId, deps, () => box.finished, options.onWaiting);
     if (!finished) throw new Error(`터미널 실행이 ${Math.round(deps.runTimeoutMs / 60_000)}분 안에 끝나지 않았습니다`);
     await deps.sleep(deps.usageGraceMs);
     const ofRun = usages.filter((entry) => entry.runId === started!.runId);
@@ -279,6 +284,33 @@ async function waitFor<T>(sessionId: string, deps: TerminalTaskDeps, timeoutMs: 
     if (value !== undefined) return value;
     assertAlive(sessionId, deps);
     if (Date.now() - started > timeoutMs) return undefined;
+    await deps.sleep(deps.pollMs);
+  }
+}
+
+/**
+ * 붙여 넣은 실행의 run_finished를 기다린다(B7). 기다리는 동안 세션에 "사람을 기다림" 표시가 걸리면(권한 확인 창·
+ * 되묻기·입력 대기) 카드 레인에 그대로 보여 주고, 풀리면 지운다. 같은 문구를 되풀이하지 않으려고 바뀔 때만 onWaiting을 부른다
+ */
+async function waitForRun(
+  sessionId: string,
+  deps: TerminalTaskDeps,
+  get: () => Extract<StudioEvent, { type: 'run_finished' }> | undefined,
+  onWaiting: ((note: string | undefined) => void) | undefined,
+): Promise<Extract<StudioEvent, { type: 'run_finished' }> | undefined> {
+  const started = Date.now();
+  let shown: string | undefined;
+  for (;;) {
+    const value = get();
+    if (value !== undefined) return value;
+    assertAlive(sessionId, deps);
+    if (Date.now() - started > deps.runTimeoutMs) return undefined;
+    const attention = deps.attention(sessionId);
+    const note = attention ? `칸에서 claude가 확인을 기다립니다: ${attention.message}` : undefined;
+    if (note !== shown) {
+      shown = note;
+      onWaiting?.(note);
+    }
     await deps.sleep(deps.pollMs);
   }
 }

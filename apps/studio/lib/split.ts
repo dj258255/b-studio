@@ -81,10 +81,12 @@ type OutcomeStatus = Extract<ChatItem, { kind: 'outcome' }>['status'];
  * 칸 머리·칩에 보여 줄 상태 점·문구·강조 여부.
  * lastOutcome은 가장 최근에 끝난 실행 결과다(없으면 아직 실행한 적이 없다는 뜻)
  */
-export function paneState(snapshot: Pick<SessionSnapshot, 'status' | 'running' | 'pendingQuestion'>, lastOutcome?: OutcomeStatus): PaneState {
+export function paneState(snapshot: Pick<SessionSnapshot, 'status' | 'running' | 'pendingQuestion' | 'terminalAttention'>, lastOutcome?: OutcomeStatus): PaneState {
   if (snapshot.status === 'failed') return { tone: 'fail', label: '실패', attention: true };
   if (snapshot.status === 'starting') return { tone: 'wait', label: '준비 중', attention: false };
   if (snapshot.status === 'stopped') return { tone: 'idle', label: '중지', attention: false };
+  // 터미널의 CLI가 사람을 기다리는 중이면(확인 창·되묻기·입력 대기, B7) "작업 중"보다 이 상태를 먼저 보여 준다
+  if (snapshot.terminalAttention) return { tone: 'wait', label: '확인 기다림', attention: true };
   if (snapshot.running) return { tone: 'wait', label: '작업 중', attention: false };
   if (snapshot.pendingQuestion) return { tone: 'wait', label: '답을 기다림', attention: true };
   if (lastOutcome === 'failed' || lastOutcome === 'error') return { tone: 'fail', label: '실패', attention: true };
@@ -101,7 +103,7 @@ export interface PaneSummary extends PaneState {
 }
 
 /** 칩·머리에 함께 쓰는 요약(상태 + 이름 하나로). 세션을 찾지 못한 칸에는 쓰지 않는다 */
-export function paneSummary(snapshot: Pick<SessionSnapshot, 'status' | 'running' | 'pendingQuestion' | 'projectName'>, lastOutcome?: OutcomeStatus): PaneSummary {
+export function paneSummary(snapshot: Pick<SessionSnapshot, 'status' | 'running' | 'pendingQuestion' | 'terminalAttention' | 'projectName'>, lastOutcome?: OutcomeStatus): PaneSummary {
   return { projectName: snapshot.projectName, ...paneState(snapshot, lastOutcome) };
 }
 

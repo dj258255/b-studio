@@ -12,6 +12,7 @@ import {
   AGENT_GATEWAY_TARGET,
   AGENT_HOOK_EVENTS,
   AGENT_IMAGE,
+  AGENT_NOTIFICATION_MATCHER,
   AGENT_READ_ONLY_MARK,
   AGENT_TERMINAL_COMMAND,
   AGENT_READ_TOOLS,
@@ -226,13 +227,13 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     expect(() => agentRunArgs({ ...plan, gatewayDir: '/tmp/a,target=/workspace' })).toThrow('쉼표');
   });
 
-  it('관리 설정은 훅 다섯과 b-studio 도구의 허락, 텔레메트리 env를 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
+  it('관리 설정은 훅 여섯과 b-studio 도구의 허락, 텔레메트리 env를 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
     const settings = agentManagedSettings(address) as { permissions: { allow: string[] }; hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number }> }>> };
     expect(Object.keys(settings).sort()).toEqual(['disableAllHooks', 'env', 'hooks', 'permissions']);
     // 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)이 훅을 통째로 끄지 못하게 관리 설정에서 값을 정해 둔다
     expect((settings as unknown as { disableAllHooks: boolean }).disableAllHooks).toBe(false);
     expect(settings.permissions.allow).toEqual(['mcp__b-studio']);
-    expect(Object.keys(settings.hooks).sort()).toEqual(['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'UserPromptSubmit']);
+    expect(Object.keys(settings.hooks).sort()).toEqual(['Notification', 'PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'UserPromptSubmit']);
     const command = (name: string) => settings.hooks[name]![0]!.hooks[0]!;
     // node는 이름이 아니라 자리로 부른다. 터미널의 PATH 앞쪽(홈 폴더)에 같은 이름을 두어 훅을 바꿔치기하지 못한다
     expect(command('UserPromptSubmit').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs prompt');
@@ -240,6 +241,11 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     expect(command('SessionStart').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-start');
     expect(command('SessionEnd').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-end');
     expect(command('PreToolUse').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs pre-tool');
+    // B7: 사람을 기다리는 창(권한 확인·되묻기·입력 필요·입력 대기)에서 알림 훅이 온다
+    expect(command('Notification').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification');
+    expect(settings.hooks.Notification![0]!.matcher).toBe(AGENT_NOTIFICATION_MATCHER);
+    expect(AGENT_NOTIFICATION_MATCHER).toBe('permission_prompt|elicitation_dialog|agent_needs_input|idle_prompt');
+    for (const kind of ['permission_prompt', 'elicitation_dialog', 'agent_needs_input', 'idle_prompt']) expect(new RegExp(AGENT_NOTIFICATION_MATCHER).test(kind), kind).toBe(true);
     expect(settings.hooks.PreToolUse![0]!.matcher).toBe(AGENT_WRITE_TOOL_MATCHER);
     const hooked = (tool: string) => new RegExp(AGENT_WRITE_TOOL_MATCHER).test(tool);
     // 셸, 편집 도구, b-studio 도구에 건다. 모르는 도구(CLI에 새로 생긴 것)도 건다 — 빠지면 그 도구로 바꾼 파일은 변경 전 기준 없이 바뀐다
@@ -393,6 +399,14 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(seen).toEqual([{ url: '/stop', authorization: 'Bearer tok', body: input }]);
   });
 
+  it('사람을 기다리는 알림은 /notification으로 보내고 빈 답을 그대로 낸다 — 결정을 바꾸지 않는다(B7)', async () => {
+    const { url, seen } = await gateway(() => ({ status: 200, body: '{}' }));
+    const file = await script({ url, token: 'tok' });
+    const input = JSON.stringify({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Do you want to create …?' });
+    expect(await run(file, 'notification', input)).toEqual({ code: 0, stdout: '{}' });
+    expect(seen).toEqual([{ url: '/notification', authorization: 'Bearer tok', body: input }]);
+  });
+
   it('주소는 옆의 파일에서만 읽는다. 환경 변수로 다른 주소를 줘도, 주소를 비워도 따르지 않는다', async () => {
     const real = await gateway(() => ({ status: 200, body: '{}' }));
     const decoy = await gateway(() => ({ status: 200, body: '{}' }));
@@ -423,7 +437,7 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(denied(tool.stdout).permissionDecisionReason).toContain('관문에 닿지 못해');
 
     // 턴의 끝은 막지 않는다(막으면 CLI가 끝나지 않는다). 검증이 돌지 않았으니 체크포인트도 없다
-    for (const event of ['stop', 'session-start', 'session-end']) expect(await run(file, event, '{}')).toEqual({ code: 0, stdout: '' });
+    for (const event of ['stop', 'session-start', 'session-end', 'notification']) expect(await run(file, event, '{}')).toEqual({ code: 0, stdout: '' });
   });
 
   it('읽기만 요청은 관문에 등록하지 못하면 보내지 않는다(보통 요청은 알리기만 하고 보낸다)', async () => {
@@ -505,7 +519,7 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(await run(file, '', '{}')).toEqual({ code: 0, stdout: '' });
     expect(seen).toEqual([]);
     // 훅으로 거는 종류는 설정이 거는 종류와 같다
-    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['pre-tool', 'prompt', 'session-end', 'session-start', 'stop']);
+    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['notification', 'pre-tool', 'prompt', 'session-end', 'session-start', 'stop']);
   });
 
   it('닿는지 묻는 일(ping)은 닿으면 0, 닿지 못하거나 관문이 오류로 답하면 0이 아닌 값으로 끝난다', async () => {

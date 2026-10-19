@@ -15,6 +15,7 @@ function handlers(overrides: Partial<TerminalGatewayHandlers> = {}): TerminalGat
     preTool: async () => ({}),
     stop: async () => ({}),
     sessionEnd: async () => {},
+    notification: async () => {},
     telemetry: async () => {},
     toolSpecs: () => [{ name: 'run_in_service', description: '서비스에서 명령 실행', input_schema: { type: 'object', properties: { service: { type: 'string', description: '서비스' } }, required: ['service'] } }] as never,
     runTool: async (name, args) => ({ ok: true, content: `${name} ${JSON.stringify(args)}` }),
@@ -68,6 +69,16 @@ describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () =>
 
   it('닿는지 묻는 요청에는 빈 답을 준다(처리를 부르지 않는다)', async () => {
     expect(await terminalHookRoutes(handlers())['/ping']({})).toEqual({});
+  });
+
+  it('사람을 기다리는 알림(Notification)을 처리에 넘기고 빈 답을 준다(결정을 바꾸는 꼴은 내지 않는다, B7)', async () => {
+    const seen: unknown[] = [];
+    const routes = terminalHookRoutes(handlers({ notification: async (input) => void seen.push(input) }));
+    const input = { notification_type: 'permission_prompt', message: 'Do you want to create …?' };
+    expect(await routes['/notification'](input)).toEqual({});
+    expect(seen).toEqual([input]);
+    // 처리하지 않아도(빈 처리기) 빈 답이다 — 알림은 판정이 아니다
+    expect(await terminalHookRoutes(handlers())['/notification']({ notification_type: 'idle_prompt' })).toEqual({});
   });
 
   it('대화의 시작: 안내 글이 있으면 맥락에 덧붙인다', async () => {

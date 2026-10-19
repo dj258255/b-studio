@@ -100,4 +100,19 @@ describe("터미널 아래의 활동 줄(이슈 #689)", () => {
     expect(render(view([{ type: "run_started", runId: "c1", request: "대화 창 요청" }]))).not.toContain("사용량");
     expect(render(view())).not.toContain("사용량");
   });
+
+  it("터미널의 CLI가 사람을 기다리면 그 사실과 메시지를 한 줄로 보이고, 풀리면 사라진다(B7)", () => {
+    const html = render(view([{ type: "terminal_attention", kind: "permission_prompt", message: "Do you want to create …?", at: "2026-10-19T00:00:00.000Z" }]));
+    expect(html).toContain("claude가 이 칸에서 확인을 기다립니다");
+    expect(html).toContain("Do you want to create …?");
+    // 풀리면(kind 없는 이벤트) 줄이 사라진다
+    const moved = render(
+      view([
+        { type: "terminal_attention", kind: "permission_prompt", message: "Do you want to create …?", at: "2026-10-19T00:00:00.000Z" },
+        { type: "terminal_attention", at: "2026-10-19T00:01:00.000Z" },
+      ]),
+    );
+    expect(moved).not.toContain("확인을 기다립니다");
+    expect(render(view())).not.toContain("확인을 기다립니다");
+  });
 });

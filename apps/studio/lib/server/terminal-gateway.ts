@@ -28,6 +28,11 @@ export interface TerminalGatewayHandlers {
   /** CLI가 끝났다 */
   sessionEnd(input: HookInput): Promise<void>;
   /**
+   * CLI가 사람을 기다린다(Notification 훅, B7): 권한 확인 창·되묻기·입력 대기. 알리기만 하고 판정을 바꾸지 않는다 —
+   * 여기서 권한을 대신 허락하거나 CLI의 확인 창을 건너뛰지 않는다
+   */
+  notification(input: HookInput): Promise<void>;
+  /**
    * CLI가 OTLP/HTTP JSON으로 보낸 텔레메트리 로그 한 묶음(#726). 모델 요청 하나가 끝날 때마다 온다.
    * 판정이 아니라 통로다 — 여기서 던져도 터미널의 CLI는 그대로 돈다(응답은 5xx)
    */
@@ -75,6 +80,11 @@ export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/
     },
     '/session-end': async (input) => {
       await handlers.sessionEnd(input);
+      return {};
+    },
+    // CLI가 확인 창·되묻기·입력 대기에서 멈췄다(B7). 알리기만 하고 빈 답(200)을 준다 — 결정을 바꾸지 않는다
+    '/notification': async (input) => {
+      await handlers.notification(input);
       return {};
     },
   };

@@ -60,6 +60,9 @@ export function ActivityStrip({ view, open, onToggle }: { view: SessionView; ope
           )}
         </div>
       </div>
+      {view.snapshot.terminalAttention && (
+        <p className="text-xs font-medium text-wait">claude가 이 칸에서 확인을 기다립니다: {view.snapshot.terminalAttention.message}</p>
+      )}
       {(stages.length > 0 || checkpoint || usage !== undefined) && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-4">
           {stages.length > 0 && (

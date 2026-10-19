@@ -103,6 +103,16 @@ describe('paneState', () => {
     // 실행 중이면 되묻기·지난 결과보다 우선한다
     expect(paneState({ status: 'ready', running: true, pendingQuestion: question }).label).toBe('작업 중');
   });
+
+  it('터미널의 CLI가 사람을 기다리면(B7) "확인 기다림"으로 강조한다(작업 중보다 앞에서 본다)', () => {
+    const attention = { kind: 'permission_prompt', message: 'Do you want to create …?', at: '2026-10-19T00:00:00.000Z' };
+    expect(paneState({ status: 'ready', running: true, terminalAttention: attention })).toEqual({ tone: 'wait', label: '확인 기다림', attention: true });
+    expect(paneState({ status: 'ready', running: false, terminalAttention: attention })).toEqual({ tone: 'wait', label: '확인 기다림', attention: true });
+    // 기다림이 없으면 지금처럼 작업 중·검증 통과로 본다
+    expect(paneState({ status: 'ready', running: true }).label).toBe('작업 중');
+    // 준비 중·중지·실패는 기다림 표시보다 앞선다(샌드박스 상태가 더 근본적이다)
+    expect(paneState({ status: 'stopped', running: false, terminalAttention: attention }).label).toBe('중지');
+  });
 });
 
 describe('lastOutcomeStatus', () => {
