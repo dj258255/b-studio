@@ -15,6 +15,7 @@ import {
   paneDisplay,
   paneState,
   parseSplitIds,
+  parseSplitPlanId,
   readStoredSplitIds,
   selectedPaneId,
   shownPaneId,
@@ -26,6 +27,7 @@ import {
   splitHref,
   splitLayout,
   splitLines,
+  splitPlanHref,
   storeSplitIds,
 } from './split';
 
@@ -37,6 +39,24 @@ describe('parseSplitIds', () => {
     expect(parseSplitIds(undefined)).toEqual([]);
     expect(parseSplitIds('')).toEqual([]);
     expect(parseSplitIds(['a,b', 'c'])).toEqual(['a', 'b']);
+  });
+});
+
+describe('parseSplitPlanId / splitPlanHref', () => {
+  it('영문·숫자 id만 받고, 형식이 아니면 무시한다', () => {
+    expect(parseSplitPlanId('abcd1234')).toBe('abcd1234');
+    expect(parseSplitPlanId(' a1b2 ')).toBe('a1b2');
+    expect(parseSplitPlanId(['plan42'])).toBe('plan42');
+    expect(parseSplitPlanId(undefined)).toBeUndefined();
+    expect(parseSplitPlanId('')).toBeUndefined();
+    // 기호가 섞이거나 너무 길면 없는 것으로 본다(주소가 손으로 고쳐져도 서버가 지킨다)
+    expect(parseSplitPlanId('a-b')).toBeUndefined();
+    expect(parseSplitPlanId('../../etc/passwd')).toBeUndefined();
+    expect(parseSplitPlanId('x'.repeat(17))).toBeUndefined();
+  });
+
+  it('계획을 나란히 보기로 여는 주소를 만든다', () => {
+    expect(splitPlanHref('abcd1234')).toBe('/split?plan=abcd1234');
   });
 });
 

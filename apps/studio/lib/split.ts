@@ -27,6 +27,22 @@ export function splitHref(ids: readonly string[]): string {
   return ids.length > 0 ? `/split?ids=${ids.join(',')}` : '/split';
 }
 
+/**
+ * `/split?plan=<id>`의 계획 id. 계획 id는 8자 안팎의 영문·숫자다.
+ * 형식이 아니면(빈 값·기호 포함·너무 길면) 무시하고 없는 것으로 본다 — 주소가 손으로 고쳐져도 서버가 지킨다
+ */
+export function parseSplitPlanId(raw: string | string[] | undefined): string | undefined {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const id = value?.trim();
+  if (!id || !/^[A-Za-z0-9]{1,16}$/.test(id)) return undefined;
+  return id;
+}
+
+/** 계획을 나란히 보기로 여는 주소. 레인 세션이 만들어지는 대로 이 주소로 다시 그린다 */
+export function splitPlanHref(id: string): string {
+  return `/split?plan=${id}`;
+}
+
 /** 나란히 보기에 세션을 더한다. 이미 있으면 맨 뒤로 옮기고, 상한을 넘으면 먼저 담긴 것부터 버린다 */
 export function nextSplitIds(existing: readonly string[], id: string): string[] {
   return [...existing.filter((candidate) => candidate !== id), id].slice(-MAX_SPLIT);
