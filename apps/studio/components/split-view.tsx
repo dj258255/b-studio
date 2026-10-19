@@ -31,15 +31,18 @@ import {
 } from "@/lib/split";
 import { answerRequest } from "@/lib/question-answer";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
-import type { SessionSnapshot, SessionStatus, SessionSummary } from "@/lib/studio-events";
+import type { ProjectSummary, SessionSnapshot, SessionStatus, SessionSummary } from "@/lib/studio-events";
+import type { TaskPlanView } from "@/lib/task-plan-types";
 import { describeTokens, formatTokenCount, hasTokens, totalTokens } from "@/lib/usage";
 import { ActivityStrip } from "./activity-strip";
 import { Dot, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, type Tone } from "./status";
 import { PaneFilesTab, PanePreviewTab, SplitResultPanel } from "./split-result-panel";
+import { planUsageLine, TaskCardsEditor, TaskPlanProgress } from "./task-cards-panel";
 import { TerminalPanel } from "./terminal-panel";
 import { TerminalStreamProvider } from "./terminal-stream";
 import { useLightVerify } from "./use-light-verify";
 import { useNarrow } from "./use-narrow";
+import { usePreference } from "./use-preference";
 import { useReadOnly } from "./use-read-only";
 import { useSession } from "./use-session";
 
@@ -47,6 +50,49 @@ export interface SplitPaneInit {
   id: string;
   /** 없으면 "세션을 찾을 수 없습니다" 칸을 그린다 */
   snapshot?: SessionSnapshot;
+}
+
+/** 나란히 보기 왼쪽 칸의 작업 카드 편집기에 넘길 서버 데이터(페이지가 내려준다) */
+export interface SplitCardsEditor {
+  /** 세션 터미널을 쓸 수 있는가(실험 + 개인 PC). 아니면 편집기 대신 안내 한 줄을 보인다 */
+  terminalAllowed: boolean;
+  projects: ProjectSummary[];
+  defaultProjectId?: string;
+  limits: { maxTasks: number };
+  /** 프로젝트 id → 그 프로젝트의 관리형 서비스 이름들(완료 조건을 돌릴 서비스 고르기에 쓴다) */
+  services: Record<string, string[]>;
+}
+
+const CARDS_OPEN_KEY = "b-studio:task-cards-open";
+
+/** 왼쪽 칸의 작업 카드 편집기를 펼쳐 뒀는가. 기본은 접힘. 저장소를 못 읽어도 접힘으로 동작한다 */
+function readCardsOpen(storage: Pick<Storage, "getItem"> | undefined): boolean {
+  try {
+    return storage?.getItem(CARDS_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function storeCardsOpen(storage: Pick<Storage, "setItem"> | undefined, open: boolean): void {
+  try {
+    storage?.setItem(CARDS_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // 기억하지 못해도 화면은 그대로 쓴다
+  }
+}
+
+/**
+ * 계획 진행이 새 레인 세션을 알려 왔을 때 서버가 ids를 다시 계산하게 할지 정한다.
+ * 지금 칸에 없는 새 세션이 있고 그 세션 집합이 마지막으로 갱신한 것과 다르면 그 집합의 서명을 돌려준다.
+ * 아니면 undefined(같은 세션 집합으로는 되풀이하지 않는다). 레인이 하나 더 생기면 서명이 달라져 다시 갱신한다
+ */
+export function laneRefreshSignature(knownSessionIds: readonly string[], laneSessionIds: readonly string[], lastRefreshed: string | undefined): string | undefined {
+  const ids = laneSessionIds.filter((id) => id !== "");
+  const signature = ids.join(",");
+  if (signature === "" || signature === lastRefreshed) return undefined;
+  if (!ids.some((id) => !knownSessionIds.includes(id))) return undefined;
+  return signature;
 }
 
 /** 여러 칸에 한꺼번에 보낼 신호. nonce가 바뀔 때마다 칸마다 한 번씩 받는다(칸은 각자 대기 중인지 보고 요청·지시를 고른다) */
@@ -78,7 +124,7 @@ function attentionRing(summary: Pick<PaneSummary, "tone" | "attention">): string
  * 터미널 출력용 연결은 칸이 몇 개든 하나로 묶고(TerminalStreamProvider), 고른 칸의 결과는 오른쪽 결과 칸에서 본다.
  * ⌘/Ctrl+1~4는 칸을 "고른다"(선택). 선택은 배치를 바꾸지 않는다 — 집중은 칸 머리의 버튼으로만 한다(ADR-071)
  */
-export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
+export function SplitView({ panes, plan, cardsEditor }: { panes: SplitPaneInit[]; plan?: TaskPlanView; cardsEditor?: SplitCardsEditor }) {
   const router = useRouter();
   const ids = useMemo(() => panes.map((pane) => pane.id), [panes]);
   const idsKey = ids.join(",");
@@ -96,6 +142,8 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
   const [broadcastText, setBroadcastText] = useState("");
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string>();
+  // 왼쪽 칸의 작업 카드 편집기를 펼쳐 뒀는가(기본 접힘). 저장소를 못 읽어도 접힘으로 동작한다
+  const [cardsOpen, setCardsOpen] = usePreference(CARDS_OPEN_KEY, readCardsOpen, storeCardsOpen);
 
   const report = useCallback((id: string, summary: PaneSummary) => {
     setSummaries((prev) => (samePaneSummary(prev[id], summary) ? prev : { ...prev, [id]: summary }));
@@ -103,6 +151,25 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
   const reportView = useCallback((id: string, view: SessionView) => {
     setViews((prev) => (prev[id] === view ? prev : { ...prev, [id]: view }));
   }, []);
+
+  // 계획 진행이 새 레인 세션이 생겼다고 알려 오면 서버가 ids를 다시 계산하게 한다(주소는 이미 /split?plan=<id>다).
+  // 같은 세션 집합으로는 되풀이하지 않고, 레인이 하나 더 생기면 서명이 달라져 다시 갱신한다
+  const refreshedSignature = useRef<string | undefined>(undefined);
+  const handlePlan = useCallback(
+    (next: TaskPlanView) => {
+      const known = idsKey ? idsKey.split(",") : [];
+      const laneIds = next.lanes.map((lane) => lane.sessionId).filter((id): id is string => Boolean(id));
+      const signature = laneRefreshSignature(known, laneIds, refreshedSignature.current);
+      if (signature === undefined) return;
+      refreshedSignature.current = signature;
+      router.refresh();
+    },
+    [idsKey, router],
+  );
+
+  function toggleCards() {
+    setCardsOpen(!cardsOpen);
+  }
 
   const summaryFor = useCallback((pane: SplitPaneInit): PaneSummary => summaries[pane.id] ?? fallbackSummary(pane), [summaries]);
   const focusId = layout.focusId ?? defaultFocusId(panes.map((pane) => ({ id: pane.id, attention: summaryFor(pane).attention })));
@@ -211,6 +278,16 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
             <h1 className="text-lg font-semibold">나란히 보기</h1>
             <p className="text-sm text-muted">{panes.length}개 세션</p>
             <div className="ml-auto flex items-center gap-3 text-sm">
+              {!narrow && !plan && cardsEditor && (
+                <button
+                  type="button"
+                  onClick={toggleCards}
+                  aria-expanded={cardsOpen}
+                  className="glass-soft rounded-control px-3.5 py-1.5 font-medium hover:bg-panel"
+                >
+                  작업 카드
+                </button>
+              )}
               {canAddTerminal && (
                 <button type="button" onClick={() => void addTerminal()} disabled={adding} className="glass-soft rounded-control px-3.5 py-1.5 font-medium hover:bg-panel disabled:opacity-50">
                   + 새 터미널
@@ -252,6 +329,9 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
             })}
           </div>
 
+          {/* 좁은 화면(<900px)에서는 왼쪽 칸을 그리지 않는다. 계획이 있으면 합계 한 줄만 머리에 보인다 */}
+          {narrow && plan && planUsageLine(plan) && <p className="text-xs text-muted">{planUsageLine(plan)}</p>}
+
           <form onSubmit={sendBroadcast} className="flex items-end gap-2">
             <label htmlFor="split-broadcast" className="sr-only">
               모두에게 보낼 요청
@@ -271,28 +351,49 @@ export function SplitView({ panes }: { panes: SplitPaneInit[] }) {
         </header>
 
         <div className="flex min-h-0 flex-1 gap-3">
-          <div className={mode === "grid" ? `${splitGridClass(panes.length)} min-h-0 flex-1` : "flex min-h-0 flex-1 flex-col"}>
-            {panes.map((pane) => {
-              const display = paneDisplay(mode, pane.id, shownId);
-              return (
-                <div key={pane.id} className={display === "hidden" ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
-                  <SplitPane
-                    id={pane.id}
-                    snapshot={pane.snapshot}
-                    selected={selectedId === pane.id}
-                    onSelect={() => choose(pane.id)}
-                    onClose={() => close(pane.id)}
-                    onFocus={() => dispatchLayout({ type: "focus", id: pane.id })}
-                    onReport={report}
-                    onView={reportView}
-                    broadcast={broadcast}
-                    fleet={fleet}
-                    onWinnerChosen={(sessionId) => setFleet((prev) => (prev ? { ...prev, winnerSessionId: sessionId } : prev))}
-                  />
-                </div>
-              );
-            })}
-          </div>
+          {/* 왼쪽 칸(넓은 화면만): 계획이 있으면 진행 보기, 없으면 작업 카드 편집기(접힘이 기본) */}
+          {!narrow && (plan || (cardsEditor && cardsOpen)) && (
+            <aside className="glass flex min-h-0 w-[22rem] shrink-0 flex-col overflow-hidden rounded-panel" aria-label={plan ? "계획 진행" : "작업 카드"}>
+              {plan ? (
+                <TaskPlanProgress planId={plan.id} onSelectSession={choose} onPlan={handlePlan} />
+              ) : cardsEditor && cardsEditor.terminalAllowed ? (
+                <TaskCardsEditor
+                  projects={cardsEditor.projects}
+                  defaultProjectId={cardsEditor.defaultProjectId}
+                  limits={cardsEditor.limits}
+                  services={cardsEditor.services}
+                />
+              ) : (
+                <p className="p-3 text-sm text-muted">작업 카드는 세션 터미널을 쓸 수 있을 때 씁니다</p>
+              )}
+            </aside>
+          )}
+          {panes.length === 0 ? (
+            <div className="glass flex min-h-0 flex-1 items-center justify-center rounded-panel p-8 text-center text-muted">레인 세션을 만드는 중입니다</div>
+          ) : (
+            <div className={mode === "grid" ? `${splitGridClass(panes.length)} min-h-0 flex-1` : "flex min-h-0 flex-1 flex-col"}>
+              {panes.map((pane) => {
+                const display = paneDisplay(mode, pane.id, shownId);
+                return (
+                  <div key={pane.id} className={display === "hidden" ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
+                    <SplitPane
+                      id={pane.id}
+                      snapshot={pane.snapshot}
+                      selected={selectedId === pane.id}
+                      onSelect={() => choose(pane.id)}
+                      onClose={() => close(pane.id)}
+                      onFocus={() => dispatchLayout({ type: "focus", id: pane.id })}
+                      onReport={report}
+                      onView={reportView}
+                      broadcast={broadcast}
+                      fleet={fleet}
+                      onWinnerChosen={(sessionId) => setFleet((prev) => (prev ? { ...prev, winnerSessionId: sessionId } : prev))}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {/* 결과 칸은 넓은 화면에서만 그린다(좁은 화면에서는 칸 하나가 화면을 다 쓴다) */}
           {!narrow && selectedView && <SplitResultPanel view={selectedView} />}
         </div>
@@ -715,8 +816,8 @@ function useElapsed(running: boolean): string | undefined {
 
 const STATUS_TONE: Record<SessionStatus, Tone> = { idle: "idle", starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
 
-/** id가 없는 `/split`에서 세션을 고르는 화면. 최근 순 목록에서 최대 4개를 고른다 */
-export function SplitPicker({ sessions }: { sessions: SessionSummary[] }) {
+/** id가 없는 `/split`에서 세션을 고르는 화면. 목록 위에 작업 카드 편집기를 펼친 채로 둔다 */
+export function SplitPicker({ sessions, cardsEditor }: { sessions: SessionSummary[]; cardsEditor?: SplitCardsEditor }) {
   const router = useRouter();
   const [selected, setSelected] = useState<string[]>([]);
 
@@ -733,7 +834,22 @@ export function SplitPicker({ sessions }: { sessions: SessionSummary[] }) {
         </Link>
       </div>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">나란히 볼 세션을 고르세요</h1>
-      <p className="mt-3 max-w-[60ch] leading-7 text-muted">최대 {MAX_SPLIT}개까지 한 화면에 띄웁니다. 칸마다 대화를 보고 요청을 보낼 수 있습니다.</p>
+      <p className="mt-3 max-w-[60ch] leading-7 text-muted">터미널 세션은 칸마다 터미널로 열립니다. 위의 작업 카드로 일을 나눠 맡길 수도 있습니다.</p>
+
+      {cardsEditor && (
+        <section className="glass mt-8 overflow-hidden rounded-panel" aria-label="작업 카드">
+          {cardsEditor.terminalAllowed ? (
+            <TaskCardsEditor
+              projects={cardsEditor.projects}
+              defaultProjectId={cardsEditor.defaultProjectId}
+              limits={cardsEditor.limits}
+              services={cardsEditor.services}
+            />
+          ) : (
+            <p className="px-5 py-4 text-sm text-muted">작업 카드는 세션 터미널을 쓸 수 있을 때 씁니다</p>
+          )}
+        </section>
+      )}
 
       <ul className="glass mt-8 divide-y divide-line overflow-hidden rounded-panel">
         {sessions.length === 0 && <li className="px-5 py-6 text-muted">열 수 있는 세션이 없습니다. 먼저 프로젝트를 열어 세션을 만드세요.</li>}

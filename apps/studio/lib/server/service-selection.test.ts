@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
@@ -58,6 +58,23 @@ describe('writeServiceSelection', () => {
     await writeServiceSelection('orders', ['commerce', 'mysql'], dir);
     await writeServiceSelection('orders', ['commerce'], dir);
     expect((await readServiceSelection('orders', dir))?.selected).toEqual(['commerce']);
+  });
+
+  it('같은 프로젝트로 동시에 여러 번 써도 모두 성공하고, 남은 임시 파일이 없다 (B6b 수정 2-1)', async () => {
+    const dir = await stateDir();
+    // 같은 프로젝트로 레인 두 개가 동시에 세션을 만들 때처럼 같은 pid에서 동시에 쓴다
+    const results = await Promise.allSettled(Array.from({ length: 16 }, (_, index) => writeServiceSelection('orders', [`service-${index}`], dir)));
+
+    // 이름이 겹치면(옛 `${file}.${pid}.tmp`) rename이 ENOENT로 깨져 여기서 실패한다
+    expect(results.map((result) => (result.status === 'fulfilled' ? 'ok' : result.reason))).toEqual(Array.from({ length: 16 }, () => 'ok'));
+
+    // 파일은 그중 하나의 온전한 JSON이다(경쟁에서도 항상 온전하다)
+    const saved = await readServiceSelection('orders', dir);
+    expect(saved?.selected).toHaveLength(1);
+    expect(saved?.selected[0]).toMatch(/^service-\d+$/);
+
+    // 임시 파일이 남지 않았다
+    expect(await readdir(path.join(dir, 'orders'))).toEqual(['services.json']);
   });
 });
 
