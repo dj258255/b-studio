@@ -10,6 +10,7 @@
  * ADR-146)는 depends_on 여부와 무관하게 기본으로 켠다 — 나중에 compose에 더한 서비스는 쓰려고 일부러 넣은
  * 것으로 본다(실측: mediamtx는 어느 managed 서비스도 depends_on으로 기대지 않는다).
  */
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -75,7 +76,9 @@ export async function writeServiceSelection(
   };
   const file = fileFor(projectId, dir);
   await mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
+  // 임시 이름에 추측할 수 없는 값을 더한다 — 같은 프로세스에서 같은 프로젝트로 동시에 쓰면(예: 같은 프로젝트로
+  // 레인 두 개가 동시에 세션을 만들 때) pid만으로는 이름이 겹쳐 서로의 임시 파일을 덮어쓰고 rename이 ENOENT로 깨진다
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
   await rename(temp, file);
   return value;

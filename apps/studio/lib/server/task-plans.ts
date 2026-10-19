@@ -525,6 +525,33 @@ export function getTaskPlan(id: string, owner: string): TaskPlanView {
   return clone(findPlan(id, owner));
 }
 
+/** 카드 미리보기 응답의 레인 하나. 화면이 "레인 N: 카드 …"로 그린다 */
+export interface TaskCardPreviewLane {
+  id: string;
+  cards: Array<{ id: string; title: string }>;
+  paths: string[];
+}
+
+/**
+ * 사람이 쓴 카드를 레인으로만 묶어 본다(#B6b). 계획도 세션도 만들지 않는다 — 화면이 카드를 고칠 때마다 부른다.
+ * 묶는 규칙은 카드 계획 만들기와 **같은 함수**(cardsToPlan + planLanes)를 쓴다. 검사 순서도 createTaskPlan과 같다:
+ * 세션 터미널 확인(409) → 프로젝트 확인(404) → 카드 형식·상한(400)
+ */
+export async function previewTaskCards(projectId: string, cards: unknown): Promise<{ lanes: TaskCardPreviewLane[] }> {
+  if (!sessionTerminalAllowed()) throw new StudioError(409, '작업 카드는 세션 터미널을 쓸 수 있을 때(B_STUDIO_EXPERIMENTAL=1, 개인 PC 모드) 씁니다');
+  const project = await findProject(projectId);
+  if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
+  const cardData = cardsToPlan(cards, project.managed.map(([name]) => name));
+  let lanes: TaskLane[];
+  try {
+    lanes = planLanes(cardData.plan, PLAN_LIMITS);
+  } catch (error) {
+    if (error instanceof TaskPlanError) throw new StudioError(400, error.message);
+    throw error;
+  }
+  return { lanes: lanes.map((lane) => ({ id: lane.id, cards: lane.tasks.map((task) => ({ id: task.id, title: task.title })), paths: lane.paths })) };
+}
+
 /** 계획을 찾아 소유자를 확인한다. 승인·거부도 같은 규칙을 쓴다 */
 function findPlan(id: string, owner: string): TaskPlanView {
   ensureLoaded();

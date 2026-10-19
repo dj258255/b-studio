@@ -325,6 +325,7 @@ import {
   listTaskPlans,
   mintBoardToken,
   planRequirementIds,
+  previewTaskCards,
   rejectTaskPlan,
   resolveBoardToken,
   revokeBoardToken,
@@ -2171,5 +2172,55 @@ describe('사람이 쓴 작업 카드(#B6a)', () => {
     const full = `작업 카드: ${['가'.repeat(80), '가'.repeat(80), '가'.repeat(80)].join(' · ')}`;
     expect(settled.request).toBe(`${full.slice(0, 200)}…`);
     expect(settled.request.length).toBe(201);
+  });
+});
+
+describe('작업 카드 미리보기(#B6b)', () => {
+  const card = (title: string, paths: string[]) => ({ title, request: `${title} 작업`, paths });
+
+  it('겹치는 경로의 카드는 한 레인에 순서대로, 겹치지 않으면 레인이 나뉜다', async () => {
+    const { lanes } = await previewTaskCards('orders', [card('카드1', ['web/a']), card('카드2', ['web/b']), card('카드3', ['web/a'])]);
+
+    // card-3이 card-1과 겹쳐 한 레인으로 묶인다 → 레인 2개
+    expect(lanes).toHaveLength(2);
+    const together = lanes.find((lane) => lane.cards.length === 2)!;
+    expect(together.cards.map((entry) => entry.id)).toEqual(['card-1', 'card-3']);
+    expect(together.cards.map((entry) => entry.title)).toEqual(['카드1', '카드3']);
+    expect(together.paths).toEqual(['web/a']);
+    const alone = lanes.find((lane) => lane.id !== together.id)!;
+    expect(alone.cards.map((entry) => entry.id)).toEqual(['card-2']);
+  });
+
+  it('계획도 세션도 만들지 않는다 — 미리보기 뒤 계획 저장소도 세션도 그대로다', async () => {
+    const before = listTaskPlans('kim').length;
+
+    await previewTaskCards('orders', [card('카드1', ['web/a'])]);
+
+    expect(listTaskPlans('kim')).toHaveLength(before);
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.modelCalls).toBe(0);
+  });
+
+  it('카드 형식이 틀리면 400', async () => {
+    const error = await previewTaskCards('orders', []).catch((cause: unknown) => cause);
+    expect((error as { status?: number }).status).toBe(400);
+  });
+
+  it('작업 상한을 넘으면 400', async () => {
+    const many = ['1', '2', '3', '4', '5', '6', '7'].map((n) => card(`카드${n}`, [`web/${n}`]));
+
+    const error = await previewTaskCards('orders', many).catch((cause: unknown) => cause);
+
+    expect((error as { status?: number }).status).toBe(400);
+    expect((error as Error).message).toContain('작업은');
+  });
+
+  it('세션 터미널을 쓸 수 없으면 409로 거부한다', async () => {
+    fake.terminalAllowed = false;
+
+    const error = await previewTaskCards('orders', [card('카드1', ['web/a'])]).catch((cause: unknown) => cause);
+
+    expect((error as { status?: number }).status).toBe(409);
+    expect(fake.sessions.size).toBe(0);
   });
 });
