@@ -885,7 +885,15 @@ async function startSession({
   const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, projectId);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
-  const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
+  // 샌드박스를 만들 때 평가 자산 자리의 종류와 첫 내용을 마지막 체크포인트의 판으로 정한다(#745). 작업 복사본의 지금 모습을 보면
+  // 에이전트가 종류를 바꿔 컨테이너가 붙잡은 자리와 b-studio가 쓰는 자리가 갈린다. 꺼내지 못하면 세션을 만들지 않는다
+  let initialAssets: EvaluationAssetContent[] = [];
+  try {
+    initialAssets = await evaluationAssetContents(checkpoints, project.spec.workflow?.evaluationAssets ?? [], firstCheckpoint.sha);
+  } catch (error) {
+    throw new StudioError(500, `평가 자산을 준비하지 못해 세션을 만들지 않았습니다: ${describe(error)}`);
+  }
+  const sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
 
   const session = newSession({
     snapshot: {
@@ -1418,7 +1426,14 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
     const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
-    const sandbox = await provider.create(project, { secrets });
+    // 이어서 작업할 때도 샌드박스의 평가 자산 자리 종류·첫 내용은 마지막 체크포인트의 판으로 정한다(#745). 꺼내지 못하면 세션을 만들지 않는다
+    let initialAssets: EvaluationAssetContent[] = [];
+    try {
+      initialAssets = await evaluationAssetContents(checkpoints, project.spec.workflow?.evaluationAssets ?? [], head.sha);
+    } catch (error) {
+      throw new StudioError(500, `평가 자산을 준비하지 못해 세션을 만들지 않았습니다: ${describe(error)}`);
+    }
+    const sandbox = await provider.create(project, { secrets, ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
 
     const session = newSession({
       snapshot: {
@@ -2665,9 +2680,27 @@ async function ensureReadySessionInfra(session: Session, signal: AbortSignal): P
 }
 
 /**
+ * 마지막 체크포인트(ref)에 커밋된 평가 자산을 꺼낸다(#745). 커밋된 판을 읽으므로 실행 전에 백그라운드나 사람이 작업 복사본에서
+ * 바꿔 둔 내용은 들어가지 않는다. 링크·서브모듈은 넣지 않는다(일반 파일 100644·100755만). 자산의 종류도 이 판이 정한다 —
+ * 작업 복사본의 지금 모습(파일·링크·없음)을 보지 않는다. 폴더 자산은 커밋된 일반 파일만 꺼내고 링크는 빈 폴더가 된다
+ */
+async function evaluationAssetContents(checkpoints: CheckpointStore, declared: readonly string[], ref: string): Promise<EvaluationAssetContent[]> {
+  const assets: EvaluationAssetContent[] = [];
+  for (const assetPath of declared) {
+    const blob = await checkpoints.blobAt(assetPath, ref);
+    if (blob.kind === 'file') {
+      assets.push({ path: assetPath, kind: 'file', files: [{ path: assetPath, content: blob.content, executable: blob.executable }] });
+      continue;
+    }
+    const files = await checkpoints.listBlobs(ref, assetPath);
+    assets.push({ path: assetPath, kind: 'directory', files: files.map((file) => ({ path: file.path, content: file.content, executable: file.executable })) });
+  }
+  return assets;
+}
+
+/**
  * 평가 자산의 복사본을 마지막 체크포인트에 커밋된 판으로 맞춘다(#745). 컨테이너에는 작업 복사본의 자산이 아니라 이 복사본이
- * 읽기 전용으로 붙는다. 커밋된 판을 읽으므로 실행 전에 백그라운드나 사람이 작업 복사본에서 바꿔 둔 내용은 들어가지 않는다.
- * 링크·서브모듈은 넣지 않는다(일반 파일 100644·100755만). 선언이 없거나 제공자가 복사본을 지원하지 않으면 아무 일도 하지 않는다.
+ * 읽기 전용으로 붙는다. 선언이 없거나 제공자가 복사본을 지원하지 않으면 아무 일도 하지 않는다.
  * 읽기·쓰기에 실패하면 던진다 — 빈 복사본으로 테스트가 도는 것을 조용히 넘기지 않는다
  */
 async function syncEvaluationAssetsFromCheckpoint(session: Session): Promise<void> {
@@ -2676,18 +2709,7 @@ async function syncEvaluationAssetsFromCheckpoint(session: Session): Promise<voi
   if (declared.length === 0 || !sandbox.syncEvaluationAssets) return;
   const ref = session.snapshot.checkpoints[0]?.sha;
   if (!ref) throw new StudioError(502, '평가 자산을 꺼낼 마지막 체크포인트가 없습니다');
-  const assets: EvaluationAssetContent[] = [];
-  for (const assetPath of declared) {
-    const blob = await session.checkpoints.blobAt(assetPath, ref);
-    if (blob.kind === 'file') {
-      assets.push({ path: assetPath, kind: 'file', files: [{ path: assetPath, content: blob.content, executable: blob.executable }] });
-      continue;
-    }
-    // 폴더 자산(또는 그 시점에 폴더·링크·없음)은 커밋된 일반 파일만 꺼낸다. 링크는 따라가지 않아 빈 폴더가 된다
-    const files = await session.checkpoints.listBlobs(ref, assetPath);
-    assets.push({ path: assetPath, kind: 'directory', files: files.map((file) => ({ path: file.path, content: file.content, executable: file.executable })) });
-  }
-  await sandbox.syncEvaluationAssets(assets);
+  await sandbox.syncEvaluationAssets(await evaluationAssetContents(session.checkpoints, declared, ref));
 }
 
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */

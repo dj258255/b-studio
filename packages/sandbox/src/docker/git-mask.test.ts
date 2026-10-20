@@ -433,4 +433,58 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
     expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: true }], {}, declared)).toEqual(['/workspace/tests/acceptance']);
     expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
   });
+
+  it('평가 자산 자리의 원본이 복사본이 아니거나 그 안쪽에 다른 마운트가 있으면 빠진 것으로 본다(커밋 보안 검토)', async () => {
+    const root = await project();
+    const copies = [{ path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' }];
+    const base = [
+      { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+    ];
+    const declared = { evaluationAssets: copies };
+    const copy = { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false };
+
+    // 읽기 전용 마운트가 같은 자리에 있지만 원본이 b-studio의 복사본이 아니다
+    const otherSource = { ...copy, Source: path.join(root, 'tests', 'acceptance') };
+    expect(await findMissingMasks(root, [...base, otherSource], {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    // 자리 안쪽에 더 깊은 마운트가 있으면 컨테이너에는 그 내용이 덧씌워진다
+    const nested = { Type: 'bind', Source: '/evil/check.mjs', Destination: '/workspace/tests/acceptance/check.mjs', RW: false };
+    expect(await findMissingMasks(root, [...base, copy, nested], {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    // 셋 다 맞으면 통과
+    expect(await findMissingMasks(root, [...base, copy], {}, declared)).toEqual([]);
+  });
+
+  /** Docker Desktop이 Source를 접두어 붙여 알려 주는 상황의 기본 마운트 */
+  async function desktop() {
+    const root = await project();
+    const copies = [{ path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' }];
+    const base = [
+      { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+    ];
+    const at = (Source: string) => [...base, { Type: 'bind', Source, Destination: '/workspace/tests/acceptance', RW: false }];
+    return { root, copies, declared: { evaluationAssets: copies }, at };
+  }
+
+  it('Docker Desktop의 /host_mnt 접두어를 떼고 복사본과 견준다', async () => {
+    const { root, copies, declared, at } = await desktop();
+    expect(await findMissingMasks(root, at(`/host_mnt${copies[0]!.source}`), {}, declared)).toEqual([]);
+  });
+
+  it('Docker Desktop의 /run/desktop/mnt/host 접두어를 떼고 복사본과 견준다', async () => {
+    const { root, copies, declared, at } = await desktop();
+    expect(await findMissingMasks(root, at(`/run/desktop/mnt/host${copies[0]!.source}`), {}, declared)).toEqual([]);
+  });
+
+  it('접미어만 같은 다른 경로는 받지 않는다', async () => {
+    const { root, copies, declared, at } = await desktop();
+    expect(await findMissingMasks(root, at(`/elsewhere${copies[0]!.source}`), {}, declared)).toEqual(['/workspace/tests/acceptance']);
+  });
+
+  it('접두어를 떼고 난 경로에 `..`가 있으면 받지 않는다', async () => {
+    const { root, copies, declared, at } = await desktop();
+    expect(await findMissingMasks(root, at(`/host_mnt/..${copies[0]!.source}`), {}, declared)).toEqual(['/workspace/tests/acceptance']);
+  });
 });

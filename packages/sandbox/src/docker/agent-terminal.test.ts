@@ -599,6 +599,29 @@ describe('컨테이너를 띄운 뒤의 확인 (관문 설정)', { timeout: 30_0
     expect((await missing.calls()).at(-1)).toBe('rm --force sb-agent');
   });
 
+  it('평가 자산 자리의 원본이 복사본이 아니거나 그 안쪽에 다른 마운트가 있으면 지우고 던진다', async () => {
+    const assetRoot = await mkdtemp(path.join(tmpdir(), 'b-studio-agent-assets-'));
+    const assets = ['tests/acceptance'];
+    const copies = evaluationAssetCopies(assets, assetRoot, 'sb');
+
+    for (const extra of [
+      // 같은 자리에 읽기 전용으로 붙었지만 원본이 작업 복사본의 자산이다
+      (root: string) => ({ Type: 'bind', Source: path.join(root, 'tests', 'acceptance'), Destination: '/workspace/tests/acceptance', RW: false }),
+      // 자리 위에 더 깊은 마운트를 얹었다
+      () => ({ Type: 'bind', Source: '/evil/check.mjs', Destination: '/workspace/tests/acceptance/check.mjs', RW: false }),
+    ]) {
+      const docker = await fakeDocker();
+      await writeFile(
+        path.join(docker.dir, 'after-run.json'),
+        docker.mounts([{ Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }, extra(await realpath(docker.root))]),
+      );
+      await expect(
+        ensureAgentContainer('sb', docker.root, { projectId: 'p', evaluationAssets: assets, evaluationAssetRoot: assetRoot, dockerBin: docker.bin }),
+      ).rejects.toThrow('보호와 관문 설정을 확인하지 못해');
+      expect((await docker.calls()).at(-1)).toBe('rm --force sb-agent');
+    }
+  });
+
   it('띄웠는데 관문 폴더가 없거나, 쓸 수 있게 붙었거나, 다른 폴더가 붙었으면 지우고 던진다', async () => {
     for (const extra of [[], [{ Type: 'bind', Source: gatewayDir, Destination: '/etc/claude-code', RW: true }], [{ Type: 'bind', Source: '/Users/me/.cache/b-studio/agent-gateway/ffffffffffffffff', Destination: '/etc/claude-code', RW: false }]]) {
       const docker = await fakeDocker();

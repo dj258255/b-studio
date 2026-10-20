@@ -385,4 +385,11 @@ export interface CleanupCommand {
 export interface CreateSandboxOptions {
   /** studio.yaml에 선언한 시크릿의 값 (이름 → 값). resolveSecrets()로 준비한다 */
   secrets?: Record<string, string>;
+  /**
+   * 선언한 평가 자산의 **마지막 체크포인트 판**(#745). 자리의 종류와 첫 내용을 여기서 정하고, 컨테이너를 띄우기 전에 채운다.
+   * 작업 복사본의 지금 모습(있는 파일·링크·없는 것)을 보지 않는다 — 에이전트가 종류를 바꾸면 컨테이너가 붙잡은 자리와
+   * b-studio가 쓰는 자리가 갈린다. 선언했는데 여기 없는 자산은 빈 폴더 자리로 만든다.
+   * 스튜디오는 세션을 만들 때 마지막 체크포인트에서 꺼낸 판을 넘긴다. 구현하지 않는 제공자는 무시한다
+   */
+  evaluationAssets?: readonly EvaluationAssetContent[];
 }

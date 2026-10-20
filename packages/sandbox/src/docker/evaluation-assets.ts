@@ -25,9 +25,13 @@ export interface EvaluationAssetCopy {
   source: string;
 }
 
-/** 선언 경로 하나의 복사본 자리와 지금 만들 자리의 종류 */
+/** 선언 경로 하나의 복사본 자리와, 자리를 만들 때의 종류·신원 */
 export interface EvaluationAssetSlot extends EvaluationAssetCopy {
   kind: 'file' | 'directory';
+  /** 자리를 만들 때의 device. sync는 자리가 그대로일 때만 안을 바꾼다 */
+  dev: number;
+  /** 자리를 만들 때의 inode. sync는 자리가 그대로일 때만 안을 바꾼다 */
+  ino: number;
 }
 
 /**
@@ -56,36 +60,44 @@ export function evaluationAssetCopies(declared: readonly string[], root: string,
 }
 
 /**
- * 선언마다 복사본 자리를 만든다. 폴더 자산은 빈 폴더, 파일 자산은 빈 파일이다. 자리가 링크나 다른 종류면 그 항목만 지우고
- * 새로 만든다(링크를 따라가지 않는다). 만든 뒤 실제 위치가 샌드박스 복사본 폴더 안인지 확인한다.
- * 자리의 종류는 복사본의 내용이 아니라 작업 복사본에서 지금 보이는 모습으로 정한다 — 첫 sync 전에 마운트 모양을 정해야 한다
+ * 선언마다 복사본 자리를 만들고, 넘긴 판(마지막 체크포인트)의 내용으로 채운다. 컨테이너를 띄우기 전에 부른다.
+ * 자리의 종류는 **넘긴 판**이 정한다 — 작업 복사본의 `lstat`을 보지 않는다. 에이전트가 작업 복사본에서 자산을 링크·파일로
+ * 바꿔도 자리 종류가 따라가지 않아, 컨테이너가 붙잡은 자리와 b-studio가 쓰는 자리가 갈리지 않는다.
+ * 선언했지만 판에 없는 자산은 빈 폴더 자리로 만든다. 자리가 링크나 다른 종류면 그 항목만 지우고 새로 만든다(링크를 따라가지 않는다).
+ * 만든 뒤 실제 위치가 샌드박스 복사본 폴더 안인지 확인한다
  */
 export async function prepareEvaluationAssetCopies(
   declared: readonly string[],
-  projectRoot: string,
   root: string,
   sandboxId: string,
+  assets: readonly EvaluationAssetContent[] = [],
 ): Promise<EvaluationAssetSlot[]> {
   if (declared.length === 0) return [];
   const dir = evaluationAssetSandboxDir(root, sandboxId);
   await mkdir(dir, { recursive: true });
   const realDir = await checkSandboxDir(root, dir);
+  const kinds = new Map(assets.map((asset) => [asset.path, asset.kind]));
   const slots: EvaluationAssetSlot[] = [];
   for (const declaredPath of declared) {
-    const kind = await declaredKind(projectRoot, declaredPath);
+    const kind = kinds.get(declaredPath) ?? 'directory';
     const source = path.join(dir, copyName(declaredPath));
     await prepareSlot(source, kind, dir);
     if (!isInside(realDir, await realpath(source))) {
       throw new SandboxError('평가 자산 복사본 자리가 샌드박스 복사본 폴더 밖을 가리킵니다', `${source} → ${await realpath(source).catch(() => source)}`);
     }
-    slots.push({ path: declaredPath, kind, source });
+    const info = await lstat(source);
+    slots.push({ path: declaredPath, kind, source, dev: info.dev, ino: info.ino });
   }
+  // 방금 만든 자리에 첫 내용을 채운다. 자리 신원을 방금 기록했으므로 sync의 확인을 통과한다
+  await syncEvaluationAssetCopies(slots, dir, assets);
   return slots;
 }
 
 /**
  * 복사본의 내용을 넘긴 판으로 바꾼다. 폴더 자산은 폴더 자체(inode)를 그대로 두고 안만 맞춘다(없는 파일 지우기, 새 내용 쓰기).
  * 파일 자산은 같은 파일에 덮어쓴다(truncate 후 write) — inode가 그대로라 컨테이너도 새 내용을 본다.
+ * **자리가 그대로일 때만 안을 바꾼다**: 자리가 없거나 종류가 다르거나 device·inode가 바뀌었으면(자리를 지우고 다시 만들거나
+ * 바꿔치기했다) 고치지 않고 멈춘다. 자리를 갈아 끼우면 컨테이너가 붙잡은 옛 자리와 b-studio가 쓰는 새 자리가 갈려 소리 없이 어긋난다.
  * 복사본 안의 링크는 따라가지 않고 지운 뒤 새로 쓴다. 선언에 없는 `path`나 선언 경로 밖의 파일은 거절한다
  */
 export async function syncEvaluationAssetCopies(
@@ -99,6 +111,7 @@ export async function syncEvaluationAssetCopies(
   for (const asset of assets) {
     const slot = byPath.get(asset.path);
     if (!slot) throw new SandboxError('선언하지 않은 평가 자산의 복사본은 바꿀 수 없습니다', asset.path);
+    await assertSlotUnchanged(slot, asset.kind);
     if (!isInside(realDir, await realpath(path.dirname(slot.source)).catch(() => path.dirname(slot.source)))) {
       throw new SandboxError('평가 자산 복사본 자리가 샌드박스 복사본 폴더 밖을 가리킵니다', slot.source);
     }
@@ -125,9 +138,16 @@ function copyName(declaredPath: string): string {
   return createHash('sha256').update(declaredPath).digest('hex').slice(0, 32);
 }
 
-async function declaredKind(projectRoot: string, declaredPath: string): Promise<'file' | 'directory'> {
-  const info = await lstat(path.join(projectRoot, declaredPath)).catch(() => undefined);
-  return info?.isFile() ? 'file' : 'directory';
+/** 자리가 만들 때와 같은 종류·device·inode인지 본다. 아니면 고치지 않고 멈춘다 */
+async function assertSlotUnchanged(slot: EvaluationAssetSlot, kind: EvaluationAssetContent['kind']): Promise<void> {
+  const current = await lstat(slot.source).catch(() => undefined);
+  const sameKind = current !== undefined && slot.kind === kind && (kind === 'file' ? current.isFile() : current.isDirectory());
+  if (!sameKind || current.dev !== slot.dev || current.ino !== slot.ino) {
+    throw new SandboxError(
+      '평가 자산 복사본 자리가 바뀌었습니다 — 샌드박스를 다시 만드세요',
+      `${slot.path}: ${current === undefined ? '자리가 없습니다' : '자리의 종류나 inode가 만들 때와 다릅니다'}`,
+    );
+  }
 }
 
 async function prepareSlot(source: string, kind: 'file' | 'directory', parent: string): Promise<void> {
@@ -159,16 +179,14 @@ async function syncFile(slot: EvaluationAssetSlot, files: EvaluationAssetContent
   for (const file of files) {
     if (file.path !== slot.path) throw new SandboxError('평가 자산 파일 자산의 경로가 선언과 다릅니다', `${slot.path} ≠ ${file.path}`);
   }
-  await prepareSlot(slot.source, 'file', path.dirname(slot.source));
   const file = files.find((entry) => entry.path === slot.path);
   const content = file?.content ?? Buffer.alloc(0);
-  // 같은 inode에 쓴다. 컨테이너가 붙잡은 파일 판이 바뀌지 않는다
+  // 같은 inode에 쓴다(자리는 sync 전에 확인했다). 컨테이너가 붙잡은 파일 판이 바뀌지 않는다
   await writeFile(slot.source, content);
   await chmod(slot.source, file?.executable ? 0o755 : 0o644);
 }
 
 async function syncDirectory(slot: EvaluationAssetSlot, files: EvaluationAssetContent['files']): Promise<void> {
-  await prepareSlot(slot.source, 'directory', path.dirname(slot.source));
   const desired = new Map<string, EvaluationAssetContent['files'][number]>();
   for (const file of files) {
     desired.set(containedRelative(slot.path, file.path), file);

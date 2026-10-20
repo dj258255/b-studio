@@ -224,7 +224,7 @@ export class LocalDockerProvider implements SandboxProvider {
     if (failure) throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, failure instanceof Error ? failure.message : String(failure));
   }
 
-  async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {
+  async create(project: LoadedProject, { secrets = {}, evaluationAssets: initialAssets = [] }: CreateSandboxOptions = {}): Promise<Sandbox> {
     // 런타임이 없으면 compose up 도중이 아니라 샌드박스를 만들기 전에 알린다
     if (this.#options.runtime) await assertRuntime(this.#options.dockerBin ?? 'docker', this.#options.runtime);
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
@@ -233,18 +233,25 @@ export class LocalDockerProvider implements SandboxProvider {
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     const hostPorts = await preallocatePublicUrlPorts(project);
     const evaluationAssetRoot = this.#evaluationAssetRoot();
-    // 마운트할 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 자리는 여기서 만들고, 내용은 실행을 시작할 때마다
-    // studio가 마지막 체크포인트에서 꺼내 syncEvaluationAssets로 채운다
-    const evaluationAssets = await prepareEvaluationAssetCopies(project.spec.workflow?.evaluationAssets ?? [], project.root, evaluationAssetRoot, id);
-    const gitMask = await loadGitMask(project, {
-      dockerBin: this.#options.dockerBin,
-      env: composeEnvironment(secrets),
-      projectName: id,
-      evaluationAssets,
-      redact: (text) => new Redactor(secrets).redact(text),
-    });
-    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
-    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts, evaluationAssetRoot, evaluationAssets);
+    // 마운트할 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 자리의 종류와 첫 내용은 넘긴 판(마지막 체크포인트)이
+    // 정하고 여기서 채운다 — 컨테이너를 띄우기 전이라 컨테이너가 붙잡는 자리와 b-studio가 쓰는 자리가 처음부터 같다
+    const evaluationAssets = await prepareEvaluationAssetCopies(project.spec.workflow?.evaluationAssets ?? [], evaluationAssetRoot, id, initialAssets);
+    try {
+      const gitMask = await loadGitMask(project, {
+        dockerBin: this.#options.dockerBin,
+        env: composeEnvironment(secrets),
+        projectName: id,
+        evaluationAssets,
+        redact: (text) => new Redactor(secrets).redact(text),
+      });
+      await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
+      return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts, evaluationAssetRoot, evaluationAssets);
+    } catch (error) {
+      // 샌드박스를 돌려주지 못하면 destroy도 불리지 않는다. 그 샌드박스 id의 복사본 폴더를 여기서 지운다.
+      // 지우기 실패가 원래 오류(만들기를 거절한 이유)를 가리지 않게 한다
+      await removeEvaluationAssets(evaluationAssetRoot, id).catch(() => {});
+      throw error;
+    }
   }
 
   #evaluationAssetRoot(): string {

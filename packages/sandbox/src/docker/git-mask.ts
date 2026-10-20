@@ -82,6 +82,36 @@ export function planGitMask(mounts: readonly Pick<BindMount, 'service' | 'source
   return Object.fromEntries([...plan].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
 }
 
+/** 평가 자산 하나가 덧붙는 자리. target은 컨테이너 안 경로, source는 b-studio 복사본이다 */
+interface EvaluationAssetMaskEntry {
+  service: string;
+  target: string;
+  source: string;
+  /** 이 target을 만든 평가 자산의 작업 복사본 절대 경로(같은 자리를 직접 마운트한 경우를 알아보는 데 쓴다) */
+  asset: string;
+}
+
+function evaluationAssetMaskEntries(
+  mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[],
+  projectRoot: string,
+  assets: readonly EvaluationAssetCopy[],
+): EvaluationAssetMaskEntry[] {
+  const entries: EvaluationAssetMaskEntry[] = [];
+  for (const mount of mounts) {
+    const source = path.resolve(mount.source);
+    for (const asset of assets) {
+      const assetAbs = path.resolve(projectRoot, asset.path);
+      if (isInside(source, assetAbs)) {
+        entries.push({ service: mount.service, target: path.posix.join(mount.target, toPosix(path.relative(source, assetAbs))), source: asset.source, asset: assetAbs });
+      } else if (isInside(assetAbs, source)) {
+        // 자산 폴더나 그 하위를 직접 마운트했다. 같은 자리(target)에 복사본의 같은 하위 경로를 붙인다
+        entries.push({ service: mount.service, target: mount.target, source: path.join(asset.source, path.relative(assetAbs, source)), asset: assetAbs });
+      }
+    }
+  }
+  return entries;
+}
+
 /**
  * 선언된 평가 자산을 서비스 컨테이너에 읽기 전용으로 덧붙이는 마운트 계획(ADR-175 후속, #745).
  *
@@ -101,26 +131,39 @@ export function planEvaluationAssetMask(
   assets: readonly EvaluationAssetCopy[],
 ): Record<string, MaskVolume[]> {
   const plan = new Map<string, Map<string, MaskVolume>>();
-  const add = (service: string, volume: MaskVolume) => {
-    const volumes = plan.get(service) ?? new Map<string, MaskVolume>();
-    volumes.set(volume.target, volume);
-    plan.set(service, volumes);
-  };
-  const readOnly = (source: string, target: string): MaskVolume => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
+  for (const entry of evaluationAssetMaskEntries(mounts, projectRoot, assets)) {
+    const volumes = plan.get(entry.service) ?? new Map<string, MaskVolume>();
+    volumes.set(entry.target, { type: 'bind', source: entry.source, target: entry.target, read_only: true, bind: { create_host_path: false } });
+    plan.set(entry.service, volumes);
+  }
+  return Object.fromEntries([...plan].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
+}
 
-  for (const mount of mounts) {
-    const source = path.resolve(mount.source);
-    for (const asset of assets) {
-      const assetAbs = path.resolve(projectRoot, asset.path);
-      if (isInside(source, assetAbs)) {
-        add(mount.service, readOnly(asset.source, path.posix.join(mount.target, toPosix(path.relative(source, assetAbs)))));
-      } else if (isInside(assetAbs, source)) {
-        // 자산 폴더나 그 하위를 직접 마운트했다. 같은 자리(target)에 복사본의 같은 하위 경로를 붙인다
-        add(mount.service, readOnly(path.join(asset.source, path.relative(assetAbs, source)), mount.target));
+/**
+ * 사용자 compose의 마운트 가운데 평가 자산 자리 안쪽(같은 자리 포함)에 있는 것이 있는지 본다.
+ * Docker는 더 깊은 target의 마운트를 위에 얹으므로, 그런 마운트가 있으면 우리가 붙인 복사본 위에 다른 내용이 덮인다.
+ * 게이트의 지문은 작업 복사본의 자산을 보므로 소리 없이 어긋난다(컬라임 실측: 복사본의 check.mjs 위에 다른 파일을 얹자
+ * 컨테이너는 그 파일을 읽었다). 자산을 직접 마운트한 그 마운트 자신(같은 자리를 복사본으로 바꾸는 경우)만 빼고 거절한다
+ */
+function assertNoNestedAssetMounts(
+  mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[],
+  entries: readonly EvaluationAssetMaskEntry[],
+): void {
+  for (const entry of entries) {
+    for (const mount of mounts) {
+      if (mount.service !== entry.service) continue;
+      const source = path.resolve(mount.source);
+      if (mount.target === entry.target) {
+        if (isInside(source, entry.asset) || isInside(entry.asset, source)) continue;
+        throw new SandboxError(
+          `서비스 ${mount.service}가 평가 자산 자리 ${entry.target}에 다른 마운트(${source})를 겹쳤습니다. 평가 자산을 보호할 수 없어 샌드박스를 만들지 않습니다`,
+        );
+      }
+      if (isInsidePosix(entry.target, mount.target)) {
+        throw new SandboxError(`서비스 ${mount.service}의 마운트 ${mount.target}가 평가 자산 자리 ${entry.target} 안쪽에 있습니다. 평가 자산을 보호할 수 없어 샌드박스를 만들지 않습니다`);
       }
     }
   }
-  return Object.fromEntries([...plan].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
 }
 
 /**
@@ -222,7 +265,10 @@ export async function computeGitMask(
   }
   const gitMask = planGitMask(mounts, entries);
   // 목록은 선언에서만 정한다(작업 복사본의 지금 상태를 보지 않는다). 그래야 자산이 지워지거나 링크로 바뀌어도 기대가 줄지 않는다
-  return evaluationAssets.length === 0 ? gitMask : mergeMasks(planEvaluationAssetMask(mounts, root, evaluationAssets), gitMask);
+  if (evaluationAssets.length === 0) return gitMask;
+  // 사용자 compose가 평가 자산 자리 위에 더 깊은 마운트를 얹으면 우리 복사본 위에 그 내용이 덮인다. 만들지 않고 멈춘다
+  assertNoNestedAssetMounts(mounts, evaluationAssetMaskEntries(mounts, root, evaluationAssets));
+  return mergeMasks(planEvaluationAssetMask(mounts, root, evaluationAssets), gitMask);
 }
 
 /** 마스크 계획을 서비스·target으로 합친다. 뒤에 오는 계획이 같은 target에서 이긴다 */
@@ -278,6 +324,22 @@ export interface InspectedMount {
 }
 
 /**
+ * Docker Desktop은 bind 마운트의 Source를 호스트 경로 앞에 `/host_mnt` 또는 `/run/desktop/mnt/host`를 붙여 알려 주기도 한다.
+ * 맨 앞이 **정확히** 그 접두어이고, 뗀 나머지가 절대 경로이며 `..` 요소가 없을 때만 그 경로로 본다.
+ * 그 밖의 꼴(접미어만 같은 다른 경로 등)은 받지 않는다
+ */
+function dockerDesktopHostPath(source: string): string | undefined {
+  for (const prefix of ['/host_mnt/', '/run/desktop/mnt/host/']) {
+    if (!source.startsWith(prefix)) continue;
+    // 접두어의 마지막 `/`는 남긴다 — 뗀 경로가 `/Users/…`처럼 절대 경로여야 한다
+    const stripped = source.slice(prefix.length - 1);
+    if (!path.posix.isAbsolute(stripped) || stripped.split('/').includes('..')) return undefined;
+    return stripped;
+  }
+  return source;
+}
+
+/**
  * 사후 확인(설정이 아니라 결과를 본다): 실행 중인 컨테이너의 실제 마운트에서 `.git`이 든 호스트 폴더를 덮는 마운트가 있는데
  * 그 안의 `.git` 자리에 읽기 전용 마운트(상태 폴더는 빈 폴더)가 없으면 빠진 자리(컨테이너 안 경로)를 돌려준다.
  * `evaluationAssets`를 주면 선언한 평가 자산 자리도 같은 계획으로 확인한다.
@@ -306,6 +368,20 @@ export async function findMissingMasks(
     const ok = actual !== undefined && actual.RW === false;
     if (!ok) missing.push(volume.target);
   }
+  // 평가 자산 자리는 셋을 모두 본다: 읽기 전용, 원본이 b-studio의 복사본, 그 자리 안쪽에 다른 마운트가 없음.
+  // "읽기 전용 마운트가 있다"만 보면 더 깊은 사용자 마운트가 위에 내용을 덮어도 통과한다(커밋 보안 검토)
+  for (const entry of evaluationAssets.length === 0 ? [] : evaluationAssetMaskEntries(hostMounts, root, evaluationAssets)) {
+    // 같은 자리에 마운트가 여럿이면 어느 것이 이겼는지 알 수 없다. 하나뿐일 때만 그 마운트를 본다
+    const actuals = mounts.filter((mount) => mount.Destination === entry.target);
+    const actual = actuals[0];
+    const raw = actual?.Type === 'bind' ? actual.Source : actual?.Type === 'volume' && actual.Name ? boundDevice(volumeOptions[actual.Name]) : undefined;
+    // Docker Desktop이 붙여 알려 주는 접두어만 뗀다. 그 밖의 꼴은 받지 않는다
+    const source = raw === undefined ? undefined : dockerDesktopHostPath(raw);
+    const nested = mounts.some((mount) => mount.Destination !== entry.target && isInsidePosix(entry.target, mount.Destination));
+    const ok =
+      actuals.length === 1 && actual !== undefined && actual.RW === false && source !== undefined && (await real(source)) === (await real(entry.source)) && !nested;
+    if (!ok && !missing.includes(entry.target)) missing.push(entry.target);
+  }
   return missing;
 }
 
@@ -324,6 +400,12 @@ async function real(target: string): Promise<string> {
 function isInside(parent: string, target: string): boolean {
   const relative = path.relative(parent, target);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+/** 컨테이너 안 경로(target)를 비교한다. 호스트 경로가 아니라 항상 POSIX 규칙이다 */
+function isInsidePosix(parent: string, target: string): boolean {
+  const relative = path.posix.relative(parent, target);
+  return relative === '' || (!relative.startsWith('..') && !path.posix.isAbsolute(relative));
 }
 
 function toPosix(relative: string): string {

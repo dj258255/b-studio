@@ -34,12 +34,14 @@ async function roots(): Promise<{ project: string; root: string }> {
 
 describe('평가 자산 복사본 자리', () => {
   it('폴더 자산은 빈 폴더, 파일 자산은 빈 파일로 만든다. 순서를 바꿔 불러도 같은 자리다', async () => {
-    const { project, root } = await roots();
-    await mkdir(path.join(project, 'tests', 'acceptance'), { recursive: true });
-    await writeFile(path.join(project, 'expected.json'), '{}\n');
+    const { root } = await roots();
+    const contents = [
+      { path: 'tests/acceptance', kind: 'directory' as const, files: [] },
+      { path: 'expected.json', kind: 'file' as const, files: [] },
+    ];
 
-    const forward = await prepareEvaluationAssetCopies(['tests/acceptance', 'expected.json'], project, root, 'sb');
-    const backward = await prepareEvaluationAssetCopies(['expected.json', 'tests/acceptance'], project, root, 'sb');
+    const forward = await prepareEvaluationAssetCopies(['tests/acceptance', 'expected.json'], root, 'sb', contents);
+    const backward = await prepareEvaluationAssetCopies(['expected.json', 'tests/acceptance'], root, 'sb', contents);
 
     expect(forward.map((slot) => [slot.path, slot.kind])).toEqual([
       ['tests/acceptance', 'directory'],
@@ -55,8 +57,7 @@ describe('평가 자산 복사본 자리', () => {
   });
 
   it('자리로 쓰일 경로가 링크나 다른 종류면 그 항목만 지우고 새로 만든다(링크 너머는 그대로)', async () => {
-    const { project, root } = await roots();
-    await mkdir(path.join(project, 'tests', 'acceptance'), { recursive: true });
+    const { root } = await roots();
     const outside = path.join(path.dirname(root), 'outside');
     await mkdir(outside);
     await writeFile(path.join(outside, 'important.txt'), '지우면 안 된다');
@@ -65,17 +66,42 @@ describe('평가 자산 복사본 자리', () => {
     await mkdir(path.dirname(slot!.source), { recursive: true });
     await symlink(outside, slot!.source);
 
-    const [prepared] = await prepareEvaluationAssetCopies(['tests/acceptance'], project, root, 'sb');
+    const [prepared] = await prepareEvaluationAssetCopies(['tests/acceptance'], root, 'sb');
     expect((await lstat(prepared!.source)).isSymbolicLink()).toBe(false);
     expect((await lstat(prepared!.source)).isDirectory()).toBe(true);
     expect(await readdir(prepared!.source)).toEqual([]);
     expect(await readFile(path.join(outside, 'important.txt'), 'utf8')).toBe('지우면 안 된다');
   });
 
-  it('선언에 없는 자산의 복사본은 바꾸지 않는다', async () => {
+  it('자리 종류와 첫 내용은 넘긴 판(체크포인트)을 따른다. 작업 복사본의 모습은 보지 않는다', async () => {
     const { project, root } = await roots();
-    await mkdir(path.join(project, 'tests', 'acceptance'), { recursive: true });
-    const slots = await prepareEvaluationAssetCopies(['tests/acceptance'], project, root, 'sb');
+    // 작업 복사본에서는 자산이 없거나 링크일 수 있다. 에이전트가 그렇게 바꿔도 자리 종류가 따라가지 않아야 한다
+    const outside = path.join(path.dirname(root), 'outside');
+    await mkdir(outside);
+    await symlink(outside, path.join(project, 'tests'));
+
+    const slots = await prepareEvaluationAssetCopies(['tests/acceptance', 'expected.json', 'later.json'], root, 'sb', [
+      { path: 'tests/acceptance', kind: 'directory', files: [{ path: 'tests/acceptance/a.txt', content: Buffer.from('a\n'), executable: false }] },
+      { path: 'expected.json', kind: 'file', files: [{ path: 'expected.json', content: Buffer.from('{}\n'), executable: false }] },
+    ]);
+
+    expect(slots.map((slot) => [slot.path, slot.kind])).toEqual([
+      ['tests/acceptance', 'directory'],
+      ['expected.json', 'file'],
+      ['later.json', 'directory'],
+    ]);
+    expect(await readFile(path.join(slots[0]!.source, 'a.txt'), 'utf8')).toBe('a\n');
+    expect(await readFile(slots[1]!.source, 'utf8')).toBe('{}\n');
+    // 선언했지만 판에 없는 자산은 빈 폴더 자리다
+    expect((await lstat(slots[2]!.source)).isDirectory()).toBe(true);
+    expect(await readdir(slots[2]!.source)).toEqual([]);
+    // 작업 복사본의 링크 너머는 건드리지 않는다
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it('선언에 없는 자산의 복사본은 바꾸지 않는다', async () => {
+    const { root } = await roots();
+    const slots = await prepareEvaluationAssetCopies(['tests/acceptance'], root, 'sb');
     await expect(syncEvaluationAssetCopies(slots, evaluationAssetSandboxDir(root, 'sb'), [{ path: 'elsewhere', kind: 'directory', files: [] }])).rejects.toThrow(
       '선언하지 않은 평가 자산',
     );
@@ -84,10 +110,11 @@ describe('평가 자산 복사본 자리', () => {
 
 describe('syncEvaluationAssetCopies', () => {
   async function setup(): Promise<{ slots: EvaluationAssetSlot[]; sandboxDir: string; root: string }> {
-    const { project, root } = await roots();
-    await mkdir(path.join(project, 'tests', 'acceptance'), { recursive: true });
-    await writeFile(path.join(project, 'expected.json'), '{}\n');
-    const slots = await prepareEvaluationAssetCopies(['tests/acceptance', 'expected.json'], project, root, 'sb');
+    const { root } = await roots();
+    const slots = await prepareEvaluationAssetCopies(['tests/acceptance', 'expected.json'], root, 'sb', [
+      { path: 'tests/acceptance', kind: 'directory', files: [] },
+      { path: 'expected.json', kind: 'file', files: [] },
+    ]);
     return { slots, sandboxDir: evaluationAssetSandboxDir(root, 'sb'), root };
   }
 
@@ -159,14 +186,57 @@ describe('syncEvaluationAssetCopies', () => {
       ]),
     ).rejects.toThrow('올바르지 않습니다');
   });
+
+  const contents = [
+    { path: 'tests/acceptance', kind: 'directory' as const, files: [{ path: 'tests/acceptance/a.txt', content: Buffer.from('a\n'), executable: false }] },
+    { path: 'expected.json', kind: 'file' as const, files: [{ path: 'expected.json', content: Buffer.from('{"ok":true}\n'), executable: false }] },
+  ];
+
+  it('자리를 지웠으면 sync는 자리를 다시 만들지 않고 멈춘다', async () => {
+    const { slots, sandboxDir } = await setup();
+    const dirSlot = slots.find((slot) => slot.kind === 'directory')!;
+    await rm(dirSlot.source, { recursive: true, force: true });
+
+    await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
+    expect(await lstat(dirSlot.source).catch(() => undefined)).toBeUndefined();
+  });
+
+  it('자리를 다른 inode로 바꿔치기했으면 sync는 그 자리를 고치지 않고 멈춘다', async () => {
+    const { slots, sandboxDir } = await setup();
+    const dirSlot = slots.find((slot) => slot.kind === 'directory')!;
+    await rm(dirSlot.source, { recursive: true, force: true });
+    await mkdir(dirSlot.source);
+
+    await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
+    expect(await readdir(dirSlot.source)).toEqual([]);
+  });
+
+  it('파일 자산 자리를 다른 inode로 바꿔치기했으면 그 내용을 덮어쓰지 않고 멈춘다', async () => {
+    const { slots, sandboxDir } = await setup();
+    const fileSlot = slots.find((slot) => slot.kind === 'file')!;
+    await rm(fileSlot.source, { force: true });
+    await writeFile(fileSlot.source, '바꿔치기한 내용');
+
+    await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
+    expect(await readFile(fileSlot.source, 'utf8')).toBe('바꿔치기한 내용');
+  });
+
+  it('넘긴 판의 종류가 자리 종류와 다르면 sync는 자리를 바꾸지 않고 멈춘다', async () => {
+    const { slots, sandboxDir } = await setup();
+    const dirSlot = slots.find((slot) => slot.kind === 'directory')!;
+    await expect(
+      syncEvaluationAssetCopies(slots, sandboxDir, [{ path: 'tests/acceptance', kind: 'file', files: [{ path: 'tests/acceptance', content: Buffer.from('x'), executable: false }] }]),
+    ).rejects.toThrow('자리가 바뀌었습니다');
+    expect((await lstat(dirSlot.source)).isDirectory()).toBe(true);
+  });
 });
 
 describe('removeEvaluationAssets', () => {
   it('그 샌드박스 id의 복사본 폴더만 지운다', async () => {
     const { project, root } = await roots();
     await mkdir(path.join(project, 'tests', 'acceptance'), { recursive: true });
-    await prepareEvaluationAssetCopies(['tests/acceptance'], project, root, 'sb');
-    await prepareEvaluationAssetCopies(['tests/acceptance'], project, root, 'other');
+    await prepareEvaluationAssetCopies(['tests/acceptance'], root, 'sb');
+    await prepareEvaluationAssetCopies(['tests/acceptance'], root, 'other');
     await removeEvaluationAssets(root, 'sb');
     expect(await readdir(root)).toEqual(['other']);
   });
