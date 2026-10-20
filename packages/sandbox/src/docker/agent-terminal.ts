@@ -463,6 +463,12 @@ export interface AgentContainerOptions {
   projectId: string;
   /** 관문 설정을 둔 호스트 폴더. 주면 CLI의 관리 설정 자리에 붙이고, 붙었는지를 띄운 뒤에 확인한다 */
   gatewayDir?: string;
+  /**
+   * 세션 프로젝트가 선언한 평가 자산(studio.yaml workflow.evaluationAssets). 작업 복사본 위에 읽기 전용으로 덮는다.
+   * 선언이 바뀌면 다음에 컨테이너를 만들 때부터 반영된다 — 떠 있는 컨테이너의 마운트가 선언과 다르면 지우고 새로 띄운다.
+   * 게이트의 지문 견줌은 그대로 남는다(호스트 셸·이 컴퓨터 방식은 이 마운트로 막지 못한다)
+   */
+  evaluationAssets?: readonly string[];
   dockerBin?: string;
   image?: string;
 }
@@ -472,18 +478,18 @@ export interface AgentContainerOptions {
  * 띄운 뒤에는 설정이 아니라 결과를 본다: 실제 마운트에서 `.git`이 읽기 전용으로 덮였는지 확인하고, 아니면 지우고 던진다.
  * 확인하기 전에는 누구도 이 컨테이너에서 명령을 돌리지 않는다(이름을 돌려주지 않는다)
  */
-export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { projectId, gatewayDir, dockerBin = 'docker', image }: AgentContainerOptions): Promise<string> {
+export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { projectId, gatewayDir, evaluationAssets, dockerBin = 'docker', image }: AgentContainerOptions): Promise<string> {
   const name = agentContainerName(sandboxId);
   const docker = (args: string[]) => execFileAsync(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
   const root = await realpath(projectRoot);
 
   // 설정이 다른 컨테이너(관문 없이 띄운 것, 다른 판의 설정을 붙인 것)는 다시 쓰지 않고 새로 띄운다
-  const ready = async (mounts: readonly InspectedMount[]): Promise<boolean> => (await masksInPlace(root, mounts)) && gatewayInPlace(gatewayDir, mounts);
+  const ready = async (mounts: readonly InspectedMount[]): Promise<boolean> => (await masksInPlace(root, mounts, evaluationAssets)) && gatewayInPlace(gatewayDir, mounts);
   const existing = await inspect(dockerBin, name);
   if (existing?.running && (await ready(existing.mounts))) return name;
   if (existing) await docker(['rm', '--force', name]).catch(() => {});
 
-  const masks = (await computeGitMask(root, { services: { [AGENT_SERVICE]: { volumes: [{ type: 'bind', source: root, target: AGENT_WORKSPACE }] } } }))[AGENT_SERVICE] ?? [];
+  const masks = (await computeGitMask(root, { services: { [AGENT_SERVICE]: { volumes: [{ type: 'bind', source: root, target: AGENT_WORKSPACE }] } } }, { evaluationAssets }))[AGENT_SERVICE] ?? [];
   try {
     await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId), gatewayDir, image }));
   } catch (error) {
@@ -524,8 +530,8 @@ export async function removeAgentContainer(sandboxId: string, { dockerBin = 'doc
   await execFileAsync(dockerBin, ['rm', '--force', agentContainerName(sandboxId)], { cwd: tmpdir() }).catch(() => {});
 }
 
-async function masksInPlace(projectRoot: string, mounts: readonly InspectedMount[]): Promise<boolean> {
-  return (await findMissingMasks(projectRoot, mounts, {})).length === 0;
+async function masksInPlace(projectRoot: string, mounts: readonly InspectedMount[], evaluationAssets: readonly string[] = []): Promise<boolean> {
+  return (await findMissingMasks(projectRoot, mounts, {}, { evaluationAssets })).length === 0;
 }
 
 /** 관문 설정이 정한 대로 붙어 있는가: 주었으면 그 폴더가 읽기 전용으로, 주지 않았으면 그 자리에 아무것도 없어야 한다 */

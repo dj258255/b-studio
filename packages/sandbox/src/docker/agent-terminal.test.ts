@@ -567,6 +567,30 @@ describe('컨테이너를 띄운 뒤의 확인 (관문 설정)', { timeout: 30_0
     expect((await docker.calls()).filter((call) => call.startsWith('run '))).toHaveLength(1);
   });
 
+  it('평가 자산 폴더만 읽기 전용으로 붙여 띄운다. 파일 자산은 붙이지 않고, 폴더 마스크가 실제 마운트에 없으면 지우고 던진다', async () => {
+    const docker = await fakeDocker();
+    const root = await realpath(docker.root);
+    await mkdir(path.join(root, 'tests', 'acceptance'), { recursive: true });
+    await writeFile(path.join(root, 'expected.json'), '{}\n');
+    const source = path.join(root, 'tests', 'acceptance');
+    const assets = ['tests/acceptance', 'expected.json'];
+    await writeFile(path.join(docker.dir, 'after-run.json'), docker.mounts([{ Type: 'bind', Source: source, Destination: '/workspace/tests/acceptance', RW: false }]));
+
+    expect(await ensureAgentContainer('sb', docker.root, { projectId: 'p', evaluationAssets: assets, dockerBin: docker.bin })).toBe('sb-agent');
+    const run = (await docker.calls()).find((call) => call.startsWith('run '))!;
+    expect(run).toContain(`type=bind,source=${source},target=/workspace/tests/acceptance,readonly`);
+    // 파일 자산은 마운트하지 않는다: bind 마운트가 inode를 붙잡아 호스트의 새 판을 보지 못한다
+    expect(run).not.toContain(path.join(root, 'expected.json'));
+
+    // 마스크 없이 떠 있으면(결과가 선언과 다르면) 지운다
+    const missing = await fakeDocker();
+    const missingRoot = await realpath(missing.root);
+    await mkdir(path.join(missingRoot, 'tests', 'acceptance'), { recursive: true });
+    await writeFile(path.join(missing.dir, 'after-run.json'), missing.mounts([]));
+    await expect(ensureAgentContainer('sb', missing.root, { projectId: 'p', evaluationAssets: ['tests/acceptance'], dockerBin: missing.bin })).rejects.toThrow('보호와 관문 설정을 확인하지 못해');
+    expect((await missing.calls()).at(-1)).toBe('rm --force sb-agent');
+  });
+
   it('띄웠는데 관문 폴더가 없거나, 쓸 수 있게 붙었거나, 다른 폴더가 붙었으면 지우고 던진다', async () => {
     for (const extra of [[], [{ Type: 'bind', Source: gatewayDir, Destination: '/etc/claude-code', RW: true }], [{ Type: 'bind', Source: '/Users/me/.cache/b-studio/agent-gateway/ffffffffffffffff', Destination: '/etc/claude-code', RW: false }]]) {
       const docker = await fakeDocker();

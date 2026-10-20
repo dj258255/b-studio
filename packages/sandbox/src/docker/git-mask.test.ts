@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildOverride } from './format';
-import { boundDevice, collectHostMounts, computeGitMask, detectGitEntries, findMissingMasks, planGitMask, type GitEntry } from './git-mask';
+import { boundDevice, collectHostMounts, computeGitMask, detectGitEntries, findMissingMasks, planEvaluationAssetMask, planGitMask, type GitEntry } from './git-mask';
 
 const ROOT = '/work/shop';
 const ro = (source: string, target: string) => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
@@ -92,6 +92,34 @@ describe('planGitMask 마운트 꼴별 계획', () => {
   });
 });
 
+describe('planEvaluationAssetMask 마운트 꼴별 계획', () => {
+  const assets = [{ relative: 'tests/acceptance' }];
+
+  it('프로젝트 루트를 마운트하면 자산 폴더가 컨테이너의 같은 자리에 읽기 전용으로 붙는다', () => {
+    const plan = planEvaluationAssetMask([{ service: 'api', source: ROOT, target: '/app' }], ROOT, assets);
+    expect(plan).toEqual({
+      api: [ro(`${ROOT}/tests/acceptance`, '/app/tests/acceptance')],
+    });
+  });
+
+  it('자산을 품은 하위 폴더만 마운트하면 그 마운트 자리 기준으로 붙는다', () => {
+    expect(planEvaluationAssetMask([{ service: 'api', source: `${ROOT}/tests`, target: '/t' }], ROOT, assets)).toEqual({
+      api: [ro(`${ROOT}/tests/acceptance`, '/t/acceptance')],
+    });
+  });
+
+  it('자산 폴더 자체를 마운트하면 같은 자리를 읽기 전용으로 바꿔 쓴다', () => {
+    expect(planEvaluationAssetMask([{ service: 'api', source: `${ROOT}/tests/acceptance`, target: '/x' }], ROOT, assets)).toEqual({
+      api: [ro(`${ROOT}/tests/acceptance`, '/x')],
+    });
+  });
+
+  it('자산과 무관한 마운트는 건드리지 않고, 선언이 없으면 빈 맵이다', () => {
+    expect(planEvaluationAssetMask([{ service: 'db', source: '/var/data', target: '/data' }], ROOT, assets)).toEqual({});
+    expect(planEvaluationAssetMask([{ service: 'api', source: ROOT, target: '/app' }], ROOT, [])).toEqual({});
+  });
+});
+
 describe('buildOverride의 .git 마스크', () => {
   const project = { managed: [['api', { template: 'node', path: '.', port: 3000 }]], composeServices: ['api', 'db'], external: [] } as unknown as LoadedProject;
 
@@ -105,6 +133,12 @@ describe('buildOverride의 .git 마스크', () => {
   it('마스크가 없으면 예전과 똑같다', () => {
     const override = buildOverride(project, 'studio-shop-abc123');
     expect(override.services.api).not.toHaveProperty('volumes');
+  });
+
+  it('평가 자산 마스크도 서비스의 volumes에 적는다', () => {
+    const gitMask = planEvaluationAssetMask([{ service: 'api', source: ROOT, target: '/workspace' }], ROOT, [{ relative: 'tests/acceptance' }]);
+    const override = buildOverride(project, 'studio-shop-abc123', { gitMask });
+    expect(override.services.api?.volumes).toEqual([ro(`${ROOT}/tests/acceptance`, '/workspace/tests/acceptance')]);
   });
 });
 
@@ -161,6 +195,26 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
       },
     });
     expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
+  });
+
+  it('선언한 평가 자산 폴더만 git 마스크와 한 맵으로 합친다. 파일 자산·없는 자산·링크는 뺀다', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    await mkdir(path.join(root, 'tests', 'acceptance'), { recursive: true });
+    await writeFile(path.join(root, 'expected.json'), '{}\n');
+    await symlink(path.join(root, 'tests'), path.join(root, 'linked'));
+
+    const mask = await computeGitMask(
+      root,
+      { services: { api: { volumes: [{ type: 'bind', source: root, target: '/app' }] } } },
+      { evaluationAssets: ['tests/acceptance', 'expected.json', 'missing.json', 'linked'] },
+    );
+
+    // 파일 자산(expected.json)은 마운트하지 않는다: bind 마운트가 inode를 붙잡아 호스트의 새 판을 보지 못한다
+    expect(mask).toEqual({
+      api: [ro(path.join(root, '.git'), '/app/.git'), empty(root, '/app/.git/b-studio'), ro(path.join(root, 'tests', 'acceptance'), '/app/tests/acceptance')],
+    });
   });
 
   it('서비스 여럿이 함께 재시작돼 동시에 불려도 실패하지 않고, 빈 폴더는 비어 있다(도그푸딩 마찰 187)', async () => {
@@ -327,5 +381,20 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
   it('프로젝트와 무관한 마운트만 있으면 확인할 것이 없다', async () => {
     const root = await project();
     expect(await findMissingMasks(root, [{ Type: 'volume', Name: 'db', Destination: '/data', RW: true }], {})).toEqual([]);
+  });
+
+  it('평가 자산 자리의 실제 마운트가 없거나 쓰기 가능하면 그 자리를 돌려준다', async () => {
+    const root = await project();
+    await mkdir(path.join(root, 'tests', 'acceptance'), { recursive: true });
+    const asset = path.join(root, 'tests', 'acceptance');
+    const base = [
+      { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+    ];
+    const declared = { evaluationAssets: ['tests/acceptance'] };
+    expect(await findMissingMasks(root, base, {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: asset, Destination: '/workspace/tests/acceptance', RW: true }], {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: asset, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
   });
 });

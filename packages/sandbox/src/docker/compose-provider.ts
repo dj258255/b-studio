@@ -970,7 +970,7 @@ class LocalDockerSandbox implements Sandbox {
       const name = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] ?? container.Name ?? container.Id;
       // compose 파일로 권한·네임스페이스·네트워크·포트·호스트 경로를 바꾼 컨테이너(이슈 #701). 마운트처럼 실제 설정을 본다
       const escalated = findPolicyViolations(container, { projectName: this.id, sandboxNetwork: SANDBOX_NETWORK, egressNetwork: EGRESS_NETWORK, edgeService: EDGE_SERVICE });
-      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions);
+      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions, { evaluationAssets: this.project.spec.workflow?.evaluationAssets });
       if (escalated.length === 0 && missing.length === 0) continue;
       remove.push(container.Id);
       if (escalated.length > 0) violations.push(`${name}: ${escalated.join(', ')}`);
