@@ -482,7 +482,7 @@ export class DockerDeployer {
     const result = await this.#docker(args, { signal, onLine, input });
     if (result.exitCode !== 0 && !(ignore && ignore.test(result.stderr))) {
       signal?.throwIfAborted();
-      throw new DeployError(`docker ${args.slice(0, 2).join(' ')} 실패`, this.#redactor.redact(result.stderr.slice(-4_000)));
+      throw new DeployError(`docker ${args.slice(0, 2).join(' ')} 실패`, dockerFailureDetail(result.stderr, (text) => this.#redactor.redact(text)));
     }
     return result;
   }
@@ -514,6 +514,14 @@ export class DockerDeployer {
       child.stdin.end(input);
     });
   }
+}
+
+/**
+ * 실패한 docker 명령의 오류 출력 뒤쪽 4,000자. 자르기 전에 가린다.
+ * 자른 뒤에 가리면 경계에 걸친 시크릿의 뒷부분이 가림에 맞지 않고 남는다(#751)
+ */
+export function dockerFailureDetail(stderr: string, redact: (text: string) => string): string {
+  return redact(stderr).slice(-4_000);
 }
 
 function freePort(): Promise<number> {

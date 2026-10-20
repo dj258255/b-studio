@@ -94,4 +94,23 @@ describe('workspaceChoiceFor', () => {
     expect(workspaceChoiceFor({ projectId: 'orders', workspace: 'copy' })).toEqual({ kind: 'start', projectId: 'orders' });
     expect(workspaceChoiceFor({ workspace: 'copy' })).toEqual({ kind: 'start' });
   });
+
+  const projects = [
+    { id: 'orders', name: '주문' },
+    { id: 'pipeline-lint', name: '파이프라인' },
+  ];
+
+  it('고를 세션이 없고 프로젝트가 둘 이상이면 이름순 첫 프로젝트를 켜지 않고 고르게 한다(pick)', () => {
+    expect(workspaceChoiceFor({ projectId: 'orders', workspace: 'copy' }, { projects })).toEqual({ kind: 'pick', projects });
+  });
+
+  it('프로젝트가 하나뿐이거나 주소로 정해 왔으면 지금처럼 바로 만든다(start)', () => {
+    expect(workspaceChoiceFor({ projectId: 'orders', workspace: 'copy' }, { projects: projects.slice(0, 1) })).toEqual({ kind: 'start', projectId: 'orders' });
+    expect(workspaceChoiceFor({ projectId: 'pipeline-lint', workspace: 'copy' }, { projects, requested: true })).toEqual({ kind: 'start', projectId: 'pipeline-lint' });
+  });
+
+  it('세션이 있으면 프로젝트 수와 상관없이 그 세션을 고른다', () => {
+    expect(workspaceChoiceFor({ session: summary({ id: 's1', status: 'ready' }), projectId: 'orders', workspace: 'copy' }, { projects }).kind).toBe('live');
+    expect(workspaceChoiceFor({ session: summary({ id: 's2', status: 'stopped' }), projectId: 'orders', workspace: 'copy' }, { projects }).kind).toBe('resumable');
+  });
 });
