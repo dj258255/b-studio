@@ -1,6 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
@@ -18,6 +17,7 @@ import {
   planLimitsFromEnv,
   PlanBackendSchema,
   externalBoardAccess,
+  readProjectFileSync,
   requestLaneContracts,
   requestTaskPlan,
   runTaskGraph,
@@ -1006,6 +1006,8 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     if (finished) {
       lane.workDir = finished.workDir;
       lane.changedFiles = [...new Set(finished.checkpoints.slice(0, -1).flatMap((checkpoint) => checkpoint.files))].sort();
+      // 통합이 작업 폴더의 지금 파일이 아니라 이 커밋에 든 파일을 꺼내 쓴다(이슈 #744). 체크포인트는 최신부터라 [0]이 마지막이다
+      lane.checkpointSha = finished.checkpoints[0]?.sha;
     }
     persist(plan);
   } catch (error) {
@@ -1031,18 +1033,20 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     for (const lane of plan.lanes) {
       // 재시작 뒤에는 레인 세션이 없어도 남겨 둔 기록으로 통합한다. 기록이 없으면 합칠 근거가 없으므로 멈춘다
       if (!lane.workDir || !lane.changedFiles) throw new Error(`${lane.id} 의 결과 기록이 없어 통합할 수 없습니다`);
-      const workDir = lane.workDir;
       const changed = lane.changedFiles;
       const outside = changed.filter((file) => !isInScope(file, lane.paths));
       // 명령으로 만든 파일처럼 도구 게이트를 거치지 않은 변경도 체크포인트에는 들어온다. 범위 밖이면 합치지 않는다
       if (outside.length > 0) throw new Error(`${lane.id}가 쓰기 범위 밖 파일을 바꿨습니다: ${outside.join(', ')}`);
       for (const file of changed) {
-        const content = await readFile(path.join(workDir, file)).catch(() => undefined);
-        // 작업 폴더에 없는 파일은 레인이 지운 것이다. 지운 것도 통합이 함께 지운다
-        if (!content) {
+        const read = await readLaneFile(lane, file);
+        // 체크포인트/작업 폴더에 없는 파일은 레인이 지운 것이다. 지운 것도 통합이 함께 지운다
+        if (read.kind === 'deleted') {
           deletes.push(file);
           continue;
         }
+        // 커밋된 파일이 링크·서브모듈·폴더면 그 내용을 통합에 실을 수 없다. 조용히 넘기지 않고 멈춘다
+        if (read.kind === 'unsupported') throw new Error(`${lane.id}의 ${file}은 링크·서브모듈이라 통합하지 않습니다`);
+        const content = read.content;
         if (content.byteLength > MAX_INTEGRATION_FILE_BYTES || content.includes(0)) throw new Error(`${lane.id}의 ${file}은 텍스트 파일로 다시 적용할 수 없습니다`);
         writes.push({ path: file, content: content.toString('utf8') });
       }
@@ -1127,6 +1131,32 @@ async function integrate(plan: TaskPlanView): Promise<void> {
 
 async function stopLaneSessions(plan: TaskPlanView): Promise<void> {
   await Promise.all(plan.lanes.map((lane) => (lane.sessionId ? stopSession(lane.sessionId).catch(() => {}) : undefined)));
+}
+
+/** 통합이 레인이 바꾼 파일 하나를 어떻게 읽었는지: 내용 / 레인이 지운 것 / 링크·특수 파일이라 실을 수 없는 것 */
+type LaneFileRead = { kind: 'content'; content: Buffer } | { kind: 'deleted' } | { kind: 'unsupported' };
+
+/**
+ * 통합이 레인이 바꾼 파일 하나를 읽는다. 레인의 마지막 체크포인트(lane.checkpointSha)가 있으면 그 커밋에 든 파일을
+ * git에서 꺼낸다 — 작업 폴더의 지금 파일이 아니라 커밋된 값이라, 레인이 끝난 뒤에도 그 칸의 터미널이 살아 있어
+ * 파일을 프로젝트 밖 비밀 파일을 가리키는 링크로 바꿔도 그 내용을 읽어 통합 체크포인트에 싣지 않는다(이슈 #744).
+ * 옛 계획(checkpointSha 없음)은 작업 폴더에서 링크를 따라가지 않고 읽는다(readProjectFileSync — 마지막 요소뿐 아니라
+ * 상위 폴더가 링크여도 거절한다. `src` 폴더를 바깥 링크로 바꾸면 O_NOFOLLOW만으로는 그 너머를 읽었다). 어느 쪽이든
+ * 그 시점에 파일이 없으면 지운 것으로 본다
+ */
+async function readLaneFile(lane: TaskPlanLaneView, file: string): Promise<LaneFileRead> {
+  const workDir = lane.workDir!;
+  if (lane.checkpointSha) {
+    const blob = await new CheckpointStore(workDir).blobAt(file, lane.checkpointSha);
+    if (blob.kind === 'missing') return { kind: 'deleted' };
+    if (blob.kind === 'unsupported') return { kind: 'unsupported' };
+    return { kind: 'content', content: blob.content };
+  }
+  // 상한 없는 읽기 — 크기 초과는 아래 통합 쪽의 크기 검사가 "링크·서브모듈"이 아니라 제 문구로 알리게 한다
+  const read = readProjectFileSync(workDir, file, Number.POSITIVE_INFINITY);
+  if (read.kind === 'missing') return { kind: 'deleted' };
+  if (read.kind === 'irregular') return { kind: 'unsupported' };
+  return { kind: 'content', content: Buffer.from(read.content, 'utf8') };
 }
 
 /**
