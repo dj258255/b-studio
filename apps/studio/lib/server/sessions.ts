@@ -2449,9 +2449,32 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       // 지연 기동 세션이 샌드박스를 켜지 않았다면 바뀐 것이 없다(바뀌었으면 도구/게이트가 켰다).
       // 체크포인트도 되돌리기도 샌드박스가 필요하므로, 켠 세션에서만 한다
       if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && questionRunPassedGate(result)))) {
-        // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
-        // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
-        await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true);
+        // 커밋될 내용이 방금 검증한 내용과 같아야 한다. 러너가 실어 준 지문과 스테이징될 내용을 견준다.
+        // 지문이 없으면 빈 지문으로 본다 — 지문을 싣지 않는 러너(또는 앞으로 새 러너)가 검증하지 않은 내용을
+        // 체크포인트로 남기지 않게 닫힌 쪽으로 판정한다. 스테이징될 변경이 있으면 불일치로 되돌린다.
+        // git이 추적하지 않는 생성 파일(studio.yaml 등)은 인덱스에 없으므로 견줄 대상에서 뺀다
+        const generated = new Set(await session.checkpoints.pendingExcludedFiles());
+        const expectStaged = new Map(Object.entries(result.verifiedFingerprints ?? {}).filter(([file]) => !generated.has(file)));
+        try {
+          // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
+          // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
+          await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true, expectStaged);
+        } catch (error) {
+          if (!(error instanceof StagedMismatchError)) throw error;
+          // 게이트가 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 검증하지 않은 내용을 체크포인트로 남기지 않고 되돌린다
+          const reverted = await revertRun(session, run.id).catch((cause: unknown) => {
+            console.error('[b-studio] 검증 뒤 바뀐 변경을 되돌리지 못했습니다', cause);
+            return undefined;
+          });
+          const shown = error.files.slice(0, 20).join(', ');
+          const rest = error.files.length > 20 ? ` 외 ${error.files.length - 20}개` : '';
+          const summary = reverted
+            ? `검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않고 되돌렸습니다: ${shown}${rest}`
+            : `검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않았지만 되돌리지 못했습니다: ${shown}${rest}`;
+          emit(session, { type: 'notice', text: summary, at: new Date().toISOString() });
+          finished = { status: 'error', summary };
+          return;
+        }
         if (result.checks) session.lastGateChecks = result.checks;
         // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
         // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
@@ -2659,6 +2682,12 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     project: session.project,
     sandbox: session.sandbox,
     externalChanges,
+    // b-studio 도구를 거치지 않고 바뀐 파일(CLI 내장 도구·서비스 안 명령)도 게이트가 검증하게 한다.
+    // 러너는 게이트를 통과하면 검증한 내용의 지문을 결과에 실어, 체크포인트를 남기기 전에 스테이징될 내용과 견주게 한다
+    outsideChanges: {
+      pendingFiles: () => changesOutsideTools(session),
+      fingerprint: (files: readonly string[]) => session.checkpoints.stagedFingerprints(files),
+    },
     requirementsBaseline,
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
