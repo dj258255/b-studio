@@ -35,6 +35,11 @@ export function injectLocationScript(html: string): string {
 
 const DECOMPRESSIBLE = new Set(['gzip', 'deflate', 'br', 'identity']);
 
+/** 모아서 풀어 볼 원문 응답의 최대 크기. 이보다 큰 HTML은 스크립트를 심지 않고 그대로 흘려보낸다 */
+export const MAX_INJECT_RAW_BYTES = 5 * 1024 * 1024;
+/** 압축을 풀었을 때의 최대 크기. 넘으면(압축 폭탄) 원문 그대로 돌려준다 */
+export const MAX_INJECT_DECODED_BYTES = 10 * 1024 * 1024;
+
 /**
  * 이 응답에 스크립트를 넣어도 되는지. HTML이 아니거나(JSON·이미지·정적 자원), 몸이 없거나(304),
  * 모르는 인코딩이면 건드리지 않는다. content-security-policy 헤더가 있으면 인라인 스크립트를 막을 수 있어
@@ -50,12 +55,16 @@ export function shouldInject(statusCode: number | undefined, headers: IncomingHt
   return true;
 }
 
-function decompress(encoding: string | string[] | undefined, body: Buffer): Promise<Buffer> {
+function decompress(encoding: string | string[] | undefined, body: Buffer, maxOutputLength: number): Promise<Buffer> {
   const value = (Array.isArray(encoding) ? encoding[0] : encoding)?.toLowerCase();
   if (!value || value === 'identity') return Promise.resolve(body);
-  const fn = value === 'br' ? zlib.brotliDecompress : value === 'gzip' ? zlib.gunzip : value === 'deflate' ? zlib.inflate : undefined;
-  if (!fn) return Promise.resolve(body);
-  return new Promise((resolve, reject) => fn(body, (error, result) => (error ? reject(error) : resolve(result))));
+  return new Promise((resolve, reject) => {
+    const callback = (error: Error | null, result: Buffer) => (error ? reject(error) : resolve(result));
+    if (value === 'br') zlib.brotliDecompress(body, { maxOutputLength }, callback);
+    else if (value === 'gzip') zlib.gunzip(body, { maxOutputLength }, callback);
+    else if (value === 'deflate') zlib.inflate(body, { maxOutputLength }, callback);
+    else resolve(body);
+  });
 }
 
 /**
@@ -63,24 +72,36 @@ function decompress(encoding: string | string[] | undefined, body: Buffer): Prom
  * 지운다(한 번에 .end()하면 Node가 다시 계산해 붙인다). content-encoding도 지운다 — 다시 압축하지 않고 그대로 보낸다.
  * 풀지 못하면(알 수 없는 인코딩이 실려 왔거나 손상됐으면) 스크립트 없이 원문 그대로 돌려준다 — 끊어진 페이지보다 낫다
  */
-export function pipeMaybeInjected(upstream: IncomingMessage, response: ServerResponse, headers: OutgoingHttpHeaders): void {
+export function pipeMaybeInjected(
+  upstream: IncomingMessage,
+  response: ServerResponse,
+  headers: OutgoingHttpHeaders,
+  limits: { rawBytes?: number; decodedBytes?: number } = {},
+): void {
+  const rawLimit = limits.rawBytes ?? MAX_INJECT_RAW_BYTES;
+  const decodedLimit = limits.decodedBytes ?? MAX_INJECT_DECODED_BYTES;
   if (!shouldInject(upstream.statusCode, upstream.headers)) {
     response.writeHead(upstream.statusCode ?? 502, headers);
     upstream.pipe(response);
     return;
   }
+  // 선언된 길이가 상한을 넘으면 몸을 모으지 않고 그대로 흘려보낸다(스크립트 없음)
+  const declared = upstream.headers['content-length'];
+  const declaredBytes = typeof declared === 'string' ? Number(declared) : NaN;
+  if (Number.isFinite(declaredBytes) && declaredBytes > rawLimit) {
+    response.writeHead(upstream.statusCode ?? 502, headers);
+    upstream.pipe(response);
+    return;
+  }
   const chunks: Buffer[] = [];
-  upstream.on('data', (chunk: Buffer) => chunks.push(chunk));
-  upstream.on('error', () => {
-    if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-    response.end();
-  });
-  upstream.on('end', () => {
+  let received = 0;
+  const onEnd = () => {
     void (async () => {
       const raw = Buffer.concat(chunks);
       delete headers['content-length'];
       try {
-        const decompressed = await decompress(upstream.headers['content-encoding'], raw);
+        // identity/인코딩 없음이면 원문 길이가 곧 푼 크기이고, 원문 상한이 푼 상한보다 작아 따로 볼 필요가 없다
+        const decompressed = await decompress(upstream.headers['content-encoding'], raw, decodedLimit);
         delete headers['content-encoding'];
         response.writeHead(upstream.statusCode ?? 502, headers);
         response.end(injectLocationScript(decompressed.toString('utf8')), 'utf8');
@@ -89,5 +110,22 @@ export function pipeMaybeInjected(upstream: IncomingMessage, response: ServerRes
         response.end(raw);
       }
     })();
+  };
+  const onData = (chunk: Buffer) => {
+    chunks.push(chunk);
+    received += chunk.length;
+    if (received <= rawLimit) return;
+    // 모으는 중 상한을 넘었다: 원래 헤더 그대로 쓴 뒤 모은 것과 남은 것을 이어서 흘려보낸다(주입하지 않는다)
+    upstream.off('data', onData);
+    upstream.off('end', onEnd);
+    response.writeHead(upstream.statusCode ?? 502, headers);
+    for (const buffered of chunks) response.write(buffered);
+    upstream.pipe(response);
+  };
+  upstream.on('data', onData);
+  upstream.on('error', () => {
+    if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end();
   });
+  upstream.on('end', onEnd);
 }

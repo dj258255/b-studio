@@ -23,6 +23,9 @@ const MAX_READ_BYTES = 256 * 1024;
 /** readRegularFileSync의 결과: 없음, 읽은 글, 또는 읽지 않은 이유(일반 파일이 아님·너무 큼·읽기 실패) */
 export type RegularFileRead = { kind: 'missing' } | { kind: 'text'; content: string } | { kind: 'irregular'; reason: string };
 
+/** readRegularFileBytesSync의 결과: 없음, 읽은 바이트(complete가 false면 확인한 크기만큼 다 읽지 못함), 또는 읽지 않은 이유(일반 파일이 아님·너무 큼·읽기 실패) */
+export type RegularFileBytesRead = { kind: 'missing' } | { kind: 'bytes'; content: Buffer; complete: boolean } | { kind: 'irregular'; reason: string };
+
 /**
  * 일반 파일이고 상한 이하일 때만 동기적으로 읽는다. 서버의 이벤트 루프를 막는 읽기라 조건을 좁힌다:
  * - 마지막 경로 요소가 심볼릭 링크면 따라가지 않는다(O_NOFOLLOW). 링크로 바꿔치기한 문서를 읽지 않는다
@@ -62,6 +65,18 @@ export function readProjectFileSync(root: string, relative: string, maxBytes: nu
 }
 
 export function readRegularFileSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
+  const read = readRegularFileBytesSync(absolute, maxBytes);
+  return read.kind === 'bytes' ? { kind: 'text', content: read.content.toString('utf8') } : read;
+}
+
+/**
+ * readRegularFileSync와 같은 열기 규칙(O_NOFOLLOW·일반 파일·상한)으로 원본 바이트를 읽는다.
+ * 글자로 바꾸면 서로 다른 바이트가 같은 글자가 되므로(예: 0xff와 0xfe가 모두 U+FFFD '�'), 바이트가 그대로 필요한
+ * 지문 비교에 쓴다. 읽는 도중 파일이 줄거나 늘어남(확인한 stat 크기만큼 다 읽지 못했거나, 뒤에 내용이 덧붙어 두 번째 stat이 달라짐)
+ * 이면 complete를 false로 알린다 — 어중간하게 읽은 바이트를 지문으로 삼지 않게 하는 것은 부르는 쪽의 몫이다
+ * (읽기 자체는 readRegularFileSync와 같이 동작한다)
+ */
+export function readRegularFileBytesSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileBytesRead {
   let fd: number;
   try {
     fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -81,7 +96,11 @@ export function readRegularFileSync(absolute: string, maxBytes: number = MAX_REA
       if (read === 0) break;
       offset += read;
     }
-    return { kind: 'text', content: buffer.subarray(0, offset).toString('utf8') };
+    // 읽는 동안 파일 뒤에 내용이 덧붙으면 앞부분만 읽고 offset === stat.size가 된다. 같은 fd로 한 번 더 확인해,
+    // 크기·수정 시각이 그대로일 때만 완전한 읽기로 본다(그 사이에 파일이 바뀌었으면 지문으로 삼지 않는다)
+    const after = fstatSync(fd);
+    const complete = offset === stat.size && after.size === stat.size && after.mtimeMs === stat.mtimeMs;
+    return { kind: 'bytes', content: buffer.subarray(0, offset), complete };
   } catch {
     return { kind: 'irregular', reason: '읽을 수 없습니다' };
   } finally {

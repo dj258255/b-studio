@@ -118,6 +118,20 @@ describe('parseSpec', () => {
 `)).toThrow(SpecError);
   });
 
+  it('평가 자산은 프로젝트 상대 경로만 받고, test를 필수로 둘 때 tests를 대신하지 못한다(ADR-175)', () => {
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  evaluationAssets: [tests/acceptance, scripts/grade.py]\n`).workflow?.evaluationAssets).toEqual([
+      'tests/acceptance',
+      'scripts/grade.py',
+    ]);
+    // 프로젝트 밖 경로(절대·상위)는 거부한다
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  evaluationAssets: [/etc/passwd]\n`)).issues.some((issue) => issue.startsWith('workflow.evaluationAssets'))).toBe(true);
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  evaluationAssets: [../secret]\n`)).issues.some((issue) => issue.startsWith('workflow.evaluationAssets'))).toBe(true);
+    // 평가 자산은 테스트를 돌리는 수단이 아니다: required에 test가 있으면 tests가 최소 하나 필요하다
+    expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [plan, test, checkpoint]\n  evaluationAssets: [tests/acceptance]\n`)).issues).toEqual([
+      'workflow.tests: required에 test가 있으면 실행할 tests가 최소 1개 필요합니다',
+    ]);
+  });
+
   it('턴 상한(workflow.maxTurns)을 읽고, 생략하면 undefined이며, 범위 밖 값은 거부한다(ADR-131)', () => {
     expect(parseSpec(`${ORDERS_SPEC}`).workflow?.maxTurns).toBeUndefined();
     expect(parseSpec(`${ORDERS_SPEC}workflow:\n  maxTurns: 30\n`).workflow?.maxTurns).toBe(30);
