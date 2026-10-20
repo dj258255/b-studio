@@ -77,6 +77,8 @@ const OUTPUT_TAIL_LINES = 30;
 const MAX_EVALUATION_ASSET_FILES = 2_000;
 /** 평가 자산이 바뀌었을 때 사유에 나열할 파일 수 상한 */
 const MAX_EVALUATION_ASSET_LIST = 20;
+/** 검사하는 동안 바뀐 도구 밖 파일을 사유에 나열할 수 상한 */
+const MAX_OUTSIDE_CHANGE_LIST = 20;
 
 /**
  * Next.js가 오류 화면을 대신 그릴 때 나오는 문구. 상태 코드가 200이어도 본문이 오류 화면이면 실패로 본다.
@@ -359,6 +361,27 @@ export class VerificationGate {
   }
 
   /**
+   * 선언한 검사(테스트)를 돌리는 동안 도구 밖에서 파일이 바뀌었는지 다시 동기화한다(TOCTOU). 검사 전에만 동기화하면
+   * 검사가 바뀐 내용으로 판정해 놓고 지문은 그 전 것을 내게 되어, 검증하지 않은 내용이 체크포인트로 갈 수 있다.
+   * 바뀐 파일(또는 게이트가 다룰 수 없는 경로)이 있으면 outside-tool-changes 실패를 더한다. 검사 전에 이미 같은 실패가
+   * 있으면 그대로 둔다.
+   * 남은 한계: 검사가 도는 동안 바꿨다가 끝나기 전에 되돌리면 앞뒤 지문이 같아 잡지 못한다(#765).
+   */
+  async #recheckOutsideChanges(recordChecks: WorkflowCheck[]): Promise<void> {
+    const elapsed = await this.#outsideTracker?.sync();
+    if (!elapsed || (elapsed.changed.length === 0 && elapsed.rejected.length === 0)) return;
+    if (recordChecks.some((check) => check.name === 'outside-tool-changes' && !check.ok)) return;
+    const files = [...new Set([...elapsed.changed, ...elapsed.rejected])].sort();
+    const shown = files.slice(0, MAX_OUTSIDE_CHANGE_LIST);
+    const rest = files.length - shown.length;
+    const detail =
+      elapsed.changed.length > 0
+        ? `검사하는 동안 파일이 바뀌었습니다: ${rest > 0 ? `${shown.join(', ')} 외 ${rest}개` : shown.join(', ')}. 테스트나 백그라운드 명령이 추적되는 파일을 고쳐 쓰지 않게 하세요(생성물이면 .gitignore에 넣으세요).`
+        : rejectedChangeFeedback(elapsed.rejected);
+    recordChecks.push({ stage: 'review', name: 'outside-tool-changes', ok: false, attempts: 1, detail });
+  }
+
+  /**
    * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
    * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
    * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
@@ -465,6 +488,9 @@ export class VerificationGate {
         signal?.throwIfAborted();
         // 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었을 수 있다. 검사 뒤에 지문을 다시 떠 견주고, 다르면 같은 실패로 바꾼다(TOCTOU)
         await this.#recheckEvaluationAssets(recordChecks);
+        // 도구 밖 변경도 같은 이유로 검사 뒤에 한 번 더 동기화한다. 검사 전에만 동기화하면 판정은 바뀐 내용으로 났는데 지문은
+        // 바뀌기 전 것이라, 검증하지 않은 내용이 체크포인트로 갈 수 있다. 바뀌었으면 실패로 남긴다
+        await this.#recheckOutsideChanges(recordChecks);
         // 부하 확인을 재지 못한 것이 b-studio 쪽 문제면 여기서 멈춘다. 서비스 재시작의 플랫폼 실패와 같은 규칙이다(트러블슈팅 117)
         if (this.#loadPlatformFailure) {
           this.checks = [...checks, ...recordChecks];

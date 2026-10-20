@@ -44,7 +44,7 @@ async function setup(
   target: LoadedProject,
   options: {
     restarts?: boolean[];
-    exec?: (command: string[]) => ExecResult;
+    exec?: (command: string[]) => ExecResult | Promise<ExecResult>;
     page?: PageFetcher;
     browser?: BrowserRunner;
     verify?: 'full' | 'light';
@@ -202,6 +202,36 @@ describe('도구를 거치지 않고 바뀐 파일(outsideChanges)', () => {
     expect(outcome.kind).toBe('retry');
     expect(gate.checks).toEqual(
       expect.arrayContaining([expect.objectContaining({ stage: 'review', name: 'outside-tool-changes', ok: false })]),
+    );
+  });
+
+  it('선언한 테스트가 도는 동안 작업 폴더의 파일을 고치면 outside-tool-changes로 실패한다', async () => {
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }] });
+    let pending: string[] = [];
+    const { gate } = await setup(target, {
+      outsideChanges: { pendingFiles: async () => pending },
+      exec: async () => {
+        // 테스트가 추적되는 파일을 고쳐 쓴다. 게이트는 검사를 마친 뒤에 이 변경을 본다
+        await writeFile(path.join(target.root, 'api/src/Generated.java'), 'class Generated {}\n');
+        pending = ['api/src/Payment.java', 'api/src/Generated.java'];
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    await writeFile(path.join(target.root, 'api/src/Payment.java'), 'class Payment {}\n');
+    pending = ['api/src/Payment.java'];
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'review',
+          name: 'outside-tool-changes',
+          ok: false,
+          detail: expect.stringContaining('api/src/Generated.java'),
+        }),
+      ]),
     );
   });
 

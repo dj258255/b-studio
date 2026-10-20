@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -14,16 +15,8 @@ const execFileAsync = promisify(execFile);
  * 진짜로 하는 것: 파일 시스템의 git 저장소·체크포인트·검증 게이트.
  * 가짜로 바꾸는 것: 샌드박스(Docker)와 모델(ScriptedModelClient, HTTP로는 받지 않는 서버 내부 경로).
  */
-interface ExecResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
 const fake = vi.hoisted(() => ({
   root: '',
-  /** workflow.tests가 부르는 exec. 테스트가 검증 도중 파일을 바꾸는 상황을 흉내 낸다 */
-  exec: undefined as undefined | ((command: string[]) => Promise<ExecResult>),
   /** claude-code 러너가 대신 돌려줄 결과. 지문을 싣지 않는 러너를 흉내 낼 때 쓴다 */
   runner: undefined as undefined | ((root: string) => Promise<Record<string, unknown>>),
 }));
@@ -52,8 +45,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
       return [];
     },
     async *logs() {},
-    async exec(_service: string, command: string[]) {
-      return fake.exec ? fake.exec(command) : { exitCode: 0, stdout: '', stderr: '' };
+    async exec() {
+      return { exitCode: 0, stdout: '', stderr: '' };
     },
     async execToFile() {
       return { exitCode: 0, stdout: '', stderr: '' };
@@ -130,7 +123,6 @@ ${workflow}review:
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'b-studio-outside-session-'));
-  fake.exec = undefined;
   fake.runner = undefined;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
@@ -221,18 +213,19 @@ describe('러너 실행의 체크포인트는 게이트가 검증한 내용과 �
   }, 20_000);
 
   it('검증한 뒤에 파일이 바뀌면 체크포인트를 남기지 않고 되돌린다', async () => {
-    await setupProject(true);
+    await setupProject(false);
     const id = (await createSession('outsideproj', 'kim', 'copy')).id;
     expect(await waitForReady(id)).toBe('ready');
     const workDir = getSnapshot(id)!.workDir;
-    // 게이트가 테스트를 도는 동안 파일 내용이 바뀐다. 지문을 뜬 뒤라 게이트는 옛 내용을 검증했다
-    fake.exec = async () => {
-      await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; String note; }\n');
-      return { exitCode: 0, stdout: '', stderr: '' };
-    };
-
     const events: StudioEvent[] = [];
-    const unsubscribe = subscribe(id, (event) => events.push(event));
+    // 게이트가 통과한 뒤(agent done), 커밋하기 전에 백그라운드 프로세스가 추적되는 파일을 고치는 상황을 흉내 낸다.
+    // 검사하는 동안 바뀐 파일은 게이트가 두 번째 sync로 먼저 잡으므로(#758), 세션의 마지막 견줌은 그 뒤에 바뀐 것을 본다
+    const unsubscribe = subscribe(id, (event) => {
+      events.push(event);
+      if (event.type === 'agent' && event.event.type === 'done') {
+        writeFileSync(path.join(workDir, 'api/src/Order.java'), 'class Order { String memo; String note; }\n');
+      }
+    });
 
     sendMessage(id, '메모 필드 추가', { allowBreaking: false, scriptedTurns: [...EDITS] });
     const finished = await waitFor(() => runFinished(events));
