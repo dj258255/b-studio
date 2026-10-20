@@ -4873,7 +4873,7 @@ export async function readCodeFile(id: string, file: string): Promise<CodeFile> 
   const change = (await session.checkpoints.pendingChanges()).find((candidate) => candidate.file === file)?.change;
   if (change === 'deleted') {
     if (isDeniedPath(file)) throw new StudioError(400, `${file}: 생성물이나 비밀 파일 경로는 볼 수 없습니다`);
-    return { path: file, change, patch: session.sandbox.redact(await session.checkpoints.pendingPatch(file)) };
+    return { path: file, change, patch: await session.checkpoints.pendingPatch(file, (text) => session.sandbox.redact(text)) };
   }
   const content = await new Workspace(session.project.root).read(file);
   const binary = content.includes('\u0000');
@@ -4882,7 +4882,7 @@ export async function readCodeFile(id: string, file: string): Promise<CodeFile> 
     content: binary ? undefined : session.sandbox.redact(content),
     binary: binary || undefined,
     change,
-    patch: change === 'modified' ? session.sandbox.redact(await session.checkpoints.pendingPatch(file)) : undefined,
+    patch: change === 'modified' ? await session.checkpoints.pendingPatch(file, (text) => session.sandbox.redact(text)) : undefined,
   };
 }
 
@@ -4891,7 +4891,8 @@ export async function checkpointPatch(id: string, sha: string): Promise<string> 
   if (!session.snapshot.checkpoints.some((checkpoint) => checkpoint.sha === sha)) {
     throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
   }
-  return session.checkpoints.patch(sha);
+  // 코드 탭의 diff처럼 시크릿 값을 가린다(#751)
+  return session.checkpoints.patch(sha, (text) => session.sandbox.redact(text));
 }
 
 // ---------------------------------------------------------------------------
