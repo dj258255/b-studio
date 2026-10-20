@@ -8,7 +8,7 @@ import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, t
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
-import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, withDeclaredChecks } from './declared-checks';
+import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, weakenedDeclarations, withDeclaredChecks } from './declared-checks';
 import { judgeLoad, loadRequestFor } from './load-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
@@ -552,7 +552,8 @@ export class VerificationGate {
    * 이번 검증에 쓸 확인 선언을 정한다(ADR-164). 기본은 실행을 시작할 때의 선언이다 — 에이전트가 실행 도중에 확인을 지우거나
    * 느슨하게 고쳐 비켜 가지 못하게 한다(ADR-159). 사용자가 이 요청에서 선언 변경을 허용했을 때만 지금 파일의 선언을 쓰고,
    * 무엇이 바뀌었는지 리뷰 단계의 확인으로 남긴다. 허용했는데 파일을 읽지 못하면 옛 선언으로 조용히 통과시키지 않고 실패로 알린다.
-   * 허용하지 않았는데 선언이 바뀌어 있으면 그 사실만 기억해 두었다가 실패 안내에 싣는다
+   * 허용하지 않았는데 선언이 바뀌어 있으면 그 사실만 기억해 두었다가 실패 안내에 싣는다. 다만 그 변경이 선언을 약하게
+   * 바꾼 것이면(확인·보호를 지우거나 느슨하게 고침) 이번 검증은 통과시키지 않고 리뷰 단계에서 실패로 알린다(#767)
    */
   async #reviewDeclaredChecks(): Promise<WorkflowCheck[]> {
     const started = this.#options.project;
@@ -566,14 +567,30 @@ export class VerificationGate {
       return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: false, attempts: 1, detail: `${SPEC_FILE}을(를) 다시 읽지 못해 바뀐 확인 선언으로 검증하지 못했습니다${latest.error}` }];
     }
     const change = diffDeclaredChecks(started.spec.workflow, latest.workflow);
-    if (!hasDeclaredCheckChange(change)) return [];
+    const weakened = weakenedDeclarations(started.spec.workflow, latest.workflow);
+    const changed = hasDeclaredCheckChange(change);
+    if (!changed && weakened.length === 0) return [];
     const summary = this.#options.sandbox.redact(describeDeclaredCheckChange(change));
     if (!allowed) {
-      this.#unadoptedChange = summary;
+      // 확인 선언이 바뀐 사실은 지금처럼 실패 안내에 싣는다. 약하게 바꾼 것은 그 자체로 이번 검증을 통과시키지 않는다
+      if (changed) this.#unadoptedChange = summary;
+      if (weakened.length > 0) {
+        const detail = this.#options.sandbox.redact(
+          `${SPEC_FILE}의 확인·보호 선언을 약하게 바꿨습니다: ${weakened.join(' · ')}. 되돌리세요. 바꾸는 것이 사용자의 요청이면 되묻기 도구(ask_user)로 '확인 선언 변경 허용'을 켜고 답해 달라고 알리세요.`,
+        );
+        return [{ stage: 'review', name: 'weakened-declarations', ok: false, attempts: 1, detail }];
+      }
       return [];
     }
     this.#project = { ...started, spec: { ...started.spec, workflow: withDeclaredChecks(started.spec.workflow, latest.workflow) } } as LoadedProject;
-    return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: true, attempts: 1, detail: `사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — ${summary}` }];
+    // 확인 선언의 삭제·변경은 위 요약에 이미 들어 있다. 여기서는 그 밖에 약해진 실행 정책을 함께 적는다
+    const declared = new Set([...change.removed.map((name) => `삭제: ${name}`), ...change.changed.map((name) => `변경: ${name}`)]);
+    const policy = weakened.filter((item) => !declared.has(item));
+    const detail = [
+      ...(changed ? [`사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — ${summary}`] : []),
+      ...(policy.length > 0 ? [`${changed ? '약하게 바꾼 실행 정책' : '사용자가 허용해 약하게 바뀐 실행 정책을 받아들였습니다'}: ${policy.join(' · ')}`] : []),
+    ].join(' · ');
+    return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: true, attempts: 1, detail: this.#options.sandbox.redact(detail) }];
   }
 
   /**

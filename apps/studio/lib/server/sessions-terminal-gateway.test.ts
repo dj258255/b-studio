@@ -128,8 +128,8 @@ workflow:
 `;
 }
 
-/** unit 테스트의 명령만 바꾼 studio.yaml. 다시 읽기가 실제로 새 값을 집어오는지 보려고 쓴다(수정 1) */
-function studioYamlWithTestCommand(command: string): string {
+/** unit 테스트는 그대로 두고 테스트 하나를 더한 studio.yaml. 다시 읽기가 실제로 새 값을 집어오는지 보려고 쓴다(수정 1) */
+function studioYamlWithExtraTest(name: string, command: string): string {
   return `version: 1
 name: termgw
 services:
@@ -139,7 +139,25 @@ workflow:
   tests:
     - name: unit
       service: api
+      command: [./gradlew, test]
+    - name: ${name}
+      service: api
       command: [${command}]
+`;
+}
+
+/** unit 테스트를 다른 테스트 하나로 바꾼 studio.yaml. 사용자가 선언한 테스트를 지우는 경우를 볼 때 쓴다 */
+function studioYamlWithoutUnitTest(name: string): string {
+  return `version: 1
+name: termgw
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: /v3/api-docs } }
+workflow:
+  required: [plan, implement, run, contract_check, test, review, checkpoint]
+  tests:
+    - name: ${name}
+      service: api
+      command: [echo, ${name}]
 `;
 }
 
@@ -1998,25 +2016,48 @@ describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린
     // 첫 턴: 파일을 바꾸고 studio.yaml도 바꿔, 체크포인트 때 project를 다시 읽게 한다
     await session.gateway.prompt({ prompt: '메모 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
-    await write(session, 'studio.yaml', studioYamlWithTestCommand('echo, changed'));
+    await write(session, 'studio.yaml', studioYamlWithExtraTest('smoke', 'echo, added'));
     expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    // 이번 턴은 시작할 때의 선언으로 돌았다(더한 테스트는 아직 돌지 않는다)
+    expect(fake.execCalls.map((command) => command.join(' ')).sort()).toEqual(['./gradlew test', 'sh -c echo done']);
 
-    // 다시 읽은 뒤에도 완료 검사가 남아 있다: 다음 턴은 다시 읽은 unit(echo changed)과 완료 검사가 함께 돈다
+    // 다시 읽은 뒤에도 완료 검사가 남아 있다: 다음 턴은 다시 읽은 workflow(unit + smoke)와 완료 검사가 함께 돈다
     fake.execCalls = [];
     await session.gateway.prompt({ prompt: 'note도 추가' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; String note; }\n');
     expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
-    expect(fake.execCalls.map((command) => command.join(' ')).sort()).toEqual(['echo changed', 'sh -c echo done']);
+    expect(fake.execCalls.map((command) => command.join(' ')).sort()).toEqual(['./gradlew test', 'echo added', 'sh -c echo done']);
 
-    // 맥락을 지우면 다시 읽은 workflow(바뀐 unit)로 돌아간다: 완료 검사는 더 돌지 않는다
+    // 맥락을 지우면 다시 읽은 workflow(unit + smoke)로 돌아간다: 완료 검사는 더 돌지 않는다
     setTerminalTaskContext(session.id, undefined);
     fake.execCalls = [];
     await session.gateway.prompt({ prompt: '한 번 더' });
     await write(session, 'api/src/Order.java', 'class Order { String memo; String note; String extra; }\n');
     expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
-    expect(fake.execCalls).toEqual([['echo', 'changed']]);
+    expect(fake.execCalls.map((command) => command.join(' ')).sort()).toEqual(['./gradlew test', 'echo added']);
     await stopSession(session.id);
   }, 60_000);
+
+  it('카드 맥락이 걸려 있어도 사용자가 선언한 테스트를 지우면 약해진 선언으로 돌려보낸다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, {
+      writableScope: ['api/src', 'studio.yaml'],
+      doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }],
+    });
+    await session.gateway.prompt({ prompt: '메모 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await write(session, 'studio.yaml', studioYamlWithoutUnitTest('smoke'));
+
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toContain('weakened-declarations');
+    expect(answer.feedback).toContain('삭제: 테스트 unit');
+    // 카드의 완료 검사는 다시 읽은 workflow에도 덧입혀져 있으므로 삭제로 잡히지 않는다
+    expect(answer.feedback).not.toContain('done-card-1');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
 
   it('바꾼 파일이 없어도 카드에 완료 검사가 있으면 완료 명령을 돌린다 (수정 2-1)', async () => {
     const session = await open();

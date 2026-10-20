@@ -51,6 +51,42 @@ export function hasDeclaredCheckChange(change: DeclaredCheckChange): boolean {
   return change.added.length + change.removed.length + change.changed.length > 0;
 }
 
+/** 약해졌는지 보는 실행 정책 목록과 사람이 읽는 이름. 시작할 때 있던 항목이 빠지면 약해진 것이다 */
+const POLICY_LISTS: ReadonlyArray<{ field: 'protectedPaths' | 'evaluationAssets' | 'deniedCommands' | 'requireApprovalFor' | 'releaseRequires'; label: string }> = [
+  { field: 'protectedPaths', label: '보호 경로' },
+  { field: 'evaluationAssets', label: '평가 자산' },
+  { field: 'deniedCommands', label: '금지 명령' },
+  { field: 'requireApprovalFor', label: '승인 대상 도구' },
+  { field: 'releaseRequires', label: '배포 조건 단계' },
+];
+
+/**
+ * 실행을 시작할 때보다 지금 선언이 약해진 항목을 사람이 읽는 목록으로 돌려준다(#767). 확인 선언은 삭제·변경만 보고,
+ * 실행 정책은 시작할 때 있던 값이 빠진 것을 본다. maxTurns는 보호가 아니므로 보지 않는다.
+ */
+export function weakenedDeclarations(started: WorkflowSpec | undefined, latest: WorkflowSpec | undefined): string[] {
+  const weakened: string[] = [];
+  const change = diffDeclaredChecks(started, latest);
+  for (const name of change.removed) weakened.push(`삭제: ${name}`);
+  for (const name of change.changed) weakened.push(`변경: ${name}`);
+  for (const { field, label } of POLICY_LISTS) {
+    const after: readonly string[] = latest?.[field] ?? [];
+    for (const item of started?.[field] ?? []) {
+      if (!after.includes(item)) weakened.push(`삭제: ${label} ${item}`);
+    }
+  }
+  // 시작할 때 목록이 없었으면(모든 도구 허용) 지금 목록을 더 봐도 약해진 것이 아니다
+  if (started?.allowedTools) {
+    if (!latest?.allowedTools) weakened.push('삭제: 허용 도구(모든 도구 허용)');
+    else for (const tool of latest.allowedTools) if (!started.allowedTools.includes(tool)) weakened.push(`추가: 허용 도구 ${tool}`);
+  }
+  if (started?.maxChangedFiles !== undefined) {
+    if (latest?.maxChangedFiles === undefined) weakened.push('삭제: 변경 파일 수 상한');
+    else if (latest.maxChangedFiles > started.maxChangedFiles) weakened.push(`변경: 변경 파일 수 상한 ${started.maxChangedFiles} → ${latest.maxChangedFiles}`);
+  }
+  return weakened;
+}
+
 /** 예: "추가: 부하 orders-p95 · 삭제: 테스트 unit · 변경: 화면 web /cart" */
 export function describeDeclaredCheckChange(change: DeclaredCheckChange): string {
   const part = (label: string, names: readonly string[]) => (names.length > 0 ? [`${label}: ${names.join(', ')}`] : []);

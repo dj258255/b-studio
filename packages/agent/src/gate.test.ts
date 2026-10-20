@@ -1852,7 +1852,9 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     await workspace.write('web/app/reports/page.tsx', page);
     await workspace.write('web/app/settings/page.tsx', page);
 
-    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // 확인을 끄거나 줄이려는 변경은 이제 허용 없이는 통과하지 못한다(#767). 이번 검증은 시작 때의 선언으로 돈다
+    expect((await gate.check()).kind).toBe('retry');
+    expect(gate.checks.find((c) => c.name === 'weakened-declarations')?.detail).toContain('삭제: 화면 web /dashboard');
     // 선언한 pageChecks(/dashboard)가 그대로 돌고, 자동 확인은 web 서비스에서 maxPages 5로 모든 페이지를 연다. 값만 바뀌었다
     const opened = requested.map((url) => new URL(url).pathname);
     expect(opened).toEqual(expect.arrayContaining(['/dashboard', '/orders/7', '/reports', '/settings']));
@@ -1888,7 +1890,9 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     await writeFile(path.join(target.root, 'web/app/orders/page.tsx'), "import { Card } from '../../components/Card';\nexport default function Page() { return Card(); }\n");
     await workspace.write('web/components/Card.tsx', 'export const Card = () => null;\n');
 
-    expect(await gate.check()).toEqual({ kind: 'pass' });
+    // 실행 중 선언을 약하게 바꾼 것은 허용 없이는 통과하지 못하지만, 이번 검증은 시작 때의 값으로 돈다
+    expect((await gate.check()).kind).toBe('retry');
+    expect(gate.checks.find((c) => c.name === 'weakened-declarations')?.detail).toContain('변경: 바뀐 페이지 자동 확인');
     expect(requested.some((url) => url.endsWith('/orders'))).toBe(true);
   });
 
@@ -2972,6 +2976,53 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
     latest = { tests: [{ ...unit, command: ['lint'] }] };
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(commands).toEqual([['./gradlew', 'broken'], ['lint']]);
+  });
+
+  it('허용 없이 평가 자산 선언을 지우면 약해진 선언으로 리뷰 단계가 실패한다(#767)', async () => {
+    const target = withWorkflow({ evaluationAssets: ['tests/acceptance'] });
+    const { gate, workspace } = await setup(target, { reload: withLatest(target, {}) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.name === 'weakened-declarations');
+    expect(check).toMatchObject({ stage: 'review', ok: false, attempts: 1 });
+    expect(check?.detail).toContain('삭제: 평가 자산 tests/acceptance');
+    expect(check?.detail).toContain('되돌리세요');
+    expect(check?.detail).toContain("'확인 선언 변경 허용'을 켜고 답해 달라");
+  });
+
+  it('허용 없이 테스트 선언 하나를 지우면 약해진 선언으로 리뷰 단계가 실패한다(#767)', async () => {
+    const lint = { name: 'lint', service: 'api', command: ['lint'], maxAttempts: 1 };
+    const target = withWorkflow({ tests: [unit, lint] });
+    const { gate, workspace, commands } = await setup(target, { reload: withLatest(target, { tests: [unit] }) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    // 이번 검증은 시작할 때의 선언으로 돌았다
+    expect(commands).toEqual([['./gradlew', 'test'], ['lint']]);
+    expect(gate.checks.find((entry) => entry.name === 'weakened-declarations')?.detail).toContain('삭제: 테스트 lint');
+  });
+
+  it('허용 없이 보호 경로를 더하는 것은 약해진 것이 아니므로 그대로 통과한다', async () => {
+    const target = withWorkflow({ protectedPaths: ['.env'] });
+    const { gate, workspace } = await setup(target, { reload: withLatest(target, { protectedPaths: ['.env', 'api/src'] }) });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((entry) => entry.name === 'weakened-declarations')).toBe(false);
+  });
+
+  it('허용하면 약해진 실행 정책도 리뷰 기록에 함께 남긴다', async () => {
+    const target = withWorkflow({ evaluationAssets: ['tests/acceptance'] });
+    const { gate, workspace } = await setup(target, { reload: withLatest(target, {}), allowCheckChanges: true });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const record = gate.checks.find((entry) => entry.name === 'declared-checks');
+    expect(record).toMatchObject({ stage: 'review', ok: true, attempts: 1 });
+    expect(record?.detail).toContain('삭제: 평가 자산 tests/acceptance');
   });
 });
 
