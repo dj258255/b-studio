@@ -2593,7 +2593,7 @@ describe('VerificationGate 부하 확인 (ADR-163)', () => {
     ...over,
   });
 
-  async function loadGate(target: LoadedProject, runLoad: Sandbox['runLoad'] | undefined, extra: { exec?: () => Promise<ExecResult> } = {}) {
+  async function loadGate(target: LoadedProject, runLoad: Sandbox['runLoad'] | undefined, extra: { exec?: Sandbox['exec'] } = {}) {
     const workspace = new Workspace(target.root);
     const sandbox = fakeSandbox(target, [true, true, true]);
     if (runLoad) sandbox.runLoad = runLoad;
